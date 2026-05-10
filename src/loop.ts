@@ -158,6 +158,42 @@ type LoopOptions = {
 	maxIterations: number
 	dryRun: boolean
 	checkRuntime: boolean
+	preset: Preset
+}
+
+export type PresetVariableSource =
+	| { kind: "item"; field: string }
+	| { kind: "config"; field: string }
+	| { kind: "runtime"; key: string }
+
+export type PresetPhase = {
+	name: string
+	prompt: string
+	variables: ReadonlyArray<readonly [string, PresetVariableSource]>
+}
+
+export type PresetFragment = {
+	id: string
+	role: string
+	path: string
+}
+
+export type Preset = {
+	name: string
+	version: number
+	description: string
+	presetDir: string
+	item: { idField: string }
+	statuses: {
+		continuable: readonly string[]
+		terminal: readonly string[]
+	}
+	phases: readonly PresetPhase[]
+	fragments: readonly PresetFragment[]
+	agent: {
+		binary: string
+		extraArgs: readonly string[]
+	}
 }
 
 type RuntimeCheckError = {
@@ -294,7 +330,8 @@ async function main() {
 	const targetCwd = resolve(rawArgs.targetCwd ?? process.cwd())
 	const configPath = resolveFrom(targetCwd, rawArgs.configPath ?? DEFAULT_CONFIG_FILE)
 	const config = await loadConfig(configPath)
-	const options = buildOptions(targetCwd, configPath, rawArgs, config)
+	const preset = await loadPreset(PRESET_DIR)
+	const options = buildOptions(targetCwd, configPath, rawArgs, config, preset)
 
 	if (options.checkRuntime) {
 		const state = await loadState(options.statePath)
@@ -453,7 +490,7 @@ async function runReview(options: LoopOptions, context: RenderContext): Promise<
 	return reviewCode
 }
 
-function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, config: LoopConfig): LoopOptions {
+function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, config: LoopConfig, preset: Preset): LoopOptions {
 	const workflowPath = resolveFrom(targetCwd, raw.workflowPath ?? config.workflowFile ?? DEFAULT_WORKFLOW_FILE)
 	const sharedContextPath = resolveFrom(targetCwd, config.sharedContextFile ?? DEFAULT_SHARED_FILE)
 	const statePath = resolveFrom(targetCwd, raw.statePath ?? config.stateFile ?? DEFAULT_STATE_FILE)
@@ -487,7 +524,114 @@ function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, confi
 		maxIterations,
 		dryRun: raw.dryRun,
 		checkRuntime: raw.checkRuntime,
+		preset,
 	}
+}
+
+export async function loadPreset(presetDir: string): Promise<Preset> {
+	const tomlPath = resolve(presetDir, "preset.toml")
+	const raw = await readFile(tomlPath, "utf-8").catch((error: unknown) => {
+		if (isNodeError(error) && error.code === "ENOENT") fail(`Missing preset file: ${tomlPath}`)
+		throw error
+	})
+	const parsed: unknown = Bun.TOML.parse(raw)
+	const preset = parsePreset(parsed, presetDir)
+	for (const phase of preset.phases) {
+		await assertReadable(phase.prompt, `preset phase "${phase.name}" prompt`)
+	}
+	for (const fragment of preset.fragments) {
+		await assertReadable(fragment.path, `preset fragment "${fragment.id}"`)
+	}
+	return preset
+}
+
+export function parsePreset(value: unknown, presetDir: string): Preset {
+	const root = expectRecord(value, "preset")
+	const name = requiredString(root, "name")
+	const version = requiredNumber(root, "version")
+	const description = optionalString(root, "description") ?? ""
+
+	const itemRaw = expectRecord(root.item, "preset.item")
+	const idField = requiredString(itemRaw, "idField")
+
+	const statusesRaw = expectRecord(root.statuses, "preset.statuses")
+	const continuable = requiredStringArray(statusesRaw, "continuable")
+	const terminal = requiredStringArray(statusesRaw, "terminal")
+	for (const status of continuable) {
+		if (terminal.includes(status)) presetError(`preset.statuses: "${status}" appears in both continuable and terminal`)
+	}
+
+	const phasesRaw = root.phases
+	if (!Array.isArray(phasesRaw)) presetError("preset.phases must be an array")
+	const phaseNames = new Set<string>()
+	const phases: PresetPhase[] = []
+	for (const [index, entry] of phasesRaw.entries()) {
+		const phaseRecord = expectRecord(entry, `preset.phases[${index}]`)
+		const phaseName = requiredString(phaseRecord, "name")
+		if (phaseNames.has(phaseName)) presetError(`preset.phases[${index}].name: duplicate name "${phaseName}"`)
+		phaseNames.add(phaseName)
+		const phasePromptRel = requiredString(phaseRecord, "prompt")
+		const phasePrompt = resolve(presetDir, phasePromptRel)
+		const variablesRaw = phaseRecord.variables === undefined
+			? {}
+			: expectRecord(phaseRecord.variables, `preset.phases[${index}].variables`)
+		const variables: Array<readonly [string, PresetVariableSource]> = []
+		for (const [key, val] of Object.entries(variablesRaw)) {
+			if (typeof val !== "string") presetError(`preset.phases[${index}].variables.${key}: must be a string`)
+			variables.push([key, parseVariableSource(val, `preset.phases[${index}].variables.${key}`)] as const)
+		}
+		phases.push({ name: phaseName, prompt: phasePrompt, variables })
+	}
+
+	const fragmentsRaw = root.fragments
+	if (!Array.isArray(fragmentsRaw)) presetError("preset.fragments must be an array")
+	const fragmentIds = new Set<string>()
+	const fragments: PresetFragment[] = []
+	for (const [index, entry] of fragmentsRaw.entries()) {
+		const fragmentRecord = expectRecord(entry, `preset.fragments[${index}]`)
+		const id = requiredString(fragmentRecord, "id")
+		if (fragmentIds.has(id)) presetError(`preset.fragments[${index}].id: duplicate id "${id}"`)
+		fragmentIds.add(id)
+		const role = requiredString(fragmentRecord, "role")
+		const fragmentPathRel = requiredString(fragmentRecord, "path")
+		fragments.push({ id, role, path: resolve(presetDir, fragmentPathRel) })
+	}
+
+	const agentRaw = expectRecord(root.agent, "preset.agent")
+	const agent = {
+		binary: requiredString(agentRaw, "binary"),
+		extraArgs: optionalStringArray(agentRaw, "extraArgs") ?? [],
+	}
+
+	return {
+		name,
+		version,
+		description,
+		presetDir,
+		item: { idField },
+		statuses: { continuable, terminal },
+		phases,
+		fragments,
+		agent,
+	}
+}
+
+function parseVariableSource(value: string, label: string): PresetVariableSource {
+	const match = /^(item|config|runtime)\.([a-zA-Z][a-zA-Z0-9_]*)$/.exec(value)
+	if (!match) presetError(`${label}: invalid variable source "${value}" (expected item.<f> | config.<f> | runtime.<k>)`)
+	const kind = match[1] as "item" | "config" | "runtime"
+	const fieldOrKey = match[2]!
+	return kind === "runtime" ? { kind, key: fieldOrKey } : { kind, field: fieldOrKey }
+}
+
+function presetError(message: string): never {
+	throw new Error(message)
+}
+
+function requiredStringArray(record: Record<string, unknown>, key: string): string[] {
+	const value = record[key]
+	if (Array.isArray(value) && value.every((entry) => typeof entry === "string")) return value
+	presetError(`${key} must be a string array`)
 }
 
 async function loadConfig(path: string): Promise<LoopConfig> {
@@ -1041,9 +1185,11 @@ function fail(message: string): never {
 	process.exit(1)
 }
 
-main().catch((error: unknown) => {
-	const message = error instanceof Error ? `${error.message}\n${error.stack ?? ""}` : String(error)
-	log(`Fatal: ${message}`)
-	logStream?.end()
-	process.exit(1)
-})
+if (import.meta.main) {
+	main().catch((error: unknown) => {
+		const message = error instanceof Error ? `${error.message}\n${error.stack ?? ""}` : String(error)
+		log(`Fatal: ${message}`)
+		logStream?.end()
+		process.exit(1)
+	})
+}
