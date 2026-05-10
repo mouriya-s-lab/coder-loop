@@ -14,7 +14,8 @@ import { createWriteStream, type WriteStream } from "node:fs"
 import { isAbsolute, relative, resolve } from "node:path"
 
 const PKG_ROOT = resolve(import.meta.dir, "..")
-const PRESET_DIR = resolve(PKG_ROOT, "presets/gh-issue-pr-iteration")
+const DEFAULT_PRESET_NAME = "gh-issue-pr-iteration"
+const PRESET_NAME_PATTERN = /^[a-zA-Z][a-zA-Z0-9_-]*$/
 
 const DEFAULT_CONFIG_FILE = ".coder-loop/runtime/config.json"
 const DEFAULT_WORKFLOW_FILE = ".coder-loop/workflow.md"
@@ -84,6 +85,8 @@ type LoopConfig = {
 	requireAgentBrowserScreenshots: boolean | null
 	claudeBinary: string | null
 	claudeExtraArgs: string[]
+	preset: string | null
+	presetPath: string | null
 }
 
 export type LoopOptions = {
@@ -307,7 +310,8 @@ async function main() {
 	const targetCwd = resolve(rawArgs.targetCwd ?? process.cwd())
 	const configPath = resolveFrom(targetCwd, rawArgs.configPath ?? DEFAULT_CONFIG_FILE)
 	const config = await loadConfig(configPath)
-	const preset = await loadPreset(PRESET_DIR)
+	const presetDir = resolvePresetDir(config, PKG_ROOT, targetCwd)
+	const preset = await loadPreset(presetDir)
 	const options = buildOptions(targetCwd, configPath, rawArgs, config, preset)
 
 	if (options.checkRuntime) {
@@ -323,6 +327,7 @@ async function main() {
 		console.error(`Runtime check passed: repo=${options.repository}`)
 		console.error(`Runtime check passed: state=${options.statePath}`)
 		console.error(`Runtime check passed: queue=${state.queue.length}, selected=${selected ? `#${getItemId(selected.item, options.preset)}` : "none"}`)
+		console.error(`Runtime check passed: preset=${options.preset.name}`)
 		return
 	}
 
@@ -656,7 +661,27 @@ async function loadConfig(path: string): Promise<LoopConfig> {
 		requireAgentBrowserScreenshots: evidence ? optionalBoolean(evidence, "requireAgentBrowserScreenshots") : null,
 		claudeBinary: claude ? optionalString(claude, "binary") : null,
 		claudeExtraArgs: claude ? (optionalStringArray(claude, "extraArgs") ?? []) : [],
+		preset: optionalString(root, "preset"),
+		presetPath: optionalString(root, "presetPath"),
 	}
+}
+
+export function resolvePresetDir(
+	config: { preset: string | null; presetPath: string | null },
+	pkgRoot: string,
+	targetCwd: string,
+): string {
+	if (config.preset !== null && config.presetPath !== null) {
+		throw new Error(`config: "preset" and "presetPath" are mutually exclusive (got preset="${config.preset}", presetPath="${config.presetPath}")`)
+	}
+	if (config.presetPath !== null) {
+		return isAbsolute(config.presetPath) ? config.presetPath : resolve(targetCwd, config.presetPath)
+	}
+	const name = config.preset ?? DEFAULT_PRESET_NAME
+	if (!PRESET_NAME_PATTERN.test(name)) {
+		throw new Error(`config.preset: invalid name "${name}" (must match ${PRESET_NAME_PATTERN.source})`)
+	}
+	return resolve(pkgRoot, "presets", name)
 }
 
 async function ensureRuntime(options: LoopOptions): Promise<void> {
