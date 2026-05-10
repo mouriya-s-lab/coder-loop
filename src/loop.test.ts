@@ -17,6 +17,7 @@ import {
 	renderFragmentIndex,
 	renderPrompt,
 	resolveBinding,
+	resolvePresetDir,
 	selectIssue,
 	type ConfigBindings,
 	type CurrentRun,
@@ -499,6 +500,86 @@ describe("renderPrompt with bundled preset", () => {
 		const rendered = renderPrompt(template, phase, ctx)
 		const leftover = rendered.match(/\{\{[A-Z_][A-Z0-9_]*\}\}/g)
 		expect(leftover).toBeNull()
+	})
+})
+
+describe("resolvePresetDir", () => {
+	const PKG_ROOT = "/repo/coder-loop"
+	const TARGET_CWD = "/some/target"
+
+	test("default fallback (preset and presetPath both null) → bundled gh-issue-pr-iteration under pkgRoot", () => {
+		const dir = resolvePresetDir({ preset: null, presetPath: null }, PKG_ROOT, TARGET_CWD)
+		expect(dir).toBe("/repo/coder-loop/presets/gh-issue-pr-iteration")
+	})
+
+	test("config.preset = name → bundled lookup under pkgRoot/presets/<name>", () => {
+		const dir = resolvePresetDir({ preset: "single-phase-example", presetPath: null }, PKG_ROOT, TARGET_CWD)
+		expect(dir).toBe("/repo/coder-loop/presets/single-phase-example")
+	})
+
+	test("config.presetPath absolute → returned verbatim", () => {
+		const dir = resolvePresetDir({ preset: null, presetPath: "/abs/path/my-preset" }, PKG_ROOT, TARGET_CWD)
+		expect(dir).toBe("/abs/path/my-preset")
+	})
+
+	test("config.presetPath relative → resolved against targetCwd", () => {
+		const dir = resolvePresetDir({ preset: null, presetPath: ".coder-loop/local-preset" }, PKG_ROOT, TARGET_CWD)
+		expect(dir).toBe("/some/target/.coder-loop/local-preset")
+	})
+
+	test("config.preset and config.presetPath both set → throws (mutually exclusive)", () => {
+		expect(() => resolvePresetDir({ preset: "x", presetPath: "/y" }, PKG_ROOT, TARGET_CWD)).toThrow(/mutually exclusive/)
+	})
+
+	test("config.preset with path traversal name (..) → throws", () => {
+		expect(() => resolvePresetDir({ preset: "..", presetPath: null }, PKG_ROOT, TARGET_CWD)).toThrow(/invalid name/)
+	})
+
+	test("config.preset with slash → throws", () => {
+		expect(() => resolvePresetDir({ preset: "evil/sub", presetPath: null }, PKG_ROOT, TARGET_CWD)).toThrow(/invalid name/)
+	})
+
+	test("config.preset starting with digit → throws (must start with letter)", () => {
+		expect(() => resolvePresetDir({ preset: "1bad", presetPath: null }, PKG_ROOT, TARGET_CWD)).toThrow(/invalid name/)
+	})
+})
+
+describe("preset selection integration (synthetic target)", () => {
+	test("target config preset='gh-issue-pr-iteration' makes --check-runtime path emit `preset=gh-issue-pr-iteration`", async () => {
+		const targetCwd = await mkdtemp(resolve(tmpdir(), "coder-loop-pr5-"))
+		const runtimeDir = resolve(targetCwd, ".coder-loop/runtime")
+		const issueDir = resolve(runtimeDir, "issues")
+		const evidenceDir = resolve(runtimeDir, "evidence")
+		const logDir = resolve(runtimeDir, "logs")
+		await mkdir(issueDir, { recursive: true })
+		await mkdir(evidenceDir, { recursive: true })
+		await mkdir(logDir, { recursive: true })
+		await writeFile(resolve(targetCwd, ".coder-loop/workflow.md"), "# workflow\n")
+		await writeFile(resolve(runtimeDir, "shared.md"), "# shared\n")
+		await writeFile(resolve(runtimeDir, "config.json"), JSON.stringify({
+			repository: "Mouriya-Emma/synthetic",
+			baseBranch: "main",
+			preset: "gh-issue-pr-iteration",
+		}))
+		await writeFile(resolve(runtimeDir, "state.json"), JSON.stringify({
+			version: 1,
+			queue: [],
+			repository: "Mouriya-Emma/synthetic",
+			baseBranch: "main",
+			recentRuns: [],
+			current: null,
+		}))
+
+		const proc = Bun.spawnSync({
+			cmd: ["bun", "src/loop.ts", "--target-cwd", targetCwd, "--check-runtime"],
+			cwd: REPO_ROOT,
+			stderr: "pipe",
+			stdout: "pipe",
+		})
+		const stderr = new TextDecoder().decode(proc.stderr)
+		expect(proc.exitCode).toBe(0)
+		expect(stderr).toContain("preset=gh-issue-pr-iteration")
+		expect(stderr).toContain("Runtime check passed: target=")
 	})
 })
 
