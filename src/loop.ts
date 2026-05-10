@@ -28,15 +28,6 @@ const DEFAULT_EVIDENCE_DIR = ".coder-loop/runtime/evidence"
 const DEFAULT_LOG_DIR = ".coder-loop/runtime/logs"
 
 const EXCLUDE_ENTRIES = [".dev-loop", ".dev-trace.txt", ".coder-loop/runtime"]
-const QUEUE_STATUSES = [
-	"queued",
-	"in_progress",
-	"changes_requested",
-	"blocked",
-	"moot",
-	"done",
-] as const
-const ACTIONABLE_STATUSES = ["queued", "in_progress", "changes_requested"] as const
 const PROMPT_FRAGMENTS = [
 	{ id: "common/runtime-contract", role: "common", path: "common/runtime-contract.md" },
 	{ id: "common/github-routing", role: "common", path: "common/github-routing.md" },
@@ -70,10 +61,7 @@ const PROMPT_FRAGMENTS = [
 
 let logStream: WriteStream | null = null
 
-type QueueStatus = (typeof QUEUE_STATUSES)[number]
-type ActionableStatus = (typeof ACTIONABLE_STATUSES)[number]
-type LoopPhase = "iteration" | "review"
-type AgentLabel = "iter" | "review"
+type AgentLabel = string
 type PromptFragmentRole = "common" | "iter" | "review"
 
 type PromptFragment = {
@@ -82,9 +70,8 @@ type PromptFragment = {
 	path: string
 }
 
-type QueueItem = {
-	issue: number
-	status: QueueStatus
+export type QueueItem = {
+	status: string
 	attempts: number
 	title: string
 	priority: string
@@ -93,16 +80,17 @@ type QueueItem = {
 	lastRunId: string | null
 	issueFile: string
 	evidenceDir: string
+	[key: string]: unknown
 }
 
-type CurrentRun = {
-	issue: number
-	phase: LoopPhase
+export type CurrentRun = {
+	phase: string
 	runId: string
 	startedAt: string
+	[key: string]: unknown
 }
 
-type LoopState = {
+export type LoopState = {
 	version: number
 	queue: QueueItem[]
 	repository: string
@@ -138,7 +126,7 @@ type LoopConfig = {
 	claudeExtraArgs: string[]
 }
 
-type LoopOptions = {
+export type LoopOptions = {
 	targetCwd: string
 	configPath: string
 	workflowPath: string
@@ -216,19 +204,19 @@ type AgentRunStatus = {
 	error: string | null
 }
 
-type SelectedIssue = {
+export type SelectedIssue = {
 	item: QueueItem
 	issueFile: string
 	evidenceDir: string
 }
 
-type IssueRunContext = {
+export type IssueRunContext = {
 	mode: "fresh" | "retry" | "resume-iteration" | "resume-review"
 	previousRunId: string | null
 	startedAt: string | null
 	branch: string | null
 	pr: number | null
-	status: QueueStatus | null
+	status: string | null
 }
 
 type RenderContext = {
@@ -345,7 +333,7 @@ async function main() {
 		console.error(`Runtime check passed: target=${options.targetCwd}`)
 		console.error(`Runtime check passed: repo=${options.repository}`)
 		console.error(`Runtime check passed: state=${options.statePath}`)
-		console.error(`Runtime check passed: queue=${state.queue.length}, selected=${selected ? `#${selected.item.issue}` : "none"}`)
+		console.error(`Runtime check passed: queue=${state.queue.length}, selected=${selected ? `#${getItemId(selected.item, options.preset)}` : "none"}`)
 		return
 	}
 
@@ -359,7 +347,7 @@ async function main() {
 		console.error(`Dry run: repo=${options.repository}`)
 		console.error(`Dry run: workflow=${options.workflowPath}`)
 		console.error(`Dry run: state=${options.statePath}`)
-		console.error(`Dry run: selected=${selected ? `#${selected.item.issue}` : "none"}`)
+		console.error(`Dry run: selected=${selected ? `#${getItemId(selected.item, options.preset)}` : "none"}`)
 		return
 	}
 
@@ -406,35 +394,40 @@ async function main() {
 			break
 		}
 
-		const current = state.current?.issue === selected.item.issue ? state.current : null
-		const issueRun = makeIssueRunContext(selected.item, current)
-		const runId = current?.runId ?? makeRunId(selected.item.issue)
+		const selectedId = getItemId(selected.item, options.preset)
+		const current = state.current && getCurrentId(state.current, options.preset) === selectedId ? state.current : null
+		const issueRun = makeIssueRunContext(selected.item, current, options.preset)
+		const runId = current?.runId ?? makeRunId(selectedId)
+		const phases = options.preset.phases
+		const iterPhase = phases[0]
+		const reviewPhase = phases[phases.length - 1]
+		if (!iterPhase || !reviewPhase) fail("preset must define at least one phase")
 		let context: RenderContext = {
-			issue: String(selected.item.issue),
+			issue: selectedId,
 			runId,
 			currentIssueFile: selected.issueFile,
 			evidenceDir: selected.evidenceDir,
 			issueRun,
 		}
 
-		if (current?.phase !== "review") {
+		if (current?.phase !== reviewPhase.name) {
 			const stateForIteration = await loadState(options.statePath)
-			markIterationStarted(stateForIteration, selected.item.issue, runId, current === null)
+			markIterationStarted(stateForIteration, selected.item, options.preset, runId, current === null)
 			await saveState(options.statePath, stateForIteration)
 
-			log(`${current ? "Resuming" : "Starting"} iteration agent for issue #${selected.item.issue}...`)
+			log(`${current ? "Resuming" : "Starting"} ${iterPhase.name} agent for issue #${selectedId}...`)
 			const iterStart = Date.now()
-			const iterPromptRaw = await readFile(ITERATION_PROMPT, "utf-8")
+			const iterPromptRaw = await readFile(iterPhase.prompt, "utf-8")
 			const iterPrompt = renderPrompt(iterPromptRaw, options, context)
-			const iterOutputPath = agentOutputPath(options, runId, "iter")
-			const { output: iterTrace, code: iterCode } = await runAgent(options, "iter", iterPrompt, iterOutputPath)
+			const iterOutputPath = agentOutputPath(options, runId, iterPhase.name)
+			const { output: iterTrace, code: iterCode } = await runAgent(options, iterPhase.name, iterPrompt, iterOutputPath)
 			const iterDuration = ((Date.now() - iterStart) / 1000).toFixed(0)
 			await writeFile(options.traceFile, iterTrace)
 
-			log(`Iteration agent finished: issue=#${selected.item.issue}, exit=${iterCode}, duration=${iterDuration}s, trace=${options.traceFile}, output=${iterOutputPath} (${iterTrace.length} bytes)`)
+			log(`${iterPhase.name} agent finished: issue=#${selectedId}, exit=${iterCode}, duration=${iterDuration}s, trace=${options.traceFile}, output=${iterOutputPath} (${iterTrace.length} bytes)`)
 
 			if (iterCode !== 0) {
-				log(`Iteration agent failed (exit ${iterCode}). Stopping without review or state judgment.`)
+				log(`${iterPhase.name} agent failed (exit ${iterCode}). Stopping without review or state judgment.`)
 				await removeLoopFile(options.loopFile)
 				break
 			}
@@ -445,10 +438,10 @@ async function main() {
 			}
 
 			const stateForReview = await loadState(options.statePath)
-			markReviewStarted(stateForReview, selected.item.issue, runId)
+			markReviewStarted(stateForReview, selected.item, options.preset, runId)
 			await saveState(options.statePath, stateForReview)
 					} else {
-			log(`Resuming review agent for issue #${selected.item.issue} without rerunning iteration...`)
+			log(`Resuming ${reviewPhase.name} agent for issue #${selectedId} without rerunning iteration...`)
 		}
 
 		const reviewCode = await runReview(options, context)
@@ -475,17 +468,20 @@ async function main() {
 }
 
 async function runReview(options: LoopOptions, context: RenderContext): Promise<number> {
-	log("Starting review agent...")
+	const phases = options.preset.phases
+	const reviewPhase = phases[phases.length - 1]
+	if (!reviewPhase) fail("preset must define at least one phase")
+	log(`Starting ${reviewPhase.name} agent...`)
 	const reviewStart = Date.now()
-	const reviewPromptRaw = await readFile(REVIEW_PROMPT, "utf-8")
+	const reviewPromptRaw = await readFile(reviewPhase.prompt, "utf-8")
 	const reviewPrompt = renderPrompt(reviewPromptRaw, options, context)
-	const reviewOutputPath = agentOutputPath(options, context.runId, "review")
-	const { output: reviewTrace, code: reviewCode } = await runAgent(options, "review", reviewPrompt, reviewOutputPath)
+	const reviewOutputPath = agentOutputPath(options, context.runId, reviewPhase.name)
+	const { output: reviewTrace, code: reviewCode } = await runAgent(options, reviewPhase.name, reviewPrompt, reviewOutputPath)
 	const reviewDuration = ((Date.now() - reviewStart) / 1000).toFixed(0)
 
-	log(`Review agent finished: exit=${reviewCode}, duration=${reviewDuration}s, output=${reviewOutputPath} (${reviewTrace.length} bytes)`)
+	log(`${reviewPhase.name} agent finished: exit=${reviewCode}, duration=${reviewDuration}s, output=${reviewOutputPath} (${reviewTrace.length} bytes)`)
 	if (reviewTrace.trim().length > 0) {
-		await appendFile(options.logFile, `\n--- review output ${new Date().toISOString()} ---\n${reviewTrace}\n`)
+		await appendFile(options.logFile, `\n--- ${reviewPhase.name} output ${new Date().toISOString()} ---\n${reviewTrace}\n`)
 	}
 	return reviewCode
 }
@@ -678,9 +674,13 @@ async function assertRuntimeValid(options: LoopOptions, state?: LoopState): Prom
 	fail(`Runtime validation failed:\n${details}`)
 }
 
-async function checkRuntime(options: LoopOptions, state: LoopState): Promise<RuntimeCheckError[]> {
+export async function checkRuntime(options: LoopOptions, state: LoopState): Promise<RuntimeCheckError[]> {
 	const errors: RuntimeCheckError[] = []
-	const seenIssues = new Set<number>()
+	const seenIds = new Set<string>()
+	const preset = options.preset
+	const idField = preset.item.idField
+	const allowedStatuses = new Set<string>([...preset.statuses.continuable, ...preset.statuses.terminal])
+	const allowedPhases = new Set<string>(preset.phases.map((phase) => phase.name))
 
 	if (state.version !== 1) pushCheckError(errors, "state.version", "must be 1")
 	if (state.repository !== options.repository) pushCheckError(errors, "state.repository", `must match configured repository ${options.repository}`)
@@ -712,9 +712,19 @@ async function checkRuntime(options: LoopOptions, state: LoopState): Promise<Run
 
 	for (const [index, item] of state.queue.entries()) {
 		const label = `state.queue[${index}]`
-		if (seenIssues.has(item.issue)) pushCheckError(errors, `${label}.issue`, `duplicate issue #${item.issue}`)
-		seenIssues.add(item.issue)
-		if (!Number.isInteger(item.issue) || item.issue <= 0) pushCheckError(errors, `${label}.issue`, "must be a positive integer")
+		const idValue = item[idField]
+		const idLabel = `${label}.${idField}`
+		const idAsString = typeof idValue === "string" && idValue.length > 0
+			? idValue
+			: typeof idValue === "number" && Number.isFinite(idValue)
+				? String(idValue)
+				: null
+		if (idAsString === null) pushCheckError(errors, idLabel, `must be a non-empty string or finite number (preset.item.idField="${idField}")`)
+		else {
+			if (seenIds.has(idAsString)) pushCheckError(errors, idLabel, `duplicate id "${idAsString}"`)
+			seenIds.add(idAsString)
+		}
+		if (!allowedStatuses.has(item.status)) pushCheckError(errors, `${label}.status`, `status "${item.status}" is not in preset.statuses (continuable + terminal)`)
 		if (!Number.isInteger(item.attempts) || item.attempts < 0) pushCheckError(errors, `${label}.attempts`, "must be a non-negative integer")
 		if (item.title.trim() === "") pushCheckError(errors, `${label}.title`, "must not be empty")
 		if (item.priority.trim() === "") pushCheckError(errors, `${label}.priority`, "must not be empty")
@@ -729,9 +739,26 @@ async function checkRuntime(options: LoopOptions, state: LoopState): Promise<Run
 	}
 
 	if (state.current) {
-		const currentItem = state.queue.find((item) => item.issue === state.current?.issue)
-		if (!currentItem) pushCheckError(errors, "state.current.issue", `issue #${state.current.issue} is not present in queue`)
-		else if (!isActionableStatus(currentItem.status)) pushCheckError(errors, "state.current.issue", `issue #${state.current.issue} has non-actionable status ${currentItem.status}`)
+		const currentIdValue = state.current[idField]
+		const currentIdLabel = `state.current.${idField}`
+		const currentIdAsString = typeof currentIdValue === "string" && currentIdValue.length > 0
+			? currentIdValue
+			: typeof currentIdValue === "number" && Number.isFinite(currentIdValue)
+				? String(currentIdValue)
+				: null
+		if (currentIdAsString === null) {
+			pushCheckError(errors, currentIdLabel, `must be a non-empty string or finite number (preset.item.idField="${idField}")`)
+		} else {
+			const currentItem = state.queue.find((item) => {
+				const value = item[idField]
+				if (typeof value === "string") return value === currentIdAsString
+				if (typeof value === "number") return String(value) === currentIdAsString
+				return false
+			})
+			if (!currentItem) pushCheckError(errors, currentIdLabel, `id "${currentIdAsString}" is not present in queue`)
+			else if (!preset.statuses.continuable.includes(currentItem.status)) pushCheckError(errors, currentIdLabel, `id "${currentIdAsString}" has non-continuable status ${currentItem.status}`)
+		}
+		if (!allowedPhases.has(state.current.phase)) pushCheckError(errors, "state.current.phase", `phase "${state.current.phase}" is not declared in preset.phases`)
 		if (state.current.runId.trim() === "") pushCheckError(errors, "state.current.runId", "must not be empty")
 		if (!isIsoDateTime(state.current.startedAt)) pushCheckError(errors, "state.current.startedAt", "must be an ISO date string")
 	}
@@ -772,8 +799,8 @@ async function loadState(path: string): Promise<LoopState> {
 function parseQueueItem(value: unknown, label: string): QueueItem {
 	const record = expectRecord(value, label)
 	return {
-		issue: requiredNumber(record, "issue"),
-		status: requiredQueueStatus(record, "status"),
+		...record,
+		status: requiredString(record, "status"),
 		attempts: requiredNumber(record, "attempts"),
 		title: requiredString(record, "title"),
 		priority: requiredString(record, "priority"),
@@ -789,8 +816,8 @@ function parseCurrent(value: unknown): CurrentRun | null {
 	if (value === undefined || value === null) return null
 	const record = expectRecord(value, "state.current")
 	return {
-		issue: requiredNumber(record, "issue"),
-		phase: requiredLoopPhase(record, "phase"),
+		...record,
+		phase: requiredString(record, "phase"),
 		runId: requiredString(record, "runId"),
 		startedAt: requiredString(record, "startedAt"),
 	}
@@ -800,11 +827,15 @@ async function saveState(path: string, state: LoopState): Promise<void> {
 	await writeFile(path, `${JSON.stringify(state, null, "\t")}\n`)
 }
 
-function selectIssue(state: LoopState, options: LoopOptions): SelectedIssue | null {
-	const currentItem = state.current ? state.queue.find((item) => item.issue === state.current?.issue) : undefined
-	const selected = currentItem && isActionableStatus(currentItem.status)
+export function selectIssue(state: LoopState, options: LoopOptions): SelectedIssue | null {
+	const preset = options.preset
+	const continuable = preset.statuses.continuable
+	const currentItem = state.current
+		? state.queue.find((item) => getItemId(item, preset) === getCurrentId(state.current!, preset))
+		: undefined
+	const selected = currentItem && continuable.includes(currentItem.status)
 		? currentItem
-		: state.queue.find((item) => isActionableStatus(item.status))
+		: state.queue.find((item) => continuable.includes(item.status))
 	if (!selected) return null
 
 	const issueFile = resolveFrom(options.targetCwd, selected.issueFile)
@@ -815,23 +846,49 @@ function selectIssue(state: LoopState, options: LoopOptions): SelectedIssue | nu
 	return { item: selected, issueFile, evidenceDir }
 }
 
-function markIterationStarted(state: LoopState, issue: number, runId: string, countAttempt: boolean): void {
-	const item = state.queue.find((entry) => entry.issue === issue)
-	if (!item) fail(`Selected issue #${issue} not found in state queue`)
-	item.status = "in_progress"
-	if (countAttempt) item.attempts += 1
-	item.lastRunId = runId
-	state.current = { issue, phase: "iteration", runId, startedAt: new Date().toISOString() }
+export function markIterationStarted(
+	state: LoopState,
+	item: QueueItem,
+	preset: Preset,
+	runId: string,
+	countAttempt: boolean,
+): void {
+	const id = getItemId(item, preset)
+	const queueItem = state.queue.find((entry) => getItemId(entry, preset) === id)
+	if (!queueItem) fail(`Selected item "${id}" not found in state queue`)
+	queueItem.status = "in_progress"
+	if (countAttempt) queueItem.attempts += 1
+	queueItem.lastRunId = runId
+	const phases = preset.phases
+	const iterPhase = phases[0]
+	if (!iterPhase) fail("preset must define at least one phase")
+	state.current = {
+		[preset.item.idField]: queueItem[preset.item.idField],
+		phase: iterPhase.name,
+		runId,
+		startedAt: new Date().toISOString(),
+	}
 }
 
-function markReviewStarted(state: LoopState, issue: number, runId: string): void {
-	state.current = { issue, phase: "review", runId, startedAt: new Date().toISOString() }
+export function markReviewStarted(state: LoopState, item: QueueItem, preset: Preset, runId: string): void {
+	const phases = preset.phases
+	const reviewPhase = phases[phases.length - 1]
+	if (!reviewPhase) fail("preset must define at least one phase")
+	state.current = {
+		[preset.item.idField]: item[preset.item.idField],
+		phase: reviewPhase.name,
+		runId,
+		startedAt: new Date().toISOString(),
+	}
 }
 
-function makeIssueRunContext(item: QueueItem, current: CurrentRun | null): IssueRunContext {
+export function makeIssueRunContext(item: QueueItem, current: CurrentRun | null, preset: Preset): IssueRunContext {
 	if (current) {
+		const phases = preset.phases
+		const reviewPhase = phases[phases.length - 1]
+		const isReviewResume = reviewPhase !== undefined && current.phase === reviewPhase.name
 		return {
-			mode: current.phase === "review" ? "resume-review" : "resume-iteration",
+			mode: isReviewResume ? "resume-review" : "resume-iteration",
 			previousRunId: current.runId,
 			startedAt: current.startedAt,
 			branch: item.branch,
@@ -848,6 +905,20 @@ function makeIssueRunContext(item: QueueItem, current: CurrentRun | null): Issue
 		pr: item.pr,
 		status: item.status,
 	}
+}
+
+export function getItemId(item: QueueItem, preset: Preset): string {
+	const value = item[preset.item.idField]
+	if (typeof value === "string" && value.length > 0) return value
+	if (typeof value === "number" && Number.isFinite(value)) return String(value)
+	throw new Error(`queue item is missing required id field "${preset.item.idField}"`)
+}
+
+export function getCurrentId(current: CurrentRun, preset: Preset): string {
+	const value = current[preset.item.idField]
+	if (typeof value === "string" && value.length > 0) return value
+	if (typeof value === "number" && Number.isFinite(value)) return String(value)
+	throw new Error(`state.current is missing required id field "${preset.item.idField}"`)
 }
 
 function renderPrompt(template: string, options: LoopOptions, context: RenderContext): string {
@@ -1074,9 +1145,9 @@ function isIsoDateTime(value: string): boolean {
 	return !Number.isNaN(Date.parse(value))
 }
 
-function makeRunId(issue: number | null): string {
+function makeRunId(id: string | null): string {
 	const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")
-	return issue === null ? `run-${timestamp}-no-issue` : `run-${timestamp}-issue-${issue}`
+	return id === null ? `run-${timestamp}-no-issue` : `run-${timestamp}-issue-${id}`
 }
 
 async function exists(path: string): Promise<boolean> {
@@ -1100,10 +1171,6 @@ function log(message: string): void {
 
 function formatMaxIterations(value: number): string {
 	return value === Number.POSITIVE_INFINITY ? "Infinity" : String(value)
-}
-
-function isActionableStatus(status: QueueStatus): status is ActionableStatus {
-	return ACTIONABLE_STATUSES.includes(status as ActionableStatus)
 }
 
 function expectRecord(value: unknown, label: string): Record<string, unknown> {
@@ -1162,18 +1229,6 @@ function optionalStringArray(record: Record<string, unknown>, key: string): stri
 	if (value === undefined || value === null) return null
 	if (Array.isArray(value) && value.every((entry) => typeof entry === "string")) return value
 	fail(`${key} must be a string array when provided`)
-}
-
-function requiredQueueStatus(record: Record<string, unknown>, key: string): QueueStatus {
-	const value = requiredString(record, key)
-	if (QUEUE_STATUSES.includes(value as QueueStatus)) return value as QueueStatus
-	fail(`${key} has invalid queue status: ${value}`)
-}
-
-function requiredLoopPhase(record: Record<string, unknown>, key: string): LoopPhase {
-	const value = requiredString(record, key)
-	if (value === "iteration" || value === "review") return value
-	fail(`${key} must be "iteration" or "review"`)
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
