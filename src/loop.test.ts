@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test"
+import { readFile } from "node:fs/promises"
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { resolve } from "node:path"
 
 import {
+	buildConfigBindings,
+	buildRuntimeBindings,
 	checkRuntime,
 	getCurrentId,
 	getItemId,
@@ -11,12 +14,19 @@ import {
 	makeIssueRunContext,
 	markIterationStarted,
 	markReviewStarted,
+	renderFragmentIndex,
+	renderPrompt,
+	resolveBinding,
 	selectIssue,
+	type ConfigBindings,
 	type CurrentRun,
+	type IssueRunContext,
 	type LoopOptions,
 	type LoopState,
 	type Preset,
 	type QueueItem,
+	type ResolveContext,
+	type RuntimeBindings,
 } from "./loop"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -294,5 +304,239 @@ describe("checkRuntime preset-driven validation", () => {
 		})
 		const errors = await checkRuntime(options, state)
 		expect(errors.some((e) => e.message.includes("duplicate id"))).toBe(true)
+	})
+})
+
+function makeFixtureRuntime(overrides: Partial<RuntimeBindings> = {}): RuntimeBindings {
+	return {
+		runId: "run-fixture",
+		targetCwd: "/tmp/fixture-cwd",
+		workflowPath: "/tmp/fixture-cwd/.coder-loop/workflow.md",
+		sharedContextPath: "/tmp/fixture-cwd/.coder-loop/runtime/shared.md",
+		statePath: "/tmp/fixture-cwd/.coder-loop/runtime/state.json",
+		currentIssueFile: "/tmp/fixture-cwd/.coder-loop/runtime/issues/131.md",
+		issueDir: "/tmp/fixture-cwd/.coder-loop/runtime/issues",
+		evidenceDir: "/tmp/fixture-cwd/.coder-loop/runtime/evidence/131",
+		evidenceRootDir: "/tmp/fixture-cwd/.coder-loop/runtime/evidence",
+		logDir: "/tmp/fixture-cwd/.coder-loop/runtime/logs",
+		traceFile: "/tmp/fixture-cwd/.dev-trace.txt",
+		loopFile: "/tmp/fixture-cwd/.dev-loop",
+		presetDir: "/tmp/fixture-preset",
+		fragmentIndex: "- f1 (common): /tmp/fixture-preset/f1.md",
+		issueRunMode: "fresh",
+		recoveryMode: "fresh",
+		previousRunId: "",
+		recoveryStartedAt: "",
+		...overrides,
+	}
+}
+
+function makeFixtureConfig(overrides: Partial<ConfigBindings> = {}): ConfigBindings {
+	return {
+		repository: "Mouriya-Emma/test",
+		baseBranch: "main",
+		requireBrowserEvidence: false,
+		...overrides,
+	}
+}
+
+describe("resolveBinding", () => {
+	test("item.<f> reads from ctx.item and stringifies number / string / boolean", async () => {
+		const preset = await bundledPreset()
+		const item = makeItem({ issue: 131, status: "queued", branch: "feature/x", pr: 42 })
+		const ctx: ResolveContext = { item, config: makeFixtureConfig(), runtime: makeFixtureRuntime() }
+		expect(resolveBinding({ kind: "item", field: "issue" }, ctx)).toBe("131")
+		expect(resolveBinding({ kind: "item", field: "status" }, ctx)).toBe("queued")
+		expect(resolveBinding({ kind: "item", field: "branch" }, ctx)).toBe("feature/x")
+		expect(resolveBinding({ kind: "item", field: "pr" }, ctx)).toBe("42")
+		expect(preset.item.idField).toBe("issue")
+	})
+
+	test("item.<f> returns empty string for null / undefined", async () => {
+		const item = makeItem({ issue: 1, status: "queued", branch: null, pr: null })
+		const ctx: ResolveContext = { item, config: makeFixtureConfig(), runtime: makeFixtureRuntime() }
+		expect(resolveBinding({ kind: "item", field: "branch" }, ctx)).toBe("")
+		expect(resolveBinding({ kind: "item", field: "pr" }, ctx)).toBe("")
+		expect(resolveBinding({ kind: "item", field: "missingField" }, ctx)).toBe("")
+	})
+
+	test("config.<f> reads from ctx.config and stringifies boolean", () => {
+		const item = makeItem({ issue: 1, status: "queued" })
+		const ctx: ResolveContext = {
+			item,
+			config: makeFixtureConfig({ requireBrowserEvidence: true }),
+			runtime: makeFixtureRuntime(),
+		}
+		expect(resolveBinding({ kind: "config", field: "repository" }, ctx)).toBe("Mouriya-Emma/test")
+		expect(resolveBinding({ kind: "config", field: "baseBranch" }, ctx)).toBe("main")
+		expect(resolveBinding({ kind: "config", field: "requireBrowserEvidence" }, ctx)).toBe("true")
+	})
+
+	test("config.<f> with unknown field throws", () => {
+		const item = makeItem({ issue: 1, status: "queued" })
+		const ctx: ResolveContext = { item, config: makeFixtureConfig(), runtime: makeFixtureRuntime() }
+		expect(() => resolveBinding({ kind: "config", field: "noSuchField" }, ctx)).toThrow(/config\.noSuchField/)
+	})
+
+	test("runtime.<k> reads from ctx.runtime when key is in whitelist", () => {
+		const item = makeItem({ issue: 1, status: "queued" })
+		const ctx: ResolveContext = {
+			item,
+			config: makeFixtureConfig(),
+			runtime: makeFixtureRuntime({ runId: "run-special" }),
+		}
+		expect(resolveBinding({ kind: "runtime", key: "runId" }, ctx)).toBe("run-special")
+		expect(resolveBinding({ kind: "runtime", key: "presetDir" }, ctx)).toBe("/tmp/fixture-preset")
+	})
+
+	test("runtime.<k> with unknown key throws (whitelist enforced)", () => {
+		const item = makeItem({ issue: 1, status: "queued" })
+		const ctx: ResolveContext = { item, config: makeFixtureConfig(), runtime: makeFixtureRuntime() }
+		expect(() => resolveBinding({ kind: "runtime", key: "notWhitelisted" }, ctx)).toThrow(/runtime\.notWhitelisted/)
+	})
+
+	test("item.<f> with non-stringifiable value (e.g. nested object) throws", () => {
+		const item = makeItem({ issue: 1, status: "queued" })
+		;(item as Record<string, unknown>).weird = { nested: true }
+		const ctx: ResolveContext = { item, config: makeFixtureConfig(), runtime: makeFixtureRuntime() }
+		expect(() => resolveBinding({ kind: "item", field: "weird" }, ctx)).toThrow(/item\.weird/)
+	})
+})
+
+describe("renderPrompt with bundled preset", () => {
+	test("substitutes all 25 KEY placeholders in a synthetic template (byte-equal expected output)", async () => {
+		const preset = await bundledPreset()
+		const phase = preset.phases[0]!
+		const item = makeItem({
+			issue: 131,
+			status: "in_progress",
+			branch: "feature/test",
+			pr: 99,
+		})
+		const runtime = makeFixtureRuntime({
+			runId: "run-2026-05-10-12-00-00-issue-131",
+			fragmentIndex: "- frag1 (common): /tmp/fixture-preset/frag1.md\n- frag2 (review): /tmp/fixture-preset/frag2.md",
+			issueRunMode: "resume-iteration",
+			recoveryMode: "resume-iteration",
+			previousRunId: "run-prev",
+			recoveryStartedAt: "2026-05-10T11:50:00Z",
+		})
+		const config = makeFixtureConfig({ requireBrowserEvidence: true })
+		const ctx: ResolveContext = { item, config, runtime }
+
+		const keys = phase.variables.map(([k]) => k)
+		const template = keys.map((k) => `${k}={{${k}}}`).join("\n")
+		const rendered = renderPrompt(template, phase, ctx)
+
+		const expectedLines: string[] = [
+			`TARGET_CWD=${runtime.targetCwd}`,
+			`REPO=${config.repository}`,
+			`BASE_BRANCH=${config.baseBranch}`,
+			`RUN_ID=${runtime.runId}`,
+			`ISSUE=${item.issue}`,
+			`WORKFLOW_FILE=${runtime.workflowPath}`,
+			`SHARED_CONTEXT_FILE=${runtime.sharedContextPath}`,
+			`STATE_FILE=${runtime.statePath}`,
+			`CURRENT_ISSUE_FILE=${runtime.currentIssueFile}`,
+			`ISSUE_DIR=${runtime.issueDir}`,
+			`EVIDENCE_DIR=${runtime.evidenceDir}`,
+			`EVIDENCE_ROOT_DIR=${runtime.evidenceRootDir}`,
+			`LOG_DIR=${runtime.logDir}`,
+			`TRACE_FILE=${runtime.traceFile}`,
+			`LOOP_FILE=${runtime.loopFile}`,
+			`PROMPT_ROOT=${runtime.presetDir}`,
+			`PROMPT_FRAGMENT_INDEX=${runtime.fragmentIndex}`,
+			`REQUIRE_BROWSER_EVIDENCE=${String(config.requireBrowserEvidence)}`,
+			`ISSUE_RUN_MODE=${runtime.issueRunMode}`,
+			`RECOVERY_MODE=${runtime.recoveryMode}`,
+			`PREVIOUS_RUN_ID=${runtime.previousRunId}`,
+			`RECOVERY_STARTED_AT=${runtime.recoveryStartedAt}`,
+			`ISSUE_BRANCH=${item.branch}`,
+			`ISSUE_PR=${item.pr}`,
+			`ISSUE_STATUS=${item.status}`,
+		]
+		expect(rendered).toBe(expectedLines.join("\n"))
+	})
+
+	test("null item.branch / item.pr → empty string in rendered output", async () => {
+		const preset = await bundledPreset()
+		const phase = preset.phases[0]!
+		const item = makeItem({ issue: 1, status: "queued", branch: null, pr: null })
+		const ctx: ResolveContext = {
+			item,
+			config: makeFixtureConfig(),
+			runtime: makeFixtureRuntime(),
+		}
+		const rendered = renderPrompt("branch=[{{ISSUE_BRANCH}}] pr=[{{ISSUE_PR}}]", phase, ctx)
+		expect(rendered).toBe("branch=[] pr=[]")
+	})
+
+	test("smoke: render real iter-entry.md leaves no {{[A-Z_]+}} placeholders", async () => {
+		const preset = await bundledPreset()
+		const phase = preset.phases[0]!
+		const item = makeItem({ issue: 131, status: "queued", branch: null, pr: null })
+		const ctx: ResolveContext = {
+			item,
+			config: makeFixtureConfig(),
+			runtime: makeFixtureRuntime(),
+		}
+		const template = await readFile(phase.prompt, "utf-8")
+		const rendered = renderPrompt(template, phase, ctx)
+		const leftover = rendered.match(/\{\{[A-Z_][A-Z0-9_]*\}\}/g)
+		expect(leftover).toBeNull()
+	})
+
+	test("smoke: render real review-entry.md leaves no {{[A-Z_]+}} placeholders", async () => {
+		const preset = await bundledPreset()
+		const phase = preset.phases[preset.phases.length - 1]!
+		const item = makeItem({ issue: 131, status: "in_progress", branch: "feature/x", pr: 99 })
+		const ctx: ResolveContext = {
+			item,
+			config: makeFixtureConfig(),
+			runtime: makeFixtureRuntime({ issueRunMode: "resume-review", recoveryMode: "resume-review" }),
+		}
+		const template = await readFile(phase.prompt, "utf-8")
+		const rendered = renderPrompt(template, phase, ctx)
+		const leftover = rendered.match(/\{\{[A-Z_][A-Z0-9_]*\}\}/g)
+		expect(leftover).toBeNull()
+	})
+})
+
+describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () => {
+	test("buildRuntimeBindings exposes all whitelisted runtime keys", async () => {
+		const preset = await bundledPreset()
+		const options = await makeFixtureOptions(preset)
+		const issueRun: IssueRunContext = { mode: "fresh", previousRunId: null, startedAt: null, branch: null, pr: null, status: null }
+		const runtime = buildRuntimeBindings({
+			options,
+			runId: "run-1",
+			currentIssueFile: "/tmp/issue.md",
+			evidenceDir: "/tmp/evidence",
+			issueRun,
+		})
+		expect(runtime.runId).toBe("run-1")
+		expect(runtime.targetCwd).toBe(options.targetCwd)
+		expect(runtime.presetDir).toBe(preset.presetDir)
+		expect(runtime.previousRunId).toBe("")
+		expect(runtime.recoveryStartedAt).toBe("")
+		expect(runtime.issueRunMode).toBe("fresh")
+		expect(runtime.recoveryMode).toBe("fresh")
+	})
+
+	test("buildConfigBindings reads repository / baseBranch / requireBrowserEvidence from options", async () => {
+		const preset = await bundledPreset()
+		const options = await makeFixtureOptions(preset)
+		const config = buildConfigBindings(options)
+		expect(config.repository).toBe(options.repository)
+		expect(config.baseBranch).toBe(options.baseBranch)
+		expect(config.requireBrowserEvidence).toBe(options.requireBrowserEvidence)
+	})
+
+	test("renderFragmentIndex enumerates preset.fragments with absolute paths", async () => {
+		const preset = await bundledPreset()
+		const index = renderFragmentIndex(preset)
+		expect(index.split("\n").length).toBe(preset.fragments.length)
+		expect(index.startsWith(`- ${preset.fragments[0]!.id} (${preset.fragments[0]!.role}): `)).toBe(true)
+		expect(index.includes(preset.fragments[0]!.path)).toBe(true)
 	})
 })

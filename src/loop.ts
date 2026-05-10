@@ -15,9 +15,6 @@ import { isAbsolute, relative, resolve } from "node:path"
 
 const PKG_ROOT = resolve(import.meta.dir, "..")
 const PRESET_DIR = resolve(PKG_ROOT, "presets/gh-issue-pr-iteration")
-const ITERATION_PROMPT = resolve(PRESET_DIR, "iter-entry.md")
-const REVIEW_PROMPT = resolve(PRESET_DIR, "review-entry.md")
-const PROMPT_ROOT = PRESET_DIR
 
 const DEFAULT_CONFIG_FILE = ".coder-loop/runtime/config.json"
 const DEFAULT_WORKFLOW_FILE = ".coder-loop/workflow.md"
@@ -28,47 +25,10 @@ const DEFAULT_EVIDENCE_DIR = ".coder-loop/runtime/evidence"
 const DEFAULT_LOG_DIR = ".coder-loop/runtime/logs"
 
 const EXCLUDE_ENTRIES = [".dev-loop", ".dev-trace.txt", ".coder-loop/runtime"]
-const PROMPT_FRAGMENTS = [
-	{ id: "common/runtime-contract", role: "common", path: "common/runtime-contract.md" },
-	{ id: "common/github-routing", role: "common", path: "common/github-routing.md" },
-	{ id: "common/state-contract", role: "common", path: "common/state-contract.md" },
-	{ id: "iter/index", role: "iter", path: "iter/index.md" },
-	{ id: "iter/read-context", role: "iter", path: "iter/read-context.md" },
-	{ id: "iter/classify-scope", role: "iter", path: "iter/classify-scope.md" },
-	{ id: "iter/implement", role: "iter", path: "iter/implement.md" },
-	{ id: "iter/verify-evidence", role: "iter", path: "iter/verify-evidence.md" },
-	{ id: "iter/commit-pr", role: "iter", path: "iter/commit-pr.md" },
-	{ id: "iter/handoff", role: "iter", path: "iter/handoff.md" },
-	{ id: "iter/final", role: "iter", path: "iter/final.md" },
-	{ id: "review/index", role: "review", path: "review/index.md" },
-	{ id: "review/read-evidence", role: "review", path: "review/read-evidence.md" },
-	{ id: "review/trace-honesty", role: "review", path: "review/trace-honesty.md" },
-	{ id: "review/pr-protocol", role: "review", path: "review/pr-protocol.md" },
-	{ id: "review/evidence-gate", role: "review", path: "review/evidence-gate.md" },
-	{ id: "review/code-gate", role: "review", path: "review/code-gate.md" },
-	{ id: "review/issue-closure-gate", role: "review", path: "review/issue-closure-gate.md" },
-	{ id: "review/action-retry", role: "review", path: "review/action-retry.md" },
-	{ id: "review/action-expand-parent", role: "review", path: "review/action-expand-parent.md" },
-	{ id: "review/action-accept-pr", role: "review", path: "review/action-accept-pr.md" },
-	{ id: "review/action-accept-no-pr", role: "review", path: "review/action-accept-no-pr.md" },
-	{ id: "review/action-skip", role: "review", path: "review/action-skip.md" },
-	{ id: "review/action-blocked", role: "review", path: "review/action-blocked.md" },
-	{ id: "review/action-stop", role: "review", path: "review/action-stop.md" },
-	{ id: "review/update-state", role: "review", path: "review/update-state.md" },
-	{ id: "review/global-assessment", role: "review", path: "review/global-assessment.md" },
-	{ id: "review/final", role: "review", path: "review/final.md" },
-] as const satisfies readonly PromptFragment[]
 
 let logStream: WriteStream | null = null
 
 type AgentLabel = string
-type PromptFragmentRole = "common" | "iter" | "review"
-
-type PromptFragment = {
-	id: string
-	role: PromptFragmentRole
-	path: string
-}
 
 export type QueueItem = {
 	status: string
@@ -219,12 +179,41 @@ export type IssueRunContext = {
 	status: string | null
 }
 
-type RenderContext = {
-	issue: string
-	runId: string
-	currentIssueFile: string
-	evidenceDir: string
-	issueRun: IssueRunContext
+const RUNTIME_BINDING_KEYS = [
+	"runId",
+	"targetCwd",
+	"workflowPath",
+	"sharedContextPath",
+	"statePath",
+	"currentIssueFile",
+	"issueDir",
+	"evidenceDir",
+	"evidenceRootDir",
+	"logDir",
+	"traceFile",
+	"loopFile",
+	"presetDir",
+	"fragmentIndex",
+	"issueRunMode",
+	"recoveryMode",
+	"previousRunId",
+	"recoveryStartedAt",
+] as const
+
+type RuntimeBindingKey = (typeof RUNTIME_BINDING_KEYS)[number]
+
+export type RuntimeBindings = Record<RuntimeBindingKey, string>
+
+export type ConfigBindings = {
+	repository: string
+	baseBranch: string
+	requireBrowserEvidence: boolean
+}
+
+export type ResolveContext = {
+	item: QueueItem
+	config: ConfigBindings
+	runtime: RuntimeBindings
 }
 
 function parseArgs(): RawArgs {
@@ -355,7 +344,8 @@ async function main() {
 	log(`=== coder-loop started (pid=${process.pid}, cwd=${options.targetCwd}) ===`)
 	log(`Config: maxIterations=${formatMaxIterations(options.maxIterations)}`)
 	log(`Repo=${options.repository}`)
-	log(`Prompt files: iter=${ITERATION_PROMPT}, review=${REVIEW_PROMPT}, fragments=${PROMPT_ROOT}`)
+	log(`Preset dir: ${options.preset.presetDir}`)
+	for (const phase of options.preset.phases) log(`Phase ${phase.name} prompt: ${phase.prompt}`)
 	log(`Workflow=${options.workflowPath}`)
 	log(`State=${options.statePath}`)
 
@@ -379,13 +369,21 @@ async function main() {
 		if (!selected) {
 			await writeFile(options.traceFile, "No actionable issue found in .coder-loop/runtime/state.json. Review must assess whether to stop.\n")
 			log("No actionable issue selected; running review for global state assessment.")
-			await runReview(options, {
-				issue: "",
-				runId: makeRunId(null),
-				currentIssueFile: "",
-				evidenceDir: options.evidenceRootDir,
-				issueRun: { mode: "fresh", previousRunId: null, startedAt: null, branch: null, pr: null, status: null },
-			})
+			const fallbackItem = makeFallbackItem()
+			const fallbackRunId = makeRunId(null)
+			const fallbackIssueRun: IssueRunContext = { mode: "fresh", previousRunId: null, startedAt: null, branch: null, pr: null, status: null }
+			const fallbackCtx: ResolveContext = {
+				item: fallbackItem,
+				config: buildConfigBindings(options),
+				runtime: buildRuntimeBindings({
+					options,
+					runId: fallbackRunId,
+					currentIssueFile: "",
+					evidenceDir: options.evidenceRootDir,
+					issueRun: fallbackIssueRun,
+				}),
+			}
+			await runReview(options, fallbackRunId, fallbackCtx)
 			if (!(await exists(options.loopFile))) {
 				log("Review agent stopped the loop.")
 				break
@@ -402,12 +400,16 @@ async function main() {
 		const iterPhase = phases[0]
 		const reviewPhase = phases[phases.length - 1]
 		if (!iterPhase || !reviewPhase) fail("preset must define at least one phase")
-		let context: RenderContext = {
-			issue: selectedId,
-			runId,
-			currentIssueFile: selected.issueFile,
-			evidenceDir: selected.evidenceDir,
-			issueRun,
+		const ctx: ResolveContext = {
+			item: selected.item,
+			config: buildConfigBindings(options),
+			runtime: buildRuntimeBindings({
+				options,
+				runId,
+				currentIssueFile: selected.issueFile,
+				evidenceDir: selected.evidenceDir,
+				issueRun,
+			}),
 		}
 
 		if (current?.phase !== reviewPhase.name) {
@@ -418,7 +420,7 @@ async function main() {
 			log(`${current ? "Resuming" : "Starting"} ${iterPhase.name} agent for issue #${selectedId}...`)
 			const iterStart = Date.now()
 			const iterPromptRaw = await readFile(iterPhase.prompt, "utf-8")
-			const iterPrompt = renderPrompt(iterPromptRaw, options, context)
+			const iterPrompt = renderPrompt(iterPromptRaw, iterPhase, ctx)
 			const iterOutputPath = agentOutputPath(options, runId, iterPhase.name)
 			const { output: iterTrace, code: iterCode } = await runAgent(options, iterPhase.name, iterPrompt, iterOutputPath)
 			const iterDuration = ((Date.now() - iterStart) / 1000).toFixed(0)
@@ -444,7 +446,7 @@ async function main() {
 			log(`Resuming ${reviewPhase.name} agent for issue #${selectedId} without rerunning iteration...`)
 		}
 
-		const reviewCode = await runReview(options, context)
+		const reviewCode = await runReview(options, runId, ctx)
 		if (reviewCode !== 0) {
 			log(`Review agent crashed (exit ${reviewCode}). Stopping.`)
 			await removeLoopFile(options.loopFile)
@@ -467,15 +469,15 @@ async function main() {
 	logStream?.end()
 }
 
-async function runReview(options: LoopOptions, context: RenderContext): Promise<number> {
+async function runReview(options: LoopOptions, runId: string, ctx: ResolveContext): Promise<number> {
 	const phases = options.preset.phases
 	const reviewPhase = phases[phases.length - 1]
 	if (!reviewPhase) fail("preset must define at least one phase")
 	log(`Starting ${reviewPhase.name} agent...`)
 	const reviewStart = Date.now()
 	const reviewPromptRaw = await readFile(reviewPhase.prompt, "utf-8")
-	const reviewPrompt = renderPrompt(reviewPromptRaw, options, context)
-	const reviewOutputPath = agentOutputPath(options, context.runId, reviewPhase.name)
+	const reviewPrompt = renderPrompt(reviewPromptRaw, reviewPhase, ctx)
+	const reviewOutputPath = agentOutputPath(options, runId, reviewPhase.name)
 	const { output: reviewTrace, code: reviewCode } = await runAgent(options, reviewPhase.name, reviewPrompt, reviewOutputPath)
 	const reviewDuration = ((Date.now() - reviewStart) / 1000).toFixed(0)
 
@@ -661,7 +663,6 @@ async function ensureRuntime(options: LoopOptions): Promise<void> {
 	await assertReadable(options.workflowPath, "workflow")
 	await assertReadable(options.sharedContextPath, "shared context")
 	await assertReadable(options.statePath, "state")
-	await assertPromptFragmentsReadable()
 	await mkdir(options.logDir, { recursive: true })
 }
 
@@ -766,8 +767,18 @@ export async function checkRuntime(options: LoopOptions, state: LoopState): Prom
 	return errors
 }
 
-async function assertPromptFragmentsReadable(): Promise<void> {
-	await Promise.all(PROMPT_FRAGMENTS.map((fragment) => assertReadable(resolve(PROMPT_ROOT, fragment.path), `prompt fragment ${fragment.id}`)))
+function makeFallbackItem(): QueueItem {
+	return {
+		status: "",
+		attempts: 0,
+		title: "",
+		priority: "",
+		branch: null,
+		pr: null,
+		lastRunId: null,
+		issueFile: "",
+		evidenceDir: "",
+	}
 }
 
 async function assertReadable(path: string, label: string): Promise<void> {
@@ -921,42 +932,82 @@ export function getCurrentId(current: CurrentRun, preset: Preset): string {
 	throw new Error(`state.current is missing required id field "${preset.item.idField}"`)
 }
 
-function renderPrompt(template: string, options: LoopOptions, context: RenderContext): string {
-	const replacements: Array<[string, string]> = [
-		["{{TARGET_CWD}}", options.targetCwd],
-		["{{REPO}}", options.repository],
-		["{{BASE_BRANCH}}", options.baseBranch],
-		["{{RUN_ID}}", context.runId],
-		["{{ISSUE}}", context.issue],
-		["{{WORKFLOW_FILE}}", options.workflowPath],
-		["{{SHARED_CONTEXT_FILE}}", options.sharedContextPath],
-		["{{STATE_FILE}}", options.statePath],
-		["{{CURRENT_ISSUE_FILE}}", context.currentIssueFile],
-		["{{ISSUE_DIR}}", options.issueDir],
-		["{{EVIDENCE_DIR}}", context.evidenceDir],
-		["{{EVIDENCE_ROOT_DIR}}", options.evidenceRootDir],
-		["{{LOG_DIR}}", options.logDir],
-		["{{TRACE_FILE}}", options.traceFile],
-		["{{LOOP_FILE}}", options.loopFile],
-		["{{PROMPT_ROOT}}", PROMPT_ROOT],
-		["{{PROMPT_FRAGMENT_INDEX}}", renderPromptFragmentIndex()],
-		["{{REQUIRE_BROWSER_EVIDENCE}}", String(options.requireBrowserEvidence)],
-		["{{ISSUE_RUN_MODE}}", context.issueRun.mode],
-		["{{RECOVERY_MODE}}", context.issueRun.mode],
-		["{{PREVIOUS_RUN_ID}}", context.issueRun.previousRunId ?? ""],
-		["{{RECOVERY_STARTED_AT}}", context.issueRun.startedAt ?? ""],
-		["{{ISSUE_BRANCH}}", context.issueRun.branch ?? ""],
-		["{{ISSUE_PR}}", context.issueRun.pr === null ? "" : String(context.issueRun.pr)],
-		["{{ISSUE_STATUS}}", context.issueRun.status ?? ""],
-	]
-
-	return replacements.reduce((prompt, [placeholder, value]) => prompt.replaceAll(placeholder, value), template)
+export function renderPrompt(template: string, phase: PresetPhase, ctx: ResolveContext): string {
+	let result = template
+	for (const [key, source] of phase.variables) {
+		const value = resolveBinding(source, ctx)
+		result = result.replaceAll(`{{${key}}}`, value)
+	}
+	return result
 }
 
-function renderPromptFragmentIndex(): string {
-	return PROMPT_FRAGMENTS
-		.map((fragment) => `- ${fragment.id} (${fragment.role}): ${resolve(PROMPT_ROOT, fragment.path)}`)
+export function resolveBinding(source: PresetVariableSource, ctx: ResolveContext): string {
+	if (source.kind === "item") {
+		const value = ctx.item[source.field]
+		return stringifyBindingValue(value, `item.${source.field}`)
+	}
+	if (source.kind === "config") {
+		const record = ctx.config as unknown as Record<string, unknown>
+		if (!(source.field in record)) throw new Error(`config.${source.field}: not in known config bindings`)
+		const value = record[source.field]
+		if (value === null || value === undefined) throw new Error(`config.${source.field}: must not be null or undefined`)
+		return stringifyBindingValue(value, `config.${source.field}`)
+	}
+	if (!RUNTIME_BINDING_KEYS.includes(source.key as RuntimeBindingKey)) {
+		throw new Error(`runtime.${source.key}: not in runtime binding whitelist`)
+	}
+	return ctx.runtime[source.key as RuntimeBindingKey]
+}
+
+function stringifyBindingValue(value: unknown, label: string): string {
+	if (value === null || value === undefined) return ""
+	if (typeof value === "string") return value
+	if (typeof value === "number" && Number.isFinite(value)) return String(value)
+	if (typeof value === "boolean") return String(value)
+	throw new Error(`${label}: cannot stringify value of type ${typeof value}`)
+}
+
+export function renderFragmentIndex(preset: Preset): string {
+	return preset.fragments
+		.map((fragment) => `- ${fragment.id} (${fragment.role}): ${fragment.path}`)
 		.join("\n")
+}
+
+export function buildRuntimeBindings(input: {
+	options: LoopOptions
+	runId: string
+	currentIssueFile: string
+	evidenceDir: string
+	issueRun: IssueRunContext
+}): RuntimeBindings {
+	return {
+		runId: input.runId,
+		targetCwd: input.options.targetCwd,
+		workflowPath: input.options.workflowPath,
+		sharedContextPath: input.options.sharedContextPath,
+		statePath: input.options.statePath,
+		currentIssueFile: input.currentIssueFile,
+		issueDir: input.options.issueDir,
+		evidenceDir: input.evidenceDir,
+		evidenceRootDir: input.options.evidenceRootDir,
+		logDir: input.options.logDir,
+		traceFile: input.options.traceFile,
+		loopFile: input.options.loopFile,
+		presetDir: input.options.preset.presetDir,
+		fragmentIndex: renderFragmentIndex(input.options.preset),
+		issueRunMode: input.issueRun.mode,
+		recoveryMode: input.issueRun.mode,
+		previousRunId: input.issueRun.previousRunId ?? "",
+		recoveryStartedAt: input.issueRun.startedAt ?? "",
+	}
+}
+
+export function buildConfigBindings(options: LoopOptions): ConfigBindings {
+	return {
+		repository: options.repository,
+		baseBranch: options.baseBranch,
+		requireBrowserEvidence: options.requireBrowserEvidence,
+	}
 }
 
 async function runAgent(options: LoopOptions, label: AgentLabel, prompt: string, outputPath: string): Promise<{ output: string; code: number }> {
