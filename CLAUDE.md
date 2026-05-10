@@ -24,9 +24,9 @@ Three-phase signal pipeline: `plan → iter → review`
 /dev-plan (large task/design → GitHub issues with checkpoint tables → .coder-loop/runtime queue)
     ↓
 src/loop.ts (state machine orchestrator)
-    ├→ spawn iteration agent (prompts/iter-entry.md) → implement + execute checkpoints
+    ├→ spawn iteration agent (presets/gh-issue-pr-iteration/iter-entry.md) → implement + execute checkpoints
     ├→ write output to .dev-trace.txt
-    ├→ spawn review agent (prompts/review-entry.md) → audit trace, post feedback to issue
+    ├→ spawn review agent (presets/gh-issue-pr-iteration/review-entry.md) → audit trace, post feedback to issue
     └→ repeat until issue closed or .dev-loop deleted
 ```
 
@@ -48,7 +48,7 @@ src/loop.ts (state machine orchestrator)
 
 ## Agent Prompt 设计前提
 
-修改 `prompts/iter-entry.md` / `prompts/review-entry.md` 之前必须理解以下前提。
+修改 `presets/gh-issue-pr-iteration/iter-entry.md` / `presets/gh-issue-pr-iteration/review-entry.md` 之前必须理解以下前提。
 
 ### 这不是软件工程问题
 
@@ -72,9 +72,9 @@ Agent 不是"判断力差"——是没人教它怎么判断。当前 prompt 给�
 
 `templates/` ships project-agnostic starting points distilled from a known-good default implementation (Fulcrum):
 
-- `templates/workflow.md` — `.coder-loop/workflow.md` skeleton (goal, source-of-truth, PR/evidence rules, CI-parity, review behavior).
-- `templates/shared.md` — `.coder-loop/runtime/shared.md` skeleton with allowed/forbidden memory policy.
-- `templates/pr-body.md` — PR body evidence-layer skeleton.
+- `presets/gh-issue-pr-iteration/templates/workflow.md` — `.coder-loop/workflow.md` skeleton (goal, source-of-truth, PR/evidence rules, CI-parity, review behavior).
+- `presets/gh-issue-pr-iteration/templates/shared.md` — `.coder-loop/runtime/shared.md` skeleton with allowed/forbidden memory policy.
+- `presets/gh-issue-pr-iteration/templates/pr-body.md` — PR body evidence-layer skeleton.
 - `templates/supervisor/` — optional outer-layer supervisor (cron-driven cross-patrol orchestration on top of the loop). Use only for long multi-mission work; short runs don't need it.
 
 See `templates/README.md` for the copy table, minimum viable setup, and what each template is for.

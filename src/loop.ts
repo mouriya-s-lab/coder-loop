@@ -14,9 +14,10 @@ import { createWriteStream, type WriteStream } from "node:fs"
 import { isAbsolute, relative, resolve } from "node:path"
 
 const PKG_ROOT = resolve(import.meta.dir, "..")
-const ITERATION_PROMPT = resolve(PKG_ROOT, "prompts/iter-entry.md")
-const REVIEW_PROMPT = resolve(PKG_ROOT, "prompts/review-entry.md")
-const PROMPT_ROOT = resolve(PKG_ROOT, "prompts")
+const PRESET_DIR = resolve(PKG_ROOT, "presets/gh-issue-pr-iteration")
+const ITERATION_PROMPT = resolve(PRESET_DIR, "iter-entry.md")
+const REVIEW_PROMPT = resolve(PRESET_DIR, "review-entry.md")
+const PROMPT_ROOT = PRESET_DIR
 
 const DEFAULT_CONFIG_FILE = ".coder-loop/runtime/config.json"
 const DEFAULT_WORKFLOW_FILE = ".coder-loop/workflow.md"
