@@ -14,8 +14,8 @@ import { createWriteStream, type WriteStream } from "node:fs"
 import { isAbsolute, relative, resolve } from "node:path"
 
 const PKG_ROOT = resolve(import.meta.dir, "..")
-const ITERATION_PROMPT = resolve(PKG_ROOT, "dev-iter.md")
-const REVIEW_PROMPT = resolve(PKG_ROOT, "dev-review.md")
+const ITERATION_PROMPT = resolve(PKG_ROOT, "prompts/iter-entry.md")
+const REVIEW_PROMPT = resolve(PKG_ROOT, "prompts/review-entry.md")
 const PROMPT_ROOT = resolve(PKG_ROOT, "prompts")
 
 const DEFAULT_CONFIG_FILE = ".coder-loop/runtime/config.json"
@@ -477,7 +477,7 @@ function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, confi
 		logDir,
 		loopFile: resolve(targetCwd, ".dev-loop"),
 		traceFile: resolve(targetCwd, ".dev-trace.txt"),
-		logFile: resolve(logDir, `autotask-${process.pid}.${timestamp}.log`),
+		logFile: resolve(logDir, `coder-loop-${process.pid}.${timestamp}.log`),
 		repository,
 		baseBranch: config.baseBranch ?? "main",
 		requireBrowserEvidence,
