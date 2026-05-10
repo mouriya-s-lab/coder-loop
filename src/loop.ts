@@ -18,6 +18,7 @@ const DEFAULT_PRESET_NAME = "gh-issue-pr-iteration"
 const PRESET_NAME_PATTERN = /^[a-zA-Z][a-zA-Z0-9_-]*$/
 
 const DEFAULT_CONFIG_FILE = ".coder-loop/runtime/config.json"
+const DEFAULT_CONFIG_FILE_TOML = ".coder-loop/runtime/config.toml"
 const DEFAULT_WORKFLOW_FILE = ".coder-loop/workflow.md"
 const DEFAULT_SHARED_FILE = ".coder-loop/runtime/shared.md"
 const DEFAULT_STATE_FILE = ".coder-loop/runtime/state.json"
@@ -308,7 +309,7 @@ function rejectInlineValue(value: string | null, name: string): void {
 async function main() {
 	const rawArgs = parseArgs()
 	const targetCwd = resolve(rawArgs.targetCwd ?? process.cwd())
-	const configPath = resolveFrom(targetCwd, rawArgs.configPath ?? DEFAULT_CONFIG_FILE)
+	const configPath = await resolveConfigPath(targetCwd, rawArgs.configPath)
 	const config = await loadConfig(configPath)
 	const presetDir = resolvePresetDir(config, PKG_ROOT, targetCwd)
 	const preset = await loadPreset(presetDir)
@@ -325,6 +326,7 @@ async function main() {
 		}
 		console.error(`Runtime check passed: target=${options.targetCwd}`)
 		if (options.repository !== null) console.error(`Runtime check passed: repo=${options.repository}`)
+		console.error(`Runtime check passed: config=${options.configPath} (${configFormatForPath(options.configPath)})`)
 		console.error(`Runtime check passed: state=${options.statePath}`)
 		console.error(`Runtime check passed: queue=${state.queue.length}, selected=${selected ? getItemId(selected.item, options.preset) : "none"}`)
 		console.error(`Runtime check passed: preset=${options.preset.name}`)
@@ -635,6 +637,22 @@ function requiredStringArray(record: Record<string, unknown>, key: string): stri
 	presetError(`${key} must be a string array`)
 }
 
+export type ConfigFormat = "json" | "toml"
+
+export function configFormatForPath(path: string): ConfigFormat {
+	if (path.endsWith(".toml")) return "toml"
+	return "json"
+}
+
+async function resolveConfigPath(targetCwd: string, override: string | null): Promise<string> {
+	if (override !== null) return resolveFrom(targetCwd, override)
+	const jsonPath = resolveFrom(targetCwd, DEFAULT_CONFIG_FILE)
+	if (await exists(jsonPath)) return jsonPath
+	const tomlPath = resolveFrom(targetCwd, DEFAULT_CONFIG_FILE_TOML)
+	if (await exists(tomlPath)) return tomlPath
+	return jsonPath
+}
+
 async function loadConfig(path: string): Promise<LoopConfig> {
 	const raw = await readFile(path, "utf-8").catch((error: unknown) => {
 		if (isNodeError(error) && error.code === "ENOENT") {
@@ -642,7 +660,8 @@ async function loadConfig(path: string): Promise<LoopConfig> {
 		}
 		throw error
 	})
-	const parsed: unknown = JSON.parse(raw)
+	const format = configFormatForPath(path)
+	const parsed: unknown = format === "toml" ? Bun.TOML.parse(raw) : JSON.parse(raw)
 	const root = expectRecord(parsed, "config")
 	const evidence = optionalRecord(root, "evidence")
 	const claude = optionalRecord(root, "claude")
