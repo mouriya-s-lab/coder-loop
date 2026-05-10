@@ -1,0 +1,23 @@
+name        = "single-phase-example"
+version     = 1
+description = "Minimal 1-phase preset for engine smoke testing."
+
+[item]
+idField = "id"
+
+[statuses]
+continuable = ["pending"]
+terminal    = ["done"]
+
+[[phases]]
+name   = "run"
+prompt = "run-entry.md"
+
+  [phases.variables]
+  ITEM_ID    = "item.id"
+  RUN_ID     = "runtime.runId"
+  TARGET_CWD = "runtime.targetCwd"
+
+[agent]
+binary    = "echo"
+extraArgs = []

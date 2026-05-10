@@ -33,14 +33,14 @@ type AgentLabel = string
 
 export type QueueItem = {
 	status: string
-	attempts: number
-	title: string
-	priority: string
+	attempts: number | null
+	title: string | null
+	priority: string | null
 	branch: string | null
 	pr: number | null
 	lastRunId: string | null
-	issueFile: string
-	evidenceDir: string
+	issueFile: string | null
+	evidenceDir: string | null
 	[key: string]: unknown
 }
 
@@ -54,8 +54,8 @@ export type CurrentRun = {
 export type LoopState = {
 	version: number
 	queue: QueueItem[]
-	repository: string
-	baseBranch: string
+	repository: string | null
+	baseBranch: string | null
 	recentRuns: unknown[]
 	current: CurrentRun | null
 }
@@ -101,8 +101,8 @@ export type LoopOptions = {
 	loopFile: string
 	traceFile: string
 	logFile: string
-	repository: string
-	baseBranch: string
+	repository: string | null
+	baseBranch: string | null
 	requireBrowserEvidence: boolean
 	claudeBinary: string
 	claudeExtraArgs: string[]
@@ -169,8 +169,8 @@ type AgentRunStatus = {
 
 export type SelectedIssue = {
 	item: QueueItem
-	issueFile: string
-	evidenceDir: string
+	issueFile: string | null
+	evidenceDir: string | null
 }
 
 export type IssueRunContext = {
@@ -208,8 +208,8 @@ type RuntimeBindingKey = (typeof RUNTIME_BINDING_KEYS)[number]
 export type RuntimeBindings = Record<RuntimeBindingKey, string>
 
 export type ConfigBindings = {
-	repository: string
-	baseBranch: string
+	repository: string | null
+	baseBranch: string | null
 	requireBrowserEvidence: boolean
 }
 
@@ -324,9 +324,9 @@ async function main() {
 			process.exit(1)
 		}
 		console.error(`Runtime check passed: target=${options.targetCwd}`)
-		console.error(`Runtime check passed: repo=${options.repository}`)
+		if (options.repository !== null) console.error(`Runtime check passed: repo=${options.repository}`)
 		console.error(`Runtime check passed: state=${options.statePath}`)
-		console.error(`Runtime check passed: queue=${state.queue.length}, selected=${selected ? `#${getItemId(selected.item, options.preset)}` : "none"}`)
+		console.error(`Runtime check passed: queue=${state.queue.length}, selected=${selected ? getItemId(selected.item, options.preset) : "none"}`)
 		console.error(`Runtime check passed: preset=${options.preset.name}`)
 		return
 	}
@@ -338,10 +338,10 @@ async function main() {
 		const state = await loadState(options.statePath)
 		const selected = selectIssue(state, options)
 		console.error(`Dry run: target=${options.targetCwd}`)
-		console.error(`Dry run: repo=${options.repository}`)
+		if (options.repository !== null) console.error(`Dry run: repo=${options.repository}`)
 		console.error(`Dry run: workflow=${options.workflowPath}`)
 		console.error(`Dry run: state=${options.statePath}`)
-		console.error(`Dry run: selected=${selected ? `#${getItemId(selected.item, options.preset)}` : "none"}`)
+		console.error(`Dry run: selected=${selected ? getItemId(selected.item, options.preset) : "none"}`)
 		return
 	}
 
@@ -501,8 +501,6 @@ function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, confi
 	const evidenceRootDir = resolveFrom(targetCwd, config.evidenceDir ?? DEFAULT_EVIDENCE_DIR)
 	const logDir = resolveFrom(targetCwd, config.logDir ?? DEFAULT_LOG_DIR)
 	const repository = raw.repository ?? config.repository
-	if (!repository) fail("Repository is required. Set --repo or .coder-loop/runtime/config.json repository.")
-
 	const maxIterations = raw.once ? 1 : (raw.maxIterations ?? Number.POSITIVE_INFINITY)
 	const requireBrowserEvidence = raw.requireBrowserEvidence ?? config.requireAgentBrowserScreenshots ?? false
 	const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")
@@ -520,7 +518,7 @@ function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, confi
 		traceFile: resolve(targetCwd, ".dev-trace.txt"),
 		logFile: resolve(logDir, `coder-loop-${process.pid}.${timestamp}.log`),
 		repository,
-		baseBranch: config.baseBranch ?? "main",
+		baseBranch: config.baseBranch,
 		requireBrowserEvidence,
 		claudeBinary: config.claudeBinary ?? "claude",
 		claudeExtraArgs: config.claudeExtraArgs,
@@ -586,7 +584,7 @@ export function parsePreset(value: unknown, presetDir: string): Preset {
 		phases.push({ name: phaseName, prompt: phasePrompt, variables })
 	}
 
-	const fragmentsRaw = root.fragments
+	const fragmentsRaw = root.fragments ?? []
 	if (!Array.isArray(fragmentsRaw)) presetError("preset.fragments must be an array")
 	const fragmentIds = new Set<string>()
 	const fragments: PresetFragment[] = []
@@ -709,8 +707,8 @@ export async function checkRuntime(options: LoopOptions, state: LoopState): Prom
 	const allowedPhases = new Set<string>(preset.phases.map((phase) => phase.name))
 
 	if (state.version !== 1) pushCheckError(errors, "state.version", "must be 1")
-	if (state.repository !== options.repository) pushCheckError(errors, "state.repository", `must match configured repository ${options.repository}`)
-	if (state.baseBranch !== options.baseBranch) pushCheckError(errors, "state.baseBranch", `must match configured baseBranch ${options.baseBranch}`)
+	if (options.repository !== null && state.repository !== options.repository) pushCheckError(errors, "state.repository", `must match configured repository ${options.repository}`)
+	if (options.baseBranch !== null && state.baseBranch !== options.baseBranch) pushCheckError(errors, "state.baseBranch", `must match configured baseBranch ${options.baseBranch}`)
 
 	await checkDirectory(options.targetCwd, "targetCwd", errors)
 	await checkFile(options.configPath, "config", errors)
@@ -751,17 +749,21 @@ export async function checkRuntime(options: LoopOptions, state: LoopState): Prom
 			seenIds.add(idAsString)
 		}
 		if (!allowedStatuses.has(item.status)) pushCheckError(errors, `${label}.status`, `status "${item.status}" is not in preset.statuses (continuable + terminal)`)
-		if (!Number.isInteger(item.attempts) || item.attempts < 0) pushCheckError(errors, `${label}.attempts`, "must be a non-negative integer")
-		if (item.title.trim() === "") pushCheckError(errors, `${label}.title`, "must not be empty")
-		if (item.priority.trim() === "") pushCheckError(errors, `${label}.priority`, "must not be empty")
+		if (item.attempts !== null && (!Number.isInteger(item.attempts) || item.attempts < 0)) pushCheckError(errors, `${label}.attempts`, "must be null or a non-negative integer")
+		if (item.title !== null && item.title.trim() === "") pushCheckError(errors, `${label}.title`, "must be null or non-empty")
+		if (item.priority !== null && item.priority.trim() === "") pushCheckError(errors, `${label}.priority`, "must be null or non-empty")
 		if (item.branch !== null && item.branch.trim() === "") pushCheckError(errors, `${label}.branch`, "must be null or non-empty")
 		if (item.pr !== null && (!Number.isInteger(item.pr) || item.pr <= 0)) pushCheckError(errors, `${label}.pr`, "must be null or a positive integer")
 		if (item.lastRunId !== null && item.lastRunId.trim() === "") pushCheckError(errors, `${label}.lastRunId`, "must be null or non-empty")
 
-		const issueFile = resolveRuntimePath(options, item.issueFile, `${label}.issueFile`, options.issueDir, errors)
-		const evidenceDir = resolveRuntimePath(options, item.evidenceDir, `${label}.evidenceDir`, options.evidenceRootDir, errors)
-		if (issueFile) await checkFile(issueFile, `${label}.issueFile`, errors)
-		if (evidenceDir) await checkDirectory(evidenceDir, `${label}.evidenceDir`, errors)
+		if (item.issueFile !== null) {
+			const issueFile = resolveRuntimePath(options, item.issueFile, `${label}.issueFile`, options.issueDir, errors)
+			if (issueFile) await checkFile(issueFile, `${label}.issueFile`, errors)
+		}
+		if (item.evidenceDir !== null) {
+			const evidenceDir = resolveRuntimePath(options, item.evidenceDir, `${label}.evidenceDir`, options.evidenceRootDir, errors)
+			if (evidenceDir) await checkDirectory(evidenceDir, `${label}.evidenceDir`, errors)
+		}
 	}
 
 	if (state.current) {
@@ -795,14 +797,14 @@ export async function checkRuntime(options: LoopOptions, state: LoopState): Prom
 function makeFallbackItem(): QueueItem {
 	return {
 		status: "",
-		attempts: 0,
-		title: "",
-		priority: "",
+		attempts: null,
+		title: null,
+		priority: null,
 		branch: null,
 		pr: null,
 		lastRunId: null,
-		issueFile: "",
-		evidenceDir: "",
+		issueFile: null,
+		evidenceDir: null,
 	}
 }
 
@@ -825,8 +827,8 @@ async function loadState(path: string): Promise<LoopState> {
 	return {
 		version: requiredNumber(root, "version"),
 		queue: queueValue.map((item, index) => parseQueueItem(item, `state.queue[${index}]`)),
-		repository: optionalString(root, "repository") ?? "",
-		baseBranch: optionalString(root, "baseBranch") ?? "main",
+		repository: optionalString(root, "repository"),
+		baseBranch: optionalString(root, "baseBranch"),
 		recentRuns: Array.isArray(root.recentRuns) ? root.recentRuns : [],
 		current: parseCurrent(root.current),
 	}
@@ -837,14 +839,14 @@ function parseQueueItem(value: unknown, label: string): QueueItem {
 	return {
 		...record,
 		status: requiredString(record, "status"),
-		attempts: requiredNumber(record, "attempts"),
-		title: requiredString(record, "title"),
-		priority: requiredString(record, "priority"),
-		branch: nullableString(record, "branch"),
-		pr: nullableNumber(record, "pr"),
-		lastRunId: nullableString(record, "lastRunId"),
-		issueFile: requiredString(record, "issueFile"),
-		evidenceDir: requiredString(record, "evidenceDir"),
+		attempts: optionalNumber(record, "attempts"),
+		title: optionalString(record, "title"),
+		priority: optionalString(record, "priority"),
+		branch: optionalString(record, "branch"),
+		pr: optionalNumber(record, "pr"),
+		lastRunId: optionalString(record, "lastRunId"),
+		issueFile: optionalString(record, "issueFile"),
+		evidenceDir: optionalString(record, "evidenceDir"),
 	}
 }
 
@@ -874,10 +876,10 @@ export function selectIssue(state: LoopState, options: LoopOptions): SelectedIss
 		: state.queue.find((item) => continuable.includes(item.status))
 	if (!selected) return null
 
-	const issueFile = resolveFrom(options.targetCwd, selected.issueFile)
-	const evidenceDir = resolveFrom(options.targetCwd, selected.evidenceDir)
-	if (!isWithin(options.issueDir, issueFile)) fail(`Selected issue file must resolve inside issueDir: ${selected.issueFile}`)
-	if (!isWithin(options.evidenceRootDir, evidenceDir)) fail(`Selected evidence directory must resolve inside evidenceDir: ${selected.evidenceDir}`)
+	const issueFile = selected.issueFile === null ? null : resolveFrom(options.targetCwd, selected.issueFile)
+	const evidenceDir = selected.evidenceDir === null ? null : resolveFrom(options.targetCwd, selected.evidenceDir)
+	if (issueFile !== null && !isWithin(options.issueDir, issueFile)) fail(`Selected issue file must resolve inside issueDir: ${selected.issueFile}`)
+	if (evidenceDir !== null && !isWithin(options.evidenceRootDir, evidenceDir)) fail(`Selected evidence directory must resolve inside evidenceDir: ${selected.evidenceDir}`)
 
 	return { item: selected, issueFile, evidenceDir }
 }
@@ -893,7 +895,7 @@ export function markIterationStarted(
 	const queueItem = state.queue.find((entry) => getItemId(entry, preset) === id)
 	if (!queueItem) fail(`Selected item "${id}" not found in state queue`)
 	queueItem.status = "in_progress"
-	if (countAttempt) queueItem.attempts += 1
+	if (countAttempt) queueItem.attempts = (queueItem.attempts ?? 0) + 1
 	queueItem.lastRunId = runId
 	const phases = preset.phases
 	const iterPhase = phases[0]
@@ -1001,8 +1003,8 @@ export function renderFragmentIndex(preset: Preset): string {
 export function buildRuntimeBindings(input: {
 	options: LoopOptions
 	runId: string
-	currentIssueFile: string
-	evidenceDir: string
+	currentIssueFile: string | null
+	evidenceDir: string | null
 	issueRun: IssueRunContext
 }): RuntimeBindings {
 	return {
@@ -1011,9 +1013,9 @@ export function buildRuntimeBindings(input: {
 		workflowPath: input.options.workflowPath,
 		sharedContextPath: input.options.sharedContextPath,
 		statePath: input.options.statePath,
-		currentIssueFile: input.currentIssueFile,
+		currentIssueFile: input.currentIssueFile ?? "",
 		issueDir: input.options.issueDir,
-		evidenceDir: input.evidenceDir,
+		evidenceDir: input.evidenceDir ?? input.options.evidenceRootDir,
 		evidenceRootDir: input.options.evidenceRootDir,
 		logDir: input.options.logDir,
 		traceFile: input.options.traceFile,
@@ -1291,6 +1293,13 @@ function nullableNumber(record: Record<string, unknown>, key: string): number | 
 	if (value === null) return null
 	if (typeof value === "number" && Number.isFinite(value)) return value
 	fail(`${key} must be a finite number or null`)
+}
+
+function optionalNumber(record: Record<string, unknown>, key: string): number | null {
+	const value = record[key]
+	if (value === undefined || value === null) return null
+	if (typeof value === "number" && Number.isFinite(value)) return value
+	fail(`${key} must be a finite number when provided`)
 }
 
 function optionalBoolean(record: Record<string, unknown>, key: string): boolean | null {
