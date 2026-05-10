@@ -57,7 +57,7 @@ coder-loop 是项目无关的 GitHub issue/PR loop。目标仓库只要提供 `.
 
 loop.ts 是程序状态机：创建 `.dev-loop` → 选择 actionable issue → 根据 `state.current.phase` spawn iteration 或 review agent → 捕获输出写 trace/status → 检查 `.dev-loop` 是否存在。它只做确定性调度，不判断 issue 是否完成、证据是否充分、PR 是否正确、parent 是否可关闭。
 
-Agent prompt 是另一层状态机：iteration/review 通过 `prompts/` 下的 fragment 做语义判断。每个 fragment 代表一个阶段，给出输入、目标、禁止事项、允许 verdict 和下一 fragment。程序只把 fragment 路径索引和目标 workflow 注入入口 prompt，并校验 fragment 文件可读；下一步选择仍由 agent 按 prompt 和目标 workflow 判断。
+Agent prompt 是另一层状态机：iteration/review 通过 `presets/<preset-name>/` 下的 fragment 做语义判断（默认 preset 是 `gh-issue-pr-iteration`）。每个 fragment 代表一个阶段，给出输入、目标、禁止事项、允许 verdict 和下一 fragment。程序只把 fragment 路径索引和目标 workflow 注入入口 prompt，并校验 fragment 文件可读；下一步选择仍由 agent 按 prompt 和目标 workflow 判断。
 
 目标仓库的 `.coder-loop/` 分为两部分：
 
@@ -108,12 +108,14 @@ bun src/loop.ts --target-cwd <target-repo-path> --check-runtime
 | `src/loop.ts` | 循环状态机。创建 `.dev-loop`，交替 spawn 两个 agent，捕获输出写 trace |
 | `.claude/commands/dev-plan.md` | 大任务 intake skill。先生成原子 GitHub issues、checkpoint、parent/child graph 和 runtime queue |
 | `.claude/commands/dev-loop.md` | loop skill。消费现有队列并启动迭代循环 |
-| `prompts/iter-entry.md` | iteration agent 入口 prompt。绑定运行时输入并指向 iteration fragments |
-| `prompts/review-entry.md` | review agent 入口 prompt。绑定运行时输入并指向 review fragments |
-| `prompts/common/` | 程序/agent 边界、GitHub 路由、状态文件不变量 |
-| `prompts/iter/` | iteration agent 的分阶段 fragments：读上下文、分类、实现、验证、PR、handoff、final |
-| `prompts/review/` | review agent 的分阶段 fragments：读证据、PR/evidence/code/closure gates、动作、状态更新、global assessment、stop/final |
-| `templates/` | 项目无关的目标侧 starter 模板（`workflow.md`、`shared.md`、`pr-body.md`、`supervisor/`），见 `templates/README.md` |
+| `presets/gh-issue-pr-iteration/preset.toml` | 默认 preset 定义：item 形态、status 集、phase 列表、fragment 清单、变量绑定 |
+| `presets/gh-issue-pr-iteration/iter-entry.md` | iteration agent 入口 prompt。绑定运行时输入并指向 iteration fragments |
+| `presets/gh-issue-pr-iteration/review-entry.md` | review agent 入口 prompt。绑定运行时输入并指向 review fragments |
+| `presets/gh-issue-pr-iteration/common/` | 程序/agent 边界、GitHub 路由、状态文件不变量 |
+| `presets/gh-issue-pr-iteration/iter/` | iteration agent 的分阶段 fragments：读上下文、分类、实现、验证、PR、handoff、final |
+| `presets/gh-issue-pr-iteration/review/` | review agent 的分阶段 fragments：读证据、PR/evidence/code/closure gates、动作、状态更新、global assessment、stop/final |
+| `presets/gh-issue-pr-iteration/templates/` | preset 自带的目标侧 starter（`workflow.md`、`shared.md`、`pr-body.md`） |
+| `templates/supervisor/` | 跨 preset 通用的 supervisor 模式模板，见 `templates/README.md` |
 | target `.coder-loop/workflow.md` | committed 项目级 workflow/policy：命令、PR 格式、证据、review gate |
 | target `.coder-loop/runtime/` | ignored 本地运行态：config、state、shared、issues、evidence、logs |
 

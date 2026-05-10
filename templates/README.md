@@ -6,7 +6,7 @@ These are reusable starting points distilled from real production usage (the Ful
 
 `coder-loop` is a **stateless program loop**. It alternates iteration and review agent spawns, captures their output to trace/log/status files, and exits. It does not judge issue completion, evidence sufficiency, PR correctness, parent closure, queue priority, or any other domain question. All of those judgments come from:
 
-- the agent prompts in `prompts/` (built into this repo)
+- the agent prompts in `presets/<preset-name>/` (the bundled `gh-issue-pr-iteration` preset is the default)
 - the **project policy** the agents read at every spawn — primarily `.coder-loop/workflow.md`, `.coder-loop/runtime/shared.md`, and per-issue handoff files
 - live GitHub issue/PR state
 
@@ -16,10 +16,10 @@ The templates below are the project-policy half. If you delete a rule from one o
 
 | Template | Copy to | Purpose |
 |---|---|---|
-| `workflow.md` | `<TARGET>/.coder-loop/workflow.md` | committed project policy: goal, source-of-truth, PR/evidence rules, CI-parity, review behavior |
-| `shared.md` | `<TARGET>/.coder-loop/runtime/shared.md` | local durable cross-issue facts, with allowed/forbidden policy |
-| `pr-body.md` | `<TARGET>/.coder-loop/templates/pr-body.md` (or inline into `workflow.md`) | PR body skeleton with evidence layers |
-| `supervisor/` | `<TARGET>/.coder-loop/runtime/supervisor/<MISSION>/` + `<TARGET>/.claude/skills/bootstrap/SKILL.md` | optional outer-layer supervisor (cron-driven cross-patrol orchestration) — see `supervisor/README.md` |
+| `presets/gh-issue-pr-iteration/templates/workflow.md` | `<TARGET>/.coder-loop/workflow.md` | committed project policy: goal, source-of-truth, PR/evidence rules, CI-parity, review behavior |
+| `presets/gh-issue-pr-iteration/templates/shared.md` | `<TARGET>/.coder-loop/runtime/shared.md` | local durable cross-issue facts, with allowed/forbidden policy |
+| `presets/gh-issue-pr-iteration/templates/pr-body.md` | `<TARGET>/.coder-loop/templates/pr-body.md` (or inline into `workflow.md`) | PR body skeleton with evidence layers |
+| `templates/supervisor/` | `<TARGET>/.coder-loop/runtime/supervisor/<MISSION>/` + `<TARGET>/.claude/skills/bootstrap/SKILL.md` | optional outer-layer supervisor (cron-driven cross-patrol orchestration) — see `supervisor/README.md` |
 
 ## Minimum viable target setup
 

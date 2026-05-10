@@ -1,0 +1,233 @@
+# coder-loop preset: gh-issue-pr-iteration
+#
+# This is the default preset bundled with coder-loop. It encodes the
+# two-role (iteration + review) GitHub issue/PR loop that has historically
+# been hardcoded in src/loop.ts.
+#
+# Stage 1 PR 1 introduces this file alongside the existing hardcoded loop;
+# the engine begins consuming it in Stage 1 PR 2 (loadPreset). Variable
+# binding right-hand sides use the three-prefix DSL described in RFC #5:
+#
+#   item.<field>     - field of the queue item
+#   config.<field>   - field of target runtime/config.{json,toml}
+#   runtime.<key>    - engine-computed runtime value
+#
+# Fragments are the canonical fragment list. Entry prompts may only
+# reference fragments declared in [[fragments]] below.
+
+name        = "gh-issue-pr-iteration"
+version     = 1
+description = "Two-role (iteration + review) GitHub issue/PR loop. Default preset bundled with coder-loop."
+
+[item]
+idField = "issue"
+
+[statuses]
+continuable = ["queued", "in_progress", "changes_requested"]
+terminal    = ["blocked", "moot", "done"]
+
+[[phases]]
+name   = "iteration"
+prompt = "iter-entry.md"
+
+  [phases.variables]
+  TARGET_CWD               = "runtime.targetCwd"
+  REPO                     = "config.repository"
+  BASE_BRANCH              = "config.baseBranch"
+  RUN_ID                   = "runtime.runId"
+  ISSUE                    = "item.issue"
+  WORKFLOW_FILE            = "runtime.workflowPath"
+  SHARED_CONTEXT_FILE      = "runtime.sharedContextPath"
+  STATE_FILE               = "runtime.statePath"
+  CURRENT_ISSUE_FILE       = "runtime.currentIssueFile"
+  ISSUE_DIR                = "runtime.issueDir"
+  EVIDENCE_DIR             = "runtime.evidenceDir"
+  EVIDENCE_ROOT_DIR        = "runtime.evidenceRootDir"
+  LOG_DIR                  = "runtime.logDir"
+  TRACE_FILE               = "runtime.traceFile"
+  LOOP_FILE                = "runtime.loopFile"
+  PROMPT_ROOT              = "runtime.presetDir"
+  PROMPT_FRAGMENT_INDEX    = "runtime.fragmentIndex"
+  REQUIRE_BROWSER_EVIDENCE = "config.requireBrowserEvidence"
+  ISSUE_RUN_MODE           = "runtime.issueRunMode"
+  RECOVERY_MODE            = "runtime.recoveryMode"
+  PREVIOUS_RUN_ID          = "runtime.previousRunId"
+  RECOVERY_STARTED_AT      = "runtime.recoveryStartedAt"
+  ISSUE_BRANCH             = "item.branch"
+  ISSUE_PR                 = "item.pr"
+  ISSUE_STATUS             = "item.status"
+
+[[phases]]
+name   = "review"
+prompt = "review-entry.md"
+
+  [phases.variables]
+  TARGET_CWD               = "runtime.targetCwd"
+  REPO                     = "config.repository"
+  BASE_BRANCH              = "config.baseBranch"
+  RUN_ID                   = "runtime.runId"
+  ISSUE                    = "item.issue"
+  WORKFLOW_FILE            = "runtime.workflowPath"
+  SHARED_CONTEXT_FILE      = "runtime.sharedContextPath"
+  STATE_FILE               = "runtime.statePath"
+  CURRENT_ISSUE_FILE       = "runtime.currentIssueFile"
+  ISSUE_DIR                = "runtime.issueDir"
+  EVIDENCE_DIR             = "runtime.evidenceDir"
+  EVIDENCE_ROOT_DIR        = "runtime.evidenceRootDir"
+  LOG_DIR                  = "runtime.logDir"
+  TRACE_FILE               = "runtime.traceFile"
+  LOOP_FILE                = "runtime.loopFile"
+  PROMPT_ROOT              = "runtime.presetDir"
+  PROMPT_FRAGMENT_INDEX    = "runtime.fragmentIndex"
+  REQUIRE_BROWSER_EVIDENCE = "config.requireBrowserEvidence"
+  ISSUE_RUN_MODE           = "runtime.issueRunMode"
+  RECOVERY_MODE            = "runtime.recoveryMode"
+  PREVIOUS_RUN_ID          = "runtime.previousRunId"
+  RECOVERY_STARTED_AT      = "runtime.recoveryStartedAt"
+  ISSUE_BRANCH             = "item.branch"
+  ISSUE_PR                 = "item.pr"
+  ISSUE_STATUS             = "item.status"
+
+[[fragments]]
+id   = "common/runtime-contract"
+role = "common"
+path = "common/runtime-contract.md"
+
+[[fragments]]
+id   = "common/github-routing"
+role = "common"
+path = "common/github-routing.md"
+
+[[fragments]]
+id   = "common/state-contract"
+role = "common"
+path = "common/state-contract.md"
+
+[[fragments]]
+id   = "iter/index"
+role = "iter"
+path = "iter/index.md"
+
+[[fragments]]
+id   = "iter/read-context"
+role = "iter"
+path = "iter/read-context.md"
+
+[[fragments]]
+id   = "iter/classify-scope"
+role = "iter"
+path = "iter/classify-scope.md"
+
+[[fragments]]
+id   = "iter/implement"
+role = "iter"
+path = "iter/implement.md"
+
+[[fragments]]
+id   = "iter/verify-evidence"
+role = "iter"
+path = "iter/verify-evidence.md"
+
+[[fragments]]
+id   = "iter/commit-pr"
+role = "iter"
+path = "iter/commit-pr.md"
+
+[[fragments]]
+id   = "iter/handoff"
+role = "iter"
+path = "iter/handoff.md"
+
+[[fragments]]
+id   = "iter/final"
+role = "iter"
+path = "iter/final.md"
+
+[[fragments]]
+id   = "review/index"
+role = "review"
+path = "review/index.md"
+
+[[fragments]]
+id   = "review/read-evidence"
+role = "review"
+path = "review/read-evidence.md"
+
+[[fragments]]
+id   = "review/trace-honesty"
+role = "review"
+path = "review/trace-honesty.md"
+
+[[fragments]]
+id   = "review/pr-protocol"
+role = "review"
+path = "review/pr-protocol.md"
+
+[[fragments]]
+id   = "review/evidence-gate"
+role = "review"
+path = "review/evidence-gate.md"
+
+[[fragments]]
+id   = "review/code-gate"
+role = "review"
+path = "review/code-gate.md"
+
+[[fragments]]
+id   = "review/issue-closure-gate"
+role = "review"
+path = "review/issue-closure-gate.md"
+
+[[fragments]]
+id   = "review/action-retry"
+role = "review"
+path = "review/action-retry.md"
+
+[[fragments]]
+id   = "review/action-expand-parent"
+role = "review"
+path = "review/action-expand-parent.md"
+
+[[fragments]]
+id   = "review/action-accept-pr"
+role = "review"
+path = "review/action-accept-pr.md"
+
+[[fragments]]
+id   = "review/action-accept-no-pr"
+role = "review"
+path = "review/action-accept-no-pr.md"
+
+[[fragments]]
+id   = "review/action-skip"
+role = "review"
+path = "review/action-skip.md"
+
+[[fragments]]
+id   = "review/action-blocked"
+role = "review"
+path = "review/action-blocked.md"
+
+[[fragments]]
+id   = "review/action-stop"
+role = "review"
+path = "review/action-stop.md"
+
+[[fragments]]
+id   = "review/update-state"
+role = "review"
+path = "review/update-state.md"
+
+[[fragments]]
+id   = "review/global-assessment"
+role = "review"
+path = "review/global-assessment.md"
+
+[[fragments]]
+id   = "review/final"
+role = "review"
+path = "review/final.md"
+
+[agent]
+binary    = "claude"
+extraArgs = []
