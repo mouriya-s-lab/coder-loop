@@ -10,7 +10,8 @@ For the selected issue:
 
 - one implementation PR must close exactly one issue;
 - PR body first line must be exactly `Closes #<ISSUE>` when a PR exists;
-- PR title/body, sections, language, and evidence formatting must satisfy workflow-defined requirements;
+- PR title/body, sections, language, and initial evidence formatting must satisfy workflow-defined requirements;
+- after an implementation PR exists, each iteration/retry must leave a new PR-thread comment that records addressed feedback, changed files/behavior, and the full current layered evidence packet; PR body edits are not a substitute for this historical record;
 - PR body or PR-thread evidence must state CI detection and local CI-parity status when the project has reproducible CI;
 - once an implementation PR exists, implementation/review discussion must be on the PR thread;
 - if the latest retry response only appears on the issue after a PR exists, reject and require a PR-thread reply;
