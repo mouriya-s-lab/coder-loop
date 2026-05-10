@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-autotask/coder-loop — 项目无关的 GitHub issue/PR agent loop。目标仓库提供 committed `.coder-loop/workflow.md` 和 ignored `.coder-loop/runtime/` 本地状态后，loop 交替运行 iteration agent（实现/证据/PR）和 review agent（审查/merge/close/state transition）直到队列完成。
+coder-loop — 项目无关的 GitHub issue/PR agent loop。目标仓库提供 committed `.coder-loop/workflow.md` 和 ignored `.coder-loop/runtime/` 本地状态后，loop 交替运行 iteration agent（实现/证据/PR）和 review agent（审查/merge/close/state transition）直到队列完成。
 
 ## Commands
 
@@ -24,15 +24,15 @@ Three-phase signal pipeline: `plan → iter → review`
 /dev-plan (large task/design → GitHub issues with checkpoint tables → .coder-loop/runtime queue)
     ↓
 src/loop.ts (state machine orchestrator)
-    ├→ spawn iteration agent (dev-iter.md) → implement + execute checkpoints
+    ├→ spawn iteration agent (prompts/iter-entry.md) → implement + execute checkpoints
     ├→ write output to .dev-trace.txt
-    ├→ spawn review agent (dev-review.md) → audit trace, post feedback to issue
+    ├→ spawn review agent (prompts/review-entry.md) → audit trace, post feedback to issue
     └→ repeat until issue closed or .dev-loop deleted
 ```
 
 **Orchestrator** (`src/loop.ts`): Pure program state machine. Creates `.dev-loop` as on-switch, reads target `.coder-loop/runtime/state.json`, selects actionable issues, alternates spawning `claude -p` with iteration/review prompts, and writes trace/log/status files. It does not judge issue completion, evidence sufficiency, PR correctness, or parent closure.
 
-**Target contract**: Target repositories keep committed policy in `.coder-loop/workflow.md` and optional `.coder-loop/prompts/` or `.coder-loop/templates/`. Local runtime files live under `.coder-loop/runtime/` and must not be committed.
+**Target contract**: `loop.ts` only knows about `.coder-loop/workflow.md` (committed) and `.coder-loop/runtime/` (ignored). Other subdirectories under `.coder-loop/` (e.g. `templates/`, project-specific `prompts/`) are agent-readable convention only — they take effect only when `workflow.md` or an issue handoff explicitly points the agent at them. Runtime files must not be committed.
 
 **Agent communication**: Iteration writes local handoff/evidence and PR updates; review reads trace, GitHub issue/PR live state, target workflow, and handoff. Durable task semantics belong in GitHub issues/PRs; `.coder-loop/runtime/` is local scheduling and handoff state.
 
@@ -48,7 +48,7 @@ src/loop.ts (state machine orchestrator)
 
 ## Agent Prompt 设计前提
 
-修改 `dev-iter.md` / `dev-review.md` 之前必须理解以下前提。
+修改 `prompts/iter-entry.md` / `prompts/review-entry.md` 之前必须理解以下前提。
 
 ### 这不是软件工程问题
 
@@ -65,6 +65,19 @@ Agent 不是"判断力差"——是没人教它怎么判断。当前 prompt 给�
 ### 每个 agent 运行都是无状态的
 
 每次 `claude -p` spawn 的 agent 是独立进程，没有跨轮次记忆。本地文件会丢失、会损坏、跨机器不可用。如果要用本地状态，必须每次做完即丢弃。持久化状态只能依赖 GitHub（issues / labels / comments）。
+
+## Templates for target projects
+
+`coder-loop` is a stateless program loop — it does not enforce PR shape, evidence rules, queue policy, or cross-issue memory. Those rules live in the target repo's `.coder-loop/workflow.md` + `.coder-loop/runtime/shared.md`, which the agents read at every spawn. Delete a rule there and the loop stops enforcing it.
+
+`templates/` ships project-agnostic starting points distilled from a known-good default implementation (Fulcrum):
+
+- `templates/workflow.md` — `.coder-loop/workflow.md` skeleton (goal, source-of-truth, PR/evidence rules, CI-parity, review behavior).
+- `templates/shared.md` — `.coder-loop/runtime/shared.md` skeleton with allowed/forbidden memory policy.
+- `templates/pr-body.md` — PR body evidence-layer skeleton.
+- `templates/supervisor/` — optional outer-layer supervisor (cron-driven cross-patrol orchestration on top of the loop). Use only for long multi-mission work; short runs don't need it.
+
+See `templates/README.md` for the copy table, minimum viable setup, and what each template is for.
 
 ## Tech Stack
 

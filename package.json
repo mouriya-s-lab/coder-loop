@@ -1,9 +1,9 @@
 {
-	"name": "autotask",
+	"name": "coder-loop",
 	"private": true,
 	"type": "module",
 	"bin": {
-		"autotask": "src/loop.ts"
+		"coder-loop": "src/loop.ts"
 	},
 	"scripts": {
 		"typecheck": "bun x tsc --noEmit"
