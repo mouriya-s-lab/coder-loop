@@ -21,11 +21,17 @@ If local CI-parity could not run because of Docker, act installation, image pull
 
 ## Target workflow evidence
 
+Use the latest complete evidence packet from the PR thread for the current iteration when present; use the PR body only as the immutable opening evidence packet. Do not accept evidence that was only created by overwriting the PR body after retry, because that loses review history.
+
 Reject unless reviewer-consumable evidence satisfies the target workflow file:
 
 - required build, test, lint, typecheck, migration, browser, deployment-preview, or runtime checks are present with command names, exit status, and concise log excerpts or paths;
 - workflow-defined command wrappers/prohibitions were followed;
 - workflow-required artifacts, screenshots, logs, or PR-body sections are present and reviewer-visible;
+- workflow-required screenshots are embedded in the evidence packet as Markdown images (`![alt](path-or-url)`); plain links to screenshots are insufficient;
+- every screenshot reference in the evidence packet is enumerated and resolved to the exact PR-branch/local-checkout file it claims to show;
+- every resolved screenshot file exists, is reachable from the evidence packet URL/path, and is actually read/opened as image data before accepting the evidence;
+- stale screenshots that only exist on `main`, deleted head branches, local-only runtime paths, broken raw/blob URLs, non-image files, or uninspectable image references are insufficient even when the Markdown image syntax is present;
 - evidence maps each artifact or log excerpt to the behavior it proves;
 - positive and negative/error/disabled paths are covered when required by workflow or issue scope.
 

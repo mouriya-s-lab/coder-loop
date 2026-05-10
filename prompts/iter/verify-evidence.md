@@ -21,6 +21,8 @@ Follow the target workflow file for project-specific verification:
 - run the workflow-defined build, test, lint, typecheck, migration, browser, or deployment-preview commands that apply to the selected issue;
 - obey workflow-defined prohibitions and required wrappers for commands;
 - collect workflow-defined evidence artifacts, screenshots, logs, and PR-body excerpts;
+- after each screenshot capture, verify the image file exists under a tracked `screenshots/` path and can be read/opened as image data before using it as evidence;
+- record both the local file path and the repository-relative `screenshots/...` path for every screenshot so the PR body can embed the exact committed artifact;
 - capture positive and negative/error/disabled paths when the workflow or issue scope requires them;
 - if a workflow-required command or evidence path cannot run, record the exact command, failure mode, exit status, and log excerpt as a blocker or retry input.
 
