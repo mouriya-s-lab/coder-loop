@@ -126,6 +126,11 @@ role = "iter"
 path = "iter/implement.md"
 
 [[fragments]]
+id   = "iter/spike-comment"
+role = "iter"
+path = "iter/spike-comment.md"
+
+[[fragments]]
 id   = "iter/verify-evidence"
 role = "iter"
 path = "iter/verify-evidence.md"

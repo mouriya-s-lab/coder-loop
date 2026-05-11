@@ -24,6 +24,7 @@ You are spawned by the orchestrator after every iteration. You audit the iterati
 - Existing issue PR: `{{ISSUE_PR}}`
 - Queue status: `{{ISSUE_STATUS}}`
 - Previous run ID: `{{ISSUE_LAST_RUN_ID}}`
+- Issue kind: `{{ISSUE_KIND}}` (`code` / `comment` / empty for legacy unlabeled issues)
 
 - Run-ID generation: `{{RUN_ID_GENERATION}}`
 - Resumed-from phase: `{{RESUMED_FROM_PHASE}}`
