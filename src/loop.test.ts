@@ -5,21 +5,35 @@ import { tmpdir } from "node:os"
 import { resolve } from "node:path"
 
 import {
+	agentClaudeArgs,
+	agentSessionsPath,
+	appendSessionEntry,
+	BACKOFF_BUDGET_SECONDS,
 	buildConfigBindings,
 	buildRuntimeBindings,
 	checkRuntime,
+	classifyTermination,
+	decideResume,
+	extractErrorCode,
 	getCurrentId,
 	getItemId,
+	isTransient5xx,
 	loadPreset,
 	makeIssueRunContext,
 	markIterationStarted,
 	markReviewStarted,
+	nextBackoffSeconds,
 	parseKindFromLabels,
+	parseSessionIdFromStream,
+	readLastSessionEntry,
 	renderFragmentIndex,
 	renderPrompt,
 	resolveBinding,
 	resolvePresetDir,
+	RESUME_CONTINUE_PROMPT,
+	runAgentWithBackoff,
 	selectIssue,
+	type AttemptOutcome,
 	type ConfigBindings,
 	type CurrentRun,
 	type IssueRunContext,
@@ -28,7 +42,10 @@ import {
 	type Preset,
 	type QueueItem,
 	type ResolveContext,
+	type ResumeDecision,
 	type RuntimeBindings,
+	type SessionEntry,
+	type Terminated,
 } from "./loop"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -716,5 +733,427 @@ describe("parseKindFromLabels", () => {
 		const result = parseKindFromLabels(["kind:"])
 		expect(result.ok).toBe(false)
 		if (!result.ok) expect(result.error).toMatch(/unknown kind label "kind:"/)
+	})
+})
+
+describe("parseSessionIdFromStream — captures session_id from claude --output-format stream-json --verbose", () => {
+	test("first system/init event with session_id yields the uuid string", () => {
+		const text = `{"type":"system","subtype":"init","session_id":"abc-123","cwd":"/tmp"}\n{"type":"assistant","session_id":"abc-123"}\n`
+		expect(parseSessionIdFromStream(text)).toBe("abc-123")
+	})
+
+	test("returns null when first line has no session_id", () => {
+		const text = `{"type":"system","subtype":"init","cwd":"/tmp"}\n`
+		expect(parseSessionIdFromStream(text)).toBeNull()
+	})
+
+	test("returns null when stream is empty", () => {
+		expect(parseSessionIdFromStream("")).toBeNull()
+	})
+
+	test("returns null when stream has no terminating newline yet (partial chunk)", () => {
+		expect(parseSessionIdFromStream(`{"type":"system","session_id":"x"`)).toBeNull()
+	})
+
+	test("returns null when first line is not valid JSON", () => {
+		expect(parseSessionIdFromStream("not-json\n{\"session_id\":\"x\"}\n")).toBeNull()
+	})
+})
+
+describe("extractErrorCode — pulls error code from stream-json error events or stderr HTTP status", () => {
+	test("uses error.type from last is_error event in stdout", () => {
+		const stdout = `{"type":"assistant","is_error":false}\n{"type":"result","is_error":true,"error":{"type":"overloaded_error","message":"API overloaded"}}\n`
+		expect(extractErrorCode(stdout, "")).toBe("overloaded_error")
+	})
+
+	test("falls back to error.code when error.type is missing", () => {
+		const stdout = `{"is_error":true,"error":{"code":"529"}}\n`
+		expect(extractErrorCode(stdout, "")).toBe("529")
+	})
+
+	test("falls back to error.message (truncated) when type and code missing", () => {
+		const stdout = `{"is_error":true,"error":{"message":"Service Unavailable"}}\n`
+		expect(extractErrorCode(stdout, "")).toBe("Service Unavailable")
+	})
+
+	test("falls back to stderr HTTP 5xx when stdout has no usable event", () => {
+		expect(extractErrorCode("", "HTTP/1.1 503 Service Unavailable")).toBe("503_http")
+	})
+
+	test("falls back to stderr keyword overloaded when no 5xx and no events", () => {
+		expect(extractErrorCode("", "Anthropic API: overloaded, retry later")).toBe("overloaded")
+	})
+
+	test("returns 'unknown' when neither stdout events nor stderr patterns match", () => {
+		expect(extractErrorCode("plain text\n", "syntax error")).toBe("unknown")
+	})
+})
+
+describe("classifyTermination — tagged union from exit code + signal + output", () => {
+	test("signal != null wins over exitCode and yields {kind:'signal'}", () => {
+		const t = classifyTermination({ exitCode: 1, signal: "SIGTERM", stdoutText: "", stderrText: "" })
+		expect(t).toEqual({ kind: "signal", name: "SIGTERM" })
+	})
+
+	test("exit 0 with no signal yields {kind:'clean'}", () => {
+		expect(classifyTermination({ exitCode: 0, signal: null, stdoutText: "", stderrText: "" })).toEqual({ kind: "clean" })
+	})
+
+	test("non-zero exit with 5xx error event yields {kind:'error', code:<type>}", () => {
+		const stdout = `{"is_error":true,"error":{"type":"overloaded_error"}}\n`
+		const t = classifyTermination({ exitCode: 1, signal: null, stdoutText: stdout, stderrText: "" })
+		expect(t).toEqual({ kind: "error", code: "overloaded_error" })
+	})
+
+	test("non-zero exit with HTTP 503 in stderr yields {kind:'error', code:'503_http'}", () => {
+		const t = classifyTermination({ exitCode: 1, signal: null, stdoutText: "", stderrText: "HTTP 503 from upstream" })
+		expect(t).toEqual({ kind: "error", code: "503_http" })
+	})
+
+	test("non-zero exit with no parseable error yields {kind:'error', code:'unknown'}", () => {
+		const t = classifyTermination({ exitCode: 1, signal: null, stdoutText: "blah\n", stderrText: "fatal: oops" })
+		expect(t).toEqual({ kind: "error", code: "unknown" })
+	})
+
+	test("empty signal string treated as no signal (uses exit code path)", () => {
+		expect(classifyTermination({ exitCode: 0, signal: "", stdoutText: "", stderrText: "" })).toEqual({ kind: "clean" })
+	})
+})
+
+describe("isTransient5xx — recognizes claude API transient overload signals", () => {
+	test.each([
+		["529_overloaded", true],
+		["overloaded_error", true],
+		["503_http", true],
+		["overloaded", true],
+		["rate_limit_error", true],
+		["rate-limit", true],
+		["service_unavailable", true],
+		["service-unavailable", true],
+		["OVERLOADED", true],
+		["unknown", false],
+		["401_unauthorized", false],
+		["invalid_request_error", false],
+		["spawn_error", false],
+		["", false],
+	])("isTransient5xx(%p) === %p", (code, expected) => {
+		expect(isTransient5xx(code as string)).toBe(expected)
+	})
+})
+
+describe("decideResume — resume policy from last sessions.jsonl entry", () => {
+	const baseEntry: SessionEntry = {
+		attempt: "2026-05-11T00:00:00Z",
+		sessionId: "sess-1",
+		exitCode: 0,
+		signal: null,
+		terminated: { kind: "clean" },
+		log: "/tmp/log.jsonl",
+	}
+
+	test("null entry → fresh", () => {
+		expect(decideResume(null)).toEqual({ kind: "fresh" })
+	})
+
+	test("missing sessionId → fresh (even if terminated says resume-eligible)", () => {
+		const entry: SessionEntry = { ...baseEntry, sessionId: null, terminated: { kind: "signal", name: "SIGTERM" } }
+		expect(decideResume(entry)).toEqual({ kind: "fresh" })
+	})
+
+	test("clean termination → fresh", () => {
+		expect(decideResume(baseEntry)).toEqual({ kind: "fresh" })
+	})
+
+	test("signal termination + sessionId → resume", () => {
+		const entry: SessionEntry = { ...baseEntry, terminated: { kind: "signal", name: "SIGTERM" } }
+		expect(decideResume(entry)).toEqual({ kind: "resume", sessionId: "sess-1" })
+	})
+
+	test("error with 5xx code + sessionId → resume", () => {
+		const entry: SessionEntry = { ...baseEntry, terminated: { kind: "error", code: "529_overloaded" } }
+		expect(decideResume(entry)).toEqual({ kind: "resume", sessionId: "sess-1" })
+	})
+
+	test("error with non-5xx code → fresh", () => {
+		const entry: SessionEntry = { ...baseEntry, terminated: { kind: "error", code: "401_unauthorized" } }
+		expect(decideResume(entry)).toEqual({ kind: "fresh" })
+	})
+})
+
+describe("nextBackoffSeconds — capped exponential", () => {
+	test.each([
+		[0, 4],
+		[1, 8],
+		[2, 16],
+		[3, 32],
+		[4, 64],
+		[5, 128],
+		[6, 256],
+		[7, 512],
+		[8, 600],
+		[9, 600],
+		[20, 600],
+	])("nextBackoffSeconds(%i) === %i", (n, expected) => {
+		expect(nextBackoffSeconds(n)).toBe(expected)
+	})
+})
+
+describe("agentClaudeArgs — composes claude CLI args including --resume", () => {
+	test("fresh resume: no --resume flag, -p prompt at end", () => {
+		const args = agentClaudeArgs([], "hello", { kind: "fresh" })
+		expect(args).toContain("--output-format")
+		expect(args).toContain("stream-json")
+		expect(args).toContain("--verbose")
+		expect(args).not.toContain("--resume")
+		expect(args[args.length - 2]).toBe("-p")
+		expect(args[args.length - 1]).toBe("hello")
+	})
+
+	test("resume decision injects --resume <sessionId> before -p", () => {
+		const args = agentClaudeArgs([], RESUME_CONTINUE_PROMPT, { kind: "resume", sessionId: "sess-xyz" })
+		const resumeIdx = args.indexOf("--resume")
+		const promptIdx = args.indexOf("-p")
+		expect(resumeIdx).toBeGreaterThanOrEqual(0)
+		expect(args[resumeIdx + 1]).toBe("sess-xyz")
+		expect(promptIdx).toBeGreaterThan(resumeIdx)
+		expect(args[promptIdx + 1]).toBe(RESUME_CONTINUE_PROMPT)
+	})
+
+	test("preserves caller's extraArgs and skips duplicate --output-format / --verbose", () => {
+		const args = agentClaudeArgs(["--output-format", "stream-json", "--verbose", "--max-turns", "5"], "prompt", { kind: "fresh" })
+		expect(args.filter((a) => a === "--output-format").length).toBe(1)
+		expect(args.filter((a) => a === "--verbose").length).toBe(1)
+		expect(args).toContain("--max-turns")
+		expect(args).toContain("5")
+	})
+})
+
+describe("sessions.jsonl appends each attempt — I/O roundtrip", () => {
+	async function freshSessionsPath(): Promise<string> {
+		const dir = await mkdtemp(resolve(tmpdir(), "sessions-jsonl-"))
+		const latest = resolve(dir, "run-1.iter.txt")
+		return agentSessionsPath(latest)
+	}
+
+	test("agentSessionsPath rewrites .txt → .sessions.jsonl", () => {
+		expect(agentSessionsPath("/tmp/logs/run-X.iter.txt")).toBe("/tmp/logs/run-X.iter.sessions.jsonl")
+	})
+
+	test("sessions.jsonl appends each attempt as one JSON line with required fields", async () => {
+		const path = await freshSessionsPath()
+		const entries: SessionEntry[] = [
+			{ attempt: "2026-05-11T00:00:00Z", sessionId: "s1", exitCode: 1, signal: null, terminated: { kind: "error", code: "529_overloaded" }, log: "/tmp/a1.jsonl" },
+			{ attempt: "2026-05-11T00:05:00Z", sessionId: "s1", exitCode: 0, signal: null, terminated: { kind: "clean" }, log: "/tmp/a2.jsonl" },
+			{ attempt: "2026-05-11T00:10:00Z", sessionId: "s1", exitCode: 143, signal: "SIGTERM", terminated: { kind: "signal", name: "SIGTERM" }, log: "/tmp/a3.jsonl" },
+		]
+		for (const entry of entries) await appendSessionEntry(path, entry)
+		const raw = await readFile(path, "utf-8")
+		const lines = raw.split("\n").filter((l) => l.trim() !== "")
+		expect(lines.length).toBe(3)
+		for (const line of lines) {
+			const parsed = JSON.parse(line) as Record<string, unknown>
+			expect(parsed).toHaveProperty("attempt")
+			expect(parsed).toHaveProperty("sessionId")
+			expect(parsed).toHaveProperty("exitCode")
+			expect(parsed).toHaveProperty("signal")
+			expect(parsed).toHaveProperty("terminated")
+			expect(parsed).toHaveProperty("log")
+			const terminated = parsed["terminated"] as { kind?: unknown }
+			expect(["clean", "signal", "error"]).toContain(terminated.kind as string)
+		}
+		const last = await readLastSessionEntry(path)
+		expect(last).not.toBeNull()
+		expect(last!.attempt).toBe("2026-05-11T00:10:00Z")
+		expect(last!.terminated).toEqual({ kind: "signal", name: "SIGTERM" })
+	})
+})
+
+describe("sessions.jsonl missing or corrupt falls back to fresh — degrade-not-crash", () => {
+	async function freshSessionsPath(): Promise<string> {
+		const dir = await mkdtemp(resolve(tmpdir(), "sessions-jsonl-corrupt-"))
+		const latest = resolve(dir, "run-1.iter.txt")
+		return agentSessionsPath(latest)
+	}
+
+	test("missing sessions.jsonl → readLastSessionEntry returns null (fresh spawn at top of runAgent)", async () => {
+		const path = await freshSessionsPath()
+		expect(await readLastSessionEntry(path)).toBeNull()
+		expect(decideResume(await readLastSessionEntry(path))).toEqual({ kind: "fresh" })
+	})
+
+	test("trailing corrupt line falls back to prior valid entry, doesn't crash", async () => {
+		const path = await freshSessionsPath()
+		const good: SessionEntry = { attempt: "2026-05-11T00:00:00Z", sessionId: "s1", exitCode: 1, signal: null, terminated: { kind: "signal", name: "SIGTERM" }, log: "/tmp/a1.jsonl" }
+		await appendSessionEntry(path, good)
+		await writeFile(path, (await readFile(path, "utf-8")) + "{not valid json\n")
+		const last = await readLastSessionEntry(path)
+		expect(last).not.toBeNull()
+		expect(last!.attempt).toBe("2026-05-11T00:00:00Z")
+	})
+
+	test("entries with wrong shape are skipped (missing required fields → not a SessionEntry)", async () => {
+		const path = await freshSessionsPath()
+		await writeFile(path, `{"attempt":"x"}\n{"attempt":"y","sessionId":null,"exitCode":0,"signal":null,"terminated":{"kind":"clean"},"log":"/tmp/x"}\n{"garbage":true}\n`)
+		const last = await readLastSessionEntry(path)
+		expect(last).not.toBeNull()
+		expect(last!.attempt).toBe("y")
+	})
+
+	test("every line corrupt → readLastSessionEntry returns null → decideResume yields fresh", async () => {
+		const path = await freshSessionsPath()
+		await writeFile(path, `{"garbage":1}\n!!!not json!!!\n{"attempt":"missing-terminated","sessionId":null,"exitCode":0,"signal":null,"log":"/tmp/x"}\n`)
+		const last = await readLastSessionEntry(path)
+		expect(last).toBeNull()
+		expect(decideResume(last)).toEqual({ kind: "fresh" })
+	})
+})
+
+describe("runAgentWithBackoff — orchestrates retries and budget across in-process attempts", () => {
+	function makeOutcome(overrides: Partial<AttemptOutcome>): AttemptOutcome {
+		return {
+			output: "out",
+			exitCode: 0,
+			signal: null,
+			sessionId: "sess-1",
+			terminated: { kind: "clean" },
+			...overrides,
+		}
+	}
+
+	function makeSleepRecorder(): { sleep: (s: number) => Promise<void>; calls: number[] } {
+		const calls: number[] = []
+		return {
+			calls,
+			sleep: async (seconds: number) => {
+				calls.push(seconds)
+			},
+		}
+	}
+
+	test("clean outcome returns after exactly 1 attempt, no sleeps", async () => {
+		const { sleep, calls } = makeSleepRecorder()
+		let spawns = 0
+		const result = await runAgentWithBackoff({
+			spawnAttempt: async () => {
+				spawns++
+				return makeOutcome({ terminated: { kind: "clean" }, exitCode: 0 })
+			},
+			sleep,
+			log: () => {},
+			now: () => 0,
+			initialResume: { kind: "fresh" },
+		})
+		expect(spawns).toBe(1)
+		expect(result.attempts).toBe(1)
+		expect(result.code).toBe(0)
+		expect(calls).toEqual([])
+	})
+
+	test("non-5xx error returns to outer after 1 attempt without retry", async () => {
+		const { sleep, calls } = makeSleepRecorder()
+		const result = await runAgentWithBackoff({
+			spawnAttempt: async () => makeOutcome({ terminated: { kind: "error", code: "401_unauthorized" }, exitCode: 1 }),
+			sleep,
+			log: () => {},
+			now: () => 0,
+			initialResume: { kind: "fresh" },
+		})
+		expect(result.attempts).toBe(1)
+		expect(result.code).toBe(1)
+		expect(calls).toEqual([])
+	})
+
+	test("signal outcome returns to outer immediately (signal is cross-tick resume, not in-process)", async () => {
+		const { sleep, calls } = makeSleepRecorder()
+		const result = await runAgentWithBackoff({
+			spawnAttempt: async () => makeOutcome({ terminated: { kind: "signal", name: "SIGTERM" }, exitCode: 143 }),
+			sleep,
+			log: () => {},
+			now: () => 0,
+			initialResume: { kind: "fresh" },
+		})
+		expect(result.attempts).toBe(1)
+		expect(calls).toEqual([])
+	})
+
+	test("transient-5xx retries with min(4*2^n, 600) backoff and stops on success", async () => {
+		const { sleep, calls } = makeSleepRecorder()
+		const seq: AttemptOutcome[] = [
+			makeOutcome({ terminated: { kind: "error", code: "529_overloaded" }, exitCode: 1 }),
+			makeOutcome({ terminated: { kind: "error", code: "overloaded" }, exitCode: 1 }),
+			makeOutcome({ terminated: { kind: "error", code: "503_http" }, exitCode: 1 }),
+			makeOutcome({ terminated: { kind: "clean" }, exitCode: 0 }),
+		]
+		let i = 0
+		const result = await runAgentWithBackoff({
+			spawnAttempt: async ({ resume }) => {
+				if (i > 0) expect(resume).toEqual({ kind: "resume", sessionId: "sess-1" })
+				return seq[i++]!
+			},
+			sleep,
+			log: () => {},
+			now: () => 0,
+			initialResume: { kind: "fresh" },
+		})
+		expect(result.attempts).toBe(4)
+		expect(result.code).toBe(0)
+		expect(calls).toEqual([4, 8, 16])
+	})
+
+	test("transient-5xx without sessionId aborts to outer (no resume possible)", async () => {
+		const { sleep, calls } = makeSleepRecorder()
+		const result = await runAgentWithBackoff({
+			spawnAttempt: async () => makeOutcome({ terminated: { kind: "error", code: "overloaded" }, exitCode: 1, sessionId: null }),
+			sleep,
+			log: () => {},
+			now: () => 0,
+			initialResume: { kind: "fresh" },
+		})
+		expect(result.attempts).toBe(1)
+		expect(calls).toEqual([])
+	})
+
+	test("transient-5xx in-process backoff budget 2h: 8 fast retries then 600s plateau, exhausts budget", async () => {
+		const { sleep, calls } = makeSleepRecorder()
+		let spawns = 0
+		const result = await runAgentWithBackoff({
+			spawnAttempt: async () => {
+				spawns++
+				return makeOutcome({ terminated: { kind: "error", code: "overloaded" }, exitCode: 1 })
+			},
+			sleep,
+			log: () => {},
+			now: () => 0,
+			initialResume: { kind: "fresh" },
+		})
+		// Schedule: 4,8,16,32,64,128,256,512,600,600,...; cumulative sum until exceeding 7200.
+		// 4+8+16+32+64+128+256+512 = 1020. Then 600*N until 1020 + 600*N > 7200 → N=11 → 1020+6600=7620 (>7200). N=10 → 1020+6000=7020 (≤7200, allow), N=11 → 7620 (deny).
+		// So allowed sleeps: 8 fast + 10 plateau = 18. Last sleep is 600 (the 18th). Then 19th spawn yields next-600 candidate which would push elapsed to 7620 > 7200; abort.
+		// attempts: 19 (initial + 18 retries after sleeps).
+		expect(calls.length).toBe(18)
+		expect(calls.slice(0, 8)).toEqual([4, 8, 16, 32, 64, 128, 256, 512])
+		expect(calls.slice(8)).toEqual(Array(10).fill(600))
+		const total = calls.reduce((a, b) => a + b, 0)
+		expect(total).toBeLessThanOrEqual(BACKOFF_BUDGET_SECONDS)
+		expect(total + 600).toBeGreaterThan(BACKOFF_BUDGET_SECONDS)
+		expect(spawns).toBe(19)
+		expect(result.attempts).toBe(19)
+		expect(result.code).toBe(1)
+	})
+
+	test("initial resume=resume sends --resume on first attempt (cross-tick recovery)", async () => {
+		const { sleep } = makeSleepRecorder()
+		const seen: ResumeDecision[] = []
+		await runAgentWithBackoff({
+			spawnAttempt: async ({ resume }) => {
+				seen.push(resume)
+				return makeOutcome({ terminated: { kind: "clean" }, exitCode: 0 })
+			},
+			sleep,
+			log: () => {},
+			now: () => 0,
+			initialResume: { kind: "resume", sessionId: "from-disk" },
+		})
+		expect(seen[0]).toEqual({ kind: "resume", sessionId: "from-disk" })
 	})
 })

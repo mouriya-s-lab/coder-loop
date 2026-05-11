@@ -167,7 +167,32 @@ type AgentRunStatus = {
 	exitCode: number | null
 	signal: string | null
 	error: string | null
+	sessionId: string | null
+	terminated: Terminated | null
 }
+
+export type Terminated =
+	| { kind: "clean" }
+	| { kind: "signal"; name: string }
+	| { kind: "error"; code: string }
+
+export type SessionEntry = {
+	attempt: string
+	sessionId: string | null
+	exitCode: number | null
+	signal: string | null
+	terminated: Terminated
+	log: string
+}
+
+export type ResumeDecision =
+	| { kind: "fresh" }
+	| { kind: "resume"; sessionId: string }
+
+export const RESUME_CONTINUE_PROMPT = "继续"
+export const BACKOFF_BUDGET_SECONDS = 7200
+const BACKOFF_INITIAL_SECONDS = 4
+const BACKOFF_MAX_INTERVAL_SECONDS = 600
 
 export type SelectedIssue = {
 	item: QueueItem
@@ -1131,29 +1156,64 @@ export function buildConfigBindings(options: LoopOptions): ConfigBindings {
 }
 
 async function runAgent(options: LoopOptions, label: AgentLabel, prompt: string, outputPath: string): Promise<{ output: string; code: number }> {
+	const sessionsPath = agentSessionsPath(outputPath)
+	const lastEntry = await readLastSessionEntry(sessionsPath)
+	const initialResume = decideResume(lastEntry)
+	if (initialResume.kind === "resume") {
+		log(`Agent [${label}] cross-tick resume: sessionId=${initialResume.sessionId} (last terminated=${lastEntry?.terminated.kind ?? "?"})`)
+	}
+
+	const result = await runAgentWithBackoff({
+		spawnAttempt: ({ resume }) => spawnOneAttempt({ options, label, prompt, outputPath, sessionsPath, resume }),
+		sleep: (seconds: number) => new Promise((resolve) => setTimeout(resolve, seconds * 1000)),
+		log,
+		now: () => Date.now(),
+		initialResume,
+	})
+
+	log(`Agent [${label}] finished after ${result.attempts} attempt(s); code=${result.code}`)
+	return { output: result.output, code: result.code }
+}
+
+type SpawnOneAttemptInput = {
+	options: LoopOptions
+	label: AgentLabel
+	prompt: string
+	outputPath: string
+	sessionsPath: string
+	resume: ResumeDecision
+}
+
+async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<AttemptOutcome> {
+	const { options, label, prompt: basePrompt, outputPath, sessionsPath, resume } = input
+	const effectivePrompt = resume.kind === "resume" ? RESUME_CONTINUE_PROMPT : basePrompt
 	return new Promise((resolveResult) => {
 		const out: Buffer[] = []
 		const err: Buffer[] = []
 		let settled = false
 
 		const startedAt = new Date().toISOString()
-		const attemptPath = agentAttemptOutputPath(outputPath, startedAt)
+		const attemptStreamPath = agentAttemptStreamPath(outputPath, startedAt)
+		const attemptStderrPath = agentAttemptStderrPath(outputPath, startedAt)
 		const statusPath = agentStatusPath(outputPath)
-		const outputStream = createWriteStream(attemptPath, { flags: "wx" })
-		const claudeArgs = agentClaudeArgs(options.claudeExtraArgs, prompt)
+		const streamOutFile = createWriteStream(attemptStreamPath, { flags: "wx" })
+		const stderrOutFile = createWriteStream(attemptStderrPath, { flags: "wx" })
+		const claudeArgs = agentClaudeArgs(options.claudeExtraArgs, effectivePrompt, resume)
 		const status: AgentRunStatus = {
 			label,
 			pid: null,
 			startedAt,
 			lastEventAt: startedAt,
-			outputPath: attemptPath,
+			outputPath: attemptStreamPath,
 			statusPath,
 			bytesWritten: 0,
-			promptChars: prompt.length,
+			promptChars: effectivePrompt.length,
 			lastStream: null,
 			exitCode: null,
 			signal: null,
 			error: null,
+			sessionId: null,
+			terminated: null,
 		}
 		const writeStatus = (): void => {
 			void writeFile(statusPath, `${JSON.stringify(status, null, "\t")}\n`).catch((error: unknown) => {
@@ -1161,16 +1221,19 @@ async function runAgent(options: LoopOptions, label: AgentLabel, prompt: string,
 			})
 		}
 		const writeLatestIndex = (): void => {
-			const index = [
+			const lines = [
 				`# Agent [${label}] latest attempt`,
 				`startedAt: ${status.startedAt}`,
 				`pid: ${status.pid ?? ""}`,
 				`status: ${statusPath}`,
-				`output: ${attemptPath}`,
-				`promptChars: ${prompt.length}`,
+				`stream: ${attemptStreamPath}`,
+				`stderr: ${attemptStderrPath}`,
+				`sessions: ${sessionsPath}`,
+				`promptChars: ${effectivePrompt.length}`,
+				`resume: ${resume.kind === "resume" ? resume.sessionId : "none"}`,
 				"",
-			].join("\n")
-			void writeFile(outputPath, index).catch((error: unknown) => {
+			]
+			void writeFile(outputPath, lines.join("\n")).catch((error: unknown) => {
 				log(`Agent [${label}] latest index write failed: ${error instanceof Error ? error.message : String(error)}`)
 			})
 		}
@@ -1178,9 +1241,20 @@ async function runAgent(options: LoopOptions, label: AgentLabel, prompt: string,
 			status.lastStream = stream
 			status.lastEventAt = new Date().toISOString()
 			status.bytesWritten += chunk.byteLength
-			if (stream === "stdout") out.push(chunk)
-			else err.push(chunk)
-			outputStream.write(chunk)
+			if (stream === "stdout") {
+				out.push(chunk)
+				streamOutFile.write(chunk)
+				if (status.sessionId === null) {
+					const accumulated = Buffer.concat(out).toString("utf-8")
+					const detected = parseSessionIdFromStream(accumulated)
+					if (detected !== null) {
+						status.sessionId = detected
+					}
+				}
+			} else {
+				err.push(chunk)
+				stderrOutFile.write(chunk)
+			}
 			writeStatus()
 		}
 
@@ -1193,22 +1267,46 @@ async function runAgent(options: LoopOptions, label: AgentLabel, prompt: string,
 		writeStatus()
 		writeLatestIndex()
 
-		log(`Agent [${label}] spawned: pid=${child.pid}, output=${attemptPath}, latest=${outputPath}, status=${statusPath}`)
-		outputStream.write(`# Agent [${label}] started at ${startedAt}\n`)
-		outputStream.write(`# Command: ${options.claudeBinary} ${claudeArgs.map(shellQuote).join(" ")}\n\n`)
+		log(`Agent [${label}] spawned: pid=${child.pid}, stream=${attemptStreamPath}, stderr=${attemptStderrPath}, status=${statusPath}, resume=${resume.kind === "resume" ? resume.sessionId : "none"}`)
 
 		child.stdout.on("data", (chunk: Buffer) => recordChunk("stdout", chunk))
 		child.stderr.on("data", (chunk: Buffer) => recordChunk("stderr", chunk))
+
+		const settle = async (terminated: Terminated, output: string, exitCode: number, signal: string | null): Promise<void> => {
+			const entry: SessionEntry = {
+				attempt: startedAt,
+				sessionId: status.sessionId,
+				exitCode,
+				signal,
+				terminated,
+				log: attemptStreamPath,
+			}
+			try {
+				await appendSessionEntry(sessionsPath, entry)
+			} catch (error) {
+				log(`Agent [${label}] sessions.jsonl append failed: ${error instanceof Error ? error.message : String(error)}`)
+			}
+			resolveResult({
+				output,
+				exitCode,
+				signal,
+				sessionId: status.sessionId,
+				terminated,
+			})
+		}
 
 		child.on("error", (error) => {
 			if (settled) return
 			settled = true
 			status.error = error.message
 			status.lastEventAt = new Date().toISOString()
+			status.exitCode = 1
+			status.terminated = { kind: "error", code: "spawn_error" }
 			writeStatus()
 			log(`Agent [${label}] spawn error: ${error.message}`)
-			outputStream.end(`\nspawn error: ${error.message}\n`)
-			resolveResult({ output: `spawn error: ${error.message}`, code: 1 })
+			streamOutFile.end()
+			stderrOutFile.end(`\nspawn error: ${error.message}\n`)
+			void settle({ kind: "error", code: "spawn_error" }, `spawn error: ${error.message}`, 1, null)
 		})
 
 		child.on("close", (code, signal) => {
@@ -1216,21 +1314,28 @@ async function runAgent(options: LoopOptions, label: AgentLabel, prompt: string,
 			settled = true
 			const stdout = Buffer.concat(out).toString("utf-8")
 			const stderr = Buffer.concat(err).toString("utf-8")
-			status.exitCode = code ?? 1
-			status.signal = signal
+			const exitCode = code ?? 1
+			const signalName = signal ?? null
+			const terminated = classifyTermination({ exitCode, signal: signalName, stdoutText: stdout, stderrText: stderr })
+			status.exitCode = exitCode
+			status.signal = signalName
+			status.terminated = terminated
 			status.lastEventAt = new Date().toISOString()
 			writeStatus()
 			if (signal) log(`Agent [${label}] killed by signal ${signal}`)
-			outputStream.end(`\n# Agent [${label}] exited at ${status.lastEventAt} code=${code ?? 1}${signal ? ` signal=${signal}` : ""}\n`)
-			resolveResult({ output: stdout + "\n" + stderr, code: code ?? 1 })
+			streamOutFile.end()
+			stderrOutFile.end()
+			log(`Agent [${label}] attempt closed: exit=${exitCode}, signal=${signalName ?? "none"}, terminated=${terminated.kind}${terminated.kind === "error" ? `(${terminated.code})` : terminated.kind === "signal" ? `(${terminated.name})` : ""}, sessionId=${status.sessionId ?? "<none>"}`)
+			void settle(terminated, stdout + "\n" + stderr, exitCode, signalName)
 		})
 	})
 }
 
-function agentClaudeArgs(extraArgs: string[], prompt: string): string[] {
+export function agentClaudeArgs(extraArgs: readonly string[], prompt: string, resume: ResumeDecision): string[] {
 	const args = [...extraArgs]
 	if (!args.includes("--output-format")) args.push("--output-format", "stream-json")
 	if (!args.includes("--verbose")) args.push("--verbose")
+	if (resume.kind === "resume") args.push("--resume", resume.sessionId)
 	args.push("-p", prompt)
 	return args
 }
@@ -1255,13 +1360,194 @@ function agentOutputPath(options: LoopOptions, runId: string, label: AgentLabel)
 	return resolve(options.logDir, `${runId}.${label}.txt`)
 }
 
-function agentAttemptOutputPath(outputPath: string, startedAt: string): string {
-	const suffix = startedAt.slice(0, 19).replace(/[T:]/g, "-")
-	return outputPath.replace(/\.txt$/, `.attempt-${suffix}.${process.pid}.txt`)
-}
-
 function agentStatusPath(outputPath: string): string {
 	return outputPath.replace(/\.txt$/, `.status.json`)
+}
+
+export function agentSessionsPath(outputPath: string): string {
+	return outputPath.replace(/\.txt$/, `.sessions.jsonl`)
+}
+
+function agentAttemptStderrPath(outputPath: string, startedAt: string): string {
+	const suffix = startedAt.slice(0, 19).replace(/[T:]/g, "-")
+	return outputPath.replace(/\.txt$/, `.attempt-${suffix}.${process.pid}.stderr.txt`)
+}
+
+function agentAttemptStreamPath(outputPath: string, startedAt: string): string {
+	const suffix = startedAt.slice(0, 19).replace(/[T:]/g, "-")
+	return outputPath.replace(/\.txt$/, `.attempt-${suffix}.${process.pid}.jsonl`)
+}
+
+export function parseSessionIdFromStream(text: string): string | null {
+	const newlineIdx = text.indexOf("\n")
+	if (newlineIdx === -1) return null
+	const firstLine = text.slice(0, newlineIdx).trim()
+	if (firstLine === "") return null
+	try {
+		const event = JSON.parse(firstLine) as { session_id?: unknown }
+		if (typeof event.session_id === "string" && event.session_id !== "") return event.session_id
+		return null
+	} catch {
+		return null
+	}
+}
+
+export function extractErrorCode(stdoutText: string, stderrText: string): string {
+	const lines = stdoutText.split("\n")
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const line = lines[i]
+		if (line === undefined || line.trim() === "") continue
+		try {
+			const event = JSON.parse(line) as Record<string, unknown>
+			const isError = event["is_error"] === true || event["type"] === "error"
+			if (!isError) continue
+			const errorObj = event["error"] as { type?: unknown; code?: unknown; message?: unknown } | undefined
+			if (errorObj && typeof errorObj === "object") {
+				if (typeof errorObj.type === "string" && errorObj.type !== "") return errorObj.type
+				if (typeof errorObj.code === "string" && errorObj.code !== "") return errorObj.code
+				if (typeof errorObj.message === "string" && errorObj.message !== "") return errorObj.message.slice(0, 200)
+			}
+			if (typeof event["message"] === "string" && event["message"] !== "") return (event["message"] as string).slice(0, 200)
+		} catch {
+			continue
+		}
+	}
+	const httpMatch = stderrText.match(/\b(5\d\d)\b/)
+	if (httpMatch) return `${httpMatch[1]}_http`
+	const keywordMatch = stderrText.toLowerCase().match(/overloaded|rate[\s_-]?limit|service[\s_-]?unavailable/)
+	if (keywordMatch) return keywordMatch[0]
+	return "unknown"
+}
+
+export type ClassifyInput = {
+	exitCode: number
+	signal: string | null
+	stdoutText: string
+	stderrText: string
+}
+
+export function classifyTermination(input: ClassifyInput): Terminated {
+	if (input.signal !== null && input.signal !== "") return { kind: "signal", name: input.signal }
+	if (input.exitCode === 0) return { kind: "clean" }
+	return { kind: "error", code: extractErrorCode(input.stdoutText, input.stderrText) }
+}
+
+export function isTransient5xx(code: string): boolean {
+	const lower = code.toLowerCase()
+	if (/(^|[^\d])5\d\d($|[^\d])/.test(lower)) return true
+	if (lower.includes("overloaded")) return true
+	if (lower.includes("rate_limit") || lower.includes("rate-limit") || lower.includes("ratelimit")) return true
+	if (lower.includes("service_unavailable") || lower.includes("service-unavailable")) return true
+	return false
+}
+
+export function decideResume(entry: SessionEntry | null): ResumeDecision {
+	if (entry === null) return { kind: "fresh" }
+	if (entry.sessionId === null || entry.sessionId === "") return { kind: "fresh" }
+	switch (entry.terminated.kind) {
+		case "clean":
+			return { kind: "fresh" }
+		case "signal":
+			return { kind: "resume", sessionId: entry.sessionId }
+		case "error":
+			return isTransient5xx(entry.terminated.code) ? { kind: "resume", sessionId: entry.sessionId } : { kind: "fresh" }
+	}
+}
+
+export function nextBackoffSeconds(retryIndex: number): number {
+	if (retryIndex < 0) return BACKOFF_INITIAL_SECONDS
+	const exponential = BACKOFF_INITIAL_SECONDS * Math.pow(2, retryIndex)
+	return Math.min(exponential, BACKOFF_MAX_INTERVAL_SECONDS)
+}
+
+export async function readLastSessionEntry(sessionsPath: string): Promise<SessionEntry | null> {
+	let raw: string
+	try {
+		raw = await readFile(sessionsPath, "utf-8")
+	} catch (error) {
+		if (isNodeError(error) && error.code === "ENOENT") return null
+		throw error
+	}
+	const lines = raw.split("\n")
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const line = lines[i]
+		if (line === undefined || line.trim() === "") continue
+		try {
+			const parsed = JSON.parse(line) as unknown
+			if (!isValidSessionEntry(parsed)) continue
+			return parsed
+		} catch {
+			continue
+		}
+	}
+	return null
+}
+
+function isValidSessionEntry(value: unknown): value is SessionEntry {
+	if (typeof value !== "object" || value === null) return false
+	const v = value as Record<string, unknown>
+	if (typeof v["attempt"] !== "string") return false
+	if (v["sessionId"] !== null && typeof v["sessionId"] !== "string") return false
+	if (v["exitCode"] !== null && typeof v["exitCode"] !== "number") return false
+	if (v["signal"] !== null && typeof v["signal"] !== "string") return false
+	if (typeof v["log"] !== "string") return false
+	const terminated = v["terminated"] as { kind?: unknown } | null
+	if (typeof terminated !== "object" || terminated === null) return false
+	const kind = terminated.kind
+	if (kind === "clean") return true
+	if (kind === "signal" && typeof (terminated as { name?: unknown }).name === "string") return true
+	if (kind === "error" && typeof (terminated as { code?: unknown }).code === "string") return true
+	return false
+}
+
+export async function appendSessionEntry(sessionsPath: string, entry: SessionEntry): Promise<void> {
+	const line = JSON.stringify(entry) + "\n"
+	await appendFile(sessionsPath, line)
+}
+
+export type AttemptOutcome = {
+	output: string
+	exitCode: number
+	signal: string | null
+	sessionId: string | null
+	terminated: Terminated
+}
+
+export type RunWithBackoffDeps = {
+	spawnAttempt: (params: { resume: ResumeDecision }) => Promise<AttemptOutcome>
+	sleep: (seconds: number) => Promise<void>
+	log: (message: string) => void
+	now: () => number
+	initialResume: ResumeDecision
+}
+
+export async function runAgentWithBackoff(deps: RunWithBackoffDeps): Promise<{ output: string; code: number; attempts: number }> {
+	let resume = deps.initialResume
+	let retryIndex = 0
+	let elapsedBackoffSeconds = 0
+	let attempts = 0
+	while (true) {
+		attempts++
+		const outcome = await deps.spawnAttempt({ resume })
+		if (outcome.terminated.kind === "error" && isTransient5xx(outcome.terminated.code)) {
+			if (outcome.sessionId === null) {
+				deps.log(`backoff abort: transient-5xx without sessionId; returning to outer loop`)
+				return { output: outcome.output, code: outcome.exitCode, attempts }
+			}
+			const sleepSeconds = nextBackoffSeconds(retryIndex)
+			if (elapsedBackoffSeconds + sleepSeconds > BACKOFF_BUDGET_SECONDS) {
+				deps.log(`backoff budget exhausted: elapsed=${elapsedBackoffSeconds}s, next=${sleepSeconds}s, budget=${BACKOFF_BUDGET_SECONDS}s; returning to outer loop`)
+				return { output: outcome.output, code: outcome.exitCode, attempts }
+			}
+			deps.log(`transient-5xx detected (code=${outcome.terminated.code}); sleeping ${sleepSeconds}s before resume #${retryIndex + 1}`)
+			await deps.sleep(sleepSeconds)
+			elapsedBackoffSeconds += sleepSeconds
+			retryIndex++
+			resume = { kind: "resume", sessionId: outcome.sessionId }
+			continue
+		}
+		return { output: outcome.output, code: outcome.exitCode, attempts }
+	}
 }
 
 function resolveFrom(base: string, path: string): string {
