@@ -1,36 +1,34 @@
 # coder-loop templates
 
-These are reusable starting points distilled from real production usage (the Fulcrum project is the reference implementation). Copy into a target project, replace placeholders, adapt to local conventions.
+Supervisor 模式跟 preset 正交——它是包在 loop 外面的 cron-driven 跨 patrol orchestrator，跨 preset 通用。这一层现在唯一的 starter 在这里。
+
+具体到「target 跑 coder-loop 需要哪些 starter」，那些已经按 preset 切分到 `presets/<preset-name>/templates/`（如 `presets/gh-issue-pr-iteration/templates/` 下的 `workflow.md / shared.md / pr-body.md`），不在本目录。详见仓库根 README 的「内置 preset：`gh-issue-pr-iteration`」一节。
 
 ## What coder-loop actually is
 
-`coder-loop` is a **stateless program loop**. It alternates iteration and review agent spawns, captures their output to trace/log/status files, and exits. It does not judge issue completion, evidence sufficiency, PR correctness, parent closure, queue priority, or any other domain question. All of those judgments come from:
+`coder-loop` 是 N 角色字符串调度引擎。它按 preset 描述的 phase 顺序 spawn agent、捕获 trace、推进队列。它不判断 item 是否完成、PR 是否正确、证据是否充分、parent 是否可关闭、queue 优先级、或任何 domain 问题。这些判断来自：
 
-- the agent prompts in `presets/<preset-name>/` (the bundled `gh-issue-pr-iteration` preset is the default)
-- the **project policy** the agents read at every spawn — primarily `.coder-loop/workflow.md`, `.coder-loop/runtime/shared.md`, and per-issue handoff files
-- live GitHub issue/PR state
-
-The templates below are the project-policy half. If you delete a rule from one of these files in your target project, the loop stops enforcing it. There is no built-in fallback. That is by design — coder-loop is project-agnostic precisely because the rules live in the target.
+- preset 的 agent prompt（`presets/<preset-name>/`，bundled 默认是 `gh-issue-pr-iteration`）
+- target 拷过去的 starter 与项目级 policy（具体形式由 preset 决定）
+- live 第三方 state（GitHub issue/PR、CI 状态、SSH 日志等，由 preset 的 agent 决定要不要读）
 
 ## Available templates
 
 | Template | Copy to | Purpose |
 |---|---|---|
-| `presets/gh-issue-pr-iteration/templates/workflow.md` | `<TARGET>/.coder-loop/workflow.md` | committed project policy: goal, source-of-truth, PR/evidence rules, CI-parity, review behavior |
-| `presets/gh-issue-pr-iteration/templates/shared.md` | `<TARGET>/.coder-loop/runtime/shared.md` | local durable cross-issue facts, with allowed/forbidden policy |
-| `presets/gh-issue-pr-iteration/templates/pr-body.md` | `<TARGET>/.coder-loop/templates/pr-body.md` (or inline into `workflow.md`) | PR body skeleton with evidence layers |
-| `templates/supervisor/` | `<TARGET>/.coder-loop/runtime/supervisor/<MISSION>/` + `<TARGET>/.claude/skills/bootstrap/SKILL.md` | optional outer-layer supervisor (cron-driven cross-patrol orchestration) — see `supervisor/README.md` |
+| `templates/supervisor/` | `<TARGET>/.coder-loop/runtime/supervisor/<MISSION>/` + `<TARGET>/.claude/skills/bootstrap/SKILL.md` | optional 外层 supervisor（cron 驱动跨 patrol orchestration），跨 preset 通用 |
+
+preset-specific starter 不在此处：
+
+- `presets/gh-issue-pr-iteration/templates/` — `gh-issue-pr-iteration` preset 的 target-side starter（`workflow.md / shared.md / pr-body.md`）
+- 其他 preset 各自的 `templates/` 子目录
 
 ## Minimum viable target setup
 
-The smallest project that can run coder-loop needs only:
+跑 coder-loop 所需最小目标项目：
 
-1. A committed `.coder-loop/workflow.md` (start from `workflow.md`, trim layers you don't need).
-2. A `.coder-loop/runtime/config.json` with at least `repository` and `baseBranch` (defaults in `src/loop.ts` cover the rest).
-3. Local `gh` auth for the target repository.
+1. Committed `<TARGET>/.coder-loop/workflow.md`（具体内容由 preset 决定；用 `gh-issue-pr-iteration` 时从 `presets/gh-issue-pr-iteration/templates/workflow.md` 起步并裁剪）
+2. `<TARGET>/.coder-loop/runtime/config.json`（写 `preset` 或 `presetPath` 字段；用默认 `gh-issue-pr-iteration` 时再加 `repository / baseBranch`）
+3. 本机 `gh` 授权对应 repository（仅当 preset 用 GitHub 时）
 
-`shared.md` and `pr-body.md` are highly recommended but not required for the loop to start. The `supervisor/` pattern is only needed for long multi-mission work — short single-issue runs don't need it.
-
-## Why these specific templates
-
-These four are the things every project using coder-loop has had to write from scratch. Anything else (project-specific hooks, language-specific test wrappers, custom slash commands) stays in the target project — those are not cross-project patterns.
+shared 与 PR-body starter 在 `gh-issue-pr-iteration` 下高度推荐但不阻塞 loop 启动。Supervisor 仅在长 multi-mission 工作下需要，短跑无需。
