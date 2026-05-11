@@ -2,7 +2,9 @@
 
 ## Goal
 
-For each candidate deliverable in the intake, assign one of five classes. The class drives downstream fragments — `implementation` and `spike` go to decompose; `parent` becomes umbrella; `design-question` / `no-code` exit planning without queue work.
+For each candidate deliverable in the intake, assign one of five classes. The class drives downstream fragments — `implementation` and `spike` go through `plan/triage-existing` (if intake also has already-open issues to triage) then `plan/decompose`; `parent` becomes umbrella; `design-question` / `no-code` exit planning without queue work.
+
+If the intake includes already-open issues that the operator asked to triage (rewrite body / close / pr-reply / no-op), classify only the *new* candidate deliverables here; the existing-issue triage is the job of `plan/triage-existing` and runs on the dedicated fragment between classify and decompose.
 
 ## Inputs
 
@@ -47,8 +49,8 @@ If the entire intake reduces to `no-code` (everything already satisfied), emit `
 
 Choose exactly one:
 
-- `classified` → read `plan/decompose`. Every candidate has a class.
+- `classified` → next fragment is `plan/triage-existing` if intake contains already-open issues to triage; otherwise read `plan/decompose` directly. Every new candidate has a class.
 - `classification_blocked` → read `plan/handoff` with the ambiguities. Operator must clarify.
 - `classification_no_work` → read `plan/handoff` noting no actionable work remains.
 
-Do not decompose any candidate whose class is `classification_blocked`.
+Do not decompose any candidate whose class is `classification_blocked`. Do not let `plan/triage-existing` swallow new-issue candidates — that fragment only handles existing-issue triage actions.

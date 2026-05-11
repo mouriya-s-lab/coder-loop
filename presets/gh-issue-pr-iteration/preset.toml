@@ -126,6 +126,11 @@ role = "plan"
 path = "plan/classify.md"
 
 [[fragments]]
+id   = "plan/triage-existing"
+role = "plan"
+path = "plan/triage-existing.md"
+
+[[fragments]]
 id   = "plan/decompose"
 role = "plan"
 path = "plan/decompose.md"
