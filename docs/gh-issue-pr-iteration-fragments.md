@@ -17,7 +17,7 @@
 | `statuses.terminal` | `blocked / moot / done` |
 | phases | `iteration` → `review`（两段固定顺序；planning 不在 phases 内，由 `/dev-plan` slash command 入口驱动） |
 | `agent.binary` | `claude` |
-| fragments | 43 个，分布在 `common/ / plan/ / iter/ / review/` 四个目录 |
+| fragments | 44 个，分布在 `common/ / plan/ / iter/ / review/` 四个目录 |
 
 `item` 字段（除 `issue / status` 外）：
 
@@ -47,11 +47,12 @@ status 字面量都是 preset 字符串，引擎只识别 `continuable / termina
 - `common/state-contract`
 - `contract` — preset 的 issue body / PR body / review gate 解析规则，override 用户级 `writing-issue` skill
 
-**plan/** — planning phase 内部，10 个（仅 `/dev-plan` slash command 进入）
+**plan/** — planning phase 内部，11 个（仅 `/dev-plan` slash command 进入）
 
 - `plan/index` — phase 入口
 - `plan/intake`
 - `plan/classify`
+- `plan/triage-existing` — 既存 issue 的 rewrite_body / pr_reply / close_* / no_op 副作用动作
 - `plan/decompose`
 - `plan/checkpoint-author`
 - `plan/adversarial-validate`
@@ -95,7 +96,7 @@ status 字面量都是 preset 字符串，引擎只识别 `continuable / termina
 - `review/global-assessment`
 - `review/final`
 
-fragment 总数 = 4 + 10 + 9 + 20 = 43，与 `presets/gh-issue-pr-iteration/preset.toml` 的 `[[fragments]]` 块数一致。
+fragment 总数 = 4 + 11 + 9 + 20 = 44，与 `presets/gh-issue-pr-iteration/preset.toml` 的 `[[fragments]]` 块数一致。
 
 ---
 
@@ -112,9 +113,16 @@ plan/intake
   └─ intake_blocked                  → plan/handoff
 
 plan/classify
-  ├─ classified                      → plan/decompose
-  ├─ classification_blocked          → plan/handoff
-  └─ classification_no_work          → plan/handoff
+  ├─ classified (有既存 issue 要 triage)   → plan/triage-existing
+  ├─ classified (无既存 issue)              → plan/decompose
+  ├─ classification_blocked                → plan/handoff
+  └─ classification_no_work                → plan/handoff
+
+plan/triage-existing
+  ├─ triage_complete                       → plan/decompose
+  ├─ triage_only                           → plan/init-queue
+  ├─ triage_close_via_review               → plan/handoff
+  └─ triage_blocked                        → plan/handoff
 
 plan/decompose
   ├─ atomic_set_ready                → plan/checkpoint-author
