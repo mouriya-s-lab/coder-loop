@@ -4,86 +4,109 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-coder-loop — 项目无关的 GitHub issue/PR agent loop。目标仓库提供 committed `.coder-loop/workflow.md` 和 ignored `.coder-loop/runtime/` 本地状态后，loop 交替运行 iteration agent（实现/证据/PR）和 review agent（审查/merge/close/state transition）直到队列完成。
+coder-loop — 项目无关的 N 角色字符串调度引擎。给定一个 preset（角色定义、状态集、phase 列表、prompt 与变量绑定），引擎按 preset 描述的顺序 spawn 各 phase 的 agent，捕获输出，根据状态推进队列直到所有 item 落在 terminal 状态。
+
+bundled `gh-issue-pr-iteration` preset 编码 GitHub issue/PR 两角色（iteration + review）迭代工作流，是默认 preset；`single-phase-example` 是验证 1 phase / 字符串 id / 双状态可行的最小 preset。引擎本身不知道 GitHub、不知道 phase 数量、不知道 status 字面量。
+
+## Architecture / Layers
+
+三层架构：
+
+```
+L1: 引擎（src/loop.ts）
+    - 加载 preset、加载 target runtime、按 phase 顺序 spawn agent、resume、--check-runtime
+    - 不知道 phase 数量 / status 字面量 / 已知 KEY / GitHub
+    - 不判断 item 是否完成、PR 是否正确、证据是否充分
+
+L2: Preset（presets/<name>/）
+    - preset.toml: 形态契约 (item.idField / statuses / phases / fragments / agent)
+    - <phase>-entry.md + fragments: 角色 prompt 与状态机语义
+    - templates/: 目标侧 starter（仅当该 preset 需要 target-side policy 时）
+
+目标侧策略：<TARGET>/.coder-loop/
+    - workflow.md: committed 项目级策略（具体内容由 preset 定义）
+    - runtime/{config,state,shared,issues,evidence,logs}: ignored 本地运行态
+```
+
+每层职责互不重叠：
+
+| 层 | 知道什么 | 不知道什么 |
+|---|---|---|
+| L1 | 怎么 spawn / 怎么 resume / 怎么读 toml / 怎么校验 runtime | preset 名、phase 名、status 字面量、变量 KEY 含义 |
+| L2 (preset) | phase 顺序、status 语义、角色边界、什么时候 verdict、什么时候 stop | target 项目命令、CI 配置、PR 模板细节 |
+| target | 项目命令、CI-parity 规则、PR/evidence/review 具体形式 | 引擎调度细节、其他 preset 的事 |
 
 ## Commands
 
 - **Type check**: `bun run typecheck` (alias for `bun x tsc --noEmit`)
-- **Run orchestrator**: `bun run src/loop.ts [maxIter] [--target-cwd <path>] [--once]`
+- **Run unit + smoke tests**: `bun test` (覆盖 `src/loop.test.ts` + `src/smoke.test.ts`)
+- **Run orchestrator**: `bun run src/loop.ts [--target-cwd <path>] [--once] [--max-iterations N]`
 - **Check runtime**: `bun run src/loop.ts --target-cwd <path> --check-runtime`
-- **Plan phase**: `/dev-plan` (大任务入口：读取设计/目标，生成 GitHub issues + `.coder-loop/runtime` 队列)
-- **Loop phase**: `/dev-loop [N]` (消费现有队列并启动迭代循环，默认无限)
+- **Dry run**: `bun run src/loop.ts --target-cwd <path> --dry-run` (渲染 + 选 item，不 spawn agent)
+- **Plan phase**: `/dev-plan` （`gh-issue-pr-iteration` preset 配套的规划器）
+- **Loop phase**: `/dev-loop [N]` （`gh-issue-pr-iteration` preset 配套的循环入口）
 
-No test suite or linter — verification happens through checkpoint execution in target projects.
+### 写一个新 preset 的最小流程
 
-## Architecture
+1. `mkdir presets/<name>/` 写 `preset.toml`（schema 见 README §「写一个新 preset」）。
+2. 给每个 phase 写一份 `<phase>-entry.md`，里头用 `{{KEY}}` 占位符引用 preset.toml `[phases.variables]` 表的 key。
+3. target 在 `.coder-loop/runtime/config.json` 写 `{ "preset": "<name>" }` 或 `{ "presetPath": "<absolute-or-relative>" }`。
+4. `bun src/loop.ts --target-cwd <target> --check-runtime` 应输出 `preset=<name>`、exit 0。
+5. `bun src/loop.ts --target-cwd <target> --dry-run` 应输出 `selected=<id>`、exit 0。
+6. 真跑前确保 preset.toml 的 `agent.binary` 与本机 PATH 上的二进制对齐。
 
-Three-phase signal pipeline: `plan → iter → review`
+## gh-issue-pr-iteration preset 的设计前提
 
-```
-/dev-plan (large task/design → GitHub issues with checkpoint tables → .coder-loop/runtime queue)
-    ↓
-src/loop.ts (state machine orchestrator)
-    ├→ spawn iteration agent (presets/gh-issue-pr-iteration/iter-entry.md) → implement + execute checkpoints
-    ├→ write output to .dev-trace.txt
-    ├→ spawn review agent (presets/gh-issue-pr-iteration/review-entry.md) → audit trace, post feedback to issue
-    └→ repeat until issue closed or .dev-loop deleted
-```
-
-**Orchestrator** (`src/loop.ts`): Pure program state machine. Creates `.dev-loop` as on-switch, reads target `.coder-loop/runtime/state.json`, selects actionable issues, alternates spawning `claude -p` with iteration/review prompts, and writes trace/log/status files. It does not judge issue completion, evidence sufficiency, PR correctness, or parent closure.
-
-**Target contract**: `loop.ts` only knows about `.coder-loop/workflow.md` (committed) and `.coder-loop/runtime/` (ignored). Other subdirectories under `.coder-loop/` (e.g. `templates/`, project-specific `prompts/`) are agent-readable convention only — they take effect only when `workflow.md` or an issue handoff explicitly points the agent at them. Runtime files must not be committed.
-
-**Agent communication**: Iteration writes local handoff/evidence and PR updates; review reads trace, GitHub issue/PR live state, target workflow, and handoff. Durable task semantics belong in GitHub issues/PRs; `.coder-loop/runtime/` is local scheduling and handoff state.
-
-## Key Design Concepts
-
-**Checkpoint 4-tuples**: Each acceptance criterion compiles to `{dimension, command, env, expect}` — executable, not natural language. Agents can't skip or fake execution.
-
-**Dimensional coverage**: Checkpoints must cover all relevant dimensions (function / environment / integration / assumption). Review agent verifies per-dimension coverage.
-
-**Spike issues**: Risky third-party assumptions get a spike issue before implementation. Spike failure → design question, not wasted implementation.
-
-**Inherited verification obligations**: Checkpoints that can't run in current environment are deferred to a downstream issue. Cannot be deferred twice.
-
-## Agent Prompt 设计前提
-
-修改 `presets/gh-issue-pr-iteration/iter-entry.md` / `presets/gh-issue-pr-iteration/review-entry.md` 之前必须理解以下前提。
+下面四条**全部是 `gh-issue-pr-iteration` preset 的前提**，不是 L1 行为。修改 `presets/gh-issue-pr-iteration/iter-entry.md` / `review-entry.md` 之前必须理解；写其他 preset 时这些可以替换或删掉。
 
 ### 这不是软件工程问题
 
-Agent 的判断失误不能用工程手段（状态机、验证层、verdict 文件）修补。把判断交给没有判断能力的程序没有任何意义——正因为程序不可靠所以才交给 LLM 判断。任何试图用确定性逻辑替代 LLM 判断的方案都是在回避问题。
+Agent 的判断失误不能用工程手段（状态机、验证层、verdict 文件）修补。把判断交给没有判断能力的程序没意义——正因为程序不可靠所以才交给 LLM 判断。任何试图用确定性逻辑替代 LLM 判断的方案都是在回避问题。
 
 ### 问题是 prompt 没有教 agent 怎么工作
 
-Agent 不是"判断力差"——是没人教它怎么判断。当前 prompt 给了一个模糊目标（"verify no open issues → stop"），没有思维链，没有工作流程，没有待办事项管理。系统中最关键的决策得到了最少的认知支撑。Agent 当然走捷径，因为 prompt 给了它一个 Goal 而不是一个 Procedure。
+Agent 不是「判断力差」——是没人教它怎么判断。当前 prompt 给了一个模糊目标（"verify no open issues → stop"），没有思维链、没有工作流程、没有待办事项管理。系统中最关键的决策得到了最少的认知支撑。Agent 当然走捷径，因为 prompt 给了它一个 Goal 而不是一个 Procedure。
 
 ### Agent 需要的信息分散在无数来源
 
-做出正确的终止判断需要的证据不只在 issues 里——可能在 PR comments、SSH 日志、设计文档、git 历史中。不可能预取所有来源。所以不能用"注入 ground truth"的方式解决——需要教 agent 自己系统性地收集证据。
+做出正确的终止判断需要的证据不只在 issues 里——可能在 PR comments、SSH 日志、设计文档、git 历史中。不可能预取所有来源。所以不能用「注入 ground truth」的方式解决——需要教 agent 自己系统性地收集证据。
 
 ### 每个 agent 运行都是无状态的
 
-每次 `claude -p` spawn 的 agent 是独立进程，没有跨轮次记忆。本地文件会丢失、会损坏、跨机器不可用。如果要用本地状态，必须每次做完即丢弃。持久化状态只能依赖 GitHub（issues / labels / comments）。
+每次 `claude -p` spawn 的 agent 是独立进程，没有跨轮次记忆。本地文件会丢失、损坏、跨机器不可用。如果要用本地状态，必须每次做完即丢弃。持久业务语义只能依赖 GitHub（issues / labels / comments）。
+
+## Supervisor pattern
+
+跨 preset 通用，包在 loop 外面。`templates/supervisor/` 提供 cron-driven cross-patrol orchestration starter，long multi-mission work 适用。短单 issue 跑不需要它。supervisor 自己不调引擎；它读 target `.coder-loop/runtime/state.json` + 引擎写的 status JSON，判断「应该启停哪个 mission」，然后启停 loop。
 
 ## Templates for target projects
 
-`coder-loop` is a stateless program loop — it does not enforce PR shape, evidence rules, queue policy, or cross-issue memory. Those rules live in the target repo's `.coder-loop/workflow.md` + `.coder-loop/runtime/shared.md`, which the agents read at every spawn. Delete a rule there and the loop stops enforcing it.
+`coder-loop` 是 stateless program loop——它不内置 PR 形态、证据规则、queue 策略、跨 issue 记忆。这些规则的具体内容由 preset 决定（preset 的 entry prompt 引用 target 的 `workflow.md / shared.md`），target 拷 starter 后改本项目命令。
 
-`templates/` ships project-agnostic starting points distilled from a known-good default implementation (Fulcrum):
+starter 位置：
 
-- `presets/gh-issue-pr-iteration/templates/workflow.md` — `.coder-loop/workflow.md` skeleton (goal, source-of-truth, PR/evidence rules, CI-parity, review behavior).
-- `presets/gh-issue-pr-iteration/templates/shared.md` — `.coder-loop/runtime/shared.md` skeleton with allowed/forbidden memory policy.
-- `presets/gh-issue-pr-iteration/templates/pr-body.md` — PR body evidence-layer skeleton.
-- `templates/supervisor/` — optional outer-layer supervisor (cron-driven cross-patrol orchestration on top of the loop). Use only for long multi-mission work; short runs don't need it.
+- `presets/<preset-name>/templates/` — 该 preset 配套的目标侧 starter（如 `gh-issue-pr-iteration/templates/{workflow,shared,pr-body}.md`）
+- `templates/supervisor/` — 跨 preset 通用的 supervisor starter
 
-See `templates/README.md` for the copy table, minimum viable setup, and what each template is for.
+详见 `templates/README.md`。
+
+## 当前实现 vs 分层契约的差距
+
+记录 `src/loop.ts` 仍接受 PR-shaped 概念的位置，作为下一轮重构的工单参考。这些不是 bug，是 Stage 1-3 重构尚未触及的区域：
+
+- **`markIterationStarted`**：写死 `queueItem.status = "in_progress"`。该字面量是 `gh-issue-pr-iteration` 的 status 之一；若用其他 preset 跑生产路径（非 dry-run），状态机会偏。Stage 4 #9 § E 的范围。
+- **status JSON schema**：引擎写出的 agent status JSON 含 `branch / pr / lastRunId` 字段，是 PR 概念。schema 应只含 `id / phase / runId / startedAt / exitCode / signal / outputPath / statusPath`，preset-specific 字段由 spawn 钩子追加。Stage 4 #9 § E。
+- **Target config 仅 JSON**：当前 `loadConfig` 只读 `config.json`；preset 字段已在 Stage 1 PR 5 引入但 TOML 解析尚未对外。Stage 4 #9 § A。
+- **`--check-runtime` 不校验 status transition**：preset 可声明 `[[transitions]]` 表，引擎可在 strict 模式下校验 `recentRuns` 相邻条目转移合法性。Stage 4 #9 § B。
+- **supervisor bootstrap 要手动改占位符**：项目级 bootstrap skill 应自动 dispatch 到 `<TARGET>/.coder-loop/runtime/supervisor/` 下最近活动 mission。Stage 4 #9 § C。
+- **runtime.\* 白名单**：18 key，新增需改源码两处。候选追加：`lastPhaseOutput / queuePosition / elapsedSeconds`。Stage 4 #9 § D。
 
 ## Tech Stack
 
-Bun + TypeScript (strict, ESM). No runtime dependencies. Requires `claude` CLI and `gh` CLI on PATH.
+Bun + TypeScript (strict, ESM). No runtime dependencies. Requires `claude` CLI (or 自定义 `agent.binary`) and `gh` CLI on PATH。
 
 ## Conventions
 
 - Conventional commits: `feat:`, `fix:`, `refactor:`, `docs:`
 - Cross-repo refs in commit body: `Closes owner/repo#N`
+- 引擎层禁止任何 `gh-issue-pr-iteration` 字面量（status 字符串、phase 名、`{{REPO}}` 等已知 KEY、GitHub-specific 字段名）。新增引擎代码触碰这些时一律改成读 preset。

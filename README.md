@@ -1,14 +1,18 @@
 # coder-loop
 
-无人值守开发循环。给定一份设计文档，自动把它变成 GitHub PR，持续迭代直到完成。
+N 角色字符串调度引擎。给定一个 preset（角色定义、状态集、phase 列表、prompt 与变量绑定），coder-loop 按 preset 描述的顺序 spawn 各 phase 的 agent，捕获输出，根据状态推进队列，直到队列里所有 item 落在 terminal 状态。
+
+**这不是一个 GitHub PR loop。** GitHub issue/PR 迭代是它内置的一个 preset（`gh-issue-pr-iteration`）。引擎本身不知道 GitHub 的存在、不知道 phase 数量、不知道 phase 名字、不知道 status 字面量。
+
+---
 
 ## 设计思想
 
 ### 核心模型：信号生成 → 信号产生 → 信号消费
 
-coder-loop 本质上是一个迭代收敛系统。它能否收敛到正确结果，取决于每次迭代是否产生足够的**信号**来驱动下一次迭代的方向。
+迭代收敛系统能否走到正确结果，取决于每次迭代是否产生足够的**信号**驱动下一次迭代。
 
-这个认识来自 2024-2025 年四组研究的共同发现：
+这个认识来自 2024-2025 年四组研究：
 
 | 问题 | 研究 | 发现 |
 |---|---|---|
@@ -17,57 +21,210 @@ coder-loop 本质上是一个迭代收敛系统。它能否收敛到正确结果
 | 任务分解为什么导致失败？ | Agent Failure Taxonomy (2025) | planning phase defects 是 agent 任务失败的首要类别（约 50% 的失败源于此） |
 | 怎么防止无限低质量推进？ | VMAO (2025) | completeness threshold + diminishing returns 检测 |
 
-基于这些发现，coder-loop 将迭代系统的职责拆分为三个独立环节：
+这些是**preset 设计原则**，不是引擎行为。引擎不知道「信号」是什么——它只调度 phase 顺序、传变量、捕获 trace。是 preset（默认 `gh-issue-pr-iteration`）按 plan/iter/review 三段切分把信号生成/产生/消费做成了 phase 流水线。
 
-```
-plan（信号结构定义）→ iter（信号产生）→ review（信号消费与判定）
-```
+不同 preset 可以选择不同的切分：1 phase（如 `single-phase-example`，仅 run）、2 phase（如 `gh-issue-pr-iteration`，iter+review）、N phase（plan+iter+review+publish 等）都行。引擎对 N 没有上界。
 
-- **plan** 定义"要检查什么"——将验收标准编译为带维度标注的可执行 checkpoint 序列
-- **iter** 产生信号——执行 checkpoint 命令，报告每个 checkpoint 的 pass/fail 及实际输出
-- **review** 消费信号并判定——审计 checkpoint 执行结果，检查维度覆盖，决定迭代方向
+### 四个设计决策（gh-issue-pr-iteration preset）
 
-### 四个设计决策
+下面四条是 `gh-issue-pr-iteration` preset 的设计前提，不是引擎契约。换 preset 时这些可以改。
 
 **1. Checkpoint 取代 checkbox**
 
-传统做法是在 issue 中写 `- [ ] docker build 成功`。这是自然语言描述，不是可执行的验证。iteration agent 可以跳过它、重新解释它、或声称完成了它。
-
-coder-loop 的 plan 将每条验收标准编译为 `{dimension, command, env, expect}` 四元组。iteration agent 无法"跳过"一个有具体 SSH 命令的 checkpoint——它要么执行了，要么没执行，trace 里看得到。
+传统 issue 写 `- [ ] docker build 成功`。这是自然语言，不是可执行验证。iteration agent 可以跳过、重新解释、或声称完成。`gh-issue-pr-iteration` 的 plan 把每条验收标准编译为 `{dimension, command, env, expect}` 四元组，agent 无法跳过。
 
 **2. 维度覆盖强制**
 
-issue #69 事后分析发现：Phase 3 的全部验收标准属于功能维度（代码写对了），但 7 个 bug 中 6 个属于环境、集成、假设维度。单维度覆盖等于无覆盖。
-
-plan 要求每个 issue 的 checkpoint 覆盖所有相关维度（function / environment / integration / assumption）。review 在评估时检查每个维度是否有至少一个 PASS。整个维度为空意味着这个 Phase 在该维度上完全未验证。
+issue #69 事后分析：Phase 3 验收标准全是功能维度，但 7 个 bug 中 6 个属于环境/集成/假设维度。`gh-issue-pr-iteration` 的 plan 要求每个 issue 的 checkpoint 覆盖 function / environment / integration / assumption；review 检查每个维度是否有至少一个 PASS。
 
 **3. Spike 前置于实现**
 
-如果一个 Phase 的架构假设依赖第三方组件的未文档化行为（如"Debian Chromium 的 CDP 实现兼容 Patchright"），这个假设必须在实现之前被验证。
-
-plan 在任务分解时扫描风险信号，为高风险假设创建 spike issue。spike 的验收标准不是"代码完成"而是"假设被证实或证伪"。spike 失败触发设计调整，而非在错误假设上堆叠多个 Phase 的代码。
+如果 Phase 的架构假设依赖第三方组件未文档化行为，假设必须在实现前被验证。`gh-issue-pr-iteration` 的 plan 扫描风险信号、为高风险假设创建 spike issue。spike 失败触发设计调整，而非在错误假设上堆叠代码。
 
 **4. 推迟验证不可遗忘**
 
-如果某个 checkpoint 在当前环境无法执行（如本机没有 Docker daemon），plan 将其作为 inherited verification obligation 分配到下游 issue。obligation 不可二次推迟——到达目标 issue 时必须执行。
+某 checkpoint 当前环境无法执行（如本机没 Docker daemon），plan 将其作为 inherited verification obligation 分配到下游 issue，不可二次推迟。
 
-### 无状态运行
+---
 
-coder-loop 是项目无关的 GitHub issue/PR loop。目标仓库只要提供 `.coder-loop/workflow.md` 和 `.coder-loop/runtime/` 下的本地运行态，并且本地 `gh` 有权限访问对应 repository，就可以运行。
+## L1 引擎契约
 
-loop.ts 是程序状态机：创建 `.dev-loop` → 选择 actionable issue → 根据 `state.current.phase` spawn iteration 或 review agent → 捕获输出写 trace/status → 检查 `.dev-loop` 是否存在。它只做确定性调度，不判断 issue 是否完成、证据是否充分、PR 是否正确、parent 是否可关闭。
+`src/loop.ts` 是一个有限状态机，行为由 preset 驱动。引擎本身的职责：
 
-Agent prompt 是另一层状态机：iteration/review 通过 `presets/<preset-name>/` 下的 fragment 做语义判断（默认 preset 是 `gh-issue-pr-iteration`）。每个 fragment 代表一个阶段，给出输入、目标、禁止事项、允许 verdict 和下一 fragment。程序只把 fragment 路径索引和目标 workflow 注入入口 prompt，并校验 fragment 文件可读；下一步选择仍由 agent 按 prompt 和目标 workflow 判断。
+| 引擎职责 | 说明 |
+|---|---|
+| **加载 preset** | 从 `<pkg>/presets/<name>/` 或 target 指定的 `presetPath` 读 `preset.toml`，解析 `name / version / item.idField / statuses / phases / fragments / agent`。每个 fragment 路径必须可读。 |
+| **加载 target runtime** | 读 target `.coder-loop/runtime/{config.json, state.json, shared.md}`，校验路径都落在 target 目录下。 |
+| **选 actionable item** | 若 `state.current` 存在且其 status 在 preset 的 `statuses.continuable` 集合内，继续它；否则在队列里找首个 `continuable` item。`continuable` 集合外的所有 item 是 terminal，引擎不动它们。 |
+| **按 phase 顺序 spawn agent** | 遍历 `preset.phases`：对每个 phase，read 它的 entry prompt 模板，按 phase 的 `[phases.variables]` 表绑定变量（`item.<f>` / `config.<f>` / `runtime.<k>`）替换 `{{KEY}}`，把渲染后的 prompt 作为 argv 传给 `preset.agent.binary`。捕获 stdout/stderr 写到 trace 文件。每个 phase spawn 完毕后写一个 status JSON。 |
+| **resume / 不丢工作** | 若 spawn 中途崩溃，重启时根据 `state.current.phase` 跳到当前 phase 而非从头跑。 |
+| **`.dev-loop` 开关** | 引擎启动时创建 `.dev-loop`；删除该文件即正常退出当前轮，不强杀正在跑的 agent。 |
+| **`--check-runtime` 健康检查** | 不 spawn agent。校验 preset、target 文件、queue item id / status 是否合法、`state.current` 是否一致。返回错误清单。 |
+| **`--dry-run` 渲染检查** | 选 actionable item，跑到 spawn 前为止，输出选中的 item id；不写 trace、不调 agent。 |
 
-目标仓库的 `.coder-loop/` 分为两部分：
+引擎**不知道**：phase 数量、phase 名字、status 字面量（`queued / done / pending` 之类）、item id 字段名、已知变量 KEY（`{{REPO}}` / `{{ISSUE}}` 之类）、preset 之间的差异、GitHub。所有这些来自 preset 与 target config。
 
-| 路径 | 是否提交 | loop 是否感知 | 说明 |
-|---|---|---|---|
-| `.coder-loop/workflow.md` | 是 | 是（路径校验 + 注入入口 prompt） | 项目级工作流、PR/evidence/review policy |
-| `.coder-loop/runtime/` | 否 | 是（state/config/shared/issues/evidence/logs 路径） | 本地 queue/state/handoff/evidence/logs/config |
-| `.coder-loop/templates/`、`.coder-loop/prompts/` 等其他子目录 | 自定 | 否 | loop 自身不读；只有当 `workflow.md` 或 issue handoff 显式指引 agent 去读时才生效 |
+引擎**不判断**：item 是否完成、PR 是否正确、证据是否充分、parent 是否可关闭、queue 优先级。这些由 preset 的 agent prompt 判断（默认 preset 让 agent 改 GitHub state；其他 preset 可以让 agent 改任何东西）。
 
-每次 iteration agent 和 review agent 被 spawn 时，它们从零开始，读取 GitHub issue/PR live state、目标 workflow、shared context、issue handoff 和 trace。agent 之间没有共享内存；持久业务语义应落在 GitHub issue/PR，runtime 文件只用于本地调度和交接。
+---
+
+## 写一个新 preset
+
+最小可跑示例在 `presets/single-phase-example/`。结构：
+
+```
+presets/<preset-name>/
+  preset.toml          # 必需：schema 见下
+  <phase>-entry.md     # 每个 phase 一个 entry prompt 模板
+  [common/, role-x/, ...]   # 可选：fragment 文件，preset.toml 里 [[fragments]] 声明
+```
+
+### `preset.toml` schema
+
+```toml
+name        = "single-phase-example"      # preset 标识
+version     = 1                           # 整数
+description = "..."
+
+[item]
+idField = "id"                            # queue item 的 id 字段名
+
+[statuses]
+continuable = ["pending"]                 # 引擎会调度的 status 集合
+terminal    = ["done"]                    # 引擎跳过的 status 集合（合并去重）
+
+[[phases]]
+name   = "run"                            # phase 名字，写入 state.current.phase
+prompt = "run-entry.md"                   # 相对 preset.toml 的 entry prompt 模板路径
+
+  [phases.variables]                      # 模板中 {{KEY}} 的解析表
+  ITEM_ID    = "item.id"                  # → queue item 的 id 字段
+  RUN_ID     = "runtime.runId"            # → 引擎生成的本轮 run id
+  TARGET_CWD = "runtime.targetCwd"        # → target 目录绝对路径
+
+# [[fragments]] 可省略；写时声明 fragment 文件供 entry prompt 引用
+
+[agent]
+binary    = "echo"                        # 实际生产 preset 通常是 "claude"
+extraArgs = []
+```
+
+### 变量绑定 DSL（三前缀）
+
+`[phases.variables]` 表的右侧字符串必须 match `^(item|config|runtime)\.[a-zA-Z][a-zA-Z0-9_]*$`：
+
+| 前缀 | 来源 | 行为 |
+|---|---|---|
+| `item.<field>` | 当前 actionable queue item 的字段（包括 `idField` 与任意附加字段） | 字段缺失/null → `""`；string/number/boolean → `String(...)`；其他类型 → throw |
+| `config.<field>` | target `.coder-loop/runtime/config.{json,toml}` 的字段 | 字段不存在 → throw；`null/undefined` → throw；类型同上 |
+| `runtime.<key>` | 引擎计算的运行期值 | key 必须在引擎白名单内（见下）；否则 throw |
+
+`runtime.*` 白名单（18 key）：`runId / targetCwd / workflowPath / sharedContextPath / statePath / currentIssueFile / issueDir / evidenceDir / evidenceRootDir / logDir / traceFile / loopFile / presetDir / fragmentIndex / issueRunMode / recoveryMode / previousRunId / recoveryStartedAt`。新增一个白名单 key 必须改引擎源码（`RUNTIME_BINDING_KEYS` 与 `buildRuntimeBindings` 两处同时改）。
+
+### Target 选 preset 的方式
+
+target 在 `.coder-loop/runtime/config.json`（或 `config.toml`）写：
+
+```json
+{ "preset": "single-phase-example" }            // 用 bundled preset
+```
+
+或：
+
+```json
+{ "presetPath": "../my-custom-preset" }         // target-side 路径，相对 target 目录
+```
+
+或：
+
+```json
+{ "presetPath": "/abs/path/to/preset" }         // 绝对路径
+```
+
+两者互斥。都不写时引擎走默认的 `gh-issue-pr-iteration`。`preset` 名只允许 `^[a-zA-Z][a-zA-Z0-9_-]*$`，禁止路径分隔符与 `..`，所以 bundled name 一定落在 `<pkg>/presets/<name>/` 内。
+
+### 最小 target
+
+跑一个新 preset 所需的最小 target 文件（参见 `src/smoke.test.ts`）：
+
+```
+<target>/.coder-loop/
+  workflow.md                   # 占位即可，preset 是否引用看 entry prompt
+  runtime/
+    config.json                 # { "preset": "<name>" }
+    state.json                  # { version: 1, queue: [{<idField>, status}], recentRuns: [], current: null }
+    shared.md                   # 占位
+    issues/                     # 空目录
+    evidence/                   # 空目录
+    logs/                       # 空目录
+```
+
+`bun src/loop.ts --target-cwd <target> --check-runtime` 应当 exit 0、输出 `preset=<name>` 与 `queue=N, selected=<id>`。
+
+---
+
+## 内置 preset：`gh-issue-pr-iteration`
+
+bundled 默认 preset，编码两角色（iteration + review）GitHub issue/PR 迭代工作流。下面所有内容都属于该 preset，不是引擎契约。
+
+### 形态
+
+| 维度 | 值 |
+|---|---|
+| `item.idField` | `issue`（GitHub issue number） |
+| `statuses.continuable` | `queued / in_progress / changes_requested` |
+| `statuses.terminal` | `blocked / moot / done` |
+| phases | `iteration` → `review`（两段固定顺序） |
+| `agent.binary` | `claude` |
+| fragments | 27 个，分布在 `common/ / iter/ / review/` 三个角色目录 |
+
+### 状态机语义
+
+- `queued`：尚未开始
+- `in_progress`：iteration 已 spawn 但 review 未结论
+- `changes_requested`：review 要求 iteration 重做
+- `blocked`：spike 失败 / 设计问题，需人介入
+- `moot`：上游已解决，不再跟
+- `done`：review 判定关闭
+
+iteration agent：实现 + 验证 checkpoint + 写证据 + 开/更新 PR + 写 handoff。
+review agent：读 trace + 读 GitHub live state + 决定 status 转移 + post review comments + close issue/PR。
+
+### Fragments
+
+`presets/gh-issue-pr-iteration/` 下：
+
+| 目录 | 内容 |
+|---|---|
+| `common/` | 程序↔agent 边界、GitHub 路由、状态文件不变量、shared memory policy |
+| `iter/` | iteration 分阶段：读上下文 / 分类 / 实现 / 验证 / PR / handoff / final |
+| `review/` | review 分阶段：读证据 / PR-evidence-code-closure 四 gate / 动作 / state transition / global assessment / stop / final |
+| `templates/` | 目标侧 starter：`workflow.md / shared.md / pr-body.md` |
+
+### Target 侧约定（仅在用 `gh-issue-pr-iteration` 时）
+
+`workflow.md` / `shared.md` / `pr-body.md` 的 starter 在 `presets/gh-issue-pr-iteration/templates/`。target 拷过去后改本项目命令、PR 格式、证据 layer、CI-parity 行为。删一条规则就停止生效——bundled preset 不内置 fallback。
+
+PR body 四层证据：functional / environment / integration / assumption。每层带可执行命令 + actual 输出 + verdict。任何 layer 缺失 → review 拒绝合并。
+
+agent-browser 证据：UI 改动必须截图，截图保存到 `<TARGET>/.coder-loop/runtime/evidence/<issue>/`，PR body 引用绝对路径。
+
+### Queue 优先级
+
+queue item 字段（除 `issue / status` 外）：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `attempts` | number / null | iteration 累计次数；review 判循环失败的硬上限 |
+| `title` | string / null | 人类可读标题 |
+| `priority` | `high \| medium \| low` / null | review 决定下一选哪个 |
+| `branch` | string / null | iteration 创建的 PR 分支名 |
+| `pr` | number / null | iteration 开的 PR 号 |
+| `lastRunId` | string / null | 上一次 iteration 的 runId，supervisor 用于 trace 跳转 |
+| `issueFile` | string / null | issue handoff 文件相对路径 |
+| `evidenceDir` | string / null | 该 issue 的证据目录相对路径 |
+
+这些字段对 `gh-issue-pr-iteration` 是 part-of-the-spec；对其他 preset 完全可忽略（引擎层从 Stage 2 起 type 上 nullable）。
 
 ---
 
@@ -79,12 +236,9 @@ Agent prompt 是另一层状态机：iteration/review 通过 `presets/<preset-na
 /dev-plan
 ```
 
-读取设计文档、GitHub issue/PR/RFC 或用户描述的大任务，产出：
-- **GitHub Issues**：原子任务、checkpoint 表格、维度标注、spike issue、inherited obligations、parent/child graph
-- **`.coder-loop/runtime` 队列**：本地 ignored runtime state，供 loop 消费
-- **target `.coder-loop/workflow.md`**：若缺失，需要先创建或补齐项目级命令、PR/evidence/review policy
+读取设计文档、GitHub issue/PR/RFC 或用户描述的大任务，产出 GitHub issues + checkpoint 表 + 维度标注 + spike issue + parent/child graph + `.coder-loop/runtime` 队列。`/dev-plan` 是 `gh-issue-pr-iteration` preset 配套的规划器，对其他 preset 不直接适用。
 
-`/dev-plan` 不实现代码、不创建 PR、不启动 loop，除非用户明确要求 plan 后直接运行。写完 runtime queue 后必须先运行 schema check：
+写完 runtime queue 后必须先跑 schema check：
 
 ```bash
 bun src/loop.ts --target-cwd <target-repo-path> --check-runtime
@@ -97,48 +251,32 @@ bun src/loop.ts --target-cwd <target-repo-path> --check-runtime
 /dev-loop 10     # 最多 10 轮
 ```
 
-循环只消费 `/dev-plan` 准备好的现有 issue 队列，交替运行 iteration agent 和 review agent。删除 `.dev-loop` 可随时停止。
+循环消费现有队列，按 preset 的 phase 顺序交替 spawn agent。删除 `.dev-loop` 即停止。
+
+`/dev-loop` 也是 `gh-issue-pr-iteration` 的入口；其他 preset 直接调 `bun src/loop.ts --target-cwd <path>`。
 
 ---
 
-## 文件
-
-| 文件 | 说明 |
-|---|---|
-| `src/loop.ts` | 循环状态机。创建 `.dev-loop`，交替 spawn 两个 agent，捕获输出写 trace |
-| `.claude/commands/dev-plan.md` | 大任务 intake skill。先生成原子 GitHub issues、checkpoint、parent/child graph 和 runtime queue |
-| `.claude/commands/dev-loop.md` | loop skill。消费现有队列并启动迭代循环 |
-| `presets/gh-issue-pr-iteration/preset.toml` | 默认 preset 定义：item 形态、status 集、phase 列表、fragment 清单、变量绑定 |
-| `presets/gh-issue-pr-iteration/iter-entry.md` | iteration agent 入口 prompt。绑定运行时输入并指向 iteration fragments |
-| `presets/gh-issue-pr-iteration/review-entry.md` | review agent 入口 prompt。绑定运行时输入并指向 review fragments |
-| `presets/gh-issue-pr-iteration/common/` | 程序/agent 边界、GitHub 路由、状态文件不变量 |
-| `presets/gh-issue-pr-iteration/iter/` | iteration agent 的分阶段 fragments：读上下文、分类、实现、验证、PR、handoff、final |
-| `presets/gh-issue-pr-iteration/review/` | review agent 的分阶段 fragments：读证据、PR/evidence/code/closure gates、动作、状态更新、global assessment、stop/final |
-| `presets/gh-issue-pr-iteration/templates/` | preset 自带的目标侧 starter（`workflow.md`、`shared.md`、`pr-body.md`） |
-| `templates/supervisor/` | 跨 preset 通用的 supervisor 模式模板，见 `templates/README.md` |
-| target `.coder-loop/workflow.md` | committed 项目级 workflow/policy：命令、PR 格式、证据、review gate |
-| target `.coder-loop/runtime/` | ignored 本地运行态：config、state、shared、issues、evidence、logs |
-
 ## 安装
 
-仓库本身用 bun + TypeScript，不发布到 npm。要在本机用：
+仓库本身用 bun + TypeScript，不发布到 npm：
 
 ```bash
-bun install                          # 安装 devDependencies (类型)
-bun link                              # 注册 coder-loop bin 到全局
-cp .claude/commands/dev-*.md ~/.claude/commands/   # 注册 slash commands
+bun install                                          # 安装 devDependencies
+bun link                                             # 注册 coder-loop bin 到全局
+cp .claude/commands/dev-*.md ~/.claude/commands/     # 注册 slash commands
 ```
 
-之后 `coder-loop` 命令和 `/dev-plan` `/dev-loop` 在任意目录可用。也可以不 `bun link`，所有 `coder-loop` 调用改成 `bun /path/to/coder-loop/src/loop.ts`。
+之后 `coder-loop` 命令和 `/dev-plan` `/dev-loop` 在任意目录可用。也可以不 `bun link`，调用改成 `bun /path/to/coder-loop/src/loop.ts`。
 
 ## `/dev-plan` 的前置依赖
 
-`.claude/commands/dev-plan.md` 引用以下用户级规则和 skill：
+`.claude/commands/dev-plan.md` 引用以下用户级规则与 skill：
 
 - `~/.claude/rules/github-issue-pr-routing.rule.md`
-- skill `writing-issue`、`writing-pr`、`review-pr`
+- skill `writing-issue / writing-pr / review-pr`
 
-这些不是 coder-loop 仓库内的资产，由用户自己维护。缺失时 `/dev-plan` 仍可运行，但 issue 形式、PR 路由、review gate 设计会退化到 dev-plan.md 内嵌的最小描述。如果计划长期使用 `/dev-plan`，建议把上述 rule/skill 准备好。`/dev-loop` 没有此类依赖。
+不是 coder-loop 仓库内的资产，由用户自己维护。缺失时 `/dev-plan` 仍可运行，但 issue 形式、PR 路由、review gate 设计会退化。`/dev-loop` 没有此类依赖。
 
 ## References
 
