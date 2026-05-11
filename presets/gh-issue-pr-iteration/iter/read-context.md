@@ -40,7 +40,9 @@ If retrying (queue status is `changes_requested` and previous run ID is non-empt
 
 Choose exactly one:
 
-- `context_ready` → read `iter/classify-scope`.
+- `context_ready` → branch by `ISSUE_KIND`:
+  - `ISSUE_KIND` is `comment` → read `iter/spike-comment`. The deliverable is an issue comment + sub-issue 列表, not code.
+  - `ISSUE_KIND` is `code` or empty (legacy unlabeled issue) → read `iter/classify-scope`.
 - `infrastructure_failure` → read `iter/handoff` and record the exact missing file/query failure.
 
 Do not implement before this fragment reaches `context_ready`.
