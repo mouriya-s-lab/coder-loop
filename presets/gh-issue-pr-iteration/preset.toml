@@ -56,6 +56,7 @@ prompt = "iter-entry.md"
   ISSUE_PR                 = "item.pr"
   ISSUE_STATUS             = "item.status"
   ISSUE_LAST_RUN_ID        = "item.lastRunId"
+  ISSUE_KIND               = "runtime.issueKind"
 
 [[phases]]
 name   = "review"
@@ -87,6 +88,7 @@ prompt = "review-entry.md"
   ISSUE_PR                 = "item.pr"
   ISSUE_STATUS             = "item.status"
   ISSUE_LAST_RUN_ID        = "item.lastRunId"
+  ISSUE_KIND               = "runtime.issueKind"
 
 [[fragments]]
 id   = "common/runtime-contract"

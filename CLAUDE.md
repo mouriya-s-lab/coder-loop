@@ -95,7 +95,7 @@ starter 位置：
 记录 `src/loop.ts` 仍接受 PR-shaped 概念的位置，作为下一轮重构的工单参考。这些不是 bug，是 Stage 1-3 重构尚未触及的区域：
 
 - **supervisor bootstrap 要手动改占位符**：项目级 bootstrap skill 应自动 dispatch 到 `<TARGET>/.coder-loop/runtime/supervisor/` 下最近活动 mission（#31）。
-- **runtime.\* 白名单**：当前 17 key，新增需改源码两处（`RUNTIME_BINDING_KEYS` 与 `buildRuntimeBindings`）。任何新 key 必须先 grep `presets/<preset>/` 证明已有 fragment 在 work-around 该值缺失（参考 #32 audit）。
+- **runtime.\* 白名单**：当前 18 key，新增需改源码两处（`RUNTIME_BINDING_KEYS` 与 `buildRuntimeBindings`）。任何新 key 必须先 grep `presets/<preset>/` 证明已有 fragment 在 work-around 该值缺失（参考 #32 audit）。例外：与新 fragments 同 issue 一并引入的 key（如 `issueKind` 配 commitment-gate fragments，#40）不在 audit 适用范围。
 - **`QueueItem` 索引签名**：preset.toml 没有声明 item 字段 schema，preset 拼错 `item.<f>` 会通过 `stringifyBindingValue` 静默生成空串。可加 `[item.fields]` schema 表把这类错误移到 preset 加载期。独立 issue 评估。
 
 ## Tech Stack

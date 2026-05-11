@@ -64,6 +64,7 @@ const EXPECTED_VARIABLE_KEYS = [
 	"ISSUE_PR",
 	"ISSUE_STATUS",
 	"ISSUE_LAST_RUN_ID",
+	"ISSUE_KIND",
 ] as const
 
 describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
@@ -88,7 +89,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		}
 	})
 
-	test("each phase declares all 25 variable bindings with parsed sources", async () => {
+	test("each phase declares all 26 variable bindings with parsed sources", async () => {
 		const preset = await loadPreset(BUNDLED_PRESET_DIR)
 		for (const phase of preset.phases) {
 			const keys = phase.variables.map(([key]) => key)

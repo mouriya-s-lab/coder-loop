@@ -14,6 +14,7 @@ import {
 	makeIssueRunContext,
 	markIterationStarted,
 	markReviewStarted,
+	parseKindFromLabels,
 	renderFragmentIndex,
 	renderPrompt,
 	resolveBinding,
@@ -329,6 +330,7 @@ function makeFixtureRuntime(overrides: Partial<RuntimeBindings> = {}): RuntimeBi
 		runIdGeneration: "new",
 		resumedFromPhase: "",
 		resumedStartedAt: "",
+		issueKind: "",
 		...overrides,
 	}
 }
@@ -422,6 +424,7 @@ describe("renderPrompt with bundled preset", () => {
 			runIdGeneration: "resumed",
 			resumedFromPhase: preset.phases[0]!.name,
 			resumedStartedAt: "2026-05-10T11:50:00Z",
+			issueKind: "code",
 		})
 		const config = makeFixtureConfig({ requireBrowserEvidence: true })
 		const ctx: ResolveContext = { item, config, runtime }
@@ -456,6 +459,7 @@ describe("renderPrompt with bundled preset", () => {
 			`ISSUE_PR=${item.pr}`,
 			`ISSUE_STATUS=${item.status}`,
 			`ISSUE_LAST_RUN_ID=${item.lastRunId}`,
+			`ISSUE_KIND=${runtime.issueKind}`,
 		]
 		expect(rendered).toBe(expectedLines.join("\n"))
 	})
@@ -595,6 +599,7 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 			currentIssueFile: "/tmp/issue.md",
 			evidenceDir: "/tmp/evidence",
 			issueRun,
+			issueKind: null,
 		})
 		expect(runtime.runId).toBe("run-1")
 		expect(runtime.targetCwd).toBe(options.targetCwd)
@@ -602,6 +607,7 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 		expect(runtime.runIdGeneration).toBe("new")
 		expect(runtime.resumedFromPhase).toBe("")
 		expect(runtime.resumedStartedAt).toBe("")
+		expect(runtime.issueKind).toBe("")
 	})
 
 	test("buildRuntimeBindings exposes resumed values when issueRun.runIdGeneration === 'resumed'", async () => {
@@ -618,10 +624,42 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 			currentIssueFile: "/tmp/issue.md",
 			evidenceDir: "/tmp/evidence",
 			issueRun,
+			issueKind: "code",
 		})
 		expect(runtime.runIdGeneration).toBe("resumed")
 		expect(runtime.resumedFromPhase).toBe(preset.phases[0]!.name)
 		expect(runtime.resumedStartedAt).toBe("2026-05-10T11:50:00Z")
+		expect(runtime.issueKind).toBe("code")
+	})
+
+	test("buildRuntimeBindings maps issueKind null to empty string", async () => {
+		const preset = await bundledPreset()
+		const options = await makeFixtureOptions(preset)
+		const issueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null }
+		const runtime = buildRuntimeBindings({
+			options,
+			runId: "run-3",
+			currentIssueFile: "/tmp/issue.md",
+			evidenceDir: "/tmp/evidence",
+			issueRun,
+			issueKind: null,
+		})
+		expect(runtime.issueKind).toBe("")
+	})
+
+	test("buildRuntimeBindings passes through 'comment' kind unchanged", async () => {
+		const preset = await bundledPreset()
+		const options = await makeFixtureOptions(preset)
+		const issueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null }
+		const runtime = buildRuntimeBindings({
+			options,
+			runId: "run-4",
+			currentIssueFile: "/tmp/issue.md",
+			evidenceDir: "/tmp/evidence",
+			issueRun,
+			issueKind: "comment",
+		})
+		expect(runtime.issueKind).toBe("comment")
 	})
 
 	test("buildConfigBindings reads repository / baseBranch / requireBrowserEvidence from options", async () => {
@@ -639,5 +677,44 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 		expect(index.split("\n").length).toBe(preset.fragments.length)
 		expect(index.startsWith(`- ${preset.fragments[0]!.id} (${preset.fragments[0]!.role}): `)).toBe(true)
 		expect(index.includes(preset.fragments[0]!.path)).toBe(true)
+	})
+})
+
+describe("parseKindFromLabels", () => {
+	test("returns kind=null when no kind:* label is present (legacy issue path)", () => {
+		const result = parseKindFromLabels(["bug", "good first issue"])
+		expect(result).toEqual({ ok: true, kind: null })
+	})
+
+	test("returns kind=null when label list is empty", () => {
+		expect(parseKindFromLabels([])).toEqual({ ok: true, kind: null })
+	})
+
+	test("returns kind='code' for a single kind:code label", () => {
+		const result = parseKindFromLabels(["kind:code", "priority:high"])
+		expect(result).toEqual({ ok: true, kind: "code" })
+	})
+
+	test("returns kind='comment' for a single kind:comment label", () => {
+		const result = parseKindFromLabels(["kind:comment"])
+		expect(result).toEqual({ ok: true, kind: "comment" })
+	})
+
+	test("returns ok=false when both kind:code and kind:comment are present", () => {
+		const result = parseKindFromLabels(["kind:code", "kind:comment"])
+		expect(result.ok).toBe(false)
+		if (!result.ok) expect(result.error).toMatch(/expected exactly one kind:\* label, found 2/)
+	})
+
+	test("returns ok=false for unknown kind:* values", () => {
+		const result = parseKindFromLabels(["kind:spike"])
+		expect(result.ok).toBe(false)
+		if (!result.ok) expect(result.error).toMatch(/unknown kind label "kind:spike"/)
+	})
+
+	test("returns ok=false for empty kind: prefix value (kind: with nothing after)", () => {
+		const result = parseKindFromLabels(["kind:"])
+		expect(result.ok).toBe(false)
+		if (!result.ok) expect(result.error).toMatch(/unknown kind label "kind:"/)
 	})
 })
