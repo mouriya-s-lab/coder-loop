@@ -26,11 +26,11 @@ Past missions stay on disk after `mission complete`; do not start a new mission 
 
 ## What to copy
 
-| From (this dir) | To (target project) | Purpose |
+| From (this dir) | To (target project) | Placeholder handling |
 |---|---|---|
-| `role.md` | `<TARGET_DIR>/.coder-loop/runtime/supervisor/<MISSION>/role.md` | durable role contract |
-| `patrol-entry.md` | `<TARGET_DIR>/.coder-loop/runtime/supervisor/<MISSION>/patrol-entry.md` | cron re-entry prompt |
-| `bootstrap-skill.md` | `<TARGET_DIR>/.claude/skills/bootstrap/SKILL.md` | `/bootstrap` slash command |
+| `bootstrap-skill.md` | `<TARGET_DIR>/.claude/skills/bootstrap/SKILL.md` | **verbatim copy, no hand-edit** — resolves target dir / repo / log prefix / memory dir at runtime via Step 0 shell block |
+| `role.md` | `<TARGET_DIR>/.coder-loop/runtime/supervisor/<MISSION>/role.md` | mission-level placeholders need hand-edit on copy (see below) |
+| `patrol-entry.md` | `<TARGET_DIR>/.coder-loop/runtime/supervisor/<MISSION>/patrol-entry.md` | mission-level placeholders need hand-edit on copy (see below) |
 
 Plus seed an empty `<TARGET_DIR>/.coder-loop/runtime/supervisor/<MISSION>/log.md` with this header:
 
@@ -40,7 +40,7 @@ Plus seed an empty `<TARGET_DIR>/.coder-loop/runtime/supervisor/<MISSION>/log.md
 Append-only cross-patrol event stream. Each patrol invocation appends one concise dated entry only on meaningful events: decision, restart, stall suspicion, blocker, issue/runtime transition, PR result, mission completion. Local runtime state, must not be committed.
 ```
 
-## Placeholders to replace on copy
+## Placeholders in `role.md` / `patrol-entry.md` (replace on copy)
 
 - `<TARGET_DIR>` — absolute path to the target repo worktree (e.g. `/Users/mouriya/Ext/code/<repo>`).
 - `<TARGET_REPO>` — GitHub `owner/repo` slug (e.g. `Mouriya-Emma/<repo>`).
@@ -49,6 +49,8 @@ Append-only cross-patrol event stream. Each patrol invocation appends one concis
 - `<LOG_PREFIX>` — `/tmp` log-file prefix the loop uses for this mission (e.g. `coder-loop-<repo>-<mission>`).
 - `<MEMORY_PROJECT_DIR>` — the encoded path under `~/.claude/projects/` if the target uses auto-memory (e.g. `~/.claude/projects/-Users-mouriya-Ext-code-<repo>/memory/`); otherwise remove the row.
 - `<UPSTREAM_REPO_URL>` — only if the mission references an upstream; remove the line otherwise.
+
+`bootstrap-skill.md` no longer contains these placeholders — it derives `TARGET_DIR / TARGET_REPO / LOG_PREFIX / MEMORY_DIR` at runtime and reads mission-specific paths from the active mission's `role.md`.
 
 ## Where state actually lives — never duplicate
 
