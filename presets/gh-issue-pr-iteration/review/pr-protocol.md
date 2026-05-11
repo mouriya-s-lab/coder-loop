@@ -27,7 +27,7 @@ If no PR exists, continue only when the trace/handoff/live issue evidence indica
 
 Choose exactly one:
 
-- `pr_protocol_passed` → read `review/evidence-gate`.
+- `pr_protocol_passed` → read `review/title-intent-gate`.
 - `no_pr_semantic_review` → read `review/issue-closure-gate`.
 - `retry` → read `review/action-retry`.
 
