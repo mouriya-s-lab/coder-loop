@@ -106,6 +106,61 @@ role = "common"
 path = "common/state-contract.md"
 
 [[fragments]]
+id   = "contract"
+role = "common"
+path = "contract.md"
+
+[[fragments]]
+id   = "plan/index"
+role = "plan"
+path = "plan/index.md"
+
+[[fragments]]
+id   = "plan/intake"
+role = "plan"
+path = "plan/intake.md"
+
+[[fragments]]
+id   = "plan/classify"
+role = "plan"
+path = "plan/classify.md"
+
+[[fragments]]
+id   = "plan/decompose"
+role = "plan"
+path = "plan/decompose.md"
+
+[[fragments]]
+id   = "plan/checkpoint-author"
+role = "plan"
+path = "plan/checkpoint-author.md"
+
+[[fragments]]
+id   = "plan/adversarial-validate"
+role = "plan"
+path = "plan/adversarial-validate.md"
+
+[[fragments]]
+id   = "plan/create-issues"
+role = "plan"
+path = "plan/create-issues.md"
+
+[[fragments]]
+id   = "plan/init-queue"
+role = "plan"
+path = "plan/init-queue.md"
+
+[[fragments]]
+id   = "plan/handoff"
+role = "plan"
+path = "plan/handoff.md"
+
+[[fragments]]
+id   = "plan/final"
+role = "plan"
+path = "plan/final.md"
+
+[[fragments]]
 id   = "iter/index"
 role = "iter"
 path = "iter/index.md"
