@@ -180,6 +180,8 @@ export type IssueRunContext = {
 	resumedStartedAt: string | null
 }
 
+export type IssueKind = "code" | "comment" | null
+
 const RUNTIME_BINDING_KEYS = [
 	"runId",
 	"targetCwd",
@@ -198,6 +200,7 @@ const RUNTIME_BINDING_KEYS = [
 	"runIdGeneration",
 	"resumedFromPhase",
 	"resumedStartedAt",
+	"issueKind",
 ] as const
 
 type RuntimeBindingKey = (typeof RUNTIME_BINDING_KEYS)[number]
@@ -340,6 +343,14 @@ async function main() {
 		console.error(`Dry run: workflow=${options.workflowPath}`)
 		console.error(`Dry run: state=${options.statePath}`)
 		console.error(`Dry run: selected=${selected ? getItemId(selected.item, options.preset) : "none"}`)
+		if (selected) {
+			const kindResult = await fetchIssueKind(options.repository, getItemId(selected.item, options.preset))
+			if (!kindResult.ok) {
+				console.error(`Dry run: issue kind label check failed: ${kindResult.error}`)
+				process.exit(1)
+			}
+			console.error(`Dry run: kind=${kindResult.kind ?? "<none>"}`)
+		}
 		return
 	}
 
@@ -384,6 +395,7 @@ async function main() {
 					currentIssueFile: "",
 					evidenceDir: options.evidenceRootDir,
 					issueRun: fallbackIssueRun,
+					issueKind: null,
 				}),
 			}
 			await runReview(options, fallbackRunId, fallbackCtx)
@@ -403,6 +415,9 @@ async function main() {
 		const iterPhase = phases[0]
 		const reviewPhase = phases[phases.length - 1]
 		if (!iterPhase || !reviewPhase) fail("preset must define at least one phase")
+		const kindResult = await fetchIssueKind(options.repository, selectedId)
+		if (!kindResult.ok) fail(`Issue kind label check failed: ${kindResult.error}`)
+		log(`Issue #${selectedId} kind=${kindResult.kind ?? "<none>"}`)
 		const ctx: ResolveContext = {
 			item: selected.item,
 			config: buildConfigBindings(options),
@@ -412,6 +427,7 @@ async function main() {
 				currentIssueFile: selected.issueFile,
 				evidenceDir: selected.evidenceDir,
 				issueRun,
+				issueKind: kindResult.kind,
 			}),
 		}
 
@@ -1011,6 +1027,7 @@ export function buildRuntimeBindings(input: {
 	currentIssueFile: string | null
 	evidenceDir: string | null
 	issueRun: IssueRunContext
+	issueKind: IssueKind
 }): RuntimeBindings {
 	return {
 		runId: input.runId,
@@ -1030,7 +1047,60 @@ export function buildRuntimeBindings(input: {
 		runIdGeneration: input.issueRun.runIdGeneration,
 		resumedFromPhase: input.issueRun.resumedFromPhase ?? "",
 		resumedStartedAt: input.issueRun.resumedStartedAt ?? "",
+		issueKind: input.issueKind ?? "",
 	}
+}
+
+export type ParsedIssueKind =
+	| { ok: true; kind: IssueKind }
+	| { ok: false; error: string }
+
+export function parseKindFromLabels(labelNames: readonly string[]): ParsedIssueKind {
+	const kindLabels = labelNames.filter((name) => name.startsWith("kind:"))
+	if (kindLabels.length === 0) return { ok: true, kind: null }
+	if (kindLabels.length > 1) {
+		return { ok: false, error: `expected exactly one kind:* label, found ${kindLabels.length}: ${kindLabels.join(", ")}` }
+	}
+	const value = kindLabels[0]!.slice("kind:".length)
+	if (value !== "code" && value !== "comment") {
+		return { ok: false, error: `unknown kind label "kind:${value}" (allowed: kind:code, kind:comment)` }
+	}
+	return { ok: true, kind: value }
+}
+
+export async function fetchIssueKind(repository: string | null, issueId: string): Promise<ParsedIssueKind> {
+	if (repository === null) return { ok: true, kind: null }
+	return new Promise((resolveResult) => {
+		const child = spawn("gh", ["issue", "view", issueId, "--repo", repository, "--json", "labels", "--jq", "[.labels[].name]"], {
+			stdio: ["ignore", "pipe", "pipe"],
+		})
+		const out: Buffer[] = []
+		const err: Buffer[] = []
+		child.stdout.on("data", (chunk: Buffer) => out.push(chunk))
+		child.stderr.on("data", (chunk: Buffer) => err.push(chunk))
+		child.on("error", (error) => {
+			resolveResult({ ok: false, error: `gh issue view failed to spawn: ${error.message}` })
+		})
+		child.on("close", (code) => {
+			if (code !== 0) {
+				const stderr = Buffer.concat(err).toString("utf-8").trim()
+				resolveResult({ ok: false, error: `gh issue view exited ${code} for ${repository}#${issueId}: ${stderr}` })
+				return
+			}
+			const stdout = Buffer.concat(out).toString("utf-8").trim()
+			try {
+				const parsed: unknown = JSON.parse(stdout)
+				if (!Array.isArray(parsed) || !parsed.every((entry) => typeof entry === "string")) {
+					resolveResult({ ok: false, error: `gh issue view returned non-string-array labels for ${repository}#${issueId}: ${stdout}` })
+					return
+				}
+				resolveResult(parseKindFromLabels(parsed))
+			} catch (parseError) {
+				const message = parseError instanceof Error ? parseError.message : String(parseError)
+				resolveResult({ ok: false, error: `gh issue view returned invalid JSON for ${repository}#${issueId}: ${message}` })
+			}
+		})
+	})
 }
 
 export function buildConfigBindings(options: LoopOptions): ConfigBindings {
