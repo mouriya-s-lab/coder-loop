@@ -2,9 +2,9 @@
 
 读者：维护 bundled preset 的人——加 / 改 / 删 fragment，调整 review gate 顺序，或想搞清楚某条 trace 走的是哪条链。
 
-读完后你能：照着图找到任意 fragment 的 verdict 出口与下一跳；理解 `ISSUE_KIND` 怎么在 iter 链早期分流；理解 review 13-step 顺序里每个 gate 的 fail-fast 边界。
+读完后你能：照着图找到任意 fragment 的 verdict 出口与下一跳；理解 plan 链 9 个 verdict 的回退路径；理解 `ISSUE_KIND` 怎么在 iter 链早期分流；理解 review 13-step 顺序里每个 gate 的 fail-fast 边界。
 
-不在范围内：preset.toml 字段语义（看 [preset-authoring](./preset-authoring.md)）；写 issue / PR 内容（看用户级 skill `writing-issue` / `writing-pr` / `review-pr`）。
+不在范围内：preset.toml 字段语义（看 [preset-authoring](./preset-authoring.md)）；写 issue / PR 内容（看 `presets/gh-issue-pr-iteration/contract.md` + 用户级 skill `writing-issue` / `writing-pr` / `review-pr`）。
 
 ---
 
@@ -15,9 +15,9 @@
 | `item.idField` | `issue`（GitHub issue number） |
 | `statuses.continuable` | `queued / in_progress / changes_requested` |
 | `statuses.terminal` | `blocked / moot / done` |
-| phases | `iteration` → `review`（两段固定顺序） |
+| phases | `iteration` → `review`（两段固定顺序；planning 不在 phases 内，由 `/dev-plan` slash command 入口驱动） |
 | `agent.binary` | `claude` |
-| fragments | 32 个，分布在 `common/ / iter/ / review/` 三个目录 |
+| fragments | 43 个，分布在 `common/ / plan/ / iter/ / review/` 四个目录 |
 
 `item` 字段（除 `issue / status` 外）：
 
@@ -36,15 +36,29 @@ status 字面量都是 preset 字符串，引擎只识别 `continuable / termina
 
 ---
 
-## 2. Fragment 全集（32）
+## 2. Fragment 全集（43）
 
 按目录列出全部 fragment id：
 
-**common/** — 程序↔agent 边界、GitHub 路由、状态文件不变量（iter / review 入口都读）
+**common/** — 程序↔agent 边界、GitHub 路由、状态文件不变量、preset 内 issue/PR/review 解析契约（plan / iter / review 入口都读）
 
 - `common/runtime-contract`
 - `common/github-routing`
 - `common/state-contract`
+- `contract` — preset 的 issue body / PR body / review gate 解析规则，override 用户级 `writing-issue` skill
+
+**plan/** — planning phase 内部，10 个（仅 `/dev-plan` slash command 进入）
+
+- `plan/index` — phase 入口
+- `plan/intake`
+- `plan/classify`
+- `plan/decompose`
+- `plan/checkpoint-author`
+- `plan/adversarial-validate`
+- `plan/create-issues`
+- `plan/init-queue`
+- `plan/handoff`
+- `plan/final`
 
 **iter/** — iteration phase 内部，9 个
 
@@ -81,11 +95,69 @@ status 字面量都是 preset 字符串，引擎只识别 `continuable / termina
 - `review/global-assessment`
 - `review/final`
 
-fragment 总数 = 3 + 9 + 20 = 32，与 `presets/gh-issue-pr-iteration/preset.toml` 的 `[[fragments]]` 块数一致。
+fragment 总数 = 4 + 10 + 9 + 20 = 43，与 `presets/gh-issue-pr-iteration/preset.toml` 的 `[[fragments]]` 块数一致。
 
 ---
 
-## 3. Iteration phase 跳转
+## 3. Planning phase 跳转
+
+`/dev-plan` 是 thin-shell slash command（`.claude/commands/dev-plan.md`），把 `$ARGUMENTS` 作为 intake 输入交给 plan 链。planning 不消费 queue item（与 iter / review 的 per-item 不同），因此 plan 不是 `preset.phases` 成员；slash command 直接读 `plan/index.md`。
+
+`plan/index` 强制先读 `<preset>/contract.md` + 用户级 `writing-issue` skill + 目标 `<target>/.coder-loop/workflow.md`，然后进 `plan/intake`。
+
+```
+plan/intake
+  ├─ intake_clear                    → plan/classify
+  ├─ intake_needs_clarification      → plan/handoff
+  └─ intake_blocked                  → plan/handoff
+
+plan/classify
+  ├─ classified                      → plan/decompose
+  ├─ classification_blocked          → plan/handoff
+  └─ classification_no_work          → plan/handoff
+
+plan/decompose
+  ├─ atomic_set_ready                → plan/checkpoint-author
+  ├─ not_atomic_resplit              → plan/classify        (返回 classify 重切)
+  └─ decompose_blocked               → plan/handoff
+
+plan/checkpoint-author
+  ├─ checkpoints_authored            → plan/adversarial-validate
+  ├─ cannot_author_blocked           → plan/handoff
+  └─ not_atomic_resplit              → plan/decompose
+
+plan/adversarial-validate
+  ├─ validated                       → plan/create-issues
+  ├─ sharpen_checkpoints             → plan/checkpoint-author (回上一步)
+  ├─ sharpen_resplit                 → plan/decompose
+  └─ validation_blocked              → plan/handoff
+
+plan/create-issues
+  ├─ issues_created                  → plan/init-queue
+  └─ creation_failed                 → plan/handoff          (含已创建 / 未创建分组)
+
+plan/init-queue
+  ├─ queue_initialized               → plan/handoff
+  └─ queue_init_failed               → plan/handoff
+```
+
+不论哪条分支，最终收敛到 `plan/handoff` → `plan/final`：
+
+```
+plan/handoff
+  ├─ handoff_written                 → plan/final
+  └─ handoff_failed                  → plan/final           (失败把 file-write 错误写进 mandatory summary)
+```
+
+`plan/final` 无 `## Output verdict`，是 planning 的硬终点，打印 `=== planning final ===` block 供 slash command shell grep。
+
+### Planning 不可做的事
+
+`plan/index` 明确禁止：开 PR、merge PR、关 issue、写 review-side state（这些是 review 的职责）；删 `.dev-loop`（与 plan 无关）；越过 `contract.md` 自行决定 issue 形态。
+
+---
+
+## 4. Iteration phase 跳转
 
 `iter/index` 强制先读 `common/runtime-contract` → `common/github-routing` → `common/state-contract`，然后进 `iter/read-context`。
 
@@ -144,7 +216,7 @@ iter/handoff
 
 ---
 
-## 4. Review phase 顺序（13 步）
+## 5. Review phase 顺序（13 步）
 
 `review/index` 强制：
 
@@ -268,7 +340,7 @@ review/update-state
 
 ---
 
-## 5. `ISSUE_KIND` 在 review 链的分流
+## 6. `ISSUE_KIND` 在 review 链的分流
 
 `ISSUE_KIND` 由引擎在 spawn 前 `gh issue view --json labels` fetch，注入 prompt 模板。三个 review gate 用它自跳过：
 
@@ -284,19 +356,21 @@ review/update-state
 
 ---
 
-## 6. 实战：从 trace 反推走了哪条链
+## 7. 实战：从 trace 反推走了哪条链
 
-trace 文件在 `<target>/.coder-loop/runtime/logs/<runId>.<phase>.txt`。每个 fragment 会输出自己的 verdict 字面量（如 `verification_passed`），按 §3 / §4 的图就能反推路径。
+trace 文件在 `<target>/.coder-loop/runtime/logs/<runId>.<phase>.txt`。每个 fragment 会输出自己的 verdict 字面量（如 `verification_passed`），按 §3 / §4 / §5 的图就能反推路径。
 
 常见路径示例：
 
-- **顺利 PR-merge**：`read-context (context_ready) → classify-scope (needs_implementation) → implement (ready_for_verification) → verify-evidence (passed) → commit-pr (pr_ready) → handoff (written) → final`；review：`read-evidence → trace-honesty → pr-protocol → title-intent-gate (aligned) → evidence-gate (passed) → commitment-gate (passed) → spike-followup-gate (skipped) → code-gate (passed) → issue-closure-gate (accepted_pr) → action-accept-pr (closed) → update-state → global-assessment → final`.
+- **Planning 顺利**：`plan/intake (intake_clear) → plan/classify (classified) → plan/decompose (atomic_set_ready) → plan/checkpoint-author (checkpoints_authored) → plan/adversarial-validate (validated) → plan/create-issues (issues_created) → plan/init-queue (queue_initialized) → plan/handoff (handoff_written) → plan/final`.
+- **Planning intake 不清**：`plan/intake (intake_needs_clarification) → plan/handoff (handoff_written) → plan/final (verdict: intake_needs_clarification)`；operator 看 handoff 文件回答问题后重跑 `/dev-plan`.
+- **顺利 PR-merge**：`iter/read-context (context_ready) → classify-scope (needs_implementation) → implement (ready_for_verification) → verify-evidence (passed) → commit-pr (pr_ready) → handoff (written) → final`；review：`read-evidence → trace-honesty → pr-protocol → title-intent-gate (aligned) → evidence-gate (passed) → commitment-gate (passed) → spike-followup-gate (skipped) → code-gate (passed) → issue-closure-gate (accepted_pr) → action-accept-pr (closed) → update-state → global-assessment → final`.
 - **Spike 成功**：`read-context (ready, kind=comment) → spike-comment (posted) → handoff → final`；review：`... → title-intent-gate (skipped) → evidence-gate (passed) → commitment-gate (skipped) → spike-followup-gate (passed) → code-gate (passed, no PR) → issue-closure-gate (accepted_no_pr) → action-accept-no-pr → ...`.
 - **commitment-gate 失败 retry**：`... → commitment-gate (failed) → action-retry → update-state (retry) → global-assessment → final`；iter 下轮重启从 implement 开始。
 
 ---
 
-## 7. 改 fragment 链的检查清单
+## 8. 改 fragment 链的检查清单
 
 加 / 删 / 改 fragment 时：
 
@@ -304,7 +378,7 @@ trace 文件在 `<target>/.coder-loop/runtime/logs/<runId>.<phase>.txt`。每个
 2. 改 `preset.toml` 的 `[[fragments]]` 块（增 / 减条目）。
 3. 改 `iter/index.md` 或 `review/index.md` 的 phase 顺序段。
 4. 改 `src/preset.test.ts` 的 `EXPECTED_FRAGMENTS` 数组。
-5. 改本文档（§2 全集列表 / §3-4 跳转图 / §4 phase 顺序表）。
+5. 改本文档（§2 全集列表 / §3-5 跳转图 / §5 phase 顺序表）。
 6. 跑 `bun test`（preset.test.ts 会验证 fragment 集合一致性）+ `bun x tsc --noEmit`.
 
 漏改任一处 → preset load throws 或 test 红或文档说谎。
