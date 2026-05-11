@@ -41,7 +41,7 @@ Review does not create missing workflow evidence. If evidence is absent, stale, 
 
 Choose exactly one:
 
-- `evidence_passed` → read `review/code-gate`.
+- `evidence_passed` → read `review/commitment-gate`.
 - `retry` → read `review/action-retry`.
 - `blocked` → read `review/action-blocked`.
 
