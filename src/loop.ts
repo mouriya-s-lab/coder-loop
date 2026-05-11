@@ -175,12 +175,9 @@ export type SelectedIssue = {
 }
 
 export type IssueRunContext = {
-	mode: "fresh" | "retry" | "resume-iteration" | "resume-review"
-	previousRunId: string | null
-	startedAt: string | null
-	branch: string | null
-	pr: number | null
-	status: string | null
+	runIdGeneration: "new" | "resumed"
+	resumedFromPhase: string | null
+	resumedStartedAt: string | null
 }
 
 const RUNTIME_BINDING_KEYS = [
@@ -198,10 +195,9 @@ const RUNTIME_BINDING_KEYS = [
 	"loopFile",
 	"presetDir",
 	"fragmentIndex",
-	"issueRunMode",
-	"recoveryMode",
-	"previousRunId",
-	"recoveryStartedAt",
+	"runIdGeneration",
+	"resumedFromPhase",
+	"resumedStartedAt",
 ] as const
 
 type RuntimeBindingKey = (typeof RUNTIME_BINDING_KEYS)[number]
@@ -378,7 +374,7 @@ async function main() {
 			log("No actionable issue selected; running review for global state assessment.")
 			const fallbackItem = makeFallbackItem()
 			const fallbackRunId = makeRunId(null)
-			const fallbackIssueRun: IssueRunContext = { mode: "fresh", previousRunId: null, startedAt: null, branch: null, pr: null, status: null }
+			const fallbackIssueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null }
 			const fallbackCtx: ResolveContext = {
 				item: fallbackItem,
 				config: buildConfigBindings(options),
@@ -401,7 +397,7 @@ async function main() {
 
 		const selectedId = getItemId(selected.item, options.preset)
 		const current = state.current && getCurrentId(state.current, options.preset) === selectedId ? state.current : null
-		const issueRun = makeIssueRunContext(selected.item, current, options.preset)
+		const issueRun = makeIssueRunContext(current)
 		const runId = current?.runId ?? makeRunId(selectedId)
 		const phases = options.preset.phases
 		const iterPhase = phases[0]
@@ -913,7 +909,6 @@ export function markIterationStarted(
 	const id = getItemId(item, preset)
 	const queueItem = state.queue.find((entry) => getItemId(entry, preset) === id)
 	if (!queueItem) fail(`Selected item "${id}" not found in state queue`)
-	queueItem.status = "in_progress"
 	if (countAttempt) queueItem.attempts = (queueItem.attempts ?? 0) + 1
 	queueItem.lastRunId = runId
 	const phases = preset.phases
@@ -939,28 +934,19 @@ export function markReviewStarted(state: LoopState, item: QueueItem, preset: Pre
 	}
 }
 
-export function makeIssueRunContext(item: QueueItem, current: CurrentRun | null, preset: Preset): IssueRunContext {
+export function makeIssueRunContext(current: CurrentRun | null): IssueRunContext {
 	if (current) {
-		const phases = preset.phases
-		const reviewPhase = phases[phases.length - 1]
-		const isReviewResume = reviewPhase !== undefined && current.phase === reviewPhase.name
 		return {
-			mode: isReviewResume ? "resume-review" : "resume-iteration",
-			previousRunId: current.runId,
-			startedAt: current.startedAt,
-			branch: item.branch,
-			pr: item.pr,
-			status: item.status,
+			runIdGeneration: "resumed",
+			resumedFromPhase: current.phase,
+			resumedStartedAt: current.startedAt,
 		}
 	}
 
 	return {
-		mode: item.status === "changes_requested" ? "retry" : "fresh",
-		previousRunId: item.lastRunId,
-		startedAt: null,
-		branch: item.branch,
-		pr: item.pr,
-		status: item.status,
+		runIdGeneration: "new",
+		resumedFromPhase: null,
+		resumedStartedAt: null,
 	}
 }
 
@@ -1041,10 +1027,9 @@ export function buildRuntimeBindings(input: {
 		loopFile: input.options.loopFile,
 		presetDir: input.options.preset.presetDir,
 		fragmentIndex: renderFragmentIndex(input.options.preset),
-		issueRunMode: input.issueRun.mode,
-		recoveryMode: input.issueRun.mode,
-		previousRunId: input.issueRun.previousRunId ?? "",
-		recoveryStartedAt: input.issueRun.startedAt ?? "",
+		runIdGeneration: input.issueRun.runIdGeneration,
+		resumedFromPhase: input.issueRun.resumedFromPhase ?? "",
+		resumedStartedAt: input.issueRun.resumedStartedAt ?? "",
 	}
 }
 

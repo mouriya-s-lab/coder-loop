@@ -182,12 +182,12 @@ describe("selectIssue", () => {
 })
 
 describe("markIterationStarted / markReviewStarted", () => {
-	test("markIterationStarted sets queue item status, increments attempts when fresh, writes state.current.phase to first phase", async () => {
+	test("markIterationStarted preserves queue item status, increments attempts when fresh, writes state.current.phase to first phase", async () => {
 		const preset = await bundledPreset()
 		const item = makeItem({ issue: 55, status: "queued", attempts: 0 })
 		const state = makeState({ queue: [item] })
 		markIterationStarted(state, item, preset, "run-X", true)
-		expect(state.queue[0]!.status).toBe("in_progress")
+		expect(state.queue[0]!.status).toBe("queued")
 		expect(state.queue[0]!.attempts).toBe(1)
 		expect(state.queue[0]!.lastRunId).toBe("run-X")
 		expect(state.current).not.toBeNull()
@@ -196,9 +196,19 @@ describe("markIterationStarted / markReviewStarted", () => {
 		expect(state.current![preset.item.idField]).toBe(55)
 	})
 
+	test("markIterationStarted preserves changes_requested status on retry", async () => {
+		const preset = await bundledPreset()
+		const item = makeItem({ issue: 55, status: "changes_requested", attempts: 2, lastRunId: "run-prev" })
+		const state = makeState({ queue: [item] })
+		markIterationStarted(state, item, preset, "run-X", true)
+		expect(state.queue[0]!.status).toBe("changes_requested")
+		expect(state.queue[0]!.attempts).toBe(3)
+		expect(state.queue[0]!.lastRunId).toBe("run-X")
+	})
+
 	test("markIterationStarted does not increment attempts when countAttempt=false (resume)", async () => {
 		const preset = await bundledPreset()
-		const item = makeItem({ issue: 55, status: "in_progress", attempts: 3 })
+		const item = makeItem({ issue: 55, status: "queued", attempts: 3 })
 		const state = makeState({ queue: [item] })
 		markIterationStarted(state, item, preset, "run-Y", false)
 		expect(state.queue[0]!.attempts).toBe(3)
@@ -207,7 +217,7 @@ describe("markIterationStarted / markReviewStarted", () => {
 
 	test("markReviewStarted writes state.current.phase to last phase, preserving id field type", async () => {
 		const preset = await bundledPreset()
-		const item = makeItem({ issue: 99, status: "in_progress" })
+		const item = makeItem({ issue: 99, status: "queued" })
 		const state = makeState({ queue: [item] })
 		markReviewStarted(state, item, preset, "run-Z")
 		expect(state.current).not.toBeNull()
@@ -218,47 +228,39 @@ describe("markIterationStarted / markReviewStarted", () => {
 })
 
 describe("makeIssueRunContext", () => {
-	test("fresh mode when no current and status is queued", async () => {
-		const preset = await bundledPreset()
-		const item = makeItem({ issue: 1, status: "queued" })
-		const ctx = makeIssueRunContext(item, null, preset)
-		expect(ctx.mode).toBe("fresh")
-		expect(ctx.previousRunId).toBeNull()
+	test("runIdGeneration=new when no current run, regardless of item status", async () => {
+		const ctx = makeIssueRunContext(null)
+		expect(ctx.runIdGeneration).toBe("new")
+		expect(ctx.resumedFromPhase).toBeNull()
+		expect(ctx.resumedStartedAt).toBeNull()
 	})
 
-	test("retry mode when status is changes_requested and no current", async () => {
+	test("runIdGeneration=resumed exposes current.phase and current.startedAt", async () => {
 		const preset = await bundledPreset()
-		const item = makeItem({ issue: 1, status: "changes_requested", lastRunId: "run-old" })
-		const ctx = makeIssueRunContext(item, null, preset)
-		expect(ctx.mode).toBe("retry")
-		expect(ctx.previousRunId).toBe("run-old")
-	})
-
-	test("resume-iteration when current.phase is the first phase", async () => {
-		const preset = await bundledPreset()
-		const item = makeItem({ issue: 1, status: "in_progress" })
 		const current: CurrentRun = {
 			phase: preset.phases[0]!.name,
 			runId: "run-resume",
 			startedAt: "2026-01-01T00:00:00Z",
 			issue: 1,
 		}
-		const ctx = makeIssueRunContext(item, current, preset)
-		expect(ctx.mode).toBe("resume-iteration")
-		expect(ctx.previousRunId).toBe("run-resume")
+		const ctx = makeIssueRunContext(current)
+		expect(ctx.runIdGeneration).toBe("resumed")
+		expect(ctx.resumedFromPhase).toBe(preset.phases[0]!.name)
+		expect(ctx.resumedStartedAt).toBe("2026-01-01T00:00:00Z")
 	})
 
-	test("resume-review when current.phase is the last phase", async () => {
+	test("runIdGeneration=resumed when current.phase is the last phase exposes that phase verbatim", async () => {
 		const preset = await bundledPreset()
-		const item = makeItem({ issue: 1, status: "in_progress" })
+		const last = preset.phases[preset.phases.length - 1]!.name
 		const current: CurrentRun = {
-			phase: preset.phases[preset.phases.length - 1]!.name,
+			phase: last,
 			runId: "run-resume",
 			startedAt: "2026-01-01T00:00:00Z",
 			issue: 1,
 		}
-		const ctx = makeIssueRunContext(item, current, preset)
-		expect(ctx.mode).toBe("resume-review")
+		const ctx = makeIssueRunContext(current)
+		expect(ctx.runIdGeneration).toBe("resumed")
+		expect(ctx.resumedFromPhase).toBe(last)
 	})
 })
 
@@ -324,10 +326,9 @@ function makeFixtureRuntime(overrides: Partial<RuntimeBindings> = {}): RuntimeBi
 		loopFile: "/tmp/fixture-cwd/.dev-loop",
 		presetDir: "/tmp/fixture-preset",
 		fragmentIndex: "- f1 (common): /tmp/fixture-preset/f1.md",
-		issueRunMode: "fresh",
-		recoveryMode: "fresh",
-		previousRunId: "",
-		recoveryStartedAt: "",
+		runIdGeneration: "new",
+		resumedFromPhase: "",
+		resumedStartedAt: "",
 		...overrides,
 	}
 }
@@ -405,22 +406,22 @@ describe("resolveBinding", () => {
 })
 
 describe("renderPrompt with bundled preset", () => {
-	test("substitutes all 25 KEY placeholders in a synthetic template (byte-equal expected output)", async () => {
+	test("substitutes all KEY placeholders in a synthetic template (byte-equal expected output)", async () => {
 		const preset = await bundledPreset()
 		const phase = preset.phases[0]!
 		const item = makeItem({
 			issue: 131,
-			status: "in_progress",
+			status: "changes_requested",
 			branch: "feature/test",
 			pr: 99,
+			lastRunId: "run-prev",
 		})
 		const runtime = makeFixtureRuntime({
 			runId: "run-2026-05-10-12-00-00-issue-131",
 			fragmentIndex: "- frag1 (common): /tmp/fixture-preset/frag1.md\n- frag2 (review): /tmp/fixture-preset/frag2.md",
-			issueRunMode: "resume-iteration",
-			recoveryMode: "resume-iteration",
-			previousRunId: "run-prev",
-			recoveryStartedAt: "2026-05-10T11:50:00Z",
+			runIdGeneration: "resumed",
+			resumedFromPhase: preset.phases[0]!.name,
+			resumedStartedAt: "2026-05-10T11:50:00Z",
 		})
 		const config = makeFixtureConfig({ requireBrowserEvidence: true })
 		const ctx: ResolveContext = { item, config, runtime }
@@ -448,13 +449,13 @@ describe("renderPrompt with bundled preset", () => {
 			`PROMPT_ROOT=${runtime.presetDir}`,
 			`PROMPT_FRAGMENT_INDEX=${runtime.fragmentIndex}`,
 			`REQUIRE_BROWSER_EVIDENCE=${String(config.requireBrowserEvidence)}`,
-			`ISSUE_RUN_MODE=${runtime.issueRunMode}`,
-			`RECOVERY_MODE=${runtime.recoveryMode}`,
-			`PREVIOUS_RUN_ID=${runtime.previousRunId}`,
-			`RECOVERY_STARTED_AT=${runtime.recoveryStartedAt}`,
+			`RUN_ID_GENERATION=${runtime.runIdGeneration}`,
+			`RESUMED_FROM_PHASE=${runtime.resumedFromPhase}`,
+			`RESUMED_STARTED_AT=${runtime.resumedStartedAt}`,
 			`ISSUE_BRANCH=${item.branch}`,
 			`ISSUE_PR=${item.pr}`,
 			`ISSUE_STATUS=${item.status}`,
+			`ISSUE_LAST_RUN_ID=${item.lastRunId}`,
 		]
 		expect(rendered).toBe(expectedLines.join("\n"))
 	})
@@ -490,11 +491,11 @@ describe("renderPrompt with bundled preset", () => {
 	test("smoke: render real review-entry.md leaves no {{[A-Z_]+}} placeholders", async () => {
 		const preset = await bundledPreset()
 		const phase = preset.phases[preset.phases.length - 1]!
-		const item = makeItem({ issue: 131, status: "in_progress", branch: "feature/x", pr: 99 })
+		const item = makeItem({ issue: 131, status: "queued", branch: "feature/x", pr: 99, lastRunId: "run-prev" })
 		const ctx: ResolveContext = {
 			item,
 			config: makeFixtureConfig(),
-			runtime: makeFixtureRuntime({ issueRunMode: "resume-review", recoveryMode: "resume-review" }),
+			runtime: makeFixtureRuntime({ runIdGeneration: "resumed", resumedFromPhase: phase.name, resumedStartedAt: "2026-05-10T11:50:00Z" }),
 		}
 		const template = await readFile(phase.prompt, "utf-8")
 		const rendered = renderPrompt(template, phase, ctx)
@@ -587,7 +588,7 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 	test("buildRuntimeBindings exposes all whitelisted runtime keys", async () => {
 		const preset = await bundledPreset()
 		const options = await makeFixtureOptions(preset)
-		const issueRun: IssueRunContext = { mode: "fresh", previousRunId: null, startedAt: null, branch: null, pr: null, status: null }
+		const issueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null }
 		const runtime = buildRuntimeBindings({
 			options,
 			runId: "run-1",
@@ -598,10 +599,29 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 		expect(runtime.runId).toBe("run-1")
 		expect(runtime.targetCwd).toBe(options.targetCwd)
 		expect(runtime.presetDir).toBe(preset.presetDir)
-		expect(runtime.previousRunId).toBe("")
-		expect(runtime.recoveryStartedAt).toBe("")
-		expect(runtime.issueRunMode).toBe("fresh")
-		expect(runtime.recoveryMode).toBe("fresh")
+		expect(runtime.runIdGeneration).toBe("new")
+		expect(runtime.resumedFromPhase).toBe("")
+		expect(runtime.resumedStartedAt).toBe("")
+	})
+
+	test("buildRuntimeBindings exposes resumed values when issueRun.runIdGeneration === 'resumed'", async () => {
+		const preset = await bundledPreset()
+		const options = await makeFixtureOptions(preset)
+		const issueRun: IssueRunContext = {
+			runIdGeneration: "resumed",
+			resumedFromPhase: preset.phases[0]!.name,
+			resumedStartedAt: "2026-05-10T11:50:00Z",
+		}
+		const runtime = buildRuntimeBindings({
+			options,
+			runId: "run-2",
+			currentIssueFile: "/tmp/issue.md",
+			evidenceDir: "/tmp/evidence",
+			issueRun,
+		})
+		expect(runtime.runIdGeneration).toBe("resumed")
+		expect(runtime.resumedFromPhase).toBe(preset.phases[0]!.name)
+		expect(runtime.resumedStartedAt).toBe("2026-05-10T11:50:00Z")
 	})
 
 	test("buildConfigBindings reads repository / baseBranch / requireBrowserEvidence from options", async () => {

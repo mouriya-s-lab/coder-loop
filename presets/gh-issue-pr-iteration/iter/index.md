@@ -19,7 +19,7 @@ Then read `iter/read-context`.
 Iteration produces implementation signal:
 
 - understand selected issue scope;
-- continue existing branch/PR when in retry or recovery mode;
+- continue existing branch/PR when retrying (`ISSUE_STATUS == changes_requested`) or when resuming an interrupted iteration (`RUN_ID_GENERATION == resumed`);
 - implement one complete deliverable when required;
 - run required verification and collect reviewer-visible evidence;
 - create/update the implementation PR when code changed;

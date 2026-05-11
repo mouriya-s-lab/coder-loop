@@ -119,7 +119,9 @@ extraArgs = []
 | `config.<field>` | target `.coder-loop/runtime/config.{json,toml}` 的字段 | 字段不存在 → throw；`null/undefined` → throw；类型同上 |
 | `runtime.<key>` | 引擎计算的运行期值 | key 必须在引擎白名单内（见下）；否则 throw |
 
-`runtime.*` 白名单（18 key）：`runId / targetCwd / workflowPath / sharedContextPath / statePath / currentIssueFile / issueDir / evidenceDir / evidenceRootDir / logDir / traceFile / loopFile / presetDir / fragmentIndex / issueRunMode / recoveryMode / previousRunId / recoveryStartedAt`。新增一个白名单 key 必须改引擎源码（`RUNTIME_BINDING_KEYS` 与 `buildRuntimeBindings` 两处同时改）。
+`runtime.*` 白名单（17 key）：`runId / targetCwd / workflowPath / sharedContextPath / statePath / currentIssueFile / issueDir / evidenceDir / evidenceRootDir / logDir / traceFile / loopFile / presetDir / fragmentIndex / runIdGeneration / resumedFromPhase / resumedStartedAt`。新增一个白名单 key 必须改引擎源码（`RUNTIME_BINDING_KEYS` 与 `buildRuntimeBindings` 两处同时改）。
+
+`runIdGeneration` 是引擎对「这次 spawn 是新生成 runId 还是从 state.current 恢复」的客观回答；preset 自行用这一信号 + `item.status` + `item.lastRunId` 派生 fresh / retry / resume 三种调度形态，引擎不识别这些领域分类。
 
 ### Target 选 preset 的方式
 
@@ -180,12 +182,14 @@ bundled 默认 preset，编码两角色（iteration + review）GitHub issue/PR �
 
 ### 状态机语义
 
-- `queued`：尚未开始
-- `in_progress`：iteration 已 spawn 但 review 未结论
+- `queued`：尚未开始（fresh / mid-iteration / mid-review 状态都用它——「正在跑」由 `state.current.id == X` 表达，而不是 status 字段）
+- `in_progress`：legacy 值，引擎不再主动写入；仍接受历史 state.json 含此状态的 item，prompt 可以选择继续写它
 - `changes_requested`：review 要求 iteration 重做
 - `blocked`：spike 失败 / 设计问题，需人介入
 - `moot`：上游已解决，不再跟
 - `done`：review 判定关闭
+
+所有 status 字面量都是 preset 自己的字符串，引擎只识别 `continuable / terminal` 二元集合。除上述外的转移（包括 `queued → done` 等）也合法，由 preset/agent 通过 prompt 写入 state.json。
 
 iteration agent：实现 + 验证 checkpoint + 写证据 + 开/更新 PR + 写 handoff。
 review agent：读 trace + 读 GitHub live state + 决定 status 转移 + post review comments + close issue/PR。
