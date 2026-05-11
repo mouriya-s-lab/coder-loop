@@ -12,6 +12,7 @@ import { spawn } from "node:child_process"
 import { appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises"
 import { createWriteStream, type WriteStream } from "node:fs"
 import { isAbsolute, relative, resolve } from "node:path"
+import { dispatchSubcommand } from "./install-commands"
 
 const PKG_ROOT = resolve(import.meta.dir, "..")
 const DEFAULT_PRESET_NAME = "gh-issue-pr-iteration"
@@ -306,6 +307,11 @@ function rejectInlineValue(value: string | null, name: string): void {
 }
 
 async function main() {
+	const firstArg = process.argv[2]
+	if (firstArg === "install" || firstArg === "uninstall" || firstArg === "doctor") {
+		const handled = await dispatchSubcommand(firstArg, process.argv.slice(3))
+		if (handled) return
+	}
 	const rawArgs = parseArgs()
 	const targetCwd = resolve(rawArgs.targetCwd ?? process.cwd())
 	const configPath = await resolveConfigPath(targetCwd, rawArgs.configPath)
@@ -690,9 +696,22 @@ async function loadConfig(path: string): Promise<LoopConfig> {
 		requireAgentBrowserScreenshots: evidence ? optionalBoolean(evidence, "requireAgentBrowserScreenshots") : null,
 		claudeBinary: claude ? optionalString(claude, "binary") : null,
 		claudeExtraArgs: claude ? (optionalStringArray(claude, "extraArgs") ?? []) : [],
-		preset: optionalString(root, "preset"),
+		preset: readPresetName(root),
 		presetPath: optionalString(root, "presetPath"),
 	}
+}
+
+function readPresetName(root: Record<string, unknown>): string | null {
+	const value = root.preset
+	if (value === undefined || value === null) return null
+	if (typeof value === "string") return value
+	if (typeof value === "object" && !Array.isArray(value)) {
+		const obj = value as Record<string, unknown>
+		const name = obj.name
+		if (typeof name !== "string") fail("config.preset.name must be a string when preset is an object")
+		return name
+	}
+	fail(`config.preset must be a string or { name, version } object`)
 }
 
 export function resolvePresetDir(
