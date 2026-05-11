@@ -51,8 +51,8 @@ If a row's `Command` itself errors out for environmental reasons (gh auth, missi
 
 Choose exactly one:
 
-- `commitment_passed` → read `review/code-gate`. All rows of both tables matched their Expect column.
-- `commitment_skipped` → read `review/code-gate`. Gate did not apply (ISSUE_KIND ≠ code, or no `## 验收标准` table in body). Record the skip reason in the trace.
+- `commitment_passed` → read `review/spike-followup-gate`. All rows of both tables matched their Expect column.
+- `commitment_skipped` → read `review/spike-followup-gate`. Gate did not apply (ISSUE_KIND ≠ code, or no `## 验收标准` table in body). Record the skip reason in the trace.
 - `commitment_failed` → read `review/action-retry`. Cite every failing row's #, Check, Command, actual vs Expect. The retry feedback must enumerate all failing rows; iteration cannot fix them piecemeal.
 
-Do not advance to `review/code-gate` while any commitment row is in `不匹配 / changes_requested` state.
+Do not advance past this gate while any commitment row is in `不匹配 / changes_requested` state.

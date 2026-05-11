@@ -171,6 +171,11 @@ role = "review"
 path = "review/pr-protocol.md"
 
 [[fragments]]
+id   = "review/title-intent-gate"
+role = "review"
+path = "review/title-intent-gate.md"
+
+[[fragments]]
 id   = "review/evidence-gate"
 role = "review"
 path = "review/evidence-gate.md"
@@ -179,6 +184,11 @@ path = "review/evidence-gate.md"
 id   = "review/commitment-gate"
 role = "review"
 path = "review/commitment-gate.md"
+
+[[fragments]]
+id   = "review/spike-followup-gate"
+role = "review"
+path = "review/spike-followup-gate.md"
 
 [[fragments]]
 id   = "review/code-gate"
