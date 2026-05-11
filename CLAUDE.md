@@ -94,12 +94,9 @@ starter 位置：
 
 记录 `src/loop.ts` 仍接受 PR-shaped 概念的位置，作为下一轮重构的工单参考。这些不是 bug，是 Stage 1-3 重构尚未触及的区域：
 
-- **`markIterationStarted`**：写死 `queueItem.status = "in_progress"`。该字面量是 `gh-issue-pr-iteration` 的 status 之一；若用其他 preset 跑生产路径（非 dry-run），状态机会偏。Stage 4 #9 § E 的范围。
-- **status JSON schema**：引擎写出的 agent status JSON 含 `branch / pr / lastRunId` 字段，是 PR 概念。schema 应只含 `id / phase / runId / startedAt / exitCode / signal / outputPath / statusPath`，preset-specific 字段由 spawn 钩子追加。Stage 4 #9 § E。
-- **Target config 仅 JSON**：当前 `loadConfig` 只读 `config.json`；preset 字段已在 Stage 1 PR 5 引入但 TOML 解析尚未对外。Stage 4 #9 § A。
-- **`--check-runtime` 不校验 status transition**：preset 可声明 `[[transitions]]` 表，引擎可在 strict 模式下校验 `recentRuns` 相邻条目转移合法性。Stage 4 #9 § B。
-- **supervisor bootstrap 要手动改占位符**：项目级 bootstrap skill 应自动 dispatch 到 `<TARGET>/.coder-loop/runtime/supervisor/` 下最近活动 mission。Stage 4 #9 § C。
-- **runtime.\* 白名单**：18 key，新增需改源码两处。候选追加：`lastPhaseOutput / queuePosition / elapsedSeconds`。Stage 4 #9 § D。
+- **supervisor bootstrap 要手动改占位符**：项目级 bootstrap skill 应自动 dispatch 到 `<TARGET>/.coder-loop/runtime/supervisor/` 下最近活动 mission（#31）。
+- **runtime.\* 白名单**：当前 17 key，新增需改源码两处（`RUNTIME_BINDING_KEYS` 与 `buildRuntimeBindings`）。候选追加：`lastPhaseOutput / queuePosition / elapsedSeconds`（#32）。
+- **`QueueItem` 索引签名**：preset.toml 没有声明 item 字段 schema，preset 拼错 `item.<f>` 会通过 `stringifyBindingValue` 静默生成空串。可加 `[item.fields]` schema 表把这类错误移到 preset 加载期。独立 issue 评估。
 
 ## Tech Stack
 

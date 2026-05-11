@@ -6,7 +6,7 @@ Implement one complete deliverable for the selected issue.
 
 ## Branch and PR continuity
 
-If issue run mode is retry or recovery mode is resume-iteration, continue the existing branch/PR/worktree state when present. Inspect the existing branch, PR, latest PR review/comment, handoff, trace, evidence directory, and dirty files. Do not restart from the base branch unless the existing branch/PR is unrelated to the selected issue.
+If this spawn is a retry (`ISSUE_STATUS` is `changes_requested` and `ISSUE_LAST_RUN_ID` is non-empty) or a resumed iteration (`RUN_ID_GENERATION` is `resumed` and `RESUMED_FROM_PHASE` is the iteration phase), continue the existing branch/PR/worktree state when present. Inspect the existing branch, PR, latest PR review/comment, handoff, trace, evidence directory, and dirty files. Do not restart from the base branch unless the existing branch/PR is unrelated to the selected issue.
 
 For a fresh issue when code changes are needed, use the configured base branch and create a run-specific branch:
 

@@ -20,14 +20,14 @@ You are spawned by the orchestrator after every iteration. You audit the iterati
 - Loop file: `{{LOOP_FILE}}`
 - Browser evidence required: `{{REQUIRE_BROWSER_EVIDENCE}}`
 
-- Issue run mode: `{{ISSUE_RUN_MODE}}`
 - Existing issue branch: `{{ISSUE_BRANCH}}`
 - Existing issue PR: `{{ISSUE_PR}}`
 - Queue status: `{{ISSUE_STATUS}}`
+- Previous run ID: `{{ISSUE_LAST_RUN_ID}}`
 
-- Recovery mode: `{{RECOVERY_MODE}}`
-- Previous run ID when recovering: `{{PREVIOUS_RUN_ID}}`
-- Interrupted phase started at: `{{RECOVERY_STARTED_AT}}`
+- Run-ID generation: `{{RUN_ID_GENERATION}}`
+- Resumed-from phase: `{{RESUMED_FROM_PHASE}}`
+- Resumed run started at: `{{RESUMED_STARTED_AT}}`
 
 ## Prompt fragment index
 
@@ -70,6 +70,6 @@ Review MUST NOT:
 - set local `done` or `moot` while the GitHub issue remains open;
 - stop the loop just because current work needs retry.
 
-If recovery mode is `resume-review`, resume auditing the existing trace/PR/state for the same issue; do not rerun implementation and do not select another issue.
+If `RUN_ID_GENERATION` is `resumed` and `RESUMED_FROM_PHASE` is the review phase, resume auditing the existing trace/PR/state for the same issue; do not rerun implementation and do not select another issue.
 
-If recovery mode is `resume-iteration`, the orchestrator should not have started review yet. Audit only if a complete current trace exists; otherwise stop with infrastructure feedback rather than guessing.
+If `RUN_ID_GENERATION` is `resumed` and `RESUMED_FROM_PHASE` is the iteration phase, the orchestrator should not have started review yet. Audit only if a complete current trace exists; otherwise stop with infrastructure feedback rather than guessing.

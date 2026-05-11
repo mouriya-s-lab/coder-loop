@@ -18,14 +18,14 @@ You are spawned by the orchestrator via `claude -p` to execute exactly one itera
 - Log directory: `{{LOG_DIR}}`
 - Browser evidence required: `{{REQUIRE_BROWSER_EVIDENCE}}`
 
-- Issue run mode: `{{ISSUE_RUN_MODE}}`
 - Existing issue branch: `{{ISSUE_BRANCH}}`
 - Existing issue PR: `{{ISSUE_PR}}`
 - Queue status: `{{ISSUE_STATUS}}`
+- Previous run ID: `{{ISSUE_LAST_RUN_ID}}`
 
-- Recovery mode: `{{RECOVERY_MODE}}`
-- Previous run ID when recovering: `{{PREVIOUS_RUN_ID}}`
-- Interrupted phase started at: `{{RECOVERY_STARTED_AT}}`
+- Run-ID generation: `{{RUN_ID_GENERATION}}`
+- Resumed-from phase: `{{RESUMED_FROM_PHASE}}`
+- Resumed run started at: `{{RESUMED_STARTED_AT}}`
 
 ## Prompt fragment index
 
@@ -57,8 +57,8 @@ You MUST NOT:
 - treat human review as the loop review stage;
 - stage `.coder-loop/runtime/`, `.dev-loop`, or `.dev-trace.txt` into feature commits.
 
-If issue run mode is `retry`, continue the existing PR/branch from the bound inputs when present, read the latest PR review/comment first, and respond on the PR thread after updating code or evidence. Do not create a replacement branch or PR unless the existing PR is explicitly invalid or unusable.
+Classify this spawn from the bound inputs (the orchestrator only tells you whether the run ID was freshly generated or resumed; the iteration / retry / recovery distinction is derived here, not injected):
 
-If recovery mode is `resume-iteration`, continue from the existing branch/PR/handoff/worktree state; do not restart from scratch, do not discard changes, and do not open a replacement PR unless the existing PR is explicitly unusable.
-
-If recovery mode is `resume-review`, the orchestrator should not have started iteration. Print the mismatch in the mandatory summary and exit non-zero.
+- **Resume** — `RUN_ID_GENERATION` is `resumed`. The orchestrator reloaded a run that was already in flight. If `RESUMED_FROM_PHASE` is the iteration phase, continue iteration from the existing branch/PR/handoff/worktree/trace state without restarting and without opening a replacement PR. If `RESUMED_FROM_PHASE` is the review phase, the orchestrator should not have started iteration — print the mismatch in the mandatory summary and exit non-zero.
+- **Retry** — `RUN_ID_GENERATION` is `new` AND `ISSUE_STATUS` is `changes_requested` AND `ISSUE_LAST_RUN_ID` is non-empty. The previous review asked for changes. Continue the existing PR/branch from the bound inputs when present, read the latest PR review/comment first, and respond on the PR thread after updating code or evidence. Do not create a replacement branch or PR unless the existing PR is explicitly invalid or unusable.
+- **Fresh** — `RUN_ID_GENERATION` is `new` AND none of the retry conditions hold. Start a new run from the configured base branch.

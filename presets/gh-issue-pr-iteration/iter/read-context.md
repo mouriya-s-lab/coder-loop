@@ -6,7 +6,7 @@ Collect the selected issue context before making implementation decisions.
 
 ## Inputs
 
-Use the concrete runtime values from the entry prompt: target working directory, repository, base branch, current issue, run ID, workflow file, shared context file, state file, current issue handoff, evidence directory, issue run mode, branch/PR fields, queue status, and recovery mode.
+Use the concrete runtime values from the entry prompt: target working directory, repository, base branch, current issue, run ID, workflow file, shared context file, state file, current issue handoff, evidence directory, branch/PR fields, queue status, previous run ID, run-ID generation, and resumed-from phase.
 
 ## Procedure
 
@@ -34,7 +34,7 @@ gh pr view <PR_NUMBER> -R <REPO> --json title,body,comments,reviews,statusCheckR
 gh api repos/<REPO>/pulls/<PR_NUMBER>/comments
 ```
 
-For retry mode, treat the newest coder-loop PR review/comment as the primary instruction. Do not create a replacement branch or PR unless the existing PR is explicitly invalid or unusable.
+If retrying (queue status is `changes_requested` and previous run ID is non-empty), treat the newest coder-loop PR review/comment as the primary instruction. Do not create a replacement branch or PR unless the existing PR is explicitly invalid or unusable.
 
 ## Output verdict
 
