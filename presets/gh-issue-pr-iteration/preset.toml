@@ -176,6 +176,11 @@ role = "review"
 path = "review/evidence-gate.md"
 
 [[fragments]]
+id   = "review/commitment-gate"
+role = "review"
+path = "review/commitment-gate.md"
+
+[[fragments]]
 id   = "review/code-gate"
 role = "review"
 path = "review/code-gate.md"

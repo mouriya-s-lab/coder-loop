@@ -25,6 +25,7 @@ const EXPECTED_FRAGMENTS = [
 	{ id: "review/trace-honesty", role: "review", relPath: "review/trace-honesty.md" },
 	{ id: "review/pr-protocol", role: "review", relPath: "review/pr-protocol.md" },
 	{ id: "review/evidence-gate", role: "review", relPath: "review/evidence-gate.md" },
+	{ id: "review/commitment-gate", role: "review", relPath: "review/commitment-gate.md" },
 	{ id: "review/code-gate", role: "review", relPath: "review/code-gate.md" },
 	{ id: "review/issue-closure-gate", role: "review", relPath: "review/issue-closure-gate.md" },
 	{ id: "review/action-retry", role: "review", relPath: "review/action-retry.md" },

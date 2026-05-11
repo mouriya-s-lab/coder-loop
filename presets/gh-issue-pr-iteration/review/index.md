@@ -39,11 +39,12 @@ Run review in this order:
 2. `review/trace-honesty`
 3. `review/pr-protocol`
 4. `review/evidence-gate`
-5. `review/code-gate`
-6. `review/issue-closure-gate`
-7. one terminal action fragment
-8. `review/update-state`
-9. `review/global-assessment`
-10. `review/final`
+5. `review/commitment-gate`
+6. `review/code-gate`
+7. `review/issue-closure-gate`
+8. one terminal action fragment
+9. `review/update-state`
+10. `review/global-assessment`
+11. `review/final`
 
 Do not inspect a later semantic phase until the previous gate has passed, except when the issue has no implementation PR and is being evaluated as no-code/already-satisfied/skip.
