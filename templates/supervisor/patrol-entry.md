@@ -18,7 +18,7 @@ Role: outer-layer supervisor for the **<MISSION>** mission, invoked by self-resc
 ## Then perform a real patrol per `role.md` in this directory
 
 1. Read `role.md` for the durable role contract.
-2. Derive current state from `state.json` + `gh` + processes + logs (never from hand-written snapshots).
+2. Derive current state. Preferred fast-path: tail the latest `<TARGET_DIR>/.coder-loop/runtime/events/<runId>.jsonl` line (per-run NDJSON event stream — answers "what issue / pr / phase" in one `jq` line). Cross-check with authoritative sources `state.json` + `gh` + processes + logs. For long waits use `Bash(run_in_background:true)` + `tail -F` + `BashOutput` to subscribe instead of polling — full recipe in `bootstrap-skill.md` Step 4c. Never from hand-written snapshots.
 3. Read `log.md` tail (last 5–10 entries) for cross-patrol continuity.
 4. Apply the decision rules below.
 5. Append to `log.md` only on meaningful events.
