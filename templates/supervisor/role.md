@@ -14,23 +14,25 @@ This supervisor is the **outer layer**. The **inner layer** is `coder-loop`, whi
 
 Current state is always **derived**, never read from a hand-written snapshot:
 
-1. `<TARGET_DIR>/.coder-loop/runtime/state.json` — loop queue, current run, run history (machine truth).
-2. `gh issue list / pr list / pr view` — GitHub truth for `<TARGET_REPO>`.
-3. Latest loop log mtime/tail (`/tmp/<LOG_PREFIX>-*.log`), latest `<TARGET_DIR>/.coder-loop/runtime/logs/<run>.{iter,review}.status.json`, latest run iter/review output mtime/size, and active loop / `claude` / `bun` / `mise` / dev-server / test processes — liveness truth.
-4. `log.md` tail in this directory — last few cross-patrol decisions for continuity.
-5. `<TARGET_DIR>/.coder-loop/workflow.md` — coder-loop's PR/evidence rules (only when PR/review semantics matter for the patrol).
-6. Memory index at `<MEMORY_PROJECT_DIR>MEMORY.md` if the target project uses auto-memory.
+1. `<TARGET_DIR>/.coder-loop/runtime/events/<runId>.jsonl` — **recommended event subscription source**. Per-run append-only NDJSON; one line per state transition (`queue.select` / `phase.start` / `phase.end` / `attempt.start` / `attempt.close` / `watchdog.fire` / `queue.terminal`). Every line carries `ts` / `runId` / `issueId` / `pr` / `branch` / `phase`, so a single `tail -n 1 | jq` answers "what issue / PR / phase right now" without polling state.json. See `bootstrap-skill.md` "Non-polling event subscription via events.jsonl" for the `Bash(run_in_background:true)` + `tail -F` + `BashOutput` workflow.
+2. `<TARGET_DIR>/.coder-loop/runtime/state.json` — loop queue, current run, run history (authoritative state). events.jsonl is a notification channel, not a replacement; crash-resume and queue scheduling still go through state.json.
+3. `gh issue list / pr list / pr view` — GitHub truth for `<TARGET_REPO>`.
+4. Latest loop log mtime/tail (`/tmp/<LOG_PREFIX>-*.log`), latest `<TARGET_DIR>/.coder-loop/runtime/logs/<run>.{iter,review}.status.json`, latest run iter/review output mtime/size, and active loop / `claude` / `bun` / `mise` / dev-server / test processes — liveness truth + audit detail.
+5. `log.md` tail in this directory — last few cross-patrol decisions for continuity.
+6. `<TARGET_DIR>/.coder-loop/workflow.md` — coder-loop's PR/evidence rules (only when PR/review semantics matter for the patrol).
+7. Memory index at `<MEMORY_PROJECT_DIR>MEMORY.md` if the target project uses auto-memory.
 
 ## Patrol procedure
 
 1. **Multi-signal liveness — never `ps` alone:**
-   - `state.json` current issue/phase/runId/queue counts.
+   - latest event line in `<TARGET_DIR>/.coder-loop/runtime/events/<runId>.jsonl` (issueId / pr / phase + last `attempt.close` terminated kind) — preferred fast-path.
+   - `state.json` current issue/phase/runId/queue counts (authoritative when events disagree).
    - latest loop log mtime/tail and whether it grew since last patrol.
    - latest run status JSON (phase, exitCode, timestamps, output path).
    - latest iter/review output mtime and size.
    - active parent loop process and child agents for the current run.
    - GitHub state for the current issue/PR.
-   - elapsed time of the current phase and no-progress duration since the last log/status/output/GitHub change.
+   - elapsed time of the current phase and no-progress duration since the last event line / log / status / output / GitHub change.
 
 2. **Duration thresholds (suspect, not instant proof of death):**
    - >20 minutes with no log/status/output/GitHub movement → inspect deeply, append `suspect_stalled` entry to `log.md`.
@@ -43,7 +45,9 @@ Current state is always **derived**, never read from a hand-written snapshot:
    - If a loop is running, do not start another unless the existing one is clearly dead by multiple signals.
    - If loop state is incoherent, stop and report blocker; do not destructively recover.
 
-4. **Append `log.md` only on meaningful events:** decision, restart, stall suspicion, blocker, issue/runtime transition, PR result. Not every patrol.
+4. **Live wait, not poll:** when a patrol needs to wait for the next phase transition (long-running iter, in-flight watchdog window, expecting a `queue.terminal` event), spawn a background `tail -F` against the latest `events/<runId>.jsonl` via `Bash(run_in_background:true)`, then pull increments with `BashOutput` until the awaited event type appears. Do not loop a foreground `sleep + jq` snapshot. Recipe and `KillShell` cleanup are in `bootstrap-skill.md` Step 4c.
+
+5. **Append `log.md` only on meaningful events:** decision, restart, stall suspicion, blocker, issue/runtime transition, PR result. Not every patrol.
 
 ## Commands
 

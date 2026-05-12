@@ -7,6 +7,7 @@ import { resolve } from "node:path"
 import {
 	agentClaudeArgs,
 	agentSessionsPath,
+	appendLoopEvent,
 	appendSessionEntry,
 	BACKOFF_BUDGET_SECONDS,
 	buildConfigBindings,
@@ -16,11 +17,15 @@ import {
 	createSummaryWatchdog,
 	decideResume,
 	extractErrorCode,
+	formatLoopEventLine,
 	getCurrentId,
 	getItemId,
 	isTransient5xx,
+	LOOP_EVENT_TYPES,
 	loadPreset,
+	loopEventsPath,
 	makeIssueRunContext,
+	makeLoopEventEmitter,
 	markIterationStarted,
 	markReviewStarted,
 	nextBackoffSeconds,
@@ -40,6 +45,8 @@ import {
 	type ConfigBindings,
 	type CurrentRun,
 	type IssueRunContext,
+	type LoopEvent,
+	type LoopEventContext,
 	type LoopOptions,
 	type LoopState,
 	type Preset,
@@ -1405,3 +1412,281 @@ describe("summary watchdog e2e — spawnOneAttempt with a fake claudeBinary", ()
 		expect(outcome.exitCode).toBe(0)
 	}, 10_000)
 })
+
+describe("events jsonl — per-run NDJSON event stream", () => {
+	async function freshTargetCwd(): Promise<string> {
+		return mkdtemp(resolve(tmpdir(), "coder-loop-events-"))
+	}
+
+	async function readEvents(path: string): Promise<LoopEvent[]> {
+		const raw = await readFile(path, "utf-8")
+		return raw
+			.split("\n")
+			.filter((line) => line.length > 0)
+			.map((line) => JSON.parse(line) as LoopEvent)
+	}
+
+	async function emitSequence(targetCwd: string, runId: string, events: LoopEvent[]): Promise<string> {
+		const emit = makeLoopEventEmitter(targetCwd, runId, () => {})
+		for (const event of events) await emit(event)
+		return loopEventsPath(targetCwd, runId)
+	}
+
+	const sampleBase = (overrides: Partial<LoopEvent> = {}): { runId: string; issueId: string; pr: number | null; branch: string | null } => ({
+		runId: overrides.runId ?? "run-2026-05-12-issue-99",
+		issueId: overrides.issueId ?? "99",
+		pr: (overrides as { pr?: number | null }).pr ?? null,
+		branch: (overrides as { branch?: string | null }).branch ?? null,
+	})
+
+	test("events jsonl: writes per-runId file with controlled type strings in chronological order", async () => {
+		const targetCwd = await freshTargetCwd()
+		const runId = "run-2026-05-12-issue-99"
+		const sequence: LoopEvent[] = [
+			{ type: "queue.select", ts: "2026-05-12T00:00:00.000Z", ...sampleBase(), status: "queued" },
+			{ type: "phase.start", ts: "2026-05-12T00:00:01.000Z", ...sampleBase(), phase: "iteration" },
+			{
+				type: "attempt.start",
+				ts: "2026-05-12T00:00:02.000Z",
+				...sampleBase(),
+				phase: "iteration",
+				attemptStartedAt: "2026-05-12T00:00:02.000Z",
+				pid: 12345,
+				resume: "fresh",
+			},
+			{
+				type: "attempt.close",
+				ts: "2026-05-12T00:00:03.000Z",
+				...sampleBase(),
+				phase: "iteration",
+				attemptStartedAt: "2026-05-12T00:00:02.000Z",
+				exitCode: 0,
+				signal: null,
+				terminated: { kind: "clean" },
+				sessionId: "sess-abc",
+			},
+			{
+				type: "phase.end",
+				ts: "2026-05-12T00:00:04.000Z",
+				...sampleBase(),
+				phase: "iteration",
+				exitCode: 0,
+				durationSeconds: 3,
+			},
+			{ type: "phase.start", ts: "2026-05-12T00:00:05.000Z", ...sampleBase({ pr: 137 }), phase: "review" },
+			{
+				type: "phase.end",
+				ts: "2026-05-12T00:00:06.000Z",
+				...sampleBase({ pr: 137 }),
+				phase: "review",
+				exitCode: 0,
+				durationSeconds: 1,
+			},
+			{
+				type: "queue.terminal",
+				ts: "2026-05-12T00:00:07.000Z",
+				...sampleBase({ pr: 137 }),
+				terminalStatus: "merged",
+			},
+		]
+		const path = await emitSequence(targetCwd, runId, sequence)
+		const events = await readEvents(path)
+
+		expect(path.endsWith(`/.coder-loop/runtime/events/${runId}.jsonl`)).toBe(true)
+		expect(events.length).toBe(sequence.length)
+		for (const e of events) expect(LOOP_EVENT_TYPES).toContain(e.type)
+		const timestamps = events.map((e) => e.ts)
+		expect([...timestamps].sort()).toEqual(timestamps)
+	})
+
+	test("events jsonl fields: pr/branch reflect QueueItem state including null and concrete values", async () => {
+		const targetCwd = await freshTargetCwd()
+		const runId = "run-fields-test"
+		const sequence: LoopEvent[] = [
+			{ type: "queue.select", ts: "2026-05-12T00:00:00.000Z", runId, issueId: "100", pr: null, branch: null, status: "queued" },
+			{
+				type: "phase.start",
+				ts: "2026-05-12T00:00:01.000Z",
+				runId,
+				issueId: "100",
+				pr: 200,
+				branch: "issue-100-feat",
+				phase: "review",
+			},
+		]
+		const path = await emitSequence(targetCwd, runId, sequence)
+		const events = await readEvents(path)
+		expect(events[0]?.pr).toBeNull()
+		expect(events[0]?.branch).toBeNull()
+		expect(events[1]?.pr).toBe(200)
+		expect(events[1]?.branch).toBe("issue-100-feat")
+		// Every non-loop-level event must carry runId + issueId + ts (criterion #2)
+		for (const e of events) {
+			expect(e.runId).toBe(runId)
+			expect(e.issueId).toBe("100")
+			expect(typeof e.ts).toBe("string")
+		}
+	})
+
+	test("events jsonl watchdog: spawnOneAttempt with eventContext writes attempt.start, watchdog.fire, attempt.close", async () => {
+		const targetCwd = await freshTargetCwd()
+		const fake = await mkdtemp(resolve(tmpdir(), "coder-loop-fakebin-"))
+		const fakePath = resolve(fake, "fake-claude.sh")
+		await writeFile(fakePath, `#!/bin/bash\necho 'ITERATION SUMMARY: stuck path'\nsleep 30\n`, { mode: 0o755 })
+
+		const preset = await bundledPreset()
+		const baseOpts = await makeFixtureOptions(preset)
+		const options: LoopOptions = { ...baseOpts, claudeBinary: fakePath, claudeExtraArgs: [], targetCwd }
+		const runId = "run-wd-events"
+		const outputPath = resolve(options.logDir, "wd-events.iteration.txt")
+		const sessionsPath = agentSessionsPath(outputPath)
+		const eventsPath = loopEventsPath(targetCwd, runId)
+
+		const eventContext: LoopEventContext = {
+			emit: makeLoopEventEmitter(targetCwd, runId, () => {}),
+			runId,
+			issueId: "135",
+			pr: 137,
+			branch: "issue-135-fix",
+			phase: "iteration",
+		}
+
+		const outcome = await spawnOneAttempt({
+			options,
+			label: "iteration",
+			prompt: "ignored",
+			outputPath,
+			sessionsPath,
+			resume: { kind: "fresh" },
+			watchdog: { marker: SUMMARY_WATCHDOG_MARKER, termMs: 300, killMs: 200 },
+			eventContext,
+		})
+		expect(outcome.terminated.kind).toBe("watchdog")
+
+		const events = await readEvents(eventsPath)
+		const types = events.map((e) => e.type)
+		expect(types).toContain("attempt.start")
+		expect(types).toContain("watchdog.fire")
+		expect(types).toContain("attempt.close")
+		// Order: attempt.start before watchdog.fire before attempt.close
+		const startIdx = types.indexOf("attempt.start")
+		const fireIdx = types.indexOf("watchdog.fire")
+		const closeIdx = types.indexOf("attempt.close")
+		expect(startIdx).toBeLessThan(fireIdx)
+		expect(fireIdx).toBeLessThan(closeIdx)
+		// attempt.close terminated.kind must be "watchdog"
+		const closeEvent = events.find((e) => e.type === "attempt.close")
+		expect(closeEvent?.type === "attempt.close" && closeEvent.terminated.kind).toBe("watchdog")
+		// Every event carries the issue/pr/branch context
+		for (const e of events) {
+			expect(e.issueId).toBe("135")
+			expect(e.pr).toBe(137)
+			expect(e.branch).toBe("issue-135-fix")
+		}
+	}, 15_000)
+
+	test("events jsonl no-watchdog clean exit: only attempt.start + attempt.close, no watchdog.fire", async () => {
+		const targetCwd = await freshTargetCwd()
+		const fake = await mkdtemp(resolve(tmpdir(), "coder-loop-fakebin-"))
+		const fakePath = resolve(fake, "fake-claude.sh")
+		await writeFile(fakePath, `#!/bin/bash\necho '{"event":"work"}'\nexit 0\n`, { mode: 0o755 })
+
+		const preset = await bundledPreset()
+		const baseOpts = await makeFixtureOptions(preset)
+		const options: LoopOptions = { ...baseOpts, claudeBinary: fakePath, claudeExtraArgs: [], targetCwd }
+		const runId = "run-clean-events"
+		const outputPath = resolve(options.logDir, "clean-events.iteration.txt")
+		const sessionsPath = agentSessionsPath(outputPath)
+		const eventsPath = loopEventsPath(targetCwd, runId)
+
+		const eventContext: LoopEventContext = {
+			emit: makeLoopEventEmitter(targetCwd, runId, () => {}),
+			runId,
+			issueId: "200",
+			pr: null,
+			branch: null,
+			phase: "iteration",
+		}
+
+		const outcome = await spawnOneAttempt({
+			options,
+			label: "iteration",
+			prompt: "ignored",
+			outputPath,
+			sessionsPath,
+			resume: { kind: "fresh" },
+			eventContext,
+		})
+		expect(outcome.terminated.kind).toBe("clean")
+
+		const events = await readEvents(eventsPath)
+		const types = events.map((e) => e.type)
+		expect(types).toEqual(["attempt.start", "attempt.close"])
+	}, 10_000)
+
+	test("events jsonl best-effort: appendLoopEvent failure (parent path is a file) only logs warn and resolves", async () => {
+		const targetCwd = await freshTargetCwd()
+		// Make the events directory's parent a file so mkdir(recursive) cannot create the path
+		const sabotage = resolve(targetCwd, ".coder-loop/runtime/events")
+		await mkdir(resolve(targetCwd, ".coder-loop/runtime"), { recursive: true })
+		await writeFile(sabotage, "this-is-a-file-not-a-directory")
+		const logs: string[] = []
+		const path = loopEventsPath(targetCwd, "run-fail")
+		await expect(
+			appendLoopEvent(
+				path,
+				{
+					type: "queue.select",
+					ts: "2026-05-12T00:00:00.000Z",
+					runId: "run-fail",
+					issueId: "1",
+					pr: null,
+					branch: null,
+					status: "queued",
+				},
+				(m) => logs.push(m),
+			),
+		).resolves.toBeUndefined()
+		expect(logs.some((m) => m.includes("events.jsonl append failed"))).toBe(true)
+	})
+
+	test("events jsonl format: formatLoopEventLine produces single-line compact JSON terminated by \\n (jq -c compatible)", () => {
+		const event: LoopEvent = {
+			type: "queue.terminal",
+			ts: "2026-05-12T00:00:00.000Z",
+			runId: "r",
+			issueId: "1",
+			pr: 2,
+			branch: "b",
+			terminalStatus: "merged",
+		}
+		const line = formatLoopEventLine(event)
+		expect(line.endsWith("\n")).toBe(true)
+		expect(line.indexOf("\n")).toBe(line.length - 1)
+		expect(JSON.parse(line.slice(0, -1))).toEqual(event)
+	})
+
+	test("events jsonl tail e2e: tail -n +1 + jq filters phase.start rows showing issue/phase/pr per line", async () => {
+		const targetCwd = await freshTargetCwd()
+		const runId = "run-jq-e2e"
+		const sequence: LoopEvent[] = [
+			{ type: "queue.select", ts: "2026-05-12T00:00:00.000Z", runId, issueId: "135", pr: null, branch: null, status: "queued" },
+			{ type: "phase.start", ts: "2026-05-12T00:00:01.000Z", runId, issueId: "135", pr: null, branch: "issue-135-fix", phase: "iteration" },
+			{ type: "phase.end", ts: "2026-05-12T00:00:10.000Z", runId, issueId: "135", pr: null, branch: "issue-135-fix", phase: "iteration", exitCode: 0, durationSeconds: 9 },
+			{ type: "phase.start", ts: "2026-05-12T00:00:11.000Z", runId, issueId: "135", pr: 137, branch: "issue-135-fix", phase: "review" },
+			{ type: "phase.end", ts: "2026-05-12T00:00:14.000Z", runId, issueId: "135", pr: 137, branch: "issue-135-fix", phase: "review", exitCode: 0, durationSeconds: 3 },
+		]
+		const path = await emitSequence(targetCwd, runId, sequence)
+		const proc = Bun.spawnSync({
+			cmd: [
+				"bash",
+				"-c",
+				`tail -n +1 "${path}" | jq -r 'select(.type=="phase.start") | "\\(.issueId) \\(.phase) pr=\\(.pr // "null")"'`,
+			],
+		})
+		const stdout = new TextDecoder().decode(proc.stdout).trim()
+		const lines = stdout.split("\n")
+		expect(lines).toEqual(["135 iteration pr=null", "135 review pr=137"])
+	})
+})
+

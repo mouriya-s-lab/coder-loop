@@ -190,6 +190,96 @@ export type ResumeDecision =
 	| { kind: "fresh" }
 	| { kind: "resume"; sessionId: string }
 
+export type LoopEventBase = {
+	ts: string
+	runId: string
+	issueId: string
+	pr: number | null
+	branch: string | null
+}
+
+export type LoopEvent =
+	| (LoopEventBase & { type: "queue.select"; status: string })
+	| (LoopEventBase & { type: "phase.start"; phase: string })
+	| (LoopEventBase & { type: "phase.end"; phase: string; exitCode: number; durationSeconds: number })
+	| (LoopEventBase & {
+			type: "attempt.start"
+			phase: string
+			attemptStartedAt: string
+			pid: number | null
+			resume: "fresh" | "resume"
+		})
+	| (LoopEventBase & {
+			type: "attempt.close"
+			phase: string
+			attemptStartedAt: string
+			exitCode: number
+			signal: string | null
+			terminated: Terminated
+			sessionId: string | null
+		})
+	| (LoopEventBase & {
+			type: "watchdog.fire"
+			phase: string
+			attemptStartedAt: string
+			signal: "SIGTERM" | "SIGKILL"
+		})
+	| (LoopEventBase & { type: "queue.terminal"; terminalStatus: string })
+
+export type LoopEventType = LoopEvent["type"]
+
+export const LOOP_EVENT_TYPES = [
+	"queue.select",
+	"phase.start",
+	"phase.end",
+	"attempt.start",
+	"attempt.close",
+	"watchdog.fire",
+	"queue.terminal",
+] as const satisfies readonly LoopEventType[]
+
+export type LoopEventEmit = (event: LoopEvent) => Promise<void>
+
+export type LoopEventContext = {
+	emit: LoopEventEmit
+	runId: string
+	issueId: string
+	pr: number | null
+	branch: string | null
+	phase: string
+}
+
+export function loopEventsPath(targetCwd: string, runId: string): string {
+	return resolve(targetCwd, ".coder-loop/runtime/events", `${runId}.jsonl`)
+}
+
+export function formatLoopEventLine(event: LoopEvent): string {
+	return `${JSON.stringify(event)}\n`
+}
+
+export async function appendLoopEvent(
+	path: string,
+	event: LoopEvent,
+	logFn: (message: string) => void,
+): Promise<void> {
+	const line = formatLoopEventLine(event)
+	try {
+		await mkdir(resolve(path, ".."), { recursive: true })
+		await appendFile(path, line)
+	} catch (error) {
+		logFn(`events.jsonl append failed (${path}): ${error instanceof Error ? error.message : String(error)}`)
+	}
+}
+
+export function makeLoopEventEmitter(
+	targetCwd: string,
+	runId: string,
+	logFn: (message: string) => void,
+): LoopEventEmit {
+	const path = loopEventsPath(targetCwd, runId)
+	return (event) => appendLoopEvent(path, event, logFn)
+}
+
 export const RESUME_CONTINUE_PROMPT = "继续"
 export const BACKOFF_BUDGET_SECONDS = 7200
 const BACKOFF_INITIAL_SECONDS = 4
@@ -467,6 +557,20 @@ async function main() {
 			}),
 		}
 
+		const emit = makeLoopEventEmitter(options.targetCwd, runId, log)
+		const baseEvent = {
+			runId,
+			issueId: selectedId,
+			pr: selected.item.pr,
+			branch: selected.item.branch,
+		}
+		await emit({
+			type: "queue.select",
+			ts: new Date().toISOString(),
+			...baseEvent,
+			status: selected.item.status,
+		})
+
 		if (current?.phase !== reviewPhase.name) {
 			const stateForIteration = await loadState(options.statePath)
 			markIterationStarted(stateForIteration, selected.item, options.preset, runId, current === null)
@@ -477,11 +581,32 @@ async function main() {
 			const iterPromptRaw = await readFile(iterPhase.prompt, "utf-8")
 			const iterPrompt = renderPrompt(iterPromptRaw, iterPhase, ctx)
 			const iterOutputPath = agentOutputPath(options, runId, iterPhase.name)
-			const { output: iterTrace, code: iterCode } = await runAgent(options, iterPhase.name, iterPrompt, iterOutputPath)
-			const iterDuration = ((Date.now() - iterStart) / 1000).toFixed(0)
+			await emit({
+				type: "phase.start",
+				ts: new Date().toISOString(),
+				...baseEvent,
+				phase: iterPhase.name,
+			})
+			const iterEventContext: LoopEventContext = { emit, ...baseEvent, phase: iterPhase.name }
+			const { output: iterTrace, code: iterCode } = await runAgent(
+				options,
+				iterPhase.name,
+				iterPrompt,
+				iterOutputPath,
+				iterEventContext,
+			)
+			const iterDurationSeconds = (Date.now() - iterStart) / 1000
 			await writeFile(options.traceFile, iterTrace)
 
-			log(`${iterPhase.name} agent finished: issue=#${selectedId}, exit=${iterCode}, duration=${iterDuration}s, trace=${options.traceFile}, output=${iterOutputPath} (${iterTrace.length} bytes)`)
+			log(`${iterPhase.name} agent finished: issue=#${selectedId}, exit=${iterCode}, duration=${iterDurationSeconds.toFixed(0)}s, trace=${options.traceFile}, output=${iterOutputPath} (${iterTrace.length} bytes)`)
+			await emit({
+				type: "phase.end",
+				ts: new Date().toISOString(),
+				...baseEvent,
+				phase: iterPhase.name,
+				exitCode: iterCode,
+				durationSeconds: Math.round(iterDurationSeconds),
+			})
 
 			if (iterCode !== 0) {
 				log(`${iterPhase.name} agent failed (exit ${iterCode}). Stopping without review or state judgment.`)
@@ -501,7 +626,7 @@ async function main() {
 			log(`Resuming ${reviewPhase.name} agent for issue #${selectedId} without rerunning iteration...`)
 		}
 
-		const reviewCode = await runReview(options, runId, ctx)
+		const reviewCode = await runReview(options, runId, ctx, { emit, ...baseEvent })
 		if (reviewCode !== 0) {
 			log(`Review agent crashed (exit ${reviewCode}). Stopping.`)
 			await removeLoopFile(options.loopFile)
@@ -511,6 +636,20 @@ async function main() {
 		if (!(await exists(options.loopFile))) {
 			log("Review agent stopped the loop.")
 			break
+		}
+
+		const stateAfterReview = await loadState(options.statePath)
+		const itemAfterReview = stateAfterReview.queue.find((q) => getItemId(q, options.preset) === selectedId)
+		if (itemAfterReview && options.preset.statuses.terminal.includes(itemAfterReview.status)) {
+			await emit({
+				type: "queue.terminal",
+				ts: new Date().toISOString(),
+				runId,
+				issueId: selectedId,
+				pr: itemAfterReview.pr,
+				branch: itemAfterReview.branch,
+				terminalStatus: itemAfterReview.status,
+			})
 		}
 
 		log(`Iteration ${iteration} complete.`)
@@ -524,7 +663,12 @@ async function main() {
 	logStream?.end()
 }
 
-async function runReview(options: LoopOptions, runId: string, ctx: ResolveContext): Promise<number> {
+async function runReview(
+	options: LoopOptions,
+	runId: string,
+	ctx: ResolveContext,
+	eventContext?: Omit<LoopEventContext, "phase">,
+): Promise<number> {
 	const phases = options.preset.phases
 	const reviewPhase = phases[phases.length - 1]
 	if (!reviewPhase) fail("preset must define at least one phase")
@@ -533,12 +677,45 @@ async function runReview(options: LoopOptions, runId: string, ctx: ResolveContex
 	const reviewPromptRaw = await readFile(reviewPhase.prompt, "utf-8")
 	const reviewPrompt = renderPrompt(reviewPromptRaw, reviewPhase, ctx)
 	const reviewOutputPath = agentOutputPath(options, runId, reviewPhase.name)
-	const { output: reviewTrace, code: reviewCode } = await runAgent(options, reviewPhase.name, reviewPrompt, reviewOutputPath)
-	const reviewDuration = ((Date.now() - reviewStart) / 1000).toFixed(0)
+	const phaseEventContext: LoopEventContext | undefined = eventContext
+		? { ...eventContext, phase: reviewPhase.name }
+		: undefined
+	if (phaseEventContext) {
+		await phaseEventContext.emit({
+			type: "phase.start",
+			ts: new Date().toISOString(),
+			runId: phaseEventContext.runId,
+			issueId: phaseEventContext.issueId,
+			pr: phaseEventContext.pr,
+			branch: phaseEventContext.branch,
+			phase: reviewPhase.name,
+		})
+	}
+	const { output: reviewTrace, code: reviewCode } = await runAgent(
+		options,
+		reviewPhase.name,
+		reviewPrompt,
+		reviewOutputPath,
+		phaseEventContext,
+	)
+	const reviewDuration = (Date.now() - reviewStart) / 1000
 
-	log(`${reviewPhase.name} agent finished: exit=${reviewCode}, duration=${reviewDuration}s, output=${reviewOutputPath} (${reviewTrace.length} bytes)`)
+	log(`${reviewPhase.name} agent finished: exit=${reviewCode}, duration=${reviewDuration.toFixed(0)}s, output=${reviewOutputPath} (${reviewTrace.length} bytes)`)
 	if (reviewTrace.trim().length > 0) {
 		await appendFile(options.logFile, `\n--- ${reviewPhase.name} output ${new Date().toISOString()} ---\n${reviewTrace}\n`)
+	}
+	if (phaseEventContext) {
+		await phaseEventContext.emit({
+			type: "phase.end",
+			ts: new Date().toISOString(),
+			runId: phaseEventContext.runId,
+			issueId: phaseEventContext.issueId,
+			pr: phaseEventContext.pr,
+			branch: phaseEventContext.branch,
+			phase: reviewPhase.name,
+			exitCode: reviewCode,
+			durationSeconds: Math.round(reviewDuration),
+		})
 	}
 	return reviewCode
 }
@@ -1160,7 +1337,13 @@ export function buildConfigBindings(options: LoopOptions): ConfigBindings {
 	}
 }
 
-async function runAgent(options: LoopOptions, label: AgentLabel, prompt: string, outputPath: string): Promise<{ output: string; code: number }> {
+async function runAgent(
+	options: LoopOptions,
+	label: AgentLabel,
+	prompt: string,
+	outputPath: string,
+	eventContext?: LoopEventContext,
+): Promise<{ output: string; code: number }> {
 	const sessionsPath = agentSessionsPath(outputPath)
 	const lastEntry = await readLastSessionEntry(sessionsPath)
 	const initialResume = decideResume(lastEntry)
@@ -1169,7 +1352,10 @@ async function runAgent(options: LoopOptions, label: AgentLabel, prompt: string,
 	}
 
 	const result = await runAgentWithBackoff({
-		spawnAttempt: ({ resume }) => spawnOneAttempt({ options, label, prompt, outputPath, sessionsPath, resume }),
+		spawnAttempt: ({ resume }) => {
+			const baseInput: SpawnOneAttemptInput = { options, label, prompt, outputPath, sessionsPath, resume }
+			return spawnOneAttempt(eventContext ? { ...baseInput, eventContext } : baseInput)
+		},
 		sleep: (seconds: number) => new Promise((resolve) => setTimeout(resolve, seconds * 1000)),
 		log,
 		now: () => Date.now(),
@@ -1188,6 +1374,7 @@ export type SpawnOneAttemptInput = {
 	sessionsPath: string
 	resume: ResumeDecision
 	watchdog?: SummaryWatchdogConfig
+	eventContext?: LoopEventContext
 }
 
 export type SummaryWatchdogConfig = {
@@ -1357,6 +1544,22 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			}
 		}
 
+		const emitWatchdogFire = (sig: "SIGTERM" | "SIGKILL"): void => {
+			const ec = input.eventContext
+			if (!ec) return
+			void ec.emit({
+				type: "watchdog.fire",
+				ts: new Date().toISOString(),
+				runId: ec.runId,
+				issueId: ec.issueId,
+				pr: ec.pr,
+				branch: ec.branch,
+				phase: ec.phase,
+				attemptStartedAt: startedAt,
+				signal: sig,
+			})
+		}
+
 		const watchdog = createSummaryWatchdog({
 			config: watchdogConfig,
 			setTimer: (cb, ms) => setTimeout(cb, ms),
@@ -1365,10 +1568,12 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			},
 			onTerm: () => {
 				log(`Agent [${label}] forced-terminate after ITERATION SUMMARY+${Math.round(watchdogConfig.termMs / 1000)}s; sending SIGTERM (pid=${child.pid ?? "?"})`)
+				emitWatchdogFire("SIGTERM")
 				sendSignalToGroup("SIGTERM")
 			},
 			onKill: () => {
 				log(`Agent [${label}] forced-terminate SIGTERM+${Math.round(watchdogConfig.killMs / 1000)}s elapsed; sending SIGKILL (pid=${child.pid ?? "?"})`)
+				emitWatchdogFire("SIGKILL")
 				sendSignalToGroup("SIGKILL")
 			},
 			log,
@@ -1402,6 +1607,22 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 
 		log(`Agent [${label}] spawned: pid=${child.pid}, stream=${attemptStreamPath}, stderr=${attemptStderrPath}, status=${statusPath}, resume=${resume.kind === "resume" ? resume.sessionId : "none"}`)
 
+		if (input.eventContext) {
+			const ec = input.eventContext
+			void ec.emit({
+				type: "attempt.start",
+				ts: new Date().toISOString(),
+				runId: ec.runId,
+				issueId: ec.issueId,
+				pr: ec.pr,
+				branch: ec.branch,
+				phase: ec.phase,
+				attemptStartedAt: startedAt,
+				pid: child.pid ?? null,
+				resume: resume.kind === "resume" ? "resume" : "fresh",
+			})
+		}
+
 		child.stdout.on("data", (chunk: Buffer) => recordChunk("stdout", chunk))
 		child.stderr.on("data", (chunk: Buffer) => recordChunk("stderr", chunk))
 
@@ -1418,6 +1639,23 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 				await appendSessionEntry(sessionsPath, entry)
 			} catch (error) {
 				log(`Agent [${label}] sessions.jsonl append failed: ${error instanceof Error ? error.message : String(error)}`)
+			}
+			if (input.eventContext) {
+				const ec = input.eventContext
+				await ec.emit({
+					type: "attempt.close",
+					ts: new Date().toISOString(),
+					runId: ec.runId,
+					issueId: ec.issueId,
+					pr: ec.pr,
+					branch: ec.branch,
+					phase: ec.phase,
+					attemptStartedAt: startedAt,
+					exitCode,
+					signal,
+					terminated,
+					sessionId: status.sessionId,
+				})
 			}
 			resolveResult({
 				output,
