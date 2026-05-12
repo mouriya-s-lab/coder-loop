@@ -13,6 +13,7 @@ import {
 	buildRuntimeBindings,
 	checkRuntime,
 	classifyTermination,
+	createSummaryWatchdog,
 	decideResume,
 	extractErrorCode,
 	getCurrentId,
@@ -33,6 +34,8 @@ import {
 	RESUME_CONTINUE_PROMPT,
 	runAgentWithBackoff,
 	selectIssue,
+	spawnOneAttempt,
+	SUMMARY_WATCHDOG_MARKER,
 	type AttemptOutcome,
 	type ConfigBindings,
 	type CurrentRun,
@@ -1156,4 +1159,249 @@ describe("runAgentWithBackoff — orchestrates retries and budget across in-proc
 		})
 		expect(seen[0]).toEqual({ kind: "resume", sessionId: "from-disk" })
 	})
+
+	test("watchdog-terminated outcome maps to code=0 so orchestrator advances to review", async () => {
+		const { sleep, calls } = makeSleepRecorder()
+		const result = await runAgentWithBackoff({
+			spawnAttempt: async () =>
+				makeOutcome({
+					terminated: { kind: "watchdog", phase: "term", afterSummarySeconds: 300 },
+					exitCode: 143,
+					sessionId: "sess-watch",
+				}),
+			sleep,
+			log: () => {},
+			now: () => 0,
+			initialResume: { kind: "fresh" },
+		})
+		expect(result.attempts).toBe(1)
+		expect(result.code).toBe(0)
+		expect(calls).toEqual([])
+	})
+})
+
+describe("decideResume — watchdog termination disqualifies in-process resume", () => {
+	test("watchdog termination yields fresh even with sessionId present", () => {
+		const entry: SessionEntry = {
+			attempt: "2026-05-12T00:00:00.000Z",
+			sessionId: "sess-watch",
+			exitCode: 143,
+			signal: "SIGTERM",
+			terminated: { kind: "watchdog", phase: "term", afterSummarySeconds: 300 },
+			log: "/tmp/x",
+		}
+		expect(decideResume(entry)).toEqual({ kind: "fresh" })
+	})
+})
+
+describe("createSummaryWatchdog — summary watchdog timer state machine", () => {
+	type TimerEntry = { id: number; cb: () => void; ms: number; cancelled: boolean }
+
+	function makeFakeTimers(): {
+		setTimer: (cb: () => void, ms: number) => unknown
+		clearTimer: (h: unknown) => void
+		timers: TimerEntry[]
+		fire: (id: number) => void
+	} {
+		const timers: TimerEntry[] = []
+		let nextId = 1
+		return {
+			timers,
+			setTimer: (cb, ms) => {
+				const entry: TimerEntry = { id: nextId++, cb, ms, cancelled: false }
+				timers.push(entry)
+				return entry.id
+			},
+			clearTimer: (h) => {
+				const id = h as number
+				const entry = timers.find((t) => t.id === id)
+				if (entry) entry.cancelled = true
+			},
+			fire: (id: number) => {
+				const entry = timers.find((t) => t.id === id)
+				if (!entry || entry.cancelled) throw new Error(`timer ${id} not pending`)
+				entry.cb()
+			},
+		}
+	}
+
+	test("summary watchdog: stdout containing ITERATION SUMMARY arms 5min timer; firing it sends SIGTERM then 5s SIGKILL", () => {
+		const fake = makeFakeTimers()
+		const calls: string[] = []
+		const wd = createSummaryWatchdog({
+			config: { marker: SUMMARY_WATCHDOG_MARKER, termMs: 300_000, killMs: 5_000 },
+			setTimer: fake.setTimer,
+			clearTimer: fake.clearTimer,
+			onTerm: () => calls.push("term"),
+			onKill: () => calls.push("kill"),
+			log: () => {},
+		})
+
+		wd.observeStdout(`{"event":"text"}\n`)
+		expect(fake.timers.length).toBe(0)
+		expect(wd.state()).toEqual({ kind: "idle" })
+
+		wd.observeStdout(`prefix ITERATION SUMMARY: done suffix\n`)
+		expect(fake.timers.length).toBe(1)
+		expect(fake.timers[0]!.ms).toBe(300_000)
+		expect(wd.state()).toEqual({ kind: "armed" })
+
+		fake.fire(fake.timers[0]!.id)
+		expect(calls).toEqual(["term"])
+		expect(wd.state()).toEqual({ kind: "term-sent" })
+		expect(fake.timers.length).toBe(2)
+		expect(fake.timers[1]!.ms).toBe(5_000)
+
+		fake.fire(fake.timers[1]!.id)
+		expect(calls).toEqual(["term", "kill"])
+		expect(wd.state()).toEqual({ kind: "kill-sent" })
+	})
+
+	test("summary watchdog: marker straddling two stdout chunks still arms exactly once", () => {
+		const fake = makeFakeTimers()
+		const calls: string[] = []
+		const wd = createSummaryWatchdog({
+			config: { marker: SUMMARY_WATCHDOG_MARKER, termMs: 300_000, killMs: 5_000 },
+			setTimer: fake.setTimer,
+			clearTimer: fake.clearTimer,
+			onTerm: () => calls.push("term"),
+			onKill: () => calls.push("kill"),
+			log: () => {},
+		})
+
+		wd.observeStdout("blah ITERATION SUMM")
+		expect(wd.state()).toEqual({ kind: "idle" })
+		wd.observeStdout("ARY: rest of line\n")
+		expect(wd.state()).toEqual({ kind: "armed" })
+		expect(fake.timers.length).toBe(1)
+
+		// Further stdout after arming must not arm a second time
+		wd.observeStdout("ITERATION SUMMARY: again\n")
+		expect(fake.timers.length).toBe(1)
+	})
+
+	test("summary watchdog: cancel before SIGTERM timer fires prevents both SIGTERM and SIGKILL (clean child exit case)", () => {
+		const fake = makeFakeTimers()
+		const calls: string[] = []
+		const wd = createSummaryWatchdog({
+			config: { marker: SUMMARY_WATCHDOG_MARKER, termMs: 300_000, killMs: 5_000 },
+			setTimer: fake.setTimer,
+			clearTimer: fake.clearTimer,
+			onTerm: () => calls.push("term"),
+			onKill: () => calls.push("kill"),
+			log: () => {},
+		})
+
+		wd.observeStdout("ITERATION SUMMARY: about to exit\n")
+		expect(fake.timers.length).toBe(1)
+		expect(fake.timers[0]!.cancelled).toBe(false)
+
+		// Simulate child.on("close") firing before the 300s elapse
+		wd.cancel()
+		expect(fake.timers[0]!.cancelled).toBe(true)
+		expect(calls).toEqual([])
+		expect(wd.state()).toEqual({ kind: "cancelled" })
+	})
+
+	test("summary watchdog: stdout never contains ITERATION SUMMARY → no timers scheduled, no signals sent (mid-work crash path)", () => {
+		const fake = makeFakeTimers()
+		const calls: string[] = []
+		const wd = createSummaryWatchdog({
+			config: { marker: SUMMARY_WATCHDOG_MARKER, termMs: 300_000, killMs: 5_000 },
+			setTimer: fake.setTimer,
+			clearTimer: fake.clearTimer,
+			onTerm: () => calls.push("term"),
+			onKill: () => calls.push("kill"),
+			log: () => {},
+		})
+
+		wd.observeStdout(`{"event":"build"}\n`)
+		wd.observeStdout(`{"event":"test"}\n`)
+		wd.observeStdout(`partial line without the marker word`)
+		expect(fake.timers.length).toBe(0)
+		expect(wd.state()).toEqual({ kind: "idle" })
+
+		// Cancel after a non-armed run is also a no-op (no kill calls)
+		wd.cancel()
+		expect(calls).toEqual([])
+	})
+})
+
+describe("summary watchdog e2e — spawnOneAttempt with a fake claudeBinary", () => {
+	async function makeFakeClaudeBinary(scriptBody: string): Promise<string> {
+		const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-fakebin-"))
+		const path = resolve(dir, "fake-claude.sh")
+		await writeFile(path, `#!/bin/bash\n${scriptBody}\n`, { mode: 0o755 })
+		return path
+	}
+
+	async function fixtureOptions(claudeBinary: string): Promise<LoopOptions> {
+		const preset = await bundledPreset()
+		const opts = await makeFixtureOptions(preset)
+		return { ...opts, claudeBinary, claudeExtraArgs: [] }
+	}
+
+	test("summary watchdog e2e: fake binary prints SUMMARY then sleeps; watchdog SIGTERM closes attempt, terminated=watchdog", async () => {
+		const fake = await makeFakeClaudeBinary(
+			[
+				`echo '{"event":"prelude"}'`,
+				// Print SUMMARY then sleep way longer than the watchdog window
+				`echo 'ITERATION SUMMARY: pretending to be done'`,
+				// Use sleep loop so SIGTERM actually has work to interrupt
+				`sleep 30`,
+			].join("\n"),
+		)
+		const options = await fixtureOptions(fake)
+		const outputPath = resolve(options.logDir, `wd-e2e.iteration.txt`)
+		const sessionsPath = agentSessionsPath(outputPath)
+
+		const start = Date.now()
+		const outcome = await spawnOneAttempt({
+			options,
+			label: "iteration",
+			prompt: "ignored by fake binary",
+			outputPath,
+			sessionsPath,
+			resume: { kind: "fresh" },
+			watchdog: { marker: SUMMARY_WATCHDOG_MARKER, termMs: 300, killMs: 200 },
+		})
+		const elapsedMs = Date.now() - start
+
+		expect(outcome.terminated.kind).toBe("watchdog")
+		if (outcome.terminated.kind === "watchdog") {
+			expect(outcome.terminated.phase === "term" || outcome.terminated.phase === "kill").toBe(true)
+		}
+		// 300ms term + ≤200ms kill + bash spawn overhead — must finish well under 10s
+		expect(elapsedMs).toBeLessThan(10_000)
+
+		// sessions.jsonl must persist the watchdog termination so a re-read decides fresh next tick
+		const last = await readLastSessionEntry(sessionsPath)
+		expect(last?.terminated.kind).toBe("watchdog")
+	}, 15_000)
+
+	test("summary watchdog e2e: fake binary prints SUMMARY then exits cleanly within window → no SIGTERM, terminated=clean", async () => {
+		const fake = await makeFakeClaudeBinary(
+			[
+				`echo '{"event":"prelude"}'`,
+				`echo 'ITERATION SUMMARY: done'`,
+				`exit 0`,
+			].join("\n"),
+		)
+		const options = await fixtureOptions(fake)
+		const outputPath = resolve(options.logDir, `wd-e2e-clean.iteration.txt`)
+		const sessionsPath = agentSessionsPath(outputPath)
+
+		const outcome = await spawnOneAttempt({
+			options,
+			label: "iteration",
+			prompt: "ignored",
+			outputPath,
+			sessionsPath,
+			resume: { kind: "fresh" },
+			watchdog: { marker: SUMMARY_WATCHDOG_MARKER, termMs: 5_000, killMs: 1_000 },
+		})
+
+		expect(outcome.terminated.kind).toBe("clean")
+		expect(outcome.exitCode).toBe(0)
+	}, 10_000)
 })
