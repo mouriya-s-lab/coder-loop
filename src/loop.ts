@@ -175,6 +175,7 @@ export type Terminated =
 	| { kind: "clean" }
 	| { kind: "signal"; name: string }
 	| { kind: "error"; code: string }
+	| { kind: "watchdog"; phase: "term" | "kill"; afterSummarySeconds: number }
 
 export type SessionEntry = {
 	attempt: string
@@ -193,6 +194,10 @@ export const RESUME_CONTINUE_PROMPT = "继续"
 export const BACKOFF_BUDGET_SECONDS = 7200
 const BACKOFF_INITIAL_SECONDS = 4
 const BACKOFF_MAX_INTERVAL_SECONDS = 600
+
+export const SUMMARY_WATCHDOG_MARKER = "ITERATION SUMMARY:"
+export const SUMMARY_WATCHDOG_TERM_MS = 5 * 60 * 1000
+export const SUMMARY_WATCHDOG_KILL_MS = 5 * 1000
 
 export type SelectedIssue = {
 	item: QueueItem
@@ -1175,16 +1180,106 @@ async function runAgent(options: LoopOptions, label: AgentLabel, prompt: string,
 	return { output: result.output, code: result.code }
 }
 
-type SpawnOneAttemptInput = {
+export type SpawnOneAttemptInput = {
 	options: LoopOptions
 	label: AgentLabel
 	prompt: string
 	outputPath: string
 	sessionsPath: string
 	resume: ResumeDecision
+	watchdog?: SummaryWatchdogConfig
 }
 
-async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<AttemptOutcome> {
+export type SummaryWatchdogConfig = {
+	marker: string
+	termMs: number
+	killMs: number
+}
+
+const DEFAULT_SUMMARY_WATCHDOG: SummaryWatchdogConfig = {
+	marker: SUMMARY_WATCHDOG_MARKER,
+	termMs: SUMMARY_WATCHDOG_TERM_MS,
+	killMs: SUMMARY_WATCHDOG_KILL_MS,
+}
+
+export type SummaryWatchdogTimerHandle = unknown
+
+export type SummaryWatchdogDeps = {
+	config: SummaryWatchdogConfig
+	setTimer: (cb: () => void, ms: number) => SummaryWatchdogTimerHandle
+	clearTimer: (handle: SummaryWatchdogTimerHandle) => void
+	onTerm: () => void
+	onKill: () => void
+	log: (message: string) => void
+}
+
+export type SummaryWatchdogState =
+	| { kind: "idle" }
+	| { kind: "armed" }
+	| { kind: "term-sent" }
+	| { kind: "kill-sent" }
+	| { kind: "cancelled" }
+
+export type SummaryWatchdog = {
+	observeStdout: (chunk: string) => void
+	cancel: () => void
+	state: () => SummaryWatchdogState
+}
+
+export function createSummaryWatchdog(deps: SummaryWatchdogDeps): SummaryWatchdog {
+	let state: SummaryWatchdogState = { kind: "idle" }
+	let tail = ""
+	let termTimer: SummaryWatchdogTimerHandle = null
+	let killTimer: SummaryWatchdogTimerHandle = null
+	const tailLimit = Math.max(deps.config.marker.length - 1, 0)
+
+	const arm = (): void => {
+		if (state.kind !== "idle") return
+		state = { kind: "armed" }
+		deps.log(`summary watchdog armed: SIGTERM scheduled in ${Math.round(deps.config.termMs / 1000)}s after observing "${deps.config.marker}"`)
+		termTimer = deps.setTimer(() => {
+			termTimer = null
+			if (state.kind !== "armed") return
+			state = { kind: "term-sent" }
+			deps.log(`summary watchdog firing SIGTERM`)
+			deps.onTerm()
+			killTimer = deps.setTimer(() => {
+				killTimer = null
+				if (state.kind !== "term-sent") return
+				state = { kind: "kill-sent" }
+				deps.log(`summary watchdog firing SIGKILL`)
+				deps.onKill()
+			}, deps.config.killMs)
+		}, deps.config.termMs)
+	}
+
+	return {
+		observeStdout: (chunk: string) => {
+			if (state.kind !== "idle") return
+			const search = tail + chunk
+			if (search.includes(deps.config.marker)) {
+				tail = ""
+				arm()
+				return
+			}
+			tail = tailLimit === 0 ? "" : search.slice(-tailLimit)
+		},
+		cancel: () => {
+			if (termTimer !== null) {
+				deps.clearTimer(termTimer)
+				termTimer = null
+			}
+			if (killTimer !== null) {
+				deps.clearTimer(killTimer)
+				killTimer = null
+			}
+			state = { kind: "cancelled" }
+		},
+		state: () => state,
+	}
+}
+
+export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<AttemptOutcome> {
 	const { options, label, prompt: basePrompt, outputPath, sessionsPath, resume } = input
 	const effectivePrompt = resume.kind === "resume" ? RESUME_CONTINUE_PROMPT : basePrompt
 	return new Promise((resolveResult) => {
@@ -1237,6 +1332,48 @@ async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<AttemptOutc
 				log(`Agent [${label}] latest index write failed: ${error instanceof Error ? error.message : String(error)}`)
 			})
 		}
+		const watchdogConfig = input.watchdog ?? DEFAULT_SUMMARY_WATCHDOG
+		const child = spawn(options.claudeBinary, claudeArgs, {
+			cwd: options.targetCwd,
+			stdio: ["ignore", "pipe", "pipe"],
+			detached: true,
+		})
+		const sendSignalToGroup = (sig: NodeJS.Signals): void => {
+			const pid = child.pid
+			if (pid === undefined) return
+			// `detached: true` makes the child a process-group leader; signalling -pid
+			// reaches the whole tree (bash + sleep + agent-browser + …) which is what we
+			// need when the iter agent is wedged with live subprocesses holding stdio open.
+			try {
+				process.kill(-pid, sig)
+				return
+			} catch (error) {
+				log(`Agent [${label}] ${sig} group kill failed (${error instanceof Error ? error.message : String(error)}); falling back to leader-only kill`)
+			}
+			try {
+				child.kill(sig)
+			} catch (error) {
+				log(`Agent [${label}] ${sig} leader kill failed: ${error instanceof Error ? error.message : String(error)}`)
+			}
+		}
+
+		const watchdog = createSummaryWatchdog({
+			config: watchdogConfig,
+			setTimer: (cb, ms) => setTimeout(cb, ms),
+			clearTimer: (handle) => {
+				if (handle !== null) clearTimeout(handle as ReturnType<typeof setTimeout>)
+			},
+			onTerm: () => {
+				log(`Agent [${label}] forced-terminate after ITERATION SUMMARY+${Math.round(watchdogConfig.termMs / 1000)}s; sending SIGTERM (pid=${child.pid ?? "?"})`)
+				sendSignalToGroup("SIGTERM")
+			},
+			onKill: () => {
+				log(`Agent [${label}] forced-terminate SIGTERM+${Math.round(watchdogConfig.killMs / 1000)}s elapsed; sending SIGKILL (pid=${child.pid ?? "?"})`)
+				sendSignalToGroup("SIGKILL")
+			},
+			log,
+		})
+
 		const recordChunk = (stream: "stdout" | "stderr", chunk: Buffer): void => {
 			status.lastStream = stream
 			status.lastEventAt = new Date().toISOString()
@@ -1251,6 +1388,7 @@ async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<AttemptOutc
 						status.sessionId = detected
 					}
 				}
+				watchdog.observeStdout(chunk.toString("utf-8"))
 			} else {
 				err.push(chunk)
 				stderrOutFile.write(chunk)
@@ -1258,11 +1396,6 @@ async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<AttemptOutc
 			writeStatus()
 		}
 
-		const child = spawn(options.claudeBinary, claudeArgs, {
-			cwd: options.targetCwd,
-			stdio: ["ignore", "pipe", "pipe"],
-			detached: true,
-		})
 		status.pid = child.pid ?? null
 		writeStatus()
 		writeLatestIndex()
@@ -1298,6 +1431,7 @@ async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<AttemptOutc
 		child.on("error", (error) => {
 			if (settled) return
 			settled = true
+			watchdog.cancel()
 			status.error = error.message
 			status.lastEventAt = new Date().toISOString()
 			status.exitCode = 1
@@ -1312,11 +1446,20 @@ async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<AttemptOutc
 		child.on("close", (code, signal) => {
 			if (settled) return
 			settled = true
+			const watchdogStateAtClose = watchdog.state()
+			watchdog.cancel()
 			const stdout = Buffer.concat(out).toString("utf-8")
 			const stderr = Buffer.concat(err).toString("utf-8")
 			const exitCode = code ?? 1
 			const signalName = signal ?? null
-			const terminated = classifyTermination({ exitCode, signal: signalName, stdoutText: stdout, stderrText: stderr })
+			const terminated: Terminated =
+				watchdogStateAtClose.kind === "term-sent" || watchdogStateAtClose.kind === "kill-sent"
+					? {
+							kind: "watchdog",
+							phase: watchdogStateAtClose.kind === "kill-sent" ? "kill" : "term",
+							afterSummarySeconds: Math.round(watchdogConfig.termMs / 1000),
+						}
+					: classifyTermination({ exitCode, signal: signalName, stdoutText: stdout, stderrText: stderr })
 			status.exitCode = exitCode
 			status.signal = signalName
 			status.terminated = terminated
@@ -1325,7 +1468,15 @@ async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<AttemptOutc
 			if (signal) log(`Agent [${label}] killed by signal ${signal}`)
 			streamOutFile.end()
 			stderrOutFile.end()
-			log(`Agent [${label}] attempt closed: exit=${exitCode}, signal=${signalName ?? "none"}, terminated=${terminated.kind}${terminated.kind === "error" ? `(${terminated.code})` : terminated.kind === "signal" ? `(${terminated.name})` : ""}, sessionId=${status.sessionId ?? "<none>"}`)
+			const terminatedDetail =
+				terminated.kind === "error"
+					? `(${terminated.code})`
+					: terminated.kind === "signal"
+						? `(${terminated.name})`
+						: terminated.kind === "watchdog"
+							? `(forced-terminate after ITERATION SUMMARY+${terminated.afterSummarySeconds}s, phase=${terminated.phase})`
+							: ""
+			log(`Agent [${label}] attempt closed: exit=${exitCode}, signal=${signalName ?? "none"}, terminated=${terminated.kind}${terminatedDetail}, sessionId=${status.sessionId ?? "<none>"}`)
 			void settle(terminated, stdout + "\n" + stderr, exitCode, signalName)
 		})
 	})
@@ -1451,6 +1602,8 @@ export function decideResume(entry: SessionEntry | null): ResumeDecision {
 			return { kind: "resume", sessionId: entry.sessionId }
 		case "error":
 			return isTransient5xx(entry.terminated.code) ? { kind: "resume", sessionId: entry.sessionId } : { kind: "fresh" }
+		case "watchdog":
+			return { kind: "fresh" }
 	}
 }
 
@@ -1497,6 +1650,10 @@ function isValidSessionEntry(value: unknown): value is SessionEntry {
 	if (kind === "clean") return true
 	if (kind === "signal" && typeof (terminated as { name?: unknown }).name === "string") return true
 	if (kind === "error" && typeof (terminated as { code?: unknown }).code === "string") return true
+	if (kind === "watchdog") {
+		const w = terminated as { phase?: unknown; afterSummarySeconds?: unknown }
+		if ((w.phase === "term" || w.phase === "kill") && typeof w.afterSummarySeconds === "number") return true
+	}
 	return false
 }
 
@@ -1529,6 +1686,10 @@ export async function runAgentWithBackoff(deps: RunWithBackoffDeps): Promise<{ o
 	while (true) {
 		attempts++
 		const outcome = await deps.spawnAttempt({ resume })
+		if (outcome.terminated.kind === "watchdog") {
+			deps.log(`post-summary watchdog terminated attempt (phase=${outcome.terminated.phase}); treating as success so review can proceed`)
+			return { output: outcome.output, code: 0, attempts }
+		}
 		if (outcome.terminated.kind === "error" && isTransient5xx(outcome.terminated.code)) {
 			if (outcome.sessionId === null) {
 				deps.log(`backoff abort: transient-5xx without sessionId; returning to outer loop`)
