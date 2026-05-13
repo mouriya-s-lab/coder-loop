@@ -16,6 +16,7 @@ const EXPECTED_FRAGMENTS = [
 	{ id: "plan/intake", role: "plan", relPath: "plan/intake.md" },
 	{ id: "plan/classify", role: "plan", relPath: "plan/classify.md" },
 	{ id: "plan/triage-existing", role: "plan", relPath: "plan/triage-existing.md" },
+	{ id: "plan/business-frame", role: "plan", relPath: "plan/business-frame.md" },
 	{ id: "plan/decompose", role: "plan", relPath: "plan/decompose.md" },
 	{ id: "plan/checkpoint-author", role: "plan", relPath: "plan/checkpoint-author.md" },
 	{ id: "plan/adversarial-validate", role: "plan", relPath: "plan/adversarial-validate.md" },

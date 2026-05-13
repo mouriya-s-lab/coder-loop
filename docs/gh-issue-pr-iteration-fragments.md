@@ -36,7 +36,7 @@ status 字面量都是 preset 字符串，引擎只识别 `continuable / termina
 
 ---
 
-## 2. Fragment 全集（43）
+## 2. Fragment 全集（45）
 
 按目录列出全部 fragment id：
 
@@ -47,12 +47,13 @@ status 字面量都是 preset 字符串，引擎只识别 `continuable / termina
 - `common/state-contract`
 - `contract` — preset 的 issue body / PR body / review gate 解析规则，override 用户级 `writing-issue` skill
 
-**plan/** — planning phase 内部，11 个（仅 `/dev-plan` slash command 进入）
+**plan/** — planning phase 内部，12 个（仅 `/dev-plan` slash command 进入）
 
 - `plan/index` — phase 入口
 - `plan/intake`
 - `plan/classify`
 - `plan/triage-existing` — 既存 issue 的 rewrite_body / pr_reply / close_* / no_op 副作用动作
+- `plan/business-frame` — 用 business outcome 三段式（痛点 / 用户做完能多干什么 / 具体场景）阻止 sub-issue body 写成 audit 视角
 - `plan/decompose`
 - `plan/checkpoint-author`
 - `plan/adversarial-validate`
@@ -96,7 +97,7 @@ status 字面量都是 preset 字符串，引擎只识别 `continuable / termina
 - `review/global-assessment`
 - `review/final`
 
-fragment 总数 = 4 + 11 + 9 + 20 = 44，与 `presets/gh-issue-pr-iteration/preset.toml` 的 `[[fragments]]` 块数一致。
+fragment 总数 = 4 + 12 + 9 + 20 = 45，与 `presets/gh-issue-pr-iteration/preset.toml` 的 `[[fragments]]` 块数一致。
 
 ---
 
