@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { readFile } from "node:fs/promises"
+import * as fs from "node:fs/promises"
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { resolve } from "node:path"
@@ -76,6 +77,7 @@ function makeItem(overrides: Partial<QueueItem> & { issue: number; status: strin
 		lastRunId: overrides.lastRunId ?? null,
 		issueFile: overrides.issueFile ?? `.coder-loop/runtime/issues/${overrides.issue}.md`,
 		evidenceDir: overrides.evidenceDir ?? `.coder-loop/runtime/evidence/${overrides.issue}`,
+		agentCwd: overrides.agentCwd ?? null,
 		issue: overrides.issue,
 	}
 }
@@ -207,6 +209,29 @@ describe("selectIssue", () => {
 		expect(selected).not.toBeNull()
 		expect(getItemId(selected!.item, preset)).toBe("7")
 	})
+
+	test("agentCwd defaults to options.targetCwd when the queue item omits it", async () => {
+		const preset = await bundledPreset()
+		const options = await makeFixtureOptions(preset)
+		const state = makeState({
+			queue: [makeItem({ issue: 11, status: "queued" })],
+		})
+		const selected = selectIssue(state, options)
+		expect(selected).not.toBeNull()
+		expect(selected!.agentCwd).toBe(options.targetCwd)
+	})
+
+	test("agentCwd echoes the queue item's absolute agentCwd when set (cross-repo iteration)", async () => {
+		const preset = await bundledPreset()
+		const options = await makeFixtureOptions(preset)
+		const state = makeState({
+			queue: [makeItem({ issue: 12, status: "queued", agentCwd: "/abs/other-repo" })],
+		})
+		const selected = selectIssue(state, options)
+		expect(selected).not.toBeNull()
+		expect(selected!.agentCwd).toBe("/abs/other-repo")
+	})
+
 })
 
 describe("markIterationStarted / markReviewStarted", () => {
@@ -336,12 +361,44 @@ describe("checkRuntime preset-driven validation", () => {
 		const errors = await checkRuntime(options, state)
 		expect(errors.some((e) => e.message.includes("duplicate id"))).toBe(true)
 	})
+
+	test("queue item with a relative agentCwd produces an absolute-path error", async () => {
+		const preset = await bundledPreset()
+		const options = await makeFixtureOptions(preset)
+		const state = makeState({
+			queue: [makeItem({ issue: 21, status: "queued", agentCwd: "relative/repo" })],
+		})
+		const errors = await checkRuntime(options, state)
+		expect(errors.some((e) => e.path === "state.queue[0].agentCwd" && /absolute/.test(e.message))).toBe(true)
+	})
+
+	test("queue item with an agentCwd pointing at a missing directory produces a not-a-directory error", async () => {
+		const preset = await bundledPreset()
+		const options = await makeFixtureOptions(preset)
+		const state = makeState({
+			queue: [makeItem({ issue: 22, status: "queued", agentCwd: "/abs/does-not-exist-coder-loop-test" })],
+		})
+		const errors = await checkRuntime(options, state)
+		expect(errors.some((e) => e.path === "state.queue[0].agentCwd")).toBe(true)
+	})
+
+	test("queue item with an existing absolute agentCwd directory passes (cross-repo case)", async () => {
+		const preset = await bundledPreset()
+		const options = await makeFixtureOptions(preset)
+		const otherRepo = await mkdtemp(resolve(tmpdir(), "coder-loop-otherrepo-"))
+		const state = makeState({
+			queue: [makeItem({ issue: 23, status: "queued", agentCwd: otherRepo })],
+		})
+		const errors = await checkRuntime(options, state)
+		expect(errors.some((e) => e.path === "state.queue[0].agentCwd")).toBe(false)
+	})
 })
 
 function makeFixtureRuntime(overrides: Partial<RuntimeBindings> = {}): RuntimeBindings {
 	return {
 		runId: "run-fixture",
 		targetCwd: "/tmp/fixture-cwd",
+		agentCwd: "/tmp/fixture-cwd",
 		workflowPath: "/tmp/fixture-cwd/.coder-loop/workflow.md",
 		sharedContextPath: "/tmp/fixture-cwd/.coder-loop/runtime/shared.md",
 		statePath: "/tmp/fixture-cwd/.coder-loop/runtime/state.json",
@@ -462,6 +519,7 @@ describe("renderPrompt with bundled preset", () => {
 
 		const expectedLines: string[] = [
 			`TARGET_CWD=${runtime.targetCwd}`,
+			`AGENT_CWD=${runtime.agentCwd}`,
 			`REPO=${config.repository}`,
 			`BASE_BRANCH=${config.baseBranch}`,
 			`RUN_ID=${runtime.runId}`,
@@ -625,16 +683,35 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 			runId: "run-1",
 			currentIssueFile: "/tmp/issue.md",
 			evidenceDir: "/tmp/evidence",
+			agentCwd: options.targetCwd,
 			issueRun,
 			issueKind: null,
 		})
 		expect(runtime.runId).toBe("run-1")
 		expect(runtime.targetCwd).toBe(options.targetCwd)
+		expect(runtime.agentCwd).toBe(options.targetCwd)
 		expect(runtime.presetDir).toBe(preset.presetDir)
 		expect(runtime.runIdGeneration).toBe("new")
 		expect(runtime.resumedFromPhase).toBe("")
 		expect(runtime.resumedStartedAt).toBe("")
 		expect(runtime.issueKind).toBe("")
+	})
+
+	test("buildRuntimeBindings forwards a per-item agentCwd distinct from targetCwd", async () => {
+		const preset = await bundledPreset()
+		const options = await makeFixtureOptions(preset)
+		const issueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null }
+		const runtime = buildRuntimeBindings({
+			options,
+			runId: "run-cross-repo",
+			currentIssueFile: "/tmp/issue.md",
+			evidenceDir: "/tmp/evidence",
+			agentCwd: "/abs/other-repo",
+			issueRun,
+			issueKind: null,
+		})
+		expect(runtime.agentCwd).toBe("/abs/other-repo")
+		expect(runtime.targetCwd).toBe(options.targetCwd)
 	})
 
 	test("buildRuntimeBindings exposes resumed values when issueRun.runIdGeneration === 'resumed'", async () => {
@@ -650,6 +727,7 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 			runId: "run-2",
 			currentIssueFile: "/tmp/issue.md",
 			evidenceDir: "/tmp/evidence",
+			agentCwd: options.targetCwd,
 			issueRun,
 			issueKind: "code",
 		})
@@ -668,6 +746,7 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 			runId: "run-3",
 			currentIssueFile: "/tmp/issue.md",
 			evidenceDir: "/tmp/evidence",
+			agentCwd: options.targetCwd,
 			issueRun,
 			issueKind: null,
 		})
@@ -683,6 +762,7 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 			runId: "run-4",
 			currentIssueFile: "/tmp/issue.md",
 			evidenceDir: "/tmp/evidence",
+			agentCwd: options.targetCwd,
 			issueRun,
 			issueKind: "comment",
 		})
@@ -1370,6 +1450,7 @@ describe("summary watchdog e2e — spawnOneAttempt with a fake claudeBinary", ()
 			outputPath,
 			sessionsPath,
 			resume: { kind: "fresh" },
+			agentCwd: options.targetCwd,
 			watchdog: { marker: SUMMARY_WATCHDOG_MARKER, termMs: 300, killMs: 200 },
 		})
 		const elapsedMs = Date.now() - start
@@ -1385,6 +1466,30 @@ describe("summary watchdog e2e — spawnOneAttempt with a fake claudeBinary", ()
 		const last = await readLastSessionEntry(sessionsPath)
 		expect(last?.terminated.kind).toBe("watchdog")
 	}, 15_000)
+
+	test("spawnOneAttempt uses input.agentCwd as the child cwd, not options.targetCwd", async () => {
+		// Fake claude prints `pwd -P` so we get the real path even when mkdtemp returns a symlinked /var/folders/... on macOS.
+		const fake = await makeFakeClaudeBinary(`echo "PWD=$(pwd -P)"`)
+		const options = await fixtureOptions(fake)
+		const otherRepo = await fs.realpath(await mkdtemp(resolve(tmpdir(), "coder-loop-otherrepo-")))
+		const targetReal = await fs.realpath(options.targetCwd)
+		const outputPath = resolve(options.logDir, "agentcwd.iteration.txt")
+		const sessionsPath = agentSessionsPath(outputPath)
+
+		const outcome = await spawnOneAttempt({
+			options,
+			label: "iteration",
+			prompt: "ignored",
+			outputPath,
+			sessionsPath,
+			resume: { kind: "fresh" },
+			agentCwd: otherRepo,
+		})
+
+		expect(outcome.exitCode).toBe(0)
+		expect(outcome.output).toContain(`PWD=${otherRepo}`)
+		expect(outcome.output).not.toContain(`PWD=${targetReal}`)
+	}, 10_000)
 
 	test("summary watchdog e2e: fake binary prints SUMMARY then exits cleanly within window → no SIGTERM, terminated=clean", async () => {
 		const fake = await makeFakeClaudeBinary(
@@ -1405,6 +1510,7 @@ describe("summary watchdog e2e — spawnOneAttempt with a fake claudeBinary", ()
 			outputPath,
 			sessionsPath,
 			resume: { kind: "fresh" },
+			agentCwd: options.targetCwd,
 			watchdog: { marker: SUMMARY_WATCHDOG_MARKER, termMs: 5_000, killMs: 1_000 },
 		})
 
@@ -1558,6 +1664,7 @@ describe("events jsonl — per-run NDJSON event stream", () => {
 			outputPath,
 			sessionsPath,
 			resume: { kind: "fresh" },
+			agentCwd: options.targetCwd,
 			watchdog: { marker: SUMMARY_WATCHDOG_MARKER, termMs: 300, killMs: 200 },
 			eventContext,
 		})
@@ -1615,6 +1722,7 @@ describe("events jsonl — per-run NDJSON event stream", () => {
 			outputPath,
 			sessionsPath,
 			resume: { kind: "fresh" },
+			agentCwd: options.targetCwd,
 			eventContext,
 		})
 		expect(outcome.terminated.kind).toBe("clean")

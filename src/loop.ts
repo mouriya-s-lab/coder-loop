@@ -43,6 +43,7 @@ export type QueueItem = {
 	lastRunId: string | null
 	issueFile: string | null
 	evidenceDir: string | null
+	agentCwd: string | null
 	[key: string]: unknown
 }
 
@@ -293,6 +294,7 @@ export type SelectedIssue = {
 	item: QueueItem
 	issueFile: string | null
 	evidenceDir: string | null
+	agentCwd: string
 }
 
 export type IssueRunContext = {
@@ -306,6 +308,7 @@ export type IssueKind = "code" | "comment" | null
 const RUNTIME_BINDING_KEYS = [
 	"runId",
 	"targetCwd",
+	"agentCwd",
 	"workflowPath",
 	"sharedContextPath",
 	"statePath",
@@ -520,11 +523,12 @@ async function main() {
 					runId: fallbackRunId,
 					currentIssueFile: "",
 					evidenceDir: options.evidenceRootDir,
+					agentCwd: options.targetCwd,
 					issueRun: fallbackIssueRun,
 					issueKind: null,
 				}),
 			}
-			await runReview(options, fallbackRunId, fallbackCtx)
+			await runReview(options, fallbackRunId, fallbackCtx, options.targetCwd)
 			if (!(await exists(options.loopFile))) {
 				log("Review agent stopped the loop.")
 				break
@@ -552,6 +556,7 @@ async function main() {
 				runId,
 				currentIssueFile: selected.issueFile,
 				evidenceDir: selected.evidenceDir,
+				agentCwd: selected.agentCwd,
 				issueRun,
 				issueKind: kindResult.kind,
 			}),
@@ -593,6 +598,7 @@ async function main() {
 				iterPhase.name,
 				iterPrompt,
 				iterOutputPath,
+				selected.agentCwd,
 				iterEventContext,
 			)
 			const iterDurationSeconds = (Date.now() - iterStart) / 1000
@@ -626,7 +632,7 @@ async function main() {
 			log(`Resuming ${reviewPhase.name} agent for issue #${selectedId} without rerunning iteration...`)
 		}
 
-		const reviewCode = await runReview(options, runId, ctx, { emit, ...baseEvent })
+		const reviewCode = await runReview(options, runId, ctx, selected.agentCwd, { emit, ...baseEvent })
 		if (reviewCode !== 0) {
 			log(`Review agent crashed (exit ${reviewCode}). Stopping.`)
 			await removeLoopFile(options.loopFile)
@@ -667,6 +673,7 @@ async function runReview(
 	options: LoopOptions,
 	runId: string,
 	ctx: ResolveContext,
+	agentCwd: string,
 	eventContext?: Omit<LoopEventContext, "phase">,
 ): Promise<number> {
 	const phases = options.preset.phases
@@ -696,6 +703,7 @@ async function runReview(
 		reviewPhase.name,
 		reviewPrompt,
 		reviewOutputPath,
+		agentCwd,
 		phaseEventContext,
 	)
 	const reviewDuration = (Date.now() - reviewStart) / 1000
@@ -1021,6 +1029,13 @@ export async function checkRuntime(options: LoopOptions, state: LoopState): Prom
 			const evidenceDir = resolveRuntimePath(options, item.evidenceDir, `${label}.evidenceDir`, options.evidenceRootDir, errors)
 			if (evidenceDir) await checkDirectory(evidenceDir, `${label}.evidenceDir`, errors)
 		}
+		if (item.agentCwd !== null) {
+			if (!isAbsolute(item.agentCwd)) {
+				pushCheckError(errors, `${label}.agentCwd`, `must be an absolute path (got "${item.agentCwd}")`)
+			} else {
+				await checkDirectory(item.agentCwd, `${label}.agentCwd`, errors)
+			}
+		}
 	}
 
 	if (state.current) {
@@ -1062,6 +1077,7 @@ function makeFallbackItem(): QueueItem {
 		lastRunId: null,
 		issueFile: null,
 		evidenceDir: null,
+		agentCwd: null,
 	}
 }
 
@@ -1104,6 +1120,7 @@ function parseQueueItem(value: unknown, label: string): QueueItem {
 		lastRunId: optionalString(record, "lastRunId"),
 		issueFile: optionalString(record, "issueFile"),
 		evidenceDir: optionalString(record, "evidenceDir"),
+		agentCwd: optionalString(record, "agentCwd"),
 	}
 }
 
@@ -1138,7 +1155,10 @@ export function selectIssue(state: LoopState, options: LoopOptions): SelectedIss
 	if (issueFile !== null && !isWithin(options.issueDir, issueFile)) fail(`Selected issue file must resolve inside issueDir: ${selected.issueFile}`)
 	if (evidenceDir !== null && !isWithin(options.evidenceRootDir, evidenceDir)) fail(`Selected evidence directory must resolve inside evidenceDir: ${selected.evidenceDir}`)
 
-	return { item: selected, issueFile, evidenceDir }
+	// agentCwd validity (absolute + existing directory) is enforced upstream by checkRuntime.
+	const agentCwd = selected.agentCwd ?? options.targetCwd
+
+	return { item: selected, issueFile, evidenceDir, agentCwd }
 }
 
 export function markIterationStarted(
@@ -1252,12 +1272,14 @@ export function buildRuntimeBindings(input: {
 	runId: string
 	currentIssueFile: string | null
 	evidenceDir: string | null
+	agentCwd: string
 	issueRun: IssueRunContext
 	issueKind: IssueKind
 }): RuntimeBindings {
 	return {
 		runId: input.runId,
 		targetCwd: input.options.targetCwd,
+		agentCwd: input.agentCwd,
 		workflowPath: input.options.workflowPath,
 		sharedContextPath: input.options.sharedContextPath,
 		statePath: input.options.statePath,
@@ -1342,6 +1364,7 @@ async function runAgent(
 	label: AgentLabel,
 	prompt: string,
 	outputPath: string,
+	agentCwd: string,
 	eventContext?: LoopEventContext,
 ): Promise<{ output: string; code: number }> {
 	const sessionsPath = agentSessionsPath(outputPath)
@@ -1353,7 +1376,7 @@ async function runAgent(
 
 	const result = await runAgentWithBackoff({
 		spawnAttempt: ({ resume }) => {
-			const baseInput: SpawnOneAttemptInput = { options, label, prompt, outputPath, sessionsPath, resume }
+			const baseInput: SpawnOneAttemptInput = { options, label, prompt, outputPath, sessionsPath, resume, agentCwd }
 			return spawnOneAttempt(eventContext ? { ...baseInput, eventContext } : baseInput)
 		},
 		sleep: (seconds: number) => new Promise((resolve) => setTimeout(resolve, seconds * 1000)),
@@ -1373,6 +1396,7 @@ export type SpawnOneAttemptInput = {
 	outputPath: string
 	sessionsPath: string
 	resume: ResumeDecision
+	agentCwd: string
 	watchdog?: SummaryWatchdogConfig
 	eventContext?: LoopEventContext
 }
@@ -1521,7 +1545,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 		}
 		const watchdogConfig = input.watchdog ?? DEFAULT_SUMMARY_WATCHDOG
 		const child = spawn(options.claudeBinary, claudeArgs, {
-			cwd: options.targetCwd,
+			cwd: input.agentCwd,
 			stdio: ["ignore", "pipe", "pipe"],
 			detached: true,
 		})

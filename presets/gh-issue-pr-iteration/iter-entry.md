@@ -4,7 +4,8 @@ You are spawned by the orchestrator via `claude -p` to execute exactly one itera
 
 ## Bound runtime inputs
 
-- Target working directory: `{{TARGET_CWD}}`
+- Target working directory (where `.coder-loop/runtime/` lives): `{{TARGET_CWD}}`
+- Agent working directory (your `cwd`; may equal TARGET_CWD or point at a different repo checkout for cross-repo work): `{{AGENT_CWD}}`
 - GitHub repository: `{{REPO}}`
 - Base branch: `{{BASE_BRANCH}}`
 - Current issue: `#{{ISSUE}}`

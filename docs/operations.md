@@ -34,6 +34,7 @@ type QueueItem = {
   lastRunId: string | null
   issueFile: string | null        // 相对 issueDir 的路径或绝对路径
   evidenceDir: string | null      // 相对 evidenceRootDir 或绝对
+  agentCwd: string | null         // 绝对路径；spawn 子进程的 cwd。null → 等于 targetCwd。跨 repo 迭代用：指向外部 repo 的 checkout
   [<preset.item.idField>]: string | number   // 默认 "issue"
   [其他字段]: unknown              // preset 可加任意自定义字段
 }
@@ -55,7 +56,8 @@ type CurrentRun = {
 - 每个 queue item 的 `status` 必须落在 preset 的 status 集合内；
 - 若 `state.current` 存在，其 `idField` 值必须能在 `queue` 找到匹配项，且该项的 status 必须落在 `statuses.continuable` 内；
 - 若 `state.current.phase` 存在，必须落在 `preset.phases.*.name` 内；
-- `state.current.startedAt` 必须 ISO 8601。
+- `state.current.startedAt` 必须 ISO 8601；
+- 若 queue item 声明 `agentCwd`，必须是绝对路径，且必须是个已存在目录。
 
 不变量违反 → `--check-runtime` 非零退出，引擎 spawn 前 abort。
 
@@ -121,6 +123,7 @@ Runtime check failed: <N> error(s)
 | queue item status 非法 | `state.queue[N].status: status "foo" is not in preset.statuses` | 用 preset 声明的 status 字面量 |
 | queue item 字段类型错 | `state.queue[N].attempts: must be null or a non-negative integer` | 改字段类型 |
 | issueFile / evidenceDir 找不到 | `state.queue[N].issueFile: file does not exist` | 创建文件或把字段设回 null |
+| agentCwd 不是绝对路径 / 不存在 | `state.queue[N].agentCwd: must be an absolute path` / `directory does not exist` | 改成已存在的绝对目录或设回 null（用 targetCwd） |
 | current 引用不到 queue 项 | `state.current.issue: id "42" is not present in queue` | 队列没该 id，要么补回 queue，要么 `state.current = null` |
 | current 引用了 terminal item | `state.current.issue: id "42" has non-continuable status done` | 已完成 item 不该是 current，`state.current = null` |
 | current.phase 不在 preset | `state.current.phase: phase "foo" is not declared in preset.phases` | phase 字面量错，改为 preset 声明的名字 |
