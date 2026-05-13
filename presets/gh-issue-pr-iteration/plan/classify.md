@@ -49,7 +49,7 @@ If the entire intake reduces to `no-code` (everything already satisfied), emit `
 
 Choose exactly one:
 
-- `classified` → next fragment is `plan/triage-existing` if intake contains already-open issues to triage; otherwise read `plan/decompose` directly. Every new candidate has a class.
+- `classified` → next fragment is `plan/triage-existing` if intake contains already-open issues to triage; otherwise read `plan/business-frame`. Every new candidate has a class.
 - `classification_blocked` → read `plan/handoff` with the ambiguities. Operator must clarify.
 - `classification_no_work` → read `plan/handoff` noting no actionable work remains.
 

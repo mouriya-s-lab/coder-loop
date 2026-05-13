@@ -2,7 +2,7 @@
 
 ## Goal
 
-把 intake 阶段命中的已开 issue 走显式 triage 路径，按 operator policy 分到 5 类副作用动作，避免被压进 `plan/classify` / `plan/decompose` 当 pass-through。新 issue（intake 列出的、GitHub 上还不存在的候选）继续走 `plan/decompose` → `plan/checkpoint-author` → `plan/create-issues`。
+把 intake 阶段命中的已开 issue 走显式 triage 路径，按 operator policy 分到 5 类副作用动作，避免被压进 `plan/classify` / `plan/decompose` 当 pass-through。新 issue（intake 列出的、GitHub 上还不存在的候选）继续走 `plan/business-frame` → `plan/decompose` → `plan/checkpoint-author` → `plan/create-issues`。
 
 triage 与新 issue planning 共存：一次 `/dev-plan` 调用既可以 triage 5 个既存 + decompose 2 个新（`triage_complete`），也可以只 triage 不 decompose 任何新（`triage_only`）。
 
@@ -70,7 +70,7 @@ triage 与新 issue planning 共存：一次 `/dev-plan` 调用既可以 triage 
 
 每条 verdict 严格映射到下游 fragment：
 
-- `triage_complete` → read `plan/decompose`。triage 已处理；intake 还有新 issue 候选要拆。
+- `triage_complete` → read `plan/business-frame`。triage 已处理；intake 还有新 issue 候选要拆，先建立业务陈述再 decompose。
 - `triage_only` → read `plan/init-queue`。仅 triage，无新 issue 候选；既存 issue 中有 `rewrite_body` 落地的、且要入 coder-loop queue 的，按动作产物准备 queue item 后直接 init-queue。
 - `triage_close_via_review` → read `plan/handoff`。triage 含一条或多条 `close_propose_to_review` 动作；plan 把待关清单 + 理由 + 引用证据写进 handoff，由 `/dev-loop` review phase `review/issue-closure-gate` 决定关 / 不关。
 - `triage_blocked` → read `plan/handoff`。至少一条 issue 上 GitHub 写入失败 / state diverge / policy 冲突；plan 不继续 decompose，把阻塞集合 + 已成功集合都写进 handoff，operator 决定下一步。
