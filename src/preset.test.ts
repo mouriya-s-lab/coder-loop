@@ -39,6 +39,7 @@ const EXPECTED_FRAGMENTS = [
 	{ id: "review/pr-protocol", role: "review", relPath: "review/pr-protocol.md" },
 	{ id: "review/title-intent-gate", role: "review", relPath: "review/title-intent-gate.md" },
 	{ id: "review/evidence-gate", role: "review", relPath: "review/evidence-gate.md" },
+	{ id: "review/caveat-honesty-gate", role: "review", relPath: "review/caveat-honesty-gate.md" },
 	{ id: "review/commitment-gate", role: "review", relPath: "review/commitment-gate.md" },
 	{ id: "review/spike-followup-gate", role: "review", relPath: "review/spike-followup-gate.md" },
 	{ id: "review/code-gate", role: "review", relPath: "review/code-gate.md" },

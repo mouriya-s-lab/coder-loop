@@ -40,13 +40,14 @@ Run review in this order:
 3. `review/pr-protocol`
 4. `review/title-intent-gate`
 5. `review/evidence-gate`
-6. `review/commitment-gate`
-7. `review/spike-followup-gate`
-8. `review/code-gate`
-9. `review/issue-closure-gate`
-10. one terminal action fragment
-11. `review/update-state`
-12. `review/global-assessment`
-13. `review/final`
+6. `review/caveat-honesty-gate`
+7. `review/commitment-gate`
+8. `review/spike-followup-gate`
+9. `review/code-gate`
+10. `review/issue-closure-gate`
+11. one terminal action fragment
+12. `review/update-state`
+13. `review/global-assessment`
+14. `review/final`
 
 Do not inspect a later semantic phase until the previous gate has passed, except when the issue has no implementation PR and is being evaluated as no-code/already-satisfied/skip.
