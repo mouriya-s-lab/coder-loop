@@ -43,6 +43,9 @@ L2: Preset（presets/<name>/）
 - **Run orchestrator**: `bun run src/loop.ts [--target-cwd <path>] [--once] [--max-iterations N]`
 - **Check runtime**: `bun run src/loop.ts --target-cwd <path> --check-runtime`
 - **Dry run**: `bun run src/loop.ts --target-cwd <path> --dry-run` (渲染 + 选 item，不 spawn agent)
+- **Install target**: `coder-loop install <target> [--repo <owner/repo>] [--preset <name>] [--force] [--dry-run] [--install-skills]` — 幂等四层 bootstrap（slash commands + runtime 目录 + config + workflow.md + GitHub `kind:code`/`kind:comment` 标签 + PATH/skill 检查）。源：`src/install-commands.ts`。
+- **Uninstall target**: `coder-loop uninstall <target>` — 仅删 `.claude/commands/dev-*.md`；runtime 和 GitHub labels 保留。
+- **Doctor**: `coder-loop doctor <target> [--repo <owner/repo>]` — 只读四层体检（target 文件 / GitHub 标签 / 操作员 PATH / writing-issue skill 版本）。
 - **Plan phase**: `/dev-plan` （`gh-issue-pr-iteration` preset 配套的规划器）
 - **Loop phase**: `/dev-loop [N]` （`gh-issue-pr-iteration` preset 配套的循环入口）
 

@@ -206,9 +206,23 @@ state: /abs/path/.coder-loop/runtime/state.json
 
 ---
 
-## 6. CLI Flags 全表
+## 6. CLI 全表
 
-`bun src/loop.ts [flags]` 或 `coder-loop [flags]`（来自 `src/loop.ts:222-288`）：
+### 6.1 子命令（必须作为第一位置参数）
+
+`coder-loop install / uninstall / doctor`（源：`src/install-commands.ts`）。详细行为见 [operator-quickstart §1](./operator-quickstart.md#1-bootstrap-目标-repo-的-coder-loop)：
+
+| 子命令 | 用途 | 主要 flag |
+|---|---|---|
+| `install <target>` | 幂等四层 bootstrap | `--repo <slug>` `--preset <name>` `--force` `--dry-run` `--install-skills` `--skip-skill-check` |
+| `uninstall <target>` | 仅删 `.claude/commands/dev-*.md` | — |
+| `doctor <target>` | 只读四层体检 | `--repo <slug>` |
+
+跑 loop 自身时**不**带子命令，直接进 6.2。
+
+### 6.2 主循环 flags
+
+`bun src/loop.ts [flags]` 或 `coder-loop [flags]`：
 
 | Flag | 类型 | 默认 | 含义 |
 |---|---|---|---|
@@ -218,12 +232,18 @@ state: /abs/path/.coder-loop/runtime/state.json
 | `--workflow <path>` | string | config 字段或 `<target>/.coder-loop/workflow.md` | workflow 文件路径 |
 | `--state <path>` | string | config 字段或 `<target>/.coder-loop/runtime/state.json` | state 文件路径 |
 | `--repo <owner>/<repo>` | string | config 字段或 null | 校验 `state.repository` 一致；不会改写 state |
-| `--require-browser-evidence` | bool flag | config 字段或 false | 强制 agent 收集浏览器截图证据 |
+| `--require-browser-evidence` | bool flag | config 字段或 false | 暴露 `runtime.requireBrowserEvidence = "true"` 给 preset，preset prompt 自行决定是否拒收非浏览器证据；引擎自身不验证截图存在 |
 | `--once` | bool flag | false | 跑 1 轮就退出（等价 `1`） |
 | `--dry-run` | bool flag | false | 选中 item 后停（不 spawn agent，不写 trace） |
 | `--check-runtime` | bool flag | false | 校验 schema 后退出，不 spawn agent |
 
 flag 冲突优先级：CLI > config > 默认。
+
+### 6.3 Agent 进程与监控（非 CLI 参数，但运维需要知道）
+
+- **Per-run events JSONL**：每次 loop 启动会写 `<target>/.coder-loop/runtime/events/<runId>.jsonl`，行级 JSON 事件（`queue.select` / `phase.start` / `phase.end` / `attempt.start` / `attempt.close` / `watchdog.fire` / `queue.terminal`）。`runId` 在 `state.current.runId`。外部 watcher（supervisor / 下游 agent）订阅这条流而不是 scrape stdout：`tail -F <runId>.jsonl`。
+- **Post-summary watchdog**：iteration agent 输出 `ITERATION SUMMARY` 后 5 分钟未自然退出，引擎发 SIGTERM；再 30 秒后 SIGKILL。事件流写一条 `watchdog.fire`。这是引擎层兜底，防止 wedged agent 卡死循环。
+- **Agent --resume**：claude CLI spawn 中断（5xx / 网络）时引擎自动 `--resume <sessionId>` 续跑，最多重试若干次后退避。sessionId 索引在 `<logDir>/<runId>.<phase>.sessions.jsonl`。
 
 ---
 

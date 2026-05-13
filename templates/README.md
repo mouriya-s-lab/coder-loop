@@ -25,7 +25,9 @@ preset-specific starter 不在此处：
 
 ## Minimum viable target setup
 
-跑 coder-loop 所需最小目标项目：
+一键路径：`coder-loop install <target> --repo <owner>/<repo>` 幂等做完下面 1-2，并补 `kind:code` / `kind:comment` GitHub 标签 + slash command + PATH/skill 检查。详见 [docs/operator-quickstart.md §1](../docs/operator-quickstart.md#1-bootstrap-目标-repo-的-coder-loop)。
+
+手动等价 = 下面三步：
 
 1. Committed `<TARGET>/.coder-loop/workflow.md`（具体内容由 preset 决定；用 `gh-issue-pr-iteration` 时从 `presets/gh-issue-pr-iteration/templates/workflow.md` 起步并裁剪）
 2. `<TARGET>/.coder-loop/runtime/config.json`（写 `preset` 或 `presetPath` 字段；用默认 `gh-issue-pr-iteration` 时再加 `repository / baseBranch`）
