@@ -32,6 +32,7 @@ prompt = "iter-entry.md"
 
   [phases.variables]
   TARGET_CWD               = "runtime.targetCwd"
+  AGENT_CWD                = "runtime.agentCwd"
   REPO                     = "config.repository"
   BASE_BRANCH              = "config.baseBranch"
   RUN_ID                   = "runtime.runId"
@@ -64,6 +65,7 @@ prompt = "review-entry.md"
 
   [phases.variables]
   TARGET_CWD               = "runtime.targetCwd"
+  AGENT_CWD                = "runtime.agentCwd"
   REPO                     = "config.repository"
   BASE_BRANCH              = "config.baseBranch"
   RUN_ID                   = "runtime.runId"

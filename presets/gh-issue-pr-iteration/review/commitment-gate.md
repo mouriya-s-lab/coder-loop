@@ -30,7 +30,7 @@ This gate replaces the prior reliance on review thinking to read the issue body 
 4. Enumerate every row from both tables. **Do not silently drop any row.** Name each Command verbatim in the verdict report so the operator can see all rows were considered.
 
 5. For each row, branch on `Env`:
-   - `local` — execute the `Command` in `{{TARGET_CWD}}`. Capture exit code and stdout/stderr. Compare to `Expect`.
+   - `local` — execute the `Command` in `{{AGENT_CWD}}` (= the working directory the iteration agent was spawned in; equals `{{TARGET_CWD}}` for in-repo work, points at the cross-repo checkout when the queue item declared one). Capture exit code and stdout/stderr. Compare to `Expect`.
    - `VM` / `container` / `CI` / `browser` / target-environment — review does not run these (review never starts servers, runs target tests, or opens browsers). Instead, locate the matching evidence artifact in the PR evidence packet that proves the row was executed in the target env and produced the `Expect` output. If no matching artifact exists, treat the row as failed and cite the missing artifact requirement.
    - `downstream` / `integration` — same as VM: require the row's artifact in the PR evidence packet.
 

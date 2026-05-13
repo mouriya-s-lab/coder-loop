@@ -56,6 +56,7 @@ const EXPECTED_FRAGMENTS = [
 
 const EXPECTED_VARIABLE_KEYS = [
 	"TARGET_CWD",
+	"AGENT_CWD",
 	"REPO",
 	"BASE_BRANCH",
 	"RUN_ID",
@@ -105,7 +106,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		}
 	})
 
-	test("each phase declares all 26 variable bindings with parsed sources", async () => {
+	test("each phase declares all 27 variable bindings with parsed sources", async () => {
 		const preset = await loadPreset(BUNDLED_PRESET_DIR)
 		for (const phase of preset.phases) {
 			const keys = phase.variables.map(([key]) => key)
@@ -129,6 +130,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(iterVars.get("BASE_BRANCH")).toEqual(expectedConfig("baseBranch"))
 		expect(iterVars.get("REQUIRE_BROWSER_EVIDENCE")).toEqual(expectedConfig("requireBrowserEvidence"))
 		expect(iterVars.get("TARGET_CWD")).toEqual(expectedRuntime("targetCwd"))
+		expect(iterVars.get("AGENT_CWD")).toEqual(expectedRuntime("agentCwd"))
 		expect(iterVars.get("PROMPT_ROOT")).toEqual(expectedRuntime("presetDir"))
 		expect(iterVars.get("PROMPT_FRAGMENT_INDEX")).toEqual(expectedRuntime("fragmentIndex"))
 	})

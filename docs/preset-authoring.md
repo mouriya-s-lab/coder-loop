@@ -127,21 +127,23 @@ bun src/loop.ts --target-cwd <fresh-target> --check-runtime
 
 模板里 `{{KEY}}` 替换为 `String(...)`；多次出现都替换。
 
-### `runtime.*` 白名单（当前 18 key）
+### `runtime.*` 白名单（当前 19 key）
 
 ```
-runtime.runId               runtime.targetCwd            runtime.workflowPath
-runtime.sharedContextPath   runtime.statePath            runtime.currentIssueFile
-runtime.issueDir            runtime.evidenceDir          runtime.evidenceRootDir
-runtime.logDir              runtime.traceFile            runtime.loopFile
-runtime.presetDir           runtime.fragmentIndex        runtime.runIdGeneration
-runtime.resumedFromPhase    runtime.resumedStartedAt     runtime.issueKind
+runtime.runId               runtime.targetCwd            runtime.agentCwd
+runtime.workflowPath        runtime.sharedContextPath    runtime.statePath
+runtime.currentIssueFile    runtime.issueDir             runtime.evidenceDir
+runtime.evidenceRootDir     runtime.logDir               runtime.traceFile
+runtime.loopFile            runtime.presetDir            runtime.fragmentIndex
+runtime.runIdGeneration     runtime.resumedFromPhase     runtime.resumedStartedAt
+runtime.issueKind
 ```
 
 | Key | 含义 |
 |---|---|
 | `runId` | 本轮 spawn 的 runId（新生成或 resumed） |
-| `targetCwd` | target 目录绝对路径 |
+| `targetCwd` | target 目录绝对路径（`.coder-loop/runtime/` 所在 repo） |
+| `agentCwd` | agent `claude -p` 子进程的实际 `cwd` 绝对路径。等于 `item.agentCwd ?? targetCwd`；跨 repo 迭代时 item 可声明绝对路径覆盖。 |
 | `workflowPath` | `.coder-loop/workflow.md` 绝对路径 |
 | `sharedContextPath` | `.coder-loop/runtime/shared.md` 绝对路径 |
 | `statePath` | `.coder-loop/runtime/state.json` 绝对路径 |

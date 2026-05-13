@@ -83,7 +83,7 @@ gh label list --repo <owner>/<repo> --search kind:
   - `Env` — 行执行环境，取值之一：`local` / `VM` / `container` / `CI` / `browser` / `downstream` / `integration`。
   - `Expect` — 预期 actual。可以是 exit code（`exit 0`）、grep 匹配数（`≥ 1`）、布尔（`true`）、文件存在等。
 - 每行**review 真的会执行或验证**：
-  - `Env == local` → review agent 在 `{{TARGET_CWD}}` 跑 `Command`，比对 stdout/stderr/exit 与 `Expect`。
+  - `Env == local` → review agent 在 `{{AGENT_CWD}}` 跑 `Command`（in-repo case 时 `AGENT_CWD == TARGET_CWD`；cross-repo iteration 时 = item.agentCwd 所指向的外部 repo checkout），比对 stdout/stderr/exit 与 `Expect`。
   - `Env != local` → review 不跑，转而在 PR 证据 packet 里找匹配 artifact（commit-pr / verify-evidence 阶段必须放进去）。
 
 写表时遵守：
@@ -245,7 +245,7 @@ planning agent 必须：
 - 不在 issue body 里写实现方案 / 模块结构 / protocol choice / 命名（除非源 design 明确给出）；
 - 高风险未文档化假设拆成独立 `kind:comment` spike issue，spike `Blocks: #<impl>` 标明依赖；
 - adversarial validation：对每个 future-work issue 思考 "iter 怎么用最省事的方式糊弄 checkpoint"，能糊弄就把 checkpoint 改严；
-- `## 验收标准` 表的 `Command` 列必须能在 `Env` 列声明的环境真跑通——planning 自己应该在 `{{TARGET_CWD}}` 试跑 `local` 行的命令做 smoke check；
+- `## 验收标准` 表的 `Command` 列必须能在 `Env` 列声明的环境真跑通——planning 自己应该在 issue 未来的 spawn cwd 下试跑 `local` 行的命令做 smoke check（in-repo work = `{{TARGET_CWD}}`；cross-repo work = 该 queue item 计划写到 `agentCwd` 的那个绝对路径）；
 - 写 queue 进 `state.json` 后必须跑 `coder-loop --target-cwd <target> --check-runtime` exit 0，否则 plan/init-queue 不能 verdict pass。
 
 planning agent 禁止：

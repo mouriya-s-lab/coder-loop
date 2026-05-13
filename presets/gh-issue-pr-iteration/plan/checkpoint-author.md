@@ -38,7 +38,7 @@ For each draft body, fill in the `## 验收标准` table (and `## 结果分支` 
 
 4. **Adversarial inference**. For each row, ask: "what's the smallest change to source code that satisfies `Expect` without solving the user-visible problem?" If you can construct such a shortcut, the row's `Check` or `Expect` is too lax — sharpen it. (Full adversarial validation is `plan/adversarial-validate`'s job; this is the per-row first pass.)
 
-5. **Smoke-check `local` rows now**. For every `Env == local` row, try running `Command` in `{{TARGET_CWD}}` (or via best-effort dry-run if it's destructive). Confirm:
+5. **Smoke-check `local` rows now**. For every `Env == local` row, try running `Command` in `{{TARGET_CWD}}` — or, if the issue will queue with `agentCwd` pointing at a cross-repo checkout, in that checkout directory (the iter agent's future `cwd`). Best-effort dry-run if the command is destructive. Confirm:
    - command syntax parses (no obvious typo);
    - command exists in `PATH` or relative to repo root;
    - exit code is consistent with the spec (passing `Expect` shape is fine; if the work hasn't landed yet the command may still error meaningfully).
