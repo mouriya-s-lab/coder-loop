@@ -36,7 +36,7 @@ status 字面量都是 preset 字符串，引擎只识别 `continuable / termina
 
 ---
 
-## 2. Fragment 全集（45）
+## 2. Fragment 全集（46）
 
 按目录列出全部 fragment id：
 
@@ -74,7 +74,7 @@ status 字面量都是 preset 字符串，引擎只识别 `continuable / termina
 - `iter/handoff`
 - `iter/final`
 
-**review/** — review phase 内部，20 个
+**review/** — review phase 内部，21 个
 
 - `review/index` — phase 入口
 - `review/read-evidence`
@@ -82,6 +82,7 @@ status 字面量都是 preset 字符串，引擎只识别 `continuable / termina
 - `review/pr-protocol`
 - `review/title-intent-gate`
 - `review/evidence-gate`
+- `review/caveat-honesty-gate` — 在 evidence_passed 之后、commitment-gate 之前扫 5 类 caveat（system-under-test bypass / invariant downgrade / cosmetic handwave / cross-issue scope deferral / environment-precondition admission）
 - `review/commitment-gate`
 - `review/spike-followup-gate`
 - `review/code-gate`
@@ -97,7 +98,7 @@ status 字面量都是 preset 字符串，引擎只识别 `continuable / termina
 - `review/global-assessment`
 - `review/final`
 
-fragment 总数 = 4 + 12 + 9 + 20 = 45，与 `presets/gh-issue-pr-iteration/preset.toml` 的 `[[fragments]]` 块数一致。
+fragment 总数 = 4 + 12 + 9 + 21 = 46，与 `presets/gh-issue-pr-iteration/preset.toml` 的 `[[fragments]]` 块数一致。
 
 ---
 

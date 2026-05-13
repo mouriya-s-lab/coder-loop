@@ -248,6 +248,11 @@ role = "review"
 path = "review/evidence-gate.md"
 
 [[fragments]]
+id   = "review/caveat-honesty-gate"
+role = "review"
+path = "review/caveat-honesty-gate.md"
+
+[[fragments]]
 id   = "review/commitment-gate"
 role = "review"
 path = "review/commitment-gate.md"
