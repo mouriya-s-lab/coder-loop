@@ -25,58 +25,57 @@
 git clone https://github.com/Mouriya-Emma/coder-loop.git
 cd coder-loop
 bun install
-bun link                                              # 注册 `coder-loop` 全局 bin（可选）
-cp .claude/commands/dev-*.md ~/.claude/commands/      # 注册 /dev-plan /dev-loop slash command
+bun link                                              # 注册 `coder-loop` 全局 bin（推荐）
 ```
 
 不 `bun link` 也行——把后面命令里的 `coder-loop` 换成 `bun /path/to/coder-loop/src/loop.ts`。
+
+slash command（`/dev-plan` `/dev-loop`）有两种 scope：
+
+- **per-target**（仅在该 target repo 内可用）：下一步的 `coder-loop install <target>` 会自动写到 `<target>/.claude/commands/`，不用手工拷。
+- **global**（所有 repo 内都可用）：必须手工 `cp .claude/commands/dev-*.md ~/.claude/commands/`，install 子命令不碰 home 目录。
+
+只用一个 target 的话 per-target 就够；常态 operator 通常两个都做。
 
 ---
 
 ## 1. Bootstrap 目标 repo 的 `.coder-loop/`
 
-在**目标 repo**（不是本 repo）里：
+在**目标 repo**（不是本 repo）里一条命令完成：
 
 ```bash
-cd /path/to/your-target-repo
-mkdir -p .coder-loop/runtime/{issues,evidence,logs}
+coder-loop install /path/to/your-target-repo --repo <owner>/<repo>
 ```
 
-写三个 starter 文件。`.coder-loop/workflow.md` 给 iter/review agent 读本项目特有的命令 / PR 风格 / 证据 layer 约定；起点直接拷 bundled preset 的模板：
+幂等。它做四层事：
+
+- **A) target 项目文件**：写 `.claude/commands/dev-plan.md` / `dev-loop.md`、建 `.coder-loop/runtime/{issues,evidence,logs}/`、merge `.coder-loop/runtime/config.json`（含 preset 绑定）、若 `workflow.md` 缺失则从 preset 模板拷一份。
+- **B) target GitHub state**：通过 `gh` 确保 `kind:code` / `kind:comment` 标签存在（preset fragments 依赖它们做 issue 分类）。
+- **C) 操作员机器前置**：只做检查、不安装——`gh`(+ auth) / `claude` / `coder-loop` 是否在 PATH。
+- **D) 用户级 skill 版本**：检查 `~/.claude/skills/writing-issue/SKILL.md` 是否含新版 marker；加 `--install-skills` 会自动同步到最新。
+
+常用 flag：
+
+| Flag | 用途 |
+|---|---|
+| `--repo <owner>/<repo>` | 写进 config，并用来创建 GitHub 标签；省略则跳过 B 层 |
+| `--preset <name>` | 默认 `gh-issue-pr-iteration` |
+| `--force` | 覆盖已存在的 slash command / workflow.md（其他文件仍幂等） |
+| `--dry-run` | 打印每一步将做什么，不写盘 |
+| `--install-skills` | 同步 `writing-issue` skill 到 `~/.claude/skills/` |
+| `--skip-skill-check` | 跳过 D 层检查 |
+
+之后做一次只读体检：
 
 ```bash
-cp /path/to/coder-loop/presets/gh-issue-pr-iteration/templates/workflow.md    .coder-loop/workflow.md
-cp /path/to/coder-loop/presets/gh-issue-pr-iteration/templates/shared.md      .coder-loop/runtime/shared.md
-cp /path/to/coder-loop/presets/gh-issue-pr-iteration/templates/pr-body.md     .coder-loop/runtime/pr-body.md
+coder-loop doctor /path/to/your-target-repo --repo <owner>/<repo>
 ```
 
-拷完按本项目改：项目命令（`mise run test` vs `npm test` 等）、PR 证据 layer 的截图位置、CI parity 行为。删一条规则就停止生效——bundled preset 不内置 fallback。
+四层全 OK 才能进下一步。doctor 不改任何文件——失败时按它指出的项目重跑 `install`（或修 PATH / `gh auth login`）。
 
-`.coder-loop/runtime/config.json`：
+想精确看一遍 install 会做什么、不会做什么，直接 `coder-loop install <target> --repo <slug> --dry-run`——它会逐行打印每个 layer 的动作和 `would-write` 标记。
 
-```json
-{
-  "repository": "<owner>/<repo>",
-  "baseBranch": "main"
-}
-```
-
-`repository` 与 GitHub 远端一致；`baseBranch` 是 PR target。不写 `preset` 字段默认走 `gh-issue-pr-iteration`。
-
-`.coder-loop/runtime/state.json`（空队列起手）：
-
-```json
-{
-  "version": 1,
-  "queue": [],
-  "repository": "<owner>/<repo>",
-  "baseBranch": "main",
-  "recentRuns": [],
-  "current": null
-}
-```
-
-把整个 `.coder-loop/runtime/` 加进 `.gitignore`，运行期 state 不入仓：
+把运行期文件加 `.gitignore`：
 
 ```bash
 echo '.coder-loop/runtime/' >> .gitignore
@@ -86,11 +85,13 @@ echo '.dev-trace.txt' >> .gitignore
 
 `.coder-loop/workflow.md` **要**入仓——agent 读这一份判断本项目的工作方式。
 
+拆掉 slash command（保留 runtime 和 GitHub labels）：`coder-loop uninstall /path/to/your-target-repo`。
+
 ---
 
 ## 2. Schema 自检
 
-在 bootstrap 完、灌队列**前**先校验：
+`coder-loop doctor` 已经覆盖 bootstrap 完整性。如果你只想看 schema（不查 PATH / 标签 / skill），用：
 
 ```bash
 coder-loop --target-cwd /path/to/your-target-repo --check-runtime
@@ -148,13 +149,24 @@ echo "coder-loop started (pid=$!, log=$LOGFILE)"
 
 循环消费现有队列，按 preset 的 phase 顺序交替 spawn `iter` + `review` agent；每轮 review agent 判断 continue / retry / accept / block / stop。
 
-监控：
+监控分两路 audience：
+
+**人类肉眼**（自由文本，stdout / trace 含 stack trace 与 prompt 内容）：
 
 ```bash
 tail -f $LOGFILE                                                            # 进程级日志
 ls -lt /path/to/your-target-repo/.coder-loop/runtime/logs/                  # agent 输出/状态
 tail -f /path/to/your-target-repo/.dev-trace.txt                            # 当前迭代 trace（每轮覆盖）
 ```
+
+**agent / 自动化 watcher**（结构化 JSONL，行级解析，不要 scrape 上面那条 stdout）：
+
+```bash
+RUNID=$(jq -r '.current.runId // empty' /path/to/your-target-repo/.coder-loop/runtime/state.json)
+tail -F /path/to/your-target-repo/.coder-loop/runtime/events/$RUNID.jsonl   # per-run 事件流
+```
+
+事件类型：`queue.select` / `phase.start` / `phase.end` / `attempt.start` / `attempt.close` / `watchdog.fire` / `queue.terminal`。详见 [operations.md §6.3](./operations.md#63-agent-进程与监控非-cli-参数但运维需要知道)。
 
 停：
 
