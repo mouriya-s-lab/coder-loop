@@ -26,6 +26,8 @@ const DEFAULT_STATE_FILE = ".coder-loop/runtime/state.json"
 const DEFAULT_ISSUE_DIR = ".coder-loop/runtime/issues"
 const DEFAULT_EVIDENCE_DIR = ".coder-loop/runtime/evidence"
 const DEFAULT_LOG_DIR = ".coder-loop/runtime/logs"
+const REVIEW_ON_EMPTY_LOCK_FILE = "review-on-empty.lock"
+const DEFAULT_IDLE_SLEEP_MS = 60_000
 
 const EXCLUDE_ENTRIES = [".dev-loop", ".dev-trace.txt", ".coder-loop/runtime"]
 
@@ -499,43 +501,53 @@ async function main() {
 	)
 	log("Loop file created. Delete .dev-loop to stop.")
 
-	let iteration = 0
+	let workIteration = 0
+	const idleSleepMs = resolveIdleSleepMs()
+	const lockPath = reviewOnEmptyLockPath(options.statePath)
+	log(`Idle sleep: ${idleSleepMs}ms (override via CODER_LOOP_IDLE_SLEEP_MS)`)
+	log(`Review-on-empty lock: ${lockPath}`)
 
-	while ((await exists(options.loopFile)) && iteration < options.maxIterations) {
-		iteration++
-		log(`--- Iteration ${iteration} ---`)
-
+	while ((await exists(options.loopFile)) && workIteration < options.maxIterations) {
 		const state = await loadState(options.statePath)
 		await assertRuntimeValid(options, state)
 		const selected = selectIssue(state, options)
 
 		if (!selected) {
-			await writeFile(options.traceFile, "No actionable issue found in .coder-loop/runtime/state.json. Review must assess whether to stop.\n")
-			log("No actionable issue selected; running review for global state assessment.")
-			const fallbackItem = makeFallbackItem()
-			const fallbackRunId = makeRunId(null)
-			const fallbackIssueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null }
-			const fallbackCtx: ResolveContext = {
-				item: fallbackItem,
-				config: buildConfigBindings(options),
-				runtime: buildRuntimeBindings({
-					options,
-					runId: fallbackRunId,
-					currentIssueFile: "",
-					evidenceDir: options.evidenceRootDir,
-					agentCwd: options.targetCwd,
-					issueRun: fallbackIssueRun,
-					issueKind: null,
-				}),
+			if (!(await exists(lockPath))) {
+				await writeFile(options.traceFile, "No actionable issue found in .coder-loop/runtime/state.json. Review must assess whether to stop.\n")
+				log("Empty queue: running review-on-empty for global state assessment.")
+				const fallbackItem = makeFallbackItem()
+				const fallbackRunId = makeRunId(null)
+				const fallbackIssueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null }
+				const fallbackCtx: ResolveContext = {
+					item: fallbackItem,
+					config: buildConfigBindings(options),
+					runtime: buildRuntimeBindings({
+						options,
+						runId: fallbackRunId,
+						currentIssueFile: "",
+						evidenceDir: options.evidenceRootDir,
+						agentCwd: options.targetCwd,
+						issueRun: fallbackIssueRun,
+						issueKind: null,
+					}),
+				}
+				await runReview(options, fallbackRunId, fallbackCtx, options.targetCwd)
+				if (!(await exists(options.loopFile))) {
+					log("Review agent stopped the loop.")
+					break
+				}
+				await writeFile(lockPath, serializeReviewOnEmptyLock(fallbackRunId, new Date()))
+				log(`review-on-empty lock written: ${lockPath} (runId=${fallbackRunId})`)
+			} else {
+				log(`Idle: empty queue + review-on-empty lock present. Sleeping ${idleSleepMs}ms.`)
 			}
-			await runReview(options, fallbackRunId, fallbackCtx, options.targetCwd)
-			if (!(await exists(options.loopFile))) {
-				log("Review agent stopped the loop.")
-				break
-			}
-			log("Review left loop running even though no actionable issue was selected; stopping to avoid a tight loop.")
-			break
+			await sleep(idleSleepMs)
+			continue
 		}
+
+		workIteration++
+		log(`--- Iteration ${workIteration} (work) ---`)
 
 		const selectedId = getItemId(selected.item, options.preset)
 		const current = state.current && getCurrentId(state.current, options.preset) === selectedId ? state.current : null
@@ -659,11 +671,11 @@ async function main() {
 			})
 		}
 
-		log(`Iteration ${iteration} complete.`)
+		log(`Iteration ${workIteration} (work) complete.`)
 	}
 
-	if (iteration >= options.maxIterations) {
-		log(`Reached ${formatMaxIterations(options.maxIterations)} iterations.`)
+	if (workIteration >= options.maxIterations) {
+		log(`Reached ${formatMaxIterations(options.maxIterations)} work iterations.`)
 	}
 
 	log("=== Loop ended. ===")
@@ -2061,8 +2073,29 @@ function isIsoDateTime(value: string): boolean {
 }
 
 function makeRunId(id: string | null): string {
-	const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")
+	const timestamp = new Date().toISOString().slice(0, 23).replace(/[T:.]/g, "-")
 	return id === null ? `run-${timestamp}-no-issue` : `run-${timestamp}-issue-${id}`
+}
+
+export function reviewOnEmptyLockPath(statePath: string): string {
+	return resolve(dirname(statePath), REVIEW_ON_EMPTY_LOCK_FILE)
+}
+
+export function serializeReviewOnEmptyLock(runId: string, acquiredAt: Date): string {
+	return `${JSON.stringify({ acquiredAt: acquiredAt.toISOString(), runId, reason: "queue-drained" }, null, "\t")}\n`
+}
+
+export function resolveIdleSleepMs(env: Record<string, string | undefined> = process.env): number {
+	const raw = env.CODER_LOOP_IDLE_SLEEP_MS
+	if (raw === undefined || raw === "") return DEFAULT_IDLE_SLEEP_MS
+	const parsed = Number(raw)
+	if (!Number.isFinite(parsed) || parsed < 0) throw new Error(`CODER_LOOP_IDLE_SLEEP_MS must be a non-negative number, got: ${raw}`)
+	return parsed
+}
+
+async function sleep(ms: number): Promise<void> {
+	if (ms <= 0) return
+	await new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 async function exists(path: string): Promise<boolean> {
