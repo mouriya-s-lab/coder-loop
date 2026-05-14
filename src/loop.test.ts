@@ -29,6 +29,8 @@ import {
 	makeLoopEventEmitter,
 	markIterationStarted,
 	markReviewStarted,
+	reconcileStateAfterIter,
+	serializeState,
 	nextBackoffSeconds,
 	parseKindFromLabels,
 	parseSessionIdFromStream,
@@ -277,6 +279,80 @@ describe("markIterationStarted / markReviewStarted", () => {
 		expect(state.current!.phase).toBe(preset.phases[preset.phases.length - 1]!.name)
 		expect(state.current!.runId).toBe("run-Z")
 		expect(state.current![preset.item.idField]).toBe(99)
+	})
+})
+
+describe("reconcileStateAfterIter — recovers state.json wiped or reverted by iter's git ops (issue #67)", () => {
+	async function setupSnapshot(): Promise<{ statePath: string; snapshot: string; runtimeDir: string }> {
+		const cwd = await mkdtemp(resolve(tmpdir(), "coder-loop-reconcile-"))
+		const runtimeDir = resolve(cwd, ".coder-loop/runtime")
+		await mkdir(runtimeDir, { recursive: true })
+		const statePath = resolve(runtimeDir, "state.json")
+		const state: LoopState = {
+			version: 1,
+			repository: "Mouriya-Emma/test",
+			baseBranch: "main",
+			recentRuns: [],
+			queue: [
+				{
+					status: "queued",
+					attempts: 1,
+					title: "t",
+					priority: "medium",
+					branch: null,
+					pr: null,
+					lastRunId: "run-A",
+					issueFile: ".coder-loop/runtime/issues/1.md",
+					evidenceDir: ".coder-loop/runtime/evidence/1",
+					agentCwd: null,
+					issue: 1,
+				},
+			],
+			current: { phase: "iteration", runId: "run-A", startedAt: "2026-01-01T00:00:00Z", issue: 1 },
+		}
+		const snapshot = serializeState(state)
+		await writeFile(statePath, snapshot)
+		return { statePath, snapshot, runtimeDir }
+	}
+
+	test("no-op when on-disk state.json matches the in-memory snapshot", async () => {
+		const { statePath, snapshot } = await setupSnapshot()
+		const logs: string[] = []
+		const outcome = await reconcileStateAfterIter(statePath, snapshot, (m) => logs.push(m))
+		expect(outcome.restored).toBe(false)
+		expect(logs).toEqual([])
+		expect(await readFile(statePath, "utf-8")).toBe(snapshot)
+	})
+
+	test("restores from snapshot when iter wiped state.json (git merge deleted the tracked file)", async () => {
+		const { statePath, snapshot } = await setupSnapshot()
+		await fs.rm(statePath)
+		const logs: string[] = []
+		const outcome = await reconcileStateAfterIter(statePath, snapshot, (m) => logs.push(m))
+		expect(outcome).toEqual({ restored: true, reason: "missing" })
+		expect(await readFile(statePath, "utf-8")).toBe(snapshot)
+		expect(logs.length).toBe(1)
+		expect(logs[0]).toMatch(/missing after iteration/)
+	})
+
+	test("restores from snapshot when iter reverted state.json content (git reset --hard to broken bootstrap)", async () => {
+		const { statePath, snapshot } = await setupSnapshot()
+		await writeFile(statePath, '{ "queue": [238] }\n')
+		const logs: string[] = []
+		const outcome = await reconcileStateAfterIter(statePath, snapshot, (m) => logs.push(m))
+		expect(outcome).toEqual({ restored: true, reason: "modified" })
+		expect(await readFile(statePath, "utf-8")).toBe(snapshot)
+		expect(logs.length).toBe(1)
+		expect(logs[0]).toMatch(/modified during iteration/)
+	})
+
+	test("recreates parent runtime directory if iter removed it entirely", async () => {
+		const { statePath, snapshot, runtimeDir } = await setupSnapshot()
+		await fs.rm(runtimeDir, { recursive: true })
+		const logs: string[] = []
+		const outcome = await reconcileStateAfterIter(statePath, snapshot, (m) => logs.push(m))
+		expect(outcome).toEqual({ restored: true, reason: "missing" })
+		expect(await readFile(statePath, "utf-8")).toBe(snapshot)
 	})
 })
 
