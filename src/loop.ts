@@ -11,7 +11,7 @@
 import { spawn } from "node:child_process"
 import { appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises"
 import { createWriteStream, type WriteStream } from "node:fs"
-import { isAbsolute, relative, resolve } from "node:path"
+import { dirname, isAbsolute, relative, resolve } from "node:path"
 import { dispatchSubcommand } from "./install-commands"
 
 const PKG_ROOT = resolve(import.meta.dir, "..")
@@ -580,6 +580,7 @@ async function main() {
 			const stateForIteration = await loadState(options.statePath)
 			markIterationStarted(stateForIteration, selected.item, options.preset, runId, current === null)
 			await saveState(options.statePath, stateForIteration)
+			const preIterSnapshot = serializeState(stateForIteration)
 
 			log(`${current ? "Resuming" : "Starting"} ${iterPhase.name} agent for issue #${selectedId}...`)
 			const iterStart = Date.now()
@@ -625,9 +626,9 @@ async function main() {
 				break
 			}
 
-			const stateForReview = await loadState(options.statePath)
-			markReviewStarted(stateForReview, selected.item, options.preset, runId)
-			await saveState(options.statePath, stateForReview)
+			await reconcileStateAfterIter(options.statePath, preIterSnapshot, log)
+			markReviewStarted(stateForIteration, selected.item, options.preset, runId)
+			await saveState(options.statePath, stateForIteration)
 					} else {
 			log(`Resuming ${reviewPhase.name} agent for issue #${selectedId} without rerunning iteration...`)
 		}
@@ -1135,8 +1136,42 @@ function parseCurrent(value: unknown): CurrentRun | null {
 	}
 }
 
+export function serializeState(state: LoopState): string {
+	return `${JSON.stringify(state, null, "\t")}\n`
+}
+
 async function saveState(path: string, state: LoopState): Promise<void> {
-	await writeFile(path, `${JSON.stringify(state, null, "\t")}\n`)
+	await writeFile(path, serializeState(state))
+}
+
+export type ReconcileStateOutcome =
+	| { restored: false }
+	| { restored: true; reason: "missing" | "modified" }
+
+export async function reconcileStateAfterIter(
+	path: string,
+	expectedSerialized: string,
+	logFn: (message: string) => void = log,
+): Promise<ReconcileStateOutcome> {
+	let onDisk: string
+	try {
+		onDisk = await readFile(path, "utf-8")
+	} catch (error) {
+		if (isNodeError(error) && error.code === "ENOENT") {
+			logFn(`WARN: state.json missing after iteration (iter likely did 'git reset --hard' / 'git merge' that wiped runtime). Restoring from in-memory snapshot: ${path}`)
+			await mkdir(dirname(path), { recursive: true })
+			await writeFile(path, expectedSerialized)
+			return { restored: true, reason: "missing" }
+		}
+		throw error
+	}
+	if (onDisk !== expectedSerialized) {
+		logFn(`WARN: state.json was modified during iteration (iter likely did 'git reset --hard' / 'git merge' that reverted runtime). Restoring from in-memory snapshot: ${path}`)
+		await mkdir(dirname(path), { recursive: true })
+		await writeFile(path, expectedSerialized)
+		return { restored: true, reason: "modified" }
+	}
+	return { restored: false }
 }
 
 export function selectIssue(state: LoopState, options: LoopOptions): SelectedIssue | null {
