@@ -30,6 +30,9 @@ import {
 	markIterationStarted,
 	markReviewStarted,
 	reconcileStateAfterIter,
+	resolveIdleSleepMs,
+	reviewOnEmptyLockPath,
+	serializeReviewOnEmptyLock,
 	serializeState,
 	nextBackoffSeconds,
 	parseKindFromLabels,
@@ -353,6 +356,49 @@ describe("reconcileStateAfterIter — recovers state.json wiped or reverted by i
 		const outcome = await reconcileStateAfterIter(statePath, snapshot, (m) => logs.push(m))
 		expect(outcome).toEqual({ restored: true, reason: "missing" })
 		expect(await readFile(statePath, "utf-8")).toBe(snapshot)
+	})
+})
+
+describe("review-on-empty lock helpers (issue #69)", () => {
+	test("reviewOnEmptyLockPath derives a sibling of state.json named review-on-empty.lock", () => {
+		const lockPath = reviewOnEmptyLockPath("/tmp/foo/.coder-loop/runtime/state.json")
+		expect(lockPath).toBe("/tmp/foo/.coder-loop/runtime/review-on-empty.lock")
+	})
+
+	test("reviewOnEmptyLockPath handles arbitrary state.json locations (no .coder-loop assumption)", () => {
+		const lockPath = reviewOnEmptyLockPath("/var/lib/cl/state.json")
+		expect(lockPath).toBe("/var/lib/cl/review-on-empty.lock")
+	})
+
+	test("serializeReviewOnEmptyLock writes acquiredAt / runId / reason as JSON with trailing newline", () => {
+		const payload = serializeReviewOnEmptyLock("run-2026-05-14-10-00-00-no-issue", new Date("2026-05-14T10:00:01.234Z"))
+		expect(payload.endsWith("\n")).toBe(true)
+		const parsed = JSON.parse(payload)
+		expect(parsed).toEqual({
+			acquiredAt: "2026-05-14T10:00:01.234Z",
+			runId: "run-2026-05-14-10-00-00-no-issue",
+			reason: "queue-drained",
+		})
+	})
+})
+
+describe("resolveIdleSleepMs — env override for idle sleep (issue #69)", () => {
+	test("defaults to 60000ms when CODER_LOOP_IDLE_SLEEP_MS is unset", () => {
+		expect(resolveIdleSleepMs({})).toBe(60_000)
+	})
+
+	test("honors CODER_LOOP_IDLE_SLEEP_MS when set to a non-negative number", () => {
+		expect(resolveIdleSleepMs({ CODER_LOOP_IDLE_SLEEP_MS: "150" })).toBe(150)
+		expect(resolveIdleSleepMs({ CODER_LOOP_IDLE_SLEEP_MS: "0" })).toBe(0)
+	})
+
+	test("treats empty string as unset and falls back to default", () => {
+		expect(resolveIdleSleepMs({ CODER_LOOP_IDLE_SLEEP_MS: "" })).toBe(60_000)
+	})
+
+	test("rejects negative or non-numeric values", () => {
+		expect(() => resolveIdleSleepMs({ CODER_LOOP_IDLE_SLEEP_MS: "-1" })).toThrow(/CODER_LOOP_IDLE_SLEEP_MS/)
+		expect(() => resolveIdleSleepMs({ CODER_LOOP_IDLE_SLEEP_MS: "abc" })).toThrow(/CODER_LOOP_IDLE_SLEEP_MS/)
 	})
 })
 
