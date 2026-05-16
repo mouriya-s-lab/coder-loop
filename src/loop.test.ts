@@ -11,6 +11,7 @@ import {
 	appendLoopEvent,
 	appendSessionEntry,
 	BACKOFF_BUDGET_SECONDS,
+	buildCoderLoopStatusSnapshot,
 	buildConfigBindings,
 	buildRuntimeBindings,
 	checkRuntime,
@@ -140,6 +141,30 @@ async function makeFixtureOptions(preset: Preset): Promise<LoopOptions> {
 	}
 }
 
+async function makeStatusTarget(presetName = "single-phase-example"): Promise<string> {
+	const cwd = await mkdtemp(resolve(tmpdir(), "coder-loop-status-"))
+	const runtimeDir = resolve(cwd, ".coder-loop/runtime")
+	await mkdir(resolve(runtimeDir, "issues"), { recursive: true })
+	await mkdir(resolve(runtimeDir, "evidence"), { recursive: true })
+	await mkdir(resolve(runtimeDir, "logs"), { recursive: true })
+	await writeFile(resolve(cwd, ".coder-loop/workflow.md"), "# workflow\n")
+	await writeFile(resolve(runtimeDir, "shared.md"), "# shared\n")
+	await writeFile(resolve(runtimeDir, "config.json"), JSON.stringify({ preset: presetName }, null, "\t"))
+	await writeFile(
+		resolve(runtimeDir, "state.json"),
+		JSON.stringify({
+			version: 1,
+			queue: [
+				{ id: "alpha", status: "pending", lastRunId: "run-alpha" },
+				{ id: "beta", status: "done" },
+			],
+			recentRuns: ["preset-owned-note"],
+			current: null,
+		}, null, "\t"),
+	)
+	return cwd
+}
+
 describe("getItemId / getCurrentId", () => {
 	test("getItemId reads preset.item.idField from a queue item (number → string)", async () => {
 		const preset = await bundledPreset()
@@ -158,6 +183,58 @@ describe("getItemId / getCurrentId", () => {
 		const preset = await bundledPreset()
 		const current: CurrentRun = { phase: "iteration", runId: "r1", startedAt: new Date().toISOString(), issue: 42 }
 		expect(getCurrentId(current, preset)).toBe("42")
+	})
+})
+
+describe("buildCoderLoopStatusSnapshot", () => {
+	test("returns a read-only ok snapshot with target/state/queue/current/events/processes", async () => {
+		const target = await makeStatusTarget()
+		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json" })
+
+		expect(snapshot.target.cwd).toBe(target)
+		expect(snapshot.target.config.kind).toBe("loaded")
+		expect(snapshot.target.preset?.name).toBe("single-phase-example")
+		expect(snapshot.state.kind).toBe("ok")
+		expect(snapshot.state.ok).toBe(true)
+		expect(snapshot.state.loaded).toBe(true)
+		expect(snapshot.queue.selected?.item.lastRunId).toBe("run-alpha")
+		expect(snapshot.queue.total).toBe(2)
+		expect(snapshot.queue.byStatus.pending).toBe(1)
+		expect(snapshot.queue.byStatus.done).toBe(1)
+		expect(snapshot.queue.continuable).toBe(1)
+		expect(snapshot.queue.terminal).toBe(1)
+		expect(snapshot.queue.selected?.id).toBe("alpha")
+		expect(snapshot.current.run).toBeNull()
+		expect(snapshot.events.runId).toBe("run-alpha")
+		expect(snapshot.processes.loopFile.exists).toBe(false)
+	})
+
+	test("distinguishes missing state from missing or invalid config", async () => {
+		const target = await makeStatusTarget()
+		await fs.rm(resolve(target, ".coder-loop/runtime/state.json"))
+
+		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json" })
+
+		expect(snapshot.target.config.kind).toBe("loaded")
+		expect(snapshot.state.kind).toBe("missing-state")
+		expect(snapshot.state.ok).toBe(false)
+		expect(snapshot.state.loaded).toBe(false)
+		expect(snapshot.state.errors[0]?.path).toBe("state")
+	})
+
+	test("reports runtime validation errors without hiding the loaded queue", async () => {
+		const target = await makeStatusTarget()
+		await writeFile(
+			resolve(target, ".coder-loop/runtime/state.json"),
+			JSON.stringify({ version: 1, queue: [{ id: "alpha", status: "garbage" }], recentRuns: [], current: null }, null, "\t"),
+		)
+
+		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json" })
+
+		expect(snapshot.state.kind).toBe("invalid-runtime")
+		expect(snapshot.state.loaded).toBe(true)
+		expect(snapshot.queue.total).toBe(1)
+		expect(snapshot.state.errors.some((error) => error.path.endsWith(".status") && error.message.includes("garbage"))).toBe(true)
 	})
 })
 
@@ -1919,4 +1996,3 @@ describe("events jsonl — per-run NDJSON event stream", () => {
 		expect(lines).toEqual(["135 iteration pr=null", "135 review pr=137"])
 	})
 })
-

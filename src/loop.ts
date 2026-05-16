@@ -12,6 +12,8 @@ import { spawn } from "node:child_process"
 import { appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises"
 import { createWriteStream, type WriteStream } from "node:fs"
 import { dirname, isAbsolute, relative, resolve } from "node:path"
+import { command, flag, option, optional, positional, run as runCmd, string as cmdString } from "cmd-ts"
+import { type as arkType } from "arktype"
 import { dispatchSubcommand } from "./install-commands"
 
 const PKG_ROOT = resolve(import.meta.dir, "..")
@@ -34,6 +36,15 @@ const EXCLUDE_ENTRIES = [".dev-loop", ".dev-trace.txt", ".coder-loop/runtime"]
 let logStream: WriteStream | null = null
 
 type AgentLabel = string
+class CoderLoopError extends Error {
+	constructor(message: string) {
+		super(message)
+		this.name = "CoderLoopError"
+	}
+}
+
+export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
+export type JsonObject = { [key: string]: JsonValue }
 
 export type QueueItem = {
 	status: string
@@ -46,14 +57,14 @@ export type QueueItem = {
 	issueFile: string | null
 	evidenceDir: string | null
 	agentCwd: string | null
-	[key: string]: unknown
+	[key: string]: JsonValue
 }
 
 export type CurrentRun = {
 	phase: string
 	runId: string
 	startedAt: string
-	[key: string]: unknown
+	[key: string]: JsonValue
 }
 
 export type LoopState = {
@@ -61,7 +72,7 @@ export type LoopState = {
 	queue: QueueItem[]
 	repository: string | null
 	baseBranch: string | null
-	recentRuns: unknown[]
+	recentRuns: JsonValue[]
 	current: CurrentRun | null
 }
 
@@ -76,6 +87,13 @@ type RawArgs = {
 	once: boolean
 	dryRun: boolean
 	checkRuntime: boolean
+}
+
+export type StatusCommandArgs = {
+	targetCwd: string
+	configPath: string | null
+	repository: string | null
+	output: "json"
 }
 
 type LoopConfig = {
@@ -93,6 +111,65 @@ type LoopConfig = {
 	preset: string | null
 	presetPath: string | null
 }
+
+const StatusConfigBoundary = arkType({
+	"repository?": "string|null",
+	"baseBranch?": "string|null",
+	"workflowFile?": "string|null",
+	"sharedContextFile?": "string|null",
+	"stateFile?": "string|null",
+	"issueDir?": "string|null",
+	"evidenceDir?": "string|null",
+	"logDir?": "string|null",
+	"evidence?": {
+		"requireAgentBrowserScreenshots?": "boolean|null",
+	},
+	"claude?": {
+		"binary?": "string|null",
+		"extraArgs?": "string[]",
+	},
+	"preset?": arkType.or("string", { name: "string" }, "null"),
+	"presetPath?": "string|null",
+})
+
+type StatusConfigInput = typeof StatusConfigBoundary.infer
+
+const StatusStateBoundary = arkType({
+	version: "number",
+	queue: "object[]",
+	"repository?": "string|null",
+	"baseBranch?": "string|null",
+	"recentRuns?": "unknown[]",
+	"current?": "object|null",
+})
+
+const AgentRunStatusBoundary = arkType({
+	label: "string",
+	"pid": "number|null",
+	startedAt: "string",
+	lastEventAt: "string",
+	outputPath: "string",
+	statusPath: "string",
+	bytesWritten: "number",
+	promptChars: "number",
+	"lastStream": arkType.or(arkType.unit("stdout"), arkType.unit("stderr"), "null"),
+	"exitCode": "number|null",
+	"signal": "string|null",
+	"error": "string|null",
+	"sessionId": "string|null",
+	"terminated": "object|null",
+})
+
+type AgentRunStatusInput = typeof AgentRunStatusBoundary.infer
+
+const StatusSnapshotBoundary = arkType({
+	target: "object",
+	state: "object",
+	queue: "object",
+	current: "object",
+	events: "object",
+	processes: "object",
+})
 
 export type LoopOptions = {
 	targetCwd: string
@@ -152,12 +229,12 @@ export type Preset = {
 	}
 }
 
-type RuntimeCheckError = {
+export type RuntimeCheckError = {
 	path: string
 	message: string
 }
 
-type AgentRunStatus = {
+export type AgentRunStatus = {
 	label: AgentLabel
 	pid: number | null
 	startedAt: string
@@ -172,6 +249,132 @@ type AgentRunStatus = {
 	error: string | null
 	sessionId: string | null
 	terminated: Terminated | null
+}
+
+export type CoderLoopStatusSnapshot = {
+	target: StatusTargetSnapshot
+	state: StatusStateSnapshot
+	queue: StatusQueueSnapshot
+	current: StatusCurrentSnapshot
+	events: StatusEventsSnapshot
+	processes: StatusProcessSnapshot
+}
+
+export type StatusTargetSnapshot = {
+	cwd: string
+	configPath: string
+	configFormat: ConfigFormat
+	config: StatusResourceSnapshot
+	workflowPath: string
+	sharedContextPath: string
+	statePath: string
+	issueDir: string
+	evidenceRootDir: string
+	logDir: string
+	traceFile: string
+	loopFile: string
+	repository: string | null
+	baseBranch: string | null
+	preset: {
+		name: string
+		version: number
+		description: string
+		presetDir: string
+	} | null
+}
+
+export type StatusResourceSnapshot =
+	| { kind: "loaded"; error: null }
+	| { kind: "missing"; error: string }
+	| { kind: "invalid"; error: string }
+
+export type StatusStateKind =
+	| "ok"
+	| "missing-config"
+	| "invalid-config"
+	| "missing-preset"
+	| "invalid-preset"
+	| "missing-state"
+	| "invalid-state"
+	| "invalid-runtime"
+
+export type StatusStateSnapshot = {
+	kind: StatusStateKind
+	ok: boolean
+	loaded: boolean
+	path: string
+	version: number | null
+	repository: string | null
+	baseBranch: string | null
+	errors: RuntimeCheckError[]
+	error: string | null
+}
+
+export type StatusSelectedIssue = {
+	id: string
+	item: QueueItem
+	issueFile: string | null
+	evidenceDir: string | null
+	agentCwd: string
+}
+
+export type StatusQueueSnapshot = {
+	total: number
+	byStatus: Record<string, number>
+	continuable: number
+	terminal: number
+	selected: StatusSelectedIssue | null
+}
+
+export type StatusPhaseStatusSnapshot = {
+	path: string
+	exists: boolean
+	value: AgentRunStatus | null
+	error: string | null
+}
+
+export type StatusCurrentSnapshot = {
+	run: CurrentRun | null
+	id: string | null
+	item: QueueItem | null
+	phaseStatus: StatusPhaseStatusSnapshot | null
+}
+
+export type StatusEventsSnapshot = {
+	runId: string | null
+	path: string | null
+	exists: boolean
+	recent: JsonValue[]
+	latest: JsonValue | null
+	error: string | null
+}
+
+export type StatusLoopFileSnapshot = {
+	path: string
+	exists: boolean
+	startedAt: string | null
+	pid: number | null
+	pidAlive: boolean | null
+	log: string | null
+	cwd: string | null
+	statePath: string | null
+	raw: string | null
+}
+
+export type StatusProcessInfo = {
+	pid: number
+	ppid: number | null
+	command: string | null
+	cwd: string | null
+	matchesTarget: boolean
+	alive: boolean
+	source: "loopFile" | "ps"
+}
+
+export type StatusProcessSnapshot = {
+	loopFile: StatusLoopFileSnapshot
+	live: StatusProcessInfo[]
+	scanError: string | null
 }
 
 export type Terminated =
@@ -414,6 +617,32 @@ function parseArgs(): RawArgs {
 	return raw
 }
 
+type CliCommand =
+	| { kind: "status"; args: StatusCommandArgs }
+
+const statusCliCommand = command({
+	name: "status",
+	description: "Emit a read-only coder-loop runtime snapshot.",
+	args: {
+		target: positional({ displayName: "target", type: cmdString }),
+		json: flag({ long: "json" }),
+		config: option({ long: "config", type: optional(cmdString) }),
+		repo: option({ long: "repo", type: optional(cmdString) }),
+	},
+	handler: (args): CliCommand => {
+		if (!args.json) fail("status: only --json output is supported for now. Usage: coder-loop status <target> --json")
+		return {
+			kind: "status",
+			args: {
+				targetCwd: args.target,
+				configPath: args.config ?? null,
+				repository: args.repo ?? null,
+				output: "json",
+			},
+		}
+	},
+})
+
 function splitFlag(arg: string): [string, string | null] {
 	const equalsIndex = arg.indexOf("=")
 	if (equalsIndex === -1) return [arg, null]
@@ -431,8 +660,20 @@ function rejectInlineValue(value: string | null, name: string): void {
 	if (value !== null) fail(`${name} does not accept a value`)
 }
 
+async function runStatusCommand(args: string[]): Promise<void> {
+	const parsed = await runCmd(statusCliCommand, args)
+	if (parsed.kind !== "status") return
+	const snapshot = await buildCoderLoopStatusSnapshot(parsed.args)
+	StatusSnapshotBoundary.assert(snapshot)
+	process.stdout.write(`${JSON.stringify(snapshot, null, "\t")}\n`)
+}
+
 async function main() {
 	const firstArg = process.argv[2]
+	if (firstArg === "status") {
+		await runStatusCommand(process.argv.slice(3))
+		return
+	}
 	if (firstArg === "install" || firstArg === "uninstall" || firstArg === "doctor") {
 		const handled = await dispatchSubcommand(firstArg, process.argv.slice(3))
 		if (handled) return
@@ -777,12 +1018,432 @@ function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, confi
 	}
 }
 
+export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Promise<CoderLoopStatusSnapshot> {
+	const targetCwd = resolve(args.targetCwd)
+	const configPath = await resolveConfigPath(targetCwd, args.configPath)
+	const baseTarget = makeStatusTargetSnapshot(targetCwd, configPath, args.repository, null, { kind: "loaded", error: null })
+
+	const configResult = await readStatusConfig(configPath)
+	if (configResult.kind !== "ok") {
+		const stateKind: StatusStateKind = configResult.kind === "missing" ? "missing-config" : "invalid-config"
+		return makeUnavailableStatusSnapshot({
+			target: makeStatusTargetSnapshot(targetCwd, configPath, args.repository, null, { kind: configResult.kind, error: configResult.message }),
+			stateKind,
+			statePath: baseTarget.statePath,
+			errorPath: "config",
+			errorMessage: configResult.message,
+		})
+	}
+
+	const presetResult = await readStatusPreset(configResult.value, targetCwd)
+	if (presetResult.kind !== "ok") {
+		const stateKind: StatusStateKind = presetResult.kind === "missing" ? "missing-preset" : "invalid-preset"
+		return makeUnavailableStatusSnapshot({
+			target: makeStatusTargetSnapshot(targetCwd, configPath, args.repository, null, { kind: "loaded", error: null }),
+			stateKind,
+			statePath: baseTarget.statePath,
+			errorPath: "preset",
+			errorMessage: presetResult.message,
+		})
+	}
+
+	const raw = makeStatusRawArgs(args)
+	const options = buildOptions(targetCwd, configPath, raw, configResult.value, presetResult.value)
+	const target = makeStatusTargetSnapshot(targetCwd, configPath, args.repository, options, { kind: "loaded", error: null })
+	const stateResult = await readStatusState(options.statePath)
+	if (stateResult.kind !== "ok") {
+		const stateKind: StatusStateKind = stateResult.kind === "missing" ? "missing-state" : "invalid-state"
+		return makeUnavailableStatusSnapshot({
+			target,
+			stateKind,
+			statePath: options.statePath,
+			errorPath: "state",
+			errorMessage: stateResult.message,
+		})
+	}
+
+	const selected = selectIssue(stateResult.value, options)
+	const runtimeErrors = await checkRuntime(options, stateResult.value)
+	const currentSnapshot = await buildStatusCurrentSnapshot(options, stateResult.value)
+	const events = await buildStatusEventsSnapshot(options, stateResult.value, selected)
+	const processes = await buildStatusProcessSnapshot(options)
+	const snapshot: CoderLoopStatusSnapshot = {
+		target,
+		state: {
+			kind: runtimeErrors.length === 0 ? "ok" : "invalid-runtime",
+			ok: runtimeErrors.length === 0,
+			loaded: true,
+			path: options.statePath,
+			version: stateResult.value.version,
+			repository: stateResult.value.repository,
+			baseBranch: stateResult.value.baseBranch,
+			errors: runtimeErrors,
+			error: null,
+		},
+		queue: buildStatusQueueSnapshot(options, stateResult.value, selected),
+		current: currentSnapshot,
+		events,
+		processes,
+	}
+	StatusSnapshotBoundary.assert(snapshot)
+	return snapshot
+}
+
+type StatusReadResult<T> =
+	| { kind: "ok"; value: T }
+	| { kind: "missing"; message: string }
+	| { kind: "invalid"; message: string }
+
+async function readStatusConfig(path: string): Promise<StatusReadResult<LoopConfig>> {
+	try {
+		const raw = await readFile(path, "utf-8")
+		return { kind: "ok", value: parseConfigText(raw, path) }
+	} catch (error) {
+		if (isNodeError(error) && error.code === "ENOENT") return { kind: "missing", message: `missing config file: ${path}` }
+		return { kind: "invalid", message: errorMessage(error) }
+	}
+}
+
+async function readStatusPreset(config: LoopConfig, targetCwd: string): Promise<StatusReadResult<Preset>> {
+	let presetDir: string
+	try {
+		presetDir = resolvePresetDir(config, PKG_ROOT, targetCwd)
+	} catch (error) {
+		return { kind: "invalid", message: errorMessage(error) }
+	}
+	try {
+		return { kind: "ok", value: await loadPreset(presetDir) }
+	} catch (error) {
+		if (isNodeError(error) && error.code === "ENOENT") return { kind: "missing", message: `missing preset file: ${resolve(presetDir, "preset.toml")}` }
+		return { kind: "invalid", message: errorMessage(error) }
+	}
+}
+
+async function readStatusState(path: string): Promise<StatusReadResult<LoopState>> {
+	try {
+		const raw = await readFile(path, "utf-8")
+		return { kind: "ok", value: parseStateText(raw) }
+	} catch (error) {
+		if (isNodeError(error) && error.code === "ENOENT") return { kind: "missing", message: `missing state file: ${path}` }
+		return { kind: "invalid", message: errorMessage(error) }
+	}
+}
+
+function makeStatusRawArgs(args: StatusCommandArgs): RawArgs {
+	return {
+		maxIterations: null,
+		targetCwd: args.targetCwd,
+		configPath: args.configPath,
+		workflowPath: null,
+		statePath: null,
+		repository: args.repository,
+		requireBrowserEvidence: null,
+		once: false,
+		dryRun: false,
+		checkRuntime: false,
+	}
+}
+
+function makeStatusTargetSnapshot(
+	targetCwd: string,
+	configPath: string,
+	repositoryOverride: string | null,
+	options: LoopOptions | null,
+	config: StatusResourceSnapshot,
+): StatusTargetSnapshot {
+	const runtimeRoot = resolve(targetCwd, ".coder-loop/runtime")
+	const preset = options === null ? null : {
+		name: options.preset.name,
+		version: options.preset.version,
+		description: options.preset.description,
+		presetDir: options.preset.presetDir,
+	}
+	return {
+		cwd: targetCwd,
+		configPath,
+		configFormat: configFormatForPath(configPath),
+		config,
+		workflowPath: options?.workflowPath ?? resolve(targetCwd, DEFAULT_WORKFLOW_FILE),
+		sharedContextPath: options?.sharedContextPath ?? resolve(runtimeRoot, "shared.md"),
+		statePath: options?.statePath ?? resolve(runtimeRoot, "state.json"),
+		issueDir: options?.issueDir ?? resolve(runtimeRoot, "issues"),
+		evidenceRootDir: options?.evidenceRootDir ?? resolve(runtimeRoot, "evidence"),
+		logDir: options?.logDir ?? resolve(runtimeRoot, "logs"),
+		traceFile: options?.traceFile ?? resolve(targetCwd, ".dev-trace.txt"),
+		loopFile: options?.loopFile ?? resolve(targetCwd, ".dev-loop"),
+		repository: options?.repository ?? repositoryOverride,
+		baseBranch: options?.baseBranch ?? null,
+		preset,
+	}
+}
+
+function makeUnavailableStatusSnapshot(input: {
+	target: StatusTargetSnapshot
+	stateKind: StatusStateKind
+	statePath: string
+	errorPath: string
+	errorMessage: string
+}): CoderLoopStatusSnapshot {
+	return {
+		target: input.target,
+		state: {
+			kind: input.stateKind,
+			ok: false,
+			loaded: false,
+			path: input.statePath,
+			version: null,
+			repository: null,
+			baseBranch: null,
+			errors: [{ path: input.errorPath, message: input.errorMessage }],
+			error: input.errorMessage,
+		},
+		queue: { total: 0, byStatus: {}, continuable: 0, terminal: 0, selected: null },
+		current: { run: null, id: null, item: null, phaseStatus: null },
+		events: { runId: null, path: null, exists: false, recent: [], latest: null, error: null },
+		processes: {
+			loopFile: {
+				path: input.target.loopFile,
+				exists: false,
+				startedAt: null,
+				pid: null,
+				pidAlive: null,
+				log: null,
+				cwd: null,
+				statePath: null,
+				raw: null,
+			},
+			live: [],
+			scanError: null,
+		},
+	}
+}
+
+function buildStatusQueueSnapshot(options: LoopOptions, state: LoopState, selected: SelectedIssue | null): StatusQueueSnapshot {
+	const byStatus: Record<string, number> = {}
+	for (const item of state.queue) byStatus[item.status] = (byStatus[item.status] ?? 0) + 1
+	const continuableStatuses = new Set(options.preset.statuses.continuable)
+	const terminalStatuses = new Set(options.preset.statuses.terminal)
+	return {
+		total: state.queue.length,
+		byStatus,
+		continuable: state.queue.filter((item) => continuableStatuses.has(item.status)).length,
+		terminal: state.queue.filter((item) => terminalStatuses.has(item.status)).length,
+		selected: selected === null ? null : {
+			id: getItemId(selected.item, options.preset),
+			item: selected.item,
+			issueFile: selected.issueFile,
+			evidenceDir: selected.evidenceDir,
+			agentCwd: selected.agentCwd,
+		},
+	}
+}
+
+async function buildStatusCurrentSnapshot(options: LoopOptions, state: LoopState): Promise<StatusCurrentSnapshot> {
+	if (state.current === null) return { run: null, id: null, item: null, phaseStatus: null }
+	let id: string | null = null
+	let item: QueueItem | null = null
+	try {
+		id = getCurrentId(state.current, options.preset)
+		item = state.queue.find((entry) => getItemId(entry, options.preset) === id) ?? null
+	} catch {
+		id = null
+	}
+	const outputPath = agentOutputPath(options, state.current.runId, state.current.phase)
+	return {
+		run: state.current,
+		id,
+		item,
+		phaseStatus: await readAgentPhaseStatus(agentStatusPath(outputPath)),
+	}
+}
+
+async function readAgentPhaseStatus(path: string): Promise<StatusPhaseStatusSnapshot> {
+	try {
+		const raw = await readFile(path, "utf-8")
+		const parsed: unknown = JSON.parse(raw)
+		const status = agentStatusFromInput(assertArk(AgentRunStatusBoundary, parsed, "agent status"))
+		return { path, exists: true, value: status, error: null }
+	} catch (error) {
+		if (isNodeError(error) && error.code === "ENOENT") return { path, exists: false, value: null, error: null }
+		return { path, exists: true, value: null, error: errorMessage(error) }
+	}
+}
+
+function agentStatusFromInput(input: AgentRunStatusInput): AgentRunStatus {
+	return {
+		label: input.label,
+		pid: input.pid,
+		startedAt: input.startedAt,
+		lastEventAt: input.lastEventAt,
+		outputPath: input.outputPath,
+		statusPath: input.statusPath,
+		bytesWritten: input.bytesWritten,
+		promptChars: input.promptChars,
+		lastStream: input.lastStream,
+		exitCode: input.exitCode,
+		signal: input.signal,
+		error: input.error,
+		sessionId: input.sessionId,
+		terminated: parseTerminatedFromStatus(input.terminated),
+	}
+}
+
+function parseTerminatedFromStatus(value: object | null): Terminated | null {
+	if (value === null) return null
+	const record = expectJsonObject(value, "agent status.terminated")
+	const kind = requiredJsonString(record, "kind")
+	if (kind === "clean") return { kind }
+	if (kind === "signal") return { kind, name: requiredJsonString(record, "name") }
+	if (kind === "error") return { kind, code: requiredJsonString(record, "code") }
+	if (kind === "watchdog") {
+		const phase = requiredJsonString(record, "phase")
+		if (phase !== "term" && phase !== "kill") throw new Error(`agent status.terminated.phase must be "term" or "kill"`)
+		return { kind, phase, afterSummarySeconds: requiredJsonNumber(record, "afterSummarySeconds") }
+	}
+	throw new Error(`agent status.terminated.kind is not supported: ${kind}`)
+}
+
+async function buildStatusEventsSnapshot(options: LoopOptions, state: LoopState, selected: SelectedIssue | null): Promise<StatusEventsSnapshot> {
+	const runId = state.current?.runId ?? selected?.item.lastRunId ?? firstLastRunId(state)
+	if (runId === null) return { runId: null, path: null, exists: false, recent: [], latest: null, error: null }
+	const path = loopEventsPath(options.targetCwd, runId)
+	try {
+		const raw = await readFile(path, "utf-8")
+		const recent = parseRecentJsonLines(raw, 20)
+		return {
+			runId,
+			path,
+			exists: true,
+			recent,
+			latest: recent[recent.length - 1] ?? null,
+			error: null,
+		}
+	} catch (error) {
+		if (isNodeError(error) && error.code === "ENOENT") return { runId, path, exists: false, recent: [], latest: null, error: null }
+		return { runId, path, exists: true, recent: [], latest: null, error: errorMessage(error) }
+	}
+}
+
+function firstLastRunId(state: LoopState): string | null {
+	for (const item of state.queue) {
+		if (item.lastRunId !== null) return item.lastRunId
+	}
+	return null
+}
+
+function parseRecentJsonLines(raw: string, limit: number): JsonValue[] {
+	const lines = raw.split("\n").filter((line) => line.trim() !== "")
+	const recent = lines.slice(-limit)
+	return recent.map((line) => {
+		const parsed: unknown = JSON.parse(line)
+		if (!isJsonValue(parsed)) throw new Error("event line is not JSON data")
+		return parsed
+	})
+}
+
+async function buildStatusProcessSnapshot(options: LoopOptions): Promise<StatusProcessSnapshot> {
+	const loopFile = await readStatusLoopFile(options.loopFile)
+	const live: StatusProcessInfo[] = []
+	if (loopFile.pid !== null) {
+		live.push({
+			pid: loopFile.pid,
+			ppid: null,
+			command: null,
+			cwd: loopFile.cwd,
+			matchesTarget: loopFile.cwd === options.targetCwd,
+			alive: loopFile.pidAlive === true,
+			source: "loopFile",
+		})
+	}
+	const scan = scanLoopProcesses(options.targetCwd)
+	return {
+		loopFile,
+		live: mergeProcessSnapshots(live, scan.kind === "ok" ? scan.value : []),
+		scanError: scan.kind === "ok" ? null : scan.message,
+	}
+}
+
+async function readStatusLoopFile(path: string): Promise<StatusLoopFileSnapshot> {
+	try {
+		const raw = await readFile(path, "utf-8")
+		const parsed = parseLoopFile(raw)
+		const pidAlive = parsed.pid === null ? null : isPidAlive(parsed.pid)
+		return { path, exists: true, ...parsed, pidAlive, raw }
+	} catch (error) {
+		if (isNodeError(error) && error.code === "ENOENT") {
+			return { path, exists: false, startedAt: null, pid: null, pidAlive: null, log: null, cwd: null, statePath: null, raw: null }
+		}
+		return { path, exists: true, startedAt: null, pid: null, pidAlive: null, log: null, cwd: null, statePath: null, raw: null }
+	}
+}
+
+function parseLoopFile(raw: string): Omit<StatusLoopFileSnapshot, "path" | "exists" | "pidAlive" | "raw"> {
+	const fields: Record<string, string> = {}
+	for (const line of raw.split("\n")) {
+		const separator = line.indexOf(":")
+		if (separator <= 0) continue
+		fields[line.slice(0, separator).trim()] = line.slice(separator + 1).trim()
+	}
+	const pid = fields.pid === undefined || fields.pid === "" ? null : Number(fields.pid)
+	return {
+		startedAt: fields.started ?? null,
+		pid: pid === null || Number.isInteger(pid) ? pid : null,
+		log: fields.log ?? null,
+		cwd: fields.cwd ?? null,
+		statePath: fields.state ?? null,
+	}
+}
+
+function scanLoopProcesses(targetCwd: string): StatusReadResult<StatusProcessInfo[]> {
+	const proc = Bun.spawnSync({
+		cmd: ["ps", "-axo", "pid=,ppid=,command="],
+		stdout: "pipe",
+		stderr: "pipe",
+	})
+	if (proc.exitCode !== 0) return { kind: "invalid", message: new TextDecoder().decode(proc.stderr).trim() || "ps scan failed" }
+	const stdout = new TextDecoder().decode(proc.stdout)
+	const live: StatusProcessInfo[] = []
+	for (const line of stdout.split("\n")) {
+		const match = /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(line)
+		if (!match) continue
+		const pid = Number(match[1])
+		const ppid = Number(match[2])
+		const commandText = match[3] ?? ""
+		const invokesLoop = commandText.includes("src/loop.ts") || /(^|\s)coder-loop(\s|$)/.test(commandText)
+		const looksLikeLoop = invokesLoop && !/(^|\s)status(\s|$)/.test(commandText)
+		const matchesTarget = commandText.includes(targetCwd)
+		if (!looksLikeLoop) continue
+		live.push({
+			pid,
+			ppid: Number.isInteger(ppid) ? ppid : null,
+			command: commandText,
+			cwd: null,
+			matchesTarget,
+			alive: true,
+			source: "ps",
+		})
+	}
+	return { kind: "ok", value: live }
+}
+
+function mergeProcessSnapshots(left: StatusProcessInfo[], right: StatusProcessInfo[]): StatusProcessInfo[] {
+	const byKey = new Map<string, StatusProcessInfo>()
+	for (const entry of [...left, ...right]) byKey.set(`${entry.source}:${entry.pid}`, entry)
+	return [...byKey.values()]
+}
+
+function isPidAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0)
+		return true
+	} catch {
+		return false
+	}
+}
+
 export async function loadPreset(presetDir: string): Promise<Preset> {
 	const tomlPath = resolve(presetDir, "preset.toml")
-	const raw = await readFile(tomlPath, "utf-8").catch((error: unknown) => {
-		if (isNodeError(error) && error.code === "ENOENT") fail(`Missing preset file: ${tomlPath}`)
-		throw error
-	})
+	const raw = await readFile(tomlPath, "utf-8")
 	const parsed: unknown = Bun.TOML.parse(raw)
 	const preset = parsePreset(parsed, presetDir)
 	for (const phase of preset.phases) {
@@ -906,40 +1567,38 @@ async function loadConfig(path: string): Promise<LoopConfig> {
 		}
 		throw error
 	})
+	return parseConfigText(raw, path)
+}
+
+function parseConfigText(raw: string, path: string): LoopConfig {
 	const format = configFormatForPath(path)
 	const parsed: unknown = format === "toml" ? Bun.TOML.parse(raw) : JSON.parse(raw)
-	const root = expectRecord(parsed, "config")
-	const evidence = optionalRecord(root, "evidence")
-	const claude = optionalRecord(root, "claude")
+	const input = assertArk(StatusConfigBoundary, parsed, "config")
+	return loopConfigFromStatusInput(input)
+}
 
+function loopConfigFromStatusInput(input: StatusConfigInput): LoopConfig {
 	return {
-		repository: optionalString(root, "repository"),
-		baseBranch: optionalString(root, "baseBranch"),
-		workflowFile: optionalString(root, "workflowFile"),
-		sharedContextFile: optionalString(root, "sharedContextFile"),
-		stateFile: optionalString(root, "stateFile"),
-		issueDir: optionalString(root, "issueDir"),
-		evidenceDir: optionalString(root, "evidenceDir"),
-		logDir: optionalString(root, "logDir"),
-		requireAgentBrowserScreenshots: evidence ? optionalBoolean(evidence, "requireAgentBrowserScreenshots") : null,
-		claudeBinary: claude ? optionalString(claude, "binary") : null,
-		claudeExtraArgs: claude ? (optionalStringArray(claude, "extraArgs") ?? []) : [],
-		preset: readPresetName(root),
-		presetPath: optionalString(root, "presetPath"),
+		repository: input.repository ?? null,
+		baseBranch: input.baseBranch ?? null,
+		workflowFile: input.workflowFile ?? null,
+		sharedContextFile: input.sharedContextFile ?? null,
+		stateFile: input.stateFile ?? null,
+		issueDir: input.issueDir ?? null,
+		evidenceDir: input.evidenceDir ?? null,
+		logDir: input.logDir ?? null,
+		requireAgentBrowserScreenshots: input.evidence?.requireAgentBrowserScreenshots ?? null,
+		claudeBinary: input.claude?.binary ?? null,
+		claudeExtraArgs: input.claude?.extraArgs ?? [],
+		preset: readPresetNameFromStatusInput(input.preset),
+		presetPath: input.presetPath ?? null,
 	}
 }
 
-function readPresetName(root: Record<string, unknown>): string | null {
-	const value = root.preset
+function readPresetNameFromStatusInput(value: StatusConfigInput["preset"]): string | null {
 	if (value === undefined || value === null) return null
 	if (typeof value === "string") return value
-	if (typeof value === "object" && !Array.isArray(value)) {
-		const obj = value as Record<string, unknown>
-		const name = obj.name
-		if (typeof name !== "string") fail("config.preset.name must be a string when preset is an object")
-		return name
-	}
-	fail(`config.preset must be a string or { name, version } object`)
+	return value.name
 }
 
 export function resolvePresetDir(
@@ -1105,46 +1764,47 @@ async function assertReadable(path: string, label: string): Promise<void> {
 
 async function loadState(path: string): Promise<LoopState> {
 	const raw = await readFile(path, "utf-8")
-	const parsed: unknown = JSON.parse(raw)
-	const root = expectRecord(parsed, "state")
-	const queueValue = root.queue
-	if (!Array.isArray(queueValue)) fail("state.queue must be an array")
+	return parseStateText(raw)
+}
 
+function parseStateText(raw: string): LoopState {
+	const parsed: unknown = JSON.parse(raw)
+	const root = assertArk(StatusStateBoundary, parsed, "state")
 	return {
-		version: requiredNumber(root, "version"),
-		queue: queueValue.map((item, index) => parseQueueItem(item, `state.queue[${index}]`)),
-		repository: optionalString(root, "repository"),
-		baseBranch: optionalString(root, "baseBranch"),
-		recentRuns: Array.isArray(root.recentRuns) ? root.recentRuns : [],
+		version: root.version,
+		queue: root.queue.map((item, index) => parseQueueItem(item, `state.queue[${index}]`)),
+		repository: root.repository ?? null,
+		baseBranch: root.baseBranch ?? null,
+		recentRuns: (root.recentRuns ?? []).map((entry, index) => expectJsonValue(entry, `state.recentRuns[${index}]`)),
 		current: parseCurrent(root.current),
 	}
 }
 
-function parseQueueItem(value: unknown, label: string): QueueItem {
-	const record = expectRecord(value, label)
+function parseQueueItem(value: object, label: string): QueueItem {
+	const record = expectJsonObject(value, label)
 	return {
 		...record,
-		status: requiredString(record, "status"),
-		attempts: optionalNumber(record, "attempts"),
-		title: optionalString(record, "title"),
-		priority: optionalString(record, "priority"),
-		branch: optionalString(record, "branch"),
-		pr: optionalNumber(record, "pr"),
-		lastRunId: optionalString(record, "lastRunId"),
-		issueFile: optionalString(record, "issueFile"),
-		evidenceDir: optionalString(record, "evidenceDir"),
-		agentCwd: optionalString(record, "agentCwd"),
+		status: requiredJsonString(record, "status"),
+		attempts: optionalJsonNumber(record, "attempts"),
+		title: optionalJsonString(record, "title"),
+		priority: optionalJsonString(record, "priority"),
+		branch: optionalJsonString(record, "branch"),
+		pr: optionalJsonNumber(record, "pr"),
+		lastRunId: optionalJsonString(record, "lastRunId"),
+		issueFile: optionalJsonString(record, "issueFile"),
+		evidenceDir: optionalJsonString(record, "evidenceDir"),
+		agentCwd: optionalJsonString(record, "agentCwd"),
 	}
 }
 
-function parseCurrent(value: unknown): CurrentRun | null {
+function parseCurrent(value: object | null | undefined): CurrentRun | null {
 	if (value === undefined || value === null) return null
-	const record = expectRecord(value, "state.current")
+	const record = expectJsonObject(value, "state.current")
 	return {
 		...record,
-		phase: requiredString(record, "phase"),
-		runId: requiredString(record, "runId"),
-		startedAt: requiredString(record, "startedAt"),
+		phase: requiredJsonString(record, "phase"),
+		runId: requiredJsonString(record, "runId"),
+		startedAt: requiredJsonString(record, "startedAt"),
 	}
 }
 
@@ -1223,8 +1883,10 @@ export function markIterationStarted(
 	const phases = preset.phases
 	const iterPhase = phases[0]
 	if (!iterPhase) fail("preset must define at least one phase")
+	const currentIdValue = queueItem[preset.item.idField]
+	if (currentIdValue === undefined) fail(`Selected item "${id}" is missing id field "${preset.item.idField}"`)
 	state.current = {
-		[preset.item.idField]: queueItem[preset.item.idField],
+		[preset.item.idField]: currentIdValue,
 		phase: iterPhase.name,
 		runId,
 		startedAt: new Date().toISOString(),
@@ -1235,8 +1897,10 @@ export function markReviewStarted(state: LoopState, item: QueueItem, preset: Pre
 	const phases = preset.phases
 	const reviewPhase = phases[phases.length - 1]
 	if (!reviewPhase) fail("preset must define at least one phase")
+	const currentIdValue = item[preset.item.idField]
+	if (currentIdValue === undefined) fail(`Selected item is missing id field "${preset.item.idField}"`)
 	state.current = {
-		[preset.item.idField]: item[preset.item.idField],
+		[preset.item.idField]: currentIdValue,
 		phase: reviewPhase.name,
 		runId,
 		startedAt: new Date().toISOString(),
@@ -2126,6 +2790,69 @@ function expectRecord(value: unknown, label: string): Record<string, unknown> {
 	fail(`${label} must be an object`)
 }
 
+type ArkAssertable<T> = {
+	assert(data: unknown): T
+}
+
+function assertArk<T>(schema: ArkAssertable<T>, data: unknown, label: string): T {
+	try {
+		return schema.assert(data)
+	} catch (error) {
+		throw new Error(`${label}: ${errorMessage(error)}`)
+	}
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
+	if (value === null) return true
+	const kind = typeof value
+	if (kind === "string" || kind === "number" || kind === "boolean") return kind !== "number" || Number.isFinite(value)
+	if (Array.isArray(value)) return value.every(isJsonValue)
+	if (kind !== "object") return false
+	return isJsonObject(value)
+}
+
+function isJsonObject(value: unknown): value is JsonObject {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false
+	const record = value as Record<string, unknown>
+	return Object.values(record).every(isJsonValue)
+}
+
+function expectJsonObject(value: unknown, label: string): JsonObject {
+	if (isJsonObject(value)) return value
+	throw new Error(`${label} must be a JSON object`)
+}
+
+function expectJsonValue(value: unknown, label: string): JsonValue {
+	if (isJsonValue(value)) return value
+	throw new Error(`${label} must be JSON data`)
+}
+
+function requiredJsonString(record: JsonObject, key: string): string {
+	const value = record[key]
+	if (typeof value === "string") return value
+	throw new Error(`${key} must be a string`)
+}
+
+function optionalJsonString(record: JsonObject, key: string): string | null {
+	const value = record[key]
+	if (value === undefined || value === null) return null
+	if (typeof value === "string") return value
+	throw new Error(`${key} must be a string when provided`)
+}
+
+function requiredJsonNumber(record: JsonObject, key: string): number {
+	const value = record[key]
+	if (typeof value === "number" && Number.isFinite(value)) return value
+	throw new Error(`${key} must be a finite number`)
+}
+
+function optionalJsonNumber(record: JsonObject, key: string): number | null {
+	const value = record[key]
+	if (value === undefined || value === null) return null
+	if (typeof value === "number" && Number.isFinite(value)) return value
+	throw new Error(`${key} must be a finite number when provided`)
+}
+
 function optionalRecord(record: Record<string, unknown>, key: string): Record<string, unknown> | null {
 	const value = record[key]
 	if (value === undefined || value === null) return null
@@ -2190,15 +2917,25 @@ function isNodeError(error: unknown): error is NodeJS.ErrnoException {
 	return typeof error === "object" && error !== null && "code" in error
 }
 
+function errorMessage(error: unknown): string {
+	if (error instanceof Error) return error.message
+	if (typeof error === "string") return error
+	try {
+		return JSON.stringify(error)
+	} catch {
+		return String(error)
+	}
+}
+
 function fail(message: string): never {
-	console.error(message)
-	process.exit(1)
+	throw new CoderLoopError(message)
 }
 
 if (import.meta.main) {
 	main().catch((error: unknown) => {
-		const message = error instanceof Error ? `${error.message}\n${error.stack ?? ""}` : String(error)
-		log(`Fatal: ${message}`)
+		const message = errorMessage(error)
+		if (logStream === null) console.error(message)
+		else log(`Fatal: ${message}`)
 		logStream?.end()
 		process.exit(1)
 	})
