@@ -71,6 +71,11 @@ target config 可写：
 
 queue item 也可写 `"runner": "claude" | "codex"` 做单 item 覆盖。`doctor` 的 Layer C 会检查 `target.runner.default.binary`，不是硬编码检查 `claude`。
 
+Codex runner 默认使用 `--sandbox danger-full-access`，因为真实
+`gh-issue-pr-iteration` 需要写工作区、写 handoff、并调用 `gh`。需要更窄
+sandbox 的 target 可通过 `codex.extraArgs` 显式传入 `--sandbox
+workspace-write` 或其他 Codex CLI 支持的值；显式 extraArgs 优先于默认值。
+
 Runtime 文件仍是必要的 debug reference，但它们不是外层长期依赖的首选 API。只有在 `doctor/status/daemon` 输出指出某个局部异常，或需要人工恢复状态时，才直接编辑/读取下面的文件。
 
 ---

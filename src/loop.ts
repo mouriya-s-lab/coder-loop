@@ -2794,10 +2794,13 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			sessionId: null,
 			terminated: null,
 		}
-		const writeStatus = (): void => {
-			void writeFile(statusPath, `${JSON.stringify(status, null, "\t")}\n`).catch((error: unknown) => {
+		let statusWriteChain = Promise.resolve()
+		const writeStatus = (): Promise<void> => {
+			const payload = `${JSON.stringify(status, null, "\t")}\n`
+			statusWriteChain = statusWriteChain.then(() => writeFile(statusPath, payload)).catch((error: unknown) => {
 				log(`Agent [${label}] status write failed: ${error instanceof Error ? error.message : String(error)}`)
 			})
+			return statusWriteChain
 		}
 		const writeLatestIndex = (): void => {
 			const lines = [
@@ -2895,11 +2898,11 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 				err.push(chunk)
 				stderrOutFile.write(chunk)
 			}
-			writeStatus()
+			void writeStatus()
 		}
 
 		status.pid = child.pid ?? null
-		writeStatus()
+		void writeStatus()
 		writeLatestIndex()
 
 		log(`Agent [${label}] spawned: runner=${selectedRunner.kind}, pid=${child.pid}, stream=${attemptStreamPath}, stderr=${attemptStderrPath}, status=${statusPath}, resume=${resume.kind === "resume" ? resume.sessionId : "none"}`)
@@ -2971,11 +2974,13 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			status.lastEventAt = new Date().toISOString()
 			status.exitCode = 1
 			status.terminated = { kind: "error", code: "spawn_error" }
-			writeStatus()
-			log(`Agent [${label}] spawn error: ${error.message}`)
-			streamOutFile.end()
-			stderrOutFile.end(`\nspawn error: ${error.message}\n`)
-			void settle({ kind: "error", code: "spawn_error" }, `spawn error: ${error.message}`, 1, null)
+			void (async () => {
+				await writeStatus()
+				log(`Agent [${label}] spawn error: ${error.message}`)
+				streamOutFile.end()
+				stderrOutFile.end(`\nspawn error: ${error.message}\n`)
+				await settle({ kind: "error", code: "spawn_error" }, `spawn error: ${error.message}`, 1, null)
+			})()
 		})
 
 		child.on("close", (code, signal) => {
@@ -2999,10 +3004,6 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			status.signal = signalName
 			status.terminated = terminated
 			status.lastEventAt = new Date().toISOString()
-			writeStatus()
-			if (signal) log(`Agent [${label}] killed by signal ${signal}`)
-			streamOutFile.end()
-			stderrOutFile.end()
 			const terminatedDetail =
 				terminated.kind === "error"
 					? `(${terminated.code})`
@@ -3011,8 +3012,14 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 						: terminated.kind === "watchdog"
 							? `(forced-terminate after ITERATION SUMMARY+${terminated.afterSummarySeconds}s, phase=${terminated.phase})`
 							: ""
-			log(`Agent [${label}] attempt closed: exit=${exitCode}, signal=${signalName ?? "none"}, terminated=${terminated.kind}${terminatedDetail}, sessionId=${status.sessionId ?? "<none>"}`)
-			void settle(terminated, stdout + "\n" + stderr, exitCode, signalName)
+			void (async () => {
+				await writeStatus()
+				if (signal) log(`Agent [${label}] killed by signal ${signal}`)
+				streamOutFile.end()
+				stderrOutFile.end()
+				log(`Agent [${label}] attempt closed: exit=${exitCode}, signal=${signalName ?? "none"}, terminated=${terminated.kind}${terminatedDetail}, sessionId=${status.sessionId ?? "<none>"}`)
+				await settle(terminated, stdout + "\n" + stderr, exitCode, signalName)
+			})()
 		})
 	})
 }
@@ -3056,7 +3063,7 @@ export function agentCodexArgs(extraArgs: readonly string[], prompt: string, res
 	const args = [...topLevelArgs, ...extraArgs]
 	if (!args.includes("--json")) args.push("--json")
 	if (!args.includes("--cd")) args.push("--cd", agentCwd)
-	if (!args.includes("--sandbox")) args.push("--sandbox", "read-only")
+	if (!args.includes("--sandbox")) args.push("--sandbox", "danger-full-access")
 	args.push(prompt)
 	return args
 }
