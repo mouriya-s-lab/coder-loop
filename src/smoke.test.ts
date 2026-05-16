@@ -7,6 +7,14 @@ const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
 
 type ConfigShape = "json" | "toml"
+type StatusSmokeSnapshot = {
+	target?: { cwd?: string }
+	state?: { kind?: string; ok?: boolean }
+	queue?: { total?: number; selected?: { id?: string } | null }
+	current?: object
+	events?: object
+	processes?: object
+}
 
 async function makeMinimalTarget(presetName: string, configShape: ConfigShape = "json"): Promise<string> {
 	const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-smoke-"))
@@ -82,6 +90,45 @@ describe("smoke: single-phase-example preset", () => {
 		expect(stderr).toContain("Runtime check passed: preset=single-phase-example")
 		expect(stderr).toContain("queue=2, selected=alpha")
 		expect(stderr).toMatch(/config=.*config\.toml \(toml\)/)
+	})
+
+	test("status <target> --json emits parseable supervisor snapshot", async () => {
+		const target = await makeMinimalTarget("single-phase-example")
+		const proc = Bun.spawnSync({
+			cmd: ["bun", LOOP_ENTRY, "status", target, "--json"],
+			cwd: REPO_ROOT,
+			stdout: "pipe",
+			stderr: "pipe",
+		})
+		const stdout = new TextDecoder().decode(proc.stdout)
+		const stderr = new TextDecoder().decode(proc.stderr)
+		expect(proc.exitCode).toBe(0)
+		expect(stderr).toBe("")
+		const snapshot = JSON.parse(stdout) as StatusSmokeSnapshot
+		expect(snapshot.target?.cwd).toBe(target)
+		expect(snapshot.state?.kind).toBe("ok")
+		expect(snapshot.state?.ok).toBe(true)
+		expect(snapshot.queue?.total).toBe(2)
+		expect(snapshot.queue?.selected?.id).toBe("alpha")
+		expect(snapshot.current).toBeDefined()
+		expect(snapshot.events).toBeDefined()
+		expect(snapshot.processes).toBeDefined()
+	})
+
+	test("status <target> --json reports missing state as JSON instead of throwing", async () => {
+		const target = await makeMinimalTarget("single-phase-example")
+		await rm(resolve(target, ".coder-loop/runtime/state.json"))
+		const proc = Bun.spawnSync({
+			cmd: ["bun", LOOP_ENTRY, "status", target, "--json"],
+			cwd: REPO_ROOT,
+			stdout: "pipe",
+			stderr: "pipe",
+		})
+		const stdout = new TextDecoder().decode(proc.stdout)
+		expect(proc.exitCode).toBe(0)
+		const snapshot = JSON.parse(stdout) as StatusSmokeSnapshot
+		expect(snapshot.state?.kind).toBe("missing-state")
+		expect(snapshot.state?.ok).toBe(false)
 	})
 })
 
