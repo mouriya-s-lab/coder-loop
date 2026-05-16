@@ -2,7 +2,7 @@
 
 读者：第一次想在一个 repo 上跑通 coder-loop 的人。
 
-读完后你能：bootstrap 一个新 repo 的 `.coder-loop/`、用 `/dev-plan` 灌一批 GitHub issue 进队列、起 `/dev-loop` 让循环跑起来、查 trace 判断是哪一轮成功/失败。
+读完后你能：bootstrap 一个新 repo 的 `.coder-loop/`、用稳定 CLI 体检 target、用 `/dev-plan` 灌一批 GitHub issue 进队列、通过 daemon API 起停 `/dev-loop`、用 `coder-loop status <target> --json` 判断当前进度。
 
 不在范围内：preset 内部怎么写（看 [preset-authoring](./preset-authoring.md)）、`gh-issue-pr-iteration` fragments 跳转细节（看 [gh-issue-pr-iteration-fragments](./gh-issue-pr-iteration-fragments.md)）、`state.json` schema 细节（看 [operations](./operations.md)）。
 
@@ -69,9 +69,10 @@ coder-loop install /path/to/your-target-repo --repo <owner>/<repo>
 
 ```bash
 coder-loop doctor /path/to/your-target-repo --repo <owner>/<repo>
+coder-loop status /path/to/your-target-repo --json
 ```
 
-四层全 OK 才能进下一步。doctor 不改任何文件——失败时按它指出的项目重跑 `install`（或修 PATH / `gh auth login`）。
+四层全 OK 且 `status` 能输出 JSON，才能进下一步。doctor 不改任何文件——失败时按它指出的项目重跑 `install`（或修 PATH / `gh auth login`）。`status` 也只读；即使 runtime 缺失或损坏，它也会用 `state.kind` 返回机器可读状态。
 
 想精确看一遍 install 会做什么、不会做什么，直接 `coder-loop install <target> --repo <slug> --dry-run`——它会逐行打印每个 layer 的动作和 `would-write` 标记。
 
@@ -89,15 +90,32 @@ echo '.dev-trace.txt' >> .gitignore
 
 ---
 
-## 2. Schema 自检
+## 2. 健康检查与状态快照
 
-`coder-loop doctor` 已经覆盖 bootstrap 完整性。如果你只想看 schema（不查 PATH / 标签 / skill），用：
+常规检查先看两条：
+
+```bash
+coder-loop doctor /path/to/your-target-repo --repo <owner>/<repo>
+coder-loop status /path/to/your-target-repo --json | jq '.state.kind, .queue, .current, .processes.loopFile'
+```
+
+`doctor` 给人看 bootstrap / live runtime health；`status --json` 给 supervisor、脚本、cron 看结构化状态。常见判断：
+
+| 字段 | 期望 |
+|---|---|
+| `.state.kind` | `"ok"` 表示 config/state/preset/runtime 都可读；其他值按错误继续排 |
+| `.queue.total` / `.queue.selected` | 有可推进 item 时 selected 不为 null |
+| `.current.run` | 正在跑或可 resume 的 run；null 表示当前没有 in-flight phase |
+| `.events.latest` | 当前或最近 run 的最后一条结构化事件 |
+| `.processes.loopFile.pidAlive` | daemon 记录的 pid 是否还活着 |
+
+如果你只想看 schema（不查 PATH / 标签 / skill），用旧的 schema check：
 
 ```bash
 coder-loop --target-cwd /path/to/your-target-repo --check-runtime
 ```
 
-期望输出：
+期望输出类似：
 
 ```
 Runtime check passed: target=...
@@ -108,7 +126,7 @@ Runtime check passed: queue=0, selected=none
 Runtime check passed: preset=gh-issue-pr-iteration
 ```
 
-exit 0 表示 schema OK；任何 exit 1 + `Runtime check failed:` 提示先按错误清单修文件，再继续。常见错误见 [operations#--check-runtime](./operations.md#--check-runtime-错误分类)。
+exit 0 表示 schema OK；任何 exit 1 + `Runtime check failed:` 提示先按错误清单修文件，再继续。常见错误见 [operations#--check-runtime](./operations.md#4-fallback-check-runtime-错误分类)。
 
 ---
 
@@ -125,60 +143,75 @@ exit 0 表示 schema OK；任何 exit 1 + `Runtime check failed:` 提示先按�
 跑完后再做一次 schema 自检：
 
 ```bash
-coder-loop --target-cwd /path/to/your-target-repo --check-runtime
+coder-loop status /path/to/your-target-repo --json | jq '.state.kind, .queue.total, .queue.selected'
 ```
 
-`queue=N, selected=<issue>` 出现且 `N ≥ 1` 才能进下一步。
+`.state.kind == "ok"` 且 `.queue.selected` 不为 null，才有东西可跑。schema 细节异常时再用 `coder-loop --target-cwd <target> --check-runtime` 看逐条错误。
 
 ---
 
-## 4. 用 `/dev-loop` 起循环
+## 4. 用 `/dev-loop` 或 daemon API 起循环
 
 ```
-/dev-loop          # 不限轮次，循环直到 review agent 停或 .dev-loop 被删
+/dev-loop          # 不限轮次，通过 coder-loop daemon start 起后台循环
 /dev-loop 10       # 最多 10 轮
 ```
 
-底层等价于：
+`/dev-loop` 是人类在 target 内的快捷入口。它会先跑 `coder-loop doctor "$PWD"` 和 `coder-loop status "$PWD" --json`，再调用 daemon API。脚本或 supervisor 直接用 daemon 命令：
 
 ```bash
-LOGFILE="/tmp/coder-loop-$$.$(date +%Y%m%d-%H%M%S).log"
-nohup coder-loop > "$LOGFILE" 2>&1 &
-echo "coder-loop started (pid=$!, log=$LOGFILE)"
+coder-loop daemon start /path/to/your-target-repo
+coder-loop daemon start /path/to/your-target-repo --max-iterations 10
+coder-loop daemon status /path/to/your-target-repo --json
 ```
+
+`daemon start` 对已运行 target 幂等：返回 `alreadyRunning: true`，不会启动重复 loop。
 
 循环消费现有队列，按 preset 的 phase 顺序交替 spawn `iter` + `review` agent；每轮 review agent 判断 continue / retry / accept / block / stop。
 
-监控分两路 audience：
+监控优先用稳定 API：
+
+```bash
+coder-loop status /path/to/your-target-repo --json | jq '.state.kind, .queue, .current, .events.latest, .processes'
+coder-loop daemon status /path/to/your-target-repo --json | jq '.processes'
+```
+
+需要看原始输出时再下钻到 runtime 文件：
 
 **人类肉眼**（自由文本，stdout / trace 含 stack trace 与 prompt 内容）：
 
 ```bash
-tail -f $LOGFILE                                                            # 进程级日志
 ls -lt /path/to/your-target-repo/.coder-loop/runtime/logs/                  # agent 输出/状态
+tail -f /path/to/your-target-repo/.coder-loop/runtime/logs/coder-loop-*.log  # daemon stdout/stderr
 tail -f /path/to/your-target-repo/.dev-trace.txt                            # 当前迭代 trace（每轮覆盖）
 ```
 
-**agent / 自动化 watcher**（结构化 JSONL，行级解析，不要 scrape 上面那条 stdout）：
+**事件流 fallback**（结构化 JSONL，适合需要非轮询的 watcher）：
 
 ```bash
-RUNID=$(jq -r '.current.runId // empty' /path/to/your-target-repo/.coder-loop/runtime/state.json)
-tail -F /path/to/your-target-repo/.coder-loop/runtime/events/$RUNID.jsonl   # per-run 事件流
+EVENTS=$(coder-loop status /path/to/your-target-repo --json | jq -r '.events.path // empty')
+test -n "$EVENTS" && tail -F "$EVENTS"
 ```
 
-事件类型：`queue.select` / `phase.start` / `phase.end` / `attempt.start` / `attempt.close` / `watchdog.fire` / `queue.terminal`。详见 [operations.md §6.3](./operations.md#63-agent-进程与监控非-cli-参数但运维需要知道)。
+事件类型：`queue.select` / `phase.start` / `phase.end` / `attempt.start` / `attempt.close` / `watchdog.fire` / `queue.terminal`。详见 [operations.md §7.3](./operations.md#73-agent-进程与监控fallback-reference)。
 
 停：
 
 ```bash
-rm /path/to/your-target-repo/.dev-loop
+coder-loop daemon stop /path/to/your-target-repo
 ```
 
-agent 跑到下一次循环条件检查时正常退出；不会强杀正在跑的 agent。
+`daemon stop` 删除 loop file 并 SIGTERM 已归属的 live pid。手工删除 `.dev-loop` 仍可作为最后 fallback；它只在下一次循环边界生效，不强杀正在跑的 agent。
 
 ---
 
 ## 5. 一轮跑完后怎么看 trace
+
+先用 status 找当前或最近 run：
+
+```bash
+coder-loop status /path/to/your-target-repo --json | jq '.current, .events, .queue.selected'
+```
 
 每轮结束后这些文件出现在 `.coder-loop/runtime/logs/`：
 
@@ -195,13 +228,13 @@ agent 跑到下一次循环条件检查时正常退出；不会强杀正在跑�
 - iter `txt` 末尾的 `## Output verdict` 表明 iter 选了哪个出口（如 `implementation_ready_for_verification`），跳进 `iter/verify-evidence` 等下一 fragment。
 - review `txt` 末尾的 verdict 决定本轮命运：`accepted_pr` → PR 已 merge / issue 已 close；`retry` → iter 下一轮继续；`blocked` / `loop_stopped` → 需人介入。
 
-`state.json.current` 会在每轮开始时写、phase 切换时更新——出问题时先看它：
+`state.json.current` 会在每轮开始时写、phase 切换时更新。通常先看 `coder-loop status` 的 `.current`，需要直接确认原始文件时再看：
 
 ```bash
 jq . .coder-loop/runtime/state.json | head -30
 ```
 
-`current.phase == "iteration"` 表示当前/上次崩在 iter；`"review"` 表示在 review。重启 `/dev-loop` 时引擎会按 `current.phase` 续跑，不重头来。详见 [operations#resume](./operations.md#resume-行为)。
+`current.phase == "iteration"` 表示当前/上次崩在 iter；`"review"` 表示在 review。重启 `/dev-loop` 或 `coder-loop daemon restart` 时引擎会按 `current.phase` 续跑，不重头来。详见 [operations#resume](./operations.md#5-resume-行为)。
 
 ---
 
@@ -211,4 +244,4 @@ jq . .coder-loop/runtime/state.json | head -30
 - **`.coder-loop/workflow.md` 缺失或没入仓** → iter/review agent 读不到项目工作方式，行为退化为 bundled preset 默认值，往往写错命令 / 漏证据 layer。
 - **`gh` 未 auth** → `iter/read-context` 会以 `infrastructure_failure` 出局，trace 里能看到 `gh auth status` 失败回显。
 - **`config.json` 的 `repository` 字段与远端不一致** → `--check-runtime` 报 `repository mismatch`；改文件，不是改 `--repo` 参数。
-- **删了 `.dev-loop` 但发现下一轮还跑了一次** → 引擎在每轮入口检查 sentinel，删除生效在当前轮的下一次循环边界。
+- **删了 `.dev-loop` 但发现下一轮还跑了一次** → 正常停 loop 用 `coder-loop daemon stop <target>`；手工删除 sentinel 只在下一次循环边界生效。

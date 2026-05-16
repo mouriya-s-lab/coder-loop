@@ -40,14 +40,16 @@ L2: Preset（presets/<name>/）
 
 - **Type check**: `bun run typecheck` (alias for `bun x tsc --noEmit`)
 - **Run unit + smoke tests**: `bun test` (覆盖 `src/loop.test.ts` + `src/smoke.test.ts`)
-- **Run orchestrator**: `bun run src/loop.ts [--target-cwd <path>] [--once] [--max-iterations N]`
+- **Run orchestrator directly**: `bun run src/loop.ts [N] [--target-cwd <path>] [--once]` (core loop path; operational callers should prefer daemon)
+- **Status snapshot**: `coder-loop status <target> --json [--config <path>] [--repo <owner/repo>]` — stable read-only JSON API for supervisor/scripts; do not scrape runtime files first.
+- **Daemon operations**: `coder-loop daemon status <target> --json`, `coder-loop daemon start|restart <target> [--max-iterations N] [--require-browser-evidence]`, `coder-loop daemon stop <target>` — stable start/stop/process ownership API.
 - **Check runtime**: `bun run src/loop.ts --target-cwd <path> --check-runtime`
 - **Dry run**: `bun run src/loop.ts --target-cwd <path> --dry-run` (渲染 + 选 item，不 spawn agent)
 - **Install target**: `coder-loop install <target> [--repo <owner/repo>] [--preset <name>] [--force] [--dry-run] [--install-skills]` — 幂等四层 bootstrap（slash commands + runtime 目录 + config + workflow.md + GitHub `kind:code`/`kind:comment` 标签 + PATH/skill 检查）。源：`src/install-commands.ts`。
 - **Uninstall target**: `coder-loop uninstall <target>` — 仅删 `.claude/commands/dev-*.md`；runtime 和 GitHub labels 保留。
-- **Doctor**: `coder-loop doctor <target> [--repo <owner/repo>]` — 只读四层体检（target 文件 / GitHub 标签 / 操作员 PATH / writing-issue skill 版本）。
+- **Doctor**: `coder-loop doctor <target> [--repo <owner/repo>]` — 只读四层体检（target 文件 / GitHub 标签 / 操作员 PATH / writing-issue skill 版本）并输出 live runtime health。
 - **Plan phase**: `/dev-plan` （`gh-issue-pr-iteration` preset 配套的规划器）
-- **Loop phase**: `/dev-loop [N]` （`gh-issue-pr-iteration` preset 配套的循环入口）
+- **Loop phase**: `/dev-loop [N]` （`gh-issue-pr-iteration` preset 配套的循环入口；内部走 `coder-loop daemon start`）
 
 ### 写一个新 preset 的最小流程
 
@@ -80,7 +82,15 @@ Agent 不是「判断力差」——是没人教它怎么判断。当前 prompt 
 
 ## Supervisor pattern
 
-跨 preset 通用，包在 loop 外面。`templates/supervisor/` 提供 cron-driven cross-patrol orchestration starter，long multi-mission work 适用。短单 issue 跑不需要它。supervisor 自己不调引擎；它读 target `.coder-loop/runtime/state.json` + 引擎写的 status JSON，判断「应该启停哪个 mission」，然后启停 loop。
+跨 preset 通用，包在 loop 外面。`templates/supervisor/` 提供 cron-driven cross-patrol orchestration starter，long multi-mission work 适用。短单 issue 跑不需要它。
+
+supervisor 的正常接口是 coder-loop 运维 API：
+
+- bootstrap / repair: `coder-loop install <target>` then `coder-loop doctor <target>`
+- observe: `coder-loop status <target> --json` or `coder-loop daemon status <target> --json`
+- control: `coder-loop daemon start|stop|restart <target>`
+
+不要把 `.coder-loop/runtime/state.json`、events JSONL、agent `status.json`、`.dev-loop` 当作第一层契约来 scrape。那些文件只在 `doctor/status/daemon` 指向具体异常、或需要人工恢复 runtime 时作为 fallback/debug evidence 使用。
 
 ## Templates for target projects
 

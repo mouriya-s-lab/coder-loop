@@ -13,7 +13,7 @@ N 角色字符串调度引擎。给定一个 preset（角色定义、状态集�
 | **Operator**（想在一个 repo 上把 coder-loop 跑起来） | [docs/operator-quickstart.md](./docs/operator-quickstart.md) | bootstrap target 的 `.coder-loop/`、灌队列、起循环、看 trace |
 | **Preset 作者**（写新 preset 或改 bundled preset） | [docs/preset-authoring.md](./docs/preset-authoring.md) | `preset.toml` 字段、变量 DSL、`runtime.*` 白名单、minimal template |
 | **`gh-issue-pr-iteration` 维护者**（动 bundled preset 的 fragment） | [docs/gh-issue-pr-iteration-fragments.md](./docs/gh-issue-pr-iteration-fragments.md) | 32 fragments 的 verdict 跳转图 + review 13-step 顺序 |
-| **运维 / debug**（循环挂了、想 reset 状态、想看上一轮跑哪儿了） | [docs/operations.md](./docs/operations.md) | `state.json` schema、trace layout、`--check-runtime` 错码、resume / `.dev-loop` 语义 |
+| **运维 / supervisor**（循环挂了、想 reset 状态、想看上一轮跑哪儿了） | [docs/operations.md](./docs/operations.md) | 稳定 API：`coder-loop doctor` / `coder-loop status <target> --json` / `coder-loop daemon ...`；runtime 文件只是 fallback reference |
 
 不在以上四类的人——看完下面这一页（设计思想 + 安装 + References）就够。
 
@@ -71,6 +71,22 @@ cp .claude/commands/dev-*.md ~/.claude/commands/     # 注册 slash commands
 ```
 
 之后 `coder-loop` 命令和 `/dev-plan` `/dev-loop` 在任意目录可用。也可以不 `bun link`，调用改成 `bun /path/to/coder-loop/src/loop.ts`。
+
+在目标 repo 上启动前，先通过 `install` 建立 target-side bootstrap 契约：
+
+```bash
+coder-loop install /path/to/target --repo <owner>/<repo>
+coder-loop doctor /path/to/target --repo <owner>/<repo>
+coder-loop status /path/to/target --json
+```
+
+后台循环由 daemon API 管理；`/dev-loop [N]` 也是这个 API 的人类快捷入口，不再手写 `nohup`：
+
+```bash
+coder-loop daemon start /path/to/target
+coder-loop daemon status /path/to/target --json
+coder-loop daemon stop /path/to/target
+```
 
 `/dev-plan` 引用以下用户级规则与 skill：
 
