@@ -110,6 +110,7 @@ export type DaemonCommandArgs =
 			configPath: string | null
 			repository: string | null
 			requireBrowserEvidence: boolean
+			maxIterations: number | null
 			dryRun: boolean
 		}
 	| {
@@ -125,6 +126,7 @@ export type DaemonCommandArgs =
 			configPath: string | null
 			repository: string | null
 			requireBrowserEvidence: boolean
+			maxIterations: number | null
 			dryRun: boolean
 		}
 
@@ -710,6 +712,7 @@ const daemonStartCliCommand = command({
 		config: option({ long: "config", type: optional(cmdString) }),
 		repo: option({ long: "repo", type: optional(cmdString) }),
 		requireBrowserEvidence: flag({ long: "require-browser-evidence" }),
+		maxIterations: option({ long: "max-iterations", type: optional(cmdString) }),
 		dryRun: flag({ long: "dry-run" }),
 	},
 	handler: (args): CliCommand => ({
@@ -720,6 +723,7 @@ const daemonStartCliCommand = command({
 			configPath: args.config ?? null,
 			repository: args.repo ?? null,
 			requireBrowserEvidence: args.requireBrowserEvidence,
+			maxIterations: parseDaemonMaxIterations(args.maxIterations ?? null),
 			dryRun: args.dryRun,
 		},
 	}),
@@ -754,6 +758,7 @@ const daemonRestartCliCommand = command({
 		config: option({ long: "config", type: optional(cmdString) }),
 		repo: option({ long: "repo", type: optional(cmdString) }),
 		requireBrowserEvidence: flag({ long: "require-browser-evidence" }),
+		maxIterations: option({ long: "max-iterations", type: optional(cmdString) }),
 		dryRun: flag({ long: "dry-run" }),
 	},
 	handler: (args): CliCommand => ({
@@ -764,6 +769,7 @@ const daemonRestartCliCommand = command({
 			configPath: args.config ?? null,
 			repository: args.repo ?? null,
 			requireBrowserEvidence: args.requireBrowserEvidence,
+			maxIterations: parseDaemonMaxIterations(args.maxIterations ?? null),
 			dryRun: args.dryRun,
 		},
 	}),
@@ -795,6 +801,13 @@ function readFlagValue(args: string[], index: number, inlineValue: string | null
 
 function rejectInlineValue(value: string | null, name: string): void {
 	if (value !== null) fail(`${name} does not accept a value`)
+}
+
+function parseDaemonMaxIterations(value: string | null): number | null {
+	if (value === null) return null
+	const parsed = Number(value)
+	if (!Number.isInteger(parsed) || parsed <= 0) fail(`--max-iterations must be a positive integer, got: ${value}`)
+	return parsed
 }
 
 async function runStatusCommand(args: string[]): Promise<void> {
@@ -1687,6 +1700,7 @@ export function buildDaemonStartPlan(args: Extract<DaemonCommandArgs, { action: 
 	if (args.configPath !== null) command.push("--config", args.configPath)
 	if (args.repository !== null) command.push("--repo", args.repository)
 	if (args.requireBrowserEvidence) command.push("--require-browser-evidence")
+	if (args.maxIterations !== null) command.push(String(args.maxIterations))
 	return {
 		targetCwd,
 		command,
@@ -1823,7 +1837,7 @@ async function runDaemonRestartCommand(args: Extract<DaemonCommandArgs, { action
 		return
 	}
 	const stopped = await executeDaemonStop(buildDaemonStopPlan(current))
-	const started = await executeDaemonStart({ ...args, action: "start", requireBrowserEvidence, dryRun: false })
+	const started = await executeDaemonStart({ ...args, action: "start", requireBrowserEvidence, maxIterations: args.maxIterations, dryRun: false })
 	process.stdout.write(JSON.stringify({
 		action: "restart",
 		target: current.target.cwd,

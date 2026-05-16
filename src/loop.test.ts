@@ -248,6 +248,7 @@ describe("buildDaemonStartPlan", () => {
 			configPath: null,
 			repository: "Mouriya-Emma/coder-loop-fixture",
 			requireBrowserEvidence: true,
+			maxIterations: 10,
 			dryRun: true,
 		})
 
@@ -257,6 +258,7 @@ describe("buildDaemonStartPlan", () => {
 		expect(plan.command).toContain("--repo")
 		expect(plan.command).toContain("Mouriya-Emma/coder-loop-fixture")
 		expect(plan.command).toContain("--require-browser-evidence")
+		expect(plan.command).toContain("10")
 		expect(plan.commandLine).toContain("--require-browser-evidence")
 		expect(plan.requireBrowserEvidence).toBe(true)
 	})
