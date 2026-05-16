@@ -15,10 +15,12 @@ import {
 	buildConfigBindings,
 	buildDaemonStartPlan,
 	buildRuntimeBindings,
+	buildRunnerInvocation,
 	checkRuntime,
 	classifyTermination,
 	createSummaryWatchdog,
 	decideResume,
+	detectHostRunner,
 	extractErrorCode,
 	formatLoopEventLine,
 	getCurrentId,
@@ -85,6 +87,7 @@ function makeItem(overrides: Partial<QueueItem> & { issue: number; status: strin
 		issueFile: overrides.issueFile ?? `.coder-loop/runtime/issues/${overrides.issue}.md`,
 		evidenceDir: overrides.evidenceDir ?? `.coder-loop/runtime/evidence/${overrides.issue}`,
 		agentCwd: overrides.agentCwd ?? null,
+		runner: overrides.runner ?? null,
 		issue: overrides.issue,
 	}
 }
@@ -118,6 +121,8 @@ async function makeFixtureOptions(preset: Preset): Promise<LoopOptions> {
 	await writeFile(sharedContextPath, "")
 	await writeFile(statePath, "{}")
 	await writeFile(workflowPath, "")
+	const claudeRunner = { kind: "claude" as const, binary: "claude", extraArgs: [] }
+	const codexRunner = { kind: "codex" as const, binary: "codex", extraArgs: [] }
 	return {
 		targetCwd: cwd,
 		configPath,
@@ -133,8 +138,9 @@ async function makeFixtureOptions(preset: Preset): Promise<LoopOptions> {
 		repository: "Mouriya-Emma/test",
 		baseBranch: "main",
 		requireBrowserEvidence: false,
-		claudeBinary: "claude",
-		claudeExtraArgs: [],
+		hostRunner: "claude",
+		defaultRunner: { ...claudeRunner, source: "host" as const },
+		runnerCommands: { claude: claudeRunner, codex: codexRunner },
 		maxIterations: 1,
 		dryRun: false,
 		checkRuntime: false,
@@ -188,6 +194,13 @@ describe("getItemId / getCurrentId", () => {
 })
 
 describe("buildCoderLoopStatusSnapshot", () => {
+	test("detectHostRunner defaults to Codex inside Codex env and Claude otherwise", () => {
+		expect(detectHostRunner({ CODEX_SHELL: "1" })).toBe("codex")
+		expect(detectHostRunner({ CODEX_THREAD_ID: "thread" })).toBe("codex")
+		expect(detectHostRunner({ CLAUDECODE: "1" })).toBe("claude")
+		expect(detectHostRunner({})).toBe("claude")
+	})
+
 	test("returns a read-only ok snapshot with target/state/queue/current/events/processes", async () => {
 		const target = await makeStatusTarget()
 		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json" })
@@ -205,9 +218,102 @@ describe("buildCoderLoopStatusSnapshot", () => {
 		expect(snapshot.queue.continuable).toBe(1)
 		expect(snapshot.queue.terminal).toBe(1)
 		expect(snapshot.queue.selected?.id).toBe("alpha")
+		expect(snapshot.queue.selected?.runner.kind).toBe(snapshot.target.runner.default.kind)
 		expect(snapshot.current.run).toBeNull()
 		expect(snapshot.events.runId).toBe("run-alpha")
 		expect(snapshot.processes.loopFile.exists).toBe(false)
+	})
+
+	test("config runner becomes the default runner in status JSON", async () => {
+		const target = await makeStatusTarget()
+		await writeFile(
+			resolve(target, ".coder-loop/runtime/config.json"),
+			JSON.stringify({
+				preset: "single-phase-example",
+				runner: "codex",
+				codex: { binary: "/tmp/fake-codex", extraArgs: ["--json"] },
+			}, null, "\t"),
+		)
+
+		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json" })
+
+		expect(snapshot.state.kind).toBe("ok")
+		expect(snapshot.target.runner.default).toEqual({
+			kind: "codex",
+			source: "config",
+			binary: "/tmp/fake-codex",
+			extraArgs: ["--json"],
+		})
+		expect(snapshot.queue.selected?.runner).toEqual(snapshot.target.runner.default)
+	})
+
+	test("queue item runner overrides the config default for the selected item", async () => {
+		const target = await makeStatusTarget()
+		await writeFile(
+			resolve(target, ".coder-loop/runtime/config.json"),
+			JSON.stringify({
+				preset: "single-phase-example",
+				runner: "claude",
+				codex: { binary: "/tmp/fake-codex", extraArgs: ["--ask-for-approval", "never"] },
+			}, null, "\t"),
+		)
+		await writeFile(
+			resolve(target, ".coder-loop/runtime/state.json"),
+			JSON.stringify({
+				version: 1,
+				queue: [
+					{ id: "alpha", status: "pending", runner: "codex" },
+					{ id: "beta", status: "done" },
+				],
+				recentRuns: [],
+				current: null,
+			}, null, "\t"),
+		)
+
+		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json" })
+
+		expect(snapshot.state.kind).toBe("ok")
+		expect(snapshot.target.runner.default.kind).toBe("claude")
+		expect(snapshot.queue.selected?.runner).toEqual({
+			kind: "codex",
+			source: "queue",
+			binary: "/tmp/fake-codex",
+			extraArgs: ["--ask-for-approval", "never"],
+		})
+	})
+
+	test("invalid config runner is reported as an invalid-config status snapshot", async () => {
+		const target = await makeStatusTarget()
+		await writeFile(
+			resolve(target, ".coder-loop/runtime/config.json"),
+			JSON.stringify({ preset: "single-phase-example", runner: "ollama" }, null, "\t"),
+		)
+
+		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json" })
+
+		expect(snapshot.state.kind).toBe("invalid-config")
+		expect(snapshot.state.ok).toBe(false)
+		expect(snapshot.state.errors[0]?.path).toBe("config")
+		expect(snapshot.state.errors[0]?.message).toContain("runner")
+	})
+
+	test("invalid queue item runner is reported as an invalid-state status snapshot", async () => {
+		const target = await makeStatusTarget()
+		await writeFile(
+			resolve(target, ".coder-loop/runtime/state.json"),
+			JSON.stringify({
+				version: 1,
+				queue: [{ id: "alpha", status: "pending", runner: "ollama" }],
+				recentRuns: [],
+				current: null,
+			}, null, "\t"),
+		)
+
+		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json" })
+
+		expect(snapshot.state.kind).toBe("invalid-state")
+		expect(snapshot.state.ok).toBe(false)
+		expect(snapshot.state.errors[0]?.message).toContain("runner")
 	})
 
 	test("distinguishes missing state from missing or invalid config", async () => {
@@ -411,6 +517,7 @@ describe("reconcileStateAfterIter — recovers state.json wiped or reverted by i
 					issueFile: ".coder-loop/runtime/issues/1.md",
 					evidenceDir: ".coder-loop/runtime/evidence/1",
 					agentCwd: null,
+					runner: null,
 					issue: 1,
 				},
 			],
@@ -1243,6 +1350,35 @@ describe("agentClaudeArgs — composes claude CLI args including --resume", () =
 	})
 })
 
+describe("buildRunnerInvocation", () => {
+	test("Claude runner maps to the existing claude stream-json invocation", () => {
+		const invocation = buildRunnerInvocation(
+			{ kind: "claude", source: "config", binary: "/tmp/claude", extraArgs: ["--max-turns", "5"] },
+			"hello",
+			{ kind: "fresh" },
+		)
+
+		expect(invocation.kind).toBe("spawn")
+		if (invocation.kind === "spawn") {
+			expect(invocation.binary).toBe("/tmp/claude")
+			expect(invocation.args).toContain("--output-format")
+			expect(invocation.args).toContain("stream-json")
+			expect(invocation.args).toContain("--max-turns")
+			expect(invocation.args[invocation.args.length - 1]).toBe("hello")
+		}
+	})
+
+	test("Codex runner is selected but deliberately unsupported until issue #88", () => {
+		const invocation = buildRunnerInvocation(
+			{ kind: "codex", source: "queue", binary: "codex", extraArgs: [] },
+			"hello",
+			{ kind: "fresh" },
+		)
+
+		expect(invocation).toEqual({ kind: "unsupported", runner: "codex" })
+	})
+})
+
 describe("sessions.jsonl appends each attempt — I/O roundtrip", () => {
 	async function freshSessionsPath(): Promise<string> {
 		const dir = await mkdtemp(resolve(tmpdir(), "sessions-jsonl-"))
@@ -1650,7 +1786,12 @@ describe("summary watchdog e2e — spawnOneAttempt with a fake claudeBinary", ()
 	async function fixtureOptions(claudeBinary: string): Promise<LoopOptions> {
 		const preset = await bundledPreset()
 		const opts = await makeFixtureOptions(preset)
-		return { ...opts, claudeBinary, claudeExtraArgs: [] }
+		const claudeRunner = { kind: "claude" as const, binary: claudeBinary, extraArgs: [] }
+		return {
+			...opts,
+			defaultRunner: { ...claudeRunner, source: "host" as const },
+			runnerCommands: { ...opts.runnerCommands, claude: claudeRunner },
+		}
 	}
 
 	test("summary watchdog e2e: fake binary prints SUMMARY then sleeps; watchdog SIGTERM closes attempt, terminated=watchdog", async () => {
@@ -1867,7 +2008,13 @@ describe("events jsonl — per-run NDJSON event stream", () => {
 
 		const preset = await bundledPreset()
 		const baseOpts = await makeFixtureOptions(preset)
-		const options: LoopOptions = { ...baseOpts, claudeBinary: fakePath, claudeExtraArgs: [], targetCwd }
+		const claudeRunner = { kind: "claude" as const, binary: fakePath, extraArgs: [] }
+		const options: LoopOptions = {
+			...baseOpts,
+			targetCwd,
+			defaultRunner: { ...claudeRunner, source: "host" as const },
+			runnerCommands: { ...baseOpts.runnerCommands, claude: claudeRunner },
+		}
 		const runId = "run-wd-events"
 		const outputPath = resolve(options.logDir, "wd-events.iteration.txt")
 		const sessionsPath = agentSessionsPath(outputPath)
@@ -1925,7 +2072,13 @@ describe("events jsonl — per-run NDJSON event stream", () => {
 
 		const preset = await bundledPreset()
 		const baseOpts = await makeFixtureOptions(preset)
-		const options: LoopOptions = { ...baseOpts, claudeBinary: fakePath, claudeExtraArgs: [], targetCwd }
+		const claudeRunner = { kind: "claude" as const, binary: fakePath, extraArgs: [] }
+		const options: LoopOptions = {
+			...baseOpts,
+			targetCwd,
+			defaultRunner: { ...claudeRunner, source: "host" as const },
+			runnerCommands: { ...baseOpts.runnerCommands, claude: claudeRunner },
+		}
 		const runId = "run-clean-events"
 		const outputPath = resolve(options.logDir, "clean-events.iteration.txt")
 		const sessionsPath = agentSessionsPath(outputPath)

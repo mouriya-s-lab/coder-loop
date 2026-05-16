@@ -208,6 +208,7 @@ exit 0
 		resolve(runtime, "config.json"),
 		JSON.stringify({
 			preset: "single-phase-example",
+			runner: "claude",
 			claude: { binary: fakeAgent, extraArgs: [] },
 		}, null, 2),
 	)
