@@ -130,6 +130,40 @@ describe("smoke: single-phase-example preset", () => {
 		expect(snapshot.state?.kind).toBe("missing-state")
 		expect(snapshot.state?.ok).toBe(false)
 	})
+
+	test("daemon status <target> --json emits parseable process snapshot", async () => {
+		const target = await makeMinimalTarget("single-phase-example")
+		const proc = Bun.spawnSync({
+			cmd: ["bun", LOOP_ENTRY, "daemon", "status", target, "--json"],
+			cwd: REPO_ROOT,
+			stdout: "pipe",
+			stderr: "pipe",
+		})
+		const stdout = new TextDecoder().decode(proc.stdout)
+		const stderr = new TextDecoder().decode(proc.stderr)
+		expect(proc.exitCode).toBe(0)
+		expect(stderr).toBe("")
+		const snapshot = JSON.parse(stdout) as StatusSmokeSnapshot
+		expect(snapshot.target?.cwd).toBe(target)
+		expect(snapshot.processes).toBeDefined()
+	})
+
+	test("daemon start <target> --require-browser-evidence --dry-run shows the launch command", async () => {
+		const target = await makeMinimalTarget("single-phase-example")
+		const proc = Bun.spawnSync({
+			cmd: ["bun", LOOP_ENTRY, "daemon", "start", target, "--require-browser-evidence", "--dry-run"],
+			cwd: REPO_ROOT,
+			stdout: "pipe",
+			stderr: "pipe",
+		})
+		const stdout = new TextDecoder().decode(proc.stdout)
+		const stderr = new TextDecoder().decode(proc.stderr)
+		expect(proc.exitCode).toBe(0)
+		expect(stderr).toBe("")
+		expect(stdout).toContain("daemon start dry-run: command=")
+		expect(stdout).toContain("--require-browser-evidence")
+		expect(stdout).toContain("require-browser-evidence=true")
+	})
 })
 
 async function makeIdleTarget(): Promise<{ target: string; counterPath: string; lockPath: string; devLoopPath: string }> {

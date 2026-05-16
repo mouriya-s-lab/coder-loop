@@ -13,6 +13,7 @@ import {
 	BACKOFF_BUDGET_SECONDS,
 	buildCoderLoopStatusSnapshot,
 	buildConfigBindings,
+	buildDaemonStartPlan,
 	buildRuntimeBindings,
 	checkRuntime,
 	classifyTermination,
@@ -235,6 +236,29 @@ describe("buildCoderLoopStatusSnapshot", () => {
 		expect(snapshot.state.loaded).toBe(true)
 		expect(snapshot.queue.total).toBe(1)
 		expect(snapshot.state.errors.some((error) => error.path.endsWith(".status") && error.message.includes("garbage"))).toBe(true)
+	})
+})
+
+describe("buildDaemonStartPlan", () => {
+	test("renders the detached loop command with --require-browser-evidence when requested", async () => {
+		const target = await makeStatusTarget()
+		const plan = buildDaemonStartPlan({
+			action: "start",
+			targetCwd: target,
+			configPath: null,
+			repository: "Mouriya-Emma/coder-loop-fixture",
+			requireBrowserEvidence: true,
+			dryRun: true,
+		})
+
+		expect(plan.targetCwd).toBe(target)
+		expect(plan.command).toContain("--target-cwd")
+		expect(plan.command).toContain(target)
+		expect(plan.command).toContain("--repo")
+		expect(plan.command).toContain("Mouriya-Emma/coder-loop-fixture")
+		expect(plan.command).toContain("--require-browser-evidence")
+		expect(plan.commandLine).toContain("--require-browser-evidence")
+		expect(plan.requireBrowserEvidence).toBe(true)
 	})
 })
 

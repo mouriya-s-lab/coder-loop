@@ -10,9 +10,9 @@
 
 import { spawn } from "node:child_process"
 import { appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises"
-import { createWriteStream, type WriteStream } from "node:fs"
+import { closeSync, createWriteStream, openSync, type WriteStream } from "node:fs"
 import { dirname, isAbsolute, relative, resolve } from "node:path"
-import { command, flag, option, optional, positional, run as runCmd, string as cmdString } from "cmd-ts"
+import { command, flag, option, optional, positional, run as runCmd, string as cmdString, subcommands } from "cmd-ts"
 import { type as arkType } from "arktype"
 import { dispatchSubcommand } from "./install-commands"
 
@@ -95,6 +95,38 @@ export type StatusCommandArgs = {
 	repository: string | null
 	output: "json"
 }
+
+export type DaemonCommandArgs =
+	| {
+			action: "status"
+			targetCwd: string
+			configPath: string | null
+			repository: string | null
+			output: "json"
+		}
+	| {
+			action: "start"
+			targetCwd: string
+			configPath: string | null
+			repository: string | null
+			requireBrowserEvidence: boolean
+			dryRun: boolean
+		}
+	| {
+			action: "stop"
+			targetCwd: string
+			configPath: string | null
+			repository: string | null
+			dryRun: boolean
+		}
+	| {
+			action: "restart"
+			targetCwd: string
+			configPath: string | null
+			repository: string | null
+			requireBrowserEvidence: boolean
+			dryRun: boolean
+		}
 
 type LoopConfig = {
 	repository: string | null
@@ -358,6 +390,8 @@ export type StatusLoopFileSnapshot = {
 	log: string | null
 	cwd: string | null
 	statePath: string | null
+	command: string | null
+	requireBrowserEvidence: boolean | null
 	raw: string | null
 }
 
@@ -619,6 +653,7 @@ function parseArgs(): RawArgs {
 
 type CliCommand =
 	| { kind: "status"; args: StatusCommandArgs }
+	| { kind: "daemon"; args: DaemonCommandArgs }
 
 const statusCliCommand = command({
 	name: "status",
@@ -640,6 +675,108 @@ const statusCliCommand = command({
 				output: "json",
 			},
 		}
+	},
+})
+
+const daemonStatusCliCommand = command({
+	name: "status",
+	description: "Emit daemon ownership and runtime status for a target.",
+	args: {
+		target: positional({ displayName: "target", type: cmdString }),
+		json: flag({ long: "json" }),
+		config: option({ long: "config", type: optional(cmdString) }),
+		repo: option({ long: "repo", type: optional(cmdString) }),
+	},
+	handler: (args): CliCommand => {
+		if (!args.json) fail("daemon status: only --json output is supported for now. Usage: coder-loop daemon status <target> --json")
+		return {
+			kind: "daemon",
+			args: {
+				action: "status",
+				targetCwd: args.target,
+				configPath: args.config ?? null,
+				repository: args.repo ?? null,
+				output: "json",
+			},
+		}
+	},
+})
+
+const daemonStartCliCommand = command({
+	name: "start",
+	description: "Start coder-loop as a detached daemon for a target.",
+	args: {
+		target: positional({ displayName: "target", type: cmdString }),
+		config: option({ long: "config", type: optional(cmdString) }),
+		repo: option({ long: "repo", type: optional(cmdString) }),
+		requireBrowserEvidence: flag({ long: "require-browser-evidence" }),
+		dryRun: flag({ long: "dry-run" }),
+	},
+	handler: (args): CliCommand => ({
+		kind: "daemon",
+		args: {
+			action: "start",
+			targetCwd: args.target,
+			configPath: args.config ?? null,
+			repository: args.repo ?? null,
+			requireBrowserEvidence: args.requireBrowserEvidence,
+			dryRun: args.dryRun,
+		},
+	}),
+})
+
+const daemonStopCliCommand = command({
+	name: "stop",
+	description: "Stop the coder-loop daemon for a target.",
+	args: {
+		target: positional({ displayName: "target", type: cmdString }),
+		config: option({ long: "config", type: optional(cmdString) }),
+		repo: option({ long: "repo", type: optional(cmdString) }),
+		dryRun: flag({ long: "dry-run" }),
+	},
+	handler: (args): CliCommand => ({
+		kind: "daemon",
+		args: {
+			action: "stop",
+			targetCwd: args.target,
+			configPath: args.config ?? null,
+			repository: args.repo ?? null,
+			dryRun: args.dryRun,
+		},
+	}),
+})
+
+const daemonRestartCliCommand = command({
+	name: "restart",
+	description: "Restart the coder-loop daemon for a target.",
+	args: {
+		target: positional({ displayName: "target", type: cmdString }),
+		config: option({ long: "config", type: optional(cmdString) }),
+		repo: option({ long: "repo", type: optional(cmdString) }),
+		requireBrowserEvidence: flag({ long: "require-browser-evidence" }),
+		dryRun: flag({ long: "dry-run" }),
+	},
+	handler: (args): CliCommand => ({
+		kind: "daemon",
+		args: {
+			action: "restart",
+			targetCwd: args.target,
+			configPath: args.config ?? null,
+			repository: args.repo ?? null,
+			requireBrowserEvidence: args.requireBrowserEvidence,
+			dryRun: args.dryRun,
+		},
+	}),
+})
+
+const daemonCliCommand = subcommands({
+	name: "daemon",
+	description: "Manage coder-loop daemon processes.",
+	cmds: {
+		status: daemonStatusCliCommand,
+		start: daemonStartCliCommand,
+		stop: daemonStopCliCommand,
+		restart: daemonRestartCliCommand,
 	},
 })
 
@@ -668,10 +805,40 @@ async function runStatusCommand(args: string[]): Promise<void> {
 	process.stdout.write(`${JSON.stringify(snapshot, null, "\t")}\n`)
 }
 
+async function runDaemonCommand(args: string[]): Promise<void> {
+	const parsed = await runCmd(daemonCliCommand, args)
+	if (parsed.value.kind !== "daemon") return
+	const daemonArgs = parsed.value.args
+	if (daemonArgs.action === "status") {
+		const snapshot = await buildCoderLoopStatusSnapshot({
+			targetCwd: daemonArgs.targetCwd,
+			configPath: daemonArgs.configPath,
+			repository: daemonArgs.repository,
+			output: "json",
+		})
+		StatusSnapshotBoundary.assert(snapshot)
+		process.stdout.write(`${JSON.stringify(snapshot, null, "\t")}\n`)
+		return
+	}
+	if (daemonArgs.action === "start") {
+		await runDaemonStartCommand(daemonArgs)
+		return
+	}
+	if (daemonArgs.action === "stop") {
+		await runDaemonStopCommand(daemonArgs)
+		return
+	}
+	await runDaemonRestartCommand(daemonArgs)
+}
+
 async function main() {
 	const firstArg = process.argv[2]
 	if (firstArg === "status") {
 		await runStatusCommand(process.argv.slice(3))
+		return
+	}
+	if (firstArg === "daemon") {
+		await runDaemonCommand(process.argv.slice(3))
 		return
 	}
 	if (firstArg === "install" || firstArg === "uninstall" || firstArg === "doctor") {
@@ -738,7 +905,16 @@ async function main() {
 	await ensureGitExclude(options.targetCwd)
 	await writeFile(
 		options.loopFile,
-		`started: ${new Date().toISOString()}\npid: ${process.pid}\nlog: ${options.logFile}\ncwd: ${options.targetCwd}\nstate: ${options.statePath}\n`,
+		[
+			`started: ${new Date().toISOString()}`,
+			`pid: ${process.pid}`,
+			`log: ${options.logFile}`,
+			`cwd: ${options.targetCwd}`,
+			`state: ${options.statePath}`,
+			`command: ${process.argv.map(shellQuote).join(" ")}`,
+			`requireBrowserEvidence: ${options.requireBrowserEvidence}`,
+			"",
+		].join("\n"),
 	)
 	log("Loop file created. Delete .dev-loop to stop.")
 
@@ -1210,6 +1386,8 @@ function makeUnavailableStatusSnapshot(input: {
 				log: null,
 				cwd: null,
 				statePath: null,
+				command: null,
+				requireBrowserEvidence: null,
 				raw: null,
 			},
 			live: [],
@@ -1371,9 +1549,9 @@ async function readStatusLoopFile(path: string): Promise<StatusLoopFileSnapshot>
 		return { path, exists: true, ...parsed, pidAlive, raw }
 	} catch (error) {
 		if (isNodeError(error) && error.code === "ENOENT") {
-			return { path, exists: false, startedAt: null, pid: null, pidAlive: null, log: null, cwd: null, statePath: null, raw: null }
+			return { path, exists: false, startedAt: null, pid: null, pidAlive: null, log: null, cwd: null, statePath: null, command: null, requireBrowserEvidence: null, raw: null }
 		}
-		return { path, exists: true, startedAt: null, pid: null, pidAlive: null, log: null, cwd: null, statePath: null, raw: null }
+		return { path, exists: true, startedAt: null, pid: null, pidAlive: null, log: null, cwd: null, statePath: null, command: null, requireBrowserEvidence: null, raw: null }
 	}
 }
 
@@ -1391,7 +1569,16 @@ function parseLoopFile(raw: string): Omit<StatusLoopFileSnapshot, "path" | "exis
 		log: fields.log ?? null,
 		cwd: fields.cwd ?? null,
 		statePath: fields.state ?? null,
+		command: fields.command ?? null,
+		requireBrowserEvidence: parseLoopFileBoolean(fields.requireBrowserEvidence),
 	}
+}
+
+function parseLoopFileBoolean(value: string | undefined): boolean | null {
+	if (value === undefined) return null
+	if (value === "true") return true
+	if (value === "false") return false
+	return null
 }
 
 function scanLoopProcesses(targetCwd: string): StatusReadResult<StatusProcessInfo[]> {
@@ -1410,7 +1597,7 @@ function scanLoopProcesses(targetCwd: string): StatusReadResult<StatusProcessInf
 		const ppid = Number(match[2])
 		const commandText = match[3] ?? ""
 		const invokesLoop = commandText.includes("src/loop.ts") || /(^|\s)coder-loop(\s|$)/.test(commandText)
-		const looksLikeLoop = invokesLoop && !/(^|\s)status(\s|$)/.test(commandText)
+		const looksLikeLoop = invokesLoop && !/(^|\s)(status|daemon|install|uninstall|doctor)(\s|$)/.test(commandText)
 		const matchesTarget = commandText.includes(targetCwd)
 		if (!looksLikeLoop) continue
 		live.push({
@@ -1439,6 +1626,223 @@ function isPidAlive(pid: number): boolean {
 	} catch {
 		return false
 	}
+}
+
+export type DaemonStartPlan = {
+	targetCwd: string
+	command: string[]
+	commandLine: string
+	stdoutPath: string
+	stderrPath: string
+	requireBrowserEvidence: boolean
+}
+
+type DaemonStartResult =
+	| {
+			action: "start"
+			target: string
+			pid: number | null
+			command: string[]
+			stdoutPath: string
+			stderrPath: string
+			requireBrowserEvidence: boolean
+	  }
+	| {
+			action: "start"
+			target: string
+			alreadyRunning: true
+			pid: number
+			source: StatusProcessInfo["source"]
+			loopFile: StatusLoopFileSnapshot
+			command: string | null
+			requireBrowserEvidence: boolean | null
+	  }
+
+type DaemonStopPlan = {
+	action: "stop"
+	target: string
+	loopFile: string
+	loopFileExists: boolean
+	pid: number | null
+	pidAlive: boolean | null
+}
+
+type DaemonStopResult = DaemonStopPlan & {
+	stopped: true
+	pidExited: boolean | null
+}
+
+export function buildDaemonStartPlan(args: Extract<DaemonCommandArgs, { action: "start" }>): DaemonStartPlan {
+	const targetCwd = resolve(args.targetCwd)
+	const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")
+	const logDir = resolve(targetCwd, DEFAULT_LOG_DIR)
+	const stdoutPath = resolve(logDir, `coder-loop-daemon-${timestamp}.stdout.log`)
+	const stderrPath = resolve(logDir, `coder-loop-daemon-${timestamp}.stderr.log`)
+	const command = [
+		process.argv[0] ?? "bun",
+		resolve(import.meta.dir, "loop.ts"),
+		"--target-cwd",
+		targetCwd,
+	]
+	if (args.configPath !== null) command.push("--config", args.configPath)
+	if (args.repository !== null) command.push("--repo", args.repository)
+	if (args.requireBrowserEvidence) command.push("--require-browser-evidence")
+	return {
+		targetCwd,
+		command,
+		commandLine: command.map(shellQuote).join(" "),
+		stdoutPath,
+		stderrPath,
+		requireBrowserEvidence: args.requireBrowserEvidence,
+	}
+}
+
+async function runDaemonStartCommand(args: Extract<DaemonCommandArgs, { action: "start" }>): Promise<void> {
+	const plan = buildDaemonStartPlan(args)
+	if (args.dryRun) {
+		process.stdout.write([
+			`daemon start dry-run: target=${plan.targetCwd}`,
+			`daemon start dry-run: command=${plan.commandLine}`,
+			`daemon start dry-run: require-browser-evidence=${plan.requireBrowserEvidence}`,
+			`daemon start dry-run: stdout=${plan.stdoutPath}`,
+			`daemon start dry-run: stderr=${plan.stderrPath}`,
+			"",
+		].join("\n"))
+		return
+	}
+	const result = await executeDaemonStart(args, plan)
+	process.stdout.write(JSON.stringify(result, null, "\t") + "\n")
+}
+
+async function executeDaemonStart(args: Extract<DaemonCommandArgs, { action: "start" }>, plan = buildDaemonStartPlan(args)): Promise<DaemonStartResult> {
+	const current = await buildCoderLoopStatusSnapshot({
+		targetCwd: args.targetCwd,
+		configPath: args.configPath,
+		repository: args.repository,
+		output: "json",
+	})
+	const live = findOwnedLiveProcess(current)
+	if (live !== null) {
+		return {
+			action: "start",
+			target: plan.targetCwd,
+			alreadyRunning: true,
+			pid: live.pid,
+			source: live.source,
+			loopFile: current.processes.loopFile,
+			command: current.processes.loopFile.command,
+			requireBrowserEvidence: current.processes.loopFile.requireBrowserEvidence,
+		}
+	}
+
+	await mkdir(dirname(plan.stdoutPath), { recursive: true })
+	const stdoutFd = openSync(plan.stdoutPath, "a")
+	const stderrFd = openSync(plan.stderrPath, "a")
+	try {
+		const child = spawn(plan.command[0]!, plan.command.slice(1), {
+			cwd: plan.targetCwd,
+			detached: true,
+			stdio: ["ignore", stdoutFd, stderrFd],
+		})
+		child.unref()
+		return {
+			action: "start",
+			target: plan.targetCwd,
+			pid: child.pid ?? null,
+			command: plan.command,
+			stdoutPath: plan.stdoutPath,
+			stderrPath: plan.stderrPath,
+			requireBrowserEvidence: plan.requireBrowserEvidence,
+		}
+	} finally {
+		closeSync(stdoutFd)
+		closeSync(stderrFd)
+	}
+}
+
+async function runDaemonStopCommand(args: Extract<DaemonCommandArgs, { action: "stop" }>): Promise<void> {
+	const snapshot = await buildCoderLoopStatusSnapshot({
+		targetCwd: args.targetCwd,
+		configPath: args.configPath,
+		repository: args.repository,
+		output: "json",
+	})
+	const plan = buildDaemonStopPlan(snapshot)
+	if (args.dryRun) {
+		process.stdout.write(JSON.stringify({ ...plan, dryRun: true }, null, "\t") + "\n")
+		return
+	}
+	const result = await executeDaemonStop(plan)
+	process.stdout.write(JSON.stringify(result, null, "\t") + "\n")
+}
+
+function buildDaemonStopPlan(snapshot: CoderLoopStatusSnapshot): DaemonStopPlan {
+	const loopFile = snapshot.processes.loopFile
+	return {
+		action: "stop",
+		target: snapshot.target.cwd,
+		loopFile: loopFile.path,
+		loopFileExists: loopFile.exists,
+		pid: loopFile.pid,
+		pidAlive: loopFile.pidAlive,
+	}
+}
+
+async function executeDaemonStop(plan: DaemonStopPlan): Promise<DaemonStopResult> {
+	if (plan.loopFileExists) await removeLoopFile(plan.loopFile)
+	let pidExited: boolean | null = null
+	if (plan.pid !== null && plan.pidAlive === true) {
+		try {
+			process.kill(plan.pid, "SIGTERM")
+			pidExited = await waitForPidExit(plan.pid, 5_000)
+		} catch {
+			// The loop may have exited after status was read; removing the loop file is the durable stop signal.
+			pidExited = true
+		}
+	}
+	return { ...plan, stopped: true, pidExited }
+}
+
+async function runDaemonRestartCommand(args: Extract<DaemonCommandArgs, { action: "restart" }>): Promise<void> {
+	const current = await buildCoderLoopStatusSnapshot({
+		targetCwd: args.targetCwd,
+		configPath: args.configPath,
+		repository: args.repository,
+		output: "json",
+	})
+	const requireBrowserEvidence = args.requireBrowserEvidence || current.processes.loopFile.requireBrowserEvidence === true
+	if (args.dryRun) {
+		const startPlan = buildDaemonStartPlan({ ...args, action: "start", requireBrowserEvidence })
+		process.stdout.write(JSON.stringify({
+			action: "restart",
+			target: startPlan.targetCwd,
+			dryRun: true,
+			stop: { targetCwd: args.targetCwd, configPath: args.configPath, repository: args.repository },
+			start: { command: startPlan.command, commandLine: startPlan.commandLine },
+		}, null, "\t") + "\n")
+		return
+	}
+	const stopped = await executeDaemonStop(buildDaemonStopPlan(current))
+	const started = await executeDaemonStart({ ...args, action: "start", requireBrowserEvidence, dryRun: false })
+	process.stdout.write(JSON.stringify({
+		action: "restart",
+		target: current.target.cwd,
+		stopped,
+		started,
+	}, null, "\t") + "\n")
+}
+
+function findOwnedLiveProcess(snapshot: CoderLoopStatusSnapshot): StatusProcessInfo | null {
+	return snapshot.processes.live.find((entry) => entry.alive && entry.matchesTarget) ?? null
+}
+
+async function waitForPidExit(pid: number, timeoutMs: number): Promise<boolean> {
+	const deadline = Date.now() + timeoutMs
+	while (Date.now() < deadline) {
+		if (!isPidAlive(pid)) return true
+		await sleep(50)
+	}
+	return !isPidAlive(pid)
 }
 
 export async function loadPreset(presetDir: string): Promise<Preset> {
