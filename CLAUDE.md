@@ -51,6 +51,18 @@ L2: Preset（presets/<name>/）
 - **Plan phase**: `/dev-plan` （`gh-issue-pr-iteration` preset 配套的规划器）
 - **Loop phase**: `/dev-loop [N]` （`gh-issue-pr-iteration` preset 配套的循环入口；内部走 `coder-loop daemon start`）
 
+## Runner Selection
+
+Runner 是运维/target runtime 契约，不是 preset 的业务状态机。默认 runner 继承启动宿主：Codex 环境中为 `codex`，Claude Code 环境中为 `claude`；没有明确宿主信号时保持 legacy `claude` fallback。
+
+覆盖顺序：
+
+1. `state.json.queue[]` item 上的 `"runner": "claude" | "codex"`，只影响该 item。
+2. `.coder-loop/runtime/config.json` 顶层 `"runner": "claude" | "codex"`，作为 target 默认 runner。
+3. host default。
+
+Runner binary 与额外参数由 config 的 `claude.binary` / `claude.extraArgs`、`codex.binary` / `codex.extraArgs` 提供。`coder-loop status <target> --json` 暴露 `target.runner.hostDefault`、`target.runner.default`、`queue.selected.runner`、`current.runner` 和 `current.phaseStatus.value.runner`；`doctor` 按 target default runner 的实际 binary 做 PATH 检查。不要从 `.coder-loop/runtime/logs/*.status.json` 反推 runner，除非 `status` 已经指出需要 fallback debug。
+
 ### 写一个新 preset 的最小流程
 
 1. `mkdir presets/<name>/` 写 `preset.toml`（schema 见 README §「写一个新 preset」）。
@@ -113,7 +125,7 @@ starter 位置：
 
 ## Tech Stack
 
-Bun + TypeScript (strict, ESM). No runtime dependencies. Requires `claude` CLI (or 自定义 `agent.binary`) and `gh` CLI on PATH。
+Bun + TypeScript (strict, ESM). Runtime dependencies are external CLIs: `gh` plus selected runner CLI (`claude` or `codex`, optionally via config custom binary) on PATH。
 
 ## Conventions
 

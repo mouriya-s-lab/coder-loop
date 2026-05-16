@@ -49,6 +49,28 @@ coder-loop daemon restart /path/to/target --max-iterations 10
 | `events` | 当前或最近 run 的 events JSONL 路径、最近事件、解析错误 |
 | `processes` | `.dev-loop` 归属、pid 是否 alive、匹配 target 的 live process、扫描错误 |
 
+Runner 选择也在 `status` 中显式暴露：
+
+| JSON path | 含义 |
+|---|---|
+| `target.runner.hostDefault` | 当前宿主推断出的默认 runner：Codex 宿主为 `codex`，Claude Code 宿主为 `claude`，无宿主信号时 fallback `claude` |
+| `target.runner.default` | target 默认 runner；来源为 `config` 或 `host`，含 `kind / source / binary / extraArgs` |
+| `queue.selected.runner` | 当前 selected item 的实际 runner；queue item 上的 `runner` 会覆盖 target default |
+| `current.runner` | 当前 run 对应 item 的实际 runner；没有 current 时为 `null` |
+| `current.phaseStatus.value.runner` | 已落盘 phase status 里记录的 runner kind；旧 status 文件可能为 `null` |
+
+target config 可写：
+
+```json
+{
+  "runner": "codex",
+  "claude": { "binary": "claude", "extraArgs": [] },
+  "codex": { "binary": "codex", "extraArgs": ["--model", "gpt-5.4"] }
+}
+```
+
+queue item 也可写 `"runner": "claude" | "codex"` 做单 item 覆盖。`doctor` 的 Layer C 会检查 `target.runner.default.binary`，不是硬编码检查 `claude`。
+
 Runtime 文件仍是必要的 debug reference，但它们不是外层长期依赖的首选 API。只有在 `doctor/status/daemon` 输出指出某个局部异常，或需要人工恢复状态时，才直接编辑/读取下面的文件。
 
 ---
@@ -125,6 +147,7 @@ type CurrentRun = {
 ```json
 {
   "label": "iteration",
+  "runner": "codex",
   "pid": 12345,
   "startedAt": "2026-05-11T10:00:00.000Z",
   "lastEventAt": "2026-05-11T10:14:32.123Z",
@@ -139,7 +162,7 @@ type CurrentRun = {
 }
 ```
 
-`exitCode != 0` 或 `signal != null` → spawn 异常（不是 agent 内部逻辑失败，agent 内部失败是 `exitCode == 0` 但 trace 末尾 verdict 是 blocked/failed）。
+`runner` 为本次 phase 使用的 runner kind（旧文件可能缺失）。`exitCode != 0` 或 `signal != null` → spawn 异常（不是 agent 内部逻辑失败，agent 内部失败是 `exitCode == 0` 但 trace 末尾 verdict 是 blocked/failed）。
 
 ---
 

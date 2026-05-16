@@ -14,6 +14,7 @@
 
 - `bun` 已安装（`bun --version` 能跑）。
 - `gh` CLI 已 auth（`gh auth status` 不报错），有目标 repo 的 issue / PR 写权限。
+- 至少一个 runner CLI 在 PATH：Claude Code 宿主通常用 `claude`，Codex 宿主通常用 `codex`。默认 runner 继承启动 loop 的宿主，target config 可覆盖。
 - 目标 repo 在本地，有可用的 base branch（通常 `main`）。
 - 用户级 skill / rule（仅 `/dev-plan` 需要，`/dev-loop` 本身不需要）：
   - `~/.claude/rules/github-issue-pr-routing.rule.md`
@@ -51,7 +52,7 @@ coder-loop install /path/to/your-target-repo --repo <owner>/<repo>
 
 - **A) target 项目文件**：写 `.claude/commands/dev-plan.md` / `dev-loop.md`、建 `.coder-loop/runtime/{issues,evidence,logs}/`、merge `.coder-loop/runtime/config.json`（含 preset 绑定）、若 `workflow.md` 缺失则从 preset 模板拷一份。
 - **B) target GitHub state**：通过 `gh` 确保 `kind:code` / `kind:comment` 标签存在（preset fragments 依赖它们做 issue 分类）。
-- **C) 操作员机器前置**：只做检查、不安装——`gh`(+ auth) / `claude` / `coder-loop` 是否在 PATH。
+- **C) 操作员机器前置**：只做检查、不安装——`gh`(+ auth) / host-default runner CLI（`claude` 或 `codex`）/ `coder-loop` 是否在 PATH。
 - **D) 用户级 skill 版本**：检查 `~/.claude/skills/writing-issue/SKILL.md` 是否含新版 marker；加 `--install-skills` 会自动同步到最新。
 
 常用 flag：
@@ -75,6 +76,20 @@ coder-loop status /path/to/your-target-repo --json
 四层全 OK 且 `status` 能输出 JSON，才能进下一步。doctor 不改任何文件——失败时按它指出的项目重跑 `install`（或修 PATH / `gh auth login`）。`status` 也只读；即使 runtime 缺失或损坏，它也会用 `state.kind` 返回机器可读状态。
 
 想精确看一遍 install 会做什么、不会做什么，直接 `coder-loop install <target> --repo <slug> --dry-run`——它会逐行打印每个 layer 的动作和 `would-write` 标记。
+
+### Runner 默认值与覆盖
+
+默认 runner 由启动宿主决定：Codex 里启动 loop 默认用 `codex`，Claude Code 里启动默认用 `claude`；没有宿主信号时 fallback `claude`。需要固定 target 默认 runner 时，在 `.coder-loop/runtime/config.json` 写：
+
+```json
+{
+  "runner": "codex",
+  "codex": { "binary": "codex", "extraArgs": [] },
+  "claude": { "binary": "claude", "extraArgs": [] }
+}
+```
+
+单个 queue item 可加 `"runner": "claude" | "codex"` 覆盖 target 默认值。`doctor` 检查 target 默认 runner 的实际 binary；`status --json` 暴露 `target.runner.hostDefault`、`target.runner.default`、`queue.selected.runner`、`current.runner` 与 phase status 的 runner。
 
 把运行期文件加 `.gitignore`：
 
@@ -105,6 +120,7 @@ coder-loop status /path/to/your-target-repo --json | jq '.state.kind, .queue, .c
 |---|---|
 | `.state.kind` | `"ok"` 表示 config/state/preset/runtime 都可读；其他值按错误继续排 |
 | `.queue.total` / `.queue.selected` | 有可推进 item 时 selected 不为 null |
+| `.target.runner.default` / `.queue.selected.runner` | target 默认 runner 与 selected item 实际 runner；含 kind/source/binary |
 | `.current.run` | 正在跑或可 resume 的 run；null 表示当前没有 in-flight phase |
 | `.events.latest` | 当前或最近 run 的最后一条结构化事件 |
 | `.processes.loopFile.pidAlive` | daemon 记录的 pid 是否还活着 |

@@ -17,7 +17,7 @@
 | **加载 preset** | 从 `<pkg>/presets/<name>/` 或 target 的 `presetPath` 读 `preset.toml`，解析 `name / version / item.idField / statuses / phases / fragments / agent`。每个 fragment 路径必须可读。 |
 | **加载 target runtime** | 读 target `.coder-loop/runtime/{config.json,state.json,shared.md}`，校验路径都落在 target 目录下。 |
 | **选 actionable item** | 若 `state.current` 存在且其 status 在 preset 的 `statuses.continuable` 内，继续它；否则在队列里找首个 `continuable` item。`continuable` 外的所有 item 视为 terminal，引擎不动。 |
-| **按 phase 顺序 spawn agent** | 遍历 `preset.phases`：每个 phase 读 entry prompt 模板，按 `[phases.variables]` 表绑定变量替换 `{{KEY}}`，把渲染后的 prompt 作为 argv 传给 `preset.agent.binary`。捕获 stdout/stderr 写 trace。每个 phase spawn 完写一个 status JSON。 |
+| **按 phase 顺序 spawn agent** | 遍历 `preset.phases`：每个 phase 读 entry prompt 模板，按 `[phases.variables]` 表绑定变量替换 `{{KEY}}`，把渲染后的 prompt 传给当前 runner（`claude` 或 `codex`）。捕获 stdout/stderr 写 trace。每个 phase spawn 完写一个 status JSON。 |
 | **resume / 不丢工作** | spawn 中途崩溃，重启时根据 `state.current.phase` 跳到当前 phase 而非从头。 |
 | **`.dev-loop` 开关** | 启动时创建 `.dev-loop`；删除该文件即正常退出当前轮，不强杀正在跑的 agent。 |
 | **`--check-runtime` 健康检查** | 不 spawn agent。校验 preset、target 文件、queue item id / status 是否合法、`state.current` 是否一致。返回错误清单。 |
@@ -100,8 +100,8 @@ bun src/loop.ts --target-cwd <fresh-target> --check-runtime
 | `[[fragments]].id` | string | 是 | fragment 唯一标识（如 `iter/read-context`），entry prompt 通过该 id 引用 |
 | `[[fragments]].role` | string | 是 | fragment 角色（如 `common` / `iter` / `review`），仅 metadata，引擎不校验 |
 | `[[fragments]].path` | string | 是 | 相对 preset.toml 的 markdown 文件路径，文件必须可读 |
-| `[agent].binary` | string | 是 | spawn 的可执行（生产 preset 通常是 `claude`；测试用 `echo`） |
-| `[agent].extraArgs` | string[] | 否 | 额外 argv，渲染后的 prompt 作为最后一个 arg 追加 |
+| `[agent].binary` | string | 是 | schema 保留字段；实际 spawn 由 target runtime 的 runner selection 决定。新 preset 可填 `"claude"` 作为兼容占位 |
+| `[agent].extraArgs` | string[] | 否 | schema 保留字段；实际 runner args 用 target config 的 `claude.extraArgs` / `codex.extraArgs` |
 
 引擎在加载时强制：
 
@@ -197,6 +197,19 @@ target 在 `.coder-loop/runtime/config.json`（或 `config.toml`）写：
 ```
 
 两者互斥。都不写时引擎走默认的 `gh-issue-pr-iteration`。`preset` 名只允许 `^[a-zA-Z][a-zA-Z0-9_-]*$`，禁止路径分隔符与 `..`，所以 bundled name 一定落在 `<pkg>/presets/<name>/` 内。
+
+Runner 是 target runtime 配置，不是 preset 状态机的一部分。默认 runner 继承宿主；target 可写：
+
+```json
+{
+  "preset": "single-phase-example",
+  "runner": "codex",
+  "codex": { "binary": "codex", "extraArgs": [] },
+  "claude": { "binary": "claude", "extraArgs": [] }
+}
+```
+
+queue item 可加 `"runner": "claude" | "codex"` 只覆盖该 item。preset 作者不要把某个 runner 的 CLI 细节写进 engine contract；若某个 preset 只支持特定 runner，把它写进该 preset 的 README / target workflow，并用 `doctor` / `status` 验证 target config 是否符合预期。
 
 ---
 
