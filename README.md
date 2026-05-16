@@ -14,6 +14,7 @@ N 角色字符串调度引擎。给定一个 preset（角色定义、状态集�
 | **Preset 作者**（写新 preset 或改 bundled preset） | [docs/preset-authoring.md](./docs/preset-authoring.md) | `preset.toml` 字段、变量 DSL、`runtime.*` 白名单、minimal template |
 | **`gh-issue-pr-iteration` 维护者**（动 bundled preset 的 fragment） | [docs/gh-issue-pr-iteration-fragments.md](./docs/gh-issue-pr-iteration-fragments.md) | 32 fragments 的 verdict 跳转图 + review 13-step 顺序 |
 | **运维 / supervisor**（循环挂了、想 reset 状态、想看上一轮跑哪儿了） | [docs/operations.md](./docs/operations.md) | 稳定 API：`coder-loop doctor` / `coder-loop status <target> --json` / `coder-loop daemon ...`；runtime 文件只是 fallback reference |
+| **维护者**（想证明重构没有只停在单测） | [docs/real-e2e-fixture.md](./docs/real-e2e-fixture.md) | 私有 fixture repo、真实 issue→PR→review→merge→closure 路径、Codex runner e2e 证据 |
 
 不在以上四类的人——看完下面这一页（设计思想 + 安装 + References）就够。
 
