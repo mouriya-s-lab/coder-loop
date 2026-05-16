@@ -13,6 +13,7 @@ describe("buildLiveRuntimeHealthLines", () => {
 
 		expect(lines).toContain(`OK: state ok (${resolve(target, ".coder-loop/runtime/state.json")})`)
 		expect(lines.some((line) => line.includes("queue total=1") && line.includes("selected=alpha"))).toBe(true)
+		expect(lines.some((line) => line.includes("runner hostDefault=") && line.includes("default="))).toBe(true)
 		expect(lines.some((line) => line.includes("current id=alpha") && line.includes("phase=run"))).toBe(true)
 		expect(lines.some((line) => line.includes("current phase status missing"))).toBe(true)
 		expect(lines).toContain("WARN: stale loop file: recorded pid is not alive")

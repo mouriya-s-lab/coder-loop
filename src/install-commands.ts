@@ -5,7 +5,7 @@
  *   A) target project files: slash commands, config (with preset binding),
  *      runtime dirs, workflow.md template
  *   B) target GitHub state: kind:code / kind:comment labels
- *   C) operator machine prereqs: gh (+ auth), claude (verify only)
+ *   C) operator machine prereqs: gh (+ auth), selected runner CLI (verify only)
  *   D) user-level skill version: writing-issue marker check
  *
  * Idempotent by design: re-running install does not mutate files whose
@@ -22,7 +22,7 @@ import {
 } from "node:fs/promises"
 import { homedir } from "node:os"
 import { resolve, dirname } from "node:path"
-import { buildCoderLoopStatusSnapshot, loadPreset, type CoderLoopStatusSnapshot, type JsonValue, type Preset } from "./loop"
+import { buildCoderLoopStatusSnapshot, detectHostRunner, loadPreset, type AgentRunnerKind, type AgentRunnerSelection, type CoderLoopStatusSnapshot, type JsonValue, type Preset } from "./loop"
 
 const PKG_ROOT = resolve(import.meta.dir, "..")
 const PRESETS_DIR = resolve(PKG_ROOT, "presets")
@@ -235,7 +235,9 @@ function whichBinary(name: string): string | null {
 // Layer C: operator machine prereqs (verify only, never install)
 // ===================================================================
 
-async function checkLayerC(): Promise<CheckOutcome[]> {
+type RequiredRunnerCli = Pick<AgentRunnerSelection, "kind" | "binary">
+
+async function checkLayerC(requiredRunner: RequiredRunnerCli): Promise<CheckOutcome[]> {
 	const results: CheckOutcome[] = []
 
 	const ghPath = whichBinary("gh")
@@ -251,12 +253,9 @@ async function checkLayerC(): Promise<CheckOutcome[]> {
 		}
 	}
 
-	const claudePath = whichBinary("claude")
-	if (!claudePath) {
-		results.push({ ok: false, detail: "claude CLI 未在 PATH 中。安装：https://docs.anthropic.com/claude/docs/claude-code（npm: `npm install -g @anthropic-ai/claude-code`）。" })
-	} else {
-		results.push({ ok: true, detail: `claude CLI 在 ${claudePath}` })
-	}
+	const runnerPath = whichBinary(requiredRunner.binary)
+	if (!runnerPath) results.push({ ok: false, detail: runnerInstallHint(requiredRunner) })
+	else results.push({ ok: true, detail: `${requiredRunner.kind} runner CLI (${requiredRunner.binary}) 在 ${runnerPath}` })
 
 	const coderLoopPath = whichBinary("coder-loop")
 	if (!coderLoopPath) {
@@ -266,6 +265,11 @@ async function checkLayerC(): Promise<CheckOutcome[]> {
 	}
 
 	return results
+}
+
+function runnerInstallHint(runner: RequiredRunnerCli): string {
+	if (runner.kind === "codex") return `codex runner CLI (${runner.binary}) 未在 PATH 中。安装/配置 Codex CLI，并确认 \`${runner.binary} --version\` 可运行。`
+	return `claude runner CLI (${runner.binary}) 未在 PATH 中。安装：https://docs.anthropic.com/claude/docs/claude-code（npm: \`npm install -g @anthropic-ai/claude-code\`），并确认 \`${runner.binary} --version\` 可运行。`
 }
 
 // ===================================================================
@@ -497,11 +501,14 @@ export function buildLiveRuntimeHealthLines(snapshot: CoderLoopStatusSnapshot): 
 
 	const selected = snapshot.queue.selected?.id ?? "<none>"
 	lines.push(`INFO: queue total=${snapshot.queue.total}, continuable=${snapshot.queue.continuable}, terminal=${snapshot.queue.terminal}, selected=${selected}`)
+	lines.push(`INFO: runner hostDefault=${snapshot.target.runner.hostDefault}, default=${snapshot.target.runner.default.kind} (${snapshot.target.runner.default.source}, binary=${snapshot.target.runner.default.binary})`)
+	if (snapshot.queue.selected !== null) lines.push(`INFO: selected runner=${snapshot.queue.selected.runner.kind} (${snapshot.queue.selected.runner.source}, binary=${snapshot.queue.selected.runner.binary})`)
 
 	if (snapshot.current.run === null) {
 		lines.push("INFO: current run=<none>")
 	} else {
-		lines.push(`INFO: current id=${snapshot.current.id ?? "<unknown>"}, phase=${snapshot.current.run.phase}, runId=${snapshot.current.run.runId}`)
+		const currentRunner = snapshot.current.runner === null ? "<unknown>" : `${snapshot.current.runner.kind} (${snapshot.current.runner.source}, binary=${snapshot.current.runner.binary})`
+		lines.push(`INFO: current id=${snapshot.current.id ?? "<unknown>"}, phase=${snapshot.current.run.phase}, runId=${snapshot.current.run.runId}, runner=${currentRunner}`)
 		const phaseStatus = snapshot.current.phaseStatus
 		if (phaseStatus === null) {
 			lines.push("WARN: current phase status unavailable")
@@ -510,7 +517,7 @@ export function buildLiveRuntimeHealthLines(snapshot: CoderLoopStatusSnapshot): 
 		} else if (phaseStatus.error !== null) {
 			lines.push(`FAIL: current phase status unreadable (${phaseStatus.error})`)
 		} else if (phaseStatus.value !== null) {
-			lines.push(`OK: current phase status pid=${phaseStatus.value.pid}, exit=${phaseStatus.value.exitCode ?? "<running>"}, signal=${phaseStatus.value.signal ?? "<none>"}, session=${phaseStatus.value.sessionId ?? "<none>"}`)
+			lines.push(`OK: current phase status runner=${phaseStatus.value.runner ?? "<unknown>"}, pid=${phaseStatus.value.pid}, exit=${phaseStatus.value.exitCode ?? "<running>"}, signal=${phaseStatus.value.signal ?? "<none>"}, session=${phaseStatus.value.sessionId ?? "<none>"}`)
 		}
 	}
 
@@ -581,11 +588,13 @@ export async function runInstallCommand(rawArgs: string[]): Promise<void> {
 
 	// Layer C: prereqs
 	info("\n[Layer C] Operator 机器先决条件")
-	const layerCResults = await checkLayerC()
+	const installRunner = detectHostRunner(process.env)
+	info(`  INFO: install 默认 runner=${installRunner}（可在 target config 用 runner 覆盖）`)
+	const layerCResults = await checkLayerC({ kind: installRunner, binary: installRunner })
 	for (const r of layerCResults) info(`  ${r.ok ? "OK" : "FAIL"}: ${r.detail}`)
 	const layerCOk = layerCResults.every((r) => r.ok)
 	if (!layerCOk && !args.dryRun) {
-		fail("Layer C 校验未通过：先按上面提示修复 gh / claude / 认证，再重跑 install。")
+		fail(`Layer C 校验未通过：先按上面提示修复 gh / ${installRunner} / 认证，再重跑 install。`)
 	}
 
 	// Layer D: user-level skill
@@ -750,8 +759,11 @@ export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
 		}
 	}
 
+	const statusSnapshot = await buildCoderLoopStatusSnapshot({ targetCwd: args.target, configPath: null, repository: args.repo, output: "json" })
+
 	info("\n[Layer C] Operator 机器先决条件")
-	const cResults = await checkLayerC()
+	const cResults = await checkLayerC(statusSnapshot.target.runner.default)
+	info(`  INFO: target default runner=${statusSnapshot.target.runner.default.kind} (${statusSnapshot.target.runner.default.source})`)
 	for (const r of cResults) info(`  ${r.ok ? "OK" : "FAIL"}: ${r.detail}`)
 
 	info("\n[Layer D] User-level skill 版本")
@@ -759,7 +771,6 @@ export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
 	info(`  ${dResult.status === "ok" ? "OK" : "FAIL"}: ${dResult.detail}`)
 
 	info("\n[Live Runtime] coder-loop runtime health")
-	const statusSnapshot = await buildCoderLoopStatusSnapshot({ targetCwd: args.target, configPath: null, repository: args.repo, output: "json" })
 	for (const line of buildLiveRuntimeHealthLines(statusSnapshot)) info(`  ${line}`)
 
 	info("\nDoctor 完成（read-only）。任何 FAIL 项需 `coder-loop install <target>` 或手动修复。")
