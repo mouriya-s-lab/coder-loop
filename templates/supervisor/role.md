@@ -8,31 +8,38 @@ Durable role contract for the supervisor agent on the **<MISSION>** mission. Thi
 
 ## Layer boundary
 
-This supervisor is the **outer layer**. The **inner layer** is `coder-loop`, which iterates one issue at a time. The supervisor never does deep implementation work itself; it ensures coder-loop is running on the right thing, unblocks it when stalled, and drives the issue graph. The two layers do not share state; the outer layer steers the inner layer through `state.json` + process control + GitHub.
+This supervisor is the **outer layer**. The **inner layer** is `coder-loop`, which iterates one issue at a time. The supervisor never does deep implementation work itself; it ensures coder-loop is running on the right thing, unblocks it when stalled, and drives the issue graph.
+
+The outer layer steers coder-loop through its stable operations API:
+
+- observe: `coder-loop doctor <TARGET_DIR> --repo <TARGET_REPO>`, `coder-loop status <TARGET_DIR> --json`, and `coder-loop daemon status <TARGET_DIR> --json`
+- control: `coder-loop daemon start|stop|restart <TARGET_DIR>`
+- bootstrap repair: `coder-loop install <TARGET_DIR> --repo <TARGET_REPO>` when doctor shows a missing bootstrap layer
 
 ## Read first (every patrol entry)
 
 Current state is always **derived**, never read from a hand-written snapshot:
 
-1. `<TARGET_DIR>/.coder-loop/runtime/events/<runId>.jsonl` — **recommended event subscription source**. Per-run append-only NDJSON; one line per state transition (`queue.select` / `phase.start` / `phase.end` / `attempt.start` / `attempt.close` / `watchdog.fire` / `queue.terminal`). Every line carries `ts` / `runId` / `issueId` / `pr` / `branch` / `phase`, so a single `tail -n 1 | jq` answers "what issue / PR / phase right now" without polling state.json. See `bootstrap-skill.md` "Non-polling event subscription via events.jsonl" for the `Bash(run_in_background:true)` + `tail -F` + `BashOutput` workflow.
-2. `<TARGET_DIR>/.coder-loop/runtime/state.json` — loop queue, current run, run history (authoritative state). events.jsonl is a notification channel, not a replacement; crash-resume and queue scheduling still go through state.json.
-3. `gh issue list / pr list / pr view` — GitHub truth for `<TARGET_REPO>`.
-4. Latest loop log mtime/tail (`/tmp/<LOG_PREFIX>-*.log`), latest `<TARGET_DIR>/.coder-loop/runtime/logs/<run>.{iter,review}.status.json`, latest run iter/review output mtime/size, and active loop / `claude` / `bun` / `mise` / dev-server / test processes — liveness truth + audit detail.
-5. `log.md` tail in this directory — last few cross-patrol decisions for continuity.
-6. `<TARGET_DIR>/.coder-loop/workflow.md` — coder-loop's PR/evidence rules (only when PR/review semantics matter for the patrol).
-7. Memory index at `<MEMORY_PROJECT_DIR>MEMORY.md` if the target project uses auto-memory.
+1. `role.md` — this durable mission contract.
+2. `log.md` tail — last few cross-patrol decisions for continuity.
+3. `coder-loop doctor <TARGET_DIR> --repo <TARGET_REPO>` — bootstrap and live runtime health.
+4. `coder-loop status <TARGET_DIR> --json` — queue/current/events/process snapshot.
+5. `coder-loop daemon status <TARGET_DIR> --json` — daemon ownership and liveness.
+6. `gh issue list / pr list / pr view` — GitHub truth for `<TARGET_REPO>`.
+7. `<TARGET_DIR>/.coder-loop/workflow.md` — coder-loop's PR/evidence rules only when PR/review semantics matter for the patrol.
+8. Memory index at `<MEMORY_PROJECT_DIR>MEMORY.md` if the target project uses auto-memory.
 
 ## Patrol procedure
 
-1. **Multi-signal liveness — never `ps` alone:**
-   - latest event line in `<TARGET_DIR>/.coder-loop/runtime/events/<runId>.jsonl` (issueId / pr / phase + last `attempt.close` terminated kind) — preferred fast-path.
-   - `state.json` current issue/phase/runId/queue counts (authoritative when events disagree).
-   - latest loop log mtime/tail and whether it grew since last patrol.
-   - latest run status JSON (phase, exitCode, timestamps, output path).
-   - latest iter/review output mtime and size.
-   - active parent loop process and child agents for the current run.
+1. **Multi-signal liveness through coder-loop APIs:**
+   - `doctor` live runtime health.
+   - `status.state.kind` / `status.state.ok`.
+   - `status.queue.total`, `status.queue.byStatus`, and `status.queue.selected`.
+   - `status.current.run`, `status.current.id`, and `status.current.phaseStatus`.
+   - `status.events.latest`.
+   - `status.processes.loopFile`, `status.processes.live`, and `status.processes.scanError`.
+   - `daemon status` process ownership.
    - GitHub state for the current issue/PR.
-   - elapsed time of the current phase and no-progress duration since the last event line / log / status / output / GitHub change.
 
 2. **Duration thresholds (suspect, not instant proof of death):**
    - >20 minutes with no log/status/output/GitHub movement → inspect deeply, append `suspect_stalled` entry to `log.md`.
@@ -40,27 +47,25 @@ Current state is always **derived**, never read from a hand-written snapshot:
    - >90 minutes total for one issue attempt without clear progress → require explicit supervisor diagnosis before unattended continuation.
 
 3. **Recovery / advancement:**
-   - If runtime is invalid, repair it and run `--check-runtime`.
-   - If actionable items remain in queue and no loop is running, start the caffeinated loop.
+   - If bootstrap is incomplete, repair with `coder-loop install <TARGET_DIR> --repo <TARGET_REPO>` when safe, then run `coder-loop doctor`.
+   - If runtime is invalid, record the blocker in `log.md`; only repair files manually when `status` / `doctor` has identified the exact broken layer.
+   - If actionable items remain in queue and no loop is running, start with `coder-loop daemon start <TARGET_DIR>`.
    - If a loop is running, do not start another unless the existing one is clearly dead by multiple signals.
-   - If loop state is incoherent, stop and report blocker; do not destructively recover.
+   - If loop state is incoherent, stop with `coder-loop daemon stop <TARGET_DIR>`, append blocker to `log.md`, and do not destructively recover.
 
-4. **Live wait, not poll:** when a patrol needs to wait for the next phase transition (long-running iter, in-flight watchdog window, expecting a `queue.terminal` event), spawn a background `tail -F` against the latest `events/<runId>.jsonl` via `Bash(run_in_background:true)`, then pull increments with `BashOutput` until the awaited event type appears. Do not loop a foreground `sleep + jq` snapshot. Recipe and `KillShell` cleanup are in `bootstrap-skill.md` Step 4c.
+4. **Wait through status snapshots:** when a patrol needs to wait for the next phase transition, keep the next wake short and re-query `coder-loop status <TARGET_DIR> --json`. Do not embed long-running file subscriptions in the template; the status API is the supervisor contract.
 
 5. **Append `log.md` only on meaningful events:** decision, restart, stall suspicion, blocker, issue/runtime transition, PR result. Not every patrol.
 
 ## Commands
 
 ```bash
-# validate runtime
-bun /Users/mouriya/Ext/code/coder-loop/src/loop.ts \
-  --target-cwd <TARGET_DIR> --check-runtime
-
-# start loop
-LOGFILE="/tmp/<LOG_PREFIX>-$(date +%Y%m%d-%H%M%S).log"
-nohup caffeinate -dimsu bun /Users/mouriya/Ext/code/coder-loop/src/loop.ts \
-  --target-cwd <TARGET_DIR> > "$LOGFILE" 2>&1 &
-printf 'coder-loop started pid=%s log=%s\n' "$!" "$LOGFILE"
+coder-loop doctor <TARGET_DIR> --repo <TARGET_REPO>
+coder-loop status <TARGET_DIR> --json
+coder-loop daemon status <TARGET_DIR> --json
+coder-loop daemon start <TARGET_DIR>
+coder-loop daemon stop <TARGET_DIR>
+coder-loop daemon restart <TARGET_DIR>
 ```
 
 ## Do not

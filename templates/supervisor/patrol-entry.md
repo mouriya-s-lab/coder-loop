@@ -18,17 +18,17 @@ Role: outer-layer supervisor for the **<MISSION>** mission, invoked by self-resc
 ## Then perform a real patrol per `role.md` in this directory
 
 1. Read `role.md` for the durable role contract.
-2. Derive current state. Preferred fast-path: tail the latest `<TARGET_DIR>/.coder-loop/runtime/events/<runId>.jsonl` line (per-run NDJSON event stream — answers "what issue / pr / phase" in one `jq` line). Cross-check with authoritative sources `state.json` + `gh` + processes + logs. For long waits use `Bash(run_in_background:true)` + `tail -F` + `BashOutput` to subscribe instead of polling — full recipe in `bootstrap-skill.md` Step 4c. Never from hand-written snapshots.
+2. Derive current state through coder-loop APIs: `coder-loop doctor <TARGET_DIR> --repo <TARGET_REPO>`, `coder-loop status <TARGET_DIR> --json`, and `coder-loop daemon status <TARGET_DIR> --json`. Cross-check issue/PR truth with `gh`. Never from hand-written snapshots.
 3. Read `log.md` tail (last 5–10 entries) for cross-patrol continuity.
 4. Apply the decision rules below.
 5. Append to `log.md` only on meaningful events.
 
 ## Decision rules
 
-- **Loop active and healthy** → verify it's advancing the <MISSION> queue; report current issue/phase and expected next transition; stop.
-- **Loop stalled** (multi-signal evidence per `role.md` thresholds) → kill loop parent + all related child agents as one unit, clear stale loop control, repair runtime, run `--check-runtime`, restart caffeinated.
-- **No loop active but actionable items remain** → validate runtime, start caffeinated loop.
-- **Loop state incoherent** → stop, append blocker to `log.md`, do not destructively recover.
+- **Loop active and healthy** → verify it's advancing the <MISSION> queue via `status.current`, `status.events.latest`, and GitHub; report current issue/phase and expected next transition; stop.
+- **Loop stalled** (multi-signal evidence per `role.md` thresholds) → stop through `coder-loop daemon stop <TARGET_DIR>`, repair only the layer identified by `doctor` / `status`, then restart with `coder-loop daemon restart <TARGET_DIR>` when safe.
+- **No loop active but actionable items remain** → run `coder-loop doctor <TARGET_DIR> --repo <TARGET_REPO>`, then `coder-loop daemon start <TARGET_DIR>`.
+- **Loop state incoherent** → stop through `coder-loop daemon stop <TARGET_DIR>`, append blocker to `log.md`, do not destructively recover.
 - **Mission complete** (no actionable <MISSION> items left in queue and audit accepts current state as on-target) → append final `mission complete` entry to `log.md`, do not schedule another patrol for this mission, report to user that the next mission should be initialized.
 
 ## Safety boundaries

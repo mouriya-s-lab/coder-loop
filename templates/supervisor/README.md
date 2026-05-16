@@ -9,7 +9,7 @@ Use this pattern when a target project has long-running multi-mission work (upst
 - **Inner — `coder-loop`** (this repo, `src/loop.ts`): iterates one issue at a time; iter→review→PR. Pure black box from the supervisor's perspective.
 - **Outer — supervisor agent + cron** (these templates): stateless, cron-woken, ensures the right mission is being worked, unblocks the inner loop, manages issue graph, decides restart vs. wait.
 
-The two layers do not share state. The outer steers the inner via `<TARGET_DIR>/.coder-loop/runtime/state.json` + process control + GitHub. coder-loop itself does not depend on this pattern.
+The two layers do not share state. The outer steers the inner through coder-loop's stable operations API (`coder-loop doctor`, `coder-loop status <target> --json`, and `coder-loop daemon ...`) plus GitHub. coder-loop itself does not depend on this pattern.
 
 ## Mission scope
 
@@ -50,7 +50,7 @@ Append-only cross-patrol event stream. Each patrol invocation appends one concis
 - `<MEMORY_PROJECT_DIR>` — the encoded path under `~/.claude/projects/` if the target uses auto-memory (e.g. `~/.claude/projects/-Users-mouriya-Ext-code-<repo>/memory/`); otherwise remove the row.
 - `<UPSTREAM_REPO_URL>` — only if the mission references an upstream; remove the line otherwise.
 
-`bootstrap-skill.md` no longer contains these placeholders — it derives `TARGET_DIR / TARGET_REPO / LOG_PREFIX / MEMORY_DIR` at runtime and reads mission-specific paths from the active mission's `role.md`.
+`bootstrap-skill.md` no longer contains these placeholders — it derives `TARGET_DIR / TARGET_REPO / MEMORY_DIR` at runtime and reads mission-specific paths from the active mission's `role.md`.
 
 ## Where state actually lives — never duplicate
 
@@ -58,9 +58,10 @@ Append-only cross-patrol event stream. Each patrol invocation appends one concis
 |---|---|
 | Long-term direction / lessons | target project's user memory (`~/.claude/projects/.../memory/`) if used |
 | Cross-patrol decisions for this mission | `<MISSION>/log.md` |
-| Loop queue / runs | `<TARGET_DIR>/.coder-loop/runtime/state.json` |
+| Loop runtime snapshot | `coder-loop status <TARGET_DIR> --json` |
+| Loop daemon liveness | `coder-loop daemon status <TARGET_DIR> --json` |
+| Bootstrap / live health | `coder-loop doctor <TARGET_DIR> --repo <TARGET_REPO>` |
 | Issue/PR truth | `gh` on `<TARGET_REPO>` |
-| Liveness | `/tmp/<LOG_PREFIX>-*.log` + `.coder-loop/runtime/logs/*.status.json` + processes |
 
 Anything derivable from these sources must not be duplicated into a hand-written MD; that is how earlier `STATE.md` / `TODO.md`-style files went stale within a day. Only `log.md` (append-only history) is hand-maintained, because by definition each entry was true at its timestamp.
 
