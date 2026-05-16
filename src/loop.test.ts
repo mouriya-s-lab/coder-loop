@@ -1371,7 +1371,7 @@ describe("agentClaudeArgs — composes claude CLI args including --resume", () =
 })
 
 describe("agentCodexArgs", () => {
-	test("fresh invocation uses Codex exec JSON mode with cwd and read-only sandbox", () => {
+	test("fresh invocation uses Codex exec JSON mode with cwd and full sandbox for real loop work", () => {
 		const args = agentCodexArgs([], "hello", { kind: "fresh" }, "/tmp/target")
 		expect(args).toEqual([
 			"--ask-for-approval",
@@ -1381,7 +1381,22 @@ describe("agentCodexArgs", () => {
 			"--cd",
 			"/tmp/target",
 			"--sandbox",
-			"read-only",
+			"danger-full-access",
+			"hello",
+		])
+	})
+
+	test("fresh invocation preserves caller-provided sandbox override", () => {
+		const args = agentCodexArgs(["--sandbox", "workspace-write"], "hello", { kind: "fresh" }, "/tmp/target")
+		expect(args).toEqual([
+			"--ask-for-approval",
+			"never",
+			"exec",
+			"--sandbox",
+			"workspace-write",
+			"--json",
+			"--cd",
+			"/tmp/target",
 			"hello",
 		])
 	})
@@ -1430,7 +1445,7 @@ describe("buildRunnerInvocation", () => {
 		expect(invocation).toEqual({
 			kind: "spawn",
 			binary: "codex",
-			args: ["--ask-for-approval", "never", "exec", "--json", "--cd", "/tmp/target", "--sandbox", "read-only", "hello"],
+			args: ["--ask-for-approval", "never", "exec", "--json", "--cd", "/tmp/target", "--sandbox", "danger-full-access", "hello"],
 		})
 	})
 })
