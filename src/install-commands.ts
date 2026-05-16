@@ -22,7 +22,7 @@ import {
 } from "node:fs/promises"
 import { homedir } from "node:os"
 import { resolve, dirname } from "node:path"
-import { loadPreset, type Preset } from "./loop"
+import { buildCoderLoopStatusSnapshot, loadPreset, type CoderLoopStatusSnapshot, type JsonValue, type Preset } from "./loop"
 
 const PKG_ROOT = resolve(import.meta.dir, "..")
 const PRESETS_DIR = resolve(PKG_ROOT, "presets")
@@ -486,6 +486,70 @@ async function runCheckRuntime(target: string): Promise<{ code: number; output: 
 }
 
 // ===================================================================
+// Live runtime health (read-only; sourced from coder-loop status)
+// ===================================================================
+
+export function buildLiveRuntimeHealthLines(snapshot: CoderLoopStatusSnapshot): string[] {
+	const lines: string[] = []
+	const statePrefix = snapshot.state.ok ? "OK" : "FAIL"
+	lines.push(`${statePrefix}: state ${snapshot.state.kind} (${snapshot.state.path})`)
+	for (const error of snapshot.state.errors) lines.push(`  FAIL: ${error.path}: ${error.message}`)
+
+	const selected = snapshot.queue.selected?.id ?? "<none>"
+	lines.push(`INFO: queue total=${snapshot.queue.total}, continuable=${snapshot.queue.continuable}, terminal=${snapshot.queue.terminal}, selected=${selected}`)
+
+	if (snapshot.current.run === null) {
+		lines.push("INFO: current run=<none>")
+	} else {
+		lines.push(`INFO: current id=${snapshot.current.id ?? "<unknown>"}, phase=${snapshot.current.run.phase}, runId=${snapshot.current.run.runId}`)
+		const phaseStatus = snapshot.current.phaseStatus
+		if (phaseStatus === null) {
+			lines.push("WARN: current phase status unavailable")
+		} else if (!phaseStatus.exists) {
+			lines.push(`WARN: current phase status missing (${phaseStatus.path})`)
+		} else if (phaseStatus.error !== null) {
+			lines.push(`FAIL: current phase status unreadable (${phaseStatus.error})`)
+		} else if (phaseStatus.value !== null) {
+			lines.push(`OK: current phase status pid=${phaseStatus.value.pid}, exit=${phaseStatus.value.exitCode ?? "<running>"}, signal=${phaseStatus.value.signal ?? "<none>"}, session=${phaseStatus.value.sessionId ?? "<none>"}`)
+		}
+	}
+
+	if (snapshot.events.error !== null) {
+		lines.push(`FAIL: events unreadable (${snapshot.events.error})`)
+	} else if (snapshot.events.runId === null) {
+		lines.push("INFO: events runId=<none>")
+	} else {
+		const latestType = eventType(snapshot.events.latest)
+		lines.push(`${snapshot.events.exists ? "OK" : "WARN"}: events runId=${snapshot.events.runId}, exists=${snapshot.events.exists}, recent=${snapshot.events.recent.length}, latest=${latestType}`)
+	}
+
+	const loopFile = snapshot.processes.loopFile
+	lines.push(`INFO: loopFile exists=${loopFile.exists}, pid=${loopFile.pid ?? "<none>"}, pidAlive=${formatNullableBoolean(loopFile.pidAlive)}, command=${loopFile.command ?? "<none>"}, requireBrowserEvidence=${formatNullableBoolean(loopFile.requireBrowserEvidence)}`)
+	if (loopFile.exists && loopFile.pidAlive === false) lines.push("WARN: stale loop file: recorded pid is not alive")
+	if (loopFile.exists && loopFile.cwd !== null && loopFile.cwd !== snapshot.target.cwd) lines.push(`WARN: loop file cwd mismatch: ${loopFile.cwd}`)
+
+	const matchingLive = snapshot.processes.live.filter((entry) => entry.alive && entry.matchesTarget)
+	lines.push(`INFO: live processes total=${snapshot.processes.live.length}, matching=${matchingLive.length}`)
+	if (snapshot.processes.scanError !== null) lines.push(`FAIL: process scan error: ${snapshot.processes.scanError}`)
+	if (matchingLive.length > 1) lines.push("WARN: multiple live loop processes match target")
+	if (loopFile.exists && loopFile.pidAlive !== true && matchingLive.length === 0) lines.push("WARN: no live loop process is owned by this target")
+
+	return lines
+}
+
+function eventType(value: JsonValue | null): string {
+	if (value === null) return "<none>"
+	if (typeof value !== "object" || Array.isArray(value)) return "<non-object>"
+	const type = value.type
+	return typeof type === "string" ? type : "<unknown>"
+}
+
+function formatNullableBoolean(value: boolean | null): string {
+	if (value === null) return "<unknown>"
+	return value ? "true" : "false"
+}
+
+// ===================================================================
 // install / uninstall / doctor entry points
 // ===================================================================
 
@@ -693,6 +757,10 @@ export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
 	info("\n[Layer D] User-level skill 版本")
 	const dResult = await checkLayerD()
 	info(`  ${dResult.status === "ok" ? "OK" : "FAIL"}: ${dResult.detail}`)
+
+	info("\n[Live Runtime] coder-loop runtime health")
+	const statusSnapshot = await buildCoderLoopStatusSnapshot({ targetCwd: args.target, configPath: null, repository: args.repo, output: "json" })
+	for (const line of buildLiveRuntimeHealthLines(statusSnapshot)) info(`  ${line}`)
 
 	info("\nDoctor 完成（read-only）。任何 FAIL 项需 `coder-loop install <target>` 或手动修复。")
 }

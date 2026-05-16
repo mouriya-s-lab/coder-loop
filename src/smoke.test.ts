@@ -164,6 +164,22 @@ describe("smoke: single-phase-example preset", () => {
 		expect(stdout).toContain("--require-browser-evidence")
 		expect(stdout).toContain("require-browser-evidence=true")
 	})
+
+	test("doctor <target> emits live runtime health section", async () => {
+		const target = await makeMinimalTarget("single-phase-example")
+		const proc = Bun.spawnSync({
+			cmd: ["bun", LOOP_ENTRY, "doctor", target],
+			cwd: REPO_ROOT,
+			stdout: "pipe",
+			stderr: "pipe",
+		})
+		const stderr = new TextDecoder().decode(proc.stderr)
+		expect(proc.exitCode).toBe(0)
+		expect(stderr).toContain("[Live Runtime] coder-loop runtime health")
+		expect(stderr).toContain("OK: state ok")
+		expect(stderr).toContain("queue total=2")
+		expect(stderr).toContain("live processes total=")
+	})
 })
 
 async function makeIdleTarget(): Promise<{ target: string; counterPath: string; lockPath: string; devLoopPath: string }> {
