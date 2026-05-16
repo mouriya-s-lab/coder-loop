@@ -57,6 +57,7 @@ export type QueueItem = {
 	issueFile: string | null
 	evidenceDir: string | null
 	agentCwd: string | null
+	runner: AgentRunnerKind | null
 	[key: string]: JsonValue
 }
 
@@ -140,11 +141,16 @@ type LoopConfig = {
 	evidenceDir: string | null
 	logDir: string | null
 	requireAgentBrowserScreenshots: boolean | null
+	defaultRunner: AgentRunnerKind | null
 	claudeBinary: string | null
 	claudeExtraArgs: string[]
+	codexBinary: string | null
+	codexExtraArgs: string[]
 	preset: string | null
 	presetPath: string | null
 }
+
+const AgentRunnerKindBoundary = arkType.or(arkType.unit("claude"), arkType.unit("codex"))
 
 const StatusConfigBoundary = arkType({
 	"repository?": "string|null",
@@ -158,7 +164,12 @@ const StatusConfigBoundary = arkType({
 	"evidence?": {
 		"requireAgentBrowserScreenshots?": "boolean|null",
 	},
+	"runner?": arkType.or(AgentRunnerKindBoundary, "null"),
 	"claude?": {
+		"binary?": "string|null",
+		"extraArgs?": "string[]",
+	},
+	"codex?": {
 		"binary?": "string|null",
 		"extraArgs?": "string[]",
 	},
@@ -220,8 +231,9 @@ export type LoopOptions = {
 	repository: string | null
 	baseBranch: string | null
 	requireBrowserEvidence: boolean
-	claudeBinary: string
-	claudeExtraArgs: string[]
+	hostRunner: AgentRunnerKind
+	defaultRunner: AgentRunnerSelection
+	runnerCommands: AgentRunnerCommands
 	maxIterations: number
 	dryRun: boolean
 	checkRuntime: boolean
@@ -261,6 +273,25 @@ export type Preset = {
 		binary: string
 		extraArgs: readonly string[]
 	}
+}
+
+export type AgentRunnerKind = "claude" | "codex"
+
+export type AgentRunnerSource = "host" | "config" | "queue"
+
+export type AgentRunnerCommand = {
+	kind: AgentRunnerKind
+	binary: string
+	extraArgs: readonly string[]
+}
+
+export type AgentRunnerSelection = AgentRunnerCommand & {
+	source: AgentRunnerSource
+}
+
+export type AgentRunnerCommands = {
+	claude: AgentRunnerCommand
+	codex: AgentRunnerCommand
 }
 
 export type RuntimeCheckError = {
@@ -309,6 +340,7 @@ export type StatusTargetSnapshot = {
 	loopFile: string
 	repository: string | null
 	baseBranch: string | null
+	runner: StatusRunnerDefaultsSnapshot
 	preset: {
 		name: string
 		version: number
@@ -321,6 +353,18 @@ export type StatusResourceSnapshot =
 	| { kind: "loaded"; error: null }
 	| { kind: "missing"; error: string }
 	| { kind: "invalid"; error: string }
+
+export type StatusRunnerSelectionSnapshot = {
+	kind: AgentRunnerKind
+	source: AgentRunnerSource
+	binary: string
+	extraArgs: string[]
+}
+
+export type StatusRunnerDefaultsSnapshot = {
+	hostDefault: AgentRunnerKind
+	default: StatusRunnerSelectionSnapshot
+}
 
 export type StatusStateKind =
 	| "ok"
@@ -350,6 +394,7 @@ export type StatusSelectedIssue = {
 	issueFile: string | null
 	evidenceDir: string | null
 	agentCwd: string
+	runner: StatusRunnerSelectionSnapshot
 }
 
 export type StatusQueueSnapshot = {
@@ -371,6 +416,7 @@ export type StatusCurrentSnapshot = {
 	run: CurrentRun | null
 	id: string | null
 	item: QueueItem | null
+	runner: StatusRunnerSelectionSnapshot | null
 	phaseStatus: StatusPhaseStatusSnapshot | null
 }
 
@@ -536,6 +582,7 @@ export type SelectedIssue = {
 	issueFile: string | null
 	evidenceDir: string | null
 	agentCwd: string
+	runner: AgentRunnerSelection
 }
 
 export type IssueRunContext = {
@@ -911,6 +958,7 @@ async function main() {
 	log(`Config: maxIterations=${formatMaxIterations(options.maxIterations)}`)
 	log(`Repo=${options.repository}`)
 	log(`Preset dir: ${options.preset.presetDir}`)
+	log(`Default runner: ${options.defaultRunner.kind} (${options.defaultRunner.source}, binary=${options.defaultRunner.binary})`)
 	for (const phase of options.preset.phases) log(`Phase ${phase.name} prompt: ${phase.prompt}`)
 	log(`Workflow=${options.workflowPath}`)
 	log(`State=${options.statePath}`)
@@ -962,7 +1010,7 @@ async function main() {
 						issueKind: null,
 					}),
 				}
-				await runReview(options, fallbackRunId, fallbackCtx, options.targetCwd)
+				await runReview(options, fallbackRunId, fallbackCtx, options.targetCwd, options.defaultRunner)
 				if (!(await exists(options.loopFile))) {
 					log("Review agent stopped the loop.")
 					break
@@ -980,6 +1028,7 @@ async function main() {
 		log(`--- Iteration ${workIteration} (work) ---`)
 
 		const selectedId = getItemId(selected.item, options.preset)
+		log(`Selected runner: ${selected.runner.kind} (${selected.runner.source}, binary=${selected.runner.binary})`)
 		const current = state.current && getCurrentId(state.current, options.preset) === selectedId ? state.current : null
 		const issueRun = makeIssueRunContext(current)
 		const runId = current?.runId ?? makeRunId(selectedId)
@@ -1042,6 +1091,7 @@ async function main() {
 				iterPrompt,
 				iterOutputPath,
 				selected.agentCwd,
+				selected.runner,
 				iterEventContext,
 			)
 			const iterDurationSeconds = (Date.now() - iterStart) / 1000
@@ -1075,7 +1125,7 @@ async function main() {
 			log(`Resuming ${reviewPhase.name} agent for issue #${selectedId} without rerunning iteration...`)
 		}
 
-		const reviewCode = await runReview(options, runId, ctx, selected.agentCwd, { emit, ...baseEvent })
+		const reviewCode = await runReview(options, runId, ctx, selected.agentCwd, selected.runner, { emit, ...baseEvent })
 		if (reviewCode !== 0) {
 			log(`Review agent crashed (exit ${reviewCode}). Stopping.`)
 			await removeLoopFile(options.loopFile)
@@ -1117,6 +1167,7 @@ async function runReview(
 	runId: string,
 	ctx: ResolveContext,
 	agentCwd: string,
+	runner: AgentRunnerSelection,
 	eventContext?: Omit<LoopEventContext, "phase">,
 ): Promise<number> {
 	const phases = options.preset.phases
@@ -1147,6 +1198,7 @@ async function runReview(
 		reviewPrompt,
 		reviewOutputPath,
 		agentCwd,
+		runner,
 		phaseEventContext,
 	)
 	const reviewDuration = (Date.now() - reviewStart) / 1000
@@ -1182,6 +1234,9 @@ function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, confi
 	const maxIterations = raw.once ? 1 : (raw.maxIterations ?? Number.POSITIVE_INFINITY)
 	const requireBrowserEvidence = raw.requireBrowserEvidence ?? config.requireAgentBrowserScreenshots ?? false
 	const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")
+	const hostRunner = detectHostRunner(process.env)
+	const runnerCommands = buildAgentRunnerCommands(config)
+	const defaultRunner = selectDefaultRunner(hostRunner, config.defaultRunner, runnerCommands)
 
 	return {
 		targetCwd,
@@ -1198,8 +1253,9 @@ function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, confi
 		repository,
 		baseBranch: config.baseBranch,
 		requireBrowserEvidence,
-		claudeBinary: config.claudeBinary ?? "claude",
-		claudeExtraArgs: config.claudeExtraArgs,
+		hostRunner,
+		defaultRunner,
+		runnerCommands,
 		maxIterations,
 		dryRun: raw.dryRun,
 		checkRuntime: raw.checkRuntime,
@@ -1362,7 +1418,40 @@ function makeStatusTargetSnapshot(
 		loopFile: options?.loopFile ?? resolve(targetCwd, ".dev-loop"),
 		repository: options?.repository ?? repositoryOverride,
 		baseBranch: options?.baseBranch ?? null,
+		runner: buildStatusRunnerDefaultsSnapshot(options),
 		preset,
+	}
+}
+
+function buildStatusRunnerDefaultsSnapshot(options: LoopOptions | null): StatusRunnerDefaultsSnapshot {
+	if (options !== null) {
+		return {
+			hostDefault: options.hostRunner,
+			default: statusRunnerSelection(options.defaultRunner),
+		}
+	}
+	const hostRunner = detectHostRunner(process.env)
+	const config: LoopConfig = {
+		repository: null,
+		baseBranch: null,
+		workflowFile: null,
+		sharedContextFile: null,
+		stateFile: null,
+		issueDir: null,
+		evidenceDir: null,
+		logDir: null,
+		requireAgentBrowserScreenshots: null,
+		defaultRunner: null,
+		claudeBinary: null,
+		claudeExtraArgs: [],
+		codexBinary: null,
+		codexExtraArgs: [],
+		preset: null,
+		presetPath: null,
+	}
+	return {
+		hostDefault: hostRunner,
+		default: statusRunnerSelection(selectDefaultRunner(hostRunner, null, buildAgentRunnerCommands(config))),
 	}
 }
 
@@ -1387,7 +1476,7 @@ function makeUnavailableStatusSnapshot(input: {
 			error: input.errorMessage,
 		},
 		queue: { total: 0, byStatus: {}, continuable: 0, terminal: 0, selected: null },
-		current: { run: null, id: null, item: null, phaseStatus: null },
+		current: { run: null, id: null, item: null, runner: null, phaseStatus: null },
 		events: { runId: null, path: null, exists: false, recent: [], latest: null, error: null },
 		processes: {
 			loopFile: {
@@ -1425,12 +1514,13 @@ function buildStatusQueueSnapshot(options: LoopOptions, state: LoopState, select
 			issueFile: selected.issueFile,
 			evidenceDir: selected.evidenceDir,
 			agentCwd: selected.agentCwd,
+			runner: statusRunnerSelection(selected.runner),
 		},
 	}
 }
 
 async function buildStatusCurrentSnapshot(options: LoopOptions, state: LoopState): Promise<StatusCurrentSnapshot> {
-	if (state.current === null) return { run: null, id: null, item: null, phaseStatus: null }
+	if (state.current === null) return { run: null, id: null, item: null, runner: null, phaseStatus: null }
 	let id: string | null = null
 	let item: QueueItem | null = null
 	try {
@@ -1444,7 +1534,17 @@ async function buildStatusCurrentSnapshot(options: LoopOptions, state: LoopState
 		run: state.current,
 		id,
 		item,
+		runner: item === null ? null : statusRunnerSelection(selectRunnerForItem(item, options)),
 		phaseStatus: await readAgentPhaseStatus(agentStatusPath(outputPath)),
+	}
+}
+
+function statusRunnerSelection(selection: AgentRunnerSelection): StatusRunnerSelectionSnapshot {
+	return {
+		kind: selection.kind,
+		source: selection.source,
+		binary: selection.binary,
+		extraArgs: [...selection.extraArgs],
 	}
 }
 
@@ -2006,11 +2106,45 @@ function loopConfigFromStatusInput(input: StatusConfigInput): LoopConfig {
 		evidenceDir: input.evidenceDir ?? null,
 		logDir: input.logDir ?? null,
 		requireAgentBrowserScreenshots: input.evidence?.requireAgentBrowserScreenshots ?? null,
+		defaultRunner: input.runner ?? null,
 		claudeBinary: input.claude?.binary ?? null,
 		claudeExtraArgs: input.claude?.extraArgs ?? [],
+		codexBinary: input.codex?.binary ?? null,
+		codexExtraArgs: input.codex?.extraArgs ?? [],
 		preset: readPresetNameFromStatusInput(input.preset),
 		presetPath: input.presetPath ?? null,
 	}
+}
+
+export function detectHostRunner(env: Record<string, string | undefined>): AgentRunnerKind {
+	if (env.CODEX_SHELL === "1" || env.CODEX_THREAD_ID !== undefined || env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE?.toLowerCase().includes("codex") === true) return "codex"
+	if (env.CLAUDECODE !== undefined || env.CLAUDE_CODE !== undefined || env.CLAUDE_SESSION_ID !== undefined || env.CLAUDE_PROJECT_DIR !== undefined) return "claude"
+	return "claude"
+}
+
+function buildAgentRunnerCommands(config: LoopConfig): AgentRunnerCommands {
+	return {
+		claude: {
+			kind: "claude",
+			binary: config.claudeBinary ?? "claude",
+			extraArgs: config.claudeExtraArgs,
+		},
+		codex: {
+			kind: "codex",
+			binary: config.codexBinary ?? "codex",
+			extraArgs: config.codexExtraArgs,
+		},
+	}
+}
+
+function selectDefaultRunner(hostRunner: AgentRunnerKind, configuredRunner: AgentRunnerKind | null, commands: AgentRunnerCommands): AgentRunnerSelection {
+	const kind = configuredRunner ?? hostRunner
+	return { ...commands[kind], source: configuredRunner === null ? "host" : "config" }
+}
+
+function selectRunnerForItem(item: QueueItem, options: LoopOptions): AgentRunnerSelection {
+	if (item.runner === null) return options.defaultRunner
+	return { ...options.runnerCommands[item.runner], source: "queue" }
 }
 
 function readPresetNameFromStatusInput(value: StatusConfigInput["preset"]): string | null {
@@ -2168,6 +2302,7 @@ function makeFallbackItem(): QueueItem {
 		issueFile: null,
 		evidenceDir: null,
 		agentCwd: null,
+		runner: null,
 	}
 }
 
@@ -2212,6 +2347,7 @@ function parseQueueItem(value: object, label: string): QueueItem {
 		issueFile: optionalJsonString(record, "issueFile"),
 		evidenceDir: optionalJsonString(record, "evidenceDir"),
 		agentCwd: optionalJsonString(record, "agentCwd"),
+		runner: optionalJsonRunnerKind(record, "runner"),
 	}
 }
 
@@ -2282,8 +2418,9 @@ export function selectIssue(state: LoopState, options: LoopOptions): SelectedIss
 
 	// agentCwd validity (absolute + existing directory) is enforced upstream by checkRuntime.
 	const agentCwd = selected.agentCwd ?? options.targetCwd
+	const runner = selectRunnerForItem(selected, options)
 
-	return { item: selected, issueFile, evidenceDir, agentCwd }
+	return { item: selected, issueFile, evidenceDir, agentCwd, runner }
 }
 
 export function markIterationStarted(
@@ -2494,6 +2631,7 @@ async function runAgent(
 	prompt: string,
 	outputPath: string,
 	agentCwd: string,
+	runner: AgentRunnerSelection,
 	eventContext?: LoopEventContext,
 ): Promise<{ output: string; code: number }> {
 	const sessionsPath = agentSessionsPath(outputPath)
@@ -2505,7 +2643,7 @@ async function runAgent(
 
 	const result = await runAgentWithBackoff({
 		spawnAttempt: ({ resume }) => {
-			const baseInput: SpawnOneAttemptInput = { options, label, prompt, outputPath, sessionsPath, resume, agentCwd }
+			const baseInput: SpawnOneAttemptInput = { options, label, prompt, outputPath, sessionsPath, resume, agentCwd, runner }
 			return spawnOneAttempt(eventContext ? { ...baseInput, eventContext } : baseInput)
 		},
 		sleep: (seconds: number) => new Promise((resolve) => setTimeout(resolve, seconds * 1000)),
@@ -2526,6 +2664,7 @@ export type SpawnOneAttemptInput = {
 	sessionsPath: string
 	resume: ResumeDecision
 	agentCwd: string
+	runner?: AgentRunnerSelection
 	watchdog?: SummaryWatchdogConfig
 	eventContext?: LoopEventContext
 }
@@ -2622,6 +2761,7 @@ export function createSummaryWatchdog(deps: SummaryWatchdogDeps): SummaryWatchdo
 export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<AttemptOutcome> {
 	const { options, label, prompt: basePrompt, outputPath, sessionsPath, resume } = input
 	const effectivePrompt = resume.kind === "resume" ? RESUME_CONTINUE_PROMPT : basePrompt
+	const selectedRunner = input.runner ?? options.defaultRunner
 	return new Promise((resolveResult) => {
 		const out: Buffer[] = []
 		const err: Buffer[] = []
@@ -2633,7 +2773,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 		const statusPath = agentStatusPath(outputPath)
 		const streamOutFile = createWriteStream(attemptStreamPath, { flags: "wx" })
 		const stderrOutFile = createWriteStream(attemptStderrPath, { flags: "wx" })
-		const claudeArgs = agentClaudeArgs(options.claudeExtraArgs, effectivePrompt, resume)
+		const runnerPlan = buildRunnerInvocation(selectedRunner, effectivePrompt, resume)
 		const status: AgentRunStatus = {
 			label,
 			pid: null,
@@ -2673,7 +2813,25 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			})
 		}
 		const watchdogConfig = input.watchdog ?? DEFAULT_SUMMARY_WATCHDOG
-		const child = spawn(options.claudeBinary, claudeArgs, {
+		if (runnerPlan.kind === "unsupported") {
+			const error = `runner "${selectedRunner.kind}" is selected but its adapter is not implemented yet (tracked by #88)`
+			status.error = error
+			status.exitCode = 1
+			status.terminated = { kind: "error", code: "spawn_error" }
+			writeStatus()
+			writeLatestIndex()
+			streamOutFile.end(`spawn error: ${error}\n`)
+			stderrOutFile.end(`spawn error: ${error}\n`)
+			resolveResult({
+				output: `spawn error: ${error}`,
+				exitCode: 1,
+				signal: null,
+				sessionId: null,
+				terminated: { kind: "error", code: "spawn_error" },
+			})
+			return
+		}
+		const child = spawn(runnerPlan.binary, runnerPlan.args, {
 			cwd: input.agentCwd,
 			stdio: ["ignore", "pipe", "pipe"],
 			detached: true,
@@ -2758,7 +2916,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 		writeStatus()
 		writeLatestIndex()
 
-		log(`Agent [${label}] spawned: pid=${child.pid}, stream=${attemptStreamPath}, stderr=${attemptStderrPath}, status=${statusPath}, resume=${resume.kind === "resume" ? resume.sessionId : "none"}`)
+		log(`Agent [${label}] spawned: runner=${selectedRunner.kind}, pid=${child.pid}, stream=${attemptStreamPath}, stderr=${attemptStderrPath}, status=${statusPath}, resume=${resume.kind === "resume" ? resume.sessionId : "none"}`)
 
 		if (input.eventContext) {
 			const ec = input.eventContext
@@ -2880,6 +3038,21 @@ export function agentClaudeArgs(extraArgs: readonly string[], prompt: string, re
 	if (resume.kind === "resume") args.push("--resume", resume.sessionId)
 	args.push("-p", prompt)
 	return args
+}
+
+export type RunnerInvocation =
+	| { kind: "spawn"; binary: string; args: string[] }
+	| { kind: "unsupported"; runner: AgentRunnerKind }
+
+export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: string, resume: ResumeDecision): RunnerInvocation {
+	if (runner.kind === "claude") {
+		return {
+			kind: "spawn",
+			binary: runner.binary,
+			args: agentClaudeArgs(runner.extraArgs, prompt, resume),
+		}
+	}
+	return { kind: "unsupported", runner: runner.kind }
 }
 
 function shellQuote(value: string): string {
@@ -3256,6 +3429,13 @@ function optionalJsonString(record: JsonObject, key: string): string | null {
 	if (value === undefined || value === null) return null
 	if (typeof value === "string") return value
 	throw new Error(`${key} must be a string when provided`)
+}
+
+function optionalJsonRunnerKind(record: JsonObject, key: string): AgentRunnerKind | null {
+	const value = record[key]
+	if (value === undefined || value === null) return null
+	if (value === "claude" || value === "codex") return value
+	throw new Error(`${key} must be "claude" or "codex" when provided`)
 }
 
 function requiredJsonNumber(record: JsonObject, key: string): number {
