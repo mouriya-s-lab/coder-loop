@@ -87,6 +87,8 @@ Use the JSON snapshots to derive:
 
 - state health from `state.kind` / `state.ok`
 - queue shape from `queue.total`, `queue.byStatus`, and `queue.selected`
+- runner selection from `target.runner.default`, `queue.selected.runner`, and
+  `current.runner`
 - current run from `current.run`, `current.id`, and `current.phaseStatus`
 - latest event summary from `events.latest`
 - daemon ownership from `processes.loopFile`, `processes.live`, and
@@ -96,6 +98,11 @@ If `doctor` reports a bootstrap failure, repair with `coder-loop install
 "$TARGET_DIR" --repo "$TARGET_REPO"` when that is obviously safe, then rerun
 `doctor`. If `status` reports an invalid runtime state, record the blocker in
 `log.md` before attempting manual file repair.
+
+Runner note: do not assume Claude. coder-loop inherits the host runner by
+default (`codex` from Codex, `claude` from Claude Code), and target config or
+queue items may override it. Trust `status` / `doctor` output over runtime file
+guesswork.
 
 ### Step 4 — Check GitHub truth
 
@@ -114,7 +121,7 @@ Report:
 - active mission and one-line goal from `role.md`
 - last meaningful `log.md` entry
 - coder-loop health from `doctor` / `status` / `daemon status`
-- current selected item, run, phase status, and queue counts
+- current selected item, runner, run, phase status, and queue counts
 - open PRs or issues that block the mission
 - recommended next supervisor action, and whether you already took it
 
