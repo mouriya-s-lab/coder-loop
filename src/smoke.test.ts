@@ -151,7 +151,7 @@ describe("smoke: single-phase-example preset", () => {
 	test("daemon start <target> --require-browser-evidence --dry-run shows the launch command", async () => {
 		const target = await makeMinimalTarget("single-phase-example")
 		const proc = Bun.spawnSync({
-			cmd: ["bun", LOOP_ENTRY, "daemon", "start", target, "--require-browser-evidence", "--dry-run"],
+			cmd: ["bun", LOOP_ENTRY, "daemon", "start", target, "--require-browser-evidence", "--max-iterations", "10", "--dry-run"],
 			cwd: REPO_ROOT,
 			stdout: "pipe",
 			stderr: "pipe",
@@ -163,6 +163,7 @@ describe("smoke: single-phase-example preset", () => {
 		expect(stdout).toContain("daemon start dry-run: command=")
 		expect(stdout).toContain("--require-browser-evidence")
 		expect(stdout).toContain("require-browser-evidence=true")
+		expect(stdout).toContain("'10'")
 	})
 
 	test("doctor <target> emits live runtime health section", async () => {
