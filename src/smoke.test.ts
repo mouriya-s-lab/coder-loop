@@ -178,8 +178,32 @@ describe("smoke: single-phase-example preset", () => {
 		expect(proc.exitCode).toBe(0)
 		expect(stderr).toContain("[Live Runtime] coder-loop runtime health")
 		expect(stderr).toContain("OK: state ok")
+		expect(stderr).toContain("runner hostDefault=")
+		expect(stderr).toContain("target default runner=")
 		expect(stderr).toContain("queue total=2")
 		expect(stderr).toContain("live processes total=")
+	})
+
+	test("doctor <target> checks the configured runner binary", async () => {
+		const target = await makeMinimalTarget("single-phase-example")
+		await writeFile(
+			resolve(target, ".coder-loop/runtime/config.json"),
+			JSON.stringify({
+				preset: "single-phase-example",
+				runner: "codex",
+				codex: { binary: "missing-codex-for-doctor-test" },
+			}, null, 2),
+		)
+		const proc = Bun.spawnSync({
+			cmd: ["bun", LOOP_ENTRY, "doctor", target],
+			cwd: REPO_ROOT,
+			stdout: "pipe",
+			stderr: "pipe",
+		})
+		const stderr = new TextDecoder().decode(proc.stderr)
+		expect(proc.exitCode).toBe(0)
+		expect(stderr).toContain("INFO: target default runner=codex (config)")
+		expect(stderr).toContain("FAIL: codex runner CLI (missing-codex-for-doctor-test) 未在 PATH 中")
 	})
 })
 

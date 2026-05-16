@@ -190,6 +190,7 @@ const StatusStateBoundary = arkType({
 
 const AgentRunStatusBoundary = arkType({
 	label: "string",
+	"runner?": arkType.or(AgentRunnerKindBoundary, "null"),
 	"pid": "number|null",
 	startedAt: "string",
 	lastEventAt: "string",
@@ -301,6 +302,7 @@ export type RuntimeCheckError = {
 
 export type AgentRunStatus = {
 	label: AgentLabel
+	runner: AgentRunnerKind | null
 	pid: number | null
 	startedAt: string
 	lastEventAt: string
@@ -1563,6 +1565,7 @@ async function readAgentPhaseStatus(path: string): Promise<StatusPhaseStatusSnap
 function agentStatusFromInput(input: AgentRunStatusInput): AgentRunStatus {
 	return {
 		label: input.label,
+		runner: input.runner ?? null,
 		pid: input.pid,
 		startedAt: input.startedAt,
 		lastEventAt: input.lastEventAt,
@@ -2773,9 +2776,10 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 		const statusPath = agentStatusPath(outputPath)
 		const streamOutFile = createWriteStream(attemptStreamPath, { flags: "wx" })
 		const stderrOutFile = createWriteStream(attemptStderrPath, { flags: "wx" })
-		const runnerPlan = buildRunnerInvocation(selectedRunner, effectivePrompt, resume)
+		const runnerPlan = buildRunnerInvocation(selectedRunner, effectivePrompt, resume, input.agentCwd)
 		const status: AgentRunStatus = {
 			label,
+			runner: selectedRunner.kind,
 			pid: null,
 			startedAt,
 			lastEventAt: startedAt,
@@ -2813,24 +2817,6 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			})
 		}
 		const watchdogConfig = input.watchdog ?? DEFAULT_SUMMARY_WATCHDOG
-		if (runnerPlan.kind === "unsupported") {
-			const error = `runner "${selectedRunner.kind}" is selected but its adapter is not implemented yet (tracked by #88)`
-			status.error = error
-			status.exitCode = 1
-			status.terminated = { kind: "error", code: "spawn_error" }
-			writeStatus()
-			writeLatestIndex()
-			streamOutFile.end(`spawn error: ${error}\n`)
-			stderrOutFile.end(`spawn error: ${error}\n`)
-			resolveResult({
-				output: `spawn error: ${error}`,
-				exitCode: 1,
-				signal: null,
-				sessionId: null,
-				terminated: { kind: "error", code: "spawn_error" },
-			})
-			return
-		}
 		const child = spawn(runnerPlan.binary, runnerPlan.args, {
 			cwd: input.agentCwd,
 			stdio: ["ignore", "pipe", "pipe"],
@@ -2899,7 +2885,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 				streamOutFile.write(chunk)
 				if (status.sessionId === null) {
 					const accumulated = Buffer.concat(out).toString("utf-8")
-					const detected = parseSessionIdFromStream(accumulated)
+					const detected = parseSessionIdFromRunnerStream(selectedRunner.kind, accumulated)
 					if (detected !== null) {
 						status.sessionId = detected
 					}
@@ -3042,9 +3028,8 @@ export function agentClaudeArgs(extraArgs: readonly string[], prompt: string, re
 
 export type RunnerInvocation =
 	| { kind: "spawn"; binary: string; args: string[] }
-	| { kind: "unsupported"; runner: AgentRunnerKind }
 
-export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: string, resume: ResumeDecision): RunnerInvocation {
+export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: string, resume: ResumeDecision, agentCwd: string): RunnerInvocation {
 	if (runner.kind === "claude") {
 		return {
 			kind: "spawn",
@@ -3052,7 +3037,28 @@ export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: stri
 			args: agentClaudeArgs(runner.extraArgs, prompt, resume),
 		}
 	}
-	return { kind: "unsupported", runner: runner.kind }
+	return {
+		kind: "spawn",
+		binary: runner.binary,
+		args: agentCodexArgs(runner.extraArgs, prompt, resume, agentCwd),
+	}
+}
+
+export function agentCodexArgs(extraArgs: readonly string[], prompt: string, resume: ResumeDecision, agentCwd: string): string[] {
+	const topLevelArgs = ["--ask-for-approval", "never", "exec"]
+	if (resume.kind === "resume") {
+		const args = [...topLevelArgs, "resume", resume.sessionId, ...extraArgs]
+		if (!args.includes("--json")) args.push("--json")
+		if (!args.includes("--ignore-rules")) args.push("--ignore-rules")
+		args.push(prompt)
+		return args
+	}
+	const args = [...topLevelArgs, ...extraArgs]
+	if (!args.includes("--json")) args.push("--json")
+	if (!args.includes("--cd")) args.push("--cd", agentCwd)
+	if (!args.includes("--sandbox")) args.push("--sandbox", "read-only")
+	args.push(prompt)
+	return args
 }
 
 function shellQuote(value: string): string {
@@ -3105,6 +3111,24 @@ export function parseSessionIdFromStream(text: string): string | null {
 	} catch {
 		return null
 	}
+}
+
+export function parseCodexThreadIdFromStream(text: string): string | null {
+	for (const line of text.split("\n")) {
+		const trimmed = line.trim()
+		if (trimmed === "") continue
+		try {
+			const event = JSON.parse(trimmed) as { type?: unknown; thread_id?: unknown }
+			if (event.type === "thread.started" && typeof event.thread_id === "string" && event.thread_id !== "") return event.thread_id
+		} catch {
+			continue
+		}
+	}
+	return null
+}
+
+export function parseSessionIdFromRunnerStream(runner: AgentRunnerKind, text: string): string | null {
+	return runner === "codex" ? parseCodexThreadIdFromStream(text) : parseSessionIdFromStream(text)
 }
 
 export function extractErrorCode(stdoutText: string, stderrText: string): string {

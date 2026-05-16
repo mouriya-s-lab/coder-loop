@@ -7,6 +7,7 @@ import { resolve } from "node:path"
 
 import {
 	agentClaudeArgs,
+	agentCodexArgs,
 	agentSessionsPath,
 	appendLoopEvent,
 	appendSessionEntry,
@@ -40,6 +41,8 @@ import {
 	serializeState,
 	nextBackoffSeconds,
 	parseKindFromLabels,
+	parseCodexThreadIdFromStream,
+	parseSessionIdFromRunnerStream,
 	parseSessionIdFromStream,
 	readLastSessionEntry,
 	renderFragmentIndex,
@@ -1182,6 +1185,23 @@ describe("parseSessionIdFromStream — captures session_id from claude --output-
 	})
 })
 
+describe("parseCodexThreadIdFromStream", () => {
+	test("captures thread_id from Codex thread.started JSONL", () => {
+		const text = [
+			`{"type":"thread.started","thread_id":"thread-123"}`,
+			`{"type":"turn.started"}`,
+			`{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}`,
+		].join("\n")
+		expect(parseCodexThreadIdFromStream(text)).toBe("thread-123")
+		expect(parseSessionIdFromRunnerStream("codex", text)).toBe("thread-123")
+	})
+
+	test("skips non-json lines and returns null when no thread.started event exists", () => {
+		const text = `not-json\n{"type":"turn.started"}\n{"type":"thread.started","thread_id":""}\n`
+		expect(parseCodexThreadIdFromStream(text)).toBeNull()
+	})
+})
+
 describe("extractErrorCode — pulls error code from stream-json error events or stderr HTTP status", () => {
 	test("uses error.type from last is_error event in stdout", () => {
 		const stdout = `{"type":"assistant","is_error":false}\n{"type":"result","is_error":true,"error":{"type":"overloaded_error","message":"API overloaded"}}\n`
@@ -1350,32 +1370,68 @@ describe("agentClaudeArgs — composes claude CLI args including --resume", () =
 	})
 })
 
+describe("agentCodexArgs", () => {
+	test("fresh invocation uses Codex exec JSON mode with cwd and read-only sandbox", () => {
+		const args = agentCodexArgs([], "hello", { kind: "fresh" }, "/tmp/target")
+		expect(args).toEqual([
+			"--ask-for-approval",
+			"never",
+			"exec",
+			"--json",
+			"--cd",
+			"/tmp/target",
+			"--sandbox",
+			"read-only",
+			"hello",
+		])
+	})
+
+	test("resume invocation uses Codex exec resume with JSON and ignore-rules", () => {
+		const args = agentCodexArgs(["--model", "gpt-5.4"], "继续", { kind: "resume", sessionId: "thread-123" }, "/tmp/target")
+		expect(args).toEqual([
+			"--ask-for-approval",
+			"never",
+			"exec",
+			"resume",
+			"thread-123",
+			"--model",
+			"gpt-5.4",
+			"--json",
+			"--ignore-rules",
+			"继续",
+		])
+	})
+})
+
 describe("buildRunnerInvocation", () => {
 	test("Claude runner maps to the existing claude stream-json invocation", () => {
 		const invocation = buildRunnerInvocation(
 			{ kind: "claude", source: "config", binary: "/tmp/claude", extraArgs: ["--max-turns", "5"] },
 			"hello",
 			{ kind: "fresh" },
+			"/tmp/target",
 		)
 
-		expect(invocation.kind).toBe("spawn")
-		if (invocation.kind === "spawn") {
-			expect(invocation.binary).toBe("/tmp/claude")
-			expect(invocation.args).toContain("--output-format")
-			expect(invocation.args).toContain("stream-json")
-			expect(invocation.args).toContain("--max-turns")
-			expect(invocation.args[invocation.args.length - 1]).toBe("hello")
-		}
+		expect(invocation.binary).toBe("/tmp/claude")
+		expect(invocation.args).toContain("--output-format")
+		expect(invocation.args).toContain("stream-json")
+		expect(invocation.args).toContain("--max-turns")
+		expect(invocation.args[invocation.args.length - 1]).toBe("hello")
 	})
 
-	test("Codex runner is selected but deliberately unsupported until issue #88", () => {
+	test("Codex runner maps to codex exec invocation", () => {
 		const invocation = buildRunnerInvocation(
 			{ kind: "codex", source: "queue", binary: "codex", extraArgs: [] },
 			"hello",
 			{ kind: "fresh" },
+			"/tmp/target",
 		)
 
-		expect(invocation).toEqual({ kind: "unsupported", runner: "codex" })
+		expect(invocation).toEqual({
+			kind: "spawn",
+			binary: "codex",
+			args: ["--ask-for-approval", "never", "exec", "--json", "--cd", "/tmp/target", "--sandbox", "read-only", "hello"],
+		})
 	})
 })
 
@@ -1882,6 +1938,40 @@ describe("summary watchdog e2e — spawnOneAttempt with a fake claudeBinary", ()
 
 		expect(outcome.terminated.kind).toBe("clean")
 		expect(outcome.exitCode).toBe(0)
+	}, 10_000)
+
+	test("spawnOneAttempt supports Codex JSONL thread ids and records runner in status", async () => {
+		const fake = await makeFakeClaudeBinary(
+			[
+				`echo '{"type":"thread.started","thread_id":"thread-codex-123"}'`,
+				`echo '{"type":"turn.started"}'`,
+				`echo '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}'`,
+				`exit 0`,
+			].join("\n"),
+		)
+		const options = await fixtureOptions("claude")
+		const outputPath = resolve(options.logDir, `codex.iteration.txt`)
+		const sessionsPath = agentSessionsPath(outputPath)
+		const runner = { kind: "codex" as const, source: "queue" as const, binary: fake, extraArgs: [] }
+
+		const outcome = await spawnOneAttempt({
+			options,
+			label: "iteration",
+			prompt: "ignored",
+			outputPath,
+			sessionsPath,
+			resume: { kind: "fresh" },
+			agentCwd: options.targetCwd,
+			runner,
+		})
+
+		expect(outcome.exitCode).toBe(0)
+		expect(outcome.sessionId).toBe("thread-codex-123")
+		const last = await readLastSessionEntry(sessionsPath)
+		expect(last?.sessionId).toBe("thread-codex-123")
+		const status = JSON.parse(await readFile(outputPath.replace(/\.txt$/, ".status.json"), "utf-8")) as { runner?: string; sessionId?: string }
+		expect(status.runner).toBe("codex")
+		expect(status.sessionId).toBe("thread-codex-123")
 	}, 10_000)
 })
 
