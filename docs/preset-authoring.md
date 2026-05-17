@@ -198,18 +198,19 @@ target 在 `.coder-loop/runtime/config.json`（或 `config.toml`）写：
 
 两者互斥。都不写时引擎走默认的 `gh-issue-pr-iteration`。`preset` 名只允许 `^[a-zA-Z][a-zA-Z0-9_-]*$`，禁止路径分隔符与 `..`，所以 bundled name 一定落在 `<pkg>/presets/<name>/` 内。
 
-Runner 是 target runtime 配置，不是 preset 状态机的一部分。默认 runner 继承宿主；target 可写：
+Runner 是 target runtime 配置，不是 preset 状态机的一部分。Iteration 默认 runner 继承宿主；review 默认 runner 固定为 `claude`。target 可写：
 
 ```json
 {
   "preset": "single-phase-example",
   "runner": "codex",
+  "reviewRunner": "claude",
   "codex": { "binary": "codex", "extraArgs": [] },
   "claude": { "binary": "claude", "extraArgs": [] }
 }
 ```
 
-queue item 可加 `"runner": "claude" | "codex"` 只覆盖该 item。preset 作者不要把某个 runner 的 CLI 细节写进 engine contract；若某个 preset 只支持特定 runner，把它写进该 preset 的 README / target workflow，并用 `doctor` / `status` 验证 target config 是否符合预期。
+queue item 可加 `"runner": "claude" | "codex"` 只覆盖该 item 的 iteration runner；review 不受 queue item 覆盖影响，除非 target config 显式写 `reviewRunner`。preset 作者不要把某个 runner 的 CLI 细节写进 engine contract；若某个 preset 只支持特定 runner，把它写进该 preset 的 README / target workflow，并用 `doctor` / `status` 验证 target config 是否符合预期。
 
 ---
 

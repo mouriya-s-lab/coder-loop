@@ -31,13 +31,13 @@ logs, or local evidence artifacts from this fixture.
 
 ## Runner Coverage
 
-The successful 2026-05-17 run used Codex end to end:
+The successful 2026-05-17 run used Codex end to end. Current runner semantics differ for review: iteration can still be Codex, but review now defaults to Claude unless target config explicitly sets `reviewRunner`:
 
 - target config: `.coder-loop/runtime/config.json` has `"runner": "codex"`;
 - queue item: `runner: "codex"`;
 - `status --json`: selected runner `kind=codex`, `source=queue`;
-- iteration and review phase status files recorded `runner: "codex"` and Codex
-  `thread_id` session ids.
+- `status --json`: review runner defaults to `kind=claude`, `source=review-default` unless config sets `reviewRunner`;
+- iteration phase status should record `runner: "codex"` and a Codex `thread_id`; review phase status should record `runner: "claude"` under the default review policy.
 
 Codex runner requires real workspace writes and GitHub CLI access for the
 `gh-issue-pr-iteration` preset. The default fresh Codex invocation therefore

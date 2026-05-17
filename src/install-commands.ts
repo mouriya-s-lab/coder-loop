@@ -5,7 +5,7 @@
  *   A) target project files: slash commands, config (with preset binding),
  *      runtime dirs, workflow.md template
  *   B) target GitHub state: kind:code / kind:comment labels
- *   C) operator machine prereqs: gh (+ auth), selected runner CLI (verify only)
+ *   C) operator machine prereqs: gh (+ auth), selected runner CLIs (verify only)
  *   D) user-level skill version: writing-issue marker check
  *
  * Idempotent by design: re-running install does not mutate files whose
@@ -237,7 +237,7 @@ function whichBinary(name: string): string | null {
 
 type RequiredRunnerCli = Pick<AgentRunnerSelection, "kind" | "binary">
 
-async function checkLayerC(requiredRunner: RequiredRunnerCli): Promise<CheckOutcome[]> {
+async function checkLayerC(requiredRunners: RequiredRunnerCli[]): Promise<CheckOutcome[]> {
 	const results: CheckOutcome[] = []
 
 	const ghPath = whichBinary("gh")
@@ -253,9 +253,11 @@ async function checkLayerC(requiredRunner: RequiredRunnerCli): Promise<CheckOutc
 		}
 	}
 
-	const runnerPath = whichBinary(requiredRunner.binary)
-	if (!runnerPath) results.push({ ok: false, detail: runnerInstallHint(requiredRunner) })
-	else results.push({ ok: true, detail: `${requiredRunner.kind} runner CLI (${requiredRunner.binary}) 在 ${runnerPath}` })
+	for (const requiredRunner of uniqueRequiredRunners(requiredRunners)) {
+		const runnerPath = whichBinary(requiredRunner.binary)
+		if (!runnerPath) results.push({ ok: false, detail: runnerInstallHint(requiredRunner) })
+		else results.push({ ok: true, detail: `${requiredRunner.kind} runner CLI (${requiredRunner.binary}) 在 ${runnerPath}` })
+	}
 
 	const coderLoopPath = whichBinary("coder-loop")
 	if (!coderLoopPath) {
@@ -265,6 +267,18 @@ async function checkLayerC(requiredRunner: RequiredRunnerCli): Promise<CheckOutc
 	}
 
 	return results
+}
+
+function uniqueRequiredRunners(runners: RequiredRunnerCli[]): RequiredRunnerCli[] {
+	const seen = new Set<string>()
+	const unique: RequiredRunnerCli[] = []
+	for (const runner of runners) {
+		const key = `${runner.kind}\0${runner.binary}`
+		if (seen.has(key)) continue
+		seen.add(key)
+		unique.push(runner)
+	}
+	return unique
 }
 
 function runnerInstallHint(runner: RequiredRunnerCli): string {
@@ -501,8 +515,8 @@ export function buildLiveRuntimeHealthLines(snapshot: CoderLoopStatusSnapshot): 
 
 	const selected = snapshot.queue.selected?.id ?? "<none>"
 	lines.push(`INFO: queue total=${snapshot.queue.total}, continuable=${snapshot.queue.continuable}, terminal=${snapshot.queue.terminal}, selected=${selected}`)
-	lines.push(`INFO: runner hostDefault=${snapshot.target.runner.hostDefault}, default=${snapshot.target.runner.default.kind} (${snapshot.target.runner.default.source}, binary=${snapshot.target.runner.default.binary})`)
-	if (snapshot.queue.selected !== null) lines.push(`INFO: selected runner=${snapshot.queue.selected.runner.kind} (${snapshot.queue.selected.runner.source}, binary=${snapshot.queue.selected.runner.binary})`)
+	lines.push(`INFO: runner hostDefault=${snapshot.target.runner.hostDefault}, default=${snapshot.target.runner.default.kind} (${snapshot.target.runner.default.source}, binary=${snapshot.target.runner.default.binary}), reviewDefault=${snapshot.target.runner.reviewDefault.kind} (${snapshot.target.runner.reviewDefault.source}, binary=${snapshot.target.runner.reviewDefault.binary})`)
+	if (snapshot.queue.selected !== null) lines.push(`INFO: selected runner=${snapshot.queue.selected.runner.kind} (${snapshot.queue.selected.runner.source}, binary=${snapshot.queue.selected.runner.binary}), review=${snapshot.queue.selected.reviewRunner.kind} (${snapshot.queue.selected.reviewRunner.source}, binary=${snapshot.queue.selected.reviewRunner.binary})`)
 
 	if (snapshot.current.run === null) {
 		lines.push("INFO: current run=<none>")
@@ -589,12 +603,12 @@ export async function runInstallCommand(rawArgs: string[]): Promise<void> {
 	// Layer C: prereqs
 	info("\n[Layer C] Operator 机器先决条件")
 	const installRunner = detectHostRunner(process.env)
-	info(`  INFO: install 默认 runner=${installRunner}（可在 target config 用 runner 覆盖）`)
-	const layerCResults = await checkLayerC({ kind: installRunner, binary: installRunner })
+	info(`  INFO: install 默认 runner=${installRunner}（可在 target config 用 runner 覆盖），review 默认 runner=claude（可用 reviewRunner 覆盖）`)
+	const layerCResults = await checkLayerC([{ kind: installRunner, binary: installRunner }, { kind: "claude", binary: "claude" }])
 	for (const r of layerCResults) info(`  ${r.ok ? "OK" : "FAIL"}: ${r.detail}`)
 	const layerCOk = layerCResults.every((r) => r.ok)
 	if (!layerCOk && !args.dryRun) {
-		fail(`Layer C 校验未通过：先按上面提示修复 gh / ${installRunner} / 认证，再重跑 install。`)
+		fail(`Layer C 校验未通过：先按上面提示修复 gh / runner CLI / 认证，再重跑 install。`)
 	}
 
 	// Layer D: user-level skill
@@ -762,8 +776,9 @@ export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
 	const statusSnapshot = await buildCoderLoopStatusSnapshot({ targetCwd: args.target, configPath: null, repository: args.repo, output: "json" })
 
 	info("\n[Layer C] Operator 机器先决条件")
-	const cResults = await checkLayerC(statusSnapshot.target.runner.default)
+	const cResults = await checkLayerC([statusSnapshot.target.runner.default, statusSnapshot.target.runner.reviewDefault])
 	info(`  INFO: target default runner=${statusSnapshot.target.runner.default.kind} (${statusSnapshot.target.runner.default.source})`)
+	info(`  INFO: review default runner=${statusSnapshot.target.runner.reviewDefault.kind} (${statusSnapshot.target.runner.reviewDefault.source})`)
 	for (const r of cResults) info(`  ${r.ok ? "OK" : "FAIL"}: ${r.detail}`)
 
 	info("\n[Layer D] User-level skill 版本")
