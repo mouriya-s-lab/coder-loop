@@ -576,6 +576,7 @@ const BACKOFF_INITIAL_SECONDS = 4
 const BACKOFF_MAX_INTERVAL_SECONDS = 600
 
 export const SUMMARY_WATCHDOG_MARKER = "ITERATION SUMMARY:"
+export const REVIEW_SUMMARY_WATCHDOG_MARKER = "REVIEW SUMMARY:"
 export const SUMMARY_WATCHDOG_TERM_MS = 5 * 60 * 1000
 export const SUMMARY_WATCHDOG_KILL_MS = 5 * 1000
 
@@ -2684,6 +2685,14 @@ const DEFAULT_SUMMARY_WATCHDOG: SummaryWatchdogConfig = {
 	killMs: SUMMARY_WATCHDOG_KILL_MS,
 }
 
+export function summaryWatchdogConfigForPrompt(prompt: string): SummaryWatchdogConfig {
+	const marker = prompt.includes("REVIEW SUMMARY") ? REVIEW_SUMMARY_WATCHDOG_MARKER : SUMMARY_WATCHDOG_MARKER
+	return {
+		...DEFAULT_SUMMARY_WATCHDOG,
+		marker,
+	}
+}
+
 export type SummaryWatchdogTimerHandle = unknown
 
 export type SummaryWatchdogDeps = {
@@ -2706,6 +2715,64 @@ export type SummaryWatchdog = {
 	observeStdout: (chunk: string) => void
 	cancel: () => void
 	state: () => SummaryWatchdogState
+}
+
+type SummaryWatchdogStdoutObserver = {
+	observeStdout: (chunk: string) => void
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null
+}
+
+function codexAgentMessageText(event: unknown): string | null {
+	if (!isObjectRecord(event)) return null
+	if (event.type === "agent_message" && typeof event.text === "string") return event.text
+	if (event.type !== "item.completed" || !isObjectRecord(event.item)) return null
+	return event.item.type === "agent_message" && typeof event.item.text === "string" ? event.item.text : null
+}
+
+function containsSummaryMarkerLine(text: string, marker: string): boolean {
+	return text.split(/\r?\n/).some((line) => line.trimStart().startsWith(marker))
+}
+
+export function codexSummaryTextFromJsonLine(line: string, marker: string): string | null {
+	const trimmed = line.trim()
+	if (trimmed === "") return null
+	try {
+		const text = codexAgentMessageText(JSON.parse(trimmed))
+		if (text === null || !containsSummaryMarkerLine(text, marker)) return null
+		return text
+	} catch {
+		return null
+	}
+}
+
+export function createSummaryWatchdogStdoutObserver(runner: AgentRunnerKind, marker: string, watchdog: SummaryWatchdog): SummaryWatchdogStdoutObserver {
+	if (runner !== "codex") {
+		return {
+			observeStdout: (chunk) => watchdog.observeStdout(chunk),
+		}
+	}
+
+	let bufferedLine = ""
+	const maxBufferedLineChars = 1_000_000
+	return {
+		observeStdout: (chunk) => {
+			bufferedLine += chunk
+			let newlineIndex = bufferedLine.indexOf("\n")
+			while (newlineIndex >= 0) {
+				const line = bufferedLine.slice(0, newlineIndex)
+				bufferedLine = bufferedLine.slice(newlineIndex + 1)
+				const summaryText = codexSummaryTextFromJsonLine(line, marker)
+				if (summaryText !== null) watchdog.observeStdout(summaryText)
+				newlineIndex = bufferedLine.indexOf("\n")
+			}
+			if (bufferedLine.length > maxBufferedLineChars) {
+				bufferedLine = bufferedLine.slice(-maxBufferedLineChars)
+			}
+		},
+	}
 }
 
 export function createSummaryWatchdog(deps: SummaryWatchdogDeps): SummaryWatchdog {
@@ -2819,7 +2886,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 				log(`Agent [${label}] latest index write failed: ${error instanceof Error ? error.message : String(error)}`)
 			})
 		}
-		const watchdogConfig = input.watchdog ?? DEFAULT_SUMMARY_WATCHDOG
+		const watchdogConfig = input.watchdog ?? summaryWatchdogConfigForPrompt(basePrompt)
 		const child = spawn(runnerPlan.binary, runnerPlan.args, {
 			cwd: input.agentCwd,
 			stdio: ["ignore", "pipe", "pipe"],
@@ -2867,7 +2934,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 				if (handle !== null) clearTimeout(handle as ReturnType<typeof setTimeout>)
 			},
 			onTerm: () => {
-				log(`Agent [${label}] forced-terminate after ITERATION SUMMARY+${Math.round(watchdogConfig.termMs / 1000)}s; sending SIGTERM (pid=${child.pid ?? "?"})`)
+				log(`Agent [${label}] forced-terminate after "${watchdogConfig.marker}" + ${Math.round(watchdogConfig.termMs / 1000)}s; sending SIGTERM (pid=${child.pid ?? "?"})`)
 				emitWatchdogFire("SIGTERM")
 				sendSignalToGroup("SIGTERM")
 			},
@@ -2878,6 +2945,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			},
 			log,
 		})
+		const watchdogStdout = createSummaryWatchdogStdoutObserver(selectedRunner.kind, watchdogConfig.marker, watchdog)
 
 		const recordChunk = (stream: "stdout" | "stderr", chunk: Buffer): void => {
 			status.lastStream = stream
@@ -2893,7 +2961,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 						status.sessionId = detected
 					}
 				}
-				watchdog.observeStdout(chunk.toString("utf-8"))
+				watchdogStdout.observeStdout(chunk.toString("utf-8"))
 			} else {
 				err.push(chunk)
 				stderrOutFile.write(chunk)
@@ -3010,7 +3078,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 					: terminated.kind === "signal"
 						? `(${terminated.name})`
 						: terminated.kind === "watchdog"
-							? `(forced-terminate after ITERATION SUMMARY+${terminated.afterSummarySeconds}s, phase=${terminated.phase})`
+							? `(forced-terminate after "${watchdogConfig.marker}" + ${terminated.afterSummarySeconds}s, phase=${terminated.phase})`
 							: ""
 			void (async () => {
 				await writeStatus()
@@ -3282,7 +3350,7 @@ export async function runAgentWithBackoff(deps: RunWithBackoffDeps): Promise<{ o
 		attempts++
 		const outcome = await deps.spawnAttempt({ resume })
 		if (outcome.terminated.kind === "watchdog") {
-			deps.log(`post-summary watchdog terminated attempt (phase=${outcome.terminated.phase}); treating as success so review can proceed`)
+			deps.log(`post-summary watchdog terminated attempt (phase=${outcome.terminated.phase}); treating as success because the phase printed its mandatory summary`)
 			return { output: outcome.output, code: 0, attempts }
 		}
 		if (outcome.terminated.kind === "error" && isTransient5xx(outcome.terminated.code)) {
