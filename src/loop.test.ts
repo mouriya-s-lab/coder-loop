@@ -19,7 +19,9 @@ import {
 	buildRunnerInvocation,
 	checkRuntime,
 	classifyTermination,
+	codexSummaryTextFromJsonLine,
 	createSummaryWatchdog,
+	createSummaryWatchdogStdoutObserver,
 	decideResume,
 	detectHostRunner,
 	extractErrorCode,
@@ -50,10 +52,12 @@ import {
 	resolveBinding,
 	resolvePresetDir,
 	RESUME_CONTINUE_PROMPT,
+	REVIEW_SUMMARY_WATCHDOG_MARKER,
 	runAgentWithBackoff,
 	selectIssue,
 	spawnOneAttempt,
 	SUMMARY_WATCHDOG_MARKER,
+	summaryWatchdogConfigForPrompt,
 	type AttemptOutcome,
 	type ConfigBindings,
 	type CurrentRun,
@@ -1797,6 +1801,106 @@ describe("createSummaryWatchdog — summary watchdog timer state machine", () =>
 		// Further stdout after arming must not arm a second time
 		wd.observeStdout("ITERATION SUMMARY: again\n")
 		expect(fake.timers.length).toBe(1)
+	})
+
+	test("summary watchdog: review marker ignores historical iteration summaries", () => {
+		const fake = makeFakeTimers()
+		const calls: string[] = []
+		const wd = createSummaryWatchdog({
+			config: { marker: REVIEW_SUMMARY_WATCHDOG_MARKER, termMs: 300_000, killMs: 5_000 },
+			setTimer: fake.setTimer,
+			clearTimer: fake.clearTimer,
+			onTerm: () => calls.push("term"),
+			onKill: () => calls.push("kill"),
+			log: () => {},
+		})
+
+		wd.observeStdout("trace excerpt: ITERATION SUMMARY: issue #54 retry completed\n")
+		expect(fake.timers.length).toBe(0)
+		expect(wd.state()).toEqual({ kind: "idle" })
+
+		wd.observeStdout("REVIEW SUMMARY: verdict=accepted; issue=#54; actionable=0; reason=ok\n")
+		expect(fake.timers.length).toBe(1)
+		expect(wd.state()).toEqual({ kind: "armed" })
+		expect(calls).toEqual([])
+	})
+
+	test("summary watchdog: prompt marker selection prefers review summaries for review prompts", () => {
+		expect(summaryWatchdogConfigForPrompt("Before exiting, print REVIEW SUMMARY: verdict=<...>").marker).toBe(REVIEW_SUMMARY_WATCHDOG_MARKER)
+		expect(summaryWatchdogConfigForPrompt("Before exiting, read review/final and print its required REVIEW SUMMARY line.").marker).toBe(REVIEW_SUMMARY_WATCHDOG_MARKER)
+		expect(summaryWatchdogConfigForPrompt("Before exiting, print ITERATION SUMMARY: <...>").marker).toBe(SUMMARY_WATCHDOG_MARKER)
+	})
+
+	test("summary watchdog: codex JSONL ignores command output that quotes review summary contract", () => {
+		const fake = makeFakeTimers()
+		const wd = createSummaryWatchdog({
+			config: { marker: REVIEW_SUMMARY_WATCHDOG_MARKER, termMs: 300_000, killMs: 5_000 },
+			setTimer: fake.setTimer,
+			clearTimer: fake.clearTimer,
+			onTerm: () => {},
+			onKill: () => {},
+			log: () => {},
+		})
+		const observer = createSummaryWatchdogStdoutObserver("codex", REVIEW_SUMMARY_WATCHDOG_MARKER, wd)
+		const commandEvent = {
+			type: "item.completed",
+			item: {
+				type: "command_execution",
+				aggregated_output: "# Fragment: review/final\nREVIEW SUMMARY: verdict=<retry|accepted|skip|blocked|stop>\n",
+			},
+		}
+
+		observer.observeStdout(`${JSON.stringify(commandEvent)}\n`)
+
+		expect(fake.timers.length).toBe(0)
+		expect(wd.state()).toEqual({ kind: "idle" })
+	})
+
+	test("summary watchdog: codex JSONL arms on agent message summary line", () => {
+		const fake = makeFakeTimers()
+		const wd = createSummaryWatchdog({
+			config: { marker: REVIEW_SUMMARY_WATCHDOG_MARKER, termMs: 300_000, killMs: 5_000 },
+			setTimer: fake.setTimer,
+			clearTimer: fake.clearTimer,
+			onTerm: () => {},
+			onKill: () => {},
+			log: () => {},
+		})
+		const observer = createSummaryWatchdogStdoutObserver("codex", REVIEW_SUMMARY_WATCHDOG_MARKER, wd)
+		const agentEvent = {
+			type: "item.completed",
+			item: {
+				type: "agent_message",
+				text: "Review finished.\nREVIEW SUMMARY: verdict=accepted; issue=#54; actionable=0; reason=ok\n",
+			},
+		}
+		const line = `${JSON.stringify(agentEvent)}\n`
+
+		observer.observeStdout(line.slice(0, 24))
+		expect(wd.state()).toEqual({ kind: "idle" })
+		observer.observeStdout(line.slice(24))
+
+		expect(fake.timers.length).toBe(1)
+		expect(wd.state()).toEqual({ kind: "armed" })
+	})
+
+	test("codex summary extractor only accepts real agent summary lines", () => {
+		const commandLine = JSON.stringify({
+			type: "item.completed",
+			item: { type: "command_execution", aggregated_output: "REVIEW SUMMARY: verdict=<...>" },
+		})
+		const proseLine = JSON.stringify({
+			type: "item.completed",
+			item: { type: "agent_message", text: "I will print REVIEW SUMMARY: after finishing." },
+		})
+		const summaryLine = JSON.stringify({
+			type: "item.completed",
+			item: { type: "agent_message", text: "REVIEW SUMMARY: verdict=accepted; issue=#54; actionable=0; reason=ok" },
+		})
+
+		expect(codexSummaryTextFromJsonLine(commandLine, REVIEW_SUMMARY_WATCHDOG_MARKER)).toBeNull()
+		expect(codexSummaryTextFromJsonLine(proseLine, REVIEW_SUMMARY_WATCHDOG_MARKER)).toBeNull()
+		expect(codexSummaryTextFromJsonLine(summaryLine, REVIEW_SUMMARY_WATCHDOG_MARKER)).toContain("verdict=accepted")
 	})
 
 	test("summary watchdog: cancel before SIGTERM timer fires prevents both SIGTERM and SIGKILL (clean child exit case)", () => {
