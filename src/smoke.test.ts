@@ -207,6 +207,105 @@ describe("smoke: single-phase-example preset", () => {
 	})
 })
 
+describe("smoke: phase runner selection", () => {
+	test("work item can run with Codex while review defaults to Claude", async () => {
+		const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-review-runner-"))
+		const runtime = resolve(dir, ".coder-loop/runtime")
+		const presetDir = resolve(dir, ".coder-loop/two-phase-preset")
+		await mkdir(resolve(runtime, "issues"), { recursive: true })
+		await mkdir(resolve(runtime, "evidence/alpha"), { recursive: true })
+		await mkdir(resolve(runtime, "logs"), { recursive: true })
+		await mkdir(presetDir, { recursive: true })
+		await writeFile(resolve(dir, ".coder-loop/workflow.md"), "# placeholder workflow\n")
+		await writeFile(resolve(runtime, "shared.md"), "# placeholder shared context\n")
+
+		await writeFile(resolve(presetDir, "preset.toml"), [
+			`name = "two-phase-smoke"`,
+			`version = 1`,
+			`description = "Two phase smoke preset."`,
+			``,
+			`[item]`,
+			`idField = "id"`,
+			``,
+			`[statuses]`,
+			`continuable = ["pending"]`,
+			`terminal = ["done"]`,
+			``,
+			`[[phases]]`,
+			`name = "iteration"`,
+			`prompt = "iter-entry.md"`,
+			`  [phases.variables]`,
+			`  ITEM_ID = "item.id"`,
+			`  RUN_ID = "runtime.runId"`,
+			``,
+			`[[phases]]`,
+			`name = "review"`,
+			`prompt = "review-entry.md"`,
+			`  [phases.variables]`,
+			`  ITEM_ID = "item.id"`,
+			`  RUN_ID = "runtime.runId"`,
+			``,
+			`[agent]`,
+			`binary = "claude"`,
+			`extraArgs = []`,
+			``,
+		].join("\n"))
+		await writeFile(resolve(presetDir, "iter-entry.md"), "ITER {{ITEM_ID}} {{RUN_ID}}\n")
+		await writeFile(resolve(presetDir, "review-entry.md"), "REVIEW {{ITEM_ID}} {{RUN_ID}}\n")
+
+		const callsPath = resolve(dir, "runner-calls.log")
+		const fakeCodex = resolve(dir, "fake-codex.sh")
+		const fakeClaude = resolve(dir, "fake-claude.sh")
+		await writeFile(fakeCodex, [
+			`#!/usr/bin/env bash`,
+			`echo codex >> "${callsPath}"`,
+			`echo '{"type":"thread.started","thread_id":"thread-codex-smoke"}'`,
+			`echo '{"type":"item.completed","item":{"type":"agent_message","text":"ITERATION SUMMARY: done"}}'`,
+			`exit 0`,
+			``,
+		].join("\n"), { mode: 0o755 })
+		await writeFile(fakeClaude, [
+			`#!/usr/bin/env bash`,
+			`echo claude >> "${callsPath}"`,
+			`echo 'REVIEW SUMMARY: done'`,
+			`exit 0`,
+			``,
+		].join("\n"), { mode: 0o755 })
+
+		await writeFile(resolve(runtime, "config.json"), JSON.stringify({
+			presetPath: presetDir,
+			runner: "codex",
+			codex: { binary: fakeCodex, extraArgs: [] },
+			claude: { binary: fakeClaude, extraArgs: [] },
+		}, null, 2))
+		await writeFile(resolve(runtime, "state.json"), JSON.stringify({
+			version: 1,
+			queue: [{
+				id: "alpha",
+				status: "pending",
+				issueFile: ".coder-loop/runtime/issues/alpha.md",
+				evidenceDir: ".coder-loop/runtime/evidence/alpha",
+				runner: "codex",
+			}],
+			recentRuns: [],
+			current: null,
+		}, null, 2))
+		await writeFile(resolve(runtime, "issues/alpha.md"), "# alpha\n")
+
+		const proc = Bun.spawnSync({
+			cmd: ["bun", LOOP_ENTRY, "--target-cwd", dir, "--once"],
+			cwd: REPO_ROOT,
+			stdout: "pipe",
+			stderr: "pipe",
+		})
+		const stderr = new TextDecoder().decode(proc.stderr)
+		expect(proc.exitCode).toBe(0)
+		expect(stderr).toContain("Selected runner: codex (queue")
+		expect(stderr).toContain("Review runner: claude (review-default")
+		expect((await readFile(callsPath, "utf-8")).trim().split("\n")).toEqual(["codex", "claude"])
+	}, 15_000)
+})
+
 async function makeIdleTarget(): Promise<{ target: string; counterPath: string; lockPath: string; devLoopPath: string }> {
 	const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-idle-"))
 	const runtime = resolve(dir, ".coder-loop/runtime")

@@ -81,7 +81,7 @@ coder-loop doctor /path/to/target --repo <owner>/<repo>
 coder-loop status /path/to/target --json
 ```
 
-Runner 默认继承启动宿主：Codex 里启动 loop 就默认用 `codex`，Claude Code 里启动就默认用 `claude`。target config 可用 `"runner": "claude" | "codex"` 覆盖默认值，单个 queue item 也可用同名 `runner` 字段覆盖；`doctor` / `status --json` 会显示实际选择。
+Iteration runner 默认继承启动宿主：Codex 里启动 loop 就默认用 `codex`，Claude Code 里启动就默认用 `claude`。target config 可用 `"runner": "claude" | "codex"` 覆盖 iteration 默认值，单个 queue item 也可用同名 `runner` 字段覆盖。Review runner 默认固定为 `claude`，不继承 Codex 宿主或 queue item；需要改时在 target config 写 `"reviewRunner": "claude" | "codex"`。`doctor` / `status --json` 会显示实际选择。
 
 后台循环由 daemon API 管理；`/dev-loop [N]` 也是这个 API 的人类快捷入口，不再手写 `nohup`：
 

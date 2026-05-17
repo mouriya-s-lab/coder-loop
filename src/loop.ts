@@ -142,6 +142,7 @@ type LoopConfig = {
 	logDir: string | null
 	requireAgentBrowserScreenshots: boolean | null
 	defaultRunner: AgentRunnerKind | null
+	reviewRunner: AgentRunnerKind | null
 	claudeBinary: string | null
 	claudeExtraArgs: string[]
 	codexBinary: string | null
@@ -165,6 +166,7 @@ const StatusConfigBoundary = arkType({
 		"requireAgentBrowserScreenshots?": "boolean|null",
 	},
 	"runner?": arkType.or(AgentRunnerKindBoundary, "null"),
+	"reviewRunner?": arkType.or(AgentRunnerKindBoundary, "null"),
 	"claude?": {
 		"binary?": "string|null",
 		"extraArgs?": "string[]",
@@ -234,6 +236,7 @@ export type LoopOptions = {
 	requireBrowserEvidence: boolean
 	hostRunner: AgentRunnerKind
 	defaultRunner: AgentRunnerSelection
+	reviewRunner: AgentRunnerSelection
 	runnerCommands: AgentRunnerCommands
 	maxIterations: number
 	dryRun: boolean
@@ -278,7 +281,7 @@ export type Preset = {
 
 export type AgentRunnerKind = "claude" | "codex"
 
-export type AgentRunnerSource = "host" | "config" | "queue"
+export type AgentRunnerSource = "host" | "config" | "queue" | "review-default"
 
 export type AgentRunnerCommand = {
 	kind: AgentRunnerKind
@@ -366,6 +369,7 @@ export type StatusRunnerSelectionSnapshot = {
 export type StatusRunnerDefaultsSnapshot = {
 	hostDefault: AgentRunnerKind
 	default: StatusRunnerSelectionSnapshot
+	reviewDefault: StatusRunnerSelectionSnapshot
 }
 
 export type StatusStateKind =
@@ -397,6 +401,7 @@ export type StatusSelectedIssue = {
 	evidenceDir: string | null
 	agentCwd: string
 	runner: StatusRunnerSelectionSnapshot
+	reviewRunner: StatusRunnerSelectionSnapshot
 }
 
 export type StatusQueueSnapshot = {
@@ -469,6 +474,7 @@ export type Terminated =
 
 export type SessionEntry = {
 	attempt: string
+	runner?: AgentRunnerKind | null
 	sessionId: string | null
 	exitCode: number | null
 	signal: string | null
@@ -586,6 +592,7 @@ export type SelectedIssue = {
 	evidenceDir: string | null
 	agentCwd: string
 	runner: AgentRunnerSelection
+	reviewRunner: AgentRunnerSelection
 }
 
 export type IssueRunContext = {
@@ -1013,7 +1020,7 @@ async function main() {
 						issueKind: null,
 					}),
 				}
-				await runReview(options, fallbackRunId, fallbackCtx, options.targetCwd, options.defaultRunner)
+				await runReview(options, fallbackRunId, fallbackCtx, options.targetCwd, options.reviewRunner)
 				if (!(await exists(options.loopFile))) {
 					log("Review agent stopped the loop.")
 					break
@@ -1032,6 +1039,7 @@ async function main() {
 
 		const selectedId = getItemId(selected.item, options.preset)
 		log(`Selected runner: ${selected.runner.kind} (${selected.runner.source}, binary=${selected.runner.binary})`)
+		log(`Review runner: ${selected.reviewRunner.kind} (${selected.reviewRunner.source}, binary=${selected.reviewRunner.binary})`)
 		const current = state.current && getCurrentId(state.current, options.preset) === selectedId ? state.current : null
 		const issueRun = makeIssueRunContext(current)
 		const runId = current?.runId ?? makeRunId(selectedId)
@@ -1128,7 +1136,7 @@ async function main() {
 			log(`Resuming ${reviewPhase.name} agent for issue #${selectedId} without rerunning iteration...`)
 		}
 
-		const reviewCode = await runReview(options, runId, ctx, selected.agentCwd, selected.runner, { emit, ...baseEvent })
+		const reviewCode = await runReview(options, runId, ctx, selected.agentCwd, selected.reviewRunner, { emit, ...baseEvent })
 		if (reviewCode !== 0) {
 			log(`Review agent crashed (exit ${reviewCode}). Stopping.`)
 			await removeLoopFile(options.loopFile)
@@ -1240,6 +1248,7 @@ function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, confi
 	const hostRunner = detectHostRunner(process.env)
 	const runnerCommands = buildAgentRunnerCommands(config)
 	const defaultRunner = selectDefaultRunner(hostRunner, config.defaultRunner, runnerCommands)
+	const reviewRunner = selectReviewRunner(config.reviewRunner, runnerCommands)
 
 	return {
 		targetCwd,
@@ -1258,6 +1267,7 @@ function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, confi
 		requireBrowserEvidence,
 		hostRunner,
 		defaultRunner,
+		reviewRunner,
 		runnerCommands,
 		maxIterations,
 		dryRun: raw.dryRun,
@@ -1431,6 +1441,7 @@ function buildStatusRunnerDefaultsSnapshot(options: LoopOptions | null): StatusR
 		return {
 			hostDefault: options.hostRunner,
 			default: statusRunnerSelection(options.defaultRunner),
+			reviewDefault: statusRunnerSelection(options.reviewRunner),
 		}
 	}
 	const hostRunner = detectHostRunner(process.env)
@@ -1445,6 +1456,7 @@ function buildStatusRunnerDefaultsSnapshot(options: LoopOptions | null): StatusR
 		logDir: null,
 		requireAgentBrowserScreenshots: null,
 		defaultRunner: null,
+		reviewRunner: null,
 		claudeBinary: null,
 		claudeExtraArgs: [],
 		codexBinary: null,
@@ -1455,6 +1467,7 @@ function buildStatusRunnerDefaultsSnapshot(options: LoopOptions | null): StatusR
 	return {
 		hostDefault: hostRunner,
 		default: statusRunnerSelection(selectDefaultRunner(hostRunner, null, buildAgentRunnerCommands(config))),
+		reviewDefault: statusRunnerSelection(selectReviewRunner(null, buildAgentRunnerCommands(config))),
 	}
 }
 
@@ -1518,6 +1531,7 @@ function buildStatusQueueSnapshot(options: LoopOptions, state: LoopState, select
 			evidenceDir: selected.evidenceDir,
 			agentCwd: selected.agentCwd,
 			runner: statusRunnerSelection(selected.runner),
+			reviewRunner: statusRunnerSelection(selected.reviewRunner),
 		},
 	}
 }
@@ -1537,7 +1551,7 @@ async function buildStatusCurrentSnapshot(options: LoopOptions, state: LoopState
 		run: state.current,
 		id,
 		item,
-		runner: item === null ? null : statusRunnerSelection(selectRunnerForItem(item, options)),
+		runner: item === null ? null : statusRunnerSelection(selectRunnerForPhase(state.current.phase, item, options)),
 		phaseStatus: await readAgentPhaseStatus(agentStatusPath(outputPath)),
 	}
 }
@@ -2111,6 +2125,7 @@ function loopConfigFromStatusInput(input: StatusConfigInput): LoopConfig {
 		logDir: input.logDir ?? null,
 		requireAgentBrowserScreenshots: input.evidence?.requireAgentBrowserScreenshots ?? null,
 		defaultRunner: input.runner ?? null,
+		reviewRunner: input.reviewRunner ?? null,
 		claudeBinary: input.claude?.binary ?? null,
 		claudeExtraArgs: input.claude?.extraArgs ?? [],
 		codexBinary: input.codex?.binary ?? null,
@@ -2146,9 +2161,20 @@ function selectDefaultRunner(hostRunner: AgentRunnerKind, configuredRunner: Agen
 	return { ...commands[kind], source: configuredRunner === null ? "host" : "config" }
 }
 
+function selectReviewRunner(configuredRunner: AgentRunnerKind | null, commands: AgentRunnerCommands): AgentRunnerSelection {
+	const kind = configuredRunner ?? "claude"
+	return { ...commands[kind], source: configuredRunner === null ? "review-default" : "config" }
+}
+
 function selectRunnerForItem(item: QueueItem, options: LoopOptions): AgentRunnerSelection {
 	if (item.runner === null) return options.defaultRunner
 	return { ...options.runnerCommands[item.runner], source: "queue" }
+}
+
+function selectRunnerForPhase(phase: string, item: QueueItem, options: LoopOptions): AgentRunnerSelection {
+	const reviewPhase = options.preset.phases[options.preset.phases.length - 1]
+	if (reviewPhase && phase === reviewPhase.name) return options.reviewRunner
+	return selectRunnerForItem(item, options)
 }
 
 function readPresetNameFromStatusInput(value: StatusConfigInput["preset"]): string | null {
@@ -2423,8 +2449,9 @@ export function selectIssue(state: LoopState, options: LoopOptions): SelectedIss
 	// agentCwd validity (absolute + existing directory) is enforced upstream by checkRuntime.
 	const agentCwd = selected.agentCwd ?? options.targetCwd
 	const runner = selectRunnerForItem(selected, options)
+	const reviewRunner = options.reviewRunner
 
-	return { item: selected, issueFile, evidenceDir, agentCwd, runner }
+	return { item: selected, issueFile, evidenceDir, agentCwd, runner, reviewRunner }
 }
 
 export function markIterationStarted(
@@ -2640,9 +2667,10 @@ async function runAgent(
 ): Promise<{ output: string; code: number }> {
 	const sessionsPath = agentSessionsPath(outputPath)
 	const lastEntry = await readLastSessionEntry(sessionsPath)
-	const initialResume = decideResume(lastEntry)
+	const compatibleLastEntry = await selectResumeEntryForRunner(lastEntry, runner, outputPath, label)
+	const initialResume = decideResume(compatibleLastEntry)
 	if (initialResume.kind === "resume") {
-		log(`Agent [${label}] cross-tick resume: sessionId=${initialResume.sessionId} (last terminated=${lastEntry?.terminated.kind ?? "?"})`)
+		log(`Agent [${label}] cross-tick resume: sessionId=${initialResume.sessionId} (last terminated=${compatibleLastEntry?.terminated.kind ?? "?"})`)
 	}
 
 	const result = await runAgentWithBackoff({
@@ -2658,6 +2686,26 @@ async function runAgent(
 
 	log(`Agent [${label}] finished after ${result.attempts} attempt(s); code=${result.code}`)
 	return { output: result.output, code: result.code }
+}
+
+async function selectResumeEntryForRunner(
+	entry: SessionEntry | null,
+	runner: AgentRunnerSelection,
+	outputPath: string,
+	label: AgentLabel,
+): Promise<SessionEntry | null> {
+	if (entry === null) return null
+	const lastRunner = entry.runner ?? await readAgentStatusRunner(agentStatusPath(outputPath))
+	if (lastRunner !== null && lastRunner !== runner.kind) {
+		log(`Agent [${label}] not resuming previous ${lastRunner} session with ${runner.kind} runner.`)
+		return null
+	}
+	return entry
+}
+
+async function readAgentStatusRunner(statusPath: string): Promise<AgentRunnerKind | null> {
+	const phaseStatus = await readAgentPhaseStatus(statusPath)
+	return phaseStatus.value?.runner ?? null
 }
 
 export type SpawnOneAttemptInput = {
@@ -2997,6 +3045,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 		const settle = async (terminated: Terminated, output: string, exitCode: number, signal: string | null): Promise<void> => {
 			const entry: SessionEntry = {
 				attempt: startedAt,
+				runner: selectedRunner.kind,
 				sessionId: status.sessionId,
 				exitCode,
 				signal,
@@ -3303,6 +3352,7 @@ function isValidSessionEntry(value: unknown): value is SessionEntry {
 	if (typeof value !== "object" || value === null) return false
 	const v = value as Record<string, unknown>
 	if (typeof v["attempt"] !== "string") return false
+	if (v["runner"] !== undefined && v["runner"] !== null && v["runner"] !== "claude" && v["runner"] !== "codex") return false
 	if (v["sessionId"] !== null && typeof v["sessionId"] !== "string") return false
 	if (v["exitCode"] !== null && typeof v["exitCode"] !== "number") return false
 	if (v["signal"] !== null && typeof v["signal"] !== "string") return false

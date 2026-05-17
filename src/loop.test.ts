@@ -147,6 +147,7 @@ async function makeFixtureOptions(preset: Preset): Promise<LoopOptions> {
 		requireBrowserEvidence: false,
 		hostRunner: "claude",
 		defaultRunner: { ...claudeRunner, source: "host" as const },
+		reviewRunner: { ...claudeRunner, source: "review-default" as const },
 		runnerCommands: { claude: claudeRunner, codex: codexRunner },
 		maxIterations: 1,
 		dryRun: false,
@@ -226,6 +227,13 @@ describe("buildCoderLoopStatusSnapshot", () => {
 		expect(snapshot.queue.terminal).toBe(1)
 		expect(snapshot.queue.selected?.id).toBe("alpha")
 		expect(snapshot.queue.selected?.runner.kind).toBe(snapshot.target.runner.default.kind)
+		expect(snapshot.target.runner.reviewDefault).toEqual({
+			kind: "claude",
+			source: "review-default",
+			binary: "claude",
+			extraArgs: [],
+		})
+		expect(snapshot.queue.selected?.reviewRunner).toEqual(snapshot.target.runner.reviewDefault)
 		expect(snapshot.current.run).toBeNull()
 		expect(snapshot.events.runId).toBe("run-alpha")
 		expect(snapshot.processes.loopFile.exists).toBe(false)
@@ -252,6 +260,33 @@ describe("buildCoderLoopStatusSnapshot", () => {
 			extraArgs: ["--json"],
 		})
 		expect(snapshot.queue.selected?.runner).toEqual(snapshot.target.runner.default)
+		expect(snapshot.queue.selected?.reviewRunner).toEqual(snapshot.target.runner.reviewDefault)
+		expect(snapshot.target.runner.reviewDefault.kind).toBe("claude")
+	})
+
+	test("config reviewRunner overrides the Claude review default in status JSON", async () => {
+		const target = await makeStatusTarget()
+		await writeFile(
+			resolve(target, ".coder-loop/runtime/config.json"),
+			JSON.stringify({
+				preset: "single-phase-example",
+				runner: "claude",
+				reviewRunner: "codex",
+				codex: { binary: "/tmp/fake-codex-review", extraArgs: ["--json"] },
+			}, null, "\t"),
+		)
+
+		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json" })
+
+		expect(snapshot.state.kind).toBe("ok")
+		expect(snapshot.target.runner.default.kind).toBe("claude")
+		expect(snapshot.target.runner.reviewDefault).toEqual({
+			kind: "codex",
+			source: "config",
+			binary: "/tmp/fake-codex-review",
+			extraArgs: ["--json"],
+		})
+		expect(snapshot.queue.selected?.reviewRunner).toEqual(snapshot.target.runner.reviewDefault)
 	})
 
 	test("queue item runner overrides the config default for the selected item", async () => {
@@ -287,6 +322,8 @@ describe("buildCoderLoopStatusSnapshot", () => {
 			binary: "/tmp/fake-codex",
 			extraArgs: ["--ask-for-approval", "never"],
 		})
+		expect(snapshot.queue.selected?.reviewRunner).toEqual(snapshot.target.runner.reviewDefault)
+		expect(snapshot.queue.selected?.reviewRunner.kind).toBe("claude")
 	})
 
 	test("invalid config runner is reported as an invalid-config status snapshot", async () => {
@@ -302,6 +339,21 @@ describe("buildCoderLoopStatusSnapshot", () => {
 		expect(snapshot.state.ok).toBe(false)
 		expect(snapshot.state.errors[0]?.path).toBe("config")
 		expect(snapshot.state.errors[0]?.message).toContain("runner")
+	})
+
+	test("invalid config reviewRunner is reported as an invalid-config status snapshot", async () => {
+		const target = await makeStatusTarget()
+		await writeFile(
+			resolve(target, ".coder-loop/runtime/config.json"),
+			JSON.stringify({ preset: "single-phase-example", reviewRunner: "ollama" }, null, "\t"),
+		)
+
+		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json" })
+
+		expect(snapshot.state.kind).toBe("invalid-config")
+		expect(snapshot.state.ok).toBe(false)
+		expect(snapshot.state.errors[0]?.path).toBe("config")
+		expect(snapshot.state.errors[0]?.message).toContain("reviewRunner")
 	})
 
 	test("invalid queue item runner is reported as an invalid-state status snapshot", async () => {
@@ -2088,6 +2140,7 @@ describe("summary watchdog e2e — spawnOneAttempt with a fake claudeBinary", ()
 		expect(outcome.sessionId).toBe("thread-codex-123")
 		const last = await readLastSessionEntry(sessionsPath)
 		expect(last?.sessionId).toBe("thread-codex-123")
+		expect(last?.runner).toBe("codex")
 		const status = JSON.parse(await readFile(outputPath.replace(/\.txt$/, ".status.json"), "utf-8")) as { runner?: string; sessionId?: string }
 		expect(status.runner).toBe("codex")
 		expect(status.sessionId).toBe("thread-codex-123")
