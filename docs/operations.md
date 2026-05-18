@@ -53,8 +53,8 @@ Runner 选择也在 `status` 中显式暴露：
 
 | JSON path | 含义 |
 |---|---|
-| `target.runner.hostDefault` | 当前宿主推断出的默认 runner：Codex 宿主为 `codex`，Claude Code 宿主为 `claude`，无宿主信号时 fallback `claude` |
-| `target.runner.default` | target 默认 iteration runner；来源为 `config` 或 `host`，含 `kind / source / binary / extraArgs / model` |
+| `target.runner.hostDefault` | 当前宿主推断出的 runner 诊断信息：Codex 宿主为 `codex`，Claude Code 宿主为 `claude`，无宿主信号时 fallback `claude`；不决定 iteration 默认值 |
+| `target.runner.default` | target 默认 iteration runner；来源为 `config` 或 `iteration-default`，含 `kind / source / binary / extraArgs / model` |
 | `target.runner.reviewDefault` | review runner；默认 `claude`（source=`review-default`），可由 config 的 `reviewRunner` 覆盖；当 kind 为 `claude` 时 model 强制为 `claude-opus-4-7` |
 | `queue.selected.runner` | 当前 selected item 的实际 iteration runner；queue item 上的 `runner` 会覆盖 target default |
 | `queue.selected.reviewRunner` | 当前 selected item 的 review runner；不受 queue item `runner` 影响 |

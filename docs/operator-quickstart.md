@@ -14,7 +14,7 @@
 
 - `bun` 已安装（`bun --version` 能跑）。
 - `gh` CLI 已 auth（`gh auth status` 不报错），有目标 repo 的 issue / PR 写权限。
-- runner CLI 在 PATH：iteration 默认继承启动宿主（Claude Code → `claude`，Codex → `codex`），review 默认使用 `claude`。target config 可分别覆盖。
+- runner CLI 在 PATH：iteration 未手动设置时默认使用 `codex`，review 默认使用 `claude`。target config 可分别覆盖。
 - 目标 repo 在本地，有可用的 base branch（通常 `main`）。
 - 用户级 skill / rule（仅 `/dev-plan` 需要，`/dev-loop` 本身不需要）：
   - `~/.claude/rules/github-issue-pr-routing.rule.md`
@@ -79,7 +79,7 @@ coder-loop status /path/to/your-target-repo --json
 
 ### Runner 默认值与覆盖
 
-Iteration 默认 runner 由启动宿主决定：Codex 里启动 loop 默认用 `codex`，Claude Code 里启动默认用 `claude`；没有宿主信号时 fallback `claude`。Review 默认 runner 固定为 `claude`，不继承 Codex 宿主或 queue item；Claude review 的模型固定为 `claude-opus-4-7`。需要固定 target 默认 runner / model 时，在 `.coder-loop/runtime/config.json` 写：
+Iteration 未手动设置时固定默认 `codex`，不跟随启动宿主。Review 默认 runner 固定为 `claude`，不继承 Codex 宿主或 queue item；Claude review 的模型固定为 `claude-opus-4-7`。需要固定 target 默认 runner / model 时，在 `.coder-loop/runtime/config.json` 写：
 
 ```json
 {
