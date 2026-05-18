@@ -22,7 +22,7 @@ import {
 } from "node:fs/promises"
 import { homedir } from "node:os"
 import { resolve, dirname } from "node:path"
-import { buildCoderLoopStatusSnapshot, detectHostRunner, loadPreset, type AgentRunnerKind, type AgentRunnerSelection, type CoderLoopStatusSnapshot, type JsonValue, type Preset } from "./loop"
+import { buildCoderLoopStatusSnapshot, loadPreset, type AgentRunnerKind, type AgentRunnerSelection, type CoderLoopStatusSnapshot, type JsonValue, type Preset } from "./loop"
 
 const PKG_ROOT = resolve(import.meta.dir, "..")
 const PRESETS_DIR = resolve(PKG_ROOT, "presets")
@@ -606,8 +606,8 @@ export async function runInstallCommand(rawArgs: string[]): Promise<void> {
 
 	// Layer C: prereqs
 	info("\n[Layer C] Operator 机器先决条件")
-	const installRunner = detectHostRunner(process.env)
-	info(`  INFO: install 默认 runner=${installRunner}（可在 target config 用 runner 覆盖），review 默认 runner=claude / model=claude-opus-4-7（可用 reviewRunner 改 runner）`)
+	const installRunner: AgentRunnerKind = "codex"
+	info(`  INFO: install 默认 iteration runner=${installRunner}（可在 target config 用 runner 覆盖），review 默认 runner=claude / model=claude-opus-4-7（可用 reviewRunner 改 runner）`)
 	const layerCResults = await checkLayerC([{ kind: installRunner, binary: installRunner }, { kind: "claude", binary: "claude" }])
 	for (const r of layerCResults) info(`  ${r.ok ? "OK" : "FAIL"}: ${r.detail}`)
 	const layerCOk = layerCResults.every((r) => r.ok)

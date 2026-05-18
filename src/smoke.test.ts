@@ -16,6 +16,15 @@ type StatusSmokeSnapshot = {
 	processes?: object
 }
 
+function claudeHostEnv(): NodeJS.ProcessEnv {
+	const env: NodeJS.ProcessEnv = { ...process.env }
+	env.CLAUDECODE = "1"
+	delete env["CODEX_SHELL"]
+	delete env["CODEX_THREAD_ID"]
+	delete env["CODEX_INTERNAL_ORIGINATOR_OVERRIDE"]
+	return env
+}
+
 async function makeMinimalTarget(presetName: string, configShape: ConfigShape = "json"): Promise<string> {
 	const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-smoke-"))
 	const runtime = resolve(dir, ".coder-loop/runtime")
@@ -209,7 +218,7 @@ describe("smoke: single-phase-example preset", () => {
 })
 
 describe("smoke: phase runner selection", () => {
-	test("work item can run with Codex while review defaults to Claude Opus 4.7 model", async () => {
+	test("default iteration runner uses Codex while review stays Claude", async () => {
 		const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-review-runner-"))
 		const runtime = resolve(dir, ".coder-loop/runtime")
 		const presetDir = resolve(dir, ".coder-loop/two-phase-preset")
@@ -277,7 +286,6 @@ describe("smoke: phase runner selection", () => {
 
 		await writeFile(resolve(runtime, "config.json"), JSON.stringify({
 			presetPath: presetDir,
-			runner: "codex",
 			codex: { binary: fakeCodex, extraArgs: [] },
 			claude: { binary: fakeClaude, extraArgs: [] },
 		}, null, 2))
@@ -288,7 +296,6 @@ describe("smoke: phase runner selection", () => {
 				status: "pending",
 				issueFile: ".coder-loop/runtime/issues/alpha.md",
 				evidenceDir: ".coder-loop/runtime/evidence/alpha",
-				runner: "codex",
 			}],
 			recentRuns: [],
 			current: null,
@@ -300,10 +307,11 @@ describe("smoke: phase runner selection", () => {
 			cwd: REPO_ROOT,
 			stdout: "pipe",
 			stderr: "pipe",
+			env: claudeHostEnv(),
 		})
 		const stderr = new TextDecoder().decode(proc.stderr)
 		expect(proc.exitCode).toBe(0)
-		expect(stderr).toContain("Selected runner: codex (queue")
+		expect(stderr).toContain("Selected runner: codex (iteration-default")
 		expect(stderr).toContain("Review runner: claude (review-default")
 		expect(stderr).toContain("model=claude-opus-4-7")
 		expect((await readFile(callsPath, "utf-8")).trim().split("\n")).toEqual(["codex", "claude"])

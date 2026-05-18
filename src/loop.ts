@@ -30,6 +30,7 @@ const DEFAULT_EVIDENCE_DIR = ".coder-loop/runtime/evidence"
 const DEFAULT_LOG_DIR = ".coder-loop/runtime/logs"
 const REVIEW_ON_EMPTY_LOCK_FILE = "review-on-empty.lock"
 const DEFAULT_IDLE_SLEEP_MS = 60_000
+const DEFAULT_ITERATION_RUNNER: AgentRunnerKind = "codex"
 export const CLAUDE_REVIEW_MODEL = "claude-opus-4-7"
 
 const EXCLUDE_ENTRIES = [".dev-loop", ".dev-trace.txt", ".coder-loop/runtime"]
@@ -287,7 +288,7 @@ export type Preset = {
 
 export type AgentRunnerKind = "claude" | "codex"
 
-export type AgentRunnerSource = "host" | "config" | "queue" | "review-default"
+export type AgentRunnerSource = "iteration-default" | "config" | "queue" | "review-default"
 
 export type AgentRunnerCommand = {
 	kind: AgentRunnerKind
@@ -1257,7 +1258,7 @@ function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, confi
 	const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")
 	const hostRunner = detectHostRunner(process.env)
 	const runnerCommands = buildAgentRunnerCommands(config)
-	const defaultRunner = selectDefaultRunner(hostRunner, config.defaultRunner, runnerCommands)
+	const defaultRunner = selectDefaultRunner(config.defaultRunner, runnerCommands)
 	const reviewRunner = selectReviewRunner(config.reviewRunner, runnerCommands)
 
 	return {
@@ -1478,7 +1479,7 @@ function buildStatusRunnerDefaultsSnapshot(options: LoopOptions | null): StatusR
 	}
 	return {
 		hostDefault: hostRunner,
-		default: statusRunnerSelection(selectDefaultRunner(hostRunner, null, buildAgentRunnerCommands(config))),
+		default: statusRunnerSelection(selectDefaultRunner(null, buildAgentRunnerCommands(config))),
 		reviewDefault: statusRunnerSelection(selectReviewRunner(null, buildAgentRunnerCommands(config))),
 	}
 }
@@ -2174,9 +2175,9 @@ function buildAgentRunnerCommands(config: LoopConfig): AgentRunnerCommands {
 	}
 }
 
-function selectDefaultRunner(hostRunner: AgentRunnerKind, configuredRunner: AgentRunnerKind | null, commands: AgentRunnerCommands): AgentRunnerSelection {
-	const kind = configuredRunner ?? hostRunner
-	return { ...commands[kind], source: configuredRunner === null ? "host" : "config" }
+function selectDefaultRunner(configuredRunner: AgentRunnerKind | null, commands: AgentRunnerCommands): AgentRunnerSelection {
+	const kind = configuredRunner ?? DEFAULT_ITERATION_RUNNER
+	return { ...commands[kind], source: configuredRunner === null ? "iteration-default" : "config" }
 }
 
 function selectReviewRunner(configuredRunner: AgentRunnerKind | null, commands: AgentRunnerCommands): AgentRunnerSelection {

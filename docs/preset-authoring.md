@@ -198,7 +198,7 @@ target 在 `.coder-loop/runtime/config.json`（或 `config.toml`）写：
 
 两者互斥。都不写时引擎走默认的 `gh-issue-pr-iteration`。`preset` 名只允许 `^[a-zA-Z][a-zA-Z0-9_-]*$`，禁止路径分隔符与 `..`，所以 bundled name 一定落在 `<pkg>/presets/<name>/` 内。
 
-Runner 是 target runtime 配置，不是 preset 状态机的一部分。Iteration 默认 runner 继承宿主；review 默认 runner 固定为 `claude`，且 Claude review 模型固定为 `claude-opus-4-7`。target 可写：
+Runner 是 target runtime 配置，不是 preset 状态机的一部分。Iteration 未手动设置时固定默认 `codex`，不跟随启动宿主；review 默认 runner 固定为 `claude`，且 Claude review 模型固定为 `claude-opus-4-7`。target 可写：
 
 ```json
 {
