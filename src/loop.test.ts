@@ -1398,17 +1398,18 @@ describe("nextBackoffSeconds — capped exponential", () => {
 
 describe("agentClaudeArgs — composes claude CLI args including --resume", () => {
 	test("fresh resume: no --resume flag, -p prompt at end", () => {
-		const args = agentClaudeArgs([], "hello", { kind: "fresh" })
+		const args = agentClaudeArgs([], "hello", { kind: "fresh" }, [])
 		expect(args).toContain("--output-format")
 		expect(args).toContain("stream-json")
 		expect(args).toContain("--verbose")
 		expect(args).not.toContain("--resume")
+		expect(args).not.toContain("--add-dir")
 		expect(args[args.length - 2]).toBe("-p")
 		expect(args[args.length - 1]).toBe("hello")
 	})
 
 	test("resume decision injects --resume <sessionId> before -p", () => {
-		const args = agentClaudeArgs([], RESUME_CONTINUE_PROMPT, { kind: "resume", sessionId: "sess-xyz" })
+		const args = agentClaudeArgs([], RESUME_CONTINUE_PROMPT, { kind: "resume", sessionId: "sess-xyz" }, [])
 		const resumeIdx = args.indexOf("--resume")
 		const promptIdx = args.indexOf("-p")
 		expect(resumeIdx).toBeGreaterThanOrEqual(0)
@@ -1418,11 +1419,27 @@ describe("agentClaudeArgs — composes claude CLI args including --resume", () =
 	})
 
 	test("preserves caller's extraArgs and skips duplicate --output-format / --verbose", () => {
-		const args = agentClaudeArgs(["--output-format", "stream-json", "--verbose", "--max-turns", "5"], "prompt", { kind: "fresh" })
+		const args = agentClaudeArgs(["--output-format", "stream-json", "--verbose", "--max-turns", "5"], "prompt", { kind: "fresh" }, [])
 		expect(args.filter((a) => a === "--output-format").length).toBe(1)
 		expect(args.filter((a) => a === "--verbose").length).toBe(1)
 		expect(args).toContain("--max-turns")
 		expect(args).toContain("5")
+	})
+
+	test("additionalDirs injects a single --add-dir followed by every dir, before -p", () => {
+		const args = agentClaudeArgs([], "p", { kind: "fresh" }, ["/x/preset", "/x/target"])
+		const idx = args.indexOf("--add-dir")
+		expect(args.filter((a) => a === "--add-dir").length).toBe(1)
+		expect(args[idx + 1]).toBe("/x/preset")
+		expect(args[idx + 2]).toBe("/x/target")
+		expect(idx).toBeLessThan(args.indexOf("-p"))
+	})
+
+	test("caller-provided --add-dir in extraArgs takes precedence; additionalDirs is skipped", () => {
+		const args = agentClaudeArgs(["--add-dir", "/caller/path"], "p", { kind: "fresh" }, ["/x/preset"])
+		expect(args.filter((a) => a === "--add-dir").length).toBe(1)
+		expect(args).toContain("/caller/path")
+		expect(args).not.toContain("/x/preset")
 	})
 })
 
@@ -1475,27 +1492,43 @@ describe("agentCodexArgs", () => {
 })
 
 describe("buildRunnerInvocation", () => {
-	test("Claude runner maps to the existing claude stream-json invocation", () => {
+	test("Claude runner maps to the existing claude stream-json invocation and exposes presetDir via --add-dir", () => {
 		const invocation = buildRunnerInvocation(
 			{ kind: "claude", source: "config", binary: "/tmp/claude", extraArgs: ["--max-turns", "5"] },
 			"hello",
 			{ kind: "fresh" },
-			"/tmp/target",
+			{ agentCwd: "/tmp/target", targetCwd: "/tmp/target", presetDir: "/tmp/preset" },
 		)
 
 		expect(invocation.binary).toBe("/tmp/claude")
 		expect(invocation.args).toContain("--output-format")
 		expect(invocation.args).toContain("stream-json")
 		expect(invocation.args).toContain("--max-turns")
+		expect(invocation.args).toContain("--add-dir")
+		expect(invocation.args).toContain("/tmp/preset")
 		expect(invocation.args[invocation.args.length - 1]).toBe("hello")
 	})
 
-	test("Codex runner maps to codex exec invocation", () => {
+	test("Claude runner with cross-repo agentCwd adds both presetDir and targetCwd to --add-dir", () => {
+		const invocation = buildRunnerInvocation(
+			{ kind: "claude", source: "config", binary: "/tmp/claude", extraArgs: [] },
+			"hello",
+			{ kind: "fresh" },
+			{ agentCwd: "/tmp/agent-repo", targetCwd: "/tmp/target", presetDir: "/tmp/preset" },
+		)
+
+		const idx = invocation.args.indexOf("--add-dir")
+		expect(idx).toBeGreaterThanOrEqual(0)
+		expect(invocation.args[idx + 1]).toBe("/tmp/preset")
+		expect(invocation.args[idx + 2]).toBe("/tmp/target")
+	})
+
+	test("Codex runner maps to codex exec invocation (uses agentCwd; --add-dir not applicable)", () => {
 		const invocation = buildRunnerInvocation(
 			{ kind: "codex", source: "queue", binary: "codex", extraArgs: [] },
 			"hello",
 			{ kind: "fresh" },
-			"/tmp/target",
+			{ agentCwd: "/tmp/target", targetCwd: "/tmp/target", presetDir: "/tmp/preset" },
 		)
 
 		expect(invocation).toEqual({

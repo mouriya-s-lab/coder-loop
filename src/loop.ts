@@ -2891,7 +2891,11 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 		const statusPath = agentStatusPath(outputPath)
 		const streamOutFile = createWriteStream(attemptStreamPath, { flags: "wx" })
 		const stderrOutFile = createWriteStream(attemptStderrPath, { flags: "wx" })
-		const runnerPlan = buildRunnerInvocation(selectedRunner, effectivePrompt, resume, input.agentCwd)
+		const runnerPlan = buildRunnerInvocation(selectedRunner, effectivePrompt, resume, {
+			agentCwd: input.agentCwd,
+			targetCwd: options.targetCwd,
+			presetDir: options.preset.presetDir,
+		})
 		const status: AgentRunStatus = {
 			label,
 			runner: selectedRunner.kind,
@@ -3141,10 +3145,13 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 	})
 }
 
-export function agentClaudeArgs(extraArgs: readonly string[], prompt: string, resume: ResumeDecision): string[] {
+export function agentClaudeArgs(extraArgs: readonly string[], prompt: string, resume: ResumeDecision, additionalDirs: readonly string[]): string[] {
 	const args = [...extraArgs]
 	if (!args.includes("--output-format")) args.push("--output-format", "stream-json")
 	if (!args.includes("--verbose")) args.push("--verbose")
+	if (additionalDirs.length > 0 && !args.includes("--add-dir")) {
+		args.push("--add-dir", ...additionalDirs)
+	}
 	if (resume.kind === "resume") args.push("--resume", resume.sessionId)
 	args.push("-p", prompt)
 	return args
@@ -3153,18 +3160,26 @@ export function agentClaudeArgs(extraArgs: readonly string[], prompt: string, re
 export type RunnerInvocation =
 	| { kind: "spawn"; binary: string; args: string[] }
 
-export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: string, resume: ResumeDecision, agentCwd: string): RunnerInvocation {
+export type RunnerInvocationPaths = {
+	agentCwd: string
+	targetCwd: string
+	presetDir: string
+}
+
+export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: string, resume: ResumeDecision, paths: RunnerInvocationPaths): RunnerInvocation {
 	if (runner.kind === "claude") {
+		const dirs = [paths.presetDir]
+		if (paths.targetCwd !== paths.agentCwd) dirs.push(paths.targetCwd)
 		return {
 			kind: "spawn",
 			binary: runner.binary,
-			args: agentClaudeArgs(runner.extraArgs, prompt, resume),
+			args: agentClaudeArgs(runner.extraArgs, prompt, resume, dirs),
 		}
 	}
 	return {
 		kind: "spawn",
 		binary: runner.binary,
-		args: agentCodexArgs(runner.extraArgs, prompt, resume, agentCwd),
+		args: agentCodexArgs(runner.extraArgs, prompt, resume, paths.agentCwd),
 	}
 }
 
