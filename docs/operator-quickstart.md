@@ -79,18 +79,18 @@ coder-loop status /path/to/your-target-repo --json
 
 ### Runner 默认值与覆盖
 
-Iteration 默认 runner 由启动宿主决定：Codex 里启动 loop 默认用 `codex`，Claude Code 里启动默认用 `claude`；没有宿主信号时 fallback `claude`。Review 默认 runner 固定为 `claude`，不继承 Codex 宿主或 queue item。需要固定 target 默认 runner 时，在 `.coder-loop/runtime/config.json` 写：
+Iteration 默认 runner 由启动宿主决定：Codex 里启动 loop 默认用 `codex`，Claude Code 里启动默认用 `claude`；没有宿主信号时 fallback `claude`。Review 默认 runner 固定为 `claude`，不继承 Codex 宿主或 queue item；Claude review 的模型固定为 `claude-opus-4-7`。需要固定 target 默认 runner / model 时，在 `.coder-loop/runtime/config.json` 写：
 
 ```json
 {
   "runner": "codex",
   "reviewRunner": "claude",
-  "codex": { "binary": "codex", "extraArgs": [] },
-  "claude": { "binary": "claude", "extraArgs": [] }
+  "codex": { "binary": "codex", "model": "gpt-5.4", "extraArgs": [] },
+  "claude": { "binary": "claude", "model": "sonnet", "extraArgs": [] }
 }
 ```
 
-单个 queue item 可加 `"runner": "claude" | "codex"` 覆盖 target iteration 默认值；review 仍用 `reviewRunner`（默认 `claude`）。`doctor` 检查 target 默认 runner 和 review 默认 runner 的实际 binary；`status --json` 暴露 `target.runner.hostDefault`、`target.runner.default`、`target.runner.reviewDefault`、`queue.selected.runner`、`queue.selected.reviewRunner`、`current.runner` 与 phase status 的 runner。
+单个 queue item 可加 `"runner": "claude" | "codex"` 覆盖 target iteration 默认值；review 仍用 `reviewRunner`（默认 `claude`）。`claude.model` 影响 Claude iteration；review 为 Claude 时仍强制 `claude-opus-4-7`。`doctor` 检查 target 默认 runner 和 review 默认 runner 的实际 binary；`status --json` 暴露 `target.runner.hostDefault`、`target.runner.default`、`target.runner.reviewDefault`、`queue.selected.runner`、`queue.selected.reviewRunner`、`current.runner` 与 phase status 的 runner/model。
 
 把运行期文件加 `.gitignore`：
 
@@ -121,8 +121,8 @@ coder-loop status /path/to/your-target-repo --json | jq '.state.kind, .queue, .c
 |---|---|
 | `.state.kind` | `"ok"` 表示 config/state/preset/runtime 都可读；其他值按错误继续排 |
 | `.queue.total` / `.queue.selected` | 有可推进 item 时 selected 不为 null |
-| `.target.runner.default` / `.queue.selected.runner` | target 默认 iteration runner 与 selected item iteration runner；含 kind/source/binary |
-| `.target.runner.reviewDefault` / `.queue.selected.reviewRunner` | review runner；默认 `claude`，显式 `reviewRunner` 时来源为 config |
+| `.target.runner.default` / `.queue.selected.runner` | target 默认 iteration runner 与 selected item iteration runner；含 kind/source/binary/model |
+| `.target.runner.reviewDefault` / `.queue.selected.reviewRunner` | review runner；默认 `claude` + `claude-opus-4-7`，显式 `reviewRunner` 时来源为 config |
 | `.current.run` | 正在跑或可 resume 的 run；null 表示当前没有 in-flight phase |
 | `.events.latest` | 当前或最近 run 的最后一条结构化事件 |
 | `.processes.loopFile.pidAlive` | daemon 记录的 pid 是否还活着 |

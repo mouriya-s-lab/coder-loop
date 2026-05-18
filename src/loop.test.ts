@@ -18,6 +18,7 @@ import {
 	buildRuntimeBindings,
 	buildRunnerInvocation,
 	checkRuntime,
+	CLAUDE_REVIEW_MODEL,
 	classifyTermination,
 	codexSummaryTextFromJsonLine,
 	createSummaryWatchdog,
@@ -128,8 +129,8 @@ async function makeFixtureOptions(preset: Preset): Promise<LoopOptions> {
 	await writeFile(sharedContextPath, "")
 	await writeFile(statePath, "{}")
 	await writeFile(workflowPath, "")
-	const claudeRunner = { kind: "claude" as const, binary: "claude", extraArgs: [] }
-	const codexRunner = { kind: "codex" as const, binary: "codex", extraArgs: [] }
+	const claudeRunner = { kind: "claude" as const, binary: "claude", extraArgs: [], model: null }
+	const codexRunner = { kind: "codex" as const, binary: "codex", extraArgs: [], model: null }
 	return {
 		targetCwd: cwd,
 		configPath,
@@ -232,6 +233,7 @@ describe("buildCoderLoopStatusSnapshot", () => {
 			source: "review-default",
 			binary: "claude",
 			extraArgs: [],
+			model: "claude-opus-4-7",
 		})
 		expect(snapshot.queue.selected?.reviewRunner).toEqual(snapshot.target.runner.reviewDefault)
 		expect(snapshot.current.run).toBeNull()
@@ -246,7 +248,7 @@ describe("buildCoderLoopStatusSnapshot", () => {
 			JSON.stringify({
 				preset: "single-phase-example",
 				runner: "codex",
-				codex: { binary: "/tmp/fake-codex", extraArgs: ["--json"] },
+				codex: { binary: "/tmp/fake-codex", extraArgs: ["--json"], model: "gpt-5.4" },
 			}, null, "\t"),
 		)
 
@@ -258,6 +260,7 @@ describe("buildCoderLoopStatusSnapshot", () => {
 			source: "config",
 			binary: "/tmp/fake-codex",
 			extraArgs: ["--json"],
+			model: "gpt-5.4",
 		})
 		expect(snapshot.queue.selected?.runner).toEqual(snapshot.target.runner.default)
 		expect(snapshot.queue.selected?.reviewRunner).toEqual(snapshot.target.runner.reviewDefault)
@@ -272,7 +275,7 @@ describe("buildCoderLoopStatusSnapshot", () => {
 				preset: "single-phase-example",
 				runner: "claude",
 				reviewRunner: "codex",
-				codex: { binary: "/tmp/fake-codex-review", extraArgs: ["--json"] },
+				codex: { binary: "/tmp/fake-codex-review", extraArgs: ["--json"], model: "gpt-5.4-high" },
 			}, null, "\t"),
 		)
 
@@ -285,8 +288,42 @@ describe("buildCoderLoopStatusSnapshot", () => {
 			source: "config",
 			binary: "/tmp/fake-codex-review",
 			extraArgs: ["--json"],
+			model: "gpt-5.4-high",
 		})
 		expect(snapshot.queue.selected?.reviewRunner).toEqual(snapshot.target.runner.reviewDefault)
+	})
+
+	test("runner model config is exposed while Claude review model is forced", async () => {
+		const target = await makeStatusTarget()
+		await writeFile(
+			resolve(target, ".coder-loop/runtime/config.json"),
+			JSON.stringify({
+				preset: "single-phase-example",
+				runner: "claude",
+				reviewRunner: "claude",
+				claude: { binary: "/tmp/fake-claude", extraArgs: ["--model", "sonnet"], model: "sonnet" },
+			}, null, "\t"),
+		)
+
+		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json" })
+
+		expect(snapshot.state.kind).toBe("ok")
+		expect(snapshot.target.runner.default).toEqual({
+			kind: "claude",
+			source: "config",
+			binary: "/tmp/fake-claude",
+			extraArgs: ["--model", "sonnet"],
+			model: "sonnet",
+		})
+		expect(snapshot.target.runner.reviewDefault).toEqual({
+			kind: "claude",
+			source: "config",
+			binary: "/tmp/fake-claude",
+			extraArgs: ["--model", "sonnet"],
+			model: CLAUDE_REVIEW_MODEL,
+		})
+		expect(snapshot.queue.selected?.runner.model).toBe("sonnet")
+		expect(snapshot.queue.selected?.reviewRunner.model).toBe(CLAUDE_REVIEW_MODEL)
 	})
 
 	test("queue item runner overrides the config default for the selected item", async () => {
@@ -321,6 +358,7 @@ describe("buildCoderLoopStatusSnapshot", () => {
 			source: "queue",
 			binary: "/tmp/fake-codex",
 			extraArgs: ["--ask-for-approval", "never"],
+			model: null,
 		})
 		expect(snapshot.queue.selected?.reviewRunner).toEqual(snapshot.target.runner.reviewDefault)
 		expect(snapshot.queue.selected?.reviewRunner.kind).toBe("claude")
@@ -1426,6 +1464,16 @@ describe("agentClaudeArgs — composes claude CLI args including --resume", () =
 		expect(args).toContain("5")
 	})
 
+	test("runner model replaces caller-provided Claude --model args", () => {
+		const args = agentClaudeArgs(["--model", "sonnet", "--max-turns", "5"], "prompt", { kind: "fresh" }, [], CLAUDE_REVIEW_MODEL)
+		const modelIdx = args.indexOf("--model")
+		expect(args.filter((a) => a === "--model").length).toBe(1)
+		expect(args).not.toContain("sonnet")
+		expect(args[modelIdx + 1]).toBe(CLAUDE_REVIEW_MODEL)
+		expect(args).toContain("--max-turns")
+		expect(args).toContain("5")
+	})
+
 	test("additionalDirs injects a single --add-dir followed by every dir, before -p", () => {
 		const args = agentClaudeArgs([], "p", { kind: "fresh" }, ["/x/preset", "/x/target"])
 		const idx = args.indexOf("--add-dir")
@@ -1474,6 +1522,23 @@ describe("agentCodexArgs", () => {
 		])
 	})
 
+	test("runner model replaces caller-provided Codex --model args", () => {
+		const args = agentCodexArgs(["-m", "gpt-5.3", "--sandbox", "workspace-write"], "hello", { kind: "fresh" }, "/tmp/target", "gpt-5.4")
+		expect(args).toEqual([
+			"--ask-for-approval",
+			"never",
+			"exec",
+			"--sandbox",
+			"workspace-write",
+			"--model",
+			"gpt-5.4",
+			"--json",
+			"--cd",
+			"/tmp/target",
+			"hello",
+		])
+	})
+
 	test("resume invocation uses Codex exec resume with JSON and ignore-rules", () => {
 		const args = agentCodexArgs(["--model", "gpt-5.4"], "继续", { kind: "resume", sessionId: "thread-123" }, "/tmp/target")
 		expect(args).toEqual([
@@ -1494,7 +1559,7 @@ describe("agentCodexArgs", () => {
 describe("buildRunnerInvocation", () => {
 	test("Claude runner maps to the existing claude stream-json invocation and exposes presetDir via --add-dir", () => {
 		const invocation = buildRunnerInvocation(
-			{ kind: "claude", source: "config", binary: "/tmp/claude", extraArgs: ["--max-turns", "5"] },
+			{ kind: "claude", source: "config", binary: "/tmp/claude", extraArgs: ["--max-turns", "5"], model: null },
 			"hello",
 			{ kind: "fresh" },
 			{ agentCwd: "/tmp/target", targetCwd: "/tmp/target", presetDir: "/tmp/preset" },
@@ -1511,7 +1576,7 @@ describe("buildRunnerInvocation", () => {
 
 	test("Claude runner with cross-repo agentCwd adds both presetDir and targetCwd to --add-dir", () => {
 		const invocation = buildRunnerInvocation(
-			{ kind: "claude", source: "config", binary: "/tmp/claude", extraArgs: [] },
+			{ kind: "claude", source: "config", binary: "/tmp/claude", extraArgs: [], model: null },
 			"hello",
 			{ kind: "fresh" },
 			{ agentCwd: "/tmp/agent-repo", targetCwd: "/tmp/target", presetDir: "/tmp/preset" },
@@ -1523,9 +1588,23 @@ describe("buildRunnerInvocation", () => {
 		expect(invocation.args[idx + 2]).toBe("/tmp/target")
 	})
 
+	test("runner model reaches Claude invocation and overrides extraArgs model", () => {
+		const invocation = buildRunnerInvocation(
+			{ kind: "claude", source: "config", binary: "/tmp/claude", extraArgs: ["--model", "sonnet"], model: CLAUDE_REVIEW_MODEL },
+			"hello",
+			{ kind: "fresh" },
+			{ agentCwd: "/tmp/target", targetCwd: "/tmp/target", presetDir: "/tmp/preset" },
+		)
+
+		const idx = invocation.args.indexOf("--model")
+		expect(invocation.args.filter((a) => a === "--model").length).toBe(1)
+		expect(invocation.args[idx + 1]).toBe(CLAUDE_REVIEW_MODEL)
+		expect(invocation.args).not.toContain("sonnet")
+	})
+
 	test("Codex runner maps to codex exec invocation (uses agentCwd; --add-dir not applicable)", () => {
 		const invocation = buildRunnerInvocation(
-			{ kind: "codex", source: "queue", binary: "codex", extraArgs: [] },
+			{ kind: "codex", source: "queue", binary: "codex", extraArgs: [], model: null },
 			"hello",
 			{ kind: "fresh" },
 			{ agentCwd: "/tmp/target", targetCwd: "/tmp/target", presetDir: "/tmp/preset" },
@@ -2046,7 +2125,7 @@ describe("summary watchdog e2e — spawnOneAttempt with a fake claudeBinary", ()
 	async function fixtureOptions(claudeBinary: string): Promise<LoopOptions> {
 		const preset = await bundledPreset()
 		const opts = await makeFixtureOptions(preset)
-		const claudeRunner = { kind: "claude" as const, binary: claudeBinary, extraArgs: [] }
+		const claudeRunner = { kind: "claude" as const, binary: claudeBinary, extraArgs: [], model: null }
 		return {
 			...opts,
 			defaultRunner: { ...claudeRunner, source: "host" as const },
@@ -2144,7 +2223,7 @@ describe("summary watchdog e2e — spawnOneAttempt with a fake claudeBinary", ()
 		expect(outcome.exitCode).toBe(0)
 	}, 10_000)
 
-	test("spawnOneAttempt supports Codex JSONL thread ids and records runner in status", async () => {
+	test("spawnOneAttempt supports Codex JSONL thread ids and records runner model in status", async () => {
 		const fake = await makeFakeClaudeBinary(
 			[
 				`echo '{"type":"thread.started","thread_id":"thread-codex-123"}'`,
@@ -2156,7 +2235,7 @@ describe("summary watchdog e2e — spawnOneAttempt with a fake claudeBinary", ()
 		const options = await fixtureOptions("claude")
 		const outputPath = resolve(options.logDir, `codex.iteration.txt`)
 		const sessionsPath = agentSessionsPath(outputPath)
-		const runner = { kind: "codex" as const, source: "queue" as const, binary: fake, extraArgs: [] }
+		const runner = { kind: "codex" as const, source: "queue" as const, binary: fake, extraArgs: [], model: "gpt-5.4" }
 
 		const outcome = await spawnOneAttempt({
 			options,
@@ -2174,8 +2253,10 @@ describe("summary watchdog e2e — spawnOneAttempt with a fake claudeBinary", ()
 		const last = await readLastSessionEntry(sessionsPath)
 		expect(last?.sessionId).toBe("thread-codex-123")
 		expect(last?.runner).toBe("codex")
-		const status = JSON.parse(await readFile(outputPath.replace(/\.txt$/, ".status.json"), "utf-8")) as { runner?: string; sessionId?: string }
+		expect(last?.model).toBe("gpt-5.4")
+		const status = JSON.parse(await readFile(outputPath.replace(/\.txt$/, ".status.json"), "utf-8")) as { runner?: string; model?: string; sessionId?: string }
 		expect(status.runner).toBe("codex")
+		expect(status.model).toBe("gpt-5.4")
 		expect(status.sessionId).toBe("thread-codex-123")
 	}, 10_000)
 })
@@ -2303,7 +2384,7 @@ describe("events jsonl — per-run NDJSON event stream", () => {
 
 		const preset = await bundledPreset()
 		const baseOpts = await makeFixtureOptions(preset)
-		const claudeRunner = { kind: "claude" as const, binary: fakePath, extraArgs: [] }
+		const claudeRunner = { kind: "claude" as const, binary: fakePath, extraArgs: [], model: null }
 		const options: LoopOptions = {
 			...baseOpts,
 			targetCwd,
@@ -2367,7 +2448,7 @@ describe("events jsonl — per-run NDJSON event stream", () => {
 
 		const preset = await bundledPreset()
 		const baseOpts = await makeFixtureOptions(preset)
-		const claudeRunner = { kind: "claude" as const, binary: fakePath, extraArgs: [] }
+		const claudeRunner = { kind: "claude" as const, binary: fakePath, extraArgs: [], model: null }
 		const options: LoopOptions = {
 			...baseOpts,
 			targetCwd,

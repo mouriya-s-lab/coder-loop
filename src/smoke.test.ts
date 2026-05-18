@@ -202,13 +202,14 @@ describe("smoke: single-phase-example preset", () => {
 		})
 		const stderr = new TextDecoder().decode(proc.stderr)
 		expect(proc.exitCode).toBe(0)
-		expect(stderr).toContain("INFO: target default runner=codex (config)")
+		expect(stderr).toContain("INFO: target default runner=codex (config, binary=missing-codex-for-doctor-test, model=<default>)")
+		expect(stderr).toContain("INFO: review default runner=claude (review-default, binary=claude, model=claude-opus-4-7)")
 		expect(stderr).toContain("FAIL: codex runner CLI (missing-codex-for-doctor-test) 未在 PATH 中")
 	})
 })
 
 describe("smoke: phase runner selection", () => {
-	test("work item can run with Codex while review defaults to Claude", async () => {
+	test("work item can run with Codex while review defaults to Claude Opus 4.7 model", async () => {
 		const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-review-runner-"))
 		const runtime = resolve(dir, ".coder-loop/runtime")
 		const presetDir = resolve(dir, ".coder-loop/two-phase-preset")
@@ -254,6 +255,7 @@ describe("smoke: phase runner selection", () => {
 		await writeFile(resolve(presetDir, "review-entry.md"), "REVIEW {{ITEM_ID}} {{RUN_ID}}\n")
 
 		const callsPath = resolve(dir, "runner-calls.log")
+		const claudeArgsPath = resolve(dir, "claude-args.log")
 		const fakeCodex = resolve(dir, "fake-codex.sh")
 		const fakeClaude = resolve(dir, "fake-claude.sh")
 		await writeFile(fakeCodex, [
@@ -267,6 +269,7 @@ describe("smoke: phase runner selection", () => {
 		await writeFile(fakeClaude, [
 			`#!/usr/bin/env bash`,
 			`echo claude >> "${callsPath}"`,
+			`printf '%s\\n' "$@" > "${claudeArgsPath}"`,
 			`echo 'REVIEW SUMMARY: done'`,
 			`exit 0`,
 			``,
@@ -302,7 +305,12 @@ describe("smoke: phase runner selection", () => {
 		expect(proc.exitCode).toBe(0)
 		expect(stderr).toContain("Selected runner: codex (queue")
 		expect(stderr).toContain("Review runner: claude (review-default")
+		expect(stderr).toContain("model=claude-opus-4-7")
 		expect((await readFile(callsPath, "utf-8")).trim().split("\n")).toEqual(["codex", "claude"])
+		const claudeArgs = (await readFile(claudeArgsPath, "utf-8")).trim().split("\n")
+		const modelIdx = claudeArgs.indexOf("--model")
+		expect(modelIdx).toBeGreaterThanOrEqual(0)
+		expect(claudeArgs[modelIdx + 1]).toBe("claude-opus-4-7")
 	}, 15_000)
 })
 

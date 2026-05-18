@@ -101,7 +101,7 @@ bun src/loop.ts --target-cwd <fresh-target> --check-runtime
 | `[[fragments]].role` | string | 是 | fragment 角色（如 `common` / `iter` / `review`），仅 metadata，引擎不校验 |
 | `[[fragments]].path` | string | 是 | 相对 preset.toml 的 markdown 文件路径，文件必须可读 |
 | `[agent].binary` | string | 是 | schema 保留字段；实际 spawn 由 target runtime 的 runner selection 决定。新 preset 可填 `"claude"` 作为兼容占位 |
-| `[agent].extraArgs` | string[] | 否 | schema 保留字段；实际 runner args 用 target config 的 `claude.extraArgs` / `codex.extraArgs` |
+| `[agent].extraArgs` | string[] | 否 | schema 保留字段；实际 runner args 用 target config 的 `claude.model` / `claude.extraArgs`、`codex.model` / `codex.extraArgs` |
 
 引擎在加载时强制：
 
@@ -198,19 +198,19 @@ target 在 `.coder-loop/runtime/config.json`（或 `config.toml`）写：
 
 两者互斥。都不写时引擎走默认的 `gh-issue-pr-iteration`。`preset` 名只允许 `^[a-zA-Z][a-zA-Z0-9_-]*$`，禁止路径分隔符与 `..`，所以 bundled name 一定落在 `<pkg>/presets/<name>/` 内。
 
-Runner 是 target runtime 配置，不是 preset 状态机的一部分。Iteration 默认 runner 继承宿主；review 默认 runner 固定为 `claude`。target 可写：
+Runner 是 target runtime 配置，不是 preset 状态机的一部分。Iteration 默认 runner 继承宿主；review 默认 runner 固定为 `claude`，且 Claude review 模型固定为 `claude-opus-4-7`。target 可写：
 
 ```json
 {
   "preset": "single-phase-example",
   "runner": "codex",
   "reviewRunner": "claude",
-  "codex": { "binary": "codex", "extraArgs": [] },
-  "claude": { "binary": "claude", "extraArgs": [] }
+  "codex": { "binary": "codex", "model": "gpt-5.4", "extraArgs": [] },
+  "claude": { "binary": "claude", "model": "sonnet", "extraArgs": [] }
 }
 ```
 
-queue item 可加 `"runner": "claude" | "codex"` 只覆盖该 item 的 iteration runner；review 不受 queue item 覆盖影响，除非 target config 显式写 `reviewRunner`。preset 作者不要把某个 runner 的 CLI 细节写进 engine contract；若某个 preset 只支持特定 runner，把它写进该 preset 的 README / target workflow，并用 `doctor` / `status` 验证 target config 是否符合预期。
+queue item 可加 `"runner": "claude" | "codex"` 只覆盖该 item 的 iteration runner；review 不受 queue item 覆盖影响，除非 target config 显式写 `reviewRunner`。`claude.model` 只影响 Claude iteration；review runner 为 Claude 时引擎会把 model 强制成 `claude-opus-4-7` 并替换 `--model` extra arg。preset 作者不要把某个 runner 的 CLI 细节写进 engine contract；若某个 preset 只支持特定 runner，把它写进该 preset 的 README / target workflow，并用 `doctor` / `status` 验证 target config 是否符合预期。
 
 ---
 

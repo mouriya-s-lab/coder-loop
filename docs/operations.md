@@ -54,12 +54,12 @@ Runner 选择也在 `status` 中显式暴露：
 | JSON path | 含义 |
 |---|---|
 | `target.runner.hostDefault` | 当前宿主推断出的默认 runner：Codex 宿主为 `codex`，Claude Code 宿主为 `claude`，无宿主信号时 fallback `claude` |
-| `target.runner.default` | target 默认 iteration runner；来源为 `config` 或 `host`，含 `kind / source / binary / extraArgs` |
-| `target.runner.reviewDefault` | review runner；默认 `claude`（source=`review-default`），可由 config 的 `reviewRunner` 覆盖 |
+| `target.runner.default` | target 默认 iteration runner；来源为 `config` 或 `host`，含 `kind / source / binary / extraArgs / model` |
+| `target.runner.reviewDefault` | review runner；默认 `claude`（source=`review-default`），可由 config 的 `reviewRunner` 覆盖；当 kind 为 `claude` 时 model 强制为 `claude-opus-4-7` |
 | `queue.selected.runner` | 当前 selected item 的实际 iteration runner；queue item 上的 `runner` 会覆盖 target default |
 | `queue.selected.reviewRunner` | 当前 selected item 的 review runner；不受 queue item `runner` 影响 |
 | `current.runner` | 当前 phase 的实际 runner；没有 current 时为 `null` |
-| `current.phaseStatus.value.runner` | 已落盘 phase status 里记录的 runner kind；旧 status 文件可能为 `null` |
+| `current.phaseStatus.value.runner` / `.model` | 已落盘 phase status 里记录的 runner kind 与 model；旧 status 文件可能为 `null` |
 
 target config 可写：
 
@@ -67,12 +67,12 @@ target config 可写：
 {
   "runner": "codex",
   "reviewRunner": "claude",
-  "claude": { "binary": "claude", "extraArgs": [] },
-  "codex": { "binary": "codex", "extraArgs": ["--model", "gpt-5.4"] }
+  "claude": { "binary": "claude", "model": "sonnet", "extraArgs": [] },
+  "codex": { "binary": "codex", "model": "gpt-5.4", "extraArgs": [] }
 }
 ```
 
-queue item 也可写 `"runner": "claude" | "codex"` 做单 item iteration 覆盖。Review 默认固定 `claude`；需要改 review 才写 config 顶层 `"reviewRunner"`。`doctor` 的 Layer C 会检查 `target.runner.default.binary` 和 `target.runner.reviewDefault.binary`，不是硬编码检查单一 runner。
+queue item 也可写 `"runner": "claude" | "codex"` 做单 item iteration 覆盖。Review 默认固定 `claude`；需要改 review runner 才写 config 顶层 `"reviewRunner"`。当 review runner 是 Claude 时，`target.runner.reviewDefault.model` 固定为 `claude-opus-4-7`，并会替换 `claude.extraArgs` 中已有的 `--model`。`doctor` 的 Layer C 会检查 `target.runner.default.binary` 和 `target.runner.reviewDefault.binary`，不是硬编码检查单一 runner。
 
 Codex runner 默认使用 `--sandbox danger-full-access`，因为真实
 `gh-issue-pr-iteration` 需要写工作区、写 handoff、并调用 `gh`。需要更窄
@@ -156,6 +156,7 @@ type CurrentRun = {
 {
   "label": "iteration",
   "runner": "codex",
+  "model": "gpt-5.4",
   "pid": 12345,
   "startedAt": "2026-05-11T10:00:00.000Z",
   "lastEventAt": "2026-05-11T10:14:32.123Z",
@@ -170,7 +171,7 @@ type CurrentRun = {
 }
 ```
 
-`runner` 为本次 phase 使用的 runner kind（旧文件可能缺失）。`exitCode != 0` 或 `signal != null` → spawn 异常（不是 agent 内部逻辑失败，agent 内部失败是 `exitCode == 0` 但 trace 末尾 verdict 是 blocked/failed）。
+`runner` / `model` 为本次 phase 使用的 runner kind 与模型（旧文件可能缺失）。`exitCode != 0` 或 `signal != null` → spawn 异常（不是 agent 内部逻辑失败，agent 内部失败是 `exitCode == 0` 但 trace 末尾 verdict 是 blocked/failed）。
 
 ---
 

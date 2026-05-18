@@ -70,6 +70,10 @@ type CheckOutcome =
 	| { ok: true; detail: string }
 	| { ok: false; detail: string }
 
+function formatStatusRunner(runner: { kind: string; source: string; binary: string; model: string | null }): string {
+	return `${runner.kind} (${runner.source}, binary=${runner.binary}, model=${runner.model ?? "<default>"})`
+}
+
 function fail(message: string): never {
 	console.error(message)
 	process.exit(1)
@@ -515,13 +519,13 @@ export function buildLiveRuntimeHealthLines(snapshot: CoderLoopStatusSnapshot): 
 
 	const selected = snapshot.queue.selected?.id ?? "<none>"
 	lines.push(`INFO: queue total=${snapshot.queue.total}, continuable=${snapshot.queue.continuable}, terminal=${snapshot.queue.terminal}, selected=${selected}`)
-	lines.push(`INFO: runner hostDefault=${snapshot.target.runner.hostDefault}, default=${snapshot.target.runner.default.kind} (${snapshot.target.runner.default.source}, binary=${snapshot.target.runner.default.binary}), reviewDefault=${snapshot.target.runner.reviewDefault.kind} (${snapshot.target.runner.reviewDefault.source}, binary=${snapshot.target.runner.reviewDefault.binary})`)
-	if (snapshot.queue.selected !== null) lines.push(`INFO: selected runner=${snapshot.queue.selected.runner.kind} (${snapshot.queue.selected.runner.source}, binary=${snapshot.queue.selected.runner.binary}), review=${snapshot.queue.selected.reviewRunner.kind} (${snapshot.queue.selected.reviewRunner.source}, binary=${snapshot.queue.selected.reviewRunner.binary})`)
+	lines.push(`INFO: runner hostDefault=${snapshot.target.runner.hostDefault}, default=${formatStatusRunner(snapshot.target.runner.default)}, reviewDefault=${formatStatusRunner(snapshot.target.runner.reviewDefault)}`)
+	if (snapshot.queue.selected !== null) lines.push(`INFO: selected runner=${formatStatusRunner(snapshot.queue.selected.runner)}, review=${formatStatusRunner(snapshot.queue.selected.reviewRunner)}`)
 
 	if (snapshot.current.run === null) {
 		lines.push("INFO: current run=<none>")
 	} else {
-		const currentRunner = snapshot.current.runner === null ? "<unknown>" : `${snapshot.current.runner.kind} (${snapshot.current.runner.source}, binary=${snapshot.current.runner.binary})`
+		const currentRunner = snapshot.current.runner === null ? "<unknown>" : formatStatusRunner(snapshot.current.runner)
 		lines.push(`INFO: current id=${snapshot.current.id ?? "<unknown>"}, phase=${snapshot.current.run.phase}, runId=${snapshot.current.run.runId}, runner=${currentRunner}`)
 		const phaseStatus = snapshot.current.phaseStatus
 		if (phaseStatus === null) {
@@ -531,7 +535,7 @@ export function buildLiveRuntimeHealthLines(snapshot: CoderLoopStatusSnapshot): 
 		} else if (phaseStatus.error !== null) {
 			lines.push(`FAIL: current phase status unreadable (${phaseStatus.error})`)
 		} else if (phaseStatus.value !== null) {
-			lines.push(`OK: current phase status runner=${phaseStatus.value.runner ?? "<unknown>"}, pid=${phaseStatus.value.pid}, exit=${phaseStatus.value.exitCode ?? "<running>"}, signal=${phaseStatus.value.signal ?? "<none>"}, session=${phaseStatus.value.sessionId ?? "<none>"}`)
+			lines.push(`OK: current phase status runner=${phaseStatus.value.runner ?? "<unknown>"}, model=${phaseStatus.value.model ?? "<default>"}, pid=${phaseStatus.value.pid}, exit=${phaseStatus.value.exitCode ?? "<running>"}, signal=${phaseStatus.value.signal ?? "<none>"}, session=${phaseStatus.value.sessionId ?? "<none>"}`)
 		}
 	}
 
@@ -603,7 +607,7 @@ export async function runInstallCommand(rawArgs: string[]): Promise<void> {
 	// Layer C: prereqs
 	info("\n[Layer C] Operator 机器先决条件")
 	const installRunner = detectHostRunner(process.env)
-	info(`  INFO: install 默认 runner=${installRunner}（可在 target config 用 runner 覆盖），review 默认 runner=claude（可用 reviewRunner 覆盖）`)
+	info(`  INFO: install 默认 runner=${installRunner}（可在 target config 用 runner 覆盖），review 默认 runner=claude / model=claude-opus-4-7（可用 reviewRunner 改 runner）`)
 	const layerCResults = await checkLayerC([{ kind: installRunner, binary: installRunner }, { kind: "claude", binary: "claude" }])
 	for (const r of layerCResults) info(`  ${r.ok ? "OK" : "FAIL"}: ${r.detail}`)
 	const layerCOk = layerCResults.every((r) => r.ok)
@@ -777,8 +781,8 @@ export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
 
 	info("\n[Layer C] Operator 机器先决条件")
 	const cResults = await checkLayerC([statusSnapshot.target.runner.default, statusSnapshot.target.runner.reviewDefault])
-	info(`  INFO: target default runner=${statusSnapshot.target.runner.default.kind} (${statusSnapshot.target.runner.default.source})`)
-	info(`  INFO: review default runner=${statusSnapshot.target.runner.reviewDefault.kind} (${statusSnapshot.target.runner.reviewDefault.source})`)
+	info(`  INFO: target default runner=${formatStatusRunner(statusSnapshot.target.runner.default)}`)
+	info(`  INFO: review default runner=${formatStatusRunner(statusSnapshot.target.runner.reviewDefault)}`)
 	for (const r of cResults) info(`  ${r.ok ? "OK" : "FAIL"}: ${r.detail}`)
 
 	info("\n[Layer D] User-level skill 版本")

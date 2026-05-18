@@ -30,6 +30,7 @@ const DEFAULT_EVIDENCE_DIR = ".coder-loop/runtime/evidence"
 const DEFAULT_LOG_DIR = ".coder-loop/runtime/logs"
 const REVIEW_ON_EMPTY_LOCK_FILE = "review-on-empty.lock"
 const DEFAULT_IDLE_SLEEP_MS = 60_000
+export const CLAUDE_REVIEW_MODEL = "claude-opus-4-7"
 
 const EXCLUDE_ENTRIES = [".dev-loop", ".dev-trace.txt", ".coder-loop/runtime"]
 
@@ -145,8 +146,10 @@ type LoopConfig = {
 	reviewRunner: AgentRunnerKind | null
 	claudeBinary: string | null
 	claudeExtraArgs: string[]
+	claudeModel: string | null
 	codexBinary: string | null
 	codexExtraArgs: string[]
+	codexModel: string | null
 	preset: string | null
 	presetPath: string | null
 }
@@ -170,10 +173,12 @@ const StatusConfigBoundary = arkType({
 	"claude?": {
 		"binary?": "string|null",
 		"extraArgs?": "string[]",
+		"model?": "string|null",
 	},
 	"codex?": {
 		"binary?": "string|null",
 		"extraArgs?": "string[]",
+		"model?": "string|null",
 	},
 	"preset?": arkType.or("string", { name: "string" }, "null"),
 	"presetPath?": "string|null",
@@ -193,6 +198,7 @@ const StatusStateBoundary = arkType({
 const AgentRunStatusBoundary = arkType({
 	label: "string",
 	"runner?": arkType.or(AgentRunnerKindBoundary, "null"),
+	"model?": "string|null",
 	"pid": "number|null",
 	startedAt: "string",
 	lastEventAt: "string",
@@ -287,6 +293,7 @@ export type AgentRunnerCommand = {
 	kind: AgentRunnerKind
 	binary: string
 	extraArgs: readonly string[]
+	model: string | null
 }
 
 export type AgentRunnerSelection = AgentRunnerCommand & {
@@ -306,6 +313,7 @@ export type RuntimeCheckError = {
 export type AgentRunStatus = {
 	label: AgentLabel
 	runner: AgentRunnerKind | null
+	model: string | null
 	pid: number | null
 	startedAt: string
 	lastEventAt: string
@@ -364,6 +372,7 @@ export type StatusRunnerSelectionSnapshot = {
 	source: AgentRunnerSource
 	binary: string
 	extraArgs: string[]
+	model: string | null
 }
 
 export type StatusRunnerDefaultsSnapshot = {
@@ -475,6 +484,7 @@ export type Terminated =
 export type SessionEntry = {
 	attempt: string
 	runner?: AgentRunnerKind | null
+	model?: string | null
 	sessionId: string | null
 	exitCode: number | null
 	signal: string | null
@@ -968,7 +978,7 @@ async function main() {
 	log(`Config: maxIterations=${formatMaxIterations(options.maxIterations)}`)
 	log(`Repo=${options.repository}`)
 	log(`Preset dir: ${options.preset.presetDir}`)
-	log(`Default runner: ${options.defaultRunner.kind} (${options.defaultRunner.source}, binary=${options.defaultRunner.binary})`)
+	log(`Default runner: ${options.defaultRunner.kind} (${options.defaultRunner.source}, binary=${options.defaultRunner.binary}, model=${options.defaultRunner.model ?? "<default>"})`)
 	for (const phase of options.preset.phases) log(`Phase ${phase.name} prompt: ${phase.prompt}`)
 	log(`Workflow=${options.workflowPath}`)
 	log(`State=${options.statePath}`)
@@ -1038,8 +1048,8 @@ async function main() {
 		log(`--- Iteration ${workIteration} (work) ---`)
 
 		const selectedId = getItemId(selected.item, options.preset)
-		log(`Selected runner: ${selected.runner.kind} (${selected.runner.source}, binary=${selected.runner.binary})`)
-		log(`Review runner: ${selected.reviewRunner.kind} (${selected.reviewRunner.source}, binary=${selected.reviewRunner.binary})`)
+		log(`Selected runner: ${selected.runner.kind} (${selected.runner.source}, binary=${selected.runner.binary}, model=${selected.runner.model ?? "<default>"})`)
+		log(`Review runner: ${selected.reviewRunner.kind} (${selected.reviewRunner.source}, binary=${selected.reviewRunner.binary}, model=${selected.reviewRunner.model ?? "<default>"})`)
 		const current = state.current && getCurrentId(state.current, options.preset) === selectedId ? state.current : null
 		const issueRun = makeIssueRunContext(current)
 		const runId = current?.runId ?? makeRunId(selectedId)
@@ -1459,8 +1469,10 @@ function buildStatusRunnerDefaultsSnapshot(options: LoopOptions | null): StatusR
 		reviewRunner: null,
 		claudeBinary: null,
 		claudeExtraArgs: [],
+		claudeModel: null,
 		codexBinary: null,
 		codexExtraArgs: [],
+		codexModel: null,
 		preset: null,
 		presetPath: null,
 	}
@@ -1562,6 +1574,7 @@ function statusRunnerSelection(selection: AgentRunnerSelection): StatusRunnerSel
 		source: selection.source,
 		binary: selection.binary,
 		extraArgs: [...selection.extraArgs],
+		model: selection.model,
 	}
 }
 
@@ -1581,6 +1594,7 @@ function agentStatusFromInput(input: AgentRunStatusInput): AgentRunStatus {
 	return {
 		label: input.label,
 		runner: input.runner ?? null,
+		model: input.model ?? null,
 		pid: input.pid,
 		startedAt: input.startedAt,
 		lastEventAt: input.lastEventAt,
@@ -2128,8 +2142,10 @@ function loopConfigFromStatusInput(input: StatusConfigInput): LoopConfig {
 		reviewRunner: input.reviewRunner ?? null,
 		claudeBinary: input.claude?.binary ?? null,
 		claudeExtraArgs: input.claude?.extraArgs ?? [],
+		claudeModel: input.claude?.model ?? null,
 		codexBinary: input.codex?.binary ?? null,
 		codexExtraArgs: input.codex?.extraArgs ?? [],
+		codexModel: input.codex?.model ?? null,
 		preset: readPresetNameFromStatusInput(input.preset),
 		presetPath: input.presetPath ?? null,
 	}
@@ -2147,11 +2163,13 @@ function buildAgentRunnerCommands(config: LoopConfig): AgentRunnerCommands {
 			kind: "claude",
 			binary: config.claudeBinary ?? "claude",
 			extraArgs: config.claudeExtraArgs,
+			model: config.claudeModel,
 		},
 		codex: {
 			kind: "codex",
 			binary: config.codexBinary ?? "codex",
 			extraArgs: config.codexExtraArgs,
+			model: config.codexModel,
 		},
 	}
 }
@@ -2163,7 +2181,9 @@ function selectDefaultRunner(hostRunner: AgentRunnerKind, configuredRunner: Agen
 
 function selectReviewRunner(configuredRunner: AgentRunnerKind | null, commands: AgentRunnerCommands): AgentRunnerSelection {
 	const kind = configuredRunner ?? "claude"
-	return { ...commands[kind], source: configuredRunner === null ? "review-default" : "config" }
+	const command = commands[kind]
+	const model = command.kind === "claude" ? CLAUDE_REVIEW_MODEL : command.model
+	return { ...command, model, source: configuredRunner === null ? "review-default" : "config" }
 }
 
 function selectRunnerForItem(item: QueueItem, options: LoopOptions): AgentRunnerSelection {
@@ -2700,12 +2720,22 @@ async function selectResumeEntryForRunner(
 		log(`Agent [${label}] not resuming previous ${lastRunner} session with ${runner.kind} runner.`)
 		return null
 	}
+	const lastModel = entry.model ?? await readAgentStatusModel(agentStatusPath(outputPath))
+	if (lastModel !== runner.model) {
+		log(`Agent [${label}] not resuming previous ${lastModel ?? "<default>"} model session with ${runner.model ?? "<default>"} model.`)
+		return null
+	}
 	return entry
 }
 
 async function readAgentStatusRunner(statusPath: string): Promise<AgentRunnerKind | null> {
 	const phaseStatus = await readAgentPhaseStatus(statusPath)
 	return phaseStatus.value?.runner ?? null
+}
+
+async function readAgentStatusModel(statusPath: string): Promise<string | null> {
+	const phaseStatus = await readAgentPhaseStatus(statusPath)
+	return phaseStatus.value?.model ?? null
 }
 
 export type SpawnOneAttemptInput = {
@@ -2899,6 +2929,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 		const status: AgentRunStatus = {
 			label,
 			runner: selectedRunner.kind,
+			model: selectedRunner.model,
 			pid: null,
 			startedAt,
 			lastEventAt: startedAt,
@@ -2926,6 +2957,8 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 				`# Agent [${label}] latest attempt`,
 				`startedAt: ${status.startedAt}`,
 				`pid: ${status.pid ?? ""}`,
+				`runner: ${selectedRunner.kind}`,
+				`model: ${selectedRunner.model ?? ""}`,
 				`status: ${statusPath}`,
 				`stream: ${attemptStreamPath}`,
 				`stderr: ${attemptStderrPath}`,
@@ -3025,7 +3058,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 		void writeStatus()
 		writeLatestIndex()
 
-		log(`Agent [${label}] spawned: runner=${selectedRunner.kind}, pid=${child.pid}, stream=${attemptStreamPath}, stderr=${attemptStderrPath}, status=${statusPath}, resume=${resume.kind === "resume" ? resume.sessionId : "none"}`)
+		log(`Agent [${label}] spawned: runner=${selectedRunner.kind}, model=${selectedRunner.model ?? "<default>"}, pid=${child.pid}, stream=${attemptStreamPath}, stderr=${attemptStderrPath}, status=${statusPath}, resume=${resume.kind === "resume" ? resume.sessionId : "none"}`)
 
 		if (input.eventContext) {
 			const ec = input.eventContext
@@ -3050,6 +3083,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			const entry: SessionEntry = {
 				attempt: startedAt,
 				runner: selectedRunner.kind,
+				model: selectedRunner.model,
 				sessionId: status.sessionId,
 				exitCode,
 				signal,
@@ -3145,8 +3179,23 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 	})
 }
 
-export function agentClaudeArgs(extraArgs: readonly string[], prompt: string, resume: ResumeDecision, additionalDirs: readonly string[]): string[] {
-	const args = [...extraArgs]
+function stripModelArgs(extraArgs: readonly string[], flags: readonly string[]): string[] {
+	const stripped: string[] = []
+	for (let i = 0; i < extraArgs.length; i++) {
+		const arg = extraArgs[i]!
+		if (flags.includes(arg)) {
+			i++
+			continue
+		}
+		if (flags.some((flag) => arg.startsWith(`${flag}=`))) continue
+		stripped.push(arg)
+	}
+	return stripped
+}
+
+export function agentClaudeArgs(extraArgs: readonly string[], prompt: string, resume: ResumeDecision, additionalDirs: readonly string[], model: string | null = null): string[] {
+	const args = model === null ? [...extraArgs] : stripModelArgs(extraArgs, ["--model"])
+	if (model !== null) args.push("--model", model)
 	if (!args.includes("--output-format")) args.push("--output-format", "stream-json")
 	if (!args.includes("--verbose")) args.push("--verbose")
 	if (additionalDirs.length > 0 && !args.includes("--add-dir")) {
@@ -3173,26 +3222,29 @@ export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: stri
 		return {
 			kind: "spawn",
 			binary: runner.binary,
-			args: agentClaudeArgs(runner.extraArgs, prompt, resume, dirs),
+			args: agentClaudeArgs(runner.extraArgs, prompt, resume, dirs, runner.model),
 		}
 	}
 	return {
 		kind: "spawn",
 		binary: runner.binary,
-		args: agentCodexArgs(runner.extraArgs, prompt, resume, paths.agentCwd),
+		args: agentCodexArgs(runner.extraArgs, prompt, resume, paths.agentCwd, runner.model),
 	}
 }
 
-export function agentCodexArgs(extraArgs: readonly string[], prompt: string, resume: ResumeDecision, agentCwd: string): string[] {
+export function agentCodexArgs(extraArgs: readonly string[], prompt: string, resume: ResumeDecision, agentCwd: string, model: string | null = null): string[] {
 	const topLevelArgs = ["--ask-for-approval", "never", "exec"]
+	const runnerArgs = model === null ? [...extraArgs] : stripModelArgs(extraArgs, ["--model", "-m"])
 	if (resume.kind === "resume") {
-		const args = [...topLevelArgs, "resume", resume.sessionId, ...extraArgs]
+		const args = [...topLevelArgs, "resume", resume.sessionId, ...runnerArgs]
+		if (model !== null) args.push("--model", model)
 		if (!args.includes("--json")) args.push("--json")
 		if (!args.includes("--ignore-rules")) args.push("--ignore-rules")
 		args.push(prompt)
 		return args
 	}
-	const args = [...topLevelArgs, ...extraArgs]
+	const args = [...topLevelArgs, ...runnerArgs]
+	if (model !== null) args.push("--model", model)
 	if (!args.includes("--json")) args.push("--json")
 	if (!args.includes("--cd")) args.push("--cd", agentCwd)
 	if (!args.includes("--sandbox")) args.push("--sandbox", "danger-full-access")
@@ -3368,6 +3420,7 @@ function isValidSessionEntry(value: unknown): value is SessionEntry {
 	const v = value as Record<string, unknown>
 	if (typeof v["attempt"] !== "string") return false
 	if (v["runner"] !== undefined && v["runner"] !== null && v["runner"] !== "claude" && v["runner"] !== "codex") return false
+	if (v["model"] !== undefined && v["model"] !== null && typeof v["model"] !== "string") return false
 	if (v["sessionId"] !== null && typeof v["sessionId"] !== "string") return false
 	if (v["exitCode"] !== null && typeof v["exitCode"] !== "number") return false
 	if (v["signal"] !== null && typeof v["signal"] !== "string") return false
