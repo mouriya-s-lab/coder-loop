@@ -61,7 +61,7 @@ Runner 是运维/target runtime 契约，不是 preset 的业务状态机。Iter
 2. `.coder-loop/runtime/config.json` 顶层 `"runner": "claude" | "codex"`，作为 target iteration 默认 runner。
 3. host default。
 
-Review 可用 `.coder-loop/runtime/config.json` 顶层 `"reviewRunner": "claude" | "codex"` 显式覆盖；不写时恒为 `claude`。Runner binary 与额外参数由 config 的 `claude.binary` / `claude.extraArgs`、`codex.binary` / `codex.extraArgs` 提供。`coder-loop status <target> --json` 暴露 `target.runner.hostDefault`、`target.runner.default`、`target.runner.reviewDefault`、`queue.selected.runner`、`queue.selected.reviewRunner`、`current.runner` 和 `current.phaseStatus.value.runner`；`doctor` 按 target default runner 与 review default runner 的实际 binary 做 PATH 检查。不要从 `.coder-loop/runtime/logs/*.status.json` 反推 runner，除非 `status` 已经指出需要 fallback debug。
+Review 可用 `.coder-loop/runtime/config.json` 顶层 `"reviewRunner": "claude" | "codex"` 显式覆盖；不写时恒为 `claude`。Runner binary、模型与额外参数由 config 的 `claude.binary` / `claude.model` / `claude.extraArgs`、`codex.binary` / `codex.model` / `codex.extraArgs` 提供；但 review runner 为 Claude 时模型强制为 `claude-opus-4-7`，会替换任何 Claude `--model` extra arg。`coder-loop status <target> --json` 暴露 `target.runner.hostDefault`、`target.runner.default`、`target.runner.reviewDefault`、`queue.selected.runner`、`queue.selected.reviewRunner`、`current.runner` 和 `current.phaseStatus.value.runner/model`；`doctor` 按 target default runner 与 review default runner 的实际 binary 做 PATH 检查。不要从 `.coder-loop/runtime/logs/*.status.json` 反推 runner/model，除非 `status` 已经指出需要 fallback debug。
 
 ### 写一个新 preset 的最小流程
 

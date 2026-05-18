@@ -36,8 +36,8 @@ The successful 2026-05-17 run used Codex end to end. Current runner semantics di
 - target config: `.coder-loop/runtime/config.json` has `"runner": "codex"`;
 - queue item: `runner: "codex"`;
 - `status --json`: selected runner `kind=codex`, `source=queue`;
-- `status --json`: review runner defaults to `kind=claude`, `source=review-default` unless config sets `reviewRunner`;
-- iteration phase status should record `runner: "codex"` and a Codex `thread_id`; review phase status should record `runner: "claude"` under the default review policy.
+- `status --json`: review runner defaults to `kind=claude`, `source=review-default`, `model=claude-opus-4-7` unless config sets `reviewRunner` to another runner;
+- iteration phase status should record `runner: "codex"` and a Codex `thread_id`; review phase status should record `runner: "claude"` and `model: "claude-opus-4-7"` under the default review policy.
 
 Codex runner requires real workspace writes and GitHub CLI access for the
 `gh-issue-pr-iteration` preset. The default fresh Codex invocation therefore
