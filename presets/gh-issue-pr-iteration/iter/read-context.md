@@ -42,6 +42,7 @@ Choose exactly one:
 
 - `context_ready` → branch by `ISSUE_KIND`:
   - `ISSUE_KIND` is `comment` → read `iter/spike-comment`. The deliverable is an issue comment + sub-issue 列表, not code.
+  - `ISSUE_KIND` is `code-spike` → read `iter/source-writing-spike`. The deliverable is source-writing spike evidence + issue comment, not a PR.
   - `ISSUE_KIND` is `code` or empty (legacy unlabeled issue) → read `iter/classify-scope`.
 - `infrastructure_failure` → read `iter/handoff` and record the exact missing file/query failure.
 

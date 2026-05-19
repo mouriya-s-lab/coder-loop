@@ -18,13 +18,19 @@ Then read `iter/read-context`.
 
 Iteration produces implementation signal. The exact deliverable depends on `ISSUE_KIND`:
 
-- `ISSUE_KIND` is `code` or empty (legacy unlabeled) — code path:
+- `ISSUE_KIND` is `code` or empty (legacy unlabeled) — PR-backed code path:
   - understand selected issue scope;
   - continue existing branch/PR when retrying (`ISSUE_STATUS == changes_requested`) or when resuming an interrupted iteration (`RUN_ID_GENERATION == resumed`);
   - implement one complete deliverable when required;
   - run required verification and collect reviewer-visible evidence;
   - create/update the implementation PR when code changed;
   - append a handoff note.
+- `ISSUE_KIND` is `code-spike` — source-writing no-merge spike path:
+  - understand selected spike scope;
+  - continue existing spike branch when retrying or resuming;
+  - write the minimal PoC/source/evidence needed to answer the spike;
+  - post the result as an issue comment with evidence artifacts and branch/SHA when useful;
+  - do not open a PR, merge anything, close the issue, or write final local state.
 - `ISSUE_KIND` is `comment` — comment path (spike / design dialogue):
   - understand the selected issue's question and result branches;
   - post a GitHub issue comment with the answer + cited evidence;

@@ -13,7 +13,7 @@ Take classified deliverables and emit a draft issue body for each. At this fragm
 
 ## Procedure
 
-1. For each `implementation` / `spike` / `parent` candidate, draft a body skeleton.
+1. For each `implementation` / `spike` / `source-writing-spike` / `parent` candidate, draft a body skeleton.
 
 2. **Atomicity test** (per user-level skill hard constraint, also in `contract.md` §5):
    - Can you write a single coherent `## Why` (or `## 问题` / `## 目标` for future-work) paragraph that justifies the entire body without listing multiple distinct triggers?
@@ -83,6 +83,41 @@ Take classified deliverables and emit a draft issue body for each. At this fragm
 
    ## 依赖关系
    - Blocks: #<N>（依赖该假设的 implementation issue）
+   ```
+
+   `source-writing-spike` (kind:code-spike):
+
+   ```markdown
+   ## 目标
+   Verify assumption with source/runtime PoC: <具体 claim>
+
+   ## 上下文
+   - **Repo**: <owner>/<repo>（path: <local>）
+   - **Design doc / source**: <path / issue / PR> section <N>
+   - **Assumption source**: <原文 quote>
+
+   ## 问题
+   <为什么 comment-only spike 无法验证；为什么需要写 PoC/source 或 runtime evidence>
+
+   ## 预期结果
+   <spike 完成后 operator 能据此决定什么>
+
+   ## 约束
+   - PoC branch/evidence only; no implementation PR; no merge into main.
+
+   ## 验证步骤
+   1. <具体 source-writing / runtime 步骤>
+   2. <具体 evidence 步骤>
+
+   ## 验收标准
+   <plan/checkpoint-author 将填表>
+
+   ## 结果分支
+   - **If passed**: <动作>
+   - **If failed**: <动作>
+
+   ## 依赖关系
+   - Blocks: #<N>（依赖该 source-writing spike 的 implementation issue）
    ```
 
    `parent` (umbrella; usually kind:code if it itself has a closure task, otherwise no `kind:*` label and not queued):

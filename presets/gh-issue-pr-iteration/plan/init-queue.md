@@ -17,6 +17,7 @@ Write the actionable issues into `{{TARGET_CWD}}/.coder-loop/runtime/state.json`
 2. **Queue selection** — only push these to `queue`:
    - `kind:code` `implementation` issues that are ready to run (have unmet `Blocks:` dependencies that ARE other queued issues, not external blockers);
    - `kind:comment` `spike` issues that block downstream implementation;
+   - `kind:code-spike` source-writing spikes that block downstream implementation and must not merge into production;
    - prerequisites before dependents (when both queue, list prereq first).
 
    Don't queue:

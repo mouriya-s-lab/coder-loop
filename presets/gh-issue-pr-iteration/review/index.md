@@ -21,9 +21,10 @@ Review owns:
 - trace audit;
 - PR protocol audit;
 - evidence audit;
+- source-writing spike audit for `kind:code-spike` no-merge issues;
 - code/check/mergeability audit;
 - issue hierarchy and final closure gate;
-- PR merge when accepted;
+- PR merge when accepted for PR-backed work;
 - issue closure when complete or skipped;
 - child issue creation/linking when parent scope is incomplete;
 - final local state transition;
@@ -38,16 +39,17 @@ Run review in this order:
 1. `review/read-evidence`
 2. `review/trace-honesty`
 3. `review/pr-protocol`
-4. `review/title-intent-gate`
-5. `review/evidence-gate`
-6. `review/caveat-honesty-gate`
-7. `review/commitment-gate`
-8. `review/spike-followup-gate`
-9. `review/code-gate`
-10. `review/issue-closure-gate`
-11. one terminal action fragment
-12. `review/update-state`
-13. `review/global-assessment`
-14. `review/final`
+4. `review/source-writing-spike-gate` when `ISSUE_KIND` is `code-spike`
+5. `review/title-intent-gate`
+6. `review/evidence-gate`
+7. `review/caveat-honesty-gate`
+8. `review/commitment-gate`
+9. `review/spike-followup-gate`
+10. `review/code-gate`
+11. `review/issue-closure-gate`
+12. one terminal action fragment
+13. `review/update-state`
+14. `review/global-assessment`
+15. `review/final`
 
 Do not inspect a later semantic phase until the previous gate has passed, except when the issue has no implementation PR and is being evaluated as no-code/already-satisfied/skip.

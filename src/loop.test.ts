@@ -29,6 +29,7 @@ import {
 	formatLoopEventLine,
 	getCurrentId,
 	getItemId,
+	iterationRouteForIssueKind,
 	isTransient5xx,
 	LOOP_EVENT_TYPES,
 	loadPreset,
@@ -51,6 +52,7 @@ import {
 	renderFragmentIndex,
 	renderPrompt,
 	resolveBinding,
+	resolveIssueKind,
 	resolvePresetDir,
 	RESUME_CONTINUE_PROMPT,
 	REVIEW_SUMMARY_WATCHDOG_MARKER,
@@ -1056,6 +1058,30 @@ describe("renderPrompt with bundled preset", () => {
 		const leftover = rendered.match(/\{\{[A-Z_][A-Z0-9_]*\}\}/g)
 		expect(leftover).toBeNull()
 	})
+
+	test("source-writing spike iteration fragment allows source writes and forbids PR/merge/closure", async () => {
+		const body = await readFile(resolve(BUNDLED_PRESET_DIR, "iter/source-writing-spike.md"), "utf-8")
+		expect(body).toContain("create, edit, and delete PoC/source files")
+		expect(body).toContain("Do not open an implementation PR")
+		expect(body).toContain("merge a PR or branch")
+		expect(body).toContain("close the issue")
+		expect(body).toContain("write final local state")
+		expect(body).not.toContain("gh pr merge")
+	})
+
+	test("comment spike fragment remains no-code", async () => {
+		const body = await readFile(resolve(BUNDLED_PRESET_DIR, "iter/spike-comment.md"), "utf-8")
+		expect(body).toContain("Do not write code files")
+	})
+
+	test("source-writing spike review gate is no-merge while accepted PR still merges", async () => {
+		const sourceSpikeGate = await readFile(resolve(BUNDLED_PRESET_DIR, "review/source-writing-spike-gate.md"), "utf-8")
+		const acceptPr = await readFile(resolve(BUNDLED_PRESET_DIR, "review/action-accept-pr.md"), "utf-8")
+		expect(sourceSpikeGate).toContain("must not merge a PR")
+		expect(sourceSpikeGate).toContain("no implementation PR exists")
+		expect(sourceSpikeGate).not.toContain("gh pr merge")
+		expect(acceptPr).toContain("gh pr merge <PR_NUMBER>")
+	})
 })
 
 describe("resolvePresetDir", () => {
@@ -1234,6 +1260,22 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 		expect(runtime.issueKind).toBe("comment")
 	})
 
+	test("buildRuntimeBindings passes through 'code-spike' kind unchanged", async () => {
+		const preset = await bundledPreset()
+		const options = await makeFixtureOptions(preset)
+		const issueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null }
+		const runtime = buildRuntimeBindings({
+			options,
+			runId: "run-5",
+			currentIssueFile: "/tmp/issue.md",
+			evidenceDir: "/tmp/evidence",
+			agentCwd: options.targetCwd,
+			issueRun,
+			issueKind: "code-spike",
+		})
+		expect(runtime.issueKind).toBe("code-spike")
+	})
+
 	test("buildConfigBindings reads repository / baseBranch / requireBrowserEvidence from options", async () => {
 		const preset = await bundledPreset()
 		const options = await makeFixtureOptions(preset)
@@ -1272,10 +1314,22 @@ describe("parseKindFromLabels", () => {
 		expect(result).toEqual({ ok: true, kind: "comment" })
 	})
 
-	test("returns ok=false when both kind:code and kind:comment are present", () => {
-		const result = parseKindFromLabels(["kind:code", "kind:comment"])
+	test("returns kind='code-spike' for a single kind:code-spike label", () => {
+		const result = parseKindFromLabels(["kind:code-spike"])
+		expect(result).toEqual({ ok: true, kind: "code-spike" })
+	})
+
+	test("routes issue kinds to their iteration fragments", () => {
+		expect(iterationRouteForIssueKind("code")).toBe("iter/classify-scope")
+		expect(iterationRouteForIssueKind(null)).toBe("iter/classify-scope")
+		expect(iterationRouteForIssueKind("comment")).toBe("iter/spike-comment")
+		expect(iterationRouteForIssueKind("code-spike")).toBe("iter/source-writing-spike")
+	})
+
+	test("returns ok=false when multiple kind labels are present", () => {
+		const result = parseKindFromLabels(["kind:code", "kind:comment", "kind:code-spike"])
 		expect(result.ok).toBe(false)
-		if (!result.ok) expect(result.error).toMatch(/expected exactly one kind:\* label, found 2/)
+		if (!result.ok) expect(result.error).toMatch(/expected exactly one kind:\* label, found 3/)
 	})
 
 	test("returns ok=false for unknown kind:* values", () => {
@@ -1288,6 +1342,12 @@ describe("parseKindFromLabels", () => {
 		const result = parseKindFromLabels(["kind:"])
 		expect(result.ok).toBe(false)
 		if (!result.ok) expect(result.error).toMatch(/unknown kind label "kind:"/)
+	})
+
+	test("resolveIssueKind reads local queue kind when repository is not configured", async () => {
+		const item = makeItem({ issue: 44, status: "queued" })
+		item.kind = "code-spike"
+		expect(await resolveIssueKind(null, "44", item)).toEqual({ ok: true, kind: "code-spike" })
 	})
 })
 
