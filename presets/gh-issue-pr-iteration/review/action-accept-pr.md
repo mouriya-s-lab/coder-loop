@@ -38,11 +38,14 @@ EOF
 gh issue close <ISSUE> -R <REPO> --comment "Closed by coder-loop review <RUN_ID> after verifying completion of parent scope, child issues, and corresponding PRs."
 ```
 
-If merge or issue close fails, do not set local `done`; retry with exact PR feedback.
+Each command above is a required GitHub side effect. If any required side effect is blocked by a noninteractive approval/permission boundary (for example, `This command requires approval`) or otherwise fails before durable feedback/closure/linking can be published, record the exact failed command, target PR/issue, and accepted verdict in handoff, do not set local `done`, and stop as review infrastructure failure so the daemon cannot immediately replay the same accepted PR.
+
+If the acceptance comment was published and a later merge/closure command fails for an ordinary actionable reason such as merge conflict, failing checks, or stale mergeability, do not set local `done`; retry with exact PR feedback.
 
 ## Output verdict
 
 Choose exactly one:
 
 - `accepted_pr_closed` → read `review/update-state` with transition `accepted_pr`.
-- `accept_pr_failed` → read `review/action-retry`.
+- `accept_pr_infrastructure_failed` → read `review/action-stop`.
+- `accept_pr_retry_needed` → read `review/action-retry`.
