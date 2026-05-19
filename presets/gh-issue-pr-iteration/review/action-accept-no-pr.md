@@ -2,7 +2,7 @@
 
 ## Goal
 
-Accept an issue without a PR only when live evidence proves it is already satisfied on the base branch or is a complete no-code closure that should become `done` rather than `moot`.
+Accept an issue without a PR only when live evidence proves it is already satisfied on the base branch, is a complete no-code closure, or is a complete `kind:code-spike` source-writing spike that should become `done` rather than `moot`.
 
 ## Preconditions
 
@@ -17,7 +17,7 @@ Use only when `review/issue-closure-gate` proves current scope and children are 
 gh issue comment <ISSUE> -R <REPO> --body "$(cat <<'EOF'
 ## Coder-loop closure review (<RUN_ID>)
 
-Review verified that this issue is already fully handled on the base branch.
+Review verified that this issue is fully handled without an implementation PR.
 
 Reason:
 <evidence-backed reason>

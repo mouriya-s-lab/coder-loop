@@ -42,6 +42,7 @@ For each draft issue, run the adversarial simulation:
 
 6. **Spike-specific adversarial**:
    - For `kind:comment` issues, simulate the laziest spike comment. Does it select a `## 结果分支` line AND propose the minimum sub-issue titles?
+   - For `kind:code-spike` issues, simulate the laziest source-writing spike. Does it write real PoC/runtime evidence, post a no-merge issue comment, and avoid PR creation/merge?
    - If the spike comment could say "assumption holds" without proposing the downstream implementation, `## 结果分支` isn't forcing sub-issue creation — fix the branch text.
 
 ## Failure handling

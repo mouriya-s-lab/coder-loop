@@ -1,0 +1,24 @@
+{
+	"version": 1,
+	"queue": [
+		{
+			"issue": 9001,
+			"status": "queued",
+			"attempts": 0,
+			"title": "Spike: source-writing no-merge fixture",
+			"priority": "high",
+			"branch": null,
+			"pr": null,
+			"lastRunId": null,
+			"issueFile": ".coder-loop/runtime/issues/9001.md",
+			"evidenceDir": ".coder-loop/runtime/evidence/issue-9001",
+			"agentCwd": null,
+			"runner": null,
+			"kind": "code-spike"
+		}
+	],
+	"repository": null,
+	"baseBranch": "main",
+	"recentRuns": [],
+	"current": null
+}

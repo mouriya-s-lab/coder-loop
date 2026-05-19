@@ -23,11 +23,15 @@ The review agent owns PR merge for accepted PR-backed work. The iteration agent 
 
 If no PR exists, continue only when the trace/handoff/live issue evidence indicates an allowed no-PR path: already satisfied on base, invalid, duplicate, no-code, moot, parent/wrapper classification, incomplete parent expansion, blocked, or implementation/PR creation failure requiring retry.
 
+For `ISSUE_KIND` = `code-spike`, no PR is the expected route. Continue to `review/source-writing-spike-gate` so review verifies the issue comment, spike branch/SHA, command evidence, and no-merge semantics before any closure action.
+If a PR exists for a `code-spike` issue, still emit `source_spike_review`; that gate owns the retry because the route itself forbids implementation PRs.
+
 ## Output verdict
 
 Choose exactly one:
 
 - `pr_protocol_passed` → read `review/title-intent-gate`.
+- `source_spike_review` → read `review/source-writing-spike-gate`.
 - `no_pr_semantic_review` → read `review/issue-closure-gate`.
 - `retry` → read `review/action-retry`.
 

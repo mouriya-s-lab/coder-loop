@@ -198,6 +198,11 @@ role = "iter"
 path = "iter/spike-comment.md"
 
 [[fragments]]
+id   = "iter/source-writing-spike"
+role = "iter"
+path = "iter/source-writing-spike.md"
+
+[[fragments]]
 id   = "iter/verify-evidence"
 role = "iter"
 path = "iter/verify-evidence.md"
@@ -236,6 +241,11 @@ path = "review/trace-honesty.md"
 id   = "review/pr-protocol"
 role = "review"
 path = "review/pr-protocol.md"
+
+[[fragments]]
+id   = "review/source-writing-spike-gate"
+role = "review"
+path = "review/source-writing-spike-gate.md"
 
 [[fragments]]
 id   = "review/title-intent-gate"

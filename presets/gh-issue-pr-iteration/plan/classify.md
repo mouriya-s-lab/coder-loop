@@ -18,6 +18,7 @@ If the intake includes already-open issues that the operator asked to triage (re
 |---|---|---|
 | `implementation` | future code / config / docs change; landed deliverable is a PR | queued as `kind:code` issue |
 | `spike` | risky undocumented assumption blocks implementation; deliverable is an issue comment validating / falsifying | queued as `kind:comment` issue, `Blocks: #<impl>` |
+| `source-writing-spike` | the assumption needs PoC/source/runtime evidence but must not merge into production | queued as `kind:code-spike` issue, `Blocks: #<impl>` |
 | `parent` | umbrella that coordinates ≥ 2 child deliverables; itself has no atomic Why | created but NOT queued (no concrete action); children get queued |
 | `design-question` | source has missing / contradictory facts that planning can't resolve; needs operator answer first | filed as `kind:comment` issue, NOT queued; operator answers in issue thread |
 | `no-code` | already satisfied / duplicate / invalid / out of scope | filed (or referenced existing) but never queued |

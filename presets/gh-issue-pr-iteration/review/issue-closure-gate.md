@@ -9,6 +9,7 @@ Decide whether the GitHub issue can be closed, must be expanded into child issue
 Run this gate before any local `done` or `moot` transition.
 
 - PR-backed work must pass PR protocol, evidence, and code gates. Its implementation PR must be merged by `review/action-accept-pr` before local `done` is written.
+- Source-writing spike work (`ISSUE_KIND` = `code-spike`) must pass `review/source-writing-spike-gate`; it is accepted through `accepted_no_pr` and must never route to `review/action-accept-pr`.
 - No-code, duplicate, invalid, already-satisfied, parent/wrapper, and moot outcomes still need this gate before local `done` or `moot`.
 
 ## Classification
@@ -26,7 +27,7 @@ Fixed classification rules:
 
 - Parent/wrapper is not a skip reason by itself. If child/current scope is complete, accept/close it; if remaining scope exists, expand it; if a real external dependency exists, block it.
 - `skip` is only for issues that should not produce implementation work at all: duplicate, invalid, out-of-scope, no-code, or truly moot.
-- `accepted_no_pr` is only for already-satisfied-on-base or complete no-code closure where local `done` is the correct semantic result.
+- `accepted_no_pr` is only for already-satisfied-on-base, complete no-code closure, or a complete source-writing spike where local `done` is the correct semantic result.
 - A closed child issue without a merged PR counts as complete only when its issue history explicitly justifies no-code/duplicate/invalid/out-of-scope/already-satisfied/moot closure.
 - If the selected issue has an open implementation PR, do not use `accepted_no_pr` or `skip` unless the PR is explicitly invalid/unusable and feedback is routed accordingly.
 
@@ -49,6 +50,7 @@ The current issue is complete only when:
 - every corresponding implementation PR is merged or no-code closure is justified;
 - current acceptance criteria and comments have no unresolved scope;
 - the current implementation PR, if any, passed previous phases;
+- the current source-writing spike, if `ISSUE_KIND` is `code-spike`, passed `review/source-writing-spike-gate`;
 - no coherent deliverable remains to split out.
 
 ## Output verdict

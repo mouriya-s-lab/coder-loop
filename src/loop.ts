@@ -612,7 +612,7 @@ export type IssueRunContext = {
 	resumedStartedAt: string | null
 }
 
-export type IssueKind = "code" | "comment" | null
+export type IssueKind = "code" | "comment" | "code-spike" | null
 
 const RUNTIME_BINDING_KEYS = [
 	"runId",
@@ -964,12 +964,14 @@ async function main() {
 		console.error(`Dry run: state=${options.statePath}`)
 		console.error(`Dry run: selected=${selected ? getItemId(selected.item, options.preset) : "none"}`)
 		if (selected) {
-			const kindResult = await fetchIssueKind(options.repository, getItemId(selected.item, options.preset))
+			const kindResult = await resolveIssueKind(options.repository, getItemId(selected.item, options.preset), selected.item)
 			if (!kindResult.ok) {
 				console.error(`Dry run: issue kind label check failed: ${kindResult.error}`)
 				process.exit(1)
 			}
 			console.error(`Dry run: kind=${kindResult.kind ?? "<none>"}`)
+			console.error(`Dry run: iterationRoute=${iterationRouteForIssueKind(kindResult.kind)}`)
+			if (kindResult.kind === "code-spike") console.error("Dry run: noMerge=true")
 		}
 		return
 	}
@@ -1058,7 +1060,7 @@ async function main() {
 		const iterPhase = phases[0]
 		const reviewPhase = phases[phases.length - 1]
 		if (!iterPhase || !reviewPhase) fail("preset must define at least one phase")
-		const kindResult = await fetchIssueKind(options.repository, selectedId)
+		const kindResult = await resolveIssueKind(options.repository, selectedId, selected.item)
 		if (!kindResult.ok) fail(`Issue kind label check failed: ${kindResult.error}`)
 		log(`Issue #${selectedId} kind=${kindResult.kind ?? "<none>"}`)
 		const ctx: ResolveContext = {
@@ -2621,6 +2623,12 @@ export type ParsedIssueKind =
 	| { ok: true; kind: IssueKind }
 	| { ok: false; error: string }
 
+export function iterationRouteForIssueKind(kind: IssueKind): string {
+	if (kind === "comment") return "iter/spike-comment"
+	if (kind === "code-spike") return "iter/source-writing-spike"
+	return "iter/classify-scope"
+}
+
 export function parseKindFromLabels(labelNames: readonly string[]): ParsedIssueKind {
 	const kindLabels = labelNames.filter((name) => name.startsWith("kind:"))
 	if (kindLabels.length === 0) return { ok: true, kind: null }
@@ -2628,10 +2636,23 @@ export function parseKindFromLabels(labelNames: readonly string[]): ParsedIssueK
 		return { ok: false, error: `expected exactly one kind:* label, found ${kindLabels.length}: ${kindLabels.join(", ")}` }
 	}
 	const value = kindLabels[0]!.slice("kind:".length)
-	if (value !== "code" && value !== "comment") {
-		return { ok: false, error: `unknown kind label "kind:${value}" (allowed: kind:code, kind:comment)` }
+	if (value !== "code" && value !== "comment" && value !== "code-spike") {
+		return { ok: false, error: `unknown kind label "kind:${value}" (allowed: kind:code, kind:comment, kind:code-spike)` }
 	}
 	return { ok: true, kind: value }
+}
+
+function parseIssueKindFromQueueItem(item: QueueItem): ParsedIssueKind {
+	const raw = item.issueKind ?? item.kind
+	if (raw === null || raw === undefined || raw === "") return { ok: true, kind: null }
+	if (typeof raw !== "string") return { ok: false, error: `queue item issue kind must be a string when repository is not configured` }
+	const label = raw.startsWith("kind:") ? raw : `kind:${raw}`
+	return parseKindFromLabels([label])
+}
+
+export async function resolveIssueKind(repository: string | null, issueId: string, item: QueueItem): Promise<ParsedIssueKind> {
+	if (repository !== null) return fetchIssueKind(repository, issueId)
+	return parseIssueKindFromQueueItem(item)
 }
 
 export async function fetchIssueKind(repository: string | null, issueId: string): Promise<ParsedIssueKind> {

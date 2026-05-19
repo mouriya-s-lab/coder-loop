@@ -2,7 +2,7 @@
 
 读者：维护 bundled preset 的人——加 / 改 / 删 fragment，调整 review gate 顺序，或想搞清楚某条 trace 走的是哪条链。
 
-读完后你能：照着图找到任意 fragment 的 verdict 出口与下一跳；理解 plan 链 9 个 verdict 的回退路径；理解 `ISSUE_KIND` 怎么在 iter 链早期分流；理解 review 13-step 顺序里每个 gate 的 fail-fast 边界。
+读完后你能：照着图找到任意 fragment 的 verdict 出口与下一跳；理解 plan 链 9 个 verdict 的回退路径；理解 `ISSUE_KIND` 怎么在 iter 链早期分流；理解 review 15-step 顺序里每个 gate 的 fail-fast 边界。
 
 不在范围内：preset.toml 字段语义（看 [preset-authoring](./preset-authoring.md)）；写 issue / PR 内容（看 `presets/gh-issue-pr-iteration/contract.md` + 用户级 skill `writing-issue` / `writing-pr` / `review-pr`）。
 
@@ -17,7 +17,7 @@
 | `statuses.terminal` | `blocked / moot / done` |
 | phases | `iteration` → `review`（两段固定顺序；planning 不在 phases 内，由 `/dev-plan` slash command 入口驱动） |
 | `agent.binary` | `claude` |
-| fragments | 44 个，分布在 `common/ / plan/ / iter/ / review/` 四个目录 |
+| fragments | 48 个，分布在 `common/ / plan/ / iter/ / review/` 四个目录 |
 
 `item` 字段（除 `issue / status` 外）：
 
@@ -36,7 +36,7 @@ status 字面量都是 preset 字符串，引擎只识别 `continuable / termina
 
 ---
 
-## 2. Fragment 全集（46）
+## 2. Fragment 全集（48）
 
 按目录列出全部 fragment id：
 
@@ -62,24 +62,26 @@ status 字面量都是 preset 字符串，引擎只识别 `continuable / termina
 - `plan/handoff`
 - `plan/final`
 
-**iter/** — iteration phase 内部，9 个
+**iter/** — iteration phase 内部，10 个
 
 - `iter/index` — phase 入口
 - `iter/read-context`
 - `iter/classify-scope`
 - `iter/implement`
 - `iter/spike-comment`
+- `iter/source-writing-spike`
 - `iter/verify-evidence`
 - `iter/commit-pr`
 - `iter/handoff`
 - `iter/final`
 
-**review/** — review phase 内部，21 个
+**review/** — review phase 内部，22 个
 
 - `review/index` — phase 入口
 - `review/read-evidence`
 - `review/trace-honesty`
 - `review/pr-protocol`
+- `review/source-writing-spike-gate`
 - `review/title-intent-gate`
 - `review/evidence-gate`
 - `review/caveat-honesty-gate` — 在 evidence_passed 之后、commitment-gate 之前扫 5 类 caveat（system-under-test bypass / invariant downgrade / cosmetic handwave / cross-issue scope deferral / environment-precondition admission）
@@ -98,7 +100,7 @@ status 字面量都是 preset 字符串，引擎只识别 `continuable / termina
 - `review/global-assessment`
 - `review/final`
 
-fragment 总数 = 4 + 12 + 9 + 21 = 46，与 `presets/gh-issue-pr-iteration/preset.toml` 的 `[[fragments]]` 块数一致。
+fragment 总数 = 4 + 12 + 10 + 22 = 48，与 `presets/gh-issue-pr-iteration/preset.toml` 的 `[[fragments]]` 块数一致。
 
 ---
 
@@ -175,6 +177,7 @@ plan/handoff
 iter/read-context
   ├─ context_ready
   │    ├─ ISSUE_KIND == "comment"     → iter/spike-comment    (spike / design dialogue)
+  │    ├─ ISSUE_KIND == "code-spike"  → iter/source-writing-spike (source-writing no-merge spike)
   │    └─ ISSUE_KIND == "code" or ""  → iter/classify-scope   (legacy 无 label 走 code 路径)
   └─ infrastructure_failure           → iter/handoff
 ```
@@ -210,6 +213,14 @@ iter/spike-comment
   └─ spike_blocked         → iter/handoff   (含具体 blocker)
 ```
 
+**Source-writing spike 分支**（no-merge PoC / evidence）：
+
+```
+iter/source-writing-spike
+  ├─ source_spike_comment_posted  → iter/handoff   (含 issue comment URL + evidence + branch/SHA)
+  └─ source_spike_blocked         → iter/handoff   (含具体 blocker)
+```
+
 不论哪条分支，最终都收敛到 `iter/handoff` → `iter/final`：
 
 ```
@@ -226,7 +237,7 @@ iter/handoff
 
 ---
 
-## 5. Review phase 顺序（13 步）
+## 5. Review phase 顺序（15 步）
 
 `review/index` 强制：
 
@@ -241,16 +252,18 @@ common/runtime-contract → common/github-routing → common/state-contract → 
 | 1 | `review/read-evidence` | 载入 trace 与 GitHub live state |
 | 2 | `review/trace-honesty` | trace 与 GitHub 实况是否一致 |
 | 3 | `review/pr-protocol` | PR 身份 / closing keyword / 评论位置 |
-| 4 | `review/title-intent-gate` | PR title 与 issue title 主语一致性（仅 `kind:code` + 存在 PR） |
-| 5 | `review/evidence-gate` | 四层证据 packet 是否齐 |
-| 6 | `review/commitment-gate` | 逐行兑现 issue `## 验收标准` 表（仅 `kind:code` + 表存在） |
-| 7 | `review/spike-followup-gate` | spike comment 是否选了 `## 结果分支` + 提议足够 sub-issue（仅 `kind:comment`） |
-| 8 | `review/code-gate` | merge-ability / CI / 代码质量（无 PR 时自跳过） |
-| 9 | `review/issue-closure-gate` | 选 terminal action |
-| 10 | terminal action（六选一） | 执行副作用：accept-pr / accept-no-pr / expand-parent / skip / blocked / retry |
-| 11 | `review/update-state` | 写 state.json 转移 |
-| 12 | `review/global-assessment` | 决定 loop 继续 / 停 |
-| 13 | `review/final` | review phase 硬终点 |
+| 4 | `review/source-writing-spike-gate` | source-writing spike evidence/no-merge gate（仅 `kind:code-spike`） |
+| 5 | `review/title-intent-gate` | PR title 与 issue title 主语一致性（仅 PR-backed 路径 + 存在 PR） |
+| 6 | `review/evidence-gate` | 四层证据 packet 是否齐 |
+| 7 | `review/caveat-honesty-gate` | 证据 caveat 是否诚实 |
+| 8 | `review/commitment-gate` | 逐行兑现 issue `## 验收标准` 表（仅 `kind:code` + 表存在） |
+| 9 | `review/spike-followup-gate` | spike comment 是否选了 `## 结果分支` + 提议足够 sub-issue（仅 `kind:comment`） |
+| 10 | `review/code-gate` | merge-ability / CI / 代码质量（无 PR 时自跳过） |
+| 11 | `review/issue-closure-gate` | 选 terminal action |
+| 12 | terminal action（六选一） | 执行副作用：accept-pr / accept-no-pr / expand-parent / skip / blocked / retry |
+| 13 | `review/update-state` | 写 state.json 转移 |
+| 14 | `review/global-assessment` | 决定 loop 继续 / 停 |
+| 15 | `review/final` | review phase 硬终点 |
 
 每个 gate 不通过 → 跳 `review/action-retry` / `review/action-blocked` / `review/action-stop` 之一，绕过下游 gate 直达 update-state。
 
@@ -267,14 +280,20 @@ review/trace-honesty
   └─ retry        → review/action-retry
 
 review/pr-protocol
-  ├─ pr_protocol_passed   → review/title-intent-gate
-  ├─ no_pr_semantic_review → review/issue-closure-gate   (无 PR 直接跳到 closure，跳过 4-8)
+  ├─ pr_protocol_passed    → review/title-intent-gate
+  ├─ source_spike_review   → review/source-writing-spike-gate
+  ├─ no_pr_semantic_review → review/issue-closure-gate   (普通无 PR 直接跳到 closure)
   └─ retry                → review/action-retry
+
+review/source-writing-spike-gate
+  ├─ source_spike_passed  → review/issue-closure-gate
+  ├─ source_spike_skipped → review/title-intent-gate
+  └─ source_spike_retry   → review/action-retry
 
 review/title-intent-gate
   ├─ title_aligned        → review/evidence-gate
   ├─ title_drift          → review/action-retry
-  └─ title_gate_skipped   → review/evidence-gate         (无 PR 或 kind:comment 自跳过)
+  └─ title_gate_skipped   → review/evidence-gate         (无 PR / kind:comment / kind:code-spike 自跳过)
 
 review/evidence-gate
   ├─ evidence_passed → review/commitment-gate
@@ -352,17 +371,18 @@ review/update-state
 
 ## 6. `ISSUE_KIND` 在 review 链的分流
 
-`ISSUE_KIND` 由引擎在 spawn 前 `gh issue view --json labels` fetch，注入 prompt 模板。三个 review gate 用它自跳过：
+`ISSUE_KIND` 由引擎在 spawn 前 `gh issue view --json labels` fetch，注入 prompt 模板。无 repo 的本地 fixture 可用 queue item 的 `kind` 字段模拟。四个 review gate 用它自跳过：
 
-| Gate | `kind:code` | `kind:comment` | empty / legacy |
-|---|---|---|---|
-| `title-intent-gate` | 跑（要求 PR title 与 issue title 主语一致） | `title_gate_skipped`（无 PR） | 跑（legacy 也可能漂） |
-| `commitment-gate` | 跑（逐行兑现 `## 验收标准` 表） | `commitment_skipped` | 视有无 `## 验收标准` 表决定 |
-| `spike-followup-gate` | `spike_gate_skipped` | 跑（要求 spike comment 选 `## 结果分支` + 足够 sub-issue 提议） | `spike_gate_skipped` |
+| Gate | `kind:code` | `kind:comment` | `kind:code-spike` | empty / legacy |
+|---|---|---|---|---|
+| `source-writing-spike-gate` | `source_spike_skipped` | `source_spike_skipped` | 跑（要求 no-merge evidence/comment/branch） | `source_spike_skipped` |
+| `title-intent-gate` | 跑（要求 PR title 与 issue title 主语一致） | `title_gate_skipped`（无 PR） | 跳过（source spike 无 PR） | 跑（legacy 也可能漂） |
+| `commitment-gate` | 跑（逐行兑现 `## 验收标准` 表） | `commitment_skipped` | 由 `source-writing-spike-gate` 审命令证据 | 视有无 `## 验收标准` 表决定 |
+| `spike-followup-gate` | `spike_gate_skipped` | 跑（要求 spike comment 选 `## 结果分支` + 足够 sub-issue 提议） | 由 `source-writing-spike-gate` 审结果分支 | `spike_gate_skipped` |
 
 `code-gate` 在无 PR 时自跳过（`no_pr_semantic_review` 路径直接绕过它进 `issue-closure-gate`）。
 
-设计权衡：每个 gate 自跳过而非按 kind 做 phase 分叉，这样 review phase 顺序保持 13 步固定，trace 易读、`review/index` 不需要按 kind 维护多份。
+设计权衡：PR-backed 与 comment-only gate 仍自跳过；`kind:code-spike` 是显式分叉，因为它允许 source writes 但禁止 PR merge，必须在 no-PR closure 前单独审证据。
 
 ---
 

@@ -51,7 +51,7 @@ coder-loop install /path/to/your-target-repo --repo <owner>/<repo>
 幂等。它做四层事：
 
 - **A) target 项目文件**：写 `.claude/commands/dev-plan.md` / `dev-loop.md`、建 `.coder-loop/runtime/{issues,evidence,logs}/`、merge `.coder-loop/runtime/config.json`（含 preset 绑定）、若 `workflow.md` 缺失则从 preset 模板拷一份。
-- **B) target GitHub state**：通过 `gh` 确保 `kind:code` / `kind:comment` 标签存在（preset fragments 依赖它们做 issue 分类）。
+- **B) target GitHub state**：通过 `gh` 确保 `kind:code` / `kind:comment` / `kind:code-spike` 标签存在（preset fragments 依赖它们做 issue 分类）。
 - **C) 操作员机器前置**：只做检查、不安装——`gh`(+ auth) / target default runner CLI / review default runner CLI / `coder-loop` 是否在 PATH。
 - **D) 用户级 skill 版本**：检查 `~/.claude/skills/writing-issue/SKILL.md` 是否含新版 marker；加 `--install-skills` 会自动同步到最新。
 

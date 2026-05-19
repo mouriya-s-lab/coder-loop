@@ -54,7 +54,7 @@ For each draft body, fill in the `## 验收标准` table (and `## 结果分支` 
    ```
    Inherited rows cannot be deferred a second time. If you'd write a row that the current environment also can't run, that's a sign the row belongs on a different downstream issue — re-route, don't defer twice.
 
-### For each `kind:comment` (spike) issue
+### For each `kind:comment` or `kind:code-spike` spike issue
 
 1. Write the `## 验收标准` table (same column spec as above). Even spikes need executable verification — typically `assumption` Dimension rows. "What command, in what env, proves the assumption holds / fails?"
 
@@ -73,6 +73,8 @@ For each draft body, fill in the `## 验收标准` table (and `## 结果分支` 
    - Don't write `If passed: TBD` or vague placeholders; the gate will reject `vague proposals do not satisfy the minimum`.
 
 3. Spike issue's `## 依赖关系` must include `Blocks: #<impl>` where `#<impl>` is the implementation issue that depends on the spike outcome.
+
+4. For `kind:code-spike`, include at least one row whose command or artifact proves the source-writing/runtime PoC. Also include the no-merge expectation in `## 约束`; review will reject a PR-backed result on this route.
 
 ## Failure handling
 

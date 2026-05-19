@@ -86,6 +86,23 @@ describe("smoke: single-phase-example preset", () => {
 		expect(stderr).not.toContain("repo=")
 	})
 
+	test("--dry-run selects the source-writing no-merge route for fixture", async () => {
+		const target = resolve(REPO_ROOT, "test-fixtures/no-merge-code-spike-target")
+		const proc = Bun.spawnSync({
+			cmd: ["bun", LOOP_ENTRY, "--target-cwd", target, "--dry-run"],
+			cwd: REPO_ROOT,
+			stdout: "pipe",
+			stderr: "pipe",
+		})
+		const stderr = new TextDecoder().decode(proc.stderr)
+		expect(proc.exitCode).toBe(0)
+		expect(stderr).toContain("Dry run: selected=9001")
+		expect(stderr).toContain("Dry run: kind=code-spike")
+		expect(stderr).toContain("Dry run: iterationRoute=iter/source-writing-spike")
+		expect(stderr).toContain("Dry run: noMerge=true")
+		expect(stderr).not.toContain("gh pr merge")
+	})
+
 	test("--check-runtime passes with config.toml only", async () => {
 		const target = await makeMinimalTarget("single-phase-example", "toml")
 		const proc = Bun.spawnSync({
