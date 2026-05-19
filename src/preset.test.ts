@@ -160,7 +160,7 @@ describe("parsePreset schema validation", () => {
 		item: { idField: "id" },
 		statuses: { continuable: ["a"], terminal: ["b"] },
 		phases: [
-			{ name: "p", prompt: "p.md", variables: { K: "item.x" } },
+			{ name: "p", prompt: "p.md", variables: { K: "item.id" } },
 		],
 		fragments: [
 			{ id: "f", role: "x", path: "f.md" },
@@ -189,8 +189,8 @@ describe("parsePreset schema validation", () => {
 	test("rejects duplicate phase name", () => {
 		const root = minimalRoot()
 		root.phases = [
-			{ name: "p", prompt: "p1.md", variables: { K: "item.x" } },
-			{ name: "p", prompt: "p2.md", variables: { K: "item.y" } },
+			{ name: "p", prompt: "p1.md", variables: { K: "item.id" } },
+			{ name: "p", prompt: "p2.md", variables: { K: "item.id" } },
 		]
 		expect(() => parsePreset(root, "/tmp")).toThrow(/duplicate name "p"/)
 	})
@@ -204,11 +204,28 @@ describe("parsePreset schema validation", () => {
 		expect(() => parsePreset(root, "/tmp")).toThrow(/duplicate id "f"/)
 	})
 
+	test("rejects misspelled item field reference (e.g. item.stauts instead of item.status)", () => {
+		const root: Record<string, unknown> = { ...minimalRoot(), phases: [{ name: "p", prompt: "p.md", variables: { X: "item.stauts" } }] }
+		expect(() => parsePreset(root, "/tmp")).toThrow(/unknown item field "stauts"/)
+	})
+
+	test("accepts item.idField reference in variables", () => {
+		const root: Record<string, unknown> = { ...minimalRoot(), phases: [{ name: "p", prompt: "p.md", variables: { X: "item.id" } }] }
+		const preset = parsePreset(root, "/tmp")
+		expect(preset.phases[0]!.variables[0]).toEqual(["X", { kind: "item", field: "id" }])
+	})
+
+	test("accepts known base item field reference in variables", () => {
+		const root: Record<string, unknown> = { ...minimalRoot(), phases: [{ name: "p", prompt: "p.md", variables: { X: "item.status" } }] }
+		const preset = parsePreset(root, "/tmp")
+		expect(preset.phases[0]!.variables[0]).toEqual(["X", { kind: "item", field: "status" }])
+	})
+
 	test("accepts minimal valid preset and produces normalized shape", () => {
 		const preset = parsePreset(minimalRoot(), "/tmp")
 		expect(preset.name).toBe("x")
 		expect(preset.item.idField).toBe("id")
-		expect(preset.phases[0]!.variables[0]).toEqual(["K", { kind: "item", field: "x" }])
+		expect(preset.phases[0]!.variables[0]).toEqual(["K", { kind: "item", field: "id" }])
 		expect(preset.fragments[0]!.path).toBe("/tmp/f.md")
 	})
 })
