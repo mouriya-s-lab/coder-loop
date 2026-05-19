@@ -75,6 +75,7 @@ import {
 	type ResumeDecision,
 	type RuntimeBindings,
 	type SessionEntry,
+	type SummaryWatchdogTimerHandle,
 	type Terminated,
 } from "./loop"
 
@@ -98,7 +99,7 @@ function makeItem(overrides: Partial<QueueItem> & { issue: number; status: strin
 		evidenceDir: overrides.evidenceDir ?? `.coder-loop/runtime/evidence/${overrides.issue}`,
 		agentCwd: overrides.agentCwd ?? null,
 		runner: overrides.runner ?? null,
-		issue: overrides.issue,
+		extra: { issue: overrides.issue, ...(overrides.extra ?? {}) },
 	}
 }
 
@@ -211,13 +212,13 @@ describe("getItemId / getCurrentId", () => {
 	test("getItemId throws when the id field is missing", async () => {
 		const preset = await bundledPreset()
 		const broken = makeItem({ issue: 1, status: "queued" })
-		delete broken.issue
+		delete broken.extra.issue
 		expect(() => getItemId(broken, preset)).toThrow()
 	})
 
 	test("getCurrentId reads preset.item.idField from state.current (number → string)", async () => {
 		const preset = await bundledPreset()
-		const current: CurrentRun = { phase: "iteration", runId: "r1", startedAt: new Date().toISOString(), issue: 42 }
+		const current: CurrentRun = { phase: "iteration", runId: "r1", startedAt: new Date().toISOString(), extra: { issue: 42 } }
 		expect(getCurrentId(current, preset)).toBe("42")
 	})
 })
@@ -514,7 +515,7 @@ describe("selectIssue", () => {
 				makeItem({ issue: 100, status: "queued" }),
 				makeItem({ issue: 200, status: "in_progress" }),
 			],
-			current: { phase: "iteration", runId: "r1", startedAt: new Date().toISOString(), issue: 200 },
+			current: { phase: "iteration", runId: "r1", startedAt: new Date().toISOString(), extra: { issue: 200 } },
 		})
 		const selected = selectIssue(state, options)
 		expect(selected).not.toBeNull()
@@ -595,7 +596,7 @@ describe("markIterationStarted / markReviewStarted", () => {
 		expect(state.current).not.toBeNull()
 		expect(state.current!.phase).toBe(preset.phases[0]!.name)
 		expect(state.current!.runId).toBe("run-X")
-		expect(state.current![preset.item.idField]).toBe(55)
+		expect(state.current!.extra[preset.item.idField]).toBe(55)
 	})
 
 	test("markIterationStarted preserves changes_requested status on retry", async () => {
@@ -625,7 +626,7 @@ describe("markIterationStarted / markReviewStarted", () => {
 		expect(state.current).not.toBeNull()
 		expect(state.current!.phase).toBe(preset.phases[preset.phases.length - 1]!.name)
 		expect(state.current!.runId).toBe("run-Z")
-		expect(state.current![preset.item.idField]).toBe(99)
+		expect(state.current!.extra[preset.item.idField]).toBe(99)
 	})
 })
 
@@ -653,10 +654,10 @@ describe("reconcileStateAfterIter — recovers state.json wiped or reverted by i
 					evidenceDir: ".coder-loop/runtime/evidence/1",
 					agentCwd: null,
 					runner: null,
-					issue: 1,
+					extra: { issue: 1 },
 				},
 			],
-			current: { phase: "iteration", runId: "run-A", startedAt: "2026-01-01T00:00:00Z", issue: 1 },
+			current: { phase: "iteration", runId: "run-A", startedAt: "2026-01-01T00:00:00Z", extra: { issue: 1 } },
 		}
 		const snapshot = serializeState(state)
 		await writeFile(statePath, snapshot)
@@ -761,7 +762,7 @@ describe("makeIssueRunContext", () => {
 			phase: preset.phases[0]!.name,
 			runId: "run-resume",
 			startedAt: "2026-01-01T00:00:00Z",
-			issue: 1,
+			extra: { issue: 1 },
 		}
 		const ctx = makeIssueRunContext(current)
 		expect(ctx.runIdGeneration).toBe("resumed")
@@ -776,7 +777,7 @@ describe("makeIssueRunContext", () => {
 			phase: last,
 			runId: "run-resume",
 			startedAt: "2026-01-01T00:00:00Z",
-			issue: 1,
+			extra: { issue: 1 },
 		}
 		const ctx = makeIssueRunContext(current)
 		expect(ctx.runIdGeneration).toBe("resumed")
@@ -800,7 +801,7 @@ describe("checkRuntime preset-driven validation", () => {
 		const options = await makeFixtureOptions(preset)
 		const state = makeState({
 			queue: [makeItem({ issue: 1, status: "queued" })],
-			current: { phase: "garbage", runId: "r", startedAt: "2026-01-01T00:00:00Z", issue: 1 },
+			current: { phase: "garbage", runId: "r", startedAt: "2026-01-01T00:00:00Z", extra: { issue: 1 } },
 		})
 		const errors = await checkRuntime(options, state)
 		expect(errors.some((e) => e.path === "state.current.phase" && e.message.includes("garbage"))).toBe(true)
@@ -810,7 +811,7 @@ describe("checkRuntime preset-driven validation", () => {
 		const preset = await bundledPreset()
 		const options = await makeFixtureOptions(preset)
 		const broken = makeItem({ issue: 1, status: "queued" })
-		delete broken.issue
+		delete broken.extra.issue
 		const state = makeState({ queue: [broken] })
 		const errors = await checkRuntime(options, state)
 		expect(errors.some((e) => e.path === `state.queue[0].${preset.item.idField}`)).toBe(true)
@@ -952,10 +953,11 @@ describe("resolveBinding", () => {
 
 	test("item.<f> with non-stringifiable value (e.g. nested object) throws", () => {
 		const item = makeItem({ issue: 1, status: "queued" })
-		;(item as Record<string, unknown>).weird = { nested: true }
+		item.extra.weird = { nested: true }
 		const ctx: ResolveContext = { item, config: makeFixtureConfig(), runtime: makeFixtureRuntime() }
 		expect(() => resolveBinding({ kind: "item", field: "weird" }, ctx)).toThrow(/item\.weird/)
 	})
+
 })
 
 describe("renderPrompt with bundled preset", () => {
@@ -990,7 +992,7 @@ describe("renderPrompt with bundled preset", () => {
 			`REPO=${config.repository}`,
 			`BASE_BRANCH=${config.baseBranch}`,
 			`RUN_ID=${runtime.runId}`,
-			`ISSUE=${item.issue}`,
+			`ISSUE=${item.extra.issue}`,
 			`WORKFLOW_FILE=${runtime.workflowPath}`,
 			`SHARED_CONTEXT_FILE=${runtime.sharedContextPath}`,
 			`STATE_FILE=${runtime.statePath}`,
@@ -1280,8 +1282,8 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 		const preset = await bundledPreset()
 		const options = await makeFixtureOptions(preset)
 		const config = buildConfigBindings(options)
-		expect(config.repository).toBe(options.repository)
-		expect(config.baseBranch).toBe(options.baseBranch)
+		expect(config.repository).toBe(options.repository ?? "")
+		expect(config.baseBranch).toBe(options.baseBranch ?? "")
 		expect(config.requireBrowserEvidence).toBe(options.requireBrowserEvidence)
 	})
 
@@ -1346,7 +1348,7 @@ describe("parseKindFromLabels", () => {
 
 	test("resolveIssueKind reads local queue kind when repository is not configured", async () => {
 		const item = makeItem({ issue: 44, status: "queued" })
-		item.kind = "code-spike"
+		item.extra.kind = "code-spike"
 		expect(await resolveIssueKind(null, "44", item)).toEqual({ ok: true, kind: "code-spike" })
 	})
 })
@@ -1981,8 +1983,8 @@ describe("createSummaryWatchdog — summary watchdog timer state machine", () =>
 	type TimerEntry = { id: number; cb: () => void; ms: number; cancelled: boolean }
 
 	function makeFakeTimers(): {
-		setTimer: (cb: () => void, ms: number) => unknown
-		clearTimer: (h: unknown) => void
+		setTimer: (cb: () => void, ms: number) => SummaryWatchdogTimerHandle
+		clearTimer: (h: SummaryWatchdogTimerHandle) => void
 		timers: TimerEntry[]
 		fire: (id: number) => void
 	} {
@@ -1993,10 +1995,10 @@ describe("createSummaryWatchdog — summary watchdog timer state machine", () =>
 			setTimer: (cb, ms) => {
 				const entry: TimerEntry = { id: nextId++, cb, ms, cancelled: false }
 				timers.push(entry)
-				return entry.id
+				return entry.id as unknown as SummaryWatchdogTimerHandle
 			},
 			clearTimer: (h) => {
-				const id = h as number
+				const id = h as unknown as number
 				const entry = timers.find((t) => t.id === id)
 				if (entry) entry.cancelled = true
 			},

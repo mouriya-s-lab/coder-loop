@@ -60,14 +60,14 @@ export type QueueItem = {
 	evidenceDir: string | null
 	agentCwd: string | null
 	runner: AgentRunnerKind | null
-	[key: string]: JsonValue
+	extra: JsonObject
 }
 
 export type CurrentRun = {
 	phase: string
 	runId: string
 	startedAt: string
-	[key: string]: JsonValue
+	extra: JsonObject
 }
 
 export type LoopState = {
@@ -196,6 +196,13 @@ const StatusStateBoundary = arkType({
 	"current?": "object|null",
 })
 
+const TerminatedBoundary = arkType.or(
+	{ kind: arkType.unit("clean") },
+	{ kind: arkType.unit("signal"), name: "string" },
+	{ kind: arkType.unit("error"), code: "string" },
+	{ kind: arkType.unit("watchdog"), phase: arkType.or(arkType.unit("term"), arkType.unit("kill")), afterSummarySeconds: "number" },
+)
+
 const AgentRunStatusBoundary = arkType({
 	label: "string",
 	"runner?": arkType.or(AgentRunnerKindBoundary, "null"),
@@ -212,10 +219,78 @@ const AgentRunStatusBoundary = arkType({
 	"signal": "string|null",
 	"error": "string|null",
 	"sessionId": "string|null",
-	"terminated": "object|null",
+	"terminated": arkType.or(TerminatedBoundary, "null"),
 })
 
 type AgentRunStatusInput = typeof AgentRunStatusBoundary.infer
+
+const SessionEntryBoundary = arkType({
+	attempt: "string",
+	"runner?": arkType.or(AgentRunnerKindBoundary, "null"),
+	"model?": "string|null",
+	sessionId: "string|null",
+	exitCode: "number|null",
+	signal: "string|null",
+	terminated: TerminatedBoundary,
+	log: "string",
+})
+
+const QueueItemBaseBoundary = arkType({
+	status: "string",
+	"attempts?": "number|null",
+	"title?": "string|null",
+	"priority?": "string|null",
+	"branch?": "string|null",
+	"pr?": "number|null",
+	"lastRunId?": "string|null",
+	"issueFile?": "string|null",
+	"evidenceDir?": "string|null",
+	"agentCwd?": "string|null",
+	"runner?": arkType.or(AgentRunnerKindBoundary, "null"),
+})
+
+const QUEUE_ITEM_BASE_KEYS = new Set([
+	"status", "attempts", "title", "priority", "branch", "pr",
+	"lastRunId", "issueFile", "evidenceDir", "agentCwd", "runner",
+])
+
+const CurrentRunBaseBoundary = arkType({
+	phase: "string",
+	runId: "string",
+	startedAt: "string",
+})
+
+const CURRENT_RUN_BASE_KEYS = new Set(["phase", "runId", "startedAt"])
+
+const PresetPhaseBoundary = arkType({
+	name: "string",
+	prompt: "string",
+	"variables?": "object",
+})
+
+const PresetFragmentBoundary = arkType({
+	id: "string",
+	role: "string",
+	path: "string",
+})
+
+const PresetTomlBoundary = arkType({
+	name: "string",
+	version: "number",
+	"description?": "string",
+	item: { idField: "string" },
+	statuses: { continuable: "string[]", terminal: "string[]" },
+	phases: PresetPhaseBoundary.array(),
+	"fragments?": PresetFragmentBoundary.array(),
+	agent: { binary: "string", "extraArgs?": "string[]" },
+})
+
+const CONFIG_BINDING_FIELDS = ["repository", "baseBranch", "requireBrowserEvidence"] as const
+type ConfigBindingField = typeof CONFIG_BINDING_FIELDS[number]
+
+function isConfigBindingField(field: string): field is ConfigBindingField {
+	return (CONFIG_BINDING_FIELDS as readonly string[]).includes(field)
+}
 
 const StatusSnapshotBoundary = arkType({
 	target: "object",
@@ -638,11 +713,15 @@ const RUNTIME_BINDING_KEYS = [
 
 type RuntimeBindingKey = (typeof RUNTIME_BINDING_KEYS)[number]
 
+function isRuntimeBindingKey(key: string): key is RuntimeBindingKey {
+	return (RUNTIME_BINDING_KEYS as readonly string[]).includes(key)
+}
+
 export type RuntimeBindings = Record<RuntimeBindingKey, string>
 
 export type ConfigBindings = {
-	repository: string | null
-	baseBranch: string | null
+	repository: string
+	baseBranch: string
 	requireBrowserEvidence: boolean
 }
 
@@ -883,7 +962,7 @@ async function runStatusCommand(args: string[]): Promise<void> {
 	if (parsed.kind !== "status") return
 	const snapshot = await buildCoderLoopStatusSnapshot(parsed.args)
 	StatusSnapshotBoundary.assert(snapshot)
-	process.stdout.write(`${JSON.stringify(snapshot, null, "\t")}\n`)
+	process.stdout.write(`${stringifyStatusSnapshot(snapshot)}\n`)
 }
 
 async function runDaemonCommand(args: string[]): Promise<void> {
@@ -898,7 +977,7 @@ async function runDaemonCommand(args: string[]): Promise<void> {
 			output: "json",
 		})
 		StatusSnapshotBoundary.assert(snapshot)
-		process.stdout.write(`${JSON.stringify(snapshot, null, "\t")}\n`)
+		process.stdout.write(`${stringifyStatusSnapshot(snapshot)}\n`)
 		return
 	}
 	if (daemonArgs.action === "start") {
@@ -1529,6 +1608,20 @@ function makeUnavailableStatusSnapshot(input: {
 	}
 }
 
+function flattenExtraReplacer(_key: string, value: unknown): unknown {
+	if (!isObjectRecord(value) || !("extra" in value) || !isJsonObject(value.extra)) return value
+	const extra = value.extra
+	const rest: Record<string, unknown> = {}
+	for (const [k, v] of Object.entries(value)) {
+		if (k !== "extra") rest[k] = v
+	}
+	return { ...extra, ...rest }
+}
+
+function stringifyStatusSnapshot(snapshot: CoderLoopStatusSnapshot): string {
+	return JSON.stringify(snapshot, flattenExtraReplacer, "\t")
+}
+
 function buildStatusQueueSnapshot(options: LoopOptions, state: LoopState, selected: SelectedIssue | null): StatusQueueSnapshot {
 	const byStatus: Record<string, number> = {}
 	for (const item of state.queue) byStatus[item.status] = (byStatus[item.status] ?? 0) + 1
@@ -1610,24 +1703,10 @@ function agentStatusFromInput(input: AgentRunStatusInput): AgentRunStatus {
 		signal: input.signal,
 		error: input.error,
 		sessionId: input.sessionId,
-		terminated: parseTerminatedFromStatus(input.terminated),
+		terminated: input.terminated,
 	}
 }
 
-function parseTerminatedFromStatus(value: object | null): Terminated | null {
-	if (value === null) return null
-	const record = expectJsonObject(value, "agent status.terminated")
-	const kind = requiredJsonString(record, "kind")
-	if (kind === "clean") return { kind }
-	if (kind === "signal") return { kind, name: requiredJsonString(record, "name") }
-	if (kind === "error") return { kind, code: requiredJsonString(record, "code") }
-	if (kind === "watchdog") {
-		const phase = requiredJsonString(record, "phase")
-		if (phase !== "term" && phase !== "kill") throw new Error(`agent status.terminated.phase must be "term" or "kill"`)
-		return { kind, phase, afterSummarySeconds: requiredJsonNumber(record, "afterSummarySeconds") }
-	}
-	throw new Error(`agent status.terminated.kind is not supported: ${kind}`)
-}
 
 async function buildStatusEventsSnapshot(options: LoopOptions, state: LoopState, selected: SelectedIssue | null): Promise<StatusEventsSnapshot> {
 	const runId = state.current?.runId ?? selected?.item.lastRunId ?? firstLastRunId(state)
@@ -2009,73 +2088,49 @@ export async function loadPreset(presetDir: string): Promise<Preset> {
 }
 
 export function parsePreset(value: unknown, presetDir: string): Preset {
-	const root = expectRecord(value, "preset")
-	const name = requiredString(root, "name")
-	const version = requiredNumber(root, "version")
-	const description = optionalString(root, "description") ?? ""
+	const root = assertArk(PresetTomlBoundary, value, "preset")
 
-	const itemRaw = expectRecord(root.item, "preset.item")
-	const idField = requiredString(itemRaw, "idField")
-
-	const statusesRaw = expectRecord(root.statuses, "preset.statuses")
-	const continuable = requiredStringArray(statusesRaw, "continuable")
-	const terminal = requiredStringArray(statusesRaw, "terminal")
-	for (const status of continuable) {
-		if (terminal.includes(status)) presetError(`preset.statuses: "${status}" appears in both continuable and terminal`)
+	for (const status of root.statuses.continuable) {
+		if (root.statuses.terminal.includes(status)) presetError(`preset.statuses: "${status}" appears in both continuable and terminal`)
 	}
 
-	const phasesRaw = root.phases
-	if (!Array.isArray(phasesRaw)) presetError("preset.phases must be an array")
 	const phaseNames = new Set<string>()
 	const phases: PresetPhase[] = []
-	for (const [index, entry] of phasesRaw.entries()) {
-		const phaseRecord = expectRecord(entry, `preset.phases[${index}]`)
-		const phaseName = requiredString(phaseRecord, "name")
-		if (phaseNames.has(phaseName)) presetError(`preset.phases[${index}].name: duplicate name "${phaseName}"`)
-		phaseNames.add(phaseName)
-		const phasePromptRel = requiredString(phaseRecord, "prompt")
-		const phasePrompt = resolve(presetDir, phasePromptRel)
-		const variablesRaw = phaseRecord.variables === undefined
-			? {}
-			: expectRecord(phaseRecord.variables, `preset.phases[${index}].variables`)
+	for (const [index, entry] of root.phases.entries()) {
+		if (phaseNames.has(entry.name)) presetError(`preset.phases[${index}].name: duplicate name "${entry.name}"`)
+		phaseNames.add(entry.name)
+		const variablesRaw = entry.variables ?? {}
+		if (!isObjectRecord(variablesRaw)) presetError(`preset.phases[${index}].variables: must be an object`)
 		const variables: Array<readonly [string, PresetVariableSource]> = []
 		for (const [key, val] of Object.entries(variablesRaw)) {
 			if (typeof val !== "string") presetError(`preset.phases[${index}].variables.${key}: must be a string`)
-			variables.push([key, parseVariableSource(val, `preset.phases[${index}].variables.${key}`)] as const)
+			const source = parseVariableSource(val, `preset.phases[${index}].variables.${key}`)
+			if (source.kind === "item" && !QUEUE_ITEM_BASE_KEYS.has(source.field) && source.field !== root.item.idField) {
+				presetError(`preset.phases[${index}].variables.${key}: unknown item field "${source.field}" (known base fields: ${[...QUEUE_ITEM_BASE_KEYS].join(", ")}; idField: ${root.item.idField})`)
+			}
+			variables.push([key, source] as const)
 		}
-		phases.push({ name: phaseName, prompt: phasePrompt, variables })
+		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), variables })
 	}
 
-	const fragmentsRaw = root.fragments ?? []
-	if (!Array.isArray(fragmentsRaw)) presetError("preset.fragments must be an array")
 	const fragmentIds = new Set<string>()
 	const fragments: PresetFragment[] = []
-	for (const [index, entry] of fragmentsRaw.entries()) {
-		const fragmentRecord = expectRecord(entry, `preset.fragments[${index}]`)
-		const id = requiredString(fragmentRecord, "id")
-		if (fragmentIds.has(id)) presetError(`preset.fragments[${index}].id: duplicate id "${id}"`)
-		fragmentIds.add(id)
-		const role = requiredString(fragmentRecord, "role")
-		const fragmentPathRel = requiredString(fragmentRecord, "path")
-		fragments.push({ id, role, path: resolve(presetDir, fragmentPathRel) })
-	}
-
-	const agentRaw = expectRecord(root.agent, "preset.agent")
-	const agent = {
-		binary: requiredString(agentRaw, "binary"),
-		extraArgs: optionalStringArray(agentRaw, "extraArgs") ?? [],
+	for (const [index, entry] of (root.fragments ?? []).entries()) {
+		if (fragmentIds.has(entry.id)) presetError(`preset.fragments[${index}].id: duplicate id "${entry.id}"`)
+		fragmentIds.add(entry.id)
+		fragments.push({ id: entry.id, role: entry.role, path: resolve(presetDir, entry.path) })
 	}
 
 	return {
-		name,
-		version,
-		description,
+		name: root.name,
+		version: root.version,
+		description: root.description ?? "",
 		presetDir,
-		item: { idField },
-		statuses: { continuable, terminal },
+		item: { idField: root.item.idField },
+		statuses: { continuable: root.statuses.continuable, terminal: root.statuses.terminal },
 		phases,
 		fragments,
-		agent,
+		agent: { binary: root.agent.binary, extraArgs: root.agent.extraArgs ?? [] },
 	}
 }
 
@@ -2091,11 +2146,6 @@ function presetError(message: string): never {
 	throw new Error(message)
 }
 
-function requiredStringArray(record: Record<string, unknown>, key: string): string[] {
-	const value = record[key]
-	if (Array.isArray(value) && value.every((entry) => typeof entry === "string")) return value
-	presetError(`${key} must be a string array`)
-}
 
 export type ConfigFormat = "json" | "toml"
 
@@ -2278,7 +2328,7 @@ export async function checkRuntime(options: LoopOptions, state: LoopState): Prom
 
 	for (const [index, item] of state.queue.entries()) {
 		const label = `state.queue[${index}]`
-		const idValue = item[idField]
+		const idValue = item.extra[idField]
 		const idLabel = `${label}.${idField}`
 		const idAsString = typeof idValue === "string" && idValue.length > 0
 			? idValue
@@ -2316,7 +2366,7 @@ export async function checkRuntime(options: LoopOptions, state: LoopState): Prom
 	}
 
 	if (state.current) {
-		const currentIdValue = state.current[idField]
+		const currentIdValue = state.current.extra[idField]
 		const currentIdLabel = `state.current.${idField}`
 		const currentIdAsString = typeof currentIdValue === "string" && currentIdValue.length > 0
 			? currentIdValue
@@ -2327,7 +2377,7 @@ export async function checkRuntime(options: LoopOptions, state: LoopState): Prom
 			pushCheckError(errors, currentIdLabel, `must be a non-empty string or finite number (preset.item.idField="${idField}")`)
 		} else {
 			const currentItem = state.queue.find((item) => {
-				const value = item[idField]
+				const value = item.extra[idField]
 				if (typeof value === "string") return value === currentIdAsString
 				if (typeof value === "number") return String(value) === currentIdAsString
 				return false
@@ -2356,6 +2406,7 @@ function makeFallbackItem(): QueueItem {
 		evidenceDir: null,
 		agentCwd: null,
 		runner: null,
+		extra: {},
 	}
 }
 
@@ -2381,42 +2432,88 @@ function parseStateText(raw: string): LoopState {
 		queue: root.queue.map((item, index) => parseQueueItem(item, `state.queue[${index}]`)),
 		repository: root.repository ?? null,
 		baseBranch: root.baseBranch ?? null,
-		recentRuns: (root.recentRuns ?? []).map((entry, index) => expectJsonValue(entry, `state.recentRuns[${index}]`)),
+		recentRuns: (root.recentRuns ?? []).filter((entry): entry is JsonValue => isJsonValue(entry)),
 		current: parseCurrent(root.current),
 	}
 }
 
 function parseQueueItem(value: object, label: string): QueueItem {
-	const record = expectJsonObject(value, label)
+	const validated = assertArk(QueueItemBaseBoundary, value, label)
+	const extra: JsonObject = {}
+	if (isObjectRecord(value)) {
+		for (const [key, val] of Object.entries(value)) {
+			if (!QUEUE_ITEM_BASE_KEYS.has(key) && isJsonValue(val)) {
+				extra[key] = val
+			}
+		}
+	}
+	const runner = validated.runner ?? null
 	return {
-		...record,
-		status: requiredJsonString(record, "status"),
-		attempts: optionalJsonNumber(record, "attempts"),
-		title: optionalJsonString(record, "title"),
-		priority: optionalJsonString(record, "priority"),
-		branch: optionalJsonString(record, "branch"),
-		pr: optionalJsonNumber(record, "pr"),
-		lastRunId: optionalJsonString(record, "lastRunId"),
-		issueFile: optionalJsonString(record, "issueFile"),
-		evidenceDir: optionalJsonString(record, "evidenceDir"),
-		agentCwd: optionalJsonString(record, "agentCwd"),
-		runner: optionalJsonRunnerKind(record, "runner"),
+		status: validated.status,
+		attempts: validated.attempts ?? null,
+		title: validated.title ?? null,
+		priority: validated.priority ?? null,
+		branch: validated.branch ?? null,
+		pr: validated.pr ?? null,
+		lastRunId: validated.lastRunId ?? null,
+		issueFile: validated.issueFile ?? null,
+		evidenceDir: validated.evidenceDir ?? null,
+		agentCwd: validated.agentCwd ?? null,
+		runner: runner === "claude" || runner === "codex" ? runner : null,
+		extra,
 	}
 }
 
 function parseCurrent(value: object | null | undefined): CurrentRun | null {
 	if (value === undefined || value === null) return null
-	const record = expectJsonObject(value, "state.current")
+	const validated = assertArk(CurrentRunBaseBoundary, value, "state.current")
+	const extra: JsonObject = {}
+	if (isObjectRecord(value)) {
+		for (const [key, val] of Object.entries(value)) {
+			if (!CURRENT_RUN_BASE_KEYS.has(key) && isJsonValue(val)) {
+				extra[key] = val
+			}
+		}
+	}
 	return {
-		...record,
-		phase: requiredJsonString(record, "phase"),
-		runId: requiredJsonString(record, "runId"),
-		startedAt: requiredJsonString(record, "startedAt"),
+		phase: validated.phase,
+		runId: validated.runId,
+		startedAt: validated.startedAt,
+		extra,
 	}
 }
 
+function flattenQueueItem(item: QueueItem): JsonObject {
+	const result: JsonObject = { ...item.extra }
+	result.status = item.status
+	result.attempts = item.attempts
+	result.title = item.title
+	result.priority = item.priority
+	result.branch = item.branch
+	result.pr = item.pr
+	result.lastRunId = item.lastRunId
+	result.issueFile = item.issueFile
+	result.evidenceDir = item.evidenceDir
+	result.agentCwd = item.agentCwd
+	result.runner = item.runner
+	return result
+}
+
+function flattenCurrentRun(run: CurrentRun): JsonObject {
+	const result: JsonObject = { ...run.extra }
+	result.phase = run.phase
+	result.runId = run.runId
+	result.startedAt = run.startedAt
+	return result
+}
+
 export function serializeState(state: LoopState): string {
-	return `${JSON.stringify(state, null, "\t")}\n`
+	const serializable = {
+		...state,
+		queue: state.queue.map(flattenQueueItem),
+		current: state.current ? flattenCurrentRun(state.current) : null,
+	}
+	return `${JSON.stringify(serializable, null, "\t")}\n`
 }
 
 async function saveState(path: string, state: LoopState): Promise<void> {
@@ -2492,13 +2589,13 @@ export function markIterationStarted(
 	const phases = preset.phases
 	const iterPhase = phases[0]
 	if (!iterPhase) fail("preset must define at least one phase")
-	const currentIdValue = queueItem[preset.item.idField]
+	const currentIdValue = queueItem.extra[preset.item.idField]
 	if (currentIdValue === undefined) fail(`Selected item "${id}" is missing id field "${preset.item.idField}"`)
 	state.current = {
-		[preset.item.idField]: currentIdValue,
 		phase: iterPhase.name,
 		runId,
 		startedAt: new Date().toISOString(),
+		extra: { [preset.item.idField]: currentIdValue },
 	}
 }
 
@@ -2506,13 +2603,13 @@ export function markReviewStarted(state: LoopState, item: QueueItem, preset: Pre
 	const phases = preset.phases
 	const reviewPhase = phases[phases.length - 1]
 	if (!reviewPhase) fail("preset must define at least one phase")
-	const currentIdValue = item[preset.item.idField]
+	const currentIdValue = item.extra[preset.item.idField]
 	if (currentIdValue === undefined) fail(`Selected item is missing id field "${preset.item.idField}"`)
 	state.current = {
-		[preset.item.idField]: currentIdValue,
 		phase: reviewPhase.name,
 		runId,
 		startedAt: new Date().toISOString(),
+		extra: { [preset.item.idField]: currentIdValue },
 	}
 }
 
@@ -2533,14 +2630,14 @@ export function makeIssueRunContext(current: CurrentRun | null): IssueRunContext
 }
 
 export function getItemId(item: QueueItem, preset: Preset): string {
-	const value = item[preset.item.idField]
+	const value = item.extra[preset.item.idField]
 	if (typeof value === "string" && value.length > 0) return value
 	if (typeof value === "number" && Number.isFinite(value)) return String(value)
 	throw new Error(`queue item is missing required id field "${preset.item.idField}"`)
 }
 
 export function getCurrentId(current: CurrentRun, preset: Preset): string {
-	const value = current[preset.item.idField]
+	const value = current.extra[preset.item.idField]
 	if (typeof value === "string" && value.length > 0) return value
 	if (typeof value === "number" && Number.isFinite(value)) return String(value)
 	throw new Error(`state.current is missing required id field "${preset.item.idField}"`)
@@ -2555,22 +2652,37 @@ export function renderPrompt(template: string, phase: PresetPhase, ctx: ResolveC
 	return result
 }
 
+function lookupItemField(item: QueueItem, field: string): unknown {
+	switch (field) {
+		case "status": return item.status
+		case "attempts": return item.attempts
+		case "title": return item.title
+		case "priority": return item.priority
+		case "branch": return item.branch
+		case "pr": return item.pr
+		case "lastRunId": return item.lastRunId
+		case "issueFile": return item.issueFile
+		case "evidenceDir": return item.evidenceDir
+		case "agentCwd": return item.agentCwd
+		case "runner": return item.runner
+		default: return item.extra[field]
+	}
+}
+
 export function resolveBinding(source: PresetVariableSource, ctx: ResolveContext): string {
 	if (source.kind === "item") {
-		const value = ctx.item[source.field]
+		const value = lookupItemField(ctx.item, source.field)
 		return stringifyBindingValue(value, `item.${source.field}`)
 	}
 	if (source.kind === "config") {
-		const record = ctx.config as unknown as Record<string, unknown>
-		if (!(source.field in record)) throw new Error(`config.${source.field}: not in known config bindings`)
-		const value = record[source.field]
-		if (value === null || value === undefined) throw new Error(`config.${source.field}: must not be null or undefined`)
+		if (!isConfigBindingField(source.field)) throw new Error(`config.${source.field}: not in known config bindings`)
+		const value = ctx.config[source.field]
 		return stringifyBindingValue(value, `config.${source.field}`)
 	}
-	if (!RUNTIME_BINDING_KEYS.includes(source.key as RuntimeBindingKey)) {
+	if (!isRuntimeBindingKey(source.key)) {
 		throw new Error(`runtime.${source.key}: not in runtime binding whitelist`)
 	}
-	return ctx.runtime[source.key as RuntimeBindingKey]
+	return ctx.runtime[source.key]
 }
 
 function stringifyBindingValue(value: unknown, label: string): string {
@@ -2643,7 +2755,7 @@ export function parseKindFromLabels(labelNames: readonly string[]): ParsedIssueK
 }
 
 function parseIssueKindFromQueueItem(item: QueueItem): ParsedIssueKind {
-	const raw = item.issueKind ?? item.kind
+	const raw = item.extra.issueKind ?? item.extra.kind
 	if (raw === null || raw === undefined || raw === "") return { ok: true, kind: null }
 	if (typeof raw !== "string") return { ok: false, error: `queue item issue kind must be a string when repository is not configured` }
 	const label = raw.startsWith("kind:") ? raw : `kind:${raw}`
@@ -2692,8 +2804,8 @@ export async function fetchIssueKind(repository: string | null, issueId: string)
 
 export function buildConfigBindings(options: LoopOptions): ConfigBindings {
 	return {
-		repository: options.repository,
-		baseBranch: options.baseBranch,
+		repository: options.repository ?? "",
+		baseBranch: options.baseBranch ?? "",
 		requireBrowserEvidence: options.requireBrowserEvidence,
 	}
 }
@@ -2793,7 +2905,7 @@ export function summaryWatchdogConfigForPrompt(prompt: string): SummaryWatchdogC
 	}
 }
 
-export type SummaryWatchdogTimerHandle = unknown
+export type SummaryWatchdogTimerHandle = ReturnType<typeof setTimeout> | null
 
 export type SummaryWatchdogDeps = {
 	config: SummaryWatchdogConfig
@@ -3038,7 +3150,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			config: watchdogConfig,
 			setTimer: (cb, ms) => setTimeout(cb, ms),
 			clearTimer: (handle) => {
-				if (handle !== null) clearTimeout(handle as ReturnType<typeof setTimeout>)
+				if (handle !== null) clearTimeout(handle)
 			},
 			onTerm: () => {
 				log(`Agent [${label}] forced-terminate after "${watchdogConfig.marker}" + ${Math.round(watchdogConfig.termMs / 1000)}s; sending SIGTERM (pid=${child.pid ?? "?"})`)
@@ -3318,8 +3430,8 @@ export function parseSessionIdFromStream(text: string): string | null {
 	const firstLine = text.slice(0, newlineIdx).trim()
 	if (firstLine === "") return null
 	try {
-		const event = JSON.parse(firstLine) as { session_id?: unknown }
-		if (typeof event.session_id === "string" && event.session_id !== "") return event.session_id
+		const event: unknown = JSON.parse(firstLine)
+		if (isObjectRecord(event) && typeof event.session_id === "string" && event.session_id !== "") return event.session_id
 		return null
 	} catch {
 		return null
@@ -3331,8 +3443,8 @@ export function parseCodexThreadIdFromStream(text: string): string | null {
 		const trimmed = line.trim()
 		if (trimmed === "") continue
 		try {
-			const event = JSON.parse(trimmed) as { type?: unknown; thread_id?: unknown }
-			if (event.type === "thread.started" && typeof event.thread_id === "string" && event.thread_id !== "") return event.thread_id
+			const event: unknown = JSON.parse(trimmed)
+			if (isObjectRecord(event) && event.type === "thread.started" && typeof event.thread_id === "string" && event.thread_id !== "") return event.thread_id
 		} catch {
 			continue
 		}
@@ -3350,16 +3462,17 @@ export function extractErrorCode(stdoutText: string, stderrText: string): string
 		const line = lines[i]
 		if (line === undefined || line.trim() === "") continue
 		try {
-			const event = JSON.parse(line) as Record<string, unknown>
-			const isError = event["is_error"] === true || event["type"] === "error"
+			const parsed: unknown = JSON.parse(line)
+			if (!isObjectRecord(parsed)) continue
+			const isError = parsed["is_error"] === true || parsed["type"] === "error"
 			if (!isError) continue
-			const errorObj = event["error"] as { type?: unknown; code?: unknown; message?: unknown } | undefined
-			if (errorObj && typeof errorObj === "object") {
+			const errorObj = parsed["error"]
+			if (isObjectRecord(errorObj)) {
 				if (typeof errorObj.type === "string" && errorObj.type !== "") return errorObj.type
 				if (typeof errorObj.code === "string" && errorObj.code !== "") return errorObj.code
 				if (typeof errorObj.message === "string" && errorObj.message !== "") return errorObj.message.slice(0, 200)
 			}
-			if (typeof event["message"] === "string" && event["message"] !== "") return (event["message"] as string).slice(0, 200)
+			if (typeof parsed["message"] === "string" && parsed["message"] !== "") return parsed["message"].slice(0, 200)
 		} catch {
 			continue
 		}
@@ -3427,9 +3540,10 @@ export async function readLastSessionEntry(sessionsPath: string): Promise<Sessio
 		const line = lines[i]
 		if (line === undefined || line.trim() === "") continue
 		try {
-			const parsed = JSON.parse(line) as unknown
-			if (!isValidSessionEntry(parsed)) continue
-			return parsed
+			const parsed: unknown = JSON.parse(line)
+			const result = SessionEntryBoundary(parsed)
+			if (result instanceof arkType.errors) continue
+			return result
 		} catch {
 			continue
 		}
@@ -3437,28 +3551,6 @@ export async function readLastSessionEntry(sessionsPath: string): Promise<Sessio
 	return null
 }
 
-function isValidSessionEntry(value: unknown): value is SessionEntry {
-	if (typeof value !== "object" || value === null) return false
-	const v = value as Record<string, unknown>
-	if (typeof v["attempt"] !== "string") return false
-	if (v["runner"] !== undefined && v["runner"] !== null && v["runner"] !== "claude" && v["runner"] !== "codex") return false
-	if (v["model"] !== undefined && v["model"] !== null && typeof v["model"] !== "string") return false
-	if (v["sessionId"] !== null && typeof v["sessionId"] !== "string") return false
-	if (v["exitCode"] !== null && typeof v["exitCode"] !== "number") return false
-	if (v["signal"] !== null && typeof v["signal"] !== "string") return false
-	if (typeof v["log"] !== "string") return false
-	const terminated = v["terminated"] as { kind?: unknown } | null
-	if (typeof terminated !== "object" || terminated === null) return false
-	const kind = terminated.kind
-	if (kind === "clean") return true
-	if (kind === "signal" && typeof (terminated as { name?: unknown }).name === "string") return true
-	if (kind === "error" && typeof (terminated as { code?: unknown }).code === "string") return true
-	if (kind === "watchdog") {
-		const w = terminated as { phase?: unknown; afterSummarySeconds?: unknown }
-		if ((w.phase === "term" || w.phase === "kill") && typeof w.afterSummarySeconds === "number") return true
-	}
-	return false
-}
 
 export async function appendSessionEntry(sessionsPath: string, entry: SessionEntry): Promise<void> {
 	const line = JSON.stringify(entry) + "\n"
@@ -3615,11 +3707,6 @@ function formatMaxIterations(value: number): string {
 	return value === Number.POSITIVE_INFINITY ? "Infinity" : String(value)
 }
 
-function expectRecord(value: unknown, label: string): Record<string, unknown> {
-	if (typeof value === "object" && value !== null && !Array.isArray(value)) return value as Record<string, unknown>
-	fail(`${label} must be an object`)
-}
-
 type ArkAssertable<T> = {
 	assert(data: unknown): T
 }
@@ -3642,113 +3729,10 @@ function isJsonValue(value: unknown): value is JsonValue {
 }
 
 function isJsonObject(value: unknown): value is JsonObject {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) return false
-	const record = value as Record<string, unknown>
-	return Object.values(record).every(isJsonValue)
+	if (!isObjectRecord(value) || Array.isArray(value)) return false
+	return Object.values(value).every(isJsonValue)
 }
 
-function expectJsonObject(value: unknown, label: string): JsonObject {
-	if (isJsonObject(value)) return value
-	throw new Error(`${label} must be a JSON object`)
-}
-
-function expectJsonValue(value: unknown, label: string): JsonValue {
-	if (isJsonValue(value)) return value
-	throw new Error(`${label} must be JSON data`)
-}
-
-function requiredJsonString(record: JsonObject, key: string): string {
-	const value = record[key]
-	if (typeof value === "string") return value
-	throw new Error(`${key} must be a string`)
-}
-
-function optionalJsonString(record: JsonObject, key: string): string | null {
-	const value = record[key]
-	if (value === undefined || value === null) return null
-	if (typeof value === "string") return value
-	throw new Error(`${key} must be a string when provided`)
-}
-
-function optionalJsonRunnerKind(record: JsonObject, key: string): AgentRunnerKind | null {
-	const value = record[key]
-	if (value === undefined || value === null) return null
-	if (value === "claude" || value === "codex") return value
-	throw new Error(`${key} must be "claude" or "codex" when provided`)
-}
-
-function requiredJsonNumber(record: JsonObject, key: string): number {
-	const value = record[key]
-	if (typeof value === "number" && Number.isFinite(value)) return value
-	throw new Error(`${key} must be a finite number`)
-}
-
-function optionalJsonNumber(record: JsonObject, key: string): number | null {
-	const value = record[key]
-	if (value === undefined || value === null) return null
-	if (typeof value === "number" && Number.isFinite(value)) return value
-	throw new Error(`${key} must be a finite number when provided`)
-}
-
-function optionalRecord(record: Record<string, unknown>, key: string): Record<string, unknown> | null {
-	const value = record[key]
-	if (value === undefined || value === null) return null
-	return expectRecord(value, key)
-}
-
-function requiredString(record: Record<string, unknown>, key: string): string {
-	const value = record[key]
-	if (typeof value === "string") return value
-	fail(`${key} must be a string`)
-}
-
-function optionalString(record: Record<string, unknown>, key: string): string | null {
-	const value = record[key]
-	if (value === undefined || value === null) return null
-	if (typeof value === "string") return value
-	fail(`${key} must be a string when provided`)
-}
-
-function nullableString(record: Record<string, unknown>, key: string): string | null {
-	const value = record[key]
-	if (value === null) return null
-	if (typeof value === "string") return value
-	fail(`${key} must be a string or null`)
-}
-
-function requiredNumber(record: Record<string, unknown>, key: string): number {
-	const value = record[key]
-	if (typeof value === "number" && Number.isFinite(value)) return value
-	fail(`${key} must be a finite number`)
-}
-
-function nullableNumber(record: Record<string, unknown>, key: string): number | null {
-	const value = record[key]
-	if (value === null) return null
-	if (typeof value === "number" && Number.isFinite(value)) return value
-	fail(`${key} must be a finite number or null`)
-}
-
-function optionalNumber(record: Record<string, unknown>, key: string): number | null {
-	const value = record[key]
-	if (value === undefined || value === null) return null
-	if (typeof value === "number" && Number.isFinite(value)) return value
-	fail(`${key} must be a finite number when provided`)
-}
-
-function optionalBoolean(record: Record<string, unknown>, key: string): boolean | null {
-	const value = record[key]
-	if (value === undefined || value === null) return null
-	if (typeof value === "boolean") return value
-	fail(`${key} must be a boolean when provided`)
-}
-
-function optionalStringArray(record: Record<string, unknown>, key: string): string[] | null {
-	const value = record[key]
-	if (value === undefined || value === null) return null
-	if (Array.isArray(value) && value.every((entry) => typeof entry === "string")) return value
-	fail(`${key} must be a string array when provided`)
-}
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
 	return typeof error === "object" && error !== null && "code" in error
