@@ -1084,6 +1084,19 @@ describe("renderPrompt with bundled preset", () => {
 		expect(sourceSpikeGate).not.toContain("gh pr merge")
 		expect(acceptPr).toContain("gh pr merge <PR_NUMBER>")
 	})
+
+	test("accepted PR GitHub side-effect approval failures stop instead of retrying the same accepted PR", async () => {
+		const acceptPr = await readFile(resolve(BUNDLED_PRESET_DIR, "review/action-accept-pr.md"), "utf-8")
+		const actionStop = await readFile(resolve(BUNDLED_PRESET_DIR, "review/action-stop.md"), "utf-8")
+		expect(acceptPr).toContain("This command requires approval")
+		expect(acceptPr).toContain("noninteractive approval/permission boundary")
+		expect(acceptPr).toContain("read `review/action-stop`")
+		expect(acceptPr).not.toContain("`accept_pr_failed` → read `review/action-retry`")
+		expect(actionStop).toContain("accepted PR GitHub side effect failure")
+		expect(actionStop).toContain("failed command")
+		expect(actionStop).toContain("Remove `.dev-loop`")
+		expect(actionStop).toContain("Do not mark the selected issue `done`")
+	})
 })
 
 describe("resolvePresetDir", () => {
