@@ -27,6 +27,10 @@ EOF
 gh issue close <ISSUE> -R <REPO> --comment "Closed by coder-loop review <RUN_ID> after verifying completion."
 ```
 
+Each command above is a required GitHub side effect. If any required side effect is blocked by a noninteractive approval/permission boundary (for example, `This command requires approval`) or otherwise fails before durable feedback/closure can be published, record the exact failed command, target repo/issue, accepted verdict, and command output in handoff, do not set local `done`, and stop as review infrastructure failure so the daemon cannot immediately replay the same accepted no-PR closure.
+
+If the closure comment was published and a later close command fails for an ordinary actionable reason such as transient GitHub failure, stale issue state, or issue status mismatch, do not set local `done`; retry with exact issue feedback.
+
 If close fails or the issue remains open, do not set local `done`.
 
 ## Output verdict
@@ -34,4 +38,5 @@ If close fails or the issue remains open, do not set local `done`.
 Choose exactly one:
 
 - `accepted_no_pr_closed` → read `review/update-state` with transition `accepted_no_pr`.
-- `accept_no_pr_failed` → read `review/action-retry`.
+- `accept_no_pr_infrastructure_failed` → read `review/action-stop`.
+- `accept_no_pr_retry_needed` → read `review/action-retry`.
