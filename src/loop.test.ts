@@ -234,6 +234,17 @@ describe("getItemId / getCurrentId", () => {
 	})
 })
 
+describe("reserved strings registry", () => {
+	test("docs list the current summary watchdog markers", async () => {
+		const registry = await readFile(resolve(REPO_ROOT, "docs/reserved-strings.md"), "utf-8")
+
+		expect(registry).toContain(SUMMARY_WATCHDOG_MARKER)
+		expect(registry).toContain(REVIEW_SUMMARY_WATCHDOG_MARKER)
+		expect(registry).toContain("SUMMARY_WATCHDOG_MARKER")
+		expect(registry).toContain("REVIEW_SUMMARY_WATCHDOG_MARKER")
+	})
+})
+
 describe("buildCoderLoopStatusSnapshot", () => {
 	test("detectHostRunner defaults to Codex inside Codex env and Claude otherwise", () => {
 		expect(detectHostRunner({ CODEX_SHELL: "1" })).toBe("codex")
