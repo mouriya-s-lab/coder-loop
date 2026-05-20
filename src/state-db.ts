@@ -126,6 +126,8 @@ export type StateStore = {
 	) => Chain
 	getChain: (idOrName: number | string) => Chain | null
 	listChains: () => Chain[]
+	listActiveChains: () => Chain[]
+	listRepoCwdsForChain: (chainId: number) => string[]
 	completeChain: (id: number) => Chain
 	addItem: (chainId: number, item: NewItem) => Item
 	getItem: (id: number) => Item | null
@@ -200,6 +202,8 @@ export function openStateStore(path: string = DEFAULT_STATE_DB_PATH): StateStore
 		createChain: (...args) => createChain(db, ...args),
 		getChain: (idOrName) => getChain(db, idOrName),
 		listChains: () => listChains(db),
+		listActiveChains: () => listActiveChains(db),
+		listRepoCwdsForChain: (chainId) => listRepoCwdsForChain(db, chainId),
 		completeChain: (id) => completeChain(db, id),
 		addItem: (chainId, item) => addItem(db, chainId, item),
 		getItem: (id) => getItem(db, id),
@@ -304,6 +308,21 @@ export function getChain(db: Database, idOrName: number | string): Chain | null 
 export function listChains(db: Database): Chain[] {
 	const rows = db.query("SELECT * FROM chains ORDER BY id").all()
 	return rows.map((row) => chainFromRow(expectRow<ChainRow>(row, "listChains")))
+}
+
+export function listActiveChains(db: Database): Chain[] {
+	const rows = db.query("SELECT * FROM chains WHERE status = 'active' ORDER BY id").all()
+	return rows.map((row) => chainFromRow(expectRow<ChainRow>(row, "listActiveChains")))
+}
+
+export function listRepoCwdsForChain(db: Database, chainId: number): string[] {
+	const rows = db.query(`
+		SELECT DISTINCT repo_cwd
+		FROM items
+		WHERE chain_id = ?
+		ORDER BY repo_cwd
+	`).all(chainId)
+	return rows.map((row) => expectRow<{ repo_cwd: string }>(row, "listRepoCwdsForChain").repo_cwd)
 }
 
 export function completeChain(db: Database, id: number): Chain {
