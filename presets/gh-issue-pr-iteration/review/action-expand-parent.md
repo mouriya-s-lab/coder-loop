@@ -93,7 +93,7 @@ Initialize the local child bookkeeping before state insertion:
 
 Before creating the child, self-check that it describes one coherent remaining problem, contains no unchecked checklist acceptance criteria, does not prescribe implementation internals, and does not expose loop run IDs or other local scaffolding in the GitHub body.
 
-Do not close the parent issue. Do not mark the parent final. Leave `.dev-loop` untouched.
+Do not close the parent issue. Do not mark the parent final. Leave loop execution active.
 
 ## Output verdict
 

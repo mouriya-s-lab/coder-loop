@@ -153,7 +153,7 @@ async function makeFixtureOptions(preset: Preset): Promise<LoopOptions> {
 		issueDir,
 		evidenceRootDir,
 		logDir,
-		loopFile: resolve(cwd, ".dev-loop"),
+		loopFile: resolve(cwd, "loop-data/chains/test/loop-control"),
 		traceFile: resolve(logDir, "run-fixture/iteration/stdout.jsonl"),
 		logFile: resolve(logDir, "test.log"),
 		repository: "Mouriya-Emma/test",
@@ -898,15 +898,19 @@ function makeFixtureRuntime(overrides: Partial<RuntimeBindings> = {}): RuntimeBi
 		targetCwd: "/tmp/fixture-cwd",
 		agentCwd: "/tmp/fixture-cwd",
 		workflowPath: "/tmp/fixture-cwd/.coder-loop/workflow.md",
-		sharedContextPath: "/tmp/fixture-cwd/.coder-loop/runtime/shared.md",
-		statePath: "/tmp/fixture-cwd/.coder-loop/runtime/state.json",
-		currentIssueFile: "/tmp/fixture-cwd/.coder-loop/runtime/issues/131.md",
-		issueDir: "/tmp/fixture-cwd/.coder-loop/runtime/issues",
-		evidenceDir: "/tmp/fixture-cwd/.coder-loop/runtime/evidence/131",
-		evidenceRootDir: "/tmp/fixture-cwd/.coder-loop/runtime/evidence",
+		sharedContextPath: "/tmp/fixture-cwd/loop-data/chains/test/shared.md",
+		stateDbPath: "/tmp/fixture-cwd/loop-data/state.db",
+		currentIssueFile: "/tmp/fixture-cwd/loop-data/chains/test/issues/131.md",
+		issueDir: "/tmp/fixture-cwd/loop-data/chains/test/issues",
+		evidenceDir: "/tmp/fixture-cwd/loop-data/chains/test/evidence/131",
+		evidenceRootDir: "/tmp/fixture-cwd/loop-data/chains/test/evidence",
 		logDir: "/tmp/fixture-cwd/loop-data/chains/test/runs",
-		traceFile: "/tmp/fixture-cwd/loop-data/chains/test/runs/run-fixture/iteration/stdout.jsonl",
-		loopFile: "/tmp/fixture-cwd/.dev-loop",
+		loopDataRoot: "/tmp/fixture-cwd/loop-data",
+		chainName: "test",
+		chainDir: "/tmp/fixture-cwd/loop-data/chains/test",
+		runDir: "/tmp/fixture-cwd/loop-data/chains/test/runs/run-fixture",
+		eventsFile: "/tmp/fixture-cwd/loop-data/chains/test/runs/run-fixture/events.jsonl",
+		iterationStdoutFile: "/tmp/fixture-cwd/loop-data/chains/test/runs/run-fixture/iteration/stdout.jsonl",
 		presetDir: "/tmp/fixture-preset",
 		fragmentIndex: "- f1 (common): /tmp/fixture-preset/f1.md",
 		runIdGeneration: "new",
@@ -1025,14 +1029,17 @@ describe("renderPrompt with bundled preset", () => {
 			`ISSUE=${item.extra.issue}`,
 			`WORKFLOW_FILE=${runtime.workflowPath}`,
 			`SHARED_CONTEXT_FILE=${runtime.sharedContextPath}`,
-			`STATE_FILE=${runtime.statePath}`,
+			`STATE_STORE=${runtime.stateDbPath}`,
 			`CURRENT_ISSUE_FILE=${runtime.currentIssueFile}`,
 			`ISSUE_DIR=${runtime.issueDir}`,
 			`EVIDENCE_DIR=${runtime.evidenceDir}`,
 			`EVIDENCE_ROOT_DIR=${runtime.evidenceRootDir}`,
 			`LOG_DIR=${runtime.logDir}`,
-			`TRACE_FILE=${runtime.traceFile}`,
-			`LOOP_FILE=${runtime.loopFile}`,
+			`LOOP_DATA_ROOT=${runtime.loopDataRoot}`,
+			`CHAIN_DIR=${runtime.chainDir}`,
+			`RUN_DIR=${runtime.runDir}`,
+			`EVENTS_FILE=${runtime.eventsFile}`,
+			`ITERATION_STDOUT_FILE=${runtime.iterationStdoutFile}`,
 			`PROMPT_ROOT=${runtime.presetDir}`,
 			`PROMPT_FRAGMENT_INDEX=${runtime.fragmentIndex}`,
 			`REQUIRE_BROWSER_EVIDENCE=${String(config.requireBrowserEvidence)}`,
@@ -1089,6 +1096,34 @@ describe("renderPrompt with bundled preset", () => {
 		const rendered = renderPrompt(template, phase, ctx)
 		const leftover = rendered.match(/\{\{[A-Z_][A-Z0-9_]*\}\}/g)
 		expect(leftover).toBeNull()
+	})
+
+	test("bundled entry prompts render loop-data paths without legacy runtime bindings", async () => {
+		const preset = await bundledPreset()
+		const options = await makeFixtureOptions(preset)
+		const item = makeItem({ issue: 149, status: "queued", branch: "issue-149", pr: 154, lastRunId: "run-prev" })
+		const runtime = buildRuntimeBindings({
+			options,
+			runId: "run-render-149",
+			currentIssueFile: resolve(options.issueDir, "149.md"),
+			evidenceDir: resolve(options.evidenceRootDir, "issue-149"),
+			agentCwd: options.targetCwd,
+			issueRun: { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null },
+			issueKind: "code",
+		})
+		const ctx: ResolveContext = { item, config: buildConfigBindings(options), runtime }
+
+		for (const phase of preset.phases) {
+			const raw = await readFile(phase.prompt, "utf-8")
+			const rendered = renderPrompt(raw, phase, ctx)
+			const legacyLoopSentinel = ".dev" + "-loop"
+			const legacyTraceFile = ".dev" + "-trace.txt"
+			expect(rendered).toContain("/chains/")
+			expect(rendered).not.toContain(".coder-loop/runtime/state.json")
+			expect(rendered).not.toContain(legacyLoopSentinel)
+			expect(rendered).not.toContain(legacyTraceFile)
+			expect(rendered.match(/\{\{[A-Z_][A-Z0-9_]*\}\}/g)).toBeNull()
+		}
 	})
 
 	test("source-writing spike iteration fragment allows source writes and forbids PR/merge/closure", async () => {
@@ -1211,7 +1246,7 @@ describe("renderPrompt with bundled preset", () => {
 		expect(acceptPr).not.toContain("`accept_pr_failed` → read `review/action-retry`")
 		expect(actionStop).toContain("accepted PR or accepted no-PR GitHub side effect failure")
 		expect(actionStop).toContain("failed command")
-		expect(actionStop).toContain("Remove `.dev-loop`")
+		expect(actionStop).toContain("Request loop stop")
 		expect(actionStop).toContain("Do not mark the selected issue `done`")
 	})
 
@@ -1226,7 +1261,7 @@ describe("renderPrompt with bundled preset", () => {
 		expect(acceptNoPr).toContain("`accept_no_pr_retry_needed` → read `review/action-retry`")
 		expect(actionStop).toContain("accepted PR or accepted no-PR GitHub side effect failure")
 		expect(actionStop).toContain("failed command")
-		expect(actionStop).toContain("Remove `.dev-loop`")
+		expect(actionStop).toContain("Request loop stop")
 		expect(actionStop).toContain("Do not mark the selected issue `done`")
 	})
 
@@ -1425,6 +1460,14 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 		expect(runtime.runId).toBe("run-1")
 		expect(runtime.targetCwd).toBe(options.targetCwd)
 		expect(runtime.agentCwd).toBe(options.targetCwd)
+		expect(runtime.sharedContextPath).toContain("/chains/")
+		expect(runtime.stateDbPath).toContain("state.db")
+		expect(runtime.currentIssueFile).toMatch(/\/chains\/.+\/issues\/issue\.md$/)
+		expect(runtime.evidenceDir).toMatch(/\/chains\/.+\/evidence\/evidence$/)
+		expect(runtime.iterationStdoutFile).toContain("/runs/run-1/iteration/stdout.jsonl")
+		expect(Object.keys(runtime)).not.toContain("statePath")
+		expect(Object.keys(runtime)).not.toContain("traceFile")
+		expect(Object.keys(runtime)).not.toContain("loopFile")
 		expect(runtime.presetDir).toBe(preset.presetDir)
 		expect(runtime.runIdGeneration).toBe("new")
 		expect(runtime.resumedFromPhase).toBe("")
@@ -1935,7 +1978,7 @@ describe("buildRunnerInvocation", () => {
 			{ kind: "claude", source: "config", binary: "/tmp/claude", extraArgs: ["--max-turns", "5"], model: null },
 			"hello",
 			{ kind: "fresh" },
-			{ agentCwd: "/tmp/target", targetCwd: "/tmp/target", presetDir: "/tmp/preset" },
+			{ agentCwd: "/tmp/target", targetCwd: "/tmp/target", presetDir: "/tmp/preset", loopDataRoot: "/tmp/loop-data" },
 		)
 
 		expect(invocation.binary).toBe("/tmp/claude")
@@ -1944,21 +1987,23 @@ describe("buildRunnerInvocation", () => {
 		expect(invocation.args).toContain("--max-turns")
 		expect(invocation.args).toContain("--add-dir")
 		expect(invocation.args).toContain("/tmp/preset")
+		expect(invocation.args).toContain("/tmp/loop-data")
 		expect(invocation.args[invocation.args.length - 1]).toBe("hello")
 	})
 
-	test("Claude runner with cross-repo agentCwd adds both presetDir and targetCwd to --add-dir", () => {
+	test("Claude runner with cross-repo agentCwd adds presetDir, loopDataRoot, and targetCwd to --add-dir", () => {
 		const invocation = buildRunnerInvocation(
 			{ kind: "claude", source: "config", binary: "/tmp/claude", extraArgs: [], model: null },
 			"hello",
 			{ kind: "fresh" },
-			{ agentCwd: "/tmp/agent-repo", targetCwd: "/tmp/target", presetDir: "/tmp/preset" },
+			{ agentCwd: "/tmp/agent-repo", targetCwd: "/tmp/target", presetDir: "/tmp/preset", loopDataRoot: "/tmp/loop-data" },
 		)
 
 		const idx = invocation.args.indexOf("--add-dir")
 		expect(idx).toBeGreaterThanOrEqual(0)
 		expect(invocation.args[idx + 1]).toBe("/tmp/preset")
-		expect(invocation.args[idx + 2]).toBe("/tmp/target")
+		expect(invocation.args[idx + 2]).toBe("/tmp/loop-data")
+		expect(invocation.args[idx + 3]).toBe("/tmp/target")
 	})
 
 	test("runner model reaches Claude invocation and overrides extraArgs model", () => {
@@ -1966,7 +2011,7 @@ describe("buildRunnerInvocation", () => {
 			{ kind: "claude", source: "config", binary: "/tmp/claude", extraArgs: ["--model", "sonnet"], model: CLAUDE_REVIEW_MODEL },
 			"hello",
 			{ kind: "fresh" },
-			{ agentCwd: "/tmp/target", targetCwd: "/tmp/target", presetDir: "/tmp/preset" },
+			{ agentCwd: "/tmp/target", targetCwd: "/tmp/target", presetDir: "/tmp/preset", loopDataRoot: "/tmp/loop-data" },
 		)
 
 		const idx = invocation.args.indexOf("--model")
@@ -1980,7 +2025,7 @@ describe("buildRunnerInvocation", () => {
 			{ kind: "codex", source: "queue", binary: "codex", extraArgs: [], model: null },
 			"hello",
 			{ kind: "fresh" },
-			{ agentCwd: "/tmp/target", targetCwd: "/tmp/target", presetDir: "/tmp/preset" },
+			{ agentCwd: "/tmp/target", targetCwd: "/tmp/target", presetDir: "/tmp/preset", loopDataRoot: "/tmp/loop-data" },
 		)
 
 		expect(invocation).toEqual({

@@ -19,7 +19,7 @@ Hard terminus for the planning run. Emit a single-line summary the slash command
    === end planning final ===
    ```
 
-3. Exit. Do not write further GitHub state. Do not mutate `state.json` beyond what `plan/init-queue` already did. Do not delete `.dev-loop` (planning does not interact with the loop sentinel — that's iter / review territory).
+3. Exit. Do not write further GitHub state. Do not mutate the loop state store beyond what `plan/init-queue` already did. Do not stop loop-control (planning does not interact with the loop sentinel — that's iter / review territory).
 
 ## Output
 

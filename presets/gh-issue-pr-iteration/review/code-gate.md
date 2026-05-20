@@ -9,7 +9,7 @@ Audit diff/code scope, tests, live checks, and mergeability after PR protocol an
 Reject unless live PR metadata and diff review show:
 
 - PR diff is scoped to exactly the selected issue;
-- PR diff does not stage `.coder-loop/runtime/` or `.dev-loop`;
+- PR diff does not stage runtime data, loop-data files, or local evidence;
 - PR does not weaken tests;
 - PR follows target project conventions;
 - required GitHub checks are passing;

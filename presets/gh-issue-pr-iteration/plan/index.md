@@ -41,7 +41,7 @@ Planning must not:
 - bypass `contract.md` §1.4 table column requirements;
 - skip adversarial validation;
 - queue parent-only umbrella issues without a concrete closure task;
-- delete `.dev-loop` or modify runtime files outside `state.json` + `issues/` + `evidence/`.
+- stop loop-control or modify runtime files outside the loop state, issues, and evidence surfaces.
 
 ## Next fragment
 

@@ -68,14 +68,17 @@ const EXPECTED_VARIABLE_KEYS = [
 	"ISSUE",
 	"WORKFLOW_FILE",
 	"SHARED_CONTEXT_FILE",
-	"STATE_FILE",
+	"STATE_STORE",
 	"CURRENT_ISSUE_FILE",
 	"ISSUE_DIR",
 	"EVIDENCE_DIR",
 	"EVIDENCE_ROOT_DIR",
 	"LOG_DIR",
-	"TRACE_FILE",
-	"LOOP_FILE",
+	"LOOP_DATA_ROOT",
+	"CHAIN_DIR",
+	"RUN_DIR",
+	"EVENTS_FILE",
+	"ITERATION_STDOUT_FILE",
 	"PROMPT_ROOT",
 	"PROMPT_FRAGMENT_INDEX",
 	"REQUIRE_BROWSER_EVIDENCE",
@@ -161,7 +164,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(prompt).toContain("gh")
 		expect(prompt).toContain("kind:blocked")
 		expect(prompt).toContain("Unblocks: {{REPO}}#{{ISSUE}}")
-		expect(prompt).toContain(".coder-loop/runtime/state.json")
+		expect(prompt).toContain("{{STATE_STORE}}")
 		expect(prompt).toContain("coder-loop daemon start <targetRepoPath> --require-browser-evidence")
 		expect(prompt).toContain("Do not change the current repository's blocked item")
 		expect(prompt).toContain("ITERATION SUMMARY: blocked_responder=")

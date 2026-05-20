@@ -17,7 +17,7 @@ Refs: <REPO>#<ISSUE>"
 git push -u origin <branch>
 ```
 
-Do not stage `.coder-loop/runtime/`, `.dev-loop`, secrets, unrelated files, or local-only evidence.
+Do not stage runtime data, loop-data files, secrets, unrelated files, or local-only evidence.
 
 ## PR
 

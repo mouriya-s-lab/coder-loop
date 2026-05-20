@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { resolve } from "node:path"
 import { buildLiveRuntimeHealthLines, upsertTargetChain } from "./install-commands"
 import { buildCoderLoopStatusSnapshot, loadPreset } from "./loop"
-import { defaultChainNameForTarget } from "./runtime-paths"
+import { chainRuntimePaths, defaultChainNameForTarget } from "./runtime-paths"
 import { openStateStore } from "./state-db"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -109,7 +109,9 @@ async function makeDoctorTarget(): Promise<string> {
 			startedAt: new Date().toISOString(),
 		},
 	}, null, 2))
-	await writeFile(resolve(dir, ".dev-loop"), [
+	const loopControlPath = resolve(chainRuntimePaths(null, defaultChainNameForTarget(dir)).chainDir, "loop-control")
+	await mkdir(resolve(loopControlPath, ".."), { recursive: true })
+	await writeFile(loopControlPath, [
 		"started: 2026-05-17T00:00:00.000Z",
 		"pid: 999999",
 		`log: ${resolve(runtime, "logs/coder-loop-999999.log")}`,
