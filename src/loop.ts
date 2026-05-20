@@ -32,6 +32,8 @@ const REVIEW_ON_EMPTY_LOCK_FILE = "review-on-empty.lock"
 const DEFAULT_IDLE_SLEEP_MS = 60_000
 const DEFAULT_ITERATION_RUNNER: AgentRunnerKind = "codex"
 export const CLAUDE_REVIEW_MODEL = "claude-opus-4-7"
+export const DEFAULT_ATTEMPT_TIMEOUT_SECONDS = 60 * 60
+export const ATTEMPT_TIMEOUT_KILL_MS = 5 * 1000
 
 const EXCLUDE_ENTRIES = [".dev-loop", ".dev-trace.txt", ".coder-loop/runtime"]
 
@@ -209,6 +211,7 @@ const TerminatedBoundary = arkType.or(
 	{ kind: arkType.unit("signal"), name: "string" },
 	{ kind: arkType.unit("error"), code: "string" },
 	{ kind: arkType.unit("watchdog"), phase: arkType.or(arkType.unit("term"), arkType.unit("kill")), afterSummarySeconds: "number" },
+	{ kind: arkType.unit("timeout"), phase: arkType.or(arkType.unit("term"), arkType.unit("kill")), attemptSeconds: "number" },
 )
 
 const AgentRunStatusBoundary = arkType({
@@ -290,7 +293,7 @@ const PresetTomlBoundary = arkType({
 	statuses: { continuable: "string[]", terminal: "string[]" },
 	phases: PresetPhaseBoundary.array(),
 	"fragments?": PresetFragmentBoundary.array(),
-	agent: { binary: "string", "extraArgs?": "string[]" },
+	agent: { binary: "string", "extraArgs?": "string[]", "attemptTimeoutSeconds?": "number" },
 })
 
 const CONFIG_BINDING_FIELDS = ["repository", "baseBranch", "requireBrowserEvidence"] as const
@@ -367,6 +370,7 @@ export type Preset = {
 	agent: {
 		binary: string
 		extraArgs: readonly string[]
+		attemptTimeoutSeconds: number
 	}
 }
 
@@ -566,6 +570,7 @@ export type Terminated =
 	| { kind: "signal"; name: string }
 	| { kind: "error"; code: string }
 	| { kind: "watchdog"; phase: "term" | "kill"; afterSummarySeconds: number }
+	| { kind: "timeout"; phase: "term" | "kill"; attemptSeconds: number }
 
 export type SessionEntry = {
 	attempt: string
@@ -616,6 +621,13 @@ export type LoopEvent =
 			attemptStartedAt: string
 			signal: "SIGTERM" | "SIGKILL"
 		})
+	| (LoopEventBase & {
+			type: "attempt.timeout"
+			phase: string
+			attemptStartedAt: string
+			signal: "SIGTERM" | "SIGKILL"
+			attemptSeconds: number
+		})
 	| (LoopEventBase & { type: "queue.terminal"; terminalStatus: string })
 
 export type LoopEventType = LoopEvent["type"]
@@ -625,6 +637,7 @@ export const LOOP_EVENT_TYPES = [
 	"phase.start",
 	"phase.end",
 	"attempt.start",
+	"attempt.timeout",
 	"attempt.close",
 	"watchdog.fire",
 	"queue.terminal",
@@ -2171,6 +2184,10 @@ export function parsePreset(value: unknown, presetDir: string): Preset {
 	for (const status of root.statuses.continuable) {
 		if (root.statuses.terminal.includes(status)) presetError(`preset.statuses: "${status}" appears in both continuable and terminal`)
 	}
+	const attemptTimeoutSeconds = root.agent.attemptTimeoutSeconds ?? DEFAULT_ATTEMPT_TIMEOUT_SECONDS
+	if (!Number.isFinite(attemptTimeoutSeconds) || attemptTimeoutSeconds <= 0) {
+		presetError("preset.agent.attemptTimeoutSeconds: must be a finite positive number")
+	}
 
 	const phaseNames = new Set<string>()
 	const phases: PresetPhase[] = []
@@ -2208,7 +2225,7 @@ export function parsePreset(value: unknown, presetDir: string): Preset {
 		statuses: { continuable: root.statuses.continuable, terminal: root.statuses.terminal },
 		phases,
 		fragments,
-		agent: { binary: root.agent.binary, extraArgs: root.agent.extraArgs ?? [] },
+		agent: { binary: root.agent.binary, extraArgs: root.agent.extraArgs ?? [], attemptTimeoutSeconds },
 	}
 }
 
@@ -2962,6 +2979,7 @@ export type SpawnOneAttemptInput = {
 	agentCwd: string
 	runner?: AgentRunnerSelection
 	watchdog?: SummaryWatchdogConfig
+	attemptTimeout?: AttemptTimeoutConfig | null
 	eventContext?: LoopEventContext
 }
 
@@ -2971,10 +2989,24 @@ export type SummaryWatchdogConfig = {
 	killMs: number
 }
 
+export type AttemptTimeoutConfig = {
+	termMs: number
+	killMs: number
+	attemptSeconds: number
+}
+
 const DEFAULT_SUMMARY_WATCHDOG: SummaryWatchdogConfig = {
 	marker: SUMMARY_WATCHDOG_MARKER,
 	termMs: SUMMARY_WATCHDOG_TERM_MS,
 	killMs: SUMMARY_WATCHDOG_KILL_MS,
+}
+
+export function attemptTimeoutConfigForPreset(preset: Preset): AttemptTimeoutConfig {
+	return {
+		termMs: preset.agent.attemptTimeoutSeconds * 1000,
+		killMs: ATTEMPT_TIMEOUT_KILL_MS,
+		attemptSeconds: preset.agent.attemptTimeoutSeconds,
+	}
 }
 
 export function summaryWatchdogConfigForPrompt(prompt: string): SummaryWatchdogConfig {
@@ -3235,6 +3267,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			})
 		}
 		const watchdogConfig = input.watchdog ?? summaryWatchdogConfigForPrompt(basePrompt)
+		const attemptTimeoutConfig = input.attemptTimeout ?? attemptTimeoutConfigForPreset(options.preset)
 		const child = spawn(runnerPlan.binary, runnerPlan.args, {
 			cwd: input.agentCwd,
 			stdio: ["ignore", "pipe", "pipe"],
@@ -3259,6 +3292,27 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			}
 		}
 
+		type AttemptTimeoutState = "idle" | "term-sent" | "kill-sent" | "cancelled"
+		let attemptTimeoutState: AttemptTimeoutState = "idle"
+		let attemptTermTimer: ReturnType<typeof setTimeout> | null = null
+		let attemptKillTimer: ReturnType<typeof setTimeout> | null = null
+
+		const clearAttemptTimeoutTimers = (): void => {
+			if (attemptTermTimer !== null) {
+				clearTimeout(attemptTermTimer)
+				attemptTermTimer = null
+			}
+			if (attemptKillTimer !== null) {
+				clearTimeout(attemptKillTimer)
+				attemptKillTimer = null
+			}
+		}
+
+		const cancelAttemptTimeout = (): void => {
+			clearAttemptTimeoutTimers()
+			if (attemptTimeoutState === "idle") attemptTimeoutState = "cancelled"
+		}
+
 		const emitWatchdogFire = (sig: "SIGTERM" | "SIGKILL"): void => {
 			const ec = input.eventContext
 			if (!ec) return
@@ -3275,7 +3329,48 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			})
 		}
 
-		const watchdog = createSummaryWatchdog({
+		const emitAttemptTimeoutFire = (sig: "SIGTERM" | "SIGKILL"): void => {
+			const ec = input.eventContext
+			if (!ec) return
+			void ec.emit({
+				type: "attempt.timeout",
+				ts: new Date().toISOString(),
+				runId: ec.runId,
+				issueId: ec.issueId,
+				pr: ec.pr,
+				branch: ec.branch,
+				phase: ec.phase,
+				attemptStartedAt: startedAt,
+				signal: sig,
+				attemptSeconds: attemptTimeoutConfig.attemptSeconds,
+			})
+		}
+
+		let watchdog: SummaryWatchdog
+		const armAttemptTimeout = (): void => {
+			attemptTermTimer = setTimeout(() => {
+				attemptTermTimer = null
+				if (settled || attemptTimeoutState !== "idle") return
+				if (watchdog.state().kind !== "idle") {
+					attemptTimeoutState = "cancelled"
+					return
+				}
+				attemptTimeoutState = "term-sent"
+				log(`Agent [${label}] absolute attempt timeout after ${attemptTimeoutConfig.attemptSeconds}s before summary; sending SIGTERM (pid=${child.pid ?? "?"})`)
+				emitAttemptTimeoutFire("SIGTERM")
+				sendSignalToGroup("SIGTERM")
+				attemptKillTimer = setTimeout(() => {
+					attemptKillTimer = null
+					if (settled || attemptTimeoutState !== "term-sent") return
+					attemptTimeoutState = "kill-sent"
+					log(`Agent [${label}] absolute attempt timeout SIGTERM+${Math.round(attemptTimeoutConfig.killMs / 1000)}s elapsed; sending SIGKILL (pid=${child.pid ?? "?"})`)
+					emitAttemptTimeoutFire("SIGKILL")
+					sendSignalToGroup("SIGKILL")
+				}, attemptTimeoutConfig.killMs)
+			}, attemptTimeoutConfig.termMs)
+		}
+
+		watchdog = createSummaryWatchdog({
 			config: watchdogConfig,
 			setTimer: (cb, ms) => setTimeout(cb, ms),
 			clearTimer: (handle) => {
@@ -3294,6 +3389,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			log,
 		})
 		const watchdogStdout = createSummaryWatchdogStdoutObserver(selectedRunner.kind, watchdogConfig.marker, watchdog)
+		armAttemptTimeout()
 
 		const recordChunk = (stream: "stdout" | "stderr", chunk: Buffer): void => {
 			status.lastStream = stream
@@ -3309,7 +3405,11 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 						status.sessionId = detected
 					}
 				}
+				const watchdogStateBefore = watchdog.state().kind
 				watchdogStdout.observeStdout(chunk.toString("utf-8"))
+				if (watchdogStateBefore === "idle" && watchdog.state().kind !== "idle") {
+					cancelAttemptTimeout()
+				}
 			} else {
 				err.push(chunk)
 				stderrOutFile.write(chunk)
@@ -3321,7 +3421,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 		void writeStatus()
 		writeLatestIndex()
 
-		log(`Agent [${label}] spawned: runner=${selectedRunner.kind}, model=${selectedRunner.model ?? "<default>"}, pid=${child.pid}, stream=${attemptStreamPath}, stderr=${attemptStderrPath}, status=${statusPath}, resume=${resume.kind === "resume" ? resume.sessionId : "none"}`)
+		log(`Agent [${label}] spawned: runner=${selectedRunner.kind}, model=${selectedRunner.model ?? "<default>"}, pid=${child.pid}, stream=${attemptStreamPath}, stderr=${attemptStderrPath}, status=${statusPath}, resume=${resume.kind === "resume" ? resume.sessionId : "none"}, attemptTimeout=${attemptTimeoutConfig.attemptSeconds}s`)
 
 		if (input.eventContext) {
 			const ec = input.eventContext
@@ -3388,6 +3488,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			if (settled) return
 			settled = true
 			watchdog.cancel()
+			cancelAttemptTimeout()
 			status.error = error.message
 			status.lastEventAt = new Date().toISOString()
 			status.exitCode = 1
@@ -3405,13 +3506,21 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			if (settled) return
 			settled = true
 			const watchdogStateAtClose = watchdog.state()
+			const attemptTimeoutStateAtClose = attemptTimeoutState
 			watchdog.cancel()
+			cancelAttemptTimeout()
 			const stdout = Buffer.concat(out).toString("utf-8")
 			const stderr = Buffer.concat(err).toString("utf-8")
 			const exitCode = code ?? 1
 			const signalName = signal ?? null
 			const terminated: Terminated =
-				watchdogStateAtClose.kind === "term-sent" || watchdogStateAtClose.kind === "kill-sent"
+				attemptTimeoutStateAtClose === "term-sent" || attemptTimeoutStateAtClose === "kill-sent"
+					? {
+							kind: "timeout",
+							phase: attemptTimeoutStateAtClose === "kill-sent" ? "kill" : "term",
+							attemptSeconds: attemptTimeoutConfig.attemptSeconds,
+						}
+					: watchdogStateAtClose.kind === "term-sent" || watchdogStateAtClose.kind === "kill-sent"
 					? {
 							kind: "watchdog",
 							phase: watchdogStateAtClose.kind === "kill-sent" ? "kill" : "term",
@@ -3429,6 +3538,8 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 						? `(${terminated.name})`
 						: terminated.kind === "watchdog"
 							? `(forced-terminate after "${watchdogConfig.marker}" + ${terminated.afterSummarySeconds}s, phase=${terminated.phase})`
+							: terminated.kind === "timeout"
+								? `(absolute attempt timeout after ${terminated.attemptSeconds}s, phase=${terminated.phase})`
 							: ""
 			void (async () => {
 				await writeStatus()
@@ -3746,6 +3857,8 @@ export function decideResume(entry: SessionEntry | null): ResumeDecision {
 		case "error":
 			return isTransient5xx(entry.terminated.code) ? { kind: "resume", sessionId: entry.sessionId } : { kind: "fresh" }
 		case "watchdog":
+			return { kind: "fresh" }
+		case "timeout":
 			return { kind: "fresh" }
 	}
 }

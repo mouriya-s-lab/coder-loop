@@ -1632,6 +1632,11 @@ describe("decideResume — resume policy from last sessions.jsonl entry", () => 
 		const entry: SessionEntry = { ...baseEntry, terminated: { kind: "error", code: "401_unauthorized" } }
 		expect(decideResume(entry)).toEqual({ kind: "fresh" })
 	})
+
+	test("absolute attempt timeout → fresh", () => {
+		const entry: SessionEntry = { ...baseEntry, terminated: { kind: "timeout", phase: "term", attemptSeconds: 60 } }
+		expect(decideResume(entry)).toEqual({ kind: "fresh" })
+	})
 })
 
 describe("nextBackoffSeconds — capped exponential", () => {
@@ -1853,11 +1858,12 @@ describe("sessions.jsonl appends each attempt — I/O roundtrip", () => {
 			{ attempt: "2026-05-11T00:00:00Z", sessionId: "s1", exitCode: 1, signal: null, terminated: { kind: "error", code: "529_overloaded" }, log: "/tmp/a1.jsonl" },
 			{ attempt: "2026-05-11T00:05:00Z", sessionId: "s1", exitCode: 0, signal: null, terminated: { kind: "clean" }, log: "/tmp/a2.jsonl" },
 			{ attempt: "2026-05-11T00:10:00Z", sessionId: "s1", exitCode: 143, signal: "SIGTERM", terminated: { kind: "signal", name: "SIGTERM" }, log: "/tmp/a3.jsonl" },
+			{ attempt: "2026-05-11T00:15:00Z", sessionId: null, exitCode: 143, signal: "SIGTERM", terminated: { kind: "timeout", phase: "term", attemptSeconds: 60 }, log: "/tmp/a4.jsonl" },
 		]
 		for (const entry of entries) await appendSessionEntry(path, entry)
 		const raw = await readFile(path, "utf-8")
 		const lines = raw.split("\n").filter((l) => l.trim() !== "")
-		expect(lines.length).toBe(3)
+		expect(lines.length).toBe(4)
 		for (const line of lines) {
 			const parsed = JSON.parse(line) as Record<string, unknown>
 			expect(parsed).toHaveProperty("attempt")
@@ -1867,12 +1873,12 @@ describe("sessions.jsonl appends each attempt — I/O roundtrip", () => {
 			expect(parsed).toHaveProperty("terminated")
 			expect(parsed).toHaveProperty("log")
 			const terminated = parsed["terminated"] as { kind?: unknown }
-			expect(["clean", "signal", "error"]).toContain(terminated.kind as string)
+			expect(["clean", "signal", "error", "timeout"]).toContain(terminated.kind as string)
 		}
 		const last = await readLastSessionEntry(path)
 		expect(last).not.toBeNull()
-		expect(last!.attempt).toBe("2026-05-11T00:10:00Z")
-		expect(last!.terminated).toEqual({ kind: "signal", name: "SIGTERM" })
+		expect(last!.attempt).toBe("2026-05-11T00:15:00Z")
+		expect(last!.terminated).toEqual({ kind: "timeout", phase: "term", attemptSeconds: 60 })
 	})
 })
 
@@ -2340,16 +2346,16 @@ describe("summary watchdog e2e — spawnOneAttempt with a fake claudeBinary", ()
 		return path
 	}
 
-		async function fixtureOptions(claudeBinary: string): Promise<LoopOptions> {
-			const preset = await bundledPreset()
-			const opts = await makeFixtureOptions(preset)
-			const claudeRunner = { kind: "claude" as const, binary: claudeBinary, extraArgs: [], model: null }
-			return {
-				...opts,
-				defaultRunner: { ...claudeRunner, source: "config" as const },
-				runnerCommands: { ...opts.runnerCommands, claude: claudeRunner },
-			}
+	async function fixtureOptions(claudeBinary: string): Promise<LoopOptions> {
+		const preset = await bundledPreset()
+		const opts = await makeFixtureOptions(preset)
+		const claudeRunner = { kind: "claude" as const, binary: claudeBinary, extraArgs: [], model: null }
+		return {
+			...opts,
+			defaultRunner: { ...claudeRunner, source: "config" as const },
+			runnerCommands: { ...opts.runnerCommands, claude: claudeRunner },
 		}
+	}
 
 	test("summary watchdog e2e: fake binary prints SUMMARY then sleeps; watchdog SIGTERM closes attempt, terminated=watchdog", async () => {
 		const fake = await makeFakeClaudeBinary(
@@ -2374,7 +2380,8 @@ describe("summary watchdog e2e — spawnOneAttempt with a fake claudeBinary", ()
 			sessionsPath,
 			resume: { kind: "fresh" },
 			agentCwd: options.targetCwd,
-			watchdog: { marker: SUMMARY_WATCHDOG_MARKER, termMs: 300, killMs: 200 },
+			watchdog: { marker: SUMMARY_WATCHDOG_MARKER, termMs: 800, killMs: 200 },
+			attemptTimeout: { termMs: 500, killMs: 200, attemptSeconds: 0.5 },
 		})
 		const elapsedMs = Date.now() - start
 
@@ -2382,12 +2389,55 @@ describe("summary watchdog e2e — spawnOneAttempt with a fake claudeBinary", ()
 		if (outcome.terminated.kind === "watchdog") {
 			expect(outcome.terminated.phase === "term" || outcome.terminated.phase === "kill").toBe(true)
 		}
-		// 300ms term + ≤200ms kill + bash spawn overhead — must finish well under 10s
+		// 800ms term + <=200ms kill + bash spawn overhead — must finish well under 10s
 		expect(elapsedMs).toBeLessThan(10_000)
 
 		// sessions.jsonl must persist the watchdog termination so a re-read decides fresh next tick
 		const last = await readLastSessionEntry(sessionsPath)
 		expect(last?.terminated.kind).toBe("watchdog")
+	}, 15_000)
+
+	test("absolute attempt timeout e2e: fake binary never prints SUMMARY; timeout SIGTERM closes attempt", async () => {
+		const fake = await makeFakeClaudeBinary(`sleep 30`)
+		const baseOptions = await fixtureOptions(fake)
+		const options: LoopOptions = {
+			...baseOptions,
+			preset: {
+				...baseOptions.preset,
+				agent: { ...baseOptions.preset.agent, attemptTimeoutSeconds: 0.3 },
+			},
+		}
+		const outputPath = resolve(options.logDir, `attempt-timeout.iteration.txt`)
+		const sessionsPath = agentSessionsPath(outputPath)
+
+		const start = Date.now()
+		const outcome = await spawnOneAttempt({
+			options,
+			label: "iteration",
+			prompt: "ignored by fake binary",
+			outputPath,
+			sessionsPath,
+			resume: { kind: "fresh" },
+			agentCwd: options.targetCwd,
+			watchdog: { marker: SUMMARY_WATCHDOG_MARKER, termMs: 5_000, killMs: 1_000 },
+		})
+		const elapsedMs = Date.now() - start
+
+		expect(outcome.terminated.kind).toBe("timeout")
+		if (outcome.terminated.kind === "timeout") {
+			expect(outcome.terminated.phase === "term" || outcome.terminated.phase === "kill").toBe(true)
+			expect(outcome.terminated.attemptSeconds).toBe(0.3)
+		}
+		expect(outcome.exitCode).not.toBe(0)
+		expect(elapsedMs).toBeLessThan(10_000)
+
+		const last = await readLastSessionEntry(sessionsPath)
+		expect(last?.terminated.kind).toBe("timeout")
+		if (last?.terminated.kind === "timeout") {
+			expect(last.terminated.attemptSeconds).toBe(0.3)
+		}
+		const status = JSON.parse(await readFile(outputPath.replace(/\.txt$/, ".status.json"), "utf-8")) as { terminated?: { kind?: string } }
+		expect(status.terminated?.kind).toBe("timeout")
 	}, 15_000)
 
 	test("spawnOneAttempt uses input.agentCwd as the child cwd, not options.targetCwd", async () => {
@@ -2600,15 +2650,15 @@ describe("events jsonl — per-run NDJSON event stream", () => {
 		const fakePath = resolve(fake, "fake-claude.sh")
 		await writeFile(fakePath, `#!/bin/bash\necho 'ITERATION SUMMARY: stuck path'\nsleep 30\n`, { mode: 0o755 })
 
-			const preset = await bundledPreset()
-			const baseOpts = await makeFixtureOptions(preset)
-			const claudeRunner = { kind: "claude" as const, binary: fakePath, extraArgs: [], model: null }
-			const options: LoopOptions = {
-				...baseOpts,
-				targetCwd,
-				defaultRunner: { ...claudeRunner, source: "config" as const },
-				runnerCommands: { ...baseOpts.runnerCommands, claude: claudeRunner },
-			}
+		const preset = await bundledPreset()
+		const baseOpts = await makeFixtureOptions(preset)
+		const claudeRunner = { kind: "claude" as const, binary: fakePath, extraArgs: [], model: null }
+		const options: LoopOptions = {
+			...baseOpts,
+			targetCwd,
+			defaultRunner: { ...claudeRunner, source: "config" as const },
+			runnerCommands: { ...baseOpts.runnerCommands, claude: claudeRunner },
+		}
 		const runId = "run-wd-events"
 		const outputPath = resolve(options.logDir, "wd-events.iteration.txt")
 		const sessionsPath = agentSessionsPath(outputPath)
@@ -2658,21 +2708,79 @@ describe("events jsonl — per-run NDJSON event stream", () => {
 		}
 	}, 15_000)
 
+	test("events jsonl absolute timeout: spawnOneAttempt writes attempt.timeout before attempt.close", async () => {
+		const targetCwd = await freshTargetCwd()
+		const fake = await mkdtemp(resolve(tmpdir(), "coder-loop-fakebin-"))
+		const fakePath = resolve(fake, "fake-claude.sh")
+		await writeFile(fakePath, `#!/bin/bash\nsleep 30\n`, { mode: 0o755 })
+
+		const preset = await bundledPreset()
+		const baseOpts = await makeFixtureOptions(preset)
+		const claudeRunner = { kind: "claude" as const, binary: fakePath, extraArgs: [], model: null }
+		const options: LoopOptions = {
+			...baseOpts,
+			targetCwd,
+			defaultRunner: { ...claudeRunner, source: "config" as const },
+			runnerCommands: { ...baseOpts.runnerCommands, claude: claudeRunner },
+		}
+		const runId = "run-timeout-events"
+		const outputPath = resolve(options.logDir, "timeout-events.iteration.txt")
+		const sessionsPath = agentSessionsPath(outputPath)
+		const eventsPath = loopEventsPath(targetCwd, runId)
+
+		const eventContext: LoopEventContext = {
+			emit: makeLoopEventEmitter(targetCwd, runId, () => {}),
+			runId,
+			issueId: "117",
+			pr: null,
+			branch: "issue-117-timeout",
+			phase: "iteration",
+		}
+
+		const outcome = await spawnOneAttempt({
+			options,
+			label: "iteration",
+			prompt: "ignored",
+			outputPath,
+			sessionsPath,
+			resume: { kind: "fresh" },
+			agentCwd: options.targetCwd,
+			watchdog: { marker: SUMMARY_WATCHDOG_MARKER, termMs: 5_000, killMs: 1_000 },
+			attemptTimeout: { termMs: 300, killMs: 200, attemptSeconds: 0.3 },
+			eventContext,
+		})
+		expect(outcome.terminated.kind).toBe("timeout")
+
+		const events = await readEvents(eventsPath)
+		const types = events.map((e) => e.type)
+		expect(types).toContain("attempt.start")
+		expect(types).toContain("attempt.timeout")
+		expect(types).toContain("attempt.close")
+		expect(types).not.toContain("watchdog.fire")
+		const startIdx = types.indexOf("attempt.start")
+		const timeoutIdx = types.indexOf("attempt.timeout")
+		const closeIdx = types.indexOf("attempt.close")
+		expect(startIdx).toBeLessThan(timeoutIdx)
+		expect(timeoutIdx).toBeLessThan(closeIdx)
+		const closeEvent = events.find((e) => e.type === "attempt.close")
+		expect(closeEvent?.type === "attempt.close" && closeEvent.terminated.kind).toBe("timeout")
+	}, 15_000)
+
 	test("events jsonl no-watchdog clean exit: only attempt.start + attempt.close, no watchdog.fire", async () => {
 		const targetCwd = await freshTargetCwd()
 		const fake = await mkdtemp(resolve(tmpdir(), "coder-loop-fakebin-"))
 		const fakePath = resolve(fake, "fake-claude.sh")
 		await writeFile(fakePath, `#!/bin/bash\necho '{"event":"work"}'\nexit 0\n`, { mode: 0o755 })
 
-			const preset = await bundledPreset()
-			const baseOpts = await makeFixtureOptions(preset)
-			const claudeRunner = { kind: "claude" as const, binary: fakePath, extraArgs: [], model: null }
-			const options: LoopOptions = {
-				...baseOpts,
-				targetCwd,
-				defaultRunner: { ...claudeRunner, source: "config" as const },
-				runnerCommands: { ...baseOpts.runnerCommands, claude: claudeRunner },
-			}
+		const preset = await bundledPreset()
+		const baseOpts = await makeFixtureOptions(preset)
+		const claudeRunner = { kind: "claude" as const, binary: fakePath, extraArgs: [], model: null }
+		const options: LoopOptions = {
+			...baseOpts,
+			targetCwd,
+			defaultRunner: { ...claudeRunner, source: "config" as const },
+			runnerCommands: { ...baseOpts.runnerCommands, claude: claudeRunner },
+		}
 		const runId = "run-clean-events"
 		const outputPath = resolve(options.logDir, "clean-events.iteration.txt")
 		const sessionsPath = agentSessionsPath(outputPath)

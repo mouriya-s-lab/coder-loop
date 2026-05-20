@@ -211,7 +211,7 @@ EVENTS=$(coder-loop status /path/to/your-target-repo --json | jq -r '.events.pat
 test -n "$EVENTS" && tail -F "$EVENTS"
 ```
 
-事件类型：`queue.select` / `phase.start` / `phase.end` / `attempt.start` / `attempt.close` / `watchdog.fire` / `queue.terminal`。详见 [operations.md §7.3](./operations.md#73-agent-进程与监控fallback-reference)。
+事件类型：`queue.select` / `phase.start` / `phase.end` / `attempt.start` / `attempt.timeout` / `attempt.close` / `watchdog.fire` / `queue.terminal`。详见 [operations.md §7.3](./operations.md#73-agent-进程与监控fallback-reference)。
 
 停：
 
