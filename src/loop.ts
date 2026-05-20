@@ -10,8 +10,8 @@
 
 import { spawn } from "node:child_process"
 import { appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises"
-import { closeSync, createWriteStream, openSync, type WriteStream } from "node:fs"
-import { dirname, isAbsolute, relative, resolve } from "node:path"
+import { closeSync, createWriteStream, openSync, realpathSync, type WriteStream } from "node:fs"
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
 import { command, flag, option, optional, positional, run as runCmd, string as cmdString, subcommands } from "cmd-ts"
 import { type as arkType } from "arktype"
 import { dispatchSubcommand } from "./install-commands"
@@ -90,6 +90,8 @@ type RawArgs = {
 	once: boolean
 	dryRun: boolean
 	checkRuntime: boolean
+	worktree: boolean
+	baseBranch: string | null
 }
 
 export type StatusCommandArgs = {
@@ -115,6 +117,8 @@ export type DaemonCommandArgs =
 			requireBrowserEvidence: boolean
 			maxIterations: number | null
 			dryRun: boolean
+			worktree: boolean
+			baseBranch: string | null
 		}
 	| {
 			action: "stop"
@@ -131,11 +135,14 @@ export type DaemonCommandArgs =
 			requireBrowserEvidence: boolean
 			maxIterations: number | null
 			dryRun: boolean
+			worktree: boolean
+			baseBranch: string | null
 		}
 
 type LoopConfig = {
 	repository: string | null
 	baseBranch: string | null
+	worktree: boolean | null
 	workflowFile: string | null
 	sharedContextFile: string | null
 	stateFile: string | null
@@ -160,6 +167,7 @@ const AgentRunnerKindBoundary = arkType.or(arkType.unit("claude"), arkType.unit(
 const StatusConfigBoundary = arkType({
 	"repository?": "string|null",
 	"baseBranch?": "string|null",
+	"worktree?": "boolean|null",
 	"workflowFile?": "string|null",
 	"sharedContextFile?": "string|null",
 	"stateFile?": "string|null",
@@ -315,6 +323,7 @@ export type LoopOptions = {
 	logFile: string
 	repository: string | null
 	baseBranch: string | null
+	worktree: boolean
 	requireBrowserEvidence: boolean
 	hostRunner: AgentRunnerKind
 	defaultRunner: AgentRunnerSelection
@@ -429,6 +438,7 @@ export type StatusTargetSnapshot = {
 	loopFile: string
 	repository: string | null
 	baseBranch: string | null
+	worktree: boolean
 	runner: StatusRunnerDefaultsSnapshot
 	preset: {
 		name: string
@@ -744,6 +754,8 @@ function parseArgs(): RawArgs {
 		once: false,
 		dryRun: false,
 		checkRuntime: false,
+		worktree: false,
+		baseBranch: null,
 	}
 
 	const args = process.argv.slice(2)
@@ -792,6 +804,14 @@ function parseArgs(): RawArgs {
 			case "--check-runtime":
 				rejectInlineValue(inlineValue, name)
 				raw.checkRuntime = true
+				break
+			case "--worktree":
+				rejectInlineValue(inlineValue, name)
+				raw.worktree = true
+				break
+			case "--base-branch":
+				raw.baseBranch = readFlagValue(args, index, inlineValue, name)
+				if (inlineValue === null) index++
 				break
 			default:
 				fail(`Unknown argument: ${arg}`)
@@ -862,6 +882,8 @@ const daemonStartCliCommand = command({
 		requireBrowserEvidence: flag({ long: "require-browser-evidence" }),
 		maxIterations: option({ long: "max-iterations", type: optional(cmdString) }),
 		dryRun: flag({ long: "dry-run" }),
+		worktree: flag({ long: "worktree" }),
+		baseBranch: option({ long: "base-branch", type: optional(cmdString) }),
 	},
 	handler: (args): CliCommand => ({
 		kind: "daemon",
@@ -873,6 +895,8 @@ const daemonStartCliCommand = command({
 			requireBrowserEvidence: args.requireBrowserEvidence,
 			maxIterations: parseDaemonMaxIterations(args.maxIterations ?? null),
 			dryRun: args.dryRun,
+			worktree: args.worktree,
+			baseBranch: args.baseBranch ?? null,
 		},
 	}),
 })
@@ -908,6 +932,8 @@ const daemonRestartCliCommand = command({
 		requireBrowserEvidence: flag({ long: "require-browser-evidence" }),
 		maxIterations: option({ long: "max-iterations", type: optional(cmdString) }),
 		dryRun: flag({ long: "dry-run" }),
+		worktree: flag({ long: "worktree" }),
+		baseBranch: option({ long: "base-branch", type: optional(cmdString) }),
 	},
 	handler: (args): CliCommand => ({
 		kind: "daemon",
@@ -919,6 +945,8 @@ const daemonRestartCliCommand = command({
 			requireBrowserEvidence: args.requireBrowserEvidence,
 			maxIterations: parseDaemonMaxIterations(args.maxIterations ?? null),
 			dryRun: args.dryRun,
+			worktree: args.worktree,
+			baseBranch: args.baseBranch ?? null,
 		},
 	}),
 })
@@ -1035,6 +1063,13 @@ async function main() {
 	await ensureRuntime(options)
 	await assertRuntimeValid(options)
 
+	if (options.worktree) {
+		if (options.baseBranch === null || options.baseBranch.trim() === "") {
+			fail("worktree mode requires a non-empty baseBranch (set in config or via --base-branch)")
+		}
+		validateWorktreePrerequisites(options.targetCwd, options.baseBranch)
+	}
+
 	if (options.dryRun) {
 		const state = await loadState(options.statePath)
 		const selected = selectIssue(state, options)
@@ -1065,6 +1100,17 @@ async function main() {
 	for (const phase of options.preset.phases) log(`Phase ${phase.name} prompt: ${phase.prompt}`)
 	log(`Workflow=${options.workflowPath}`)
 	log(`State=${options.statePath}`)
+	if (options.worktree) {
+		log(`Worktree mode: baseBranch=origin/${options.baseBranch}`)
+		const startupState = await loadState(options.statePath)
+		const activeIds = new Set<string>()
+		for (const item of startupState.queue) {
+			if (options.preset.statuses.continuable.includes(item.status)) {
+				activeIds.add(getItemId(item, options.preset).replace(/[^a-zA-Z0-9_-]/g, "_"))
+			}
+		}
+		cleanupStaleWorktrees(options.targetCwd, activeIds, log)
+	}
 
 	await ensureGitExclude(options.targetCwd)
 	await writeFile(
@@ -1091,7 +1137,21 @@ async function main() {
 	while ((await exists(options.loopFile)) && workIteration < options.maxIterations) {
 		const state = await loadState(options.statePath)
 		await assertRuntimeValid(options, state)
-		const selected = selectIssue(state, options)
+		let selected = selectIssue(state, options)
+
+		if (options.worktree && selected && selected.item.agentCwd === null) {
+			const selectedId = getItemId(selected.item, options.preset)
+			const wtPath = ensureWorktreeForItem(
+				options.targetCwd,
+				options.baseBranch ?? "main",
+				selectedId,
+				selected.item.agentCwd,
+			)
+			selected.item.agentCwd = wtPath
+			await saveState(options.statePath, state)
+			selected = { ...selected, agentCwd: wtPath }
+			log(`worktree: created ${wtPath} for item #${selectedId}`)
+		}
 
 		if (!selected) {
 			if (!(await exists(lockPath))) {
@@ -1253,6 +1313,10 @@ async function main() {
 				branch: itemAfterReview.branch,
 				terminalStatus: itemAfterReview.status,
 			})
+			if (options.worktree && itemAfterReview.agentCwd !== null) {
+				removeWorktreeForItem(options.targetCwd, selectedId, log)
+				log(`worktree: removed worktree for terminal item #${selectedId}`)
+			}
 		}
 
 		log(`Iteration ${workIteration} (work) complete.`)
@@ -1341,6 +1405,8 @@ function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, confi
 	const repository = raw.repository ?? config.repository
 	const maxIterations = raw.once ? 1 : (raw.maxIterations ?? Number.POSITIVE_INFINITY)
 	const requireBrowserEvidence = raw.requireBrowserEvidence ?? config.requireAgentBrowserScreenshots ?? false
+	const worktree = raw.worktree || config.worktree === true
+	const baseBranch = raw.baseBranch ?? config.baseBranch ?? (worktree ? "main" : null)
 	const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")
 	const hostRunner = detectHostRunner(process.env)
 	const runnerCommands = buildAgentRunnerCommands(config)
@@ -1360,7 +1426,8 @@ function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, confi
 		traceFile: resolve(targetCwd, ".dev-trace.txt"),
 		logFile: resolve(logDir, `coder-loop-${process.pid}.${timestamp}.log`),
 		repository,
-		baseBranch: config.baseBranch,
+		baseBranch,
+		worktree,
 		requireBrowserEvidence,
 		hostRunner,
 		defaultRunner,
@@ -1496,6 +1563,8 @@ function makeStatusRawArgs(args: StatusCommandArgs): RawArgs {
 		once: false,
 		dryRun: false,
 		checkRuntime: false,
+		worktree: false,
+		baseBranch: null,
 	}
 }
 
@@ -1528,6 +1597,7 @@ function makeStatusTargetSnapshot(
 		loopFile: options?.loopFile ?? resolve(targetCwd, ".dev-loop"),
 		repository: options?.repository ?? repositoryOverride,
 		baseBranch: options?.baseBranch ?? null,
+		worktree: options?.worktree ?? false,
 		runner: buildStatusRunnerDefaultsSnapshot(options),
 		preset,
 	}
@@ -1545,6 +1615,7 @@ function buildStatusRunnerDefaultsSnapshot(options: LoopOptions | null): StatusR
 	const config: LoopConfig = {
 		repository: null,
 		baseBranch: null,
+		worktree: null,
 		workflowFile: null,
 		sharedContextFile: null,
 		stateFile: null,
@@ -1919,6 +1990,8 @@ export function buildDaemonStartPlan(args: Extract<DaemonCommandArgs, { action: 
 	if (args.configPath !== null) command.push("--config", args.configPath)
 	if (args.repository !== null) command.push("--repo", args.repository)
 	if (args.requireBrowserEvidence) command.push("--require-browser-evidence")
+	if (args.worktree) command.push("--worktree")
+	if (args.baseBranch !== null) command.push("--base-branch", args.baseBranch)
 	if (args.maxIterations !== null) command.push(String(args.maxIterations))
 	return {
 		targetCwd,
@@ -2189,6 +2262,7 @@ function loopConfigFromStatusInput(input: StatusConfigInput): LoopConfig {
 	return {
 		repository: input.repository ?? null,
 		baseBranch: input.baseBranch ?? null,
+		worktree: input.worktree ?? null,
 		workflowFile: input.workflowFile ?? null,
 		sharedContextFile: input.sharedContextFile ?? null,
 		stateFile: input.stateFile ?? null,
@@ -2306,6 +2380,7 @@ export async function checkRuntime(options: LoopOptions, state: LoopState): Prom
 	if (state.version !== 1) pushCheckError(errors, "state.version", "must be 1")
 	if (options.repository !== null && state.repository !== options.repository) pushCheckError(errors, "state.repository", `must match configured repository ${options.repository}`)
 	if (options.baseBranch !== null && state.baseBranch !== options.baseBranch) pushCheckError(errors, "state.baseBranch", `must match configured baseBranch ${options.baseBranch}`)
+	if (options.worktree && (options.baseBranch === null || options.baseBranch.trim() === "")) pushCheckError(errors, "worktree", "worktree mode requires a non-empty baseBranch")
 
 	await checkDirectory(options.targetCwd, "targetCwd", errors)
 	await checkFile(options.configPath, "config", errors)
@@ -3396,6 +3471,106 @@ export function agentClaudeArgs(extraArgs: readonly string[], prompt: string, re
 
 export type RunnerInvocation =
 	| { kind: "spawn"; binary: string; args: string[] }
+
+// --- git worktree management ---
+
+type GitExecResult = { stdout: string; stderr: string; exitCode: number }
+
+function gitExec(cwd: string, args: readonly string[]): GitExecResult {
+	const proc = Bun.spawnSync({ cmd: ["git", ...args], cwd, stdout: "pipe", stderr: "pipe" })
+	return {
+		stdout: new TextDecoder().decode(proc.stdout).trim(),
+		stderr: new TextDecoder().decode(proc.stderr).trim(),
+		exitCode: proc.exitCode,
+	}
+}
+
+export function worktreeBasePath(targetCwd: string): string {
+	return resolve(targetCwd, "..", ".coder-loop-worktrees", basename(targetCwd))
+}
+
+export function worktreePathForItem(targetCwd: string, itemId: string): string {
+	const safeId = itemId.replace(/[^a-zA-Z0-9_-]/g, "_")
+	return resolve(worktreeBasePath(targetCwd), safeId)
+}
+
+export function validateWorktreePrerequisites(targetCwd: string, baseBranch: string): void {
+	const fetchResult = gitExec(targetCwd, ["fetch", "origin"])
+	if (fetchResult.exitCode !== 0) {
+		throw new CoderLoopError(`worktree: git fetch origin failed (exit ${fetchResult.exitCode}) in ${targetCwd}: ${fetchResult.stderr}`)
+	}
+	const revResult = gitExec(targetCwd, ["rev-parse", "--verify", `origin/${baseBranch}`])
+	if (revResult.exitCode !== 0) {
+		throw new CoderLoopError(`worktree: remote branch origin/${baseBranch} does not exist`)
+	}
+}
+
+export function ensureWorktreeForItem(
+	targetCwd: string,
+	baseBranch: string,
+	itemId: string,
+	existingAgentCwd: string | null,
+): string {
+	const wtPath = worktreePathForItem(targetCwd, itemId)
+
+	if (existingAgentCwd === wtPath) {
+		const check = gitExec(targetCwd, ["worktree", "list", "--porcelain"])
+		if (check.stdout.includes(wtPath)) return wtPath
+	}
+
+	const branchName = `coder-loop/${itemId.replace(/[^a-zA-Z0-9_-]/g, "_")}`
+	const result = gitExec(targetCwd, ["worktree", "add", "-b", branchName, wtPath, `origin/${baseBranch}`])
+	if (result.exitCode === 0) return wtPath
+
+	const retry = gitExec(targetCwd, ["worktree", "add", wtPath, branchName])
+	if (retry.exitCode === 0) return wtPath
+
+	throw new CoderLoopError(
+		`worktree: failed to create worktree at ${wtPath} for item ${itemId} (exit ${retry.exitCode}): ${retry.stderr}`,
+	)
+}
+
+export function removeWorktreeForItem(
+	targetCwd: string,
+	itemId: string,
+	logFn: (message: string) => void,
+): void {
+	const wtPath = worktreePathForItem(targetCwd, itemId)
+	const result = gitExec(targetCwd, ["worktree", "remove", "--force", wtPath])
+	if (result.exitCode !== 0) {
+		logFn(`worktree: removal of ${wtPath} failed (exit ${result.exitCode}): ${result.stderr}; continuing`)
+	}
+}
+
+export function cleanupStaleWorktrees(
+	targetCwd: string,
+	activeItemIds: Set<string>,
+	logFn: (message: string) => void,
+): void {
+	gitExec(targetCwd, ["worktree", "prune"])
+
+	const base = worktreeBasePath(targetCwd)
+	let realBase: string
+	try { realBase = realpathSync(base) } catch { realBase = base }
+	const listResult = gitExec(targetCwd, ["worktree", "list", "--porcelain"])
+	if (listResult.exitCode !== 0) return
+
+	const worktreePaths = listResult.stdout
+		.split("\n")
+		.filter((line) => line.startsWith("worktree "))
+		.map((line) => line.slice("worktree ".length))
+		.filter((path) => path.startsWith(realBase))
+
+	for (const wtPath of worktreePaths) {
+		const itemDir = basename(wtPath)
+		if (!activeItemIds.has(itemDir)) {
+			logFn(`worktree: cleaning stale worktree ${wtPath}`)
+			gitExec(targetCwd, ["worktree", "remove", "--force", wtPath])
+		}
+	}
+}
+
+// --- runner invocation ---
 
 export type RunnerInvocationPaths = {
 	agentCwd: string

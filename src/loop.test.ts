@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises"
 import * as fs from "node:fs/promises"
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { resolve } from "node:path"
+import { basename, resolve } from "node:path"
 
 import {
 	agentClaudeArgs,
@@ -78,6 +78,12 @@ import {
 	type SessionEntry,
 	type SummaryWatchdogTimerHandle,
 	type Terminated,
+	worktreeBasePath,
+	worktreePathForItem,
+	validateWorktreePrerequisites,
+	ensureWorktreeForItem,
+	removeWorktreeForItem,
+	cleanupStaleWorktrees,
 } from "./loop"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -149,6 +155,7 @@ async function makeFixtureOptions(preset: Preset): Promise<LoopOptions> {
 		logFile: resolve(logDir, "test.log"),
 		repository: "Mouriya-Emma/test",
 		baseBranch: "main",
+		worktree: false,
 		requireBrowserEvidence: false,
 		hostRunner: "claude",
 		defaultRunner: { ...codexRunner, source: "iteration-default" as const },
@@ -493,6 +500,8 @@ describe("buildDaemonStartPlan", () => {
 			requireBrowserEvidence: true,
 			maxIterations: 10,
 			dryRun: true,
+			worktree: false,
+			baseBranch: null,
 		})
 
 		expect(plan.targetCwd).toBe(target)
@@ -2758,5 +2767,207 @@ describe("events jsonl — per-run NDJSON event stream", () => {
 		const stdout = new TextDecoder().decode(proc.stdout).trim()
 		const lines = stdout.split("\n")
 		expect(lines).toEqual(["135 iteration pr=null", "135 review pr=137"])
+	})
+})
+
+// --- worktree ---
+
+describe("worktreeBasePath / worktreePathForItem", () => {
+	test("worktreeBasePath places worktrees one level up from targetCwd under .coder-loop-worktrees/<basename>", () => {
+		const target = "/home/dev/projects/my-app"
+		const result = worktreeBasePath(target)
+		expect(result).toBe(resolve("/home/dev/projects", ".coder-loop-worktrees", "my-app"))
+	})
+
+	test("worktreePathForItem sanitizes special characters in itemId", () => {
+		const target = "/repo/target"
+		const result = worktreePathForItem(target, "feat/fix#123")
+		expect(basename(result)).toBe("feat_fix_123")
+		expect(result.startsWith(worktreeBasePath(target))).toBe(true)
+	})
+
+	test("worktreePathForItem preserves already-safe itemId characters", () => {
+		const target = "/repo/target"
+		expect(basename(worktreePathForItem(target, "42"))).toBe("42")
+		expect(basename(worktreePathForItem(target, "my-item_01"))).toBe("my-item_01")
+	})
+})
+
+describe("buildDaemonStartPlan with worktree flags", () => {
+	test("--worktree and --base-branch appear in daemon start command when set", async () => {
+		const target = await makeStatusTarget()
+		const plan = buildDaemonStartPlan({
+			action: "start",
+			targetCwd: target,
+			configPath: null,
+			repository: "owner/repo",
+			requireBrowserEvidence: false,
+			maxIterations: 5,
+			dryRun: false,
+			worktree: true,
+			baseBranch: "develop",
+		})
+
+		expect(plan.command).toContain("--worktree")
+		expect(plan.command).toContain("--base-branch")
+		expect(plan.command).toContain("develop")
+		expect(plan.commandLine).toContain("--worktree")
+		expect(plan.commandLine).toContain("--base-branch")
+		expect(plan.commandLine).toContain("develop")
+	})
+
+	test("--worktree and --base-branch are absent when worktree is false", async () => {
+		const target = await makeStatusTarget()
+		const plan = buildDaemonStartPlan({
+			action: "start",
+			targetCwd: target,
+			configPath: null,
+			repository: "owner/repo",
+			requireBrowserEvidence: false,
+			maxIterations: 3,
+			dryRun: false,
+			worktree: false,
+			baseBranch: null,
+		})
+
+		expect(plan.command).not.toContain("--worktree")
+		expect(plan.command).not.toContain("--base-branch")
+	})
+})
+
+describe("checkRuntime worktree validation", () => {
+	test("worktree mode with empty baseBranch produces an error", async () => {
+		const preset = await bundledPreset()
+		const options = await makeFixtureOptions(preset)
+		options.worktree = true
+		;(options as Record<string, unknown>).baseBranch = ""
+		const state = makeState({ queue: [makeItem({ issue: 1, status: "queued" })] })
+		const errors = await checkRuntime(options, state)
+		expect(errors.some((e) => e.path === "worktree" && /baseBranch/.test(e.message))).toBe(true)
+	})
+
+	test("worktree mode with null baseBranch produces an error", async () => {
+		const preset = await bundledPreset()
+		const options = await makeFixtureOptions(preset)
+		options.worktree = true
+		;(options as Record<string, unknown>).baseBranch = null
+		const state = makeState({ queue: [makeItem({ issue: 1, status: "queued" })] })
+		const errors = await checkRuntime(options, state)
+		expect(errors.some((e) => e.path === "worktree" && /baseBranch/.test(e.message))).toBe(true)
+	})
+})
+
+// --- worktree git integration tests ---
+
+async function makeGitFixture(): Promise<{ remote: string; clone: string }> {
+	const base = await mkdtemp(resolve(tmpdir(), "coder-loop-wt-"))
+	const remote = resolve(base, "remote.git")
+	const clone = resolve(base, "clone")
+
+	const run = (cwd: string, cmd: string[]) => {
+		const proc = Bun.spawnSync({ cmd, cwd, stdout: "pipe", stderr: "pipe" })
+		if (proc.exitCode !== 0) {
+			throw new Error(`git command failed: ${cmd.join(" ")} in ${cwd}: ${new TextDecoder().decode(proc.stderr)}`)
+		}
+		return new TextDecoder().decode(proc.stdout).trim()
+	}
+
+	run(base, ["git", "init", "--bare", "-b", "main", remote])
+	run(base, ["git", "clone", remote, clone])
+	run(clone, ["git", "config", "user.email", "test@test.com"])
+	run(clone, ["git", "config", "user.name", "Test"])
+	await writeFile(resolve(clone, "README.md"), "# fixture\n")
+	run(clone, ["git", "add", "README.md"])
+	run(clone, ["git", "commit", "-m", "initial"])
+	run(clone, ["git", "push", "origin", "main"])
+
+	return { remote, clone }
+}
+
+describe("worktree git integration", () => {
+	test("validateWorktreePrerequisites succeeds when origin/<baseBranch> exists", async () => {
+		const { clone } = await makeGitFixture()
+		expect(() => validateWorktreePrerequisites(clone, "main")).not.toThrow()
+	})
+
+	test("validateWorktreePrerequisites throws when baseBranch does not exist on remote", async () => {
+		const { clone } = await makeGitFixture()
+		expect(() => validateWorktreePrerequisites(clone, "nonexistent-branch")).toThrow(/does not exist/)
+	})
+
+	test("ensureWorktreeForItem creates a worktree visible in git worktree list", async () => {
+		const { clone } = await makeGitFixture()
+		const wtPath = ensureWorktreeForItem(clone, "main", "42", null)
+
+		expect(wtPath).toBe(worktreePathForItem(clone, "42"))
+
+		const proc = Bun.spawnSync({ cmd: ["git", "worktree", "list", "--porcelain"], cwd: clone, stdout: "pipe" })
+		const stdout = new TextDecoder().decode(proc.stdout)
+		expect(stdout).toContain(basename(wtPath))
+	})
+
+	test("ensureWorktreeForItem reuses existing worktree on second call", async () => {
+		const { clone } = await makeGitFixture()
+		const first = ensureWorktreeForItem(clone, "main", "42", null)
+		const second = ensureWorktreeForItem(clone, "main", "42", first)
+		expect(second).toBe(first)
+	})
+
+	test("removeWorktreeForItem removes the worktree", async () => {
+		const { clone } = await makeGitFixture()
+		ensureWorktreeForItem(clone, "main", "99", null)
+
+		const logs: string[] = []
+		removeWorktreeForItem(clone, "99", (m) => logs.push(m))
+
+		const proc = Bun.spawnSync({ cmd: ["git", "worktree", "list", "--porcelain"], cwd: clone, stdout: "pipe" })
+		const stdout = new TextDecoder().decode(proc.stdout)
+		expect(stdout).not.toContain("coder-loop/99")
+	})
+
+	test("cleanupStaleWorktrees removes worktrees not in the active set", async () => {
+		const { clone } = await makeGitFixture()
+		ensureWorktreeForItem(clone, "main", "active-1", null)
+		ensureWorktreeForItem(clone, "main", "stale-1", null)
+
+		const logs: string[] = []
+		cleanupStaleWorktrees(clone, new Set(["active-1"]), (m) => logs.push(m))
+
+		const proc = Bun.spawnSync({ cmd: ["git", "worktree", "list", "--porcelain"], cwd: clone, stdout: "pipe" })
+		const stdout = new TextDecoder().decode(proc.stdout)
+		expect(stdout).toContain("active-1")
+		expect(stdout).not.toContain("stale-1")
+		expect(logs.some((l) => l.includes("stale-1"))).toBe(true)
+	})
+
+	test("worktree branch is named coder-loop/<sanitized-id>", async () => {
+		const { clone } = await makeGitFixture()
+		const wtPath = ensureWorktreeForItem(clone, "main", "77", null)
+
+		const proc = Bun.spawnSync({ cmd: ["git", "branch", "--list", "coder-loop/77"], cwd: clone, stdout: "pipe" })
+		const stdout = new TextDecoder().decode(proc.stdout).trim()
+		expect(stdout).toContain("coder-loop/77")
+	})
+
+	test("worktree directory contains the repo files", async () => {
+		const { clone } = await makeGitFixture()
+		const wtPath = ensureWorktreeForItem(clone, "main", "55", null)
+
+		const readmePath = resolve(wtPath, "README.md")
+		const content = await readFile(readmePath, "utf-8")
+		expect(content).toBe("# fixture\n")
+	})
+
+	test("AC#2: item.agentCwd persists worktree path through serializeState round-trip", async () => {
+		const { clone } = await makeGitFixture()
+		const wtPath = ensureWorktreeForItem(clone, "main", "42", null)
+
+		const item = makeItem({ issue: 42, status: "in_progress" })
+		item.agentCwd = wtPath
+		const state = makeState({ queue: [item] })
+
+		const serialized = serializeState(state)
+		const parsed = JSON.parse(serialized)
+		expect(parsed.queue[0].agentCwd).toBe(wtPath)
 	})
 })
