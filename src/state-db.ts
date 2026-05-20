@@ -1,11 +1,11 @@
 import { Database, type SQLQueryBindings } from "bun:sqlite"
 import { mkdirSync } from "node:fs"
 import { dirname, resolve } from "node:path"
-import { homedir } from "node:os"
 
 import type { AgentRunnerKind, JsonObject, JsonValue } from "./loop"
+import { loopDataRootPaths } from "./runtime-paths"
 
-export const DEFAULT_STATE_DB_PATH = resolve(homedir(), "Ext/loop-data/state.db")
+export const DEFAULT_STATE_DB_PATH = loopDataRootPaths().stateDbPath
 
 export const DEFAULT_TERMINAL_ITEM_STATUSES = ["done", "moot", "blocked", "merged", "skipped", "failed-permanent"] as const
 

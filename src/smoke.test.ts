@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { resolve } from "node:path"
 
@@ -391,12 +391,20 @@ describe("smoke: single-phase-example preset", () => {
 			expect(startDown.exitCode).toBe(0)
 			const startDownJson = asRecord(JSON.parse(startDownStdout), "start down")
 			expect(asRecord(startDownJson.daemon, "start down daemon").started).toBe(true)
-			expect(asRecord(startDownJson.import, "start down import").imported).toBe(1)
+			const importResult = asRecord(startDownJson.import, "start down import")
+			expect(importResult.imported).toBe(1)
 			expect(asArray(asRecord(startDownJson.status, "start down status").items, "start down items")[0]).toMatchObject({
 				issue: 9300,
 				status: "queued",
 				repoCwd: target,
 			})
+			const rootEntries = await readdir(root)
+			expect(rootEntries).toContain("chains")
+			expect(rootEntries).not.toContain("logs")
+			expect(rootEntries).not.toContain("events")
+			expect(rootEntries.some((entry) => entry.startsWith("daemon-up-"))).toBe(false)
+			const chainEntries = await readdir(resolve(root, "chains", String(importResult.chainName)))
+			expect(chainEntries).toEqual(expect.arrayContaining(["daemon", "evidence", "issues", "runs", "shared.md"]))
 
 			const stop = Bun.spawnSync({
 				cmd: ["bun", LOOP_ENTRY, "daemon", "stop", target, "--socket", socket],

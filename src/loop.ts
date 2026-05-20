@@ -24,6 +24,7 @@ import {
 	type DaemonServerOptions,
 } from "./daemon"
 import { dispatchSubcommand } from "./install-commands"
+import { chainRuntimePaths } from "./runtime-paths"
 
 const PKG_ROOT = resolve(import.meta.dir, "..")
 const DEFAULT_PRESET_NAME = "gh-issue-pr-iteration"
@@ -1233,6 +1234,10 @@ function parseDaemonUpArgs(args: string[]): DaemonServerOptions {
 				options.rootDir = readFlagValue(args, index, inlineValue, name)
 				if (inlineValue === null) index++
 				break
+			case "--log-chain":
+				options.logChainName = readFlagValue(args, index, inlineValue, name)
+				if (inlineValue === null) index++
+				break
 			case "--scheduler-interval-ms": {
 				const value = readFlagValue(args, index, inlineValue, name)
 				if (inlineValue === null) index++
@@ -2318,6 +2323,7 @@ function isPidAlive(pid: number): boolean {
 
 export type DaemonStartPlan = {
 	targetCwd: string
+	chainName: string
 	socketPath: string
 	pidPath: string
 	dbPath: string
@@ -2398,8 +2404,10 @@ export function buildDaemonStartPlan(args: Extract<DaemonCommandArgs, { action: 
 	const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")
 	const options = daemonServerOptionsFromIpc(args.ipc)
 	const defaults = daemonDefaults(options)
-	const stdoutPath = resolve(defaults.rootDir, `daemon-up-${timestamp}.stdout.log`)
-	const stderrPath = resolve(defaults.rootDir, `daemon-up-${timestamp}.stderr.log`)
+	const chainName = defaultChainNameForTarget(targetCwd)
+	const daemonUpDir = chainRuntimePaths(defaults.rootDir, chainName).daemonRunDir(timestamp)
+	const stdoutPath = resolve(daemonUpDir, "up.stdout.log")
+	const stderrPath = resolve(daemonUpDir, "up.stderr.log")
 	const command = [
 		process.argv[0] ?? "bun",
 		resolve(import.meta.dir, "loop.ts"),
@@ -2410,10 +2418,12 @@ export function buildDaemonStartPlan(args: Extract<DaemonCommandArgs, { action: 
 	command.push("--socket", defaults.socketPath)
 	command.push("--pid", defaults.pidPath)
 	command.push("--db", defaults.dbPath)
+	command.push("--log-chain", chainName)
 	command.push("--scheduler-interval-ms", String(defaults.schedulerIntervalMs))
 	if (!defaults.spawnAgents) command.push("--no-spawn-agents")
 	return {
 		targetCwd,
+		chainName,
 		socketPath: defaults.socketPath,
 		pidPath: defaults.pidPath,
 		dbPath: defaults.dbPath,
@@ -2626,6 +2636,8 @@ async function probeDaemon(socketPath: string): Promise<{ reachable: true; respo
 
 async function startDetachedDaemon(plan: DaemonStartPlan): Promise<number | null> {
 	await mkdir(plan.rootDir, { recursive: true })
+	await mkdir(dirname(plan.stdoutPath), { recursive: true })
+	await mkdir(dirname(plan.stderrPath), { recursive: true })
 	const stdoutFd = openSync(plan.stdoutPath, "a")
 	const stderrFd = openSync(plan.stderrPath, "a")
 	try {

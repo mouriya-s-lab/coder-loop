@@ -1,12 +1,10 @@
 import { spawn, type ChildProcess } from "node:child_process"
 import { createConnection, createServer, type Server, type Socket } from "node:net"
-import { homedir } from "node:os"
-import { basename, dirname, resolve } from "node:path"
+import { basename, resolve } from "node:path"
 import { createWriteStream, existsSync, type WriteStream } from "node:fs"
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
 
 import {
-	DEFAULT_STATE_DB_PATH,
 	type Chain,
 	type Item,
 	type ItemPatch,
@@ -14,6 +12,13 @@ import {
 	openStateStore,
 	type StateStore,
 } from "./state-db"
+import {
+	chainRuntimePaths,
+	DEFAULT_LOOP_DATA_ROOT,
+	ensureChainRuntimeSkeleton,
+	loopDataRootPaths,
+	sanitizeChainName,
+} from "./runtime-paths"
 import {
 	clearSchedulerRun,
 	createSchedulerState,
@@ -26,9 +31,9 @@ import {
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
 type JsonObject = { [key: string]: JsonValue }
 
-export const DEFAULT_DAEMON_ROOT = resolve(homedir(), "Ext/loop-data")
-export const DEFAULT_DAEMON_SOCKET_PATH = resolve(DEFAULT_DAEMON_ROOT, "daemon.sock")
-export const DEFAULT_DAEMON_PID_PATH = resolve(DEFAULT_DAEMON_ROOT, "daemon.pid")
+export const DEFAULT_DAEMON_ROOT = DEFAULT_LOOP_DATA_ROOT
+export const DEFAULT_DAEMON_SOCKET_PATH = loopDataRootPaths().daemonSocketPath
+export const DEFAULT_DAEMON_PID_PATH = loopDataRootPaths().daemonPidPath
 export const DEFAULT_DAEMON_SCHEDULER_INTERVAL_MS = 5_000
 export const DAEMON_CHILD_GRACE_MS = 5_000
 
@@ -78,6 +83,7 @@ export type DaemonServerOptions = {
 	pidPath?: string
 	dbPath?: string
 	rootDir?: string
+	logChainName?: string
 	schedulerIntervalMs?: number
 	spawnAgents?: boolean
 	processArgs?: string[]
@@ -114,12 +120,12 @@ type DaemonRuntime = {
 }
 
 export function daemonDefaults(options: DaemonServerOptions = {}): Required<Pick<DaemonServerOptions, "socketPath" | "pidPath" | "dbPath" | "rootDir" | "schedulerIntervalMs" | "spawnAgents">> {
-	const rootDir = resolve(options.rootDir ?? DEFAULT_DAEMON_ROOT)
+	const root = loopDataRootPaths(options.rootDir ?? null)
 	return {
-		rootDir,
-		socketPath: resolve(options.socketPath ?? resolve(rootDir, "daemon.sock")),
-		pidPath: resolve(options.pidPath ?? resolve(rootDir, "daemon.pid")),
-		dbPath: resolve(options.dbPath ?? DEFAULT_STATE_DB_PATH),
+		rootDir: root.rootDir,
+		socketPath: resolve(options.socketPath ?? root.daemonSocketPath),
+		pidPath: resolve(options.pidPath ?? root.daemonPidPath),
+		dbPath: resolve(options.dbPath ?? root.stateDbPath),
 		schedulerIntervalMs: options.schedulerIntervalMs ?? DEFAULT_DAEMON_SCHEDULER_INTERVAL_MS,
 		spawnAgents: options.spawnAgents ?? true,
 	}
@@ -129,7 +135,7 @@ export async function startDaemonServer(options: DaemonServerOptions = {}): Prom
 	const defaults = daemonDefaults(options)
 	await mkdir(defaults.rootDir, { recursive: true })
 	await removeStaleSocket(defaults.socketPath)
-	const logDir = await prepareDaemonLogDir(defaults.rootDir, defaults.dbPath)
+	const logDir = await prepareDaemonLogDir(defaults.rootDir, defaults.dbPath, options.logChainName ?? null)
 	const engineLog = createWriteStream(resolve(logDir, "engine.log"), { flags: "a" })
 	const stdoutLog = createWriteStream(resolve(logDir, "stdout.log"), { flags: "a" })
 	const stderrLog = createWriteStream(resolve(logDir, "stderr.log"), { flags: "a" })
@@ -223,13 +229,15 @@ async function removeStaleSocket(socketPath: string): Promise<void> {
 	}
 }
 
-async function prepareDaemonLogDir(rootDir: string, dbPath: string): Promise<string> {
+async function prepareDaemonLogDir(rootDir: string, dbPath: string, logChainName: string | null): Promise<string> {
 	const store = openStateStore(dbPath)
 	try {
 		const chains = store.listActiveChains()
-		const chainName = chains[0]?.name ?? "_global"
+		const chainName = logChainName ?? chains[0]?.name ?? "_global"
 		const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")
-		const dir = resolve(rootDir, "chains", sanitizePathSegment(chainName), "daemon", timestamp)
+		const chainPaths = chainRuntimePaths(rootDir, chainName)
+		await ensureChainRuntimeSkeleton(chainPaths)
+		const dir = chainPaths.daemonRunDir(timestamp)
 		await mkdir(dir, { recursive: true })
 		await writeFile(resolve(dir, "stdout.log"), "", { flag: "a" })
 		await writeFile(resolve(dir, "stderr.log"), "", { flag: "a" })
@@ -262,12 +270,12 @@ async function handleRequestLine(runtime: DaemonRuntime, socket: Socket, line: s
 	})
 }
 
-export async function processDaemonRequest(runtime: Pick<DaemonRuntime, "store" | "schedulerState" | "children" | "socketPath" | "pidPath" | "dbPath" | "startedAt" | "schedulerIntervalMs" | "spawnAgents" | "lastTick" | "shuttingDown">, line: string): Promise<DaemonResponse> {
+export async function processDaemonRequest(runtime: Pick<DaemonRuntime, "store" | "schedulerState" | "children" | "socketPath" | "pidPath" | "dbPath" | "rootDir" | "startedAt" | "schedulerIntervalMs" | "spawnAgents" | "lastTick" | "shuttingDown">, line: string): Promise<DaemonResponse> {
 	try {
 		const request = parseDaemonRequest(line)
 		switch (request.cmd) {
 			case "chain.create":
-				return ok(upsertChain(runtime.store, request))
+				return ok(await upsertChain(runtime.store, runtime.rootDir, request))
 			case "chain.list":
 				return ok(runtime.store.listChains())
 			case "chain.get":
@@ -292,10 +300,9 @@ export async function processDaemonRequest(runtime: Pick<DaemonRuntime, "store" 
 	}
 }
 
-function upsertChain(store: StateStore, request: Extract<DaemonRequest, { cmd: "chain.create" }>): Chain {
+async function upsertChain(store: StateStore, rootDir: string, request: Extract<DaemonRequest, { cmd: "chain.create" }>): Promise<Chain> {
 	const existing = store.getChain(request.name)
-	if (existing !== null) return existing
-	return store.createChain(
+	const chain = existing ?? store.createChain(
 		request.name,
 		request.preset,
 		request.repo ?? null,
@@ -303,6 +310,8 @@ function upsertChain(store: StateStore, request: Extract<DaemonRequest, { cmd: "
 		request.umbrellaIssue ?? null,
 		request.umbrellaRepo ?? null,
 	)
+	await ensureChainRuntimeSkeleton(chainRuntimePaths(rootDir, chain.name))
+	return chain
 }
 
 function newItemFromRequest(request: Extract<DaemonRequest, { cmd: "item.add" }>): NewItem {
@@ -662,16 +671,12 @@ function logEngine(runtime: Pick<DaemonRuntime, "engineLog">, message: string): 
 	runtime.engineLog.write(`${new Date().toISOString()} ${message}\n`)
 }
 
-function sanitizePathSegment(value: string): string {
-	return value.replace(/[^a-zA-Z0-9._-]/g, "-").replace(/-+/g, "-").replace(/^\.+|\.+$/g, "") || "unnamed"
-}
-
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error)
 }
 
 export function defaultChainNameForTarget(targetCwd: string): string {
-	return basename(resolve(targetCwd)) || "default"
+	return sanitizeChainName(basename(resolve(targetCwd)) || "default")
 }
 
 export async function importTargetStateIntoStore(store: StateStore, targetCwd: string, preset: string, repository: string | null, baseBranch: string | null): Promise<{ chain: Chain; itemsImported: number }> {
@@ -687,7 +692,15 @@ export async function importTargetStateIntoStore(store: StateStore, targetCwd: s
 		repo: repository ?? undefined,
 		baseBranch: baseBranch ?? undefined,
 	}) as Extract<DaemonRequest, { cmd: "chain.create" }>
-	const chain = upsertChain(store, chainRequest)
+	const existing = store.getChain(chainRequest.name)
+	const chain = existing ?? store.createChain(
+		chainRequest.name,
+		chainRequest.preset,
+		chainRequest.repo ?? null,
+		chainRequest.baseBranch ?? null,
+		chainRequest.umbrellaIssue ?? null,
+		chainRequest.umbrellaRepo ?? null,
+	)
 	let itemsImported = 0
 	for (const entry of parsed.queue) {
 		if (!isObjectRecord(entry) || typeof entry.issue !== "number") continue
