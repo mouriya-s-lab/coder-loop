@@ -133,6 +133,13 @@ describe("state-db", () => {
 				title: "high priority",
 				runner: "codex",
 			})
+			const retry = addItem(db, chain.id, {
+				issue: 4,
+				repoCwd: "/repo/a",
+				status: "changes_requested",
+				priority: "high",
+				title: "retry priority",
+			})
 			addItem(db, chain.id, { issue: 3, repoCwd: "/repo/b", priority: "high" })
 
 			expect(getItem(db, low.id)?.extra).toEqual({ issueKind: "code" })
@@ -155,7 +162,9 @@ describe("state-db", () => {
 			expect(updated.status).toBe("done")
 			expect(updated.runner).toBe("codex")
 			expect(updated.extra).toEqual({ reviewed: true })
+			expect(getNextPending(db, chain.id, "/repo/a")?.id).toBe(retry.id)
 			expect(allItemsTerminal(db, chain.id, ["done"])).toBe(false)
+			updateItem(db, retry.id, { status: "done" })
 			updateItem(db, low.id, { status: "done" })
 			updateItem(db, getNextPending(db, chain.id, "/repo/b")?.id ?? 0, { status: "done" })
 			expect(allItemsTerminal(db, chain.id, ["done"])).toBe(true)

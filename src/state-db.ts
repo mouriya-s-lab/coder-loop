@@ -7,6 +7,7 @@ import { loopDataRootPaths } from "./runtime-paths"
 
 export const DEFAULT_STATE_DB_PATH = loopDataRootPaths().stateDbPath
 
+export const DEFAULT_PENDING_ITEM_STATUSES = ["queued", "changes_requested"] as const
 export const DEFAULT_TERMINAL_ITEM_STATUSES = ["done", "moot", "blocked", "merged", "skipped", "failed-permanent"] as const
 
 export type ChainStatus = "active" | "completed" | "archived"
@@ -468,10 +469,11 @@ export function updateItem(db: Database, id: number, patch: ItemPatch): Item {
 }
 
 export function getNextPending(db: Database, chainId: number, repoCwd: string): Item | null {
+	const placeholders = DEFAULT_PENDING_ITEM_STATUSES.map(() => "?").join(", ")
 	const row = db.query(`
 		SELECT *
 		FROM items
-		WHERE chain_id = ? AND repo_cwd = ? AND status = 'queued'
+		WHERE chain_id = ? AND repo_cwd = ? AND status IN (${placeholders})
 		ORDER BY
 			CASE priority
 				WHEN 'high' THEN 0
@@ -482,7 +484,7 @@ export function getNextPending(db: Database, chainId: number, repoCwd: string): 
 			attempts ASC,
 			id ASC
 		LIMIT 1
-	`).get(chainId, repoCwd)
+	`).get(chainId, repoCwd, ...DEFAULT_PENDING_ITEM_STATUSES)
 	return row === null ? null : itemFromRow(expectRow<ItemRow>(row, "getNextPending"))
 }
 
