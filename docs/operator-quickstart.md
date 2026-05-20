@@ -171,7 +171,7 @@ coder-loop status /path/to/your-target-repo --json | jq '.state.kind, .queue.tot
 ## 4. 用 `/dev-loop` 或 daemon API 起循环
 
 ```
-/dev-loop          # 不限轮次，通过 coder-loop daemon start 起后台循环
+/dev-loop          # 不限轮次，通过 coder-loop daemon start 导入集中 daemon
 /dev-loop 10       # 最多 10 轮
 ```
 
@@ -183,7 +183,9 @@ coder-loop daemon start /path/to/your-target-repo --max-iterations 10
 coder-loop daemon status /path/to/your-target-repo --json
 ```
 
-`daemon start` 对已运行 target 幂等：返回 `alreadyRunning: true`，不会启动重复 loop。
+`daemon start` 对已运行的集中 daemon 幂等：socket 在线时只把 target
+queue 通过 `chain.create` + `item.add` 导入集中 DB；socket 不在线时先自动
+启动 `daemon up`，再导入同一份 target queue。
 
 循环消费现有队列，按 preset 的 phase 顺序交替 spawn `iter` + `review` agent；每轮 review agent 判断 continue / retry / accept / block / stop。
 
@@ -191,7 +193,7 @@ coder-loop daemon status /path/to/your-target-repo --json
 
 ```bash
 coder-loop status /path/to/your-target-repo --json | jq '.state.kind, .queue, .current, .events.latest, .processes'
-coder-loop daemon status /path/to/your-target-repo --json | jq '.processes'
+coder-loop daemon status /path/to/your-target-repo --json | jq '.chain, .items, .slots'
 ```
 
 需要看原始输出时再下钻到 runtime 文件：
@@ -219,7 +221,8 @@ test -n "$EVENTS" && tail -F "$EVENTS"
 coder-loop daemon stop /path/to/your-target-repo
 ```
 
-`daemon stop` 删除 loop file 并 SIGTERM 已归属的 live pid。手工删除 `.dev-loop` 仍可作为最后 fallback；它只在下一次循环边界生效，不强杀正在跑的 agent。
+`daemon stop` 不关闭集中 daemon；它通过 socket 把该 target 导入的 items
+标记为 `paused`。需要关闭 daemon 进程时用 `coder-loop daemon down`。
 
 ---
 
@@ -262,4 +265,4 @@ jq . .coder-loop/runtime/state.json | head -30
 - **`.coder-loop/workflow.md` 缺失或没入仓** → iter/review agent 读不到项目工作方式，行为退化为 bundled preset 默认值，往往写错命令 / 漏证据 layer。
 - **`gh` 未 auth** → `iter/read-context` 会以 `infrastructure_failure` 出局，trace 里能看到 `gh auth status` 失败回显。
 - **`config.json` 的 `repository` 字段与远端不一致** → `--check-runtime` 报 `repository mismatch`；改文件，不是改 `--repo` 参数。
-- **删了 `.dev-loop` 但发现下一轮还跑了一次** → 正常停 loop 用 `coder-loop daemon stop <target>`；手工删除 sentinel 只在下一次循环边界生效。
+- **删了 `.dev-loop` 但发现 legacy loop 下一轮还跑了一次** → 旧 sentinel 只在下一次循环边界生效；集中 daemon 的 target 队列暂停用 `coder-loop daemon stop <target>`。

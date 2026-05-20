@@ -105,6 +105,16 @@ async function pathExists(path: string): Promise<boolean> {
 	}
 }
 
+function asRecord(value: unknown, label: string): Record<string, unknown> {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error(`${label}: expected object`)
+	return value as Record<string, unknown>
+}
+
+function asArray(value: unknown, label: string): unknown[] {
+	if (!Array.isArray(value)) throw new Error(`${label}: expected array`)
+	return value
+}
+
 async function makePostReviewTriggerTarget(reviewStatus: "blocked" | "done"): Promise<{ dir: string; responderLog: string }> {
 	const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-trigger-"))
 	const runtime = resolve(dir, ".coder-loop/runtime")
@@ -317,7 +327,7 @@ describe("smoke: single-phase-example preset", () => {
 		expect(snapshot.state?.ok).toBe(false)
 	})
 
-	test("daemon status <target> --json emits parseable process snapshot", async () => {
+	test("daemon status <target> --json emits parseable central daemon snapshot when socket is down", async () => {
 		const target = await makeMinimalTarget("single-phase-example")
 		const proc = Bun.spawnSync({
 			cmd: ["bun", LOOP_ENTRY, "daemon", "status", target, "--json"],
@@ -329,9 +339,12 @@ describe("smoke: single-phase-example preset", () => {
 		const stderr = new TextDecoder().decode(proc.stderr)
 		expect(proc.exitCode).toBe(0)
 		expect(stderr).toBe("")
-		const snapshot = JSON.parse(stdout) as StatusSmokeSnapshot
-		expect(snapshot.target?.cwd).toBe(target)
-		expect(snapshot.processes).toBeDefined()
+		const snapshot = asRecord(JSON.parse(stdout), "daemon status")
+		expect(snapshot.target).toBe(target)
+		expect(asRecord(snapshot.daemon, "daemon").ok).toBe(false)
+		expect(snapshot.chain).toBeNull()
+		expect(asArray(snapshot.items, "items")).toEqual([])
+		expect(asArray(snapshot.slots, "slots")).toEqual([])
 	})
 
 	test("daemon start <target> --require-browser-evidence --dry-run shows the launch command", async () => {
@@ -346,10 +359,95 @@ describe("smoke: single-phase-example preset", () => {
 		const stderr = new TextDecoder().decode(proc.stderr)
 		expect(proc.exitCode).toBe(0)
 		expect(stderr).toBe("")
-		expect(stdout).toContain("daemon start dry-run: command=")
-		expect(stdout).toContain("--require-browser-evidence")
+		expect(stdout).toContain("daemon start dry-run: daemon-up-command=")
+		expect(stdout).toContain("daemon start dry-run: socket=")
 		expect(stdout).toContain("require-browser-evidence=true")
-		expect(stdout).toContain("'10'")
+		expect(stdout).toContain("spawn-agents=true")
+	})
+
+	test("daemon start/status/stop <target> import and pause target items through central socket", async () => {
+		const target = await makeGhIssuePrTarget("code", 9300)
+		const root = resolve(REPO_ROOT, ".cache", `smoke-daemon-compat-${Date.now()}-${Math.random().toString(16).slice(2)}`)
+		const socket = resolve(root, "daemon.sock")
+		const pid = resolve(root, "daemon.pid")
+		const db = resolve(root, "state.db")
+		const daemonFlags = [
+			"--root", root,
+			"--socket", socket,
+			"--pid", pid,
+			"--db", db,
+			"--scheduler-interval-ms", "600000",
+			"--no-spawn-agents",
+		]
+		try {
+			const startDown = Bun.spawnSync({
+				cmd: ["bun", LOOP_ENTRY, "daemon", "start", target, ...daemonFlags],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			const startDownStdout = new TextDecoder().decode(startDown.stdout)
+			expect(new TextDecoder().decode(startDown.stderr)).toBe("")
+			expect(startDown.exitCode).toBe(0)
+			const startDownJson = asRecord(JSON.parse(startDownStdout), "start down")
+			expect(asRecord(startDownJson.daemon, "start down daemon").started).toBe(true)
+			expect(asRecord(startDownJson.import, "start down import").imported).toBe(1)
+			expect(asArray(asRecord(startDownJson.status, "start down status").items, "start down items")[0]).toMatchObject({
+				issue: 9300,
+				status: "queued",
+				repoCwd: target,
+			})
+
+			const stop = Bun.spawnSync({
+				cmd: ["bun", LOOP_ENTRY, "daemon", "stop", target, "--socket", socket],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			expect(new TextDecoder().decode(stop.stderr)).toBe("")
+			expect(stop.exitCode).toBe(0)
+			const stopJson = asRecord(JSON.parse(new TextDecoder().decode(stop.stdout)), "stop")
+			expect(stopJson.updated).toBe(1)
+			expect(asArray(stopJson.items, "stopped items")[0]).toMatchObject({ issue: 9300, status: "paused" })
+
+			const startUp = Bun.spawnSync({
+				cmd: ["bun", LOOP_ENTRY, "daemon", "start", target, ...daemonFlags],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			expect(new TextDecoder().decode(startUp.stderr)).toBe("")
+			expect(startUp.exitCode).toBe(0)
+			const startUpJson = asRecord(JSON.parse(new TextDecoder().decode(startUp.stdout)), "start up")
+			expect(asRecord(startUpJson.daemon, "start up daemon").started).toBe(false)
+			expect(asRecord(startUpJson.import, "start up import").updated).toBe(1)
+			expect(asArray(asRecord(startUpJson.status, "start up status").items, "start up items")[0]).toMatchObject({
+				issue: 9300,
+				status: "queued",
+			})
+
+			const status = Bun.spawnSync({
+				cmd: ["bun", LOOP_ENTRY, "daemon", "status", target, "--socket", socket, "--json"],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			expect(new TextDecoder().decode(status.stderr)).toBe("")
+			expect(status.exitCode).toBe(0)
+			const statusJson = asRecord(JSON.parse(new TextDecoder().decode(status.stdout)), "status")
+			expect(asRecord(statusJson.daemon, "status daemon").ok).toBe(true)
+			expect(asRecord(statusJson.chain, "status chain").name).toBeTruthy()
+			expect(asArray(statusJson.items, "status items")[0]).toMatchObject({ issue: 9300, status: "queued" })
+			expect(asArray(statusJson.slots, "status slots")).toEqual([])
+		} finally {
+			Bun.spawnSync({
+				cmd: ["bun", LOOP_ENTRY, "daemon", "down", "--socket", socket],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			await rm(root, { recursive: true, force: true })
+		}
 	})
 
 	test("doctor <target> emits live runtime health section", async () => {
@@ -566,7 +664,9 @@ describe("smoke: queue unblock CLI", () => {
 		const result = JSON.parse(stdout)
 		expect(result.dryRun).toBe(true)
 		expect(result.daemon.requested).toBe(true)
-		expect(result.daemon.plan.command).toContain("--require-browser-evidence")
+		expect(result.daemon.plan.requireBrowserEvidence).toBe(true)
+		expect(result.daemon.plan.command).toContain("daemon")
+		expect(result.daemon.plan.command).toContain("up")
 
 		const updated = JSON.parse(await readFile(statePath, "utf-8"))
 		expect(updated.queue[0].status).toBe("blocked")

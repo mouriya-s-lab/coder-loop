@@ -45,7 +45,24 @@ export type DaemonRequest =
 	| { cmd: "chain.list" }
 	| { cmd: "chain.get"; chain: string | number }
 	| { cmd: "chain.complete"; chain: string | number }
-	| { cmd: "item.add"; chain: string | number; issue: number; repoCwd: string; priority?: string; extra?: JsonObject }
+	| {
+			cmd: "item.add"
+			chain: string | number
+			issue: number
+			repoCwd: string
+			status?: string
+			priority?: string
+			attempts?: number
+			title?: string | null
+			branch?: string | null
+			pr?: number | null
+			lastRunId?: string | null
+			issueFile?: string | null
+			evidenceDir?: string | null
+			agentCwd?: string | null
+			runner?: "claude" | "codex" | null
+			extra?: JsonObject
+	  }
 	| { cmd: "item.update"; itemId: number; patch: ItemPatch }
 	| { cmd: "item.list"; chain: string | number; status?: string }
 	| { cmd: "slot.list" }
@@ -289,12 +306,23 @@ function upsertChain(store: StateStore, request: Extract<DaemonRequest, { cmd: "
 }
 
 function newItemFromRequest(request: Extract<DaemonRequest, { cmd: "item.add" }>): NewItem {
-	return {
+	const item: NewItem = {
 		issue: request.issue,
 		repoCwd: request.repoCwd,
 		priority: request.priority ?? "medium",
 		extra: request.extra ?? {},
 	}
+	if (request.status !== undefined) item.status = request.status
+	if (request.attempts !== undefined) item.attempts = request.attempts
+	if (request.title !== undefined) item.title = request.title
+	if (request.branch !== undefined) item.branch = request.branch
+	if (request.pr !== undefined) item.pr = request.pr
+	if (request.lastRunId !== undefined) item.lastRunId = request.lastRunId
+	if (request.issueFile !== undefined) item.issueFile = request.issueFile
+	if (request.evidenceDir !== undefined) item.evidenceDir = request.evidenceDir
+	if (request.agentCwd !== undefined) item.agentCwd = request.agentCwd
+	if (request.runner !== undefined) item.runner = request.runner
+	return item
 }
 
 function daemonStatus(runtime: Pick<DaemonRuntime, "socketPath" | "pidPath" | "dbPath" | "startedAt" | "schedulerIntervalMs" | "spawnAgents" | "lastTick" | "shuttingDown" | "schedulerState" | "children">): JsonObject {
@@ -424,7 +452,17 @@ function parseDaemonRequest(line: string): DaemonRequest {
 				issue: readInteger(parsed, "issue"),
 				repoCwd: readString(parsed, "repoCwd"),
 			}, {
+				status: readOptionalString(parsed, "status"),
 				priority: readOptionalString(parsed, "priority"),
+				attempts: readOptionalInteger(parsed, "attempts"),
+				title: readOptionalNullableString(parsed, "title"),
+				branch: readOptionalNullableString(parsed, "branch"),
+				pr: readOptionalNullableInteger(parsed, "pr"),
+				lastRunId: readOptionalNullableString(parsed, "lastRunId"),
+				issueFile: readOptionalNullableString(parsed, "issueFile"),
+				evidenceDir: readOptionalNullableString(parsed, "evidenceDir"),
+				agentCwd: readOptionalNullableString(parsed, "agentCwd"),
+				runner: readOptionalRunner(parsed, "runner"),
 				extra: readOptionalJsonObject(parsed, "extra"),
 			}) as DaemonRequest
 		case "item.update":
@@ -551,6 +589,14 @@ function readOptionalString(value: Record<string, unknown>, key: string): string
 	return raw
 }
 
+function readOptionalNullableString(value: Record<string, unknown>, key: string): string | null | undefined {
+	const raw = value[key]
+	if (raw === undefined) return undefined
+	if (raw === null) return null
+	if (typeof raw !== "string") throw new Error(`${key}: expected string or null`)
+	return raw
+}
+
 function readInteger(value: Record<string, unknown>, key: string): number {
 	const raw = value[key]
 	if (typeof raw !== "number" || !Number.isInteger(raw)) throw new Error(`${key}: expected integer`)
@@ -564,11 +610,27 @@ function readOptionalInteger(value: Record<string, unknown>, key: string): numbe
 	return raw
 }
 
+function readOptionalNullableInteger(value: Record<string, unknown>, key: string): number | null | undefined {
+	const raw = value[key]
+	if (raw === undefined) return undefined
+	if (raw === null) return null
+	if (typeof raw !== "number" || !Number.isInteger(raw)) throw new Error(`${key}: expected integer or null`)
+	return raw
+}
+
 function readStringOrInteger(value: Record<string, unknown>, key: string): string | number {
 	const raw = value[key]
 	if (typeof raw === "string" && raw.trim() !== "") return raw
 	if (typeof raw === "number" && Number.isInteger(raw)) return raw
 	throw new Error(`${key}: expected string or integer`)
+}
+
+function readOptionalRunner(value: Record<string, unknown>, key: string): "claude" | "codex" | null | undefined {
+	const raw = value[key]
+	if (raw === undefined) return undefined
+	if (raw === null) return null
+	if (raw === "claude" || raw === "codex") return raw
+	throw new Error(`${key}: expected claude, codex, or null`)
 }
 
 function readOptionalJsonObject(value: Record<string, unknown>, key: string): JsonObject | undefined {
@@ -644,7 +706,7 @@ export async function importTargetStateIntoStore(store: StateStore, targetCwd: s
 				evidenceDir: typeof entry.evidenceDir === "string" ? entry.evidenceDir : null,
 				agentCwd: typeof entry.agentCwd === "string" ? entry.agentCwd : null,
 				runner: entry.runner === "claude" || entry.runner === "codex" ? entry.runner : null,
-				extra: {},
+				extra: isJsonObject(entry.extra) ? entry.extra : {},
 			})
 			itemsImported++
 		} catch (error) {
