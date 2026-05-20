@@ -1128,6 +1128,73 @@ describe("renderPrompt with bundled preset", () => {
 		expect(parseReviewSummaryVerdict("REVIEW SUMMARY: verdict=retry; issue=#114; actionable=1; reason=changes requested")).toBe("retry")
 		expect(parseReviewSummaryVerdict("REVIEW SUMMARY: noop")).toBeNull()
 	})
+
+	test("review summary parser ignores quoted old stop summaries outside the final agent summary", () => {
+		const staleCommandOutput = JSON.stringify({
+			type: "item.completed",
+			item: {
+				type: "command_execution",
+				aggregated_output: "old log:\nREVIEW SUMMARY: verdict=stop; issue=#114; actionable=1; reason=review infrastructure broken",
+			},
+		})
+		const codexNoFinalSummary = JSON.stringify({
+			type: "item.completed",
+			item: {
+				type: "agent_message",
+				text: "I found an old stop summary in logs, but I am still checking it.",
+			},
+		})
+		const codexEarlierAgentSummary = JSON.stringify({
+			type: "item.completed",
+			item: {
+				type: "agent_message",
+				text: "Interim note.\nREVIEW SUMMARY: verdict=stop; issue=#114; actionable=1; reason=review infrastructure broken",
+			},
+		})
+		const codexLaterAgentMessage = JSON.stringify({
+			type: "item.completed",
+			item: {
+				type: "agent_message",
+				text: "I continued after the interim note and did not emit a final summary.",
+			},
+		})
+		const claudeQuotedSummary = JSON.stringify({
+			type: "assistant",
+			message: {
+				content: [{
+					type: "text",
+					text: "The old trace contained:\nREVIEW SUMMARY: verdict=stop; issue=#114; actionable=1; reason=review infrastructure broken\nContinuing without a final stop verdict.",
+				}],
+			},
+		})
+
+		expect(parseReviewSummaryVerdict(`${staleCommandOutput}\n${codexNoFinalSummary}`, "codex")).toBeNull()
+		expect(parseReviewSummaryVerdict(`${codexEarlierAgentSummary}\n${codexLaterAgentMessage}`, "codex")).toBeNull()
+		expect(parseReviewSummaryVerdict(claudeQuotedSummary, "claude")).toBeNull()
+		expect(parseReviewSummaryVerdict("old log:\nREVIEW SUMMARY: verdict=stop; issue=#114; actionable=1; reason=review infrastructure broken\nreview still running")).toBeNull()
+	})
+
+	test("review summary parser accepts final runner agent summary lines", () => {
+		const codexFinalSummary = JSON.stringify({
+			type: "item.completed",
+			item: {
+				type: "agent_message",
+				text: "Review stopped.\nREVIEW SUMMARY: verdict=stop; issue=#114; actionable=1; reason=review infrastructure broken",
+			},
+		})
+		const claudeFinalSummary = JSON.stringify({
+			type: "assistant",
+			message: {
+				content: [{
+					type: "text",
+					text: "Review stopped.\nREVIEW SUMMARY: verdict=stop; issue=#114; actionable=1; reason=review infrastructure broken",
+				}],
+			},
+		})
+
+		expect(parseReviewSummaryVerdict(codexFinalSummary, "codex")).toBe("stop")
+		expect(parseReviewSummaryVerdict(claudeFinalSummary, "claude")).toBe("stop")
+	})
 })
 
 describe("resolvePresetDir", () => {

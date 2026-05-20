@@ -338,8 +338,8 @@ describe("smoke: phase runner selection", () => {
 		expect(claudeArgs[modelIdx + 1]).toBe("claude-opus-4-7")
 	}, 15_000)
 
-	test("review verdict=stop removes .dev-loop even when the review runner cannot remove it", async () => {
-		const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-review-stop-"))
+	async function makeTwoPhaseReviewTarget(reviewScript: readonly string[], prefix: string): Promise<string> {
+		const dir = await mkdtemp(resolve(tmpdir(), prefix))
 		const runtime = resolve(dir, ".coder-loop/runtime")
 		const presetDir = resolve(dir, ".coder-loop/two-phase-stop-preset")
 		await mkdir(resolve(runtime, "issues"), { recursive: true })
@@ -394,8 +394,7 @@ describe("smoke: phase runner selection", () => {
 		].join("\n"), { mode: 0o755 })
 		await writeFile(fakeClaude, [
 			`#!/usr/bin/env bash`,
-			`echo 'gh issue comment failed: This command requires approval'`,
-			`echo 'REVIEW SUMMARY: verdict=stop; issue=#alpha; actionable=1; reason=review infrastructure broken'`,
+			...reviewScript,
 			`exit 0`,
 			``,
 		].join("\n"), { mode: 0o755 })
@@ -417,7 +416,14 @@ describe("smoke: phase runner selection", () => {
 			current: null,
 		}, null, 2))
 		await writeFile(resolve(runtime, "issues/alpha.md"), "# alpha\n")
+		return dir
+	}
 
+	test("review verdict=stop removes .dev-loop even when the review runner cannot remove it", async () => {
+		const dir = await makeTwoPhaseReviewTarget([
+			`echo 'gh issue comment failed: This command requires approval'`,
+			`echo 'REVIEW SUMMARY: verdict=stop; issue=#alpha; actionable=1; reason=review infrastructure broken'`,
+		], "coder-loop-review-stop-")
 		const proc = Bun.spawnSync({
 			cmd: ["bun", LOOP_ENTRY, "--target-cwd", dir, "--once"],
 			cwd: REPO_ROOT,
@@ -430,6 +436,26 @@ describe("smoke: phase runner selection", () => {
 		expect(await Bun.file(resolve(dir, ".dev-loop")).exists()).toBe(false)
 		expect(stderr).toContain("review agent requested loop stop via REVIEW SUMMARY; removing .dev-loop.")
 		expect(stderr).toContain("Review agent stopped the loop.")
+	}, 15_000)
+
+	test("quoted old review stop summary does not remove .dev-loop without a final stop verdict", async () => {
+		const dir = await makeTwoPhaseReviewTarget([
+			`echo 'old review log:'`,
+			`echo 'REVIEW SUMMARY: verdict=stop; issue=#alpha; actionable=1; reason=review infrastructure broken'`,
+			`echo 'review output ended without a final stop summary'`,
+		], "coder-loop-review-stale-stop-")
+		const proc = Bun.spawnSync({
+			cmd: ["bun", LOOP_ENTRY, "--target-cwd", dir, "--once"],
+			cwd: REPO_ROOT,
+			stdout: "pipe",
+			stderr: "pipe",
+			env: claudeHostEnv(),
+		})
+		const stderr = new TextDecoder().decode(proc.stderr)
+		expect(proc.exitCode).toBe(0)
+		expect(await Bun.file(resolve(dir, ".dev-loop")).exists()).toBe(true)
+		expect(stderr).not.toContain("review agent requested loop stop via REVIEW SUMMARY; removing .dev-loop.")
+		expect(stderr).not.toContain("Review agent stopped the loop.")
 	}, 15_000)
 })
 

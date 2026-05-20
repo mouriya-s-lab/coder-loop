@@ -1324,7 +1324,7 @@ async function runReview(
 			durationSeconds: Math.round(reviewDuration),
 		})
 	}
-	if (reviewCode === 0 && parseReviewSummaryVerdict(reviewTrace) === "stop") {
+	if (reviewCode === 0 && parseReviewSummaryVerdict(reviewTrace, runner.kind) === "stop") {
 		log(`${reviewPhase.name} agent requested loop stop via REVIEW SUMMARY; removing .dev-loop.`)
 		await removeLoopFile(options.loopFile)
 	}
@@ -2949,6 +2949,17 @@ function codexAgentMessageText(event: unknown): string | null {
 	return event.item.type === "agent_message" && typeof event.item.text === "string" ? event.item.text : null
 }
 
+function claudeAgentMessageText(event: unknown): string | null {
+	if (!isObjectRecord(event) || event.type !== "assistant" || !isObjectRecord(event.message)) return null
+	const content = event.message.content
+	if (!Array.isArray(content)) return null
+	const textParts = content.flatMap((part): string[] => {
+		if (!isObjectRecord(part) || part.type !== "text" || typeof part.text !== "string") return []
+		return [part.text]
+	})
+	return textParts.length === 0 ? null : textParts.join("\n")
+}
+
 function containsSummaryMarkerLine(text: string, marker: string): boolean {
 	return text.split(/\r?\n/).some((line) => line.trimStart().startsWith(marker))
 }
@@ -2965,12 +2976,42 @@ export function codexSummaryTextFromJsonLine(line: string, marker: string): stri
 	}
 }
 
-export function parseReviewSummaryVerdict(output: string): ReviewSummaryVerdict | null {
-	let verdict: ReviewSummaryVerdict | null = null
-	for (const match of output.matchAll(/REVIEW SUMMARY:\s*verdict=(retry|accepted|skip|blocked|stop)\s*;/g)) {
-		verdict = match[1] as ReviewSummaryVerdict
+function finalSummaryLine(text: string, marker: string): string | null {
+	const lines = text.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0)
+	const lastLine = lines.at(-1)
+	return lastLine?.startsWith(marker) ? lastLine : null
+}
+
+function parseReviewSummaryVerdictFromText(text: string): ReviewSummaryVerdict | null {
+	const summaryLine = finalSummaryLine(text, REVIEW_SUMMARY_WATCHDOG_MARKER)
+	if (summaryLine === null) return null
+	const match = summaryLine.match(/^REVIEW SUMMARY:\s*verdict=(retry|accepted|skip|blocked|stop)\s*;/)
+	return match === null ? null : match[1] as ReviewSummaryVerdict
+}
+
+function runnerAgentTextFromJsonLine(line: string, runner: AgentRunnerKind): { parsedRunnerEvent: boolean; text: string | null } {
+	const trimmed = line.trim()
+	if (trimmed === "" || !trimmed.startsWith("{")) return { parsedRunnerEvent: false, text: null }
+	try {
+		const event: unknown = JSON.parse(trimmed)
+		if (!isObjectRecord(event) || typeof event.type !== "string") return { parsedRunnerEvent: false, text: null }
+		const text = runner === "codex" ? codexAgentMessageText(event) : claudeAgentMessageText(event)
+		return { parsedRunnerEvent: true, text }
+	} catch {
+		return { parsedRunnerEvent: false, text: null }
 	}
-	return verdict
+}
+
+export function parseReviewSummaryVerdict(output: string, runner: AgentRunnerKind = "claude"): ReviewSummaryVerdict | null {
+	let sawRunnerJson = false
+	let verdict: ReviewSummaryVerdict | null = null
+	for (const line of output.split(/\r?\n/)) {
+		const parsed = runnerAgentTextFromJsonLine(line, runner)
+		sawRunnerJson = sawRunnerJson || parsed.parsedRunnerEvent
+		if (parsed.text === null) continue
+		verdict = parseReviewSummaryVerdictFromText(parsed.text)
+	}
+	return sawRunnerJson ? verdict : parseReviewSummaryVerdictFromText(output)
 }
 
 export function createSummaryWatchdogStdoutObserver(runner: AgentRunnerKind, marker: string, watchdog: SummaryWatchdog): SummaryWatchdogStdoutObserver {
