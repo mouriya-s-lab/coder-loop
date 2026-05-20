@@ -14,6 +14,13 @@ import { closeSync, createWriteStream, openSync, realpathSync, type WriteStream 
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
 import { command, flag, option, optional, positional, run as runCmd, string as cmdString, subcommands } from "cmd-ts"
 import { type as arkType } from "arktype"
+import {
+	daemonDefaults,
+	sendDaemonRequest,
+	startDaemonServer,
+	type DaemonResponse,
+	type DaemonServerOptions,
+} from "./daemon"
 import { dispatchSubcommand } from "./install-commands"
 
 const PKG_ROOT = resolve(import.meta.dir, "..")
@@ -1067,6 +1074,18 @@ async function runStatusCommand(args: string[]): Promise<void> {
 }
 
 async function runDaemonCommand(args: string[]): Promise<void> {
+	if (args[0] === "up") {
+		await runDaemonUpCommand(args.slice(1))
+		return
+	}
+	if (args[0] === "down") {
+		await runDaemonDownCommand(args.slice(1))
+		return
+	}
+	if (args[0] === "status" && !daemonStatusArgsIncludeTarget(args.slice(1))) {
+		await runGlobalDaemonStatusCommand(args.slice(1))
+		return
+	}
 	const parsed = await runCmd(daemonCliCommand, args)
 	if (parsed.value.kind !== "daemon") return
 	const daemonArgs = parsed.value.args
@@ -1090,6 +1109,124 @@ async function runDaemonCommand(args: string[]): Promise<void> {
 		return
 	}
 	await runDaemonRestartCommand(daemonArgs)
+}
+
+type DaemonClientArgs = {
+	socketPath: string
+	json: boolean
+}
+
+async function runDaemonUpCommand(args: string[]): Promise<void> {
+	const options = parseDaemonUpArgs(args)
+	const defaults = daemonDefaults(options)
+	const handle = await startDaemonServer(options)
+	process.stdout.write(JSON.stringify({
+		ok: true,
+		data: {
+			pid: process.pid,
+			socketPath: defaults.socketPath,
+			pidPath: defaults.pidPath,
+			dbPath: defaults.dbPath,
+			startedAt: handle.startedAt,
+		},
+	}, null, "\t") + "\n")
+}
+
+async function runGlobalDaemonStatusCommand(args: string[]): Promise<void> {
+	const parsed = parseDaemonClientArgs(args)
+	if (!parsed.json) fail("daemon status: global daemon status requires --json")
+	await writeDaemonClientResponse(await sendDaemonRequest(parsed.socketPath, { cmd: "daemon.status" }))
+}
+
+async function runDaemonDownCommand(args: string[]): Promise<void> {
+	const parsed = parseDaemonClientArgs(args)
+	await writeDaemonClientResponse(await sendDaemonRequest(parsed.socketPath, { cmd: "daemon.shutdown" }))
+}
+
+async function writeDaemonClientResponse(response: DaemonResponse): Promise<void> {
+	process.stdout.write(JSON.stringify(response, null, "\t") + "\n")
+	if (!response.ok) process.exitCode = 1
+}
+
+function parseDaemonUpArgs(args: string[]): DaemonServerOptions {
+	const options: DaemonServerOptions = {}
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index]
+		if (arg === undefined) fail(`Missing daemon up argument at index ${index}`)
+		const [name, inlineValue] = splitFlag(arg)
+		switch (name) {
+			case "--socket":
+				options.socketPath = readFlagValue(args, index, inlineValue, name)
+				if (inlineValue === null) index++
+				break
+			case "--pid":
+				options.pidPath = readFlagValue(args, index, inlineValue, name)
+				if (inlineValue === null) index++
+				break
+			case "--db":
+				options.dbPath = readFlagValue(args, index, inlineValue, name)
+				if (inlineValue === null) index++
+				break
+			case "--root":
+				options.rootDir = readFlagValue(args, index, inlineValue, name)
+				if (inlineValue === null) index++
+				break
+			case "--scheduler-interval-ms": {
+				const value = readFlagValue(args, index, inlineValue, name)
+				if (inlineValue === null) index++
+				const parsed = Number(value)
+				if (!Number.isInteger(parsed) || parsed <= 0) fail(`--scheduler-interval-ms must be a positive integer, got: ${value}`)
+				options.schedulerIntervalMs = parsed
+				break
+			}
+			case "--no-spawn-agents":
+				rejectInlineValue(inlineValue, name)
+				options.spawnAgents = false
+				break
+			default:
+				fail(`daemon up: unknown argument ${arg}`)
+		}
+	}
+	return options
+}
+
+function parseDaemonClientArgs(args: string[]): DaemonClientArgs {
+	const defaults = daemonDefaults()
+	const parsed: DaemonClientArgs = { socketPath: defaults.socketPath, json: false }
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index]
+		if (arg === undefined) fail(`Missing daemon client argument at index ${index}`)
+		const [name, inlineValue] = splitFlag(arg)
+		switch (name) {
+			case "--socket":
+				parsed.socketPath = readFlagValue(args, index, inlineValue, name)
+				if (inlineValue === null) index++
+				break
+			case "--json":
+				rejectInlineValue(inlineValue, name)
+				parsed.json = true
+				break
+			default:
+				fail(`daemon: unknown argument ${arg}`)
+		}
+	}
+	return parsed
+}
+
+function daemonStatusArgsIncludeTarget(args: string[]): boolean {
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index]
+		if (arg === undefined) continue
+		const [name, inlineValue] = splitFlag(arg)
+		if (name === "--json") continue
+		if (name === "--socket") {
+			if (inlineValue === null) index++
+			continue
+		}
+		if (arg.startsWith("--")) continue
+		return true
+	}
+	return false
 }
 
 async function runQueueCommand(args: string[]): Promise<void> {

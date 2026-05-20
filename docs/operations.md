@@ -18,6 +18,7 @@ operator / supervisor 的默认入口是 `coder-loop` 自己暴露的只读或�
 | 体检 target | `coder-loop doctor <target> --repo <owner>/<repo>` | 只读检查 bootstrap layers 和 live runtime health |
 | 读机器状态 | `coder-loop status <target> --json` | supervisor / script 读取当前 config/state/queue/current/events/process snapshot |
 | 管理后台循环 | `coder-loop daemon status/start/stop/restart <target>` | 启停 detached loop，避免手写 `nohup` / PID 归属逻辑；`status` 需要 `--json` |
+| 管理集中 daemon | `coder-loop daemon up/status/down` | 启动单进程 SQLite + Unix socket daemon，或通过 socket 查询 / 关闭它 |
 | 人类快捷入口 | `/dev-loop [N]` | target 内通过 slash command 调用 daemon API，`N` 会传给 `--max-iterations` |
 
 常规排障顺序：
@@ -31,12 +32,47 @@ coder-loop daemon status /path/to/target --json | jq '.processes'
 判断 daemon：
 
 ```bash
+coder-loop daemon up
+coder-loop daemon status --json
+coder-loop daemon down
 coder-loop daemon start /path/to/target
 coder-loop daemon stop /path/to/target
 coder-loop daemon restart /path/to/target --max-iterations 10
 ```
 
+`daemon up` 前台运行单进程 daemon。默认持有 SQLite DB
+`~/Ext/loop-data/state.db`，写 PID 到 `~/Ext/loop-data/daemon.pid`，监听 Unix
+domain socket `~/Ext/loop-data/daemon.sock`，并创建
+`~/Ext/loop-data/chains/<chain-name>/daemon/<timestamp>/{engine,stdout,stderr}.log`。
+`daemon status --json` 和 `daemon down` 不需要 target path，它们通过 socket
+发送 `daemon.status` / `daemon.shutdown` JSONL 请求。测试或开发时可用：
+
+```bash
+coder-loop daemon up \
+  --root .cache/daemon-dev \
+  --db .cache/daemon-dev/state.db \
+  --socket .cache/daemon-dev/daemon.sock \
+  --pid .cache/daemon-dev/daemon.pid
+coder-loop daemon status --socket .cache/daemon-dev/daemon.sock --json
+coder-loop daemon down --socket .cache/daemon-dev/daemon.sock
+```
+
 `daemon start` 对已运行 target 幂等：返回 `alreadyRunning: true`，不会再开一个 loop。`daemon stop` 读取 `.dev-loop` 归属并 SIGTERM 记录的 live pid，同时删除 loop file。`daemon restart` 输出一个 JSON object，不会串接 stop/start 两份 JSON。
+
+集中 daemon socket 协议是一行一个 JSON request，响应也是一行 JSON：
+
+```json
+{ "cmd": "daemon.status" }
+{ "cmd": "chain.create", "name": "release", "preset": "gh-issue-pr-iteration", "repo": "owner/repo", "baseBranch": "main" }
+{ "cmd": "item.add", "chain": "release", "issue": 127, "repoCwd": "/path/to/repo", "priority": "high" }
+{ "cmd": "item.list", "chain": "release" }
+{ "cmd": "chain.complete", "chain": "release" }
+{ "cmd": "slot.list" }
+{ "cmd": "daemon.shutdown" }
+```
+
+响应 shape 固定为 `{ "ok": true, "data": ... }` 或
+`{ "ok": false, "error": "..." }`。
 
 `status <target> --json` 是 supervisor 的稳定读取契约。它会在 config/state 缺失或损坏时仍输出 JSON，让外部逻辑根据 `state.kind` 分支，而不是从 stderr 猜测失败类型。当前顶层字段：
 
