@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { resolve } from "node:path"
 import { stat } from "node:fs/promises"
 
-import { loadPreset, parsePreset, type Preset, type PresetVariableSource } from "./loop"
+import { DEFAULT_ATTEMPT_TIMEOUT_SECONDS, loadPreset, parsePreset, type Preset, type PresetVariableSource } from "./loop"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const BUNDLED_PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
@@ -96,6 +96,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(preset.item.idField).toBe("issue")
 		expect(preset.agent.binary).toBe("claude")
 		expect([...preset.agent.extraArgs]).toEqual([])
+		expect(preset.agent.attemptTimeoutSeconds).toBe(DEFAULT_ATTEMPT_TIMEOUT_SECONDS)
 		expect([...preset.statuses.continuable]).toEqual(["queued", "in_progress", "changes_requested"])
 		expect([...preset.statuses.terminal]).toEqual(["blocked", "moot", "done"])
 	})
@@ -227,5 +228,19 @@ describe("parsePreset schema validation", () => {
 		expect(preset.item.idField).toBe("id")
 		expect(preset.phases[0]!.variables[0]).toEqual(["K", { kind: "item", field: "id" }])
 		expect(preset.fragments[0]!.path).toBe("/tmp/f.md")
+		expect(preset.agent.attemptTimeoutSeconds).toBe(DEFAULT_ATTEMPT_TIMEOUT_SECONDS)
+	})
+
+	test("accepts agent attemptTimeoutSeconds override", () => {
+		const root: Record<string, unknown> = minimalRoot()
+		root.agent = { binary: "echo", attemptTimeoutSeconds: 120 }
+		const preset = parsePreset(root, "/tmp")
+		expect(preset.agent.attemptTimeoutSeconds).toBe(120)
+	})
+
+	test("rejects non-positive agent attemptTimeoutSeconds", () => {
+		const root: Record<string, unknown> = minimalRoot()
+		root.agent = { binary: "echo", attemptTimeoutSeconds: 0 }
+		expect(() => parsePreset(root, "/tmp")).toThrow(/attemptTimeoutSeconds/)
 	})
 })

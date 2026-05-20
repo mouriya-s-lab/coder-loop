@@ -333,5 +333,6 @@ role = "review"
 path = "review/final.md"
 
 [agent]
-binary    = "claude"
-extraArgs = []
+binary                = "claude"
+extraArgs             = []
+attemptTimeoutSeconds = 3600

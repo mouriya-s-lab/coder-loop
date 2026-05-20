@@ -19,5 +19,6 @@ prompt = "run-entry.md"
   TARGET_CWD = "runtime.targetCwd"
 
 [agent]
-binary    = "echo"
-extraArgs = []
+binary                = "echo"
+extraArgs             = []
+attemptTimeoutSeconds = 3600

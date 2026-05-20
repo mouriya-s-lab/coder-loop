@@ -64,8 +64,9 @@ prompt = "run-entry.md"
   TARGET_CWD = "runtime.targetCwd"
 
 [agent]
-binary    = "echo"
-extraArgs = []
+binary                = "echo"
+extraArgs             = []
+attemptTimeoutSeconds = 3600
 ```
 
 `presets/single-phase-example/run-entry.md`：
@@ -102,6 +103,7 @@ bun src/loop.ts --target-cwd <fresh-target> --check-runtime
 | `[[fragments]].path` | string | 是 | 相对 preset.toml 的 markdown 文件路径，文件必须可读 |
 | `[agent].binary` | string | 是 | schema 保留字段；实际 spawn 由 target runtime 的 runner selection 决定。新 preset 可填 `"claude"` 作为兼容占位 |
 | `[agent].extraArgs` | string[] | 否 | schema 保留字段；实际 runner args 用 target config 的 `claude.model` / `claude.extraArgs`、`codex.model` / `codex.extraArgs` |
+| `[agent].attemptTimeoutSeconds` | number | 否 | 每次 agent attempt 的绝对超时秒数；默认 `3600`。到期且尚未观察到 phase summary marker 时，先对进程组发 `SIGTERM`，5 秒后仍未退出则发 `SIGKILL` |
 
 引擎在加载时强制：
 
