@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process"
 import { createConnection, createServer, type Server, type Socket } from "node:net"
-import { basename, resolve } from "node:path"
+import { resolve } from "node:path"
 import { createWriteStream, existsSync, type WriteStream } from "node:fs"
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
 
@@ -15,9 +15,9 @@ import {
 import {
 	chainRuntimePaths,
 	DEFAULT_LOOP_DATA_ROOT,
+	defaultChainNameForTarget,
 	ensureChainRuntimeSkeleton,
 	loopDataRootPaths,
-	sanitizeChainName,
 } from "./runtime-paths"
 import {
 	clearSchedulerRun,
@@ -301,8 +301,7 @@ export async function processDaemonRequest(runtime: Pick<DaemonRuntime, "store" 
 }
 
 async function upsertChain(store: StateStore, rootDir: string, request: Extract<DaemonRequest, { cmd: "chain.create" }>): Promise<Chain> {
-	const existing = store.getChain(request.name)
-	const chain = existing ?? store.createChain(
+	const chain = store.upsertChain(
 		request.name,
 		request.preset,
 		request.repo ?? null,
@@ -673,10 +672,6 @@ function logEngine(runtime: Pick<DaemonRuntime, "engineLog">, message: string): 
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error)
-}
-
-export function defaultChainNameForTarget(targetCwd: string): string {
-	return sanitizeChainName(basename(resolve(targetCwd)) || "default")
 }
 
 export async function importTargetStateIntoStore(store: StateStore, targetCwd: string, preset: string, repository: string | null, baseBranch: string | null): Promise<{ chain: Chain; itemsImported: number }> {

@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test"
 import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { resolve } from "node:path"
+import { openStateStore } from "./state-db"
+import { chainRuntimePaths, defaultChainNameForTarget, ensureChainRuntimeSkeleton } from "./runtime-paths"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
@@ -209,6 +211,49 @@ async function makePostReviewTriggerTarget(reviewStatus: "blocked" | "done"): Pr
 }
 
 describe("smoke: single-phase-example preset", () => {
+	test("--check-runtime and --dry-run pass from SQLite chain metadata without target runtime", async () => {
+		const target = await mkdtemp(resolve(tmpdir(), "coder-loop-db-runtime-"))
+		const root = resolve(target, "loop-data")
+		await mkdir(resolve(target, ".coder-loop"), { recursive: true })
+		await writeFile(resolve(target, ".coder-loop/workflow.md"), "# workflow\n")
+		const chainName = defaultChainNameForTarget(target)
+		const chainPaths = chainRuntimePaths(root, chainName)
+		await ensureChainRuntimeSkeleton(chainPaths)
+		const store = openStateStore(resolve(root, "state.db"))
+		try {
+			store.upsertChain(chainName, "gh-issue-pr-iteration", "owner/repo", "main", null, null, { targetCwd: target })
+		} finally {
+			store.close()
+		}
+		const env = { ...process.env, CODER_LOOP_DATA_ROOT: root }
+
+		const check = Bun.spawnSync({
+			cmd: ["bun", LOOP_ENTRY, "--target-cwd", target, "--check-runtime"],
+			cwd: REPO_ROOT,
+			stdout: "pipe",
+			stderr: "pipe",
+			env,
+		})
+		const checkStderr = new TextDecoder().decode(check.stderr)
+		expect(check.exitCode).toBe(0)
+		expect(checkStderr).toContain(`Runtime check passed: state=${resolve(root, "state.db")} (chain=${chainName})`)
+		expect(checkStderr).toContain("Runtime check passed: queue=0, selected=none")
+		expect(await Bun.file(resolve(target, ".coder-loop/runtime")).exists()).toBe(false)
+
+		const dryRun = Bun.spawnSync({
+			cmd: ["bun", LOOP_ENTRY, "--target-cwd", target, "--dry-run"],
+			cwd: REPO_ROOT,
+			stdout: "pipe",
+			stderr: "pipe",
+			env,
+		})
+		const dryRunStderr = new TextDecoder().decode(dryRun.stderr)
+		expect(dryRun.exitCode).toBe(0)
+		expect(dryRunStderr).toContain(`Dry run: state=${resolve(root, "state.db")} (chain=${chainName})`)
+		expect(dryRunStderr).toContain("Dry run: selected=none")
+		expect(await Bun.file(resolve(target, ".coder-loop/runtime")).exists()).toBe(false)
+	})
+
 	test("--check-runtime passes with minimal target", async () => {
 		const target = await makeMinimalTarget("single-phase-example")
 		const proc = Bun.spawnSync({

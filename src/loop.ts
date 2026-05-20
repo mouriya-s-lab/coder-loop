@@ -10,13 +10,12 @@
 
 import { spawn } from "node:child_process"
 import { appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises"
-import { closeSync, createWriteStream, openSync, realpathSync, type WriteStream } from "node:fs"
+import { closeSync, createWriteStream, existsSync, openSync, realpathSync, type WriteStream } from "node:fs"
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
 import { command, flag, option, optional, positional, run as runCmd, string as cmdString, subcommands } from "cmd-ts"
 import { type as arkType } from "arktype"
 import {
 	daemonDefaults,
-	defaultChainNameForTarget,
 	sendDaemonRequest,
 	startDaemonServer,
 	type DaemonRequest,
@@ -24,7 +23,8 @@ import {
 	type DaemonServerOptions,
 } from "./daemon"
 import { dispatchSubcommand } from "./install-commands"
-import { chainRuntimePaths } from "./runtime-paths"
+import { chainRuntimePaths, defaultChainNameForTarget, loopDataRootPaths, type ChainRuntimePaths } from "./runtime-paths"
+import { openStateStore, type Item } from "./state-db"
 
 const PKG_ROOT = resolve(import.meta.dir, "..")
 const DEFAULT_PRESET_NAME = "gh-issue-pr-iteration"
@@ -90,6 +90,15 @@ export type LoopState = {
 	recentRuns: JsonValue[]
 	current: CurrentRun | null
 }
+
+export type RuntimeStateSource =
+	| { kind: "file"; statePath: string }
+	| { kind: "chain-db"; dbPath: string; chainName: string; chainPaths: ChainRuntimePaths }
+
+type RuntimeStateReadResult =
+	| { kind: "ok"; value: LoopState; source: RuntimeStateSource }
+	| { kind: "missing"; message: string; statePath: string }
+	| { kind: "invalid"; message: string; statePath: string }
 
 type RawArgs = {
 	maxIterations: number | null
@@ -1329,9 +1338,11 @@ async function main() {
 	const options = buildOptions(targetCwd, configPath, rawArgs, config, preset)
 
 	if (options.checkRuntime) {
-		const state = await loadState(options.statePath)
+		const stateResult = await readRuntimeState(options)
+		if (stateResult.kind !== "ok") fail(stateResult.message)
+		const state = stateResult.value
 		const selected = selectIssue(state, options)
-		const errors = await checkRuntime(options, state)
+		const errors = await checkRuntime(options, state, stateResult.source)
 		if (errors.length > 0) {
 			console.error(`Runtime check failed: ${errors.length} error(s)`)
 			for (const error of errors) console.error(`- ${error.path}: ${error.message}`)
@@ -1340,29 +1351,35 @@ async function main() {
 		console.error(`Runtime check passed: target=${options.targetCwd}`)
 		if (options.repository !== null) console.error(`Runtime check passed: repo=${options.repository}`)
 		console.error(`Runtime check passed: config=${options.configPath} (${configFormatForPath(options.configPath)})`)
-		console.error(`Runtime check passed: state=${options.statePath}`)
+		if (stateResult.source.kind === "chain-db") {
+			console.error(`Runtime check passed: state=${stateResult.source.dbPath} (chain=${stateResult.source.chainName})`)
+		} else {
+			console.error(`Runtime check passed: state=${stateResult.source.statePath}`)
+		}
 		console.error(`Runtime check passed: queue=${state.queue.length}, selected=${selected ? getItemId(selected.item, options.preset) : "none"}`)
 		console.error(`Runtime check passed: preset=${options.preset.name}`)
 		return
 	}
 
-	await ensureRuntime(options)
-	await assertRuntimeValid(options)
-
-	if (options.worktree) {
-		if (options.baseBranch === null || options.baseBranch.trim() === "") {
-			fail("worktree mode requires a non-empty baseBranch (set in config or via --base-branch)")
-		}
-		validateWorktreePrerequisites(options.targetCwd, options.baseBranch)
-	}
-
 	if (options.dryRun) {
-		const state = await loadState(options.statePath)
+		const stateResult = await readRuntimeState(options)
+		if (stateResult.kind !== "ok") fail(stateResult.message)
+		const state = stateResult.value
 		const selected = selectIssue(state, options)
+		const errors = await checkRuntime(options, state, stateResult.source)
+		if (errors.length > 0) {
+			console.error(`Dry run failed runtime validation: ${errors.length} error(s)`)
+			for (const error of errors) console.error(`- ${error.path}: ${error.message}`)
+			process.exit(1)
+		}
 		console.error(`Dry run: target=${options.targetCwd}`)
 		if (options.repository !== null) console.error(`Dry run: repo=${options.repository}`)
 		console.error(`Dry run: workflow=${options.workflowPath}`)
-		console.error(`Dry run: state=${options.statePath}`)
+		if (stateResult.source.kind === "chain-db") {
+			console.error(`Dry run: state=${stateResult.source.dbPath} (chain=${stateResult.source.chainName})`)
+		} else {
+			console.error(`Dry run: state=${stateResult.source.statePath}`)
+		}
 		console.error(`Dry run: selected=${selected ? getItemId(selected.item, options.preset) : "none"}`)
 		if (selected) {
 			const kindResult = await resolveIssueKind(options.repository, getItemId(selected.item, options.preset), selected.item)
@@ -1375,6 +1392,16 @@ async function main() {
 			if (kindResult.kind === "code-spike") console.error("Dry run: noMerge=true")
 		}
 		return
+	}
+
+	await ensureRuntime(options)
+	await assertRuntimeValid(options)
+
+	if (options.worktree) {
+		if (options.baseBranch === null || options.baseBranch.trim() === "") {
+			fail("worktree mode requires a non-empty baseBranch (set in config or via --base-branch)")
+		}
+		validateWorktreePrerequisites(options.targetCwd, options.baseBranch)
 	}
 
 	logStream = createWriteStream(options.logFile, { flags: "a" })
@@ -1786,12 +1813,19 @@ async function runReview(
 }
 
 function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, config: LoopConfig, preset: Preset): LoopOptions {
+	const chainPaths = chainRuntimePaths(null, defaultChainNameForTarget(targetCwd))
+	const useLegacyRuntimeDefaults = existsSync(configPath)
+	const defaultSharedPath = useLegacyRuntimeDefaults ? DEFAULT_SHARED_FILE : chainPaths.sharedPath
+	const defaultStatePath = useLegacyRuntimeDefaults ? DEFAULT_STATE_FILE : loopDataRootPaths().stateDbPath
+	const defaultIssueDir = useLegacyRuntimeDefaults ? DEFAULT_ISSUE_DIR : chainPaths.issuesDir
+	const defaultEvidenceDir = useLegacyRuntimeDefaults ? DEFAULT_EVIDENCE_DIR : chainPaths.evidenceDir
+	const defaultLogDir = useLegacyRuntimeDefaults ? DEFAULT_LOG_DIR : chainPaths.runsDir
 	const workflowPath = resolveFrom(targetCwd, raw.workflowPath ?? config.workflowFile ?? DEFAULT_WORKFLOW_FILE)
-	const sharedContextPath = resolveFrom(targetCwd, config.sharedContextFile ?? DEFAULT_SHARED_FILE)
-	const statePath = resolveFrom(targetCwd, raw.statePath ?? config.stateFile ?? DEFAULT_STATE_FILE)
-	const issueDir = resolveFrom(targetCwd, config.issueDir ?? DEFAULT_ISSUE_DIR)
-	const evidenceRootDir = resolveFrom(targetCwd, config.evidenceDir ?? DEFAULT_EVIDENCE_DIR)
-	const logDir = resolveFrom(targetCwd, config.logDir ?? DEFAULT_LOG_DIR)
+	const sharedContextPath = resolveFrom(targetCwd, config.sharedContextFile ?? defaultSharedPath)
+	const statePath = resolveFrom(targetCwd, raw.statePath ?? config.stateFile ?? defaultStatePath)
+	const issueDir = resolveFrom(targetCwd, config.issueDir ?? defaultIssueDir)
+	const evidenceRootDir = resolveFrom(targetCwd, config.evidenceDir ?? defaultEvidenceDir)
+	const logDir = resolveFrom(targetCwd, config.logDir ?? defaultLogDir)
 	const repository = raw.repository ?? config.repository
 	const maxIterations = raw.once ? 1 : (raw.maxIterations ?? Number.POSITIVE_INFINITY)
 	const requireBrowserEvidence = raw.requireBrowserEvidence ?? config.requireAgentBrowserScreenshots ?? false
@@ -1836,22 +1870,25 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 	const baseTarget = makeStatusTargetSnapshot(targetCwd, configPath, args.repository, null, { kind: "loaded", error: null })
 
 	const configResult = await readStatusConfig(configPath)
-	if (configResult.kind !== "ok") {
-		const stateKind: StatusStateKind = configResult.kind === "missing" ? "missing-config" : "invalid-config"
+	if (configResult.kind === "invalid") {
 		return makeUnavailableStatusSnapshot({
-			target: makeStatusTargetSnapshot(targetCwd, configPath, args.repository, null, { kind: configResult.kind, error: configResult.message }),
-			stateKind,
+			target: makeStatusTargetSnapshot(targetCwd, configPath, args.repository, null, { kind: "invalid", error: configResult.message }),
+			stateKind: "invalid-config",
 			statePath: baseTarget.statePath,
 			errorPath: "config",
 			errorMessage: configResult.message,
 		})
 	}
+	const configValue = configResult.kind === "ok" ? configResult.value : defaultLoopConfig()
+	const configSnapshot: StatusResourceSnapshot = configResult.kind === "ok"
+		? { kind: "loaded", error: null }
+		: { kind: "missing", error: configResult.message }
 
-	const presetResult = await readStatusPreset(configResult.value, targetCwd)
+	const presetResult = await readStatusPreset(configValue, targetCwd)
 	if (presetResult.kind !== "ok") {
 		const stateKind: StatusStateKind = presetResult.kind === "missing" ? "missing-preset" : "invalid-preset"
 		return makeUnavailableStatusSnapshot({
-			target: makeStatusTargetSnapshot(targetCwd, configPath, args.repository, null, { kind: "loaded", error: null }),
+			target: makeStatusTargetSnapshot(targetCwd, configPath, args.repository, null, configSnapshot),
 			stateKind,
 			statePath: baseTarget.statePath,
 			errorPath: "preset",
@@ -1860,9 +1897,9 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 	}
 
 	const raw = makeStatusRawArgs(args)
-	const options = buildOptions(targetCwd, configPath, raw, configResult.value, presetResult.value)
-	const target = makeStatusTargetSnapshot(targetCwd, configPath, args.repository, options, { kind: "loaded", error: null })
-	const stateResult = await readStatusState(options.statePath)
+	const options = buildOptions(targetCwd, configPath, raw, configValue, presetResult.value)
+	const target = makeStatusTargetSnapshot(targetCwd, configPath, args.repository, options, configSnapshot)
+	const stateResult = await readRuntimeState(options)
 	if (stateResult.kind !== "ok") {
 		const stateKind: StatusStateKind = stateResult.kind === "missing" ? "missing-state" : "invalid-state"
 		return makeUnavailableStatusSnapshot({
@@ -1875,7 +1912,7 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 	}
 
 	const selected = selectIssue(stateResult.value, options)
-	const runtimeErrors = await checkRuntime(options, stateResult.value)
+	const runtimeErrors = await checkRuntime(options, stateResult.value, stateResult.source)
 	const currentSnapshot = await buildStatusCurrentSnapshot(options, stateResult.value)
 	const events = await buildStatusEventsSnapshot(options, stateResult.value, selected)
 	const processes = await buildStatusProcessSnapshot(options)
@@ -1885,7 +1922,7 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 			kind: runtimeErrors.length === 0 ? "ok" : "invalid-runtime",
 			ok: runtimeErrors.length === 0,
 			loaded: true,
-			path: options.statePath,
+			path: stateResult.source.kind === "chain-db" ? stateResult.source.dbPath : stateResult.source.statePath,
 			version: stateResult.value.version,
 			repository: stateResult.value.repository,
 			baseBranch: stateResult.value.baseBranch,
@@ -1911,7 +1948,7 @@ async function readStatusConfig(path: string): Promise<StatusReadResult<LoopConf
 		const raw = await readFile(path, "utf-8")
 		return { kind: "ok", value: parseConfigText(raw, path) }
 	} catch (error) {
-		if (isNodeError(error) && error.code === "ENOENT") return { kind: "missing", message: `missing config file: ${path}` }
+		if (isNodeError(error) && error.code === "ENOENT") return { kind: "missing", message: `missing optional config file: ${path}` }
 		return { kind: "invalid", message: errorMessage(error) }
 	}
 }
@@ -1938,6 +1975,70 @@ async function readStatusState(path: string): Promise<StatusReadResult<LoopState
 	} catch (error) {
 		if (isNodeError(error) && error.code === "ENOENT") return { kind: "missing", message: `missing state file: ${path}` }
 		return { kind: "invalid", message: errorMessage(error) }
+	}
+}
+
+async function readRuntimeState(options: LoopOptions): Promise<RuntimeStateReadResult> {
+	const chainState = await readChainRuntimeState(options)
+	if (chainState !== null) return chainState
+	const fileState = await readStatusState(options.statePath)
+	if (fileState.kind === "ok") {
+		return { kind: "ok", value: fileState.value, source: { kind: "file", statePath: options.statePath } }
+	}
+	const legacyStatePath = resolve(options.targetCwd, DEFAULT_STATE_FILE)
+	if (legacyStatePath !== options.statePath) {
+		const legacyState = await readStatusState(legacyStatePath)
+		if (legacyState.kind === "ok") {
+			return { kind: "ok", value: legacyState.value, source: { kind: "file", statePath: legacyStatePath } }
+		}
+	}
+	return {
+		kind: fileState.kind,
+		message: `${fileState.message}; no chain row "${defaultChainNameForTarget(options.targetCwd)}" in ${loopDataRootPaths().stateDbPath}`,
+		statePath: options.statePath,
+	}
+}
+
+async function readChainRuntimeState(options: LoopOptions): Promise<Extract<RuntimeStateReadResult, { kind: "ok" }> | null> {
+	const root = loopDataRootPaths()
+	const chainName = defaultChainNameForTarget(options.targetCwd)
+	const chainPaths = chainRuntimePaths(root.rootDir, chainName)
+	const store = openStateStore(root.stateDbPath)
+	try {
+		const chain = store.getChain(chainName)
+		if (chain === null) return null
+		const queue = store.listItems(chain.id).map((item) => dbItemToQueueItem(item, chainPaths))
+		return {
+			kind: "ok",
+			value: {
+				version: 1,
+				queue,
+				repository: chain.repository,
+				baseBranch: chain.baseBranch,
+				recentRuns: [],
+				current: null,
+			},
+			source: { kind: "chain-db", dbPath: root.stateDbPath, chainName, chainPaths },
+		}
+	} finally {
+		store.close()
+	}
+}
+
+function dbItemToQueueItem(item: Item, chainPaths: ChainRuntimePaths): QueueItem {
+	return {
+		status: item.status,
+		attempts: item.attempts,
+		title: item.title,
+		priority: item.priority,
+		branch: item.branch,
+		pr: item.pr,
+		lastRunId: item.lastRunId,
+		issueFile: item.issueFile === null ? null : resolveFrom(chainPaths.chainDir, item.issueFile),
+		evidenceDir: item.evidenceDir === null ? null : resolveFrom(chainPaths.chainDir, item.evidenceDir),
+		agentCwd: item.agentCwd,
+		runner: item.runner,
+		extra: { ...item.extra, issue: item.issue },
 	}
 }
 
@@ -3192,11 +3293,37 @@ async function resolveConfigPath(targetCwd: string, override: string | null): Pr
 async function loadConfig(path: string): Promise<LoopConfig> {
 	const raw = await readFile(path, "utf-8").catch((error: unknown) => {
 		if (isNodeError(error) && error.code === "ENOENT") {
-			fail(`Missing config file: ${path}`)
+			return null
 		}
 		throw error
 	})
+	if (raw === null) return defaultLoopConfig()
 	return parseConfigText(raw, path)
+}
+
+function defaultLoopConfig(): LoopConfig {
+	return {
+		repository: null,
+		baseBranch: null,
+		worktree: null,
+		workflowFile: null,
+		sharedContextFile: null,
+		stateFile: null,
+		issueDir: null,
+		evidenceDir: null,
+		logDir: null,
+		requireAgentBrowserScreenshots: null,
+		defaultRunner: null,
+		reviewRunner: null,
+		claudeBinary: null,
+		claudeExtraArgs: [],
+		claudeModel: null,
+		codexBinary: null,
+		codexExtraArgs: [],
+		codexModel: null,
+		preset: null,
+		presetPath: null,
+	}
 }
 
 function parseConfigText(raw: string, path: string): LoopConfig {
@@ -3329,7 +3456,11 @@ async function assertRuntimeValid(options: LoopOptions, state?: LoopState): Prom
 	fail(`Runtime validation failed:\n${details}`)
 }
 
-export async function checkRuntime(options: LoopOptions, state: LoopState): Promise<RuntimeCheckError[]> {
+export async function checkRuntime(
+	options: LoopOptions,
+	state: LoopState,
+	source: RuntimeStateSource = { kind: "file", statePath: options.statePath },
+): Promise<RuntimeCheckError[]> {
 	const errors: RuntimeCheckError[] = []
 	const seenIds = new Set<string>()
 	const preset = options.preset
@@ -3343,28 +3474,39 @@ export async function checkRuntime(options: LoopOptions, state: LoopState): Prom
 	if (options.worktree && (options.baseBranch === null || options.baseBranch.trim() === "")) pushCheckError(errors, "worktree", "worktree mode requires a non-empty baseBranch")
 
 	await checkDirectory(options.targetCwd, "targetCwd", errors)
-	await checkFile(options.configPath, "config", errors)
 	await checkFile(options.workflowPath, "workflow", errors)
-	await checkFile(options.sharedContextPath, "shared context", errors)
-	await checkFile(options.statePath, "state", errors)
-	await checkDirectory(options.issueDir, "issueDir", errors)
-	await checkDirectory(options.evidenceRootDir, "evidenceDir", errors)
-	await checkDirectory(options.logDir, "logDir", errors)
-	const runtimeRoot = resolve(options.targetCwd, ".coder-loop/runtime")
-	checkInside(options.targetCwd, options.configPath, "config", errors)
-	checkInside(options.targetCwd, options.workflowPath, "workflow", errors)
-	checkInside(options.targetCwd, options.sharedContextPath, "shared context", errors)
-	checkInside(options.targetCwd, options.statePath, "state", errors)
-	checkInside(options.targetCwd, options.issueDir, "issueDir", errors)
-	checkInside(options.targetCwd, options.evidenceRootDir, "evidenceDir", errors)
-	checkInside(options.targetCwd, options.logDir, "logDir", errors)
-	checkInside(runtimeRoot, options.configPath, "config", errors)
-	checkInside(runtimeRoot, options.sharedContextPath, "shared context", errors)
-	checkInside(runtimeRoot, options.statePath, "state", errors)
-	checkInside(runtimeRoot, options.issueDir, "issueDir", errors)
-	checkInside(runtimeRoot, options.evidenceRootDir, "evidenceDir", errors)
-	checkInside(runtimeRoot, options.logDir, "logDir", errors)
-	if (isWithin(runtimeRoot, options.workflowPath)) pushCheckError(errors, "workflow", "must be project policy outside .coder-loop/runtime")
+	if (source.kind === "file") {
+		await checkFile(options.configPath, "config", errors)
+		await checkFile(options.sharedContextPath, "shared context", errors)
+		await checkFile(options.statePath, "state", errors)
+		await checkDirectory(options.issueDir, "issueDir", errors)
+		await checkDirectory(options.evidenceRootDir, "evidenceDir", errors)
+		await checkDirectory(options.logDir, "logDir", errors)
+		const runtimeRoot = resolve(options.targetCwd, ".coder-loop/runtime")
+		checkInside(options.targetCwd, options.configPath, "config", errors)
+		checkInside(options.targetCwd, options.workflowPath, "workflow", errors)
+		checkInside(options.targetCwd, options.sharedContextPath, "shared context", errors)
+		checkInside(options.targetCwd, options.statePath, "state", errors)
+		checkInside(options.targetCwd, options.issueDir, "issueDir", errors)
+		checkInside(options.targetCwd, options.evidenceRootDir, "evidenceDir", errors)
+		checkInside(options.targetCwd, options.logDir, "logDir", errors)
+		checkInside(runtimeRoot, options.configPath, "config", errors)
+		checkInside(runtimeRoot, options.sharedContextPath, "shared context", errors)
+		checkInside(runtimeRoot, options.statePath, "state", errors)
+		checkInside(runtimeRoot, options.issueDir, "issueDir", errors)
+		checkInside(runtimeRoot, options.evidenceRootDir, "evidenceDir", errors)
+		checkInside(runtimeRoot, options.logDir, "logDir", errors)
+		if (isWithin(runtimeRoot, options.workflowPath)) pushCheckError(errors, "workflow", "must be project policy outside .coder-loop/runtime")
+	} else {
+		await checkFile(source.dbPath, "state db", errors)
+		await checkDirectory(source.chainPaths.chainDir, "chainDir", errors)
+		await checkFile(source.chainPaths.sharedPath, "shared context", errors)
+		await checkDirectory(source.chainPaths.issuesDir, "issueDir", errors)
+		await checkDirectory(source.chainPaths.evidenceDir, "evidenceDir", errors)
+		await checkDirectory(source.chainPaths.runsDir, "runsDir", errors)
+		await checkDirectory(source.chainPaths.daemonDir, "daemonDir", errors)
+		if (isWithin(source.chainPaths.chainDir, options.workflowPath)) pushCheckError(errors, "workflow", "must be project policy outside loop-data chain runtime")
+	}
 
 	for (const [index, item] of state.queue.entries()) {
 		const label = `state.queue[${index}]`
@@ -3389,11 +3531,11 @@ export async function checkRuntime(options: LoopOptions, state: LoopState): Prom
 		if (item.lastRunId !== null && item.lastRunId.trim() === "") pushCheckError(errors, `${label}.lastRunId`, "must be null or non-empty")
 
 		if (item.issueFile !== null) {
-			const issueFile = resolveRuntimePath(options, item.issueFile, `${label}.issueFile`, options.issueDir, errors)
+			const issueFile = resolveRuntimePath(options, source, item.issueFile, `${label}.issueFile`, source.kind === "chain-db" ? source.chainPaths.issuesDir : options.issueDir, errors)
 			if (issueFile) await checkFile(issueFile, `${label}.issueFile`, errors)
 		}
 		if (item.evidenceDir !== null) {
-			const evidenceDir = resolveRuntimePath(options, item.evidenceDir, `${label}.evidenceDir`, options.evidenceRootDir, errors)
+			const evidenceDir = resolveRuntimePath(options, source, item.evidenceDir, `${label}.evidenceDir`, source.kind === "chain-db" ? source.chainPaths.evidenceDir : options.evidenceRootDir, errors)
 			if (evidenceDir) await checkDirectory(evidenceDir, `${label}.evidenceDir`, errors)
 		}
 		if (item.agentCwd !== null) {
@@ -4898,13 +5040,14 @@ function resolveFrom(base: string, path: string): string {
 	return isAbsolute(path) ? path : resolve(base, path)
 }
 
-function resolveRuntimePath(options: LoopOptions, path: string, label: string, root: string, errors: RuntimeCheckError[]): string | null {
+function resolveRuntimePath(options: LoopOptions, source: RuntimeStateSource, path: string, label: string, root: string, errors: RuntimeCheckError[]): string | null {
 	if (path.trim() === "") {
 		pushCheckError(errors, label, "must not be empty")
 		return null
 	}
-	const resolved = resolveFrom(options.targetCwd, path)
-	checkInside(options.targetCwd, resolved, label, errors)
+	const resolved = resolveFrom(source.kind === "chain-db" ? source.chainPaths.chainDir : options.targetCwd, path)
+	if (source.kind === "file") checkInside(options.targetCwd, resolved, label, errors)
+	else checkInside(source.chainPaths.chainDir, resolved, label, errors)
 	checkInside(root, resolved, label, errors)
 	return resolved
 }

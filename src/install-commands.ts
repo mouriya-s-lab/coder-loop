@@ -13,6 +13,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process"
+import { constants as fsConstants } from "node:fs"
 import {
 	access,
 	mkdir,
@@ -21,8 +22,10 @@ import {
 	writeFile,
 } from "node:fs/promises"
 import { homedir } from "node:os"
-import { resolve, dirname } from "node:path"
+import { basename, resolve, dirname } from "node:path"
 import { buildCoderLoopStatusSnapshot, loadPreset, type AgentRunnerKind, type AgentRunnerSelection, type CoderLoopStatusSnapshot, type JsonValue, type Preset } from "./loop"
+import { openStateStore, type Chain, type ItemPatch, type NewItem, type StateStore } from "./state-db"
+import { chainRuntimePaths, defaultChainNameForTarget, ensureChainRuntimeSkeleton, loopDataRootPaths, type ChainRuntimePaths } from "./runtime-paths"
 
 const PKG_ROOT = resolve(import.meta.dir, "..")
 const PRESETS_DIR = resolve(PKG_ROOT, "presets")
@@ -40,12 +43,7 @@ const WRITING_ISSUE_SKILL_REL = ".claude/skills/writing-issue/SKILL.md"
 const WRITING_ISSUE_MARKER = "docs/reserved-strings.md"
 
 const RUNTIME_DIR = ".coder-loop/runtime"
-const CONFIG_REL = `${RUNTIME_DIR}/config.json`
 const STATE_REL = `${RUNTIME_DIR}/state.json`
-const SHARED_REL = `${RUNTIME_DIR}/shared.md`
-const ISSUE_DIR_REL = `${RUNTIME_DIR}/issues`
-const EVIDENCE_DIR_REL = `${RUNTIME_DIR}/evidence`
-const LOG_DIR_REL = `${RUNTIME_DIR}/logs`
 const WORKFLOW_REL = ".coder-loop/workflow.md"
 const SLASH_COMMANDS_REL = ".claude/commands"
 
@@ -72,6 +70,24 @@ type CheckOutcome =
 	| { ok: true; detail: string }
 	| { ok: false; detail: string }
 
+type LegacyStateSnapshot = {
+	repository: string | null
+	baseBranch: string | null
+	queue: unknown[]
+}
+
+type ChainInstallResult = {
+	chain: Chain
+	dbPath: string
+	rootDir: string
+	chainDir: string
+	legacyStatePath: string
+	legacyStateFound: boolean
+	validLegacyItems: number
+	itemsInserted: number
+	itemsUpdated: number
+}
+
 function formatStatusRunner(runner: { kind: string; source: string; binary: string; model: string | null }): string {
 	return `${runner.kind} (${runner.source}, binary=${runner.binary}, model=${runner.model ?? "<default>"})`
 }
@@ -83,6 +99,10 @@ function fail(message: string): never {
 
 function info(message: string): void {
 	console.error(message)
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error)
 }
 
 function joinArgs(remaining: string[], index: number, inlineValue: string | null, name: string): { value: string; consumed: number } {
@@ -352,90 +372,6 @@ async function ensureSlashCommands(target: string, opts: { force: boolean; dryRu
 	return out
 }
 
-async function ensureRuntimeDirs(target: string, dryRun: boolean): Promise<string[]> {
-	const dirs = [
-		resolve(target, RUNTIME_DIR),
-		resolve(target, ISSUE_DIR_REL),
-		resolve(target, EVIDENCE_DIR_REL),
-		resolve(target, LOG_DIR_REL),
-	]
-	const created: string[] = []
-	for (const d of dirs) {
-		if (await pathExists(d)) continue
-		if (!dryRun) await mkdir(d, { recursive: true })
-		created.push(d)
-	}
-	return created
-}
-
-type ConfigMergeResult = {
-	wrote: boolean
-	previewBefore: string | null
-	previewAfter: string
-}
-
-async function mergeConfigJson(target: string, presetName: string, presetVersion: number, dryRun: boolean): Promise<ConfigMergeResult> {
-	const path = resolve(target, CONFIG_REL)
-	const existing = await readIfExists(path)
-	let parsed: Record<string, unknown>
-	if (existing === null) {
-		parsed = { version: 1 }
-	} else {
-		try {
-			const json: unknown = JSON.parse(existing)
-			if (typeof json !== "object" || json === null || Array.isArray(json)) {
-				fail(`${path}: 顶层必须是 JSON object`)
-			}
-			parsed = json as Record<string, unknown>
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error)
-			fail(`${path}: 解析失败 (${message})`)
-		}
-	}
-	if (typeof parsed.version !== "number") parsed.version = 1
-	parsed.preset = { name: presetName, version: presetVersion }
-	const desired = JSON.stringify(parsed, null, "\t") + "\n"
-	if (existing === desired) {
-		return { wrote: false, previewBefore: existing, previewAfter: desired }
-	}
-	if (!dryRun) {
-		await mkdir(dirname(path), { recursive: true })
-		await writeFile(path, desired)
-	}
-	return { wrote: true, previewBefore: existing, previewAfter: desired }
-}
-
-async function ensureStateJson(target: string, dryRun: boolean): Promise<{ wrote: boolean; path: string }> {
-	const path = resolve(target, STATE_REL)
-	const existing = await readIfExists(path)
-	if (existing !== null) return { wrote: false, path }
-	const skeleton = {
-		version: 1,
-		queue: [],
-		repository: null,
-		baseBranch: null,
-		recentRuns: [],
-		current: null,
-	}
-	const desired = JSON.stringify(skeleton, null, "\t") + "\n"
-	if (!dryRun) {
-		await mkdir(dirname(path), { recursive: true })
-		await writeFile(path, desired)
-	}
-	return { wrote: true, path }
-}
-
-async function ensureSharedMd(target: string, dryRun: boolean): Promise<{ wrote: boolean; path: string }> {
-	const path = resolve(target, SHARED_REL)
-	if (await pathExists(path)) return { wrote: false, path }
-	const stub = "# Shared durable context\n\n本文件由 plan / iter / review fragment 写入共享事实。install 落空壳。\n"
-	if (!dryRun) {
-		await mkdir(dirname(path), { recursive: true })
-		await writeFile(path, stub)
-	}
-	return { wrote: true, path }
-}
-
 async function ensureWorkflowMd(target: string, dryRun: boolean): Promise<{ wrote: boolean; path: string }> {
 	const path = resolve(target, WORKFLOW_REL)
 	if (await pathExists(path)) return { wrote: false, path }
@@ -445,6 +381,243 @@ async function ensureWorkflowMd(target: string, dryRun: boolean): Promise<{ wrot
 		await writeFile(path, template)
 	}
 	return { wrote: true, path }
+}
+
+async function readLegacyStateSnapshot(path: string): Promise<LegacyStateSnapshot | null> {
+	const raw = await readIfExists(path)
+	if (raw === null) return null
+	let parsed: unknown
+	try {
+		parsed = JSON.parse(raw)
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error)
+		fail(`${path}: legacy state.json 解析失败 (${message})`)
+	}
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+		fail(`${path}: legacy state.json 顶层必须是 object`)
+	}
+	const root = parsed as Record<string, unknown>
+	const queue = Array.isArray(root.queue) ? root.queue : []
+	return {
+		repository: typeof root.repository === "string" ? root.repository : null,
+		baseBranch: typeof root.baseBranch === "string" ? root.baseBranch : null,
+		queue,
+	}
+}
+
+async function ensureLoopDataWritable(rootDir: string): Promise<void> {
+	await mkdir(rootDir, { recursive: true })
+	await access(rootDir, fsConstants.W_OK)
+}
+
+export async function upsertTargetChain(input: {
+	target: string
+	preset: Preset
+	repository: string | null
+	baseBranch: string | null
+	dryRun: boolean
+}): Promise<ChainInstallResult> {
+	const root = loopDataRootPaths()
+	const chainName = defaultChainNameForTarget(input.target)
+	const legacyStatePath = resolve(input.target, STATE_REL)
+	const legacy = await readLegacyStateSnapshot(legacyStatePath)
+	const repository = input.repository ?? legacy?.repository ?? null
+	const baseBranch = input.baseBranch ?? legacy?.baseBranch ?? "main"
+	const chainPaths = chainRuntimePaths(root.rootDir, chainName)
+	if (input.dryRun) {
+		return {
+			chain: {
+				id: -1,
+				name: chainName,
+				preset: input.preset.name,
+				repository,
+				baseBranch,
+				umbrellaIssue: null,
+				umbrellaRepo: null,
+				status: "active",
+				completedAt: null,
+				createdAt: new Date().toISOString(),
+				metadata: { targetCwd: input.target },
+			},
+			dbPath: root.stateDbPath,
+			rootDir: root.rootDir,
+			chainDir: chainPaths.chainDir,
+			legacyStatePath,
+			legacyStateFound: legacy !== null,
+			validLegacyItems: countValidLegacyItems(legacy?.queue ?? []),
+			itemsInserted: 0,
+			itemsUpdated: 0,
+		}
+	}
+
+	await ensureLoopDataWritable(root.rootDir)
+	await ensureChainRuntimeSkeleton(chainPaths)
+	const store = openStateStore(root.stateDbPath)
+	try {
+		const chain = store.upsertChain(
+			chainName,
+			input.preset.name,
+			repository,
+			baseBranch,
+			null,
+			null,
+			{ targetCwd: input.target },
+		)
+		const importResult = legacy === null
+			? { validLegacyItems: 0, itemsInserted: 0, itemsUpdated: 0 }
+			: await importLegacyQueueIntoChain(store, chain.id, input.target, legacy.queue, chainPaths)
+		return {
+			chain,
+			dbPath: root.stateDbPath,
+			rootDir: root.rootDir,
+			chainDir: chainPaths.chainDir,
+			legacyStatePath,
+			legacyStateFound: legacy !== null,
+			...importResult,
+		}
+	} finally {
+		store.close()
+	}
+}
+
+async function importLegacyQueueIntoChain(
+	store: StateStore,
+	chainId: number,
+	target: string,
+	queue: unknown[],
+	chainPaths: ChainRuntimePaths,
+): Promise<{ validLegacyItems: number; itemsInserted: number; itemsUpdated: number }> {
+	let validLegacyItems = 0
+	let itemsInserted = 0
+	let itemsUpdated = 0
+	for (const entry of queue) {
+		const item = newItemFromLegacyQueueEntry(entry, target)
+		if (item === null) continue
+		await migrateLegacyItemArtifacts(item, target, chainPaths)
+		validLegacyItems++
+		const existing = store.listItems(chainId).find((candidate) => candidate.issue === item.issue && candidate.repoCwd === item.repoCwd)
+		if (existing === undefined) {
+			store.addItem(chainId, item)
+			itemsInserted++
+		} else {
+			store.updateItem(existing.id, itemPatchFromNewItem(item))
+			itemsUpdated++
+		}
+	}
+	return { validLegacyItems, itemsInserted, itemsUpdated }
+}
+
+async function migrateLegacyItemArtifacts(item: NewItem, target: string, chainPaths: ChainRuntimePaths): Promise<void> {
+	if (item.issueFile !== null && item.issueFile !== undefined) {
+		const source = resolve(target, item.issueFile)
+		const destName = basename(item.issueFile) || `${item.issue}.md`
+		const dest = resolve(chainPaths.issuesDir, destName)
+		const existing = await readIfExists(source)
+		await mkdir(dirname(dest), { recursive: true })
+		await writeFile(dest, existing ?? `# Issue ${item.issue}\n`)
+		item.issueFile = `issues/${destName}`
+	}
+	if (item.evidenceDir !== null && item.evidenceDir !== undefined) {
+		const destName = basename(item.evidenceDir) || `issue-${item.issue}`
+		const dest = resolve(chainPaths.evidenceDir, destName)
+		await mkdir(dest, { recursive: true })
+		item.evidenceDir = `evidence/${destName}`
+	}
+}
+
+function countValidLegacyItems(queue: unknown[]): number {
+	return queue.filter((entry) => newItemFromLegacyQueueEntry(entry, "") !== null).length
+}
+
+const LEGACY_QUEUE_BASE_KEYS = new Set([
+	"issue",
+	"status",
+	"attempts",
+	"title",
+	"priority",
+	"branch",
+	"pr",
+	"lastRunId",
+	"issueFile",
+	"evidenceDir",
+	"agentCwd",
+	"runner",
+	"extra",
+])
+
+function newItemFromLegacyQueueEntry(entry: unknown, target: string): NewItem | null {
+	if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return null
+	const root = entry as Record<string, unknown>
+	if (typeof root.issue !== "number" || !Number.isInteger(root.issue)) return null
+	const item: NewItem = {
+		issue: root.issue,
+		repoCwd: target,
+		status: typeof root.status === "string" ? root.status : "queued",
+		priority: typeof root.priority === "string" ? root.priority : "medium",
+		attempts: typeof root.attempts === "number" && Number.isInteger(root.attempts) ? root.attempts : 0,
+		title: nullableString(root.title) ?? null,
+		branch: nullableString(root.branch) ?? null,
+		pr: nullableInteger(root.pr) ?? null,
+		lastRunId: nullableString(root.lastRunId) ?? null,
+		issueFile: nullableString(root.issueFile) ?? null,
+		evidenceDir: nullableString(root.evidenceDir) ?? null,
+		agentCwd: nullableString(root.agentCwd) ?? null,
+		runner: root.runner === "claude" || root.runner === "codex" ? root.runner : null,
+		extra: legacyExtraFromQueueEntry(root),
+	}
+	return item
+}
+
+function itemPatchFromNewItem(item: NewItem): ItemPatch {
+	const patch: ItemPatch = {}
+	if (item.status !== undefined) patch.status = item.status
+	if (item.priority !== undefined) patch.priority = item.priority
+	if (item.attempts !== undefined) patch.attempts = item.attempts
+	if (item.title !== undefined) patch.title = item.title
+	if (item.branch !== undefined) patch.branch = item.branch
+	if (item.pr !== undefined) patch.pr = item.pr
+	if (item.lastRunId !== undefined) patch.lastRunId = item.lastRunId
+	if (item.issueFile !== undefined) patch.issueFile = item.issueFile
+	if (item.evidenceDir !== undefined) patch.evidenceDir = item.evidenceDir
+	if (item.agentCwd !== undefined) patch.agentCwd = item.agentCwd
+	if (item.runner !== undefined) patch.runner = item.runner
+	if (item.extra !== undefined) patch.extra = item.extra
+	return patch
+}
+
+function legacyExtraFromQueueEntry(entry: Record<string, unknown>): Record<string, JsonValue> {
+	const extra: Record<string, JsonValue> = isJsonObject(entry.extra) ? { ...entry.extra } : {}
+	for (const [key, value] of Object.entries(entry)) {
+		if (LEGACY_QUEUE_BASE_KEYS.has(key)) continue
+		if (isJsonValue(value)) extra[key] = value
+	}
+	return extra
+}
+
+function nullableString(value: unknown): string | null | undefined {
+	if (typeof value === "string") return value
+	if (value === null) return null
+	return undefined
+}
+
+function nullableInteger(value: unknown): number | null | undefined {
+	if (typeof value === "number" && Number.isInteger(value)) return value
+	if (value === null) return null
+	return undefined
+}
+
+function isJsonObject(value: unknown): value is Record<string, JsonValue> {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false
+	return Object.values(value).every(isJsonValue)
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
+	if (value === null) return true
+	const kind = typeof value
+	if (kind === "string" || kind === "boolean") return true
+	if (kind === "number") return Number.isFinite(value)
+	if (Array.isArray(value)) return value.every(isJsonValue)
+	return isJsonObject(value)
 }
 
 // ===================================================================
@@ -635,34 +808,34 @@ export async function runInstallCommand(rawArgs: string[]): Promise<void> {
 
 	// Layer A: project files
 	info("\n[Layer A] Target 项目文件")
-	const dirs = await ensureRuntimeDirs(args.target, args.dryRun)
-	for (const d of dirs) info(`  ${args.dryRun ? "would-create" : "已创建"} 目录: ${d}`)
-	if (dirs.length === 0) info("  目录已就位（无新建）")
-
 	const slashCmds = await ensureSlashCommands(args.target, { force: args.force, dryRun: args.dryRun })
 	for (const [fname, result] of Object.entries(slashCmds)) info(`  ${result === "wrote" ? (args.dryRun ? "would-write" : "已写入") : "未变化"}: ${SLASH_COMMANDS_REL}/${fname}`)
 
-	const configMerge = await mergeConfigJson(args.target, preset.name, preset.version, args.dryRun)
-	info(`  ${configMerge.wrote ? (args.dryRun ? "would-write" : "已写入") : "未变化"}: ${CONFIG_REL}`)
-	if (args.dryRun && configMerge.wrote) {
-		info("  --- dry-run config 预览 (before → after) ---")
-		info(`  before: ${configMerge.previewBefore ?? "<missing>"}`)
-		info(`  after:  ${configMerge.previewAfter.trim()}`)
-	}
-
-	const stateResult = await ensureStateJson(args.target, args.dryRun)
-	info(`  ${stateResult.wrote ? (args.dryRun ? "would-write" : "已写入") : "未变化"}: ${STATE_REL}`)
-
-	const sharedResult = await ensureSharedMd(args.target, args.dryRun)
-	info(`  ${sharedResult.wrote ? (args.dryRun ? "would-write" : "已写入") : "未变化"}: ${SHARED_REL}`)
-
 	const workflowResult = await ensureWorkflowMd(args.target, args.dryRun)
 	info(`  ${workflowResult.wrote ? (args.dryRun ? "would-write" : "已写入") : "未变化（保留 operator 自定义）"}: ${WORKFLOW_REL}`)
+	info(`  INFO: target-local runtime 不再由 install 创建: ${RUNTIME_DIR}`)
+
+	const legacyState = await readLegacyStateSnapshot(resolve(args.target, STATE_REL))
+	const repoForTarget = args.repo ?? legacyState?.repository ?? (await inferRepoFromGit(args.target))
+	const chainResult = await upsertTargetChain({
+		target: args.target,
+		preset,
+		repository: repoForTarget,
+		baseBranch: legacyState?.baseBranch ?? null,
+		dryRun: args.dryRun,
+	})
+	info(`  ${args.dryRun ? "would-upsert" : "OK"}: chain ${chainResult.chain.name} → ${chainResult.dbPath}`)
+	info(`  ${args.dryRun ? "would-ensure" : "OK"}: chain runtime skeleton ${chainResult.chainDir}`)
+	if (chainResult.legacyStateFound) {
+		info(`  OK: legacy state 作为迁移源: ${chainResult.legacyStatePath}`)
+		info(`  OK: legacy items valid=${chainResult.validLegacyItems}, inserted=${chainResult.itemsInserted}, updated=${chainResult.itemsUpdated}`)
+	} else {
+		info(`  OK: no legacy state source (${chainResult.legacyStatePath})`)
+	}
 
 	// Layer B: GitHub labels
 	info("\n[Layer B] Target GitHub 状态")
-	const repoForLabels = args.repo ?? (await inferRepoFromGit(args.target))
-	const labelOutcomes = await ensureGithubLabels(repoForLabels, args.dryRun)
+	const labelOutcomes = await ensureGithubLabels(repoForTarget, args.dryRun)
 	for (const o of labelOutcomes) {
 		const desc = o.status === "failed" ? `FAIL (${o.reason})` : o.status
 		info(`  ${o.name}: ${desc}`)
@@ -719,42 +892,35 @@ export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
 	const aChecks: { label: string; check: Promise<boolean> }[] = [
 		{ label: `${SLASH_COMMANDS_REL}/dev-plan.md`, check: pathExists(resolve(args.target, SLASH_COMMANDS_REL, "dev-plan.md")) },
 		{ label: `${SLASH_COMMANDS_REL}/dev-loop.md`, check: pathExists(resolve(args.target, SLASH_COMMANDS_REL, "dev-loop.md")) },
-		{ label: CONFIG_REL, check: pathExists(resolve(args.target, CONFIG_REL)) },
-		{ label: STATE_REL, check: pathExists(resolve(args.target, STATE_REL)) },
 		{ label: WORKFLOW_REL, check: pathExists(resolve(args.target, WORKFLOW_REL)) },
-		{ label: ISSUE_DIR_REL, check: pathExists(resolve(args.target, ISSUE_DIR_REL)) },
-		{ label: EVIDENCE_DIR_REL, check: pathExists(resolve(args.target, EVIDENCE_DIR_REL)) },
-		{ label: LOG_DIR_REL, check: pathExists(resolve(args.target, LOG_DIR_REL)) },
 	]
-	let aFail = 0
 	for (const c of aChecks) {
 		const ok = await c.check
 		info(`  ${ok ? "OK" : "FAIL"}: ${c.label}`)
-		if (!ok) aFail++
 	}
+	info(`  INFO: legacy runtime optional: ${RUNTIME_DIR}`)
 
-	// Check config has preset field
-	const configPath = resolve(args.target, CONFIG_REL)
-	const configRaw = await readIfExists(configPath)
-	if (configRaw !== null) {
-		try {
-			const parsed: unknown = JSON.parse(configRaw)
-			const root = (parsed ?? {}) as Record<string, unknown>
-			const preset = root.preset
-			if (preset === undefined || preset === null) {
-				info("  FAIL: config 缺 preset 字段（install 会补）")
-				aFail++
-			} else if (typeof preset === "object" && !Array.isArray(preset)) {
-				const p = preset as Record<string, unknown>
-				info(`  OK: config.preset = { name: ${JSON.stringify(p.name)}, version: ${JSON.stringify(p.version)} }`)
-			} else if (typeof preset === "string") {
-				info(`  WARN: config.preset = ${JSON.stringify(preset)}（string 形式，建议升级为 { name, version }）`)
-			}
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error)
-			info(`  FAIL: config 解析失败 (${message})`)
-			aFail++
+	const root = loopDataRootPaths()
+	try {
+		await ensureLoopDataWritable(root.rootDir)
+		info(`  OK: loop-data root writable: ${root.rootDir}`)
+	} catch (error) {
+		info(`  FAIL: loop-data root writable: ${root.rootDir} (${errorMessage(error)})`)
+	}
+	const chainName = defaultChainNameForTarget(args.target)
+	const store = openStateStore(root.stateDbPath)
+	try {
+		const chain = store.getChain(chainName)
+		if (chain === null) {
+			info(`  FAIL: chain row missing: ${chainName} (${root.stateDbPath})`)
+		} else {
+			info(`  OK: chain row ${chain.name} preset=${chain.preset}, repo=${chain.repository ?? "<none>"}, base=${chain.baseBranch ?? "<none>"}`)
 		}
+		const chainPaths = chainRuntimePaths(root.rootDir, chainName)
+		if (await pathExists(chainPaths.chainDir)) info(`  OK: chain runtime skeleton ${chainPaths.chainDir}`)
+		else info(`  FAIL: chain runtime skeleton missing ${chainPaths.chainDir}`)
+	} finally {
+		store.close()
 	}
 
 	info("\n[Layer B] Target GitHub 状态")

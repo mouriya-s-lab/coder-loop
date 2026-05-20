@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
-import { isAbsolute, resolve } from "node:path"
+import { basename, isAbsolute, resolve } from "node:path"
 
 export const LOOP_DATA_ROOT_ENV = "CODER_LOOP_DATA_ROOT"
 export const DEFAULT_LOOP_DATA_ROOT = resolve(homedir(), "Ext/loop-data")
@@ -77,6 +77,10 @@ export async function ensureChainRuntimeSkeleton(paths: ChainRuntimePaths): Prom
 
 export function sanitizeChainName(value: string): string {
 	return sanitizeRuntimeSegment(value, "chain name")
+}
+
+export function defaultChainNameForTarget(targetCwd: string): string {
+	return sanitizeChainName(basename(resolve(targetCwd)) || "default")
 }
 
 function sanitizeRuntimeSegment(value: string, label: string): string {
