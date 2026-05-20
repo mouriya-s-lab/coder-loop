@@ -124,6 +124,15 @@ export type StateStore = {
 		umbrellaRepo?: string | null,
 		metadata?: JsonObject,
 	) => Chain
+	upsertChain: (
+		name: string,
+		preset: string,
+		repository?: string | null,
+		baseBranch?: string | null,
+		umbrellaIssue?: number | null,
+		umbrellaRepo?: string | null,
+		metadata?: JsonObject,
+	) => Chain
 	getChain: (idOrName: number | string) => Chain | null
 	listChains: () => Chain[]
 	listActiveChains: () => Chain[]
@@ -201,6 +210,7 @@ export function openStateStore(path: string = DEFAULT_STATE_DB_PATH): StateStore
 		db,
 		close: () => db.close(),
 		createChain: (...args) => createChain(db, ...args),
+		upsertChain: (...args) => upsertChain(db, ...args),
 		getChain: (idOrName) => getChain(db, idOrName),
 		listChains: () => listChains(db),
 		listActiveChains: () => listActiveChains(db),
@@ -297,6 +307,39 @@ export function createChain(
 			RETURNING *
 		`).get(name, preset, repository, baseBranch, umbrellaIssue, umbrellaRepo, encodeJsonObject(metadata))
 		return chainFromRow(expectRow<ChainRow>(row, "createChain"))
+	})()
+}
+
+export function upsertChain(
+	db: Database,
+	name: string,
+	preset: string,
+	repository: string | null = null,
+	baseBranch: string | null = null,
+	umbrellaIssue: number | null = null,
+	umbrellaRepo: string | null = null,
+	metadata: JsonObject = {},
+): Chain {
+	return db.transaction(() => {
+		const existing = getChain(db, name)
+		if (existing === null) {
+			return createChain(db, name, preset, repository, baseBranch, umbrellaIssue, umbrellaRepo, metadata)
+		}
+		const row = db.query(`
+			UPDATE chains
+			SET preset = ?, repository = ?, base_branch = ?, umbrella_issue = ?, umbrella_repo = ?, metadata = ?
+			WHERE id = ?
+			RETURNING *
+		`).get(
+			preset,
+			repository,
+			baseBranch,
+			umbrellaIssue,
+			umbrellaRepo,
+			encodeJsonObject(metadata),
+			existing.id,
+		)
+		return chainFromRow(expectRow<ChainRow>(row, "upsertChain"))
 	})()
 }
 
