@@ -182,8 +182,8 @@ describe("state-db", () => {
 				phase: "iteration",
 				runner: "codex",
 				startedAt: "2026-05-20T00:00:00.000Z",
-				logPath: ".coder-loop/runtime/logs/run-1.jsonl",
-				statusPath: ".coder-loop/runtime/logs/run-1.status.json",
+				logPath: "chains/chain/runs/run-1/iteration/stdout.jsonl",
+				statusPath: "chains/chain/runs/run-1/iteration/status.json",
 			})
 
 			expect(recorded.finishedAt).toBeNull()

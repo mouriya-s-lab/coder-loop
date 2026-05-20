@@ -57,7 +57,7 @@ You MUST NOT:
 - reorder, prepend, or finalize queue items in `{{STATE_FILE}}`;
 - mark work `done`, `moot`, or final `blocked` in `{{STATE_FILE}}`;
 - treat human review as the loop review stage;
-- stage `.coder-loop/runtime/`, `.dev-loop`, or `.dev-trace.txt` into feature commits.
+- stage `.coder-loop/runtime/` or `.dev-loop` into feature commits.
 
 Classify this spawn from the bound inputs (the orchestrator only tells you whether the run ID was freshly generated or resumed; the iteration / retry / recovery distinction is derived here, not injected):
 

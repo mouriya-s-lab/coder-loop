@@ -11,7 +11,7 @@ Record the planning outcome in a form the operator (and any future planning re-i
 
 ## Procedure
 
-1. Write `{{TARGET_CWD}}/.coder-loop/runtime/logs/<runId>.plan.handoff.md` (or append to `<runId>.plan.txt` — the slash command shell will decide the exact path).
+1. Write under `{{LOG_DIR}}/<runId>/plan/` (or the equivalent run-local plan handoff path chosen by the slash command shell).
 
 2. Required handoff sections:
 

@@ -22,7 +22,8 @@ requirements may all differ.
 - Queue/order/state: `.coder-loop/runtime/state.json`
 - Current issue handoff: `.coder-loop/runtime/issues/<issue>.md`
 - Shared durable facts: `.coder-loop/runtime/shared.md`
-- Runtime evidence/logs: `.coder-loop/runtime/evidence/` and `.coder-loop/runtime/logs/`
+- Runtime evidence: `.coder-loop/runtime/evidence/`
+- Run logs: `chains/<chain>/runs/<runId>/` under `CODER_LOOP_DATA_ROOT`
 - Live GitHub issue/PR state verifies reality.
 - `CLAUDE.md` is project reference only. It is not the loop workflow.
 
@@ -39,7 +40,7 @@ If this workflow conflicts with target `CLAUDE.md` about loop process, queue sta
 - Do not mark an issue done without credible evidence.
 - Review agent is the final gate: accepted PR-backed work is merged by review; retry/blocked/skipped/no-code decisions are classified by review.
 - Iteration agent must never merge PRs or close issues.
-- Do not stage `.coder-loop/`, `.dev-loop`, `.dev-trace.txt`, `.claude/scheduled_tasks.json`, runtime logs, or untracked runtime evidence into feature PRs.
+- Do not stage `.coder-loop/`, `.dev-loop`, `.claude/scheduled_tasks.json`, runtime logs, or untracked runtime evidence into feature PRs.
 
 ## Required PR body skeleton
 

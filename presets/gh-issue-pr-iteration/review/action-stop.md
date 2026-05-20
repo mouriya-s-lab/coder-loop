@@ -10,7 +10,7 @@ Use this only when:
 
 - no actionable queue item exists and global assessment confirms the loop is complete;
 - review infrastructure is broken and state cannot be safely audited or updated;
-- the trace file or required runtime files are unavailable and continuing would create a tight loop or corrupt state;
+- the iteration stdout JSONL or required runtime files are unavailable and continuing would create a tight loop or corrupt state;
 - a required GitHub side effect failed before durable feedback/closure/linking was published, so local state must not be advanced as if the side effect succeeded.
 
 Do not use stop for bad code, weak evidence, failed tests, PR conflicts, pending checks, merge failure, or unproven blocked/skipped claims. Those are retry or blocked.

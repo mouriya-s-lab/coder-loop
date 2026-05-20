@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This fragment defines how `.coder-loop/runtime/state.json`, `.dev-loop`, `.dev-trace.txt`, and handoff files are used.
+This fragment defines how `.coder-loop/runtime/state.json`, `.dev-loop`, per-run stdout JSONL, and handoff files are used.
 
 ## Queue state
 
@@ -16,11 +16,11 @@ The orchestrator selects an actionable `state.current` item before the front of 
 ## Runtime files
 
 - `.dev-loop` is the loop on-switch. Review removes it only when no actionable work remains or review infrastructure is broken.
-- `.dev-trace.txt` is per-run trace output for review. It is not durable task history.
+- Legacy `.dev-trace.txt` is not a review input; review reads `chains/<chain>/runs/<runId>/iteration/stdout.jsonl`.
 - `.coder-loop/runtime/issues/<issue>.md` is append-only handoff for the selected issue.
 - `.coder-loop/runtime/shared.md` stores only stable, source-cited cross-issue facts.
 - `.coder-loop/workflow.md`, `.coder-loop/prompts/`, and `.coder-loop/templates/` are committed target policy/configuration when present.
-- `.coder-loop/runtime/`, `.dev-loop`, and `.dev-trace.txt` must not be staged into feature commits.
+- `.coder-loop/runtime/` and `.dev-loop` must not be staged into feature commits.
 
 ## Final state invariants
 

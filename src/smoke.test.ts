@@ -21,6 +21,7 @@ type StatusSmokeSnapshot = {
 function claudeHostEnv(): NodeJS.ProcessEnv {
 	const env: NodeJS.ProcessEnv = { ...process.env }
 	env.CLAUDECODE = "1"
+	env.CODER_LOOP_DATA_ROOT = resolve(REPO_ROOT, ".cache/smoke-loop-data")
 	delete env["CODEX_SHELL"]
 	delete env["CODEX_THREAD_ID"]
 	delete env["CODEX_INTERNAL_ORIGINATOR_OVERRIDE"]
@@ -805,6 +806,117 @@ describe("smoke: queue unblock CLI", () => {
 })
 
 describe("smoke: phase runner selection", () => {
+	test("per-run layout writes events and phase artifacts under chain runs", async () => {
+		const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-per-run-layout-"))
+		const root = resolve(REPO_ROOT, ".cache", `smoke-per-run-layout-${Date.now()}-${Math.random().toString(16).slice(2)}`)
+		const runtime = resolve(dir, ".coder-loop/runtime")
+		const presetDir = resolve(dir, ".coder-loop/per-run-layout-preset")
+		await mkdir(resolve(runtime, "issues"), { recursive: true })
+		await mkdir(resolve(runtime, "evidence/alpha"), { recursive: true })
+		await mkdir(resolve(runtime, "logs"), { recursive: true })
+		await mkdir(presetDir, { recursive: true })
+		await writeFile(resolve(dir, ".coder-loop/workflow.md"), "# placeholder workflow\n")
+		await writeFile(resolve(runtime, "shared.md"), "# placeholder shared context\n")
+
+		await writeFile(resolve(presetDir, "preset.toml"), [
+			`name = "per-run-layout-smoke"`,
+			`version = 1`,
+			``,
+			`[item]`,
+			`idField = "id"`,
+			``,
+			`[statuses]`,
+			`continuable = ["pending"]`,
+			`terminal = ["done"]`,
+			``,
+			`[[phases]]`,
+			`name = "iteration"`,
+			`prompt = "iter-entry.md"`,
+			`  [phases.variables]`,
+			`  ITEM_ID = "item.id"`,
+			`  RUN_ID = "runtime.runId"`,
+			``,
+			`[[phases]]`,
+			`name = "review"`,
+			`prompt = "review-entry.md"`,
+			`  [phases.variables]`,
+			`  ITEM_ID = "item.id"`,
+			`  RUN_ID = "runtime.runId"`,
+			`  STATE_FILE = "runtime.statePath"`,
+			``,
+			`[agent]`,
+			`binary = "claude"`,
+			`extraArgs = []`,
+			``,
+		].join("\n"))
+		await writeFile(resolve(presetDir, "iter-entry.md"), "ITER {{ITEM_ID}} {{RUN_ID}}\n")
+		await writeFile(resolve(presetDir, "review-entry.md"), "REVIEW {{ITEM_ID}} {{RUN_ID}} {{STATE_FILE}}\n")
+
+		const fakeCodex = resolve(dir, "fake-codex.sh")
+		const fakeClaude = resolve(dir, "fake-claude.sh")
+		await writeFile(fakeCodex, [
+			`#!/usr/bin/env bash`,
+			`echo '{"type":"thread.started","thread_id":"thread-layout-smoke"}'`,
+			`echo '{"type":"item.completed","item":{"type":"agent_message","text":"ITERATION SUMMARY: done"}}'`,
+			`exit 0`,
+			``,
+		].join("\n"), { mode: 0o755 })
+		await writeFile(fakeClaude, [
+			`#!/usr/bin/env bash`,
+			`node -e 'const fs = require("fs"); const path = process.argv[1]; const state = JSON.parse(fs.readFileSync(path, "utf8")); state.queue[0].status = "done"; state.current = null; fs.writeFileSync(path, JSON.stringify(state, null, "\\t") + "\\n");' ${JSON.stringify(resolve(runtime, "state.json"))}`,
+			`echo 'REVIEW SUMMARY: verdict=accepted; issue=#alpha; actionable=0; reason=fixture'`,
+			`exit 0`,
+			``,
+		].join("\n"), { mode: 0o755 })
+
+		await writeFile(resolve(runtime, "config.json"), JSON.stringify({
+			presetPath: presetDir,
+			codex: { binary: fakeCodex, extraArgs: [] },
+			claude: { binary: fakeClaude, extraArgs: [] },
+		}, null, 2))
+		await writeFile(resolve(runtime, "state.json"), JSON.stringify({
+			version: 1,
+			queue: [{
+				id: "alpha",
+				status: "pending",
+				issueFile: ".coder-loop/runtime/issues/alpha.md",
+				evidenceDir: ".coder-loop/runtime/evidence/alpha",
+			}],
+			recentRuns: [],
+			current: null,
+		}, null, 2))
+		await writeFile(resolve(runtime, "issues/alpha.md"), "# alpha\n")
+
+		try {
+			const proc = Bun.spawnSync({
+				cmd: ["bun", LOOP_ENTRY, "--target-cwd", dir, "--once"],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+				env: { ...claudeHostEnv(), CODER_LOOP_DATA_ROOT: root },
+			})
+			expect(new TextDecoder().decode(proc.stderr)).toContain("Iteration 1 (work) complete.")
+			expect(proc.exitCode).toBe(0)
+			const state = JSON.parse(await readFile(resolve(runtime, "state.json"), "utf-8"))
+			const runId = state.queue[0].lastRunId
+			expect(typeof runId).toBe("string")
+			const rootEntries = await readdir(root)
+			expect(rootEntries).toContain("chains")
+			expect(rootEntries).not.toContain("logs")
+			expect(rootEntries).not.toContain("events")
+			const runDir = resolve(root, "chains", defaultChainNameForTarget(dir), "runs", runId)
+			expect(await pathExists(resolve(runDir, "events.jsonl"))).toBe(true)
+			for (const phase of ["iteration", "review"]) {
+				expect(await pathExists(resolve(runDir, phase, "stdout.jsonl"))).toBe(true)
+				expect(await pathExists(resolve(runDir, phase, "stderr.txt"))).toBe(true)
+				expect(await pathExists(resolve(runDir, phase, "status.json"))).toBe(true)
+				expect(await pathExists(resolve(runDir, phase, "sessions.jsonl"))).toBe(true)
+			}
+		} finally {
+			await rm(root, { recursive: true, force: true })
+		}
+	}, 15_000)
+
 	test("default iteration runner uses Codex while review stays Claude", async () => {
 		const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-review-runner-"))
 		const runtime = resolve(dir, ".coder-loop/runtime")

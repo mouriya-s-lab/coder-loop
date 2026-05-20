@@ -11,6 +11,7 @@ import {
 	loopDataRootPaths,
 	LOOP_DATA_ROOT_ENV,
 	resolveLoopDataRoot,
+	runRuntimePaths,
 	sanitizeChainName,
 } from "./runtime-paths"
 import { openStateDb } from "./state-db"
@@ -48,6 +49,16 @@ describe("runtime-paths", () => {
 			expect(paths.sharedPath).toBe(resolve(root, "chains/release-train/shared.md"))
 			expect(paths.runDir("run:1")).toBe(resolve(root, "chains/release-train/runs/run-1"))
 			expect(paths.daemonRunDir("2026-05-20T21:37:28Z")).toBe(resolve(root, "chains/release-train/daemon/2026-05-20T21-37-28Z"))
+			const runPaths = runRuntimePaths(paths.runsDir, "run:1")
+			expect(runPaths.eventsPath).toBe(resolve(root, "chains/release-train/runs/run-1/events.jsonl"))
+			expect(runPaths.phasePaths("iteration")).toEqual({
+				phaseDir: resolve(root, "chains/release-train/runs/run-1/iteration"),
+				latestPath: resolve(root, "chains/release-train/runs/run-1/iteration/latest.md"),
+				stdoutPath: resolve(root, "chains/release-train/runs/run-1/iteration/stdout.jsonl"),
+				stderrPath: resolve(root, "chains/release-train/runs/run-1/iteration/stderr.txt"),
+				statusPath: resolve(root, "chains/release-train/runs/run-1/iteration/status.json"),
+				sessionsPath: resolve(root, "chains/release-train/runs/run-1/iteration/sessions.jsonl"),
+			})
 			expect(existsSync(paths.sharedPath)).toBe(true)
 			expect(await readFile(paths.sharedPath, "utf-8")).toBe("# Shared durable context\n")
 			expect(existsSync(paths.issuesDir)).toBe(true)
