@@ -130,7 +130,7 @@ async function makePostReviewTriggerTarget(reviewStatus: "blocked" | "done"): Pr
 	].join("\n"), { mode: 0o755 })
 	await writeFile(fakeClaude, [
 		`#!/usr/bin/env bash`,
-		`node -e 'const fs = require("fs"); const [path, status] = process.argv.slice(1); const state = JSON.parse(fs.readFileSync(path, "utf8")); state.queue[0].status = status; state.current = null; fs.writeFileSync(path, JSON.stringify(state, null, "\\t") + "\\n");' ${JSON.stringify(resolve(runtime, "state.json"))} ${JSON.stringify(reviewStatus)}`,
+		`node -e 'const fs = require("fs"); const [path, status] = process.argv.slice(1); const state = JSON.parse(fs.readFileSync(path, "utf8")); state.queue[0].status = status; if (status === "blocked") { state.queue[0].blockerRepo = "owner/dependency"; state.queue[0].blockerRef = "#267"; } else { delete state.queue[0].blockerRepo; delete state.queue[0].blockerRef; } state.current = null; fs.writeFileSync(path, JSON.stringify(state, null, "\\t") + "\\n");' ${JSON.stringify(resolve(runtime, "state.json"))} ${JSON.stringify(reviewStatus)}`,
 		`echo 'REVIEW SUMMARY: verdict=${reviewStatus === "blocked" ? "blocked" : "accepted"}; issue=#alpha; actionable=0; reason=fixture'`,
 		`exit 0`,
 		``,
@@ -350,6 +350,9 @@ describe("smoke: post-review phase triggers", () => {
 		expect(proc.exitCode).toBe(0)
 		expect(stderr).toContain("Starting trigger phase responder after review")
 		expect(await readFile(responderLog, "utf-8")).toBe("responder\n")
+		const state = JSON.parse(await readFile(resolve(dir, ".coder-loop/runtime/state.json"), "utf-8"))
+		expect(state.queue[0].blockerRepo).toBe("owner/dependency")
+		expect(state.queue[0].blockerRef).toBe("#267")
 	})
 
 	test("skips a trigger phase when review changes the item to a different status", async () => {
@@ -365,6 +368,9 @@ describe("smoke: post-review phase triggers", () => {
 		expect(proc.exitCode).toBe(0)
 		expect(stderr).toContain("Skipping trigger phase responder: status=done, wanted=blocked")
 		expect(await pathExists(responderLog)).toBe(false)
+		const state = JSON.parse(await readFile(resolve(dir, ".coder-loop/runtime/state.json"), "utf-8"))
+		expect(state.queue[0].blockerRepo).toBeUndefined()
+		expect(state.queue[0].blockerRef).toBeUndefined()
 	})
 })
 

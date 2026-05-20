@@ -1123,6 +1123,19 @@ describe("renderPrompt with bundled preset", () => {
 		expect(actionStop).toContain("Do not mark the selected issue `done`")
 	})
 
+	test("blocked review path requires structured blocker metadata", async () => {
+		const actionBlocked = await readFile(resolve(BUNDLED_PRESET_DIR, "review/action-blocked.md"), "utf-8")
+		const updateState = await readFile(resolve(BUNDLED_PRESET_DIR, "review/update-state.md"), "utf-8")
+
+		expect(actionBlocked).toContain("Standard blocker metadata")
+		expect(actionBlocked).toContain("blockerRepo: owner/repo")
+		expect(actionBlocked).toContain("blockerRef: #123")
+		expect(updateState).toContain("Only the `blocked` transition writes blocker metadata")
+		expect(updateState).toContain("top-level JSON fields on each queue item")
+		expect(updateState).toContain("do not create a literal nested `extra` object")
+		expect(updateState).toContain("do not add `blockerRepo` or `blockerRef`")
+	})
+
 	test("review summary parser extracts stop verdict from raw and stream-json runner output", () => {
 		expect(parseReviewSummaryVerdict("REVIEW SUMMARY: verdict=stop; issue=#114; actionable=1; reason=review infrastructure broken")).toBe("stop")
 		expect(parseReviewSummaryVerdict(JSON.stringify({
