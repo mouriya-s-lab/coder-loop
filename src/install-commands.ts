@@ -37,7 +37,7 @@ const KIND_LABELS = [
 ] as const
 
 const WRITING_ISSUE_SKILL_REL = ".claude/skills/writing-issue/SKILL.md"
-const WRITING_ISSUE_MARKER = "preset contract is the override layer"
+const WRITING_ISSUE_MARKER = "docs/reserved-strings.md"
 
 const RUNTIME_DIR = ".coder-loop/runtime"
 const CONFIG_REL = `${RUNTIME_DIR}/config.json`
@@ -305,7 +305,7 @@ async function checkLayerD(): Promise<{ status: SkillCheckStatus; detail: string
 		return { status: "missing", detail: `${path} 不存在`, path }
 	}
 	if (!content.includes(WRITING_ISSUE_MARKER)) {
-		return { status: "outdated", detail: `${path} 缺少新版 marker "${WRITING_ISSUE_MARKER}"（PR #48 前版本）`, path }
+		return { status: "outdated", detail: `${path} 缺少新版 marker "${WRITING_ISSUE_MARKER}"（缺少 engine reserved strings issue-writing rule）`, path }
 	}
 	return { status: "ok", detail: `${path} 含新版 marker`, path }
 }

@@ -29,6 +29,8 @@ A test for "is this atomic": can you write a single coherent `## Why` paragraph 
 
 **Forbidden in title and body:** internal IDs like `int-foo-bar` or `int-foo-sub-N-slug`, sub_new_id strings, source-tree paths like `intermediates/<id>/...`, working-group names, agent IDs. The operator looks at the issue body on GitHub directly — internal scaffolding is noise that survives no review. If the body needs to reference a sibling sub-proposal, use its title or its GitHub issue number after creation, not its draft id.
 
+**Forbidden in issue bodies/comments: engine reserved strings.** Before posting or updating a GitHub issue body or issue comment, check `docs/reserved-strings.md` in `mouriya-s-lab/coder-loop` (or the target repo's equivalent registry, if it has one). Do not write any listed reserved string verbatim in GitHub issue text. Link to the registry or split the token in prose when the string itself must be discussed. This prevents the summary watchdog from arming when an agent reads issue context.
+
 **Forbidden in body: future-tense `[ ]` Acceptance checklist for retroactive work.** Most umbrellas in this codebase are retroactive — the work has already merged. Writing an Acceptance section with unchecked boxes is misleading: the operator can't tick them because the boxes were satisfied by PRs that already merged, and there's nothing left to verify. Use a How section in prose to describe what the work actually does, plus an Implementing-PRs section listing the merged PRs. Skip Acceptance entirely. Future-tense checklists only belong on issues for work that has not yet started.
 
 **Fresh implementation issues need executable checkpoints, not prose acceptance.** When the issue is for future work, the body must be sufficient for an agent to implement and verify without rereading the design doc. Use `## 目标`, `## 上下文`, `## 问题`, `## 预期结果`, `## 约束`, `## 验收标准`, optional `## 继承验证义务`, and `## 依赖关系`. Acceptance criteria are checkpoint rows with dimension, command, environment, and expected result — not vague `[ ] tests pass` checkboxes.
@@ -263,6 +265,7 @@ Run through this list against the draft body before `gh issue create`:
 - 全 body 中文（除 mechanical token：code identifier、`<repo>#<N>`、文件路径、命令）。
 - retroactive 的话第一段写了「filed retroactively to umbrella work that already landed」+ 时间窗口。
 - 标题和 body 没出现 `int-...` / `sub_new_id` / 内部草稿 id。
+- 已按 `docs/reserved-strings.md` 检查 issue body / comment；没有把 listed engine reserved strings verbatim 写进 GitHub issue text。
 - 没有 retroactive 的 `## Acceptance` 段（unchecked checkbox 是误导）。
 - 引用别的 issue 时 `#N` 真存在；不确定 `gh issue view <repo>#N` 验过再放。
 - 引用 child PR / issue 时数字对得上 GitHub 上实际编号。
