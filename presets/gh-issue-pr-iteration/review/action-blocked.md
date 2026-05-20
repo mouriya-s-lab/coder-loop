@@ -21,6 +21,19 @@ Weak evidence, failed tests, bad code, PR conflicts, pending checks, or missing 
 
 Comment on the PR if one exists and the blocker concerns implementation/verification of that PR; otherwise comment on the issue.
 
+## Standard blocker metadata
+
+The blocker comment must include a machine-readable metadata block:
+
+```text
+blockerRepo: owner/repo
+blockerRef: #123
+```
+
+Use `blockerRepo` for the blocking repository in `owner/repo` format. If the blocker is in the current repository, set it to the current `REPO` value.
+
+Use `blockerRef` for the blocking issue reference (`#123` or `owner/repo#123`) when a concrete issue exists. If the blocker is an environmental condition rather than an issue, use a concise condition string, for example `macOS DirectoryServices user lookup unavailable`.
+
 ## Output verdict
 
 Choose exactly one:

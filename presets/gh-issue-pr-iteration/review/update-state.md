@@ -13,9 +13,20 @@ For the selected queue item:
 - `accepted_pr` → only after PR merge and issue close succeeded: set `status: "done"`, set PR number if known, clear `current`.
 - `accepted_no_pr` → only after issue close succeeded: set `status: "done"`, clear `current`.
 - `skip` → only after issue close succeeded: set `status: "moot"`, clear `current`.
-- `blocked` → set `status: "blocked"`, record blocker in handoff, clear `current`.
+- `blocked` → set `status: "blocked"`, write structured blocker metadata to the selected queue item, record blocker in handoff, clear `current`.
 
 If merge fails, issue close fails, the GitHub issue remains open, checks/mergeability are not green, or parent expansion fails, keep the issue actionable with exact feedback.
+
+## Blocked metadata
+
+Only the `blocked` transition writes blocker metadata. For retry, expanded-parent, accepted, accepted-no-PR, and skip transitions, do not add `blockerRepo` or `blockerRef`; if stale blocker metadata is present while moving the item to a non-blocked status, remove those stale fields.
+
+When applying the `blocked` transition, update the selected queue item in `state.json` with:
+
+- `blockerRepo`: the blocking repository in `owner/repo` format. If the blocker is inside the current repository, this may be omitted or set to the current `REPO`.
+- `blockerRef`: the blocking issue reference such as `#267`, `owner/repo#267`, or a concise condition string when the blocker is not a concrete issue.
+
+`state.json` stores queue-item extra fields as top-level JSON fields on each queue item. Add `blockerRepo` and `blockerRef` at the selected queue item's top level so they deserialize into `QueueItem.extra`; do not create a literal nested `extra` object in the file.
 
 ## Expanded parent queue rules
 
