@@ -337,6 +337,126 @@ describe("smoke: phase runner selection", () => {
 		expect(modelIdx).toBeGreaterThanOrEqual(0)
 		expect(claudeArgs[modelIdx + 1]).toBe("claude-opus-4-7")
 	}, 15_000)
+
+	async function makeTwoPhaseReviewTarget(reviewScript: readonly string[], prefix: string): Promise<string> {
+		const dir = await mkdtemp(resolve(tmpdir(), prefix))
+		const runtime = resolve(dir, ".coder-loop/runtime")
+		const presetDir = resolve(dir, ".coder-loop/two-phase-stop-preset")
+		await mkdir(resolve(runtime, "issues"), { recursive: true })
+		await mkdir(resolve(runtime, "evidence/alpha"), { recursive: true })
+		await mkdir(resolve(runtime, "logs"), { recursive: true })
+		await mkdir(presetDir, { recursive: true })
+		await writeFile(resolve(dir, ".coder-loop/workflow.md"), "# placeholder workflow\n")
+		await writeFile(resolve(runtime, "shared.md"), "# placeholder shared context\n")
+
+		await writeFile(resolve(presetDir, "preset.toml"), [
+			`name = "two-phase-stop-smoke"`,
+			`version = 1`,
+			`description = "Two phase stop smoke preset."`,
+			``,
+			`[item]`,
+			`idField = "id"`,
+			``,
+			`[statuses]`,
+			`continuable = ["pending"]`,
+			`terminal = ["done"]`,
+			``,
+			`[[phases]]`,
+			`name = "iteration"`,
+			`prompt = "iter-entry.md"`,
+			`  [phases.variables]`,
+			`  ITEM_ID = "item.id"`,
+			`  RUN_ID = "runtime.runId"`,
+			``,
+			`[[phases]]`,
+			`name = "review"`,
+			`prompt = "review-entry.md"`,
+			`  [phases.variables]`,
+			`  ITEM_ID = "item.id"`,
+			`  RUN_ID = "runtime.runId"`,
+			``,
+			`[agent]`,
+			`binary = "claude"`,
+			`extraArgs = []`,
+			``,
+		].join("\n"))
+		await writeFile(resolve(presetDir, "iter-entry.md"), "ITER {{ITEM_ID}} {{RUN_ID}}\n")
+		await writeFile(resolve(presetDir, "review-entry.md"), "REVIEW {{ITEM_ID}} {{RUN_ID}}\n")
+
+		const fakeCodex = resolve(dir, "fake-codex.sh")
+		const fakeClaude = resolve(dir, "fake-claude.sh")
+		await writeFile(fakeCodex, [
+			`#!/usr/bin/env bash`,
+			`echo '{"type":"thread.started","thread_id":"thread-stop-smoke"}'`,
+			`echo '{"type":"item.completed","item":{"type":"agent_message","text":"ITERATION SUMMARY: done"}}'`,
+			`exit 0`,
+			``,
+		].join("\n"), { mode: 0o755 })
+		await writeFile(fakeClaude, [
+			`#!/usr/bin/env bash`,
+			...reviewScript,
+			`exit 0`,
+			``,
+		].join("\n"), { mode: 0o755 })
+
+		await writeFile(resolve(runtime, "config.json"), JSON.stringify({
+			presetPath: presetDir,
+			codex: { binary: fakeCodex, extraArgs: [] },
+			claude: { binary: fakeClaude, extraArgs: [] },
+		}, null, 2))
+		await writeFile(resolve(runtime, "state.json"), JSON.stringify({
+			version: 1,
+			queue: [{
+				id: "alpha",
+				status: "pending",
+				issueFile: ".coder-loop/runtime/issues/alpha.md",
+				evidenceDir: ".coder-loop/runtime/evidence/alpha",
+			}],
+			recentRuns: [],
+			current: null,
+		}, null, 2))
+		await writeFile(resolve(runtime, "issues/alpha.md"), "# alpha\n")
+		return dir
+	}
+
+	test("review verdict=stop removes .dev-loop even when the review runner cannot remove it", async () => {
+		const dir = await makeTwoPhaseReviewTarget([
+			`echo 'gh issue comment failed: This command requires approval'`,
+			`echo 'REVIEW SUMMARY: verdict=stop; issue=#alpha; actionable=1; reason=review infrastructure broken'`,
+		], "coder-loop-review-stop-")
+		const proc = Bun.spawnSync({
+			cmd: ["bun", LOOP_ENTRY, "--target-cwd", dir, "--once"],
+			cwd: REPO_ROOT,
+			stdout: "pipe",
+			stderr: "pipe",
+			env: claudeHostEnv(),
+		})
+		const stderr = new TextDecoder().decode(proc.stderr)
+		expect(proc.exitCode).toBe(0)
+		expect(await Bun.file(resolve(dir, ".dev-loop")).exists()).toBe(false)
+		expect(stderr).toContain("review agent requested loop stop via REVIEW SUMMARY; removing .dev-loop.")
+		expect(stderr).toContain("Review agent stopped the loop.")
+	}, 15_000)
+
+	test("quoted old review stop summary does not remove .dev-loop without a final stop verdict", async () => {
+		const dir = await makeTwoPhaseReviewTarget([
+			`echo 'old review log:'`,
+			`echo 'REVIEW SUMMARY: verdict=stop; issue=#alpha; actionable=1; reason=review infrastructure broken'`,
+			`echo 'review output ended without a final stop summary'`,
+		], "coder-loop-review-stale-stop-")
+		const proc = Bun.spawnSync({
+			cmd: ["bun", LOOP_ENTRY, "--target-cwd", dir, "--once"],
+			cwd: REPO_ROOT,
+			stdout: "pipe",
+			stderr: "pipe",
+			env: claudeHostEnv(),
+		})
+		const stderr = new TextDecoder().decode(proc.stderr)
+		expect(proc.exitCode).toBe(0)
+		expect(await Bun.file(resolve(dir, ".dev-loop")).exists()).toBe(true)
+		expect(stderr).not.toContain("review agent requested loop stop via REVIEW SUMMARY; removing .dev-loop.")
+		expect(stderr).not.toContain("Review agent stopped the loop.")
+	}, 15_000)
 })
 
 async function makeIdleTarget(): Promise<{ target: string; counterPath: string; lockPath: string; devLoopPath: string }> {

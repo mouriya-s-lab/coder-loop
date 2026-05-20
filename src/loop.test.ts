@@ -46,6 +46,7 @@ import {
 	nextBackoffSeconds,
 	parseKindFromLabels,
 	parseCodexThreadIdFromStream,
+	parseReviewSummaryVerdict,
 	parseSessionIdFromRunnerStream,
 	parseSessionIdFromStream,
 	readLastSessionEntry,
@@ -1092,10 +1093,107 @@ describe("renderPrompt with bundled preset", () => {
 		expect(acceptPr).toContain("noninteractive approval/permission boundary")
 		expect(acceptPr).toContain("read `review/action-stop`")
 		expect(acceptPr).not.toContain("`accept_pr_failed` → read `review/action-retry`")
-		expect(actionStop).toContain("accepted PR GitHub side effect failure")
+		expect(actionStop).toContain("accepted PR or accepted no-PR GitHub side effect failure")
 		expect(actionStop).toContain("failed command")
 		expect(actionStop).toContain("Remove `.dev-loop`")
 		expect(actionStop).toContain("Do not mark the selected issue `done`")
+	})
+
+	test("accepted no-PR GitHub side-effect approval failures stop instead of retrying the same accepted issue", async () => {
+		const acceptNoPr = await readFile(resolve(BUNDLED_PRESET_DIR, "review/action-accept-no-pr.md"), "utf-8")
+		const actionStop = await readFile(resolve(BUNDLED_PRESET_DIR, "review/action-stop.md"), "utf-8")
+		expect(acceptNoPr).toContain("This command requires approval")
+		expect(acceptNoPr).toContain("noninteractive approval/permission boundary")
+		expect(acceptNoPr).toContain("accepted_no_pr")
+		expect(acceptNoPr).toContain("read `review/action-stop`")
+		expect(acceptNoPr).not.toContain("`accept_no_pr_failed` → read `review/action-retry`")
+		expect(acceptNoPr).toContain("`accept_no_pr_retry_needed` → read `review/action-retry`")
+		expect(actionStop).toContain("accepted PR or accepted no-PR GitHub side effect failure")
+		expect(actionStop).toContain("failed command")
+		expect(actionStop).toContain("Remove `.dev-loop`")
+		expect(actionStop).toContain("Do not mark the selected issue `done`")
+	})
+
+	test("review summary parser extracts stop verdict from raw and stream-json runner output", () => {
+		expect(parseReviewSummaryVerdict("REVIEW SUMMARY: verdict=stop; issue=#114; actionable=1; reason=review infrastructure broken")).toBe("stop")
+		expect(parseReviewSummaryVerdict(JSON.stringify({
+			type: "assistant",
+			message: {
+				content: [{
+					type: "text",
+					text: "gh issue comment failed: This command requires approval\nREVIEW SUMMARY: verdict=stop; issue=#114; actionable=1; reason=review infrastructure broken",
+				}],
+			},
+		}))).toBe("stop")
+		expect(parseReviewSummaryVerdict("REVIEW SUMMARY: verdict=retry; issue=#114; actionable=1; reason=changes requested")).toBe("retry")
+		expect(parseReviewSummaryVerdict("REVIEW SUMMARY: noop")).toBeNull()
+	})
+
+	test("review summary parser ignores quoted old stop summaries outside the final agent summary", () => {
+		const staleCommandOutput = JSON.stringify({
+			type: "item.completed",
+			item: {
+				type: "command_execution",
+				aggregated_output: "old log:\nREVIEW SUMMARY: verdict=stop; issue=#114; actionable=1; reason=review infrastructure broken",
+			},
+		})
+		const codexNoFinalSummary = JSON.stringify({
+			type: "item.completed",
+			item: {
+				type: "agent_message",
+				text: "I found an old stop summary in logs, but I am still checking it.",
+			},
+		})
+		const codexEarlierAgentSummary = JSON.stringify({
+			type: "item.completed",
+			item: {
+				type: "agent_message",
+				text: "Interim note.\nREVIEW SUMMARY: verdict=stop; issue=#114; actionable=1; reason=review infrastructure broken",
+			},
+		})
+		const codexLaterAgentMessage = JSON.stringify({
+			type: "item.completed",
+			item: {
+				type: "agent_message",
+				text: "I continued after the interim note and did not emit a final summary.",
+			},
+		})
+		const claudeQuotedSummary = JSON.stringify({
+			type: "assistant",
+			message: {
+				content: [{
+					type: "text",
+					text: "The old trace contained:\nREVIEW SUMMARY: verdict=stop; issue=#114; actionable=1; reason=review infrastructure broken\nContinuing without a final stop verdict.",
+				}],
+			},
+		})
+
+		expect(parseReviewSummaryVerdict(`${staleCommandOutput}\n${codexNoFinalSummary}`, "codex")).toBeNull()
+		expect(parseReviewSummaryVerdict(`${codexEarlierAgentSummary}\n${codexLaterAgentMessage}`, "codex")).toBeNull()
+		expect(parseReviewSummaryVerdict(claudeQuotedSummary, "claude")).toBeNull()
+		expect(parseReviewSummaryVerdict("old log:\nREVIEW SUMMARY: verdict=stop; issue=#114; actionable=1; reason=review infrastructure broken\nreview still running")).toBeNull()
+	})
+
+	test("review summary parser accepts final runner agent summary lines", () => {
+		const codexFinalSummary = JSON.stringify({
+			type: "item.completed",
+			item: {
+				type: "agent_message",
+				text: "Review stopped.\nREVIEW SUMMARY: verdict=stop; issue=#114; actionable=1; reason=review infrastructure broken",
+			},
+		})
+		const claudeFinalSummary = JSON.stringify({
+			type: "assistant",
+			message: {
+				content: [{
+					type: "text",
+					text: "Review stopped.\nREVIEW SUMMARY: verdict=stop; issue=#114; actionable=1; reason=review infrastructure broken",
+				}],
+			},
+		})
+
+		expect(parseReviewSummaryVerdict(codexFinalSummary, "codex")).toBe("stop")
+		expect(parseReviewSummaryVerdict(claudeFinalSummary, "claude")).toBe("stop")
 	})
 })
 
