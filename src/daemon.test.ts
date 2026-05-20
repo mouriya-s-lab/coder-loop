@@ -1,12 +1,13 @@
 import { describe, expect, test } from "bun:test"
 import { existsSync } from "node:fs"
-import { mkdir, rm } from "node:fs/promises"
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
 import {
 	sendDaemonRequest,
 	startDaemonServer,
 } from "./daemon"
+import { defaultChainNameForTarget } from "./runtime-paths"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const DAEMON_TEST_ROOT = resolve(REPO_ROOT, ".cache/daemon-tests")
@@ -25,6 +26,33 @@ async function withDaemonPaths<T>(name: string, fn: (paths: { root: string; db: 
 	} finally {
 		await rm(root, { recursive: true, force: true })
 	}
+}
+
+async function readDaemonStdoutLogs(root: string): Promise<string> {
+	let combined = ""
+	async function visit(dir: string): Promise<void> {
+		for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+			const path = resolve(dir, entry.name)
+			if (entry.isDirectory()) {
+				await visit(path)
+			} else if (entry.isFile() && entry.name === "stdout.log") {
+				combined += await readFile(path, "utf-8")
+			}
+		}
+	}
+	await visit(resolve(root, "chains"))
+	return combined
+}
+
+async function waitForDaemonStdout(root: string, pattern: string): Promise<string> {
+	const deadline = Date.now() + 2_000
+	let text = ""
+	while (Date.now() < deadline) {
+		text = await readDaemonStdoutLogs(root)
+		if (text.includes(pattern)) return text
+		await Bun.sleep(50)
+	}
+	return text
 }
 
 describe("daemon socket IPC", () => {
@@ -107,6 +135,49 @@ describe("daemon socket IPC", () => {
 			await Bun.sleep(100)
 			expect(existsSync(paths.socket)).toBe(false)
 			expect(existsSync(paths.pid)).toBe(false)
+		})
+	})
+
+	test("scheduler spawns queued DB items without target runtime state", async () => {
+		await withDaemonPaths("spawn-db-native", async (paths) => {
+			const target = resolve(paths.root, "policy-only-target")
+			await mkdir(resolve(target, ".coder-loop"), { recursive: true })
+			await writeFile(resolve(target, ".coder-loop/workflow.md"), "# policy only\n")
+			const script = "console.log(JSON.stringify({root:process.env.CODER_LOOP_DATA_ROOT,cwd:process.cwd(),args:process.argv.slice(2)}))"
+			const handle = await startDaemonServer({
+				rootDir: paths.root,
+				dbPath: paths.db,
+				socketPath: paths.socket,
+				pidPath: paths.pid,
+				schedulerIntervalMs: 50,
+				spawnAgents: true,
+				processArgs: ["bun", "-e", script],
+			})
+			try {
+				const chainName = defaultChainNameForTarget(target)
+				const created = await sendDaemonRequest(paths.socket, {
+					cmd: "chain.create",
+					name: chainName,
+					preset: "gh-issue-pr-iteration",
+					repo: "owner/repo",
+					baseBranch: "main",
+				})
+				expect(created.ok).toBe(true)
+				const added = await sendDaemonRequest(paths.socket, {
+					cmd: "item.add",
+					chain: chainName,
+					issue: 147,
+					repoCwd: target,
+				})
+				expect(added.ok).toBe(true)
+
+				const stdout = await waitForDaemonStdout(paths.root, `"root":"${paths.root}"`)
+				expect(stdout).toContain(`"cwd":"${target}"`)
+				expect(stdout).toContain(target)
+				expect(existsSync(resolve(target, ".coder-loop/runtime/state.json"))).toBe(false)
+			} finally {
+				await handle.shutdown()
+			}
 		})
 	})
 })

@@ -98,6 +98,13 @@ async function makeGhIssuePrTarget(kind: string, issue: number): Promise<string>
 	return dir
 }
 
+async function makePolicyOnlyGhIssuePrTarget(): Promise<string> {
+	const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-gh-policy-only-"))
+	await mkdir(resolve(dir, ".coder-loop"), { recursive: true })
+	await writeFile(resolve(dir, ".coder-loop/workflow.md"), "# gh issue fixture workflow\n")
+	return dir
+}
+
 async function pathExists(path: string): Promise<boolean> {
 	try {
 		await readFile(path)
@@ -492,6 +499,75 @@ describe("smoke: single-phase-example preset", () => {
 			expect(asRecord(statusJson.chain, "status chain").name).toBeTruthy()
 			expect(asArray(statusJson.items, "status items")[0]).toMatchObject({ issue: 9300, status: "queued" })
 			expect(asArray(statusJson.slots, "status slots")).toEqual([])
+		} finally {
+			Bun.spawnSync({
+				cmd: ["bun", LOOP_ENTRY, "daemon", "down", "--socket", socket],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			await rm(root, { recursive: true, force: true })
+		}
+	})
+
+	test("daemon start/status/stop <target> works without target runtime directory", async () => {
+		const target = await makePolicyOnlyGhIssuePrTarget()
+		const root = resolve(REPO_ROOT, ".cache", `smoke-daemon-db-native-${Date.now()}-${Math.random().toString(16).slice(2)}`)
+		const socket = resolve(root, "daemon.sock")
+		const pid = resolve(root, "daemon.pid")
+		const db = resolve(root, "state.db")
+		const daemonFlags = [
+			"--root", root,
+			"--socket", socket,
+			"--pid", pid,
+			"--db", db,
+			"--scheduler-interval-ms", "600000",
+			"--no-spawn-agents",
+		]
+		try {
+			const start = Bun.spawnSync({
+				cmd: ["bun", LOOP_ENTRY, "daemon", "start", target, "--repo", "owner/repo", ...daemonFlags],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			expect(new TextDecoder().decode(start.stderr)).toBe("")
+			expect(start.exitCode).toBe(0)
+			const startJson = asRecord(JSON.parse(new TextDecoder().decode(start.stdout)), "start")
+			expect(asRecord(startJson.daemon, "start daemon").started).toBe(true)
+			const importResult = asRecord(startJson.import, "start import")
+			expect(importResult.legacyStateFound).toBe(false)
+			expect(importResult.itemsSeen).toBe(0)
+			expect(importResult.imported).toBe(0)
+			expect(asRecord(importResult.chain, "import chain")).toMatchObject({
+				name: defaultChainNameForTarget(target),
+				repository: "owner/repo",
+			})
+
+			const status = Bun.spawnSync({
+				cmd: ["bun", LOOP_ENTRY, "daemon", "status", target, "--socket", socket, "--json"],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			expect(new TextDecoder().decode(status.stderr)).toBe("")
+			expect(status.exitCode).toBe(0)
+			const statusJson = asRecord(JSON.parse(new TextDecoder().decode(status.stdout)), "status")
+			expect(asRecord(statusJson.daemon, "status daemon").ok).toBe(true)
+			expect(asRecord(statusJson.chain, "status chain").name).toBe(defaultChainNameForTarget(target))
+			expect(asArray(statusJson.items, "status items")).toEqual([])
+
+			const stop = Bun.spawnSync({
+				cmd: ["bun", LOOP_ENTRY, "daemon", "stop", target, "--socket", socket],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			expect(new TextDecoder().decode(stop.stderr)).toBe("")
+			expect(stop.exitCode).toBe(0)
+			const stopJson = asRecord(JSON.parse(new TextDecoder().decode(stop.stdout)), "stop")
+			expect(stopJson.updated).toBe(0)
+			expect(asArray(stopJson.items, "stopped items")).toEqual([])
 		} finally {
 			Bun.spawnSync({
 				cmd: ["bun", LOOP_ENTRY, "daemon", "down", "--socket", socket],

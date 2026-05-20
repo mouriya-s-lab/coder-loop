@@ -17,6 +17,7 @@ import {
 	DEFAULT_LOOP_DATA_ROOT,
 	defaultChainNameForTarget,
 	ensureChainRuntimeSkeleton,
+	LOOP_DATA_ROOT_ENV,
 	loopDataRootPaths,
 } from "./runtime-paths"
 import {
@@ -380,13 +381,15 @@ function startScheduler(runtime: DaemonRuntime): void {
 function spawnAgentForItem(runtime: DaemonRuntime, item: Item): SchedulerRun {
 	if (!runtime.spawnAgents) throw new Error("scheduler spawn requested while spawnAgents=false")
 	const runId = `daemon-${item.id}-${Date.now()}`
+	const cwd = item.agentCwd ?? item.repoCwd
 	const child = spawn(runtime.processArgs[0]!, [
 		...runtime.processArgs.slice(1),
 		"--target-cwd",
 		item.repoCwd,
 		"--once",
 	], {
-		cwd: item.repoCwd,
+		cwd,
+		env: { ...process.env, [LOOP_DATA_ROOT_ENV]: runtime.rootDir },
 		stdio: ["ignore", "pipe", "pipe"],
 	})
 	runtime.children.set(runId, child)
@@ -397,7 +400,7 @@ function spawnAgentForItem(runtime: DaemonRuntime, item: Item): SchedulerRun {
 		clearSchedulerRun(runtime.schedulerState, runId)
 		logEngine(runtime, `agent exited run=${runId} item=${item.id} code=${code ?? "<null>"} signal=${signal ?? "<null>"}`)
 	})
-	logEngine(runtime, `agent spawned run=${runId} item=${item.id} repo=${item.repoCwd} pid=${child.pid ?? "<null>"}`)
+	logEngine(runtime, `agent spawned run=${runId} item=${item.id} repo=${item.repoCwd} cwd=${cwd} loopDataRoot=${runtime.rootDir} pid=${child.pid ?? "<null>"}`)
 	return { runId, pid: child.pid ?? -1, itemId: item.id }
 }
 
@@ -676,9 +679,6 @@ function errorMessage(error: unknown): string {
 
 export async function importTargetStateIntoStore(store: StateStore, targetCwd: string, preset: string, repository: string | null, baseBranch: string | null): Promise<{ chain: Chain; itemsImported: number }> {
 	const statePath = resolve(targetCwd, ".coder-loop/runtime/state.json")
-	const raw = await readFile(statePath, "utf-8")
-	const parsed: unknown = JSON.parse(raw)
-	if (!isObjectRecord(parsed) || !Array.isArray(parsed.queue)) throw new Error(`${statePath}: expected state object with queue array`)
 	const chainRequest = withOptionalFields({
 		cmd: "chain.create",
 		name: defaultChainNameForTarget(targetCwd),
@@ -687,8 +687,7 @@ export async function importTargetStateIntoStore(store: StateStore, targetCwd: s
 		repo: repository ?? undefined,
 		baseBranch: baseBranch ?? undefined,
 	}) as Extract<DaemonRequest, { cmd: "chain.create" }>
-	const existing = store.getChain(chainRequest.name)
-	const chain = existing ?? store.createChain(
+	const chain = store.upsertChain(
 		chainRequest.name,
 		chainRequest.preset,
 		chainRequest.repo ?? null,
@@ -696,6 +695,13 @@ export async function importTargetStateIntoStore(store: StateStore, targetCwd: s
 		chainRequest.umbrellaIssue ?? null,
 		chainRequest.umbrellaRepo ?? null,
 	)
+	const raw = await readFile(statePath, "utf-8").catch((error: unknown) => {
+		if (isNodeError(error) && error.code === "ENOENT") return null
+		throw error
+	})
+	if (raw === null) return { chain, itemsImported: 0 }
+	const parsed: unknown = JSON.parse(raw)
+	if (!isObjectRecord(parsed) || !Array.isArray(parsed.queue)) throw new Error(`${statePath}: expected state object with queue array`)
 	let itemsImported = 0
 	for (const entry of parsed.queue) {
 		if (!isObjectRecord(entry) || typeof entry.issue !== "number") continue
@@ -722,4 +728,8 @@ export async function importTargetStateIntoStore(store: StateStore, targetCwd: s
 		}
 	}
 	return { chain, itemsImported }
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+	return error instanceof Error && "code" in error
 }

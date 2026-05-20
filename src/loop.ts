@@ -2448,6 +2448,8 @@ type DaemonTargetImportTrace = {
 type DaemonTargetImportResult = {
 	chainName: string
 	chain: JsonObject
+	legacyStatePath: string
+	legacyStateFound: boolean
 	itemsSeen: number
 	imported: number
 	updated: number
@@ -2768,27 +2770,24 @@ async function waitForDaemonReady(socketPath: string): Promise<void> {
 }
 
 async function importTargetStateViaDaemon(args: Extract<DaemonCommandArgs, { action: "start" }>, socketPath: string): Promise<DaemonTargetImportResult> {
-	const snapshot = await buildCoderLoopStatusSnapshot({
-		targetCwd: args.targetCwd,
-		configPath: args.configPath,
-		repository: args.repository,
-		output: "json",
-	})
-	const targetCwd = snapshot.target.cwd
+	const options = await loadLoopOptionsForTarget(args.targetCwd, args.configPath, args.repository)
+	const targetCwd = options.targetCwd
 	const chainName = defaultChainNameForTarget(targetCwd)
 	const chainRequest: Extract<DaemonRequest, { cmd: "chain.create" }> = {
 		cmd: "chain.create",
 		name: chainName,
-		preset: snapshot.target.preset?.name ?? DEFAULT_PRESET_NAME,
+		preset: options.preset.name,
 	}
-	if (snapshot.target.repository !== null) chainRequest.repo = snapshot.target.repository
-	if (snapshot.target.baseBranch !== null) chainRequest.baseBranch = snapshot.target.baseBranch
+	if (options.repository !== null) chainRequest.repo = options.repository
+	if (options.baseBranch !== null) chainRequest.baseBranch = options.baseBranch
 	const trace: DaemonTargetImportTrace[] = []
 	const chainResponse = await sendDaemonRequest(socketPath, chainRequest)
 	trace.push(daemonImportTrace("chain.create", undefined, chainResponse))
 	if (!chainResponse.ok) throw new Error(`chain.create ${chainName}: ${chainResponse.error}`)
 	const chain = requireJsonObject(chainResponse.data, "chain.create")
-	const queue = await readTargetQueue(snapshot.target.statePath)
+	const legacyStatePath = legacyStatePathForDaemonImport(options)
+	const queueResult = await readLegacyTargetQueue(legacyStatePath)
+	const queue = queueResult.queue
 	let imported = 0
 	let updated = 0
 	let skipped = 0
@@ -2811,6 +2810,8 @@ async function importTargetStateViaDaemon(args: Extract<DaemonCommandArgs, { act
 	return {
 		chainName,
 		chain,
+		legacyStatePath,
+		legacyStateFound: queueResult.found,
 		itemsSeen: queue.length,
 		imported,
 		updated,
@@ -2819,11 +2820,21 @@ async function importTargetStateViaDaemon(args: Extract<DaemonCommandArgs, { act
 	}
 }
 
-async function readTargetQueue(statePath: string): Promise<unknown[]> {
-	const raw = await readFile(statePath, "utf-8")
+function legacyStatePathForDaemonImport(options: LoopOptions): string {
+	return existsSync(options.configPath)
+		? options.statePath
+		: resolve(options.targetCwd, DEFAULT_STATE_FILE)
+}
+
+async function readLegacyTargetQueue(statePath: string): Promise<{ found: boolean; queue: unknown[] }> {
+	const raw = await readFile(statePath, "utf-8").catch((error: unknown) => {
+		if (isNodeError(error) && error.code === "ENOENT") return null
+		throw error
+	})
+	if (raw === null) return { found: false, queue: [] }
 	const parsed: unknown = JSON.parse(raw)
 	if (!isObjectRecord(parsed) || !Array.isArray(parsed.queue)) throw new Error(`${statePath}: expected state object with queue array`)
-	return parsed.queue
+	return { found: true, queue: parsed.queue }
 }
 
 function daemonImportTrace(cmd: string, issue: number | undefined, response: DaemonResponse): DaemonTargetImportTrace {
