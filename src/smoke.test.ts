@@ -7,6 +7,7 @@ import { chainRuntimePaths, defaultChainNameForTarget, ensureChainRuntimeSkeleto
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
+const SMOKE_LOOP_DATA_ROOT = resolve(REPO_ROOT, ".cache/smoke-loop-data")
 
 type ConfigShape = "json" | "toml"
 type StatusSmokeSnapshot = {
@@ -21,11 +22,15 @@ type StatusSmokeSnapshot = {
 function claudeHostEnv(): NodeJS.ProcessEnv {
 	const env: NodeJS.ProcessEnv = { ...process.env }
 	env.CLAUDECODE = "1"
-	env.CODER_LOOP_DATA_ROOT = resolve(REPO_ROOT, ".cache/smoke-loop-data")
+	env.CODER_LOOP_DATA_ROOT = SMOKE_LOOP_DATA_ROOT
 	delete env["CODEX_SHELL"]
 	delete env["CODEX_THREAD_ID"]
 	delete env["CODEX_INTERNAL_ORIGINATOR_OVERRIDE"]
 	return env
+}
+
+function loopControlPathForTarget(target: string, root = SMOKE_LOOP_DATA_ROOT): string {
+	return resolve(chainRuntimePaths(root, defaultChainNameForTarget(target)).chainDir, "loop-control")
 }
 
 async function makeMinimalTarget(presetName: string, configShape: ConfigShape = "json"): Promise<string> {
@@ -842,7 +847,6 @@ describe("smoke: phase runner selection", () => {
 			`  [phases.variables]`,
 			`  ITEM_ID = "item.id"`,
 			`  RUN_ID = "runtime.runId"`,
-			`  STATE_FILE = "runtime.statePath"`,
 			``,
 			`[agent]`,
 			`binary = "claude"`,
@@ -850,7 +854,7 @@ describe("smoke: phase runner selection", () => {
 			``,
 		].join("\n"))
 		await writeFile(resolve(presetDir, "iter-entry.md"), "ITER {{ITEM_ID}} {{RUN_ID}}\n")
-		await writeFile(resolve(presetDir, "review-entry.md"), "REVIEW {{ITEM_ID}} {{RUN_ID}} {{STATE_FILE}}\n")
+		await writeFile(resolve(presetDir, "review-entry.md"), "REVIEW {{ITEM_ID}} {{RUN_ID}}\n")
 
 		const fakeCodex = resolve(dir, "fake-codex.sh")
 		const fakeClaude = resolve(dir, "fake-claude.sh")
@@ -1101,7 +1105,7 @@ describe("smoke: phase runner selection", () => {
 		return dir
 	}
 
-	test("review verdict=stop removes .dev-loop even when the review runner cannot remove it", async () => {
+	test("review verdict=stop removes loop-control even when the review runner cannot remove it", async () => {
 		const dir = await makeTwoPhaseReviewTarget([
 			`echo 'gh issue comment failed: This command requires approval'`,
 			`echo 'REVIEW SUMMARY: verdict=stop; issue=#alpha; actionable=1; reason=review infrastructure broken'`,
@@ -1115,12 +1119,12 @@ describe("smoke: phase runner selection", () => {
 		})
 		const stderr = new TextDecoder().decode(proc.stderr)
 		expect(proc.exitCode).toBe(0)
-		expect(await Bun.file(resolve(dir, ".dev-loop")).exists()).toBe(false)
-		expect(stderr).toContain("review agent requested loop stop via REVIEW SUMMARY; removing .dev-loop.")
+		expect(await Bun.file(loopControlPathForTarget(dir)).exists()).toBe(false)
+		expect(stderr).toContain("review agent requested loop stop via REVIEW SUMMARY; removing loop control file.")
 		expect(stderr).toContain("Review agent stopped the loop.")
 	}, 15_000)
 
-	test("quoted old review stop summary does not remove .dev-loop without a final stop verdict", async () => {
+	test("quoted old review stop summary does not remove loop-control without a final stop verdict", async () => {
 		const dir = await makeTwoPhaseReviewTarget([
 			`echo 'old review log:'`,
 			`echo 'REVIEW SUMMARY: verdict=stop; issue=#alpha; actionable=1; reason=review infrastructure broken'`,
@@ -1135,8 +1139,8 @@ describe("smoke: phase runner selection", () => {
 		})
 		const stderr = new TextDecoder().decode(proc.stderr)
 		expect(proc.exitCode).toBe(0)
-		expect(await Bun.file(resolve(dir, ".dev-loop")).exists()).toBe(true)
-		expect(stderr).not.toContain("review agent requested loop stop via REVIEW SUMMARY; removing .dev-loop.")
+		expect(await Bun.file(loopControlPathForTarget(dir)).exists()).toBe(true)
+		expect(stderr).not.toContain("review agent requested loop stop via REVIEW SUMMARY; removing loop control file.")
 		expect(stderr).not.toContain("Review agent stopped the loop.")
 	}, 15_000)
 })
@@ -1178,7 +1182,7 @@ exit 0
 		target: dir,
 		counterPath,
 		lockPath: resolve(runtime, "review-on-empty.lock"),
-		devLoopPath: resolve(dir, ".dev-loop"),
+		devLoopPath: loopControlPathForTarget(dir),
 	}
 }
 
@@ -1210,7 +1214,7 @@ describe("daemon idle behavior — review-on-empty lock + idle ticks (issue #69)
 			cwd: REPO_ROOT,
 			stdout: "pipe",
 			stderr: "pipe",
-			env: { ...process.env, CODER_LOOP_IDLE_SLEEP_MS: "50" },
+			env: { ...process.env, CODER_LOOP_DATA_ROOT: SMOKE_LOOP_DATA_ROOT, CODER_LOOP_IDLE_SLEEP_MS: "50" },
 		})
 
 		const lockAppeared = await waitFor(async () => (await fileLineCount(counterPath)) >= 1 && (await Bun.file(lockPath).exists()), 5000)
@@ -1246,7 +1250,7 @@ describe("daemon idle behavior — review-on-empty lock + idle ticks (issue #69)
 			cwd: REPO_ROOT,
 			stdout: "pipe",
 			stderr: "pipe",
-			env: { ...process.env, CODER_LOOP_IDLE_SLEEP_MS: "50" },
+			env: { ...process.env, CODER_LOOP_DATA_ROOT: SMOKE_LOOP_DATA_ROOT, CODER_LOOP_IDLE_SLEEP_MS: "50" },
 		})
 
 		const firstLockSeen = await waitFor(async () => (await fileLineCount(counterPath)) >= 1 && (await Bun.file(lockPath).exists()), 5000)
@@ -1275,7 +1279,7 @@ describe("daemon idle behavior — review-on-empty lock + idle ticks (issue #69)
 			cwd: REPO_ROOT,
 			stdout: "pipe",
 			stderr: "pipe",
-			env: { ...process.env, CODER_LOOP_IDLE_SLEEP_MS: "50" },
+			env: { ...process.env, CODER_LOOP_DATA_ROOT: SMOKE_LOOP_DATA_ROOT, CODER_LOOP_IDLE_SLEEP_MS: "50" },
 		})
 
 		await waitFor(async () => (await fileLineCount(counterPath)) >= 1, 5000)

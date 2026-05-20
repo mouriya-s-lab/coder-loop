@@ -6,7 +6,7 @@
 > short, source-cited, and policy-bounded so it doesn't drift into a
 > dumping ground.
 
-Canonical task state remains in GitHub issues/PRs and `.coder-loop/runtime/state.json`. This file is for *cross-issue* facts that don't belong to any single issue.
+Canonical task state remains in GitHub issues/PRs and the loop state store. This file is for *cross-issue* facts that don't belong to any single issue.
 
 ## Memory policy
 

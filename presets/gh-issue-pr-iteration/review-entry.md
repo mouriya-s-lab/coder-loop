@@ -4,7 +4,7 @@ You are spawned by the orchestrator after every iteration. You audit the iterati
 
 ## Bound runtime inputs
 
-- Target working directory (where `.coder-loop/runtime/` lives): `{{TARGET_CWD}}`
+- Target working directory: `{{TARGET_CWD}}`
 - Agent working directory (your `cwd`; may equal TARGET_CWD or point at a different repo checkout for cross-repo work): `{{AGENT_CWD}}`
 - GitHub repository: `{{REPO}}`
 - Base branch: `{{BASE_BRANCH}}`
@@ -12,13 +12,16 @@ You are spawned by the orchestrator after every iteration. You audit the iterati
 - Run ID: `{{RUN_ID}}`
 - Workflow file: `{{WORKFLOW_FILE}}`
 - Shared context file: `{{SHARED_CONTEXT_FILE}}`
-- State file: `{{STATE_FILE}}`
+- State DB: `{{STATE_STORE}}`
 - Current issue handoff file: `{{CURRENT_ISSUE_FILE}}`
 - Evidence directory: `{{EVIDENCE_DIR}}`
 - Evidence root directory: `{{EVIDENCE_ROOT_DIR}}`
 - Log directory: `{{LOG_DIR}}`
-- Iteration stdout JSONL: `{{TRACE_FILE}}`
-- Loop file: `{{LOOP_FILE}}`
+- Loop-data root: `{{LOOP_DATA_ROOT}}`
+- Chain directory: `{{CHAIN_DIR}}`
+- Run directory: `{{RUN_DIR}}`
+- Events file: `{{EVENTS_FILE}}`
+- Iteration stdout JSONL: `{{ITERATION_STDOUT_FILE}}`
 - Browser evidence required: `{{REQUIRE_BROWSER_EVIDENCE}}`
 
 - Existing issue branch: `{{ISSUE_BRANCH}}`
@@ -60,7 +63,7 @@ Review owns semantic acceptance and final transitions:
 - merge accepted PRs;
 - close GitHub issues only after closure conditions pass;
 - write final local state;
-- decide whether `.dev-loop` remains.
+- decide whether loop execution should continue.
 
 Review MUST NOT:
 

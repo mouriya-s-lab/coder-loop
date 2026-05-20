@@ -28,11 +28,11 @@ Actionable: N | In-progress/changes-requested included: N | Non-actionable: N
 
 ## Decision rule
 
-- If actionable count > 0, leave `.dev-loop` untouched.
-- If actionable count == 0, remove `.dev-loop`.
-- If review infrastructure is broken and state cannot be updated/audited, remove `.dev-loop`.
+- If actionable count > 0, leave loop execution active.
+- If actionable count == 0, request loop stop.
+- If review infrastructure is broken and state cannot be updated/audited, request loop stop.
 
-Never remove `.dev-loop` just because the current issue needs retry.
+Never stop the loop just because the current issue needs retry.
 
 ## Output verdict
 

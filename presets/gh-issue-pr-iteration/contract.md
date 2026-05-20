@@ -276,7 +276,7 @@ planning agent 必须：
 
 planning agent 禁止：
 
-- 直接开 PR / 合 PR / 关 issue / 删 `.dev-loop`（这些是 iter / review 的事）；
+- 直接开 PR / 合 PR / 关 issue / 停止 loop-control（这些是 iter / review 的事）；
 - 把 kind label 之外的 `kind:*` 值用进 `gh issue create`；
 - 在散文 issue body 里偷偷塞 `[ ] foo` checkbox 代替 `## 验收标准` 表；
 - 把多个无关问题打包进同一 issue（违反 atomic）。

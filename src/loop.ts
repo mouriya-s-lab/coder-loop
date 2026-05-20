@@ -44,7 +44,7 @@ export const CLAUDE_REVIEW_MODEL = "claude-opus-4-7"
 export const DEFAULT_ATTEMPT_TIMEOUT_SECONDS = 60 * 60
 export const ATTEMPT_TIMEOUT_KILL_MS = 5 * 1000
 
-const EXCLUDE_ENTRIES = [".dev-loop", ".coder-loop/runtime"]
+const EXCLUDE_ENTRIES = [".coder-loop/runtime"]
 
 let logStream: WriteStream | null = null
 
@@ -774,14 +774,18 @@ const RUNTIME_BINDING_KEYS = [
 	"agentCwd",
 	"workflowPath",
 	"sharedContextPath",
-	"statePath",
+	"stateDbPath",
 	"currentIssueFile",
 	"issueDir",
 	"evidenceDir",
 	"evidenceRootDir",
 	"logDir",
-	"traceFile",
-	"loopFile",
+	"loopDataRoot",
+	"chainName",
+	"chainDir",
+	"runDir",
+	"eventsFile",
+	"iterationStdoutFile",
 	"presetDir",
 	"fragmentIndex",
 	"runIdGeneration",
@@ -1425,6 +1429,7 @@ async function main() {
 	}
 
 	await ensureGitExclude(options.targetCwd)
+	await mkdir(dirname(options.loopFile), { recursive: true })
 	await writeFile(
 		options.loopFile,
 		[
@@ -1438,7 +1443,7 @@ async function main() {
 			"",
 		].join("\n"),
 	)
-	log("Loop file created. Delete .dev-loop to stop.")
+	log(`Loop control file created. Delete it to stop: ${options.loopFile}`)
 
 	let workIteration = 0
 	const idleSleepMs = resolveIdleSleepMs()
@@ -1806,7 +1811,7 @@ async function runReview(
 		})
 	}
 	if (reviewCode === 0 && parseReviewSummaryVerdict(reviewTrace, runner.kind) === "stop") {
-		log(`${reviewPhase.name} agent requested loop stop via REVIEW SUMMARY; removing .dev-loop.`)
+		log(`${reviewPhase.name} agent requested loop stop via REVIEW SUMMARY; removing loop control file.`)
 		await removeLoopFile(options.loopFile)
 	}
 	return reviewCode
@@ -1846,7 +1851,7 @@ function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, confi
 		issueDir,
 		evidenceRootDir,
 		logDir,
-		loopFile: resolve(targetCwd, ".dev-loop"),
+		loopFile: resolve(chainPaths.chainDir, "loop-control"),
 		traceFile: resolve(logDir, "legacy-trace.txt"),
 		logFile: resolve(logDir, `coder-loop-${process.pid}.${timestamp}.log`),
 		repository,
@@ -2087,7 +2092,7 @@ function makeStatusTargetSnapshot(
 		evidenceRootDir: options?.evidenceRootDir ?? resolve(runtimeRoot, "evidence"),
 		logDir: options?.logDir ?? defaultLogDir,
 		traceFile: options?.traceFile ?? resolve(defaultLogDir, "legacy-trace.txt"),
-		loopFile: options?.loopFile ?? resolve(targetCwd, ".dev-loop"),
+		loopFile: options?.loopFile ?? resolve(chainPaths.chainDir, "loop-control"),
 		repository: options?.repository ?? repositoryOverride,
 		baseBranch: options?.baseBranch ?? null,
 		worktree: options?.worktree ?? false,
@@ -3898,20 +3903,30 @@ export function buildRuntimeBindings(input: {
 	issueRun: IssueRunContext
 	issueKind: IssueKind
 }): RuntimeBindings {
+	const root = loopDataRootPaths()
+	const chainPaths = chainRuntimePaths(root.rootDir, defaultChainNameForTarget(input.options.targetCwd))
+	const runPaths = runRuntimePaths(chainPaths.runsDir, input.runId)
+	const iterationPhase = input.options.preset.phases[0]?.name ?? "iteration"
 	return {
 		runId: input.runId,
 		targetCwd: input.options.targetCwd,
 		agentCwd: input.agentCwd,
 		workflowPath: input.options.workflowPath,
-		sharedContextPath: input.options.sharedContextPath,
-		statePath: input.options.statePath,
-		currentIssueFile: input.currentIssueFile ?? "",
-		issueDir: input.options.issueDir,
-		evidenceDir: input.evidenceDir ?? input.options.evidenceRootDir,
-		evidenceRootDir: input.options.evidenceRootDir,
-		logDir: input.options.logDir,
-		traceFile: runRuntimePaths(input.options.logDir, input.runId).phasePaths(input.options.preset.phases[0]?.name ?? "iteration").stdoutPath,
-		loopFile: input.options.loopFile,
+		sharedContextPath: chainPaths.sharedPath,
+		stateDbPath: root.stateDbPath,
+		currentIssueFile: runtimeArtifactPath(chainPaths.issuesDir, input.currentIssueFile),
+		issueDir: chainPaths.issuesDir,
+		evidenceDir: input.evidenceDir === null
+			? chainPaths.evidenceDir
+			: runtimeArtifactPath(chainPaths.evidenceDir, input.evidenceDir),
+		evidenceRootDir: chainPaths.evidenceDir,
+		logDir: chainPaths.runsDir,
+		loopDataRoot: root.rootDir,
+		chainName: chainPaths.chainName,
+		chainDir: chainPaths.chainDir,
+		runDir: runPaths.runDir,
+		eventsFile: runPaths.eventsPath,
+		iterationStdoutFile: runPaths.phasePaths(iterationPhase).stdoutPath,
 		presetDir: input.options.preset.presetDir,
 		fragmentIndex: renderFragmentIndex(input.options.preset),
 		runIdGeneration: input.issueRun.runIdGeneration,
@@ -3919,6 +3934,11 @@ export function buildRuntimeBindings(input: {
 		resumedStartedAt: input.issueRun.resumedStartedAt ?? "",
 		issueKind: input.issueKind ?? "",
 	}
+}
+
+function runtimeArtifactPath(directory: string, path: string | null): string {
+	if (path === null || path.trim() === "") return ""
+	return resolve(directory, basename(path))
 }
 
 export type ParsedIssueKind =
@@ -4319,6 +4339,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			agentCwd: input.agentCwd,
 			targetCwd: options.targetCwd,
 			presetDir: options.preset.presetDir,
+			loopDataRoot: loopDataRootPaths().rootDir,
 		})
 		const status: AgentRunStatus = {
 			label,
@@ -4786,11 +4807,12 @@ export type RunnerInvocationPaths = {
 	agentCwd: string
 	targetCwd: string
 	presetDir: string
+	loopDataRoot: string
 }
 
 export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: string, resume: ResumeDecision, paths: RunnerInvocationPaths): RunnerInvocation {
 	if (runner.kind === "claude") {
-		const dirs = [paths.presetDir]
+		const dirs = [paths.presetDir, paths.loopDataRoot]
 		if (paths.targetCwd !== paths.agentCwd) dirs.push(paths.targetCwd)
 		return {
 			kind: "spawn",

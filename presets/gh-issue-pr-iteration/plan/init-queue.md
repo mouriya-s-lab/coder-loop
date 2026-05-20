@@ -2,7 +2,7 @@
 
 ## Goal
 
-Write the actionable issues into `{{TARGET_CWD}}/.coder-loop/runtime/state.json` as queue items. Write per-issue handoff files into `runtime/issues/`. Validate the resulting runtime with `--check-runtime`.
+Write the actionable issues into the loop state store as queue items. Write per-issue handoff files into the loop-data chain issues directory. Validate the resulting runtime with `--check-runtime`.
 
 ## Inputs
 
@@ -12,7 +12,7 @@ Write the actionable issues into `{{TARGET_CWD}}/.coder-loop/runtime/state.json`
 
 ## Procedure
 
-1. Read existing `{{TARGET_CWD}}/.coder-loop/runtime/state.json`. Preserve existing `queue`, `repository`, `baseBranch`, `recentRuns`, `current` fields if present.
+1. Read existing loop state. Preserve existing `queue`, `repository`, `baseBranch`, `recentRuns`, `current` fields if present.
 
 2. **Queue selection** — only push these to `queue`:
 	   - `kind:code` `implementation` issues that are ready to run (have unmet `Blocks:` dependencies that ARE other queued issues, not external blockers);
