@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { resolve } from "node:path"
 import { stat } from "node:fs/promises"
 
-import { DEFAULT_ATTEMPT_TIMEOUT_SECONDS, loadPreset, parsePreset, type Preset, type PresetVariableSource } from "./loop"
+import { DEFAULT_ATTEMPT_TIMEOUT_SECONDS, loadPreset, parsePreset, reviewPhaseForPreset, triggeredPhasesAfter, type Preset, type PresetVariableSource } from "./loop"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const BUNDLED_PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
@@ -194,6 +194,44 @@ describe("parsePreset schema validation", () => {
 			{ name: "p", prompt: "p2.md", variables: { K: "item.id" } },
 		]
 		expect(() => parsePreset(root, "/tmp")).toThrow(/duplicate name "p"/)
+	})
+
+	test("accepts trigger phases and keeps review as the last non-trigger phase", () => {
+		const root: Record<string, unknown> = minimalRoot()
+		root.statuses = { continuable: ["queued"], terminal: ["blocked", "done"] }
+		root.phases = [
+			{ name: "iteration", prompt: "iter.md", variables: { K: "item.id" } },
+			{ name: "review", prompt: "review.md", variables: { K: "item.id" } },
+			{ name: "responder", prompt: "responder.md", trigger: { afterPhase: "review", whenStatus: "blocked" }, variables: { K: "item.id" } },
+		]
+
+		const preset = parsePreset(root, "/tmp")
+
+		expect(preset.phases[2]!.trigger).toEqual({ afterPhase: "review", whenStatus: "blocked" })
+		expect(reviewPhaseForPreset(preset).name).toBe("review")
+		expect(triggeredPhasesAfter(preset, "review", "blocked").map((phase) => phase.name)).toEqual(["responder"])
+		expect(triggeredPhasesAfter(preset, "review", "done")).toEqual([])
+	})
+
+	test("rejects trigger afterPhase that does not name a declared phase", () => {
+		const root: Record<string, unknown> = minimalRoot()
+		root.statuses = { continuable: ["queued"], terminal: ["blocked"] }
+		root.phases = [
+			{ name: "iteration", prompt: "iter.md", variables: { K: "item.id" } },
+			{ name: "responder", prompt: "responder.md", trigger: { afterPhase: "review", whenStatus: "blocked" }, variables: { K: "item.id" } },
+		]
+
+		expect(() => parsePreset(root, "/tmp")).toThrow(/trigger\.afterPhase: unknown phase "review"/)
+	})
+
+	test("rejects trigger whenStatus outside preset statuses", () => {
+		const root: Record<string, unknown> = minimalRoot()
+		root.phases = [
+			{ name: "iteration", prompt: "iter.md", variables: { K: "item.id" } },
+			{ name: "responder", prompt: "responder.md", trigger: { afterPhase: "iteration", whenStatus: "blocked" }, variables: { K: "item.id" } },
+		]
+
+		expect(() => parsePreset(root, "/tmp")).toThrow(/trigger\.whenStatus: unknown status "blocked"/)
 	})
 
 	test("rejects duplicate fragment id", () => {
