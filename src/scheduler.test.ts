@@ -133,6 +133,42 @@ describe("scheduler", () => {
 		})
 	})
 
+	test("does not spawn again after an externally completed active chain", async () => {
+		await withStore(async (store) => {
+			const chain = store.createChain("externally-completed", "gh-issue-pr-iteration")
+			const item = store.addItem(chain.id, { issue: 127, repoCwd: "/repo/a" })
+			const schedulerState = createSchedulerState()
+			const spawnedIssues: number[] = []
+
+			const firstTick = await runSchedulerTick({
+				store,
+				state: schedulerState,
+				spawnAgent: ({ item }) => {
+					spawnedIssues.push(item.issue)
+					return { runId: `run-${item.issue}`, pid: 5000 + item.issue, itemId: item.id }
+				},
+			})
+
+			expect(firstTick.spawned.map((record) => record.item.id)).toEqual([item.id])
+			expect(spawnedIssues).toEqual([127])
+			store.completeChain(chain.id)
+			expect(clearSchedulerRun(schedulerState, "run-127")?.repoCwd).toBe("/repo/a")
+
+			const laterTick = await runSchedulerTick({
+				store,
+				state: schedulerState,
+				spawnAgent: ({ item }) => {
+					spawnedIssues.push(item.issue)
+					return { runId: `run-${item.issue}`, pid: 6000 + item.issue, itemId: item.id }
+				},
+			})
+
+			expect(laterTick.activeChains).toBe(0)
+			expect(laterTick.spawned).toEqual([])
+			expect(spawnedIssues).toEqual([127])
+		})
+	})
+
 	test("does not query repo slots when no active chains are returned", async () => {
 		const schedulerState = createSchedulerState()
 		const store: SchedulerStore = {

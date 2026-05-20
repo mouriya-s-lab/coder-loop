@@ -14,6 +14,15 @@ import { closeSync, createWriteStream, openSync, realpathSync, type WriteStream 
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
 import { command, flag, option, optional, positional, run as runCmd, string as cmdString, subcommands } from "cmd-ts"
 import { type as arkType } from "arktype"
+import {
+	daemonDefaults,
+	defaultChainNameForTarget,
+	sendDaemonRequest,
+	startDaemonServer,
+	type DaemonRequest,
+	type DaemonResponse,
+	type DaemonServerOptions,
+} from "./daemon"
 import { dispatchSubcommand } from "./install-commands"
 
 const PKG_ROOT = resolve(import.meta.dir, "..")
@@ -103,6 +112,15 @@ export type StatusCommandArgs = {
 	output: "json"
 }
 
+type DaemonTargetIpcOptions = {
+	socketPath: string | null
+	pidPath: string | null
+	dbPath: string | null
+	rootDir: string | null
+	schedulerIntervalMs: number | null
+	spawnAgents: boolean
+}
+
 export type DaemonCommandArgs =
 	| {
 			action: "status"
@@ -110,6 +128,7 @@ export type DaemonCommandArgs =
 			configPath: string | null
 			repository: string | null
 			output: "json"
+			ipc: DaemonTargetIpcOptions
 		}
 	| {
 			action: "start"
@@ -121,6 +140,7 @@ export type DaemonCommandArgs =
 			dryRun: boolean
 			worktree: boolean
 			baseBranch: string | null
+			ipc: DaemonTargetIpcOptions
 		}
 	| {
 			action: "stop"
@@ -128,6 +148,7 @@ export type DaemonCommandArgs =
 			configPath: string | null
 			repository: string | null
 			dryRun: boolean
+			ipc: DaemonTargetIpcOptions
 		}
 	| {
 			action: "restart"
@@ -139,6 +160,7 @@ export type DaemonCommandArgs =
 			dryRun: boolean
 			worktree: boolean
 			baseBranch: string | null
+			ipc: DaemonTargetIpcOptions
 		}
 
 export type QueueUnblockCommandArgs = {
@@ -894,6 +916,7 @@ const daemonStatusCliCommand = command({
 		json: flag({ long: "json" }),
 		config: option({ long: "config", type: optional(cmdString) }),
 		repo: option({ long: "repo", type: optional(cmdString) }),
+		socket: option({ long: "socket", type: optional(cmdString) }),
 	},
 	handler: (args): CliCommand => {
 		if (!args.json) fail("daemon status: only --json output is supported for now. Usage: coder-loop daemon status <target> --json")
@@ -905,6 +928,7 @@ const daemonStatusCliCommand = command({
 				configPath: args.config ?? null,
 				repository: args.repo ?? null,
 				output: "json",
+				ipc: daemonIpcOptionsFromArgs(args),
 			},
 		}
 	},
@@ -922,6 +946,12 @@ const daemonStartCliCommand = command({
 		dryRun: flag({ long: "dry-run" }),
 		worktree: flag({ long: "worktree" }),
 		baseBranch: option({ long: "base-branch", type: optional(cmdString) }),
+		socket: option({ long: "socket", type: optional(cmdString) }),
+		pid: option({ long: "pid", type: optional(cmdString) }),
+		db: option({ long: "db", type: optional(cmdString) }),
+		root: option({ long: "root", type: optional(cmdString) }),
+		schedulerIntervalMs: option({ long: "scheduler-interval-ms", type: optional(cmdString) }),
+		noSpawnAgents: flag({ long: "no-spawn-agents" }),
 	},
 	handler: (args): CliCommand => ({
 		kind: "daemon",
@@ -935,6 +965,7 @@ const daemonStartCliCommand = command({
 			dryRun: args.dryRun,
 			worktree: args.worktree,
 			baseBranch: args.baseBranch ?? null,
+			ipc: daemonIpcOptionsFromArgs(args),
 		},
 	}),
 })
@@ -947,6 +978,7 @@ const daemonStopCliCommand = command({
 		config: option({ long: "config", type: optional(cmdString) }),
 		repo: option({ long: "repo", type: optional(cmdString) }),
 		dryRun: flag({ long: "dry-run" }),
+		socket: option({ long: "socket", type: optional(cmdString) }),
 	},
 	handler: (args): CliCommand => ({
 		kind: "daemon",
@@ -956,6 +988,7 @@ const daemonStopCliCommand = command({
 			configPath: args.config ?? null,
 			repository: args.repo ?? null,
 			dryRun: args.dryRun,
+			ipc: daemonIpcOptionsFromArgs(args),
 		},
 	}),
 })
@@ -972,6 +1005,12 @@ const daemonRestartCliCommand = command({
 		dryRun: flag({ long: "dry-run" }),
 		worktree: flag({ long: "worktree" }),
 		baseBranch: option({ long: "base-branch", type: optional(cmdString) }),
+		socket: option({ long: "socket", type: optional(cmdString) }),
+		pid: option({ long: "pid", type: optional(cmdString) }),
+		db: option({ long: "db", type: optional(cmdString) }),
+		root: option({ long: "root", type: optional(cmdString) }),
+		schedulerIntervalMs: option({ long: "scheduler-interval-ms", type: optional(cmdString) }),
+		noSpawnAgents: flag({ long: "no-spawn-agents" }),
 	},
 	handler: (args): CliCommand => ({
 		kind: "daemon",
@@ -985,6 +1024,7 @@ const daemonRestartCliCommand = command({
 			dryRun: args.dryRun,
 			worktree: args.worktree,
 			baseBranch: args.baseBranch ?? null,
+			ipc: daemonIpcOptionsFromArgs(args),
 		},
 	}),
 })
@@ -1058,6 +1098,42 @@ function parseDaemonMaxIterations(value: string | null): number | null {
 	return parsed
 }
 
+function parseDaemonSchedulerIntervalMs(value: string | null): number | null {
+	if (value === null) return null
+	const parsed = Number(value)
+	if (!Number.isInteger(parsed) || parsed <= 0) fail(`--scheduler-interval-ms must be a positive integer, got: ${value}`)
+	return parsed
+}
+
+function daemonIpcOptionsFromArgs(args: {
+	socket?: string | undefined
+	pid?: string | undefined
+	db?: string | undefined
+	root?: string | undefined
+	schedulerIntervalMs?: string | undefined
+	noSpawnAgents?: boolean | undefined
+}): DaemonTargetIpcOptions {
+	return {
+		socketPath: args.socket ?? null,
+		pidPath: args.pid ?? null,
+		dbPath: args.db ?? null,
+		rootDir: args.root ?? null,
+		schedulerIntervalMs: parseDaemonSchedulerIntervalMs(args.schedulerIntervalMs ?? null),
+		spawnAgents: args.noSpawnAgents === true ? false : true,
+	}
+}
+
+function defaultDaemonIpcOptions(): DaemonTargetIpcOptions {
+	return {
+		socketPath: null,
+		pidPath: null,
+		dbPath: null,
+		rootDir: null,
+		schedulerIntervalMs: null,
+		spawnAgents: true,
+	}
+}
+
 async function runStatusCommand(args: string[]): Promise<void> {
 	const parsed = await runCmd(statusCliCommand, args)
 	if (parsed.kind !== "status") return
@@ -1067,18 +1143,23 @@ async function runStatusCommand(args: string[]): Promise<void> {
 }
 
 async function runDaemonCommand(args: string[]): Promise<void> {
+	if (args[0] === "up") {
+		await runDaemonUpCommand(args.slice(1))
+		return
+	}
+	if (args[0] === "down") {
+		await runDaemonDownCommand(args.slice(1))
+		return
+	}
+	if (args[0] === "status" && !daemonStatusArgsIncludeTarget(args.slice(1))) {
+		await runGlobalDaemonStatusCommand(args.slice(1))
+		return
+	}
 	const parsed = await runCmd(daemonCliCommand, args)
 	if (parsed.value.kind !== "daemon") return
 	const daemonArgs = parsed.value.args
 	if (daemonArgs.action === "status") {
-		const snapshot = await buildCoderLoopStatusSnapshot({
-			targetCwd: daemonArgs.targetCwd,
-			configPath: daemonArgs.configPath,
-			repository: daemonArgs.repository,
-			output: "json",
-		})
-		StatusSnapshotBoundary.assert(snapshot)
-		process.stdout.write(`${stringifyStatusSnapshot(snapshot)}\n`)
+		await runDaemonTargetStatusCommand(daemonArgs)
 		return
 	}
 	if (daemonArgs.action === "start") {
@@ -1090,6 +1171,124 @@ async function runDaemonCommand(args: string[]): Promise<void> {
 		return
 	}
 	await runDaemonRestartCommand(daemonArgs)
+}
+
+type DaemonClientArgs = {
+	socketPath: string
+	json: boolean
+}
+
+async function runDaemonUpCommand(args: string[]): Promise<void> {
+	const options = parseDaemonUpArgs(args)
+	const defaults = daemonDefaults(options)
+	const handle = await startDaemonServer(options)
+	process.stdout.write(JSON.stringify({
+		ok: true,
+		data: {
+			pid: process.pid,
+			socketPath: defaults.socketPath,
+			pidPath: defaults.pidPath,
+			dbPath: defaults.dbPath,
+			startedAt: handle.startedAt,
+		},
+	}, null, "\t") + "\n")
+}
+
+async function runGlobalDaemonStatusCommand(args: string[]): Promise<void> {
+	const parsed = parseDaemonClientArgs(args)
+	if (!parsed.json) fail("daemon status: global daemon status requires --json")
+	await writeDaemonClientResponse(await sendDaemonRequest(parsed.socketPath, { cmd: "daemon.status" }))
+}
+
+async function runDaemonDownCommand(args: string[]): Promise<void> {
+	const parsed = parseDaemonClientArgs(args)
+	await writeDaemonClientResponse(await sendDaemonRequest(parsed.socketPath, { cmd: "daemon.shutdown" }))
+}
+
+async function writeDaemonClientResponse(response: DaemonResponse): Promise<void> {
+	process.stdout.write(JSON.stringify(response, null, "\t") + "\n")
+	if (!response.ok) process.exitCode = 1
+}
+
+function parseDaemonUpArgs(args: string[]): DaemonServerOptions {
+	const options: DaemonServerOptions = {}
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index]
+		if (arg === undefined) fail(`Missing daemon up argument at index ${index}`)
+		const [name, inlineValue] = splitFlag(arg)
+		switch (name) {
+			case "--socket":
+				options.socketPath = readFlagValue(args, index, inlineValue, name)
+				if (inlineValue === null) index++
+				break
+			case "--pid":
+				options.pidPath = readFlagValue(args, index, inlineValue, name)
+				if (inlineValue === null) index++
+				break
+			case "--db":
+				options.dbPath = readFlagValue(args, index, inlineValue, name)
+				if (inlineValue === null) index++
+				break
+			case "--root":
+				options.rootDir = readFlagValue(args, index, inlineValue, name)
+				if (inlineValue === null) index++
+				break
+			case "--scheduler-interval-ms": {
+				const value = readFlagValue(args, index, inlineValue, name)
+				if (inlineValue === null) index++
+				const parsed = Number(value)
+				if (!Number.isInteger(parsed) || parsed <= 0) fail(`--scheduler-interval-ms must be a positive integer, got: ${value}`)
+				options.schedulerIntervalMs = parsed
+				break
+			}
+			case "--no-spawn-agents":
+				rejectInlineValue(inlineValue, name)
+				options.spawnAgents = false
+				break
+			default:
+				fail(`daemon up: unknown argument ${arg}`)
+		}
+	}
+	return options
+}
+
+function parseDaemonClientArgs(args: string[]): DaemonClientArgs {
+	const defaults = daemonDefaults()
+	const parsed: DaemonClientArgs = { socketPath: defaults.socketPath, json: false }
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index]
+		if (arg === undefined) fail(`Missing daemon client argument at index ${index}`)
+		const [name, inlineValue] = splitFlag(arg)
+		switch (name) {
+			case "--socket":
+				parsed.socketPath = readFlagValue(args, index, inlineValue, name)
+				if (inlineValue === null) index++
+				break
+			case "--json":
+				rejectInlineValue(inlineValue, name)
+				parsed.json = true
+				break
+			default:
+				fail(`daemon: unknown argument ${arg}`)
+		}
+	}
+	return parsed
+}
+
+function daemonStatusArgsIncludeTarget(args: string[]): boolean {
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index]
+		if (arg === undefined) continue
+		const [name, inlineValue] = splitFlag(arg)
+		if (name === "--json") continue
+		if (name === "--socket") {
+			if (inlineValue === null) index++
+			continue
+		}
+		if (arg.startsWith("--")) continue
+		return true
+	}
+	return false
 }
 
 async function runQueueCommand(args: string[]): Promise<void> {
@@ -2119,6 +2318,12 @@ function isPidAlive(pid: number): boolean {
 
 export type DaemonStartPlan = {
 	targetCwd: string
+	socketPath: string
+	pidPath: string
+	dbPath: string
+	rootDir: string
+	schedulerIntervalMs: number
+	spawnAgents: boolean
 	command: string[]
 	commandLine: string
 	stdoutPath: string
@@ -2126,61 +2331,95 @@ export type DaemonStartPlan = {
 	requireBrowserEvidence: boolean
 }
 
-type DaemonStartResult =
-	| {
-			action: "start"
-			target: string
-			pid: number | null
-			command: string[]
-			stdoutPath: string
-			stderrPath: string
-			requireBrowserEvidence: boolean
-	  }
-	| {
-			action: "start"
-			target: string
-			alreadyRunning: true
-			pid: number
-			source: StatusProcessInfo["source"]
-			loopFile: StatusLoopFileSnapshot
-			command: string | null
-			requireBrowserEvidence: boolean | null
-	  }
+type DaemonTargetImportTrace = {
+	cmd: string
+	issue?: number
+	ok: boolean
+	error?: string
+}
+
+type DaemonTargetImportResult = {
+	chainName: string
+	chain: JsonObject
+	itemsSeen: number
+	imported: number
+	updated: number
+	skipped: number
+	trace: DaemonTargetImportTrace[]
+}
+
+type DaemonTargetStatusResult = {
+	action: "status"
+	target: string
+	socketPath: string
+	chainName: string
+	daemon: DaemonResponse
+	chain: JsonObject | null
+	chainError: string | null
+	items: JsonValue[]
+	slots: JsonValue[]
+}
+
+type DaemonStartResult = {
+	action: "start"
+	target: string
+	socketPath: string
+	pidPath: string
+	dbPath: string
+	daemon: {
+		started: boolean
+		pid: number | null
+		command: string[]
+		stdoutPath: string
+		stderrPath: string
+		spawnAgents: boolean
+	}
+	import: DaemonTargetImportResult
+	status: DaemonTargetStatusResult
+	requireBrowserEvidence: boolean
+}
 
 type DaemonStopPlan = {
 	action: "stop"
 	target: string
-	loopFile: string
-	loopFileExists: boolean
-	pid: number | null
-	pidAlive: boolean | null
+	socketPath: string
+	chainName: string
 }
 
 type DaemonStopResult = DaemonStopPlan & {
 	stopped: true
-	pidExited: boolean | null
+	updated: number
+	items: JsonValue[]
+	daemon: DaemonResponse
 }
 
 export function buildDaemonStartPlan(args: Extract<DaemonCommandArgs, { action: "start" }>): DaemonStartPlan {
 	const targetCwd = resolve(args.targetCwd)
 	const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")
-	const logDir = resolve(targetCwd, DEFAULT_LOG_DIR)
-	const stdoutPath = resolve(logDir, `coder-loop-daemon-${timestamp}.stdout.log`)
-	const stderrPath = resolve(logDir, `coder-loop-daemon-${timestamp}.stderr.log`)
+	const options = daemonServerOptionsFromIpc(args.ipc)
+	const defaults = daemonDefaults(options)
+	const stdoutPath = resolve(defaults.rootDir, `daemon-up-${timestamp}.stdout.log`)
+	const stderrPath = resolve(defaults.rootDir, `daemon-up-${timestamp}.stderr.log`)
 	const command = [
 		process.argv[0] ?? "bun",
 		resolve(import.meta.dir, "loop.ts"),
-		"--target-cwd",
-		targetCwd,
+		"daemon",
+		"up",
 	]
-	if (args.configPath !== null) command.push("--config", args.configPath)
-	if (args.repository !== null) command.push("--repo", args.repository)
-	if (args.requireBrowserEvidence) command.push("--require-browser-evidence")
-	if (args.worktree) command.push("--worktree")
-	if (args.baseBranch !== null) command.push("--base-branch", args.baseBranch)
-	if (args.maxIterations !== null) command.push(String(args.maxIterations))
+	command.push("--root", defaults.rootDir)
+	command.push("--socket", defaults.socketPath)
+	command.push("--pid", defaults.pidPath)
+	command.push("--db", defaults.dbPath)
+	command.push("--scheduler-interval-ms", String(defaults.schedulerIntervalMs))
+	if (!defaults.spawnAgents) command.push("--no-spawn-agents")
 	return {
 		targetCwd,
+		socketPath: defaults.socketPath,
+		pidPath: defaults.pidPath,
+		dbPath: defaults.dbPath,
+		rootDir: defaults.rootDir,
+		schedulerIntervalMs: defaults.schedulerIntervalMs,
+		spawnAgents: defaults.spawnAgents,
 		command,
 		commandLine: command.map(shellQuote).join(" "),
 		stdoutPath,
@@ -2194,8 +2433,10 @@ async function runDaemonStartCommand(args: Extract<DaemonCommandArgs, { action: 
 	if (args.dryRun) {
 		process.stdout.write([
 			`daemon start dry-run: target=${plan.targetCwd}`,
-			`daemon start dry-run: command=${plan.commandLine}`,
+			`daemon start dry-run: socket=${plan.socketPath}`,
+			`daemon start dry-run: daemon-up-command=${plan.commandLine}`,
 			`daemon start dry-run: require-browser-evidence=${plan.requireBrowserEvidence}`,
+			`daemon start dry-run: spawn-agents=${plan.spawnAgents}`,
 			`daemon start dry-run: stdout=${plan.stdoutPath}`,
 			`daemon start dry-run: stderr=${plan.stderrPath}`,
 			"",
@@ -2207,27 +2448,184 @@ async function runDaemonStartCommand(args: Extract<DaemonCommandArgs, { action: 
 }
 
 async function executeDaemonStart(args: Extract<DaemonCommandArgs, { action: "start" }>, plan = buildDaemonStartPlan(args)): Promise<DaemonStartResult> {
-	const current = await buildCoderLoopStatusSnapshot({
+	const probe = await probeDaemon(plan.socketPath)
+	let started = false
+	let pid: number | null = null
+	if (!probe.reachable) {
+		pid = await startDetachedDaemon(plan)
+		started = true
+		await waitForDaemonReady(plan.socketPath)
+	}
+	const imported = await importTargetStateViaDaemon(args, plan.socketPath)
+	const status = await buildDaemonTargetStatus({
+		action: "status",
 		targetCwd: args.targetCwd,
 		configPath: args.configPath,
 		repository: args.repository,
 		output: "json",
+		ipc: args.ipc,
 	})
-	const live = findOwnedLiveProcess(current)
-	if (live !== null) {
+	return {
+		action: "start",
+		target: plan.targetCwd,
+		socketPath: plan.socketPath,
+		pidPath: plan.pidPath,
+		dbPath: plan.dbPath,
+		daemon: {
+			started,
+			pid,
+			command: plan.command,
+			stdoutPath: plan.stdoutPath,
+			stderrPath: plan.stderrPath,
+			spawnAgents: plan.spawnAgents,
+		},
+		import: imported,
+		status,
+		requireBrowserEvidence: plan.requireBrowserEvidence,
+	}
+}
+
+async function runDaemonStopCommand(args: Extract<DaemonCommandArgs, { action: "stop" }>): Promise<void> {
+	const plan = buildDaemonStopPlan(args)
+	if (args.dryRun) {
+		process.stdout.write(JSON.stringify({ ...plan, dryRun: true }, null, "\t") + "\n")
+		return
+	}
+	const result = await executeDaemonStop(plan)
+	process.stdout.write(JSON.stringify(result, null, "\t") + "\n")
+}
+
+function buildDaemonStopPlan(args: Extract<DaemonCommandArgs, { action: "stop" }>): DaemonStopPlan {
+	const defaults = daemonDefaults(daemonServerOptionsFromIpc(args.ipc))
+	const targetCwd = resolve(args.targetCwd)
+	return {
+		action: "stop",
+		target: targetCwd,
+		socketPath: defaults.socketPath,
+		chainName: defaultChainNameForTarget(targetCwd),
+	}
+}
+
+async function executeDaemonStop(plan: DaemonStopPlan): Promise<DaemonStopResult> {
+	const daemon = await sendDaemonRequest(plan.socketPath, { cmd: "daemon.status" })
+	const chainResponse = await sendDaemonRequest(plan.socketPath, { cmd: "chain.get", chain: plan.chainName })
+	if (!chainResponse.ok) return { ...plan, stopped: true, updated: 0, items: [], daemon }
+	const items = await listDaemonItemsForTarget(plan.socketPath, plan.chainName, plan.target)
+	let updated = 0
+	const stoppedItems: JsonValue[] = []
+	for (const item of items) {
+		if (!isObjectRecord(item) || typeof item.id !== "number") continue
+		const response = await sendDaemonRequest(plan.socketPath, {
+			cmd: "item.update",
+			itemId: item.id,
+			patch: { status: "paused" },
+		})
+		if (!response.ok) throw new Error(`item.update ${item.id}: ${response.error}`)
+		updated++
+		stoppedItems.push(response.data)
+	}
+	return { ...plan, stopped: true, updated, items: stoppedItems, daemon }
+}
+
+async function runDaemonRestartCommand(args: Extract<DaemonCommandArgs, { action: "restart" }>): Promise<void> {
+	const requireBrowserEvidence = args.requireBrowserEvidence
+	if (args.dryRun) {
+		const startPlan = buildDaemonStartPlan({ ...args, action: "start", requireBrowserEvidence })
+		process.stdout.write(JSON.stringify({
+			action: "restart",
+			target: startPlan.targetCwd,
+			dryRun: true,
+			stop: buildDaemonStopPlan({ ...args, action: "stop" }),
+			start: { command: startPlan.command, commandLine: startPlan.commandLine },
+		}, null, "\t") + "\n")
+		return
+	}
+	const stopped = await executeDaemonStop(buildDaemonStopPlan({ ...args, action: "stop" }))
+	const started = await executeDaemonStart({ ...args, action: "start", requireBrowserEvidence, maxIterations: args.maxIterations, dryRun: false })
+	process.stdout.write(JSON.stringify({
+		action: "restart",
+		target: resolve(args.targetCwd),
+		stopped,
+		started,
+	}, null, "\t") + "\n")
+}
+
+async function runDaemonTargetStatusCommand(args: Extract<DaemonCommandArgs, { action: "status" }>): Promise<void> {
+	const status = await buildDaemonTargetStatus(args)
+	process.stdout.write(JSON.stringify(status, null, "\t") + "\n")
+}
+
+async function buildDaemonTargetStatus(args: Extract<DaemonCommandArgs, { action: "status" }>): Promise<DaemonTargetStatusResult> {
+	const target = resolve(args.targetCwd)
+	const defaults = daemonDefaults(daemonServerOptionsFromIpc(args.ipc))
+	const chainName = defaultChainNameForTarget(target)
+	const daemonProbe = await probeDaemon(defaults.socketPath)
+	if (!daemonProbe.reachable) {
 		return {
-			action: "start",
-			target: plan.targetCwd,
-			alreadyRunning: true,
-			pid: live.pid,
-			source: live.source,
-			loopFile: current.processes.loopFile,
-			command: current.processes.loopFile.command,
-			requireBrowserEvidence: current.processes.loopFile.requireBrowserEvidence,
+			action: "status",
+			target,
+			socketPath: defaults.socketPath,
+			chainName,
+			daemon: { ok: false, error: daemonProbe.error },
+			chain: null,
+			chainError: daemonProbe.error,
+			items: [],
+			slots: [],
 		}
 	}
+	const daemon = daemonProbe.response
+	const chainResponse = await sendDaemonRequest(defaults.socketPath, { cmd: "chain.get", chain: chainName })
+	if (!chainResponse.ok) {
+		return {
+			action: "status",
+			target,
+			socketPath: defaults.socketPath,
+			chainName,
+			daemon,
+			chain: null,
+			chainError: chainResponse.error,
+			items: [],
+			slots: [],
+		}
+	}
+	const chain = requireJsonObject(chainResponse.data, "chain.get")
+	const items = await listDaemonItemsForTarget(defaults.socketPath, chainName, target)
+	const slotResponse = await sendDaemonRequest(defaults.socketPath, { cmd: "slot.list" })
+	const allSlots = slotResponse.ok && Array.isArray(slotResponse.data) ? slotResponse.data : []
+	const slots = allSlots.filter((slot) => daemonSlotMatchesTarget(slot, chain, target))
+	return {
+		action: "status",
+		target,
+		socketPath: defaults.socketPath,
+		chainName,
+		daemon,
+		chain,
+		chainError: null,
+		items,
+		slots,
+	}
+}
 
-	await mkdir(dirname(plan.stdoutPath), { recursive: true })
+function daemonServerOptionsFromIpc(ipc: DaemonTargetIpcOptions): DaemonServerOptions {
+	const options: DaemonServerOptions = { spawnAgents: ipc.spawnAgents }
+	if (ipc.socketPath !== null) options.socketPath = ipc.socketPath
+	if (ipc.pidPath !== null) options.pidPath = ipc.pidPath
+	if (ipc.dbPath !== null) options.dbPath = ipc.dbPath
+	if (ipc.rootDir !== null) options.rootDir = ipc.rootDir
+	if (ipc.schedulerIntervalMs !== null) options.schedulerIntervalMs = ipc.schedulerIntervalMs
+	return options
+}
+
+async function probeDaemon(socketPath: string): Promise<{ reachable: true; response: DaemonResponse } | { reachable: false; error: string }> {
+	try {
+		return { reachable: true, response: await sendDaemonRequest(socketPath, { cmd: "daemon.status" }, 1_000) }
+	} catch (error) {
+		return { reachable: false, error: errorMessage(error) }
+	}
+}
+
+async function startDetachedDaemon(plan: DaemonStartPlan): Promise<number | null> {
+	await mkdir(plan.rootDir, { recursive: true })
 	const stdoutFd = openSync(plan.stdoutPath, "a")
 	const stderrFd = openSync(plan.stderrPath, "a")
 	try {
@@ -2237,91 +2635,217 @@ async function executeDaemonStart(args: Extract<DaemonCommandArgs, { action: "st
 			stdio: ["ignore", stdoutFd, stderrFd],
 		})
 		child.unref()
-		return {
-			action: "start",
-			target: plan.targetCwd,
-			pid: child.pid ?? null,
-			command: plan.command,
-			stdoutPath: plan.stdoutPath,
-			stderrPath: plan.stderrPath,
-			requireBrowserEvidence: plan.requireBrowserEvidence,
-		}
+		return child.pid ?? null
 	} finally {
 		closeSync(stdoutFd)
 		closeSync(stderrFd)
 	}
 }
 
-async function runDaemonStopCommand(args: Extract<DaemonCommandArgs, { action: "stop" }>): Promise<void> {
+async function waitForDaemonReady(socketPath: string): Promise<void> {
+	const deadline = Date.now() + 5_000
+	let lastError = "daemon did not become ready"
+	while (Date.now() < deadline) {
+		const probe = await probeDaemon(socketPath)
+		if (probe.reachable) return
+		lastError = probe.error
+		await sleep(100)
+	}
+	throw new Error(`daemon start timed out waiting for ${socketPath}: ${lastError}`)
+}
+
+async function importTargetStateViaDaemon(args: Extract<DaemonCommandArgs, { action: "start" }>, socketPath: string): Promise<DaemonTargetImportResult> {
 	const snapshot = await buildCoderLoopStatusSnapshot({
 		targetCwd: args.targetCwd,
 		configPath: args.configPath,
 		repository: args.repository,
 		output: "json",
 	})
-	const plan = buildDaemonStopPlan(snapshot)
-	if (args.dryRun) {
-		process.stdout.write(JSON.stringify({ ...plan, dryRun: true }, null, "\t") + "\n")
-		return
+	const targetCwd = snapshot.target.cwd
+	const chainName = defaultChainNameForTarget(targetCwd)
+	const chainRequest: Extract<DaemonRequest, { cmd: "chain.create" }> = {
+		cmd: "chain.create",
+		name: chainName,
+		preset: snapshot.target.preset?.name ?? DEFAULT_PRESET_NAME,
 	}
-	const result = await executeDaemonStop(plan)
-	process.stdout.write(JSON.stringify(result, null, "\t") + "\n")
-}
-
-function buildDaemonStopPlan(snapshot: CoderLoopStatusSnapshot): DaemonStopPlan {
-	const loopFile = snapshot.processes.loopFile
-	return {
-		action: "stop",
-		target: snapshot.target.cwd,
-		loopFile: loopFile.path,
-		loopFileExists: loopFile.exists,
-		pid: loopFile.pid,
-		pidAlive: loopFile.pidAlive,
-	}
-}
-
-async function executeDaemonStop(plan: DaemonStopPlan): Promise<DaemonStopResult> {
-	if (plan.loopFileExists) await removeLoopFile(plan.loopFile)
-	let pidExited: boolean | null = null
-	if (plan.pid !== null && plan.pidAlive === true) {
-		try {
-			process.kill(plan.pid, "SIGTERM")
-			pidExited = await waitForPidExit(plan.pid, 5_000)
-		} catch {
-			// The loop may have exited after status was read; removing the loop file is the durable stop signal.
-			pidExited = true
+	if (snapshot.target.repository !== null) chainRequest.repo = snapshot.target.repository
+	if (snapshot.target.baseBranch !== null) chainRequest.baseBranch = snapshot.target.baseBranch
+	const trace: DaemonTargetImportTrace[] = []
+	const chainResponse = await sendDaemonRequest(socketPath, chainRequest)
+	trace.push(daemonImportTrace("chain.create", undefined, chainResponse))
+	if (!chainResponse.ok) throw new Error(`chain.create ${chainName}: ${chainResponse.error}`)
+	const chain = requireJsonObject(chainResponse.data, "chain.create")
+	const queue = await readTargetQueue(snapshot.target.statePath)
+	let imported = 0
+	let updated = 0
+	let skipped = 0
+	for (const entry of queue) {
+		const request = itemAddRequestFromQueueEntry(entry, chainName, targetCwd)
+		if (request === null) {
+			skipped++
+			continue
 		}
+		const response = await sendDaemonRequest(socketPath, request)
+		trace.push(daemonImportTrace("item.add", request.issue, response))
+		if (response.ok) {
+			imported++
+			continue
+		}
+		if (!response.error.includes("UNIQUE constraint failed")) throw new Error(`item.add ${request.issue}: ${response.error}`)
+		await updateDuplicateDaemonItem(socketPath, chainName, request, trace)
+		updated++
 	}
-	return { ...plan, stopped: true, pidExited }
+	return {
+		chainName,
+		chain,
+		itemsSeen: queue.length,
+		imported,
+		updated,
+		skipped,
+		trace,
+	}
 }
 
-async function runDaemonRestartCommand(args: Extract<DaemonCommandArgs, { action: "restart" }>): Promise<void> {
-	const current = await buildCoderLoopStatusSnapshot({
-		targetCwd: args.targetCwd,
-		configPath: args.configPath,
-		repository: args.repository,
-		output: "json",
-	})
-	const requireBrowserEvidence = args.requireBrowserEvidence || current.processes.loopFile.requireBrowserEvidence === true
-	if (args.dryRun) {
-		const startPlan = buildDaemonStartPlan({ ...args, action: "start", requireBrowserEvidence })
-		process.stdout.write(JSON.stringify({
-			action: "restart",
-			target: startPlan.targetCwd,
-			dryRun: true,
-			stop: { targetCwd: args.targetCwd, configPath: args.configPath, repository: args.repository },
-			start: { command: startPlan.command, commandLine: startPlan.commandLine },
-		}, null, "\t") + "\n")
-		return
+async function readTargetQueue(statePath: string): Promise<unknown[]> {
+	const raw = await readFile(statePath, "utf-8")
+	const parsed: unknown = JSON.parse(raw)
+	if (!isObjectRecord(parsed) || !Array.isArray(parsed.queue)) throw new Error(`${statePath}: expected state object with queue array`)
+	return parsed.queue
+}
+
+function daemonImportTrace(cmd: string, issue: number | undefined, response: DaemonResponse): DaemonTargetImportTrace {
+	const entry: DaemonTargetImportTrace = { cmd, ok: response.ok }
+	if (issue !== undefined) entry.issue = issue
+	if (!response.ok) entry.error = response.error
+	return entry
+}
+
+function itemAddRequestFromQueueEntry(entry: unknown, chainName: string, targetCwd: string): Extract<DaemonRequest, { cmd: "item.add" }> | null {
+	if (!isObjectRecord(entry) || typeof entry.issue !== "number" || !Number.isInteger(entry.issue)) return null
+	const request: Extract<DaemonRequest, { cmd: "item.add" }> = {
+		cmd: "item.add",
+		chain: chainName,
+		issue: entry.issue,
+		repoCwd: targetCwd,
+		extra: importExtraFromQueueEntry(entry),
 	}
-	const stopped = await executeDaemonStop(buildDaemonStopPlan(current))
-	const started = await executeDaemonStart({ ...args, action: "start", requireBrowserEvidence, maxIterations: args.maxIterations, dryRun: false })
-	process.stdout.write(JSON.stringify({
-		action: "restart",
-		target: current.target.cwd,
-		stopped,
-		started,
-	}, null, "\t") + "\n")
+	if (typeof entry.status === "string") request.status = entry.status
+	if (typeof entry.priority === "string") request.priority = entry.priority
+	if (typeof entry.attempts === "number" && Number.isInteger(entry.attempts)) request.attempts = entry.attempts
+	const title = nullableStringFromEntry(entry.title)
+	if (title !== undefined) request.title = title
+	const branch = nullableStringFromEntry(entry.branch)
+	if (branch !== undefined) request.branch = branch
+	const pr = nullableIntegerFromEntry(entry.pr)
+	if (pr !== undefined) request.pr = pr
+	const lastRunId = nullableStringFromEntry(entry.lastRunId)
+	if (lastRunId !== undefined) request.lastRunId = lastRunId
+	const issueFile = nullableStringFromEntry(entry.issueFile)
+	if (issueFile !== undefined) request.issueFile = issueFile
+	const evidenceDir = nullableStringFromEntry(entry.evidenceDir)
+	if (evidenceDir !== undefined) request.evidenceDir = evidenceDir
+	const agentCwd = nullableStringFromEntry(entry.agentCwd)
+	if (agentCwd !== undefined) request.agentCwd = agentCwd
+	if (entry.runner === "claude" || entry.runner === "codex" || entry.runner === null) request.runner = entry.runner
+	return request
+}
+
+function nullableStringFromEntry(value: unknown): string | null | undefined {
+	if (typeof value === "string") return value
+	if (value === null) return null
+	return undefined
+}
+
+function nullableIntegerFromEntry(value: unknown): number | null | undefined {
+	if (typeof value === "number" && Number.isInteger(value)) return value
+	if (value === null) return null
+	return undefined
+}
+
+const DAEMON_IMPORT_BASE_KEYS = new Set([
+	"issue",
+	"status",
+	"attempts",
+	"title",
+	"priority",
+	"branch",
+	"pr",
+	"lastRunId",
+	"issueFile",
+	"evidenceDir",
+	"agentCwd",
+	"runner",
+	"extra",
+])
+
+function importExtraFromQueueEntry(entry: Record<string, unknown>): JsonObject {
+	const extra: JsonObject = isJsonObject(entry.extra) ? { ...entry.extra } : {}
+	for (const [key, value] of Object.entries(entry)) {
+		if (DAEMON_IMPORT_BASE_KEYS.has(key)) continue
+		if (isJsonValue(value)) extra[key] = value
+	}
+	return extra
+}
+
+async function updateDuplicateDaemonItem(
+	socketPath: string,
+	chainName: string,
+	request: Extract<DaemonRequest, { cmd: "item.add" }>,
+	trace: DaemonTargetImportTrace[],
+): Promise<void> {
+	const existing = await findDaemonItem(socketPath, chainName, request.issue, request.repoCwd)
+	if (existing === null || typeof existing.id !== "number") throw new Error(`item.add ${request.issue}: duplicate row was not found by item.list`)
+	const response = await sendDaemonRequest(socketPath, {
+		cmd: "item.update",
+		itemId: existing.id,
+		patch: itemPatchFromImportRequest(request),
+	})
+	trace.push(daemonImportTrace("item.update", request.issue, response))
+	if (!response.ok) throw new Error(`item.update ${existing.id}: ${response.error}`)
+}
+
+async function findDaemonItem(socketPath: string, chainName: string, issue: number, repoCwd: string): Promise<JsonObject | null> {
+	const items = await listDaemonItemsForTarget(socketPath, chainName, repoCwd)
+	for (const item of items) {
+		if (!isObjectRecord(item) || Array.isArray(item)) continue
+		if (item.issue === issue && item.repoCwd === repoCwd) return item as JsonObject
+	}
+	return null
+}
+
+function itemPatchFromImportRequest(request: Extract<DaemonRequest, { cmd: "item.add" }>): Extract<DaemonRequest, { cmd: "item.update" }>["patch"] {
+	const patch: Extract<DaemonRequest, { cmd: "item.update" }>["patch"] = {}
+	if (request.status !== undefined) patch.status = request.status
+	if (request.priority !== undefined) patch.priority = request.priority
+	if (request.attempts !== undefined) patch.attempts = request.attempts
+	if (request.title !== undefined) patch.title = request.title
+	if (request.branch !== undefined) patch.branch = request.branch
+	if (request.pr !== undefined) patch.pr = request.pr
+	if (request.lastRunId !== undefined) patch.lastRunId = request.lastRunId
+	if (request.issueFile !== undefined) patch.issueFile = request.issueFile
+	if (request.evidenceDir !== undefined) patch.evidenceDir = request.evidenceDir
+	if (request.agentCwd !== undefined) patch.agentCwd = request.agentCwd
+	if (request.runner !== undefined) patch.runner = request.runner
+	if (request.extra !== undefined) patch.extra = request.extra
+	return patch
+}
+
+async function listDaemonItemsForTarget(socketPath: string, chainName: string, targetCwd: string): Promise<JsonValue[]> {
+	const response = await sendDaemonRequest(socketPath, { cmd: "item.list", chain: chainName })
+	if (!response.ok) throw new Error(`item.list ${chainName}: ${response.error}`)
+	if (!Array.isArray(response.data)) throw new Error(`item.list ${chainName}: expected array`)
+	return response.data.filter((item) => isObjectRecord(item) && item.repoCwd === targetCwd)
+}
+
+function daemonSlotMatchesTarget(slot: JsonValue, chain: JsonObject, targetCwd: string): boolean {
+	return isObjectRecord(slot)
+		&& slot.chainId === chain.id
+		&& slot.repoCwd === targetCwd
+}
+
+function requireJsonObject(value: JsonValue, label: string): JsonObject {
+	if (!isJsonObject(value)) throw new Error(`${label}: expected object response`)
+	return value
 }
 
 export type QueueUnblockMutationOutcome =
@@ -2396,6 +2920,7 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 				dryRun: true,
 				worktree: options.worktree,
 				baseBranch: options.baseBranch,
+				ipc: defaultDaemonIpcOptions(),
 			}),
 		}
 	} else {
@@ -2413,6 +2938,7 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 				dryRun: false,
 				worktree: options.worktree,
 				baseBranch: options.baseBranch,
+				ipc: defaultDaemonIpcOptions(),
 			}),
 		}
 	}
@@ -2453,8 +2979,7 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 function daemonResultIndicatesRunning(daemon: QueueUnblockCommandResult["daemon"]): boolean {
 	if (!daemon.requested) return false
 	if (daemon.dryRun) return false
-	if ("alreadyRunning" in daemon.result) return daemon.result.alreadyRunning === true
-	return daemon.result.pid !== null
+	return daemon.result.status.daemon.ok
 }
 
 async function loadLoopOptionsForTarget(targetCwdInput: string, configPathInput: string | null, repository: string | null): Promise<LoopOptions> {

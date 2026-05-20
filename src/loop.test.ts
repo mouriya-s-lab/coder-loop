@@ -504,7 +504,7 @@ describe("buildCoderLoopStatusSnapshot", () => {
 })
 
 describe("buildDaemonStartPlan", () => {
-	test("renders the detached loop command with --require-browser-evidence when requested", async () => {
+	test("renders the central daemon up command and preserves requested evidence flag", async () => {
 		const target = await makeStatusTarget()
 		const plan = buildDaemonStartPlan({
 			action: "start",
@@ -516,16 +516,22 @@ describe("buildDaemonStartPlan", () => {
 			dryRun: true,
 			worktree: false,
 			baseBranch: null,
+			ipc: {
+				socketPath: null,
+				pidPath: null,
+				dbPath: null,
+				rootDir: null,
+				schedulerIntervalMs: null,
+				spawnAgents: true,
+			},
 		})
 
 		expect(plan.targetCwd).toBe(target)
-		expect(plan.command).toContain("--target-cwd")
-		expect(plan.command).toContain(target)
-		expect(plan.command).toContain("--repo")
-		expect(plan.command).toContain("Mouriya-Emma/coder-loop-fixture")
-		expect(plan.command).toContain("--require-browser-evidence")
-		expect(plan.command).toContain("10")
-		expect(plan.commandLine).toContain("--require-browser-evidence")
+		expect(plan.command).toContain("daemon")
+		expect(plan.command).toContain("up")
+		expect(plan.command).toContain("--socket")
+		expect(plan.command).toContain("--db")
+		expect(plan.command).not.toContain("--target-cwd")
 		expect(plan.requireBrowserEvidence).toBe(true)
 	})
 })
@@ -3045,8 +3051,8 @@ describe("worktreeBasePath / worktreePathForItem", () => {
 	})
 })
 
-describe("buildDaemonStartPlan with worktree flags", () => {
-	test("--worktree and --base-branch appear in daemon start command when set", async () => {
+describe("buildDaemonStartPlan central daemon flags", () => {
+	test("uses central daemon IPC options instead of per-target loop flags", async () => {
 		const target = await makeStatusTarget()
 		const plan = buildDaemonStartPlan({
 			action: "start",
@@ -3058,17 +3064,25 @@ describe("buildDaemonStartPlan with worktree flags", () => {
 			dryRun: false,
 			worktree: true,
 			baseBranch: "develop",
+			ipc: {
+				socketPath: "/sock/custom.sock",
+				pidPath: "/sock/custom.pid",
+				dbPath: "/sock/custom.db",
+				rootDir: "/sock",
+				schedulerIntervalMs: 1234,
+				spawnAgents: false,
+			},
 		})
 
-		expect(plan.command).toContain("--worktree")
-		expect(plan.command).toContain("--base-branch")
-		expect(plan.command).toContain("develop")
-		expect(plan.commandLine).toContain("--worktree")
-		expect(plan.commandLine).toContain("--base-branch")
-		expect(plan.commandLine).toContain("develop")
+		expect(plan.command).toContain("/sock/custom.sock")
+		expect(plan.command).toContain("/sock/custom.db")
+		expect(plan.command).toContain("--no-spawn-agents")
+		expect(plan.command).not.toContain("--worktree")
+		expect(plan.command).not.toContain("--base-branch")
+		expect(plan.command).not.toContain("develop")
 	})
 
-	test("--worktree and --base-branch are absent when worktree is false", async () => {
+	test("omits no-spawn flag when central scheduler spawning is enabled", async () => {
 		const target = await makeStatusTarget()
 		const plan = buildDaemonStartPlan({
 			action: "start",
@@ -3080,10 +3094,17 @@ describe("buildDaemonStartPlan with worktree flags", () => {
 			dryRun: false,
 			worktree: false,
 			baseBranch: null,
+			ipc: {
+				socketPath: null,
+				pidPath: null,
+				dbPath: null,
+				rootDir: null,
+				schedulerIntervalMs: null,
+				spawnAgents: true,
+			},
 		})
 
-		expect(plan.command).not.toContain("--worktree")
-		expect(plan.command).not.toContain("--base-branch")
+		expect(plan.command).not.toContain("--no-spawn-agents")
 	})
 })
 

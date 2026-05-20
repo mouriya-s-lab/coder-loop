@@ -17,7 +17,8 @@ operator / supervisor 的默认入口是 `coder-loop` 自己暴露的只读或�
 | 初始化 target | `coder-loop install <target> --repo <owner>/<repo>` | 幂等写 slash command、runtime layout、config、workflow starter，并检查 GitHub label / PATH / skill |
 | 体检 target | `coder-loop doctor <target> --repo <owner>/<repo>` | 只读检查 bootstrap layers 和 live runtime health |
 | 读机器状态 | `coder-loop status <target> --json` | supervisor / script 读取当前 config/state/queue/current/events/process snapshot |
-| 管理后台循环 | `coder-loop daemon status/start/stop/restart <target>` | 启停 detached loop，避免手写 `nohup` / PID 归属逻辑；`status` 需要 `--json` |
+| 管理 target queue | `coder-loop daemon status/start/stop/restart <target>` | 通过集中 daemon socket 导入、查询、暂停 target queue；`status` 需要 `--json` |
+| 管理集中 daemon | `coder-loop daemon up/status/down` | 启动单进程 SQLite + Unix socket daemon，或通过 socket 查询 / 关闭它 |
 | 人类快捷入口 | `/dev-loop [N]` | target 内通过 slash command 调用 daemon API，`N` 会传给 `--max-iterations` |
 
 常规排障顺序：
@@ -25,18 +26,61 @@ operator / supervisor 的默认入口是 `coder-loop` 自己暴露的只读或�
 ```bash
 coder-loop doctor /path/to/target --repo <owner>/<repo>
 coder-loop status /path/to/target --json | jq '.state.kind, .queue, .current, .processes.loopFile'
-coder-loop daemon status /path/to/target --json | jq '.processes'
+coder-loop daemon status /path/to/target --json | jq '.chain, .items, .slots'
 ```
 
 判断 daemon：
 
 ```bash
+coder-loop daemon up
+coder-loop daemon status --json
+coder-loop daemon down
 coder-loop daemon start /path/to/target
+coder-loop daemon status /path/to/target --json
 coder-loop daemon stop /path/to/target
 coder-loop daemon restart /path/to/target --max-iterations 10
 ```
 
-`daemon start` 对已运行 target 幂等：返回 `alreadyRunning: true`，不会再开一个 loop。`daemon stop` 读取 `.dev-loop` 归属并 SIGTERM 记录的 live pid，同时删除 loop file。`daemon restart` 输出一个 JSON object，不会串接 stop/start 两份 JSON。
+`daemon up` 前台运行单进程 daemon。默认持有 SQLite DB
+`~/Ext/loop-data/state.db`，写 PID 到 `~/Ext/loop-data/daemon.pid`，监听 Unix
+domain socket `~/Ext/loop-data/daemon.sock`，并创建
+`~/Ext/loop-data/chains/<chain-name>/daemon/<timestamp>/{engine,stdout,stderr}.log`。
+`daemon status --json` 和 `daemon down` 不需要 target path，它们通过 socket
+发送 `daemon.status` / `daemon.shutdown` JSONL 请求。测试或开发时可用：
+
+```bash
+coder-loop daemon up \
+  --root .cache/daemon-dev \
+  --db .cache/daemon-dev/state.db \
+  --socket .cache/daemon-dev/daemon.sock \
+  --pid .cache/daemon-dev/daemon.pid
+coder-loop daemon status --socket .cache/daemon-dev/daemon.sock --json
+coder-loop daemon down --socket .cache/daemon-dev/daemon.sock
+```
+
+`daemon start <target>` 是旧运维入口的兼容层：先尝试连接集中
+daemon socket；socket 已在线时通过 `chain.create` + `item.add` 把 target
+的 `state.json.queue` 导入集中 DB，不再启动 per-target loop 进程；socket
+不在线时自动 detached 启动 `daemon up`，等 socket 可用后走同一条导入路径。
+`daemon status <target> --json` 通过 socket 返回该 target 对应的
+`chain` / `items` / `slots`；`daemon stop <target>` 通过 `item.update` 把该
+target 导入的 items 标记为 `paused`，daemon 本身保持在线。`daemon restart`
+输出一个 JSON object，不会串接 stop/start 两份 JSON。
+
+集中 daemon socket 协议是一行一个 JSON request，响应也是一行 JSON：
+
+```json
+{ "cmd": "daemon.status" }
+{ "cmd": "chain.create", "name": "release", "preset": "gh-issue-pr-iteration", "repo": "owner/repo", "baseBranch": "main" }
+{ "cmd": "item.add", "chain": "release", "issue": 127, "repoCwd": "/path/to/repo", "priority": "high" }
+{ "cmd": "item.list", "chain": "release" }
+{ "cmd": "chain.complete", "chain": "release" }
+{ "cmd": "slot.list" }
+{ "cmd": "daemon.shutdown" }
+```
+
+响应 shape 固定为 `{ "ok": true, "data": ... }` 或
+`{ "ok": false, "error": "..." }`。
 
 `status <target> --json` 是 supervisor 的稳定读取契约。它会在 config/state 缺失或损坏时仍输出 JSON，让外部逻辑根据 `state.kind` 分支，而不是从 stderr 猜测失败类型。当前顶层字段：
 
@@ -263,7 +307,7 @@ coder-loop --target-cwd . --check-runtime          # 验证仍合法
 
 文件：`<target>/.dev-loop`，引擎绝对路径暴露为 `runtime.loopFile`。
 
-常规启停请用 `coder-loop daemon start/stop/restart <target>`。本节是理解 daemon/status 输出或做手工救援时的底层语义。
+常规 target queue 导入 / 暂停请用 `coder-loop daemon start/stop/restart <target>`。本节是理解 legacy sentinel 或做手工救援时的底层语义。
 
 **创建时点**：`coder-loop` 进程启动、`--check-runtime` / `--dry-run` 通过、即将进入主循环时（`src/loop.ts:367-371`）。
 
@@ -297,10 +341,10 @@ state: /abs/path/.coder-loop/runtime/state.json
 | `uninstall <target>` | 仅删 `.claude/commands/dev-*.md` | — |
 | `doctor <target>` | 只读四层体检 + live runtime health | `--repo <slug>` |
 | `status <target> --json` | 只读 JSON runtime/process snapshot | `--config <path>` `--repo <slug>` |
-| `daemon status <target> --json` | daemon 视角 JSON snapshot | `--config <path>` `--repo <slug>` |
-| `daemon start <target>` | detached 启动 loop；已运行时幂等返回 | `--config <path>` `--repo <slug>` `--require-browser-evidence` `--max-iterations <N>` `--dry-run` |
-| `daemon stop <target>` | 删除 loop file 并 SIGTERM owned pid | `--config <path>` `--repo <slug>` `--dry-run` |
-| `daemon restart <target>` | stop 后 start，输出单个 JSON object | `--config <path>` `--repo <slug>` `--require-browser-evidence` `--max-iterations <N>` `--dry-run` |
+| `daemon status <target> --json` | socket 查询 target chain / items / slots | `--config <path>` `--repo <slug>` `--socket <path>` |
+| `daemon start <target>` | socket 在线则导入 target queue；不在线则自动 up 后导入 | `--config <path>` `--repo <slug>` `--require-browser-evidence` `--dry-run` `--socket <path>` `--root <path>` `--db <path>` |
+| `daemon stop <target>` | 通过 socket 将 target items 标记为 `paused` | `--config <path>` `--repo <slug>` `--dry-run` `--socket <path>` |
+| `daemon restart <target>` | stop 后 start，输出单个 JSON object | `--config <path>` `--repo <slug>` `--require-browser-evidence` `--dry-run` `--socket <path>` `--root <path>` `--db <path>` |
 | `queue unblock <target>` | 将一个 `blocked` item 改回 `queued` 并清除 blocker metadata；用于 `kind:blocked` accept 后反向解除源仓 block | `--issue <id>` `--config <path>` `--repo <slug>` `--start-daemon` `--require-browser-evidence` `--dry-run` |
 
 跑 loop 自身时**不**带子命令，直接进 7.2。
@@ -361,7 +405,7 @@ jq '.queue |= map(if .issue == 42 then .status = "queued" | .attempts = 0 else .
 ### 看活着的 coder-loop 进程
 
 ```bash
-coder-loop daemon status . --json | jq '.processes'
+coder-loop status . --json | jq '.processes'
 cat .dev-loop      # fallback: pid / cwd / log / command 都在里面
 ```
 

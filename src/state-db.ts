@@ -128,6 +128,7 @@ export type StateStore = {
 	listChains: () => Chain[]
 	listActiveChains: () => Chain[]
 	listRepoCwdsForChain: (chainId: number) => string[]
+	listItems: (chainId: number, status?: string | null) => Item[]
 	completeChain: (id: number) => Chain
 	addItem: (chainId: number, item: NewItem) => Item
 	getItem: (id: number) => Item | null
@@ -204,6 +205,7 @@ export function openStateStore(path: string = DEFAULT_STATE_DB_PATH): StateStore
 		listChains: () => listChains(db),
 		listActiveChains: () => listActiveChains(db),
 		listRepoCwdsForChain: (chainId) => listRepoCwdsForChain(db, chainId),
+		listItems: (chainId, status) => listItems(db, chainId, status),
 		completeChain: (id) => completeChain(db, id),
 		addItem: (chainId, item) => addItem(db, chainId, item),
 		getItem: (id) => getItem(db, id),
@@ -323,6 +325,23 @@ export function listRepoCwdsForChain(db: Database, chainId: number): string[] {
 		ORDER BY repo_cwd
 	`).all(chainId)
 	return rows.map((row) => expectRow<{ repo_cwd: string }>(row, "listRepoCwdsForChain").repo_cwd)
+}
+
+export function listItems(db: Database, chainId: number, status: string | null = null): Item[] {
+	const rows = status === null
+		? db.query(`
+			SELECT *
+			FROM items
+			WHERE chain_id = ?
+			ORDER BY id
+		`).all(chainId)
+		: db.query(`
+			SELECT *
+			FROM items
+			WHERE chain_id = ? AND status = ?
+			ORDER BY id
+		`).all(chainId, status)
+	return rows.map((row) => itemFromRow(expectRow<ItemRow>(row, "listItems")))
 }
 
 export function completeChain(db: Database, id: number): Chain {
