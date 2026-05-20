@@ -2846,4 +2846,17 @@ describe("worktree git integration", () => {
 		const content = await readFile(readmePath, "utf-8")
 		expect(content).toBe("# fixture\n")
 	})
+
+	test("AC#2: item.agentCwd persists worktree path through serializeState round-trip", async () => {
+		const { clone } = await makeGitFixture()
+		const wtPath = ensureWorktreeForItem(clone, "main", "42", null)
+
+		const item = makeItem({ issue: 42, status: "in_progress" })
+		item.agentCwd = wtPath
+		const state = makeState({ queue: [item] })
+
+		const serialized = serializeState(state)
+		const parsed = JSON.parse(serialized)
+		expect(parsed.queue[0].agentCwd).toBe(wtPath)
+	})
 })
