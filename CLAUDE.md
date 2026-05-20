@@ -45,7 +45,7 @@ L2: Preset（presets/<name>/）
 - **Daemon operations**: `coder-loop daemon status <target> --json`, `coder-loop daemon start|restart <target> [--max-iterations N] [--require-browser-evidence]`, `coder-loop daemon stop <target>` — stable start/stop/process ownership API.
 - **Check runtime**: `bun run src/loop.ts --target-cwd <path> --check-runtime`
 - **Dry run**: `bun run src/loop.ts --target-cwd <path> --dry-run` (渲染 + 选 item，不 spawn agent)
-- **Install target**: `coder-loop install <target> [--repo <owner/repo>] [--preset <name>] [--force] [--dry-run] [--install-skills]` — 幂等四层 bootstrap（slash commands + runtime 目录 + config + workflow.md + GitHub `kind:code`/`kind:comment` 标签 + PATH/skill 检查）。源：`src/install-commands.ts`。
+- **Install target**: `coder-loop install <target> [--repo <owner/repo>] [--preset <name>] [--force] [--dry-run] [--install-skills]` — 幂等四层 bootstrap（slash commands + runtime 目录 + config + workflow.md + GitHub `kind:code`/`kind:comment`/`kind:code-spike`/`kind:blocked` 标签 + PATH/skill 检查）。源：`src/install-commands.ts`。
 - **Uninstall target**: `coder-loop uninstall <target>` — 仅删 `.claude/commands/dev-*.md`；runtime 和 GitHub labels 保留。
 - **Doctor**: `coder-loop doctor <target> [--repo <owner/repo>]` — 只读四层体检（target 文件 / GitHub 标签 / 操作员 PATH / writing-issue skill 版本）并输出 live runtime health。
 - **Plan phase**: `/dev-plan` （`gh-issue-pr-iteration` preset 配套的规划器）

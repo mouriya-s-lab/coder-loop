@@ -26,6 +26,8 @@ If no PR exists, continue only when the trace/handoff/live issue evidence indica
 For `ISSUE_KIND` = `code-spike`, no PR is the expected route. Continue to `review/source-writing-spike-gate` so review verifies the issue comment, spike branch/SHA, command evidence, and no-merge semantics before any closure action.
 If a PR exists for a `code-spike` issue, still emit `source_spike_review`; that gate owns the retry because the route itself forbids implementation PRs.
 
+For `ISSUE_KIND` = `blocked`, treat the issue as PR-backed implementation work. A no-PR unblock is only allowed when live evidence proves the blocker was already gone on the base branch; otherwise missing PR/e2e unblock evidence is a retry.
+
 ## Output verdict
 
 Choose exactly one:

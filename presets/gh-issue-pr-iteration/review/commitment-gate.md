@@ -2,16 +2,17 @@
 
 ## Goal
 
-For `kind:code` issues, verify that the PR actually delivers every commitment the issue body declared in `## 验收标准` and `## 继承验证义务` tables. Each row is a machine-checkable Command + Expect pair. Any row whose Expect does not match → `changes_requested`.
+For `kind:code` and `kind:blocked` issues, verify that the PR actually delivers every commitment the issue body declared in `## 验收标准` and `## 继承验证义务` tables. Each row is a machine-checkable Command + Expect pair. Any row whose Expect does not match → `changes_requested`.
 
 This gate replaces the prior reliance on review thinking to read the issue body and self-judge whether commitments are met. Review previously saw the constraints, rationalized them, and let work through anyway (`Mouriya-Emma/coder-loop#4` root cause). This fragment forces row-by-row execution.
 
 ## When this gate runs
 
-- `ISSUE_KIND` is `code` AND the live issue body contains a `## 验收标准` table → run the gate.
+- `ISSUE_KIND` is `code` or `blocked` AND the live issue body contains a `## 验收标准` table → run the gate.
 - `ISSUE_KIND` is `comment` (spike / discussion) → skip via `commitment_skipped`. Commitments for spike issues are verified by `review/spike-followup-gate`, not here.
+- `ISSUE_KIND` is `code-spike` → skip via `commitment_skipped`. Source-writing spike commitments are verified by `review/source-writing-spike-gate`.
 - `ISSUE_KIND` is empty (legacy unlabeled issue) → skip via `commitment_skipped`. Do not block the 50+ pre-`kind:*` issues.
-- The live issue body has no `## 验收标准` heading → skip via `commitment_skipped` even on `kind:code`. Some `kind:code` issues are too small to carry a structured acceptance table; do not invent rows.
+- The live issue body has no `## 验收标准` heading → skip via `commitment_skipped` even on `kind:code` or `kind:blocked`. Some issues are too small to carry a structured acceptance table; do not invent rows, but `kind:blocked` still needs blocker-resolution evidence in `review/evidence-gate`.
 
 ## Inputs
 

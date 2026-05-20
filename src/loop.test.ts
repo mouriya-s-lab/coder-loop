@@ -1081,6 +1081,16 @@ describe("renderPrompt with bundled preset", () => {
 		expect(body).not.toContain("gh pr merge")
 	})
 
+	test("blocked iteration route narrows scope before implementation", async () => {
+		const readContext = await readFile(resolve(BUNDLED_PRESET_DIR, "iter/read-context.md"), "utf-8")
+		const resolveBlocker = await readFile(resolve(BUNDLED_PRESET_DIR, "iter/resolve-blocker.md"), "utf-8")
+		expect(readContext).toContain("`ISSUE_KIND` is `blocked` → read `iter/resolve-blocker`")
+		expect(resolveBlocker).toContain("Use only when `ISSUE_KIND` is `blocked`")
+		expect(resolveBlocker).toContain("the `Unblocks: owner/repo#N` back-link")
+		expect(resolveBlocker).toContain("replays the blocked path")
+		expect(resolveBlocker).toContain("`needs_implementation` -> read `iter/implement`")
+	})
+
 	test("comment spike fragment remains no-code", async () => {
 		const body = await readFile(resolve(BUNDLED_PRESET_DIR, "iter/spike-comment.md"), "utf-8")
 		expect(body).toContain("Do not write code files")
@@ -1093,6 +1103,17 @@ describe("renderPrompt with bundled preset", () => {
 		expect(sourceSpikeGate).toContain("no implementation PR exists")
 		expect(sourceSpikeGate).not.toContain("gh pr merge")
 		expect(acceptPr).toContain("gh pr merge <PR_NUMBER>")
+	})
+
+	test("blocked review path requires e2e unblock evidence and downstream side effect", async () => {
+		const evidenceGate = await readFile(resolve(BUNDLED_PRESET_DIR, "review/evidence-gate.md"), "utf-8")
+		const acceptPr = await readFile(resolve(BUNDLED_PRESET_DIR, "review/action-accept-pr.md"), "utf-8")
+		expect(evidenceGate).toContain("For `ISSUE_KIND` = `blocked`")
+		expect(evidenceGate).toContain("replays the blocked path")
+		expect(evidenceGate).toContain("unit test, typecheck, diff review")
+		expect(acceptPr).toContain("parse the `Unblocks: owner/repo#N` back-link")
+		expect(acceptPr).toContain("re-queue the blocked item")
+		expect(acceptPr).toContain("coder-loop status <SOURCE_TARGET_CWD> --json --repo <SOURCE_REPO>")
 	})
 
 	test("accepted PR GitHub side-effect approval failures stop instead of retrying the same accepted PR", async () => {
@@ -1411,6 +1432,22 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 		expect(runtime.issueKind).toBe("code-spike")
 	})
 
+	test("buildRuntimeBindings passes through 'blocked' kind unchanged", async () => {
+		const preset = await bundledPreset()
+		const options = await makeFixtureOptions(preset)
+		const issueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null }
+		const runtime = buildRuntimeBindings({
+			options,
+			runId: "run-6",
+			currentIssueFile: "/tmp/issue.md",
+			evidenceDir: "/tmp/evidence",
+			agentCwd: options.targetCwd,
+			issueRun,
+			issueKind: "blocked",
+		})
+		expect(runtime.issueKind).toBe("blocked")
+	})
+
 	test("buildConfigBindings reads repository / baseBranch / requireBrowserEvidence from options", async () => {
 		const preset = await bundledPreset()
 		const options = await makeFixtureOptions(preset)
@@ -1454,17 +1491,23 @@ describe("parseKindFromLabels", () => {
 		expect(result).toEqual({ ok: true, kind: "code-spike" })
 	})
 
+	test("returns kind='blocked' for a single kind:blocked label", () => {
+		const result = parseKindFromLabels(["kind:blocked"])
+		expect(result).toEqual({ ok: true, kind: "blocked" })
+	})
+
 	test("routes issue kinds to their iteration fragments", () => {
 		expect(iterationRouteForIssueKind("code")).toBe("iter/classify-scope")
 		expect(iterationRouteForIssueKind(null)).toBe("iter/classify-scope")
 		expect(iterationRouteForIssueKind("comment")).toBe("iter/spike-comment")
 		expect(iterationRouteForIssueKind("code-spike")).toBe("iter/source-writing-spike")
+		expect(iterationRouteForIssueKind("blocked")).toBe("iter/resolve-blocker")
 	})
 
 	test("returns ok=false when multiple kind labels are present", () => {
-		const result = parseKindFromLabels(["kind:code", "kind:comment", "kind:code-spike"])
+		const result = parseKindFromLabels(["kind:code", "kind:comment", "kind:code-spike", "kind:blocked"])
 		expect(result.ok).toBe(false)
-		if (!result.ok) expect(result.error).toMatch(/expected exactly one kind:\* label, found 3/)
+		if (!result.ok) expect(result.error).toMatch(/expected exactly one kind:\* label, found 4/)
 	})
 
 	test("returns ok=false for unknown kind:* values", () => {
@@ -1483,6 +1526,12 @@ describe("parseKindFromLabels", () => {
 		const item = makeItem({ issue: 44, status: "queued" })
 		item.extra.kind = "code-spike"
 		expect(await resolveIssueKind(null, "44", item)).toEqual({ ok: true, kind: "code-spike" })
+	})
+
+	test("resolveIssueKind reads local queue blocked kind when repository is not configured", async () => {
+		const item = makeItem({ issue: 45, status: "queued" })
+		item.extra.kind = "blocked"
+		expect(await resolveIssueKind(null, "45", item)).toEqual({ ok: true, kind: "blocked" })
 	})
 })
 

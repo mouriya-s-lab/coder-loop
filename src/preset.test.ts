@@ -27,6 +27,7 @@ const EXPECTED_FRAGMENTS = [
 	{ id: "iter/index", role: "iter", relPath: "iter/index.md" },
 	{ id: "iter/read-context", role: "iter", relPath: "iter/read-context.md" },
 	{ id: "iter/classify-scope", role: "iter", relPath: "iter/classify-scope.md" },
+	{ id: "iter/resolve-blocker", role: "iter", relPath: "iter/resolve-blocker.md" },
 	{ id: "iter/implement", role: "iter", relPath: "iter/implement.md" },
 	{ id: "iter/spike-comment", role: "iter", relPath: "iter/spike-comment.md" },
 	{ id: "iter/source-writing-spike", role: "iter", relPath: "iter/source-writing-spike.md" },

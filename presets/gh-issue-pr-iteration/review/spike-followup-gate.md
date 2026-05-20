@@ -9,7 +9,8 @@ This gate exists because spike issues' value is in the follow-up they unlock. A 
 ## When this gate runs
 
 - `ISSUE_KIND` is `comment` → run the gate.
-- `ISSUE_KIND` is `code` → skip via `spike_gate_skipped`. Code issues do not have a spike comment deliverable.
+- `ISSUE_KIND` is `code` or `blocked` → skip via `spike_gate_skipped`. PR-backed code and blocker-resolution issues do not have a spike comment deliverable.
+- `ISSUE_KIND` is `code-spike` → skip via `spike_gate_skipped`. Source-writing spike follow-up is verified by `review/source-writing-spike-gate`.
 - `ISSUE_KIND` is empty (legacy unlabeled) → skip via `spike_gate_skipped`. Legacy issues are not spike-shaped.
 
 ## Inputs

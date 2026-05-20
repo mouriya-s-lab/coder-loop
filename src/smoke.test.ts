@@ -54,6 +54,48 @@ async function makeMinimalTarget(presetName: string, configShape: ConfigShape = 
 	return dir
 }
 
+async function makeGhIssuePrTarget(kind: string, issue: number): Promise<string> {
+	const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-gh-issue-"))
+	const runtime = resolve(dir, ".coder-loop/runtime")
+	await mkdir(resolve(runtime, "issues"), { recursive: true })
+	await mkdir(resolve(runtime, `evidence/issue-${issue}`), { recursive: true })
+	await mkdir(resolve(runtime, "logs"), { recursive: true })
+	await writeFile(resolve(dir, ".coder-loop/workflow.md"), "# gh issue fixture workflow\n")
+	await writeFile(resolve(runtime, "shared.md"), "# shared\n\nNo durable facts.\n")
+	await writeFile(resolve(runtime, "config.json"), JSON.stringify({ preset: "gh-issue-pr-iteration" }, null, 2))
+	await writeFile(resolve(runtime, `issues/${issue}.md`), [
+		`# Issue ${issue}`,
+		"",
+		"Unblocks: owner/repo#9000",
+		"",
+		`Fixture handoff for kind:${kind}.`,
+		"",
+	].join("\n"))
+	await writeFile(resolve(runtime, "state.json"), JSON.stringify({
+		version: 1,
+		queue: [{
+			issue,
+			status: "queued",
+			attempts: 0,
+			title: `Fixture kind:${kind}`,
+			priority: "high",
+			branch: null,
+			pr: null,
+			lastRunId: null,
+			issueFile: `.coder-loop/runtime/issues/${issue}.md`,
+			evidenceDir: `.coder-loop/runtime/evidence/issue-${issue}`,
+			agentCwd: null,
+			runner: null,
+			kind,
+		}],
+		repository: null,
+		baseBranch: "main",
+		recentRuns: [],
+		current: null,
+	}, null, 2))
+	return dir
+}
+
 async function pathExists(path: string): Promise<boolean> {
 	try {
 		await readFile(path)
@@ -203,6 +245,22 @@ describe("smoke: single-phase-example preset", () => {
 		expect(stderr).toContain("Dry run: iterationRoute=iter/source-writing-spike")
 		expect(stderr).toContain("Dry run: noMerge=true")
 		expect(stderr).not.toContain("gh pr merge")
+	})
+
+	test("--dry-run selects the blocked resolver route for fixture", async () => {
+		const target = await makeGhIssuePrTarget("blocked", 9002)
+		const proc = Bun.spawnSync({
+			cmd: ["bun", LOOP_ENTRY, "--target-cwd", target, "--dry-run"],
+			cwd: REPO_ROOT,
+			stdout: "pipe",
+			stderr: "pipe",
+		})
+		const stderr = new TextDecoder().decode(proc.stderr)
+		expect(proc.exitCode).toBe(0)
+		expect(stderr).toContain("Dry run: selected=9002")
+		expect(stderr).toContain("Dry run: kind=blocked")
+		expect(stderr).toContain("Dry run: iterationRoute=iter/resolve-blocker")
+		expect(stderr).not.toContain("Dry run: noMerge=true")
 	})
 
 	test("--check-runtime passes with config.toml only", async () => {

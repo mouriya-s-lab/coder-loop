@@ -6,7 +6,7 @@ For a `kind:comment` issue (spike / design question / open dialogue), the delive
 
 ## When this fragment runs
 
-`ISSUE_KIND` is `comment`. If `ISSUE_KIND` is empty or `code`, this fragment does not apply — return to `iter/classify-scope` from `iter/read-context`.
+`ISSUE_KIND` is `comment`. If `ISSUE_KIND` is `blocked`, use `iter/resolve-blocker` instead. If `ISSUE_KIND` is empty or `code`, this fragment does not apply — return to `iter/classify-scope` from `iter/read-context`.
 
 ## Hard constraints
 

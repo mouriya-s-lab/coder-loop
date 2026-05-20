@@ -19,6 +19,16 @@ Remote PR checks are Phase C mergeability signals. They do not replace iteration
 
 If local CI-parity could not run because of Docker, act installation, image pull, network, runner tooling, or third-party limitations, choose retry or blocked depending on whether an immediate retry can help. Do not accept as if CI passed.
 
+## Blocker-resolution evidence
+
+For `ISSUE_KIND` = `blocked`, evidence must be at least as strong as ordinary PR-backed `kind:code` evidence and must additionally prove the blocker is gone:
+
+- the evidence packet must identify the exact blocking condition from the issue body or latest comments;
+- the packet must include the `Unblocks: owner/repo#N` back-link when present, or explicitly state that no back-link exists;
+- the packet must show an e2e/integration/runtime command that replays the blocked path and exits successfully after the change;
+- a unit test, typecheck, diff review, or "code changed so it should be fixed" explanation is not enough for blocked resolution;
+- if the blocked path requires an external environment that iteration could not access, choose retry or blocked. Do not accept the PR as an unblock.
+
 ## Target workflow evidence
 
 Use the latest complete evidence packet from the PR thread for the current iteration when present; use the PR body only as the immutable opening evidence packet. Do not accept evidence that was only created by overwriting the PR body after retry, because that loses review history.

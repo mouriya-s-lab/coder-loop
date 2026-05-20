@@ -8,7 +8,7 @@ The deliverable is a GitHub issue comment plus evidence artifacts and, when usef
 
 ## Applicability
 
-`ISSUE_KIND` must be `code-spike`. If `ISSUE_KIND` is `comment`, use `iter/spike-comment` instead. If `ISSUE_KIND` is `code` or empty, use `iter/classify-scope` instead.
+`ISSUE_KIND` must be `code-spike`. If `ISSUE_KIND` is `comment`, use `iter/spike-comment` instead. If `ISSUE_KIND` is `blocked`, use `iter/resolve-blocker` instead. If `ISSUE_KIND` is `code` or empty, use `iter/classify-scope` instead.
 
 ## Branch and source writes
 

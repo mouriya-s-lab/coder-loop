@@ -13,7 +13,7 @@ Take classified deliverables and emit a draft issue body for each. At this fragm
 
 ## Procedure
 
-1. For each `implementation` / `spike` / `source-writing-spike` / `parent` candidate, draft a body skeleton.
+1. For each `implementation` / `blocker-resolution` / `spike` / `source-writing-spike` / `parent` candidate, draft a body skeleton.
 
 2. **Atomicity test** (per user-level skill hard constraint, also in `contract.md` §5):
    - Can you write a single coherent `## Why` (or `## 问题` / `## 目标` for future-work) paragraph that justifies the entire body without listing multiple distinct triggers?
@@ -57,6 +57,32 @@ Take classified deliverables and emit a draft issue body for each. At this fragm
    ## 依赖关系
    - Depends on: #<N>（<原因>）
    - Blocks: #<M>（<原因>）
+   ```
+
+   `blocker-resolution` (kind:blocked):
+
+   ```markdown
+   ## 目标
+   解除 <owner/repo#N 或具体 runtime blocker>。
+
+   ## 上下文
+   - **Repo**: <owner>/<repo>（path: <local>）
+   - **Blocked source**: <issue / PR / review comment / runtime log source>
+   - **Unblocks**: <owner/repo#N>
+
+   ## 阻塞条件
+   <当前 blocked 的具体条件：命令、runtime path、service、issue、PR 或 evidence gap。>
+
+   Unblocks: <owner/repo#N>
+
+   ## 预期结果
+   <被阻塞的 loop/item 可以重新执行；写用户/agent 能观察到什么，不写实现方案。>
+
+   ## 验收标准
+   <plan/checkpoint-author 将填表；必须包含 blocked path e2e/integration 复测。>
+
+   ## 依赖关系
+   - Unblocks: <owner/repo#N>
    ```
 
    `spike` (kind:comment):

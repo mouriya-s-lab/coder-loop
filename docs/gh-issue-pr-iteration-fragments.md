@@ -178,6 +178,7 @@ iter/read-context
   ├─ context_ready
   │    ├─ ISSUE_KIND == "comment"     → iter/spike-comment    (spike / design dialogue)
   │    ├─ ISSUE_KIND == "code-spike"  → iter/source-writing-spike (source-writing no-merge spike)
+  │    ├─ ISSUE_KIND == "blocked"     → iter/resolve-blocker  (PR-backed blocker removal)
   │    └─ ISSUE_KIND == "code" or ""  → iter/classify-scope   (legacy 无 label 走 code 路径)
   └─ infrastructure_failure           → iter/handoff
 ```
@@ -203,6 +204,15 @@ iter/commit-pr
   ├─ pr_ready              → iter/handoff
   ├─ no_code_change        → iter/handoff
   └─ commit_or_pr_blocked  → iter/handoff
+```
+
+**Blocked 分支**（解除具体 blocker）：
+
+```
+iter/resolve-blocker
+  ├─ needs_implementation  → iter/implement
+  ├─ handoff_only          → iter/handoff
+  └─ blocked               → iter/handoff   (含证明 blocker / 缺失 unblock 输入的命令或 query)
 ```
 
 **Comment 分支**（spike / design dialogue）：
@@ -256,7 +266,7 @@ common/runtime-contract → common/github-routing → common/state-contract → 
 | 5 | `review/title-intent-gate` | PR title 与 issue title 主语一致性（仅 PR-backed 路径 + 存在 PR） |
 | 6 | `review/evidence-gate` | 四层证据 packet 是否齐 |
 | 7 | `review/caveat-honesty-gate` | 证据 caveat 是否诚实 |
-| 8 | `review/commitment-gate` | 逐行兑现 issue `## 验收标准` 表（仅 `kind:code` + 表存在） |
+| 8 | `review/commitment-gate` | 逐行兑现 issue `## 验收标准` 表（`kind:code` / `kind:blocked` + 表存在） |
 | 9 | `review/spike-followup-gate` | spike comment 是否选了 `## 结果分支` + 提议足够 sub-issue（仅 `kind:comment`） |
 | 10 | `review/code-gate` | merge-ability / CI / 代码质量（无 PR 时自跳过） |
 | 11 | `review/issue-closure-gate` | 选 terminal action |
@@ -302,7 +312,7 @@ review/evidence-gate
 
 review/commitment-gate
   ├─ commitment_passed  → review/spike-followup-gate
-  ├─ commitment_skipped → review/spike-followup-gate     (ISSUE_KIND ≠ code 或无 ## 验收标准 表)
+  ├─ commitment_skipped → review/spike-followup-gate     (ISSUE_KIND 不是 code/blocked 或无 ## 验收标准 表)
   └─ commitment_failed  → review/action-retry            (引用每个失败行)
 
 review/spike-followup-gate
@@ -329,8 +339,9 @@ review/issue-closure-gate
 
 ```
 review/action-accept-pr
-  ├─ accepted_pr_closed   → review/update-state (transition: accepted_pr)
-  └─ accept_pr_failed     → review/action-retry
+  ├─ accepted_pr_closed              → review/update-state (transition: accepted_pr)
+  ├─ accept_pr_infrastructure_failed → review/action-stop
+  └─ accept_pr_retry_needed          → review/action-retry
 
 review/action-accept-no-pr
   ├─ accepted_no_pr_closed → review/update-state (transition: accepted_no_pr)
@@ -373,16 +384,17 @@ review/update-state
 
 `ISSUE_KIND` 由引擎在 spawn 前 `gh issue view --json labels` fetch，注入 prompt 模板。无 repo 的本地 fixture 可用 queue item 的 `kind` 字段模拟。四个 review gate 用它自跳过：
 
-| Gate | `kind:code` | `kind:comment` | `kind:code-spike` | empty / legacy |
-|---|---|---|---|---|
-| `source-writing-spike-gate` | `source_spike_skipped` | `source_spike_skipped` | 跑（要求 no-merge evidence/comment/branch） | `source_spike_skipped` |
-| `title-intent-gate` | 跑（要求 PR title 与 issue title 主语一致） | `title_gate_skipped`（无 PR） | 跳过（source spike 无 PR） | 跑（legacy 也可能漂） |
-| `commitment-gate` | 跑（逐行兑现 `## 验收标准` 表） | `commitment_skipped` | 由 `source-writing-spike-gate` 审命令证据 | 视有无 `## 验收标准` 表决定 |
-| `spike-followup-gate` | `spike_gate_skipped` | 跑（要求 spike comment 选 `## 结果分支` + 足够 sub-issue 提议） | 由 `source-writing-spike-gate` 审结果分支 | `spike_gate_skipped` |
+| Gate | `kind:code` | `kind:blocked` | `kind:comment` | `kind:code-spike` | empty / legacy |
+|---|---|---|---|---|---|
+| `source-writing-spike-gate` | `source_spike_skipped` | `source_spike_skipped` | `source_spike_skipped` | 跑（要求 no-merge evidence/comment/branch） | `source_spike_skipped` |
+| `title-intent-gate` | 跑（要求 PR title 与 issue title 主语一致） | 跑（同 PR-backed 路径） | `title_gate_skipped`（无 PR） | 跳过（source spike 无 PR） | 跑（legacy 也可能漂） |
+| `evidence-gate` | 四层证据 | 四层证据 + blocked path e2e/integration 复测 | 无 PR 时自通过 | 由 `source-writing-spike-gate` 审证据 | 四层证据 |
+| `commitment-gate` | 跑（逐行兑现 `## 验收标准` 表） | 跑（逐行兑现 `## 验收标准` 表） | `commitment_skipped` | 由 `source-writing-spike-gate` 审命令证据 | 视有无 `## 验收标准` 表决定 |
+| `spike-followup-gate` | `spike_gate_skipped` | `spike_gate_skipped` | 跑（要求 spike comment 选 `## 结果分支` + 足够 sub-issue 提议） | 由 `source-writing-spike-gate` 审结果分支 | `spike_gate_skipped` |
 
 `code-gate` 在无 PR 时自跳过（`no_pr_semantic_review` 路径直接绕过它进 `issue-closure-gate`）。
 
-设计权衡：PR-backed 与 comment-only gate 仍自跳过；`kind:code-spike` 是显式分叉，因为它允许 source writes 但禁止 PR merge，必须在 no-PR closure 前单独审证据。
+设计权衡：PR-backed 与 comment-only gate 仍自跳过；`kind:blocked` 是 PR-backed 但 evidence-gate 多一层 blocked path 复测；`kind:code-spike` 是显式分叉，因为它允许 source writes 但禁止 PR merge，必须在 no-PR closure 前单独审证据。
 
 ---
 

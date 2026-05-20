@@ -41,9 +41,11 @@ For each draft issue, run the adversarial simulation:
 5. **Title subject re-check**. Re-read the title with the laziest-PR simulation. Does the simulated PR title's subject match the issue title's subject? If the simulated PR could rename the subject and still pass, the title-intent-gate hole exists. Sharpen title or add subject-binding row.
 
 6. **Spike-specific adversarial**:
-   - For `kind:comment` issues, simulate the laziest spike comment. Does it select a `## 结果分支` line AND propose the minimum sub-issue titles?
-   - For `kind:code-spike` issues, simulate the laziest source-writing spike. Does it write real PoC/runtime evidence, post a no-merge issue comment, and avoid PR creation/merge?
-   - If the spike comment could say "assumption holds" without proposing the downstream implementation, `## 结果分支` isn't forcing sub-issue creation — fix the branch text.
+	   - For `kind:comment` issues, simulate the laziest spike comment. Does it select a `## 结果分支` line AND propose the minimum sub-issue titles?
+	   - For `kind:code-spike` issues, simulate the laziest source-writing spike. Does it write real PoC/runtime evidence, post a no-merge issue comment, and avoid PR creation/merge?
+	   - If the spike comment could say "assumption holds" without proposing the downstream implementation, `## 结果分支` isn't forcing sub-issue creation — fix the branch text.
+
+7. **Blocked-specific adversarial**. For `kind:blocked`, simulate the laziest unblock PR. If it could pass by changing code plus unit tests without replaying the blocked path, add or sharpen an e2e/integration checkpoint row. If `Unblocks:` is absent or ambiguous, fix the issue body before creation.
 
 ## Failure handling
 

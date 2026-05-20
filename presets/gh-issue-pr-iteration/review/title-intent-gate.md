@@ -2,14 +2,15 @@
 
 ## Goal
 
-For `kind:code` issues with an open PR, verify that the PR title's main subject aligns with the issue title's main subject. Catch noun-drift like `Shim CLI` (issue) vs `Shim SDK` (PR) where the iter agent silently re-scoped the deliverable.
+For PR-backed `kind:code` and `kind:blocked` issues with an open PR, verify that the PR title's main subject aligns with the issue title's main subject. Catch noun-drift like `Shim CLI` (issue) vs `Shim SDK` (PR) where the iter agent silently re-scoped the deliverable.
 
 This gate exists because such drift previously slipped through review on the assumption that the agent had a reason — it usually did not, and the wrong-scope PR was accepted (`Mouriya-Emma/moat-browser#75` documented in `Mouriya-Emma/coder-loop#4`).
 
 ## When this gate runs
 
-- `ISSUE_KIND` is `code` AND a PR exists for the selected issue → run the gate.
+- `ISSUE_KIND` is `code` or `blocked` AND a PR exists for the selected issue → run the gate.
 - `ISSUE_KIND` is `comment` → skip via `title_gate_skipped`. Spike issues have no PR.
+- `ISSUE_KIND` is `code-spike` → skip via `title_gate_skipped`. Source-writing spikes must not have implementation PRs; `review/source-writing-spike-gate` owns that failure.
 - `ISSUE_KIND` is empty (legacy unlabeled) AND a PR exists → run the gate. Legacy issues can still suffer scope drift.
 - No PR exists for the selected issue (handoff-only / no-code path) → skip via `title_gate_skipped`.
 
@@ -54,6 +55,6 @@ Choose exactly one:
 
 - `title_aligned` → read `review/evidence-gate`.
 - `title_drift` → read `review/action-retry`. Retry feedback must cite both titles + subjects.
-- `title_gate_skipped` → read `review/evidence-gate`. Gate did not apply (no PR / `kind:comment`). Record the skip reason in the trace.
+- `title_gate_skipped` → read `review/evidence-gate`. Gate did not apply (no PR / `kind:comment` / `kind:code-spike`). Record the skip reason in the trace.
 
 Do not proceed past this gate while PR title and issue title subjects are confirmed to diverge.
