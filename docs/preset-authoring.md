@@ -161,11 +161,11 @@ runtime.issueKind
 | `runIdGeneration` | `"new"` / `"resumed"`，本轮 runId 是新生成还是 resume |
 | `resumedFromPhase` | 若 resume，从哪个 phase 续；否则 `""` |
 | `resumedStartedAt` | 若 resume，原 run 起始时间戳；否则 `""` |
-| `issueKind` | `"code"` / `"comment"` / `"code-spike"` / `""`（empty = 无 label / legacy）；从 `gh issue view --json labels` fetch，或无 repo 的本地 fixture 从 queue item `kind` 读 |
+| `issueKind` | `"code"` / `"comment"` / `"code-spike"` / `"blocked"` / `""`（empty = 无 label / legacy）；从 `gh issue view --json labels` fetch，或无 repo 的本地 fixture 从 queue item `kind` 读 |
 
 `runIdGeneration` 是引擎对「这次 spawn 是新生成 runId 还是从 state.current 恢复」的客观回答；preset 自行用这一信号 + `item.status` + `item.lastRunId` 派生 fresh / retry / resume 三种调度形态——引擎不识别这些领域分类。
 
-`issueKind` 是 `gh-issue-pr-iteration` 专用信号（issue 上的 `kind:code` / `kind:comment` / `kind:code-spike` label），其他 preset 一般可忽略或不引用。
+`issueKind` 是 `gh-issue-pr-iteration` 专用信号（issue 上的 `kind:code` / `kind:comment` / `kind:code-spike` / `kind:blocked` label），其他 preset 一般可忽略或不引用。
 
 ### 扩 `runtime.*` 白名单的流程
 

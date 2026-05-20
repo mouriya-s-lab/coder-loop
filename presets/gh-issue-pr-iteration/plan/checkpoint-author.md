@@ -12,7 +12,7 @@ For each draft body, fill in the `## 验收标准` table (and `## 结果分支` 
 
 ## Procedure
 
-### For each `kind:code` issue
+### For each `kind:code` or `kind:blocked` issue
 
 1. Write the `## 验收标准` table with column header exactly:
    ```
@@ -44,11 +44,13 @@ For each draft body, fill in the `## 验收标准` table (and `## 结果分支` 
    - exit code is consistent with the spec (passing `Expect` shape is fine; if the work hasn't landed yet the command may still error meaningfully).
    If a row's `Command` doesn't even parse, the issue is unrunnable — revise before posting.
 
-6. **Skip the table only when trivially small**. Per `contract.md` §6, allowed to omit `## 验收标准` for truly trivial work (rename, format-only). When omitting, write inline:
+6. **Skip the table only when trivially small**. Per `contract.md` §6, allowed to omit `## 验收标准` for truly trivial `kind:code` work (rename, format-only). `kind:blocked` issues must not omit the table because review needs the blocked-path proof. When omitting for `kind:code`, write inline:
    > 本 issue trivial，无 `## 验收标准` 表；依赖 PR 四层证据。
    Without that explicit note, omission looks like a write error.
 
-7. **`## 继承验证义务` table** (if applicable). Same column shape as `## 验收标准` except first columns:
+7. For `kind:blocked`, include at least one `integration` or target-environment row whose command/artifact replays the blocked path after the fix and proves it no longer reproduces. The issue body must also include the `Unblocks:` back-link or explicitly say why no back-link exists.
+
+8. **`## 继承验证义务` table** (if applicable). Same column shape as `## 验收标准` except first columns:
    ```
    | From | Original # | Check | Command | Env | Expect |
    ```

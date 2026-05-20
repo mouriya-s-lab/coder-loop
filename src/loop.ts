@@ -723,7 +723,9 @@ export type IssueRunContext = {
 	resumedStartedAt: string | null
 }
 
-export type IssueKind = "code" | "comment" | "code-spike" | null
+const ISSUE_KIND_VALUES = ["code", "comment", "code-spike", "blocked"] as const
+export type IssueKindValue = (typeof ISSUE_KIND_VALUES)[number]
+export type IssueKind = IssueKindValue | null
 
 const RUNTIME_BINDING_KEYS = [
 	"runId",
@@ -2976,6 +2978,7 @@ export type ParsedIssueKind =
 export function iterationRouteForIssueKind(kind: IssueKind): string {
 	if (kind === "comment") return "iter/spike-comment"
 	if (kind === "code-spike") return "iter/source-writing-spike"
+	if (kind === "blocked") return "iter/resolve-blocker"
 	return "iter/classify-scope"
 }
 
@@ -2986,10 +2989,14 @@ export function parseKindFromLabels(labelNames: readonly string[]): ParsedIssueK
 		return { ok: false, error: `expected exactly one kind:* label, found ${kindLabels.length}: ${kindLabels.join(", ")}` }
 	}
 	const value = kindLabels[0]!.slice("kind:".length)
-	if (value !== "code" && value !== "comment" && value !== "code-spike") {
-		return { ok: false, error: `unknown kind label "kind:${value}" (allowed: kind:code, kind:comment, kind:code-spike)` }
+	if (!isIssueKindValue(value)) {
+		return { ok: false, error: `unknown kind label "kind:${value}" (allowed: ${ISSUE_KIND_VALUES.map((kind) => `kind:${kind}`).join(", ")})` }
 	}
 	return { ok: true, kind: value }
+}
+
+function isIssueKindValue(value: string): value is IssueKindValue {
+	return ISSUE_KIND_VALUES.includes(value as IssueKindValue)
 }
 
 function parseIssueKindFromQueueItem(item: QueueItem): ParsedIssueKind {

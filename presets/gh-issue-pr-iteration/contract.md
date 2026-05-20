@@ -49,6 +49,16 @@
 - `## 结果分支`（详见 §1.6）
 - `## 依赖关系`
 
+`kind:blocked` issue（blocked 解除，deliverable 是 PR + unblock side effect）必须含：
+
+- `## 目标`
+- `## 上下文`（含 Repo + 本地路径 + blocked 来源）
+- `## 阻塞条件`（具体说明哪个命令 / runtime path / issue / evidence gap 目前 blocked）
+- `Unblocks: owner/repo#N`（如适用；没有 back-link 时必须说明原因）
+- `## 预期结果`
+- `## 验收标准`（必须包含真实 blocked path 的 e2e/integration 复测）
+- `## 依赖关系`
+
 ### 1.3 Kind label 单值规则
 
 每个 issue 必须带**恰好一个** `kind:*` label：
@@ -56,14 +66,15 @@
 - `kind:code` — deliverable 是 PR + 代码变更。`runtime.issueKind = "code"`。
 - `kind:comment` — deliverable 是 issue comment + 可选 sub-issue 提议。`runtime.issueKind = "comment"`。
 - `kind:code-spike` — deliverable 是 source-writing no-merge spike branch/evidence + issue comment。`runtime.issueKind = "code-spike"`。
+- `kind:blocked` — deliverable 是 PR + 代码/配置变更，目标是解除一个具体 blocked 条件并恢复 `Unblocks:` 指向的 loop。`runtime.issueKind = "blocked"`。
 
 引擎 fetch 行为（`src/loop.ts` 的 `parseKindFromLabels`）：
 
 - 0 个 `kind:*` label → `runtime.issueKind = ""`（legacy / 旧 issue 兼容路径，三 gate 自跳过）；
 - ≥ 2 个 `kind:*` label → spawn abort，stderr 报 "expected exactly one kind:\* label, found N"；
-- `kind:<value>` 且 value 不在 `{code, comment, code-spike}` → spawn abort，stderr 报 "unknown kind label"。
+- `kind:<value>` 且 value 不在 `{code, comment, code-spike, blocked}` → spawn abort，stderr 报 "unknown kind label"。
 
-`gh issue create` 必须传 `--label kind:code`、`--label kind:comment` 或 `--label kind:code-spike`，不要省略也不要双带。
+`gh issue create` 必须传 `--label kind:code`、`--label kind:comment`、`--label kind:code-spike` 或 `--label kind:blocked`，不要省略也不要双带。
 
 Repo 必须先有这些 label。check：
 
@@ -75,7 +86,7 @@ gh label list --repo <owner>/<repo> --search kind:
 
 ### 1.4 `## 验收标准` 表（`commitment-gate` 解析）
 
-`review/commitment-gate` 对 `kind:code` 的 issue 强制：
+`review/commitment-gate` 对 `kind:code` 和 `kind:blocked` 的 issue 强制：
 
 - 必须有 `## 验收标准` heading（无则 gate 自跳过 `commitment_skipped`，PR 可能无证据要求基础，但 evidence-gate 仍会查四层证据）。
 - heading 下必须是 markdown pipe table，**列名顺序固定**：
@@ -144,6 +155,7 @@ gate 解析规则：
 - `kind:code` 标题动词偏 "实现 / 加 / 修 / 重构"，body 必有 `## 验收标准`。
 - `kind:comment` 标题偏 "Spike: 验证…" / "评估…"，body 必有 `## 验证步骤` + `## 结果分支`。
 - `kind:code-spike` 标题偏 "Spike: 验证…" / "PoC: 验证…"，body 必有 `## 验证步骤` + `## 结果分支`，并明确 no-merge / no-PR 约束。
+- `kind:blocked` 标题偏 "解除 / unblock / resolve blocker"，body 必有具体阻塞条件、`Unblocks: owner/repo#N` back-link（如适用）、`## 验收标准`，证据必须包含真实 blocked path 的 e2e/integration 复测。
 - 标题 prefix `RFC:` 偏 retroactive umbrella（用户级 writing-issue 的 retroactive 形态）；这种 issue 在 coder-loop 队列里通常用作 parent，不直接 queue 实现。
 
 ---
@@ -226,7 +238,7 @@ PR 存在后：
 | `review/trace-honesty` | iter trace + GitHub live state | trace 中的 verdict 与 GitHub 实际状态一致 | `retry` |
 | `review/pr-protocol` | PR body + PR thread comments + issue comments | first line `Closes #<N>`、CI parity 行、最新 retry 在 PR thread | `retry` / `no_pr_semantic_review` |
 | `review/title-intent-gate` | issue title + PR title | strip conventional prefix 后主语 noun phrase 对齐 | `title_drift` |
-| `review/evidence-gate` | PR body 四层证据 | functional / environment / integration / assumption 各一层（无相关 Dimension 可省略并 explicit 注明） | `retry` / `blocked` |
+| `review/evidence-gate` | PR body 四层证据 | functional / environment / integration / assumption 各一层（无相关 Dimension 可省略并 explicit 注明）；`kind:blocked` 额外要求 blocked path e2e/integration 复测 | `retry` / `blocked` |
 | `review/commitment-gate` | issue `## 验收标准` + `## 继承验证义务` table | 列 `# / Dimension / Check / Command / Env / Expect`、每行 actual vs Expect | `commitment_failed` |
 | `review/spike-followup-gate` | iter spike comment + issue `## 结果分支` | comment 选了一条分支 + 提议数 ≥ 该分支动词词表要求 | `spike_followup_failed` |
 | `review/code-gate` | PR diff + CI checks | merge-ability、CI 绿、no diff red flag | `retry` |
@@ -238,15 +250,15 @@ PR 存在后：
 
 每个 gate 按 `runtime.issueKind` 自跳过：
 
-| Gate | `kind:code` | `kind:comment` | `kind:code-spike` | `""`（empty / legacy） |
-|---|---|---|---|---|
-| `pr-protocol` | 跑 | 跑（但 `no_pr_semantic_review`，无 PR 时跳过下游 gate） | 跑（进入 `source_spike_review`，PR 存在也判 retry） | 跑 |
-| `source-writing-spike-gate` | `source_spike_skipped` | `source_spike_skipped` | 跑 | `source_spike_skipped` |
-| `title-intent-gate` | 跑 | `title_gate_skipped`（无 PR） | 跳过（source spike 无 PR） | 跑（legacy 也可能漂） |
-| `evidence-gate` | 跑 | `evidence_passed`（无 PR 即无四层证据要求） | source spike evidence 由 `source-writing-spike-gate` 审 | 跑 |
-| `commitment-gate` | 跑（仅当 `## 验收标准` 表存在） | `commitment_skipped` | source spike commitments 由 `source-writing-spike-gate` 审 | `commitment_skipped` |
-| `spike-followup-gate` | `spike_gate_skipped` | 跑 | source spike follow-up 由 `source-writing-spike-gate` 审 | `spike_gate_skipped` |
-| `code-gate` | 跑 | 跳（无 PR） | 跳（no-merge route） | 跑 |
+| Gate | `kind:code` | `kind:blocked` | `kind:comment` | `kind:code-spike` | `""`（empty / legacy） |
+|---|---|---|---|---|---|
+| `pr-protocol` | 跑 | 跑（PR-backed unblock；无 PR 仅限 already-satisfied） | 跑（但 `no_pr_semantic_review`，无 PR 时跳过下游 gate） | 跑（进入 `source_spike_review`，PR 存在也判 retry） | 跑 |
+| `source-writing-spike-gate` | `source_spike_skipped` | `source_spike_skipped` | `source_spike_skipped` | 跑 | `source_spike_skipped` |
+| `title-intent-gate` | 跑 | 跑 | `title_gate_skipped`（无 PR） | 跳过（source spike 无 PR） | 跑（legacy 也可能漂） |
+| `evidence-gate` | 跑 | 跑，且额外要求 blocked path e2e/integration 复测 | `evidence_passed`（无 PR 即无四层证据要求） | source spike evidence 由 `source-writing-spike-gate` 审 | 跑 |
+| `commitment-gate` | 跑（仅当 `## 验收标准` 表存在） | 跑（仅当 `## 验收标准` 表存在） | `commitment_skipped` | source spike commitments 由 `source-writing-spike-gate` 审 | `commitment_skipped` |
+| `spike-followup-gate` | `spike_gate_skipped` | `spike_gate_skipped` | 跑 | source spike follow-up 由 `source-writing-spike-gate` 审 | `spike_gate_skipped` |
+| `code-gate` | 跑 | 跑 | 跳（无 PR） | 跳（no-merge route） | 跑 |
 
 ---
 
@@ -275,7 +287,7 @@ planning agent 禁止：
 
 少数 `kind:code` issue 太小（trivial 重命名 / 格式化），写不出有意义的 5 行表。允许省略 `## 验收标准`，commitment-gate 自跳过。代价：reviewer 完全靠四层证据 packet 判断，不享受 row-by-row 强制。planning agent 决定省略时必须在 issue body 写一句 "本 issue trivial，无 `## 验收标准` 表；依赖 PR 四层证据"——给 review agent 看见 explicit 决定，不是漏写。
 
-`kind:comment` 与 `kind:code-spike` issue 不能省略 `## 验收标准`：spike 必须有"何为通过 / 失败"的判据，否则 review 无法判 picked branch 是否合理。
+`kind:blocked` 不能省略 `## 验收标准`：至少要有一个真实 blocked path 的 e2e/integration 复测。`kind:comment` 与 `kind:code-spike` issue 也不能省略 `## 验收标准`：spike 必须有"何为通过 / 失败"的判据，否则 review 无法判 picked branch 是否合理。
 
 ---
 
@@ -288,7 +300,7 @@ planning agent 禁止：
 | 标题语言 | 用户操作员要求中文 | 继承（无差异） |
 | 原子性 | one issue, one problem | 继承（无差异） |
 | Cite 原文 | 每条动机句要 cite | 继承（无差异） |
-| `kind:*` label | （应该退出 user-level skill） | 强制单值 `kind:code` / `kind:comment` / `kind:code-spike`，规则见 §1.3 |
+| `kind:*` label | （应该退出 user-level skill） | 强制单值 `kind:code` / `kind:comment` / `kind:code-spike` / `kind:blocked`，规则见 §1.3 |
 | 必备段（future-work issue） | 目标 / 上下文 / 问题 / 预期结果 / 约束 / 验收标准 / 继承验证义务 / 依赖关系 | 继承，但 §1.4 强制表格列固定 |
 | Acceptance checkpoint 形态 | "checkpoint rows with dimension, command, environment, expected result" | §1.4 强制 6 列名顺序 + Dimension 枚举 + Command 反引号 |
 | Spike `## 结果分支` | 提到但无解析规则 | §1.6 强制动词词表 + 最少 sub-issue 提议数 |

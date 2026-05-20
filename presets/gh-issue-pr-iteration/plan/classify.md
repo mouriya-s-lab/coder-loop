@@ -2,7 +2,7 @@
 
 ## Goal
 
-For each candidate deliverable in the intake, assign one of five classes. The class drives downstream fragments — `implementation` and `spike` go through `plan/triage-existing` (if intake also has already-open issues to triage) then `plan/decompose`; `parent` becomes umbrella; `design-question` / `no-code` exit planning without queue work.
+For each candidate deliverable in the intake, assign one of the classes below. The class drives downstream fragments — implementation-like and spike classes go through `plan/triage-existing` (if intake also has already-open issues to triage) then `plan/decompose`; `parent` becomes umbrella; `design-question` / `no-code` exit planning without queue work.
 
 If the intake includes already-open issues that the operator asked to triage (rewrite body / close / pr-reply / no-op), classify only the *new* candidate deliverables here; the existing-issue triage is the job of `plan/triage-existing` and runs on the dedicated fragment between classify and decompose.
 
@@ -19,6 +19,7 @@ If the intake includes already-open issues that the operator asked to triage (re
 | `implementation` | future code / config / docs change; landed deliverable is a PR | queued as `kind:code` issue |
 | `spike` | risky undocumented assumption blocks implementation; deliverable is an issue comment validating / falsifying | queued as `kind:comment` issue, `Blocks: #<impl>` |
 | `source-writing-spike` | the assumption needs PoC/source/runtime evidence but must not merge into production | queued as `kind:code-spike` issue, `Blocks: #<impl>` |
+| `blocker-resolution` | future code / config / docs change whose only purpose is to remove a concrete blocker for another queued item | queued as `kind:blocked` issue with `Unblocks: owner/repo#N` |
 | `parent` | umbrella that coordinates ≥ 2 child deliverables; itself has no atomic Why | created but NOT queued (no concrete action); children get queued |
 | `design-question` | source has missing / contradictory facts that planning can't resolve; needs operator answer first | filed as `kind:comment` issue, NOT queued; operator answers in issue thread |
 | `no-code` | already satisfied / duplicate / invalid / out of scope | filed (or referenced existing) but never queued |
@@ -29,6 +30,7 @@ If the intake includes already-open issues that the operator asked to triage (re
 
 2. For each bullet, walk the decision tree:
    - Does the deliverable depend on undocumented third-party / cross-environment / "should work" / "presumably" assumption? → `spike`.
+   - Does the source unambiguously specify removing a concrete blocker for another queued item, with an `Unblocks:` target or equivalent blocked item reference? → `blocker-resolution`.
    - Does the source unambiguously specify a code-deliverable problem with verifiable outcome? → `implementation`.
    - Does it coordinate ≥ 2 child deliverables and have no own atomic Why? → `parent`.
    - Does it require an operator decision the planning agent can't make (e.g. "should this auth go through SSO or password?")? → `design-question`.

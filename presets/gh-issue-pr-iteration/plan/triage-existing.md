@@ -36,7 +36,7 @@ triage 与新 issue planning 共存：一次 `/dev-plan` 调用既可以 triage 
 1. 列出 intake 给的所有既存 issue 候选。一条 bullet 一个 issue，附 `<repo>#<N>` + 当前 title。
 
 2. 对每个 issue 跑 `gh issue view <repo>#<N> --json title,body,state,labels,linkedPullRequests`。检查：
-   - `kind:*` label 数量（§1.3：必须恰好 1 个，且 value ∈ `{code, comment}`）；
+   - `kind:*` label 数量（§1.3：必须恰好 1 个，且 value ∈ `{code, comment, code-spike, blocked}`）；
    - 必备段是否齐全（§1.2 / §1.4 / §1.6）；
    - 关联 PR 状态（影响 `pr_reply` vs `close_*` 分支）。
 
@@ -63,7 +63,7 @@ triage 与新 issue planning 共存：一次 `/dev-plan` 调用既可以 triage 
 ## Failure handling
 
 - 任意 issue 的 `gh` 写入命令 exit 非零、或写后 verify 显示 GitHub 实际 state 与 plan 草稿 diverge → 该 issue 进 `triage_blocked` 集合。trace 完整记录命令、stderr、当前 GitHub state。
-- operator policy 与 contract.md §1 / §2 冲突（如 "policy 要求 kind:foo" 但 §1.3 仅允许 `{code, comment}`）→ 不要走 `rewrite_body`，emit `triage_blocked` 并把冲突写进 handoff 让 operator 仲裁。
+- operator policy 与 contract.md §1 / §2 冲突（如 "policy 要求 kind:foo" 但 §1.3 仅允许 `{code, comment, code-spike, blocked}`）→ 不要走 `rewrite_body`，emit `triage_blocked` 并把冲突写进 handoff 让 operator 仲裁。
 - 候选 issue 已 closed 但 operator policy 要求 "改 body" → 该 issue 进 `triage_blocked`，trace 记 "issue closed; cannot rewrite"，不重开 issue（不在 plan 授权范围）。
 
 ## Output verdict

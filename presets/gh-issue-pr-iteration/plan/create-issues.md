@@ -15,11 +15,12 @@ Post the validated draft bodies as GitHub issues. Link parent/child relationship
    ```bash
    gh label list --repo <owner>/<repo> --search kind:
    ```
-   Expect: `kind:code`, `kind:comment`, and `kind:code-spike` present. If absent, create them before posting issues:
+   Expect: `kind:code`, `kind:comment`, `kind:code-spike`, and `kind:blocked` present. If absent, create them before posting issues:
    ```bash
    gh label create kind:code --repo <owner>/<repo> --color 1d76db --description "iter 写代码 → PR；deliverable 是代码变更"
    gh label create kind:comment --repo <owner>/<repo> --color fbca04 --description "iter 写 issue comment + 必要 sub-issue；不允许 Write 代码文件"
    gh label create kind:code-spike --repo <owner>/<repo> --color f9d0c4 --description "iter 写 source spike evidence；不允许 PR merge"
+   gh label create kind:blocked --repo <owner>/<repo> --color b60205 --description "iter 解除具体 blocked 条件并恢复被阻塞 loop"
    ```
 
 2. **Order of creation** matters when issues reference each other:
@@ -42,6 +43,7 @@ Post the validated draft bodies as GitHub issues. Link parent/child relationship
    - For `kind:code` deliverables → `--label kind:code`.
    - For `kind:comment` spike / design-dialog → `--label kind:comment`.
    - For source-writing no-merge spike deliverables → `--label kind:code-spike`.
+   - For blocked-resolution deliverables with an `Unblocks:` back-link → `--label kind:blocked`.
    - For `parent` umbrella that has its own closure task → `--label kind:code`.
    - For `parent` umbrella that's coordinator-only (no closure task) → no `kind:*` label (it won't be queued anyway; this is the legacy / coordinator pattern).
    - For `design-question` issues → `--label kind:comment` (deliverable is operator's clarifying comment).

@@ -21,6 +21,7 @@ Review owns:
 - trace audit;
 - PR protocol audit;
 - evidence audit;
+- blocker-resolution e2e evidence audit for `kind:blocked` issues;
 - source-writing spike audit for `kind:code-spike` no-merge issues;
 - code/check/mergeability audit;
 - issue hierarchy and final closure gate;

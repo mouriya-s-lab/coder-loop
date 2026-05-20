@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { resolve } from "node:path"
 import { buildLiveRuntimeHealthLines } from "./install-commands"
 import { buildCoderLoopStatusSnapshot } from "./loop"
+
+const REPO_ROOT = resolve(import.meta.dir, "..")
 
 describe("buildLiveRuntimeHealthLines", () => {
 	test("summarizes status snapshot health and stale loop ownership signals", async () => {
@@ -18,6 +20,14 @@ describe("buildLiveRuntimeHealthLines", () => {
 		expect(lines.some((line) => line.includes("current phase status missing"))).toBe(true)
 		expect(lines).toContain("WARN: stale loop file: recorded pid is not alive")
 		expect(lines).toContain("WARN: no live loop process is owned by this target")
+	})
+})
+
+describe("install label catalog", () => {
+	test("includes the blocked issue kind label", async () => {
+		const source = await readFile(resolve(REPO_ROOT, "src/install-commands.ts"), "utf-8")
+		expect(source).toContain('name: "kind:blocked"')
+		expect(source).toContain("解除具体阻塞条件")
 	})
 })
 

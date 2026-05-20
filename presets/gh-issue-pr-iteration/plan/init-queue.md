@@ -15,10 +15,11 @@ Write the actionable issues into `{{TARGET_CWD}}/.coder-loop/runtime/state.json`
 1. Read existing `{{TARGET_CWD}}/.coder-loop/runtime/state.json`. Preserve existing `queue`, `repository`, `baseBranch`, `recentRuns`, `current` fields if present.
 
 2. **Queue selection** — only push these to `queue`:
-   - `kind:code` `implementation` issues that are ready to run (have unmet `Blocks:` dependencies that ARE other queued issues, not external blockers);
-   - `kind:comment` `spike` issues that block downstream implementation;
-   - `kind:code-spike` source-writing spikes that block downstream implementation and must not merge into production;
-   - prerequisites before dependents (when both queue, list prereq first).
+	   - `kind:code` `implementation` issues that are ready to run (have unmet `Blocks:` dependencies that ARE other queued issues, not external blockers);
+	   - `kind:comment` `spike` issues that block downstream implementation;
+	   - `kind:code-spike` source-writing spikes that block downstream implementation and must not merge into production;
+	   - `kind:blocked` unblock issues that have a concrete blocker description and are ready to resolve;
+	   - prerequisites before dependents (when both queue, list prereq first).
 
    Don't queue:
    - `parent` umbrella issues that are coordinator-only (no `kind:*` label);

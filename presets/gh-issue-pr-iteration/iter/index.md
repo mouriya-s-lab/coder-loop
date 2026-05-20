@@ -31,6 +31,12 @@ Iteration produces implementation signal. The exact deliverable depends on `ISSU
   - write the minimal PoC/source/evidence needed to answer the spike;
   - post the result as an issue comment with evidence artifacts and branch/SHA when useful;
   - do not open a PR, merge anything, close the issue, or write final local state.
+- `ISSUE_KIND` is `blocked` — PR-backed blocker-resolution path:
+  - understand the selected issue's `Unblocks:` back-link and exact blocking condition;
+  - route through `iter/resolve-blocker` before implementation;
+  - implement only the smallest change that removes that blocker;
+  - run the normal code checks plus an e2e/integration check proving the blocked path no longer reproduces;
+  - create/update the implementation PR and append handoff evidence.
 - `ISSUE_KIND` is `comment` — comment path (spike / design dialogue):
   - understand the selected issue's question and result branches;
   - post a GitHub issue comment with the answer + cited evidence;

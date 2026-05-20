@@ -8,7 +8,7 @@ Audit `kind:code-spike` output without treating it as PR-backed implementation. 
 
 - `ISSUE_KIND` is `code-spike` and no PR exists for the selected issue -> run this gate.
 - `ISSUE_KIND` is `code-spike` and a PR exists -> emit `source_spike_retry`; source-writing spike output must not be represented as an implementation PR unless the issue was relabeled to `kind:code`.
-- `ISSUE_KIND` is `code`, `comment`, or empty -> skip this gate via the normal PR/no-PR route.
+- `ISSUE_KIND` is `code`, `blocked`, `comment`, or empty -> skip this gate via the normal PR/no-PR route.
 
 ## Inputs
 

@@ -4,6 +4,8 @@
 
 Classify what kind of work the selected issue requires.
 
+This fragment is for `kind:code` and legacy unlabeled PR-backed work. `kind:blocked` must route through `iter/resolve-blocker` first so the implementation scope is limited to removing the named blocker.
+
 ## Procedure
 
 - Read the full issue body and latest comments.

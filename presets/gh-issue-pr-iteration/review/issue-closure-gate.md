@@ -9,6 +9,7 @@ Decide whether the GitHub issue can be closed, must be expanded into child issue
 Run this gate before any local `done` or `moot` transition.
 
 - PR-backed work must pass PR protocol, evidence, and code gates. Its implementation PR must be merged by `review/action-accept-pr` before local `done` is written.
+- `kind:blocked` is PR-backed work unless the blocker was already gone on base. It must pass blocker-resolution evidence in `review/evidence-gate`; `review/action-accept-pr` performs the downstream unblock side effect before closure.
 - Source-writing spike work (`ISSUE_KIND` = `code-spike`) must pass `review/source-writing-spike-gate`; it is accepted through `accepted_no_pr` and must never route to `review/action-accept-pr`.
 - No-code, duplicate, invalid, already-satisfied, parent/wrapper, and moot outcomes still need this gate before local `done` or `moot`.
 

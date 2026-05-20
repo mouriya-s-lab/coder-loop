@@ -23,7 +23,7 @@ You are spawned by the orchestrator via `claude -p` to execute exactly one itera
 - Existing issue PR: `{{ISSUE_PR}}`
 - Queue status: `{{ISSUE_STATUS}}`
 - Previous run ID: `{{ISSUE_LAST_RUN_ID}}`
-- Issue kind: `{{ISSUE_KIND}}` (`code` / `comment` / `code-spike` / empty for legacy unlabeled issues)
+- Issue kind: `{{ISSUE_KIND}}` (`code` / `comment` / `code-spike` / `blocked` / empty for legacy unlabeled issues)
 
 - Run-ID generation: `{{RUN_ID_GENERATION}}`
 - Resumed-from phase: `{{RESUMED_FROM_PHASE}}`

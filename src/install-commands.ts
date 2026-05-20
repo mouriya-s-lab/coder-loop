@@ -4,7 +4,7 @@
  * Four layers (per issue #49):
  *   A) target project files: slash commands, config (with preset binding),
  *      runtime dirs, workflow.md template
- *   B) target GitHub state: kind:code / kind:comment / kind:code-spike labels
+ *   B) target GitHub state: kind:code / kind:comment / kind:code-spike / kind:blocked labels
  *   C) operator machine prereqs: gh (+ auth), selected runner CLIs (verify only)
  *   D) user-level skill version: writing-issue marker check
  *
@@ -33,6 +33,7 @@ const KIND_LABELS = [
 	{ name: "kind:code", color: "1f883d", description: "Issue 的 deliverable 是代码 PR" },
 	{ name: "kind:comment", color: "0969da", description: "Issue 的 deliverable 是 PR comment / review reply" },
 	{ name: "kind:code-spike", color: "fbca04", description: "Issue 的 deliverable 是 source-writing spike evidence；不走 PR merge" },
+	{ name: "kind:blocked", color: "b60205", description: "Issue 的 deliverable 是解除具体阻塞条件并恢复被阻塞 loop" },
 ] as const
 
 const WRITING_ISSUE_SKILL_REL = ".claude/skills/writing-issue/SKILL.md"

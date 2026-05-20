@@ -18,7 +18,7 @@ git switch -c "issue-<ISSUE>-<RUN_ID>"
 
 ## Read commitments before implementing
 
-For `kind:code` (and legacy unlabeled) issues, the issue body may carry machine-checkable commitments that review will enforce row-by-row. Before writing code, read the issue body's `## 验收标准` 与 `## 继承验证义务` 表全部 Command 列 from the live GitHub state (use the `gh issue view --json body` output from `iter/read-context`). Each row's Command column is a concrete check; each row's Expect column is the result review will compare against.
+For `kind:code`, `kind:blocked`, and legacy unlabeled issues, the issue body may carry machine-checkable commitments that review will enforce row-by-row. Before writing code, read the issue body's `## 验收标准` 与 `## 继承验证义务` 表全部 Command 列 from the live GitHub state (use the `gh issue view --json body` output from `iter/read-context`). Each row's Command column is a concrete check; each row's Expect column is the result review will compare against.
 
 Implement the change so that every Command row will pass. If a row's Command cannot be made to pass within the current environment (e.g. it requires VM, browser, or external service), capture the evidence that the row's intent is satisfied via an alternative observable proof and record the deviation in handoff — but do not silently drop the row.
 

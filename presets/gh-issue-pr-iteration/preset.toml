@@ -188,6 +188,11 @@ role = "iter"
 path = "iter/classify-scope.md"
 
 [[fragments]]
+id   = "iter/resolve-blocker"
+role = "iter"
+path = "iter/resolve-blocker.md"
+
+[[fragments]]
 id   = "iter/implement"
 role = "iter"
 path = "iter/implement.md"
