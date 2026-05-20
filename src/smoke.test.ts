@@ -54,6 +54,108 @@ async function makeMinimalTarget(presetName: string, configShape: ConfigShape = 
 	return dir
 }
 
+async function pathExists(path: string): Promise<boolean> {
+	try {
+		await readFile(path)
+		return true
+	} catch {
+		return false
+	}
+}
+
+async function makePostReviewTriggerTarget(reviewStatus: "blocked" | "done"): Promise<{ dir: string; responderLog: string }> {
+	const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-trigger-"))
+	const runtime = resolve(dir, ".coder-loop/runtime")
+	const presetDir = resolve(dir, ".coder-loop/post-review-trigger-preset")
+	const responderLog = resolve(runtime, "responder-called.txt")
+	await mkdir(resolve(runtime, "issues"), { recursive: true })
+	await mkdir(resolve(runtime, "evidence/alpha"), { recursive: true })
+	await mkdir(resolve(runtime, "logs"), { recursive: true })
+	await mkdir(presetDir, { recursive: true })
+	await writeFile(resolve(dir, ".coder-loop/workflow.md"), "# placeholder workflow\n")
+	await writeFile(resolve(runtime, "shared.md"), "# placeholder shared context\n")
+
+	await writeFile(resolve(presetDir, "preset.toml"), [
+		`name = "post-review-trigger-smoke"`,
+		`version = 1`,
+		`description = "Post-review trigger smoke preset."`,
+		``,
+		`[item]`,
+		`idField = "id"`,
+		``,
+		`[statuses]`,
+		`continuable = ["pending"]`,
+		`terminal = ["blocked", "done"]`,
+		``,
+		`[[phases]]`,
+		`name = "iteration"`,
+		`prompt = "iter-entry.md"`,
+		`  [phases.variables]`,
+		`  ITEM_ID = "item.id"`,
+		`  RUN_ID = "runtime.runId"`,
+		``,
+		`[[phases]]`,
+		`name = "review"`,
+		`prompt = "review-entry.md"`,
+		`  [phases.variables]`,
+		`  ITEM_ID = "item.id"`,
+		`  RUN_ID = "runtime.runId"`,
+		``,
+		`[[phases]]`,
+		`name = "responder"`,
+		`prompt = "responder-entry.md"`,
+		`trigger = { afterPhase = "review", whenStatus = "blocked" }`,
+		`  [phases.variables]`,
+		`  ITEM_ID = "item.id"`,
+		`  RUN_ID = "runtime.runId"`,
+		``,
+		`[agent]`,
+		`binary = "claude"`,
+		`extraArgs = []`,
+		``,
+	].join("\n"))
+	await writeFile(resolve(presetDir, "iter-entry.md"), "ITER {{ITEM_ID}} {{RUN_ID}}\n")
+	await writeFile(resolve(presetDir, "review-entry.md"), "REVIEW {{ITEM_ID}} {{RUN_ID}}\n")
+	await writeFile(resolve(presetDir, "responder-entry.md"), "RESPONDER {{ITEM_ID}} {{RUN_ID}}\n")
+
+	const fakeCodex = resolve(dir, "fake-codex.sh")
+	const fakeClaude = resolve(dir, "fake-claude.sh")
+	await writeFile(fakeCodex, [
+		`#!/usr/bin/env bash`,
+		`if [[ "$*" == *RESPONDER* ]]; then printf 'responder\\n' >> ${JSON.stringify(responderLog)}; fi`,
+		`echo '{"type":"thread.started","thread_id":"thread-trigger-smoke"}'`,
+		`echo '{"type":"item.completed","item":{"type":"agent_message","text":"ITERATION SUMMARY: done"}}'`,
+		`exit 0`,
+		``,
+	].join("\n"), { mode: 0o755 })
+	await writeFile(fakeClaude, [
+		`#!/usr/bin/env bash`,
+		`node -e 'const fs = require("fs"); const [path, status] = process.argv.slice(1); const state = JSON.parse(fs.readFileSync(path, "utf8")); state.queue[0].status = status; state.current = null; fs.writeFileSync(path, JSON.stringify(state, null, "\\t") + "\\n");' ${JSON.stringify(resolve(runtime, "state.json"))} ${JSON.stringify(reviewStatus)}`,
+		`echo 'REVIEW SUMMARY: verdict=${reviewStatus === "blocked" ? "blocked" : "accepted"}; issue=#alpha; actionable=0; reason=fixture'`,
+		`exit 0`,
+		``,
+	].join("\n"), { mode: 0o755 })
+
+	await writeFile(resolve(runtime, "config.json"), JSON.stringify({
+		presetPath: presetDir,
+		codex: { binary: fakeCodex, extraArgs: [] },
+		claude: { binary: fakeClaude, extraArgs: [] },
+	}, null, 2))
+	await writeFile(resolve(runtime, "state.json"), JSON.stringify({
+		version: 1,
+		queue: [{
+			id: "alpha",
+			status: "pending",
+			issueFile: ".coder-loop/runtime/issues/alpha.md",
+			evidenceDir: ".coder-loop/runtime/evidence/alpha",
+		}],
+		recentRuns: [],
+		current: null,
+	}, null, 2))
+	await writeFile(resolve(runtime, "issues/alpha.md"), "# alpha\n")
+	return { dir, responderLog }
+}
+
 describe("smoke: single-phase-example preset", () => {
 	test("--check-runtime passes with minimal target", async () => {
 		const target = await makeMinimalTarget("single-phase-example")
@@ -231,6 +333,38 @@ describe("smoke: single-phase-example preset", () => {
 		expect(stderr).toContain("INFO: target default runner=codex (config, binary=missing-codex-for-doctor-test, model=<default>)")
 		expect(stderr).toContain("INFO: review default runner=claude (review-default, binary=claude, model=claude-opus-4-7)")
 		expect(stderr).toContain("FAIL: codex runner CLI (missing-codex-for-doctor-test) 未在 PATH 中")
+	})
+})
+
+describe("smoke: post-review phase triggers", () => {
+	test("runs a trigger phase when review changes the item to the matching status", async () => {
+		const { dir, responderLog } = await makePostReviewTriggerTarget("blocked")
+		const proc = Bun.spawnSync({
+			cmd: ["bun", LOOP_ENTRY, "--target-cwd", dir, "--once"],
+			cwd: REPO_ROOT,
+			stdout: "pipe",
+			stderr: "pipe",
+			env: claudeHostEnv(),
+		})
+		const stderr = new TextDecoder().decode(proc.stderr)
+		expect(proc.exitCode).toBe(0)
+		expect(stderr).toContain("Starting trigger phase responder after review")
+		expect(await readFile(responderLog, "utf-8")).toBe("responder\n")
+	})
+
+	test("skips a trigger phase when review changes the item to a different status", async () => {
+		const { dir, responderLog } = await makePostReviewTriggerTarget("done")
+		const proc = Bun.spawnSync({
+			cmd: ["bun", LOOP_ENTRY, "--target-cwd", dir, "--once"],
+			cwd: REPO_ROOT,
+			stdout: "pipe",
+			stderr: "pipe",
+			env: claudeHostEnv(),
+		})
+		const stderr = new TextDecoder().decode(proc.stderr)
+		expect(proc.exitCode).toBe(0)
+		expect(stderr).toContain("Skipping trigger phase responder: status=done, wanted=blocked")
+		expect(await pathExists(responderLog)).toBe(false)
 	})
 })
 

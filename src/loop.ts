@@ -273,10 +273,16 @@ const CurrentRunBaseBoundary = arkType({
 
 const CURRENT_RUN_BASE_KEYS = new Set(["phase", "runId", "startedAt"])
 
+const PresetPhaseTriggerBoundary = arkType({
+	afterPhase: "string",
+	whenStatus: "string",
+})
+
 const PresetPhaseBoundary = arkType({
 	name: "string",
 	prompt: "string",
 	"variables?": "object",
+	"trigger?": PresetPhaseTriggerBoundary,
 })
 
 const PresetFragmentBoundary = arkType({
@@ -347,6 +353,7 @@ export type PresetPhase = {
 	name: string
 	prompt: string
 	variables: ReadonlyArray<readonly [string, PresetVariableSource]>
+	trigger: PresetPhaseTrigger | null
 }
 
 export type PresetFragment = {
@@ -372,6 +379,11 @@ export type Preset = {
 		extraArgs: readonly string[]
 		attemptTimeoutSeconds: number
 	}
+}
+
+export type PresetPhaseTrigger = {
+	afterPhase: string
+	whenStatus: string
 }
 
 export type AgentRunnerKind = "claude" | "codex"
@@ -1211,8 +1223,8 @@ async function main() {
 		const runId = current?.runId ?? makeRunId(selectedId)
 		const phases = options.preset.phases
 		const iterPhase = phases[0]
-		const reviewPhase = phases[phases.length - 1]
-		if (!iterPhase || !reviewPhase) fail("preset must define at least one phase")
+		if (!iterPhase) fail("preset must define at least one phase")
+		const reviewPhase = reviewPhaseForPreset(options.preset)
 		const kindResult = await resolveIssueKind(options.repository, selectedId, selected.item)
 		if (!kindResult.ok) fail(`Issue kind label check failed: ${kindResult.error}`)
 		log(`Issue #${selectedId} kind=${kindResult.kind ?? "<none>"}`)
@@ -1314,19 +1326,38 @@ async function main() {
 			break
 		}
 
-		const stateAfterReview = await loadState(options.statePath)
-		const itemAfterReview = stateAfterReview.queue.find((q) => getItemId(q, options.preset) === selectedId)
-		if (itemAfterReview && options.preset.statuses.terminal.includes(itemAfterReview.status)) {
+		const triggerCode = await runTriggeredPhasesAfter(
+			options,
+			runId,
+			selectedId,
+			reviewPhase.name,
+			kindResult.kind,
+			emit,
+		)
+		if (triggerCode !== 0) {
+			log(`Post-${reviewPhase.name} trigger agent crashed (exit ${triggerCode}). Stopping.`)
+			await removeLoopFile(options.loopFile)
+			break
+		}
+
+		if (!(await exists(options.loopFile))) {
+			log(`Post-${reviewPhase.name} trigger agent stopped the loop.`)
+			break
+		}
+
+		const stateAfterReviewTriggers = await loadState(options.statePath)
+		const itemAfterReviewTriggers = stateAfterReviewTriggers.queue.find((q) => getItemId(q, options.preset) === selectedId)
+		if (itemAfterReviewTriggers && options.preset.statuses.terminal.includes(itemAfterReviewTriggers.status)) {
 			await emit({
 				type: "queue.terminal",
 				ts: new Date().toISOString(),
 				runId,
 				issueId: selectedId,
-				pr: itemAfterReview.pr,
-				branch: itemAfterReview.branch,
-				terminalStatus: itemAfterReview.status,
+				pr: itemAfterReviewTriggers.pr,
+				branch: itemAfterReviewTriggers.branch,
+				terminalStatus: itemAfterReviewTriggers.status,
 			})
-			if (options.worktree && itemAfterReview.agentCwd !== null) {
+			if (options.worktree && itemAfterReviewTriggers.agentCwd !== null) {
 				removeWorktreeForItem(options.targetCwd, selectedId, log)
 				log(`worktree: removed worktree for terminal item #${selectedId}`)
 			}
@@ -1343,6 +1374,93 @@ async function main() {
 	logStream?.end()
 }
 
+async function runTriggeredPhasesAfter(
+	options: LoopOptions,
+	runId: string,
+	selectedId: string,
+	afterPhase: string,
+	issueKind: IssueKind,
+	emit: LoopEventEmit,
+): Promise<number> {
+	for (const phase of options.preset.phases.filter((candidate) => candidate.trigger?.afterPhase === afterPhase)) {
+		const state = await loadState(options.statePath)
+		const item = state.queue.find((queueItem) => getItemId(queueItem, options.preset) === selectedId)
+		if (!item) {
+			log(`Skipping trigger phase ${phase.name}: issue #${selectedId} no longer exists in queue.`)
+			continue
+		}
+		if (phase.trigger?.whenStatus !== item.status) {
+			log(`Skipping trigger phase ${phase.name}: status=${item.status}, wanted=${phase.trigger?.whenStatus ?? "<none>"}.`)
+			continue
+		}
+
+		const issueFile = item.issueFile === null ? null : resolveFrom(options.targetCwd, item.issueFile)
+		const evidenceDir = item.evidenceDir === null ? null : resolveFrom(options.targetCwd, item.evidenceDir)
+		if (issueFile !== null && !isWithin(options.issueDir, issueFile)) fail(`Triggered issue file must resolve inside issueDir: ${item.issueFile}`)
+		if (evidenceDir !== null && !isWithin(options.evidenceRootDir, evidenceDir)) fail(`Triggered evidence directory must resolve inside evidenceDir: ${item.evidenceDir}`)
+
+		const agentCwd = item.agentCwd ?? options.targetCwd
+		const runner = selectRunnerForPhase(phase.name, item, options)
+		const ctx: ResolveContext = {
+			item,
+			config: buildConfigBindings(options),
+			runtime: buildRuntimeBindings({
+				options,
+				runId,
+				currentIssueFile: issueFile,
+				evidenceDir,
+				agentCwd,
+				issueRun: { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null },
+				issueKind,
+			}),
+		}
+		const eventContext: LoopEventContext = {
+			emit,
+			runId,
+			issueId: selectedId,
+			pr: item.pr,
+			branch: item.branch,
+			phase: phase.name,
+		}
+
+		log(`Starting trigger phase ${phase.name} after ${afterPhase} for issue #${selectedId} (status=${item.status})...`)
+		const phaseStart = Date.now()
+		const promptRaw = await readFile(phase.prompt, "utf-8")
+		const prompt = renderPrompt(promptRaw, phase, ctx)
+		const outputPath = agentOutputPath(options, runId, phase.name)
+		await emit({
+			type: "phase.start",
+			ts: new Date().toISOString(),
+			runId,
+			issueId: selectedId,
+			pr: item.pr,
+			branch: item.branch,
+			phase: phase.name,
+		})
+		const { output, code } = await runAgent(options, phase.name, prompt, outputPath, agentCwd, runner, eventContext)
+		const durationSeconds = (Date.now() - phaseStart) / 1000
+
+		log(`Trigger phase ${phase.name} finished: issue=#${selectedId}, exit=${code}, duration=${durationSeconds.toFixed(0)}s, output=${outputPath} (${output.length} bytes)`)
+		if (output.trim().length > 0) {
+			await appendFile(options.logFile, `\n--- ${phase.name} output ${new Date().toISOString()} ---\n${output}\n`)
+		}
+		await emit({
+			type: "phase.end",
+			ts: new Date().toISOString(),
+			runId,
+			issueId: selectedId,
+			pr: item.pr,
+			branch: item.branch,
+			phase: phase.name,
+			exitCode: code,
+			durationSeconds: Math.round(durationSeconds),
+		})
+		if (code !== 0) return code
+		if (!(await exists(options.loopFile))) return 0
+	}
+	return 0
+}
+
 async function runReview(
 	options: LoopOptions,
 	runId: string,
@@ -1351,9 +1469,7 @@ async function runReview(
 	runner: AgentRunnerSelection,
 	eventContext?: Omit<LoopEventContext, "phase">,
 ): Promise<number> {
-	const phases = options.preset.phases
-	const reviewPhase = phases[phases.length - 1]
-	if (!reviewPhase) fail("preset must define at least one phase")
+	const reviewPhase = reviewPhaseForPreset(options.preset)
 	log(`Starting ${reviewPhase.name} agent...`)
 	const reviewStart = Date.now()
 	const reviewPromptRaw = await readFile(reviewPhase.prompt, "utf-8")
@@ -2205,7 +2321,22 @@ export function parsePreset(value: unknown, presetDir: string): Preset {
 			}
 			variables.push([key, source] as const)
 		}
-		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), variables })
+		const trigger = entry.trigger
+			? { afterPhase: entry.trigger.afterPhase, whenStatus: entry.trigger.whenStatus }
+			: null
+		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), variables, trigger })
+	}
+	if (!phases.some((phase) => phase.trigger === null)) presetError("preset.phases: must include at least one non-trigger phase")
+
+	const statuses = new Set<string>([...root.statuses.continuable, ...root.statuses.terminal])
+	for (const [index, phase] of phases.entries()) {
+		if (phase.trigger === null) continue
+		if (!phaseNames.has(phase.trigger.afterPhase)) {
+			presetError(`preset.phases[${index}].trigger.afterPhase: unknown phase "${phase.trigger.afterPhase}"`)
+		}
+		if (!statuses.has(phase.trigger.whenStatus)) {
+			presetError(`preset.phases[${index}].trigger.whenStatus: unknown status "${phase.trigger.whenStatus}"`)
+		}
 	}
 
 	const fragmentIds = new Set<string>()
@@ -2341,9 +2472,21 @@ function selectRunnerForItem(item: QueueItem, options: LoopOptions): AgentRunner
 }
 
 function selectRunnerForPhase(phase: string, item: QueueItem, options: LoopOptions): AgentRunnerSelection {
-	const reviewPhase = options.preset.phases[options.preset.phases.length - 1]
-	if (reviewPhase && phase === reviewPhase.name) return options.reviewRunner
+	const reviewPhase = reviewPhaseForPreset(options.preset)
+	if (phase === reviewPhase.name) return options.reviewRunner
 	return selectRunnerForItem(item, options)
+}
+
+export function reviewPhaseForPreset(preset: Preset): PresetPhase {
+	for (let index = preset.phases.length - 1; index >= 0; index--) {
+		const phase = preset.phases[index]!
+		if (phase.trigger === null) return phase
+	}
+	fail("preset must define at least one non-trigger phase")
+}
+
+export function triggeredPhasesAfter(preset: Preset, afterPhase: string, status: string): readonly PresetPhase[] {
+	return preset.phases.filter((phase) => phase.trigger?.afterPhase === afterPhase && phase.trigger.whenStatus === status)
 }
 
 function readPresetNameFromStatusInput(value: StatusConfigInput["preset"]): string | null {
@@ -2697,9 +2840,7 @@ export function markIterationStarted(
 }
 
 export function markReviewStarted(state: LoopState, item: QueueItem, preset: Preset, runId: string): void {
-	const phases = preset.phases
-	const reviewPhase = phases[phases.length - 1]
-	if (!reviewPhase) fail("preset must define at least one phase")
+	const reviewPhase = reviewPhaseForPreset(preset)
 	const currentIdValue = item.extra[preset.item.idField]
 	if (currentIdValue === undefined) fail(`Selected item is missing id field "${preset.item.idField}"`)
 	state.current = {
