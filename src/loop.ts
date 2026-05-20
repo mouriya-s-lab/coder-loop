@@ -669,6 +669,7 @@ const BACKOFF_MAX_INTERVAL_SECONDS = 600
 
 export const SUMMARY_WATCHDOG_MARKER = "ITERATION SUMMARY:"
 export const REVIEW_SUMMARY_WATCHDOG_MARKER = "REVIEW SUMMARY:"
+export type ReviewSummaryVerdict = "retry" | "accepted" | "skip" | "blocked" | "stop"
 export const SUMMARY_WATCHDOG_TERM_MS = 5 * 60 * 1000
 export const SUMMARY_WATCHDOG_KILL_MS = 5 * 1000
 
@@ -1322,6 +1323,10 @@ async function runReview(
 			exitCode: reviewCode,
 			durationSeconds: Math.round(reviewDuration),
 		})
+	}
+	if (reviewCode === 0 && parseReviewSummaryVerdict(reviewTrace) === "stop") {
+		log(`${reviewPhase.name} agent requested loop stop via REVIEW SUMMARY; removing .dev-loop.`)
+		await removeLoopFile(options.loopFile)
 	}
 	return reviewCode
 }
@@ -2958,6 +2963,14 @@ export function codexSummaryTextFromJsonLine(line: string, marker: string): stri
 	} catch {
 		return null
 	}
+}
+
+export function parseReviewSummaryVerdict(output: string): ReviewSummaryVerdict | null {
+	let verdict: ReviewSummaryVerdict | null = null
+	for (const match of output.matchAll(/REVIEW SUMMARY:\s*verdict=(retry|accepted|skip|blocked|stop)\s*;/g)) {
+		verdict = match[1] as ReviewSummaryVerdict
+	}
+	return verdict
 }
 
 export function createSummaryWatchdogStdoutObserver(runner: AgentRunnerKind, marker: string, watchdog: SummaryWatchdog): SummaryWatchdogStdoutObserver {

@@ -46,6 +46,7 @@ import {
 	nextBackoffSeconds,
 	parseKindFromLabels,
 	parseCodexThreadIdFromStream,
+	parseReviewSummaryVerdict,
 	parseSessionIdFromRunnerStream,
 	parseSessionIdFromStream,
 	readLastSessionEntry,
@@ -1111,6 +1112,21 @@ describe("renderPrompt with bundled preset", () => {
 		expect(actionStop).toContain("failed command")
 		expect(actionStop).toContain("Remove `.dev-loop`")
 		expect(actionStop).toContain("Do not mark the selected issue `done`")
+	})
+
+	test("review summary parser extracts stop verdict from raw and stream-json runner output", () => {
+		expect(parseReviewSummaryVerdict("REVIEW SUMMARY: verdict=stop; issue=#114; actionable=1; reason=review infrastructure broken")).toBe("stop")
+		expect(parseReviewSummaryVerdict(JSON.stringify({
+			type: "assistant",
+			message: {
+				content: [{
+					type: "text",
+					text: "gh issue comment failed: This command requires approval\nREVIEW SUMMARY: verdict=stop; issue=#114; actionable=1; reason=review infrastructure broken",
+				}],
+			},
+		}))).toBe("stop")
+		expect(parseReviewSummaryVerdict("REVIEW SUMMARY: verdict=retry; issue=#114; actionable=1; reason=changes requested")).toBe("retry")
+		expect(parseReviewSummaryVerdict("REVIEW SUMMARY: noop")).toBeNull()
 	})
 })
 
