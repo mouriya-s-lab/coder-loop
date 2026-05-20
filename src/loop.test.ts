@@ -1119,7 +1119,11 @@ describe("renderPrompt with bundled preset", () => {
 		expect(acceptPr).toContain("re-queue the blocked item")
 		expect(acceptPr).toContain("coder-loop queue unblock <SOURCE_TARGET_CWD>")
 		expect(acceptPr).toContain("coder-loop status <SOURCE_TARGET_CWD> --json --repo <SOURCE_REPO>")
+		expect(acceptPr).toContain("skip-no-cross-repo-back-link")
+		expect(acceptPr).toContain("without invoking `coder-loop queue unblock`")
 		expect(acceptNoPr).toContain("coder-loop queue unblock <SOURCE_TARGET_CWD>")
+		expect(acceptNoPr).toContain("skip-no-cross-repo-back-link")
+		expect(acceptNoPr).toContain("without invoking `coder-loop queue unblock`")
 		expect(acceptNoPr).toContain("A no-PR accepted unblock issue without the downstream re-queue/start side effect is not complete")
 	})
 
