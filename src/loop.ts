@@ -141,6 +141,16 @@ export type DaemonCommandArgs =
 			baseBranch: string | null
 		}
 
+export type QueueUnblockCommandArgs = {
+	targetCwd: string
+	configPath: string | null
+	repository: string | null
+	issue: string
+	startDaemon: boolean
+	requireBrowserEvidence: boolean
+	dryRun: boolean
+}
+
 type LoopConfig = {
 	repository: string | null
 	baseBranch: string | null
@@ -851,6 +861,7 @@ function parseArgs(): RawArgs {
 type CliCommand =
 	| { kind: "status"; args: StatusCommandArgs }
 	| { kind: "daemon"; args: DaemonCommandArgs }
+	| { kind: "queue"; args: QueueUnblockCommandArgs }
 
 const statusCliCommand = command({
 	name: "status",
@@ -989,6 +1000,40 @@ const daemonCliCommand = subcommands({
 	},
 })
 
+const queueUnblockCliCommand = command({
+	name: "unblock",
+	description: "Requeue one blocked item and clear its blocker metadata.",
+	args: {
+		target: positional({ displayName: "target", type: cmdString }),
+		issue: option({ long: "issue", type: cmdString }),
+		config: option({ long: "config", type: optional(cmdString) }),
+		repo: option({ long: "repo", type: optional(cmdString) }),
+		startDaemon: flag({ long: "start-daemon" }),
+		requireBrowserEvidence: flag({ long: "require-browser-evidence" }),
+		dryRun: flag({ long: "dry-run" }),
+	},
+	handler: (args): CliCommand => ({
+		kind: "queue",
+		args: {
+			targetCwd: args.target,
+			configPath: args.config ?? null,
+			repository: args.repo ?? null,
+			issue: args.issue,
+			startDaemon: args.startDaemon,
+			requireBrowserEvidence: args.requireBrowserEvidence,
+			dryRun: args.dryRun,
+		},
+	}),
+})
+
+const queueCliCommand = subcommands({
+	name: "queue",
+	description: "Operate on coder-loop queue state through checked runtime APIs.",
+	cmds: {
+		unblock: queueUnblockCliCommand,
+	},
+})
+
 function splitFlag(arg: string): [string, string | null] {
 	const equalsIndex = arg.indexOf("=")
 	if (equalsIndex === -1) return [arg, null]
@@ -1047,6 +1092,12 @@ async function runDaemonCommand(args: string[]): Promise<void> {
 	await runDaemonRestartCommand(daemonArgs)
 }
 
+async function runQueueCommand(args: string[]): Promise<void> {
+	const parsed = await runCmd(queueCliCommand, args)
+	if (parsed.value.kind !== "queue") return
+	await runQueueUnblockCommand(parsed.value.args)
+}
+
 async function main() {
 	const firstArg = process.argv[2]
 	if (firstArg === "status") {
@@ -1055,6 +1106,10 @@ async function main() {
 	}
 	if (firstArg === "daemon") {
 		await runDaemonCommand(process.argv.slice(3))
+		return
+	}
+	if (firstArg === "queue") {
+		await runQueueCommand(process.argv.slice(3))
 		return
 	}
 	if (firstArg === "install" || firstArg === "uninstall" || firstArg === "doctor") {
@@ -2267,6 +2322,212 @@ async function runDaemonRestartCommand(args: Extract<DaemonCommandArgs, { action
 		stopped,
 		started,
 	}, null, "\t") + "\n")
+}
+
+export type QueueUnblockMutationOutcome =
+	| {
+			changed: true
+			issue: string
+			beforeStatus: "blocked"
+			afterStatus: "queued"
+			clearedBlockerRepo: boolean
+			clearedBlockerRef: boolean
+			clearedCurrent: boolean
+	  }
+	| {
+			changed: false
+			issue: string
+			reason: "not_found"
+	  }
+	| {
+			changed: false
+			issue: string
+			reason: "not_blocked"
+			status: string
+	  }
+
+type QueueUnblockCommandResult = {
+	action: "queue.unblock"
+	target: string
+	repository: string | null
+	statePath: string
+	issue: string
+	dryRun: boolean
+	mutation: QueueUnblockMutationOutcome
+	daemon:
+		| { requested: false; skipped: true; reason: "not_requested" | "no_requeue_needed" }
+		| { requested: true; dryRun: true; plan: DaemonStartPlan }
+		| { requested: true; dryRun: false; result: DaemonStartResult }
+	verification: {
+		itemStatus: string | null
+		blockerRepoPresent: boolean | null
+		blockerRefPresent: boolean | null
+		stateKind: StatusStateKind
+		daemonRunning: boolean
+	}
+}
+
+async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<void> {
+	const options = await loadLoopOptionsForTarget(args.targetCwd, args.configPath, args.repository)
+	assertQueueUnblockSupported(options.preset)
+	const issue = normalizeQueueIssueId(args.issue)
+	const state = await loadState(options.statePath)
+	const mutation = requeueBlockedItem(state, options.preset, issue)
+	if (!mutation.changed && mutation.reason === "not_found") {
+		fail(`queue unblock: issue ${issue} not found in ${options.statePath}`)
+	}
+
+	let daemon: QueueUnblockCommandResult["daemon"]
+	if (!mutation.changed) {
+		daemon = { requested: false, skipped: true, reason: "no_requeue_needed" }
+	} else if (!args.startDaemon) {
+		daemon = { requested: false, skipped: true, reason: "not_requested" }
+	} else if (args.dryRun) {
+		daemon = {
+			requested: true,
+			dryRun: true,
+			plan: buildDaemonStartPlan({
+				action: "start",
+				targetCwd: options.targetCwd,
+				configPath: args.configPath,
+				repository: options.repository,
+				requireBrowserEvidence: args.requireBrowserEvidence,
+				maxIterations: null,
+				dryRun: true,
+				worktree: options.worktree,
+				baseBranch: options.baseBranch,
+			}),
+		}
+	} else {
+		await saveState(options.statePath, state)
+		daemon = {
+			requested: true,
+			dryRun: false,
+			result: await executeDaemonStart({
+				action: "start",
+				targetCwd: options.targetCwd,
+				configPath: args.configPath,
+				repository: options.repository,
+				requireBrowserEvidence: args.requireBrowserEvidence,
+				maxIterations: null,
+				dryRun: false,
+				worktree: options.worktree,
+				baseBranch: options.baseBranch,
+			}),
+		}
+	}
+
+	if (mutation.changed && !args.dryRun && !args.startDaemon) {
+		await saveState(options.statePath, state)
+	}
+
+	const verificationState = args.dryRun ? state : await loadState(options.statePath)
+	const item = findQueueItemById(verificationState, options.preset, issue)
+	const statusSnapshot = await buildCoderLoopStatusSnapshot({
+		targetCwd: options.targetCwd,
+		configPath: args.configPath,
+		repository: options.repository,
+		output: "json",
+	})
+	const daemonRunning = daemonResultIndicatesRunning(daemon) || findOwnedLiveProcess(statusSnapshot) !== null
+	const result: QueueUnblockCommandResult = {
+		action: "queue.unblock",
+		target: options.targetCwd,
+		repository: options.repository,
+		statePath: options.statePath,
+		issue,
+		dryRun: args.dryRun,
+		mutation,
+		daemon,
+		verification: {
+			itemStatus: item?.status ?? null,
+			blockerRepoPresent: item === null ? null : hasOwnJsonKey(item.extra, "blockerRepo"),
+			blockerRefPresent: item === null ? null : hasOwnJsonKey(item.extra, "blockerRef"),
+			stateKind: statusSnapshot.state.kind,
+			daemonRunning,
+		},
+	}
+	process.stdout.write(JSON.stringify(result, null, "\t") + "\n")
+}
+
+function daemonResultIndicatesRunning(daemon: QueueUnblockCommandResult["daemon"]): boolean {
+	if (!daemon.requested) return false
+	if (daemon.dryRun) return false
+	if ("alreadyRunning" in daemon.result) return daemon.result.alreadyRunning === true
+	return daemon.result.pid !== null
+}
+
+async function loadLoopOptionsForTarget(targetCwdInput: string, configPathInput: string | null, repository: string | null): Promise<LoopOptions> {
+	const targetCwd = resolve(targetCwdInput)
+	const configPath = await resolveConfigPath(targetCwd, configPathInput)
+	const config = await loadConfig(configPath)
+	const presetDir = resolvePresetDir(config, PKG_ROOT, targetCwd)
+	const preset = await loadPreset(presetDir)
+	return buildOptions(targetCwd, configPath, makeStatusRawArgs({
+		targetCwd,
+		configPath: configPathInput,
+		repository,
+		output: "json",
+	}), config, preset)
+}
+
+function assertQueueUnblockSupported(preset: Preset): void {
+	if (!preset.statuses.terminal.includes("blocked") || !preset.statuses.continuable.includes("queued")) {
+		fail(`queue unblock: preset "${preset.name}" must declare terminal status "blocked" and continuable status "queued"`)
+	}
+}
+
+export function normalizeQueueIssueId(raw: string): string {
+	const trimmed = raw.trim()
+	if (trimmed === "") fail("queue unblock: --issue must not be empty")
+	if (/\s/.test(trimmed)) fail(`queue unblock: --issue must not contain whitespace: ${raw}`)
+	const crossRepoMatch = /^[^/\s]+\/[^#\s]+#(.+)$/.exec(trimmed)
+	const value = crossRepoMatch ? crossRepoMatch[1]! : trimmed
+	const normalized = value.startsWith("#") ? value.slice(1) : value
+	if (normalized.trim() === "") fail(`queue unblock: --issue did not include an issue id: ${raw}`)
+	return normalized
+}
+
+export function requeueBlockedItem(state: LoopState, preset: Preset, issue: string): QueueUnblockMutationOutcome {
+	const item = findQueueItemById(state, preset, issue)
+	if (item === null) return { changed: false, issue, reason: "not_found" }
+	if (item.status !== "blocked") return { changed: false, issue, reason: "not_blocked", status: item.status }
+
+	const clearedBlockerRepo = hasOwnJsonKey(item.extra, "blockerRepo")
+	const clearedBlockerRef = hasOwnJsonKey(item.extra, "blockerRef")
+	item.status = "queued"
+	delete item.extra.blockerRepo
+	delete item.extra.blockerRef
+
+	let clearedCurrent = false
+	if (state.current !== null) {
+		try {
+			if (getCurrentId(state.current, preset) === issue) {
+				state.current = null
+				clearedCurrent = true
+			}
+		} catch {
+			// Leave unrelated malformed current state for the runtime checker to report.
+		}
+	}
+
+	return {
+		changed: true,
+		issue,
+		beforeStatus: "blocked",
+		afterStatus: "queued",
+		clearedBlockerRepo,
+		clearedBlockerRef,
+		clearedCurrent,
+	}
+}
+
+function findQueueItemById(state: LoopState, preset: Preset, issue: string): QueueItem | null {
+	return state.queue.find((item) => getItemId(item, preset) === issue) ?? null
+}
+
+function hasOwnJsonKey(value: JsonObject, key: string): boolean {
+	return Object.prototype.hasOwnProperty.call(value, key)
 }
 
 function findOwnedLiveProcess(snapshot: CoderLoopStatusSnapshot): StatusProcessInfo | null {

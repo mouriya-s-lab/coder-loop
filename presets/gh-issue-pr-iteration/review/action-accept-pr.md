@@ -20,8 +20,14 @@ gh pr merge <PR_NUMBER> -R <REPO> --squash --delete-branch
 3. If merge succeeds and `ISSUE_KIND` is `blocked`, perform the unblock side effect before closing the current issue:
 
    - Re-fetch the current issue body and parse the `Unblocks: owner/repo#N` back-link. If multiple `Unblocks:` lines exist, do not guess; retry or stop with the ambiguity recorded.
+   - If the issue body contains no `Unblocks: owner/repo#N` line at all, log `skip-no-cross-repo-back-link` in the issue handoff and proceed to close the current issue without invoking `coder-loop queue unblock`. This is the compatibility path for non-cross-repo `kind:blocked` issues.
    - Resolve the source repository target checkout/runtime for that back-link from available local state, handoff, supervisor state, or an explicit path already present in the issue/comment history. Do not ask for credentials or target paths in chat.
-   - Through the supported `coder-loop` CLI for that source target, re-queue the blocked item named by the back-link so it becomes actionable again, then start or restart that source target's daemon.
+   - Through the supported `coder-loop` CLI for that source target, re-queue the blocked item named by the back-link so it becomes actionable again, then start or restart that source target's daemon:
+
+```bash
+coder-loop queue unblock <SOURCE_TARGET_CWD> --repo <SOURCE_REPO> --issue <SOURCE_ISSUE> --start-daemon --require-browser-evidence
+```
+
    - Verify with `coder-loop status <SOURCE_TARGET_CWD> --json --repo <SOURCE_REPO>` that the item is no longer `blocked` and that the daemon is running or was started successfully.
 
    If the back-link, source target, re-queue command, daemon start, or status verification cannot be completed, do not close the current issue and do not write local `done`; record the exact failed command/query and use the infrastructure failure path. A merged unblock PR without the downstream re-queue/start side effect is not complete for `kind:blocked`.

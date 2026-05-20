@@ -38,7 +38,9 @@ import {
 	makeLoopEventEmitter,
 	markIterationStarted,
 	markReviewStarted,
+	normalizeQueueIssueId,
 	reconcileStateAfterIter,
+	requeueBlockedItem,
 	resolveIdleSleepMs,
 	reviewOnEmptyLockPath,
 	serializeReviewOnEmptyLock,
@@ -1109,12 +1111,78 @@ describe("renderPrompt with bundled preset", () => {
 	test("blocked review path requires e2e unblock evidence and downstream side effect", async () => {
 		const evidenceGate = await readFile(resolve(BUNDLED_PRESET_DIR, "review/evidence-gate.md"), "utf-8")
 		const acceptPr = await readFile(resolve(BUNDLED_PRESET_DIR, "review/action-accept-pr.md"), "utf-8")
+		const acceptNoPr = await readFile(resolve(BUNDLED_PRESET_DIR, "review/action-accept-no-pr.md"), "utf-8")
 		expect(evidenceGate).toContain("For `ISSUE_KIND` = `blocked`")
 		expect(evidenceGate).toContain("replays the blocked path")
 		expect(evidenceGate).toContain("unit test, typecheck, diff review")
 		expect(acceptPr).toContain("parse the `Unblocks: owner/repo#N` back-link")
 		expect(acceptPr).toContain("re-queue the blocked item")
+		expect(acceptPr).toContain("coder-loop queue unblock <SOURCE_TARGET_CWD>")
 		expect(acceptPr).toContain("coder-loop status <SOURCE_TARGET_CWD> --json --repo <SOURCE_REPO>")
+		expect(acceptPr).toContain("skip-no-cross-repo-back-link")
+		expect(acceptPr).toContain("without invoking `coder-loop queue unblock`")
+		expect(acceptNoPr).toContain("coder-loop queue unblock <SOURCE_TARGET_CWD>")
+		expect(acceptNoPr).toContain("skip-no-cross-repo-back-link")
+		expect(acceptNoPr).toContain("without invoking `coder-loop queue unblock`")
+		expect(acceptNoPr).toContain("A no-PR accepted unblock issue without the downstream re-queue/start side effect is not complete")
+	})
+
+	test("requeueBlockedItem moves blocked item to queued and clears blocker metadata", async () => {
+		const preset = await bundledPreset()
+		const item = makeItem({
+			issue: 9000,
+			status: "blocked",
+			extra: {
+				blockerRepo: "owner/dependency",
+				blockerRef: "#267",
+			},
+		})
+		const state = makeState({
+			queue: [item],
+			current: { phase: "review", runId: "r1", startedAt: "2026-05-20T00:00:00.000Z", extra: { issue: 9000 } },
+		})
+
+		const result = requeueBlockedItem(state, preset, "9000")
+
+		expect(result).toEqual({
+			changed: true,
+			issue: "9000",
+			beforeStatus: "blocked",
+			afterStatus: "queued",
+			clearedBlockerRepo: true,
+			clearedBlockerRef: true,
+			clearedCurrent: true,
+		})
+		expect(state.queue[0]!.status).toBe("queued")
+		expect(state.queue[0]!.extra.blockerRepo).toBeUndefined()
+		expect(state.queue[0]!.extra.blockerRef).toBeUndefined()
+		expect(state.current).toBeNull()
+	})
+
+	test("requeueBlockedItem skips items that are already actionable", async () => {
+		const preset = await bundledPreset()
+		const item = makeItem({
+			issue: 9000,
+			status: "queued",
+			extra: {
+				blockerRepo: "owner/dependency",
+				blockerRef: "#267",
+			},
+		})
+		const state = makeState({ queue: [item] })
+
+		const result = requeueBlockedItem(state, preset, "9000")
+
+		expect(result).toEqual({ changed: false, issue: "9000", reason: "not_blocked", status: "queued" })
+		expect(state.queue[0]!.status).toBe("queued")
+		expect(state.queue[0]!.extra.blockerRepo).toBe("owner/dependency")
+		expect(state.queue[0]!.extra.blockerRef).toBe("#267")
+	})
+
+	test("normalizeQueueIssueId accepts issue numbers, #numbers, and owner/repo back-links", () => {
+		expect(normalizeQueueIssueId("9000")).toBe("9000")
+		expect(normalizeQueueIssueId("#9000")).toBe("9000")
+		expect(normalizeQueueIssueId("owner/repo#9000")).toBe("9000")
 	})
 
 	test("accepted PR GitHub side-effect approval failures stop instead of retrying the same accepted PR", async () => {
