@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises"
 import * as fs from "node:fs/promises"
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { basename, resolve } from "node:path"
+import { basename, dirname, resolve } from "node:path"
 
 import {
 	agentClaudeArgs,
@@ -128,7 +128,7 @@ async function makeFixtureOptions(preset: Preset): Promise<LoopOptions> {
 	const cwd = await mkdtemp(resolve(tmpdir(), "coder-loop-test-"))
 	const issueDir = resolve(cwd, ".coder-loop/runtime/issues")
 	const evidenceRootDir = resolve(cwd, ".coder-loop/runtime/evidence")
-	const logDir = resolve(cwd, ".coder-loop/runtime/logs")
+	const logDir = resolve(cwd, "loop-data/chains/test/runs")
 	const runtimeDir = resolve(cwd, ".coder-loop/runtime")
 	const configPath = resolve(runtimeDir, "config.json")
 	const sharedContextPath = resolve(runtimeDir, "shared.md")
@@ -154,7 +154,7 @@ async function makeFixtureOptions(preset: Preset): Promise<LoopOptions> {
 		evidenceRootDir,
 		logDir,
 		loopFile: resolve(cwd, ".dev-loop"),
-		traceFile: resolve(cwd, ".dev-trace.txt"),
+		traceFile: resolve(logDir, "run-fixture/iteration/stdout.jsonl"),
 		logFile: resolve(logDir, "test.log"),
 		repository: "Mouriya-Emma/test",
 		baseBranch: "main",
@@ -904,8 +904,8 @@ function makeFixtureRuntime(overrides: Partial<RuntimeBindings> = {}): RuntimeBi
 		issueDir: "/tmp/fixture-cwd/.coder-loop/runtime/issues",
 		evidenceDir: "/tmp/fixture-cwd/.coder-loop/runtime/evidence/131",
 		evidenceRootDir: "/tmp/fixture-cwd/.coder-loop/runtime/evidence",
-		logDir: "/tmp/fixture-cwd/.coder-loop/runtime/logs",
-		traceFile: "/tmp/fixture-cwd/.dev-trace.txt",
+		logDir: "/tmp/fixture-cwd/loop-data/chains/test/runs",
+		traceFile: "/tmp/fixture-cwd/loop-data/chains/test/runs/run-fixture/iteration/stdout.jsonl",
 		loopFile: "/tmp/fixture-cwd/.dev-loop",
 		presetDir: "/tmp/fixture-preset",
 		fragmentIndex: "- f1 (common): /tmp/fixture-preset/f1.md",
@@ -1994,12 +1994,13 @@ describe("buildRunnerInvocation", () => {
 describe("sessions.jsonl appends each attempt — I/O roundtrip", () => {
 	async function freshSessionsPath(): Promise<string> {
 		const dir = await mkdtemp(resolve(tmpdir(), "sessions-jsonl-"))
-		const latest = resolve(dir, "run-1.iter.txt")
+		const latest = resolve(dir, "run-1/iteration/latest.md")
+		await mkdir(dirname(latest), { recursive: true })
 		return agentSessionsPath(latest)
 	}
 
-	test("agentSessionsPath rewrites .txt → .sessions.jsonl", () => {
-		expect(agentSessionsPath("/tmp/logs/run-X.iter.txt")).toBe("/tmp/logs/run-X.iter.sessions.jsonl")
+	test("agentSessionsPath resolves beside the phase latest index", () => {
+		expect(agentSessionsPath("/tmp/logs/run-X/iteration/latest.md")).toBe("/tmp/logs/run-X/iteration/sessions.jsonl")
 	})
 
 	test("sessions.jsonl appends each attempt as one JSON line with required fields", async () => {
@@ -2586,7 +2587,7 @@ describe("summary watchdog e2e — spawnOneAttempt with a fake claudeBinary", ()
 		if (last?.terminated.kind === "timeout") {
 			expect(last.terminated.attemptSeconds).toBe(0.3)
 		}
-		const status = JSON.parse(await readFile(outputPath.replace(/\.txt$/, ".status.json"), "utf-8")) as { terminated?: { kind?: string } }
+		const status = JSON.parse(await readFile(resolve(dirname(outputPath), "status.json"), "utf-8")) as { terminated?: { kind?: string } }
 		expect(status.terminated?.kind).toBe("timeout")
 	}, 15_000)
 
@@ -2672,7 +2673,7 @@ describe("summary watchdog e2e — spawnOneAttempt with a fake claudeBinary", ()
 		expect(last?.sessionId).toBe("thread-codex-123")
 		expect(last?.runner).toBe("codex")
 		expect(last?.model).toBe("gpt-5.4")
-		const status = JSON.parse(await readFile(outputPath.replace(/\.txt$/, ".status.json"), "utf-8")) as { runner?: string; model?: string; sessionId?: string }
+		const status = JSON.parse(await readFile(resolve(dirname(outputPath), "status.json"), "utf-8")) as { runner?: string; model?: string; sessionId?: string }
 		expect(status.runner).toBe("codex")
 		expect(status.model).toBe("gpt-5.4")
 		expect(status.sessionId).toBe("thread-codex-123")
@@ -2680,7 +2681,7 @@ describe("summary watchdog e2e — spawnOneAttempt with a fake claudeBinary", ()
 })
 
 describe("events jsonl — per-run NDJSON event stream", () => {
-	async function freshTargetCwd(): Promise<string> {
+	async function freshRunsDir(): Promise<string> {
 		return mkdtemp(resolve(tmpdir(), "coder-loop-events-"))
 	}
 
@@ -2692,10 +2693,10 @@ describe("events jsonl — per-run NDJSON event stream", () => {
 			.map((line) => JSON.parse(line) as LoopEvent)
 	}
 
-	async function emitSequence(targetCwd: string, runId: string, events: LoopEvent[]): Promise<string> {
-		const emit = makeLoopEventEmitter(targetCwd, runId, () => {})
+	async function emitSequence(runsDir: string, runId: string, events: LoopEvent[]): Promise<string> {
+		const emit = makeLoopEventEmitter(runsDir, runId, () => {})
 		for (const event of events) await emit(event)
-		return loopEventsPath(targetCwd, runId)
+		return loopEventsPath(runsDir, runId)
 	}
 
 	const sampleBase = (overrides: Partial<LoopEvent> = {}): { runId: string; issueId: string; pr: number | null; branch: string | null } => ({
@@ -2706,7 +2707,7 @@ describe("events jsonl — per-run NDJSON event stream", () => {
 	})
 
 	test("events jsonl: writes per-runId file with controlled type strings in chronological order", async () => {
-		const targetCwd = await freshTargetCwd()
+		const runsDir = await freshRunsDir()
 		const runId = "run-2026-05-12-issue-99"
 		const sequence: LoopEvent[] = [
 			{ type: "queue.select", ts: "2026-05-12T00:00:00.000Z", ...sampleBase(), status: "queued" },
@@ -2755,10 +2756,10 @@ describe("events jsonl — per-run NDJSON event stream", () => {
 				terminalStatus: "merged",
 			},
 		]
-		const path = await emitSequence(targetCwd, runId, sequence)
+		const path = await emitSequence(runsDir, runId, sequence)
 		const events = await readEvents(path)
 
-		expect(path.endsWith(`/.coder-loop/runtime/events/${runId}.jsonl`)).toBe(true)
+		expect(path.endsWith(`/${runId}/events.jsonl`)).toBe(true)
 		expect(events.length).toBe(sequence.length)
 		for (const e of events) expect(LOOP_EVENT_TYPES).toContain(e.type)
 		const timestamps = events.map((e) => e.ts)
@@ -2766,7 +2767,7 @@ describe("events jsonl — per-run NDJSON event stream", () => {
 	})
 
 	test("events jsonl fields: pr/branch reflect QueueItem state including null and concrete values", async () => {
-		const targetCwd = await freshTargetCwd()
+		const runsDir = await freshRunsDir()
 		const runId = "run-fields-test"
 		const sequence: LoopEvent[] = [
 			{ type: "queue.select", ts: "2026-05-12T00:00:00.000Z", runId, issueId: "100", pr: null, branch: null, status: "queued" },
@@ -2780,7 +2781,7 @@ describe("events jsonl — per-run NDJSON event stream", () => {
 				phase: "review",
 			},
 		]
-		const path = await emitSequence(targetCwd, runId, sequence)
+		const path = await emitSequence(runsDir, runId, sequence)
 		const events = await readEvents(path)
 		expect(events[0]?.pr).toBeNull()
 		expect(events[0]?.branch).toBeNull()
@@ -2795,7 +2796,7 @@ describe("events jsonl — per-run NDJSON event stream", () => {
 	})
 
 	test("events jsonl watchdog: spawnOneAttempt with eventContext writes attempt.start, watchdog.fire, attempt.close", async () => {
-		const targetCwd = await freshTargetCwd()
+		const targetCwd = await freshRunsDir()
 		const fake = await mkdtemp(resolve(tmpdir(), "coder-loop-fakebin-"))
 		const fakePath = resolve(fake, "fake-claude.sh")
 		await writeFile(fakePath, `#!/bin/bash\necho 'ITERATION SUMMARY: stuck path'\nsleep 30\n`, { mode: 0o755 })
@@ -2812,10 +2813,10 @@ describe("events jsonl — per-run NDJSON event stream", () => {
 		const runId = "run-wd-events"
 		const outputPath = resolve(options.logDir, "wd-events.iteration.txt")
 		const sessionsPath = agentSessionsPath(outputPath)
-		const eventsPath = loopEventsPath(targetCwd, runId)
+		const eventsPath = loopEventsPath(options.logDir, runId)
 
 		const eventContext: LoopEventContext = {
-			emit: makeLoopEventEmitter(targetCwd, runId, () => {}),
+			emit: makeLoopEventEmitter(options.logDir, runId, () => {}),
 			runId,
 			issueId: "135",
 			pr: 137,
@@ -2859,7 +2860,7 @@ describe("events jsonl — per-run NDJSON event stream", () => {
 	}, 15_000)
 
 	test("events jsonl absolute timeout: spawnOneAttempt writes attempt.timeout before attempt.close", async () => {
-		const targetCwd = await freshTargetCwd()
+		const targetCwd = await freshRunsDir()
 		const fake = await mkdtemp(resolve(tmpdir(), "coder-loop-fakebin-"))
 		const fakePath = resolve(fake, "fake-claude.sh")
 		await writeFile(fakePath, `#!/bin/bash\nsleep 30\n`, { mode: 0o755 })
@@ -2876,10 +2877,10 @@ describe("events jsonl — per-run NDJSON event stream", () => {
 		const runId = "run-timeout-events"
 		const outputPath = resolve(options.logDir, "timeout-events.iteration.txt")
 		const sessionsPath = agentSessionsPath(outputPath)
-		const eventsPath = loopEventsPath(targetCwd, runId)
+		const eventsPath = loopEventsPath(options.logDir, runId)
 
 		const eventContext: LoopEventContext = {
-			emit: makeLoopEventEmitter(targetCwd, runId, () => {}),
+			emit: makeLoopEventEmitter(options.logDir, runId, () => {}),
 			runId,
 			issueId: "117",
 			pr: null,
@@ -2917,7 +2918,7 @@ describe("events jsonl — per-run NDJSON event stream", () => {
 	}, 15_000)
 
 	test("events jsonl no-watchdog clean exit: only attempt.start + attempt.close, no watchdog.fire", async () => {
-		const targetCwd = await freshTargetCwd()
+		const targetCwd = await freshRunsDir()
 		const fake = await mkdtemp(resolve(tmpdir(), "coder-loop-fakebin-"))
 		const fakePath = resolve(fake, "fake-claude.sh")
 		await writeFile(fakePath, `#!/bin/bash\necho '{"event":"work"}'\nexit 0\n`, { mode: 0o755 })
@@ -2934,10 +2935,10 @@ describe("events jsonl — per-run NDJSON event stream", () => {
 		const runId = "run-clean-events"
 		const outputPath = resolve(options.logDir, "clean-events.iteration.txt")
 		const sessionsPath = agentSessionsPath(outputPath)
-		const eventsPath = loopEventsPath(targetCwd, runId)
+		const eventsPath = loopEventsPath(options.logDir, runId)
 
 		const eventContext: LoopEventContext = {
-			emit: makeLoopEventEmitter(targetCwd, runId, () => {}),
+			emit: makeLoopEventEmitter(options.logDir, runId, () => {}),
 			runId,
 			issueId: "200",
 			pr: null,
@@ -2963,13 +2964,13 @@ describe("events jsonl — per-run NDJSON event stream", () => {
 	}, 10_000)
 
 	test("events jsonl best-effort: appendLoopEvent failure (parent path is a file) only logs warn and resolves", async () => {
-		const targetCwd = await freshTargetCwd()
-		// Make the events directory's parent a file so mkdir(recursive) cannot create the path
-		const sabotage = resolve(targetCwd, ".coder-loop/runtime/events")
-		await mkdir(resolve(targetCwd, ".coder-loop/runtime"), { recursive: true })
+		const runsDir = await freshRunsDir()
+		// Make the run directory path a file so mkdir(recursive) cannot create it.
+		const sabotage = resolve(runsDir, "run-fail")
+		await mkdir(runsDir, { recursive: true })
 		await writeFile(sabotage, "this-is-a-file-not-a-directory")
 		const logs: string[] = []
-		const path = loopEventsPath(targetCwd, "run-fail")
+		const path = loopEventsPath(runsDir, "run-fail")
 		await expect(
 			appendLoopEvent(
 				path,
@@ -3005,7 +3006,7 @@ describe("events jsonl — per-run NDJSON event stream", () => {
 	})
 
 	test("events jsonl tail e2e: tail -n +1 + jq filters phase.start rows showing issue/phase/pr per line", async () => {
-		const targetCwd = await freshTargetCwd()
+		const runsDir = await freshRunsDir()
 		const runId = "run-jq-e2e"
 		const sequence: LoopEvent[] = [
 			{ type: "queue.select", ts: "2026-05-12T00:00:00.000Z", runId, issueId: "135", pr: null, branch: null, status: "queued" },
@@ -3014,7 +3015,7 @@ describe("events jsonl — per-run NDJSON event stream", () => {
 			{ type: "phase.start", ts: "2026-05-12T00:00:11.000Z", runId, issueId: "135", pr: 137, branch: "issue-135-fix", phase: "review" },
 			{ type: "phase.end", ts: "2026-05-12T00:00:14.000Z", runId, issueId: "135", pr: 137, branch: "issue-135-fix", phase: "review", exitCode: 0, durationSeconds: 3 },
 		]
-		const path = await emitSequence(targetCwd, runId, sequence)
+		const path = await emitSequence(runsDir, runId, sequence)
 		const proc = Bun.spawnSync({
 			cmd: [
 				"bash",

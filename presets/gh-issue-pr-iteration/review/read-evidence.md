@@ -8,7 +8,7 @@ Collect all evidence required for review before making a verdict.
 
 Read, in order:
 
-1. trace file;
+1. iteration stdout JSONL file;
 2. workflow file;
 3. shared context file;
 4. state file;
@@ -50,4 +50,4 @@ Choose exactly one:
 - `no_selected_issue` → read `review/global-assessment`.
 - `review_infrastructure_broken` → read `review/action-stop` if present in the index, otherwise proceed to `review/global-assessment` with the exact failure.
 
-If the trace file cannot be read, use `review_infrastructure_broken`.
+If the iteration stdout JSONL file cannot be read, use `review_infrastructure_broken`.

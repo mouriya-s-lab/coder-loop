@@ -17,7 +17,7 @@ You are spawned by the orchestrator after every iteration. You audit the iterati
 - Evidence directory: `{{EVIDENCE_DIR}}`
 - Evidence root directory: `{{EVIDENCE_ROOT_DIR}}`
 - Log directory: `{{LOG_DIR}}`
-- Trace file: `{{TRACE_FILE}}`
+- Iteration stdout JSONL: `{{TRACE_FILE}}`
 - Loop file: `{{LOOP_FILE}}`
 - Browser evidence required: `{{REQUIRE_BROWSER_EVIDENCE}}`
 
@@ -74,4 +74,4 @@ Review MUST NOT:
 
 If `RUN_ID_GENERATION` is `resumed` and `RESUMED_FROM_PHASE` is the review phase, resume auditing the existing trace/PR/state for the same issue; do not rerun implementation and do not select another issue.
 
-If `RUN_ID_GENERATION` is `resumed` and `RESUMED_FROM_PHASE` is the iteration phase, the orchestrator should not have started review yet. Audit only if a complete current trace exists; otherwise stop with infrastructure feedback rather than guessing.
+If `RUN_ID_GENERATION` is `resumed` and `RESUMED_FROM_PHASE` is the iteration phase, the orchestrator should not have started review yet. Audit only if a complete current iteration stdout JSONL exists; otherwise stop with infrastructure feedback rather than guessing.

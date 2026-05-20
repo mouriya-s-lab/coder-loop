@@ -23,7 +23,7 @@ import {
 	type DaemonServerOptions,
 } from "./daemon"
 import { dispatchSubcommand } from "./install-commands"
-import { chainRuntimePaths, defaultChainNameForTarget, loopDataRootPaths, type ChainRuntimePaths } from "./runtime-paths"
+import { chainRuntimePaths, defaultChainNameForTarget, loopDataRootPaths, runRuntimePaths, type ChainRuntimePaths } from "./runtime-paths"
 import { openStateStore, type Item } from "./state-db"
 
 const PKG_ROOT = resolve(import.meta.dir, "..")
@@ -37,7 +37,6 @@ const DEFAULT_SHARED_FILE = ".coder-loop/runtime/shared.md"
 const DEFAULT_STATE_FILE = ".coder-loop/runtime/state.json"
 const DEFAULT_ISSUE_DIR = ".coder-loop/runtime/issues"
 const DEFAULT_EVIDENCE_DIR = ".coder-loop/runtime/evidence"
-const DEFAULT_LOG_DIR = ".coder-loop/runtime/logs"
 const REVIEW_ON_EMPTY_LOCK_FILE = "review-on-empty.lock"
 const DEFAULT_IDLE_SLEEP_MS = 60_000
 const DEFAULT_ITERATION_RUNNER: AgentRunnerKind = "codex"
@@ -45,7 +44,7 @@ export const CLAUDE_REVIEW_MODEL = "claude-opus-4-7"
 export const DEFAULT_ATTEMPT_TIMEOUT_SECONDS = 60 * 60
 export const ATTEMPT_TIMEOUT_KILL_MS = 5 * 1000
 
-const EXCLUDE_ENTRIES = [".dev-loop", ".dev-trace.txt", ".coder-loop/runtime"]
+const EXCLUDE_ENTRIES = [".dev-loop", ".coder-loop/runtime"]
 
 let logStream: WriteStream | null = null
 
@@ -708,8 +707,8 @@ export type LoopEventContext = {
 	phase: string
 }
 
-export function loopEventsPath(targetCwd: string, runId: string): string {
-	return resolve(targetCwd, ".coder-loop/runtime/events", `${runId}.jsonl`)
+export function loopEventsPath(runsDir: string, runId: string): string {
+	return runRuntimePaths(runsDir, runId).eventsPath
 }
 
 export function formatLoopEventLine(event: LoopEvent): string {
@@ -731,11 +730,11 @@ export async function appendLoopEvent(
 }
 
 export function makeLoopEventEmitter(
-	targetCwd: string,
+	runsDir: string,
 	runId: string,
 	logFn: (message: string) => void,
 ): LoopEventEmit {
-	const path = loopEventsPath(targetCwd, runId)
+	const path = loopEventsPath(runsDir, runId)
 	return (event) => appendLoopEvent(path, event, logFn)
 }
 
@@ -1468,10 +1467,12 @@ async function main() {
 
 		if (!selected) {
 			if (!(await exists(lockPath))) {
-				await writeFile(options.traceFile, "No actionable issue found in .coder-loop/runtime/state.json. Review must assess whether to stop.\n")
 				log("Empty queue: running review-on-empty for global state assessment.")
 				const fallbackItem = makeFallbackItem()
 				const fallbackRunId = makeRunId(null)
+				const fallbackTrace = runRuntimePaths(options.logDir, fallbackRunId).phasePaths(options.preset.phases[0]?.name ?? "iteration").stdoutPath
+				await mkdir(dirname(fallbackTrace), { recursive: true })
+				await writeFile(fallbackTrace, "No actionable issue found in runtime state. Review must assess whether to stop.\n")
 				const fallbackIssueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null }
 				const fallbackCtx: ResolveContext = {
 					item: fallbackItem,
@@ -1530,7 +1531,7 @@ async function main() {
 			}),
 		}
 
-		const emit = makeLoopEventEmitter(options.targetCwd, runId, log)
+		const emit = makeLoopEventEmitter(options.logDir, runId, log)
 		const baseEvent = {
 			runId,
 			issueId: selectedId,
@@ -1572,9 +1573,8 @@ async function main() {
 				iterEventContext,
 			)
 			const iterDurationSeconds = (Date.now() - iterStart) / 1000
-			await writeFile(options.traceFile, iterTrace)
 
-			log(`${iterPhase.name} agent finished: issue=#${selectedId}, exit=${iterCode}, duration=${iterDurationSeconds.toFixed(0)}s, trace=${options.traceFile}, output=${iterOutputPath} (${iterTrace.length} bytes)`)
+			log(`${iterPhase.name} agent finished: issue=#${selectedId}, exit=${iterCode}, duration=${iterDurationSeconds.toFixed(0)}s, output=${iterOutputPath} (${iterTrace.length} bytes)`)
 			await emit({
 				type: "phase.end",
 				ts: new Date().toISOString(),
@@ -1819,7 +1819,7 @@ function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, confi
 	const defaultStatePath = useLegacyRuntimeDefaults ? DEFAULT_STATE_FILE : loopDataRootPaths().stateDbPath
 	const defaultIssueDir = useLegacyRuntimeDefaults ? DEFAULT_ISSUE_DIR : chainPaths.issuesDir
 	const defaultEvidenceDir = useLegacyRuntimeDefaults ? DEFAULT_EVIDENCE_DIR : chainPaths.evidenceDir
-	const defaultLogDir = useLegacyRuntimeDefaults ? DEFAULT_LOG_DIR : chainPaths.runsDir
+	const defaultLogDir = chainPaths.runsDir
 	const workflowPath = resolveFrom(targetCwd, raw.workflowPath ?? config.workflowFile ?? DEFAULT_WORKFLOW_FILE)
 	const sharedContextPath = resolveFrom(targetCwd, config.sharedContextFile ?? defaultSharedPath)
 	const statePath = resolveFrom(targetCwd, raw.statePath ?? config.stateFile ?? defaultStatePath)
@@ -1847,7 +1847,7 @@ function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, confi
 		evidenceRootDir,
 		logDir,
 		loopFile: resolve(targetCwd, ".dev-loop"),
-		traceFile: resolve(targetCwd, ".dev-trace.txt"),
+		traceFile: resolve(logDir, "legacy-trace.txt"),
 		logFile: resolve(logDir, `coder-loop-${process.pid}.${timestamp}.log`),
 		repository,
 		baseBranch,
@@ -2067,6 +2067,8 @@ function makeStatusTargetSnapshot(
 	config: StatusResourceSnapshot,
 ): StatusTargetSnapshot {
 	const runtimeRoot = resolve(targetCwd, ".coder-loop/runtime")
+	const chainPaths = chainRuntimePaths(null, defaultChainNameForTarget(targetCwd))
+	const defaultLogDir = chainPaths.runsDir
 	const preset = options === null ? null : {
 		name: options.preset.name,
 		version: options.preset.version,
@@ -2083,8 +2085,8 @@ function makeStatusTargetSnapshot(
 		statePath: options?.statePath ?? resolve(runtimeRoot, "state.json"),
 		issueDir: options?.issueDir ?? resolve(runtimeRoot, "issues"),
 		evidenceRootDir: options?.evidenceRootDir ?? resolve(runtimeRoot, "evidence"),
-		logDir: options?.logDir ?? resolve(runtimeRoot, "logs"),
-		traceFile: options?.traceFile ?? resolve(targetCwd, ".dev-trace.txt"),
+		logDir: options?.logDir ?? defaultLogDir,
+		traceFile: options?.traceFile ?? resolve(defaultLogDir, "legacy-trace.txt"),
 		loopFile: options?.loopFile ?? resolve(targetCwd, ".dev-loop"),
 		repository: options?.repository ?? repositoryOverride,
 		baseBranch: options?.baseBranch ?? null,
@@ -2278,7 +2280,7 @@ function agentStatusFromInput(input: AgentRunStatusInput): AgentRunStatus {
 async function buildStatusEventsSnapshot(options: LoopOptions, state: LoopState, selected: SelectedIssue | null): Promise<StatusEventsSnapshot> {
 	const runId = state.current?.runId ?? selected?.item.lastRunId ?? firstLastRunId(state)
 	if (runId === null) return { runId: null, path: null, exists: false, recent: [], latest: null, error: null }
-	const path = loopEventsPath(options.targetCwd, runId)
+	const path = loopEventsPath(options.logDir, runId)
 	try {
 		const raw = await readFile(path, "utf-8")
 		const recent = parseRecentJsonLines(raw, 20)
@@ -3492,7 +3494,6 @@ export async function checkRuntime(
 		await checkFile(options.statePath, "state", errors)
 		await checkDirectory(options.issueDir, "issueDir", errors)
 		await checkDirectory(options.evidenceRootDir, "evidenceDir", errors)
-		await checkDirectory(options.logDir, "logDir", errors)
 		const runtimeRoot = resolve(options.targetCwd, ".coder-loop/runtime")
 		checkInside(options.targetCwd, options.configPath, "config", errors)
 		checkInside(options.targetCwd, options.workflowPath, "workflow", errors)
@@ -3500,13 +3501,11 @@ export async function checkRuntime(
 		checkInside(options.targetCwd, options.statePath, "state", errors)
 		checkInside(options.targetCwd, options.issueDir, "issueDir", errors)
 		checkInside(options.targetCwd, options.evidenceRootDir, "evidenceDir", errors)
-		checkInside(options.targetCwd, options.logDir, "logDir", errors)
 		checkInside(runtimeRoot, options.configPath, "config", errors)
 		checkInside(runtimeRoot, options.sharedContextPath, "shared context", errors)
 		checkInside(runtimeRoot, options.statePath, "state", errors)
 		checkInside(runtimeRoot, options.issueDir, "issueDir", errors)
 		checkInside(runtimeRoot, options.evidenceRootDir, "evidenceDir", errors)
-		checkInside(runtimeRoot, options.logDir, "logDir", errors)
 		if (isWithin(runtimeRoot, options.workflowPath)) pushCheckError(errors, "workflow", "must be project policy outside .coder-loop/runtime")
 	} else {
 		await checkFile(source.dbPath, "state db", errors)
@@ -3911,7 +3910,7 @@ export function buildRuntimeBindings(input: {
 		evidenceDir: input.evidenceDir ?? input.options.evidenceRootDir,
 		evidenceRootDir: input.options.evidenceRootDir,
 		logDir: input.options.logDir,
-		traceFile: input.options.traceFile,
+		traceFile: runRuntimePaths(input.options.logDir, input.runId).phasePaths(input.options.preset.phases[0]?.name ?? "iteration").stdoutPath,
 		loopFile: input.options.loopFile,
 		presetDir: input.options.preset.presetDir,
 		fragmentIndex: renderFragmentIndex(input.options.preset),
@@ -4304,6 +4303,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 	const { options, label, prompt: basePrompt, outputPath, sessionsPath, resume } = input
 	const effectivePrompt = resume.kind === "resume" ? RESUME_CONTINUE_PROMPT : basePrompt
 	const selectedRunner = input.runner ?? options.defaultRunner
+	await mkdir(dirname(outputPath), { recursive: true })
 	return new Promise((resolveResult) => {
 		const out: Buffer[] = []
 		const err: Buffer[] = []
@@ -4313,8 +4313,8 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 		const attemptStreamPath = agentAttemptStreamPath(outputPath, startedAt)
 		const attemptStderrPath = agentAttemptStderrPath(outputPath, startedAt)
 		const statusPath = agentStatusPath(outputPath)
-		const streamOutFile = createWriteStream(attemptStreamPath, { flags: "wx" })
-		const stderrOutFile = createWriteStream(attemptStderrPath, { flags: "wx" })
+		const streamOutFile = createWriteStream(attemptStreamPath, { flags: "a" })
+		const stderrOutFile = createWriteStream(attemptStderrPath, { flags: "a" })
 		const runnerPlan = buildRunnerInvocation(selectedRunner, effectivePrompt, resume, {
 			agentCwd: input.agentCwd,
 			targetCwd: options.targetCwd,
@@ -4842,25 +4842,29 @@ async function ensureGitExclude(cwd: string): Promise<void> {
 }
 
 function agentOutputPath(options: LoopOptions, runId: string, label: AgentLabel): string {
-	return resolve(options.logDir, `${runId}.${label}.txt`)
+	return runRuntimePaths(options.logDir, runId).phasePaths(label).latestPath
 }
 
 function agentStatusPath(outputPath: string): string {
-	return outputPath.replace(/\.txt$/, `.status.json`)
+	return runPhaseSibling(outputPath, "status.json")
 }
 
 export function agentSessionsPath(outputPath: string): string {
-	return outputPath.replace(/\.txt$/, `.sessions.jsonl`)
+	return runPhaseSibling(outputPath, "sessions.jsonl")
 }
 
 function agentAttemptStderrPath(outputPath: string, startedAt: string): string {
-	const suffix = startedAt.slice(0, 19).replace(/[T:]/g, "-")
-	return outputPath.replace(/\.txt$/, `.attempt-${suffix}.${process.pid}.stderr.txt`)
+	void startedAt
+	return runPhaseSibling(outputPath, "stderr.txt")
 }
 
 function agentAttemptStreamPath(outputPath: string, startedAt: string): string {
-	const suffix = startedAt.slice(0, 19).replace(/[T:]/g, "-")
-	return outputPath.replace(/\.txt$/, `.attempt-${suffix}.${process.pid}.jsonl`)
+	void startedAt
+	return runPhaseSibling(outputPath, "stdout.jsonl")
+}
+
+function runPhaseSibling(outputPath: string, filename: string): string {
+	return resolve(dirname(outputPath), filename)
 }
 
 export function parseSessionIdFromStream(text: string): string | null {

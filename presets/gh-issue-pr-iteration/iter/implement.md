@@ -29,7 +29,7 @@ If the issue body has no `## 验收标准` table (legacy issue without structure
 - Make a small direct change that closes exactly the selected issue.
 - Do not batch multiple issues.
 - Do not weaken tests.
-- Do not stage `.coder-loop/runtime/`, `.dev-loop`, or `.dev-trace.txt`.
+- Do not stage `.coder-loop/runtime/` or `.dev-loop`.
 - Do not create child issues, link sub-issues, merge PRs, close issues, or write final local state.
 - Preserve unrelated dirty files.
 

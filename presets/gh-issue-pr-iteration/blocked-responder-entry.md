@@ -52,7 +52,7 @@ If the selected queue item is blocked by another repository, create the cross-re
 - Do not close `{{REPO}}#{{ISSUE}}`.
 - Do not merge PRs.
 - Do not create child issue links.
-- Do not stage `.coder-loop/runtime/`, `.dev-loop`, or `.dev-trace.txt`.
+- Do not stage `.coder-loop/runtime/` or `.dev-loop`.
 - Use `gh` only for issue metadata/comments/creation, not for source-code bytes.
 
 ## Required final line

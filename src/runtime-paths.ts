@@ -30,6 +30,22 @@ export type ChainRuntimePaths = {
 	daemonRunDir: (timestamp: string) => string
 }
 
+export type RunRuntimePaths = {
+	runDir: string
+	eventsPath: string
+	phaseDir: (phase: string) => string
+	phasePaths: (phase: string) => RunPhaseRuntimePaths
+}
+
+export type RunPhaseRuntimePaths = {
+	phaseDir: string
+	latestPath: string
+	stdoutPath: string
+	stderrPath: string
+	statusPath: string
+	sessionsPath: string
+}
+
 export function resolveLoopDataRoot(input: string | null = null, env: Record<string, string | undefined> = process.env): string {
 	const raw = input ?? env[LOOP_DATA_ROOT_ENV] ?? DEFAULT_LOOP_DATA_ROOT
 	const expanded = expandHome(raw.trim())
@@ -64,6 +80,26 @@ export function chainRuntimePaths(rootInput: string | null, chainName: string): 
 		daemonDir: resolve(chainDir, "daemon"),
 		runDir: (runId) => resolve(chainDir, "runs", sanitizeRuntimeSegment(runId, "runId")),
 		daemonRunDir: (timestamp) => resolve(chainDir, "daemon", sanitizeRuntimeSegment(timestamp, "timestamp")),
+	}
+}
+
+export function runRuntimePaths(runsDir: string, runId: string): RunRuntimePaths {
+	const runDir = resolve(runsDir, sanitizeRuntimeSegment(runId, "runId"))
+	return {
+		runDir,
+		eventsPath: resolve(runDir, "events.jsonl"),
+		phaseDir: (phase) => resolve(runDir, sanitizeRuntimeSegment(phase, "phase")),
+		phasePaths: (phase) => {
+			const phaseDir = resolve(runDir, sanitizeRuntimeSegment(phase, "phase"))
+			return {
+				phaseDir,
+				latestPath: resolve(phaseDir, "latest.md"),
+				stdoutPath: resolve(phaseDir, "stdout.jsonl"),
+				stderrPath: resolve(phaseDir, "stderr.txt"),
+				statusPath: resolve(phaseDir, "status.json"),
+				sessionsPath: resolve(phaseDir, "sessions.jsonl"),
+			}
+		},
 	}
 }
 
