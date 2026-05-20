@@ -12,7 +12,9 @@ import {
 	getChain,
 	getItem,
 	getNextPending,
+	listActiveChains,
 	listChains,
+	listRepoCwdsForChain,
 	openStateDb,
 	openStateStore,
 	recordRun,
@@ -85,10 +87,12 @@ describe("state-db", () => {
 			expect(getChain(db, created.id)).toEqual(created)
 			expect(getChain(db, "umbrella-123")).toEqual(created)
 			expect(listChains(db)).toEqual([created])
+			expect(listActiveChains(db)).toEqual([created])
 
 			const completed = completeChain(db, created.id)
 			expect(completed.status).toBe("completed")
 			expect(completed.completedAt).toEqual(expect.any(String))
+			expect(listActiveChains(db)).toEqual([])
 		})
 	})
 
@@ -132,6 +136,7 @@ describe("state-db", () => {
 			addItem(db, chain.id, { issue: 3, repoCwd: "/repo/b", priority: "high" })
 
 			expect(getItem(db, low.id)?.extra).toEqual({ issueKind: "code" })
+			expect(listRepoCwdsForChain(db, chain.id)).toEqual(["/repo/a", "/repo/b"])
 			expect(getNextPending(db, chain.id, "/repo/a")?.id).toBe(high.id)
 			expect(getNextPending(db, chain.id, "/repo/b")?.issue).toBe(3)
 
