@@ -102,9 +102,11 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect([...preset.statuses.terminal]).toEqual(["blocked", "moot", "done"])
 	})
 
-	test("phases match the two hardcoded LoopPhase literals and prompt files exist", async () => {
+	test("phases include iteration, review, and the blocked responder trigger", async () => {
 		const preset = await loadPreset(BUNDLED_PRESET_DIR)
-		expect(preset.phases.map((p) => p.name)).toEqual(["iteration", "review"])
+		expect(preset.phases.map((p) => p.name)).toEqual(["iteration", "review", "blocked-responder"])
+		expect(reviewPhaseForPreset(preset).name).toBe("review")
+		expect(triggeredPhasesAfter(preset, "review", "blocked").map((phase) => phase.name)).toEqual(["blocked-responder"])
 		for (const phase of preset.phases) {
 			expect(phase.prompt.startsWith(BUNDLED_PRESET_DIR)).toBe(true)
 			const info = await stat(phase.prompt)
@@ -152,6 +154,17 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 			const info = await stat(actual.path)
 			expect(info.isFile()).toBe(true)
 		}
+	})
+
+	test("blocked responder prompt carries the required cross-repo side effects", async () => {
+		const prompt = await Bun.file(resolve(BUNDLED_PRESET_DIR, "blocked-responder-entry.md")).text()
+		expect(prompt).toContain("gh")
+		expect(prompt).toContain("kind:blocked")
+		expect(prompt).toContain("Unblocks: {{REPO}}#{{ISSUE}}")
+		expect(prompt).toContain(".coder-loop/runtime/state.json")
+		expect(prompt).toContain("coder-loop daemon start <targetRepoPath> --require-browser-evidence")
+		expect(prompt).toContain("Do not change the current repository's blocked item")
+		expect(prompt).toContain("ITERATION SUMMARY: blocked_responder=")
 	})
 })
 

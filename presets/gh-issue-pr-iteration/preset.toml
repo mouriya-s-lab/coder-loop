@@ -1,8 +1,9 @@
 # coder-loop preset: gh-issue-pr-iteration
 #
 # This is the default preset bundled with coder-loop. It encodes the
-# two-role (iteration + review) GitHub issue/PR loop that has historically
-# been hardcoded in src/loop.ts.
+# GitHub issue/PR loop that has historically been hardcoded in src/loop.ts:
+# iteration + review, plus post-review trigger phases for side effects that
+# belong outside ordinary PR review.
 #
 # Stage 1 PR 1 introduces this file alongside the existing hardcoded loop;
 # the engine begins consuming it in Stage 1 PR 2 (loadPreset). Variable
@@ -17,7 +18,7 @@
 
 name        = "gh-issue-pr-iteration"
 version     = 1
-description = "Two-role (iteration + review) GitHub issue/PR loop. Default preset bundled with coder-loop."
+description = "GitHub issue/PR loop with iteration, review, and post-review trigger phases. Default preset bundled with coder-loop."
 
 [item]
 idField = "issue"
@@ -62,6 +63,40 @@ prompt = "iter-entry.md"
 [[phases]]
 name   = "review"
 prompt = "review-entry.md"
+
+  [phases.variables]
+  TARGET_CWD               = "runtime.targetCwd"
+  AGENT_CWD                = "runtime.agentCwd"
+  REPO                     = "config.repository"
+  BASE_BRANCH              = "config.baseBranch"
+  RUN_ID                   = "runtime.runId"
+  ISSUE                    = "item.issue"
+  WORKFLOW_FILE            = "runtime.workflowPath"
+  SHARED_CONTEXT_FILE      = "runtime.sharedContextPath"
+  STATE_FILE               = "runtime.statePath"
+  CURRENT_ISSUE_FILE       = "runtime.currentIssueFile"
+  ISSUE_DIR                = "runtime.issueDir"
+  EVIDENCE_DIR             = "runtime.evidenceDir"
+  EVIDENCE_ROOT_DIR        = "runtime.evidenceRootDir"
+  LOG_DIR                  = "runtime.logDir"
+  TRACE_FILE               = "runtime.traceFile"
+  LOOP_FILE                = "runtime.loopFile"
+  PROMPT_ROOT              = "runtime.presetDir"
+  PROMPT_FRAGMENT_INDEX    = "runtime.fragmentIndex"
+  REQUIRE_BROWSER_EVIDENCE = "config.requireBrowserEvidence"
+  RUN_ID_GENERATION        = "runtime.runIdGeneration"
+  RESUMED_FROM_PHASE       = "runtime.resumedFromPhase"
+  RESUMED_STARTED_AT       = "runtime.resumedStartedAt"
+  ISSUE_BRANCH             = "item.branch"
+  ISSUE_PR                 = "item.pr"
+  ISSUE_STATUS             = "item.status"
+  ISSUE_LAST_RUN_ID        = "item.lastRunId"
+  ISSUE_KIND               = "runtime.issueKind"
+
+[[phases]]
+name    = "blocked-responder"
+prompt  = "blocked-responder-entry.md"
+trigger = { afterPhase = "review", whenStatus = "blocked" }
 
   [phases.variables]
   TARGET_CWD               = "runtime.targetCwd"

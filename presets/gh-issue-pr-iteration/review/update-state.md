@@ -28,6 +28,8 @@ When applying the `blocked` transition, update the selected queue item in `state
 
 `state.json` stores queue-item extra fields as top-level JSON fields on each queue item. Add `blockerRepo` and `blockerRef` at the selected queue item's top level so they deserialize into `QueueItem.extra`; do not create a literal nested `extra` object in the file.
 
+If `blockerRepo` names a different repository from `REPO`, resolve that repository's local checkout before writing state. When a verified checkout exists, set the selected queue item's top-level `agentCwd` to that absolute path so the post-review `blocked-responder` trigger spawns in the blocking repository while retaining the current target repo as an additional readable directory. Verify by git remote owner/name, not by directory basename alone. If no checkout can be verified, leave `agentCwd` null and state the lookup failure in the handoff so `blocked-responder` can report the infrastructure blocker.
+
 ## Expanded parent queue rules
 
 When prepending children:

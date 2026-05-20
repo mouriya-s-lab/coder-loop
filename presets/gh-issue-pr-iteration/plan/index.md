@@ -4,7 +4,7 @@
 
 Start one planning invocation and follow the planning fragment chain. Planning produces the coder-loop queue: atomic GitHub issues with executable checkpoints + parent/child graph + initialized `state.json`.
 
-Planning is **not** a `preset.phases` member. It is invoked by the `/dev-plan` slash command, which is a thin shell that delegates to this fragment chain. The L1 engine does not see planning; it only sees the `iteration` → `review` phases that consume the queue planning produces.
+Planning is **not** a `preset.phases` member. It is invoked by the `/dev-plan` slash command, which is a thin shell that delegates to this fragment chain. The L1 engine does not see planning; it sees the runtime phases that consume the queue planning produces: `iteration`, `review`, and any configured post-review trigger phases such as `blocked-responder`.
 
 ## Required reads
 

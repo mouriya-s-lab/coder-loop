@@ -15,7 +15,7 @@
 | `item.idField` | `issue`（GitHub issue number） |
 | `statuses.continuable` | `queued / in_progress / changes_requested` |
 | `statuses.terminal` | `blocked / moot / done` |
-| phases | `iteration` → `review`（两段固定顺序；planning 不在 phases 内，由 `/dev-plan` slash command 入口驱动） |
+| phases | `iteration` → `review`，以及 review 后按 `trigger` 条件运行的 side-effect phase（当前：`blocked-responder` on `blocked`）；planning 不在 phases 内，由 `/dev-plan` slash command 入口驱动 |
 | `agent.binary` | `claude` |
 | fragments | 48 个，分布在 `common/ / plan/ / iter/ / review/` 四个目录 |
 
@@ -31,6 +31,10 @@
 | `lastRunId` | string / null | 上一次 iteration 的 runId |
 | `issueFile` | string / null | issue handoff 文件相对路径 |
 | `evidenceDir` | string / null | 该 issue 的证据目录相对路径 |
+| `agentCwd` | string / null | agent spawn 的绝对 cwd；跨仓或 post-review responder 可指向外部 checkout |
+| `runner` | `claude \| codex` / null | 该 item 的 iteration/trigger runner override |
+| `blockerRepo` | string / undefined | `blocked` transition 写入的阻塞仓库，`owner/repo` |
+| `blockerRef` | string / undefined | `blocked` transition 写入的阻塞 issue ref 或环境条件 |
 
 status 字面量都是 preset 字符串，引擎只识别 `continuable / terminal` 二元集合。除上述外的转移（包括 `queued → done` 等）也合法，由 agent 通过 prompt 写入 state.json。
 

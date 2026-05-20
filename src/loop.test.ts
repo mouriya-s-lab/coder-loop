@@ -57,6 +57,7 @@ import {
 	resolvePresetDir,
 	RESUME_CONTINUE_PROMPT,
 	REVIEW_SUMMARY_WATCHDOG_MARKER,
+	reviewPhaseForPreset,
 	runAgentWithBackoff,
 	selectIssue,
 	spawnOneAttempt,
@@ -628,13 +629,13 @@ describe("markIterationStarted / markReviewStarted", () => {
 		expect(state.queue[0]!.lastRunId).toBe("run-Y")
 	})
 
-	test("markReviewStarted writes state.current.phase to last phase, preserving id field type", async () => {
+	test("markReviewStarted writes state.current.phase to review phase, preserving id field type", async () => {
 		const preset = await bundledPreset()
 		const item = makeItem({ issue: 99, status: "queued" })
 		const state = makeState({ queue: [item] })
 		markReviewStarted(state, item, preset, "run-Z")
 		expect(state.current).not.toBeNull()
-		expect(state.current!.phase).toBe(preset.phases[preset.phases.length - 1]!.name)
+		expect(state.current!.phase).toBe(reviewPhaseForPreset(preset).name)
 		expect(state.current!.runId).toBe("run-Z")
 		expect(state.current!.extra[preset.item.idField]).toBe(99)
 	})
@@ -1154,6 +1155,8 @@ describe("renderPrompt with bundled preset", () => {
 		expect(updateState).toContain("Only the `blocked` transition writes blocker metadata")
 		expect(updateState).toContain("top-level JSON fields on each queue item")
 		expect(updateState).toContain("do not create a literal nested `extra` object")
+		expect(updateState).toContain("set the selected queue item's top-level `agentCwd`")
+		expect(updateState).toContain("post-review `blocked-responder` trigger spawns in the blocking repository")
 		expect(updateState).toContain("do not add `blockerRepo` or `blockerRef`")
 	})
 
