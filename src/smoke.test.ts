@@ -507,6 +507,74 @@ describe("smoke: post-review phase triggers", () => {
 	})
 })
 
+describe("smoke: queue unblock CLI", () => {
+	test("requeues a blocked item and clears blocker metadata without touching unrelated fields", async () => {
+		const issue = 9200
+		const dir = await makeGhIssuePrTarget("blocked", issue)
+		const statePath = resolve(dir, ".coder-loop/runtime/state.json")
+		const state = JSON.parse(await readFile(statePath, "utf-8"))
+		state.queue[0].status = "blocked"
+		state.queue[0].blockerRepo = "owner/dependency"
+		state.queue[0].blockerRef = "#267"
+		state.current = { phase: "review", runId: "r1", startedAt: "2026-05-20T00:00:00.000Z", issue }
+		await writeFile(statePath, JSON.stringify(state, null, "\t") + "\n")
+
+		const proc = Bun.spawnSync({
+			cmd: ["bun", LOOP_ENTRY, "queue", "unblock", dir, "--issue", "owner/source#9200"],
+			cwd: REPO_ROOT,
+			stdout: "pipe",
+			stderr: "pipe",
+		})
+		const stdout = new TextDecoder().decode(proc.stdout)
+		const stderr = new TextDecoder().decode(proc.stderr)
+		expect(proc.exitCode).toBe(0)
+		expect(stderr).toBe("")
+		const result = JSON.parse(stdout)
+		expect(result.mutation.changed).toBe(true)
+		expect(result.mutation.clearedBlockerRepo).toBe(true)
+		expect(result.mutation.clearedBlockerRef).toBe(true)
+		expect(result.daemon.skipped).toBe(true)
+		expect(result.verification.itemStatus).toBe("queued")
+		expect(result.verification.blockerRepoPresent).toBe(false)
+		expect(result.verification.blockerRefPresent).toBe(false)
+
+		const updated = JSON.parse(await readFile(statePath, "utf-8"))
+		expect(updated.queue[0].status).toBe("queued")
+		expect(updated.queue[0].blockerRepo).toBeUndefined()
+		expect(updated.queue[0].blockerRef).toBeUndefined()
+		expect(updated.current).toBeNull()
+	})
+
+	test("dry-run reports daemon start plan without writing state", async () => {
+		const issue = 9201
+		const dir = await makeGhIssuePrTarget("blocked", issue)
+		const statePath = resolve(dir, ".coder-loop/runtime/state.json")
+		const state = JSON.parse(await readFile(statePath, "utf-8"))
+		state.queue[0].status = "blocked"
+		state.queue[0].blockerRepo = "owner/dependency"
+		state.queue[0].blockerRef = "#267"
+		await writeFile(statePath, JSON.stringify(state, null, "\t") + "\n")
+
+		const proc = Bun.spawnSync({
+			cmd: ["bun", LOOP_ENTRY, "queue", "unblock", dir, "--issue", "#9201", "--start-daemon", "--require-browser-evidence", "--dry-run"],
+			cwd: REPO_ROOT,
+			stdout: "pipe",
+			stderr: "pipe",
+		})
+		const stdout = new TextDecoder().decode(proc.stdout)
+		expect(proc.exitCode).toBe(0)
+		const result = JSON.parse(stdout)
+		expect(result.dryRun).toBe(true)
+		expect(result.daemon.requested).toBe(true)
+		expect(result.daemon.plan.command).toContain("--require-browser-evidence")
+
+		const updated = JSON.parse(await readFile(statePath, "utf-8"))
+		expect(updated.queue[0].status).toBe("blocked")
+		expect(updated.queue[0].blockerRepo).toBe("owner/dependency")
+		expect(updated.queue[0].blockerRef).toBe("#267")
+	})
+})
+
 describe("smoke: phase runner selection", () => {
 	test("default iteration runner uses Codex while review stays Claude", async () => {
 		const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-review-runner-"))

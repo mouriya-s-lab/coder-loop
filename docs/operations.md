@@ -301,6 +301,7 @@ state: /abs/path/.coder-loop/runtime/state.json
 | `daemon start <target>` | detached 启动 loop；已运行时幂等返回 | `--config <path>` `--repo <slug>` `--require-browser-evidence` `--max-iterations <N>` `--dry-run` |
 | `daemon stop <target>` | 删除 loop file 并 SIGTERM owned pid | `--config <path>` `--repo <slug>` `--dry-run` |
 | `daemon restart <target>` | stop 后 start，输出单个 JSON object | `--config <path>` `--repo <slug>` `--require-browser-evidence` `--max-iterations <N>` `--dry-run` |
+| `queue unblock <target>` | 将一个 `blocked` item 改回 `queued` 并清除 blocker metadata；用于 `kind:blocked` accept 后反向解除源仓 block | `--issue <id>` `--config <path>` `--repo <slug>` `--start-daemon` `--require-browser-evidence` `--dry-run` |
 
 跑 loop 自身时**不**带子命令，直接进 7.2。
 

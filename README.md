@@ -89,6 +89,7 @@ Iteration runner 未手动设置时固定默认 `codex`，不跟随启动宿主�
 coder-loop daemon start /path/to/target
 coder-loop daemon status /path/to/target --json
 coder-loop daemon stop /path/to/target
+coder-loop queue unblock /path/to/source-target --issue 123 --start-daemon --require-browser-evidence
 ```
 
 `/dev-plan` 引用以下用户级规则与 skill：
