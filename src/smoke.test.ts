@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { resolve } from "node:path"
 
@@ -429,6 +429,81 @@ describe("smoke: post-review phase triggers", () => {
 		const state = JSON.parse(await readFile(resolve(dir, ".coder-loop/runtime/state.json"), "utf-8"))
 		expect(state.queue[0].blockerRepo).toBeUndefined()
 		expect(state.queue[0].blockerRef).toBeUndefined()
+	})
+
+	test("bundled blocked-responder trigger uses the blocked item's target agentCwd", async () => {
+		const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-bundled-responder-"))
+		const runtime = resolve(dir, ".coder-loop/runtime")
+		const targetRepo = resolve(dir, "dependency-repo")
+		const responderCwdLog = resolve(runtime, "blocked-responder-cwd.txt")
+		await mkdir(resolve(runtime, "issues"), { recursive: true })
+		await mkdir(resolve(runtime, "evidence/issue-9100"), { recursive: true })
+		await mkdir(resolve(runtime, "logs"), { recursive: true })
+		await mkdir(targetRepo, { recursive: true })
+		await writeFile(resolve(dir, ".coder-loop/workflow.md"), "# bundled responder fixture workflow\n")
+		await writeFile(resolve(runtime, "shared.md"), "# shared\n")
+
+		const fakeCodex = resolve(dir, "fake-codex.sh")
+		const fakeClaude = resolve(dir, "fake-claude.sh")
+		await writeFile(fakeCodex, [
+			`#!/usr/bin/env bash`,
+			`prompt="$*"`,
+			`if [[ "$prompt" == *"blocked-responder agent"* ]]; then pwd > ${JSON.stringify(responderCwdLog)}; fi`,
+			`echo '{"type":"thread.started","thread_id":"thread-bundled-responder"}'`,
+			`echo '{"type":"item.completed","item":{"type":"agent_message","text":"ITERATION SUMMARY: done"}}'`,
+			`exit 0`,
+			``,
+		].join("\n"), { mode: 0o755 })
+		await writeFile(fakeClaude, [
+			`#!/usr/bin/env bash`,
+			`node -e 'const fs = require("fs"); const [path, agentCwd] = process.argv.slice(1); const state = JSON.parse(fs.readFileSync(path, "utf8")); state.queue[0].status = "blocked"; state.queue[0].blockerRepo = "owner/dependency"; state.queue[0].blockerRef = "#267"; state.queue[0].agentCwd = agentCwd; state.current = null; fs.writeFileSync(path, JSON.stringify(state, null, "\\t") + "\\n");' ${JSON.stringify(resolve(runtime, "state.json"))} ${JSON.stringify(targetRepo)}`,
+			`echo 'REVIEW SUMMARY: verdict=blocked; issue=#9100; actionable=1; reason=fixture cross-repo blocker'`,
+			`exit 0`,
+			``,
+		].join("\n"), { mode: 0o755 })
+
+		await writeFile(resolve(runtime, "config.json"), JSON.stringify({
+			preset: "gh-issue-pr-iteration",
+			codex: { binary: fakeCodex, extraArgs: [] },
+			claude: { binary: fakeClaude, extraArgs: [] },
+		}, null, 2))
+		await writeFile(resolve(runtime, "state.json"), JSON.stringify({
+			version: 1,
+			queue: [{
+				issue: 9100,
+				kind: "code",
+				status: "queued",
+				attempts: 0,
+				title: "Fixture bundled blocked responder",
+				priority: "medium",
+				branch: null,
+				pr: null,
+				lastRunId: null,
+				issueFile: null,
+				evidenceDir: ".coder-loop/runtime/evidence/issue-9100",
+				agentCwd: null,
+				runner: null,
+			}],
+			repository: null,
+			baseBranch: null,
+			recentRuns: [],
+			current: null,
+		}, null, 2))
+
+		const proc = Bun.spawnSync({
+			cmd: ["bun", LOOP_ENTRY, "--target-cwd", dir, "--once"],
+			cwd: REPO_ROOT,
+			stdout: "pipe",
+			stderr: "pipe",
+			env: claudeHostEnv(),
+		})
+		const stderr = new TextDecoder().decode(proc.stderr)
+		expect(proc.exitCode).toBe(0)
+		expect(stderr).toContain("Starting trigger phase blocked-responder after review")
+		expect((await readFile(responderCwdLog, "utf-8")).trim()).toBe(await realpath(targetRepo))
+		const state = JSON.parse(await readFile(resolve(runtime, "state.json"), "utf-8"))
+		expect(state.queue[0].status).toBe("blocked")
+		expect(state.queue[0].agentCwd).toBe(targetRepo)
 	})
 })
 
