@@ -1,52 +1,56 @@
-# 运维 / Debug Reference
+# Operations Reference
 
-读者：循环跑挂了 / 行为奇怪 / 想 reset 状态 / 想理解某轮跑哪儿去了的人。
+循环挂了、行为奇怪、想 debug 或 reset 状态时看这里。
 
-读完后你能：先用稳定 CLI 运维面判断 target 是否健康、daemon 是否活着、队列当前在做什么；必要时再下钻到 `state.json`、events JSONL、agent `status.json`、`.dev-loop` 等 runtime 文件。
+排障入口永远是稳定 CLI，不要直接读 runtime 文件：
 
-不在范围内：写新 preset（看 [preset-authoring](./preset-authoring.md)）；`gh-issue-pr-iteration` 内部跳转（看 [gh-issue-pr-iteration-fragments](./gh-issue-pr-iteration-fragments.md)）。
+```bash
+coder-loop doctor /path/to/target --repo owner/repo
+coder-loop status /path/to/target --json
+coder-loop daemon status /path/to/target --json
+```
 
 ---
 
-## 1. 稳定运维 API 优先
+## 1. Daemon
 
-operator / supervisor 的默认入口是 `coder-loop` 自己暴露的只读或受控子命令，不是直接拼 runtime 文件路径。
+单进程集中 daemon，SQLite 状态，Unix socket 通信。
 
-| 场景 | 首选命令 | 何时用 |
-|---|---|---|
-| 初始化 target | `coder-loop install <target> --repo <owner>/<repo>` | 幂等写 slash command、runtime layout、config、workflow starter，并检查 GitHub label / PATH / skill |
-| 体检 target | `coder-loop doctor <target> --repo <owner>/<repo>` | 只读检查 bootstrap layers 和 live runtime health |
-| 读机器状态 | `coder-loop status <target> --json` | supervisor / script 读取当前 config/state/queue/current/events/process snapshot |
-| 管理 target queue | `coder-loop daemon status/start/stop/restart <target>` | 通过集中 daemon socket 导入、查询、暂停 target queue；`status` 需要 `--json` |
-| 管理集中 daemon | `coder-loop daemon up/status/down` | 启动单进程 SQLite + Unix socket daemon，或通过 socket 查询 / 关闭它 |
-| 人类快捷入口 | `/dev-loop [N]` | target 内通过 slash command 调用 daemon API，`N` 会传给 `--max-iterations` |
-
-常规排障顺序：
-
-```bash
-coder-loop doctor /path/to/target --repo <owner>/<repo>
-coder-loop status /path/to/target --json | jq '.state.kind, .queue, .current, .processes.loopFile'
-coder-loop daemon status /path/to/target --json | jq '.chain, .items, .slots'
+```
+~/Ext/loop-data/
+  state.db       # SQLite DB（chains, items, runs）
+  daemon.pid     # PID file
+  daemon.sock    # Unix domain socket
+  chains/<name>/daemon/<timestamp>/   # per-chain 日志
 ```
 
-判断 daemon：
+### 命令
 
-```bash
-coder-loop daemon up
-coder-loop daemon status --json
-coder-loop daemon down
-coder-loop daemon start /path/to/target
-coder-loop daemon status /path/to/target --json
-coder-loop daemon stop /path/to/target
-coder-loop daemon restart /path/to/target --max-iterations 10
+| 命令 | 用途 |
+|---|---|
+| `daemon start <target>` | 导入 target queue 到 DB + 开始执行。socket 不在线时自动启动 daemon |
+| `daemon stop <target>` | 将 target items 标记为 `paused`，daemon 继续在线 |
+| `daemon restart <target>` | stop + start，输出单个 JSON |
+| `daemon status [<target>] --json` | 无 target 时显示 daemon 全局状态；有 target 时显示 chain/items/slots |
+| `daemon down` | 关闭 daemon 进程 |
+
+`daemon start` 幂等：socket 已在线时只导入 queue。
+
+### Socket 协议
+
+一行一个 JSON request，响应也是一行 JSON：
+
+```json
+{ "cmd": "daemon.status" }
+{ "cmd": "chain.create", "name": "release", "preset": "gh-issue-pr-iteration", "repo": "owner/repo", "baseBranch": "main" }
+{ "cmd": "item.add", "chain": "release", "issue": 127, "repoCwd": "/path/to/repo", "priority": "high" }
+{ "cmd": "item.list", "chain": "release" }
+{ "cmd": "daemon.shutdown" }
 ```
 
-`daemon up` 前台运行单进程 daemon。默认持有 SQLite DB
-`~/Ext/loop-data/state.db`，写 PID 到 `~/Ext/loop-data/daemon.pid`，监听 Unix
-domain socket `~/Ext/loop-data/daemon.sock`，并创建
-`~/Ext/loop-data/chains/<chain-name>/daemon/<timestamp>/{engine,stdout,stderr}.log`。
-`daemon status --json` 和 `daemon down` 不需要 target path，它们通过 socket
-发送 `daemon.status` / `daemon.shutdown` JSONL 请求。测试或开发时可用：
+响应：`{ "ok": true, "data": ... }` 或 `{ "ok": false, "error": "..." }`。
+
+### 测试 / 开发
 
 ```bash
 coder-loop daemon up \
@@ -54,399 +58,205 @@ coder-loop daemon up \
   --db .cache/daemon-dev/state.db \
   --socket .cache/daemon-dev/daemon.sock \
   --pid .cache/daemon-dev/daemon.pid
-coder-loop daemon status --socket .cache/daemon-dev/daemon.sock --json
-coder-loop daemon down --socket .cache/daemon-dev/daemon.sock
 ```
-
-`daemon start <target>` 是旧运维入口的兼容层：先尝试连接集中
-daemon socket；socket 已在线时把 target 的 legacy `state.json.queue`
-导入集中 DB，不再启动 per-target loop 进程；socket 不在线时自动 detached
-启动 `daemon up`，等 socket 可用后走同一条导入路径。显式一次性迁移可用
-`coder-loop migrate <target> --json`；它复制 legacy `shared.md` / `issues/` /
-`evidence/`，并保留 `state.json.pre-sqlite-migration` 备份。
-`daemon status <target> --json` 通过 socket 返回该 target 对应的
-`chain` / `items` / `slots`；`daemon stop <target>` 通过 `item.update` 把该
-target 导入的 items 标记为 `paused`，daemon 本身保持在线。`daemon restart`
-输出一个 JSON object，不会串接 stop/start 两份 JSON。
-
-集中 daemon socket 协议是一行一个 JSON request，响应也是一行 JSON：
-
-```json
-{ "cmd": "daemon.status" }
-{ "cmd": "chain.create", "name": "release", "preset": "gh-issue-pr-iteration", "repo": "owner/repo", "baseBranch": "main" }
-{ "cmd": "item.add", "chain": "release", "issue": 127, "repoCwd": "/path/to/repo", "priority": "high" }
-{ "cmd": "item.list", "chain": "release" }
-{ "cmd": "chain.complete", "chain": "release" }
-{ "cmd": "slot.list" }
-{ "cmd": "daemon.shutdown" }
-```
-
-响应 shape 固定为 `{ "ok": true, "data": ... }` 或
-`{ "ok": false, "error": "..." }`。
-
-`status <target> --json` 是 supervisor 的稳定读取契约。它会在 config/state 缺失或损坏时仍输出 JSON，让外部逻辑根据 `state.kind` 分支，而不是从 stderr 猜测失败类型。当前顶层字段：
-
-| 字段 | 含义 |
-|---|---|
-| `target` | target cwd、config/workflow/state/log/trace/loop file 路径、preset metadata |
-| `state` | `ok` 与 `kind` discriminant；如 `ok`、`missing-config`、`invalid-config`、`missing-preset`、`invalid-preset`、`missing-state`、`invalid-state`、`invalid-runtime` |
-| `queue` | 队列总数、按 status 计数、continuable/terminal 数、当前 selected item |
-| `current` | 当前 run、item、phase status JSON snapshot |
-| `events` | 当前或最近 run 的 events JSONL 路径、最近事件、解析错误 |
-| `processes` | `.dev-loop` 归属、pid 是否 alive、匹配 target 的 live process、扫描错误 |
-
-Runner 选择也在 `status` 中显式暴露：
-
-| JSON path | 含义 |
-|---|---|
-| `target.runner.hostDefault` | 当前宿主推断出的 runner 诊断信息：Codex 宿主为 `codex`，Claude Code 宿主为 `claude`，无宿主信号时 fallback `claude`；不决定 iteration 默认值 |
-| `target.runner.default` | target 默认 iteration runner；来源为 `config` 或 `iteration-default`，含 `kind / source / binary / extraArgs / model` |
-| `target.runner.reviewDefault` | review runner；默认 `claude`（source=`review-default`），可由 config 的 `reviewRunner` 覆盖；当 kind 为 `claude` 时 model 强制为 `claude-opus-4-7` |
-| `queue.selected.runner` | 当前 selected item 的实际 iteration runner；queue item 上的 `runner` 会覆盖 target default |
-| `queue.selected.reviewRunner` | 当前 selected item 的 review runner；不受 queue item `runner` 影响 |
-| `current.runner` | 当前 phase 的实际 runner；没有 current 时为 `null` |
-| `current.phaseStatus.value.runner` / `.model` | 已落盘 phase status 里记录的 runner kind 与 model；旧 status 文件可能为 `null` |
-
-target config 可写：
-
-```json
-{
-  "runner": "codex",
-  "reviewRunner": "claude",
-  "claude": { "binary": "claude", "model": "sonnet", "extraArgs": [] },
-  "codex": { "binary": "codex", "model": "gpt-5.4", "extraArgs": [] }
-}
-```
-
-queue item 也可写 `"runner": "claude" | "codex"` 做单 item iteration 覆盖。Review 默认固定 `claude`；需要改 review runner 才写 config 顶层 `"reviewRunner"`。当 review runner 是 Claude 时，`target.runner.reviewDefault.model` 固定为 `claude-opus-4-7`，并会替换 `claude.extraArgs` 中已有的 `--model`。`doctor` 的 Layer C 会检查 `target.runner.default.binary` 和 `target.runner.reviewDefault.binary`，不是硬编码检查单一 runner。
-
-Codex runner 默认使用 `--sandbox danger-full-access`，因为真实
-`gh-issue-pr-iteration` 需要写工作区、写 handoff、并调用 `gh`。需要更窄
-sandbox 的 target 可通过 `codex.extraArgs` 显式传入 `--sandbox
-workspace-write` 或其他 Codex CLI 支持的值；显式 extraArgs 优先于默认值。
-
-Runtime 文件仍是必要的 debug reference，但它们不是外层长期依赖的首选 API。只有在 `doctor/status/daemon` 输出指出某个局部异常，或需要人工恢复状态时，才直接编辑/读取下面的文件。
 
 ---
 
-## 2. Fallback: `state.json` schema
+## 2. `status --json` 字段
 
-文件：`<target>/.coder-loop/runtime/state.json`，UTF-8 JSON。
+| 顶层字段 | 内容 |
+|---|---|
+| `target` | cwd、config/workflow/state 路径、preset metadata |
+| `state` | `kind` discriminant：`ok` / `missing-config` / `invalid-state` / ... |
+| `queue` | 总数、按 status 计数、selected item |
+| `current` | 当前 run、item、phase status |
+| `events` | events JSONL 路径、最近事件 |
+| `processes` | `.dev-loop` 归属、pid alive、匹配的 live process |
 
-TypeScript shape（`src/loop.ts:55-62`）：
+Runner 选择字段：
+
+| Path | 含义 |
+|---|---|
+| `target.runner.default` | target iteration runner（含 kind/source/binary/model） |
+| `target.runner.reviewDefault` | review runner |
+| `queue.selected.runner` | 当前 item 的 iteration runner |
+| `queue.selected.reviewRunner` | 当前 item 的 review runner |
+
+---
+
+## 3. Resume 行为
+
+引擎在 spawn 前检查 `state.current`：
+
+| `state.current` | 结果 |
+|---|---|
+| `null` | 新 run，attempts++，从 phase[0] 开始 |
+| 存在，id 不匹配选中 item | 丢弃 current，按 null 处理 |
+| 存在，id 匹配，phase=`iteration` | resume iteration（attempts 不变） |
+| 存在，id 匹配，phase=`review` | 跳过 iteration 直接 review |
+
+Resume 注入 `runtime.runIdGeneration = "resumed"` + `runtime.resumedFromPhase`。
+
+强制重头：
+
+```bash
+jq '.current = null' .coder-loop/runtime/state.json > .tmp && mv .tmp .coder-loop/runtime/state.json
+```
+
+---
+
+## 4. Agent 进程监控
+
+- **Attempt timeout**：默认 60 分钟（`preset.toml` 的 `attemptTimeoutSeconds`）。到期发 SIGTERM，5s 后 SIGKILL
+- **Post-summary watchdog**：agent 输出 summary marker 后 5 分钟未退出则 SIGTERM
+- **Events JSONL**：`<target>/.coder-loop/runtime/events/<runId>.jsonl`
+  - 事件类型：`queue.select` / `phase.start` / `phase.end` / `attempt.start` / `attempt.timeout` / `attempt.close` / `watchdog.fire` / `queue.terminal`
+- **Auto-resume**：claude CLI spawn 中断时自动 `--resume <sessionId>`
+
+---
+
+## 5. Trace 文件
+
+| 文件 | 路径 | 用途 |
+|---|---|---|
+| Agent latest | `<logDir>/<runId>.<phase>.txt` | 当前轮全 stdout（每轮覆盖） |
+| Agent attempt 归档 | `<logDir>/<runId>.<phase>.attempt-<ts>.<pid>.txt` | 每次 spawn 留底 |
+| Agent status | `<logDir>/<runId>.<phase>.status.json` | spawn 元数据（exitCode/signal/bytes/runner/model） |
+| Daemon log | `<logDir>/coder-loop-<pid>.<ts>.log` | 引擎 stderr/stdout |
+| Trace | `<target>/.dev-trace.txt` | 当前迭代高层事件流 |
+
+`exitCode != 0` → spawn 失败。`exitCode == 0` 但 trace 末尾 verdict 是 blocked/failed → agent 内部逻辑选了非成功路径。
+
+---
+
+## 6. `--check-runtime` 错误
+
+`coder-loop --target-cwd <path> --check-runtime` 校验 schema，exit 1 时输出错误清单。
+
+常见错误：
+
+| 错误 | 修法 |
+|---|---|
+| `state.version: must be 1` | state.json 加 `"version": 1` |
+| `state.repository: must match configured ...` | 对齐 state.json 和 config.json |
+| `workflow: must be project policy outside .coder-loop/runtime` | workflow.md 放 `.coder-loop/` 不是 `runtime/` |
+| `duplicate id "42"` | queue 里去重 |
+| `status "foo" is not in preset.statuses` | 用 preset 声明的 status |
+| `state.current.issue: id "42" has non-continuable status` | `jq '.current = null'` 清 current |
+
+---
+
+## 7. `.dev-loop` Sentinel
+
+Legacy 循环控制文件。集中 daemon 架构下通常用 `daemon stop/start`，不需要手动操作这个文件。
+
+- 引擎启动时创建，删除后当前轮跑完正常退出
+- 不强杀 in-flight agent——sentinel 检查在轮间隔
+- 进程死后不自动清理，下次启动会覆盖
+
+---
+
+## 8. `kind:blocked` 工作流
+
+1. Review 判定 item blocked，写入 `blockerRepo` / `blockerRef`
+2. `blocked-responder` trigger phase 在 blocker 仓创建 follow-up issue，注入该仓 queue，启动该仓 daemon
+3. Blocker 仓 follow-up PR merge 后，review 执行 `coder-loop queue unblock` 恢复原仓 item
+
+```bash
+coder-loop queue unblock /path/to/source-target --issue 123 --start-daemon --require-browser-evidence
+```
+
+---
+
+## 9. Debug 速查
+
+```bash
+# 看上一轮跑去哪了
+coder-loop status . --json | jq '.current, .events.latest'
+ls -t .coder-loop/runtime/logs/ | head
+tail -50 .coder-loop/runtime/logs/<runId>.iteration.txt
+
+# 清掉卡住的 current，从队首重选
+jq '.current = null' .coder-loop/runtime/state.json > .tmp && mv .tmp .coder-loop/runtime/state.json
+coder-loop --target-cwd . --check-runtime
+
+# 把某 issue 从 done 拉回 queued 重跑
+jq '.queue |= map(if .issue == 42 then .status = "queued" | .attempts = 0 else . end) | .current = null' \
+    .coder-loop/runtime/state.json > .tmp && mv .tmp .coder-loop/runtime/state.json
+
+# 核手段：reset 到空队列
+echo '{ "version": 1, "queue": [], "repository": null, "baseBranch": null, "recentRuns": [], "current": null }' \
+    > .coder-loop/runtime/state.json
+```
+
+---
+
+## 10. `state.json` Schema
+
+文件：`<target>/.coder-loop/runtime/state.json`。
 
 ```typescript
 type LoopState = {
-  version: number          // 必须为 1
+  version: 1
   queue: QueueItem[]
   repository: string | null
   baseBranch: string | null
-  recentRuns: unknown[]    // 引擎不读不写，preset 可自由用
+  recentRuns: unknown[]
   current: CurrentRun | null
 }
 
 type QueueItem = {
-  status: string                  // 必须落在 preset.statuses.{continuable, terminal} 任一集合
-  attempts: number | null         // 非负整数或 null
+  [idField]: string | number     // preset 定义的 id 字段
+  status: string                 // preset statuses 集合内
+  attempts: number | null
   title: string | null
-  priority: string | null         // gh-issue-pr-iteration: "high" | "medium" | "low" | null
+  priority: "high" | "medium" | "low" | null
   branch: string | null
-  pr: number | null               // 正整数或 null
+  pr: number | null
   lastRunId: string | null
-  issueFile: string | null        // 相对 issueDir 的路径或绝对路径
-  evidenceDir: string | null      // 相对 evidenceRootDir 或绝对
-  agentCwd: string | null         // 绝对路径；spawn 子进程的 cwd。null → 等于 targetCwd。跨 repo 迭代用：指向外部 repo 的 checkout
-  [<preset.item.idField>]: string | number   // 默认 "issue"
-  [其他字段]: unknown              // preset 可加任意自定义字段
+  issueFile: string | null
+  evidenceDir: string | null
+  agentCwd: string | null        // 跨 repo 时指定绝对路径
+  runner: "claude" | "codex" | null
 }
 
 type CurrentRun = {
-  phase: string                   // 必须落在 preset.phases.*.name
-  runId: string                   // 非空
-  startedAt: string               // ISO 8601 datetime
-  [<preset.item.idField>]: string | number   // 当前正在跑的 item id
-  [其他字段]: unknown
+  phase: string                  // preset phases 内
+  runId: string
+  startedAt: string              // ISO 8601
+  [idField]: string | number
 }
 ```
 
-不变量（引擎在 `--check-runtime` / spawn 前强制）：
-
-- `state.version === 1`；
-- 若 config `repository` 非 null，`state.repository` 必须匹配；`baseBranch` 同理；
-- `queue` 内 id 不可重复；
-- 每个 queue item 的 `status` 必须落在 preset 的 status 集合内；
-- 若 `state.current` 存在，其 `idField` 值必须能在 `queue` 找到匹配项，且该项的 status 必须落在 `statuses.continuable` 内；
-- 若 `state.current.phase` 存在，必须落在 `preset.phases.*.name` 内；
-- `state.current.startedAt` 必须 ISO 8601；
-- 若 queue item 声明 `agentCwd`，必须是绝对路径，且必须是个已存在目录。
-
-不变量违反 → `--check-runtime` 非零退出，引擎 spawn 前 abort。
+不变量（`--check-runtime` 强制）：queue id 不重复、status 在 preset 集合内、current.phase 在 preset phases 内、agentCwd 必须是已存在的绝对目录。
 
 ---
 
-## 3. Fallback: Trace / 日志文件 layout
+## 11. CLI Flags 全表
 
-| 文件 | 路径模板 | 用途 | 何时写 |
-|---|---|---|---|
-| 当前迭代 trace | `<target>/.dev-trace.txt` | 当前 / 最近一轮的高层事件流，给人看 | 每轮覆盖 |
-| 进程级日志 | `<target>/.coder-loop/runtime/logs/coder-loop-<pid>.<timestamp>.log` | 引擎自身 stderr/stdout | 每次 `coder-loop` 启动一份，append |
-| Agent latest 输出 | `<logDir>/<runId>.<phase>.txt` | agent 当前轮全 stdout | spawn 时覆盖 |
-| Agent attempt 归档 | `<logDir>/<runId>.<phase>.attempt-<timestamp>.<pid>.txt` | 每次 spawn 留底（防 latest 被下次覆盖） | 每次 spawn 新建 |
-| Agent status | `<logDir>/<runId>.<phase>.status.json` | spawn 结束元数据（exitCode / signal / bytes / 错误） | spawn 退出时写 |
+### 子命令
 
-`<logDir>` = `<target>/.coder-loop/runtime/logs/`，引擎绝对路径暴露为 `runtime.logDir`。
+| 子命令 | 主要 flags |
+|---|---|
+| `install <target>` | `--repo` `--preset` `--force` `--dry-run` `--install-skills` |
+| `uninstall <target>` | — |
+| `doctor <target>` | `--repo` |
+| `status <target> --json` | `--config` `--repo` |
+| `daemon start <target>` | `--require-browser-evidence` `--max-iterations` `--worktree` `--dry-run` |
+| `daemon stop <target>` | `--dry-run` |
+| `daemon restart <target>` | 同 start |
+| `daemon status [<target>] --json` | — |
+| `daemon down` | — |
+| `queue unblock <target>` | `--issue` `--start-daemon` `--require-browser-evidence` |
 
-`status.json` 字段（`src/loop.ts:156-169`）：
+### 主循环 flags
 
-```json
-{
-  "label": "iteration",
-  "runner": "codex",
-  "model": "gpt-5.4",
-  "pid": 12345,
-  "startedAt": "2026-05-11T10:00:00.000Z",
-  "lastEventAt": "2026-05-11T10:14:32.123Z",
-  "outputPath": "/abs/path/<runId>.iteration.txt",
-  "statusPath": "/abs/path/<runId>.iteration.status.json",
-  "bytesWritten": 123456,
-  "promptChars": 8901,
-  "lastStream": "stdout",
-  "exitCode": 0,
-  "signal": null,
-  "error": null
-}
-```
-
-`runner` / `model` 为本次 phase 使用的 runner kind 与模型（旧文件可能缺失）。`exitCode != 0` 或 `signal != null` → spawn 异常（不是 agent 内部逻辑失败，agent 内部失败是 `exitCode == 0` 但 trace 末尾 verdict 是 blocked/failed）。
-
----
-
-## 4. Fallback: `--check-runtime` 错误分类
-
-`coder-loop doctor <target>` 已经覆盖 bootstrap 与 live runtime health。只想校验 target runtime schema、不查 PATH / GitHub / skill 时，再用 `coder-loop --target-cwd <path> --check-runtime`。它执行 `checkRuntime`（`src/loop.ts:732-826`），失败 → exit 1，stderr 列出每条错误：
-
-```
-Runtime check failed: <N> error(s)
-- <path>: <message>
-- <path>: <message>
-```
-
-错误类别：
-
-| 类别 | 示例 | 修法 |
+| Flag | 默认 | 含义 |
 |---|---|---|
-| schema 版本错 | `state.version: must be 1` | state.json 顶层加 / 改 `"version": 1` |
-| repo 不匹配 | `state.repository: must match configured repository <owner>/<repo>` | 改 state.json 或 config.json 二选一对齐 |
-| base branch 不匹配 | `state.baseBranch: must match configured baseBranch main` | 同上 |
-| 必需文件 / 目录缺失 | `targetCwd: directory does not exist` / `workflow: file does not exist` | bootstrap 缺失项（看 [operator-quickstart](./operator-quickstart.md#1-bootstrap-目标-repo-的-coder-loop)） |
-| 路径越出 target | `state: must be inside <target>` | 不要把 state.json 放 target 外 |
-| 路径越出 runtime 根 | `state: must be inside <target>/.coder-loop/runtime` | runtime 文件强制在 `runtime/` 内 |
-| workflow 误入 runtime | `workflow: must be project policy outside .coder-loop/runtime` | workflow.md 留在 `.coder-loop/` 而不是 `.coder-loop/runtime/` |
-| queue item id 缺失 / 重复 | `state.queue[N].issue: must be a non-empty string` / `duplicate id "42"` | 修 state.json 队列 |
-| queue item status 非法 | `state.queue[N].status: status "foo" is not in preset.statuses` | 用 preset 声明的 status 字面量 |
-| queue item 字段类型错 | `state.queue[N].attempts: must be null or a non-negative integer` | 改字段类型 |
-| issueFile / evidenceDir 找不到 | `state.queue[N].issueFile: file does not exist` | 创建文件或把字段设回 null |
-| agentCwd 不是绝对路径 / 不存在 | `state.queue[N].agentCwd: must be an absolute path` / `directory does not exist` | 改成已存在的绝对目录或设回 null（用 targetCwd） |
-| current 引用不到 queue 项 | `state.current.issue: id "42" is not present in queue` | 队列没该 id，要么补回 queue，要么 `state.current = null` |
-| current 引用了 terminal item | `state.current.issue: id "42" has non-continuable status done` | 已完成 item 不该是 current，`state.current = null` |
-| current.phase 不在 preset | `state.current.phase: phase "foo" is not declared in preset.phases` | phase 字面量错，改为 preset 声明的名字 |
-| current.runId 空 | `state.current.runId: must not be empty` | 给个非空 runId 或清 current |
-| current.startedAt 格式错 | `state.current.startedAt: must be an ISO date string` | 用 `new Date().toISOString()` 格式 |
-| preset 加载错 | `loadPreset throws`（preset.toml 字段缺失 / fragment 文件不可读 / 集合冲突等） | 看 stderr 具体错，按 [preset-authoring](./preset-authoring.md#3-presettoml-字段表) 修 preset |
-
-exit 0 时 stderr 输出：
-
-```
-Runtime check passed: target=<abs>
-Runtime check passed: repo=<owner>/<repo>          # 仅 config.repository 非 null 时
-Runtime check passed: config=<abs> (json|toml)
-Runtime check passed: state=<abs>
-Runtime check passed: queue=<N>, selected=<id>|none
-Runtime check passed: preset=<name>
-```
-
----
-
-## 5. Resume 行为
-
-引擎在 spawn 前看 `state.current`（`src/loop.ts:411-466`）。决策表：
-
-| `state.current` | 与选中 item id 关系 | `current.phase` | 结果 |
-|---|---|---|---|
-| `null` | n/a | n/a | 新 run；`runIdGeneration = "new"`；attempts++ 后从 `phases[0]` 跑 |
-| 非 null | id 不匹配选中 item | n/a | 视为 stale，丢弃 `state.current`；按 `null` 路径处理 |
-| 非 null | id 匹配选中 item | `iteration` | resume iteration；`runIdGeneration = "resumed"`；resumedFromPhase = "iteration"`；从 iter 入口重跑（attempts 不重新自增） |
-| 非 null | id 匹配选中 item | `review` | 跳过 iter 直接 review；`runIdGeneration = "resumed"`；resumedFromPhase = "review"` |
-
-Resume 时引擎注入：
-
-- `runtime.runIdGeneration = "resumed"`
-- `runtime.resumedFromPhase = <state.current.phase>`
-- `runtime.resumedStartedAt = <state.current.startedAt>`
-
-新 run：
-
-- `runtime.runIdGeneration = "new"`
-- `runtime.resumedFromPhase = ""`
-- `runtime.resumedStartedAt = ""`
-
-preset prompt 自行用这三个变量决定续跑细节（如「`runIdGeneration == resumed` 时不要重写 PR description，只 append 新一轮证据」）。引擎不识别这些领域分类。
-
-### 强制重头：清 current
-
-```bash
-jq '.current = null' .coder-loop/runtime/state.json > .coder-loop/runtime/state.next.json
-mv .coder-loop/runtime/state.next.json .coder-loop/runtime/state.json
-coder-loop --target-cwd . --check-runtime          # 验证仍合法
-```
-
-### 强制 review 不重跑 iter：保留 current.phase = review
-
-`state.current.phase == "review"` 自动跳过 iteration，按当前 iter 输出的 trace 进 review。常用于 review fragment bug fix 后重跑同一 issue 的 review。
-
----
-
-## 6. `.dev-loop` Sentinel
-
-文件：`<target>/.dev-loop`，引擎绝对路径暴露为 `runtime.loopFile`。
-
-常规 target queue 导入 / 暂停请用 `coder-loop daemon start/stop/restart <target>`。本节是理解 legacy sentinel 或做手工救援时的底层语义。
-
-**创建时点**：`coder-loop` 进程启动、`--check-runtime` / `--dry-run` 通过、即将进入主循环时（`src/loop.ts:367-371`）。
-
-内容（人类可读）：
-
-```
-started: 2026-05-11T10:00:00.000Z
-pid: 12345
-log: /abs/path/.coder-loop/runtime/logs/coder-loop-XXX.log
-cwd: /abs/path/to/target
-state: /abs/path/.coder-loop/runtime/state.json
-```
-
-**检查时点**：每轮主循环入口（`src/loop.ts:375-407`）。删除 → 当前轮跑完后正常退出。
-
-**不强杀 in-flight agent**：sentinel 检查在轮间隔；当前 spawn 的 agent 进程继续跑直到结束。要立即停 → `kill <pid>` 杀引擎 + agent。
-
-**进程死后残留**：`.dev-loop` 不会自动清理（引擎正常退出时不删，crash 时更不删）。下次 `coder-loop` 启动会覆盖文件内容，无害。
-
----
-
-## 7. CLI 全表
-
-### 7.1 子命令（必须作为第一位置参数）
-
-`coder-loop install / uninstall / doctor / status / migrate / daemon`。详细 bootstrap 行为见 [operator-quickstart §1](./operator-quickstart.md#1-bootstrap-目标-repo-的-coder-loop)：
-
-| 子命令 | 用途 | 主要 flag |
-|---|---|---|
-| `install <target>` | 幂等四层 bootstrap | `--repo <slug>` `--preset <name>` `--force` `--dry-run` `--install-skills` `--skip-skill-check` |
-| `uninstall <target>` | 仅删 `.claude/commands/dev-*.md` | — |
-| `doctor <target>` | 只读四层体检 + live runtime health | `--repo <slug>` |
-| `status <target> --json` | 只读 JSON runtime/process snapshot | `--config <path>` `--repo <slug>` |
-| `migrate <target>` | 显式把 legacy `state.json` 导入 SQLite chain/items/runs，并复制 shared/issues/evidence | `--json` `--root <path>` `--db <path>` `--config <path>` `--state <path>` `--repo <slug>` `--base-branch <branch>` `--chain <name>` |
-| `daemon status <target> --json` | socket 查询 target chain / items / slots | `--config <path>` `--repo <slug>` `--socket <path>` |
-| `daemon start <target>` | socket 在线则导入 target queue；不在线则自动 up 后导入 | `--config <path>` `--repo <slug>` `--require-browser-evidence` `--dry-run` `--socket <path>` `--root <path>` `--db <path>` |
-| `daemon stop <target>` | 通过 socket 将 target items 标记为 `paused` | `--config <path>` `--repo <slug>` `--dry-run` `--socket <path>` |
-| `daemon restart <target>` | stop 后 start，输出单个 JSON object | `--config <path>` `--repo <slug>` `--require-browser-evidence` `--dry-run` `--socket <path>` `--root <path>` `--db <path>` |
-| `queue unblock <target>` | 将一个 `blocked` item 改回 `queued` 并清除 blocker metadata；用于 `kind:blocked` accept 后反向解除源仓 block | `--issue <id>` `--config <path>` `--repo <slug>` `--start-daemon` `--require-browser-evidence` `--dry-run` |
-
-跑 loop 自身时**不**带子命令，直接进 7.2。
-
-### 7.1.1 `kind:blocked` / blocked-responder 运维路径
-
-`kind:blocked` 是 PR-backed blocker-resolution issue，不是普通实现 issue 的别名。正常路径：
-
-1. review 判定源仓 item blocked，并在 state item 写入 `blockerRepo` / `blockerRef`。
-2. preset trigger 运行 `blocked-responder`，在 blocker 仓创建 `kind:blocked` follow-up，写 `Unblocks: <sourceRepo>#<issue>`，注入 blocker 仓 queue，并用 `coder-loop daemon start <blockerTarget> --require-browser-evidence` 保持该仓推进。
-3. blocker 仓 follow-up PR merge 且 review 接受后，review 执行：
-
-   ```bash
-   coder-loop queue unblock /path/to/source-target --issue <source-issue> --start-daemon --require-browser-evidence
-   ```
-
-4. source target 的 blocked item 回到 `queued`，daemon 继续原任务。
-
-如果 responder 找不到 blocker 仓 checkout，先修 checkout/remote 映射；不要手工把源仓 item 从 `blocked` 改回 `queued`，否则会绕过 unblock 证据。
-
-### 7.2 主循环 flags
-
-`bun src/loop.ts [flags]` 或 `coder-loop [flags]`：
-
-| Flag | 类型 | 默认 | 含义 |
-|---|---|---|---|
-| `<N>` | positional int | 无（无限） | 最大循环轮次；不传则无限 |
-| `--target-cwd <path>` | string | `process.cwd()` | target 目录绝对 / 相对路径 |
-| `--config <path>` | string | `<target>/.coder-loop/runtime/config.json` 或 `.toml` | config 文件路径 |
-| `--workflow <path>` | string | config 字段或 `<target>/.coder-loop/workflow.md` | workflow 文件路径 |
-| `--state <path>` | string | config 字段或 `<target>/.coder-loop/runtime/state.json` | state 文件路径 |
-| `--repo <owner>/<repo>` | string | config 字段或 null | 校验 `state.repository` 一致；不会改写 state |
-| `--require-browser-evidence` | bool flag | config 字段或 false | 暴露 `runtime.requireBrowserEvidence = "true"` 给 preset，preset prompt 自行决定是否拒收非浏览器证据；引擎自身不验证截图存在 |
-| `--once` | bool flag | false | 跑 1 轮就退出（等价 `1`） |
-| `--dry-run` | bool flag | false | 选中 item 后停（不 spawn agent，不写 trace） |
-| `--check-runtime` | bool flag | false | 校验 schema 后退出，不 spawn agent |
-
-flag 冲突优先级：CLI > config > 默认。
-
-### 7.3 Agent 进程与监控（fallback reference）
-
-- **Per-run events JSONL**：每次 loop 启动会写 `<target>/.coder-loop/runtime/events/<runId>.jsonl`，行级 JSON 事件（`queue.select` / `phase.start` / `phase.end` / `attempt.start` / `attempt.timeout` / `attempt.close` / `watchdog.fire` / `queue.terminal`）。`runId` 在 `state.current.runId`，`coder-loop status <target> --json` 的 `events.path` 会给出当前或最近 run 的位置。外部 watcher 优先 poll `status`；需要非轮询事件流时再 `tail -F <runId>.jsonl`。
-- **Absolute attempt timeout**：每个 agent attempt 默认 60 分钟绝对上限，可在 preset.toml `[agent] attemptTimeoutSeconds = <seconds>` 覆盖。到期且尚未观察到 phase summary marker 时，引擎对 agent 进程组发 SIGTERM，5 秒后仍未退出则 SIGKILL；attempt 记录 `terminated.kind = "timeout"`，事件流写 `attempt.timeout`。
-- **Post-summary watchdog**：iteration agent 输出 `ITERATION SUMMARY` 后 5 分钟未自然退出，引擎发 SIGTERM；再 5 秒后 SIGKILL。事件流写一条 `watchdog.fire`。这是 summary 已交付后的兜底；一旦 marker 被观察到，absolute attempt timeout 不再接管该 attempt。
-- **Agent --resume**：claude CLI spawn 中断（5xx / 网络）时引擎自动 `--resume <sessionId>` 续跑，最多重试若干次后退避。sessionId 索引在 `<logDir>/<runId>.<phase>.sessions.jsonl`。
-
----
-
-## 8. 常用 debug 操作
-
-### 看上一轮跑去哪了
-
-```bash
-coder-loop status . --json | jq '.current, .events.latest, .processes'
-ls -t .coder-loop/runtime/logs/ | head
-tail -50 .coder-loop/runtime/logs/<runId>.iteration.txt    # iter trace 末尾
-cat .coder-loop/runtime/logs/<runId>.iteration.status.json # spawn 元数据
-```
-
-### 把卡住的 current run 清掉，从队首重新选
-
-```bash
-jq '.current = null' .coder-loop/runtime/state.json > .coder-loop/runtime/state.next.json
-mv .coder-loop/runtime/state.next.json .coder-loop/runtime/state.json
-coder-loop --target-cwd . --check-runtime
-```
-
-### 把某 issue 从 done 拉回 queued 重跑
-
-```bash
-jq '.queue |= map(if .issue == 42 then .status = "queued" | .attempts = 0 else . end) | .current = null' \
-    .coder-loop/runtime/state.json > .coder-loop/runtime/state.next.json
-mv .coder-loop/runtime/state.next.json .coder-loop/runtime/state.json
-```
-
-### 看活着的 coder-loop 进程
-
-```bash
-coder-loop status . --json | jq '.processes'
-cat .dev-loop      # fallback: pid / cwd / log / command 都在里面
-```
-
-### 把 state reset 到空队列（核手段）
-
-```bash
-cat > .coder-loop/runtime/state.json <<EOF
-{ "version": 1, "queue": [], "repository": null, "baseBranch": null, "recentRuns": [], "current": null }
-EOF
-```
-
-⚠ 这会丢失所有进度（除了 GitHub 上已落地的 PR / comment 等真持久状态）。
-
----
-
-## 9. 已知坑
-
-- **`status.json` 显示 exitCode=0 但 trace 末尾是 blocked** —— spawn 成功，agent 内部逻辑选了 blocked verdict。看 trace 末尾的 fragment verdict，不是看 exitCode。
-- **`--check-runtime` 报 `workflow: must be project policy outside .coder-loop/runtime`** —— 你把 `workflow.md` 放进 `runtime/` 了。它应在 `.coder-loop/workflow.md`（runtime 的同级父）。
-- **resume 后 attempts 不变** —— 这是 spec 行为，resume 不算新 attempt；只有 `current = null` 的新 run 才 attempts++。
-- **删了 `.dev-loop` 但循环又跑了一轮** —— sentinel 检查在轮间隔，已经 spawn 的 agent 跑完才退出。
-- **`gh issue view --json labels` 调用失败** —— 引擎在 spawn 前 fetch `ISSUE_KIND`，gh auth 失效或网络异常会导致 spawn 直接 abort，stderr 显示 `gh issue view exited <code>` 或 `failed to spawn`。
+| `<N>` | 无限 | 最大轮次 |
+| `--target-cwd <path>` | cwd | target 目录 |
+| `--require-browser-evidence` | false | 启用最强 E2E 证据要求 |
+| `--worktree` | false | 在 git worktree 中执行 |
+| `--once` | false | 跑 1 轮 |
+| `--dry-run` | false | 选 item 不 spawn |
+| `--check-runtime` | false | 只校验 schema |

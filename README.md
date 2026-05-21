@@ -1,113 +1,181 @@
 # coder-loop
 
-N 角色字符串调度引擎。给定一个 preset（角色定义、状态集、phase 列表、prompt 与变量绑定），coder-loop 按 preset 描述的顺序 spawn 各 phase 的 agent，捕获输出，根据状态推进队列，直到队列里所有 item 落在 terminal 状态。
+给 AI agent 排队列、跑循环的调度引擎。你准备一批 GitHub issue，coder-loop 逐个 spawn iteration agent 实现 + review agent 审核，accept 或 retry，直到队列清空。
 
-**这不是一个 GitHub PR loop。** GitHub issue/PR 迭代是它内置的一个 preset（`gh-issue-pr-iteration`）。引擎本身不知道 GitHub 的存在、不知道 phase 数量、不知道 phase 名字、不知道 status 字面量。
+## 工作流程
 
----
+```
+GitHub issues ──→ coder-loop queue
+                      │
+                      ▼
+              ┌── 选 actionable item
+              │
+              ▼
+         iteration agent（写代码、开 PR）
+              │
+              ▼
+         review agent（审证据、判 accept/retry/block）
+              │
+              ├─ accept → merge PR、close issue、选下一个
+              ├─ retry  → 回 iteration，带 review feedback
+              └─ block  → 标记 blocked，触发 blocked-responder
+```
 
-## 按身份找文档
-
-| 你是 | 看哪 | 你要做什么 |
-|---|---|---|
-| **Operator**（想在一个 repo 上把 coder-loop 跑起来） | [docs/operator-quickstart.md](./docs/operator-quickstart.md) | bootstrap target 的 `.coder-loop/`、灌队列、起循环、看 trace |
-| **Preset 作者**（写新 preset 或改 bundled preset） | [docs/preset-authoring.md](./docs/preset-authoring.md) | `preset.toml` 字段、变量 DSL、`runtime.*` 白名单、minimal template |
-| **`gh-issue-pr-iteration` 维护者**（动 bundled preset 的 fragment） | [docs/gh-issue-pr-iteration-fragments.md](./docs/gh-issue-pr-iteration-fragments.md) | 48 fragments 的 verdict 跳转图 + review 15-step 顺序 |
-| **运维 / supervisor**（循环挂了、想 reset 状态、想看上一轮跑哪儿了） | [docs/operations.md](./docs/operations.md) | 稳定 API：`coder-loop doctor` / `coder-loop status <target> --json` / `coder-loop daemon ...`；runtime 文件只是 fallback reference |
-| **维护者**（想证明重构没有只停在单测） | [docs/real-e2e-fixture.md](./docs/real-e2e-fixture.md) | 私有 fixture repo、真实 issue→PR→review→merge→closure 路径、Codex runner e2e 证据 |
-
-不在以上四类的人——看完下面这一页（设计思想 + 安装 + References）就够。
-
----
-
-## 设计思想
-
-### 核心模型：信号生成 → 信号产生 → 信号消费
-
-迭代收敛系统能否走到正确结果，取决于每次迭代是否产生足够的**信号**驱动下一次迭代。
-
-这个认识来自 2024-2025 年四组研究：
-
-| 问题 | 研究 | 发现 |
-|---|---|---|
-| 迭代系统为什么不收敛？ | ReVeal (2025), VeRPO (2025), DynaFix (2025) | binary pass/fail 是 sparse reward，无法指导迭代方向；dense per-step signal 使收敛效率提升 10%-37% |
-| 评估为什么漏判？ | EDDOps (2024), Beyond Task Completion (2024) | 单维度评估掩盖其他维度的缺陷；agent 可在功能维度 100% 通过但策略维度仅 33% |
-| 任务分解为什么导致失败？ | Agent Failure Taxonomy (2025) | planning phase defects 是 agent 任务失败的首要类别（约 50% 的失败源于此） |
-| 怎么防止无限低质量推进？ | VMAO (2025) | completeness threshold + diminishing returns 检测 |
-
-这些是**preset 设计原则**，不是引擎行为。引擎不知道「信号」是什么——它只调度 phase 顺序、传变量、捕获 trace。是 preset（默认 `gh-issue-pr-iteration`）按 plan/iter/review 三段切分把信号生成/产生/消费做成了 phase 流水线。
-
-不同 preset 可以选择不同的切分：1 phase（如 `single-phase-example`，仅 run）、2 phase（如 `gh-issue-pr-iteration`，iter+review，并在 review 后按条件触发 blocked-responder）、N phase（plan+iter+review+publish 等）都行。引擎对 N 没有上界。
-
-### 四个设计决策（gh-issue-pr-iteration preset）
-
-下面四条是 `gh-issue-pr-iteration` preset 的设计前提，不是引擎契约。换 preset 时这些可以改。
-
-**1. Checkpoint 取代 checkbox**
-
-传统 issue 写 `- [ ] docker build 成功`。这是自然语言，不是可执行验证。iteration agent 可以跳过、重新解释、或声称完成。`gh-issue-pr-iteration` 的 plan 把每条验收标准编译为 `{dimension, command, env, expect}` 四元组，agent 无法跳过。
-
-**2. 维度覆盖强制**
-
-issue #69 事后分析：Phase 3 验收标准全是功能维度，但 7 个 bug 中 6 个属于环境/集成/假设维度。`gh-issue-pr-iteration` 的 plan 要求每个 issue 的 checkpoint 覆盖 function / environment / integration / assumption；review 检查每个维度是否有至少一个 PASS。
-
-**3. Spike 前置于实现**
-
-如果 Phase 的架构假设依赖第三方组件未文档化行为，假设必须在实现前被验证。`gh-issue-pr-iteration` 的 plan 扫描风险信号、为高风险假设创建 spike issue。spike 失败触发设计调整，而非在错误假设上堆叠代码。
-
-**4. 推迟验证不可遗忘**
-
-某 checkpoint 当前环境无法执行（如本机没 Docker daemon），plan 将其作为 inherited verification obligation 分配到下游 issue，不可二次推迟。
-
-**5. Blocked 解除是独立 issue 类型**
-
-`kind:blocked` 表示 deliverable 不是继续原 issue，而是解除一个明确 blocker。review 接受 blocked 结论后，preset 可按 trigger 启动 `blocked-responder`：跨仓创建 `kind:blocked` follow-up、把它注入 blocker 仓库队列，并在该仓 daemon keepalive 后继续推进。解除 PR 被接受时，review 再执行 `queue unblock`，把原仓被阻塞 item 恢复为 actionable。
-
----
+引擎本身是项目无关的状态机调度器——不知道 GitHub、不知道 phase 名字、不知道 status 字面量。上面的 issue/PR 循环是内置 preset `gh-issue-pr-iteration` 的行为。引擎可以跑任意 preset。
 
 ## 安装
 
-仓库本身用 bun + TypeScript，不发布到 npm：
-
 ```bash
-bun install                                          # 安装 devDependencies
-bun link                                             # 注册 coder-loop bin 到全局
-cp .claude/commands/dev-*.md ~/.claude/commands/     # 注册 slash commands
+git clone https://github.com/mouriya-s-lab/coder-loop.git
+cd coder-loop
+bun install
+bun link                                              # 注册全局 `coder-loop` 命令
+cp .claude/commands/dev-*.md ~/.claude/commands/       # 注册 /dev-plan /dev-loop slash commands
 ```
 
-之后 `coder-loop` 命令和 `/dev-plan` `/dev-loop` 在任意目录可用。也可以不 `bun link`，调用改成 `bun /path/to/coder-loop/src/loop.ts`。
+## 快速开始
 
-在目标 repo 上启动前，先通过 `install` 建立 target-side bootstrap 契约：
+### 1. 初始化目标 repo
 
 ```bash
-coder-loop install /path/to/target --repo <owner>/<repo>
-coder-loop doctor /path/to/target --repo <owner>/<repo>
-coder-loop status /path/to/target --json
+coder-loop install /path/to/target --repo owner/repo
+coder-loop doctor  /path/to/target --repo owner/repo   # 只读体检
 ```
 
-Iteration runner 未手动设置时固定默认 `codex`，不跟随启动宿主。target config 可用 `"runner": "claude" | "codex"` 覆盖 iteration 默认值，单个 queue item 也可用同名 `runner` 字段覆盖。Runner 模型可用 `claude.model` / `codex.model` 指定。Review runner 默认固定为 `claude`，不继承 Codex 宿主或 queue item；需要改 runner 时在 target config 写 `"reviewRunner": "claude" | "codex"`。当 review runner 是 Claude 时，模型强制为 `claude-opus-4-7`，不受 `claude.model` 或 `claude.extraArgs` 里的 `--model` 覆盖。`doctor` / `status --json` 会显示实际选择。
+`install` 幂等：写 slash commands、建 `.coder-loop/runtime/` 目录结构、写 config、从 preset 拷 workflow.md starter、确保 GitHub 上有 `kind:*` 标签。
 
-后台循环由 daemon API 管理；`/dev-loop [N]` 也是这个 API 的人类快捷入口，不再手写 `nohup`：
+### 2. 创建 issue 队列
+
+在 Claude Code 里：
+
+```
+/dev-plan <design-doc | github-issue-url | "描述">
+```
+
+`/dev-plan` 把大任务拆成原子 GitHub issue（含验收 checkpoint），建 parent/child 关系，推进 queue。
+
+### 3. 启动循环
 
 ```bash
-coder-loop daemon start /path/to/target
+coder-loop daemon start /path/to/target --require-browser-evidence
+```
+
+或在 Claude Code 里 `/dev-loop`。daemon 会自动导入 target queue 到集中 SQLite DB，开始逐 item 跑 iteration → review 循环。
+
+### 4. 监控
+
+```bash
+coder-loop status /path/to/target --json | jq '.queue, .current'
 coder-loop daemon status /path/to/target --json
-coder-loop daemon stop /path/to/target
-coder-loop queue unblock /path/to/source-target --issue 123 --start-daemon --require-browser-evidence
 ```
 
-Supervisor 模板是 optional 外层：只在长 multi-repo campaign 需要 recurring durable heartbeat 巡检时使用。单机 multi-repo blocker 优先走 daemon keepalive + `kind:blocked` / blocked-responder。
+### 5. 停止
 
-`/dev-plan` 引用以下用户级规则与 skill：
+```bash
+coder-loop daemon stop /path/to/target     # 暂停该 target 的 items，daemon 继续在线
+coder-loop daemon down                     # 关闭 daemon 进程
+```
 
-- `~/.claude/rules/github-issue-pr-routing.rule.md`
-- skill `writing-issue / writing-pr / review-pr`
+## 架构
 
-不是 coder-loop 仓库内的资产，由用户自己维护。缺失时 `/dev-plan` 仍可运行，但 issue 形式、PR 路由、review gate 设计会退化。`/dev-loop` 没有此类依赖。
+```
+┌─────────────────────────────────────────────────────┐
+│  L1: Engine (src/loop.ts)                           │
+│  加载 preset → 选 item → spawn agent → 捕获 trace   │
+│  不知道 phase 含义，不判断完成/正确/证据             │
+├─────────────────────────────────────────────────────┤
+│  L2: Preset (presets/<name>/)                       │
+│  preset.toml 定义 status 集合、phase 顺序、变量绑定 │
+│  entry prompt + fragments 定义 agent 行为           │
+├─────────────────────────────────────────────────────┤
+│  L3: Target (<your-repo>/.coder-loop/)              │
+│  workflow.md 定义项目级策略（命令、证据规则等）       │
+│  runtime/ 下是运行态（config、state、logs、evidence）│
+└─────────────────────────────────────────────────────┘
+```
 
-新 operator 完整 bootstrap 步骤见 [docs/operator-quickstart.md](./docs/operator-quickstart.md)。
+## Daemon
 
----
+coder-loop 使用单进程集中 daemon 管理所有 target。
+
+- **SQLite 状态**：`~/Ext/loop-data/state.db` 存 chains/items/runs
+- **Unix socket**：`~/Ext/loop-data/daemon.sock` 接收 JSONL 命令
+- **每个 target** 的 queue 通过 `daemon start <target>` 导入 daemon，daemon 调度执行
+
+```bash
+coder-loop daemon start /path/to/target     # 导入 queue + 开始执行
+coder-loop daemon status /path/to/target --json  # 查看 chain/items/slots
+coder-loop daemon stop /path/to/target      # 暂停 target items
+coder-loop daemon restart /path/to/target   # stop + start
+coder-loop daemon down                      # 关闭整个 daemon
+```
+
+`daemon start` 幂等：socket 在线时只导入 queue；不在线时自动启动 daemon 再导入。
+
+## Runner 选择
+
+Iteration 和 review 分别有独立的 runner（`codex` 或 `claude`）。
+
+| 维度 | 默认值 | 覆盖方式 |
+|---|---|---|
+| Iteration runner | `codex` | config `"runner"` 或 queue item `"runner"` |
+| Review runner | `claude` | config `"reviewRunner"` |
+| Claude review model | `claude-opus-4-7`（强制） | 不可覆盖 |
+
+Target config 示例（`.coder-loop/runtime/config.json`）：
+
+```json
+{
+  "runner": "codex",
+  "reviewRunner": "claude",
+  "codex": { "model": "gpt-5.4" },
+  "claude": { "model": "sonnet" }
+}
+```
+
+`status --json` 的 `target.runner` 和 `queue.selected.runner` 暴露实际选择结果。`doctor` 检查对应 runner binary 在 PATH 上。
+
+## CLI
+
+| 命令 | 用途 |
+|---|---|
+| `install <target> --repo <slug>` | 幂等 bootstrap target |
+| `uninstall <target>` | 删 slash commands，保留 runtime |
+| `doctor <target>` | 只读体检 |
+| `status <target> --json` | 结构化运行快照 |
+| `daemon start <target>` | 导入 queue + 开始执行 |
+| `daemon stop <target>` | 暂停 target items |
+| `daemon restart <target>` | stop + start |
+| `daemon status [<target>] --json` | daemon / target 状态 |
+| `daemon down` | 关闭 daemon 进程 |
+| `queue unblock <target> --issue N` | 解除 blocked item |
+
+主循环 flags（通常不直接用，daemon 内部调用）：
+
+| Flag | 含义 |
+|---|---|
+| `--target-cwd <path>` | target 目录 |
+| `--require-browser-evidence` | 启用最强 E2E 证据要求 |
+| `--once` | 跑 1 轮 |
+| `--dry-run` | 选 item 后停，不 spawn |
+| `--check-runtime` | 只校验 schema |
+| `--worktree` | 在 git worktree 中执行 iteration |
+
+## 文档
+
+| 文档 | 读者 |
+|---|---|
+| [operator-quickstart](./docs/operator-quickstart.md) | 第一次跑 coder-loop 的人 |
+| [operations](./docs/operations.md) | 循环挂了 / 想 debug / 想改状态 |
+| [preset-authoring](./docs/preset-authoring.md) | 写新 preset 的人 |
+| [gh-issue-pr-iteration-fragments](./docs/gh-issue-pr-iteration-fragments.md) | 改 bundled preset fragments 的人 |
+
+## 前置依赖
+
+- [bun](https://bun.sh)
+- [gh](https://cli.github.com)（需 `gh auth login`）
+- iteration runner CLI（默认 `codex`）
+- review runner CLI（默认 `claude`）
 
 ## References
 
