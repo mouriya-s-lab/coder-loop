@@ -21,7 +21,7 @@ GitHub issues ──→ coder-loop queue
               └─ block  → 标记 blocked，触发 blocked-responder
 ```
 
-引擎本身是项目无关的状态机调度器——不知道 GitHub、不知道 phase 名字、不知道 status 字面量。上面的 issue/PR 循环是内置 preset `gh-issue-pr-iteration` 的行为。引擎可以跑任意 preset。
+上面是内置 preset `gh-issue-pr-iteration` 的行为。引擎本身是通用的 queue→phase 调度器：从队列里选 item，按 preset 定义的 phase 顺序 spawn agent，每个 phase 用渲染后的 prompt 模板调用 runner CLI（codex/claude），捕获输出写 trace，循环直到队列清空。哪些 phase、agent 在每个 phase 里干什么、什么算 accept 什么算 retry——全部由 preset 的 prompt 定义，引擎不介入。写不同的 preset 就是不同的工作流。只用默认 preset 的话不需要关心这个区分。
 
 ## 安装
 
