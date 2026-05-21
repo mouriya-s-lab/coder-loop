@@ -26,7 +26,9 @@ import {
 	decideResume,
 	detectHostRunner,
 	extractErrorCode,
+	extractRateLimitReset,
 	formatLoopEventLine,
+	formatRateLimitNotice,
 	getCurrentId,
 	getItemId,
 	iterationRouteForIssueKind,
@@ -49,6 +51,7 @@ import {
 	parseKindFromLabels,
 	parseCodexThreadIdFromStream,
 	parseReviewSummaryVerdict,
+	parseRateLimitNoticeLine,
 	parseSessionIdFromRunnerStream,
 	parseSessionIdFromStream,
 	readLastSessionEntry,
@@ -1725,6 +1728,16 @@ describe("extractErrorCode — pulls error code from stream-json error events or
 		expect(extractErrorCode(stdout, "")).toBe("Service Unavailable")
 	})
 
+	test("detects Claude result events with api_error_status=429 as account rate limit", () => {
+		const stdout = `{"type":"result","is_error":true,"api_error_status":429,"result":"You've hit your limit · resets 12:20am (Asia/Tokyo)"}\n`
+		expect(extractErrorCode(stdout, "")).toBe("rate_limit_429")
+	})
+
+	test("detects synthetic assistant rate_limit events even without result error fields", () => {
+		const stdout = `{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"You've hit your limit"}]},"error":"rate_limit"}\n`
+		expect(extractErrorCode(stdout, "")).toBe("rate_limit_429")
+	})
+
 	test("falls back to stderr HTTP 5xx when stdout has no usable event", () => {
 		expect(extractErrorCode("", "HTTP/1.1 503 Service Unavailable")).toBe("503_http")
 	})
@@ -1735,6 +1748,27 @@ describe("extractErrorCode — pulls error code from stream-json error events or
 
 	test("returns 'unknown' when neither stdout events nor stderr patterns match", () => {
 		expect(extractErrorCode("plain text\n", "syntax error")).toBe("unknown")
+	})
+})
+
+describe("rate limit stream parsing", () => {
+	test("extracts rejected rate_limit_event resetsAt from the tail of stdout JSONL", () => {
+		const stdout = [
+			`{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1779203000,"rateLimitType":"five_hour","utilization":0.91}}`,
+			`{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1779204000,"rateLimitType":"five_hour","overageStatus":"rejected"}}`,
+			`{"type":"result","is_error":true,"api_error_status":429,"result":"You've hit your limit"}`,
+		].join("\n")
+		expect(extractRateLimitReset(stdout)).toEqual({
+			resetsAt: 1779204000,
+			resetAtIso: "2026-05-19T15:20:00.000Z",
+			rateLimitType: "five_hour",
+		})
+	})
+
+	test("formats and parses daemon-visible rate limit notices", () => {
+		const reset = { resetsAt: 1779204000, resetAtIso: "2026-05-19T15:20:00.000Z", rateLimitType: "five_hour" }
+		const line = `[2026-05-19T15:00:00.000Z] ${formatRateLimitNotice(reset)}`
+		expect(parseRateLimitNoticeLine(line)).toEqual(reset)
 	})
 })
 
@@ -1752,6 +1786,23 @@ describe("classifyTermination — tagged union from exit code + signal + output"
 		const stdout = `{"is_error":true,"error":{"type":"overloaded_error"}}\n`
 		const t = classifyTermination({ exitCode: 1, signal: null, stdoutText: stdout, stderrText: "" })
 		expect(t).toEqual({ kind: "error", code: "overloaded_error" })
+	})
+
+	test("non-zero exit with Claude 429 result carries parsed rate-limit reset metadata", () => {
+		const stdout = [
+			`{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1779204000,"rateLimitType":"five_hour"}}`,
+			`{"type":"result","is_error":true,"api_error_status":429,"result":"You've hit your limit"}`,
+		].join("\n")
+		const t = classifyTermination({ exitCode: 1, signal: null, stdoutText: stdout, stderrText: "" })
+		expect(t).toEqual({
+			kind: "error",
+			code: "rate_limit_429",
+			rateLimit: {
+				resetsAt: 1779204000,
+				resetAtIso: "2026-05-19T15:20:00.000Z",
+				rateLimitType: "five_hour",
+			},
+		})
 	})
 
 	test("non-zero exit with HTTP 503 in stderr yields {kind:'error', code:'503_http'}", () => {
@@ -1775,6 +1826,7 @@ describe("isTransient5xx — recognizes claude API transient overload signals", 
 		["overloaded_error", true],
 		["503_http", true],
 		["overloaded", true],
+		["rate_limit_429", true],
 		["rate_limit_error", true],
 		["rate-limit", true],
 		["service_unavailable", true],
@@ -1820,6 +1872,11 @@ describe("decideResume — resume policy from last sessions.jsonl entry", () => 
 
 	test("error with 5xx code + sessionId → resume", () => {
 		const entry: SessionEntry = { ...baseEntry, terminated: { kind: "error", code: "529_overloaded" } }
+		expect(decideResume(entry)).toEqual({ kind: "resume", sessionId: "sess-1" })
+	})
+
+	test("rate limit error with sessionId → resume after daemon cooldown", () => {
+		const entry: SessionEntry = { ...baseEntry, terminated: { kind: "error", code: "rate_limit_429" } }
 		expect(decideResume(entry)).toEqual({ kind: "resume", sessionId: "sess-1" })
 	})
 
@@ -2128,6 +2185,7 @@ describe("runAgentWithBackoff — orchestrates retries and budget across in-proc
 			signal: null,
 			sessionId: "sess-1",
 			terminated: { kind: "clean" },
+			rateLimit: null,
 			...overrides,
 		}
 	}
@@ -2222,6 +2280,24 @@ describe("runAgentWithBackoff — orchestrates retries and budget across in-proc
 			initialResume: { kind: "fresh" },
 		})
 		expect(result.attempts).toBe(1)
+		expect(calls).toEqual([])
+	})
+
+	test("rate limit with resetsAt returns to outer loop immediately for daemon cooldown", async () => {
+		const { sleep, calls } = makeSleepRecorder()
+		const rateLimit = { resetsAt: 1779204000, resetAtIso: "2026-05-19T15:20:00.000Z", rateLimitType: "five_hour" }
+		const result = await runAgentWithBackoff({
+			spawnAttempt: async () => makeOutcome({
+				terminated: { kind: "error", code: "rate_limit_429", rateLimit },
+				exitCode: 1,
+				rateLimit,
+			}),
+			sleep,
+			log: () => {},
+			now: () => 0,
+			initialResume: { kind: "fresh" },
+		})
+		expect(result).toEqual({ output: "out", code: 1, attempts: 1, rateLimit })
 		expect(calls).toEqual([])
 	})
 

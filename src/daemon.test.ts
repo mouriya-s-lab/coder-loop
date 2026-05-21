@@ -4,8 +4,10 @@ import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
 import {
+	daemonRateLimitDecision,
 	sendDaemonRequest,
 	startDaemonServer,
+	type DaemonRateLimitState,
 } from "./daemon"
 import { defaultChainNameForTarget } from "./runtime-paths"
 
@@ -56,6 +58,20 @@ async function waitForDaemonStdout(root: string, pattern: string): Promise<strin
 }
 
 describe("daemon socket IPC", () => {
+	test("rate limit scheduling decision pauses until reset and then staggers one slot", () => {
+		const state: DaemonRateLimitState = {
+			reset: { resetsAt: 200, resetAtIso: "1970-01-01T00:03:20.000Z", rateLimitType: "five_hour" },
+			observedAt: "1970-01-01T00:00:00.000Z",
+			sourceRunId: "daemon-1",
+			sourceItemId: 1,
+			nextResumeAtMs: null,
+		}
+		expect(daemonRateLimitDecision(state, 199_000)).toEqual({ kind: "paused", waitMs: 1_000, maxSpawns: 0 })
+		expect(daemonRateLimitDecision(state, 200_000)).toEqual({ kind: "stagger-ready", maxSpawns: 1 })
+		state.nextResumeAtMs = 230_000
+		expect(daemonRateLimitDecision(state, 210_000)).toEqual({ kind: "stagger-wait", waitMs: 20_000, maxSpawns: 0 })
+	})
+
 	test("serves chain, item, slot, status, and shutdown requests over JSON lines", async () => {
 		await withDaemonPaths("ipc", async (paths) => {
 			await startDaemonServer({
@@ -175,6 +191,71 @@ describe("daemon socket IPC", () => {
 				expect(stdout).toContain(`"cwd":"${target}"`)
 				expect(stdout).toContain(target)
 				expect(existsSync(resolve(target, ".coder-loop/runtime/state.json"))).toBe(false)
+			} finally {
+				await handle.shutdown()
+			}
+		})
+	})
+
+	test("daemon-wide rate limit notice pauses later slot dispatch", async () => {
+		await withDaemonPaths("rate-limit-pause", async (paths) => {
+			const firstTarget = resolve(paths.root, "first-target")
+			const secondTarget = resolve(paths.root, "second-target")
+			await mkdir(resolve(firstTarget, ".coder-loop"), { recursive: true })
+			await mkdir(resolve(secondTarget, ".coder-loop"), { recursive: true })
+			await writeFile(resolve(firstTarget, ".coder-loop/workflow.md"), "# policy only\n")
+			await writeFile(resolve(secondTarget, ".coder-loop/workflow.md"), "# policy only\n")
+			const resetsAt = Math.floor(Date.now() / 1000) + 120
+			const script = [
+				`console.error('CODER_LOOP_RATE_LIMIT ${JSON.stringify({ resetsAt, resetAtIso: new Date(resetsAt * 1000).toISOString(), rateLimitType: "five_hour" })}')`,
+				`console.log(JSON.stringify({cwd:process.cwd(),args:process.argv.slice(2)}))`,
+				"process.exit(1)",
+			].join(";")
+			const handle = await startDaemonServer({
+				rootDir: paths.root,
+				dbPath: paths.db,
+				socketPath: paths.socket,
+				pidPath: paths.pid,
+				schedulerIntervalMs: 50,
+				spawnAgents: true,
+				processArgs: ["bun", "-e", script],
+			})
+			try {
+				const chainName = "rate-limit-chain"
+				expect((await sendDaemonRequest(paths.socket, {
+					cmd: "chain.create",
+					name: chainName,
+					preset: "gh-issue-pr-iteration",
+					repo: "owner/repo",
+					baseBranch: "main",
+				})).ok).toBe(true)
+				expect((await sendDaemonRequest(paths.socket, {
+					cmd: "item.add",
+					chain: chainName,
+					issue: 137,
+					repoCwd: firstTarget,
+				})).ok).toBe(true)
+
+				await waitForDaemonStdout(paths.root, `"cwd":"${firstTarget}"`)
+				let status = await sendDaemonRequest(paths.socket, { cmd: "daemon.status" })
+				expect(status.ok).toBe(true)
+				if (!status.ok || typeof status.data !== "object" || status.data === null || Array.isArray(status.data)) throw new Error("expected daemon status")
+				expect(status.data.rateLimit).toMatchObject({
+					active: true,
+					rateLimitedUntilUnix: resetsAt,
+					rateLimitType: "five_hour",
+				})
+
+				expect((await sendDaemonRequest(paths.socket, {
+					cmd: "item.add",
+					chain: chainName,
+					issue: 138,
+					repoCwd: secondTarget,
+				})).ok).toBe(true)
+				await Bun.sleep(200)
+				const stdout = await readDaemonStdoutLogs(paths.root)
+				expect(stdout).toContain(`"cwd":"${firstTarget}"`)
+				expect(stdout).not.toContain(`"cwd":"${secondTarget}"`)
 			} finally {
 				await handle.shutdown()
 			}

@@ -62,6 +62,7 @@ export type SchedulerTickOptions = {
 	store: SchedulerStore
 	state: SchedulerState
 	terminalStatuses?: readonly string[]
+	maxSpawns?: number
 	ensureWorktree?: (input: SchedulerWorktreeInput) => string | Promise<string>
 	spawnAgent: (input: SchedulerSpawnInput) => SchedulerRun | Promise<SchedulerRun>
 }
@@ -131,6 +132,7 @@ export async function runSchedulerTick(options: SchedulerTickOptions): Promise<S
 		}
 
 		for (const repoCwd of repoCwds) {
+			if (spawnBudgetExhausted(options, result)) return result
 			const slot = getOrCreateSchedulerSlot(options.state, chain.id, repoCwd)
 			if (slot.currentRun !== null) {
 				result.skippedBusySlots.push(slot)
@@ -151,10 +153,15 @@ export async function runSchedulerTick(options: SchedulerTickOptions): Promise<S
 			if (run.itemId !== item.id) throw new Error(`spawnAgent returned itemId ${run.itemId}, expected ${item.id}`)
 			slot.currentRun = run
 			result.spawned.push({ chain, item, slot, run, worktreePath })
+			if (spawnBudgetExhausted(options, result)) return result
 		}
 	}
 
 	return result
+}
+
+function spawnBudgetExhausted(options: SchedulerTickOptions, result: SchedulerTickResult): boolean {
+	return options.maxSpawns !== undefined && result.spawned.length >= options.maxSpawns
 }
 
 export async function runSchedulerLoop(options: SchedulerLoopOptions): Promise<SchedulerLoopResult> {

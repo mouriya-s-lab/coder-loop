@@ -25,6 +25,15 @@ import {
 import { dispatchSubcommand } from "./install-commands"
 import { chainRuntimePaths, defaultChainNameForTarget, ensureChainRuntimeSkeleton, loopDataRootPaths, runRuntimePaths, type ChainRuntimePaths } from "./runtime-paths"
 import { openStateStore, type Chain, type Item, type ItemPatch, type NewItem, type StateStore } from "./state-db"
+import {
+	extractRateLimitErrorCodeFromEvent,
+	extractRateLimitReset,
+	formatRateLimitNotice,
+	isRateLimitErrorCode,
+	type RateLimitReset,
+} from "./rate-limit"
+
+export { extractRateLimitReset, formatRateLimitNotice, parseRateLimitNoticeLine } from "./rate-limit"
 
 const PKG_ROOT = resolve(import.meta.dir, "..")
 const DEFAULT_PRESET_NAME = "gh-issue-pr-iteration"
@@ -248,10 +257,16 @@ const StatusStateBoundary = arkType({
 	"current?": "object|null",
 })
 
+const RateLimitResetBoundary = arkType({
+	resetsAt: "number",
+	resetAtIso: "string",
+	"rateLimitType": "string|null",
+})
+
 const TerminatedBoundary = arkType.or(
 	{ kind: arkType.unit("clean") },
 	{ kind: arkType.unit("signal"), name: "string" },
-	{ kind: arkType.unit("error"), code: "string" },
+	{ kind: arkType.unit("error"), code: "string", "rateLimit?": RateLimitResetBoundary },
 	{ kind: arkType.unit("watchdog"), phase: arkType.or(arkType.unit("term"), arkType.unit("kill")), afterSummarySeconds: "number" },
 	{ kind: arkType.unit("timeout"), phase: arkType.or(arkType.unit("term"), arkType.unit("kill")), attemptSeconds: "number" },
 )
@@ -624,7 +639,7 @@ export type StatusProcessSnapshot = {
 export type Terminated =
 	| { kind: "clean" }
 	| { kind: "signal"; name: string }
-	| { kind: "error"; code: string }
+	| { kind: "error"; code: string; rateLimit?: RateLimitReset }
 	| { kind: "watchdog"; phase: "term" | "kill"; afterSummarySeconds: number }
 	| { kind: "timeout"; phase: "term" | "kill"; attemptSeconds: number }
 
@@ -4651,7 +4666,7 @@ async function runAgent(
 	agentCwd: string,
 	runner: AgentRunnerSelection,
 	eventContext?: LoopEventContext,
-): Promise<{ output: string; code: number }> {
+): Promise<{ output: string; code: number; rateLimit: RateLimitReset | null }> {
 	const sessionsPath = agentSessionsPath(outputPath)
 	const lastEntry = await readLastSessionEntry(sessionsPath)
 	const compatibleLastEntry = await selectResumeEntryForRunner(lastEntry, runner, outputPath, label)
@@ -4671,8 +4686,9 @@ async function runAgent(
 		initialResume,
 	})
 
+	if (result.rateLimit !== null) log(formatRateLimitNotice(result.rateLimit))
 	log(`Agent [${label}] finished after ${result.attempts} attempt(s); code=${result.code}`)
-	return { output: result.output, code: result.code }
+	return { output: result.output, code: result.code, rateLimit: result.rateLimit }
 }
 
 async function selectResumeEntryForRunner(
@@ -5219,6 +5235,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 				signal,
 				sessionId: status.sessionId,
 				terminated,
+				rateLimit: terminated.kind === "error" ? terminated.rateLimit ?? null : null,
 			})
 		}
 
@@ -5547,6 +5564,8 @@ export function extractErrorCode(stdoutText: string, stderrText: string): string
 		try {
 			const parsed: unknown = JSON.parse(line)
 			if (!isObjectRecord(parsed)) continue
+			const rateLimitCode = extractRateLimitErrorCodeFromEvent(parsed)
+			if (rateLimitCode !== null) return rateLimitCode
 			const isError = parsed["is_error"] === true || parsed["type"] === "error"
 			if (!isError) continue
 			const errorObj = parsed["error"]
@@ -5577,14 +5596,16 @@ export type ClassifyInput = {
 export function classifyTermination(input: ClassifyInput): Terminated {
 	if (input.signal !== null && input.signal !== "") return { kind: "signal", name: input.signal }
 	if (input.exitCode === 0) return { kind: "clean" }
-	return { kind: "error", code: extractErrorCode(input.stdoutText, input.stderrText) }
+	const code = extractErrorCode(input.stdoutText, input.stderrText)
+	const rateLimit = isRateLimitErrorCode(code) ? extractRateLimitReset(input.stdoutText) : null
+	return rateLimit === null ? { kind: "error", code } : { kind: "error", code, rateLimit }
 }
 
 export function isTransient5xx(code: string): boolean {
 	const lower = code.toLowerCase()
 	if (/(^|[^\d])5\d\d($|[^\d])/.test(lower)) return true
 	if (lower.includes("overloaded")) return true
-	if (lower.includes("rate_limit") || lower.includes("rate-limit") || lower.includes("ratelimit")) return true
+	if (isRateLimitErrorCode(lower)) return true
 	if (lower.includes("service_unavailable") || lower.includes("service-unavailable")) return true
 	return false
 }
@@ -5648,6 +5669,7 @@ export type AttemptOutcome = {
 	signal: string | null
 	sessionId: string | null
 	terminated: Terminated
+	rateLimit: RateLimitReset | null
 }
 
 export type RunWithBackoffDeps = {
@@ -5658,7 +5680,7 @@ export type RunWithBackoffDeps = {
 	initialResume: ResumeDecision
 }
 
-export async function runAgentWithBackoff(deps: RunWithBackoffDeps): Promise<{ output: string; code: number; attempts: number }> {
+export async function runAgentWithBackoff(deps: RunWithBackoffDeps): Promise<{ output: string; code: number; attempts: number; rateLimit: RateLimitReset | null }> {
 	let resume = deps.initialResume
 	let retryIndex = 0
 	let elapsedBackoffSeconds = 0
@@ -5668,17 +5690,21 @@ export async function runAgentWithBackoff(deps: RunWithBackoffDeps): Promise<{ o
 		const outcome = await deps.spawnAttempt({ resume })
 		if (outcome.terminated.kind === "watchdog") {
 			deps.log(`post-summary watchdog terminated attempt (phase=${outcome.terminated.phase}); treating as success because the phase printed its mandatory summary`)
-			return { output: outcome.output, code: 0, attempts }
+			return { output: outcome.output, code: 0, attempts, rateLimit: null }
 		}
 		if (outcome.terminated.kind === "error" && isTransient5xx(outcome.terminated.code)) {
+			if (outcome.rateLimit !== null) {
+				deps.log(`account rate limit detected (until ${outcome.rateLimit.resetAtIso}); returning to outer loop for daemon-level cooldown`)
+				return { output: outcome.output, code: outcome.exitCode, attempts, rateLimit: outcome.rateLimit }
+			}
 			if (outcome.sessionId === null) {
 				deps.log(`backoff abort: transient-5xx without sessionId; returning to outer loop`)
-				return { output: outcome.output, code: outcome.exitCode, attempts }
+				return { output: outcome.output, code: outcome.exitCode, attempts, rateLimit: null }
 			}
 			const sleepSeconds = nextBackoffSeconds(retryIndex)
 			if (elapsedBackoffSeconds + sleepSeconds > BACKOFF_BUDGET_SECONDS) {
 				deps.log(`backoff budget exhausted: elapsed=${elapsedBackoffSeconds}s, next=${sleepSeconds}s, budget=${BACKOFF_BUDGET_SECONDS}s; returning to outer loop`)
-				return { output: outcome.output, code: outcome.exitCode, attempts }
+				return { output: outcome.output, code: outcome.exitCode, attempts, rateLimit: null }
 			}
 			deps.log(`transient-5xx detected (code=${outcome.terminated.code}); sleeping ${sleepSeconds}s before resume #${retryIndex + 1}`)
 			await deps.sleep(sleepSeconds)
@@ -5687,7 +5713,7 @@ export async function runAgentWithBackoff(deps: RunWithBackoffDeps): Promise<{ o
 			resume = { kind: "resume", sessionId: outcome.sessionId }
 			continue
 		}
-		return { output: outcome.output, code: outcome.exitCode, attempts }
+		return { output: outcome.output, code: outcome.exitCode, attempts, rateLimit: outcome.rateLimit }
 	}
 }
 
