@@ -244,7 +244,7 @@ const BACKOFF_MAX_INTERVAL_SECONDS = 600
 
 export const SUMMARY_WATCHDOG_MARKER = "ITERATION SUMMARY:"
 export const REVIEW_SUMMARY_WATCHDOG_MARKER = "REVIEW SUMMARY:"
-export const SUMMARY_WATCHDOG_TERM_MS = 5 * 60 * 1000
+export const SUMMARY_WATCHDOG_TERM_MS = Infinity
 export const SUMMARY_WATCHDOG_KILL_MS = 5 * 1000
 
 const DEFAULT_SUMMARY_WATCHDOG: SummaryWatchdogConfig = {
@@ -375,6 +375,7 @@ export function createSummaryWatchdog(deps: SummaryWatchdogDeps): SummaryWatchdo
 
 	const arm = (): void => {
 		if (state.kind !== "idle") return
+		if (!Number.isFinite(deps.config.termMs) || deps.config.termMs <= 0) return
 		state = { kind: "armed" }
 		deps.log(`summary watchdog armed: SIGTERM scheduled in ${Math.round(deps.config.termMs / 1000)}s after observing "${deps.config.marker}"`)
 		termTimer = deps.setTimer(() => {

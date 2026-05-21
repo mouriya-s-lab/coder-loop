@@ -24,7 +24,9 @@ Follow the target workflow file for project-specific verification:
 - after each screenshot capture, verify the image file exists under a tracked `screenshots/` path and can be read/opened as image data before using it as evidence;
 - record both the local file path and the repository-relative `screenshots/...` path for every screenshot so the PR body can embed the exact committed artifact;
 - capture positive and negative/error/disabled paths when the workflow or issue scope requires them;
-- if a workflow-required command or evidence path cannot run, record the exact command, failure mode, exit status, and log excerpt as a blocker or retry input.
+- if a workflow-required command or evidence path cannot run, record the exact command, failure mode, exit status, and log excerpt as a blocker or retry input;
+- **screenshot target must be the real system**: screenshot the actual running dev server, actual CI/CD page, actual service UI, or actual deployed endpoint. Never create a local HTML file that renders log output, test results, or data and screenshot that — such synthetic screenshots prove nothing that a text log excerpt doesn't already prove, and they hide whether the real system was actually running;
+- **log evidence is text, not screenshots**: paste log output directly as text in the evidence packet (command, exit status, concise excerpt or path to full log). Two forms: (a) change-verification logs (typecheck, test, lint, build output) proving correctness of the diff, (b) runtime-execution logs (server startup, daemon output, CLI smoke, integration probe) proving the behavior works. Both belong as text. Screenshot a log only when the log is displayed inside a real UI that is itself part of the evidence (e.g. a CI dashboard page, a monitoring panel).
 
 If a workflow command starts a long-running server or service, use an explicit background/PID/log pattern and stop the PID before exiting.
 

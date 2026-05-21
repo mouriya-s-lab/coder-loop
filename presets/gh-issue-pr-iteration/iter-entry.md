@@ -22,7 +22,7 @@ You are spawned by the orchestrator via `claude -p` to execute exactly one itera
 - Run directory: `{{RUN_DIR}}`
 - Events file: `{{EVENTS_FILE}}`
 - Iteration stdout JSONL: `{{ITERATION_STDOUT_FILE}}`
-- Browser evidence required: `{{REQUIRE_BROWSER_EVIDENCE}}`
+- Browser evidence required: `{{REQUIRE_BROWSER_EVIDENCE}}` — when `true`, Layer 4 must contain the strongest feasible E2E evidence for the project type. For projects with UI: real browser screenshots of the running dev server or deployed page. For projects without UI (pure CLI / library / backend / config): CLI smoke run transcripts with command, exit status, and output are the Layer 4 evidence; do not fabricate screenshots by creating HTML files and screenshotting them.
 
 - Existing issue branch: `{{ISSUE_BRANCH}}`
 - Existing issue PR: `{{ISSUE_PR}}`
