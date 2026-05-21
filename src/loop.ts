@@ -5479,6 +5479,19 @@ function gitExec(cwd: string, args: readonly string[]): GitExecResult {
 	}
 }
 
+function realpathForComparison(path: string): string {
+	try { return realpathSync(path) } catch { return path }
+}
+
+function gitWorktreeListIncludesPath(stdout: string, expectedPath: string): boolean {
+	const expectedRealPath = realpathForComparison(expectedPath)
+	return stdout
+		.split("\n")
+		.filter((line) => line.startsWith("worktree "))
+		.map((line) => line.slice("worktree ".length))
+		.some((listedPath) => listedPath === expectedPath || realpathForComparison(listedPath) === expectedRealPath)
+}
+
 export function worktreeBasePath(targetCwd: string): string {
 	return resolve(targetCwd, "..", ".coder-loop-worktrees", basename(targetCwd))
 }
@@ -5509,7 +5522,7 @@ export function ensureWorktreeForItem(
 
 	if (existingAgentCwd === wtPath) {
 		const check = gitExec(targetCwd, ["worktree", "list", "--porcelain"])
-		if (check.stdout.includes(wtPath)) return wtPath
+		if (check.exitCode === 0 && gitWorktreeListIncludesPath(check.stdout, wtPath)) return wtPath
 	}
 
 	const branchName = `coder-loop/${itemId.replace(/[^a-zA-Z0-9_-]/g, "_")}`

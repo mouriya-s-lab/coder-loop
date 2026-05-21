@@ -3389,6 +3389,20 @@ describe("worktree git integration", () => {
 		expect(second).toBe(first)
 	})
 
+	test("ensureWorktreeForItem reuses existing worktree when target cwd uses a symlinked parent", async () => {
+		const { clone } = await makeGitFixture()
+		const linkParent = await mkdtemp(resolve(tmpdir(), "coder-loop-wt-link-"))
+		const linkedBase = resolve(linkParent, "fixture")
+		await fs.symlink(dirname(clone), linkedBase, "dir")
+		const linkedClone = resolve(linkedBase, basename(clone))
+
+		const first = ensureWorktreeForItem(linkedClone, "main", "42", null)
+		const second = ensureWorktreeForItem(linkedClone, "main", "42", first)
+
+		expect(first).toBe(worktreePathForItem(linkedClone, "42"))
+		expect(second).toBe(first)
+	})
+
 	test("removeWorktreeForItem removes the worktree", async () => {
 		const { clone } = await makeGitFixture()
 		ensureWorktreeForItem(clone, "main", "99", null)
