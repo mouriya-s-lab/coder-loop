@@ -37,7 +37,7 @@ N 角色字符串调度引擎。给定一个 preset（角色定义、状态集�
 
 这些是**preset 设计原则**，不是引擎行为。引擎不知道「信号」是什么——它只调度 phase 顺序、传变量、捕获 trace。是 preset（默认 `gh-issue-pr-iteration`）按 plan/iter/review 三段切分把信号生成/产生/消费做成了 phase 流水线。
 
-不同 preset 可以选择不同的切分：1 phase（如 `single-phase-example`，仅 run）、2 phase（如 `gh-issue-pr-iteration`，iter+review）、N phase（plan+iter+review+publish 等）都行。引擎对 N 没有上界。
+不同 preset 可以选择不同的切分：1 phase（如 `single-phase-example`，仅 run）、2 phase（如 `gh-issue-pr-iteration`，iter+review，并在 review 后按条件触发 blocked-responder）、N phase（plan+iter+review+publish 等）都行。引擎对 N 没有上界。
 
 ### 四个设计决策（gh-issue-pr-iteration preset）
 
@@ -58,6 +58,10 @@ issue #69 事后分析：Phase 3 验收标准全是功能维度，但 7 个 bug 
 **4. 推迟验证不可遗忘**
 
 某 checkpoint 当前环境无法执行（如本机没 Docker daemon），plan 将其作为 inherited verification obligation 分配到下游 issue，不可二次推迟。
+
+**5. Blocked 解除是独立 issue 类型**
+
+`kind:blocked` 表示 deliverable 不是继续原 issue，而是解除一个明确 blocker。review 接受 blocked 结论后，preset 可按 trigger 启动 `blocked-responder`：跨仓创建 `kind:blocked` follow-up、把它注入 blocker 仓库队列，并在该仓 daemon keepalive 后继续推进。解除 PR 被接受时，review 再执行 `queue unblock`，把原仓被阻塞 item 恢复为 actionable。
 
 ---
 
@@ -91,6 +95,8 @@ coder-loop daemon status /path/to/target --json
 coder-loop daemon stop /path/to/target
 coder-loop queue unblock /path/to/source-target --issue 123 --start-daemon --require-browser-evidence
 ```
+
+Supervisor 模板是 optional 外层：只在长 multi-repo campaign 需要 recurring durable heartbeat 巡检时使用。单机 multi-repo blocker 优先走 daemon keepalive + `kind:blocked` / blocked-responder。
 
 `/dev-plan` 引用以下用户级规则与 skill：
 

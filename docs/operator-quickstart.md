@@ -23,7 +23,7 @@
 第一次安装本 repo：
 
 ```bash
-git clone https://github.com/Mouriya-Emma/coder-loop.git
+git clone https://github.com/mouriya-s-lab/coder-loop.git
 cd coder-loop
 bun install
 bun link                                              # 注册 `coder-loop` 全局 bin（推荐）
@@ -188,6 +188,8 @@ queue 通过 `chain.create` + `item.add` 导入集中 DB；socket 不在线时�
 启动 `daemon up`，再导入同一份 target queue。
 
 循环消费现有队列，按 preset 的 phase 顺序交替 spawn `iter` + `review` agent；每轮 review agent 判断 continue / retry / accept / block / stop。
+
+`gh-issue-pr-iteration` 还支持 `kind:blocked` 专用路由：当 review 把一个 item 判为 blocked，后续 trigger phase 会运行 blocked-responder。跨仓 blocker 会在 blocker 仓创建 `kind:blocked` follow-up、注入该仓 queue，并启动/保持 blocker 仓 daemon；follow-up 通过 PR 解除 blocker 后，review 用 `coder-loop queue unblock` 把原仓 item 恢复为 actionable。
 
 监控优先用稳定 API：
 

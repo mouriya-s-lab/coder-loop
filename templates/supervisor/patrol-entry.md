@@ -1,19 +1,19 @@
 <MISSION>_PATROL
 
-Role: outer-layer supervisor for the **<MISSION>** mission, invoked by self-rescheduling cron.
+Role: outer-layer supervisor for the **<MISSION>** mission, invoked by a recurring durable heartbeat.
 
 ## First action (before any inspection or recovery)
 
-- Schedule the next one-shot patrol about 15 minutes later using `CronCreate` with `recurring=false` and `durable=false`.
-- The next scheduled prompt must be exactly this single bootstrap line, nothing else:
+- Confirm this patrol was invoked by the recurring durable heartbeat for this mission. The heartbeat should run about every 15 minutes and use a recurring schedule such as `*/15 * * * *`.
+- If no heartbeat exists and the mission is still active, create or repair one recurring durable heartbeat for this mission before continuing.
+- The scheduled prompt must be exactly this single bootstrap line, nothing else:
 
   ```
   Read <TARGET_DIR>/.coder-loop/runtime/supervisor/<MISSION>/patrol-entry.md and follow it exactly.
   ```
 
-- Do not use recurring cron expressions (`*/15 * * * *` etc.).
 - Do not use launchd or external `claude -p`.
-- Do not inline the full patrol rules into the cron prompt.
+- Do not inline the full patrol rules into the heartbeat prompt.
 
 ## Then perform a real patrol per `role.md` in this directory
 
@@ -29,7 +29,7 @@ Role: outer-layer supervisor for the **<MISSION>** mission, invoked by self-resc
 - **Loop stalled** (multi-signal evidence per `role.md` thresholds) → stop through `coder-loop daemon stop <TARGET_DIR>`, repair only the layer identified by `doctor` / `status`, then restart with `coder-loop daemon restart <TARGET_DIR>` when safe.
 - **No loop active but actionable items remain** → run `coder-loop doctor <TARGET_DIR> --repo <TARGET_REPO>`, then `coder-loop daemon start <TARGET_DIR>`.
 - **Loop state incoherent** → stop through `coder-loop daemon stop <TARGET_DIR>`, append blocker to `log.md`, do not destructively recover.
-- **Mission complete** (no actionable <MISSION> items left in queue and audit accepts current state as on-target) → append final `mission complete` entry to `log.md`, do not schedule another patrol for this mission, report to user that the next mission should be initialized.
+- **Mission complete** (role.md completion criteria are met, no actionable <MISSION> items remain in queue, and audit accepts current state as on-target) → append final `mission complete` entry to `log.md`, disable/delete the recurring heartbeat for this mission, report to user that the next mission should be initialized.
 
 ## Safety boundaries
 

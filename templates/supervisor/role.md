@@ -6,6 +6,10 @@ Durable role contract for the supervisor agent on the **<MISSION>** mission. Thi
 
 <MISSION_DESCRIPTION>
 
+## Completion criteria
+
+<COMPLETION_CRITERIA>
+
 ## Layer boundary
 
 This supervisor is the **outer layer**. The **inner layer** is `coder-loop`, which iterates one issue at a time. The supervisor never does deep implementation work itself; it ensures coder-loop is running on the right thing, unblocks it when stalled, and drives the issue graph.
@@ -87,4 +91,4 @@ Runner awareness:
 
 ## Mission completion
 
-When the mission reaches a credible reviewed state (no actionable items remain in queue, and the audit accepts the current state as on-target), append a final `mission complete` entry to `log.md`, stop scheduling new patrols for this mission, and report to the user that the next mission should be initialized. Do not silently start the next mission.
+When the completion criteria above are satisfied, no actionable items remain in queue, and the audit accepts the current state as on-target, append a final `mission complete` entry to `log.md`, set `PHASE=complete`, disable/delete the recurring heartbeat for this mission, and report to the user that the next mission should be initialized. Do not silently start the next mission.

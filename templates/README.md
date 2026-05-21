@@ -1,6 +1,6 @@
 # coder-loop templates
 
-Supervisor 模式跟 preset 正交——它是包在 loop 外面的 cron-driven 跨 patrol orchestrator，跨 preset 通用。这一层现在唯一的 starter 在这里。
+Supervisor 模式跟 preset 正交——它是包在 loop 外面的 recurring-heartbeat 跨 patrol orchestrator，跨 preset 通用。这一层现在唯一的 starter 在这里。它是可选层：单机 multi-repo blocker 通常先用 daemon keepalive + `kind:blocked` / blocked-responder 路由解决，只有 long-running campaign 才需要 supervisor。
 
 具体到「target 跑 coder-loop 需要哪些 starter」，那些已经按 preset 切分到 `presets/<preset-name>/templates/`（如 `presets/gh-issue-pr-iteration/templates/` 下的 `workflow.md / shared.md / pr-body.md`），不在本目录。详见仓库根 README 的「内置 preset：`gh-issue-pr-iteration`」一节。
 
@@ -16,7 +16,7 @@ Supervisor 模式跟 preset 正交——它是包在 loop 外面的 cron-driven 
 
 | Template | Copy to | Purpose |
 |---|---|---|
-| `templates/supervisor/` | `<TARGET>/.coder-loop/runtime/supervisor/<MISSION>/` + `<TARGET>/.claude/skills/bootstrap/SKILL.md` | optional 外层 supervisor（cron 驱动跨 patrol orchestration），跨 preset 通用 |
+| `templates/supervisor/` | `<TARGET>/.coder-loop/runtime/supervisor/<MISSION>/` + `<TARGET>/.claude/skills/bootstrap/SKILL.md` | optional 外层 supervisor（recurring heartbeat 驱动跨 patrol orchestration），跨 preset 通用 |
 
 preset-specific starter 不在此处：
 
@@ -25,7 +25,7 @@ preset-specific starter 不在此处：
 
 ## Minimum viable target setup
 
-一键路径：`coder-loop install <target> --repo <owner>/<repo>` 幂等做完下面 1-2，并补 `kind:code` / `kind:comment` / `kind:code-spike` GitHub 标签 + slash command + PATH/skill 检查。详见 [docs/operator-quickstart.md §1](../docs/operator-quickstart.md#1-bootstrap-目标-repo-的-coder-loop)。
+一键路径：`coder-loop install <target> --repo <owner>/<repo>` 幂等做完下面 1-2，并补 `kind:code` / `kind:comment` / `kind:code-spike` / `kind:blocked` GitHub 标签 + slash command + PATH/skill 检查。详见 [docs/operator-quickstart.md §1](../docs/operator-quickstart.md#1-bootstrap-目标-repo-的-coder-loop)。
 
 手动等价 = 下面三步：
 

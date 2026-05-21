@@ -295,7 +295,8 @@ preset prompt 自行用这三个变量决定续跑细节（如「`runIdGeneratio
 ### 强制重头：清 current
 
 ```bash
-jq '.current = null' .coder-loop/runtime/state.json > /tmp/state.json && mv /tmp/state.json .coder-loop/runtime/state.json
+jq '.current = null' .coder-loop/runtime/state.json > .coder-loop/runtime/state.next.json
+mv .coder-loop/runtime/state.next.json .coder-loop/runtime/state.json
 coder-loop --target-cwd . --check-runtime          # 验证仍合法
 ```
 
@@ -318,7 +319,7 @@ coder-loop --target-cwd . --check-runtime          # 验证仍合法
 ```
 started: 2026-05-11T10:00:00.000Z
 pid: 12345
-log: /tmp/coder-loop-XXX.log
+log: /abs/path/.coder-loop/runtime/logs/coder-loop-XXX.log
 cwd: /abs/path/to/target
 state: /abs/path/.coder-loop/runtime/state.json
 ```
@@ -351,6 +352,22 @@ state: /abs/path/.coder-loop/runtime/state.json
 | `queue unblock <target>` | 将一个 `blocked` item 改回 `queued` 并清除 blocker metadata；用于 `kind:blocked` accept 后反向解除源仓 block | `--issue <id>` `--config <path>` `--repo <slug>` `--start-daemon` `--require-browser-evidence` `--dry-run` |
 
 跑 loop 自身时**不**带子命令，直接进 7.2。
+
+### 7.1.1 `kind:blocked` / blocked-responder 运维路径
+
+`kind:blocked` 是 PR-backed blocker-resolution issue，不是普通实现 issue 的别名。正常路径：
+
+1. review 判定源仓 item blocked，并在 state item 写入 `blockerRepo` / `blockerRef`。
+2. preset trigger 运行 `blocked-responder`，在 blocker 仓创建 `kind:blocked` follow-up，写 `Unblocks: <sourceRepo>#<issue>`，注入 blocker 仓 queue，并用 `coder-loop daemon start <blockerTarget> --require-browser-evidence` 保持该仓推进。
+3. blocker 仓 follow-up PR merge 且 review 接受后，review 执行：
+
+   ```bash
+   coder-loop queue unblock /path/to/source-target --issue <source-issue> --start-daemon --require-browser-evidence
+   ```
+
+4. source target 的 blocked item 回到 `queued`，daemon 继续原任务。
+
+如果 responder 找不到 blocker 仓 checkout，先修 checkout/remote 映射；不要手工把源仓 item 从 `blocked` 改回 `queued`，否则会绕过 unblock 证据。
 
 ### 7.2 主循环 flags
 
@@ -394,7 +411,8 @@ cat .coder-loop/runtime/logs/<runId>.iteration.status.json # spawn 元数据
 ### 把卡住的 current run 清掉，从队首重新选
 
 ```bash
-jq '.current = null' .coder-loop/runtime/state.json > /tmp/state.json && mv /tmp/state.json .coder-loop/runtime/state.json
+jq '.current = null' .coder-loop/runtime/state.json > .coder-loop/runtime/state.next.json
+mv .coder-loop/runtime/state.next.json .coder-loop/runtime/state.json
 coder-loop --target-cwd . --check-runtime
 ```
 
@@ -402,7 +420,8 @@ coder-loop --target-cwd . --check-runtime
 
 ```bash
 jq '.queue |= map(if .issue == 42 then .status = "queued" | .attempts = 0 else . end) | .current = null' \
-    .coder-loop/runtime/state.json > /tmp/state.json && mv /tmp/state.json .coder-loop/runtime/state.json
+    .coder-loop/runtime/state.json > .coder-loop/runtime/state.next.json
+mv .coder-loop/runtime/state.next.json .coder-loop/runtime/state.json
 ```
 
 ### 看活着的 coder-loop 进程
