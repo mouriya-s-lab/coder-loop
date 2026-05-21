@@ -368,7 +368,7 @@ function startScheduler(runtime: DaemonRuntime): void {
 			runtime.lastTick = await runSchedulerTick({
 				store: runtime.store,
 				state: runtime.schedulerState,
-				spawnAgent: (input): SchedulerRun => spawnAgentForItem(runtime, input.item),
+				spawnAgent: (input): SchedulerRun => spawnAgentForItem(runtime, input),
 			})
 			for (const chain of runtime.lastTick.completedChains) logEngine(runtime, `chain completed: ${chain.name}`)
 		} catch (error) {
@@ -378,14 +378,17 @@ function startScheduler(runtime: DaemonRuntime): void {
 	runtime.schedulerTimer = setInterval(() => void tick(), runtime.schedulerIntervalMs)
 }
 
-function spawnAgentForItem(runtime: DaemonRuntime, item: Item): SchedulerRun {
+function spawnAgentForItem(runtime: DaemonRuntime, input: { chain: Chain; item: Item }): SchedulerRun {
 	if (!runtime.spawnAgents) throw new Error("scheduler spawn requested while spawnAgents=false")
+	const item = input.item
 	const runId = `daemon-${item.id}-${Date.now()}`
 	const cwd = item.agentCwd ?? item.repoCwd
 	const child = spawn(runtime.processArgs[0]!, [
 		...runtime.processArgs.slice(1),
 		"--target-cwd",
 		item.repoCwd,
+		"--chain",
+		input.chain.name,
 		"--once",
 	], {
 		cwd,
