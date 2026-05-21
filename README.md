@@ -94,60 +94,35 @@ coder-loop daemon down                     # 关闭 daemon 进程
 
 ## 架构
 
-```
-┌──────────────────────────────────────────────────────────┐
-│  引擎 (src/loop.ts)                                      │
-│                                                          │
-│  loadPreset → selectIssue → 对每个 phase：                │
-│    renderPrompt(模板, {item, config, runtime})             │
-│    → buildRunnerInvocation(runner, prompt, resume)        │
-│    → spawn 子进程，stdout/stderr 写 trace                 │
-│    → parseSessionId, arm watchdog, arm attempt timeout    │
-│    → 退出后：记录 session, 检查 verdict, 推进状态          │
-│                                                          │
-│  引擎不变量：零 preset 专属字面量。                        │
-│  Status 名、phase 名、GitHub 概念、fragment 内容           │
-│  全部来自加载的 preset。                                   │
-├──────────────────────────────────────────────────────────┤
-│  Preset (presets/<name>/)                                │
-│                                                          │
-│  preset.toml：                                           │
-│    [item] idField                                        │
-│    [statuses] continuable / terminal                     │
-│    [[phases]] name, prompt, variables, trigger?           │
-│    [[fragments]] id, path                                │
-│    [agent] binary, attemptTimeoutSeconds                 │
-│                                                          │
-│  变量绑定把 {{KEY}} 映射到：                               │
-│    item.<field>    → queue item 字段                      │
-│    config.<field>  → target config.json 字段              │
-│    runtime.<key>   → 引擎计算值（24 个白名单 key）         │
-├──────────────────────────────────────────────────────────┤
-│  Target (<your-repo>/.coder-loop/)                       │
-│                                                          │
-│  workflow.md — committed 项目级策略                        │
-│    （构建命令、证据规则、repo 约定）                        │
-│  runtime/ — gitignored，集中 daemon 不再依赖               │
-├──────────────────────────────────────────────────────────┤
-│  Daemon (src/daemon.ts)                                  │
-│                                                          │
-│  单进程集中状态：                                         │
-│    ~/Ext/loop-data/state.db  — SQLite (chains/items/runs)│
-│    ~/Ext/loop-data/daemon.sock — Unix socket (JSONL)     │
-│    ~/Ext/loop-data/daemon.pid  — PID file                │
-│    ~/Ext/loop-data/chains/<name>/ — per-chain runtime    │
-│                                                          │
-│  调度器 (src/scheduler.ts)：                              │
-│    每 5 秒 tick。每 (chainId, repoCwd) 一个 slot。         │
-│    每 tick：从每个 slot 选下一个 pending item → spawn       │
-│    引擎子进程。支持 rate-limit pause/stagger。              │
-│                                                          │
-│  State DB (src/state-db.ts)：                             │
-│    chains — 命名工作队列 (active/completed/archived)       │
-│    items — 队列条目，映射 GitHub issue                     │
-│    runs — 执行记录，per (item, phase)                      │
-└──────────────────────────────────────────────────────────┘
-```
+### L1 引擎（`src/loop.ts`）
+
+loadPreset → selectIssue → 对每个 phase：renderPrompt → buildRunnerInvocation → spawn 子进程（stdout/stderr 写 trace）→ parseSessionId → arm watchdog + attempt timeout → 退出后记录 session、检查 verdict、推进状态。
+
+引擎不变量：零 preset 专属字面量。Status 名、phase 名、GitHub 概念、fragment 内容全部来自加载的 preset。
+
+### L2 Preset（`presets/<name>/`）
+
+`preset.toml` 定义：`[item]` idField、`[statuses]` continuable / terminal、`[[phases]]` name + prompt + variables + trigger?、`[[fragments]]` id + path、`[agent]` binary + attemptTimeoutSeconds。
+
+变量绑定把 `{{KEY}}` 映射到：`item.<field>`（queue item 字段）、`config.<field>`（target config.json 字段）、`runtime.<key>`（引擎计算值，24 个白名单 key）。
+
+### L3 Target（`<your-repo>/.coder-loop/`）
+
+- `workflow.md` — committed 项目级策略（构建命令、证据规则、repo 约定）
+- `runtime/` — gitignored，集中 daemon 不再依赖
+
+### L4 Daemon（`src/daemon.ts`）
+
+单进程集中状态：
+
+- `~/Ext/loop-data/state.db` — SQLite（chains / items / runs 三张表）
+- `~/Ext/loop-data/daemon.sock` — Unix domain socket（JSONL）
+- `~/Ext/loop-data/daemon.pid` — PID file
+- `~/Ext/loop-data/chains/<name>/` — per-chain runtime
+
+调度器（`src/scheduler.ts`）：每 5 秒 tick，每 (chainId, repoCwd) 一个 slot，每 tick 从空闲 slot 选下一个 pending item spawn 引擎子进程。支持 rate-limit pause/stagger。
+
+State DB（`src/state-db.ts`）：chains（命名工作队列，active/completed/archived）、items（队列条目，映射 GitHub issue）、runs（执行记录，per item/phase）。
 
 ### Agent 在 phase 内的生命周期
 
