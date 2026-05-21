@@ -26,8 +26,10 @@ import {
 	runSchedulerTick,
 	type SchedulerRun,
 	type SchedulerState,
+	type SchedulerTickOptions,
 	type SchedulerTickResult,
 } from "./scheduler"
+import { parseRateLimitNoticeLine, type RateLimitReset } from "./rate-limit"
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
 type JsonObject = { [key: string]: JsonValue }
@@ -37,6 +39,21 @@ export const DEFAULT_DAEMON_SOCKET_PATH = loopDataRootPaths().daemonSocketPath
 export const DEFAULT_DAEMON_PID_PATH = loopDataRootPaths().daemonPidPath
 export const DEFAULT_DAEMON_SCHEDULER_INTERVAL_MS = 5_000
 export const DAEMON_CHILD_GRACE_MS = 5_000
+export const DAEMON_RATE_LIMIT_STAGGER_MS = 30_000
+
+export type DaemonRateLimitState = {
+	reset: RateLimitReset | null
+	observedAt: string | null
+	sourceRunId: string | null
+	sourceItemId: number | null
+	nextResumeAtMs: number | null
+}
+
+export type DaemonRateLimitDecision =
+	| { kind: "normal"; maxSpawns: undefined }
+	| { kind: "paused"; waitMs: number; maxSpawns: 0 }
+	| { kind: "stagger-wait"; waitMs: number; maxSpawns: 0 }
+	| { kind: "stagger-ready"; maxSpawns: 1 }
 
 export type DaemonRequest =
 	| {
@@ -117,6 +134,7 @@ type DaemonRuntime = {
 	processArgs: string[]
 	schedulerTimer: NodeJS.Timeout | null
 	lastTick: SchedulerTickResult | null
+	rateLimit: DaemonRateLimitState
 	shuttingDown: boolean
 }
 
@@ -152,6 +170,7 @@ export async function startDaemonServer(options: DaemonServerOptions = {}): Prom
 		stderrLog,
 		schedulerTimer: null,
 		lastTick: null,
+		rateLimit: createDaemonRateLimitState(),
 		shuttingDown: false,
 		processArgs: options.processArgs ?? [process.argv[0] ?? "bun", resolve(import.meta.dir, "loop.ts")],
 	}
@@ -271,7 +290,7 @@ async function handleRequestLine(runtime: DaemonRuntime, socket: Socket, line: s
 	})
 }
 
-export async function processDaemonRequest(runtime: Pick<DaemonRuntime, "store" | "schedulerState" | "children" | "socketPath" | "pidPath" | "dbPath" | "rootDir" | "startedAt" | "schedulerIntervalMs" | "spawnAgents" | "lastTick" | "shuttingDown">, line: string): Promise<DaemonResponse> {
+export async function processDaemonRequest(runtime: Pick<DaemonRuntime, "store" | "schedulerState" | "children" | "socketPath" | "pidPath" | "dbPath" | "rootDir" | "startedAt" | "schedulerIntervalMs" | "spawnAgents" | "lastTick" | "rateLimit" | "shuttingDown">, line: string): Promise<DaemonResponse> {
 	try {
 		const request = parseDaemonRequest(line)
 		switch (request.cmd) {
@@ -334,7 +353,43 @@ function newItemFromRequest(request: Extract<DaemonRequest, { cmd: "item.add" }>
 	return item
 }
 
-function daemonStatus(runtime: Pick<DaemonRuntime, "socketPath" | "pidPath" | "dbPath" | "startedAt" | "schedulerIntervalMs" | "spawnAgents" | "lastTick" | "shuttingDown" | "schedulerState" | "children">): JsonObject {
+export function createDaemonRateLimitState(): DaemonRateLimitState {
+	return {
+		reset: null,
+		observedAt: null,
+		sourceRunId: null,
+		sourceItemId: null,
+		nextResumeAtMs: null,
+	}
+}
+
+export function daemonRateLimitDecision(rateLimit: DaemonRateLimitState, nowMs: number): DaemonRateLimitDecision {
+	if (rateLimit.reset === null) return { kind: "normal", maxSpawns: undefined }
+	const resetMs = rateLimit.reset.resetsAt * 1000
+	if (nowMs < resetMs) return { kind: "paused", waitMs: resetMs - nowMs, maxSpawns: 0 }
+	if (rateLimit.nextResumeAtMs !== null && nowMs < rateLimit.nextResumeAtMs) {
+		return { kind: "stagger-wait", waitMs: rateLimit.nextResumeAtMs - nowMs, maxSpawns: 0 }
+	}
+	return { kind: "stagger-ready", maxSpawns: 1 }
+}
+
+function daemonRateLimitStatus(rateLimit: DaemonRateLimitState, nowMs: number): JsonObject {
+	const decision = daemonRateLimitDecision(rateLimit, nowMs)
+	return {
+		active: decision.kind === "paused" || decision.kind === "stagger-wait",
+		mode: decision.kind,
+		rateLimitedUntil: rateLimit.reset?.resetAtIso ?? null,
+		rateLimitedUntilUnix: rateLimit.reset?.resetsAt ?? null,
+		rateLimitType: rateLimit.reset?.rateLimitType ?? null,
+		observedAt: rateLimit.observedAt,
+		sourceRunId: rateLimit.sourceRunId,
+		sourceItemId: rateLimit.sourceItemId,
+		nextResumeAt: rateLimit.nextResumeAtMs === null ? null : new Date(rateLimit.nextResumeAtMs).toISOString(),
+		staggerMs: DAEMON_RATE_LIMIT_STAGGER_MS,
+	}
+}
+
+function daemonStatus(runtime: Pick<DaemonRuntime, "socketPath" | "pidPath" | "dbPath" | "startedAt" | "schedulerIntervalMs" | "spawnAgents" | "lastTick" | "rateLimit" | "shuttingDown" | "schedulerState" | "children">): JsonObject {
 	return {
 		pid: process.pid,
 		socketPath: runtime.socketPath,
@@ -345,6 +400,7 @@ function daemonStatus(runtime: Pick<DaemonRuntime, "socketPath" | "pidPath" | "d
 		spawnAgents: runtime.spawnAgents,
 		shuttingDown: runtime.shuttingDown,
 		activeChildren: runtime.children.size,
+		rateLimit: daemonRateLimitStatus(runtime.rateLimit, Date.now()),
 		slots: [...runtime.schedulerState.slots.values()] as unknown as JsonValue,
 		lastTick: runtime.lastTick === null ? null : {
 			activeChains: runtime.lastTick.activeChains,
@@ -365,11 +421,21 @@ function startScheduler(runtime: DaemonRuntime): void {
 	const tick = async () => {
 		if (runtime.shuttingDown) return
 		try {
-			runtime.lastTick = await runSchedulerTick({
+			const nowMs = Date.now()
+			const rateLimitDecision = daemonRateLimitDecision(runtime.rateLimit, nowMs)
+			if (rateLimitDecision.kind === "paused" || rateLimitDecision.kind === "stagger-wait") {
+				logEngine(runtime, `scheduler paused by account rate limit: mode=${rateLimitDecision.kind} waitMs=${rateLimitDecision.waitMs}`)
+				return
+			}
+			const tickOptions: SchedulerTickOptions = {
 				store: runtime.store,
 				state: runtime.schedulerState,
 				spawnAgent: (input): SchedulerRun => spawnAgentForItem(runtime, input),
-			})
+			}
+			runtime.lastTick = await runSchedulerTick(rateLimitDecision.maxSpawns === undefined
+				? tickOptions
+				: { ...tickOptions, maxSpawns: rateLimitDecision.maxSpawns })
+			updateRateLimitAfterTick(runtime, runtime.lastTick, nowMs)
 			for (const chain of runtime.lastTick.completedChains) logEngine(runtime, `chain completed: ${chain.name}`)
 		} catch (error) {
 			logEngine(runtime, `scheduler tick failed: ${errorMessage(error)}`)
@@ -378,11 +444,25 @@ function startScheduler(runtime: DaemonRuntime): void {
 	runtime.schedulerTimer = setInterval(() => void tick(), runtime.schedulerIntervalMs)
 }
 
+function updateRateLimitAfterTick(runtime: DaemonRuntime, tick: SchedulerTickResult, nowMs: number): void {
+	if (runtime.rateLimit.reset === null) return
+	if (nowMs < runtime.rateLimit.reset.resetsAt * 1000) return
+	if (tick.spawned.length > 0) {
+		runtime.rateLimit.nextResumeAtMs = nowMs + DAEMON_RATE_LIMIT_STAGGER_MS
+		logEngine(runtime, `rate limit recovery stagger: spawned=${tick.spawned.length}, nextResumeAt=${new Date(runtime.rateLimit.nextResumeAtMs).toISOString()}`)
+		return
+	}
+	if (tick.skippedBusySlots.length > 0) return
+	logEngine(runtime, "rate limit recovery complete")
+	runtime.rateLimit = createDaemonRateLimitState()
+}
+
 function spawnAgentForItem(runtime: DaemonRuntime, input: { chain: Chain; item: Item }): SchedulerRun {
 	if (!runtime.spawnAgents) throw new Error("scheduler spawn requested while spawnAgents=false")
 	const item = input.item
 	const runId = `daemon-${item.id}-${Date.now()}`
 	const cwd = item.agentCwd ?? item.repoCwd
+	const observeRateLimitNotice = createRateLimitNoticeObserver(runtime, runId, item.id)
 	const child = spawn(runtime.processArgs[0]!, [
 		...runtime.processArgs.slice(1),
 		"--target-cwd",
@@ -396,8 +476,14 @@ function spawnAgentForItem(runtime: DaemonRuntime, input: { chain: Chain; item: 
 		stdio: ["ignore", "pipe", "pipe"],
 	})
 	runtime.children.set(runId, child)
-	child.stdout?.on("data", (chunk) => runtime.stdoutLog.write(chunk))
-	child.stderr?.on("data", (chunk) => runtime.stderrLog.write(chunk))
+	child.stdout?.on("data", (chunk) => {
+		runtime.stdoutLog.write(chunk)
+		observeRateLimitNotice(chunk.toString("utf-8"))
+	})
+	child.stderr?.on("data", (chunk) => {
+		runtime.stderrLog.write(chunk)
+		observeRateLimitNotice(chunk.toString("utf-8"))
+	})
 	child.once("exit", (code, signal) => {
 		runtime.children.delete(runId)
 		clearSchedulerRun(runtime.schedulerState, runId)
@@ -405,6 +491,36 @@ function spawnAgentForItem(runtime: DaemonRuntime, input: { chain: Chain; item: 
 	})
 	logEngine(runtime, `agent spawned run=${runId} item=${item.id} repo=${item.repoCwd} cwd=${cwd} loopDataRoot=${runtime.rootDir} pid=${child.pid ?? "<null>"}`)
 	return { runId, pid: child.pid ?? -1, itemId: item.id }
+}
+
+function createRateLimitNoticeObserver(runtime: DaemonRuntime, runId: string, itemId: number): (chunk: string) => void {
+	let buffered = ""
+	const maxBufferedChars = 20_000
+	return (chunk: string) => {
+		buffered += chunk
+		let newlineIndex = buffered.indexOf("\n")
+		while (newlineIndex >= 0) {
+			const line = buffered.slice(0, newlineIndex)
+			buffered = buffered.slice(newlineIndex + 1)
+			const reset = parseRateLimitNoticeLine(line)
+			if (reset !== null) applyRateLimitNotice(runtime, runId, itemId, reset)
+			newlineIndex = buffered.indexOf("\n")
+		}
+		if (buffered.length > maxBufferedChars) buffered = buffered.slice(-maxBufferedChars)
+	}
+}
+
+function applyRateLimitNotice(runtime: DaemonRuntime, runId: string, itemId: number, reset: RateLimitReset): void {
+	const existingResetMs = runtime.rateLimit.reset?.resetsAt === undefined ? 0 : runtime.rateLimit.reset.resetsAt * 1000
+	if (existingResetMs > reset.resetsAt * 1000) return
+	runtime.rateLimit = {
+		reset,
+		observedAt: new Date().toISOString(),
+		sourceRunId: runId,
+		sourceItemId: itemId,
+		nextResumeAtMs: null,
+	}
+	logEngine(runtime, `account rate limit observed: run=${runId} item=${itemId} resetsAt=${reset.resetAtIso} type=${reset.rateLimitType ?? "<unknown>"}`)
 }
 
 async function shutdownDaemon(runtime: DaemonRuntime): Promise<void> {

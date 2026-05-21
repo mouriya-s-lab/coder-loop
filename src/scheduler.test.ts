@@ -106,6 +106,25 @@ describe("scheduler", () => {
 		})
 	})
 
+	test("maxSpawns limits a tick to one new slot for staggered recovery", async () => {
+		await withStore(async (store) => {
+			const chain = store.upsertChain("release-train", "gh-issue-pr-iteration", "owner/repo", "main", null, null)
+			store.addItem(chain.id, { issue: 10, repoCwd: "/repo/a" })
+			store.addItem(chain.id, { issue: 11, repoCwd: "/repo/b" })
+			const schedulerState = createSchedulerState()
+
+			const tick = await runSchedulerTick({
+				store,
+				state: schedulerState,
+				maxSpawns: 1,
+				spawnAgent: ({ item }) => ({ runId: `run-${item.issue}`, pid: 7000 + item.issue, itemId: item.id }),
+			})
+
+			expect(tick.spawned.map((record) => record.item.issue)).toEqual([10])
+			expect(schedulerState.slots.size).toBe(1)
+		})
+	})
+
 	test("completes terminal chains and skips completed chains on later ticks", async () => {
 		await withStore(async (store) => {
 			const chain = store.createChain("done-chain", "gh-issue-pr-iteration")
