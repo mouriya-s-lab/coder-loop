@@ -42,6 +42,7 @@ L2: Preset（presets/<name>/）
 - **Run unit + smoke tests**: `bun test` (覆盖 `src/loop.test.ts` + `src/smoke.test.ts`)
 - **Run orchestrator directly**: `bun run src/loop.ts [N] [--target-cwd <path>] [--once]` (core loop path; operational callers should prefer daemon)
 - **Status snapshot**: `coder-loop status <target> --json [--config <path>] [--repo <owner/repo>]` — stable read-only JSON API for supervisor/scripts; do not scrape runtime files first.
+- **Legacy state migration**: `coder-loop migrate <target> [--json] [--root <path>] [--db <path>]` — explicit one-shot import from target-local `.coder-loop/runtime/state.json` into SQLite chain/items/runs, copying shared/issues/evidence and leaving a `.pre-sqlite-migration` backup.
 - **Daemon operations**: `coder-loop daemon status <target> --json`, `coder-loop daemon start|restart <target> [--max-iterations N] [--require-browser-evidence]`, `coder-loop daemon stop <target>` — stable target queue import/status/pause API backed by the central daemon socket.
 - **Check runtime**: `bun run src/loop.ts --target-cwd <path> --check-runtime`
 - **Dry run**: `bun run src/loop.ts --target-cwd <path> --dry-run` (渲染 + 选 item，不 spawn agent)

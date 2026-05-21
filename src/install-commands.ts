@@ -26,6 +26,7 @@ import { basename, resolve, dirname } from "node:path"
 import { buildCoderLoopStatusSnapshot, loadPreset, type AgentRunnerKind, type AgentRunnerSelection, type CoderLoopStatusSnapshot, type JsonValue, type Preset } from "./loop"
 import { openStateStore, type Chain, type ItemPatch, type NewItem, type StateStore } from "./state-db"
 import { chainRuntimePaths, defaultChainNameForTarget, ensureChainRuntimeSkeleton, loopDataRootPaths, type ChainRuntimePaths } from "./runtime-paths"
+import { migrateStateJson } from "./state-migration"
 
 const PKG_ROOT = resolve(import.meta.dir, "..")
 const PRESETS_DIR = resolve(PKG_ROOT, "presets")
@@ -454,26 +455,26 @@ export async function upsertTargetChain(input: {
 	await ensureChainRuntimeSkeleton(chainPaths)
 	const store = openStateStore(root.stateDbPath)
 	try {
-		const chain = store.upsertChain(
+		const migration = await migrateStateJson(input.target, store.db, {
+			rootDir: root.rootDir,
 			chainName,
-			input.preset.name,
+			preset: input.preset.name,
 			repository,
 			baseBranch,
-			null,
-			null,
-			{ targetCwd: input.target },
-		)
-		const importResult = legacy === null
-			? { validLegacyItems: 0, itemsInserted: 0, itemsUpdated: 0 }
-			: await importLegacyQueueIntoChain(store, chain.id, input.target, legacy.queue, chainPaths)
+			allowMissingState: true,
+			onDuplicate: "update",
+			backupState: true,
+		})
 		return {
-			chain,
+			chain: migration.chain,
 			dbPath: root.stateDbPath,
 			rootDir: root.rootDir,
 			chainDir: chainPaths.chainDir,
 			legacyStatePath,
 			legacyStateFound: legacy !== null,
-			...importResult,
+			validLegacyItems: migration.itemsSeen - migration.skipped.filter((entry) => entry.reason === "invalid legacy queue item").length,
+			itemsInserted: migration.itemsInserted,
+			itemsUpdated: migration.itemsUpdated,
 		}
 	} finally {
 		store.close()

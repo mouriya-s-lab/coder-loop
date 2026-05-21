@@ -24,7 +24,8 @@ import {
 } from "./daemon"
 import { dispatchSubcommand } from "./install-commands"
 import { chainRuntimePaths, defaultChainNameForTarget, ensureChainRuntimeSkeleton, loopDataRootPaths, runRuntimePaths, type ChainRuntimePaths } from "./runtime-paths"
-import { openStateStore, type Chain, type Item, type ItemPatch, type NewItem, type StateStore } from "./state-db"
+import { defaultMigratedChainName, migrateStateJson, type StateJsonMigrationResult } from "./state-migration"
+import { openStateDb, openStateStore, type Chain, type Item, type ItemPatch, type NewItem, type StateStore } from "./state-db"
 import {
 	extractRateLimitErrorCodeFromEvent,
 	extractRateLimitReset,
@@ -1172,6 +1173,119 @@ async function runItemCommand(args: string[]): Promise<void> {
 	fail(`item: unknown subcommand "${subcommand ?? ""}". Usage: coder-loop item add|list|update`)
 }
 
+type MigrateCliOptions = {
+	targetCwd: string
+	json: boolean
+	rootDir: string | null
+	dbPath: string | null
+	configPath: string | null
+	statePath: string | null
+	chainName: string | null
+	repository: string | null
+	baseBranch: string | null
+	allowMissingState: boolean
+}
+
+async function runMigrateCommand(args: string[]): Promise<void> {
+	const options = parseMigrateCliArgs(args)
+	const root = loopDataRootPaths(options.rootDir)
+	const dbPath = resolve(options.dbPath ?? root.stateDbPath)
+	const db = openStateDb(dbPath)
+	try {
+		const result = await migrateStateJson(options.targetCwd, db, {
+			rootDir: root.rootDir,
+			statePath: options.statePath,
+			configPath: options.configPath,
+			chainName: options.chainName,
+			repository: options.repository,
+			baseBranch: options.baseBranch,
+			allowMissingState: options.allowMissingState,
+			onDuplicate: "skip",
+			backupState: true,
+		})
+		if (options.json) {
+			writeJson(migrationResultJson(result, dbPath))
+		} else {
+			process.stdout.write([
+				`Migrated legacy state: ${result.legacyStatePath}`,
+				`Chain: ${result.chain.name} (${result.chain.status})`,
+				`DB: ${dbPath}`,
+				`Items: seen=${result.itemsSeen}, inserted=${result.itemsInserted}, updated=${result.itemsUpdated}, skipped=${result.skipped.length}`,
+				`Runs: seen=${result.runsSeen}, inserted=${result.runsInserted}`,
+				`Shared copied: ${result.copied.shared}`,
+				`State backup: ${result.backupPath ?? "<none>"}`,
+				"",
+			].join("\n"))
+		}
+	} finally {
+		db.close()
+	}
+}
+
+function parseMigrateCliArgs(args: string[]): MigrateCliOptions {
+	let targetCwd: string | null = null
+	const options: Omit<MigrateCliOptions, "targetCwd"> = {
+		json: false,
+		rootDir: null,
+		dbPath: null,
+		configPath: null,
+		statePath: null,
+		chainName: null,
+		repository: null,
+		baseBranch: null,
+		allowMissingState: false,
+	}
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index]
+		if (arg === undefined) fail(`Missing migrate argument at index ${index}`)
+		const [flagName, inlineValue] = splitFlag(arg)
+		switch (flagName) {
+			case "--json":
+				rejectInlineValue(inlineValue, flagName)
+				options.json = true
+				break
+			case "--root":
+				options.rootDir = readFlagValue(args, index, inlineValue, flagName)
+				if (inlineValue === null) index++
+				break
+			case "--db":
+				options.dbPath = readFlagValue(args, index, inlineValue, flagName)
+				if (inlineValue === null) index++
+				break
+			case "--config":
+				options.configPath = readFlagValue(args, index, inlineValue, flagName)
+				if (inlineValue === null) index++
+				break
+			case "--state":
+				options.statePath = readFlagValue(args, index, inlineValue, flagName)
+				if (inlineValue === null) index++
+				break
+			case "--chain":
+				options.chainName = readFlagValue(args, index, inlineValue, flagName)
+				if (inlineValue === null) index++
+				break
+			case "--repo":
+				options.repository = readFlagValue(args, index, inlineValue, flagName)
+				if (inlineValue === null) index++
+				break
+			case "--base-branch":
+				options.baseBranch = readFlagValue(args, index, inlineValue, flagName)
+				if (inlineValue === null) index++
+				break
+			case "--allow-missing-state":
+				rejectInlineValue(inlineValue, flagName)
+				options.allowMissingState = true
+				break
+			default:
+				if (arg.startsWith("--")) fail(`migrate: unknown argument ${arg}`)
+				if (targetCwd !== null) fail(`migrate: extra target "${arg}"`)
+				targetCwd = arg
+		}
+	}
+	if (targetCwd === null) fail("migrate: missing target. Usage: coder-loop migrate <target> [--json] [--root <path>] [--db <path>] [--repo <owner/repo>] [--base-branch <branch>]")
+	return { targetCwd: resolve(targetCwd), ...options }
+}
+
 async function runChainCreateCommand(args: string[]): Promise<void> {
 	let name: string | null = null
 	let preset: string | null = null
@@ -1579,6 +1693,28 @@ function formatItemListLine(item: Item): string {
 	return `${item.id}\tissue=${item.issue}\tstatus=${item.status}\tpriority=${item.priority}\trepoCwd=${item.repoCwd}`
 }
 
+function migrationResultJson(result: StateJsonMigrationResult, dbPath: string): JsonObject {
+	return {
+		chain: result.chain as unknown as JsonObject,
+		items: result.items as unknown as JsonValue[],
+		runs: result.runs as unknown as JsonValue[],
+		skipped: result.skipped as unknown as JsonValue[],
+		dbPath,
+		legacyStatePath: result.legacyStatePath,
+		legacyStateFound: result.legacyStateFound,
+		legacyConfigPath: result.legacyConfigPath,
+		legacySharedPath: result.legacySharedPath,
+		backupPath: result.backupPath,
+		chainDir: result.chainDir,
+		itemsSeen: result.itemsSeen,
+		itemsInserted: result.itemsInserted,
+		itemsUpdated: result.itemsUpdated,
+		runsSeen: result.runsSeen,
+		runsInserted: result.runsInserted,
+		copied: result.copied,
+	}
+}
+
 function writeJson(value: unknown): void {
 	process.stdout.write(JSON.stringify(value, null, "\t") + "\n")
 }
@@ -1856,6 +1992,10 @@ async function main() {
 	}
 	if (firstArg === "item") {
 		await runItemCommand(process.argv.slice(3))
+		return
+	}
+	if (firstArg === "migrate") {
+		await runMigrateCommand(process.argv.slice(3))
 		return
 	}
 	if (firstArg === "status") {
@@ -3081,7 +3221,7 @@ export function buildDaemonStartPlan(args: Extract<DaemonCommandArgs, { action: 
 	const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")
 	const options = daemonServerOptionsFromIpc(args.ipc)
 	const defaults = daemonDefaults(options)
-	const chainName = defaultChainNameForTarget(targetCwd)
+	const chainName = defaultMigratedChainName(targetCwd, args.repository)
 	const daemonUpDir = chainRuntimePaths(defaults.rootDir, chainName).daemonRunDir(timestamp)
 	const stdoutPath = resolve(daemonUpDir, "up.stdout.log")
 	const stderrPath = resolve(daemonUpDir, "up.stderr.log")
@@ -3363,58 +3503,46 @@ async function waitForDaemonReady(socketPath: string): Promise<void> {
 async function importTargetStateViaDaemon(args: Extract<DaemonCommandArgs, { action: "start" }>, socketPath: string): Promise<DaemonTargetImportResult> {
 	const options = await loadLoopOptionsForTarget(args.targetCwd, args.configPath, args.repository)
 	const targetCwd = options.targetCwd
-	const chainName = await resolveDaemonChainNameForTarget(socketPath, targetCwd, defaultChainNameForTarget(targetCwd))
-	const existingChain = await readDaemonChainIfExists(socketPath, chainName)
-	const chainRequest: Extract<DaemonRequest, { cmd: "chain.create" }> = {
-		cmd: "chain.create",
-		name: chainName,
-		preset: options.preset.name,
-	}
-	const repository = options.repository ?? optionalStringFromJsonObject(existingChain, "repository")
-	const baseBranch = options.baseBranch ?? optionalStringFromJsonObject(existingChain, "baseBranch")
-	const umbrellaIssue = optionalNumberFromJsonObject(existingChain, "umbrellaIssue")
-	const umbrellaRepo = optionalStringFromJsonObject(existingChain, "umbrellaRepo")
-	if (repository !== null) chainRequest.repo = repository
-	if (baseBranch !== null) chainRequest.baseBranch = baseBranch
-	if (umbrellaIssue !== null) chainRequest.umbrellaIssue = umbrellaIssue
-	if (umbrellaRepo !== null) chainRequest.umbrellaRepo = umbrellaRepo
+	const defaults = daemonDefaults(daemonServerOptionsFromIpc(args.ipc))
+	const chainName = await resolveDaemonChainNameForTarget(
+		socketPath,
+		targetCwd,
+		defaultMigratedChainName(targetCwd, options.repository),
+	)
 	const trace: DaemonTargetImportTrace[] = []
-	const chainResponse = await sendDaemonRequest(socketPath, chainRequest)
-	trace.push(daemonImportTrace("chain.create", undefined, chainResponse))
-	if (!chainResponse.ok) throw new Error(`chain.create ${chainName}: ${chainResponse.error}`)
-	const chain = requireJsonObject(chainResponse.data, "chain.create")
-	const legacyStatePath = legacyStatePathForDaemonImport(options)
-	const queueResult = await readLegacyTargetQueue(legacyStatePath)
-	const queue = queueResult.queue
-	let imported = 0
-	let updated = 0
-	let skipped = 0
-	for (const entry of queue) {
-		const request = itemAddRequestFromQueueEntry(entry, chainName, targetCwd)
-		if (request === null) {
-			skipped++
-			continue
+	const db = openStateDb(defaults.dbPath)
+	try {
+		const result = await migrateStateJson(targetCwd, db, {
+			rootDir: defaults.rootDir,
+			statePath: legacyStatePathForDaemonImport(options),
+			chainName,
+			preset: options.preset.name,
+			repository: options.repository,
+			baseBranch: options.baseBranch,
+			allowMissingState: true,
+			onDuplicate: "update",
+			backupState: true,
+		})
+		trace.push({ cmd: "chain.upsert", ok: true })
+		for (const item of result.items) trace.push({ cmd: result.itemsUpdated > 0 ? "item.upsert" : "item.add", issue: item.issue, ok: true })
+		for (const skipped of result.skipped) {
+			const entry: DaemonTargetImportTrace = { cmd: "item.skip", ok: true }
+			if (skipped.issue !== null) entry.issue = skipped.issue
+			trace.push(entry)
 		}
-		const response = await sendDaemonRequest(socketPath, request)
-		trace.push(daemonImportTrace("item.add", request.issue, response))
-		if (response.ok) {
-			imported++
-			continue
+		return {
+			chainName: result.chain.name,
+			chain: result.chain as unknown as JsonObject,
+			legacyStatePath: result.legacyStatePath,
+			legacyStateFound: result.legacyStateFound,
+			itemsSeen: result.itemsSeen,
+			imported: result.itemsInserted,
+			updated: result.itemsUpdated,
+			skipped: result.skipped.length,
+			trace,
 		}
-		if (!response.error.includes("UNIQUE constraint failed")) throw new Error(`item.add ${request.issue}: ${response.error}`)
-		await updateDuplicateDaemonItem(socketPath, chainName, request, trace)
-		updated++
-	}
-	return {
-		chainName,
-		chain,
-		legacyStatePath,
-		legacyStateFound: queueResult.found,
-		itemsSeen: queue.length,
-		imported,
-		updated,
-		skipped,
-		trace,
+	} finally {
+		db.close()
 	}
 }
 

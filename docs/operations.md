@@ -59,9 +59,11 @@ coder-loop daemon down --socket .cache/daemon-dev/daemon.sock
 ```
 
 `daemon start <target>` 是旧运维入口的兼容层：先尝试连接集中
-daemon socket；socket 已在线时通过 `chain.create` + `item.add` 把 target
-的 `state.json.queue` 导入集中 DB，不再启动 per-target loop 进程；socket
-不在线时自动 detached 启动 `daemon up`，等 socket 可用后走同一条导入路径。
+daemon socket；socket 已在线时把 target 的 legacy `state.json.queue`
+导入集中 DB，不再启动 per-target loop 进程；socket 不在线时自动 detached
+启动 `daemon up`，等 socket 可用后走同一条导入路径。显式一次性迁移可用
+`coder-loop migrate <target> --json`；它复制 legacy `shared.md` / `issues/` /
+`evidence/`，并保留 `state.json.pre-sqlite-migration` 备份。
 `daemon status <target> --json` 通过 socket 返回该 target 对应的
 `chain` / `items` / `slots`；`daemon stop <target>` 通过 `item.update` 把该
 target 导入的 items 标记为 `paused`，daemon 本身保持在线。`daemon restart`
@@ -333,7 +335,7 @@ state: /abs/path/.coder-loop/runtime/state.json
 
 ### 7.1 子命令（必须作为第一位置参数）
 
-`coder-loop install / uninstall / doctor / status / daemon`。详细 bootstrap 行为见 [operator-quickstart §1](./operator-quickstart.md#1-bootstrap-目标-repo-的-coder-loop)：
+`coder-loop install / uninstall / doctor / status / migrate / daemon`。详细 bootstrap 行为见 [operator-quickstart §1](./operator-quickstart.md#1-bootstrap-目标-repo-的-coder-loop)：
 
 | 子命令 | 用途 | 主要 flag |
 |---|---|---|
@@ -341,6 +343,7 @@ state: /abs/path/.coder-loop/runtime/state.json
 | `uninstall <target>` | 仅删 `.claude/commands/dev-*.md` | — |
 | `doctor <target>` | 只读四层体检 + live runtime health | `--repo <slug>` |
 | `status <target> --json` | 只读 JSON runtime/process snapshot | `--config <path>` `--repo <slug>` |
+| `migrate <target>` | 显式把 legacy `state.json` 导入 SQLite chain/items/runs，并复制 shared/issues/evidence | `--json` `--root <path>` `--db <path>` `--config <path>` `--state <path>` `--repo <slug>` `--base-branch <branch>` `--chain <name>` |
 | `daemon status <target> --json` | socket 查询 target chain / items / slots | `--config <path>` `--repo <slug>` `--socket <path>` |
 | `daemon start <target>` | socket 在线则导入 target queue；不在线则自动 up 后导入 | `--config <path>` `--repo <slug>` `--require-browser-evidence` `--dry-run` `--socket <path>` `--root <path>` `--db <path>` |
 | `daemon stop <target>` | 通过 socket 将 target items 标记为 `paused` | `--config <path>` `--repo <slug>` `--dry-run` `--socket <path>` |
