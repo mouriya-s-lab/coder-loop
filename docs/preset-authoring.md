@@ -4,7 +4,7 @@
 
 ## 引擎做什么
 
-引擎（`src/loop.ts`）是 preset 驱动的有限状态机。运行时行为完全由 preset 定义：
+引擎（入口 `src/loop.ts`，agent 执行在 `src/agent.ts`，CLI 在 `src/cli.ts`）是 preset 驱动的有限状态机。运行时行为完全由 preset 定义：
 
 1. 从 `preset.toml` 加载 item idField、status 集合（continuable / terminal）、phase 列表（名字 + prompt 模板 + 变量绑定）、fragments、agent 配置
 2. 从 target `.coder-loop/runtime/` 加载 config + state
@@ -129,7 +129,7 @@ resumedStartedAt   issueKind
 
 ### 扩展白名单
 
-必须同时改 `src/loop.ts` 两处：
+必须同时改 `src/loop.ts` 两处（`RUNTIME_BINDING_KEYS` 和 `buildRuntimeBindings` 均在 `src/loop.ts`）：
 
 1. `RUNTIME_BINDING_KEYS` 数组
 2. `buildRuntimeBindings` 函数的返回对象
