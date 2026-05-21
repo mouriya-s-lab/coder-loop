@@ -21,6 +21,7 @@ L1: 引擎（src/loop.ts）
 L2: Preset（presets/<name>/）
     - preset.toml: 形态契约 (item.idField / statuses / phases / fragments / agent)
     - <phase>-entry.md + fragments: 角色 prompt 与状态机语义
+    - trigger phases: review 后按条件运行的 side-effect agent（如 blocked-responder）
     - templates/: 目标侧 starter（仅当该 preset 需要 target-side policy 时）
 
 目标侧策略：<TARGET>/.coder-loop/
@@ -51,6 +52,7 @@ L2: Preset（presets/<name>/）
 - **Doctor**: `coder-loop doctor <target> [--repo <owner/repo>]` — 只读四层体检（target 文件 / GitHub 标签 / 操作员 PATH / writing-issue skill 版本）并输出 live runtime health。
 - **Plan phase**: `/dev-plan` （`gh-issue-pr-iteration` preset 配套的规划器）
 - **Loop phase**: `/dev-loop [N]` （`gh-issue-pr-iteration` preset 配套的循环入口；内部走 `coder-loop daemon start`）
+- **Blocked responder**: `kind:blocked` issue 由 review gate 判定后触发 post-review side-effect phase；跨仓 blocker 会创建目标仓 `kind:blocked` follow-up、注入该仓 queue，并启动/保持目标仓 daemon。接受 unblock PR 时 review 通过 `coder-loop queue unblock` 恢复原仓 blocked item。
 
 ## Runner Selection
 
@@ -95,7 +97,7 @@ Agent 不是「判断力差」——是没人教它怎么判断。当前 prompt 
 
 ## Supervisor pattern
 
-跨 preset 通用，包在 loop 外面。`templates/supervisor/` 提供 cron-driven cross-patrol orchestration starter，long multi-mission work 适用。短单 issue 跑不需要它。
+跨 preset 通用，包在 loop 外面。`templates/supervisor/` 提供 recurring-heartbeat cross-patrol orchestration starter，long multi-mission work 适用。短单 issue 或单机 multi-repo blocker 优先用 daemon keepalive + `kind:blocked` / blocked-responder，不需要 supervisor。
 
 supervisor 的正常接口是 coder-loop 运维 API：
 

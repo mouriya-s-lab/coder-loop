@@ -1,6 +1,6 @@
 ---
 name: bootstrap
-description: Bootstrap a fresh session into the target project's supervisor / coder-loop context. Resolves the target dir, repo slug, and active mission, reads mission files, queries coder-loop through its stable operations API, and reports current situation plus next supervisor action. Use when resuming work after compaction, restart, cron wake, or `/resume`.
+description: Bootstrap a fresh session into the target project's supervisor / coder-loop context. Resolves the target dir, repo slug, and active mission, reads mission files, queries coder-loop through its stable operations API, and reports current situation plus next supervisor action. Use when resuming work after compaction, restart, heartbeat wake, or `/resume`.
 disable-model-invocation: true
 allowed-tools: Read, Bash, Glob, Grep
 ---
@@ -26,13 +26,15 @@ Only one mission is active at a time. Each mission has its own dir:
 ```
 .coder-loop/runtime/supervisor/<mission>/
   role.md          # durable role contract
-  patrol-entry.md  # cron re-entry prompt
+  patrol-entry.md  # heartbeat re-entry prompt
+  PHASE            # init | running | complete
   log.md           # append-only cross-patrol event stream
 ```
 
 Past missions stay on disk after `mission complete`; do not start a new mission
-silently. Active mission = the one whose `log.md` is most recently modified, or
-the only one.
+silently. Active mission = the one whose `PHASE` file says `running`. If exactly
+one mission exists and has no `PHASE` file, treat it as legacy input and report
+that the mission needs a `PHASE` file before unattended patrol continues.
 
 ## Bootstrap procedure
 
@@ -56,11 +58,12 @@ target is not ready for supervisor bootstrap.
 ### Step 1 — Identify active mission
 
 ```bash
-find "$TARGET_DIR/.coder-loop/runtime/supervisor" -maxdepth 2 -name log.md -print 2>/dev/null
+find "$TARGET_DIR/.coder-loop/runtime/supervisor" -maxdepth 2 -name PHASE -print 2>/dev/null
 ```
 
-Pick the mission whose `log.md` was modified most recently. If no mission exists,
-report `no supervisor mission initialized` and stop.
+Pick the single mission whose `PHASE` content is `running`. If more than one
+mission is running, stop and report the conflict. If no mission is running,
+report `no running supervisor mission initialized` and stop.
 
 ### Step 2 — Read durable mission files
 
@@ -99,9 +102,9 @@ If `doctor` reports a bootstrap failure, repair with `coder-loop install
 `doctor`. If `status` reports an invalid runtime state, record the blocker in
 `log.md` before attempting manual file repair.
 
-Runner note: do not assume Claude. coder-loop inherits the host runner by
-default (`codex` from Codex, `claude` from Claude Code), and target config or
-queue items may override it. Trust `status` / `doctor` output over runtime file
+Runner note: do not assume Claude. Iteration defaults to Codex unless target
+config or the selected queue item overrides it; review defaults to Claude unless
+target config overrides it. Trust `status` / `doctor` output over runtime file
 guesswork.
 
 ### Step 4 — Check GitHub truth
@@ -140,9 +143,9 @@ Report:
 Anything derivable from these sources must not be re-written into a
 hand-maintained state file.
 
-## Cron re-entry convention
+## Heartbeat re-entry convention
 
-Self-rescheduling cron prompts for this project must be exactly one line,
+Recurring durable heartbeat prompts for this project must be exactly one line,
 nothing else:
 
 ```
@@ -150,5 +153,6 @@ Read $TARGET_DIR/.coder-loop/runtime/supervisor/<mission>/patrol-entry.md and fo
 ```
 
 Resolve `$TARGET_DIR` and `<mission>` to concrete strings when scheduling. Never
-inline full patrol rules into the cron prompt. Never use recurring cron
-expressions (`*/15 * * * *` etc.). Never use launchd or external `claude -p`.
+inline full patrol rules into the heartbeat prompt. Use one recurring durable
+heartbeat for the active mission, typically every 15 minutes (`*/15 * * * *`).
+Never use launchd or external `claude -p`.
