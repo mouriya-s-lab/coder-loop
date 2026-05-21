@@ -37,6 +37,7 @@ When prepending children:
 - read the latest state immediately before writing;
 - avoid duplicate child issue numbers already in queue;
 - insert the new child items as a batch at the front, preserving creation order;
+- if the parent item is currently before the new child batch, move or rewrite the array/store order so the new children are selected before the parent retry item and before any older queued siblings;
 - set `current: null` because the orchestrator selects actionable current before queue front;
 - do not set the parent to `done`, `moot`, or `blocked`.
 

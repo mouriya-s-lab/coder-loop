@@ -5574,23 +5574,30 @@ export type RunnerInvocationPaths = {
 }
 
 export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: string, resume: ResumeDecision, paths: RunnerInvocationPaths): RunnerInvocation {
+	const additionalDirs = [paths.presetDir, paths.loopDataRoot]
+	if (paths.targetCwd !== paths.agentCwd) additionalDirs.push(paths.targetCwd)
 	if (runner.kind === "claude") {
-		const dirs = [paths.presetDir, paths.loopDataRoot]
-		if (paths.targetCwd !== paths.agentCwd) dirs.push(paths.targetCwd)
 		return {
 			kind: "spawn",
 			binary: runner.binary,
-			args: agentClaudeArgs(runner.extraArgs, prompt, resume, dirs, runner.model),
+			args: agentClaudeArgs(runner.extraArgs, prompt, resume, additionalDirs, runner.model),
 		}
 	}
 	return {
 		kind: "spawn",
 		binary: runner.binary,
-		args: agentCodexArgs(runner.extraArgs, prompt, resume, paths.agentCwd, runner.model),
+		args: agentCodexArgs(runner.extraArgs, prompt, resume, paths.agentCwd, runner.model, additionalDirs),
 	}
 }
 
-export function agentCodexArgs(extraArgs: readonly string[], prompt: string, resume: ResumeDecision, agentCwd: string, model: string | null = null): string[] {
+export function agentCodexArgs(
+	extraArgs: readonly string[],
+	prompt: string,
+	resume: ResumeDecision,
+	agentCwd: string,
+	model: string | null = null,
+	additionalDirs: readonly string[] = [],
+): string[] {
 	const topLevelArgs = ["--ask-for-approval", "never", "exec"]
 	const runnerArgs = model === null ? [...extraArgs] : stripModelArgs(extraArgs, ["--model", "-m"])
 	if (resume.kind === "resume") {
@@ -5605,6 +5612,9 @@ export function agentCodexArgs(extraArgs: readonly string[], prompt: string, res
 	if (model !== null) args.push("--model", model)
 	if (!args.includes("--json")) args.push("--json")
 	if (!args.includes("--cd")) args.push("--cd", agentCwd)
+	if (additionalDirs.length > 0 && !args.includes("--add-dir")) {
+		for (const dir of additionalDirs) args.push("--add-dir", dir)
+	}
 	if (!args.includes("--sandbox")) args.push("--sandbox", "danger-full-access")
 	args.push(prompt)
 	return args
