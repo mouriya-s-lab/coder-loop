@@ -516,6 +516,84 @@ describe("smoke: single-phase-example preset", () => {
 		}
 	})
 
+	test("migrate <target> imports legacy state and chain status completes all-terminal queues", async () => {
+		const root = resolve(REPO_ROOT, ".cache", `smoke-migrate-${Date.now()}-${Math.random().toString(16).slice(2)}`)
+		const target = resolve(root, "legacy-target")
+		const runtime = resolve(target, ".coder-loop/runtime")
+		await mkdir(resolve(runtime, "issues"), { recursive: true })
+		await mkdir(resolve(runtime, "evidence/issue-9400"), { recursive: true })
+		await writeFile(resolve(target, ".coder-loop/workflow.md"), "# workflow\n")
+		await writeFile(resolve(runtime, "config.json"), JSON.stringify({
+			preset: "gh-issue-pr-iteration",
+			repository: "owner/service",
+			baseBranch: "main",
+		}, null, "\t"))
+		await writeFile(resolve(runtime, "shared.md"), "# shared legacy\n")
+		await writeFile(resolve(runtime, "issues/9400.md"), "# Issue 9400\n")
+		await writeFile(resolve(runtime, "evidence/issue-9400/proof.txt"), "ok\n")
+		await writeFile(resolve(runtime, "state.json"), JSON.stringify({
+			version: 1,
+			queue: [{
+				issue: 9400,
+				status: "done",
+				priority: "high",
+				issueFile: ".coder-loop/runtime/issues/9400.md",
+				evidenceDir: ".coder-loop/runtime/evidence/issue-9400",
+			}],
+			recentRuns: [],
+			current: null,
+		}, null, "\t"))
+		try {
+			const migrate = Bun.spawnSync({
+				cmd: ["bun", LOOP_ENTRY, "migrate", target, "--root", root, "--json"],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			expect(new TextDecoder().decode(migrate.stderr)).toBe("")
+			expect(migrate.exitCode).toBe(0)
+			const migrated = asRecord(JSON.parse(new TextDecoder().decode(migrate.stdout)), "migrate")
+			expect(asRecord(migrated.chain, "migrated chain")).toMatchObject({
+				name: "service",
+				status: "active",
+				repository: "owner/service",
+				umbrellaIssue: null,
+				umbrellaRepo: null,
+			})
+			expect(migrated.itemsInserted).toBe(1)
+			expect(migrated.backupPath).toBe(resolve(runtime, "state.json.pre-sqlite-migration"))
+			expect(await readFile(resolve(root, "chains/service/shared.md"), "utf-8")).toBe("# shared legacy\n")
+			expect(await readFile(resolve(root, "chains/service/issues/9400.md"), "utf-8")).toBe("# Issue 9400\n")
+			expect(await readFile(resolve(root, "chains/service/evidence/issue-9400/proof.txt"), "utf-8")).toBe("ok\n")
+
+			const duplicate = Bun.spawnSync({
+				cmd: ["bun", LOOP_ENTRY, "migrate", target, "--root", root, "--json"],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			expect(duplicate.exitCode).toBe(0)
+			const duplicateJson = asRecord(JSON.parse(new TextDecoder().decode(duplicate.stdout)), "duplicate migrate")
+			expect(duplicateJson.itemsInserted).toBe(0)
+			expect(asArray(duplicateJson.skipped, "duplicate skipped")[0]).toMatchObject({
+				issue: 9400,
+				reason: "item already exists in migrated chain",
+			})
+
+			const status = Bun.spawnSync({
+				cmd: ["bun", LOOP_ENTRY, "chain", "status", "service", "--root", root, "--json"],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			expect(status.exitCode).toBe(0)
+			const statusJson = asRecord(JSON.parse(new TextDecoder().decode(status.stdout)), "chain status")
+			expect(asRecord(statusJson.chain, "status chain").status).toBe("completed")
+		} finally {
+			await rm(root, { recursive: true, force: true })
+		}
+	})
+
 	test("daemon start/status/stop <target> works without target runtime directory", async () => {
 		const target = await makePolicyOnlyGhIssuePrTarget()
 		const root = resolve(REPO_ROOT, ".cache", `smoke-daemon-db-native-${Date.now()}-${Math.random().toString(16).slice(2)}`)
@@ -546,7 +624,7 @@ describe("smoke: single-phase-example preset", () => {
 			expect(importResult.itemsSeen).toBe(0)
 			expect(importResult.imported).toBe(0)
 			expect(asRecord(importResult.chain, "import chain")).toMatchObject({
-				name: defaultChainNameForTarget(target),
+				name: "repo",
 				repository: "owner/repo",
 			})
 
@@ -560,7 +638,7 @@ describe("smoke: single-phase-example preset", () => {
 			expect(status.exitCode).toBe(0)
 			const statusJson = asRecord(JSON.parse(new TextDecoder().decode(status.stdout)), "status")
 			expect(asRecord(statusJson.daemon, "status daemon").ok).toBe(true)
-			expect(asRecord(statusJson.chain, "status chain").name).toBe(defaultChainNameForTarget(target))
+			expect(asRecord(statusJson.chain, "status chain").name).toBe("repo")
 			expect(asArray(statusJson.items, "status items")).toEqual([])
 
 			const stop = Bun.spawnSync({
