@@ -12,8 +12,8 @@ it does not replace runtime parsing.
 
 | String | Use | Source |
 |--------|-----|--------|
-| `ITERATION SUMMARY:` | Iteration phase completion marker observed by the post-summary watchdog. | `src/loop.ts` `SUMMARY_WATCHDOG_MARKER` |
-| `REVIEW SUMMARY:` | Review phase completion marker observed by the post-summary watchdog. | `src/loop.ts` `REVIEW_SUMMARY_WATCHDOG_MARKER` |
+| `ITERATION SUMMARY:` | Iteration phase completion marker observed by the post-summary watchdog. | `src/agent.ts` `SUMMARY_WATCHDOG_MARKER` |
+| `REVIEW SUMMARY:` | Review phase completion marker observed by the post-summary watchdog. | `src/agent.ts` `REVIEW_SUMMARY_WATCHDOG_MARKER` |
 
 ## Maintenance
 

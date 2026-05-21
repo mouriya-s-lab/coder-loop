@@ -4,13 +4,28 @@
 
 coder-loop 是队列到 phase 的调度引擎。给定一个 preset（item schema、status 集合、phase 列表、带 `{{KEY}}` 变量绑定的 prompt 模板），引擎选取 continuable item、渲染 prompt、spawn runner CLI（codex/claude）、捕获 trace、循环直到队列全部进入 terminal 状态。
 
-引擎（`src/loop.ts`，约 6000 行）不含任何 preset 专属字面量。Status 字符串、phase 名、GitHub 概念、fragment 内容——全部来自 `presets/<name>/preset.toml` 及其 prompt 文件。
+引擎层不含任何 preset 专属字面量。Status 字符串、phase 名、GitHub 概念、fragment 内容——全部来自 `presets/<name>/preset.toml` 及其 prompt 文件。
 
 现有两个 preset：`gh-issue-pr-iteration`（生产用 GitHub issue/PR iteration+review+blocked-responder 工作流，48 个 fragment）和 `single-phase-example`（最小验证 preset）。
 
+## 引擎源码结构
+
+引擎分 6 个模块，入口仍为 `src/loop.ts`：
+
+| 文件 | 职责 |
+|---|---|
+| `src/loop.ts` | 引擎核心：主循环、preset/config 加载、prompt 渲染、状态推进 |
+| `src/agent.ts` | Agent 执行：spawn、backoff、watchdog、worktree、session |
+| `src/status.ts` | 状态快照：`buildCoderLoopStatusSnapshot` 及子函数 |
+| `src/daemon-client.ts` | Daemon 客户端命令：start/stop/restart plan、probe、queue unblock |
+| `src/cli.ts` | CLI 子命令：parseArgs、install/doctor/status/daemon handler |
+| `src/util.ts` | 共享工具：log、error、JSON guards、sleep、file ops |
+
+所有模块的导出通过 `loop.ts` re-export，外部消费者只需 `import { ... } from "./loop"`。
+
 ## 三层架构
 
-**L1 引擎** — `src/loop.ts`：加载 preset → 选 item → 渲染 prompt → spawn agent → 捕获 trace → 推进状态。不知道 phase 语义、status 含义、GitHub。
+**L1 引擎** — `src/loop.ts` + 上表中的引擎模块：加载 preset → 选 item → 渲染 prompt → spawn agent → 捕获 trace → 推进状态。不知道 phase 语义、status 含义、GitHub。
 
 **L2 Preset** — `presets/<name>/`：`preset.toml` 定义 `[item].idField`、`[statuses].continuable`/`terminal`、`[[phases]]` 含 prompt 模板和 `[phases.variables]` 绑定表、`[[fragments]]`、`[agent]` 配置。Entry prompt + fragment 编码所有领域行为。
 
