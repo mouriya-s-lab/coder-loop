@@ -156,6 +156,8 @@ async function makeFixtureOptions(preset: Preset): Promise<LoopOptions> {
 		loopFile: resolve(cwd, "loop-data/chains/test/loop-control"),
 		traceFile: resolve(logDir, "run-fixture/iteration/stdout.jsonl"),
 		logFile: resolve(logDir, "test.log"),
+		chainName: "test",
+		chainNameExplicit: true,
 		repository: "Mouriya-Emma/test",
 		baseBranch: "main",
 		worktree: false,

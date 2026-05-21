@@ -585,6 +585,182 @@ describe("smoke: single-phase-example preset", () => {
 		}
 	})
 
+	test("chain and item CLI manage DB-native work and report completion", async () => {
+		const root = resolve(REPO_ROOT, ".cache", `smoke-chain-item-cli-${Date.now()}-${Math.random().toString(16).slice(2)}`)
+		const target = resolve(root, "target-repo")
+		await mkdir(target, { recursive: true })
+		try {
+			const create = Bun.spawnSync({
+				cmd: ["bun", LOOP_ENTRY, "chain", "create", "release", "--preset", "gh-issue-pr-iteration", "--repo", "owner/repo", "--base-branch", "main", "--umbrella", "owner/repo#42", "--root", root, "--json"],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			expect(new TextDecoder().decode(create.stderr)).toBe("")
+			expect(create.exitCode).toBe(0)
+			const created = asRecord(JSON.parse(new TextDecoder().decode(create.stdout)), "created chain")
+			expect(created).toMatchObject({ name: "release", status: "active", umbrellaRepo: "owner/repo", umbrellaIssue: 42 })
+
+			const listed = Bun.spawnSync({
+				cmd: ["bun", LOOP_ENTRY, "chain", "list", "--root", root, "--json"],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			expect(listed.exitCode).toBe(0)
+			expect(asArray(JSON.parse(new TextDecoder().decode(listed.stdout)), "chains")).toHaveLength(1)
+
+			const add = Bun.spawnSync({
+				cmd: ["bun", LOOP_ENTRY, "item", "add", "release", "--issue", "42", "--repo-cwd", target, "--priority", "high", "--extra", "{\"kind\":\"code\"}", "--root", root, "--json"],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			expect(new TextDecoder().decode(add.stderr)).toBe("")
+			expect(add.exitCode).toBe(0)
+			const item = asRecord(JSON.parse(new TextDecoder().decode(add.stdout)), "created item")
+			expect(item).toMatchObject({ issue: 42, repoCwd: target, status: "queued", priority: "high" })
+			const itemId = Number(item.id)
+
+			const queued = Bun.spawnSync({
+				cmd: ["bun", LOOP_ENTRY, "item", "list", "release", "--status", "queued", "--root", root, "--json"],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			expect(queued.exitCode).toBe(0)
+			expect(asArray(JSON.parse(new TextDecoder().decode(queued.stdout)), "queued items")).toHaveLength(1)
+
+			const update = Bun.spawnSync({
+				cmd: ["bun", LOOP_ENTRY, "item", "update", String(itemId), "--status", "done", "--extra", "{\"reviewed\":true}", "--root", root, "--json"],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			expect(new TextDecoder().decode(update.stderr)).toBe("")
+			expect(update.exitCode).toBe(0)
+			expect(asRecord(JSON.parse(new TextDecoder().decode(update.stdout)), "updated item")).toMatchObject({
+				id: itemId,
+				status: "done",
+				extra: { kind: "code", reviewed: true },
+			})
+
+			const status = Bun.spawnSync({
+				cmd: ["bun", LOOP_ENTRY, "chain", "status", "release", "--root", root, "--json"],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			expect(new TextDecoder().decode(status.stderr)).toBe("")
+			expect(status.exitCode).toBe(0)
+			const report = asRecord(JSON.parse(new TextDecoder().decode(status.stdout)), "chain status")
+			expect(asRecord(report.chain, "status chain")).toMatchObject({ status: "completed", umbrellaRepo: "owner/repo", umbrellaIssue: 42 })
+			expect(asRecord(asRecord(report.items, "items").byStatus, "byStatus").done).toBe(1)
+			expect(typeof asRecord(report.chain, "status chain").completedAt).toBe("string")
+
+			const statusHuman = Bun.spawnSync({
+				cmd: ["bun", LOOP_ENTRY, "chain", "status", "release", "--root", root],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			const statusHumanStdout = new TextDecoder().decode(statusHuman.stdout)
+			expect(statusHuman.exitCode).toBe(0)
+			expect(statusHumanStdout).toContain("Status: completed")
+			expect(statusHumanStdout).toContain("Umbrella: owner/repo#42")
+			expect(statusHumanStdout).toContain("done=1")
+
+			const deleted = Bun.spawnSync({
+				cmd: ["bun", LOOP_ENTRY, "chain", "delete", "release", "--root", root, "--json"],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			expect(deleted.exitCode).toBe(0)
+			expect(asRecord(JSON.parse(new TextDecoder().decode(deleted.stdout)), "delete result")).toMatchObject({ deleted: true, chain: "release" })
+		} finally {
+			await rm(root, { recursive: true, force: true })
+		}
+	})
+
+	test("legacy daemon --target-cwd commands resolve a non-default chain by repo_cwd", async () => {
+		const root = resolve(REPO_ROOT, ".cache", `smoke-daemon-target-cwd-chain-${Date.now()}-${Math.random().toString(16).slice(2)}`)
+		const target = resolve(root, "repo")
+		const socket = resolve(root, "daemon.sock")
+		const pid = resolve(root, "daemon.pid")
+		const db = resolve(root, "state.db")
+		await mkdir(target, { recursive: true })
+		try {
+			const create = Bun.spawnSync({
+				cmd: ["bun", LOOP_ENTRY, "chain", "create", "custom-chain", "--preset", "gh-issue-pr-iteration", "--repo", "owner/repo", "--root", root],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			expect(create.exitCode).toBe(0)
+			const add = Bun.spawnSync({
+				cmd: ["bun", LOOP_ENTRY, "item", "add", "custom-chain", "--issue", "9301", "--repo-cwd", target, "--root", root],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			expect(add.exitCode).toBe(0)
+
+			const daemonFlags = [
+				"--root", root,
+				"--socket", socket,
+				"--pid", pid,
+				"--db", db,
+				"--scheduler-interval-ms", "600000",
+				"--no-spawn-agents",
+			]
+			const start = Bun.spawnSync({
+				cmd: ["bun", LOOP_ENTRY, "daemon", "start", "--target-cwd", target, ...daemonFlags],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			expect(new TextDecoder().decode(start.stderr)).toBe("")
+			expect(start.exitCode).toBe(0)
+			const startJson = asRecord(JSON.parse(new TextDecoder().decode(start.stdout)), "start")
+			expect(asRecord(startJson.import, "import").chainName).toBe("custom-chain")
+			expect(asRecord(startJson.status, "status").chainName).toBe("custom-chain")
+			expect(asRecord(asRecord(startJson.import, "import").chain, "import chain").repository).toBe("owner/repo")
+
+			const status = Bun.spawnSync({
+				cmd: ["bun", LOOP_ENTRY, "daemon", "status", "--target-cwd", target, "--socket", socket, "--json"],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			expect(new TextDecoder().decode(status.stderr)).toBe("")
+			expect(status.exitCode).toBe(0)
+			const statusJson = asRecord(JSON.parse(new TextDecoder().decode(status.stdout)), "daemon status")
+			expect(statusJson.chainName).toBe("custom-chain")
+			expect(asArray(statusJson.items, "status items")[0]).toMatchObject({ issue: 9301, repoCwd: target })
+
+			const stop = Bun.spawnSync({
+				cmd: ["bun", LOOP_ENTRY, "daemon", "stop", "--target-cwd", target, "--socket", socket],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			expect(new TextDecoder().decode(stop.stderr)).toBe("")
+			expect(stop.exitCode).toBe(0)
+			const stopJson = asRecord(JSON.parse(new TextDecoder().decode(stop.stdout)), "stop")
+			expect(stopJson.chainName).toBe("custom-chain")
+			expect(asArray(stopJson.items, "stopped items")[0]).toMatchObject({ issue: 9301, status: "paused" })
+		} finally {
+			Bun.spawnSync({
+				cmd: ["bun", LOOP_ENTRY, "daemon", "down", "--socket", socket],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			await rm(root, { recursive: true, force: true })
+		}
+	})
+
 	test("doctor <target> emits live runtime health section", async () => {
 		const target = await makeMinimalTarget("single-phase-example")
 		const proc = Bun.spawnSync({

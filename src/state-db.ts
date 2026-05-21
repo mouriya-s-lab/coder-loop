@@ -138,6 +138,7 @@ export type StateStore = {
 	listChains: () => Chain[]
 	listActiveChains: () => Chain[]
 	listRepoCwdsForChain: (chainId: number) => string[]
+	deleteChain: (id: number) => boolean
 	listItems: (chainId: number, status?: string | null) => Item[]
 	completeChain: (id: number) => Chain
 	addItem: (chainId: number, item: NewItem) => Item
@@ -216,6 +217,7 @@ export function openStateStore(path: string = DEFAULT_STATE_DB_PATH): StateStore
 		listChains: () => listChains(db),
 		listActiveChains: () => listActiveChains(db),
 		listRepoCwdsForChain: (chainId) => listRepoCwdsForChain(db, chainId),
+		deleteChain: (id) => deleteChain(db, id),
 		listItems: (chainId, status) => listItems(db, chainId, status),
 		completeChain: (id) => completeChain(db, id),
 		addItem: (chainId, item) => addItem(db, chainId, item),
@@ -369,6 +371,13 @@ export function listRepoCwdsForChain(db: Database, chainId: number): string[] {
 		ORDER BY repo_cwd
 	`).all(chainId)
 	return rows.map((row) => expectRow<{ repo_cwd: string }>(row, "listRepoCwdsForChain").repo_cwd)
+}
+
+export function deleteChain(db: Database, id: number): boolean {
+	return db.transaction(() => {
+		const result = db.query("DELETE FROM chains WHERE id = ?").run(id)
+		return result.changes > 0
+	})()
 }
 
 export function listItems(db: Database, chainId: number, status: string | null = null): Item[] {

@@ -9,7 +9,7 @@
  */
 
 import { spawn } from "node:child_process"
-import { appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises"
+import { appendFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { closeSync, createWriteStream, existsSync, openSync, realpathSync, type WriteStream } from "node:fs"
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
 import { command, flag, option, optional, positional, run as runCmd, string as cmdString, subcommands } from "cmd-ts"
@@ -23,8 +23,8 @@ import {
 	type DaemonServerOptions,
 } from "./daemon"
 import { dispatchSubcommand } from "./install-commands"
-import { chainRuntimePaths, defaultChainNameForTarget, loopDataRootPaths, runRuntimePaths, type ChainRuntimePaths } from "./runtime-paths"
-import { openStateStore, type Item } from "./state-db"
+import { chainRuntimePaths, defaultChainNameForTarget, ensureChainRuntimeSkeleton, loopDataRootPaths, runRuntimePaths, type ChainRuntimePaths } from "./runtime-paths"
+import { openStateStore, type Chain, type Item, type ItemPatch, type NewItem, type StateStore } from "./state-db"
 
 const PKG_ROOT = resolve(import.meta.dir, "..")
 const DEFAULT_PRESET_NAME = "gh-issue-pr-iteration"
@@ -106,6 +106,7 @@ type RawArgs = {
 	workflowPath: string | null
 	statePath: string | null
 	repository: string | null
+	chainName: string | null
 	requireBrowserEvidence: boolean | null
 	once: boolean
 	dryRun: boolean
@@ -371,6 +372,8 @@ export type LoopOptions = {
 	loopFile: string
 	traceFile: string
 	logFile: string
+	chainName: string
+	chainNameExplicit: boolean
 	repository: string | null
 	baseBranch: string | null
 	worktree: boolean
@@ -822,6 +825,7 @@ function parseArgs(): RawArgs {
 		workflowPath: null,
 		statePath: null,
 		repository: null,
+		chainName: null,
 		requireBrowserEvidence: null,
 		once: false,
 		dryRun: false,
@@ -859,6 +863,10 @@ function parseArgs(): RawArgs {
 				break
 			case "--repo":
 				raw.repository = readFlagValue(args, index, inlineValue, name)
+				if (inlineValue === null) index++
+				break
+			case "--chain":
+				raw.chainName = readFlagValue(args, index, inlineValue, name)
 				if (inlineValue === null) index++
 				break
 			case "--require-browser-evidence":
@@ -1087,6 +1095,479 @@ const queueCliCommand = subcommands({
 	},
 })
 
+type StoreCliOptions = {
+	json: boolean
+	rootDir: string | null
+	dbPath: string | null
+	socketPath: string | null
+}
+
+type ResolvedStoreCliOptions = {
+	json: boolean
+	rootDir: string
+	dbPath: string
+	socketPath: string
+}
+
+type ChainStatusReport = {
+	chain: Chain
+	items: {
+		total: number
+		byStatus: Record<string, number>
+	}
+	slots: JsonValue[]
+	daemon: { ok: boolean; error: string | null }
+}
+
+async function runChainCommand(args: string[]): Promise<void> {
+	const subcommand = args[0]
+	if (subcommand === "create") {
+		await runChainCreateCommand(args.slice(1))
+		return
+	}
+	if (subcommand === "list") {
+		await runChainListCommand(args.slice(1))
+		return
+	}
+	if (subcommand === "status") {
+		await runChainStatusCommand(args.slice(1))
+		return
+	}
+	if (subcommand === "delete") {
+		await runChainDeleteCommand(args.slice(1))
+		return
+	}
+	fail(`chain: unknown subcommand "${subcommand ?? ""}". Usage: coder-loop chain create|list|status|delete`)
+}
+
+async function runItemCommand(args: string[]): Promise<void> {
+	const subcommand = args[0]
+	if (subcommand === "add") {
+		await runItemAddCommand(args.slice(1))
+		return
+	}
+	if (subcommand === "list") {
+		await runItemListCommand(args.slice(1))
+		return
+	}
+	if (subcommand === "update") {
+		await runItemUpdateCommand(args.slice(1))
+		return
+	}
+	fail(`item: unknown subcommand "${subcommand ?? ""}". Usage: coder-loop item add|list|update`)
+}
+
+async function runChainCreateCommand(args: string[]): Promise<void> {
+	let name: string | null = null
+	let preset: string | null = null
+	let repository: string | null = null
+	let baseBranch: string | null = null
+	let umbrellaRepo: string | null = null
+	let umbrellaIssue: number | null = null
+	const options = defaultStoreCliOptions()
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index]
+		if (arg === undefined) fail(`Missing chain create argument at index ${index}`)
+		const [flagName, inlineValue] = splitFlag(arg)
+		if (readStoreCliFlag(options, args, index, flagName, inlineValue)) {
+			if (inlineValue === null && storeCliFlagNeedsValue(flagName)) index++
+			continue
+		}
+		switch (flagName) {
+			case "--preset":
+				preset = readFlagValue(args, index, inlineValue, flagName)
+				if (inlineValue === null) index++
+				break
+			case "--repo":
+				repository = readFlagValue(args, index, inlineValue, flagName)
+				if (inlineValue === null) index++
+				break
+			case "--base-branch":
+				baseBranch = readFlagValue(args, index, inlineValue, flagName)
+				if (inlineValue === null) index++
+				break
+			case "--umbrella": {
+				const parsed = parseUmbrellaRef(readFlagValue(args, index, inlineValue, flagName))
+				umbrellaRepo = parsed.repo
+				umbrellaIssue = parsed.issue
+				if (inlineValue === null) index++
+				break
+			}
+			default:
+				if (arg.startsWith("--")) fail(`chain create: unknown argument ${arg}`)
+				if (name !== null) fail(`chain create: extra chain name "${arg}"`)
+				name = arg
+		}
+	}
+	if (name === null) fail("chain create: missing name. Usage: coder-loop chain create <name> --preset <preset> [--repo <owner/repo>] [--base-branch <branch>] [--umbrella <owner/repo#N>]")
+	if (preset === null) fail("chain create: missing --preset")
+	const resolved = resolveStoreCliOptions(options)
+	const chainPaths = chainRuntimePaths(resolved.rootDir, name)
+	await ensureChainRuntimeSkeleton(chainPaths)
+	const store = openStateStore(resolved.dbPath)
+	try {
+		const chain = store.upsertChain(name, preset, repository, baseBranch, umbrellaIssue, umbrellaRepo)
+		if (resolved.json) writeJson(chain)
+		else process.stdout.write(`Chain ${chain.name} created: preset=${chain.preset}, status=${chain.status}, db=${resolved.dbPath}\n`)
+	} finally {
+		store.close()
+	}
+}
+
+async function runChainListCommand(args: string[]): Promise<void> {
+	const options = parseStoreCliOnlyArgs("chain list", args)
+	const resolved = resolveStoreCliOptions(options)
+	const store = openStateStore(resolved.dbPath)
+	try {
+		const chains = store.listChains()
+		if (resolved.json) writeJson(chains)
+		else process.stdout.write(chains.length === 0 ? "No chains.\n" : chains.map(formatChainListLine).join("\n") + "\n")
+	} finally {
+		store.close()
+	}
+}
+
+async function runChainStatusCommand(args: string[]): Promise<void> {
+	let name: string | null = null
+	const options = defaultStoreCliOptions()
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index]
+		if (arg === undefined) fail(`Missing chain status argument at index ${index}`)
+		const [flagName, inlineValue] = splitFlag(arg)
+		if (readStoreCliFlag(options, args, index, flagName, inlineValue)) {
+			if (inlineValue === null && storeCliFlagNeedsValue(flagName)) index++
+			continue
+		}
+		if (arg.startsWith("--")) fail(`chain status: unknown argument ${arg}`)
+		if (name !== null) fail(`chain status: extra chain name "${arg}"`)
+		name = arg
+	}
+	if (name === null) fail("chain status: missing name. Usage: coder-loop chain status <name> [--json]")
+	const resolved = resolveStoreCliOptions(options)
+	const store = openStateStore(resolved.dbPath)
+	try {
+		const chain = store.getChain(name)
+		if (chain === null) fail(`chain status: chain not found: ${name}`)
+		const refreshed = chain.status === "active" && store.allItemsTerminal(chain.id)
+			? store.completeChain(chain.id)
+			: chain
+		const report = await buildChainStatusReport(store, refreshed, resolved.socketPath)
+		if (resolved.json) writeJson(report)
+		else process.stdout.write(formatChainStatusReport(report))
+	} finally {
+		store.close()
+	}
+}
+
+async function runChainDeleteCommand(args: string[]): Promise<void> {
+	let name: string | null = null
+	const options = defaultStoreCliOptions()
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index]
+		if (arg === undefined) fail(`Missing chain delete argument at index ${index}`)
+		const [flagName, inlineValue] = splitFlag(arg)
+		if (readStoreCliFlag(options, args, index, flagName, inlineValue)) {
+			if (inlineValue === null && storeCliFlagNeedsValue(flagName)) index++
+			continue
+		}
+		if (arg.startsWith("--")) fail(`chain delete: unknown argument ${arg}`)
+		if (name !== null) fail(`chain delete: extra chain name "${arg}"`)
+		name = arg
+	}
+	if (name === null) fail("chain delete: missing name. Usage: coder-loop chain delete <name>")
+	const resolved = resolveStoreCliOptions(options)
+	const store = openStateStore(resolved.dbPath)
+	let chain: Chain | null = null
+	try {
+		chain = store.getChain(name)
+		if (chain === null) fail(`chain delete: chain not found: ${name}`)
+		store.deleteChain(chain.id)
+	} finally {
+		store.close()
+	}
+	await rm(chainRuntimePaths(resolved.rootDir, name).chainDir, { recursive: true, force: true })
+	if (resolved.json) writeJson({ deleted: true, chain: name })
+	else process.stdout.write(`Chain ${name} deleted.\n`)
+}
+
+async function runItemAddCommand(args: string[]): Promise<void> {
+	let chainName: string | null = null
+	let issue: number | null = null
+	let repoCwd: string | null = null
+	let status: string | undefined
+	let priority: string | undefined
+	let extra: JsonObject | undefined
+	const options = defaultStoreCliOptions()
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index]
+		if (arg === undefined) fail(`Missing item add argument at index ${index}`)
+		const [flagName, inlineValue] = splitFlag(arg)
+		if (readStoreCliFlag(options, args, index, flagName, inlineValue)) {
+			if (inlineValue === null && storeCliFlagNeedsValue(flagName)) index++
+			continue
+		}
+		switch (flagName) {
+			case "--issue":
+				issue = parsePositiveInteger(readFlagValue(args, index, inlineValue, flagName), "--issue")
+				if (inlineValue === null) index++
+				break
+			case "--repo-cwd":
+				repoCwd = resolve(readFlagValue(args, index, inlineValue, flagName))
+				if (inlineValue === null) index++
+				break
+			case "--status":
+				status = readFlagValue(args, index, inlineValue, flagName)
+				if (inlineValue === null) index++
+				break
+			case "--priority":
+				priority = parsePriority(readFlagValue(args, index, inlineValue, flagName))
+				if (inlineValue === null) index++
+				break
+			case "--extra":
+				extra = parseJsonObjectFlag(readFlagValue(args, index, inlineValue, flagName), "--extra")
+				if (inlineValue === null) index++
+				break
+			default:
+				if (arg.startsWith("--")) fail(`item add: unknown argument ${arg}`)
+				if (chainName !== null) fail(`item add: extra chain name "${arg}"`)
+				chainName = arg
+		}
+	}
+	if (chainName === null) fail("item add: missing chain. Usage: coder-loop item add <chain> --issue <N> --repo-cwd <path>")
+	if (issue === null) fail("item add: missing --issue")
+	if (repoCwd === null) fail("item add: missing --repo-cwd")
+	const resolved = resolveStoreCliOptions(options)
+	const store = openStateStore(resolved.dbPath)
+	try {
+		const chain = store.getChain(chainName)
+		if (chain === null) fail(`item add: chain not found: ${chainName}`)
+		const newItem: NewItem = { issue, repoCwd }
+		if (status !== undefined) newItem.status = status
+		if (priority !== undefined) newItem.priority = priority
+		if (extra !== undefined) newItem.extra = extra
+		const item = store.addItem(chain.id, newItem)
+		if (resolved.json) writeJson(item)
+		else process.stdout.write(`Item ${item.id} added: chain=${chainName}, issue=${item.issue}, status=${item.status}, repoCwd=${item.repoCwd}\n`)
+	} finally {
+		store.close()
+	}
+}
+
+async function runItemListCommand(args: string[]): Promise<void> {
+	let chainName: string | null = null
+	let status: string | null = null
+	const options = defaultStoreCliOptions()
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index]
+		if (arg === undefined) fail(`Missing item list argument at index ${index}`)
+		const [flagName, inlineValue] = splitFlag(arg)
+		if (readStoreCliFlag(options, args, index, flagName, inlineValue)) {
+			if (inlineValue === null && storeCliFlagNeedsValue(flagName)) index++
+			continue
+		}
+		if (flagName === "--status") {
+			status = readFlagValue(args, index, inlineValue, flagName)
+			if (inlineValue === null) index++
+			continue
+		}
+		if (arg.startsWith("--")) fail(`item list: unknown argument ${arg}`)
+		if (chainName !== null) fail(`item list: extra chain name "${arg}"`)
+		chainName = arg
+	}
+	if (chainName === null) fail("item list: missing chain. Usage: coder-loop item list <chain> [--status <status>] [--json]")
+	const resolved = resolveStoreCliOptions(options)
+	const store = openStateStore(resolved.dbPath)
+	try {
+		const chain = store.getChain(chainName)
+		if (chain === null) fail(`item list: chain not found: ${chainName}`)
+		const items = store.listItems(chain.id, status)
+		if (resolved.json) writeJson(items)
+		else process.stdout.write(items.length === 0 ? "No items.\n" : items.map(formatItemListLine).join("\n") + "\n")
+	} finally {
+		store.close()
+	}
+}
+
+async function runItemUpdateCommand(args: string[]): Promise<void> {
+	let itemId: number | null = null
+	let status: string | undefined
+	let extra: JsonObject | undefined
+	const options = defaultStoreCliOptions()
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index]
+		if (arg === undefined) fail(`Missing item update argument at index ${index}`)
+		const [flagName, inlineValue] = splitFlag(arg)
+		if (readStoreCliFlag(options, args, index, flagName, inlineValue)) {
+			if (inlineValue === null && storeCliFlagNeedsValue(flagName)) index++
+			continue
+		}
+		switch (flagName) {
+			case "--status":
+				status = readFlagValue(args, index, inlineValue, flagName)
+				if (inlineValue === null) index++
+				break
+			case "--extra":
+				extra = parseJsonObjectFlag(readFlagValue(args, index, inlineValue, flagName), "--extra")
+				if (inlineValue === null) index++
+				break
+			default:
+				if (arg.startsWith("--")) fail(`item update: unknown argument ${arg}`)
+				if (itemId !== null) fail(`item update: extra item id "${arg}"`)
+				itemId = parsePositiveInteger(arg, "item-id")
+		}
+	}
+	if (itemId === null) fail("item update: missing item-id. Usage: coder-loop item update <item-id> --status <status> [--extra '{...}']")
+	if (status === undefined && extra === undefined) fail("item update: specify --status and/or --extra")
+	const resolved = resolveStoreCliOptions(options)
+	const store = openStateStore(resolved.dbPath)
+	try {
+		const existing = store.getItem(itemId)
+		if (existing === null) fail(`item update: item not found: ${itemId}`)
+		const patch: ItemPatch = {}
+		if (status !== undefined) patch.status = status
+		if (extra !== undefined) patch.extra = { ...existing.extra, ...extra }
+		const item = store.updateItem(itemId, patch)
+		if (resolved.json) writeJson(item)
+		else process.stdout.write(`Item ${item.id} updated: issue=${item.issue}, status=${item.status}\n`)
+	} finally {
+		store.close()
+	}
+}
+
+function defaultStoreCliOptions(): StoreCliOptions {
+	return { json: false, rootDir: null, dbPath: null, socketPath: null }
+}
+
+function parseStoreCliOnlyArgs(label: string, args: string[]): StoreCliOptions {
+	const options = defaultStoreCliOptions()
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index]
+		if (arg === undefined) fail(`Missing ${label} argument at index ${index}`)
+		const [flagName, inlineValue] = splitFlag(arg)
+		if (!readStoreCliFlag(options, args, index, flagName, inlineValue)) fail(`${label}: unknown argument ${arg}`)
+		if (inlineValue === null && storeCliFlagNeedsValue(flagName)) index++
+	}
+	return options
+}
+
+function readStoreCliFlag(options: StoreCliOptions, args: string[], index: number, name: string, inlineValue: string | null): boolean {
+	switch (name) {
+		case "--json":
+			rejectInlineValue(inlineValue, name)
+			options.json = true
+			return true
+		case "--root":
+			options.rootDir = readFlagValue(args, index, inlineValue, name)
+			return true
+		case "--db":
+			options.dbPath = readFlagValue(args, index, inlineValue, name)
+			return true
+		case "--socket":
+			options.socketPath = readFlagValue(args, index, inlineValue, name)
+			return true
+		default:
+			return false
+	}
+}
+
+function storeCliFlagNeedsValue(name: string): boolean {
+	return name === "--root" || name === "--db" || name === "--socket"
+}
+
+function resolveStoreCliOptions(options: StoreCliOptions): ResolvedStoreCliOptions {
+	const root = loopDataRootPaths(options.rootDir)
+	return {
+		json: options.json,
+		rootDir: root.rootDir,
+		dbPath: resolve(options.dbPath ?? root.stateDbPath),
+		socketPath: resolve(options.socketPath ?? root.daemonSocketPath),
+	}
+}
+
+function parseUmbrellaRef(value: string): { repo: string; issue: number } {
+	const match = /^([^/\s#]+\/[^/\s#]+)#(\d+)$/.exec(value)
+	if (match === null) fail(`--umbrella must be <owner/repo#N>, got: ${value}`)
+	return { repo: match[1]!, issue: parsePositiveInteger(match[2]!, "--umbrella issue") }
+}
+
+function parsePositiveInteger(value: string, label: string): number {
+	const parsed = Number(value)
+	if (!Number.isInteger(parsed) || parsed <= 0) fail(`${label} must be a positive integer, got: ${value}`)
+	return parsed
+}
+
+function parsePriority(value: string): string {
+	if (value !== "high" && value !== "medium" && value !== "low") fail(`--priority must be high, medium, or low, got: ${value}`)
+	return value
+}
+
+function parseJsonObjectFlag(value: string, label: string): JsonObject {
+	let parsed: unknown
+	try {
+		parsed = JSON.parse(value)
+	} catch (error) {
+		fail(`${label} must be a JSON object: ${errorMessage(error)}`)
+	}
+	if (!isJsonObject(parsed)) fail(`${label} must be a JSON object`)
+	return parsed
+}
+
+async function buildChainStatusReport(store: StateStore, chain: Chain, socketPath: string): Promise<ChainStatusReport> {
+	const items = store.listItems(chain.id)
+	const byStatus: Record<string, number> = {}
+	for (const item of items) byStatus[item.status] = (byStatus[item.status] ?? 0) + 1
+	const daemon = await readDaemonSlotsForChain(socketPath, chain.id)
+	return {
+		chain,
+		items: { total: items.length, byStatus },
+		slots: daemon.slots,
+		daemon: { ok: daemon.ok, error: daemon.error },
+	}
+}
+
+async function readDaemonSlotsForChain(socketPath: string, chainId: number): Promise<{ ok: boolean; error: string | null; slots: JsonValue[] }> {
+	try {
+		const response = await sendDaemonRequest(socketPath, { cmd: "daemon.status" }, 500)
+		if (!response.ok) return { ok: false, error: response.error, slots: [] }
+		if (!isObjectRecord(response.data)) return { ok: false, error: "daemon.status returned non-object data", slots: [] }
+		const slots = Array.isArray(response.data.slots)
+			? response.data.slots.filter((slot) => isObjectRecord(slot) && slot.chainId === chainId)
+			: []
+		return { ok: true, error: null, slots }
+	} catch (error) {
+		return { ok: false, error: errorMessage(error), slots: [] }
+	}
+}
+
+function formatChainListLine(chain: Chain): string {
+	const umbrella = chain.umbrellaRepo === null || chain.umbrellaIssue === null ? "" : ` umbrella=${chain.umbrellaRepo}#${chain.umbrellaIssue}`
+	return `${chain.name}\tstatus=${chain.status}\tpreset=${chain.preset}\trepo=${chain.repository ?? "<none>"}${umbrella}`
+}
+
+function formatChainStatusReport(report: ChainStatusReport): string {
+	const chain = report.chain
+	const stats = Object.keys(report.items.byStatus).sort().map((status) => `${status}=${report.items.byStatus[status]}`).join(", ") || "none"
+	return [
+		`Chain: ${chain.name}`,
+		`Preset: ${chain.preset}`,
+		`Repository: ${chain.repository ?? "<none>"}`,
+		`Status: ${chain.status}`,
+		`Completed at: ${chain.completedAt ?? "<none>"}`,
+		`Umbrella: ${chain.umbrellaRepo === null || chain.umbrellaIssue === null ? "<none>" : `${chain.umbrellaRepo}#${chain.umbrellaIssue}`}`,
+		`Items: total=${report.items.total}${stats === "none" ? "" : `, ${stats}`}`,
+		`Active slots: ${report.slots.length === 0 ? "none" : String(report.slots.length)}`,
+		"",
+	].join("\n")
+}
+
+function formatItemListLine(item: Item): string {
+	return `${item.id}\tissue=${item.issue}\tstatus=${item.status}\tpriority=${item.priority}\trepoCwd=${item.repoCwd}`
+}
+
+function writeJson(value: unknown): void {
+	process.stdout.write(JSON.stringify(value, null, "\t") + "\n")
+}
+
 function splitFlag(arg: string): [string, string | null] {
 	const equalsIndex = arg.indexOf("=")
 	if (equalsIndex === -1) return [arg, null]
@@ -1156,19 +1637,20 @@ async function runStatusCommand(args: string[]): Promise<void> {
 }
 
 async function runDaemonCommand(args: string[]): Promise<void> {
-	if (args[0] === "up") {
-		await runDaemonUpCommand(args.slice(1))
+	const normalizedArgs = normalizeDaemonTargetCwdArgs(args)
+	if (normalizedArgs[0] === "up") {
+		await runDaemonUpCommand(normalizedArgs.slice(1))
 		return
 	}
-	if (args[0] === "down") {
-		await runDaemonDownCommand(args.slice(1))
+	if (normalizedArgs[0] === "down") {
+		await runDaemonDownCommand(normalizedArgs.slice(1))
 		return
 	}
-	if (args[0] === "status" && !daemonStatusArgsIncludeTarget(args.slice(1))) {
-		await runGlobalDaemonStatusCommand(args.slice(1))
+	if (normalizedArgs[0] === "status" && !daemonStatusArgsIncludeTarget(normalizedArgs.slice(1))) {
+		await runGlobalDaemonStatusCommand(normalizedArgs.slice(1))
 		return
 	}
-	const parsed = await runCmd(daemonCliCommand, args)
+	const parsed = await runCmd(daemonCliCommand, normalizedArgs)
 	if (parsed.value.kind !== "daemon") return
 	const daemonArgs = parsed.value.args
 	if (daemonArgs.action === "status") {
@@ -1184,6 +1666,43 @@ async function runDaemonCommand(args: string[]): Promise<void> {
 		return
 	}
 	await runDaemonRestartCommand(daemonArgs)
+}
+
+function normalizeDaemonTargetCwdArgs(args: string[]): string[] {
+	const subcommand = args[0]
+	if (subcommand !== "start" && subcommand !== "stop" && subcommand !== "restart" && subcommand !== "status") return args
+	let target: string | null = null
+	const rest: string[] = []
+	for (let index = 1; index < args.length; index++) {
+		const arg = args[index]
+		if (arg === undefined) fail(`Missing daemon argument at index ${index}`)
+		const [name, inlineValue] = splitFlag(arg)
+		if (name !== "--target-cwd") {
+			rest.push(arg)
+			continue
+		}
+		if (target !== null) fail(`daemon ${subcommand}: duplicate --target-cwd`)
+		target = readFlagValue(args, index, inlineValue, name)
+		if (inlineValue === null) index++
+	}
+	if (target === null) return args
+	if (daemonArgsHavePositionalTarget(rest)) fail(`daemon ${subcommand}: use either positional target or --target-cwd, not both`)
+	return [subcommand, target, ...rest]
+}
+
+function daemonArgsHavePositionalTarget(args: string[]): boolean {
+	const flagsWithValues = new Set(["--config", "--repo", "--socket", "--pid", "--db", "--root", "--scheduler-interval-ms", "--max-iterations", "--base-branch"])
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index]
+		if (arg === undefined) continue
+		const [name, inlineValue] = splitFlag(arg)
+		if (name.startsWith("--")) {
+			if (inlineValue === null && flagsWithValues.has(name)) index++
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 type DaemonClientArgs = {
@@ -1316,6 +1835,14 @@ async function runQueueCommand(args: string[]): Promise<void> {
 
 async function main() {
 	const firstArg = process.argv[2]
+	if (firstArg === "chain") {
+		await runChainCommand(process.argv.slice(3))
+		return
+	}
+	if (firstArg === "item") {
+		await runItemCommand(process.argv.slice(3))
+		return
+	}
 	if (firstArg === "status") {
 		await runStatusCommand(process.argv.slice(3))
 		return
@@ -1818,7 +2345,8 @@ async function runReview(
 }
 
 function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, config: LoopConfig, preset: Preset): LoopOptions {
-	const chainPaths = chainRuntimePaths(null, defaultChainNameForTarget(targetCwd))
+	const chainName = raw.chainName ?? defaultChainNameForTarget(targetCwd)
+	const chainPaths = chainRuntimePaths(null, chainName)
 	const useLegacyRuntimeDefaults = existsSync(configPath)
 	const defaultSharedPath = useLegacyRuntimeDefaults ? DEFAULT_SHARED_FILE : chainPaths.sharedPath
 	const defaultStatePath = useLegacyRuntimeDefaults ? DEFAULT_STATE_FILE : loopDataRootPaths().stateDbPath
@@ -1854,6 +2382,8 @@ function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, confi
 		loopFile: resolve(chainPaths.chainDir, "loop-control"),
 		traceFile: resolve(logDir, "legacy-trace.txt"),
 		logFile: resolve(logDir, `coder-loop-${process.pid}.${timestamp}.log`),
+		chainName,
+		chainNameExplicit: raw.chainName !== null,
 		repository,
 		baseBranch,
 		worktree,
@@ -2006,10 +2536,12 @@ async function readRuntimeState(options: LoopOptions): Promise<RuntimeStateReadR
 
 async function readChainRuntimeState(options: LoopOptions): Promise<Extract<RuntimeStateReadResult, { kind: "ok" }> | null> {
 	const root = loopDataRootPaths()
-	const chainName = defaultChainNameForTarget(options.targetCwd)
-	const chainPaths = chainRuntimePaths(root.rootDir, chainName)
 	const store = openStateStore(root.stateDbPath)
 	try {
+		const chainName = options.chainNameExplicit
+			? options.chainName
+			: resolveChainNameForTarget(store, options.targetCwd, defaultChainNameForTarget(options.targetCwd))
+		const chainPaths = chainRuntimePaths(root.rootDir, chainName)
 		const chain = store.getChain(chainName)
 		if (chain === null) return null
 		const queue = store.listItems(chain.id).map((item) => dbItemToQueueItem(item, chainPaths))
@@ -2028,6 +2560,25 @@ async function readChainRuntimeState(options: LoopOptions): Promise<Extract<Runt
 	} finally {
 		store.close()
 	}
+}
+
+function resolveChainNameForTarget(store: StateStore, targetCwdInput: string, fallbackName: string): string {
+	const targetCwd = resolve(targetCwdInput)
+	const matches: Chain[] = []
+	for (const chain of store.listChains()) {
+		if (chainTargetsRepoCwd(store, chain, targetCwd)) matches.push(chain)
+	}
+	if (matches.length === 1) return matches[0]!.name
+	if (matches.length > 1) {
+		throw new Error(`target-cwd ${targetCwd} belongs to multiple chains: ${matches.map((chain) => chain.name).join(", ")}; specify --chain`)
+	}
+	return fallbackName
+}
+
+function chainTargetsRepoCwd(store: StateStore, chain: Chain, targetCwd: string): boolean {
+	const metadataTarget = chain.metadata.targetCwd
+	if (typeof metadataTarget === "string" && resolve(metadataTarget) === targetCwd) return true
+	return store.listItems(chain.id).some((item) => resolve(item.repoCwd) === targetCwd)
 }
 
 function dbItemToQueueItem(item: Item, chainPaths: ChainRuntimePaths): QueueItem {
@@ -2055,6 +2606,7 @@ function makeStatusRawArgs(args: StatusCommandArgs): RawArgs {
 		workflowPath: null,
 		statePath: null,
 		repository: args.repository,
+		chainName: null,
 		requireBrowserEvidence: null,
 		once: false,
 		dryRun: false,
@@ -2628,9 +3180,10 @@ function buildDaemonStopPlan(args: Extract<DaemonCommandArgs, { action: "stop" }
 
 async function executeDaemonStop(plan: DaemonStopPlan): Promise<DaemonStopResult> {
 	const daemon = await sendDaemonRequest(plan.socketPath, { cmd: "daemon.status" })
-	const chainResponse = await sendDaemonRequest(plan.socketPath, { cmd: "chain.get", chain: plan.chainName })
-	if (!chainResponse.ok) return { ...plan, stopped: true, updated: 0, items: [], daemon }
-	const items = await listDaemonItemsForTarget(plan.socketPath, plan.chainName, plan.target)
+	const chainName = await resolveDaemonChainNameForTarget(plan.socketPath, plan.target, plan.chainName)
+	const chainResponse = await sendDaemonRequest(plan.socketPath, { cmd: "chain.get", chain: chainName })
+	if (!chainResponse.ok) return { ...plan, chainName, stopped: true, updated: 0, items: [], daemon }
+	const items = await listDaemonItemsForTarget(plan.socketPath, chainName, plan.target)
 	let updated = 0
 	const stoppedItems: JsonValue[] = []
 	for (const item of items) {
@@ -2644,7 +3197,7 @@ async function executeDaemonStop(plan: DaemonStopPlan): Promise<DaemonStopResult
 		updated++
 		stoppedItems.push(response.data)
 	}
-	return { ...plan, stopped: true, updated, items: stoppedItems, daemon }
+	return { ...plan, chainName, stopped: true, updated, items: stoppedItems, daemon }
 }
 
 async function runDaemonRestartCommand(args: Extract<DaemonCommandArgs, { action: "restart" }>): Promise<void> {
@@ -2678,14 +3231,14 @@ async function runDaemonTargetStatusCommand(args: Extract<DaemonCommandArgs, { a
 async function buildDaemonTargetStatus(args: Extract<DaemonCommandArgs, { action: "status" }>): Promise<DaemonTargetStatusResult> {
 	const target = resolve(args.targetCwd)
 	const defaults = daemonDefaults(daemonServerOptionsFromIpc(args.ipc))
-	const chainName = defaultChainNameForTarget(target)
+	const fallbackChainName = defaultChainNameForTarget(target)
 	const daemonProbe = await probeDaemon(defaults.socketPath)
 	if (!daemonProbe.reachable) {
 		return {
 			action: "status",
 			target,
 			socketPath: defaults.socketPath,
-			chainName,
+			chainName: fallbackChainName,
 			daemon: { ok: false, error: daemonProbe.error },
 			chain: null,
 			chainError: daemonProbe.error,
@@ -2694,6 +3247,22 @@ async function buildDaemonTargetStatus(args: Extract<DaemonCommandArgs, { action
 		}
 	}
 	const daemon = daemonProbe.response
+	let chainName = fallbackChainName
+	try {
+		chainName = await resolveDaemonChainNameForTarget(defaults.socketPath, target, fallbackChainName)
+	} catch (error) {
+		return {
+			action: "status",
+			target,
+			socketPath: defaults.socketPath,
+			chainName: fallbackChainName,
+			daemon,
+			chain: null,
+			chainError: errorMessage(error),
+			items: [],
+			slots: [],
+		}
+	}
 	const chainResponse = await sendDaemonRequest(defaults.socketPath, { cmd: "chain.get", chain: chainName })
 	if (!chainResponse.ok) {
 		return {
@@ -2779,14 +3348,21 @@ async function waitForDaemonReady(socketPath: string): Promise<void> {
 async function importTargetStateViaDaemon(args: Extract<DaemonCommandArgs, { action: "start" }>, socketPath: string): Promise<DaemonTargetImportResult> {
 	const options = await loadLoopOptionsForTarget(args.targetCwd, args.configPath, args.repository)
 	const targetCwd = options.targetCwd
-	const chainName = defaultChainNameForTarget(targetCwd)
+	const chainName = await resolveDaemonChainNameForTarget(socketPath, targetCwd, defaultChainNameForTarget(targetCwd))
+	const existingChain = await readDaemonChainIfExists(socketPath, chainName)
 	const chainRequest: Extract<DaemonRequest, { cmd: "chain.create" }> = {
 		cmd: "chain.create",
 		name: chainName,
 		preset: options.preset.name,
 	}
-	if (options.repository !== null) chainRequest.repo = options.repository
-	if (options.baseBranch !== null) chainRequest.baseBranch = options.baseBranch
+	const repository = options.repository ?? optionalStringFromJsonObject(existingChain, "repository")
+	const baseBranch = options.baseBranch ?? optionalStringFromJsonObject(existingChain, "baseBranch")
+	const umbrellaIssue = optionalNumberFromJsonObject(existingChain, "umbrellaIssue")
+	const umbrellaRepo = optionalStringFromJsonObject(existingChain, "umbrellaRepo")
+	if (repository !== null) chainRequest.repo = repository
+	if (baseBranch !== null) chainRequest.baseBranch = baseBranch
+	if (umbrellaIssue !== null) chainRequest.umbrellaIssue = umbrellaIssue
+	if (umbrellaRepo !== null) chainRequest.umbrellaRepo = umbrellaRepo
 	const trace: DaemonTargetImportTrace[] = []
 	const chainResponse = await sendDaemonRequest(socketPath, chainRequest)
 	trace.push(daemonImportTrace("chain.create", undefined, chainResponse))
@@ -2825,6 +3401,24 @@ async function importTargetStateViaDaemon(args: Extract<DaemonCommandArgs, { act
 		skipped,
 		trace,
 	}
+}
+
+async function readDaemonChainIfExists(socketPath: string, chainName: string): Promise<JsonObject | null> {
+	const response = await sendDaemonRequest(socketPath, { cmd: "chain.get", chain: chainName })
+	if (!response.ok) return null
+	return isJsonObject(response.data) ? response.data : null
+}
+
+function optionalStringFromJsonObject(value: JsonObject | null, key: string): string | null {
+	if (value === null) return null
+	const raw = value[key]
+	return typeof raw === "string" ? raw : null
+}
+
+function optionalNumberFromJsonObject(value: JsonObject | null, key: string): number | null {
+	if (value === null) return null
+	const raw = value[key]
+	return typeof raw === "number" && Number.isInteger(raw) ? raw : null
 }
 
 function legacyStatePathForDaemonImport(options: LoopOptions): string {
@@ -2972,6 +3566,30 @@ function daemonSlotMatchesTarget(slot: JsonValue, chain: JsonObject, targetCwd: 
 	return isObjectRecord(slot)
 		&& slot.chainId === chain.id
 		&& slot.repoCwd === targetCwd
+}
+
+async function resolveDaemonChainNameForTarget(socketPath: string, targetCwdInput: string, fallbackName: string): Promise<string> {
+	const targetCwd = resolve(targetCwdInput)
+	const listResponse = await sendDaemonRequest(socketPath, { cmd: "chain.list" })
+	if (!listResponse.ok) throw new Error(`chain.list: ${listResponse.error}`)
+	if (!Array.isArray(listResponse.data)) throw new Error("chain.list: expected array")
+	const matches: string[] = []
+	for (const entry of listResponse.data) {
+		if (!isObjectRecord(entry) || typeof entry.name !== "string" || typeof entry.id !== "number") continue
+		const metadata = isObjectRecord(entry.metadata) ? entry.metadata : {}
+		if (typeof metadata.targetCwd === "string" && resolve(metadata.targetCwd) === targetCwd) {
+			matches.push(entry.name)
+			continue
+		}
+		const itemResponse = await sendDaemonRequest(socketPath, { cmd: "item.list", chain: entry.name })
+		if (!itemResponse.ok || !Array.isArray(itemResponse.data)) continue
+		if (itemResponse.data.some((item) => isObjectRecord(item) && typeof item.repoCwd === "string" && resolve(item.repoCwd) === targetCwd)) {
+			matches.push(entry.name)
+		}
+	}
+	if (matches.length === 1) return matches[0]!
+	if (matches.length > 1) throw new Error(`target-cwd ${targetCwd} belongs to multiple chains: ${matches.join(", ")}`)
+	return fallbackName
 }
 
 function requireJsonObject(value: JsonValue, label: string): JsonObject {
@@ -3904,7 +4522,7 @@ export function buildRuntimeBindings(input: {
 	issueKind: IssueKind
 }): RuntimeBindings {
 	const root = loopDataRootPaths()
-	const chainPaths = chainRuntimePaths(root.rootDir, defaultChainNameForTarget(input.options.targetCwd))
+	const chainPaths = chainRuntimePaths(root.rootDir, input.options.chainName)
 	const runPaths = runRuntimePaths(chainPaths.runsDir, input.runId)
 	const iterationPhase = input.options.preset.phases[0]?.name ?? "iteration"
 	return {
