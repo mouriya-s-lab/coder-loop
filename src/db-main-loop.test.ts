@@ -126,8 +126,8 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
 		queue: [{
 			id: "alpha",
 			status: options.initialStatus ?? "pending",
-			issueFile: ".coder-loop/runtime/issues/alpha.md",
-			evidenceDir: ".coder-loop/runtime/evidence/alpha",
+			issueFile: "issues/alpha.md",
+			evidenceDir: "evidence/alpha",
 		}],
 		recentRuns: [],
 		current: null,
@@ -213,8 +213,8 @@ function seedDb(loopDataRoot: string, target: string, options: FixtureOptions): 
 			issueNumber: 1,
 			repoCwd: target,
 			status: options.initialStatus ?? "pending",
-			issueFile: ".coder-loop/runtime/issues/alpha.md",
-			evidenceDir: ".coder-loop/runtime/evidence/alpha",
+			issueFile: "issues/alpha.md",
+			evidenceDir: "evidence/alpha",
 			extra: { id: "alpha", ...(options.extra ?? {}) },
 		})
 	} finally {

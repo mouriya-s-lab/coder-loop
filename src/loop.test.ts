@@ -14,6 +14,7 @@ import {
 	BACKOFF_BUDGET_SECONDS,
 	buildCoderLoopStatusSnapshot,
 	buildConfigBindings,
+	buildCentralRuntimeBindingPaths,
 	buildDaemonStartPlan,
 	buildRuntimeBindings,
 	buildRunnerInvocation,
@@ -60,6 +61,7 @@ import {
 	RESUME_CONTINUE_PROMPT,
 	REVIEW_SUMMARY_WATCHDOG_MARKER,
 	reviewPhaseForPreset,
+	runnerAdditionalDirs,
 	runAgentWithBackoff,
 	selectIssue,
 	spawnOneAttempt,
@@ -88,7 +90,7 @@ import {
 	removeWorktreeForItem,
 	cleanupStaleWorktrees,
 } from "./loop"
-import { openSqliteStateStore } from "./sqlite-state"
+import { type ChainRecord, openSqliteStateStore } from "./sqlite-state"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const BUNDLED_PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
@@ -106,8 +108,8 @@ function makeItem(overrides: Partial<QueueItem> & { issue: number; status: strin
 		branch: overrides.branch ?? null,
 		pr: overrides.pr ?? null,
 		lastRunId: overrides.lastRunId ?? null,
-		issueFile: overrides.issueFile ?? `.coder-loop/runtime/issues/${overrides.issue}.md`,
-		evidenceDir: overrides.evidenceDir ?? `.coder-loop/runtime/evidence/${overrides.issue}`,
+		issueFile: overrides.issueFile === undefined ? `.coder-loop/runtime/issues/${overrides.issue}.md` : overrides.issueFile,
+		evidenceDir: overrides.evidenceDir === undefined ? `.coder-loop/runtime/evidence/${overrides.issue}` : overrides.evidenceDir,
 		agentCwd: overrides.agentCwd ?? null,
 		runner: overrides.runner ?? null,
 		extra: { issue: overrides.issue, ...(overrides.extra ?? {}) },
@@ -122,6 +124,22 @@ function makeState(overrides: Partial<LoopState> & { queue: QueueItem[] }): Loop
 		recentRuns: overrides.recentRuns ?? [],
 		queue: overrides.queue,
 		current: overrides.current ?? null,
+	}
+}
+
+function makeChainRecord(overrides: Partial<ChainRecord> = {}): ChainRecord {
+	return {
+		id: overrides.id ?? 1,
+		name: overrides.name ?? "test-chain",
+		preset: overrides.preset ?? "gh-issue-pr-iteration",
+		repository: overrides.repository ?? "Mouriya-Emma/test",
+		baseBranch: overrides.baseBranch ?? "main",
+		umbrellaIssue: overrides.umbrellaIssue ?? null,
+		umbrellaRepo: overrides.umbrellaRepo ?? null,
+		status: overrides.status ?? "active",
+		metadata: overrides.metadata ?? {},
+		createdAt: overrides.createdAt ?? 1,
+		updatedAt: overrides.updatedAt ?? 1,
 	}
 }
 
@@ -606,6 +624,33 @@ describe("selectIssue", () => {
 		const selected = selectIssue(state, options)
 		expect(selected).not.toBeNull()
 		expect(selected!.agentCwd).toBe("/abs/other-repo")
+	})
+
+	test("resolves selected issue handoff and evidence under the central chain paths", async () => {
+		const preset = await bundledPreset()
+		const baseOptions = await makeFixtureOptions(preset)
+		const options = { ...baseOptions, loopDataRoot: resolve(baseOptions.targetCwd, "loop-data") }
+		const chain = makeChainRecord({ name: "central-chain" })
+		const state = makeState({
+			queue: [makeItem({ issue: 183, status: "queued", issueFile: null, evidenceDir: null })],
+		})
+
+		const selected = selectIssue(state, options, chain)
+
+		expect(selected?.issueFile).toBe(resolve(options.loopDataRoot, "chains/central-chain/issues/183.md"))
+		expect(selected?.evidenceDir).toBe(resolve(options.loopDataRoot, "chains/central-chain/evidence/183"))
+	})
+
+	test("binding unavailable explicit fail when a DB item issueFile is not relative to the chain issues directory", async () => {
+		const preset = await bundledPreset()
+		const baseOptions = await makeFixtureOptions(preset)
+		const options = { ...baseOptions, loopDataRoot: resolve(baseOptions.targetCwd, "loop-data") }
+		const chain = makeChainRecord({ name: "central-chain" })
+		const state = makeState({
+			queue: [makeItem({ issue: 183, status: "queued", issueFile: ".coder-loop/runtime/issues/183.md" })],
+		})
+
+		expect(() => selectIssue(state, options, chain)).toThrow(/Selected issue file must resolve inside/)
 	})
 
 })
@@ -1457,6 +1502,122 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 		expect(runtime.issueKind).toBe("")
 	})
 
+	test("buildRuntimeBindings central paths resolve shared/issues/evidence/logs/state/trace/loop under loop-data", async () => {
+		const preset = await bundledPreset()
+		const baseOptions = await makeFixtureOptions(preset)
+		const options = { ...baseOptions, loopDataRoot: resolve(baseOptions.targetCwd, "loop-data") }
+		const issueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null }
+		const paths = buildCentralRuntimeBindingPaths({
+			options,
+			chain: makeChainRecord({ name: "central-chain" }),
+			runId: "run-central",
+			currentIssueFile: resolve(options.loopDataRoot, "chains/central-chain/issues/183.md"),
+			evidenceDir: resolve(options.loopDataRoot, "chains/central-chain/evidence/183"),
+		})
+		const runtime = buildRuntimeBindings({
+			options,
+			runId: "run-central",
+			currentIssueFile: paths.currentIssueFile,
+			evidenceDir: paths.evidenceDir,
+			agentCwd: options.targetCwd,
+			issueRun,
+			issueKind: "code",
+			paths,
+		})
+
+		expect(runtime.sharedContextPath).toBe(resolve(options.loopDataRoot, "chains/central-chain/shared.md"))
+		expect(runtime.statePath).toBe(resolve(options.loopDataRoot, "db.sqlite"))
+		expect(runtime.currentIssueFile).toBe(resolve(options.loopDataRoot, "chains/central-chain/issues/183.md"))
+		expect(runtime.issueDir).toBe(resolve(options.loopDataRoot, "chains/central-chain/issues"))
+		expect(runtime.evidenceDir).toBe(resolve(options.loopDataRoot, "chains/central-chain/evidence/183"))
+		expect(runtime.evidenceRootDir).toBe(resolve(options.loopDataRoot, "chains/central-chain/evidence"))
+		expect(runtime.logDir).toBe(resolve(options.loopDataRoot, "chains/central-chain/runs"))
+		expect(runtime.traceFile).toBe(resolve(options.loopDataRoot, "chains/central-chain/.dev-trace.txt"))
+		expect(runtime.loopFile).toBe(resolve(options.loopDataRoot, "chains/central-chain/.dev-loop"))
+	})
+
+	test("iter prompt central paths and review prompt central paths", async () => {
+		const preset = await bundledPreset()
+		const baseOptions = await makeFixtureOptions(preset)
+		const options = { ...baseOptions, loopDataRoot: resolve(baseOptions.targetCwd, "loop-data") }
+		const issueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null }
+		const paths = buildCentralRuntimeBindingPaths({
+			options,
+			chain: makeChainRecord({ name: "central-chain" }),
+			runId: "run-central",
+			currentIssueFile: resolve(options.loopDataRoot, "chains/central-chain/issues/183.md"),
+			evidenceDir: resolve(options.loopDataRoot, "chains/central-chain/evidence/183"),
+		})
+		const ctx: ResolveContext = {
+			item: makeItem({ issue: 183, status: "queued" }),
+			config: buildConfigBindings(options),
+			runtime: buildRuntimeBindings({
+				options,
+				runId: "run-central",
+				currentIssueFile: paths.currentIssueFile,
+				evidenceDir: paths.evidenceDir,
+				agentCwd: options.targetCwd,
+				issueRun,
+				issueKind: "code",
+				paths,
+			}),
+		}
+		const iterPhase = preset.phases.find((phase) => phase.name === "iteration")
+		const reviewPhase = preset.phases.find((phase) => phase.name === "review")
+		expect(iterPhase).toBeDefined()
+		expect(reviewPhase).toBeDefined()
+
+		const iterPrompt = renderPrompt(await readFile(iterPhase!.prompt, "utf-8"), iterPhase!, ctx)
+		const reviewPrompt = renderPrompt(await readFile(reviewPhase!.prompt, "utf-8"), reviewPhase!, ctx)
+
+		for (const prompt of [iterPrompt, reviewPrompt]) {
+			expect(prompt).toContain(resolve(options.loopDataRoot, "chains/central-chain/shared.md"))
+			expect(prompt).toContain(resolve(options.loopDataRoot, "chains/central-chain/issues/183.md"))
+			expect(prompt).toContain(resolve(options.loopDataRoot, "chains/central-chain/evidence/183"))
+			expect(prompt).not.toContain(resolve(options.targetCwd, ".coder-loop/runtime/shared.md"))
+			expect(prompt).not.toContain(resolve(options.targetCwd, ".coder-loop/runtime/issues"))
+		}
+	})
+
+	test("agent in worktree reads central shared", async () => {
+		const preset = await bundledPreset()
+		const baseOptions = await makeFixtureOptions(preset)
+		const options = { ...baseOptions, loopDataRoot: resolve(baseOptions.targetCwd, "loop-data") }
+		const issueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null }
+		const paths = buildCentralRuntimeBindingPaths({
+			options,
+			chain: makeChainRecord({ name: "central-chain" }),
+			runId: "run-central",
+			currentIssueFile: null,
+			evidenceDir: null,
+		})
+
+		const fromWorktreeA = buildRuntimeBindings({
+			options,
+			runId: "run-central",
+			currentIssueFile: null,
+			evidenceDir: null,
+			agentCwd: resolve(options.targetCwd, "worktree-a"),
+			issueRun,
+			issueKind: "code",
+			paths,
+		})
+		const fromWorktreeB = buildRuntimeBindings({
+			options,
+			runId: "run-central",
+			currentIssueFile: null,
+			evidenceDir: null,
+			agentCwd: resolve(options.targetCwd, "worktree-b"),
+			issueRun,
+			issueKind: "code",
+			paths,
+		})
+
+		expect(fromWorktreeA.sharedContextPath).toBe(fromWorktreeB.sharedContextPath)
+		expect(fromWorktreeA.sharedContextPath).toBe(resolve(options.loopDataRoot, "chains/central-chain/shared.md"))
+		expect(fromWorktreeA.agentCwd).not.toBe(fromWorktreeB.agentCwd)
+	})
+
 	test("buildRuntimeBindings forwards a per-item agentCwd distinct from targetCwd", async () => {
 		const preset = await bundledPreset()
 		const options = await makeFixtureOptions(preset)
@@ -1986,7 +2147,7 @@ describe("buildRunnerInvocation", () => {
 			{ kind: "claude", source: "config", binary: "/tmp/claude", extraArgs: ["--max-turns", "5"], model: null },
 			"hello",
 			{ kind: "fresh" },
-			{ agentCwd: "/tmp/target", targetCwd: "/tmp/target", presetDir: "/tmp/preset" },
+			{ agentCwd: "/tmp/target", targetCwd: "/tmp/target", presetDir: "/tmp/preset", loopDataRoot: "/tmp/loop-data" },
 		)
 
 		expect(invocation.binary).toBe("/tmp/claude")
@@ -1995,21 +2156,25 @@ describe("buildRunnerInvocation", () => {
 		expect(invocation.args).toContain("--max-turns")
 		expect(invocation.args).toContain("--add-dir")
 		expect(invocation.args).toContain("/tmp/preset")
+		expect(invocation.args).toContain("/tmp/loop-data")
+		expect(invocation.args).toContain("/tmp/target")
 		expect(invocation.args[invocation.args.length - 1]).toBe("hello")
 	})
 
-	test("Claude runner with cross-repo agentCwd adds both presetDir and targetCwd to --add-dir", () => {
+	test("Claude --add-dir central", () => {
 		const invocation = buildRunnerInvocation(
 			{ kind: "claude", source: "config", binary: "/tmp/claude", extraArgs: [], model: null },
 			"hello",
 			{ kind: "fresh" },
-			{ agentCwd: "/tmp/agent-repo", targetCwd: "/tmp/target", presetDir: "/tmp/preset" },
+			{ agentCwd: "/tmp/agent-repo", targetCwd: "/tmp/target", presetDir: "/tmp/preset", loopDataRoot: "/tmp/loop-data" },
 		)
 
 		const idx = invocation.args.indexOf("--add-dir")
 		expect(idx).toBeGreaterThanOrEqual(0)
 		expect(invocation.args[idx + 1]).toBe("/tmp/preset")
-		expect(invocation.args[idx + 2]).toBe("/tmp/target")
+		expect(invocation.args[idx + 2]).toBe("/tmp/loop-data")
+		expect(invocation.args[idx + 3]).toBe("/tmp/agent-repo")
+		expect(invocation.args).not.toContain("/tmp/target")
 	})
 
 	test("runner model reaches Claude invocation and overrides extraArgs model", () => {
@@ -2017,7 +2182,7 @@ describe("buildRunnerInvocation", () => {
 			{ kind: "claude", source: "config", binary: "/tmp/claude", extraArgs: ["--model", "sonnet"], model: CLAUDE_REVIEW_MODEL },
 			"hello",
 			{ kind: "fresh" },
-			{ agentCwd: "/tmp/target", targetCwd: "/tmp/target", presetDir: "/tmp/preset" },
+			{ agentCwd: "/tmp/target", targetCwd: "/tmp/target", presetDir: "/tmp/preset", loopDataRoot: "/tmp/loop-data" },
 		)
 
 		const idx = invocation.args.indexOf("--model")
@@ -2031,7 +2196,7 @@ describe("buildRunnerInvocation", () => {
 			{ kind: "codex", source: "queue", binary: "codex", extraArgs: [], model: null },
 			"hello",
 			{ kind: "fresh" },
-			{ agentCwd: "/tmp/target", targetCwd: "/tmp/target", presetDir: "/tmp/preset" },
+			{ agentCwd: "/tmp/target", targetCwd: "/tmp/target", presetDir: "/tmp/preset", loopDataRoot: "/tmp/loop-data" },
 		)
 
 		expect(invocation).toEqual({
@@ -2046,6 +2211,10 @@ describe("buildRunnerInvocation", () => {
 				"/tmp/target",
 				"--add-dir",
 				"/tmp/preset",
+				"--add-dir",
+				"/tmp/loop-data",
+				"--add-dir",
+				"/tmp/target",
 				"--sandbox",
 				"danger-full-access",
 				"hello",
@@ -2053,18 +2222,29 @@ describe("buildRunnerInvocation", () => {
 		})
 	})
 
-	test("Codex runner with cross-repo agentCwd adds targetCwd alongside preset dir", () => {
+	test("runnerAdditionalDirs deduplicates semantically identical paths", () => {
+		expect(runnerAdditionalDirs({
+			agentCwd: "/tmp/target/.",
+			targetCwd: "/tmp/target",
+			presetDir: "/tmp/preset",
+			loopDataRoot: "/tmp/target",
+		})).toEqual(["/tmp/preset", "/tmp/target"])
+	})
+
+	test("Codex sandbox central", () => {
 		const invocation = buildRunnerInvocation(
 			{ kind: "codex", source: "queue", binary: "codex", extraArgs: [], model: null },
 			"hello",
 			{ kind: "fresh" },
-			{ agentCwd: "/tmp/agent-repo", targetCwd: "/tmp/target", presetDir: "/tmp/preset" },
+			{ agentCwd: "/tmp/agent-repo", targetCwd: "/tmp/target", presetDir: "/tmp/preset", loopDataRoot: "/tmp/loop-data" },
 		)
 
 		expect(invocation.args).toContain("--cd")
 		expect(invocation.args).toContain("/tmp/agent-repo")
 		expect(invocation.args).toContain("/tmp/preset")
-		expect(invocation.args).toContain("/tmp/target")
+		expect(invocation.args).toContain("/tmp/loop-data")
+		expect(invocation.args).not.toContain("/tmp/target/.coder-loop/runtime")
+		expect(invocation.args).not.toContain("/tmp/target")
 	})
 })
 

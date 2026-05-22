@@ -10,8 +10,8 @@
 			"branch": null,
 			"pr": null,
 			"lastRunId": null,
-			"issueFile": ".coder-loop/runtime/issues/9001.md",
-			"evidenceDir": ".coder-loop/runtime/evidence/issue-9001",
+			"issueFile": "issues/9001.md",
+			"evidenceDir": "evidence/issue-9001",
 			"agentCwd": null,
 			"runner": null,
 			"kind": "code-spike"
