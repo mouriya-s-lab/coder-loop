@@ -14,10 +14,11 @@ Always, for every iteration regardless of `ISSUE_KIND`. The pattern occurs in bo
 
 ## Inputs
 
-- PR body (latest), specifically Analysis / Notes / Caveats / Known issues sections.
+- PR body (latest), specifically Analysis / Notes / Caveats / Known issues / Intent sections.
 - PR thread review-iteration comments for the current run (latest evidence packet posted as comment).
-- Iteration handoff at `{{ISSUE_DIR}}/{{ISSUE}}.md` (the Run handoff / Iteration section the iteration agent wrote).
+- Iteration handoff at `{{ISSUE_DIR}}/{{ISSUE}}.md` (the Run handoff / Iteration section the iteration agent wrote, including the `Intent (run …)` and `Result (run …)` blocks the iteration agent appended).
 - Live issue body (`gh issue view {{ISSUE}} -R {{REPO}} --json body --jq .body`) — re-fetch to check whether the substitution was pre-authorized.
+- **Commit diff for the current PR** (`gh pr diff {{ISSUE_PR}} -R {{REPO}}` — or for an iteration that produced no PR / no new commits, the iteration handoff itself plus any new PR-thread comment). This is the only place this gate reads code; it is read solely to compare the iteration agent's declared intent against the actual change footprint. **Do not use the diff to second-guess code quality, architecture, naming, or style — those belong to `review/code-gate` and to the iteration agent's own judgment.** The single question this input answers is: does the diff resemble what the intent statement said the iteration would do?
 
 ## Procedure
 
@@ -52,6 +53,14 @@ Always, for every iteration regardless of `ISSUE_KIND`. The pattern occurs in bo
    - "[required service] was not running / not available / not installed"
    - "could not reach [target]; used [substitute] instead"
    - "skipped [precondition] step because [reason]"
+
+   **F. Intent-action mismatch.** Reading the iteration agent's `Intent (run …)` block (from handoff and / or PR body / comment) alongside the actual change footprint (commit diff or, for research-only iterations, the materials the iteration produced), check whether action drifted from intent without the iteration agent disclosing the delta:
+   - intent named files / sites / scope X but the diff touches a meaningfully different set Y — and the iteration agent's `Result (run …)` block does not mention or explain the difference;
+   - intent said "this iteration is research-only" but the diff contains substantive code change — or said "I will implement X" but the iteration produced only research notes — and the change-of-plan is not disclosed in the result block;
+   - intent named an out-of-scope set with explicit owners ("sites A, B, C belong to issue #N, not this PR") but the diff in fact touches one of those sites without explanation;
+   - intent is absent entirely on a non-trivial iteration — i.e. handoff has no `Intent (run …)` block and the PR body / PR comment has no equivalent opening section. Missing intent on a substantive change is itself a trigger, because review cannot do intent-action comparison at all.
+
+   This category is a substance check using LLM judgment, not a string match. The reviewer reads the intent statement and the diff and asks: "would a reasonable engineer reading both say these correspond?" If the answer is no and the iteration agent did not disclose the delta, the trigger fires. Trivial drift (same scope, slightly different file split) that the iteration agent acknowledged honestly is not a trigger.
 
 3. For each trigger hit:
    - Quote the exact phrase + which input source it came from.

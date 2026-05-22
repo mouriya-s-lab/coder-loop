@@ -4,6 +4,27 @@
 
 Commit verified changes and create or update the implementation PR.
 
+## Self-check intent vs action before writing the PR body or PR comment
+
+You wrote an intent statement before starting (per `iter/implement` — Intent statement section). Now compare it to what you actually did this iteration.
+
+Specifically reflect on:
+
+- did the code you wrote actually do what the intent said you would do, or did the implementation drift?
+- did the footprint you said you would touch match the files you actually touched, or did extra files / fewer files get changed?
+- if drift happened, what caused it — finding the problem was different from what you thought, the original plan turned out infeasible, you discovered a better approach, you ran out of time?
+- if you did research-only this iteration (no code), did you produce the research outputs your intent said you would, and what is the actual followup for the next iteration?
+- are there things you noticed during implementation that the intent statement did not anticipate, and which review should also know about?
+
+Reflect honestly. The point is not to make intent and action match by retroactively editing intent — the intent statement in handoff and the prior PR body / comment is immutable historical record. The point is to write the **delta** somewhere review will see, so review has full picture.
+
+Where to write the intent-vs-action delta:
+
+- the same place you wrote the iteration's intent statement: append to handoff under `Result (run {{RUN_ID}})`, and either fold it into the PR body (only for the first PR creation in this iteration) or post it as part of the PR thread comment (every retry / iteration after the first).
+- when this iteration was research-only, the delta belongs in the same surface as the intent statement (handoff + PR comment / issue comment) — describe what the research surfaced and what it changes about the next iteration's plan.
+
+If the delta is "no drift, did what I said" then say that plainly. A short honest "intent matched action" line is fine and useful — it tells review the surface match is clean. Do not pad it with prose to look thorough.
+
 ## Commit
 
 If code changed and verification/evidence is credible:

@@ -240,6 +240,7 @@ PR 存在后：
 | `review/title-intent-gate` | issue title + PR title | strip conventional prefix 后主语 noun phrase 对齐 | `title_drift` |
 | `review/evidence-gate` | PR body 四层证据 | functional / environment / integration / assumption 各一层（无相关 Dimension 可省略并 explicit 注明）；`kind:blocked` 额外要求 blocked path e2e/integration 复测 | `retry` / `blocked` |
 | `review/commitment-gate` | issue `## 验收标准` + `## 继承验证义务` table | 列 `# / Dimension / Check / Command / Env / Expect`、每行 actual vs Expect | `commitment_failed` |
+| `review/caveat-honesty-gate` | PR body + PR thread comments + iter handoff `Intent (run …)` / `Result (run …)` blocks + 本 PR `gh pr diff` | LLM 判断：scope-reduction admission phrases (categories A-E) + intent statement 与实际 diff / 行为之间是否一致 (category F)。`gh pr diff` 仅供 intent ↔ action 比对用，不用来挑代码细节（代码细节是 `review/code-gate` 的事）。 | `caveat_honesty_failed` |
 | `review/spike-followup-gate` | iter spike comment + issue `## 结果分支` | comment 选了一条分支 + 提议数 ≥ 该分支动词词表要求 | `spike_followup_failed` |
 | `review/code-gate` | PR diff + CI checks | merge-ability、CI 绿、no diff red flag | `retry` |
 | `review/issue-closure-gate` | 上面 gate 综合结果 | 决定 terminal action | 选 action fragment |
@@ -256,6 +257,7 @@ PR 存在后：
 | `source-writing-spike-gate` | `source_spike_skipped` | `source_spike_skipped` | `source_spike_skipped` | 跑 | `source_spike_skipped` |
 | `title-intent-gate` | 跑 | 跑 | `title_gate_skipped`（无 PR） | 跳过（source spike 无 PR） | 跑（legacy 也可能漂） |
 | `evidence-gate` | 跑 | 跑，且额外要求 blocked path e2e/integration 复测 | `evidence_passed`（无 PR 即无四层证据要求） | source spike evidence 由 `source-writing-spike-gate` 审 | 跑 |
+| `caveat-honesty-gate` | 跑 | 跑 | 跑 | 跑 | 跑 |
 | `commitment-gate` | 跑（仅当 `## 验收标准` 表存在） | 跑（仅当 `## 验收标准` 表存在） | `commitment_skipped` | source spike commitments 由 `source-writing-spike-gate` 审 | `commitment_skipped` |
 | `spike-followup-gate` | `spike_gate_skipped` | `spike_gate_skipped` | 跑 | source spike follow-up 由 `source-writing-spike-gate` 审 | `spike_gate_skipped` |
 | `code-gate` | 跑 | 跑 | 跳（无 PR） | 跳（no-merge route） | 跑 |
