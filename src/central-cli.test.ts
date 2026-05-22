@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdir, rm, stat } from "node:fs/promises"
+import { mkdir, rm, stat, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
 import { startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
@@ -174,16 +174,116 @@ describe("central chain/item CLI", () => {
 		}
 	})
 
-	test("legacy daemon target-cwd unchanged", async () => {
-		const start = await runCli(["daemon", "start", REPO_ROOT, "--dry-run", "--require-browser-evidence"])
-		expect(start.exitCode).toBe(0)
-		expect(start.stdout).toContain(`daemon start dry-run: target=${REPO_ROOT}`)
-		expect(start.stdout).toContain("daemon start dry-run: require-browser-evidence=true")
+	test("daemon start chain resolve", async () => {
+		const fixture = await startFixture("target-cwd")
+		try {
+			expectJsonOk(await runCli(["chain", "create", "target-chain", "--repo", "mouriya-s-lab/coder-loop", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expectJsonOk(await runCli(["item", "add", "target-chain", "--issue", "184", "--repo-cwd", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 
-		const stop = await runCli(["daemon", "stop", REPO_ROOT, "--dry-run"])
-		expect(stop.exitCode).toBe(0)
-		expect(stop.stdout).toContain("\"action\": \"stop\"")
-		expect(stop.stdout).toContain(`\"target\": \"${REPO_ROOT}\"`)
+			const start = await runCli(["daemon", "start", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--dry-run", "--require-browser-evidence"])
+			expect(start.exitCode).toBe(0)
+			expect(start.stdout).toContain(`daemon start dry-run: target=${REPO_ROOT}`)
+			expect(start.stdout).toContain("daemon start dry-run: chain=target-chain")
+			expect(start.stdout).not.toContain("command=")
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("daemon target-cwd fails explicitly when no chain matches", async () => {
+		const fixture = await startFixture("target-cwd-missing")
+		try {
+			const start = await runCli(["daemon", "start", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--dry-run"])
+			expect(start.exitCode).toBe(1)
+			expect(start.stderr).toContain("SQLite state DB has no active chain")
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("daemon start ambiguous chain", async () => {
+		const fixture = await startFixture("target-cwd-ambiguous")
+		try {
+			for (const chain of ["first-chain", "second-chain"]) {
+				expectJsonOk(await runCli(["chain", "create", chain, "--repo", "mouriya-s-lab/coder-loop", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+				expectJsonOk(await runCli(["item", "add", chain, "--issue", chain === "first-chain" ? "184" : "185", "--repo-cwd", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			}
+
+			const ambiguous = await runCli(["daemon", "start", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--dry-run"])
+			expect(ambiguous.exitCode).toBe(1)
+			expect(ambiguous.stderr).toContain("matches multiple active chains")
+			expect(ambiguous.stderr).toContain("--chain")
+
+			const selected = await runCli(["daemon", "start", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--chain", "second-chain", "--dry-run"])
+			expect(selected.exitCode).toBe(0)
+			expect(selected.stdout).toContain("chain=second-chain")
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("status json compat no legacy reads", async () => {
+		const fixture = await startFixture("status-json")
+		try {
+			const target = await makeTarget("status-json-target")
+			await writeFile(resolve(target, ".coder-loop/runtime/state.json"), "{ invalid legacy state", { mode: 0o644 }).catch(async () => {
+				await mkdir(resolve(target, ".coder-loop/runtime"), { recursive: true })
+				await writeFile(resolve(target, ".coder-loop/runtime/state.json"), "{ invalid legacy state")
+			})
+			await writeFile(resolve(target, ".dev-loop"), "pid: not-a-number\n")
+			expectJsonOk(await runCli(["chain", "create", "status-json-chain", "--repo", "fixture/repo", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expectJsonOk(await runCli(["item", "add", "status-json-chain", "--issue", "184", "--repo-cwd", target, "--loop-data-root", fixture.loopDataRoot, "--json"]))
+
+			const status = expectJsonOk(await runCli(["status", target, "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expect(status.state).toMatchObject({ kind: "ok", ok: true, path: resolve(fixture.loopDataRoot, "db.sqlite") })
+			expect(status.queue.selected.id).toBe("184")
+			expect(status.processes.loopFile).toMatchObject({ exists: false, raw: null })
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("install no runtime dir; install writes workflow; install creates chain row", async () => {
+		const fixture = await startFixture("install-chain")
+		try {
+			const env = await fakeCliEnv("install-chain")
+			const target = await makeEmptyTarget("install-chain-target")
+			const result = await runCli(["install", target, "--repo", "fixture/repo", "--loop-data-root", fixture.loopDataRoot, "--skip-skill-check"], env)
+			expect(result.exitCode, result.stderr).toBe(0)
+			await expect(Bun.file(resolve(target, ".coder-loop/workflow.md")).exists()).resolves.toBe(true)
+			await expect(Bun.file(resolve(target, ".coder-loop/runtime")).exists()).resolves.toBe(false)
+			const status = expectJsonOk(await runCli(["chain", "status", "repo", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expect(status.chain).toMatchObject({ name: "repo", repository: "fixture/repo", preset: "gh-issue-pr-iteration", status: "active" })
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("install daemon offline explicit fail", async () => {
+		const env = await fakeCliEnv("install-offline")
+		const target = await makeTarget("install-offline-target")
+		const loopDataRoot = resolve(TEST_ROOT, `${++nextFixtureId}-offline-loop-data`)
+		await mkdir(loopDataRoot, { recursive: true })
+		const result = await runCli(["install", target, "--repo", "fixture/repo", "--loop-data-root", loopDataRoot, "--skip-skill-check"], env)
+		expect(result.exitCode).toBe(1)
+		expect(result.stderr).toContain("central daemon is not running")
+		expect(result.stderr).toContain("coder-loop daemon up --loop-data-root")
+		await expect(Bun.file(resolve(target, ".coder-loop/runtime")).exists()).resolves.toBe(false)
+	})
+
+	test("doctor passes without runtime dir", async () => {
+		const fixture = await startFixture("doctor-chain")
+		try {
+			const env = await fakeCliEnv("doctor-chain")
+			const target = await makeTarget("doctor-target")
+			expectJsonOk(await runCli(["chain", "create", "doctor-chain", "--repo", "fixture/repo", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const result = await runCli(["doctor", target, "--repo", "fixture/repo", "--loop-data-root", fixture.loopDataRoot, "--chain", "doctor-chain"], env)
+			expect(result.exitCode, result.stderr).toBe(0)
+			expect(result.stderr).toContain("OK: .coder-loop/workflow.md")
+			expect(result.stderr).toContain("OK: .coder-loop/runtime absent")
+		} finally {
+			await fixture.daemon.stop()
+		}
 	})
 })
 
@@ -214,12 +314,13 @@ async function makeLoopDataRoot(name: string): Promise<string> {
 	return resolve(root, "loop-data")
 }
 
-async function runCli(args: string[]): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
+async function runCli(args: string[], env: Record<string, string> = {}): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
 	const proc = Bun.spawn({
 		cmd: ["bun", LOOP_ENTRY, ...args],
 		cwd: REPO_ROOT,
 		stdout: "pipe",
 		stderr: "pipe",
+		env: { ...process.env, ...env },
 	})
 	const [exitCode, stdout, stderr] = await Promise.all([
 		proc.exited,
@@ -231,6 +332,40 @@ async function runCli(args: string[]): Promise<{ exitCode: number | null; stdout
 		stdout,
 		stderr,
 	}
+}
+
+async function makeTarget(name: string): Promise<string> {
+	const target = resolve(TEST_ROOT, `${++nextFixtureId}-${name}`)
+	await mkdir(resolve(target, ".coder-loop"), { recursive: true })
+	await writeFile(resolve(target, ".coder-loop/workflow.md"), "# workflow\n")
+	return target
+}
+
+async function makeEmptyTarget(name: string): Promise<string> {
+	const target = resolve(TEST_ROOT, `${++nextFixtureId}-${name}`)
+	await mkdir(target, { recursive: true })
+	return target
+}
+
+async function fakeCliEnv(name: string): Promise<Record<string, string>> {
+	const bin = resolve(TEST_ROOT, `${++nextFixtureId}-${name}-bin`)
+	await mkdir(bin, { recursive: true })
+	await writeExecutable(resolve(bin, "gh"), [
+		"#!/usr/bin/env bash",
+		`if [ "$1" = "auth" ]; then exit 0; fi`,
+		`if [ "$1" = "label" ] && [ "$2" = "list" ]; then printf '[]\\n'; exit 0; fi`,
+		`if [ "$1" = "label" ] && [ "$2" = "create" ]; then exit 0; fi`,
+		"exit 0",
+		"",
+	].join("\n"))
+	for (const name of ["codex", "claude", "coder-loop"]) {
+		await writeExecutable(resolve(bin, name), "#!/usr/bin/env bash\nexit 0\n")
+	}
+	return { PATH: `${bin}:${process.env.PATH ?? ""}` }
+}
+
+async function writeExecutable(path: string, content: string): Promise<void> {
+	await writeFile(path, content, { mode: 0o755 })
 }
 
 function expectJsonOk(result: { exitCode: number | null; stdout: string; stderr: string }) {

@@ -17,14 +17,14 @@ afterAll(async () => {
 describe("db-backed main loop hard cut", () => {
 	test("main loop phase advances db status", async () => {
 		const fixture = await createFixture({ reviewDbUpdate: "done" })
-		const result = runLoop(fixture.target)
+		const result = runLoop(fixture)
 		expect(result.exitCode).toBe(0)
 		expect(readItem(fixture.loopDataRoot).status).toBe("done")
 	})
 
 	test("main loop writes current_runs", async () => {
 		const fixture = await createFixture()
-		const result = runLoop(fixture.target)
+		const result = runLoop(fixture)
 		expect(result.exitCode).toBe(0)
 		const current = readCurrentRun(fixture.loopDataRoot)
 		expect(current?.phase).toBe("review")
@@ -35,7 +35,7 @@ describe("db-backed main loop hard cut", () => {
 		const fixture = await createFixture({ reviewDbUpdate: "done" })
 		const beforeText = await readFile(fixture.statePath, "utf-8")
 		const beforeMtime = (await stat(fixture.statePath)).mtimeMs
-		const result = runLoop(fixture.target)
+		const result = runLoop(fixture)
 		expect(result.exitCode).toBe(0)
 		expect(await readFile(fixture.statePath, "utf-8")).toBe(beforeText)
 		expect((await stat(fixture.statePath)).mtimeMs).toBe(beforeMtime)
@@ -43,7 +43,7 @@ describe("db-backed main loop hard cut", () => {
 
 	test("main loop db unavailable explicit fail", async () => {
 		const fixture = await createFixture({ seedDb: false })
-		const result = runCli(["--target-cwd", fixture.target, "--check-runtime"])
+		const result = runCli(["--target-cwd", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--check-runtime"])
 		expect(result.exitCode).toBe(1)
 		expect(result.stderr).toContain("SQLite state DB does not exist")
 		expect(result.stderr).not.toContain("state.json")
@@ -52,27 +52,28 @@ describe("db-backed main loop hard cut", () => {
 	test("queue unblock db only", async () => {
 		const fixture = await createFixture({ initialStatus: "blocked", extra: { blockerRepo: "owner/dependency", blockerRef: "#267" } })
 		const beforeText = await readFile(fixture.statePath, "utf-8")
-		const result = runCli(["queue", "unblock", fixture.target, "--issue", "alpha"])
+		const result = runCli(["queue", "unblock", fixture.target, "--issue", "alpha", "--loop-data-root", fixture.loopDataRoot])
 		expect(result.exitCode).toBe(0)
 		expect(readItem(fixture.loopDataRoot).status).toBe("queued")
 		expect(readItem(fixture.loopDataRoot).extra.blockerRepo).toBeUndefined()
 		expect(await readFile(fixture.statePath, "utf-8")).toBe(beforeText)
 	})
 
-	test("check runtime db only", async () => {
+	test("check-runtime db only", async () => {
 		const fixture = await createFixture()
 		await rm(fixture.statePath)
-		const result = runCli(["--target-cwd", fixture.target, "--check-runtime"])
+		const result = runCli(["--target-cwd", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--check-runtime"])
 		expect(result.exitCode).toBe(0)
 		expect(result.stderr).toContain("Runtime check passed: queue=1, selected=alpha")
 	})
 
-	test("daemon spawn child writes db not file", async () => {
+	test("daemon start target-cwd resolves chain without per-target state writes", async () => {
 		const fixture = await createFixture({ reviewDbUpdate: "done" })
 		const beforeText = await readFile(fixture.statePath, "utf-8")
-		const result = runCli(["daemon", "start", fixture.target, "--max-iterations", "1"])
+		const result = runCli(["daemon", "start", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--dry-run"])
 		expect(result.exitCode).toBe(0)
-		await waitFor(() => readItem(fixture.loopDataRoot).status === "done")
+		expect(result.stdout).toContain(`daemon start dry-run: chain=${CHAIN_NAME}`)
+		expect(readItem(fixture.loopDataRoot).status).toBe("pending")
 		expect(await readFile(fixture.statePath, "utf-8")).toBe(beforeText)
 	})
 
@@ -109,9 +110,11 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
 	await mkdir(resolve(runtime, "evidence/alpha"), { recursive: true })
 	await mkdir(resolve(runtime, "logs"), { recursive: true })
 	await mkdir(loopDataRoot, { recursive: true })
+	await mkdir(resolve(loopDataRoot, "chains", CHAIN_NAME), { recursive: true })
 	await mkdir(presetDir, { recursive: true })
 	await writeFile(resolve(target, ".coder-loop/workflow.md"), "# workflow\n")
 	await writeFile(resolve(runtime, "shared.md"), "# shared\n")
+	await writeFile(resolve(loopDataRoot, "chains", CHAIN_NAME, "shared.md"), "# shared\n")
 	await writePreset(presetDir)
 	await writeRunner(resolve(target, "fake-iter.sh"), "ITERATION SUMMARY: ok")
 	await writeRunner(resolve(target, "fake-review.sh"), "REVIEW SUMMARY: ok", options.reviewDbUpdate, loopDataRoot)
@@ -206,7 +209,13 @@ function seedDb(loopDataRoot: string, target: string, options: FixtureOptions): 
 			preset: "db-main-loop-test",
 			repository: "fixture/repo",
 			baseBranch: "main",
-			metadata: {},
+			metadata: {
+				runner: "codex",
+				reviewRunner: "claude",
+				presetPath: presetDirForTarget(target),
+				codex: { binary: resolve(target, "fake-iter.sh"), extraArgs: [] },
+				claude: { binary: resolve(target, "fake-review.sh"), extraArgs: [] },
+			},
 		})
 		store.createItem({
 			chainId: chain.id,
@@ -215,15 +224,19 @@ function seedDb(loopDataRoot: string, target: string, options: FixtureOptions): 
 			status: options.initialStatus ?? "pending",
 			issueFile: "issues/alpha.md",
 			evidenceDir: "evidence/alpha",
-			extra: { id: "alpha", ...(options.extra ?? {}) },
+			extra: { id: "alpha", issueKind: "code", ...(options.extra ?? {}) },
 		})
 	} finally {
 		store.close()
 	}
 }
 
-function runLoop(target: string): { exitCode: number | null; stderr: string } {
-	return runCli(["--target-cwd", target, "--once"])
+function presetDirForTarget(target: string): string {
+	return resolve(target, ".coder-loop/db-preset")
+}
+
+function runLoop(fixture: Fixture): { exitCode: number | null; stderr: string } {
+	return runCli(["--target-cwd", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--once"])
 }
 
 function runCli(args: string[]): { exitCode: number | null; stdout: string; stderr: string } {

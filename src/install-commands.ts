@@ -22,7 +22,9 @@ import {
 } from "node:fs/promises"
 import { homedir } from "node:os"
 import { resolve, dirname } from "node:path"
+import { daemonRequest, sendDaemonRequest } from "./daemon"
 import { buildCoderLoopStatusSnapshot, loadPreset, type AgentRunnerKind, type AgentRunnerSelection, type CoderLoopStatusSnapshot, type JsonValue, type Preset } from "./loop"
+import { resolveLoopDataPaths } from "./runtime-paths"
 
 const PKG_ROOT = resolve(import.meta.dir, "..")
 const PRESETS_DIR = resolve(PKG_ROOT, "presets")
@@ -53,6 +55,7 @@ type InstallArgs = {
 	target: string
 	repo: string | null
 	presetName: string
+	loopDataRoot: string | null
 	force: boolean
 	dryRun: boolean
 	installSkills: boolean
@@ -66,6 +69,8 @@ type UninstallArgs = {
 type DoctorArgs = {
 	target: string
 	repo: string | null
+	loopDataRoot: string | null
+	chainName: string | null
 }
 
 type CheckOutcome =
@@ -102,6 +107,7 @@ function parseInstallArgs(raw: string[]): InstallArgs {
 	let target: string | null = null
 	let repo: string | null = null
 	let presetName = "gh-issue-pr-iteration"
+	let loopDataRoot: string | null = null
 	let force = false
 	let dryRun = false
 	let installSkills = false
@@ -128,6 +134,12 @@ function parseInstallArgs(raw: string[]): InstallArgs {
 				i += consumed
 				break
 			}
+			case "--loop-data-root": {
+				const { value, consumed } = joinArgs(raw, i, inline, name)
+				loopDataRoot = value
+				i += consumed
+				break
+			}
 			case "--force":
 				force = true
 				break
@@ -145,8 +157,8 @@ function parseInstallArgs(raw: string[]): InstallArgs {
 		}
 	}
 
-	if (target === null) fail("install: 缺少 target 路径。用法: coder-loop install <target> [--repo <slug>] [--preset <name>] [--force] [--dry-run] [--install-skills] [--skip-skill-check]")
-	return { target: resolve(target), repo, presetName, force, dryRun, installSkills, skipSkillCheck }
+	if (target === null) fail("install: 缺少 target 路径。用法: coder-loop install <target> [--repo <slug>] [--preset <name>] [--loop-data-root <path>] [--force] [--dry-run] [--install-skills] [--skip-skill-check]")
+	return { target: resolve(target), repo, presetName, loopDataRoot, force, dryRun, installSkills, skipSkillCheck }
 }
 
 function parseUninstallArgs(raw: string[]): UninstallArgs {
@@ -163,6 +175,8 @@ function parseUninstallArgs(raw: string[]): UninstallArgs {
 function parseDoctorArgs(raw: string[]): DoctorArgs {
 	let target: string | null = null
 	let repo: string | null = null
+	let loopDataRoot: string | null = null
+	let chainName: string | null = null
 	for (let i = 0; i < raw.length; i++) {
 		const arg = raw[i]!
 		if (!arg.startsWith("--")) {
@@ -177,9 +191,21 @@ function parseDoctorArgs(raw: string[]): DoctorArgs {
 			i += consumed
 			continue
 		}
+		if (name === "--loop-data-root") {
+			const { value, consumed } = joinArgs(raw, i, inline, name)
+			loopDataRoot = value
+			i += consumed
+			continue
+		}
+		if (name === "--chain") {
+			const { value, consumed } = joinArgs(raw, i, inline, name)
+			chainName = value
+			i += consumed
+			continue
+		}
 		fail(`doctor: 未知参数 "${arg}"`)
 	}
-	return { target: resolve(target ?? process.cwd()), repo }
+	return { target: resolve(target ?? process.cwd()), repo, loopDataRoot, chainName }
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -502,11 +528,50 @@ async function ensureGithubLabels(repo: string | null, dryRun: boolean): Promise
 // Final --check-runtime invocation
 // ===================================================================
 
-async function runCheckRuntime(target: string): Promise<{ code: number; output: string }> {
+async function runCheckRuntime(target: string, repo: string | null, loopDataRoot: string | null, chainName: string | null = null): Promise<{ code: number; output: string }> {
 	const entry = resolve(PKG_ROOT, "src/loop.ts")
 	const bunPath = whichBinary("bun") ?? "bun"
-	const child = await spawnCapture(bunPath, [entry, "--target-cwd", target, "--check-runtime"])
+	const args = [entry, "--target-cwd", target, "--check-runtime"]
+	if (repo !== null) args.push("--repo", repo)
+	if (loopDataRoot !== null) args.push("--loop-data-root", loopDataRoot)
+	if (chainName !== null) args.push("--chain", chainName)
+	const child = await spawnCapture(bunPath, args)
 	return { code: child.code, output: `${child.stdout}\n${child.stderr}` }
+}
+
+async function createChainThroughDaemon(input: {
+	target: string
+	repo: string
+	preset: Preset
+	loopDataRoot: string | null
+	dryRun: boolean
+}): Promise<{ chainName: string; result: JsonValue | null }> {
+	const chainName = defaultChainName(input.repo)
+	if (input.dryRun) return { chainName, result: null }
+	const socketPath = resolveLoopDataPaths(input.loopDataRoot === null ? {} : { loopDataRoot: input.loopDataRoot }).daemonSocket
+	try {
+		const response = await sendDaemonRequest(socketPath, daemonRequest("chain.create", {
+			name: chainName,
+			repository: input.repo,
+			preset: input.preset.name,
+			baseBranch: "main",
+			metadata: {
+				runner: "codex",
+				reviewRunner: "claude",
+			},
+		}))
+		if (!response.ok) fail(`${response.error.code}: ${response.error.message}`)
+		return { chainName, result: response.result as JsonValue }
+	} catch (error) {
+		const hint = input.loopDataRoot === null ? "coder-loop daemon up" : `coder-loop daemon up --loop-data-root ${input.loopDataRoot}`
+		fail(`central daemon is not running at ${socketPath}; start it with \`${hint}\`. ${error instanceof Error ? error.message : String(error)}`)
+	}
+}
+
+function defaultChainName(repo: string): string {
+	const name = repo.split("/").pop()?.trim()
+	if (!name) fail(`install: invalid repo slug ${repo}`)
+	return name
 }
 
 // ===================================================================
@@ -606,6 +671,23 @@ export async function runInstallCommand(rawArgs: string[]): Promise<void> {
 
 	info(`==> coder-loop install: target=${args.target}, preset=${preset.name}@${preset.version}, dry-run=${args.dryRun}`)
 
+	info("\n[Layer A] Target committed policy")
+	const workflowResult = await ensureWorkflowMd(args.target, args.dryRun)
+	info(`  ${workflowResult.wrote ? (args.dryRun ? "would-write" : "已写入") : "未变化（保留 operator 自定义）"}: ${WORKFLOW_REL}`)
+
+	const repoForChain = args.repo ?? (await inferRepoFromGit(args.target))
+	if (repoForChain === null) fail("install: missing --repo and git origin is not a GitHub repository; cannot create chain")
+
+	info("\n[Central] DB chain")
+	const chainCreate = await createChainThroughDaemon({
+		target: args.target,
+		repo: repoForChain,
+		preset,
+		loopDataRoot: args.loopDataRoot,
+		dryRun: args.dryRun,
+	})
+	info(`  ${args.dryRun ? "would-upsert" : "upserted"} chain: ${chainCreate.chainName} (repo ${repoForChain})`)
+
 	// Layer C: prereqs
 	info("\n[Layer C] Operator 机器先决条件")
 	const installRunner: AgentRunnerKind = "codex"
@@ -633,35 +715,9 @@ export async function runInstallCommand(rawArgs: string[]): Promise<void> {
 		}
 	}
 
-	// Layer A: project files
-	info("\n[Layer A] Target 项目文件")
-	const dirs = await ensureRuntimeDirs(args.target, args.dryRun)
-	for (const d of dirs) info(`  ${args.dryRun ? "would-create" : "已创建"} 目录: ${d}`)
-	if (dirs.length === 0) info("  目录已就位（无新建）")
-
-	const slashCmds = await ensureSlashCommands(args.target, { force: args.force, dryRun: args.dryRun })
-	for (const [fname, result] of Object.entries(slashCmds)) info(`  ${result === "wrote" ? (args.dryRun ? "would-write" : "已写入") : "未变化"}: ${SLASH_COMMANDS_REL}/${fname}`)
-
-	const configMerge = await mergeConfigJson(args.target, preset.name, preset.version, args.dryRun)
-	info(`  ${configMerge.wrote ? (args.dryRun ? "would-write" : "已写入") : "未变化"}: ${CONFIG_REL}`)
-	if (args.dryRun && configMerge.wrote) {
-		info("  --- dry-run config 预览 (before → after) ---")
-		info(`  before: ${configMerge.previewBefore ?? "<missing>"}`)
-		info(`  after:  ${configMerge.previewAfter.trim()}`)
-	}
-
-	const stateResult = await ensureStateJson(args.target, args.dryRun)
-	info(`  ${stateResult.wrote ? (args.dryRun ? "would-write" : "已写入") : "未变化"}: ${STATE_REL}`)
-
-	const sharedResult = await ensureSharedMd(args.target, args.dryRun)
-	info(`  ${sharedResult.wrote ? (args.dryRun ? "would-write" : "已写入") : "未变化"}: ${SHARED_REL}`)
-
-	const workflowResult = await ensureWorkflowMd(args.target, args.dryRun)
-	info(`  ${workflowResult.wrote ? (args.dryRun ? "would-write" : "已写入") : "未变化（保留 operator 自定义）"}: ${WORKFLOW_REL}`)
-
 	// Layer B: GitHub labels
 	info("\n[Layer B] Target GitHub 状态")
-	const repoForLabels = args.repo ?? (await inferRepoFromGit(args.target))
+	const repoForLabels = repoForChain
 	const labelOutcomes = await ensureGithubLabels(repoForLabels, args.dryRun)
 	for (const o of labelOutcomes) {
 		const desc = o.status === "failed" ? `FAIL (${o.reason})` : o.status
@@ -674,7 +730,7 @@ export async function runInstallCommand(rawArgs: string[]): Promise<void> {
 		return
 	}
 	info("\n[Final] 跑 coder-loop --check-runtime")
-	const finalCheck = await runCheckRuntime(args.target)
+	const finalCheck = await runCheckRuntime(args.target, repoForChain, args.loopDataRoot, chainCreate.chainName)
 	process.stderr.write(finalCheck.output)
 	if (finalCheck.code !== 0) {
 		fail(`\nInstall 部分成功，但 --check-runtime 退出 ${finalCheck.code}。修复后重跑 install。`)
@@ -717,14 +773,7 @@ export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
 
 	info("\n[Layer A] Target 项目文件")
 	const aChecks: { label: string; check: Promise<boolean> }[] = [
-		{ label: `${SLASH_COMMANDS_REL}/dev-plan.md`, check: pathExists(resolve(args.target, SLASH_COMMANDS_REL, "dev-plan.md")) },
-		{ label: `${SLASH_COMMANDS_REL}/dev-loop.md`, check: pathExists(resolve(args.target, SLASH_COMMANDS_REL, "dev-loop.md")) },
-		{ label: CONFIG_REL, check: pathExists(resolve(args.target, CONFIG_REL)) },
-		{ label: STATE_REL, check: pathExists(resolve(args.target, STATE_REL)) },
 		{ label: WORKFLOW_REL, check: pathExists(resolve(args.target, WORKFLOW_REL)) },
-		{ label: ISSUE_DIR_REL, check: pathExists(resolve(args.target, ISSUE_DIR_REL)) },
-		{ label: EVIDENCE_DIR_REL, check: pathExists(resolve(args.target, EVIDENCE_DIR_REL)) },
-		{ label: LOG_DIR_REL, check: pathExists(resolve(args.target, LOG_DIR_REL)) },
 	]
 	let aFail = 0
 	for (const c of aChecks) {
@@ -733,29 +782,8 @@ export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
 		if (!ok) aFail++
 	}
 
-	// Check config has preset field
-	const configPath = resolve(args.target, CONFIG_REL)
-	const configRaw = await readIfExists(configPath)
-	if (configRaw !== null) {
-		try {
-			const parsed: unknown = JSON.parse(configRaw)
-			const root = (parsed ?? {}) as Record<string, unknown>
-			const preset = root.preset
-			if (preset === undefined || preset === null) {
-				info("  FAIL: config 缺 preset 字段（install 会补）")
-				aFail++
-			} else if (typeof preset === "object" && !Array.isArray(preset)) {
-				const p = preset as Record<string, unknown>
-				info(`  OK: config.preset = { name: ${JSON.stringify(p.name)}, version: ${JSON.stringify(p.version)} }`)
-			} else if (typeof preset === "string") {
-				info(`  WARN: config.preset = ${JSON.stringify(preset)}（string 形式，建议升级为 { name, version }）`)
-			}
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error)
-			info(`  FAIL: config 解析失败 (${message})`)
-			aFail++
-		}
-	}
+	const runtimeExists = await pathExists(resolve(args.target, RUNTIME_DIR))
+	info(`  ${runtimeExists ? "WARN" : "OK"}: ${RUNTIME_DIR} ${runtimeExists ? "still exists (legacy local runtime)" : "absent"}`)
 
 	info("\n[Layer B] Target GitHub 状态")
 	const repo = args.repo ?? (await inferRepoFromGit(args.target))
@@ -779,7 +807,14 @@ export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
 		}
 	}
 
-	const statusSnapshot = await buildCoderLoopStatusSnapshot({ targetCwd: args.target, configPath: null, repository: args.repo, output: "json" })
+	const statusSnapshot = await buildCoderLoopStatusSnapshot({
+		targetCwd: args.target,
+		configPath: null,
+		loopDataRoot: args.loopDataRoot,
+		chainName: args.chainName,
+		repository: args.repo,
+		output: "json",
+	})
 
 	info("\n[Layer C] Operator 机器先决条件")
 	const cResults = await checkLayerC([statusSnapshot.target.runner.default, statusSnapshot.target.runner.reviewDefault])
