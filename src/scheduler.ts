@@ -22,6 +22,11 @@ export type SchedulerActiveRun = {
 	worktreePath: string
 	startedAt: number
 	closed: Promise<SchedulerCompletedRun>
+	terminate: (options?: SchedulerRunTerminateOptions) => Promise<SchedulerCompletedRun>
+}
+
+export type SchedulerRunTerminateOptions = {
+	forceAfterMs?: number
 }
 
 export type SchedulerCompletedRun = {
@@ -312,7 +317,38 @@ function attachRunCloseHandler(
 			})()
 		})
 	})
-	return { runId, pid: child.pid ?? null, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, worktreePath, startedAt, closed }
+	const terminate = createRunTerminator(child, closed)
+	return { runId, pid: child.pid ?? null, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, worktreePath, startedAt, closed, terminate }
+}
+
+function createRunTerminator(
+	child: ReturnType<typeof spawn>,
+	closed: Promise<SchedulerCompletedRun>,
+): (options?: SchedulerRunTerminateOptions) => Promise<SchedulerCompletedRun> {
+	let requested = false
+	return async (options = {}) => {
+		if (!requested && child.exitCode === null && child.signalCode === null) {
+			requested = true
+			child.kill("SIGTERM")
+			const closedBeforeForce = await promiseSettledWithin(closed, options.forceAfterMs ?? 5_000)
+			if (!closedBeforeForce && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
+		}
+		return await closed
+	}
+}
+
+async function promiseSettledWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<boolean> {
+	let timeout: ReturnType<typeof setTimeout> | null = null
+	try {
+		return await Promise.race([
+			promise.then(() => true),
+			new Promise<boolean>((resolve) => {
+				timeout = setTimeout(() => resolve(false), timeoutMs)
+			}),
+		])
+	} finally {
+		if (timeout !== null) clearTimeout(timeout)
+	}
 }
 
 async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecord): Promise<void> {

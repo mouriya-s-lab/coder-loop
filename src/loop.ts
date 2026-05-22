@@ -14,7 +14,9 @@ import { closeSync, createWriteStream, openSync, realpathSync, type WriteStream 
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
 import { command, flag, option, optional, positional, run as runCmd, string as cmdString, subcommands } from "cmd-ts"
 import { type as arkType } from "arktype"
+import { daemonRequest, sendDaemonRequest, startCoderLoopDaemon } from "./daemon"
 import { dispatchSubcommand } from "./install-commands"
+import { resolveLoopDataPaths } from "./runtime-paths"
 
 const PKG_ROOT = resolve(import.meta.dir, "..")
 const DEFAULT_PRESET_NAME = "gh-issue-pr-iteration"
@@ -105,6 +107,11 @@ export type StatusCommandArgs = {
 
 export type DaemonCommandArgs =
 	| {
+			action: "up"
+			loopDataRoot: string | null
+			schedulerIntervalMs: number | null
+	  }
+	| {
 			action: "status"
 			targetCwd: string
 			configPath: string | null
@@ -139,7 +146,11 @@ export type DaemonCommandArgs =
 			dryRun: boolean
 			worktree: boolean
 			baseBranch: string | null
-		}
+	  }
+	| {
+			action: "down"
+			loopDataRoot: string | null
+	  }
 
 export type QueueUnblockCommandArgs = {
 	targetCwd: string
@@ -910,6 +921,23 @@ const daemonStatusCliCommand = command({
 	},
 })
 
+const daemonUpCliCommand = command({
+	name: "up",
+	description: "Run the centralized coder-loop daemon process.",
+	args: {
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		schedulerIntervalMs: option({ long: "scheduler-interval-ms", type: optional(cmdString) }),
+	},
+	handler: (args): CliCommand => ({
+		kind: "daemon",
+		args: {
+			action: "up",
+			loopDataRoot: args.loopDataRoot ?? null,
+			schedulerIntervalMs: parseOptionalPositiveInteger(args.schedulerIntervalMs ?? null, "--scheduler-interval-ms"),
+		},
+	}),
+})
+
 const daemonStartCliCommand = command({
 	name: "start",
 	description: "Start coder-loop as a detached daemon for a target.",
@@ -989,14 +1017,31 @@ const daemonRestartCliCommand = command({
 	}),
 })
 
+const daemonDownCliCommand = command({
+	name: "down",
+	description: "Ask the centralized coder-loop daemon to shut down through its Unix socket.",
+	args: {
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+	},
+	handler: (args): CliCommand => ({
+		kind: "daemon",
+		args: {
+			action: "down",
+			loopDataRoot: args.loopDataRoot ?? null,
+		},
+	}),
+})
+
 const daemonCliCommand = subcommands({
 	name: "daemon",
 	description: "Manage coder-loop daemon processes.",
 	cmds: {
+		up: daemonUpCliCommand,
 		status: daemonStatusCliCommand,
 		start: daemonStartCliCommand,
 		stop: daemonStopCliCommand,
 		restart: daemonRestartCliCommand,
+		down: daemonDownCliCommand,
 	},
 })
 
@@ -1052,9 +1097,13 @@ function rejectInlineValue(value: string | null, name: string): void {
 }
 
 function parseDaemonMaxIterations(value: string | null): number | null {
+	return parseOptionalPositiveInteger(value, "--max-iterations")
+}
+
+function parseOptionalPositiveInteger(value: string | null, flagName: string): number | null {
 	if (value === null) return null
 	const parsed = Number(value)
-	if (!Number.isInteger(parsed) || parsed <= 0) fail(`--max-iterations must be a positive integer, got: ${value}`)
+	if (!Number.isInteger(parsed) || parsed <= 0) fail(`${flagName} must be a positive integer, got: ${value}`)
 	return parsed
 }
 
@@ -1070,6 +1119,14 @@ async function runDaemonCommand(args: string[]): Promise<void> {
 	const parsed = await runCmd(daemonCliCommand, args)
 	if (parsed.value.kind !== "daemon") return
 	const daemonArgs = parsed.value.args
+	if (daemonArgs.action === "up") {
+		await runDaemonUpCommand(daemonArgs)
+		return
+	}
+	if (daemonArgs.action === "down") {
+		await runDaemonDownCommand(daemonArgs)
+		return
+	}
 	if (daemonArgs.action === "status") {
 		const snapshot = await buildCoderLoopStatusSnapshot({
 			targetCwd: daemonArgs.targetCwd,
@@ -2187,6 +2244,33 @@ export function buildDaemonStartPlan(args: Extract<DaemonCommandArgs, { action: 
 		stderrPath,
 		requireBrowserEvidence: args.requireBrowserEvidence,
 	}
+}
+
+async function runDaemonUpCommand(args: Extract<DaemonCommandArgs, { action: "up" }>): Promise<void> {
+	const scheduler = args.schedulerIntervalMs === null ? {} : { intervalMs: args.schedulerIntervalMs }
+	const daemon = await startCoderLoopDaemon({
+		...(args.loopDataRoot === null ? {} : { loopDataRoot: args.loopDataRoot }),
+		scheduler,
+	})
+	const shutdown = () => {
+		void daemon.stop().then(() => process.exit(0))
+	}
+	process.once("SIGTERM", shutdown)
+	process.once("SIGINT", shutdown)
+	process.stdout.write(JSON.stringify({
+		action: "up",
+		pid: process.pid,
+		socketPath: daemon.snapshot().socketPath,
+		pidFile: daemon.snapshot().pidFile,
+	}, null, "\t") + "\n")
+	await daemon.closed
+}
+
+async function runDaemonDownCommand(args: Extract<DaemonCommandArgs, { action: "down" }>): Promise<void> {
+	const socketPath = resolveLoopDataPaths(args.loopDataRoot === null ? {} : { loopDataRoot: args.loopDataRoot }).daemonSocket
+	const response = await sendDaemonRequest(socketPath, daemonRequest("daemon.down"))
+	process.stdout.write(JSON.stringify(response, null, "\t") + "\n")
+	if (!response.ok) process.exitCode = 1
 }
 
 async function runDaemonStartCommand(args: Extract<DaemonCommandArgs, { action: "start" }>): Promise<void> {
