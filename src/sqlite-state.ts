@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite"
+import { existsSync } from "node:fs"
 
 import type { AgentRunnerKind, JsonObject, JsonValue } from "./loop"
 import { type LoopDataRootOptions, resolveLoopDataPaths } from "./runtime-paths"
@@ -151,7 +152,9 @@ export type AllItemsTerminalInput = {
 
 export type StateTableName = "chains" | "items" | "runs" | "current_runs"
 
-export type SqliteStateStoreOptions = LoopDataRootOptions
+export type SqliteStateStoreOptions = LoopDataRootOptions & {
+	createIfMissing?: boolean
+}
 
 export type SqliteStateStore = {
 	close: () => void
@@ -313,9 +316,13 @@ CREATE INDEX IF NOT EXISTS idx_runs_chain_item ON runs(chain_id, item_id);
 
 export function openSqliteStateStore(options: SqliteStateStoreOptions = {}): SqliteStateStore {
 	const dbFile = resolveLoopDataPaths(options).dbFile
+	const createIfMissing = options.createIfMissing ?? true
+	if (!createIfMissing && !existsSync(dbFile)) {
+		throw new SqliteStateError("db_unavailable", `SQLite state DB does not exist at ${dbFile}`, { dbFile })
+	}
 	let db: Database
 	try {
-		db = new Database(dbFile, { create: true, readwrite: true, strict: true })
+		db = new Database(dbFile, { create: createIfMissing, readwrite: true, strict: true })
 	} catch (error) {
 		throw new SqliteStateError("db_unavailable", `unable to open SQLite state DB at ${dbFile}: ${errorMessage(error)}`, {
 			dbFile,

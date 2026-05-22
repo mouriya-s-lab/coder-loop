@@ -2,9 +2,12 @@ import { describe, expect, test } from "bun:test"
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { resolve } from "node:path"
+import { openSqliteStateStore } from "./sqlite-state"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
+const FIXTURE_CHAIN_NAME = "fixture-chain"
+const SQLITE_STATE_MODULE = resolve(REPO_ROOT, "src/sqlite-state.ts")
 
 type ConfigShape = "json" | "toml"
 type StatusSmokeSnapshot = {
@@ -16,6 +19,34 @@ type StatusSmokeSnapshot = {
 	processes?: object
 }
 
+type FixtureQueueItem = {
+	id?: string
+	issue?: number
+	status: string
+	attempts?: number
+	title?: string | null
+	priority?: string | null
+	branch?: string | null
+	pr?: number | null
+	lastRunId?: string | null
+	issueFile?: string | null
+	evidenceDir?: string | null
+	agentCwd?: string | null
+	runner?: "claude" | "codex" | null
+	[key: string]: unknown
+}
+
+type FixtureState = {
+	queue: FixtureQueueItem[]
+	recentRuns?: unknown[]
+	current?: Record<string, unknown> | null
+	repository?: string | null
+	baseBranch?: string | null
+}
+
+type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
+type JsonObject = { [key: string]: JsonValue }
+
 function claudeHostEnv(): NodeJS.ProcessEnv {
 	const env: NodeJS.ProcessEnv = { ...process.env }
 	env.CLAUDECODE = "1"
@@ -25,20 +56,147 @@ function claudeHostEnv(): NodeJS.ProcessEnv {
 	return env
 }
 
+async function seedLoopDb(target: string, preset: string, state: FixtureState): Promise<string> {
+	const loopDataRoot = resolve(target, ".coder-loop/runtime/loop-data")
+	await rm(loopDataRoot, { recursive: true, force: true })
+	await mkdir(loopDataRoot, { recursive: true })
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = store.createChain({
+			name: FIXTURE_CHAIN_NAME,
+			preset,
+			repository: state.repository ?? "fixture/repo",
+			baseBranch: state.baseBranch ?? "main",
+			metadata: { recentRuns: Array.isArray(state.recentRuns) ? state.recentRuns.filter(isJsonValue) : [] },
+		})
+		state.queue.forEach((entry, index) => {
+			const issueNumber = typeof entry.issue === "number" ? entry.issue : index + 1
+			store.createItem({
+				chainId: chain.id,
+				issueNumber,
+				repoCwd: target,
+				status: entry.status,
+				attempts: entry.attempts ?? 0,
+				title: entry.title ?? null,
+				priority: entry.priority ?? null,
+				branch: entry.branch ?? null,
+				pr: entry.pr ?? null,
+				lastRunId: entry.lastRunId ?? null,
+				issueFile: entry.issueFile ?? null,
+				evidenceDir: entry.evidenceDir ?? null,
+				agentCwd: entry.agentCwd ?? null,
+				runner: entry.runner ?? null,
+				extra: queueItemExtra(entry),
+			})
+		})
+		if (state.current) {
+			const currentIssue = typeof state.current.issue === "number" ? state.current.issue : 1
+			const item = store.getItemByIssue(chain.id, currentIssue) ?? store.listItems(chain.id)[0]
+			if (item !== undefined) {
+				const runId = typeof state.current.runId === "string" ? state.current.runId : "run-current"
+				const phase = typeof state.current.phase === "string" ? state.current.phase : "iteration"
+				const startedAtRaw = typeof state.current.startedAt === "string" ? Date.parse(state.current.startedAt) / 1000 : Date.now() / 1000
+				const startedAt = Number.isFinite(startedAtRaw) ? startedAtRaw : Date.now() / 1000
+				const extra = queueItemExtra(state.current)
+				if (extra.issue === undefined) extra.issue = item.issueNumber
+				store.recordRun({ runId, chainId: chain.id, itemId: item.id, phase, startedAt, extra })
+				store.setCurrentRun({ chainId: chain.id, phase, runId, startedAt, extra })
+			}
+		}
+	} finally {
+		store.close()
+	}
+	return loopDataRoot
+}
+
+function queueItemExtra(entry: Record<string, unknown>): JsonObject {
+	const base = new Set(["status", "attempts", "title", "priority", "branch", "pr", "lastRunId", "issueFile", "evidenceDir", "agentCwd", "runner"])
+	const extra: JsonObject = {}
+	for (const [key, value] of Object.entries(entry)) {
+		if (!base.has(key) && isJsonValue(value)) extra[key] = value
+	}
+	return extra
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
+	if (value === null) return true
+	if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return true
+	if (Array.isArray(value)) return value.every(isJsonValue)
+	if (typeof value === "object") return Object.values(value as Record<string, unknown>).every(isJsonValue)
+	return false
+}
+
+function dbUpdateCommand(loopDataRoot: string, issueNumber: number): string {
+	const script = [
+		`import { openSqliteStateStore } from ${JSON.stringify(SQLITE_STATE_MODULE)}`,
+		`const [loopDataRoot, issue, status, blockerRepo, blockerRef, agentCwd] = Bun.argv.slice(1)`,
+		`const store = openSqliteStateStore({ loopDataRoot })`,
+		`const chain = store.getChainByName(${JSON.stringify(FIXTURE_CHAIN_NAME)})`,
+		`if (chain === null) throw new Error("missing fixture chain")`,
+		`const item = store.getItemByIssue(chain.id, Number(issue))`,
+		`if (item === null) throw new Error("missing fixture item")`,
+		`const extra = { ...item.extra }`,
+		`if (blockerRepo) extra.blockerRepo = blockerRepo; else delete extra.blockerRepo`,
+		`if (blockerRef) extra.blockerRef = blockerRef; else delete extra.blockerRef`,
+		`store.updateItem(item.id, { status, extra, agentCwd: agentCwd || item.agentCwd })`,
+		`store.clearCurrentRun(chain.id)`,
+		`store.close()`,
+	].join("; ")
+	return `bun -e ${JSON.stringify(script)} ${JSON.stringify(loopDataRoot)} ${issueNumber}`
+}
+
+function readDbItem(target: string, issueNumber: number) {
+	const loopDataRoot = resolve(target, ".coder-loop/runtime/loop-data")
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = store.getChainByName(FIXTURE_CHAIN_NAME)
+		if (chain === null) throw new Error("missing fixture chain")
+		const item = store.getItemByIssue(chain.id, issueNumber)
+		if (item === null) throw new Error("missing fixture item")
+		return item
+	} finally {
+		store.close()
+	}
+}
+
+function updateDbItem(target: string, issueNumber: number, update: { status?: string; extra?: JsonObject; currentPhase?: string; runId?: string }): void {
+	const loopDataRoot = resolve(target, ".coder-loop/runtime/loop-data")
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = store.getChainByName(FIXTURE_CHAIN_NAME)
+		if (chain === null) throw new Error("missing fixture chain")
+		const item = store.getItemByIssue(chain.id, issueNumber)
+		if (item === null) throw new Error("missing fixture item")
+		const updated = store.updateItem(item.id, {
+			status: update.status ?? item.status,
+			extra: update.extra === undefined ? item.extra : { ...item.extra, ...update.extra },
+		})
+		if (update.currentPhase !== undefined) {
+			const runId = update.runId ?? "run-current"
+			const startedAt = Date.now() / 1000
+			if (store.getRunByRunId(runId) === null) store.recordRun({ runId, chainId: chain.id, itemId: updated.id, phase: update.currentPhase, startedAt, extra: updated.extra })
+			store.setCurrentRun({ chainId: chain.id, phase: update.currentPhase, runId, startedAt, extra: updated.extra })
+		}
+	} finally {
+		store.close()
+	}
+}
+
 async function makeMinimalTarget(presetName: string, configShape: ConfigShape = "json"): Promise<string> {
 	const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-smoke-"))
 	const runtime = resolve(dir, ".coder-loop/runtime")
+	const loopDataRoot = resolve(runtime, "loop-data")
 	await mkdir(resolve(runtime, "issues"), { recursive: true })
 	await mkdir(resolve(runtime, "evidence"), { recursive: true })
 	await mkdir(resolve(runtime, "logs"), { recursive: true })
 	await writeFile(resolve(dir, ".coder-loop/workflow.md"), "# placeholder workflow\n")
 	await writeFile(resolve(runtime, "shared.md"), "# placeholder shared context\n")
 	if (configShape === "toml") {
-		await writeFile(resolve(runtime, "config.toml"), `preset = "${presetName}"\n`)
+		await writeFile(resolve(runtime, "config.toml"), `preset = "${presetName}"\nloopDataRoot = "${loopDataRoot}"\n`)
 	} else {
 		await writeFile(
 			resolve(runtime, "config.json"),
-			JSON.stringify({ preset: presetName }, null, 2),
+			JSON.stringify({ preset: presetName, loopDataRoot }, null, 2),
 		)
 	}
 	const state = {
@@ -51,18 +209,20 @@ async function makeMinimalTarget(presetName: string, configShape: ConfigShape = 
 		current: null,
 	}
 	await writeFile(resolve(runtime, "state.json"), JSON.stringify(state, null, 2))
+	await seedLoopDb(dir, presetName, state)
 	return dir
 }
 
 async function makeGhIssuePrTarget(kind: string, issue: number): Promise<string> {
 	const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-gh-issue-"))
 	const runtime = resolve(dir, ".coder-loop/runtime")
+	const loopDataRoot = resolve(runtime, "loop-data")
 	await mkdir(resolve(runtime, "issues"), { recursive: true })
 	await mkdir(resolve(runtime, `evidence/issue-${issue}`), { recursive: true })
 	await mkdir(resolve(runtime, "logs"), { recursive: true })
 	await writeFile(resolve(dir, ".coder-loop/workflow.md"), "# gh issue fixture workflow\n")
 	await writeFile(resolve(runtime, "shared.md"), "# shared\n\nNo durable facts.\n")
-	await writeFile(resolve(runtime, "config.json"), JSON.stringify({ preset: "gh-issue-pr-iteration" }, null, 2))
+	await writeFile(resolve(runtime, "config.json"), JSON.stringify({ preset: "gh-issue-pr-iteration", loopDataRoot }, null, 2))
 	await writeFile(resolve(runtime, `issues/${issue}.md`), [
 		`# Issue ${issue}`,
 		"",
@@ -71,7 +231,7 @@ async function makeGhIssuePrTarget(kind: string, issue: number): Promise<string>
 		`Fixture handoff for kind:${kind}.`,
 		"",
 	].join("\n"))
-	await writeFile(resolve(runtime, "state.json"), JSON.stringify({
+	const state = {
 		version: 1,
 		queue: [{
 			issue,
@@ -92,7 +252,9 @@ async function makeGhIssuePrTarget(kind: string, issue: number): Promise<string>
 		baseBranch: "main",
 		recentRuns: [],
 		current: null,
-	}, null, 2))
+	}
+	await writeFile(resolve(runtime, "state.json"), JSON.stringify(state, null, 2))
+	await seedLoopDb(dir, "gh-issue-pr-iteration", state)
 	return dir
 }
 
@@ -108,6 +270,7 @@ async function pathExists(path: string): Promise<boolean> {
 async function makePostReviewTriggerTarget(reviewStatus: "blocked" | "done"): Promise<{ dir: string; responderLog: string }> {
 	const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-trigger-"))
 	const runtime = resolve(dir, ".coder-loop/runtime")
+	const loopDataRoot = resolve(runtime, "loop-data")
 	const presetDir = resolve(dir, ".coder-loop/post-review-trigger-preset")
 	const responderLog = resolve(runtime, "responder-called.txt")
 	await mkdir(resolve(runtime, "issues"), { recursive: true })
@@ -172,7 +335,7 @@ async function makePostReviewTriggerTarget(reviewStatus: "blocked" | "done"): Pr
 	].join("\n"), { mode: 0o755 })
 	await writeFile(fakeClaude, [
 		`#!/usr/bin/env bash`,
-		`node -e 'const fs = require("fs"); const [path, status] = process.argv.slice(1); const state = JSON.parse(fs.readFileSync(path, "utf8")); state.queue[0].status = status; if (status === "blocked") { state.queue[0].blockerRepo = "owner/dependency"; state.queue[0].blockerRef = "#267"; } else { delete state.queue[0].blockerRepo; delete state.queue[0].blockerRef; } state.current = null; fs.writeFileSync(path, JSON.stringify(state, null, "\\t") + "\\n");' ${JSON.stringify(resolve(runtime, "state.json"))} ${JSON.stringify(reviewStatus)}`,
+		`${dbUpdateCommand(loopDataRoot, 1)} ${JSON.stringify(reviewStatus)} ${reviewStatus === "blocked" ? JSON.stringify("owner/dependency") : "''"} ${reviewStatus === "blocked" ? JSON.stringify("#267") : "''"}`,
 		`echo 'REVIEW SUMMARY: verdict=${reviewStatus === "blocked" ? "blocked" : "accepted"}; issue=#alpha; actionable=0; reason=fixture'`,
 		`exit 0`,
 		``,
@@ -180,10 +343,11 @@ async function makePostReviewTriggerTarget(reviewStatus: "blocked" | "done"): Pr
 
 	await writeFile(resolve(runtime, "config.json"), JSON.stringify({
 		presetPath: presetDir,
+		loopDataRoot,
 		codex: { binary: fakeCodex, extraArgs: [] },
 		claude: { binary: fakeClaude, extraArgs: [] },
 	}, null, 2))
-	await writeFile(resolve(runtime, "state.json"), JSON.stringify({
+	const state = {
 		version: 1,
 		queue: [{
 			id: "alpha",
@@ -193,7 +357,9 @@ async function makePostReviewTriggerTarget(reviewStatus: "blocked" | "done"): Pr
 		}],
 		recentRuns: [],
 		current: null,
-	}, null, 2))
+	}
+	await writeFile(resolve(runtime, "state.json"), JSON.stringify(state, null, 2))
+	await seedLoopDb(dir, "post-review-trigger-smoke", state)
 	await writeFile(resolve(runtime, "issues/alpha.md"), "# alpha\n")
 	return { dir, responderLog }
 }
@@ -232,8 +398,10 @@ describe("smoke: single-phase-example preset", () => {
 
 	test("--dry-run selects the source-writing no-merge route for fixture", async () => {
 		const target = resolve(REPO_ROOT, "test-fixtures/no-merge-code-spike-target")
+		const state = JSON.parse(await readFile(resolve(target, ".coder-loop/runtime/state.json"), "utf-8")) as FixtureState
+		const loopDataRoot = await seedLoopDb(target, "gh-issue-pr-iteration", state)
 		const proc = Bun.spawnSync({
-			cmd: ["bun", LOOP_ENTRY, "--target-cwd", target, "--dry-run"],
+			cmd: ["bun", LOOP_ENTRY, "--target-cwd", target, "--loop-data-root", loopDataRoot, "--dry-run"],
 			cwd: REPO_ROOT,
 			stdout: "pipe",
 			stderr: "pipe",
@@ -408,9 +576,9 @@ describe("smoke: post-review phase triggers", () => {
 		expect(proc.exitCode).toBe(0)
 		expect(stderr).toContain("Starting trigger phase responder after review")
 		expect(await readFile(responderLog, "utf-8")).toBe("responder\n")
-		const state = JSON.parse(await readFile(resolve(dir, ".coder-loop/runtime/state.json"), "utf-8"))
-		expect(state.queue[0].blockerRepo).toBe("owner/dependency")
-		expect(state.queue[0].blockerRef).toBe("#267")
+		const item = readDbItem(dir, 1)
+		expect(item.extra.blockerRepo).toBe("owner/dependency")
+		expect(item.extra.blockerRef).toBe("#267")
 	})
 
 	test("skips a trigger phase when review changes the item to a different status", async () => {
@@ -426,14 +594,15 @@ describe("smoke: post-review phase triggers", () => {
 		expect(proc.exitCode).toBe(0)
 		expect(stderr).toContain("Skipping trigger phase responder: status=done, wanted=blocked")
 		expect(await pathExists(responderLog)).toBe(false)
-		const state = JSON.parse(await readFile(resolve(dir, ".coder-loop/runtime/state.json"), "utf-8"))
-		expect(state.queue[0].blockerRepo).toBeUndefined()
-		expect(state.queue[0].blockerRef).toBeUndefined()
+		const item = readDbItem(dir, 1)
+		expect(item.extra.blockerRepo).toBeUndefined()
+		expect(item.extra.blockerRef).toBeUndefined()
 	})
 
 	test("bundled blocked-responder trigger uses the blocked item's target agentCwd", async () => {
 		const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-bundled-responder-"))
 		const runtime = resolve(dir, ".coder-loop/runtime")
+		const loopDataRoot = resolve(runtime, "loop-data")
 		const targetRepo = resolve(dir, "dependency-repo")
 		const responderCwdLog = resolve(runtime, "blocked-responder-cwd.txt")
 		await mkdir(resolve(runtime, "issues"), { recursive: true })
@@ -456,7 +625,7 @@ describe("smoke: post-review phase triggers", () => {
 		].join("\n"), { mode: 0o755 })
 		await writeFile(fakeClaude, [
 			`#!/usr/bin/env bash`,
-			`node -e 'const fs = require("fs"); const [path, agentCwd] = process.argv.slice(1); const state = JSON.parse(fs.readFileSync(path, "utf8")); state.queue[0].status = "blocked"; state.queue[0].blockerRepo = "owner/dependency"; state.queue[0].blockerRef = "#267"; state.queue[0].agentCwd = agentCwd; state.current = null; fs.writeFileSync(path, JSON.stringify(state, null, "\\t") + "\\n");' ${JSON.stringify(resolve(runtime, "state.json"))} ${JSON.stringify(targetRepo)}`,
+			`${dbUpdateCommand(loopDataRoot, 9100)} blocked owner/dependency '#267' ${JSON.stringify(targetRepo)}`,
 			`echo 'REVIEW SUMMARY: verdict=blocked; issue=#9100; actionable=1; reason=fixture cross-repo blocker'`,
 			`exit 0`,
 			``,
@@ -464,10 +633,11 @@ describe("smoke: post-review phase triggers", () => {
 
 		await writeFile(resolve(runtime, "config.json"), JSON.stringify({
 			preset: "gh-issue-pr-iteration",
+			loopDataRoot,
 			codex: { binary: fakeCodex, extraArgs: [] },
 			claude: { binary: fakeClaude, extraArgs: [] },
 		}, null, 2))
-		await writeFile(resolve(runtime, "state.json"), JSON.stringify({
+		const state = {
 			version: 1,
 			queue: [{
 				issue: 9100,
@@ -488,7 +658,9 @@ describe("smoke: post-review phase triggers", () => {
 			baseBranch: null,
 			recentRuns: [],
 			current: null,
-		}, null, 2))
+		}
+		await writeFile(resolve(runtime, "state.json"), JSON.stringify(state, null, 2))
+		await seedLoopDb(dir, "gh-issue-pr-iteration", state)
 
 		const proc = Bun.spawnSync({
 			cmd: ["bun", LOOP_ENTRY, "--target-cwd", dir, "--once"],
@@ -501,9 +673,9 @@ describe("smoke: post-review phase triggers", () => {
 		expect(proc.exitCode).toBe(0)
 		expect(stderr).toContain("Starting trigger phase blocked-responder after review")
 		expect((await readFile(responderCwdLog, "utf-8")).trim()).toBe(await realpath(targetRepo))
-		const state = JSON.parse(await readFile(resolve(runtime, "state.json"), "utf-8"))
-		expect(state.queue[0].status).toBe("blocked")
-		expect(state.queue[0].agentCwd).toBe(targetRepo)
+		const item = readDbItem(dir, 9100)
+		expect(item.status).toBe("blocked")
+		expect(item.agentCwd).toBe(targetRepo)
 	})
 })
 
@@ -512,12 +684,13 @@ describe("smoke: queue unblock CLI", () => {
 		const issue = 9200
 		const dir = await makeGhIssuePrTarget("blocked", issue)
 		const statePath = resolve(dir, ".coder-loop/runtime/state.json")
-		const state = JSON.parse(await readFile(statePath, "utf-8"))
-		state.queue[0].status = "blocked"
-		state.queue[0].blockerRepo = "owner/dependency"
-		state.queue[0].blockerRef = "#267"
-		state.current = { phase: "review", runId: "r1", startedAt: "2026-05-20T00:00:00.000Z", issue }
-		await writeFile(statePath, JSON.stringify(state, null, "\t") + "\n")
+		const beforeState = await readFile(statePath, "utf-8")
+		updateDbItem(dir, issue, {
+			status: "blocked",
+			extra: { blockerRepo: "owner/dependency", blockerRef: "#267" },
+			currentPhase: "review",
+			runId: "r1",
+		})
 
 		const proc = Bun.spawnSync({
 			cmd: ["bun", LOOP_ENTRY, "queue", "unblock", dir, "--issue", "owner/source#9200"],
@@ -538,22 +711,22 @@ describe("smoke: queue unblock CLI", () => {
 		expect(result.verification.blockerRepoPresent).toBe(false)
 		expect(result.verification.blockerRefPresent).toBe(false)
 
-		const updated = JSON.parse(await readFile(statePath, "utf-8"))
-		expect(updated.queue[0].status).toBe("queued")
-		expect(updated.queue[0].blockerRepo).toBeUndefined()
-		expect(updated.queue[0].blockerRef).toBeUndefined()
-		expect(updated.current).toBeNull()
+		expect(await readFile(statePath, "utf-8")).toBe(beforeState)
+		const updated = readDbItem(dir, issue)
+		expect(updated.status).toBe("queued")
+		expect(updated.extra.blockerRepo).toBeUndefined()
+		expect(updated.extra.blockerRef).toBeUndefined()
 	})
 
 	test("dry-run reports daemon start plan without writing state", async () => {
 		const issue = 9201
 		const dir = await makeGhIssuePrTarget("blocked", issue)
 		const statePath = resolve(dir, ".coder-loop/runtime/state.json")
-		const state = JSON.parse(await readFile(statePath, "utf-8"))
-		state.queue[0].status = "blocked"
-		state.queue[0].blockerRepo = "owner/dependency"
-		state.queue[0].blockerRef = "#267"
-		await writeFile(statePath, JSON.stringify(state, null, "\t") + "\n")
+		const beforeState = await readFile(statePath, "utf-8")
+		updateDbItem(dir, issue, {
+			status: "blocked",
+			extra: { blockerRepo: "owner/dependency", blockerRef: "#267" },
+		})
 
 		const proc = Bun.spawnSync({
 			cmd: ["bun", LOOP_ENTRY, "queue", "unblock", dir, "--issue", "#9201", "--start-daemon", "--require-browser-evidence", "--dry-run"],
@@ -568,10 +741,11 @@ describe("smoke: queue unblock CLI", () => {
 		expect(result.daemon.requested).toBe(true)
 		expect(result.daemon.plan.command).toContain("--require-browser-evidence")
 
-		const updated = JSON.parse(await readFile(statePath, "utf-8"))
-		expect(updated.queue[0].status).toBe("blocked")
-		expect(updated.queue[0].blockerRepo).toBe("owner/dependency")
-		expect(updated.queue[0].blockerRef).toBe("#267")
+		expect(await readFile(statePath, "utf-8")).toBe(beforeState)
+		const updated = readDbItem(dir, issue)
+		expect(updated.status).toBe("blocked")
+		expect(updated.extra.blockerRepo).toBe("owner/dependency")
+		expect(updated.extra.blockerRef).toBe("#267")
 	})
 })
 
@@ -579,6 +753,7 @@ describe("smoke: phase runner selection", () => {
 	test("default iteration runner uses Codex while review stays Claude", async () => {
 		const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-review-runner-"))
 		const runtime = resolve(dir, ".coder-loop/runtime")
+		const loopDataRoot = resolve(runtime, "loop-data")
 		const presetDir = resolve(dir, ".coder-loop/two-phase-preset")
 		await mkdir(resolve(runtime, "issues"), { recursive: true })
 		await mkdir(resolve(runtime, "evidence/alpha"), { recursive: true })
@@ -644,10 +819,11 @@ describe("smoke: phase runner selection", () => {
 
 		await writeFile(resolve(runtime, "config.json"), JSON.stringify({
 			presetPath: presetDir,
+			loopDataRoot,
 			codex: { binary: fakeCodex, extraArgs: [] },
 			claude: { binary: fakeClaude, extraArgs: [] },
 		}, null, 2))
-		await writeFile(resolve(runtime, "state.json"), JSON.stringify({
+		const state = {
 			version: 1,
 			queue: [{
 				id: "alpha",
@@ -657,7 +833,9 @@ describe("smoke: phase runner selection", () => {
 			}],
 			recentRuns: [],
 			current: null,
-		}, null, 2))
+		}
+		await writeFile(resolve(runtime, "state.json"), JSON.stringify(state, null, 2))
+		await seedLoopDb(dir, "two-phase-smoke", state)
 		await writeFile(resolve(runtime, "issues/alpha.md"), "# alpha\n")
 
 		const proc = Bun.spawnSync({
@@ -682,6 +860,7 @@ describe("smoke: phase runner selection", () => {
 	async function makeTwoPhaseReviewTarget(reviewScript: readonly string[], prefix: string): Promise<string> {
 		const dir = await mkdtemp(resolve(tmpdir(), prefix))
 		const runtime = resolve(dir, ".coder-loop/runtime")
+		const loopDataRoot = resolve(runtime, "loop-data")
 		const presetDir = resolve(dir, ".coder-loop/two-phase-stop-preset")
 		await mkdir(resolve(runtime, "issues"), { recursive: true })
 		await mkdir(resolve(runtime, "evidence/alpha"), { recursive: true })
@@ -742,10 +921,11 @@ describe("smoke: phase runner selection", () => {
 
 		await writeFile(resolve(runtime, "config.json"), JSON.stringify({
 			presetPath: presetDir,
+			loopDataRoot,
 			codex: { binary: fakeCodex, extraArgs: [] },
 			claude: { binary: fakeClaude, extraArgs: [] },
 		}, null, 2))
-		await writeFile(resolve(runtime, "state.json"), JSON.stringify({
+		const state = {
 			version: 1,
 			queue: [{
 				id: "alpha",
@@ -755,7 +935,9 @@ describe("smoke: phase runner selection", () => {
 			}],
 			recentRuns: [],
 			current: null,
-		}, null, 2))
+		}
+		await writeFile(resolve(runtime, "state.json"), JSON.stringify(state, null, 2))
+		await seedLoopDb(dir, "two-phase-stop-smoke", state)
 		await writeFile(resolve(runtime, "issues/alpha.md"), "# alpha\n")
 		return dir
 	}
@@ -803,6 +985,7 @@ describe("smoke: phase runner selection", () => {
 async function makeIdleTarget(): Promise<{ target: string; counterPath: string; lockPath: string; devLoopPath: string }> {
 	const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-idle-"))
 	const runtime = resolve(dir, ".coder-loop/runtime")
+	const loopDataRoot = resolve(runtime, "loop-data")
 	await mkdir(resolve(runtime, "issues"), { recursive: true })
 	await mkdir(resolve(runtime, "evidence"), { recursive: true })
 	await mkdir(resolve(runtime, "logs"), { recursive: true })
@@ -825,14 +1008,17 @@ exit 0
 		resolve(runtime, "config.json"),
 		JSON.stringify({
 			preset: "single-phase-example",
+			loopDataRoot,
 			runner: "claude",
 			claude: { binary: fakeAgent, extraArgs: [] },
 		}, null, 2),
 	)
+	const state = { version: 1, queue: [], recentRuns: [], current: null }
 	await writeFile(
 		resolve(runtime, "state.json"),
-		JSON.stringify({ version: 1, queue: [], recentRuns: [], current: null }, null, 2),
+		JSON.stringify(state, null, 2),
 	)
+	await seedLoopDb(dir, "single-phase-example", state)
 	return {
 		target: dir,
 		counterPath,

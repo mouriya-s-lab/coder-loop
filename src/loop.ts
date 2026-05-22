@@ -17,6 +17,13 @@ import { type as arkType } from "arktype"
 import { daemonRequest, sendDaemonRequest, startCoderLoopDaemon, type DaemonCommandName } from "./daemon"
 import { dispatchSubcommand } from "./install-commands"
 import { resolveLoopDataPaths } from "./runtime-paths"
+import {
+	type ChainRecord,
+	type CurrentRunRecord,
+	type ItemRecord,
+	openSqliteStateStore,
+	type SqliteStateStore,
+} from "./sqlite-state"
 
 const PKG_ROOT = resolve(import.meta.dir, "..")
 const DEFAULT_PRESET_NAME = "gh-issue-pr-iteration"
@@ -83,12 +90,22 @@ export type LoopState = {
 	current: CurrentRun | null
 }
 
+type DbLoopStateSnapshot = {
+	chain: ChainRecord
+	state: LoopState
+}
+
+type DbLoopStateContext = DbLoopStateSnapshot & {
+	store: SqliteStateStore
+}
+
 type RawArgs = {
 	maxIterations: number | null
 	targetCwd: string | null
 	configPath: string | null
 	workflowPath: string | null
 	statePath: string | null
+	loopDataRoot: string | null
 	repository: string | null
 	requireBrowserEvidence: boolean | null
 	once: boolean
@@ -247,6 +264,7 @@ type LoopConfig = {
 	issueDir: string | null
 	evidenceDir: string | null
 	logDir: string | null
+	loopDataRoot: string | null
 	requireAgentBrowserScreenshots: boolean | null
 	defaultRunner: AgentRunnerKind | null
 	reviewRunner: AgentRunnerKind | null
@@ -272,6 +290,7 @@ const StatusConfigBoundary = arkType({
 	"issueDir?": "string|null",
 	"evidenceDir?": "string|null",
 	"logDir?": "string|null",
+	"loopDataRoot?": "string|null",
 	"evidence?": {
 		"requireAgentBrowserScreenshots?": "boolean|null",
 	},
@@ -423,6 +442,7 @@ export type LoopOptions = {
 	issueDir: string
 	evidenceRootDir: string
 	logDir: string
+	loopDataRoot: string | null
 	loopFile: string
 	traceFile: string
 	logFile: string
@@ -872,6 +892,7 @@ function parseArgs(): RawArgs {
 		configPath: null,
 		workflowPath: null,
 		statePath: null,
+		loopDataRoot: null,
 		repository: null,
 		requireBrowserEvidence: null,
 		once: false,
@@ -906,6 +927,10 @@ function parseArgs(): RawArgs {
 				break
 			case "--state":
 				raw.statePath = readFlagValue(args, index, inlineValue, name)
+				if (inlineValue === null) index++
+				break
+			case "--loop-data-root":
+				raw.loopDataRoot = readFlagValue(args, index, inlineValue, name)
 				if (inlineValue === null) index++
 				break
 			case "--repo":
@@ -1735,7 +1760,7 @@ async function main() {
 	const options = buildOptions(targetCwd, configPath, rawArgs, config, preset)
 
 	if (options.checkRuntime) {
-		const state = await loadState(options.statePath)
+		const { state } = await loadLoopStateFromDb(options)
 		const selected = selectIssue(state, options)
 		const errors = await checkRuntime(options, state)
 		if (errors.length > 0) {
@@ -1746,7 +1771,7 @@ async function main() {
 		console.error(`Runtime check passed: target=${options.targetCwd}`)
 		if (options.repository !== null) console.error(`Runtime check passed: repo=${options.repository}`)
 		console.error(`Runtime check passed: config=${options.configPath} (${configFormatForPath(options.configPath)})`)
-		console.error(`Runtime check passed: state=${options.statePath}`)
+		console.error(`Runtime check passed: state=${resolveLoopDataPaths(loopDataRootOption(options.loopDataRoot)).dbFile}`)
 		console.error(`Runtime check passed: queue=${state.queue.length}, selected=${selected ? getItemId(selected.item, options.preset) : "none"}`)
 		console.error(`Runtime check passed: preset=${options.preset.name}`)
 		return
@@ -1763,12 +1788,12 @@ async function main() {
 	}
 
 	if (options.dryRun) {
-		const state = await loadState(options.statePath)
+		const { state } = await loadLoopStateFromDb(options)
 		const selected = selectIssue(state, options)
 		console.error(`Dry run: target=${options.targetCwd}`)
 		if (options.repository !== null) console.error(`Dry run: repo=${options.repository}`)
 		console.error(`Dry run: workflow=${options.workflowPath}`)
-		console.error(`Dry run: state=${options.statePath}`)
+		console.error(`Dry run: state=${resolveLoopDataPaths(loopDataRootOption(options.loopDataRoot)).dbFile}`)
 		console.error(`Dry run: selected=${selected ? getItemId(selected.item, options.preset) : "none"}`)
 		if (selected) {
 			const kindResult = await resolveIssueKind(options.repository, getItemId(selected.item, options.preset), selected.item)
@@ -1791,10 +1816,10 @@ async function main() {
 	log(`Default runner: ${options.defaultRunner.kind} (${options.defaultRunner.source}, binary=${options.defaultRunner.binary}, model=${options.defaultRunner.model ?? "<default>"})`)
 	for (const phase of options.preset.phases) log(`Phase ${phase.name} prompt: ${phase.prompt}`)
 	log(`Workflow=${options.workflowPath}`)
-	log(`State=${options.statePath}`)
+	log(`State=${resolveLoopDataPaths(loopDataRootOption(options.loopDataRoot)).dbFile}`)
 	if (options.worktree) {
 		log(`Worktree mode: baseBranch=origin/${options.baseBranch}`)
-		const startupState = await loadState(options.statePath)
+		const { state: startupState } = await loadLoopStateFromDb(options)
 		const activeIds = new Set<string>()
 		for (const item of startupState.queue) {
 			if (options.preset.statuses.continuable.includes(item.status)) {
@@ -1827,7 +1852,8 @@ async function main() {
 	log(`Review-on-empty lock: ${lockPath}`)
 
 	while ((await exists(options.loopFile)) && workIteration < options.maxIterations) {
-		const state = await loadState(options.statePath)
+		const dbSnapshot = await loadLoopStateFromDb(options)
+		const state = dbSnapshot.state
 		await assertRuntimeValid(options, state)
 		let selected = selectIssue(state, options)
 
@@ -1840,7 +1866,7 @@ async function main() {
 				selected.item.agentCwd,
 			)
 			selected.item.agentCwd = wtPath
-			await saveState(options.statePath, state)
+			await saveLoopStateToDb(options, dbSnapshot.chain, state)
 			selected = { ...selected, agentCwd: wtPath }
 			log(`worktree: created ${wtPath} for item #${selectedId}`)
 		}
@@ -1924,10 +1950,10 @@ async function main() {
 		})
 
 		if (current?.phase !== reviewPhase.name) {
-			const stateForIteration = await loadState(options.statePath)
+			const iterationSnapshot = await loadLoopStateFromDb(options)
+			const stateForIteration = iterationSnapshot.state
 			markIterationStarted(stateForIteration, selected.item, options.preset, runId, current === null)
-			await saveState(options.statePath, stateForIteration)
-			const preIterSnapshot = serializeState(stateForIteration)
+			await saveLoopStateToDb(options, iterationSnapshot.chain, stateForIteration)
 
 			log(`${current ? "Resuming" : "Starting"} ${iterPhase.name} agent for issue #${selectedId}...`)
 			const iterStart = Date.now()
@@ -1974,10 +2000,9 @@ async function main() {
 				break
 			}
 
-			await reconcileStateAfterIter(options.statePath, preIterSnapshot, log)
 			markReviewStarted(stateForIteration, selected.item, options.preset, runId)
-			await saveState(options.statePath, stateForIteration)
-					} else {
+			await saveLoopStateToDb(options, iterationSnapshot.chain, stateForIteration)
+		} else {
 			log(`Resuming ${reviewPhase.name} agent for issue #${selectedId} without rerunning iteration...`)
 		}
 
@@ -2012,7 +2037,7 @@ async function main() {
 			break
 		}
 
-		const stateAfterReviewTriggers = await loadState(options.statePath)
+		const { state: stateAfterReviewTriggers } = await loadLoopStateFromDb(options)
 		const itemAfterReviewTriggers = stateAfterReviewTriggers.queue.find((q) => getItemId(q, options.preset) === selectedId)
 		if (itemAfterReviewTriggers && options.preset.statuses.terminal.includes(itemAfterReviewTriggers.status)) {
 			await emit({
@@ -2050,7 +2075,7 @@ async function runTriggeredPhasesAfter(
 	emit: LoopEventEmit,
 ): Promise<number> {
 	for (const phase of options.preset.phases.filter((candidate) => candidate.trigger?.afterPhase === afterPhase)) {
-		const state = await loadState(options.statePath)
+		const { state } = await loadLoopStateFromDb(options)
 		const item = state.queue.find((queueItem) => getItemId(queueItem, options.preset) === selectedId)
 		if (!item) {
 			log(`Skipping trigger phase ${phase.name}: issue #${selectedId} no longer exists in queue.`)
@@ -2198,6 +2223,7 @@ function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, confi
 	const issueDir = resolveFrom(targetCwd, config.issueDir ?? DEFAULT_ISSUE_DIR)
 	const evidenceRootDir = resolveFrom(targetCwd, config.evidenceDir ?? DEFAULT_EVIDENCE_DIR)
 	const logDir = resolveFrom(targetCwd, config.logDir ?? DEFAULT_LOG_DIR)
+	const loopDataRoot = raw.loopDataRoot ?? config.loopDataRoot
 	const repository = raw.repository ?? config.repository
 	const maxIterations = raw.once ? 1 : (raw.maxIterations ?? Number.POSITIVE_INFINITY)
 	const requireBrowserEvidence = raw.requireBrowserEvidence ?? config.requireAgentBrowserScreenshots ?? false
@@ -2218,6 +2244,7 @@ function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, confi
 		issueDir,
 		evidenceRootDir,
 		logDir,
+		loopDataRoot,
 		loopFile: resolve(targetCwd, ".dev-loop"),
 		traceFile: resolve(targetCwd, ".dev-trace.txt"),
 		logFile: resolve(logDir, `coder-loop-${process.pid}.${timestamp}.log`),
@@ -2354,6 +2381,7 @@ function makeStatusRawArgs(args: StatusCommandArgs): RawArgs {
 		configPath: args.configPath,
 		workflowPath: null,
 		statePath: null,
+		loopDataRoot: null,
 		repository: args.repository,
 		requireBrowserEvidence: null,
 		once: false,
@@ -2418,6 +2446,7 @@ function buildStatusRunnerDefaultsSnapshot(options: LoopOptions | null): StatusR
 		issueDir: null,
 		evidenceDir: null,
 		logDir: null,
+		loopDataRoot: null,
 		requireAgentBrowserScreenshots: null,
 		defaultRunner: null,
 		reviewRunner: null,
@@ -3013,10 +3042,11 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 	const options = await loadLoopOptionsForTarget(args.targetCwd, args.configPath, args.repository)
 	assertQueueUnblockSupported(options.preset)
 	const issue = normalizeQueueIssueId(args.issue)
-	const state = await loadState(options.statePath)
+	const dbSnapshot = await loadLoopStateFromDb(options)
+	const state = dbSnapshot.state
 	const mutation = requeueBlockedItem(state, options.preset, issue)
 	if (!mutation.changed && mutation.reason === "not_found") {
-		fail(`queue unblock: issue ${issue} not found in ${options.statePath}`)
+		fail(`queue unblock: issue ${issue} not found in SQLite state DB`)
 	}
 
 	let daemon: QueueUnblockCommandResult["daemon"]
@@ -3041,7 +3071,7 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 			}),
 		}
 	} else {
-		await saveState(options.statePath, state)
+		await saveLoopStateToDb(options, dbSnapshot.chain, state)
 		daemon = {
 			requested: true,
 			dryRun: false,
@@ -3060,18 +3090,12 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 	}
 
 	if (mutation.changed && !args.dryRun && !args.startDaemon) {
-		await saveState(options.statePath, state)
+		await saveLoopStateToDb(options, dbSnapshot.chain, state)
 	}
 
-	const verificationState = args.dryRun ? state : await loadState(options.statePath)
+	const verificationState = args.dryRun ? state : (await loadLoopStateFromDb(options)).state
 	const item = findQueueItemById(verificationState, options.preset, issue)
-	const statusSnapshot = await buildCoderLoopStatusSnapshot({
-		targetCwd: options.targetCwd,
-		configPath: args.configPath,
-		repository: options.repository,
-		output: "json",
-	})
-	const daemonRunning = daemonResultIndicatesRunning(daemon) || findOwnedLiveProcess(statusSnapshot) !== null
+	const daemonRunning = daemonResultIndicatesRunning(daemon)
 	const result: QueueUnblockCommandResult = {
 		action: "queue.unblock",
 		target: options.targetCwd,
@@ -3085,7 +3109,7 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 			itemStatus: item?.status ?? null,
 			blockerRepoPresent: item === null ? null : hasOwnJsonKey(item.extra, "blockerRepo"),
 			blockerRefPresent: item === null ? null : hasOwnJsonKey(item.extra, "blockerRef"),
-			stateKind: statusSnapshot.state.kind,
+			stateKind: "ok",
 			daemonRunning,
 		},
 	}
@@ -3322,6 +3346,7 @@ function loopConfigFromStatusInput(input: StatusConfigInput): LoopConfig {
 		issueDir: input.issueDir ?? null,
 		evidenceDir: input.evidenceDir ?? null,
 		logDir: input.logDir ?? null,
+		loopDataRoot: input.loopDataRoot ?? null,
 		requireAgentBrowserScreenshots: input.evidence?.requireAgentBrowserScreenshots ?? null,
 		defaultRunner: input.runner ?? null,
 		reviewRunner: input.reviewRunner ?? null,
@@ -3421,12 +3446,12 @@ export function resolvePresetDir(
 async function ensureRuntime(options: LoopOptions): Promise<void> {
 	await assertReadable(options.workflowPath, "workflow")
 	await assertReadable(options.sharedContextPath, "shared context")
-	await assertReadable(options.statePath, "state")
+	await loadLoopStateFromDb(options)
 	await mkdir(options.logDir, { recursive: true })
 }
 
 async function assertRuntimeValid(options: LoopOptions, state?: LoopState): Promise<void> {
-	const runtimeState = state ?? await loadState(options.statePath)
+	const runtimeState = state ?? (await loadLoopStateFromDb(options)).state
 	const errors = await checkRuntime(options, runtimeState)
 	if (errors.length === 0) return
 
@@ -3451,7 +3476,6 @@ export async function checkRuntime(options: LoopOptions, state: LoopState): Prom
 	await checkFile(options.configPath, "config", errors)
 	await checkFile(options.workflowPath, "workflow", errors)
 	await checkFile(options.sharedContextPath, "shared context", errors)
-	await checkFile(options.statePath, "state", errors)
 	await checkDirectory(options.issueDir, "issueDir", errors)
 	await checkDirectory(options.evidenceRootDir, "evidenceDir", errors)
 	await checkDirectory(options.logDir, "logDir", errors)
@@ -3459,13 +3483,11 @@ export async function checkRuntime(options: LoopOptions, state: LoopState): Prom
 	checkInside(options.targetCwd, options.configPath, "config", errors)
 	checkInside(options.targetCwd, options.workflowPath, "workflow", errors)
 	checkInside(options.targetCwd, options.sharedContextPath, "shared context", errors)
-	checkInside(options.targetCwd, options.statePath, "state", errors)
 	checkInside(options.targetCwd, options.issueDir, "issueDir", errors)
 	checkInside(options.targetCwd, options.evidenceRootDir, "evidenceDir", errors)
 	checkInside(options.targetCwd, options.logDir, "logDir", errors)
 	checkInside(runtimeRoot, options.configPath, "config", errors)
 	checkInside(runtimeRoot, options.sharedContextPath, "shared context", errors)
-	checkInside(runtimeRoot, options.statePath, "state", errors)
 	checkInside(runtimeRoot, options.issueDir, "issueDir", errors)
 	checkInside(runtimeRoot, options.evidenceRootDir, "evidenceDir", errors)
 	checkInside(runtimeRoot, options.logDir, "logDir", errors)
@@ -3659,6 +3681,179 @@ export function serializeState(state: LoopState): string {
 		current: state.current ? flattenCurrentRun(state.current) : null,
 	}
 	return `${JSON.stringify(serializable, null, "\t")}\n`
+}
+
+async function loadLoopStateFromDb(options: LoopOptions): Promise<DbLoopStateSnapshot> {
+	return await withDbLoopState(options, (ctx) => ({ chain: ctx.chain, state: ctx.state }))
+}
+
+async function withDbLoopState<T>(options: LoopOptions, fn: (ctx: DbLoopStateContext) => T | Promise<T>): Promise<T> {
+	const store = openSqliteStateStore({ createIfMissing: false, ...loopDataRootOption(options.loopDataRoot) })
+	try {
+		const chain = selectDbChainForOptions(store, options)
+		const state = loopStateFromDbRecords(chain, store.listItems(chain.id), store.getCurrentRun(chain.id), options.preset)
+		return await fn({ store, chain, state })
+	} finally {
+		store.close()
+	}
+}
+
+async function saveLoopStateToDb(options: LoopOptions, chain: ChainRecord, state: LoopState): Promise<void> {
+	await withDbLoopState(options, ({ store }) => {
+		persistLoopStateToDb(store, chain, state, options.preset)
+	})
+}
+
+function loopDataRootOption(loopDataRoot: string | null): { loopDataRoot?: string } {
+	return loopDataRoot === null ? {} : { loopDataRoot }
+}
+
+function selectDbChainForOptions(store: SqliteStateStore, options: LoopOptions): ChainRecord {
+	const activeChains = store.listChains().filter((chain) =>
+		chain.status === "active"
+		&& (options.repository === null || chain.repository === options.repository)
+		&& chain.preset === options.preset.name
+		&& (options.baseBranch === null || chain.baseBranch === options.baseBranch)
+	)
+	const matchingByRepoCwd = activeChains.filter((chain) =>
+		store.listItems(chain.id).some((item) => samePath(item.repoCwd, options.targetCwd)),
+	)
+	const candidates = matchingByRepoCwd.length > 0 ? matchingByRepoCwd : activeChains
+	if (candidates.length === 1) return candidates[0]!
+	const dbFile = resolveLoopDataPaths(loopDataRootOption(options.loopDataRoot)).dbFile
+	if (candidates.length === 0) {
+		const repoLabel = options.repository === null ? "any repo" : `repo ${options.repository}`
+		fail(`SQLite state DB has no active chain for ${repoLabel} at ${dbFile}`)
+	}
+	const repoLabel = options.repository === null ? "this target" : `repo ${options.repository}`
+	fail(`SQLite state DB has multiple active chains for ${repoLabel}; select one by repo_cwd or complete/delete stale chains`)
+}
+
+function loopStateFromDbRecords(
+	chain: ChainRecord,
+	items: ItemRecord[],
+	current: CurrentRunRecord | null,
+	preset: Preset,
+): LoopState {
+	return {
+		version: 1,
+		queue: items.map((item) => itemRecordToQueueItem(item, preset)),
+		repository: chain.repository,
+		baseBranch: chain.baseBranch,
+		recentRuns: jsonArray(chain.metadata.recentRuns),
+		current: currentRecordToCurrentRun(current, items, preset),
+	}
+}
+
+function itemRecordToQueueItem(item: ItemRecord, preset: Preset): QueueItem {
+	const extra = { ...item.extra }
+	if (extra[preset.item.idField] === undefined) extra[preset.item.idField] = item.issueNumber
+	return {
+		status: item.status,
+		attempts: item.attempts,
+		title: item.title,
+		priority: item.priority,
+		branch: item.branch,
+		pr: item.pr,
+		lastRunId: item.lastRunId,
+		issueFile: item.issueFile,
+		evidenceDir: item.evidenceDir,
+		agentCwd: item.agentCwd,
+		runner: item.runner,
+		extra,
+	}
+}
+
+function currentRecordToCurrentRun(
+	current: CurrentRunRecord | null,
+	items: ItemRecord[],
+	preset: Preset,
+): CurrentRun | null {
+	if (current === null) return null
+	const extra = { ...current.extra }
+	const currentItem = items.find((item) => item.id === extra.itemId) ?? items.find((item) => item.lastRunId === current.runId)
+	if (currentItem !== undefined && extra[preset.item.idField] === undefined) extra[preset.item.idField] = currentItem.issueNumber
+	return {
+		phase: current.phase,
+		runId: current.runId,
+		startedAt: new Date(current.startedAt * 1000).toISOString(),
+		extra,
+	}
+}
+
+function persistLoopStateToDb(store: SqliteStateStore, chain: ChainRecord, state: LoopState, preset: Preset): void {
+	const itemsByIssue = new Map(store.listItems(chain.id).map((item) => [getItemId(itemRecordToQueueItem(item, preset), preset), item]))
+	for (const item of state.queue) {
+		const issue = getItemId(item, preset)
+		const record = itemsByIssue.get(issue)
+		if (record === undefined) fail(`SQLite state DB item ${issue} was not found in chain ${chain.name}`)
+		store.updateItem(record.id, {
+			status: item.status,
+			attempts: item.attempts ?? 0,
+			title: item.title,
+			priority: item.priority,
+			branch: item.branch,
+			pr: item.pr,
+			lastRunId: item.lastRunId,
+			issueFile: item.issueFile,
+			evidenceDir: item.evidenceDir,
+			agentCwd: item.agentCwd,
+			runner: item.runner,
+			extra: item.extra,
+			updatedAt: unixSeconds(),
+		})
+	}
+
+	if (Array.isArray(state.recentRuns)) {
+		store.updateChain(chain.id, {
+			metadata: { ...chain.metadata, recentRuns: state.recentRuns },
+			updatedAt: unixSeconds(),
+		})
+	}
+
+	if (state.current === null) {
+		store.clearCurrentRun(chain.id)
+		return
+	}
+	const currentIssue = getCurrentId(state.current, preset)
+	const currentItem = itemsByIssue.get(currentIssue)
+	if (currentItem === undefined) fail(`SQLite state DB current item ${currentIssue} was not found in chain ${chain.name}`)
+	const startedAt = unixSecondsFromIso(state.current.startedAt)
+	if (store.getRunByRunId(state.current.runId) === null) {
+		store.recordRun({
+			runId: state.current.runId,
+			chainId: chain.id,
+			itemId: currentItem.id,
+			phase: state.current.phase,
+			startedAt,
+			extra: state.current.extra,
+		})
+	}
+	store.setCurrentRun({
+		chainId: chain.id,
+		phase: state.current.phase,
+		runId: state.current.runId,
+		startedAt,
+		extra: state.current.extra,
+	})
+}
+
+function jsonArray(value: JsonValue | undefined): JsonValue[] {
+	return Array.isArray(value) ? value.filter((entry): entry is JsonValue => isJsonValue(entry)) : []
+}
+
+function unixSecondsFromIso(value: string): number {
+	const time = Date.parse(value)
+	if (!Number.isFinite(time)) fail(`invalid ISO timestamp for DB current_runs.started_at: ${value}`)
+	return time / 1000
+}
+
+function unixSeconds(): number {
+	return Date.now() / 1000
+}
+
+function samePath(left: string, right: string): boolean {
+	return resolve(left) === resolve(right)
 }
 
 async function saveState(path: string, state: LoopState): Promise<void> {

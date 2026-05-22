@@ -88,6 +88,7 @@ import {
 	removeWorktreeForItem,
 	cleanupStaleWorktrees,
 } from "./loop"
+import { openSqliteStateStore } from "./sqlite-state"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const BUNDLED_PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
@@ -153,6 +154,7 @@ async function makeFixtureOptions(preset: Preset): Promise<LoopOptions> {
 		issueDir,
 		evidenceRootDir,
 		logDir,
+		loopDataRoot: null,
 		loopFile: resolve(cwd, ".dev-loop"),
 		traceFile: resolve(cwd, ".dev-trace.txt"),
 		logFile: resolve(logDir, "test.log"),
@@ -1384,15 +1386,18 @@ describe("preset selection integration (synthetic target)", () => {
 		const issueDir = resolve(runtimeDir, "issues")
 		const evidenceDir = resolve(runtimeDir, "evidence")
 		const logDir = resolve(runtimeDir, "logs")
+		const loopDataRoot = resolve(runtimeDir, "loop-data")
 		await mkdir(issueDir, { recursive: true })
 		await mkdir(evidenceDir, { recursive: true })
 		await mkdir(logDir, { recursive: true })
+		await mkdir(loopDataRoot, { recursive: true })
 		await writeFile(resolve(targetCwd, ".coder-loop/workflow.md"), "# workflow\n")
 		await writeFile(resolve(runtimeDir, "shared.md"), "# shared\n")
 		await writeFile(resolve(runtimeDir, "config.json"), JSON.stringify({
 			repository: "Mouriya-Emma/synthetic",
 			baseBranch: "main",
 			preset: "gh-issue-pr-iteration",
+			loopDataRoot,
 		}))
 		await writeFile(resolve(runtimeDir, "state.json"), JSON.stringify({
 			version: 1,
@@ -1402,6 +1407,18 @@ describe("preset selection integration (synthetic target)", () => {
 			recentRuns: [],
 			current: null,
 		}))
+		const store = openSqliteStateStore({ loopDataRoot })
+		try {
+			store.createChain({
+				name: "synthetic",
+				preset: "gh-issue-pr-iteration",
+				repository: "Mouriya-Emma/synthetic",
+				baseBranch: "main",
+				metadata: { recentRuns: [] },
+			})
+		} finally {
+			store.close()
+		}
 
 		const proc = Bun.spawnSync({
 			cmd: ["bun", "src/loop.ts", "--target-cwd", targetCwd, "--check-runtime"],
