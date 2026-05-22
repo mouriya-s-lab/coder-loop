@@ -68,7 +68,12 @@ gh api graphql -f query='
   -f p="$PARENT_ID" -f c="$CHILD_ID"
 ```
 
-Prepare a queue item for each new child:
+Prepare a **front-insertion batch** for the new children. The batch is not an
+append list: it must be carried to `review/update-state` as the exact set of
+new child queue items that should be inserted before any pre-existing queued
+siblings. Preserve creation order inside the batch.
+
+Queue item shape for each new child:
 
 ```json
 {
@@ -84,6 +89,13 @@ Prepare a queue item for each new child:
   "evidenceDir": ".coder-loop/runtime/evidence/issue-123"
 }
 ```
+
+If the previous queue shape was `[parent(current), B, C]` and this fragment
+created child issues `[D, E]`, the required next queue shape is `[D, E, parent
+changes_requested, B, C]` or `[D, E, B, C, parent changes_requested]` depending
+on where the parent item already lives in the local store. The invariant is
+that `D` and `E` appear before `B` and `C`; do not append `[D, E]` after
+existing queued siblings.
 
 Initialize the local child bookkeeping before state insertion:
 

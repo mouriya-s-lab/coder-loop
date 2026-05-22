@@ -42,6 +42,8 @@ Reject unless reviewer-consumable evidence satisfies the target workflow file:
 - every screenshot reference in the evidence packet is enumerated and resolved to the exact PR-branch/local-checkout file it claims to show;
 - every resolved screenshot file exists, is reachable from the evidence packet URL/path, and is actually read/opened as image data before accepting the evidence;
 - stale screenshots that only exist on `main`, deleted head branches, local-only runtime paths, broken raw/blob URLs, non-image files, or uninspectable image references are insufficient even when the Markdown image syntax is present;
+- **synthetic screenshots are rejected**: screenshots of locally-generated HTML pages that render log output, test results, JSON data, or other text content are not valid evidence. A valid screenshot shows the actual running system (real dev server, real CI dashboard, real service UI, real deployed page). If the screenshot content could have been produced by writing an HTML file and opening it in a browser, it is synthetic. The fix is to paste the log/data as text and screenshot the real system instead, or omit the screenshot if no real UI is involved;
+- **log evidence must be text**: command output, test results, build logs, and runtime logs belong as text excerpts (command + exit status + concise output or log path) in the evidence packet, not as screenshots of terminal output or HTML-rendered logs. Reject screenshots whose only content is text that should have been pasted directly;
 - evidence maps each artifact or log excerpt to the behavior it proves;
 - positive and negative/error/disabled paths are covered when required by workflow or issue scope.
 

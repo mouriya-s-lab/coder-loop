@@ -108,7 +108,19 @@ For UI projects, minimum expectation:
 - Commit screenshots under tracked `screenshots/coder-loop/issue-N/<runId>/` or similar.
 - Reference screenshot paths in Layer 4 and explain what each screenshot proves.
 
-For backend/config/CLI-only issues, still use agent-browser to open the closest relevant UI/status/settings page or a smoke page and capture a no-regression screenshot, unless impossible. If impossible, block for review instead of waiving the requirement.
+For backend/config/CLI-only issues in projects that have a UI, still use agent-browser to open the closest relevant UI/status/settings page and capture a no-regression screenshot. For projects that have no UI at all (pure CLI / library / backend), CLI smoke run transcripts (command + exit status + output) are the Layer 4 evidence — do not fabricate a screenshot by creating an HTML page.
+
+**What is NOT a valid screenshot:**
+
+- A locally-created HTML file that renders log output, test results, JSON, or any text data. This is a synthetic screenshot — it proves nothing beyond what pasting the text directly would prove, and it hides whether the real system was actually exercised.
+- A terminal screenshot when the same log content could be pasted as text.
+- A screenshot of CI logs rendered locally instead of a screenshot of the actual CI dashboard page.
+
+**When to use text instead of screenshots:**
+
+- Change-verification evidence (typecheck, test, lint, build): paste as text (command + exit status + concise excerpt or log path).
+- Runtime-execution evidence (server startup, daemon output, CLI smoke): paste as text.
+- Only screenshot when the evidence is inherently visual: rendered UI state, layout, interactive behavior, real CI/CD dashboard pages, real monitoring panels.
 
 ## Issue queue policy
 

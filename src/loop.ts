@@ -715,7 +715,7 @@ const BACKOFF_MAX_INTERVAL_SECONDS = 600
 export const SUMMARY_WATCHDOG_MARKER = "ITERATION SUMMARY:"
 export const REVIEW_SUMMARY_WATCHDOG_MARKER = "REVIEW SUMMARY:"
 export type ReviewSummaryVerdict = "retry" | "accepted" | "skip" | "blocked" | "stop"
-export const SUMMARY_WATCHDOG_TERM_MS = 5 * 60 * 1000
+export const SUMMARY_WATCHDOG_TERM_MS = Infinity
 export const SUMMARY_WATCHDOG_KILL_MS = 5 * 1000
 
 export type SelectedIssue = {
@@ -3566,6 +3566,7 @@ export function createSummaryWatchdog(deps: SummaryWatchdogDeps): SummaryWatchdo
 
 	const arm = (): void => {
 		if (state.kind !== "idle") return
+		if (!Number.isFinite(deps.config.termMs) || deps.config.termMs <= 0) return
 		state = { kind: "armed" }
 		deps.log(`summary watchdog armed: SIGTERM scheduled in ${Math.round(deps.config.termMs / 1000)}s after observing "${deps.config.marker}"`)
 		termTimer = deps.setTimer(() => {
@@ -3996,6 +3997,19 @@ export type RunnerInvocation =
 
 type GitExecResult = { stdout: string; stderr: string; exitCode: number }
 
+function realpathForComparison(path: string): string {
+	try { return realpathSync(path) } catch { return path }
+}
+
+function gitWorktreeListIncludesPath(stdout: string, expectedPath: string): boolean {
+	const expectedRealPath = realpathForComparison(expectedPath)
+	return stdout
+		.split("\n")
+		.filter((line) => line.startsWith("worktree "))
+		.map((line) => line.slice("worktree ".length))
+		.some((listedPath) => listedPath === expectedPath || realpathForComparison(listedPath) === expectedRealPath)
+}
+
 function gitExec(cwd: string, args: readonly string[]): GitExecResult {
 	const proc = Bun.spawnSync({ cmd: ["git", ...args], cwd, stdout: "pipe", stderr: "pipe" })
 	return {
@@ -4035,7 +4049,7 @@ export function ensureWorktreeForItem(
 
 	if (existingAgentCwd === wtPath) {
 		const check = gitExec(targetCwd, ["worktree", "list", "--porcelain"])
-		if (check.stdout.includes(wtPath)) return wtPath
+		if (check.exitCode === 0 && gitWorktreeListIncludesPath(check.stdout, wtPath)) return wtPath
 	}
 
 	const branchName = `coder-loop/${itemId.replace(/[^a-zA-Z0-9_-]/g, "_")}`
@@ -4099,23 +4113,30 @@ export type RunnerInvocationPaths = {
 }
 
 export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: string, resume: ResumeDecision, paths: RunnerInvocationPaths): RunnerInvocation {
+	const additionalDirs = [paths.presetDir]
+	if (paths.targetCwd !== paths.agentCwd) additionalDirs.push(paths.targetCwd)
 	if (runner.kind === "claude") {
-		const dirs = [paths.presetDir]
-		if (paths.targetCwd !== paths.agentCwd) dirs.push(paths.targetCwd)
 		return {
 			kind: "spawn",
 			binary: runner.binary,
-			args: agentClaudeArgs(runner.extraArgs, prompt, resume, dirs, runner.model),
+			args: agentClaudeArgs(runner.extraArgs, prompt, resume, additionalDirs, runner.model),
 		}
 	}
 	return {
 		kind: "spawn",
 		binary: runner.binary,
-		args: agentCodexArgs(runner.extraArgs, prompt, resume, paths.agentCwd, runner.model),
+		args: agentCodexArgs(runner.extraArgs, prompt, resume, paths.agentCwd, runner.model, additionalDirs),
 	}
 }
 
-export function agentCodexArgs(extraArgs: readonly string[], prompt: string, resume: ResumeDecision, agentCwd: string, model: string | null = null): string[] {
+export function agentCodexArgs(
+	extraArgs: readonly string[],
+	prompt: string,
+	resume: ResumeDecision,
+	agentCwd: string,
+	model: string | null = null,
+	additionalDirs: readonly string[] = [],
+): string[] {
 	const topLevelArgs = ["--ask-for-approval", "never", "exec"]
 	const runnerArgs = model === null ? [...extraArgs] : stripModelArgs(extraArgs, ["--model", "-m"])
 	if (resume.kind === "resume") {
@@ -4130,6 +4151,9 @@ export function agentCodexArgs(extraArgs: readonly string[], prompt: string, res
 	if (model !== null) args.push("--model", model)
 	if (!args.includes("--json")) args.push("--json")
 	if (!args.includes("--cd")) args.push("--cd", agentCwd)
+	if (additionalDirs.length > 0 && !args.includes("--add-dir")) {
+		for (const dir of additionalDirs) args.push("--add-dir", dir)
+	}
 	if (!args.includes("--sandbox")) args.push("--sandbox", "danger-full-access")
 	args.push(prompt)
 	return args

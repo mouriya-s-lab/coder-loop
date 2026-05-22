@@ -66,7 +66,7 @@ Always, for every iteration regardless of `ISSUE_KIND`. The pattern occurs in bo
 Choose exactly one:
 
 - `caveat_honesty_passed` → read `review/commitment-gate`. No trigger phrases found, or every trigger was matched by explicit pre-authorization in the issue body.
-- `caveat_honesty_failed` → read `review/action-retry`. Emit a retry-feedback block listing every trigger (verbatim quote + source file + affected acceptance row + why it's not authorized). The retry must address all triggers — either by re-doing the probe on the demanded path, by tightening the invariant check, by removing the cosmetic-handwave language and resolving the actual mismatch, or by first opening a separate issue / amendment to the body if the scope reduction is truly necessary.
+- `caveat_honesty_failed` → read `review/action-retry`. Emit a retry-feedback block listing every trigger (verbatim quote + source file + affected acceptance row + why it's not authorized). The retry must address all triggers — either by re-doing the probe on the demanded path, by tightening the invariant check, by removing the cosmetic-handwave language and resolving the actual mismatch, or by first opening a separate issue / amendment to the body if the scope reduction is truly necessary. **PR body immutability applies here too**: when a trigger phrase appears in the PR body (e.g. Analysis or Summary sections), the retry feedback must instruct iteration to post corrected language and updated evidence in a new PR-thread comment — not to edit the PR body. The PR body retains the original caveat as historical record; the PR-thread comment supersedes it with the substantive fix.
 
 ## Anti-rationalization rule for this gate itself
 

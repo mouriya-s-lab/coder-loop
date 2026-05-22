@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises"
 import * as fs from "node:fs/promises"
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { basename, resolve } from "node:path"
+import { basename, dirname, resolve } from "node:path"
 
 import {
 	agentClaudeArgs,
@@ -1239,6 +1239,20 @@ describe("renderPrompt with bundled preset", () => {
 		expect(updateState).toContain("do not add `blockerRepo` or `blockerRef`")
 	})
 
+	test("expanded parent review path requires front insertion before existing queued siblings", async () => {
+		const actionExpandParent = await readFile(resolve(BUNDLED_PRESET_DIR, "review/action-expand-parent.md"), "utf-8")
+		const updateState = await readFile(resolve(BUNDLED_PRESET_DIR, "review/update-state.md"), "utf-8")
+
+		expect(actionExpandParent).toContain("front-insertion batch")
+		expect(actionExpandParent).toContain("inserted before any pre-existing queued")
+		expect(actionExpandParent).toContain("siblings")
+		expect(actionExpandParent).toContain("do not append")
+		expect(actionExpandParent).toContain("D` and `E` appear before `B` and `C`")
+		expect(updateState).toContain("insert the new child items as a batch at the front")
+		expect(updateState).toContain("the new children are selected before the parent retry item and before any older queued siblings")
+		expect(updateState).toContain("set `current: null`")
+	})
+
 	test("review summary parser extracts stop verdict from raw and stream-json runner output", () => {
 		expect(parseReviewSummaryVerdict("REVIEW SUMMARY: verdict=stop; issue=#114; actionable=1; reason=review infrastructure broken")).toBe("stop")
 		expect(parseReviewSummaryVerdict(JSON.stringify({
@@ -1874,6 +1888,25 @@ describe("agentCodexArgs", () => {
 		])
 	})
 
+	test("fresh invocation adds readable sibling dirs when the caller did not override --add-dir", () => {
+		const args = agentCodexArgs([], "hello", { kind: "fresh" }, "/tmp/target", null, ["/tmp/preset", "/tmp/loop-data"])
+		expect(args).toEqual([
+			"--ask-for-approval",
+			"never",
+			"exec",
+			"--json",
+			"--cd",
+			"/tmp/target",
+			"--add-dir",
+			"/tmp/preset",
+			"--add-dir",
+			"/tmp/loop-data",
+			"--sandbox",
+			"danger-full-access",
+			"hello",
+		])
+	})
+
 	test("fresh invocation preserves caller-provided sandbox override", () => {
 		const args = agentCodexArgs(["--sandbox", "workspace-write"], "hello", { kind: "fresh" }, "/tmp/target")
 		expect(args).toEqual([
@@ -1887,6 +1920,13 @@ describe("agentCodexArgs", () => {
 			"/tmp/target",
 			"hello",
 		])
+	})
+
+	test("caller-provided Codex --add-dir takes precedence over generated additional dirs", () => {
+		const args = agentCodexArgs(["--add-dir", "/caller/path"], "hello", { kind: "fresh" }, "/tmp/target", null, ["/tmp/preset"])
+		expect(args.filter((arg) => arg === "--add-dir")).toHaveLength(1)
+		expect(args).toContain("/caller/path")
+		expect(args).not.toContain("/tmp/preset")
 	})
 
 	test("runner model replaces caller-provided Codex --model args", () => {
@@ -1969,7 +2009,7 @@ describe("buildRunnerInvocation", () => {
 		expect(invocation.args).not.toContain("sonnet")
 	})
 
-	test("Codex runner maps to codex exec invocation (uses agentCwd; --add-dir not applicable)", () => {
+	test("Codex runner maps to codex exec invocation with preset add-dir access", () => {
 		const invocation = buildRunnerInvocation(
 			{ kind: "codex", source: "queue", binary: "codex", extraArgs: [], model: null },
 			"hello",
@@ -1980,8 +2020,34 @@ describe("buildRunnerInvocation", () => {
 		expect(invocation).toEqual({
 			kind: "spawn",
 			binary: "codex",
-			args: ["--ask-for-approval", "never", "exec", "--json", "--cd", "/tmp/target", "--sandbox", "danger-full-access", "hello"],
+			args: [
+				"--ask-for-approval",
+				"never",
+				"exec",
+				"--json",
+				"--cd",
+				"/tmp/target",
+				"--add-dir",
+				"/tmp/preset",
+				"--sandbox",
+				"danger-full-access",
+				"hello",
+			],
 		})
+	})
+
+	test("Codex runner with cross-repo agentCwd adds targetCwd alongside preset dir", () => {
+		const invocation = buildRunnerInvocation(
+			{ kind: "codex", source: "queue", binary: "codex", extraArgs: [], model: null },
+			"hello",
+			{ kind: "fresh" },
+			{ agentCwd: "/tmp/agent-repo", targetCwd: "/tmp/target", presetDir: "/tmp/preset" },
+		)
+
+		expect(invocation.args).toContain("--cd")
+		expect(invocation.args).toContain("/tmp/agent-repo")
+		expect(invocation.args).toContain("/tmp/preset")
+		expect(invocation.args).toContain("/tmp/target")
 	})
 })
 
@@ -3162,6 +3228,20 @@ describe("worktree git integration", () => {
 		const { clone } = await makeGitFixture()
 		const first = ensureWorktreeForItem(clone, "main", "42", null)
 		const second = ensureWorktreeForItem(clone, "main", "42", first)
+		expect(second).toBe(first)
+	})
+
+	test("ensureWorktreeForItem reuses existing worktree when target cwd uses a symlinked parent", async () => {
+		const { clone } = await makeGitFixture()
+		const linkParent = await mkdtemp(resolve(tmpdir(), "coder-loop-wt-link-"))
+		const linkedBase = resolve(linkParent, "fixture")
+		await fs.symlink(dirname(clone), linkedBase, "dir")
+		const linkedClone = resolve(linkedBase, basename(clone))
+
+		const first = ensureWorktreeForItem(linkedClone, "main", "42", null)
+		const second = ensureWorktreeForItem(linkedClone, "main", "42", first)
+
+		expect(first).toBe(worktreePathForItem(linkedClone, "42"))
 		expect(second).toBe(first)
 	})
 

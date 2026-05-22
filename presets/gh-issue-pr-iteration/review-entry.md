@@ -19,7 +19,7 @@ You are spawned by the orchestrator after every iteration. You audit the iterati
 - Log directory: `{{LOG_DIR}}`
 - Trace file: `{{TRACE_FILE}}`
 - Loop file: `{{LOOP_FILE}}`
-- Browser evidence required: `{{REQUIRE_BROWSER_EVIDENCE}}`
+- Browser evidence required: `{{REQUIRE_BROWSER_EVIDENCE}}` — when `true`, Layer 4 must contain the strongest feasible E2E evidence for the project type. For projects with UI: real browser screenshots of the running dev server or deployed page. For projects without UI (pure CLI / library / backend / config): CLI smoke run transcripts with command, exit status, and output are the Layer 4 evidence; synthetic screenshots (HTML files rendered and screenshotted) are rejected.
 
 - Existing issue branch: `{{ISSUE_BRANCH}}`
 - Existing issue PR: `{{ISSUE_PR}}`
