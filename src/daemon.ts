@@ -291,9 +291,13 @@ export class CoderLoopDaemon {
 
 	private handleChainStatus(args: JsonObject): JsonObject {
 		const chain = this.resolveChain(args)
+		const items = this.requireStore().listItems(chain.id)
+		const activeRuns = listActiveRuns(this.schedulerState).filter((run) => run.chainId === chain.id)
 		return {
 			chain: chainToJson(chain),
-			items: this.requireStore().listItems(chain.id).map(itemToJson),
+			summary: chainStatusSummary(chain, items, activeRuns),
+			items: items.map(itemToJson),
+			activeRuns: activeRuns.map(activeRunToJson),
 		}
 	}
 
@@ -454,6 +458,10 @@ export async function sendDaemonRequest(socketPath: string, request: Omit<Daemon
 	return await new Promise((resolveResponse, reject) => {
 		const socket = createConnection(socketPath)
 		let buffer = ""
+		const cleanup = () => {
+			socket.removeAllListeners()
+			socket.destroy()
+		}
 		socket.setEncoding("utf-8")
 		socket.on("connect", () => {
 			socket.write(`${JSON.stringify({ ...request, args: request.args ?? {} })}\n`)
@@ -463,14 +471,19 @@ export async function sendDaemonRequest(socketPath: string, request: Omit<Daemon
 			const newlineIndex = buffer.indexOf("\n")
 			if (newlineIndex === -1) return
 			const line = buffer.slice(0, newlineIndex)
-			socket.end()
 			try {
-				resolveResponse(parseDaemonResponse(line))
+				const response = parseDaemonResponse(line)
+				cleanup()
+				resolveResponse(response)
 			} catch (error) {
+				cleanup()
 				reject(error)
 			}
 		})
-		socket.on("error", reject)
+		socket.on("error", (error) => {
+			cleanup()
+			reject(error)
+		})
 	})
 }
 
@@ -660,6 +673,50 @@ function itemToJson(item: ItemRecord): JsonObject {
 		extra: item.extra,
 		createdAt: item.createdAt,
 		updatedAt: item.updatedAt,
+	}
+}
+
+function chainStatusSummary(
+	chain: ChainRecord,
+	items: ItemRecord[],
+	activeRuns: ReturnType<typeof listActiveRuns>,
+): JsonObject {
+	const byStatus: Record<string, number> = {}
+	for (const item of items) byStatus[item.status] = (byStatus[item.status] ?? 0) + 1
+	return {
+		completion: {
+			state: chain.status,
+			completedAt: chain.status === "completed" ? chain.updatedAt : null,
+		},
+		umbrella: {
+			repo: chain.umbrellaRepo,
+			issue: chain.umbrellaIssue,
+		},
+		items: {
+			total: items.length,
+			byStatus,
+		},
+		activeSlots: activeRuns.map((run) => ({
+			chainId: run.chainId,
+			repoCwd: run.repoCwd,
+			itemId: run.itemId,
+			runId: run.runId,
+			pid: run.pid,
+			worktreePath: run.worktreePath,
+			startedAt: run.startedAt,
+		})),
+	}
+}
+
+function activeRunToJson(run: ReturnType<typeof listActiveRuns>[number]): JsonObject {
+	return {
+		runId: run.runId,
+		pid: run.pid,
+		itemId: run.itemId,
+		chainId: run.chainId,
+		repoCwd: run.repoCwd,
+		worktreePath: run.worktreePath,
+		startedAt: run.startedAt,
 	}
 }
 
