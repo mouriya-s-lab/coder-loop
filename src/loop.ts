@@ -14,7 +14,7 @@ import { closeSync, createWriteStream, openSync, realpathSync, type WriteStream 
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
 import { command, flag, option, optional, positional, run as runCmd, string as cmdString, subcommands } from "cmd-ts"
 import { type as arkType } from "arktype"
-import { daemonRequest, sendDaemonRequest, startCoderLoopDaemon } from "./daemon"
+import { daemonRequest, sendDaemonRequest, startCoderLoopDaemon, type DaemonCommandName } from "./daemon"
 import { dispatchSubcommand } from "./install-commands"
 import { resolveLoopDataPaths } from "./runtime-paths"
 
@@ -150,6 +150,81 @@ export type DaemonCommandArgs =
 	| {
 			action: "down"
 			loopDataRoot: string | null
+	  }
+
+export type ChainCommandArgs =
+	| {
+			action: "create"
+			name: string
+			repository: string
+			preset: string | null
+			baseBranch: string | null
+			umbrella: string | null
+			loopDataRoot: string | null
+			json: boolean
+	  }
+	| {
+			action: "list"
+			loopDataRoot: string | null
+			json: boolean
+	  }
+	| {
+			action: "status"
+			name: string
+			loopDataRoot: string | null
+			json: boolean
+	  }
+	| {
+			action: "delete"
+			name: string
+			loopDataRoot: string | null
+			json: boolean
+	  }
+
+export type ItemCommandArgs =
+	| {
+			action: "add"
+			chainName: string
+			issueNumber: number
+			repoCwd: string
+			status: string | null
+			attempts: number | null
+			title: string | null
+			priority: string | null
+			branch: string | null
+			pr: number | null
+			lastRunId: string | null
+			issueFile: string | null
+			evidenceDir: string | null
+			agentCwd: string | null
+			runner: AgentRunnerKind | null
+			loopDataRoot: string | null
+			json: boolean
+	  }
+	| {
+			action: "list"
+			chainName: string
+			loopDataRoot: string | null
+			json: boolean
+	  }
+	| {
+			action: "update"
+			chainName: string
+			issueNumber: number
+			repoCwd: string | null
+			status: string | null
+			attempts: number | null
+			title: string | null
+			priority: string | null
+			branch: string | null
+			pr: number | null
+			lastRunId: string | null
+			issueFile: string | null
+			evidenceDir: string | null
+			agentCwd: string | null
+			runner: AgentRunnerKind | null
+			loopDataRoot: string | null
+			json: boolean
 	  }
 
 export type QueueUnblockCommandArgs = {
@@ -872,6 +947,8 @@ function parseArgs(): RawArgs {
 type CliCommand =
 	| { kind: "status"; args: StatusCommandArgs }
 	| { kind: "daemon"; args: DaemonCommandArgs }
+	| { kind: "chain"; args: ChainCommandArgs }
+	| { kind: "item"; args: ItemCommandArgs }
 	| { kind: "queue"; args: QueueUnblockCommandArgs }
 
 const statusCliCommand = command({
@@ -1045,6 +1122,218 @@ const daemonCliCommand = subcommands({
 	},
 })
 
+const chainCreateCliCommand = command({
+	name: "create",
+	description: "Create a centralized coder-loop chain through the daemon socket.",
+	args: {
+		name: positional({ displayName: "name", type: cmdString }),
+		repo: option({ long: "repo", type: cmdString }),
+		preset: option({ long: "preset", type: optional(cmdString) }),
+		baseBranch: option({ long: "base-branch", type: optional(cmdString) }),
+		umbrella: option({ long: "umbrella", type: optional(cmdString) }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		json: flag({ long: "json" }),
+	},
+	handler: (args): CliCommand => ({
+		kind: "chain",
+		args: {
+			action: "create",
+			name: args.name,
+			repository: args.repo,
+			preset: args.preset ?? null,
+			baseBranch: args.baseBranch ?? null,
+			umbrella: args.umbrella ?? null,
+			loopDataRoot: args.loopDataRoot ?? null,
+			json: args.json,
+		},
+	}),
+})
+
+const chainListCliCommand = command({
+	name: "list",
+	description: "List centralized coder-loop chains through the daemon socket.",
+	args: {
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		json: flag({ long: "json" }),
+	},
+	handler: (args): CliCommand => ({
+		kind: "chain",
+		args: {
+			action: "list",
+			loopDataRoot: args.loopDataRoot ?? null,
+			json: args.json,
+		},
+	}),
+})
+
+const chainStatusCliCommand = command({
+	name: "status",
+	description: "Show one centralized coder-loop chain through the daemon socket.",
+	args: {
+		name: positional({ displayName: "name", type: cmdString }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		json: flag({ long: "json" }),
+	},
+	handler: (args): CliCommand => ({
+		kind: "chain",
+		args: {
+			action: "status",
+			name: args.name,
+			loopDataRoot: args.loopDataRoot ?? null,
+			json: args.json,
+		},
+	}),
+})
+
+const chainDeleteCliCommand = command({
+	name: "delete",
+	description: "Mark one centralized coder-loop chain as deleted through the daemon socket.",
+	args: {
+		name: positional({ displayName: "name", type: cmdString }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		json: flag({ long: "json" }),
+	},
+	handler: (args): CliCommand => ({
+		kind: "chain",
+		args: {
+			action: "delete",
+			name: args.name,
+			loopDataRoot: args.loopDataRoot ?? null,
+			json: args.json,
+		},
+	}),
+})
+
+const chainCliCommand = subcommands({
+	name: "chain",
+	description: "Operate centralized coder-loop chains through the daemon socket.",
+	cmds: {
+		create: chainCreateCliCommand,
+		list: chainListCliCommand,
+		status: chainStatusCliCommand,
+		delete: chainDeleteCliCommand,
+	},
+})
+
+const itemAddCliCommand = command({
+	name: "add",
+	description: "Add an item to a centralized coder-loop chain through the daemon socket.",
+	args: {
+		chain: positional({ displayName: "chain", type: cmdString }),
+		issue: option({ long: "issue", type: cmdString }),
+		repoCwd: option({ long: "repo-cwd", type: cmdString }),
+		status: option({ long: "status", type: optional(cmdString) }),
+		attempts: option({ long: "attempts", type: optional(cmdString) }),
+		title: option({ long: "title", type: optional(cmdString) }),
+		priority: option({ long: "priority", type: optional(cmdString) }),
+		branch: option({ long: "branch", type: optional(cmdString) }),
+		pr: option({ long: "pr", type: optional(cmdString) }),
+		lastRunId: option({ long: "last-run-id", type: optional(cmdString) }),
+		issueFile: option({ long: "issue-file", type: optional(cmdString) }),
+		evidenceDir: option({ long: "evidence-dir", type: optional(cmdString) }),
+		agentCwd: option({ long: "agent-cwd", type: optional(cmdString) }),
+		runner: option({ long: "runner", type: optional(cmdString) }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		json: flag({ long: "json" }),
+	},
+	handler: (args): CliCommand => ({
+		kind: "item",
+		args: {
+			action: "add",
+			chainName: args.chain,
+			issueNumber: parseRequiredPositiveInteger(args.issue, "--issue"),
+			repoCwd: resolve(args.repoCwd),
+			status: args.status ?? null,
+			attempts: parseOptionalNonNegativeInteger(args.attempts ?? null, "--attempts"),
+			title: args.title ?? null,
+			priority: args.priority ?? null,
+			branch: args.branch ?? null,
+			pr: parseOptionalPositiveInteger(args.pr ?? null, "--pr"),
+			lastRunId: args.lastRunId ?? null,
+			issueFile: args.issueFile ?? null,
+			evidenceDir: args.evidenceDir ?? null,
+			agentCwd: args.agentCwd === undefined ? null : resolve(args.agentCwd),
+			runner: parseOptionalRunner(args.runner ?? null, "--runner"),
+			loopDataRoot: args.loopDataRoot ?? null,
+			json: args.json,
+		},
+	}),
+})
+
+const itemListCliCommand = command({
+	name: "list",
+	description: "List items in a centralized coder-loop chain through the daemon socket.",
+	args: {
+		chain: positional({ displayName: "chain", type: cmdString }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		json: flag({ long: "json" }),
+	},
+	handler: (args): CliCommand => ({
+		kind: "item",
+		args: {
+			action: "list",
+			chainName: args.chain,
+			loopDataRoot: args.loopDataRoot ?? null,
+			json: args.json,
+		},
+	}),
+})
+
+const itemUpdateCliCommand = command({
+	name: "update",
+	description: "Update an item in a centralized coder-loop chain through the daemon socket.",
+	args: {
+		chain: positional({ displayName: "chain", type: cmdString }),
+		issue: option({ long: "issue", type: cmdString }),
+		repoCwd: option({ long: "repo-cwd", type: optional(cmdString) }),
+		status: option({ long: "status", type: optional(cmdString) }),
+		attempts: option({ long: "attempts", type: optional(cmdString) }),
+		title: option({ long: "title", type: optional(cmdString) }),
+		priority: option({ long: "priority", type: optional(cmdString) }),
+		branch: option({ long: "branch", type: optional(cmdString) }),
+		pr: option({ long: "pr", type: optional(cmdString) }),
+		lastRunId: option({ long: "last-run-id", type: optional(cmdString) }),
+		issueFile: option({ long: "issue-file", type: optional(cmdString) }),
+		evidenceDir: option({ long: "evidence-dir", type: optional(cmdString) }),
+		agentCwd: option({ long: "agent-cwd", type: optional(cmdString) }),
+		runner: option({ long: "runner", type: optional(cmdString) }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		json: flag({ long: "json" }),
+	},
+	handler: (args): CliCommand => ({
+		kind: "item",
+		args: {
+			action: "update",
+			chainName: args.chain,
+			issueNumber: parseRequiredPositiveInteger(args.issue, "--issue"),
+			repoCwd: args.repoCwd === undefined ? null : resolve(args.repoCwd),
+			status: args.status ?? null,
+			attempts: parseOptionalNonNegativeInteger(args.attempts ?? null, "--attempts"),
+			title: args.title ?? null,
+			priority: args.priority ?? null,
+			branch: args.branch ?? null,
+			pr: parseOptionalPositiveInteger(args.pr ?? null, "--pr"),
+			lastRunId: args.lastRunId ?? null,
+			issueFile: args.issueFile ?? null,
+			evidenceDir: args.evidenceDir ?? null,
+			agentCwd: args.agentCwd === undefined ? null : resolve(args.agentCwd),
+			runner: parseOptionalRunner(args.runner ?? null, "--runner"),
+			loopDataRoot: args.loopDataRoot ?? null,
+			json: args.json,
+		},
+	}),
+})
+
+const itemCliCommand = subcommands({
+	name: "item",
+	description: "Operate centralized coder-loop chain items through the daemon socket.",
+	cmds: {
+		add: itemAddCliCommand,
+		list: itemListCliCommand,
+		update: itemUpdateCliCommand,
+	},
+})
+
 const queueUnblockCliCommand = command({
 	name: "unblock",
 	description: "Requeue one blocked item and clear its blocker metadata.",
@@ -1107,6 +1396,25 @@ function parseOptionalPositiveInteger(value: string | null, flagName: string): n
 	return parsed
 }
 
+function parseRequiredPositiveInteger(value: string, flagName: string): number {
+	const parsed = parseOptionalPositiveInteger(value, flagName)
+	if (parsed === null) fail(`${flagName} is required`)
+	return parsed
+}
+
+function parseOptionalNonNegativeInteger(value: string | null, flagName: string): number | null {
+	if (value === null) return null
+	const parsed = Number(value)
+	if (!Number.isInteger(parsed) || parsed < 0) fail(`${flagName} must be a non-negative integer, got: ${value}`)
+	return parsed
+}
+
+function parseOptionalRunner(value: string | null, flagName: string): AgentRunnerKind | null {
+	if (value === null) return null
+	if (value === "claude" || value === "codex") return value
+	fail(`${flagName} must be claude or codex, got: ${value}`)
+}
+
 async function runStatusCommand(args: string[]): Promise<void> {
 	const parsed = await runCmd(statusCliCommand, args)
 	if (parsed.kind !== "status") return
@@ -1115,7 +1423,244 @@ async function runStatusCommand(args: string[]): Promise<void> {
 	process.stdout.write(`${stringifyStatusSnapshot(snapshot)}\n`)
 }
 
+async function runChainCommand(args: string[]): Promise<void> {
+	const parsed = await runCmd(chainCliCommand, args)
+	if (parsed.value.kind !== "chain") return
+	const chainArgs = parsed.value.args
+	if (chainArgs.action === "create") {
+		const requestArgs: JsonObject = {
+			name: chainArgs.name,
+			repository: chainArgs.repository,
+		}
+		if (chainArgs.preset !== null) requestArgs.preset = chainArgs.preset
+		if (chainArgs.baseBranch !== null) requestArgs.baseBranch = chainArgs.baseBranch
+		if (chainArgs.umbrella !== null) Object.assign(requestArgs, parseUmbrellaRef(chainArgs.umbrella, chainArgs.repository))
+		const result = await requestDaemonResult(chainArgs.loopDataRoot, "chain.create", requestArgs)
+		writeCommandResult(result, chainArgs.json, formatChainCreateResult)
+		return
+	}
+	if (chainArgs.action === "list") {
+		const result = await requestDaemonResult(chainArgs.loopDataRoot, "chain.list")
+		writeCommandResult(result, chainArgs.json, formatChainListResult)
+		return
+	}
+	if (chainArgs.action === "status") {
+		const result = await requestDaemonResult(chainArgs.loopDataRoot, "chain.status", { chainName: chainArgs.name })
+		writeCommandResult(result, chainArgs.json, formatChainStatusResult)
+		return
+	}
+	const result = await requestDaemonResult(chainArgs.loopDataRoot, "chain.delete", { chainName: chainArgs.name })
+	writeCommandResult(result, chainArgs.json, formatChainDeleteResult)
+}
+
+async function runItemCommand(args: string[]): Promise<void> {
+	const parsed = await runCmd(itemCliCommand, args)
+	if (parsed.value.kind !== "item") return
+	const itemArgs = parsed.value.args
+	if (itemArgs.action === "add") {
+		const requestArgs: JsonObject = {
+			chainName: itemArgs.chainName,
+			issueNumber: itemArgs.issueNumber,
+			repoCwd: itemArgs.repoCwd,
+		}
+		assignCliOptional(requestArgs, "status", itemArgs.status)
+		assignCliOptional(requestArgs, "attempts", itemArgs.attempts)
+		assignCliOptional(requestArgs, "title", itemArgs.title)
+		assignCliOptional(requestArgs, "priority", itemArgs.priority)
+		assignCliOptional(requestArgs, "branch", itemArgs.branch)
+		assignCliOptional(requestArgs, "pr", itemArgs.pr)
+		assignCliOptional(requestArgs, "lastRunId", itemArgs.lastRunId)
+		assignCliOptional(requestArgs, "issueFile", itemArgs.issueFile)
+		assignCliOptional(requestArgs, "evidenceDir", itemArgs.evidenceDir)
+		assignCliOptional(requestArgs, "agentCwd", itemArgs.agentCwd)
+		assignCliOptional(requestArgs, "runner", itemArgs.runner)
+		const result = await requestDaemonResult(itemArgs.loopDataRoot, "item.add", requestArgs)
+		writeCommandResult(result, itemArgs.json, formatItemMutationResult)
+		return
+	}
+	if (itemArgs.action === "list") {
+		const result = await requestDaemonResult(itemArgs.loopDataRoot, "item.list", { chainName: itemArgs.chainName })
+		writeCommandResult(result, itemArgs.json, formatItemListResult)
+		return
+	}
+	const requestArgs: JsonObject = {
+		chainName: itemArgs.chainName,
+		issueNumber: itemArgs.issueNumber,
+		fields: {},
+	}
+	const fields = requestArgs.fields as JsonObject
+	assignCliOptional(fields, "repoCwd", itemArgs.repoCwd)
+	assignCliOptional(fields, "status", itemArgs.status)
+	assignCliOptional(fields, "attempts", itemArgs.attempts)
+	assignCliOptional(fields, "title", itemArgs.title)
+	assignCliOptional(fields, "priority", itemArgs.priority)
+	assignCliOptional(fields, "branch", itemArgs.branch)
+	assignCliOptional(fields, "pr", itemArgs.pr)
+	assignCliOptional(fields, "lastRunId", itemArgs.lastRunId)
+	assignCliOptional(fields, "issueFile", itemArgs.issueFile)
+	assignCliOptional(fields, "evidenceDir", itemArgs.evidenceDir)
+	assignCliOptional(fields, "agentCwd", itemArgs.agentCwd)
+	assignCliOptional(fields, "runner", itemArgs.runner)
+	if (Object.keys(fields).length === 0) fail("item update requires at least one field to update")
+	const result = await requestDaemonResult(itemArgs.loopDataRoot, "item.update", requestArgs)
+	writeCommandResult(result, itemArgs.json, formatItemMutationResult)
+}
+
+function assignCliOptional(target: JsonObject, key: string, value: JsonValue | undefined): void {
+	if (value !== undefined && value !== null) target[key] = value
+}
+
+function parseUmbrellaRef(raw: string, defaultRepo: string): JsonObject {
+	const trimmed = raw.trim()
+	const match = /^(?:(?<repo>[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+))?#(?<issue>[1-9][0-9]*)$/.exec(trimmed)
+	if (match === null) fail(`--umbrella must look like owner/repo#123 or #123, got: ${raw}`)
+	const issue = Number(match.groups?.issue)
+	const repo = match.groups?.repo ?? defaultRepo
+	return {
+		umbrellaRepo: repo,
+		umbrellaIssue: issue,
+	}
+}
+
+async function runCentralDaemonStatusCommand(args: string[]): Promise<void> {
+	const options = parseCentralDaemonSocketOptions(args, "daemon status")
+	const result = await requestDaemonResult(options.loopDataRoot, "daemon.status")
+	writeCommandResult(result, options.json, formatDaemonStatusResult)
+}
+
+function isCentralDaemonStatusInvocation(args: string[]): boolean {
+	if (args[0] !== "status") return false
+	return !hasPositionalArgument(args.slice(1))
+}
+
+function hasPositionalArgument(args: string[]): boolean {
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index]
+		if (arg === undefined) continue
+		if (!arg.startsWith("-")) return true
+		const [name, inlineValue] = splitFlag(arg)
+		if (inlineValue !== null) continue
+		if (name === "--loop-data-root") index++
+	}
+	return false
+}
+
+function parseCentralDaemonSocketOptions(args: string[], usage: string): { loopDataRoot: string | null; json: boolean } {
+	let loopDataRoot: string | null = null
+	let json = false
+	for (let index = 1; index < args.length; index++) {
+		const arg = args[index]
+		if (arg === undefined) fail(`${usage}: missing argument at index ${index}`)
+		const [name, inlineValue] = splitFlag(arg)
+		switch (name) {
+			case "--loop-data-root":
+				loopDataRoot = readFlagValue(args, index, inlineValue, name)
+				if (inlineValue === null) index++
+				break
+			case "--json":
+				rejectInlineValue(inlineValue, name)
+				json = true
+				break
+			default:
+				fail(`${usage}: unknown argument ${arg}`)
+		}
+	}
+	return { loopDataRoot, json }
+}
+
+async function requestDaemonResult(loopDataRoot: string | null, command: DaemonCommandName, args: JsonObject = {}): Promise<JsonObject> {
+	const pathOptions = loopDataRoot === null ? {} : { loopDataRoot }
+	const socketPath = resolveLoopDataPaths(pathOptions).daemonSocket
+	let response: Awaited<ReturnType<typeof sendDaemonRequest>>
+	try {
+		response = await sendDaemonRequest(socketPath, daemonRequest(command, args))
+	} catch (error) {
+		fail(centralDaemonNotRunningMessage(loopDataRoot, socketPath, error))
+	}
+	if (!response.ok) fail(`${response.error.code}: ${response.error.message}`)
+	return response.result
+}
+
+function centralDaemonNotRunningMessage(loopDataRoot: string | null, socketPath: string, error: unknown): string {
+	const hint = loopDataRoot === null ? "coder-loop daemon up" : `coder-loop daemon up --loop-data-root ${loopDataRoot}`
+	const detail = isNodeError(error) && typeof error.code === "string" ? `${error.code}: ${errorMessage(error)}` : errorMessage(error)
+	return `central daemon is not running at ${socketPath}; start it with \`${hint}\`. ${detail}`
+}
+
+function writeCommandResult(result: JsonObject, json: boolean, formatText: (result: JsonObject) => string): void {
+	if (json) {
+		process.stdout.write(`${JSON.stringify(result, null, "\t")}\n`)
+		return
+	}
+	process.stdout.write(formatText(result))
+}
+
+function formatChainCreateResult(result: JsonObject): string {
+	const chain = result.chain as JsonObject | undefined
+	return `created chain ${String(chain?.name ?? "")}\n`
+}
+
+function formatChainListResult(result: JsonObject): string {
+	const chains = Array.isArray(result.chains) ? result.chains : []
+	if (chains.length === 0) return "no chains\n"
+	return chains.map((raw) => {
+		const chain = raw as JsonObject
+		return `${String(chain.name)}\t${String(chain.status)}\t${String(chain.repository)}\n`
+	}).join("")
+}
+
+function formatChainStatusResult(result: JsonObject): string {
+	const chain = result.chain as JsonObject | undefined
+	const summary = result.summary as JsonObject | undefined
+	const items = summary?.items as JsonObject | undefined
+	const total = typeof items?.total === "number" ? items.total : 0
+	const activeSlots = Array.isArray(summary?.activeSlots) ? summary.activeSlots.length : 0
+	return [
+		`chain: ${String(chain?.name ?? "")}`,
+		`status: ${String(chain?.status ?? "")}`,
+		`repository: ${String(chain?.repository ?? "")}`,
+		`items: ${total}`,
+		`activeSlots: ${activeSlots}`,
+		"",
+	].join("\n")
+}
+
+function formatChainDeleteResult(result: JsonObject): string {
+	const chain = result.chain as JsonObject | undefined
+	return `deleted chain ${String(chain?.name ?? "")}\n`
+}
+
+function formatItemMutationResult(result: JsonObject): string {
+	const item = result.item as JsonObject | undefined
+	return `item ${String(item?.issueNumber ?? "")}: ${String(item?.status ?? "")}\n`
+}
+
+function formatItemListResult(result: JsonObject): string {
+	const items = Array.isArray(result.items) ? result.items : []
+	if (items.length === 0) return "no items\n"
+	return items.map((raw) => {
+		const item = raw as JsonObject
+		return `${String(item.issueNumber)}\t${String(item.status)}\t${String(item.repoCwd)}\n`
+	}).join("")
+}
+
+function formatDaemonStatusResult(result: JsonObject): string {
+	const daemon = result.daemon as JsonObject | undefined
+	const activeRuns = Array.isArray(daemon?.activeRuns) ? daemon.activeRuns.length : 0
+	return [
+		`pid: ${String(daemon?.pid ?? "")}`,
+		`running: ${String(daemon?.running ?? "")}`,
+		`socket: ${String(daemon?.socketPath ?? "")}`,
+		`activeRuns: ${activeRuns}`,
+		"",
+	].join("\n")
+}
+
 async function runDaemonCommand(args: string[]): Promise<void> {
+	if (isCentralDaemonStatusInvocation(args)) {
+		await runCentralDaemonStatusCommand(args)
+		return
+	}
 	const parsed = await runCmd(daemonCliCommand, args)
 	if (parsed.value.kind !== "daemon") return
 	const daemonArgs = parsed.value.args
@@ -1163,6 +1708,14 @@ async function main() {
 	}
 	if (firstArg === "daemon") {
 		await runDaemonCommand(process.argv.slice(3))
+		return
+	}
+	if (firstArg === "chain") {
+		await runChainCommand(process.argv.slice(3))
+		return
+	}
+	if (firstArg === "item") {
+		await runItemCommand(process.argv.slice(3))
 		return
 	}
 	if (firstArg === "queue") {
@@ -2268,7 +2821,12 @@ async function runDaemonUpCommand(args: Extract<DaemonCommandArgs, { action: "up
 
 async function runDaemonDownCommand(args: Extract<DaemonCommandArgs, { action: "down" }>): Promise<void> {
 	const socketPath = resolveLoopDataPaths(args.loopDataRoot === null ? {} : { loopDataRoot: args.loopDataRoot }).daemonSocket
-	const response = await sendDaemonRequest(socketPath, daemonRequest("daemon.down"))
+	let response: Awaited<ReturnType<typeof sendDaemonRequest>>
+	try {
+		response = await sendDaemonRequest(socketPath, daemonRequest("daemon.down"))
+	} catch (error) {
+		fail(centralDaemonNotRunningMessage(args.loopDataRoot, socketPath, error))
+	}
 	process.stdout.write(JSON.stringify(response, null, "\t") + "\n")
 	if (!response.ok) process.exitCode = 1
 }
