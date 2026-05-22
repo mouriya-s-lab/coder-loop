@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, resolve } from "node:path"
 import { openSqliteStateStore } from "./sqlite-state"
@@ -970,7 +970,7 @@ describe("smoke: phase runner selection", () => {
 		return dir
 	}
 
-	test("review verdict=stop removes .dev-loop even when the review runner cannot remove it", async () => {
+	test("review verdict=stop exits without .dev-loop signaling", async () => {
 		const dir = await makeTwoPhaseReviewTarget([
 			`echo 'gh issue comment failed: This command requires approval'`,
 			`echo 'REVIEW SUMMARY: verdict=stop; issue=#alpha; actionable=1; reason=review infrastructure broken'`,
@@ -985,11 +985,11 @@ describe("smoke: phase runner selection", () => {
 		const stderr = new TextDecoder().decode(proc.stderr)
 		expect(proc.exitCode).toBe(0)
 		expect(await Bun.file(resolve(dir, ".dev-loop")).exists()).toBe(false)
-		expect(stderr).toContain("review agent requested loop stop via REVIEW SUMMARY; removing .dev-loop.")
-		expect(stderr).toContain("Review agent stopped the loop.")
+		expect(stderr).toContain("review agent requested loop stop via REVIEW SUMMARY.")
+		expect(stderr).toContain("Review agent requested loop stop.")
 	}, 15_000)
 
-	test("quoted old review stop summary does not remove .dev-loop without a final stop verdict", async () => {
+	test("quoted old review stop summary does not request stop without a final stop verdict", async () => {
 		const dir = await makeTwoPhaseReviewTarget([
 			`echo 'old review log:'`,
 			`echo 'REVIEW SUMMARY: verdict=stop; issue=#alpha; actionable=1; reason=review infrastructure broken'`,
@@ -1004,13 +1004,189 @@ describe("smoke: phase runner selection", () => {
 		})
 		const stderr = new TextDecoder().decode(proc.stderr)
 		expect(proc.exitCode).toBe(0)
-		expect(await Bun.file(resolve(dir, ".dev-loop")).exists()).toBe(true)
-		expect(stderr).not.toContain("review agent requested loop stop via REVIEW SUMMARY; removing .dev-loop.")
-		expect(stderr).not.toContain("Review agent stopped the loop.")
+		expect(await Bun.file(resolve(dir, ".dev-loop")).exists()).toBe(false)
+		expect(stderr).not.toContain("review agent requested loop stop via REVIEW SUMMARY.")
+		expect(stderr).not.toContain("Review agent requested loop stop.")
 	}, 15_000)
 })
 
-async function makeIdleTarget(): Promise<{ target: string; counterPath: string; lockPath: string; devLoopPath: string }> {
+type Issue185Fixture = {
+	target: string
+	loopDataRoot: string
+	runId: string
+	runDir: string
+}
+
+async function makeIssue185ArtifactFixture(options: { reviewReadsTrace?: boolean } = {}): Promise<Issue185Fixture> {
+	const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-issue-185-"))
+	const runtime = resolve(dir, ".coder-loop/runtime")
+	const loopDataRoot = resolve(runtime, "loop-data")
+	const presetDir = resolve(dir, ".coder-loop/issue-185-preset")
+	await mkdir(resolve(runtime, "issues"), { recursive: true })
+	await mkdir(resolve(runtime, "evidence/alpha"), { recursive: true })
+	await mkdir(resolve(runtime, "logs"), { recursive: true })
+	await mkdir(presetDir, { recursive: true })
+	await writeFile(resolve(dir, ".coder-loop/workflow.md"), "# placeholder workflow\n")
+	await writeFile(resolve(runtime, "shared.md"), "# placeholder shared context\n")
+	await writeFile(resolve(presetDir, "preset.toml"), [
+		`name = "issue-185-artifact-smoke"`,
+		`version = 1`,
+		`description = "Issue 185 artifact layout smoke preset."`,
+		``,
+		`[item]`,
+		`idField = "id"`,
+		``,
+		`[statuses]`,
+		`continuable = ["pending"]`,
+		`terminal = ["done"]`,
+		``,
+		`[[phases]]`,
+		`name = "iteration"`,
+		`prompt = "iter-entry.md"`,
+		`  [phases.variables]`,
+		`  ITEM_ID = "item.id"`,
+		`  RUN_ID = "runtime.runId"`,
+		``,
+		`[[phases]]`,
+		`name = "review"`,
+		`prompt = "review-entry.md"`,
+		`  [phases.variables]`,
+		`  TRACE_FILE = "runtime.traceFile"`,
+		`  RUN_ID = "runtime.runId"`,
+		``,
+		`[agent]`,
+		`binary = "claude"`,
+		`extraArgs = []`,
+		``,
+	].join("\n"))
+	await writeFile(resolve(presetDir, "iter-entry.md"), "ITER {{ITEM_ID}} {{RUN_ID}}\n")
+	await writeFile(resolve(presetDir, "review-entry.md"), "TRACE={{TRACE_FILE}}\nRUN={{RUN_ID}}\n")
+
+	const traceEvidence = resolve(dir, "review-trace-path.txt")
+	const fakeCodex = resolve(dir, "fake-codex.sh")
+	const fakeClaude = resolve(dir, "fake-claude.sh")
+	await writeFile(fakeCodex, [
+		`#!/usr/bin/env bash`,
+		`echo '{"type":"thread.started","thread_id":"thread-issue-185"}'`,
+		`echo '{"type":"item.completed","item":{"type":"agent_message","text":"ITERATION SUMMARY: done"}}'`,
+		`exit 0`,
+		``,
+	].join("\n"), { mode: 0o755 })
+	const reviewScript = options.reviewReadsTrace
+		? [
+				`prompt=""`,
+				`prev=""`,
+				`for arg in "$@"; do if [ "$prev" = "-p" ]; then prompt="$arg"; fi; prev="$arg"; done`,
+				`trace="$(printf '%s\\n' "$prompt" | sed -n 's/^TRACE=//p' | head -n 1)"`,
+				`test -f "$trace"`,
+				`grep -q 'ITERATION SUMMARY' "$trace"`,
+				`printf '%s\\n' "$trace" > "${traceEvidence}"`,
+				`echo 'REVIEW SUMMARY: verdict=accepted; issue=#alpha; reason=trace-read'`,
+			]
+		: [`echo 'REVIEW SUMMARY: done'`]
+	await writeFile(fakeClaude, [`#!/usr/bin/env bash`, ...reviewScript, `exit 0`, ``].join("\n"), { mode: 0o755 })
+	await writeFile(resolve(runtime, "config.json"), JSON.stringify({
+		presetPath: presetDir,
+		loopDataRoot,
+		codex: { binary: fakeCodex, extraArgs: [] },
+		claude: { binary: fakeClaude, extraArgs: [] },
+	}, null, 2))
+	const state = {
+		version: 1,
+		queue: [{ id: "alpha", issue: 1, status: "pending", issueFile: "issues/alpha.md", evidenceDir: "evidence/alpha" }],
+		recentRuns: [],
+		current: null,
+	}
+	await writeFile(resolve(runtime, "state.json"), JSON.stringify(state, null, 2))
+	await seedLoopDb(dir, "issue-185-artifact-smoke", state)
+	const proc = Bun.spawnSync({
+		cmd: ["bun", LOOP_ENTRY, "--target-cwd", dir, "--once"],
+		cwd: REPO_ROOT,
+		stdout: "pipe",
+		stderr: "pipe",
+		env: claudeHostEnv(),
+	})
+	if (proc.exitCode !== 0) {
+		throw new Error(new TextDecoder().decode(proc.stderr))
+	}
+	const item = readDbItem(dir, 1)
+	if (item.lastRunId === null) throw new Error("missing lastRunId")
+	const paths = resolveChainRuntimePaths(FIXTURE_CHAIN_NAME, { loopDataRoot })
+	return { target: dir, loopDataRoot, runId: item.lastRunId, runDir: paths.runDir(item.lastRunId) }
+}
+
+describe("issue #185 chain artifact layout", () => {
+	test("iteration run artifacts per chain", async () => {
+		const fixture = await makeIssue185ArtifactFixture()
+		expect(await Bun.file(resolve(fixture.runDir, "iteration/stdout.jsonl")).exists()).toBe(true)
+		expect(fixture.runDir).toContain(`/loop-data/chains/${FIXTURE_CHAIN_NAME}/runs/${fixture.runId}`)
+	})
+
+	test("per-run files complete", async () => {
+		const fixture = await makeIssue185ArtifactFixture()
+		for (const phase of ["iteration", "review"]) {
+			for (const file of ["stdout.jsonl", "stderr.txt", "status.json", "sessions.jsonl"]) {
+				expect(await Bun.file(resolve(fixture.runDir, phase, file)).exists()).toBe(true)
+			}
+		}
+		expect(await Bun.file(resolve(fixture.runDir, "events.jsonl")).exists()).toBe(true)
+	})
+
+	test("daemon log per chain", async () => {
+		const fixture = await makeIssue185ArtifactFixture()
+		const daemonDir = resolve(fixture.loopDataRoot, "chains", FIXTURE_CHAIN_NAME, "daemon")
+		const batches = await readdir(daemonDir)
+		expect(batches.length).toBeGreaterThan(0)
+		expect(await Bun.file(resolve(daemonDir, batches[0]!, "engine.log")).exists()).toBe(true)
+	})
+
+	test("no top-level logs or events", async () => {
+		const fixture = await makeIssue185ArtifactFixture()
+		const topLevel = await readdir(fixture.loopDataRoot)
+		expect(topLevel).not.toContain("logs")
+		expect(topLevel).not.toContain("events")
+	})
+
+	test("main loop does not create dev-loop or dev-trace", async () => {
+		const fixture = await makeIssue185ArtifactFixture()
+		expect(await Bun.file(resolve(fixture.target, ".dev-loop")).exists()).toBe(false)
+		expect(await Bun.file(resolve(fixture.target, ".dev-trace.txt")).exists()).toBe(false)
+	})
+
+	test("review reads stdout jsonl", async () => {
+		const fixture = await makeIssue185ArtifactFixture({ reviewReadsTrace: true })
+		const trace = (await readFile(resolve(fixture.target, "review-trace-path.txt"), "utf-8")).trim()
+		expect(trace).toBe(resolve(fixture.runDir, "iteration/stdout.jsonl"))
+		expect(await readFile(trace, "utf-8")).toContain("ITERATION SUMMARY")
+	})
+
+	test("status doctor reports chain paths", async () => {
+		const fixture = await makeIssue185ArtifactFixture()
+		const status = Bun.spawnSync({
+			cmd: ["bun", LOOP_ENTRY, "status", fixture.target, "--json"],
+			cwd: REPO_ROOT,
+			stdout: "pipe",
+			stderr: "pipe",
+			env: claudeHostEnv(),
+		})
+		expect(status.exitCode).toBe(0)
+		const snapshot = JSON.parse(new TextDecoder().decode(status.stdout)) as { target: { logDir: string }; events: { path: string | null } }
+		expect(snapshot.target.logDir).toContain(`/loop-data/chains/${FIXTURE_CHAIN_NAME}/runs`)
+		expect(snapshot.events.path).toBe(resolve(fixture.runDir, "events.jsonl"))
+
+		const checkRuntime = Bun.spawnSync({
+			cmd: ["bun", LOOP_ENTRY, "--target-cwd", fixture.target, "--check-runtime"],
+			cwd: REPO_ROOT,
+			stdout: "pipe",
+			stderr: "pipe",
+			env: claudeHostEnv(),
+		})
+		expect(checkRuntime.exitCode).toBe(0)
+		expect(new TextDecoder().decode(checkRuntime.stderr)).toContain(`Runtime check passed: chain=${FIXTURE_CHAIN_NAME}`)
+	})
+})
+
+async function makeIdleTarget(): Promise<{ target: string; counterPath: string; lockPath: string }> {
 	const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-idle-"))
 	const runtime = resolve(dir, ".coder-loop/runtime")
 	const loopDataRoot = resolve(runtime, "loop-data")
@@ -1051,7 +1227,6 @@ exit 0
 		target: dir,
 		counterPath,
 		lockPath: resolve(loopDataRoot, "review-on-empty.lock"),
-		devLoopPath: resolve(dir, ".dev-loop"),
 	}
 }
 
@@ -1075,8 +1250,27 @@ async function waitFor(predicate: () => Promise<boolean>, timeoutMs: number, int
 }
 
 describe("daemon idle behavior — review-on-empty lock + idle ticks (issue #69)", () => {
+	test("main loop lifecycle via signal", async () => {
+		const { target, counterPath } = await makeIdleTarget()
+		const proc = Bun.spawn({
+			cmd: ["bun", LOOP_ENTRY, "--target-cwd", target],
+			cwd: REPO_ROOT,
+			stdout: "pipe",
+			stderr: "pipe",
+			env: { ...process.env, CODER_LOOP_IDLE_SLEEP_MS: "50" },
+		})
+		const started = await waitFor(async () => (await fileLineCount(counterPath)) >= 1, 5000)
+		expect(started).toBe(true)
+		expect(await Bun.file(resolve(target, ".dev-loop")).exists()).toBe(false)
+		proc.kill("SIGTERM")
+		const exitCode = await proc.exited
+		expect(exitCode).toBe(0)
+		const stderr = await new Response(proc.stderr).text()
+		expect(stderr).toContain("Stop requested by SIGTERM")
+	})
+
 	test("empty queue: runs review-on-empty once, writes lock, subsequent idle ticks skip review until lock removed", async () => {
-		const { target, counterPath, lockPath, devLoopPath } = await makeIdleTarget()
+		const { target, counterPath, lockPath } = await makeIdleTarget()
 
 		const proc = Bun.spawn({
 			cmd: ["bun", LOOP_ENTRY, "--target-cwd", target],
@@ -1095,7 +1289,7 @@ describe("daemon idle behavior — review-on-empty lock + idle ticks (issue #69)
 		const callsAfterIdleTicks = await fileLineCount(counterPath)
 		expect(callsAfterIdleTicks).toBe(1)
 
-		await rm(devLoopPath, { force: true })
+		proc.kill("SIGTERM")
 		const exitCode = await proc.exited
 		expect(exitCode).toBe(0)
 
@@ -1112,7 +1306,7 @@ describe("daemon idle behavior — review-on-empty lock + idle ticks (issue #69)
 	}, 15_000)
 
 	test("removing the lock externally triggers a fresh review-on-empty on the next idle tick", async () => {
-		const { target, counterPath, lockPath, devLoopPath } = await makeIdleTarget()
+		const { target, counterPath, lockPath } = await makeIdleTarget()
 
 		const proc = Bun.spawn({
 			cmd: ["bun", LOOP_ENTRY, "--target-cwd", target],
@@ -1135,13 +1329,13 @@ describe("daemon idle behavior — review-on-empty lock + idle ticks (issue #69)
 		expect(secondLockSeen).toBe(true)
 		expect(await fileLineCount(counterPath)).toBe(2)
 
-		await rm(devLoopPath, { force: true })
+		proc.kill("SIGTERM")
 		const exitCode = await proc.exited
 		expect(exitCode).toBe(0)
 	}, 15_000)
 
 	test("idle ticks do not burn --max-iterations budget; daemon stays alive with --max-iterations=1 until removed", async () => {
-		const { target, counterPath, devLoopPath } = await makeIdleTarget()
+		const { target, counterPath } = await makeIdleTarget()
 
 		const proc = Bun.spawn({
 			cmd: ["bun", LOOP_ENTRY, "--target-cwd", target, "1"],
@@ -1156,7 +1350,7 @@ describe("daemon idle behavior — review-on-empty lock + idle ticks (issue #69)
 		expect(proc.exitCode).toBeNull()
 		expect(await fileLineCount(counterPath)).toBe(1)
 
-		await rm(devLoopPath, { force: true })
+		proc.kill("SIGTERM")
 		const exitCode = await proc.exited
 		expect(exitCode).toBe(0)
 

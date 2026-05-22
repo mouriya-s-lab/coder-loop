@@ -796,8 +796,8 @@ export type LoopEventContext = {
 	phase: string
 }
 
-export function loopEventsPath(targetCwd: string, runId: string): string {
-	return resolve(targetCwd, ".coder-loop/runtime/events", `${runId}.jsonl`)
+export function loopEventsPath(logDir: string, runId: string): string {
+	return resolve(logDir, runId, "events.jsonl")
 }
 
 export function formatLoopEventLine(event: LoopEvent): string {
@@ -819,11 +819,11 @@ export async function appendLoopEvent(
 }
 
 export function makeLoopEventEmitter(
-	targetCwd: string,
+	logDir: string,
 	runId: string,
 	logFn: (message: string) => void,
 ): LoopEventEmit {
-	const path = loopEventsPath(targetCwd, runId)
+	const path = loopEventsPath(logDir, runId)
 	return (event) => appendLoopEvent(path, event, logFn)
 }
 
@@ -1898,20 +1898,13 @@ async function main() {
 	}
 
 	await ensureGitExclude(options.targetCwd)
-	await writeFile(
-		options.loopFile,
-		[
-			`started: ${new Date().toISOString()}`,
-			`pid: ${process.pid}`,
-			`log: ${options.logFile}`,
-			`cwd: ${options.targetCwd}`,
-			`state: ${options.statePath}`,
-			`command: ${process.argv.map(shellQuote).join(" ")}`,
-			`requireBrowserEvidence: ${options.requireBrowserEvidence}`,
-			"",
-		].join("\n"),
-	)
-	log("Loop file created. Delete .dev-loop to stop.")
+	let stopRequested = false
+	const requestStop = (signal: NodeJS.Signals): void => {
+		stopRequested = true
+		log(`Stop requested by ${signal}; loop will exit after the current safe point.`)
+	}
+	process.once("SIGTERM", requestStop)
+	process.once("SIGINT", requestStop)
 
 	let workIteration = 0
 	const idleSleepMs = resolveIdleSleepMs()
@@ -1919,7 +1912,7 @@ async function main() {
 	log(`Idle sleep: ${idleSleepMs}ms (override via CODER_LOOP_IDLE_SLEEP_MS)`)
 	log(`Review-on-empty lock: ${lockPath}`)
 
-	while ((await exists(options.loopFile)) && workIteration < options.maxIterations) {
+	while (!stopRequested && workIteration < options.maxIterations) {
 		const dbSnapshot = await loadLoopStateFromDb(options)
 		const state = dbSnapshot.state
 		await assertRuntimeValid(options, state, dbSnapshot.chain)
@@ -1941,7 +1934,6 @@ async function main() {
 
 		if (!selected) {
 			if (!(await exists(lockPath))) {
-				await writeFile(options.traceFile, "No actionable issue found in .coder-loop/runtime/state.json. Review must assess whether to stop.\n")
 				log("Empty queue: running review-on-empty for global state assessment.")
 				const fallbackItem = makeFallbackItem()
 				const fallbackRunId = makeRunId(null)
@@ -1966,9 +1958,9 @@ async function main() {
 						}),
 					}),
 				}
-				await runReview(options, fallbackRunId, fallbackCtx, options.targetCwd, options.reviewRunner)
-				if (!(await exists(options.loopFile))) {
-					log("Review agent stopped the loop.")
+				const fallbackReview = await runReview(options, fallbackRunId, fallbackCtx, options.targetCwd, options.reviewRunner)
+				if (fallbackReview.stopRequested) {
+					log("Review agent requested loop stop.")
 					break
 				}
 				await writeFile(lockPath, serializeReviewOnEmptyLock(fallbackRunId, new Date()))
@@ -2017,7 +2009,7 @@ async function main() {
 			}),
 		}
 
-		const emit = makeLoopEventEmitter(options.targetCwd, runId, log)
+		const emit = makeLoopEventEmitter(options.logDir, runId, log)
 		const baseEvent = {
 			runId,
 			issueId: selectedId,
@@ -2059,9 +2051,8 @@ async function main() {
 				iterEventContext,
 			)
 			const iterDurationSeconds = (Date.now() - iterStart) / 1000
-			await writeFile(options.traceFile, iterTrace)
 
-			log(`${iterPhase.name} agent finished: issue=#${selectedId}, exit=${iterCode}, duration=${iterDurationSeconds.toFixed(0)}s, trace=${options.traceFile}, output=${iterOutputPath} (${iterTrace.length} bytes)`)
+			log(`${iterPhase.name} agent finished: issue=#${selectedId}, exit=${iterCode}, duration=${iterDurationSeconds.toFixed(0)}s, output=${iterOutputPath} (${iterTrace.length} bytes)`)
 			await emit({
 				type: "phase.end",
 				ts: new Date().toISOString(),
@@ -2073,12 +2064,11 @@ async function main() {
 
 			if (iterCode !== 0) {
 				log(`${iterPhase.name} agent failed (exit ${iterCode}). Stopping without review or state judgment.`)
-				await removeLoopFile(options.loopFile)
 				break
 			}
 
-			if (!(await exists(options.loopFile))) {
-				log("Loop file removed during iteration. Stopping before review.")
+			if (stopRequested) {
+				log("Stop requested during iteration. Stopping before review.")
 				break
 			}
 
@@ -2088,15 +2078,14 @@ async function main() {
 			log(`Resuming ${reviewPhase.name} agent for issue #${selectedId} without rerunning iteration...`)
 		}
 
-		const reviewCode = await runReview(options, runId, ctx, selected.agentCwd, selected.reviewRunner, { emit, ...baseEvent })
-		if (reviewCode !== 0) {
-			log(`Review agent crashed (exit ${reviewCode}). Stopping.`)
-			await removeLoopFile(options.loopFile)
+		const reviewResult = await runReview(options, runId, ctx, selected.agentCwd, selected.reviewRunner, { emit, ...baseEvent })
+		if (reviewResult.code !== 0) {
+			log(`Review agent crashed (exit ${reviewResult.code}). Stopping.`)
 			break
 		}
 
-		if (!(await exists(options.loopFile))) {
-			log("Review agent stopped the loop.")
+		if (reviewResult.stopRequested) {
+			log("Review agent requested loop stop.")
 			break
 		}
 
@@ -2110,12 +2099,11 @@ async function main() {
 		)
 		if (triggerCode !== 0) {
 			log(`Post-${reviewPhase.name} trigger agent crashed (exit ${triggerCode}). Stopping.`)
-			await removeLoopFile(options.loopFile)
 			break
 		}
 
-		if (!(await exists(options.loopFile))) {
-			log(`Post-${reviewPhase.name} trigger agent stopped the loop.`)
+		if (stopRequested) {
+			log(`Stop requested after post-${reviewPhase.name} trigger.`)
 			break
 		}
 
@@ -2235,7 +2223,6 @@ async function runTriggeredPhasesAfter(
 			durationSeconds: Math.round(durationSeconds),
 		})
 		if (code !== 0) return code
-		if (!(await exists(options.loopFile))) return 0
 	}
 	return 0
 }
@@ -2247,7 +2234,7 @@ async function runReview(
 	agentCwd: string,
 	runner: AgentRunnerSelection,
 	eventContext?: Omit<LoopEventContext, "phase">,
-): Promise<number> {
+): Promise<{ code: number; stopRequested: boolean }> {
 	const reviewPhase = reviewPhaseForPreset(options.preset)
 	log(`Starting ${reviewPhase.name} agent...`)
 	const reviewStart = Date.now()
@@ -2296,11 +2283,9 @@ async function runReview(
 			durationSeconds: Math.round(reviewDuration),
 		})
 	}
-	if (reviewCode === 0 && parseReviewSummaryVerdict(reviewTrace, runner.kind) === "stop") {
-		log(`${reviewPhase.name} agent requested loop stop via REVIEW SUMMARY; removing .dev-loop.`)
-		await removeLoopFile(options.loopFile)
-	}
-	return reviewCode
+	const stopRequested = reviewCode === 0 && parseReviewSummaryVerdict(reviewTrace, runner.kind) === "stop"
+	if (stopRequested) log(`${reviewPhase.name} agent requested loop stop via REVIEW SUMMARY.`)
+	return { code: reviewCode, stopRequested }
 }
 
 function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, config: LoopConfig, preset: Preset): LoopOptions {
@@ -2317,6 +2302,7 @@ function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, confi
 	const worktree = raw.worktree || config.worktree === true
 	const baseBranch = raw.baseBranch ?? config.baseBranch ?? (worktree ? "main" : null)
 	const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")
+	const chainPaths = raw.chainName === null ? null : resolveChainRuntimePaths(raw.chainName, loopDataRootOption(loopDataRoot))
 	const hostRunner = detectHostRunner(process.env)
 	const runnerCommands = buildAgentRunnerCommands(config)
 	const defaultRunner = selectDefaultRunner(config.defaultRunner, runnerCommands)
@@ -2334,7 +2320,7 @@ function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, confi
 		loopDataRoot,
 		loopFile: resolve(targetCwd, ".dev-loop"),
 		traceFile: resolve(targetCwd, ".dev-trace.txt"),
-		logFile: resolve(logDir, `coder-loop-${process.pid}.${timestamp}.log`),
+		logFile: chainPaths === null ? resolve(logDir, `coder-loop-${process.pid}.${timestamp}.log`) : chainPaths.daemonLogFile(timestamp),
 		repository,
 		baseBranch,
 		chainName: raw.chainName,
@@ -2689,7 +2675,7 @@ function agentStatusFromInput(input: AgentRunStatusInput): AgentRunStatus {
 async function buildStatusEventsSnapshot(options: LoopOptions, state: LoopState, selected: SelectedIssue | null): Promise<StatusEventsSnapshot> {
 	const runId = state.current?.runId ?? selected?.item.lastRunId ?? firstLastRunId(state)
 	if (runId === null) return { runId: null, path: null, exists: false, recent: [], latest: null, error: null }
-	const path = loopEventsPath(options.targetCwd, runId)
+	const path = loopEventsPath(options.logDir, runId)
 	try {
 		const raw = await readFile(path, "utf-8")
 		const recent = parseRecentJsonLines(raw, 20)
@@ -2900,9 +2886,11 @@ type DaemonStopResult = DaemonStopPlan & {
 export function buildDaemonStartPlan(args: Extract<DaemonCommandArgs, { action: "start" }>): DaemonStartPlan {
 	const targetCwd = resolve(args.targetCwd)
 	const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")
-	const logDir = resolve(targetCwd, DEFAULT_LOG_DIR)
-	const stdoutPath = resolve(logDir, `coder-loop-daemon-${timestamp}.stdout.log`)
-	const stderrPath = resolve(logDir, `coder-loop-daemon-${timestamp}.stderr.log`)
+	const chainName = args.chainName ?? null
+	const chainPaths = chainName === null ? null : resolveChainRuntimePaths(chainName, loopDataRootOption(args.loopDataRoot ?? null))
+	const logDir = chainPaths === null ? resolve(targetCwd, DEFAULT_LOG_DIR) : chainPaths.daemonBatchDir(timestamp)
+	const stdoutPath = resolve(logDir, "stdout.log")
+	const stderrPath = resolve(logDir, "stderr.log")
 	const command = [
 		process.argv[0] ?? "bun",
 		resolve(import.meta.dir, "loop.ts"),
@@ -2910,6 +2898,7 @@ export function buildDaemonStartPlan(args: Extract<DaemonCommandArgs, { action: 
 		targetCwd,
 	]
 	if (args.configPath !== null) command.push("--config", args.configPath)
+	if (chainName !== null) command.push("--chain", chainName)
 	if (args.repository !== null) command.push("--repo", args.repository)
 	if (args.requireBrowserEvidence) command.push("--require-browser-evidence")
 	if (args.worktree) command.push("--worktree")
@@ -3803,6 +3792,7 @@ async function ensureRuntime(options: LoopOptions): Promise<void> {
 	await assertReadable(options.sharedContextPath, "shared context")
 	await loadLoopStateFromDb(options)
 	await mkdir(options.logDir, { recursive: true })
+	await mkdir(dirname(options.logFile), { recursive: true })
 }
 
 async function assertRuntimeValid(options: LoopOptions, state?: LoopState, chain?: ChainRecord): Promise<void> {
@@ -4454,6 +4444,7 @@ export function buildCentralRuntimeBindingPaths(input: {
 	const rootOptions = loopDataRootOption(input.options.loopDataRoot)
 	const loopData = resolveLoopDataPaths(rootOptions)
 	const chainPaths = resolveChainRuntimePaths(input.chain.name, rootOptions)
+	const firstPhase = input.options.preset.phases[0]?.name ?? "phase"
 	return {
 		sharedContextPath: chainPaths.sharedFile,
 		statePath: loopData.dbFile,
@@ -4462,7 +4453,7 @@ export function buildCentralRuntimeBindingPaths(input: {
 		evidenceDir: input.evidenceDir ?? chainPaths.evidenceDir,
 		evidenceRootDir: chainPaths.evidenceDir,
 		logDir: chainPaths.runsDir,
-		traceFile: resolve(chainPaths.chainRoot, ".dev-trace.txt"),
+		traceFile: chainPaths.runPhaseStdoutFile(input.runId, firstPhase),
 		loopFile: resolve(chainPaths.chainRoot, ".dev-loop"),
 	}
 }
@@ -4896,6 +4887,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 	const { options, label, prompt: basePrompt, outputPath, sessionsPath, resume } = input
 	const effectivePrompt = resume.kind === "resume" ? RESUME_CONTINUE_PROMPT : basePrompt
 	const selectedRunner = input.runner ?? options.defaultRunner
+	await mkdir(dirname(outputPath), { recursive: true })
 	return new Promise((resolveResult) => {
 		const out: Buffer[] = []
 		const err: Buffer[] = []
@@ -4905,8 +4897,8 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 		const attemptStreamPath = agentAttemptStreamPath(outputPath, startedAt)
 		const attemptStderrPath = agentAttemptStderrPath(outputPath, startedAt)
 		const statusPath = agentStatusPath(outputPath)
-		const streamOutFile = createWriteStream(attemptStreamPath, { flags: "wx" })
-		const stderrOutFile = createWriteStream(attemptStderrPath, { flags: "wx" })
+		const streamOutFile = createWriteStream(attemptStreamPath, { flags: "w" })
+		const stderrOutFile = createWriteStream(attemptStderrPath, { flags: "w" })
 		const runnerPlan = buildRunnerInvocation(selectedRunner, effectivePrompt, resume, {
 			agentCwd: input.agentCwd,
 			targetCwd: options.targetCwd,
@@ -4938,25 +4930,6 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 				log(`Agent [${label}] status write failed: ${error instanceof Error ? error.message : String(error)}`)
 			})
 			return statusWriteChain
-		}
-		const writeLatestIndex = (): void => {
-			const lines = [
-				`# Agent [${label}] latest attempt`,
-				`startedAt: ${status.startedAt}`,
-				`pid: ${status.pid ?? ""}`,
-				`runner: ${selectedRunner.kind}`,
-				`model: ${selectedRunner.model ?? ""}`,
-				`status: ${statusPath}`,
-				`stream: ${attemptStreamPath}`,
-				`stderr: ${attemptStderrPath}`,
-				`sessions: ${sessionsPath}`,
-				`promptChars: ${effectivePrompt.length}`,
-				`resume: ${resume.kind === "resume" ? resume.sessionId : "none"}`,
-				"",
-			]
-			void writeFile(outputPath, lines.join("\n")).catch((error: unknown) => {
-				log(`Agent [${label}] latest index write failed: ${error instanceof Error ? error.message : String(error)}`)
-			})
 		}
 		const watchdogConfig = input.watchdog ?? summaryWatchdogConfigForPrompt(basePrompt)
 		const attemptTimeoutConfig = input.attemptTimeout ?? attemptTimeoutConfigForPreset(options.preset)
@@ -5111,7 +5084,6 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 
 		status.pid = child.pid ?? null
 		void writeStatus()
-		writeLatestIndex()
 
 		log(`Agent [${label}] spawned: runner=${selectedRunner.kind}, model=${selectedRunner.model ?? "<default>"}, pid=${child.pid}, stream=${attemptStreamPath}, stderr=${attemptStderrPath}, status=${statusPath}, resume=${resume.kind === "resume" ? resume.sessionId : "none"}, attemptTimeout=${attemptTimeoutConfig.attemptSeconds}s`)
 
@@ -5470,25 +5442,25 @@ async function ensureGitExclude(cwd: string): Promise<void> {
 }
 
 function agentOutputPath(options: LoopOptions, runId: string, label: AgentLabel): string {
-	return resolve(options.logDir, `${runId}.${label}.txt`)
+	return resolve(options.logDir, runId, label, "stdout.jsonl")
 }
 
 function agentStatusPath(outputPath: string): string {
-	return outputPath.replace(/\.txt$/, `.status.json`)
+	return resolve(dirname(outputPath), "status.json")
 }
 
 export function agentSessionsPath(outputPath: string): string {
-	return outputPath.replace(/\.txt$/, `.sessions.jsonl`)
+	return resolve(dirname(outputPath), "sessions.jsonl")
 }
 
 function agentAttemptStderrPath(outputPath: string, startedAt: string): string {
-	const suffix = startedAt.slice(0, 19).replace(/[T:]/g, "-")
-	return outputPath.replace(/\.txt$/, `.attempt-${suffix}.${process.pid}.stderr.txt`)
+	void startedAt
+	return resolve(dirname(outputPath), "stderr.txt")
 }
 
 function agentAttemptStreamPath(outputPath: string, startedAt: string): string {
-	const suffix = startedAt.slice(0, 19).replace(/[T:]/g, "-")
-	return outputPath.replace(/\.txt$/, `.attempt-${suffix}.${process.pid}.jsonl`)
+	void startedAt
+	return outputPath
 }
 
 export function parseSessionIdFromStream(text: string): string | null {
