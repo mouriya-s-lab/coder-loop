@@ -13,6 +13,12 @@ export const CHAIN_ISSUES_DIRNAME = "issues"
 export const CHAIN_EVIDENCE_DIRNAME = "evidence"
 export const CHAIN_RUNS_DIRNAME = "runs"
 export const CHAIN_DAEMON_DIRNAME = "daemon"
+export const RUN_EVENTS_FILENAME = "events.jsonl"
+export const PHASE_STDOUT_FILENAME = "stdout.jsonl"
+export const PHASE_STDERR_FILENAME = "stderr.txt"
+export const PHASE_STATUS_FILENAME = "status.json"
+export const PHASE_SESSIONS_FILENAME = "sessions.jsonl"
+export const DAEMON_ENGINE_LOG_FILENAME = "engine.log"
 
 export type RuntimePathErrorCode = "invalid_loop_data_root" | "invalid_chain_name" | "invalid_path_component"
 
@@ -52,6 +58,12 @@ export type ChainRuntimePaths = {
 	issueFile: (issueNumber: number | string) => string
 	issueEvidenceDir: (issueNumber: number | string) => string
 	runDir: (runId: string) => string
+	runEventsFile: (runId: string) => string
+	runPhaseDir: (runId: string, phase: string) => string
+	runPhaseStdoutFile: (runId: string, phase: string) => string
+	runPhaseStderrFile: (runId: string, phase: string) => string
+	runPhaseStatusFile: (runId: string, phase: string) => string
+	runPhaseSessionsFile: (runId: string, phase: string) => string
 	daemonBatchDir: (timestamp: string) => string
 	daemonLogFile: (timestamp: string) => string
 }
@@ -115,6 +127,9 @@ export function resolveChainRuntimePaths(chainName: string, options: LoopDataRoo
 	const runsDir = resolve(chainRoot, CHAIN_RUNS_DIRNAME)
 	const daemonDir = resolve(chainRoot, CHAIN_DAEMON_DIRNAME)
 
+	const runDir = (runId: string) => resolve(runsDir, sanitizePathComponent(runId, "run id"))
+	const runPhaseDir = (runId: string, phase: string) => resolve(runDir(runId), sanitizePathComponent(phase, "phase"))
+
 	return {
 		chainName: sanitizedName,
 		chainRoot,
@@ -125,9 +140,15 @@ export function resolveChainRuntimePaths(chainName: string, options: LoopDataRoo
 		daemonDir,
 		issueFile: (issueNumber) => resolve(issuesDir, `${sanitizePathComponent(String(issueNumber), "issue number")}.md`),
 		issueEvidenceDir: (issueNumber) => resolve(evidenceDir, sanitizePathComponent(String(issueNumber), "issue number")),
-		runDir: (runId) => resolve(runsDir, sanitizePathComponent(runId, "run id")),
+		runDir,
+		runEventsFile: (runId) => resolve(runDir(runId), RUN_EVENTS_FILENAME),
+		runPhaseDir,
+		runPhaseStdoutFile: (runId, phase) => resolve(runPhaseDir(runId, phase), PHASE_STDOUT_FILENAME),
+		runPhaseStderrFile: (runId, phase) => resolve(runPhaseDir(runId, phase), PHASE_STDERR_FILENAME),
+		runPhaseStatusFile: (runId, phase) => resolve(runPhaseDir(runId, phase), PHASE_STATUS_FILENAME),
+		runPhaseSessionsFile: (runId, phase) => resolve(runPhaseDir(runId, phase), PHASE_SESSIONS_FILENAME),
 		daemonBatchDir: (timestamp) => resolve(daemonDir, sanitizePathComponent(timestamp, "daemon timestamp")),
-		daemonLogFile: (timestamp) => resolve(daemonDir, sanitizePathComponent(timestamp, "daemon timestamp"), "daemon.log"),
+		daemonLogFile: (timestamp) => resolve(daemonDir, sanitizePathComponent(timestamp, "daemon timestamp"), DAEMON_ENGINE_LOG_FILENAME),
 	}
 }
 

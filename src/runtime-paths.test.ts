@@ -49,9 +49,15 @@ describe("runtime path model", () => {
 		expect(paths.issueEvidenceDir(178)).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/evidence/178")
 		expect(paths.runsDir).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs")
 		expect(paths.runDir("run-2026-05-22")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs/run-2026-05-22")
+		expect(paths.runEventsFile("run-2026-05-22")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs/run-2026-05-22/events.jsonl")
+		expect(paths.runPhaseDir("run-2026-05-22", "iteration")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs/run-2026-05-22/iteration")
+		expect(paths.runPhaseStdoutFile("run-2026-05-22", "iteration")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs/run-2026-05-22/iteration/stdout.jsonl")
+		expect(paths.runPhaseStderrFile("run-2026-05-22", "iteration")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs/run-2026-05-22/iteration/stderr.txt")
+		expect(paths.runPhaseStatusFile("run-2026-05-22", "iteration")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs/run-2026-05-22/iteration/status.json")
+		expect(paths.runPhaseSessionsFile("run-2026-05-22", "iteration")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs/run-2026-05-22/iteration/sessions.jsonl")
 		expect(paths.daemonDir).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/daemon")
 		expect(paths.daemonBatchDir("2026-05-22-16-28-22")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/daemon/2026-05-22-16-28-22")
-		expect(paths.daemonLogFile("2026-05-22-16-28-22")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/daemon/2026-05-22-16-28-22/daemon.log")
+		expect(paths.daemonLogFile("2026-05-22-16-28-22")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/daemon/2026-05-22-16-28-22/engine.log")
 	})
 
 	test("sanitization rejects empty traversal absolute control and separator input", () => {

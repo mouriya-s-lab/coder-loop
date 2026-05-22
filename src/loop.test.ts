@@ -1614,7 +1614,7 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 		expect(runtime.evidenceDir).toBe(resolve(options.loopDataRoot, "chains/central-chain/evidence/183"))
 		expect(runtime.evidenceRootDir).toBe(resolve(options.loopDataRoot, "chains/central-chain/evidence"))
 		expect(runtime.logDir).toBe(resolve(options.loopDataRoot, "chains/central-chain/runs"))
-		expect(runtime.traceFile).toBe(resolve(options.loopDataRoot, "chains/central-chain/.dev-trace.txt"))
+		expect(runtime.traceFile).toBe(resolve(options.loopDataRoot, "chains/central-chain/runs/run-central/iteration/stdout.jsonl"))
 		expect(runtime.loopFile).toBe(resolve(options.loopDataRoot, "chains/central-chain/.dev-loop"))
 	})
 
@@ -2337,8 +2337,8 @@ describe("sessions.jsonl appends each attempt — I/O roundtrip", () => {
 		return agentSessionsPath(latest)
 	}
 
-	test("agentSessionsPath rewrites .txt → .sessions.jsonl", () => {
-		expect(agentSessionsPath("/tmp/logs/run-X.iter.txt")).toBe("/tmp/logs/run-X.iter.sessions.jsonl")
+	test("agentSessionsPath resolves fixed phase sessions filename", () => {
+		expect(agentSessionsPath("/tmp/logs/run-X/iteration/stdout.jsonl")).toBe("/tmp/logs/run-X/iteration/sessions.jsonl")
 	})
 
 	test("sessions.jsonl appends each attempt as one JSON line with required fields", async () => {
@@ -2925,7 +2925,7 @@ describe("summary watchdog e2e — spawnOneAttempt with a fake claudeBinary", ()
 		if (last?.terminated.kind === "timeout") {
 			expect(last.terminated.attemptSeconds).toBe(0.3)
 		}
-		const status = JSON.parse(await readFile(outputPath.replace(/\.txt$/, ".status.json"), "utf-8")) as { terminated?: { kind?: string } }
+		const status = JSON.parse(await readFile(resolve(dirname(outputPath), "status.json"), "utf-8")) as { terminated?: { kind?: string } }
 		expect(status.terminated?.kind).toBe("timeout")
 	}, 15_000)
 
@@ -3011,7 +3011,7 @@ describe("summary watchdog e2e — spawnOneAttempt with a fake claudeBinary", ()
 		expect(last?.sessionId).toBe("thread-codex-123")
 		expect(last?.runner).toBe("codex")
 		expect(last?.model).toBe("gpt-5.4")
-		const status = JSON.parse(await readFile(outputPath.replace(/\.txt$/, ".status.json"), "utf-8")) as { runner?: string; model?: string; sessionId?: string }
+		const status = JSON.parse(await readFile(resolve(dirname(outputPath), "status.json"), "utf-8")) as { runner?: string; model?: string; sessionId?: string }
 		expect(status.runner).toBe("codex")
 		expect(status.model).toBe("gpt-5.4")
 		expect(status.sessionId).toBe("thread-codex-123")
@@ -3097,7 +3097,7 @@ describe("events jsonl — per-run NDJSON event stream", () => {
 		const path = await emitSequence(targetCwd, runId, sequence)
 		const events = await readEvents(path)
 
-		expect(path.endsWith(`/.coder-loop/runtime/events/${runId}.jsonl`)).toBe(true)
+		expect(path.endsWith(`/${runId}/events.jsonl`)).toBe(true)
 		expect(events.length).toBe(sequence.length)
 		for (const e of events) expect(LOOP_EVENT_TYPES).toContain(e.type)
 		const timestamps = events.map((e) => e.ts)
@@ -3303,9 +3303,9 @@ describe("events jsonl — per-run NDJSON event stream", () => {
 
 	test("events jsonl best-effort: appendLoopEvent failure (parent path is a file) only logs warn and resolves", async () => {
 		const targetCwd = await freshTargetCwd()
-		// Make the events directory's parent a file so mkdir(recursive) cannot create the path
-		const sabotage = resolve(targetCwd, ".coder-loop/runtime/events")
-		await mkdir(resolve(targetCwd, ".coder-loop/runtime"), { recursive: true })
+		// Make the run directory path a file so mkdir(recursive) cannot create it.
+		const sabotage = resolve(targetCwd, "run-fail")
+		await mkdir(targetCwd, { recursive: true })
 		await writeFile(sabotage, "this-is-a-file-not-a-directory")
 		const logs: string[] = []
 		const path = loopEventsPath(targetCwd, "run-fail")
