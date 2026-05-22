@@ -71,6 +71,7 @@ import {
 	type ConfigBindings,
 	type CurrentRun,
 	type IssueRunContext,
+	type JsonObject,
 	type LoopEvent,
 	type LoopEventContext,
 	type LoopOptions,
@@ -91,6 +92,7 @@ import {
 	cleanupStaleWorktrees,
 } from "./loop"
 import { type ChainRecord, openSqliteStateStore } from "./sqlite-state"
+import { resolveChainRuntimePaths } from "./runtime-paths"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const BUNDLED_PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
@@ -200,19 +202,123 @@ async function makeStatusTarget(presetName = "single-phase-example"): Promise<st
 	await writeFile(resolve(cwd, ".coder-loop/workflow.md"), "# workflow\n")
 	await writeFile(resolve(runtimeDir, "shared.md"), "# shared\n")
 	await writeFile(resolve(runtimeDir, "config.json"), JSON.stringify({ preset: presetName }, null, "\t"))
-	await writeFile(
-		resolve(runtimeDir, "state.json"),
-		JSON.stringify({
-			version: 1,
-			queue: [
-				{ id: "alpha", status: "pending", lastRunId: "run-alpha" },
-				{ id: "beta", status: "done" },
-			],
-			recentRuns: ["preset-owned-note"],
-			current: null,
-		}, null, "\t"),
-	)
+	const state = {
+		version: 1,
+		queue: [
+			{ id: "alpha", status: "pending", lastRunId: "run-alpha" },
+			{ id: "beta", status: "done" },
+		],
+		recentRuns: ["preset-owned-note"],
+		current: null,
+	}
+	await writeFile(resolve(runtimeDir, "state.json"), JSON.stringify(state, null, "\t"))
+	await seedStatusDb(cwd, presetName, state)
 	return cwd
+}
+
+type StatusSeedItem = {
+	id: string
+	status: string
+	attempts?: number
+	title?: string | null
+	priority?: string | null
+	branch?: string | null
+	pr?: number | null
+	lastRunId?: string | null
+	issueFile?: string | null
+	evidenceDir?: string | null
+	agentCwd?: string | null
+	runner?: "claude" | "codex" | null
+}
+
+type StatusSeedState = {
+	queue: StatusSeedItem[]
+	recentRuns?: unknown[]
+	current?: null
+}
+
+async function seedStatusDb(target: string, presetName: string, state: StatusSeedState, metadata: JsonObject = {}): Promise<void> {
+	const loopDataRoot = resolve(target, ".coder-loop/runtime/loop-data")
+	await mkdir(loopDataRoot, { recursive: true })
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = store.createChain({
+			name: "status-chain",
+			preset: presetName,
+			repository: "Mouriya-Emma/test",
+			baseBranch: "main",
+			metadata: {
+				recentRuns: Array.isArray(state.recentRuns) ? state.recentRuns.filter(isJsonValue) : [],
+				...metadata,
+			},
+		})
+		await seedStatusChainRuntime(loopDataRoot, chain.name, state.queue)
+		state.queue.forEach((item, index) => {
+			store.createItem({
+				chainId: chain.id,
+				issueNumber: index + 1,
+				repoCwd: target,
+				status: item.status,
+				attempts: item.attempts ?? 0,
+				title: item.title ?? "test item",
+				priority: item.priority ?? "medium",
+				branch: item.branch ?? null,
+				pr: item.pr ?? null,
+				lastRunId: item.lastRunId ?? null,
+				issueFile: item.issueFile ?? null,
+				evidenceDir: item.evidenceDir ?? null,
+				agentCwd: item.agentCwd ?? null,
+				runner: item.runner ?? null,
+				extra: { id: item.id },
+			})
+		})
+	} finally {
+		store.close()
+	}
+}
+
+async function seedStatusChainRuntime(loopDataRoot: string, chainName: string, items: StatusSeedItem[]): Promise<void> {
+	const paths = resolveChainRuntimePaths(chainName, { loopDataRoot })
+	await mkdir(paths.issuesDir, { recursive: true })
+	await mkdir(paths.evidenceDir, { recursive: true })
+	await mkdir(paths.runsDir, { recursive: true })
+	await writeFile(paths.sharedFile, "# shared\n")
+	for (const item of items) {
+		await writeFile(paths.issueFile(item.id), `# ${item.id}\n`)
+		await mkdir(paths.issueEvidenceDir(item.id), { recursive: true })
+	}
+}
+
+function isJsonValue(value: unknown): value is JsonObject[keyof JsonObject] {
+	if (value === null) return true
+	if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return true
+	if (Array.isArray(value)) return value.every(isJsonValue)
+	if (typeof value === "object") return Object.values(value as Record<string, unknown>).every(isJsonValue)
+	return false
+}
+
+function updateStatusChainMetadata(target: string, metadata: JsonObject): void {
+	const store = openSqliteStateStore({ loopDataRoot: resolve(target, ".coder-loop/runtime/loop-data") })
+	try {
+		const chain = store.getChainByName("status-chain")
+		if (chain === null) throw new Error("missing status-chain")
+		store.updateChain(chain.id, { metadata: { ...chain.metadata, ...metadata } })
+	} finally {
+		store.close()
+	}
+}
+
+function updateStatusItem(target: string, issueNumber: number, update: { status?: string; runner?: "claude" | "codex" | null }): void {
+	const store = openSqliteStateStore({ loopDataRoot: resolve(target, ".coder-loop/runtime/loop-data") })
+	try {
+		const chain = store.getChainByName("status-chain")
+		if (chain === null) throw new Error("missing status-chain")
+		const item = store.getItemByIssue(chain.id, issueNumber)
+		if (item === null) throw new Error(`missing status item ${issueNumber}`)
+		store.updateItem(item.id, update)
+	} finally {
+		store.close()
+	}
 }
 
 async function withHostEnv<T>(env: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> {
@@ -293,7 +399,7 @@ describe("buildCoderLoopStatusSnapshot", () => {
 
 	test("returns a read-only ok snapshot with target/state/queue/current/events/processes", async () => {
 		const target = await makeStatusTarget()
-		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json" })
+		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json", loopDataRoot: resolve(target, ".coder-loop/runtime/loop-data") })
 
 		expect(snapshot.target.cwd).toBe(target)
 		expect(snapshot.target.config.kind).toBe("loaded")
@@ -324,16 +430,12 @@ describe("buildCoderLoopStatusSnapshot", () => {
 
 	test("configured iteration runner still overrides default", async () => {
 		const target = await makeStatusTarget()
-		await writeFile(
-			resolve(target, ".coder-loop/runtime/config.json"),
-			JSON.stringify({
-				preset: "single-phase-example",
-				runner: "claude",
-				claude: { binary: "/tmp/fake-claude", extraArgs: ["--max-turns", "3"], model: "sonnet" },
-			}, null, "\t"),
-		)
+		updateStatusChainMetadata(target, {
+			runner: "claude",
+			claude: { binary: "/tmp/fake-claude", extraArgs: ["--max-turns", "3"], model: "sonnet" },
+		})
 
-		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json" })
+		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json", loopDataRoot: resolve(target, ".coder-loop/runtime/loop-data") })
 
 		expect(snapshot.state.kind).toBe("ok")
 		expect(snapshot.target.runner.default).toEqual({
@@ -350,17 +452,13 @@ describe("buildCoderLoopStatusSnapshot", () => {
 
 	test("config reviewRunner overrides the Claude review default in status JSON", async () => {
 		const target = await makeStatusTarget()
-		await writeFile(
-			resolve(target, ".coder-loop/runtime/config.json"),
-			JSON.stringify({
-				preset: "single-phase-example",
-				runner: "claude",
-				reviewRunner: "codex",
-				codex: { binary: "/tmp/fake-codex-review", extraArgs: ["--json"], model: "gpt-5.4-high" },
-			}, null, "\t"),
-		)
+		updateStatusChainMetadata(target, {
+			runner: "claude",
+			reviewRunner: "codex",
+			codex: { binary: "/tmp/fake-codex-review", extraArgs: ["--json"], model: "gpt-5.4-high" },
+		})
 
-		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json" })
+		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json", loopDataRoot: resolve(target, ".coder-loop/runtime/loop-data") })
 
 		expect(snapshot.state.kind).toBe("ok")
 		expect(snapshot.target.runner.default.kind).toBe("claude")
@@ -376,17 +474,13 @@ describe("buildCoderLoopStatusSnapshot", () => {
 
 	test("runner model config is exposed while Claude review model is forced", async () => {
 		const target = await makeStatusTarget()
-		await writeFile(
-			resolve(target, ".coder-loop/runtime/config.json"),
-			JSON.stringify({
-				preset: "single-phase-example",
-				runner: "claude",
-				reviewRunner: "claude",
-				claude: { binary: "/tmp/fake-claude", extraArgs: ["--model", "sonnet"], model: "sonnet" },
-			}, null, "\t"),
-		)
+		updateStatusChainMetadata(target, {
+			runner: "claude",
+			reviewRunner: "claude",
+			claude: { binary: "/tmp/fake-claude", extraArgs: ["--model", "sonnet"], model: "sonnet" },
+		})
 
-		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json" })
+		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json", loopDataRoot: resolve(target, ".coder-loop/runtime/loop-data") })
 
 		expect(snapshot.state.kind).toBe("ok")
 		expect(snapshot.target.runner.default).toEqual({
@@ -409,28 +503,13 @@ describe("buildCoderLoopStatusSnapshot", () => {
 
 	test("queue item runner still overrides default iteration runner", async () => {
 		const target = await makeStatusTarget()
-		await writeFile(
-			resolve(target, ".coder-loop/runtime/config.json"),
-			JSON.stringify({
-				preset: "single-phase-example",
-				runner: "codex",
-				claude: { binary: "/tmp/fake-claude", extraArgs: ["--max-turns", "3"] },
-			}, null, "\t"),
-		)
-		await writeFile(
-			resolve(target, ".coder-loop/runtime/state.json"),
-			JSON.stringify({
-				version: 1,
-				queue: [
-					{ id: "alpha", status: "pending", runner: "claude" },
-					{ id: "beta", status: "done" },
-				],
-				recentRuns: [],
-				current: null,
-			}, null, "\t"),
-		)
+		updateStatusChainMetadata(target, {
+			runner: "codex",
+			claude: { binary: "/tmp/fake-claude", extraArgs: ["--max-turns", "3"] },
+		})
+		updateStatusItem(target, 1, { runner: "claude" })
 
-		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json" })
+		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json", loopDataRoot: resolve(target, ".coder-loop/runtime/loop-data") })
 
 		expect(snapshot.state.kind).toBe("ok")
 		expect(snapshot.target.runner.default.kind).toBe("codex")
@@ -445,37 +524,45 @@ describe("buildCoderLoopStatusSnapshot", () => {
 		expect(snapshot.queue.selected?.reviewRunner.kind).toBe("claude")
 	})
 
-	test("invalid config runner is reported as an invalid-config status snapshot", async () => {
+	test("target-local invalid config runner is ignored by chain-authoritative status", async () => {
 		const target = await makeStatusTarget()
 		await writeFile(
 			resolve(target, ".coder-loop/runtime/config.json"),
 			JSON.stringify({ preset: "single-phase-example", runner: "ollama" }, null, "\t"),
 		)
 
-		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json" })
+		const snapshot = await buildCoderLoopStatusSnapshot({
+			targetCwd: target,
+			configPath: null,
+			repository: null,
+			output: "json",
+			loopDataRoot: resolve(target, ".coder-loop/runtime/loop-data"),
+		})
 
-		expect(snapshot.state.kind).toBe("invalid-config")
-		expect(snapshot.state.ok).toBe(false)
-		expect(snapshot.state.errors[0]?.path).toBe("config")
-		expect(snapshot.state.errors[0]?.message).toContain("runner")
+		expect(snapshot.state.kind).toBe("ok")
+		expect(snapshot.target.runner.default.kind).toBe("codex")
 	})
 
-	test("invalid config reviewRunner is reported as an invalid-config status snapshot", async () => {
+	test("target-local invalid config reviewRunner is ignored by chain-authoritative status", async () => {
 		const target = await makeStatusTarget()
 		await writeFile(
 			resolve(target, ".coder-loop/runtime/config.json"),
 			JSON.stringify({ preset: "single-phase-example", reviewRunner: "ollama" }, null, "\t"),
 		)
 
-		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json" })
+		const snapshot = await buildCoderLoopStatusSnapshot({
+			targetCwd: target,
+			configPath: null,
+			repository: null,
+			output: "json",
+			loopDataRoot: resolve(target, ".coder-loop/runtime/loop-data"),
+		})
 
-		expect(snapshot.state.kind).toBe("invalid-config")
-		expect(snapshot.state.ok).toBe(false)
-		expect(snapshot.state.errors[0]?.path).toBe("config")
-		expect(snapshot.state.errors[0]?.message).toContain("reviewRunner")
+		expect(snapshot.state.kind).toBe("ok")
+		expect(snapshot.target.runner.reviewDefault.kind).toBe("claude")
 	})
 
-	test("invalid queue item runner is reported as an invalid-state status snapshot", async () => {
+	test("target-local invalid queue item runner is ignored by chain-authoritative status", async () => {
 		const target = await makeStatusTarget()
 		await writeFile(
 			resolve(target, ".coder-loop/runtime/state.json"),
@@ -489,36 +576,31 @@ describe("buildCoderLoopStatusSnapshot", () => {
 
 		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json" })
 
-		expect(snapshot.state.kind).toBe("invalid-state")
-		expect(snapshot.state.ok).toBe(false)
-		expect(snapshot.state.errors[0]?.message).toContain("runner")
+		expect(snapshot.state.kind).toBe("ok")
+		expect(snapshot.queue.selected?.runner.kind).toBe("codex")
 	})
 
-	test("distinguishes missing state from missing or invalid config", async () => {
+	test("reports missing DB state when the chain database is absent", async () => {
 		const target = await makeStatusTarget()
-		await fs.rm(resolve(target, ".coder-loop/runtime/state.json"))
+		await fs.rm(resolve(target, ".coder-loop/runtime/loop-data"), { recursive: true, force: true })
 
 		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json" })
 
-		expect(snapshot.target.config.kind).toBe("loaded")
 		expect(snapshot.state.kind).toBe("missing-state")
 		expect(snapshot.state.ok).toBe(false)
 		expect(snapshot.state.loaded).toBe(false)
-		expect(snapshot.state.errors[0]?.path).toBe("state")
+		expect(snapshot.state.errors[0]?.path).toBe("chain")
 	})
 
 	test("reports runtime validation errors without hiding the loaded queue", async () => {
 		const target = await makeStatusTarget()
-		await writeFile(
-			resolve(target, ".coder-loop/runtime/state.json"),
-			JSON.stringify({ version: 1, queue: [{ id: "alpha", status: "garbage" }], recentRuns: [], current: null }, null, "\t"),
-		)
+		updateStatusItem(target, 1, { status: "garbage" })
 
 		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json" })
 
 		expect(snapshot.state.kind).toBe("invalid-runtime")
 		expect(snapshot.state.loaded).toBe(true)
-		expect(snapshot.queue.total).toBe(1)
+		expect(snapshot.queue.total).toBe(2)
 		expect(snapshot.state.errors.some((error) => error.path.endsWith(".status") && error.message.includes("garbage"))).toBe(true)
 	})
 })

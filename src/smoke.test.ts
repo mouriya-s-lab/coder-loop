@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test"
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { resolve } from "node:path"
+import { dirname, resolve } from "node:path"
 import { openSqliteStateStore } from "./sqlite-state"
+import { resolveChainRuntimePaths } from "./runtime-paths"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
@@ -69,6 +70,7 @@ async function seedLoopDb(target: string, preset: string, state: FixtureState): 
 			baseBranch: state.baseBranch ?? "main",
 			metadata: { recentRuns: Array.isArray(state.recentRuns) ? state.recentRuns.filter(isJsonValue) : [] },
 		})
+		await seedChainRuntimeLayout(loopDataRoot, chain.name, state)
 		state.queue.forEach((entry, index) => {
 			const issueNumber = typeof entry.issue === "number" ? entry.issue : index + 1
 			store.createItem({
@@ -107,6 +109,31 @@ async function seedLoopDb(target: string, preset: string, state: FixtureState): 
 		store.close()
 	}
 	return loopDataRoot
+}
+
+async function seedChainRuntimeLayout(loopDataRoot: string, chainName: string, state: FixtureState): Promise<void> {
+	const paths = resolveChainRuntimePaths(chainName, { loopDataRoot })
+	await mkdir(paths.issuesDir, { recursive: true })
+	await mkdir(paths.evidenceDir, { recursive: true })
+	await mkdir(paths.runsDir, { recursive: true })
+	await writeFile(paths.sharedFile, "# placeholder shared context\n")
+	for (const [index, entry] of state.queue.entries()) {
+		const issueNumber = typeof entry.issue === "number" ? entry.issue : index + 1
+		const itemId = typeof entry.id === "string" || typeof entry.id === "number"
+			? String(entry.id)
+			: typeof entry.issue === "number"
+				? String(entry.issue)
+				: String(issueNumber)
+		const issueFile = typeof entry.issueFile === "string"
+			? resolve(paths.chainRoot, entry.issueFile)
+			: paths.issueFile(itemId)
+		await mkdir(dirname(issueFile), { recursive: true })
+		await writeFile(issueFile, `# ${itemId}\n`)
+		const evidenceDir = typeof entry.evidenceDir === "string"
+			? resolve(paths.chainRoot, entry.evidenceDir)
+			: paths.issueEvidenceDir(itemId)
+		await mkdir(evidenceDir, { recursive: true })
+	}
 }
 
 function queueItemExtra(entry: Record<string, unknown>): JsonObject {
@@ -376,9 +403,9 @@ describe("smoke: single-phase-example preset", () => {
 		const stderr = new TextDecoder().decode(proc.stderr)
 		expect(proc.exitCode).toBe(0)
 		expect(stderr).toContain("Runtime check passed: target=")
+		expect(stderr).toContain("Runtime check passed: repo=fixture/repo")
 		expect(stderr).toContain("Runtime check passed: preset=single-phase-example")
 		expect(stderr).toContain("queue=2, selected=alpha")
-		expect(stderr).not.toContain("repo=")
 	})
 
 	test("--dry-run passes with minimal target", async () => {
@@ -392,8 +419,8 @@ describe("smoke: single-phase-example preset", () => {
 		const stderr = new TextDecoder().decode(proc.stderr)
 		expect(proc.exitCode).toBe(0)
 		expect(stderr).toContain("Dry run: target=")
+		expect(stderr).toContain("Dry run: repo=fixture/repo")
 		expect(stderr).toContain("Dry run: selected=alpha")
-		expect(stderr).not.toContain("repo=")
 	})
 
 	test("--dry-run selects the source-writing no-merge route for fixture", async () => {
@@ -443,7 +470,7 @@ describe("smoke: single-phase-example preset", () => {
 		expect(proc.exitCode).toBe(0)
 		expect(stderr).toContain("Runtime check passed: preset=single-phase-example")
 		expect(stderr).toContain("queue=2, selected=alpha")
-		expect(stderr).toMatch(/config=.*config\.toml \(toml\)/)
+		expect(stderr).toMatch(/config=.*db\.sqlite \(json\)/)
 	})
 
 	test("status <target> --json emits parseable supervisor snapshot", async () => {
@@ -515,10 +542,10 @@ describe("smoke: single-phase-example preset", () => {
 		const stderr = new TextDecoder().decode(proc.stderr)
 		expect(proc.exitCode).toBe(0)
 		expect(stderr).toBe("")
-		expect(stdout).toContain("daemon start dry-run: command=")
-		expect(stdout).toContain("--require-browser-evidence")
+		expect(stdout).toContain("daemon start dry-run: chain=fixture-chain")
+		expect(stdout).toContain("daemon start dry-run: central-daemon=required")
 		expect(stdout).toContain("require-browser-evidence=true")
-		expect(stdout).toContain("'10'")
+		expect(stdout).not.toContain("command=")
 	})
 
 	test("doctor <target> emits live runtime health section", async () => {
@@ -1023,7 +1050,7 @@ exit 0
 	return {
 		target: dir,
 		counterPath,
-		lockPath: resolve(runtime, "review-on-empty.lock"),
+		lockPath: resolve(loopDataRoot, "review-on-empty.lock"),
 		devLoopPath: resolve(dir, ".dev-loop"),
 	}
 }

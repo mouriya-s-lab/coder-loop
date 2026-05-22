@@ -159,7 +159,7 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 			spawnedRuns.push(activeRun)
 		}
 
-		if (!hasActiveSlotForChain(options.state, chain.id) && options.store.allItemsTerminal({ chainId: chain.id, terminalStatuses })) {
+		if (items.length > 0 && !hasActiveSlotForChain(options.state, chain.id) && options.store.allItemsTerminal({ chainId: chain.id, terminalStatuses })) {
 			const updated = options.store.updateChain(chain.id, { status: "completed", updatedAt: nowSeconds(options) })
 			completedChainIds.push(updated.id)
 			await emit(options, { type: "chain.completed", chainId: updated.id, chainName: updated.name })

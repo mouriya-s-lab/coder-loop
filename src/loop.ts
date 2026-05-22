@@ -106,6 +106,7 @@ type RawArgs = {
 	workflowPath: string | null
 	statePath: string | null
 	loopDataRoot: string | null
+	chainName: string | null
 	repository: string | null
 	requireBrowserEvidence: boolean | null
 	once: boolean
@@ -118,6 +119,8 @@ type RawArgs = {
 export type StatusCommandArgs = {
 	targetCwd: string
 	configPath: string | null
+	loopDataRoot?: string | null
+	chainName?: string | null
 	repository: string | null
 	output: "json"
 }
@@ -132,6 +135,8 @@ export type DaemonCommandArgs =
 			action: "status"
 			targetCwd: string
 			configPath: string | null
+			loopDataRoot?: string | null
+			chainName?: string | null
 			repository: string | null
 			output: "json"
 		}
@@ -139,6 +144,8 @@ export type DaemonCommandArgs =
 			action: "start"
 			targetCwd: string
 			configPath: string | null
+			loopDataRoot?: string | null
+			chainName?: string | null
 			repository: string | null
 			requireBrowserEvidence: boolean
 			maxIterations: number | null
@@ -150,6 +157,8 @@ export type DaemonCommandArgs =
 			action: "stop"
 			targetCwd: string
 			configPath: string | null
+			loopDataRoot?: string | null
+			chainName?: string | null
 			repository: string | null
 			dryRun: boolean
 		}
@@ -157,6 +166,8 @@ export type DaemonCommandArgs =
 			action: "restart"
 			targetCwd: string
 			configPath: string | null
+			loopDataRoot?: string | null
+			chainName?: string | null
 			repository: string | null
 			requireBrowserEvidence: boolean
 			maxIterations: number | null
@@ -247,6 +258,8 @@ export type ItemCommandArgs =
 export type QueueUnblockCommandArgs = {
 	targetCwd: string
 	configPath: string | null
+	loopDataRoot: string | null
+	chainName: string | null
 	repository: string | null
 	issue: string
 	startDaemon: boolean
@@ -448,6 +461,7 @@ export type LoopOptions = {
 	logFile: string
 	repository: string | null
 	baseBranch: string | null
+	chainName?: string | null
 	worktree: boolean
 	requireBrowserEvidence: boolean
 	hostRunner: AgentRunnerKind
@@ -905,6 +919,7 @@ function parseArgs(): RawArgs {
 		workflowPath: null,
 		statePath: null,
 		loopDataRoot: null,
+		chainName: null,
 		repository: null,
 		requireBrowserEvidence: null,
 		once: false,
@@ -943,6 +958,10 @@ function parseArgs(): RawArgs {
 				break
 			case "--loop-data-root":
 				raw.loopDataRoot = readFlagValue(args, index, inlineValue, name)
+				if (inlineValue === null) index++
+				break
+			case "--chain":
+				raw.chainName = readFlagValue(args, index, inlineValue, name)
 				if (inlineValue === null) index++
 				break
 			case "--repo":
@@ -995,6 +1014,8 @@ const statusCliCommand = command({
 		target: positional({ displayName: "target", type: cmdString }),
 		json: flag({ long: "json" }),
 		config: option({ long: "config", type: optional(cmdString) }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		chain: option({ long: "chain", type: optional(cmdString) }),
 		repo: option({ long: "repo", type: optional(cmdString) }),
 	},
 	handler: (args): CliCommand => {
@@ -1004,6 +1025,8 @@ const statusCliCommand = command({
 			args: {
 				targetCwd: args.target,
 				configPath: args.config ?? null,
+				loopDataRoot: args.loopDataRoot ?? null,
+				chainName: args.chain ?? null,
 				repository: args.repo ?? null,
 				output: "json",
 			},
@@ -1018,6 +1041,8 @@ const daemonStatusCliCommand = command({
 		target: positional({ displayName: "target", type: cmdString }),
 		json: flag({ long: "json" }),
 		config: option({ long: "config", type: optional(cmdString) }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		chain: option({ long: "chain", type: optional(cmdString) }),
 		repo: option({ long: "repo", type: optional(cmdString) }),
 	},
 	handler: (args): CliCommand => {
@@ -1028,6 +1053,8 @@ const daemonStatusCliCommand = command({
 				action: "status",
 				targetCwd: args.target,
 				configPath: args.config ?? null,
+				loopDataRoot: args.loopDataRoot ?? null,
+				chainName: args.chain ?? null,
 				repository: args.repo ?? null,
 				output: "json",
 			},
@@ -1058,6 +1085,8 @@ const daemonStartCliCommand = command({
 	args: {
 		target: positional({ displayName: "target", type: cmdString }),
 		config: option({ long: "config", type: optional(cmdString) }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		chain: option({ long: "chain", type: optional(cmdString) }),
 		repo: option({ long: "repo", type: optional(cmdString) }),
 		requireBrowserEvidence: flag({ long: "require-browser-evidence" }),
 		maxIterations: option({ long: "max-iterations", type: optional(cmdString) }),
@@ -1071,6 +1100,8 @@ const daemonStartCliCommand = command({
 			action: "start",
 			targetCwd: args.target,
 			configPath: args.config ?? null,
+			loopDataRoot: args.loopDataRoot ?? null,
+			chainName: args.chain ?? null,
 			repository: args.repo ?? null,
 			requireBrowserEvidence: args.requireBrowserEvidence,
 			maxIterations: parseDaemonMaxIterations(args.maxIterations ?? null),
@@ -1087,6 +1118,8 @@ const daemonStopCliCommand = command({
 	args: {
 		target: positional({ displayName: "target", type: cmdString }),
 		config: option({ long: "config", type: optional(cmdString) }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		chain: option({ long: "chain", type: optional(cmdString) }),
 		repo: option({ long: "repo", type: optional(cmdString) }),
 		dryRun: flag({ long: "dry-run" }),
 	},
@@ -1096,6 +1129,8 @@ const daemonStopCliCommand = command({
 			action: "stop",
 			targetCwd: args.target,
 			configPath: args.config ?? null,
+			loopDataRoot: args.loopDataRoot ?? null,
+			chainName: args.chain ?? null,
 			repository: args.repo ?? null,
 			dryRun: args.dryRun,
 		},
@@ -1108,6 +1143,8 @@ const daemonRestartCliCommand = command({
 	args: {
 		target: positional({ displayName: "target", type: cmdString }),
 		config: option({ long: "config", type: optional(cmdString) }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		chain: option({ long: "chain", type: optional(cmdString) }),
 		repo: option({ long: "repo", type: optional(cmdString) }),
 		requireBrowserEvidence: flag({ long: "require-browser-evidence" }),
 		maxIterations: option({ long: "max-iterations", type: optional(cmdString) }),
@@ -1121,6 +1158,8 @@ const daemonRestartCliCommand = command({
 			action: "restart",
 			targetCwd: args.target,
 			configPath: args.config ?? null,
+			loopDataRoot: args.loopDataRoot ?? null,
+			chainName: args.chain ?? null,
 			repository: args.repo ?? null,
 			requireBrowserEvidence: args.requireBrowserEvidence,
 			maxIterations: parseDaemonMaxIterations(args.maxIterations ?? null),
@@ -1378,6 +1417,8 @@ const queueUnblockCliCommand = command({
 		target: positional({ displayName: "target", type: cmdString }),
 		issue: option({ long: "issue", type: cmdString }),
 		config: option({ long: "config", type: optional(cmdString) }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		chain: option({ long: "chain", type: optional(cmdString) }),
 		repo: option({ long: "repo", type: optional(cmdString) }),
 		startDaemon: flag({ long: "start-daemon" }),
 		requireBrowserEvidence: flag({ long: "require-browser-evidence" }),
@@ -1388,6 +1429,8 @@ const queueUnblockCliCommand = command({
 		args: {
 			targetCwd: args.target,
 			configPath: args.config ?? null,
+			loopDataRoot: args.loopDataRoot ?? null,
+			chainName: args.chain ?? null,
 			repository: args.repo ?? null,
 			issue: args.issue,
 			startDaemon: args.startDaemon,
@@ -1713,6 +1756,8 @@ async function runDaemonCommand(args: string[]): Promise<void> {
 		const snapshot = await buildCoderLoopStatusSnapshot({
 			targetCwd: daemonArgs.targetCwd,
 			configPath: daemonArgs.configPath,
+			loopDataRoot: daemonArgs.loopDataRoot ?? null,
+			chainName: daemonArgs.chainName ?? null,
 			repository: daemonArgs.repository,
 			output: "json",
 		})
@@ -1764,17 +1809,27 @@ async function main() {
 		if (handled) return
 	}
 	const rawArgs = parseArgs()
-	const targetCwd = resolve(rawArgs.targetCwd ?? process.cwd())
-	const configPath = await resolveConfigPath(targetCwd, rawArgs.configPath)
-	const config = await loadConfig(configPath)
-	const presetDir = resolvePresetDir(config, PKG_ROOT, targetCwd)
-	const preset = await loadPreset(presetDir)
-	const options = buildOptions(targetCwd, configPath, rawArgs, config, preset)
+	const loadedRuntime = await loadTargetRuntime({
+		targetCwd: rawArgs.targetCwd ?? process.cwd(),
+		configPath: rawArgs.configPath,
+		loopDataRoot: rawArgs.loopDataRoot,
+		chainName: rawArgs.chainName,
+		repository: rawArgs.repository,
+		baseBranch: rawArgs.baseBranch,
+		requireBrowserEvidence: rawArgs.requireBrowserEvidence,
+		once: rawArgs.once,
+		dryRun: rawArgs.dryRun,
+		checkRuntime: rawArgs.checkRuntime,
+		worktree: rawArgs.worktree,
+		maxIterations: rawArgs.maxIterations,
+		workflowPath: rawArgs.workflowPath,
+		statePath: rawArgs.statePath,
+	})
+	const options = loadedRuntime.options
 
 	if (options.checkRuntime) {
-		const { chain, state } = await loadLoopStateFromDb(options)
-		const selected = selectIssue(state, options, chain)
-		const errors = await checkRuntime(options, state, chain)
+		const selected = selectIssue(loadedRuntime.state, options, loadedRuntime.chain)
+		const errors = await checkRuntime(options, loadedRuntime.state, loadedRuntime.chain)
 		if (errors.length > 0) {
 			console.error(`Runtime check failed: ${errors.length} error(s)`)
 			for (const error of errors) console.error(`- ${error.path}: ${error.message}`)
@@ -1784,7 +1839,8 @@ async function main() {
 		if (options.repository !== null) console.error(`Runtime check passed: repo=${options.repository}`)
 		console.error(`Runtime check passed: config=${options.configPath} (${configFormatForPath(options.configPath)})`)
 		console.error(`Runtime check passed: state=${resolveLoopDataPaths(loopDataRootOption(options.loopDataRoot)).dbFile}`)
-		console.error(`Runtime check passed: queue=${state.queue.length}, selected=${selected ? getItemId(selected.item, options.preset) : "none"}`)
+		console.error(`Runtime check passed: chain=${loadedRuntime.chain.name}`)
+		console.error(`Runtime check passed: queue=${loadedRuntime.state.queue.length}, selected=${selected ? getItemId(selected.item, options.preset) : "none"}`)
 		console.error(`Runtime check passed: preset=${options.preset.name}`)
 		return
 	}
@@ -2281,6 +2337,7 @@ function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, confi
 		logFile: resolve(logDir, `coder-loop-${process.pid}.${timestamp}.log`),
 		repository,
 		baseBranch,
+		chainName: raw.chainName,
 		worktree,
 		requireBrowserEvidence,
 		hostRunner,
@@ -2295,79 +2352,56 @@ function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, confi
 }
 
 export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Promise<CoderLoopStatusSnapshot> {
-	const targetCwd = resolve(args.targetCwd)
-	const configPath = await resolveConfigPath(targetCwd, args.configPath)
-	const baseTarget = makeStatusTargetSnapshot(targetCwd, configPath, args.repository, null, { kind: "loaded", error: null })
-
-	const configResult = await readStatusConfig(configPath)
-	if (configResult.kind !== "ok") {
-		const stateKind: StatusStateKind = configResult.kind === "missing" ? "missing-config" : "invalid-config"
-		return makeUnavailableStatusSnapshot({
-			target: makeStatusTargetSnapshot(targetCwd, configPath, args.repository, null, { kind: configResult.kind, error: configResult.message }),
-			stateKind,
-			statePath: baseTarget.statePath,
-			errorPath: "config",
-			errorMessage: configResult.message,
-		})
-	}
-
-	const presetResult = await readStatusPreset(configResult.value, targetCwd)
-	if (presetResult.kind !== "ok") {
-		const stateKind: StatusStateKind = presetResult.kind === "missing" ? "missing-preset" : "invalid-preset"
-		return makeUnavailableStatusSnapshot({
-			target: makeStatusTargetSnapshot(targetCwd, configPath, args.repository, null, { kind: "loaded", error: null }),
-			stateKind,
-			statePath: baseTarget.statePath,
-			errorPath: "preset",
-			errorMessage: presetResult.message,
-		})
-	}
-
-	const raw = makeStatusRawArgs(args)
-	const options = buildOptions(targetCwd, configPath, raw, configResult.value, presetResult.value)
-	const target = makeStatusTargetSnapshot(targetCwd, configPath, args.repository, options, { kind: "loaded", error: null })
-	let statusChain: ChainRecord | undefined
-	let statusState: LoopState
-	let statusStatePath = options.statePath
+	let loaded: LoadedTargetRuntime
 	try {
-		const snapshot = await loadLoopStateFromDb(options)
-		statusChain = snapshot.chain
-		statusState = snapshot.state
-		statusStatePath = resolveLoopDataPaths(loopDataRootOption(options.loopDataRoot)).dbFile
-	} catch {
-		const stateResult = await readStatusState(options.statePath)
-		if (stateResult.kind !== "ok") {
-			const stateKind: StatusStateKind = stateResult.kind === "missing" ? "missing-state" : "invalid-state"
-			return makeUnavailableStatusSnapshot({
-				target,
-				stateKind,
-				statePath: options.statePath,
-				errorPath: "state",
-				errorMessage: stateResult.message,
-			})
-		}
-		statusState = stateResult.value
+		loaded = await loadTargetRuntime({
+			targetCwd: args.targetCwd,
+			configPath: args.configPath,
+			loopDataRoot: args.loopDataRoot ?? null,
+			chainName: args.chainName ?? null,
+			repository: args.repository,
+			baseBranch: null,
+			requireBrowserEvidence: null,
+			once: false,
+			dryRun: false,
+			checkRuntime: false,
+			worktree: false,
+			maxIterations: null,
+			workflowPath: null,
+			statePath: null,
+		})
+	} catch (error) {
+		const targetCwd = resolve(args.targetCwd)
+		const dbFile = resolveLoopDataPaths(loopDataRootOption(args.loopDataRoot ?? null)).dbFile
+		return makeUnavailableStatusSnapshot({
+			target: makeStatusTargetSnapshot(targetCwd, dbFile, args.repository, null, { kind: "missing", error: errorMessage(error) }),
+			stateKind: "missing-state",
+			statePath: dbFile,
+			errorPath: "chain",
+			errorMessage: errorMessage(error),
+		})
 	}
-
-	const selected = selectIssue(statusState, options, statusChain)
-	const runtimeErrors = await checkRuntime(options, statusState, statusChain)
-	const currentSnapshot = await buildStatusCurrentSnapshot(options, statusState)
-	const events = await buildStatusEventsSnapshot(options, statusState, selected)
-	const processes = await buildStatusProcessSnapshot(options)
+	const options = loaded.options
+	const target = makeStatusTargetSnapshot(options.targetCwd, options.configPath, args.repository, options, { kind: "loaded", error: null })
+	const selected = selectIssue(loaded.state, options, loaded.chain)
+	const runtimeErrors = await checkRuntime(options, loaded.state, loaded.chain)
+	const currentSnapshot = await buildStatusCurrentSnapshot(options, loaded.state)
+	const events = await buildStatusEventsSnapshot(options, loaded.state, selected)
+	const processes = buildCentralStatusProcessSnapshot(options)
 	const snapshot: CoderLoopStatusSnapshot = {
 		target,
 		state: {
 			kind: runtimeErrors.length === 0 ? "ok" : "invalid-runtime",
 			ok: runtimeErrors.length === 0,
 			loaded: true,
-			path: statusStatePath,
-			version: statusState.version,
-			repository: statusState.repository,
-			baseBranch: statusState.baseBranch,
+			path: resolveLoopDataPaths(loopDataRootOption(options.loopDataRoot)).dbFile,
+			version: loaded.state.version,
+			repository: loaded.state.repository,
+			baseBranch: loaded.state.baseBranch,
 			errors: runtimeErrors,
 			error: null,
 		},
-		queue: buildStatusQueueSnapshot(options, statusState, selected),
+		queue: buildStatusQueueSnapshot(options, loaded.state, selected),
 		current: currentSnapshot,
 		events,
 		processes,
@@ -2423,7 +2457,8 @@ function makeStatusRawArgs(args: StatusCommandArgs): RawArgs {
 		configPath: args.configPath,
 		workflowPath: null,
 		statePath: null,
-		loopDataRoot: null,
+		loopDataRoot: args.loopDataRoot ?? null,
+		chainName: args.chainName ?? null,
 		repository: args.repository,
 		requireBrowserEvidence: null,
 		once: false,
@@ -2744,6 +2779,26 @@ function parseLoopFile(raw: string): Omit<StatusLoopFileSnapshot, "path" | "exis
 	}
 }
 
+function buildCentralStatusProcessSnapshot(options: LoopOptions): StatusProcessSnapshot {
+	return {
+		loopFile: {
+			path: options.loopFile,
+			exists: false,
+			startedAt: null,
+			pid: null,
+			pidAlive: null,
+			log: null,
+			cwd: null,
+			statePath: null,
+			command: null,
+			requireBrowserEvidence: null,
+			raw: null,
+		},
+		live: [],
+		scanError: null,
+	}
+}
+
 function parseLoopFileBoolean(value: string | undefined): boolean | null {
 	if (value === undefined) return null
 	if (value === "true") return true
@@ -2903,26 +2958,33 @@ async function runDaemonDownCommand(args: Extract<DaemonCommandArgs, { action: "
 }
 
 async function runDaemonStartCommand(args: Extract<DaemonCommandArgs, { action: "start" }>): Promise<void> {
-	const plan = buildDaemonStartPlan(args)
+	const runtime = await loadTargetRuntime(daemonCommandToTargetLookupArgs(args))
 	if (args.dryRun) {
 		process.stdout.write([
-			`daemon start dry-run: target=${plan.targetCwd}`,
-			`daemon start dry-run: command=${plan.commandLine}`,
-			`daemon start dry-run: require-browser-evidence=${plan.requireBrowserEvidence}`,
-			`daemon start dry-run: stdout=${plan.stdoutPath}`,
-			`daemon start dry-run: stderr=${plan.stderrPath}`,
+			`daemon start dry-run: target=${runtime.options.targetCwd}`,
+			`daemon start dry-run: chain=${runtime.chain.name}`,
+			`daemon start dry-run: central-daemon=required`,
+			`daemon start dry-run: require-browser-evidence=${runtime.options.requireBrowserEvidence}`,
 			"",
 		].join("\n"))
 		return
 	}
-	const result = await executeDaemonStart(args, plan)
-	process.stdout.write(JSON.stringify(result, null, "\t") + "\n")
+	const daemon = await requestDaemonResult(args.loopDataRoot ?? null, "daemon.status")
+	process.stdout.write(JSON.stringify({
+		action: "start",
+		target: runtime.options.targetCwd,
+		chain: runtime.chain.name,
+		alreadyRunning: true,
+		daemon: daemon.daemon,
+	}, null, "\t") + "\n")
 }
 
 async function executeDaemonStart(args: Extract<DaemonCommandArgs, { action: "start" }>, plan = buildDaemonStartPlan(args)): Promise<DaemonStartResult> {
 	const current = await buildCoderLoopStatusSnapshot({
 		targetCwd: args.targetCwd,
 		configPath: args.configPath,
+		loopDataRoot: args.loopDataRoot ?? null,
+		chainName: args.chainName ?? null,
 		repository: args.repository,
 		output: "json",
 	})
@@ -2966,19 +3028,23 @@ async function executeDaemonStart(args: Extract<DaemonCommandArgs, { action: "st
 }
 
 async function runDaemonStopCommand(args: Extract<DaemonCommandArgs, { action: "stop" }>): Promise<void> {
-	const snapshot = await buildCoderLoopStatusSnapshot({
-		targetCwd: args.targetCwd,
-		configPath: args.configPath,
-		repository: args.repository,
-		output: "json",
-	})
-	const plan = buildDaemonStopPlan(snapshot)
+	const runtime = await loadTargetRuntime(daemonCommandToTargetLookupArgs(args))
 	if (args.dryRun) {
-		process.stdout.write(JSON.stringify({ ...plan, dryRun: true }, null, "\t") + "\n")
+		process.stdout.write(JSON.stringify({
+			action: "stop",
+			target: runtime.options.targetCwd,
+			chain: runtime.chain.name,
+			dryRun: true,
+		}, null, "\t") + "\n")
 		return
 	}
-	const result = await executeDaemonStop(plan)
-	process.stdout.write(JSON.stringify(result, null, "\t") + "\n")
+	const result = await requestDaemonResult(args.loopDataRoot ?? null, "chain.delete", { chainName: runtime.chain.name })
+	process.stdout.write(JSON.stringify({
+		action: "stop",
+		target: runtime.options.targetCwd,
+		chain: runtime.chain.name,
+		result,
+	}, null, "\t") + "\n")
 }
 
 function buildDaemonStopPlan(snapshot: CoderLoopStatusSnapshot): DaemonStopPlan {
@@ -3009,32 +3075,45 @@ async function executeDaemonStop(plan: DaemonStopPlan): Promise<DaemonStopResult
 }
 
 async function runDaemonRestartCommand(args: Extract<DaemonCommandArgs, { action: "restart" }>): Promise<void> {
-	const current = await buildCoderLoopStatusSnapshot({
-		targetCwd: args.targetCwd,
-		configPath: args.configPath,
-		repository: args.repository,
-		output: "json",
-	})
-	const requireBrowserEvidence = args.requireBrowserEvidence || current.processes.loopFile.requireBrowserEvidence === true
+	const runtime = await loadTargetRuntime(daemonCommandToTargetLookupArgs(args))
 	if (args.dryRun) {
-		const startPlan = buildDaemonStartPlan({ ...args, action: "start", requireBrowserEvidence })
 		process.stdout.write(JSON.stringify({
 			action: "restart",
-			target: startPlan.targetCwd,
+			target: runtime.options.targetCwd,
+			chain: runtime.chain.name,
 			dryRun: true,
-			stop: { targetCwd: args.targetCwd, configPath: args.configPath, repository: args.repository },
-			start: { command: startPlan.command, commandLine: startPlan.commandLine },
+			centralDaemon: "required",
 		}, null, "\t") + "\n")
 		return
 	}
-	const stopped = await executeDaemonStop(buildDaemonStopPlan(current))
-	const started = await executeDaemonStart({ ...args, action: "start", requireBrowserEvidence, maxIterations: args.maxIterations, dryRun: false })
+	const daemon = await requestDaemonResult(args.loopDataRoot ?? null, "daemon.status")
 	process.stdout.write(JSON.stringify({
 		action: "restart",
-		target: current.target.cwd,
-		stopped,
-		started,
+		target: runtime.options.targetCwd,
+		chain: runtime.chain.name,
+		restarted: false,
+		reason: "central daemon is global; target restart resolves the chain and verifies daemon availability",
+		daemon: daemon.daemon,
 	}, null, "\t") + "\n")
+}
+
+function daemonCommandToTargetLookupArgs(args: Extract<DaemonCommandArgs, { action: "start" | "stop" | "restart" }>): TargetChainLookupArgs {
+	return {
+		targetCwd: args.targetCwd,
+		configPath: args.configPath,
+		loopDataRoot: args.loopDataRoot ?? null,
+		chainName: args.chainName ?? null,
+		repository: args.repository,
+		baseBranch: "baseBranch" in args ? args.baseBranch : null,
+		requireBrowserEvidence: "requireBrowserEvidence" in args ? args.requireBrowserEvidence : null,
+		once: false,
+		dryRun: args.dryRun,
+		checkRuntime: false,
+		worktree: "worktree" in args ? args.worktree : false,
+		maxIterations: "maxIterations" in args ? args.maxIterations : null,
+		workflowPath: null,
+		statePath: null,
+	}
 }
 
 export type QueueUnblockMutationOutcome =
@@ -3081,7 +3160,10 @@ type QueueUnblockCommandResult = {
 }
 
 async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<void> {
-	const options = await loadLoopOptionsForTarget(args.targetCwd, args.configPath, args.repository)
+	const options = await loadLoopOptionsForTarget(args.targetCwd, args.configPath, args.repository, {
+		loopDataRoot: args.loopDataRoot,
+		chainName: args.chainName,
+	})
 	assertQueueUnblockSupported(options.preset)
 	const issue = normalizeQueueIssueId(args.issue)
 	const dbSnapshot = await loadLoopStateFromDb(options)
@@ -3104,6 +3186,8 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 				action: "start",
 				targetCwd: options.targetCwd,
 				configPath: args.configPath,
+				loopDataRoot: options.loopDataRoot,
+				chainName: options.chainName ?? null,
 				repository: options.repository,
 				requireBrowserEvidence: args.requireBrowserEvidence,
 				maxIterations: null,
@@ -3121,6 +3205,8 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 				action: "start",
 				targetCwd: options.targetCwd,
 				configPath: args.configPath,
+				loopDataRoot: options.loopDataRoot,
+				chainName: options.chainName ?? null,
 				repository: options.repository,
 				requireBrowserEvidence: args.requireBrowserEvidence,
 				maxIterations: null,
@@ -3165,18 +3251,245 @@ function daemonResultIndicatesRunning(daemon: QueueUnblockCommandResult["daemon"
 	return daemon.result.pid !== null
 }
 
-async function loadLoopOptionsForTarget(targetCwdInput: string, configPathInput: string | null, repository: string | null): Promise<LoopOptions> {
-	const targetCwd = resolve(targetCwdInput)
-	const configPath = await resolveConfigPath(targetCwd, configPathInput)
-	const config = await loadConfig(configPath)
+type TargetChainLookupArgs = {
+	targetCwd: string
+	configPath: string | null
+	loopDataRoot: string | null
+	chainName: string | null
+	repository: string | null
+	baseBranch: string | null
+	requireBrowserEvidence: boolean | null
+	once: boolean
+	dryRun: boolean
+	checkRuntime: boolean
+	worktree: boolean
+	maxIterations: number | null
+	workflowPath: string | null
+	statePath: string | null
+}
+
+type LoadedTargetRuntime = {
+	options: LoopOptions
+	chain: ChainRecord
+	state: LoopState
+}
+
+async function loadTargetRuntime(args: TargetChainLookupArgs): Promise<LoadedTargetRuntime> {
+	const targetCwd = resolve(args.targetCwd)
+	const discoveredConfig = await discoverLegacyConfigForTarget(targetCwd, args)
+	const effectiveLoopDataRoot = args.loopDataRoot ?? discoveredConfig?.config.loopDataRoot ?? null
+	const chain = await resolveDbChainForTarget({ ...args, loopDataRoot: effectiveLoopDataRoot })
+	const explicitConfig = args.configPath === null ? discoveredConfig?.config ?? null : await loadConfig(resolveFrom(targetCwd, args.configPath))
+	const config = loopConfigFromChain(chain, effectiveLoopDataRoot, explicitConfig)
 	const presetDir = resolvePresetDir(config, PKG_ROOT, targetCwd)
 	const preset = await loadPreset(presetDir)
-	return buildOptions(targetCwd, configPath, makeStatusRawArgs({
+	const configPath = args.configPath === null ? resolveLoopDataPaths(loopDataRootOption(effectiveLoopDataRoot)).dbFile : resolveFrom(targetCwd, args.configPath)
+	const options = buildOptions(targetCwd, configPath, {
+		maxIterations: args.maxIterations,
 		targetCwd,
+		configPath: args.configPath,
+		workflowPath: args.workflowPath,
+		statePath: args.statePath,
+		loopDataRoot: effectiveLoopDataRoot,
+		chainName: chain.name,
+		repository: args.repository,
+		requireBrowserEvidence: args.requireBrowserEvidence,
+		once: args.once,
+		dryRun: args.dryRun,
+		checkRuntime: args.checkRuntime,
+		worktree: args.worktree,
+		baseBranch: args.baseBranch,
+	}, config, preset)
+	const state = loopStateFromDbRecords(chain, readDbItemsForChain(effectiveLoopDataRoot, chain.id), readDbCurrentRun(effectiveLoopDataRoot, chain.id), preset)
+	return { options, chain, state }
+}
+
+async function discoverLegacyConfigForTarget(targetCwd: string, args: TargetChainLookupArgs): Promise<{ path: string; config: LoopConfig } | null> {
+	if (args.configPath !== null || args.loopDataRoot !== null) return null
+	const path = await resolveConfigPath(targetCwd, null)
+	const result = await readStatusConfig(path)
+	if (result.kind !== "ok") return null
+	if (result.value.loopDataRoot !== null) return { path, config: result.value }
+	const legacyLoopDataRoot = resolve(targetCwd, ".coder-loop/runtime/loop-data")
+	if (await exists(resolve(legacyLoopDataRoot, "db.sqlite"))) {
+		return { path, config: { ...result.value, loopDataRoot: legacyLoopDataRoot } }
+	}
+	return { path, config: result.value }
+}
+
+async function loadLoopOptionsForTarget(
+	targetCwdInput: string,
+	configPathInput: string | null,
+	repository: string | null,
+	extra: Partial<TargetChainLookupArgs> = {},
+): Promise<LoopOptions> {
+	const loaded = await loadTargetRuntime({
+		targetCwd: targetCwdInput,
 		configPath: configPathInput,
+		loopDataRoot: extra.loopDataRoot ?? null,
+		chainName: extra.chainName ?? null,
 		repository,
-		output: "json",
-	}), config, preset)
+		baseBranch: extra.baseBranch ?? null,
+		requireBrowserEvidence: extra.requireBrowserEvidence ?? null,
+		once: extra.once ?? false,
+		dryRun: extra.dryRun ?? false,
+		checkRuntime: extra.checkRuntime ?? false,
+		worktree: extra.worktree ?? false,
+		maxIterations: extra.maxIterations ?? null,
+		workflowPath: extra.workflowPath ?? null,
+		statePath: extra.statePath ?? null,
+	})
+	return loaded.options
+}
+
+async function resolveDbChainForTarget(args: TargetChainLookupArgs): Promise<ChainRecord> {
+	const loopDataRoot = args.loopDataRoot
+	const store = openSqliteStateStore({ createIfMissing: false, ...loopDataRootOption(loopDataRoot) })
+	try {
+		const requestedRepo = args.repository ?? await inferRepositoryFromGit(args.targetCwd)
+		const requestedBase = args.baseBranch
+		if (args.chainName !== null) {
+			const chain = store.getChainByName(args.chainName)
+			if (chain === null) throw new CoderLoopError(`SQLite state DB has no chain named "${args.chainName}"`)
+			if (chain.status !== "active") throw new CoderLoopError(`SQLite chain "${chain.name}" is ${chain.status}, expected active`)
+			if (requestedRepo !== null && chain.repository !== requestedRepo) {
+				throw new CoderLoopError(`SQLite chain "${chain.name}" repository is ${chain.repository}, expected ${requestedRepo}`)
+			}
+			if (requestedBase !== null && chain.baseBranch !== requestedBase) {
+				throw new CoderLoopError(`SQLite chain "${chain.name}" base branch is ${chain.baseBranch}, expected ${requestedBase}`)
+			}
+			return chain
+		}
+
+		const targetCwd = resolve(args.targetCwd)
+		const active = store.listChains().filter((chain) =>
+			chain.status === "active"
+			&& (requestedRepo === null || chain.repository === requestedRepo)
+			&& (requestedBase === null || chain.baseBranch === requestedBase)
+		)
+		const matchingByRepoCwd = active.filter((chain) =>
+			store.listItems(chain.id).some((item) => samePath(item.repoCwd, targetCwd)),
+		)
+		if (matchingByRepoCwd.length === 1) return matchingByRepoCwd[0]!
+		if (matchingByRepoCwd.length > 1) {
+			throw new CoderLoopError(`target ${targetCwd} matches multiple active chains by repo_cwd: ${matchingByRepoCwd.map((chain) => chain.name).join(", ")}; pass --chain <name>`)
+		}
+		if (active.length === 1) return active[0]!
+		if (active.length === 0) {
+			const repoLabel = requestedRepo === null ? "any repository" : `repository ${requestedRepo}`
+			throw new CoderLoopError(`SQLite state DB has no active chain for ${repoLabel} and target ${targetCwd}`)
+		}
+		throw new CoderLoopError(`target ${targetCwd} is ambiguous across active chains: ${active.map((chain) => chain.name).join(", ")}; pass --chain <name>`)
+	} finally {
+		store.close()
+	}
+}
+
+function readDbItemsForChain(loopDataRoot: string | null, chainId: number): ItemRecord[] {
+	const store = openSqliteStateStore({ createIfMissing: false, ...loopDataRootOption(loopDataRoot) })
+	try {
+		return store.listItems(chainId)
+	} finally {
+		store.close()
+	}
+}
+
+function readDbCurrentRun(loopDataRoot: string | null, chainId: number): CurrentRunRecord | null {
+	const store = openSqliteStateStore({ createIfMissing: false, ...loopDataRootOption(loopDataRoot) })
+	try {
+		return store.getCurrentRun(chainId)
+	} finally {
+		store.close()
+	}
+}
+
+function loopConfigFromChain(chain: ChainRecord, loopDataRoot: string | null, explicitConfig: LoopConfig | null): LoopConfig {
+	const metadata = chain.metadata
+	const presetPath = stringMetadata(metadata, "presetPath") ?? explicitConfig?.presetPath ?? null
+	const config: LoopConfig = {
+		repository: chain.repository,
+		baseBranch: chain.baseBranch,
+		worktree: booleanMetadata(metadata, "worktree") ?? explicitConfig?.worktree ?? null,
+		workflowFile: stringMetadata(metadata, "workflowFile") ?? explicitConfig?.workflowFile ?? null,
+		sharedContextFile: stringMetadata(metadata, "sharedContextFile") ?? explicitConfig?.sharedContextFile ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "shared"),
+		stateFile: stringMetadata(metadata, "stateFile") ?? explicitConfig?.stateFile ?? resolveLoopDataPaths(loopDataRootOption(loopDataRoot)).dbFile,
+		issueDir: stringMetadata(metadata, "issueDir") ?? explicitConfig?.issueDir ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "issues"),
+		evidenceDir: stringMetadata(metadata, "evidenceDir") ?? explicitConfig?.evidenceDir ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "evidence"),
+		logDir: stringMetadata(metadata, "logDir") ?? explicitConfig?.logDir ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "runs"),
+		loopDataRoot,
+		requireAgentBrowserScreenshots: booleanMetadata(metadata, "requireAgentBrowserScreenshots") ?? explicitConfig?.requireAgentBrowserScreenshots ?? null,
+		defaultRunner: runnerMetadata(metadata, "runner") ?? explicitConfig?.defaultRunner ?? null,
+		reviewRunner: runnerMetadata(metadata, "reviewRunner") ?? explicitConfig?.reviewRunner ?? null,
+		claudeBinary: nestedStringMetadata(metadata, "claude", "binary") ?? explicitConfig?.claudeBinary ?? null,
+		claudeExtraArgs: nestedStringArrayMetadata(metadata, "claude", "extraArgs") ?? explicitConfig?.claudeExtraArgs ?? [],
+		claudeModel: nestedStringMetadata(metadata, "claude", "model") ?? explicitConfig?.claudeModel ?? null,
+		codexBinary: nestedStringMetadata(metadata, "codex", "binary") ?? explicitConfig?.codexBinary ?? null,
+		codexExtraArgs: nestedStringArrayMetadata(metadata, "codex", "extraArgs") ?? explicitConfig?.codexExtraArgs ?? [],
+		codexModel: nestedStringMetadata(metadata, "codex", "model") ?? explicitConfig?.codexModel ?? null,
+		preset: presetPath === null ? chain.preset : null,
+		presetPath,
+	}
+	return config
+}
+
+function chainRuntimePathForConfig(chainName: string, loopDataRoot: string | null, kind: "shared" | "issues" | "evidence" | "runs"): string {
+	const paths = resolveChainRuntimePaths(chainName, loopDataRootOption(loopDataRoot))
+	if (kind === "shared") return paths.sharedFile
+	if (kind === "issues") return paths.issuesDir
+	if (kind === "evidence") return paths.evidenceDir
+	return paths.runsDir
+}
+
+function stringMetadata(metadata: JsonObject, key: string): string | null {
+	const value = metadata[key]
+	return typeof value === "string" && value.trim() !== "" ? value : null
+}
+
+function booleanMetadata(metadata: JsonObject, key: string): boolean | null {
+	const value = metadata[key]
+	return typeof value === "boolean" ? value : null
+}
+
+function runnerMetadata(metadata: JsonObject, key: string): AgentRunnerKind | null {
+	const value = metadata[key]
+	return value === "claude" || value === "codex" ? value : null
+}
+
+function nestedStringMetadata(metadata: JsonObject, objectKey: string, key: string): string | null {
+	const object = metadata[objectKey]
+	if (!isObjectRecord(object)) return null
+	const value = object[key]
+	return typeof value === "string" && value.trim() !== "" ? value : null
+}
+
+function nestedStringArrayMetadata(metadata: JsonObject, objectKey: string, key: string): string[] | null {
+	const object = metadata[objectKey]
+	if (!isObjectRecord(object)) return null
+	const value = object[key]
+	return Array.isArray(value) && value.every((entry) => typeof entry === "string") ? [...value] : null
+}
+
+async function inferRepositoryFromGit(targetCwd: string): Promise<string | null> {
+	const rootResult = Bun.spawnSync({
+		cmd: ["git", "-C", resolve(targetCwd), "rev-parse", "--show-toplevel"],
+		stdout: "pipe",
+		stderr: "ignore",
+	})
+	if (rootResult.exitCode !== 0) return null
+	const gitRoot = new TextDecoder().decode(rootResult.stdout).trim()
+	if (!samePath(gitRoot, targetCwd)) return null
+	const result = Bun.spawnSync({
+		cmd: ["git", "-C", resolve(targetCwd), "remote", "get-url", "origin"],
+		stdout: "pipe",
+		stderr: "ignore",
+	})
+	if (result.exitCode !== 0) return null
+	const url = new TextDecoder().decode(result.stdout).trim()
+	const sshMatch = /^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/.exec(url)
+	if (sshMatch) return `${sshMatch[1]}/${sshMatch[2]}`
+	const httpsMatch = /^https?:\/\/github\.com\/([^/]+)\/(.+?)(?:\.git)?\/?$/.exec(url)
+	if (httpsMatch) return `${httpsMatch[1]}/${httpsMatch[2]}`
+	return null
 }
 
 function assertQueueUnblockSupported(preset: Preset): void {
@@ -3517,14 +3830,14 @@ export async function checkRuntime(options: LoopOptions, state: LoopState, chain
 	if (options.worktree && (options.baseBranch === null || options.baseBranch.trim() === "")) pushCheckError(errors, "worktree", "worktree mode requires a non-empty baseBranch")
 
 	await checkDirectory(options.targetCwd, "targetCwd", errors)
-	await checkFile(options.configPath, "config", errors)
 	await checkFile(options.workflowPath, "workflow", errors)
 	const runtimeRoot = resolve(options.targetCwd, ".coder-loop/runtime")
-	checkInside(options.targetCwd, options.configPath, "config", errors)
 	checkInside(options.targetCwd, options.workflowPath, "workflow", errors)
-	checkInside(runtimeRoot, options.configPath, "config", errors)
 	if (isWithin(runtimeRoot, options.workflowPath)) pushCheckError(errors, "workflow", "must be project policy outside .coder-loop/runtime")
 	if (chain === undefined) {
+		await checkFile(options.configPath, "config", errors)
+		checkInside(options.targetCwd, options.configPath, "config", errors)
+		checkInside(runtimeRoot, options.configPath, "config", errors)
 		await checkFile(options.sharedContextPath, "shared context", errors)
 		await checkDirectory(options.issueDir, "issueDir", errors)
 		await checkDirectory(options.evidenceRootDir, "evidenceDir", errors)
@@ -3538,6 +3851,7 @@ export async function checkRuntime(options: LoopOptions, state: LoopState, chain
 		checkInside(runtimeRoot, options.evidenceRootDir, "evidenceDir", errors)
 		checkInside(runtimeRoot, options.logDir, "logDir", errors)
 	} else {
+		if (chain.status !== "active") pushCheckError(errors, "chain.status", `must be active (got ${chain.status})`)
 		checkCentralRuntimeLayout(options, chain, errors)
 	}
 
@@ -3765,6 +4079,12 @@ function loopDataRootOption(loopDataRoot: string | null): { loopDataRoot?: strin
 }
 
 function selectDbChainForOptions(store: SqliteStateStore, options: LoopOptions): ChainRecord {
+	if (options.chainName !== undefined && options.chainName !== null) {
+		const chain = store.getChainByName(options.chainName)
+		if (chain === null) fail(`SQLite state DB has no chain named "${options.chainName}"`)
+		if (chain.status !== "active") fail(`SQLite chain "${chain.name}" is ${chain.status}, expected active`)
+		return chain
+	}
 	const activeChains = store.listChains().filter((chain) =>
 		chain.status === "active"
 		&& (options.repository === null || chain.repository === options.repository)
@@ -4228,8 +4548,10 @@ function parseIssueKindFromQueueItem(item: QueueItem): ParsedIssueKind {
 }
 
 export async function resolveIssueKind(repository: string | null, issueId: string, item: QueueItem): Promise<ParsedIssueKind> {
-	if (repository !== null) return fetchIssueKind(repository, issueId)
-	return parseIssueKindFromQueueItem(item)
+	const itemKind = parseIssueKindFromQueueItem(item)
+	if (!itemKind.ok || itemKind.kind !== null) return itemKind
+	if (repository !== null && /^\d+$/.test(issueId)) return fetchIssueKind(repository, issueId)
+	return itemKind
 }
 
 export async function fetchIssueKind(repository: string | null, issueId: string): Promise<ParsedIssueKind> {

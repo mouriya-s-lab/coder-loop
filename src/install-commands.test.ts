@@ -1,25 +1,29 @@
-import { describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
+import { afterAll, describe, expect, test } from "bun:test"
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 import { buildLiveRuntimeHealthLines } from "./install-commands"
 import { buildCoderLoopStatusSnapshot } from "./loop"
+import { openSqliteStateStore } from "./sqlite-state"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
+const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/install-command-tests", String(process.pid))
+
+afterAll(async () => {
+	await rm(TEST_ROOT, { recursive: true, force: true })
+})
 
 describe("buildLiveRuntimeHealthLines", () => {
 	test("summarizes status snapshot health and stale loop ownership signals", async () => {
 		const target = await makeDoctorTarget()
-		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json" })
+		const loopDataRoot = resolve(target, "loop-data")
+		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, loopDataRoot, repository: "fixture/repo", output: "json" })
 		const lines = buildLiveRuntimeHealthLines(snapshot)
 
-		expect(lines).toContain(`OK: state ok (${resolve(target, ".coder-loop/runtime/state.json")})`)
+		expect(lines).toContain(`OK: state ok (${resolve(loopDataRoot, "db.sqlite")})`)
 		expect(lines.some((line) => line.includes("queue total=1") && line.includes("selected=alpha"))).toBe(true)
 		expect(lines.some((line) => line.includes("runner hostDefault=") && line.includes("default="))).toBe(true)
-		expect(lines.some((line) => line.includes("current id=alpha") && line.includes("phase=run"))).toBe(true)
-		expect(lines.some((line) => line.includes("current phase status missing"))).toBe(true)
-		expect(lines).toContain("WARN: stale loop file: recorded pid is not alive")
-		expect(lines).toContain("WARN: no live loop process is owned by this target")
+		expect(lines).toContain("INFO: current run=<none>")
+		expect(lines).toContain("INFO: loopFile exists=false, pid=<none>, pidAlive=<unknown>, command=<none>, requireBrowserEvidence=<unknown>")
 	})
 })
 
@@ -32,34 +36,28 @@ describe("install label catalog", () => {
 })
 
 async function makeDoctorTarget(): Promise<string> {
-	const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-doctor-"))
-	const runtime = resolve(dir, ".coder-loop/runtime")
-	await mkdir(resolve(runtime, "issues"), { recursive: true })
-	await mkdir(resolve(runtime, "evidence"), { recursive: true })
-	await mkdir(resolve(runtime, "logs"), { recursive: true })
+	const dir = resolve(TEST_ROOT, `doctor-${Date.now()}-${Math.random().toString(16).slice(2)}`)
+	const loopDataRoot = resolve(dir, "loop-data")
+	await mkdir(resolve(dir, ".coder-loop"), { recursive: true })
+	await mkdir(loopDataRoot, { recursive: true })
 	await writeFile(resolve(dir, ".coder-loop/workflow.md"), "# placeholder workflow\n")
-	await writeFile(resolve(runtime, "shared.md"), "# placeholder shared context\n")
-	await writeFile(resolve(runtime, "config.json"), JSON.stringify({ preset: "single-phase-example" }, null, 2))
-	await writeFile(resolve(runtime, "state.json"), JSON.stringify({
-		version: 1,
-		queue: [{ id: "alpha", status: "pending" }],
-		recentRuns: [],
-		current: {
-			id: "alpha",
-			phase: "run",
-			runId: "run-alpha",
-			startedAt: new Date().toISOString(),
-		},
-	}, null, 2))
-	await writeFile(resolve(dir, ".dev-loop"), [
-		"started: 2026-05-17T00:00:00.000Z",
-		"pid: 999999",
-		`log: ${resolve(runtime, "logs/coder-loop-999999.log")}`,
-		`cwd: ${dir}`,
-		`state: ${resolve(runtime, "state.json")}`,
-		"command: bun src/loop.ts --target-cwd .",
-		"requireBrowserEvidence: false",
-		"",
-	].join("\n"))
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = store.createChain({
+			name: "doctor-chain",
+			preset: "single-phase-example",
+			repository: "fixture/repo",
+			baseBranch: "main",
+		})
+		store.createItem({
+			chainId: chain.id,
+			issueNumber: 1,
+			repoCwd: dir,
+			status: "pending",
+			extra: { id: "alpha" },
+		})
+	} finally {
+		store.close()
+	}
 	return dir
 }

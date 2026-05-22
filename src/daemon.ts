@@ -19,9 +19,10 @@ import {
 	openSqliteStateStore,
 	type RunRecord,
 	type SqliteStateStore,
+	type UpdateChainInput,
 	type UpdateItemInput,
 } from "./sqlite-state"
-import { type LoopDataRootOptions, resolveLoopDataPaths } from "./runtime-paths"
+import { type LoopDataRootOptions, resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 
 export type DaemonCommandName =
 	| "chain.create"
@@ -281,8 +282,37 @@ export class CoderLoopDaemon {
 		if (umbrellaIssue !== undefined) input.umbrellaIssue = umbrellaIssue
 		const umbrellaRepo = optionalStringOrNull(args, "umbrellaRepo")
 		if (umbrellaRepo !== undefined) input.umbrellaRepo = umbrellaRepo
-		const chain = this.requireStore().createChain(input)
+		const store = this.requireStore()
+		const existing = store.getChainByName(input.name)
+		let chain: ChainRecord
+		if (existing === null) {
+			chain = store.createChain(input)
+		} else {
+			const update: UpdateChainInput = {
+				preset: input.preset,
+				repository: input.repository,
+				baseBranch: input.baseBranch,
+				status: "active",
+				metadata: { ...existing.metadata, ...(input.metadata ?? {}) },
+			}
+			if (input.umbrellaIssue !== undefined) update.umbrellaIssue = input.umbrellaIssue
+			if (input.umbrellaRepo !== undefined) update.umbrellaRepo = input.umbrellaRepo
+			chain = store.updateChain(existing.id, update)
+		}
+		await this.ensureChainRuntimeLayout(chain.name)
 		return { chain: chainToJson(chain) }
+	}
+
+	private async ensureChainRuntimeLayout(chainName: string): Promise<void> {
+		const paths = resolveChainRuntimePaths(chainName, { loopDataRoot: this.paths.root })
+		await mkdir(paths.issuesDir, { recursive: true })
+		await mkdir(paths.evidenceDir, { recursive: true })
+		await mkdir(paths.runsDir, { recursive: true })
+		await mkdir(paths.daemonDir, { recursive: true })
+		await writeFile(paths.sharedFile, "# Shared durable context\n\n", { flag: "wx" }).catch((error: unknown) => {
+			if (isNodeError(error) && error.code === "EEXIST") return
+			throw error
+		})
 	}
 
 	private handleChainList(): JsonObject {

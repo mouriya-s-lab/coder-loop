@@ -144,6 +144,21 @@ describe("scheduler", () => {
 		}
 	})
 
+	test("empty active chain remains active", async () => {
+		const fixture = await createFixture("empty-active")
+		try {
+			const chain = createChain(fixture.store, "empty-active-chain")
+
+			const tick = await schedulerTick(fixture.options())
+
+			expect(tick.spawnedRuns).toHaveLength(0)
+			expect(tick.completedChainIds).toEqual([])
+			expect(fixture.store.getChain(chain.id)?.status).toBe("active")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
 	test("completed chain skipped", async () => {
 		const fixture = await createFixture("completed-skip")
 		try {
