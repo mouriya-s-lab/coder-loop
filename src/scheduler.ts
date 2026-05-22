@@ -11,7 +11,7 @@ import {
 	type RunnerInvocationPaths,
 } from "./loop"
 import { type ChainRecord, type ItemRecord, type SqliteStateStore } from "./sqlite-state"
-import { type LoopDataRootOptions, resolveChainRuntimePaths } from "./runtime-paths"
+import { type LoopDataRootOptions, resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 
 export type SchedulerActiveRun = {
 	runId: string
@@ -260,7 +260,12 @@ async function spawnSchedulerRun(
 
 	const context: SchedulerSpawnContext = { chain, item, slot, runId, worktreePath }
 	const prompt = typeof options.prompt === "string" ? options.prompt : await options.prompt(context)
-	const runnerPlan = buildRunnerInvocation(options.runner, prompt, freshResume(), invocationPaths(item.repoCwd, worktreePath, options.presetDir))
+	const runnerPlan = buildRunnerInvocation(
+		options.runner,
+		prompt,
+		freshResume(),
+		invocationPaths(item.repoCwd, worktreePath, options.presetDir, resolveLoopDataPaths(options.loopDataRootOptions).root),
+	)
 	const child = spawn(runnerPlan.binary, runnerPlan.args, {
 		cwd: worktreePath,
 		stdio: ["ignore", "pipe", "pipe"],
@@ -403,8 +408,8 @@ function freshResume(): ResumeDecision {
 	return { kind: "fresh" }
 }
 
-function invocationPaths(targetCwd: string, agentCwd: string, presetDir: string): RunnerInvocationPaths {
-	return { targetCwd, agentCwd, presetDir }
+function invocationPaths(targetCwd: string, agentCwd: string, presetDir: string, loopDataRoot: string): RunnerInvocationPaths {
+	return { targetCwd, agentCwd, presetDir, loopDataRoot }
 }
 
 async function emit(options: SchedulerOptions, event: SchedulerEvent): Promise<void> {

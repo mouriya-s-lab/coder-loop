@@ -16,7 +16,7 @@ import { command, flag, option, optional, positional, run as runCmd, string as c
 import { type as arkType } from "arktype"
 import { daemonRequest, sendDaemonRequest, startCoderLoopDaemon, type DaemonCommandName } from "./daemon"
 import { dispatchSubcommand } from "./install-commands"
-import { resolveLoopDataPaths } from "./runtime-paths"
+import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import {
 	type ChainRecord,
 	type CurrentRunRecord,
@@ -872,6 +872,18 @@ function isRuntimeBindingKey(key: string): key is RuntimeBindingKey {
 }
 
 export type RuntimeBindings = Record<RuntimeBindingKey, string>
+
+export type RuntimeBindingPaths = {
+	sharedContextPath: string
+	statePath: string
+	currentIssueFile: string
+	issueDir: string
+	evidenceDir: string
+	evidenceRootDir: string
+	logDir: string
+	traceFile: string
+	loopFile: string
+}
 
 export type ConfigBindings = {
 	repository: string
@@ -1760,9 +1772,9 @@ async function main() {
 	const options = buildOptions(targetCwd, configPath, rawArgs, config, preset)
 
 	if (options.checkRuntime) {
-		const { state } = await loadLoopStateFromDb(options)
-		const selected = selectIssue(state, options)
-		const errors = await checkRuntime(options, state)
+		const { chain, state } = await loadLoopStateFromDb(options)
+		const selected = selectIssue(state, options, chain)
+		const errors = await checkRuntime(options, state, chain)
 		if (errors.length > 0) {
 			console.error(`Runtime check failed: ${errors.length} error(s)`)
 			for (const error of errors) console.error(`- ${error.path}: ${error.message}`)
@@ -1788,8 +1800,8 @@ async function main() {
 	}
 
 	if (options.dryRun) {
-		const { state } = await loadLoopStateFromDb(options)
-		const selected = selectIssue(state, options)
+		const { chain, state } = await loadLoopStateFromDb(options)
+		const selected = selectIssue(state, options, chain)
 		console.error(`Dry run: target=${options.targetCwd}`)
 		if (options.repository !== null) console.error(`Dry run: repo=${options.repository}`)
 		console.error(`Dry run: workflow=${options.workflowPath}`)
@@ -1854,8 +1866,8 @@ async function main() {
 	while ((await exists(options.loopFile)) && workIteration < options.maxIterations) {
 		const dbSnapshot = await loadLoopStateFromDb(options)
 		const state = dbSnapshot.state
-		await assertRuntimeValid(options, state)
-		let selected = selectIssue(state, options)
+		await assertRuntimeValid(options, state, dbSnapshot.chain)
+		let selected = selectIssue(state, options, dbSnapshot.chain)
 
 		if (options.worktree && selected && selected.item.agentCwd === null) {
 			const selectedId = getItemId(selected.item, options.preset)
@@ -1885,10 +1897,17 @@ async function main() {
 						options,
 						runId: fallbackRunId,
 						currentIssueFile: "",
-						evidenceDir: options.evidenceRootDir,
+						evidenceDir: null,
 						agentCwd: options.targetCwd,
 						issueRun: fallbackIssueRun,
 						issueKind: null,
+						paths: buildCentralRuntimeBindingPaths({
+							options,
+							chain: dbSnapshot.chain,
+							runId: fallbackRunId,
+							currentIssueFile: "",
+							evidenceDir: null,
+						}),
 					}),
 				}
 				await runReview(options, fallbackRunId, fallbackCtx, options.targetCwd, options.reviewRunner)
@@ -1932,6 +1951,13 @@ async function main() {
 				agentCwd: selected.agentCwd,
 				issueRun,
 				issueKind: kindResult.kind,
+				paths: buildCentralRuntimeBindingPaths({
+					options,
+					chain: dbSnapshot.chain,
+					runId,
+					currentIssueFile: selected.issueFile,
+					evidenceDir: selected.evidenceDir,
+				}),
 			}),
 		}
 
@@ -2075,7 +2101,7 @@ async function runTriggeredPhasesAfter(
 	emit: LoopEventEmit,
 ): Promise<number> {
 	for (const phase of options.preset.phases.filter((candidate) => candidate.trigger?.afterPhase === afterPhase)) {
-		const { state } = await loadLoopStateFromDb(options)
+		const { chain, state } = await loadLoopStateFromDb(options)
 		const item = state.queue.find((queueItem) => getItemId(queueItem, options.preset) === selectedId)
 		if (!item) {
 			log(`Skipping trigger phase ${phase.name}: issue #${selectedId} no longer exists in queue.`)
@@ -2086,10 +2112,8 @@ async function runTriggeredPhasesAfter(
 			continue
 		}
 
-		const issueFile = item.issueFile === null ? null : resolveFrom(options.targetCwd, item.issueFile)
-		const evidenceDir = item.evidenceDir === null ? null : resolveFrom(options.targetCwd, item.evidenceDir)
-		if (issueFile !== null && !isWithin(options.issueDir, issueFile)) fail(`Triggered issue file must resolve inside issueDir: ${item.issueFile}`)
-		if (evidenceDir !== null && !isWithin(options.evidenceRootDir, evidenceDir)) fail(`Triggered evidence directory must resolve inside evidenceDir: ${item.evidenceDir}`)
+		const issueFile = resolveChainIssueFile(options, chain, item, selectedId, "Triggered issue file")
+		const evidenceDir = resolveChainEvidenceDir(options, chain, item, selectedId, "Triggered evidence directory")
 
 		const agentCwd = item.agentCwd ?? options.targetCwd
 		const runner = selectRunnerForPhase(phase.name, item, options)
@@ -2104,6 +2128,13 @@ async function runTriggeredPhasesAfter(
 				agentCwd,
 				issueRun: { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null },
 				issueKind,
+				paths: buildCentralRuntimeBindingPaths({
+					options,
+					chain,
+					runId,
+					currentIssueFile: issueFile,
+					evidenceDir,
+				}),
 			}),
 		}
 		const eventContext: LoopEventContext = {
@@ -2295,22 +2326,33 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 	const raw = makeStatusRawArgs(args)
 	const options = buildOptions(targetCwd, configPath, raw, configResult.value, presetResult.value)
 	const target = makeStatusTargetSnapshot(targetCwd, configPath, args.repository, options, { kind: "loaded", error: null })
-	const stateResult = await readStatusState(options.statePath)
-	if (stateResult.kind !== "ok") {
-		const stateKind: StatusStateKind = stateResult.kind === "missing" ? "missing-state" : "invalid-state"
-		return makeUnavailableStatusSnapshot({
-			target,
-			stateKind,
-			statePath: options.statePath,
-			errorPath: "state",
-			errorMessage: stateResult.message,
-		})
+	let statusChain: ChainRecord | undefined
+	let statusState: LoopState
+	let statusStatePath = options.statePath
+	try {
+		const snapshot = await loadLoopStateFromDb(options)
+		statusChain = snapshot.chain
+		statusState = snapshot.state
+		statusStatePath = resolveLoopDataPaths(loopDataRootOption(options.loopDataRoot)).dbFile
+	} catch {
+		const stateResult = await readStatusState(options.statePath)
+		if (stateResult.kind !== "ok") {
+			const stateKind: StatusStateKind = stateResult.kind === "missing" ? "missing-state" : "invalid-state"
+			return makeUnavailableStatusSnapshot({
+				target,
+				stateKind,
+				statePath: options.statePath,
+				errorPath: "state",
+				errorMessage: stateResult.message,
+			})
+		}
+		statusState = stateResult.value
 	}
 
-	const selected = selectIssue(stateResult.value, options)
-	const runtimeErrors = await checkRuntime(options, stateResult.value)
-	const currentSnapshot = await buildStatusCurrentSnapshot(options, stateResult.value)
-	const events = await buildStatusEventsSnapshot(options, stateResult.value, selected)
+	const selected = selectIssue(statusState, options, statusChain)
+	const runtimeErrors = await checkRuntime(options, statusState, statusChain)
+	const currentSnapshot = await buildStatusCurrentSnapshot(options, statusState)
+	const events = await buildStatusEventsSnapshot(options, statusState, selected)
 	const processes = await buildStatusProcessSnapshot(options)
 	const snapshot: CoderLoopStatusSnapshot = {
 		target,
@@ -2318,14 +2360,14 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 			kind: runtimeErrors.length === 0 ? "ok" : "invalid-runtime",
 			ok: runtimeErrors.length === 0,
 			loaded: true,
-			path: options.statePath,
-			version: stateResult.value.version,
-			repository: stateResult.value.repository,
-			baseBranch: stateResult.value.baseBranch,
+			path: statusStatePath,
+			version: statusState.version,
+			repository: statusState.repository,
+			baseBranch: statusState.baseBranch,
 			errors: runtimeErrors,
 			error: null,
 		},
-		queue: buildStatusQueueSnapshot(options, stateResult.value, selected),
+		queue: buildStatusQueueSnapshot(options, statusState, selected),
 		current: currentSnapshot,
 		events,
 		processes,
@@ -3450,16 +3492,18 @@ async function ensureRuntime(options: LoopOptions): Promise<void> {
 	await mkdir(options.logDir, { recursive: true })
 }
 
-async function assertRuntimeValid(options: LoopOptions, state?: LoopState): Promise<void> {
-	const runtimeState = state ?? (await loadLoopStateFromDb(options)).state
-	const errors = await checkRuntime(options, runtimeState)
+async function assertRuntimeValid(options: LoopOptions, state?: LoopState, chain?: ChainRecord): Promise<void> {
+	const snapshot = state === undefined || chain === undefined ? await loadLoopStateFromDb(options) : null
+	const runtimeState = state ?? snapshot!.state
+	const runtimeChain = chain ?? snapshot!.chain
+	const errors = await checkRuntime(options, runtimeState, runtimeChain)
 	if (errors.length === 0) return
 
 	const details = errors.map((error) => `- ${error.path}: ${error.message}`).join("\n")
 	fail(`Runtime validation failed:\n${details}`)
 }
 
-export async function checkRuntime(options: LoopOptions, state: LoopState): Promise<RuntimeCheckError[]> {
+export async function checkRuntime(options: LoopOptions, state: LoopState, chain?: ChainRecord): Promise<RuntimeCheckError[]> {
 	const errors: RuntimeCheckError[] = []
 	const seenIds = new Set<string>()
 	const preset = options.preset
@@ -3475,23 +3519,27 @@ export async function checkRuntime(options: LoopOptions, state: LoopState): Prom
 	await checkDirectory(options.targetCwd, "targetCwd", errors)
 	await checkFile(options.configPath, "config", errors)
 	await checkFile(options.workflowPath, "workflow", errors)
-	await checkFile(options.sharedContextPath, "shared context", errors)
-	await checkDirectory(options.issueDir, "issueDir", errors)
-	await checkDirectory(options.evidenceRootDir, "evidenceDir", errors)
-	await checkDirectory(options.logDir, "logDir", errors)
 	const runtimeRoot = resolve(options.targetCwd, ".coder-loop/runtime")
 	checkInside(options.targetCwd, options.configPath, "config", errors)
 	checkInside(options.targetCwd, options.workflowPath, "workflow", errors)
-	checkInside(options.targetCwd, options.sharedContextPath, "shared context", errors)
-	checkInside(options.targetCwd, options.issueDir, "issueDir", errors)
-	checkInside(options.targetCwd, options.evidenceRootDir, "evidenceDir", errors)
-	checkInside(options.targetCwd, options.logDir, "logDir", errors)
 	checkInside(runtimeRoot, options.configPath, "config", errors)
-	checkInside(runtimeRoot, options.sharedContextPath, "shared context", errors)
-	checkInside(runtimeRoot, options.issueDir, "issueDir", errors)
-	checkInside(runtimeRoot, options.evidenceRootDir, "evidenceDir", errors)
-	checkInside(runtimeRoot, options.logDir, "logDir", errors)
 	if (isWithin(runtimeRoot, options.workflowPath)) pushCheckError(errors, "workflow", "must be project policy outside .coder-loop/runtime")
+	if (chain === undefined) {
+		await checkFile(options.sharedContextPath, "shared context", errors)
+		await checkDirectory(options.issueDir, "issueDir", errors)
+		await checkDirectory(options.evidenceRootDir, "evidenceDir", errors)
+		await checkDirectory(options.logDir, "logDir", errors)
+		checkInside(options.targetCwd, options.sharedContextPath, "shared context", errors)
+		checkInside(options.targetCwd, options.issueDir, "issueDir", errors)
+		checkInside(options.targetCwd, options.evidenceRootDir, "evidenceDir", errors)
+		checkInside(options.targetCwd, options.logDir, "logDir", errors)
+		checkInside(runtimeRoot, options.sharedContextPath, "shared context", errors)
+		checkInside(runtimeRoot, options.issueDir, "issueDir", errors)
+		checkInside(runtimeRoot, options.evidenceRootDir, "evidenceDir", errors)
+		checkInside(runtimeRoot, options.logDir, "logDir", errors)
+	} else {
+		checkCentralRuntimeLayout(options, chain, errors)
+	}
 
 	for (const [index, item] of state.queue.entries()) {
 		const label = `state.queue[${index}]`
@@ -3516,12 +3564,20 @@ export async function checkRuntime(options: LoopOptions, state: LoopState): Prom
 		if (item.lastRunId !== null && item.lastRunId.trim() === "") pushCheckError(errors, `${label}.lastRunId`, "must be null or non-empty")
 
 		if (item.issueFile !== null) {
-			const issueFile = resolveRuntimePath(options, item.issueFile, `${label}.issueFile`, options.issueDir, errors)
-			if (issueFile) await checkFile(issueFile, `${label}.issueFile`, errors)
+			if (chain === undefined) {
+				const issueFile = resolveRuntimePath(options, item.issueFile, `${label}.issueFile`, options.issueDir, errors)
+				if (issueFile) await checkFile(issueFile, `${label}.issueFile`, errors)
+			} else {
+				checkChainItemPath(options, chain, item.issueFile, `${label}.issueFile`, "issues", errors)
+			}
 		}
 		if (item.evidenceDir !== null) {
-			const evidenceDir = resolveRuntimePath(options, item.evidenceDir, `${label}.evidenceDir`, options.evidenceRootDir, errors)
-			if (evidenceDir) await checkDirectory(evidenceDir, `${label}.evidenceDir`, errors)
+			if (chain === undefined) {
+				const evidenceDir = resolveRuntimePath(options, item.evidenceDir, `${label}.evidenceDir`, options.evidenceRootDir, errors)
+				if (evidenceDir) await checkDirectory(evidenceDir, `${label}.evidenceDir`, errors)
+			} else {
+				checkChainItemPath(options, chain, item.evidenceDir, `${label}.evidenceDir`, "evidence", errors)
+			}
 		}
 		if (item.agentCwd !== null) {
 			if (!isAbsolute(item.agentCwd)) {
@@ -3856,6 +3912,38 @@ function samePath(left: string, right: string): boolean {
 	return resolve(left) === resolve(right)
 }
 
+function resolveChainIssueFile(options: LoopOptions, chain: ChainRecord, item: QueueItem, itemId: string, label: string): string {
+	const chainPaths = resolveChainRuntimePaths(chain.name, loopDataRootOption(options.loopDataRoot))
+	if (item.issueFile === null) return chainPaths.issueFile(itemId)
+	return resolveChainScopedPath(chainPaths.chainRoot, chainPaths.issuesDir, item.issueFile, label)
+}
+
+function resolveChainEvidenceDir(options: LoopOptions, chain: ChainRecord, item: QueueItem, itemId: string, label: string): string {
+	const chainPaths = resolveChainRuntimePaths(chain.name, loopDataRootOption(options.loopDataRoot))
+	if (item.evidenceDir === null) return chainPaths.issueEvidenceDir(itemId)
+	return resolveChainScopedPath(chainPaths.chainRoot, chainPaths.evidenceDir, item.evidenceDir, label)
+}
+
+function resolveLegacyIssueFile(options: LoopOptions, item: QueueItem): string | null {
+	const issueFile = item.issueFile === null ? null : resolveFrom(options.targetCwd, item.issueFile)
+	if (issueFile !== null && !isWithin(options.issueDir, issueFile)) fail(`Selected issue file must resolve inside issueDir: ${item.issueFile}`)
+	return issueFile
+}
+
+function resolveLegacyEvidenceDir(options: LoopOptions, item: QueueItem): string | null {
+	const evidenceDir = item.evidenceDir === null ? null : resolveFrom(options.targetCwd, item.evidenceDir)
+	if (evidenceDir !== null && !isWithin(options.evidenceRootDir, evidenceDir)) fail(`Selected evidence directory must resolve inside evidenceDir: ${item.evidenceDir}`)
+	return evidenceDir
+}
+
+function resolveChainScopedPath(chainRoot: string, expectedRoot: string, path: string, label: string): string {
+	if (path.trim() === "") fail(`${label} must not be empty`)
+	if (isAbsolute(path)) fail(`${label} must be relative to the chain root, got absolute path: ${path}`)
+	const resolved = resolve(chainRoot, path)
+	if (!isWithin(expectedRoot, resolved)) fail(`${label} must resolve inside ${expectedRoot}: ${path}`)
+	return resolved
+}
+
 async function saveState(path: string, state: LoopState): Promise<void> {
 	await writeFile(path, serializeState(state))
 }
@@ -3890,7 +3978,7 @@ export async function reconcileStateAfterIter(
 	return { restored: false }
 }
 
-export function selectIssue(state: LoopState, options: LoopOptions): SelectedIssue | null {
+export function selectIssue(state: LoopState, options: LoopOptions, chain?: ChainRecord): SelectedIssue | null {
 	const preset = options.preset
 	const continuable = preset.statuses.continuable
 	const currentItem = state.current
@@ -3901,10 +3989,9 @@ export function selectIssue(state: LoopState, options: LoopOptions): SelectedIss
 		: state.queue.find((item) => continuable.includes(item.status))
 	if (!selected) return null
 
-	const issueFile = selected.issueFile === null ? null : resolveFrom(options.targetCwd, selected.issueFile)
-	const evidenceDir = selected.evidenceDir === null ? null : resolveFrom(options.targetCwd, selected.evidenceDir)
-	if (issueFile !== null && !isWithin(options.issueDir, issueFile)) fail(`Selected issue file must resolve inside issueDir: ${selected.issueFile}`)
-	if (evidenceDir !== null && !isWithin(options.evidenceRootDir, evidenceDir)) fail(`Selected evidence directory must resolve inside evidenceDir: ${selected.evidenceDir}`)
+	const selectedId = getItemId(selected, preset)
+	const issueFile = chain === undefined ? resolveLegacyIssueFile(options, selected) : resolveChainIssueFile(options, chain, selected, selectedId, "Selected issue file")
+	const evidenceDir = chain === undefined ? resolveLegacyEvidenceDir(options, selected) : resolveChainEvidenceDir(options, chain, selected, selectedId, "Selected evidence directory")
 
 	// agentCwd validity (absolute + existing directory) is enforced upstream by checkRuntime.
 	const agentCwd = selected.agentCwd ?? options.targetCwd
@@ -4037,6 +4124,29 @@ export function renderFragmentIndex(preset: Preset): string {
 		.join("\n")
 }
 
+export function buildCentralRuntimeBindingPaths(input: {
+	options: LoopOptions
+	chain: Pick<ChainRecord, "name">
+	runId: string
+	currentIssueFile: string | null
+	evidenceDir: string | null
+}): RuntimeBindingPaths {
+	const rootOptions = loopDataRootOption(input.options.loopDataRoot)
+	const loopData = resolveLoopDataPaths(rootOptions)
+	const chainPaths = resolveChainRuntimePaths(input.chain.name, rootOptions)
+	return {
+		sharedContextPath: chainPaths.sharedFile,
+		statePath: loopData.dbFile,
+		currentIssueFile: input.currentIssueFile ?? "",
+		issueDir: chainPaths.issuesDir,
+		evidenceDir: input.evidenceDir ?? chainPaths.evidenceDir,
+		evidenceRootDir: chainPaths.evidenceDir,
+		logDir: chainPaths.runsDir,
+		traceFile: resolve(chainPaths.chainRoot, ".dev-trace.txt"),
+		loopFile: resolve(chainPaths.chainRoot, ".dev-loop"),
+	}
+}
+
 export function buildRuntimeBindings(input: {
 	options: LoopOptions
 	runId: string
@@ -4045,12 +4155,9 @@ export function buildRuntimeBindings(input: {
 	agentCwd: string
 	issueRun: IssueRunContext
 	issueKind: IssueKind
+	paths?: RuntimeBindingPaths
 }): RuntimeBindings {
-	return {
-		runId: input.runId,
-		targetCwd: input.options.targetCwd,
-		agentCwd: input.agentCwd,
-		workflowPath: input.options.workflowPath,
+	const paths = input.paths ?? {
 		sharedContextPath: input.options.sharedContextPath,
 		statePath: input.options.statePath,
 		currentIssueFile: input.currentIssueFile ?? "",
@@ -4060,6 +4167,21 @@ export function buildRuntimeBindings(input: {
 		logDir: input.options.logDir,
 		traceFile: input.options.traceFile,
 		loopFile: input.options.loopFile,
+	}
+	return {
+		runId: input.runId,
+		targetCwd: input.options.targetCwd,
+		agentCwd: input.agentCwd,
+		workflowPath: input.options.workflowPath,
+		sharedContextPath: paths.sharedContextPath,
+		statePath: paths.statePath,
+		currentIssueFile: paths.currentIssueFile,
+		issueDir: paths.issueDir,
+		evidenceDir: paths.evidenceDir,
+		evidenceRootDir: paths.evidenceRootDir,
+		logDir: paths.logDir,
+		traceFile: paths.traceFile,
+		loopFile: paths.loopFile,
 		presetDir: input.options.preset.presetDir,
 		fragmentIndex: renderFragmentIndex(input.options.preset),
 		runIdGeneration: input.issueRun.runIdGeneration,
@@ -4467,6 +4589,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			agentCwd: input.agentCwd,
 			targetCwd: options.targetCwd,
 			presetDir: options.preset.presetDir,
+			loopDataRoot: resolveLoopDataPaths(loopDataRootOption(options.loopDataRoot)).root,
 		})
 		const status: AgentRunStatus = {
 			label,
@@ -4947,11 +5070,11 @@ export type RunnerInvocationPaths = {
 	agentCwd: string
 	targetCwd: string
 	presetDir: string
+	loopDataRoot: string
 }
 
 export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: string, resume: ResumeDecision, paths: RunnerInvocationPaths): RunnerInvocation {
-	const additionalDirs = [paths.presetDir]
-	if (paths.targetCwd !== paths.agentCwd) additionalDirs.push(paths.targetCwd)
+	const additionalDirs = runnerAdditionalDirs(paths)
 	if (runner.kind === "claude") {
 		return {
 			kind: "spawn",
@@ -4964,6 +5087,18 @@ export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: stri
 		binary: runner.binary,
 		args: agentCodexArgs(runner.extraArgs, prompt, resume, paths.agentCwd, runner.model, additionalDirs),
 	}
+}
+
+export function runnerAdditionalDirs(paths: RunnerInvocationPaths): string[] {
+	return distinctPaths([paths.presetDir, paths.loopDataRoot, paths.agentCwd])
+}
+
+function distinctPaths(paths: readonly string[]): string[] {
+	const result: string[] = []
+	for (const path of paths) {
+		if (!result.some((existing) => samePath(existing, path))) result.push(path)
+	}
+	return result
 }
 
 export function agentCodexArgs(
@@ -5220,6 +5355,37 @@ export async function runAgentWithBackoff(deps: RunWithBackoffDeps): Promise<{ o
 
 function resolveFrom(base: string, path: string): string {
 	return isAbsolute(path) ? path : resolve(base, path)
+}
+
+function checkCentralRuntimeLayout(options: LoopOptions, chain: ChainRecord, errors: RuntimeCheckError[]): void {
+	try {
+		const rootOptions = loopDataRootOption(options.loopDataRoot)
+		const loopData = resolveLoopDataPaths(rootOptions)
+		const chainPaths = resolveChainRuntimePaths(chain.name, rootOptions)
+		checkInside(loopData.root, chainPaths.sharedFile, "shared context", errors)
+		checkInside(loopData.root, chainPaths.issuesDir, "issueDir", errors)
+		checkInside(loopData.root, chainPaths.evidenceDir, "evidenceDir", errors)
+		checkInside(loopData.root, chainPaths.runsDir, "logDir", errors)
+	} catch (error) {
+		pushCheckError(errors, "loopDataRoot", errorMessage(error))
+	}
+}
+
+function checkChainItemPath(
+	options: LoopOptions,
+	chain: ChainRecord,
+	path: string,
+	label: string,
+	kind: "issues" | "evidence",
+	errors: RuntimeCheckError[],
+): void {
+	try {
+		const chainPaths = resolveChainRuntimePaths(chain.name, loopDataRootOption(options.loopDataRoot))
+		const root = kind === "issues" ? chainPaths.issuesDir : chainPaths.evidenceDir
+		resolveChainScopedPath(chainPaths.chainRoot, root, path, label)
+	} catch (error) {
+		pushCheckError(errors, label, errorMessage(error))
+	}
 }
 
 function resolveRuntimePath(options: LoopOptions, path: string, label: string, root: string, errors: RuntimeCheckError[]): string | null {

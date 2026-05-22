@@ -242,8 +242,8 @@ async function makeGhIssuePrTarget(kind: string, issue: number): Promise<string>
 			branch: null,
 			pr: null,
 			lastRunId: null,
-			issueFile: `.coder-loop/runtime/issues/${issue}.md`,
-			evidenceDir: `.coder-loop/runtime/evidence/issue-${issue}`,
+			issueFile: `issues/${issue}.md`,
+			evidenceDir: `evidence/issue-${issue}`,
 			agentCwd: null,
 			runner: null,
 			kind,
@@ -352,8 +352,8 @@ async function makePostReviewTriggerTarget(reviewStatus: "blocked" | "done"): Pr
 		queue: [{
 			id: "alpha",
 			status: "pending",
-			issueFile: ".coder-loop/runtime/issues/alpha.md",
-			evidenceDir: ".coder-loop/runtime/evidence/alpha",
+			issueFile: "issues/alpha.md",
+			evidenceDir: "evidence/alpha",
 		}],
 		recentRuns: [],
 		current: null,
@@ -472,6 +472,7 @@ describe("smoke: single-phase-example preset", () => {
 	test("status <target> --json reports missing state as JSON instead of throwing", async () => {
 		const target = await makeMinimalTarget("single-phase-example")
 		await rm(resolve(target, ".coder-loop/runtime/state.json"))
+		await rm(resolve(target, ".coder-loop/runtime/loop-data"), { recursive: true, force: true })
 		const proc = Bun.spawnSync({
 			cmd: ["bun", LOOP_ENTRY, "status", target, "--json"],
 			cwd: REPO_ROOT,
@@ -650,7 +651,7 @@ describe("smoke: post-review phase triggers", () => {
 				pr: null,
 				lastRunId: null,
 				issueFile: null,
-				evidenceDir: ".coder-loop/runtime/evidence/issue-9100",
+				evidenceDir: "evidence/issue-9100",
 				agentCwd: null,
 				runner: null,
 			}],
@@ -828,8 +829,8 @@ describe("smoke: phase runner selection", () => {
 			queue: [{
 				id: "alpha",
 				status: "pending",
-				issueFile: ".coder-loop/runtime/issues/alpha.md",
-				evidenceDir: ".coder-loop/runtime/evidence/alpha",
+				issueFile: "issues/alpha.md",
+				evidenceDir: "evidence/alpha",
 			}],
 			recentRuns: [],
 			current: null,
@@ -930,8 +931,8 @@ describe("smoke: phase runner selection", () => {
 			queue: [{
 				id: "alpha",
 				status: "pending",
-				issueFile: ".coder-loop/runtime/issues/alpha.md",
-				evidenceDir: ".coder-loop/runtime/evidence/alpha",
+				issueFile: "issues/alpha.md",
+				evidenceDir: "evidence/alpha",
 			}],
 			recentRuns: [],
 			current: null,
