@@ -50,6 +50,9 @@ describe("runtime path model", () => {
 		expect(paths.runsDir).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs")
 		expect(paths.runDir("run-2026-05-22")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs/run-2026-05-22")
 		expect(paths.runEventsFile("run-2026-05-22")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs/run-2026-05-22/events.jsonl")
+		expect(paths.runStdoutFile("run-2026-05-22")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs/run-2026-05-22/stdout.log")
+		expect(paths.runStderrFile("run-2026-05-22")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs/run-2026-05-22/stderr.log")
+		expect(paths.runStatusFile("run-2026-05-22")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs/run-2026-05-22/status.json")
 		expect(paths.runPhaseDir("run-2026-05-22", "iteration")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs/run-2026-05-22/iteration")
 		expect(paths.runPhaseStdoutFile("run-2026-05-22", "iteration")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs/run-2026-05-22/iteration/stdout.jsonl")
 		expect(paths.runPhaseStderrFile("run-2026-05-22", "iteration")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs/run-2026-05-22/iteration/stderr.txt")
@@ -57,7 +60,7 @@ describe("runtime path model", () => {
 		expect(paths.runPhaseSessionsFile("run-2026-05-22", "iteration")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs/run-2026-05-22/iteration/sessions.jsonl")
 		expect(paths.daemonDir).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/daemon")
 		expect(paths.daemonBatchDir("2026-05-22-16-28-22")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/daemon/2026-05-22-16-28-22")
-		expect(paths.daemonLogFile("2026-05-22-16-28-22")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/daemon/2026-05-22-16-28-22/engine.log")
+		expect(paths.daemonLogFile("2026-05-22-16-28-22")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/daemon/2026-05-22-16-28-22/daemon.log")
 	})
 
 	test("sanitization rejects empty traversal absolute control and separator input", () => {

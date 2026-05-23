@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
 import {
@@ -11,6 +11,7 @@ import {
 	type DaemonResponse,
 } from "./daemon"
 import { schedulerSlotWorktreePath, type SchedulerEvent, type SchedulerOptions, type SchedulerWorktreeManager } from "./scheduler"
+import { resolveChainRuntimePaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -225,6 +226,45 @@ describe("daemon", () => {
 			const run = await readRun(fixture.loopDataRoot, item?.lastRunId ?? "")
 			expect(run?.exitCode).toBe(7)
 			expect(typeof run?.endedAt).toBe("number")
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("daemon scheduler writes run artifacts and per-chain daemon log", async () => {
+		const fixture = await startFixture("scheduler-artifacts", { schedulerIntervalMs: 1_000 })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "scheduler-artifacts-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 203,
+				repoCwd: REPO_ROOT,
+				extra: { sleepMs: 5, exitCode: 0 },
+			})
+
+			const item = await waitFor(async () => readItem(fixture.loopDataRoot, chainId, 203), (candidate) => candidate?.status === "done")
+			const runId = item?.lastRunId ?? ""
+			const paths = resolveChainRuntimePaths("scheduler-artifacts-chain", { loopDataRoot: fixture.loopDataRoot })
+			const status = JSON.parse(await readFile(paths.runStatusFile(runId), "utf-8")) as Record<string, unknown>
+			const stdout = await readFile(paths.runStdoutFile(runId), "utf-8")
+			const stderr = await readFile(paths.runStderrFile(runId), "utf-8")
+			const events = (await readFile(paths.runEventsFile(runId), "utf-8"))
+				.trim()
+				.split("\n")
+				.filter(Boolean)
+				.map((line) => JSON.parse(line) as { type: string })
+			const daemonBatches = await readdir(paths.daemonDir)
+			const daemonLog = await readFile(paths.daemonLogFile(daemonBatches[0]!), "utf-8")
+
+			expect(status).toMatchObject({ runId, chainId, issueNumber: 203, phase: "iteration", exitCode: 0, status: "done" })
+			expect(stdout).toContain("done:")
+			expect(stderr).toBe("")
+			expect(events.map((event) => event.type)).toEqual(["agent.spawn", "agent.exit", "chain.completed"])
+			expect(daemonLog).toContain("scheduler.event")
 		} finally {
 			await fixture.daemon.stop()
 		}

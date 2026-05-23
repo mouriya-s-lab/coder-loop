@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
-import { mkdir } from "node:fs/promises"
+import { appendFile, mkdir, writeFile } from "node:fs/promises"
 import { existsSync, realpathSync } from "node:fs"
 import { basename, dirname, resolve } from "node:path"
 
@@ -51,6 +51,7 @@ export type SchedulerSlot = {
 
 export type SchedulerState = {
 	slots: Map<string, SchedulerSlot>
+	finalizingItemStatuses: Map<number, string>
 }
 
 export type SchedulerStore = Pick<
@@ -89,7 +90,7 @@ export type SchedulerEvent =
 	| { type: "slot.busy"; slotKey: string; chainId: number; repoCwd: string; activeRunId: string }
 	| { type: "agent.spawn"; slotKey: string; chainId: number; itemId: number; runId: string; pid: number | null; worktreePath: string }
 	| { type: "agent.exit"; slotKey: string; chainId: number; itemId: number; runId: string; exitCode: number; status: string }
-	| { type: "chain.completed"; chainId: number; chainName: string }
+	| { type: "chain.completed"; chainId: number; chainName: string; runId?: string }
 
 export type SchedulerOptions = {
 	store: SchedulerStore
@@ -122,7 +123,7 @@ const DEFAULT_TERMINAL_STATUSES = ["done", "moot", "blocked"] as const
 let fallbackRunSequence = 0
 
 export function createSchedulerState(): SchedulerState {
-	return { slots: new Map() }
+	return { slots: new Map(), finalizingItemStatuses: new Map() }
 }
 
 export async function schedulerTick(options: SchedulerOptions): Promise<SchedulerTickResult> {
@@ -267,11 +268,26 @@ async function spawnSchedulerRun(
 		freshResume(),
 		invocationPaths(item.repoCwd, worktreePath, options.presetDir, resolveLoopDataPaths(options.loopDataRootOptions).root),
 	)
+	await initializeSchedulerRunArtifacts(options, chain, item, runId, phase, startedAt, worktreePath)
 	const child = spawn(runnerPlan.binary, runnerPlan.args, {
 		cwd: worktreePath,
 		stdio: ["ignore", "pipe", "pipe"],
 	})
 	const activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, child)
+	await writeSchedulerRunStatus(options, {
+		runId,
+		chain,
+		item,
+		phase,
+		startedAt,
+		endedAt: null,
+		exitCode: null,
+		status: "in_progress",
+		pid: activeRun.pid,
+		worktreePath,
+		stdoutBytes: 0,
+		stderrBytes: 0,
+	})
 	slot.activeRun = activeRun
 	await emit(options, {
 		type: "agent.spawn",
@@ -313,18 +329,37 @@ function attachRunCloseHandler(
 				const currentItem = options.store.getItem(item.id)
 				const status = currentItem !== null && terminalStatuses.has(currentItem.status) ? currentItem.status : statusFromExit
 				const endedAt = nowSeconds(options)
-				options.store.completeRun(runId, { endedAt, exitCode, extra: { stdoutBytes: stdoutText.length, stderrBytes: stderrText.length } })
-				if (currentItem === null || !terminalStatuses.has(currentItem.status)) {
-					options.store.updateItem(item.id, { status, lastRunId: runId, agentCwd: worktreePath, updatedAt: endedAt })
+				options.state.finalizingItemStatuses.set(item.id, status)
+				try {
+					await writeSchedulerRunCompletionArtifacts(options, {
+						runId,
+						chain,
+						item,
+						phase: options.phase ?? DEFAULT_PHASE,
+						startedAt,
+						endedAt,
+						exitCode,
+						status,
+						pid: child.pid ?? null,
+						worktreePath,
+						stdoutText,
+						stderrText,
+					})
+
+					const currentRun = options.store.getCurrentRun(chain.id)
+					if (currentRun?.runId === runId) options.store.clearCurrentRun(chain.id)
+
+					if (slot.activeRun?.runId === runId) slot.activeRun = null
+					await emit(options, { type: "agent.exit", slotKey: slot.key, chainId: chain.id, itemId: item.id, runId, exitCode, status })
+					await completeChainIfReady(options, chain, runId)
+					options.store.completeRun(runId, { endedAt, exitCode, extra: { stdoutBytes: stdoutText.length, stderrBytes: stderrText.length } })
+					if (currentItem === null || !terminalStatuses.has(currentItem.status)) {
+						options.store.updateItem(item.id, { status, lastRunId: runId, agentCwd: worktreePath, updatedAt: endedAt })
+					}
+					resolveClosed({ runId, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, exitCode, stdout: stdoutText, stderr: stderrText, status })
+				} finally {
+					options.state.finalizingItemStatuses.delete(item.id)
 				}
-
-				const currentRun = options.store.getCurrentRun(chain.id)
-				if (currentRun?.runId === runId) options.store.clearCurrentRun(chain.id)
-
-				if (slot.activeRun?.runId === runId) slot.activeRun = null
-				await emit(options, { type: "agent.exit", slotKey: slot.key, chainId: chain.id, itemId: item.id, runId, exitCode, status })
-				await completeChainIfReady(options, chain)
-				resolveClosed({ runId, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, exitCode, stdout: stdoutText, stderr: stderrText, status })
 			})()
 		})
 	})
@@ -362,14 +397,19 @@ async function promiseSettledWithin<T>(promise: Promise<T>, timeoutMs: number): 
 	}
 }
 
-async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecord): Promise<void> {
+async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecord, runId?: string): Promise<void> {
 	if (hasActiveSlotForChain(options.state, chain.id)) return
 	const terminalStatuses = options.terminalStatuses ?? DEFAULT_TERMINAL_STATUSES
 	const current = options.store.listChains().find((candidate) => candidate.id === chain.id)
 	if (current?.status !== "active") return
-	if (!options.store.allItemsTerminal({ chainId: chain.id, terminalStatuses })) return
+	if (!allItemsTerminalIncludingFinalizing(options, chain.id, terminalStatuses)) return
 	const updated = options.store.updateChain(chain.id, { status: "completed", updatedAt: nowSeconds(options) })
-	await emit(options, { type: "chain.completed", chainId: updated.id, chainName: updated.name })
+	await emit(options, { type: "chain.completed", chainId: updated.id, chainName: updated.name, ...(runId === undefined ? {} : { runId }) })
+}
+
+function allItemsTerminalIncludingFinalizing(options: SchedulerOptions, chainId: number, terminalStatuses: readonly string[]): boolean {
+	const terminal = new Set(terminalStatuses)
+	return options.store.listItems(chainId).every((item) => terminal.has(options.state.finalizingItemStatuses.get(item.id) ?? item.status))
 }
 
 function getOrCreateSlot(state: SchedulerState, chain: ChainRecord, repoCwd: string): SchedulerSlot {
@@ -419,7 +459,143 @@ function invocationPaths(targetCwd: string, agentCwd: string, presetDir: string,
 }
 
 async function emit(options: SchedulerOptions, event: SchedulerEvent): Promise<void> {
+	await appendSchedulerRunEvent(options, event)
 	await options.onEvent?.(event)
+}
+
+async function initializeSchedulerRunArtifacts(
+	options: SchedulerOptions,
+	chain: ChainRecord,
+	item: ItemRecord,
+	runId: string,
+	phase: string,
+	startedAt: number,
+	worktreePath: string,
+): Promise<void> {
+	const paths = resolveChainRuntimePaths(chain.name, options.loopDataRootOptions)
+	await mkdir(paths.runDir(runId), { recursive: true })
+	await Promise.all([
+		writeFile(paths.runStdoutFile(runId), ""),
+		writeFile(paths.runStderrFile(runId), ""),
+		writeFile(paths.runEventsFile(runId), ""),
+		writeSchedulerRunStatus(options, {
+			runId,
+			chain,
+			item,
+			phase,
+			startedAt,
+			endedAt: null,
+			exitCode: null,
+			status: "in_progress",
+			pid: null,
+			worktreePath,
+			stdoutBytes: 0,
+			stderrBytes: 0,
+		}),
+	])
+}
+
+async function writeSchedulerRunCompletionArtifacts(
+	options: SchedulerOptions,
+	input: {
+		runId: string
+		chain: ChainRecord
+		item: ItemRecord
+		phase: string
+		startedAt: number
+		endedAt: number
+		exitCode: number
+		status: string
+		pid: number | null
+		worktreePath: string
+		stdoutText: string
+		stderrText: string
+	},
+): Promise<void> {
+	const paths = resolveChainRuntimePaths(input.chain.name, options.loopDataRootOptions)
+	await mkdir(paths.runDir(input.runId), { recursive: true })
+	await Promise.all([
+		writeFile(paths.runStdoutFile(input.runId), input.stdoutText),
+		writeFile(paths.runStderrFile(input.runId), input.stderrText),
+		writeSchedulerRunStatus(options, {
+			runId: input.runId,
+			chain: input.chain,
+			item: input.item,
+			phase: input.phase,
+			startedAt: input.startedAt,
+			endedAt: input.endedAt,
+			exitCode: input.exitCode,
+			status: input.status,
+			pid: input.pid,
+			worktreePath: input.worktreePath,
+			stdoutBytes: Buffer.byteLength(input.stdoutText),
+			stderrBytes: Buffer.byteLength(input.stderrText),
+		}),
+	])
+}
+
+async function writeSchedulerRunStatus(
+	options: SchedulerOptions,
+	input: {
+		runId: string
+		chain: ChainRecord
+		item: ItemRecord
+		phase: string
+		startedAt: number
+		endedAt: number | null
+		exitCode: number | null
+		status: string
+		pid: number | null
+		worktreePath: string
+		stdoutBytes: number
+		stderrBytes: number
+	},
+): Promise<void> {
+	const paths = resolveChainRuntimePaths(input.chain.name, options.loopDataRootOptions)
+	await mkdir(paths.runDir(input.runId), { recursive: true })
+	await writeFile(paths.runStatusFile(input.runId), `${JSON.stringify({
+		runId: input.runId,
+		chainId: input.chain.id,
+		chainName: input.chain.name,
+		itemId: input.item.id,
+		issueNumber: input.item.issueNumber,
+		phase: input.phase,
+		pid: input.pid,
+		repoCwd: input.item.repoCwd,
+		worktreePath: input.worktreePath,
+		startedAt: input.startedAt,
+		endedAt: input.endedAt,
+		exitCode: input.exitCode,
+		status: input.status,
+		stdoutBytes: input.stdoutBytes,
+		stderrBytes: input.stderrBytes,
+		stdoutPath: paths.runStdoutFile(input.runId),
+		stderrPath: paths.runStderrFile(input.runId),
+		eventsPath: paths.runEventsFile(input.runId),
+	}, null, "\t")}\n`)
+}
+
+async function appendSchedulerRunEvent(options: SchedulerOptions, event: SchedulerEvent): Promise<void> {
+	const runId = schedulerEventRunId(event)
+	if (runId === null) return
+	const chainName = schedulerEventChainName(options, event.chainId)
+	if (chainName === null) return
+	const paths = resolveChainRuntimePaths(chainName, options.loopDataRootOptions)
+	await mkdir(paths.runDir(runId), { recursive: true })
+	await appendFile(paths.runEventsFile(runId), `${JSON.stringify({
+		...event,
+		recordedAt: nowSeconds(options),
+	})}\n`)
+}
+
+function schedulerEventRunId(event: SchedulerEvent): string | null {
+	if (event.type === "slot.busy") return event.activeRunId
+	if (event.type === "chain.completed") return event.runId ?? null
+	return event.runId
+}
+
+function schedulerEventChainName(options: SchedulerOptions, chainId: number): string | null {
+	return options.store.listChains().find((chain) => chain.id === chainId)?.name ?? null
 }
 
 function safePathComponent(input: string): string {

@@ -1138,7 +1138,7 @@ describe("issue #185 chain artifact layout", () => {
 		const daemonDir = resolve(fixture.loopDataRoot, "chains", FIXTURE_CHAIN_NAME, "daemon")
 		const batches = await readdir(daemonDir)
 		expect(batches.length).toBeGreaterThan(0)
-		expect(await Bun.file(resolve(daemonDir, batches[0]!, "engine.log")).exists()).toBe(true)
+		expect(await Bun.file(resolve(daemonDir, batches[0]!, "daemon.log")).exists()).toBe(true)
 	})
 
 	test("no top-level logs or events", async () => {
