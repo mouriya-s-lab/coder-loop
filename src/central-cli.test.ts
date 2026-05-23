@@ -118,7 +118,7 @@ describe("central chain/item CLI", () => {
 	test("daemon up down", async () => {
 		const loopDataRoot = await makeLoopDataRoot("daemon-up-down")
 		const daemonProcess = Bun.spawn({
-			cmd: ["bun", LOOP_ENTRY, "daemon", "up", "--loop-data-root", loopDataRoot, "--scheduler-interval-ms", "100"],
+			cmd: ["bun", LOOP_ENTRY, "daemon", "up", "--loop-data-root", loopDataRoot, "--scheduler-interval-ms", "100", "--json"],
 			cwd: REPO_ROOT,
 			stdout: "pipe",
 			stderr: "pipe",
@@ -128,7 +128,7 @@ describe("central chain/item CLI", () => {
 				const socketStat = await stat(resolve(loopDataRoot, "daemon.sock"))
 				return socketStat.isSocket() ? true : null
 			}, 5_000)
-			const down = await runCli(["daemon", "down", "--loop-data-root", loopDataRoot])
+			const down = await runCli(["daemon", "down", "--loop-data-root", loopDataRoot, "--json"])
 			expect(down.exitCode).toBe(0)
 			expect(JSON.parse(down.stdout)).toMatchObject({ ok: true, result: { shutdown: true } })
 			expect(await daemonProcess.exited).toBe(0)
@@ -141,6 +141,45 @@ describe("central chain/item CLI", () => {
 				// Process may already have exited after daemon down.
 			}
 			await daemonProcess.exited.catch(() => undefined)
+		}
+	})
+
+	test("daemon down emits human text without json flag", async () => {
+		const loopDataRoot = await makeLoopDataRoot("daemon-down-text")
+		const daemonProcess = Bun.spawn({
+			cmd: ["bun", LOOP_ENTRY, "daemon", "up", "--loop-data-root", loopDataRoot, "--scheduler-interval-ms", "100"],
+			cwd: REPO_ROOT,
+			stdout: "pipe",
+			stderr: "pipe",
+		})
+		try {
+			await waitFor(async () => {
+				const socketStat = await stat(resolve(loopDataRoot, "daemon.sock"))
+				return socketStat.isSocket() ? true : null
+			}, 5_000)
+			const down = await runCli(["daemon", "down", "--loop-data-root", loopDataRoot])
+			expect(down.exitCode).toBe(0)
+			expect(down.stdout).toContain("daemon down: shutdown=true")
+			expect(down.stdout).toContain(`socket=${resolve(loopDataRoot, "daemon.sock")}`)
+			expect(await daemonProcess.exited).toBe(0)
+			const stdout = await new Response(daemonProcess.stdout).text()
+			expect(stdout).toContain("daemon up: pid=")
+			expect(stdout).toContain(`socket=${resolve(loopDataRoot, "daemon.sock")}`)
+		} finally {
+			try {
+				daemonProcess.kill()
+			} catch {
+				// Process may already have exited after daemon down.
+			}
+			await daemonProcess.exited.catch(() => undefined)
+		}
+	})
+
+	test("daemon commands expose json flag in help", async () => {
+		for (const action of ["up", "status", "start", "stop", "restart", "down"]) {
+			const help = await runCli(["daemon", action, "--help"])
+			expect(help.exitCode).toBe(0)
+			expect(help.stdout).toContain("--json")
 		}
 	})
 
@@ -235,6 +274,15 @@ describe("central chain/item CLI", () => {
 			expect(start.stdout).toContain(`daemon start dry-run: target=${REPO_ROOT}`)
 			expect(start.stdout).toContain("daemon start dry-run: chain=target-chain")
 			expect(start.stdout).not.toContain("command=")
+
+			const startJson = expectJsonOk(await runCli(["daemon", "start", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--chain", "target-chain", "--dry-run", "--require-browser-evidence", "--json"]))
+			expect(startJson).toMatchObject({ action: "start", target: REPO_ROOT, chain: "target-chain", dryRun: true, requireBrowserEvidence: true })
+
+			const stopJson = expectJsonOk(await runCli(["daemon", "stop", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--chain", "target-chain", "--dry-run", "--json"]))
+			expect(stopJson).toMatchObject({ action: "stop", target: REPO_ROOT, chain: "target-chain", dryRun: true })
+
+			const restartJson = expectJsonOk(await runCli(["daemon", "restart", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--chain", "target-chain", "--dry-run", "--json"]))
+			expect(restartJson).toMatchObject({ action: "restart", target: REPO_ROOT, chain: "target-chain", dryRun: true, centralDaemon: "required" })
 		} finally {
 			await fixture.daemon.stop()
 		}

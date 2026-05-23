@@ -597,6 +597,7 @@ describe("buildDaemonStartPlan", () => {
 			dryRun: true,
 			worktree: false,
 			baseBranch: null,
+			json: false,
 		})
 
 		expect(plan.targetCwd).toBe(target)
@@ -3298,6 +3299,7 @@ describe("buildDaemonStartPlan with worktree flags", () => {
 			dryRun: false,
 			worktree: true,
 			baseBranch: "develop",
+			json: false,
 		})
 
 		expect(plan.command).toContain("--worktree")
@@ -3320,6 +3322,7 @@ describe("buildDaemonStartPlan with worktree flags", () => {
 			dryRun: false,
 			worktree: false,
 			baseBranch: null,
+			json: false,
 		})
 
 		expect(plan.command).not.toContain("--worktree")
