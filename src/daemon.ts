@@ -22,7 +22,13 @@ import {
 	type UpdateChainInput,
 	type UpdateItemInput,
 } from "./sqlite-state"
-import { type LoopDataRootOptions, resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
+import {
+	type LoopDataRootOptions,
+	RuntimePathError,
+	resolveChainRuntimePaths,
+	resolveLoopDataPaths,
+	sanitizeChainName,
+} from "./runtime-paths"
 
 export type DaemonCommandName =
 	| "chain.create"
@@ -287,7 +293,7 @@ export class CoderLoopDaemon {
 
 	private async handleChainCreate(args: JsonObject): Promise<JsonObject> {
 		const input: CreateChainInput = {
-			name: requiredString(args, "name"),
+			name: validateChainNameForRequest(requiredString(args, "name")),
 			preset: optionalString(args, "preset") ?? "gh-issue-pr-iteration",
 			repository: requiredString(args, "repository"),
 			baseBranch: optionalString(args, "baseBranch") ?? "main",
@@ -336,20 +342,37 @@ export class CoderLoopDaemon {
 
 	private async ensureRuntimeLayoutForExistingChains(): Promise<void> {
 		for (const chain of this.requireStore().listChains()) {
-			await this.ensureChainRuntimeLayout(chain.name)
+			try {
+				await this.ensureChainRuntimeLayout(chain.name)
+			} catch (error) {
+				if (isInvalidChainNameError(error)) {
+					this.warnSkippedInvalidChain(chain, error, "startup runtime layout")
+					continue
+				}
+				throw error
+			}
 		}
 	}
 
 	private async appendDaemonLogForAllChains(event: JsonObject): Promise<void> {
 		for (const chain of this.requireStore().listChains()) {
-			await this.appendDaemonLog(chain.name, event)
+			await this.appendDaemonLogIfChainNameIsValid(chain, event)
 		}
 	}
 
 	private async appendDaemonLogForChainId(chainId: number, event: JsonObject): Promise<void> {
 		const chain = this.requireStore().getChain(chainId)
 		if (chain === null) return
-		await this.appendDaemonLog(chain.name, event)
+		await this.appendDaemonLogIfChainNameIsValid(chain, event)
+	}
+
+	private async appendDaemonLogIfChainNameIsValid(chain: ChainRecord, event: JsonObject): Promise<void> {
+		try {
+			await this.appendDaemonLog(chain.name, event)
+		} catch (error) {
+			if (isInvalidChainNameError(error)) return
+			throw error
+		}
 	}
 
 	private async appendDaemonLog(chainName: string, event: JsonObject): Promise<void> {
@@ -528,6 +551,10 @@ export class CoderLoopDaemon {
 		if (scheduler.statusFromExit !== undefined) options.statusFromExit = scheduler.statusFromExit
 		return options
 	}
+
+	private warnSkippedInvalidChain(chain: ChainRecord, error: RuntimePathError, context: string): void {
+		console.warn(`coder-loop daemon warning: skipped ${context} for invalid chain ${chain.id} (${JSON.stringify(chain.name)}): ${error.message}`)
+	}
 }
 
 export async function startCoderLoopDaemon(options: StartCoderLoopDaemonOptions = {}): Promise<CoderLoopDaemon> {
@@ -583,6 +610,21 @@ function defaultDaemonRunner(): AgentRunnerSelection {
 
 function defaultDaemonPrompt(): string {
 	return "coder-loop daemon scheduler placeholder; full prompt binding is owned by later central-state migration issues."
+}
+
+function validateChainNameForRequest(input: string): string {
+	try {
+		return sanitizeChainName(input)
+	} catch (error) {
+		if (isInvalidChainNameError(error)) {
+			throw new DaemonError("invalid_request", error.message, { reason: error.code, input: error.input })
+		}
+		throw error
+	}
+}
+
+function isInvalidChainNameError(error: unknown): error is RuntimePathError {
+	return error instanceof RuntimePathError && error.code === "invalid_chain_name"
 }
 
 function formatDaemonBatchTimestamp(date: Date): string {

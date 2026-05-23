@@ -73,6 +73,27 @@ describe("scheduler", () => {
 		}
 	})
 
+	test("invalid chain names are ignored by scheduler ticks", async () => {
+		const fixture = await createFixture("invalid-chain-skip")
+		try {
+			const invalid = createChain(fixture.store, "..")
+			const valid = createChain(fixture.store, "valid-chain")
+			createItem(fixture.store, invalid, { issueNumber: 178, repoCwd: "/repo/a" })
+			createItem(fixture.store, valid, { issueNumber: 179, repoCwd: "/repo/a" })
+
+			const tick = await schedulerTick(fixture.options())
+			expect(tick.spawnedRuns).toHaveLength(1)
+			await tick.spawnedRuns[0]!.closed
+
+			expect(fixture.store.getItemByIssue(invalid.id, 178)?.status).toBe("queued")
+			expect(fixture.store.getItemByIssue(valid.id, 179)?.status).toBe("done")
+			expect(fixture.worktreeCalls).toHaveLength(1)
+			expect(fixture.worktreeCalls[0]).toContain("valid-chain")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
 	test("multi chain same repo worktree isolation", async () => {
 		const fixture = await createFixture("multi-chain")
 		try {

@@ -22,6 +22,7 @@ export const PHASE_STDERR_FILENAME = "stderr.txt"
 export const PHASE_STATUS_FILENAME = "status.json"
 export const PHASE_SESSIONS_FILENAME = "sessions.jsonl"
 export const DAEMON_LOG_FILENAME = "daemon.log"
+const MAX_PATH_COMPONENT_LENGTH = 255
 
 export type RuntimePathErrorCode = "invalid_loop_data_root" | "invalid_chain_name" | "invalid_path_component"
 
@@ -108,6 +109,9 @@ export function sanitizeChainName(input: string): string {
 	if (input.trim() === "") {
 		throw new RuntimePathError("invalid_chain_name", "chain name must not be empty", input)
 	}
+	if (input.length > MAX_PATH_COMPONENT_LENGTH) {
+		throw new RuntimePathError("invalid_chain_name", `chain name must be at most ${MAX_PATH_COMPONENT_LENGTH} characters`, input)
+	}
 	if (input === "." || input.includes("..")) {
 		throw new RuntimePathError("invalid_chain_name", `chain name must not be a reserved path segment: ${input}`, input)
 	}
@@ -162,6 +166,9 @@ export function resolveChainRuntimePaths(chainName: string, options: LoopDataRoo
 }
 
 function sanitizePathComponent(input: string, label: string): string {
+	if (input.length > MAX_PATH_COMPONENT_LENGTH) {
+		throw new RuntimePathError("invalid_path_component", `${label} must be at most ${MAX_PATH_COMPONENT_LENGTH} characters`, input)
+	}
 	if (input.trim() === "" || input === "." || input.includes("..") || isAbsolute(input) || !/^[A-Za-z0-9._-]+$/.test(input)) {
 		throw new RuntimePathError("invalid_path_component", `${label} is not a safe path component: ${input}`, input)
 	}

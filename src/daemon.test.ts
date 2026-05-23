@@ -58,6 +58,66 @@ describe("daemon", () => {
 		}
 	})
 
+	test("socket chain.create rejects invalid names before db insert", async () => {
+		const fixture = await startFixture("chain-create-invalid", { schedulerEnabled: false })
+		try {
+			const invalidNames = ["..", ".", "a/b", "../escape", "/etc/hi", "a".repeat(256), "bad\tname"]
+
+			for (const name of invalidNames) {
+				const response = await request(fixture, "chain.create", {
+					name,
+					repository: "mouriya-s-lab/coder-loop",
+				})
+
+				expect(response.ok).toBe(false)
+				if (!response.ok) expect(response.error.code).toBe("invalid_request")
+				const listed = expectOk(await request(fixture, "chain.list")).chains
+				expect(Array.isArray(listed)).toBe(true)
+				expect(listed).toHaveLength(0)
+			}
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("daemon startup skips invalid existing chain rows", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-invalid-existing-chain`)
+		const loopDataRoot = resolve(root, "ld")
+		await mkdir(loopDataRoot, { recursive: true })
+		const store = openSqliteStateStore({ loopDataRoot })
+		try {
+			store.createChain({
+				name: "..",
+				preset: "gh-issue-pr-iteration",
+				repository: "mouriya-s-lab/coder-loop",
+				baseBranch: "main",
+				status: "active",
+				metadata: {},
+			})
+			store.createChain({
+				name: "valid-chain",
+				preset: "gh-issue-pr-iteration",
+				repository: "mouriya-s-lab/coder-loop",
+				baseBranch: "main",
+				status: "active",
+				metadata: {},
+			})
+		} finally {
+			store.close()
+		}
+
+		const daemon = await startCoderLoopDaemon({ loopDataRoot, shutdownGraceMs: 100, scheduler: { enabled: false } })
+		try {
+			expect(daemon.snapshot().running).toBe(true)
+			const listed = expectOk(await sendDaemonRequest(daemon.snapshot().socketPath, daemonRequest("chain.list"))).chains
+			expect(Array.isArray(listed)).toBe(true)
+			expect(listed).toHaveLength(2)
+			expect(await pathExists(resolveChainRuntimePaths("valid-chain", { loopDataRoot }).sharedFile)).toBe(true)
+		} finally {
+			await daemon.stop()
+		}
+	})
+
 	test("socket item CRUD", async () => {
 		const fixture = await startFixture("item-crud", { schedulerEnabled: false })
 		try {
