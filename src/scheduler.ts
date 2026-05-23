@@ -11,7 +11,13 @@ import {
 	type RunnerInvocationPaths,
 } from "./loop"
 import { type ChainRecord, type ItemRecord, type SqliteStateStore } from "./sqlite-state"
-import { type LoopDataRootOptions, resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
+import {
+	type LoopDataRootOptions,
+	RuntimePathError,
+	resolveChainRuntimePaths,
+	resolveLoopDataPaths,
+	sanitizeChainName,
+} from "./runtime-paths"
 
 export type SchedulerActiveRun = {
 	runId: string
@@ -130,7 +136,9 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 	const phase = options.phase ?? DEFAULT_PHASE
 	const pendingStatuses = options.pendingStatuses ?? DEFAULT_PENDING_STATUSES
 	const terminalStatuses = options.terminalStatuses ?? DEFAULT_TERMINAL_STATUSES
-	const activeChains = options.store.listChains().filter((chain) => chain.status === "active")
+	const activeChains = options.store
+		.listChains()
+		.filter((chain) => chain.status === "active" && hasValidChainName(chain.name))
 	const activeChainIds = new Set(activeChains.map((chain) => chain.id))
 	const spawnedRuns: SchedulerActiveRun[] = []
 	const completedChainIds: number[] = []
@@ -631,6 +639,16 @@ function realpathForComparison(path: string): string {
 		return realpathSync(path)
 	} catch {
 		return path
+	}
+}
+
+function hasValidChainName(chainName: string): boolean {
+	try {
+		sanitizeChainName(chainName)
+		return true
+	} catch (error) {
+		if (error instanceof RuntimePathError && error.code === "invalid_chain_name") return false
+		throw error
 	}
 }
 
