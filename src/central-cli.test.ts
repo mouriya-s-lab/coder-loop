@@ -366,7 +366,7 @@ describe("central chain/item CLI", () => {
 		const fixture = await startFixture("install-chain")
 		try {
 			const env = await fakeCliEnv("install-chain")
-			const target = await makeEmptyTarget("install-chain-target")
+			const target = await makeGitTarget("install-chain-target")
 			const result = await runCli(["install", target, "--repo", "fixture/repo", "--loop-data-root", fixture.loopDataRoot, "--skip-skill-check"], env)
 			expect(result.exitCode, result.stderr).toBe(0)
 			await expect(Bun.file(resolve(target, ".coder-loop/workflow.md")).exists()).resolves.toBe(true)
@@ -378,9 +378,30 @@ describe("central chain/item CLI", () => {
 		}
 	})
 
+	test("install rejects non-git target before writing workflow", async () => {
+		const env = await fakeCliEnv("install-non-git")
+		const target = await makeEmptyTarget("install-non-git-target")
+		const result = await runCli(["install", target, "--dry-run", "--skip-skill-check"], env)
+		expect(result.exitCode).toBe(1)
+		expect(result.stderr).toContain("target is not a git repository")
+		expect(result.stderr).not.toContain("[Layer A]")
+		await expect(Bun.file(resolve(target, ".coder-loop/workflow.md")).exists()).resolves.toBe(false)
+	})
+
+	test("install rejects malformed repo slugs before chain creation", async () => {
+		const env = await fakeCliEnv("install-invalid-repo")
+		const target = await makeGitTarget("install-invalid-repo-target")
+		for (const repo of ["a/b/c", "no-slash", "x/y\nbad", ""]) {
+			const result = await runCli(["install", target, "--repo", repo, "--dry-run", "--skip-skill-check"], env)
+			expect(result.exitCode, `repo=${JSON.stringify(repo)} stderr=${result.stderr}`).toBe(1)
+			expect(result.stderr).toContain("invalid repo slug")
+			expect(result.stderr).not.toContain("[Central] DB chain")
+		}
+	})
+
 	test("install daemon offline explicit fail", async () => {
 		const env = await fakeCliEnv("install-offline")
-		const target = await makeTarget("install-offline-target")
+		const target = await makeGitTarget("install-offline-target", { workflow: true })
 		const loopDataRoot = resolve(TEST_ROOT, `${++nextFixtureId}-offline-loop-data`)
 		await mkdir(loopDataRoot, { recursive: true })
 		const result = await runCli(["install", target, "--repo", "fixture/repo", "--loop-data-root", loopDataRoot, "--skip-skill-check"], env)
@@ -498,13 +519,30 @@ async function makeEmptyTarget(name: string): Promise<string> {
 	return target
 }
 
+async function makeGitTarget(name: string, options: { workflow?: boolean } = {}): Promise<string> {
+	const target = await makeEmptyTarget(name)
+	const init = Bun.spawnSync({
+		cmd: ["git", "init"],
+		cwd: target,
+		stdin: "ignore",
+		stdout: "pipe",
+		stderr: "pipe",
+	})
+	if (init.exitCode !== 0) throw new Error(new TextDecoder().decode(init.stderr))
+	if (options.workflow === true) {
+		await mkdir(resolve(target, ".coder-loop"), { recursive: true })
+		await writeFile(resolve(target, ".coder-loop/workflow.md"), "# workflow\n")
+	}
+	return target
+}
+
 async function fakeCliEnv(name: string): Promise<Record<string, string>> {
 	const bin = resolve(TEST_ROOT, `${++nextFixtureId}-${name}-bin`)
 	await mkdir(bin, { recursive: true })
 	await writeExecutable(resolve(bin, "gh"), [
 		"#!/usr/bin/env bash",
 		`if [ "$1" = "auth" ]; then exit 0; fi`,
-		`if [ "$1" = "label" ] && [ "$2" = "list" ]; then printf '[]\\n'; exit 0; fi`,
+		`if [ "$1" = "label" ] && [ "$2" = "list" ]; then printf '["kind:code","kind:comment","kind:code-spike","kind:blocked"]\\n'; exit 0; fi`,
 		`if [ "$1" = "label" ] && [ "$2" = "create" ]; then exit 0; fi`,
 		"exit 0",
 		"",

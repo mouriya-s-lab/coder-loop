@@ -83,6 +83,42 @@ function info(message: string): void {
 	console.error(message)
 }
 
+type RepoSlug = {
+	owner: string
+	name: string
+	slug: string
+}
+
+function repoSlugError(repo: string): string {
+	return `install: invalid repo slug ${JSON.stringify(repo)}`
+}
+
+function parseRepoSlug(input: string): RepoSlug | null {
+	if (input.trim() !== input) return null
+	const parts = input.split("/")
+	if (parts.length !== 2) return null
+	const owner = parts[0]!
+	const name = parts[1]!
+	if (!isRepoSlugSegment(owner) || !isRepoSlugSegment(name)) return null
+	return { owner, name, slug: `${owner}/${name}` }
+}
+
+function isRepoSlugSegment(input: string): boolean {
+	return input.length > 0 && input.length <= 255 && /^[A-Za-z0-9._-]+$/.test(input)
+}
+
+function requireInstallRepoSlug(repo: string): RepoSlug {
+	const parsed = parseRepoSlug(repo)
+	if (parsed === null) fail(repoSlugError(repo))
+	return parsed
+}
+
+async function assertInstallTargetIsGitRepository(target: string): Promise<void> {
+	if (!(await pathExists(resolve(target, ".git")))) {
+		fail(`install: target is not a git repository: ${target}`)
+	}
+}
+
 function joinArgs(remaining: string[], index: number, inlineValue: string | null, name: string): { value: string; consumed: number } {
 	if (inlineValue !== null) return { value: inlineValue, consumed: 0 }
 	const value = remaining[index + 1]
@@ -452,9 +488,7 @@ async function createChainThroughDaemon(input: {
 }
 
 function defaultChainName(repo: string): string {
-	const name = repo.split("/").pop()?.trim()
-	if (!name) fail(`install: invalid repo slug ${repo}`)
-	return name
+	return requireInstallRepoSlug(repo).name
 }
 
 // ===================================================================
@@ -539,6 +573,8 @@ async function loadPresetForName(name: string): Promise<Preset> {
 
 export async function runInstallCommand(rawArgs: string[]): Promise<void> {
 	const args = parseInstallArgs(rawArgs)
+	await assertInstallTargetIsGitRepository(args.target)
+	const explicitRepo = args.repo === null ? null : requireInstallRepoSlug(args.repo).slug
 	const preset = await loadPresetForName(args.presetName)
 
 	info(`==> coder-loop install: target=${args.target}, preset=${preset.name}@${preset.version}, dry-run=${args.dryRun}`)
@@ -547,7 +583,7 @@ export async function runInstallCommand(rawArgs: string[]): Promise<void> {
 	const workflowResult = await ensureWorkflowMd(args.target, args.dryRun)
 	info(`  ${workflowResult.wrote ? (args.dryRun ? "would-write" : "已写入") : "未变化（保留 operator 自定义）"}: ${WORKFLOW_REL}`)
 
-	const repoForChain = args.repo ?? (await inferRepoFromGit(args.target))
+	const repoForChain = explicitRepo ?? (await inferRepoFromGit(args.target))
 	if (repoForChain === null) fail("install: missing --repo and git origin is not a GitHub repository; cannot create chain")
 
 	info("\n[Central] DB chain")
@@ -616,9 +652,9 @@ async function inferRepoFromGit(target: string): Promise<string | null> {
 	const url = result.stdout.trim()
 	// Forms: git@github.com:owner/repo.git, https://github.com/owner/repo(.git)
 	const sshMatch = /^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/.exec(url)
-	if (sshMatch) return `${sshMatch[1]}/${sshMatch[2]}`
+	if (sshMatch) return parseRepoSlug(`${sshMatch[1]}/${sshMatch[2]}`)?.slug ?? null
 	const httpsMatch = /^https?:\/\/github\.com\/([^/]+)\/(.+?)(?:\.git)?\/?$/.exec(url)
-	if (httpsMatch) return `${httpsMatch[1]}/${httpsMatch[2]}`
+	if (httpsMatch) return parseRepoSlug(`${httpsMatch[1]}/${httpsMatch[2]}`)?.slug ?? null
 	return null
 }
 
@@ -641,17 +677,17 @@ export async function runUninstallCommand(rawArgs: string[]): Promise<void> {
 
 export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
 	const args = parseDoctorArgs(rawArgs)
+	let hasFailure = false
 	info(`==> coder-loop doctor: target=${args.target}`)
 
 	info("\n[Layer A] Target 项目文件")
 	const aChecks: { label: string; check: Promise<boolean> }[] = [
 		{ label: WORKFLOW_REL, check: pathExists(resolve(args.target, WORKFLOW_REL)) },
 	]
-	let aFail = 0
 	for (const c of aChecks) {
 		const ok = await c.check
 		info(`  ${ok ? "OK" : "FAIL"}: ${c.label}`)
-		if (!ok) aFail++
+		if (!ok) hasFailure = true
 	}
 
 	const runtimeExists = await pathExists(resolve(args.target, RUNTIME_DIR))
@@ -665,6 +701,7 @@ export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
 		const list = await spawnCapture("gh", ["label", "list", "--repo", repo, "--limit", "500", "--json", "name", "--jq", "[.[].name]"])
 		if (list.code !== 0) {
 			info(`  FAIL: gh label list 失败 (${list.stderr.trim()})`)
+			hasFailure = true
 		} else {
 			let names = new Set<string>()
 			try {
@@ -674,7 +711,9 @@ export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
 				// ignore
 			}
 			for (const label of KIND_LABELS) {
-				info(`  ${names.has(label.name) ? "OK" : "FAIL"}: label ${label.name}（repo ${repo}）`)
+				const ok = names.has(label.name)
+				info(`  ${ok ? "OK" : "FAIL"}: label ${label.name}（repo ${repo}）`)
+				if (!ok) hasFailure = true
 			}
 		}
 	}
@@ -692,16 +731,24 @@ export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
 	const cResults = await checkLayerC([statusSnapshot.target.runner.default, statusSnapshot.target.runner.reviewDefault])
 	info(`  INFO: target default runner=${formatStatusRunner(statusSnapshot.target.runner.default)}`)
 	info(`  INFO: review default runner=${formatStatusRunner(statusSnapshot.target.runner.reviewDefault)}`)
-	for (const r of cResults) info(`  ${r.ok ? "OK" : "FAIL"}: ${r.detail}`)
+	for (const r of cResults) {
+		info(`  ${r.ok ? "OK" : "FAIL"}: ${r.detail}`)
+		if (!r.ok) hasFailure = true
+	}
 
 	info("\n[Layer D] User-level skill 版本")
 	const dResult = await checkLayerD()
 	info(`  ${dResult.status === "ok" ? "OK" : "FAIL"}: ${dResult.detail}`)
+	if (dResult.status !== "ok") hasFailure = true
 
 	info("\n[Live Runtime] coder-loop runtime health")
-	for (const line of buildLiveRuntimeHealthLines(statusSnapshot)) info(`  ${line}`)
+	for (const line of buildLiveRuntimeHealthLines(statusSnapshot)) {
+		info(`  ${line}`)
+		if (line.trimStart().startsWith("FAIL:")) hasFailure = true
+	}
 
 	info("\nDoctor 完成（read-only）。任何 FAIL 项需 `coder-loop install <target>` 或手动修复。")
+	if (hasFailure) process.exitCode = 1
 }
 
 export async function dispatchSubcommand(subcommand: string, rest: string[]): Promise<boolean> {
