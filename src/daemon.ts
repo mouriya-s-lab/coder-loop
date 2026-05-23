@@ -2,11 +2,12 @@ import { randomUUID } from "node:crypto"
 import { Buffer } from "node:buffer"
 import { createConnection, createServer, type Server, type Socket } from "node:net"
 import { existsSync } from "node:fs"
-import { appendFile, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises"
+import { appendFile, mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises"
 import { isAbsolute, resolve } from "node:path"
 
 import type { AgentRunnerKind, AgentRunnerSelection, JsonObject, JsonValue } from "./loop"
 import {
+	cleanupSchedulerChainWorktrees,
 	createSchedulerState,
 	listActiveRuns,
 	schedulerTick,
@@ -374,6 +375,7 @@ export class CoderLoopDaemon {
 
 	private async ensureRuntimeLayoutForExistingChains(): Promise<void> {
 		for (const chain of this.requireStore().listChains()) {
+			if (chain.status === "deleted") continue
 			try {
 				await this.ensureChainRuntimeLayout(chain.name)
 			} catch (error) {
@@ -387,7 +389,7 @@ export class CoderLoopDaemon {
 	}
 
 	private async quarantineOrphanChainDirectories(): Promise<void> {
-		const knownNames = new Set(this.requireStore().listChains().map((chain) => chain.name))
+		const knownNames = new Set(this.requireStore().listChains().filter((chain) => chain.status !== "deleted").map((chain) => chain.name))
 		const orphanRoot = resolve(this.paths.chainsDir, `${ORPHAN_CHAIN_DIR_PREFIX}${this.daemonBatchTimestamp}`)
 		let orphanRootCreated = false
 		const entries = await readdir(this.paths.chainsDir, { withFileTypes: true })
@@ -423,6 +425,7 @@ export class CoderLoopDaemon {
 	}
 
 	private async appendDaemonLogIfChainNameIsValid(chain: ChainRecord, event: JsonObject): Promise<void> {
+		if (chain.status === "deleted") return
 		try {
 			await this.appendDaemonLog(chain.name, event)
 		} catch (error) {
@@ -443,6 +446,7 @@ export class CoderLoopDaemon {
 	private async recoverStaleSchedulerState(): Promise<void> {
 		const store = this.requireStore()
 		for (const chain of store.listChains()) {
+			if (chain.status === "deleted") continue
 			const staleItems = store.listItems(chain.id).filter((item) => item.status === "in_progress")
 			const currentRun = store.getCurrentRun(chain.id)
 			if (staleItems.length === 0 && currentRun === null) continue
@@ -504,9 +508,31 @@ export class CoderLoopDaemon {
 	private async handleChainDelete(args: JsonObject): Promise<JsonObject> {
 		const chain = this.resolveChain(args)
 		if (chain.status === "deleted") return { chain: chainToJson(chain), alreadyDeleted: true }
+		const cleanup = await this.cleanupChainRuntime(chain)
 		const updated = this.requireStore().updateChain(chain.id, { status: "deleted" })
 		this.queueSchedulerTick()
-		return { chain: chainToJson(updated), alreadyDeleted: false }
+		return { chain: chainToJson(updated), alreadyDeleted: false, cleanup }
+	}
+
+	private async cleanupChainRuntime(chain: ChainRecord): Promise<JsonObject> {
+		const store = this.requireStore()
+		const repoCwds = store.listItems(chain.id).map((item) => item.repoCwd)
+		const worktrees = cleanupSchedulerChainWorktrees(chain, repoCwds, { loopDataRoot: this.paths.root })
+		try {
+			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: this.paths.root })
+			await rm(paths.chainRoot, { recursive: true, force: true })
+			return { chainRoot: paths.chainRoot, chainRootRemoved: true, worktrees: worktrees as unknown as JsonValue }
+		} catch (error) {
+			if (isInvalidChainNameError(error)) {
+				return {
+					chainRoot: null,
+					chainRootRemoved: false,
+					worktrees: worktrees as unknown as JsonValue,
+					error: errorMessage(error),
+				}
+			}
+			throw error
+		}
 	}
 
 	private async handleItemAdd(args: JsonObject): Promise<JsonObject> {

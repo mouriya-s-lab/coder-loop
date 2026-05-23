@@ -11,7 +11,7 @@ import {
 	type CoderLoopDaemon,
 	type DaemonResponse,
 } from "./daemon"
-import { schedulerSlotWorktreePath, type SchedulerEvent, type SchedulerOptions, type SchedulerWorktreeManager } from "./scheduler"
+import { createGitWorktreeManager, schedulerSlotWorktreePath, type SchedulerEvent, type SchedulerOptions, type SchedulerWorktreeManager } from "./scheduler"
 import { resolveChainRuntimePaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
 
@@ -454,6 +454,48 @@ describe("daemon", () => {
 		}
 	})
 
+	test("socket chain.delete removes scheduler worktree registration and chain runtime layout", async () => {
+		const fixture = await startFixture("chain-delete-cleanup", { realWorktreeManager: true })
+		const target = resolve(fixture.loopDataRoot, "..", "target")
+		await initGitTarget(target)
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "delete-cleanup",
+				repository: "mouriya-s-lab/coder-loop",
+				baseBranch: "main",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			await request(fixture, "item.add", { chainId, issueNumber: 225, repoCwd: target })
+			await waitFor(async () => readChainStatus(fixture.loopDataRoot, chainId), (status) => status === "completed")
+
+			const storedChain = await readChain(fixture.loopDataRoot, chainId)
+			if (storedChain === null) throw new Error("expected chain record")
+			const paths = resolveChainRuntimePaths("delete-cleanup", { loopDataRoot: fixture.loopDataRoot })
+			const worktreePath = schedulerSlotWorktreePath(storedChain, target, { loopDataRoot: fixture.loopDataRoot })
+			expect(await pathExists(worktreePath)).toBe(true)
+			expect(gitOutput(target, ["worktree", "list", "--porcelain"])).toContain(worktreePath)
+
+			const deleted = expectOk(await request(fixture, "chain.delete", { chainId }))
+			expect(deleted).toMatchObject({
+				alreadyDeleted: false,
+				chain: { status: "deleted" },
+				cleanup: { chainRootRemoved: true },
+			})
+			expect(await pathExists(paths.chainRoot)).toBe(false)
+			expect(gitOutput(target, ["worktree", "list", "--porcelain"])).not.toContain(worktreePath)
+
+			await fixture.daemon.stop()
+			const restarted = await startCoderLoopDaemon({ loopDataRoot: fixture.loopDataRoot, shutdownGraceMs: 100, scheduler: { enabled: false } })
+			try {
+				expect(await pathExists(paths.chainRoot)).toBe(false)
+			} finally {
+				await restarted.stop()
+			}
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("auto chain completion", async () => {
 		const fixture = await startFixture("completion")
 		try {
@@ -806,6 +848,7 @@ type FixtureOptions = {
 	schedulerEnabled?: boolean
 	schedulerIntervalMs?: number
 	schedulerPresetDir?: string | null
+	realWorktreeManager?: boolean
 	worktreeManager?: SchedulerWorktreeManager
 }
 
@@ -818,7 +861,7 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 	await writeFakeRunner(fakeRunner)
 
 	const schedulerEvents: SchedulerEvent[] = []
-	const worktreeManager: SchedulerWorktreeManager = options.worktreeManager ?? (async ({ chain, repoCwd }) => {
+	const worktreeManager: SchedulerWorktreeManager = options.worktreeManager ?? (options.realWorktreeManager ? createGitWorktreeManager({ loopDataRoot }) : async ({ chain, repoCwd }) => {
 		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
 		await mkdir(worktreePath, { recursive: true })
 		return worktreePath
@@ -901,6 +944,15 @@ async function readChainStatus(loopDataRoot: string, chainId: number): Promise<s
 	}
 }
 
+async function readChain(loopDataRoot: string, chainId: number) {
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		return store.getChain(chainId)
+	} finally {
+		store.close()
+	}
+}
+
 async function readItem(loopDataRoot: string, chainId: number, issueNumber: number) {
 	const store = openSqliteStateStore({ loopDataRoot })
 	try {
@@ -968,6 +1020,26 @@ async function pathExists(path: string): Promise<boolean> {
 
 async function pathIsSocket(path: string): Promise<boolean> {
 	return (await stat(path)).isSocket()
+}
+
+async function initGitTarget(path: string): Promise<void> {
+	await mkdir(path, { recursive: true })
+	gitOutput(path, ["init", "-q"])
+	gitOutput(path, ["config", "user.email", "test@example.invalid"])
+	gitOutput(path, ["config", "user.name", "Test User"])
+	await writeFile(resolve(path, "README.md"), "test\n")
+	gitOutput(path, ["add", "README.md"])
+	gitOutput(path, ["commit", "-qm", "init"])
+}
+
+function gitOutput(cwd: string, args: readonly string[]): string {
+	const proc = Bun.spawnSync({ cmd: ["git", ...args], cwd, stdout: "pipe", stderr: "pipe" })
+	const stdout = new TextDecoder().decode(proc.stdout).trim()
+	if (proc.exitCode !== 0) {
+		const stderr = new TextDecoder().decode(proc.stderr).trim()
+		throw new Error(`git ${args.join(" ")} failed in ${cwd} (exit ${proc.exitCode}): ${stderr}`)
+	}
+	return stdout
 }
 
 async function writeFakeRunner(path: string): Promise<void> {
