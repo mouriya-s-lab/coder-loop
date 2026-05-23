@@ -51,6 +51,7 @@ export type SchedulerSlot = {
 
 export type SchedulerState = {
 	slots: Map<string, SchedulerSlot>
+	finalizingItemStatuses: Map<number, string>
 }
 
 export type SchedulerStore = Pick<
@@ -122,7 +123,7 @@ const DEFAULT_TERMINAL_STATUSES = ["done", "moot", "blocked"] as const
 let fallbackRunSequence = 0
 
 export function createSchedulerState(): SchedulerState {
-	return { slots: new Map() }
+	return { slots: new Map(), finalizingItemStatuses: new Map() }
 }
 
 export async function schedulerTick(options: SchedulerOptions): Promise<SchedulerTickResult> {
@@ -328,32 +329,37 @@ function attachRunCloseHandler(
 				const currentItem = options.store.getItem(item.id)
 				const status = currentItem !== null && terminalStatuses.has(currentItem.status) ? currentItem.status : statusFromExit
 				const endedAt = nowSeconds(options)
-				options.store.completeRun(runId, { endedAt, exitCode, extra: { stdoutBytes: stdoutText.length, stderrBytes: stderrText.length } })
-				if (currentItem === null || !terminalStatuses.has(currentItem.status)) {
-					options.store.updateItem(item.id, { status, lastRunId: runId, agentCwd: worktreePath, updatedAt: endedAt })
+				options.state.finalizingItemStatuses.set(item.id, status)
+				try {
+					await writeSchedulerRunCompletionArtifacts(options, {
+						runId,
+						chain,
+						item,
+						phase: options.phase ?? DEFAULT_PHASE,
+						startedAt,
+						endedAt,
+						exitCode,
+						status,
+						pid: child.pid ?? null,
+						worktreePath,
+						stdoutText,
+						stderrText,
+					})
+
+					const currentRun = options.store.getCurrentRun(chain.id)
+					if (currentRun?.runId === runId) options.store.clearCurrentRun(chain.id)
+
+					if (slot.activeRun?.runId === runId) slot.activeRun = null
+					await emit(options, { type: "agent.exit", slotKey: slot.key, chainId: chain.id, itemId: item.id, runId, exitCode, status })
+					await completeChainIfReady(options, chain, runId)
+					options.store.completeRun(runId, { endedAt, exitCode, extra: { stdoutBytes: stdoutText.length, stderrBytes: stderrText.length } })
+					if (currentItem === null || !terminalStatuses.has(currentItem.status)) {
+						options.store.updateItem(item.id, { status, lastRunId: runId, agentCwd: worktreePath, updatedAt: endedAt })
+					}
+					resolveClosed({ runId, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, exitCode, stdout: stdoutText, stderr: stderrText, status })
+				} finally {
+					options.state.finalizingItemStatuses.delete(item.id)
 				}
-				await writeSchedulerRunCompletionArtifacts(options, {
-					runId,
-					chain,
-					item,
-					phase: options.phase ?? DEFAULT_PHASE,
-					startedAt,
-					endedAt,
-					exitCode,
-					status,
-					pid: child.pid ?? null,
-					worktreePath,
-					stdoutText,
-					stderrText,
-				})
-
-				const currentRun = options.store.getCurrentRun(chain.id)
-				if (currentRun?.runId === runId) options.store.clearCurrentRun(chain.id)
-
-				if (slot.activeRun?.runId === runId) slot.activeRun = null
-				await emit(options, { type: "agent.exit", slotKey: slot.key, chainId: chain.id, itemId: item.id, runId, exitCode, status })
-				await completeChainIfReady(options, chain, runId)
-				resolveClosed({ runId, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, exitCode, stdout: stdoutText, stderr: stderrText, status })
 			})()
 		})
 	})
@@ -396,9 +402,14 @@ async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecor
 	const terminalStatuses = options.terminalStatuses ?? DEFAULT_TERMINAL_STATUSES
 	const current = options.store.listChains().find((candidate) => candidate.id === chain.id)
 	if (current?.status !== "active") return
-	if (!options.store.allItemsTerminal({ chainId: chain.id, terminalStatuses })) return
+	if (!allItemsTerminalIncludingFinalizing(options, chain.id, terminalStatuses)) return
 	const updated = options.store.updateChain(chain.id, { status: "completed", updatedAt: nowSeconds(options) })
 	await emit(options, { type: "chain.completed", chainId: updated.id, chainName: updated.name, ...(runId === undefined ? {} : { runId }) })
+}
+
+function allItemsTerminalIncludingFinalizing(options: SchedulerOptions, chainId: number, terminalStatuses: readonly string[]): boolean {
+	const terminal = new Set(terminalStatuses)
+	return options.store.listItems(chainId).every((item) => terminal.has(options.state.finalizingItemStatuses.get(item.id) ?? item.status))
 }
 
 function getOrCreateSlot(state: SchedulerState, chain: ChainRecord, repoCwd: string): SchedulerSlot {
