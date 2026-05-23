@@ -144,6 +144,31 @@ describe("scheduler", () => {
 		}
 	})
 
+	test("terminated child preserves user terminal item status", async () => {
+		const fixture = await createFixture("terminal-preserve")
+		try {
+			const chain = createChain(fixture.store, "terminal-preserve-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", sleepMs: 5_000 })
+
+			const tick = await schedulerTick(fixture.options())
+			expect(tick.spawnedRuns).toHaveLength(1)
+			expect(fixture.store.getItem(item.id)?.status).toBe("in_progress")
+
+			fixture.store.updateItem(item.id, { status: "done", updatedAt: 1_800_000_500 })
+			const closed = await tick.spawnedRuns[0]!.terminate({ forceAfterMs: 200 })
+
+			expect(closed.exitCode).toBe(1)
+			expect(closed.status).toBe("done")
+			expect(fixture.store.getItem(item.id)?.status).toBe("done")
+			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
+
+			const secondTick = await schedulerTick(fixture.options())
+			expect(secondTick.spawnedRuns).toHaveLength(0)
+		} finally {
+			fixture.store.close()
+		}
+	})
+
 	test("empty active chain remains active", async () => {
 		const fixture = await createFixture("empty-active")
 		try {

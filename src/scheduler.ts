@@ -60,6 +60,7 @@ export type SchedulerStore = Pick<
 	| "getNextPendingItem"
 	| "allItemsTerminal"
 	| "updateChain"
+	| "getItem"
 	| "updateItem"
 	| "recordRun"
 	| "completeRun"
@@ -307,10 +308,15 @@ function attachRunCloseHandler(
 				const exitCode = code ?? 1
 				const stdoutText = Buffer.concat(stdout).toString("utf-8")
 				const stderrText = Buffer.concat(stderr).toString("utf-8")
-				const status = options.statusFromExit?.({ exitCode, stdout: stdoutText, stderr: stderrText, item, chain }) ?? (exitCode === 0 ? "done" : "changes_requested")
+				const statusFromExit = options.statusFromExit?.({ exitCode, stdout: stdoutText, stderr: stderrText, item, chain }) ?? (exitCode === 0 ? "done" : "changes_requested")
+				const terminalStatuses = new Set(options.terminalStatuses ?? DEFAULT_TERMINAL_STATUSES)
+				const currentItem = options.store.getItem(item.id)
+				const status = currentItem !== null && terminalStatuses.has(currentItem.status) ? currentItem.status : statusFromExit
 				const endedAt = nowSeconds(options)
 				options.store.completeRun(runId, { endedAt, exitCode, extra: { stdoutBytes: stdoutText.length, stderrBytes: stderrText.length } })
-				options.store.updateItem(item.id, { status, lastRunId: runId, agentCwd: worktreePath, updatedAt: endedAt })
+				if (currentItem === null || !terminalStatuses.has(currentItem.status)) {
+					options.store.updateItem(item.id, { status, lastRunId: runId, agentCwd: worktreePath, updatedAt: endedAt })
+				}
 
 				const currentRun = options.store.getCurrentRun(chain.id)
 				if (currentRun?.runId === runId) options.store.clearCurrentRun(chain.id)
