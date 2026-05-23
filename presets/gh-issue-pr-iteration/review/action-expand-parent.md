@@ -85,8 +85,8 @@ Queue item shape for each new child:
   "branch": null,
   "pr": null,
   "lastRunId": null,
-  "issueFile": ".coder-loop/runtime/issues/123.md",
-  "evidenceDir": ".coder-loop/runtime/evidence/issue-123"
+  "issueFile": "loop-data/chains/<chain>/issues/123.md",
+  "evidenceDir": "loop-data/chains/<chain>/evidence/issue-123"
 }
 ```
 
@@ -99,13 +99,13 @@ existing queued siblings.
 
 Initialize the local child bookkeeping before state insertion:
 
-- create or update `.coder-loop/runtime/issues/<child>.md` with the child issue URL, parent issue number, remaining task summary, acceptance criteria, and evidence requirements;
-- create `.coder-loop/runtime/evidence/issue-<child>/` if it does not exist;
-- do not stage these `.coder-loop/runtime/` files into any feature commit.
+- create or update `loop-data/chains/<chain>/issues/<child>.md` with the child issue URL, parent issue number, remaining task summary, acceptance criteria, and evidence requirements;
+- create `loop-data/chains/<chain>/evidence/issue-<child>/` if it does not exist;
+- do not stage these `loop-data runtime artifacts` files into any feature commit.
 
 Before creating the child, self-check that it describes one coherent remaining problem, contains no unchecked checklist acceptance criteria, does not prescribe implementation internals, and does not expose loop run IDs or other local scaffolding in the GitHub body.
 
-Do not close the parent issue. Do not mark the parent final. Leave `.dev-loop` untouched.
+Do not close the parent issue. Do not mark the parent final. Leave central daemon scheduling state untouched.
 
 ## Output verdict
 

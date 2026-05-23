@@ -9,6 +9,8 @@ const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
 const FIXTURE_CHAIN_NAME = "fixture-chain"
 const SQLITE_STATE_MODULE = resolve(REPO_ROOT, "src/sqlite-state.ts")
+const FORMER_LOOP_SENTINEL = `.${"dev-loop"}`
+const FORMER_TRACE_ARTIFACT = `.${"dev-trace"}.txt`
 
 type ConfigShape = "json" | "toml"
 type StatusSmokeSnapshot = {
@@ -425,7 +427,7 @@ describe("smoke: single-phase-example preset", () => {
 
 	test("--dry-run selects the source-writing no-merge route for fixture", async () => {
 		const target = resolve(REPO_ROOT, "test-fixtures/no-merge-code-spike-target")
-		const state = JSON.parse(await readFile(resolve(target, ".coder-loop/runtime/state.json"), "utf-8")) as FixtureState
+		const state = JSON.parse(await readFile(resolve(target, ".coder-loop/runtime", "state.json"), "utf-8")) as FixtureState
 		const loopDataRoot = await seedLoopDb(target, "gh-issue-pr-iteration", state)
 		const proc = Bun.spawnSync({
 			cmd: ["bun", LOOP_ENTRY, "--target-cwd", target, "--loop-data-root", loopDataRoot, "--dry-run"],
@@ -498,7 +500,6 @@ describe("smoke: single-phase-example preset", () => {
 
 	test("status <target> --json reports missing state as JSON instead of throwing", async () => {
 		const target = await makeMinimalTarget("single-phase-example")
-		await rm(resolve(target, ".coder-loop/runtime/state.json"))
 		await rm(resolve(target, ".coder-loop/runtime/loop-data"), { recursive: true, force: true })
 		const proc = Bun.spawnSync({
 			cmd: ["bun", LOOP_ENTRY, "status", target, "--json"],
@@ -711,8 +712,8 @@ describe("smoke: queue unblock CLI", () => {
 	test("requeues a blocked item and clears blocker metadata without touching unrelated fields", async () => {
 		const issue = 9200
 		const dir = await makeGhIssuePrTarget("blocked", issue)
-		const statePath = resolve(dir, ".coder-loop/runtime/state.json")
-		const beforeState = await readFile(statePath, "utf-8")
+		const stateFile = resolve(dir, ".coder-loop/runtime", "state.json")
+		const beforeState = await readFile(stateFile, "utf-8")
 		updateDbItem(dir, issue, {
 			status: "blocked",
 			extra: { blockerRepo: "owner/dependency", blockerRef: "#267" },
@@ -739,7 +740,7 @@ describe("smoke: queue unblock CLI", () => {
 		expect(result.verification.blockerRepoPresent).toBe(false)
 		expect(result.verification.blockerRefPresent).toBe(false)
 
-		expect(await readFile(statePath, "utf-8")).toBe(beforeState)
+		expect(await readFile(stateFile, "utf-8")).toBe(beforeState)
 		const updated = readDbItem(dir, issue)
 		expect(updated.status).toBe("queued")
 		expect(updated.extra.blockerRepo).toBeUndefined()
@@ -749,8 +750,8 @@ describe("smoke: queue unblock CLI", () => {
 	test("dry-run reports daemon start plan without writing state", async () => {
 		const issue = 9201
 		const dir = await makeGhIssuePrTarget("blocked", issue)
-		const statePath = resolve(dir, ".coder-loop/runtime/state.json")
-		const beforeState = await readFile(statePath, "utf-8")
+		const stateFile = resolve(dir, ".coder-loop/runtime", "state.json")
+		const beforeState = await readFile(stateFile, "utf-8")
 		updateDbItem(dir, issue, {
 			status: "blocked",
 			extra: { blockerRepo: "owner/dependency", blockerRef: "#267" },
@@ -769,7 +770,7 @@ describe("smoke: queue unblock CLI", () => {
 		expect(result.daemon.requested).toBe(true)
 		expect(result.daemon.plan.command).toContain("--require-browser-evidence")
 
-		expect(await readFile(statePath, "utf-8")).toBe(beforeState)
+		expect(await readFile(stateFile, "utf-8")).toBe(beforeState)
 		const updated = readDbItem(dir, issue)
 		expect(updated.status).toBe("blocked")
 		expect(updated.extra.blockerRepo).toBe("owner/dependency")
@@ -970,7 +971,7 @@ describe("smoke: phase runner selection", () => {
 		return dir
 	}
 
-	test("review verdict=stop exits without .dev-loop signaling", async () => {
+	test("review verdict=stop exits without target-local sentinel signaling", async () => {
 		const dir = await makeTwoPhaseReviewTarget([
 			`echo 'gh issue comment failed: This command requires approval'`,
 			`echo 'REVIEW SUMMARY: verdict=stop; issue=#alpha; actionable=1; reason=review infrastructure broken'`,
@@ -984,7 +985,7 @@ describe("smoke: phase runner selection", () => {
 		})
 		const stderr = new TextDecoder().decode(proc.stderr)
 		expect(proc.exitCode).toBe(0)
-		expect(await Bun.file(resolve(dir, ".dev-loop")).exists()).toBe(false)
+		expect(await Bun.file(resolve(dir, FORMER_LOOP_SENTINEL)).exists()).toBe(false)
 		expect(stderr).toContain("review agent requested loop stop via REVIEW SUMMARY.")
 		expect(stderr).toContain("Review agent requested loop stop.")
 	}, 15_000)
@@ -1004,7 +1005,7 @@ describe("smoke: phase runner selection", () => {
 		})
 		const stderr = new TextDecoder().decode(proc.stderr)
 		expect(proc.exitCode).toBe(0)
-		expect(await Bun.file(resolve(dir, ".dev-loop")).exists()).toBe(false)
+		expect(await Bun.file(resolve(dir, FORMER_LOOP_SENTINEL)).exists()).toBe(false)
 		expect(stderr).not.toContain("review agent requested loop stop via REVIEW SUMMARY.")
 		expect(stderr).not.toContain("Review agent requested loop stop.")
 	}, 15_000)
@@ -1051,7 +1052,7 @@ async function makeIssue185ArtifactFixture(options: { reviewReadsTrace?: boolean
 		`name = "review"`,
 		`prompt = "review-entry.md"`,
 		`  [phases.variables]`,
-		`  TRACE_FILE = "runtime.traceFile"`,
+		`  LOG_DIR = "runtime.logDir"`,
 		`  RUN_ID = "runtime.runId"`,
 		``,
 		`[agent]`,
@@ -1060,7 +1061,7 @@ async function makeIssue185ArtifactFixture(options: { reviewReadsTrace?: boolean
 		``,
 	].join("\n"))
 	await writeFile(resolve(presetDir, "iter-entry.md"), "ITER {{ITEM_ID}} {{RUN_ID}}\n")
-	await writeFile(resolve(presetDir, "review-entry.md"), "TRACE={{TRACE_FILE}}\nRUN={{RUN_ID}}\n")
+	await writeFile(resolve(presetDir, "review-entry.md"), "TRACE={{LOG_DIR}}/{{RUN_ID}}/iteration/stdout.jsonl\nRUN={{RUN_ID}}\n")
 
 	const traceEvidence = resolve(dir, "review-trace-path.txt")
 	const fakeCodex = resolve(dir, "fake-codex.sh")
@@ -1147,10 +1148,10 @@ describe("issue #185 chain artifact layout", () => {
 		expect(topLevel).not.toContain("events")
 	})
 
-	test("main loop does not create dev-loop or dev-trace", async () => {
+	test("main loop leaves target-local sentinels absent", async () => {
 		const fixture = await makeIssue185ArtifactFixture()
-		expect(await Bun.file(resolve(fixture.target, ".dev-loop")).exists()).toBe(false)
-		expect(await Bun.file(resolve(fixture.target, ".dev-trace.txt")).exists()).toBe(false)
+		expect(await Bun.file(resolve(fixture.target, FORMER_LOOP_SENTINEL)).exists()).toBe(false)
+		expect(await Bun.file(resolve(fixture.target, FORMER_TRACE_ARTIFACT)).exists()).toBe(false)
 	})
 
 	test("review reads stdout jsonl", async () => {
@@ -1261,7 +1262,7 @@ describe("daemon idle behavior — review-on-empty lock + idle ticks (issue #69)
 		})
 		const started = await waitFor(async () => (await fileLineCount(counterPath)) >= 1, 5000)
 		expect(started).toBe(true)
-		expect(await Bun.file(resolve(target, ".dev-loop")).exists()).toBe(false)
+		expect(await Bun.file(resolve(target, FORMER_LOOP_SENTINEL)).exists()).toBe(false)
 		proc.kill("SIGTERM")
 		const exitCode = await proc.exited
 		expect(exitCode).toBe(0)

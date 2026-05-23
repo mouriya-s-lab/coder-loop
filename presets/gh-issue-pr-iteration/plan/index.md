@@ -2,7 +2,7 @@
 
 ## Goal
 
-Start one planning invocation and follow the planning fragment chain. Planning produces the coder-loop queue: atomic GitHub issues with executable checkpoints + parent/child graph + initialized `state.json`.
+Start one planning invocation and follow the planning fragment chain. Planning produces the coder-loop queue: atomic GitHub issues with executable checkpoints + parent/child graph + initialized `central state DB`.
 
 Planning is **not** a `preset.phases` member. It is invoked by the `/dev-plan` slash command, which is a thin shell that delegates to this fragment chain. The L1 engine does not see planning; it sees the runtime phases that consume the queue planning produces: `iteration`, `review`, and any configured post-review trigger phases such as `blocked-responder`.
 
@@ -29,7 +29,7 @@ Planning produces planning signal. Concretely:
 - run adversarial validation against minimum-effort agent path;
 - create issues with `gh issue create` (one `kind:*` label each, §1.3);
 - link parent/child via `addSubIssue` (issue-to-issue only, never PR-as-child);
-- initialize `state.json` queue with actionable issues;
+- initialize `central state DB` queue with actionable issues;
 - run `coder-loop --target-cwd <target> --check-runtime` to confirm queue valid;
 - write handoff describing what was created and the queue state.
 
@@ -41,7 +41,7 @@ Planning must not:
 - bypass `contract.md` §1.4 table column requirements;
 - skip adversarial validation;
 - queue parent-only umbrella issues without a concrete closure task;
-- delete `.dev-loop` or modify runtime files outside `state.json` + `issues/` + `evidence/`.
+- delete central daemon scheduling state or modify runtime files outside `central state DB` + `issues/` + `evidence/`.
 
 ## Next fragment
 

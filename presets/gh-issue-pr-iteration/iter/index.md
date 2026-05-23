@@ -44,7 +44,7 @@ Iteration produces implementation signal. The exact deliverable depends on `ISSU
   - do not write code, do not open a PR, do not edit the issue body;
   - append a handoff note with the posted comment URL.
 
-Iteration must not create child issues, link sub-issues, merge PRs, close issues, remove `.dev-loop`, reorder/prepend queue items, or mark final local state, regardless of `ISSUE_KIND`.
+Iteration must not create child issues, link sub-issues, merge PRs, close issues, remove central daemon scheduling state, reorder/prepend queue items, or mark final local state, regardless of `ISSUE_KIND`.
 
 ## Next fragment
 

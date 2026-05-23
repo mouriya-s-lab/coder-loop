@@ -14,7 +14,7 @@ The orchestrator may decide only facts that are fully programmable:
 - whether a queue item status is actionable (`queued`, `in_progress`, `changes_requested`);
 - which issue/run/prompt path to bind into an agent invocation;
 - whether an agent process exited with code `0`;
-- whether `.dev-loop` still exists.
+- whether central daemon scheduling state still exists.
 
 The program must not judge semantic completion, evidence quality, issue validity, PR correctness, parent closure, or blocker legitimacy.
 

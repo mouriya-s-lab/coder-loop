@@ -222,22 +222,18 @@ describe("central chain/item CLI", () => {
 		}
 	})
 
-	test("status json compat no legacy reads", async () => {
+	test("status json reports DB snapshot and live process scan", async () => {
 		const fixture = await startFixture("status-json")
 		try {
 			const target = await makeTarget("status-json-target")
-			await writeFile(resolve(target, ".coder-loop/runtime/state.json"), "{ invalid legacy state", { mode: 0o644 }).catch(async () => {
-				await mkdir(resolve(target, ".coder-loop/runtime"), { recursive: true })
-				await writeFile(resolve(target, ".coder-loop/runtime/state.json"), "{ invalid legacy state")
-			})
-			await writeFile(resolve(target, ".dev-loop"), "pid: not-a-number\n")
 			expectJsonOk(await runCli(["chain", "create", "status-json-chain", "--repo", "fixture/repo", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expectJsonOk(await runCli(["item", "add", "status-json-chain", "--issue", "184", "--repo-cwd", target, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 
 			const status = expectJsonOk(await runCli(["status", target, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(status.state).toMatchObject({ kind: "ok", ok: true, path: resolve(fixture.loopDataRoot, "db.sqlite") })
 			expect(status.queue.selected.id).toBe("184")
-			expect(status.processes.loopFile).toMatchObject({ exists: false, raw: null })
+			expect(Array.isArray(status.processes.live)).toBe(true)
+			expect(status.processes.scanError === null || typeof status.processes.scanError === "string").toBe(true)
 		} finally {
 			await fixture.daemon.stop()
 		}

@@ -2,7 +2,7 @@
 
 ## Goal
 
-Post the validated draft bodies as GitHub issues. Link parent/child relationships. Record returned issue numbers for `plan/init-queue` to write into `state.json`.
+Post the validated draft bodies as GitHub issues. Link parent/child relationships. Record returned issue numbers for `plan/init-queue` to write into `central state DB`.
 
 ## Inputs
 

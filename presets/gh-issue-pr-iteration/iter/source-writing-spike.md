@@ -35,7 +35,7 @@ Forbidden on this route:
 - merge a PR or branch;
 - close the issue;
 - write final local state such as `done`, `moot`, or final `blocked`;
-- stage `.coder-loop/runtime/`, `.dev-loop`, or `.dev-trace.txt`;
+- stage `loop-data runtime artifacts`, central daemon scheduling state, or run stdout log;
 - let temporary PoC code masquerade as production implementation.
 
 ## Procedure

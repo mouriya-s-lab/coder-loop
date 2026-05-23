@@ -52,7 +52,7 @@ triage 与新 issue planning 共存：一次 `/dev-plan` 调用既可以 triage 
    - `no_op`: issue #N → 一行 "通过 §1 校验" 记录。
 
 5. 执行 GitHub 写入（按动作顺序：`rewrite_body` → `pr_reply` → `close_with_operator_auth`；`close_propose_to_review` 与 `no_op` 不写 GitHub）。每次写入：
-   - 写 body / comment 到 `.coder-loop/runtime/issues/triage-<run-id>/issue-<N>.{body,comment}.md` 留 trace；
+   - 写 body / comment 到 `loop-data/chains/<chain>/issues/triage-<run-id>/issue-<N>.{body,comment}.md` 留 trace；
    - `rewrite_body`：实际 gh issue edit `<repo>#<N> --body-file <tmp>` 必须真跑通；只把 body 写到本地 tmp 不算完成（trace 会被 review verify 跑一次 `gh issue view` 比对 GitHub live state，diverge → 该 issue 落 `triage_blocked`）。
    - `pr_reply`：实际 gh pr comment `<repo>#<PR> --body-file <tmp>` 必须真跑通；只草拟 markdown 不发不算完成。
    - `close_with_operator_auth`：实际 gh issue close `<repo>#<N>` 必须真跑通（同时实际 gh issue comment 把 close-reason 留 issue thread）。

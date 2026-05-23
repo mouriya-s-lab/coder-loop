@@ -19,7 +19,7 @@ Append a concise run note to the current issue handoff file with:
 - proposed child issue titles, expected outcomes, acceptance criteria, evidence requirements, and split rationale when parent scope is incomplete;
 - proposed shared-context additions, if any.
 
-Do not set final state in `.coder-loop/runtime/state.json`. Do not reorder queue items. Do not close GitHub issues. Do not remove `.dev-loop`.
+Do not set final state in `central SQLite state DB`. Do not reorder queue items. Do not close GitHub issues. Do not remove central daemon scheduling state.
 
 ## Output verdict
 

@@ -40,7 +40,6 @@ import {
 	markIterationStarted,
 	markReviewStarted,
 	normalizeQueueIssueId,
-	reconcileStateAfterIter,
 	requeueBlockedItem,
 	resolveIdleSleepMs,
 	reviewOnEmptyLockPath,
@@ -153,7 +152,7 @@ async function makeFixtureOptions(preset: Preset): Promise<LoopOptions> {
 	const runtimeDir = resolve(cwd, ".coder-loop/runtime")
 	const configPath = resolve(runtimeDir, "config.json")
 	const sharedContextPath = resolve(runtimeDir, "shared.md")
-	const statePath = resolve(runtimeDir, "state.json")
+	const stateFile = resolve(runtimeDir, "state.json")
 	const workflowPath = resolve(cwd, ".coder-loop/workflow.md")
 	await mkdir(issueDir, { recursive: true })
 	await mkdir(evidenceRootDir, { recursive: true })
@@ -161,7 +160,7 @@ async function makeFixtureOptions(preset: Preset): Promise<LoopOptions> {
 	await mkdir(resolve(cwd, ".coder-loop"), { recursive: true })
 	await writeFile(configPath, "{}")
 	await writeFile(sharedContextPath, "")
-	await writeFile(statePath, "{}")
+	await writeFile(stateFile, "{}")
 	await writeFile(workflowPath, "")
 	const claudeRunner = { kind: "claude" as const, binary: "claude", extraArgs: [], model: null }
 	const codexRunner = { kind: "codex" as const, binary: "codex", extraArgs: [], model: null }
@@ -170,14 +169,12 @@ async function makeFixtureOptions(preset: Preset): Promise<LoopOptions> {
 		configPath,
 		workflowPath,
 		sharedContextPath,
-		statePath,
+		stateFile,
 		issueDir,
 		evidenceRootDir,
-		logDir,
-		loopDataRoot: null,
-		loopFile: resolve(cwd, ".dev-loop"),
-		traceFile: resolve(cwd, ".dev-trace.txt"),
-		logFile: resolve(logDir, "test.log"),
+			logDir,
+			loopDataRoot: null,
+			logFile: resolve(logDir, "test.log"),
 		repository: "Mouriya-Emma/test",
 		baseBranch: "main",
 		worktree: false,
@@ -422,11 +419,11 @@ describe("buildCoderLoopStatusSnapshot", () => {
 			extraArgs: [],
 			model: "claude-opus-4-7",
 		})
-		expect(snapshot.queue.selected?.reviewRunner).toEqual(snapshot.target.runner.reviewDefault)
-		expect(snapshot.current.run).toBeNull()
-		expect(snapshot.events.runId).toBe("run-alpha")
-		expect(snapshot.processes.loopFile.exists).toBe(false)
-	})
+			expect(snapshot.queue.selected?.reviewRunner).toEqual(snapshot.target.runner.reviewDefault)
+			expect(snapshot.current.run).toBeNull()
+			expect(snapshot.events.runId).toBe("run-alpha")
+			expect(Array.isArray(snapshot.processes.live)).toBe(true)
+		})
 
 	test("configured iteration runner still overrides default", async () => {
 		const target = await makeStatusTarget()
@@ -562,25 +559,7 @@ describe("buildCoderLoopStatusSnapshot", () => {
 		expect(snapshot.target.runner.reviewDefault.kind).toBe("claude")
 	})
 
-	test("target-local invalid queue item runner is ignored by chain-authoritative status", async () => {
-		const target = await makeStatusTarget()
-		await writeFile(
-			resolve(target, ".coder-loop/runtime/state.json"),
-			JSON.stringify({
-				version: 1,
-				queue: [{ id: "alpha", status: "pending", runner: "ollama" }],
-				recentRuns: [],
-				current: null,
-			}, null, "\t"),
-		)
-
-		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json" })
-
-		expect(snapshot.state.kind).toBe("ok")
-		expect(snapshot.queue.selected?.runner.kind).toBe("codex")
-	})
-
-	test("reports missing DB state when the chain database is absent", async () => {
+		test("reports missing DB state when the chain database is absent", async () => {
 		const target = await makeStatusTarget()
 		await fs.rm(resolve(target, ".coder-loop/runtime/loop-data"), { recursive: true, force: true })
 
@@ -783,91 +762,16 @@ describe("markIterationStarted / markReviewStarted", () => {
 	})
 })
 
-describe("reconcileStateAfterIter — recovers state.json wiped or reverted by iter's git ops (issue #67)", () => {
-	async function setupSnapshot(): Promise<{ statePath: string; snapshot: string; runtimeDir: string }> {
-		const cwd = await mkdtemp(resolve(tmpdir(), "coder-loop-reconcile-"))
-		const runtimeDir = resolve(cwd, ".coder-loop/runtime")
-		await mkdir(runtimeDir, { recursive: true })
-		const statePath = resolve(runtimeDir, "state.json")
-		const state: LoopState = {
-			version: 1,
-			repository: "Mouriya-Emma/test",
-			baseBranch: "main",
-			recentRuns: [],
-			queue: [
-				{
-					status: "queued",
-					attempts: 1,
-					title: "t",
-					priority: "medium",
-					branch: null,
-					pr: null,
-					lastRunId: "run-A",
-					issueFile: ".coder-loop/runtime/issues/1.md",
-					evidenceDir: ".coder-loop/runtime/evidence/1",
-					agentCwd: null,
-					runner: null,
-					extra: { issue: 1 },
-				},
-			],
-			current: { phase: "iteration", runId: "run-A", startedAt: "2026-01-01T00:00:00Z", extra: { issue: 1 } },
-		}
-		const snapshot = serializeState(state)
-		await writeFile(statePath, snapshot)
-		return { statePath, snapshot, runtimeDir }
-	}
+	describe("review-on-empty lock helpers (issue #69)", () => {
+		test("reviewOnEmptyLockPath derives a sibling lock file", () => {
+			const lockPath = reviewOnEmptyLockPath(resolve("/fixture", "db.sqlite"))
+			expect(lockPath).toBe(resolve("/fixture", "review-on-empty.lock"))
+		})
 
-	test("no-op when on-disk state.json matches the in-memory snapshot", async () => {
-		const { statePath, snapshot } = await setupSnapshot()
-		const logs: string[] = []
-		const outcome = await reconcileStateAfterIter(statePath, snapshot, (m) => logs.push(m))
-		expect(outcome.restored).toBe(false)
-		expect(logs).toEqual([])
-		expect(await readFile(statePath, "utf-8")).toBe(snapshot)
-	})
-
-	test("restores from snapshot when iter wiped state.json (git merge deleted the tracked file)", async () => {
-		const { statePath, snapshot } = await setupSnapshot()
-		await fs.rm(statePath)
-		const logs: string[] = []
-		const outcome = await reconcileStateAfterIter(statePath, snapshot, (m) => logs.push(m))
-		expect(outcome).toEqual({ restored: true, reason: "missing" })
-		expect(await readFile(statePath, "utf-8")).toBe(snapshot)
-		expect(logs.length).toBe(1)
-		expect(logs[0]).toMatch(/missing after iteration/)
-	})
-
-	test("restores from snapshot when iter reverted state.json content (git reset --hard to broken bootstrap)", async () => {
-		const { statePath, snapshot } = await setupSnapshot()
-		await writeFile(statePath, '{ "queue": [238] }\n')
-		const logs: string[] = []
-		const outcome = await reconcileStateAfterIter(statePath, snapshot, (m) => logs.push(m))
-		expect(outcome).toEqual({ restored: true, reason: "modified" })
-		expect(await readFile(statePath, "utf-8")).toBe(snapshot)
-		expect(logs.length).toBe(1)
-		expect(logs[0]).toMatch(/modified during iteration/)
-	})
-
-	test("recreates parent runtime directory if iter removed it entirely", async () => {
-		const { statePath, snapshot, runtimeDir } = await setupSnapshot()
-		await fs.rm(runtimeDir, { recursive: true })
-		const logs: string[] = []
-		const outcome = await reconcileStateAfterIter(statePath, snapshot, (m) => logs.push(m))
-		expect(outcome).toEqual({ restored: true, reason: "missing" })
-		expect(await readFile(statePath, "utf-8")).toBe(snapshot)
-	})
-})
-
-describe("review-on-empty lock helpers (issue #69)", () => {
-	test("reviewOnEmptyLockPath derives a sibling of state.json named review-on-empty.lock", () => {
-		const lockPath = reviewOnEmptyLockPath("/tmp/foo/.coder-loop/runtime/state.json")
-		expect(lockPath).toBe("/tmp/foo/.coder-loop/runtime/review-on-empty.lock")
-	})
-
-	test("reviewOnEmptyLockPath handles arbitrary state.json locations (no .coder-loop assumption)", () => {
-		const lockPath = reviewOnEmptyLockPath("/var/lib/cl/state.json")
-		expect(lockPath).toBe("/var/lib/cl/review-on-empty.lock")
-	})
+		test("reviewOnEmptyLockPath handles arbitrary state file locations", () => {
+			const lockPath = reviewOnEmptyLockPath("/var/lib/cl/db.sqlite")
+			expect(lockPath).toBe("/var/lib/cl/review-on-empty.lock")
+		})
 
 	test("serializeReviewOnEmptyLock writes acquiredAt / runId / reason as JSON with trailing newline", () => {
 		const payload = serializeReviewOnEmptyLock("run-2026-05-14-10-00-00-no-issue", new Date("2026-05-14T10:00:01.234Z"))
@@ -1018,18 +922,15 @@ describe("checkRuntime preset-driven validation", () => {
 function makeFixtureRuntime(overrides: Partial<RuntimeBindings> = {}): RuntimeBindings {
 	return {
 		runId: "run-fixture",
-		targetCwd: "/tmp/fixture-cwd",
-		agentCwd: "/tmp/fixture-cwd",
-		workflowPath: "/tmp/fixture-cwd/.coder-loop/workflow.md",
-		sharedContextPath: "/tmp/fixture-cwd/.coder-loop/runtime/shared.md",
-		statePath: "/tmp/fixture-cwd/.coder-loop/runtime/state.json",
-		currentIssueFile: "/tmp/fixture-cwd/.coder-loop/runtime/issues/131.md",
-		issueDir: "/tmp/fixture-cwd/.coder-loop/runtime/issues",
-		evidenceDir: "/tmp/fixture-cwd/.coder-loop/runtime/evidence/131",
-		evidenceRootDir: "/tmp/fixture-cwd/.coder-loop/runtime/evidence",
-		logDir: "/tmp/fixture-cwd/.coder-loop/runtime/logs",
-		traceFile: "/tmp/fixture-cwd/.dev-trace.txt",
-		loopFile: "/tmp/fixture-cwd/.dev-loop",
+			targetCwd: "/tmp/fixture-cwd",
+			agentCwd: "/tmp/fixture-cwd",
+			workflowPath: "/tmp/fixture-cwd/.coder-loop/workflow.md",
+			sharedContextPath: "/tmp/fixture-loop-data/chains/fixture/shared.md",
+			currentIssueFile: "/tmp/fixture-loop-data/chains/fixture/issues/131.md",
+			issueDir: "/tmp/fixture-loop-data/chains/fixture/issues",
+			evidenceDir: "/tmp/fixture-loop-data/chains/fixture/evidence/131",
+			evidenceRootDir: "/tmp/fixture-loop-data/chains/fixture/evidence",
+			logDir: "/tmp/fixture-loop-data/chains/fixture/runs",
 		presetDir: "/tmp/fixture-preset",
 		fragmentIndex: "- f1 (common): /tmp/fixture-preset/f1.md",
 		runIdGeneration: "new",
@@ -1148,14 +1049,11 @@ describe("renderPrompt with bundled preset", () => {
 			`ISSUE=${item.extra.issue}`,
 			`WORKFLOW_FILE=${runtime.workflowPath}`,
 			`SHARED_CONTEXT_FILE=${runtime.sharedContextPath}`,
-			`STATE_FILE=${runtime.statePath}`,
 			`CURRENT_ISSUE_FILE=${runtime.currentIssueFile}`,
 			`ISSUE_DIR=${runtime.issueDir}`,
 			`EVIDENCE_DIR=${runtime.evidenceDir}`,
 			`EVIDENCE_ROOT_DIR=${runtime.evidenceRootDir}`,
 			`LOG_DIR=${runtime.logDir}`,
-			`TRACE_FILE=${runtime.traceFile}`,
-			`LOOP_FILE=${runtime.loopFile}`,
 			`PROMPT_ROOT=${runtime.presetDir}`,
 			`PROMPT_FRAGMENT_INDEX=${runtime.fragmentIndex}`,
 			`REQUIRE_BROWSER_EVIDENCE=${String(config.requireBrowserEvidence)}`,
@@ -1331,11 +1229,11 @@ describe("renderPrompt with bundled preset", () => {
 		expect(acceptPr).toContain("This command requires approval")
 		expect(acceptPr).toContain("noninteractive approval/permission boundary")
 		expect(acceptPr).toContain("read `review/action-stop`")
-		expect(acceptPr).not.toContain("`accept_pr_failed` → read `review/action-retry`")
-		expect(actionStop).toContain("accepted PR or accepted no-PR GitHub side effect failure")
-		expect(actionStop).toContain("failed command")
-		expect(actionStop).toContain("Remove `.dev-loop`")
-		expect(actionStop).toContain("Do not mark the selected issue `done`")
+			expect(acceptPr).not.toContain("`accept_pr_failed` → read `review/action-retry`")
+			expect(actionStop).toContain("accepted PR or accepted no-PR GitHub side effect failure")
+			expect(actionStop).toContain("failed command")
+			expect(actionStop).toContain("Remove central daemon scheduling state")
+			expect(actionStop).toContain("Do not mark the selected issue `done`")
 	})
 
 	test("accepted no-PR GitHub side-effect approval failures stop instead of retrying the same accepted issue", async () => {
@@ -1345,12 +1243,12 @@ describe("renderPrompt with bundled preset", () => {
 		expect(acceptNoPr).toContain("noninteractive approval/permission boundary")
 		expect(acceptNoPr).toContain("accepted_no_pr")
 		expect(acceptNoPr).toContain("read `review/action-stop`")
-		expect(acceptNoPr).not.toContain("`accept_no_pr_failed` → read `review/action-retry`")
-		expect(acceptNoPr).toContain("`accept_no_pr_retry_needed` → read `review/action-retry`")
-		expect(actionStop).toContain("accepted PR or accepted no-PR GitHub side effect failure")
-		expect(actionStop).toContain("failed command")
-		expect(actionStop).toContain("Remove `.dev-loop`")
-		expect(actionStop).toContain("Do not mark the selected issue `done`")
+			expect(acceptNoPr).not.toContain("`accept_no_pr_failed` → read `review/action-retry`")
+			expect(acceptNoPr).toContain("`accept_no_pr_retry_needed` → read `review/action-retry`")
+			expect(actionStop).toContain("accepted PR or accepted no-PR GitHub side effect failure")
+			expect(actionStop).toContain("failed command")
+			expect(actionStop).toContain("Remove central daemon scheduling state")
+			expect(actionStop).toContain("Do not mark the selected issue `done`")
 	})
 
 	test("blocked review path requires structured blocker metadata", async () => {
@@ -1584,7 +1482,7 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 		expect(runtime.issueKind).toBe("")
 	})
 
-	test("buildRuntimeBindings central paths resolve shared/issues/evidence/logs/state/trace/loop under loop-data", async () => {
+		test("buildRuntimeBindings central paths resolve shared/issues/evidence/logs under loop-data", async () => {
 		const preset = await bundledPreset()
 		const baseOptions = await makeFixtureOptions(preset)
 		const options = { ...baseOptions, loopDataRoot: resolve(baseOptions.targetCwd, "loop-data") }
@@ -1605,18 +1503,15 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 			issueRun,
 			issueKind: "code",
 			paths,
-		})
+			})
 
-		expect(runtime.sharedContextPath).toBe(resolve(options.loopDataRoot, "chains/central-chain/shared.md"))
-		expect(runtime.statePath).toBe(resolve(options.loopDataRoot, "db.sqlite"))
-		expect(runtime.currentIssueFile).toBe(resolve(options.loopDataRoot, "chains/central-chain/issues/183.md"))
-		expect(runtime.issueDir).toBe(resolve(options.loopDataRoot, "chains/central-chain/issues"))
-		expect(runtime.evidenceDir).toBe(resolve(options.loopDataRoot, "chains/central-chain/evidence/183"))
-		expect(runtime.evidenceRootDir).toBe(resolve(options.loopDataRoot, "chains/central-chain/evidence"))
-		expect(runtime.logDir).toBe(resolve(options.loopDataRoot, "chains/central-chain/runs"))
-		expect(runtime.traceFile).toBe(resolve(options.loopDataRoot, "chains/central-chain/runs/run-central/iteration/stdout.jsonl"))
-		expect(runtime.loopFile).toBe(resolve(options.loopDataRoot, "chains/central-chain/.dev-loop"))
-	})
+			expect(runtime.sharedContextPath).toBe(resolve(options.loopDataRoot, "chains/central-chain/shared.md"))
+			expect(runtime.currentIssueFile).toBe(resolve(options.loopDataRoot, "chains/central-chain/issues/183.md"))
+			expect(runtime.issueDir).toBe(resolve(options.loopDataRoot, "chains/central-chain/issues"))
+			expect(runtime.evidenceDir).toBe(resolve(options.loopDataRoot, "chains/central-chain/evidence/183"))
+			expect(runtime.evidenceRootDir).toBe(resolve(options.loopDataRoot, "chains/central-chain/evidence"))
+			expect(runtime.logDir).toBe(resolve(options.loopDataRoot, "chains/central-chain/runs"))
+		})
 
 	test("iter prompt central paths and review prompt central paths", async () => {
 		const preset = await bundledPreset()

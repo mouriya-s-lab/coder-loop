@@ -20,7 +20,7 @@ Do not use stop for bad code, weak evidence, failed tests, PR conflicts, pending
 - If state can be read, record the actionable/non-actionable classification before stopping.
 - If state cannot be read, record the exact infrastructure failure.
 - For an accepted PR or accepted no-PR GitHub side effect failure, append a handoff note with the accepted verdict, failed command, target repo/PR/issue, command output, and why rerunning would repeat the same infrastructure boundary.
-- Remove `.dev-loop` only for mechanical completion or infrastructure failure.
+- Remove central daemon scheduling state only for mechanical completion or infrastructure failure.
 - Do not mark the selected issue `done`, `moot`, or `blocked` unless the appropriate action fragment already proved and performed that transition.
 
 ## Output verdict
