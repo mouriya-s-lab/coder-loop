@@ -150,6 +150,135 @@ describe("daemon", () => {
 		}
 	})
 
+	test("socket item.add rejects invalid issue and repo fields before db insert", async () => {
+		const fixture = await startFixture("item-add-validation", { schedulerEnabled: false })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "validation-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			const invalidRequests = [
+				{ issueNumber: 0, repoCwd: REPO_ROOT },
+				{ issueNumber: -1, repoCwd: REPO_ROOT },
+				{ issueNumber: 181, repoCwd: "relative/path" },
+				{ issueNumber: 182, repoCwd: resolve(REPO_ROOT, "missing-coder-loop-test-dir") },
+				{ issueNumber: 183, repoCwd: `${REPO_ROOT}\nchild` },
+				{ issueNumber: 184, repoCwd: `${REPO_ROOT}\u0000child` },
+			]
+
+			for (const args of invalidRequests) {
+				expectInvalid(await request(fixture, "item.add", { chainId, ...args }))
+			}
+
+			const listed = expectOk(await request(fixture, "item.list", { chainId })).items
+			expect(Array.isArray(listed)).toBe(true)
+			expect(listed).toHaveLength(0)
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("socket item.add acks before scheduler side effects finish", async () => {
+		const fixture = await startFixture("item-add-async-scheduler", {
+			schedulerIntervalMs: 50,
+			worktreeManager: async () => {
+				throw new Error("synthetic scheduler failure")
+			},
+		})
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "async-add-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			const added = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 185,
+				repoCwd: REPO_ROOT,
+			})).item)
+
+			expect(added).toMatchObject({ issueNumber: 185, status: "queued", repoCwd: REPO_ROOT })
+			await waitFor(async () => readItem(fixture.loopDataRoot, chainId, 185), (item) => item?.status === "queued")
+			await new Promise((resolveWait) => setTimeout(resolveWait, 120))
+			expect(record(expectOk(await request(fixture, "daemon.status")).daemon).running).toBe(true)
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("socket item.update validates status and dependency graph", async () => {
+		const fixture = await startFixture("item-update-validation", { schedulerEnabled: false })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "dependency-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			const first = record(expectOk(await request(fixture, "item.add", { chainId, issueNumber: 186, repoCwd: REPO_ROOT })).item)
+			const second = record(expectOk(await request(fixture, "item.add", { chainId, issueNumber: 187, repoCwd: REPO_ROOT })).item)
+			const firstId = numberValue(first.id)
+			const secondId = numberValue(second.id)
+
+			expectInvalid(await request(fixture, "item.update", { itemId: firstId, status: "garbage_state" }))
+			expectInvalid(await request(fixture, "item.update", { itemId: firstId, dependsOn: [firstId] }))
+
+			const updatedFirst = record(expectOk(await request(fixture, "item.update", { itemId: firstId, dependsOn: [secondId] })).item)
+			expect(record(updatedFirst.extra).dependsOn).toEqual([secondId])
+
+			expectInvalid(await request(fixture, "item.update", { itemId: secondId, dependsOn: [firstId] }))
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("socket item status validation follows the chain preset", async () => {
+		const fixture = await startFixture("item-status-preset", { schedulerEnabled: false })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "single-phase-chain",
+				preset: "single-phase-example",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+
+			const added = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 188,
+				repoCwd: REPO_ROOT,
+				status: "pending",
+			})).item)
+			expect(added).toMatchObject({ issueNumber: 188, status: "pending" })
+
+			expectInvalid(await request(fixture, "item.update", { itemId: numberValue(added.id), status: "changes_requested" }))
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("socket chain.delete reports already_deleted consistently", async () => {
+		const fixture = await startFixture("chain-delete-idempotency", { schedulerEnabled: false })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "delete-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+
+			const deleted = expectOk(await request(fixture, "chain.delete", { chainId }))
+			expect(deleted).toMatchObject({ alreadyDeleted: false, chain: { status: "deleted" } })
+
+			const deletedAgain = expectOk(await request(fixture, "chain.delete", { chainId }))
+			expect(deletedAgain).toMatchObject({ alreadyDeleted: true, chain: { status: "deleted" } })
+
+			const missing = await request(fixture, "chain.delete", { chainId: 99999 })
+			expect(missing.ok).toBe(false)
+			if (!missing.ok) expect(missing.error.code).toBe("not_found")
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("auto chain completion", async () => {
 		const fixture = await startFixture("completion")
 		try {
@@ -368,6 +497,7 @@ type Fixture = {
 type FixtureOptions = {
 	schedulerEnabled?: boolean
 	schedulerIntervalMs?: number
+	worktreeManager?: SchedulerWorktreeManager
 }
 
 async function startFixture(name: string, options: FixtureOptions = {}): Promise<Fixture> {
@@ -379,11 +509,11 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 	await writeFakeRunner(fakeRunner)
 
 	const schedulerEvents: SchedulerEvent[] = []
-	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
+	const worktreeManager: SchedulerWorktreeManager = options.worktreeManager ?? (async ({ chain, repoCwd }) => {
 		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
 		await mkdir(worktreePath, { recursive: true })
 		return worktreePath
-	}
+	})
 
 	const scheduler: SchedulerOptions["runner"] = {
 		kind: "claude",
@@ -426,6 +556,11 @@ async function request(fixture: Fixture, command: string, args = {}): Promise<Da
 function expectOk(response: DaemonResponse) {
 	if (!response.ok) throw new Error(`${response.error.code}: ${response.error.message}`)
 	return response.result
+}
+
+function expectInvalid(response: DaemonResponse): void {
+	expect(response.ok).toBe(false)
+	if (!response.ok) expect(response.error.code).toBe("invalid_request")
 }
 
 function record(value: unknown): Record<string, unknown> {
