@@ -274,7 +274,8 @@ describe("central chain/item CLI", () => {
 			const status = expectJsonOk(await runCli(["chain", "status", "schema-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 
 			expect(Object.keys(status).sort()).toEqual(["activeRuns", "chain", "items", "summary"])
-			expect(Object.keys(status.summary).sort()).toEqual(["activeSlots", "completion", "items", "umbrella"])
+			expect(Object.keys(status.summary).sort()).toEqual(["activeSlots", "completion", "items", "recovery", "umbrella"])
+			expect(status.summary.recovery).toEqual({ needed: false, staleInProgressItems: [] })
 			expect(status.chain).toMatchObject({
 				name: "schema-chain",
 				preset: "gh-issue-pr-iteration",

@@ -283,8 +283,16 @@ async function spawnSchedulerRun(
 	const child = spawn(runnerPlan.binary, runnerPlan.args, {
 		cwd: worktreePath,
 		stdio: ["ignore", "pipe", "pipe"],
+		detached: true,
 	})
 	const activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, child)
+	options.store.setCurrentRun({
+		chainId: chain.id,
+		phase,
+		runId,
+		startedAt,
+		extra: { slotKey: slot.key, itemId: item.id, repoCwd: item.repoCwd, worktreePath, pid: activeRun.pid, processGroupLeader: true },
+	})
 	await writeSchedulerRunStatus(options, {
 		runId,
 		chain,
@@ -387,11 +395,29 @@ function createRunTerminator(
 	return async (options = {}) => {
 		if (!requested && child.exitCode === null && child.signalCode === null) {
 			requested = true
-			child.kill("SIGTERM")
+			sendSignalToChildProcessGroup(child, "SIGTERM")
 			const closedBeforeForce = await promiseSettledWithin(closed, options.forceAfterMs ?? 5_000)
-			if (!closedBeforeForce && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
+			if (!closedBeforeForce && child.exitCode === null && child.signalCode === null) sendSignalToChildProcessGroup(child, "SIGKILL")
 		}
 		return await closed
+	}
+}
+
+function sendSignalToChildProcessGroup(child: ReturnType<typeof spawn>, signal: NodeJS.Signals): void {
+	const pid = child.pid
+	if (pid === undefined) return
+	if (process.platform !== "win32") {
+		try {
+			process.kill(-pid, signal)
+			return
+		} catch {
+			// Fall through to leader-only signalling for old non-detached children or ESRCH.
+		}
+	}
+	try {
+		child.kill(signal)
+	} catch {
+		// The process may have exited between the liveness check and signal delivery.
 	}
 }
 
@@ -577,6 +603,7 @@ async function writeSchedulerRunStatus(
 		issueNumber: input.item.issueNumber,
 		phase: input.phase,
 		pid: input.pid,
+		processGroupLeader: input.pid !== null,
 		repoCwd: input.item.repoCwd,
 		worktreePath: input.worktreePath,
 		startedAt: input.startedAt,
