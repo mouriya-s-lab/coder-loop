@@ -59,6 +59,59 @@ describe("daemon", () => {
 		}
 	})
 
+	test("socket chain.create is idempotent but rejects conflicting existing fields", async () => {
+		const fixture = await startFixture("chain-create-conflict", { schedulerEnabled: false })
+		try {
+			const first = record(expectOk(await request(fixture, "chain.create", {
+				name: "stable-chain",
+				repository: "mouriya-s-lab/coder-loop",
+				baseBranch: "main",
+				metadata: { runner: "codex" },
+			})).chain)
+
+			const repeated = record(expectOk(await request(fixture, "chain.create", {
+				name: "stable-chain",
+				repository: "mouriya-s-lab/coder-loop",
+				baseBranch: "main",
+				metadata: { runner: "codex" },
+			})).chain)
+			expect(repeated.id).toBe(first.id)
+			expect(repeated).toMatchObject({
+				repository: "mouriya-s-lab/coder-loop",
+				baseBranch: "main",
+				metadata: { runner: "codex" },
+			})
+
+			expectConflict(await request(fixture, "chain.create", {
+				name: "stable-chain",
+				repository: "mouriya-s-lab/different",
+				baseBranch: "main",
+				metadata: { runner: "codex" },
+			}))
+			expectConflict(await request(fixture, "chain.create", {
+				name: "stable-chain",
+				repository: "mouriya-s-lab/coder-loop",
+				baseBranch: "develop",
+				metadata: { runner: "codex" },
+			}))
+			expectConflict(await request(fixture, "chain.create", {
+				name: "stable-chain",
+				repository: "mouriya-s-lab/coder-loop",
+				baseBranch: "main",
+				metadata: { runner: "claude" },
+			}))
+
+			const listed = expectOk(await request(fixture, "chain.list")).chains
+			expect(Array.isArray(listed)).toBe(true)
+			if (!Array.isArray(listed)) throw new Error("expected chain list array")
+			expect(listed).toHaveLength(1)
+			const [listedChain] = listed
+			expect(record(listedChain)).toMatchObject({ repository: "mouriya-s-lab/coder-loop", baseBranch: "main", metadata: { runner: "codex" } })
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("socket chain.create rejects invalid names before db insert", async () => {
 		const fixture = await startFixture("chain-create-invalid", { schedulerEnabled: false })
 		try {
@@ -121,6 +174,11 @@ describe("daemon", () => {
 			)
 
 			expectInvalid(await request(fixture, "chain.create", args))
+			expectInvalid(await request(fixture, "chain.create", {
+				name: "status-field",
+				repository: "mouriya-s-lab/coder-loop",
+				status: "deleted",
+			}))
 			expect(Object.prototype).not.toHaveProperty("polluted")
 			const listed = expectOk(await request(fixture, "chain.list")).chains
 			expect(Array.isArray(listed)).toBe(true)
@@ -147,6 +205,28 @@ describe("daemon", () => {
 				expect(Array.isArray(listed)).toBe(true)
 				expect(listed).toHaveLength(0)
 			}
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("socket chain.create rejects oversized request and metadata payloads", async () => {
+		const fixture = await startFixture("chain-create-size-limits", { schedulerEnabled: false })
+		try {
+			expectTooLarge(await request(fixture, "chain.create", {
+				name: "metadata-too-large",
+				repository: "mouriya-s-lab/coder-loop",
+				metadata: { k: "x".repeat(17 * 1024) },
+			}))
+			expectTooLarge(await request(fixture, "chain.create", {
+				name: "line-too-large",
+				repository: "mouriya-s-lab/coder-loop",
+				metadata: { k: "x".repeat(1024 * 1024) },
+			}))
+
+			const listed = expectOk(await request(fixture, "chain.list")).chains
+			expect(Array.isArray(listed)).toBe(true)
+			expect(listed).toHaveLength(0)
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -185,6 +265,29 @@ describe("daemon", () => {
 			expect(Array.isArray(listed)).toBe(true)
 			expect(listed).toHaveLength(2)
 			expect(await pathExists(resolveChainRuntimePaths("valid-chain", { loopDataRoot }).sharedFile)).toBe(true)
+		} finally {
+			await daemon.stop()
+		}
+	})
+
+	test("daemon startup quarantines chain directories missing from DB", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-orphan-chain-directory`)
+		const loopDataRoot = resolve(root, "ld")
+		const orphanPath = resolve(loopDataRoot, "chains", "Z", "issues")
+		await mkdir(orphanPath, { recursive: true })
+
+		const daemon = await startCoderLoopDaemon({ loopDataRoot, shutdownGraceMs: 100, scheduler: { enabled: false } })
+		try {
+			expect(daemon.snapshot().running).toBe(true)
+			expect(await pathExists(resolve(loopDataRoot, "chains", "Z"))).toBe(false)
+			const entries = await readdir(resolve(loopDataRoot, "chains"))
+			const orphanDir = entries.find((entry) => entry.startsWith(".orphan-"))
+			expect(orphanDir).toBeDefined()
+			if (orphanDir === undefined) throw new Error("expected orphan quarantine directory")
+			expect(await pathExists(resolve(loopDataRoot, "chains", orphanDir, "Z", "issues"))).toBe(true)
+			const listed = expectOk(await sendDaemonRequest(daemon.snapshot().socketPath, daemonRequest("chain.list"))).chains
+			expect(Array.isArray(listed)).toBe(true)
+			expect(listed).toHaveLength(0)
 		} finally {
 			await daemon.stop()
 		}
@@ -767,6 +870,16 @@ function expectOk(response: DaemonResponse) {
 function expectInvalid(response: DaemonResponse): void {
 	expect(response.ok).toBe(false)
 	if (!response.ok) expect(response.error.code).toBe("invalid_request")
+}
+
+function expectConflict(response: DaemonResponse): void {
+	expect(response.ok).toBe(false)
+	if (!response.ok) expect(response.error.code).toBe("conflict")
+}
+
+function expectTooLarge(response: DaemonResponse): void {
+	expect(response.ok).toBe(false)
+	if (!response.ok) expect(response.error.code).toBe("request_too_large")
 }
 
 function record(value: unknown): Record<string, unknown> {
