@@ -33,7 +33,6 @@ const DEFAULT_CONFIG_FILE = ".coder-loop/runtime/config.json"
 const DEFAULT_CONFIG_FILE_TOML = ".coder-loop/runtime/config.toml"
 const DEFAULT_WORKFLOW_FILE = ".coder-loop/workflow.md"
 const DEFAULT_SHARED_FILE = ".coder-loop/runtime/shared.md"
-const DEFAULT_STATE_FILE = ".coder-loop/runtime/state.json"
 const DEFAULT_ISSUE_DIR = ".coder-loop/runtime/issues"
 const DEFAULT_EVIDENCE_DIR = ".coder-loop/runtime/evidence"
 const DEFAULT_LOG_DIR = ".coder-loop/runtime/logs"
@@ -43,8 +42,6 @@ const DEFAULT_ITERATION_RUNNER: AgentRunnerKind = "codex"
 export const CLAUDE_REVIEW_MODEL = "claude-opus-4-7"
 export const DEFAULT_ATTEMPT_TIMEOUT_SECONDS = 60 * 60
 export const ATTEMPT_TIMEOUT_KILL_MS = 5 * 1000
-
-const EXCLUDE_ENTRIES = [".dev-loop", ".dev-trace.txt", ".coder-loop/runtime"]
 
 let logStream: WriteStream | null = null
 
@@ -104,7 +101,7 @@ type RawArgs = {
 	targetCwd: string | null
 	configPath: string | null
 	workflowPath: string | null
-	statePath: string | null
+	stateFile: string | null
 	loopDataRoot: string | null
 	chainName: string | null
 	repository: string | null
@@ -325,15 +322,6 @@ const StatusConfigBoundary = arkType({
 
 type StatusConfigInput = typeof StatusConfigBoundary.infer
 
-const StatusStateBoundary = arkType({
-	version: "number",
-	queue: "object[]",
-	"repository?": "string|null",
-	"baseBranch?": "string|null",
-	"recentRuns?": "unknown[]",
-	"current?": "object|null",
-})
-
 const TerminatedBoundary = arkType.or(
 	{ kind: arkType.unit("clean") },
 	{ kind: arkType.unit("signal"), name: "string" },
@@ -374,32 +362,10 @@ const SessionEntryBoundary = arkType({
 	log: "string",
 })
 
-const QueueItemBaseBoundary = arkType({
-	status: "string",
-	"attempts?": "number|null",
-	"title?": "string|null",
-	"priority?": "string|null",
-	"branch?": "string|null",
-	"pr?": "number|null",
-	"lastRunId?": "string|null",
-	"issueFile?": "string|null",
-	"evidenceDir?": "string|null",
-	"agentCwd?": "string|null",
-	"runner?": arkType.or(AgentRunnerKindBoundary, "null"),
-})
-
 const QUEUE_ITEM_BASE_KEYS = new Set([
 	"status", "attempts", "title", "priority", "branch", "pr",
 	"lastRunId", "issueFile", "evidenceDir", "agentCwd", "runner",
 ])
-
-const CurrentRunBaseBoundary = arkType({
-	phase: "string",
-	runId: "string",
-	startedAt: "string",
-})
-
-const CURRENT_RUN_BASE_KEYS = new Set(["phase", "runId", "startedAt"])
 
 const PresetPhaseTriggerBoundary = arkType({
 	afterPhase: "string",
@@ -451,13 +417,11 @@ export type LoopOptions = {
 	configPath: string
 	workflowPath: string
 	sharedContextPath: string
-	statePath: string
+	stateFile: string
 	issueDir: string
 	evidenceRootDir: string
 	logDir: string
 	loopDataRoot: string | null
-	loopFile: string
-	traceFile: string
 	logFile: string
 	repository: string | null
 	baseBranch: string | null
@@ -576,12 +540,10 @@ export type StatusTargetSnapshot = {
 	config: StatusResourceSnapshot
 	workflowPath: string
 	sharedContextPath: string
-	statePath: string
+	stateFile: string
 	issueDir: string
 	evidenceRootDir: string
 	logDir: string
-	traceFile: string
-	loopFile: string
 	repository: string | null
 	baseBranch: string | null
 	worktree: boolean
@@ -677,20 +639,6 @@ export type StatusEventsSnapshot = {
 	error: string | null
 }
 
-export type StatusLoopFileSnapshot = {
-	path: string
-	exists: boolean
-	startedAt: string | null
-	pid: number | null
-	pidAlive: boolean | null
-	log: string | null
-	cwd: string | null
-	statePath: string | null
-	command: string | null
-	requireBrowserEvidence: boolean | null
-	raw: string | null
-}
-
 export type StatusProcessInfo = {
 	pid: number
 	ppid: number | null
@@ -698,11 +646,10 @@ export type StatusProcessInfo = {
 	cwd: string | null
 	matchesTarget: boolean
 	alive: boolean
-	source: "loopFile" | "ps"
+	source: "ps"
 }
 
 export type StatusProcessSnapshot = {
-	loopFile: StatusLoopFileSnapshot
 	live: StatusProcessInfo[]
 	scanError: string | null
 }
@@ -863,14 +810,11 @@ const RUNTIME_BINDING_KEYS = [
 	"agentCwd",
 	"workflowPath",
 	"sharedContextPath",
-	"statePath",
 	"currentIssueFile",
 	"issueDir",
 	"evidenceDir",
 	"evidenceRootDir",
 	"logDir",
-	"traceFile",
-	"loopFile",
 	"presetDir",
 	"fragmentIndex",
 	"runIdGeneration",
@@ -889,14 +833,11 @@ export type RuntimeBindings = Record<RuntimeBindingKey, string>
 
 export type RuntimeBindingPaths = {
 	sharedContextPath: string
-	statePath: string
 	currentIssueFile: string
 	issueDir: string
 	evidenceDir: string
 	evidenceRootDir: string
 	logDir: string
-	traceFile: string
-	loopFile: string
 }
 
 export type ConfigBindings = {
@@ -917,7 +858,7 @@ function parseArgs(): RawArgs {
 		targetCwd: null,
 		configPath: null,
 		workflowPath: null,
-		statePath: null,
+		stateFile: null,
 		loopDataRoot: null,
 		chainName: null,
 		repository: null,
@@ -953,7 +894,7 @@ function parseArgs(): RawArgs {
 				if (inlineValue === null) index++
 				break
 			case "--state":
-				raw.statePath = readFlagValue(args, index, inlineValue, name)
+				raw.stateFile = readFlagValue(args, index, inlineValue, name)
 				if (inlineValue === null) index++
 				break
 			case "--loop-data-root":
@@ -1823,7 +1764,7 @@ async function main() {
 		worktree: rawArgs.worktree,
 		maxIterations: rawArgs.maxIterations,
 		workflowPath: rawArgs.workflowPath,
-		statePath: rawArgs.statePath,
+		stateFile: rawArgs.stateFile,
 	})
 	const options = loadedRuntime.options
 
@@ -1897,7 +1838,6 @@ async function main() {
 		cleanupStaleWorktrees(options.targetCwd, activeIds, log)
 	}
 
-	await ensureGitExclude(options.targetCwd)
 	let stopRequested = false
 	const requestStop = (signal: NodeJS.Signals): void => {
 		stopRequested = true
@@ -1908,7 +1848,7 @@ async function main() {
 
 	let workIteration = 0
 	const idleSleepMs = resolveIdleSleepMs()
-	const lockPath = reviewOnEmptyLockPath(options.statePath)
+	const lockPath = reviewOnEmptyLockPath(options.stateFile)
 	log(`Idle sleep: ${idleSleepMs}ms (override via CODER_LOOP_IDLE_SLEEP_MS)`)
 	log(`Review-on-empty lock: ${lockPath}`)
 
@@ -2291,11 +2231,11 @@ async function runReview(
 function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, config: LoopConfig, preset: Preset): LoopOptions {
 	const workflowPath = resolveFrom(targetCwd, raw.workflowPath ?? config.workflowFile ?? DEFAULT_WORKFLOW_FILE)
 	const sharedContextPath = resolveFrom(targetCwd, config.sharedContextFile ?? DEFAULT_SHARED_FILE)
-	const statePath = resolveFrom(targetCwd, raw.statePath ?? config.stateFile ?? DEFAULT_STATE_FILE)
+	const loopDataRoot = raw.loopDataRoot ?? config.loopDataRoot
+	const stateFile = resolveFrom(targetCwd, raw.stateFile ?? config.stateFile ?? resolveLoopDataPaths(loopDataRootOption(loopDataRoot)).dbFile)
 	const issueDir = resolveFrom(targetCwd, config.issueDir ?? DEFAULT_ISSUE_DIR)
 	const evidenceRootDir = resolveFrom(targetCwd, config.evidenceDir ?? DEFAULT_EVIDENCE_DIR)
 	const logDir = resolveFrom(targetCwd, config.logDir ?? DEFAULT_LOG_DIR)
-	const loopDataRoot = raw.loopDataRoot ?? config.loopDataRoot
 	const repository = raw.repository ?? config.repository
 	const maxIterations = raw.once ? 1 : (raw.maxIterations ?? Number.POSITIVE_INFINITY)
 	const requireBrowserEvidence = raw.requireBrowserEvidence ?? config.requireAgentBrowserScreenshots ?? false
@@ -2313,13 +2253,11 @@ function buildOptions(targetCwd: string, configPath: string, raw: RawArgs, confi
 		configPath,
 		workflowPath,
 		sharedContextPath,
-		statePath,
+		stateFile,
 		issueDir,
 		evidenceRootDir,
 		logDir,
 		loopDataRoot,
-		loopFile: resolve(targetCwd, ".dev-loop"),
-		traceFile: resolve(targetCwd, ".dev-trace.txt"),
 		logFile: chainPaths === null ? resolve(logDir, `coder-loop-${process.pid}.${timestamp}.log`) : chainPaths.daemonLogFile(timestamp),
 		repository,
 		baseBranch,
@@ -2354,7 +2292,7 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 			worktree: false,
 			maxIterations: null,
 			workflowPath: null,
-			statePath: null,
+			stateFile: null,
 		})
 	} catch (error) {
 		const targetCwd = resolve(args.targetCwd)
@@ -2362,7 +2300,7 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 		return makeUnavailableStatusSnapshot({
 			target: makeStatusTargetSnapshot(targetCwd, dbFile, args.repository, null, { kind: "missing", error: errorMessage(error) }),
 			stateKind: "missing-state",
-			statePath: dbFile,
+			stateFile: dbFile,
 			errorPath: "chain",
 			errorMessage: errorMessage(error),
 		})
@@ -2426,35 +2364,6 @@ async function readStatusPreset(config: LoopConfig, targetCwd: string): Promise<
 	}
 }
 
-async function readStatusState(path: string): Promise<StatusReadResult<LoopState>> {
-	try {
-		const raw = await readFile(path, "utf-8")
-		return { kind: "ok", value: parseStateText(raw) }
-	} catch (error) {
-		if (isNodeError(error) && error.code === "ENOENT") return { kind: "missing", message: `missing state file: ${path}` }
-		return { kind: "invalid", message: errorMessage(error) }
-	}
-}
-
-function makeStatusRawArgs(args: StatusCommandArgs): RawArgs {
-	return {
-		maxIterations: null,
-		targetCwd: args.targetCwd,
-		configPath: args.configPath,
-		workflowPath: null,
-		statePath: null,
-		loopDataRoot: args.loopDataRoot ?? null,
-		chainName: args.chainName ?? null,
-		repository: args.repository,
-		requireBrowserEvidence: null,
-		once: false,
-		dryRun: false,
-		checkRuntime: false,
-		worktree: false,
-		baseBranch: null,
-	}
-}
-
 function makeStatusTargetSnapshot(
 	targetCwd: string,
 	configPath: string,
@@ -2476,12 +2385,10 @@ function makeStatusTargetSnapshot(
 		config,
 		workflowPath: options?.workflowPath ?? resolve(targetCwd, DEFAULT_WORKFLOW_FILE),
 		sharedContextPath: options?.sharedContextPath ?? resolve(runtimeRoot, "shared.md"),
-		statePath: options?.statePath ?? resolve(runtimeRoot, "state.json"),
+		stateFile: options?.stateFile ?? resolve(runtimeRoot, "state.json"),
 		issueDir: options?.issueDir ?? resolve(runtimeRoot, "issues"),
 		evidenceRootDir: options?.evidenceRootDir ?? resolve(runtimeRoot, "evidence"),
 		logDir: options?.logDir ?? resolve(runtimeRoot, "logs"),
-		traceFile: options?.traceFile ?? resolve(targetCwd, ".dev-trace.txt"),
-		loopFile: options?.loopFile ?? resolve(targetCwd, ".dev-loop"),
 		repository: options?.repository ?? repositoryOverride,
 		baseBranch: options?.baseBranch ?? null,
 		worktree: options?.worktree ?? false,
@@ -2532,7 +2439,7 @@ function buildStatusRunnerDefaultsSnapshot(options: LoopOptions | null): StatusR
 function makeUnavailableStatusSnapshot(input: {
 	target: StatusTargetSnapshot
 	stateKind: StatusStateKind
-	statePath: string
+	stateFile: string
 	errorPath: string
 	errorMessage: string
 }): CoderLoopStatusSnapshot {
@@ -2542,7 +2449,7 @@ function makeUnavailableStatusSnapshot(input: {
 			kind: input.stateKind,
 			ok: false,
 			loaded: false,
-			path: input.statePath,
+			path: input.stateFile,
 			version: null,
 			repository: null,
 			baseBranch: null,
@@ -2550,27 +2457,11 @@ function makeUnavailableStatusSnapshot(input: {
 			error: input.errorMessage,
 		},
 		queue: { total: 0, byStatus: {}, continuable: 0, terminal: 0, selected: null },
-		current: { run: null, id: null, item: null, runner: null, phaseStatus: null },
-		events: { runId: null, path: null, exists: false, recent: [], latest: null, error: null },
-		processes: {
-			loopFile: {
-				path: input.target.loopFile,
-				exists: false,
-				startedAt: null,
-				pid: null,
-				pidAlive: null,
-				log: null,
-				cwd: null,
-				statePath: null,
-				command: null,
-				requireBrowserEvidence: null,
-				raw: null,
-			},
-			live: [],
-			scanError: null,
-		},
+			current: { run: null, id: null, item: null, runner: null, phaseStatus: null },
+			events: { runId: null, path: null, exists: false, recent: [], latest: null, error: null },
+			processes: { live: [], scanError: null },
+		}
 	}
-}
 
 function flattenExtraReplacer(_key: string, value: unknown): unknown {
 	if (!isObjectRecord(value) || !("extra" in value) || !isJsonObject(value.extra)) return value
@@ -2710,86 +2601,12 @@ function parseRecentJsonLines(raw: string, limit: number): JsonValue[] {
 	})
 }
 
-async function buildStatusProcessSnapshot(options: LoopOptions): Promise<StatusProcessSnapshot> {
-	const loopFile = await readStatusLoopFile(options.loopFile)
-	const live: StatusProcessInfo[] = []
-	if (loopFile.pid !== null) {
-		live.push({
-			pid: loopFile.pid,
-			ppid: null,
-			command: null,
-			cwd: loopFile.cwd,
-			matchesTarget: loopFile.cwd === options.targetCwd,
-			alive: loopFile.pidAlive === true,
-			source: "loopFile",
-		})
-	}
+function buildCentralStatusProcessSnapshot(options: LoopOptions): StatusProcessSnapshot {
 	const scan = scanLoopProcesses(options.targetCwd)
 	return {
-		loopFile,
-		live: mergeProcessSnapshots(live, scan.kind === "ok" ? scan.value : []),
+		live: scan.kind === "ok" ? scan.value : [],
 		scanError: scan.kind === "ok" ? null : scan.message,
 	}
-}
-
-async function readStatusLoopFile(path: string): Promise<StatusLoopFileSnapshot> {
-	try {
-		const raw = await readFile(path, "utf-8")
-		const parsed = parseLoopFile(raw)
-		const pidAlive = parsed.pid === null ? null : isPidAlive(parsed.pid)
-		return { path, exists: true, ...parsed, pidAlive, raw }
-	} catch (error) {
-		if (isNodeError(error) && error.code === "ENOENT") {
-			return { path, exists: false, startedAt: null, pid: null, pidAlive: null, log: null, cwd: null, statePath: null, command: null, requireBrowserEvidence: null, raw: null }
-		}
-		return { path, exists: true, startedAt: null, pid: null, pidAlive: null, log: null, cwd: null, statePath: null, command: null, requireBrowserEvidence: null, raw: null }
-	}
-}
-
-function parseLoopFile(raw: string): Omit<StatusLoopFileSnapshot, "path" | "exists" | "pidAlive" | "raw"> {
-	const fields: Record<string, string> = {}
-	for (const line of raw.split("\n")) {
-		const separator = line.indexOf(":")
-		if (separator <= 0) continue
-		fields[line.slice(0, separator).trim()] = line.slice(separator + 1).trim()
-	}
-	const pid = fields.pid === undefined || fields.pid === "" ? null : Number(fields.pid)
-	return {
-		startedAt: fields.started ?? null,
-		pid: pid === null || Number.isInteger(pid) ? pid : null,
-		log: fields.log ?? null,
-		cwd: fields.cwd ?? null,
-		statePath: fields.state ?? null,
-		command: fields.command ?? null,
-		requireBrowserEvidence: parseLoopFileBoolean(fields.requireBrowserEvidence),
-	}
-}
-
-function buildCentralStatusProcessSnapshot(options: LoopOptions): StatusProcessSnapshot {
-	return {
-		loopFile: {
-			path: options.loopFile,
-			exists: false,
-			startedAt: null,
-			pid: null,
-			pidAlive: null,
-			log: null,
-			cwd: null,
-			statePath: null,
-			command: null,
-			requireBrowserEvidence: null,
-			raw: null,
-		},
-		live: [],
-		scanError: null,
-	}
-}
-
-function parseLoopFileBoolean(value: string | undefined): boolean | null {
-	if (value === undefined) return null
-	if (value === "true") return true
-	if (value === "false") return false
-	return null
 }
 
 function scanLoopProcesses(targetCwd: string): StatusReadResult<StatusProcessInfo[]> {
@@ -2824,12 +2641,6 @@ function scanLoopProcesses(targetCwd: string): StatusReadResult<StatusProcessInf
 	return { kind: "ok", value: live }
 }
 
-function mergeProcessSnapshots(left: StatusProcessInfo[], right: StatusProcessInfo[]): StatusProcessInfo[] {
-	const byKey = new Map<string, StatusProcessInfo>()
-	for (const entry of [...left, ...right]) byKey.set(`${entry.source}:${entry.pid}`, entry)
-	return [...byKey.values()]
-}
-
 function isPidAlive(pid: number): boolean {
 	try {
 		process.kill(pid, 0)
@@ -2858,30 +2669,13 @@ type DaemonStartResult =
 			stderrPath: string
 			requireBrowserEvidence: boolean
 	  }
-	| {
-			action: "start"
-			target: string
-			alreadyRunning: true
-			pid: number
-			source: StatusProcessInfo["source"]
-			loopFile: StatusLoopFileSnapshot
-			command: string | null
-			requireBrowserEvidence: boolean | null
-	  }
-
-type DaemonStopPlan = {
-	action: "stop"
-	target: string
-	loopFile: string
-	loopFileExists: boolean
-	pid: number | null
-	pidAlive: boolean | null
-}
-
-type DaemonStopResult = DaemonStopPlan & {
-	stopped: true
-	pidExited: boolean | null
-}
+		| {
+				action: "start"
+				target: string
+				alreadyRunning: true
+				pid: number
+				source: StatusProcessInfo["source"]
+		  }
 
 export function buildDaemonStartPlan(args: Extract<DaemonCommandArgs, { action: "start" }>): DaemonStartPlan {
 	const targetCwd = resolve(args.targetCwd)
@@ -2979,17 +2773,14 @@ async function executeDaemonStart(args: Extract<DaemonCommandArgs, { action: "st
 	})
 	const live = findOwnedLiveProcess(current)
 	if (live !== null) {
-		return {
-			action: "start",
-			target: plan.targetCwd,
-			alreadyRunning: true,
-			pid: live.pid,
-			source: live.source,
-			loopFile: current.processes.loopFile,
-			command: current.processes.loopFile.command,
-			requireBrowserEvidence: current.processes.loopFile.requireBrowserEvidence,
+			return {
+				action: "start",
+				target: plan.targetCwd,
+				alreadyRunning: true,
+				pid: live.pid,
+				source: live.source,
+			}
 		}
-	}
 
 	await mkdir(dirname(plan.stdoutPath), { recursive: true })
 	const stdoutFd = openSync(plan.stdoutPath, "a")
@@ -3036,33 +2827,6 @@ async function runDaemonStopCommand(args: Extract<DaemonCommandArgs, { action: "
 	}, null, "\t") + "\n")
 }
 
-function buildDaemonStopPlan(snapshot: CoderLoopStatusSnapshot): DaemonStopPlan {
-	const loopFile = snapshot.processes.loopFile
-	return {
-		action: "stop",
-		target: snapshot.target.cwd,
-		loopFile: loopFile.path,
-		loopFileExists: loopFile.exists,
-		pid: loopFile.pid,
-		pidAlive: loopFile.pidAlive,
-	}
-}
-
-async function executeDaemonStop(plan: DaemonStopPlan): Promise<DaemonStopResult> {
-	if (plan.loopFileExists) await removeLoopFile(plan.loopFile)
-	let pidExited: boolean | null = null
-	if (plan.pid !== null && plan.pidAlive === true) {
-		try {
-			process.kill(plan.pid, "SIGTERM")
-			pidExited = await waitForPidExit(plan.pid, 5_000)
-		} catch {
-			// The loop may have exited after status was read; removing the loop file is the durable stop signal.
-			pidExited = true
-		}
-	}
-	return { ...plan, stopped: true, pidExited }
-}
-
 async function runDaemonRestartCommand(args: Extract<DaemonCommandArgs, { action: "restart" }>): Promise<void> {
 	const runtime = await loadTargetRuntime(daemonCommandToTargetLookupArgs(args))
 	if (args.dryRun) {
@@ -3101,7 +2865,7 @@ function daemonCommandToTargetLookupArgs(args: Extract<DaemonCommandArgs, { acti
 		worktree: "worktree" in args ? args.worktree : false,
 		maxIterations: "maxIterations" in args ? args.maxIterations : null,
 		workflowPath: null,
-		statePath: null,
+		stateFile: null,
 	}
 }
 
@@ -3131,7 +2895,7 @@ type QueueUnblockCommandResult = {
 	action: "queue.unblock"
 	target: string
 	repository: string | null
-	statePath: string
+	stateFile: string
 	issue: string
 	dryRun: boolean
 	mutation: QueueUnblockMutationOutcome
@@ -3217,7 +2981,7 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 		action: "queue.unblock",
 		target: options.targetCwd,
 		repository: options.repository,
-		statePath: options.statePath,
+		stateFile: options.stateFile,
 		issue,
 		dryRun: args.dryRun,
 		mutation,
@@ -3254,7 +3018,7 @@ type TargetChainLookupArgs = {
 	worktree: boolean
 	maxIterations: number | null
 	workflowPath: string | null
-	statePath: string | null
+	stateFile: string | null
 }
 
 type LoadedTargetRuntime = {
@@ -3278,7 +3042,7 @@ async function loadTargetRuntime(args: TargetChainLookupArgs): Promise<LoadedTar
 		targetCwd,
 		configPath: args.configPath,
 		workflowPath: args.workflowPath,
-		statePath: args.statePath,
+		stateFile: args.stateFile,
 		loopDataRoot: effectiveLoopDataRoot,
 		chainName: chain.name,
 		repository: args.repository,
@@ -3326,7 +3090,7 @@ async function loadLoopOptionsForTarget(
 		worktree: extra.worktree ?? false,
 		maxIterations: extra.maxIterations ?? null,
 		workflowPath: extra.workflowPath ?? null,
-		statePath: extra.statePath ?? null,
+		stateFile: extra.stateFile ?? null,
 	})
 	return loaded.options
 }
@@ -3946,70 +3710,6 @@ async function assertReadable(path: string, label: string): Promise<void> {
 	}
 }
 
-async function loadState(path: string): Promise<LoopState> {
-	const raw = await readFile(path, "utf-8")
-	return parseStateText(raw)
-}
-
-function parseStateText(raw: string): LoopState {
-	const parsed: unknown = JSON.parse(raw)
-	const root = assertArk(StatusStateBoundary, parsed, "state")
-	return {
-		version: root.version,
-		queue: root.queue.map((item, index) => parseQueueItem(item, `state.queue[${index}]`)),
-		repository: root.repository ?? null,
-		baseBranch: root.baseBranch ?? null,
-		recentRuns: (root.recentRuns ?? []).filter((entry): entry is JsonValue => isJsonValue(entry)),
-		current: parseCurrent(root.current),
-	}
-}
-
-function parseQueueItem(value: object, label: string): QueueItem {
-	const validated = assertArk(QueueItemBaseBoundary, value, label)
-	const extra: JsonObject = {}
-	if (isObjectRecord(value)) {
-		for (const [key, val] of Object.entries(value)) {
-			if (!QUEUE_ITEM_BASE_KEYS.has(key) && isJsonValue(val)) {
-				extra[key] = val
-			}
-		}
-	}
-	const runner = validated.runner ?? null
-	return {
-		status: validated.status,
-		attempts: validated.attempts ?? null,
-		title: validated.title ?? null,
-		priority: validated.priority ?? null,
-		branch: validated.branch ?? null,
-		pr: validated.pr ?? null,
-		lastRunId: validated.lastRunId ?? null,
-		issueFile: validated.issueFile ?? null,
-		evidenceDir: validated.evidenceDir ?? null,
-		agentCwd: validated.agentCwd ?? null,
-		runner: runner === "claude" || runner === "codex" ? runner : null,
-		extra,
-	}
-}
-
-function parseCurrent(value: object | null | undefined): CurrentRun | null {
-	if (value === undefined || value === null) return null
-	const validated = assertArk(CurrentRunBaseBoundary, value, "state.current")
-	const extra: JsonObject = {}
-	if (isObjectRecord(value)) {
-		for (const [key, val] of Object.entries(value)) {
-			if (!CURRENT_RUN_BASE_KEYS.has(key) && isJsonValue(val)) {
-				extra[key] = val
-			}
-		}
-	}
-	return {
-		phase: validated.phase,
-		runId: validated.runId,
-		startedAt: validated.startedAt,
-		extra,
-	}
-}
-
 function flattenQueueItem(item: QueueItem): JsonObject {
 	const result: JsonObject = { ...item.extra }
 	result.status = item.status
@@ -4254,40 +3954,6 @@ function resolveChainScopedPath(chainRoot: string, expectedRoot: string, path: s
 	return resolved
 }
 
-async function saveState(path: string, state: LoopState): Promise<void> {
-	await writeFile(path, serializeState(state))
-}
-
-export type ReconcileStateOutcome =
-	| { restored: false }
-	| { restored: true; reason: "missing" | "modified" }
-
-export async function reconcileStateAfterIter(
-	path: string,
-	expectedSerialized: string,
-	logFn: (message: string) => void = log,
-): Promise<ReconcileStateOutcome> {
-	let onDisk: string
-	try {
-		onDisk = await readFile(path, "utf-8")
-	} catch (error) {
-		if (isNodeError(error) && error.code === "ENOENT") {
-			logFn(`WARN: state.json missing after iteration (iter likely did 'git reset --hard' / 'git merge' that wiped runtime). Restoring from in-memory snapshot: ${path}`)
-			await mkdir(dirname(path), { recursive: true })
-			await writeFile(path, expectedSerialized)
-			return { restored: true, reason: "missing" }
-		}
-		throw error
-	}
-	if (onDisk !== expectedSerialized) {
-		logFn(`WARN: state.json was modified during iteration (iter likely did 'git reset --hard' / 'git merge' that reverted runtime). Restoring from in-memory snapshot: ${path}`)
-		await mkdir(dirname(path), { recursive: true })
-		await writeFile(path, expectedSerialized)
-		return { restored: true, reason: "modified" }
-	}
-	return { restored: false }
-}
-
 export function selectIssue(state: LoopState, options: LoopOptions, chain?: ChainRecord): SelectedIssue | null {
 	const preset = options.preset
 	const continuable = preset.statuses.continuable
@@ -4442,19 +4108,14 @@ export function buildCentralRuntimeBindingPaths(input: {
 	evidenceDir: string | null
 }): RuntimeBindingPaths {
 	const rootOptions = loopDataRootOption(input.options.loopDataRoot)
-	const loopData = resolveLoopDataPaths(rootOptions)
 	const chainPaths = resolveChainRuntimePaths(input.chain.name, rootOptions)
-	const firstPhase = input.options.preset.phases[0]?.name ?? "phase"
 	return {
 		sharedContextPath: chainPaths.sharedFile,
-		statePath: loopData.dbFile,
 		currentIssueFile: input.currentIssueFile ?? "",
 		issueDir: chainPaths.issuesDir,
 		evidenceDir: input.evidenceDir ?? chainPaths.evidenceDir,
 		evidenceRootDir: chainPaths.evidenceDir,
 		logDir: chainPaths.runsDir,
-		traceFile: chainPaths.runPhaseStdoutFile(input.runId, firstPhase),
-		loopFile: resolve(chainPaths.chainRoot, ".dev-loop"),
 	}
 }
 
@@ -4470,14 +4131,11 @@ export function buildRuntimeBindings(input: {
 }): RuntimeBindings {
 	const paths = input.paths ?? {
 		sharedContextPath: input.options.sharedContextPath,
-		statePath: input.options.statePath,
 		currentIssueFile: input.currentIssueFile ?? "",
 		issueDir: input.options.issueDir,
 		evidenceDir: input.evidenceDir ?? input.options.evidenceRootDir,
 		evidenceRootDir: input.options.evidenceRootDir,
 		logDir: input.options.logDir,
-		traceFile: input.options.traceFile,
-		loopFile: input.options.loopFile,
 	}
 	return {
 		runId: input.runId,
@@ -4485,14 +4143,11 @@ export function buildRuntimeBindings(input: {
 		agentCwd: input.agentCwd,
 		workflowPath: input.options.workflowPath,
 		sharedContextPath: paths.sharedContextPath,
-		statePath: paths.statePath,
 		currentIssueFile: paths.currentIssueFile,
 		issueDir: paths.issueDir,
 		evidenceDir: paths.evidenceDir,
 		evidenceRootDir: paths.evidenceRootDir,
 		logDir: paths.logDir,
-		traceFile: paths.traceFile,
-		loopFile: paths.loopFile,
 		presetDir: input.options.preset.presetDir,
 		fragmentIndex: renderFragmentIndex(input.options.preset),
 		runIdGeneration: input.issueRun.runIdGeneration,
@@ -5429,18 +5084,6 @@ function shellQuote(value: string): string {
 	return `'${value.replaceAll("'", `'\\''`)}'`
 }
 
-async function ensureGitExclude(cwd: string): Promise<void> {
-	const excludePath = resolve(cwd, ".git", "info", "exclude")
-	try {
-		const content = await readFile(excludePath, "utf-8")
-		const lines = content.split("\n")
-		const missing = EXCLUDE_ENTRIES.filter((entry) => !lines.includes(entry))
-		if (missing.length > 0) await appendFile(excludePath, "\n" + missing.join("\n") + "\n")
-	} catch {
-		// No .git/info/exclude available; non-git targets can still run.
-	}
-}
-
 function agentOutputPath(options: LoopOptions, runId: string, label: AgentLabel): string {
 	return resolve(options.logDir, runId, label, "stdout.jsonl")
 }
@@ -5735,8 +5378,8 @@ function makeRunId(id: string | null): string {
 	return id === null ? `run-${timestamp}-no-issue` : `run-${timestamp}-issue-${id}`
 }
 
-export function reviewOnEmptyLockPath(statePath: string): string {
-	return resolve(dirname(statePath), REVIEW_ON_EMPTY_LOCK_FILE)
+export function reviewOnEmptyLockPath(stateFile: string): string {
+	return resolve(dirname(stateFile), REVIEW_ON_EMPTY_LOCK_FILE)
 }
 
 export function serializeReviewOnEmptyLock(runId: string, acquiredAt: Date): string {
@@ -5758,15 +5401,6 @@ async function sleep(ms: number): Promise<void> {
 
 async function exists(path: string): Promise<boolean> {
 	return Bun.file(path).exists()
-}
-
-async function removeLoopFile(path: string): Promise<void> {
-	try {
-		await Bun.file(path).delete()
-	} catch (error) {
-		if (isNodeError(error) && error.code === "ENOENT") return
-		throw error
-	}
 }
 
 function log(message: string): void {

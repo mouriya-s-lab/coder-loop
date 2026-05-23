@@ -71,7 +71,7 @@ If you are doing research-only this iteration (no code), the intent statement st
 - Make a small direct change that closes exactly the selected issue.
 - Do not batch multiple issues.
 - Do not weaken tests.
-- Do not stage `.coder-loop/runtime/`, `.dev-loop`, or `.dev-trace.txt`.
+- Do not stage `loop-data runtime artifacts`, central daemon scheduling state, or run stdout log.
 - Do not create child issues, link sub-issues, merge PRs, close issues, or write final local state.
 - Preserve unrelated dirty files.
 

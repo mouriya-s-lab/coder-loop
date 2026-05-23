@@ -11,7 +11,7 @@ Record the planning outcome in a form the operator (and any future planning re-i
 
 ## Procedure
 
-1. Write `{{TARGET_CWD}}/.coder-loop/runtime/logs/<runId>.plan.handoff.md` (or append to `<runId>.plan.txt` — the slash command shell will decide the exact path).
+1. Write `{{TARGET_CWD}}/loop-data/chains/<chain>/runs/<runId>.plan.handoff.md` (or append to `<runId>.plan.txt` — the slash command shell will decide the exact path).
 
 2. Required handoff sections:
 
@@ -67,7 +67,7 @@ Record the planning outcome in a form the operator (and any future planning re-i
 
 4. **GitHub side**: do not post the handoff to any issue. Planning audit trail is local. The operator reads the handoff file directly; the slash command shell may also print a summary to stdout.
 
-5. **State side**: if planning landed `queue_initialized`, the actionable queue is already in `state.json` (from `plan/init-queue`). No further state mutation needed here.
+5. **State side**: if planning landed `queue_initialized`, the actionable queue is already in `central state DB` (from `plan/init-queue`). No further state mutation needed here.
 
 ## Failure handling
 

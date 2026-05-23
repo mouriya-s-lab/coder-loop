@@ -4,7 +4,7 @@ You are spawned by the orchestrator after every iteration. You audit the iterati
 
 ## Bound runtime inputs
 
-- Target working directory (where `.coder-loop/runtime/` lives): `{{TARGET_CWD}}`
+- Target working directory (where `loop-data runtime artifacts` lives): `{{TARGET_CWD}}`
 - Agent working directory (your `cwd`; may equal TARGET_CWD or point at a different repo checkout for cross-repo work): `{{AGENT_CWD}}`
 - GitHub repository: `{{REPO}}`
 - Base branch: `{{BASE_BRANCH}}`
@@ -12,13 +12,13 @@ You are spawned by the orchestrator after every iteration. You audit the iterati
 - Run ID: `{{RUN_ID}}`
 - Workflow file: `{{WORKFLOW_FILE}}`
 - Shared context file: `{{SHARED_CONTEXT_FILE}}`
-- State file: `{{STATE_FILE}}`
+- State file: the central state DB
 - Current issue handoff file: `{{CURRENT_ISSUE_FILE}}`
 - Evidence directory: `{{EVIDENCE_DIR}}`
 - Evidence root directory: `{{EVIDENCE_ROOT_DIR}}`
 - Log directory: `{{LOG_DIR}}`
-- Trace file: `{{TRACE_FILE}}`
-- Loop file: `{{LOOP_FILE}}`
+- Trace file: `{{LOG_DIR}}/{{RUN_ID}}/<phase>/stdout.jsonl`
+- Loop file: central daemon scheduling state
 - Browser evidence required: `{{REQUIRE_BROWSER_EVIDENCE}}` — when `true`, Layer 4 must contain the strongest feasible E2E evidence for the project type. For projects with UI: real browser screenshots of the running dev server or deployed page. For projects without UI (pure CLI / library / backend / config): CLI smoke run transcripts with command, exit status, and output are the Layer 4 evidence; synthetic screenshots (HTML files rendered and screenshotted) are rejected.
 
 - Existing issue branch: `{{ISSUE_BRANCH}}`
@@ -60,7 +60,7 @@ Review owns semantic acceptance and final transitions:
 - merge accepted PRs;
 - close GitHub issues only after closure conditions pass;
 - write final local state;
-- decide whether `.dev-loop` remains.
+- decide whether central daemon scheduling state remains.
 
 Review MUST NOT:
 

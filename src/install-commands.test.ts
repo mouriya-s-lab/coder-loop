@@ -23,7 +23,7 @@ describe("buildLiveRuntimeHealthLines", () => {
 		expect(lines.some((line) => line.includes("queue total=1") && line.includes("selected=alpha"))).toBe(true)
 		expect(lines.some((line) => line.includes("runner hostDefault=") && line.includes("default="))).toBe(true)
 		expect(lines).toContain("INFO: current run=<none>")
-		expect(lines).toContain("INFO: loopFile exists=false, pid=<none>, pidAlive=<unknown>, command=<none>, requireBrowserEvidence=<unknown>")
+		expect(lines.some((line) => /^INFO: live processes total=\d+, matching=\d+$/.test(line))).toBe(true)
 	})
 })
 

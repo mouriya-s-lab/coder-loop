@@ -2,8 +2,7 @@
  * coder-loop install / uninstall / doctor subcommands.
  *
  * Four layers (per issue #49):
- *   A) target project files: slash commands, config (with preset binding),
- *      runtime dirs, workflow.md template
+ *   A) target project files: committed workflow.md policy
  *   B) target GitHub state: kind:code / kind:comment / kind:code-spike / kind:blocked labels
  *   C) operator machine prereqs: gh (+ auth), selected runner CLIs (verify only)
  *   D) user-level skill version: writing-issue marker check
@@ -42,12 +41,6 @@ const WRITING_ISSUE_SKILL_REL = ".claude/skills/writing-issue/SKILL.md"
 const WRITING_ISSUE_MARKER = "docs/reserved-strings.md"
 
 const RUNTIME_DIR = ".coder-loop/runtime"
-const CONFIG_REL = `${RUNTIME_DIR}/config.json`
-const STATE_REL = `${RUNTIME_DIR}/state.json`
-const SHARED_REL = `${RUNTIME_DIR}/shared.md`
-const ISSUE_DIR_REL = `${RUNTIME_DIR}/issues`
-const EVIDENCE_DIR_REL = `${RUNTIME_DIR}/evidence`
-const LOG_DIR_REL = `${RUNTIME_DIR}/logs`
 const WORKFLOW_REL = ".coder-loop/workflow.md"
 const SLASH_COMMANDS_REL = ".claude/commands"
 
@@ -352,116 +345,6 @@ async function syncWritingIssueSkill(dryRun: boolean): Promise<{ wrote: boolean;
 // Layer A: target project files
 // ===================================================================
 
-type FileWriteResult = "wrote" | "skipped-equal" | "skipped-exists"
-
-async function writeIfDifferent(path: string, content: string, opts: { force: boolean; dryRun: boolean }): Promise<FileWriteResult> {
-	const existing = await readIfExists(path)
-	if (existing === content) return "skipped-equal"
-	if (existing !== null && !opts.force) {
-		// Only existing-untouched files use this path; specific call sites decide whether
-		// to overwrite. The caller picks behavior. Default: rewrite for slash commands.
-	}
-	if (opts.dryRun) return "wrote"
-	await mkdir(dirname(path), { recursive: true })
-	await writeFile(path, content)
-	return "wrote"
-}
-
-async function ensureSlashCommands(target: string, opts: { force: boolean; dryRun: boolean }): Promise<Record<string, FileWriteResult>> {
-	const out: Record<string, FileWriteResult> = {}
-	for (const fname of SLASH_COMMAND_FILES) {
-		const source = resolve(PKG_ROOT, ".claude/commands", fname)
-		const content = await readFile(source, "utf-8")
-		const dest = resolve(target, SLASH_COMMANDS_REL, fname)
-		out[fname] = await writeIfDifferent(dest, content, opts)
-	}
-	return out
-}
-
-async function ensureRuntimeDirs(target: string, dryRun: boolean): Promise<string[]> {
-	const dirs = [
-		resolve(target, RUNTIME_DIR),
-		resolve(target, ISSUE_DIR_REL),
-		resolve(target, EVIDENCE_DIR_REL),
-		resolve(target, LOG_DIR_REL),
-	]
-	const created: string[] = []
-	for (const d of dirs) {
-		if (await pathExists(d)) continue
-		if (!dryRun) await mkdir(d, { recursive: true })
-		created.push(d)
-	}
-	return created
-}
-
-type ConfigMergeResult = {
-	wrote: boolean
-	previewBefore: string | null
-	previewAfter: string
-}
-
-async function mergeConfigJson(target: string, presetName: string, presetVersion: number, dryRun: boolean): Promise<ConfigMergeResult> {
-	const path = resolve(target, CONFIG_REL)
-	const existing = await readIfExists(path)
-	let parsed: Record<string, unknown>
-	if (existing === null) {
-		parsed = { version: 1 }
-	} else {
-		try {
-			const json: unknown = JSON.parse(existing)
-			if (typeof json !== "object" || json === null || Array.isArray(json)) {
-				fail(`${path}: 顶层必须是 JSON object`)
-			}
-			parsed = json as Record<string, unknown>
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error)
-			fail(`${path}: 解析失败 (${message})`)
-		}
-	}
-	if (typeof parsed.version !== "number") parsed.version = 1
-	parsed.preset = { name: presetName, version: presetVersion }
-	const desired = JSON.stringify(parsed, null, "\t") + "\n"
-	if (existing === desired) {
-		return { wrote: false, previewBefore: existing, previewAfter: desired }
-	}
-	if (!dryRun) {
-		await mkdir(dirname(path), { recursive: true })
-		await writeFile(path, desired)
-	}
-	return { wrote: true, previewBefore: existing, previewAfter: desired }
-}
-
-async function ensureStateJson(target: string, dryRun: boolean): Promise<{ wrote: boolean; path: string }> {
-	const path = resolve(target, STATE_REL)
-	const existing = await readIfExists(path)
-	if (existing !== null) return { wrote: false, path }
-	const skeleton = {
-		version: 1,
-		queue: [],
-		repository: null,
-		baseBranch: null,
-		recentRuns: [],
-		current: null,
-	}
-	const desired = JSON.stringify(skeleton, null, "\t") + "\n"
-	if (!dryRun) {
-		await mkdir(dirname(path), { recursive: true })
-		await writeFile(path, desired)
-	}
-	return { wrote: true, path }
-}
-
-async function ensureSharedMd(target: string, dryRun: boolean): Promise<{ wrote: boolean; path: string }> {
-	const path = resolve(target, SHARED_REL)
-	if (await pathExists(path)) return { wrote: false, path }
-	const stub = "# Shared durable context\n\n本文件由 plan / iter / review fragment 写入共享事实。install 落空壳。\n"
-	if (!dryRun) {
-		await mkdir(dirname(path), { recursive: true })
-		await writeFile(path, stub)
-	}
-	return { wrote: true, path }
-}
-
 async function ensureWorkflowMd(target: string, dryRun: boolean): Promise<{ wrote: boolean; path: string }> {
 	const path = resolve(target, WORKFLOW_REL)
 	if (await pathExists(path)) return { wrote: false, path }
@@ -615,16 +498,10 @@ export function buildLiveRuntimeHealthLines(snapshot: CoderLoopStatusSnapshot): 
 		lines.push(`${snapshot.events.exists ? "OK" : "WARN"}: events runId=${snapshot.events.runId}, exists=${snapshot.events.exists}, recent=${snapshot.events.recent.length}, latest=${latestType}`)
 	}
 
-	const loopFile = snapshot.processes.loopFile
-	lines.push(`INFO: loopFile exists=${loopFile.exists}, pid=${loopFile.pid ?? "<none>"}, pidAlive=${formatNullableBoolean(loopFile.pidAlive)}, command=${loopFile.command ?? "<none>"}, requireBrowserEvidence=${formatNullableBoolean(loopFile.requireBrowserEvidence)}`)
-	if (loopFile.exists && loopFile.pidAlive === false) lines.push("WARN: stale loop file: recorded pid is not alive")
-	if (loopFile.exists && loopFile.cwd !== null && loopFile.cwd !== snapshot.target.cwd) lines.push(`WARN: loop file cwd mismatch: ${loopFile.cwd}`)
-
 	const matchingLive = snapshot.processes.live.filter((entry) => entry.alive && entry.matchesTarget)
 	lines.push(`INFO: live processes total=${snapshot.processes.live.length}, matching=${matchingLive.length}`)
 	if (snapshot.processes.scanError !== null) lines.push(`FAIL: process scan error: ${snapshot.processes.scanError}`)
 	if (matchingLive.length > 1) lines.push("WARN: multiple live loop processes match target")
-	if (loopFile.exists && loopFile.pidAlive !== true && matchingLive.length === 0) lines.push("WARN: no live loop process is owned by this target")
 
 	return lines
 }
@@ -634,11 +511,6 @@ function eventType(value: JsonValue | null): string {
 	if (typeof value !== "object" || Array.isArray(value)) return "<non-object>"
 	const type = value.type
 	return typeof type === "string" ? type : "<unknown>"
-}
-
-function formatNullableBoolean(value: boolean | null): string {
-	if (value === null) return "<unknown>"
-	return value ? "true" : "false"
 }
 
 // ===================================================================

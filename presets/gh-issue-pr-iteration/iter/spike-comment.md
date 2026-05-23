@@ -14,7 +14,7 @@ For a `kind:comment` issue (spike / design question / open dialogue), the delive
 - Do NOT create branches, commits, or pull requests.
 - Do NOT edit the issue body. Produce a new comment via `gh issue comment`.
 - Do NOT actually file the proposed sub-issues — propose them in the comment so the operator can approve. Sub-issue creation belongs to the review action layer.
-- Do NOT close the issue or set final state in `{{STATE_FILE}}`.
+- Do NOT close the issue or set final state in the central state DB.
 
 ## Procedure
 

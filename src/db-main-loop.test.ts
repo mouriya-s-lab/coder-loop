@@ -33,12 +33,12 @@ describe("db-backed main loop hard cut", () => {
 
 	test("main loop does not touch state json", async () => {
 		const fixture = await createFixture({ reviewDbUpdate: "done" })
-		const beforeText = await readFile(fixture.statePath, "utf-8")
-		const beforeMtime = (await stat(fixture.statePath)).mtimeMs
+		const beforeText = await readFile(fixture.stateFile, "utf-8")
+		const beforeMtime = (await stat(fixture.stateFile)).mtimeMs
 		const result = runLoop(fixture)
 		expect(result.exitCode).toBe(0)
-		expect(await readFile(fixture.statePath, "utf-8")).toBe(beforeText)
-		expect((await stat(fixture.statePath)).mtimeMs).toBe(beforeMtime)
+		expect(await readFile(fixture.stateFile, "utf-8")).toBe(beforeText)
+		expect((await stat(fixture.stateFile)).mtimeMs).toBe(beforeMtime)
 	})
 
 	test("main loop db unavailable explicit fail", async () => {
@@ -51,17 +51,17 @@ describe("db-backed main loop hard cut", () => {
 
 	test("queue unblock db only", async () => {
 		const fixture = await createFixture({ initialStatus: "blocked", extra: { blockerRepo: "owner/dependency", blockerRef: "#267" } })
-		const beforeText = await readFile(fixture.statePath, "utf-8")
+		const beforeText = await readFile(fixture.stateFile, "utf-8")
 		const result = runCli(["queue", "unblock", fixture.target, "--issue", "alpha", "--loop-data-root", fixture.loopDataRoot])
 		expect(result.exitCode).toBe(0)
 		expect(readItem(fixture.loopDataRoot).status).toBe("queued")
 		expect(readItem(fixture.loopDataRoot).extra.blockerRepo).toBeUndefined()
-		expect(await readFile(fixture.statePath, "utf-8")).toBe(beforeText)
+		expect(await readFile(fixture.stateFile, "utf-8")).toBe(beforeText)
 	})
 
 	test("check-runtime db only", async () => {
 		const fixture = await createFixture()
-		await rm(fixture.statePath)
+		await rm(fixture.stateFile)
 		const result = runCli(["--target-cwd", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--check-runtime"])
 		expect(result.exitCode).toBe(0)
 		expect(result.stderr).toContain("Runtime check passed: queue=1, selected=alpha")
@@ -69,20 +69,21 @@ describe("db-backed main loop hard cut", () => {
 
 	test("daemon start target-cwd resolves chain without per-target state writes", async () => {
 		const fixture = await createFixture({ reviewDbUpdate: "done" })
-		const beforeText = await readFile(fixture.statePath, "utf-8")
+		const beforeText = await readFile(fixture.stateFile, "utf-8")
 		const result = runCli(["daemon", "start", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--dry-run"])
 		expect(result.exitCode).toBe(0)
 		expect(result.stdout).toContain(`daemon start dry-run: chain=${CHAIN_NAME}`)
 		expect(readItem(fixture.loopDataRoot).status).toBe("pending")
-		expect(await readFile(fixture.statePath, "utf-8")).toBe(beforeText)
+		expect(await readFile(fixture.stateFile, "utf-8")).toBe(beforeText)
 	})
 
-	test("no still-active loadState saveState calls in main loop", async () => {
+	test("removed legacy state functions", async () => {
 		const source = await readFile(LOOP_ENTRY, "utf-8")
-		expect(source).not.toContain("loadState(options.statePath)")
-		expect(source).not.toContain("saveState(options.statePath")
-		expect(source).not.toContain("reconcileStateAfterIter(options.statePath")
-		expect(source).not.toContain("exists(options.statePath)")
+		for (const name of [`load${"State"}`, `save${"State"}`, `reconcile${"State"}AfterIter`]) {
+			expect(source).not.toContain(`function ${name}`)
+			expect(source).not.toContain(`${name}(`)
+		}
+		expect(source).not.toContain("exists(options.stateFile)")
 	})
 })
 
@@ -96,7 +97,7 @@ type FixtureOptions = {
 type Fixture = {
 	target: string
 	loopDataRoot: string
-	statePath: string
+	stateFile: string
 }
 
 async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
@@ -105,7 +106,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
 	const runtime = resolve(target, ".coder-loop/runtime")
 	const presetDir = resolve(target, ".coder-loop/db-preset")
 	const loopDataRoot = resolve(runtime, "loop-data")
-	const statePath = resolve(runtime, "state.json")
+	const stateFile = resolve(runtime, "state.json")
 	await mkdir(resolve(runtime, "issues"), { recursive: true })
 	await mkdir(resolve(runtime, "evidence/alpha"), { recursive: true })
 	await mkdir(resolve(runtime, "logs"), { recursive: true })
@@ -135,10 +136,10 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
 		recentRuns: [],
 		current: null,
 	}
-	await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`)
+	await writeFile(stateFile, `${JSON.stringify(state, null, 2)}\n`)
 	await writeFile(resolve(runtime, "issues/alpha.md"), "# alpha\n")
 	if (options.seedDb !== false) seedDb(loopDataRoot, target, options)
-	return { target, loopDataRoot, statePath }
+	return { target, loopDataRoot, stateFile }
 }
 
 async function writePreset(presetDir: string): Promise<void> {

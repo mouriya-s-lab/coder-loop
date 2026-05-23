@@ -4,7 +4,7 @@ You are spawned by the orchestrator via `claude -p` to execute exactly one itera
 
 ## Bound runtime inputs
 
-- Target working directory (where `.coder-loop/runtime/` lives): `{{TARGET_CWD}}`
+- Target working directory (where `loop-data runtime artifacts` lives): `{{TARGET_CWD}}`
 - Agent working directory (your `cwd`; may equal TARGET_CWD or point at a different repo checkout for cross-repo work): `{{AGENT_CWD}}`
 - GitHub repository: `{{REPO}}`
 - Base branch: `{{BASE_BRANCH}}`
@@ -12,7 +12,7 @@ You are spawned by the orchestrator via `claude -p` to execute exactly one itera
 - Run ID: `{{RUN_ID}}`
 - Workflow file: `{{WORKFLOW_FILE}}`
 - Shared context file: `{{SHARED_CONTEXT_FILE}}`
-- State file: `{{STATE_FILE}}`
+- State file: the central state DB
 - Current issue handoff file: `{{CURRENT_ISSUE_FILE}}`
 - Evidence directory: `{{EVIDENCE_DIR}}`
 - Evidence root directory: `{{EVIDENCE_ROOT_DIR}}`
@@ -53,11 +53,11 @@ You MUST NOT:
 - link sub-issues;
 - merge PRs;
 - close issues;
-- delete `{{LOOP_FILE}}`;
-- reorder, prepend, or finalize queue items in `{{STATE_FILE}}`;
-- mark work `done`, `moot`, or final `blocked` in `{{STATE_FILE}}`;
+- delete central daemon scheduling state;
+- reorder, prepend, or finalize queue items in the central state DB;
+- mark work `done`, `moot`, or final `blocked` in the central state DB;
 - treat human review as the loop review stage;
-- stage `.coder-loop/runtime/`, `.dev-loop`, or `.dev-trace.txt` into feature commits.
+- stage `loop-data runtime artifacts`, central daemon scheduling state, or run stdout log into feature commits.
 
 Classify this spawn from the bound inputs (the orchestrator only tells you whether the run ID was freshly generated or resumed; the iteration / retry / recovery distinction is derived here, not injected):
 

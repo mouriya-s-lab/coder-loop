@@ -28,11 +28,11 @@ Actionable: N | In-progress/changes-requested included: N | Non-actionable: N
 
 ## Decision rule
 
-- If actionable count > 0, leave `.dev-loop` untouched.
-- If actionable count == 0, remove `.dev-loop`.
-- If review infrastructure is broken and state cannot be updated/audited, remove `.dev-loop`.
+- If actionable count > 0, leave central daemon scheduling state untouched.
+- If actionable count == 0, remove central daemon scheduling state.
+- If review infrastructure is broken and state cannot be updated/audited, remove central daemon scheduling state.
 
-Never remove `.dev-loop` just because the current issue needs retry.
+Never remove central daemon scheduling state just because the current issue needs retry.
 
 ## Output verdict
 

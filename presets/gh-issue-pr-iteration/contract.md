@@ -274,11 +274,11 @@ planning agent 必须：
 - 高风险未文档化假设拆成独立 `kind:comment` spike issue，spike `Blocks: #<impl>` 标明依赖；
 - adversarial validation：对每个 future-work issue 思考 "iter 怎么用最省事的方式糊弄 checkpoint"，能糊弄就把 checkpoint 改严；
 - `## 验收标准` 表的 `Command` 列必须能在 `Env` 列声明的环境真跑通——planning 自己应该在 issue 未来的 spawn cwd 下试跑 `local` 行的命令做 smoke check（in-repo work = `{{TARGET_CWD}}`；cross-repo work = 该 queue item 计划写到 `agentCwd` 的那个绝对路径）；
-- 写 queue 进 `state.json` 后必须跑 `coder-loop --target-cwd <target> --check-runtime` exit 0，否则 plan/init-queue 不能 verdict pass。
+- 写 queue 进 `central state DB` 后必须跑 `coder-loop --target-cwd <target> --check-runtime` exit 0，否则 plan/init-queue 不能 verdict pass。
 
 planning agent 禁止：
 
-- 直接开 PR / 合 PR / 关 issue / 删 `.dev-loop`（这些是 iter / review 的事）；
+- 直接开 PR / 合 PR / 关 issue / 删 central daemon scheduling state（这些是 iter / review 的事）；
 - 把 kind label 之外的 `kind:*` 值用进 `gh issue create`；
 - 在散文 issue body 里偷偷塞 `[ ] foo` checkbox 代替 `## 验收标准` 表；
 - 把多个无关问题打包进同一 issue（违反 atomic）。

@@ -68,14 +68,11 @@ const EXPECTED_VARIABLE_KEYS = [
 	"ISSUE",
 	"WORKFLOW_FILE",
 	"SHARED_CONTEXT_FILE",
-	"STATE_FILE",
 	"CURRENT_ISSUE_FILE",
 	"ISSUE_DIR",
 	"EVIDENCE_DIR",
 	"EVIDENCE_ROOT_DIR",
 	"LOG_DIR",
-	"TRACE_FILE",
-	"LOOP_FILE",
 	"PROMPT_ROOT",
 	"PROMPT_FRAGMENT_INDEX",
 	"REQUIRE_BROWSER_EVIDENCE",
@@ -114,7 +111,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		}
 	})
 
-	test("each phase declares all 27 variable bindings with parsed sources", async () => {
+	test("each phase declares all 24 variable bindings with parsed sources", async () => {
 		const preset = await loadPreset(BUNDLED_PRESET_DIR)
 		for (const phase of preset.phases) {
 			const keys = phase.variables.map(([key]) => key)
@@ -161,7 +158,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(prompt).toContain("gh")
 		expect(prompt).toContain("kind:blocked")
 		expect(prompt).toContain("Unblocks: {{REPO}}#{{ISSUE}}")
-		expect(prompt).toContain(".coder-loop/runtime/state.json")
+		expect(prompt).toContain("central state DB")
 		expect(prompt).toContain("coder-loop daemon start <targetRepoPath> --require-browser-evidence")
 		expect(prompt).toContain("Do not change the current repository's blocked item")
 		expect(prompt).toContain("ITERATION SUMMARY: blocked_responder=")

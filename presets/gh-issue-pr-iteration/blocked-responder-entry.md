@@ -11,7 +11,7 @@ Do exactly one responder pass for the selected issue. Do not loop.
 - Current GitHub repository: `{{REPO}}`
 - Current issue: `#{{ISSUE}}`
 - Run ID: `{{RUN_ID}}`
-- State file: `{{STATE_FILE}}`
+- State file: the central state DB
 - Current issue handoff file: `{{CURRENT_ISSUE_FILE}}`
 - Evidence directory: `{{EVIDENCE_DIR}}`
 - Evidence root directory: `{{EVIDENCE_ROOT_DIR}}`
@@ -23,7 +23,7 @@ If the selected queue item is blocked by another repository, create the cross-re
 
 ## Procedure
 
-1. Read `{{STATE_FILE}}` and find the queue item whose `issue` is `{{ISSUE}}`.
+1. Read the central state DB and find the queue item whose `issue` is `{{ISSUE}}`.
 2. Continue only when all of these are true:
    - item `status` is `blocked`;
    - item has a `blockerRepo` string in `owner/repo` format;
@@ -38,7 +38,7 @@ If the selected queue item is blocked by another repository, create the cross-re
    - title: concise blocker-resolution title referencing `{{REPO}}#{{ISSUE}}`;
    - body includes an explicit `Unblocks: {{REPO}}#{{ISSUE}}` line and the `blockerRef` / source blocker context.
    - use `gh issue create --repo <blockerRepo> --label "kind:blocked" --title <title> --body <body>`.
-5. Read the target checkout's `.coder-loop/runtime/state.json`.
+5. Read the target checkout's `central SQLite state DB`.
    - If the new issue is not already present, append one queue item with `status: "queued"`, `attempts: 0`, normal null branch/PR/run fields, and an `issue` field matching the created issue number.
    - Preserve existing queue order and all unrelated state fields.
 6. Start the target daemon with browser evidence required:
@@ -52,7 +52,7 @@ If the selected queue item is blocked by another repository, create the cross-re
 - Do not close `{{REPO}}#{{ISSUE}}`.
 - Do not merge PRs.
 - Do not create child issue links.
-- Do not stage `.coder-loop/runtime/`, `.dev-loop`, or `.dev-trace.txt`.
+- Do not stage `loop-data runtime artifacts`, central daemon scheduling state, or run stdout log.
 - Use `gh` only for issue metadata/comments/creation, not for source-code bytes.
 
 ## Required final line
