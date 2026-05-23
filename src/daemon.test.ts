@@ -171,8 +171,42 @@ describe("daemon", () => {
 		}
 	})
 
+	test("daemon shutdown preserves user terminal item status", async () => {
+		const fixture = await startFixture("terminal-shutdown")
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "terminal-shutdown-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			const added = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 180,
+				repoCwd: REPO_ROOT,
+				extra: { sleepMs: 5_000, exitCode: 0 },
+			})).item)
+			await waitFor(async () => record(expectOk(await request(fixture, "daemon.status")).daemon).activeRuns, (runs) => Array.isArray(runs) && runs.length === 1)
+
+			const updated = record(expectOk(await request(fixture, "item.update", {
+				itemId: numberValue(added.id),
+				fields: { status: "done" },
+			})).item)
+			expect(updated.status).toBe("done")
+
+			const down = await request(fixture, "daemon.down")
+			expect(down.ok).toBe(true)
+			await fixture.daemon.closed
+
+			const item = await readItem(fixture.loopDataRoot, chainId, 180)
+			expect(item?.status).toBe("done")
+			expect(await readChainStatus(fixture.loopDataRoot, chainId)).toBe("completed")
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("subprocess exit callback writes db", async () => {
-		const fixture = await startFixture("exit-callback")
+		const fixture = await startFixture("exit-callback", { schedulerIntervalMs: 1_000 })
 		try {
 			const chain = record(expectOk(await request(fixture, "chain.create", {
 				name: "exit-chain",
@@ -233,6 +267,7 @@ type Fixture = {
 
 type FixtureOptions = {
 	schedulerEnabled?: boolean
+	schedulerIntervalMs?: number
 }
 
 async function startFixture(name: string, options: FixtureOptions = {}): Promise<Fixture> {
@@ -262,7 +297,7 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 		shutdownGraceMs: 100,
 		scheduler: {
 			enabled: options.schedulerEnabled ?? true,
-			intervalMs: 20,
+			intervalMs: options.schedulerIntervalMs ?? 20,
 			runner: scheduler,
 			presetDir: PRESET_DIR,
 			worktreeManager,
