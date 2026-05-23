@@ -12,6 +12,7 @@ import {
 	type SchedulerOptions,
 	type SchedulerWorktreeManager,
 } from "./scheduler"
+import { resolveChainRuntimePaths } from "./runtime-paths"
 import { type ChainRecord, openSqliteStateStore } from "./sqlite-state"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -247,11 +248,49 @@ describe("scheduler", () => {
 			fixture.store.close()
 		}
 	})
+
+	test("scheduler run writes run-root artifacts", async () => {
+		const fixture = await createFixture("run-artifacts")
+		try {
+			const chain = createChain(fixture.store, "run-artifacts-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 203, repoCwd: "/repo/a" })
+
+			await runSchedulerUntilIdle(fixture.options())
+
+			const runId = `run-${chain.id}-${item.id}`
+			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
+			const status = JSON.parse(await readFile(paths.runStatusFile(runId), "utf-8")) as Record<string, unknown>
+			const stdout = await readFile(paths.runStdoutFile(runId), "utf-8")
+			const stderr = await readFile(paths.runStderrFile(runId), "utf-8")
+			const events = (await readFile(paths.runEventsFile(runId), "utf-8"))
+				.trim()
+				.split("\n")
+				.filter(Boolean)
+				.map((line) => JSON.parse(line) as { type: string })
+
+			expect(status).toMatchObject({
+				runId,
+				chainId: chain.id,
+				chainName: chain.name,
+				itemId: item.id,
+				issueNumber: 203,
+				phase: "iteration",
+				exitCode: 0,
+				status: "done",
+			})
+			expect(stdout).toContain(`done:${item.id}`)
+			expect(stderr).toBe("")
+			expect(events.map((event) => event.type)).toEqual(["agent.spawn", "agent.exit", "chain.completed"])
+		} finally {
+			fixture.store.close()
+		}
+	})
 })
 
 type Fixture = {
 	store: ReturnType<typeof openSqliteStateStore>
 	state: ReturnType<typeof createSchedulerState>
+	loopDataRoot: string
 	eventLog: string
 	schedulerEvents: SchedulerEvent[]
 	worktreeCalls: string[]
@@ -315,7 +354,7 @@ async function createFixture(name: string): Promise<Fixture> {
 		...overrides,
 	})
 
-	return { store, state, eventLog, schedulerEvents, worktreeCalls, options }
+	return { store, state, loopDataRoot, eventLog, schedulerEvents, worktreeCalls, options }
 }
 
 function createChain(

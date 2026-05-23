@@ -14,11 +14,14 @@ export const CHAIN_EVIDENCE_DIRNAME = "evidence"
 export const CHAIN_RUNS_DIRNAME = "runs"
 export const CHAIN_DAEMON_DIRNAME = "daemon"
 export const RUN_EVENTS_FILENAME = "events.jsonl"
+export const RUN_STDOUT_FILENAME = "stdout.log"
+export const RUN_STDERR_FILENAME = "stderr.log"
+export const RUN_STATUS_FILENAME = "status.json"
 export const PHASE_STDOUT_FILENAME = "stdout.jsonl"
 export const PHASE_STDERR_FILENAME = "stderr.txt"
 export const PHASE_STATUS_FILENAME = "status.json"
 export const PHASE_SESSIONS_FILENAME = "sessions.jsonl"
-export const DAEMON_ENGINE_LOG_FILENAME = "engine.log"
+export const DAEMON_LOG_FILENAME = "daemon.log"
 
 export type RuntimePathErrorCode = "invalid_loop_data_root" | "invalid_chain_name" | "invalid_path_component"
 
@@ -59,6 +62,9 @@ export type ChainRuntimePaths = {
 	issueEvidenceDir: (issueNumber: number | string) => string
 	runDir: (runId: string) => string
 	runEventsFile: (runId: string) => string
+	runStdoutFile: (runId: string) => string
+	runStderrFile: (runId: string) => string
+	runStatusFile: (runId: string) => string
 	runPhaseDir: (runId: string, phase: string) => string
 	runPhaseStdoutFile: (runId: string, phase: string) => string
 	runPhaseStderrFile: (runId: string, phase: string) => string
@@ -142,13 +148,16 @@ export function resolveChainRuntimePaths(chainName: string, options: LoopDataRoo
 		issueEvidenceDir: (issueNumber) => resolve(evidenceDir, sanitizePathComponent(String(issueNumber), "issue number")),
 		runDir,
 		runEventsFile: (runId) => resolve(runDir(runId), RUN_EVENTS_FILENAME),
+		runStdoutFile: (runId) => resolve(runDir(runId), RUN_STDOUT_FILENAME),
+		runStderrFile: (runId) => resolve(runDir(runId), RUN_STDERR_FILENAME),
+		runStatusFile: (runId) => resolve(runDir(runId), RUN_STATUS_FILENAME),
 		runPhaseDir,
 		runPhaseStdoutFile: (runId, phase) => resolve(runPhaseDir(runId, phase), PHASE_STDOUT_FILENAME),
 		runPhaseStderrFile: (runId, phase) => resolve(runPhaseDir(runId, phase), PHASE_STDERR_FILENAME),
 		runPhaseStatusFile: (runId, phase) => resolve(runPhaseDir(runId, phase), PHASE_STATUS_FILENAME),
 		runPhaseSessionsFile: (runId, phase) => resolve(runPhaseDir(runId, phase), PHASE_SESSIONS_FILENAME),
 		daemonBatchDir: (timestamp) => resolve(daemonDir, sanitizePathComponent(timestamp, "daemon timestamp")),
-		daemonLogFile: (timestamp) => resolve(daemonDir, sanitizePathComponent(timestamp, "daemon timestamp"), DAEMON_ENGINE_LOG_FILENAME),
+		daemonLogFile: (timestamp) => resolve(daemonDir, sanitizePathComponent(timestamp, "daemon timestamp"), DAEMON_LOG_FILENAME),
 	}
 }
 

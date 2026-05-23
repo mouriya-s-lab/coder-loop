@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { createConnection, createServer, type Server, type Socket } from "node:net"
-import { mkdir, stat, unlink, writeFile } from "node:fs/promises"
+import { appendFile, mkdir, stat, unlink, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
 import type { AgentRunnerKind, AgentRunnerSelection, JsonObject, JsonValue } from "./loop"
@@ -99,6 +99,7 @@ export class CoderLoopDaemon {
 	private ownsDaemonSocket = false
 	private ownsDaemonPid = false
 	private resolveClosed: (() => void) | null = null
+	private readonly daemonBatchTimestamp = formatDaemonBatchTimestamp(new Date())
 	readonly closed: Promise<void>
 
 	constructor(private readonly options: StartCoderLoopDaemonOptions = {}) {
@@ -121,9 +122,11 @@ export class CoderLoopDaemon {
 			this.ownsDaemonSocket = true
 			const store = openSqliteStateStore(this.options)
 			this.store = store
+			await this.ensureRuntimeLayoutForExistingChains()
 			await writeFile(this.paths.daemonPid, `${process.pid}\n`)
 			this.ownsDaemonPid = true
 			this.state = "running"
+			await this.appendDaemonLogForAllChains({ type: "daemon.start", pid: process.pid, socketPath: this.paths.daemonSocket })
 			this.startSchedulerLoop()
 			this.requestSchedulerTick()
 			return this
@@ -313,6 +316,7 @@ export class CoderLoopDaemon {
 			chain = store.updateChain(existing.id, update)
 		}
 		await this.ensureChainRuntimeLayout(chain.name)
+		await this.appendDaemonLog(chain.name, { type: "chain.layout", chainId: chain.id, chainName: chain.name, state: this.state })
 		return { chain: chainToJson(chain) }
 	}
 
@@ -322,10 +326,39 @@ export class CoderLoopDaemon {
 		await mkdir(paths.evidenceDir, { recursive: true })
 		await mkdir(paths.runsDir, { recursive: true })
 		await mkdir(paths.daemonDir, { recursive: true })
+		await mkdir(paths.daemonBatchDir(this.daemonBatchTimestamp), { recursive: true })
+		await writeFile(paths.daemonLogFile(this.daemonBatchTimestamp), "", { flag: "a" })
 		await writeFile(paths.sharedFile, "# Shared durable context\n\n", { flag: "wx" }).catch((error: unknown) => {
 			if (isNodeError(error) && error.code === "EEXIST") return
 			throw error
 		})
+	}
+
+	private async ensureRuntimeLayoutForExistingChains(): Promise<void> {
+		for (const chain of this.requireStore().listChains()) {
+			await this.ensureChainRuntimeLayout(chain.name)
+		}
+	}
+
+	private async appendDaemonLogForAllChains(event: JsonObject): Promise<void> {
+		for (const chain of this.requireStore().listChains()) {
+			await this.appendDaemonLog(chain.name, event)
+		}
+	}
+
+	private async appendDaemonLogForChainId(chainId: number, event: JsonObject): Promise<void> {
+		const chain = this.requireStore().getChain(chainId)
+		if (chain === null) return
+		await this.appendDaemonLog(chain.name, event)
+	}
+
+	private async appendDaemonLog(chainName: string, event: JsonObject): Promise<void> {
+		const paths = resolveChainRuntimePaths(chainName, { loopDataRoot: this.paths.root })
+		await mkdir(paths.daemonBatchDir(this.daemonBatchTimestamp), { recursive: true })
+		await appendFile(paths.daemonLogFile(this.daemonBatchTimestamp), `${JSON.stringify({
+			...event,
+			recordedAt: new Date().toISOString(),
+		})}\n`)
 	}
 
 	private handleChainList(): JsonObject {
@@ -473,12 +506,17 @@ export class CoderLoopDaemon {
 
 	private buildSchedulerOptions(): SchedulerOptions {
 		const scheduler = this.options.scheduler ?? {}
+		const externalOnEvent = scheduler.onEvent
 		const options: SchedulerOptions = {
 			store: this.requireStore(),
 			state: this.schedulerState,
 			runner: scheduler.runner ?? defaultDaemonRunner(),
 			presetDir: scheduler.presetDir ?? resolve(import.meta.dir, "../presets/gh-issue-pr-iteration"),
 			prompt: scheduler.prompt ?? defaultDaemonPrompt,
+			onEvent: async (event) => {
+				await this.appendDaemonLogForChainId(event.chainId, { type: "scheduler.event", event: event as unknown as JsonObject })
+				await externalOnEvent?.(event)
+			},
 		}
 		if (scheduler.phase !== undefined) options.phase = scheduler.phase
 		if (scheduler.worktreeManager !== undefined) options.worktreeManager = scheduler.worktreeManager
@@ -488,7 +526,6 @@ export class CoderLoopDaemon {
 		if (scheduler.now !== undefined) options.now = scheduler.now
 		if (scheduler.runIdFactory !== undefined) options.runIdFactory = scheduler.runIdFactory
 		if (scheduler.statusFromExit !== undefined) options.statusFromExit = scheduler.statusFromExit
-		if (scheduler.onEvent !== undefined) options.onEvent = scheduler.onEvent
 		return options
 	}
 }
@@ -546,6 +583,10 @@ function defaultDaemonRunner(): AgentRunnerSelection {
 
 function defaultDaemonPrompt(): string {
 	return "coder-loop daemon scheduler placeholder; full prompt binding is owned by later central-state migration issues."
+}
+
+function formatDaemonBatchTimestamp(date: Date): string {
+	return date.toISOString().slice(0, 19).replace(/[T:]/g, "-")
 }
 
 function parseDaemonRequest(line: string): DaemonRequest {

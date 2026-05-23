@@ -121,7 +121,7 @@ function makeLoopOptions(): LoopOptions {
 		evidenceRootDir: "/loop-data/chains/main/evidence",
 		logDir: "/loop-data/chains/main/runs",
 		loopDataRoot: "/loop-data",
-		logFile: "/loop-data/chains/main/daemon/engine.log",
+		logFile: "/loop-data/chains/main/daemon/daemon.log",
 		repository: "fixture/repo",
 		baseBranch: "main",
 		chainName: "main",
