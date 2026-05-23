@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdir, rm, stat, writeFile } from "node:fs/promises"
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
 import { startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
@@ -141,6 +141,56 @@ describe("central chain/item CLI", () => {
 				// Process may already have exited after daemon down.
 			}
 			await daemonProcess.exited.catch(() => undefined)
+		}
+	})
+
+	test("second daemon up fails without orphaning first daemon", async () => {
+		const loopDataRoot = await makeLoopDataRoot("daemon-up-duplicate")
+		const daemonProcess = spawnDaemonUp(loopDataRoot)
+		try {
+			await waitForDaemonFiles(loopDataRoot)
+			const firstPid = (await readFile(resolve(loopDataRoot, "daemon.pid"), "utf-8")).trim()
+
+			const duplicate = await runCli(["daemon", "up", "--loop-data-root", loopDataRoot])
+			expect(duplicate.exitCode).toBe(1)
+			expect(duplicate.stderr).toContain("daemon socket is already accepting connections")
+
+			await waitForDaemonFiles(loopDataRoot)
+			expect((await readFile(resolve(loopDataRoot, "daemon.pid"), "utf-8")).trim()).toBe(firstPid)
+			expectJsonOk(await runCli(["chain", "list", "--loop-data-root", loopDataRoot, "--json"]))
+
+			const down = await runCli(["daemon", "down", "--loop-data-root", loopDataRoot])
+			expect(down.exitCode).toBe(0)
+			expect(await daemonProcess.exited).toBe(0)
+		} finally {
+			daemonProcess.kill()
+			await daemonProcess.exited.catch(() => undefined)
+		}
+	})
+
+	test("concurrent daemon up race leaves one usable daemon", async () => {
+		const loopDataRoot = await makeLoopDataRoot("daemon-up-race")
+		const first = spawnDaemonUp(loopDataRoot)
+		const second = spawnDaemonUp(loopDataRoot)
+		try {
+			const loser = await waitForFirstExit([
+				{ name: "first", proc: first },
+				{ name: "second", proc: second },
+			])
+			const winner = loser.name === "first" ? second : first
+			expect(loser.exitCode).toBe(1)
+			expect(loser.stderr).toContain("daemon socket is already accepting connections")
+
+			await waitForDaemonFiles(loopDataRoot)
+			expectJsonOk(await runCli(["chain", "list", "--loop-data-root", loopDataRoot, "--json"]))
+
+			const down = await runCli(["daemon", "down", "--loop-data-root", loopDataRoot])
+			expect(down.exitCode).toBe(0)
+			expect(await winner.exited).toBe(0)
+		} finally {
+			first.kill()
+			second.kill()
+			await Promise.all([first.exited.catch(() => undefined), second.exited.catch(() => undefined)])
 		}
 	})
 
@@ -328,6 +378,38 @@ async function runCli(args: string[], env: Record<string, string> = {}): Promise
 		stdout,
 		stderr,
 	}
+}
+
+function spawnDaemonUp(loopDataRoot: string): Bun.Subprocess<"ignore", "pipe", "pipe"> {
+	return Bun.spawn({
+		cmd: ["bun", LOOP_ENTRY, "daemon", "up", "--loop-data-root", loopDataRoot, "--scheduler-interval-ms", "100"],
+		cwd: REPO_ROOT,
+		stdin: "ignore",
+		stdout: "pipe",
+		stderr: "pipe",
+	})
+}
+
+async function waitForDaemonFiles(loopDataRoot: string): Promise<void> {
+	const socketPath = resolve(loopDataRoot, "daemon.sock")
+	const pidFile = resolve(loopDataRoot, "daemon.pid")
+	await waitFor(async () => {
+		const [socketStat, pidStat] = await Promise.all([stat(socketPath), stat(pidFile)])
+		return socketStat.isSocket() && pidStat.isFile() ? true : null
+	}, 5_000)
+}
+
+type NamedDaemonProcess = {
+	name: string
+	proc: Bun.Subprocess<"ignore", "pipe", "pipe">
+}
+
+async function waitForFirstExit(processes: NamedDaemonProcess[]): Promise<{ name: string; exitCode: number | null; stderr: string }> {
+	return await Promise.race(processes.map(async ({ name, proc }) => ({
+		name,
+		exitCode: await proc.exited,
+		stderr: await new Response(proc.stderr).text(),
+	})))
 }
 
 async function makeTarget(name: string): Promise<string> {

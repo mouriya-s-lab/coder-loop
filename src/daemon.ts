@@ -96,6 +96,8 @@ export class CoderLoopDaemon {
 	private schedulerTimer: ReturnType<typeof setInterval> | null = null
 	private schedulerTickInFlight: Promise<void> | null = null
 	private schedulerTickRequested = false
+	private ownsDaemonSocket = false
+	private ownsDaemonPid = false
 	private resolveClosed: (() => void) | null = null
 	readonly closed: Promise<void>
 
@@ -110,15 +112,17 @@ export class CoderLoopDaemon {
 	async start(): Promise<this> {
 		if (this.state !== "starting") throw new DaemonError("invalid_state", `daemon cannot start from state ${this.state}`)
 		await this.prepareRuntimeDirectory()
-		const store = openSqliteStateStore(this.options)
-		this.store = store
 
 		try {
 			await removeStaleSocket(this.paths.daemonSocket)
 			const server = createServer((socket) => this.acceptConnection(socket))
 			this.server = server
-			await listen(server, this.paths.daemonSocket)
+			await listenOrReportSocketInUse(server, this.paths.daemonSocket)
+			this.ownsDaemonSocket = true
+			const store = openSqliteStateStore(this.options)
+			this.store = store
 			await writeFile(this.paths.daemonPid, `${process.pid}\n`)
+			this.ownsDaemonPid = true
 			this.state = "running"
 			this.startSchedulerLoop()
 			this.requestSchedulerTick()
@@ -168,8 +172,7 @@ export class CoderLoopDaemon {
 		}
 		this.store?.close()
 		this.store = null
-		await unlinkIfExists(this.paths.daemonSocket)
-		await unlinkIfExists(this.paths.daemonPid)
+		await this.removeOwnedRuntimeFiles()
 		this.state = "exited"
 		this.resolveClosed?.()
 	}
@@ -193,10 +196,20 @@ export class CoderLoopDaemon {
 		}
 		this.store?.close()
 		this.store = null
-		await unlinkIfExists(this.paths.daemonSocket)
-		await unlinkIfExists(this.paths.daemonPid)
+		await this.removeOwnedRuntimeFiles()
 		this.state = "exited"
 		this.resolveClosed?.()
+	}
+
+	private async removeOwnedRuntimeFiles(): Promise<void> {
+		if (this.ownsDaemonSocket) {
+			await unlinkIfExists(this.paths.daemonSocket)
+			this.ownsDaemonSocket = false
+		}
+		if (this.ownsDaemonPid) {
+			await unlinkIfExists(this.paths.daemonPid)
+			this.ownsDaemonPid = false
+		}
 	}
 
 	private acceptConnection(socket: Socket): void {
@@ -819,6 +832,17 @@ async function listen(server: Server, socketPath: string): Promise<void> {
 	})
 }
 
+async function listenOrReportSocketInUse(server: Server, socketPath: string): Promise<void> {
+	try {
+		await listen(server, socketPath)
+	} catch (error) {
+		if (await pathExists(socketPath) && await canConnect(socketPath)) {
+			throw new DaemonError("socket_in_use", `daemon socket is already accepting connections at ${socketPath}`, { socketPath })
+		}
+		throw error
+	}
+}
+
 async function closeServer(server: Server): Promise<void> {
 	if (!server.listening) return
 	await new Promise<void>((resolveClose, reject) => {
@@ -831,6 +855,11 @@ async function closeServer(server: Server): Promise<void> {
 
 function translateDaemonStartError(error: unknown, details: JsonObject): DaemonError {
 	if (error instanceof DaemonError) return error
+	if (isNodeError(error) && error.code === "EADDRINUSE" && typeof details.socketPath === "string") {
+		return new DaemonError("socket_in_use", `daemon socket is already accepting connections at ${details.socketPath}`, {
+			socketPath: details.socketPath,
+		})
+	}
 	return new DaemonError("daemon_start_failed", `unable to start coder-loop daemon: ${errorMessage(error)}`, details)
 }
 
