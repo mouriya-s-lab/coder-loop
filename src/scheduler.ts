@@ -220,6 +220,57 @@ export function createGitWorktreeManager(options: LoopDataRootOptions = {}): Sch
 	}
 }
 
+export type SchedulerChainWorktreeCleanup = {
+	repoCwd: string
+	worktreePath: string
+	registered: boolean
+	removed: boolean
+	pruned: boolean
+	error: string | null
+}
+
+export function cleanupSchedulerChainWorktrees(
+	chain: ChainRecord,
+	repoCwds: readonly string[],
+	options: LoopDataRootOptions = {},
+): SchedulerChainWorktreeCleanup[] {
+	const cleaned: SchedulerChainWorktreeCleanup[] = []
+	for (const repoCwd of distinct(repoCwds)) {
+		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, options)
+		const listResult = git(repoCwd, ["worktree", "list", "--porcelain"])
+		if (listResult.exitCode !== 0) {
+			cleaned.push({
+				repoCwd,
+				worktreePath,
+				registered: false,
+				removed: false,
+				pruned: false,
+				error: `git worktree list failed (exit ${listResult.exitCode}): ${listResult.stderr}`,
+			})
+			continue
+		}
+
+		const registered = gitWorktreeListOutputIncludesPath(listResult.stdout, worktreePath)
+		let removed = false
+		let error: string | null = null
+		if (registered && existsSync(worktreePath)) {
+			const removeResult = git(repoCwd, ["worktree", "remove", "--force", worktreePath])
+			removed = removeResult.exitCode === 0
+			if (!removed) error = `git worktree remove failed (exit ${removeResult.exitCode}): ${removeResult.stderr}`
+		}
+
+		const pruneResult = git(repoCwd, ["worktree", "prune"])
+		const pruned = pruneResult.exitCode === 0
+		if (!pruned) {
+			const pruneError = `git worktree prune failed (exit ${pruneResult.exitCode}): ${pruneResult.stderr}`
+			error = error === null ? pruneError : `${error}; ${pruneError}`
+		}
+
+		cleaned.push({ repoCwd, worktreePath, registered, removed, pruned, error })
+	}
+	return cleaned
+}
+
 export function listActiveRuns(state: SchedulerState): SchedulerActiveRun[] {
 	return [...state.slots.values()].flatMap((slot) => (slot.activeRun === null ? [] : [slot.activeRun]))
 }
@@ -476,7 +527,7 @@ function removeIdleSlotsForInactiveChains(state: SchedulerState, activeChainIds:
 	}
 }
 
-function distinct(values: string[]): string[] {
+function distinct(values: readonly string[]): string[] {
 	return [...new Set(values)]
 }
 
@@ -661,8 +712,12 @@ function gitWorktreeListIncludesPath(repoCwd: string, expectedPath: string): boo
 	if (!existsSync(expectedPath)) return false
 	const result = git(repoCwd, ["worktree", "list", "--porcelain"])
 	if (result.exitCode !== 0) return false
+	return gitWorktreeListOutputIncludesPath(result.stdout, expectedPath)
+}
+
+function gitWorktreeListOutputIncludesPath(stdout: string, expectedPath: string): boolean {
 	const expectedRealPath = realpathForComparison(expectedPath)
-	return result.stdout
+	return stdout
 		.split("\n")
 		.filter((line) => line.startsWith("worktree "))
 		.map((line) => line.slice("worktree ".length))
