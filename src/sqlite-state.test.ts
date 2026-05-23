@@ -168,6 +168,30 @@ describe("sqlite state store", () => {
 		}
 	})
 
+	test("next pending prefers fewer attempts within a priority group", async () => {
+		const { store } = await openTestStore("attempt-priority")
+		try {
+			const chain = createFullChain(store)
+			const retried = createFullItem(store, chain, {
+				issueNumber: 177,
+				status: "changes_requested",
+				priority: null,
+				attempts: 3,
+			})
+			const untouched = createFullItem(store, chain, {
+				issueNumber: 179,
+				status: "queued",
+				priority: null,
+				attempts: 0,
+			})
+
+			expect(retried.id).toBeLessThan(untouched.id)
+			expect(store.getNextPendingItem({ chainId: chain.id, repoCwd: "/repo/coder-loop" })).toEqual(untouched)
+		} finally {
+			store.close()
+		}
+	})
+
 	test("wal mode", async () => {
 		const { store } = await openTestStore("wal")
 		try {

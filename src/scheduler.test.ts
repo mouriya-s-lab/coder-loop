@@ -169,6 +169,34 @@ describe("scheduler", () => {
 		}
 	})
 
+	test("same-chain same-repo SIGTERM retry cycle does not starve untouched sibling item", async () => {
+		const fixture = await createFixture("retry-fairness")
+		try {
+			const chain = createChain(fixture.store, "retry-fairness-chain")
+			const first = createItem(fixture.store, chain, { issueNumber: 7001, repoCwd: "/repo/a", sleepMs: 5_000 })
+			const second = createItem(fixture.store, chain, { issueNumber: 7002, repoCwd: "/repo/a" })
+
+			const firstTick = await schedulerTick(fixture.options())
+			expect(firstTick.spawnedRuns).toHaveLength(1)
+			expect(firstTick.spawnedRuns[0]?.itemId).toBe(first.id)
+
+			const terminated = await firstTick.spawnedRuns[0]!.terminate({ forceAfterMs: 200 })
+			expect(terminated.status).toBe("changes_requested")
+			expect(fixture.store.getItem(first.id)?.attempts).toBe(1)
+			expect(fixture.store.getItem(second.id)?.attempts).toBe(0)
+
+			const secondTick = await schedulerTick(fixture.options())
+			expect(secondTick.spawnedRuns).toHaveLength(1)
+			expect(secondTick.spawnedRuns[0]?.itemId).toBe(second.id)
+			await secondTick.spawnedRuns[0]!.closed
+
+			expect(fixture.store.getItem(second.id)?.attempts).toBe(1)
+			expect(fixture.schedulerEvents.filter((event) => event.type === "agent.spawn").map((event) => event.itemId)).toEqual([first.id, second.id])
+		} finally {
+			fixture.store.close()
+		}
+	})
+
 	test("empty active chain remains active", async () => {
 		const fixture = await createFixture("empty-active")
 		try {
