@@ -454,6 +454,39 @@ describe("daemon", () => {
 		}
 	})
 
+	test("socket deleted chain remains read-only for item mutations", async () => {
+		const fixture = await startFixture("deleted-chain-read-only", { schedulerEnabled: false })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "read-only-deleted-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			const added = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 226,
+				repoCwd: REPO_ROOT,
+			})).item)
+			const itemId = numberValue(added.id)
+
+			expectOk(await request(fixture, "chain.delete", { chainId }))
+
+			expectChainDeleted(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 227,
+				repoCwd: REPO_ROOT,
+			}))
+			expectChainDeleted(await request(fixture, "item.update", { itemId, status: "done" }))
+
+			const listed = expectOk(await request(fixture, "item.list", { chainId })).items
+			expect(Array.isArray(listed)).toBe(true)
+			expect(listed).toHaveLength(1)
+			expect(record(expectOk(await request(fixture, "chain.status", { chainId })).chain).status).toBe("deleted")
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("socket chain.delete removes scheduler worktree registration and chain runtime layout", async () => {
 		const fixture = await startFixture("chain-delete-cleanup", { realWorktreeManager: true })
 		const target = resolve(fixture.loopDataRoot, "..", "target")
@@ -913,6 +946,11 @@ function expectOk(response: DaemonResponse) {
 function expectInvalid(response: DaemonResponse): void {
 	expect(response.ok).toBe(false)
 	if (!response.ok) expect(response.error.code).toBe("invalid_request")
+}
+
+function expectChainDeleted(response: DaemonResponse): void {
+	expect(response.ok).toBe(false)
+	if (!response.ok) expect(response.error.code).toBe("chain_deleted")
 }
 
 function expectConflict(response: DaemonResponse): void {

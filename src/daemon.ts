@@ -537,6 +537,7 @@ export class CoderLoopDaemon {
 
 	private async handleItemAdd(args: JsonObject): Promise<JsonObject> {
 		const chain = this.resolveChain(args)
+		assertChainAllowsItemMutation(chain, "item.add")
 		const store = this.requireStore()
 		const rawExtra = optionalJsonObject(args, "extra") ?? {}
 		const topLevelDependsOn = optionalDependsOn(args, "dependsOn")
@@ -574,13 +575,14 @@ export class CoderLoopDaemon {
 		const item = this.resolveItem(args)
 		const fields = optionalJsonObject(args, "fields") ?? args
 		const store = this.requireStore()
+		const chain = store.getChain(item.chainId)
+		if (chain === null) throw new DaemonError("not_found", `chain ${item.chainId} was not found`, { chainId: item.chainId })
+		assertChainAllowsItemMutation(chain, "item.update")
 		const input: UpdateItemInput = {}
 		const repoCwd = optionalString(fields, "repoCwd")
 		if (repoCwd !== null) assignOptional(input, "repoCwd", await validateRepoCwdForRequest(repoCwd))
 		const status = optionalString(fields, "status")
 		if (status !== null) {
-			const chain = this.requireStore().getChain(item.chainId)
-			if (chain === null) throw new DaemonError("not_found", `chain ${item.chainId} was not found`, { chainId: item.chainId })
 			assignOptional(input, "status", await this.validateItemStatusForRequest(chain, status))
 		}
 		assignOptional(input, "attempts", optionalInteger(fields, "attempts") ?? undefined)
@@ -1292,6 +1294,15 @@ function itemToJson(item: ItemRecord): JsonObject {
 		createdAt: item.createdAt,
 		updatedAt: item.updatedAt,
 	}
+}
+
+function assertChainAllowsItemMutation(chain: ChainRecord, operation: string): void {
+	if (chain.status !== "deleted") return
+	throw new DaemonError("chain_deleted", `${operation} cannot mutate deleted chain ${chain.name}`, {
+		chainId: chain.id,
+		chainName: chain.name,
+		status: chain.status,
+	})
 }
 
 function chainStatusSummary(

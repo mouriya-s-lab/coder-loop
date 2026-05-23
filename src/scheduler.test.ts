@@ -251,6 +251,22 @@ describe("scheduler", () => {
 		}
 	})
 
+	test("deleted chain skipped", async () => {
+		const fixture = await createFixture("deleted-skip")
+		try {
+			const chain = createChain(fixture.store, "deleted-chain", { status: "deleted" })
+			const item = createItem(fixture.store, chain, { issueNumber: 226, repoCwd: "/repo/a" })
+
+			const tick = await schedulerTick(fixture.options())
+
+			expect(tick.spawnedRuns).toHaveLength(0)
+			expect(fixture.state.slots.size).toBe(0)
+			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
 	test("real subprocess spawn end-to-end", async () => {
 		const fixture = await createFixture("subprocess")
 		try {
