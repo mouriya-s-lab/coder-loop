@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto"
 import { createConnection, createServer, type Server, type Socket } from "node:net"
-import { appendFile, mkdir, stat, unlink, writeFile } from "node:fs/promises"
-import { resolve } from "node:path"
+import { appendFile, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises"
+import { isAbsolute, resolve } from "node:path"
 
 import type { AgentRunnerKind, AgentRunnerSelection, JsonObject, JsonValue } from "./loop"
 import {
@@ -80,6 +80,11 @@ export type CoderLoopDaemonSnapshot = {
 type DaemonState = "starting" | "running" | "shutting_down" | "exited"
 type UnknownRecord = Record<string, unknown>
 
+const FALLBACK_PENDING_STATUSES = ["queued", "changes_requested"] as const
+const FALLBACK_TERMINAL_STATUSES = ["blocked", "moot", "done"] as const
+const MAX_REPO_CWD_LENGTH = 4096
+const PRESET_NAME_PATTERN = /^[a-zA-Z][a-zA-Z0-9_-]*$/
+
 export class DaemonError extends Error {
 	constructor(
 		readonly code: string,
@@ -134,7 +139,7 @@ export class CoderLoopDaemon {
 			this.state = "running"
 			await this.appendDaemonLogForAllChains({ type: "daemon.start", pid: process.pid, socketPath: this.paths.daemonSocket })
 			this.startSchedulerLoop()
-			this.requestSchedulerTick()
+			this.queueSchedulerTick()
 			return this
 		} catch (error) {
 			await this.stopAfterStartFailure()
@@ -402,20 +407,27 @@ export class CoderLoopDaemon {
 
 	private async handleChainDelete(args: JsonObject): Promise<JsonObject> {
 		const chain = this.resolveChain(args)
+		if (chain.status === "deleted") return { chain: chainToJson(chain), alreadyDeleted: true }
 		const updated = this.requireStore().updateChain(chain.id, { status: "deleted" })
-		await this.requestSchedulerTick()
-		return { chain: chainToJson(updated) }
+		this.queueSchedulerTick()
+		return { chain: chainToJson(updated), alreadyDeleted: false }
 	}
 
 	private async handleItemAdd(args: JsonObject): Promise<JsonObject> {
 		const chain = this.resolveChain(args)
+		const store = this.requireStore()
+		const rawExtra = optionalJsonObject(args, "extra") ?? {}
+		const topLevelDependsOn = optionalDependsOn(args, "dependsOn")
+		const extraDependsOn = topLevelDependsOn === undefined ? optionalDependsOn(rawExtra, "dependsOn") : undefined
+		const dependsOn = topLevelDependsOn === undefined ? extraDependsOn : topLevelDependsOn
+		if (dependsOn !== undefined) validateDependsOnGraph(store.listItems(chain.id), null, dependsOn)
 		const input: CreateItemInput = {
 			chainId: chain.id,
-			issueNumber: requiredInteger(args, "issueNumber"),
-			repoCwd: requiredString(args, "repoCwd"),
-			status: optionalString(args, "status") ?? "queued",
+			issueNumber: requiredPositiveInteger(args, "issueNumber"),
+			repoCwd: await validateRepoCwdForRequest(requiredString(args, "repoCwd")),
+			status: await this.validateItemStatusForRequest(chain, optionalString(args, "status") ?? "queued"),
 			attempts: optionalInteger(args, "attempts") ?? 0,
-			extra: optionalJsonObject(args, "extra") ?? {},
+			extra: withDependsOn(rawExtra, dependsOn),
 		}
 		assignOptional(input, "title", optionalStringOrNull(args, "title"))
 		assignOptional(input, "priority", optionalStringOrNull(args, "priority"))
@@ -426,8 +438,8 @@ export class CoderLoopDaemon {
 		assignOptional(input, "evidenceDir", optionalStringOrNull(args, "evidenceDir"))
 		assignOptional(input, "agentCwd", optionalStringOrNull(args, "agentCwd"))
 		assignOptional(input, "runner", optionalRunner(args, "runner"))
-		const item = this.requireStore().createItem(input)
-		await this.requestSchedulerTick()
+		const item = store.createItem(input)
+		this.queueSchedulerTick()
 		return { item: itemToJson(item) }
 	}
 
@@ -439,9 +451,16 @@ export class CoderLoopDaemon {
 	private async handleItemUpdate(args: JsonObject): Promise<JsonObject> {
 		const item = this.resolveItem(args)
 		const fields = optionalJsonObject(args, "fields") ?? args
+		const store = this.requireStore()
 		const input: UpdateItemInput = {}
-		assignOptional(input, "repoCwd", optionalString(fields, "repoCwd") ?? undefined)
-		assignOptional(input, "status", optionalString(fields, "status") ?? undefined)
+		const repoCwd = optionalString(fields, "repoCwd")
+		if (repoCwd !== null) assignOptional(input, "repoCwd", await validateRepoCwdForRequest(repoCwd))
+		const status = optionalString(fields, "status")
+		if (status !== null) {
+			const chain = this.requireStore().getChain(item.chainId)
+			if (chain === null) throw new DaemonError("not_found", `chain ${item.chainId} was not found`, { chainId: item.chainId })
+			assignOptional(input, "status", await this.validateItemStatusForRequest(chain, status))
+		}
 		assignOptional(input, "attempts", optionalInteger(fields, "attempts") ?? undefined)
 		assignOptional(input, "title", optionalStringOrNull(fields, "title"))
 		assignOptional(input, "priority", optionalStringOrNull(fields, "priority"))
@@ -452,9 +471,18 @@ export class CoderLoopDaemon {
 		assignOptional(input, "evidenceDir", optionalStringOrNull(fields, "evidenceDir"))
 		assignOptional(input, "agentCwd", optionalStringOrNull(fields, "agentCwd"))
 		assignOptional(input, "runner", optionalRunner(fields, "runner"))
-		assignOptional(input, "extra", optionalJsonObject(fields, "extra"))
-		const updated = this.requireStore().updateItem(item.id, input)
-		await this.requestSchedulerTick()
+		const rawExtra = optionalJsonObject(fields, "extra")
+		const topLevelDependsOn = optionalDependsOn(fields, "dependsOn")
+		const extraDependsOn = topLevelDependsOn === undefined && rawExtra !== undefined ? optionalDependsOn(rawExtra, "dependsOn") : undefined
+		const dependsOn = topLevelDependsOn === undefined ? extraDependsOn : topLevelDependsOn
+		if (dependsOn !== undefined) {
+			validateDependsOnGraph(store.listItems(item.chainId), item.id, dependsOn)
+			input.extra = withDependsOn(rawExtra ?? item.extra, dependsOn)
+		} else {
+			assignOptional(input, "extra", rawExtra)
+		}
+		const updated = store.updateItem(item.id, input)
+		this.queueSchedulerTick()
 		return { item: itemToJson(updated) }
 	}
 
@@ -483,7 +511,7 @@ export class CoderLoopDaemon {
 			return item
 		}
 		const chain = this.resolveChain(args)
-		const issueNumber = requiredInteger(args, "issueNumber")
+		const issueNumber = requiredPositiveInteger(args, "issueNumber")
 		const item = this.requireStore().getItemByIssue(chain.id, issueNumber)
 		if (item === null) throw new DaemonError("not_found", `item for issue ${issueNumber} was not found`, { chainId: chain.id, issueNumber })
 		return item
@@ -502,7 +530,7 @@ export class CoderLoopDaemon {
 		if (!this.schedulerEnabled()) return
 		const intervalMs = this.options.scheduler?.intervalMs ?? 1_000
 		this.schedulerTimer = setInterval(() => {
-			this.requestSchedulerTick()
+			this.queueSchedulerTick()
 		}, intervalMs)
 	}
 
@@ -518,6 +546,12 @@ export class CoderLoopDaemon {
 		} finally {
 			this.schedulerTickInFlight = null
 		}
+	}
+
+	private queueSchedulerTick(): void {
+		void this.requestSchedulerTick().catch((error: unknown) => {
+			console.warn(`coder-loop daemon warning: scheduler tick failed after IPC ack: ${errorMessage(error)}`)
+		})
 	}
 
 	private async runSchedulerTicks(): Promise<void> {
@@ -554,6 +588,28 @@ export class CoderLoopDaemon {
 
 	private warnSkippedInvalidChain(chain: ChainRecord, error: RuntimePathError, context: string): void {
 		console.warn(`coder-loop daemon warning: skipped ${context} for invalid chain ${chain.id} (${JSON.stringify(chain.name)}): ${error.message}`)
+	}
+
+	private async validateItemStatusForRequest(chain: ChainRecord, status: string): Promise<string> {
+		const allowed = await this.allowedItemStatuses(chain)
+		if (!allowed.has(status)) {
+			throw new DaemonError("invalid_request", `item status must be one of: ${[...allowed].sort().join(", ")}`, { status })
+		}
+		return status
+	}
+
+	private async allowedItemStatuses(chain: ChainRecord): Promise<Set<string>> {
+		const scheduler = this.options.scheduler ?? {}
+		if (scheduler.pendingStatuses === undefined && scheduler.terminalStatuses === undefined) {
+			const presetStatuses = await readBundledPresetStatuses(chain.preset)
+			if (presetStatuses !== null) return new Set([...presetStatuses.continuable, ...presetStatuses.terminal, "queued", "in_progress"])
+		}
+		return new Set([
+			...(scheduler.pendingStatuses ?? FALLBACK_PENDING_STATUSES),
+			...(scheduler.terminalStatuses ?? FALLBACK_TERMINAL_STATUSES),
+			"queued",
+			"in_progress",
+		])
 	}
 }
 
@@ -701,6 +757,12 @@ function requiredInteger(record: UnknownRecord, key: string): number {
 	return value
 }
 
+function requiredPositiveInteger(record: UnknownRecord, key: string): number {
+	const value = requiredInteger(record, key)
+	if (value < 1) throw new DaemonError("invalid_request", `${key} must be a positive integer`)
+	return value
+}
+
 function optionalInteger(record: UnknownRecord, key: string): number | null {
 	const value = record[key]
 	if (value === undefined) return null
@@ -735,6 +797,19 @@ function optionalJsonObject(record: UnknownRecord, key: string): JsonObject | un
 	return value
 }
 
+function optionalDependsOn(record: UnknownRecord, key: string): number[] | null | undefined {
+	const value = record[key]
+	if (value === undefined) return undefined
+	if (value === null) return null
+	if (!Array.isArray(value)) throw new DaemonError("invalid_request", `${key} must be an array of positive item ids or null when provided`)
+	return value.map((entry, index) => {
+		if (typeof entry !== "number" || !Number.isInteger(entry) || entry < 1) {
+			throw new DaemonError("invalid_request", `${key}[${index}] must be a positive item id`, { index, value: toJsonValue(entry) })
+		}
+		return entry
+	})
+}
+
 function optionalRunner(record: UnknownRecord, key: string): AgentRunnerKind | null | undefined {
 	const value = record[key]
 	if (value === undefined) return undefined
@@ -745,6 +820,78 @@ function optionalRunner(record: UnknownRecord, key: string): AgentRunnerKind | n
 
 function assignOptional<T extends object, K extends keyof T>(target: T, key: K, value: T[K] | undefined): void {
 	if (value !== undefined) target[key] = value
+}
+
+async function validateRepoCwdForRequest(input: string): Promise<string> {
+	if (input.length > MAX_REPO_CWD_LENGTH) throw new DaemonError("invalid_request", `repoCwd must be ${MAX_REPO_CWD_LENGTH} characters or fewer`)
+	if (!isAbsolute(input)) throw new DaemonError("invalid_request", "repoCwd must be an absolute path", { repoCwd: input })
+	if (/[\u0000-\u001f\u007f]/u.test(input)) throw new DaemonError("invalid_request", "repoCwd must not contain control characters", { repoCwd: input })
+	let pathStat: Awaited<ReturnType<typeof stat>>
+	try {
+		pathStat = await stat(input)
+	} catch (error) {
+		throw new DaemonError("invalid_request", `repoCwd must exist and be a directory: ${errorMessage(error)}`, { repoCwd: input })
+	}
+	if (!pathStat.isDirectory()) throw new DaemonError("invalid_request", "repoCwd must be a directory", { repoCwd: input })
+	return input
+}
+
+async function readBundledPresetStatuses(presetName: string): Promise<{ continuable: string[]; terminal: string[] } | null> {
+	if (!PRESET_NAME_PATTERN.test(presetName)) return null
+	try {
+		const raw = await readFile(resolve(import.meta.dir, "../presets", presetName, "preset.toml"), "utf-8")
+		const parsed = Bun.TOML.parse(raw) as unknown
+		if (!isRecord(parsed) || !isRecord(parsed.statuses)) return null
+		const continuable = parsed.statuses.continuable
+		const terminal = parsed.statuses.terminal
+		if (!Array.isArray(continuable) || !continuable.every((status) => typeof status === "string")) return null
+		if (!Array.isArray(terminal) || !terminal.every((status) => typeof status === "string")) return null
+		return { continuable, terminal }
+	} catch {
+		return null
+	}
+}
+
+function validateDependsOnGraph(items: readonly ItemRecord[], itemId: number | null, dependsOn: readonly number[] | null): void {
+	if (dependsOn === null) return
+	const byId = new Map(items.map((item) => [item.id, item]))
+	for (const dependencyId of dependsOn) {
+		if (!byId.has(dependencyId)) throw new DaemonError("invalid_request", `dependsOn references unknown item ${dependencyId}`, { itemId: itemId ?? null, dependsOn: [...dependsOn] })
+	}
+	if (itemId === null) return
+
+	const visit = (candidateId: number, path: number[]): void => {
+		if (candidateId === itemId) {
+			throw new DaemonError("invalid_request", `dependsOn would create a dependency cycle through item ${itemId}`, { itemId, path: [...path, candidateId] })
+		}
+		if (path.includes(candidateId)) return
+		const candidate = byId.get(candidateId)
+		if (candidate === undefined) return
+		for (const nextId of dependsOnFromStoredExtra(candidate.extra)) visit(nextId, [...path, candidateId])
+	}
+
+	for (const dependencyId of dependsOn) visit(dependencyId, [])
+}
+
+function dependsOnFromStoredExtra(extra: JsonObject): number[] {
+	const raw = extra.dependsOn
+	if (!Array.isArray(raw)) return []
+	return raw.filter((value): value is number => typeof value === "number" && Number.isInteger(value) && value >= 1)
+}
+
+function withDependsOn(extra: JsonObject, dependsOn: readonly number[] | null | undefined): JsonObject {
+	if (dependsOn === undefined) return extra
+	const next: JsonObject = { ...extra }
+	if (dependsOn === null) {
+		delete next.dependsOn
+	} else {
+		next.dependsOn = [...dependsOn]
+	}
+	return next
+}
+
+function toJsonValue(value: unknown): JsonValue {
+	return isJsonValue(value) ? value : String(value)
 }
 
 function isRecord(value: unknown): value is UnknownRecord {
