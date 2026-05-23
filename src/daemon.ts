@@ -83,7 +83,18 @@ type UnknownRecord = Record<string, unknown>
 const FALLBACK_PENDING_STATUSES = ["queued", "changes_requested"] as const
 const FALLBACK_TERMINAL_STATUSES = ["blocked", "moot", "done"] as const
 const MAX_REPO_CWD_LENGTH = 4096
+const MAX_REPOSITORY_REF_LENGTH = 200
 const PRESET_NAME_PATTERN = /^[a-zA-Z][a-zA-Z0-9_-]*$/
+const REPOSITORY_REF_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}[A-Za-z0-9])?\/[A-Za-z0-9._-]{1,100}$/
+const CHAIN_CREATE_ARG_KEYS = [
+	"name",
+	"preset",
+	"repository",
+	"baseBranch",
+	"metadata",
+	"umbrellaIssue",
+	"umbrellaRepo",
+] as const
 
 export class DaemonError extends Error {
 	constructor(
@@ -297,10 +308,11 @@ export class CoderLoopDaemon {
 	}
 
 	private async handleChainCreate(args: JsonObject): Promise<JsonObject> {
+		validateKnownKeys(args, "chain.create args", CHAIN_CREATE_ARG_KEYS)
 		const input: CreateChainInput = {
 			name: validateChainNameForRequest(requiredString(args, "name")),
 			preset: optionalString(args, "preset") ?? "gh-issue-pr-iteration",
-			repository: requiredString(args, "repository"),
+			repository: validateRepositoryForRequest(requiredString(args, "repository")),
 			baseBranch: optionalString(args, "baseBranch") ?? "main",
 			status: "active",
 			metadata: optionalJsonObject(args, "metadata") ?? {},
@@ -670,7 +682,11 @@ function defaultDaemonPrompt(): string {
 
 function validateChainNameForRequest(input: string): string {
 	try {
-		return sanitizeChainName(input)
+		const sanitized = sanitizeChainName(input)
+		if (sanitized.startsWith("-")) {
+			throw new DaemonError("invalid_request", "chain name must not start with hyphen", { reason: "leading_hyphen", input })
+		}
+		return sanitized
 	} catch (error) {
 		if (isInvalidChainNameError(error)) {
 			throw new DaemonError("invalid_request", error.message, { reason: error.code, input: error.input })
@@ -681,6 +697,23 @@ function validateChainNameForRequest(input: string): string {
 
 function isInvalidChainNameError(error: unknown): error is RuntimePathError {
 	return error instanceof RuntimePathError && error.code === "invalid_chain_name"
+}
+
+function validateRepositoryForRequest(input: string): string {
+	if (input.length > MAX_REPOSITORY_REF_LENGTH) {
+		throw new DaemonError("invalid_request", `repository must be ${MAX_REPOSITORY_REF_LENGTH} characters or fewer`, { repository: input })
+	}
+	if (/[\u0000-\u001f\u007f]/u.test(input)) {
+		throw new DaemonError("invalid_request", "repository must not contain control characters", { repository: input })
+	}
+	if (!REPOSITORY_REF_PATTERN.test(input)) {
+		throw new DaemonError("invalid_request", "repository must use owner/repo format", { repository: input })
+	}
+	const repoName = input.slice(input.indexOf("/") + 1)
+	if (repoName === "." || repoName === "..") {
+		throw new DaemonError("invalid_request", "repository name must not be a reserved path segment", { repository: input })
+	}
+	return input
 }
 
 function formatDaemonBatchTimestamp(date: Date): string {
@@ -795,6 +828,18 @@ function optionalJsonObject(record: UnknownRecord, key: string): JsonObject | un
 	if (value === undefined) return undefined
 	if (!isRecord(value) || !isJsonObject(value)) throw new DaemonError("invalid_request", `${key} must be a JSON object when provided`)
 	return value
+}
+
+function validateKnownKeys(record: UnknownRecord, label: string, allowedKeys: readonly string[]): void {
+	const allowed = new Set(allowedKeys)
+	for (const key of Object.keys(record)) {
+		if (!allowed.has(key)) {
+			throw new DaemonError("invalid_request", `${label} contains unsupported field: ${key}`, {
+				field: key,
+				allowed: [...allowedKeys],
+			})
+		}
+	}
 }
 
 function optionalDependsOn(record: UnknownRecord, key: string): number[] | null | undefined {
