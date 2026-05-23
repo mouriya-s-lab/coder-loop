@@ -61,7 +61,7 @@ describe("daemon", () => {
 	test("socket chain.create rejects invalid names before db insert", async () => {
 		const fixture = await startFixture("chain-create-invalid", { schedulerEnabled: false })
 		try {
-			const invalidNames = ["..", ".", "a/b", "../escape", "/etc/hi", "a".repeat(256), "bad\tname"]
+			const invalidNames = ["..", ".", "a/b", "../escape", "/etc/hi", "ab cd", "-flag", "a".repeat(256), "bad\tname"]
 
 			for (const name of invalidNames) {
 				const response = await request(fixture, "chain.create", {
@@ -75,6 +75,55 @@ describe("daemon", () => {
 				expect(Array.isArray(listed)).toBe(true)
 				expect(listed).toHaveLength(0)
 			}
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("socket chain.create validates repository format", async () => {
+		const fixture = await startFixture("chain-create-invalid-repository", { schedulerEnabled: false })
+		try {
+			const invalidRepositories = [
+				"x/y\nbad",
+				"x",
+				"x/",
+				"/y",
+				"x/y/z",
+				"bad owner/repo",
+				"owner/.",
+				"owner/..",
+				"owner/repo\u007f",
+				"owner-/repo",
+			]
+
+			for (const [index, repository] of invalidRepositories.entries()) {
+				const response = await request(fixture, "chain.create", {
+					name: `repo-check-${index}`,
+					repository,
+				})
+
+				expectInvalid(response)
+				const listed = expectOk(await request(fixture, "chain.list")).chains
+				expect(Array.isArray(listed)).toBe(true)
+				expect(listed).toHaveLength(0)
+			}
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("socket chain.create rejects undeclared args", async () => {
+		const fixture = await startFixture("chain-create-strict-args", { schedulerEnabled: false })
+		try {
+			const args = JSON.parse(
+				`{"name":"strict-args","repository":"mouriya-s-lab/coder-loop","__proto__":{"polluted":1},"constructor":{"prototype":{"polluted":2}}}`,
+			)
+
+			expectInvalid(await request(fixture, "chain.create", args))
+			expect(Object.prototype).not.toHaveProperty("polluted")
+			const listed = expectOk(await request(fixture, "chain.list")).chains
+			expect(Array.isArray(listed)).toBe(true)
+			expect(listed).toHaveLength(0)
 		} finally {
 			await fixture.daemon.stop()
 		}
