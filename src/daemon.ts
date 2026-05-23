@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { createConnection, createServer, type Server, type Socket } from "node:net"
+import { existsSync } from "node:fs"
 import { appendFile, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises"
 import { isAbsolute, resolve } from "node:path"
 
@@ -82,9 +83,11 @@ type UnknownRecord = Record<string, unknown>
 
 const FALLBACK_PENDING_STATUSES = ["queued", "changes_requested"] as const
 const FALLBACK_TERMINAL_STATUSES = ["blocked", "moot", "done"] as const
+const DEFAULT_PRESET_NAME = "gh-issue-pr-iteration"
+const BUNDLED_PRESETS_DIR = resolve(import.meta.dir, "../presets")
 const MAX_REPO_CWD_LENGTH = 4096
 const MAX_REPOSITORY_REF_LENGTH = 200
-const PRESET_NAME_PATTERN = /^[a-zA-Z][a-zA-Z0-9_-]*$/
+const PRESET_NAME_PATTERN = /^[a-z][a-z0-9-]*$/
 const REPOSITORY_REF_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}[A-Za-z0-9])?\/[A-Za-z0-9._-]{1,100}$/
 const CHAIN_CREATE_ARG_KEYS = [
 	"name",
@@ -311,7 +314,7 @@ export class CoderLoopDaemon {
 		validateKnownKeys(args, "chain.create args", CHAIN_CREATE_ARG_KEYS)
 		const input: CreateChainInput = {
 			name: validateChainNameForRequest(requiredString(args, "name")),
-			preset: optionalString(args, "preset") ?? "gh-issue-pr-iteration",
+			preset: await validateBundledPresetForRequest(optionalString(args, "preset") ?? DEFAULT_PRESET_NAME),
 			repository: validateRepositoryForRequest(requiredString(args, "repository")),
 			baseBranch: optionalString(args, "baseBranch") ?? "main",
 			status: "active",
@@ -576,11 +579,12 @@ export class CoderLoopDaemon {
 	private buildSchedulerOptions(): SchedulerOptions {
 		const scheduler = this.options.scheduler ?? {}
 		const externalOnEvent = scheduler.onEvent
+		const schedulerPresetDir = scheduler.presetDir
 		const options: SchedulerOptions = {
 			store: this.requireStore(),
 			state: this.schedulerState,
 			runner: scheduler.runner ?? defaultDaemonRunner(),
-			presetDir: scheduler.presetDir ?? resolve(import.meta.dir, "../presets/gh-issue-pr-iteration"),
+			presetDir: schedulerPresetDir ?? bundledPresetDir(DEFAULT_PRESET_NAME),
 			prompt: scheduler.prompt ?? defaultDaemonPrompt,
 			onEvent: async (event) => {
 				await this.appendDaemonLogForChainId(event.chainId, { type: "scheduler.event", event: event as unknown as JsonObject })
@@ -588,6 +592,11 @@ export class CoderLoopDaemon {
 			},
 		}
 		if (scheduler.phase !== undefined) options.phase = scheduler.phase
+		if (scheduler.presetDirForChain !== undefined) {
+			options.presetDirForChain = scheduler.presetDirForChain
+		} else if (schedulerPresetDir === undefined) {
+			options.presetDirForChain = (chain) => bundledPresetDirForScheduler(chain)
+		}
 		if (scheduler.worktreeManager !== undefined) options.worktreeManager = scheduler.worktreeManager
 		options.loopDataRootOptions = this.options
 		if (scheduler.pendingStatuses !== undefined) options.pendingStatuses = scheduler.pendingStatuses
@@ -884,7 +893,7 @@ async function validateRepoCwdForRequest(input: string): Promise<string> {
 async function readBundledPresetStatuses(presetName: string): Promise<{ continuable: string[]; terminal: string[] } | null> {
 	if (!PRESET_NAME_PATTERN.test(presetName)) return null
 	try {
-		const raw = await readFile(resolve(import.meta.dir, "../presets", presetName, "preset.toml"), "utf-8")
+		const raw = await readFile(resolve(bundledPresetDir(presetName), "preset.toml"), "utf-8")
 		const parsed = Bun.TOML.parse(raw) as unknown
 		if (!isRecord(parsed) || !isRecord(parsed.statuses)) return null
 		const continuable = parsed.statuses.continuable
@@ -895,6 +904,41 @@ async function readBundledPresetStatuses(presetName: string): Promise<{ continua
 	} catch {
 		return null
 	}
+}
+
+async function validateBundledPresetForRequest(input: string): Promise<string> {
+	if (!PRESET_NAME_PATTERN.test(input)) {
+		throw new DaemonError("invalid_request", `preset must match ${PRESET_NAME_PATTERN.source}`, { preset: input })
+	}
+	const presetFile = resolve(bundledPresetDir(input), "preset.toml")
+	try {
+		const presetStat = await stat(presetFile)
+		if (!presetStat.isFile()) {
+			throw new DaemonError("invalid_request", `unknown preset: ${input}`, { preset: input })
+		}
+	} catch (error) {
+		if (error instanceof DaemonError) throw error
+		throw new DaemonError("invalid_request", `unknown preset: ${input}`, { preset: input })
+	}
+	return input
+}
+
+function bundledPresetDir(presetName: string): string {
+	return resolve(BUNDLED_PRESETS_DIR, presetName)
+}
+
+function bundledPresetDirForScheduler(chain: ChainRecord): string {
+	const fallback = bundledPresetDir(DEFAULT_PRESET_NAME)
+	if (!PRESET_NAME_PATTERN.test(chain.preset)) {
+		console.warn(`coder-loop daemon warning: chain ${chain.id} has invalid preset ${JSON.stringify(chain.preset)}; using ${DEFAULT_PRESET_NAME}`)
+		return fallback
+	}
+	const dir = bundledPresetDir(chain.preset)
+	if (!existsSync(resolve(dir, "preset.toml"))) {
+		console.warn(`coder-loop daemon warning: chain ${chain.id} references unknown preset ${JSON.stringify(chain.preset)}; using ${DEFAULT_PRESET_NAME}`)
+		return fallback
+	}
+	return dir
 }
 
 function validateDependsOnGraph(items: readonly ItemRecord[], itemId: number | null, dependsOn: readonly number[] | null): void {

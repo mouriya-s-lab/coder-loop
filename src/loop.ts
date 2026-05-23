@@ -27,7 +27,7 @@ import {
 
 const PKG_ROOT = resolve(import.meta.dir, "..")
 const DEFAULT_PRESET_NAME = "gh-issue-pr-iteration"
-const PRESET_NAME_PATTERN = /^[a-zA-Z][a-zA-Z0-9_-]*$/
+const PRESET_NAME_PATTERN = /^[a-z][a-z0-9-]*$/
 
 const DEFAULT_CONFIG_FILE = ".coder-loop/runtime/config.json"
 const DEFAULT_CONFIG_FILE_TOML = ".coder-loop/runtime/config.toml"

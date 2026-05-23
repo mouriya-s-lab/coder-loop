@@ -129,6 +129,28 @@ describe("daemon", () => {
 		}
 	})
 
+	test("socket chain.create validates preset name and existence before db insert", async () => {
+		const fixture = await startFixture("chain-create-invalid-preset", { schedulerEnabled: false })
+		try {
+			const invalidPresets = ["../etc", "bad\nname", "bad name", "Bad", "bad_name", "-bad", "1bad", "non-existent"]
+
+			for (const [index, preset] of invalidPresets.entries()) {
+				const response = await request(fixture, "chain.create", {
+					name: `preset-check-${index}`,
+					preset,
+					repository: "mouriya-s-lab/coder-loop",
+				})
+
+				expectInvalid(response)
+				const listed = expectOk(await request(fixture, "chain.list")).chains
+				expect(Array.isArray(listed)).toBe(true)
+				expect(listed).toHaveLength(0)
+			}
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("daemon startup skips invalid existing chain rows", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-invalid-existing-chain`)
 		const loopDataRoot = resolve(root, "ld")
@@ -508,6 +530,34 @@ describe("daemon", () => {
 		}
 	})
 
+	test("daemon scheduler uses bundled preset directory from the chain", async () => {
+		const fixture = await startFixture("scheduler-chain-preset", { schedulerIntervalMs: 1_000, schedulerPresetDir: null })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "scheduler-chain-preset",
+				preset: "single-phase-example",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 215,
+				repoCwd: REPO_ROOT,
+				extra: { sleepMs: 5, exitCode: 0 },
+			})
+
+			await waitFor(async () => readItem(fixture.loopDataRoot, chainId, 215), (candidate) => candidate?.status === "done")
+			const spawnEvent = fixture.schedulerEvents.find((event) => event.type === "agent.spawn")
+			expect(spawnEvent).toMatchObject({
+				type: "agent.spawn",
+				chainId,
+				presetDir: resolve(REPO_ROOT, "presets/single-phase-example"),
+			})
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("daemon db unavailable explicit fail", async () => {
 		const rootFile = resolve(TEST_ROOT, `not-a-dir-${++nextFixtureId}`)
 		await mkdir(resolve(rootFile, ".."), { recursive: true })
@@ -546,6 +596,7 @@ type Fixture = {
 type FixtureOptions = {
 	schedulerEnabled?: boolean
 	schedulerIntervalMs?: number
+	schedulerPresetDir?: string | null
 	worktreeManager?: SchedulerWorktreeManager
 }
 
@@ -578,7 +629,7 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 			enabled: options.schedulerEnabled ?? true,
 			intervalMs: options.schedulerIntervalMs ?? 20,
 			runner: scheduler,
-			presetDir: PRESET_DIR,
+			...(options.schedulerPresetDir === null ? {} : { presetDir: options.schedulerPresetDir ?? PRESET_DIR }),
 			worktreeManager,
 			prompt: ({ item, runId }) =>
 				JSON.stringify({

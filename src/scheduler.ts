@@ -82,6 +82,7 @@ export type SchedulerSpawnContext = {
 	slot: SchedulerSlot
 	runId: string
 	worktreePath: string
+	presetDir: string
 }
 
 export type SchedulerWorktreeContext = {
@@ -94,7 +95,7 @@ export type SchedulerWorktreeManager = (context: SchedulerWorktreeContext) => Pr
 
 export type SchedulerEvent =
 	| { type: "slot.busy"; slotKey: string; chainId: number; repoCwd: string; activeRunId: string }
-	| { type: "agent.spawn"; slotKey: string; chainId: number; itemId: number; runId: string; pid: number | null; worktreePath: string }
+	| { type: "agent.spawn"; slotKey: string; chainId: number; itemId: number; runId: string; pid: number | null; worktreePath: string; presetDir: string }
 	| { type: "agent.exit"; slotKey: string; chainId: number; itemId: number; runId: string; exitCode: number; status: string }
 	| { type: "chain.completed"; chainId: number; chainName: string; runId?: string }
 
@@ -103,6 +104,7 @@ export type SchedulerOptions = {
 	state: SchedulerState
 	runner: AgentRunnerSelection
 	presetDir: string
+	presetDirForChain?: (chain: ChainRecord) => string
 	phase?: string
 	prompt:
 		| string
@@ -268,13 +270,14 @@ async function spawnSchedulerRun(
 		updatedAt: startedAt,
 	})
 
-	const context: SchedulerSpawnContext = { chain, item, slot, runId, worktreePath }
+	const presetDir = schedulerPresetDir(options, chain)
+	const context: SchedulerSpawnContext = { chain, item, slot, runId, worktreePath, presetDir }
 	const prompt = typeof options.prompt === "string" ? options.prompt : await options.prompt(context)
 	const runnerPlan = buildRunnerInvocation(
 		options.runner,
 		prompt,
 		freshResume(),
-		invocationPaths(item.repoCwd, worktreePath, options.presetDir, resolveLoopDataPaths(options.loopDataRootOptions).root),
+		invocationPaths(item.repoCwd, worktreePath, presetDir, resolveLoopDataPaths(options.loopDataRootOptions).root),
 	)
 	await initializeSchedulerRunArtifacts(options, chain, item, runId, phase, startedAt, worktreePath)
 	const child = spawn(runnerPlan.binary, runnerPlan.args, {
@@ -305,6 +308,7 @@ async function spawnSchedulerRun(
 		runId,
 		pid: activeRun.pid,
 		worktreePath,
+		presetDir,
 	})
 	return activeRun
 }
@@ -464,6 +468,10 @@ function freshResume(): ResumeDecision {
 
 function invocationPaths(targetCwd: string, agentCwd: string, presetDir: string, loopDataRoot: string): RunnerInvocationPaths {
 	return { targetCwd, agentCwd, presetDir, loopDataRoot }
+}
+
+function schedulerPresetDir(options: SchedulerOptions, chain: ChainRecord): string {
+	return options.presetDirForChain?.(chain) ?? options.presetDir
 }
 
 async function emit(options: SchedulerOptions, event: SchedulerEvent): Promise<void> {
