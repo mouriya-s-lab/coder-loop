@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto"
+import { Buffer } from "node:buffer"
 import { createConnection, createServer, type Server, type Socket } from "node:net"
 import { existsSync } from "node:fs"
-import { appendFile, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises"
+import { appendFile, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises"
 import { isAbsolute, resolve } from "node:path"
 
 import type { AgentRunnerKind, AgentRunnerSelection, JsonObject, JsonValue } from "./loop"
@@ -20,7 +21,6 @@ import {
 	openSqliteStateStore,
 	type RunRecord,
 	type SqliteStateStore,
-	type UpdateChainInput,
 	type UpdateItemInput,
 } from "./sqlite-state"
 import {
@@ -85,8 +85,11 @@ const FALLBACK_PENDING_STATUSES = ["queued", "changes_requested"] as const
 const FALLBACK_TERMINAL_STATUSES = ["blocked", "moot", "done"] as const
 const DEFAULT_PRESET_NAME = "gh-issue-pr-iteration"
 const BUNDLED_PRESETS_DIR = resolve(import.meta.dir, "../presets")
+const MAX_DAEMON_REQUEST_BYTES = 1_048_576
+const MAX_CHAIN_METADATA_BYTES = 16_384
 const MAX_REPO_CWD_LENGTH = 4096
 const MAX_REPOSITORY_REF_LENGTH = 200
+const ORPHAN_CHAIN_DIR_PREFIX = ".orphan-"
 const PRESET_NAME_PATTERN = /^[a-z][a-z0-9-]*$/
 const REPOSITORY_REF_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}[A-Za-z0-9])?\/[A-Za-z0-9._-]{1,100}$/
 const CHAIN_CREATE_ARG_KEYS = [
@@ -147,6 +150,7 @@ export class CoderLoopDaemon {
 			this.ownsDaemonSocket = true
 			const store = openSqliteStateStore(this.options)
 			this.store = store
+			await this.quarantineOrphanChainDirectories()
 			await this.ensureRuntimeLayoutForExistingChains()
 			await this.recoverStaleSchedulerState()
 			await writeFile(this.paths.daemonPid, `${process.pid}\n`)
@@ -245,7 +249,9 @@ export class CoderLoopDaemon {
 		this.sockets.add(socket)
 		socket.setEncoding("utf-8")
 		let buffer = ""
+		let oversizedRequestRejected = false
 		socket.on("data", (chunk: string) => {
+			if (oversizedRequestRejected) return
 			buffer += chunk
 			let newlineIndex = buffer.indexOf("\n")
 			while (newlineIndex !== -1) {
@@ -253,6 +259,12 @@ export class CoderLoopDaemon {
 				buffer = buffer.slice(newlineIndex + 1)
 				if (line.trim() !== "") void this.handleLine(socket, line)
 				newlineIndex = buffer.indexOf("\n")
+			}
+			if (byteLength(buffer) > MAX_DAEMON_REQUEST_BYTES) {
+				oversizedRequestRejected = true
+				const actualBytes = byteLength(buffer)
+				buffer = ""
+				writeOversizedRequestResponse(socket, actualBytes)
 			}
 		})
 		socket.on("close", () => {
@@ -277,6 +289,7 @@ export class CoderLoopDaemon {
 	private async responseForLine(line: string): Promise<DaemonResponse> {
 		let requestId = "unknown"
 		try {
+			validateRequestLineSize(line)
 			const request = parseDaemonRequest(line)
 			requestId = request.id
 			const result = await this.handleRequest(request)
@@ -319,7 +332,7 @@ export class CoderLoopDaemon {
 			repository: validateRepositoryForRequest(requiredString(args, "repository")),
 			baseBranch: optionalString(args, "baseBranch") ?? "main",
 			status: "active",
-			metadata: optionalJsonObject(args, "metadata") ?? {},
+			metadata: sizedJsonObject(args, "metadata", MAX_CHAIN_METADATA_BYTES) ?? {},
 		}
 		const umbrellaIssue = optionalIntegerOrNull(args, "umbrellaIssue")
 		if (umbrellaIssue !== undefined) input.umbrellaIssue = umbrellaIssue
@@ -331,16 +344,14 @@ export class CoderLoopDaemon {
 		if (existing === null) {
 			chain = store.createChain(input)
 		} else {
-			const update: UpdateChainInput = {
-				preset: input.preset,
-				repository: input.repository,
-				baseBranch: input.baseBranch,
-				status: "active",
-				metadata: { ...existing.metadata, ...(input.metadata ?? {}) },
+			const conflicts = chainCreateConflicts(existing, input)
+			if (conflicts.length > 0) {
+				throw new DaemonError("conflict", `chain ${input.name} already exists with different fields`, {
+					chainName: input.name,
+					conflicts,
+				})
 			}
-			if (input.umbrellaIssue !== undefined) update.umbrellaIssue = input.umbrellaIssue
-			if (input.umbrellaRepo !== undefined) update.umbrellaRepo = input.umbrellaRepo
-			chain = store.updateChain(existing.id, update)
+			chain = existing
 		}
 		await this.ensureChainRuntimeLayout(chain.name)
 		await this.appendDaemonLog(chain.name, { type: "chain.layout", chainId: chain.id, chainName: chain.name, state: this.state })
@@ -371,6 +382,30 @@ export class CoderLoopDaemon {
 					continue
 				}
 				throw error
+			}
+		}
+	}
+
+	private async quarantineOrphanChainDirectories(): Promise<void> {
+		const knownNames = new Set(this.requireStore().listChains().map((chain) => chain.name))
+		const orphanRoot = resolve(this.paths.chainsDir, `${ORPHAN_CHAIN_DIR_PREFIX}${this.daemonBatchTimestamp}`)
+		let orphanRootCreated = false
+		const entries = await readdir(this.paths.chainsDir, { withFileTypes: true })
+		for (const entry of entries) {
+			if (!entry.isDirectory()) continue
+			if (entry.name.startsWith(ORPHAN_CHAIN_DIR_PREFIX)) continue
+			if (knownNames.has(entry.name)) continue
+			const source = resolve(this.paths.chainsDir, entry.name)
+			const destination = resolve(orphanRoot, entry.name)
+			try {
+				if (!orphanRootCreated) {
+					await mkdir(orphanRoot, { recursive: true })
+					orphanRootCreated = true
+				}
+				await rename(source, destination)
+				console.warn(`coder-loop daemon warning: moved orphan chain directory ${entry.name} to ${destination}`)
+			} catch (error) {
+				console.warn(`coder-loop daemon warning: unable to move orphan chain directory ${entry.name}: ${errorMessage(error)}`)
 			}
 		}
 	}
@@ -829,6 +864,38 @@ async function delay(ms: number): Promise<void> {
 	await new Promise((resolveDelay) => setTimeout(resolveDelay, ms))
 }
 
+function writeOversizedRequestResponse(socket: Socket, actualBytes: number): void {
+	const response: DaemonResponse = {
+		id: "unknown",
+		ok: false,
+		error: {
+			code: "request_too_large",
+			message: `request line must be ${MAX_DAEMON_REQUEST_BYTES} bytes or fewer`,
+			details: {
+				limitBytes: MAX_DAEMON_REQUEST_BYTES,
+				actualBytes,
+			},
+		},
+	}
+	socket.write(`${JSON.stringify(response)}\n`, () => {
+		socket.end()
+	})
+}
+
+function validateRequestLineSize(line: string): void {
+	const actualBytes = byteLength(line)
+	if (actualBytes > MAX_DAEMON_REQUEST_BYTES) {
+		throw new DaemonError("request_too_large", `request line must be ${MAX_DAEMON_REQUEST_BYTES} bytes or fewer`, {
+			limitBytes: MAX_DAEMON_REQUEST_BYTES,
+			actualBytes,
+		})
+	}
+}
+
+function byteLength(input: string): number {
+	return Buffer.byteLength(input, "utf8")
+}
+
 function parseDaemonRequest(line: string): DaemonRequest {
 	const parsed = parseJsonRecord(line)
 	const id = requiredString(parsed, "id")
@@ -940,6 +1007,20 @@ function optionalJsonObject(record: UnknownRecord, key: string): JsonObject | un
 	const value = record[key]
 	if (value === undefined) return undefined
 	if (!isRecord(value) || !isJsonObject(value)) throw new DaemonError("invalid_request", `${key} must be a JSON object when provided`)
+	return value
+}
+
+function sizedJsonObject(record: UnknownRecord, key: string, limitBytes: number): JsonObject | undefined {
+	const value = optionalJsonObject(record, key)
+	if (value === undefined) return undefined
+	const actualBytes = byteLength(JSON.stringify(value))
+	if (actualBytes > limitBytes) {
+		throw new DaemonError("request_too_large", `${key} must be ${limitBytes} bytes or fewer`, {
+			field: key,
+			limitBytes,
+			actualBytes,
+		})
+	}
 	return value
 }
 
@@ -1085,6 +1166,51 @@ function withDependsOn(extra: JsonObject, dependsOn: readonly number[] | null | 
 
 function toJsonValue(value: unknown): JsonValue {
 	return isJsonValue(value) ? value : String(value)
+}
+
+function chainCreateConflicts(existing: ChainRecord, requested: CreateChainInput): JsonObject[] {
+	const conflicts: JsonObject[] = []
+	const addConflict = (field: string, existingValue: JsonValue, requestedValue: JsonValue): void => {
+		if (jsonValuesEqual(existingValue, requestedValue)) return
+		conflicts.push({ field, existing: existingValue, requested: requestedValue })
+	}
+
+	addConflict("preset", existing.preset, requested.preset)
+	addConflict("repository", existing.repository, requested.repository)
+	addConflict("baseBranch", existing.baseBranch, requested.baseBranch)
+	addConflict("status", existing.status, requested.status ?? "active")
+	addConflict("umbrellaIssue", existing.umbrellaIssue, requested.umbrellaIssue ?? null)
+	addConflict("umbrellaRepo", existing.umbrellaRepo, requested.umbrellaRepo ?? null)
+
+	for (const [key, requestedValue] of Object.entries(requested.metadata ?? {})) {
+		const existingHasKey = Object.hasOwn(existing.metadata, key)
+		const existingValue = existing.metadata[key]
+		if (existingHasKey && jsonValuesEqual(existingValue, requestedValue)) continue
+		conflicts.push({
+			field: `metadata.${key}`,
+			existing: existingHasKey && existingValue !== undefined ? existingValue : null,
+			existingPresent: existingHasKey,
+			requested: requestedValue,
+		})
+	}
+
+	return conflicts
+}
+
+function jsonValuesEqual(left: JsonValue | undefined, right: JsonValue | undefined): boolean {
+	if (left === right) return true
+	if (Array.isArray(left) || Array.isArray(right)) {
+		if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false
+		return left.every((value, index) => jsonValuesEqual(value, right[index]))
+	}
+	if (isRecord(left) || isRecord(right)) {
+		if (!isRecord(left) || !isRecord(right)) return false
+		const leftKeys = Object.keys(left).sort()
+		const rightKeys = Object.keys(right).sort()
+		if (leftKeys.length !== rightKeys.length) return false
+		return leftKeys.every((key, index) => key === rightKeys[index] && jsonValuesEqual(left[key] as JsonValue | undefined, right[key] as JsonValue | undefined))
+	}
+	return false
 }
 
 function isRecord(value: unknown): value is UnknownRecord {
