@@ -771,6 +771,7 @@ function selectNextPendingItem(items: ItemRecord[], statuses: readonly string[])
 			if (left.priority === null && right.priority !== null) return 1
 			if (left.priority !== null && right.priority === null) return -1
 			if (left.priority !== right.priority) return String(left.priority).localeCompare(String(right.priority))
+			if (left.attempts !== right.attempts) return left.attempts - right.attempts
 			return left.id - right.id
 		})[0] ?? null
 }
