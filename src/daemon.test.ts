@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
+import { spawn } from "node:child_process"
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
@@ -466,6 +467,111 @@ describe("daemon", () => {
 		}
 	})
 
+	test("daemon startup recovers stale in_progress item and process group", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-startup-recovery`)
+		const loopDataRoot = resolve(root, "ld")
+		await mkdir(loopDataRoot, { recursive: true })
+		const stale = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+			detached: true,
+			stdio: "ignore",
+		})
+		stale.unref()
+		if (stale.pid === undefined) throw new Error("expected stale process pid")
+
+		const store = openSqliteStateStore({ loopDataRoot })
+		try {
+			const chain = store.createChain({
+				name: "startup-recovery-chain",
+				preset: "gh-issue-pr-iteration",
+				repository: "mouriya-s-lab/coder-loop",
+				baseBranch: "main",
+				status: "active",
+				metadata: {},
+			})
+			const item = store.createItem({
+				chainId: chain.id,
+				issueNumber: 217,
+				repoCwd: REPO_ROOT,
+				status: "in_progress",
+				attempts: 1,
+				lastRunId: "run-stale-217",
+				agentCwd: resolve(root, "worktree"),
+				title: "stale item",
+				extra: {},
+			})
+			store.recordRun({
+				runId: "run-stale-217",
+				chainId: chain.id,
+				itemId: item.id,
+				phase: "iteration",
+				startedAt: 1_800_000_000,
+				extra: {},
+			})
+			store.setCurrentRun({
+				chainId: chain.id,
+				phase: "iteration",
+				runId: "run-stale-217",
+				startedAt: 1_800_000_000,
+				extra: { itemId: item.id, pid: stale.pid, processGroupLeader: true },
+			})
+		} finally {
+			store.close()
+		}
+
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			shutdownGraceMs: 50,
+			scheduler: { enabled: false },
+		})
+		try {
+			expect(await waitForPidExit(stale.pid, 1_000)).toBe(true)
+			const recovered = await readItem(loopDataRoot, 1, 217)
+			expect(recovered?.status).toBe("changes_requested")
+			expect(recovered?.attempts).toBe(1)
+			expect(await readCurrentRun(loopDataRoot, 1)).toBeNull()
+			const status = record(expectOk(await sendDaemonRequest(daemon.snapshot().socketPath, daemonRequest("chain.status", { chainName: "startup-recovery-chain" }))))
+			expect(record(status.summary).recovery).toEqual({ needed: false, staleInProgressItems: [] })
+		} finally {
+			try {
+				process.kill(-(stale.pid), "SIGKILL")
+			} catch {
+				try {
+					process.kill(stale.pid, "SIGKILL")
+				} catch {
+					// Already reaped by daemon startup recovery.
+				}
+			}
+			await daemon.stop()
+		}
+	})
+
+	test("chain status marks stale in_progress rows without active slots", async () => {
+		const fixture = await startFixture("status-recovery-marker", { schedulerEnabled: false })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "status-recovery-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 217,
+				repoCwd: REPO_ROOT,
+				status: "in_progress",
+			})
+
+			const status = record(expectOk(await request(fixture, "chain.status", { chainId })))
+			expect(record(status.summary).activeSlots).toEqual([])
+			expect(record(record(status.summary).items).byStatus).toEqual({ in_progress: 1 })
+			expect(record(status.summary).recovery).toMatchObject({
+				needed: true,
+				staleInProgressItems: [{ issueNumber: 217, repoCwd: REPO_ROOT }],
+			})
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("subprocess exit callback writes db", async () => {
 		const fixture = await startFixture("exit-callback", { schedulerIntervalMs: 1_000 })
 		try {
@@ -700,6 +806,15 @@ async function readRun(loopDataRoot: string, runId: string) {
 	}
 }
 
+async function readCurrentRun(loopDataRoot: string, chainId: number) {
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		return store.getCurrentRun(chainId)
+	} finally {
+		store.close()
+	}
+}
+
 async function waitFor<T>(read: () => Promise<T>, predicate: (value: T) => boolean, timeoutMs = 2_000): Promise<T> {
 	const startedAt = Date.now()
 	let latest = await read()
@@ -709,6 +824,24 @@ async function waitFor<T>(read: () => Promise<T>, predicate: (value: T) => boole
 		latest = await read()
 	}
 	return latest
+}
+
+async function waitForPidExit(pid: number, timeoutMs: number): Promise<boolean> {
+	const startedAt = Date.now()
+	while (Date.now() - startedAt <= timeoutMs) {
+		if (!isPidAlive(pid)) return true
+		await new Promise((resolveWait) => setTimeout(resolveWait, 20))
+	}
+	return !isPidAlive(pid)
+}
+
+function isPidAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0)
+		return true
+	} catch {
+		return false
+	}
 }
 
 async function pathExists(path: string): Promise<boolean> {

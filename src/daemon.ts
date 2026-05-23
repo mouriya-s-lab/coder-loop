@@ -148,6 +148,7 @@ export class CoderLoopDaemon {
 			const store = openSqliteStateStore(this.options)
 			this.store = store
 			await this.ensureRuntimeLayoutForExistingChains()
+			await this.recoverStaleSchedulerState()
 			await writeFile(this.paths.daemonPid, `${process.pid}\n`)
 			this.ownsDaemonPid = true
 			this.state = "running"
@@ -402,6 +403,51 @@ export class CoderLoopDaemon {
 			...event,
 			recordedAt: new Date().toISOString(),
 		})}\n`)
+	}
+
+	private async recoverStaleSchedulerState(): Promise<void> {
+		const store = this.requireStore()
+		for (const chain of store.listChains()) {
+			const staleItems = store.listItems(chain.id).filter((item) => item.status === "in_progress")
+			const currentRun = store.getCurrentRun(chain.id)
+			if (staleItems.length === 0 && currentRun === null) continue
+
+			const stalePid = currentRun === null ? null : await this.readCurrentRunProcessGroupPid(chain, currentRun.runId, currentRun.extra)
+			if (stalePid !== null) await terminateStaleProcessGroup(stalePid, this.shutdownGraceMs)
+
+			if (currentRun !== null) store.clearCurrentRun(chain.id)
+			const recoveredAt = unixSeconds()
+			for (const item of staleItems) {
+				store.updateItem(item.id, { status: "changes_requested", updatedAt: recoveredAt })
+			}
+			await this.appendDaemonLogIfChainNameIsValid(chain, {
+				type: "scheduler.recovery",
+				reason: "stale_in_progress",
+				chainId: chain.id,
+				runId: currentRun?.runId ?? null,
+				pid: stalePid,
+				recoveredItems: staleItems.map((item) => ({
+					itemId: item.id,
+					issueNumber: item.issueNumber,
+					fromStatus: "in_progress",
+					toStatus: "changes_requested",
+				})),
+			})
+		}
+	}
+
+	private async readCurrentRunProcessGroupPid(chain: ChainRecord, runId: string, extra: JsonObject): Promise<number | null> {
+		const extraPid = optionalPositiveInteger(extra.pid)
+		if (extraPid !== null && extra.processGroupLeader === true) return extraPid
+		try {
+			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: this.paths.root })
+			const raw = await readFile(paths.runStatusFile(runId), "utf-8")
+			const parsed = parseJsonRecord(raw)
+			const statusPid = optionalPositiveInteger(parsed.pid)
+			return statusPid !== null && parsed.processGroupLeader === true ? statusPid : null
+		} catch {
+			return null
+		}
 	}
 
 	private handleChainList(): JsonObject {
@@ -729,6 +775,60 @@ function formatDaemonBatchTimestamp(date: Date): string {
 	return date.toISOString().slice(0, 19).replace(/[T:]/g, "-")
 }
 
+function unixSeconds(): number {
+	return Math.floor(Date.now() / 1000)
+}
+
+async function terminateStaleProcessGroup(pid: number, forceAfterMs: number): Promise<void> {
+	if (pid === process.pid) return
+	const termSent = sendSignalToPidOrGroup(pid, "SIGTERM")
+	if (!termSent) return
+	await delay(forceAfterMs)
+	if (isPidOrGroupAlive(pid)) sendSignalToPidOrGroup(pid, "SIGKILL")
+}
+
+function sendSignalToPidOrGroup(pid: number, signal: NodeJS.Signals): boolean {
+	if (process.platform !== "win32") {
+		try {
+			process.kill(-pid, signal)
+			return true
+		} catch (error) {
+			return !isNoSuchProcessError(error)
+		}
+	}
+	try {
+		process.kill(pid, signal)
+		return true
+	} catch (error) {
+		return !isNoSuchProcessError(error)
+	}
+}
+
+function isPidOrGroupAlive(pid: number): boolean {
+	if (process.platform !== "win32") {
+		try {
+			process.kill(-pid, 0)
+			return true
+		} catch (error) {
+			if (!isNoSuchProcessError(error)) return true
+		}
+	}
+	try {
+		process.kill(pid, 0)
+		return true
+	} catch (error) {
+		return !isNoSuchProcessError(error)
+	}
+}
+
+function isNoSuchProcessError(error: unknown): boolean {
+	return isNodeError(error) && error.code === "ESRCH"
+}
+
+async function delay(ms: number): Promise<void> {
+	await new Promise((resolveDelay) => setTimeout(resolveDelay, ms))
+}
+
 function parseDaemonRequest(line: string): DaemonRequest {
 	const parsed = parseJsonRecord(line)
 	const id = requiredString(parsed, "id")
@@ -810,6 +910,10 @@ function optionalInteger(record: UnknownRecord, key: string): number | null {
 	if (value === undefined) return null
 	if (typeof value !== "number" || !Number.isInteger(value)) throw new DaemonError("invalid_request", `${key} must be an integer when provided`)
 	return value
+}
+
+function optionalPositiveInteger(value: unknown): number | null {
+	return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null
 }
 
 function optionalIntegerOrNull(record: UnknownRecord, key: string): number | null | undefined {
@@ -1045,6 +1149,16 @@ function chainStatusSummary(
 ): JsonObject {
 	const byStatus: Record<string, number> = {}
 	for (const item of items) byStatus[item.status] = (byStatus[item.status] ?? 0) + 1
+	const activeItemIds = new Set(activeRuns.map((run) => run.itemId))
+	const staleInProgressItems = items
+		.filter((item) => item.status === "in_progress" && !activeItemIds.has(item.id))
+		.map((item) => ({
+			itemId: item.id,
+			issueNumber: item.issueNumber,
+			runId: item.lastRunId,
+			repoCwd: item.repoCwd,
+			agentCwd: item.agentCwd,
+		}))
 	return {
 		completion: {
 			state: chain.status,
@@ -1067,6 +1181,10 @@ function chainStatusSummary(
 			worktreePath: run.worktreePath,
 			startedAt: run.startedAt,
 		})),
+		recovery: {
+			needed: staleInProgressItems.length > 0,
+			staleInProgressItems,
+		},
 	}
 }
 
