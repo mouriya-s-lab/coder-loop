@@ -584,7 +584,7 @@ describe("smoke: single-phase-example preset", () => {
 			stderr: "pipe",
 		})
 		const stderr = new TextDecoder().decode(proc.stderr)
-		expect(proc.exitCode).toBe(0)
+		expect(proc.exitCode).toBe(1)
 		expect(stderr).toContain("INFO: target default runner=codex (config, binary=missing-codex-for-doctor-test, model=<default>)")
 		expect(stderr).toContain("INFO: review default runner=claude (review-default, binary=claude, model=claude-opus-4-7)")
 		expect(stderr).toContain("FAIL: codex runner CLI (missing-codex-for-doctor-test) 未在 PATH 中")
