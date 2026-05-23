@@ -651,7 +651,7 @@ export type StatusProcessInfo = {
 	cwd: string | null
 	matchesTarget: boolean
 	alive: boolean
-	source: "ps"
+	source: "ps" | "daemon-socket"
 }
 
 export type StatusProcessSnapshot = {
@@ -2355,12 +2355,17 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 	} catch (error) {
 		const targetCwd = resolve(args.targetCwd)
 		const dbFile = resolveLoopDataPaths(loopDataRootOption(args.loopDataRoot ?? null)).dbFile
+		const processes = await buildCentralStatusProcessSnapshot({
+			targetCwd,
+			loopDataRoot: args.loopDataRoot ?? null,
+		})
 		return makeUnavailableStatusSnapshot({
 			target: makeStatusTargetSnapshot(targetCwd, dbFile, args.repository, null, { kind: "missing", error: errorMessage(error) }),
 			stateKind: "missing-state",
 			stateFile: dbFile,
 			errorPath: "chain",
 			errorMessage: errorMessage(error),
+			processes,
 		})
 	}
 	const options = loaded.options
@@ -2369,7 +2374,7 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 	const runtimeErrors = await checkRuntime(options, loaded.state, loaded.chain)
 	const currentSnapshot = await buildStatusCurrentSnapshot(options, loaded.state)
 	const events = await buildStatusEventsSnapshot(options, loaded.state, selected)
-	const processes = buildCentralStatusProcessSnapshot(options)
+	const processes = await buildCentralStatusProcessSnapshot(options)
 	const snapshot: CoderLoopStatusSnapshot = {
 		target,
 		state: {
@@ -2500,6 +2505,7 @@ function makeUnavailableStatusSnapshot(input: {
 	stateFile: string
 	errorPath: string
 	errorMessage: string
+	processes?: StatusProcessSnapshot
 }): CoderLoopStatusSnapshot {
 	return {
 		target: input.target,
@@ -2515,11 +2521,11 @@ function makeUnavailableStatusSnapshot(input: {
 			error: input.errorMessage,
 		},
 		queue: { total: 0, byStatus: {}, continuable: 0, terminal: 0, selected: null },
-			current: { run: null, id: null, item: null, runner: null, phaseStatus: null },
-			events: { runId: null, path: null, exists: false, recent: [], latest: null, error: null },
-			processes: { live: [], scanError: null },
-		}
+		current: { run: null, id: null, item: null, runner: null, phaseStatus: null },
+		events: { runId: null, path: null, exists: false, recent: [], latest: null, error: null },
+		processes: input.processes ?? { live: [], scanError: null },
 	}
+}
 
 function flattenExtraReplacer(_key: string, value: unknown): unknown {
 	if (!isObjectRecord(value) || !("extra" in value) || !isJsonObject(value.extra)) return value
@@ -2659,11 +2665,49 @@ function parseRecentJsonLines(raw: string, limit: number): JsonValue[] {
 	})
 }
 
-function buildCentralStatusProcessSnapshot(options: LoopOptions): StatusProcessSnapshot {
+async function buildCentralStatusProcessSnapshot(options: Pick<LoopOptions, "targetCwd" | "loopDataRoot">): Promise<StatusProcessSnapshot> {
 	const scan = scanLoopProcesses(options.targetCwd)
+	const live = scan.kind === "ok" ? [...scan.value] : []
+	const scanErrors = scan.kind === "ok" ? [] : [scan.message]
+	const daemon = await readCentralDaemonProcessInfo(options.loopDataRoot)
+	if (daemon.kind === "ok" && daemon.value !== null) {
+		const daemonInfo = daemon.value
+		if (live.every((entry) => entry.pid !== daemonInfo.pid)) live.push(daemonInfo)
+	} else if (daemon.kind === "invalid") {
+		scanErrors.push(daemon.message)
+	}
 	return {
-		live: scan.kind === "ok" ? scan.value : [],
-		scanError: scan.kind === "ok" ? null : scan.message,
+		live,
+		scanError: scanErrors.length === 0 ? null : scanErrors.join("; "),
+	}
+}
+
+async function readCentralDaemonProcessInfo(loopDataRoot: string | null): Promise<StatusReadResult<StatusProcessInfo | null>> {
+	const socketPath = resolveLoopDataPaths(loopDataRootOption(loopDataRoot)).daemonSocket
+	let response: DaemonResponse
+	try {
+		response = await sendDaemonRequest(socketPath, daemonRequest("daemon.status"))
+	} catch (error) {
+		return { kind: "missing", message: centralDaemonNotRunningMessage(loopDataRoot, socketPath, error) }
+	}
+	if (!response.ok) return { kind: "invalid", message: `${response.error.code}: ${response.error.message}` }
+	const processInfo = centralDaemonStatusToProcessInfo(response.result)
+	if (processInfo === null) return { kind: "invalid", message: "daemon.status response did not include daemon process metadata" }
+	return { kind: "ok", value: processInfo }
+}
+
+function centralDaemonStatusToProcessInfo(result: JsonObject): StatusProcessInfo | null {
+	const daemon = result.daemon
+	if (!isObjectRecord(daemon)) return null
+	if (typeof daemon.pid !== "number" || !Number.isInteger(daemon.pid)) return null
+	return {
+		pid: daemon.pid,
+		ppid: null,
+		command: null,
+		cwd: null,
+		matchesTarget: true,
+		alive: daemon.running !== false && isPidAlive(daemon.pid),
+		source: "daemon-socket",
 	}
 }
 

@@ -241,6 +241,31 @@ describe("central chain/item CLI", () => {
 		expect(result.stderr).toContain("coder-loop daemon up --loop-data-root")
 	})
 
+	test("daemon status target reports chain-only daemon from loop-data socket", async () => {
+		const loopDataRoot = await makeLoopDataRoot("daemon-status-chain-only")
+		const daemonProcess = spawnDaemonUp(loopDataRoot)
+		try {
+			await waitForDaemonFiles(loopDataRoot)
+			const daemonPid = Number((await readFile(resolve(loopDataRoot, "daemon.pid"), "utf-8")).trim())
+
+			const status = expectJsonOk(await runCli(["daemon", "status", REPO_ROOT, "--loop-data-root", loopDataRoot, "--json"]))
+			const liveDaemon = status.processes.live.find((entry: Record<string, unknown>) => entry.pid === daemonPid)
+			expect(liveDaemon).toMatchObject({
+				pid: daemonPid,
+				source: "daemon-socket",
+				alive: true,
+				matchesTarget: true,
+			})
+
+			const down = await runCli(["daemon", "down", "--loop-data-root", loopDataRoot])
+			expect(down.exitCode).toBe(0)
+			expect(await daemonProcess.exited).toBe(0)
+		} finally {
+			daemonProcess.kill()
+			await daemonProcess.exited.catch(() => undefined)
+		}
+	})
+
 	test("json output schema stable", async () => {
 		const fixture = await startFixture("json-schema")
 		try {
