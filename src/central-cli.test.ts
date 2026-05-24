@@ -36,6 +36,18 @@ describe("central chain/item CLI", () => {
 
 			const deleted = expectJsonOk(await runCli(["chain", "delete", "crud-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(deleted.chain).toMatchObject({ name: "crud-chain", status: "deleted" })
+
+			const unforcedRecreate = await runCli(["chain", "create", "crud-chain", "--repo", "mouriya-s-lab/coder-loop", "--loop-data-root", fixture.loopDataRoot, "--json"])
+			expect(unforcedRecreate.exitCode).toBe(1)
+			expect(unforcedRecreate.stderr).toContain("chain_deleted")
+			expect(unforcedRecreate.stderr).toContain("force=true")
+
+			const recreated = expectJsonOk(await runCli(["chain", "create", "crud-chain", "--repo", "mouriya-s-lab/coder-loop", "--base-branch", "recreated", "--force", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expect(recreated.chain).toMatchObject({
+				name: "crud-chain",
+				status: "active",
+				baseBranch: "recreated",
+			})
 		} finally {
 			await fixture.daemon.stop()
 		}

@@ -103,6 +103,7 @@ const CHAIN_CREATE_ARG_KEYS = [
 	"metadata",
 	"umbrellaIssue",
 	"umbrellaRepo",
+	"force",
 ] as const
 const ITEM_UPDATE_SELECTOR_KEYS = ["itemId", "chainId", "chainName", "name", "issueNumber"] as const
 const ITEM_UPDATE_FIELD_KEYS = [
@@ -365,25 +366,31 @@ export class CoderLoopDaemon {
 		if (umbrellaRepo !== undefined) input.umbrellaRepo = umbrellaRepo
 		const store = this.requireStore()
 		const existing = store.getChainByName(input.name)
+		const force = optionalBoolean(args, "force") ?? false
 		let chain: ChainRecord
 		if (existing === null) {
 			chain = store.createChain(input)
 		} else {
 			if (existing.status === "deleted") {
-				throw new DaemonError("chain_deleted", `chain ${input.name} is deleted and cannot be recreated without an explicit recreate flow`, {
-					chainId: existing.id,
-					chainName: existing.name,
-					status: existing.status,
-				})
+				if (!force) {
+					throw new DaemonError("chain_deleted", `chain ${input.name} is deleted; pass force=true to recreate it`, {
+						chainId: existing.id,
+						chainName: existing.name,
+						status: existing.status,
+					})
+				}
+				store.deleteChain(existing.id)
+				chain = store.createChain(input)
+			} else {
+				const conflicts = chainCreateConflicts(existing, input)
+				if (conflicts.length > 0) {
+					throw new DaemonError("conflict", `chain ${input.name} already exists with different fields`, {
+						chainName: input.name,
+						conflicts,
+					})
+				}
+				chain = existing
 			}
-			const conflicts = chainCreateConflicts(existing, input)
-			if (conflicts.length > 0) {
-				throw new DaemonError("conflict", `chain ${input.name} already exists with different fields`, {
-					chainName: input.name,
-					conflicts,
-				})
-			}
-			chain = existing
 		}
 		await this.ensureChainRuntimeLayout(chain.name)
 		await this.appendDaemonLog(chain.name, { type: "chain.layout", chainId: chain.id, chainName: chain.name, state: this.state })
@@ -1127,6 +1134,13 @@ function optionalIntegerOrNull(record: UnknownRecord, key: string): number | nul
 function requiredBoolean(record: UnknownRecord, key: string): boolean {
 	const value = record[key]
 	if (typeof value !== "boolean") throw new DaemonError("invalid_request", `${key} must be a boolean`)
+	return value
+}
+
+function optionalBoolean(record: UnknownRecord, key: string): boolean | null {
+	const value = record[key]
+	if (value === undefined) return null
+	if (typeof value !== "boolean") throw new DaemonError("invalid_request", `${key} must be a boolean when provided`)
 	return value
 }
 

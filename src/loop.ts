@@ -190,6 +190,7 @@ export type ChainCommandArgs =
 			preset: string | null
 			baseBranch: string | null
 			umbrella: string | null
+			force: boolean
 			loopDataRoot: string | null
 			json: boolean
 	  }
@@ -1160,6 +1161,7 @@ const chainCreateCliCommand = command({
 		preset: option({ long: "preset", type: optional(cmdString) }),
 		baseBranch: option({ long: "base-branch", type: optional(cmdString) }),
 		umbrella: option({ long: "umbrella", type: optional(cmdString) }),
+		force: flag({ long: "force" }),
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
 		json: flag({ long: "json" }),
 	},
@@ -1172,6 +1174,7 @@ const chainCreateCliCommand = command({
 			preset: args.preset ?? null,
 			baseBranch: args.baseBranch ?? null,
 			umbrella: args.umbrella ?? null,
+			force: args.force,
 			loopDataRoot: args.loopDataRoot ?? null,
 			json: args.json,
 		},
@@ -1462,6 +1465,7 @@ async function runChainCommand(args: string[]): Promise<void> {
 		if (chainArgs.preset !== null) requestArgs.preset = chainArgs.preset
 		if (chainArgs.baseBranch !== null) requestArgs.baseBranch = chainArgs.baseBranch
 		if (chainArgs.umbrella !== null) Object.assign(requestArgs, parseUmbrellaRef(chainArgs.umbrella, chainArgs.repository))
+		if (chainArgs.force) requestArgs.force = true
 		const result = await requestDaemonResult(chainArgs.loopDataRoot, "chain.create", requestArgs)
 		writeCommandResult(result, chainArgs.json, formatChainCreateResult)
 		return
