@@ -144,6 +144,44 @@ describe("central chain/item CLI", () => {
 		}
 	})
 
+	test("daemon up ignores reload/debug signals and SIGQUIT shuts down gracefully", async () => {
+		const loopDataRoot = await makeLoopDataRoot("daemon-signal-policy")
+		const daemonProcess = spawnDaemonUp(loopDataRoot)
+		try {
+			await waitForDaemonFiles(loopDataRoot)
+			const daemonPid = Number((await readFile(resolve(loopDataRoot, "daemon.pid"), "utf-8")).trim())
+
+			for (const signal of ["SIGUSR1", "SIGHUP", "SIGPIPE", "SIGUSR2"] as const) {
+				process.kill(daemonPid, signal)
+				await sleep(100)
+				expect(isPidAlive(daemonPid), `${signal} should not stop daemon up`).toBe(true)
+				expectJsonOk(await runCli(["chain", "list", "--loop-data-root", loopDataRoot, "--json"]))
+			}
+
+			process.kill(daemonPid, "SIGQUIT")
+			expect(await daemonProcess.exited).toBe(0)
+			await waitForDaemonSocketRemoval(loopDataRoot)
+		} finally {
+			daemonProcess.kill()
+			await daemonProcess.exited.catch(() => undefined)
+		}
+
+		for (const signal of ["SIGTERM", "SIGINT"] as const) {
+			const shutdownLoopDataRoot = await makeLoopDataRoot(`daemon-${signal.toLowerCase()}-policy`)
+			const shutdownProcess = spawnDaemonUp(shutdownLoopDataRoot)
+			try {
+				await waitForDaemonFiles(shutdownLoopDataRoot)
+				const shutdownPid = Number((await readFile(resolve(shutdownLoopDataRoot, "daemon.pid"), "utf-8")).trim())
+				process.kill(shutdownPid, signal)
+				expect(await shutdownProcess.exited).toBe(0)
+				await waitForDaemonSocketRemoval(shutdownLoopDataRoot)
+			} finally {
+				shutdownProcess.kill()
+				await shutdownProcess.exited.catch(() => undefined)
+			}
+		}
+	})
+
 	test("daemon down emits human text without json flag", async () => {
 		const loopDataRoot = await makeLoopDataRoot("daemon-down-text")
 		const daemonProcess = Bun.spawn({
@@ -494,6 +532,17 @@ async function waitForDaemonFiles(loopDataRoot: string): Promise<void> {
 	}, 5_000)
 }
 
+async function waitForDaemonSocketRemoval(loopDataRoot: string): Promise<void> {
+	await waitFor(async () => {
+		try {
+			await stat(resolve(loopDataRoot, "daemon.sock"))
+			return null
+		} catch {
+			return true
+		}
+	}, 5_000)
+}
+
 type NamedDaemonProcess = {
 	name: string
 	proc: Bun.Subprocess<"ignore", "pipe", "pipe">
@@ -583,4 +632,17 @@ async function waitFor<T>(read: () => Promise<T | null>, timeoutMs: number, inte
 		latest = await read().catch(() => null)
 	}
 	return latest
+}
+
+function isPidAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0)
+		return true
+	} catch {
+		return false
+	}
+}
+
+async function sleep(ms: number): Promise<void> {
+	await new Promise((resolveWait) => setTimeout(resolveWait, ms))
 }
