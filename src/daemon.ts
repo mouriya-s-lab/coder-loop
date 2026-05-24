@@ -677,12 +677,24 @@ export class CoderLoopDaemon {
 	private resolveChain(args: JsonObject): ChainRecord {
 		const store = this.requireStore()
 		const chainId = optionalInteger(args, "chainId")
+		const chainName = requestedChainName(args)
 		if (chainId !== null) {
 			const chain = store.getChain(chainId)
 			if (chain === null) throw new DaemonError("not_found", `chain ${chainId} was not found`, { chainId })
+			if (chainName !== null) {
+				const chainByName = store.getChainByName(chainName)
+				if (chainByName === null) throw new DaemonError("not_found", `chain ${chainName} was not found`, { chainName })
+				if (chainByName.id !== chain.id) {
+					throw new DaemonError("invalid_request", "chainId and chainName both provided but point to different chains", {
+						chainId,
+						chainName,
+						chainIdResolvesTo: chain.name,
+						chainNameResolvesTo: chainByName.id,
+					})
+				}
+			}
 			return chain
 		}
-		const chainName = optionalString(args, "chainName") ?? optionalString(args, "name")
 		if (chainName !== null) {
 			const chain = store.getChainByName(chainName)
 			if (chain === null) throw new DaemonError("not_found", `chain ${chainName} was not found`, { chainName })
@@ -1230,6 +1242,15 @@ function itemUpdateFields(args: JsonObject): JsonObject {
 		if (Object.hasOwn(args, key)) fields[key] = args[key] as JsonValue
 	}
 	return fields
+}
+
+function requestedChainName(args: JsonObject): string | null {
+	const chainName = optionalString(args, "chainName")
+	const name = optionalString(args, "name")
+	if (chainName !== null && name !== null && chainName !== name) {
+		throw new DaemonError("invalid_request", "chainName and name both provided but differ", { chainName, name })
+	}
+	return chainName ?? name
 }
 
 function optionalDependsOn(record: UnknownRecord, key: string): number[] | null | undefined {
