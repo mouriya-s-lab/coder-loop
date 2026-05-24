@@ -348,11 +348,11 @@ export class CoderLoopDaemon {
 			name: validateChainNameForRequest(requiredString(args, "name")),
 			preset: await validateBundledPresetForRequest(optionalString(args, "preset") ?? DEFAULT_PRESET_NAME),
 			repository: validateRepositoryForRequest(requiredString(args, "repository")),
-			baseBranch: optionalString(args, "baseBranch") ?? "main",
+			baseBranch: validateBaseBranchForRequest(optionalString(args, "baseBranch") ?? "main"),
 			status: "active",
 			metadata: sizedJsonObject(args, "metadata", MAX_CHAIN_METADATA_BYTES) ?? {},
 		}
-		const umbrellaIssue = optionalIntegerOrNull(args, "umbrellaIssue")
+		const umbrellaIssue = validateUmbrellaIssueForRequest(optionalIntegerOrNull(args, "umbrellaIssue"))
 		if (umbrellaIssue !== undefined) input.umbrellaIssue = umbrellaIssue
 		const umbrellaRepo = optionalStringOrNull(args, "umbrellaRepo")
 		if (umbrellaRepo !== undefined) input.umbrellaRepo = umbrellaRepo
@@ -888,6 +888,29 @@ function validateRepositoryForRequest(input: string): string {
 		throw new DaemonError("invalid_request", "repository name must not be a reserved path segment", { repository: input })
 	}
 	return input
+}
+
+function validateBaseBranchForRequest(input: string): string {
+	if (/[\u0000-\u001f\u007f]/u.test(input)) {
+		throw new DaemonError("invalid_request", "baseBranch must not contain control characters", { baseBranch: input })
+	}
+	if (input.includes("@{")) {
+		throw new DaemonError("invalid_request", "baseBranch must be a literal branch name, not checkout shorthand", { baseBranch: input })
+	}
+
+	const check = Bun.spawnSync({ cmd: ["git", "check-ref-format", "--branch", input], stdout: "pipe", stderr: "pipe" })
+	if (check.exitCode !== 0) {
+		throw new DaemonError("invalid_request", "baseBranch must be a valid git branch name", { baseBranch: input })
+	}
+	return input
+}
+
+function validateUmbrellaIssueForRequest(value: number | null | undefined): number | null | undefined {
+	if (value === undefined || value === null) return value
+	if (value < 1) {
+		throw new DaemonError("invalid_request", "umbrellaIssue must be a positive integer or null", { umbrellaIssue: value })
+	}
+	return value
 }
 
 function formatDaemonBatchTimestamp(date: Date): string {
