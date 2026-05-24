@@ -268,6 +268,42 @@ describe("daemon", () => {
 		}
 	})
 
+	test("socket chain.create validates metadata keys and nesting before db insert", async () => {
+		const fixture = await startFixture("chain-create-metadata-validation", { schedulerEnabled: false })
+		try {
+			const invalidCases = [
+				{ name: "metadata-proto", metadata: JSON.parse(`{"__proto__":{"polluted":1},"normal":"v"}`) },
+				{ name: "metadata-constructor", metadata: JSON.parse(`{"constructor":{"prototype":{"polluted":2}}}`) },
+				{ name: "metadata-prototype", metadata: JSON.parse(`{"safe":{"prototype":true}}`) },
+				{ name: "metadata-empty-key", metadata: JSON.parse(`{"":"empty-key"}`) },
+				{ name: "metadata-nested-proto", metadata: JSON.parse(`{"items":[{"__proto__":{"polluted":3}}]}`) },
+				{ name: "metadata-too-deep", metadata: nestedMetadata(9) },
+			]
+
+			for (const { name, metadata } of invalidCases) {
+				expectInvalid(await request(fixture, "chain.create", {
+					name,
+					repository: "mouriya-s-lab/coder-loop",
+					metadata,
+				}))
+				const listed = expectOk(await request(fixture, "chain.list")).chains
+				expect(Array.isArray(listed)).toBe(true)
+				expect(listed).toHaveLength(0)
+			}
+
+			expect(Object.prototype).not.toHaveProperty("polluted")
+			const validMetadata = { runner: "codex", nested: nestedMetadata(7), list: [{ leaf: "ok" }] }
+			const created = record(expectOk(await request(fixture, "chain.create", {
+				name: "metadata-valid",
+				repository: "mouriya-s-lab/coder-loop",
+				metadata: validMetadata,
+			})).chain)
+			expect(created.metadata).toEqual(validMetadata)
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("socket chain.create validates preset name and existence before db insert", async () => {
 		const fixture = await startFixture("chain-create-invalid-preset", { schedulerEnabled: false })
 		try {
@@ -1366,6 +1402,12 @@ function expectTooLarge(response: DaemonResponse): void {
 function record(value: unknown): Record<string, unknown> {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("expected object")
 	return value as Record<string, unknown>
+}
+
+function nestedMetadata(depth: number): Record<string, unknown> {
+	let value: unknown = "ok"
+	for (let index = 0; index < depth; index++) value = { nest: value }
+	return record(value)
 }
 
 function numberValue(value: unknown): number {
