@@ -166,6 +166,86 @@ describe("daemon", () => {
 		}
 	})
 
+	test("socket chain.create validates baseBranch as a git branch name", async () => {
+		const fixture = await startFixture("chain-create-invalid-base-branch", { schedulerEnabled: false })
+		try {
+			const invalidBaseBranches = [
+				"../../etc/passwd",
+				"main\nbad",
+				"bad\u0000name",
+				"main..bad",
+				"main@{bad",
+				"@{-1}",
+				"main:bad",
+				"main^bad",
+				"main?bad",
+				"main*bad",
+				"main[bad",
+				"/main",
+				"main.lock",
+				"main/.bad",
+				"-bad",
+				"bad branch",
+			]
+
+			for (const [index, baseBranch] of invalidBaseBranches.entries()) {
+				const response = await request(fixture, "chain.create", {
+					name: `base-branch-check-${index}`,
+					repository: "mouriya-s-lab/coder-loop",
+					baseBranch,
+				})
+
+				expectInvalid(response)
+				const listed = expectOk(await request(fixture, "chain.list")).chains
+				expect(Array.isArray(listed)).toBe(true)
+				expect(listed).toHaveLength(0)
+			}
+
+			const valid = record(expectOk(await request(fixture, "chain.create", {
+				name: "base-branch-valid",
+				repository: "mouriya-s-lab/coder-loop",
+				baseBranch: "feature/safe-branch",
+			})).chain)
+			expect(valid).toMatchObject({ baseBranch: "feature/safe-branch" })
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("socket chain.create validates umbrellaIssue as positive or null", async () => {
+		const fixture = await startFixture("chain-create-invalid-umbrella-issue", { schedulerEnabled: false })
+		try {
+			for (const umbrellaIssue of [0, -1]) {
+				const response = await request(fixture, "chain.create", {
+					name: `umbrella-check-${umbrellaIssue}`,
+					repository: "mouriya-s-lab/coder-loop",
+					umbrellaIssue,
+				})
+
+				expectInvalid(response)
+				const listed = expectOk(await request(fixture, "chain.list")).chains
+				expect(Array.isArray(listed)).toBe(true)
+				expect(listed).toHaveLength(0)
+			}
+
+			const nullUmbrella = record(expectOk(await request(fixture, "chain.create", {
+				name: "null-umbrella",
+				repository: "mouriya-s-lab/coder-loop",
+				umbrellaIssue: null,
+			})).chain)
+			expect(nullUmbrella).toMatchObject({ umbrellaIssue: null })
+
+			const positiveUmbrella = record(expectOk(await request(fixture, "chain.create", {
+				name: "positive-umbrella",
+				repository: "mouriya-s-lab/coder-loop",
+				umbrellaIssue: 1,
+			})).chain)
+			expect(positiveUmbrella).toMatchObject({ umbrellaIssue: 1 })
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("socket chain.create rejects undeclared args", async () => {
 		const fixture = await startFixture("chain-create-strict-args", { schedulerEnabled: false })
 		try {
