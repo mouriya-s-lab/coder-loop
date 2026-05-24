@@ -167,6 +167,24 @@ describe("scheduler", () => {
 		}
 	})
 
+	test("manual terminal item update completes chain on next tick", async () => {
+		const fixture = await createFixture("manual-terminal-completion")
+		try {
+			const chain = createChain(fixture.store, "manual-terminal-completion-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 249, repoCwd: "/repo/a" })
+			fixture.store.updateItem(item.id, { status: "done", updatedAt: 1_800_000_500 })
+
+			const tick = await schedulerTick(fixture.options())
+
+			expect(tick.spawnedRuns).toHaveLength(0)
+			expect(tick.completedChainIds).toEqual([chain.id])
+			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
+			expect(fixture.schedulerEvents).toContainEqual({ type: "chain.completed", chainId: chain.id, chainName: chain.name })
+		} finally {
+			fixture.store.close()
+		}
+	})
+
 	test("terminated child preserves user terminal item status", async () => {
 		const fixture = await createFixture("terminal-preserve")
 		try {

@@ -65,7 +65,6 @@ export type SchedulerStore = Pick<
 	| "listChains"
 	| "listItems"
 	| "getNextPendingItem"
-	| "allItemsTerminal"
 	| "updateChain"
 	| "getItem"
 	| "updateItem"
@@ -171,11 +170,7 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 			spawnedRuns.push(activeRun)
 		}
 
-		if (items.length > 0 && !hasActiveSlotForChain(options.state, chain.id) && options.store.allItemsTerminal({ chainId: chain.id, terminalStatuses })) {
-			const updated = options.store.updateChain(chain.id, { status: "completed", updatedAt: nowSeconds(options) })
-			completedChainIds.push(updated.id)
-			await emit(options, { type: "chain.completed", chainId: updated.id, chainName: updated.name })
-		}
+		if (await completeChainIfReady(options, chain)) completedChainIds.push(chain.id)
 	}
 
 	return { spawnedRuns, completedChainIds }
@@ -486,14 +481,16 @@ async function promiseSettledWithin<T>(promise: Promise<T>, timeoutMs: number): 
 	}
 }
 
-async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecord, runId?: string): Promise<void> {
-	if (hasActiveSlotForChain(options.state, chain.id)) return
+async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecord, runId?: string): Promise<boolean> {
+	if (hasActiveSlotForChain(options.state, chain.id)) return false
 	const terminalStatuses = options.terminalStatuses ?? DEFAULT_TERMINAL_STATUSES
 	const current = options.store.listChains().find((candidate) => candidate.id === chain.id)
-	if (current?.status !== "active") return
-	if (!allItemsTerminalIncludingFinalizing(options, chain.id, terminalStatuses)) return
+	if (current?.status !== "active") return false
+	if (options.store.listItems(chain.id).length === 0) return false
+	if (!allItemsTerminalIncludingFinalizing(options, chain.id, terminalStatuses)) return false
 	const updated = options.store.updateChain(chain.id, { status: "completed", updatedAt: nowSeconds(options) })
 	await emit(options, { type: "chain.completed", chainId: updated.id, chainName: updated.name, ...(runId === undefined ? {} : { runId }) })
+	return true
 }
 
 function allItemsTerminalIncludingFinalizing(options: SchedulerOptions, chainId: number, terminalStatuses: readonly string[]): boolean {
