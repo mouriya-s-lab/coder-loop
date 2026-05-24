@@ -642,6 +642,49 @@ describe("daemon", () => {
 		}
 	})
 
+	test("socket chain lookup rejects conflicting chainId and chainName", async () => {
+		const fixture = await startFixture("chain-lookup-conflict", { schedulerEnabled: false })
+		try {
+			const chainA = record(expectOk(await request(fixture, "chain.create", {
+				name: "chain-a",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainB = record(expectOk(await request(fixture, "chain.create", {
+				name: "chain-b",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainAId = numberValue(chainA.id)
+			const chainBId = numberValue(chainB.id)
+
+			const matchingStatus = record(expectOk(await request(fixture, "chain.status", { chainId: chainAId, chainName: "chain-a" })).chain)
+			expect(matchingStatus).toMatchObject({ id: chainAId, name: "chain-a" })
+
+			const mismatchedStatus = await request(fixture, "chain.status", { chainId: chainAId, chainName: "chain-b" })
+			expectInvalid(mismatchedStatus)
+			if (mismatchedStatus.ok) throw new Error("expected mismatched chain.status to fail")
+			expect(mismatchedStatus.error.message).toBe("chainId and chainName both provided but point to different chains")
+			expect(record(mismatchedStatus.error.details)).toMatchObject({
+				chainId: chainAId,
+				chainName: "chain-b",
+				chainIdResolvesTo: "chain-a",
+				chainNameResolvesTo: chainBId,
+			})
+
+			const mismatchedDelete = await request(fixture, "chain.delete", { chainId: chainAId, chainName: "chain-b" })
+			expectInvalid(mismatchedDelete)
+			const listed = expectOk(await request(fixture, "chain.list")).chains
+			expect(Array.isArray(listed)).toBe(true)
+			if (!Array.isArray(listed)) throw new Error("expected chain list array")
+			expect(listed).toHaveLength(2)
+			expect(listed.map((entry) => record(entry))).toEqual([
+				expect.objectContaining({ id: chainAId, name: "chain-a", status: "active" }),
+				expect.objectContaining({ id: chainBId, name: "chain-b", status: "active" }),
+			])
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("socket chain.create force recreates deleted same-name chain", async () => {
 		const fixture = await startFixture("chain-create-deleted-name", { schedulerEnabled: false })
 		try {
