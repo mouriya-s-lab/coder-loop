@@ -405,6 +405,47 @@ describe("daemon", () => {
 		}
 	})
 
+	test("socket item.add rejects duplicate issue as conflict without SQL details", async () => {
+		const fixture = await startFixture("item-add-duplicate", { schedulerEnabled: false })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "duplicate-item-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			const first = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 242,
+				repoCwd: REPO_ROOT,
+			})).item)
+
+			const duplicate = await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 242,
+				repoCwd: REPO_ROOT,
+			})
+			expectConflict(duplicate)
+			if (duplicate.ok) throw new Error("expected duplicate item.add to fail")
+			expect(duplicate.error.message).toBe("item with issueNumber 242 already exists in chain duplicate-item-chain")
+			expect(JSON.stringify(duplicate.error)).not.toContain("UNIQUE constraint")
+			expect(JSON.stringify(duplicate.error)).not.toContain("items.chain_id")
+			expect(JSON.stringify(duplicate.error)).not.toContain("items.issue_number")
+			expect(record(duplicate.error.details)).toMatchObject({
+				chainId,
+				chainName: "duplicate-item-chain",
+				issueNumber: 242,
+				existingItemId: numberValue(first.id),
+			})
+
+			const listed = expectOk(await request(fixture, "item.list", { chainId })).items
+			if (!Array.isArray(listed)) throw new Error("expected item.list items array")
+			expect(listed).toHaveLength(1)
+			expect(record(listed[0])).toMatchObject({ id: numberValue(first.id), issueNumber: 242 })
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("socket item.add rejects invalid issue and repo fields before db insert", async () => {
 		const fixture = await startFixture("item-add-validation", { schedulerEnabled: false })
 		try {
