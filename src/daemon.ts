@@ -385,7 +385,7 @@ export class CoderLoopDaemon {
 		const umbrellaIssue = validateUmbrellaIssueForRequest(optionalIntegerOrNull(args, "umbrellaIssue"))
 		if (umbrellaIssue !== undefined) input.umbrellaIssue = umbrellaIssue
 		const umbrellaRepo = optionalStringOrNull(args, "umbrellaRepo")
-		if (umbrellaRepo !== undefined) input.umbrellaRepo = umbrellaRepo
+		if (umbrellaRepo !== undefined) input.umbrellaRepo = umbrellaRepo === null ? null : validateRepositoryRefForRequest(umbrellaRepo, "umbrellaRepo")
 		const store = this.requireStore()
 		const existing = store.getChainByName(input.name)
 		const force = optionalBoolean(args, "force") ?? false
@@ -936,19 +936,26 @@ function isInvalidChainNameError(error: unknown): error is RuntimePathError {
 	return error instanceof RuntimePathError && error.code === "invalid_chain_name"
 }
 
+type RepositoryRefField = "repository" | "umbrellaRepo"
+
 function validateRepositoryForRequest(input: string): string {
+	return validateRepositoryRefForRequest(input, "repository")
+}
+
+function validateRepositoryRefForRequest(input: string, field: RepositoryRefField): string {
+	const details: JsonObject = { [field]: input }
 	if (input.length > MAX_REPOSITORY_REF_LENGTH) {
-		throw new DaemonError("invalid_request", `repository must be ${MAX_REPOSITORY_REF_LENGTH} characters or fewer`, { repository: input })
+		throw new DaemonError("invalid_request", `${field} must be ${MAX_REPOSITORY_REF_LENGTH} characters or fewer`, details)
 	}
 	if (/[\u0000-\u001f\u007f]/u.test(input)) {
-		throw new DaemonError("invalid_request", "repository must not contain control characters", { repository: input })
+		throw new DaemonError("invalid_request", `${field} must not contain control characters`, details)
 	}
 	if (!REPOSITORY_REF_PATTERN.test(input)) {
-		throw new DaemonError("invalid_request", "repository must use owner/repo format", { repository: input })
+		throw new DaemonError("invalid_request", `${field} must use owner/repo format`, details)
 	}
 	const repoName = input.slice(input.indexOf("/") + 1)
 	if (repoName === "." || repoName === "..") {
-		throw new DaemonError("invalid_request", "repository name must not be a reserved path segment", { repository: input })
+		throw new DaemonError("invalid_request", `${field} name must not be a reserved path segment`, details)
 	}
 	return input
 }
