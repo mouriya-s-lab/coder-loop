@@ -614,7 +614,20 @@ export class CoderLoopDaemon {
 		assignOptional(input, "evidenceDir", optionalStringOrNull(args, "evidenceDir"))
 		assignOptional(input, "agentCwd", optionalStringOrNull(args, "agentCwd"))
 		assignOptional(input, "runner", optionalRunner(args, "runner"))
-		const item = store.createItem(input)
+		const existing = store.getItemByIssue(chain.id, input.issueNumber)
+		if (existing !== null) throw duplicateItemAddError(chain, input.issueNumber, existing)
+		let item: ItemRecord
+		try {
+			item = store.createItem(input)
+		} catch (error) {
+			try {
+				const existingAfterFailure = store.getItemByIssue(chain.id, input.issueNumber)
+				if (existingAfterFailure !== null) throw duplicateItemAddError(chain, input.issueNumber, existingAfterFailure)
+			} catch (lookupError) {
+				if (lookupError instanceof DaemonError) throw lookupError
+			}
+			throw error
+		}
 		this.queueSchedulerTick()
 		return { item: itemToJson(item) }
 	}
@@ -1378,6 +1391,15 @@ function chainCreateConflicts(existing: ChainRecord, requested: CreateChainInput
 	}
 
 	return conflicts
+}
+
+function duplicateItemAddError(chain: ChainRecord, issueNumber: number, existing: ItemRecord): DaemonError {
+	return new DaemonError("conflict", `item with issueNumber ${issueNumber} already exists in chain ${chain.name}`, {
+		chainId: chain.id,
+		chainName: chain.name,
+		issueNumber,
+		existingItemId: existing.id,
+	})
 }
 
 function jsonValuesEqual(left: JsonValue | undefined, right: JsonValue | undefined): boolean {
