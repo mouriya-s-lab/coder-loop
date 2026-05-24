@@ -3,7 +3,7 @@ import { Buffer } from "node:buffer"
 import { createConnection, createServer, type Server, type Socket } from "node:net"
 import { existsSync } from "node:fs"
 import { appendFile, mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises"
-import { isAbsolute, resolve } from "node:path"
+import { isAbsolute, relative, resolve } from "node:path"
 
 import type { AgentRunnerKind, AgentRunnerSelection, JsonObject, JsonValue } from "./loop"
 import {
@@ -90,11 +90,15 @@ const BUNDLED_PRESETS_DIR = resolve(import.meta.dir, "../presets")
 const MAX_DAEMON_REQUEST_BYTES = 1_048_576
 const MAX_CHAIN_METADATA_BYTES = 16_384
 const MAX_CHAIN_METADATA_DEPTH = 8
+const MAX_ITEM_EXTRA_BYTES = 16_384
+const MAX_ITEM_EXTRA_DEPTH = 8
+const MAX_ITEM_TITLE_LENGTH = 1024
 const MAX_REPO_CWD_LENGTH = 4096
 const MAX_REPOSITORY_REF_LENGTH = 200
 const STALE_RECOVERY_FORCE_AFTER_MS = 1_000
 const ORPHAN_CHAIN_DIR_PREFIX = ".orphan-"
 const RESERVED_METADATA_KEYS = new Set(["__proto__", "constructor", "prototype"])
+const ITEM_PRIORITY_VALUES = ["low", "medium", "high", "critical"] as const
 const PRESET_NAME_PATTERN = /^[a-z][a-z0-9-]*$/
 const REPOSITORY_REF_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}[A-Za-z0-9])?\/[A-Za-z0-9._-]{1,100}$/
 const CHAIN_CREATE_ARG_KEYS = [
@@ -106,6 +110,22 @@ const CHAIN_CREATE_ARG_KEYS = [
 	"umbrellaIssue",
 	"umbrellaRepo",
 	"force",
+] as const
+const ITEM_ADD_ARG_KEYS = [
+	"chainId",
+	"chainName",
+	"name",
+	"issueNumber",
+	"repoCwd",
+	"title",
+	"priority",
+	"branch",
+	"pr",
+	"issueFile",
+	"evidenceDir",
+	"runner",
+	"extra",
+	"dependsOn",
 ] as const
 const ITEM_UPDATE_SELECTOR_KEYS = ["itemId", "chainId", "chainName", "name", "issueNumber"] as const
 const ITEM_UPDATE_FIELD_KEYS = [
@@ -591,10 +611,11 @@ export class CoderLoopDaemon {
 	}
 
 	private async handleItemAdd(args: JsonObject): Promise<JsonObject> {
+		validateItemAddRequest(args)
 		const chain = this.resolveChain(args)
 		assertChainAllowsItemMutation(chain, "item.add")
 		const store = this.requireStore()
-		const rawExtra = optionalJsonObject(args, "extra") ?? {}
+		const rawExtra = sizedJsonObject(args, "extra", MAX_ITEM_EXTRA_BYTES) ?? {}
 		const topLevelDependsOn = optionalDependsOn(args, "dependsOn")
 		const extraDependsOn = topLevelDependsOn === undefined ? optionalDependsOn(rawExtra, "dependsOn") : undefined
 		const dependsOn = topLevelDependsOn === undefined ? extraDependsOn : topLevelDependsOn
@@ -603,18 +624,15 @@ export class CoderLoopDaemon {
 			chainId: chain.id,
 			issueNumber: requiredPositiveInteger(args, "issueNumber"),
 			repoCwd: await validateRepoCwdForRequest(requiredString(args, "repoCwd")),
-			status: await this.validateItemStatusForRequest(chain, optionalString(args, "status") ?? "queued"),
-			attempts: optionalInteger(args, "attempts") ?? 0,
-			extra: withDependsOn(rawExtra, dependsOn),
+			status: await this.defaultItemStatusForRequest(chain),
+			extra: validateItemExtra(withDependsOn(rawExtra, dependsOn)),
 		}
-		assignOptional(input, "title", optionalStringOrNull(args, "title"))
-		assignOptional(input, "priority", optionalStringOrNull(args, "priority"))
-		assignOptional(input, "branch", optionalStringOrNull(args, "branch"))
-		assignOptional(input, "pr", optionalIntegerOrNull(args, "pr"))
-		assignOptional(input, "lastRunId", optionalStringOrNull(args, "lastRunId"))
-		assignOptional(input, "issueFile", optionalStringOrNull(args, "issueFile"))
-		assignOptional(input, "evidenceDir", optionalStringOrNull(args, "evidenceDir"))
-		assignOptional(input, "agentCwd", optionalStringOrNull(args, "agentCwd"))
+		assignOptional(input, "title", validateItemTitleForRequest(optionalStringOrNull(args, "title")))
+		assignOptional(input, "priority", validateItemPriorityForRequest(optionalStringOrNull(args, "priority")))
+		assignOptional(input, "branch", validateItemBranchForRequest(optionalStringOrNull(args, "branch")))
+		assignOptional(input, "pr", validateItemPrForRequest(optionalIntegerOrNull(args, "pr")))
+		assignOptional(input, "issueFile", validateRelativeItemPathForRequest(optionalStringOrNull(args, "issueFile"), "issueFile"))
+		assignOptional(input, "evidenceDir", validateEvidenceDirForRequest(optionalStringOrNull(args, "evidenceDir"), chain, this.paths.root))
 		assignOptional(input, "runner", optionalRunner(args, "runner"))
 		const existing = store.getItemByIssue(chain.id, input.issueNumber)
 		if (existing !== null) throw duplicateItemAddError(chain, input.issueNumber, existing)
@@ -654,22 +672,22 @@ export class CoderLoopDaemon {
 		if (status !== null) {
 			assignOptional(input, "status", await this.validateItemStatusForRequest(chain, status))
 		}
-		assignOptional(input, "title", optionalStringOrNull(fields, "title"))
-		assignOptional(input, "priority", optionalStringOrNull(fields, "priority"))
-		assignOptional(input, "branch", optionalStringOrNull(fields, "branch"))
-		assignOptional(input, "pr", optionalIntegerOrNull(fields, "pr"))
-		assignOptional(input, "issueFile", optionalStringOrNull(fields, "issueFile"))
-		assignOptional(input, "evidenceDir", optionalStringOrNull(fields, "evidenceDir"))
+		assignOptional(input, "title", validateItemTitleForRequest(optionalStringOrNull(fields, "title")))
+		assignOptional(input, "priority", validateItemPriorityForRequest(optionalStringOrNull(fields, "priority")))
+		assignOptional(input, "branch", validateItemBranchForRequest(optionalStringOrNull(fields, "branch")))
+		assignOptional(input, "pr", validateItemPrForRequest(optionalIntegerOrNull(fields, "pr")))
+		assignOptional(input, "issueFile", validateRelativeItemPathForRequest(optionalStringOrNull(fields, "issueFile"), "issueFile"))
+		assignOptional(input, "evidenceDir", validateEvidenceDirForRequest(optionalStringOrNull(fields, "evidenceDir"), chain, this.paths.root))
 		assignOptional(input, "runner", optionalRunner(fields, "runner"))
-		const rawExtra = optionalJsonObject(fields, "extra")
+		const rawExtra = sizedJsonObject(fields, "extra", MAX_ITEM_EXTRA_BYTES)
 		const topLevelDependsOn = optionalDependsOn(fields, "dependsOn")
 		const extraDependsOn = topLevelDependsOn === undefined && rawExtra !== undefined ? optionalDependsOn(rawExtra, "dependsOn") : undefined
 		const dependsOn = topLevelDependsOn === undefined ? extraDependsOn : topLevelDependsOn
 		if (dependsOn !== undefined) {
 			validateDependsOnGraph(store.listItems(item.chainId), item.id, dependsOn)
-			input.extra = withDependsOn(rawExtra ?? item.extra, dependsOn)
+			input.extra = validateItemExtra(withDependsOn(rawExtra ?? item.extra, dependsOn))
 		} else {
-			assignOptional(input, "extra", rawExtra)
+			assignOptional(input, "extra", rawExtra === undefined ? undefined : validateItemExtra(rawExtra))
 		}
 		const updated = store.updateItem(item.id, input)
 		this.queueSchedulerTick()
@@ -825,6 +843,10 @@ export class CoderLoopDaemon {
 		return status
 	}
 
+	private async defaultItemStatusForRequest(chain: ChainRecord): Promise<string> {
+		return await this.validateItemStatusForRequest(chain, "queued")
+	}
+
 	private async allowedItemStatuses(chain: ChainRecord): Promise<Set<string>> {
 		const scheduler = this.options.scheduler ?? {}
 		if (scheduler.pendingStatuses === undefined && scheduler.terminalStatuses === undefined) {
@@ -944,6 +966,97 @@ function validateBaseBranchForRequest(input: string): string {
 		throw new DaemonError("invalid_request", "baseBranch must be a valid git branch name", { baseBranch: input })
 	}
 	return input
+}
+
+function validateItemTitleForRequest(value: string | null | undefined): string | null | undefined {
+	if (value === undefined || value === null) return value
+	if (value.length > MAX_ITEM_TITLE_LENGTH) {
+		throw new DaemonError("invalid_request", `title must be ${MAX_ITEM_TITLE_LENGTH} characters or fewer`, { title: value })
+	}
+	if (/[\u0000-\u001f\u007f]/u.test(value)) {
+		throw new DaemonError("invalid_request", "title must not contain control characters", { title: value })
+	}
+	return value
+}
+
+function validateItemPriorityForRequest(value: string | null | undefined): string | null | undefined {
+	if (value === undefined || value === null) return value
+	if (!(ITEM_PRIORITY_VALUES as readonly string[]).includes(value)) {
+		throw new DaemonError("invalid_request", `priority must be one of: ${ITEM_PRIORITY_VALUES.join(", ")}, or null`, { priority: value })
+	}
+	return value
+}
+
+function validateItemBranchForRequest(value: string | null | undefined): string | null | undefined {
+	if (value === undefined || value === null) return value
+	validateGitBranchNameForRequest(value, "branch")
+	return value
+}
+
+function validateGitBranchNameForRequest(input: string, field: string): string {
+	if (/[\u0000-\u001f\u007f]/u.test(input)) {
+		throw new DaemonError("invalid_request", `${field} must not contain control characters`, { [field]: input })
+	}
+	if (input.includes("@{")) {
+		throw new DaemonError("invalid_request", `${field} must be a literal branch name, not checkout shorthand`, { [field]: input })
+	}
+
+	const check = Bun.spawnSync({ cmd: ["git", "check-ref-format", "--branch", input], stdout: "pipe", stderr: "pipe" })
+	if (check.exitCode !== 0) {
+		throw new DaemonError("invalid_request", `${field} must be a valid git branch name`, { [field]: input })
+	}
+	return input
+}
+
+function validateItemPrForRequest(value: number | null | undefined): number | null | undefined {
+	if (value === undefined || value === null) return value
+	if (value < 1) {
+		throw new DaemonError("invalid_request", "pr must be a positive integer or null", { pr: value })
+	}
+	return value
+}
+
+function validateRelativeItemPathForRequest(value: string | null | undefined, field: "issueFile" | "evidenceDir"): string | null | undefined {
+	if (value === undefined || value === null) return value
+	validateItemPathText(value, field)
+	if (isAbsolute(value)) throw new DaemonError("invalid_request", `${field} must be a relative path`, { [field]: value })
+	if (hasParentPathSegment(value)) throw new DaemonError("invalid_request", `${field} must not contain parent path segments`, { [field]: value })
+	return value
+}
+
+function validateEvidenceDirForRequest(value: string | null | undefined, chain: ChainRecord, loopDataRoot: string): string | null | undefined {
+	if (value === undefined || value === null) return value
+	validateItemPathText(value, "evidenceDir")
+	if (!isAbsolute(value)) return validateRelativeItemPathForRequest(value, "evidenceDir")
+
+	const chainRoot = resolveChainRuntimePaths(chain.name, { loopDataRoot }).chainRoot
+	const resolved = resolve(value)
+	if (!isPathInsideOrEqual(chainRoot, resolved)) {
+		throw new DaemonError("invalid_request", "evidenceDir absolute path must stay under the chain root", {
+			evidenceDir: value,
+			chainRoot,
+		})
+	}
+	return value
+}
+
+function validateItemPathText(value: string, field: "issueFile" | "evidenceDir"): void {
+	if (value === "") throw new DaemonError("invalid_request", `${field} must not be empty`, { [field]: value })
+	if (value.length > MAX_REPO_CWD_LENGTH) {
+		throw new DaemonError("invalid_request", `${field} must be ${MAX_REPO_CWD_LENGTH} characters or fewer`, { [field]: value })
+	}
+	if (/[\u0000-\u001f\u007f]/u.test(value)) {
+		throw new DaemonError("invalid_request", `${field} must not contain control characters`, { [field]: value })
+	}
+}
+
+function hasParentPathSegment(value: string): boolean {
+	return value.split(/[\\/]+/u).some((segment) => segment === "..")
+}
+
+function isPathInsideOrEqual(root: string, candidate: string): boolean {
+	const fromRoot = relative(root, candidate)
+	return fromRoot === "" || (!fromRoot.startsWith("..") && !isAbsolute(fromRoot))
 }
 
 function validateUmbrellaIssueForRequest(value: number | null | undefined): number | null | undefined {
@@ -1199,20 +1312,25 @@ function sizedJsonObject(record: UnknownRecord, key: string, limitBytes: number)
 }
 
 function validateChainMetadata(metadata: JsonObject): JsonObject {
-	validateChainMetadataValue(metadata, "metadata", 0)
+	validateJsonObjectSafety(metadata, "metadata", MAX_CHAIN_METADATA_DEPTH, "metadata")
 	return metadata
 }
 
-function validateChainMetadataValue(value: JsonValue, path: string, depth: number): void {
-	if (depth > MAX_CHAIN_METADATA_DEPTH) {
-		throw new DaemonError("invalid_request", `metadata nesting depth must be ${MAX_CHAIN_METADATA_DEPTH} or fewer`, {
+function validateItemExtra(extra: JsonObject): JsonObject {
+	validateJsonObjectSafety(extra, "extra", MAX_ITEM_EXTRA_DEPTH, "extra")
+	return extra
+}
+
+function validateJsonObjectSafety(value: JsonValue, path: string, maxDepth: number, label: string, depth = 0): void {
+	if (depth > maxDepth) {
+		throw new DaemonError("invalid_request", `${label} nesting depth must be ${maxDepth} or fewer`, {
 			field: path,
-			maxDepth: MAX_CHAIN_METADATA_DEPTH,
+			maxDepth,
 			actualDepth: depth,
 		})
 	}
 	if (Array.isArray(value)) {
-		value.forEach((item, index) => validateChainMetadataValue(item, `${path}[${index}]`, depth + 1))
+		value.forEach((item, index) => validateJsonObjectSafety(item, `${path}[${index}]`, maxDepth, label, depth + 1))
 		return
 	}
 	if (!isRecord(value)) return
@@ -1220,12 +1338,12 @@ function validateChainMetadataValue(value: JsonValue, path: string, depth: numbe
 	for (const [key, child] of Object.entries(value)) {
 		const field = key === "" ? `${path}.<empty>` : `${path}.${key}`
 		if (key === "") {
-			throw new DaemonError("invalid_request", "metadata key must not be empty string", { field })
+			throw new DaemonError("invalid_request", `${label} key must not be empty string`, { field })
 		}
 		if (RESERVED_METADATA_KEYS.has(key)) {
-			throw new DaemonError("invalid_request", `metadata key not allowed: ${key}`, { field })
+			throw new DaemonError("invalid_request", `${label} key not allowed: ${key}`, { field })
 		}
-		validateChainMetadataValue(child as JsonValue, field, depth + 1)
+		validateJsonObjectSafety(child as JsonValue, field, maxDepth, label, depth + 1)
 	}
 }
 
@@ -1239,6 +1357,10 @@ function validateKnownKeys(record: UnknownRecord, label: string, allowedKeys: re
 			})
 		}
 	}
+}
+
+function validateItemAddRequest(args: JsonObject): void {
+	validateKnownKeys(args, "item.add args", ITEM_ADD_ARG_KEYS)
 }
 
 function validateItemUpdateRequest(args: JsonObject): void {

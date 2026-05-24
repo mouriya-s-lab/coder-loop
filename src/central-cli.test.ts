@@ -3,6 +3,7 @@ import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
 import { startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
+import { openSqliteStateStore } from "./sqlite-state"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
@@ -117,7 +118,14 @@ describe("central chain/item CLI", () => {
 		const fixture = await startFixture("completion", { schedulerEnabled: true })
 		try {
 			expectJsonOk(await runCli(["chain", "create", "done-chain", "--repo", "mouriya-s-lab/coder-loop", "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			expectJsonOk(await runCli(["item", "add", "done-chain", "--issue", "181", "--repo-cwd", REPO_ROOT, "--status", "done", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				const chain = store.getChainByName("done-chain")
+				if (chain === null) throw new Error("expected done-chain")
+				store.createItem({ chainId: chain.id, issueNumber: 181, repoCwd: REPO_ROOT, status: "done" })
+			} finally {
+				store.close()
+			}
 			const status = await waitForJson(() => runCli(["chain", "status", "done-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]), (value) => value.chain?.status === "completed")
 			expect(status.summary.completion.state).toBe("completed")
 			expect(typeof status.summary.completion.completedAt).toBe("number")
