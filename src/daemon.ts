@@ -103,6 +103,21 @@ const CHAIN_CREATE_ARG_KEYS = [
 	"umbrellaIssue",
 	"umbrellaRepo",
 ] as const
+const ITEM_UPDATE_SELECTOR_KEYS = ["itemId", "chainId", "chainName", "name", "issueNumber"] as const
+const ITEM_UPDATE_FIELD_KEYS = [
+	"repoCwd",
+	"status",
+	"title",
+	"priority",
+	"branch",
+	"pr",
+	"issueFile",
+	"evidenceDir",
+	"runner",
+	"extra",
+	"dependsOn",
+] as const
+const ITEM_UPDATE_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "fields", ...ITEM_UPDATE_FIELD_KEYS] as const
 
 export class DaemonError extends Error {
 	constructor(
@@ -347,6 +362,13 @@ export class CoderLoopDaemon {
 		if (existing === null) {
 			chain = store.createChain(input)
 		} else {
+			if (existing.status === "deleted") {
+				throw new DaemonError("chain_deleted", `chain ${input.name} is deleted and cannot be recreated without an explicit recreate flow`, {
+					chainId: existing.id,
+					chainName: existing.name,
+					status: existing.status,
+				})
+			}
 			const conflicts = chainCreateConflicts(existing, input)
 			if (conflicts.length > 0) {
 				throw new DaemonError("conflict", `chain ${input.name} already exists with different fields`, {
@@ -589,8 +611,9 @@ export class CoderLoopDaemon {
 	}
 
 	private async handleItemUpdate(args: JsonObject): Promise<JsonObject> {
+		validateItemUpdateRequest(args)
 		const item = this.resolveItem(args)
-		const fields = optionalJsonObject(args, "fields") ?? args
+		const fields = itemUpdateFields(args)
 		const store = this.requireStore()
 		const chain = store.getChain(item.chainId)
 		if (chain === null) throw new DaemonError("not_found", `chain ${item.chainId} was not found`, { chainId: item.chainId })
@@ -602,15 +625,12 @@ export class CoderLoopDaemon {
 		if (status !== null) {
 			assignOptional(input, "status", await this.validateItemStatusForRequest(chain, status))
 		}
-		assignOptional(input, "attempts", optionalInteger(fields, "attempts") ?? undefined)
 		assignOptional(input, "title", optionalStringOrNull(fields, "title"))
 		assignOptional(input, "priority", optionalStringOrNull(fields, "priority"))
 		assignOptional(input, "branch", optionalStringOrNull(fields, "branch"))
 		assignOptional(input, "pr", optionalIntegerOrNull(fields, "pr"))
-		assignOptional(input, "lastRunId", optionalStringOrNull(fields, "lastRunId"))
 		assignOptional(input, "issueFile", optionalStringOrNull(fields, "issueFile"))
 		assignOptional(input, "evidenceDir", optionalStringOrNull(fields, "evidenceDir"))
-		assignOptional(input, "agentCwd", optionalStringOrNull(fields, "agentCwd"))
 		assignOptional(input, "runner", optionalRunner(fields, "runner"))
 		const rawExtra = optionalJsonObject(fields, "extra")
 		const topLevelDependsOn = optionalDependsOn(fields, "dependsOn")
@@ -1098,6 +1118,42 @@ function validateKnownKeys(record: UnknownRecord, label: string, allowedKeys: re
 			})
 		}
 	}
+}
+
+function validateItemUpdateRequest(args: JsonObject): void {
+	validateKnownKeys(args, "item.update args", ITEM_UPDATE_ARG_KEYS)
+	validateItemUpdateSelector(args)
+	const nestedFields = optionalJsonObject(args, "fields")
+	if (nestedFields !== undefined) {
+		validateKnownKeys(nestedFields, "item.update fields", ITEM_UPDATE_FIELD_KEYS)
+		for (const key of ITEM_UPDATE_FIELD_KEYS) {
+			if (Object.hasOwn(args, key)) {
+				throw new DaemonError("invalid_request", `item.update args cannot mix top-level update field with fields object: ${key}`, { field: key })
+			}
+		}
+	}
+	const fields = itemUpdateFields(args)
+	if (Object.keys(fields).length === 0) throw new DaemonError("invalid_request", "item.update requires at least one field to update")
+}
+
+function validateItemUpdateSelector(args: JsonObject): void {
+	const itemId = optionalInteger(args, "itemId")
+	if (itemId === null) return
+	for (const key of ["chainId", "chainName", "name", "issueNumber"] as const) {
+		if (Object.hasOwn(args, key)) {
+			throw new DaemonError("invalid_request", `item.update with itemId must not include selector field ${key}`, { field: key })
+		}
+	}
+}
+
+function itemUpdateFields(args: JsonObject): JsonObject {
+	const nestedFields = optionalJsonObject(args, "fields")
+	if (nestedFields !== undefined) return nestedFields
+	const fields: JsonObject = {}
+	for (const key of ITEM_UPDATE_FIELD_KEYS) {
+		if (Object.hasOwn(args, key)) fields[key] = args[key] as JsonValue
+	}
+	return fields
 }
 
 function optionalDependsOn(record: UnknownRecord, key: string): number[] | null | undefined {

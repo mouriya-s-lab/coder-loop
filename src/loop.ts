@@ -243,15 +243,12 @@ export type ItemCommandArgs =
 			issueNumber: number
 			repoCwd: string | null
 			status: string | null
-			attempts: number | null
 			title: string | null
 			priority: string | null
 			branch: string | null
 			pr: number | null
-			lastRunId: string | null
 			issueFile: string | null
 			evidenceDir: string | null
-			agentCwd: string | null
 			runner: AgentRunnerKind | null
 			loopDataRoot: string | null
 			json: boolean
@@ -1319,15 +1316,12 @@ const itemUpdateCliCommand = command({
 		issue: option({ long: "issue", type: cmdString }),
 		repoCwd: option({ long: "repo-cwd", type: optional(cmdString) }),
 		status: option({ long: "status", type: optional(cmdString) }),
-		attempts: option({ long: "attempts", type: optional(cmdString) }),
 		title: option({ long: "title", type: optional(cmdString) }),
 		priority: option({ long: "priority", type: optional(cmdString) }),
 		branch: option({ long: "branch", type: optional(cmdString) }),
 		pr: option({ long: "pr", type: optional(cmdString) }),
-		lastRunId: option({ long: "last-run-id", type: optional(cmdString) }),
 		issueFile: option({ long: "issue-file", type: optional(cmdString) }),
 		evidenceDir: option({ long: "evidence-dir", type: optional(cmdString) }),
-		agentCwd: option({ long: "agent-cwd", type: optional(cmdString) }),
 		runner: option({ long: "runner", type: optional(cmdString) }),
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
 		json: flag({ long: "json" }),
@@ -1340,15 +1334,12 @@ const itemUpdateCliCommand = command({
 			issueNumber: parseRequiredPositiveInteger(args.issue, "--issue"),
 			repoCwd: args.repoCwd === undefined ? null : resolve(args.repoCwd),
 			status: args.status ?? null,
-			attempts: parseOptionalNonNegativeInteger(args.attempts ?? null, "--attempts"),
 			title: args.title ?? null,
 			priority: args.priority ?? null,
 			branch: args.branch ?? null,
 			pr: parseOptionalPositiveInteger(args.pr ?? null, "--pr"),
-			lastRunId: args.lastRunId ?? null,
 			issueFile: args.issueFile ?? null,
 			evidenceDir: args.evidenceDir ?? null,
-			agentCwd: args.agentCwd === undefined ? null : resolve(args.agentCwd),
 			runner: parseOptionalRunner(args.runner ?? null, "--runner"),
 			loopDataRoot: args.loopDataRoot ?? null,
 			json: args.json,
@@ -1527,15 +1518,12 @@ async function runItemCommand(args: string[]): Promise<void> {
 	const fields = requestArgs.fields as JsonObject
 	assignCliOptional(fields, "repoCwd", itemArgs.repoCwd)
 	assignCliOptional(fields, "status", itemArgs.status)
-	assignCliOptional(fields, "attempts", itemArgs.attempts)
 	assignCliOptional(fields, "title", itemArgs.title)
 	assignCliOptional(fields, "priority", itemArgs.priority)
 	assignCliOptional(fields, "branch", itemArgs.branch)
 	assignCliOptional(fields, "pr", itemArgs.pr)
-	assignCliOptional(fields, "lastRunId", itemArgs.lastRunId)
 	assignCliOptional(fields, "issueFile", itemArgs.issueFile)
 	assignCliOptional(fields, "evidenceDir", itemArgs.evidenceDir)
-	assignCliOptional(fields, "agentCwd", itemArgs.agentCwd)
 	assignCliOptional(fields, "runner", itemArgs.runner)
 	if (Object.keys(fields).length === 0) fail("item update requires at least one field to update")
 	const result = await requestDaemonResult(itemArgs.loopDataRoot, "item.update", requestArgs)
