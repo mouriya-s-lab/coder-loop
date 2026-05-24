@@ -89,10 +89,12 @@ const DEFAULT_PRESET_NAME = "gh-issue-pr-iteration"
 const BUNDLED_PRESETS_DIR = resolve(import.meta.dir, "../presets")
 const MAX_DAEMON_REQUEST_BYTES = 1_048_576
 const MAX_CHAIN_METADATA_BYTES = 16_384
+const MAX_CHAIN_METADATA_DEPTH = 8
 const MAX_REPO_CWD_LENGTH = 4096
 const MAX_REPOSITORY_REF_LENGTH = 200
 const STALE_RECOVERY_FORCE_AFTER_MS = 1_000
 const ORPHAN_CHAIN_DIR_PREFIX = ".orphan-"
+const RESERVED_METADATA_KEYS = new Set(["__proto__", "constructor", "prototype"])
 const PRESET_NAME_PATTERN = /^[a-z][a-z0-9-]*$/
 const REPOSITORY_REF_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}[A-Za-z0-9])?\/[A-Za-z0-9._-]{1,100}$/
 const CHAIN_CREATE_ARG_KEYS = [
@@ -358,7 +360,7 @@ export class CoderLoopDaemon {
 			repository: validateRepositoryForRequest(requiredString(args, "repository")),
 			baseBranch: validateBaseBranchForRequest(optionalString(args, "baseBranch") ?? "main"),
 			status: "active",
-			metadata: sizedJsonObject(args, "metadata", MAX_CHAIN_METADATA_BYTES) ?? {},
+			metadata: validateChainMetadata(sizedJsonObject(args, "metadata", MAX_CHAIN_METADATA_BYTES) ?? {}),
 		}
 		const umbrellaIssue = validateUmbrellaIssueForRequest(optionalIntegerOrNull(args, "umbrellaIssue"))
 		if (umbrellaIssue !== undefined) input.umbrellaIssue = umbrellaIssue
@@ -1194,6 +1196,37 @@ function sizedJsonObject(record: UnknownRecord, key: string, limitBytes: number)
 		})
 	}
 	return value
+}
+
+function validateChainMetadata(metadata: JsonObject): JsonObject {
+	validateChainMetadataValue(metadata, "metadata", 0)
+	return metadata
+}
+
+function validateChainMetadataValue(value: JsonValue, path: string, depth: number): void {
+	if (depth > MAX_CHAIN_METADATA_DEPTH) {
+		throw new DaemonError("invalid_request", `metadata nesting depth must be ${MAX_CHAIN_METADATA_DEPTH} or fewer`, {
+			field: path,
+			maxDepth: MAX_CHAIN_METADATA_DEPTH,
+			actualDepth: depth,
+		})
+	}
+	if (Array.isArray(value)) {
+		value.forEach((item, index) => validateChainMetadataValue(item, `${path}[${index}]`, depth + 1))
+		return
+	}
+	if (!isRecord(value)) return
+
+	for (const [key, child] of Object.entries(value)) {
+		const field = key === "" ? `${path}.<empty>` : `${path}.${key}`
+		if (key === "") {
+			throw new DaemonError("invalid_request", "metadata key must not be empty string", { field })
+		}
+		if (RESERVED_METADATA_KEYS.has(key)) {
+			throw new DaemonError("invalid_request", `metadata key not allowed: ${key}`, { field })
+		}
+		validateChainMetadataValue(child as JsonValue, field, depth + 1)
+	}
 }
 
 function validateKnownKeys(record: UnknownRecord, label: string, allowedKeys: readonly string[]): void {
