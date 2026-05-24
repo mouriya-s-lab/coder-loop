@@ -91,6 +91,7 @@ const MAX_DAEMON_REQUEST_BYTES = 1_048_576
 const MAX_CHAIN_METADATA_BYTES = 16_384
 const MAX_REPO_CWD_LENGTH = 4096
 const MAX_REPOSITORY_REF_LENGTH = 200
+const STALE_RECOVERY_FORCE_AFTER_MS = 1_000
 const ORPHAN_CHAIN_DIR_PREFIX = ".orphan-"
 const PRESET_NAME_PATTERN = /^[a-z][a-z0-9-]*$/
 const REPOSITORY_REF_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}[A-Za-z0-9])?\/[A-Za-z0-9._-]{1,100}$/
@@ -310,6 +311,12 @@ export class CoderLoopDaemon {
 			validateRequestLineSize(line)
 			const request = parseDaemonRequest(line)
 			requestId = request.id
+			if (this.state === "starting") {
+				throw new DaemonError("daemon_starting", "daemon is still starting; retry after startup recovery completes", {
+					state: this.state,
+					command: request.command,
+				})
+			}
 			const result = await this.handleRequest(request)
 			return { id: request.id, ok: true, result }
 		} catch (error) {
@@ -476,7 +483,7 @@ export class CoderLoopDaemon {
 			if (staleItems.length === 0 && currentRun === null) continue
 
 			const stalePid = currentRun === null ? null : await this.readCurrentRunProcessGroupPid(chain, currentRun.runId, currentRun.extra)
-			if (stalePid !== null) await terminateStaleProcessGroup(stalePid, this.shutdownGraceMs)
+			if (stalePid !== null) await terminateStaleProcessGroup(stalePid, Math.min(this.shutdownGraceMs, STALE_RECOVERY_FORCE_AFTER_MS))
 
 			if (currentRun !== null) store.clearCurrentRun(chain.id)
 			const recoveredAt = unixSeconds()
@@ -931,11 +938,13 @@ async function terminateStaleProcessGroup(pid: number, forceAfterMs: number): Pr
 
 function sendSignalToPidOrGroup(pid: number, signal: NodeJS.Signals): boolean {
 	if (process.platform !== "win32") {
-		try {
-			process.kill(-pid, signal)
-			return true
-		} catch (error) {
-			return !isNoSuchProcessError(error)
+		if (canSignalStoredProcessGroup(pid)) {
+			try {
+				process.kill(-pid, signal)
+				return true
+			} catch (error) {
+				if (!isNoSuchProcessError(error)) return true
+			}
 		}
 	}
 	try {
@@ -944,6 +953,23 @@ function sendSignalToPidOrGroup(pid: number, signal: NodeJS.Signals): boolean {
 	} catch (error) {
 		return !isNoSuchProcessError(error)
 	}
+}
+
+function canSignalStoredProcessGroup(pid: number): boolean {
+	const currentGroup = readProcessGroupId(process.pid)
+	const targetGroup = readProcessGroupId(pid)
+	if (currentGroup !== null && currentGroup === pid) return false
+	if (targetGroup !== null && targetGroup !== pid) return false
+	if (currentGroup !== null && targetGroup !== null && currentGroup === targetGroup) return false
+	return true
+}
+
+function readProcessGroupId(pid: number): number | null {
+	const result = Bun.spawnSync({ cmd: ["ps", "-o", "pgid=", "-p", String(pid)], stdout: "pipe", stderr: "pipe" })
+	if (result.exitCode !== 0) return null
+	const raw = new TextDecoder().decode(result.stdout).trim()
+	const value = Number(raw)
+	return Number.isSafeInteger(value) && value > 0 ? value : null
 }
 
 function isPidOrGroupAlive(pid: number): boolean {

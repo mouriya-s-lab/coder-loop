@@ -940,6 +940,89 @@ describe("daemon", () => {
 		}
 	})
 
+	test("daemon startup rejects socket commands before stale recovery finishes", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-startup-recovery-socket`)
+		const loopDataRoot = resolve(root, "ld")
+		const socketPath = resolve(loopDataRoot, "daemon.sock")
+		await mkdir(loopDataRoot, { recursive: true })
+		const stale = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], {
+			detached: true,
+			stdio: "ignore",
+		})
+		stale.unref()
+		if (stale.pid === undefined) throw new Error("expected stale process pid")
+
+		const store = openSqliteStateStore({ loopDataRoot })
+		try {
+			const chain = store.createChain({
+				name: "startup-recovery-socket-chain",
+				preset: "gh-issue-pr-iteration",
+				repository: "mouriya-s-lab/coder-loop",
+				baseBranch: "main",
+				status: "active",
+				metadata: {},
+			})
+			const item = store.createItem({
+				chainId: chain.id,
+				issueNumber: 238,
+				repoCwd: REPO_ROOT,
+				status: "in_progress",
+				attempts: 1,
+				lastRunId: "run-stale-238",
+				agentCwd: resolve(root, "worktree"),
+				title: "stale item",
+				extra: {},
+			})
+			store.recordRun({
+				runId: "run-stale-238",
+				chainId: chain.id,
+				itemId: item.id,
+				phase: "iteration",
+				startedAt: 1_800_000_000,
+				extra: {},
+			})
+			store.setCurrentRun({
+				chainId: chain.id,
+				phase: "iteration",
+				runId: "run-stale-238",
+				startedAt: 1_800_000_000,
+				extra: { itemId: item.id, pid: stale.pid, processGroupLeader: true },
+			})
+		} finally {
+			store.close()
+		}
+
+		const startPromise = startCoderLoopDaemon({
+			loopDataRoot,
+			shutdownGraceMs: 500,
+			scheduler: { enabled: false },
+		})
+		await new Promise((resolveWait) => setTimeout(resolveWait, 100))
+		expect(await pathIsSocket(socketPath)).toBe(true)
+		const earlyResponse = await sendDaemonRequest(socketPath, daemonRequest("daemon.down", {}))
+		expect(earlyResponse.ok).toBe(false)
+		if (!earlyResponse.ok) expect(earlyResponse.error.code).toBe("daemon_starting")
+
+		const daemon = await startPromise
+		try {
+			expect(await pathIsSocket(socketPath)).toBe(true)
+			expect(await waitForPidExit(stale.pid, 1_000)).toBe(true)
+			expect((await readItem(loopDataRoot, 1, 238))?.status).toBe("changes_requested")
+			expect(await readCurrentRun(loopDataRoot, 1)).toBeNull()
+		} finally {
+			try {
+				process.kill(-(stale.pid), "SIGKILL")
+			} catch {
+				try {
+					process.kill(stale.pid, "SIGKILL")
+				} catch {
+					// Already reaped by daemon startup recovery.
+				}
+			}
+			await daemon.stop()
+		}
+	})
+
 	test("chain status marks stale in_progress rows without active slots", async () => {
 		const fixture = await startFixture("status-recovery-marker", { schedulerEnabled: false })
 		try {
