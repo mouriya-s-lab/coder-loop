@@ -14,9 +14,9 @@ import { closeSync, createWriteStream, openSync, realpathSync, type WriteStream 
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
 import { command, flag, option, optional, positional, run as runCmd, string as cmdString, subcommands } from "cmd-ts"
 import { type as arkType } from "arktype"
-import { CoderLoopDaemon, daemonRequest, sendDaemonRequest, type DaemonCommandName, type DaemonResponse } from "./daemon"
+import { CoderLoopDaemon, DaemonError, daemonRequest, sendDaemonRequest, type DaemonCommandName, type DaemonResponse } from "./daemon"
 import { dispatchSubcommand } from "./install-commands"
-import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
+import { RuntimePathError, resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import {
 	type ChainRecord,
 	type CurrentRunRecord,
@@ -1552,7 +1552,8 @@ function parseUmbrellaRef(raw: string, defaultRepo: string): JsonObject {
 
 async function runCentralDaemonStatusCommand(args: string[]): Promise<void> {
 	const options = parseCentralDaemonSocketOptions(args, "daemon status")
-	const result = await requestDaemonResult(options.loopDataRoot, "daemon.status")
+	const result = await requestDaemonResultForDaemonCommand(options.loopDataRoot, "daemon.status", {}, options.json)
+	if (result === null) return
 	writeCommandResult(result, options.json, formatDaemonStatusResult)
 }
 
@@ -1610,10 +1611,72 @@ async function requestDaemonResult(loopDataRoot: string | null, command: DaemonC
 	return response.result
 }
 
+async function requestDaemonResultForDaemonCommand(loopDataRoot: string | null, command: DaemonCommandName, args: JsonObject, json: boolean): Promise<JsonObject | null> {
+	const response = await sendDaemonRequestForDaemonCommand(loopDataRoot, command, args, json)
+	if (response === null) return null
+	if (!response.ok) {
+		if (json) {
+			writeDaemonErrorResponse(daemonErrorResponse(response.error.code, response.error.message, response.error.details ?? {}))
+			return null
+		}
+		fail(`${response.error.code}: ${response.error.message}`)
+	}
+	return response.result
+}
+
+async function sendDaemonRequestForDaemonCommand(loopDataRoot: string | null, command: DaemonCommandName, args: JsonObject, json: boolean): Promise<DaemonResponse | null> {
+	let socketPath: string
+	try {
+		socketPath = resolveLoopDataPaths(loopDataRoot === null ? {} : { loopDataRoot }).daemonSocket
+	} catch (error) {
+		if (json) {
+			writeDaemonErrorResponse(daemonCliErrorResponse(error, "invalid_loop_data_root"))
+			return null
+		}
+		throw error
+	}
+
+	try {
+		return await sendDaemonRequest(socketPath, daemonRequest(command, args))
+	} catch (error) {
+		if (json) {
+			writeDaemonErrorResponse(daemonNotRunningErrorResponse(loopDataRoot, socketPath, error))
+			return null
+		}
+		fail(centralDaemonNotRunningMessage(loopDataRoot, socketPath, error))
+	}
+}
+
 function centralDaemonNotRunningMessage(loopDataRoot: string | null, socketPath: string, error: unknown): string {
 	const hint = loopDataRoot === null ? "coder-loop daemon up" : `coder-loop daemon up --loop-data-root ${loopDataRoot}`
 	const detail = isNodeError(error) && typeof error.code === "string" ? `${error.code}: ${errorMessage(error)}` : errorMessage(error)
 	return `central daemon is not running at ${socketPath}; start it with \`${hint}\`. ${detail}`
+}
+
+function daemonNotRunningErrorResponse(loopDataRoot: string | null, socketPath: string, error: unknown): JsonObject {
+	const details: JsonObject = { socketPath }
+	if (loopDataRoot !== null) details.loopDataRoot = loopDataRoot
+	if (isNodeError(error) && typeof error.code === "string") details.causeCode = error.code
+	return daemonErrorResponse("daemon_not_running", centralDaemonNotRunningMessage(loopDataRoot, socketPath, error), details)
+}
+
+function daemonCliErrorResponse(error: unknown, fallbackCode: string): JsonObject {
+	if (error instanceof DaemonError) return daemonErrorResponse(error.code, error.message, error.details)
+	if (error instanceof RuntimePathError) {
+		return daemonErrorResponse(error.code, error.message, { input: error.input })
+	}
+	return daemonErrorResponse(fallbackCode, errorMessage(error))
+}
+
+function daemonErrorResponse(code: string, message: string, details: JsonObject = {}): JsonObject {
+	const error: JsonObject = { code, message }
+	if (Object.keys(details).length > 0) error.details = details
+	return { ok: false, error }
+}
+
+function writeDaemonErrorResponse(response: JsonObject): void {
+	process.stdout.write(`${JSON.stringify(response, null, "\t")}\n`)
+	process.exitCode = 1
 }
 
 function writeCommandResult(result: JsonObject, json: boolean, formatText: (result: JsonObject) => string): void {
@@ -2807,21 +2870,30 @@ export function buildDaemonStartPlan(args: Extract<DaemonCommandArgs, { action: 
 
 async function runDaemonUpCommand(args: Extract<DaemonCommandArgs, { action: "up" }>): Promise<void> {
 	const scheduler = args.schedulerIntervalMs === null ? {} : { intervalMs: args.schedulerIntervalMs }
-	const daemon = new CoderLoopDaemon({
-		...(args.loopDataRoot === null ? {} : { loopDataRoot: args.loopDataRoot }),
-		scheduler,
-	})
+	let daemon: CoderLoopDaemon | null = null
 	let shutdownStarted = false
 	const shutdown = () => {
 		if (shutdownStarted) return
 		shutdownStarted = true
+		if (daemon === null) {
+			process.exit(0)
+			return
+		}
 		void daemon.stop().then(() => process.exit(0))
 	}
 	const ignoreSignal = () => undefined
-	for (const signal of DAEMON_SHUTDOWN_SIGNALS) process.once(signal, shutdown)
-	for (const signal of DAEMON_IGNORED_SIGNALS) process.on(signal, ignoreSignal)
+	let signalsRegistered = false
+	let started = false
 	try {
+		daemon = new CoderLoopDaemon({
+			...(args.loopDataRoot === null ? {} : { loopDataRoot: args.loopDataRoot }),
+			scheduler,
+		})
+		for (const signal of DAEMON_SHUTDOWN_SIGNALS) process.once(signal, shutdown)
+		for (const signal of DAEMON_IGNORED_SIGNALS) process.on(signal, ignoreSignal)
+		signalsRegistered = true
 		await daemon.start()
+		started = true
 		const result = {
 			action: "up",
 			pid: process.pid,
@@ -2830,20 +2902,23 @@ async function runDaemonUpCommand(args: Extract<DaemonCommandArgs, { action: "up
 		}
 		writeJsonOrText(result, args.json, formatDaemonUpResult)
 		await daemon.closed
+	} catch (error) {
+		if (args.json && !started) {
+			writeDaemonErrorResponse(daemonCliErrorResponse(error, "daemon_start_failed"))
+			return
+		}
+		throw error
 	} finally {
-		for (const signal of DAEMON_SHUTDOWN_SIGNALS) process.off(signal, shutdown)
-		for (const signal of DAEMON_IGNORED_SIGNALS) process.off(signal, ignoreSignal)
+		if (signalsRegistered) {
+			for (const signal of DAEMON_SHUTDOWN_SIGNALS) process.off(signal, shutdown)
+			for (const signal of DAEMON_IGNORED_SIGNALS) process.off(signal, ignoreSignal)
+		}
 	}
 }
 
 async function runDaemonDownCommand(args: Extract<DaemonCommandArgs, { action: "down" }>): Promise<void> {
-	const socketPath = resolveLoopDataPaths(args.loopDataRoot === null ? {} : { loopDataRoot: args.loopDataRoot }).daemonSocket
-	let response: DaemonResponse
-	try {
-		response = await sendDaemonRequest(socketPath, daemonRequest("daemon.down"))
-	} catch (error) {
-		fail(centralDaemonNotRunningMessage(args.loopDataRoot, socketPath, error))
-	}
+	const response = await sendDaemonRequestForDaemonCommand(args.loopDataRoot, "daemon.down", {}, args.json)
+	if (response === null) return
 	if (args.json) {
 		process.stdout.write(`${JSON.stringify(response, null, "\t")}\n`)
 		if (!response.ok) process.exitCode = 1
