@@ -291,6 +291,43 @@ describe("central chain/item CLI", () => {
 		expect(result.stderr).toContain("coder-loop daemon up --loop-data-root")
 	})
 
+	test("daemon status and down --json emit JSON when central daemon is not running", async () => {
+		const loopDataRoot = resolve(TEST_ROOT, `daemon-dead-json-${++nextFixtureId}`)
+		await mkdir(loopDataRoot, { recursive: true })
+
+		for (const action of ["status", "down"] as const) {
+			const result = await runCli(["daemon", action, "--loop-data-root", loopDataRoot, "--json"])
+			const parsed = expectJsonError(result)
+			expect(result.stderr).toBe("")
+			expect(parsed.error).toMatchObject({
+				code: "daemon_not_running",
+				details: {
+					loopDataRoot,
+					socketPath: resolve(loopDataRoot, "daemon.sock"),
+					causeCode: "ENOENT",
+				},
+			})
+			expect(parsed.error.message).toContain("central daemon is not running")
+			expect(parsed.error.message).toContain("coder-loop daemon up --loop-data-root")
+		}
+	})
+
+	test("daemon up --json emits JSON when loop-data root cannot be prepared", async () => {
+		await mkdir(TEST_ROOT, { recursive: true })
+		const parentFile = resolve(TEST_ROOT, `not-a-directory-${++nextFixtureId}`)
+		await writeFile(parentFile, "not a directory\n")
+		const loopDataRoot = resolve(parentFile, "child")
+
+		const result = await runCli(["daemon", "up", "--loop-data-root", loopDataRoot, "--json"])
+		const parsed = expectJsonError(result)
+		expect(result.stderr).toBe("")
+		expect(parsed.error).toMatchObject({
+			code: "db_unavailable",
+			details: { loopDataRoot },
+		})
+		expect(parsed.error.message).toContain("unable to prepare loop-data directory")
+	})
+
 	test("daemon status target reports chain-only daemon from loop-data socket", async () => {
 		const loopDataRoot = await makeLoopDataRoot("daemon-status-chain-only")
 		const daemonProcess = spawnDaemonUp(loopDataRoot)
@@ -622,6 +659,15 @@ async function writeExecutable(path: string, content: string): Promise<void> {
 function expectJsonOk(result: { exitCode: number | null; stdout: string; stderr: string }) {
 	expect(result.exitCode, result.stderr).toBe(0)
 	return JSON.parse(result.stdout)
+}
+
+function expectJsonError(result: { exitCode: number | null; stdout: string; stderr: string }): { ok: false; error: { code: string; message: string; details?: Record<string, unknown> } } {
+	expect(result.exitCode, result.stderr).toBe(1)
+	const parsed = JSON.parse(result.stdout)
+	expect(parsed.ok).toBe(false)
+	expect(typeof parsed.error?.code).toBe("string")
+	expect(typeof parsed.error?.message).toBe("string")
+	return parsed
 }
 
 async function waitForJson(
