@@ -467,7 +467,7 @@ async function createChainThroughDaemon(input: {
 }): Promise<{ chainName: string; result: JsonValue | null }> {
 	const chainName = defaultChainName(input.repo)
 	if (input.dryRun) return { chainName, result: null }
-	const socketPath = resolveLoopDataPaths(input.loopDataRoot === null ? {} : { loopDataRoot: input.loopDataRoot }).daemonSocket
+	const socketPath = centralDaemonSocketPath(input.loopDataRoot)
 	try {
 		const response = await sendDaemonRequest(socketPath, daemonRequest("chain.create", {
 			name: chainName,
@@ -482,13 +482,32 @@ async function createChainThroughDaemon(input: {
 		if (!response.ok) fail(`${response.error.code}: ${response.error.message}`)
 		return { chainName, result: response.result as JsonValue }
 	} catch (error) {
-		const hint = input.loopDataRoot === null ? "coder-loop daemon up" : `coder-loop daemon up --loop-data-root ${input.loopDataRoot}`
-		fail(`central daemon is not running at ${socketPath}; start it with \`${hint}\`. ${error instanceof Error ? error.message : String(error)}`)
+		fail(formatCentralDaemonNotRunning(input.loopDataRoot, socketPath, error))
 	}
 }
 
 function defaultChainName(repo: string): string {
 	return requireInstallRepoSlug(repo).name
+}
+
+async function assertCentralDaemonReachable(loopDataRoot: string | null, dryRun: boolean): Promise<void> {
+	if (dryRun) return
+	const socketPath = centralDaemonSocketPath(loopDataRoot)
+	try {
+		const response = await sendDaemonRequest(socketPath, daemonRequest("chain.list"))
+		if (!response.ok) fail(`${response.error.code}: ${response.error.message}`)
+	} catch (error) {
+		fail(formatCentralDaemonNotRunning(loopDataRoot, socketPath, error))
+	}
+}
+
+function centralDaemonSocketPath(loopDataRoot: string | null): string {
+	return resolveLoopDataPaths(loopDataRoot === null ? {} : { loopDataRoot }).daemonSocket
+}
+
+function formatCentralDaemonNotRunning(loopDataRoot: string | null, socketPath: string, error: unknown): string {
+	const hint = loopDataRoot === null ? "coder-loop daemon up" : `coder-loop daemon up --loop-data-root ${loopDataRoot}`
+	return `central daemon is not running at ${socketPath}; start it with \`${hint}\`. ${error instanceof Error ? error.message : String(error)}`
 }
 
 // ===================================================================
@@ -576,15 +595,15 @@ export async function runInstallCommand(rawArgs: string[]): Promise<void> {
 	await assertInstallTargetIsGitRepository(args.target)
 	const explicitRepo = args.repo === null ? null : requireInstallRepoSlug(args.repo).slug
 	const preset = await loadPresetForName(args.presetName)
+	const repoForChain = explicitRepo ?? (await inferRepoFromGit(args.target))
+	if (repoForChain === null) fail("install: missing --repo and git origin is not a GitHub repository; cannot create chain")
+	await assertCentralDaemonReachable(args.loopDataRoot, args.dryRun)
 
 	info(`==> coder-loop install: target=${args.target}, preset=${preset.name}@${preset.version}, dry-run=${args.dryRun}`)
 
 	info("\n[Layer A] Target committed policy")
 	const workflowResult = await ensureWorkflowMd(args.target, args.dryRun)
 	info(`  ${workflowResult.wrote ? (args.dryRun ? "would-write" : "已写入") : "未变化（保留 operator 自定义）"}: ${WORKFLOW_REL}`)
-
-	const repoForChain = explicitRepo ?? (await inferRepoFromGit(args.target))
-	if (repoForChain === null) fail("install: missing --repo and git origin is not a GitHub repository; cannot create chain")
 
 	info("\n[Central] DB chain")
 	const chainCreate = await createChainThroughDaemon({

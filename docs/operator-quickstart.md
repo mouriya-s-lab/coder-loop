@@ -42,9 +42,10 @@ slash command（`/dev-plan` `/dev-loop`）有两种 scope：
 
 ## 1. Bootstrap 目标 repo 的 `.coder-loop/`
 
-在**目标 repo**（不是本 repo）里一条命令完成：
+在**目标 repo**（不是本 repo）里先启动 central daemon，再执行 install：
 
 ```bash
+coder-loop daemon up
 coder-loop install /path/to/your-target-repo --repo <owner>/<repo>
 ```
 
@@ -54,6 +55,8 @@ coder-loop install /path/to/your-target-repo --repo <owner>/<repo>
 - **B) target GitHub state**：通过 `gh` 确保 `kind:code` / `kind:comment` / `kind:code-spike` / `kind:blocked` 标签存在（preset fragments 依赖它们做 issue 分类）。
 - **C) 操作员机器前置**：只做检查、不安装——`gh`(+ auth) / target default runner CLI / review default runner CLI / `coder-loop` 是否在 PATH。
 - **D) 用户级 skill 版本**：检查 `~/.claude/skills/writing-issue/SKILL.md` 是否含新版 marker；加 `--install-skills` 会自动同步到最新。
+
+`install` 第一件事会确认 central daemon 可达；daemon 不在线时会在写 `.coder-loop/workflow.md` 之前 fail-fast。使用自定义 `--loop-data-root` 时，`daemon up` 与后续 `install` / `doctor` / `status` 要传同一个 root。
 
 常用 flag：
 

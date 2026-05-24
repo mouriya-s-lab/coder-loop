@@ -497,13 +497,15 @@ describe("central chain/item CLI", () => {
 
 	test("install daemon offline explicit fail", async () => {
 		const env = await fakeCliEnv("install-offline")
-		const target = await makeGitTarget("install-offline-target", { workflow: true })
+		const target = await makeGitTarget("install-offline-target")
 		const loopDataRoot = resolve(TEST_ROOT, `${++nextFixtureId}-offline-loop-data`)
 		await mkdir(loopDataRoot, { recursive: true })
 		const result = await runCli(["install", target, "--repo", "fixture/repo", "--loop-data-root", loopDataRoot, "--skip-skill-check"], env)
 		expect(result.exitCode).toBe(1)
 		expect(result.stderr).toContain("central daemon is not running")
 		expect(result.stderr).toContain("coder-loop daemon up --loop-data-root")
+		expect(result.stderr).not.toContain("[Layer A]")
+		await expect(Bun.file(resolve(target, ".coder-loop/workflow.md")).exists()).resolves.toBe(false)
 		await expect(Bun.file(resolve(target, ".coder-loop/runtime")).exists()).resolves.toBe(false)
 	})
 
