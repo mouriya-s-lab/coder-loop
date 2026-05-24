@@ -14,7 +14,7 @@ import { closeSync, createWriteStream, openSync, realpathSync, type WriteStream 
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
 import { command, flag, option, optional, positional, run as runCmd, string as cmdString, subcommands } from "cmd-ts"
 import { type as arkType } from "arktype"
-import { daemonRequest, sendDaemonRequest, startCoderLoopDaemon, type DaemonCommandName, type DaemonResponse } from "./daemon"
+import { CoderLoopDaemon, daemonRequest, sendDaemonRequest, type DaemonCommandName, type DaemonResponse } from "./daemon"
 import { dispatchSubcommand } from "./install-commands"
 import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import {
@@ -2767,6 +2767,9 @@ type DaemonStartResult =
 				source: StatusProcessInfo["source"]
 		  }
 
+const DAEMON_SHUTDOWN_SIGNALS = ["SIGTERM", "SIGINT", "SIGQUIT"] as const
+const DAEMON_IGNORED_SIGNALS = ["SIGHUP", "SIGUSR1", "SIGUSR2", "SIGPIPE"] as const
+
 export function buildDaemonStartPlan(args: Extract<DaemonCommandArgs, { action: "start" }>): DaemonStartPlan {
 	const targetCwd = resolve(args.targetCwd)
 	const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")
@@ -2800,23 +2803,33 @@ export function buildDaemonStartPlan(args: Extract<DaemonCommandArgs, { action: 
 
 async function runDaemonUpCommand(args: Extract<DaemonCommandArgs, { action: "up" }>): Promise<void> {
 	const scheduler = args.schedulerIntervalMs === null ? {} : { intervalMs: args.schedulerIntervalMs }
-	const daemon = await startCoderLoopDaemon({
+	const daemon = new CoderLoopDaemon({
 		...(args.loopDataRoot === null ? {} : { loopDataRoot: args.loopDataRoot }),
 		scheduler,
 	})
+	let shutdownStarted = false
 	const shutdown = () => {
+		if (shutdownStarted) return
+		shutdownStarted = true
 		void daemon.stop().then(() => process.exit(0))
 	}
-	process.once("SIGTERM", shutdown)
-	process.once("SIGINT", shutdown)
-	const result = {
-		action: "up",
-		pid: process.pid,
-		socketPath: daemon.snapshot().socketPath,
-		pidFile: daemon.snapshot().pidFile,
+	const ignoreSignal = () => undefined
+	for (const signal of DAEMON_SHUTDOWN_SIGNALS) process.once(signal, shutdown)
+	for (const signal of DAEMON_IGNORED_SIGNALS) process.on(signal, ignoreSignal)
+	try {
+		await daemon.start()
+		const result = {
+			action: "up",
+			pid: process.pid,
+			socketPath: daemon.snapshot().socketPath,
+			pidFile: daemon.snapshot().pidFile,
+		}
+		writeJsonOrText(result, args.json, formatDaemonUpResult)
+		await daemon.closed
+	} finally {
+		for (const signal of DAEMON_SHUTDOWN_SIGNALS) process.off(signal, shutdown)
+		for (const signal of DAEMON_IGNORED_SIGNALS) process.off(signal, ignoreSignal)
 	}
-	writeJsonOrText(result, args.json, formatDaemonUpResult)
-	await daemon.closed
 }
 
 async function runDaemonDownCommand(args: Extract<DaemonCommandArgs, { action: "down" }>): Promise<void> {
