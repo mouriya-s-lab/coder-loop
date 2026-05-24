@@ -511,6 +511,82 @@ describe("daemon", () => {
 		}
 	})
 
+	test("socket item.add rejects daemon-owned, unsafe, and unknown fields before db insert", async () => {
+		const fixture = await startFixture("item-add-strict-fields", { schedulerEnabled: false })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "strict-add-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			const chainPaths = resolveChainRuntimePaths("strict-add-chain", { loopDataRoot: fixture.loopDataRoot })
+			const absoluteEvidenceDir = resolve(chainPaths.chainRoot, "evidence/custom-246")
+
+			const added = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 246,
+				repoCwd: REPO_ROOT,
+				title: "strict add item",
+				priority: "high",
+				branch: "feature/issue-246",
+				pr: 254,
+				issueFile: "issues/246.md",
+				evidenceDir: absoluteEvidenceDir,
+				runner: "codex",
+				extra: { note: "allowed" },
+			})).item)
+			expect(added).toMatchObject({
+				issueNumber: 246,
+				status: "queued",
+				attempts: 0,
+				priority: "high",
+				branch: "feature/issue-246",
+				pr: 254,
+				issueFile: "issues/246.md",
+				evidenceDir: absoluteEvidenceDir,
+				lastRunId: null,
+				agentCwd: null,
+				runner: "codex",
+			})
+
+			const invalidRequests = [
+				{ issueNumber: 601, repoCwd: REPO_ROOT, status: "done" },
+				{ issueNumber: 602, repoCwd: REPO_ROOT, attempts: 999 },
+				{ issueNumber: 603, repoCwd: REPO_ROOT, lastRunId: "hacked" },
+				{ issueNumber: 604, repoCwd: REPO_ROOT, agentCwd: "/etc/passwd" },
+				{ issueNumber: 605, repoCwd: REPO_ROOT, id: 1 },
+				{ issueNumber: 606, repoCwd: REPO_ROOT, createdAt: 1 },
+				{ issueNumber: 607, repoCwd: REPO_ROOT, updatedAt: 1 },
+				{ issueNumber: 608, repoCwd: REPO_ROOT, branch: "../../etc/passwd" },
+				{ issueNumber: 609, repoCwd: REPO_ROOT, issueFile: "../../etc/passwd" },
+				{ issueNumber: 610, repoCwd: REPO_ROOT, evidenceDir: "/etc/coder-loop-evidence" },
+				{ issueNumber: 611, repoCwd: REPO_ROOT, random_field: "hack" },
+				{ issueNumber: 612, repoCwd: REPO_ROOT, title: "bad\nline" },
+				{ issueNumber: 613, repoCwd: REPO_ROOT, priority: "garbage-xyz" },
+				{ issueNumber: 614, repoCwd: REPO_ROOT, priority: 999 },
+				{ issueNumber: 615, repoCwd: REPO_ROOT, pr: -1 },
+				{ issueNumber: 616, repoCwd: REPO_ROOT, extra: JSON.parse(`{"__proto__":{"polluted":1}}`) },
+				{ issueNumber: 617, repoCwd: REPO_ROOT, extra: { "": "empty-key" } },
+				{ issueNumber: 618, repoCwd: REPO_ROOT, extra: nestedMetadata(9) },
+			]
+			for (const args of invalidRequests) expectInvalid(await request(fixture, "item.add", { chainId, ...args }))
+
+			expectTooLarge(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 619,
+				repoCwd: REPO_ROOT,
+				extra: { k: "x".repeat(17 * 1024) },
+			}))
+
+			const listed = expectOk(await request(fixture, "item.list", { chainId })).items
+			expect(Array.isArray(listed)).toBe(true)
+			expect(listed).toHaveLength(1)
+			expect(record(Array.isArray(listed) ? listed[0] : null)).toMatchObject({ issueNumber: 246 })
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("socket item.add acks before scheduler side effects finish", async () => {
 		const fixture = await startFixture("item-add-async-scheduler", {
 			schedulerIntervalMs: 50,
@@ -578,9 +654,13 @@ describe("daemon", () => {
 				chainId,
 				issueNumber: 188,
 				repoCwd: REPO_ROOT,
+			})).item)
+			expect(added).toMatchObject({ issueNumber: 188, status: "queued" })
+			const pending = record(expectOk(await request(fixture, "item.update", {
+				itemId: numberValue(added.id),
 				status: "pending",
 			})).item)
-			expect(added).toMatchObject({ issueNumber: 188, status: "pending" })
+			expect(pending).toMatchObject({ issueNumber: 188, status: "pending" })
 
 			expectInvalid(await request(fixture, "item.update", { itemId: numberValue(added.id), status: "changes_requested" }))
 		} finally {
@@ -890,10 +970,13 @@ describe("daemon", () => {
 				repository: "mouriya-s-lab/coder-loop",
 			})).chain)
 			const chainId = numberValue(chain.id)
-			await request(fixture, "item.add", {
+			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
 				issueNumber: 180,
 				repoCwd: REPO_ROOT,
+			})).item)
+			await request(fixture, "item.update", {
+				itemId: numberValue(added.id),
 				status: "done",
 			})
 
@@ -910,10 +993,13 @@ describe("daemon", () => {
 				name: "first-chain",
 				repository: "mouriya-s-lab/coder-loop",
 			})).chain)
-			await request(fixture, "item.add", {
+			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId: numberValue(first.id),
 				issueNumber: 180,
 				repoCwd: REPO_ROOT,
+			})).item)
+			await request(fixture, "item.update", {
+				itemId: numberValue(added.id),
 				status: "done",
 			})
 			await waitFor(async () => readChainStatus(fixture.loopDataRoot, numberValue(first.id)), (status) => status === "completed")
@@ -1167,10 +1253,13 @@ describe("daemon", () => {
 				repository: "mouriya-s-lab/coder-loop",
 			})).chain)
 			const chainId = numberValue(chain.id)
-			await request(fixture, "item.add", {
+			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
 				issueNumber: 217,
 				repoCwd: REPO_ROOT,
+			})).item)
+			await request(fixture, "item.update", {
+				itemId: numberValue(added.id),
 				status: "in_progress",
 			})
 
