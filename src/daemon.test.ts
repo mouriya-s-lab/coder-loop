@@ -246,6 +246,54 @@ describe("daemon", () => {
 		}
 	})
 
+	test("socket chain.create validates umbrellaRepo format", async () => {
+		const fixture = await startFixture("chain-create-invalid-umbrella-repo", { schedulerEnabled: false })
+		try {
+			const invalidUmbrellaRepos = [
+				"/etc/passwd",
+				"no-slash",
+				"a/b/c",
+				"foo",
+				"https://github.com/owner/repo",
+				"bad owner/repo",
+				"owner/.",
+				"owner/..",
+				"owner/repo\u007f",
+				"owner-/repo",
+			]
+
+			for (const [index, umbrellaRepo] of invalidUmbrellaRepos.entries()) {
+				const response = await request(fixture, "chain.create", {
+					name: `umbrella-repo-check-${index}`,
+					repository: "mouriya-s-lab/coder-loop",
+					umbrellaRepo,
+				})
+
+				expectInvalid(response)
+				if (!response.ok) expect(response.error.message).toContain("umbrellaRepo")
+				const listed = expectOk(await request(fixture, "chain.list")).chains
+				expect(Array.isArray(listed)).toBe(true)
+				expect(listed).toHaveLength(0)
+			}
+
+			const nullUmbrellaRepo = record(expectOk(await request(fixture, "chain.create", {
+				name: "null-umbrella-repo",
+				repository: "mouriya-s-lab/coder-loop",
+				umbrellaRepo: null,
+			})).chain)
+			expect(nullUmbrellaRepo).toMatchObject({ umbrellaRepo: null })
+
+			const validUmbrellaRepo = record(expectOk(await request(fixture, "chain.create", {
+				name: "valid-umbrella-repo",
+				repository: "mouriya-s-lab/coder-loop",
+				umbrellaRepo: "mouriya-s-lab/coder-loop",
+			})).chain)
+			expect(validUmbrellaRepo).toMatchObject({ umbrellaRepo: "mouriya-s-lab/coder-loop" })
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("socket chain.create rejects undeclared args", async () => {
 		const fixture = await startFixture("chain-create-strict-args", { schedulerEnabled: false })
 		try {
