@@ -601,7 +601,7 @@ describe("daemon", () => {
 		}
 	})
 
-	test("socket chain.create rejects deleted same-name chain instead of resurrecting it", async () => {
+	test("socket chain.create force recreates deleted same-name chain", async () => {
 		const fixture = await startFixture("chain-create-deleted-name", { schedulerEnabled: false })
 		try {
 			const chain = record(expectOk(await request(fixture, "chain.create", {
@@ -611,16 +611,32 @@ describe("daemon", () => {
 			const chainId = numberValue(chain.id)
 
 			expectOk(await request(fixture, "chain.delete", { chainId }))
-			expectChainDeleted(await request(fixture, "chain.create", {
+			const unforced = await request(fixture, "chain.create", {
 				name: "recyclable",
 				repository: "mouriya-s-lab/coder-loop",
-			}))
+			})
+			expectChainDeleted(unforced)
+			if (!unforced.ok) expect(unforced.error.message).toContain("force=true")
+
+			const recreated = record(expectOk(await request(fixture, "chain.create", {
+				name: "recyclable",
+				repository: "mouriya-s-lab/coder-loop",
+				baseBranch: "recreated",
+				force: true,
+			})).chain)
+			const recreatedId = numberValue(recreated.id)
+			expect(recreatedId).not.toBe(chainId)
+			expect(recreated).toMatchObject({
+				name: "recyclable",
+				status: "active",
+				baseBranch: "recreated",
+			})
 
 			const listed = expectOk(await request(fixture, "chain.list")).chains
 			expect(Array.isArray(listed)).toBe(true)
 			if (!Array.isArray(listed)) throw new Error("expected chain list array")
 			expect(listed).toHaveLength(1)
-			expect(record(listed[0])).toMatchObject({ id: chainId, name: "recyclable", status: "deleted" })
+			expect(record(listed[0])).toMatchObject({ id: recreatedId, name: "recyclable", status: "active" })
 		} finally {
 			await fixture.daemon.stop()
 		}
