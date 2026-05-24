@@ -1034,6 +1034,38 @@ describe("daemon", () => {
 		}
 	})
 
+	test("terminal item.update terminates active run and completes chain", async () => {
+		const fixture = await startFixture("terminal-update-active-run")
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "terminal-update-active-run-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			const added = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 249,
+				repoCwd: REPO_ROOT,
+				extra: { sleepMs: 5_000, exitCode: 0 },
+			})).item)
+			const itemId = numberValue(added.id)
+			await waitFor(async () => record(expectOk(await request(fixture, "daemon.status")).daemon).activeRuns, (runs) => Array.isArray(runs) && runs.length === 1)
+
+			const updated = record(expectOk(await request(fixture, "item.update", {
+				itemId,
+				status: "done",
+			})).item)
+
+			expect(updated).toMatchObject({ id: itemId, status: "done" })
+			expect(await readChainStatus(fixture.loopDataRoot, chainId)).toBe("completed")
+			expect(record(expectOk(await request(fixture, "daemon.status")).daemon).activeRuns).toEqual([])
+			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({ type: "agent.exit", itemId, status: "done" }))
+			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({ type: "chain.completed", chainId }))
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("daemon survives all chains complete", async () => {
 		const fixture = await startFixture("survives-complete")
 		try {

@@ -589,6 +589,11 @@ export class CoderLoopDaemon {
 		return await Promise.all(activeRuns.map((run) => run.terminate({ forceAfterMs: this.shutdownGraceMs })))
 	}
 
+	private async terminateActiveRunsForItem(itemId: number): Promise<SchedulerCompletedRun[]> {
+		const activeRuns = listActiveRuns(this.schedulerState).filter((run) => run.itemId === itemId)
+		return await Promise.all(activeRuns.map((run) => run.terminate({ forceAfterMs: this.shutdownGraceMs })))
+	}
+
 	private async cleanupChainRuntime(chain: ChainRecord): Promise<JsonObject> {
 		const store = this.requireStore()
 		const repoCwds = store.listItems(chain.id).map((item) => item.repoCwd)
@@ -689,9 +694,17 @@ export class CoderLoopDaemon {
 		} else {
 			assignOptional(input, "extra", rawExtra === undefined ? undefined : validateItemExtra(rawExtra))
 		}
-		const updated = store.updateItem(item.id, input)
-		this.queueSchedulerTick()
-		return { item: itemToJson(updated) }
+		const terminalStatuses = await this.terminalItemStatuses(chain)
+		const resumeScheduler = await this.pauseSchedulerForMutation()
+		try {
+			const updated = store.updateItem(item.id, input)
+			if (input.status !== undefined && terminalStatuses.has(input.status)) {
+				await this.terminateActiveRunsForItem(updated.id)
+			}
+			return { item: itemToJson(updated) }
+		} finally {
+			resumeScheduler()
+		}
 	}
 
 	private resolveChain(args: JsonObject): ChainRecord {
@@ -859,6 +872,16 @@ export class CoderLoopDaemon {
 			"queued",
 			"in_progress",
 		])
+	}
+
+	private async terminalItemStatuses(chain: ChainRecord): Promise<Set<string>> {
+		const scheduler = this.options.scheduler ?? {}
+		if (scheduler.terminalStatuses !== undefined) return new Set(scheduler.terminalStatuses)
+		if (scheduler.pendingStatuses === undefined) {
+			const presetStatuses = await readBundledPresetStatuses(chain.preset)
+			if (presetStatuses !== null) return new Set(presetStatuses.terminal)
+		}
+		return new Set(FALLBACK_TERMINAL_STATUSES)
 	}
 }
 
