@@ -431,6 +431,73 @@ describe("daemon", () => {
 		}
 	})
 
+	test("socket item.update rejects immutable selectors and daemon-owned fields", async () => {
+		const fixture = await startFixture("item-update-strict-fields", { schedulerEnabled: false })
+		try {
+			const firstChain = record(expectOk(await request(fixture, "chain.create", {
+				name: "immutable-item-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const secondChain = record(expectOk(await request(fixture, "chain.create", {
+				name: "other-item-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(firstChain.id)
+			const otherChainId = numberValue(secondChain.id)
+			const added = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 221,
+				repoCwd: REPO_ROOT,
+			})).item)
+			const itemId = numberValue(added.id)
+
+			const invalidRequests = [
+				{ itemId },
+				{ itemId, chainId: otherChainId, status: "done" },
+				{ itemId, issueNumber: 999, status: "done" },
+				{ itemId, id: itemId, status: "done" },
+				{ itemId, createdAt: 1, status: "done" },
+				{ itemId, updatedAt: 1, status: "done" },
+				{ itemId, attempts: 5 },
+				{ itemId, lastRunId: "run-forged" },
+				{ itemId, agentCwd: "/etc/passwd" },
+				{ itemId, fields: { chainId: otherChainId } },
+				{ itemId, fields: { issueNumber: 999 } },
+				{ itemId, fields: { attempts: 5 } },
+				{ itemId, fields: { lastRunId: "run-forged" } },
+				{ itemId, fields: { agentCwd: "/etc/passwd" } },
+				{ itemId, fields: { updatedAt: 1 } },
+			]
+			for (const args of invalidRequests) expectInvalid(await request(fixture, "item.update", args))
+
+			const unchangedItems = expectOk(await request(fixture, "item.list", { chainId })).items
+			expect(Array.isArray(unchangedItems)).toBe(true)
+			if (!Array.isArray(unchangedItems)) throw new Error("expected unchanged item list array")
+			expect(unchangedItems).toHaveLength(1)
+			expect(record(unchangedItems[0])).toMatchObject({
+				id: itemId,
+				chainId,
+				issueNumber: 221,
+				status: "queued",
+				attempts: 0,
+				lastRunId: null,
+				agentCwd: null,
+			})
+			const otherItems = expectOk(await request(fixture, "item.list", { chainId: otherChainId })).items
+			expect(Array.isArray(otherItems)).toBe(true)
+			expect(otherItems).toHaveLength(0)
+
+			const updated = record(expectOk(await request(fixture, "item.update", {
+				chainId,
+				issueNumber: 221,
+				fields: { status: "done", title: "strict item update" },
+			})).item)
+			expect(updated).toMatchObject({ id: itemId, chainId, issueNumber: 221, status: "done", title: "strict item update" })
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("socket chain.delete reports already_deleted consistently", async () => {
 		const fixture = await startFixture("chain-delete-idempotency", { schedulerEnabled: false })
 		try {
@@ -449,6 +516,31 @@ describe("daemon", () => {
 			const missing = await request(fixture, "chain.delete", { chainId: 99999 })
 			expect(missing.ok).toBe(false)
 			if (!missing.ok) expect(missing.error.code).toBe("not_found")
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("socket chain.create rejects deleted same-name chain instead of resurrecting it", async () => {
+		const fixture = await startFixture("chain-create-deleted-name", { schedulerEnabled: false })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "recyclable",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+
+			expectOk(await request(fixture, "chain.delete", { chainId }))
+			expectChainDeleted(await request(fixture, "chain.create", {
+				name: "recyclable",
+				repository: "mouriya-s-lab/coder-loop",
+			}))
+
+			const listed = expectOk(await request(fixture, "chain.list")).chains
+			expect(Array.isArray(listed)).toBe(true)
+			if (!Array.isArray(listed)) throw new Error("expected chain list array")
+			expect(listed).toHaveLength(1)
+			expect(record(listed[0])).toMatchObject({ id: chainId, name: "recyclable", status: "deleted" })
 		} finally {
 			await fixture.daemon.stop()
 		}
