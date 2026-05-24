@@ -11,6 +11,7 @@ import {
 	createSchedulerState,
 	listActiveRuns,
 	schedulerTick,
+	type SchedulerCompletedRun,
 	type SchedulerOptions,
 	type SchedulerState,
 } from "./scheduler"
@@ -125,6 +126,7 @@ export class CoderLoopDaemon {
 	private schedulerTimer: ReturnType<typeof setInterval> | null = null
 	private schedulerTickInFlight: Promise<void> | null = null
 	private schedulerTickRequested = false
+	private schedulerPauseDepth = 0
 	private ownsDaemonSocket = false
 	private ownsDaemonPid = false
 	private resolveClosed: (() => void) | null = null
@@ -508,10 +510,25 @@ export class CoderLoopDaemon {
 	private async handleChainDelete(args: JsonObject): Promise<JsonObject> {
 		const chain = this.resolveChain(args)
 		if (chain.status === "deleted") return { chain: chainToJson(chain), alreadyDeleted: true }
-		const cleanup = await this.cleanupChainRuntime(chain)
-		const updated = this.requireStore().updateChain(chain.id, { status: "deleted" })
-		this.queueSchedulerTick()
-		return { chain: chainToJson(updated), alreadyDeleted: false, cleanup }
+		const resumeScheduler = await this.pauseSchedulerForMutation()
+		try {
+			const terminatedRuns = await this.terminateActiveRunsForChain(chain.id)
+			const cleanup = await this.cleanupChainRuntime(chain)
+			const updated = this.requireStore().updateChain(chain.id, { status: "deleted" })
+			return {
+				chain: chainToJson(updated),
+				alreadyDeleted: false,
+				terminatedRuns: terminatedRuns.map(completedRunToJson),
+				cleanup,
+			}
+		} finally {
+			resumeScheduler()
+		}
+	}
+
+	private async terminateActiveRunsForChain(chainId: number): Promise<SchedulerCompletedRun[]> {
+		const activeRuns = listActiveRuns(this.schedulerState).filter((run) => run.chainId === chainId)
+		return await Promise.all(activeRuns.map((run) => run.terminate({ forceAfterMs: this.shutdownGraceMs })))
 	}
 
 	private async cleanupChainRuntime(chain: ChainRecord): Promise<JsonObject> {
@@ -659,7 +676,7 @@ export class CoderLoopDaemon {
 	}
 
 	private async requestSchedulerTick(): Promise<void> {
-		if (!this.schedulerEnabled() || this.state !== "running") return
+		if (!this.schedulerEnabled() || this.state !== "running" || this.schedulerPauseDepth > 0) return
 		if (this.schedulerTickInFlight !== null) {
 			this.schedulerTickRequested = true
 			return await this.schedulerTickInFlight
@@ -676,6 +693,25 @@ export class CoderLoopDaemon {
 		void this.requestSchedulerTick().catch((error: unknown) => {
 			console.warn(`coder-loop daemon warning: scheduler tick failed after IPC ack: ${errorMessage(error)}`)
 		})
+	}
+
+	private async pauseSchedulerForMutation(): Promise<() => void> {
+		this.schedulerPauseDepth += 1
+		if (this.schedulerTimer !== null) {
+			clearInterval(this.schedulerTimer)
+			this.schedulerTimer = null
+		}
+		await this.schedulerTickInFlight
+		let resumed = false
+		return () => {
+			if (resumed) return
+			resumed = true
+			this.schedulerPauseDepth -= 1
+			if (this.schedulerPauseDepth === 0 && this.state === "running") {
+				this.startSchedulerLoop()
+				this.queueSchedulerTick()
+			}
+		}
 	}
 
 	private async runSchedulerTicks(): Promise<void> {
@@ -1360,6 +1396,19 @@ function activeRunToJson(run: ReturnType<typeof listActiveRuns>[number]): JsonOb
 		repoCwd: run.repoCwd,
 		worktreePath: run.worktreePath,
 		startedAt: run.startedAt,
+	}
+}
+
+function completedRunToJson(run: SchedulerCompletedRun): JsonObject {
+	return {
+		runId: run.runId,
+		itemId: run.itemId,
+		chainId: run.chainId,
+		repoCwd: run.repoCwd,
+		exitCode: run.exitCode,
+		status: run.status,
+		stdoutBytes: run.stdout.length,
+		stderrBytes: run.stderr.length,
 	}
 }
 

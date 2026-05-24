@@ -529,6 +529,51 @@ describe("daemon", () => {
 		}
 	})
 
+	test("socket chain.delete terminates active runs before marking chain deleted", async () => {
+		const fixture = await startFixture("chain-delete-active-run", { schedulerIntervalMs: 20 })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "delete-active-run",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			const added = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 220,
+				repoCwd: REPO_ROOT,
+				extra: { sleepMs: 5_000, exitCode: 0 },
+			})).item)
+			const itemId = numberValue(added.id)
+			await waitFor(async () => record(expectOk(await request(fixture, "daemon.status")).daemon).activeRuns, (runs) => Array.isArray(runs) && runs.length === 1)
+
+			const startedAt = Date.now()
+			const deleted = expectOk(await request(fixture, "chain.delete", { chainId }))
+
+			expect(Date.now() - startedAt).toBeLessThan(4_000)
+			expect(deleted).toMatchObject({
+				alreadyDeleted: false,
+				chain: { status: "deleted" },
+				terminatedRuns: [{
+					chainId,
+					itemId,
+					exitCode: 1,
+					status: "changes_requested",
+				}],
+				cleanup: { chainRootRemoved: true },
+			})
+			expect(record(expectOk(await request(fixture, "daemon.status")).daemon).activeRuns).toEqual([])
+
+			const status = record(expectOk(await request(fixture, "chain.status", { chainId })))
+			expect(record(status.chain).status).toBe("deleted")
+			expect(status.activeRuns).toEqual([])
+			expect(record(status.summary).activeSlots).toEqual([])
+			expect(record(record(status.summary).items).byStatus).toEqual({ changes_requested: 1 })
+			expect(await pathExists(resolveChainRuntimePaths("delete-active-run", { loopDataRoot: fixture.loopDataRoot }).chainRoot)).toBe(false)
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("auto chain completion", async () => {
 		const fixture = await startFixture("completion")
 		try {
