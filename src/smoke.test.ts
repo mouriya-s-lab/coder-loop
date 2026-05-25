@@ -896,6 +896,7 @@ describe("smoke: dependency-aware scheduler selection", () => {
 					} finally {
 						store.close()
 					}
+					await new Promise((resolve) => setTimeout(resolve, 80))
 					return { decision: "complete" }
 				},
 			},

@@ -58,6 +58,7 @@ export type SchedulerSlot = {
 export type SchedulerState = {
 	slots: Map<string, SchedulerSlot>
 	finalizingItemStatuses: Map<number, string>
+	finalizingChainIds: Set<number>
 }
 
 export type SchedulerStore = Pick<
@@ -152,7 +153,7 @@ const DEFAULT_TERMINAL_STATUSES = ["done", "moot", "blocked"] as const
 let fallbackRunSequence = 0
 
 export function createSchedulerState(): SchedulerState {
-	return { slots: new Map(), finalizingItemStatuses: new Map() }
+	return { slots: new Map(), finalizingItemStatuses: new Map(), finalizingChainIds: new Set() }
 }
 
 export async function schedulerTick(options: SchedulerOptions): Promise<SchedulerTickResult> {
@@ -183,6 +184,7 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 				})
 				continue
 			}
+			if (hasFinalizingItemForRepo(options.state, items, repoCwd)) continue
 
 			const item = options.store.getNextPendingItem({ chainId: chain.id, repoCwd, statuses: chainStatuses.pending, terminalStatuses: chainStatuses.terminal })
 			if (item === null) continue
@@ -507,16 +509,24 @@ async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecor
 	const effectiveTerminalStatuses = terminalStatuses ?? (await schedulerStatusesForChain(options, chain)).terminal
 	const current = options.store.listChains().find((candidate) => candidate.id === chain.id)
 	if (current?.status !== "active") return false
-	if (options.store.listItems(chain.id).length === 0) return false
+	const items = options.store.listItems(chain.id)
+	if (items.length === 0) return false
+	if (runId === undefined && hasFinalizingItemForChain(options.state, items)) return false
 	if (!allItemsTerminalIncludingFinalizing(options, chain.id, effectiveTerminalStatuses)) return false
-	if (!await chainCompletionTriggerAllowsCompletion(options, current, runId, effectiveTerminalStatuses)) return false
-	const refreshed = options.store.listChains().find((candidate) => candidate.id === chain.id)
-	if (refreshed?.status !== "active") return false
-	if (options.store.listItems(chain.id).length === 0) return false
-	if (!allItemsTerminalIncludingFinalizing(options, chain.id, effectiveTerminalStatuses)) return false
-	const updated = options.store.updateChain(chain.id, { status: "completed", updatedAt: nowSeconds(options) })
-	await emit(options, { type: "chain.completed", chainId: updated.id, chainName: updated.name, ...(runId === undefined ? {} : { runId }) })
-	return true
+	if (options.state.finalizingChainIds.has(chain.id)) return false
+	options.state.finalizingChainIds.add(chain.id)
+	try {
+		if (!await chainCompletionTriggerAllowsCompletion(options, current, runId, effectiveTerminalStatuses)) return false
+		const refreshed = options.store.listChains().find((candidate) => candidate.id === chain.id)
+		if (refreshed?.status !== "active") return false
+		if (options.store.listItems(chain.id).length === 0) return false
+		if (!allItemsTerminalIncludingFinalizing(options, chain.id, effectiveTerminalStatuses)) return false
+		const updated = options.store.updateChain(chain.id, { status: "completed", updatedAt: nowSeconds(options) })
+		await emit(options, { type: "chain.completed", chainId: updated.id, chainName: updated.name, ...(runId === undefined ? {} : { runId }) })
+		return true
+	} finally {
+		options.state.finalizingChainIds.delete(chain.id)
+	}
 }
 
 async function chainCompletionTriggerAllowsCompletion(options: SchedulerOptions, chain: ChainRecord, runId: string | undefined, terminalStatuses: readonly string[]): Promise<boolean> {
@@ -587,6 +597,14 @@ function getOrCreateSlot(state: SchedulerState, chain: ChainRecord, repoCwd: str
 
 function hasActiveSlotForChain(state: SchedulerState, chainId: number): boolean {
 	return [...state.slots.values()].some((slot) => slot.chainId === chainId && slot.activeRun !== null)
+}
+
+function hasFinalizingItemForRepo(state: SchedulerState, items: readonly ItemRecord[], repoCwd: string): boolean {
+	return items.some((item) => item.repoCwd === repoCwd && state.finalizingItemStatuses.has(item.id))
+}
+
+function hasFinalizingItemForChain(state: SchedulerState, items: readonly ItemRecord[]): boolean {
+	return items.some((item) => state.finalizingItemStatuses.has(item.id))
 }
 
 function removeIdleSlotsForInactiveChains(state: SchedulerState, activeChainIds: Set<number>): void {

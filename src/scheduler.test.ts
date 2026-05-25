@@ -194,6 +194,49 @@ describe("scheduler", () => {
 		}
 	})
 
+	test("chain-complete trigger does not run twice during overlapping completion ticks", async () => {
+		const fixture = await createFixture("completion-trigger-overlap")
+		try {
+			const chain = createChain(fixture.store, "completion-trigger-overlap-chain")
+			createItem(fixture.store, chain, { issueNumber: 2696, repoCwd: "/repo/a" })
+			const triggerStarted = createDeferred()
+			const releaseTrigger = createDeferred()
+			let triggerCalls = 0
+			const options = fixture.options({
+				chainCompleteTrigger: async () => {
+					triggerCalls += 1
+					triggerStarted.resolve()
+					await releaseTrigger.promise
+					return { decision: "complete", reason: "fixture finalizer passed" }
+				},
+			})
+
+			const firstTick = await schedulerTick(options)
+			expect(firstTick.spawnedRuns).toHaveLength(1)
+			const closed = firstTick.spawnedRuns[0]!.closed
+			await triggerStarted.promise
+
+			const overlappingTickPromise = schedulerTick(options)
+			try {
+				const settledBeforeRelease = await promiseSettledWithin(overlappingTickPromise, 100)
+				expect(settledBeforeRelease).toBe(true)
+				const overlappingTick = await overlappingTickPromise
+				expect(overlappingTick.spawnedRuns).toHaveLength(0)
+				expect(overlappingTick.completedChainIds).toEqual([])
+				expect(triggerCalls).toBe(1)
+			} finally {
+				releaseTrigger.resolve()
+				await Promise.allSettled([overlappingTickPromise, closed])
+			}
+
+			expect(triggerCalls).toBe(1)
+			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
+			expect(fixture.schedulerEvents.filter((event) => event.type === "chain.complete_trigger")).toHaveLength(1)
+		} finally {
+			fixture.store.close()
+		}
+	})
+
 	test("chain-complete trigger can keep chain active", async () => {
 		const fixture = await createFixture("completion-trigger-active")
 		try {
@@ -583,4 +626,28 @@ function maxConcurrentRunnerEvents(events: RunnerEvent[]): number {
 		max = Math.max(max, active)
 	}
 	return max
+}
+
+function createDeferred(): { promise: Promise<void>; resolve: () => void; reject: (reason?: unknown) => void } {
+	let resolve: () => void = () => {}
+	let reject: (reason?: unknown) => void = () => {}
+	const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+		resolve = resolvePromise
+		reject = rejectPromise
+	})
+	return { promise, resolve, reject }
+}
+
+async function promiseSettledWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<boolean> {
+	let timeout: ReturnType<typeof setTimeout> | null = null
+	try {
+		return await Promise.race([
+			promise.then(() => true),
+			new Promise<boolean>((resolve) => {
+				timeout = setTimeout(() => resolve(false), timeoutMs)
+			}),
+		])
+	} finally {
+		if (timeout !== null) clearTimeout(timeout)
+	}
 }
