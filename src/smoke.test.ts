@@ -992,6 +992,8 @@ describe("smoke: dependency-aware scheduler selection", () => {
 
 			const finalizerRan = await waitFor(async () => await fileLineCount(finalizerLog) >= 1, 2_000)
 			expect(finalizerRan).toBe(true)
+			await new Promise((resolve) => setTimeout(resolve, 150))
+			expect(await fileLineCount(finalizerLog)).toBe(1)
 			const verifyStore = openSqliteStateStore({ loopDataRoot })
 			try {
 				const chain = verifyStore.getChainByName("gh-finalizer-active")
@@ -1005,11 +1007,11 @@ describe("smoke: dependency-aware scheduler selection", () => {
 				.split("\n")
 				.filter(Boolean)
 				.map((line) => JSON.parse(line) as { mode: string; promptIncludesFinalizer: boolean; decision: string })
-			expect(events[0]).toMatchObject({
+			expect(events).toEqual([{
 				mode: "keep-active",
 				promptIncludesFinalizer: true,
 				decision: "keep-active",
-			})
+			}])
 			expect(await readFile(promptCapture, "utf-8")).toContain("# coder-loop umbrella-finalizer agent")
 			expect(await readFile(commentPath, "utf-8")).toContain("Remaining scope")
 			expect(await readFile(followupPath, "utf-8")).toContain("Follow-up issue")

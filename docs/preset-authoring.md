@@ -138,7 +138,7 @@ prompt = "umbrella-finalizer-entry.md"
 trigger = { on = "chain-complete" }
 ```
 
-hook 决策只控制 lifecycle：允许 completed、保持 active，或因为 hook 失败而保持 active。语义判断仍属于 preset prompt 或外部 operator，不属于 scheduler。
+hook 决策只控制 lifecycle：允许 completed、保持 active，或因为 hook 失败而保持 active。语义判断仍属于 preset prompt 或外部 operator，不属于 scheduler。`decision=keep-active` 会在 chain metadata 中记录当前 all-terminal item 指纹；后续 tick 若 item 集合、terminal status contract 和相关 chain metadata 未变化，调度器保持 active 但不重复触发 finalizer。新增/完成 follow-up item 或其他会改变指纹的状态更新会允许 finalizer 再次运行。
 
 bundled `gh-issue-pr-iteration` preset 用这个 hook 声明 `umbrella-finalizer`：
 
