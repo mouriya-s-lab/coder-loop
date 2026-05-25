@@ -42,7 +42,7 @@ L2: Preset（presets/<name>/）
 - **Run unit + smoke tests**: `bun test` (覆盖 `src/loop.test.ts` + `src/smoke.test.ts`)
 - **Run orchestrator directly**: `bun run src/loop.ts [N] [--target-cwd <path>] [--once]` (core loop path; operational callers should prefer daemon)
 - **Status snapshot**: `coder-loop status <target> --json [--config <path>] [--repo <owner/repo>]` — stable read-only JSON API for supervisor/scripts; do not scrape runtime files first.
-- **Daemon operations**: `coder-loop daemon status <target> --json`, `coder-loop daemon start|restart <target> [--max-iterations N] [--require-browser-evidence]`, `coder-loop daemon stop <target>` — stable start/stop/process ownership API.
+- **Daemon operations**: `coder-loop daemon status <target> --json`, `coder-loop daemon start|restart <target> [--max-iterations N] [--require-browser-evidence]`, `coder-loop daemon stop <target>` — stable central-daemon / target-chain control API.
 - **Check runtime**: `bun run src/loop.ts --target-cwd <path> --check-runtime`
 - **Dry run**: `bun run src/loop.ts --target-cwd <path> --dry-run` (渲染 + 选 item，不 spawn agent)
 - **Install target**: `coder-loop install <target> [--repo <owner/repo>] [--preset <name>] [--force] [--dry-run] [--install-skills]` — 幂等四层 bootstrap（slash commands + runtime 目录 + config + workflow.md + GitHub `kind:code`/`kind:comment`/`kind:code-spike`/`kind:blocked` 标签 + PATH/skill 检查）。源：`src/install-commands.ts`。
@@ -57,11 +57,11 @@ Runner 是运维/target runtime 契约，不是 preset 的业务状态机。Iter
 
 覆盖顺序：
 
-1. `state.json.queue[]` item 上的 `"runner": "claude" | "codex"`，只影响该 item 的 iteration runner。
+1. centralized queue item 上的 `"runner": "claude" | "codex"`，只影响该 item 的 iteration runner。
 2. `.coder-loop/runtime/config.json` 顶层 `"runner": "claude" | "codex"`，作为 target iteration 默认 runner。
 3. 内建 iteration default：`codex`。
 
-Review 可用 `.coder-loop/runtime/config.json` 顶层 `"reviewRunner": "claude" | "codex"` 显式覆盖；不写时恒为 `claude`。Runner binary、模型与额外参数由 config 的 `claude.binary` / `claude.model` / `claude.extraArgs`、`codex.binary` / `codex.model` / `codex.extraArgs` 提供；但 review runner 为 Claude 时模型强制为 `claude-opus-4-7`，会替换任何 Claude `--model` extra arg。`coder-loop status <target> --json` 暴露 `target.runner.hostDefault`、`target.runner.default`、`target.runner.reviewDefault`、`queue.selected.runner`、`queue.selected.reviewRunner`、`current.runner` 和 `current.phaseStatus.value.runner/model`；`doctor` 按 target default runner 与 review default runner 的实际 binary 做 PATH 检查。不要从 `.coder-loop/runtime/logs/*.status.json` 反推 runner/model，除非 `status` 已经指出需要 fallback debug。
+Review 可用 `.coder-loop/runtime/config.json` 顶层 `"reviewRunner": "claude" | "codex"` 显式覆盖；不写时恒为 `claude`。Runner binary、模型与额外参数由 config 的 `claude.binary` / `claude.model` / `claude.extraArgs`、`codex.binary` / `codex.model` / `codex.extraArgs` 提供；但 review runner 为 Claude 时模型强制为 `claude-opus-4-7`，会替换任何 Claude `--model` extra arg。`coder-loop status <target> --json` 暴露 `target.runner.hostDefault`、`target.runner.default`、`target.runner.reviewDefault`、`queue.selected.runner`、`queue.selected.reviewRunner`、`current.runner` 和 `current.phaseStatus.value.runner/model`；`doctor` 按 target default runner 与 review default runner 的实际 binary 做 PATH 检查。不要从旧 flat log 或 agent `status.json` 反推 runner/model，除非 `status` 已经指出需要 fallback debug；新版 agent status 位于 `<logDir>/<runId>/<phase>/status.json`。
 
 ### 写一个新 preset 的最小流程
 
@@ -102,7 +102,7 @@ supervisor 的正常接口是 coder-loop 运维 API：
 - observe: `coder-loop status <target> --json` or `coder-loop daemon status <target> --json`
 - control: `coder-loop daemon start|stop|restart <target>`
 
-不要把 `.coder-loop/runtime/state.json`、events JSONL、agent `status.json`、`.dev-loop` 当作第一层契约来 scrape。那些文件只在 `doctor/status/daemon` 指向具体异常、或需要人工恢复 runtime 时作为 fallback/debug evidence 使用。
+不要把 runtime 文件、events JSONL、agent `status.json`、旧 `.dev-loop` 当作第一层契约来 scrape。先用 `doctor/status/daemon`；只有这些 API 指向具体异常、或需要人工恢复 runtime 时，才按 `status` 返回的路径读取 centralized DB / events / `<logDir>/<runId>/<phase>/status.json` 作为 fallback/debug evidence。
 
 ## Templates for target projects
 

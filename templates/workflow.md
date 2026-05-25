@@ -8,7 +8,7 @@
 
 ## Source of truth
 
-- Queue / order / state: `.coder-loop/runtime/state.json`
+- Queue / order / state: centralized coder-loop chain (`coder-loop status`, `coder-loop chain`, `coder-loop item`)
 - Current issue handoff: `.coder-loop/runtime/issues/<issue>.md`
 - Shared durable facts: `.coder-loop/runtime/shared.md`
 - Runtime evidence / logs: `.coder-loop/runtime/evidence/` and `.coder-loop/runtime/logs/`

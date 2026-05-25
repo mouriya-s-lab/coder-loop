@@ -13,7 +13,7 @@ This supervisor is the **outer layer**. The **inner layer** is `coder-loop`, whi
 The outer layer steers coder-loop through its stable operations API:
 
 - observe: `coder-loop doctor <TARGET_DIR> --repo <TARGET_REPO>`, `coder-loop status <TARGET_DIR> --json`, and `coder-loop daemon status <TARGET_DIR> --json`
-- control: `coder-loop daemon start|stop|restart <TARGET_DIR>`
+- control: `coder-loop daemon start|stop|restart <TARGET_DIR>` (target-aware wrappers over the central daemon / chain API)
 - bootstrap repair: `coder-loop install <TARGET_DIR> --repo <TARGET_REPO>` when doctor shows a missing bootstrap layer
 
 ## Read first (every patrol entry)
@@ -37,7 +37,7 @@ Current state is always **derived**, never read from a hand-written snapshot:
    - `status.queue.total`, `status.queue.byStatus`, and `status.queue.selected`.
    - `status.current.run`, `status.current.id`, and `status.current.phaseStatus`.
    - `status.events.latest`.
-   - `status.processes.loopFile`, `status.processes.live`, and `status.processes.scanError`.
+   - `status.processes.live` and `status.processes.scanError`.
    - `daemon status` process ownership.
    - GitHub state for the current issue/PR.
 
@@ -80,7 +80,7 @@ Runner awareness:
 
 - Do not assume any external dependency is fully integrated without audit.
 - Do not queue implementation children before an audit/design issue has produced reviewable output.
-- Do not stage `.coder-loop/`, `.dev-loop`, `.dev-trace.txt`, `.claude/scheduled_tasks.json`, runtime logs, or supervisor files into PR branches.
+- Do not stage `.coder-loop/`, `.claude/scheduled_tasks.json`, runtime logs, or supervisor files into PR branches; if a legacy target has `.dev-loop` / `.dev-trace.txt`, keep those out too.
 - Do not bypass coder-loop review or merge manually outside the review-agent path.
 - Do not kill only a child agent — kill loop parent + all children as a unit.
 - (If mission references upstream `<UPSTREAM_REPO_URL>`: do not bulk merge upstream.)

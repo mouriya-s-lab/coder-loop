@@ -26,8 +26,7 @@ The fixture repo keeps only tiny committed assets:
   contracts;
 - `CLAUDE.md`, project commands and PR boundaries for the spawned agent.
 
-Do not commit `.coder-loop/runtime/`, `.dev-loop`, `.dev-trace.txt`, runtime
-logs, or local evidence artifacts from this fixture.
+Do not commit `.coder-loop/runtime/`, runtime logs, or local evidence artifacts from this fixture. If an older fixture run left `.dev-loop` / `.dev-trace.txt`, keep those out too.
 
 ## Runner Coverage
 
@@ -59,18 +58,14 @@ bun src/loop.ts status /Users/mouriya/Ext/code/coder-loop-e2e-fixture --json \
 
 Expected:
 
-- install is idempotent and preserves existing target workflow/state;
+- install is idempotent and preserves existing target workflow plus centralized chain state;
 - runtime check exits 0;
 - doctor has no `FAIL`;
 - `state.kind == "ok"`;
 - selected queue item, when present, resolves to runner `codex`;
-- no stale `.dev-loop` ownership before a clean e2e run.
+- no stale live process / chain ownership before a clean e2e run.
 
-If doctor reports a stale loop file, remove only the local runtime switch:
-
-```bash
-rm -f /Users/mouriya/Ext/code/coder-loop-e2e-fixture/.dev-loop
-```
+If doctor reports stale runtime ownership, inspect `coder-loop daemon status ... --json` and stop/delete the target chain through the daemon API before rerunning.
 
 ## Repeatable Task Shape
 
@@ -89,7 +84,7 @@ large feature:
    status: complete
    ```
 
-3. Queue that issue in `.coder-loop/runtime/state.json` with:
+3. Queue that issue in the centralized chain runtime, with an item shaped like:
 
    ```jsonc
    {
@@ -106,7 +101,7 @@ large feature:
    }
    ```
 
-4. Clear `state.current` to `null` before the run.
+4. Ensure chain `current` is null before the run (`coder-loop status ... --json | jq .current`).
 
 5. Run exactly one work iteration:
 
@@ -124,7 +119,7 @@ Expected result:
   the issue through the closing reference;
 - local queue item becomes `status: "done"` with `pr` set;
 - `current` becomes `null`;
-- `.dev-loop` is removed and no loop process remains.
+- no live loop process remains and `current` becomes `null`.
 
 ## 2026-05-17 Evidence
 
@@ -171,7 +166,7 @@ Observed result:
 - install/doctor/status exit 0 after the run, with no selected item and no live
   loop process;
 - local status has `queue.byStatus.done == 1`, `queue.selected == null`,
-  `current.run == null`, `.dev-loop` absent, and no live loop process;
+  `current.run == null` and no live loop process;
 - `bun run check` on updated fixture `main` prints
   `message fixture check passed`.
 

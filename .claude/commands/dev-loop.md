@@ -1,6 +1,6 @@
 # /dev-loop — Start coder-loop via daemon API
 
-Launch coder-loop after `/dev-plan` has created or refreshed the GitHub issue queue and `.coder-loop/runtime/state.json`. This command does not decompose large work; it only runs the existing queue.
+Launch coder-loop after `/dev-plan` has created or refreshed the GitHub issue queue in the centralized chain runtime. This command does not decompose large work; it only runs the existing queue.
 
 Treat the current working directory as the target. Before launch, run the read-only checks through coder-loop itself:
 
@@ -36,13 +36,13 @@ The start command is idempotent for an already-live target: it returns `alreadyR
 
 ```bash
 coder-loop daemon status "$PWD" --json
-tail -f .coder-loop/runtime/logs/coder-loop-*.log
+coder-loop status "$PWD" --json | jq '.events.path, .current.phaseStatus.value.outputPath, .current.phaseStatus.value.statusPath'
 ```
 
 - No argument: run indefinitely until a preset phase signals stop.
 - Pass a number to limit iterations, e.g. `/dev-loop 10`.
-- Recovery/resume is preset-driven: if `.coder-loop/runtime/state.json` `current` is set, the engine resumes that phase via session id instead of starting a fresh phase. The set of phases and their stop semantics are owned by the active preset (`presets/<name>/preset.toml`).
+- Recovery/resume is preset-driven: if the centralized chain state has `current` set, the engine resumes that phase via session id instead of starting a fresh phase. Read it through `coder-loop status "$PWD" --json`; the set of phases and their stop semantics are owned by the active preset (`presets/<name>/preset.toml`).
 
-Structured per-run event stream (agent-consumable, non-polling): `tail -F .coder-loop/runtime/events/<runId>.jsonl`. Each line is one JSONL event (`queue.select` / `phase.start` / `phase.end` / `attempt.start` / `attempt.close` / `watchdog.fire` / `queue.terminal`). `runId` of the active run lives in `state.json` `current.runId`. Use this channel for any external watcher (supervisor, downstream agent) instead of scraping stdout.
+Structured per-run event stream (agent-consumable, non-polling): get the path from `coder-loop status "$PWD" --json | jq -r '.events.path // empty'` and then `tail -F` that file. Each line is one JSONL event (`queue.select` / `phase.start` / `phase.end` / `attempt.start` / `attempt.close` / `watchdog.fire` / `queue.terminal`). Use this channel for any external watcher (supervisor, downstream agent) instead of scraping stdout.
 
 Stop: `coder-loop daemon stop "$PWD"`.

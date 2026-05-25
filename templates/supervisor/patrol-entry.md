@@ -26,16 +26,16 @@ Role: outer-layer supervisor for the **<MISSION>** mission, invoked by self-resc
 ## Decision rules
 
 - **Loop active and healthy** → verify it's advancing the <MISSION> queue via `status.current`, `status.events.latest`, and GitHub; report current issue/phase and expected next transition; stop.
-- **Loop stalled** (multi-signal evidence per `role.md` thresholds) → stop through `coder-loop daemon stop <TARGET_DIR>`, repair only the layer identified by `doctor` / `status`, then restart with `coder-loop daemon restart <TARGET_DIR>` when safe.
+- **Loop stalled** (multi-signal evidence per `role.md` thresholds) → stop/delete the target chain through `coder-loop daemon stop <TARGET_DIR>`, repair only the layer identified by `doctor` / `status`, then verify/restart with `coder-loop daemon restart <TARGET_DIR>` when safe.
 - **No loop active but actionable items remain** → run `coder-loop doctor <TARGET_DIR> --repo <TARGET_REPO>`, then `coder-loop daemon start <TARGET_DIR>`.
-- **Loop state incoherent** → stop through `coder-loop daemon stop <TARGET_DIR>`, append blocker to `log.md`, do not destructively recover.
+- **Loop state incoherent** → stop/delete the target chain through `coder-loop daemon stop <TARGET_DIR>`, append blocker to `log.md`, do not destructively recover.
 - **Mission complete** (no actionable <MISSION> items left in queue and audit accepts current state as on-target) → append final `mission complete` entry to `log.md`, do not schedule another patrol for this mission, report to user that the next mission should be initialized.
 
 ## Safety boundaries
 
 - Never kill only a child agent.
 - Never use destructive recovery (reset/clean/force-push/delete worktrees).
-- Never stage `.coder-loop/`, `.dev-loop`, `.dev-trace.txt`, `.claude/scheduled_tasks.json`, runtime logs, or supervisor files into feature PRs.
+- Never stage `.coder-loop/`, `.claude/scheduled_tasks.json`, runtime logs, or supervisor files into feature PRs; if a legacy target has `.dev-loop` / `.dev-trace.txt`, keep those out too.
 - Never bypass coder-loop review.
 
 ## Final response

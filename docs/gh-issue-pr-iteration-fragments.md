@@ -36,7 +36,7 @@
 | `blockerRepo` | string / undefined | `blocked` transition 写入的阻塞仓库，`owner/repo` |
 | `blockerRef` | string / undefined | `blocked` transition 写入的阻塞 issue ref 或环境条件 |
 
-status 字面量都是 preset 字符串，引擎只识别 `continuable / terminal` 二元集合。除上述外的转移（包括 `queued → done` 等）也合法，由 agent 通过 prompt 写入 state.json。
+status 字面量都是 preset 字符串，引擎只识别 `continuable / terminal` 二元集合。除上述外的转移（包括 `queued → done` 等）也合法，由 agent 通过 prompt 驱动 review/update-state 写入 centralized chain state。
 
 ---
 
@@ -169,7 +169,7 @@ plan/handoff
 
 ### Planning 不可做的事
 
-`plan/index` 明确禁止：开 PR、merge PR、关 issue、写 review-side state（这些是 review 的职责）；删 `.dev-loop`（与 plan 无关）；越过 `contract.md` 自行决定 issue 形态。
+`plan/index` 明确禁止：开 PR、merge PR、关 issue、写 review-side state（这些是 review 的职责）；操作 daemon/chain stop（与 plan 无关）；越过 `contract.md` 自行决定 issue 形态。
 
 ---
 
@@ -247,7 +247,7 @@ iter/handoff
 
 ### Iteration 不可做的事
 
-`iter/index` 明确禁止：创建 child issue / 链接 sub-issue / 合并 PR / 关闭 issue / 删 `.dev-loop` / 重排 queue / 写入最终 local state——不论 `ISSUE_KIND` 哪条分支。这些是 review 的职责。
+`iter/index` 明确禁止：创建 child issue / 链接 sub-issue / 合并 PR / 关闭 issue / 操作 daemon/chain stop / 重排 queue / 写入最终 local state——不论 `ISSUE_KIND` 哪条分支。这些是 review 的职责。
 
 ---
 
@@ -275,7 +275,7 @@ common/runtime-contract → common/github-routing → common/state-contract → 
 | 10 | `review/code-gate` | merge-ability / CI / 代码质量（无 PR 时自跳过） |
 | 11 | `review/issue-closure-gate` | 选 terminal action |
 | 12 | terminal action（六选一） | 执行副作用：accept-pr / accept-no-pr / expand-parent / skip / blocked / retry |
-| 13 | `review/update-state` | 写 state.json 转移 |
+| 13 | `review/update-state` | 写 centralized chain state 转移 |
 | 14 | `review/global-assessment` | 决定 loop 继续 / 停 |
 | 15 | `review/final` | review phase 硬终点 |
 
@@ -404,7 +404,7 @@ review/update-state
 
 ## 7. 实战：从 trace 反推走了哪条链
 
-trace 文件在 `<target>/.coder-loop/runtime/logs/<runId>.<phase>.txt`。每个 fragment 会输出自己的 verdict 字面量（如 `verification_passed`），按 §3 / §4 / §5 的图就能反推路径。
+phase 输出文件路径由 `coder-loop status <target> --json` 的 `current.phaseStatus.value.outputPath` 暴露；新版 layout 是 `<logDir>/<runId>/<phase>/stdout.jsonl`。每个 fragment 会输出自己的 verdict 字面量（如 `verification_passed`），按 §3 / §4 / §5 的图就能反推路径。
 
 常见路径示例：
 

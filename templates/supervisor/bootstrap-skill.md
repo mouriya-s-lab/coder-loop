@@ -91,7 +91,7 @@ Use the JSON snapshots to derive:
   `current.runner`
 - current run from `current.run`, `current.id`, and `current.phaseStatus`
 - latest event summary from `events.latest`
-- daemon ownership from `processes.loopFile`, `processes.live`, and
+- daemon / process liveness from `processes.live` and
   `processes.scanError`
 
 If `doctor` reports a bootstrap failure, repair with `coder-loop install

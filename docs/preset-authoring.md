@@ -15,12 +15,12 @@
 | 引擎职责 | 说明 |
 |---|---|
 | **加载 preset** | 从 `<pkg>/presets/<name>/` 或 target 的 `presetPath` 读 `preset.toml`，解析 `name / version / item.idField / statuses / phases / fragments / agent`。每个 fragment 路径必须可读。 |
-| **加载 target runtime** | 读 target `.coder-loop/runtime/{config.json,state.json,shared.md}`，校验路径都落在 target 目录下。 |
+| **加载 target runtime** | 读 target `.coder-loop/runtime/config.{json,toml}`、`.coder-loop/runtime/shared.md`、`.coder-loop/workflow.md`，并从 centralized SQLite loop-data store 解析 active chain / queue / current。 |
 | **选 actionable item** | 若 `state.current` 存在且其 status 在 preset 的 `statuses.continuable` 内，继续它；否则在队列里找首个 `continuable` item。`continuable` 外的所有 item 视为 terminal，引擎不动。 |
-| **按 phase 顺序 spawn agent** | 遍历 `preset.phases`：每个 phase 读 entry prompt 模板，按 `[phases.variables]` 表绑定变量替换 `{{KEY}}`，把渲染后的 prompt 传给当前 runner（`claude` 或 `codex`）。捕获 stdout/stderr 写 trace。每个 phase spawn 完写一个 status JSON。 |
+| **按 phase 顺序 spawn agent** | 遍历 `preset.phases`：每个 phase 读 entry prompt 模板，按 `[phases.variables]` 表绑定变量替换 `{{KEY}}`，把渲染后的 prompt 传给当前 runner（`claude` 或 `codex`）。捕获 stdout/stderr 写入 `<logDir>/<runId>/<phase>/`，每个 phase spawn 完写 `status.json`。 |
 | **resume / 不丢工作** | spawn 中途崩溃，重启时根据 `state.current.phase` 跳到当前 phase 而非从头。 |
-| **`.dev-loop` 开关** | 启动时创建 `.dev-loop`；删除该文件即正常退出当前轮，不强杀正在跑的 agent。 |
-| **`--check-runtime` 健康检查** | 不 spawn agent。校验 preset、target 文件、queue item id / status 是否合法、`state.current` 是否一致。返回错误清单。 |
+| **daemon / chain 控制** | 新版运行期由 centralized daemon socket + chain/item state 控制；target start/stop/restart 通过 daemon API 解析 chain，而不是依赖 target-local sentinel 文件。 |
+| **`--check-runtime` 健康检查** | 不 spawn agent。校验 preset、target 文件、central chain layout、queue item id / status 是否合法、`state.current` 是否一致。返回错误清单。 |
 | **`--dry-run` 渲染检查** | 选 actionable item，跑到 spawn 前为止，输出选中的 item id；不写 trace、不调 agent。 |
 
 引擎**不知道**：phase 数量、phase 名字、status 字面量（`queued / done / pending` 之类）、item id 字段名、已知变量 KEY（`{{REPO}}` / `{{ISSUE}}` 之类）、preset 之间的差异、GitHub。
@@ -129,14 +129,13 @@ bun src/loop.ts --target-cwd <fresh-target> --check-runtime
 
 模板里 `{{KEY}}` 替换为 `String(...)`；多次出现都替换。
 
-### `runtime.*` 白名单（当前 19 key）
+### `runtime.*` 白名单（当前 16 key）
 
 ```
 runtime.runId               runtime.targetCwd            runtime.agentCwd
-runtime.workflowPath        runtime.sharedContextPath    runtime.statePath
-runtime.currentIssueFile    runtime.issueDir             runtime.evidenceDir
-runtime.evidenceRootDir     runtime.logDir               runtime.traceFile
-runtime.loopFile            runtime.presetDir            runtime.fragmentIndex
+runtime.workflowPath        runtime.sharedContextPath    runtime.currentIssueFile
+runtime.issueDir            runtime.evidenceDir          runtime.evidenceRootDir
+runtime.logDir              runtime.presetDir            runtime.fragmentIndex
 runtime.runIdGeneration     runtime.resumedFromPhase     runtime.resumedStartedAt
 runtime.issueKind
 ```
@@ -144,18 +143,15 @@ runtime.issueKind
 | Key | 含义 |
 |---|---|
 | `runId` | 本轮 spawn 的 runId（新生成或 resumed） |
-| `targetCwd` | target 目录绝对路径（`.coder-loop/runtime/` 所在 repo） |
-| `agentCwd` | agent `claude -p` 子进程的实际 `cwd` 绝对路径。等于 `item.agentCwd ?? targetCwd`；跨 repo 迭代时 item 可声明绝对路径覆盖。 |
+| `targetCwd` | target 目录绝对路径 |
+| `agentCwd` | agent 子进程的实际 `cwd` 绝对路径。等于 `item.agentCwd ?? targetCwd`；跨 repo 迭代时 item 可声明绝对路径覆盖。 |
 | `workflowPath` | `.coder-loop/workflow.md` 绝对路径 |
-| `sharedContextPath` | `.coder-loop/runtime/shared.md` 绝对路径 |
-| `statePath` | `.coder-loop/runtime/state.json` 绝对路径 |
+| `sharedContextPath` | 当前 chain shared context 文件绝对路径 |
 | `currentIssueFile` | 当前 item 的 issue handoff 文件绝对路径（无则 `""`） |
 | `issueDir` | issue handoff 文件根目录绝对路径 |
 | `evidenceDir` | 当前 item 的证据子目录绝对路径（无则 fallback `evidenceRootDir`） |
 | `evidenceRootDir` | 证据根目录绝对路径 |
-| `logDir` | 日志 / trace 根目录绝对路径 |
-| `traceFile` | `<target>/.dev-trace.txt` 绝对路径（每轮覆盖） |
-| `loopFile` | `<target>/.dev-loop` sentinel 绝对路径 |
+| `logDir` | 当前 chain runs/log 根目录绝对路径；agent 输出位于 `<logDir>/<runId>/<phase>/` |
 | `presetDir` | preset 目录绝对路径（让 agent prompt 能 `cat <presetDir>/iter/...md`） |
 | `fragmentIndex` | 全部 fragments 的 markdown 表格（id + role + 绝对路径），entry prompt 嵌它给 agent 当索引 |
 | `runIdGeneration` | `"new"` / `"resumed"`，本轮 runId 是新生成还是 resume |
@@ -171,10 +167,10 @@ runtime.issueKind
 
 新增一个白名单 key 必须**同时**改两处 `src/loop.ts`：
 
-1. `RUNTIME_BINDING_KEYS`（`src/loop.ts:185-204`）数组加 key 字面量。
-2. `buildRuntimeBindings`（`src/loop.ts:1024-1052`）返回对象加该 key 的赋值；类型系统会强制要求。
+1. `RUNTIME_BINDING_KEYS` 数组加 key 字面量。
+2. `buildRuntimeBindings` 返回对象加该 key 的赋值；类型系统会强制要求。
 
-只改其中一处会 TypeScript 编译失败。改完跑 `bun test`（`src/loop.test.ts` 有完整 binding 测试覆盖）+ `bun x tsc --noEmit`。
+只改其中一处会 TypeScript 编译失败。改完跑 `bun test`（binding / smoke 覆盖）+ `bun x tsc --noEmit`。
 
 ---
 
@@ -216,7 +212,7 @@ queue item 可加 `"runner": "claude" | "codex"` 只覆盖该 item 的 iteration
 
 ---
 
-## 6. 最小 target 文件
+## 6. 最小 target / chain 文件
 
 跑一个新 preset 所需的最小 target（参见 `src/smoke.test.ts`）：
 
@@ -225,14 +221,15 @@ queue item 可加 `"runner": "claude" | "codex"` 只覆盖该 item 的 iteration
   workflow.md                   # 占位即可，preset 是否引用看 entry prompt
   runtime/
     config.json                 # { "preset": "<name>" }
-    state.json                  # { version: 1, queue: [{<idField>, status}], recentRuns: [], current: null }
-    shared.md                   # 占位
-    issues/                     # 空目录
-    evidence/                   # 空目录
-    logs/                       # 空目录
+    shared.md                   # 占位；central chain 也可有自己的 shared context
+    issues/                     # handoff 文件目录
+    evidence/                   # evidence 根目录
+    logs/                       # legacy/local fallback；新版 runs/log path 由 chain runtime 决定
 ```
 
-`bun src/loop.ts --target-cwd <target> --check-runtime` 应当 exit 0、输出 `preset=<name>` 与 `queue=N, selected=<id>`。
+队列 / current / recentRuns 存在 centralized SQLite loop-data store 中。用 `coder-loop chain create`、`coder-loop item add`、安装/规划命令，或测试 helper 建 chain + item；不要为新版 runtime 手写 `.coder-loop/runtime/state.json` 当 authoritative queue。
+
+`bun src/loop.ts --target-cwd <target> --check-runtime` 应当 exit 0、输出 `state=<...>/db.sqlite`、`chain=<name>`、`preset=<name>` 与 `queue=N, selected=<id>`。
 
 ---
 
@@ -243,7 +240,7 @@ queue item 可加 `"runner": "claude" | "codex"` 只覆盖该 item 的 iteration
 - 每个 fragment 文件以 `# Fragment: <id>` 起手。
 - 入口 prompt 把 `{{PROMPT_FRAGMENT_INDEX}}` 嵌入做索引，agent 按 id 读 fragment。
 - 每个 fragment 末尾有 `## Output verdict` 段，列出该 fragment 的可能出口 + 下一跳目标 fragment id。
-- agent 按 verdict 链跑，trace 文件记录每个 fragment 的 verdict 出口，review 阶段据此审查。
+- agent 按 verdict 链跑，agent 输出 / events 记录每个 fragment 的 verdict 出口，review 阶段据此审查。
 
 这套约定让 review agent 能从 trace 复核 iter 的 fragment 链路是否合法。换 preset 时这套不强制——你也可以让 agent 跑单一 prompt 不分 fragment。
 
