@@ -19,7 +19,9 @@ import {
 	type ChainRecord,
 	type CreateChainInput,
 	type CreateItemInput,
+	type DependencyWaitReason,
 	type ItemRecord,
+	listDependencyWaitReasons,
 	openSqliteStateStore,
 	type RunRecord,
 	type SqliteStateStore,
@@ -354,7 +356,7 @@ export class CoderLoopDaemon {
 			case "chain.list":
 				return this.handleChainList()
 			case "chain.status":
-				return this.handleChainStatus(request.args)
+				return await this.handleChainStatus(request.args)
 			case "chain.delete":
 				return await this.handleChainDelete(request.args)
 			case "item.add":
@@ -553,14 +555,20 @@ export class CoderLoopDaemon {
 		return { chains: this.requireStore().listChains().map(chainToJson) }
 	}
 
-	private handleChainStatus(args: JsonObject): JsonObject {
+	private async handleChainStatus(args: JsonObject): Promise<JsonObject> {
 		const chain = this.resolveChain(args)
 		const items = this.requireStore().listItems(chain.id)
 		const activeRuns = listActiveRuns(this.schedulerState).filter((run) => run.chainId === chain.id)
+		const pendingStatusSet = await this.continuableItemStatuses(chain)
+		const terminalStatusSet = await this.terminalItemStatuses(chain)
+		const pendingStatuses = [...pendingStatusSet]
+		const terminalStatuses = [...terminalStatusSet]
+		const dependencyWaits = listDependencyWaitReasons(items, { statuses: pendingStatuses, terminalStatuses })
+		const dependencyWaitsByItemId = new Map(dependencyWaits.map((wait) => [wait.itemId, wait]))
 		return {
 			chain: chainToJson(chain),
-			summary: chainStatusSummary(chain, items, activeRuns),
-			items: items.map(itemToJson),
+			summary: chainStatusSummary(chain, items, activeRuns, dependencyWaits),
+			items: items.map((item) => itemToJson(item, dependencyWaitsByItemId.get(item.id) ?? null)),
 			activeRuns: activeRuns.map(activeRunToJson),
 		}
 	}
@@ -659,7 +667,7 @@ export class CoderLoopDaemon {
 
 	private handleItemList(args: JsonObject): JsonObject {
 		const chain = this.resolveChain(args)
-		return { items: this.requireStore().listItems(chain.id).map(itemToJson) }
+		return { items: this.requireStore().listItems(chain.id).map((item) => itemToJson(item)) }
 	}
 
 	private async handleItemUpdate(args: JsonObject): Promise<JsonObject> {
@@ -838,6 +846,14 @@ export class CoderLoopDaemon {
 		options.loopDataRootOptions = this.options
 		if (scheduler.pendingStatuses !== undefined) options.pendingStatuses = scheduler.pendingStatuses
 		if (scheduler.terminalStatuses !== undefined) options.terminalStatuses = scheduler.terminalStatuses
+		options.statusesForChain = scheduler.statusesForChain ?? (async (chain) => {
+			const pendingStatuses = await this.continuableItemStatuses(chain)
+			const terminalStatuses = await this.terminalItemStatuses(chain)
+			return {
+				pending: [...pendingStatuses],
+				terminal: [...terminalStatuses],
+			}
+		})
 		if (scheduler.now !== undefined) options.now = scheduler.now
 		if (scheduler.runIdFactory !== undefined) options.runIdFactory = scheduler.runIdFactory
 		if (scheduler.statusFromExit !== undefined) options.statusFromExit = scheduler.statusFromExit
@@ -872,6 +888,16 @@ export class CoderLoopDaemon {
 			"queued",
 			"in_progress",
 		])
+	}
+
+	private async continuableItemStatuses(chain: ChainRecord): Promise<Set<string>> {
+		const scheduler = this.options.scheduler ?? {}
+		if (scheduler.pendingStatuses !== undefined) return new Set(scheduler.pendingStatuses)
+		if (scheduler.terminalStatuses === undefined) {
+			const presetStatuses = await readBundledPresetStatuses(chain.preset)
+			if (presetStatuses !== null) return new Set([...presetStatuses.continuable, "queued"])
+		}
+		return new Set(FALLBACK_PENDING_STATUSES)
 	}
 
 	private async terminalItemStatuses(chain: ChainRecord): Promise<Set<string>> {
@@ -1656,8 +1682,8 @@ function chainToJson(chain: ChainRecord): JsonObject {
 	}
 }
 
-function itemToJson(item: ItemRecord): JsonObject {
-	return {
+function itemToJson(item: ItemRecord, dependencyWait?: DependencyWaitReason | null): JsonObject {
+	const result: JsonObject = {
 		id: item.id,
 		chainId: item.chainId,
 		issueNumber: item.issueNumber,
@@ -1677,6 +1703,8 @@ function itemToJson(item: ItemRecord): JsonObject {
 		createdAt: item.createdAt,
 		updatedAt: item.updatedAt,
 	}
+	if (dependencyWait !== undefined) result.waiting = dependencyWait === null ? null : dependencyWaitToJson(dependencyWait)
+	return result
 }
 
 function assertChainAllowsItemMutation(chain: ChainRecord, operation: string): void {
@@ -1692,6 +1720,7 @@ function chainStatusSummary(
 	chain: ChainRecord,
 	items: ItemRecord[],
 	activeRuns: ReturnType<typeof listActiveRuns>,
+	dependencyWaits: readonly DependencyWaitReason[],
 ): JsonObject {
 	const byStatus: Record<string, number> = {}
 	for (const item of items) byStatus[item.status] = (byStatus[item.status] ?? 0) + 1
@@ -1731,6 +1760,20 @@ function chainStatusSummary(
 			needed: staleInProgressItems.length > 0,
 			staleInProgressItems,
 		},
+		waiting: {
+			dependency: dependencyWaits.map(dependencyWaitToJson),
+		},
+	}
+}
+
+function dependencyWaitToJson(wait: DependencyWaitReason): JsonObject {
+	return {
+		reason: "blocked-by-dependency",
+		itemId: wait.itemId,
+		issueNumber: wait.issueNumber,
+		repoCwd: wait.repoCwd,
+		dependsOn: wait.dependsOn,
+		unsatisfied: wait.unsatisfied,
 	}
 }
 

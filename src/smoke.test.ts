@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, resolve } from "node:path"
+import { startCoderLoopDaemon } from "./daemon"
 import { openSqliteStateStore } from "./sqlite-state"
 import { resolveChainRuntimePaths } from "./runtime-paths"
 
@@ -775,6 +776,88 @@ describe("smoke: queue unblock CLI", () => {
 		expect(updated.status).toBe("blocked")
 		expect(updated.extra.blockerRepo).toBe("owner/dependency")
 		expect(updated.extra.blockerRef).toBe("#267")
+	})
+})
+
+describe("smoke: dependency-aware scheduler selection", () => {
+	test("scheduler skips items with unmet dependsOn", async () => {
+		const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-dependency-scheduler-"))
+		const runtime = resolve(dir, ".coder-loop/runtime")
+		const loopDataRoot = resolve(runtime, "loop-data")
+		const runnerLog = resolve(runtime, "dependency-scheduler-runner.jsonl")
+		const fakeRunner = resolve(dir, "fake-runner.ts")
+		await mkdir(runtime, { recursive: true })
+		await writeFile(fakeRunner, [
+			`import { appendFile } from "node:fs/promises"`,
+			`const promptIndex = Bun.argv.indexOf("-p")`,
+			`const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"`,
+			`const input = JSON.parse(prompt)`,
+			`await appendFile(input.runnerLog, JSON.stringify({ issueNumber: input.issueNumber, itemId: input.itemId }) + "\\n")`,
+			`console.log("done:" + input.issueNumber)`,
+			``,
+		].join("\n"))
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			scheduler: {
+				enabled: true,
+				intervalMs: 20,
+				runner: {
+					kind: "claude",
+					source: "iteration-default",
+					binary: "bun",
+					extraArgs: [fakeRunner],
+					model: null,
+				},
+				worktreeManager: async ({ repoCwd }) => repoCwd,
+				runIdFactory: ({ chain, item }) => `run-${chain.id}-${item.id}`,
+				prompt: ({ item }) => JSON.stringify({ runnerLog, issueNumber: item.issueNumber, itemId: item.id }),
+			},
+		})
+		try {
+			const store = openSqliteStateStore({ loopDataRoot })
+			try {
+				const chain = store.createChain({
+					name: "dependency-scheduler",
+					preset: "gh-issue-pr-iteration",
+					repository: "mouriya-s-lab/coder-loop",
+					baseBranch: "main",
+				})
+				const prerequisite = store.createItem({ chainId: chain.id, issueNumber: 2671, repoCwd: dir, status: "queued", priority: "10" })
+				store.createItem({
+					chainId: chain.id,
+					issueNumber: 2672,
+					repoCwd: dir,
+					status: "queued",
+					priority: "00",
+					extra: { dependsOn: [prerequisite.id] },
+				})
+			} finally {
+				store.close()
+			}
+
+			const completed = await waitFor(async () => (await fileLineCount(runnerLog)) >= 2, 5_000)
+			expect(completed).toBe(true)
+			const events = (await readFile(runnerLog, "utf-8"))
+				.trim()
+				.split("\n")
+				.filter(Boolean)
+				.map((line) => JSON.parse(line) as { issueNumber: number })
+			expect(events.map((event) => event.issueNumber)).toEqual([2671, 2672])
+			const finalized = await waitFor(async () => {
+				const store = openSqliteStateStore({ loopDataRoot })
+				try {
+					const chain = store.getChainByName("dependency-scheduler")
+					if (chain === null || chain.status !== "completed") return false
+					const items = store.listItems(chain.id)
+					return items.length === 2 && items.every((item) => item.status === "done")
+				} finally {
+					store.close()
+				}
+			}, 5_000)
+			expect(finalized).toBe(true)
+		} finally {
+			await daemon.stop()
+		}
 	})
 })
 
