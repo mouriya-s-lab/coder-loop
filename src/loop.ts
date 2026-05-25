@@ -371,8 +371,9 @@ const QUEUE_ITEM_BASE_KEYS = new Set([
 ])
 
 const PresetPhaseTriggerBoundary = arkType({
-	afterPhase: "string",
-	whenStatus: "string",
+	"afterPhase?": "string",
+	"whenStatus?": "string",
+	"on?": "string",
 })
 
 const PresetPhaseBoundary = arkType({
@@ -478,10 +479,9 @@ export type Preset = {
 	}
 }
 
-export type PresetPhaseTrigger = {
-	afterPhase: string
-	whenStatus: string
-}
+export type PresetPhaseTrigger =
+	| { afterPhase: string; whenStatus: string }
+	| { on: "chain-complete" }
 
 export type AgentRunnerKind = "claude" | "codex"
 
@@ -2197,15 +2197,17 @@ async function runTriggeredPhasesAfter(
 	issueKind: IssueKind,
 	emit: LoopEventEmit,
 ): Promise<number> {
-	for (const phase of options.preset.phases.filter((candidate) => candidate.trigger?.afterPhase === afterPhase)) {
+	for (const phase of options.preset.phases.filter((candidate) => candidate.trigger !== null && !isChainCompleteTrigger(candidate.trigger) && candidate.trigger.afterPhase === afterPhase)) {
+		const trigger = phase.trigger
+		if (trigger === null || isChainCompleteTrigger(trigger)) continue
 		const { chain, state } = await loadLoopStateFromDb(options)
 		const item = state.queue.find((queueItem) => getItemId(queueItem, options.preset) === selectedId)
 		if (!item) {
 			log(`Skipping trigger phase ${phase.name}: issue #${selectedId} no longer exists in queue.`)
 			continue
 		}
-		if (phase.trigger?.whenStatus !== item.status) {
-			log(`Skipping trigger phase ${phase.name}: status=${item.status}, wanted=${phase.trigger?.whenStatus ?? "<none>"}.`)
+		if (trigger.whenStatus !== item.status) {
+			log(`Skipping trigger phase ${phase.name}: status=${item.status}, wanted=${trigger.whenStatus}.`)
 			continue
 		}
 
@@ -3553,9 +3555,7 @@ export function parsePreset(value: unknown, presetDir: string): Preset {
 			}
 			variables.push([key, source] as const)
 		}
-		const trigger = entry.trigger
-			? { afterPhase: entry.trigger.afterPhase, whenStatus: entry.trigger.whenStatus }
-			: null
+		const trigger = parsePresetPhaseTrigger(entry.trigger ?? null, `preset.phases[${index}].trigger`)
 		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), variables, trigger })
 	}
 	if (!phases.some((phase) => phase.trigger === null)) presetError("preset.phases: must include at least one non-trigger phase")
@@ -3563,6 +3563,7 @@ export function parsePreset(value: unknown, presetDir: string): Preset {
 	const statuses = new Set<string>([...root.statuses.continuable, ...root.statuses.terminal])
 	for (const [index, phase] of phases.entries()) {
 		if (phase.trigger === null) continue
+		if (isChainCompleteTrigger(phase.trigger)) continue
 		if (!phaseNames.has(phase.trigger.afterPhase)) {
 			presetError(`preset.phases[${index}].trigger.afterPhase: unknown phase "${phase.trigger.afterPhase}"`)
 		}
@@ -3598,6 +3599,24 @@ function parseVariableSource(value: string, label: string): PresetVariableSource
 	const kind = match[1] as "item" | "config" | "runtime"
 	const fieldOrKey = match[2]!
 	return kind === "runtime" ? { kind, key: fieldOrKey } : { kind, field: fieldOrKey }
+}
+
+function parsePresetPhaseTrigger(value: typeof PresetPhaseTriggerBoundary.infer | null, label: string): PresetPhaseTrigger | null {
+	if (value === null) return null
+	const hasAfterPhase = value.afterPhase !== undefined
+	const hasWhenStatus = value.whenStatus !== undefined
+	const hasOn = value.on !== undefined
+	if (hasOn) {
+		if (value.on !== "chain-complete") presetError(`${label}.on: unsupported trigger event "${value.on}"`)
+		if (hasAfterPhase || hasWhenStatus) presetError(`${label}: chain-complete trigger cannot also declare afterPhase/whenStatus`)
+		return { on: "chain-complete" }
+	}
+	if (hasAfterPhase && hasWhenStatus) return { afterPhase: value.afterPhase!, whenStatus: value.whenStatus! }
+	presetError(`${label}: trigger must declare either afterPhase + whenStatus or on = "chain-complete"`)
+}
+
+function isChainCompleteTrigger(trigger: PresetPhaseTrigger): trigger is { on: "chain-complete" } {
+	return "on" in trigger
 }
 
 function presetError(message: string): never {
@@ -3719,7 +3738,11 @@ export function reviewPhaseForPreset(preset: Preset): PresetPhase {
 }
 
 export function triggeredPhasesAfter(preset: Preset, afterPhase: string, status: string): readonly PresetPhase[] {
-	return preset.phases.filter((phase) => phase.trigger?.afterPhase === afterPhase && phase.trigger.whenStatus === status)
+	return preset.phases.filter((phase) => phase.trigger !== null && !isChainCompleteTrigger(phase.trigger) && phase.trigger.afterPhase === afterPhase && phase.trigger.whenStatus === status)
+}
+
+export function chainCompleteTriggerPhases(preset: Preset): readonly PresetPhase[] {
+	return preset.phases.filter((phase) => phase.trigger !== null && isChainCompleteTrigger(phase.trigger))
 }
 
 function readPresetNameFromStatusInput(value: StatusConfigInput["preset"]): string | null {

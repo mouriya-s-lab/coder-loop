@@ -97,6 +97,7 @@ bun src/loop.ts --target-cwd <fresh-target> --check-runtime
 | `[statuses].terminal` | string[] | 是 | 引擎跳过的 status 集合（与 continuable 合并去重） |
 | `[[phases]].name` | string | 是 | phase 名字，写入 `state.current.phase` |
 | `[[phases]].prompt` | string | 是 | 相对 preset.toml 的 entry prompt 模板路径 |
+| `[[phases]].trigger` | table | 否 | 可把 phase 声明为 trigger phase。支持 `trigger = { afterPhase = "...", whenStatus = "..." }` 的 item phase trigger，或 `trigger = { on = "chain-complete" }` 的 chain lifecycle trigger |
 | `[phases.variables]` | table | 是 | 模板中 `{{KEY}}` 的解析表，详见下节 |
 | `[[fragments]].id` | string | 是 | fragment 唯一标识（如 `iter/read-context`），entry prompt 通过该 id 引用 |
 | `[[fragments]].role` | string | 是 | fragment 角色（如 `common` / `iter` / `review`），仅 metadata，引擎不校验 |
@@ -111,9 +112,33 @@ bun src/loop.ts --target-cwd <fresh-target> --check-runtime
 - 同 `name` 的 phase 不可重名；
 - 同 `id` 的 fragment 不可重复；
 - `[statuses]` 的 continuable / terminal 集合不可有交集；
+- item phase trigger 的 `afterPhase` 必须指向已声明 phase，`whenStatus` 必须属于 continuable 或 terminal status；
+- chain lifecycle trigger 目前只支持 `on = "chain-complete"`，且不能同时声明 `afterPhase` / `whenStatus`；
 - 每条 `[phases.variables]` 右侧必须 match `^(item|config|runtime)\.[a-zA-Z][a-zA-Z0-9_]*$`。
 
 任何一条失败 → preset load throws，`--check-runtime` 报错。
+
+### Trigger phases
+
+普通 trigger phase 仍用于“某个 phase 之后，当前 item status 等于某值”的场景：
+
+```toml
+[[phases]]
+name = "blocked-responder"
+prompt = "blocked-responder-entry.md"
+trigger = { afterPhase = "review", whenStatus = "blocked" }
+```
+
+chain-complete trigger 是 chain lifecycle hook。调度器在 active chain 有 item、没有 active slot、所有 item 都落入 terminal status、且即将写入 `status = "completed"` 前调用该 hook。没有 chain-complete trigger 时保持旧行为：直接完成 chain 并 emit `chain.completed`。
+
+```toml
+[[phases]]
+name = "umbrella-finalizer"
+prompt = "umbrella-finalizer-entry.md"
+trigger = { on = "chain-complete" }
+```
+
+hook 决策只控制 lifecycle：允许 completed、保持 active，或因为 hook 失败而保持 active。语义判断仍属于 preset prompt 或外部 operator，不属于 scheduler。
 
 ---
 
