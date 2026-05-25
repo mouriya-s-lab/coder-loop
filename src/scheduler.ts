@@ -112,10 +112,16 @@ export type SchedulerOptions = {
 	loopDataRootOptions?: LoopDataRootOptions
 	pendingStatuses?: readonly string[]
 	terminalStatuses?: readonly string[]
+	statusesForChain?: (chain: ChainRecord) => SchedulerChainStatuses | Promise<SchedulerChainStatuses>
 	now?: () => number
 	runIdFactory?: (context: { chain: ChainRecord; item: ItemRecord; phase: string }) => string
 	statusFromExit?: (context: { exitCode: number; stdout: string; stderr: string; item: ItemRecord; chain: ChainRecord }) => string
 	onEvent?: (event: SchedulerEvent) => void | Promise<void>
+}
+
+export type SchedulerChainStatuses = {
+	pending: readonly string[]
+	terminal: readonly string[]
 }
 
 export type SchedulerTickResult = {
@@ -135,8 +141,6 @@ export function createSchedulerState(): SchedulerState {
 
 export async function schedulerTick(options: SchedulerOptions): Promise<SchedulerTickResult> {
 	const phase = options.phase ?? DEFAULT_PHASE
-	const pendingStatuses = options.pendingStatuses ?? DEFAULT_PENDING_STATUSES
-	const terminalStatuses = options.terminalStatuses ?? DEFAULT_TERMINAL_STATUSES
 	const activeChains = options.store
 		.listChains()
 		.filter((chain) => chain.status === "active" && hasValidChainName(chain.name))
@@ -147,6 +151,7 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 	removeIdleSlotsForInactiveChains(options.state, activeChainIds)
 
 	for (const chain of activeChains) {
+		const chainStatuses = await schedulerStatusesForChain(options, chain)
 		const items = options.store.listItems(chain.id)
 		const repoCwds = distinct(items.map((item) => item.repoCwd))
 
@@ -163,14 +168,14 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 				continue
 			}
 
-			const item = options.store.getNextPendingItem({ chainId: chain.id, repoCwd, statuses: pendingStatuses })
+			const item = options.store.getNextPendingItem({ chainId: chain.id, repoCwd, statuses: chainStatuses.pending, terminalStatuses: chainStatuses.terminal })
 			if (item === null) continue
 
 			const activeRun = await spawnSchedulerRun(options, chain, item, slot, phase)
 			spawnedRuns.push(activeRun)
 		}
 
-		if (await completeChainIfReady(options, chain)) completedChainIds.push(chain.id)
+		if (await completeChainIfReady(options, chain, undefined, chainStatuses.terminal)) completedChainIds.push(chain.id)
 	}
 
 	return { spawnedRuns, completedChainIds }
@@ -391,7 +396,7 @@ function attachRunCloseHandler(
 				const stdoutText = Buffer.concat(stdout).toString("utf-8")
 				const stderrText = Buffer.concat(stderr).toString("utf-8")
 				const statusFromExit = options.statusFromExit?.({ exitCode, stdout: stdoutText, stderr: stderrText, item, chain }) ?? (exitCode === 0 ? "done" : "changes_requested")
-				const terminalStatuses = new Set(options.terminalStatuses ?? DEFAULT_TERMINAL_STATUSES)
+				const terminalStatuses = new Set((await schedulerStatusesForChain(options, chain)).terminal)
 				const currentItem = options.store.getItem(item.id)
 				const status = currentItem !== null && terminalStatuses.has(currentItem.status) ? currentItem.status : statusFromExit
 				const endedAt = nowSeconds(options)
@@ -417,7 +422,7 @@ function attachRunCloseHandler(
 
 					if (slot.activeRun?.runId === runId) slot.activeRun = null
 					await emit(options, { type: "agent.exit", slotKey: slot.key, chainId: chain.id, itemId: item.id, runId, exitCode, status })
-					await completeChainIfReady(options, chain, runId)
+					await completeChainIfReady(options, chain, runId, [...terminalStatuses])
 					options.store.completeRun(runId, { endedAt, exitCode, extra: { stdoutBytes: stdoutText.length, stderrBytes: stderrText.length } })
 					if (currentItem === null || !terminalStatuses.has(currentItem.status)) {
 						options.store.updateItem(item.id, { status, lastRunId: runId, agentCwd: worktreePath, updatedAt: endedAt })
@@ -481,16 +486,24 @@ async function promiseSettledWithin<T>(promise: Promise<T>, timeoutMs: number): 
 	}
 }
 
-async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecord, runId?: string): Promise<boolean> {
+async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecord, runId?: string, terminalStatuses?: readonly string[]): Promise<boolean> {
 	if (hasActiveSlotForChain(options.state, chain.id)) return false
-	const terminalStatuses = options.terminalStatuses ?? DEFAULT_TERMINAL_STATUSES
+	const effectiveTerminalStatuses = terminalStatuses ?? (await schedulerStatusesForChain(options, chain)).terminal
 	const current = options.store.listChains().find((candidate) => candidate.id === chain.id)
 	if (current?.status !== "active") return false
 	if (options.store.listItems(chain.id).length === 0) return false
-	if (!allItemsTerminalIncludingFinalizing(options, chain.id, terminalStatuses)) return false
+	if (!allItemsTerminalIncludingFinalizing(options, chain.id, effectiveTerminalStatuses)) return false
 	const updated = options.store.updateChain(chain.id, { status: "completed", updatedAt: nowSeconds(options) })
 	await emit(options, { type: "chain.completed", chainId: updated.id, chainName: updated.name, ...(runId === undefined ? {} : { runId }) })
 	return true
+}
+
+async function schedulerStatusesForChain(options: SchedulerOptions, chain: ChainRecord): Promise<SchedulerChainStatuses> {
+	const resolved = await options.statusesForChain?.(chain)
+	return {
+		pending: resolved?.pending ?? options.pendingStatuses ?? DEFAULT_PENDING_STATUSES,
+		terminal: resolved?.terminal ?? options.terminalStatuses ?? DEFAULT_TERMINAL_STATUSES,
+	}
 }
 
 function allItemsTerminalIncludingFinalizing(options: SchedulerOptions, chainId: number, terminalStatuses: readonly string[]): boolean {

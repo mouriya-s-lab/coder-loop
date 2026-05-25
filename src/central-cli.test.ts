@@ -135,6 +135,47 @@ describe("central chain/item CLI", () => {
 		}
 	})
 
+	test("chain status reports dependency waiting reason", async () => {
+		const fixture = await startFixture("dependency-wait-status")
+		try {
+			expectJsonOk(await runCli(["chain", "create", "dependency-wait-chain", "--repo", "mouriya-s-lab/coder-loop", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			let prerequisiteId = 0
+			let dependentId = 0
+			try {
+				const chain = store.getChainByName("dependency-wait-chain")
+				if (chain === null) throw new Error("expected dependency-wait-chain")
+				const prerequisite = store.createItem({ chainId: chain.id, issueNumber: 2671, repoCwd: REPO_ROOT, status: "queued", priority: "10" })
+				const dependent = store.createItem({
+					chainId: chain.id,
+					issueNumber: 2672,
+					repoCwd: REPO_ROOT,
+					status: "queued",
+					priority: "00",
+					extra: { dependsOn: [prerequisite.id] },
+				})
+				prerequisiteId = prerequisite.id
+				dependentId = dependent.id
+			} finally {
+				store.close()
+			}
+
+			const status = expectJsonOk(await runCli(["chain", "status", "dependency-wait-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const dependentStatus = status.items.find((item: Record<string, unknown>) => item.id === dependentId)
+			expect(dependentStatus?.waiting).toEqual({
+				reason: "blocked-by-dependency",
+				itemId: dependentId,
+				issueNumber: 2672,
+				repoCwd: REPO_ROOT,
+				dependsOn: [prerequisiteId],
+				unsatisfied: [prerequisiteId],
+			})
+			expect(status.summary.waiting.dependency).toEqual([dependentStatus?.waiting])
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("daemon up down", async () => {
 		const loopDataRoot = await makeLoopDataRoot("daemon-up-down")
 		const daemonProcess = Bun.spawn({
@@ -369,7 +410,7 @@ describe("central chain/item CLI", () => {
 			const status = expectJsonOk(await runCli(["chain", "status", "schema-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 
 			expect(Object.keys(status).sort()).toEqual(["activeRuns", "chain", "items", "summary"])
-			expect(Object.keys(status.summary).sort()).toEqual(["activeSlots", "completion", "items", "recovery", "umbrella"])
+			expect(Object.keys(status.summary).sort()).toEqual(["activeSlots", "completion", "items", "recovery", "umbrella", "waiting"])
 			expect(status.summary.recovery).toEqual({ needed: false, staleInProgressItems: [] })
 			expect(status.chain).toMatchObject({
 				name: "schema-chain",

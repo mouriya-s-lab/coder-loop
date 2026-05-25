@@ -192,6 +192,74 @@ describe("sqlite state store", () => {
 		}
 	})
 
+	test("dependsOn gates pending item selection", async () => {
+		const { store } = await openTestStore("depends-gates")
+		try {
+			const chain = createFullChain(store)
+			const prerequisite = createFullItem(store, chain, { issueNumber: 2671, priority: "10", status: "queued" })
+			const dependent = createFullItem(store, chain, {
+				issueNumber: 2672,
+				priority: "00",
+				status: "queued",
+				extra: { issue: 2672, dependsOn: [prerequisite.id] },
+			})
+			const fallback = createFullItem(store, chain, { issueNumber: 2673, priority: "20", status: "queued" })
+
+			expect(dependent.id).toBeGreaterThan(prerequisite.id)
+			expect(store.getNextPendingItem({
+				chainId: chain.id,
+				repoCwd: "/repo/coder-loop",
+				statuses: ["queued"],
+				terminalStatuses: ["done", "moot", "blocked"],
+			})).toEqual(prerequisite)
+			expect(store.listDependencyWaits({
+				chainId: chain.id,
+				repoCwd: "/repo/coder-loop",
+				statuses: ["queued"],
+				terminalStatuses: ["done", "moot", "blocked"],
+			})).toEqual([{
+				itemId: dependent.id,
+				issueNumber: 2672,
+				repoCwd: "/repo/coder-loop",
+				dependsOn: [prerequisite.id],
+				unsatisfied: [prerequisite.id],
+			}])
+			expect(store.getItem(fallback.id)).toEqual(fallback)
+		} finally {
+			store.close()
+		}
+	})
+
+	test("dependsOn releases item after dependency terminal status", async () => {
+		const { store } = await openTestStore("depends-release")
+		try {
+			const chain = createFullChain(store)
+			const prerequisite = createFullItem(store, chain, { issueNumber: 2674, priority: "99", status: "done" })
+			const dependent = createFullItem(store, chain, {
+				issueNumber: 2675,
+				priority: "00",
+				status: "queued",
+				extra: { issue: 2675, dependsOn: [prerequisite.id] },
+			})
+			createFullItem(store, chain, { issueNumber: 2676, priority: "10", status: "queued" })
+
+			expect(store.getNextPendingItem({
+				chainId: chain.id,
+				repoCwd: "/repo/coder-loop",
+				statuses: ["queued"],
+				terminalStatuses: ["done", "moot", "blocked"],
+			})).toEqual(dependent)
+			expect(store.listDependencyWaits({
+				chainId: chain.id,
+				repoCwd: "/repo/coder-loop",
+				statuses: ["queued"],
+				terminalStatuses: ["done", "moot", "blocked"],
+			})).toEqual([])
+		} finally {
+			store.close()
+		}
+	})
+
 	test("wal mode", async () => {
 		const { store } = await openTestStore("wal")
 		try {

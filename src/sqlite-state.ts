@@ -143,6 +143,22 @@ export type GetNextPendingItemInput = {
 	chainId: number
 	repoCwd: string
 	statuses?: readonly string[]
+	terminalStatuses?: readonly string[]
+}
+
+export type ListDependencyWaitsInput = {
+	chainId: number
+	repoCwd?: string
+	statuses: readonly string[]
+	terminalStatuses: readonly string[]
+}
+
+export type DependencyWaitReason = {
+	itemId: number
+	issueNumber: number
+	repoCwd: string
+	dependsOn: number[]
+	unsatisfied: number[]
 }
 
 export type AllItemsTerminalInput = {
@@ -173,6 +189,7 @@ export type SqliteStateStore = {
 	updateItem: (id: number, input: UpdateItemInput) => ItemRecord
 	deleteItem: (id: number) => boolean
 	getNextPendingItem: (input: GetNextPendingItemInput) => ItemRecord | null
+	listDependencyWaits: (input: ListDependencyWaitsInput) => DependencyWaitReason[]
 	allItemsTerminal: (input: AllItemsTerminalInput) => boolean
 	recordRun: (input: RecordRunInput) => RunRecord
 	getRunByRunId: (runId: string) => RunRecord | null
@@ -548,14 +565,24 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 		getNextPendingItem: (input) =>
 			read("get next pending item", () => {
 				const statuses = input.statuses ?? ["queued", "changes_requested"]
+				const terminalStatuses = input.terminalStatuses ?? []
 				return selectNextPendingItem(
-					db.query<ItemRow, SqlParams>("SELECT * FROM items WHERE chain_id = $chainId AND repo_cwd = $repoCwd ORDER BY id ASC").all({
+					db.query<ItemRow, SqlParams>("SELECT * FROM items WHERE chain_id = $chainId ORDER BY id ASC").all({
 						chainId: input.chainId,
-						repoCwd: input.repoCwd,
 					}).map((row) => requireItem(row, row.id)),
-					statuses,
+					{ repoCwd: input.repoCwd, statuses, terminalStatuses },
 				)
 			}),
+
+		listDependencyWaits: (input) =>
+			read("list dependency waits", () =>
+				listDependencyWaitReasons(
+					db.query<ItemRow, SqlParams>("SELECT * FROM items WHERE chain_id = $chainId ORDER BY id ASC").all({
+						chainId: input.chainId,
+					}).map((row) => requireItem(row, row.id)),
+					input,
+				)
+			),
 
 		allItemsTerminal: (input) =>
 			read("check all items terminal", () => {
@@ -763,10 +790,19 @@ function currentRunParams(input: SetCurrentRunInput): SqlParams {
 	}
 }
 
-function selectNextPendingItem(items: ItemRecord[], statuses: readonly string[]): ItemRecord | null {
-	const eligible = new Set(statuses)
+type PendingSelectionOptions = {
+	repoCwd?: string
+	statuses: readonly string[]
+	terminalStatuses: readonly string[]
+}
+
+function selectNextPendingItem(items: ItemRecord[], options: PendingSelectionOptions): ItemRecord | null {
+	const eligible = new Set(options.statuses)
+	const waitsByItemId = dependencyWaitsByItemId(items, options.terminalStatuses)
 	return items
+		.filter((item) => options.repoCwd === undefined || item.repoCwd === options.repoCwd)
 		.filter((item) => eligible.has(item.status))
+		.filter((item) => !waitsByItemId.has(item.id))
 		.sort((left, right) => {
 			if (left.priority === null && right.priority !== null) return 1
 			if (left.priority !== null && right.priority === null) return -1
@@ -774,6 +810,45 @@ function selectNextPendingItem(items: ItemRecord[], statuses: readonly string[])
 			if (left.attempts !== right.attempts) return left.attempts - right.attempts
 			return left.id - right.id
 		})[0] ?? null
+}
+
+export function listDependencyWaitReasons(items: readonly ItemRecord[], options: PendingSelectionOptions): DependencyWaitReason[] {
+	const eligible = new Set(options.statuses)
+	const waitsByItemId = dependencyWaitsByItemId(items, options.terminalStatuses)
+	return items
+		.filter((item) => options.repoCwd === undefined || item.repoCwd === options.repoCwd)
+		.filter((item) => eligible.has(item.status))
+		.map((item) => waitsByItemId.get(item.id) ?? null)
+		.filter((wait): wait is DependencyWaitReason => wait !== null)
+}
+
+function dependencyWaitsByItemId(items: readonly ItemRecord[], terminalStatuses: readonly string[]): Map<number, DependencyWaitReason> {
+	const terminal = new Set(terminalStatuses)
+	const byId = new Map(items.map((item) => [item.id, item]))
+	const waits = new Map<number, DependencyWaitReason>()
+	for (const item of items) {
+		const dependsOn = dependsOnItemIds(item.extra)
+		if (dependsOn.length === 0) continue
+		const unsatisfied = dependsOn.filter((dependencyId) => {
+			const dependency = byId.get(dependencyId)
+			return dependency === undefined || !terminal.has(dependency.status)
+		})
+		if (unsatisfied.length === 0) continue
+		waits.set(item.id, {
+			itemId: item.id,
+			issueNumber: item.issueNumber,
+			repoCwd: item.repoCwd,
+			dependsOn,
+			unsatisfied,
+		})
+	}
+	return waits
+}
+
+function dependsOnItemIds(extra: JsonObject): number[] {
+	const raw = extra.dependsOn
+	if (!Array.isArray(raw)) return []
+	return raw.filter((value): value is number => typeof value === "number" && Number.isInteger(value) && value >= 1)
 }
 
 function stringifyJsonObject(value: JsonObject): string {
