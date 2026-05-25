@@ -812,6 +812,7 @@ describe("smoke: dependency-aware scheduler selection", () => {
 				worktreeManager: async ({ repoCwd }) => repoCwd,
 				runIdFactory: ({ chain, item }) => `run-${chain.id}-${item.id}`,
 				prompt: ({ item }) => JSON.stringify({ runnerLog, issueNumber: item.issueNumber, itemId: item.id }),
+				chainCompleteTriggerForChain: () => null,
 			},
 		})
 		try {
@@ -948,10 +949,14 @@ describe("smoke: dependency-aware scheduler selection", () => {
 		const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-gh-finalizer-active-"))
 		const runtime = resolve(dir, ".coder-loop/runtime")
 		const loopDataRoot = resolve(runtime, "loop-data")
-		const finalizerLog = resolve(runtime, "umbrella-finalizer.jsonl")
+		const markerDir = resolve(runtime, "finalizer-markers")
+		const finalizerLog = resolve(markerDir, "finalizer.jsonl")
+		const commentPath = resolve(markerDir, "umbrella-comment.md")
+		const followupPath = resolve(markerDir, "follow-up.md")
+		const promptCapture = resolve(markerDir, "prompt.md")
 		const fakeRunner = resolve(dir, "fake-runner.ts")
 		await mkdir(runtime, { recursive: true })
-		await writeFile(fakeRunner, `console.log("done")\n`)
+		await writeGhFinalizerFakeRunner(fakeRunner)
 		const daemon = await startCoderLoopDaemon({
 			loopDataRoot,
 			scheduler: {
@@ -961,29 +966,12 @@ describe("smoke: dependency-aware scheduler selection", () => {
 					kind: "claude",
 					source: "iteration-default",
 					binary: "bun",
-					extraArgs: [fakeRunner],
+					extraArgs: [fakeRunner, "--mode", "keep-active", "--marker-dir", markerDir],
 					model: null,
 				},
 				worktreeManager: async ({ repoCwd }) => repoCwd,
 				runIdFactory: ({ chain, item }) => `run-${chain.id}-${item.id}`,
 				prompt: () => "gh-issue-pr finalizer active fixture",
-				chainCompleteTrigger: async ({ chain, items }) => {
-					const store = openSqliteStateStore({ loopDataRoot })
-					try {
-						await appendFile(finalizerLog, `${JSON.stringify({
-							phase: finalizer!.name,
-							umbrellaRepo: chain.umbrellaRepo,
-							umbrellaIssue: chain.umbrellaIssue,
-							chainStatusDuringFinalizer: store.getChain(chain.id)?.status ?? null,
-							itemStatuses: items.map((item) => item.status),
-							decision: "keep-active",
-							reason: "open child issue remains",
-						})}\n`)
-					} finally {
-						store.close()
-					}
-					return { decision: "keep-active", reason: "open child issue remains" }
-				},
 			},
 		})
 		try {
@@ -1016,15 +1004,15 @@ describe("smoke: dependency-aware scheduler selection", () => {
 				.trim()
 				.split("\n")
 				.filter(Boolean)
-				.map((line) => JSON.parse(line) as { phase: string; umbrellaRepo: string; umbrellaIssue: number; chainStatusDuringFinalizer: string; itemStatuses: string[]; decision: string })
+				.map((line) => JSON.parse(line) as { mode: string; promptIncludesFinalizer: boolean; decision: string })
 			expect(events[0]).toMatchObject({
-				phase: "umbrella-finalizer",
-				umbrellaRepo: "mouriya-s-lab/coder-loop",
-				umbrellaIssue: 260,
-				chainStatusDuringFinalizer: "active",
-				itemStatuses: ["done"],
+				mode: "keep-active",
+				promptIncludesFinalizer: true,
 				decision: "keep-active",
 			})
+			expect(await readFile(promptCapture, "utf-8")).toContain("# coder-loop umbrella-finalizer agent")
+			expect(await readFile(commentPath, "utf-8")).toContain("Remaining scope")
+			expect(await readFile(followupPath, "utf-8")).toContain("Follow-up issue")
 		} finally {
 			await daemon.stop()
 		}
@@ -1041,10 +1029,14 @@ describe("smoke: dependency-aware scheduler selection", () => {
 		const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-gh-finalizer-complete-"))
 		const runtime = resolve(dir, ".coder-loop/runtime")
 		const loopDataRoot = resolve(runtime, "loop-data")
-		const finalizerLog = resolve(runtime, "umbrella-finalizer.jsonl")
+		const markerDir = resolve(runtime, "finalizer-markers")
+		const finalizerLog = resolve(markerDir, "finalizer.jsonl")
+		const commentPath = resolve(markerDir, "umbrella-comment.md")
+		const closureTablePath = resolve(markerDir, "closure-table.md")
+		const promptCapture = resolve(markerDir, "prompt.md")
 		const fakeRunner = resolve(dir, "fake-runner.ts")
 		await mkdir(runtime, { recursive: true })
-		await writeFile(fakeRunner, `console.log("done")\n`)
+		await writeGhFinalizerFakeRunner(fakeRunner)
 		const daemon = await startCoderLoopDaemon({
 			loopDataRoot,
 			scheduler: {
@@ -1054,28 +1046,12 @@ describe("smoke: dependency-aware scheduler selection", () => {
 					kind: "claude",
 					source: "iteration-default",
 					binary: "bun",
-					extraArgs: [fakeRunner],
+					extraArgs: [fakeRunner, "--mode", "complete", "--marker-dir", markerDir],
 					model: null,
 				},
 				worktreeManager: async ({ repoCwd }) => repoCwd,
 				runIdFactory: ({ chain, item }) => `run-${chain.id}-${item.id}`,
 				prompt: () => "gh-issue-pr finalizer complete fixture",
-				chainCompleteTrigger: async ({ chain, items }) => {
-					const store = openSqliteStateStore({ loopDataRoot })
-					try {
-						await appendFile(finalizerLog, `${JSON.stringify({
-							phase: finalizer!.name,
-							umbrellaRepo: chain.umbrellaRepo,
-							umbrellaIssue: chain.umbrellaIssue,
-							chainStatusDuringFinalizer: store.getChain(chain.id)?.status ?? null,
-							itemStatuses: items.map((item) => item.status),
-							decision: "complete",
-						})}\n`)
-					} finally {
-						store.close()
-					}
-					return { decision: "complete", reason: "umbrella closure review passed" }
-				},
 			},
 		})
 		try {
@@ -1107,15 +1083,15 @@ describe("smoke: dependency-aware scheduler selection", () => {
 				.trim()
 				.split("\n")
 				.filter(Boolean)
-				.map((line) => JSON.parse(line) as { phase: string; umbrellaRepo: string; umbrellaIssue: number; chainStatusDuringFinalizer: string; itemStatuses: string[]; decision: string })
+				.map((line) => JSON.parse(line) as { mode: string; promptIncludesFinalizer: boolean; decision: string })
 			expect(events).toEqual([{
-				phase: "umbrella-finalizer",
-				umbrellaRepo: "mouriya-s-lab/coder-loop",
-				umbrellaIssue: 260,
-				chainStatusDuringFinalizer: "active",
-				itemStatuses: ["done"],
+				mode: "complete",
+				promptIncludesFinalizer: true,
 				decision: "complete",
 			}])
+			expect(await readFile(promptCapture, "utf-8")).toContain("# coder-loop umbrella-finalizer agent")
+			expect(await readFile(commentPath, "utf-8")).toContain("Completion conclusion")
+			expect(await readFile(closureTablePath, "utf-8")).toContain("Child closure table")
 		} finally {
 			await daemon.stop()
 		}
@@ -1583,6 +1559,51 @@ async function fileLineCount(path: string): Promise<number> {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0
 		throw error
 	}
+}
+
+async function writeGhFinalizerFakeRunner(path: string): Promise<void> {
+	await writeFile(path, [
+		`import { mkdir, writeFile, appendFile } from "node:fs/promises"`,
+		`import { resolve } from "node:path"`,
+		``,
+		`const args = process.argv.slice(2)`,
+		`function flagValue(name) {`,
+		`  const index = args.indexOf(name)`,
+		`  return index === -1 ? null : args[index + 1] ?? null`,
+		`}`,
+		`function assistant(text) {`,
+		`  console.log(JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text }] } }))`,
+		`}`,
+		``,
+		`const mode = flagValue("--mode") ?? "complete"`,
+		`const markerDir = flagValue("--marker-dir")`,
+		`if (markerDir === null) throw new Error("missing --marker-dir")`,
+		`const prompt = args.at(-1) ?? ""`,
+		`await mkdir(markerDir, { recursive: true })`,
+		``,
+		`if (!prompt.includes("coder-loop umbrella-finalizer agent")) {`,
+		`  assistant("ITERATION SUMMARY: fake iteration completed")`,
+		`  process.exit(0)`,
+		`}`,
+		``,
+		`const commentPath = resolve(markerDir, "umbrella-comment.md")`,
+		`const followupPath = resolve(markerDir, "follow-up.md")`,
+		`const closureTablePath = resolve(markerDir, "closure-table.md")`,
+		`await writeFile(resolve(markerDir, "prompt.md"), prompt)`,
+		``,
+		`if (mode === "keep-active") {`,
+		`  await writeFile(commentPath, "## Coder-loop umbrella finalizer\\n\\nRemaining scope: open child issue remains.\\n")`,
+		`  await writeFile(followupPath, "Follow-up issue: close remaining umbrella scope.\\n")`,
+		`  await appendFile(resolve(markerDir, "finalizer.jsonl"), JSON.stringify({ mode, promptIncludesFinalizer: true, decision: "keep-active" }) + "\\n")`,
+		`  assistant("FINALIZER SUMMARY: decision=keep-active; umbrella=mouriya-s-lab/coder-loop#260; comment=file://" + commentPath + "; followup=file://" + followupPath + "; reason=open child issue remains")`,
+		`} else {`,
+		`  await writeFile(commentPath, "## Coder-loop umbrella finalizer\\n\\nCompletion conclusion: umbrella closure review passed.\\n")`,
+		`  await writeFile(closureTablePath, "Child closure table: all child issues closed with accepted review.\\n")`,
+		`  await appendFile(resolve(markerDir, "finalizer.jsonl"), JSON.stringify({ mode, promptIncludesFinalizer: true, decision: "complete" }) + "\\n")`,
+		`  assistant("FINALIZER SUMMARY: decision=complete; umbrella=mouriya-s-lab/coder-loop#260; comment=file://" + commentPath + "; followup=; reason=umbrella closure review passed")`,
+		`}`,
+		``,
+	].join("\n"))
 }
 
 async function waitFor(predicate: () => Promise<boolean>, timeoutMs: number, intervalMs = 25): Promise<boolean> {

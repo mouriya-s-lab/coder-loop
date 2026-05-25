@@ -113,6 +113,7 @@ export type SchedulerChainCompleteDecision =
 	| { decision: "keep-active"; reason?: string }
 
 export type SchedulerChainCompleteTrigger = (context: SchedulerChainCompleteTriggerContext) => Promise<SchedulerChainCompleteDecision> | SchedulerChainCompleteDecision
+export type SchedulerChainCompleteTriggerForChain = (context: SchedulerChainCompleteTriggerContext) => Promise<SchedulerChainCompleteDecision | null> | SchedulerChainCompleteDecision | null
 
 export type SchedulerOptions = {
 	store: SchedulerStore
@@ -133,6 +134,7 @@ export type SchedulerOptions = {
 	runIdFactory?: (context: { chain: ChainRecord; item: ItemRecord; phase: string }) => string
 	statusFromExit?: (context: { exitCode: number; stdout: string; stderr: string; item: ItemRecord; chain: ChainRecord }) => string
 	chainCompleteTrigger?: SchedulerChainCompleteTrigger
+	chainCompleteTriggerForChain?: SchedulerChainCompleteTriggerForChain
 	onEvent?: (event: SchedulerEvent) => void | Promise<void>
 }
 
@@ -440,11 +442,11 @@ function attachRunCloseHandler(
 
 					if (slot.activeRun?.runId === runId) slot.activeRun = null
 					await emit(options, { type: "agent.exit", slotKey: slot.key, chainId: chain.id, itemId: item.id, runId, exitCode, status })
-					await completeChainIfReady(options, chain, runId, [...terminalStatuses])
 					options.store.completeRun(runId, { endedAt, exitCode, extra: { stdoutBytes: stdoutText.length, stderrBytes: stderrText.length } })
 					if (currentItem === null || !terminalStatuses.has(currentItem.status)) {
 						options.store.updateItem(item.id, { status, lastRunId: runId, agentCwd: worktreePath, updatedAt: endedAt })
 					}
+					await completeChainIfReady(options, chain, runId, [...terminalStatuses])
 					resolveClosed({ runId, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, exitCode, stdout: stdoutText, stderr: stderrText, status })
 				} finally {
 					options.state.finalizingItemStatuses.delete(item.id)
@@ -530,14 +532,17 @@ async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecor
 }
 
 async function chainCompletionTriggerAllowsCompletion(options: SchedulerOptions, chain: ChainRecord, runId: string | undefined, terminalStatuses: readonly string[]): Promise<boolean> {
-	if (options.chainCompleteTrigger === undefined) return true
 	try {
-		const decision = await options.chainCompleteTrigger({
+		const context: SchedulerChainCompleteTriggerContext = {
 			chain,
 			items: listItemsIncludingFinalizing(options, chain.id),
 			...(runId === undefined ? {} : { runId }),
 			terminalStatuses,
-		})
+		}
+		const decision = options.chainCompleteTrigger !== undefined
+			? await options.chainCompleteTrigger(context)
+			: await options.chainCompleteTriggerForChain?.(context) ?? null
+		if (decision === null) return true
 		await emit(options, {
 			type: "chain.complete_trigger",
 			chainId: chain.id,
