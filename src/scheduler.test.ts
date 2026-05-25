@@ -167,6 +167,146 @@ describe("scheduler", () => {
 		}
 	})
 
+	test("chain-complete trigger runs before chain completion", async () => {
+		const fixture = await createFixture("completion-trigger")
+		try {
+			const chain = createChain(fixture.store, "completion-trigger-chain")
+			createItem(fixture.store, chain, { issueNumber: 2691, repoCwd: "/repo/a" })
+			const observedChainStatuses: string[] = []
+
+			await runSchedulerUntilIdle(fixture.options({
+				chainCompleteTrigger: ({ chain: triggerChain }) => {
+					observedChainStatuses.push(fixture.store.getChain(triggerChain.id)?.status ?? "missing")
+					return { decision: "complete", reason: "fixture finalizer passed" }
+				},
+			}))
+
+			expect(observedChainStatuses).toEqual(["active"])
+			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
+			expect(fixture.schedulerEvents.map((event) => event.type)).toEqual([
+				"agent.spawn",
+				"agent.exit",
+				"chain.complete_trigger",
+				"chain.completed",
+			])
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("chain-complete trigger does not run twice during overlapping completion ticks", async () => {
+		const fixture = await createFixture("completion-trigger-overlap")
+		try {
+			const chain = createChain(fixture.store, "completion-trigger-overlap-chain")
+			createItem(fixture.store, chain, { issueNumber: 2696, repoCwd: "/repo/a" })
+			const triggerStarted = createDeferred()
+			const releaseTrigger = createDeferred()
+			let triggerCalls = 0
+			const options = fixture.options({
+				chainCompleteTrigger: async () => {
+					triggerCalls += 1
+					triggerStarted.resolve()
+					await releaseTrigger.promise
+					return { decision: "complete", reason: "fixture finalizer passed" }
+				},
+			})
+
+			const firstTick = await schedulerTick(options)
+			expect(firstTick.spawnedRuns).toHaveLength(1)
+			const closed = firstTick.spawnedRuns[0]!.closed
+			await triggerStarted.promise
+
+			const overlappingTickPromise = schedulerTick(options)
+			try {
+				const settledBeforeRelease = await promiseSettledWithin(overlappingTickPromise, 100)
+				expect(settledBeforeRelease).toBe(true)
+				const overlappingTick = await overlappingTickPromise
+				expect(overlappingTick.spawnedRuns).toHaveLength(0)
+				expect(overlappingTick.completedChainIds).toEqual([])
+				expect(triggerCalls).toBe(1)
+			} finally {
+				releaseTrigger.resolve()
+				await Promise.allSettled([overlappingTickPromise, closed])
+			}
+
+			expect(triggerCalls).toBe(1)
+			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
+			expect(fixture.schedulerEvents.filter((event) => event.type === "chain.complete_trigger")).toHaveLength(1)
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("chain-complete trigger can keep chain active", async () => {
+		const fixture = await createFixture("completion-trigger-active")
+		try {
+			const chain = createChain(fixture.store, "completion-trigger-active-chain")
+			createItem(fixture.store, chain, { issueNumber: 2692, repoCwd: "/repo/a" })
+
+			const firstTick = await schedulerTick(fixture.options({
+				chainCompleteTrigger: () => ({ decision: "keep-active", reason: "fixture follow-up required" }),
+			}))
+			await firstTick.spawnedRuns[0]!.closed
+
+			expect(firstTick.spawnedRuns).toHaveLength(1)
+			expect(fixture.store.getChain(chain.id)?.status).toBe("active")
+			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({
+				type: "chain.complete_trigger",
+				chainId: chain.id,
+				chainName: chain.name,
+				decision: "keep-active",
+				reason: "fixture follow-up required",
+			}))
+			expect(fixture.schedulerEvents.some((event) => event.type === "chain.completed" && event.chainId === chain.id)).toBe(false)
+		} finally {
+			fixture.store.close()
+		}
+
+		const followUpFixture = await createFixture("completion-trigger-follow-up")
+		try {
+			const chain = createChain(followUpFixture.store, "completion-trigger-follow-up-chain")
+			createItem(followUpFixture.store, chain, { issueNumber: 2693, repoCwd: "/repo/a" })
+
+			const tick = await schedulerTick(followUpFixture.options({
+				chainCompleteTrigger: ({ chain: triggerChain }) => {
+					createItem(followUpFixture.store, triggerChain, { issueNumber: 2694, repoCwd: "/repo/a" })
+					return { decision: "complete", reason: "fixture follow-up inserted" }
+				},
+			}))
+			await tick.spawnedRuns[0]!.closed
+
+			expect(followUpFixture.store.getChain(chain.id)?.status).toBe("active")
+			expect(followUpFixture.store.listItems(chain.id).map((item) => item.status)).toEqual(["done", "queued"])
+			expect(followUpFixture.schedulerEvents.some((event) => event.type === "chain.completed" && event.chainId === chain.id)).toBe(false)
+		} finally {
+			followUpFixture.store.close()
+		}
+
+		const failingFixture = await createFixture("completion-trigger-failing")
+		try {
+			const chain = createChain(failingFixture.store, "completion-trigger-failing-chain")
+			createItem(failingFixture.store, chain, { issueNumber: 2695, repoCwd: "/repo/a" })
+
+			const tick = await schedulerTick(failingFixture.options({
+				chainCompleteTrigger: () => {
+					throw new Error("fixture finalizer failed")
+				},
+			}))
+			await tick.spawnedRuns[0]!.closed
+
+			expect(failingFixture.store.getChain(chain.id)?.status).toBe("active")
+			expect(failingFixture.schedulerEvents).toContainEqual(expect.objectContaining({
+				type: "chain.complete_trigger_failed",
+				chainId: chain.id,
+				chainName: chain.name,
+				error: "fixture finalizer failed",
+			}))
+			expect(failingFixture.schedulerEvents.some((event) => event.type === "chain.completed" && event.chainId === chain.id)).toBe(false)
+		} finally {
+			failingFixture.store.close()
+		}
+	})
+
 	test("manual terminal item update completes chain on next tick", async () => {
 		const fixture = await createFixture("manual-terminal-completion")
 		try {
@@ -486,4 +626,28 @@ function maxConcurrentRunnerEvents(events: RunnerEvent[]): number {
 		max = Math.max(max, active)
 	}
 	return max
+}
+
+function createDeferred(): { promise: Promise<void>; resolve: () => void; reject: (reason?: unknown) => void } {
+	let resolve: () => void = () => {}
+	let reject: (reason?: unknown) => void = () => {}
+	const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+		resolve = resolvePromise
+		reject = rejectPromise
+	})
+	return { promise, resolve, reject }
+}
+
+async function promiseSettledWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<boolean> {
+	let timeout: ReturnType<typeof setTimeout> | null = null
+	try {
+		return await Promise.race([
+			promise.then(() => true),
+			new Promise<boolean>((resolve) => {
+				timeout = setTimeout(() => resolve(false), timeoutMs)
+			}),
+		])
+	} finally {
+		if (timeout !== null) clearTimeout(timeout)
+	}
 }

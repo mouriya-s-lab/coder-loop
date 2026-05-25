@@ -58,6 +58,7 @@ export type SchedulerSlot = {
 export type SchedulerState = {
 	slots: Map<string, SchedulerSlot>
 	finalizingItemStatuses: Map<number, string>
+	finalizingChainIds: Set<number>
 }
 
 export type SchedulerStore = Pick<
@@ -96,7 +97,22 @@ export type SchedulerEvent =
 	| { type: "slot.busy"; slotKey: string; chainId: number; repoCwd: string; activeRunId: string }
 	| { type: "agent.spawn"; slotKey: string; chainId: number; itemId: number; runId: string; pid: number | null; worktreePath: string; presetDir: string }
 	| { type: "agent.exit"; slotKey: string; chainId: number; itemId: number; runId: string; exitCode: number; status: string }
+	| { type: "chain.complete_trigger"; chainId: number; chainName: string; runId?: string; decision: SchedulerChainCompleteDecision["decision"]; reason?: string }
+	| { type: "chain.complete_trigger_failed"; chainId: number; chainName: string; runId?: string; error: string }
 	| { type: "chain.completed"; chainId: number; chainName: string; runId?: string }
+
+export type SchedulerChainCompleteTriggerContext = {
+	chain: ChainRecord
+	items: readonly ItemRecord[]
+	runId?: string
+	terminalStatuses: readonly string[]
+}
+
+export type SchedulerChainCompleteDecision =
+	| { decision: "complete"; reason?: string }
+	| { decision: "keep-active"; reason?: string }
+
+export type SchedulerChainCompleteTrigger = (context: SchedulerChainCompleteTriggerContext) => Promise<SchedulerChainCompleteDecision> | SchedulerChainCompleteDecision
 
 export type SchedulerOptions = {
 	store: SchedulerStore
@@ -116,6 +132,7 @@ export type SchedulerOptions = {
 	now?: () => number
 	runIdFactory?: (context: { chain: ChainRecord; item: ItemRecord; phase: string }) => string
 	statusFromExit?: (context: { exitCode: number; stdout: string; stderr: string; item: ItemRecord; chain: ChainRecord }) => string
+	chainCompleteTrigger?: SchedulerChainCompleteTrigger
 	onEvent?: (event: SchedulerEvent) => void | Promise<void>
 }
 
@@ -136,7 +153,7 @@ const DEFAULT_TERMINAL_STATUSES = ["done", "moot", "blocked"] as const
 let fallbackRunSequence = 0
 
 export function createSchedulerState(): SchedulerState {
-	return { slots: new Map(), finalizingItemStatuses: new Map() }
+	return { slots: new Map(), finalizingItemStatuses: new Map(), finalizingChainIds: new Set() }
 }
 
 export async function schedulerTick(options: SchedulerOptions): Promise<SchedulerTickResult> {
@@ -167,6 +184,7 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 				})
 				continue
 			}
+			if (hasFinalizingItemForRepo(options.state, items, repoCwd)) continue
 
 			const item = options.store.getNextPendingItem({ chainId: chain.id, repoCwd, statuses: chainStatuses.pending, terminalStatuses: chainStatuses.terminal })
 			if (item === null) continue
@@ -491,11 +509,54 @@ async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecor
 	const effectiveTerminalStatuses = terminalStatuses ?? (await schedulerStatusesForChain(options, chain)).terminal
 	const current = options.store.listChains().find((candidate) => candidate.id === chain.id)
 	if (current?.status !== "active") return false
-	if (options.store.listItems(chain.id).length === 0) return false
+	const items = options.store.listItems(chain.id)
+	if (items.length === 0) return false
+	if (runId === undefined && hasFinalizingItemForChain(options.state, items)) return false
 	if (!allItemsTerminalIncludingFinalizing(options, chain.id, effectiveTerminalStatuses)) return false
-	const updated = options.store.updateChain(chain.id, { status: "completed", updatedAt: nowSeconds(options) })
-	await emit(options, { type: "chain.completed", chainId: updated.id, chainName: updated.name, ...(runId === undefined ? {} : { runId }) })
-	return true
+	if (options.state.finalizingChainIds.has(chain.id)) return false
+	options.state.finalizingChainIds.add(chain.id)
+	try {
+		if (!await chainCompletionTriggerAllowsCompletion(options, current, runId, effectiveTerminalStatuses)) return false
+		const refreshed = options.store.listChains().find((candidate) => candidate.id === chain.id)
+		if (refreshed?.status !== "active") return false
+		if (options.store.listItems(chain.id).length === 0) return false
+		if (!allItemsTerminalIncludingFinalizing(options, chain.id, effectiveTerminalStatuses)) return false
+		const updated = options.store.updateChain(chain.id, { status: "completed", updatedAt: nowSeconds(options) })
+		await emit(options, { type: "chain.completed", chainId: updated.id, chainName: updated.name, ...(runId === undefined ? {} : { runId }) })
+		return true
+	} finally {
+		options.state.finalizingChainIds.delete(chain.id)
+	}
+}
+
+async function chainCompletionTriggerAllowsCompletion(options: SchedulerOptions, chain: ChainRecord, runId: string | undefined, terminalStatuses: readonly string[]): Promise<boolean> {
+	if (options.chainCompleteTrigger === undefined) return true
+	try {
+		const decision = await options.chainCompleteTrigger({
+			chain,
+			items: listItemsIncludingFinalizing(options, chain.id),
+			...(runId === undefined ? {} : { runId }),
+			terminalStatuses,
+		})
+		await emit(options, {
+			type: "chain.complete_trigger",
+			chainId: chain.id,
+			chainName: chain.name,
+			...(runId === undefined ? {} : { runId }),
+			decision: decision.decision,
+			...(decision.reason === undefined ? {} : { reason: decision.reason }),
+		})
+		return decision.decision === "complete"
+	} catch (error) {
+		await emit(options, {
+			type: "chain.complete_trigger_failed",
+			chainId: chain.id,
+			chainName: chain.name,
+			...(runId === undefined ? {} : { runId }),
+			error: errorMessage(error),
+		})
+		return false
+	}
 }
 
 async function schedulerStatusesForChain(options: SchedulerOptions, chain: ChainRecord): Promise<SchedulerChainStatuses> {
@@ -508,7 +569,14 @@ async function schedulerStatusesForChain(options: SchedulerOptions, chain: Chain
 
 function allItemsTerminalIncludingFinalizing(options: SchedulerOptions, chainId: number, terminalStatuses: readonly string[]): boolean {
 	const terminal = new Set(terminalStatuses)
-	return options.store.listItems(chainId).every((item) => terminal.has(options.state.finalizingItemStatuses.get(item.id) ?? item.status))
+	return listItemsIncludingFinalizing(options, chainId).every((item) => terminal.has(item.status))
+}
+
+function listItemsIncludingFinalizing(options: SchedulerOptions, chainId: number): ItemRecord[] {
+	return options.store.listItems(chainId).map((item) => {
+		const finalizingStatus = options.state.finalizingItemStatuses.get(item.id)
+		return finalizingStatus === undefined ? item : { ...item, status: finalizingStatus }
+	})
 }
 
 function getOrCreateSlot(state: SchedulerState, chain: ChainRecord, repoCwd: string): SchedulerSlot {
@@ -529,6 +597,14 @@ function getOrCreateSlot(state: SchedulerState, chain: ChainRecord, repoCwd: str
 
 function hasActiveSlotForChain(state: SchedulerState, chainId: number): boolean {
 	return [...state.slots.values()].some((slot) => slot.chainId === chainId && slot.activeRun !== null)
+}
+
+function hasFinalizingItemForRepo(state: SchedulerState, items: readonly ItemRecord[], repoCwd: string): boolean {
+	return items.some((item) => item.repoCwd === repoCwd && state.finalizingItemStatuses.has(item.id))
+}
+
+function hasFinalizingItemForChain(state: SchedulerState, items: readonly ItemRecord[]): boolean {
+	return items.some((item) => state.finalizingItemStatuses.has(item.id))
 }
 
 function removeIdleSlotsForInactiveChains(state: SchedulerState, activeChainIds: Set<number>): void {
@@ -695,6 +771,8 @@ async function appendSchedulerRunEvent(options: SchedulerOptions, event: Schedul
 function schedulerEventRunId(event: SchedulerEvent): string | null {
 	if (event.type === "slot.busy") return event.activeRunId
 	if (event.type === "chain.completed") return event.runId ?? null
+	if (event.type === "chain.complete_trigger") return event.runId ?? null
+	if (event.type === "chain.complete_trigger_failed") return event.runId ?? null
 	return event.runId
 }
 
@@ -758,5 +836,15 @@ function git(cwd: string, args: readonly string[]): { stdout: string; stderr: st
 		stdout: new TextDecoder().decode(proc.stdout).trim(),
 		stderr: new TextDecoder().decode(proc.stderr).trim(),
 		exitCode: proc.exitCode,
+	}
+}
+
+function errorMessage(error: unknown): string {
+	if (error instanceof Error) return error.message
+	if (typeof error === "string") return error
+	try {
+		return JSON.stringify(error)
+	} catch {
+		return String(error)
 	}
 }

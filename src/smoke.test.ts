@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises"
+import { appendFile, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, resolve } from "node:path"
 import { startCoderLoopDaemon } from "./daemon"
@@ -855,6 +855,82 @@ describe("smoke: dependency-aware scheduler selection", () => {
 				}
 			}, 5_000)
 			expect(finalized).toBe(true)
+		} finally {
+			await daemon.stop()
+		}
+	})
+
+	test("runs a chain-complete trigger before completing the chain", async () => {
+		const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-chain-complete-"))
+		const runtime = resolve(dir, ".coder-loop/runtime")
+		const loopDataRoot = resolve(runtime, "loop-data")
+		const triggerLog = resolve(runtime, "chain-complete-trigger.jsonl")
+		const fakeRunner = resolve(dir, "fake-runner.ts")
+		await mkdir(runtime, { recursive: true })
+		await writeFile(fakeRunner, [
+			`console.log("done")`,
+			``,
+		].join("\n"))
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			scheduler: {
+				enabled: true,
+				intervalMs: 20,
+				runner: {
+					kind: "claude",
+					source: "iteration-default",
+					binary: "bun",
+					extraArgs: [fakeRunner],
+					model: null,
+				},
+				worktreeManager: async ({ repoCwd }) => repoCwd,
+				runIdFactory: ({ chain, item }) => `run-${chain.id}-${item.id}`,
+				prompt: () => "chain-complete smoke",
+				chainCompleteTrigger: async ({ chain, items }) => {
+					const store = openSqliteStateStore({ loopDataRoot })
+					try {
+						await appendFile(triggerLog, `${JSON.stringify({
+							chainStatusDuringTrigger: store.getChain(chain.id)?.status ?? null,
+							itemStatuses: items.map((item) => item.status),
+						})}\n`)
+					} finally {
+						store.close()
+					}
+					await new Promise((resolve) => setTimeout(resolve, 80))
+					return { decision: "complete" }
+				},
+			},
+		})
+		try {
+			const store = openSqliteStateStore({ loopDataRoot })
+			try {
+				const chain = store.createChain({
+					name: "chain-complete-smoke",
+					preset: "gh-issue-pr-iteration",
+					repository: "mouriya-s-lab/coder-loop",
+					baseBranch: "main",
+				})
+				store.createItem({ chainId: chain.id, issueNumber: 269, repoCwd: dir, status: "queued" })
+			} finally {
+				store.close()
+			}
+
+			const finalized = await waitFor(async () => {
+				const store = openSqliteStateStore({ loopDataRoot })
+				try {
+					const chain = store.getChainByName("chain-complete-smoke")
+					return chain?.status === "completed"
+				} finally {
+					store.close()
+				}
+			}, 5_000)
+			expect(finalized).toBe(true)
+			const triggerEvents = (await readFile(triggerLog, "utf-8"))
+				.trim()
+				.split("\n")
+				.filter(Boolean)
+				.map((line) => JSON.parse(line) as { chainStatusDuringTrigger: string; itemStatuses: string[] })
+			expect(triggerEvents).toEqual([{ chainStatusDuringTrigger: "active", itemStatuses: ["done"] }])
 		} finally {
 			await daemon.stop()
 		}

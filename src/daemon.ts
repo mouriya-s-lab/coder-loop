@@ -857,6 +857,7 @@ export class CoderLoopDaemon {
 		if (scheduler.now !== undefined) options.now = scheduler.now
 		if (scheduler.runIdFactory !== undefined) options.runIdFactory = scheduler.runIdFactory
 		if (scheduler.statusFromExit !== undefined) options.statusFromExit = scheduler.statusFromExit
+		if (scheduler.chainCompleteTrigger !== undefined) options.chainCompleteTrigger = scheduler.chainCompleteTrigger
 		return options
 	}
 
