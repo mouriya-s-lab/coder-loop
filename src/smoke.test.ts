@@ -3,6 +3,7 @@ import { appendFile, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile 
 import { tmpdir } from "node:os"
 import { dirname, resolve } from "node:path"
 import { startCoderLoopDaemon } from "./daemon"
+import { chainCompleteTriggerPhases, loadPreset } from "./loop"
 import { openSqliteStateStore } from "./sqlite-state"
 import { resolveChainRuntimePaths } from "./runtime-paths"
 
@@ -931,6 +932,190 @@ describe("smoke: dependency-aware scheduler selection", () => {
 				.filter(Boolean)
 				.map((line) => JSON.parse(line) as { chainStatusDuringTrigger: string; itemStatuses: string[] })
 			expect(triggerEvents).toEqual([{ chainStatusDuringTrigger: "active", itemStatuses: ["done"] }])
+		} finally {
+			await daemon.stop()
+		}
+	})
+
+	test("gh-issue-pr finalizer keeps umbrella active when scope remains", async () => {
+		const preset = await loadPreset(resolve(REPO_ROOT, "presets/gh-issue-pr-iteration"))
+		const finalizer = chainCompleteTriggerPhases(preset)[0]
+		expect(finalizer?.name).toBe("umbrella-finalizer")
+		const finalizerPrompt = await readFile(finalizer!.prompt, "utf-8")
+		expect(finalizerPrompt).toContain("decision=keep-active")
+		expect(finalizerPrompt).toContain("remaining scope")
+
+		const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-gh-finalizer-active-"))
+		const runtime = resolve(dir, ".coder-loop/runtime")
+		const loopDataRoot = resolve(runtime, "loop-data")
+		const finalizerLog = resolve(runtime, "umbrella-finalizer.jsonl")
+		const fakeRunner = resolve(dir, "fake-runner.ts")
+		await mkdir(runtime, { recursive: true })
+		await writeFile(fakeRunner, `console.log("done")\n`)
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			scheduler: {
+				enabled: true,
+				intervalMs: 20,
+				runner: {
+					kind: "claude",
+					source: "iteration-default",
+					binary: "bun",
+					extraArgs: [fakeRunner],
+					model: null,
+				},
+				worktreeManager: async ({ repoCwd }) => repoCwd,
+				runIdFactory: ({ chain, item }) => `run-${chain.id}-${item.id}`,
+				prompt: () => "gh-issue-pr finalizer active fixture",
+				chainCompleteTrigger: async ({ chain, items }) => {
+					const store = openSqliteStateStore({ loopDataRoot })
+					try {
+						await appendFile(finalizerLog, `${JSON.stringify({
+							phase: finalizer!.name,
+							umbrellaRepo: chain.umbrellaRepo,
+							umbrellaIssue: chain.umbrellaIssue,
+							chainStatusDuringFinalizer: store.getChain(chain.id)?.status ?? null,
+							itemStatuses: items.map((item) => item.status),
+							decision: "keep-active",
+							reason: "open child issue remains",
+						})}\n`)
+					} finally {
+						store.close()
+					}
+					return { decision: "keep-active", reason: "open child issue remains" }
+				},
+			},
+		})
+		try {
+			const store = openSqliteStateStore({ loopDataRoot })
+			try {
+				const chain = store.createChain({
+					name: "gh-finalizer-active",
+					preset: "gh-issue-pr-iteration",
+					repository: "mouriya-s-lab/coder-loop",
+					baseBranch: "main",
+					umbrellaRepo: "mouriya-s-lab/coder-loop",
+					umbrellaIssue: 260,
+				})
+				store.createItem({ chainId: chain.id, issueNumber: 270, repoCwd: dir, status: "queued" })
+			} finally {
+				store.close()
+			}
+
+			const finalizerRan = await waitFor(async () => await fileLineCount(finalizerLog) >= 1, 2_000)
+			expect(finalizerRan).toBe(true)
+			const verifyStore = openSqliteStateStore({ loopDataRoot })
+			try {
+				const chain = verifyStore.getChainByName("gh-finalizer-active")
+				expect(chain?.status).toBe("active")
+				expect(verifyStore.listItems(chain!.id).map((item) => item.status)).toEqual(["done"])
+			} finally {
+				verifyStore.close()
+			}
+			const events = (await readFile(finalizerLog, "utf-8"))
+				.trim()
+				.split("\n")
+				.filter(Boolean)
+				.map((line) => JSON.parse(line) as { phase: string; umbrellaRepo: string; umbrellaIssue: number; chainStatusDuringFinalizer: string; itemStatuses: string[]; decision: string })
+			expect(events[0]).toMatchObject({
+				phase: "umbrella-finalizer",
+				umbrellaRepo: "mouriya-s-lab/coder-loop",
+				umbrellaIssue: 260,
+				chainStatusDuringFinalizer: "active",
+				itemStatuses: ["done"],
+				decision: "keep-active",
+			})
+		} finally {
+			await daemon.stop()
+		}
+	})
+
+	test("gh-issue-pr finalizer completes chain after umbrella closure review passes", async () => {
+		const preset = await loadPreset(resolve(REPO_ROOT, "presets/gh-issue-pr-iteration"))
+		const finalizer = chainCompleteTriggerPhases(preset)[0]
+		expect(finalizer?.name).toBe("umbrella-finalizer")
+		const finalizerPrompt = await readFile(finalizer!.prompt, "utf-8")
+		expect(finalizerPrompt).toContain("decision=complete")
+		expect(finalizerPrompt).toContain("child closure table")
+
+		const dir = await mkdtemp(resolve(tmpdir(), "coder-loop-gh-finalizer-complete-"))
+		const runtime = resolve(dir, ".coder-loop/runtime")
+		const loopDataRoot = resolve(runtime, "loop-data")
+		const finalizerLog = resolve(runtime, "umbrella-finalizer.jsonl")
+		const fakeRunner = resolve(dir, "fake-runner.ts")
+		await mkdir(runtime, { recursive: true })
+		await writeFile(fakeRunner, `console.log("done")\n`)
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			scheduler: {
+				enabled: true,
+				intervalMs: 20,
+				runner: {
+					kind: "claude",
+					source: "iteration-default",
+					binary: "bun",
+					extraArgs: [fakeRunner],
+					model: null,
+				},
+				worktreeManager: async ({ repoCwd }) => repoCwd,
+				runIdFactory: ({ chain, item }) => `run-${chain.id}-${item.id}`,
+				prompt: () => "gh-issue-pr finalizer complete fixture",
+				chainCompleteTrigger: async ({ chain, items }) => {
+					const store = openSqliteStateStore({ loopDataRoot })
+					try {
+						await appendFile(finalizerLog, `${JSON.stringify({
+							phase: finalizer!.name,
+							umbrellaRepo: chain.umbrellaRepo,
+							umbrellaIssue: chain.umbrellaIssue,
+							chainStatusDuringFinalizer: store.getChain(chain.id)?.status ?? null,
+							itemStatuses: items.map((item) => item.status),
+							decision: "complete",
+						})}\n`)
+					} finally {
+						store.close()
+					}
+					return { decision: "complete", reason: "umbrella closure review passed" }
+				},
+			},
+		})
+		try {
+			const store = openSqliteStateStore({ loopDataRoot })
+			try {
+				const chain = store.createChain({
+					name: "gh-finalizer-complete",
+					preset: "gh-issue-pr-iteration",
+					repository: "mouriya-s-lab/coder-loop",
+					baseBranch: "main",
+					umbrellaRepo: "mouriya-s-lab/coder-loop",
+					umbrellaIssue: 260,
+				})
+				store.createItem({ chainId: chain.id, issueNumber: 270, repoCwd: dir, status: "queued" })
+			} finally {
+				store.close()
+			}
+
+			const completed = await waitFor(async () => {
+				const store = openSqliteStateStore({ loopDataRoot })
+				try {
+					return store.getChainByName("gh-finalizer-complete")?.status === "completed"
+				} finally {
+					store.close()
+				}
+			}, 5_000)
+			expect(completed).toBe(true)
+			const events = (await readFile(finalizerLog, "utf-8"))
+				.trim()
+				.split("\n")
+				.filter(Boolean)
+				.map((line) => JSON.parse(line) as { phase: string; umbrellaRepo: string; umbrellaIssue: number; chainStatusDuringFinalizer: string; itemStatuses: string[]; decision: string })
+			expect(events).toEqual([{
+				phase: "umbrella-finalizer",
+				umbrellaRepo: "mouriya-s-lab/coder-loop",
+				umbrellaIssue: 260,
+				chainStatusDuringFinalizer: "active",
+				itemStatuses: ["done"],
+				decision: "complete",
+			}])
 		} finally {
 			await daemon.stop()
 		}

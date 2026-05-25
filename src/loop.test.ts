@@ -18,6 +18,7 @@ import {
 	buildDaemonStartPlan,
 	buildRuntimeBindings,
 	buildRunnerInvocation,
+	chainCompleteTriggerPhases,
 	checkRuntime,
 	CLAUDE_REVIEW_MODEL,
 	classifyTermination,
@@ -66,6 +67,7 @@ import {
 	spawnOneAttempt,
 	SUMMARY_WATCHDOG_MARKER,
 	summaryWatchdogConfigForPrompt,
+	triggeredPhasesAfter,
 	type AttemptOutcome,
 	type ConfigBindings,
 	type CurrentRun,
@@ -1100,7 +1102,7 @@ describe("renderPrompt with bundled preset", () => {
 
 	test("smoke: render real review-entry.md leaves no {{[A-Z_]+}} placeholders", async () => {
 		const preset = await bundledPreset()
-		const phase = preset.phases[preset.phases.length - 1]!
+		const phase = reviewPhaseForPreset(preset)
 		const item = makeItem({ issue: 131, status: "queued", branch: "feature/x", pr: 99, lastRunId: "run-prev" })
 		const ctx: ResolveContext = {
 			item,
@@ -1111,6 +1113,23 @@ describe("renderPrompt with bundled preset", () => {
 		const rendered = renderPrompt(template, phase, ctx)
 		const leftover = rendered.match(/\{\{[A-Z_][A-Z0-9_]*\}\}/g)
 		expect(leftover).toBeNull()
+	})
+
+	test("umbrella finalizer does not bypass PR review gates", async () => {
+		const preset = await bundledPreset()
+		expect(reviewPhaseForPreset(preset).name).toBe("review")
+		expect(triggeredPhasesAfter(preset, "review", "done")).toEqual([])
+		expect(triggeredPhasesAfter(preset, "review", "blocked").map((phase) => phase.name)).toEqual(["blocked-responder"])
+		const finalizers = chainCompleteTriggerPhases(preset)
+		expect(finalizers.map((phase) => phase.name)).toEqual(["umbrella-finalizer"])
+		expect(finalizers[0]!.trigger).toEqual({ on: "chain-complete" })
+
+		const prompt = await readFile(finalizers[0]!.prompt, "utf-8")
+		expect(prompt).toContain("This finalizer does not replace per-issue PR review gates")
+		expect(prompt).toContain("implementation PR was already accepted and merged by ordinary review")
+		expect(prompt).toContain("Treat open child issues, unmerged PRs, unresolved review requests, missing evidence")
+		expect(prompt).toContain("Do not merge PRs. Do not edit merged PR bodies, do not close child issues")
+		expect(prompt).toContain("Use `decision=complete` only after the umbrella comment was posted")
 	})
 
 	test("source-writing spike iteration fragment allows source writes and forbids PR/merge/closure", async () => {

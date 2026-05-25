@@ -140,6 +140,14 @@ trigger = { on = "chain-complete" }
 
 hook 决策只控制 lifecycle：允许 completed、保持 active，或因为 hook 失败而保持 active。语义判断仍属于 preset prompt 或外部 operator，不属于 scheduler。
 
+bundled `gh-issue-pr-iteration` preset 用这个 hook 声明 `umbrella-finalizer`：
+
+- phase: `umbrella-finalizer`
+- prompt: `presets/gh-issue-pr-iteration/umbrella-finalizer-entry.md`
+- trigger: `trigger = { on = "chain-complete" }`
+
+这个 finalizer 是 umbrella-level prompt，不是 L1 engine 判断。它在 chain 准备 completed 前读取 umbrella issue、sub-issues、closing PRs、本地 handoff/evidence 和相关 review 记录，向 umbrella 发布 assessment comment，再用 `FINALIZER SUMMARY: decision=<complete|keep-active>` 表达是否允许 chain completed。发现剩余 scope、缺证据、未合并 PR、未关闭 child 或需要 follow-up issue 时必须保持 chain active；只有 umbrella comment 和 child closure table 证明 scope 完整时才能允许 completion。
+
 ---
 
 ## 4. 变量绑定 DSL（三前缀）
