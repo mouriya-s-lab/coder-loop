@@ -5,7 +5,7 @@ import { existsSync } from "node:fs"
 import { appendFile, mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises"
 import { isAbsolute, relative, resolve } from "node:path"
 
-import type { AgentRunnerKind, AgentRunnerSelection, JsonObject, JsonValue } from "./loop"
+import { runPresetChainCompleteTriggerPhases, type AgentRunnerKind, type AgentRunnerSelection, type JsonObject, type JsonValue } from "./loop"
 import {
 	cleanupSchedulerChainWorktrees,
 	createSchedulerState,
@@ -825,6 +825,7 @@ export class CoderLoopDaemon {
 		const scheduler = this.options.scheduler ?? {}
 		const externalOnEvent = scheduler.onEvent
 		const schedulerPresetDir = scheduler.presetDir
+		const presetDirForChain = scheduler.presetDirForChain ?? ((chain: ChainRecord) => schedulerPresetDir ?? bundledPresetDirForScheduler(chain))
 		const options: SchedulerOptions = {
 			store: this.requireStore(),
 			state: this.schedulerState,
@@ -858,6 +859,16 @@ export class CoderLoopDaemon {
 		if (scheduler.runIdFactory !== undefined) options.runIdFactory = scheduler.runIdFactory
 		if (scheduler.statusFromExit !== undefined) options.statusFromExit = scheduler.statusFromExit
 		if (scheduler.chainCompleteTrigger !== undefined) options.chainCompleteTrigger = scheduler.chainCompleteTrigger
+		else if (scheduler.chainCompleteTriggerForChain !== undefined) options.chainCompleteTriggerForChain = scheduler.chainCompleteTriggerForChain
+		else {
+			options.chainCompleteTriggerForChain = async (context) =>
+				await runPresetChainCompleteTriggerPhases({
+					...context,
+					loopDataRoot: this.paths.root,
+					runner: options.runner,
+					presetDir: presetDirForChain(context.chain),
+				})
+		}
 		return options
 	}
 

@@ -1530,6 +1530,7 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 					sleepMs: typeof item.extra.sleepMs === "number" ? item.extra.sleepMs : 5,
 					exitCode: typeof item.extra.exitCode === "number" ? item.extra.exitCode : 0,
 				}),
+			chainCompleteTriggerForChain: () => null,
 			onEvent: (event) => {
 				schedulerEvents.push(event)
 			},

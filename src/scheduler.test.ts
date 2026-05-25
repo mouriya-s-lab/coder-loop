@@ -242,14 +242,21 @@ describe("scheduler", () => {
 		try {
 			const chain = createChain(fixture.store, "completion-trigger-active-chain")
 			createItem(fixture.store, chain, { issueNumber: 2692, repoCwd: "/repo/a" })
+			let triggerCalls = 0
+			const options = fixture.options({
+				chainCompleteTrigger: () => {
+					triggerCalls += 1
+					return { decision: "keep-active", reason: "fixture follow-up required" }
+				},
+			})
 
-			const firstTick = await schedulerTick(fixture.options({
-				chainCompleteTrigger: () => ({ decision: "keep-active", reason: "fixture follow-up required" }),
-			}))
+			const firstTick = await schedulerTick(options)
 			await firstTick.spawnedRuns[0]!.closed
 
 			expect(firstTick.spawnedRuns).toHaveLength(1)
 			expect(fixture.store.getChain(chain.id)?.status).toBe("active")
+			expect(triggerCalls).toBe(1)
+			expect(fixture.schedulerEvents.filter((event) => event.type === "chain.complete_trigger")).toHaveLength(1)
 			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({
 				type: "chain.complete_trigger",
 				chainId: chain.id,
@@ -258,6 +265,20 @@ describe("scheduler", () => {
 				reason: "fixture follow-up required",
 			}))
 			expect(fixture.schedulerEvents.some((event) => event.type === "chain.completed" && event.chainId === chain.id)).toBe(false)
+
+			const secondTick = await schedulerTick(options)
+			expect(secondTick.spawnedRuns).toHaveLength(0)
+			expect(secondTick.completedChainIds).toEqual([])
+			expect(triggerCalls).toBe(1)
+			expect(fixture.schedulerEvents.filter((event) => event.type === "chain.complete_trigger")).toHaveLength(1)
+
+			const followUp = createItem(fixture.store, chain, { issueNumber: 2696, repoCwd: "/repo/a" })
+			fixture.store.updateItem(followUp.id, { status: "done", updatedAt: 1_800_000_999 })
+			const thirdTick = await schedulerTick(options)
+			expect(thirdTick.spawnedRuns).toHaveLength(0)
+			expect(thirdTick.completedChainIds).toEqual([])
+			expect(triggerCalls).toBe(2)
+			expect(fixture.schedulerEvents.filter((event) => event.type === "chain.complete_trigger")).toHaveLength(2)
 		} finally {
 			fixture.store.close()
 		}

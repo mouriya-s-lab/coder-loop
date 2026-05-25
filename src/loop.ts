@@ -3745,6 +3745,123 @@ export function chainCompleteTriggerPhases(preset: Preset): readonly PresetPhase
 	return preset.phases.filter((phase) => phase.trigger !== null && isChainCompleteTrigger(phase.trigger))
 }
 
+export type PresetChainCompleteDecision =
+	| { decision: "complete"; reason?: string }
+	| { decision: "keep-active"; reason?: string }
+
+export type RunPresetChainCompleteTriggerPhasesInput = {
+	chain: ChainRecord
+	items: readonly ItemRecord[]
+	runId?: string
+	terminalStatuses: readonly string[]
+	loopDataRoot: string | null
+	runner: AgentRunnerSelection
+	presetDir?: string
+	targetCwd?: string | null
+}
+
+export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainCompleteTriggerPhasesInput): Promise<PresetChainCompleteDecision | null> {
+	const rawTargetCwd = input.targetCwd ?? input.items[0]?.repoCwd
+	if (rawTargetCwd === undefined || rawTargetCwd.trim() === "") throw new Error(`chain ${input.chain.id} has no item repoCwd for chain-complete trigger`)
+	const targetCwd = resolve(rawTargetCwd)
+	const config = loopConfigFromChain(input.chain, input.loopDataRoot, null)
+	const presetDir = input.presetDir ?? resolvePresetDir(config, PKG_ROOT, targetCwd)
+	const preset = await loadPreset(presetDir)
+	const phases = chainCompleteTriggerPhases(preset)
+	if (phases.length === 0) return null
+
+	const configPath = resolveLoopDataPaths(loopDataRootOption(input.loopDataRoot)).dbFile
+	const options = buildOptions(targetCwd, configPath, {
+		maxIterations: null,
+		targetCwd,
+		configPath: null,
+		workflowPath: null,
+		stateFile: null,
+		loopDataRoot: input.loopDataRoot,
+		chainName: input.chain.name,
+		repository: input.chain.repository,
+		requireBrowserEvidence: null,
+		once: false,
+		dryRun: false,
+		checkRuntime: false,
+		worktree: false,
+		baseBranch: input.chain.baseBranch,
+	}, config, preset)
+	const anchorRecord = selectFinalizerAnchorItem(input.items, input.runId)
+	const anchorItem = itemRecordToQueueItem(anchorRecord, preset)
+	const anchorId = getItemId(anchorItem, preset)
+	const currentIssueFile = resolveChainIssueFile(options, input.chain, anchorItem, anchorId, "Chain-complete trigger issue file")
+	const evidenceDir = resolveChainEvidenceDir(options, input.chain, anchorItem, anchorId, "Chain-complete trigger evidence directory")
+	const finalizerRunId = input.runId ?? makeRunId(`chain-${input.chain.id}`)
+
+	for (const phase of phases) {
+		const ctx: ResolveContext = {
+			item: anchorItem,
+			config: buildConfigBindings(options),
+			runtime: buildRuntimeBindings({
+				options,
+				runId: finalizerRunId,
+				currentIssueFile,
+				evidenceDir,
+				agentCwd: targetCwd,
+				issueRun: { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null },
+				issueKind: null,
+				paths: buildCentralRuntimeBindingPaths({
+					options,
+					chain: input.chain,
+					runId: finalizerRunId,
+					currentIssueFile,
+					evidenceDir,
+				}),
+			}),
+		}
+		const promptRaw = await readFile(phase.prompt, "utf-8")
+		const prompt = renderPrompt(promptRaw, phase, ctx)
+		const outputPath = agentOutputPath(options, finalizerRunId, phase.name)
+		log(`Starting chain-complete trigger phase ${phase.name} for chain ${input.chain.name}...`)
+		const { output, code } = await runAgent(options, phase.name, prompt, outputPath, targetCwd, input.runner)
+		log(`Chain-complete trigger phase ${phase.name} finished: exit=${code}, output=${outputPath} (${output.length} bytes)`)
+		if (code !== 0) throw new Error(`chain-complete trigger phase ${phase.name} exited ${code}`)
+		const decision = parseFinalizerSummaryDecision(output, input.runner.kind)
+		if (decision === null) throw new Error(`chain-complete trigger phase ${phase.name} did not print a valid FINALIZER SUMMARY`)
+		if (decision.decision !== "complete") return decision
+	}
+
+	return { decision: "complete" }
+}
+
+function selectFinalizerAnchorItem(items: readonly ItemRecord[], runId: string | undefined): ItemRecord {
+	const byRunId = runId === undefined ? undefined : items.find((item) => item.lastRunId === runId)
+	const item = byRunId ?? items[0]
+	if (item === undefined) throw new Error("chain-complete trigger requires at least one chain item")
+	return item
+}
+
+function parseFinalizerSummaryDecision(output: string, runner: AgentRunnerKind): PresetChainCompleteDecision | null {
+	let sawRunnerJson = false
+	let decision: PresetChainCompleteDecision | null = null
+	for (const line of output.split(/\r?\n/)) {
+		const parsed = runnerAgentTextFromJsonLine(line, runner)
+		sawRunnerJson = sawRunnerJson || parsed.parsedRunnerEvent
+		if (parsed.text === null) continue
+		decision = parseFinalizerSummaryDecisionFromText(parsed.text)
+	}
+	return sawRunnerJson ? decision : parseFinalizerSummaryDecisionFromText(output)
+}
+
+function parseFinalizerSummaryDecisionFromText(text: string): PresetChainCompleteDecision | null {
+	const summaryLine = finalSummaryLine(text, "FINALIZER SUMMARY:")
+	if (summaryLine === null) return null
+	const match = summaryLine.match(/^FINALIZER SUMMARY:\s*decision=(complete|keep-active)\s*;(.*)$/)
+	if (match === null) return null
+	const tail = match[2] ?? ""
+	const reasonMatch = tail.match(/(?:^|;)\s*reason=([^;]*)/)
+	const reason = reasonMatch?.[1]?.trim()
+	return reason === undefined || reason === ""
+		? { decision: match[1] as "complete" | "keep-active" }
+		: { decision: match[1] as "complete" | "keep-active", reason }
+}
+
 function readPresetNameFromStatusInput(value: StatusConfigInput["preset"]): string | null {
 	if (value === undefined || value === null) return null
 	if (typeof value === "string") return value

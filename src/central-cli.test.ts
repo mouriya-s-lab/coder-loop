@@ -117,7 +117,7 @@ describe("central chain/item CLI", () => {
 	test("chain status completion", async () => {
 		const fixture = await startFixture("completion", { schedulerEnabled: true })
 		try {
-			expectJsonOk(await runCli(["chain", "create", "done-chain", "--repo", "mouriya-s-lab/coder-loop", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expectJsonOk(await runCli(["chain", "create", "done-chain", "--repo", "mouriya-s-lab/coder-loop", "--preset", "single-phase-example", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
 			try {
 				const chain = store.getChainByName("done-chain")
@@ -582,6 +582,7 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 		scheduler: {
 			enabled: options.schedulerEnabled ?? false,
 			intervalMs: 20,
+			chainCompleteTriggerForChain: () => null,
 		},
 	})
 	return { daemon, loopDataRoot }

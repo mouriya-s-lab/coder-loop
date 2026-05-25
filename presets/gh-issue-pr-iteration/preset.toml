@@ -118,6 +118,37 @@ trigger = { afterPhase = "review", whenStatus = "blocked" }
   ISSUE_LAST_RUN_ID        = "item.lastRunId"
   ISSUE_KIND               = "runtime.issueKind"
 
+[[phases]]
+name    = "umbrella-finalizer"
+prompt  = "umbrella-finalizer-entry.md"
+trigger = { on = "chain-complete" }
+
+  [phases.variables]
+  TARGET_CWD               = "runtime.targetCwd"
+  AGENT_CWD                = "runtime.agentCwd"
+  REPO                     = "config.repository"
+  BASE_BRANCH              = "config.baseBranch"
+  RUN_ID                   = "runtime.runId"
+  ISSUE                    = "item.issue"
+  WORKFLOW_FILE            = "runtime.workflowPath"
+  SHARED_CONTEXT_FILE      = "runtime.sharedContextPath"
+  CURRENT_ISSUE_FILE       = "runtime.currentIssueFile"
+  ISSUE_DIR                = "runtime.issueDir"
+  EVIDENCE_DIR             = "runtime.evidenceDir"
+  EVIDENCE_ROOT_DIR        = "runtime.evidenceRootDir"
+  LOG_DIR                  = "runtime.logDir"
+  PROMPT_ROOT              = "runtime.presetDir"
+  PROMPT_FRAGMENT_INDEX    = "runtime.fragmentIndex"
+  REQUIRE_BROWSER_EVIDENCE = "config.requireBrowserEvidence"
+  RUN_ID_GENERATION        = "runtime.runIdGeneration"
+  RESUMED_FROM_PHASE       = "runtime.resumedFromPhase"
+  RESUMED_STARTED_AT       = "runtime.resumedStartedAt"
+  ISSUE_BRANCH             = "item.branch"
+  ISSUE_PR                 = "item.pr"
+  ISSUE_STATUS             = "item.status"
+  ISSUE_LAST_RUN_ID        = "item.lastRunId"
+  ISSUE_KIND               = "runtime.issueKind"
+
 [[fragments]]
 id   = "common/runtime-contract"
 role = "common"

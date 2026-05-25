@@ -99,11 +99,12 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect([...preset.statuses.terminal]).toEqual(["blocked", "moot", "done"])
 	})
 
-	test("phases include iteration, review, and the blocked responder trigger", async () => {
+	test("phases include iteration, review, blocked responder, and umbrella finalizer triggers", async () => {
 		const preset = await loadPreset(BUNDLED_PRESET_DIR)
-		expect(preset.phases.map((p) => p.name)).toEqual(["iteration", "review", "blocked-responder"])
+		expect(preset.phases.map((p) => p.name)).toEqual(["iteration", "review", "blocked-responder", "umbrella-finalizer"])
 		expect(reviewPhaseForPreset(preset).name).toBe("review")
 		expect(triggeredPhasesAfter(preset, "review", "blocked").map((phase) => phase.name)).toEqual(["blocked-responder"])
+		expect(chainCompleteTriggerPhases(preset).map((phase) => phase.name)).toEqual(["umbrella-finalizer"])
 		for (const phase of preset.phases) {
 			expect(phase.prompt.startsWith(BUNDLED_PRESET_DIR)).toBe(true)
 			const info = await stat(phase.prompt)
@@ -162,6 +163,17 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(prompt).toContain("coder-loop daemon start <targetRepoPath> --require-browser-evidence")
 		expect(prompt).toContain("Do not change the current repository's blocked item")
 		expect(prompt).toContain("ITERATION SUMMARY: blocked_responder=")
+	})
+
+	test("umbrella finalizer prompt carries the required chain-complete assessment contract", async () => {
+		const prompt = await Bun.file(resolve(BUNDLED_PRESET_DIR, "umbrella-finalizer-entry.md")).text()
+		expect(prompt).toContain("chain-complete trigger agent")
+		expect(prompt).toContain("umbrella issue, sub-issues, closing PRs")
+		expect(prompt).toContain("This finalizer does not replace per-issue PR review gates")
+		expect(prompt).toContain("Child closure table")
+		expect(prompt).toContain("decision=<complete|keep-active>")
+		expect(prompt).toContain("decision=keep-active")
+		expect(prompt).toContain("Do not merge PRs")
 	})
 })
 

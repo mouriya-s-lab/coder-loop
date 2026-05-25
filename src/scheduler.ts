@@ -7,6 +7,8 @@ import { basename, dirname, resolve } from "node:path"
 import {
 	buildRunnerInvocation,
 	type AgentRunnerSelection,
+	type JsonObject,
+	type JsonValue,
 	type ResumeDecision,
 	type RunnerInvocationPaths,
 } from "./loop"
@@ -113,6 +115,7 @@ export type SchedulerChainCompleteDecision =
 	| { decision: "keep-active"; reason?: string }
 
 export type SchedulerChainCompleteTrigger = (context: SchedulerChainCompleteTriggerContext) => Promise<SchedulerChainCompleteDecision> | SchedulerChainCompleteDecision
+export type SchedulerChainCompleteTriggerForChain = (context: SchedulerChainCompleteTriggerContext) => Promise<SchedulerChainCompleteDecision | null> | SchedulerChainCompleteDecision | null
 
 export type SchedulerOptions = {
 	store: SchedulerStore
@@ -133,6 +136,7 @@ export type SchedulerOptions = {
 	runIdFactory?: (context: { chain: ChainRecord; item: ItemRecord; phase: string }) => string
 	statusFromExit?: (context: { exitCode: number; stdout: string; stderr: string; item: ItemRecord; chain: ChainRecord }) => string
 	chainCompleteTrigger?: SchedulerChainCompleteTrigger
+	chainCompleteTriggerForChain?: SchedulerChainCompleteTriggerForChain
 	onEvent?: (event: SchedulerEvent) => void | Promise<void>
 }
 
@@ -149,6 +153,7 @@ export type SchedulerTickResult = {
 const DEFAULT_PHASE = "iteration"
 const DEFAULT_PENDING_STATUSES = ["queued", "changes_requested"] as const
 const DEFAULT_TERMINAL_STATUSES = ["done", "moot", "blocked"] as const
+const CHAIN_COMPLETE_TRIGGER_STATE_METADATA_KEY = "coderLoopChainCompleteTrigger"
 
 let fallbackRunSequence = 0
 
@@ -440,11 +445,11 @@ function attachRunCloseHandler(
 
 					if (slot.activeRun?.runId === runId) slot.activeRun = null
 					await emit(options, { type: "agent.exit", slotKey: slot.key, chainId: chain.id, itemId: item.id, runId, exitCode, status })
-					await completeChainIfReady(options, chain, runId, [...terminalStatuses])
 					options.store.completeRun(runId, { endedAt, exitCode, extra: { stdoutBytes: stdoutText.length, stderrBytes: stderrText.length } })
 					if (currentItem === null || !terminalStatuses.has(currentItem.status)) {
 						options.store.updateItem(item.id, { status, lastRunId: runId, agentCwd: worktreePath, updatedAt: endedAt })
 					}
+					await completeChainIfReady(options, chain, runId, [...terminalStatuses])
 					resolveClosed({ runId, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, exitCode, stdout: stdoutText, stderr: stderrText, status })
 				} finally {
 					options.state.finalizingItemStatuses.delete(item.id)
@@ -530,14 +535,21 @@ async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecor
 }
 
 async function chainCompletionTriggerAllowsCompletion(options: SchedulerOptions, chain: ChainRecord, runId: string | undefined, terminalStatuses: readonly string[]): Promise<boolean> {
-	if (options.chainCompleteTrigger === undefined) return true
 	try {
-		const decision = await options.chainCompleteTrigger({
+		const items = listItemsIncludingFinalizing(options, chain.id)
+		const fingerprint = chainCompletionFingerprint(chain, items, terminalStatuses)
+		if (keepActiveTriggerStateApplies(chain, fingerprint)) return false
+
+		const context: SchedulerChainCompleteTriggerContext = {
 			chain,
-			items: listItemsIncludingFinalizing(options, chain.id),
+			items,
 			...(runId === undefined ? {} : { runId }),
 			terminalStatuses,
-		})
+		}
+		const decision = options.chainCompleteTrigger !== undefined
+			? await options.chainCompleteTrigger(context)
+			: await options.chainCompleteTriggerForChain?.(context) ?? null
+		if (decision === null) return true
 		await emit(options, {
 			type: "chain.complete_trigger",
 			chainId: chain.id,
@@ -546,6 +558,10 @@ async function chainCompletionTriggerAllowsCompletion(options: SchedulerOptions,
 			decision: decision.decision,
 			...(decision.reason === undefined ? {} : { reason: decision.reason }),
 		})
+		if (decision.decision === "keep-active") {
+			persistKeepActiveTriggerState(options, chain, fingerprint, decision, runId)
+			return false
+		}
 		return decision.decision === "complete"
 	} catch (error) {
 		await emit(options, {
@@ -557,6 +573,98 @@ async function chainCompletionTriggerAllowsCompletion(options: SchedulerOptions,
 		})
 		return false
 	}
+}
+
+function keepActiveTriggerStateApplies(chain: ChainRecord, fingerprint: string): boolean {
+	const state = jsonObject(chain.metadata[CHAIN_COMPLETE_TRIGGER_STATE_METADATA_KEY])
+	return state?.decision === "keep-active" && state.fingerprint === fingerprint
+}
+
+function persistKeepActiveTriggerState(
+	options: SchedulerOptions,
+	chain: ChainRecord,
+	fingerprint: string,
+	decision: Extract<SchedulerChainCompleteDecision, { decision: "keep-active" }>,
+	runId: string | undefined,
+): void {
+	const recordedAt = nowSeconds(options)
+	const state: JsonObject = {
+		decision: decision.decision,
+		fingerprint,
+		recordedAt,
+	}
+	if (decision.reason !== undefined) state.reason = decision.reason
+	if (runId !== undefined) state.runId = runId
+	options.store.updateChain(chain.id, {
+		metadata: {
+			...chain.metadata,
+			[CHAIN_COMPLETE_TRIGGER_STATE_METADATA_KEY]: state,
+		},
+		updatedAt: recordedAt,
+	})
+}
+
+function chainCompletionFingerprint(chain: ChainRecord, items: readonly ItemRecord[], terminalStatuses: readonly string[]): string {
+	const payload: JsonObject = {
+		chain: {
+			id: chain.id,
+			name: chain.name,
+			preset: chain.preset,
+			repository: chain.repository,
+			baseBranch: chain.baseBranch,
+			umbrellaIssue: chain.umbrellaIssue,
+			umbrellaRepo: chain.umbrellaRepo,
+			metadata: chainMetadataForFingerprint(chain.metadata),
+		},
+		terminalStatuses: [...terminalStatuses].sort(),
+		items: items
+			.map((item) => ({
+				id: item.id,
+				issueNumber: item.issueNumber,
+				repoCwd: item.repoCwd,
+				status: item.status,
+				attempts: item.attempts,
+				title: item.title,
+				priority: item.priority,
+				branch: item.branch,
+				pr: item.pr,
+				lastRunId: item.lastRunId,
+				issueFile: item.issueFile,
+				evidenceDir: item.evidenceDir,
+				agentCwd: item.agentCwd,
+				runner: item.runner,
+				extra: item.extra,
+				createdAt: item.createdAt,
+				updatedAt: item.updatedAt,
+			}))
+			.sort((a, b) => a.id - b.id),
+	}
+	return createHash("sha256").update(stableJsonStringify(payload)).digest("hex")
+}
+
+function chainMetadataForFingerprint(metadata: JsonObject): JsonObject {
+	const result: JsonObject = {}
+	for (const [key, value] of Object.entries(metadata)) {
+		if (key === CHAIN_COMPLETE_TRIGGER_STATE_METADATA_KEY) continue
+		result[key] = value
+	}
+	return result
+}
+
+function stableJsonStringify(value: JsonValue): string {
+	if (Array.isArray(value)) return `[${value.map(stableJsonStringify).join(",")}]`
+	if (value !== null && typeof value === "object") {
+		return `{${Object.keys(value)
+			.sort()
+			.map((key) => `${JSON.stringify(key)}:${stableJsonStringify(value[key]!)}`)
+			.join(",")}}`
+	}
+	return JSON.stringify(value)
+}
+
+function jsonObject(value: JsonValue | undefined): JsonObject | null {
+	if (value === undefined || value === null || Array.isArray(value) || typeof value !== "object") return null
+	return value
 }
 
 async function schedulerStatusesForChain(options: SchedulerOptions, chain: ChainRecord): Promise<SchedulerChainStatuses> {
