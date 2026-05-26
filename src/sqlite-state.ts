@@ -183,6 +183,7 @@ export type SqliteStateStore = {
 	updateChain: (id: number, input: UpdateChainInput) => ChainRecord
 	deleteChain: (id: number) => boolean
 	createItem: (input: CreateItemInput) => ItemRecord
+	createItems: (input: readonly CreateItemInput[]) => ItemRecord[]
 	getItem: (id: number) => ItemRecord | null
 	getItemByIssue: (chainId: number, issueNumber: number) => ItemRecord | null
 	listItems: (chainId: number) => ItemRecord[]
@@ -476,40 +477,10 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 			write("delete chain", () => db.query<unknown, SqlParams>("DELETE FROM chains WHERE id = $id").run({ id: id }).changes > 0),
 
 		createItem: (input) =>
-			write("create item", () => {
-				const now = unixSeconds()
-				const createdAt = input.createdAt ?? now
-				const updatedAt = input.updatedAt ?? createdAt
-				const result = db.query<unknown, SqlParams>(`
-					INSERT INTO items (
-						chain_id, issue_number, repo_cwd, status, attempts, title, priority, branch, pr, last_run_id,
-						issue_file, evidence_dir, agent_cwd, runner, extra, created_at, updated_at
-					)
-					VALUES (
-						$chainId, $issueNumber, $repoCwd, $status, $attempts, $title, $priority, $branch, $pr, $lastRunId,
-						$issueFile, $evidenceDir, $agentCwd, $runner, $extra, $createdAt, $updatedAt
-					)
-				`).run({
-					chainId: input.chainId,
-					issueNumber: input.issueNumber,
-					repoCwd: input.repoCwd,
-					status: input.status,
-					attempts: input.attempts ?? 0,
-					title: input.title ?? null,
-					priority: input.priority ?? null,
-					branch: input.branch ?? null,
-					pr: input.pr ?? null,
-					lastRunId: input.lastRunId ?? null,
-					issueFile: input.issueFile ?? null,
-					evidenceDir: input.evidenceDir ?? null,
-					agentCwd: input.agentCwd ?? null,
-					runner: input.runner ?? null,
-					extra: stringifyJsonObject(input.extra ?? {}),
-					createdAt: createdAt,
-					updatedAt: updatedAt,
-				})
-				return requireItem(getItemRow(Number(result.lastInsertRowid)), Number(result.lastInsertRowid))
-			}),
+			write("create item", () => insertItem(db, getItemRow, input)),
+
+		createItems: (inputs) =>
+			write("create items", () => inputs.map((input) => insertItem(db, getItemRow, input))),
 
 		getItem: (id) => read("get item", () => rowToItem(getItemRow(id))),
 
@@ -666,6 +637,41 @@ function rowToChain(row: ChainRow | null): ChainRecord | null {
 		createdAt: row.created_at,
 		updatedAt: row.updated_at,
 	}
+}
+
+function insertItem(db: Database, getItemRow: (id: number) => ItemRow | null, input: CreateItemInput): ItemRecord {
+	const now = unixSeconds()
+	const createdAt = input.createdAt ?? now
+	const updatedAt = input.updatedAt ?? createdAt
+	const result = db.query<unknown, SqlParams>(`
+		INSERT INTO items (
+			chain_id, issue_number, repo_cwd, status, attempts, title, priority, branch, pr, last_run_id,
+			issue_file, evidence_dir, agent_cwd, runner, extra, created_at, updated_at
+		)
+		VALUES (
+			$chainId, $issueNumber, $repoCwd, $status, $attempts, $title, $priority, $branch, $pr, $lastRunId,
+			$issueFile, $evidenceDir, $agentCwd, $runner, $extra, $createdAt, $updatedAt
+		)
+	`).run({
+		chainId: input.chainId,
+		issueNumber: input.issueNumber,
+		repoCwd: input.repoCwd,
+		status: input.status,
+		attempts: input.attempts ?? 0,
+		title: input.title ?? null,
+		priority: input.priority ?? null,
+		branch: input.branch ?? null,
+		pr: input.pr ?? null,
+		lastRunId: input.lastRunId ?? null,
+		issueFile: input.issueFile ?? null,
+		evidenceDir: input.evidenceDir ?? null,
+		agentCwd: input.agentCwd ?? null,
+		runner: input.runner ?? null,
+		extra: stringifyJsonObject(input.extra ?? {}),
+		createdAt: createdAt,
+		updatedAt: updatedAt,
+	})
+	return requireItem(getItemRow(Number(result.lastInsertRowid)), Number(result.lastInsertRowid))
 }
 
 function rowToItem(row: ItemRow | null): ItemRecord | null {

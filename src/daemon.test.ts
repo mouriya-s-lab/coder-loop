@@ -489,6 +489,45 @@ describe("daemon", () => {
 		}
 	})
 
+
+	test("socket item batch add is atomic", async () => {
+		const fixture = await startFixture("item-batch-add-atomic", { schedulerEnabled: false })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "batch-atomic-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+
+			const failed = await request(fixture, "item.batchAdd", {
+				chainId,
+				items: [
+					{ issueNumber: 25811, repoCwd: REPO_ROOT, title: "valid before invalid" },
+					{ issueNumber: 0, repoCwd: REPO_ROOT, title: "invalid issue" },
+					{ issueNumber: 25813, repoCwd: REPO_ROOT, title: "valid after invalid" },
+				],
+			})
+			expectInvalid(failed)
+
+			const listed = expectOk(await request(fixture, "item.list", { chainId })).items
+			expect(Array.isArray(listed)).toBe(true)
+			expect(listed).toHaveLength(0)
+
+			const added = expectOk(await request(fixture, "item.batchAdd", {
+				chainId,
+				items: [
+					{ issueNumber: 25821, repoCwd: REPO_ROOT, title: "valid one" },
+					{ issueNumber: 25822, repoCwd: REPO_ROOT, title: "valid two" },
+					{ issueNumber: 25823, repoCwd: REPO_ROOT, title: "valid three" },
+				],
+			})).items
+			expect(Array.isArray(added)).toBe(true)
+			expect(added).toHaveLength(3)
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("socket item.add rejects duplicate issue as conflict without SQL details", async () => {
 		const fixture = await startFixture("item-add-duplicate", { schedulerEnabled: false })
 		try {

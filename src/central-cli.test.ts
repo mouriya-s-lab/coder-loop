@@ -114,6 +114,58 @@ describe("central chain/item CLI", () => {
 		}
 	})
 
+
+	test("batch item add", async () => {
+		const fixture = await startFixture("batch-item-add")
+		try {
+			expectJsonOk(await runCli(["chain", "create", "batch-chain", "--repo", "mouriya-s-lab/coder-loop", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const itemsJson = JSON.stringify([
+				{ issueNumber: 25801, repoCwd: REPO_ROOT, title: "first batch item" },
+				{ issueNumber: 25802, repoCwd: REPO_ROOT, priority: "high" },
+				{ issueNumber: 25803, repoCwd: REPO_ROOT, runner: "codex" },
+			])
+			const added = expectJsonOk(await runCli(["item", "batch-add", "batch-chain", "--items-json", itemsJson, "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expect(added.items).toHaveLength(3)
+			expect(added.items.map((item: Record<string, unknown>) => item.issueNumber)).toEqual([25801, 25802, 25803])
+
+			const listed = expectJsonOk(await runCli(["item", "list", "batch-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expect(listed.items).toHaveLength(3)
+			expect(listed.items.map((item: Record<string, unknown>) => item.issueNumber)).toEqual([25801, 25802, 25803])
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("batch item add matches daemon", async () => {
+		const fixture = await startFixture("batch-item-add-matches-daemon")
+		try {
+			expectJsonOk(await runCli(["chain", "create", "batch-cli-chain", "--repo", "mouriya-s-lab/coder-loop", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expectJsonOk(await runCli(["chain", "create", "batch-daemon-chain", "--repo", "mouriya-s-lab/coder-loop", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const batch = [
+				{ issueNumber: 25901, repoCwd: REPO_ROOT, title: "same first", priority: "medium" },
+				{ issueNumber: 25902, repoCwd: REPO_ROOT, title: "same second", runner: "codex" },
+			]
+			const cli = expectJsonOk(await runCli(["item", "batch-add", "batch-cli-chain", "--items-json", JSON.stringify(batch), "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const daemon = expectJsonOk(await runCli(["item", "batch-add", "batch-daemon-chain", "--items-json", JSON.stringify(batch), "--loop-data-root", fixture.loopDataRoot, "--json"]))
+
+			const comparable = (items: Record<string, unknown>[]) => items.map((item) => ({
+				issueNumber: item.issueNumber,
+				repoCwd: item.repoCwd,
+				status: item.status,
+				title: item.title,
+				priority: item.priority,
+				runner: item.runner,
+			}))
+			expect(comparable(cli.items)).toEqual(comparable(daemon.items))
+
+			const cliListed = expectJsonOk(await runCli(["item", "list", "batch-cli-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const daemonListed = expectJsonOk(await runCli(["item", "list", "batch-daemon-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expect(comparable(cliListed.items)).toEqual(comparable(daemonListed.items))
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("chain status completion", async () => {
 		const fixture = await startFixture("completion", { schedulerEnabled: true })
 		try {
