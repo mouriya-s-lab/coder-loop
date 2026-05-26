@@ -489,6 +489,75 @@ describe("daemon", () => {
 		}
 	})
 
+
+	test("socket item batch add short-circuits on invalid input without partial write", async () => {
+		const fixture = await startFixture("item-batch-add-invalid-input", { schedulerEnabled: false })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "batch-invalid-input-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+
+			const failed = await request(fixture, "item.batchAdd", {
+				chainId,
+				items: [
+					{ issueNumber: 25811, repoCwd: REPO_ROOT, title: "valid before invalid" },
+					{ issueNumber: 0, repoCwd: REPO_ROOT, title: "invalid issue" },
+					{ issueNumber: 25813, repoCwd: REPO_ROOT, title: "valid after invalid" },
+				],
+			})
+			expectInvalid(failed)
+
+			const listed = expectOk(await request(fixture, "item.list", { chainId })).items
+			expect(Array.isArray(listed)).toBe(true)
+			expect(listed).toHaveLength(0)
+
+			const added = expectOk(await request(fixture, "item.batchAdd", {
+				chainId,
+				items: [
+					{ issueNumber: 25821, repoCwd: REPO_ROOT, title: "valid one" },
+					{ issueNumber: 25822, repoCwd: REPO_ROOT, title: "valid two" },
+					{ issueNumber: 25823, repoCwd: REPO_ROOT, title: "valid three" },
+				],
+			})).items
+			expect(Array.isArray(added)).toBe(true)
+			expect(added).toHaveLength(3)
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("socket item batch add rejects conflict with existing item without partial write", async () => {
+		const fixture = await startFixture("item-batch-add-conflict", { schedulerEnabled: false })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "batch-conflict-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			expectOk(await request(fixture, "item.add", { chainId, issueNumber: 25901, repoCwd: REPO_ROOT, title: "occupant" }))
+			const baseline = expectOk(await request(fixture, "item.list", { chainId })).items as Record<string, unknown>[]
+			expect(baseline).toHaveLength(1)
+
+			const failed = await request(fixture, "item.batchAdd", {
+				chainId,
+				items: [
+					{ issueNumber: 25902, repoCwd: REPO_ROOT, title: "would-be first" },
+					{ issueNumber: 25901, repoCwd: REPO_ROOT, title: "conflict with occupant" },
+					{ issueNumber: 25903, repoCwd: REPO_ROOT, title: "would-be third" },
+				],
+			})
+			expectConflict(failed)
+
+			const after = expectOk(await request(fixture, "item.list", { chainId })).items as Record<string, unknown>[]
+			expect(after.map((item) => Number(item.issueNumber))).toEqual([25901])
+			expect(after.map((item) => item.id)).toEqual(baseline.map((item) => item.id))
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("socket item.add rejects duplicate issue as conflict without SQL details", async () => {
 		const fixture = await startFixture("item-add-duplicate", { schedulerEnabled: false })
 		try {

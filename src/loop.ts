@@ -233,6 +233,13 @@ export type ItemCommandArgs =
 			json: boolean
 	  }
 	| {
+			action: "batch-add"
+			chainName: string
+			items: JsonObject[]
+			loopDataRoot: string | null
+			json: boolean
+	  }
+	| {
 			action: "list"
 			chainName: string
 			loopDataRoot: string | null
@@ -1292,6 +1299,27 @@ const itemAddCliCommand = command({
 	}),
 })
 
+const itemBatchAddCliCommand = command({
+	name: "batch-add",
+	description: "Add multiple items to one centralized coder-loop chain atomically through the daemon socket.",
+	args: {
+		chain: positional({ displayName: "chain", type: cmdString }),
+		itemsJson: option({ long: "items-json", type: cmdString }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		json: flag({ long: "json" }),
+	},
+	handler: (args): CliCommand => ({
+		kind: "item",
+		args: {
+			action: "batch-add",
+			chainName: args.chain,
+			items: parseBatchItemsJson(args.itemsJson),
+			loopDataRoot: args.loopDataRoot ?? null,
+			json: args.json,
+		},
+	}),
+})
+
 const itemListCliCommand = command({
 	name: "list",
 	description: "List items in a centralized coder-loop chain through the daemon socket.",
@@ -1355,6 +1383,7 @@ const itemCliCommand = subcommands({
 	description: "Operate centralized coder-loop chain items through the daemon socket.",
 	cmds: {
 		add: itemAddCliCommand,
+		"batch-add": itemBatchAddCliCommand,
 		list: itemListCliCommand,
 		update: itemUpdateCliCommand,
 	},
@@ -1509,6 +1538,11 @@ async function runItemCommand(args: string[]): Promise<void> {
 		writeCommandResult(result, itemArgs.json, formatItemMutationResult)
 		return
 	}
+	if (itemArgs.action === "batch-add") {
+		const result = await requestDaemonResult(itemArgs.loopDataRoot, "item.batchAdd", { chainName: itemArgs.chainName, items: itemArgs.items })
+		writeCommandResult(result, itemArgs.json, formatItemBatchAddResult)
+		return
+	}
 	if (itemArgs.action === "list") {
 		const result = await requestDaemonResult(itemArgs.loopDataRoot, "item.list", { chainName: itemArgs.chainName })
 		writeCommandResult(result, itemArgs.json, formatItemListResult)
@@ -1536,6 +1570,30 @@ async function runItemCommand(args: string[]): Promise<void> {
 
 function assignCliOptional(target: JsonObject, key: string, value: JsonValue | undefined): void {
 	if (value !== undefined && value !== null) target[key] = value
+}
+
+function isJsonObjectRecord(value: unknown): value is Record<string, JsonValue> {
+	return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function parseBatchItemsJson(raw: string): JsonObject[] {
+	let parsed: unknown
+	try {
+		parsed = JSON.parse(raw)
+	} catch (error) {
+		fail(`--items-json must be a JSON array: ${errorMessage(error)}`)
+	}
+	if (!Array.isArray(parsed)) fail("--items-json must be a JSON array")
+	return parsed.map((entry, index) => {
+		if (!isJsonObjectRecord(entry)) fail(`--items-json[${index}] must be an object`)
+		const item = { ...entry } as JsonObject
+		if (typeof item.issue === "number" && item.issueNumber === undefined) {
+			item.issueNumber = item.issue
+			delete item.issue
+		}
+		if (typeof item.repoCwd === "string") item.repoCwd = resolve(item.repoCwd)
+		return item
+	})
 }
 
 function parseUmbrellaRef(raw: string, defaultRepo: string): JsonObject {
@@ -1729,6 +1787,11 @@ function formatChainDeleteResult(result: JsonObject): string {
 function formatItemMutationResult(result: JsonObject): string {
 	const item = result.item as JsonObject | undefined
 	return `item ${String(item?.issueNumber ?? "")}: ${String(item?.status ?? "")}\n`
+}
+
+function formatItemBatchAddResult(result: JsonObject): string {
+	const items = Array.isArray(result.items) ? result.items : []
+	return `added ${items.length} item(s)\n`
 }
 
 function formatItemListResult(result: JsonObject): string {

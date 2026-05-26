@@ -41,6 +41,7 @@ export type DaemonCommandName =
 	| "chain.status"
 	| "chain.delete"
 	| "item.add"
+	| "item.batchAdd"
 	| "item.list"
 	| "item.update"
 	| "daemon.status"
@@ -129,6 +130,8 @@ const ITEM_ADD_ARG_KEYS = [
 	"extra",
 	"dependsOn",
 ] as const
+const ITEM_BATCH_ADD_ARG_KEYS = ["chainId", "chainName", "name", "items"] as const
+const ITEM_BATCH_ADD_ITEM_KEYS = ITEM_ADD_ARG_KEYS.filter((key) => key !== "chainId" && key !== "chainName" && key !== "name")
 const ITEM_UPDATE_SELECTOR_KEYS = ["itemId", "chainId", "chainName", "name", "issueNumber"] as const
 const ITEM_UPDATE_FIELD_KEYS = [
 	"repoCwd",
@@ -361,6 +364,8 @@ export class CoderLoopDaemon {
 				return await this.handleChainDelete(request.args)
 			case "item.add":
 				return await this.handleItemAdd(request.args)
+			case "item.batchAdd":
+				return await this.handleItemBatchAdd(request.args)
 			case "item.list":
 				return this.handleItemList(request.args)
 			case "item.update":
@@ -628,11 +633,59 @@ export class CoderLoopDaemon {
 		const chain = this.resolveChain(args)
 		assertChainAllowsItemMutation(chain, "item.add")
 		const store = this.requireStore()
+		const existingItems = store.listItems(chain.id)
+		const input = await this.buildCreateItemInput(chain, args, existingItems, "item.add")
+		const existing = store.getItemByIssue(chain.id, input.issueNumber)
+		if (existing !== null) throw duplicateItemAddError(chain, input.issueNumber, existing)
+		let item: ItemRecord
+		try {
+			item = store.createItem(input)
+		} catch (error) {
+			throw this.translateCreateItemFailure(chain, input.issueNumber, error)
+		}
+		this.queueSchedulerTick()
+		return { item: itemToJson(item) }
+	}
+
+	private async handleItemBatchAdd(args: JsonObject): Promise<JsonObject> {
+		validateItemBatchAddRequest(args)
+		const chain = this.resolveChain(args)
+		assertChainAllowsItemMutation(chain, "item.batchAdd")
+		const store = this.requireStore()
+		const rawItems = requiredJsonObjectArray(args, "items")
+		if (rawItems.length === 0) throw new DaemonError("invalid_request", "item.batchAdd requires at least one item", { field: "items" })
+		const existingItems = store.listItems(chain.id)
+		const inputs: CreateItemInput[] = []
+		const requestedIssues = new Set<number>()
+		for (const [index, rawItem] of rawItems.entries()) {
+			validateKnownKeys(rawItem, `item.batchAdd items[${index}]`, ITEM_BATCH_ADD_ITEM_KEYS)
+			const input = await this.buildCreateItemInput(chain, rawItem, existingItems, `items[${index}]`)
+			if (requestedIssues.has(input.issueNumber)) {
+				throw new DaemonError("conflict", `batch contains duplicate issueNumber ${input.issueNumber}`, { chainId: chain.id, chainName: chain.name, issueNumber: input.issueNumber })
+			}
+			requestedIssues.add(input.issueNumber)
+			const existing = store.getItemByIssue(chain.id, input.issueNumber)
+			if (existing !== null) throw duplicateItemAddError(chain, input.issueNumber, existing)
+			inputs.push(input)
+		}
+		let items: ItemRecord[]
+		try {
+			items = store.createItems(inputs)
+		} catch (error) {
+			const firstDuplicate = inputs.map((input) => [input.issueNumber, store.getItemByIssue(chain.id, input.issueNumber)] as const).find(([, existing]) => existing !== null)
+			if (firstDuplicate !== undefined && firstDuplicate[1] !== null) throw duplicateItemAddError(chain, firstDuplicate[0], firstDuplicate[1])
+			throw error
+		}
+		this.queueSchedulerTick()
+		return { items: items.map((item) => itemToJson(item)) }
+	}
+
+	private async buildCreateItemInput(chain: ChainRecord, args: JsonObject, existingItems: readonly ItemRecord[], label: string): Promise<CreateItemInput> {
 		const rawExtra = sizedJsonObject(args, "extra", MAX_ITEM_EXTRA_BYTES) ?? {}
 		const topLevelDependsOn = optionalDependsOn(args, "dependsOn")
 		const extraDependsOn = topLevelDependsOn === undefined ? optionalDependsOn(rawExtra, "dependsOn") : undefined
 		const dependsOn = topLevelDependsOn === undefined ? extraDependsOn : topLevelDependsOn
-		if (dependsOn !== undefined) validateDependsOnGraph(store.listItems(chain.id), null, dependsOn)
+		if (dependsOn !== undefined) validateDependsOnGraph(existingItems, null, dependsOn)
 		const input: CreateItemInput = {
 			chainId: chain.id,
 			issueNumber: requiredPositiveInteger(args, "issueNumber"),
@@ -647,22 +700,17 @@ export class CoderLoopDaemon {
 		assignOptional(input, "issueFile", validateRelativeItemPathForRequest(optionalStringOrNull(args, "issueFile"), "issueFile"))
 		assignOptional(input, "evidenceDir", validateEvidenceDirForRequest(optionalStringOrNull(args, "evidenceDir"), chain, this.paths.root))
 		assignOptional(input, "runner", optionalRunner(args, "runner"))
-		const existing = store.getItemByIssue(chain.id, input.issueNumber)
-		if (existing !== null) throw duplicateItemAddError(chain, input.issueNumber, existing)
-		let item: ItemRecord
+		return input
+	}
+
+	private translateCreateItemFailure(chain: ChainRecord, issueNumber: number, error: unknown): never {
 		try {
-			item = store.createItem(input)
-		} catch (error) {
-			try {
-				const existingAfterFailure = store.getItemByIssue(chain.id, input.issueNumber)
-				if (existingAfterFailure !== null) throw duplicateItemAddError(chain, input.issueNumber, existingAfterFailure)
-			} catch (lookupError) {
-				if (lookupError instanceof DaemonError) throw lookupError
-			}
-			throw error
+			const existingAfterFailure = this.requireStore().getItemByIssue(chain.id, issueNumber)
+			if (existingAfterFailure !== null) throw duplicateItemAddError(chain, issueNumber, existingAfterFailure)
+		} catch (lookupError) {
+			if (lookupError instanceof DaemonError) throw lookupError
 		}
-		this.queueSchedulerTick()
-		return { item: itemToJson(item) }
+		throw error
 	}
 
 	private handleItemList(args: JsonObject): JsonObject {
@@ -1431,6 +1479,10 @@ function validateItemAddRequest(args: JsonObject): void {
 	validateKnownKeys(args, "item.add args", ITEM_ADD_ARG_KEYS)
 }
 
+function validateItemBatchAddRequest(args: JsonObject): void {
+	validateKnownKeys(args, "item.batchAdd args", ITEM_BATCH_ADD_ARG_KEYS)
+}
+
 function validateItemUpdateRequest(args: JsonObject): void {
 	validateKnownKeys(args, "item.update args", ITEM_UPDATE_ARG_KEYS)
 	validateItemUpdateSelector(args)
@@ -1474,6 +1526,15 @@ function requestedChainName(args: JsonObject): string | null {
 		throw new DaemonError("invalid_request", "chainName and name both provided but differ", { chainName, name })
 	}
 	return chainName ?? name
+}
+
+function requiredJsonObjectArray(record: UnknownRecord, key: string): JsonObject[] {
+	const value = record[key]
+	if (!Array.isArray(value)) throw new DaemonError("invalid_request", `${key} must be an array of item objects`, { field: key })
+	return value.map((entry, index) => {
+		if (!isRecord(entry) || Array.isArray(entry)) throw new DaemonError("invalid_request", `${key}[${index}] must be an item object`, { field: `${key}[${index}]` })
+		return entry as JsonObject
+	})
 }
 
 function optionalDependsOn(record: UnknownRecord, key: string): number[] | null | undefined {
