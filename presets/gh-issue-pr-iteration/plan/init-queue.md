@@ -68,15 +68,15 @@ Initialize the executable planning output through the current centralized chain/
    ```
    Empty directory at this stage; iter agent will populate.
 
-5. **Construct item API payloads**. Each new item passed to `coder-loop item batch-add` / daemon `item.batchAdd` contains the current item fields:
+5. **Construct item API payloads**. Each new item passed to `coder-loop item batch-add` / daemon `item.batchAdd` contains the current item fields. `issueFile` and `evidenceDir` are relative to the chain root, so include the `issues/` or `evidence/` prefix:
    ```json
    {
      "issueNumber": <number>,
      "repoCwd": "{{TARGET_CWD}}",
      "title": "<the issue title>",
      "priority": "<high|medium|low>" or null,
-     "issueFile": "<relative path inside chain issues dir>",
-     "evidenceDir": "<relative path inside chain evidence dir>",
+     "issueFile": "issues/<N>.md",
+     "evidenceDir": "evidence/issue-<N>",
      "agentCwd": null,
      "runner": null,
      "extra": { "dependsOn": [<item ids>] }
@@ -84,6 +84,7 @@ Initialize the executable planning output through the current centralized chain/
    ```
    - The preset-facing item id remains `issue`; the daemon API field is `issueNumber`.
    - `status` defaults to the preset's first continuable status; for this preset new items become `queued`.
+   - `issueFile` must resolve inside `loop-data/chains/<chain>/issues`; `evidenceDir` must resolve inside `loop-data/chains/<chain>/evidence`. Do not pass bare `"<N>.md"` or `"issue-<N>"`, because runtime path validation resolves item paths from the chain root.
    - `agentCwd`: leave `null` for in-repo work. Only set when the issue requires code changes in a **different repo's checkout**; then it must be an **absolute path** to an existing working directory.
    - `extra.dependsOn` stores item ids for prerequisites that already exist in the chain. If the prerequisite is created in the same batch and its DB id is not known yet, add the prerequisite first, read `item list`, then add dependents in a second batch.
 
