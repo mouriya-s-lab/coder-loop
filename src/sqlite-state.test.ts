@@ -260,6 +260,57 @@ describe("sqlite state store", () => {
 		}
 	})
 
+	test("createItems happy path inserts every input atomically", async () => {
+		const { store } = await openTestStore("batch-happy")
+		try {
+			const chain = createFullChain(store)
+			const inputs: CreateItemInput[] = [
+				{ chainId: chain.id, issueNumber: 311, repoCwd: "/repo/coder-loop", status: "queued", title: "first" },
+				{ chainId: chain.id, issueNumber: 312, repoCwd: "/repo/coder-loop", status: "queued", title: "second" },
+				{ chainId: chain.id, issueNumber: 313, repoCwd: "/repo/coder-loop", status: "queued", title: "third" },
+			]
+			const inserted = store.createItems(inputs)
+			expect(inserted.map((item) => item.issueNumber)).toEqual([311, 312, 313])
+			expect(store.listItems(chain.id).map((item) => item.issueNumber)).toEqual([311, 312, 313])
+		} finally {
+			store.close()
+		}
+	})
+
+	test("createItems rolls back the whole batch when a mid-batch insert violates UNIQUE", async () => {
+		const { store } = await openTestStore("batch-rollback")
+		try {
+			const chain = createFullChain(store)
+			const occupant = createFullItem(store, chain, { issueNumber: 322, title: "occupant" })
+			const occupantsBefore = store.listItems(chain.id).map((item) => item.id)
+
+			let caught: unknown = null
+			try {
+				store.createItems([
+					{ chainId: chain.id, issueNumber: 321, repoCwd: "/repo/coder-loop", status: "queued", title: "before conflict" },
+					{ chainId: chain.id, issueNumber: 322, repoCwd: "/repo/coder-loop", status: "queued", title: "conflict (UNIQUE chain_id,issue_number)" },
+					{ chainId: chain.id, issueNumber: 323, repoCwd: "/repo/coder-loop", status: "queued", title: "after conflict" },
+				])
+			} catch (error) {
+				caught = error
+			}
+
+			expect(caught).toBeInstanceOf(SqliteStateError)
+			expect((caught as SqliteStateError).code).toBe("sqlite_error")
+			expect((caught as SqliteStateError).message).toContain("create items")
+
+			expect(store.getItemByIssue(chain.id, 321)).toBeNull()
+			expect(store.getItemByIssue(chain.id, 323)).toBeNull()
+			const occupantAfter = store.getItemByIssue(chain.id, 322)
+			expect(occupantAfter).not.toBeNull()
+			expect(occupantAfter?.id).toBe(occupant.id)
+			expect(occupantAfter?.title).toBe("occupant")
+			expect(store.listItems(chain.id).map((item) => item.id)).toEqual(occupantsBefore)
+		} finally {
+			store.close()
+		}
+	})
+
 	test("wal mode", async () => {
 		const { store } = await openTestStore("wal")
 		try {
