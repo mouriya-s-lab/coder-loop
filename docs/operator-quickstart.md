@@ -18,7 +18,7 @@
 - 目标 repo 在本地，有可用的 base branch（通常 `main`）。
 - 用户级 skill / rule（仅 `/dev-plan` 需要，`/dev-loop` 本身不需要）：
   - `~/.claude/rules/github-issue-pr-routing.rule.md`
-  - skill `writing-issue` / `writing-pr` / `review-pr`
+  - skill `coder-loop` / `writing-issue` / `writing-pr` / `review-pr`
 
 第一次安装本 repo：
 
@@ -54,9 +54,16 @@ coder-loop install /path/to/your-target-repo --repo <owner>/<repo>
 - **A) target 项目文件**：写 `.claude/commands/dev-plan.md` / `dev-loop.md`、建/刷新 `.coder-loop/runtime/{issues,evidence,logs}/` 并初始化 centralized chain、merge `.coder-loop/runtime/config.json`（含 preset 绑定）、若 `workflow.md` 缺失则从 preset 模板拷一份。
 - **B) target GitHub state**：通过 `gh` 确保 `kind:code` / `kind:comment` / `kind:code-spike` / `kind:blocked` 标签存在（preset fragments 依赖它们做 issue 分类）。
 - **C) 操作员机器前置**：只做检查、不安装——`gh`(+ auth) / target default runner CLI / review default runner CLI / `coder-loop` 是否在 PATH。
-- **D) 用户级 skill 版本**：检查 `~/.claude/skills/writing-issue/SKILL.md` 是否含新版 marker；加 `--install-skills` 会自动同步到最新。
+- **D) 用户级 skill 版本**：检查 repo-owned skill 模板是否已同步到 user-level（`writing-issue` 与 `coder-loop` 的 Claude copy；如本机已有 Codex `.agents/skills/coder-loop` copy 也会检查）。加 `--install-skills` 会自动同步到最新。
 
 `install` 第一件事会确认 central daemon 可达；daemon 不在线时会在写 `.coder-loop/workflow.md` 之前 fail-fast。使用自定义 `--loop-data-root` 时，`daemon up` 与后续 `install` / `doctor` / `status` 要传同一个 root。
+
+Skill 分发源在 repo 内：
+
+| Skill | Source | Synced by |
+|---|---|---|
+| `coder-loop` | `templates/skills/coder-loop/SKILL.md` | `coder-loop install <target> --install-skills` 同步到 `~/.claude/skills/coder-loop/SKILL.md`，并在 `~/.agents/skills/coder-loop/SKILL.md` 已存在时同步该 copy |
+| `writing-issue` | `templates/skills/writing-issue/SKILL.md` | `coder-loop install <target> --install-skills` 同步到 `~/.claude/skills/writing-issue/SKILL.md` |
 
 常用 flag：
 
@@ -66,7 +73,7 @@ coder-loop install /path/to/your-target-repo --repo <owner>/<repo>
 | `--preset <name>` | 默认 `gh-issue-pr-iteration` |
 | `--force` | 覆盖已存在的 slash command / workflow.md（其他文件仍幂等） |
 | `--dry-run` | 打印每一步将做什么，不写盘 |
-| `--install-skills` | 同步 `writing-issue` skill 到 `~/.claude/skills/` |
+| `--install-skills` | 同步 repo-owned skill templates 到 user-level skill 目录 |
 | `--skip-skill-check` | 跳过 D 层检查 |
 
 之后做一次只读体检：

@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
-import { resolve } from "node:path"
+import { dirname, resolve } from "node:path"
 
 import { startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
 import { openSqliteStateStore } from "./sqlite-state"
@@ -689,7 +689,11 @@ async function makeGitTarget(name: string, options: { workflow?: boolean } = {})
 
 async function fakeCliEnv(name: string): Promise<Record<string, string>> {
 	const bin = resolve(TEST_ROOT, `${++nextFixtureId}-${name}-bin`)
+	const skillHome = resolve(TEST_ROOT, `${++nextFixtureId}-${name}-home`)
 	await mkdir(bin, { recursive: true })
+	await writeFakeSkill(skillHome, ".claude/skills/writing-issue/SKILL.md", "docs/reserved-strings.md")
+	await writeFakeSkill(skillHome, ".claude/skills/coder-loop/SKILL.md", "repo-owned source for the operator-facing coder-loop skill")
+	await writeFakeSkill(skillHome, ".agents/skills/coder-loop/SKILL.md", "repo-owned source for the operator-facing coder-loop skill")
 	await writeExecutable(resolve(bin, "gh"), [
 		"#!/usr/bin/env bash",
 		`if [ "$1" = "auth" ]; then exit 0; fi`,
@@ -701,11 +705,17 @@ async function fakeCliEnv(name: string): Promise<Record<string, string>> {
 	for (const name of ["codex", "claude", "coder-loop"]) {
 		await writeExecutable(resolve(bin, name), "#!/usr/bin/env bash\nexit 0\n")
 	}
-	return { PATH: `${bin}:${process.env.PATH ?? ""}` }
+	return { PATH: `${bin}:${process.env.PATH ?? ""}`, CODER_LOOP_SKILL_HOME: skillHome }
 }
 
 async function writeExecutable(path: string, content: string): Promise<void> {
 	await writeFile(path, content, { mode: 0o755 })
+}
+
+async function writeFakeSkill(root: string, rel: string, marker: string): Promise<void> {
+	const path = resolve(root, rel)
+	await mkdir(dirname(path), { recursive: true })
+	await writeFile(path, `---\nname: fake\n---\n${marker}\n`)
 }
 
 function expectJsonOk(result: { exitCode: number | null; stdout: string; stderr: string }) {

@@ -30,6 +30,8 @@ coder-loop status /path/to/target --json | jq '.state.kind, .queue, .current, .p
 coder-loop daemon status /path/to/target --json | jq '.processes'
 ```
 
+短 skill 入口不要维护第二套命令表。repo-owned source 是 `templates/skills/coder-loop/SKILL.md`，它只保留操作顺序、fallback 边界和最小命令族；详细 flag 表以本文件 §6 为准。`coder-loop install <target> --install-skills` 会把该 source 同步到 user-level Claude skill copy；如果维护者机器上已有 Codex `.agents` copy，也会从同一 source 同步，避免两个 agent 入口语义漂移。
+
 判断 / 控制 daemon：
 
 ```bash

@@ -61,6 +61,20 @@ function claudeHostEnv(): NodeJS.ProcessEnv {
 	return env
 }
 
+async function fakeSkillHomeEnv(name: string): Promise<NodeJS.ProcessEnv> {
+	const root = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/smoke-skill-home", `${process.pid}-${name}`)
+	await writeFakeSkill(root, ".claude/skills/writing-issue/SKILL.md", "docs/reserved-strings.md")
+	await writeFakeSkill(root, ".claude/skills/coder-loop/SKILL.md", "repo-owned source for the operator-facing coder-loop skill")
+	await writeFakeSkill(root, ".agents/skills/coder-loop/SKILL.md", "repo-owned source for the operator-facing coder-loop skill")
+	return { ...process.env, CODER_LOOP_SKILL_HOME: root }
+}
+
+async function writeFakeSkill(root: string, rel: string, marker: string): Promise<void> {
+	const path = resolve(root, rel)
+	await mkdir(dirname(path), { recursive: true })
+	await writeFile(path, `---\nname: fake\n---\n${marker}\n`)
+}
+
 async function seedLoopDb(target: string, preset: string, state: FixtureState): Promise<string> {
 	const loopDataRoot = resolve(target, ".coder-loop/runtime/loop-data")
 	await rm(loopDataRoot, { recursive: true, force: true })
@@ -553,11 +567,13 @@ describe("smoke: single-phase-example preset", () => {
 
 	test("doctor <target> emits live runtime health section", async () => {
 		const target = await makeMinimalTarget("single-phase-example")
+		const env = await fakeSkillHomeEnv("doctor-health")
 		const proc = Bun.spawnSync({
 			cmd: ["bun", LOOP_ENTRY, "doctor", target],
 			cwd: REPO_ROOT,
 			stdout: "pipe",
 			stderr: "pipe",
+			env,
 		})
 		const stderr = new TextDecoder().decode(proc.stderr)
 		expect(proc.exitCode).toBe(0)
@@ -571,6 +587,7 @@ describe("smoke: single-phase-example preset", () => {
 
 	test("doctor <target> checks the configured runner binary", async () => {
 		const target = await makeMinimalTarget("single-phase-example")
+		const env = await fakeSkillHomeEnv("doctor-runner")
 		await writeFile(
 			resolve(target, ".coder-loop/runtime/config.json"),
 			JSON.stringify({
@@ -584,6 +601,7 @@ describe("smoke: single-phase-example preset", () => {
 			cwd: REPO_ROOT,
 			stdout: "pipe",
 			stderr: "pipe",
+			env,
 		})
 		const stderr = new TextDecoder().decode(proc.stderr)
 		expect(proc.exitCode).toBe(1)

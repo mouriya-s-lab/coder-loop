@@ -16,6 +16,7 @@ Supervisor 模式跟 preset 正交——它是包在 loop 外面的 cron-driven 
 
 | Template | Copy to | Purpose |
 |---|---|---|
+| `templates/skills/coder-loop/SKILL.md` | user-level `coder-loop` skill copy | short operator skill source for stable `install` / `doctor` / `status` / `daemon` / `chain` / `item` / `queue unblock` usage |
 | `templates/supervisor/` | `<TARGET>/.coder-loop/runtime/supervisor/<MISSION>/` + `<TARGET>/.claude/skills/bootstrap/SKILL.md` | optional 外层 supervisor（cron 驱动跨 patrol orchestration），跨 preset 通用 |
 
 preset-specific starter 不在此处：

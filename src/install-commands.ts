@@ -5,7 +5,7 @@
  *   A) target project files: committed workflow.md policy
  *   B) target GitHub state: kind:code / kind:comment / kind:code-spike / kind:blocked labels
  *   C) operator machine prereqs: gh (+ auth), selected runner CLIs (verify only)
- *   D) user-level skill version: writing-issue marker check
+ *   D) user-level skill versions: repo-owned skill marker checks
  *
  * Idempotent by design: re-running install does not mutate files whose
  * content already matches; `--force` overrides.
@@ -37,8 +37,40 @@ const KIND_LABELS = [
 	{ name: "kind:blocked", color: "b60205", description: "Issue 的 deliverable 是解除具体阻塞条件并恢复被阻塞 loop" },
 ] as const
 
-const WRITING_ISSUE_SKILL_REL = ".claude/skills/writing-issue/SKILL.md"
+const CODER_LOOP_SKILL_MARKER = "repo-owned source for the operator-facing coder-loop skill"
 const WRITING_ISSUE_MARKER = "docs/reserved-strings.md"
+
+type UserSkillTarget = {
+	name: string
+	targetRel: string
+	sourceRel: string
+	marker: string
+	required: boolean
+}
+
+const USER_SKILL_TARGETS: UserSkillTarget[] = [
+	{
+		name: "writing-issue",
+		targetRel: ".claude/skills/writing-issue/SKILL.md",
+		sourceRel: "skills/writing-issue/SKILL.md",
+		marker: WRITING_ISSUE_MARKER,
+		required: true,
+	},
+	{
+		name: "coder-loop",
+		targetRel: ".claude/skills/coder-loop/SKILL.md",
+		sourceRel: "skills/coder-loop/SKILL.md",
+		marker: CODER_LOOP_SKILL_MARKER,
+		required: true,
+	},
+	{
+		name: "coder-loop",
+		targetRel: ".agents/skills/coder-loop/SKILL.md",
+		sourceRel: "skills/coder-loop/SKILL.md",
+		marker: CODER_LOOP_SKILL_MARKER,
+		required: false,
+	},
+]
 
 const RUNTIME_DIR = ".coder-loop/runtime"
 const WORKFLOW_REL = ".coder-loop/workflow.md"
@@ -348,26 +380,41 @@ function runnerInstallHint(runner: RequiredRunnerCli): string {
 }
 
 // ===================================================================
-// Layer D: user-level skill version check (writing-issue marker)
+// Layer D: user-level skill version checks
 // ===================================================================
 
-type SkillCheckStatus = "ok" | "missing" | "outdated"
+type SkillCheckStatus = "ok" | "missing" | "outdated" | "optional-missing"
 
-async function checkLayerD(): Promise<{ status: SkillCheckStatus; detail: string; path: string }> {
-	const path = resolve(homedir(), WRITING_ISSUE_SKILL_REL)
-	const content = await readIfExists(path)
-	if (content === null) {
-		return { status: "missing", detail: `${path} 不存在`, path }
-	}
-	if (!content.includes(WRITING_ISSUE_MARKER)) {
-		return { status: "outdated", detail: `${path} 缺少新版 marker "${WRITING_ISSUE_MARKER}"（缺少 engine reserved strings issue-writing rule）`, path }
-	}
-	return { status: "ok", detail: `${path} 含新版 marker`, path }
+type SkillCheckResult = {
+	target: UserSkillTarget
+	status: SkillCheckStatus
+	ok: boolean
+	detail: string
+	path: string
 }
 
-async function syncWritingIssueSkill(dryRun: boolean): Promise<{ wrote: boolean; path: string; sourcePath: string }> {
-	const sourcePath = resolve(TEMPLATES_DIR, "skills/writing-issue/SKILL.md")
-	const targetPath = resolve(homedir(), WRITING_ISSUE_SKILL_REL)
+async function checkLayerD(): Promise<SkillCheckResult[]> {
+	return Promise.all(USER_SKILL_TARGETS.map(checkSkillTarget))
+}
+
+async function checkSkillTarget(target: UserSkillTarget): Promise<SkillCheckResult> {
+	const path = resolve(skillHomeDir(), target.targetRel)
+	const content = await readIfExists(path)
+	if (content === null) {
+		if (!target.required) {
+			return { target, status: "optional-missing", ok: true, detail: `${path} 不存在（可选 Codex skill 副本；存在时会校验同步）`, path }
+		}
+		return { target, status: "missing", ok: false, detail: `${path} 不存在`, path }
+	}
+	if (!content.includes(target.marker)) {
+		return { target, status: "outdated", ok: false, detail: `${path} 缺少新版 marker "${target.marker}"（skill 不是 repo 模板版本）`, path }
+	}
+	return { target, status: "ok", ok: true, detail: `${path} 含新版 marker`, path }
+}
+
+async function syncUserSkill(target: UserSkillTarget, dryRun: boolean): Promise<{ wrote: boolean; path: string; sourcePath: string }> {
+	const sourcePath = resolve(TEMPLATES_DIR, target.sourceRel)
+	const targetPath = resolve(skillHomeDir(), target.targetRel)
 	const sourceContent = await readFile(sourcePath, "utf-8")
 	const existing = await readIfExists(targetPath)
 	if (existing === sourceContent) return { wrote: false, path: targetPath, sourcePath }
@@ -375,6 +422,10 @@ async function syncWritingIssueSkill(dryRun: boolean): Promise<{ wrote: boolean;
 	await mkdir(dirname(targetPath), { recursive: true })
 	await writeFile(targetPath, sourceContent)
 	return { wrote: true, path: targetPath, sourcePath }
+}
+
+function skillHomeDir(): string {
+	return process.env.CODER_LOOP_SKILL_HOME ?? homedir()
 }
 
 // ===================================================================
@@ -626,19 +677,23 @@ export async function runInstallCommand(rawArgs: string[]): Promise<void> {
 		fail(`Layer C 校验未通过：先按上面提示修复 gh / runner CLI / 认证，再重跑 install。`)
 	}
 
-	// Layer D: user-level skill
+	// Layer D: user-level skills
 	info("\n[Layer D] User-level skill 版本")
 	const layerD = await checkLayerD()
-	info(`  ${layerD.status === "ok" ? "OK" : "FAIL"}: ${layerD.detail}`)
-	if (layerD.status !== "ok") {
+	for (const result of layerD) info(`  ${result.ok ? "OK" : "FAIL"}: ${result.detail}`)
+	const failingLayerD = layerD.filter((result) => !result.ok)
+	if (failingLayerD.length > 0) {
 		if (args.installSkills) {
-			info("  --install-skills: 同步 templates/skills/writing-issue/SKILL.md → user-level")
-			const sync = await syncWritingIssueSkill(args.dryRun)
-			info(`  ${sync.wrote ? "已写入" : (args.dryRun ? "would-write" : "未变化")}: ${sync.path}（源：${sync.sourcePath}）`)
+			info("  --install-skills: 同步 repo-owned skill templates → user-level")
+			for (const failure of failingLayerD) {
+				const sync = await syncUserSkill(failure.target, args.dryRun)
+				info(`  ${sync.wrote ? "已写入" : (args.dryRun ? "would-write" : "未变化")}: ${sync.path}（源：${sync.sourcePath}）`)
+			}
 		} else if (args.skipSkillCheck) {
 			info("  --skip-skill-check 已设置：跳过 Layer D 严格校验。")
 		} else if (!args.dryRun) {
-			fail(`Layer D 校验未通过。修复路径：\n  (a) coder-loop install ${args.target} --install-skills   # 自动 sync 新版\n  (b) 手动覆盖 ${layerD.path} 为最新 writing-issue SKILL.md\n  (c) coder-loop install ${args.target} --skip-skill-check  # 临时绕过`)
+			const failedPaths = failingLayerD.map((result) => `      - ${result.path}`).join("\n")
+			fail(`Layer D 校验未通过。修复路径：\n  (a) coder-loop install ${args.target} --install-skills   # 自动 sync repo-owned skill templates\n  (b) 手动覆盖以下路径为 templates/skills/ 下对应 SKILL.md\n${failedPaths}\n  (c) coder-loop install ${args.target} --skip-skill-check  # 临时绕过`)
 		}
 	}
 
@@ -757,8 +812,10 @@ export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
 
 	info("\n[Layer D] User-level skill 版本")
 	const dResult = await checkLayerD()
-	info(`  ${dResult.status === "ok" ? "OK" : "FAIL"}: ${dResult.detail}`)
-	if (dResult.status !== "ok") hasFailure = true
+	for (const result of dResult) {
+		info(`  ${result.ok ? "OK" : "FAIL"}: ${result.detail}`)
+		if (!result.ok) hasFailure = true
+	}
 
 	info("\n[Live Runtime] coder-loop runtime health")
 	for (const line of buildLiveRuntimeHealthLines(statusSnapshot)) {

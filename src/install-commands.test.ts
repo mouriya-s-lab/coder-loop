@@ -33,6 +33,17 @@ describe("install label catalog", () => {
 		expect(source).toContain('name: "kind:blocked"')
 		expect(source).toContain("解除具体阻塞条件")
 	})
+
+	test("checks the repo-owned coder-loop skill template", async () => {
+		const source = await readFile(resolve(REPO_ROOT, "src/install-commands.ts"), "utf-8")
+		const skill = await readFile(resolve(REPO_ROOT, "templates/skills/coder-loop/SKILL.md"), "utf-8")
+		expect(source).toContain('targetRel: ".claude/skills/coder-loop/SKILL.md"')
+		expect(source).toContain('targetRel: ".agents/skills/coder-loop/SKILL.md"')
+		expect(skill).toContain("coder-loop daemon up")
+		expect(skill).toContain("coder-loop chain create")
+		expect(skill).toContain("coder-loop item add")
+		expect(skill).toContain("coder-loop queue unblock")
+	})
 })
 
 async function makeDoctorTarget(): Promise<string> {
