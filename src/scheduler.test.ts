@@ -7,6 +7,7 @@ import {
 	createSchedulerState,
 	defaultSchedulerStatusFromExit,
 	listActiveRuns,
+	makeRunId,
 	renderSchedulerSpawnPrompt,
 	resumeDecisionForItem,
 	reviewOnEmptyLockPathForChain,
@@ -2260,6 +2261,29 @@ describe("scheduler session-id resume (issue #291)", () => {
 		} finally {
 			fixture.store.close()
 		}
+	})
+
+	describe("makeRunId phase segment (issue #294)", () => {
+		test("phase is embedded in the runId so iter and review spawns never collide on the same item", () => {
+			const iterRunId = makeRunId(42, "iteration")
+			const reviewRunId = makeRunId(42, "review")
+			expect(iterRunId).toContain("iteration")
+			expect(reviewRunId).toContain("review")
+			expect(iterRunId).not.toBe(reviewRunId)
+			expect(iterRunId).toMatch(/-item-42$/)
+			expect(reviewRunId).toMatch(/-item-42$/)
+		})
+
+		test("omitted phase keeps the legacy run-<ts>-<seq>-item-<id> shape", () => {
+			const runId = makeRunId(7)
+			expect(runId).toMatch(/^run-\d+-\d+-item-7$/)
+		})
+
+		test("phase name with unsafe characters is sanitized into a path-safe segment", () => {
+			const runId = makeRunId(9, "weird phase/name")
+			expect(runId).toContain("weird-phase-name")
+			expect(runId).toMatch(/^[A-Za-z0-9._-]+$/)
+		})
 	})
 })
 

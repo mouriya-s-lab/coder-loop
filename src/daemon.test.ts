@@ -2079,6 +2079,87 @@ process.exit(0)
 			}
 		})
 	})
+
+	describe("per-(item, phase) runId + artifact directory (issue #294)", () => {
+		test("iter and review spawns produce distinct phase-tagged runIds with isolated artifact subdirs and SQLite runs rows", async () => {
+			const fixture = await startPhaseAdvancementFixture("phase-runid-artifact")
+			try {
+				const result = expectOk(await request(fixture, "chain.create", {
+					name: "phase-runid-artifact-chain",
+					preset: "gh-issue-pr-iteration",
+					repository: "mouriya-s-lab/coder-loop",
+				})).chain
+				const chain = record(result)
+				const chainId = numberValue(chain.id)
+				await request(fixture, "item.add", {
+					chainId,
+					issueNumber: 294_001,
+					repoCwd: REPO_ROOT,
+					extra: { issueKind: "code" },
+				})
+
+				const item = await waitFor(
+					async () => readItem(fixture.loopDataRoot, chainId, 294_001),
+					(candidate) => candidate !== null && candidate.status === "done",
+					10_000,
+				)
+				expect(item).not.toBeNull()
+
+				const phaseStartEvents = fixture.schedulerEvents.filter(
+					(event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
+						event.type === "phase.start" && event.itemId === item!.id,
+				)
+				expect(phaseStartEvents.map((event) => event.phase)).toEqual(["iteration", "review"])
+				const runIdByPhase = new Map<string, string>(phaseStartEvents.map((event) => [event.phase, event.runId]))
+				const iterRunId = runIdByPhase.get("iteration")!
+				const reviewRunId = runIdByPhase.get("review")!
+				expect(iterRunId).toBeTruthy()
+				expect(reviewRunId).toBeTruthy()
+				expect(iterRunId).not.toBe(reviewRunId)
+				expect(iterRunId).toContain("iteration")
+				expect(reviewRunId).toContain("review")
+
+				const paths = resolveChainRuntimePaths("phase-runid-artifact-chain", { loopDataRoot: fixture.loopDataRoot })
+				for (const runId of [iterRunId, reviewRunId]) {
+					const runDirEntries = await readdir(paths.runDir(runId))
+					expect(runDirEntries.sort()).toEqual(["events.jsonl", "status.json", "stderr.log", "stdout.log"])
+				}
+				const iterStatus = JSON.parse(await readFile(paths.runStatusFile(iterRunId), "utf-8")) as { phase: string }
+				const reviewStatus = JSON.parse(await readFile(paths.runStatusFile(reviewRunId), "utf-8")) as { phase: string }
+				expect(iterStatus.phase).toBe("iteration")
+				expect(reviewStatus.phase).toBe("review")
+
+				const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot, createIfMissing: false })
+				try {
+					const iterRow = store.getRunByRunId(iterRunId)
+					const reviewRow = store.getRunByRunId(reviewRunId)
+					expect(iterRow?.phase).toBe("iteration")
+					expect(reviewRow?.phase).toBe("review")
+					expect(iterRow?.itemId).toBe(item!.id)
+					expect(reviewRow?.itemId).toBe(item!.id)
+				} finally {
+					store.close()
+				}
+
+				const iterEventLines = (await readFile(paths.runEventsFile(iterRunId), "utf-8"))
+					.trim()
+					.split("\n")
+					.filter(Boolean)
+					.map((line) => JSON.parse(line) as { type: string; phase?: string })
+				const reviewEventLines = (await readFile(paths.runEventsFile(reviewRunId), "utf-8"))
+					.trim()
+					.split("\n")
+					.filter(Boolean)
+					.map((line) => JSON.parse(line) as { type: string; phase?: string })
+				const iterPhaseEnd = iterEventLines.find((event) => event.type === "phase.end")
+				const reviewPhaseEnd = reviewEventLines.find((event) => event.type === "phase.end")
+				expect(iterPhaseEnd?.phase).toBe("iteration")
+				expect(reviewPhaseEnd?.phase).toBe("review")
+			} finally {
+				await fixture.daemon.stop()
+			}
+		})
+	})
 })
 
 type PhaseAdvancementFixture = Fixture & {

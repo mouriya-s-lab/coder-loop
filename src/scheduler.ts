@@ -522,7 +522,7 @@ async function spawnSchedulerRun(
 	slot.worktreePath = worktreePath
 
 	const runner = await resolvePhaseRunner(options, { chain, item, phase })
-	const runId = options.runIdFactory?.({ chain, item, phase }) ?? makeRunId(item.id)
+	const runId = options.runIdFactory?.({ chain, item, phase }) ?? makeRunId(item.id, phase)
 	const startedAt = nowSeconds(options)
 	options.store.recordRun({
 		runId,
@@ -1015,8 +1015,14 @@ function nowIso(options: SchedulerOptions): string {
 	return new Date(nowSeconds(options) * 1000).toISOString()
 }
 
-function makeRunId(itemId: number): string {
-	return `run-${Date.now()}-${++fallbackRunSequence}-item-${itemId}`
+export function makeRunId(itemId: number, phase?: string): string {
+	const phaseSegment = phase === undefined ? "" : `-${sanitizeRunIdPhaseSegment(phase)}`
+	return `run-${Date.now()}-${++fallbackRunSequence}${phaseSegment}-item-${itemId}`
+}
+
+function sanitizeRunIdPhaseSegment(phase: string): string {
+	const replaced = phase.replace(/[^A-Za-z0-9._-]/g, "-")
+	return replaced === "" ? "phase" : replaced
 }
 
 function makeReviewOnEmptyRunId(chain: ChainRecord): string {
