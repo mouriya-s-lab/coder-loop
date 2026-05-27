@@ -1796,13 +1796,13 @@ describe("parseKindFromLabels", () => {
 	test("resolveIssueKind reads local queue kind when repository is not configured", async () => {
 		const item = makeItem({ issue: 44, status: "queued" })
 		item.extra.kind = "code-spike"
-		expect(await resolveIssueKind(null, "44", item)).toEqual({ ok: true, kind: "code-spike" })
+		expect(await resolveIssueKind(null, "44", item.extra)).toEqual({ ok: true, kind: "code-spike" })
 	})
 
 	test("resolveIssueKind reads local queue blocked kind when repository is not configured", async () => {
 		const item = makeItem({ issue: 45, status: "queued" })
 		item.extra.kind = "blocked"
-		expect(await resolveIssueKind(null, "45", item)).toEqual({ ok: true, kind: "blocked" })
+		expect(await resolveIssueKind(null, "45", item.extra)).toEqual({ ok: true, kind: "blocked" })
 	})
 })
 

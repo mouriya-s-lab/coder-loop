@@ -8,10 +8,12 @@ import {
 	buildRunnerInvocation,
 	hasIterationSummaryMarker,
 	parseReviewSummaryVerdict,
+	resolveIssueKind,
 	type AgentRunnerKind,
 	type AgentRunnerSelection,
 	type JsonObject,
 	type JsonValue,
+	type ParsedIssueKind,
 	type ResumeDecision,
 	type RunnerInvocationPaths,
 } from "./loop"
@@ -103,6 +105,7 @@ export type SchedulerEvent =
 	| { type: "slot.busy"; slotKey: string; chainId: number; repoCwd: string; activeRunId: string }
 	| { type: "agent.spawn"; slotKey: string; chainId: number; itemId: number; runId: string; pid: number | null; worktreePath: string; presetDir: string }
 	| { type: "agent.exit"; slotKey: string; chainId: number; itemId: number; runId: string; exitCode: number; status: string }
+	| { type: "spawn.aborted"; slotKey: string; chainId: number; chainName: string; itemId: number; issueNumber: number; reason: string; toStatus: string }
 	| { type: "chain.complete_trigger"; chainId: number; chainName: string; runId?: string; decision: SchedulerChainCompleteDecision["decision"]; reason?: string }
 	| { type: "chain.complete_trigger_failed"; chainId: number; chainName: string; runId?: string; error: string }
 	| { type: "chain.completed"; chainId: number; chainName: string; runId?: string }
@@ -120,6 +123,11 @@ export type SchedulerChainCompleteDecision =
 
 export type SchedulerChainCompleteTrigger = (context: SchedulerChainCompleteTriggerContext) => Promise<SchedulerChainCompleteDecision> | SchedulerChainCompleteDecision
 export type SchedulerChainCompleteTriggerForChain = (context: SchedulerChainCompleteTriggerContext) => Promise<SchedulerChainCompleteDecision | null> | SchedulerChainCompleteDecision | null
+
+export type SchedulerKindResolver = (context: {
+	chain: ChainRecord
+	item: ItemRecord
+}) => Promise<ParsedIssueKind> | ParsedIssueKind
 
 export type SchedulerOptions = {
 	store: SchedulerStore
@@ -139,6 +147,7 @@ export type SchedulerOptions = {
 	now?: () => number
 	runIdFactory?: (context: { chain: ChainRecord; item: ItemRecord; phase: string }) => string
 	statusFromExit?: (context: SchedulerStatusFromExitContext) => string
+	kindResolver?: SchedulerKindResolver
 	chainCompleteTrigger?: SchedulerChainCompleteTrigger
 	chainCompleteTriggerForChain?: SchedulerChainCompleteTriggerForChain
 	onEvent?: (event: SchedulerEvent) => void | Promise<void>
@@ -240,7 +249,7 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 			if (item === null) continue
 
 			const activeRun = await spawnSchedulerRun(options, chain, item, slot, phase)
-			spawnedRuns.push(activeRun)
+			if (activeRun !== null) spawnedRuns.push(activeRun)
 		}
 
 		if (await completeChainIfReady(options, chain, undefined, chainStatuses.terminal)) completedChainIds.push(chain.id)
@@ -359,7 +368,29 @@ async function spawnSchedulerRun(
 	item: ItemRecord,
 	slot: SchedulerSlot,
 	phase: string,
-): Promise<SchedulerActiveRun> {
+): Promise<SchedulerActiveRun | null> {
+	const kindResolver = options.kindResolver ?? defaultSchedulerKindResolver
+	const kindResult = await kindResolver({ chain, item })
+	if (!kindResult.ok || kindResult.kind === null) {
+		const reason = kindResult.ok
+			? `expected exactly one kind:* label, found 0 on ${chain.repository || "<unconfigured>"}#${item.issueNumber}`
+			: kindResult.error
+		const abortedAt = nowSeconds(options)
+		options.store.updateItem(item.id, { status: "blocked", updatedAt: abortedAt })
+		console.warn(`coder-loop scheduler: kind label check failed for chain=${chain.name} item=${item.id} issue=#${item.issueNumber}: ${reason}`)
+		await emit(options, {
+			type: "spawn.aborted",
+			slotKey: slot.key,
+			chainId: chain.id,
+			chainName: chain.name,
+			itemId: item.id,
+			issueNumber: item.issueNumber,
+			reason,
+			toStatus: "blocked",
+		})
+		return null
+	}
+
 	const worktreeManager = options.worktreeManager ?? createGitWorktreeManager(options.loopDataRootOptions)
 	const worktreePath = slot.worktreePath ?? await worktreeManager({ chain, repoCwd: item.repoCwd, slotKey: slot.key })
 	slot.worktreePath = worktreePath
@@ -784,6 +815,11 @@ function freshResume(): ResumeDecision {
 	return { kind: "fresh" }
 }
 
+export async function defaultSchedulerKindResolver(context: { chain: ChainRecord; item: ItemRecord }): Promise<ParsedIssueKind> {
+	const repository = context.chain.repository === "" ? null : context.chain.repository
+	return await resolveIssueKind(repository, String(context.item.issueNumber), context.item.extra)
+}
+
 function invocationPaths(targetCwd: string, agentCwd: string, presetDir: string, loopDataRoot: string): RunnerInvocationPaths {
 	return { targetCwd, agentCwd, presetDir, loopDataRoot }
 }
@@ -925,6 +961,7 @@ async function appendSchedulerRunEvent(options: SchedulerOptions, event: Schedul
 
 function schedulerEventRunId(event: SchedulerEvent): string | null {
 	if (event.type === "slot.busy") return event.activeRunId
+	if (event.type === "spawn.aborted") return null
 	if (event.type === "chain.completed") return event.runId ?? null
 	if (event.type === "chain.complete_trigger") return event.runId ?? null
 	if (event.type === "chain.complete_trigger_failed") return event.runId ?? null

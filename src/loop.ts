@@ -1981,7 +1981,7 @@ async function main() {
 		console.error(`Dry run: state=${resolveLoopDataPaths(loopDataRootOption(options.loopDataRoot)).dbFile}`)
 		console.error(`Dry run: selected=${selected ? getItemId(selected.item, options.preset) : "none"}`)
 		if (selected) {
-			const kindResult = await resolveIssueKind(options.repository, getItemId(selected.item, options.preset), selected.item)
+			const kindResult = await resolveIssueKind(options.repository, getItemId(selected.item, options.preset), selected.item.extra)
 			if (!kindResult.ok) {
 				console.error(`Dry run: issue kind label check failed: ${kindResult.error}`)
 				process.exit(1)
@@ -2101,7 +2101,7 @@ async function main() {
 		const iterPhase = phases[0]
 		if (!iterPhase) fail("preset must define at least one phase")
 		const reviewPhase = reviewPhaseForPreset(options.preset)
-		const kindResult = await resolveIssueKind(options.repository, selectedId, selected.item)
+		const kindResult = await resolveIssueKind(options.repository, selectedId, selected.item.extra)
 		if (!kindResult.ok) fail(`Issue kind label check failed: ${kindResult.error}`)
 		log(`Issue #${selectedId} kind=${kindResult.kind ?? "<none>"}`)
 		const ctx: ResolveContext = {
@@ -4583,16 +4583,16 @@ function isIssueKindValue(value: string): value is IssueKindValue {
 	return ISSUE_KIND_VALUES.includes(value as IssueKindValue)
 }
 
-function parseIssueKindFromQueueItem(item: QueueItem): ParsedIssueKind {
-	const raw = item.extra.issueKind ?? item.extra.kind
+function parseIssueKindFromExtra(extra: JsonObject): ParsedIssueKind {
+	const raw = extra.issueKind ?? extra.kind
 	if (raw === null || raw === undefined || raw === "") return { ok: true, kind: null }
 	if (typeof raw !== "string") return { ok: false, error: `queue item issue kind must be a string when repository is not configured` }
 	const label = raw.startsWith("kind:") ? raw : `kind:${raw}`
 	return parseKindFromLabels([label])
 }
 
-export async function resolveIssueKind(repository: string | null, issueId: string, item: QueueItem): Promise<ParsedIssueKind> {
-	const itemKind = parseIssueKindFromQueueItem(item)
+export async function resolveIssueKind(repository: string | null, issueId: string, extra: JsonObject): Promise<ParsedIssueKind> {
+	const itemKind = parseIssueKindFromExtra(extra)
 	if (!itemKind.ok || itemKind.kind !== null) return itemKind
 	if (repository !== null && /^\d+$/.test(issueId)) return fetchIssueKind(repository, issueId)
 	return itemKind

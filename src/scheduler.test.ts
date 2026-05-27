@@ -644,6 +644,145 @@ describe("scheduler default statusFromExit (end-to-end via fixture)", () => {
 	})
 })
 
+describe("scheduler kind-label gate", () => {
+	test("missing kind:* label aborts spawn, marks item blocked, leaves no current run", async () => {
+		const fixture = await createFixture("kind-gate-missing")
+		try {
+			const chain = createChain(fixture.store, "kind-gate-missing-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 9001, repoCwd: "/repo/a", issueKind: null })
+
+			const warn = captureConsoleWarn()
+			let tick
+			try {
+				tick = await schedulerTick(fixture.options({
+					kindResolver: () => ({ ok: true, kind: null }),
+				}))
+			} finally {
+				warn.restore()
+			}
+
+			expect(tick.spawnedRuns).toHaveLength(0)
+			expect(fixture.worktreeCalls).toHaveLength(0)
+			expect(fixture.store.getItem(item.id)?.status).toBe("blocked")
+			expect(fixture.store.getCurrentRun(chain.id)).toBeNull()
+			expect(listActiveRuns(fixture.state)).toHaveLength(0)
+			const aborted = fixture.schedulerEvents.find((event) => event.type === "spawn.aborted")
+			expect(aborted).toMatchObject({
+				type: "spawn.aborted",
+				chainId: chain.id,
+				itemId: item.id,
+				issueNumber: 9001,
+				toStatus: "blocked",
+			})
+			expect(warn.messages.some((line) => /kind label check failed/.test(line))).toBe(true)
+			expect(warn.messages.some((line) => /expected exactly one kind:\* label, found 0/.test(line))).toBe(true)
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("multiple kind:* labels abort spawn with 'expected exactly one kind' error", async () => {
+		const fixture = await createFixture("kind-gate-multi")
+		try {
+			const chain = createChain(fixture.store, "kind-gate-multi-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 9002, repoCwd: "/repo/a" })
+
+			const warn = captureConsoleWarn()
+			let tick
+			try {
+				tick = await schedulerTick(fixture.options({
+					kindResolver: () => ({ ok: false, error: "expected exactly one kind:* label, found 2: kind:code, kind:comment" }),
+				}))
+			} finally {
+				warn.restore()
+			}
+
+			expect(tick.spawnedRuns).toHaveLength(0)
+			expect(fixture.store.getItem(item.id)?.status).toBe("blocked")
+			expect(fixture.store.getCurrentRun(chain.id)).toBeNull()
+			const aborted = fixture.schedulerEvents.find((event) => event.type === "spawn.aborted")
+			expect(aborted).toMatchObject({
+				type: "spawn.aborted",
+				chainId: chain.id,
+				itemId: item.id,
+				issueNumber: 9002,
+			})
+			expect(aborted?.type === "spawn.aborted" ? aborted.reason : null).toMatch(/expected exactly one kind/)
+			expect(warn.messages.some((line) => /expected exactly one kind/.test(line))).toBe(true)
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("unknown kind:* value aborts spawn with 'unknown kind label' error", async () => {
+		const fixture = await createFixture("kind-gate-unknown")
+		try {
+			const chain = createChain(fixture.store, "kind-gate-unknown-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 9003, repoCwd: "/repo/a" })
+
+			const warn = captureConsoleWarn()
+			let tick
+			try {
+				tick = await schedulerTick(fixture.options({
+					kindResolver: () => ({ ok: false, error: 'unknown kind label "kind:foo" (allowed: kind:code, kind:comment, kind:code-spike, kind:blocked)' }),
+				}))
+			} finally {
+				warn.restore()
+			}
+
+			expect(tick.spawnedRuns).toHaveLength(0)
+			expect(fixture.store.getItem(item.id)?.status).toBe("blocked")
+			expect(fixture.store.getCurrentRun(chain.id)).toBeNull()
+			const aborted = fixture.schedulerEvents.find((event) => event.type === "spawn.aborted")
+			expect(aborted?.type === "spawn.aborted" ? aborted.reason : null).toMatch(/unknown kind label/)
+			expect(warn.messages.some((line) => /unknown kind label/.test(line))).toBe(true)
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("kind:code label from item.extra passes gate, default resolver does not call gh", async () => {
+		const fixture = await createFixture("kind-gate-extra-pass")
+		try {
+			const chain = createChain(fixture.store, "kind-gate-extra-pass-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 9004, repoCwd: "/repo/a", issueKind: "code-spike" })
+
+			const tick = await schedulerTick(fixture.options())
+			expect(tick.spawnedRuns).toHaveLength(1)
+			await tick.spawnedRuns[0]!.closed
+			expect(fixture.store.getItem(item.id)?.status).toBe("done")
+			expect(fixture.schedulerEvents.some((event) => event.type === "spawn.aborted")).toBe(false)
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("blocked item is treated as terminal — chain completes when only aborted item remains", async () => {
+		const fixture = await createFixture("kind-gate-chain-completes")
+		try {
+			const chain = createChain(fixture.store, "kind-gate-chain-completes-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 9005, repoCwd: "/repo/a", issueKind: null })
+
+			const warn = captureConsoleWarn()
+			let tick
+			try {
+				tick = await schedulerTick(fixture.options({
+					kindResolver: () => ({ ok: true, kind: null }),
+				}))
+			} finally {
+				warn.restore()
+			}
+
+			expect(tick.spawnedRuns).toHaveLength(0)
+			expect(tick.completedChainIds).toEqual([chain.id])
+			expect(fixture.store.getItem(item.id)?.status).toBe("blocked")
+			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
+		} finally {
+			fixture.store.close()
+		}
+	})
+})
+
 describe("resolveSchedulerPresetPhasePrompt", () => {
 	const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
 
@@ -797,11 +936,12 @@ function createChain(
 function createItem(
 	store: ReturnType<typeof openSqliteStateStore>,
 	chain: ChainRecord,
-	input: { issueNumber: number; repoCwd: string; sleepMs?: number; exitCode?: number; summary?: string | null },
+	input: { issueNumber: number; repoCwd: string; sleepMs?: number; exitCode?: number; summary?: string | null; issueKind?: string | null },
 ) {
 	const extra: JsonObject = {
 		sleepMs: input.sleepMs ?? 5,
 		exitCode: input.exitCode ?? 0,
+		issueKind: input.issueKind === undefined ? "code" : input.issueKind,
 	}
 	if (Object.prototype.hasOwnProperty.call(input, "summary")) extra.summary = input.summary ?? null
 	return store.createItem({
@@ -861,6 +1001,20 @@ function createDeferred(): { promise: Promise<void>; resolve: () => void; reject
 		reject = rejectPromise
 	})
 	return { promise, resolve, reject }
+}
+
+function captureConsoleWarn(): { messages: string[]; restore: () => void } {
+	const original = console.warn
+	const messages: string[] = []
+	console.warn = (...args: unknown[]) => {
+		messages.push(args.map((arg) => (typeof arg === "string" ? arg : JSON.stringify(arg))).join(" "))
+	}
+	return {
+		messages,
+		restore: () => {
+			console.warn = original
+		},
+	}
 }
 
 async function promiseSettledWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<boolean> {
