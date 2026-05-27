@@ -1,11 +1,19 @@
 import { describe, expect, test } from "bun:test"
 import { appendFile, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises"
+import { mkdirSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, resolve } from "node:path"
 import { startCoderLoopDaemon } from "./daemon"
 import { chainCompleteTriggerPhases, loadPreset } from "./loop"
+import { reviewOnEmptyLockPathForChainName, serializeSchedulerReviewOnEmptyLock } from "./scheduler"
 import { openSqliteStateStore } from "./sqlite-state"
 import { resolveChainRuntimePaths } from "./runtime-paths"
+
+function preInstallReviewOnEmptyLockByName(chainName: string, loopDataRoot: string, runId = "test-pre-installed"): void {
+	const lockPath = reviewOnEmptyLockPathForChainName(chainName, { loopDataRoot })
+	mkdirSync(resolve(lockPath, ".."), { recursive: true })
+	writeFileSync(lockPath, serializeSchedulerReviewOnEmptyLock(runId, new Date(0)))
+}
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
@@ -818,6 +826,7 @@ describe("smoke: dependency-aware scheduler selection", () => {
 			},
 		})
 		try {
+			preInstallReviewOnEmptyLockByName("dependency-scheduler", loopDataRoot)
 			const store = openSqliteStateStore({ loopDataRoot })
 			try {
 				const chain = store.createChain({

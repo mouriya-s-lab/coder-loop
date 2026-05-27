@@ -238,6 +238,9 @@ const DEFAULT_PHASE = "iteration"
 const DEFAULT_PENDING_STATUSES = ["queued", "changes_requested"] as const
 const DEFAULT_TERMINAL_STATUSES = ["done", "moot", "blocked"] as const
 const CHAIN_COMPLETE_TRIGGER_STATE_METADATA_KEY = "coderLoopChainCompleteTrigger"
+const REVIEW_ON_EMPTY_LOCK_FILENAME = "review-on-empty.lock"
+const REVIEW_ON_EMPTY_LOCK_REASON = "chain-queue-drained"
+const REVIEW_ON_EMPTY_FALLBACK_ITEM_ID = 0
 
 let fallbackRunSequence = 0
 
@@ -288,6 +291,14 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 
 			const activeRun = await spawnSchedulerRun(options, chain, next.item, slot, next.phase)
 			if (activeRun !== null) spawnedRuns.push(activeRun)
+		}
+
+		if (shouldRunReviewOnEmpty(options, chain, items, chainStatuses.terminal)) {
+			const reviewOnEmptyRun = await spawnSchedulerReviewOnEmptyRun(options, chain, items)
+			if (reviewOnEmptyRun !== null) {
+				spawnedRuns.push(reviewOnEmptyRun)
+				continue
+			}
 		}
 
 		if (await completeChainIfReady(options, chain, undefined, chainStatuses.terminal)) completedChainIds.push(chain.id)
@@ -770,10 +781,11 @@ async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecor
 	if (runId === undefined && hasFinalizingItemForChain(options.state, items)) return false
 	if (!allItemsTerminalIncludingFinalizing(options, chain.id, effectiveTerminalStatuses)) return false
 	if (options.state.finalizingChainIds.has(chain.id)) return false
-	const phasePlan = await resolvePhasePlanForChain(options, chain)
-	if (hasPendingItemLevelTrigger(options, chain.id, phasePlan)) return false
+	if (!reviewOnEmptyLockExistsForChain(chain, options.loopDataRootOptions)) return false
 	options.state.finalizingChainIds.add(chain.id)
 	try {
+		const phasePlan = await resolvePhasePlanForChain(options, chain)
+		if (hasPendingItemLevelTrigger(options, chain.id, phasePlan)) return false
 		if (!await chainCompletionTriggerAllowsCompletion(options, current, runId, effectiveTerminalStatuses)) return false
 		const refreshed = options.store.listChains().find((candidate) => candidate.id === chain.id)
 		if (refreshed?.status !== "active") return false
@@ -1005,6 +1017,277 @@ function nowIso(options: SchedulerOptions): string {
 
 function makeRunId(itemId: number): string {
 	return `run-${Date.now()}-${++fallbackRunSequence}-item-${itemId}`
+}
+
+function makeReviewOnEmptyRunId(chain: ChainRecord): string {
+	return `run-${Date.now()}-${++fallbackRunSequence}-chain-${chain.id}-review-on-empty`
+}
+
+export function reviewOnEmptyLockPathForChainName(chainName: string, options: LoopDataRootOptions | undefined): string {
+	const chainPaths = resolveChainRuntimePaths(chainName, options ?? {})
+	return resolve(chainPaths.chainRoot, REVIEW_ON_EMPTY_LOCK_FILENAME)
+}
+
+export function reviewOnEmptyLockPathForChain(chain: ChainRecord, options: LoopDataRootOptions | undefined): string {
+	return reviewOnEmptyLockPathForChainName(chain.name, options)
+}
+
+function reviewOnEmptyLockExistsForChain(chain: ChainRecord, options: LoopDataRootOptions | undefined): boolean {
+	return existsSync(reviewOnEmptyLockPathForChain(chain, options))
+}
+
+export function serializeSchedulerReviewOnEmptyLock(runId: string, acquiredAt: Date): string {
+	return `${JSON.stringify({ acquiredAt: acquiredAt.toISOString(), runId, reason: REVIEW_ON_EMPTY_LOCK_REASON }, null, "\t")}\n`
+}
+
+function shouldRunReviewOnEmpty(
+	options: SchedulerOptions,
+	chain: ChainRecord,
+	items: readonly ItemRecord[],
+	terminalStatuses: readonly string[],
+): boolean {
+	if (items.length === 0) return false
+	if (hasActiveSlotForChain(options.state, chain.id)) return false
+	if (!allItemsTerminalIncludingFinalizing(options, chain.id, terminalStatuses)) return false
+	if (options.state.finalizingChainIds.has(chain.id)) return false
+	if (reviewOnEmptyLockExistsForChain(chain, options.loopDataRootOptions)) return false
+	return true
+}
+
+function pickReviewOnEmptyRepresentativeItem(items: readonly ItemRecord[]): ItemRecord {
+	const sorted = [...items].sort((a, b) => b.updatedAt - a.updatedAt || b.id - a.id)
+	const first = sorted[0]
+	if (first === undefined) throw new Error("scheduler: review-on-empty representative item requested from empty queue")
+	return first
+}
+
+function makeReviewOnEmptyFallbackItem(chain: ChainRecord, representative: ItemRecord, reviewPhase: string): ItemRecord {
+	return {
+		id: REVIEW_ON_EMPTY_FALLBACK_ITEM_ID,
+		chainId: chain.id,
+		issueNumber: 0,
+		repoCwd: representative.repoCwd,
+		status: "",
+		attempts: 0,
+		title: null,
+		priority: null,
+		branch: null,
+		pr: null,
+		lastRunId: null,
+		lastSessionId: null,
+		issueFile: null,
+		evidenceDir: null,
+		agentCwd: representative.agentCwd,
+		runner: null,
+		phase: reviewPhase,
+		extra: {},
+		createdAt: representative.createdAt,
+		updatedAt: representative.updatedAt,
+	}
+}
+
+async function spawnSchedulerReviewOnEmptyRun(
+	options: SchedulerOptions,
+	chain: ChainRecord,
+	items: readonly ItemRecord[],
+): Promise<SchedulerActiveRun | null> {
+	if (items.length === 0) return null
+	const representative = pickReviewOnEmptyRepresentativeItem(items)
+	const slot = getOrCreateSlot(options.state, chain, representative.repoCwd)
+	if (slot.activeRun !== null) return null
+
+	const phasePlan = await resolvePhasePlanForChain(options, chain)
+	const reviewPhase = phasePlan.reviewPhase
+	const fallbackItem = makeReviewOnEmptyFallbackItem(chain, representative, reviewPhase)
+	const worktreeManager = options.worktreeManager ?? createGitWorktreeManager(options.loopDataRootOptions)
+	const worktreePath = slot.worktreePath ?? await worktreeManager({ chain, repoCwd: representative.repoCwd, slotKey: slot.key })
+	slot.worktreePath = worktreePath
+
+	const runner = await resolvePhaseRunner(options, { chain, item: fallbackItem, phase: reviewPhase })
+	const runId = options.runIdFactory?.({ chain, item: fallbackItem, phase: reviewPhase }) ?? makeReviewOnEmptyRunId(chain)
+	const startedAt = nowSeconds(options)
+	const presetDir = schedulerPresetDir(options, chain)
+	const context: SchedulerSpawnContext = { chain, item: fallbackItem, slot, runId, worktreePath, presetDir, phase: reviewPhase }
+	const rawPrompt = typeof options.prompt === "string" ? options.prompt : await options.prompt(context)
+	const renderedPrompt = await renderSchedulerSpawnPrompt({
+		rawPrompt,
+		presetDir,
+		phase: reviewPhase,
+		chain,
+		item: fallbackItem,
+		runId,
+		worktreePath,
+		issueKind: null,
+		loopDataRootOptions: options.loopDataRootOptions,
+		resume: freshResume(),
+	})
+	const runnerPlan = buildRunnerInvocation(
+		runner,
+		renderedPrompt,
+		freshResume(),
+		invocationPaths(representative.repoCwd, worktreePath, presetDir, resolveLoopDataPaths(options.loopDataRootOptions).root),
+	)
+	await initializeSchedulerRunArtifacts(options, chain, fallbackItem, runId, reviewPhase, startedAt, worktreePath)
+	const child = spawn(runnerPlan.binary, runnerPlan.args, {
+		cwd: worktreePath,
+		stdio: ["ignore", "pipe", "pipe"],
+		detached: true,
+	})
+	const activeRun = attachReviewOnEmptyCloseHandler(
+		options,
+		chain,
+		fallbackItem,
+		slot,
+		runId,
+		worktreePath,
+		startedAt,
+		reviewPhase,
+		child,
+		runner,
+		representative.repoCwd,
+	)
+	slot.activeRun = activeRun
+	await emit(options, {
+		type: "agent.spawn",
+		slotKey: slot.key,
+		chainId: chain.id,
+		itemId: fallbackItem.id,
+		runId,
+		pid: activeRun.pid,
+		worktreePath,
+		presetDir,
+	})
+	await emit(options, {
+		type: "phase.start",
+		ts: nowIso(options),
+		runId,
+		chainId: chain.id,
+		itemId: fallbackItem.id,
+		repoCwd: representative.repoCwd,
+		phase: reviewPhase,
+		pid: activeRun.pid,
+	})
+	return activeRun
+}
+
+function attachReviewOnEmptyCloseHandler(
+	options: SchedulerOptions,
+	chain: ChainRecord,
+	fallbackItem: ItemRecord,
+	slot: SchedulerSlot,
+	runId: string,
+	worktreePath: string,
+	startedAt: number,
+	phase: string,
+	child: ReturnType<typeof spawn>,
+	runner: AgentRunnerSelection,
+	repoCwd: string,
+): SchedulerActiveRun {
+	const stdout: Buffer[] = []
+	const stderr: Buffer[] = []
+	const closed = new Promise<SchedulerCompletedRun>((resolveClosed) => {
+		child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk))
+		child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk))
+		child.on("error", (error) => {
+			stderr.push(Buffer.from(error.message))
+		})
+		child.on("close", (code) => {
+			void (async () => {
+				const exitCode = code ?? 1
+				const stdoutText = Buffer.concat(stdout).toString("utf-8")
+				const stderrText = Buffer.concat(stderr).toString("utf-8")
+				const statusFromExit = options.statusFromExit?.({
+					exitCode,
+					stdout: stdoutText,
+					stderr: stderrText,
+					item: fallbackItem,
+					chain,
+					phase,
+					runner,
+				}) ?? defaultSchedulerStatusFromExit({ exitCode, stdout: stdoutText, phase, runnerKind: runner.kind })
+				const endedAt = nowSeconds(options)
+				try {
+					await writeSchedulerRunCompletionArtifacts(options, {
+						runId,
+						chain,
+						item: fallbackItem,
+						phase,
+						startedAt,
+						endedAt,
+						exitCode,
+						status: statusFromExit,
+						pid: child.pid ?? null,
+						worktreePath,
+						stdoutText,
+						stderrText,
+					})
+
+					const lockPath = reviewOnEmptyLockPathForChain(chain, options.loopDataRootOptions)
+					await mkdir(dirname(lockPath), { recursive: true })
+					await writeFile(lockPath, serializeSchedulerReviewOnEmptyLock(runId, new Date()))
+
+					if (slot.activeRun?.runId === runId) slot.activeRun = null
+					await emit(options, {
+						type: "agent.exit",
+						slotKey: slot.key,
+						chainId: chain.id,
+						itemId: fallbackItem.id,
+						runId,
+						exitCode,
+						status: statusFromExit,
+					})
+					await emit(options, {
+						type: "phase.end",
+						ts: nowIso(options),
+						runId,
+						chainId: chain.id,
+						itemId: fallbackItem.id,
+						phase,
+						exitCode,
+						durationSeconds: Math.max(0, endedAt - startedAt),
+						status: statusFromExit,
+					})
+					const chainStatuses = await schedulerStatusesForChain(options, chain)
+					await completeChainIfReady(options, chain, runId, [...chainStatuses.terminal])
+					resolveClosed({
+						runId,
+						itemId: fallbackItem.id,
+						chainId: chain.id,
+						repoCwd,
+						exitCode,
+						stdout: stdoutText,
+						stderr: stderrText,
+						status: statusFromExit,
+					})
+				} catch (error) {
+					if (slot.activeRun?.runId === runId) slot.activeRun = null
+					resolveClosed({
+						runId,
+						itemId: fallbackItem.id,
+						chainId: chain.id,
+						repoCwd,
+						exitCode,
+						stdout: stdoutText,
+						stderr: stderrText,
+						status: statusFromExit,
+					})
+					throw error
+				}
+			})()
+		})
+	})
+	const terminate = createRunTerminator(child, closed)
+	return {
+		runId,
+		pid: child.pid ?? null,
+		itemId: fallbackItem.id,
+		chainId: chain.id,
+		repoCwd,
+		worktreePath,
+		startedAt,
+		closed,
+		terminate,
+	}
 }
 
 function freshResume(): ResumeDecision {

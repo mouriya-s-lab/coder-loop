@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises"
+import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
 
 import {
@@ -8,9 +9,11 @@ import {
 	listActiveRuns,
 	renderSchedulerSpawnPrompt,
 	resumeDecisionForItem,
+	reviewOnEmptyLockPathForChain,
 	runSchedulerUntilIdle,
 	schedulerSlotWorktreePath,
 	schedulerTick,
+	serializeSchedulerReviewOnEmptyLock,
 	type SchedulerEvent,
 	type SchedulerOptions,
 	type SchedulerPhaseRunner,
@@ -42,6 +45,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("serial")
 		try {
 			const chain = createChain(fixture.store, "serial-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a" })
 			createItem(fixture.store, chain, { issueNumber: 180, repoCwd: "/repo/a" })
 			createItem(fixture.store, chain, { issueNumber: 181, repoCwd: "/repo/a" })
@@ -70,6 +74,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("multi-repo")
 		try {
 			const chain = createChain(fixture.store, "multi-repo-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", sleepMs: 80 })
 			createItem(fixture.store, chain, { issueNumber: 180, repoCwd: "/repo/b", sleepMs: 80 })
 
@@ -169,6 +174,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("completion")
 		try {
 			const chain = createChain(fixture.store, "completion-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a" })
 
 			await runSchedulerUntilIdle(fixture.options())
@@ -184,6 +190,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("completion-trigger")
 		try {
 			const chain = createChain(fixture.store, "completion-trigger-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			createItem(fixture.store, chain, { issueNumber: 2691, repoCwd: "/repo/a" })
 			const observedChainStatuses: string[] = []
 
@@ -214,6 +221,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("completion-trigger-overlap")
 		try {
 			const chain = createChain(fixture.store, "completion-trigger-overlap-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			createItem(fixture.store, chain, { issueNumber: 2696, repoCwd: "/repo/a" })
 			const triggerStarted = createDeferred()
 			const releaseTrigger = createDeferred()
@@ -257,6 +265,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("completion-trigger-active")
 		try {
 			const chain = createChain(fixture.store, "completion-trigger-active-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			createItem(fixture.store, chain, { issueNumber: 2692, repoCwd: "/repo/a" })
 			let triggerCalls = 0
 			const options = fixture.options({
@@ -302,6 +311,7 @@ describe("scheduler", () => {
 		const followUpFixture = await createFixture("completion-trigger-follow-up")
 		try {
 			const chain = createChain(followUpFixture.store, "completion-trigger-follow-up-chain")
+			preInstallReviewOnEmptyLock(chain, followUpFixture.loopDataRoot)
 			createItem(followUpFixture.store, chain, { issueNumber: 2693, repoCwd: "/repo/a" })
 
 			const tick = await schedulerTick(followUpFixture.options({
@@ -322,6 +332,7 @@ describe("scheduler", () => {
 		const failingFixture = await createFixture("completion-trigger-failing")
 		try {
 			const chain = createChain(failingFixture.store, "completion-trigger-failing-chain")
+			preInstallReviewOnEmptyLock(chain, failingFixture.loopDataRoot)
 			createItem(failingFixture.store, chain, { issueNumber: 2695, repoCwd: "/repo/a" })
 
 			const tick = await schedulerTick(failingFixture.options({
@@ -348,6 +359,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("manual-terminal-completion")
 		try {
 			const chain = createChain(fixture.store, "manual-terminal-completion-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 249, repoCwd: "/repo/a" })
 			fixture.store.updateItem(item.id, { status: "done", updatedAt: 1_800_000_500 })
 
@@ -366,6 +378,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("terminal-preserve")
 		try {
 			const chain = createChain(fixture.store, "terminal-preserve-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", sleepMs: 5_000 })
 
 			const tick = await schedulerTick(fixture.options())
@@ -486,6 +499,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("run-artifacts")
 		try {
 			const chain = createChain(fixture.store, "run-artifacts-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 203, repoCwd: "/repo/a" })
 
 			await runSchedulerUntilIdle(fixture.options())
@@ -530,6 +544,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("phase-events")
 		try {
 			const chain = createChain(fixture.store, "phase-events-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 286, repoCwd: "/repo/a" })
 
 			await runSchedulerUntilIdle(fixture.options())
@@ -883,6 +898,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 		const fixture = await createFixture("phase-ac6-review-terminal")
 		try {
 			const chain = createChain(fixture.store, "phase-ac6-review-terminal-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, {
 				issueNumber: 28906,
 				repoCwd: "/repo/a",
@@ -921,6 +937,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 		const fixture = await createFixture("trigger-b3-blocked-spawn")
 		try {
 			const chain = createChain(fixture.store, "trigger-b3-blocked-spawn-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, {
 				issueNumber: 29002,
 				repoCwd: "/repo/a",
@@ -1027,6 +1044,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 		const fixture = await createFixture("trigger-b3-no-match")
 		try {
 			const chain = createChain(fixture.store, "trigger-b3-no-match-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 29004, repoCwd: "/repo/a" })
 			fixture.store.updateItem(item.id, {
 				status: "blocked",
@@ -1053,6 +1071,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 		const fixture = await createFixture("trigger-b3-race")
 		try {
 			const chain = createChain(fixture.store, "trigger-b3-race-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, {
 				issueNumber: 29005,
 				repoCwd: "/repo/a",
@@ -1152,6 +1171,7 @@ describe("scheduler kind-label gate", () => {
 		const fixture = await createFixture("kind-gate-missing")
 		try {
 			const chain = createChain(fixture.store, "kind-gate-missing-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 9001, repoCwd: "/repo/a", issueKind: null })
 
 			const warn = captureConsoleWarn()
@@ -1188,6 +1208,7 @@ describe("scheduler kind-label gate", () => {
 		const fixture = await createFixture("kind-gate-multi")
 		try {
 			const chain = createChain(fixture.store, "kind-gate-multi-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 9002, repoCwd: "/repo/a" })
 
 			const warn = captureConsoleWarn()
@@ -1221,6 +1242,7 @@ describe("scheduler kind-label gate", () => {
 		const fixture = await createFixture("kind-gate-unknown")
 		try {
 			const chain = createChain(fixture.store, "kind-gate-unknown-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 9003, repoCwd: "/repo/a" })
 
 			const warn = captureConsoleWarn()
@@ -1248,6 +1270,7 @@ describe("scheduler kind-label gate", () => {
 		const fixture = await createFixture("kind-gate-extra-pass")
 		try {
 			const chain = createChain(fixture.store, "kind-gate-extra-pass-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 9004, repoCwd: "/repo/a", issueKind: "code-spike" })
 
 			const tick = await schedulerTick(fixture.options())
@@ -1264,6 +1287,7 @@ describe("scheduler kind-label gate", () => {
 		const fixture = await createFixture("kind-gate-chain-completes")
 		try {
 			const chain = createChain(fixture.store, "kind-gate-chain-completes-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 9005, repoCwd: "/repo/a", issueKind: null })
 
 			const warn = captureConsoleWarn()
@@ -1280,6 +1304,128 @@ describe("scheduler kind-label gate", () => {
 			expect(tick.completedChainIds).toEqual([chain.id])
 			expect(fixture.store.getItem(item.id)?.status).toBe("blocked")
 			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
+		} finally {
+			fixture.store.close()
+		}
+	})
+})
+
+describe("scheduler per-chain review-on-empty (issue #292)", () => {
+	test("chain drained + lock missing → next tick spawns review-on-empty once with phase=review", async () => {
+		const fixture = await createFixture("review-on-empty-spawn")
+		try {
+			const chain = createChain(fixture.store, "review-on-empty-spawn-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 14001, repoCwd: "/repo/a" })
+
+			const firstTick = await schedulerTick(fixture.options())
+			expect(firstTick.spawnedRuns).toHaveLength(1)
+			const iterClosed = await firstTick.spawnedRuns[0]!.closed
+			expect(iterClosed.status).toBe("done")
+			expect(fixture.store.getItem(item.id)?.status).toBe("done")
+			expect(fixture.store.getChain(chain.id)?.status).toBe("active")
+
+			const lockPath = reviewOnEmptyLockPathForChain(chain, { loopDataRoot: fixture.loopDataRoot })
+			expect(existsSync(lockPath)).toBe(false)
+
+			const reviewTick = await schedulerTick(fixture.options())
+			expect(reviewTick.spawnedRuns).toHaveLength(1)
+			expect(reviewTick.completedChainIds).toEqual([])
+
+			const reviewRun = reviewTick.spawnedRuns[0]!
+			expect(reviewRun.itemId).toBe(0)
+			const phaseStartReview = fixture.schedulerEvents
+				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> => event.type === "phase.start")
+				.find((event) => event.runId === reviewRun.runId)
+			expect(phaseStartReview?.phase).toBe("review")
+			expect(phaseStartReview?.itemId).toBe(0)
+
+			await reviewRun.closed
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("review-on-empty close writes lock file with runId + ISO acquiredAt", async () => {
+		const fixture = await createFixture("review-on-empty-lock-write")
+		try {
+			const chain = createChain(fixture.store, "review-on-empty-lock-write-chain")
+			createItem(fixture.store, chain, { issueNumber: 14002, repoCwd: "/repo/a" })
+
+			const iterTick = await schedulerTick(fixture.options())
+			await iterTick.spawnedRuns[0]!.closed
+
+			const reviewTick = await schedulerTick(fixture.options())
+			expect(reviewTick.spawnedRuns).toHaveLength(1)
+			const reviewRun = reviewTick.spawnedRuns[0]!
+			await reviewRun.closed
+
+			const lockPath = reviewOnEmptyLockPathForChain(chain, { loopDataRoot: fixture.loopDataRoot })
+			expect(existsSync(lockPath)).toBe(true)
+			const lockPayload = JSON.parse(await readFile(lockPath, "utf-8")) as Record<string, unknown>
+			expect(lockPayload.runId).toBe(reviewRun.runId)
+			expect(typeof lockPayload.acquiredAt).toBe("string")
+			expect(Number.isFinite(Date.parse(String(lockPayload.acquiredAt)))).toBe(true)
+			expect(lockPayload.reason).toBe("chain-queue-drained")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("lock present + chain drained → next tick does NOT re-spawn review-on-empty", async () => {
+		const fixture = await createFixture("review-on-empty-lock-respected")
+		try {
+			const chain = createChain(fixture.store, "review-on-empty-lock-respected-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot, "lock-pre-existing")
+			const item = createItem(fixture.store, chain, { issueNumber: 14003, repoCwd: "/repo/a" })
+			fixture.store.updateItem(item.id, { status: "done", updatedAt: 1_800_006_000 })
+
+			const tick = await schedulerTick(fixture.options())
+			expect(tick.spawnedRuns).toHaveLength(0)
+			expect(tick.completedChainIds).toEqual([chain.id])
+			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
+
+			const lockPath = reviewOnEmptyLockPathForChain(chain, { loopDataRoot: fixture.loopDataRoot })
+			const lockPayload = JSON.parse(await readFile(lockPath, "utf-8")) as Record<string, unknown>
+			expect(lockPayload.runId).toBe("lock-pre-existing")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("lock present + new queued item appears → next tick spawns iter for the queued item, not review-on-empty", async () => {
+		const fixture = await createFixture("review-on-empty-lock-with-new-item")
+		try {
+			const chain = createChain(fixture.store, "review-on-empty-lock-with-new-item-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot, "lock-from-prior-drain")
+			const done = createItem(fixture.store, chain, { issueNumber: 14004, repoCwd: "/repo/a" })
+			fixture.store.updateItem(done.id, { status: "done", updatedAt: 1_800_007_000 })
+			const fresh = createItem(fixture.store, chain, { issueNumber: 14005, repoCwd: "/repo/a" })
+
+			const tick = await schedulerTick(fixture.options())
+			expect(tick.spawnedRuns).toHaveLength(1)
+			const spawnedRun = tick.spawnedRuns[0]!
+			expect(spawnedRun.itemId).toBe(fresh.id)
+			const phaseStart = fixture.schedulerEvents
+				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> => event.type === "phase.start")
+				.find((event) => event.runId === spawnedRun.runId)
+			expect(phaseStart?.phase).toBe("iteration")
+			await spawnedRun.closed
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("empty chain (no items) does not spawn review-on-empty", async () => {
+		const fixture = await createFixture("review-on-empty-no-items")
+		try {
+			const chain = createChain(fixture.store, "review-on-empty-no-items-chain")
+
+			const tick = await schedulerTick(fixture.options())
+			expect(tick.spawnedRuns).toHaveLength(0)
+			expect(tick.completedChainIds).toEqual([])
+			expect(fixture.store.getChain(chain.id)?.status).toBe("active")
+			const lockPath = reviewOnEmptyLockPathForChain(chain, { loopDataRoot: fixture.loopDataRoot })
+			expect(existsSync(lockPath)).toBe(false)
 		} finally {
 			fixture.store.close()
 		}
@@ -1319,6 +1465,7 @@ describe("resolveSchedulerPresetPhasePrompt", () => {
 		const fixture = await createPresetPromptIntegrationFixture("integration-resolver")
 		try {
 			const chain = createChain(fixture.store, "integration-resolver-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 283, repoCwd: "/repo/a" })
 
 			const tick = await schedulerTick(fixture.options())
@@ -2333,6 +2480,12 @@ function createChain(
 		updatedAt: 1_800_000_000,
 		...overrides,
 	})
+}
+
+function preInstallReviewOnEmptyLock(chain: ChainRecord, loopDataRoot: string, runId = "test-pre-installed"): void {
+	const lockPath = reviewOnEmptyLockPathForChain(chain, { loopDataRoot })
+	mkdirSync(resolve(lockPath, ".."), { recursive: true })
+	writeFileSync(lockPath, serializeSchedulerReviewOnEmptyLock(runId, new Date(0)))
 }
 
 function createItem(

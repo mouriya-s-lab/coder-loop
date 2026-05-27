@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { spawn } from "node:child_process"
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { mkdirSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
 
 import {
@@ -12,7 +13,16 @@ import {
 	type DaemonResponse,
 } from "./daemon"
 import { buildCoderLoopStatusSnapshot } from "./loop"
-import { createGitWorktreeManager, schedulerSlotWorktreePath, type SchedulerEvent, type SchedulerKindResolver, type SchedulerOptions, type SchedulerWorktreeManager } from "./scheduler"
+import {
+	createGitWorktreeManager,
+	reviewOnEmptyLockPathForChainName,
+	schedulerSlotWorktreePath,
+	serializeSchedulerReviewOnEmptyLock,
+	type SchedulerEvent,
+	type SchedulerKindResolver,
+	type SchedulerOptions,
+	type SchedulerWorktreeManager,
+} from "./scheduler"
 import { resolveChainRuntimePaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
 
@@ -1112,6 +1122,7 @@ describe("daemon", () => {
 				repository: "mouriya-s-lab/coder-loop",
 			})).chain)
 			const chainId = numberValue(chain.id)
+			preInstallReviewOnEmptyLockByName("terminal-update-active-run-chain", fixture.loopDataRoot)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
 				issueNumber: 249,
@@ -1458,6 +1469,7 @@ describe("daemon", () => {
 				repository: "mouriya-s-lab/coder-loop",
 			})).chain)
 			const chainId = numberValue(chain.id)
+			preInstallReviewOnEmptyLockByName("scheduler-artifacts-chain", fixture.loopDataRoot)
 			await request(fixture, "item.add", {
 				chainId,
 				issueNumber: 203,
@@ -1884,6 +1896,7 @@ process.exit(0)
 					},
 				})).chain
 				const chainId = numberValue(record(result).id)
+				preInstallReviewOnEmptyLockByName("ac5-iter-chain", fixture.loopDataRoot)
 				await request(fixture, "item.add", {
 					chainId,
 					issueNumber: 287_301,
@@ -1920,6 +1933,7 @@ process.exit(0)
 					},
 				})).chain
 				const chainId = numberValue(record(result).id)
+				preInstallReviewOnEmptyLockByName("ac5-review-chain", fixture.loopDataRoot)
 				await request(fixture, "item.add", {
 					chainId,
 					issueNumber: 287_302,
@@ -2184,6 +2198,12 @@ type FixtureOptions = {
 	realWorktreeManager?: boolean
 	worktreeManager?: SchedulerWorktreeManager
 	kindResolver?: SchedulerKindResolver
+}
+
+function preInstallReviewOnEmptyLockByName(chainName: string, loopDataRoot: string, runId = "test-pre-installed"): void {
+	const lockPath = reviewOnEmptyLockPathForChainName(chainName, { loopDataRoot })
+	mkdirSync(resolve(lockPath, ".."), { recursive: true })
+	writeFileSync(lockPath, serializeSchedulerReviewOnEmptyLock(runId, new Date(0)))
 }
 
 async function startFixture(name: string, options: FixtureOptions = {}): Promise<Fixture> {
