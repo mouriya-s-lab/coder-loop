@@ -11,6 +11,7 @@ import {
 	type CoderLoopDaemon,
 	type DaemonResponse,
 } from "./daemon"
+import { buildCoderLoopStatusSnapshot } from "./loop"
 import { createGitWorktreeManager, schedulerSlotWorktreePath, type SchedulerEvent, type SchedulerKindResolver, type SchedulerOptions, type SchedulerWorktreeManager } from "./scheduler"
 import { resolveChainRuntimePaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
@@ -1481,12 +1482,110 @@ describe("daemon", () => {
 			expect(status).toMatchObject({ runId, chainId, issueNumber: 203, phase: "iteration", exitCode: 0, status: "done" })
 			expect(stdout).toContain("done:")
 			expect(stderr).toBe("")
-			expect(events.map((event) => event.type)).toEqual(["agent.spawn", "agent.exit", "chain.completed"])
+			expect(events.map((event) => event.type)).toEqual([
+				"agent.spawn",
+				"phase.start",
+				"agent.exit",
+				"phase.end",
+				"queue.terminal",
+				"chain.completed",
+			])
 			expect(daemonLog).toContain("scheduler.event")
 		} finally {
 			await fixture.daemon.stop()
 		}
 	})
+
+	test("status snapshot recent events include scheduler phase.start / phase.end / queue.terminal", async () => {
+		const chainName = "scheduler-status-events-chain"
+		// Use a long scheduler interval so the second item stays queued (chain stays active)
+		// while we snapshot status after the first item reaches terminal.
+		const fixture = await startFixture("scheduler-status-events", { schedulerIntervalMs: 60_000 })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: chainName,
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 304,
+				repoCwd: REPO_ROOT,
+				extra: { sleepMs: 5, exitCode: 0 },
+			})
+			await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 305,
+				repoCwd: REPO_ROOT,
+				extra: { sleepMs: 5, exitCode: 0 },
+			})
+			const item = await waitFor(async () => readItem(fixture.loopDataRoot, chainId, 304), (candidate) => candidate?.status === "done")
+			expect(item?.lastRunId).not.toBeNull()
+			const paths = resolveChainRuntimePaths(chainName, { loopDataRoot: fixture.loopDataRoot })
+
+			const snapshot = await buildCoderLoopStatusSnapshot({
+				targetCwd: REPO_ROOT,
+				configPath: null,
+				loopDataRoot: fixture.loopDataRoot,
+				chainName,
+				repository: "mouriya-s-lab/coder-loop",
+				output: "json",
+			})
+
+			expect(snapshot.state.kind).toBe("ok")
+			expect(snapshot.events.runId).toBe(item?.lastRunId ?? null)
+			expect(snapshot.events.exists).toBe(true)
+			expect(snapshot.events.path).toBe(paths.runEventsFile(item?.lastRunId ?? ""))
+			expect(snapshot.events.error).toBeNull()
+			const eventTypes = snapshot.events.recent.map((event) =>
+				typeof event === "object" && event !== null && !Array.isArray(event) && typeof event.type === "string" ? event.type : null,
+			)
+			expect(eventTypes).toContain("phase.start")
+			expect(eventTypes).toContain("phase.end")
+			expect(eventTypes).toContain("queue.terminal")
+
+			const cli = Bun.spawn({
+				cmd: [
+					"bun",
+					resolve(REPO_ROOT, "src/loop.ts"),
+					"status",
+					REPO_ROOT,
+					"--chain",
+					chainName,
+					"--loop-data-root",
+					fixture.loopDataRoot,
+					"--repo",
+					"mouriya-s-lab/coder-loop",
+					"--json",
+				],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+				env: { ...process.env, CODER_LOOP_DATA_DIR: fixture.loopDataRoot },
+			})
+			const [cliStdout, cliStderr, cliExit] = await Promise.all([
+				new Response(cli.stdout).text(),
+				new Response(cli.stderr).text(),
+				cli.exited,
+			])
+			if (cliExit !== 0) {
+				console.error("CLI_STDERR", cliStderr)
+				console.error("CLI_STDOUT", cliStdout)
+			}
+			expect(cliExit).toBe(0)
+			const cliPayload = JSON.parse(cliStdout) as { events: { recent: unknown[] } }
+			const cliTypes = cliPayload.events.recent.map((event) =>
+				typeof event === "object" && event !== null && !Array.isArray(event) && typeof (event as Record<string, unknown>).type === "string"
+					? ((event as Record<string, unknown>).type as string)
+					: null,
+			)
+			expect(cliTypes).toContain("phase.start")
+			expect(cliTypes).toContain("phase.end")
+			expect(cliTypes).toContain("queue.terminal")
+		} finally {
+			await fixture.daemon.stop()
+		}
+	}, 30_000)
 
 	test("daemon scheduler uses bundled preset directory from the chain", async () => {
 		const fixture = await startFixture("scheduler-chain-preset", { schedulerIntervalMs: 1_000, schedulerPresetDir: null })
