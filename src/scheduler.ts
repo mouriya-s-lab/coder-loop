@@ -9,11 +9,13 @@ import {
 	hasIterationSummaryMarker,
 	parseReviewSummaryVerdict,
 	resolveIssueKind,
+	selectRunnerForPhase,
 	type AgentRunnerKind,
 	type AgentRunnerSelection,
 	type JsonObject,
 	type JsonValue,
 	type ParsedIssueKind,
+	type PhaseRunnerSelectionInput,
 	type ResumeDecision,
 	type RunnerInvocationPaths,
 } from "./loop"
@@ -132,10 +134,22 @@ export type SchedulerKindResolver = (context: {
 	item: ItemRecord
 }) => Promise<ParsedIssueKind> | ParsedIssueKind
 
+export type SchedulerPhaseRunnerInput = {
+	chain: ChainRecord
+	item: ItemRecord
+	phase: string
+}
+
+export type SchedulerPhaseRunner = (input: SchedulerPhaseRunnerInput) => AgentRunnerSelection | Promise<AgentRunnerSelection>
+
+export type SchedulerPhaseRunnerSelectionResolver = (chain: ChainRecord) => PhaseRunnerSelectionInput | Promise<PhaseRunnerSelectionInput>
+
 export type SchedulerOptions = {
 	store: SchedulerStore
 	state: SchedulerState
-	runner: AgentRunnerSelection
+	runner?: AgentRunnerSelection
+	phaseRunner?: SchedulerPhaseRunner
+	phaseRunnerSelectionForChain?: SchedulerPhaseRunnerSelectionResolver
 	presetDir: string
 	presetDirForChain?: (chain: ChainRecord) => string
 	phase?: string
@@ -168,6 +182,7 @@ export type SchedulerStatusFromExitContext = {
 	item: ItemRecord
 	chain: ChainRecord
 	phase: string
+	runner: AgentRunnerSelection
 }
 
 export type DefaultSchedulerStatusFromExitInput = {
@@ -398,6 +413,7 @@ async function spawnSchedulerRun(
 	const worktreePath = slot.worktreePath ?? await worktreeManager({ chain, repoCwd: item.repoCwd, slotKey: slot.key })
 	slot.worktreePath = worktreePath
 
+	const runner = await resolvePhaseRunner(options, { chain, item, phase })
 	const runId = options.runIdFactory?.({ chain, item, phase }) ?? makeRunId(item.id)
 	const startedAt = nowSeconds(options)
 	options.store.recordRun({
@@ -427,7 +443,7 @@ async function spawnSchedulerRun(
 	const context: SchedulerSpawnContext = { chain, item, slot, runId, worktreePath, presetDir, phase }
 	const prompt = typeof options.prompt === "string" ? options.prompt : await options.prompt(context)
 	const runnerPlan = buildRunnerInvocation(
-		options.runner,
+		runner,
 		prompt,
 		freshResume(),
 		invocationPaths(item.repoCwd, worktreePath, presetDir, resolveLoopDataPaths(options.loopDataRootOptions).root),
@@ -438,7 +454,7 @@ async function spawnSchedulerRun(
 		stdio: ["ignore", "pipe", "pipe"],
 		detached: true,
 	})
-	const activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, phase, child)
+	const activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, phase, child, runner)
 	options.store.setCurrentRun({
 		chainId: chain.id,
 		phase,
@@ -494,6 +510,7 @@ function attachRunCloseHandler(
 	startedAt: number,
 	phase: string,
 	child: ReturnType<typeof spawn>,
+	runner: AgentRunnerSelection,
 ): SchedulerActiveRun {
 	const stdout: Buffer[] = []
 	const stderr: Buffer[] = []
@@ -508,8 +525,8 @@ function attachRunCloseHandler(
 				const exitCode = code ?? 1
 				const stdoutText = Buffer.concat(stdout).toString("utf-8")
 				const stderrText = Buffer.concat(stderr).toString("utf-8")
-				const statusFromExit = options.statusFromExit?.({ exitCode, stdout: stdoutText, stderr: stderrText, item, chain, phase })
-					?? defaultSchedulerStatusFromExit({ exitCode, stdout: stdoutText, phase, runnerKind: options.runner.kind })
+				const statusFromExit = options.statusFromExit?.({ exitCode, stdout: stdoutText, stderr: stderrText, item, chain, phase, runner })
+					?? defaultSchedulerStatusFromExit({ exitCode, stdout: stdoutText, phase, runnerKind: runner.kind })
 				const terminalStatuses = new Set((await schedulerStatusesForChain(options, chain)).terminal)
 				const currentItem = options.store.getItem(item.id)
 				const status = currentItem !== null && terminalStatuses.has(currentItem.status) ? currentItem.status : statusFromExit
@@ -857,6 +874,22 @@ function freshResume(): ResumeDecision {
 export async function defaultSchedulerKindResolver(context: { chain: ChainRecord; item: ItemRecord }): Promise<ParsedIssueKind> {
 	const repository = context.chain.repository === "" ? null : context.chain.repository
 	return await resolveIssueKind(repository, String(context.item.issueNumber), context.item.extra)
+}
+
+async function resolvePhaseRunner(
+	options: SchedulerOptions,
+	input: SchedulerPhaseRunnerInput,
+): Promise<AgentRunnerSelection> {
+	if (options.phaseRunner !== undefined) return await options.phaseRunner(input)
+	if (options.phaseRunnerSelectionForChain !== undefined) {
+		const selection = await options.phaseRunnerSelectionForChain(input.chain)
+		return selectRunnerForPhase(input.phase, input.item, selection)
+	}
+	if (options.runner !== undefined) return options.runner
+	throw new SchedulerError(
+		"spawn_failed",
+		`scheduler: no runner configured for chain=${input.chain.name} item=${input.item.id} phase=${input.phase}; set SchedulerOptions.phaseRunner, .phaseRunnerSelectionForChain, or .runner`,
+	)
 }
 
 function invocationPaths(targetCwd: string, agentCwd: string, presetDir: string, loopDataRoot: string): RunnerInvocationPaths {
