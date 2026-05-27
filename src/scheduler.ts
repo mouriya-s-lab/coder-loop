@@ -10,6 +10,7 @@ import {
 	hasIterationSummaryMarker,
 	loadPreset,
 	parseReviewSummaryVerdict,
+	parseSessionIdFromRunnerStream,
 	renderFragmentIndex,
 	renderPrompt,
 	resolveIssueKind,
@@ -539,6 +540,7 @@ async function spawnSchedulerRun(
 	const presetDir = schedulerPresetDir(options, chain)
 	const context: SchedulerSpawnContext = { chain, item, slot, runId, worktreePath, presetDir, phase }
 	const rawPrompt = typeof options.prompt === "string" ? options.prompt : await options.prompt(context)
+	const resumeDecision = resumeDecisionForItem(item)
 	const renderedPrompt = await renderSchedulerSpawnPrompt({
 		rawPrompt,
 		presetDir,
@@ -549,11 +551,12 @@ async function spawnSchedulerRun(
 		worktreePath,
 		issueKind: kindResult.kind,
 		loopDataRootOptions: options.loopDataRootOptions,
+		resume: resumeDecision,
 	})
 	const runnerPlan = buildRunnerInvocation(
 		runner,
 		renderedPrompt,
-		freshResume(),
+		resumeDecision,
 		invocationPaths(item.repoCwd, worktreePath, presetDir, resolveLoopDataPaths(options.loopDataRootOptions).root),
 	)
 	await initializeSchedulerRunArtifacts(options, chain, item, runId, phase, startedAt, worktreePath)
@@ -674,8 +677,18 @@ function attachRunCloseHandler(
 						status,
 					})
 					options.store.completeRun(runId, { endedAt, exitCode, extra: { stdoutBytes: stdoutText.length, stderrBytes: stderrText.length } })
+					const parsedSessionId = parseSessionIdFromRunnerStream(runner.kind, stdoutText)
 					if (currentItem === null || !terminalStatuses.has(currentItem.status)) {
-						options.store.updateItem(item.id, { status, lastRunId: runId, agentCwd: worktreePath, updatedAt: endedAt })
+						const update: Parameters<typeof options.store.updateItem>[1] = {
+							status,
+							lastRunId: runId,
+							agentCwd: worktreePath,
+							updatedAt: endedAt,
+						}
+						if (parsedSessionId !== null) update.lastSessionId = parsedSessionId
+						options.store.updateItem(item.id, update)
+					} else if (parsedSessionId !== null) {
+						options.store.updateItem(item.id, { lastSessionId: parsedSessionId, updatedAt: endedAt })
 					}
 					if (itemTransitionedToTerminal) {
 						await emit(options, {
@@ -869,6 +882,7 @@ function chainCompletionFingerprint(chain: ChainRecord, items: readonly ItemReco
 				branch: item.branch,
 				pr: item.pr,
 				lastRunId: item.lastRunId,
+				lastSessionId: item.lastSessionId,
 				issueFile: item.issueFile,
 				evidenceDir: item.evidenceDir,
 				agentCwd: item.agentCwd,
@@ -997,6 +1011,11 @@ function freshResume(): ResumeDecision {
 	return { kind: "fresh" }
 }
 
+export function resumeDecisionForItem(item: ItemRecord): ResumeDecision {
+	if (item.lastSessionId === null || item.lastSessionId === "") return freshResume()
+	return { kind: "resume", sessionId: item.lastSessionId }
+}
+
 export async function defaultSchedulerKindResolver(context: { chain: ChainRecord; item: ItemRecord }): Promise<ParsedIssueKind> {
 	const repository = context.chain.repository === "" ? null : context.chain.repository
 	return await resolveIssueKind(repository, String(context.item.issueNumber), context.item.extra)
@@ -1032,6 +1051,7 @@ export type SchedulerPromptRenderInput = {
 	worktreePath: string
 	issueKind: IssueKind
 	loopDataRootOptions?: LoopDataRootOptions | undefined
+	resume?: ResumeDecision
 }
 
 export async function renderSchedulerSpawnPrompt(input: SchedulerPromptRenderInput): Promise<string> {
@@ -1047,6 +1067,7 @@ export async function renderSchedulerSpawnPrompt(input: SchedulerPromptRenderInp
 		worktreePath: input.worktreePath,
 		issueKind: input.issueKind,
 		loopDataRootOptions: input.loopDataRootOptions,
+		resume: input.resume ?? resumeDecisionForItem(input.item),
 	})
 	return renderPrompt(input.rawPrompt, presetPhase, ctx)
 }
@@ -1060,10 +1081,13 @@ export function buildSchedulerResolveContext(input: {
 	worktreePath: string
 	issueKind: IssueKind
 	loopDataRootOptions?: LoopDataRootOptions | undefined
+	resume?: ResumeDecision
 }): ResolveContext {
 	const chainPaths = resolveChainRuntimePaths(input.chain.name, input.loopDataRootOptions)
 	const evidenceDir = resolveItemEvidenceDir(input.item, chainPaths.issueEvidenceDir(input.item.issueNumber))
 	const currentIssueFile = resolveItemIssueFile(input.item, chainPaths.issueFile(input.item.issueNumber))
+	const resume = input.resume ?? resumeDecisionForItem(input.item)
+	const resumedSessionId = resume.kind === "resume" ? resume.sessionId : ""
 	const runtime: RuntimeBindings = {
 		runId: input.runId,
 		targetCwd: input.item.repoCwd,
@@ -1077,9 +1101,10 @@ export function buildSchedulerResolveContext(input: {
 		logDir: chainPaths.runsDir,
 		presetDir: input.preset.presetDir,
 		fragmentIndex: renderFragmentIndex(input.preset),
-		runIdGeneration: "new",
-		resumedFromPhase: "",
+		runIdGeneration: resumedSessionId === "" ? "new" : "resumed",
+		resumedFromPhase: resumedSessionId === "" ? "" : (input.item.phase ?? ""),
 		resumedStartedAt: "",
+		resumedSessionId,
 		issueKind: input.issueKind ?? "",
 		chainName: input.chain.name,
 		chainUmbrellaRepo: input.chain.umbrellaRepo ?? "",

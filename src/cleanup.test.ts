@@ -20,6 +20,7 @@ describe("phase C cleanup guards", () => {
 				runIdGeneration: "new",
 				resumedFromPhase: null,
 				resumedStartedAt: null,
+				resumedSessionId: null,
 			},
 			issueKind: "code",
 		})
@@ -40,6 +41,7 @@ describe("phase C cleanup guards", () => {
 			"presetDir",
 			"repoCwd",
 			"resumedFromPhase",
+			"resumedSessionId",
 			"resumedStartedAt",
 			"runId",
 			"runIdGeneration",

@@ -939,6 +939,7 @@ function makeFixtureRuntime(overrides: Partial<RuntimeBindings> = {}): RuntimeBi
 		runIdGeneration: "new",
 		resumedFromPhase: "",
 		resumedStartedAt: "",
+		resumedSessionId: "",
 		issueKind: "",
 		chainName: "",
 		chainUmbrellaRepo: "",
@@ -1039,6 +1040,7 @@ describe("renderPrompt with bundled preset", () => {
 			runIdGeneration: "resumed",
 			resumedFromPhase: preset.phases[0]!.name,
 			resumedStartedAt: "2026-05-10T11:50:00Z",
+			resumedSessionId: "sess-render-prompt-1",
 			issueKind: "code",
 			chainName: "preset-render-chain",
 			chainUmbrellaRepo: "Mouriya-Emma/umbrellas",
@@ -1073,6 +1075,7 @@ describe("renderPrompt with bundled preset", () => {
 			`RUN_ID_GENERATION=${runtime.runIdGeneration}`,
 			`RESUMED_FROM_PHASE=${runtime.resumedFromPhase}`,
 			`RESUMED_STARTED_AT=${runtime.resumedStartedAt}`,
+			`RESUMED_SESSION_ID=${runtime.resumedSessionId}`,
 			`ISSUE_BRANCH=${item.branch}`,
 			`ISSUE_PR=${item.pr}`,
 			`ISSUE_STATUS=${item.status}`,
@@ -1497,7 +1500,7 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 	test("buildRuntimeBindings exposes all whitelisted runtime keys", async () => {
 		const preset = await bundledPreset()
 		const options = await makeFixtureOptions(preset)
-		const issueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null }
+		const issueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null, resumedSessionId: null }
 		const runtime = buildRuntimeBindings({
 			options,
 			runId: "run-1",
@@ -1521,7 +1524,7 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 		const preset = await bundledPreset()
 		const baseOptions = await makeFixtureOptions(preset)
 		const options = { ...baseOptions, loopDataRoot: resolve(baseOptions.targetCwd, "loop-data") }
-		const issueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null }
+		const issueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null, resumedSessionId: null }
 		const paths = buildCentralRuntimeBindingPaths({
 			options,
 			chain: makeChainRecord({ name: "central-chain" }),
@@ -1552,7 +1555,7 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 		const preset = await bundledPreset()
 		const baseOptions = await makeFixtureOptions(preset)
 		const options = { ...baseOptions, loopDataRoot: resolve(baseOptions.targetCwd, "loop-data") }
-		const issueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null }
+		const issueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null, resumedSessionId: null }
 		const paths = buildCentralRuntimeBindingPaths({
 			options,
 			chain: makeChainRecord({ name: "central-chain" }),
@@ -1595,7 +1598,7 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 		const preset = await bundledPreset()
 		const baseOptions = await makeFixtureOptions(preset)
 		const options = { ...baseOptions, loopDataRoot: resolve(baseOptions.targetCwd, "loop-data") }
-		const issueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null }
+		const issueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null, resumedSessionId: null }
 		const paths = buildCentralRuntimeBindingPaths({
 			options,
 			chain: makeChainRecord({ name: "central-chain" }),
@@ -1633,7 +1636,7 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 	test("buildRuntimeBindings forwards a per-item agentCwd distinct from targetCwd", async () => {
 		const preset = await bundledPreset()
 		const options = await makeFixtureOptions(preset)
-		const issueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null }
+		const issueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null, resumedSessionId: null }
 		const runtime = buildRuntimeBindings({
 			options,
 			runId: "run-cross-repo",
@@ -1654,6 +1657,7 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 			runIdGeneration: "resumed",
 			resumedFromPhase: preset.phases[0]!.name,
 			resumedStartedAt: "2026-05-10T11:50:00Z",
+			resumedSessionId: null,
 		}
 		const runtime = buildRuntimeBindings({
 			options,
@@ -1673,7 +1677,7 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 	test("buildRuntimeBindings maps issueKind null to empty string", async () => {
 		const preset = await bundledPreset()
 		const options = await makeFixtureOptions(preset)
-		const issueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null }
+		const issueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null, resumedSessionId: null }
 		const runtime = buildRuntimeBindings({
 			options,
 			runId: "run-3",
@@ -1689,7 +1693,7 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 	test("buildRuntimeBindings passes through 'comment' kind unchanged", async () => {
 		const preset = await bundledPreset()
 		const options = await makeFixtureOptions(preset)
-		const issueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null }
+		const issueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null, resumedSessionId: null }
 		const runtime = buildRuntimeBindings({
 			options,
 			runId: "run-4",
@@ -1705,7 +1709,7 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 	test("buildRuntimeBindings passes through 'code-spike' kind unchanged", async () => {
 		const preset = await bundledPreset()
 		const options = await makeFixtureOptions(preset)
-		const issueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null }
+		const issueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null, resumedSessionId: null }
 		const runtime = buildRuntimeBindings({
 			options,
 			runId: "run-5",
@@ -1721,7 +1725,7 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 	test("buildRuntimeBindings passes through 'blocked' kind unchanged", async () => {
 		const preset = await bundledPreset()
 		const options = await makeFixtureOptions(preset)
-		const issueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null }
+		const issueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null, resumedSessionId: null }
 		const runtime = buildRuntimeBindings({
 			options,
 			runId: "run-6",
@@ -1749,6 +1753,40 @@ describe("buildRuntimeBindings / buildConfigBindings / renderFragmentIndex", () 
 		expect(index.split("\n").length).toBe(preset.fragments.length)
 		expect(index.startsWith(`- ${preset.fragments[0]!.id} (${preset.fragments[0]!.role}): `)).toBe(true)
 		expect(index.includes(preset.fragments[0]!.path)).toBe(true)
+	})
+
+	test("buildRuntimeBindings exposes resumedSessionId from IssueRunContext (issue #291 binding wiring)", async () => {
+		const preset = await bundledPreset()
+		const options = await makeFixtureOptions(preset)
+		const issueRun: IssueRunContext = {
+			runIdGeneration: "resumed",
+			resumedFromPhase: "iteration",
+			resumedStartedAt: "2026-05-27T00:00:00Z",
+			resumedSessionId: "sess-loop-binding-1",
+		}
+		const runtime = buildRuntimeBindings({
+			options,
+			runId: "run-resume-session",
+			currentIssueFile: "/tmp/issue.md",
+			evidenceDir: "/tmp/evidence",
+			agentCwd: options.targetCwd,
+			issueRun,
+			issueKind: "code",
+		})
+		expect(runtime.resumedSessionId).toBe("sess-loop-binding-1")
+		expect(runtime.resumedFromPhase).toBe("iteration")
+
+		const freshRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null, resumedSessionId: null }
+		const freshRuntime = buildRuntimeBindings({
+			options,
+			runId: "run-fresh",
+			currentIssueFile: "/tmp/issue.md",
+			evidenceDir: "/tmp/evidence",
+			agentCwd: options.targetCwd,
+			issueRun: freshRun,
+			issueKind: "code",
+		})
+		expect(freshRuntime.resumedSessionId).toBe("")
 	})
 })
 

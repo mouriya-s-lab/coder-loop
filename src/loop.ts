@@ -808,6 +808,7 @@ export type IssueRunContext = {
 	runIdGeneration: "new" | "resumed"
 	resumedFromPhase: string | null
 	resumedStartedAt: string | null
+	resumedSessionId: string | null
 }
 
 const ISSUE_KIND_VALUES = ["code", "comment", "code-spike", "blocked"] as const
@@ -830,6 +831,7 @@ const RUNTIME_BINDING_KEYS = [
 	"runIdGeneration",
 	"resumedFromPhase",
 	"resumedStartedAt",
+	"resumedSessionId",
 	"issueKind",
 	"chainName",
 	"chainUmbrellaRepo",
@@ -2058,7 +2060,7 @@ async function main() {
 				log("Empty queue: running review-on-empty for global state assessment.")
 				const fallbackItem = makeFallbackItem()
 				const fallbackRunId = makeRunId(null)
-				const fallbackIssueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null }
+				const fallbackIssueRun: IssueRunContext = { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null, resumedSessionId: null }
 				const fallbackCtx: ResolveContext = {
 					item: fallbackItem,
 					config: buildConfigBindings(options),
@@ -2293,7 +2295,7 @@ async function runTriggeredPhasesAfter(
 				currentIssueFile: issueFile,
 				evidenceDir,
 				agentCwd,
-				issueRun: { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null },
+				issueRun: { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null, resumedSessionId: null },
 				issueKind,
 				paths: buildCentralRuntimeBindingPaths({
 					options,
@@ -3911,7 +3913,7 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 				currentIssueFile,
 				evidenceDir,
 				agentCwd: targetCwd,
-				issueRun: { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null },
+				issueRun: { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null, resumedSessionId: null },
 				issueKind: null,
 				paths: buildCentralRuntimeBindingPaths({
 					options,
@@ -4463,6 +4465,7 @@ export function makeIssueRunContext(current: CurrentRun | null): IssueRunContext
 			runIdGeneration: "resumed",
 			resumedFromPhase: current.phase,
 			resumedStartedAt: current.startedAt,
+			resumedSessionId: null,
 		}
 	}
 
@@ -4470,6 +4473,7 @@ export function makeIssueRunContext(current: CurrentRun | null): IssueRunContext
 		runIdGeneration: "new",
 		resumedFromPhase: null,
 		resumedStartedAt: null,
+		resumedSessionId: null,
 	}
 }
 
@@ -4605,6 +4609,7 @@ export function buildRuntimeBindings(input: {
 		runIdGeneration: input.issueRun.runIdGeneration,
 		resumedFromPhase: input.issueRun.resumedFromPhase ?? "",
 		resumedStartedAt: input.issueRun.resumedStartedAt ?? "",
+		resumedSessionId: input.issueRun.resumedSessionId ?? "",
 		issueKind: input.issueKind ?? "",
 		chainName: input.chain?.name ?? "",
 		chainUmbrellaRepo: input.chain?.umbrellaRepo ?? "",
