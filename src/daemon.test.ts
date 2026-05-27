@@ -11,7 +11,7 @@ import {
 	type CoderLoopDaemon,
 	type DaemonResponse,
 } from "./daemon"
-import { createGitWorktreeManager, schedulerSlotWorktreePath, type SchedulerEvent, type SchedulerOptions, type SchedulerWorktreeManager } from "./scheduler"
+import { createGitWorktreeManager, schedulerSlotWorktreePath, type SchedulerEvent, type SchedulerKindResolver, type SchedulerOptions, type SchedulerWorktreeManager } from "./scheduler"
 import { resolveChainRuntimePaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
 
@@ -1541,6 +1541,106 @@ describe("daemon", () => {
 		}
 	})
 
+	test("daemon scheduler aborts spawn when kind gate reports missing label (live integration)", async () => {
+		const warnings: string[] = []
+		const originalWarn = console.warn
+		console.warn = (...args: unknown[]) => {
+			warnings.push(args.map((value) => typeof value === "string" ? value : JSON.stringify(value)).join(" "))
+		}
+		const fixture = await startFixtureWithKindResolver("kind-gate-missing-label-live", () => ({ ok: true, kind: null }))
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "kind-gate-missing-label-live-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			await request(fixture, "item.add", { chainId, issueNumber: 9101, repoCwd: REPO_ROOT })
+
+			const item = await waitFor(
+				async () => readItem(fixture.loopDataRoot, chainId, 9101),
+				(candidate) => candidate?.status === "blocked",
+				5_000,
+			)
+			expect(item?.status).toBe("blocked")
+			expect(item?.lastRunId).toBeNull()
+			expect(fixture.schedulerEvents.some((event) => event.type === "agent.spawn" && event.itemId === item!.id)).toBe(false)
+			const aborted = fixture.schedulerEvents.find((event) => event.type === "spawn.aborted" && event.itemId === item!.id)
+			expect(aborted).toMatchObject({ type: "spawn.aborted", chainId, itemId: item!.id, issueNumber: 9101, toStatus: "blocked" })
+			expect(warnings.some((line) => line.includes("kind label check failed") && line.includes("expected exactly one kind"))).toBe(true)
+
+			const paths = resolveChainRuntimePaths("kind-gate-missing-label-live-chain", { loopDataRoot: fixture.loopDataRoot })
+			const daemonBatches = await readdir(paths.daemonDir)
+			const daemonLog = await readFile(paths.daemonLogFile(daemonBatches[0]!), "utf-8")
+			expect(daemonLog).toContain("spawn.aborted")
+			expect(daemonLog).toContain("expected exactly one kind")
+		} finally {
+			console.warn = originalWarn
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("daemon scheduler aborts spawn when kind gate reports multiple labels (live integration)", async () => {
+		const warnings: string[] = []
+		const originalWarn = console.warn
+		console.warn = (...args: unknown[]) => {
+			warnings.push(args.map((value) => typeof value === "string" ? value : JSON.stringify(value)).join(" "))
+		}
+		const fixture = await startFixtureWithKindResolver(
+			"kind-gate-multi-label-live",
+			() => ({ ok: false, error: "expected exactly one kind:* label, found 2: kind:code, kind:comment" }),
+		)
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "kind-gate-multi-label-live-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			await request(fixture, "item.add", { chainId, issueNumber: 9102, repoCwd: REPO_ROOT })
+
+			const item = await waitFor(
+				async () => readItem(fixture.loopDataRoot, chainId, 9102),
+				(candidate) => candidate?.status === "blocked",
+				5_000,
+			)
+			expect(item?.status).toBe("blocked")
+			expect(warnings.some((line) => line.includes("expected exactly one kind:* label, found 2"))).toBe(true)
+		} finally {
+			console.warn = originalWarn
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("daemon scheduler aborts spawn when kind gate reports unknown label (live integration)", async () => {
+		const warnings: string[] = []
+		const originalWarn = console.warn
+		console.warn = (...args: unknown[]) => {
+			warnings.push(args.map((value) => typeof value === "string" ? value : JSON.stringify(value)).join(" "))
+		}
+		const fixture = await startFixtureWithKindResolver(
+			"kind-gate-unknown-label-live",
+			() => ({ ok: false, error: 'unknown kind label "kind:foo" (allowed: kind:code, kind:comment, kind:code-spike, kind:blocked)' }),
+		)
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "kind-gate-unknown-label-live-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			await request(fixture, "item.add", { chainId, issueNumber: 9103, repoCwd: REPO_ROOT })
+
+			const item = await waitFor(
+				async () => readItem(fixture.loopDataRoot, chainId, 9103),
+				(candidate) => candidate?.status === "blocked",
+				5_000,
+			)
+			expect(item?.status).toBe("blocked")
+			expect(warnings.some((line) => line.includes('unknown kind label "kind:foo"'))).toBe(true)
+		} finally {
+			console.warn = originalWarn
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("daemon re-spawns item after agent exits 0 without SUMMARY marker (live integration)", async () => {
 		const warnings: string[] = []
 		const originalWarn = console.warn
@@ -1594,6 +1694,7 @@ type FixtureOptions = {
 	schedulerPresetDir?: string | null
 	realWorktreeManager?: boolean
 	worktreeManager?: SchedulerWorktreeManager
+	kindResolver?: SchedulerKindResolver
 }
 
 async function startFixture(name: string, options: FixtureOptions = {}): Promise<Fixture> {
@@ -1627,6 +1728,7 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 			runner: scheduler,
 			...(options.schedulerPresetDir === null ? {} : { presetDir: options.schedulerPresetDir ?? PRESET_DIR }),
 			worktreeManager,
+			kindResolver: options.kindResolver ?? (() => ({ ok: true, kind: "code" })),
 			prompt: ({ item, runId }) => {
 				const payload: Record<string, unknown> = {
 					itemId: item.id,
@@ -1647,6 +1749,10 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 	})
 	const snapshot = daemon.snapshot()
 	return { daemon, loopDataRoot, socketPath: snapshot.socketPath, pidFile: snapshot.pidFile, eventLog, schedulerEvents }
+}
+
+async function startFixtureWithKindResolver(name: string, kindResolver: SchedulerKindResolver): Promise<Fixture> {
+	return await startFixture(name, { schedulerIntervalMs: 30, kindResolver })
 }
 
 async function request(fixture: Fixture, command: string, args = {}): Promise<DaemonResponse> {

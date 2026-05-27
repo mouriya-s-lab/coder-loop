@@ -896,6 +896,7 @@ export class CoderLoopDaemon {
 			options.presetDirForChain = (chain) => bundledPresetDirForScheduler(chain)
 		}
 		if (scheduler.worktreeManager !== undefined) options.worktreeManager = scheduler.worktreeManager
+		if (scheduler.kindResolver !== undefined) options.kindResolver = scheduler.kindResolver
 		options.loopDataRootOptions = this.options
 		if (scheduler.pendingStatuses !== undefined) options.pendingStatuses = scheduler.pendingStatuses
 		if (scheduler.terminalStatuses !== undefined) options.terminalStatuses = scheduler.terminalStatuses
