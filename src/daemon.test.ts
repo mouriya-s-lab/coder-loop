@@ -1776,7 +1776,151 @@ describe("daemon", () => {
 			await fixture.daemon.stop()
 		}
 	})
+
+	describe("per-phase runner selection (issue #287 AC5)", () => {
+		test("live daemon with chain metadata claude/codex.binary spawns codex script for iter phase", async () => {
+			const fixture = await startChainBasedRunnerFixture("ac5-iter", { phase: "iteration" })
+			try {
+				const result = expectOk(await request(fixture, "chain.create", {
+					name: "ac5-iter-chain",
+					preset: "single-phase-example",
+					repository: "mouriya-s-lab/coder-loop",
+					metadata: {
+						claude: { binary: fixture.fakeClaudeBinary },
+						codex: { binary: fixture.fakeCodexBinary },
+					},
+				})).chain
+				const chainId = numberValue(record(result).id)
+				await request(fixture, "item.add", {
+					chainId,
+					issueNumber: 287_301,
+					repoCwd: REPO_ROOT,
+					extra: { issueKind: "code" },
+				})
+
+				const item = await waitFor(
+					async () => readItem(fixture.loopDataRoot, chainId, 287_301),
+					(candidate) => candidate !== null && candidate.lastRunId !== null && candidate.status === "done",
+					5_000,
+				)
+				expect(item).not.toBeNull()
+				const runId = item!.lastRunId!
+				const stdoutPath = resolveChainRuntimePaths(`ac5-iter-chain`, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(runId)
+				const stdout = await readFile(stdoutPath, "utf-8")
+				expect(stdout).toContain("BINARY:codex")
+				expect(stdout).not.toContain("BINARY:claude")
+			} finally {
+				await fixture.daemon.stop()
+			}
+		})
+
+		test("live daemon with chain metadata claude/codex.binary spawns claude script for review phase", async () => {
+			const fixture = await startChainBasedRunnerFixture("ac5-review", { phase: "review" })
+			try {
+				const result = expectOk(await request(fixture, "chain.create", {
+					name: "ac5-review-chain",
+					preset: "gh-issue-pr-iteration",
+					repository: "mouriya-s-lab/coder-loop",
+					metadata: {
+						claude: { binary: fixture.fakeClaudeBinary },
+						codex: { binary: fixture.fakeCodexBinary },
+					},
+				})).chain
+				const chainId = numberValue(record(result).id)
+				await request(fixture, "item.add", {
+					chainId,
+					issueNumber: 287_302,
+					repoCwd: REPO_ROOT,
+					extra: { issueKind: "code" },
+				})
+
+				const item = await waitFor(
+					async () => readItem(fixture.loopDataRoot, chainId, 287_302),
+					(candidate) => candidate !== null && candidate.lastRunId !== null && candidate.status === "done",
+					5_000,
+				)
+				expect(item).not.toBeNull()
+				const runId = item!.lastRunId!
+				const stdoutPath = resolveChainRuntimePaths(`ac5-review-chain`, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(runId)
+				const stdout = await readFile(stdoutPath, "utf-8")
+				expect(stdout).toContain("BINARY:claude")
+				expect(stdout).not.toContain("BINARY:codex")
+			} finally {
+				await fixture.daemon.stop()
+			}
+		})
+	})
 })
+
+type ChainBasedRunnerFixture = Fixture & {
+	fakeCodexBinary: string
+	fakeClaudeBinary: string
+}
+
+async function startChainBasedRunnerFixture(name: string, options: { phase: string }): Promise<ChainBasedRunnerFixture> {
+	const { chmod } = await import("node:fs/promises")
+	const root = resolve(TEST_ROOT, `${++nextFixtureId}-${name}`)
+	const loopDataRoot = resolve(root, "ld")
+	const eventLog = resolve(root, "events.jsonl")
+	await mkdir(root, { recursive: true })
+	const fakeCodex = resolve(root, "fake-codex.sh")
+	const fakeClaude = resolve(root, "fake-claude.sh")
+	await writeFile(
+		fakeCodex,
+		`#!/bin/sh
+echo "BINARY:codex"
+echo "ITERATION SUMMARY: scope=ac5; reason=marker"
+echo "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=marker"
+exit 0
+`,
+	)
+	await writeFile(
+		fakeClaude,
+		`#!/bin/sh
+echo "BINARY:claude"
+echo "ITERATION SUMMARY: scope=ac5; reason=marker"
+echo "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=marker"
+exit 0
+`,
+	)
+	await chmod(fakeCodex, 0o755)
+	await chmod(fakeClaude, 0o755)
+
+	const schedulerEvents: SchedulerEvent[] = []
+	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
+		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+		await mkdir(worktreePath, { recursive: true })
+		return worktreePath
+	}
+
+	const daemon = await startCoderLoopDaemon({
+		loopDataRoot,
+		shutdownGraceMs: 100,
+		scheduler: {
+			enabled: true,
+			intervalMs: 20,
+			worktreeManager,
+			kindResolver: () => ({ ok: true, kind: "code" }),
+			phase: options.phase,
+			prompt: () => "ac5-phase-prompt",
+			chainCompleteTriggerForChain: () => null,
+			onEvent: (event) => {
+				schedulerEvents.push(event)
+			},
+		},
+	})
+	const snapshot = daemon.snapshot()
+	return {
+		daemon,
+		loopDataRoot,
+		socketPath: snapshot.socketPath,
+		pidFile: snapshot.pidFile,
+		eventLog,
+		schedulerEvents,
+		fakeCodexBinary: fakeCodex,
+		fakeClaudeBinary: fakeClaude,
+	}
+}
 
 type Fixture = {
 	daemon: CoderLoopDaemon

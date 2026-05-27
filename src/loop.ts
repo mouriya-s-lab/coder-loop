@@ -3752,7 +3752,7 @@ export function detectHostRunner(env: Record<string, string | undefined>): Agent
 	return "claude"
 }
 
-function buildAgentRunnerCommands(config: LoopConfig): AgentRunnerCommands {
+export function buildAgentRunnerCommands(config: LoopConfig): AgentRunnerCommands {
 	return {
 		claude: {
 			kind: "claude",
@@ -3769,27 +3769,58 @@ function buildAgentRunnerCommands(config: LoopConfig): AgentRunnerCommands {
 	}
 }
 
-function selectDefaultRunner(configuredRunner: AgentRunnerKind | null, commands: AgentRunnerCommands): AgentRunnerSelection {
+export function selectDefaultRunner(configuredRunner: AgentRunnerKind | null, commands: AgentRunnerCommands): AgentRunnerSelection {
 	const kind = configuredRunner ?? DEFAULT_ITERATION_RUNNER
 	return { ...commands[kind], source: configuredRunner === null ? "iteration-default" : "config" }
 }
 
-function selectReviewRunner(configuredRunner: AgentRunnerKind | null, commands: AgentRunnerCommands): AgentRunnerSelection {
+export function selectReviewRunner(configuredRunner: AgentRunnerKind | null, commands: AgentRunnerCommands): AgentRunnerSelection {
 	const kind = configuredRunner ?? "claude"
 	const command = commands[kind]
 	const model = command.kind === "claude" ? CLAUDE_REVIEW_MODEL : command.model
 	return { ...command, model, source: configuredRunner === null ? "review-default" : "config" }
 }
 
-function selectRunnerForItem(item: QueueItem, options: LoopOptions): AgentRunnerSelection {
-	if (item.runner === null) return options.defaultRunner
-	return { ...options.runnerCommands[item.runner], source: "queue" }
+export type PhaseRunnerSelectionInput = {
+	preset: Preset
+	defaultRunner: AgentRunnerSelection
+	reviewRunner: AgentRunnerSelection
+	runnerCommands: AgentRunnerCommands
 }
 
-function selectRunnerForPhase(phase: string, item: QueueItem, options: LoopOptions): AgentRunnerSelection {
-	const reviewPhase = reviewPhaseForPreset(options.preset)
-	if (phase === reviewPhase.name) return options.reviewRunner
-	return selectRunnerForItem(item, options)
+function selectRunnerForItem(item: Pick<QueueItem, "runner">, input: Pick<PhaseRunnerSelectionInput, "defaultRunner" | "runnerCommands">): AgentRunnerSelection {
+	if (item.runner === null) return input.defaultRunner
+	return { ...input.runnerCommands[item.runner], source: "queue" }
+}
+
+export function selectRunnerForPhase(phase: string, item: Pick<QueueItem, "runner">, input: PhaseRunnerSelectionInput): AgentRunnerSelection {
+	const reviewPhase = reviewPhaseForPreset(input.preset)
+	if (phase === reviewPhase.name) return input.reviewRunner
+	return selectRunnerForItem(item, input)
+}
+
+export type BuildPhaseRunnerSelectionFromChainInput = {
+	chain: ChainRecord
+	loopDataRoot: string | null
+	preset: Preset
+}
+
+export function buildPhaseRunnerSelectionFromChain(input: BuildPhaseRunnerSelectionFromChainInput): PhaseRunnerSelectionInput {
+	const config = loopConfigFromChain(input.chain, input.loopDataRoot, null)
+	const runnerCommands = buildAgentRunnerCommands(config)
+	const defaultRunner = selectDefaultRunner(config.defaultRunner, runnerCommands)
+	const reviewRunner = selectReviewRunner(config.reviewRunner, runnerCommands)
+	return { preset: input.preset, defaultRunner, reviewRunner, runnerCommands }
+}
+
+export type ResolvePhaseRunnerFromChainInput = BuildPhaseRunnerSelectionFromChainInput & {
+	phase: string
+	item: Pick<QueueItem, "runner">
+}
+
+export function resolvePhaseRunnerFromChain(input: ResolvePhaseRunnerFromChainInput): AgentRunnerSelection {
+	const selection = buildPhaseRunnerSelectionFromChain(input)
+	return selectRunnerForPhase(input.phase, input.item, selection)
 }
 
 export function reviewPhaseForPreset(preset: Preset): PresetPhase {
@@ -3812,13 +3843,15 @@ export type PresetChainCompleteDecision =
 	| { decision: "complete"; reason?: string }
 	| { decision: "keep-active"; reason?: string }
 
+export type RunPresetChainCompleteTriggerPhasesPhaseRunner = (phase: string) => AgentRunnerSelection | Promise<AgentRunnerSelection>
+
 export type RunPresetChainCompleteTriggerPhasesInput = {
 	chain: ChainRecord
 	items: readonly ItemRecord[]
 	runId?: string
 	terminalStatuses: readonly string[]
 	loopDataRoot: string | null
-	runner: AgentRunnerSelection
+	phaseRunner?: RunPresetChainCompleteTriggerPhasesPhaseRunner
 	presetDir?: string
 	targetCwd?: string | null
 }
@@ -3857,6 +3890,12 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 	const evidenceDir = resolveChainEvidenceDir(options, input.chain, anchorItem, anchorId, "Chain-complete trigger evidence directory")
 	const finalizerRunId = input.runId ?? makeRunId(`chain-${input.chain.id}`)
 
+	const phaseSelection = buildPhaseRunnerSelectionFromChain({ chain: input.chain, loopDataRoot: input.loopDataRoot, preset })
+	const resolvePhaseRunner = async (phase: string): Promise<AgentRunnerSelection> => {
+		if (input.phaseRunner !== undefined) return await input.phaseRunner(phase)
+		return selectRunnerForPhase(phase, anchorItem, phaseSelection)
+	}
+
 	for (const phase of phases) {
 		const ctx: ResolveContext = {
 			item: anchorItem,
@@ -3881,11 +3920,12 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 		const promptRaw = await readFile(phase.prompt, "utf-8")
 		const prompt = renderPrompt(promptRaw, phase, ctx)
 		const outputPath = agentOutputPath(options, finalizerRunId, phase.name)
-		log(`Starting chain-complete trigger phase ${phase.name} for chain ${input.chain.name}...`)
-		const { output, code } = await runAgent(options, phase.name, prompt, outputPath, targetCwd, input.runner)
+		const resolvedRunner = await resolvePhaseRunner(phase.name)
+		log(`Starting chain-complete trigger phase ${phase.name} for chain ${input.chain.name} (runner=${resolvedRunner.kind})...`)
+		const { output, code } = await runAgent(options, phase.name, prompt, outputPath, targetCwd, resolvedRunner)
 		log(`Chain-complete trigger phase ${phase.name} finished: exit=${code}, output=${outputPath} (${output.length} bytes)`)
 		if (code !== 0) throw new Error(`chain-complete trigger phase ${phase.name} exited ${code}`)
-		const decision = parseFinalizerSummaryDecision(output, input.runner.kind)
+		const decision = parseFinalizerSummaryDecision(output, resolvedRunner.kind)
 		if (decision === null) throw new Error(`chain-complete trigger phase ${phase.name} did not print a valid FINALIZER SUMMARY`)
 		if (decision.decision !== "complete") return decision
 	}

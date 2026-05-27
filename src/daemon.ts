@@ -5,7 +5,15 @@ import { existsSync } from "node:fs"
 import { appendFile, mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises"
 import { isAbsolute, relative, resolve } from "node:path"
 
-import { loadPreset, runPresetChainCompleteTriggerPhases, type AgentRunnerKind, type AgentRunnerSelection, type JsonObject, type JsonValue } from "./loop"
+import {
+	buildPhaseRunnerSelectionFromChain,
+	loadPreset,
+	runPresetChainCompleteTriggerPhases,
+	type AgentRunnerKind,
+	type AgentRunnerSelection,
+	type JsonObject,
+	type JsonValue,
+} from "./loop"
 import {
 	cleanupSchedulerChainWorktrees,
 	createSchedulerState,
@@ -878,10 +886,22 @@ export class CoderLoopDaemon {
 		const presetDirForChain = scheduler.presetDirForChain ?? ((chain: ChainRecord) => schedulerPresetDir ?? bundledPresetDirForScheduler(chain))
 		const presetPromptResolver = (ctx: SchedulerSpawnContext): Promise<string> =>
 			resolveSchedulerPresetPhasePrompt({ presetDir: presetDirForChain(ctx.chain), phase: ctx.phase })
+		const fallbackRunner = scheduler.runner ?? defaultDaemonRunner()
+		const phaseRunnerSelectionForChain: SchedulerOptions["phaseRunnerSelectionForChain"] = scheduler.phaseRunnerSelectionForChain
+			?? (scheduler.phaseRunner !== undefined || scheduler.runner !== undefined
+				? undefined
+				: async (chain) => {
+					const preset = await loadPreset(presetDirForChain(chain))
+					return buildPhaseRunnerSelectionFromChain({
+						chain,
+						loopDataRoot: this.paths.root,
+						preset,
+					})
+				})
 		const options: SchedulerOptions = {
 			store: this.requireStore(),
 			state: this.schedulerState,
-			runner: scheduler.runner ?? defaultDaemonRunner(),
+			runner: fallbackRunner,
 			presetDir: schedulerPresetDir ?? bundledPresetDir(DEFAULT_PRESET_NAME),
 			prompt: scheduler.prompt ?? presetPromptResolver,
 			onEvent: async (event) => {
@@ -889,6 +909,8 @@ export class CoderLoopDaemon {
 				await externalOnEvent?.(event)
 			},
 		}
+		if (scheduler.phaseRunner !== undefined) options.phaseRunner = scheduler.phaseRunner
+		if (phaseRunnerSelectionForChain !== undefined) options.phaseRunnerSelectionForChain = phaseRunnerSelectionForChain
 		if (scheduler.phase !== undefined) options.phase = scheduler.phase
 		if (scheduler.presetDirForChain !== undefined) {
 			options.presetDirForChain = scheduler.presetDirForChain
@@ -915,17 +937,18 @@ export class CoderLoopDaemon {
 				exitCode: context.exitCode,
 				stdout: context.stdout,
 				phase: context.phase,
-				runnerKind: options.runner.kind,
+				runnerKind: context.runner.kind,
 			}))
 		if (scheduler.chainCompleteTrigger !== undefined) options.chainCompleteTrigger = scheduler.chainCompleteTrigger
 		else if (scheduler.chainCompleteTriggerForChain !== undefined) options.chainCompleteTriggerForChain = scheduler.chainCompleteTriggerForChain
 		else {
+			const explicitRunnerOverride = scheduler.runner !== undefined ? fallbackRunner : null
 			options.chainCompleteTriggerForChain = async (context) =>
 				await runPresetChainCompleteTriggerPhases({
 					...context,
 					loopDataRoot: this.paths.root,
-					runner: options.runner,
 					presetDir: presetDirForChain(context.chain),
+					...(explicitRunnerOverride === null ? {} : { phaseRunner: () => explicitRunnerOverride }),
 				})
 		}
 		return options

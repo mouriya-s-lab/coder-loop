@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
 import {
@@ -11,10 +11,18 @@ import {
 	schedulerTick,
 	type SchedulerEvent,
 	type SchedulerOptions,
+	type SchedulerPhaseRunner,
 	type SchedulerWorktreeManager,
 } from "./scheduler"
 import { resolveSchedulerPresetPhasePrompt } from "./daemon"
-import { loadPreset, type JsonObject } from "./loop"
+import {
+	buildRunnerInvocation,
+	loadPreset,
+	resolvePhaseRunnerFromChain,
+	runPresetChainCompleteTriggerPhases,
+	type AgentRunnerSelection,
+	type JsonObject,
+} from "./loop"
 import { resolveChainRuntimePaths } from "./runtime-paths"
 import { type ChainRecord, openSqliteStateStore } from "./sqlite-state"
 
@@ -948,6 +956,530 @@ describe("resolveSchedulerPresetPhasePrompt", () => {
 		}
 	})
 })
+
+describe("scheduler per-phase runner selection (issue #287)", () => {
+	test("spawnSchedulerRun routes phase=iteration through phaseRunner and uses returned binary for spawn (AC2 iter)", async () => {
+		const fixture = await createFixture("phase-runner-iter")
+		try {
+			const chain = createChain(fixture.store, "phase-runner-iter-chain")
+			createItem(fixture.store, chain, { issueNumber: 287_101, repoCwd: "/repo/a" })
+
+			const fakeIter = resolve(fixture.loopDataRoot, "..", "fake-iter-marker.ts")
+			await writeBunMarkerRunner(fakeIter, "PER-PHASE:codex")
+
+			const observedPhases: string[] = []
+			const phaseRunner: SchedulerPhaseRunner = ({ phase }) => {
+				observedPhases.push(phase)
+				return {
+					kind: "claude",
+					source: "config",
+					binary: "bun",
+					extraArgs: [fakeIter],
+					model: null,
+				}
+			}
+
+			const baseOptions = fixture.options()
+			delete (baseOptions as { runner?: AgentRunnerSelection }).runner
+			const tick = await schedulerTick({
+				...baseOptions,
+				phaseRunner,
+				phase: "iteration",
+			})
+			const closed = await tick.spawnedRuns[0]!.closed
+
+			expect(closed.exitCode).toBe(0)
+			expect(observedPhases).toEqual(["iteration"])
+			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
+			const capturedStdout = await readFile(paths.runStdoutFile(closed.runId), "utf-8")
+			expect(capturedStdout).toContain("PER-PHASE:codex")
+			expect(capturedStdout).not.toContain("PER-PHASE:claude")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("spawnSchedulerRun routes phase=review through phaseRunner and uses returned binary for spawn (AC2 review)", async () => {
+		const fixture = await createFixture("phase-runner-review")
+		try {
+			const chain = createChain(fixture.store, "phase-runner-review-chain")
+			createItem(fixture.store, chain, { issueNumber: 287_102, repoCwd: "/repo/a" })
+
+			const fakeIter = resolve(fixture.loopDataRoot, "..", "fake-codex-review.ts")
+			const fakeReview = resolve(fixture.loopDataRoot, "..", "fake-claude-review.ts")
+			await writeBunMarkerRunner(fakeIter, "PER-PHASE:codex")
+			await writeBunMarkerRunner(fakeReview, "PER-PHASE:claude")
+
+			const observedPhases: string[] = []
+			const phaseRunner: SchedulerPhaseRunner = ({ phase }) => {
+				observedPhases.push(phase)
+				if (phase === "review") {
+					return {
+						kind: "claude",
+						source: "review-default",
+						binary: "bun",
+						extraArgs: [fakeReview],
+						model: "claude-opus-4-7",
+					}
+				}
+				return {
+					kind: "claude",
+					source: "config",
+					binary: "bun",
+					extraArgs: [fakeIter],
+					model: null,
+				}
+			}
+
+			const baseOptions = fixture.options()
+			delete (baseOptions as { runner?: AgentRunnerSelection }).runner
+			const tick = await schedulerTick({
+				...baseOptions,
+				phaseRunner,
+				phase: "review",
+			})
+			const closed = await tick.spawnedRuns[0]!.closed
+
+			expect(closed.exitCode).toBe(0)
+			expect(observedPhases).toEqual(["review"])
+			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
+			const capturedStdout = await readFile(paths.runStdoutFile(closed.runId), "utf-8")
+			expect(capturedStdout).toContain("PER-PHASE:claude")
+			expect(capturedStdout).not.toContain("PER-PHASE:codex")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("falls back to options.runner when phaseRunner is not configured (backward compat)", async () => {
+		const fixture = await createFixture("phase-runner-fallback")
+		try {
+			const chain = createChain(fixture.store, "phase-runner-fallback-chain")
+			createItem(fixture.store, chain, { issueNumber: 287_103, repoCwd: "/repo/a" })
+
+			const tick = await schedulerTick(fixture.options())
+			const closed = await tick.spawnedRuns[0]!.closed
+
+			expect(closed.exitCode).toBe(0)
+			expect(fixture.store.getItem(fixture.store.listItems(chain.id)[0]!.id)?.status).toBe("done")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("throws SchedulerError when neither phaseRunner nor runner is configured", async () => {
+		const fixture = await createFixture("phase-runner-missing")
+		try {
+			const chain = createChain(fixture.store, "phase-runner-missing-chain")
+			createItem(fixture.store, chain, { issueNumber: 287_104, repoCwd: "/repo/a" })
+
+			const baseOptions = fixture.options()
+			delete (baseOptions as { runner?: AgentRunnerSelection }).runner
+
+			await expect(schedulerTick(baseOptions)).rejects.toThrow(/no runner configured/)
+			expect(fixture.store.getCurrentRun(chain.id)).toBeNull()
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	describe("resolvePhaseRunnerFromChain", () => {
+		const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
+
+		test("chain default → iteration phase returns codex with binary 'codex'", async () => {
+			const chain = makeChainFixture({ metadata: {} })
+			const preset = await loadPreset(PRESET_DIR)
+			const runner = resolvePhaseRunnerFromChain({
+				chain,
+				loopDataRoot: null,
+				preset,
+				phase: "iteration",
+				item: { runner: null },
+			})
+			expect(runner.kind).toBe("codex")
+			expect(runner.binary).toBe("codex")
+			expect(runner.source).toBe("iteration-default")
+		})
+
+		test("chain default → review phase returns claude with model claude-opus-4-7", async () => {
+			const chain = makeChainFixture({ metadata: {} })
+			const preset = await loadPreset(PRESET_DIR)
+			const runner = resolvePhaseRunnerFromChain({
+				chain,
+				loopDataRoot: null,
+				preset,
+				phase: "review",
+				item: { runner: null },
+			})
+			expect(runner.kind).toBe("claude")
+			expect(runner.binary).toBe("claude")
+			expect(runner.model).toBe("claude-opus-4-7")
+			expect(runner.source).toBe("review-default")
+		})
+
+		test("chain metadata reviewRunner='codex' overrides claude default → review phase runs codex (AC3)", async () => {
+			const chain = makeChainFixture({ metadata: { reviewRunner: "codex" } })
+			const preset = await loadPreset(PRESET_DIR)
+			const runner = resolvePhaseRunnerFromChain({
+				chain,
+				loopDataRoot: null,
+				preset,
+				phase: "review",
+				item: { runner: null },
+			})
+			expect(runner.kind).toBe("codex")
+			expect(runner.binary).toBe("codex")
+			expect(runner.source).toBe("config")
+		})
+
+		test("chain metadata claude.model is force-replaced by claude-opus-4-7 for review phase (AC4)", async () => {
+			const chain = makeChainFixture({
+				metadata: {
+					claude: { model: "claude-haiku-4-5" },
+				},
+			})
+			const preset = await loadPreset(PRESET_DIR)
+			const runner = resolvePhaseRunnerFromChain({
+				chain,
+				loopDataRoot: null,
+				preset,
+				phase: "review",
+				item: { runner: null },
+			})
+			expect(runner.kind).toBe("claude")
+			expect(runner.model).toBe("claude-opus-4-7")
+			expect(runner.model).not.toBe("claude-haiku-4-5")
+		})
+
+		test("item.runner='claude' overrides codex iteration default for non-review phase", async () => {
+			const chain = makeChainFixture({ metadata: {} })
+			const preset = await loadPreset(PRESET_DIR)
+			const runner = resolvePhaseRunnerFromChain({
+				chain,
+				loopDataRoot: null,
+				preset,
+				phase: "iteration",
+				item: { runner: "claude" },
+			})
+			expect(runner.kind).toBe("claude")
+			expect(runner.source).toBe("queue")
+		})
+
+		test("chain default → triggered/finalizer phase name (non-review) resolves to iteration default codex", async () => {
+			const chain = makeChainFixture({ metadata: {} })
+			const preset = await loadPreset(PRESET_DIR)
+			const runner = resolvePhaseRunnerFromChain({
+				chain,
+				loopDataRoot: null,
+				preset,
+				phase: "umbrella-finalizer",
+				item: { runner: null },
+			})
+			expect(runner.kind).toBe("codex")
+			expect(runner.source).toBe("iteration-default")
+		})
+
+		test("chain metadata claude.extraArgs '--model X' is stripped from review args by buildRunnerInvocation (AC4 transitive)", async () => {
+			const chain = makeChainFixture({
+				metadata: {
+					claude: {
+						model: "claude-haiku-4-5",
+						extraArgs: ["--model", "claude-haiku-4-5", "--verbose"],
+					},
+				},
+			})
+			const preset = await loadPreset(PRESET_DIR)
+			const runner = resolvePhaseRunnerFromChain({
+				chain,
+				loopDataRoot: null,
+				preset,
+				phase: "review",
+				item: { runner: null },
+			})
+			expect(runner.kind).toBe("claude")
+			expect(runner.model).toBe("claude-opus-4-7")
+			const invocation = buildRunnerInvocation(runner, "p", { kind: "fresh" }, {
+				targetCwd: "/repo/a",
+				agentCwd: "/repo/a",
+				presetDir: PRESET_DIR,
+				loopDataRoot: "/lr",
+			})
+			const modelFlagIndex = invocation.args.indexOf("--model")
+			expect(modelFlagIndex).toBeGreaterThanOrEqual(0)
+			expect(invocation.args[modelFlagIndex + 1]).toBe("claude-opus-4-7")
+			expect(invocation.args.filter((arg) => arg === "claude-haiku-4-5")).toEqual([])
+		})
+	})
+
+	test("AC5 integration: chain-based phaseRunner picks codex binary for iter spawn and claude binary for review spawn", async () => {
+		const fixture = await createFixture("ac5-integration")
+		try {
+			const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
+			const fakeCodex = resolve(fixture.loopDataRoot, "..", "fake-codex-marker.sh")
+			const fakeClaude = resolve(fixture.loopDataRoot, "..", "fake-claude-marker.sh")
+			await writeShellMarkerScript(fakeCodex, "BINARY:codex")
+			await writeShellMarkerScript(fakeClaude, "BINARY:claude")
+
+			const chain = createChain(fixture.store, "ac5-integration-chain", {
+				metadata: {
+					claude: { binary: fakeClaude },
+					codex: { binary: fakeCodex },
+				},
+			})
+			createItem(fixture.store, chain, { issueNumber: 287_201, repoCwd: "/repo/a" })
+
+			const preset = await loadPreset(PRESET_DIR)
+			const phaseRunner: SchedulerPhaseRunner = ({ chain: c, phase, item }) =>
+				resolvePhaseRunnerFromChain({
+					chain: c,
+					loopDataRoot: fixture.loopDataRoot,
+					preset,
+					phase,
+					item,
+				})
+
+			let runSeq = 0
+			const baseOptions = fixture.options({
+				presetDir: PRESET_DIR,
+				runIdFactory: ({ chain: c, item, phase }) => `run-${c.id}-${item.id}-${phase}-${++runSeq}`,
+			})
+			delete (baseOptions as { runner?: AgentRunnerSelection }).runner
+
+			const iterTick = await schedulerTick({
+				...baseOptions,
+				phaseRunner,
+				phase: "iteration",
+				prompt: "iter-prompt",
+				statusFromExit: () => "in_progress",
+			})
+			expect(iterTick.spawnedRuns).toHaveLength(1)
+			const iterClosed = await iterTick.spawnedRuns[0]!.closed
+			expect(iterClosed.exitCode).toBe(0)
+			const iterPaths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
+			const iterStdout = await readFile(iterPaths.runStdoutFile(iterClosed.runId), "utf-8")
+			expect(iterStdout).toContain("BINARY:codex")
+			expect(iterStdout).not.toContain("BINARY:claude")
+
+			fixture.store.updateItem(fixture.store.listItems(chain.id)[0]!.id, { status: "changes_requested" })
+
+			const reviewTick = await schedulerTick({
+				...baseOptions,
+				phaseRunner,
+				phase: "review",
+				prompt: "review-prompt",
+				statusFromExit: () => "done",
+			})
+			expect(reviewTick.spawnedRuns).toHaveLength(1)
+			const reviewClosed = await reviewTick.spawnedRuns[0]!.closed
+			expect(reviewClosed.exitCode).toBe(0)
+			const reviewStdout = await readFile(iterPaths.runStdoutFile(reviewClosed.runId), "utf-8")
+			expect(reviewStdout).toContain("BINARY:claude")
+			expect(reviewStdout).not.toContain("BINARY:codex")
+		} finally {
+			fixture.store.close()
+		}
+	})
+})
+
+describe("runPresetChainCompleteTriggerPhases per-phase runner selection (issue #287 retry)", () => {
+	const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
+
+	test("default chain metadata → triggered phase 'umbrella-finalizer' (non-review) spawns iter-default codex via chain-derived selectRunnerForPhase, not hardcoded runner", async () => {
+		const fixture = await createFixture("trigger-iter-default")
+		try {
+			const fakeCodex = resolve(fixture.loopDataRoot, "..", "fake-codex-finalizer.sh")
+			const fakeClaude = resolve(fixture.loopDataRoot, "..", "fake-claude-finalizer.sh")
+			await writeShellFinalizerMarkerScript(fakeCodex, "BINARY:codex")
+			await writeShellFinalizerMarkerScript(fakeClaude, "BINARY:claude")
+
+			const targetCwd = resolve(fixture.loopDataRoot, "..", "target-trigger-iter")
+			await mkdir(targetCwd, { recursive: true })
+
+			const chain = createChain(fixture.store, "trigger-iter-chain", {
+				metadata: {
+					claude: { binary: fakeClaude },
+					codex: { binary: fakeCodex },
+				},
+			})
+			createItem(fixture.store, chain, { issueNumber: 287_801, repoCwd: targetCwd })
+			const items = fixture.store.listItems(chain.id)
+
+			const runId = `trigger-${chain.id}-default`
+			const decision = await runPresetChainCompleteTriggerPhases({
+				chain,
+				items,
+				runId,
+				terminalStatuses: ["done", "moot", "blocked"],
+				loopDataRoot: fixture.loopDataRoot,
+				presetDir: PRESET_DIR,
+				targetCwd,
+			})
+			expect(decision).toEqual({ decision: "complete" })
+
+			const chainPaths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
+			const stdout = await readFile(chainPaths.runPhaseStdoutFile(runId, "umbrella-finalizer"), "utf-8")
+			expect(stdout).toContain("BINARY:codex")
+			expect(stdout).not.toContain("BINARY:claude")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("chain metadata runner='claude' → triggered phase 'umbrella-finalizer' spawns claude (resolver honors chain default-runner override)", async () => {
+		const fixture = await createFixture("trigger-claude-override")
+		try {
+			const fakeCodex = resolve(fixture.loopDataRoot, "..", "fake-codex-finalizer.sh")
+			const fakeClaude = resolve(fixture.loopDataRoot, "..", "fake-claude-finalizer.sh")
+			await writeShellFinalizerMarkerScript(fakeCodex, "BINARY:codex")
+			await writeShellFinalizerMarkerScript(fakeClaude, "BINARY:claude")
+
+			const targetCwd = resolve(fixture.loopDataRoot, "..", "target-trigger-claude")
+			await mkdir(targetCwd, { recursive: true })
+
+			const chain = createChain(fixture.store, "trigger-claude-chain", {
+				metadata: {
+					runner: "claude",
+					claude: { binary: fakeClaude },
+					codex: { binary: fakeCodex },
+				},
+			})
+			createItem(fixture.store, chain, { issueNumber: 287_802, repoCwd: targetCwd })
+			const items = fixture.store.listItems(chain.id)
+
+			const runId = `trigger-${chain.id}-claude`
+			const decision = await runPresetChainCompleteTriggerPhases({
+				chain,
+				items,
+				runId,
+				terminalStatuses: ["done", "moot", "blocked"],
+				loopDataRoot: fixture.loopDataRoot,
+				presetDir: PRESET_DIR,
+				targetCwd,
+			})
+			expect(decision).toEqual({ decision: "complete" })
+
+			const chainPaths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
+			const stdout = await readFile(chainPaths.runPhaseStdoutFile(runId, "umbrella-finalizer"), "utf-8")
+			expect(stdout).toContain("BINARY:claude")
+			expect(stdout).not.toContain("BINARY:codex")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("phaseRunner override input wins over chain-derived selection for the triggered phase spawn", async () => {
+		const fixture = await createFixture("trigger-phaseRunner-override")
+		try {
+			const fakeCodex = resolve(fixture.loopDataRoot, "..", "fake-codex-finalizer.sh")
+			const fakeClaude = resolve(fixture.loopDataRoot, "..", "fake-claude-finalizer.sh")
+			await writeShellFinalizerMarkerScript(fakeCodex, "BINARY:codex")
+			await writeShellFinalizerMarkerScript(fakeClaude, "BINARY:claude")
+
+			const targetCwd = resolve(fixture.loopDataRoot, "..", "target-trigger-override")
+			await mkdir(targetCwd, { recursive: true })
+
+			const chain = createChain(fixture.store, "trigger-override-chain", {
+				metadata: {
+					claude: { binary: fakeClaude },
+					codex: { binary: fakeCodex },
+				},
+			})
+			createItem(fixture.store, chain, { issueNumber: 287_803, repoCwd: targetCwd })
+			const items = fixture.store.listItems(chain.id)
+
+			const seenPhases: string[] = []
+			const overrideRunner: AgentRunnerSelection = {
+				kind: "claude",
+				source: "iteration-default",
+				binary: fakeClaude,
+				extraArgs: [],
+				model: null,
+			}
+
+			const runId = `trigger-${chain.id}-override`
+			const decision = await runPresetChainCompleteTriggerPhases({
+				chain,
+				items,
+				runId,
+				terminalStatuses: ["done", "moot", "blocked"],
+				loopDataRoot: fixture.loopDataRoot,
+				presetDir: PRESET_DIR,
+				targetCwd,
+				phaseRunner: (phase) => {
+					seenPhases.push(phase)
+					return overrideRunner
+				},
+			})
+			expect(decision).toEqual({ decision: "complete" })
+			expect(seenPhases).toEqual(["umbrella-finalizer"])
+
+			const chainPaths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
+			const stdout = await readFile(chainPaths.runPhaseStdoutFile(runId, "umbrella-finalizer"), "utf-8")
+			expect(stdout).toContain("BINARY:claude")
+			expect(stdout).not.toContain("BINARY:codex")
+		} finally {
+			fixture.store.close()
+		}
+	})
+})
+
+async function writeShellFinalizerMarkerScript(path: string, marker: string): Promise<void> {
+	await mkdir(resolve(path, ".."), { recursive: true })
+	await writeFile(
+		path,
+		`#!/bin/sh
+echo "${marker}"
+echo "ITERATION SUMMARY: scope=test; reason=marker"
+echo "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=marker"
+echo "FINALIZER SUMMARY: decision=complete; reason=test"
+exit 0
+`,
+	)
+	await chmod(path, 0o755)
+}
+
+function makeChainFixture(overrides: Partial<ChainRecord> = {}): ChainRecord {
+	return {
+		id: 1,
+		name: "phase-runner-fixture",
+		preset: "gh-issue-pr-iteration",
+		repository: "mouriya-s-lab/coder-loop",
+		baseBranch: "main",
+		umbrellaIssue: 282,
+		umbrellaRepo: "mouriya-s-lab/coder-loop",
+		status: "active",
+		metadata: {},
+		createdAt: 1_800_000_000,
+		updatedAt: 1_800_000_000,
+		...overrides,
+	}
+}
+
+async function writeBunMarkerRunner(path: string, marker: string): Promise<void> {
+	await mkdir(resolve(path, ".."), { recursive: true })
+	await writeFile(
+		path,
+		`process.stdout.write(${JSON.stringify(marker)} + "\\n")
+process.stdout.write("ITERATION SUMMARY: scope=test; reason=marker\\n")
+process.stdout.write("REVIEW SUMMARY: verdict=accepted; issue=#0; reason=marker\\n")
+process.exit(0)
+`,
+	)
+}
+
+async function writeShellMarkerScript(path: string, marker: string): Promise<void> {
+	await mkdir(resolve(path, ".."), { recursive: true })
+	await writeFile(
+		path,
+		`#!/bin/sh
+echo "${marker}"
+echo "ITERATION SUMMARY: scope=test; reason=marker"
+echo "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=marker"
+exit 0
+`,
+	)
+	await chmod(path, 0o755)
+}
 
 type Fixture = {
 	store: ReturnType<typeof openSqliteStateStore>
