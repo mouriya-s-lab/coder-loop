@@ -5,7 +5,7 @@ import { existsSync } from "node:fs"
 import { appendFile, mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises"
 import { isAbsolute, relative, resolve } from "node:path"
 
-import { runPresetChainCompleteTriggerPhases, type AgentRunnerKind, type AgentRunnerSelection, type JsonObject, type JsonValue } from "./loop"
+import { loadPreset, runPresetChainCompleteTriggerPhases, type AgentRunnerKind, type AgentRunnerSelection, type JsonObject, type JsonValue } from "./loop"
 import {
 	cleanupSchedulerChainWorktrees,
 	createSchedulerState,
@@ -13,6 +13,7 @@ import {
 	schedulerTick,
 	type SchedulerCompletedRun,
 	type SchedulerOptions,
+	type SchedulerSpawnContext,
 	type SchedulerState,
 } from "./scheduler"
 import {
@@ -874,12 +875,14 @@ export class CoderLoopDaemon {
 		const externalOnEvent = scheduler.onEvent
 		const schedulerPresetDir = scheduler.presetDir
 		const presetDirForChain = scheduler.presetDirForChain ?? ((chain: ChainRecord) => schedulerPresetDir ?? bundledPresetDirForScheduler(chain))
+		const presetPromptResolver = (ctx: SchedulerSpawnContext): Promise<string> =>
+			resolveSchedulerPresetPhasePrompt({ presetDir: presetDirForChain(ctx.chain), phase: ctx.phase })
 		const options: SchedulerOptions = {
 			store: this.requireStore(),
 			state: this.schedulerState,
 			runner: scheduler.runner ?? defaultDaemonRunner(),
 			presetDir: schedulerPresetDir ?? bundledPresetDir(DEFAULT_PRESET_NAME),
-			prompt: scheduler.prompt ?? defaultDaemonPrompt,
+			prompt: scheduler.prompt ?? presetPromptResolver,
 			onEvent: async (event) => {
 				await this.appendDaemonLogForChainId(event.chainId, { type: "scheduler.event", event: event as unknown as JsonObject })
 				await externalOnEvent?.(event)
@@ -1022,8 +1025,23 @@ function defaultDaemonRunner(): AgentRunnerSelection {
 	}
 }
 
-function defaultDaemonPrompt(): string {
-	return "coder-loop daemon scheduler placeholder; full prompt binding is owned by later central-state migration issues."
+function defaultDaemonPrompt(details: { reason: string; preset?: string; phase?: string; presetDir?: string } = { reason: "missing_configured_prompt" }): string {
+	const fields = [
+		`reason=${details.reason}`,
+		details.preset !== undefined ? `preset=${details.preset}` : null,
+		details.phase !== undefined ? `phase=${details.phase}` : null,
+		details.presetDir !== undefined ? `presetDir=${details.presetDir}` : null,
+	].filter((entry): entry is string => entry !== null)
+	return `coder-loop daemon scheduler prompt resolver failed (${fields.join(", ")}); investigate scheduler configuration or preset.`
+}
+
+export async function resolveSchedulerPresetPhasePrompt(input: { presetDir: string; phase: string }): Promise<string> {
+	const preset = await loadPreset(input.presetDir)
+	const phase = preset.phases.find((entry) => entry.name === input.phase)
+	if (phase === undefined) {
+		throw new Error(defaultDaemonPrompt({ reason: "phase_not_found_in_preset", preset: preset.name, phase: input.phase, presetDir: input.presetDir }))
+	}
+	return await readFile(phase.prompt, "utf-8")
 }
 
 function validateChainNameForRequest(input: string): string {

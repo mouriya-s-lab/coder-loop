@@ -12,6 +12,8 @@ import {
 	type SchedulerOptions,
 	type SchedulerWorktreeManager,
 } from "./scheduler"
+import { resolveSchedulerPresetPhasePrompt } from "./daemon"
+import { loadPreset } from "./loop"
 import { resolveChainRuntimePaths } from "./runtime-paths"
 import { type ChainRecord, openSqliteStateStore } from "./sqlite-state"
 
@@ -504,6 +506,63 @@ describe("scheduler", () => {
 	})
 })
 
+describe("resolveSchedulerPresetPhasePrompt", () => {
+	const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
+
+	test("returns iteration entry markdown including '## Required procedure'", async () => {
+		const prompt = await resolveSchedulerPresetPhasePrompt({ presetDir: PRESET_DIR, phase: "iteration" })
+		expect(prompt).toContain("## Required procedure")
+	})
+
+	test("returns review entry markdown including '## Required procedure'", async () => {
+		const prompt = await resolveSchedulerPresetPhasePrompt({ presetDir: PRESET_DIR, phase: "review" })
+		expect(prompt).toContain("## Required procedure")
+	})
+
+	test("resolver output is byte-equal to readFile on the same phase.prompt path that the main loop reads", async () => {
+		const preset = await loadPreset(PRESET_DIR)
+		for (const phaseName of ["iteration", "review"] as const) {
+			const phase = preset.phases.find((entry) => entry.name === phaseName)
+			expect(phase).not.toBeUndefined()
+			const mainLoopRaw = await readFile(phase!.prompt, "utf-8")
+			const daemonRaw = await resolveSchedulerPresetPhasePrompt({ presetDir: PRESET_DIR, phase: phaseName })
+			expect(daemonRaw).toBe(mainLoopRaw)
+			expect(Buffer.byteLength(daemonRaw, "utf-8")).toBe(Buffer.byteLength(mainLoopRaw, "utf-8"))
+		}
+	})
+
+	test("rejects unknown phase with an explicit error sentinel string", async () => {
+		await expect(resolveSchedulerPresetPhasePrompt({ presetDir: PRESET_DIR, phase: "no-such-phase" })).rejects.toThrow(/phase_not_found_in_preset/)
+	})
+
+	test("scheduler spawn passes resolver output through to subprocess argv (entry md literal reaches agent stdout)", async () => {
+		const fixture = await createPresetPromptIntegrationFixture("integration-resolver")
+		try {
+			const chain = createChain(fixture.store, "integration-resolver-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 283, repoCwd: "/repo/a" })
+
+			const tick = await schedulerTick(fixture.options())
+			const closed = await tick.spawnedRuns[0]!.closed
+
+			expect(closed.exitCode).toBe(0)
+			expect(closed.stdout).toContain("## Required procedure")
+			expect(closed.stdout).toContain("## Non-negotiable iteration boundaries")
+
+			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
+			const capturedStdout = await readFile(paths.runStdoutFile(closed.runId), "utf-8")
+			expect(capturedStdout).toContain("## Required procedure")
+
+			const preset = await loadPreset(PRESET_DIR)
+			const iterPhase = preset.phases.find((entry) => entry.name === "iteration")!
+			const mainLoopRaw = await readFile(iterPhase.prompt, "utf-8")
+			expect(capturedStdout).toContain(mainLoopRaw)
+			expect(fixture.store.getItem(item.id)?.status).toBe("done")
+		} finally {
+			fixture.store.close()
+		}
+	})
+})
+
 type Fixture = {
 	store: ReturnType<typeof openSqliteStateStore>
 	state: ReturnType<typeof createSchedulerState>
@@ -671,4 +730,60 @@ async function promiseSettledWithin<T>(promise: Promise<T>, timeoutMs: number): 
 	} finally {
 		if (timeout !== null) clearTimeout(timeout)
 	}
+}
+
+async function createPresetPromptIntegrationFixture(name: string): Promise<Fixture> {
+	const root = resolve(TEST_ROOT, `${name}-${++nextFixtureId}`)
+	const loopDataRoot = resolve(root, "loop-data")
+	const fakeRunner = resolve(root, "echo-prompt-runner.ts")
+	const eventLog = resolve(root, "runner-events.jsonl")
+	await mkdir(loopDataRoot, { recursive: true })
+	await writeEchoPromptRunner(fakeRunner)
+
+	const store = openSqliteStateStore({ loopDataRoot })
+	const state = createSchedulerState()
+	const schedulerEvents: SchedulerEvent[] = []
+	const worktreeCalls: string[] = []
+	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
+		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+		await mkdir(worktreePath, { recursive: true })
+		worktreeCalls.push(worktreePath)
+		return worktreePath
+	}
+	const presetDir = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
+
+	const options = (overrides: Partial<SchedulerOptions> = {}): SchedulerOptions => ({
+		store,
+		state,
+		presetDir,
+		runner: {
+			kind: "claude",
+			source: "iteration-default",
+			binary: "bun",
+			extraArgs: [fakeRunner],
+			model: null,
+		},
+		worktreeManager,
+		loopDataRootOptions: { loopDataRoot },
+		runIdFactory: ({ chain, item }) => `run-${chain.id}-${item.id}`,
+		prompt: (ctx) => resolveSchedulerPresetPhasePrompt({ presetDir, phase: ctx.phase }),
+		onEvent: (event) => {
+			schedulerEvents.push(event)
+		},
+		...overrides,
+	})
+
+	return { store, state, loopDataRoot, eventLog, schedulerEvents, worktreeCalls, options }
+}
+
+async function writeEchoPromptRunner(path: string): Promise<void> {
+	await mkdir(resolve(path, ".."), { recursive: true })
+	await writeFile(
+		path,
+		`const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "" : Bun.argv[promptIndex + 1] ?? ""
+process.stdout.write(prompt)
+process.exit(0)
+`,
+	)
 }
