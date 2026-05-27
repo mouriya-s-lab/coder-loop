@@ -1850,7 +1850,160 @@ describe("daemon", () => {
 			}
 		})
 	})
+
+	describe("per-item phase advancement (issue #289 AC7)", () => {
+		test("live daemon drives one item through iter → review in two distinct spawns (not one synchronous spawn-then-review)", async () => {
+			const fixture = await startPhaseAdvancementFixture("ac7-iter-then-review")
+			try {
+				const result = expectOk(await request(fixture, "chain.create", {
+					name: "ac7-iter-then-review-chain",
+					preset: "gh-issue-pr-iteration",
+					repository: "mouriya-s-lab/coder-loop",
+				})).chain
+				const chainId = numberValue(record(result).id)
+				await request(fixture, "item.add", {
+					chainId,
+					issueNumber: 289_001,
+					repoCwd: REPO_ROOT,
+					extra: { issueKind: "code" },
+				})
+
+				const item = await waitFor(
+					async () => readItem(fixture.loopDataRoot, chainId, 289_001),
+					(candidate) => candidate !== null && candidate.status === "done",
+					10_000,
+				)
+				expect(item).not.toBeNull()
+				expect(item!.attempts).toBeGreaterThanOrEqual(2)
+				expect(item!.phase).toBe("review")
+
+				const spawnEvents = fixture.schedulerEvents.filter(
+					(event) => event.type === "agent.spawn" && event.itemId === item!.id,
+				)
+				expect(spawnEvents).toHaveLength(2)
+
+				const phaseStartEvents = fixture.schedulerEvents.filter(
+					(event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
+						event.type === "phase.start" && event.itemId === item!.id,
+				)
+				const startedPhases = phaseStartEvents.map((event) => event.phase)
+				expect(startedPhases).toEqual(["iteration", "review"])
+
+				const phaseEndEvents = fixture.schedulerEvents.filter(
+					(event): event is Extract<SchedulerEvent, { type: "phase.end" }> =>
+						event.type === "phase.end" && event.itemId === item!.id,
+				)
+				const endedPhases = phaseEndEvents.map((event) => event.phase)
+				expect(endedPhases).toEqual(["iteration", "review"])
+
+				const terminalEvents = fixture.schedulerEvents.filter(
+					(event): event is Extract<SchedulerEvent, { type: "queue.terminal" }> =>
+						event.type === "queue.terminal" && event.itemId === item!.id,
+				)
+				expect(terminalEvents).toHaveLength(1)
+				expect(terminalEvents[0]!.terminalStatus).toBe("done")
+
+				const daemonDir = resolveChainRuntimePaths("ac7-iter-then-review-chain", { loopDataRoot: fixture.loopDataRoot }).daemonDir
+				const batchDirs = await readdir(daemonDir)
+				expect(batchDirs.length).toBeGreaterThanOrEqual(1)
+				const newestBatch = batchDirs.sort().at(-1)!
+				const persistedLogPath = resolve(daemonDir, newestBatch, "daemon.log")
+				const persistedLog = await readFile(persistedLogPath, "utf-8")
+				const persistedSpawnLines = persistedLog
+					.split("\n")
+					.filter(Boolean)
+					.filter((line) => {
+						const parsed = JSON.parse(line) as { type?: string; event?: { type?: string; itemId?: number } }
+						return parsed.type === "scheduler.event" && parsed.event?.type === "agent.spawn" && parsed.event.itemId === item!.id
+					})
+				expect(persistedSpawnLines).toHaveLength(2)
+			} finally {
+				await fixture.daemon.stop()
+			}
+		})
+	})
 })
+
+type PhaseAdvancementFixture = Fixture & {
+	fakePhaseAwareRunner: string
+}
+
+async function startPhaseAdvancementFixture(name: string): Promise<PhaseAdvancementFixture> {
+	const root = resolve(TEST_ROOT, `${++nextFixtureId}-${name}`)
+	const loopDataRoot = resolve(root, "ld")
+	const eventLog = resolve(root, "events.jsonl")
+	const fakeRunner = resolve(root, "phase-aware-runner.ts")
+	await mkdir(root, { recursive: true })
+	await writeFile(
+		fakeRunner,
+		`import { appendFile } from "node:fs/promises"
+
+const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
+const input = JSON.parse(prompt)
+await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, phase: input.phase, cwd: process.cwd() }) + "\\n")
+await new Promise((resolve) => setTimeout(resolve, input.sleepMs))
+await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, phase: input.phase, cwd: process.cwd() }) + "\\n")
+console.log("done:" + input.itemId + ":" + input.phase)
+if (input.phase === "review") {
+	console.log("REVIEW SUMMARY: verdict=accepted; issue=#" + input.issueNumber + "; reason=phase-aware-runner review")
+} else {
+	console.log("ITERATION SUMMARY: scope=phase-aware-runner; reason=iter-marker")
+}
+process.exit(0)
+`,
+	)
+
+	const schedulerEvents: SchedulerEvent[] = []
+	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
+		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+		await mkdir(worktreePath, { recursive: true })
+		return worktreePath
+	}
+
+	const fakeRunnerSelection: SchedulerOptions["runner"] = {
+		kind: "claude",
+		source: "iteration-default",
+		binary: "bun",
+		extraArgs: [fakeRunner],
+		model: null,
+	}
+
+	const daemon = await startCoderLoopDaemon({
+		loopDataRoot,
+		shutdownGraceMs: 100,
+		scheduler: {
+			enabled: true,
+			intervalMs: 20,
+			runner: fakeRunnerSelection,
+			presetDir: PRESET_DIR,
+			worktreeManager,
+			kindResolver: () => ({ ok: true, kind: "code" }),
+			prompt: ({ item, runId, phase }) => JSON.stringify({
+				itemId: item.id,
+				issueNumber: item.issueNumber,
+				runId,
+				phase,
+				eventLog,
+				sleepMs: 5,
+			}),
+			chainCompleteTriggerForChain: () => null,
+			onEvent: (event) => {
+				schedulerEvents.push(event)
+			},
+		},
+	})
+	const snapshot = daemon.snapshot()
+	return {
+		daemon,
+		loopDataRoot,
+		socketPath: snapshot.socketPath,
+		pidFile: snapshot.pidFile,
+		eventLog,
+		schedulerEvents,
+		fakePhaseAwareRunner: fakeRunner,
+	}
+}
 
 type ChainBasedRunnerFixture = Fixture & {
 	fakeCodexBinary: string

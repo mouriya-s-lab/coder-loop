@@ -524,25 +524,28 @@ export class CoderLoopDaemon {
 		const store = this.requireStore()
 		for (const chain of store.listChains()) {
 			if (chain.status === "deleted") continue
-			const staleItems = store.listItems(chain.id).filter((item) => item.status === "in_progress")
 			const currentRun = store.getCurrentRun(chain.id)
-			if (staleItems.length === 0 && currentRun === null) continue
+			if (currentRun === null) continue
 
-			const stalePid = currentRun === null ? null : await this.readCurrentRunProcessGroupPid(chain, currentRun.runId, currentRun.extra)
+			const stalePid = await this.readCurrentRunProcessGroupPid(chain, currentRun.runId, currentRun.extra)
 			if (stalePid !== null) await terminateStaleProcessGroup(stalePid, Math.min(this.shutdownGraceMs, STALE_RECOVERY_FORCE_AFTER_MS))
 
-			if (currentRun !== null) store.clearCurrentRun(chain.id)
+			const midFlightItemId = optionalPositiveInteger(currentRun.extra.itemId)
+			const midFlightItem = midFlightItemId !== null ? store.getItem(midFlightItemId) : null
+			const itemsToRecover = midFlightItem !== null && midFlightItem.status === "in_progress" ? [midFlightItem] : []
+
+			store.clearCurrentRun(chain.id)
 			const recoveredAt = unixSeconds()
-			for (const item of staleItems) {
-				store.updateItem(item.id, { status: "changes_requested", updatedAt: recoveredAt })
+			for (const item of itemsToRecover) {
+				store.updateItem(item.id, { status: "changes_requested", phase: null, updatedAt: recoveredAt })
 			}
 			await this.appendDaemonLogIfChainNameIsValid(chain, {
 				type: "scheduler.recovery",
 				reason: "stale_in_progress",
 				chainId: chain.id,
-				runId: currentRun?.runId ?? null,
+				runId: currentRun.runId,
 				pid: stalePid,
-				recoveredItems: staleItems.map((item) => ({
+				recoveredItems: itemsToRecover.map((item) => ({
 					itemId: item.id,
 					issueNumber: item.issueNumber,
 					fromStatus: "in_progress",

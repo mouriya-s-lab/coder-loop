@@ -53,6 +53,7 @@ describe("sqlite state store", () => {
 				"evidence_dir",
 				"agent_cwd",
 				"runner",
+				"phase",
 				"extra",
 				"created_at",
 				"updated_at",
@@ -360,6 +361,143 @@ describe("sqlite state store", () => {
 		} catch (error) {
 			expect(error).toBeInstanceOf(SqliteStateError)
 			expect((error as SqliteStateError).code).toBe("db_unavailable")
+		}
+	})
+
+	test("phase migration is idempotent across repeated opens (issue #289 AC2)", async () => {
+		const loopDataRoot = resolve(TEST_ROOT, `phase-idempotent-${Date.now()}-${++nextRootId}`)
+		await mkdir(loopDataRoot, { recursive: true })
+
+		const first = openSqliteStateStore({ loopDataRoot })
+		try {
+			expect(first.listTableColumns("items")).toContain("phase")
+		} finally {
+			first.close()
+		}
+
+		const second = openSqliteStateStore({ loopDataRoot })
+		try {
+			expect(second.listTableColumns("items")).toContain("phase")
+			const chain = createFullChain(second)
+			const item = createFullItem(second, chain, { extra: { phase: "ignored-extra-key" } })
+			expect(item.phase).toBeNull()
+
+			const updated = second.updateItem(item.id, { phase: "iteration" })
+			expect(updated.phase).toBe("iteration")
+			expect(second.getItem(item.id)?.phase).toBe("iteration")
+		} finally {
+			second.close()
+		}
+
+		const third = openSqliteStateStore({ loopDataRoot })
+		try {
+			expect(third.listTableColumns("items")).toContain("phase")
+		} finally {
+			third.close()
+		}
+	})
+
+	test("phase migration adds column to pre-v2 DB created without phase (issue #289 AC2)", async () => {
+		const loopDataRoot = resolve(TEST_ROOT, `phase-legacy-${Date.now()}-${++nextRootId}`)
+		await mkdir(loopDataRoot, { recursive: true })
+		const dbFile = resolve(loopDataRoot, "db.sqlite")
+
+		const legacy = new Database(dbFile, { create: true, readwrite: true, strict: true })
+		try {
+			legacy.exec("PRAGMA foreign_keys = ON")
+			legacy.exec("PRAGMA journal_mode = WAL")
+			legacy.exec(`
+				CREATE TABLE chains (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					name TEXT NOT NULL UNIQUE,
+					preset TEXT NOT NULL,
+					repository TEXT NOT NULL,
+					base_branch TEXT NOT NULL,
+					umbrella_issue INTEGER,
+					umbrella_repo TEXT,
+					status TEXT NOT NULL CHECK (status IN ('active', 'completed', 'deleted')),
+					metadata TEXT NOT NULL,
+					created_at REAL NOT NULL,
+					updated_at REAL NOT NULL
+				);
+				CREATE TABLE items (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+					issue_number INTEGER NOT NULL,
+					repo_cwd TEXT NOT NULL,
+					status TEXT NOT NULL,
+					attempts INTEGER NOT NULL,
+					title TEXT,
+					priority TEXT,
+					branch TEXT,
+					pr INTEGER,
+					last_run_id TEXT,
+					issue_file TEXT,
+					evidence_dir TEXT,
+					agent_cwd TEXT,
+					runner TEXT CHECK (runner IN ('claude', 'codex') OR runner IS NULL),
+					extra TEXT NOT NULL,
+					created_at REAL NOT NULL,
+					updated_at REAL NOT NULL,
+					UNIQUE (chain_id, issue_number)
+				);
+				CREATE TABLE runs (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					run_id TEXT NOT NULL UNIQUE,
+					chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+					item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+					phase TEXT NOT NULL,
+					started_at REAL NOT NULL,
+					ended_at REAL,
+					exit_code INTEGER,
+					extra TEXT NOT NULL
+				);
+				CREATE TABLE current_runs (
+					chain_id INTEGER PRIMARY KEY REFERENCES chains(id) ON DELETE CASCADE,
+					phase TEXT NOT NULL,
+					run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+					started_at REAL NOT NULL,
+					extra TEXT NOT NULL
+				);
+			`)
+			legacy.exec(`
+				INSERT INTO chains (name, preset, repository, base_branch, status, metadata, created_at, updated_at)
+				VALUES ('legacy', 'gh-issue-pr-iteration', 'mouriya-s-lab/coder-loop', 'main', 'active', '{}', 1.0, 1.0)
+			`)
+			legacy.exec(`
+				INSERT INTO items (chain_id, issue_number, repo_cwd, status, attempts, extra, created_at, updated_at)
+				VALUES (1, 999, '/repo/legacy', 'queued', 0, '{}', 1.0, 1.0)
+			`)
+			expect(
+				(legacy.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? 0),
+			).toBe(0)
+			const columnsBefore = legacy.query<{ name: string }, []>("PRAGMA table_info(items)").all().map((row) => row.name)
+			expect(columnsBefore).not.toContain("phase")
+		} finally {
+			legacy.close()
+		}
+
+		const migrated = openSqliteStateStore({ loopDataRoot })
+		try {
+			expect(migrated.listTableColumns("items")).toContain("phase")
+			const items = migrated.listItems(1)
+			expect(items).toHaveLength(1)
+			const item = items[0]!
+			expect(item.phase).toBeNull()
+			expect(item.issueNumber).toBe(999)
+			const updated = migrated.updateItem(item.id, { phase: "iteration", updatedAt: 2.0 })
+			expect(updated.phase).toBe("iteration")
+			expect(migrated.getItem(item.id)?.phase).toBe("iteration")
+		} finally {
+			migrated.close()
+		}
+
+		const reopened = openSqliteStateStore({ loopDataRoot })
+		try {
+			const item = reopened.getItemByIssue(1, 999)
+			expect(item?.phase).toBe("iteration")
+		} finally {
+			reopened.close()
 		}
 	})
 })

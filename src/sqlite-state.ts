@@ -71,6 +71,7 @@ export type ItemRecord = {
 	evidenceDir: string | null
 	agentCwd: string | null
 	runner: AgentRunnerKind | null
+	phase: string | null
 	extra: JsonObject
 	createdAt: number
 	updatedAt: number
@@ -91,6 +92,7 @@ export type CreateItemInput = {
 	evidenceDir?: string | null
 	agentCwd?: string | null
 	runner?: AgentRunnerKind | null
+	phase?: string | null
 	extra?: JsonObject
 	createdAt?: number
 	updatedAt?: number
@@ -233,6 +235,7 @@ type ItemRow = {
 	evidence_dir: string | null
 	agent_cwd: string | null
 	runner: string | null
+	phase: string | null
 	extra: string
 	created_at: number
 	updated_at: number
@@ -301,6 +304,7 @@ CREATE TABLE IF NOT EXISTS items (
 	evidence_dir TEXT,
 	agent_cwd TEXT,
 	runner TEXT CHECK (runner IN ('claude', 'codex') OR runner IS NULL),
+	phase TEXT,
 	extra TEXT NOT NULL,
 	created_at REAL NOT NULL,
 	updated_at REAL NOT NULL,
@@ -332,6 +336,12 @@ CREATE INDEX IF NOT EXISTS idx_items_chain_status ON items(chain_id, status);
 CREATE INDEX IF NOT EXISTS idx_runs_chain_item ON runs(chain_id, item_id);
 `
 
+const STATE_SCHEMA_VERSION = 2
+
+type UserVersionRow = {
+	user_version: number
+}
+
 export function openSqliteStateStore(options: SqliteStateStoreOptions = {}): SqliteStateStore {
 	const dbFile = resolveLoopDataPaths(options).dbFile
 	const createIfMissing = options.createIfMissing ?? true
@@ -359,11 +369,7 @@ export function openSqliteStateStore(options: SqliteStateStoreOptions = {}): Sql
 				})
 			}
 		}
-		if (!stateSchemaExists(db)) {
-			db.transaction(() => {
-				db.exec(STATE_SCHEMA_SQL)
-			}).immediate()
-		}
+		migrateStateSchema(db)
 	} catch (error) {
 		db.close()
 		throw translateSqliteError(error, "initialize state schema", { dbFile })
@@ -380,6 +386,29 @@ function stateSchemaExists(db: Database): boolean {
 			AND name IN ('chains', 'items', 'runs', 'current_runs')
 	`).get()
 	return row?.table_count === 4
+}
+
+function readUserVersion(db: Database): number {
+	return db.query<UserVersionRow, []>("PRAGMA user_version").get()?.user_version ?? 0
+}
+
+function itemsTableHasColumn(db: Database, columnName: string): boolean {
+	return db
+		.query<TableColumnRow, []>("PRAGMA table_info(items)")
+		.all()
+		.some((row) => row.name === columnName)
+}
+
+function migrateStateSchema(db: Database): void {
+	const beforeVersion = readUserVersion(db)
+	if (beforeVersion >= STATE_SCHEMA_VERSION && stateSchemaExists(db) && itemsTableHasColumn(db, "phase")) return
+	db.transaction(() => {
+		db.exec(STATE_SCHEMA_SQL)
+		if (!itemsTableHasColumn(db, "phase")) {
+			db.exec("ALTER TABLE items ADD COLUMN phase TEXT")
+		}
+		db.exec(`PRAGMA user_version = ${STATE_SCHEMA_VERSION}`)
+	}).immediate()
 }
 
 function createSqliteStateStore(db: Database): SqliteStateStore {
@@ -516,6 +545,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 					evidenceDir: input.evidenceDir === undefined ? current.evidenceDir : input.evidenceDir,
 					agentCwd: input.agentCwd === undefined ? current.agentCwd : input.agentCwd,
 					runner: input.runner === undefined ? current.runner : input.runner,
+					phase: input.phase === undefined ? current.phase : input.phase,
 					extra: input.extra ?? current.extra,
 					updatedAt: input.updatedAt ?? unixSeconds(),
 				}
@@ -524,7 +554,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 					SET repo_cwd = $repoCwd, status = $status, attempts = $attempts, title = $title,
 						priority = $priority, branch = $branch, pr = $pr, last_run_id = $lastRunId,
 						issue_file = $issueFile, evidence_dir = $evidenceDir, agent_cwd = $agentCwd,
-						runner = $runner, extra = $extra, updated_at = $updatedAt
+						runner = $runner, phase = $phase, extra = $extra, updated_at = $updatedAt
 					WHERE id = $id
 				`).run(itemParams(next))
 				return requireItem(getItemRow(id), id)
@@ -646,11 +676,11 @@ function insertItem(db: Database, getItemRow: (id: number) => ItemRow | null, in
 	const result = db.query<unknown, SqlParams>(`
 		INSERT INTO items (
 			chain_id, issue_number, repo_cwd, status, attempts, title, priority, branch, pr, last_run_id,
-			issue_file, evidence_dir, agent_cwd, runner, extra, created_at, updated_at
+			issue_file, evidence_dir, agent_cwd, runner, phase, extra, created_at, updated_at
 		)
 		VALUES (
 			$chainId, $issueNumber, $repoCwd, $status, $attempts, $title, $priority, $branch, $pr, $lastRunId,
-			$issueFile, $evidenceDir, $agentCwd, $runner, $extra, $createdAt, $updatedAt
+			$issueFile, $evidenceDir, $agentCwd, $runner, $phase, $extra, $createdAt, $updatedAt
 		)
 	`).run({
 		chainId: input.chainId,
@@ -667,6 +697,7 @@ function insertItem(db: Database, getItemRow: (id: number) => ItemRow | null, in
 		evidenceDir: input.evidenceDir ?? null,
 		agentCwd: input.agentCwd ?? null,
 		runner: input.runner ?? null,
+		phase: input.phase ?? null,
 		extra: stringifyJsonObject(input.extra ?? {}),
 		createdAt: createdAt,
 		updatedAt: updatedAt,
@@ -695,6 +726,7 @@ function rowToItem(row: ItemRow | null): ItemRecord | null {
 		evidenceDir: row.evidence_dir,
 		agentCwd: row.agent_cwd,
 		runner: row.runner,
+		phase: row.phase,
 		extra: parseJsonObject(row.extra, `items.${row.id}.extra`),
 		createdAt: row.created_at,
 		updatedAt: row.updated_at,
@@ -781,6 +813,7 @@ function itemParams(item: ItemRecord): SqlParams {
 		evidenceDir: item.evidenceDir,
 		agentCwd: item.agentCwd,
 		runner: item.runner,
+		phase: item.phase,
 		extra: stringifyJsonObject(item.extra),
 		updatedAt: item.updatedAt,
 	}
