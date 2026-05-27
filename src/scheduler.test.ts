@@ -762,6 +762,159 @@ describe("scheduler default statusFromExit (end-to-end via fixture)", () => {
 	})
 })
 
+describe("scheduler per-item phase advancement (issue #289)", () => {
+	test("AC3: queued item → first tick spawns iter phase and writes phase=iteration / status=in_progress", async () => {
+		const fixture = await createFixture("phase-ac3-queued-to-iter")
+		try {
+			const chain = createChain(fixture.store, "phase-ac3-queued-to-iter-chain")
+			const item = createItem(fixture.store, chain, {
+				issueNumber: 28903,
+				repoCwd: "/repo/a",
+				summary: "ITERATION SUMMARY: scope=unit; reason=ac3",
+			})
+
+			const tick = await schedulerTick(fixture.options({
+				runIdFactory: ({ chain: c, item: i, phase }) => `run-${c.id}-${i.id}-${phase}`,
+			}))
+			expect(tick.spawnedRuns).toHaveLength(1)
+			const closed = await tick.spawnedRuns[0]!.closed
+			expect(closed.exitCode).toBe(0)
+
+			const updated = fixture.store.getItem(item.id)
+			expect(updated?.phase).toBe("iteration")
+			expect(updated?.status).toBe("in_progress")
+			expect(updated?.attempts).toBe(1)
+			expect(fixture.schedulerEvents.filter((event) => event.type === "agent.spawn")).toHaveLength(1)
+			expect(fixture.schedulerEvents.find((event) => event.type === "agent.spawn" && event.itemId === item.id)).toBeDefined()
+			expect(fixture.schedulerEvents.find((event) => event.type === "phase.start" && event.itemId === item.id && event.phase === "iteration")).toBeDefined()
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("AC4: in_progress + phase=iteration → next tick spawns review (does not re-spawn iter) and writes phase=review", async () => {
+		const fixture = await createFixture("phase-ac4-iter-to-review")
+		try {
+			const chain = createChain(fixture.store, "phase-ac4-iter-to-review-chain")
+			const item = createItem(fixture.store, chain, {
+				issueNumber: 28904,
+				repoCwd: "/repo/a",
+				summary: "ITERATION SUMMARY: scope=unit; reason=ac4",
+			})
+
+			const baseOptions = fixture.options({
+				runIdFactory: ({ chain: c, item: i, phase }) => `run-${c.id}-${i.id}-${phase}`,
+			})
+
+			const iterTick = await schedulerTick(baseOptions)
+			expect(iterTick.spawnedRuns).toHaveLength(1)
+			expect(iterTick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-iteration`)
+			const iterClosed = await iterTick.spawnedRuns[0]!.closed
+			expect(iterClosed.status).toBe("in_progress")
+			expect(fixture.store.getItem(item.id)?.phase).toBe("iteration")
+
+			const reviewTick = await schedulerTick(baseOptions)
+			expect(reviewTick.spawnedRuns).toHaveLength(1)
+			expect(reviewTick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-review`)
+
+			const updatedAfterReviewSpawn = fixture.store.getItem(item.id)
+			expect(updatedAfterReviewSpawn?.phase).toBe("review")
+			expect(updatedAfterReviewSpawn?.status).toBe("in_progress")
+			expect(updatedAfterReviewSpawn?.attempts).toBe(2)
+			await reviewTick.spawnedRuns[0]!.closed
+
+			const spawnEvents = fixture.schedulerEvents.filter((event) => event.type === "agent.spawn" && event.itemId === item.id)
+			expect(spawnEvents).toHaveLength(2)
+			const phases = fixture.schedulerEvents
+				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> => event.type === "phase.start" && event.itemId === item.id)
+				.map((event) => event.phase)
+			expect(phases).toEqual(["iteration", "review"])
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("AC5: daemon restart (no current run) at phase boundary — next tick spawns review only, does NOT re-spawn iter", async () => {
+		const fixture = await createFixture("phase-ac5-restart-resume")
+		try {
+			const chain = createChain(fixture.store, "phase-ac5-restart-resume-chain")
+			const item = createItem(fixture.store, chain, {
+				issueNumber: 28905,
+				repoCwd: "/repo/a",
+				summary: "ITERATION SUMMARY: scope=unit; reason=ac5",
+			})
+
+			fixture.store.updateItem(item.id, {
+				status: "in_progress",
+				phase: "iteration",
+				attempts: 1,
+				lastRunId: "run-pre-crash-iter",
+				updatedAt: 1_800_001_000,
+			})
+			expect(fixture.store.getCurrentRun(chain.id)).toBeNull()
+
+			const baseOptions = fixture.options({
+				runIdFactory: ({ chain: c, item: i, phase }) => `run-${c.id}-${i.id}-${phase}-resume`,
+			})
+
+			const tick = await schedulerTick(baseOptions)
+			expect(tick.spawnedRuns).toHaveLength(1)
+			expect(tick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-review-resume`)
+
+			const updated = fixture.store.getItem(item.id)
+			expect(updated?.phase).toBe("review")
+			expect(updated?.status).toBe("in_progress")
+			expect(updated?.attempts).toBe(2)
+			await tick.spawnedRuns[0]!.closed
+
+			const spawnEvents = fixture.schedulerEvents.filter((event) => event.type === "agent.spawn" && event.itemId === item.id)
+			expect(spawnEvents).toHaveLength(1)
+			const startedPhases = fixture.schedulerEvents
+				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> => event.type === "phase.start" && event.itemId === item.id)
+				.map((event) => event.phase)
+			expect(startedPhases).toEqual(["review"])
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("AC6: in_progress + phase=review + REVIEW SUMMARY verdict=accepted → item terminal=done, next tick does NOT spawn", async () => {
+		const fixture = await createFixture("phase-ac6-review-terminal")
+		try {
+			const chain = createChain(fixture.store, "phase-ac6-review-terminal-chain")
+			const item = createItem(fixture.store, chain, {
+				issueNumber: 28906,
+				repoCwd: "/repo/a",
+				summary: "REVIEW SUMMARY: verdict=accepted; issue=#28906; reason=ac6",
+			})
+			fixture.store.updateItem(item.id, {
+				status: "in_progress",
+				phase: "iteration",
+				attempts: 1,
+				lastRunId: "run-pre-review-iter",
+				updatedAt: 1_800_002_000,
+			})
+
+			const baseOptions = fixture.options({
+				runIdFactory: ({ chain: c, item: i, phase }) => `run-${c.id}-${i.id}-${phase}-ac6`,
+			})
+
+			const reviewTick = await schedulerTick(baseOptions)
+			expect(reviewTick.spawnedRuns).toHaveLength(1)
+			expect(reviewTick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-review-ac6`)
+			const reviewClosed = await reviewTick.spawnedRuns[0]!.closed
+			expect(reviewClosed.status).toBe("done")
+			expect(fixture.store.getItem(item.id)?.status).toBe("done")
+			expect(fixture.store.getItem(item.id)?.phase).toBe("review")
+
+			const followUpTick = await schedulerTick(baseOptions)
+			expect(followUpTick.spawnedRuns).toHaveLength(0)
+		} finally {
+			fixture.store.close()
+		}
+	})
+})
+
 describe("scheduler kind-label gate", () => {
 	test("missing kind:* label aborts spawn, marks item blocked, leaves no current run", async () => {
 		const fixture = await createFixture("kind-gate-missing")
@@ -1615,6 +1768,7 @@ function makeItemFixture(chain: ChainRecord, overrides: Partial<ItemRecord> & Pi
 		evidenceDir: null,
 		agentCwd: null,
 		runner: null,
+		phase: null,
 		extra: {},
 		createdAt: 1_800_000_001,
 		updatedAt: 1_800_000_001,

@@ -13,6 +13,7 @@ import {
 	renderFragmentIndex,
 	renderPrompt,
 	resolveIssueKind,
+	reviewPhaseForPreset,
 	selectRunnerForPhase,
 	type AgentRunnerKind,
 	type AgentRunnerSelection,
@@ -244,7 +245,6 @@ export function createSchedulerState(): SchedulerState {
 }
 
 export async function schedulerTick(options: SchedulerOptions): Promise<SchedulerTickResult> {
-	const phase = options.phase ?? DEFAULT_PHASE
 	const activeChains = options.store
 		.listChains()
 		.filter((chain) => chain.status === "active" && hasValidChainName(chain.name))
@@ -258,6 +258,7 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 		const chainStatuses = await schedulerStatusesForChain(options, chain)
 		const items = options.store.listItems(chain.id)
 		const repoCwds = distinct(items.map((item) => item.repoCwd))
+		const phasePlan = await resolvePhasePlanForChain(options, chain)
 
 		for (const repoCwd of repoCwds) {
 			const slot = getOrCreateSlot(options.state, chain, repoCwd)
@@ -273,10 +274,18 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 			}
 			if (hasFinalizingItemForRepo(options.state, items, repoCwd)) continue
 
-			const item = options.store.getNextPendingItem({ chainId: chain.id, repoCwd, statuses: chainStatuses.pending, terminalStatuses: chainStatuses.terminal })
-			if (item === null) continue
+			const next = selectNextItemAndPhase({
+				store: options.store,
+				chainId: chain.id,
+				repoCwd,
+				items,
+				chainStatuses,
+				phasePlan,
+				explicitPhase: options.phase,
+			})
+			if (next === null) continue
 
-			const activeRun = await spawnSchedulerRun(options, chain, item, slot, phase)
+			const activeRun = await spawnSchedulerRun(options, chain, next.item, slot, next.phase)
 			if (activeRun !== null) spawnedRuns.push(activeRun)
 		}
 
@@ -284,6 +293,61 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 	}
 
 	return { spawnedRuns, completedChainIds }
+}
+
+type SchedulerPhasePlan = {
+	iterPhase: string
+	reviewPhase: string
+}
+
+async function resolvePhasePlanForChain(options: SchedulerOptions, chain: ChainRecord): Promise<SchedulerPhasePlan> {
+	if (options.phase !== undefined) return { iterPhase: options.phase, reviewPhase: options.phase }
+	try {
+		const preset = await loadPreset(schedulerPresetDir(options, chain))
+		const iterPhase = preset.phases.find((phase) => phase.trigger === null)?.name ?? DEFAULT_PHASE
+		const reviewPhase = reviewPhaseForPreset(preset).name
+		return { iterPhase, reviewPhase }
+	} catch {
+		return { iterPhase: DEFAULT_PHASE, reviewPhase: DEFAULT_PHASE }
+	}
+}
+
+type SelectNextItemAndPhaseInput = {
+	store: SchedulerStore
+	chainId: number
+	repoCwd: string
+	items: readonly ItemRecord[]
+	chainStatuses: SchedulerChainStatuses
+	phasePlan: SchedulerPhasePlan
+	explicitPhase: string | undefined
+}
+
+function selectNextItemAndPhase(input: SelectNextItemAndPhaseInput): { item: ItemRecord; phase: string } | null {
+	if (input.explicitPhase !== undefined) {
+		const pending = input.store.getNextPendingItem({
+			chainId: input.chainId,
+			repoCwd: input.repoCwd,
+			statuses: input.chainStatuses.pending,
+			terminalStatuses: input.chainStatuses.terminal,
+		})
+		return pending === null ? null : { item: pending, phase: input.explicitPhase }
+	}
+
+	const repoItems = input.items.filter((item) => item.repoCwd === input.repoCwd)
+	const iterDone = repoItems.find((item) =>
+		item.status === "in_progress" && item.phase === input.phasePlan.iterPhase,
+	)
+	if (iterDone !== undefined && input.phasePlan.iterPhase !== input.phasePlan.reviewPhase) {
+		return { item: iterDone, phase: input.phasePlan.reviewPhase }
+	}
+
+	const pending = input.store.getNextPendingItem({
+		chainId: input.chainId,
+		repoCwd: input.repoCwd,
+		statuses: input.chainStatuses.pending,
+		terminalStatuses: input.chainStatuses.terminal,
+	})
+	return pending === null ? null : { item: pending, phase: input.phasePlan.iterPhase }
 }
 
 export async function runSchedulerUntilIdle(options: SchedulerOptions, maxTicks = 100): Promise<SchedulerActiveRun[]> {
@@ -446,6 +510,7 @@ async function spawnSchedulerRun(
 		attempts: item.attempts + 1,
 		lastRunId: runId,
 		agentCwd: worktreePath,
+		phase,
 		updatedAt: startedAt,
 	})
 
@@ -784,6 +849,7 @@ function chainCompletionFingerprint(chain: ChainRecord, items: readonly ItemReco
 				evidenceDir: item.evidenceDir,
 				agentCwd: item.agentCwd,
 				runner: item.runner,
+				phase: item.phase,
 				extra: item.extra,
 				createdAt: item.createdAt,
 				updatedAt: item.updatedAt,
