@@ -84,6 +84,11 @@ const EXPECTED_VARIABLE_KEYS = [
 	"ISSUE_STATUS",
 	"ISSUE_LAST_RUN_ID",
 	"ISSUE_KIND",
+	"CHAIN_NAME",
+	"CHAIN_UMBRELLA_REPO",
+	"CHAIN_UMBRELLA_ISSUE",
+	"CHAIN_BASE_BRANCH",
+	"REPO_CWD",
 ] as const
 
 describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
@@ -112,7 +117,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		}
 	})
 
-	test("each phase declares all 24 variable bindings with parsed sources", async () => {
+	test("each phase declares all 29 variable bindings (24 baseline + 5 chain) with parsed sources", async () => {
 		const preset = await loadPreset(BUNDLED_PRESET_DIR)
 		for (const phase of preset.phases) {
 			const keys = phase.variables.map(([key]) => key)

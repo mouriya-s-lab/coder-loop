@@ -56,6 +56,11 @@ prompt = "iter-entry.md"
   ISSUE_STATUS             = "item.status"
   ISSUE_LAST_RUN_ID        = "item.lastRunId"
   ISSUE_KIND               = "runtime.issueKind"
+  CHAIN_NAME               = "runtime.chainName"
+  CHAIN_UMBRELLA_REPO      = "runtime.chainUmbrellaRepo"
+  CHAIN_UMBRELLA_ISSUE     = "runtime.chainUmbrellaIssue"
+  CHAIN_BASE_BRANCH        = "runtime.chainBaseBranch"
+  REPO_CWD                 = "runtime.repoCwd"
 
 [[phases]]
 name   = "review"
@@ -86,6 +91,11 @@ prompt = "review-entry.md"
   ISSUE_STATUS             = "item.status"
   ISSUE_LAST_RUN_ID        = "item.lastRunId"
   ISSUE_KIND               = "runtime.issueKind"
+  CHAIN_NAME               = "runtime.chainName"
+  CHAIN_UMBRELLA_REPO      = "runtime.chainUmbrellaRepo"
+  CHAIN_UMBRELLA_ISSUE     = "runtime.chainUmbrellaIssue"
+  CHAIN_BASE_BRANCH        = "runtime.chainBaseBranch"
+  REPO_CWD                 = "runtime.repoCwd"
 
 [[phases]]
 name    = "blocked-responder"
@@ -117,6 +127,11 @@ trigger = { afterPhase = "review", whenStatus = "blocked" }
   ISSUE_STATUS             = "item.status"
   ISSUE_LAST_RUN_ID        = "item.lastRunId"
   ISSUE_KIND               = "runtime.issueKind"
+  CHAIN_NAME               = "runtime.chainName"
+  CHAIN_UMBRELLA_REPO      = "runtime.chainUmbrellaRepo"
+  CHAIN_UMBRELLA_ISSUE     = "runtime.chainUmbrellaIssue"
+  CHAIN_BASE_BRANCH        = "runtime.chainBaseBranch"
+  REPO_CWD                 = "runtime.repoCwd"
 
 [[phases]]
 name    = "umbrella-finalizer"
@@ -148,6 +163,11 @@ trigger = { on = "chain-complete" }
   ISSUE_STATUS             = "item.status"
   ISSUE_LAST_RUN_ID        = "item.lastRunId"
   ISSUE_KIND               = "runtime.issueKind"
+  CHAIN_NAME               = "runtime.chainName"
+  CHAIN_UMBRELLA_REPO      = "runtime.chainUmbrellaRepo"
+  CHAIN_UMBRELLA_ISSUE     = "runtime.chainUmbrellaIssue"
+  CHAIN_BASE_BRANCH        = "runtime.chainBaseBranch"
+  REPO_CWD                 = "runtime.repoCwd"
 
 [[fragments]]
 id   = "common/runtime-contract"
