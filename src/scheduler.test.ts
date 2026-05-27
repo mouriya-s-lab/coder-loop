@@ -7,6 +7,7 @@ import {
 	defaultSchedulerStatusFromExit,
 	listActiveRuns,
 	renderSchedulerSpawnPrompt,
+	resumeDecisionForItem,
 	runSchedulerUntilIdle,
 	schedulerSlotWorktreePath,
 	schedulerTick,
@@ -1952,6 +1953,213 @@ describe("runPresetChainCompleteTriggerPhases per-phase runner selection (issue 
 	})
 })
 
+describe("scheduler session-id resume (issue #291)", () => {
+	const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
+
+	test("first spawn (lastSessionId == null): buildRunnerInvocation argv has no --resume; rendered prompt's RESUMED_SESSION_ID is empty (AC6)", async () => {
+		const chain = makeChainFixture({ name: "first-spawn-chain" })
+		const item = makeItemFixture(chain, { issueNumber: 291_001, repoCwd: "/tmp/first-spawn-repo" })
+		expect(item.lastSessionId).toBeNull()
+
+		const decision = resumeDecisionForItem(item)
+		expect(decision).toEqual({ kind: "fresh" })
+
+		const invocation = buildRunnerInvocation(
+			{ kind: "claude", source: "iteration-default", binary: "claude", extraArgs: [], model: null },
+			"prompt",
+			decision,
+			{ targetCwd: "/tmp", agentCwd: "/tmp", presetDir: PRESET_DIR, loopDataRoot: "/tmp/loop-data" },
+		)
+		expect(invocation.kind).toBe("spawn")
+		if (invocation.kind === "spawn") {
+			expect(invocation.args).not.toContain("--resume")
+		}
+
+		const rendered = await renderSchedulerSpawnPrompt({
+			rawPrompt: "RESUMED_SESSION_ID=[{{RESUMED_SESSION_ID}}] RESUMED_FROM_PHASE=[{{RESUMED_FROM_PHASE}}] RUN_ID_GENERATION=[{{RUN_ID_GENERATION}}]",
+			presetDir: PRESET_DIR,
+			phase: "iteration",
+			chain,
+			item,
+			runId: "run-fresh",
+			worktreePath: "/tmp/fresh-worktree",
+			issueKind: "code",
+		})
+		expect(rendered).toBe("RESUMED_SESSION_ID=[] RESUMED_FROM_PHASE=[] RUN_ID_GENERATION=[new]")
+	})
+
+	test("resume spawn (lastSessionId set): buildRunnerInvocation argv contains --resume <id>; rendered prompt embeds the session id literal (AC4 / AC5)", async () => {
+		const chain = makeChainFixture({ name: "resume-chain" })
+		const item = makeItemFixture(chain, {
+			issueNumber: 291_002,
+			repoCwd: "/tmp/resume-repo",
+			lastSessionId: "sess-deadbeef-cafe",
+			phase: "iteration",
+		})
+
+		const decision = resumeDecisionForItem(item)
+		expect(decision).toEqual({ kind: "resume", sessionId: "sess-deadbeef-cafe" })
+
+		const invocation = buildRunnerInvocation(
+			{ kind: "claude", source: "iteration-default", binary: "claude", extraArgs: [], model: null },
+			"prompt",
+			decision,
+			{ targetCwd: "/tmp", agentCwd: "/tmp", presetDir: PRESET_DIR, loopDataRoot: "/tmp/loop-data" },
+		)
+		expect(invocation.kind).toBe("spawn")
+		if (invocation.kind === "spawn") {
+			const idx = invocation.args.indexOf("--resume")
+			expect(idx).toBeGreaterThanOrEqual(0)
+			expect(invocation.args[idx + 1]).toBe("sess-deadbeef-cafe")
+		}
+
+		const rendered = await renderSchedulerSpawnPrompt({
+			rawPrompt: "RESUMED_SESSION_ID=[{{RESUMED_SESSION_ID}}] RESUMED_FROM_PHASE=[{{RESUMED_FROM_PHASE}}] RUN_ID_GENERATION=[{{RUN_ID_GENERATION}}]",
+			presetDir: PRESET_DIR,
+			phase: "iteration",
+			chain,
+			item,
+			runId: "run-resume",
+			worktreePath: "/tmp/resume-worktree",
+			issueKind: "code",
+		})
+		expect(rendered).toBe("RESUMED_SESSION_ID=[sess-deadbeef-cafe] RESUMED_FROM_PHASE=[iteration] RUN_ID_GENERATION=[resumed]")
+	})
+
+	test("codex resume spawn (lastSessionId set): buildRunnerInvocation argv shape includes `resume <sessionId>` subcommand", async () => {
+		const item = makeItemFixture(makeChainFixture(), {
+			issueNumber: 291_003,
+			repoCwd: "/tmp/codex-resume-repo",
+			lastSessionId: "thread-codex-1",
+		})
+		const decision = resumeDecisionForItem(item)
+		const invocation = buildRunnerInvocation(
+			{ kind: "codex", source: "iteration-default", binary: "codex", extraArgs: [], model: null },
+			"prompt",
+			decision,
+			{ targetCwd: "/tmp", agentCwd: "/tmp", presetDir: PRESET_DIR, loopDataRoot: "/tmp/loop-data" },
+		)
+		expect(invocation.kind).toBe("spawn")
+		if (invocation.kind === "spawn") {
+			const resumeIdx = invocation.args.indexOf("resume")
+			expect(resumeIdx).toBeGreaterThanOrEqual(0)
+			expect(invocation.args[resumeIdx + 1]).toBe("thread-codex-1")
+		}
+	})
+
+	test("end-to-end (claude runner): session-id parsed from stdout first line is persisted to item.lastSessionId after exit (AC3)", async () => {
+		const fixture = await createFixture("session-id-capture-claude")
+		try {
+			const chain = createChain(fixture.store, "session-id-capture-claude-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 291_010, repoCwd: "/repo/session-id" })
+			const fakeRunner = resolve(fixture.loopDataRoot, "..", "fake-claude-session.ts")
+			await writeFakeClaudeSessionRunner(fakeRunner, "sess-captured-001")
+
+			const options = fixture.options({
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
+			})
+			await runSchedulerUntilIdle(options)
+
+			const refreshed = fixture.store.getItem(item.id)
+			expect(refreshed?.lastSessionId).toBe("sess-captured-001")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("end-to-end composition: seeded item.lastSessionId reaches subprocess argv as --resume <id> (AC7 wire-level proxy)", async () => {
+		const fixture = await createFixture("session-id-roundtrip-claude")
+		try {
+			const chain = createChain(fixture.store, "session-id-roundtrip-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 291_020, repoCwd: "/repo/session-roundtrip" })
+			fixture.store.updateItem(item.id, { lastSessionId: "sess-seeded-200" })
+			const fakeRunner = resolve(fixture.loopDataRoot, "..", "fake-claude-argv-echo.ts")
+			await writeFakeClaudeArgvEchoRunner(fakeRunner)
+
+			const options = fixture.options({
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
+			})
+			await runSchedulerUntilIdle(options)
+
+			const runId = `run-${chain.id}-${item.id}`
+			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
+			const stdout = await readFile(paths.runStdoutFile(runId), "utf-8")
+			const argvLine = stdout.split("\n").find((line) => line.startsWith("{") && line.includes("\"argv\""))
+			expect(argvLine).toBeDefined()
+			const argv = JSON.parse(argvLine!) as { argv: string[] }
+			const idx = argv.argv.indexOf("--resume")
+			expect(idx).toBeGreaterThanOrEqual(0)
+			expect(argv.argv[idx + 1]).toBe("sess-seeded-200")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("end-to-end (codex runner): codex thread.started event id is persisted to item.lastSessionId after exit", async () => {
+		const fixture = await createFixture("session-id-capture-codex")
+		try {
+			const chain = createChain(fixture.store, "session-id-capture-codex-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 291_011, repoCwd: "/repo/session-id-codex" })
+			const fakeRunner = resolve(fixture.loopDataRoot, "..", "fake-codex-session.sh")
+			await writeFakeCodexSessionShellRunner(fakeRunner, "thread-captured-002")
+
+			const options = fixture.options({
+				runner: { kind: "codex", source: "iteration-default", binary: fakeRunner, extraArgs: [], model: null },
+			})
+			await runSchedulerUntilIdle(options)
+
+			const refreshed = fixture.store.getItem(item.id)
+			expect(refreshed?.lastSessionId).toBe("thread-captured-002")
+		} finally {
+			fixture.store.close()
+		}
+	})
+})
+
+async function writeFakeClaudeSessionRunner(path: string, sessionId: string): Promise<void> {
+	await mkdir(resolve(path, ".."), { recursive: true })
+	await writeFile(
+		path,
+		`import { appendFile } from "node:fs/promises"
+
+const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
+const input = JSON.parse(prompt)
+console.log(JSON.stringify({ type: "system", subtype: "init", session_id: ${JSON.stringify(sessionId)} }))
+await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
+await new Promise((resolve) => setTimeout(resolve, input.sleepMs ?? 5))
+await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
+console.log(JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=fake-claude-session-runner" }] } }))
+process.exit(0)
+`,
+	)
+}
+
+async function writeFakeClaudeArgvEchoRunner(path: string): Promise<void> {
+	await mkdir(resolve(path, ".."), { recursive: true })
+	await writeFile(
+		path,
+		`console.log(JSON.stringify({ argv: Bun.argv }))
+console.log(JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=argv-echo" }] } }))
+process.exit(0)
+`,
+	)
+}
+
+async function writeFakeCodexSessionShellRunner(path: string, threadId: string): Promise<void> {
+	await mkdir(resolve(path, ".."), { recursive: true })
+	await writeFile(
+		path,
+		`#!/bin/sh
+# Fake codex CLI: ignore all argv (codex shapes don't matter for this test), emit fixed JSON stream.
+printf '%s\\n' '{"type":"thread.started","thread_id":"${threadId}"}'
+printf '%s\\n' '{"type":"agent_message","text":"REVIEW SUMMARY: verdict=accepted; issue=#0; reason=fake-codex-session-runner"}'
+exit 0
+`,
+	)
+	await chmod(path, 0o755)
+}
+
 async function writeShellFinalizerMarkerScript(path: string, marker: string): Promise<void> {
 	await mkdir(resolve(path, ".."), { recursive: true })
 	await writeFile(
@@ -1995,6 +2203,7 @@ function makeItemFixture(chain: ChainRecord, overrides: Partial<ItemRecord> & Pi
 		branch: null,
 		pr: null,
 		lastRunId: null,
+		lastSessionId: null,
 		issueFile: null,
 		evidenceDir: null,
 		agentCwd: null,

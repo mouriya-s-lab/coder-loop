@@ -67,6 +67,7 @@ export type ItemRecord = {
 	branch: string | null
 	pr: number | null
 	lastRunId: string | null
+	lastSessionId: string | null
 	issueFile: string | null
 	evidenceDir: string | null
 	agentCwd: string | null
@@ -88,6 +89,7 @@ export type CreateItemInput = {
 	branch?: string | null
 	pr?: number | null
 	lastRunId?: string | null
+	lastSessionId?: string | null
 	issueFile?: string | null
 	evidenceDir?: string | null
 	agentCwd?: string | null
@@ -231,6 +233,7 @@ type ItemRow = {
 	branch: string | null
 	pr: number | null
 	last_run_id: string | null
+	last_session_id: string | null
 	issue_file: string | null
 	evidence_dir: string | null
 	agent_cwd: string | null
@@ -300,6 +303,7 @@ CREATE TABLE IF NOT EXISTS items (
 	branch TEXT,
 	pr INTEGER,
 	last_run_id TEXT,
+	last_session_id TEXT,
 	issue_file TEXT,
 	evidence_dir TEXT,
 	agent_cwd TEXT,
@@ -336,7 +340,7 @@ CREATE INDEX IF NOT EXISTS idx_items_chain_status ON items(chain_id, status);
 CREATE INDEX IF NOT EXISTS idx_runs_chain_item ON runs(chain_id, item_id);
 `
 
-const STATE_SCHEMA_VERSION = 2
+const STATE_SCHEMA_VERSION = 3
 
 type UserVersionRow = {
 	user_version: number
@@ -401,11 +405,19 @@ function itemsTableHasColumn(db: Database, columnName: string): boolean {
 
 function migrateStateSchema(db: Database): void {
 	const beforeVersion = readUserVersion(db)
-	if (beforeVersion >= STATE_SCHEMA_VERSION && stateSchemaExists(db) && itemsTableHasColumn(db, "phase")) return
+	if (
+		beforeVersion >= STATE_SCHEMA_VERSION
+		&& stateSchemaExists(db)
+		&& itemsTableHasColumn(db, "phase")
+		&& itemsTableHasColumn(db, "last_session_id")
+	) return
 	db.transaction(() => {
 		db.exec(STATE_SCHEMA_SQL)
 		if (!itemsTableHasColumn(db, "phase")) {
 			db.exec("ALTER TABLE items ADD COLUMN phase TEXT")
+		}
+		if (!itemsTableHasColumn(db, "last_session_id")) {
+			db.exec("ALTER TABLE items ADD COLUMN last_session_id TEXT")
 		}
 		db.exec(`PRAGMA user_version = ${STATE_SCHEMA_VERSION}`)
 	}).immediate()
@@ -541,6 +553,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 					branch: input.branch === undefined ? current.branch : input.branch,
 					pr: input.pr === undefined ? current.pr : input.pr,
 					lastRunId: input.lastRunId === undefined ? current.lastRunId : input.lastRunId,
+					lastSessionId: input.lastSessionId === undefined ? current.lastSessionId : input.lastSessionId,
 					issueFile: input.issueFile === undefined ? current.issueFile : input.issueFile,
 					evidenceDir: input.evidenceDir === undefined ? current.evidenceDir : input.evidenceDir,
 					agentCwd: input.agentCwd === undefined ? current.agentCwd : input.agentCwd,
@@ -553,6 +566,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 					UPDATE items
 					SET repo_cwd = $repoCwd, status = $status, attempts = $attempts, title = $title,
 						priority = $priority, branch = $branch, pr = $pr, last_run_id = $lastRunId,
+						last_session_id = $lastSessionId,
 						issue_file = $issueFile, evidence_dir = $evidenceDir, agent_cwd = $agentCwd,
 						runner = $runner, phase = $phase, extra = $extra, updated_at = $updatedAt
 					WHERE id = $id
@@ -676,11 +690,11 @@ function insertItem(db: Database, getItemRow: (id: number) => ItemRow | null, in
 	const result = db.query<unknown, SqlParams>(`
 		INSERT INTO items (
 			chain_id, issue_number, repo_cwd, status, attempts, title, priority, branch, pr, last_run_id,
-			issue_file, evidence_dir, agent_cwd, runner, phase, extra, created_at, updated_at
+			last_session_id, issue_file, evidence_dir, agent_cwd, runner, phase, extra, created_at, updated_at
 		)
 		VALUES (
 			$chainId, $issueNumber, $repoCwd, $status, $attempts, $title, $priority, $branch, $pr, $lastRunId,
-			$issueFile, $evidenceDir, $agentCwd, $runner, $phase, $extra, $createdAt, $updatedAt
+			$lastSessionId, $issueFile, $evidenceDir, $agentCwd, $runner, $phase, $extra, $createdAt, $updatedAt
 		)
 	`).run({
 		chainId: input.chainId,
@@ -693,6 +707,7 @@ function insertItem(db: Database, getItemRow: (id: number) => ItemRow | null, in
 		branch: input.branch ?? null,
 		pr: input.pr ?? null,
 		lastRunId: input.lastRunId ?? null,
+		lastSessionId: input.lastSessionId ?? null,
 		issueFile: input.issueFile ?? null,
 		evidenceDir: input.evidenceDir ?? null,
 		agentCwd: input.agentCwd ?? null,
@@ -722,6 +737,7 @@ function rowToItem(row: ItemRow | null): ItemRecord | null {
 		branch: row.branch,
 		pr: row.pr,
 		lastRunId: row.last_run_id,
+		lastSessionId: row.last_session_id,
 		issueFile: row.issue_file,
 		evidenceDir: row.evidence_dir,
 		agentCwd: row.agent_cwd,
@@ -809,6 +825,7 @@ function itemParams(item: ItemRecord): SqlParams {
 		branch: item.branch,
 		pr: item.pr,
 		lastRunId: item.lastRunId,
+		lastSessionId: item.lastSessionId,
 		issueFile: item.issueFile,
 		evidenceDir: item.evidenceDir,
 		agentCwd: item.agentCwd,
