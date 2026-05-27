@@ -1481,7 +1481,14 @@ describe("daemon", () => {
 			expect(status).toMatchObject({ runId, chainId, issueNumber: 203, phase: "iteration", exitCode: 0, status: "done" })
 			expect(stdout).toContain("done:")
 			expect(stderr).toBe("")
-			expect(events.map((event) => event.type)).toEqual(["agent.spawn", "agent.exit", "chain.completed"])
+			expect(events.map((event) => event.type)).toEqual([
+				"agent.spawn",
+				"phase.start",
+				"agent.exit",
+				"phase.end",
+				"queue.terminal",
+				"chain.completed",
+			])
 			expect(daemonLog).toContain("scheduler.event")
 		} finally {
 			await fixture.daemon.stop()

@@ -109,6 +109,9 @@ export type SchedulerEvent =
 	| { type: "chain.complete_trigger"; chainId: number; chainName: string; runId?: string; decision: SchedulerChainCompleteDecision["decision"]; reason?: string }
 	| { type: "chain.complete_trigger_failed"; chainId: number; chainName: string; runId?: string; error: string }
 	| { type: "chain.completed"; chainId: number; chainName: string; runId?: string }
+	| { type: "phase.start"; ts: string; runId: string; chainId: number; itemId: number; repoCwd: string; phase: string; pid: number | null }
+	| { type: "phase.end"; ts: string; runId: string; chainId: number; itemId: number; phase: string; exitCode: number; durationSeconds: number; status: string }
+	| { type: "queue.terminal"; ts: string; runId: string; chainId: number; itemId: number; terminalStatus: string }
 
 export type SchedulerChainCompleteTriggerContext = {
 	chain: ChainRecord
@@ -435,7 +438,7 @@ async function spawnSchedulerRun(
 		stdio: ["ignore", "pipe", "pipe"],
 		detached: true,
 	})
-	const activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, child)
+	const activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, phase, child)
 	options.store.setCurrentRun({
 		chainId: chain.id,
 		phase,
@@ -468,6 +471,16 @@ async function spawnSchedulerRun(
 		worktreePath,
 		presetDir,
 	})
+	await emit(options, {
+		type: "phase.start",
+		ts: nowIso(options),
+		runId,
+		chainId: chain.id,
+		itemId: item.id,
+		repoCwd: item.repoCwd,
+		phase,
+		pid: activeRun.pid,
+	})
 	return activeRun
 }
 
@@ -479,6 +492,7 @@ function attachRunCloseHandler(
 	runId: string,
 	worktreePath: string,
 	startedAt: number,
+	phase: string,
 	child: ReturnType<typeof spawn>,
 ): SchedulerActiveRun {
 	const stdout: Buffer[] = []
@@ -494,20 +508,20 @@ function attachRunCloseHandler(
 				const exitCode = code ?? 1
 				const stdoutText = Buffer.concat(stdout).toString("utf-8")
 				const stderrText = Buffer.concat(stderr).toString("utf-8")
-				const closePhase = options.phase ?? DEFAULT_PHASE
-				const statusFromExit = options.statusFromExit?.({ exitCode, stdout: stdoutText, stderr: stderrText, item, chain, phase: closePhase })
-					?? defaultSchedulerStatusFromExit({ exitCode, stdout: stdoutText, phase: closePhase, runnerKind: options.runner.kind })
+				const statusFromExit = options.statusFromExit?.({ exitCode, stdout: stdoutText, stderr: stderrText, item, chain, phase })
+					?? defaultSchedulerStatusFromExit({ exitCode, stdout: stdoutText, phase, runnerKind: options.runner.kind })
 				const terminalStatuses = new Set((await schedulerStatusesForChain(options, chain)).terminal)
 				const currentItem = options.store.getItem(item.id)
 				const status = currentItem !== null && terminalStatuses.has(currentItem.status) ? currentItem.status : statusFromExit
 				const endedAt = nowSeconds(options)
+				const itemTransitionedToTerminal = (currentItem === null || !terminalStatuses.has(currentItem.status)) && terminalStatuses.has(status)
 				options.state.finalizingItemStatuses.set(item.id, status)
 				try {
 					await writeSchedulerRunCompletionArtifacts(options, {
 						runId,
 						chain,
 						item,
-						phase: options.phase ?? DEFAULT_PHASE,
+						phase,
 						startedAt,
 						endedAt,
 						exitCode,
@@ -523,9 +537,30 @@ function attachRunCloseHandler(
 
 					if (slot.activeRun?.runId === runId) slot.activeRun = null
 					await emit(options, { type: "agent.exit", slotKey: slot.key, chainId: chain.id, itemId: item.id, runId, exitCode, status })
+					await emit(options, {
+						type: "phase.end",
+						ts: nowIso(options),
+						runId,
+						chainId: chain.id,
+						itemId: item.id,
+						phase,
+						exitCode,
+						durationSeconds: Math.max(0, endedAt - startedAt),
+						status,
+					})
 					options.store.completeRun(runId, { endedAt, exitCode, extra: { stdoutBytes: stdoutText.length, stderrBytes: stderrText.length } })
 					if (currentItem === null || !terminalStatuses.has(currentItem.status)) {
 						options.store.updateItem(item.id, { status, lastRunId: runId, agentCwd: worktreePath, updatedAt: endedAt })
+					}
+					if (itemTransitionedToTerminal) {
+						await emit(options, {
+							type: "queue.terminal",
+							ts: nowIso(options),
+							runId,
+							chainId: chain.id,
+							itemId: item.id,
+							terminalStatus: status,
+						})
 					}
 					await completeChainIfReady(options, chain, runId, [...terminalStatuses])
 					resolveClosed({ runId, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, exitCode, stdout: stdoutText, stderr: stderrText, status })
@@ -805,6 +840,10 @@ function distinct(values: readonly string[]): string[] {
 
 function nowSeconds(options: SchedulerOptions): number {
 	return options.now?.() ?? Math.floor(Date.now() / 1000)
+}
+
+function nowIso(options: SchedulerOptions): string {
+	return new Date(nowSeconds(options) * 1000).toISOString()
 }
 
 function makeRunId(itemId: number): string {

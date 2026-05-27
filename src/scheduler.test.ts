@@ -188,7 +188,10 @@ describe("scheduler", () => {
 			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
 			expect(fixture.schedulerEvents.map((event) => event.type)).toEqual([
 				"agent.spawn",
+				"phase.start",
 				"agent.exit",
+				"phase.end",
+				"queue.terminal",
 				"chain.complete_trigger",
 				"chain.completed",
 			])
@@ -500,7 +503,113 @@ describe("scheduler", () => {
 			})
 			expect(stdout).toContain(`done:${item.id}`)
 			expect(stderr).toBe("")
-			expect(events.map((event) => event.type)).toEqual(["agent.spawn", "agent.exit", "chain.completed"])
+			expect(events.map((event) => event.type)).toEqual([
+				"agent.spawn",
+				"phase.start",
+				"agent.exit",
+				"phase.end",
+				"queue.terminal",
+				"chain.completed",
+			])
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("scheduler emits phase.start / phase.end / queue.terminal with the expected payload", async () => {
+		const fixture = await createFixture("phase-events")
+		try {
+			const chain = createChain(fixture.store, "phase-events-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 286, repoCwd: "/repo/a" })
+
+			await runSchedulerUntilIdle(fixture.options())
+
+			const runId = `run-${chain.id}-${item.id}`
+			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
+			const persisted = (await readFile(paths.runEventsFile(runId), "utf-8"))
+				.trim()
+				.split("\n")
+				.filter(Boolean)
+				.map((line) => JSON.parse(line) as JsonObject)
+
+			const phaseStartEvents = fixture.schedulerEvents.filter((event) => event.type === "phase.start")
+			const phaseEndEvents = fixture.schedulerEvents.filter((event) => event.type === "phase.end")
+			const queueTerminalEvents = fixture.schedulerEvents.filter((event) => event.type === "queue.terminal")
+
+			expect(phaseStartEvents).toHaveLength(1)
+			expect(phaseEndEvents).toHaveLength(1)
+			expect(queueTerminalEvents).toHaveLength(1)
+
+			const [phaseStart] = phaseStartEvents
+			const [phaseEnd] = phaseEndEvents
+			const [queueTerminal] = queueTerminalEvents
+			if (phaseStart?.type !== "phase.start") throw new Error("expected phase.start")
+			if (phaseEnd?.type !== "phase.end") throw new Error("expected phase.end")
+			if (queueTerminal?.type !== "queue.terminal") throw new Error("expected queue.terminal")
+
+			expect(phaseStart).toMatchObject({
+				type: "phase.start",
+				runId,
+				chainId: chain.id,
+				itemId: item.id,
+				repoCwd: "/repo/a",
+				phase: "iteration",
+			})
+			expect(typeof phaseStart.ts).toBe("string")
+			expect(Number.isFinite(Date.parse(phaseStart.ts))).toBe(true)
+			expect(phaseStart.pid).toEqual(expect.any(Number))
+
+			expect(phaseEnd).toMatchObject({
+				type: "phase.end",
+				runId,
+				chainId: chain.id,
+				itemId: item.id,
+				phase: "iteration",
+				exitCode: 0,
+				status: "done",
+			})
+			expect(typeof phaseEnd.ts).toBe("string")
+			expect(Number.isFinite(Date.parse(phaseEnd.ts))).toBe(true)
+			expect(phaseEnd.durationSeconds).toBeGreaterThanOrEqual(0)
+
+			expect(queueTerminal).toMatchObject({
+				type: "queue.terminal",
+				runId,
+				chainId: chain.id,
+				itemId: item.id,
+				terminalStatus: "done",
+			})
+			expect(typeof queueTerminal.ts).toBe("string")
+			expect(Number.isFinite(Date.parse(queueTerminal.ts))).toBe(true)
+
+			const persistedTypes = persisted.map((event) => event.type)
+			expect(persistedTypes.filter((type) => type === "phase.start")).toHaveLength(1)
+			expect(persistedTypes.filter((type) => type === "phase.end")).toHaveLength(1)
+			expect(persistedTypes.filter((type) => type === "queue.terminal")).toHaveLength(1)
+			expect(persistedTypes.indexOf("phase.start")).toBeGreaterThan(persistedTypes.indexOf("agent.spawn"))
+			expect(persistedTypes.indexOf("phase.end")).toBeGreaterThan(persistedTypes.indexOf("agent.exit"))
+			expect(persistedTypes.indexOf("queue.terminal")).toBeGreaterThan(persistedTypes.indexOf("phase.end"))
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("non-terminal phase exit does not emit queue.terminal", async () => {
+		const fixture = await createFixture("phase-events-non-terminal")
+		try {
+			const chain = createChain(fixture.store, "phase-events-non-terminal-chain")
+			createItem(fixture.store, chain, { issueNumber: 286, repoCwd: "/repo/a", exitCode: 1, summary: null })
+
+			const tick = await schedulerTick(fixture.options())
+			await tick.spawnedRuns[0]!.closed
+
+			const phaseEnd = fixture.schedulerEvents.filter((event) => event.type === "phase.end")
+			const queueTerminal = fixture.schedulerEvents.filter((event) => event.type === "queue.terminal")
+
+			expect(phaseEnd).toHaveLength(1)
+			if (phaseEnd[0]?.type !== "phase.end") throw new Error("expected phase.end")
+			expect(phaseEnd[0].status).toBe("changes_requested")
+			expect(queueTerminal).toHaveLength(0)
 		} finally {
 			fixture.store.close()
 		}
