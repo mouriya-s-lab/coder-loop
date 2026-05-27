@@ -6,6 +6,9 @@ import { basename, dirname, resolve } from "node:path"
 
 import {
 	buildRunnerInvocation,
+	hasIterationSummaryMarker,
+	parseReviewSummaryVerdict,
+	type AgentRunnerKind,
 	type AgentRunnerSelection,
 	type JsonObject,
 	type JsonValue,
@@ -135,7 +138,7 @@ export type SchedulerOptions = {
 	statusesForChain?: (chain: ChainRecord) => SchedulerChainStatuses | Promise<SchedulerChainStatuses>
 	now?: () => number
 	runIdFactory?: (context: { chain: ChainRecord; item: ItemRecord; phase: string }) => string
-	statusFromExit?: (context: { exitCode: number; stdout: string; stderr: string; item: ItemRecord; chain: ChainRecord }) => string
+	statusFromExit?: (context: SchedulerStatusFromExitContext) => string
 	chainCompleteTrigger?: SchedulerChainCompleteTrigger
 	chainCompleteTriggerForChain?: SchedulerChainCompleteTriggerForChain
 	onEvent?: (event: SchedulerEvent) => void | Promise<void>
@@ -144,6 +147,47 @@ export type SchedulerOptions = {
 export type SchedulerChainStatuses = {
 	pending: readonly string[]
 	terminal: readonly string[]
+}
+
+export type SchedulerStatusFromExitContext = {
+	exitCode: number
+	stdout: string
+	stderr: string
+	item: ItemRecord
+	chain: ChainRecord
+	phase: string
+}
+
+export type DefaultSchedulerStatusFromExitInput = {
+	exitCode: number
+	stdout: string
+	phase: string
+	runnerKind: AgentRunnerKind
+}
+
+const ITERATION_PHASE_NAME = "iteration"
+
+export function defaultSchedulerStatusFromExit(input: DefaultSchedulerStatusFromExitInput): string {
+	if (input.exitCode !== 0) return "changes_requested"
+	const reviewVerdict = parseReviewSummaryVerdict(input.stdout, input.runnerKind)
+	if (reviewVerdict !== null) {
+		switch (reviewVerdict) {
+			case "accepted":
+			case "stop":
+				return "done"
+			case "skip":
+				return "moot"
+			case "blocked":
+				return "blocked"
+			case "retry":
+				return "changes_requested"
+		}
+	}
+	if (input.phase === ITERATION_PHASE_NAME && hasIterationSummaryMarker(input.stdout, input.runnerKind)) {
+		return "in_progress"
+	}
+	console.warn(`coder-loop scheduler: phase ${input.phase} exit 0 without SUMMARY marker, retry`)
+	return "changes_requested"
 }
 
 export type SchedulerTickResult = {
@@ -419,7 +463,9 @@ function attachRunCloseHandler(
 				const exitCode = code ?? 1
 				const stdoutText = Buffer.concat(stdout).toString("utf-8")
 				const stderrText = Buffer.concat(stderr).toString("utf-8")
-				const statusFromExit = options.statusFromExit?.({ exitCode, stdout: stdoutText, stderr: stderrText, item, chain }) ?? (exitCode === 0 ? "done" : "changes_requested")
+				const closePhase = options.phase ?? DEFAULT_PHASE
+				const statusFromExit = options.statusFromExit?.({ exitCode, stdout: stdoutText, stderr: stderrText, item, chain, phase: closePhase })
+					?? defaultSchedulerStatusFromExit({ exitCode, stdout: stdoutText, phase: closePhase, runnerKind: options.runner.kind })
 				const terminalStatuses = new Set((await schedulerStatusesForChain(options, chain)).terminal)
 				const currentItem = options.store.getItem(item.id)
 				const status = currentItem !== null && terminalStatuses.has(currentItem.status) ? currentItem.status : statusFromExit

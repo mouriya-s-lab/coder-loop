@@ -4,6 +4,7 @@ import { resolve } from "node:path"
 
 import {
 	createSchedulerState,
+	defaultSchedulerStatusFromExit,
 	listActiveRuns,
 	runSchedulerUntilIdle,
 	schedulerSlotWorktreePath,
@@ -13,7 +14,7 @@ import {
 	type SchedulerWorktreeManager,
 } from "./scheduler"
 import { resolveSchedulerPresetPhasePrompt } from "./daemon"
-import { loadPreset } from "./loop"
+import { loadPreset, type JsonObject } from "./loop"
 import { resolveChainRuntimePaths } from "./runtime-paths"
 import { type ChainRecord, openSqliteStateStore } from "./sqlite-state"
 
@@ -506,6 +507,143 @@ describe("scheduler", () => {
 	})
 })
 
+describe("defaultSchedulerStatusFromExit", () => {
+	test("exit code != 0 maps to changes_requested regardless of stdout", () => {
+		expect(defaultSchedulerStatusFromExit({ exitCode: 1, stdout: "", phase: "iteration", runnerKind: "claude" })).toBe("changes_requested")
+		expect(defaultSchedulerStatusFromExit({ exitCode: 137, stdout: "REVIEW SUMMARY: verdict=accepted; ignored", phase: "iteration", runnerKind: "claude" })).toBe("changes_requested")
+	})
+
+	test("exit 0 with no SUMMARY marker maps to changes_requested", () => {
+		const stdout = "exploration log line\nanother line without summary\n"
+		expect(defaultSchedulerStatusFromExit({ exitCode: 0, stdout, phase: "iteration", runnerKind: "claude" })).toBe("changes_requested")
+	})
+
+	test("exit 0 with REVIEW SUMMARY maps per parseReviewSummaryVerdict for every verdict", () => {
+		const map: Array<[string, string]> = [
+			["accepted", "done"],
+			["stop", "done"],
+			["skip", "moot"],
+			["blocked", "blocked"],
+			["retry", "changes_requested"],
+		]
+		for (const [verdict, expected] of map) {
+			const stdout = `intermediate line\nREVIEW SUMMARY: verdict=${verdict}; issue=#1; reason=unit`
+			expect(defaultSchedulerStatusFromExit({ exitCode: 0, stdout, phase: "iteration", runnerKind: "claude" })).toBe(expected)
+		}
+	})
+
+	test("exit 0 with only ITERATION SUMMARY and phase=iteration maps to in_progress", () => {
+		const stdout = "exploring\nITERATION SUMMARY: scope=unit; reason=fake"
+		expect(defaultSchedulerStatusFromExit({ exitCode: 0, stdout, phase: "iteration", runnerKind: "claude" })).toBe("in_progress")
+	})
+
+	test("exit 0 with only ITERATION SUMMARY and phase!=iteration falls through to changes_requested", () => {
+		const stdout = "exploring\nITERATION SUMMARY: scope=unit; reason=fake"
+		expect(defaultSchedulerStatusFromExit({ exitCode: 0, stdout, phase: "review", runnerKind: "claude" })).toBe("changes_requested")
+	})
+
+	test("REVIEW SUMMARY wins over an earlier ITERATION SUMMARY", () => {
+		const stdout = [
+			"ITERATION SUMMARY: scope=phase-1",
+			"middle log noise",
+			"REVIEW SUMMARY: verdict=skip; issue=#2; reason=both markers present",
+		].join("\n")
+		expect(defaultSchedulerStatusFromExit({ exitCode: 0, stdout, phase: "iteration", runnerKind: "claude" })).toBe("moot")
+	})
+})
+
+describe("scheduler default statusFromExit (end-to-end via fixture)", () => {
+	test("exit 0 with no SUMMARY marker leaves item continuable (changes_requested) after one tick", async () => {
+		const fixture = await createFixture("status-no-marker")
+		try {
+			const chain = createChain(fixture.store, "status-no-marker-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 5001, repoCwd: "/repo/a", summary: null })
+
+			const tick = await schedulerTick(fixture.options())
+			expect(tick.spawnedRuns).toHaveLength(1)
+			const closed = await tick.spawnedRuns[0]!.closed
+
+			expect(closed.exitCode).toBe(0)
+			expect(closed.status).toBe("changes_requested")
+			expect(fixture.store.getItem(item.id)?.status).toBe("changes_requested")
+			expect(fixture.store.getChain(chain.id)?.status).toBe("active")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("exit 0 with REVIEW SUMMARY verdict=skip maps item to moot", async () => {
+		const fixture = await createFixture("status-review-skip")
+		try {
+			const chain = createChain(fixture.store, "status-review-skip-chain")
+			const item = createItem(fixture.store, chain, {
+				issueNumber: 5002,
+				repoCwd: "/repo/a",
+				summary: "REVIEW SUMMARY: verdict=skip; issue=#5002; reason=unit",
+			})
+
+			const tick = await schedulerTick(fixture.options())
+			const closed = await tick.spawnedRuns[0]!.closed
+
+			expect(closed.exitCode).toBe(0)
+			expect(closed.status).toBe("moot")
+			expect(fixture.store.getItem(item.id)?.status).toBe("moot")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("exit 0 with only ITERATION SUMMARY in iteration phase keeps item in_progress (not terminal done)", async () => {
+		const fixture = await createFixture("status-iter-summary")
+		try {
+			const chain = createChain(fixture.store, "status-iter-summary-chain")
+			const item = createItem(fixture.store, chain, {
+				issueNumber: 5003,
+				repoCwd: "/repo/a",
+				summary: "ITERATION SUMMARY: scope=unit; reason=mid-phase",
+			})
+
+			const tick = await schedulerTick(fixture.options())
+			const closed = await tick.spawnedRuns[0]!.closed
+
+			expect(closed.exitCode).toBe(0)
+			expect(closed.status).toBe("in_progress")
+			expect(fixture.store.getItem(item.id)?.status).toBe("in_progress")
+			expect(fixture.store.getChain(chain.id)?.status).toBe("active")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("daemon-bound default re-spawns the same item across ticks when each spawn exits 0 without SUMMARY marker", async () => {
+		const fixture = await createFixture("status-respawn")
+		try {
+			const chain = createChain(fixture.store, "status-respawn-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 5004, repoCwd: "/repo/a", summary: null })
+
+			let runCounter = 0
+			const baseOptions = fixture.options()
+			const options: SchedulerOptions = {
+				...baseOptions,
+				runIdFactory: () => `run-respawn-${++runCounter}`,
+			}
+
+			const firstTick = await schedulerTick(options)
+			expect(firstTick.spawnedRuns).toHaveLength(1)
+			await firstTick.spawnedRuns[0]!.closed
+			expect(fixture.store.getItem(item.id)?.status).toBe("changes_requested")
+
+			const secondTick = await schedulerTick(options)
+			expect(secondTick.spawnedRuns).toHaveLength(1)
+			await secondTick.spawnedRuns[0]!.closed
+			expect(fixture.store.getItem(item.id)?.attempts).toBe(2)
+			expect(fixture.store.getItem(item.id)?.status).toBe("changes_requested")
+		} finally {
+			fixture.store.close()
+		}
+	})
+})
+
 describe("resolveSchedulerPresetPhasePrompt", () => {
 	const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
 
@@ -614,8 +752,8 @@ async function createFixture(name: string): Promise<Fixture> {
 		worktreeManager,
 		loopDataRootOptions: { loopDataRoot },
 		runIdFactory: ({ chain, item }) => `run-${chain.id}-${item.id}`,
-		prompt: ({ item, runId, worktreePath }) =>
-			JSON.stringify({
+		prompt: ({ item, runId, worktreePath }) => {
+			const payload: Record<string, unknown> = {
 				itemId: item.id,
 				issueNumber: item.issueNumber,
 				runId,
@@ -623,7 +761,10 @@ async function createFixture(name: string): Promise<Fixture> {
 				eventLog,
 				sleepMs: typeof item.extra.sleepMs === "number" ? item.extra.sleepMs : 5,
 				exitCode: typeof item.extra.exitCode === "number" ? item.extra.exitCode : 0,
-			}),
+			}
+			if (Object.prototype.hasOwnProperty.call(item.extra, "summary")) payload.summary = item.extra.summary
+			return JSON.stringify(payload)
+		},
 		onEvent: (event) => {
 			schedulerEvents.push(event)
 		},
@@ -656,8 +797,13 @@ function createChain(
 function createItem(
 	store: ReturnType<typeof openSqliteStateStore>,
 	chain: ChainRecord,
-	input: { issueNumber: number; repoCwd: string; sleepMs?: number; exitCode?: number },
+	input: { issueNumber: number; repoCwd: string; sleepMs?: number; exitCode?: number; summary?: string | null },
 ) {
+	const extra: JsonObject = {
+		sleepMs: input.sleepMs ?? 5,
+		exitCode: input.exitCode ?? 0,
+	}
+	if (Object.prototype.hasOwnProperty.call(input, "summary")) extra.summary = input.summary ?? null
 	return store.createItem({
 		chainId: chain.id,
 		issueNumber: input.issueNumber,
@@ -665,10 +811,7 @@ function createItem(
 		status: "queued",
 		attempts: 0,
 		title: `issue ${input.issueNumber}`,
-		extra: {
-			sleepMs: input.sleepMs ?? 5,
-			exitCode: input.exitCode ?? 0,
-		},
+		extra,
 		createdAt: 1_800_000_001 + input.issueNumber,
 		updatedAt: 1_800_000_001 + input.issueNumber,
 	})
@@ -687,6 +830,8 @@ await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.i
 await new Promise((resolve) => setTimeout(resolve, input.sleepMs))
 await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
 console.log("done:" + input.itemId)
+const summary = Object.prototype.hasOwnProperty.call(input, "summary") ? input.summary : "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=fake-runner default"
+if (summary !== null) console.log(summary)
 process.exit(input.exitCode)
 `,
 	)
@@ -783,6 +928,7 @@ async function writeEchoPromptRunner(path: string): Promise<void> {
 		`const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "" : Bun.argv[promptIndex + 1] ?? ""
 process.stdout.write(prompt)
+process.stdout.write("\\nREVIEW SUMMARY: verdict=accepted; issue=#0; reason=echo-prompt-runner default\\n")
 process.exit(0)
 `,
 	)

@@ -4855,6 +4855,22 @@ export function parseReviewSummaryVerdict(output: string, runner: AgentRunnerKin
 	return sawRunnerJson ? verdict : parseReviewSummaryVerdictFromText(output)
 }
 
+function hasIterationSummaryLineInText(text: string): boolean {
+	return finalSummaryLine(text, SUMMARY_WATCHDOG_MARKER) !== null
+}
+
+export function hasIterationSummaryMarker(output: string, runner: AgentRunnerKind = "claude"): boolean {
+	let sawRunnerJson = false
+	let lastTextHadMarker = false
+	for (const line of output.split(/\r?\n/)) {
+		const parsed = runnerAgentTextFromJsonLine(line, runner)
+		sawRunnerJson = sawRunnerJson || parsed.parsedRunnerEvent
+		if (parsed.text === null) continue
+		lastTextHadMarker = hasIterationSummaryLineInText(parsed.text)
+	}
+	return sawRunnerJson ? lastTextHadMarker : hasIterationSummaryLineInText(output)
+}
+
 export function createSummaryWatchdogStdoutObserver(runner: AgentRunnerKind, marker: string, watchdog: SummaryWatchdog): SummaryWatchdogStdoutObserver {
 	if (runner !== "codex") {
 		return {

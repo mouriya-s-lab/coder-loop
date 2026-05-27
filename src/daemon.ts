@@ -9,6 +9,7 @@ import { loadPreset, runPresetChainCompleteTriggerPhases, type AgentRunnerKind, 
 import {
 	cleanupSchedulerChainWorktrees,
 	createSchedulerState,
+	defaultSchedulerStatusFromExit,
 	listActiveRuns,
 	schedulerTick,
 	type SchedulerCompletedRun,
@@ -908,7 +909,13 @@ export class CoderLoopDaemon {
 		})
 		if (scheduler.now !== undefined) options.now = scheduler.now
 		if (scheduler.runIdFactory !== undefined) options.runIdFactory = scheduler.runIdFactory
-		if (scheduler.statusFromExit !== undefined) options.statusFromExit = scheduler.statusFromExit
+		options.statusFromExit = scheduler.statusFromExit
+			?? ((context) => defaultSchedulerStatusFromExit({
+				exitCode: context.exitCode,
+				stdout: context.stdout,
+				phase: context.phase,
+				runnerKind: options.runner.kind,
+			}))
 		if (scheduler.chainCompleteTrigger !== undefined) options.chainCompleteTrigger = scheduler.chainCompleteTrigger
 		else if (scheduler.chainCompleteTriggerForChain !== undefined) options.chainCompleteTriggerForChain = scheduler.chainCompleteTriggerForChain
 		else {

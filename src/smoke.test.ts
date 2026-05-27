@@ -795,6 +795,7 @@ describe("smoke: dependency-aware scheduler selection", () => {
 			`const input = JSON.parse(prompt)`,
 			`await appendFile(input.runnerLog, JSON.stringify({ issueNumber: input.issueNumber, itemId: input.itemId }) + "\\n")`,
 			`console.log("done:" + input.issueNumber)`,
+			`console.log("REVIEW SUMMARY: verdict=accepted; issue=#" + input.issueNumber + "; reason=dependency-scheduler smoke")`,
 			``,
 		].join("\n"))
 		const daemon = await startCoderLoopDaemon({
@@ -871,6 +872,7 @@ describe("smoke: dependency-aware scheduler selection", () => {
 		await mkdir(runtime, { recursive: true })
 		await writeFile(fakeRunner, [
 			`console.log("done")`,
+			`console.log("REVIEW SUMMARY: verdict=accepted; issue=#0; reason=chain-complete smoke")`,
 			``,
 		].join("\n"))
 		const daemon = await startCoderLoopDaemon({
@@ -1584,7 +1586,7 @@ async function writeGhFinalizerFakeRunner(path: string): Promise<void> {
 		`await mkdir(markerDir, { recursive: true })`,
 		``,
 		`if (!prompt.includes("coder-loop umbrella-finalizer agent")) {`,
-		`  assistant("ITERATION SUMMARY: fake iteration completed")`,
+		`  assistant("REVIEW SUMMARY: verdict=accepted; issue=#0; reason=fake iteration completed")`,
 		`  process.exit(0)`,
 		`}`,
 		``,
