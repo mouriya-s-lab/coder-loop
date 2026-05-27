@@ -1740,6 +1740,99 @@ describe("daemon", () => {
 		}
 	})
 
+	test("daemon scheduler spawns blocked-responder trigger phase after review exits blocked (live integration, issue #290)", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-b3-blocked-responder-live`)
+		const loopDataRoot = resolve(root, "ld")
+		const fakeRunner = resolve(root, "fake-phase-runner.ts")
+		const eventLog = resolve(root, "events.jsonl")
+		await mkdir(loopDataRoot, { recursive: true })
+		await writeFile(
+			fakeRunner,
+			`import { appendFile } from "node:fs/promises"
+
+const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
+const input = JSON.parse(prompt)
+await appendFile(input.eventLog, JSON.stringify({ type: "start", phase: input.phase, runId: input.runId }) + "\\n")
+await new Promise((resolve) => setTimeout(resolve, input.sleepMs))
+await appendFile(input.eventLog, JSON.stringify({ type: "end", phase: input.phase, runId: input.runId }) + "\\n")
+if (input.phase === "iteration") console.log("ITERATION SUMMARY: scope=b3-live; reason=iter-marker")
+else if (input.phase === "review") console.log("REVIEW SUMMARY: verdict=blocked; issue=#0; reason=b3-live-blocked")
+else if (input.phase === "blocked-responder") console.log("REVIEW SUMMARY: verdict=accepted; issue=#0; reason=b3-live-unblock-accepted")
+process.exit(0)
+`,
+		)
+
+		const schedulerEvents: SchedulerEvent[] = []
+		const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
+			const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+			await mkdir(worktreePath, { recursive: true })
+			return worktreePath
+		}
+		const runnerSelection: SchedulerOptions["runner"] = {
+			kind: "claude",
+			source: "iteration-default",
+			binary: "bun",
+			extraArgs: [fakeRunner],
+			model: null,
+		}
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			shutdownGraceMs: 100,
+			scheduler: {
+				enabled: true,
+				intervalMs: 30,
+				runner: runnerSelection,
+				presetDir: PRESET_DIR,
+				worktreeManager,
+				kindResolver: () => ({ ok: true, kind: "code" }),
+				prompt: ({ item, runId, phase }) => JSON.stringify({
+					itemId: item.id,
+					issueNumber: item.issueNumber,
+					runId,
+					phase,
+					eventLog,
+					sleepMs: 5,
+				}),
+				chainCompleteTriggerForChain: () => null,
+				onEvent: (event) => {
+					schedulerEvents.push(event)
+				},
+			},
+		})
+		const socketPath = daemon.snapshot().socketPath
+		try {
+			const chain = record(expectOk(await sendDaemonRequest(socketPath, daemonRequest("chain.create", {
+				name: "b3-blocked-responder-live-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			}))).chain)
+			const chainId = numberValue(chain.id)
+			expectOk(await sendDaemonRequest(socketPath, daemonRequest("item.add", { chainId, issueNumber: 29011, repoCwd: REPO_ROOT })))
+
+			const finalItem = await waitFor(
+				async () => readItem(loopDataRoot, chainId, 29011),
+				(candidate) => candidate?.phase === "blocked-responder" && candidate?.status === "done",
+				10_000,
+			)
+			expect(finalItem?.phase).toBe("blocked-responder")
+			expect(finalItem?.status).toBe("done")
+
+			const phaseStarts = schedulerEvents
+				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
+					event.type === "phase.start" && event.itemId === finalItem!.id,
+				)
+				.map((event) => event.phase)
+			expect(phaseStarts).toEqual(["iteration", "review", "blocked-responder"])
+
+			const paths = resolveChainRuntimePaths("b3-blocked-responder-live-chain", { loopDataRoot })
+			const daemonBatches = await readdir(paths.daemonDir)
+			const daemonLog = await readFile(paths.daemonLogFile(daemonBatches[0]!), "utf-8")
+			expect(daemonLog).toContain("blocked-responder")
+		} finally {
+			await daemon.stop()
+		}
+	})
+
 	test("daemon re-spawns item after agent exits 0 without SUMMARY marker (live integration)", async () => {
 		const warnings: string[] = []
 		const originalWarn = console.warn
