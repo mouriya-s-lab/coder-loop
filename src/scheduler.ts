@@ -85,6 +85,7 @@ export type SchedulerSpawnContext = {
 	runId: string
 	worktreePath: string
 	presetDir: string
+	phase: string
 }
 
 export type SchedulerWorktreeContext = {
@@ -345,7 +346,7 @@ async function spawnSchedulerRun(
 	})
 
 	const presetDir = schedulerPresetDir(options, chain)
-	const context: SchedulerSpawnContext = { chain, item, slot, runId, worktreePath, presetDir }
+	const context: SchedulerSpawnContext = { chain, item, slot, runId, worktreePath, presetDir, phase }
 	const prompt = typeof options.prompt === "string" ? options.prompt : await options.prompt(context)
 	const runnerPlan = buildRunnerInvocation(
 		options.runner,
