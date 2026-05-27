@@ -915,6 +915,237 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 	})
 })
 
+describe("scheduler item-level trigger phase advancement (issue #290)", () => {
+	test("AC2: blocked + phase=review → next tick spawns blocked-responder trigger phase", async () => {
+		const fixture = await createFixture("trigger-b3-blocked-spawn")
+		try {
+			const chain = createChain(fixture.store, "trigger-b3-blocked-spawn-chain")
+			const item = createItem(fixture.store, chain, {
+				issueNumber: 29002,
+				repoCwd: "/repo/a",
+				summary: "REVIEW SUMMARY: verdict=accepted; issue=#29002; reason=trigger-default",
+			})
+			fixture.store.updateItem(item.id, {
+				status: "blocked",
+				phase: "review",
+				attempts: 2,
+				lastRunId: "run-pre-blocked-review",
+				updatedAt: 1_800_003_000,
+			})
+
+			const baseOptions = fixture.options({
+				runIdFactory: ({ chain: c, item: i, phase }) => `run-${c.id}-${i.id}-${phase}-b3`,
+			})
+
+			const triggerTick = await schedulerTick(baseOptions)
+			expect(triggerTick.spawnedRuns).toHaveLength(1)
+			expect(triggerTick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-blocked-responder-b3`)
+
+			const duringSpawn = fixture.store.getItem(item.id)
+			expect(duringSpawn?.phase).toBe("blocked-responder")
+			expect(duringSpawn?.status).toBe("in_progress")
+			expect(duringSpawn?.attempts).toBe(3)
+
+			await triggerTick.spawnedRuns[0]!.closed
+
+			const spawnEvents = fixture.schedulerEvents.filter(
+				(event) => event.type === "agent.spawn" && event.itemId === item.id,
+			)
+			expect(spawnEvents).toHaveLength(1)
+			const phaseStarts = fixture.schedulerEvents
+				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
+					event.type === "phase.start" && event.itemId === item.id,
+				)
+				.map((event) => event.phase)
+			expect(phaseStarts).toEqual(["blocked-responder"])
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("AC3: trigger phase exit with REVIEW SUMMARY verdict=retry → status=changes_requested; next tick spawns iter", async () => {
+		const fixture = await createFixture("trigger-b3-unblock")
+		try {
+			const chain = createChain(fixture.store, "trigger-b3-unblock-chain")
+			const item = createItem(fixture.store, chain, {
+				issueNumber: 29003,
+				repoCwd: "/repo/a",
+				summary: "REVIEW SUMMARY: verdict=retry; issue=#29003; reason=unblock",
+			})
+			fixture.store.updateItem(item.id, {
+				status: "blocked",
+				phase: "review",
+				attempts: 2,
+				lastRunId: "run-pre-blocked-review",
+				updatedAt: 1_800_004_000,
+			})
+
+			const baseOptions = fixture.options({
+				runIdFactory: ({ chain: c, item: i, phase }) => `run-${c.id}-${i.id}-${phase}-b3`,
+			})
+
+			const triggerTick = await schedulerTick(baseOptions)
+			expect(triggerTick.spawnedRuns).toHaveLength(1)
+			expect(triggerTick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-blocked-responder-b3`)
+			const triggerClosed = await triggerTick.spawnedRuns[0]!.closed
+			expect(triggerClosed.status).toBe("changes_requested")
+
+			const afterTrigger = fixture.store.getItem(item.id)
+			expect(afterTrigger?.status).toBe("changes_requested")
+			expect(afterTrigger?.phase).toBe("blocked-responder")
+
+			// Configure the iter re-spawn so its REVIEW SUMMARY doesn't propagate "retry" again.
+			fixture.store.updateItem(item.id, {
+				extra: {
+					...afterTrigger!.extra,
+					summary: "ITERATION SUMMARY: scope=unit; reason=b3-resume",
+				},
+			})
+
+			const followUpTick = await schedulerTick(baseOptions)
+			expect(followUpTick.spawnedRuns).toHaveLength(1)
+			expect(followUpTick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-iteration-b3`)
+			const followUpClosed = await followUpTick.spawnedRuns[0]!.closed
+			expect(followUpClosed.status).toBe("in_progress")
+
+			const afterIter = fixture.store.getItem(item.id)
+			expect(afterIter?.phase).toBe("iteration")
+
+			const phaseStarts = fixture.schedulerEvents
+				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
+					event.type === "phase.start" && event.itemId === item.id,
+				)
+				.map((event) => event.phase)
+			expect(phaseStarts).toEqual(["blocked-responder", "iteration"])
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("AC4: blocked + phase=iteration (no matching trigger phase) → no spawn, chain proceeds to completion", async () => {
+		const fixture = await createFixture("trigger-b3-no-match")
+		try {
+			const chain = createChain(fixture.store, "trigger-b3-no-match-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 29004, repoCwd: "/repo/a" })
+			fixture.store.updateItem(item.id, {
+				status: "blocked",
+				phase: "iteration",
+				attempts: 1,
+				lastRunId: "run-pre-blocked-iter",
+				updatedAt: 1_800_005_000,
+			})
+
+			const tick = await schedulerTick(fixture.options())
+			expect(tick.spawnedRuns).toHaveLength(0)
+
+			const after = fixture.store.getItem(item.id)
+			expect(after?.status).toBe("blocked")
+			expect(after?.phase).toBe("iteration")
+			expect(tick.completedChainIds).toEqual([chain.id])
+			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("race: review exit with verdict=blocked keeps chain active until item-level trigger spawns", async () => {
+		const fixture = await createFixture("trigger-b3-race")
+		try {
+			const chain = createChain(fixture.store, "trigger-b3-race-chain")
+			const item = createItem(fixture.store, chain, {
+				issueNumber: 29005,
+				repoCwd: "/repo/a",
+				summary: "REVIEW SUMMARY: verdict=blocked; issue=#29005; reason=race-review",
+			})
+			fixture.store.updateItem(item.id, {
+				status: "in_progress",
+				phase: "iteration",
+				attempts: 1,
+				lastRunId: "run-pre-race-iter",
+				updatedAt: 1_800_006_000,
+			})
+
+			const baseOptions = fixture.options({
+				runIdFactory: ({ chain: c, item: i, phase }) => `run-${c.id}-${i.id}-${phase}-race`,
+			})
+
+			const reviewTick = await schedulerTick(baseOptions)
+			expect(reviewTick.spawnedRuns).toHaveLength(1)
+			expect(reviewTick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-review-race`)
+			const reviewClosed = await reviewTick.spawnedRuns[0]!.closed
+			expect(reviewClosed.status).toBe("blocked")
+
+			expect(fixture.store.getItem(item.id)?.status).toBe("blocked")
+			expect(fixture.store.getItem(item.id)?.phase).toBe("review")
+			expect(fixture.store.getChain(chain.id)?.status).toBe("active")
+			expect(fixture.schedulerEvents.some((event) => event.type === "chain.completed")).toBe(false)
+			expect(reviewTick.completedChainIds).toEqual([])
+
+			fixture.store.updateItem(item.id, {
+				extra: {
+					...fixture.store.getItem(item.id)!.extra,
+					summary: "REVIEW SUMMARY: verdict=blocked; issue=#29005; reason=stay-blocked",
+				},
+			})
+			const triggerTick = await schedulerTick(baseOptions)
+			expect(triggerTick.spawnedRuns).toHaveLength(1)
+			expect(triggerTick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-blocked-responder-race`)
+			await triggerTick.spawnedRuns[0]!.closed
+
+			expect(fixture.store.getItem(item.id)?.phase).toBe("blocked-responder")
+			expect(fixture.store.getItem(item.id)?.status).toBe("blocked")
+			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("integration: real subprocess spawn for blocked-responder trigger phase", async () => {
+		const fixture = await createFixture("trigger-b3-real-spawn")
+		try {
+			const chain = createChain(fixture.store, "trigger-b3-real-spawn-chain")
+			const item = createItem(fixture.store, chain, {
+				issueNumber: 29006,
+				repoCwd: "/repo/a",
+				summary: "REVIEW SUMMARY: verdict=accepted; issue=#29006; reason=real-spawn-trigger",
+			})
+			fixture.store.updateItem(item.id, {
+				status: "blocked",
+				phase: "review",
+				attempts: 2,
+				lastRunId: "run-pre-real-spawn-review",
+				updatedAt: 1_800_007_000,
+			})
+
+			const tick = await schedulerTick(fixture.options())
+			expect(tick.spawnedRuns).toHaveLength(1)
+			const closed = await tick.spawnedRuns[0]!.closed
+			expect(closed.exitCode).toBe(0)
+			expect(closed.stdout).toContain(`done:${item.id}`)
+			expect(closed.stdout).toContain("REVIEW SUMMARY: verdict=accepted")
+
+			const runs = (await readRunnerEvents(fixture.eventLog)).map((event) => event.type)
+			expect(runs).toEqual(["start", "end"])
+
+			const spawnEvents = fixture.schedulerEvents.filter(
+				(event): event is Extract<SchedulerEvent, { type: "agent.spawn" }> =>
+					event.type === "agent.spawn" && event.itemId === item.id,
+			)
+			expect(spawnEvents).toHaveLength(1)
+			expect(spawnEvents[0]?.pid).not.toBeNull()
+
+			const phaseStarts = fixture.schedulerEvents
+				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
+					event.type === "phase.start" && event.itemId === item.id,
+				)
+				.map((event) => event.phase)
+			expect(phaseStarts).toEqual(["blocked-responder"])
+		} finally {
+			fixture.store.close()
+		}
+	})
+})
+
 describe("scheduler kind-label gate", () => {
 	test("missing kind:* label aborts spawn, marks item blocked, leaves no current run", async () => {
 		const fixture = await createFixture("kind-gate-missing")

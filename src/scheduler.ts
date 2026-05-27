@@ -295,20 +295,33 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 	return { spawnedRuns, completedChainIds }
 }
 
+type SchedulerItemTriggerPhase = {
+	name: string
+	afterPhase: string
+	whenStatus: string
+}
+
 type SchedulerPhasePlan = {
 	iterPhase: string
 	reviewPhase: string
+	itemTriggerPhases: readonly SchedulerItemTriggerPhase[]
 }
 
 async function resolvePhasePlanForChain(options: SchedulerOptions, chain: ChainRecord): Promise<SchedulerPhasePlan> {
-	if (options.phase !== undefined) return { iterPhase: options.phase, reviewPhase: options.phase }
+	if (options.phase !== undefined) return { iterPhase: options.phase, reviewPhase: options.phase, itemTriggerPhases: [] }
 	try {
 		const preset = await loadPreset(schedulerPresetDir(options, chain))
 		const iterPhase = preset.phases.find((phase) => phase.trigger === null)?.name ?? DEFAULT_PHASE
 		const reviewPhase = reviewPhaseForPreset(preset).name
-		return { iterPhase, reviewPhase }
+		const itemTriggerPhases = preset.phases.flatMap((phase): SchedulerItemTriggerPhase[] => {
+			const trigger = phase.trigger
+			if (trigger === null) return []
+			if (!("afterPhase" in trigger)) return []
+			return [{ name: phase.name, afterPhase: trigger.afterPhase, whenStatus: trigger.whenStatus }]
+		})
+		return { iterPhase, reviewPhase, itemTriggerPhases }
 	} catch {
-		return { iterPhase: DEFAULT_PHASE, reviewPhase: DEFAULT_PHASE }
+		return { iterPhase: DEFAULT_PHASE, reviewPhase: DEFAULT_PHASE, itemTriggerPhases: [] }
 	}
 }
 
@@ -339,6 +352,15 @@ function selectNextItemAndPhase(input: SelectNextItemAndPhaseInput): { item: Ite
 	)
 	if (iterDone !== undefined && input.phasePlan.iterPhase !== input.phasePlan.reviewPhase) {
 		return { item: iterDone, phase: input.phasePlan.reviewPhase }
+	}
+
+	for (const triggerPhase of input.phasePlan.itemTriggerPhases) {
+		const triggered = repoItems.find((item) =>
+			item.phase === triggerPhase.afterPhase &&
+			item.status === triggerPhase.whenStatus &&
+			item.phase !== triggerPhase.name,
+		)
+		if (triggered !== undefined) return { item: triggered, phase: triggerPhase.name }
 	}
 
 	const pending = input.store.getNextPendingItem({
@@ -735,6 +757,8 @@ async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecor
 	if (runId === undefined && hasFinalizingItemForChain(options.state, items)) return false
 	if (!allItemsTerminalIncludingFinalizing(options, chain.id, effectiveTerminalStatuses)) return false
 	if (options.state.finalizingChainIds.has(chain.id)) return false
+	const phasePlan = await resolvePhasePlanForChain(options, chain)
+	if (hasPendingItemLevelTrigger(options, chain.id, phasePlan)) return false
 	options.state.finalizingChainIds.add(chain.id)
 	try {
 		if (!await chainCompletionTriggerAllowsCompletion(options, current, runId, effectiveTerminalStatuses)) return false
@@ -895,6 +919,21 @@ async function schedulerStatusesForChain(options: SchedulerOptions, chain: Chain
 function allItemsTerminalIncludingFinalizing(options: SchedulerOptions, chainId: number, terminalStatuses: readonly string[]): boolean {
 	const terminal = new Set(terminalStatuses)
 	return listItemsIncludingFinalizing(options, chainId).every((item) => terminal.has(item.status))
+}
+
+function hasPendingItemLevelTrigger(options: SchedulerOptions, chainId: number, phasePlan: SchedulerPhasePlan): boolean {
+	if (phasePlan.itemTriggerPhases.length === 0) return false
+	const items = listItemsIncludingFinalizing(options, chainId)
+	for (const item of items) {
+		for (const triggerPhase of phasePlan.itemTriggerPhases) {
+			if (
+				item.phase === triggerPhase.afterPhase &&
+				item.status === triggerPhase.whenStatus &&
+				item.phase !== triggerPhase.name
+			) return true
+		}
+	}
+	return false
 }
 
 function listItemsIncludingFinalizing(options: SchedulerOptions, chainId: number): ItemRecord[] {
