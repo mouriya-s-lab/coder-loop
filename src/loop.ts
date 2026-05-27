@@ -3843,13 +3843,15 @@ export type PresetChainCompleteDecision =
 	| { decision: "complete"; reason?: string }
 	| { decision: "keep-active"; reason?: string }
 
+export type RunPresetChainCompleteTriggerPhasesPhaseRunner = (phase: string) => AgentRunnerSelection | Promise<AgentRunnerSelection>
+
 export type RunPresetChainCompleteTriggerPhasesInput = {
 	chain: ChainRecord
 	items: readonly ItemRecord[]
 	runId?: string
 	terminalStatuses: readonly string[]
 	loopDataRoot: string | null
-	runner: AgentRunnerSelection
+	phaseRunner?: RunPresetChainCompleteTriggerPhasesPhaseRunner
 	presetDir?: string
 	targetCwd?: string | null
 }
@@ -3888,6 +3890,12 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 	const evidenceDir = resolveChainEvidenceDir(options, input.chain, anchorItem, anchorId, "Chain-complete trigger evidence directory")
 	const finalizerRunId = input.runId ?? makeRunId(`chain-${input.chain.id}`)
 
+	const phaseSelection = buildPhaseRunnerSelectionFromChain({ chain: input.chain, loopDataRoot: input.loopDataRoot, preset })
+	const resolvePhaseRunner = async (phase: string): Promise<AgentRunnerSelection> => {
+		if (input.phaseRunner !== undefined) return await input.phaseRunner(phase)
+		return selectRunnerForPhase(phase, anchorItem, phaseSelection)
+	}
+
 	for (const phase of phases) {
 		const ctx: ResolveContext = {
 			item: anchorItem,
@@ -3912,11 +3920,12 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 		const promptRaw = await readFile(phase.prompt, "utf-8")
 		const prompt = renderPrompt(promptRaw, phase, ctx)
 		const outputPath = agentOutputPath(options, finalizerRunId, phase.name)
-		log(`Starting chain-complete trigger phase ${phase.name} for chain ${input.chain.name}...`)
-		const { output, code } = await runAgent(options, phase.name, prompt, outputPath, targetCwd, input.runner)
+		const resolvedRunner = await resolvePhaseRunner(phase.name)
+		log(`Starting chain-complete trigger phase ${phase.name} for chain ${input.chain.name} (runner=${resolvedRunner.kind})...`)
+		const { output, code } = await runAgent(options, phase.name, prompt, outputPath, targetCwd, resolvedRunner)
 		log(`Chain-complete trigger phase ${phase.name} finished: exit=${code}, output=${outputPath} (${output.length} bytes)`)
 		if (code !== 0) throw new Error(`chain-complete trigger phase ${phase.name} exited ${code}`)
-		const decision = parseFinalizerSummaryDecision(output, input.runner.kind)
+		const decision = parseFinalizerSummaryDecision(output, resolvedRunner.kind)
 		if (decision === null) throw new Error(`chain-complete trigger phase ${phase.name} did not print a valid FINALIZER SUMMARY`)
 		if (decision.decision !== "complete") return decision
 	}

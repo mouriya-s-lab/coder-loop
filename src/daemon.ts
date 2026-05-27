@@ -942,12 +942,13 @@ export class CoderLoopDaemon {
 		if (scheduler.chainCompleteTrigger !== undefined) options.chainCompleteTrigger = scheduler.chainCompleteTrigger
 		else if (scheduler.chainCompleteTriggerForChain !== undefined) options.chainCompleteTriggerForChain = scheduler.chainCompleteTriggerForChain
 		else {
+			const explicitRunnerOverride = scheduler.runner !== undefined ? fallbackRunner : null
 			options.chainCompleteTriggerForChain = async (context) =>
 				await runPresetChainCompleteTriggerPhases({
 					...context,
 					loopDataRoot: this.paths.root,
-					runner: fallbackRunner,
 					presetDir: presetDirForChain(context.chain),
+					...(explicitRunnerOverride === null ? {} : { phaseRunner: () => explicitRunnerOverride }),
 				})
 		}
 		return options

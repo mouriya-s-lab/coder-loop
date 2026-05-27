@@ -19,6 +19,7 @@ import {
 	buildRunnerInvocation,
 	loadPreset,
 	resolvePhaseRunnerFromChain,
+	runPresetChainCompleteTriggerPhases,
 	type AgentRunnerSelection,
 	type JsonObject,
 } from "./loop"
@@ -1279,6 +1280,163 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 		}
 	})
 })
+
+describe("runPresetChainCompleteTriggerPhases per-phase runner selection (issue #287 retry)", () => {
+	const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
+
+	test("default chain metadata → triggered phase 'umbrella-finalizer' (non-review) spawns iter-default codex via chain-derived selectRunnerForPhase, not hardcoded runner", async () => {
+		const fixture = await createFixture("trigger-iter-default")
+		try {
+			const fakeCodex = resolve(fixture.loopDataRoot, "..", "fake-codex-finalizer.sh")
+			const fakeClaude = resolve(fixture.loopDataRoot, "..", "fake-claude-finalizer.sh")
+			await writeShellFinalizerMarkerScript(fakeCodex, "BINARY:codex")
+			await writeShellFinalizerMarkerScript(fakeClaude, "BINARY:claude")
+
+			const targetCwd = resolve(fixture.loopDataRoot, "..", "target-trigger-iter")
+			await mkdir(targetCwd, { recursive: true })
+
+			const chain = createChain(fixture.store, "trigger-iter-chain", {
+				metadata: {
+					claude: { binary: fakeClaude },
+					codex: { binary: fakeCodex },
+				},
+			})
+			createItem(fixture.store, chain, { issueNumber: 287_801, repoCwd: targetCwd })
+			const items = fixture.store.listItems(chain.id)
+
+			const runId = `trigger-${chain.id}-default`
+			const decision = await runPresetChainCompleteTriggerPhases({
+				chain,
+				items,
+				runId,
+				terminalStatuses: ["done", "moot", "blocked"],
+				loopDataRoot: fixture.loopDataRoot,
+				presetDir: PRESET_DIR,
+				targetCwd,
+			})
+			expect(decision).toEqual({ decision: "complete" })
+
+			const chainPaths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
+			const stdout = await readFile(chainPaths.runPhaseStdoutFile(runId, "umbrella-finalizer"), "utf-8")
+			expect(stdout).toContain("BINARY:codex")
+			expect(stdout).not.toContain("BINARY:claude")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("chain metadata runner='claude' → triggered phase 'umbrella-finalizer' spawns claude (resolver honors chain default-runner override)", async () => {
+		const fixture = await createFixture("trigger-claude-override")
+		try {
+			const fakeCodex = resolve(fixture.loopDataRoot, "..", "fake-codex-finalizer.sh")
+			const fakeClaude = resolve(fixture.loopDataRoot, "..", "fake-claude-finalizer.sh")
+			await writeShellFinalizerMarkerScript(fakeCodex, "BINARY:codex")
+			await writeShellFinalizerMarkerScript(fakeClaude, "BINARY:claude")
+
+			const targetCwd = resolve(fixture.loopDataRoot, "..", "target-trigger-claude")
+			await mkdir(targetCwd, { recursive: true })
+
+			const chain = createChain(fixture.store, "trigger-claude-chain", {
+				metadata: {
+					runner: "claude",
+					claude: { binary: fakeClaude },
+					codex: { binary: fakeCodex },
+				},
+			})
+			createItem(fixture.store, chain, { issueNumber: 287_802, repoCwd: targetCwd })
+			const items = fixture.store.listItems(chain.id)
+
+			const runId = `trigger-${chain.id}-claude`
+			const decision = await runPresetChainCompleteTriggerPhases({
+				chain,
+				items,
+				runId,
+				terminalStatuses: ["done", "moot", "blocked"],
+				loopDataRoot: fixture.loopDataRoot,
+				presetDir: PRESET_DIR,
+				targetCwd,
+			})
+			expect(decision).toEqual({ decision: "complete" })
+
+			const chainPaths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
+			const stdout = await readFile(chainPaths.runPhaseStdoutFile(runId, "umbrella-finalizer"), "utf-8")
+			expect(stdout).toContain("BINARY:claude")
+			expect(stdout).not.toContain("BINARY:codex")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("phaseRunner override input wins over chain-derived selection for the triggered phase spawn", async () => {
+		const fixture = await createFixture("trigger-phaseRunner-override")
+		try {
+			const fakeCodex = resolve(fixture.loopDataRoot, "..", "fake-codex-finalizer.sh")
+			const fakeClaude = resolve(fixture.loopDataRoot, "..", "fake-claude-finalizer.sh")
+			await writeShellFinalizerMarkerScript(fakeCodex, "BINARY:codex")
+			await writeShellFinalizerMarkerScript(fakeClaude, "BINARY:claude")
+
+			const targetCwd = resolve(fixture.loopDataRoot, "..", "target-trigger-override")
+			await mkdir(targetCwd, { recursive: true })
+
+			const chain = createChain(fixture.store, "trigger-override-chain", {
+				metadata: {
+					claude: { binary: fakeClaude },
+					codex: { binary: fakeCodex },
+				},
+			})
+			createItem(fixture.store, chain, { issueNumber: 287_803, repoCwd: targetCwd })
+			const items = fixture.store.listItems(chain.id)
+
+			const seenPhases: string[] = []
+			const overrideRunner: AgentRunnerSelection = {
+				kind: "claude",
+				source: "iteration-default",
+				binary: fakeClaude,
+				extraArgs: [],
+				model: null,
+			}
+
+			const runId = `trigger-${chain.id}-override`
+			const decision = await runPresetChainCompleteTriggerPhases({
+				chain,
+				items,
+				runId,
+				terminalStatuses: ["done", "moot", "blocked"],
+				loopDataRoot: fixture.loopDataRoot,
+				presetDir: PRESET_DIR,
+				targetCwd,
+				phaseRunner: (phase) => {
+					seenPhases.push(phase)
+					return overrideRunner
+				},
+			})
+			expect(decision).toEqual({ decision: "complete" })
+			expect(seenPhases).toEqual(["umbrella-finalizer"])
+
+			const chainPaths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
+			const stdout = await readFile(chainPaths.runPhaseStdoutFile(runId, "umbrella-finalizer"), "utf-8")
+			expect(stdout).toContain("BINARY:claude")
+			expect(stdout).not.toContain("BINARY:codex")
+		} finally {
+			fixture.store.close()
+		}
+	})
+})
+
+async function writeShellFinalizerMarkerScript(path: string, marker: string): Promise<void> {
+	await mkdir(resolve(path, ".."), { recursive: true })
+	await writeFile(
+		path,
+		`#!/bin/sh
+echo "${marker}"
+echo "ITERATION SUMMARY: scope=test; reason=marker"
+echo "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=marker"
+echo "FINALIZER SUMMARY: decision=complete; reason=test"
+exit 0
+`,
+	)
+	await chmod(path, 0o755)
+}
 
 function makeChainFixture(overrides: Partial<ChainRecord> = {}): ChainRecord {
 	return {
