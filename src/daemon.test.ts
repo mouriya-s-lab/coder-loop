@@ -1540,6 +1540,43 @@ describe("daemon", () => {
 			await fixture.daemon.stop()
 		}
 	})
+
+	test("daemon re-spawns item after agent exits 0 without SUMMARY marker (live integration)", async () => {
+		const warnings: string[] = []
+		const originalWarn = console.warn
+		console.warn = (...args: unknown[]) => {
+			warnings.push(args.map((value) => typeof value === "string" ? value : JSON.stringify(value)).join(" "))
+		}
+		const fixture = await startFixture("scheduler-respawn-no-summary", { schedulerIntervalMs: 30 })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "scheduler-respawn-no-summary-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 7284,
+				repoCwd: REPO_ROOT,
+				extra: { sleepMs: 5, exitCode: 0, summary: null },
+			})
+
+			await waitFor(
+				async () => readItem(fixture.loopDataRoot, chainId, 7284),
+				(candidate) => (candidate?.attempts ?? 0) >= 2,
+				5_000,
+			)
+
+			const finalItem = await readItem(fixture.loopDataRoot, chainId, 7284)
+			expect(finalItem?.attempts).toBeGreaterThanOrEqual(2)
+			expect(["queued", "in_progress", "changes_requested"]).toContain(finalItem?.status ?? "")
+			expect(fixture.schedulerEvents.filter((event) => event.type === "agent.spawn" && event.itemId === finalItem!.id).length).toBeGreaterThanOrEqual(2)
+			expect(warnings.some((line) => line.includes("exit 0 without SUMMARY marker"))).toBe(true)
+		} finally {
+			console.warn = originalWarn
+			await fixture.daemon.stop()
+		}
+	})
 })
 
 type Fixture = {
@@ -1590,15 +1627,18 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 			runner: scheduler,
 			...(options.schedulerPresetDir === null ? {} : { presetDir: options.schedulerPresetDir ?? PRESET_DIR }),
 			worktreeManager,
-			prompt: ({ item, runId }) =>
-				JSON.stringify({
+			prompt: ({ item, runId }) => {
+				const payload: Record<string, unknown> = {
 					itemId: item.id,
 					issueNumber: item.issueNumber,
 					runId,
 					eventLog,
 					sleepMs: typeof item.extra.sleepMs === "number" ? item.extra.sleepMs : 5,
 					exitCode: typeof item.extra.exitCode === "number" ? item.extra.exitCode : 0,
-				}),
+				}
+				if (Object.prototype.hasOwnProperty.call(item.extra, "summary")) payload.summary = item.extra.summary
+				return JSON.stringify(payload)
+			},
 			chainCompleteTriggerForChain: () => null,
 			onEvent: (event) => {
 				schedulerEvents.push(event)
@@ -1773,6 +1813,8 @@ await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.i
 await new Promise((resolve) => setTimeout(resolve, input.sleepMs))
 await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
 console.log("done:" + input.itemId)
+const summary = Object.prototype.hasOwnProperty.call(input, "summary") ? input.summary : "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=fake-runner default"
+if (summary !== null) console.log(summary)
 process.exit(input.exitCode)
 `,
 	)
