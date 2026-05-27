@@ -246,14 +246,19 @@ export class CoderLoopDaemon {
 	async stop(): Promise<void> {
 		if (this.state === "exited") return
 		if (this.state !== "shutting_down") this.state = "shutting_down"
-		if (this.schedulerTimer !== null) {
-			clearInterval(this.schedulerTimer)
-			this.schedulerTimer = null
-		}
-		await this.schedulerTickInFlight
+		// Pause scheduler tick: clears the interval timer, awaits any in-flight
+		// tick, and bumps schedulerPauseDepth so requestSchedulerTick is gated
+		// out for the remainder of shutdown. The resume callback would no-op
+		// because state is now "shutting_down", so we deliberately discard it.
+		await this.pauseSchedulerForMutation()
 
+		// Wait for active child runs to finish naturally. attachRunCloseHandler
+		// resolves `closed` only after it writes completion artifacts, emits
+		// phase.end / queue.terminal, calls clearCurrentRun, and nulls the
+		// slot's activeRun — the graceful path required by #293. No timeout /
+		// force kill; that is umbrella #282 follow-up scope.
 		const activeRuns = listActiveRuns(this.schedulerState)
-		await Promise.all(activeRuns.map((run) => run.terminate({ forceAfterMs: this.shutdownGraceMs })))
+		await Promise.all(activeRuns.map((run) => run.closed.catch(() => undefined)))
 
 		for (const socket of this.sockets) socket.end()
 		if (this.server !== null) {

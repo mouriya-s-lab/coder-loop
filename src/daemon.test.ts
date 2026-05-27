@@ -1179,7 +1179,7 @@ describe("daemon", () => {
 		}
 	})
 
-	test("daemon graceful shutdown", async () => {
+	test("daemon graceful shutdown waits for active runs to finish naturally", async () => {
 		const fixture = await startFixture("graceful-shutdown")
 		try {
 			const chain = record(expectOk(await request(fixture, "chain.create", {
@@ -1191,7 +1191,7 @@ describe("daemon", () => {
 				chainId,
 				issueNumber: 180,
 				repoCwd: REPO_ROOT,
-				extra: { sleepMs: 5_000, exitCode: 0 },
+				extra: { sleepMs: 400, exitCode: 0 },
 			})
 			await waitFor(async () => record(expectOk(await request(fixture, "daemon.status")).daemon).activeRuns, (runs) => Array.isArray(runs) && runs.length === 1)
 
@@ -1202,10 +1202,60 @@ describe("daemon", () => {
 			expect(await pathExists(fixture.socketPath)).toBe(false)
 			expect(await pathExists(fixture.pidFile)).toBe(false)
 			const item = await readItem(fixture.loopDataRoot, chainId, 180)
-			expect(item?.status).toBe("changes_requested")
+			// Fake runner emits the default REVIEW SUMMARY (verdict=accepted) and exits 0;
+			// natural completion via attachRunCloseHandler maps that to "done".
+			expect(item?.status).toBe("done")
 			expect(typeof item?.lastRunId).toBe("string")
 			const run = await readRun(fixture.loopDataRoot, item?.lastRunId ?? "")
-			expect(run?.exitCode).toBe(1)
+			// exit 0 (natural exit, not SIGTERM/SIGKILL) is the strongest single proof
+			// that daemon waited for the child instead of force-terminating it.
+			expect(run?.exitCode).toBe(0)
+			expect(await readCurrentRun(fixture.loopDataRoot, chainId)).toBeNull()
+
+			const phaseEnd = fixture.schedulerEvents.find((event) => event.type === "phase.end")
+			expect(phaseEnd).toBeDefined()
+			expect((phaseEnd as { status?: string }).status).toBe("done")
+			const queueTerminal = fixture.schedulerEvents.find((event) => event.type === "queue.terminal")
+			expect(queueTerminal).toBeDefined()
+			expect((queueTerminal as { terminalStatus?: string }).terminalStatus).toBe("done")
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("daemon shutdown does not return before active runs exit", async () => {
+		const fixture = await startFixture("graceful-shutdown-timing")
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "shutdown-timing-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			const childSleepMs = 500
+			await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 181,
+				repoCwd: REPO_ROOT,
+				extra: { sleepMs: childSleepMs, exitCode: 0 },
+			})
+			const activeRuns = await waitFor(async () => record(expectOk(await request(fixture, "daemon.status")).daemon).activeRuns, (runs) => Array.isArray(runs) && runs.length === 1)
+			const startedAt = Date.now()
+			const firstRun = (activeRuns as unknown as Array<{ startedAt?: number }>)[0]
+			const spawnedAt = typeof firstRun?.startedAt === "number" ? firstRun.startedAt : startedAt
+			const remainingSleepMs = Math.max(0, spawnedAt + childSleepMs - startedAt)
+
+			const downStartedAt = Date.now()
+			expect((await request(fixture, "daemon.down")).ok).toBe(true)
+			await fixture.daemon.closed
+			const shutdownDurationMs = Date.now() - downStartedAt
+
+			// Allow some scheduler-tick latency, but if the daemon force-killed the
+			// child mid-sleep this would resolve in tens of milliseconds.
+			expect(shutdownDurationMs).toBeGreaterThanOrEqual(Math.max(50, remainingSleepMs - 100))
+
+			const item = await readItem(fixture.loopDataRoot, chainId, 181)
+			const run = await readRun(fixture.loopDataRoot, item?.lastRunId ?? "")
+			expect(run?.exitCode).toBe(0)
 		} finally {
 			await fixture.daemon.stop()
 		}
