@@ -831,6 +831,11 @@ const RUNTIME_BINDING_KEYS = [
 	"resumedFromPhase",
 	"resumedStartedAt",
 	"issueKind",
+	"chainName",
+	"chainUmbrellaRepo",
+	"chainUmbrellaIssue",
+	"chainBaseBranch",
+	"repoCwd",
 ] as const
 
 type RuntimeBindingKey = (typeof RUNTIME_BINDING_KEYS)[number]
@@ -4557,6 +4562,13 @@ export function buildCentralRuntimeBindingPaths(input: {
 	}
 }
 
+export type ChainRuntimeBinding = {
+	name: string
+	umbrellaRepo: string | null
+	umbrellaIssue: number | null
+	baseBranch: string
+}
+
 export function buildRuntimeBindings(input: {
 	options: LoopOptions
 	runId: string
@@ -4566,6 +4578,8 @@ export function buildRuntimeBindings(input: {
 	issueRun: IssueRunContext
 	issueKind: IssueKind
 	paths?: RuntimeBindingPaths
+	chain?: ChainRuntimeBinding
+	repoCwd?: string
 }): RuntimeBindings {
 	const paths = input.paths ?? {
 		sharedContextPath: input.options.sharedContextPath,
@@ -4592,6 +4606,11 @@ export function buildRuntimeBindings(input: {
 		resumedFromPhase: input.issueRun.resumedFromPhase ?? "",
 		resumedStartedAt: input.issueRun.resumedStartedAt ?? "",
 		issueKind: input.issueKind ?? "",
+		chainName: input.chain?.name ?? "",
+		chainUmbrellaRepo: input.chain?.umbrellaRepo ?? "",
+		chainUmbrellaIssue: input.chain?.umbrellaIssue !== undefined && input.chain.umbrellaIssue !== null ? String(input.chain.umbrellaIssue) : "",
+		chainBaseBranch: input.chain?.baseBranch ?? "",
+		repoCwd: input.repoCwd ?? "",
 	}
 }
 
@@ -4673,7 +4692,9 @@ export async function fetchIssueKind(repository: string | null, issueId: string)
 	})
 }
 
-export function buildConfigBindings(options: LoopOptions): ConfigBindings {
+export type ConfigBindingsInput = Pick<LoopOptions, "repository" | "baseBranch" | "requireBrowserEvidence">
+
+export function buildConfigBindings(options: ConfigBindingsInput): ConfigBindings {
 	return {
 		repository: options.repository ?? "",
 		baseBranch: options.baseBranch ?? "",

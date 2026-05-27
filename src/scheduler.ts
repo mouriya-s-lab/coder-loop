@@ -5,19 +5,29 @@ import { existsSync, realpathSync } from "node:fs"
 import { basename, dirname, resolve } from "node:path"
 
 import {
+	buildConfigBindings,
 	buildRunnerInvocation,
 	hasIterationSummaryMarker,
+	loadPreset,
 	parseReviewSummaryVerdict,
+	renderFragmentIndex,
+	renderPrompt,
 	resolveIssueKind,
 	selectRunnerForPhase,
 	type AgentRunnerKind,
 	type AgentRunnerSelection,
+	type IssueKind,
 	type JsonObject,
 	type JsonValue,
 	type ParsedIssueKind,
+	type Preset,
+	type PresetPhase,
 	type PhaseRunnerSelectionInput,
+	type QueueItem,
+	type ResolveContext,
 	type ResumeDecision,
 	type RunnerInvocationPaths,
+	type RuntimeBindings,
 } from "./loop"
 import { type ChainRecord, type ItemRecord, type SqliteStateStore } from "./sqlite-state"
 import {
@@ -441,10 +451,21 @@ async function spawnSchedulerRun(
 
 	const presetDir = schedulerPresetDir(options, chain)
 	const context: SchedulerSpawnContext = { chain, item, slot, runId, worktreePath, presetDir, phase }
-	const prompt = typeof options.prompt === "string" ? options.prompt : await options.prompt(context)
+	const rawPrompt = typeof options.prompt === "string" ? options.prompt : await options.prompt(context)
+	const renderedPrompt = await renderSchedulerSpawnPrompt({
+		rawPrompt,
+		presetDir,
+		phase,
+		chain,
+		item,
+		runId,
+		worktreePath,
+		issueKind: kindResult.kind,
+		loopDataRootOptions: options.loopDataRootOptions,
+	})
 	const runnerPlan = buildRunnerInvocation(
 		runner,
-		prompt,
+		renderedPrompt,
 		freshResume(),
 		invocationPaths(item.repoCwd, worktreePath, presetDir, resolveLoopDataPaths(options.loopDataRootOptions).root),
 	)
@@ -894,6 +915,114 @@ async function resolvePhaseRunner(
 
 function invocationPaths(targetCwd: string, agentCwd: string, presetDir: string, loopDataRoot: string): RunnerInvocationPaths {
 	return { targetCwd, agentCwd, presetDir, loopDataRoot }
+}
+
+export type SchedulerPromptRenderInput = {
+	rawPrompt: string
+	presetDir: string
+	phase: string
+	chain: ChainRecord
+	item: ItemRecord
+	runId: string
+	worktreePath: string
+	issueKind: IssueKind
+	loopDataRootOptions?: LoopDataRootOptions | undefined
+}
+
+export async function renderSchedulerSpawnPrompt(input: SchedulerPromptRenderInput): Promise<string> {
+	const preset = await loadPreset(input.presetDir)
+	const presetPhase = preset.phases.find((entry) => entry.name === input.phase)
+	if (presetPhase === undefined) return input.rawPrompt
+	const ctx = buildSchedulerResolveContext({
+		preset,
+		phase: presetPhase,
+		chain: input.chain,
+		item: input.item,
+		runId: input.runId,
+		worktreePath: input.worktreePath,
+		issueKind: input.issueKind,
+		loopDataRootOptions: input.loopDataRootOptions,
+	})
+	return renderPrompt(input.rawPrompt, presetPhase, ctx)
+}
+
+export function buildSchedulerResolveContext(input: {
+	preset: Preset
+	phase: PresetPhase
+	chain: ChainRecord
+	item: ItemRecord
+	runId: string
+	worktreePath: string
+	issueKind: IssueKind
+	loopDataRootOptions?: LoopDataRootOptions | undefined
+}): ResolveContext {
+	const chainPaths = resolveChainRuntimePaths(input.chain.name, input.loopDataRootOptions)
+	const evidenceDir = resolveItemEvidenceDir(input.item, chainPaths.issueEvidenceDir(input.item.issueNumber))
+	const currentIssueFile = resolveItemIssueFile(input.item, chainPaths.issueFile(input.item.issueNumber))
+	const runtime: RuntimeBindings = {
+		runId: input.runId,
+		targetCwd: input.item.repoCwd,
+		agentCwd: input.worktreePath,
+		workflowPath: resolveRepoWorkflowPath(input.item.repoCwd),
+		sharedContextPath: chainPaths.sharedFile,
+		currentIssueFile,
+		issueDir: chainPaths.issuesDir,
+		evidenceDir,
+		evidenceRootDir: chainPaths.evidenceDir,
+		logDir: chainPaths.runsDir,
+		presetDir: input.preset.presetDir,
+		fragmentIndex: renderFragmentIndex(input.preset),
+		runIdGeneration: "new",
+		resumedFromPhase: "",
+		resumedStartedAt: "",
+		issueKind: input.issueKind ?? "",
+		chainName: input.chain.name,
+		chainUmbrellaRepo: input.chain.umbrellaRepo ?? "",
+		chainUmbrellaIssue: input.chain.umbrellaIssue === null ? "" : String(input.chain.umbrellaIssue),
+		chainBaseBranch: input.chain.baseBranch,
+		repoCwd: input.item.repoCwd,
+	}
+	const config = buildConfigBindings({
+		repository: input.chain.repository,
+		baseBranch: input.chain.baseBranch,
+		requireBrowserEvidence: false,
+	})
+	const item: QueueItem = itemRecordToQueueItem(input.item, input.preset)
+	return { item, config, runtime }
+}
+
+function itemRecordToQueueItem(item: ItemRecord, preset: Preset): QueueItem {
+	const idField = preset.item.idField
+	const extra: JsonObject = { ...item.extra }
+	if (extra[idField] === undefined) extra[idField] = item.issueNumber
+	return {
+		status: item.status,
+		attempts: item.attempts,
+		title: item.title,
+		priority: item.priority,
+		branch: item.branch,
+		pr: item.pr,
+		lastRunId: item.lastRunId,
+		issueFile: item.issueFile,
+		evidenceDir: item.evidenceDir,
+		agentCwd: item.agentCwd,
+		runner: item.runner,
+		extra,
+	}
+}
+
+function resolveItemEvidenceDir(item: ItemRecord, fallback: string): string {
+	if (item.evidenceDir === null || item.evidenceDir === "") return fallback
+	return item.evidenceDir
+}
+
+function resolveItemIssueFile(item: ItemRecord, fallback: string): string {
+	if (item.issueFile === null || item.issueFile === "") return fallback
+	return item.issueFile
+}
+
+function resolveRepoWorkflowPath(repoCwd: string): string {
+	return resolve(repoCwd, ".coder-loop/workflow.md")
 }
 
 function schedulerPresetDir(options: SchedulerOptions, chain: ChainRecord): string {

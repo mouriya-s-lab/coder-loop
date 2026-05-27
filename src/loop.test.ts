@@ -940,6 +940,11 @@ function makeFixtureRuntime(overrides: Partial<RuntimeBindings> = {}): RuntimeBi
 		resumedFromPhase: "",
 		resumedStartedAt: "",
 		issueKind: "",
+		chainName: "",
+		chainUmbrellaRepo: "",
+		chainUmbrellaIssue: "",
+		chainBaseBranch: "",
+		repoCwd: "",
 		...overrides,
 	}
 }
@@ -1035,6 +1040,11 @@ describe("renderPrompt with bundled preset", () => {
 			resumedFromPhase: preset.phases[0]!.name,
 			resumedStartedAt: "2026-05-10T11:50:00Z",
 			issueKind: "code",
+			chainName: "preset-render-chain",
+			chainUmbrellaRepo: "Mouriya-Emma/umbrellas",
+			chainUmbrellaIssue: "176",
+			chainBaseBranch: "main",
+			repoCwd: "/tmp/fixture-repo-cwd",
 		})
 		const config = makeFixtureConfig({ requireBrowserEvidence: true })
 		const ctx: ResolveContext = { item, config, runtime }
@@ -1068,6 +1078,11 @@ describe("renderPrompt with bundled preset", () => {
 			`ISSUE_STATUS=${item.status}`,
 			`ISSUE_LAST_RUN_ID=${item.lastRunId}`,
 			`ISSUE_KIND=${runtime.issueKind}`,
+			`CHAIN_NAME=${runtime.chainName}`,
+			`CHAIN_UMBRELLA_REPO=${runtime.chainUmbrellaRepo}`,
+			`CHAIN_UMBRELLA_ISSUE=${runtime.chainUmbrellaIssue}`,
+			`CHAIN_BASE_BRANCH=${runtime.chainBaseBranch}`,
+			`REPO_CWD=${runtime.repoCwd}`,
 		]
 		expect(rendered).toBe(expectedLines.join("\n"))
 	})

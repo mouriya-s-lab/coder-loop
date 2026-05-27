@@ -26,6 +26,10 @@ describe("phase C cleanup guards", () => {
 
 		expect(Object.keys(runtime).sort()).toEqual([
 			"agentCwd",
+			"chainBaseBranch",
+			"chainName",
+			"chainUmbrellaIssue",
+			"chainUmbrellaRepo",
 			"currentIssueFile",
 			"evidenceDir",
 			"evidenceRootDir",
@@ -34,6 +38,7 @@ describe("phase C cleanup guards", () => {
 			"issueKind",
 			"logDir",
 			"presetDir",
+			"repoCwd",
 			"resumedFromPhase",
 			"resumedStartedAt",
 			"runId",

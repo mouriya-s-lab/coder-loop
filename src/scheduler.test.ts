@@ -6,6 +6,7 @@ import {
 	createSchedulerState,
 	defaultSchedulerStatusFromExit,
 	listActiveRuns,
+	renderSchedulerSpawnPrompt,
 	runSchedulerUntilIdle,
 	schedulerSlotWorktreePath,
 	schedulerTick,
@@ -24,7 +25,7 @@ import {
 	type JsonObject,
 } from "./loop"
 import { resolveChainRuntimePaths } from "./runtime-paths"
-import { type ChainRecord, openSqliteStateStore } from "./sqlite-state"
+import { type ChainRecord, type ItemRecord, openSqliteStateStore } from "./sqlite-state"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-tests", String(process.pid))
@@ -929,7 +930,7 @@ describe("resolveSchedulerPresetPhasePrompt", () => {
 		await expect(resolveSchedulerPresetPhasePrompt({ presetDir: PRESET_DIR, phase: "no-such-phase" })).rejects.toThrow(/phase_not_found_in_preset/)
 	})
 
-	test("scheduler spawn passes resolver output through to subprocess argv (entry md literal reaches agent stdout)", async () => {
+	test("scheduler spawn renders resolver output before subprocess (entry md prose preserved, {{KEY}} placeholders replaced)", async () => {
 		const fixture = await createPresetPromptIntegrationFixture("integration-resolver")
 		try {
 			const chain = createChain(fixture.store, "integration-resolver-chain")
@@ -949,7 +950,151 @@ describe("resolveSchedulerPresetPhasePrompt", () => {
 			const preset = await loadPreset(PRESET_DIR)
 			const iterPhase = preset.phases.find((entry) => entry.name === "iteration")!
 			const mainLoopRaw = await readFile(iterPhase.prompt, "utf-8")
-			expect(capturedStdout).toContain(mainLoopRaw)
+			const declaredKeys = new Set(iterPhase.variables.map(([key]) => key))
+			const rawTokens = new Set(mainLoopRaw.match(/\{\{[A-Z_]+\}\}/g) ?? [])
+			expect(rawTokens.size).toBeGreaterThan(0)
+			for (const token of rawTokens) {
+				const key = token.slice(2, -2)
+				expect(declaredKeys.has(key)).toBe(true)
+				expect(capturedStdout).not.toContain(token)
+			}
+			expect(capturedStdout).toContain("`mouriya-s-lab/coder-loop`")
+			expect(capturedStdout).toContain("`/repo/a`")
+			expect(capturedStdout).toContain("Current issue: `#283`")
+			expect(fixture.store.getItem(item.id)?.status).toBe("done")
+		} finally {
+			fixture.store.close()
+		}
+	})
+})
+
+describe("scheduler chain bindings (issue #288)", () => {
+	const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
+
+	test("preset.toml declares CHAIN_NAME / CHAIN_UMBRELLA_REPO / CHAIN_UMBRELLA_ISSUE / CHAIN_BASE_BRANCH / REPO_CWD in every actionable phase (AC4)", async () => {
+		const preset = await loadPreset(PRESET_DIR)
+		const expected = new Set([
+			["CHAIN_NAME", "runtime", "chainName"],
+			["CHAIN_UMBRELLA_REPO", "runtime", "chainUmbrellaRepo"],
+			["CHAIN_UMBRELLA_ISSUE", "runtime", "chainUmbrellaIssue"],
+			["CHAIN_BASE_BRANCH", "runtime", "chainBaseBranch"],
+			["REPO_CWD", "runtime", "repoCwd"],
+		].map((entry) => entry.join(" ")))
+		for (const phase of preset.phases) {
+			const bindings = new Set(
+				phase.variables
+					.filter(([, source]) => source.kind === "runtime")
+					.map(([key, source]) => [key, source.kind, source.kind === "runtime" ? source.key : ""].join(" ")),
+			)
+			for (const entry of expected) {
+				expect(bindings.has(entry)).toBe(true)
+			}
+		}
+	})
+
+	test("renderSchedulerSpawnPrompt against a template that references every declared iteration binding leaves zero residual {{[A-Z_]+}} tokens (AC2)", async () => {
+		const preset = await loadPreset(PRESET_DIR)
+		const iterPhase = preset.phases.find((entry) => entry.name === "iteration")!
+		const declaredKeys = iterPhase.variables.map(([key]) => key)
+		const template = declaredKeys.map((key) => `${key}={{${key}}}`).join("\n")
+		const chain = makeChainFixture({ name: "render-zero-token-chain" })
+		const item = makeItemFixture(chain, { issueNumber: 999_001, repoCwd: "/tmp/no-token-repo" })
+		const rendered = await renderSchedulerSpawnPrompt({
+			rawPrompt: template,
+			presetDir: PRESET_DIR,
+			phase: "iteration",
+			chain,
+			item,
+			runId: "run-zero-token",
+			worktreePath: "/tmp/render-zero-token-worktree",
+			issueKind: "code",
+		})
+		const residual = rendered.match(/\{\{[A-Z_]+\}\}/g) ?? []
+		expect(residual).toEqual([])
+	})
+
+	test("renderSchedulerSpawnPrompt with chain.name=my-chain umbrellaRepo=owner/repo umbrellaIssue=42 substitutes those literals (AC3)", async () => {
+		const chain = makeChainFixture({
+			name: "my-chain",
+			umbrellaRepo: "owner/repo",
+			umbrellaIssue: 42,
+			baseBranch: "trunk",
+			repository: "owner/repo",
+		})
+		const item = makeItemFixture(chain, { issueNumber: 999_002, repoCwd: "/tmp/chain-binding-repo" })
+		const rendered = await renderSchedulerSpawnPrompt({
+			rawPrompt: [
+				"chain.name={{CHAIN_NAME}}",
+				"umbrella.repo={{CHAIN_UMBRELLA_REPO}}",
+				"umbrella.issue={{CHAIN_UMBRELLA_ISSUE}}",
+				"chain.baseBranch={{CHAIN_BASE_BRANCH}}",
+				"item.repoCwd={{REPO_CWD}}",
+			].join("\n"),
+			presetDir: PRESET_DIR,
+			phase: "iteration",
+			chain,
+			item,
+			runId: "run-chain-binding",
+			worktreePath: "/tmp/chain-binding-worktree",
+			issueKind: "code",
+		})
+		expect(rendered).toContain("chain.name=my-chain")
+		expect(rendered).toContain("umbrella.repo=owner/repo")
+		expect(rendered).toContain("umbrella.issue=42")
+		expect(rendered).toContain("chain.baseBranch=trunk")
+		expect(rendered).toContain("item.repoCwd=/tmp/chain-binding-repo")
+	})
+
+	test("renderSchedulerSpawnPrompt leaves chain.umbrellaRepo and chain.umbrellaIssue empty when chain has null umbrella (no crash, empty literals)", async () => {
+		const chain = makeChainFixture({
+			name: "no-umbrella-chain",
+			umbrellaRepo: null,
+			umbrellaIssue: null,
+		})
+		const item = makeItemFixture(chain, { issueNumber: 999_003, repoCwd: "/tmp/no-umbrella-repo" })
+		const rendered = await renderSchedulerSpawnPrompt({
+			rawPrompt: "umb_repo=[{{CHAIN_UMBRELLA_REPO}}] umb_issue=[{{CHAIN_UMBRELLA_ISSUE}}]",
+			presetDir: PRESET_DIR,
+			phase: "iteration",
+			chain,
+			item,
+			runId: "run-no-umbrella",
+			worktreePath: "/tmp/no-umbrella-worktree",
+			issueKind: "code",
+		})
+		expect(rendered).toBe("umb_repo=[] umb_issue=[]")
+	})
+
+	test("scheduler spawn end-to-end: chain literals reach agent stdout via echo runner (AC5 fixture-style integration)", async () => {
+		const fixture = await createPresetPromptIntegrationFixture("chain-binding-integration")
+		try {
+			const chain = createChain(fixture.store, "chain-binding-integration-chain", {
+				umbrellaRepo: "owner/umb-repo",
+				umbrellaIssue: 777,
+				baseBranch: "trunk",
+			})
+			const item = createItem(fixture.store, chain, { issueNumber: 288_001, repoCwd: "/tmp/chain-int-repo" })
+
+			const customPrompt = [
+				"=== chain bindings probe ===",
+				"chain.name={{CHAIN_NAME}}",
+				"chain.umbrellaRepo={{CHAIN_UMBRELLA_REPO}}",
+				"chain.umbrellaIssue={{CHAIN_UMBRELLA_ISSUE}}",
+				"chain.baseBranch={{CHAIN_BASE_BRANCH}}",
+				"item.repoCwd={{REPO_CWD}}",
+			].join("\n")
+			const tick = await schedulerTick(fixture.options({ prompt: () => customPrompt }))
+			const closed = await tick.spawnedRuns[0]!.closed
+
+			expect(closed.exitCode).toBe(0)
+			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
+			const capturedStdout = await readFile(paths.runStdoutFile(closed.runId), "utf-8")
+			expect(capturedStdout).toContain("chain.name=chain-binding-integration-chain")
+			expect(capturedStdout).toContain("chain.umbrellaRepo=owner/umb-repo")
+			expect(capturedStdout).toContain("chain.umbrellaIssue=777")
+			expect(capturedStdout).toContain("chain.baseBranch=trunk")
+			expect(capturedStdout).toContain("item.repoCwd=/tmp/chain-int-repo")
+			expect(capturedStdout.match(/\{\{[A-Z_]+\}\}/g) ?? []).toEqual([])
 			expect(fixture.store.getItem(item.id)?.status).toBe("done")
 		} finally {
 			fixture.store.close()
@@ -1451,6 +1596,28 @@ function makeChainFixture(overrides: Partial<ChainRecord> = {}): ChainRecord {
 		metadata: {},
 		createdAt: 1_800_000_000,
 		updatedAt: 1_800_000_000,
+		...overrides,
+	}
+}
+
+function makeItemFixture(chain: ChainRecord, overrides: Partial<ItemRecord> & Pick<ItemRecord, "issueNumber" | "repoCwd">): ItemRecord {
+	return {
+		id: 1,
+		chainId: chain.id,
+		status: "queued",
+		attempts: 0,
+		title: null,
+		priority: null,
+		branch: null,
+		pr: null,
+		lastRunId: null,
+		issueFile: null,
+		evidenceDir: null,
+		agentCwd: null,
+		runner: null,
+		extra: {},
+		createdAt: 1_800_000_001,
+		updatedAt: 1_800_000_001,
 		...overrides,
 	}
 }
