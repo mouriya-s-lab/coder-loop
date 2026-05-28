@@ -91,6 +91,7 @@ export type SchedulerStore = Pick<
 	| "updateChain"
 	| "getItem"
 	| "updateItem"
+	| "setItemSessionId"
 	| "recordRun"
 	| "completeRun"
 	| "setCurrentRun"
@@ -659,7 +660,7 @@ async function spawnSchedulerRun(
 	const presetDir = schedulerPresetDir(options, chain)
 	const context: SchedulerSpawnContext = { chain, item, slot, runId, worktreePath, presetDir, phase }
 	const rawPrompt = typeof options.prompt === "string" ? options.prompt : await options.prompt(context)
-	const resumeDecision = resumeDecisionForItem(item)
+	const resumeDecision = resumeDecisionForItem(item, phase, runner.kind)
 	const renderedPrompt = await renderSchedulerSpawnPrompt({
 		rawPrompt,
 		presetDir,
@@ -671,6 +672,7 @@ async function spawnSchedulerRun(
 		issueKind: kindResult.kind,
 		loopDataRootOptions: options.loopDataRootOptions,
 		resume: resumeDecision,
+		runner: runner.kind,
 	})
 	const runnerPlan = buildRunnerInvocation(
 		runner,
@@ -806,10 +808,12 @@ function attachRunCloseHandler(
 							extra: extraAfterRunCompletion(options, chain, itemForBackoff, exitCode, status, terminalStatuses, endedAt),
 							updatedAt: endedAt,
 						}
-						if (parsedSessionId !== null) update.lastSessionId = parsedSessionId
 						options.store.updateItem(item.id, update)
+						if (parsedSessionId !== null) {
+							options.store.setItemSessionId(item.id, { phase, runner: runner.kind, sessionId: parsedSessionId, updatedAt: endedAt })
+						}
 					} else if (parsedSessionId !== null) {
-						options.store.updateItem(item.id, { lastSessionId: parsedSessionId, updatedAt: endedAt })
+						options.store.setItemSessionId(item.id, { phase, runner: runner.kind, sessionId: parsedSessionId, updatedAt: endedAt })
 					}
 					if (itemTransitionedToTerminal) {
 						await emit(options, {
@@ -1492,9 +1496,10 @@ function freshResume(): ResumeDecision {
 	return { kind: "fresh" }
 }
 
-export function resumeDecisionForItem(item: ItemRecord): ResumeDecision {
-	if (item.lastSessionId === null || item.lastSessionId === "") return freshResume()
-	return { kind: "resume", sessionId: item.lastSessionId }
+export function resumeDecisionForItem(item: ItemRecord, phase: string, runner: AgentRunnerKind): ResumeDecision {
+	const sessionId = item.sessionIds[phase]?.[runner] ?? null
+	if (sessionId === null || sessionId === "") return freshResume()
+	return { kind: "resume", sessionId }
 }
 
 export async function defaultSchedulerKindResolver(context: { chain: ChainRecord; item: ItemRecord }): Promise<ParsedIssueKind> {
@@ -1533,6 +1538,7 @@ export type SchedulerPromptRenderInput = {
 	issueKind: IssueKind
 	loopDataRootOptions?: LoopDataRootOptions | undefined
 	resume?: ResumeDecision
+	runner?: AgentRunnerKind
 }
 
 export async function renderSchedulerSpawnPrompt(input: SchedulerPromptRenderInput): Promise<string> {
@@ -1548,7 +1554,7 @@ export async function renderSchedulerSpawnPrompt(input: SchedulerPromptRenderInp
 		worktreePath: input.worktreePath,
 		issueKind: input.issueKind,
 		loopDataRootOptions: input.loopDataRootOptions,
-		resume: input.resume ?? resumeDecisionForItem(input.item),
+		resume: input.resume ?? (input.runner === undefined ? freshResume() : resumeDecisionForItem(input.item, input.phase, input.runner)),
 	})
 	return renderPrompt(input.rawPrompt, presetPhase, ctx)
 }
@@ -1563,11 +1569,12 @@ export function buildSchedulerResolveContext(input: {
 	issueKind: IssueKind
 	loopDataRootOptions?: LoopDataRootOptions | undefined
 	resume?: ResumeDecision
+	runner?: AgentRunnerKind
 }): ResolveContext {
 	const chainPaths = resolveChainRuntimePaths(input.chain.name, input.loopDataRootOptions)
 	const evidenceDir = resolveItemEvidenceDir(input.item, chainPaths.issueEvidenceDir(input.item.issueNumber))
 	const currentIssueFile = resolveItemIssueFile(input.item, chainPaths.issueFile(input.item.issueNumber))
-	const resume = input.resume ?? resumeDecisionForItem(input.item)
+	const resume = input.resume ?? (input.runner === undefined ? freshResume() : resumeDecisionForItem(input.item, input.phase.name, input.runner))
 	const resumedSessionId = resume.kind === "resume" ? resume.sessionId : ""
 	const runtime: RuntimeBindings = {
 		runId: input.runId,
@@ -1583,7 +1590,7 @@ export function buildSchedulerResolveContext(input: {
 		presetDir: input.preset.presetDir,
 		fragmentIndex: renderFragmentIndex(input.preset),
 		runIdGeneration: resumedSessionId === "" ? "new" : "resumed",
-		resumedFromPhase: resumedSessionId === "" ? "" : (input.item.phase ?? ""),
+		resumedFromPhase: resumedSessionId === "" ? "" : input.phase.name,
 		resumedStartedAt: "",
 		resumedSessionId,
 		issueKind: input.issueKind ?? "",

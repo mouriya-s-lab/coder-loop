@@ -2337,22 +2337,22 @@ describe("runPresetChainCompleteTriggerPhases per-phase runner selection (issue 
 	})
 })
 
-describe("scheduler session-id resume (issue #291)", () => {
+describe("scheduler session-id resume (issue #291 / #311)", () => {
 	const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
 
-	test("first spawn (lastSessionId == null): buildRunnerInvocation argv has no --resume; rendered prompt's RESUMED_SESSION_ID is empty (AC6)", async () => {
+	test("first spawn (no session id for phase/runner): buildRunnerInvocation argv has no --resume; rendered prompt's RESUMED_SESSION_ID is empty (AC6)", async () => {
 		const chain = makeChainFixture({ name: "first-spawn-chain" })
-		const item = makeItemFixture(chain, { issueNumber: 291_001, repoCwd: "/tmp/first-spawn-repo" })
+		const item = makeItemFixture(chain, { issueNumber: 291_001, repoCwd: "/repo/first-spawn-repo" })
 		expect(item.lastSessionId).toBeNull()
 
-		const decision = resumeDecisionForItem(item)
+		const decision = resumeDecisionForItem(item, "iteration", "claude")
 		expect(decision).toEqual({ kind: "fresh" })
 
 		const invocation = buildRunnerInvocation(
 			{ kind: "claude", source: "iteration-default", binary: "claude", extraArgs: [], model: null },
 			"prompt",
 			decision,
-			{ targetCwd: "/tmp", agentCwd: "/tmp", presetDir: PRESET_DIR, loopDataRoot: "/tmp/loop-data" },
+			{ targetCwd: REPO_ROOT, agentCwd: REPO_ROOT, presetDir: PRESET_DIR, loopDataRoot: resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-tests/render-only") },
 		)
 		expect(invocation.kind).toBe("spawn")
 		if (invocation.kind === "spawn") {
@@ -2366,29 +2366,29 @@ describe("scheduler session-id resume (issue #291)", () => {
 			chain,
 			item,
 			runId: "run-fresh",
-			worktreePath: "/tmp/fresh-worktree",
+			worktreePath: "/repo/fresh-worktree",
 			issueKind: "code",
 		})
 		expect(rendered).toBe("RESUMED_SESSION_ID=[] RESUMED_FROM_PHASE=[] RUN_ID_GENERATION=[new]")
 	})
 
-	test("resume spawn (lastSessionId set): buildRunnerInvocation argv contains --resume <id>; rendered prompt embeds the session id literal (AC4 / AC5)", async () => {
+	test("resume spawn (phase/runner session id set): buildRunnerInvocation argv contains --resume <id>; rendered prompt embeds the session id literal (AC4 / AC5)", async () => {
 		const chain = makeChainFixture({ name: "resume-chain" })
 		const item = makeItemFixture(chain, {
 			issueNumber: 291_002,
-			repoCwd: "/tmp/resume-repo",
-			lastSessionId: "sess-deadbeef-cafe",
+			repoCwd: "/repo/resume-repo",
+			sessionIds: { iteration: { claude: "sess-deadbeef-cafe" } },
 			phase: "iteration",
 		})
 
-		const decision = resumeDecisionForItem(item)
+		const decision = resumeDecisionForItem(item, "iteration", "claude")
 		expect(decision).toEqual({ kind: "resume", sessionId: "sess-deadbeef-cafe" })
 
 		const invocation = buildRunnerInvocation(
 			{ kind: "claude", source: "iteration-default", binary: "claude", extraArgs: [], model: null },
 			"prompt",
 			decision,
-			{ targetCwd: "/tmp", agentCwd: "/tmp", presetDir: PRESET_DIR, loopDataRoot: "/tmp/loop-data" },
+			{ targetCwd: REPO_ROOT, agentCwd: REPO_ROOT, presetDir: PRESET_DIR, loopDataRoot: resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-tests/render-only") },
 		)
 		expect(invocation.kind).toBe("spawn")
 		if (invocation.kind === "spawn") {
@@ -2404,24 +2404,25 @@ describe("scheduler session-id resume (issue #291)", () => {
 			chain,
 			item,
 			runId: "run-resume",
-			worktreePath: "/tmp/resume-worktree",
+			worktreePath: "/repo/resume-worktree",
 			issueKind: "code",
+			resume: decision,
 		})
 		expect(rendered).toBe("RESUMED_SESSION_ID=[sess-deadbeef-cafe] RESUMED_FROM_PHASE=[iteration] RUN_ID_GENERATION=[resumed]")
 	})
 
-	test("codex resume spawn (lastSessionId set): buildRunnerInvocation argv shape includes `resume <sessionId>` subcommand", async () => {
+	test("codex resume spawn (phase/runner session id set): buildRunnerInvocation argv shape includes `resume <sessionId>` subcommand", async () => {
 		const item = makeItemFixture(makeChainFixture(), {
 			issueNumber: 291_003,
-			repoCwd: "/tmp/codex-resume-repo",
-			lastSessionId: "thread-codex-1",
+			repoCwd: "/repo/codex-resume-repo",
+			sessionIds: { iteration: { codex: "thread-codex-1" } },
 		})
-		const decision = resumeDecisionForItem(item)
+		const decision = resumeDecisionForItem(item, "iteration", "codex")
 		const invocation = buildRunnerInvocation(
 			{ kind: "codex", source: "iteration-default", binary: "codex", extraArgs: [], model: null },
 			"prompt",
 			decision,
-			{ targetCwd: "/tmp", agentCwd: "/tmp", presetDir: PRESET_DIR, loopDataRoot: "/tmp/loop-data" },
+			{ targetCwd: REPO_ROOT, agentCwd: REPO_ROOT, presetDir: PRESET_DIR, loopDataRoot: resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-tests/render-only") },
 		)
 		expect(invocation.kind).toBe("spawn")
 		if (invocation.kind === "spawn") {
@@ -2431,7 +2432,23 @@ describe("scheduler session-id resume (issue #291)", () => {
 		}
 	})
 
-	test("end-to-end (claude runner): session-id parsed from stdout first line is persisted to item.lastSessionId after exit (AC3)", async () => {
+	test("resumeDecisionForItem selects only the current phase/runner session id (issue #311 AC3 / AC4)", () => {
+		const item = makeItemFixture(makeChainFixture(), {
+			issueNumber: 311_003,
+			repoCwd: "/repo/phase-runner-resume",
+			sessionIds: {
+				iteration: { codex: "thread-iteration-codex" },
+				review: { claude: "sess-review-claude" },
+			},
+		})
+
+		expect(resumeDecisionForItem(item, "iteration", "codex")).toEqual({ kind: "resume", sessionId: "thread-iteration-codex" })
+		expect(resumeDecisionForItem(item, "review", "claude")).toEqual({ kind: "resume", sessionId: "sess-review-claude" })
+		expect(resumeDecisionForItem(item, "iteration", "claude")).toEqual({ kind: "fresh" })
+		expect(resumeDecisionForItem(item, "review", "codex")).toEqual({ kind: "fresh" })
+	})
+
+	test("end-to-end (claude runner): session-id parsed from stdout first line is persisted to the phase/runner slot (AC3)", async () => {
 		const fixture = await createFixture("session-id-capture-claude")
 		try {
 			const chain = createChain(fixture.store, "session-id-capture-claude-chain")
@@ -2445,18 +2462,19 @@ describe("scheduler session-id resume (issue #291)", () => {
 			await runSchedulerUntilIdle(options)
 
 			const refreshed = fixture.store.getItem(item.id)
-			expect(refreshed?.lastSessionId).toBe("sess-captured-001")
+			expect(refreshed?.lastSessionId).toBeNull()
+			expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "claude" })).toBe("sess-captured-001")
 		} finally {
 			fixture.store.close()
 		}
 	})
 
-	test("end-to-end composition: seeded item.lastSessionId reaches subprocess argv as --resume <id> (AC7 wire-level proxy)", async () => {
+	test("end-to-end composition: seeded phase/runner session id reaches subprocess argv as --resume <id> (AC7 wire-level proxy)", async () => {
 		const fixture = await createFixture("session-id-roundtrip-claude")
 		try {
 			const chain = createChain(fixture.store, "session-id-roundtrip-chain")
 			const item = createItem(fixture.store, chain, { issueNumber: 291_020, repoCwd: "/repo/session-roundtrip" })
-			fixture.store.updateItem(item.id, { lastSessionId: "sess-seeded-200" })
+			fixture.store.setItemSessionId(item.id, { phase: "iteration", runner: "claude", sessionId: "sess-seeded-200" })
 			const fakeRunner = resolve(fixture.loopDataRoot, "..", "fake-claude-argv-echo.ts")
 			await writeFakeClaudeArgvEchoRunner(fakeRunner)
 
@@ -2479,7 +2497,7 @@ describe("scheduler session-id resume (issue #291)", () => {
 		}
 	})
 
-	test("end-to-end (codex runner): codex thread.started event id is persisted to item.lastSessionId after exit", async () => {
+	test("end-to-end (codex runner): codex thread.started event id is persisted to the phase/runner slot after exit", async () => {
 		const fixture = await createFixture("session-id-capture-codex")
 		try {
 			const chain = createChain(fixture.store, "session-id-capture-codex-chain")
@@ -2493,7 +2511,37 @@ describe("scheduler session-id resume (issue #291)", () => {
 			await runSchedulerUntilIdle(options)
 
 			const refreshed = fixture.store.getItem(item.id)
-			expect(refreshed?.lastSessionId).toBe("thread-captured-002")
+			expect(refreshed?.lastSessionId).toBeNull()
+			expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "codex" })).toBe("thread-captured-002")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("end-to-end two-phase run stores iteration/codex and review/claude session ids separately (issue #311 AC2 / AC3)", async () => {
+		const fixture = await createFixture("session-id-capture-phase-runner")
+		try {
+			const chain = createChain(fixture.store, "session-id-capture-phase-runner-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
+			const item = createItem(fixture.store, chain, { issueNumber: 311_010, repoCwd: "/repo/session-phase-runner" })
+			const fakeCodex = resolve(fixture.loopDataRoot, "..", "fake-codex-session.sh")
+			const fakeClaude = resolve(fixture.loopDataRoot, "..", "fake-claude-session.ts")
+			await writeFakeCodexSessionShellRunner(fakeCodex, "thread-iteration-311")
+			await writeFakeClaudeSessionRunner(fakeClaude, "sess-review-311")
+
+			await runSchedulerUntilIdle(fixture.options({
+				phaseRunner: ({ phase }) =>
+					phase === "iteration"
+						? { kind: "codex", source: "iteration-default", binary: fakeCodex, extraArgs: [], model: null }
+						: { kind: "claude", source: "review-default", binary: "bun", extraArgs: [fakeClaude], model: null },
+				runIdFactory: ({ chain, item, phase }) => `run-${chain.id}-${item.id}-${phase}`,
+				statusFromExit: ({ phase }) => phase === "iteration" ? "in_progress" : "done",
+			}))
+
+			expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "codex" })).toBe("thread-iteration-311")
+			expect(fixture.store.getItemSessionId(item.id, { phase: "review", runner: "claude" })).toBe("sess-review-311")
+			expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "claude" })).toBeNull()
+			expect(fixture.store.getItemSessionId(item.id, { phase: "review", runner: "codex" })).toBeNull()
 		} finally {
 			fixture.store.close()
 		}
