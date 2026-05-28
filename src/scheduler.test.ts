@@ -2375,6 +2375,7 @@ function makeItemFixture(chain: ChainRecord, overrides: Partial<ItemRecord> & Pi
 		pr: null,
 		lastRunId: null,
 		lastSessionId: null,
+		sessionIds: {},
 		issueFile: null,
 		evidenceDir: null,
 		agentCwd: null,
