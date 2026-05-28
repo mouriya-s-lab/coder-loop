@@ -31,7 +31,7 @@ import {
 	type RunnerInvocationPaths,
 	type RuntimeBindings,
 } from "./loop"
-import { type ChainRecord, type ItemRecord, type SqliteStateStore } from "./sqlite-state"
+import { type ChainRecord, type ItemRecord, listDependencyWaitReasons, type SqliteStateStore } from "./sqlite-state"
 import {
 	type LoopDataRootOptions,
 	RuntimePathError,
@@ -157,6 +157,11 @@ export type SchedulerPhaseRunner = (input: SchedulerPhaseRunnerInput) => AgentRu
 
 export type SchedulerPhaseRunnerSelectionResolver = (chain: ChainRecord) => PhaseRunnerSelectionInput | Promise<PhaseRunnerSelectionInput>
 
+export type SchedulerSpawnFailureBackoffConfig = {
+	initialSeconds: number
+	maxSeconds: number
+}
+
 export type SchedulerOptions = {
 	store: SchedulerStore
 	state: SchedulerState
@@ -178,6 +183,10 @@ export type SchedulerOptions = {
 	runIdFactory?: (context: { chain: ChainRecord; item: ItemRecord; phase: string }) => string
 	statusFromExit?: (context: SchedulerStatusFromExitContext) => string
 	kindResolver?: SchedulerKindResolver
+	maxItemAttempts?: number
+	maxItemAttemptsForChain?: (chain: ChainRecord) => number
+	spawnFailureBackoff?: SchedulerSpawnFailureBackoffConfig
+	spawnFailureBackoffForChain?: (chain: ChainRecord) => SchedulerSpawnFailureBackoffConfig
 	chainCompleteTrigger?: SchedulerChainCompleteTrigger
 	chainCompleteTriggerForChain?: SchedulerChainCompleteTriggerForChain
 	onEvent?: (event: SchedulerEvent) => void | Promise<void>
@@ -206,6 +215,8 @@ export type DefaultSchedulerStatusFromExitInput = {
 }
 
 const ITERATION_PHASE_NAME = "iteration"
+export const DEFAULT_MAX_ITEM_ATTEMPTS = 50
+export const SCHEDULER_EXHAUSTED_STATUS = "exhausted"
 
 export function defaultSchedulerStatusFromExit(input: DefaultSchedulerStatusFromExitInput): string {
 	if (input.exitCode !== 0) return "changes_requested"
@@ -237,8 +248,11 @@ export type SchedulerTickResult = {
 
 const DEFAULT_PHASE = "iteration"
 const DEFAULT_PENDING_STATUSES = ["queued", "changes_requested"] as const
-const DEFAULT_TERMINAL_STATUSES = ["done", "moot", "blocked"] as const
+const DEFAULT_TERMINAL_STATUSES = ["done", "moot", "blocked", SCHEDULER_EXHAUSTED_STATUS] as const
 const CHAIN_COMPLETE_TRIGGER_STATE_METADATA_KEY = "coderLoopChainCompleteTrigger"
+const MAX_ITEM_ATTEMPTS_METADATA_KEY = "maxItemAttempts"
+const SCHEDULER_BACKOFF_EXTRA_KEY = "schedulerBackoff"
+const DEFAULT_SPAWN_FAILURE_BACKOFF: SchedulerSpawnFailureBackoffConfig = { initialSeconds: 1, maxSeconds: 300 }
 const REVIEW_ON_EMPTY_LOCK_FILENAME = "review-on-empty.lock"
 const REVIEW_ON_EMPTY_LOCK_REASON = "chain-queue-drained"
 const REVIEW_ON_EMPTY_FALLBACK_ITEM_ID = 0
@@ -247,6 +261,12 @@ let fallbackRunSequence = 0
 
 export function createSchedulerState(): SchedulerState {
 	return { slots: new Map(), finalizingItemStatuses: new Map(), finalizingChainIds: new Set(), pendingCloseHandlers: new Set() }
+}
+
+export function maxItemAttemptsFromChainMetadata(metadata: JsonObject): number {
+	const value = metadata[MAX_ITEM_ATTEMPTS_METADATA_KEY]
+	if (isPositiveInteger(value)) return value
+	return DEFAULT_MAX_ITEM_ATTEMPTS
 }
 
 export async function schedulerTick(options: SchedulerOptions): Promise<SchedulerTickResult> {
@@ -261,7 +281,7 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 
 	for (const chain of activeChains) {
 		const chainStatuses = await schedulerStatusesForChain(options, chain)
-		const items = options.store.listItems(chain.id)
+		let items = options.store.listItems(chain.id)
 		const repoCwds = distinct(items.map((item) => item.repoCwd))
 		const phasePlan = await resolvePhasePlanForChain(options, chain)
 
@@ -279,14 +299,14 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 			}
 			if (hasFinalizingItemForRepo(options.state, items, repoCwd)) continue
 
+			items = await exhaustItemsOverAttemptLimitForRepo(options, chain, repoCwd, items, chainStatuses)
 			const next = selectNextItemAndPhase({
-				store: options.store,
-				chainId: chain.id,
 				repoCwd,
 				items,
 				chainStatuses,
 				phasePlan,
 				explicitPhase: options.phase,
+				now: nowSeconds(options),
 			})
 			if (next === null) continue
 
@@ -339,22 +359,22 @@ async function resolvePhasePlanForChain(options: SchedulerOptions, chain: ChainR
 }
 
 type SelectNextItemAndPhaseInput = {
-	store: SchedulerStore
-	chainId: number
 	repoCwd: string
 	items: readonly ItemRecord[]
 	chainStatuses: SchedulerChainStatuses
 	phasePlan: SchedulerPhasePlan
 	explicitPhase: string | undefined
+	now: number
 }
 
 function selectNextItemAndPhase(input: SelectNextItemAndPhaseInput): { item: ItemRecord; phase: string } | null {
 	if (input.explicitPhase !== undefined) {
-		const pending = input.store.getNextPendingItem({
-			chainId: input.chainId,
+		const pending = selectNextPendingItemFromSnapshot({
+			items: input.items,
 			repoCwd: input.repoCwd,
 			statuses: input.chainStatuses.pending,
 			terminalStatuses: input.chainStatuses.terminal,
+			now: input.now,
 		})
 		return pending === null ? null : { item: pending, phase: input.explicitPhase }
 	}
@@ -383,13 +403,89 @@ function selectNextItemAndPhase(input: SelectNextItemAndPhaseInput): { item: Ite
 		if (triggered !== undefined) return { item: triggered, phase: triggerPhase.name }
 	}
 
-	const pending = input.store.getNextPendingItem({
-		chainId: input.chainId,
+	const pending = selectNextPendingItemFromSnapshot({
+		items: input.items,
 		repoCwd: input.repoCwd,
 		statuses: input.chainStatuses.pending,
 		terminalStatuses: input.chainStatuses.terminal,
+		now: input.now,
 	})
 	return pending === null ? null : { item: pending, phase: input.phasePlan.iterPhase }
+}
+
+type SchedulerPendingSelectionInput = {
+	items: readonly ItemRecord[]
+	repoCwd: string
+	statuses: readonly string[]
+	terminalStatuses: readonly string[]
+	now: number
+}
+
+function selectNextPendingItemFromSnapshot(input: SchedulerPendingSelectionInput): ItemRecord | null {
+	const eligible = new Set(input.statuses)
+	const waitsByItemId = new Set(
+		listDependencyWaitReasons(input.items, {
+			repoCwd: input.repoCwd,
+			statuses: input.statuses,
+			terminalStatuses: input.terminalStatuses,
+		}).map((wait) => wait.itemId),
+	)
+	return input.items
+		.filter((item) => item.repoCwd === input.repoCwd)
+		.filter((item) => eligible.has(item.status))
+		.filter((item) => !waitsByItemId.has(item.id))
+		.filter((item) => itemBackoffReady(item, input.now))
+		.sort(comparePendingItems)
+		[0] ?? null
+}
+
+function comparePendingItems(left: ItemRecord, right: ItemRecord): number {
+	if (left.priority === null && right.priority !== null) return 1
+	if (left.priority !== null && right.priority === null) return -1
+	if (left.priority !== right.priority) return String(left.priority).localeCompare(String(right.priority))
+	if (left.attempts !== right.attempts) return left.attempts - right.attempts
+	return left.id - right.id
+}
+
+async function exhaustItemsOverAttemptLimitForRepo(
+	options: SchedulerOptions,
+	chain: ChainRecord,
+	repoCwd: string,
+	items: readonly ItemRecord[],
+	chainStatuses: SchedulerChainStatuses,
+): Promise<ItemRecord[]> {
+	const maxItemAttempts = maxItemAttemptsForChain(options, chain)
+	const terminalStatuses = new Set(chainStatuses.terminal)
+	const pendingStatuses = new Set(chainStatuses.pending)
+	let changed = false
+	for (const item of items) {
+		if (item.repoCwd !== repoCwd) continue
+		if (terminalStatuses.has(item.status)) continue
+		if (!pendingStatuses.has(item.status) && item.status !== "in_progress") continue
+		if (item.attempts < maxItemAttempts) continue
+
+		const exhaustedAt = nowSeconds(options)
+		const extra = clearSchedulerBackoff(item.extra)
+		options.store.updateItem(item.id, {
+			status: SCHEDULER_EXHAUSTED_STATUS,
+			extra,
+			updatedAt: exhaustedAt,
+		})
+		changed = true
+		await emit(options, {
+			type: "queue.terminal",
+			ts: nowIso(options),
+			runId: item.lastRunId ?? makeAttemptLimitRunId(chain, item, exhaustedAt),
+			chainId: chain.id,
+			itemId: item.id,
+			terminalStatus: SCHEDULER_EXHAUSTED_STATUS,
+		})
+	}
+	return changed ? options.store.listItems(chain.id) : [...items]
+}
+
+function makeAttemptLimitRunId(chain: ChainRecord, item: ItemRecord, exhaustedAt: number): string {
+	return `run-${exhaustedAt}-max-attempts-chain-${chain.id}-item-${item.id}`
 }
 
 export async function runSchedulerUntilIdle(options: SchedulerOptions, maxTicks = 100): Promise<SchedulerActiveRun[]> {
@@ -702,10 +798,12 @@ function attachRunCloseHandler(
 					options.store.completeRun(runId, { endedAt, exitCode, status, extra: { stdoutBytes: stdoutText.length, stderrBytes: stderrText.length } })
 					const parsedSessionId = parseSessionIdFromRunnerStream(runner.kind, stdoutText)
 					if (currentItem === null || !terminalStatuses.has(currentItem.status)) {
+						const itemForBackoff = currentItem ?? item
 						const update: Parameters<typeof options.store.updateItem>[1] = {
 							status,
 							lastRunId: runId,
 							agentCwd: worktreePath,
+							extra: extraAfterRunCompletion(options, chain, itemForBackoff, exitCode, status, terminalStatuses, endedAt),
 							updatedAt: endedAt,
 						}
 						if (parsedSessionId !== null) update.lastSessionId = parsedSessionId
@@ -961,8 +1059,86 @@ async function schedulerStatusesForChain(options: SchedulerOptions, chain: Chain
 	const resolved = await options.statusesForChain?.(chain)
 	return {
 		pending: resolved?.pending ?? options.pendingStatuses ?? DEFAULT_PENDING_STATUSES,
-		terminal: resolved?.terminal ?? options.terminalStatuses ?? DEFAULT_TERMINAL_STATUSES,
+		terminal: withSchedulerTerminalStatuses(resolved?.terminal ?? options.terminalStatuses ?? DEFAULT_TERMINAL_STATUSES),
 	}
+}
+
+function withSchedulerTerminalStatuses(statuses: readonly string[]): readonly string[] {
+	return statuses.includes(SCHEDULER_EXHAUSTED_STATUS) ? statuses : [...statuses, SCHEDULER_EXHAUSTED_STATUS]
+}
+
+function maxItemAttemptsForChain(options: SchedulerOptions, chain: ChainRecord): number {
+	const configured = options.maxItemAttemptsForChain?.(chain) ?? options.maxItemAttempts ?? maxItemAttemptsFromChainMetadata(chain.metadata)
+	return isPositiveInteger(configured) ? configured : DEFAULT_MAX_ITEM_ATTEMPTS
+}
+
+function spawnFailureBackoffForChain(options: SchedulerOptions, chain: ChainRecord): SchedulerSpawnFailureBackoffConfig {
+	const configured = options.spawnFailureBackoffForChain?.(chain) ?? options.spawnFailureBackoff ?? DEFAULT_SPAWN_FAILURE_BACKOFF
+	return normalizeBackoffConfig(configured)
+}
+
+function normalizeBackoffConfig(config: SchedulerSpawnFailureBackoffConfig): SchedulerSpawnFailureBackoffConfig {
+	const initialSeconds = isPositiveInteger(config.initialSeconds) ? config.initialSeconds : DEFAULT_SPAWN_FAILURE_BACKOFF.initialSeconds
+	const maxSeconds = isPositiveInteger(config.maxSeconds) ? config.maxSeconds : DEFAULT_SPAWN_FAILURE_BACKOFF.maxSeconds
+	return { initialSeconds, maxSeconds: Math.max(initialSeconds, maxSeconds) }
+}
+
+function extraAfterRunCompletion(
+	options: SchedulerOptions,
+	chain: ChainRecord,
+	item: ItemRecord,
+	exitCode: number,
+	status: string,
+	terminalStatuses: ReadonlySet<string>,
+	endedAt: number,
+): JsonObject {
+	if (exitCode !== 0 && !terminalStatuses.has(status)) {
+		return withNextSchedulerBackoff(item.extra, endedAt, spawnFailureBackoffForChain(options, chain))
+	}
+	return clearSchedulerBackoff(item.extra)
+}
+
+function itemBackoffReady(item: ItemRecord, now: number): boolean {
+	const backoff = schedulerBackoffState(item.extra)
+	return backoff === null || backoff.nextRunAt <= now
+}
+
+function withNextSchedulerBackoff(
+	extra: JsonObject,
+	endedAt: number,
+	config: SchedulerSpawnFailureBackoffConfig,
+): JsonObject {
+	const current = schedulerBackoffState(extra)
+	const failureCount = (current?.failureCount ?? 0) + 1
+	const exponent = Math.min(failureCount - 1, 30)
+	const delaySeconds = Math.min(config.maxSeconds, config.initialSeconds * (2 ** exponent))
+	return {
+		...extra,
+		[SCHEDULER_BACKOFF_EXTRA_KEY]: {
+			failureCount,
+			nextRunAt: endedAt + delaySeconds,
+		},
+	}
+}
+
+function clearSchedulerBackoff(extra: JsonObject): JsonObject {
+	if (!(SCHEDULER_BACKOFF_EXTRA_KEY in extra)) return extra
+	const next = { ...extra }
+	delete next[SCHEDULER_BACKOFF_EXTRA_KEY]
+	return next
+}
+
+function schedulerBackoffState(extra: JsonObject): { failureCount: number; nextRunAt: number } | null {
+	const raw = jsonObject(extra[SCHEDULER_BACKOFF_EXTRA_KEY])
+	if (raw === null) return null
+	const failureCount = raw.failureCount
+	const nextRunAt = raw.nextRunAt
+	if (!isPositiveInteger(failureCount) || !isPositiveInteger(nextRunAt)) return null
+	return { failureCount, nextRunAt }
+}
+
+function isPositiveInteger(value: unknown): value is number {
+	return typeof value === "number" && Number.isInteger(value) && value >= 1
 }
 
 function allItemsTerminalIncludingFinalizing(options: SchedulerOptions, chainId: number, terminalStatuses: readonly string[]): boolean {

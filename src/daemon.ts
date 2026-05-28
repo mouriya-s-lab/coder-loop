@@ -20,6 +20,7 @@ import {
 	defaultSchedulerStatusFromExit,
 	listActiveRuns,
 	listPendingCloseHandlers,
+	maxItemAttemptsFromChainMetadata,
 	schedulerTick,
 	type SchedulerCompletedRun,
 	type SchedulerOptions,
@@ -923,7 +924,9 @@ export class CoderLoopDaemon {
 			presetDir: schedulerPresetDir ?? bundledPresetDir(DEFAULT_PRESET_NAME),
 			prompt: scheduler.prompt ?? presetPromptResolver,
 			onEvent: async (event) => {
-				await this.appendDaemonLogForChainId(event.chainId, { type: "scheduler.event", event: event as unknown as JsonObject })
+				if (this.store !== null) {
+					await this.appendDaemonLogForChainId(event.chainId, { type: "scheduler.event", event: event as unknown as JsonObject })
+				}
 				await externalOnEvent?.(event)
 			},
 		}
@@ -950,6 +953,11 @@ export class CoderLoopDaemon {
 		})
 		if (scheduler.now !== undefined) options.now = scheduler.now
 		if (scheduler.runIdFactory !== undefined) options.runIdFactory = scheduler.runIdFactory
+		options.maxItemAttemptsForChain = scheduler.maxItemAttemptsForChain
+			?? ((chain) => maxItemAttemptsFromChainMetadata(chain.metadata))
+		if (scheduler.maxItemAttempts !== undefined) options.maxItemAttempts = scheduler.maxItemAttempts
+		if (scheduler.spawnFailureBackoff !== undefined) options.spawnFailureBackoff = scheduler.spawnFailureBackoff
+		if (scheduler.spawnFailureBackoffForChain !== undefined) options.spawnFailureBackoffForChain = scheduler.spawnFailureBackoffForChain
 		options.statusFromExit = scheduler.statusFromExit
 			?? ((context) => defaultSchedulerStatusFromExit({
 				exitCode: context.exitCode,
@@ -1496,7 +1504,18 @@ function sizedJsonObject(record: UnknownRecord, key: string, limitBytes: number)
 
 function validateChainMetadata(metadata: JsonObject): JsonObject {
 	validateJsonObjectSafety(metadata, "metadata", MAX_CHAIN_METADATA_DEPTH, "metadata")
+	validateOptionalPositiveIntegerMetadata(metadata, "maxItemAttempts")
 	return metadata
+}
+
+function validateOptionalPositiveIntegerMetadata(metadata: JsonObject, key: string): void {
+	const value = metadata[key]
+	if (value === undefined) return
+	if (typeof value === "number" && Number.isInteger(value) && value >= 1) return
+	throw new DaemonError("invalid_request", `metadata.${key} must be a positive integer when provided`, {
+		field: `metadata.${key}`,
+		value: toJsonValue(value),
+	})
 }
 
 function validateItemExtra(extra: JsonObject): JsonObject {

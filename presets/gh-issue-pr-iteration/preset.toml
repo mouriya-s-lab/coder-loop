@@ -25,7 +25,7 @@ idField = "issue"
 
 [statuses]
 continuable = ["queued", "in_progress", "changes_requested"]
-terminal    = ["blocked", "moot", "done"]
+terminal    = ["blocked", "moot", "done", "exhausted"]
 
 [[phases]]
 name   = "iteration"

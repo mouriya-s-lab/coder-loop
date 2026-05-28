@@ -429,6 +429,160 @@ describe("scheduler", () => {
 		}
 	})
 
+	test("maxItemAttempts exhausts a continuable item before spawning and emits queue.terminal", async () => {
+		const fixture = await createFixture("max-item-attempts-exhaust")
+		try {
+			const chain = createChain(fixture.store, "max-item-attempts-exhaust-chain", {
+				metadata: { maxItemAttempts: 2 },
+			})
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
+			const item = createItem(fixture.store, chain, { issueNumber: 7003, repoCwd: "/repo/a" })
+			fixture.store.updateItem(item.id, {
+				status: "changes_requested",
+				attempts: 2,
+				lastRunId: "run-prior-failure",
+				extra: { ...item.extra, schedulerBackoff: { failureCount: 2, nextRunAt: 1_800_000_000 } },
+				updatedAt: 1_800_000_500,
+			})
+
+			const tick = await schedulerTick(fixture.options())
+
+			expect(tick.spawnedRuns).toHaveLength(0)
+			expect(tick.completedChainIds).toEqual([chain.id])
+			const exhausted = fixture.store.getItem(item.id)
+			expect(exhausted?.status).toBe("exhausted")
+			expect(exhausted?.extra.schedulerBackoff).toBeUndefined()
+			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({
+				type: "queue.terminal",
+				itemId: item.id,
+				runId: "run-prior-failure",
+				terminalStatus: "exhausted",
+			}))
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("failed spawns enter exponential backoff and a held item does not starve a sibling", async () => {
+		const fixture = await createFixture("failure-backoff-sibling")
+		try {
+			let now = 1_800_010_000
+			const chain = createChain(fixture.store, "failure-backoff-sibling-chain", {
+				metadata: { maxItemAttempts: 10 },
+			})
+			const failing = createItem(fixture.store, chain, {
+				issueNumber: 7004,
+				repoCwd: "/repo/a",
+				exitCode: 1,
+				summary: null,
+			})
+			const sibling = createItem(fixture.store, chain, { issueNumber: 7005, repoCwd: "/repo/a" })
+			const options = fixture.options({
+				now: () => now,
+				runIdFactory: ({ item }) => `run-backoff-${item.id}-${now}`,
+			})
+
+			const firstTick = await schedulerTick(options)
+			expect(firstTick.spawnedRuns).toHaveLength(1)
+			expect(firstTick.spawnedRuns[0]?.itemId).toBe(failing.id)
+			await firstTick.spawnedRuns[0]!.closed
+			expect(fixture.store.getItem(failing.id)?.extra.schedulerBackoff).toEqual({
+				failureCount: 1,
+				nextRunAt: now + 1,
+			})
+
+			const secondTick = await schedulerTick(options)
+			expect(secondTick.spawnedRuns).toHaveLength(1)
+			expect(secondTick.spawnedRuns[0]?.itemId).toBe(sibling.id)
+			await secondTick.spawnedRuns[0]!.closed
+			expect(fixture.store.getItem(sibling.id)?.status).toBe("done")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("failed-spawn backoff persists across scheduler state restart", async () => {
+		const fixture = await createFixture("failure-backoff-restart")
+		try {
+			let now = 1_800_020_000
+			const chain = createChain(fixture.store, "failure-backoff-restart-chain")
+			const item = createItem(fixture.store, chain, {
+				issueNumber: 7006,
+				repoCwd: "/repo/a",
+				exitCode: 1,
+				summary: null,
+			})
+			const firstOptions = fixture.options({
+				now: () => now,
+				runIdFactory: ({ item: selected }) => `run-restart-${selected.id}-${now}`,
+			})
+			const firstTick = await schedulerTick(firstOptions)
+			await firstTick.spawnedRuns[0]!.closed
+			expect(fixture.store.getItem(item.id)?.extra.schedulerBackoff).toMatchObject({
+				failureCount: 1,
+				nextRunAt: now + 1,
+			})
+
+			const restartedState = createSchedulerState()
+			const restartedOptions = fixture.options({
+				state: restartedState,
+				now: () => now,
+				runIdFactory: ({ item: selected }) => `run-restarted-${selected.id}-${now}`,
+			})
+			const heldTick = await schedulerTick(restartedOptions)
+			expect(heldTick.spawnedRuns).toHaveLength(0)
+
+			now += 1
+			const retryTick = await schedulerTick(restartedOptions)
+			expect(retryTick.spawnedRuns).toHaveLength(1)
+			expect(retryTick.spawnedRuns[0]?.itemId).toBe(item.id)
+			await retryTick.spawnedRuns[0]!.closed
+			expect(fixture.store.getItem(item.id)?.extra.schedulerBackoff).toMatchObject({
+				failureCount: 2,
+				nextRunAt: now + 2,
+			})
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("forced failure fixture does not spin at 1Hz: thirty seconds spawn at most five runs", async () => {
+		const fixture = await createFixture("failure-backoff-30s")
+		try {
+			let now = 1_800_030_000
+			const chain = createChain(fixture.store, "failure-backoff-30s-chain", {
+				metadata: { maxItemAttempts: 50 },
+			})
+			const item = createItem(fixture.store, chain, {
+				issueNumber: 7007,
+				repoCwd: "/repo/a",
+				exitCode: 1,
+				summary: null,
+			})
+			const options = fixture.options({
+				now: () => now,
+				runIdFactory: ({ item: selected }) => `run-30s-${selected.id}-${now}`,
+			})
+
+			let spawnCount = 0
+			for (let second = 0; second < 30; second += 1) {
+				now = 1_800_030_000 + second
+				const tick = await schedulerTick(options)
+				spawnCount += tick.spawnedRuns.length
+				await Promise.all(tick.spawnedRuns.map((run) => run.closed))
+			}
+
+			expect(spawnCount).toBeLessThanOrEqual(5)
+			expect(fixture.store.getItem(item.id)?.attempts).toBe(spawnCount)
+			expect(fixture.store.getItem(item.id)?.extra.schedulerBackoff).toMatchObject({
+				failureCount: spawnCount,
+				nextRunAt: 1_800_030_031,
+			})
+		} finally {
+			fixture.store.close()
+		}
+	})
+
 	test("empty active chain remains active", async () => {
 		const fixture = await createFixture("empty-active")
 		try {
@@ -2383,10 +2537,10 @@ await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.i
 await new Promise((resolve) => setTimeout(resolve, input.sleepMs ?? 5))
 await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
 console.log(JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=fake-claude-session-runner" }] } }))
-process.exit(0)
+process.exitCode = 0
 `,
-	)
-}
+		)
+	}
 
 async function writeFakeClaudeArgvEchoRunner(path: string): Promise<void> {
 	await mkdir(resolve(path, ".."), { recursive: true })
@@ -2394,10 +2548,10 @@ async function writeFakeClaudeArgvEchoRunner(path: string): Promise<void> {
 		path,
 		`console.log(JSON.stringify({ argv: Bun.argv }))
 console.log(JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=argv-echo" }] } }))
-process.exit(0)
+process.exitCode = 0
 `,
-	)
-}
+		)
+	}
 
 async function writeFakeCodexSessionShellRunner(path: string, threadId: string): Promise<void> {
 	await mkdir(resolve(path, ".."), { recursive: true })
@@ -2477,10 +2631,10 @@ async function writeBunMarkerRunner(path: string, marker: string): Promise<void>
 		`process.stdout.write(${JSON.stringify(marker)} + "\\n")
 process.stdout.write("ITERATION SUMMARY: scope=test; reason=marker\\n")
 process.stdout.write("REVIEW SUMMARY: verdict=accepted; issue=#0; reason=marker\\n")
-process.exit(0)
+process.exitCode = 0
 `,
-	)
-}
+		)
+	}
 
 async function writeShellMarkerScript(path: string, marker: string): Promise<void> {
 	await mkdir(resolve(path, ".."), { recursive: true })
@@ -2742,10 +2896,10 @@ async function writeEchoPromptRunner(path: string): Promise<void> {
 	await writeFile(
 		path,
 		`const promptIndex = Bun.argv.indexOf("-p")
-const prompt = promptIndex === -1 ? "" : Bun.argv[promptIndex + 1] ?? ""
+	const prompt = promptIndex === -1 ? "" : Bun.argv[promptIndex + 1] ?? ""
 process.stdout.write(prompt)
 process.stdout.write("\\nREVIEW SUMMARY: verdict=accepted; issue=#0; reason=echo-prompt-runner default\\n")
-process.exit(0)
+process.exitCode = 0
 `,
-	)
-}
+		)
+	}
