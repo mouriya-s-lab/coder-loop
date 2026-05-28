@@ -19,6 +19,7 @@ import {
 	createSchedulerState,
 	defaultSchedulerStatusFromExit,
 	listActiveRuns,
+	listPendingCloseHandlers,
 	schedulerTick,
 	type SchedulerCompletedRun,
 	type SchedulerOptions,
@@ -252,13 +253,10 @@ export class CoderLoopDaemon {
 		// because state is now "shutting_down", so we deliberately discard it.
 		await this.pauseSchedulerForMutation()
 
-		// Wait for active child runs to finish naturally. attachRunCloseHandler
-		// resolves `closed` only after it writes completion artifacts, emits
-		// phase.end / queue.terminal, calls clearCurrentRun, and nulls the
-		// slot's activeRun — the graceful path required by #293. No timeout /
-		// force kill; that is umbrella #282 follow-up scope.
-		const activeRuns = listActiveRuns(this.schedulerState)
-		await Promise.all(activeRuns.map((run) => run.closed.catch(() => undefined)))
+		// Wait for active children plus pending close handlers to finish before
+		// closing SQLite. attachRunCloseHandler may null activeRun before
+		// completeChainIfReady finishes so the chain can complete.
+		await this.waitForSchedulerQuiescence()
 
 		for (const socket of this.sockets) socket.end()
 		if (this.server !== null) {
@@ -294,6 +292,18 @@ export class CoderLoopDaemon {
 		await this.removeOwnedRuntimeFiles()
 		this.state = "exited"
 		this.resolveClosed?.()
+	}
+
+	private async waitForSchedulerQuiescence(): Promise<void> {
+		while (true) {
+			const activeRuns = listActiveRuns(this.schedulerState)
+			const pendingCloseHandlers = listPendingCloseHandlers(this.schedulerState)
+			if (activeRuns.length === 0 && pendingCloseHandlers.length === 0) return
+			await Promise.all([
+				...activeRuns.map((run) => run.closed.catch(() => undefined)),
+				...pendingCloseHandlers.map((pendingCloseHandler) => pendingCloseHandler.catch(() => undefined)),
+			])
+		}
 	}
 
 	private async removeOwnedRuntimeFiles(): Promise<void> {

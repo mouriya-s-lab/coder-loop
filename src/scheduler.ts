@@ -80,6 +80,7 @@ export type SchedulerState = {
 	slots: Map<string, SchedulerSlot>
 	finalizingItemStatuses: Map<number, string>
 	finalizingChainIds: Set<number>
+	pendingCloseHandlers: Set<Promise<unknown>>
 }
 
 export type SchedulerStore = Pick<
@@ -245,7 +246,7 @@ const REVIEW_ON_EMPTY_FALLBACK_ITEM_ID = 0
 let fallbackRunSequence = 0
 
 export function createSchedulerState(): SchedulerState {
-	return { slots: new Map(), finalizingItemStatuses: new Map(), finalizingChainIds: new Set() }
+	return { slots: new Map(), finalizingItemStatuses: new Map(), finalizingChainIds: new Set(), pendingCloseHandlers: new Set() }
 }
 
 export async function schedulerTick(options: SchedulerOptions): Promise<SchedulerTickResult> {
@@ -485,6 +486,10 @@ export function listActiveRuns(state: SchedulerState): SchedulerActiveRun[] {
 	return [...state.slots.values()].flatMap((slot) => (slot.activeRun === null ? [] : [slot.activeRun]))
 }
 
+export function listPendingCloseHandlers(state: SchedulerState): Promise<unknown>[] {
+	return [...state.pendingCloseHandlers]
+}
+
 export class SchedulerError extends Error {
 	constructor(
 		readonly code: "max_ticks_exceeded" | "worktree_create_failed" | "spawn_failed",
@@ -643,14 +648,14 @@ function attachRunCloseHandler(
 ): SchedulerActiveRun {
 	const stdout: Buffer[] = []
 	const stderr: Buffer[] = []
-	const closed = new Promise<SchedulerCompletedRun>((resolveClosed) => {
+	const closed = new Promise<SchedulerCompletedRun>((resolveClosed, rejectClosed) => {
 		child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk))
 		child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk))
 		child.on("error", (error) => {
 			stderr.push(Buffer.from(error.message))
 		})
 		child.on("close", (code) => {
-			void (async () => {
+			const pendingCloseHandler = (async (): Promise<SchedulerCompletedRun> => {
 				const exitCode = code ?? 1
 				const stdoutText = Buffer.concat(stdout).toString("utf-8")
 				const stderrText = Buffer.concat(stderr).toString("utf-8")
@@ -681,6 +686,7 @@ function attachRunCloseHandler(
 					const currentRun = options.store.getCurrentRun(chain.id)
 					if (currentRun?.runId === runId) options.store.clearCurrentRun(chain.id)
 
+					if (slot.activeRun?.runId === runId) slot.activeRun = null
 					await emit(options, { type: "agent.exit", slotKey: slot.key, chainId: chain.id, itemId: item.id, runId, exitCode, status })
 					await emit(options, {
 						type: "phase.end",
@@ -718,13 +724,21 @@ function attachRunCloseHandler(
 						})
 					}
 					await completeChainIfReady(options, chain, runId, [...terminalStatuses])
+					return { runId, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, exitCode, stdout: stdoutText, stderr: stderrText, status }
+				} catch (error) {
 					if (slot.activeRun?.runId === runId) slot.activeRun = null
-					resolveClosed({ runId, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, exitCode, stdout: stdoutText, stderr: stderrText, status })
+					throw error
 				} finally {
-					if (slot.activeRun?.runId === runId) slot.activeRun = null
 					options.state.finalizingItemStatuses.delete(item.id)
 				}
 			})()
+			options.state.pendingCloseHandlers.add(pendingCloseHandler)
+			void pendingCloseHandler
+				.then(resolveClosed, rejectClosed)
+				.finally(() => {
+					options.state.pendingCloseHandlers.delete(pendingCloseHandler)
+				})
+				.catch(() => undefined)
 		})
 	})
 	const terminate = createRunTerminator(child, closed)
@@ -1205,14 +1219,14 @@ function attachReviewOnEmptyCloseHandler(
 ): SchedulerActiveRun {
 	const stdout: Buffer[] = []
 	const stderr: Buffer[] = []
-	const closed = new Promise<SchedulerCompletedRun>((resolveClosed) => {
+	const closed = new Promise<SchedulerCompletedRun>((resolveClosed, rejectClosed) => {
 		child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk))
 		child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk))
 		child.on("error", (error) => {
 			stderr.push(Buffer.from(error.message))
 		})
 		child.on("close", (code) => {
-			void (async () => {
+			const pendingCloseHandler = (async (): Promise<SchedulerCompletedRun> => {
 				const exitCode = code ?? 1
 				const stdoutText = Buffer.concat(stdout).toString("utf-8")
 				const stderrText = Buffer.concat(stderr).toString("utf-8")
@@ -1246,6 +1260,7 @@ function attachReviewOnEmptyCloseHandler(
 					await mkdir(dirname(lockPath), { recursive: true })
 					await writeFile(lockPath, serializeSchedulerReviewOnEmptyLock(runId, new Date()))
 
+					if (slot.activeRun?.runId === runId) slot.activeRun = null
 					await emit(options, {
 						type: "agent.exit",
 						slotKey: slot.key,
@@ -1268,32 +1283,19 @@ function attachReviewOnEmptyCloseHandler(
 					})
 					const chainStatuses = await schedulerStatusesForChain(options, chain)
 					await completeChainIfReady(options, chain, runId, [...chainStatuses.terminal])
-					if (slot.activeRun?.runId === runId) slot.activeRun = null
-					resolveClosed({
-						runId,
-						itemId: fallbackItem.id,
-						chainId: chain.id,
-						repoCwd,
-						exitCode,
-						stdout: stdoutText,
-						stderr: stderrText,
-						status: statusFromExit,
-					})
+					return { runId, itemId: fallbackItem.id, chainId: chain.id, repoCwd, exitCode, stdout: stdoutText, stderr: stderrText, status: statusFromExit }
 				} catch (error) {
 					if (slot.activeRun?.runId === runId) slot.activeRun = null
-					resolveClosed({
-						runId,
-						itemId: fallbackItem.id,
-						chainId: chain.id,
-						repoCwd,
-						exitCode,
-						stdout: stdoutText,
-						stderr: stderrText,
-						status: statusFromExit,
-					})
 					throw error
 				}
 			})()
+			options.state.pendingCloseHandlers.add(pendingCloseHandler)
+			void pendingCloseHandler
+				.then(resolveClosed, rejectClosed)
+				.finally(() => {
+					options.state.pendingCloseHandlers.delete(pendingCloseHandler)
+				})
+				.catch(() => undefined)
 		})
 	})
 	const terminate = createRunTerminator(child, closed)
