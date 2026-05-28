@@ -9,7 +9,7 @@ This fragment defines how `central SQLite state DB`, central daemon scheduling s
 Queue item statuses are finite:
 
 - actionable: `queued`, `in_progress`, `changes_requested`;
-- non-actionable/final-ish: `blocked`, `moot`, `done`.
+- non-actionable/final-ish: `blocked`, `moot`, `done`, `exhausted`.
 
 The orchestrator selects an actionable `state.current` item before the front of `queue`. If review prepends child issues, it must set `current: null`; otherwise the parent will be selected again.
 

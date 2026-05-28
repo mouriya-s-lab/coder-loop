@@ -337,6 +337,8 @@ describe("daemon", () => {
 				{ name: "metadata-empty-key", metadata: JSON.parse(`{"":"empty-key"}`) },
 				{ name: "metadata-nested-proto", metadata: JSON.parse(`{"items":[{"__proto__":{"polluted":3}}]}`) },
 				{ name: "metadata-too-deep", metadata: nestedMetadata(9) },
+				{ name: "metadata-max-attempts-zero", metadata: { maxItemAttempts: 0 } },
+				{ name: "metadata-max-attempts-float", metadata: { maxItemAttempts: 1.5 } },
 			]
 
 			for (const { name, metadata } of invalidCases) {
@@ -351,7 +353,7 @@ describe("daemon", () => {
 			}
 
 			expect(Object.prototype).not.toHaveProperty("polluted")
-			const validMetadata = { runner: "codex", nested: nestedMetadata(7), list: [{ leaf: "ok" }] }
+			const validMetadata = { runner: "codex", maxItemAttempts: 7, nested: nestedMetadata(7), list: [{ leaf: "ok" }] }
 			const created = record(expectOk(await request(fixture, "chain.create", {
 				name: "metadata-valid",
 				repository: "mouriya-s-lab/coder-loop",
@@ -1865,13 +1867,14 @@ describe("daemon", () => {
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
 const input = JSON.parse(prompt)
+const writeLine = (line) => Bun.write(Bun.stdout, line + "\\n")
 await appendFile(input.eventLog, JSON.stringify({ type: "start", phase: input.phase, runId: input.runId }) + "\\n")
 await new Promise((resolve) => setTimeout(resolve, input.sleepMs))
 await appendFile(input.eventLog, JSON.stringify({ type: "end", phase: input.phase, runId: input.runId }) + "\\n")
-if (input.phase === "iteration") console.log("ITERATION SUMMARY: scope=b3-live; reason=iter-marker")
-else if (input.phase === "review") console.log("REVIEW SUMMARY: verdict=blocked; issue=#0; reason=b3-live-blocked")
-else if (input.phase === "blocked-responder") console.log("REVIEW SUMMARY: verdict=accepted; issue=#0; reason=b3-live-unblock-accepted")
-process.exit(0)
+if (input.phase === "iteration") await writeLine("ITERATION SUMMARY: scope=b3-live; reason=iter-marker")
+else if (input.phase === "review") await writeLine("REVIEW SUMMARY: verdict=blocked; issue=#0; reason=b3-live-blocked")
+else if (input.phase === "blocked-responder") await writeLine("REVIEW SUMMARY: verdict=accepted; issue=#0; reason=b3-live-unblock-accepted")
+process.exitCode = 0
 `,
 		)
 
@@ -1906,6 +1909,11 @@ process.exit(0)
 					eventLog,
 					sleepMs: 5,
 				}),
+				statusFromExit: ({ phase }) => {
+					if (phase === "iteration") return "in_progress"
+					if (phase === "review") return "blocked"
+					return "done"
+				},
 				chainCompleteTriggerForChain: () => null,
 				onEvent: (event) => {
 					schedulerEvents.push(event)
@@ -1919,6 +1927,7 @@ process.exit(0)
 				repository: "mouriya-s-lab/coder-loop",
 			}))).chain)
 			const chainId = numberValue(chain.id)
+			preInstallReviewOnEmptyLockByName("b3-blocked-responder-live-chain", loopDataRoot)
 			expectOk(await sendDaemonRequest(socketPath, daemonRequest("item.add", { chainId, issueNumber: 29011, repoCwd: REPO_ROOT })))
 
 			const finalItem = await waitFor(
@@ -2068,6 +2077,7 @@ process.exit(0)
 					repository: "mouriya-s-lab/coder-loop",
 				})).chain
 				const chainId = numberValue(record(result).id)
+				preInstallReviewOnEmptyLockByName("ac7-iter-then-review-chain", fixture.loopDataRoot)
 				await request(fixture, "item.add", {
 					chainId,
 					issueNumber: 289_001,
@@ -2141,6 +2151,7 @@ process.exit(0)
 				})).chain
 				const chain = record(result)
 				const chainId = numberValue(chain.id)
+				preInstallReviewOnEmptyLockByName("phase-runid-artifact-chain", fixture.loopDataRoot)
 				await request(fixture, "item.add", {
 					chainId,
 					issueNumber: 294_001,
@@ -2231,16 +2242,17 @@ async function startPhaseAdvancementFixture(name: string): Promise<PhaseAdvancem
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
 const input = JSON.parse(prompt)
+const writeLine = (line) => Bun.write(Bun.stdout, line + "\\n")
 await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, phase: input.phase, cwd: process.cwd() }) + "\\n")
 await new Promise((resolve) => setTimeout(resolve, input.sleepMs))
 await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, phase: input.phase, cwd: process.cwd() }) + "\\n")
-console.log("done:" + input.itemId + ":" + input.phase)
+await writeLine("done:" + input.itemId + ":" + input.phase)
 if (input.phase === "review") {
-	console.log("REVIEW SUMMARY: verdict=accepted; issue=#" + input.issueNumber + "; reason=phase-aware-runner review")
+	await writeLine("REVIEW SUMMARY: verdict=accepted; issue=#" + input.issueNumber + "; reason=phase-aware-runner review")
 } else {
-	console.log("ITERATION SUMMARY: scope=phase-aware-runner; reason=iter-marker")
+	await writeLine("ITERATION SUMMARY: scope=phase-aware-runner; reason=iter-marker")
 }
-process.exit(0)
+process.exitCode = 0
 `,
 	)
 
@@ -2277,6 +2289,7 @@ process.exit(0)
 				eventLog,
 				sleepMs: 5,
 			}),
+			statusFromExit: ({ phase }) => phase === "iteration" ? "in_progress" : "done",
 			chainCompleteTriggerForChain: () => null,
 			onEvent: (event) => {
 				schedulerEvents.push(event)
@@ -2608,13 +2621,14 @@ async function writeFakeRunner(path: string): Promise<void> {
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
 const input = JSON.parse(prompt)
+const writeLine = (line) => Bun.write(Bun.stdout, line + "\\n")
 await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
 await new Promise((resolve) => setTimeout(resolve, input.sleepMs))
 await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
-console.log("done:" + input.itemId)
+await writeLine("done:" + input.itemId)
 const summary = Object.prototype.hasOwnProperty.call(input, "summary") ? input.summary : "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=fake-runner default"
-if (summary !== null) console.log(summary)
-process.exit(input.exitCode)
+if (summary !== null) await writeLine(summary)
+process.exitCode = input.exitCode
 `,
-	)
-}
+		)
+	}

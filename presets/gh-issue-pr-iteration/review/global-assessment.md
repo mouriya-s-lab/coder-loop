@@ -11,7 +11,7 @@ This fragment only classifies the current queue after the fixed transition fragm
 After issue-specific state update, read the latest state file again and classify every queue item:
 
 - actionable: `queued`, `in_progress`, `changes_requested`;
-- non-actionable: `blocked`, `moot`, `done`.
+- non-actionable: `blocked`, `moot`, `done`, `exhausted`.
 
 Print a table:
 

@@ -102,7 +102,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect([...preset.agent.extraArgs]).toEqual([])
 		expect(preset.agent.attemptTimeoutSeconds).toBe(DEFAULT_ATTEMPT_TIMEOUT_SECONDS)
 		expect([...preset.statuses.continuable]).toEqual(["queued", "in_progress", "changes_requested"])
-		expect([...preset.statuses.terminal]).toEqual(["blocked", "moot", "done"])
+		expect([...preset.statuses.terminal]).toEqual(["blocked", "moot", "done", "exhausted"])
 	})
 
 	test("phases include iteration, review, blocked responder, and umbrella finalizer triggers", async () => {
