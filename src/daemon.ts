@@ -1939,6 +1939,7 @@ export function runToJson(run: RunRecord): JsonObject {
 		chainId: run.chainId,
 		itemId: run.itemId,
 		phase: run.phase,
+		status: run.status,
 		startedAt: run.startedAt,
 		endedAt: run.endedAt,
 		exitCode: run.exitCode,

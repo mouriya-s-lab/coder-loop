@@ -674,7 +674,6 @@ function attachRunCloseHandler(
 					const currentRun = options.store.getCurrentRun(chain.id)
 					if (currentRun?.runId === runId) options.store.clearCurrentRun(chain.id)
 
-					if (slot.activeRun?.runId === runId) slot.activeRun = null
 					await emit(options, { type: "agent.exit", slotKey: slot.key, chainId: chain.id, itemId: item.id, runId, exitCode, status })
 					await emit(options, {
 						type: "phase.end",
@@ -687,7 +686,7 @@ function attachRunCloseHandler(
 						durationSeconds: Math.max(0, endedAt - startedAt),
 						status,
 					})
-					options.store.completeRun(runId, { endedAt, exitCode, extra: { stdoutBytes: stdoutText.length, stderrBytes: stderrText.length } })
+					options.store.completeRun(runId, { endedAt, exitCode, status, extra: { stdoutBytes: stdoutText.length, stderrBytes: stderrText.length } })
 					const parsedSessionId = parseSessionIdFromRunnerStream(runner.kind, stdoutText)
 					if (currentItem === null || !terminalStatuses.has(currentItem.status)) {
 						const update: Parameters<typeof options.store.updateItem>[1] = {
@@ -712,8 +711,10 @@ function attachRunCloseHandler(
 						})
 					}
 					await completeChainIfReady(options, chain, runId, [...terminalStatuses])
+					if (slot.activeRun?.runId === runId) slot.activeRun = null
 					resolveClosed({ runId, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, exitCode, stdout: stdoutText, stderr: stderrText, status })
 				} finally {
+					if (slot.activeRun?.runId === runId) slot.activeRun = null
 					options.state.finalizingItemStatuses.delete(item.id)
 				}
 			})()
@@ -772,7 +773,7 @@ async function promiseSettledWithin<T>(promise: Promise<T>, timeoutMs: number): 
 }
 
 async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecord, runId?: string, terminalStatuses?: readonly string[]): Promise<boolean> {
-	if (hasActiveSlotForChain(options.state, chain.id)) return false
+	if (hasActiveSlotForChain(options.state, chain.id, runId)) return false
 	const effectiveTerminalStatuses = terminalStatuses ?? (await schedulerStatusesForChain(options, chain)).terminal
 	const current = options.store.listChains().find((candidate) => candidate.id === chain.id)
 	if (current?.status !== "active") return false
@@ -986,8 +987,12 @@ function getOrCreateSlot(state: SchedulerState, chain: ChainRecord, repoCwd: str
 	return slot
 }
 
-function hasActiveSlotForChain(state: SchedulerState, chainId: number): boolean {
-	return [...state.slots.values()].some((slot) => slot.chainId === chainId && slot.activeRun !== null)
+function hasActiveSlotForChain(state: SchedulerState, chainId: number, ignoreRunId?: string): boolean {
+	return [...state.slots.values()].some((slot) =>
+		slot.chainId === chainId
+		&& slot.activeRun !== null
+		&& slot.activeRun.runId !== ignoreRunId,
+	)
 }
 
 function hasFinalizingItemForRepo(state: SchedulerState, items: readonly ItemRecord[], repoCwd: string): boolean {
@@ -1234,7 +1239,6 @@ function attachReviewOnEmptyCloseHandler(
 					await mkdir(dirname(lockPath), { recursive: true })
 					await writeFile(lockPath, serializeSchedulerReviewOnEmptyLock(runId, new Date()))
 
-					if (slot.activeRun?.runId === runId) slot.activeRun = null
 					await emit(options, {
 						type: "agent.exit",
 						slotKey: slot.key,
@@ -1257,6 +1261,7 @@ function attachReviewOnEmptyCloseHandler(
 					})
 					const chainStatuses = await schedulerStatusesForChain(options, chain)
 					await completeChainIfReady(options, chain, runId, [...chainStatuses.terminal])
+					if (slot.activeRun?.runId === runId) slot.activeRun = null
 					resolveClosed({
 						runId,
 						itemId: fallbackItem.id,

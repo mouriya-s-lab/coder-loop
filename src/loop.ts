@@ -22,6 +22,7 @@ import {
 	type CurrentRunRecord,
 	type ItemRecord,
 	openSqliteStateStore,
+	type RunRecord,
 	type SqliteStateStore,
 } from "./sqlite-state"
 
@@ -418,6 +419,7 @@ const StatusSnapshotBoundary = arkType({
 	target: "object",
 	state: "object",
 	queue: "object",
+	runs: "object",
 	current: "object",
 	events: "object",
 	processes: "object",
@@ -538,6 +540,7 @@ export type CoderLoopStatusSnapshot = {
 	target: StatusTargetSnapshot
 	state: StatusStateSnapshot
 	queue: StatusQueueSnapshot
+	runs: StatusRunsSnapshot
 	current: StatusCurrentSnapshot
 	events: StatusEventsSnapshot
 	processes: StatusProcessSnapshot
@@ -623,6 +626,18 @@ export type StatusQueueSnapshot = {
 	continuable: number
 	terminal: number
 	selected: StatusSelectedIssue | null
+}
+
+export type StatusRunCountSnapshot = {
+	phase: string
+	status: string
+	count: number
+}
+
+export type StatusRunsSnapshot = {
+	total: number
+	byPhaseStatus: Record<string, Record<string, number>>
+	counts: StatusRunCountSnapshot[]
 }
 
 export type StatusPhaseStatusSnapshot = {
@@ -2516,6 +2531,7 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 			error: null,
 		},
 		queue: buildStatusQueueSnapshot(options, loaded.state, selected),
+		runs: buildStatusRunsSnapshot(readDbRunsForChain(options.loopDataRoot, loaded.chain.id)),
 		current: currentSnapshot,
 		events,
 		processes,
@@ -2648,6 +2664,7 @@ function makeUnavailableStatusSnapshot(input: {
 			error: input.errorMessage,
 		},
 		queue: { total: 0, byStatus: {}, continuable: 0, terminal: 0, selected: null },
+		runs: { total: 0, byPhaseStatus: {}, counts: [] },
 		current: { run: null, id: null, item: null, runner: null, phaseStatus: null },
 		events: { runId: null, path: null, exists: false, recent: [], latest: null, error: null },
 		processes: input.processes ?? { live: [], scanError: null },
@@ -2688,6 +2705,21 @@ function buildStatusQueueSnapshot(options: LoopOptions, state: LoopState, select
 			reviewRunner: statusRunnerSelection(selected.reviewRunner),
 		},
 	}
+}
+
+function buildStatusRunsSnapshot(runs: readonly RunRecord[]): StatusRunsSnapshot {
+	const byPhaseStatus: Record<string, Record<string, number>> = {}
+	for (const run of runs) {
+		const phaseCounts = byPhaseStatus[run.phase] ?? {}
+		phaseCounts[run.status] = (phaseCounts[run.status] ?? 0) + 1
+		byPhaseStatus[run.phase] = phaseCounts
+	}
+	const counts: StatusRunCountSnapshot[] = Object.entries(byPhaseStatus)
+		.flatMap(([phase, statuses]) =>
+			Object.entries(statuses).map(([status, count]) => ({ phase, status, count })),
+		)
+		.sort((a, b) => a.phase.localeCompare(b.phase) || a.status.localeCompare(b.status))
+	return { total: runs.length, byPhaseStatus, counts }
 }
 
 async function buildStatusCurrentSnapshot(options: LoopOptions, state: LoopState): Promise<StatusCurrentSnapshot> {
@@ -3409,6 +3441,15 @@ function readDbItemsForChain(loopDataRoot: string | null, chainId: number): Item
 	const store = openSqliteStateStore({ createIfMissing: false, ...loopDataRootOption(loopDataRoot) })
 	try {
 		return store.listItems(chainId)
+	} finally {
+		store.close()
+	}
+}
+
+function readDbRunsForChain(loopDataRoot: string | null, chainId: number): RunRecord[] {
+	const store = openSqliteStateStore({ createIfMissing: false, ...loopDataRootOption(loopDataRoot) })
+	try {
+		return store.listRuns(chainId)
 	} finally {
 		store.close()
 	}

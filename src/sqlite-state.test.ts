@@ -66,6 +66,7 @@ describe("sqlite state store", () => {
 				"chain_id",
 				"item_id",
 				"phase",
+				"status",
 				"started_at",
 				"ended_at",
 				"exit_code",
@@ -203,7 +204,10 @@ describe("sqlite state store", () => {
 				extra: { issue: 177 },
 			})
 			expect(store.getRunByRunId("run-data-access")).toEqual(run)
-			expect(store.completeRun("run-data-access", { endedAt: 1_800_000_260, exitCode: 0 }).endedAt).toBe(1_800_000_260)
+			const completedRun = store.completeRun("run-data-access", { endedAt: 1_800_000_260, exitCode: 0, status: "done" })
+			expect(completedRun.endedAt).toBe(1_800_000_260)
+			expect(completedRun.status).toBe("done")
+			expect(store.listRuns(chain.id).map((entry) => entry.status)).toEqual(["done"])
 
 			expect(store.deleteItem(second.id)).toBe(true)
 			expect(store.getItem(second.id)).toBeNull()
@@ -544,6 +548,107 @@ describe("sqlite state store", () => {
 			expect(item?.phase).toBe("iteration")
 		} finally {
 			reopened.close()
+		}
+	})
+
+	test("runs status migration backfills from extra status or marks unknown/in_progress", async () => {
+		const loopDataRoot = resolve(TEST_ROOT, `runs-status-legacy-${Date.now()}-${++nextRootId}`)
+		await mkdir(loopDataRoot, { recursive: true })
+		const dbFile = resolve(loopDataRoot, "db.sqlite")
+
+		const legacy = new Database(dbFile, { create: true, readwrite: true, strict: true })
+		try {
+			legacy.exec("PRAGMA foreign_keys = ON")
+			legacy.exec("PRAGMA journal_mode = WAL")
+			legacy.exec(`
+				CREATE TABLE chains (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					name TEXT NOT NULL UNIQUE,
+					preset TEXT NOT NULL,
+					repository TEXT NOT NULL,
+					base_branch TEXT NOT NULL,
+					umbrella_issue INTEGER,
+					umbrella_repo TEXT,
+					status TEXT NOT NULL CHECK (status IN ('active', 'completed', 'deleted')),
+					metadata TEXT NOT NULL,
+					created_at REAL NOT NULL,
+					updated_at REAL NOT NULL
+				);
+				CREATE TABLE items (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+					issue_number INTEGER NOT NULL,
+					repo_cwd TEXT NOT NULL,
+					status TEXT NOT NULL,
+					attempts INTEGER NOT NULL,
+					title TEXT,
+					priority TEXT,
+					branch TEXT,
+					pr INTEGER,
+					last_run_id TEXT,
+					last_session_id TEXT,
+					session_ids TEXT NOT NULL DEFAULT '{}',
+					issue_file TEXT,
+					evidence_dir TEXT,
+					agent_cwd TEXT,
+					runner TEXT CHECK (runner IN ('claude', 'codex') OR runner IS NULL),
+					phase TEXT,
+					extra TEXT NOT NULL,
+					created_at REAL NOT NULL,
+					updated_at REAL NOT NULL,
+					UNIQUE (chain_id, issue_number)
+				);
+				CREATE TABLE runs (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					run_id TEXT NOT NULL UNIQUE,
+					chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+					item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+					phase TEXT NOT NULL,
+					started_at REAL NOT NULL,
+					ended_at REAL,
+					exit_code INTEGER,
+					extra TEXT NOT NULL
+				);
+				CREATE TABLE current_runs (
+					chain_id INTEGER PRIMARY KEY REFERENCES chains(id) ON DELETE CASCADE,
+					phase TEXT NOT NULL,
+					run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+					started_at REAL NOT NULL,
+					extra TEXT NOT NULL
+				);
+				PRAGMA user_version = 4;
+			`)
+			legacy.exec(`
+				INSERT INTO chains (name, preset, repository, base_branch, status, metadata, created_at, updated_at)
+				VALUES ('legacy-runs-status', 'gh-issue-pr-iteration', 'mouriya-s-lab/coder-loop', 'main', 'active', '{}', 1.0, 1.0)
+			`)
+			legacy.exec(`
+				INSERT INTO items (chain_id, issue_number, repo_cwd, status, attempts, extra, created_at, updated_at)
+				VALUES (1, 315, '/repo/legacy', 'queued', 0, '{}', 1.0, 1.0)
+			`)
+			legacy.exec(`
+				INSERT INTO runs (run_id, chain_id, item_id, phase, started_at, ended_at, exit_code, extra)
+				VALUES
+					('run-extra-status', 1, 1, 'iteration', 1.0, 2.0, 0, '{"status":"done","stdoutBytes":12}'),
+					('run-ended-no-status', 1, 1, 'review', 3.0, 4.0, 1, '{"stderrBytes":9}'),
+					('run-open-no-status', 1, 1, 'iteration', 5.0, NULL, NULL, '{}')
+			`)
+			const columnsBefore = legacy.query<{ name: string }, []>("PRAGMA table_info(runs)").all().map((row) => row.name)
+			expect(columnsBefore).not.toContain("status")
+		} finally {
+			legacy.close()
+		}
+
+		const migrated = openSqliteStateStore({ loopDataRoot })
+		try {
+			expect(migrated.listTableColumns("runs")).toContain("status")
+			expect(migrated.listRuns(1).map((run) => [run.runId, run.status])).toEqual([
+				["run-extra-status", "done"],
+				["run-ended-no-status", "unknown"],
+				["run-open-no-status", "in_progress"],
+			])
+		} finally {
+			migrated.close()
 		}
 	})
 

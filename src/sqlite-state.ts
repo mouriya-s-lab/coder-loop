@@ -114,6 +114,7 @@ export type RunRecord = {
 	chainId: number
 	itemId: number
 	phase: string
+	status: string
 	startedAt: number
 	endedAt: number | null
 	exitCode: number | null
@@ -125,6 +126,7 @@ export type RecordRunInput = {
 	chainId: number
 	itemId: number
 	phase: string
+	status?: string
 	startedAt: number
 	endedAt?: number | null
 	exitCode?: number | null
@@ -134,6 +136,7 @@ export type RecordRunInput = {
 export type CompleteRunInput = {
 	endedAt: number
 	exitCode: number
+	status: string
 	extra?: JsonObject
 }
 
@@ -214,6 +217,7 @@ export type SqliteStateStore = {
 	allItemsTerminal: (input: AllItemsTerminalInput) => boolean
 	recordRun: (input: RecordRunInput) => RunRecord
 	getRunByRunId: (runId: string) => RunRecord | null
+	listRuns: (chainId: number) => RunRecord[]
 	completeRun: (runId: string, input: CompleteRunInput) => RunRecord
 	setCurrentRun: (input: SetCurrentRunInput) => CurrentRunRecord
 	getCurrentRun: (chainId: number) => CurrentRunRecord | null
@@ -267,6 +271,7 @@ type RunRow = {
 	chain_id: number
 	item_id: number
 	phase: string
+	status: string
 	started_at: number
 	ended_at: number | null
 	exit_code: number | null
@@ -339,6 +344,7 @@ CREATE TABLE IF NOT EXISTS runs (
 	chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
 	item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
 	phase TEXT NOT NULL,
+	status TEXT NOT NULL,
 	started_at REAL NOT NULL,
 	ended_at REAL,
 	exit_code INTEGER,
@@ -358,7 +364,7 @@ CREATE INDEX IF NOT EXISTS idx_items_chain_status ON items(chain_id, status);
 CREATE INDEX IF NOT EXISTS idx_runs_chain_item ON runs(chain_id, item_id);
 `
 
-const STATE_SCHEMA_VERSION = 4
+const STATE_SCHEMA_VERSION = 5
 
 type UserVersionRow = {
 	user_version: number
@@ -414,11 +420,19 @@ function readUserVersion(db: Database): number {
 	return db.query<UserVersionRow, []>("PRAGMA user_version").get()?.user_version ?? 0
 }
 
-function itemsTableHasColumn(db: Database, columnName: string): boolean {
+function tableHasColumn(db: Database, tableName: StateTableName, columnName: string): boolean {
 	return db
-		.query<TableColumnRow, []>("PRAGMA table_info(items)")
+		.query<TableColumnRow, []>(`PRAGMA table_info(${tableName})`)
 		.all()
 		.some((row) => row.name === columnName)
+}
+
+function itemsTableHasColumn(db: Database, columnName: string): boolean {
+	return tableHasColumn(db, "items", columnName)
+}
+
+function runsTableHasColumn(db: Database, columnName: string): boolean {
+	return tableHasColumn(db, "runs", columnName)
 }
 
 function migrateStateSchema(db: Database): void {
@@ -429,6 +443,7 @@ function migrateStateSchema(db: Database): void {
 		&& itemsTableHasColumn(db, "phase")
 		&& itemsTableHasColumn(db, "last_session_id")
 		&& itemsTableHasColumn(db, "session_ids")
+		&& runsTableHasColumn(db, "status")
 	) return
 	db.transaction(() => {
 		db.exec(STATE_SCHEMA_SQL)
@@ -441,7 +456,12 @@ function migrateStateSchema(db: Database): void {
 		if (!itemsTableHasColumn(db, "session_ids")) {
 			db.exec("ALTER TABLE items ADD COLUMN session_ids TEXT NOT NULL DEFAULT '{}'")
 		}
+		if (!runsTableHasColumn(db, "status")) {
+			db.exec("ALTER TABLE runs ADD COLUMN status TEXT NOT NULL DEFAULT 'unknown'")
+		}
+		db.exec("CREATE INDEX IF NOT EXISTS idx_runs_chain_phase_status ON runs(chain_id, phase, status)")
 		migrateLegacyItemSessionIds(db)
+		migrateLegacyRunStatuses(db)
 		db.exec(`PRAGMA user_version = ${STATE_SCHEMA_VERSION}`)
 	}).immediate()
 }
@@ -489,6 +509,36 @@ function legacySessionRunner(row: Pick<LegacyItemSessionRow, "id" | "runner" | "
 	const metadata = parseJsonObject(row.chain_metadata, `chains metadata for items.${row.id}`)
 	if (isAgentRunnerKind(metadata.runner)) return metadata.runner
 	throw new SqliteStateError("invalid_json", `cannot migrate items.${row.id}.last_session_id without chain.metadata.runner`, { id: row.id })
+}
+
+type LegacyRunStatusRow = {
+	id: number
+	ended_at: number | null
+	exit_code: number | null
+	extra: string
+	status: string | null
+}
+
+function migrateLegacyRunStatuses(db: Database): void {
+	const rows = db.query<LegacyRunStatusRow, []>("SELECT id, ended_at, exit_code, extra, status FROM runs").all()
+	for (const row of rows) {
+		const status = legacyRunStatus(row)
+		if (row.status === status) continue
+		db.query<unknown, SqlParams>("UPDATE runs SET status = $status WHERE id = $id").run({
+			id: row.id,
+			status,
+		})
+	}
+}
+
+function legacyRunStatus(row: Pick<LegacyRunStatusRow, "id" | "ended_at" | "exit_code" | "extra" | "status">): string {
+	const stored = typeof row.status === "string" ? row.status.trim() : ""
+	if (stored !== "" && stored !== "unknown") return stored
+	const extra = parseJsonObject(row.extra, `runs.${row.id}.extra`)
+	const extraStatus = extra.status
+	if (typeof extraStatus === "string" && extraStatus.trim() !== "") return normalizeRunStatus(extraStatus, "invalid_json")
+	if (row.ended_at === null || row.exit_code === null) return "in_progress"
+	return "unknown"
 }
 
 function createSqliteStateStore(db: Database): SqliteStateStore {
@@ -699,14 +749,16 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 
 		recordRun: (input) =>
 			write("record run", () => {
+				const status = normalizeRunStatus(input.status ?? "in_progress", "invalid_input")
 				const result = db.query<unknown, SqlParams>(`
-					INSERT INTO runs (run_id, chain_id, item_id, phase, started_at, ended_at, exit_code, extra)
-					VALUES ($runId, $chainId, $itemId, $phase, $startedAt, $endedAt, $exitCode, $extra)
+					INSERT INTO runs (run_id, chain_id, item_id, phase, status, started_at, ended_at, exit_code, extra)
+					VALUES ($runId, $chainId, $itemId, $phase, $status, $startedAt, $endedAt, $exitCode, $extra)
 				`).run({
 					runId: input.runId,
 					chainId: input.chainId,
 					itemId: input.itemId,
 					phase: input.phase,
+					status,
 					startedAt: input.startedAt,
 					endedAt: input.endedAt ?? null,
 					exitCode: input.exitCode ?? null,
@@ -717,18 +769,25 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 
 		getRunByRunId: (runId) => read("get run by run_id", () => rowToRun(getRunRowByRunId(runId))),
 
+		listRuns: (chainId) =>
+			read("list runs", () =>
+				db.query<RunRow, SqlParams>("SELECT * FROM runs WHERE chain_id = $chainId ORDER BY id ASC").all({ chainId }).map((row) => requireRun(row, row.id)),
+			),
+
 		completeRun: (runId, input) =>
 			write("complete run", () => {
 				const current = requireRun(getRunRowByRunId(runId), runId)
 				const nextExtra = input.extra ?? current.extra
+				const status = normalizeRunStatus(input.status, "invalid_input")
 				db.query<unknown, SqlParams>(`
 					UPDATE runs
-					SET ended_at = $endedAt, exit_code = $exitCode, extra = $extra
+					SET ended_at = $endedAt, exit_code = $exitCode, status = $status, extra = $extra
 					WHERE run_id = $runId
 				`).run({
 					runId: runId,
 					endedAt: input.endedAt,
 					exitCode: input.exitCode,
+					status,
 					extra: stringifyJsonObject(nextExtra),
 				})
 				return requireRun(getRunRowByRunId(runId), runId)
@@ -851,6 +910,7 @@ function rowToRun(row: RunRow | null): RunRecord | null {
 		chainId: row.chain_id,
 		itemId: row.item_id,
 		phase: row.phase,
+		status: row.status,
 		startedAt: row.started_at,
 		endedAt: row.ended_at,
 		exitCode: row.exit_code,
@@ -1083,6 +1143,12 @@ function setItemSessionIdInMap(
 function normalizeSessionPhase(phase: string, code: SqliteStateErrorCode): string {
 	if (phase === "") throw new SqliteStateError(code, "session id phase cannot be empty")
 	return phase
+}
+
+function normalizeRunStatus(status: string, code: SqliteStateErrorCode): string {
+	const trimmed = status.trim()
+	if (trimmed === "") throw new SqliteStateError(code, "run status must not be empty")
+	return trimmed
 }
 
 function isAgentRunnerKind(value: unknown): value is AgentRunnerKind {
