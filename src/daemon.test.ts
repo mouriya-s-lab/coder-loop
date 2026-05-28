@@ -1261,6 +1261,55 @@ describe("daemon", () => {
 		}
 	})
 
+	test("daemon shutdown waits for pending scheduler close handlers before closing db", async () => {
+		let triggerStarted = false
+		let releaseTrigger: () => void = () => {}
+		const triggerReleased = new Promise<void>((resolveRelease) => {
+			releaseTrigger = resolveRelease
+		})
+		const fixture = await startFixture("shutdown-pending-close-handler", {
+			schedulerIntervalMs: 30,
+			chainCompleteTriggerForChain: async () => {
+				triggerStarted = true
+				await triggerReleased
+				return { decision: "complete" }
+			},
+		})
+		try {
+			const chainName = "shutdown-pending-close-handler-chain"
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: chainName,
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			preInstallReviewOnEmptyLockByName(chainName, fixture.loopDataRoot)
+			await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 317,
+				repoCwd: REPO_ROOT,
+				extra: { sleepMs: 5, exitCode: 0 },
+			})
+			await waitFor(async () => triggerStarted, (started) => started)
+
+			let closed = false
+			void fixture.daemon.closed.then(() => {
+				closed = true
+			})
+			const down = await request(fixture, "daemon.down")
+			expect(down.ok).toBe(true)
+			await new Promise((resolveWait) => setTimeout(resolveWait, 50))
+			expect(closed).toBe(false)
+
+			releaseTrigger()
+			await fixture.daemon.closed
+			expect(closed).toBe(true)
+			expect(await readChainStatus(fixture.loopDataRoot, chainId)).toBe("completed")
+		} finally {
+			releaseTrigger()
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("daemon shutdown preserves user terminal item status", async () => {
 		const fixture = await startFixture("terminal-shutdown")
 		try {
@@ -2332,6 +2381,7 @@ type FixtureOptions = {
 	realWorktreeManager?: boolean
 	worktreeManager?: SchedulerWorktreeManager
 	kindResolver?: SchedulerKindResolver
+	chainCompleteTriggerForChain?: SchedulerOptions["chainCompleteTriggerForChain"]
 }
 
 function preInstallReviewOnEmptyLockByName(chainName: string, loopDataRoot: string, runId = "test-pre-installed"): void {
@@ -2384,7 +2434,7 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 				if (Object.prototype.hasOwnProperty.call(item.extra, "summary")) payload.summary = item.extra.summary
 				return JSON.stringify(payload)
 			},
-			chainCompleteTriggerForChain: () => null,
+			chainCompleteTriggerForChain: options.chainCompleteTriggerForChain ?? (() => null),
 			onEvent: (event) => {
 				schedulerEvents.push(event)
 			},
