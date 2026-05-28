@@ -461,7 +461,6 @@ function migrateStateSchema(db: Database): void {
 		}
 		db.exec("CREATE INDEX IF NOT EXISTS idx_runs_chain_phase_status ON runs(chain_id, phase, status)")
 		migrateLegacyItemSessionIds(db)
-		migrateLegacyRunStatuses(db)
 		db.exec(`PRAGMA user_version = ${STATE_SCHEMA_VERSION}`)
 	}).immediate()
 }
@@ -509,36 +508,6 @@ function legacySessionRunner(row: Pick<LegacyItemSessionRow, "id" | "runner" | "
 	const metadata = parseJsonObject(row.chain_metadata, `chains metadata for items.${row.id}`)
 	if (isAgentRunnerKind(metadata.runner)) return metadata.runner
 	throw new SqliteStateError("invalid_json", `cannot migrate items.${row.id}.last_session_id without chain.metadata.runner`, { id: row.id })
-}
-
-type LegacyRunStatusRow = {
-	id: number
-	ended_at: number | null
-	exit_code: number | null
-	extra: string
-	status: string | null
-}
-
-function migrateLegacyRunStatuses(db: Database): void {
-	const rows = db.query<LegacyRunStatusRow, []>("SELECT id, ended_at, exit_code, extra, status FROM runs").all()
-	for (const row of rows) {
-		const status = legacyRunStatus(row)
-		if (row.status === status) continue
-		db.query<unknown, SqlParams>("UPDATE runs SET status = $status WHERE id = $id").run({
-			id: row.id,
-			status,
-		})
-	}
-}
-
-function legacyRunStatus(row: Pick<LegacyRunStatusRow, "id" | "ended_at" | "exit_code" | "extra" | "status">): string {
-	const stored = typeof row.status === "string" ? row.status.trim() : ""
-	if (stored !== "" && stored !== "unknown") return stored
-	const extra = parseJsonObject(row.extra, `runs.${row.id}.extra`)
-	const extraStatus = extra.status
-	if (typeof extraStatus === "string" && extraStatus.trim() !== "") return normalizeRunStatus(extraStatus, "invalid_json")
-	if (row.ended_at === null || row.exit_code === null) return "in_progress"
-	return "unknown"
 }
 
 function createSqliteStateStore(db: Database): SqliteStateStore {

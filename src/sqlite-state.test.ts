@@ -551,7 +551,7 @@ describe("sqlite state store", () => {
 		}
 	})
 
-	test("runs status migration backfills from extra status or marks unknown/in_progress", async () => {
+	test("runs status migration adds canonical column without legacy extra-status backfill", async () => {
 		const loopDataRoot = resolve(TEST_ROOT, `runs-status-legacy-${Date.now()}-${++nextRootId}`)
 		await mkdir(loopDataRoot, { recursive: true })
 		const dbFile = resolve(loopDataRoot, "db.sqlite")
@@ -643,9 +643,9 @@ describe("sqlite state store", () => {
 		try {
 			expect(migrated.listTableColumns("runs")).toContain("status")
 			expect(migrated.listRuns(1).map((run) => [run.runId, run.status])).toEqual([
-				["run-extra-status", "done"],
+				["run-extra-status", "unknown"],
 				["run-ended-no-status", "unknown"],
-				["run-open-no-status", "in_progress"],
+				["run-open-no-status", "unknown"],
 			])
 		} finally {
 			migrated.close()
