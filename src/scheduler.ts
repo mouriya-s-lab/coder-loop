@@ -31,6 +31,7 @@ import {
 	type RunnerInvocationPaths,
 	type RuntimeBindings,
 } from "./loop"
+import { detectsSessionIdInvalid } from "./runners/session-id"
 import { type ChainRecord, type ItemRecord, listDependencyWaitReasons, type SqliteStateStore } from "./sqlite-state"
 import {
 	type LoopDataRootOptions,
@@ -121,6 +122,7 @@ export type SchedulerEvent =
 	| { type: "slot.busy"; slotKey: string; chainId: number; repoCwd: string; activeRunId: string }
 	| { type: "agent.spawn"; slotKey: string; chainId: number; itemId: number; runId: string; pid: number | null; worktreePath: string; presetDir: string }
 	| { type: "agent.exit"; slotKey: string; chainId: number; itemId: number; runId: string; exitCode: number; status: string }
+	| { type: "session_id.invalidated"; ts: string; runId: string; chainId: number; itemId: number; phase: string; runner: AgentRunnerKind; previousSessionId: string | null; reason: "runner_session_id_invalid" }
 	| { type: "spawn.aborted"; slotKey: string; chainId: number; chainName: string; itemId: number; issueNumber: number; reason: string; toStatus: string }
 	| { type: "chain.complete_trigger"; chainId: number; chainName: string; runId?: string; decision: SchedulerChainCompleteDecision["decision"]; reason?: string }
 	| { type: "chain.complete_trigger_failed"; chainId: number; chainName: string; runId?: string; error: string }
@@ -799,6 +801,8 @@ function attachRunCloseHandler(
 					})
 					options.store.completeRun(runId, { endedAt, exitCode, status, extra: { stdoutBytes: stdoutText.length, stderrBytes: stderrText.length } })
 					const parsedSessionId = parseSessionIdFromRunnerStream(runner.kind, stdoutText)
+					const sessionIdInvalid = detectsSessionIdInvalid(runner.kind, stderrText)
+					const previousSessionId = (currentItem ?? item).sessionIds[phase]?.[runner.kind] ?? null
 					if (currentItem === null || !terminalStatuses.has(currentItem.status)) {
 						const itemForBackoff = currentItem ?? item
 						const update: Parameters<typeof options.store.updateItem>[1] = {
@@ -809,9 +813,20 @@ function attachRunCloseHandler(
 							updatedAt: endedAt,
 						}
 						options.store.updateItem(item.id, update)
-						if (parsedSessionId !== null) {
-							options.store.setItemSessionId(item.id, { phase, runner: runner.kind, sessionId: parsedSessionId, updatedAt: endedAt })
-						}
+					}
+					if (sessionIdInvalid) {
+						options.store.setItemSessionId(item.id, { phase, runner: runner.kind, sessionId: null, updatedAt: endedAt })
+						await emit(options, {
+							type: "session_id.invalidated",
+							ts: nowIso(options),
+							runId,
+							chainId: chain.id,
+							itemId: item.id,
+							phase,
+							runner: runner.kind,
+							previousSessionId,
+							reason: "runner_session_id_invalid",
+						})
 					} else if (parsedSessionId !== null) {
 						options.store.setItemSessionId(item.id, { phase, runner: runner.kind, sessionId: parsedSessionId, updatedAt: endedAt })
 					}
