@@ -2547,6 +2547,79 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 		}
 	})
 
+	test("session-id-invalid stderr clears the phase/runner slot and the next spawn is fresh (issue #312 AC3)", async () => {
+		const fixture = await createFixture("session-id-invalid-fresh")
+		try {
+			const chain = createChain(fixture.store, "session-id-invalid-fresh-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 312_003, repoCwd: "/repo/session-id-invalid" })
+			fixture.store.setItemSessionId(item.id, { phase: "iteration", runner: "claude", sessionId: "sess-stale-312" })
+			const fakeRunner = resolve(fixture.loopDataRoot, "..", "fake-claude-invalid-once.ts")
+			const attemptFile = resolve(fixture.loopDataRoot, "..", "fake-claude-invalid-attempt.txt")
+			await writeFakeClaudeInvalidOnceRunner(fakeRunner, attemptFile, "sess-fresh-312")
+			let now = 1_800_312_000
+			let runSequence = 0
+
+			const options = fixture.options({
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner, attemptFile], model: null },
+				runIdFactory: ({ chain, item }) => `run-${chain.id}-${item.id}-${++runSequence}`,
+				statusFromExit: ({ exitCode }) => exitCode === 0 ? "done" : "changes_requested",
+				now: () => now,
+			})
+
+			const firstTick = await schedulerTick(options)
+			expect(firstTick.spawnedRuns).toHaveLength(1)
+			const firstClosed = await firstTick.spawnedRuns[0]!.closed
+			expect(firstClosed.exitCode).toBe(1)
+			expect(firstClosed.stderr).toContain("No conversation found with session ID: sess-stale-312")
+			expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "claude" })).toBeNull()
+			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({
+				type: "session_id.invalidated",
+				itemId: item.id,
+				phase: "iteration",
+				runner: "claude",
+				previousSessionId: "sess-stale-312",
+			}))
+
+			now += 2
+			const secondTick = await schedulerTick(options)
+			expect(secondTick.spawnedRuns).toHaveLength(1)
+			const secondClosed = await secondTick.spawnedRuns[0]!.closed
+			expect(secondClosed.exitCode).toBe(0)
+			expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "claude" })).toBe("sess-fresh-312")
+
+			const argvEvents = await readArgvEvents(fixture.eventLog)
+			expect(argvEvents).toHaveLength(2)
+			expect(argvEvents[0]?.argv).toContain("--resume")
+			expect(argvEvents[0]?.argv).toContain("sess-stale-312")
+			expect(argvEvents[1]?.argv).not.toContain("--resume")
+			expect(argvEvents[1]?.argv).not.toContain("sess-stale-312")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("normal non-invalid stderr updates the phase/runner session id instead of clearing it (issue #312 AC4)", async () => {
+		const fixture = await createFixture("session-id-normal-update")
+		try {
+			const chain = createChain(fixture.store, "session-id-normal-update-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 312_004, repoCwd: "/repo/session-id-normal" })
+			fixture.store.setItemSessionId(item.id, { phase: "iteration", runner: "claude", sessionId: "sess-old-312" })
+			const fakeRunner = resolve(fixture.loopDataRoot, "..", "fake-claude-normal-session.ts")
+			await writeFakeClaudeNormalSessionRunner(fakeRunner, "sess-new-312")
+
+			const tick = await schedulerTick(fixture.options({
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
+				statusFromExit: () => "done",
+			}))
+			await tick.spawnedRuns[0]!.closed
+
+			expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "claude" })).toBe("sess-new-312")
+			expect(fixture.schedulerEvents.some((event) => event.type === "session_id.invalidated")).toBe(false)
+		} finally {
+			fixture.store.close()
+		}
+	})
+
 	describe("makeRunId phase segment (issue #294)", () => {
 		test("phase is embedded in the runId so iter and review spawns never collide on the same item", () => {
 			const iterRunId = makeRunId(42, "iteration")
@@ -2601,6 +2674,44 @@ process.exitCode = 0
 		)
 	}
 
+async function writeFakeClaudeInvalidOnceRunner(path: string, attemptFile: string, freshSessionId: string): Promise<void> {
+	await mkdir(resolve(path, ".."), { recursive: true })
+	await writeFile(
+		path,
+		`import { appendFile, readFile, writeFile } from "node:fs/promises"
+
+const attemptFile = Bun.argv[2]
+const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
+const input = JSON.parse(prompt)
+await appendFile(input.eventLog, JSON.stringify({ type: "argv", argv: Bun.argv }) + "\\n")
+let attempt = 0
+try {
+	attempt = Number(await readFile(attemptFile, "utf-8"))
+} catch {}
+if (attempt === 0) {
+	await writeFile(attemptFile, "1")
+	console.error("No conversation found with session ID: sess-stale-312")
+	process.exitCode = 1
+} else {
+	console.log(JSON.stringify({ type: "system", subtype: "init", session_id: ${JSON.stringify(freshSessionId)} }))
+	process.exitCode = 0
+}
+`,
+	)
+}
+
+async function writeFakeClaudeNormalSessionRunner(path: string, sessionId: string): Promise<void> {
+	await mkdir(resolve(path, ".."), { recursive: true })
+	await writeFile(
+		path,
+		`console.error("ordinary stderr warning")
+console.log(JSON.stringify({ type: "system", subtype: "init", session_id: ${JSON.stringify(sessionId)} }))
+process.exitCode = 0
+`,
+	)
+}
+
 async function writeFakeCodexSessionShellRunner(path: string, threadId: string): Promise<void> {
 	await mkdir(resolve(path, ".."), { recursive: true })
 	await writeFile(
@@ -2613,6 +2724,17 @@ exit 0
 `,
 	)
 	await chmod(path, 0o755)
+}
+
+async function readArgvEvents(path: string): Promise<Array<{ argv: string[] }>> {
+	const text = await readFile(path, "utf-8")
+	return text
+		.split("\n")
+		.filter((line) => line.trim() !== "")
+		.map((line) => JSON.parse(line) as Record<string, unknown>)
+		.filter((event): event is { argv: string[] } =>
+			Array.isArray(event.argv) && event.argv.every((arg) => typeof arg === "string"),
+		)
 }
 
 async function writeShellFinalizerMarkerScript(path: string, marker: string): Promise<void> {
