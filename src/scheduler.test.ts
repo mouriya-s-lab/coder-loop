@@ -2343,7 +2343,6 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 	test("first spawn (no session id for phase/runner): buildRunnerInvocation argv has no --resume; rendered prompt's RESUMED_SESSION_ID is empty (AC6)", async () => {
 		const chain = makeChainFixture({ name: "first-spawn-chain" })
 		const item = makeItemFixture(chain, { issueNumber: 291_001, repoCwd: "/repo/first-spawn-repo" })
-		expect(item.lastSessionId).toBeNull()
 
 		const decision = resumeDecisionForItem(item, "iteration", "claude")
 		expect(decision).toEqual({ kind: "fresh" })
@@ -2462,7 +2461,6 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			await runSchedulerUntilIdle(options)
 
 			const refreshed = fixture.store.getItem(item.id)
-			expect(refreshed?.lastSessionId).toBeNull()
 			expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "claude" })).toBe("sess-captured-001")
 		} finally {
 			fixture.store.close()
@@ -2511,7 +2509,6 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			await runSchedulerUntilIdle(options)
 
 			const refreshed = fixture.store.getItem(item.id)
-			expect(refreshed?.lastSessionId).toBeNull()
 			expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "codex" })).toBe("thread-captured-002")
 		} finally {
 			fixture.store.close()
@@ -2780,7 +2777,6 @@ function makeItemFixture(chain: ChainRecord, overrides: Partial<ItemRecord> & Pi
 		branch: null,
 		pr: null,
 		lastRunId: null,
-		lastSessionId: null,
 		sessionIds: {},
 		issueFile: null,
 		evidenceDir: null,
