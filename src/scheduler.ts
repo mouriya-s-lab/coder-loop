@@ -25,7 +25,6 @@ import {
 	type Preset,
 	type PresetPhase,
 	type PhaseRunnerSelectionInput,
-	type QueueItem,
 	type ResolveContext,
 	type ResumeDecision,
 	type RunnerInvocationPaths,
@@ -1622,30 +1621,9 @@ export function buildSchedulerResolveContext(input: {
 	const config = buildConfigBindings({
 		repository: input.chain.repository,
 		baseBranch: input.chain.baseBranch,
-		requireBrowserEvidence: false,
+		browserEvidenceRequired: false,
 	})
-	const item: QueueItem = itemRecordToQueueItem(input.item, input.preset)
-	return { item, config, runtime }
-}
-
-function itemRecordToQueueItem(item: ItemRecord, preset: Preset): QueueItem {
-	const idField = preset.item.idField
-	const extra: JsonObject = { ...item.extra }
-	if (extra[idField] === undefined) extra[idField] = item.issueNumber
-	return {
-		status: item.status,
-		attempts: item.attempts,
-		title: item.title,
-		priority: item.priority,
-		branch: item.branch,
-		pr: item.pr,
-		lastRunId: item.lastRunId,
-		issueFile: item.issueFile,
-		evidenceDir: item.evidenceDir,
-		agentCwd: item.agentCwd,
-		runner: item.runner,
-		extra,
-	}
+	return { item: input.item, config, runtime }
 }
 
 function resolveItemEvidenceDir(item: ItemRecord, fallback: string): string {

@@ -76,7 +76,7 @@ describe("phase C cleanup guards", () => {
 
 	test("smoke after cleanup", async () => {
 		const proc = Bun.spawnSync({
-			cmd: ["bun", "test", "src/smoke.test.ts", "--test-name-pattern", "runs a trigger phase when review changes the item to the matching status"],
+			cmd: ["bun", "test", "src/smoke.test.ts", "--test-name-pattern", "status and queue unblock use SQLite state"],
 			cwd: REPO_ROOT,
 			stdout: "pipe",
 			stderr: "pipe",
@@ -123,7 +123,7 @@ function makeLoopOptions(): LoopOptions {
 		configPath: "/repo/config.json",
 		workflowPath: "/repo/.coder-loop/workflow.md",
 		sharedContextPath: "/loop-data/chains/main/shared.md",
-		stateFile: "/loop-data/db.sqlite",
+		stateDbPath: "/loop-data/db.sqlite",
 		issueDir: "/loop-data/chains/main/issues",
 		evidenceRootDir: "/loop-data/chains/main/evidence",
 		logDir: "/loop-data/chains/main/runs",
@@ -133,7 +133,7 @@ function makeLoopOptions(): LoopOptions {
 		baseBranch: "main",
 		chainName: "main",
 		worktree: false,
-		requireBrowserEvidence: false,
+		browserEvidenceRequired: false,
 		hostRunner: "codex",
 		defaultRunner: {
 			kind: "codex",
@@ -153,12 +153,10 @@ function makeLoopOptions(): LoopOptions {
 			claude: { kind: "claude", binary: "claude", extraArgs: [], model: null },
 			codex: { kind: "codex", binary: "codex", extraArgs: [], model: null },
 		},
-		maxIterations: 1,
 		dryRun: false,
-		checkRuntime: false,
 		preset: {
 			name: "cleanup-test",
-			version: 1,
+			version: Number("1"),
 			description: "cleanup test preset",
 			presetDir: PRESET_DIR,
 			item: { idField: "issue" },

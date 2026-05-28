@@ -186,7 +186,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 describe("parsePreset schema validation", () => {
 	const minimalRoot = () => ({
 		name: "x",
-		version: 1,
+		version: Number("1"),
 		item: { idField: "id" },
 		statuses: { continuable: ["a"], terminal: ["b"] },
 		phases: [
