@@ -3328,14 +3328,23 @@ type LoadedTargetRuntime = {
 
 async function loadTargetRuntime(args: TargetChainLookupArgs): Promise<LoadedTargetRuntime> {
 	const targetCwd = resolve(args.targetCwd)
-	const discoveredConfig = await discoverLegacyConfigForTarget(targetCwd, args)
-	const effectiveLoopDataRoot = args.loopDataRoot ?? discoveredConfig?.config.loopDataRoot ?? null
+	const configPath = await resolveConfigPath(targetCwd, args.configPath)
+	let explicitConfig: LoopConfig | null = null
+	if (args.configPath !== null || args.loopDataRoot === null) {
+		const configResult = await readStatusConfig(configPath)
+		explicitConfig = configResult.kind === "ok" ? configResult.value : null
+		if (args.configPath !== null && configResult.kind !== "ok") {
+			throw new CoderLoopError(configResult.message)
+		}
+		if (configResult.kind === "invalid") {
+			throw new CoderLoopError(configResult.message)
+		}
+	}
+	const effectiveLoopDataRoot = args.loopDataRoot ?? explicitConfig?.loopDataRoot ?? null
 	const chain = await resolveDbChainForTarget({ ...args, loopDataRoot: effectiveLoopDataRoot })
-	const explicitConfig = args.configPath === null ? discoveredConfig?.config ?? null : await loadConfig(resolveFrom(targetCwd, args.configPath))
 	const config = loopConfigFromChain(chain, effectiveLoopDataRoot, explicitConfig)
 	const presetDir = resolvePresetDir(config, PKG_ROOT, targetCwd)
 	const preset = await loadPreset(presetDir)
-	const configPath = args.configPath === null ? resolveLoopDataPaths(loopDataRootOption(effectiveLoopDataRoot)).dbFile : resolveFrom(targetCwd, args.configPath)
 	const options = buildOptions(targetCwd, configPath, {
 		maxIterations: args.maxIterations,
 		targetCwd,
@@ -3354,19 +3363,6 @@ async function loadTargetRuntime(args: TargetChainLookupArgs): Promise<LoadedTar
 	}, config, preset)
 	const state = loopStateFromDbRecords(chain, readDbItemsForChain(effectiveLoopDataRoot, chain.id), readDbCurrentRun(effectiveLoopDataRoot, chain.id), preset)
 	return { options, chain, state }
-}
-
-async function discoverLegacyConfigForTarget(targetCwd: string, args: TargetChainLookupArgs): Promise<{ path: string; config: LoopConfig } | null> {
-	if (args.configPath !== null || args.loopDataRoot !== null) return null
-	const path = await resolveConfigPath(targetCwd, null)
-	const result = await readStatusConfig(path)
-	if (result.kind !== "ok") return null
-	if (result.value.loopDataRoot !== null) return { path, config: result.value }
-	const legacyLoopDataRoot = resolve(targetCwd, ".coder-loop/runtime/loop-data")
-	if (await exists(resolve(legacyLoopDataRoot, "db.sqlite"))) {
-		return { path, config: { ...result.value, loopDataRoot: legacyLoopDataRoot } }
-	}
-	return { path, config: result.value }
 }
 
 async function loadLoopOptionsForTarget(
@@ -3749,16 +3745,6 @@ async function resolveConfigPath(targetCwd: string, override: string | null): Pr
 	const tomlPath = resolveFrom(targetCwd, DEFAULT_CONFIG_FILE_TOML)
 	if (await exists(tomlPath)) return tomlPath
 	return jsonPath
-}
-
-async function loadConfig(path: string): Promise<LoopConfig> {
-	const raw = await readFile(path, "utf-8").catch((error: unknown) => {
-		if (isNodeError(error) && error.code === "ENOENT") {
-			fail(`Missing config file: ${path}`)
-		}
-		throw error
-	})
-	return parseConfigText(raw, path)
 }
 
 function parseConfigText(raw: string, path: string): LoopConfig {
