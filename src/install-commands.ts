@@ -443,13 +443,13 @@ async function ensureGithubLabels(repo: string | null, dryRun: boolean): Promise
 }
 
 // ===================================================================
-// Final --check-runtime invocation
+// Final status smoke invocation
 // ===================================================================
 
-async function runCheckRuntime(target: string, repo: string | null, loopDataRoot: string | null, chainName: string | null = null): Promise<{ code: number; output: string }> {
+async function runInstallStatusSmoke(target: string, repo: string | null, loopDataRoot: string | null, chainName: string | null = null): Promise<{ code: number; output: string }> {
 	const entry = resolve(PKG_ROOT, "src/loop.ts")
 	const bunPath = whichBinary("bun") ?? "bun"
-	const args = [entry, "--target-cwd", target, "--check-runtime"]
+	const args = [entry, "status", target, "--json"]
 	if (repo !== null) args.push("--repo", repo)
 	if (loopDataRoot !== null) args.push("--loop-data-root", loopDataRoot)
 	if (chainName !== null) args.push("--chain", chainName)
@@ -650,16 +650,16 @@ export async function runInstallCommand(rawArgs: string[]): Promise<void> {
 		info(`  ${o.name}: ${desc}`)
 	}
 
-	// Final: --check-runtime (skip in dry-run)
+	// Final: status smoke (skip in dry-run)
 	if (args.dryRun) {
-		info("\n[Final] --dry-run：跳过 --check-runtime")
+		info("\n[Final] --dry-run：跳过 status smoke")
 		return
 	}
-	info("\n[Final] 跑 coder-loop --check-runtime")
-	const finalCheck = await runCheckRuntime(args.target, repoForChain, args.loopDataRoot, chainCreate.chainName)
+	info("\n[Final] 跑 coder-loop status --json")
+	const finalCheck = await runInstallStatusSmoke(args.target, repoForChain, args.loopDataRoot, chainCreate.chainName)
 	process.stderr.write(finalCheck.output)
 	if (finalCheck.code !== 0) {
-		fail(`\nInstall 部分成功，但 --check-runtime 退出 ${finalCheck.code}。修复后重跑 install。`)
+		fail(`\nInstall 部分成功，但 status smoke 退出 ${finalCheck.code}。修复后重跑 install。`)
 	}
 	info("\nInstall 完成。下一步：在 target 跑 `/dev-plan <design-doc-or-issue>`。")
 }
