@@ -49,7 +49,6 @@ describe("sqlite state store", () => {
 				"branch",
 				"pr",
 				"last_run_id",
-				"last_session_id",
 				"session_ids",
 				"issue_file",
 				"evidence_dir",
@@ -135,7 +134,6 @@ describe("sqlite state store", () => {
 				updatedAt: 1_800_000_040,
 			})
 			expect(withIteration.sessionIds).toEqual({ iteration: { codex: "thread-codex-123" } })
-			expect(withIteration.lastSessionId).toBeNull()
 
 			const withReview = store.setItemSessionId(item.id, {
 				phase: "review",
@@ -652,13 +650,13 @@ describe("sqlite state store", () => {
 		}
 	})
 
-	test("lastSessionId migration is idempotent across repeated opens (issue #291 AC2)", async () => {
-		const loopDataRoot = resolve(TEST_ROOT, `last-session-id-idempotent-${Date.now()}-${++nextRootId}`)
+	test("item session schema is idempotent across repeated opens", async () => {
+		const loopDataRoot = resolve(TEST_ROOT, `item-session-idempotent-${Date.now()}-${++nextRootId}`)
 		await mkdir(loopDataRoot, { recursive: true })
 
 		const first = openSqliteStateStore({ loopDataRoot })
 		try {
-			expect(first.listTableColumns("items")).toContain("last_session_id")
+			expect(first.listTableColumns("items")).not.toContain("last_session_id")
 			expect(first.listTableColumns("items")).toContain("session_ids")
 		} finally {
 			first.close()
@@ -666,31 +664,30 @@ describe("sqlite state store", () => {
 
 		const second = openSqliteStateStore({ loopDataRoot })
 		try {
-			expect(second.listTableColumns("items")).toContain("last_session_id")
+			expect(second.listTableColumns("items")).not.toContain("last_session_id")
 			expect(second.listTableColumns("items")).toContain("session_ids")
 			const chain = createFullChain(second)
 			const item = createFullItem(second, chain)
-			expect(item.lastSessionId).toBeNull()
 			expect(item.sessionIds).toEqual({})
 
-			const updated = second.updateItem(item.id, { lastSessionId: "sess-abc" })
-			expect(updated.lastSessionId).toBe("sess-abc")
-			expect(second.getItem(item.id)?.lastSessionId).toBe("sess-abc")
+			const updated = second.setItemSessionId(item.id, { phase: "iteration", runner: "codex", sessionId: "sess-abc" })
+			expect(updated.sessionIds).toEqual({ iteration: { codex: "sess-abc" } })
+			expect(second.getItemSessionId(item.id, { phase: "iteration", runner: "codex" })).toBe("sess-abc")
 		} finally {
 			second.close()
 		}
 
 		const third = openSqliteStateStore({ loopDataRoot })
 		try {
-			expect(third.listTableColumns("items")).toContain("last_session_id")
+			expect(third.listTableColumns("items")).not.toContain("last_session_id")
 			expect(third.listTableColumns("items")).toContain("session_ids")
 		} finally {
 			third.close()
 		}
 	})
 
-	test("sessionIds migration maps legacy last_session_id by current phase and chain runner (issue #310 AC3)", async () => {
-		const loopDataRoot = resolve(TEST_ROOT, `session-ids-legacy-${Date.now()}-${++nextRootId}`)
+	test("v5 to v6 migration maps legacy last_session_id by current phase and chain runner (issue #330 AC8)", async () => {
+		const loopDataRoot = resolve(TEST_ROOT, `session-ids-v5-v6-${Date.now()}-${++nextRootId}`)
 		await mkdir(loopDataRoot, { recursive: true })
 		const dbFile = resolve(loopDataRoot, "db.sqlite")
 
@@ -725,6 +722,7 @@ describe("sqlite state store", () => {
 					pr INTEGER,
 					last_run_id TEXT,
 					last_session_id TEXT,
+					session_ids TEXT NOT NULL DEFAULT '{}',
 					issue_file TEXT,
 					evidence_dir TEXT,
 					agent_cwd TEXT,
@@ -741,6 +739,7 @@ describe("sqlite state store", () => {
 					chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
 					item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
 					phase TEXT NOT NULL,
+					status TEXT NOT NULL DEFAULT 'unknown',
 					started_at REAL NOT NULL,
 					ended_at REAL,
 					exit_code INTEGER,
@@ -753,28 +752,28 @@ describe("sqlite state store", () => {
 					started_at REAL NOT NULL,
 					extra TEXT NOT NULL
 				);
-				PRAGMA user_version = 3;
+				PRAGMA user_version = 5;
 			`)
 			legacy.exec(`
 				INSERT INTO chains (name, preset, repository, base_branch, status, metadata, created_at, updated_at)
 				VALUES ('legacy-session-ids', 'gh-issue-pr-iteration', 'mouriya-s-lab/coder-loop', 'main', 'active', '{"runner":"codex","reviewRunner":"claude"}', 1.0, 1.0)
 			`)
 			legacy.exec(`
-				INSERT INTO items (chain_id, issue_number, repo_cwd, status, attempts, last_session_id, phase, extra, created_at, updated_at)
-				VALUES (1, 310, '/repo/legacy', 'queued', 0, 'd400e2b2-04a4-44f8-8f13-3078f41a5593', 'iteration', '{}', 1.0, 1.0)
+				INSERT INTO items (chain_id, issue_number, repo_cwd, status, attempts, last_session_id, session_ids, phase, extra, created_at, updated_at)
+				VALUES (1, 330, '/repo/legacy', 'queued', 0, 'd400e2b2-04a4-44f8-8f13-3078f41a5593', '{}', 'iteration', '{}', 1.0, 1.0)
 			`)
 			const columnsBefore = legacy.query<{ name: string }, []>("PRAGMA table_info(items)").all().map((row) => row.name)
 			expect(columnsBefore).toContain("last_session_id")
-			expect(columnsBefore).not.toContain("session_ids")
+			expect(columnsBefore).toContain("session_ids")
 		} finally {
 			legacy.close()
 		}
 
 		const migrated = openSqliteStateStore({ loopDataRoot })
 		try {
+			expect(migrated.listTableColumns("items")).not.toContain("last_session_id")
 			expect(migrated.listTableColumns("items")).toContain("session_ids")
-			const item = migrated.getItemByIssue(1, 310)
-			expect(item?.lastSessionId).toBe("d400e2b2-04a4-44f8-8f13-3078f41a5593")
+			const item = migrated.getItemByIssue(1, 330)
 			expect(item?.sessionIds).toEqual({
 				iteration: { codex: "d400e2b2-04a4-44f8-8f13-3078f41a5593" },
 			})
@@ -784,8 +783,8 @@ describe("sqlite state store", () => {
 		}
 	})
 
-	test("lastSessionId migration adds column to pre-v3 DB created without last_session_id (issue #291 AC2)", async () => {
-		const loopDataRoot = resolve(TEST_ROOT, `last-session-id-legacy-${Date.now()}-${++nextRootId}`)
+	test("pre-v3 item schema migration adds session_ids without reintroducing last_session_id", async () => {
+		const loopDataRoot = resolve(TEST_ROOT, `item-session-legacy-${Date.now()}-${++nextRootId}`)
 		await mkdir(loopDataRoot, { recursive: true })
 		const dbFile = resolve(loopDataRoot, "db.sqlite")
 
@@ -866,16 +865,20 @@ describe("sqlite state store", () => {
 
 		const migrated = openSqliteStateStore({ loopDataRoot })
 		try {
-			expect(migrated.listTableColumns("items")).toContain("last_session_id")
+			expect(migrated.listTableColumns("items")).not.toContain("last_session_id")
 			expect(migrated.listTableColumns("items")).toContain("session_ids")
 			const items = migrated.listItems(1)
 			expect(items).toHaveLength(1)
 			const item = items[0]!
-			expect(item.lastSessionId).toBeNull()
 			expect(item.sessionIds).toEqual({})
-			const updated = migrated.updateItem(item.id, { lastSessionId: "sess-from-legacy", updatedAt: 2.0 })
-			expect(updated.lastSessionId).toBe("sess-from-legacy")
-			expect(migrated.getItem(item.id)?.lastSessionId).toBe("sess-from-legacy")
+			const updated = migrated.setItemSessionId(item.id, {
+				phase: "iteration",
+				runner: "codex",
+				sessionId: "sess-from-legacy",
+				updatedAt: 2.0,
+			})
+			expect(updated.sessionIds).toEqual({ iteration: { codex: "sess-from-legacy" } })
+			expect(migrated.getItemSessionId(item.id, { phase: "iteration", runner: "codex" })).toBe("sess-from-legacy")
 		} finally {
 			migrated.close()
 		}

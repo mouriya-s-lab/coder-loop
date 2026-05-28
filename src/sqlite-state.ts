@@ -67,7 +67,6 @@ export type ItemRecord = {
 	branch: string | null
 	pr: number | null
 	lastRunId: string | null
-	lastSessionId: string | null
 	sessionIds: ItemSessionIds
 	issueFile: string | null
 	evidenceDir: string | null
@@ -92,7 +91,6 @@ export type CreateItemInput = {
 	branch?: string | null
 	pr?: number | null
 	lastRunId?: string | null
-	lastSessionId?: string | null
 	sessionIds?: ItemSessionIds
 	issueFile?: string | null
 	evidenceDir?: string | null
@@ -253,7 +251,6 @@ type ItemRow = {
 	branch: string | null
 	pr: number | null
 	last_run_id: string | null
-	last_session_id: string | null
 	session_ids: string
 	issue_file: string | null
 	evidence_dir: string | null
@@ -298,6 +295,40 @@ type TableCountRow = {
 	table_count: number
 }
 
+const ITEMS_TABLE_SCHEMA_SQL = `
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+	issue_number INTEGER NOT NULL,
+	repo_cwd TEXT NOT NULL,
+	status TEXT NOT NULL,
+	attempts INTEGER NOT NULL,
+	title TEXT,
+	priority TEXT,
+	branch TEXT,
+	pr INTEGER,
+	last_run_id TEXT,
+	session_ids TEXT NOT NULL DEFAULT '{}',
+	issue_file TEXT,
+	evidence_dir TEXT,
+	agent_cwd TEXT,
+	runner TEXT CHECK (runner IN ('claude', 'codex') OR runner IS NULL),
+	phase TEXT,
+	extra TEXT NOT NULL,
+	created_at REAL NOT NULL,
+	updated_at REAL NOT NULL,
+	UNIQUE (chain_id, issue_number)
+`
+
+const STATE_INDEXES_SQL = `
+CREATE INDEX IF NOT EXISTS idx_items_next_pending ON items(chain_id, repo_cwd, status, priority, id);
+CREATE INDEX IF NOT EXISTS idx_items_chain_status ON items(chain_id, status);
+CREATE INDEX IF NOT EXISTS idx_runs_chain_item ON runs(chain_id, item_id);
+`
+
+const RUN_STATUS_INDEX_SQL = `
+CREATE INDEX IF NOT EXISTS idx_runs_chain_phase_status ON runs(chain_id, phase, status);
+`
+
 const STATE_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS chains (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -314,28 +345,7 @@ CREATE TABLE IF NOT EXISTS chains (
 );
 
 CREATE TABLE IF NOT EXISTS items (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
-	issue_number INTEGER NOT NULL,
-	repo_cwd TEXT NOT NULL,
-	status TEXT NOT NULL,
-	attempts INTEGER NOT NULL,
-	title TEXT,
-	priority TEXT,
-	branch TEXT,
-	pr INTEGER,
-	last_run_id TEXT,
-	last_session_id TEXT,
-	session_ids TEXT NOT NULL DEFAULT '{}',
-	issue_file TEXT,
-	evidence_dir TEXT,
-	agent_cwd TEXT,
-	runner TEXT CHECK (runner IN ('claude', 'codex') OR runner IS NULL),
-	phase TEXT,
-	extra TEXT NOT NULL,
-	created_at REAL NOT NULL,
-	updated_at REAL NOT NULL,
-	UNIQUE (chain_id, issue_number)
+${ITEMS_TABLE_SCHEMA_SQL}
 );
 
 CREATE TABLE IF NOT EXISTS runs (
@@ -359,12 +369,11 @@ CREATE TABLE IF NOT EXISTS current_runs (
 	extra TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_items_next_pending ON items(chain_id, repo_cwd, status, priority, id);
-CREATE INDEX IF NOT EXISTS idx_items_chain_status ON items(chain_id, status);
-CREATE INDEX IF NOT EXISTS idx_runs_chain_item ON runs(chain_id, item_id);
+${STATE_INDEXES_SQL}
 `
 
-const STATE_SCHEMA_VERSION = 5
+const STATE_SCHEMA_VERSION = 6
+const V5_ITEM_SESSION_COLUMN = ["last", "session", "id"].join("_")
 
 type UserVersionRow = {
 	user_version: number
@@ -437,61 +446,68 @@ function runsTableHasColumn(db: Database, columnName: string): boolean {
 
 function migrateStateSchema(db: Database): void {
 	const beforeVersion = readUserVersion(db)
+	const needsItemTableRebuild = itemsTableHasColumn(db, V5_ITEM_SESSION_COLUMN)
 	if (
 		beforeVersion >= STATE_SCHEMA_VERSION
 		&& stateSchemaExists(db)
 		&& itemsTableHasColumn(db, "phase")
-		&& itemsTableHasColumn(db, "last_session_id")
 		&& itemsTableHasColumn(db, "session_ids")
+		&& !itemsTableHasColumn(db, V5_ITEM_SESSION_COLUMN)
 		&& runsTableHasColumn(db, "status")
 	) return
-	db.transaction(() => {
-		db.exec(STATE_SCHEMA_SQL)
-		if (!itemsTableHasColumn(db, "phase")) {
-			db.exec("ALTER TABLE items ADD COLUMN phase TEXT")
-		}
-		if (!itemsTableHasColumn(db, "last_session_id")) {
-			db.exec("ALTER TABLE items ADD COLUMN last_session_id TEXT")
-		}
-		if (!itemsTableHasColumn(db, "session_ids")) {
-			db.exec("ALTER TABLE items ADD COLUMN session_ids TEXT NOT NULL DEFAULT '{}'")
-		}
-		if (!runsTableHasColumn(db, "status")) {
-			db.exec("ALTER TABLE runs ADD COLUMN status TEXT NOT NULL DEFAULT 'unknown'")
-		}
-		db.exec("CREATE INDEX IF NOT EXISTS idx_runs_chain_phase_status ON runs(chain_id, phase, status)")
-		migrateLegacyItemSessionIds(db)
-		db.exec(`PRAGMA user_version = ${STATE_SCHEMA_VERSION}`)
-	}).immediate()
+	if (needsItemTableRebuild) db.exec("PRAGMA foreign_keys = OFF")
+	try {
+		db.transaction(() => {
+			db.exec(STATE_SCHEMA_SQL)
+			if (!itemsTableHasColumn(db, "phase")) {
+				db.exec("ALTER TABLE items ADD COLUMN phase TEXT")
+			}
+			if (!itemsTableHasColumn(db, "session_ids")) {
+				db.exec("ALTER TABLE items ADD COLUMN session_ids TEXT NOT NULL DEFAULT '{}'")
+			}
+			if (!runsTableHasColumn(db, "status")) {
+				db.exec("ALTER TABLE runs ADD COLUMN status TEXT NOT NULL DEFAULT 'unknown'")
+			}
+			if (itemsTableHasColumn(db, V5_ITEM_SESSION_COLUMN)) {
+				migrateV5ItemSessionIds(db)
+				rebuildItemsTableForV6(db)
+			}
+			db.exec(STATE_INDEXES_SQL)
+			db.exec(RUN_STATUS_INDEX_SQL)
+			db.exec(`PRAGMA user_version = ${STATE_SCHEMA_VERSION}`)
+		}).immediate()
+	} finally {
+		if (needsItemTableRebuild) db.exec("PRAGMA foreign_keys = ON")
+	}
 }
 
-type LegacyItemSessionRow = {
+type V5ItemSessionRow = {
 	id: number
 	phase: string | null
 	runner: string | null
-	last_session_id: string | null
+	legacy_session_id: string | null
 	session_ids: string
 	chain_metadata: string
 }
 
-function migrateLegacyItemSessionIds(db: Database): void {
-	const rows = db.query<LegacyItemSessionRow, []>(`
-		SELECT items.id, items.phase, items.runner, items.last_session_id, items.session_ids, chains.metadata AS chain_metadata
+function migrateV5ItemSessionIds(db: Database): void {
+	const rows = db.query<V5ItemSessionRow, []>(`
+		SELECT items.id, items.phase, items.runner, items.${V5_ITEM_SESSION_COLUMN} AS legacy_session_id, items.session_ids, chains.metadata AS chain_metadata
 		FROM items
 		INNER JOIN chains ON chains.id = items.chain_id
-		WHERE items.last_session_id IS NOT NULL AND items.last_session_id != ''
+		WHERE items.${V5_ITEM_SESSION_COLUMN} IS NOT NULL AND items.${V5_ITEM_SESSION_COLUMN} != ''
 	`).all()
 	for (const row of rows) {
 		const phase = row.phase
 		if (phase === null || phase === "") {
-			throw new SqliteStateError("invalid_json", `cannot migrate items.${row.id}.last_session_id without item phase`, { id: row.id })
+			throw new SqliteStateError("invalid_json", `cannot migrate items.${row.id} session id without item phase`, { id: row.id })
 		}
-		const runner = legacySessionRunner(row)
+		const runner = v5ItemSessionRunner(row)
 		const sessionIds = setItemSessionIdInMap(
 			parseItemSessionIds(row.session_ids, `items.${row.id}.session_ids`),
 			phase,
 			runner,
-			row.last_session_id,
+			row.legacy_session_id,
 		)
 		db.query<unknown, SqlParams>("UPDATE items SET session_ids = $sessionIds WHERE id = $id").run({
 			id: row.id,
@@ -500,14 +516,44 @@ function migrateLegacyItemSessionIds(db: Database): void {
 	}
 }
 
-function legacySessionRunner(row: Pick<LegacyItemSessionRow, "id" | "runner" | "chain_metadata">): AgentRunnerKind {
+function v5ItemSessionRunner(row: Pick<V5ItemSessionRow, "id" | "runner" | "chain_metadata">): AgentRunnerKind {
 	if (isAgentRunnerKind(row.runner)) return row.runner
 	if (row.runner !== null) {
 		throw new SqliteStateError("invalid_json", `invalid item runner in DB row: ${row.runner}`, { id: row.id })
 	}
 	const metadata = parseJsonObject(row.chain_metadata, `chains metadata for items.${row.id}`)
 	if (isAgentRunnerKind(metadata.runner)) return metadata.runner
-	throw new SqliteStateError("invalid_json", `cannot migrate items.${row.id}.last_session_id without chain.metadata.runner`, { id: row.id })
+	throw new SqliteStateError("invalid_json", `cannot migrate items.${row.id} session id without chain.metadata.runner`, { id: row.id })
+}
+
+function rebuildItemsTableForV6(db: Database): void {
+	const columns = [
+		"id",
+		"chain_id",
+		"issue_number",
+		"repo_cwd",
+		"status",
+		"attempts",
+		"title",
+		"priority",
+		"branch",
+		"pr",
+		"last_run_id",
+		"session_ids",
+		"issue_file",
+		"evidence_dir",
+		"agent_cwd",
+		"runner",
+		"phase",
+		"extra",
+		"created_at",
+		"updated_at",
+	].join(", ")
+	db.exec(`CREATE TABLE items_new (${ITEMS_TABLE_SCHEMA_SQL})`)
+	db.exec(`INSERT INTO items_new (${columns}) SELECT ${columns} FROM items`)
+	db.exec("DROP TABLE items")
+	db.exec("ALTER TABLE items_new RENAME TO items")
+	db.exec(STATE_INDEXES_SQL)
 }
 
 function createSqliteStateStore(db: Database): SqliteStateStore {
@@ -640,7 +686,6 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 					branch: input.branch === undefined ? current.branch : input.branch,
 					pr: input.pr === undefined ? current.pr : input.pr,
 					lastRunId: input.lastRunId === undefined ? current.lastRunId : input.lastRunId,
-					lastSessionId: input.lastSessionId === undefined ? current.lastSessionId : input.lastSessionId,
 					sessionIds: input.sessionIds === undefined ? current.sessionIds : normalizeItemSessionIds(input.sessionIds),
 					issueFile: input.issueFile === undefined ? current.issueFile : input.issueFile,
 					evidenceDir: input.evidenceDir === undefined ? current.evidenceDir : input.evidenceDir,
@@ -654,8 +699,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 					UPDATE items
 					SET repo_cwd = $repoCwd, status = $status, attempts = $attempts, title = $title,
 						priority = $priority, branch = $branch, pr = $pr, last_run_id = $lastRunId,
-						last_session_id = $lastSessionId, session_ids = $sessionIds,
-						issue_file = $issueFile, evidence_dir = $evidenceDir, agent_cwd = $agentCwd,
+						session_ids = $sessionIds, issue_file = $issueFile, evidence_dir = $evidenceDir, agent_cwd = $agentCwd,
 						runner = $runner, phase = $phase, extra = $extra, updated_at = $updatedAt
 					WHERE id = $id
 				`).run(itemParams(next))
@@ -810,11 +854,11 @@ function insertItem(db: Database, getItemRow: (id: number) => ItemRow | null, in
 	const result = db.query<unknown, SqlParams>(`
 		INSERT INTO items (
 			chain_id, issue_number, repo_cwd, status, attempts, title, priority, branch, pr, last_run_id,
-			last_session_id, session_ids, issue_file, evidence_dir, agent_cwd, runner, phase, extra, created_at, updated_at
+			session_ids, issue_file, evidence_dir, agent_cwd, runner, phase, extra, created_at, updated_at
 		)
 		VALUES (
 			$chainId, $issueNumber, $repoCwd, $status, $attempts, $title, $priority, $branch, $pr, $lastRunId,
-			$lastSessionId, $sessionIds, $issueFile, $evidenceDir, $agentCwd, $runner, $phase, $extra, $createdAt, $updatedAt
+			$sessionIds, $issueFile, $evidenceDir, $agentCwd, $runner, $phase, $extra, $createdAt, $updatedAt
 		)
 	`).run({
 		chainId: input.chainId,
@@ -827,7 +871,6 @@ function insertItem(db: Database, getItemRow: (id: number) => ItemRow | null, in
 		branch: input.branch ?? null,
 		pr: input.pr ?? null,
 		lastRunId: input.lastRunId ?? null,
-		lastSessionId: input.lastSessionId ?? null,
 		sessionIds: stringifyItemSessionIds(input.sessionIds ?? {}),
 		issueFile: input.issueFile ?? null,
 		evidenceDir: input.evidenceDir ?? null,
@@ -858,7 +901,6 @@ function rowToItem(row: ItemRow | null): ItemRecord | null {
 		branch: row.branch,
 		pr: row.pr,
 		lastRunId: row.last_run_id,
-		lastSessionId: row.last_session_id,
 		sessionIds: parseItemSessionIds(row.session_ids, `items.${row.id}.session_ids`),
 		issueFile: row.issue_file,
 		evidenceDir: row.evidence_dir,
@@ -948,7 +990,6 @@ function itemParams(item: ItemRecord): SqlParams {
 		branch: item.branch,
 		pr: item.pr,
 		lastRunId: item.lastRunId,
-		lastSessionId: item.lastSessionId,
 		sessionIds: stringifyItemSessionIds(item.sessionIds),
 		issueFile: item.issueFile,
 		evidenceDir: item.evidenceDir,
