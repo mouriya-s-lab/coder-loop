@@ -50,6 +50,7 @@ coder-loop daemon down --json                    # 关闭 central daemon socket 
 | `target` | target cwd、config/workflow/shared/runtime/log 路径、preset metadata、runner policy |
 | `state` | `ok` 与 `kind` discriminant；如 `ok`、`missing-config`、`invalid-config`、`missing-preset`、`invalid-preset`、`missing-state`、`invalid-state`、`invalid-runtime` |
 | `queue` | 队列总数、按 status 计数、continuable/terminal 数、当前 selected item |
+| `runs` | SQLite `runs.status` 聚合出的 run 总数与 phase × status 计数 |
 | `current` | 当前 run、item、phase status JSON snapshot |
 | `events` | 当前或最近 run 的 events JSONL 路径、最近事件、解析错误 |
 | `processes` | central/process scan 结果：`live[]` 与 `scanError` |

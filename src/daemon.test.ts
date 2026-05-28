@@ -1567,6 +1567,7 @@ describe("daemon", () => {
 			const chain = record(expectOk(await request(fixture, "chain.create", {
 				name: chainName,
 				repository: "mouriya-s-lab/coder-loop",
+				metadata: { workflowFile: "CLAUDE.md" },
 			})).chain)
 			const chainId = numberValue(chain.id)
 			await request(fixture, "item.add", {
@@ -2135,6 +2136,8 @@ process.exit(0)
 					const reviewRow = store.getRunByRunId(reviewRunId)
 					expect(iterRow?.phase).toBe("iteration")
 					expect(reviewRow?.phase).toBe("review")
+					expect(iterRow?.status).toBe("in_progress")
+					expect(reviewRow?.status).toBe("done")
 					expect(iterRow?.itemId).toBe(item!.id)
 					expect(reviewRow?.itemId).toBe(item!.id)
 				} finally {

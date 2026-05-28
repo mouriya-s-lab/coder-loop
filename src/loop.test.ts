@@ -320,6 +320,30 @@ function updateStatusItem(target: string, issueNumber: number, update: { status?
 	}
 }
 
+function recordStatusRun(target: string, issueNumber: number, run: { runId: string; phase: string; status: string; exitCode?: number }): void {
+	const store = openSqliteStateStore({ loopDataRoot: resolve(target, ".coder-loop/runtime/loop-data") })
+	try {
+		const chain = store.getChainByName("status-chain")
+		if (chain === null) throw new Error("missing status-chain")
+		const item = store.getItemByIssue(chain.id, issueNumber)
+		if (item === null) throw new Error(`missing status item ${issueNumber}`)
+		store.recordRun({
+			runId: run.runId,
+			chainId: chain.id,
+			itemId: item.id,
+			phase: run.phase,
+			status: "in_progress",
+			startedAt: 1_800_000_100,
+			extra: {},
+		})
+		if (run.exitCode !== undefined) {
+			store.completeRun(run.runId, { endedAt: 1_800_000_200, exitCode: run.exitCode, status: run.status })
+		}
+	} finally {
+		store.close()
+	}
+}
+
 async function withHostEnv<T>(env: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> {
 	const keys = ["CODEX_SHELL", "CODEX_THREAD_ID", "CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "CLAUDECODE", "CLAUDE_CODE", "CLAUDE_SESSION_ID", "CLAUDE_PROJECT_DIR"]
 	const previous = new Map(keys.map((key) => [key, process.env[key]]))
@@ -421,11 +445,33 @@ describe("buildCoderLoopStatusSnapshot", () => {
 			extraArgs: [],
 			model: "claude-opus-4-7",
 		})
-			expect(snapshot.queue.selected?.reviewRunner).toEqual(snapshot.target.runner.reviewDefault)
-			expect(snapshot.current.run).toBeNull()
-			expect(snapshot.events.runId).toBe("run-alpha")
-			expect(Array.isArray(snapshot.processes.live)).toBe(true)
+		expect(snapshot.queue.selected?.reviewRunner).toEqual(snapshot.target.runner.reviewDefault)
+		expect(snapshot.current.run).toBeNull()
+		expect(snapshot.events.runId).toBe("run-alpha")
+		expect(Array.isArray(snapshot.processes.live)).toBe(true)
+	})
+
+	test("aggregates run phase/status counts from SQLite runs.status", async () => {
+		const target = await makeStatusTarget()
+		recordStatusRun(target, 1, { runId: "run-alpha-iteration", phase: "iteration", status: "in_progress" })
+		recordStatusRun(target, 1, { runId: "run-alpha-review", phase: "review", status: "done", exitCode: 0 })
+		recordStatusRun(target, 2, { runId: "run-beta-iteration", phase: "iteration", status: "done", exitCode: 0 })
+
+		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json", loopDataRoot: resolve(target, ".coder-loop/runtime/loop-data") })
+
+		expect(snapshot.runs).toEqual({
+			total: 3,
+			byPhaseStatus: {
+				iteration: { in_progress: 1, done: 1 },
+				review: { done: 1 },
+			},
+			counts: [
+				{ phase: "iteration", status: "done", count: 1 },
+				{ phase: "iteration", status: "in_progress", count: 1 },
+				{ phase: "review", status: "done", count: 1 },
+			],
 		})
+	})
 
 	test("configured iteration runner still overrides default", async () => {
 		const target = await makeStatusTarget()
@@ -561,11 +607,12 @@ describe("buildCoderLoopStatusSnapshot", () => {
 		expect(snapshot.target.runner.reviewDefault.kind).toBe("claude")
 	})
 
-		test("reports missing DB state when the chain database is absent", async () => {
+	test("reports missing DB state when the chain database is absent", async () => {
 		const target = await makeStatusTarget()
-		await fs.rm(resolve(target, ".coder-loop/runtime/loop-data"), { recursive: true, force: true })
+		const loopDataRoot = resolve(target, ".coder-loop/runtime/loop-data")
+		await fs.rm(loopDataRoot, { recursive: true, force: true })
 
-		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json" })
+		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json", loopDataRoot })
 
 		expect(snapshot.state.kind).toBe("missing-state")
 		expect(snapshot.state.ok).toBe(false)
