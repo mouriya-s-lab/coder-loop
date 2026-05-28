@@ -497,8 +497,14 @@ export async function runSchedulerUntilIdle(options: SchedulerOptions, maxTicks 
 		const result = await schedulerTick(options)
 		allSpawned.push(...result.spawnedRuns)
 		const activeRuns = listActiveRuns(options.state)
-		if (result.spawnedRuns.length === 0 && activeRuns.length === 0) return allSpawned
-		if (activeRuns.length > 0) await Promise.race(activeRuns.map((run) => run.closed))
+		const pendingCloseHandlers = listPendingCloseHandlers(options.state)
+		if (result.spawnedRuns.length === 0 && activeRuns.length === 0 && pendingCloseHandlers.length === 0) return allSpawned
+		if (activeRuns.length > 0 || pendingCloseHandlers.length > 0) {
+			await Promise.race([
+				...activeRuns.map((run) => run.closed),
+				...pendingCloseHandlers,
+			])
+		}
 	}
 	throw new SchedulerError("max_ticks_exceeded", `scheduler did not become idle after ${maxTicks} ticks`)
 }
