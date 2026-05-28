@@ -4,6 +4,7 @@ import { mkdirSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
 
 import { startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
+import { LOOP_DATA_ROOT_ENV } from "./runtime-paths"
 import { reviewOnEmptyLockPathForChainName, serializeSchedulerReviewOnEmptyLock } from "./scheduler"
 import { openSqliteStateStore } from "./sqlite-state"
 
@@ -511,6 +512,46 @@ describe("central chain/item CLI", () => {
 		}
 	})
 
+	test("daemon start ignores target-local legacy loop-data when loop-data root is omitted", async () => {
+		const target = await makeTarget("target-cwd-legacy-local")
+		const globalLoopDataRoot = await makeLoopDataRoot("target-cwd-global")
+		const targetLocalLoopDataRoot = resolve(target, ".coder-loop/runtime/loop-data")
+		await mkdir(globalLoopDataRoot, { recursive: true })
+		await mkdir(targetLocalLoopDataRoot, { recursive: true })
+		await writeFile(resolve(target, ".coder-loop/runtime/config.json"), "{}\n")
+
+		const globalStore = openSqliteStateStore({ loopDataRoot: globalLoopDataRoot })
+		try {
+			globalStore.createChain({
+				name: "global-chain",
+				preset: "gh-issue-pr-iteration",
+				repository: "fixture/repo",
+				baseBranch: "main",
+			})
+		} finally {
+			globalStore.close()
+		}
+
+		const legacyStore = openSqliteStateStore({ loopDataRoot: targetLocalLoopDataRoot })
+		try {
+			legacyStore.createChain({
+				name: "legacy-local-chain",
+				preset: "gh-issue-pr-iteration",
+				repository: "fixture/repo",
+				baseBranch: "main",
+			})
+		} finally {
+			legacyStore.close()
+		}
+
+		const result = await runCli(
+			["daemon", "start", target, "--repo", "fixture/repo", "--dry-run", "--json"],
+			{ [LOOP_DATA_ROOT_ENV]: globalLoopDataRoot },
+		)
+		const parsed = expectJsonOk(result)
+		expect(parsed).toMatchObject({ action: "start", target, chain: "global-chain", dryRun: true })
+	})
+
 	test("daemon target-cwd fails explicitly when no chain matches", async () => {
 		const fixture = await startFixture("target-cwd-missing")
 		try {
@@ -620,7 +661,25 @@ describe("central chain/item CLI", () => {
 			const result = await runCli(["doctor", target, "--repo", "fixture/repo", "--loop-data-root", fixture.loopDataRoot, "--chain", "doctor-chain"], env)
 			expect(result.exitCode, result.stderr).toBe(0)
 			expect(result.stderr).toContain("OK: .coder-loop/workflow.md")
-			expect(result.stderr).toContain("OK: .coder-loop/runtime absent")
+			expect(result.stderr).not.toContain("legacy local runtime")
+			expect(result.stderr).not.toContain(".coder-loop/runtime absent")
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("doctor does not warn when runtime dir exists", async () => {
+		const fixture = await startFixture("doctor-runtime-dir")
+		try {
+			const env = await fakeCliEnv("doctor-runtime-dir")
+			const target = await makeTarget("doctor-runtime-target")
+			await mkdir(resolve(target, ".coder-loop/runtime"), { recursive: true })
+			expectJsonOk(await runCli(["chain", "create", "doctor-runtime-chain", "--repo", "fixture/repo", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const result = await runCli(["doctor", target, "--repo", "fixture/repo", "--loop-data-root", fixture.loopDataRoot, "--chain", "doctor-runtime-chain"], env)
+			expect(result.exitCode, result.stderr).toBe(0)
+			expect(result.stderr).toContain("OK: .coder-loop/workflow.md")
+			expect(result.stderr).not.toContain("legacy local runtime")
+			expect(result.stderr).not.toContain("WARN: .coder-loop/runtime")
 		} finally {
 			await fixture.daemon.stop()
 		}

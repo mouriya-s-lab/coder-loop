@@ -482,7 +482,7 @@ describe("smoke: single-phase-example preset", () => {
 		expect(proc.exitCode).toBe(0)
 		expect(stderr).toContain("Runtime check passed: preset=single-phase-example")
 		expect(stderr).toContain("queue=2, selected=alpha")
-		expect(stderr).toMatch(/config=.*db\.sqlite \(json\)/)
+		expect(stderr).toMatch(/config=.*config\.toml \(toml\)/)
 	})
 
 	test("status <target> --json emits parseable supervisor snapshot", async () => {
@@ -579,10 +579,12 @@ describe("smoke: single-phase-example preset", () => {
 
 	test("doctor <target> checks the configured runner binary", async () => {
 		const target = await makeMinimalTarget("single-phase-example")
+		const loopDataRoot = resolve(target, ".coder-loop/runtime/loop-data")
 		await writeFile(
 			resolve(target, ".coder-loop/runtime/config.json"),
 			JSON.stringify({
 				preset: "single-phase-example",
+				loopDataRoot,
 				runner: "codex",
 				codex: { binary: "missing-codex-for-doctor-test" },
 			}, null, 2),

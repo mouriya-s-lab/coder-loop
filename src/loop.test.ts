@@ -405,7 +405,13 @@ describe("buildCoderLoopStatusSnapshot", () => {
 	test("default iteration runner uses Codex when config omits runner", async () => {
 		await withHostEnv({ CLAUDECODE: "1" }, async () => {
 			const target = await makeStatusTarget()
-			const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json" })
+			const snapshot = await buildCoderLoopStatusSnapshot({
+				targetCwd: target,
+				configPath: null,
+				repository: null,
+				output: "json",
+				loopDataRoot: resolve(target, ".coder-loop/runtime/loop-data"),
+			})
 
 			expect(snapshot.state.kind).toBe("ok")
 			expect(snapshot.target.runner.hostDefault).toBe("claude")
@@ -624,7 +630,13 @@ describe("buildCoderLoopStatusSnapshot", () => {
 		const target = await makeStatusTarget()
 		updateStatusItem(target, 1, { status: "garbage" })
 
-		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, repository: null, output: "json" })
+		const snapshot = await buildCoderLoopStatusSnapshot({
+			targetCwd: target,
+			configPath: null,
+			repository: null,
+			output: "json",
+			loopDataRoot: resolve(target, ".coder-loop/runtime/loop-data"),
+		})
 
 		expect(snapshot.state.kind).toBe("invalid-runtime")
 		expect(snapshot.state.loaded).toBe(true)

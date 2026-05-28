@@ -40,7 +40,6 @@ const KIND_LABELS = [
 const WRITING_ISSUE_SKILL_REL = ".claude/skills/writing-issue/SKILL.md"
 const WRITING_ISSUE_MARKER = "docs/reserved-strings.md"
 
-const RUNTIME_DIR = ".coder-loop/runtime"
 const WORKFLOW_REL = ".coder-loop/workflow.md"
 const SLASH_COMMANDS_REL = ".claude/commands"
 
@@ -708,9 +707,6 @@ export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
 		info(`  ${ok ? "OK" : "FAIL"}: ${c.label}`)
 		if (!ok) hasFailure = true
 	}
-
-	const runtimeExists = await pathExists(resolve(args.target, RUNTIME_DIR))
-	info(`  ${runtimeExists ? "WARN" : "OK"}: ${RUNTIME_DIR} ${runtimeExists ? "still exists (legacy local runtime)" : "absent"}`)
 
 	info("\n[Layer B] Target GitHub 状态")
 	const repo = args.repo ?? (await inferRepoFromGit(args.target))
