@@ -895,6 +895,88 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 		}
 	})
 
+	test("changes_requested + phase=review → next tick retries review, not iteration", async () => {
+		const fixture = await createFixture("phase-review-retry")
+		try {
+			const chain = createChain(fixture.store, "phase-review-retry-chain")
+			const item = createItem(fixture.store, chain, {
+				issueNumber: 31401,
+				repoCwd: "/repo/a",
+				summary: "REVIEW SUMMARY: verdict=retry; issue=#31401; reason=review-retry",
+			})
+			fixture.store.updateItem(item.id, {
+				status: "changes_requested",
+				phase: "review",
+				attempts: 2,
+				lastRunId: "run-pre-review-retry",
+				updatedAt: 1_800_002_500,
+			})
+
+			const tick = await schedulerTick(fixture.options({
+				runIdFactory: ({ chain: c, item: i, phase }) => `run-${c.id}-${i.id}-${phase}-retry`,
+			}))
+
+			expect(tick.spawnedRuns).toHaveLength(1)
+			expect(tick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-review-retry`)
+			const spawned = fixture.store.getItem(item.id)
+			expect(spawned?.phase).toBe("review")
+			expect(spawned?.status).toBe("in_progress")
+			expect(spawned?.attempts).toBe(3)
+
+			await tick.spawnedRuns[0]!.closed
+
+			const phaseStarts = fixture.schedulerEvents
+				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
+					event.type === "phase.start" && event.itemId === item.id,
+				)
+				.map((event) => event.phase)
+			expect(phaseStarts).toEqual(["review"])
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("changes_requested + phase=iteration → next tick still retries iteration", async () => {
+		const fixture = await createFixture("phase-iter-retry")
+		try {
+			const chain = createChain(fixture.store, "phase-iter-retry-chain")
+			const item = createItem(fixture.store, chain, {
+				issueNumber: 31402,
+				repoCwd: "/repo/a",
+				summary: "ITERATION SUMMARY: scope=unit; reason=iter-retry",
+			})
+			fixture.store.updateItem(item.id, {
+				status: "changes_requested",
+				phase: "iteration",
+				attempts: 1,
+				lastRunId: "run-pre-iter-retry",
+				updatedAt: 1_800_002_600,
+			})
+
+			const tick = await schedulerTick(fixture.options({
+				runIdFactory: ({ chain: c, item: i, phase }) => `run-${c.id}-${i.id}-${phase}-retry`,
+			}))
+
+			expect(tick.spawnedRuns).toHaveLength(1)
+			expect(tick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-iteration-retry`)
+			const spawned = fixture.store.getItem(item.id)
+			expect(spawned?.phase).toBe("iteration")
+			expect(spawned?.status).toBe("in_progress")
+			expect(spawned?.attempts).toBe(2)
+
+			await tick.spawnedRuns[0]!.closed
+
+			const phaseStarts = fixture.schedulerEvents
+				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
+					event.type === "phase.start" && event.itemId === item.id,
+				)
+				.map((event) => event.phase)
+			expect(phaseStarts).toEqual(["iteration"])
+		} finally {
+			fixture.store.close()
+		}
+	})
+
 	test("AC6: in_progress + phase=review + REVIEW SUMMARY verdict=accepted → item terminal=done, next tick does NOT spawn", async () => {
 		const fixture = await createFixture("phase-ac6-review-terminal")
 		try {
