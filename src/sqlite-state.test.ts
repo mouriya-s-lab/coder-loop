@@ -50,6 +50,7 @@ describe("sqlite state store", () => {
 				"pr",
 				"last_run_id",
 				"last_session_id",
+				"session_ids",
 				"issue_file",
 				"evidence_dir",
 				"agent_cwd",
@@ -113,6 +114,50 @@ describe("sqlite state store", () => {
 			const item = createFullItem(store, chain)
 			expect(store.getItem(item.id)).toEqual(item)
 			expect(store.getItemByIssue(chain.id, 177)).toEqual(item)
+		} finally {
+			store.close()
+		}
+	})
+
+	test("item session id helpers isolate values by phase and runner", async () => {
+		const { store } = await openTestStore("item-session-ids")
+		try {
+			const chain = createFullChain(store)
+			const item = createFullItem(store, chain)
+
+			expect(store.getItemSessionId(item.id, { phase: "iteration", runner: "codex" })).toBeNull()
+
+			const withIteration = store.setItemSessionId(item.id, {
+				phase: "iteration",
+				runner: "codex",
+				sessionId: "thread-codex-123",
+				updatedAt: 1_800_000_040,
+			})
+			expect(withIteration.sessionIds).toEqual({ iteration: { codex: "thread-codex-123" } })
+			expect(withIteration.lastSessionId).toBeNull()
+
+			const withReview = store.setItemSessionId(item.id, {
+				phase: "review",
+				runner: "claude",
+				sessionId: "thread-claude-456",
+				updatedAt: 1_800_000_041,
+			})
+			expect(withReview.sessionIds).toEqual({
+				iteration: { codex: "thread-codex-123" },
+				review: { claude: "thread-claude-456" },
+			})
+			expect(store.getItemSessionId(item.id, { phase: "iteration", runner: "codex" })).toBe("thread-codex-123")
+			expect(store.getItemSessionId(item.id, { phase: "review", runner: "claude" })).toBe("thread-claude-456")
+			expect(store.getItemSessionId(item.id, { phase: "iteration", runner: "claude" })).toBeNull()
+
+			const cleared = store.setItemSessionId(item.id, {
+				phase: "iteration",
+				runner: "codex",
+				sessionId: null,
+				updatedAt: 1_800_000_042,
+			})
+			expect(cleared.sessionIds).toEqual({ review: { claude: "thread-claude-456" } })
+			expect(store.getItemSessionId(item.id, { phase: "iteration", runner: "codex" })).toBeNull()
 		} finally {
 			store.close()
 		}
@@ -509,6 +554,7 @@ describe("sqlite state store", () => {
 		const first = openSqliteStateStore({ loopDataRoot })
 		try {
 			expect(first.listTableColumns("items")).toContain("last_session_id")
+			expect(first.listTableColumns("items")).toContain("session_ids")
 		} finally {
 			first.close()
 		}
@@ -516,9 +562,11 @@ describe("sqlite state store", () => {
 		const second = openSqliteStateStore({ loopDataRoot })
 		try {
 			expect(second.listTableColumns("items")).toContain("last_session_id")
+			expect(second.listTableColumns("items")).toContain("session_ids")
 			const chain = createFullChain(second)
 			const item = createFullItem(second, chain)
 			expect(item.lastSessionId).toBeNull()
+			expect(item.sessionIds).toEqual({})
 
 			const updated = second.updateItem(item.id, { lastSessionId: "sess-abc" })
 			expect(updated.lastSessionId).toBe("sess-abc")
@@ -530,8 +578,104 @@ describe("sqlite state store", () => {
 		const third = openSqliteStateStore({ loopDataRoot })
 		try {
 			expect(third.listTableColumns("items")).toContain("last_session_id")
+			expect(third.listTableColumns("items")).toContain("session_ids")
 		} finally {
 			third.close()
+		}
+	})
+
+	test("sessionIds migration maps legacy last_session_id by current phase and chain runner (issue #310 AC3)", async () => {
+		const loopDataRoot = resolve(TEST_ROOT, `session-ids-legacy-${Date.now()}-${++nextRootId}`)
+		await mkdir(loopDataRoot, { recursive: true })
+		const dbFile = resolve(loopDataRoot, "db.sqlite")
+
+		const legacy = new Database(dbFile, { create: true, readwrite: true, strict: true })
+		try {
+			legacy.exec("PRAGMA foreign_keys = ON")
+			legacy.exec("PRAGMA journal_mode = WAL")
+			legacy.exec(`
+				CREATE TABLE chains (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					name TEXT NOT NULL UNIQUE,
+					preset TEXT NOT NULL,
+					repository TEXT NOT NULL,
+					base_branch TEXT NOT NULL,
+					umbrella_issue INTEGER,
+					umbrella_repo TEXT,
+					status TEXT NOT NULL CHECK (status IN ('active', 'completed', 'deleted')),
+					metadata TEXT NOT NULL,
+					created_at REAL NOT NULL,
+					updated_at REAL NOT NULL
+				);
+				CREATE TABLE items (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+					issue_number INTEGER NOT NULL,
+					repo_cwd TEXT NOT NULL,
+					status TEXT NOT NULL,
+					attempts INTEGER NOT NULL,
+					title TEXT,
+					priority TEXT,
+					branch TEXT,
+					pr INTEGER,
+					last_run_id TEXT,
+					last_session_id TEXT,
+					issue_file TEXT,
+					evidence_dir TEXT,
+					agent_cwd TEXT,
+					runner TEXT CHECK (runner IN ('claude', 'codex') OR runner IS NULL),
+					phase TEXT,
+					extra TEXT NOT NULL,
+					created_at REAL NOT NULL,
+					updated_at REAL NOT NULL,
+					UNIQUE (chain_id, issue_number)
+				);
+				CREATE TABLE runs (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					run_id TEXT NOT NULL UNIQUE,
+					chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+					item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+					phase TEXT NOT NULL,
+					started_at REAL NOT NULL,
+					ended_at REAL,
+					exit_code INTEGER,
+					extra TEXT NOT NULL
+				);
+				CREATE TABLE current_runs (
+					chain_id INTEGER PRIMARY KEY REFERENCES chains(id) ON DELETE CASCADE,
+					phase TEXT NOT NULL,
+					run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+					started_at REAL NOT NULL,
+					extra TEXT NOT NULL
+				);
+				PRAGMA user_version = 3;
+			`)
+			legacy.exec(`
+				INSERT INTO chains (name, preset, repository, base_branch, status, metadata, created_at, updated_at)
+				VALUES ('legacy-session-ids', 'gh-issue-pr-iteration', 'mouriya-s-lab/coder-loop', 'main', 'active', '{"runner":"codex","reviewRunner":"claude"}', 1.0, 1.0)
+			`)
+			legacy.exec(`
+				INSERT INTO items (chain_id, issue_number, repo_cwd, status, attempts, last_session_id, phase, extra, created_at, updated_at)
+				VALUES (1, 310, '/repo/legacy', 'queued', 0, 'd400e2b2-04a4-44f8-8f13-3078f41a5593', 'iteration', '{}', 1.0, 1.0)
+			`)
+			const columnsBefore = legacy.query<{ name: string }, []>("PRAGMA table_info(items)").all().map((row) => row.name)
+			expect(columnsBefore).toContain("last_session_id")
+			expect(columnsBefore).not.toContain("session_ids")
+		} finally {
+			legacy.close()
+		}
+
+		const migrated = openSqliteStateStore({ loopDataRoot })
+		try {
+			expect(migrated.listTableColumns("items")).toContain("session_ids")
+			const item = migrated.getItemByIssue(1, 310)
+			expect(item?.lastSessionId).toBe("d400e2b2-04a4-44f8-8f13-3078f41a5593")
+			expect(item?.sessionIds).toEqual({
+				iteration: { codex: "d400e2b2-04a4-44f8-8f13-3078f41a5593" },
+			})
+			expect(migrated.getItemSessionId(item!.id, { phase: "iteration", runner: "codex" })).toBe("d400e2b2-04a4-44f8-8f13-3078f41a5593")
+		} finally {
+			migrated.close()
 		}
 	})
 
@@ -618,10 +762,12 @@ describe("sqlite state store", () => {
 		const migrated = openSqliteStateStore({ loopDataRoot })
 		try {
 			expect(migrated.listTableColumns("items")).toContain("last_session_id")
+			expect(migrated.listTableColumns("items")).toContain("session_ids")
 			const items = migrated.listItems(1)
 			expect(items).toHaveLength(1)
 			const item = items[0]!
 			expect(item.lastSessionId).toBeNull()
+			expect(item.sessionIds).toEqual({})
 			const updated = migrated.updateItem(item.id, { lastSessionId: "sess-from-legacy", updatedAt: 2.0 })
 			expect(updated.lastSessionId).toBe("sess-from-legacy")
 			expect(migrated.getItem(item.id)?.lastSessionId).toBe("sess-from-legacy")

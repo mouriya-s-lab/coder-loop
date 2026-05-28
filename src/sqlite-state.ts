@@ -68,6 +68,7 @@ export type ItemRecord = {
 	pr: number | null
 	lastRunId: string | null
 	lastSessionId: string | null
+	sessionIds: ItemSessionIds
 	issueFile: string | null
 	evidenceDir: string | null
 	agentCwd: string | null
@@ -77,6 +78,8 @@ export type ItemRecord = {
 	createdAt: number
 	updatedAt: number
 }
+
+export type ItemSessionIds = Record<string, Partial<Record<AgentRunnerKind, string>>>
 
 export type CreateItemInput = {
 	chainId: number
@@ -90,6 +93,7 @@ export type CreateItemInput = {
 	pr?: number | null
 	lastRunId?: string | null
 	lastSessionId?: string | null
+	sessionIds?: ItemSessionIds
 	issueFile?: string | null
 	evidenceDir?: string | null
 	agentCwd?: string | null
@@ -170,6 +174,16 @@ export type AllItemsTerminalInput = {
 	terminalStatuses: readonly string[]
 }
 
+export type ItemSessionIdInput = {
+	phase: string
+	runner: AgentRunnerKind
+}
+
+export type SetItemSessionIdInput = ItemSessionIdInput & {
+	sessionId: string | null
+	updatedAt?: number
+}
+
 export type StateTableName = "chains" | "items" | "runs" | "current_runs"
 
 export type SqliteStateStoreOptions = LoopDataRootOptions & {
@@ -192,6 +206,8 @@ export type SqliteStateStore = {
 	getItemByIssue: (chainId: number, issueNumber: number) => ItemRecord | null
 	listItems: (chainId: number) => ItemRecord[]
 	updateItem: (id: number, input: UpdateItemInput) => ItemRecord
+	getItemSessionId: (id: number, input: ItemSessionIdInput) => string | null
+	setItemSessionId: (id: number, input: SetItemSessionIdInput) => ItemRecord
 	deleteItem: (id: number) => boolean
 	getNextPendingItem: (input: GetNextPendingItemInput) => ItemRecord | null
 	listDependencyWaits: (input: ListDependencyWaitsInput) => DependencyWaitReason[]
@@ -234,6 +250,7 @@ type ItemRow = {
 	pr: number | null
 	last_run_id: string | null
 	last_session_id: string | null
+	session_ids: string
 	issue_file: string | null
 	evidence_dir: string | null
 	agent_cwd: string | null
@@ -304,6 +321,7 @@ CREATE TABLE IF NOT EXISTS items (
 	pr INTEGER,
 	last_run_id TEXT,
 	last_session_id TEXT,
+	session_ids TEXT NOT NULL DEFAULT '{}',
 	issue_file TEXT,
 	evidence_dir TEXT,
 	agent_cwd TEXT,
@@ -340,7 +358,7 @@ CREATE INDEX IF NOT EXISTS idx_items_chain_status ON items(chain_id, status);
 CREATE INDEX IF NOT EXISTS idx_runs_chain_item ON runs(chain_id, item_id);
 `
 
-const STATE_SCHEMA_VERSION = 3
+const STATE_SCHEMA_VERSION = 4
 
 type UserVersionRow = {
 	user_version: number
@@ -410,6 +428,7 @@ function migrateStateSchema(db: Database): void {
 		&& stateSchemaExists(db)
 		&& itemsTableHasColumn(db, "phase")
 		&& itemsTableHasColumn(db, "last_session_id")
+		&& itemsTableHasColumn(db, "session_ids")
 	) return
 	db.transaction(() => {
 		db.exec(STATE_SCHEMA_SQL)
@@ -419,8 +438,57 @@ function migrateStateSchema(db: Database): void {
 		if (!itemsTableHasColumn(db, "last_session_id")) {
 			db.exec("ALTER TABLE items ADD COLUMN last_session_id TEXT")
 		}
+		if (!itemsTableHasColumn(db, "session_ids")) {
+			db.exec("ALTER TABLE items ADD COLUMN session_ids TEXT NOT NULL DEFAULT '{}'")
+		}
+		migrateLegacyItemSessionIds(db)
 		db.exec(`PRAGMA user_version = ${STATE_SCHEMA_VERSION}`)
 	}).immediate()
+}
+
+type LegacyItemSessionRow = {
+	id: number
+	phase: string | null
+	runner: string | null
+	last_session_id: string | null
+	session_ids: string
+	chain_metadata: string
+}
+
+function migrateLegacyItemSessionIds(db: Database): void {
+	const rows = db.query<LegacyItemSessionRow, []>(`
+		SELECT items.id, items.phase, items.runner, items.last_session_id, items.session_ids, chains.metadata AS chain_metadata
+		FROM items
+		INNER JOIN chains ON chains.id = items.chain_id
+		WHERE items.last_session_id IS NOT NULL AND items.last_session_id != ''
+	`).all()
+	for (const row of rows) {
+		const phase = row.phase
+		if (phase === null || phase === "") {
+			throw new SqliteStateError("invalid_json", `cannot migrate items.${row.id}.last_session_id without item phase`, { id: row.id })
+		}
+		const runner = legacySessionRunner(row)
+		const sessionIds = setItemSessionIdInMap(
+			parseItemSessionIds(row.session_ids, `items.${row.id}.session_ids`),
+			phase,
+			runner,
+			row.last_session_id,
+		)
+		db.query<unknown, SqlParams>("UPDATE items SET session_ids = $sessionIds WHERE id = $id").run({
+			id: row.id,
+			sessionIds: stringifyItemSessionIds(sessionIds),
+		})
+	}
+}
+
+function legacySessionRunner(row: Pick<LegacyItemSessionRow, "id" | "runner" | "chain_metadata">): AgentRunnerKind {
+	if (isAgentRunnerKind(row.runner)) return row.runner
+	if (row.runner !== null) {
+		throw new SqliteStateError("invalid_json", `invalid item runner in DB row: ${row.runner}`, { id: row.id })
+	}
+	const metadata = parseJsonObject(row.chain_metadata, `chains metadata for items.${row.id}`)
+	if (isAgentRunnerKind(metadata.runner)) return metadata.runner
+	throw new SqliteStateError("invalid_json", `cannot migrate items.${row.id}.last_session_id without chain.metadata.runner`, { id: row.id })
 }
 
 function createSqliteStateStore(db: Database): SqliteStateStore {
@@ -554,6 +622,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 					pr: input.pr === undefined ? current.pr : input.pr,
 					lastRunId: input.lastRunId === undefined ? current.lastRunId : input.lastRunId,
 					lastSessionId: input.lastSessionId === undefined ? current.lastSessionId : input.lastSessionId,
+					sessionIds: input.sessionIds === undefined ? current.sessionIds : normalizeItemSessionIds(input.sessionIds),
 					issueFile: input.issueFile === undefined ? current.issueFile : input.issueFile,
 					evidenceDir: input.evidenceDir === undefined ? current.evidenceDir : input.evidenceDir,
 					agentCwd: input.agentCwd === undefined ? current.agentCwd : input.agentCwd,
@@ -566,11 +635,34 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 					UPDATE items
 					SET repo_cwd = $repoCwd, status = $status, attempts = $attempts, title = $title,
 						priority = $priority, branch = $branch, pr = $pr, last_run_id = $lastRunId,
-						last_session_id = $lastSessionId,
+						last_session_id = $lastSessionId, session_ids = $sessionIds,
 						issue_file = $issueFile, evidence_dir = $evidenceDir, agent_cwd = $agentCwd,
 						runner = $runner, phase = $phase, extra = $extra, updated_at = $updatedAt
 					WHERE id = $id
 				`).run(itemParams(next))
+				return requireItem(getItemRow(id), id)
+			}),
+
+		getItemSessionId: (id, input) =>
+			read("get item session id", () => {
+				const item = requireItem(getItemRow(id), id)
+				const phase = normalizeSessionPhase(input.phase, "invalid_input")
+				return item.sessionIds[phase]?.[input.runner] ?? null
+			}),
+
+		setItemSessionId: (id, input) =>
+			write("set item session id", () => {
+				const current = requireItem(getItemRow(id), id)
+				const nextSessionIds = setItemSessionIdInMap(current.sessionIds, input.phase, input.runner, input.sessionId)
+				db.query<unknown, SqlParams>(`
+					UPDATE items
+					SET session_ids = $sessionIds, updated_at = $updatedAt
+					WHERE id = $id
+				`).run({
+					id: id,
+					sessionIds: stringifyItemSessionIds(nextSessionIds),
+					updatedAt: input.updatedAt ?? unixSeconds(),
+				})
 				return requireItem(getItemRow(id), id)
 			}),
 
@@ -690,11 +782,11 @@ function insertItem(db: Database, getItemRow: (id: number) => ItemRow | null, in
 	const result = db.query<unknown, SqlParams>(`
 		INSERT INTO items (
 			chain_id, issue_number, repo_cwd, status, attempts, title, priority, branch, pr, last_run_id,
-			last_session_id, issue_file, evidence_dir, agent_cwd, runner, phase, extra, created_at, updated_at
+			last_session_id, session_ids, issue_file, evidence_dir, agent_cwd, runner, phase, extra, created_at, updated_at
 		)
 		VALUES (
 			$chainId, $issueNumber, $repoCwd, $status, $attempts, $title, $priority, $branch, $pr, $lastRunId,
-			$lastSessionId, $issueFile, $evidenceDir, $agentCwd, $runner, $phase, $extra, $createdAt, $updatedAt
+			$lastSessionId, $sessionIds, $issueFile, $evidenceDir, $agentCwd, $runner, $phase, $extra, $createdAt, $updatedAt
 		)
 	`).run({
 		chainId: input.chainId,
@@ -708,6 +800,7 @@ function insertItem(db: Database, getItemRow: (id: number) => ItemRow | null, in
 		pr: input.pr ?? null,
 		lastRunId: input.lastRunId ?? null,
 		lastSessionId: input.lastSessionId ?? null,
+		sessionIds: stringifyItemSessionIds(input.sessionIds ?? {}),
 		issueFile: input.issueFile ?? null,
 		evidenceDir: input.evidenceDir ?? null,
 		agentCwd: input.agentCwd ?? null,
@@ -738,6 +831,7 @@ function rowToItem(row: ItemRow | null): ItemRecord | null {
 		pr: row.pr,
 		lastRunId: row.last_run_id,
 		lastSessionId: row.last_session_id,
+		sessionIds: parseItemSessionIds(row.session_ids, `items.${row.id}.session_ids`),
 		issueFile: row.issue_file,
 		evidenceDir: row.evidence_dir,
 		agentCwd: row.agent_cwd,
@@ -826,6 +920,7 @@ function itemParams(item: ItemRecord): SqlParams {
 		pr: item.pr,
 		lastRunId: item.lastRunId,
 		lastSessionId: item.lastSessionId,
+		sessionIds: stringifyItemSessionIds(item.sessionIds),
 		issueFile: item.issueFile,
 		evidenceDir: item.evidenceDir,
 		agentCwd: item.agentCwd,
@@ -905,6 +1000,93 @@ function dependsOnItemIds(extra: JsonObject): number[] {
 	const raw = extra.dependsOn
 	if (!Array.isArray(raw)) return []
 	return raw.filter((value): value is number => typeof value === "number" && Number.isInteger(value) && value >= 1)
+}
+
+function parseItemSessionIds(raw: string, label: string): ItemSessionIds {
+	const parsed = parseJsonObject(raw, label)
+	return normalizeParsedItemSessionIds(parsed, label)
+}
+
+function stringifyItemSessionIds(value: ItemSessionIds): string {
+	return JSON.stringify(normalizeItemSessionIds(value))
+}
+
+function normalizeItemSessionIds(value: ItemSessionIds): ItemSessionIds {
+	const result: ItemSessionIds = {}
+	for (const [phase, sessionsByRunner] of Object.entries(value)) {
+		const phaseKey = normalizeSessionPhase(phase, "invalid_input")
+		const runnerMap: Partial<Record<AgentRunnerKind, string>> = {}
+		for (const [runner, sessionId] of Object.entries(sessionsByRunner)) {
+			if (!isAgentRunnerKind(runner)) {
+				throw new SqliteStateError("invalid_input", `invalid session_ids runner: ${runner}`, { phase: phaseKey, runner })
+			}
+			if (sessionId === undefined) continue
+			if (sessionId === "") {
+				throw new SqliteStateError("invalid_input", `session id for phase ${phaseKey} and runner ${runner} cannot be empty`, { phase: phaseKey, runner })
+			}
+			runnerMap[runner] = sessionId
+		}
+		if (Object.keys(runnerMap).length > 0) result[phaseKey] = runnerMap
+	}
+	return result
+}
+
+function normalizeParsedItemSessionIds(value: JsonObject, label: string): ItemSessionIds {
+	const result: ItemSessionIds = {}
+	for (const [phase, sessionsByRunner] of Object.entries(value)) {
+		if (phase === "") {
+			throw new SqliteStateError("invalid_json", `${label} contains an empty phase key`, { label })
+		}
+		if (!isJsonObject(sessionsByRunner)) {
+			throw new SqliteStateError("invalid_json", `${label}.${phase} must contain a runner map`, { label, phase })
+		}
+		const runnerMap: Partial<Record<AgentRunnerKind, string>> = {}
+		for (const [runner, sessionId] of Object.entries(sessionsByRunner)) {
+			if (!isAgentRunnerKind(runner)) {
+				throw new SqliteStateError("invalid_json", `${label}.${phase} contains invalid runner ${runner}`, { label, phase, runner })
+			}
+			if (typeof sessionId !== "string" || sessionId === "") {
+				throw new SqliteStateError("invalid_json", `${label}.${phase}.${runner} must contain a non-empty session id`, { label, phase, runner })
+			}
+			runnerMap[runner] = sessionId
+		}
+		if (Object.keys(runnerMap).length > 0) result[phase] = runnerMap
+	}
+	return result
+}
+
+function setItemSessionIdInMap(
+	current: ItemSessionIds,
+	phase: string,
+	runner: AgentRunnerKind,
+	sessionId: string | null,
+): ItemSessionIds {
+	const phaseKey = normalizeSessionPhase(phase, "invalid_input")
+	const next = normalizeItemSessionIds(current)
+	const runnerMap: Partial<Record<AgentRunnerKind, string>> = { ...(next[phaseKey] ?? {}) }
+	if (sessionId === null) {
+		delete runnerMap[runner]
+	} else {
+		if (sessionId === "") {
+			throw new SqliteStateError("invalid_input", `session id for phase ${phaseKey} and runner ${runner} cannot be empty`, { phase: phaseKey, runner })
+		}
+		runnerMap[runner] = sessionId
+	}
+	if (Object.keys(runnerMap).length === 0) {
+		delete next[phaseKey]
+	} else {
+		next[phaseKey] = runnerMap
+	}
+	return next
+}
+
+function normalizeSessionPhase(phase: string, code: SqliteStateErrorCode): string {
+	if (phase === "") throw new SqliteStateError(code, "session id phase cannot be empty")
+	return phase
+}
+
+function isAgentRunnerKind(value: unknown): value is AgentRunnerKind {
+	return value === "claude" || value === "codex"
 }
 
 function stringifyJsonObject(value: JsonObject): string {
