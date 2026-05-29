@@ -415,7 +415,7 @@ function selectNextItemAndPhase(input: SelectNextItemAndPhaseInput): { item: Ite
 	return pending === null ? null : { item: pending, phase: input.phasePlan.iterPhase }
 }
 
-type SchedulerPendingSelectionInput = {
+export type SchedulerPendingSelectionInput = {
 	items: readonly ItemRecord[]
 	repoCwd: string
 	statuses: readonly string[]
@@ -423,7 +423,7 @@ type SchedulerPendingSelectionInput = {
 	now: number
 }
 
-function selectNextPendingItemFromSnapshot(input: SchedulerPendingSelectionInput): ItemRecord | null {
+export function selectNextPendingItemFromSnapshot(input: SchedulerPendingSelectionInput): ItemRecord | null {
 	const eligible = new Set(input.statuses)
 	const waitsByItemId = new Set(
 		listDependencyWaitReasons(input.items, {
@@ -442,10 +442,7 @@ function selectNextPendingItemFromSnapshot(input: SchedulerPendingSelectionInput
 }
 
 function comparePendingItems(left: ItemRecord, right: ItemRecord): number {
-	if (left.priority === null && right.priority !== null) return 1
-	if (left.priority !== null && right.priority === null) return -1
-	if (left.priority !== right.priority) return String(left.priority).localeCompare(String(right.priority))
-	if (left.attempts !== right.attempts) return left.attempts - right.attempts
+	if (left.position !== right.position) return left.position - right.position
 	return left.id - right.id
 }
 
@@ -1301,6 +1298,7 @@ function makeReviewOnEmptyFallbackItem(chain: ChainRecord, representative: ItemR
 		repoCwd: representative.repoCwd,
 		status: "",
 		attempts: 0,
+		position: 0,
 		title: null,
 		priority: null,
 		branch: null,

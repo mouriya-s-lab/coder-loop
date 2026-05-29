@@ -124,6 +124,29 @@ describe("central chain/item CLI", () => {
 	})
 
 
+	test("item reorder CLI", async () => {
+		const fixture = await startFixture("item-reorder-cli")
+		try {
+			expectJsonOk(await runCli(["chain", "create", "reorder-chain", "--repo", "mouriya-s-lab/coder-loop", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const itemsJson = JSON.stringify([
+				{ issueNumber: 401, repoCwd: REPO_ROOT, title: "first" },
+				{ issueNumber: 402, repoCwd: REPO_ROOT, title: "second" },
+				{ issueNumber: 403, repoCwd: REPO_ROOT, title: "third" },
+			])
+			expectJsonOk(await runCli(["item", "batch-add", "reorder-chain", "--items-json", itemsJson, "--loop-data-root", fixture.loopDataRoot, "--json"]))
+
+			const moved = expectJsonOk(await runCli(["item", "reorder", "reorder-chain", "--issue", "403", "--position", "0", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expect(moved.items.map((item: Record<string, unknown>) => item.issueNumber)).toEqual([403, 401, 402])
+			expect(moved.items.map((item: Record<string, unknown>) => item.position)).toEqual([0, 1, 2])
+
+			const listed = expectJsonOk(await runCli(["item", "list", "reorder-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expect(listed.items.map((item: Record<string, unknown>) => item.issueNumber)).toEqual([403, 401, 402])
+			expect(listed.items.map((item: Record<string, unknown>) => item.position)).toEqual([0, 1, 2])
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("batch item add", async () => {
 		const fixture = await startFixture("batch-item-add")
 		try {

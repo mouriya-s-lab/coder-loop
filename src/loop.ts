@@ -244,6 +244,14 @@ export type ItemCommandArgs =
 			loopDataRoot: string | null
 			json: boolean
 	  }
+	| {
+			action: "reorder"
+			chainName: string
+			issueNumber: number
+			position: number
+			loopDataRoot: string | null
+			json: boolean
+	  }
 
 export type QueueUnblockCommandArgs = {
 	targetCwd: string
@@ -1307,6 +1315,29 @@ const itemUpdateCliCommand = command({
 	}),
 })
 
+const itemReorderCliCommand = command({
+	name: "reorder",
+	description: "Move an item to a new queue position in a centralized coder-loop chain through the daemon socket.",
+	args: {
+		chain: positional({ displayName: "chain", type: cmdString }),
+		issue: option({ long: "issue", type: cmdString }),
+		position: option({ long: "position", type: cmdString }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		json: flag({ long: "json" }),
+	},
+	handler: (args): CliCommand => ({
+		kind: "item",
+		args: {
+			action: "reorder",
+			chainName: args.chain,
+			issueNumber: parseRequiredPositiveInteger(args.issue, "--issue"),
+			position: parseRequiredNonNegativeInteger(args.position, "--position"),
+			loopDataRoot: args.loopDataRoot ?? null,
+			json: args.json,
+		},
+	}),
+})
+
 const itemCliCommand = subcommands({
 	name: "item",
 	description: "Operate centralized coder-loop chain items through the daemon socket.",
@@ -1315,6 +1346,7 @@ const itemCliCommand = subcommands({
 		"batch-add": itemBatchAddCliCommand,
 		list: itemListCliCommand,
 		update: itemUpdateCliCommand,
+		reorder: itemReorderCliCommand,
 	},
 })
 
@@ -1397,6 +1429,12 @@ function parseOptionalNonNegativeInteger(value: string | null, flagName: string)
 	return parsed
 }
 
+function parseRequiredNonNegativeInteger(value: string, flagName: string): number {
+	const parsed = parseOptionalNonNegativeInteger(value, flagName)
+	if (parsed === null) fail(`${flagName} is required`)
+	return parsed
+}
+
 function parseOptionalRunner(value: string | null, flagName: string): AgentRunnerKind | null {
 	if (value === null) return null
 	if (value === "claude" || value === "codex") return value
@@ -1474,6 +1512,15 @@ async function runItemCommand(args: string[]): Promise<void> {
 	}
 	if (itemArgs.action === "list") {
 		const result = await requestDaemonResult(itemArgs.loopDataRoot, "item.list", { chainName: itemArgs.chainName })
+		writeCommandResult(result, itemArgs.json, formatItemListResult)
+		return
+	}
+	if (itemArgs.action === "reorder") {
+		const result = await requestDaemonResult(itemArgs.loopDataRoot, "item.reorder", {
+			chainName: itemArgs.chainName,
+			issueNumber: itemArgs.issueNumber,
+			position: itemArgs.position,
+		})
 		writeCommandResult(result, itemArgs.json, formatItemListResult)
 		return
 	}

@@ -62,6 +62,7 @@ export type ItemRecord = {
 	repoCwd: string
 	status: string
 	attempts: number
+	position: number
 	title: string | null
 	priority: string | null
 	branch: string | null
@@ -207,6 +208,7 @@ export type SqliteStateStore = {
 	getItemByIssue: (chainId: number, issueNumber: number) => ItemRecord | null
 	listItems: (chainId: number) => ItemRecord[]
 	updateItem: (id: number, input: UpdateItemInput) => ItemRecord
+	reorderItem: (id: number, position: number) => ItemRecord[]
 	getItemSessionId: (id: number, input: ItemSessionIdInput) => string | null
 	setItemSessionId: (id: number, input: SetItemSessionIdInput) => ItemRecord
 	deleteItem: (id: number) => boolean
@@ -246,6 +248,7 @@ type ItemRow = {
 	repo_cwd: string
 	status: string
 	attempts: number
+	position: number
 	title: string | null
 	priority: string | null
 	branch: string | null
@@ -295,6 +298,10 @@ type TableCountRow = {
 	table_count: number
 }
 
+type MaxPositionRow = {
+	max_position: number | null
+}
+
 const ITEMS_TABLE_SCHEMA_SQL = `
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
@@ -302,6 +309,7 @@ const ITEMS_TABLE_SCHEMA_SQL = `
 	repo_cwd TEXT NOT NULL,
 	status TEXT NOT NULL,
 	attempts INTEGER NOT NULL,
+	position INTEGER NOT NULL DEFAULT 0,
 	title TEXT,
 	priority TEXT,
 	branch TEXT,
@@ -320,9 +328,12 @@ const ITEMS_TABLE_SCHEMA_SQL = `
 `
 
 const STATE_INDEXES_SQL = `
-CREATE INDEX IF NOT EXISTS idx_items_next_pending ON items(chain_id, repo_cwd, status, priority, id);
 CREATE INDEX IF NOT EXISTS idx_items_chain_status ON items(chain_id, status);
 CREATE INDEX IF NOT EXISTS idx_runs_chain_item ON runs(chain_id, item_id);
+`
+
+const ITEM_NEXT_PENDING_INDEX_SQL = `
+CREATE INDEX IF NOT EXISTS idx_items_next_pending ON items(chain_id, repo_cwd, status, position, id);
 `
 
 const RUN_STATUS_INDEX_SQL = `
@@ -452,6 +463,7 @@ function migrateStateSchema(db: Database): void {
 		&& stateSchemaExists(db)
 		&& itemsTableHasColumn(db, "phase")
 		&& itemsTableHasColumn(db, "session_ids")
+		&& itemsTableHasColumn(db, "position")
 		&& !itemsTableHasColumn(db, V5_ITEM_SESSION_COLUMN)
 		&& runsTableHasColumn(db, "status")
 	) return
@@ -465,6 +477,10 @@ function migrateStateSchema(db: Database): void {
 			if (!itemsTableHasColumn(db, "session_ids")) {
 				db.exec("ALTER TABLE items ADD COLUMN session_ids TEXT NOT NULL DEFAULT '{}'")
 			}
+			if (!itemsTableHasColumn(db, "position")) {
+				db.exec("ALTER TABLE items ADD COLUMN position INTEGER NOT NULL DEFAULT 0")
+				db.exec("UPDATE items SET position = id")
+			}
 			if (!runsTableHasColumn(db, "status")) {
 				db.exec("ALTER TABLE runs ADD COLUMN status TEXT NOT NULL DEFAULT 'unknown'")
 			}
@@ -473,6 +489,7 @@ function migrateStateSchema(db: Database): void {
 				rebuildItemsTableForV6(db)
 			}
 			db.exec(STATE_INDEXES_SQL)
+			db.exec(ITEM_NEXT_PENDING_INDEX_SQL)
 			db.exec(RUN_STATUS_INDEX_SQL)
 			db.exec(`PRAGMA user_version = ${STATE_SCHEMA_VERSION}`)
 		}).immediate()
@@ -534,6 +551,7 @@ function rebuildItemsTableForV6(db: Database): void {
 		"repo_cwd",
 		"status",
 		"attempts",
+		"position",
 		"title",
 		"priority",
 		"branch",
@@ -670,7 +688,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 
 		listItems: (chainId) =>
 			read("list items", () =>
-				db.query<ItemRow, SqlParams>("SELECT * FROM items WHERE chain_id = $chainId ORDER BY id ASC").all({ chainId: chainId }).map((row) => requireItem(row, row.id)),
+				db.query<ItemRow, SqlParams>("SELECT * FROM items WHERE chain_id = $chainId ORDER BY position ASC, id ASC").all({ chainId: chainId }).map((row) => requireItem(row, row.id)),
 			),
 
 		updateItem: (id, input) =>
@@ -697,13 +715,37 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 				}
 				db.query<unknown, SqlParams>(`
 					UPDATE items
-					SET repo_cwd = $repoCwd, status = $status, attempts = $attempts, title = $title,
+					SET repo_cwd = $repoCwd, status = $status, attempts = $attempts, position = $position, title = $title,
 						priority = $priority, branch = $branch, pr = $pr, last_run_id = $lastRunId,
 						session_ids = $sessionIds, issue_file = $issueFile, evidence_dir = $evidenceDir, agent_cwd = $agentCwd,
 						runner = $runner, phase = $phase, extra = $extra, updated_at = $updatedAt
 					WHERE id = $id
 				`).run(itemParams(next))
 				return requireItem(getItemRow(id), id)
+			}),
+
+		reorderItem: (id, position) =>
+			write("reorder item", () => {
+				const target = requireItem(getItemRow(id), id)
+				if (!Number.isInteger(position) || position < 0) {
+					throw new SqliteStateError("invalid_input", `reorder position must be a non-negative integer, got ${position}`, { id: id, position: position })
+				}
+				const ordered = db
+					.query<ItemRow, SqlParams>("SELECT * FROM items WHERE chain_id = $chainId ORDER BY position ASC, id ASC")
+					.all({ chainId: target.chainId })
+					.map((row) => requireItem(row, row.id))
+				const without = ordered.filter((item) => item.id !== id)
+				const clamped = Math.min(position, without.length)
+				without.splice(clamped, 0, target)
+				const now = unixSeconds()
+				const updatePosition = db.query<unknown, SqlParams>("UPDATE items SET position = $position, updated_at = $updatedAt WHERE id = $id")
+				without.forEach((item, index) => {
+					updatePosition.run({ id: item.id, position: index, updatedAt: now })
+				})
+				return db
+					.query<ItemRow, SqlParams>("SELECT * FROM items WHERE chain_id = $chainId ORDER BY position ASC, id ASC")
+					.all({ chainId: target.chainId })
+					.map((row) => requireItem(row, row.id))
 			}),
 
 		getItemSessionId: (id, input) =>
@@ -847,17 +889,23 @@ function rowToChain(row: ChainRow | null): ChainRecord | null {
 	}
 }
 
+function nextItemPosition(db: Database, chainId: number): number {
+	const row = db.query<MaxPositionRow, SqlParams>("SELECT MAX(position) AS max_position FROM items WHERE chain_id = $chainId").get({ chainId: chainId })
+	return row?.max_position === null || row?.max_position === undefined ? 0 : row.max_position + 1
+}
+
 function insertItem(db: Database, getItemRow: (id: number) => ItemRow | null, input: CreateItemInput): ItemRecord {
 	const now = unixSeconds()
 	const createdAt = input.createdAt ?? now
 	const updatedAt = input.updatedAt ?? createdAt
+	const position = nextItemPosition(db, input.chainId)
 	const result = db.query<unknown, SqlParams>(`
 		INSERT INTO items (
-			chain_id, issue_number, repo_cwd, status, attempts, title, priority, branch, pr, last_run_id,
+			chain_id, issue_number, repo_cwd, status, attempts, position, title, priority, branch, pr, last_run_id,
 			session_ids, issue_file, evidence_dir, agent_cwd, runner, phase, extra, created_at, updated_at
 		)
 		VALUES (
-			$chainId, $issueNumber, $repoCwd, $status, $attempts, $title, $priority, $branch, $pr, $lastRunId,
+			$chainId, $issueNumber, $repoCwd, $status, $attempts, $position, $title, $priority, $branch, $pr, $lastRunId,
 			$sessionIds, $issueFile, $evidenceDir, $agentCwd, $runner, $phase, $extra, $createdAt, $updatedAt
 		)
 	`).run({
@@ -866,6 +914,7 @@ function insertItem(db: Database, getItemRow: (id: number) => ItemRow | null, in
 		repoCwd: input.repoCwd,
 		status: input.status,
 		attempts: input.attempts ?? 0,
+		position: position,
 		title: input.title ?? null,
 		priority: input.priority ?? null,
 		branch: input.branch ?? null,
@@ -896,6 +945,7 @@ function rowToItem(row: ItemRow | null): ItemRecord | null {
 		repoCwd: row.repo_cwd,
 		status: row.status,
 		attempts: row.attempts,
+		position: row.position,
 		title: row.title,
 		priority: row.priority,
 		branch: row.branch,
@@ -985,6 +1035,7 @@ function itemParams(item: ItemRecord): SqlParams {
 		repoCwd: item.repoCwd,
 		status: item.status,
 		attempts: item.attempts,
+		position: item.position,
 		title: item.title,
 		priority: item.priority,
 		branch: item.branch,
@@ -1025,10 +1076,7 @@ function selectNextPendingItem(items: ItemRecord[], options: PendingSelectionOpt
 		.filter((item) => eligible.has(item.status))
 		.filter((item) => !waitsByItemId.has(item.id))
 		.sort((left, right) => {
-			if (left.priority === null && right.priority !== null) return 1
-			if (left.priority !== null && right.priority === null) return -1
-			if (left.priority !== right.priority) return String(left.priority).localeCompare(String(right.priority))
-			if (left.attempts !== right.attempts) return left.attempts - right.attempts
+			if (left.position !== right.position) return left.position - right.position
 			return left.id - right.id
 		})[0] ?? null
 }

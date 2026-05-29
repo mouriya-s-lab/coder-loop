@@ -56,6 +56,7 @@ export type DaemonCommandName =
 	| "item.batchAdd"
 	| "item.list"
 	| "item.update"
+	| "item.reorder"
 	| "daemon.status"
 	| "daemon.down"
 
@@ -159,6 +160,7 @@ const ITEM_UPDATE_FIELD_KEYS = [
 	"dependsOn",
 ] as const
 const ITEM_UPDATE_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "fields", ...ITEM_UPDATE_FIELD_KEYS] as const
+const ITEM_REORDER_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "position"] as const
 
 export class DaemonError extends Error {
 	constructor(
@@ -396,6 +398,8 @@ export class CoderLoopDaemon {
 				return this.handleItemList(request.args)
 			case "item.update":
 				return await this.handleItemUpdate(request.args)
+			case "item.reorder":
+				return await this.handleItemReorder(request.args)
 			case "daemon.status":
 				return { daemon: this.snapshot() as unknown as JsonObject }
 			case "daemon.down":
@@ -787,6 +791,25 @@ export class CoderLoopDaemon {
 				await this.terminateActiveRunsForItem(updated.id)
 			}
 			return { item: itemToJson(updated) }
+		} finally {
+			resumeScheduler()
+		}
+	}
+
+	private async handleItemReorder(args: JsonObject): Promise<JsonObject> {
+		validateKnownKeys(args, "item.reorder args", ITEM_REORDER_ARG_KEYS)
+		validateItemUpdateSelector(args)
+		const position = requiredInteger(args, "position")
+		if (position < 0) throw new DaemonError("invalid_request", "position must be a non-negative integer")
+		const item = this.resolveItem(args)
+		const store = this.requireStore()
+		const chain = store.getChain(item.chainId)
+		if (chain === null) throw new DaemonError("not_found", `chain ${item.chainId} was not found`, { chainId: item.chainId })
+		assertChainAllowsItemMutation(chain, "item.reorder")
+		const resumeScheduler = await this.pauseSchedulerForMutation()
+		try {
+			const reordered = store.reorderItem(item.id, position)
+			return { items: reordered.map((entry) => itemToJson(entry)) }
 		} finally {
 			resumeScheduler()
 		}
@@ -1849,6 +1872,7 @@ function itemToJson(item: ItemRecord, dependencyWait?: DependencyWaitReason | nu
 		repoCwd: item.repoCwd,
 		status: item.status,
 		attempts: item.attempts,
+		position: item.position,
 		title: item.title,
 		priority: item.priority,
 		branch: item.branch,

@@ -44,6 +44,7 @@ describe("sqlite state store", () => {
 				"repo_cwd",
 				"status",
 				"attempts",
+				"position",
 				"title",
 				"priority",
 				"branch",
@@ -178,11 +179,11 @@ describe("sqlite state store", () => {
 		const { store } = await openTestStore("access")
 		try {
 			const chain = createFullChain(store)
-			const first = createFullItem(store, chain, { issueNumber: 177, priority: "20", status: "queued" })
-			const second = createFullItem(store, chain, { issueNumber: 179, priority: "10", status: "queued" })
+			const first = createFullItem(store, chain, { issueNumber: 177, status: "queued" })
+			const second = createFullItem(store, chain, { issueNumber: 179, status: "queued" })
 			const otherRepo = createFullItem(store, chain, { issueNumber: 180, repoCwd: "/repo/other", status: "queued" })
 
-			expect(store.getNextPendingItem({ chainId: chain.id, repoCwd: "/repo/coder-loop" })).toEqual(second)
+			expect(store.getNextPendingItem({ chainId: chain.id, repoCwd: "/repo/coder-loop" })).toEqual(first)
 			expect(store.allItemsTerminal({ chainId: chain.id, terminalStatuses: ["done", "moot", "blocked"] })).toBe(false)
 
 			const updatedFirst = store.updateItem(first.id, { status: "done", attempts: 2, branch: "issue-177", pr: 188, updatedAt: 1_800_000_101 })
@@ -217,7 +218,7 @@ describe("sqlite state store", () => {
 		}
 	})
 
-	test("next pending prefers fewer attempts within a priority group", async () => {
+	test("next pending follows queue position regardless of attempts", async () => {
 		const { store } = await openTestStore("attempt-priority")
 		try {
 			const chain = createFullChain(store)
@@ -235,7 +236,38 @@ describe("sqlite state store", () => {
 			})
 
 			expect(retried.id).toBeLessThan(untouched.id)
-			expect(store.getNextPendingItem({ chainId: chain.id, repoCwd: "/repo/coder-loop" })).toEqual(untouched)
+			expect(store.getNextPendingItem({ chainId: chain.id, repoCwd: "/repo/coder-loop" })).toEqual(retried)
+		} finally {
+			store.close()
+		}
+	})
+
+	test("reorderItem renumbers queue positions and drives selection", async () => {
+		const { store } = await openTestStore("reorder")
+		try {
+			const chain = createFullChain(store)
+			const a = createFullItem(store, chain, { issueNumber: 201, status: "queued", priority: null })
+			const b = createFullItem(store, chain, { issueNumber: 202, status: "queued", priority: null })
+			const c = createFullItem(store, chain, { issueNumber: 203, status: "queued", priority: null })
+
+			expect([a.position, b.position, c.position]).toEqual([0, 1, 2])
+			expect(store.getNextPendingItem({ chainId: chain.id, repoCwd: "/repo/coder-loop" })?.id).toBe(a.id)
+
+			const movedC = store.reorderItem(c.id, 0)
+			expect(movedC.map((item) => item.id)).toEqual([c.id, a.id, b.id])
+			expect(movedC.map((item) => item.position)).toEqual([0, 1, 2])
+			const orderedAfterC = store.listItems(chain.id).map((item) => item.id)
+			expect(orderedAfterC).toEqual([c.id, a.id, b.id])
+			expect(store.getItem(c.id)?.position).toBe(0)
+			expect(store.getItem(a.id)?.position).toBe(1)
+			expect(store.getItem(b.id)?.position).toBe(2)
+			expect(store.getNextPendingItem({ chainId: chain.id, repoCwd: "/repo/coder-loop" })?.id).toBe(c.id)
+
+			const movedCToEnd = store.reorderItem(c.id, 99)
+			expect(movedCToEnd.map((item) => item.id)).toEqual([a.id, b.id, c.id])
+			expect(store.listItems(chain.id).map((item) => item.id)).toEqual([a.id, b.id, c.id])
+
+			expect(() => store.reorderItem(a.id, -1)).toThrow()
 		} finally {
 			store.close()
 		}

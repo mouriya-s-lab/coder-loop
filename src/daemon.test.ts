@@ -770,6 +770,44 @@ describe("daemon", () => {
 		}
 	})
 
+	test("socket item.reorder renumbers queue positions", async () => {
+		const fixture = await startFixture("item-reorder", { schedulerEnabled: false })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "reorder-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			const a = record(expectOk(await request(fixture, "item.add", { chainId, issueNumber: 301, repoCwd: REPO_ROOT })).item)
+			const b = record(expectOk(await request(fixture, "item.add", { chainId, issueNumber: 302, repoCwd: REPO_ROOT })).item)
+			const c = record(expectOk(await request(fixture, "item.add", { chainId, issueNumber: 303, repoCwd: REPO_ROOT })).item)
+
+			const baseline = expectOk(await request(fixture, "item.list", { chainId })).items as Record<string, unknown>[]
+			expect(baseline.map((item) => Number(item.issueNumber))).toEqual([301, 302, 303])
+			expect(baseline.map((item) => Number(item.position))).toEqual([0, 1, 2])
+
+			const moved = expectOk(await request(fixture, "item.reorder", { itemId: numberValue(c.id), position: 0 })).items as Record<string, unknown>[]
+			expect(moved.map((item) => Number(item.issueNumber))).toEqual([303, 301, 302])
+			expect(moved.map((item) => Number(item.position))).toEqual([0, 1, 2])
+
+			const after = expectOk(await request(fixture, "item.list", { chainId })).items as Record<string, unknown>[]
+			expect(after.map((item) => Number(item.issueNumber))).toEqual([303, 301, 302])
+			expect(after.map((item) => Number(item.position))).toEqual([0, 1, 2])
+
+			expectInvalid(await request(fixture, "item.reorder", { itemId: numberValue(a.id), position: -1 }))
+			expectInvalid(await request(fixture, "item.reorder", { itemId: numberValue(b.id), chainId, position: 0 }))
+
+			const missing = await request(fixture, "item.reorder", { itemId: 999_999, position: 0 })
+			expect(missing.ok).toBe(false)
+			if (!missing.ok) {
+				expect(missing.error.code).toBe("not_found")
+				expect(missing.error.message).toContain("999999")
+			}
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("socket item status validation follows the chain preset", async () => {
 		const fixture = await startFixture("item-status-preset", { schedulerEnabled: false })
 		try {
