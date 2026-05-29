@@ -136,7 +136,8 @@ describe("central chain/item CLI", () => {
 			expectJsonOk(await runCli(["item", "batch-add", "reorder-chain", "--items-json", itemsJson, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 
 			const moved = expectJsonOk(await runCli(["item", "reorder", "reorder-chain", "--issue", "403", "--position", "0", "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			expect(moved.item).toMatchObject({ issueNumber: 403, position: 0 })
+			expect(moved.items.map((item: Record<string, unknown>) => item.issueNumber)).toEqual([403, 401, 402])
+			expect(moved.items.map((item: Record<string, unknown>) => item.position)).toEqual([0, 1, 2])
 
 			const listed = expectJsonOk(await runCli(["item", "list", "reorder-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(listed.items.map((item: Record<string, unknown>) => item.issueNumber)).toEqual([403, 401, 402])

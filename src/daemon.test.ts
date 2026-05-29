@@ -786,8 +786,9 @@ describe("daemon", () => {
 			expect(baseline.map((item) => Number(item.issueNumber))).toEqual([301, 302, 303])
 			expect(baseline.map((item) => Number(item.position))).toEqual([0, 1, 2])
 
-			const moved = record(expectOk(await request(fixture, "item.reorder", { itemId: numberValue(c.id), position: 0 })).item)
-			expect(Number(moved.position)).toBe(0)
+			const moved = expectOk(await request(fixture, "item.reorder", { itemId: numberValue(c.id), position: 0 })).items as Record<string, unknown>[]
+			expect(moved.map((item) => Number(item.issueNumber))).toEqual([303, 301, 302])
+			expect(moved.map((item) => Number(item.position))).toEqual([0, 1, 2])
 
 			const after = expectOk(await request(fixture, "item.list", { chainId })).items as Record<string, unknown>[]
 			expect(after.map((item) => Number(item.issueNumber))).toEqual([303, 301, 302])

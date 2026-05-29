@@ -809,7 +809,7 @@ export class CoderLoopDaemon {
 		const resumeScheduler = await this.pauseSchedulerForMutation()
 		try {
 			const reordered = store.reorderItem(item.id, position)
-			return { item: itemToJson(reordered) }
+			return { items: reordered.map((entry) => itemToJson(entry)) }
 		} finally {
 			resumeScheduler()
 		}

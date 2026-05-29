@@ -254,7 +254,8 @@ describe("sqlite state store", () => {
 			expect(store.getNextPendingItem({ chainId: chain.id, repoCwd: "/repo/coder-loop" })?.id).toBe(a.id)
 
 			const movedC = store.reorderItem(c.id, 0)
-			expect(movedC.position).toBe(0)
+			expect(movedC.map((item) => item.id)).toEqual([c.id, a.id, b.id])
+			expect(movedC.map((item) => item.position)).toEqual([0, 1, 2])
 			const orderedAfterC = store.listItems(chain.id).map((item) => item.id)
 			expect(orderedAfterC).toEqual([c.id, a.id, b.id])
 			expect(store.getItem(c.id)?.position).toBe(0)
@@ -263,7 +264,7 @@ describe("sqlite state store", () => {
 			expect(store.getNextPendingItem({ chainId: chain.id, repoCwd: "/repo/coder-loop" })?.id).toBe(c.id)
 
 			const movedCToEnd = store.reorderItem(c.id, 99)
-			expect(movedCToEnd.position).toBe(2)
+			expect(movedCToEnd.map((item) => item.id)).toEqual([a.id, b.id, c.id])
 			expect(store.listItems(chain.id).map((item) => item.id)).toEqual([a.id, b.id, c.id])
 
 			expect(() => store.reorderItem(a.id, -1)).toThrow()

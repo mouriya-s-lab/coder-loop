@@ -1521,7 +1521,7 @@ async function runItemCommand(args: string[]): Promise<void> {
 			issueNumber: itemArgs.issueNumber,
 			position: itemArgs.position,
 		})
-		writeCommandResult(result, itemArgs.json, formatItemMutationResult)
+		writeCommandResult(result, itemArgs.json, formatItemListResult)
 		return
 	}
 	const requestArgs: JsonObject = {

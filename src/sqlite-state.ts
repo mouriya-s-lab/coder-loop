@@ -208,7 +208,7 @@ export type SqliteStateStore = {
 	getItemByIssue: (chainId: number, issueNumber: number) => ItemRecord | null
 	listItems: (chainId: number) => ItemRecord[]
 	updateItem: (id: number, input: UpdateItemInput) => ItemRecord
-	reorderItem: (id: number, position: number) => ItemRecord
+	reorderItem: (id: number, position: number) => ItemRecord[]
 	getItemSessionId: (id: number, input: ItemSessionIdInput) => string | null
 	setItemSessionId: (id: number, input: SetItemSessionIdInput) => ItemRecord
 	deleteItem: (id: number) => boolean
@@ -742,7 +742,10 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 				without.forEach((item, index) => {
 					updatePosition.run({ id: item.id, position: index, updatedAt: now })
 				})
-				return requireItem(getItemRow(id), id)
+				return db
+					.query<ItemRow, SqlParams>("SELECT * FROM items WHERE chain_id = $chainId ORDER BY position ASC, id ASC")
+					.all({ chainId: target.chainId })
+					.map((row) => requireItem(row, row.id))
 			}),
 
 		getItemSessionId: (id, input) =>
