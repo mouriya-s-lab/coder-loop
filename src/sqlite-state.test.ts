@@ -341,6 +341,80 @@ describe("sqlite state store", () => {
 		}
 	})
 
+	test("cross-chain dependency resolves through the global store, not the per-chain snapshot", async () => {
+		const { store } = await openTestStore("depends-cross-chain")
+		try {
+			const blockerChain = store.createChain({
+				name: "blocker-chain",
+				preset: "gh-issue-pr-iteration",
+				repository: "mouriya-s-lab/coder-loop-e2e-blocker",
+				baseBranch: "main",
+				status: "active",
+				metadata: {},
+				createdAt: 1_800_000_000,
+				updatedAt: 1_800_000_010,
+			})
+			const blocker = store.createItem({
+				chainId: blockerChain.id,
+				issueNumber: 7,
+				repoCwd: "/repo/blocker",
+				status: "done",
+				attempts: 1,
+				title: "blocker follow-up",
+				priority: "10",
+				extra: { issue: 7 },
+				createdAt: 1_800_000_020,
+				updatedAt: 1_800_000_030,
+			})
+
+			const dependentChain = createFullChain(store)
+			const dependent = createFullItem(store, dependentChain, {
+				issueNumber: 2680,
+				priority: "00",
+				status: "queued",
+				extra: { issue: 2680, dependsOn: [blocker.id] },
+			})
+
+			// The blocker lives in a different chain; without the cross-chain resolver byId.get
+			// would miss it and treat the dependency as permanently unsatisfied (deadlock).
+			expect(store.getNextPendingItem({
+				chainId: dependentChain.id,
+				repoCwd: "/repo/coder-loop",
+				statuses: ["queued"],
+				terminalStatuses: ["done", "moot", "blocked"],
+			})).toEqual(dependent)
+			expect(store.listDependencyWaits({
+				chainId: dependentChain.id,
+				repoCwd: "/repo/coder-loop",
+				statuses: ["queued"],
+				terminalStatuses: ["done", "moot", "blocked"],
+			})).toEqual([])
+
+			// Flip the cross-chain blocker back to in-flight: the dependent is gated again.
+			store.updateItem(blocker.id, { status: "in_progress" })
+			expect(store.getNextPendingItem({
+				chainId: dependentChain.id,
+				repoCwd: "/repo/coder-loop",
+				statuses: ["queued"],
+				terminalStatuses: ["done", "moot", "blocked"],
+			})).toBeNull()
+			expect(store.listDependencyWaits({
+				chainId: dependentChain.id,
+				repoCwd: "/repo/coder-loop",
+				statuses: ["queued"],
+				terminalStatuses: ["done", "moot", "blocked"],
+			})).toEqual([{
+				itemId: dependent.id,
+				issueNumber: 2680,
+				repoCwd: "/repo/coder-loop",
+				dependsOn: [blocker.id],
+				unsatisfied: [blocker.id],
+			}])
+		} finally {
+			store.close()
+		}
+	})
+
 	test("createItems happy path inserts every input atomically", async () => {
 		const { store } = await openTestStore("batch-happy")
 		try {

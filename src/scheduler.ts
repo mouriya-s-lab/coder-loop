@@ -31,7 +31,7 @@ import {
 	type RuntimeBindings,
 } from "./loop"
 import { detectsSessionIdInvalid } from "./runners/session-id"
-import { type ChainRecord, type ItemRecord, listDependencyWaitReasons, type SqliteStateStore } from "./sqlite-state"
+import { type ChainRecord, dependsOnItemIds, type ItemRecord, listDependencyWaitReasons, type SqliteStateStore } from "./sqlite-state"
 import {
 	type LoopDataRootOptions,
 	RuntimePathError,
@@ -129,6 +129,7 @@ export type SchedulerEvent =
 	| { type: "phase.start"; ts: string; runId: string; chainId: number; itemId: number; repoCwd: string; phase: string; pid: number | null }
 	| { type: "phase.end"; ts: string; runId: string; chainId: number; itemId: number; phase: string; exitCode: number; durationSeconds: number; status: string }
 	| { type: "queue.terminal"; ts: string; runId: string; chainId: number; itemId: number; terminalStatus: string }
+	| { type: "item.dependency_unblocked"; chainId: number; itemId: number; fromStatus: string; toStatus: string; dependsOn: readonly number[] }
 
 export type SchedulerChainCompleteTriggerContext = {
 	chain: ChainRecord
@@ -197,6 +198,12 @@ export type SchedulerOptions = {
 export type SchedulerChainStatuses = {
 	pending: readonly string[]
 	terminal: readonly string[]
+	// success: subset of terminal that means an item succeeded. Drives cross-chain dependsOn
+	// unblock — a terminal item is restored to `entry` only when all its dependsOn targets
+	// reached a success-terminal status.
+	success: readonly string[]
+	// entry: the actionable status a dependency-unblocked item is restored to.
+	entry: string
 }
 
 export type SchedulerStatusFromExitContext = {
@@ -251,6 +258,8 @@ export type SchedulerTickResult = {
 const DEFAULT_PHASE = "iteration"
 const DEFAULT_PENDING_STATUSES = ["queued", "changes_requested"] as const
 const DEFAULT_TERMINAL_STATUSES = ["done", "moot", "blocked", SCHEDULER_EXHAUSTED_STATUS] as const
+const DEFAULT_SUCCESS_STATUSES = ["done"] as const
+const DEFAULT_ENTRY_STATUS = "queued"
 const CHAIN_COMPLETE_TRIGGER_STATE_METADATA_KEY = "coderLoopChainCompleteTrigger"
 const MAX_ITEM_ATTEMPTS_METADATA_KEY = "maxItemAttempts"
 const SCHEDULER_BACKOFF_EXTRA_KEY = "schedulerBackoff"
@@ -317,6 +326,12 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 			const activeRun = await spawnSchedulerRun(options, chain, next.item, slot, next.phase, preserveTerminalStatus)
 			if (activeRun !== null) spawnedRuns.push(activeRun)
 		}
+
+		// Restore dependency-unblocked terminal items AFTER selection so a freshly-unblocked item is
+		// not also selected in the same tick — it becomes actionable now and is picked up on the next
+		// tick. Running it before review-on-empty / completion keeps the chain from draining or
+		// completing while an item has just become actionable again.
+		items = await unblockDependencySatisfiedItems(options, chain, items, chainStatuses)
 
 		if (shouldRunReviewOnEmpty(options, chain, items, chainStatuses.terminal)) {
 			const reviewOnEmptyRun = await spawnSchedulerReviewOnEmptyRun(options, chain, items)
@@ -926,6 +941,65 @@ async function promiseSettledWithin<T>(promise: Promise<T>, timeoutMs: number): 
 	}
 }
 
+// Engine-level cross-chain unblock: a terminal item carrying a dependsOn record is restored to
+// the chain's `entry` status once ALL its dependsOn targets reached a success-terminal status.
+// dependsOn targets may live in another chain (item ids are globally unique), so they are
+// resolved through the store rather than the per-chain snapshot. Targets that are missing
+// (dangling) or in a non-success terminal status (e.g. exhausted/moot) do NOT unblock the item.
+async function unblockDependencySatisfiedItems(
+	options: SchedulerOptions,
+	chain: ChainRecord,
+	items: ItemRecord[],
+	chainStatuses: SchedulerChainStatuses,
+): Promise<ItemRecord[]> {
+	const success = new Set(chainStatuses.success)
+	if (success.size === 0) return items
+	const terminal = new Set(chainStatuses.terminal)
+	let changed = false
+	for (const item of items) {
+		if (!terminal.has(item.status)) continue
+		const dependsOn = dependsOnItemIds(item.extra)
+		if (dependsOn.length === 0) continue
+		const allSuccess = dependsOn.every((id) => {
+			const target = options.store.getItem(id)
+			return target !== null && success.has(target.status)
+		})
+		if (!allSuccess) continue
+		// Clear the now-satisfied dependsOn record. The snapshot selection path
+		// (selectNextPendingItemFromSnapshot) resolves deps only within the per-chain snapshot, so
+		// leaving a cross-chain dependsOn on the restored item would re-gate it and it would never
+		// be selected into iteration. The dependency is fulfilled, so the record has served its job.
+		const nextExtra: JsonObject = { ...item.extra }
+		delete nextExtra.dependsOn
+		options.store.updateItem(item.id, { status: chainStatuses.entry, extra: nextExtra, updatedAt: nowSeconds(options) })
+		await emit(options, {
+			type: "item.dependency_unblocked",
+			chainId: chain.id,
+			itemId: item.id,
+			fromStatus: item.status,
+			toStatus: chainStatuses.entry,
+			dependsOn,
+		})
+		changed = true
+	}
+	return changed ? options.store.listItems(chain.id) : items
+}
+
+// True when some item in the chain still has a dependsOn target that exists and is not yet
+// terminal — i.e. an in-flight dependency that could still resolve to success and unblock the
+// item. Used to keep the chain active so the daemon keeps ticking until the dependency settles.
+// Dangling (missing) targets do not count: they can never resolve, so they must not pin the
+// chain open forever.
+function hasInflightDependency(options: SchedulerOptions, items: readonly ItemRecord[], terminalStatuses: readonly string[]): boolean {
+	const terminal = new Set(terminalStatuses)
+	return items.some((item) =>
+		dependsOnItemIds(item.extra).some((id) => {
+			const target = options.store.getItem(id)
+			return target !== null && !terminal.has(target.status)
+		})
+	)
+}
+
 async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecord, runId?: string, terminalStatuses?: readonly string[]): Promise<boolean> {
 	if (hasActiveSlotForChain(options.state, chain.id, runId)) return false
 	const effectiveTerminalStatuses = terminalStatuses ?? (await schedulerStatusesForChain(options, chain)).terminal
@@ -934,6 +1008,7 @@ async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecor
 	const items = options.store.listItems(chain.id)
 	if (items.length === 0) return false
 	if (runId === undefined && hasFinalizingItemForChain(options.state, items)) return false
+	if (hasInflightDependency(options, items, effectiveTerminalStatuses)) return false
 	if (!allItemsTerminalIncludingFinalizing(options, chain.id, effectiveTerminalStatuses)) return false
 	if (options.state.finalizingChainIds.has(chain.id)) return false
 	if (!reviewOnEmptyLockExistsForChain(chain, options.loopDataRootOptions)) return false
@@ -1094,6 +1169,8 @@ async function schedulerStatusesForChain(options: SchedulerOptions, chain: Chain
 	return {
 		pending: resolved?.pending ?? options.pendingStatuses ?? DEFAULT_PENDING_STATUSES,
 		terminal: withSchedulerTerminalStatuses(resolved?.terminal ?? options.terminalStatuses ?? DEFAULT_TERMINAL_STATUSES),
+		success: resolved?.success ?? DEFAULT_SUCCESS_STATUSES,
+		entry: resolved?.entry ?? DEFAULT_ENTRY_STATUS,
 	}
 }
 
@@ -1790,6 +1867,7 @@ async function appendSchedulerRunEvent(options: SchedulerOptions, event: Schedul
 function schedulerEventRunId(event: SchedulerEvent): string | null {
 	if (event.type === "slot.busy") return event.activeRunId
 	if (event.type === "spawn.aborted") return null
+	if (event.type === "item.dependency_unblocked") return null
 	if (event.type === "chain.completed") return event.runId ?? null
 	if (event.type === "chain.complete_trigger") return event.runId ?? null
 	if (event.type === "chain.complete_trigger_failed") return event.runId ?? null

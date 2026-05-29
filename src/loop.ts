@@ -408,7 +408,7 @@ const PresetTomlBoundary = arkType({
 	version: "number",
 	"description?": "string",
 	item: { idField: "string" },
-	statuses: { continuable: "string[]", terminal: "string[]" },
+	statuses: { continuable: "string[]", terminal: "string[]", "success?": "string[]", "entry?": "string" },
 	phases: PresetPhaseBoundary.array(),
 	"fragments?": PresetFragmentBoundary.array(),
 	agent: { binary: "string", "extraArgs?": "string[]", "attemptTimeoutSeconds?": "number" },
@@ -482,6 +482,8 @@ export type Preset = {
 	statuses: {
 		continuable: readonly string[]
 		terminal: readonly string[]
+		success: readonly string[]
+		entry: string
 	}
 	phases: readonly PresetPhase[]
 	fragments: readonly PresetFragment[]
@@ -3264,6 +3266,13 @@ export function parsePreset(value: unknown, presetDir: string): Preset {
 	for (const status of root.statuses.continuable) {
 		if (root.statuses.terminal.includes(status)) presetError(`preset.statuses: "${status}" appears in both continuable and terminal`)
 	}
+	const successStatuses = root.statuses.success ?? []
+	for (const status of successStatuses) {
+		if (!root.statuses.terminal.includes(status)) presetError(`preset.statuses.success: "${status}" must be one of statuses.terminal`)
+	}
+	const entryStatus = root.statuses.entry ?? root.statuses.continuable[0]
+	if (entryStatus === undefined) presetError("preset.statuses: continuable must declare at least one status")
+	if (!root.statuses.continuable.includes(entryStatus)) presetError(`preset.statuses.entry: "${entryStatus}" must be one of statuses.continuable`)
 	const attemptTimeoutSeconds = root.agent.attemptTimeoutSeconds ?? DEFAULT_ATTEMPT_TIMEOUT_SECONDS
 	if (!Number.isFinite(attemptTimeoutSeconds) || attemptTimeoutSeconds <= 0) {
 		presetError("preset.agent.attemptTimeoutSeconds: must be a finite positive number")
@@ -3319,7 +3328,7 @@ export function parsePreset(value: unknown, presetDir: string): Preset {
 		description: root.description ?? "",
 		presetDir,
 		item: { idField: root.item.idField },
-		statuses: { continuable: root.statuses.continuable, terminal: root.statuses.terminal },
+		statuses: { continuable: root.statuses.continuable, terminal: root.statuses.terminal, success: successStatuses, entry: entryStatus },
 		phases,
 		fragments,
 		agent: { binary: root.agent.binary, extraArgs: root.agent.extraArgs ?? [], attemptTimeoutSeconds },
