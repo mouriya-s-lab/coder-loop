@@ -46,6 +46,7 @@ function makeItem(overrides: Partial<ItemRecord> = {}): ItemRecord {
 		repoCwd: overrides.repoCwd ?? REPO_ROOT,
 		status: overrides.status ?? "queued",
 		attempts: overrides.attempts ?? 0,
+		position: overrides.position ?? 0,
 		title: overrides.title ?? "test item",
 		priority: overrides.priority ?? null,
 		branch: overrides.branch ?? null,
