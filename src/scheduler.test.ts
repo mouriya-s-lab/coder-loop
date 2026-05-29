@@ -1199,10 +1199,16 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 
 			const duringSpawn = fixture.store.getItem(item.id)
 			expect(duringSpawn?.phase).toBe("blocked-responder")
-			expect(duringSpawn?.status).toBe("in_progress")
+			// A trigger phase running on an already-terminal item keeps that terminal status
+			// persisted across spawn; it is not flipped to a continuable in_progress.
+			expect(duringSpawn?.status).toBe("blocked")
 			expect(duringSpawn?.attempts).toBe(3)
 
 			await triggerTick.spawnedRuns[0]!.closed
+
+			const afterClose = fixture.store.getItem(item.id)
+			expect(afterClose?.status).toBe("blocked")
+			expect(afterClose?.phase).toBe("blocked-responder")
 
 			const spawnEvents = fixture.schedulerEvents.filter(
 				(event) => event.type === "agent.spawn" && event.itemId === item.id,
@@ -1219,14 +1225,18 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 		}
 	})
 
-	test("AC3: trigger phase exit with REVIEW SUMMARY verdict=retry → status=changes_requested; next tick spawns iter", async () => {
+	test("trigger phase terminal: blocked item triggered, phase exit 0 keeps terminal status and is not pulled back into iteration", async () => {
 		const fixture = await createFixture("trigger-b3-unblock")
 		try {
 			const chain = createChain(fixture.store, "trigger-b3-unblock-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
+			// The production blocked-responder ends with an ITERATION-shaped marker on a non-iteration
+			// phase. Under the old fall-through this mapped to changes_requested and pulled the
+			// terminal item back into iteration → review. The fix keeps the pre-trigger terminal status.
 			const item = createItem(fixture.store, chain, {
 				issueNumber: 29003,
 				repoCwd: "/repo/a",
-				summary: "REVIEW SUMMARY: verdict=retry; issue=#29003; reason=unblock",
+				summary: "ITERATION SUMMARY: blocked_responder=created; issue=#29003; blockerRepo=mouriya-s-lab/coder-loop-e2e-blocker; followup=https://example/1; queue=injected; daemon=started; reason=unblock",
 			})
 			fixture.store.updateItem(item.id, {
 				status: "blocked",
@@ -1244,35 +1254,27 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			expect(triggerTick.spawnedRuns).toHaveLength(1)
 			expect(triggerTick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-blocked-responder-b3`)
 			const triggerClosed = await triggerTick.spawnedRuns[0]!.closed
-			expect(triggerClosed.status).toBe("changes_requested")
+			// AC1: run-close writes back the pre-trigger terminal status, not changes_requested.
+			expect(triggerClosed.status).toBe("blocked")
 
 			const afterTrigger = fixture.store.getItem(item.id)
-			expect(afterTrigger?.status).toBe("changes_requested")
+			expect(afterTrigger?.status).toBe("blocked")
 			expect(afterTrigger?.phase).toBe("blocked-responder")
+			// The chain has no actionable item left and completes in the run-close handler.
+			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
 
-			// Configure the iter re-spawn so its REVIEW SUMMARY doesn't propagate "retry" again.
-			fixture.store.updateItem(item.id, {
-				extra: {
-					...afterTrigger!.extra,
-					summary: "ITERATION SUMMARY: scope=unit; reason=b3-resume",
-				},
-			})
-
+			// AC2: the next tick does NOT re-spawn iteration/review for the terminal item.
 			const followUpTick = await schedulerTick(baseOptions)
-			expect(followUpTick.spawnedRuns).toHaveLength(1)
-			expect(followUpTick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-iteration-b3`)
-			const followUpClosed = await followUpTick.spawnedRuns[0]!.closed
-			expect(followUpClosed.status).toBe("in_progress")
-
-			const afterIter = fixture.store.getItem(item.id)
-			expect(afterIter?.phase).toBe("iteration")
+			expect(followUpTick.spawnedRuns).toHaveLength(0)
+			expect(fixture.store.getItem(item.id)?.status).toBe("blocked")
+			expect(fixture.store.getItem(item.id)?.phase).toBe("blocked-responder")
 
 			const phaseStarts = fixture.schedulerEvents
 				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
 					event.type === "phase.start" && event.itemId === item.id,
 				)
 				.map((event) => event.phase)
-			expect(phaseStarts).toEqual(["blocked-responder", "iteration"])
+			expect(phaseStarts).toEqual(["blocked-responder"])
 		} finally {
 			fixture.store.close()
 		}

@@ -312,7 +312,9 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 			})
 			if (next === null) continue
 
-			const activeRun = await spawnSchedulerRun(options, chain, next.item, slot, next.phase)
+			const isItemTriggerPhase = phasePlan.itemTriggerPhases.some((trigger) => trigger.name === next.phase)
+			const preserveTerminalStatus = isItemTriggerPhase && chainStatuses.terminal.includes(next.item.status)
+			const activeRun = await spawnSchedulerRun(options, chain, next.item, slot, next.phase, preserveTerminalStatus)
 			if (activeRun !== null) spawnedRuns.push(activeRun)
 		}
 
@@ -607,6 +609,7 @@ async function spawnSchedulerRun(
 	item: ItemRecord,
 	slot: SchedulerSlot,
 	phase: string,
+	preserveTerminalStatus: boolean,
 ): Promise<SchedulerActiveRun | null> {
 	const kindResolver = options.kindResolver ?? defaultSchedulerKindResolver
 	const kindResult = await kindResolver({ chain, item })
@@ -652,14 +655,19 @@ async function spawnSchedulerRun(
 		startedAt,
 		extra: { slotKey: slot.key, itemId: item.id, repoCwd: item.repoCwd },
 	})
-	options.store.updateItem(item.id, {
-		status: "in_progress",
+	const spawnUpdate: Parameters<typeof options.store.updateItem>[1] = {
 		attempts: item.attempts + 1,
 		lastRunId: runId,
 		agentCwd: worktreePath,
 		phase,
 		updatedAt: startedAt,
-	})
+	}
+	// A side-effect trigger phase runs on an item that was already terminal (e.g. blocked-responder on a
+	// blocked item). Overwriting its status to in_progress would lose the terminal state and let the next
+	// tick re-select it as pending. Keep the terminal status persisted; only advance phase/attempts. The
+	// new phase value also prevents the item-trigger from re-firing (its afterPhase no longer matches).
+	if (!preserveTerminalStatus) spawnUpdate.status = "in_progress"
+	options.store.updateItem(item.id, spawnUpdate)
 
 	const presetDir = schedulerPresetDir(options, chain)
 	const context: SchedulerSpawnContext = { chain, item, slot, runId, worktreePath, presetDir, phase }
@@ -761,11 +769,17 @@ function attachRunCloseHandler(
 				const exitCode = code ?? 1
 				const stdoutText = Buffer.concat(stdout).toString("utf-8")
 				const stderrText = Buffer.concat(stderr).toString("utf-8")
-				const statusFromExit = options.statusFromExit?.({ exitCode, stdout: stdoutText, stderr: stderrText, item, chain, phase, runner })
-					?? defaultSchedulerStatusFromExit({ exitCode, stdout: stdoutText, phase, runnerKind: runner.kind })
 				const terminalStatuses = new Set((await schedulerStatusesForChain(options, chain)).terminal)
 				const currentItem = options.store.getItem(item.id)
-				const status = currentItem !== null && terminalStatuses.has(currentItem.status) ? currentItem.status : statusFromExit
+				// If the item is still in a terminal status at close (e.g. a side-effect trigger phase that ran on
+				// a terminal item and left it terminal — see spawnSchedulerRun), keep that terminal status and do
+				// not consult statusFromExit. This avoids re-deriving a continuable status (and emitting the
+				// misleading "exit 0 without SUMMARY marker, retry" warn) for a phase that must not change lifecycle.
+				const preservedTerminalStatus = currentItem !== null && terminalStatuses.has(currentItem.status) ? currentItem.status : null
+				const status = preservedTerminalStatus ?? (
+					options.statusFromExit?.({ exitCode, stdout: stdoutText, stderr: stderrText, item, chain, phase, runner })
+						?? defaultSchedulerStatusFromExit({ exitCode, stdout: stdoutText, phase, runnerKind: runner.kind })
+				)
 				const endedAt = nowSeconds(options)
 				const itemTransitionedToTerminal = (currentItem === null || !terminalStatuses.has(currentItem.status)) && terminalStatuses.has(status)
 				options.state.finalizingItemStatuses.set(item.id, status)

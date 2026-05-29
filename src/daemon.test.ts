@@ -1868,13 +1868,23 @@ process.exitCode = 0
 			preInstallReviewOnEmptyLockByName("b3-blocked-responder-live-chain", loopDataRoot)
 			expectOk(await sendDaemonRequest(socketPath, daemonRequest("item.add", { chainId, issueNumber: 29011, repoCwd: REPO_ROOT })))
 
-			const finalItem = await waitFor(
-				async () => readItem(loopDataRoot, chainId, 29011),
-				(candidate) => candidate?.phase === "blocked-responder" && candidate?.status === "done",
+			// A trigger phase running on an already-terminal (blocked) item must not change that
+			// terminal status, even though this fixture's statusFromExit would map the
+			// blocked-responder exit to "done". The engine preserves the pre-trigger terminal
+			// status (issue #338), so the item stays blocked at the blocked-responder phase.
+			// With the fix the item reaches its final (blocked / blocked-responder) state at spawn
+			// time, so wait on the blocked-responder phase.start event rather than a status change.
+			await waitFor(
+				async () =>
+					schedulerEvents
+						.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> => event.type === "phase.start")
+						.map((event) => event.phase),
+				(phases) => phases?.includes("blocked-responder") ?? false,
 				10_000,
 			)
+			const finalItem = await readItem(loopDataRoot, chainId, 29011)
 			expect(finalItem?.phase).toBe("blocked-responder")
-			expect(finalItem?.status).toBe("done")
+			expect(finalItem?.status).toBe("blocked")
 
 			const phaseStarts = schedulerEvents
 				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
