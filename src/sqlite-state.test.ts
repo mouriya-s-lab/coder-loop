@@ -44,6 +44,7 @@ describe("sqlite state store", () => {
 				"repo_cwd",
 				"status",
 				"attempts",
+				"position",
 				"title",
 				"priority",
 				"branch",
@@ -217,7 +218,7 @@ describe("sqlite state store", () => {
 		}
 	})
 
-	test("next pending prefers fewer attempts before insertion order", async () => {
+	test("next pending follows queue position regardless of attempts", async () => {
 		const { store } = await openTestStore("attempt-priority")
 		try {
 			const chain = createFullChain(store)
@@ -235,7 +236,37 @@ describe("sqlite state store", () => {
 			})
 
 			expect(retried.id).toBeLessThan(untouched.id)
-			expect(store.getNextPendingItem({ chainId: chain.id, repoCwd: "/repo/coder-loop" })).toEqual(untouched)
+			expect(store.getNextPendingItem({ chainId: chain.id, repoCwd: "/repo/coder-loop" })).toEqual(retried)
+		} finally {
+			store.close()
+		}
+	})
+
+	test("reorderItem renumbers queue positions and drives selection", async () => {
+		const { store } = await openTestStore("reorder")
+		try {
+			const chain = createFullChain(store)
+			const a = createFullItem(store, chain, { issueNumber: 201, status: "queued", priority: null })
+			const b = createFullItem(store, chain, { issueNumber: 202, status: "queued", priority: null })
+			const c = createFullItem(store, chain, { issueNumber: 203, status: "queued", priority: null })
+
+			expect([a.position, b.position, c.position]).toEqual([0, 1, 2])
+			expect(store.getNextPendingItem({ chainId: chain.id, repoCwd: "/repo/coder-loop" })?.id).toBe(a.id)
+
+			const movedC = store.reorderItem(c.id, 0)
+			expect(movedC.position).toBe(0)
+			const orderedAfterC = store.listItems(chain.id).map((item) => item.id)
+			expect(orderedAfterC).toEqual([c.id, a.id, b.id])
+			expect(store.getItem(c.id)?.position).toBe(0)
+			expect(store.getItem(a.id)?.position).toBe(1)
+			expect(store.getItem(b.id)?.position).toBe(2)
+			expect(store.getNextPendingItem({ chainId: chain.id, repoCwd: "/repo/coder-loop" })?.id).toBe(c.id)
+
+			const movedCToEnd = store.reorderItem(c.id, 99)
+			expect(movedCToEnd.position).toBe(2)
+			expect(store.listItems(chain.id).map((item) => item.id)).toEqual([a.id, b.id, c.id])
+
+			expect(() => store.reorderItem(a.id, -1)).toThrow()
 		} finally {
 			store.close()
 		}

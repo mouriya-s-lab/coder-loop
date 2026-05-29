@@ -14,6 +14,7 @@ import {
 	runSchedulerUntilIdle,
 	schedulerSlotWorktreePath,
 	schedulerTick,
+	selectNextPendingItemFromSnapshot,
 	serializeSchedulerReviewOnEmptyLock,
 	type SchedulerEvent,
 	type SchedulerOptions,
@@ -2447,6 +2448,35 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 		expect(resumeDecisionForItem(item, "review", "codex")).toEqual({ kind: "fresh" })
 	})
 
+	test("selectNextPendingItemFromSnapshot ignores priority, follows queue position (issue #339 AC1)", () => {
+		const chain = makeChainFixture()
+		const firstNoPriority = makeItemFixture(chain, { id: 1, issueNumber: 339_001, repoCwd: "/repo/order", position: 0, priority: null })
+		const laterCritical = makeItemFixture(chain, { id: 2, issueNumber: 339_002, repoCwd: "/repo/order", position: 1, priority: "critical" })
+		const selected = selectNextPendingItemFromSnapshot({
+			items: [laterCritical, firstNoPriority],
+			repoCwd: "/repo/order",
+			statuses: ["queued"],
+			terminalStatuses: ["done", "moot", "blocked"],
+			now: 1_800_000_100,
+		})
+		expect(selected?.id).toBe(firstNoPriority.id)
+	})
+
+	test("selectNextPendingItemFromSnapshot returns the item reordered to position 0 (issue #339 AC3)", () => {
+		const chain = makeChainFixture()
+		const formerHead = makeItemFixture(chain, { id: 1, issueNumber: 339_011, repoCwd: "/repo/reorder", position: 1 })
+		const reorderedToHead = makeItemFixture(chain, { id: 3, issueNumber: 339_013, repoCwd: "/repo/reorder", position: 0 })
+		const middle = makeItemFixture(chain, { id: 2, issueNumber: 339_012, repoCwd: "/repo/reorder", position: 2 })
+		const selected = selectNextPendingItemFromSnapshot({
+			items: [formerHead, reorderedToHead, middle],
+			repoCwd: "/repo/reorder",
+			statuses: ["queued"],
+			terminalStatuses: ["done", "moot", "blocked"],
+			now: 1_800_000_100,
+		})
+		expect(selected?.id).toBe(reorderedToHead.id)
+	})
+
 	test("end-to-end (claude runner): session-id parsed from stdout first line is persisted to the phase/runner slot (AC3)", async () => {
 		const fixture = await createFixture("session-id-capture-claude")
 		try {
@@ -2772,6 +2802,7 @@ function makeItemFixture(chain: ChainRecord, overrides: Partial<ItemRecord> & Pi
 		chainId: chain.id,
 		status: "queued",
 		attempts: 0,
+		position: 0,
 		title: null,
 		priority: null,
 		branch: null,
