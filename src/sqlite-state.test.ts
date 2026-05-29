@@ -178,11 +178,11 @@ describe("sqlite state store", () => {
 		const { store } = await openTestStore("access")
 		try {
 			const chain = createFullChain(store)
-			const first = createFullItem(store, chain, { issueNumber: 177, priority: "20", status: "queued" })
-			const second = createFullItem(store, chain, { issueNumber: 179, priority: "10", status: "queued" })
+			const first = createFullItem(store, chain, { issueNumber: 177, status: "queued" })
+			const second = createFullItem(store, chain, { issueNumber: 179, status: "queued" })
 			const otherRepo = createFullItem(store, chain, { issueNumber: 180, repoCwd: "/repo/other", status: "queued" })
 
-			expect(store.getNextPendingItem({ chainId: chain.id, repoCwd: "/repo/coder-loop" })).toEqual(second)
+			expect(store.getNextPendingItem({ chainId: chain.id, repoCwd: "/repo/coder-loop" })).toEqual(first)
 			expect(store.allItemsTerminal({ chainId: chain.id, terminalStatuses: ["done", "moot", "blocked"] })).toBe(false)
 
 			const updatedFirst = store.updateItem(first.id, { status: "done", attempts: 2, branch: "issue-177", pr: 188, updatedAt: 1_800_000_101 })
@@ -217,7 +217,7 @@ describe("sqlite state store", () => {
 		}
 	})
 
-	test("next pending prefers fewer attempts within a priority group", async () => {
+	test("next pending prefers fewer attempts before insertion order", async () => {
 		const { store } = await openTestStore("attempt-priority")
 		try {
 			const chain = createFullChain(store)

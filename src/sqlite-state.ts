@@ -1025,9 +1025,6 @@ function selectNextPendingItem(items: ItemRecord[], options: PendingSelectionOpt
 		.filter((item) => eligible.has(item.status))
 		.filter((item) => !waitsByItemId.has(item.id))
 		.sort((left, right) => {
-			if (left.priority === null && right.priority !== null) return 1
-			if (left.priority !== null && right.priority === null) return -1
-			if (left.priority !== right.priority) return String(left.priority).localeCompare(String(right.priority))
 			if (left.attempts !== right.attempts) return left.attempts - right.attempts
 			return left.id - right.id
 		})[0] ?? null

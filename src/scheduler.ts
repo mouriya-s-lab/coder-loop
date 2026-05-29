@@ -442,9 +442,6 @@ function selectNextPendingItemFromSnapshot(input: SchedulerPendingSelectionInput
 }
 
 function comparePendingItems(left: ItemRecord, right: ItemRecord): number {
-	if (left.priority === null && right.priority !== null) return 1
-	if (left.priority !== null && right.priority === null) return -1
-	if (left.priority !== right.priority) return String(left.priority).localeCompare(String(right.priority))
 	if (left.attempts !== right.attempts) return left.attempts - right.attempts
 	return left.id - right.id
 }
