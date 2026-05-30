@@ -815,6 +815,51 @@ describe("daemon", () => {
 		}
 	})
 
+	test("socket item.update writes typed blocker fields into extra without disturbing other keys", async () => {
+		const fixture = await startFixture("item-update-blocker", { schedulerEnabled: false })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "blocker-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			const anchor = record(expectOk(await request(fixture, "item.add", { chainId, issueNumber: 500, repoCwd: REPO_ROOT })).item)
+			const item = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 501,
+				repoCwd: REPO_ROOT,
+				dependsOn: [numberValue(anchor.id)],
+			})).item)
+			const itemId = numberValue(item.id)
+
+			// Typed blocker flags land as named keys inside extra; the pre-existing dependsOn key survives.
+			const blocked = record(expectOk(await request(fixture, "item.update", {
+				itemId,
+				status: "blocked",
+				blockerRepo: "mouriya-s-lab/other",
+				blockerRef: "#267",
+			})).item)
+			expect(record(blocked.extra)).toMatchObject({ blockerRepo: "mouriya-s-lab/other", blockerRef: "#267", dependsOn: [numberValue(anchor.id)] })
+			expect(blocked.status).toBe("blocked")
+			expect(blocked.agentCwd).toBeNull()
+
+			// clearBlocker removes only the blocker keys, leaving dependsOn intact.
+			const cleared = record(expectOk(await request(fixture, "item.update", { itemId, status: "changes_requested", clearBlocker: true })).item)
+			expect(record(cleared.extra)).not.toHaveProperty("blockerRepo")
+			expect(record(cleared.extra)).not.toHaveProperty("blockerRef")
+			expect(record(cleared.extra).dependsOn).toEqual([numberValue(anchor.id)])
+
+			// agentCwd remains daemon-owned: it cannot be set through item.update.
+			expectInvalid(await request(fixture, "item.update", { itemId, fields: { agentCwd: "/abs/elsewhere" } }))
+			// Invalid blocker repo (not owner/repo) is rejected at the boundary.
+			expectInvalid(await request(fixture, "item.update", { itemId, blockerRepo: "not-a-repo-ref" }))
+			// clearBlocker cannot be combined with a blocker value.
+			expectInvalid(await request(fixture, "item.update", { itemId, clearBlocker: true, blockerRef: "#9" }))
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("socket item.reorder renumbers queue positions", async () => {
 		const fixture = await startFixture("item-reorder", { schedulerEnabled: false })
 		try {

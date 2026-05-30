@@ -11,7 +11,7 @@ The scheduler does not infer status from your output. The status you write throu
 Use the daemon-serialized CLI, which validates the status against the preset vocabulary and writes atomically:
 
 ```bash
-coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --status <status> [--pr <N>] [--branch <name>] [--extra '<json>']
+coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --status <status> [--pr <N>] [--branch <name>] [--blocker-repo <owner/repo>] [--blocker-ref <ref>] [--clear-blocker]
 ```
 
 Run it once per transition, then verify the write reached the store:
@@ -31,26 +31,26 @@ For the selected queue item, run exactly the command for the chosen verdict:
 - `accepted_pr` → only after PR merge and issue close both succeeded: `coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --status done --pr <merged-pr-number>`.
 - `accepted_no_pr` → only after issue close succeeded: `coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --status done`.
 - `skip` → only after issue close succeeded: `coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --status moot`.
-- `blocked` → `coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --status blocked --extra '<blocker-json>'` (see "Blocked metadata"), then record the blocker in the handoff.
+- `blocked` → `coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --status blocked --blocker-repo <owner/repo> --blocker-ref <ref>` (see "Blocked metadata"), then record the blocker in the handoff.
 
 If merge fails, issue close fails, the GitHub issue remains open, checks/mergeability are not green, or parent expansion fails, do not write a terminal status. Keep the issue actionable with exact feedback so it is retried.
 
 ## Blocked metadata
 
-Only the `blocked` transition writes blocker metadata. Pass it as a JSON object to `--extra`:
+Only the `blocked` transition writes blocker metadata. Each field has its own typed flag — do not pass raw JSON:
 
 ```bash
-coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --status blocked --extra '{"blockerRepo":"owner/repo","blockerRef":"#267"}'
+coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --status blocked --blocker-repo owner/repo --blocker-ref '#267'
 ```
 
-- `blockerRepo`: the blocking repository in `owner/repo` format. If the blocker is inside the current repository, omit it or set it to the current `REPO`.
-- `blockerRef`: the blocking issue reference such as `#267`, `owner/repo#267`, or a concise condition string when the blocker is not a concrete issue.
+- `--blocker-repo`: the blocking repository in `owner/repo` format. If the blocker is inside the current repository, omit it or pass the current `REPO`.
+- `--blocker-ref`: the blocking issue reference such as `#267`, `owner/repo#267`, or a concise condition string when the blocker is not a concrete issue.
 
-`--extra` merges these as top-level fields on the queue item, so they deserialize into `QueueItem.extra` and `blocked-responder` can read them.
+The daemon merges these as named fields into the queue item's `extra` (without disturbing other `extra` keys such as `dependsOn`), so `blocked-responder` can read them.
 
-For retry, expanded-parent, accepted, accepted-no-PR, and skip transitions, do not pass `blockerRepo` or `blockerRef`. If stale blocker metadata is present while moving the item to a non-blocked status, clear it by passing `--extra '{"blockerRepo":null,"blockerRef":null}'`.
+For retry, expanded-parent, accepted, accepted-no-PR, and skip transitions, do not pass `--blocker-repo` / `--blocker-ref`. If stale blocker metadata may be present while moving the item to a non-blocked status, clear it with `--clear-blocker`.
 
-If `blockerRepo` names a different repository from `REPO`, resolve that repository's local checkout before writing state. When a verified checkout exists, set the selected queue item's `agentCwd` to that absolute path with `--extra '{"blockerRepo":"owner/repo","blockerRef":"#267","agentCwd":"/abs/path"}'` so the post-review `blocked-responder` trigger spawns in the blocking repository while retaining the current target repo as an additional readable directory. Verify by git remote owner/name, not by directory basename alone. If no checkout can be verified, leave `agentCwd` unset and state the lookup failure in the handoff so `blocked-responder` can report the infrastructure blocker.
+If the blocker names a different repository from `REPO`, record `--blocker-repo` / `--blocker-ref` so `blocked-responder` can resolve the blocking repository itself. The queue item's top-level `agentCwd` is daemon-owned and cannot be set through `item update`; do not attempt to redirect the trigger's spawn directory from here. State the cross-repo blocker in the handoff so `blocked-responder` can act on it.
 
 ## Expanded parent queue rules
 
