@@ -1,5 +1,7 @@
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises"
-import { dirname } from "node:path"
+import { dirname, resolve } from "node:path"
+
+import { openSqliteStateStore } from "../../src/sqlite-state"
 
 type RunnerKind = "claude" | "codex"
 
@@ -10,6 +12,9 @@ type FakeRunnerResponse = {
 	sessionId?: string | null
 	stdout?: string[]
 	stderr?: string[]
+	// v1 status model: the agent owns its own item status and writes it explicitly. When set, the fake
+	// runner writes this status to the shared store before exiting, mirroring `coder-loop item update`.
+	writeStatus?: string
 }
 
 type FakeRunnerPlan = {
@@ -21,10 +26,10 @@ type FakeRunnerState = {
 	nextResponse: number
 }
 
-const [planPath, eventLogPath, runnerKind, ...runnerArgs] = Bun.argv.slice(2)
+const [planPath, eventLogPath, runnerKind, loopDataRoot, ...runnerArgs] = Bun.argv.slice(2)
 
-if (planPath === undefined || eventLogPath === undefined || !isRunnerKind(runnerKind)) {
-	console.error("usage: cross-runner-fake.ts <plan.json> <event-log.jsonl> <claude|codex> [...runner args]")
+if (planPath === undefined || eventLogPath === undefined || !isRunnerKind(runnerKind) || loopDataRoot === undefined) {
+	console.error("usage: cross-runner-fake.ts <plan.json> <event-log.jsonl> <claude|codex> <loop-data-root> [...runner args]")
 	process.exit(2)
 }
 
@@ -67,6 +72,21 @@ for (const line of response.stdout ?? []) {
 
 for (const line of response.stderr ?? []) {
 	console.error(line)
+}
+
+// v1 status model: the agent owns its item status and writes it through the shared store before
+// exiting, exactly like `coder-loop item update --status` would. The scheduler only reads this value;
+// it never infers status from the stdout/stderr above or from the exit code below.
+if (typeof response.writeStatus === "string") {
+	const itemId = numberValue(promptInput.itemId)
+	if (itemId !== null) {
+		const store = openSqliteStateStore({ loopDataRoot })
+		try {
+			store.updateItem(itemId, { status: response.writeStatus, updatedAt: Math.floor(Date.now() / 1000) })
+		} finally {
+			store.close()
+		}
+	}
 }
 
 process.exit(response.exitCode ?? 0)

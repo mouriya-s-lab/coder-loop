@@ -33,12 +33,14 @@ test("cross-runner happy path stores iteration/codex and review/claude session i
 			phase: "iteration",
 			sessionId: "d400e2b2-04a4-44f8-8f13-3078f41a5593",
 			stdout: ["ITERATION SUMMARY: scope=cross-runner; reason=iteration-complete"],
+			writeStatus: "in_progress",
 		},
 		{
 			runner: "claude",
 			phase: "review",
 			sessionId: "019e6cf2-5b39-7b83-9bc5-8c8b96122682",
 			stdout: ["REVIEW SUMMARY: verdict=accepted; issue=#31601; reason=review-complete"],
+			writeStatus: "done",
 		},
 	])
 	try {
@@ -83,18 +85,21 @@ test("review retry verdict retries review phase without returning to iteration",
 			phase: "iteration",
 			sessionId: "d400e2b2-04a4-44f8-8f13-3078f41a5593",
 			stdout: ["ITERATION SUMMARY: scope=cross-runner; reason=iteration-complete"],
+			writeStatus: "in_progress",
 		},
 		{
 			runner: "claude",
 			phase: "review",
 			sessionId: "019e6cf2-5b39-7b83-9bc5-8c8b96122682",
 			stdout: ["REVIEW SUMMARY: verdict=retry; issue=#31602; reason=review-wants-changes"],
+			writeStatus: "changes_requested",
 		},
 		{
 			runner: "claude",
 			phase: "review",
 			sessionId: "019e6cf2-5b39-7b83-9bc5-8c8b96122683",
 			stdout: ["REVIEW SUMMARY: verdict=accepted; issue=#31602; reason=review-retry-complete"],
+			writeStatus: "done",
 		},
 	])
 	try {
@@ -139,18 +144,21 @@ test("invalid review session id clears only review/claude and the next review sp
 			phase: "iteration",
 			sessionId: "d400e2b2-04a4-44f8-8f13-3078f41a5593",
 			stdout: ["ITERATION SUMMARY: scope=cross-runner; reason=iteration-complete"],
+			writeStatus: "in_progress",
 		},
 		{
 			runner: "claude",
 			phase: "review",
 			exitCode: 1,
 			stderr: [`No conversation found with session ID: ${staleReviewSessionId}`],
+			writeStatus: "changes_requested",
 		},
 		{
 			runner: "claude",
 			phase: "review",
 			sessionId: freshReviewSessionId,
 			stdout: ["REVIEW SUMMARY: verdict=accepted; issue=#31603; reason=fresh-review-complete"],
+			writeStatus: "done",
 		},
 	])
 	try {
@@ -203,9 +211,13 @@ test("invalid review session id clears only review/claude and the next review sp
 })
 
 test("continuous fake runner failures exhaust at maxItemAttempts without another spawn", async () => {
+	// v1 status model: neither failing agent writes a status. The iteration crash leaves the item in the
+	// spawn-time in_progress, so the scheduler's iterDone hand-off advances it to review (it never infers
+	// "failed" from the exit code); the review crash again writes no status, and the item exhausts at the
+	// attempt cap. The two spawns are therefore iteration(codex) then review(claude).
 	const fixture = await createCrossRunnerFixture("max-attempts", [
 		{ runner: "codex", phase: "iteration", exitCode: 1, stderr: ["forced failure 1"] },
-		{ runner: "codex", phase: "iteration", exitCode: 1, stderr: ["forced failure 2"] },
+		{ runner: "claude", phase: "review", exitCode: 1, stderr: ["forced failure 2"] },
 	])
 	try {
 		let now = 1_800_317_000
@@ -242,7 +254,7 @@ test("continuous fake runner failures exhaust at maxItemAttempts without another
 		const fakeEvents = await readFakeRunnerEvents(fixture.eventLog)
 		expect(fakeEvents.map((event) => `${event.runner}:${event.phase}`)).toEqual([
 			"codex:iteration",
-			"codex:iteration",
+			"claude:review",
 		])
 	} finally {
 		fixture.store.close()
@@ -258,6 +270,9 @@ type FakeRunnerResponse = {
 	sessionId?: string | null
 	stdout?: string[]
 	stderr?: string[]
+	// v1 status model: the fake agent writes this status to the shared store before exiting, mirroring
+	// `coder-loop item update --status`. The scheduler reads it as the single source of truth.
+	writeStatus?: string
 }
 
 type FakeRunnerEvent = {
@@ -289,8 +304,8 @@ async function createCrossRunnerFixture(name: string, responses: FakeRunnerRespo
 	const claudeWrapper = resolve(root, "fake-claude.sh")
 	await mkdir(loopDataRoot, { recursive: true })
 	await writeFile(planPath, JSON.stringify({ responses }, null, 2))
-	await writeRunnerWrapper(codexWrapper, planPath, eventLog, "codex")
-	await writeRunnerWrapper(claudeWrapper, planPath, eventLog, "claude")
+	await writeRunnerWrapper(codexWrapper, planPath, eventLog, "codex", loopDataRoot)
+	await writeRunnerWrapper(claudeWrapper, planPath, eventLog, "claude", loopDataRoot)
 
 	const store = openSqliteStateStore({ loopDataRoot })
 	const state = createSchedulerState()
@@ -330,12 +345,12 @@ async function createCrossRunnerFixture(name: string, responses: FakeRunnerRespo
 	return { store, state, loopDataRoot, eventLog, schedulerEvents, options }
 }
 
-async function writeRunnerWrapper(path: string, planPath: string, eventLog: string, runner: RunnerKind): Promise<void> {
+async function writeRunnerWrapper(path: string, planPath: string, eventLog: string, runner: RunnerKind, loopDataRoot: string): Promise<void> {
 	await writeFile(
 		path,
 		[
 			"#!/bin/sh",
-			`exec bun ${shellQuote(FAKE_RUNNER)} ${shellQuote(planPath)} ${shellQuote(eventLog)} ${runner} "$@"`,
+			`exec bun ${shellQuote(FAKE_RUNNER)} ${shellQuote(planPath)} ${shellQuote(eventLog)} ${runner} ${shellQuote(loopDataRoot)} "$@"`,
 			"",
 		].join("\n"),
 	)

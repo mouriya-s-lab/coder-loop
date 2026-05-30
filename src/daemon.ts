@@ -17,7 +17,6 @@ import {
 import {
 	cleanupSchedulerChainWorktrees,
 	createSchedulerState,
-	defaultSchedulerStatusFromExit,
 	listActiveRuns,
 	listPendingCloseHandlers,
 	maxItemAttemptsFromChainMetadata,
@@ -984,13 +983,6 @@ export class CoderLoopDaemon {
 		if (scheduler.maxItemAttempts !== undefined) options.maxItemAttempts = scheduler.maxItemAttempts
 		if (scheduler.spawnFailureBackoff !== undefined) options.spawnFailureBackoff = scheduler.spawnFailureBackoff
 		if (scheduler.spawnFailureBackoffForChain !== undefined) options.spawnFailureBackoffForChain = scheduler.spawnFailureBackoffForChain
-		options.statusFromExit = scheduler.statusFromExit
-			?? ((context) => defaultSchedulerStatusFromExit({
-				exitCode: context.exitCode,
-				stdout: context.stdout,
-				phase: context.phase,
-				runnerKind: context.runner.kind,
-			}))
 		if (scheduler.chainCompleteTrigger !== undefined) options.chainCompleteTrigger = scheduler.chainCompleteTrigger
 		else if (scheduler.chainCompleteTriggerForChain !== undefined) options.chainCompleteTriggerForChain = scheduler.chainCompleteTriggerForChain
 		else {

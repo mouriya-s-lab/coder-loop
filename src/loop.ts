@@ -241,6 +241,7 @@ export type ItemCommandArgs =
 			issueFile: string | null
 			evidenceDir: string | null
 			runner: AgentRunnerKind | null
+			extra: string | null
 			loopDataRoot: string | null
 			json: boolean
 	  }
@@ -1293,6 +1294,7 @@ const itemUpdateCliCommand = command({
 		issueFile: option({ long: "issue-file", type: optional(cmdString) }),
 		evidenceDir: option({ long: "evidence-dir", type: optional(cmdString) }),
 		runner: option({ long: "runner", type: optional(cmdString) }),
+		extra: option({ long: "extra", type: optional(cmdString) }),
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
 		json: flag({ long: "json" }),
 	},
@@ -1311,6 +1313,7 @@ const itemUpdateCliCommand = command({
 			issueFile: args.issueFile ?? null,
 			evidenceDir: args.evidenceDir ?? null,
 			runner: parseOptionalRunner(args.runner ?? null, "--runner"),
+			extra: args.extra ?? null,
 			loopDataRoot: args.loopDataRoot ?? null,
 			json: args.json,
 		},
@@ -1541,6 +1544,7 @@ async function runItemCommand(args: string[]): Promise<void> {
 	assignCliOptional(fields, "issueFile", itemArgs.issueFile)
 	assignCliOptional(fields, "evidenceDir", itemArgs.evidenceDir)
 	assignCliOptional(fields, "runner", itemArgs.runner)
+	if (itemArgs.extra !== null) assignCliOptional(fields, "extra", parseItemExtraJson(itemArgs.extra))
 	if (Object.keys(fields).length === 0) fail("item update requires at least one field to update")
 	const result = await requestDaemonResult(itemArgs.loopDataRoot, "item.update", requestArgs)
 	writeCommandResult(result, itemArgs.json, formatItemMutationResult)
@@ -1552,6 +1556,17 @@ function assignCliOptional(target: JsonObject, key: string, value: JsonValue | u
 
 function isJsonObjectRecord(value: unknown): value is Record<string, JsonValue> {
 	return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function parseItemExtraJson(raw: string): JsonObject {
+	let parsed: unknown
+	try {
+		parsed = JSON.parse(raw)
+	} catch (error) {
+		fail(`--extra must be a JSON object: ${errorMessage(error)}`)
+	}
+	if (!isJsonObjectRecord(parsed)) fail("--extra must be a JSON object")
+	return parsed as JsonObject
 }
 
 function parseBatchItemsJson(raw: string): JsonObject[] {
@@ -4234,22 +4249,6 @@ export function parseReviewSummaryVerdict(output: string, runner: AgentRunnerKin
 		verdict = parseReviewSummaryVerdictFromText(parsed.text)
 	}
 	return sawRunnerJson ? verdict : parseReviewSummaryVerdictFromText(output)
-}
-
-function hasIterationSummaryLineInText(text: string): boolean {
-	return finalSummaryLine(text, SUMMARY_WATCHDOG_MARKER) !== null
-}
-
-export function hasIterationSummaryMarker(output: string, runner: AgentRunnerKind = "claude"): boolean {
-	let sawRunnerJson = false
-	let lastTextHadMarker = false
-	for (const line of output.split(/\r?\n/)) {
-		const parsed = runnerAgentTextFromJsonLine(line, runner)
-		sawRunnerJson = sawRunnerJson || parsed.parsedRunnerEvent
-		if (parsed.text === null) continue
-		lastTextHadMarker = hasIterationSummaryLineInText(parsed.text)
-	}
-	return sawRunnerJson ? lastTextHadMarker : hasIterationSummaryLineInText(output)
 }
 
 export function createSummaryWatchdogStdoutObserver(runner: AgentRunnerKind, marker: string, watchdog: SummaryWatchdog): SummaryWatchdogStdoutObserver {

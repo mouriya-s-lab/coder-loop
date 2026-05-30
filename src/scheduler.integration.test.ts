@@ -24,6 +24,10 @@ test("forced spawn failures over thirty scheduler seconds are capped by persiste
 	const loopDataRoot = resolve(root, "loop-data")
 	const fakeRunner = resolve(root, "forced-failure-runner.ts")
 	await mkdir(loopDataRoot, { recursive: true })
+	// v1 status model: the runner exits non-zero and writes NO status of its own. The item therefore
+	// stays in its continuable status (in_progress) and is re-spawned on the backoff cadence — proving
+	// both "agent exits without terminal status -> continuable" and "repeated non-zero exits are capped
+	// by persisted exponential backoff" without relying on any scheduler-side exit-code inference.
 	await writeFile(
 		fakeRunner,
 		`const promptIndex = Bun.argv.indexOf("-p")
@@ -64,6 +68,12 @@ process.exit(1)
 			store,
 			state,
 			presetDir: resolve(REPO_ROOT, "presets/gh-issue-pr-iteration"),
+			// Drive a single explicit phase so the iteration->review trigger (covered elsewhere) does not
+			// interleave un-backed-off review spawns into this backoff measurement. in_progress is declared
+			// continuable here, mirroring gh-issue-pr-iteration's real `continuable` set, so the no-status
+			// failing item keeps being re-selected through the pending path on each backoff window.
+			phase: "iteration",
+			pendingStatuses: ["queued", "in_progress"],
 			runner: {
 				kind: "claude",
 				source: "iteration-default",
