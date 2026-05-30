@@ -17,7 +17,6 @@ import {
 import {
 	cleanupSchedulerChainWorktrees,
 	createSchedulerState,
-	defaultSchedulerStatusFromExit,
 	listActiveRuns,
 	listPendingCloseHandlers,
 	maxItemAttemptsFromChainMetadata,
@@ -156,6 +155,9 @@ const ITEM_UPDATE_FIELD_KEYS = [
 	"issueFile",
 	"evidenceDir",
 	"runner",
+	"blockerRepo",
+	"blockerRef",
+	"clearBlocker",
 	"extra",
 	"dependsOn",
 ] as const
@@ -774,14 +776,17 @@ export class CoderLoopDaemon {
 		assignOptional(input, "evidenceDir", validateEvidenceDirForRequest(optionalStringOrNull(fields, "evidenceDir"), chain, this.paths.root))
 		assignOptional(input, "runner", optionalRunner(fields, "runner"))
 		const rawExtra = sizedJsonObject(fields, "extra", MAX_ITEM_EXTRA_BYTES)
+		const blockerMutation = blockerExtraMutationForRequest(fields)
 		const topLevelDependsOn = optionalDependsOn(fields, "dependsOn")
 		const extraDependsOn = topLevelDependsOn === undefined && rawExtra !== undefined ? optionalDependsOn(rawExtra, "dependsOn") : undefined
 		const dependsOn = topLevelDependsOn === undefined ? extraDependsOn : topLevelDependsOn
 		if (dependsOn !== undefined) {
 			validateDependsOnGraph(store.listItems(item.chainId), item.id, dependsOn)
-			input.extra = validateItemExtra(withDependsOn(rawExtra ?? item.extra, dependsOn))
-		} else {
-			assignOptional(input, "extra", rawExtra === undefined ? undefined : validateItemExtra(rawExtra))
+			input.extra = validateItemExtra(applyBlockerMutation(withDependsOn(rawExtra ?? item.extra, dependsOn), blockerMutation))
+		} else if (rawExtra !== undefined) {
+			input.extra = validateItemExtra(applyBlockerMutation(rawExtra, blockerMutation))
+		} else if (blockerMutation !== null) {
+			input.extra = validateItemExtra(applyBlockerMutation({ ...item.extra }, blockerMutation))
 		}
 		const terminalStatuses = await this.terminalItemStatuses(chain)
 		const resumeScheduler = await this.pauseSchedulerForMutation()
@@ -984,13 +989,6 @@ export class CoderLoopDaemon {
 		if (scheduler.maxItemAttempts !== undefined) options.maxItemAttempts = scheduler.maxItemAttempts
 		if (scheduler.spawnFailureBackoff !== undefined) options.spawnFailureBackoff = scheduler.spawnFailureBackoff
 		if (scheduler.spawnFailureBackoffForChain !== undefined) options.spawnFailureBackoffForChain = scheduler.spawnFailureBackoffForChain
-		options.statusFromExit = scheduler.statusFromExit
-			?? ((context) => defaultSchedulerStatusFromExit({
-				exitCode: context.exitCode,
-				stdout: context.stdout,
-				phase: context.phase,
-				runnerKind: context.runner.kind,
-			}))
 		if (scheduler.chainCompleteTrigger !== undefined) options.chainCompleteTrigger = scheduler.chainCompleteTrigger
 		else if (scheduler.chainCompleteTriggerForChain !== undefined) options.chainCompleteTriggerForChain = scheduler.chainCompleteTriggerForChain
 		else {
@@ -1153,7 +1151,7 @@ function isInvalidChainNameError(error: unknown): error is RuntimePathError {
 	return error instanceof RuntimePathError && error.code === "invalid_chain_name"
 }
 
-type RepositoryRefField = "repository" | "umbrellaRepo"
+type RepositoryRefField = "repository" | "umbrellaRepo" | "blockerRepo"
 
 function validateRepositoryForRequest(input: string): string {
 	return validateRepositoryRefForRequest(input, "repository")
@@ -1554,6 +1552,52 @@ function validateOptionalPositiveIntegerMetadata(metadata: JsonObject, key: stri
 function validateItemExtra(extra: JsonObject): JsonObject {
 	validateJsonObjectSafety(extra, "extra", MAX_ITEM_EXTRA_DEPTH, "extra")
 	return extra
+}
+
+// Typed blocker metadata mutation for item.update. blockerRepo/blockerRef are first-class typed
+// fields at the CLI and daemon boundary; they are stored as named keys inside the item.extra map
+// (the sqlite extra column is the pre-existing JsonObject storage). `clearBlocker` removes both.
+// Returns null when the request carries no blocker fields, so callers leave extra untouched.
+type BlockerExtraMutation = { clear: true } | { clear: false; repo: string | null | undefined; ref: string | null | undefined }
+
+function blockerExtraMutationForRequest(fields: JsonObject): BlockerExtraMutation | null {
+	const clear = fields.clearBlocker === true
+	const repo = optionalStringOrNull(fields, "blockerRepo")
+	const ref = optionalStringOrNull(fields, "blockerRef")
+	if (clear) {
+		if (repo !== undefined || ref !== undefined) {
+			throw new DaemonError("invalid_request", "clearBlocker must not be combined with blockerRepo or blockerRef", {})
+		}
+		return { clear: true }
+	}
+	if (repo === undefined && ref === undefined) return null
+	if (repo !== undefined && repo !== null) validateRepositoryRefForRequest(repo, "blockerRepo")
+	if (ref !== undefined && ref !== null && /[\u0000-\u001f\u007f]/u.test(ref)) {
+		throw new DaemonError("invalid_request", "blockerRef must not contain control characters", { blockerRef: ref })
+	}
+	return { clear: false, repo, ref }
+}
+
+function applyBlockerMutation(extra: JsonObject, mutation: BlockerExtraMutation | null): JsonObject {
+	if (mutation === null) return extra
+	const next: JsonObject = { ...extra }
+	if (mutation.clear) {
+		delete next.blockerRepo
+		delete next.blockerRef
+		return next
+	}
+	applyBlockerField(next, "blockerRepo", mutation.repo)
+	applyBlockerField(next, "blockerRef", mutation.ref)
+	return next
+}
+
+function applyBlockerField(extra: JsonObject, key: "blockerRepo" | "blockerRef", value: string | null | undefined): void {
+	if (value === undefined) return
+	if (value === null) {
+		delete extra[key]
+		return
+	}
+	extra[key] = value
 }
 
 function validateJsonObjectSafety(value: JsonValue, path: string, maxDepth: number, label: string, depth = 0): void {

@@ -241,6 +241,9 @@ export type ItemCommandArgs =
 			issueFile: string | null
 			evidenceDir: string | null
 			runner: AgentRunnerKind | null
+			blockerRepo: string | null
+			blockerRef: string | null
+			clearBlocker: boolean
 			loopDataRoot: string | null
 			json: boolean
 	  }
@@ -1293,6 +1296,9 @@ const itemUpdateCliCommand = command({
 		issueFile: option({ long: "issue-file", type: optional(cmdString) }),
 		evidenceDir: option({ long: "evidence-dir", type: optional(cmdString) }),
 		runner: option({ long: "runner", type: optional(cmdString) }),
+		blockerRepo: option({ long: "blocker-repo", type: optional(cmdString) }),
+		blockerRef: option({ long: "blocker-ref", type: optional(cmdString) }),
+		clearBlocker: flag({ long: "clear-blocker" }),
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
 		json: flag({ long: "json" }),
 	},
@@ -1311,6 +1317,9 @@ const itemUpdateCliCommand = command({
 			issueFile: args.issueFile ?? null,
 			evidenceDir: args.evidenceDir ?? null,
 			runner: parseOptionalRunner(args.runner ?? null, "--runner"),
+			blockerRepo: args.blockerRepo ?? null,
+			blockerRef: args.blockerRef ?? null,
+			clearBlocker: args.clearBlocker,
 			loopDataRoot: args.loopDataRoot ?? null,
 			json: args.json,
 		},
@@ -1541,6 +1550,9 @@ async function runItemCommand(args: string[]): Promise<void> {
 	assignCliOptional(fields, "issueFile", itemArgs.issueFile)
 	assignCliOptional(fields, "evidenceDir", itemArgs.evidenceDir)
 	assignCliOptional(fields, "runner", itemArgs.runner)
+	assignCliOptional(fields, "blockerRepo", itemArgs.blockerRepo)
+	assignCliOptional(fields, "blockerRef", itemArgs.blockerRef)
+	if (itemArgs.clearBlocker) fields.clearBlocker = true
 	if (Object.keys(fields).length === 0) fail("item update requires at least one field to update")
 	const result = await requestDaemonResult(itemArgs.loopDataRoot, "item.update", requestArgs)
 	writeCommandResult(result, itemArgs.json, formatItemMutationResult)
@@ -4234,22 +4246,6 @@ export function parseReviewSummaryVerdict(output: string, runner: AgentRunnerKin
 		verdict = parseReviewSummaryVerdictFromText(parsed.text)
 	}
 	return sawRunnerJson ? verdict : parseReviewSummaryVerdictFromText(output)
-}
-
-function hasIterationSummaryLineInText(text: string): boolean {
-	return finalSummaryLine(text, SUMMARY_WATCHDOG_MARKER) !== null
-}
-
-export function hasIterationSummaryMarker(output: string, runner: AgentRunnerKind = "claude"): boolean {
-	let sawRunnerJson = false
-	let lastTextHadMarker = false
-	for (const line of output.split(/\r?\n/)) {
-		const parsed = runnerAgentTextFromJsonLine(line, runner)
-		sawRunnerJson = sawRunnerJson || parsed.parsedRunnerEvent
-		if (parsed.text === null) continue
-		lastTextHadMarker = hasIterationSummaryLineInText(parsed.text)
-	}
-	return sawRunnerJson ? lastTextHadMarker : hasIterationSummaryLineInText(output)
 }
 
 export function createSummaryWatchdogStdoutObserver(runner: AgentRunnerKind, marker: string, watchdog: SummaryWatchdog): SummaryWatchdogStdoutObserver {

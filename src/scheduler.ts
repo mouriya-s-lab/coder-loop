@@ -7,9 +7,7 @@ import { basename, dirname, resolve } from "node:path"
 import {
 	buildConfigBindings,
 	buildRunnerInvocation,
-	hasIterationSummaryMarker,
 	loadPreset,
-	parseReviewSummaryVerdict,
 	parseSessionIdFromRunnerStream,
 	renderFragmentIndex,
 	renderPrompt,
@@ -33,6 +31,7 @@ import {
 import { detectsSessionIdInvalid } from "./runners/session-id"
 import { type ChainRecord, dependsOnItemIds, type ItemRecord, listDependencyWaitReasons, type SqliteStateStore } from "./sqlite-state"
 import {
+	LOOP_DATA_ROOT_ENV,
 	type LoopDataRootOptions,
 	RuntimePathError,
 	resolveChainRuntimePaths,
@@ -184,7 +183,6 @@ export type SchedulerOptions = {
 	statusesForChain?: (chain: ChainRecord) => SchedulerChainStatuses | Promise<SchedulerChainStatuses>
 	now?: () => number
 	runIdFactory?: (context: { chain: ChainRecord; item: ItemRecord; phase: string }) => string
-	statusFromExit?: (context: SchedulerStatusFromExitContext) => string
 	kindResolver?: SchedulerKindResolver
 	maxItemAttempts?: number
 	maxItemAttemptsForChain?: (chain: ChainRecord) => number
@@ -206,49 +204,8 @@ export type SchedulerChainStatuses = {
 	entry: string
 }
 
-export type SchedulerStatusFromExitContext = {
-	exitCode: number
-	stdout: string
-	stderr: string
-	item: ItemRecord
-	chain: ChainRecord
-	phase: string
-	runner: AgentRunnerSelection
-}
-
-export type DefaultSchedulerStatusFromExitInput = {
-	exitCode: number
-	stdout: string
-	phase: string
-	runnerKind: AgentRunnerKind
-}
-
-const ITERATION_PHASE_NAME = "iteration"
 export const DEFAULT_MAX_ITEM_ATTEMPTS = 50
 export const SCHEDULER_EXHAUSTED_STATUS = "exhausted"
-
-export function defaultSchedulerStatusFromExit(input: DefaultSchedulerStatusFromExitInput): string {
-	if (input.exitCode !== 0) return "changes_requested"
-	const reviewVerdict = parseReviewSummaryVerdict(input.stdout, input.runnerKind)
-	if (reviewVerdict !== null) {
-		switch (reviewVerdict) {
-			case "accepted":
-			case "stop":
-				return "done"
-			case "skip":
-				return "moot"
-			case "blocked":
-				return "blocked"
-			case "retry":
-				return "changes_requested"
-		}
-	}
-	if (input.phase === ITERATION_PHASE_NAME && hasIterationSummaryMarker(input.stdout, input.runnerKind)) {
-		return "in_progress"
-	}
-	console.warn(`coder-loop scheduler: phase ${input.phase} exit 0 without SUMMARY marker, retry`)
-	return "changes_requested"
-}
 
 export type SchedulerTickResult = {
 	spawnedRuns: SchedulerActiveRun[]
@@ -712,6 +669,9 @@ async function spawnSchedulerRun(
 		cwd: worktreePath,
 		stdio: ["ignore", "pipe", "pipe"],
 		detached: true,
+		// The agent writes its own item status via `coder-loop item update`, which must reach
+		// the daemon that owns this loop-data-root. Pass it through so the CLI resolves the same store.
+		env: { ...process.env, [LOOP_DATA_ROOT_ENV]: resolveLoopDataPaths(options.loopDataRootOptions).root },
 	})
 	const activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, phase, child, runner)
 	options.store.setCurrentRun({
@@ -786,17 +746,14 @@ function attachRunCloseHandler(
 				const stderrText = Buffer.concat(stderr).toString("utf-8")
 				const terminalStatuses = new Set((await schedulerStatusesForChain(options, chain)).terminal)
 				const currentItem = options.store.getItem(item.id)
-				// If the item is still in a terminal status at close (e.g. a side-effect trigger phase that ran on
-				// a terminal item and left it terminal — see spawnSchedulerRun), keep that terminal status and do
-				// not consult statusFromExit. This avoids re-deriving a continuable status (and emitting the
-				// misleading "exit 0 without SUMMARY marker, retry" warn) for a phase that must not change lifecycle.
-				const preservedTerminalStatus = currentItem !== null && terminalStatuses.has(currentItem.status) ? currentItem.status : null
-				const status = preservedTerminalStatus ?? (
-					options.statusFromExit?.({ exitCode, stdout: stdoutText, stderr: stderrText, item, chain, phase, runner })
-						?? defaultSchedulerStatusFromExit({ exitCode, stdout: stdoutText, phase, runnerKind: runner.kind })
-				)
+				// v1 status model: the agent owns its item status and writes it explicitly via
+				// `coder-loop item update --status` during the run. The scheduler never derives status from
+				// agent stdout or exit code — it records whatever status the agent left in the DB. If the agent
+				// never wrote a terminal status the item stays continuable and the next tick re-spawns it (with
+				// backoff on a non-zero exit), so a no-op exit cannot silently terminate an item.
+				const status = (currentItem ?? item).status
 				const endedAt = nowSeconds(options)
-				const itemTransitionedToTerminal = (currentItem === null || !terminalStatuses.has(currentItem.status)) && terminalStatuses.has(status)
+				const itemTransitionedToTerminal = !terminalStatuses.has(item.status) && terminalStatuses.has(status)
 				options.state.finalizingItemStatuses.set(item.id, status)
 				try {
 					await writeSchedulerRunCompletionArtifacts(options, {
@@ -1453,6 +1410,8 @@ async function spawnSchedulerReviewOnEmptyRun(
 		cwd: worktreePath,
 		stdio: ["ignore", "pipe", "pipe"],
 		detached: true,
+		// Same loop-data-root passthrough as the per-item spawn so the agent's `item update` reaches this daemon.
+		env: { ...process.env, [LOOP_DATA_ROOT_ENV]: resolveLoopDataPaths(options.loopDataRootOptions).root },
 	})
 	const activeRun = attachReviewOnEmptyCloseHandler(
 		options,
@@ -1517,15 +1476,11 @@ function attachReviewOnEmptyCloseHandler(
 				const exitCode = code ?? 1
 				const stdoutText = Buffer.concat(stdout).toString("utf-8")
 				const stderrText = Buffer.concat(stderr).toString("utf-8")
-				const statusFromExit = options.statusFromExit?.({
-					exitCode,
-					stdout: stdoutText,
-					stderr: stderrText,
-					item: fallbackItem,
-					chain,
-					phase,
-					runner,
-				}) ?? defaultSchedulerStatusFromExit({ exitCode, stdout: stdoutText, phase, runnerKind: runner.kind })
+				const chainStatuses = await schedulerStatusesForChain(options, chain)
+				// Synthetic review-on-empty / chain-complete trigger run: there is no real item whose status
+				// the agent owns, so the run outcome is recorded from the exit code using the chain's own
+				// status vocabulary (no stdout parsing, no hardcoded literal). This run mutates no item.
+				const status = exitCode === 0 ? (chainStatuses.success[0] ?? chainStatuses.entry) : chainStatuses.entry
 				const endedAt = nowSeconds(options)
 				try {
 					await writeSchedulerRunCompletionArtifacts(options, {
@@ -1536,7 +1491,7 @@ function attachReviewOnEmptyCloseHandler(
 						startedAt,
 						endedAt,
 						exitCode,
-						status: statusFromExit,
+						status,
 						pid: child.pid ?? null,
 						worktreePath,
 						stdoutText,
@@ -1555,7 +1510,7 @@ function attachReviewOnEmptyCloseHandler(
 						itemId: fallbackItem.id,
 						runId,
 						exitCode,
-						status: statusFromExit,
+						status,
 					})
 					await emit(options, {
 						type: "phase.end",
@@ -1566,11 +1521,10 @@ function attachReviewOnEmptyCloseHandler(
 						phase,
 						exitCode,
 						durationSeconds: Math.max(0, endedAt - startedAt),
-						status: statusFromExit,
+						status,
 					})
-					const chainStatuses = await schedulerStatusesForChain(options, chain)
 					await completeChainIfReady(options, chain, runId, [...chainStatuses.terminal])
-					return { runId, itemId: fallbackItem.id, chainId: chain.id, repoCwd, exitCode, stdout: stdoutText, stderr: stderrText, status: statusFromExit }
+					return { runId, itemId: fallbackItem.id, chainId: chain.id, repoCwd, exitCode, stdout: stdoutText, stderr: stderrText, status }
 				} catch (error) {
 					if (slot.activeRun?.runId === runId) slot.activeRun = null
 					throw error

@@ -5,7 +5,6 @@ import { resolve } from "node:path"
 
 import {
 	createSchedulerState,
-	defaultSchedulerStatusFromExit,
 	listActiveRuns,
 	makeRunId,
 	renderSchedulerSpawnPrompt,
@@ -25,6 +24,7 @@ import { resolveSchedulerPresetPhasePrompt } from "./daemon"
 import {
 	buildRunnerInvocation,
 	loadPreset,
+	parseReviewSummaryVerdict,
 	resolvePhaseRunnerFromChain,
 	runPresetChainCompleteTriggerPhases,
 	type AgentRunnerSelection,
@@ -414,9 +414,16 @@ describe("scheduler", () => {
 			expect(firstTick.spawnedRuns[0]?.itemId).toBe(first.id)
 
 			const terminated = await firstTick.spawnedRuns[0]!.terminate({ forceAfterMs: 200 })
-			expect(terminated.status).toBe("changes_requested")
+			// SIGTERM kills the agent mid-run, so it never writes a status; the spawn-set
+			// in_progress is what the scheduler reads back (v1 status model).
+			expect(terminated.status).toBe("in_progress")
 			expect(fixture.store.getItem(first.id)?.attempts).toBe(1)
 			expect(fixture.store.getItem(second.id)?.attempts).toBe(0)
+
+			// Model the daemon's stale-recovery: a killed in_progress item is reset to a
+			// backoff-gated continuable status so the untouched sibling gets the next turn.
+			// Omit `extra` to preserve the spawn-failure backoff applied on termination.
+			fixture.store.updateItem(first.id, { status: "changes_requested", phase: null, updatedAt: 1_800_000_700 })
 
 			const secondTick = await schedulerTick(fixture.options())
 			expect(secondTick.spawnedRuns).toHaveLength(1)
@@ -797,75 +804,11 @@ describe("scheduler", () => {
 	})
 })
 
-describe("defaultSchedulerStatusFromExit", () => {
-	test("exit code != 0 maps to changes_requested regardless of stdout", () => {
-		expect(defaultSchedulerStatusFromExit({ exitCode: 1, stdout: "", phase: "iteration", runnerKind: "claude" })).toBe("changes_requested")
-		expect(defaultSchedulerStatusFromExit({ exitCode: 137, stdout: "REVIEW SUMMARY: verdict=accepted; ignored", phase: "iteration", runnerKind: "claude" })).toBe("changes_requested")
-	})
-
-	test("exit 0 with no SUMMARY marker maps to changes_requested", () => {
-		const stdout = "exploration log line\nanother line without summary\n"
-		expect(defaultSchedulerStatusFromExit({ exitCode: 0, stdout, phase: "iteration", runnerKind: "claude" })).toBe("changes_requested")
-	})
-
-	test("exit 0 with REVIEW SUMMARY maps per parseReviewSummaryVerdict for every verdict", () => {
-		const map: Array<[string, string]> = [
-			["accepted", "done"],
-			["stop", "done"],
-			["skip", "moot"],
-			["blocked", "blocked"],
-			["retry", "changes_requested"],
-		]
-		for (const [verdict, expected] of map) {
-			const stdout = `intermediate line\nREVIEW SUMMARY: verdict=${verdict}; issue=#1; reason=unit`
-			expect(defaultSchedulerStatusFromExit({ exitCode: 0, stdout, phase: "iteration", runnerKind: "claude" })).toBe(expected)
-		}
-	})
-
-	test("exit 0 with only ITERATION SUMMARY and phase=iteration maps to in_progress", () => {
-		const stdout = "exploring\nITERATION SUMMARY: scope=unit; reason=fake"
-		expect(defaultSchedulerStatusFromExit({ exitCode: 0, stdout, phase: "iteration", runnerKind: "claude" })).toBe("in_progress")
-	})
-
-	test("exit 0 with only ITERATION SUMMARY and phase!=iteration falls through to changes_requested", () => {
-		const stdout = "exploring\nITERATION SUMMARY: scope=unit; reason=fake"
-		expect(defaultSchedulerStatusFromExit({ exitCode: 0, stdout, phase: "review", runnerKind: "claude" })).toBe("changes_requested")
-	})
-
-	test("REVIEW SUMMARY wins over an earlier ITERATION SUMMARY", () => {
-		const stdout = [
-			"ITERATION SUMMARY: scope=phase-1",
-			"middle log noise",
-			"REVIEW SUMMARY: verdict=skip; issue=#2; reason=both markers present",
-		].join("\n")
-		expect(defaultSchedulerStatusFromExit({ exitCode: 0, stdout, phase: "iteration", runnerKind: "claude" })).toBe("moot")
-	})
-})
-
-describe("scheduler default statusFromExit (end-to-end via fixture)", () => {
-	test("exit 0 with no SUMMARY marker leaves item continuable (changes_requested) after one tick", async () => {
-		const fixture = await createFixture("status-no-marker")
+describe("scheduler reads the agent-written item status (v1 status model)", () => {
+	test("a terminal status the agent writes is recorded as the item's truth", async () => {
+		const fixture = await createFixture("status-agent-terminal")
 		try {
-			const chain = createChain(fixture.store, "status-no-marker-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 5001, repoCwd: "/repo/a", summary: null })
-
-			const tick = await schedulerTick(fixture.options())
-			expect(tick.spawnedRuns).toHaveLength(1)
-			const closed = await tick.spawnedRuns[0]!.closed
-
-			expect(closed.exitCode).toBe(0)
-			expect(closed.status).toBe("changes_requested")
-			expect(fixture.store.getItem(item.id)?.status).toBe("changes_requested")
-			expect(fixture.store.getChain(chain.id)?.status).toBe("active")
-		} finally {
-			fixture.store.close()
-		}
-	})
-
-	test("exit 0 with REVIEW SUMMARY verdict=skip maps item to moot", async () => {
-		const fixture = await createFixture("status-review-skip")
-		try {
-			const chain = createChain(fixture.store, "status-review-skip-chain")
+			const chain = createChain(fixture.store, "status-agent-terminal-chain")
 			const item = createItem(fixture.store, chain, {
 				issueNumber: 5002,
 				repoCwd: "/repo/a",
@@ -883,10 +826,10 @@ describe("scheduler default statusFromExit (end-to-end via fixture)", () => {
 		}
 	})
 
-	test("exit 0 with only ITERATION SUMMARY in iteration phase keeps item in_progress (not terminal done)", async () => {
-		const fixture = await createFixture("status-iter-summary")
+	test("an in_progress status the agent writes keeps the item continuable and the chain active", async () => {
+		const fixture = await createFixture("status-agent-in-progress")
 		try {
-			const chain = createChain(fixture.store, "status-iter-summary-chain")
+			const chain = createChain(fixture.store, "status-agent-in-progress-chain")
 			const item = createItem(fixture.store, chain, {
 				issueNumber: 5003,
 				repoCwd: "/repo/a",
@@ -905,16 +848,74 @@ describe("scheduler default statusFromExit (end-to-end via fixture)", () => {
 		}
 	})
 
-	test("daemon-bound default re-spawns the same item across ticks when each spawn exits 0 without SUMMARY marker", async () => {
+	test("when the agent writes no status the item keeps the spawn pre-set in_progress (continuable)", async () => {
+		const fixture = await createFixture("status-agent-silent")
+		try {
+			const chain = createChain(fixture.store, "status-agent-silent-chain")
+			// summary:null makes the fake runner write nothing, modelling an agent that exits without
+			// calling `coder-loop item update`. The scheduler must not invent a terminal status.
+			const item = createItem(fixture.store, chain, { issueNumber: 5001, repoCwd: "/repo/a", summary: null })
+
+			const tick = await schedulerTick(fixture.options())
+			expect(tick.spawnedRuns).toHaveLength(1)
+			const closed = await tick.spawnedRuns[0]!.closed
+
+			expect(closed.exitCode).toBe(0)
+			expect(closed.status).toBe("in_progress")
+			expect(fixture.store.getItem(item.id)?.status).toBe("in_progress")
+			expect(fixture.store.getChain(chain.id)?.status).toBe("active")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("the scheduler records the written status even when stdout carries a different SUMMARY verdict", async () => {
+		const fixture = await createFixture("status-agent-over-stdout")
+		try {
+			const chain = createChain(fixture.store, "status-agent-over-stdout-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 5005, repoCwd: "/repo/a" })
+
+			// The agent prints a verdict=retry SUMMARY line (which the deleted v2 inference would have
+			// mapped to changes_requested) but writes `done` to the store. v1 reads the written status.
+			const tick = await schedulerTick(fixture.options({
+				prompt: ({ item: i, runId, worktreePath }) =>
+					JSON.stringify({
+						itemId: i.id,
+						issueNumber: i.issueNumber,
+						runId,
+						worktreePath,
+						eventLog: fixture.eventLog,
+						sleepMs: 5,
+						exitCode: 0,
+						summary: "REVIEW SUMMARY: verdict=retry; issue=#5005; reason=stdout-would-retry",
+						writeStatus: "done",
+					}),
+			}))
+			const closed = await tick.spawnedRuns[0]!.closed
+
+			expect(closed.exitCode).toBe(0)
+			expect(closed.status).toBe("done")
+			expect(fixture.store.getItem(item.id)?.status).toBe("done")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("an item the agent keeps marking changes_requested is re-spawned across ticks", async () => {
 		const fixture = await createFixture("status-respawn")
 		try {
 			const chain = createChain(fixture.store, "status-respawn-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 5004, repoCwd: "/repo/a", summary: null })
+			// verdict=retry → the agent writes changes_requested each run, so the item stays pending and is
+			// re-selected for iteration on the next tick (no exit-code backoff gate, since exit is 0).
+			const item = createItem(fixture.store, chain, {
+				issueNumber: 5004,
+				repoCwd: "/repo/a",
+				summary: "REVIEW SUMMARY: verdict=retry; issue=#5004; reason=keep-retrying",
+			})
 
 			let runCounter = 0
-			const baseOptions = fixture.options()
 			const options: SchedulerOptions = {
-				...baseOptions,
+				...fixture.options(),
 				runIdFactory: () => `run-respawn-${++runCounter}`,
 			}
 
@@ -1959,7 +1960,10 @@ describe("resolveSchedulerPresetPhasePrompt", () => {
 			expect(capturedStdout).toContain("`mouriya-s-lab/coder-loop`")
 			expect(capturedStdout).toContain("`/repo/a`")
 			expect(capturedStdout).toContain("Current issue: `#283`")
-			expect(fixture.store.getItem(item.id)?.status).toBe("done")
+			// The echo-prompt runner is a render probe: it never calls `coder-loop item update`, so under
+			// the v1 status model the item keeps the in_progress status the scheduler pre-set at spawn. The
+			// scheduler does not infer a terminal status from the REVIEW SUMMARY the probe echoes to stdout.
+			expect(fixture.store.getItem(item.id)?.status).toBe("in_progress")
 		} finally {
 			fixture.store.close()
 		}
@@ -2093,7 +2097,8 @@ describe("scheduler chain bindings (issue #288)", () => {
 			expect(capturedStdout).toContain("chain.baseBranch=trunk")
 			expect(capturedStdout).toContain("item.repoCwd=/tmp/chain-int-repo")
 			expect(capturedStdout.match(/\{\{[A-Z_]+\}\}/g) ?? []).toEqual([])
-			expect(fixture.store.getItem(item.id)?.status).toBe("done")
+			// Render probe (echo-prompt runner) writes no status, so the item stays in_progress under v1.
+			expect(fixture.store.getItem(item.id)?.status).toBe("in_progress")
 		} finally {
 			fixture.store.close()
 		}
@@ -2393,7 +2398,6 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 				phaseRunner,
 				phase: "iteration",
 				prompt: "iter-prompt",
-				statusFromExit: () => "in_progress",
 			})
 			expect(iterTick.spawnedRuns).toHaveLength(1)
 			const iterClosed = await iterTick.spawnedRuns[0]!.closed
@@ -2410,7 +2414,6 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 				phaseRunner,
 				phase: "review",
 				prompt: "review-prompt",
-				statusFromExit: () => "done",
 			})
 			expect(reviewTick.spawnedRuns).toHaveLength(1)
 			const reviewClosed = await reviewTick.spawnedRuns[0]!.closed
@@ -2716,7 +2719,10 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			const options = fixture.options({
 				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
 			})
-			await runSchedulerUntilIdle(options)
+			// Single iteration spawn: the fake session runner writes no status, so drive exactly one
+			// tick rather than run-until-idle (which would auto-advance to review and reuse the runId).
+			const tick = await schedulerTick({ ...options, phase: "iteration" })
+			await tick.spawnedRuns[0]!.closed
 
 			const refreshed = fixture.store.getItem(item.id)
 			expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "claude" })).toBe("sess-captured-001")
@@ -2737,7 +2743,9 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			const options = fixture.options({
 				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
 			})
-			await runSchedulerUntilIdle(options)
+			// Single iteration spawn (see note above): one tick captures the seeded session id on argv.
+			const tick = await schedulerTick({ ...options, phase: "iteration" })
+			await tick.spawnedRuns[0]!.closed
 
 			const runId = `run-${chain.id}-${item.id}`
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
@@ -2764,7 +2772,9 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			const options = fixture.options({
 				runner: { kind: "codex", source: "iteration-default", binary: fakeRunner, extraArgs: [], model: null },
 			})
-			await runSchedulerUntilIdle(options)
+			// Single iteration spawn (see note above): one tick captures the codex thread id after exit.
+			const tick = await schedulerTick({ ...options, phase: "iteration" })
+			await tick.spawnedRuns[0]!.closed
 
 			const refreshed = fixture.store.getItem(item.id)
 			expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "codex" })).toBe("thread-captured-002")
@@ -2784,14 +2794,21 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			await writeFakeCodexSessionShellRunner(fakeCodex, "thread-iteration-311")
 			await writeFakeClaudeSessionRunner(fakeClaude, "sess-review-311")
 
-			await runSchedulerUntilIdle(fixture.options({
+			const sessionOptions = fixture.options({
 				phaseRunner: ({ phase }) =>
 					phase === "iteration"
 						? { kind: "codex", source: "iteration-default", binary: fakeCodex, extraArgs: [], model: null }
 						: { kind: "claude", source: "review-default", binary: "bun", extraArgs: [fakeClaude], model: null },
 				runIdFactory: ({ chain, item, phase }) => `run-${chain.id}-${item.id}-${phase}`,
-				statusFromExit: ({ phase }) => phase === "iteration" ? "in_progress" : "done",
-			}))
+			})
+			// Drive the two phases explicitly: the fake session runners write no status, so
+			// run-until-idle would auto-advance iteration→review reusing the runId. Between ticks,
+			// set the item to a pending-eligible status so the explicit review tick selects it.
+			const iterTick = await schedulerTick({ ...sessionOptions, phase: "iteration" })
+			await iterTick.spawnedRuns[0]!.closed
+			fixture.store.updateItem(item.id, { status: "changes_requested", updatedAt: 1_800_000_500 })
+			const reviewTick = await schedulerTick({ ...sessionOptions, phase: "review" })
+			await reviewTick.spawnedRuns[0]!.closed
 
 			expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "codex" })).toBe("thread-iteration-311")
 			expect(fixture.store.getItemSessionId(item.id, { phase: "review", runner: "claude" })).toBe("sess-review-311")
@@ -2817,7 +2834,6 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			const options = fixture.options({
 				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner, attemptFile], model: null },
 				runIdFactory: ({ chain, item }) => `run-${chain.id}-${item.id}-${++runSequence}`,
-				statusFromExit: ({ exitCode }) => exitCode === 0 ? "done" : "changes_requested",
 				now: () => now,
 			})
 
@@ -2834,6 +2850,11 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 				runner: "claude",
 				previousSessionId: "sess-stale-312",
 			}))
+
+			// The agent exited non-zero without writing a status, so the spawn-set in_progress
+			// remains; model the daemon recovery back to a continuable status so the next tick
+			// re-selects a fresh iteration spawn rather than advancing to review.
+			fixture.store.updateItem(item.id, { status: "changes_requested", phase: null, updatedAt: now })
 
 			now += 2
 			const secondTick = await schedulerTick(options)
@@ -2864,7 +2885,6 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 
 			const tick = await schedulerTick(fixture.options({
 				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
-				statusFromExit: () => "done",
 			}))
 			await tick.spawnedRuns[0]!.closed
 
@@ -3126,7 +3146,7 @@ async function createFixture(name: string): Promise<Fixture> {
 		worktreeManager,
 		loopDataRootOptions: { loopDataRoot },
 		runIdFactory: ({ chain, item }) => `run-${chain.id}-${item.id}`,
-		prompt: ({ item, runId, worktreePath }) => {
+		prompt: ({ item, runId, worktreePath, phase }) => {
 			const payload: Record<string, unknown> = {
 				itemId: item.id,
 				issueNumber: item.issueNumber,
@@ -3135,6 +3155,10 @@ async function createFixture(name: string): Promise<Fixture> {
 				eventLog,
 				sleepMs: typeof item.extra.sleepMs === "number" ? item.extra.sleepMs : 5,
 				exitCode: typeof item.extra.exitCode === "number" ? item.extra.exitCode : 0,
+				// v1 status model: the fake runner writes this status to the store itself, simulating the
+				// real agent's `coder-loop item update --status`. The scheduler only reads item.status; it
+				// never derives status from the runner's stdout or exit code.
+				writeStatus: fakeRunnerWriteStatus(phase, item.extra),
 			}
 			if (Object.prototype.hasOwnProperty.call(item.extra, "summary")) payload.summary = item.extra.summary
 			return JSON.stringify(payload)
@@ -3200,9 +3224,11 @@ function createItem(
 
 async function writeFakeRunner(path: string): Promise<void> {
 	await mkdir(resolve(path, ".."), { recursive: true })
+	const sqliteStateModule = resolve(REPO_ROOT, "src/sqlite-state.ts")
 	await writeFile(
 		path,
 		`import { appendFile } from "node:fs/promises"
+import { openSqliteStateStore } from ${JSON.stringify(sqliteStateModule)}
 
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
@@ -3213,9 +3239,65 @@ await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.ite
 console.log("done:" + input.itemId)
 const summary = Object.prototype.hasOwnProperty.call(input, "summary") ? input.summary : "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=fake-runner default"
 if (summary !== null) console.log(summary)
+// v1 status model: the agent owns its item status. Write it through the same SQLite store the
+// scheduler reads (the daemon's loop-data-root is passed via CODER_LOOP_DATA_DIR), mirroring a real
+// agent's \`coder-loop item update --status\`. A null writeStatus means the agent wrote nothing, so the
+// item keeps the in_progress status the scheduler pre-set at spawn (continuable).
+if (typeof input.writeStatus === "string" && input.itemId > 0) {
+	const loopDataRoot = process.env.CODER_LOOP_DATA_DIR
+	if (loopDataRoot) {
+		const store = openSqliteStateStore({ loopDataRoot })
+		store.updateItem(input.itemId, { status: input.writeStatus, updatedAt: Math.floor(Date.now() / 1000) })
+		store.close()
+	}
+}
 process.exit(input.exitCode)
 `,
 	)
+}
+
+const FAKE_RUNNER_DEFAULT_SUMMARY = "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=fake-runner default"
+
+// Mirrors a real agent's status decision for the fake runner: the agent writes a preset status via
+// `coder-loop item update --status`, and the scheduler reads it. The scheduler never derives status
+// from this — it only reads item.status. Returns null when the agent would write nothing (e.g. an
+// explicit summary:null clean exit), leaving the item in the in_progress status the scheduler pre-set
+// at spawn (continuable). The fixture agent writes whatever its verdict implies regardless of phase
+// slot; the "iteration only ever hands off in_progress" rule is a preset-prompt concern (iter/final.md),
+// not a scheduler invariant, so it is not modeled here.
+const TRIGGER_PHASES = new Set(["blocked-responder", "umbrella-finalizer", "review-on-empty"])
+
+function fakeRunnerWriteStatus(phase: string, extra: JsonObject): string | null {
+	// Trigger phases (blocked-responder, umbrella-finalizer, review-on-empty) run as side effects and
+	// must not mutate the triggering item's status, so the scheduler's preserveTerminalStatus keeps the
+	// pre-trigger terminal status intact. Work phases (iteration / review / single-phase `run`) write it.
+	if (TRIGGER_PHASES.has(phase)) return null
+	const exitCode = typeof extra.exitCode === "number" ? extra.exitCode : 0
+	// A failed run requests a retry so the item stays pending and the scheduler's spawn-failure backoff
+	// can gate it. This is the agent/recovery writing changes_requested, not the scheduler inferring it.
+	if (exitCode !== 0) return "changes_requested"
+	const hasSummary = Object.prototype.hasOwnProperty.call(extra, "summary")
+	const summary = hasSummary ? extra.summary : FAKE_RUNNER_DEFAULT_SUMMARY
+	if (typeof summary !== "string") return null
+	// The agent's own summary declares what it did, and the status it writes matches. An ITERATION
+	// SUMMARY means the iter agent advanced work and hands off as in_progress (never terminal); a REVIEW
+	// SUMMARY carries the terminal verdict. This mirrors the agent writing its own status, not the
+	// scheduler inferring it from stdout.
+	if (summary.startsWith("ITERATION SUMMARY")) return "in_progress"
+	const verdict = parseReviewSummaryVerdict(summary, "claude")
+	switch (verdict) {
+		case "accepted":
+		case "stop":
+			return "done"
+		case "skip":
+			return "moot"
+		case "blocked":
+			return "blocked"
+		case "retry":
+			return "changes_requested"
+		default:
+			return "changes_requested"
+	}
 }
 
 async function readRunnerEvents(path: string): Promise<RunnerEvent[]> {

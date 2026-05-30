@@ -12,7 +12,7 @@ import {
 	type CoderLoopDaemon,
 	type DaemonResponse,
 } from "./daemon"
-import { buildCoderLoopStatusSnapshot } from "./loop"
+import { buildCoderLoopStatusSnapshot, parseReviewSummaryVerdict } from "./loop"
 import {
 	createGitWorktreeManager,
 	reviewOnEmptyLockPathForChainName,
@@ -31,6 +31,51 @@ const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/dt", String(p
 const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
 
 let nextFixtureId = 0
+
+// v1 status model: the spawned agent is the only writer of item.status. These daemon
+// integration tests use fake runners, so the fake runner reproduces the real agent's
+// `coder-loop item update --status` by writing the test-computed `writeStatus` straight
+// into the shared SQLite store (the scheduler then reads it back as the source of truth).
+const FAKE_RUNNER_STATUS_WRITE_SNIPPET = `if (typeof input.writeStatus === "string" && input.itemId > 0 && process.env.CODER_LOOP_DATA_DIR) {
+	const { openSqliteStateStore } = await import(${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))})
+	const store = openSqliteStateStore({ loopDataRoot: process.env.CODER_LOOP_DATA_DIR })
+	store.updateItem(input.itemId, { status: input.writeStatus, updatedAt: Math.floor(Date.now() / 1000) })
+	store.close()
+}`
+
+const FAKE_RUNNER_DEFAULT_SUMMARY = "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=fake-runner default"
+
+// Mirror of the real agents' status-writing decision for fake runners: derive the status
+// the agent would have written from the phase and the item's scripted summary/exitCode.
+const TRIGGER_PHASES = new Set(["blocked-responder", "umbrella-finalizer", "review-on-empty"])
+
+function daemonFakeRunnerWriteStatus(phase: string, extra: Record<string, unknown>): string | null {
+	// Trigger phases run as side effects and must not mutate the triggering item's status (the engine
+	// preserves its terminal status). Work phases (iteration / review / single-phase `run`) write status.
+	if (TRIGGER_PHASES.has(phase)) return null
+	const exitCode = typeof extra.exitCode === "number" ? extra.exitCode : 0
+	if (exitCode !== 0) return "changes_requested"
+	const hasSummary = Object.prototype.hasOwnProperty.call(extra, "summary")
+	const summary = hasSummary ? extra.summary : FAKE_RUNNER_DEFAULT_SUMMARY
+	if (typeof summary !== "string") return null
+	// The agent's own summary declares what it did: an ITERATION SUMMARY hands off as in_progress (never
+	// terminal); a REVIEW SUMMARY carries the terminal verdict.
+	if (summary.startsWith("ITERATION SUMMARY")) return "in_progress"
+	const verdict = parseReviewSummaryVerdict(summary, "claude")
+	switch (verdict) {
+		case "accepted":
+		case "stop":
+			return "done"
+		case "skip":
+			return "moot"
+		case "blocked":
+			return "blocked"
+		case "retry":
+			return "changes_requested"
+		default:
+			return "changes_requested"
+	}
+}
 
 afterAll(async () => {
 	await rm(TEST_ROOT, { recursive: true, force: true })
@@ -770,6 +815,51 @@ describe("daemon", () => {
 		}
 	})
 
+	test("socket item.update writes typed blocker fields into extra without disturbing other keys", async () => {
+		const fixture = await startFixture("item-update-blocker", { schedulerEnabled: false })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "blocker-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			const anchor = record(expectOk(await request(fixture, "item.add", { chainId, issueNumber: 500, repoCwd: REPO_ROOT })).item)
+			const item = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 501,
+				repoCwd: REPO_ROOT,
+				dependsOn: [numberValue(anchor.id)],
+			})).item)
+			const itemId = numberValue(item.id)
+
+			// Typed blocker flags land as named keys inside extra; the pre-existing dependsOn key survives.
+			const blocked = record(expectOk(await request(fixture, "item.update", {
+				itemId,
+				status: "blocked",
+				blockerRepo: "mouriya-s-lab/other",
+				blockerRef: "#267",
+			})).item)
+			expect(record(blocked.extra)).toMatchObject({ blockerRepo: "mouriya-s-lab/other", blockerRef: "#267", dependsOn: [numberValue(anchor.id)] })
+			expect(blocked.status).toBe("blocked")
+			expect(blocked.agentCwd).toBeNull()
+
+			// clearBlocker removes only the blocker keys, leaving dependsOn intact.
+			const cleared = record(expectOk(await request(fixture, "item.update", { itemId, status: "changes_requested", clearBlocker: true })).item)
+			expect(record(cleared.extra)).not.toHaveProperty("blockerRepo")
+			expect(record(cleared.extra)).not.toHaveProperty("blockerRef")
+			expect(record(cleared.extra).dependsOn).toEqual([numberValue(anchor.id)])
+
+			// agentCwd remains daemon-owned: it cannot be set through item.update.
+			expectInvalid(await request(fixture, "item.update", { itemId, fields: { agentCwd: "/abs/elsewhere" } }))
+			// Invalid blocker repo (not owner/repo) is rejected at the boundary.
+			expectInvalid(await request(fixture, "item.update", { itemId, blockerRepo: "not-a-repo-ref" }))
+			// clearBlocker cannot be combined with a blocker value.
+			expectInvalid(await request(fixture, "item.update", { itemId, clearBlocker: true, blockerRef: "#9" }))
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("socket item.reorder renumbers queue positions", async () => {
 		const fixture = await startFixture("item-reorder", { schedulerEnabled: false })
 		try {
@@ -1109,11 +1199,14 @@ describe("daemon", () => {
 			expect(deleted).toMatchObject({
 				alreadyDeleted: false,
 				chain: { status: "deleted" },
+				// v1: a force-killed agent never wrote its own status, so the item keeps
+				// the continuable in_progress it was spawned at. The scheduler does not
+				// infer changes_requested from the non-zero exit of a terminated run.
 				terminatedRuns: [{
 					chainId,
 					itemId,
 					exitCode: 1,
-					status: "changes_requested",
+					status: "in_progress",
 				}],
 				cleanup: { chainRootRemoved: true },
 			})
@@ -1123,7 +1216,7 @@ describe("daemon", () => {
 			expect(record(status.chain).status).toBe("deleted")
 			expect(status.activeRuns).toEqual([])
 			expect(record(status.summary).activeSlots).toEqual([])
-			expect(record(record(status.summary).items).byStatus).toEqual({ changes_requested: 1 })
+			expect(record(record(status.summary).items).byStatus).toEqual({ in_progress: 1 })
 			expect(await pathExists(resolveChainRuntimePaths("delete-active-run", { loopDataRoot: fixture.loopDataRoot }).chainRoot)).toBe(false)
 		} finally {
 			await fixture.daemon.stop()
@@ -1583,16 +1676,24 @@ describe("daemon", () => {
 				repository: "mouriya-s-lab/coder-loop",
 			})).chain)
 			const chainId = numberValue(chain.id)
-			await request(fixture, "item.add", {
+			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
 				issueNumber: 180,
 				repoCwd: REPO_ROOT,
 				extra: { sleepMs: 5, exitCode: 7 },
-			})
+			})).item)
+			const itemId = numberValue(added.id)
 
-			const item = await waitFor(async () => readItem(fixture.loopDataRoot, chainId, 180), (candidate) => candidate?.status === "changes_requested")
-			expect(typeof item?.lastRunId).toBe("string")
-			const run = await readRun(fixture.loopDataRoot, item?.lastRunId ?? "")
+			// Synchronize on the scheduler's phase.end for the first run, then on the persisted run row.
+			// item.status flips to changes_requested when the agent writes it, which is before the close
+			// handler persists the run row, so waiting on status alone would read the row too early.
+			const phaseEnd = await waitForItemPhaseEnd(fixture, itemId)
+			expect(phaseEnd.status).toBe("changes_requested")
+			expect(phaseEnd.exitCode).toBe(7)
+			const run = await waitFor(
+				async () => readRun(fixture.loopDataRoot, phaseEnd.runId),
+				(candidate) => typeof candidate?.endedAt === "number",
+			)
 			expect(run?.exitCode).toBe(7)
 			expect(typeof run?.endedAt).toBe("number")
 		} finally {
@@ -1616,7 +1717,15 @@ describe("daemon", () => {
 				extra: { sleepMs: 5, exitCode: 0 },
 			})
 
-			const item = await waitFor(async () => readItem(fixture.loopDataRoot, chainId, 203), (candidate) => candidate?.status === "done")
+			// The run's events file must end with chain.completed, which the scheduler appends last.
+			// Observing the in-memory chain.completed event guarantees every prior artifact write
+			// (run status file, run row, phase.end / queue.terminal lines) has already landed.
+			await waitFor(
+				async () => fixture.schedulerEvents.find((event) => event.type === "chain.completed" && event.chainId === chainId) ?? null,
+				(event) => event !== null,
+				10_000,
+			)
+			const item = await readItem(fixture.loopDataRoot, chainId, 203)
 			const runId = item?.lastRunId ?? ""
 			const paths = resolveChainRuntimePaths("scheduler-artifacts-chain", { loopDataRoot: fixture.loopDataRoot })
 			const status = JSON.parse(await readFile(paths.runStatusFile(runId), "utf-8")) as Record<string, unknown>
@@ -1673,6 +1782,10 @@ describe("daemon", () => {
 			})
 			const item = await waitFor(async () => readItem(fixture.loopDataRoot, chainId, 304), (candidate) => candidate?.status === "done")
 			expect(item?.lastRunId).not.toBeNull()
+			// The agent writes status="done" before the scheduler appends queue.terminal to the
+			// events file. Synchronize on the in-memory queue.terminal event so the events-file
+			// assertions below see the fully flushed run.
+			await waitForItemQueueTerminal(fixture, item!.id)
 			const paths = resolveChainRuntimePaths(chainName, { loopDataRoot: fixture.loopDataRoot })
 
 			const snapshot = await buildCoderLoopStatusSnapshot({
@@ -1812,6 +1925,7 @@ await appendFile(input.eventLog, JSON.stringify({ type: "end", phase: input.phas
 if (input.phase === "iteration") await writeLine("ITERATION SUMMARY: scope=b3-live; reason=iter-marker")
 else if (input.phase === "review") await writeLine("REVIEW SUMMARY: verdict=blocked; issue=#0; reason=b3-live-blocked")
 else if (input.phase === "blocked-responder") await writeLine("REVIEW SUMMARY: verdict=accepted; issue=#0; reason=b3-live-unblock-accepted")
+${FAKE_RUNNER_STATUS_WRITE_SNIPPET}
 process.exitCode = 0
 `,
 		)
@@ -1846,12 +1960,9 @@ process.exitCode = 0
 					phase,
 					eventLog,
 					sleepMs: 5,
+					// blocked-responder writes nothing so the terminal blocked status is preserved (#338).
+					writeStatus: phase === "iteration" ? "in_progress" : phase === "review" ? "blocked" : null,
 				}),
-				statusFromExit: ({ phase }) => {
-					if (phase === "iteration") return "in_progress"
-					if (phase === "review") return "blocked"
-					return "done"
-				},
 				chainCompleteTriggerForChain: () => null,
 				onEvent: (event) => {
 					schedulerEvents.push(event)
@@ -1869,11 +1980,11 @@ process.exitCode = 0
 			expectOk(await sendDaemonRequest(socketPath, daemonRequest("item.add", { chainId, issueNumber: 29011, repoCwd: REPO_ROOT })))
 
 			// A trigger phase running on an already-terminal (blocked) item must not change that
-			// terminal status, even though this fixture's statusFromExit would map the
-			// blocked-responder exit to "done". The engine preserves the pre-trigger terminal
-			// status (issue #338), so the item stays blocked at the blocked-responder phase.
-			// With the fix the item reaches its final (blocked / blocked-responder) state at spawn
-			// time, so wait on the blocked-responder phase.start event rather than a status change.
+			// terminal status. The blocked-responder fake runner writes no status, and the engine
+			// preserves the pre-trigger terminal status at spawn (issue #338), so the item stays
+			// blocked at the blocked-responder phase. The item reaches its final (blocked /
+			// blocked-responder) state at spawn time, so wait on the blocked-responder phase.start
+			// event rather than a status change.
 			await waitFor(
 				async () =>
 					schedulerEvents
@@ -1915,24 +2026,32 @@ process.exitCode = 0
 				repository: "mouriya-s-lab/coder-loop",
 			})).chain)
 			const chainId = numberValue(chain.id)
-			await request(fixture, "item.add", {
+			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
 				issueNumber: 7284,
 				repoCwd: REPO_ROOT,
 				extra: { sleepMs: 5, exitCode: 0, summary: null },
-			})
+			})).item)
+			const itemId = numberValue(added.id)
 
+			// The scheduler writes the incremented `attempts` to the DB at spawn-start, but emits the
+			// agent.spawn event (streamed over IPC into fixture.schedulerEvents) later in the same spawn.
+			// Gating on the DB `attempts` would race ahead of the IPC event delivery and observe attempts>=2
+			// while only one spawn event had arrived. Gate on the same source the assertion reads — the
+			// agent.spawn event stream — so the two are synchronized.
 			await waitFor(
-				async () => readItem(fixture.loopDataRoot, chainId, 7284),
-				(candidate) => (candidate?.attempts ?? 0) >= 2,
+				async () => fixture.schedulerEvents.filter((event) => event.type === "agent.spawn" && event.itemId === itemId).length,
+				(count) => (count ?? 0) >= 2,
 				5_000,
 			)
 
 			const finalItem = await readItem(fixture.loopDataRoot, chainId, 7284)
 			expect(finalItem?.attempts).toBeGreaterThanOrEqual(2)
+			// summary:null → the agent writes no status, so the item keeps the spawn-preset continuable
+			// in_progress (the scheduler never invents a terminal status). It is therefore re-selected
+			// across ticks: iteration → review, driving attempts to >=2 with >=2 spawns.
 			expect(["queued", "in_progress", "changes_requested"]).toContain(finalItem?.status ?? "")
-			expect(fixture.schedulerEvents.filter((event) => event.type === "agent.spawn" && event.itemId === finalItem!.id).length).toBeGreaterThanOrEqual(2)
-			expect(warnings.some((line) => line.includes("exit 0 without SUMMARY marker"))).toBe(true)
+			expect(fixture.schedulerEvents.filter((event) => event.type === "agent.spawn" && event.itemId === itemId).length).toBeGreaterThanOrEqual(2)
 		} finally {
 			console.warn = originalWarn
 			await fixture.daemon.stop()
@@ -1961,11 +2080,15 @@ process.exitCode = 0
 					extra: { issueKind: "code" },
 				})
 
-				const item = await waitFor(
-					async () => readItem(fixture.loopDataRoot, chainId, 287_301),
-					(candidate) => candidate !== null && candidate.lastRunId !== null && candidate.status === "done",
+				// The fake shell runner writes no status (it only proves which binary spawned), so under v1
+				// the item never reaches a terminal status. Gate on a phase.end event, which guarantees the
+				// run closed and its stdout was flushed, then read the captured binary marker.
+				await waitFor(
+					async () => fixture.schedulerEvents.filter((event) => event.type === "phase.end").length,
+					(count) => (count ?? 0) >= 1,
 					5_000,
 				)
+				const item = await readItem(fixture.loopDataRoot, chainId, 287_301)
 				expect(item).not.toBeNull()
 				const runId = item!.lastRunId!
 				const stdoutPath = resolveChainRuntimePaths(`ac5-iter-chain`, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(runId)
@@ -1998,14 +2121,20 @@ process.exitCode = 0
 					extra: { issueKind: "code" },
 				})
 
-				const item = await waitFor(
-					async () => readItem(fixture.loopDataRoot, chainId, 287_302),
-					(candidate) => candidate !== null && candidate.lastRunId !== null && candidate.status === "done",
+				// The fake shell runner writes no status (it only proves which binary spawned), so under v1
+				// the item never reaches a terminal status. gh-issue-pr-iteration runs iteration (codex)
+				// before review (claude), so gate on the review phase.end specifically — that guarantees the
+				// review run closed and its stdout was flushed — then read its captured binary marker.
+				const reviewRunId = await waitFor(
+					async () =>
+						fixture.schedulerEvents
+							.filter((event): event is Extract<SchedulerEvent, { type: "phase.end" }> => event.type === "phase.end" && event.phase === "review")
+							.map((event) => event.runId)
+							.at(-1) ?? null,
+					(runId) => runId !== null,
 					5_000,
 				)
-				expect(item).not.toBeNull()
-				const runId = item!.lastRunId!
-				const stdoutPath = resolveChainRuntimePaths(`ac5-review-chain`, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(runId)
+				const stdoutPath = resolveChainRuntimePaths(`ac5-review-chain`, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(reviewRunId!)
 				const stdout = await readFile(stdoutPath, "utf-8")
 				expect(stdout).toContain("BINARY:claude")
 				expect(stdout).not.toContain("BINARY:codex")
@@ -2042,6 +2171,12 @@ process.exitCode = 0
 				expect(item!.attempts).toBeGreaterThanOrEqual(2)
 				expect(item!.phase).toBe("review")
 
+				// The agent writes status="done" before the scheduler emits phase.end / queue.terminal
+				// for the review run. queue.terminal is the last per-item scheduler event, so observing
+				// it guarantees both phase.end events (iteration + review) have already been recorded.
+				const terminalEvent = await waitForItemQueueTerminal(fixture, item!.id)
+				expect(terminalEvent.terminalStatus).toBe("done")
+
 				const spawnEvents = fixture.schedulerEvents.filter(
 					(event) => event.type === "agent.spawn" && event.itemId === item!.id,
 				)
@@ -2060,16 +2195,6 @@ process.exitCode = 0
 				)
 				const endedPhases = phaseEndEvents.map((event) => event.phase)
 				expect(endedPhases).toEqual(["iteration", "review"])
-
-				const terminalEvent = await waitFor(
-					async () =>
-						fixture.schedulerEvents.find((event): event is Extract<SchedulerEvent, { type: "queue.terminal" }> =>
-							event.type === "queue.terminal" && event.itemId === item!.id,
-						) ?? null,
-					(event) => event !== null,
-					10_000,
-				)
-				expect(terminalEvent?.terminalStatus).toBe("done")
 
 				const daemonDir = resolveChainRuntimePaths("ac7-iter-then-review-chain", { loopDataRoot: fixture.loopDataRoot }).daemonDir
 				const batchDirs = await readdir(daemonDir)
@@ -2116,6 +2241,11 @@ process.exitCode = 0
 					10_000,
 				)
 				expect(item).not.toBeNull()
+
+				// The agent writes status="done" before the scheduler emits phase.end / queue.terminal and
+				// finalizes the per-run rows + events files. queue.terminal is the last per-item scheduler
+				// event, so observing it guarantees both runs' artifacts and run rows have already landed.
+				await waitForItemQueueTerminal(fixture, item!.id)
 
 				const phaseStartEvents = fixture.schedulerEvents.filter(
 					(event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
@@ -2203,6 +2333,7 @@ if (input.phase === "review") {
 } else {
 	await writeLine("ITERATION SUMMARY: scope=phase-aware-runner; reason=iter-marker")
 }
+${FAKE_RUNNER_STATUS_WRITE_SNIPPET}
 process.exitCode = 0
 `,
 	)
@@ -2239,8 +2370,8 @@ process.exitCode = 0
 				phase,
 				eventLog,
 				sleepMs: 5,
+				writeStatus: phase === "iteration" ? "in_progress" : "done",
 			}),
-			statusFromExit: ({ phase }) => phase === "iteration" ? "in_progress" : "done",
 			chainCompleteTriggerForChain: () => null,
 			onEvent: (event) => {
 				schedulerEvents.push(event)
@@ -2386,7 +2517,7 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 			...(options.schedulerPresetDir === null ? {} : { presetDir: options.schedulerPresetDir ?? PRESET_DIR }),
 			worktreeManager,
 			kindResolver: () => ({ ok: true, kind: "code" }),
-			prompt: ({ item, runId }) => {
+			prompt: ({ item, runId, phase }) => {
 				const payload: Record<string, unknown> = {
 					itemId: item.id,
 					issueNumber: item.issueNumber,
@@ -2394,6 +2525,7 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 					eventLog,
 					sleepMs: typeof item.extra.sleepMs === "number" ? item.extra.sleepMs : 5,
 					exitCode: typeof item.extra.exitCode === "number" ? item.extra.exitCode : 0,
+					writeStatus: daemonFakeRunnerWriteStatus(phase, item.extra),
 				}
 				if (Object.prototype.hasOwnProperty.call(item.extra, "summary")) payload.summary = item.extra.summary
 				return JSON.stringify(payload)
@@ -2509,6 +2641,40 @@ async function waitFor<T>(read: () => Promise<T>, predicate: (value: T) => boole
 	return latest
 }
 
+// v1 status model: the agent writes item.status itself, which becomes observable BEFORE the
+// scheduler's run-close handler finishes its bookkeeping (run row, phase.end / queue.terminal
+// events, completion artifacts). Tests must therefore synchronize on the scheduler-emitted
+// terminal signal, not on item.status, or they race ahead of the close handler.
+async function waitForItemQueueTerminal(
+	fixture: Fixture,
+	itemId: number,
+	timeoutMs = 10_000,
+): Promise<Extract<SchedulerEvent, { type: "queue.terminal" }>> {
+	return (await waitFor(
+		async () =>
+			fixture.schedulerEvents.find(
+				(event): event is Extract<SchedulerEvent, { type: "queue.terminal" }> => event.type === "queue.terminal" && event.itemId === itemId,
+			) ?? null,
+		(event) => event !== null,
+		timeoutMs,
+	)) as Extract<SchedulerEvent, { type: "queue.terminal" }>
+}
+
+async function waitForItemPhaseEnd(
+	fixture: Fixture,
+	itemId: number,
+	timeoutMs = 10_000,
+): Promise<Extract<SchedulerEvent, { type: "phase.end" }>> {
+	return (await waitFor(
+		async () =>
+			fixture.schedulerEvents.find(
+				(event): event is Extract<SchedulerEvent, { type: "phase.end" }> => event.type === "phase.end" && event.itemId === itemId,
+			) ?? null,
+		(event) => event !== null,
+		timeoutMs,
+	)) as Extract<SchedulerEvent, { type: "phase.end" }>
+}
+
 async function waitForPidExit(pid: number, timeoutMs: number): Promise<boolean> {
 	const startedAt = Date.now()
 	while (Date.now() - startedAt <= timeoutMs) {
@@ -2575,6 +2741,7 @@ await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.ite
 await writeLine("done:" + input.itemId)
 const summary = Object.prototype.hasOwnProperty.call(input, "summary") ? input.summary : "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=fake-runner default"
 if (summary !== null) await writeLine(summary)
+${FAKE_RUNNER_STATUS_WRITE_SNIPPET}
 process.exitCode = input.exitCode
 `,
 		)
