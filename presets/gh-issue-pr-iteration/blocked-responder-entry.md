@@ -41,11 +41,15 @@ If the selected queue item is blocked by another repository, create the cross-re
 5. Read the target checkout's `central SQLite state DB`.
    - If the new issue is not already present, append one queue item with `status: "queued"`, `attempts: 0`, normal null branch/PR/run fields, and an `issue` field matching the created issue number.
    - Preserve existing queue order and all unrelated state fields.
-6. Start the target daemon with browser evidence required:
+   - Capture the central DB row id of the blocker queue item (the globally-unique `items.id`, not the GitHub issue number). If the item already existed, read its existing row id.
+6. Declare the cross-chain dependency on the current blocked item — this is the only state mutation you make to it:
+   - Add the captured blocker item id to the current blocked item's `extra.dependsOn` array (create the array if absent; do not duplicate an id already present).
+   - Do NOT change the current blocked item's `status`, `phase`, or any field other than `extra.dependsOn`. `dependsOn` is an optional record orthogonal to status; the engine — not this responder — restores the item to actionable once the blocker reaches a success terminal status.
+7. Start the target daemon with browser evidence required:
    - `coder-loop daemon start <targetRepoPath> --require-browser-evidence`
    - If it is already running, treat that as success and record the returned status.
-7. Do not change the current repository's blocked item back to actionable, done, moot, or closed. This responder is only the cross-repo follow-up side effect.
-8. Append a concise handoff note when `{{CURRENT_ISSUE_FILE}}` is non-empty. Include the created issue URL, target checkout path, queue injection result, daemon start result, and any evidence files.
+8. Do not change the current repository's blocked item back to actionable, done, moot, or closed. The only field you may touch on it is `extra.dependsOn` (step 6); its lifecycle status transition back to actionable is the engine's job.
+9. Append a concise handoff note when `{{CURRENT_ISSUE_FILE}}` is non-empty. Include the created issue URL, target checkout path, queue injection result, declared dependsOn blocker item id, daemon start result, and any evidence files.
 
 ## GitHub and state boundaries
 

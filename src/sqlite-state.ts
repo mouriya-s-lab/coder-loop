@@ -154,6 +154,7 @@ export type GetNextPendingItemInput = {
 	repoCwd: string
 	statuses?: readonly string[]
 	terminalStatuses?: readonly string[]
+	resolveDependency?: DependencyResolver
 }
 
 export type ListDependencyWaitsInput = {
@@ -161,6 +162,7 @@ export type ListDependencyWaitsInput = {
 	repoCwd?: string
 	statuses: readonly string[]
 	terminalStatuses: readonly string[]
+	resolveDependency?: DependencyResolver
 }
 
 export type DependencyWaitReason = {
@@ -170,6 +172,10 @@ export type DependencyWaitReason = {
 	dependsOn: number[]
 	unsatisfied: number[]
 }
+
+// Resolves a globally-unique item id, including items that live in a different chain than the
+// caller's snapshot. Used so dependsOn can express cross-chain (cross-repo) dependencies.
+export type DependencyResolver = (id: number) => ItemRecord | null
 
 export type AllItemsTerminalInput = {
 	chainId: number
@@ -782,7 +788,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 					db.query<ItemRow, SqlParams>("SELECT * FROM items WHERE chain_id = $chainId ORDER BY id ASC").all({
 						chainId: input.chainId,
 					}).map((row) => requireItem(row, row.id)),
-					{ repoCwd: input.repoCwd, statuses, terminalStatuses },
+					{ repoCwd: input.repoCwd, statuses, terminalStatuses, resolveDependency: input.resolveDependency ?? ((id) => rowToItem(getItemRow(id))) },
 				)
 			}),
 
@@ -792,7 +798,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 					db.query<ItemRow, SqlParams>("SELECT * FROM items WHERE chain_id = $chainId ORDER BY id ASC").all({
 						chainId: input.chainId,
 					}).map((row) => requireItem(row, row.id)),
-					input,
+					{ ...input, resolveDependency: input.resolveDependency ?? ((id) => rowToItem(getItemRow(id))) },
 				)
 			),
 
@@ -1066,11 +1072,12 @@ type PendingSelectionOptions = {
 	repoCwd?: string
 	statuses: readonly string[]
 	terminalStatuses: readonly string[]
+	resolveDependency?: DependencyResolver
 }
 
 function selectNextPendingItem(items: ItemRecord[], options: PendingSelectionOptions): ItemRecord | null {
 	const eligible = new Set(options.statuses)
-	const waitsByItemId = dependencyWaitsByItemId(items, options.terminalStatuses)
+	const waitsByItemId = dependencyWaitsByItemId(items, options.terminalStatuses, options.resolveDependency)
 	return items
 		.filter((item) => options.repoCwd === undefined || item.repoCwd === options.repoCwd)
 		.filter((item) => eligible.has(item.status))
@@ -1083,7 +1090,7 @@ function selectNextPendingItem(items: ItemRecord[], options: PendingSelectionOpt
 
 export function listDependencyWaitReasons(items: readonly ItemRecord[], options: PendingSelectionOptions): DependencyWaitReason[] {
 	const eligible = new Set(options.statuses)
-	const waitsByItemId = dependencyWaitsByItemId(items, options.terminalStatuses)
+	const waitsByItemId = dependencyWaitsByItemId(items, options.terminalStatuses, options.resolveDependency)
 	return items
 		.filter((item) => options.repoCwd === undefined || item.repoCwd === options.repoCwd)
 		.filter((item) => eligible.has(item.status))
@@ -1091,15 +1098,23 @@ export function listDependencyWaitReasons(items: readonly ItemRecord[], options:
 		.filter((wait): wait is DependencyWaitReason => wait !== null)
 }
 
-function dependencyWaitsByItemId(items: readonly ItemRecord[], terminalStatuses: readonly string[]): Map<number, DependencyWaitReason> {
+function dependencyWaitsByItemId(
+	items: readonly ItemRecord[],
+	terminalStatuses: readonly string[],
+	resolveDependency?: DependencyResolver,
+): Map<number, DependencyWaitReason> {
 	const terminal = new Set(terminalStatuses)
 	const byId = new Map(items.map((item) => [item.id, item]))
+	// A dependency may live in another chain (item ids are globally unique). Fall back to the
+	// cross-chain resolver when the id is not in the per-chain snapshot, otherwise a cross-chain
+	// dependsOn target would be permanently treated as unsatisfied (deadlock).
+	const resolve = (id: number): ItemRecord | undefined => byId.get(id) ?? resolveDependency?.(id) ?? undefined
 	const waits = new Map<number, DependencyWaitReason>()
 	for (const item of items) {
 		const dependsOn = dependsOnItemIds(item.extra)
 		if (dependsOn.length === 0) continue
 		const unsatisfied = dependsOn.filter((dependencyId) => {
-			const dependency = byId.get(dependencyId)
+			const dependency = resolve(dependencyId)
 			return dependency === undefined || !terminal.has(dependency.status)
 		})
 		if (unsatisfied.length === 0) continue
@@ -1114,7 +1129,7 @@ function dependencyWaitsByItemId(items: readonly ItemRecord[], terminalStatuses:
 	return waits
 }
 
-function dependsOnItemIds(extra: JsonObject): number[] {
+export function dependsOnItemIds(extra: JsonObject): number[] {
 	const raw = extra.dependsOn
 	if (!Array.isArray(raw)) return []
 	return raw.filter((value): value is number => typeof value === "number" && Number.isInteger(value) && value >= 1)

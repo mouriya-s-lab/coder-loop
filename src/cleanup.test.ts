@@ -160,7 +160,7 @@ function makeLoopOptions(): LoopOptions {
 			description: "cleanup test preset",
 			presetDir: PRESET_DIR,
 			item: { idField: "issue" },
-			statuses: { continuable: ["queued"], terminal: ["done"] },
+			statuses: { continuable: ["queued"], terminal: ["done"], success: ["done"], entry: "queued" },
 			phases: [],
 			fragments: [],
 			agent: { binary: "claude", extraArgs: [], attemptTimeoutSeconds: 3600 },
