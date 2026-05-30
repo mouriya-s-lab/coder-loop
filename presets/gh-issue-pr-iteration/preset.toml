@@ -26,6 +26,12 @@ idField = "issue"
 [statuses]
 continuable = ["queued", "in_progress", "changes_requested"]
 terminal    = ["blocked", "moot", "done", "exhausted"]
+# success: subset of terminal that means the item succeeded. Used by the engine's
+# cross-chain dependsOn unblock: a terminal item is restored to `entry` only when ALL
+# of its dependsOn targets reached a success-terminal status (not exhausted/moot).
+success     = ["done"]
+# entry: the actionable status the engine restores a dependency-unblocked item to.
+entry       = "queued"
 
 [[phases]]
 name   = "iteration"

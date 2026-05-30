@@ -969,9 +969,12 @@ export class CoderLoopDaemon {
 		options.statusesForChain = scheduler.statusesForChain ?? (async (chain) => {
 			const pendingStatuses = await this.continuableItemStatuses(chain)
 			const terminalStatuses = await this.terminalItemStatuses(chain)
+			const { success, entry } = await this.unblockItemStatuses(chain, pendingStatuses)
 			return {
 				pending: [...pendingStatuses],
 				terminal: [...terminalStatuses],
+				success,
+				entry,
 			}
 		})
 		if (scheduler.now !== undefined) options.now = scheduler.now
@@ -1051,6 +1054,13 @@ export class CoderLoopDaemon {
 			if (presetStatuses !== null) return new Set(presetStatuses.terminal)
 		}
 		return new Set(FALLBACK_TERMINAL_STATUSES)
+	}
+
+	private async unblockItemStatuses(chain: ChainRecord, pendingStatuses: Set<string>): Promise<{ success: string[]; entry: string }> {
+		const fallbackEntry = pendingStatuses.has("queued") ? "queued" : [...pendingStatuses][0] ?? "queued"
+		const presetStatuses = await readBundledPresetStatuses(chain.preset)
+		if (presetStatuses === null) return { success: [], entry: fallbackEntry }
+		return { success: presetStatuses.success, entry: presetStatuses.entry }
 	}
 }
 
@@ -1685,7 +1695,7 @@ async function validateRepoCwdForRequest(input: string): Promise<string> {
 	return input
 }
 
-async function readBundledPresetStatuses(presetName: string): Promise<{ continuable: string[]; terminal: string[] } | null> {
+async function readBundledPresetStatuses(presetName: string): Promise<{ continuable: string[]; terminal: string[]; success: string[]; entry: string } | null> {
 	if (!PRESET_NAME_PATTERN.test(presetName)) return null
 	try {
 		const raw = await readFile(resolve(bundledPresetDir(presetName), "preset.toml"), "utf-8")
@@ -1695,7 +1705,11 @@ async function readBundledPresetStatuses(presetName: string): Promise<{ continua
 		const terminal = parsed.statuses.terminal
 		if (!Array.isArray(continuable) || !continuable.every((status) => typeof status === "string")) return null
 		if (!Array.isArray(terminal) || !terminal.every((status) => typeof status === "string")) return null
-		return { continuable, terminal }
+		const successRaw = parsed.statuses.success
+		const success = Array.isArray(successRaw) && successRaw.every((status) => typeof status === "string") ? successRaw : []
+		const entryRaw = parsed.statuses.entry
+		const entry = typeof entryRaw === "string" && continuable.includes(entryRaw) ? entryRaw : (continuable[0] ?? "queued")
+		return { continuable, terminal, success, entry }
 	} catch {
 		return null
 	}

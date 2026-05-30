@@ -1199,10 +1199,16 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 
 			const duringSpawn = fixture.store.getItem(item.id)
 			expect(duringSpawn?.phase).toBe("blocked-responder")
-			expect(duringSpawn?.status).toBe("in_progress")
+			// A trigger phase running on an already-terminal item keeps that terminal status
+			// persisted across spawn; it is not flipped to a continuable in_progress.
+			expect(duringSpawn?.status).toBe("blocked")
 			expect(duringSpawn?.attempts).toBe(3)
 
 			await triggerTick.spawnedRuns[0]!.closed
+
+			const afterClose = fixture.store.getItem(item.id)
+			expect(afterClose?.status).toBe("blocked")
+			expect(afterClose?.phase).toBe("blocked-responder")
 
 			const spawnEvents = fixture.schedulerEvents.filter(
 				(event) => event.type === "agent.spawn" && event.itemId === item.id,
@@ -1219,14 +1225,18 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 		}
 	})
 
-	test("AC3: trigger phase exit with REVIEW SUMMARY verdict=retry → status=changes_requested; next tick spawns iter", async () => {
+	test("trigger phase terminal: blocked item triggered, phase exit 0 keeps terminal status and is not pulled back into iteration", async () => {
 		const fixture = await createFixture("trigger-b3-unblock")
 		try {
 			const chain = createChain(fixture.store, "trigger-b3-unblock-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
+			// The production blocked-responder ends with an ITERATION-shaped marker on a non-iteration
+			// phase. Under the old fall-through this mapped to changes_requested and pulled the
+			// terminal item back into iteration → review. The fix keeps the pre-trigger terminal status.
 			const item = createItem(fixture.store, chain, {
 				issueNumber: 29003,
 				repoCwd: "/repo/a",
-				summary: "REVIEW SUMMARY: verdict=retry; issue=#29003; reason=unblock",
+				summary: "ITERATION SUMMARY: blocked_responder=created; issue=#29003; blockerRepo=mouriya-s-lab/coder-loop-e2e-blocker; followup=https://example/1; queue=injected; daemon=started; reason=unblock",
 			})
 			fixture.store.updateItem(item.id, {
 				status: "blocked",
@@ -1244,35 +1254,27 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			expect(triggerTick.spawnedRuns).toHaveLength(1)
 			expect(triggerTick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-blocked-responder-b3`)
 			const triggerClosed = await triggerTick.spawnedRuns[0]!.closed
-			expect(triggerClosed.status).toBe("changes_requested")
+			// AC1: run-close writes back the pre-trigger terminal status, not changes_requested.
+			expect(triggerClosed.status).toBe("blocked")
 
 			const afterTrigger = fixture.store.getItem(item.id)
-			expect(afterTrigger?.status).toBe("changes_requested")
+			expect(afterTrigger?.status).toBe("blocked")
 			expect(afterTrigger?.phase).toBe("blocked-responder")
+			// The chain has no actionable item left and completes in the run-close handler.
+			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
 
-			// Configure the iter re-spawn so its REVIEW SUMMARY doesn't propagate "retry" again.
-			fixture.store.updateItem(item.id, {
-				extra: {
-					...afterTrigger!.extra,
-					summary: "ITERATION SUMMARY: scope=unit; reason=b3-resume",
-				},
-			})
-
+			// AC2: the next tick does NOT re-spawn iteration/review for the terminal item.
 			const followUpTick = await schedulerTick(baseOptions)
-			expect(followUpTick.spawnedRuns).toHaveLength(1)
-			expect(followUpTick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-iteration-b3`)
-			const followUpClosed = await followUpTick.spawnedRuns[0]!.closed
-			expect(followUpClosed.status).toBe("in_progress")
-
-			const afterIter = fixture.store.getItem(item.id)
-			expect(afterIter?.phase).toBe("iteration")
+			expect(followUpTick.spawnedRuns).toHaveLength(0)
+			expect(fixture.store.getItem(item.id)?.status).toBe("blocked")
+			expect(fixture.store.getItem(item.id)?.phase).toBe("blocked-responder")
 
 			const phaseStarts = fixture.schedulerEvents
 				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
 					event.type === "phase.start" && event.itemId === item.id,
 				)
 				.map((event) => event.phase)
-			expect(phaseStarts).toEqual(["blocked-responder", "iteration"])
+			expect(phaseStarts).toEqual(["blocked-responder"])
 		} finally {
 			fixture.store.close()
 		}
@@ -1300,6 +1302,232 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			expect(after?.phase).toBe("iteration")
 			expect(tick.completedChainIds).toEqual([chain.id])
 			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("dependsOn unblock: terminal item with all deps in success terminal is restored to actionable, next tick selects iteration", async () => {
+		const fixture = await createFixture("depends-unblock-success")
+		try {
+			// Blocker lives in a different chain (cross-repo); item ids are globally unique so the
+			// dependent's dependsOn can point across chains. The blocker chain is held non-active so
+			// this test only exercises the dependent chain's unblock pass — the unblock/guard logic
+			// resolves the blocker via store.getItem(id) regardless of the blocker chain's status.
+			const blockerChain = createChain(fixture.store, "depends-unblock-blocker-chain", {
+				repository: "mouriya-s-lab/coder-loop-e2e-blocker",
+				status: "completed",
+			})
+			const blocker = createItem(fixture.store, blockerChain, { issueNumber: 7, repoCwd: "/repo/blocker", summary: null })
+			fixture.store.updateItem(blocker.id, { status: "done", phase: "review", updatedAt: 1_800_010_000 })
+
+			const dependentChain = createChain(fixture.store, "depends-unblock-dependent-chain")
+			preInstallReviewOnEmptyLock(dependentChain, fixture.loopDataRoot)
+			const dependent = createItem(fixture.store, dependentChain, { issueNumber: 29010, repoCwd: "/repo/a", summary: null })
+			// Lifecycle: blocked-responder already ran (phase=blocked-responder) and declared the
+			// cross-chain dependency; the item is parked in the stable blocked terminal state.
+			fixture.store.updateItem(dependent.id, {
+				status: "blocked",
+				phase: "blocked-responder",
+				attempts: 3,
+				extra: { ...dependent.extra, dependsOn: [blocker.id] },
+				updatedAt: 1_800_010_100,
+			})
+
+			const baseOptions = fixture.options({
+				runIdFactory: ({ chain: c, item: i, phase }) => `run-${c.id}-${i.id}-${phase}-dep`,
+			})
+
+			// Tick 1: the unblock pass restores the item to the entry status; nothing spawns and the
+			// chain is NOT completed because an item just became actionable.
+			const unblockTick = await schedulerTick(baseOptions)
+			expect(unblockTick.spawnedRuns).toHaveLength(0)
+			expect(unblockTick.completedChainIds).toEqual([])
+
+			const afterUnblock = fixture.store.getItem(dependent.id)
+			expect(afterUnblock?.status).toBe("queued")
+			expect(afterUnblock?.extra.dependsOn).toBeUndefined()
+			expect(fixture.store.getChain(dependentChain.id)?.status).toBe("active")
+
+			const unblockedEvents = fixture.schedulerEvents.filter(
+				(event): event is Extract<SchedulerEvent, { type: "item.dependency_unblocked" }> =>
+					event.type === "item.dependency_unblocked" && event.itemId === dependent.id,
+			)
+			expect(unblockedEvents).toHaveLength(1)
+			expect(unblockedEvents[0]?.fromStatus).toBe("blocked")
+			expect(unblockedEvents[0]?.toStatus).toBe("queued")
+			expect(unblockedEvents[0]?.dependsOn).toEqual([blocker.id])
+
+			// Tick 2: the now-actionable item is selected into iteration.
+			const selectTick = await schedulerTick(baseOptions)
+			expect(selectTick.spawnedRuns).toHaveLength(1)
+			expect(selectTick.spawnedRuns[0]?.runId).toBe(`run-${dependentChain.id}-${dependent.id}-iteration-dep`)
+			await selectTick.spawnedRuns[0]!.closed
+
+			const phaseStarts = fixture.schedulerEvents
+				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
+					event.type === "phase.start" && event.itemId === dependent.id,
+				)
+				.map((event) => event.phase)
+			expect(phaseStarts).toEqual(["iteration"])
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("dependsOn unblock: item is NOT awakened when a dep is in-flight or ends in a non-success terminal status", async () => {
+		const fixture = await createFixture("depends-unblock-negative")
+		try {
+			// Non-active blocker chain: this test exercises only the dependent chain's unblock pass,
+			// which reads the blocker through store.getItem(id) independent of the blocker chain status.
+			const blockerChain = createChain(fixture.store, "depends-unblock-neg-blocker-chain", {
+				repository: "mouriya-s-lab/coder-loop-e2e-blocker",
+				status: "completed",
+			})
+			const blocker = createItem(fixture.store, blockerChain, { issueNumber: 8, repoCwd: "/repo/blocker", summary: null })
+			fixture.store.updateItem(blocker.id, { status: "in_progress", phase: "iteration", updatedAt: 1_800_011_000 })
+
+			const dependentChain = createChain(fixture.store, "depends-unblock-neg-dependent-chain")
+			preInstallReviewOnEmptyLock(dependentChain, fixture.loopDataRoot)
+			const dependent = createItem(fixture.store, dependentChain, { issueNumber: 29011, repoCwd: "/repo/a", summary: null })
+			fixture.store.updateItem(dependent.id, {
+				status: "blocked",
+				phase: "blocked-responder",
+				attempts: 3,
+				extra: { ...dependent.extra, dependsOn: [blocker.id] },
+				updatedAt: 1_800_011_100,
+			})
+
+			// Dep in-flight → no awakening, item stays blocked.
+			const inflightTick = await schedulerTick(fixture.options())
+			expect(inflightTick.spawnedRuns).toHaveLength(0)
+			expect(fixture.store.getItem(dependent.id)?.status).toBe("blocked")
+			expect(fixture.store.getItem(dependent.id)?.extra.dependsOn).toEqual([blocker.id])
+
+			// Dep ends in a non-success terminal status (exhausted) → still no awakening.
+			fixture.store.updateItem(blocker.id, { status: "exhausted", updatedAt: 1_800_011_200 })
+			const exhaustedTick = await schedulerTick(fixture.options())
+			expect(fixture.store.getItem(dependent.id)?.status).toBe("blocked")
+			expect(fixture.store.getItem(dependent.id)?.extra.dependsOn).toEqual([blocker.id])
+
+			const phaseStarts = fixture.schedulerEvents.filter(
+				(event) => event.type === "phase.start" && event.itemId === dependent.id,
+			)
+			expect(phaseStarts).toHaveLength(0)
+			const unblockedEvents = fixture.schedulerEvents.filter(
+				(event) => event.type === "item.dependency_unblocked" && event.itemId === dependent.id,
+			)
+			expect(unblockedEvents).toHaveLength(0)
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("dependsOn unblock: chain with an item whose dep is still in-flight is not completed", async () => {
+		const fixture = await createFixture("depends-unblock-completion-guard")
+		try {
+			// Non-active blocker chain: the completion guard resolves the blocker through
+			// store.getItem(id), so the blocker chain need not be ticked for this test.
+			const blockerChain = createChain(fixture.store, "depends-guard-blocker-chain", {
+				repository: "mouriya-s-lab/coder-loop-e2e-blocker",
+				status: "completed",
+			})
+			const blocker = createItem(fixture.store, blockerChain, { issueNumber: 9, repoCwd: "/repo/blocker", summary: null })
+			fixture.store.updateItem(blocker.id, { status: "in_progress", phase: "iteration", updatedAt: 1_800_012_000 })
+
+			const dependentChain = createChain(fixture.store, "depends-guard-dependent-chain")
+			preInstallReviewOnEmptyLock(dependentChain, fixture.loopDataRoot)
+			const dependent = createItem(fixture.store, dependentChain, { issueNumber: 29012, repoCwd: "/repo/a", summary: null })
+			fixture.store.updateItem(dependent.id, {
+				status: "blocked",
+				phase: "blocked-responder",
+				attempts: 3,
+				extra: { ...dependent.extra, dependsOn: [blocker.id] },
+				updatedAt: 1_800_012_100,
+			})
+
+			// All chain items are terminal AND the review-on-empty lock exists, so completion would
+			// normally fire — but the in-flight cross-chain dep keeps the chain active.
+			const guardedTick = await schedulerTick(fixture.options())
+			expect(guardedTick.completedChainIds).toEqual([])
+			expect(fixture.store.getChain(dependentChain.id)?.status).toBe("active")
+
+			// Once the dep reaches success terminal, the same chain unblocks then proceeds normally.
+			fixture.store.updateItem(blocker.id, { status: "done", updatedAt: 1_800_012_200 })
+			const unblockTick = await schedulerTick(fixture.options())
+			expect(unblockTick.completedChainIds).toEqual([])
+			expect(fixture.store.getItem(dependent.id)?.status).toBe("queued")
+			expect(fixture.store.getChain(dependentChain.id)?.status).toBe("active")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("dependsOn unblock e2e: blocker chain reaching done auto-recovers the cross-chain blocked item to done with no manual intervention", async () => {
+		const fixture = await createFixture("depends-unblock-e2e")
+		try {
+			// Two ACTIVE chains in the same central DB — the realistic cross-repo shape. The whole
+			// run is driven by the real fake runner over many ticks; the only state we set by hand is
+			// the blocked-responder postcondition (item parked blocked with a cross-chain dependsOn).
+			const blockerChain = createChain(fixture.store, "depends-e2e-blocker-chain", {
+				repository: "mouriya-s-lab/coder-loop-e2e-blocker",
+			})
+			preInstallReviewOnEmptyLock(blockerChain, fixture.loopDataRoot)
+			const blocker = createItem(fixture.store, blockerChain, { issueNumber: 41, repoCwd: "/repo/blocker" })
+
+			const dependentChain = createChain(fixture.store, "depends-e2e-dependent-chain")
+			preInstallReviewOnEmptyLock(dependentChain, fixture.loopDataRoot)
+			const dependent = createItem(fixture.store, dependentChain, { issueNumber: 29013, repoCwd: "/repo/a" })
+			fixture.store.updateItem(dependent.id, {
+				status: "blocked",
+				phase: "blocked-responder",
+				attempts: 3,
+				extra: { ...dependent.extra, dependsOn: [blocker.id] },
+				updatedAt: 1_800_013_000,
+			})
+
+			const opts = fixture.options({
+				runIdFactory: ({ chain: c, item: i, phase }) => `run-${c.id}-${i.id}-${phase}-e2e`,
+			})
+
+			// Drive like the daemon: keep ticking past idle. The tick that unblocks the dependent
+			// emits no spawn (restore happens after selection), so a single until-idle pass would stop
+			// one tick early; loop until both chains complete. Each pass also drains pending close
+			// handlers, so the store closes cleanly.
+			for (let pass = 0; pass < 6; pass += 1) {
+				await runSchedulerUntilIdle(opts)
+				const blockerDone = fixture.store.getChain(blockerChain.id)?.status === "completed"
+				const dependentDone = fixture.store.getChain(dependentChain.id)?.status === "completed"
+				if (blockerDone && dependentDone) break
+			}
+
+			// Blocker ran to success terminal on its own chain.
+			expect(fixture.store.getItem(blocker.id)?.status).toBe("done")
+			// Engine restored the dependent off the back of the blocker — no manual status change —
+			// then it ran iteration→review to done and its chain completed.
+			expect(fixture.store.getItem(dependent.id)?.status).toBe("done")
+			expect(fixture.store.getItem(dependent.id)?.extra.dependsOn).toBeUndefined()
+			expect(fixture.store.getChain(blockerChain.id)?.status).toBe("completed")
+			expect(fixture.store.getChain(dependentChain.id)?.status).toBe("completed")
+
+			const unblockedEvents = fixture.schedulerEvents.filter(
+				(event): event is Extract<SchedulerEvent, { type: "item.dependency_unblocked" }> =>
+					event.type === "item.dependency_unblocked" && event.itemId === dependent.id,
+			)
+			expect(unblockedEvents).toHaveLength(1)
+			expect(unblockedEvents[0]?.fromStatus).toBe("blocked")
+			expect(unblockedEvents[0]?.toStatus).toBe("queued")
+			expect(unblockedEvents[0]?.dependsOn).toEqual([blocker.id])
+
+			// The dependent's real work phase only ran AFTER recovery, never while blocked. The fake
+			// runner emits verdict=accepted on its single iteration run, so the item reaches done in
+			// one phase (scheduler.ts maps exit 0 + accepted → done regardless of phase).
+			const phaseStarts = fixture.schedulerEvents
+				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
+					event.type === "phase.start" && event.itemId === dependent.id,
+				)
+				.map((event) => event.phase)
+			expect(phaseStarts).toEqual(["iteration"])
 		} finally {
 			fixture.store.close()
 		}
