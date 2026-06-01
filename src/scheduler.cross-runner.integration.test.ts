@@ -78,7 +78,7 @@ test("cross-runner happy path stores iteration/codex and review/claude session i
 	}
 })
 
-test("review retry verdict retries review phase without returning to iteration", async () => {
+test("review retry verdict returns to iteration before review runs again", async () => {
 	const fixture = await createCrossRunnerFixture("review-retry", [
 		{
 			runner: "codex",
@@ -93,6 +93,13 @@ test("review retry verdict retries review phase without returning to iteration",
 			sessionId: "019e6cf2-5b39-7b83-9bc5-8c8b96122682",
 			stdout: ["REVIEW SUMMARY: verdict=retry; issue=#31602; reason=review-wants-changes"],
 			writeStatus: "changes_requested",
+		},
+		{
+			runner: "codex",
+			phase: "iteration",
+			sessionId: "d400e2b2-04a4-44f8-8f13-3078f41a5594",
+			stdout: ["ITERATION SUMMARY: scope=cross-runner; reason=retry-iteration-complete"],
+			writeStatus: "in_progress",
 		},
 		{
 			runner: "claude",
@@ -116,20 +123,29 @@ test("review retry verdict retries review phase without returning to iteration",
 		expect(fixture.store.getItem(item.id)?.phase).toBe("review")
 		expect(fixture.store.getItem(item.id)?.status).toBe("changes_requested")
 
+		const retryIterationTick = await schedulerTick(options)
+		expect(retryIterationTick.spawnedRuns).toHaveLength(1)
+		const retryIterationClosed = await retryIterationTick.spawnedRuns[0]!.closed
+		expect(retryIterationClosed.status).toBe("in_progress")
+		expect(fixture.store.getItem(item.id)?.phase).toBe("iteration")
+		expect(fixture.store.getItem(item.id)?.status).toBe("in_progress")
+
 		const acceptedReviewTick = await schedulerTick(options)
 		expect(acceptedReviewTick.spawnedRuns).toHaveLength(1)
 		const acceptedReviewClosed = await acceptedReviewTick.spawnedRuns[0]!.closed
 		expect(acceptedReviewClosed.status).toBe("done")
 		expect(fixture.store.getItem(item.id)?.status).toBe("done")
 
-		expect(phaseStarts(fixture.schedulerEvents, item.id)).toEqual(["iteration", "review", "review"])
+		expect(phaseStarts(fixture.schedulerEvents, item.id)).toEqual(["iteration", "review", "iteration", "review"])
 		const fakeEvents = await readFakeRunnerEvents(fixture.eventLog)
 		expect(fakeEvents.map((event) => `${event.runner}:${event.phase}`)).toEqual([
 			"codex:iteration",
 			"claude:review",
+			"codex:iteration",
 			"claude:review",
 		])
-		expect(fakeEvents[2]?.resumedSessionId).toBe("019e6cf2-5b39-7b83-9bc5-8c8b96122682")
+		expect(fakeEvents[2]?.resumedSessionId).toBe("d400e2b2-04a4-44f8-8f13-3078f41a5593")
+		expect(fakeEvents[3]?.resumedSessionId).toBe("019e6cf2-5b39-7b83-9bc5-8c8b96122682")
 	} finally {
 		fixture.store.close()
 	}
@@ -151,7 +167,6 @@ test("invalid review session id clears only review/claude and the next review sp
 			phase: "review",
 			exitCode: 1,
 			stderr: [`No conversation found with session ID: ${staleReviewSessionId}`],
-			writeStatus: "changes_requested",
 		},
 		{
 			runner: "claude",
@@ -180,7 +195,9 @@ test("invalid review session id clears only review/claude and the next review sp
 		expect(invalidReviewTick.spawnedRuns).toHaveLength(1)
 		const invalidReviewClosed = await invalidReviewTick.spawnedRuns[0]!.closed
 		expect(invalidReviewClosed.exitCode).toBe(1)
-		expect(invalidReviewClosed.status).toBe("changes_requested")
+		expect(invalidReviewClosed.status).toBe("in_progress")
+		expect(fixture.store.getItem(item.id)?.phase).toBe("review")
+		expect(fixture.store.getItem(item.id)?.status).toBe("in_progress")
 		expect(fixture.store.getItemSessionId(item.id, { phase: "review", runner: "claude" })).toBeNull()
 		expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "codex" })).toBe("d400e2b2-04a4-44f8-8f13-3078f41a5593")
 		expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({
