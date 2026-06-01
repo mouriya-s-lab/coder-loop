@@ -71,9 +71,9 @@ coder-loop daemon restart <TARGET_DIR>
 Runner awareness:
 
 - Do not assume the inner loop is Claude-only.
-- Read `target.runner.default`, `queue.selected.runner`, `current.runner`, and
+- Read `target.runner.phases`, `queue.selected.phaseRunners`, `current.runner`, and
   `current.phaseStatus.value.runner` from `coder-loop status <TARGET_DIR> --json`.
-- If the wrong runner is selected, fix target config or the queue item first,
+- If the wrong runner is selected, fix the role entry md or queue item first,
   then rerun `coder-loop doctor <TARGET_DIR> --repo <TARGET_REPO>`.
 
 ## Do not

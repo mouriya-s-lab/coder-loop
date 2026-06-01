@@ -1,3 +1,7 @@
+---
+defaultRunner: codex
+---
+
 # coder-loop iteration agent — fragment entry
 
 You are spawned by the orchestrator via `claude -p` to execute exactly one iteration for one selected issue. Do not loop inside this process.

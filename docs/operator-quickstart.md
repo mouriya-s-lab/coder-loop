@@ -14,7 +14,7 @@
 
 - `bun` 已安装（`bun --version` 能跑）。
 - `gh` CLI 已 auth（`gh auth status` 不报错），有目标 repo 的 issue / PR 写权限。
-- runner CLI 在 PATH：iteration 未手动设置时默认使用 `codex`，review 默认使用 `claude`。target config 可分别覆盖。
+- runner CLI 在 PATH：phase 默认 runner 由角色 entry md 声明，bundled workflow 需要 `codex` 和 `claude`。
 - 目标 repo 在本地，有可用的 base branch（通常 `main`）。
 - 用户级 skill / rule（仅 `/dev-plan` 需要，`/dev-loop` 本身不需要）：
   - `~/.claude/rules/github-issue-pr-routing.rule.md`
@@ -53,7 +53,7 @@ coder-loop install /path/to/your-target-repo --repo <owner>/<repo>
 
 - **A) target 项目文件**：写 `.claude/commands/dev-plan.md` / `dev-loop.md`、建/刷新 `.coder-loop/runtime/{issues,evidence,logs}/` 并初始化 centralized chain、merge `.coder-loop/runtime/config.json`（含 preset 绑定）、若 `workflow.md` 缺失则从 preset 模板拷一份。
 - **B) target GitHub state**：通过 `gh` 确保 `kind:code` / `kind:comment` / `kind:code-spike` / `kind:blocked` 标签存在（preset fragments 依赖它们做 issue 分类）。
-- **C) 操作员机器前置**：只做检查、不安装——`gh`(+ auth) / target default runner CLI / review default runner CLI / `coder-loop` 是否在 PATH。
+- **C) 操作员机器前置**：只做检查、不安装——`gh`(+ auth) / role-md phase runner CLI / `coder-loop` 是否在 PATH。
 - **D) 用户级 skill 版本**：检查 `~/.claude/skills/writing-issue/SKILL.md` 是否含新版 marker；加 `--install-skills` 会自动同步到最新。
 
 `install` 第一件事会确认 central daemon 可达；daemon 不在线时会在写 `.coder-loop/workflow.md` 之前 fail-fast。使用自定义 `--loop-data-root` 时，`daemon up` 与后续 `install` / `doctor` / `status` 要传同一个 root。
@@ -82,18 +82,16 @@ coder-loop status /path/to/your-target-repo --json
 
 ### Runner 默认值与覆盖
 
-Iteration 未手动设置时固定默认 `codex`，不跟随启动宿主。Review 默认 runner 固定为 `claude`，不继承 Codex 宿主或 queue item；Claude review 的模型固定为 `claude-opus-4-7`。需要固定 target 默认 runner / model 时，在 `.coder-loop/runtime/config.json` 写：
+默认 runner 由每个 phase 的角色 entry md 自声明；bundled `gh-issue-pr-iteration` 中 iteration 是 `codex`，review 是 `claude`。Review 不继承 Codex 宿主或 queue item；Claude review 的模型固定为 `claude-opus-4-7`。需要固定 runner binary / model / extra args 时，在 `.coder-loop/runtime/config.json` 写：
 
 ```json
 {
-  "runner": "codex",
-  "reviewRunner": "claude",
   "codex": { "binary": "codex", "model": "gpt-5.4", "extraArgs": [] },
   "claude": { "binary": "claude", "model": "sonnet", "extraArgs": [] }
 }
 ```
 
-单个 queue item 可加 `"runner": "claude" | "codex"` 覆盖 target iteration 默认值；review 仍用 `reviewRunner`（默认 `claude`）。`claude.model` 影响 Claude iteration；review 为 Claude 时仍强制 `claude-opus-4-7`。`doctor` 检查 target 默认 runner 和 review 默认 runner 的实际 binary；`status --json` 暴露 `target.runner.hostDefault`、`target.runner.default`、`target.runner.reviewDefault`、`queue.selected.runner`、`queue.selected.reviewRunner`、`current.runner` 与 phase status 的 runner/model。
+单个 queue item 可加 `"runner": "claude" | "codex"` 覆盖允许 item override 的普通执行 phase；review 和 trigger 角色用自己的 entry md 默认值。`doctor` 检查所有 phase runner 的实际 binary；`status --json` 暴露 `target.runner.phases`、`queue.selected.phaseRunners`、`current.runner` 与 phase status 的 runner/model。
 
 把运行期文件加 `.gitignore`：
 
@@ -125,8 +123,9 @@ coder-loop status /path/to/your-target-repo --json | jq '.state.kind, .queue, .c
 |---|---|
 | `.state.kind` | `"ok"` 表示 config/state/preset/runtime 都可读；其他值按错误继续排 |
 | `.queue.total` / `.queue.selected` | 有可推进 item 时 selected 不为 null |
-| `.target.runner.default` / `.queue.selected.runner` | target 默认 iteration runner 与 selected item iteration runner；含 kind/source/binary/model |
-| `.target.runner.reviewDefault` / `.queue.selected.reviewRunner` | review runner；默认 `claude` + `claude-opus-4-7`，显式 `reviewRunner` 时来源为 config |
+| `.target.runner.phases` / `.queue.selected.phaseRunners` | 每个 phase 的 effective runner；含 kind/source/binary/model |
+| `.target.runner.default` / `.queue.selected.runner` | 默认执行 phase 与 selected item 默认执行 phase runner |
+| `.target.runner.reviewDefault` / `.queue.selected.reviewRunner` | review phase runner；role md 声明为 Claude 时 model 固定为 `claude-opus-4-7` |
 | `.current.run` | 正在跑或可 resume 的 run；null 表示当前没有 in-flight phase |
 | `.events.latest` | 当前或最近 run 的最后一条结构化事件 |
 | `.processes.live` / `.processes.scanError` | live process scan 结果；daemon 详情看 `coder-loop daemon status` |

@@ -84,7 +84,7 @@ coder-loop status /path/to/target --json
 
 `install` 会注册 central DB chain，因此必须先有可用的 central daemon。使用自定义 `--loop-data-root` 时，`daemon up` 与后续 `install` / `doctor` / `status` 要传同一个 root。
 
-Iteration runner 未手动设置时固定默认 `codex`，不跟随启动宿主。target config 可用 `"runner": "claude" | "codex"` 覆盖 iteration 默认值，单个 queue item 也可用同名 `runner` 字段覆盖。Runner 模型可用 `claude.model` / `codex.model` 指定。Review runner 默认固定为 `claude`，不继承 Codex 宿主或 queue item；需要改 runner 时在 target config 写 `"reviewRunner": "claude" | "codex"`。当 review runner 是 Claude 时，模型强制为 `claude-opus-4-7`，不受 `claude.model` 或 `claude.extraArgs` 里的 `--model` 覆盖。`doctor` / `status --json` 会显示实际选择。
+每个 phase 的默认 runner 由该角色 entry md 顶部 `defaultRunner: claude|codex` 自声明；未声明时走 engine-builtin fallback（当前为 `codex`）。单个 queue item 的 `runner` 字段只覆盖允许 item override 的普通执行 phase。Runner binary、模型与额外参数仍由 `claude.*` / `codex.*` config 提供；review phase effective runner 为 Claude 时模型强制为 `claude-opus-4-7`。`doctor` / `status --json` 会显示每个 phase 的 runner 与 source。
 
 后台循环由 daemon API 管理；`/dev-loop [N]` 也是这个 API 的人类快捷入口，不再手写 `nohup`：
 

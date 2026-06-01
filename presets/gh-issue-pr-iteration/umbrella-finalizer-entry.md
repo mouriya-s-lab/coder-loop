@@ -1,3 +1,7 @@
+---
+defaultRunner: codex
+---
+
 # coder-loop umbrella-finalizer agent
 
 You are a chain-complete trigger agent spawned after every item in one active chain is terminal and before that chain is allowed to become `completed`.

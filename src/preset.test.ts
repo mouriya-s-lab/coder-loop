@@ -110,6 +110,12 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 	test("phases include iteration, review, blocked responder, and umbrella finalizer triggers", async () => {
 		const preset = await loadPreset(BUNDLED_PRESET_DIR)
 		expect(preset.phases.map((p) => p.name)).toEqual(["iteration", "review", "blocked-responder", "umbrella-finalizer"])
+		expect(Object.fromEntries(preset.phases.map((phase) => [phase.name, phase.defaultRunner]))).toEqual({
+			iteration: "codex",
+			review: "claude",
+			"blocked-responder": "codex",
+			"umbrella-finalizer": "codex",
+		})
 		expect(reviewPhaseForPreset(preset).name).toBe("review")
 		expect(triggeredPhasesAfter(preset, "review", "blocked").map((phase) => phase.name)).toEqual(["blocked-responder"])
 		expect(chainCompleteTriggerPhases(preset).map((phase) => phase.name)).toEqual(["umbrella-finalizer"])

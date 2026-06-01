@@ -231,19 +231,25 @@ target 在 `.coder-loop/runtime/config.json`（或 `config.toml`）写：
 
 两者互斥。都不写时引擎走默认的 `gh-issue-pr-iteration`。`preset` 名只允许 `^[a-zA-Z][a-zA-Z0-9_-]*$`，禁止路径分隔符与 `..`，所以 bundled name 一定落在 `<pkg>/presets/<name>/` 内。
 
-Runner 是 target runtime 配置，不是 preset 状态机的一部分。Iteration 未手动设置时固定默认 `codex`，不跟随启动宿主；review 默认 runner 固定为 `claude`，且 Claude review 模型固定为 `claude-opus-4-7`。target 可写：
+Runner 默认值写在角色 entry md，而不是 `preset.toml` 或 target runtime config。每个 phase 的 prompt 文件顶部声明：
+
+```markdown
+---
+defaultRunner: codex
+---
+```
+
+`defaultRunner` 只能是 `claude` 或 `codex`。未声明的 phase 使用 `source=engine-builtin` fallback；已声明的 phase 在 `status --json` 中显示 `source=role-md`。target config 继续提供 runner command 参数，例如：
 
 ```json
 {
   "preset": "single-phase-example",
-  "runner": "codex",
-  "reviewRunner": "claude",
   "codex": { "binary": "codex", "model": "gpt-5.4", "extraArgs": [] },
   "claude": { "binary": "claude", "model": "sonnet", "extraArgs": [] }
 }
 ```
 
-queue item 可加 `"runner": "claude" | "codex"` 只覆盖该 item 的 iteration runner；review 不受 queue item 覆盖影响，除非 target config 显式写 `reviewRunner`。`claude.model` 只影响 Claude iteration；review runner 为 Claude 时引擎会把 model 强制成 `claude-opus-4-7` 并替换 `--model` extra arg。preset 作者不要把某个 runner 的 CLI 细节写进 engine contract；若某个 preset 只支持特定 runner，把它写进该 preset 的 README / target workflow，并用 `doctor` / `status` 验证 target config 是否符合预期。
+queue item 可加 `"runner": "claude" | "codex"` 覆盖允许 item override 的普通执行 phase；review 和 trigger 这类角色使用自己的 entry md 声明。review phase 的 effective runner 为 Claude 时引擎会把 model 强制成 `claude-opus-4-7` 并替换 `--model` extra arg。preset 作者不要把某个 runner 的 CLI 细节写进 engine contract；若某个 preset 只支持特定 runner，把它写进该 preset 的 README / target workflow，并用 `doctor` / `status` 验证 role-md runner 与 target command config 是否符合预期。
 
 ---
 

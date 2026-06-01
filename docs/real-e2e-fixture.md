@@ -30,12 +30,11 @@ Do not commit `.coder-loop/runtime/`, runtime logs, or local evidence artifacts 
 
 ## Runner Coverage
 
-The successful 2026-05-17 run used Codex end to end. Current runner semantics differ for review: iteration can still be Codex, but review now defaults to Claude unless target config explicitly sets `reviewRunner`:
+The successful 2026-05-17 run used Codex end to end. Current runner semantics differ for review: phase defaults now come from role entry md, so the bundled iteration role declares Codex and the bundled review role declares Claude:
 
-- target config: `.coder-loop/runtime/config.json` has `"runner": "codex"`;
 - queue item: `runner: "codex"`;
 - `status --json`: selected runner `kind=codex`, `source=queue`;
-- `status --json`: review runner defaults to `kind=claude`, `source=review-default`, `model=claude-opus-4-7` unless config sets `reviewRunner` to another runner;
+- `status --json`: `target.runner.phases.review` is `kind=claude`, `source=role-md`, `model=claude-opus-4-7`;
 - iteration phase status should record `runner: "codex"` and a Codex `thread_id`; review phase status should record `runner: "claude"` and `model: "claude-opus-4-7"` under the default review policy.
 
 Codex runner requires real workspace writes and GitHub CLI access for the

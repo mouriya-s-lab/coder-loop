@@ -1,3 +1,7 @@
+---
+defaultRunner: codex
+---
+
 # coder-loop blocked-responder agent
 
 You are a post-review trigger spawned after review marked one selected issue `blocked`.

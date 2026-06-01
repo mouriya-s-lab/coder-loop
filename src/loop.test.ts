@@ -16,6 +16,7 @@ import {
 	normalizeQueueIssueId,
 	parseKindFromLabels,
 	parsePreset,
+	parseRoleEntryMetadata,
 	parseReviewSummaryVerdict,
 	parseSessionIdFromRunnerStream,
 	renderFragmentIndex,
@@ -148,8 +149,8 @@ function makeOptions(preset = makePreset()): LoopOptions {
 		worktree: false,
 		browserEvidenceRequired: false,
 		hostRunner: "codex",
-		defaultRunner: { ...codexRunner, source: "iteration-default" },
-		reviewRunner: { ...claudeRunner, source: "review-default", model: CLAUDE_REVIEW_MODEL },
+		defaultRunner: { ...codexRunner, source: "engine-builtin" },
+		reviewRunner: { ...codexRunner, source: "engine-builtin" },
 		runnerCommands: { claude: claudeRunner, codex: codexRunner },
 		dryRun: false,
 		preset,
@@ -178,6 +179,7 @@ describe("ItemRecord prompt bindings", () => {
 				["CODEX_SESSION", { kind: "item", field: "sessionIds.iteration.codex" }],
 			],
 			trigger: null,
+			defaultRunner: null,
 		}
 		const item = makeItem({
 			issueNumber: 333,
@@ -274,14 +276,38 @@ describe("runtime binding helpers", () => {
 })
 
 describe("runner and daemon helpers", () => {
-	test("selectRunnerForPhase uses review runner only for the preset review phase", () => {
-		const preset = makePreset()
+	test("selectRunnerForPhase uses role-md runner for review and queue override for iteration", () => {
+		const base = makePreset()
+		const preset: Preset = {
+			...base,
+			phases: base.phases.map((phase) =>
+				phase.name === "iteration"
+					? { ...phase, defaultRunner: "codex" as const }
+					: { ...phase, defaultRunner: "claude" as const },
+			),
+		}
 		const options = makeOptions(preset)
 		const item = makeItem({ runner: "claude" })
 
 		expect(selectRunnerForPhase("iteration", item, options).kind).toBe("claude")
 		expect(selectRunnerForPhase(reviewPhaseForPreset(preset).name, item, options).kind).toBe("claude")
 		expect(selectRunnerForPhase(reviewPhaseForPreset(preset).name, item, options).model).toBe(CLAUDE_REVIEW_MODEL)
+	})
+
+	test("selectRunnerForPhase uses engine-builtin fallback when role md omits defaultRunner", () => {
+		const preset = makePreset()
+		const options = makeOptions(preset)
+		const item = makeItem()
+		const runner = selectRunnerForPhase("iteration", item, options)
+
+		expect(runner.kind).toBe("codex")
+		expect(runner.source).toBe("engine-builtin")
+	})
+
+	test("parseRoleEntryMetadata reads strict entry frontmatter", () => {
+		expect(parseRoleEntryMetadata("---\ndefaultRunner: claude\n---\n# role", "role").defaultRunner).toBe("claude")
+		expect(parseRoleEntryMetadata("# role", "role").defaultRunner).toBeNull()
+		expect(() => parseRoleEntryMetadata("---\ndefaultRunner: bash\n---\n# role", "role")).toThrow(/defaultRunner/)
 	})
 
 	test("buildDaemonStartPlan starts the central daemon without legacy loop flags", async () => {
