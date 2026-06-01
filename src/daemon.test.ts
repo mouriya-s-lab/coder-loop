@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { spawn } from "node:child_process"
-import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { mkdir, readdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises"
 import { mkdirSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
 
@@ -89,6 +89,65 @@ describe("daemon", () => {
 			expect((await readFile(fixture.pidFile, "utf-8")).trim()).toBe(String(process.pid))
 		} finally {
 			await fixture.daemon.stop()
+		}
+	})
+
+	test("daemon rebinds socket pathname after unlink", async () => {
+		const fixture = await startFixture("socket-path-rebind", { schedulerEnabled: false })
+		try {
+			await unlink(fixture.socketPath)
+			await waitFor(async () => {
+				try {
+					return await pathIsSocket(fixture.socketPath)
+				} catch {
+					return false
+				}
+			}, (rebuilt) => rebuilt)
+
+			const status = record(expectOk(await sendDaemonRequest(fixture.socketPath, daemonRequest("daemon.status"))).daemon)
+			expect(status).toMatchObject({
+				pid: process.pid,
+				socketPath: fixture.socketPath,
+				running: true,
+			})
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("daemon startup rejects live pid with missing socket pathname", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-startup-socket-unlinked`)
+		const loopDataRoot = resolve(root, "ld")
+		const pidFile = resolve(loopDataRoot, "daemon.pid")
+		await mkdir(loopDataRoot, { recursive: true })
+		const stale = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+			detached: true,
+			stdio: "ignore",
+		})
+		stale.unref()
+		if (stale.pid === undefined) throw new Error("expected stale process pid")
+		await writeFile(pidFile, `${stale.pid}\n`)
+
+		try {
+			await expect(startCoderLoopDaemon({ loopDataRoot, scheduler: { enabled: false } })).rejects.toMatchObject({
+				code: "daemon_socket_unlinked",
+				details: {
+					pid: stale.pid,
+					socketPath: resolve(loopDataRoot, "daemon.sock"),
+					pidFile,
+				},
+			})
+		} finally {
+			try {
+				process.kill(-(stale.pid), "SIGKILL")
+			} catch {
+				try {
+					process.kill(stale.pid, "SIGKILL")
+				} catch {
+					// Already exited.
+				}
+			}
+			await waitForPidExit(stale.pid, 1_000)
 		}
 	})
 

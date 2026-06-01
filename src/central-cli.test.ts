@@ -446,6 +446,34 @@ describe("central chain/item CLI", () => {
 		}
 	})
 
+	test("daemon status --json reports live pid with missing socket pathname", async () => {
+		const loopDataRoot = await makeLoopDataRoot("daemon-socket-unlinked-json")
+		await mkdir(loopDataRoot, { recursive: true })
+		const stale = Bun.spawn({
+			cmd: [process.execPath, "-e", "setInterval(() => {}, 1000)"],
+			stdin: "ignore",
+			stdout: "ignore",
+			stderr: "ignore",
+		})
+		if (stale.pid === undefined) throw new Error("expected stale process pid")
+		await writeFile(resolve(loopDataRoot, "daemon.pid"), `${stale.pid}\n`)
+
+		try {
+			const result = await runCli(["daemon", "status", "--loop-data-root", loopDataRoot, "--json"])
+			const parsed = expectJsonError(result)
+			expect(parsed.error.code).toBe("daemon_socket_unlinked")
+			expect(parsed.error.details).toMatchObject({
+				pid: stale.pid,
+				socketPath: resolve(loopDataRoot, "daemon.sock"),
+				pidFile: resolve(loopDataRoot, "daemon.pid"),
+				causeCode: "ENOENT",
+			})
+		} finally {
+			stale.kill()
+			await stale.exited.catch(() => undefined)
+		}
+	})
+
 	test("daemon up --json emits JSON when loop-data root cannot be prepared", async () => {
 		await mkdir(TEST_ROOT, { recursive: true })
 		const parentFile = resolve(TEST_ROOT, `not-a-directory-${++nextFixtureId}`)
