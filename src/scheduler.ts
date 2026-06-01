@@ -363,11 +363,11 @@ function selectNextItemAndPhase(input: SelectNextItemAndPhaseInput): { item: Ite
 		return { item: iterDone, phase: input.phasePlan.reviewPhase }
 	}
 
-	const reviewRetry = repoItems.find((item) =>
-		item.status === "changes_requested" && item.phase === input.phasePlan.reviewPhase,
+	const reviewIncomplete = repoItems.find((item) =>
+		item.status === "in_progress" && item.phase === input.phasePlan.reviewPhase,
 	)
-	if (reviewRetry !== undefined && input.phasePlan.iterPhase !== input.phasePlan.reviewPhase) {
-		return { item: reviewRetry, phase: input.phasePlan.reviewPhase }
+	if (reviewIncomplete !== undefined && input.phasePlan.iterPhase !== input.phasePlan.reviewPhase) {
+		return { item: reviewIncomplete, phase: input.phasePlan.reviewPhase }
 	}
 
 	for (const triggerPhase of input.phasePlan.itemTriggerPhases) {

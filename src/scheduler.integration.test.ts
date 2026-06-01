@@ -112,3 +112,112 @@ process.exit(1)
 		store.close()
 	}
 })
+
+test("single item review retry verdict routes back through iteration before review", async () => {
+	const root = resolve(TEST_ROOT, "review-retry-to-iteration")
+	const loopDataRoot = resolve(root, "loop-data")
+	const fakeRunner = resolve(root, "review-retry-runner.ts")
+	await mkdir(loopDataRoot, { recursive: true })
+	await writeFile(
+		fakeRunner,
+		`import { openSqliteStateStore } from ${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))}
+
+const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
+const input = JSON.parse(prompt)
+const status = input.phase === "review" ? "changes_requested" : "in_progress"
+const loopDataRoot = process.env.CODER_LOOP_DATA_DIR
+if (typeof loopDataRoot === "string" && typeof input.itemId === "number") {
+	const store = openSqliteStateStore({ loopDataRoot })
+	store.updateItem(input.itemId, { status, updatedAt: Math.floor(Date.now() / 1000) })
+	store.close()
+}
+console.log(input.phase + ":" + status)
+`,
+	)
+
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = store.createChain({
+			name: "review-retry-to-iteration-chain",
+			preset: "gh-issue-pr-iteration",
+			repository: "mouriya-s-lab/coder-loop",
+			baseBranch: "main",
+			status: "active",
+			metadata: {},
+		})
+		const item = store.createItem({
+			chainId: chain.id,
+			issueNumber: 346_001,
+			repoCwd: REPO_ROOT,
+			status: "queued",
+			attempts: 0,
+			extra: { issueKind: "code" },
+		})
+		const state = createSchedulerState()
+		const schedulerEvents: SchedulerEvent[] = []
+		const worktreeManager: SchedulerWorktreeManager = async ({ chain: selectedChain, repoCwd }) => {
+			const worktreePath = schedulerSlotWorktreePath(selectedChain, repoCwd, { loopDataRoot })
+			await mkdir(worktreePath, { recursive: true })
+			return worktreePath
+		}
+		let runSequence = 0
+		const options: SchedulerOptions = {
+			store,
+			state,
+			presetDir: resolve(REPO_ROOT, "presets/gh-issue-pr-iteration"),
+			runner: {
+				kind: "claude",
+				source: "iteration-default",
+				binary: "bun",
+				extraArgs: [fakeRunner],
+				model: null,
+			},
+			statusesForChain: () => ({
+				pending: ["queued", "in_progress", "changes_requested"],
+				terminal: ["blocked", "moot", "done"],
+				success: ["done"],
+				entry: "queued",
+			}),
+			worktreeManager,
+			loopDataRootOptions: { loopDataRoot },
+			runIdFactory: ({ phase }) => `run-review-retry-${++runSequence}-${phase}`,
+			prompt: ({ item: selected, runId, phase }) => JSON.stringify({
+				itemId: selected.id,
+				issueNumber: selected.issueNumber,
+				runId,
+				phase,
+			}),
+			kindResolver: () => ({ ok: true, kind: "code" }),
+			onEvent: (event) => {
+				schedulerEvents.push(event)
+			},
+		}
+
+		const iterTick = await schedulerTick(options)
+		expect(iterTick.spawnedRuns).toHaveLength(1)
+		await iterTick.spawnedRuns[0]!.closed
+		expect(store.getItem(item.id)?.phase).toBe("iteration")
+		expect(store.getItem(item.id)?.status).toBe("in_progress")
+
+		const reviewTick = await schedulerTick(options)
+		expect(reviewTick.spawnedRuns).toHaveLength(1)
+		await reviewTick.spawnedRuns[0]!.closed
+		expect(store.getItem(item.id)?.phase).toBe("review")
+		expect(store.getItem(item.id)?.status).toBe("changes_requested")
+
+		const retryIterTick = await schedulerTick(options)
+		expect(retryIterTick.spawnedRuns).toHaveLength(1)
+		await retryIterTick.spawnedRuns[0]!.closed
+		expect(store.getItem(item.id)?.phase).toBe("iteration")
+		expect(store.getItem(item.id)?.status).toBe("in_progress")
+
+		expect(schedulerEvents
+			.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
+				event.type === "phase.start" && event.itemId === item.id,
+			)
+			.map((event) => event.phase)).toEqual(["iteration", "review", "iteration"])
+	} finally {
+		store.close()
+	}
+})
