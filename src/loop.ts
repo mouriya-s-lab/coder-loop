@@ -2270,7 +2270,7 @@ function pickFirstSelectableStatusItem(
 	if (selected === null) return null
 
 	const selectedId = getItemId(selected, options.preset)
-	const issueFile = resolveChainIssueFile(options, chain, selected, selectedId, "Selected issue file")
+	const issueFile = resolveOptionalChainIssueFile(options, chain, selected, "Selected issue file")
 	const evidenceDir = resolveChainEvidenceDir(options, chain, selected, selectedId, "Selected evidence directory")
 	const agentCwd = selected.agentCwd ?? options.targetCwd
 	const runner = selectRunnerForPhase(defaultPhaseForPreset(options.preset).name, selected, options)
@@ -3686,7 +3686,7 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 	}, config, preset)
 	const anchorRecord = selectFinalizerAnchorItem(input.items, input.runId)
 	const anchorId = getItemId(anchorRecord, preset)
-	const currentIssueFile = resolveChainIssueFile(options, input.chain, anchorRecord, anchorId, "Chain-complete trigger issue file")
+	const currentIssueFile = resolveOptionalChainIssueFile(options, input.chain, anchorRecord, "Chain-complete trigger issue file")
 	const evidenceDir = resolveChainEvidenceDir(options, input.chain, anchorRecord, anchorId, "Chain-complete trigger evidence directory")
 	const finalizerRunId = input.runId ?? makeRunId(`chain-${input.chain.id}`)
 
@@ -3811,7 +3811,7 @@ async function collectStatusRuntimeErrors(
 	checkInside(options.targetCwd, options.workflowPath, "workflow", errors)
 	if (isWithin(runtimeRoot, options.workflowPath)) pushCheckError(errors, "workflow", "must be project policy outside .coder-loop/runtime")
 	if (chain.status !== "active") pushCheckError(errors, "chain.status", `must be active (got ${chain.status})`)
-	checkCentralRuntimeLayout(options, chain, errors)
+	await checkCentralRuntimeLayout(options, chain, errors)
 
 	for (const [index, item] of items.entries()) {
 		const label = `state.queue[${index}]`
@@ -3864,9 +3864,9 @@ function samePath(left: string, right: string): boolean {
 	return resolve(left) === resolve(right)
 }
 
-function resolveChainIssueFile(options: LoopOptions, chain: ChainRecord, item: ItemRecord, itemId: string, label: string): string {
+function resolveOptionalChainIssueFile(options: LoopOptions, chain: ChainRecord, item: ItemRecord, label: string): string | null {
 	const chainPaths = resolveChainRuntimePaths(chain.name, loopDataRootOption(options.loopDataRoot))
-	if (item.issueFile === null) return chainPaths.issueFile(itemId)
+	if (item.issueFile === null || item.issueFile === "") return null
 	return resolveChainScopedPath(chainPaths.chainRoot, chainPaths.issuesDir, item.issueFile, label)
 }
 
@@ -5196,7 +5196,7 @@ function resolveFrom(base: string, path: string): string {
 	return isAbsolute(path) ? path : resolve(base, path)
 }
 
-function checkCentralRuntimeLayout(options: LoopOptions, chain: ChainRecord, errors: RuntimeCheckError[]): void {
+async function checkCentralRuntimeLayout(options: LoopOptions, chain: ChainRecord, errors: RuntimeCheckError[]): Promise<void> {
 	try {
 		const rootOptions = loopDataRootOption(options.loopDataRoot)
 		const loopData = resolveLoopDataPaths(rootOptions)
@@ -5205,6 +5205,10 @@ function checkCentralRuntimeLayout(options: LoopOptions, chain: ChainRecord, err
 		checkInside(loopData.root, chainPaths.issuesDir, "issueDir", errors)
 		checkInside(loopData.root, chainPaths.evidenceDir, "evidenceDir", errors)
 		checkInside(loopData.root, chainPaths.runsDir, "logDir", errors)
+		await checkFile(chainPaths.sharedFile, "sharedContextPath", errors)
+		await checkDirectory(chainPaths.issuesDir, "issueDir", errors)
+		await checkDirectory(chainPaths.evidenceDir, "evidenceRootDir", errors)
+		await checkDirectory(chainPaths.runsDir, "logDir", errors)
 	} catch (error) {
 		pushCheckError(errors, "loopDataRoot", errorMessage(error))
 	}

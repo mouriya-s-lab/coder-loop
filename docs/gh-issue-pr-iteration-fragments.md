@@ -29,7 +29,7 @@
 | `branch` | string / null | iteration 创建的 PR 分支名 |
 | `pr` | number / null | iteration 开的 PR 号 |
 | `lastRunId` | string / null | 上一次 iteration 的 runId |
-| `issueFile` | string / null | issue handoff 文件相对路径 |
+| `issueFile` | string / null | 可选 per-issue handoff attachment 相对路径；主 handoff 是 chain-level `shared.md` |
 | `evidenceDir` | string / null | 该 issue 的证据目录相对路径 |
 | `agentCwd` | string / null | agent spawn 的绝对 cwd；跨仓或 post-review responder 可指向外部 checkout |
 | `runner` | `claude \| codex` / null | 该 item 对允许 item override 的普通执行 phase 的 runner override |
@@ -408,7 +408,7 @@ phase 输出文件路径由 `coder-loop status <target> --json` 的 `current.pha
 
 常见路径示例：
 
-- **Planning 顺利**：`plan/intake (intake_clear) → plan/classify (classified) → plan/decompose (atomic_set_ready) → plan/checkpoint-author (checkpoints_authored) → plan/adversarial-validate (validated) → plan/create-issues (issues_created) → plan/init-queue (queue_initialized) → plan/handoff (handoff_written) → plan/final`。`plan/init-queue` 通过 centralized chain/item API 初始化队列：优先 `coder-loop item batch-add` / daemon `item.batchAdd` 原子写入，必要时才用兼容的单条 `coder-loop item add` fallback；handoff 与 evidence 路径位于 `loop-data/chains/<chain>/issues`、`evidence`。
+- **Planning 顺利**：`plan/intake (intake_clear) → plan/classify (classified) → plan/decompose (atomic_set_ready) → plan/checkpoint-author (checkpoints_authored) → plan/adversarial-validate (validated) → plan/create-issues (issues_created) → plan/init-queue (queue_initialized) → plan/handoff (handoff_written) → plan/final`。`plan/init-queue` 通过 centralized chain/item API 初始化队列：优先 `coder-loop item batch-add` / daemon `item.batchAdd` 原子写入，必要时才用兼容的单条 `coder-loop item add` fallback；chain handoff 位于 `loop-data/chains/<chain>/shared.md`，per-issue handoff 只是可选 attachment，evidence 位于 `loop-data/chains/<chain>/evidence`。
 - **Planning intake 不清**：`plan/intake (intake_needs_clarification) → plan/handoff (handoff_written) → plan/final (verdict: intake_needs_clarification)`；operator 看 handoff 文件回答问题后重跑 `/dev-plan`.
 - **顺利 PR-merge**：`iter/read-context (context_ready) → classify-scope (needs_implementation) → implement (ready_for_verification) → verify-evidence (passed) → commit-pr (pr_ready) → handoff (written) → final`；review：`read-evidence → trace-honesty → pr-protocol → title-intent-gate (aligned) → evidence-gate (passed) → commitment-gate (passed) → spike-followup-gate (skipped) → code-gate (passed) → issue-closure-gate (accepted_pr) → action-accept-pr (closed) → update-state → global-assessment → final`.
 - **Spike 成功**：`read-context (ready, kind=comment) → spike-comment (posted) → handoff → final`；review：`... → title-intent-gate (skipped) → evidence-gate (passed) → commitment-gate (skipped) → spike-followup-gate (passed) → code-gate (passed, no PR) → issue-closure-gate (accepted_no_pr) → action-accept-no-pr → ...`.

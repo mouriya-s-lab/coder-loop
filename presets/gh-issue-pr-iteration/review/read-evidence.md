@@ -10,13 +10,15 @@ Read, in order:
 
 1. trace file;
 2. workflow file;
-3. shared context file;
+3. chain handoff/shared file;
 4. state file;
-5. current issue handoff file if an issue is selected;
+5. optional per-issue handoff file if an issue is selected and `CURRENT_ISSUE_FILE` is non-empty and exists;
 6. target repo `CLAUDE.md` as project reference;
 7. live GitHub issue/PR/check state.
 
 If no selected issue exists, skip issue-specific audit and proceed to `review/global-assessment`.
+
+The chain handoff/shared file is the primary local evidence surface. A missing optional per-issue handoff file is not review infrastructure breakage.
 
 ## GitHub reads
 

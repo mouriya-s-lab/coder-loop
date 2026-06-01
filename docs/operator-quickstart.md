@@ -160,7 +160,7 @@ exit 0 表示 schema OK；任何 exit 1 + `Runtime check failed:` 提示先按�
 /dev-plan <design-doc-path | github-issue-url | "<用户描述>" | <repo-path> <goal>>
 ```
 
-它读源头 → 按 `writing-issue` 规则拆原子 issue（含 `## 验收标准` checkpoint 表）→ 用 `addSubIssue` 建 parent/child → 写 issue handoff / evidence 目录，并把可执行 issue 推进 centralized chain queue。
+它读源头 → 按 `writing-issue` 规则拆原子 issue（含 `## 验收标准` checkpoint 表）→ 用 `addSubIssue` 建 parent/child → 写 chain handoff / evidence 目录（per-issue handoff 只是可选附件），并把可执行 issue 推进 centralized chain queue。
 
 跑完后再做一次 schema 自检：
 

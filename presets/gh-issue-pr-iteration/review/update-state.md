@@ -64,9 +64,9 @@ When prepending children, use the centralized item CLI:
 
 ## Handoff
 
-Append a concise review note to the current issue handoff with verdict, reasons, actions performed, state transition, child closure table when applicable, and next action.
+Append a concise review note to the chain handoff/shared file with verdict, reasons, actions performed, state transition, child closure table when applicable, and next action.
 
-Promote only stable, source-cited cross-issue facts to the shared context file.
+If `{{CURRENT_ISSUE_FILE}}` is non-empty and already exists, you may also append issue-local details there. Do not fail review because the optional per-issue file is absent.
 
 ## Output verdict
 

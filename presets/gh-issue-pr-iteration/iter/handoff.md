@@ -6,7 +6,7 @@ Write durable local handoff for review without deciding final state.
 
 ## Procedure
 
-Append a concise run note to the current issue handoff file with:
+Append a concise run note to the chain handoff/shared file (`{{SHARED_CONTEXT_FILE}}`) with:
 
 - run ID;
 - classification and what was done;
@@ -18,6 +18,8 @@ Append a concise run note to the current issue handoff file with:
 - blockers or unresolved risks;
 - proposed child issue titles, expected outcomes, acceptance criteria, evidence requirements, and split rationale when parent scope is incomplete;
 - proposed shared-context additions, if any.
+
+If `{{CURRENT_ISSUE_FILE}}` is non-empty and already exists, you may append the same note or issue-local details there. A missing per-issue handoff file is not a handoff failure.
 
 Do not set final state in `central SQLite state DB`. Do not reorder queue items. Do not close GitHub issues. Do not remove central daemon scheduling state.
 

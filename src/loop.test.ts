@@ -5,6 +5,7 @@ import { resolve } from "node:path"
 import {
 	agentCodexArgs,
 	agentSessionsPath,
+	buildCentralRuntimeBindingPaths,
 	buildConfigBindings,
 	buildDaemonStartPlan,
 	buildRuntimeBindings,
@@ -251,6 +252,37 @@ describe("runtime binding helpers", () => {
 		expect(runtime.resumedFromPhase).toBe("iteration")
 		expect(runtime.resumedSessionId).toBe("thread-resume")
 		expect(runtime.issueKind).toBe("code")
+	})
+
+	test("runtime bindings keep per-issue handoff optional", () => {
+		const options = makeOptions()
+		const issueRun: IssueRunContext = {
+			runIdGeneration: "new",
+			resumedFromPhase: null,
+			resumedStartedAt: null,
+			resumedSessionId: null,
+		}
+		const runtime = buildRuntimeBindings({
+			options,
+			runId: "run-357",
+			currentIssueFile: null,
+			evidenceDir: null,
+			agentCwd: REPO_ROOT,
+			issueRun,
+			issueKind: "code",
+		})
+		expect(runtime.sharedContextPath).toBe(options.sharedContextPath)
+		expect(runtime.currentIssueFile).toBe("")
+
+		const centralPaths = buildCentralRuntimeBindingPaths({
+			options,
+			chain: { name: "fixture" },
+			runId: "run-357",
+			currentIssueFile: null,
+			evidenceDir: null,
+		})
+		expect(centralPaths.sharedContextPath).toBe(resolve(TEST_ROOT, "chains/fixture/shared.md"))
+		expect(centralPaths.currentIssueFile).toBe("")
 	})
 
 	test("makeIssueRunContext exposes current record data without LoopState", () => {

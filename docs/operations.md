@@ -184,7 +184,8 @@ Runtime check failed: <N> error(s)
 | workflow 误入 runtime | `workflow: must be project policy outside .coder-loop/runtime` | workflow.md 留在 `.coder-loop/` 而不是 runtime 内 |
 | queue item id 缺失 / 重复 | `state.queue[N].issue: must be a non-empty string or finite number` / `duplicate id "42"` | 修 chain item |
 | queue item status 非法 | `state.queue[N].status: status "foo" is not in preset.statuses` | 用 preset 声明的 status 字面量 |
-| issueFile / evidenceDir 找不到 | `state.queue[N].issueFile: file does not exist` | 创建文件或清空字段 |
+| chain handoff / runtime 目录缺失 | `sharedContextPath: missing file: .../shared.md` / `evidenceRootDir: missing directory: .../evidence` | 启动/重启 daemon 让它补齐 chain runtime layout，或手动修复对应 chain 目录 |
+| issueFile / evidenceDir 越界 | `state.queue[N].issueFile: must resolve inside .../issues` | 清空可选 `issueFile`，或改成 chain root 下的相对 attachment 路径 |
 | agentCwd 不是绝对路径 / 不存在 | `state.queue[N].agentCwd: must be an absolute path` / `directory does not exist` | 改成已存在的绝对目录或设回 null |
 | current 引用不到 queue 项 | `state.current.issue: id "42" is not present in queue` | 补回 queue item 或清 current |
 | current 引用了 terminal item | `state.current.issue: id "42" has non-continuable status done` | terminal item 不该是 current，清 current |
@@ -320,7 +321,7 @@ coder-loop status /path/to/target --json | jq '.queue'
 coder-loop item list --chain <chain-name> --json
 ```
 
-确认是不是所有 item 已 terminal；如果需要追加 work，用 planning/issue handoff 或 `coder-loop item add`，不要直接拼旧 JSON 文件。
+确认是不是所有 item 已 terminal；如果需要追加 work，用 planning / chain handoff 或 `coder-loop item add`，不要直接拼旧 JSON 文件。
 
 ---
 

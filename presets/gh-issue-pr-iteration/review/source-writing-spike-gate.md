@@ -13,7 +13,7 @@ Audit `kind:code-spike` output without treating it as PR-backed implementation. 
 ## Inputs
 
 - Live issue body and comments via `gh issue view {{ISSUE}} -R {{REPO}} --json body,comments,labels`.
-- Iter handoff at `{{CURRENT_ISSUE_FILE}}`.
+- Iter handoff at `{{SHARED_CONTEXT_FILE}}`, plus optional issue-local details at `{{CURRENT_ISSUE_FILE}}` when that path is non-empty and exists.
 - Evidence artifacts under `{{EVIDENCE_DIR}}`.
 - Optional pushed spike branch named in the issue comment or handoff.
 

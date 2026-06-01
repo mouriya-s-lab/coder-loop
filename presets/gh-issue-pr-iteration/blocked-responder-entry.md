@@ -15,8 +15,9 @@ Do exactly one responder pass for the selected issue. Do not loop.
 - Current GitHub repository: `{{REPO}}`
 - Current issue: `#{{ISSUE}}`
 - Run ID: `{{RUN_ID}}`
+- Chain handoff/shared file: `{{SHARED_CONTEXT_FILE}}`
 - State file: the central state DB
-- Current issue handoff file: `{{CURRENT_ISSUE_FILE}}`
+- Optional per-issue handoff file: `{{CURRENT_ISSUE_FILE}}`
 - Evidence directory: `{{EVIDENCE_DIR}}`
 - Evidence root directory: `{{EVIDENCE_ROOT_DIR}}`
 - Log directory: `{{LOG_DIR}}`
@@ -53,7 +54,7 @@ If the selected queue item is blocked by another repository, create the cross-re
    - `coder-loop daemon start <targetRepoPath> --require-browser-evidence`
    - If it is already running, treat that as success and record the returned status.
 8. Do not change the current repository's blocked item back to actionable, done, moot, or closed. The only field you may touch on it is `extra.dependsOn` (step 6); its lifecycle status transition back to actionable is the engine's job.
-9. Append a concise handoff note when `{{CURRENT_ISSUE_FILE}}` is non-empty. Include the created issue URL, target checkout path, queue injection result, declared dependsOn blocker item id, daemon start result, and any evidence files.
+9. Append a concise handoff note to `{{SHARED_CONTEXT_FILE}}`. If `{{CURRENT_ISSUE_FILE}}` is non-empty and already exists, you may also append issue-local details there. Include the created issue URL, target checkout path, queue injection result, declared dependsOn blocker item id, daemon start result, and any evidence files.
 
 ## GitHub and state boundaries
 

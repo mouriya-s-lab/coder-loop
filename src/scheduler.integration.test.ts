@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test"
-import { mkdir, rm, stat, writeFile } from "node:fs/promises"
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { dirname, resolve } from "node:path"
 
 import {
@@ -13,6 +13,7 @@ import {
 	type SchedulerOptions,
 	type SchedulerWorktreeManager,
 } from "./scheduler"
+import { resolveChainRuntimePaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -111,6 +112,81 @@ process.exit(1)
 			failureCount: spawnCount,
 			nextRunAt: 1_800_040_060,
 		})
+	} finally {
+		store.close()
+	}
+})
+
+test("item without per-issue handoff binds shared handoff and empty current issue file", async () => {
+	const root = resolve(TEST_ROOT, "optional-issue-handoff")
+	const loopDataRoot = resolve(root, "loop-data")
+	const fakeRunner = resolve(root, "prompt-capture-runner.ts")
+	const promptCapture = resolve(root, "prompt.txt")
+	await mkdir(loopDataRoot, { recursive: true })
+	await writeFile(
+		fakeRunner,
+		`const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "" : Bun.argv[promptIndex + 1] ?? ""
+await Bun.write(${JSON.stringify(promptCapture)}, prompt)
+`,
+	)
+
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = store.createChain({
+			name: "optional-issue-handoff-chain",
+			preset: "gh-issue-pr-iteration",
+			repository: "mouriya-s-lab/coder-loop",
+			baseBranch: "main",
+			status: "active",
+			metadata: {},
+		})
+		const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot })
+		await mkdir(paths.chainRoot, { recursive: true })
+		await writeFile(paths.sharedFile, "# Shared durable context\n\n")
+		const item = store.createItem({
+			chainId: chain.id,
+			issueNumber: 357_001,
+			repoCwd: REPO_ROOT,
+			status: "queued",
+			attempts: 0,
+			issueFile: null,
+			evidenceDir: null,
+			extra: { issueKind: "code" },
+		})
+		const state = createSchedulerState()
+		const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
+			const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+			await mkdir(worktreePath, { recursive: true })
+			return worktreePath
+		}
+		const options: SchedulerOptions = {
+			store,
+			state,
+			presetDir: resolve(REPO_ROOT, "presets/gh-issue-pr-iteration"),
+			phase: "iteration",
+			runner: {
+				kind: "claude",
+				source: "iteration-default",
+				binary: "bun",
+				extraArgs: [fakeRunner],
+				model: null,
+			},
+			worktreeManager,
+			loopDataRootOptions: { loopDataRoot },
+			runIdFactory: ({ item: selected }) => `run-optional-handoff-${selected.id}`,
+			prompt: "shared={{SHARED_CONTEXT_FILE}}\ncurrent={{CURRENT_ISSUE_FILE}}\nevidence={{EVIDENCE_DIR}}\n",
+			kindResolver: () => ({ ok: true, kind: "code" }),
+		}
+
+		const tick = await schedulerTick(options)
+		expect(tick.spawnedRuns).toHaveLength(1)
+		await tick.spawnedRuns[0]!.closed
+		expect(store.getItem(item.id)?.lastRunId).toBe(`run-optional-handoff-${item.id}`)
+		const rendered = await readFile(promptCapture, "utf-8")
+		expect(rendered).toContain(`shared=${paths.sharedFile}`)
+		expect(rendered).toContain("current=\n")
+		expect(rendered).toContain(`evidence=${paths.issueEvidenceDir(item.issueNumber)}`)
 	} finally {
 		store.close()
 	}
