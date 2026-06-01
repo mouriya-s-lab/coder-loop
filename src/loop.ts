@@ -14,7 +14,16 @@ import { closeSync, createWriteStream, openSync, realpathSync, type WriteStream 
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
 import { command, flag, option, optional, positional, run as runCmd, string as cmdString, subcommands } from "cmd-ts"
 import { type as arkType } from "arktype"
-import { CoderLoopDaemon, DaemonError, daemonRequest, sendDaemonRequest, type DaemonCommandName, type DaemonResponse } from "./daemon"
+import {
+	CoderLoopDaemon,
+	DaemonError,
+	daemonRequest,
+	daemonSocketPathIssueError,
+	detectDaemonSocketPathIssue,
+	sendDaemonRequest,
+	type DaemonCommandName,
+	type DaemonResponse,
+} from "./daemon"
 import { dispatchSubcommand } from "./install-commands"
 import { RuntimePathError, resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import {
@@ -1658,7 +1667,8 @@ async function requestDaemonResult(loopDataRoot: string | null, command: DaemonC
 	try {
 		response = await sendDaemonRequest(socketPath, daemonRequest(command, args))
 	} catch (error) {
-		fail(centralDaemonNotRunningMessage(loopDataRoot, socketPath, error))
+		const failure = await daemonConnectionFailure(loopDataRoot, error)
+		fail(failure.message)
 	}
 	if (!response.ok) fail(`${response.error.code}: ${response.error.message}`)
 	return response.result
@@ -1692,11 +1702,42 @@ async function sendDaemonRequestForDaemonCommand(loopDataRoot: string | null, co
 	try {
 		return await sendDaemonRequest(socketPath, daemonRequest(command, args))
 	} catch (error) {
+		const failure = await daemonConnectionFailure(loopDataRoot, error)
 		if (json) {
-			writeDaemonErrorResponse(daemonNotRunningErrorResponse(loopDataRoot, socketPath, error))
+			writeDaemonErrorResponse(daemonErrorResponse(failure.code, failure.message, failure.details))
 			return null
 		}
-		fail(centralDaemonNotRunningMessage(loopDataRoot, socketPath, error))
+		fail(failure.message)
+	}
+}
+
+type DaemonConnectionFailure = {
+	code: string
+	message: string
+	details: JsonObject
+}
+
+async function daemonConnectionFailure(loopDataRoot: string | null, error: unknown): Promise<DaemonConnectionFailure> {
+	const pathOptions = loopDataRoot === null ? {} : { loopDataRoot }
+	const paths = resolveLoopDataPaths(pathOptions)
+	const pathIssue = await detectDaemonSocketPathIssue(paths.daemonSocket, paths.daemonPid)
+	if (pathIssue !== null) {
+		const daemonError = daemonSocketPathIssueError(pathIssue)
+		const details: JsonObject = { ...daemonError.details }
+		if (isNodeError(error) && typeof error.code === "string") details.causeCode = error.code
+		return {
+			code: daemonError.code,
+			message: daemonError.message,
+			details,
+		}
+	}
+	const details: JsonObject = { socketPath: paths.daemonSocket }
+	if (loopDataRoot !== null) details.loopDataRoot = loopDataRoot
+	if (isNodeError(error) && typeof error.code === "string") details.causeCode = error.code
+	return {
+		code: "daemon_not_running",
+		message: centralDaemonNotRunningMessage(loopDataRoot, paths.daemonSocket, error),
+		details,
 	}
 }
 
@@ -1704,13 +1745,6 @@ function centralDaemonNotRunningMessage(loopDataRoot: string | null, socketPath:
 	const hint = loopDataRoot === null ? "coder-loop daemon up" : `coder-loop daemon up --loop-data-root ${loopDataRoot}`
 	const detail = isNodeError(error) && typeof error.code === "string" ? `${error.code}: ${errorMessage(error)}` : errorMessage(error)
 	return `central daemon is not running at ${socketPath}; start it with \`${hint}\`. ${detail}`
-}
-
-function daemonNotRunningErrorResponse(loopDataRoot: string | null, socketPath: string, error: unknown): JsonObject {
-	const details: JsonObject = { socketPath }
-	if (loopDataRoot !== null) details.loopDataRoot = loopDataRoot
-	if (isNodeError(error) && typeof error.code === "string") details.causeCode = error.code
-	return daemonErrorResponse("daemon_not_running", centralDaemonNotRunningMessage(loopDataRoot, socketPath, error), details)
 }
 
 function daemonCliErrorResponse(error: unknown, fallbackCode: string): JsonObject {

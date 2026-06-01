@@ -97,6 +97,12 @@ export type CoderLoopDaemonSnapshot = {
 
 type DaemonState = "starting" | "running" | "shutting_down" | "exited"
 type UnknownRecord = Record<string, unknown>
+export type DaemonSocketPathIssue = {
+	kind: "daemon_socket_unlinked"
+	pid: number
+	socketPath: string
+	pidFile: string
+}
 type BundledPresetStatuses = {
 	continuable: string[]
 	terminal: string[]
@@ -118,6 +124,7 @@ const MAX_ITEM_TITLE_LENGTH = 1024
 const MAX_REPO_CWD_LENGTH = 4096
 const MAX_REPOSITORY_REF_LENGTH = 200
 const STALE_RECOVERY_FORCE_AFTER_MS = 1_000
+const DAEMON_SOCKET_PATH_CHECK_INTERVAL_MS = 250
 const ORPHAN_CHAIN_DIR_PREFIX = ".orphan-"
 const RESERVED_METADATA_KEYS = new Set(["__proto__", "constructor", "prototype"])
 const ITEM_PRIORITY_VALUES = ["low", "medium", "high", "critical"] as const
@@ -194,6 +201,8 @@ export class CoderLoopDaemon {
 	private schedulerTickInFlight: Promise<void> | null = null
 	private schedulerTickRequested = false
 	private schedulerPauseDepth = 0
+	private socketPathCheckTimer: ReturnType<typeof setInterval> | null = null
+	private socketPathRepairInFlight: Promise<void> | null = null
 	private ownsDaemonSocket = false
 	private ownsDaemonPid = false
 	private resolveClosed: (() => void) | null = null
@@ -213,6 +222,8 @@ export class CoderLoopDaemon {
 		await this.prepareRuntimeDirectory()
 
 		try {
+			const pathIssue = await detectDaemonSocketPathIssue(this.paths.daemonSocket, this.paths.daemonPid)
+			if (pathIssue !== null) throw daemonSocketPathIssueError(pathIssue)
 			await removeStaleSocket(this.paths.daemonSocket)
 			const server = createServer((socket) => this.acceptConnection(socket))
 			this.server = server
@@ -220,6 +231,7 @@ export class CoderLoopDaemon {
 			this.ownsDaemonSocket = true
 			const store = openSqliteStateStore(this.options)
 			this.store = store
+			this.startSocketPathMonitor()
 			await this.quarantineOrphanChainDirectories()
 			await this.ensureRuntimeLayoutForExistingChains()
 			await this.recoverStaleSchedulerState()
@@ -264,6 +276,7 @@ export class CoderLoopDaemon {
 		// out for the remainder of shutdown. The resume callback would no-op
 		// because state is now "shutting_down", so we deliberately discard it.
 		await this.pauseSchedulerForMutation()
+		await this.stopSocketPathMonitor()
 
 		// Wait for active children plus pending close handlers to finish before
 		// closing SQLite. attachRunCloseHandler may null activeRun before
@@ -294,6 +307,7 @@ export class CoderLoopDaemon {
 	}
 
 	private async stopAfterStartFailure(): Promise<void> {
+		await this.stopSocketPathMonitor()
 		for (const socket of this.sockets) socket.destroy()
 		if (this.server !== null) {
 			await closeServer(this.server).catch(() => undefined)
@@ -304,6 +318,51 @@ export class CoderLoopDaemon {
 		await this.removeOwnedRuntimeFiles()
 		this.state = "exited"
 		this.resolveClosed?.()
+	}
+
+	private startSocketPathMonitor(): void {
+		if (this.socketPathCheckTimer !== null) return
+		this.socketPathCheckTimer = setInterval(() => {
+			if (this.socketPathRepairInFlight !== null) return
+			this.socketPathRepairInFlight = this.ensureSocketPathReachable()
+				.catch((error) => {
+					process.stderr.write(`coder-loop daemon socket repair failed: ${errorMessage(error)}\n`)
+					throw error
+				})
+				.finally(() => {
+					this.socketPathRepairInFlight = null
+				})
+		}, DAEMON_SOCKET_PATH_CHECK_INTERVAL_MS)
+	}
+
+	private async stopSocketPathMonitor(): Promise<void> {
+		if (this.socketPathCheckTimer !== null) {
+			clearInterval(this.socketPathCheckTimer)
+			this.socketPathCheckTimer = null
+		}
+		if (this.socketPathRepairInFlight !== null) await this.socketPathRepairInFlight
+	}
+
+	private async ensureSocketPathReachable(): Promise<void> {
+		if (this.state === "shutting_down" || this.state === "exited") return
+		if (await canUseDaemonSocketPath(this.paths.daemonSocket)) return
+
+		const previousServer = this.server
+		if (previousServer !== null) {
+			await closeServer(previousServer)
+			if (this.server === previousServer) this.server = null
+		}
+
+		await removeStaleSocket(this.paths.daemonSocket)
+		const replacementServer = createServer((socket) => this.acceptConnection(socket))
+		await listenOrReportSocketInUse(replacementServer, this.paths.daemonSocket)
+		this.server = replacementServer
+		this.ownsDaemonSocket = true
+		await this.appendDaemonLogForAllChains({
+			type: "daemon.socket.rebind",
+			pid: process.pid,
+			socketPath: this.paths.daemonSocket,
+		})
 	}
 
 	private async waitForSchedulerQuiescence(): Promise<void> {
@@ -2099,6 +2158,39 @@ async function removeStaleSocket(socketPath: string): Promise<void> {
 	await unlinkIfExists(socketPath)
 }
 
+export async function detectDaemonSocketPathIssue(socketPath: string, pidFile: string): Promise<DaemonSocketPathIssue | null> {
+	if (await pathExists(socketPath)) return null
+	const pid = await readDaemonPid(pidFile)
+	if (pid === null) return null
+	if (!isPidOrGroupAlive(pid)) return null
+	return { kind: "daemon_socket_unlinked", pid, socketPath, pidFile }
+}
+
+export function daemonSocketPathIssueError(issue: DaemonSocketPathIssue): DaemonError {
+	return new DaemonError(
+		issue.kind,
+		`daemon process ${issue.pid} is alive but socket pathname is missing at ${issue.socketPath}; stop that daemon process before starting a replacement, or wait for the running daemon to recreate the socket`,
+		{
+			pid: issue.pid,
+			socketPath: issue.socketPath,
+			pidFile: issue.pidFile,
+		},
+	)
+}
+
+async function readDaemonPid(pidFile: string): Promise<number | null> {
+	let content: string
+	try {
+		content = await readFile(pidFile, "utf-8")
+	} catch (error) {
+		if (isNodeError(error) && error.code === "ENOENT") return null
+		throw error
+	}
+	const parsed = Number(content.trim())
+	if (!Number.isInteger(parsed) || parsed <= 0) return null
+	return parsed
+}
+
 async function pathExists(path: string): Promise<boolean> {
 	try {
 		await stat(path)
@@ -2106,6 +2198,18 @@ async function pathExists(path: string): Promise<boolean> {
 	} catch {
 		return false
 	}
+}
+
+async function canUseDaemonSocketPath(socketPath: string): Promise<boolean> {
+	let socketStat: Awaited<ReturnType<typeof stat>>
+	try {
+		socketStat = await stat(socketPath)
+	} catch (error) {
+		if (isNodeError(error) && error.code === "ENOENT") return false
+		throw error
+	}
+	if (!socketStat.isSocket()) return false
+	return await canConnect(socketPath)
 }
 
 async function canConnect(socketPath: string): Promise<boolean> {

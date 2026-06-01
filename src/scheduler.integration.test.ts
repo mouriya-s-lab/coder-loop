@@ -1,7 +1,8 @@
 import { afterAll, expect, test } from "bun:test"
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { dirname, resolve } from "node:path"
 
+import { daemonRequest, sendDaemonRequest } from "./daemon"
 import {
 	createGitWorktreeManager,
 	createSchedulerState,
@@ -17,6 +18,7 @@ import { resolveChainRuntimePaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
+const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-integration-tests", String(process.pid))
 
 afterAll(async () => {
@@ -387,12 +389,171 @@ console.log(input.phase + ":" + status)
 	}
 })
 
+test("daemon restart after crash recovers in-flight item through observable socket status", async () => {
+	const root = resolve(TEST_ROOT, "daemon-crash-restart-resume")
+	const loopDataRoot = resolve(root, "loop-data")
+	const bin = resolve(root, "bin")
+	const eventLog = resolve(root, "runner-events.jsonl")
+	const fakeCodex = resolve(bin, "codex")
+	await mkdir(bin, { recursive: true })
+	await writeFile(
+		fakeCodex,
+		`#!/usr/bin/env bash
+printf '{"pid":%s}\\n' "$$" >> ${JSON.stringify(eventLog)}
+sleep 30
+echo "ITERATION SUMMARY: scope=daemon-crash-restart; reason=fake-codex"
+`,
+	)
+	await chmod(fakeCodex, 0o755)
+	await mkdir(loopDataRoot, { recursive: true })
+
+	const store = openSqliteStateStore({ loopDataRoot })
+	let firstDaemon: Bun.Subprocess<"ignore", "pipe", "pipe"> | null = null
+	let secondDaemon: Bun.Subprocess<"ignore", "pipe", "pipe"> | null = null
+	const observedRunPids = new Set<number>()
+	try {
+		const chain = store.createChain({
+			name: "daemon-crash-restart-resume-chain",
+			preset: "gh-issue-pr-iteration",
+			repository: "mouriya-s-lab/coder-loop",
+			baseBranch: "main",
+			status: "active",
+			metadata: {},
+		})
+		const item = store.createItem({
+			chainId: chain.id,
+			issueNumber: 359_001,
+			repoCwd: REPO_ROOT,
+			status: "queued",
+			attempts: 0,
+			extra: { issueKind: "code" },
+		})
+
+		const env = { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` }
+		const socketPath = resolve(loopDataRoot, "daemon.sock")
+		firstDaemon = spawnDaemonUp(loopDataRoot, env)
+		await waitForSocket(socketPath)
+		const firstRun = await waitForActiveRun(socketPath, item.id, null)
+		if (typeof firstRun.pid === "number") observedRunPids.add(firstRun.pid)
+
+		firstDaemon.kill("SIGKILL")
+		await firstDaemon.exited.catch(() => undefined)
+
+		secondDaemon = spawnDaemonUp(loopDataRoot, env)
+		await waitForSocket(socketPath)
+		const secondRun = await waitForActiveRun(socketPath, item.id, firstRun.runId)
+		if (typeof secondRun.pid === "number") observedRunPids.add(secondRun.pid)
+
+		const status = await daemonStatus(socketPath)
+		expect(status.daemon).toMatchObject({
+			socketPath,
+			running: true,
+		})
+		expect(secondRun.runId).not.toBe(firstRun.runId)
+		expect(store.getItem(item.id)?.status).toBe("in_progress")
+	} finally {
+		store.close()
+		for (const pid of observedRunPids) killPidOrGroup(pid)
+		if (secondDaemon !== null) {
+			secondDaemon.kill("SIGKILL")
+			await secondDaemon.exited.catch(() => undefined)
+		}
+		if (firstDaemon !== null) {
+			firstDaemon.kill("SIGKILL")
+			await firstDaemon.exited.catch(() => undefined)
+		}
+	}
+})
+
 async function pathExists(path: string): Promise<boolean> {
 	try {
 		await stat(path)
 		return true
 	} catch {
 		return false
+	}
+}
+
+function spawnDaemonUp(loopDataRoot: string, env: Record<string, string | undefined>): Bun.Subprocess<"ignore", "pipe", "pipe"> {
+	return Bun.spawn({
+		cmd: ["bun", LOOP_ENTRY, "daemon", "up", "--loop-data-root", loopDataRoot, "--scheduler-interval-ms", "20", "--json"],
+		cwd: REPO_ROOT,
+		stdin: "ignore",
+		stdout: "pipe",
+		stderr: "pipe",
+		env,
+	})
+}
+
+async function waitForSocket(socketPath: string): Promise<void> {
+	await waitFor(async () => {
+		try {
+			return (await stat(socketPath)).isSocket() ? true : null
+		} catch {
+			return null
+		}
+	}, 5_000)
+}
+
+type DaemonActiveRun = {
+	runId: string
+	itemId: number
+	pid?: number
+}
+
+async function waitForActiveRun(socketPath: string, itemId: number, excludedRunId: string | null): Promise<DaemonActiveRun> {
+	return await waitFor(async () => {
+		const status = await daemonStatus(socketPath)
+		const daemon = status.daemon
+		if (!isRecord(daemon) || !Array.isArray(daemon.activeRuns)) return null
+		const activeRun = daemon.activeRuns
+			.filter(isRecord)
+			.find((run) =>
+				run.itemId === itemId
+				&& typeof run.runId === "string"
+				&& run.runId !== excludedRunId,
+			)
+		if (activeRun === undefined) return null
+		return {
+			runId: activeRun.runId as string,
+			itemId,
+			...(typeof activeRun.pid === "number" ? { pid: activeRun.pid } : {}),
+		}
+	}, 5_000)
+}
+
+async function daemonStatus(socketPath: string): Promise<Record<string, unknown>> {
+	const response = await sendDaemonRequest(socketPath, daemonRequest("daemon.status"))
+	if (!response.ok) throw new Error(`${response.error.code}: ${response.error.message}`)
+	return response.result
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+async function waitFor<T>(read: () => Promise<T | null>, timeoutMs: number, intervalMs = 20): Promise<T> {
+	const deadline = Date.now() + timeoutMs
+	let latest: T | null = await read().catch(() => null)
+	while (latest === null) {
+		if (Date.now() > deadline) throw new Error("condition not met before timeout")
+		await new Promise((resolveWait) => setTimeout(resolveWait, intervalMs))
+		latest = await read().catch(() => null)
+	}
+	return latest
+}
+
+function killPidOrGroup(pid: number): void {
+	try {
+		process.kill(-pid, "SIGKILL")
+		return
+	} catch {
+		// Fall back to the individual process for runners that are not process-group leaders.
+	}
+	try {
+		process.kill(pid, "SIGKILL")
+	} catch {
+		// Already exited.
 	}
 }
 
