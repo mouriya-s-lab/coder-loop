@@ -22,7 +22,8 @@ export class SqliteStateError extends Error {
 	}
 }
 
-export type ChainStatus = "active" | "completed" | "deleted"
+const CHAIN_STATUSES = ["active", "completed", "deleted", "stopped"] as const
+export type ChainStatus = typeof CHAIN_STATUSES[number]
 
 export type ChainRecord = {
 	id: number
@@ -304,6 +305,10 @@ type TableCountRow = {
 	table_count: number
 }
 
+type TableSqlRow = {
+	sql: string | null
+}
+
 type MaxPositionRow = {
 	max_position: number | null
 }
@@ -346,8 +351,7 @@ const RUN_STATUS_INDEX_SQL = `
 CREATE INDEX IF NOT EXISTS idx_runs_chain_phase_status ON runs(chain_id, phase, status);
 `
 
-const STATE_SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS chains (
+const CHAINS_TABLE_SCHEMA_SQL = `
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	name TEXT NOT NULL UNIQUE,
 	preset TEXT NOT NULL,
@@ -355,10 +359,15 @@ CREATE TABLE IF NOT EXISTS chains (
 	base_branch TEXT NOT NULL,
 	umbrella_issue INTEGER,
 	umbrella_repo TEXT,
-	status TEXT NOT NULL CHECK (status IN ('active', 'completed', 'deleted')),
+	status TEXT NOT NULL CHECK (status IN ('active', 'completed', 'deleted', 'stopped')),
 	metadata TEXT NOT NULL,
 	created_at REAL NOT NULL,
 	updated_at REAL NOT NULL
+`
+
+const STATE_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS chains (
+${CHAINS_TABLE_SCHEMA_SQL}
 );
 
 CREATE TABLE IF NOT EXISTS items (
@@ -389,7 +398,7 @@ CREATE TABLE IF NOT EXISTS current_runs (
 ${STATE_INDEXES_SQL}
 `
 
-const STATE_SCHEMA_VERSION = 6
+const STATE_SCHEMA_VERSION = 7
 const V5_ITEM_SESSION_COLUMN = ["last", "session", "id"].join("_")
 
 type UserVersionRow = {
@@ -453,6 +462,11 @@ function tableHasColumn(db: Database, tableName: StateTableName, columnName: str
 		.some((row) => row.name === columnName)
 }
 
+function chainsTableAllowsStopped(db: Database): boolean {
+	const sql = db.query<TableSqlRow, []>("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chains'").get()?.sql ?? ""
+	return sql.includes("'stopped'")
+}
+
 function itemsTableHasColumn(db: Database, columnName: string): boolean {
 	return tableHasColumn(db, "items", columnName)
 }
@@ -464,19 +478,24 @@ function runsTableHasColumn(db: Database, columnName: string): boolean {
 function migrateStateSchema(db: Database): void {
 	const beforeVersion = readUserVersion(db)
 	const needsItemTableRebuild = itemsTableHasColumn(db, V5_ITEM_SESSION_COLUMN)
+	const needsChainTableRebuild = stateSchemaExists(db) && !chainsTableAllowsStopped(db)
 	if (
 		beforeVersion >= STATE_SCHEMA_VERSION
 		&& stateSchemaExists(db)
+		&& !needsChainTableRebuild
 		&& itemsTableHasColumn(db, "phase")
 		&& itemsTableHasColumn(db, "session_ids")
 		&& itemsTableHasColumn(db, "position")
 		&& !itemsTableHasColumn(db, V5_ITEM_SESSION_COLUMN)
 		&& runsTableHasColumn(db, "status")
 	) return
-	if (needsItemTableRebuild) db.exec("PRAGMA foreign_keys = OFF")
+	if (needsItemTableRebuild || needsChainTableRebuild) db.exec("PRAGMA foreign_keys = OFF")
 	try {
 		db.transaction(() => {
 			db.exec(STATE_SCHEMA_SQL)
+			if (needsChainTableRebuild) {
+				rebuildChainsTableForV7(db)
+			}
 			if (!itemsTableHasColumn(db, "phase")) {
 				db.exec("ALTER TABLE items ADD COLUMN phase TEXT")
 			}
@@ -500,8 +519,28 @@ function migrateStateSchema(db: Database): void {
 			db.exec(`PRAGMA user_version = ${STATE_SCHEMA_VERSION}`)
 		}).immediate()
 	} finally {
-		if (needsItemTableRebuild) db.exec("PRAGMA foreign_keys = ON")
+		if (needsItemTableRebuild || needsChainTableRebuild) db.exec("PRAGMA foreign_keys = ON")
 	}
+}
+
+function rebuildChainsTableForV7(db: Database): void {
+	const columns = [
+		"id",
+		"name",
+		"preset",
+		"repository",
+		"base_branch",
+		"umbrella_issue",
+		"umbrella_repo",
+		"status",
+		"metadata",
+		"created_at",
+		"updated_at",
+	].join(", ")
+	db.exec(`CREATE TABLE chains_new (${CHAINS_TABLE_SCHEMA_SQL})`)
+	db.exec(`INSERT INTO chains_new (${columns}) SELECT ${columns} FROM chains`)
+	db.exec("DROP TABLE chains")
+	db.exec("ALTER TABLE chains_new RENAME TO chains")
 }
 
 type V5ItemSessionRow = {
@@ -1258,7 +1297,7 @@ function isJsonValue(value: unknown): value is JsonValue {
 }
 
 function isChainStatus(status: string): status is ChainStatus {
-	return status === "active" || status === "completed" || status === "deleted"
+	return (CHAIN_STATUSES as readonly string[]).includes(status)
 }
 
 function unixSeconds(): number {

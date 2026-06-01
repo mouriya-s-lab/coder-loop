@@ -198,6 +198,18 @@ export type ChainCommandArgs =
 			json: boolean
 	  }
 	| {
+			action: "stop"
+			name: string
+			loopDataRoot: string | null
+			json: boolean
+	  }
+	| {
+			action: "resume"
+			name: string
+			loopDataRoot: string | null
+			json: boolean
+	  }
+	| {
 			action: "delete"
 			name: string
 			loopDataRoot: string | null
@@ -1180,6 +1192,44 @@ const chainStatusCliCommand = command({
 	}),
 })
 
+const chainStopCliCommand = command({
+	name: "stop",
+	description: "Mark one centralized coder-loop chain as stopped through the daemon socket.",
+	args: {
+		name: positional({ displayName: "name", type: cmdString }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		json: flag({ long: "json" }),
+	},
+	handler: (args): CliCommand => ({
+		kind: "chain",
+		args: {
+			action: "stop",
+			name: args.name,
+			loopDataRoot: args.loopDataRoot ?? null,
+			json: args.json,
+		},
+	}),
+})
+
+const chainResumeCliCommand = command({
+	name: "resume",
+	description: "Resume one stopped centralized coder-loop chain through the daemon socket.",
+	args: {
+		name: positional({ displayName: "name", type: cmdString }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		json: flag({ long: "json" }),
+	},
+	handler: (args): CliCommand => ({
+		kind: "chain",
+		args: {
+			action: "resume",
+			name: args.name,
+			loopDataRoot: args.loopDataRoot ?? null,
+			json: args.json,
+		},
+	}),
+})
+
 const chainDeleteCliCommand = command({
 	name: "delete",
 	description: "Mark one centralized coder-loop chain as deleted through the daemon socket.",
@@ -1206,6 +1256,8 @@ const chainCliCommand = subcommands({
 		create: chainCreateCliCommand,
 		list: chainListCliCommand,
 		status: chainStatusCliCommand,
+		stop: chainStopCliCommand,
+		resume: chainResumeCliCommand,
 		delete: chainDeleteCliCommand,
 	},
 })
@@ -1499,6 +1551,16 @@ async function runChainCommand(args: string[]): Promise<void> {
 	if (chainArgs.action === "status") {
 		const result = await requestDaemonResult(chainArgs.loopDataRoot, "chain.status", { chainName: chainArgs.name })
 		writeCommandResult(result, chainArgs.json, formatChainStatusResult)
+		return
+	}
+	if (chainArgs.action === "stop") {
+		const result = await requestDaemonResult(chainArgs.loopDataRoot, "chain.stop", { chainName: chainArgs.name })
+		writeCommandResult(result, chainArgs.json, formatChainStopResult)
+		return
+	}
+	if (chainArgs.action === "resume") {
+		const result = await requestDaemonResult(chainArgs.loopDataRoot, "chain.resume", { chainName: chainArgs.name })
+		writeCommandResult(result, chainArgs.json, formatChainResumeResult)
 		return
 	}
 	const result = await requestDaemonResult(chainArgs.loopDataRoot, "chain.delete", { chainName: chainArgs.name })
@@ -1808,6 +1870,16 @@ function formatChainStatusResult(result: JsonObject): string {
 	].join("\n")
 }
 
+function formatChainStopResult(result: JsonObject): string {
+	const chain = result.chain as JsonObject | undefined
+	return `stopped chain ${String(chain?.name ?? "")}\n`
+}
+
+function formatChainResumeResult(result: JsonObject): string {
+	const chain = result.chain as JsonObject | undefined
+	return `resumed chain ${String(chain?.name ?? "")}\n`
+}
+
 function formatChainDeleteResult(result: JsonObject): string {
 	const chain = result.chain as JsonObject | undefined
 	return `deleted chain ${String(chain?.name ?? "")}\n`
@@ -1966,7 +2038,7 @@ function rootUsage(): string {
 		"Commands:",
 		"  status <target> --json",
 		"  daemon <up|down|status|start|stop|restart>",
-		"  chain <create|list|status|delete>",
+		"  chain <create|list|status|stop|resume|delete>",
 		"  item <add|batch-add|list|update>",
 		"  queue unblock <target> --issue <issue>",
 		"  install <target>",

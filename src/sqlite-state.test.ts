@@ -175,6 +175,18 @@ describe("sqlite state store", () => {
 		}
 	})
 
+	test("chains support stopped lifecycle status", async () => {
+		const { store } = await openTestStore("chain-stopped")
+		try {
+			const chain = createFullChain(store)
+			const stopped = store.updateChain(chain.id, { status: "stopped", updatedAt: 1_800_034_900 })
+			expect(stopped.status).toBe("stopped")
+			expect(store.getChain(chain.id)?.status).toBe("stopped")
+		} finally {
+			store.close()
+		}
+	})
+
 	test("data access CRUD next pending and terminal status", async () => {
 		const { store } = await openTestStore("access")
 		try {
@@ -789,6 +801,94 @@ describe("sqlite state store", () => {
 			expect(third.listTableColumns("items")).toContain("session_ids")
 		} finally {
 			third.close()
+		}
+	})
+
+	test("v6 to v7 migration rebuilds chain status check for stopped", async () => {
+		const loopDataRoot = resolve(TEST_ROOT, `chain-status-v6-v7-${Date.now()}-${++nextRootId}`)
+		await mkdir(loopDataRoot, { recursive: true })
+		const dbFile = resolve(loopDataRoot, "db.sqlite")
+
+		const legacy = new Database(dbFile, { create: true, readwrite: true, strict: true })
+		try {
+			legacy.exec("PRAGMA foreign_keys = ON")
+			legacy.exec("PRAGMA journal_mode = WAL")
+			legacy.exec(`
+				CREATE TABLE chains (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					name TEXT NOT NULL UNIQUE,
+					preset TEXT NOT NULL,
+					repository TEXT NOT NULL,
+					base_branch TEXT NOT NULL,
+					umbrella_issue INTEGER,
+					umbrella_repo TEXT,
+					status TEXT NOT NULL CHECK (status IN ('active', 'completed', 'deleted')),
+					metadata TEXT NOT NULL,
+					created_at REAL NOT NULL,
+					updated_at REAL NOT NULL
+				);
+				CREATE TABLE items (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+					issue_number INTEGER NOT NULL,
+					repo_cwd TEXT NOT NULL,
+					status TEXT NOT NULL,
+					attempts INTEGER NOT NULL,
+					position INTEGER NOT NULL DEFAULT 0,
+					title TEXT,
+					priority TEXT,
+					branch TEXT,
+					pr INTEGER,
+					last_run_id TEXT,
+					session_ids TEXT NOT NULL DEFAULT '{}',
+					issue_file TEXT,
+					evidence_dir TEXT,
+					agent_cwd TEXT,
+					runner TEXT CHECK (runner IN ('claude', 'codex') OR runner IS NULL),
+					phase TEXT,
+					extra TEXT NOT NULL,
+					created_at REAL NOT NULL,
+					updated_at REAL NOT NULL,
+					UNIQUE (chain_id, issue_number)
+				);
+				CREATE TABLE runs (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					run_id TEXT NOT NULL UNIQUE,
+					chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+					item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+					phase TEXT NOT NULL,
+					status TEXT NOT NULL DEFAULT 'unknown',
+					started_at REAL NOT NULL,
+					ended_at REAL,
+					exit_code INTEGER,
+					extra TEXT NOT NULL
+				);
+				CREATE TABLE current_runs (
+					chain_id INTEGER PRIMARY KEY REFERENCES chains(id) ON DELETE CASCADE,
+					phase TEXT NOT NULL,
+					run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+					started_at REAL NOT NULL,
+					extra TEXT NOT NULL
+				);
+				PRAGMA user_version = 6;
+			`)
+			legacy.exec(`
+				INSERT INTO chains (name, preset, repository, base_branch, status, metadata, created_at, updated_at)
+				VALUES ('legacy-v6-chain', 'gh-issue-pr-iteration', 'mouriya-s-lab/coder-loop', 'main', 'active', '{}', 1.0, 1.0)
+			`)
+		} finally {
+			legacy.close()
+		}
+
+		const migrated = openSqliteStateStore({ loopDataRoot })
+		try {
+			const chain = migrated.getChainByName("legacy-v6-chain")
+			expect(chain).not.toBeNull()
+			const stopped = migrated.updateChain(chain!.id, { status: "stopped", updatedAt: 2.0 })
+			expect(stopped.status).toBe("stopped")
+			expect(migrated.getChain(chain!.id)?.status).toBe("stopped")
+		} finally {
+			migrated.close()
 		}
 	})
 

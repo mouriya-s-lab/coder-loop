@@ -44,6 +44,18 @@ describe("central chain/item CLI", () => {
 			expect(status.chain).toMatchObject({ name: "crud-chain", status: "active" })
 			expect(status.summary).toMatchObject({ completion: { state: "active", completedAt: null }, items: { total: 0, byStatus: {} } })
 
+			const stopped = expectJsonOk(await runCli(["chain", "stop", "crud-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expect(stopped.chain).toMatchObject({ name: "crud-chain", status: "stopped" })
+			expect(stopped.alreadyStopped).toBe(false)
+
+			const stoppedStatus = expectJsonOk(await runCli(["chain", "status", "crud-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expect(stoppedStatus.chain).toMatchObject({ name: "crud-chain", status: "stopped" })
+			expect(stoppedStatus.summary).toMatchObject({ completion: { state: "stopped", completedAt: null } })
+
+			const resumed = expectJsonOk(await runCli(["chain", "resume", "crud-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expect(resumed.chain).toMatchObject({ name: "crud-chain", status: "active" })
+			expect(resumed.alreadyActive).toBe(false)
+
 			const deleted = expectJsonOk(await runCli(["chain", "delete", "crud-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(deleted.chain).toMatchObject({ name: "crud-chain", status: "deleted" })
 

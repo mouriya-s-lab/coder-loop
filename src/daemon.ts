@@ -50,6 +50,8 @@ export type DaemonCommandName =
 	| "chain.create"
 	| "chain.list"
 	| "chain.status"
+	| "chain.stop"
+	| "chain.resume"
 	| "chain.delete"
 	| "item.add"
 	| "item.batchAdd"
@@ -456,6 +458,10 @@ export class CoderLoopDaemon {
 				return this.handleChainList()
 			case "chain.status":
 				return await this.handleChainStatus(request.args)
+			case "chain.stop":
+				return await this.handleChainStop(request.args)
+			case "chain.resume":
+				return await this.handleChainResume(request.args)
 			case "chain.delete":
 				return await this.handleChainDelete(request.args)
 			case "item.add":
@@ -693,6 +699,48 @@ export class CoderLoopDaemon {
 				terminatedRuns: terminatedRuns.map(completedRunToJson),
 				cleanup,
 			}
+		} finally {
+			resumeScheduler()
+		}
+	}
+
+	private async handleChainStop(args: JsonObject): Promise<JsonObject> {
+		const chain = this.resolveChain(args)
+		if (chain.status === "stopped") return { chain: chainToJson(chain), alreadyStopped: true, terminatedRuns: [] }
+		assertChainCanTransition(chain, "chain.stop", "active", "stopped")
+		const resumeScheduler = await this.pauseSchedulerForMutation()
+		try {
+			const stopped = this.requireStore().updateChain(chain.id, { status: "stopped" })
+			const terminatedRuns = await this.terminateActiveRunsForChain(chain.id)
+			await this.appendDaemonLogIfChainNameIsValid(stopped, {
+				type: "chain.stopped",
+				chainId: stopped.id,
+				chainName: stopped.name,
+				terminatedRuns: terminatedRuns.map((run) => run.runId),
+			})
+			return {
+				chain: chainToJson(stopped),
+				alreadyStopped: false,
+				terminatedRuns: terminatedRuns.map(completedRunToJson),
+			}
+		} finally {
+			resumeScheduler()
+		}
+	}
+
+	private async handleChainResume(args: JsonObject): Promise<JsonObject> {
+		const chain = this.resolveChain(args)
+		if (chain.status === "active") return { chain: chainToJson(chain), alreadyActive: true }
+		assertChainCanTransition(chain, "chain.resume", "stopped", "active")
+		const resumeScheduler = await this.pauseSchedulerForMutation()
+		try {
+			const resumed = this.requireStore().updateChain(chain.id, { status: "active" })
+			await this.appendDaemonLogIfChainNameIsValid(resumed, {
+				type: "chain.resumed",
+				chainId: resumed.id,
+				chainName: resumed.name,
+			})
+			return { chain: chainToJson(resumed), alreadyActive: false }
 		} finally {
 			resumeScheduler()
 		}
@@ -2046,6 +2094,22 @@ function assertChainAllowsItemMutation(chain: ChainRecord, operation: string): v
 		status: chain.status,
 		requiredStatus: "active",
 		nextStep: "create_new_chain",
+	})
+}
+
+function assertChainCanTransition(chain: ChainRecord, operation: string, from: ChainRecord["status"], to: ChainRecord["status"]): void {
+	if (chain.status === from) return
+	if (chain.status === "deleted") throw new DaemonError("chain_deleted", `${operation} cannot mutate deleted chain ${chain.name}`, {
+		chainId: chain.id,
+		chainName: chain.name,
+		status: chain.status,
+	})
+	throw new DaemonError("chain_not_active", `${operation} can transition chain ${chain.name} from ${from} to ${to}, got ${chain.status}`, {
+		chainId: chain.id,
+		chainName: chain.name,
+		status: chain.status,
+		requiredStatus: from,
+		nextStatus: to,
 	})
 }
 
