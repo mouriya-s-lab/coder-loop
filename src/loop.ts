@@ -37,7 +37,7 @@ const DEFAULT_SHARED_FILE = ".coder-loop/runtime/shared.md"
 const DEFAULT_ISSUE_DIR = ".coder-loop/runtime/issues"
 const DEFAULT_EVIDENCE_DIR = ".coder-loop/runtime/evidence"
 const DEFAULT_LOG_DIR = ".coder-loop/runtime/logs"
-const DEFAULT_ITERATION_RUNNER: AgentRunnerKind = "codex"
+const ENGINE_BUILTIN_RUNNER: AgentRunnerKind = "codex"
 export const CLAUDE_REVIEW_MODEL = "claude-opus-4-7"
 export const DEFAULT_ATTEMPT_TIMEOUT_SECONDS = 60 * 60
 export const ATTEMPT_TIMEOUT_KILL_MS = 5 * 1000
@@ -470,6 +470,7 @@ export type PresetPhase = {
 	statusWrites: readonly string[] | null
 	variables: ReadonlyArray<readonly [string, PresetVariableSource]>
 	trigger: PresetPhaseTrigger | null
+	defaultRunner: AgentRunnerKind | null
 }
 
 export type PresetFragment = {
@@ -505,7 +506,7 @@ export type PresetPhaseTrigger =
 
 export type AgentRunnerKind = "claude" | "codex"
 
-export type AgentRunnerSource = "iteration-default" | "config" | "queue" | "review-default"
+export type AgentRunnerSource = "role-md" | "engine-builtin" | "queue" | "config" | "iteration-default" | "review-default"
 
 export type AgentRunnerCommand = {
 	kind: AgentRunnerKind
@@ -597,6 +598,7 @@ export type StatusRunnerDefaultsSnapshot = {
 	hostDefault: AgentRunnerKind
 	default: StatusRunnerSelectionSnapshot
 	reviewDefault: StatusRunnerSelectionSnapshot
+	phases: Record<string, StatusRunnerSelectionSnapshot>
 }
 
 export type StatusStateKind =
@@ -629,6 +631,7 @@ export type StatusSelectedIssue = {
 	agentCwd: string
 	runner: StatusRunnerSelectionSnapshot
 	reviewRunner: StatusRunnerSelectionSnapshot
+	phaseRunners: Record<string, StatusRunnerSelectionSnapshot>
 }
 
 export type StatusQueueSnapshot = {
@@ -2016,8 +2019,8 @@ function buildOptions(targetCwd: string, configPath: string, raw: BuildOptionsIn
 	const chainPaths = raw.chainName === null ? null : resolveChainRuntimePaths(raw.chainName, loopDataRootOption(loopDataRoot))
 	const hostRunner = detectHostRunner(process.env)
 	const runnerCommands = buildAgentRunnerCommands(config)
-	const defaultRunner = selectDefaultRunner(config.defaultRunner, runnerCommands)
-	const reviewRunner = selectReviewRunner(config.reviewRunner, runnerCommands)
+	const defaultRunner = selectPhaseDefaultRunner(defaultPhaseForPreset(preset), preset, runnerCommands)
+	const reviewRunner = selectPhaseDefaultRunner(reviewPhaseForPreset(preset), preset, runnerCommands)
 
 	return {
 		targetCwd,
@@ -2176,6 +2179,7 @@ function buildStatusRunnerDefaultsSnapshot(options: LoopOptions | null): StatusR
 			hostDefault: options.hostRunner,
 			default: statusRunnerSelection(options.defaultRunner),
 			reviewDefault: statusRunnerSelection(options.reviewRunner),
+			phases: statusRunnerSelections(selectPhaseDefaultRunners(options.preset, options.runnerCommands)),
 		}
 	}
 	const hostRunner = detectHostRunner(process.env)
@@ -2205,6 +2209,7 @@ function buildStatusRunnerDefaultsSnapshot(options: LoopOptions | null): StatusR
 		hostDefault: hostRunner,
 		default: statusRunnerSelection(selectDefaultRunner(null, buildAgentRunnerCommands(config))),
 		reviewDefault: statusRunnerSelection(selectReviewRunner(null, buildAgentRunnerCommands(config))),
+		phases: {},
 	}
 }
 
@@ -2268,8 +2273,8 @@ function pickFirstSelectableStatusItem(
 	const issueFile = resolveChainIssueFile(options, chain, selected, selectedId, "Selected issue file")
 	const evidenceDir = resolveChainEvidenceDir(options, chain, selected, selectedId, "Selected evidence directory")
 	const agentCwd = selected.agentCwd ?? options.targetCwd
-	const runner = selectRunnerForItem(selected, options)
-	const reviewRunner = options.reviewRunner
+	const runner = selectRunnerForPhase(defaultPhaseForPreset(options.preset).name, selected, options)
+	const reviewRunner = selectRunnerForPhase(reviewPhaseForPreset(options.preset).name, selected, options)
 	return { item: selected, issueFile, evidenceDir, agentCwd, runner, reviewRunner }
 }
 
@@ -2291,6 +2296,7 @@ function buildStatusQueueSnapshotFromRecords(options: LoopOptions, items: readon
 			agentCwd: selected.agentCwd,
 			runner: statusRunnerSelection(selected.runner),
 			reviewRunner: statusRunnerSelection(selected.reviewRunner),
+			phaseRunners: statusRunnerSelections(selectPhaseRunnersForItem(options.preset, selected.item, options.runnerCommands)),
 		},
 	}
 }
@@ -2388,6 +2394,12 @@ function statusRunnerSelection(selection: AgentRunnerSelection): StatusRunnerSel
 		extraArgs: [...selection.extraArgs],
 		model: selection.model,
 	}
+}
+
+function statusRunnerSelections(selections: Record<string, AgentRunnerSelection>): Record<string, StatusRunnerSelectionSnapshot> {
+	const out: Record<string, StatusRunnerSelectionSnapshot> = {}
+	for (const [phase, selection] of Object.entries(selections)) out[phase] = statusRunnerSelection(selection)
+	return out
 }
 
 async function readAgentPhaseStatus(path: string): Promise<StatusPhaseStatusSnapshot> {
@@ -3265,13 +3277,16 @@ export async function loadPreset(presetDir: string): Promise<Preset> {
 	const raw = await readFile(tomlPath, "utf-8")
 	const parsed: unknown = Bun.TOML.parse(raw)
 	const preset = parsePreset(parsed, presetDir)
+	const phases: PresetPhase[] = []
 	for (const phase of preset.phases) {
-		await assertReadable(phase.prompt, `preset phase "${phase.name}" prompt`)
+		const prompt = await readPresetPhasePrompt(phase)
+		const metadata = parseRoleEntryMetadata(prompt, `preset phase "${phase.name}" prompt`)
+		phases.push({ ...phase, defaultRunner: metadata.defaultRunner })
 	}
 	for (const fragment of preset.fragments) {
 		await assertReadable(fragment.path, `preset fragment "${fragment.id}"`)
 	}
-	return preset
+	return { ...preset, phases }
 }
 
 export function parsePreset(value: unknown, presetDir: string): Preset {
@@ -3312,7 +3327,7 @@ export function parsePreset(value: unknown, presetDir: string): Preset {
 			variables.push([key, source] as const)
 		}
 		const trigger = parsePresetPhaseTrigger(entry.trigger ?? null, `preset.phases[${index}].trigger`)
-		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), statusWrites: entry.statusWrites ?? null, variables, trigger })
+		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), statusWrites: entry.statusWrites ?? null, variables, trigger, defaultRunner: null })
 	}
 	if (!phases.some((phase) => phase.trigger === null)) presetError("preset.phases: must include at least one non-trigger phase")
 
@@ -3359,6 +3374,42 @@ export function parsePreset(value: unknown, presetDir: string): Preset {
 		fragments,
 		agent: { binary: root.agent.binary, extraArgs: root.agent.extraArgs ?? [], attemptTimeoutSeconds },
 	}
+}
+
+async function readPresetPhasePrompt(phase: PresetPhase): Promise<string> {
+	try {
+		return await readFile(phase.prompt, "utf-8")
+	} catch (error) {
+		if (isNodeError(error) && error.code === "ENOENT") fail(`Missing preset phase "${phase.name}" prompt file: ${phase.prompt}`)
+		throw error
+	}
+}
+
+type RoleEntryMetadata = {
+	defaultRunner: AgentRunnerKind | null
+}
+
+export function parseRoleEntryMetadata(markdown: string, label: string): RoleEntryMetadata {
+	if (!markdown.startsWith("---\n") && !markdown.startsWith("---\r\n")) return { defaultRunner: null }
+	const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(markdown)
+	if (match === null) presetError(`${label}: frontmatter must close with ---`)
+	const rawFrontmatter = match[1]!
+	let defaultRunner: AgentRunnerKind | null = null
+	let sawDefaultRunner = false
+	for (const line of rawFrontmatter.split(/\r?\n/)) {
+		const trimmed = line.trim()
+		if (trimmed === "") continue
+		const entry = /^([A-Za-z][A-Za-z0-9_]*):\s*([A-Za-z][A-Za-z0-9_-]*)$/.exec(trimmed)
+		if (entry === null) presetError(`${label}: invalid frontmatter line "${trimmed}"`)
+		const key = entry[1]!
+		const value = entry[2]!
+		if (key !== "defaultRunner") presetError(`${label}: unsupported frontmatter key "${key}"`)
+		if (sawDefaultRunner) presetError(`${label}: duplicate defaultRunner frontmatter key`)
+		if (value !== "claude" && value !== "codex") presetError(`${label}: defaultRunner must be "claude" or "codex"`)
+		defaultRunner = value
+		sawDefaultRunner = true
+	}
+	return { defaultRunner }
 }
 
 function parseVariableSource(value: string, label: string): PresetVariableSource {
@@ -3477,16 +3528,17 @@ export function buildAgentRunnerCommands(config: LoopConfig): AgentRunnerCommand
 	}
 }
 
-export function selectDefaultRunner(configuredRunner: AgentRunnerKind | null, commands: AgentRunnerCommands): AgentRunnerSelection {
-	const kind = configuredRunner ?? DEFAULT_ITERATION_RUNNER
-	return { ...commands[kind], source: configuredRunner === null ? "iteration-default" : "config" }
+export function selectEngineBuiltinRunner(commands: AgentRunnerCommands): AgentRunnerSelection {
+	return { ...commands[ENGINE_BUILTIN_RUNNER], source: "engine-builtin" }
 }
 
-export function selectReviewRunner(configuredRunner: AgentRunnerKind | null, commands: AgentRunnerCommands): AgentRunnerSelection {
-	const kind = configuredRunner ?? "claude"
-	const command = commands[kind]
-	const model = command.kind === "claude" ? CLAUDE_REVIEW_MODEL : command.model
-	return { ...command, model, source: configuredRunner === null ? "review-default" : "config" }
+export function selectDefaultRunner(_configuredRunner: AgentRunnerKind | null, commands: AgentRunnerCommands): AgentRunnerSelection {
+	return selectEngineBuiltinRunner(commands)
+}
+
+export function selectReviewRunner(_configuredRunner: AgentRunnerKind | null, commands: AgentRunnerCommands): AgentRunnerSelection {
+	const runner = selectEngineBuiltinRunner(commands)
+	return runner.kind === "claude" ? { ...runner, model: CLAUDE_REVIEW_MODEL } : runner
 }
 
 export type PhaseRunnerSelectionInput = {
@@ -3496,15 +3548,54 @@ export type PhaseRunnerSelectionInput = {
 	runnerCommands: AgentRunnerCommands
 }
 
-function selectRunnerForItem(item: Pick<ItemRecord, "runner">, input: Pick<PhaseRunnerSelectionInput, "defaultRunner" | "runnerCommands">): AgentRunnerSelection {
-	if (item.runner === null) return input.defaultRunner
+function selectRunnerForItemOverride(item: Pick<ItemRecord, "runner">, input: Pick<PhaseRunnerSelectionInput, "runnerCommands">): AgentRunnerSelection | null {
+	if (item.runner === null) return null
 	return { ...input.runnerCommands[item.runner], source: "queue" }
 }
 
+function phaseByName(preset: Preset, phaseName: string): PresetPhase {
+	const phase = preset.phases.find((entry) => entry.name === phaseName)
+	if (phase === undefined) fail(`preset ${preset.name} does not define phase "${phaseName}"`)
+	return phase
+}
+
+function isReviewRunnerPhase(preset: Preset, phase: PresetPhase): boolean {
+	const nonTriggerPhases = preset.phases.filter((entry) => entry.trigger === null)
+	if (nonTriggerPhases.length < 2) return false
+	return nonTriggerPhases[nonTriggerPhases.length - 1]!.name === phase.name
+}
+
+function allowsItemRunnerOverride(preset: Preset, phase: PresetPhase): boolean {
+	return phase.trigger === null && !isReviewRunnerPhase(preset, phase)
+}
+
+export function selectPhaseDefaultRunner(phase: PresetPhase, preset: Preset, commands: AgentRunnerCommands): AgentRunnerSelection {
+	const kind = phase.defaultRunner ?? ENGINE_BUILTIN_RUNNER
+	const command = commands[kind]
+	const model = isReviewRunnerPhase(preset, phase) && command.kind === "claude" ? CLAUDE_REVIEW_MODEL : command.model
+	const source: AgentRunnerSource = phase.defaultRunner === null ? "engine-builtin" : "role-md"
+	return { ...command, model, source }
+}
+
+export function selectPhaseDefaultRunners(preset: Preset, commands: AgentRunnerCommands): Record<string, AgentRunnerSelection> {
+	const runners: Record<string, AgentRunnerSelection> = {}
+	for (const phase of preset.phases) runners[phase.name] = selectPhaseDefaultRunner(phase, preset, commands)
+	return runners
+}
+
+export function selectPhaseRunnersForItem(preset: Preset, item: Pick<ItemRecord, "runner">, commands: AgentRunnerCommands): Record<string, AgentRunnerSelection> {
+	const runners: Record<string, AgentRunnerSelection> = {}
+	for (const phase of preset.phases) {
+		const override = allowsItemRunnerOverride(preset, phase) ? selectRunnerForItemOverride(item, { runnerCommands: commands }) : null
+		runners[phase.name] = override ?? selectPhaseDefaultRunner(phase, preset, commands)
+	}
+	return runners
+}
+
 export function selectRunnerForPhase(phase: string, item: Pick<ItemRecord, "runner">, input: PhaseRunnerSelectionInput): AgentRunnerSelection {
-	const reviewPhase = reviewPhaseForPreset(input.preset)
-	if (phase === reviewPhase.name) return input.reviewRunner
-	return selectRunnerForItem(item, input)
+	const presetPhase = phaseByName(input.preset, phase)
+	const override = allowsItemRunnerOverride(input.preset, presetPhase) ? selectRunnerForItemOverride(item, input) : null
+	return override ?? selectPhaseDefaultRunner(presetPhase, input.preset, input.runnerCommands)
 }
 
 export type BuildPhaseRunnerSelectionFromChainInput = {
@@ -3516,8 +3607,8 @@ export type BuildPhaseRunnerSelectionFromChainInput = {
 export function buildPhaseRunnerSelectionFromChain(input: BuildPhaseRunnerSelectionFromChainInput): PhaseRunnerSelectionInput {
 	const config = loopConfigFromChain(input.chain, input.loopDataRoot, null)
 	const runnerCommands = buildAgentRunnerCommands(config)
-	const defaultRunner = selectDefaultRunner(config.defaultRunner, runnerCommands)
-	const reviewRunner = selectReviewRunner(config.reviewRunner, runnerCommands)
+	const defaultRunner = selectPhaseDefaultRunner(defaultPhaseForPreset(input.preset), input.preset, runnerCommands)
+	const reviewRunner = selectPhaseDefaultRunner(reviewPhaseForPreset(input.preset), input.preset, runnerCommands)
 	return { preset: input.preset, defaultRunner, reviewRunner, runnerCommands }
 }
 
@@ -3537,6 +3628,12 @@ export function reviewPhaseForPreset(preset: Preset): PresetPhase {
 		if (phase.trigger === null) return phase
 	}
 	fail("preset must define at least one non-trigger phase")
+}
+
+export function defaultPhaseForPreset(preset: Preset): PresetPhase {
+	const phase = preset.phases.find((entry) => entry.trigger === null) ?? preset.phases[0]
+	if (phase === undefined) fail("preset must define at least one phase")
+	return phase
 }
 
 export function triggeredPhasesAfter(preset: Preset, afterPhase: string, status: string): readonly PresetPhase[] {

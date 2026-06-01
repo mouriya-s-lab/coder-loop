@@ -297,6 +297,13 @@ function whichBinary(name: string): string | null {
 
 type RequiredRunnerCli = Pick<AgentRunnerSelection, "kind" | "binary">
 
+function requiredRunnersForPreset(preset: Preset): RequiredRunnerCli[] {
+	return preset.phases.map((phase) => {
+		const kind: AgentRunnerKind = phase.defaultRunner ?? "codex"
+		return { kind, binary: kind }
+	})
+}
+
 async function checkLayerC(requiredRunners: RequiredRunnerCli[]): Promise<CheckOutcome[]> {
 	const results: CheckOutcome[] = []
 
@@ -473,10 +480,7 @@ async function createChainThroughDaemon(input: {
 			repository: input.repo,
 			preset: input.preset.name,
 			baseBranch: "main",
-			metadata: {
-				runner: "codex",
-				reviewRunner: "claude",
-			},
+			metadata: {},
 		}))
 		if (!response.ok) fail(`${response.error.code}: ${response.error.message}`)
 		return { chainName, result: response.result as JsonValue }
@@ -522,6 +526,7 @@ export function buildLiveRuntimeHealthLines(snapshot: CoderLoopStatusSnapshot): 
 	const selected = snapshot.queue.selected?.id ?? "<none>"
 	lines.push(`INFO: queue total=${snapshot.queue.total}, continuable=${snapshot.queue.continuable}, terminal=${snapshot.queue.terminal}, selected=${selected}`)
 	lines.push(`INFO: runner hostDefault=${snapshot.target.runner.hostDefault}, default=${formatStatusRunner(snapshot.target.runner.default)}, reviewDefault=${formatStatusRunner(snapshot.target.runner.reviewDefault)}`)
+	lines.push(`INFO: phase runners=${formatPhaseRunners(snapshot.target.runner.phases)}`)
 	if (snapshot.queue.selected !== null) lines.push(`INFO: selected runner=${formatStatusRunner(snapshot.queue.selected.runner)}, review=${formatStatusRunner(snapshot.queue.selected.reviewRunner)}`)
 
 	if (snapshot.current.run === null) {
@@ -556,6 +561,12 @@ export function buildLiveRuntimeHealthLines(snapshot: CoderLoopStatusSnapshot): 
 	if (matchingLive.length > 1) lines.push("WARN: multiple live loop processes match target")
 
 	return lines
+}
+
+function formatPhaseRunners(phases: Record<string, { kind: string; source: string; binary: string; model: string | null }>): string {
+	const entries = Object.entries(phases)
+	if (entries.length === 0) return "<none>"
+	return entries.map(([phase, runner]) => `${phase}=${formatStatusRunner(runner)}`).join(", ")
 }
 
 function eventType(value: JsonValue | null): string {
@@ -616,9 +627,9 @@ export async function runInstallCommand(rawArgs: string[]): Promise<void> {
 
 	// Layer C: prereqs
 	info("\n[Layer C] Operator 机器先决条件")
-	const installRunner: AgentRunnerKind = "codex"
-	info(`  INFO: install 默认 iteration runner=${installRunner}（可在 target config 用 runner 覆盖），review 默认 runner=claude / model=claude-opus-4-7（可用 reviewRunner 改 runner）`)
-	const layerCResults = await checkLayerC([{ kind: installRunner, binary: installRunner }, { kind: "claude", binary: "claude" }])
+	const installRunners = requiredRunnersForPreset(preset)
+	info(`  INFO: role entry md runners=${installRunners.map((runner) => `${runner.kind}:${runner.binary}`).join(", ")}`)
+	const layerCResults = await checkLayerC(installRunners)
 	for (const r of layerCResults) info(`  ${r.ok ? "OK" : "FAIL"}: ${r.detail}`)
 	const layerCOk = layerCResults.every((r) => r.ok)
 	if (!layerCOk && !args.dryRun) {
@@ -743,9 +754,10 @@ export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
 	})
 
 	info("\n[Layer C] Operator 机器先决条件")
-	const cResults = await checkLayerC([statusSnapshot.target.runner.default, statusSnapshot.target.runner.reviewDefault])
+	const cResults = await checkLayerC(Object.values(statusSnapshot.target.runner.phases))
 	info(`  INFO: target default runner=${formatStatusRunner(statusSnapshot.target.runner.default)}`)
 	info(`  INFO: review default runner=${formatStatusRunner(statusSnapshot.target.runner.reviewDefault)}`)
+	info(`  INFO: phase runners=${formatPhaseRunners(statusSnapshot.target.runner.phases)}`)
 	for (const r of cResults) {
 		info(`  ${r.ok ? "OK" : "FAIL"}: ${r.detail}`)
 		if (!r.ok) hasFailure = true

@@ -1136,7 +1136,7 @@ export function daemonRequest(command: DaemonCommandName, args: JsonObject = {})
 function defaultDaemonRunner(): AgentRunnerSelection {
 	return {
 		kind: "codex",
-		source: "iteration-default",
+		source: "engine-builtin",
 		binary: "codex",
 		extraArgs: [],
 		model: null,

@@ -32,7 +32,7 @@
 | `issueFile` | string / null | issue handoff 文件相对路径 |
 | `evidenceDir` | string / null | 该 issue 的证据目录相对路径 |
 | `agentCwd` | string / null | agent spawn 的绝对 cwd；跨仓或 post-review responder 可指向外部 checkout |
-| `runner` | `claude \| codex` / null | 该 item 的 iteration/trigger runner override |
+| `runner` | `claude \| codex` / null | 该 item 对允许 item override 的普通执行 phase 的 runner override |
 | `blockerRepo` | string / undefined | `blocked` transition 写入的阻塞仓库，`owner/repo` |
 | `blockerRef` | string / undefined | `blocked` transition 写入的阻塞 issue ref 或环境条件 |
 

@@ -45,14 +45,16 @@ coder-loop queue unblock <target> --issue <id> --start-daemon --require-browser-
 
 Read `coder-loop status <target> --json` for:
 
+- `target.runner.phases`;
 - `target.runner.default` and `target.runner.reviewDefault`;
+- `queue.selected.phaseRunners`;
 - `queue.selected.runner` and `queue.selected.reviewRunner`;
 - `current.runner`;
 - `events.path`;
 - `current.phaseStatus.value.outputPath` and `statusPath`;
 - `processes.live`.
 
-Runner selection is explicit runtime policy. Do not infer runner/model from the host app or old flat logs.
+Runner selection is explicit role-md/runtime policy. Do not infer runner/model from the host app or old flat logs.
 
 ## Legacy boundaries
 

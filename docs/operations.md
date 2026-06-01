@@ -60,10 +60,12 @@ Runner 选择也在 `status` 中显式暴露：
 | JSON path | 含义 |
 |---|---|
 | `target.runner.hostDefault` | 当前宿主推断出的 runner 诊断信息；不决定 iteration 默认值 |
-| `target.runner.default` | target 默认 iteration runner；来源为 config 或内建 default |
-| `target.runner.reviewDefault` | review runner；默认 `claude`，可由 config 的 `reviewRunner` 覆盖；当 kind 为 `claude` 时 model 强制为 `claude-opus-4-7` |
-| `queue.selected.runner` | 当前 selected item 的实际 iteration runner；queue item 上的 `runner` 会覆盖 target default |
-| `queue.selected.reviewRunner` | 当前 selected item 的 review runner；不受 queue item `runner` 影响 |
+| `target.runner.phases` | 每个 phase 的 role-md / engine-builtin default runner |
+| `target.runner.default` | 默认执行 phase runner；来源通常是 role-md |
+| `target.runner.reviewDefault` | review phase runner；当 kind 为 `claude` 时 model 强制为 `claude-opus-4-7` |
+| `queue.selected.phaseRunners` | 当前 selected item 逐 phase effective runner；允许 item override 的 phase 可显示 `source=queue` |
+| `queue.selected.runner` | 当前 selected item 的默认执行 phase runner |
+| `queue.selected.reviewRunner` | 当前 selected item 的 review phase runner；不受 queue item `runner` 影响 |
 | `current.runner` | 当前 phase 的实际 runner；没有 current 时为 `null` |
 | `current.phaseStatus.value.runner` / `.model` | 已落盘 phase status 里记录的 runner kind 与 model；旧 status 文件可能为 `null` |
 

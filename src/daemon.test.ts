@@ -2223,7 +2223,7 @@ process.exitCode = 0
 			try {
 				const result = expectOk(await request(fixture, "chain.create", {
 					name: "ac5-iter-chain",
-					preset: "single-phase-example",
+					preset: "gh-issue-pr-iteration",
 					repository: "mouriya-s-lab/coder-loop",
 					metadata: {
 						claude: { binary: fixture.fakeClaudeBinary },
