@@ -97,6 +97,13 @@ export type CoderLoopDaemonSnapshot = {
 
 type DaemonState = "starting" | "running" | "shutting_down" | "exited"
 type UnknownRecord = Record<string, unknown>
+type BundledPresetStatuses = {
+	continuable: string[]
+	terminal: string[]
+	success: string[]
+	entry: string
+	phaseWrites: Map<string, string[]>
+}
 
 const FALLBACK_PENDING_STATUSES = ["queued", "changes_requested"] as const
 const FALLBACK_TERMINAL_STATUSES = ["blocked", "moot", "done"] as const
@@ -766,7 +773,7 @@ export class CoderLoopDaemon {
 		if (repoCwd !== null) assignOptional(input, "repoCwd", await validateRepoCwdForRequest(repoCwd))
 		const status = optionalString(fields, "status")
 		if (status !== null) {
-			assignOptional(input, "status", await this.validateItemStatusForRequest(chain, status))
+			assignOptional(input, "status", await this.validateItemStatusForRequest(chain, item, status))
 		}
 		assignOptional(input, "title", validateItemTitleForRequest(optionalStringOrNull(fields, "title")))
 		assignOptional(input, "priority", validateItemPriorityForRequest(optionalStringOrNull(fields, "priority")))
@@ -1008,7 +1015,13 @@ export class CoderLoopDaemon {
 		console.warn(`coder-loop daemon warning: skipped ${context} for invalid chain ${chain.id} (${JSON.stringify(chain.name)}): ${error.message}`)
 	}
 
-	private async validateItemStatusForRequest(chain: ChainRecord, status: string): Promise<string> {
+	private async validateItemStatusForRequest(chain: ChainRecord, item: ItemRecord, status: string): Promise<string> {
+		await this.validateItemStatusVocabularyForRequest(chain, status)
+		if (item.phase !== null) await this.validateItemStatusForPhaseRequest(chain, item.phase, status)
+		return status
+	}
+
+	private async validateItemStatusVocabularyForRequest(chain: ChainRecord, status: string): Promise<string> {
 		const allowed = await this.allowedItemStatuses(chain)
 		if (!allowed.has(status)) {
 			throw new DaemonError("invalid_request", `item status must be one of: ${[...allowed].sort().join(", ")}`, { status })
@@ -1017,7 +1030,24 @@ export class CoderLoopDaemon {
 	}
 
 	private async defaultItemStatusForRequest(chain: ChainRecord): Promise<string> {
-		return await this.validateItemStatusForRequest(chain, "queued")
+		return await this.validateItemStatusVocabularyForRequest(chain, "queued")
+	}
+
+	private async validateItemStatusForPhaseRequest(chain: ChainRecord, phase: string, status: string): Promise<void> {
+		const allowed = await this.allowedItemStatusesForPhase(chain, phase)
+		if (allowed === null || allowed.has(status)) return
+		const allowedList = [...allowed].sort()
+		throw new DaemonError("invalid_request", `item status ${status} is not allowed while item phase is ${phase}; allowed statuses: ${allowedList.join(", ") || "<none>"}`, {
+			status,
+			phase,
+			allowed: allowedList,
+		})
+	}
+
+	private async allowedItemStatusesForPhase(chain: ChainRecord, phase: string): Promise<Set<string> | null> {
+		const presetStatuses = await readBundledPresetStatuses(chain.preset)
+		const allowed = presetStatuses?.phaseWrites.get(phase)
+		return allowed === undefined ? null : new Set(allowed)
 	}
 
 	private async allowedItemStatuses(chain: ChainRecord): Promise<Set<string>> {
@@ -1739,21 +1769,17 @@ async function validateRepoCwdForRequest(input: string): Promise<string> {
 	return input
 }
 
-async function readBundledPresetStatuses(presetName: string): Promise<{ continuable: string[]; terminal: string[]; success: string[]; entry: string } | null> {
+async function readBundledPresetStatuses(presetName: string): Promise<BundledPresetStatuses | null> {
 	if (!PRESET_NAME_PATTERN.test(presetName)) return null
 	try {
-		const raw = await readFile(resolve(bundledPresetDir(presetName), "preset.toml"), "utf-8")
-		const parsed = Bun.TOML.parse(raw) as unknown
-		if (!isRecord(parsed) || !isRecord(parsed.statuses)) return null
-		const continuable = parsed.statuses.continuable
-		const terminal = parsed.statuses.terminal
-		if (!Array.isArray(continuable) || !continuable.every((status) => typeof status === "string")) return null
-		if (!Array.isArray(terminal) || !terminal.every((status) => typeof status === "string")) return null
-		const successRaw = parsed.statuses.success
-		const success = Array.isArray(successRaw) && successRaw.every((status) => typeof status === "string") ? successRaw : []
-		const entryRaw = parsed.statuses.entry
-		const entry = typeof entryRaw === "string" && continuable.includes(entryRaw) ? entryRaw : (continuable[0] ?? "queued")
-		return { continuable, terminal, success, entry }
+		const preset = await loadPreset(bundledPresetDir(presetName))
+		return {
+			continuable: [...preset.statuses.continuable],
+			terminal: [...preset.statuses.terminal],
+			success: [...preset.statuses.success],
+			entry: preset.statuses.entry,
+			phaseWrites: new Map(preset.phases.flatMap((phase) => phase.statusWrites === null ? [] : [[phase.name, [...phase.statusWrites]]])),
+		}
 	} catch {
 		return null
 	}

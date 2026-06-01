@@ -36,6 +36,9 @@ entry       = "queued"
 [[phases]]
 name   = "iteration"
 prompt = "iter-entry.md"
+# Agent-owned status writes are intentionally phase-scoped. The iteration
+# phase may only hand off to review; review owns retry and terminal verdicts.
+statusWrites = ["in_progress"]
 
   [phases.variables]
   TARGET_CWD               = "runtime.targetCwd"
@@ -72,6 +75,7 @@ prompt = "iter-entry.md"
 [[phases]]
 name   = "review"
 prompt = "review-entry.md"
+statusWrites = ["changes_requested", "blocked", "moot", "done", "exhausted"]
 
   [phases.variables]
   TARGET_CWD               = "runtime.targetCwd"
@@ -109,6 +113,7 @@ prompt = "review-entry.md"
 name    = "blocked-responder"
 prompt  = "blocked-responder-entry.md"
 trigger = { afterPhase = "review", whenStatus = "blocked" }
+statusWrites = []
 
   [phases.variables]
   TARGET_CWD               = "runtime.targetCwd"
@@ -146,6 +151,7 @@ trigger = { afterPhase = "review", whenStatus = "blocked" }
 name    = "umbrella-finalizer"
 prompt  = "umbrella-finalizer-entry.md"
 trigger = { on = "chain-complete" }
+statusWrites = []
 
   [phases.variables]
   TARGET_CWD               = "runtime.targetCwd"

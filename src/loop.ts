@@ -396,6 +396,7 @@ const PresetPhaseTriggerBoundary = arkType({
 const PresetPhaseBoundary = arkType({
 	name: "string",
 	prompt: "string",
+	"statusWrites?": "string[]",
 	"variables?": "object",
 	"trigger?": PresetPhaseTriggerBoundary,
 })
@@ -466,6 +467,7 @@ export type PresetVariableSource =
 export type PresetPhase = {
 	name: string
 	prompt: string
+	statusWrites: readonly string[] | null
 	variables: ReadonlyArray<readonly [string, PresetVariableSource]>
 	trigger: PresetPhaseTrigger | null
 }
@@ -3310,12 +3312,24 @@ export function parsePreset(value: unknown, presetDir: string): Preset {
 			variables.push([key, source] as const)
 		}
 		const trigger = parsePresetPhaseTrigger(entry.trigger ?? null, `preset.phases[${index}].trigger`)
-		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), variables, trigger })
+		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), statusWrites: entry.statusWrites ?? null, variables, trigger })
 	}
 	if (!phases.some((phase) => phase.trigger === null)) presetError("preset.phases: must include at least one non-trigger phase")
 
 	const statuses = new Set<string>([...root.statuses.continuable, ...root.statuses.terminal])
 	for (const [index, phase] of phases.entries()) {
+		if (phase.statusWrites !== null) {
+			const phaseStatusWrites = new Set<string>()
+			for (const status of phase.statusWrites) {
+				if (!statuses.has(status)) {
+					presetError(`preset.phases[${index}].statusWrites: unknown status "${status}"`)
+				}
+				if (phaseStatusWrites.has(status)) {
+					presetError(`preset.phases[${index}].statusWrites: duplicate status "${status}"`)
+				}
+				phaseStatusWrites.add(status)
+			}
+		}
 		if (phase.trigger === null) continue
 		if (isChainCompleteTrigger(phase.trigger)) continue
 		if (!phaseNames.has(phase.trigger.afterPhase)) {
