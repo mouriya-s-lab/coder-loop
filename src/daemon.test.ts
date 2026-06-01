@@ -1529,6 +1529,91 @@ describe("daemon", () => {
 		}
 	})
 
+	test("socket chain.stop terminates active runs and preserves stopped chain runtime", async () => {
+		const fixture = await startFixture("chain-stop-active-run")
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "chain-stop-active-run",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			preInstallReviewOnEmptyLockByName("chain-stop-active-run", fixture.loopDataRoot)
+			const added = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 349_201,
+				repoCwd: REPO_ROOT,
+				extra: {
+					issueKind: "code",
+					sleepMs: 5_000,
+					summary: "ITERATION SUMMARY: fake iteration in progress",
+				},
+			})).item)
+			const itemId = numberValue(added.id)
+			await waitFor(async () => record(expectOk(await request(fixture, "daemon.status")).daemon).activeRuns, (runs) => Array.isArray(runs) && runs.length === 1)
+
+			const currentChain = await readChain(fixture.loopDataRoot, chainId)
+			if (currentChain === null) throw new Error("expected chain")
+			const worktreePath = schedulerSlotWorktreePath(currentChain, REPO_ROOT, { loopDataRoot: fixture.loopDataRoot })
+			const stopped = record(expectOk(await request(fixture, "chain.stop", { chainId })))
+
+			expect(record(stopped.chain).status).toBe("stopped")
+			expect(stopped.alreadyStopped).toBe(false)
+			expect(Array.isArray(stopped.terminatedRuns)).toBe(true)
+			expect(record(expectOk(await request(fixture, "daemon.status")).daemon).activeRuns).toEqual([])
+			expect(await pathExists(resolveChainRuntimePaths("chain-stop-active-run", { loopDataRoot: fixture.loopDataRoot }).chainRoot)).toBe(true)
+			expect(await pathExists(worktreePath)).toBe(true)
+
+			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				store.updateItem(itemId, { status: "done", updatedAt: 1_800_034_900 })
+			} finally {
+				store.close()
+			}
+			await new Promise((resolveWait) => setTimeout(resolveWait, 80))
+			expect(await readChainStatus(fixture.loopDataRoot, chainId)).toBe("stopped")
+			expect((await readItem(fixture.loopDataRoot, chainId, 349_201))?.status).toBe("done")
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("socket chain.resume restores scheduling for a stopped chain", async () => {
+		const fixture = await startFixture("chain-resume-schedules")
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "chain-resume-schedules",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			expect(record(expectOk(await request(fixture, "chain.stop", { chainId })).chain).status).toBe("stopped")
+
+			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				store.createItem({
+					chainId,
+					issueNumber: 349_202,
+					repoCwd: REPO_ROOT,
+					status: "queued",
+					attempts: 0,
+					extra: {
+						issueKind: "code",
+						sleepMs: 200,
+						summary: "ITERATION SUMMARY: fake iteration in progress",
+					},
+				})
+			} finally {
+				store.close()
+			}
+
+			const resumed = record(expectOk(await request(fixture, "chain.resume", { chainId })))
+			expect(record(resumed.chain).status).toBe("active")
+			expect(resumed.alreadyActive).toBe(false)
+			await waitFor(async () => readItem(fixture.loopDataRoot, chainId, 349_202), (item) => item?.status === "in_progress")
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("daemon survives all chains complete", async () => {
 		const fixture = await startFixture("survives-complete")
 		try {

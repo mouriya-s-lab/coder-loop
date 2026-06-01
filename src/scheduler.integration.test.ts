@@ -194,6 +194,87 @@ await Bun.write(${JSON.stringify(promptCapture)}, prompt)
 	}
 })
 
+test("stopped chain does not block another active chain in the same scheduler tick", async () => {
+	const root = resolve(TEST_ROOT, "stopped-chain-sibling-active")
+	const loopDataRoot = resolve(root, "loop-data")
+	const fakeRunner = resolve(root, "sibling-runner.ts")
+	await mkdir(loopDataRoot, { recursive: true })
+	await writeFile(fakeRunner, "console.log('active sibling ran')\n")
+
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const stopped = store.createChain({
+			name: "stopped-sibling-chain",
+			preset: "gh-issue-pr-iteration",
+			repository: "mouriya-s-lab/coder-loop",
+			baseBranch: "main",
+			status: "stopped",
+			metadata: {},
+		})
+		const active = store.createChain({
+			name: "active-sibling-chain",
+			preset: "gh-issue-pr-iteration",
+			repository: "mouriya-s-lab/coder-loop",
+			baseBranch: "main",
+			status: "active",
+			metadata: {},
+		})
+		const stoppedItem = store.createItem({
+			chainId: stopped.id,
+			issueNumber: 349_101,
+			repoCwd: REPO_ROOT,
+			status: "queued",
+			attempts: 0,
+			extra: { issueKind: "code" },
+		})
+		const activeItem = store.createItem({
+			chainId: active.id,
+			issueNumber: 349_102,
+			repoCwd: REPO_ROOT,
+			status: "queued",
+			attempts: 0,
+			extra: { issueKind: "code" },
+		})
+		const state = createSchedulerState()
+		const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
+			const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+			await mkdir(worktreePath, { recursive: true })
+			return worktreePath
+		}
+		const options: SchedulerOptions = {
+			store,
+			state,
+			presetDir: resolve(REPO_ROOT, "presets/gh-issue-pr-iteration"),
+			phase: "iteration",
+			pendingStatuses: ["queued"],
+			terminalStatuses: ["done"],
+			runner: {
+				kind: "claude",
+				source: "iteration-default",
+				binary: "bun",
+				extraArgs: [fakeRunner],
+				model: null,
+			},
+			worktreeManager,
+			loopDataRootOptions: { loopDataRoot },
+			runIdFactory: ({ chain, item }) => `run-stopped-sibling-${chain.id}-${item.id}`,
+			prompt: ({ item }) => JSON.stringify({ itemId: item.id }),
+			kindResolver: () => ({ ok: true, kind: "code" }),
+		}
+
+		const tick = await schedulerTick(options)
+
+		expect(tick.spawnedRuns).toHaveLength(1)
+		expect(tick.spawnedRuns[0]?.chainId).toBe(active.id)
+		expect(tick.spawnedRuns[0]?.itemId).toBe(activeItem.id)
+		expect(store.getItem(stoppedItem.id)?.status).toBe("queued")
+		expect(store.getChain(stopped.id)?.status).toBe("stopped")
+		await tick.spawnedRuns[0]!.closed
+	} finally {
+		store.close()
+	}
+})
+
 test("completed chain removes its real git worktree registration and local directory", async () => {
 	const root = resolve(TEST_ROOT, "completed-worktree-cleanup")
 	const loopDataRoot = resolve(root, "loop-data")

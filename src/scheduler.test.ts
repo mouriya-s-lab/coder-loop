@@ -764,6 +764,45 @@ describe("scheduler", () => {
 		}
 	})
 
+	test("stopped chain skipped", async () => {
+		const fixture = await createFixture("stopped-skip")
+		try {
+			const chain = createChain(fixture.store, "stopped-chain", { status: "stopped" })
+			const item = createItem(fixture.store, chain, { issueNumber: 349_001, repoCwd: "/repo/a" })
+
+			const tick = await schedulerTick(fixture.options())
+
+			expect(tick.spawnedRuns).toHaveLength(0)
+			expect(tick.completedChainIds).toEqual([])
+			expect(fixture.state.slots.size).toBe(0)
+			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
+			expect(fixture.store.getChain(chain.id)?.status).toBe("stopped")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("resumed stopped chain is schedulable again", async () => {
+		const fixture = await createFixture("stopped-resume")
+		try {
+			const chain = createChain(fixture.store, "stopped-resume-chain", { status: "stopped" })
+			const item = createItem(fixture.store, chain, { issueNumber: 349_002, repoCwd: "/repo/a" })
+
+			const stoppedTick = await schedulerTick(fixture.options())
+			expect(stoppedTick.spawnedRuns).toHaveLength(0)
+
+			fixture.store.updateChain(chain.id, { status: "active", updatedAt: 1_800_034_900 })
+			const resumedTick = await schedulerTick(fixture.options())
+
+			expect(resumedTick.spawnedRuns).toHaveLength(1)
+			expect(resumedTick.spawnedRuns[0]?.itemId).toBe(item.id)
+			expect(fixture.store.getItem(item.id)?.status).toBe("in_progress")
+			await resumedTick.spawnedRuns[0]!.closed
+		} finally {
+			fixture.store.close()
+		}
+	})
+
 	test("deleted chain skipped", async () => {
 		const fixture = await createFixture("deleted-skip")
 		try {
