@@ -1252,8 +1252,8 @@ describe("daemon", () => {
 				baseBranch: "main",
 			})).chain)
 			const chainId = numberValue(chain.id)
-			await request(fixture, "item.add", { chainId, issueNumber: 225, repoCwd: target })
-			await waitFor(async () => readChainStatus(fixture.loopDataRoot, chainId), (status) => status === "completed")
+			await request(fixture, "item.add", { chainId, issueNumber: 225, repoCwd: target, extra: { sleepMs: 5_000 } })
+			await waitFor(async () => record(expectOk(await request(fixture, "daemon.status")).daemon).activeRuns, (runs) => Array.isArray(runs) && runs.length === 1)
 
 			const storedChain = await readChain(fixture.loopDataRoot, chainId)
 			if (storedChain === null) throw new Error("expected chain record")
@@ -1278,6 +1278,45 @@ describe("daemon", () => {
 			} finally {
 				await restarted.stop()
 			}
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("socket completed chain removes scheduler worktree registration and preserves audit runtime", async () => {
+		const fixture = await startFixture("chain-complete-cleanup", { realWorktreeManager: true })
+		const target = resolve(fixture.loopDataRoot, "..", "target")
+		await initGitTarget(target)
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "complete-cleanup",
+				repository: "mouriya-s-lab/coder-loop",
+				baseBranch: "main",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			await request(fixture, "item.add", { chainId, issueNumber: 351_003, repoCwd: target })
+			await waitFor(
+				async () =>
+					fixture.schedulerEvents.find(
+						(event): event is Extract<SchedulerEvent, { type: "chain.completed" }> => event.type === "chain.completed" && event.chainId === chainId,
+					) ?? null,
+				(event) => event !== null,
+				10_000,
+			)
+
+			const storedChain = await readChain(fixture.loopDataRoot, chainId)
+			if (storedChain === null) throw new Error("expected chain record")
+			const completedItem = await readItem(fixture.loopDataRoot, chainId, 351_003)
+			if (completedItem === null || completedItem.lastRunId === null) throw new Error("expected completed item run id")
+			const paths = resolveChainRuntimePaths("complete-cleanup", { loopDataRoot: fixture.loopDataRoot })
+			const worktreePath = schedulerSlotWorktreePath(storedChain, target, { loopDataRoot: fixture.loopDataRoot })
+
+			expect(storedChain.status).toBe("completed")
+			expect(await pathExists(worktreePath)).toBe(false)
+			expect(gitOutput(target, ["worktree", "list", "--porcelain"])).not.toContain(worktreePath)
+			expect(await pathExists(paths.chainRoot)).toBe(true)
+			expect(await pathExists(paths.runsDir)).toBe(true)
+			expect(await pathExists(paths.runEventsFile(completedItem.lastRunId))).toBe(true)
 		} finally {
 			await fixture.daemon.stop()
 		}

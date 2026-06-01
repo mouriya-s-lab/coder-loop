@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
 import { appendFile, mkdir, writeFile } from "node:fs/promises"
-import { existsSync, realpathSync } from "node:fs"
+import { existsSync, realpathSync, rmSync } from "node:fs"
 import { basename, dirname, resolve } from "node:path"
 
 import {
@@ -511,6 +511,7 @@ export type SchedulerChainWorktreeCleanup = {
 	worktreePath: string
 	registered: boolean
 	removed: boolean
+	directoryRemoved: boolean
 	pruned: boolean
 	error: string | null
 }
@@ -530,6 +531,7 @@ export function cleanupSchedulerChainWorktrees(
 				worktreePath,
 				registered: false,
 				removed: false,
+				directoryRemoved: false,
 				pruned: false,
 				error: `git worktree list failed (exit ${listResult.exitCode}): ${listResult.stderr}`,
 			})
@@ -538,11 +540,21 @@ export function cleanupSchedulerChainWorktrees(
 
 		const registered = gitWorktreeListOutputIncludesPath(listResult.stdout, worktreePath)
 		let removed = false
+		let directoryRemoved = false
 		let error: string | null = null
 		if (registered && existsSync(worktreePath)) {
 			const removeResult = git(repoCwd, ["worktree", "remove", "--force", worktreePath])
 			removed = removeResult.exitCode === 0
 			if (!removed) error = `git worktree remove failed (exit ${removeResult.exitCode}): ${removeResult.stderr}`
+		}
+		if ((removed || !registered) && existsSync(worktreePath)) {
+			try {
+				rmSync(worktreePath, { recursive: true, force: true })
+				directoryRemoved = true
+			} catch (cleanupError) {
+				const directoryError = `worktree directory remove failed: ${errorMessage(cleanupError)}`
+				error = error === null ? directoryError : `${error}; ${directoryError}`
+			}
 		}
 
 		const pruneResult = git(repoCwd, ["worktree", "prune"])
@@ -552,7 +564,7 @@ export function cleanupSchedulerChainWorktrees(
 			error = error === null ? pruneError : `${error}; ${pruneError}`
 		}
 
-		cleaned.push({ repoCwd, worktreePath, registered, removed, pruned, error })
+		cleaned.push({ repoCwd, worktreePath, registered, removed, directoryRemoved, pruned, error })
 	}
 	return cleaned
 }
@@ -976,9 +988,11 @@ async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecor
 		if (!await chainCompletionTriggerAllowsCompletion(options, current, runId, effectiveTerminalStatuses)) return false
 		const refreshed = options.store.listChains().find((candidate) => candidate.id === chain.id)
 		if (refreshed?.status !== "active") return false
-		if (options.store.listItems(chain.id).length === 0) return false
+		const completionItems = options.store.listItems(chain.id)
+		if (completionItems.length === 0) return false
 		if (!allItemsTerminalIncludingFinalizing(options, chain.id, effectiveTerminalStatuses)) return false
 		const updated = options.store.updateChain(chain.id, { status: "completed", updatedAt: nowSeconds(options) })
+		cleanupSchedulerChainWorktrees(updated, completionItems.map((item) => item.repoCwd), options.loopDataRootOptions)
 		await emit(options, { type: "chain.completed", chainId: updated.id, chainName: updated.name, ...(runId === undefined ? {} : { runId }) })
 		return true
 	} finally {
@@ -1883,11 +1897,15 @@ function hasValidChainName(chainName: string): boolean {
 }
 
 function git(cwd: string, args: readonly string[]): { stdout: string; stderr: string; exitCode: number } {
-	const proc = Bun.spawnSync({ cmd: ["git", ...args], cwd, stdout: "pipe", stderr: "pipe" })
-	return {
-		stdout: new TextDecoder().decode(proc.stdout).trim(),
-		stderr: new TextDecoder().decode(proc.stderr).trim(),
-		exitCode: proc.exitCode,
+	try {
+		const proc = Bun.spawnSync({ cmd: ["git", ...args], cwd, stdout: "pipe", stderr: "pipe" })
+		return {
+			stdout: new TextDecoder().decode(proc.stdout).trim(),
+			stderr: new TextDecoder().decode(proc.stderr).trim(),
+			exitCode: proc.exitCode,
+		}
+	} catch (error) {
+		return { stdout: "", stderr: errorMessage(error), exitCode: 1 }
 	}
 }
 
