@@ -1,11 +1,14 @@
 import { afterAll, expect, test } from "bun:test"
-import { mkdir, rm, writeFile } from "node:fs/promises"
-import { resolve } from "node:path"
+import { mkdir, rm, stat, writeFile } from "node:fs/promises"
+import { dirname, resolve } from "node:path"
 
 import {
+	createGitWorktreeManager,
 	createSchedulerState,
+	reviewOnEmptyLockPathForChainName,
 	schedulerSlotWorktreePath,
 	schedulerTick,
+	serializeSchedulerReviewOnEmptyLock,
 	type SchedulerEvent,
 	type SchedulerOptions,
 	type SchedulerWorktreeManager,
@@ -108,6 +111,92 @@ process.exit(1)
 			failureCount: spawnCount,
 			nextRunAt: 1_800_040_031,
 		})
+	} finally {
+		store.close()
+	}
+})
+
+test("completed chain removes its real git worktree registration and local directory", async () => {
+	const root = resolve(TEST_ROOT, "completed-worktree-cleanup")
+	const loopDataRoot = resolve(root, "loop-data")
+	const target = resolve(root, "target")
+	const fakeRunner = resolve(root, "complete-runner.ts")
+	await mkdir(loopDataRoot, { recursive: true })
+	await initGitTarget(target)
+	await writeFile(
+		fakeRunner,
+		`import { openSqliteStateStore } from ${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))}
+
+const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
+const input = JSON.parse(prompt)
+const loopDataRoot = process.env.CODER_LOOP_DATA_DIR
+if (typeof loopDataRoot === "string" && typeof input.itemId === "number") {
+	const store = openSqliteStateStore({ loopDataRoot })
+	store.updateItem(input.itemId, { status: "done", updatedAt: Math.floor(Date.now() / 1000) })
+	store.close()
+}
+console.log("done:" + input.itemId)
+`,
+	)
+
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = store.createChain({
+			name: "completed-worktree-cleanup-chain",
+			preset: "gh-issue-pr-iteration",
+			repository: "mouriya-s-lab/coder-loop",
+			baseBranch: "main",
+			status: "active",
+			metadata: {},
+		})
+		const item = store.createItem({
+			chainId: chain.id,
+			issueNumber: 351_002,
+			repoCwd: target,
+			status: "queued",
+			attempts: 0,
+			extra: { issueKind: "code" },
+		})
+		const lockPath = reviewOnEmptyLockPathForChainName(chain.name, { loopDataRoot })
+		await mkdir(dirname(lockPath), { recursive: true })
+		await writeFile(lockPath, serializeSchedulerReviewOnEmptyLock("test-pre-installed", new Date(0)))
+
+		const state = createSchedulerState()
+		const schedulerEvents: SchedulerEvent[] = []
+		const options: SchedulerOptions = {
+			store,
+			state,
+			presetDir: resolve(REPO_ROOT, "presets/gh-issue-pr-iteration"),
+			runner: {
+				kind: "claude",
+				source: "iteration-default",
+				binary: "bun",
+				extraArgs: [fakeRunner],
+				model: null,
+			},
+			worktreeManager: createGitWorktreeManager({ loopDataRoot }),
+			loopDataRootOptions: { loopDataRoot },
+			runIdFactory: ({ item: selected }) => `run-complete-cleanup-${selected.id}`,
+			prompt: ({ item: selected }) => JSON.stringify({ itemId: selected.id, issueNumber: selected.issueNumber }),
+			kindResolver: () => ({ ok: true, kind: "code" }),
+			onEvent: (event) => {
+				schedulerEvents.push(event)
+			},
+		}
+
+		const tick = await schedulerTick(options)
+		expect(tick.spawnedRuns).toHaveLength(1)
+		await tick.spawnedRuns[0]!.closed
+
+		const completed = store.getChain(chain.id)
+		if (completed === null) throw new Error("expected completed chain")
+		const worktreePath = schedulerSlotWorktreePath(completed, target, { loopDataRoot })
+		expect(store.getItem(item.id)?.status).toBe("done")
+		expect(completed.status).toBe("completed")
+		expect(schedulerEvents).toContainEqual(expect.objectContaining({ type: "chain.completed", chainId: chain.id }))
+		expect(await pathExists(worktreePath)).toBe(false)
+		expect(gitOutput(target, ["worktree", "list", "--porcelain"])).not.toContain(worktreePath)
 	} finally {
 		store.close()
 	}
@@ -221,3 +310,32 @@ console.log(input.phase + ":" + status)
 		store.close()
 	}
 })
+
+async function pathExists(path: string): Promise<boolean> {
+	try {
+		await stat(path)
+		return true
+	} catch {
+		return false
+	}
+}
+
+async function initGitTarget(path: string): Promise<void> {
+	await mkdir(path, { recursive: true })
+	gitOutput(path, ["init", "-q"])
+	gitOutput(path, ["config", "user.email", "test@example.invalid"])
+	gitOutput(path, ["config", "user.name", "Test User"])
+	await writeFile(resolve(path, "README.md"), "test\n")
+	gitOutput(path, ["add", "README.md"])
+	gitOutput(path, ["commit", "-qm", "init"])
+}
+
+function gitOutput(cwd: string, args: readonly string[]): string {
+	const proc = Bun.spawnSync({ cmd: ["git", ...args], cwd, stdout: "pipe", stderr: "pipe" })
+	const stdout = new TextDecoder().decode(proc.stdout).trim()
+	if (proc.exitCode !== 0) {
+		const stderr = new TextDecoder().decode(proc.stderr).trim()
+		throw new Error(`git ${args.join(" ")} failed in ${cwd} (exit ${proc.exitCode}): ${stderr}`)
+	}
+	return stdout
+}

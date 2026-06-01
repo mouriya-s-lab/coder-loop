@@ -4,6 +4,8 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
 
 import {
+	cleanupSchedulerChainWorktrees,
+	createGitWorktreeManager,
 	createSchedulerState,
 	listActiveRuns,
 	makeRunId,
@@ -183,6 +185,43 @@ describe("scheduler", () => {
 
 			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
 			expect(fixture.schedulerEvents.some((event) => event.type === "chain.completed" && event.chainId === chain.id)).toBe(true)
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("completed chain worktree cleanup is idempotent after prior removal", async () => {
+		const fixture = await createFixture("completion-cleanup-idempotent")
+		const target = resolve(fixture.loopDataRoot, "..", "target")
+		await initGitTarget(target)
+		try {
+			const chain = createChain(fixture.store, "completion-cleanup-idempotent-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
+			createItem(fixture.store, chain, { issueNumber: 351_001, repoCwd: target })
+
+			await runSchedulerUntilIdle(fixture.options({
+				worktreeManager: createGitWorktreeManager({ loopDataRoot: fixture.loopDataRoot }),
+			}))
+
+			const completed = fixture.store.getChain(chain.id)
+			if (completed === null) throw new Error("expected completed chain")
+			const worktreePath = schedulerSlotWorktreePath(completed, target, { loopDataRoot: fixture.loopDataRoot })
+			expect(completed.status).toBe("completed")
+			expect(existsSync(worktreePath)).toBe(false)
+			expect(gitOutput(target, ["worktree", "list", "--porcelain"])).not.toContain(worktreePath)
+
+			const repeated = cleanupSchedulerChainWorktrees(completed, [target], { loopDataRoot: fixture.loopDataRoot })
+			expect(repeated).toHaveLength(1)
+			expect(repeated[0]).toMatchObject({
+				repoCwd: target,
+				worktreePath,
+				registered: false,
+				removed: false,
+				pruned: true,
+				error: null,
+			})
+			expect(existsSync(worktreePath)).toBe(false)
+			expect(gitOutput(target, ["worktree", "list", "--porcelain"])).not.toContain(worktreePath)
 		} finally {
 			fixture.store.close()
 		}
@@ -3134,6 +3173,26 @@ exit 0
 `,
 	)
 	await chmod(path, 0o755)
+}
+
+async function initGitTarget(path: string): Promise<void> {
+	await mkdir(path, { recursive: true })
+	gitOutput(path, ["init", "-q"])
+	gitOutput(path, ["config", "user.email", "test@example.invalid"])
+	gitOutput(path, ["config", "user.name", "Test User"])
+	await writeFile(resolve(path, "README.md"), "test\n")
+	gitOutput(path, ["add", "README.md"])
+	gitOutput(path, ["commit", "-qm", "init"])
+}
+
+function gitOutput(cwd: string, args: readonly string[]): string {
+	const proc = Bun.spawnSync({ cmd: ["git", ...args], cwd, stdout: "pipe", stderr: "pipe" })
+	const stdout = new TextDecoder().decode(proc.stdout).trim()
+	if (proc.exitCode !== 0) {
+		const stderr = new TextDecoder().decode(proc.stderr).trim()
+		throw new Error(`git ${args.join(" ")} failed in ${cwd} (exit ${proc.exitCode}): ${stderr}`)
+	}
+	return stdout
 }
 
 type Fixture = {
