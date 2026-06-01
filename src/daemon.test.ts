@@ -1191,6 +1191,56 @@ describe("daemon", () => {
 		}
 	})
 
+	test("socket completed chain remains read-only for item mutations", async () => {
+		const fixture = await startFixture("completed-chain-read-only")
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "read-only-completed-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			const added = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 228,
+				repoCwd: REPO_ROOT,
+				title: "complete me",
+			})).item)
+			const itemId = numberValue(added.id)
+
+			expectOk(await request(fixture, "item.update", { itemId, status: "done" }))
+			await waitFor(async () => readChainStatus(fixture.loopDataRoot, chainId), (status) => status === "completed")
+
+			expectChainNotActive(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 229,
+				repoCwd: REPO_ROOT,
+			}), "completed", "item.add")
+			expectChainNotActive(await request(fixture, "item.batchAdd", {
+				chainId,
+				items: [
+					{ issueNumber: 230, repoCwd: REPO_ROOT },
+					{ issueNumber: 231, repoCwd: REPO_ROOT },
+				],
+			}), "completed", "item.batchAdd")
+			expectChainNotActive(await request(fixture, "item.update", { itemId, title: "mutated after completion" }), "completed", "item.update")
+			expectChainNotActive(await request(fixture, "item.reorder", { itemId, position: 0 }), "completed", "item.reorder")
+
+			const listed = expectOk(await request(fixture, "item.list", { chainId })).items
+			expect(Array.isArray(listed)).toBe(true)
+			if (!Array.isArray(listed)) throw new Error("expected item list array")
+			expect(listed).toHaveLength(1)
+			expect(record(listed[0])).toMatchObject({
+				id: itemId,
+				issueNumber: 228,
+				status: "done",
+				title: "complete me",
+			})
+			expect(record(expectOk(await request(fixture, "chain.status", { chainId })).chain).status).toBe("completed")
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("socket chain.delete removes scheduler worktree registration and chain runtime layout", async () => {
 		const fixture = await startFixture("chain-delete-cleanup", { realWorktreeManager: true })
 		const target = resolve(fixture.loopDataRoot, "..", "target")
@@ -2627,6 +2677,22 @@ function expectInvalid(response: DaemonResponse): void {
 function expectChainDeleted(response: DaemonResponse): void {
 	expect(response.ok).toBe(false)
 	if (!response.ok) expect(response.error.code).toBe("chain_deleted")
+}
+
+function expectChainNotActive(response: DaemonResponse, status: string, operation: string): void {
+	expect(response.ok).toBe(false)
+	if (!response.ok) {
+		expect(response.error.code).toBe("chain_not_active")
+		expect(response.error.message).toContain(operation)
+		expect(response.error.message).toContain("non-active chain")
+		expect(response.error.message).toContain("create a new chain")
+		if (response.error.details === undefined) throw new Error("expected chain_not_active details")
+		expect(record(response.error.details)).toMatchObject({
+			status,
+			requiredStatus: "active",
+			nextStep: "create_new_chain",
+		})
+	}
 }
 
 function expectConflict(response: DaemonResponse): void {

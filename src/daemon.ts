@@ -1975,11 +1975,18 @@ function itemToJson(item: ItemRecord, dependencyWait?: DependencyWaitReason | nu
 }
 
 function assertChainAllowsItemMutation(chain: ChainRecord, operation: string): void {
-	if (chain.status !== "deleted") return
-	throw new DaemonError("chain_deleted", `${operation} cannot mutate deleted chain ${chain.name}`, {
+	if (chain.status === "active") return
+	if (chain.status === "deleted") throw new DaemonError("chain_deleted", `${operation} cannot mutate deleted chain ${chain.name}`, {
 		chainId: chain.id,
 		chainName: chain.name,
 		status: chain.status,
+	})
+	throw new DaemonError("chain_not_active", `${operation} cannot mutate non-active chain ${chain.name} with status ${chain.status}; create a new chain for new work`, {
+		chainId: chain.id,
+		chainName: chain.name,
+		status: chain.status,
+		requiredStatus: "active",
+		nextStep: "create_new_chain",
 	})
 }
 
