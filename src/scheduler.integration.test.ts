@@ -104,12 +104,12 @@ process.exit(1)
 		}
 
 		const updated = store.getItem(item.id)
-		expect(spawnCount).toBeLessThanOrEqual(5)
+		expect(spawnCount).toBe(1)
 		expect(schedulerEvents.filter((event) => event.type === "agent.spawn" && event.itemId === item.id)).toHaveLength(spawnCount)
 		expect(updated?.attempts).toBe(spawnCount)
 		expect(updated?.extra.schedulerBackoff).toMatchObject({
 			failureCount: spawnCount,
-			nextRunAt: 1_800_040_031,
+			nextRunAt: 1_800_040_060,
 		})
 	} finally {
 		store.close()

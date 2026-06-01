@@ -7,6 +7,7 @@ import {
 	cleanupSchedulerChainWorktrees,
 	createGitWorktreeManager,
 	createSchedulerState,
+	DEFAULT_MAX_ITEM_ATTEMPTS,
 	listActiveRuns,
 	makeRunId,
 	renderSchedulerSpawnPrompt,
@@ -476,7 +477,40 @@ describe("scheduler", () => {
 		}
 	})
 
-	test("maxItemAttempts exhausts a continuable item before spawning and emits queue.terminal", async () => {
+	test("default maxItemAttempts exhausts a continuable item at ten attempts before spawning", async () => {
+		const fixture = await createFixture("default-max-item-attempts-exhaust")
+		try {
+			expect(DEFAULT_MAX_ITEM_ATTEMPTS).toBe(10)
+			const chain = createChain(fixture.store, "default-max-item-attempts-exhaust-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
+			const item = createItem(fixture.store, chain, { issueNumber: 7008, repoCwd: "/repo/a" })
+			fixture.store.updateItem(item.id, {
+				status: "changes_requested",
+				attempts: DEFAULT_MAX_ITEM_ATTEMPTS,
+				lastRunId: "run-prior-default-failure",
+				extra: { ...item.extra, schedulerBackoff: { failureCount: DEFAULT_MAX_ITEM_ATTEMPTS, nextRunAt: 1_800_000_000 } },
+				updatedAt: 1_800_000_500,
+			})
+
+			const tick = await schedulerTick(fixture.options())
+
+			expect(tick.spawnedRuns).toHaveLength(0)
+			expect(tick.completedChainIds).toEqual([chain.id])
+			const exhausted = fixture.store.getItem(item.id)
+			expect(exhausted?.status).toBe("exhausted")
+			expect(exhausted?.extra.schedulerBackoff).toBeUndefined()
+			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({
+				type: "queue.terminal",
+				itemId: item.id,
+				runId: "run-prior-default-failure",
+				terminalStatus: "exhausted",
+			}))
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("maxItemAttempts metadata override exhausts a continuable item before spawning and emits queue.terminal", async () => {
 		const fixture = await createFixture("max-item-attempts-exhaust")
 		try {
 			const chain = createChain(fixture.store, "max-item-attempts-exhaust-chain", {
@@ -535,7 +569,7 @@ describe("scheduler", () => {
 			await firstTick.spawnedRuns[0]!.closed
 			expect(fixture.store.getItem(failing.id)?.extra.schedulerBackoff).toEqual({
 				failureCount: 1,
-				nextRunAt: now + 1,
+				nextRunAt: now + 60,
 			})
 
 			const secondTick = await schedulerTick(options)
@@ -567,7 +601,7 @@ describe("scheduler", () => {
 			await firstTick.spawnedRuns[0]!.closed
 			expect(fixture.store.getItem(item.id)?.extra.schedulerBackoff).toMatchObject({
 				failureCount: 1,
-				nextRunAt: now + 1,
+				nextRunAt: now + 60,
 			})
 
 			const restartedState = createSchedulerState()
@@ -579,21 +613,90 @@ describe("scheduler", () => {
 			const heldTick = await schedulerTick(restartedOptions)
 			expect(heldTick.spawnedRuns).toHaveLength(0)
 
-			now += 1
+			now += 60
 			const retryTick = await schedulerTick(restartedOptions)
 			expect(retryTick.spawnedRuns).toHaveLength(1)
 			expect(retryTick.spawnedRuns[0]?.itemId).toBe(item.id)
 			await retryTick.spawnedRuns[0]!.closed
 			expect(fixture.store.getItem(item.id)?.extra.schedulerBackoff).toMatchObject({
 				failureCount: 2,
-				nextRunAt: now + 2,
+				nextRunAt: now + 120,
 			})
 		} finally {
 			fixture.store.close()
 		}
 	})
 
-	test("forced failure fixture does not spin at 1Hz: thirty seconds spawn at most five runs", async () => {
+	test("failed-spawn default backoff sequence is 60, 120, 240, 480, then capped at 480 seconds", async () => {
+		const fixture = await createFixture("failure-backoff-default-sequence")
+		try {
+			let now = 1_800_025_000
+			const chain = createChain(fixture.store, "failure-backoff-default-sequence-chain")
+			const item = createItem(fixture.store, chain, {
+				issueNumber: 7009,
+				repoCwd: "/repo/a",
+				exitCode: 1,
+				summary: null,
+			})
+			const options = fixture.options({
+				now: () => now,
+				runIdFactory: ({ item: selected }) => `run-default-backoff-${selected.id}-${now}`,
+			})
+			const expectedDelays = [60, 120, 240, 480, 480]
+
+			for (const [index, expectedDelay] of expectedDelays.entries()) {
+				const tick = await schedulerTick(options)
+				expect(tick.spawnedRuns).toHaveLength(1)
+				expect(tick.spawnedRuns[0]?.itemId).toBe(item.id)
+				await tick.spawnedRuns[0]!.closed
+				expect(fixture.store.getItem(item.id)?.extra.schedulerBackoff).toMatchObject({
+					failureCount: index + 1,
+					nextRunAt: now + expectedDelay,
+				})
+				now += expectedDelay
+			}
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("failed-spawn backoff option override preserves a custom cadence", async () => {
+		const fixture = await createFixture("failure-backoff-option-override")
+		try {
+			let now = 1_800_026_000
+			const chain = createChain(fixture.store, "failure-backoff-option-override-chain")
+			const item = createItem(fixture.store, chain, {
+				issueNumber: 7010,
+				repoCwd: "/repo/a",
+				exitCode: 1,
+				summary: null,
+			})
+			const options = fixture.options({
+				now: () => now,
+				runIdFactory: ({ item: selected }) => `run-option-backoff-${selected.id}-${now}`,
+				spawnFailureBackoff: { initialSeconds: 5, maxSeconds: 8 },
+			})
+
+			const firstTick = await schedulerTick(options)
+			await firstTick.spawnedRuns[0]!.closed
+			expect(fixture.store.getItem(item.id)?.extra.schedulerBackoff).toMatchObject({
+				failureCount: 1,
+				nextRunAt: now + 5,
+			})
+
+			now += 5
+			const secondTick = await schedulerTick(options)
+			await secondTick.spawnedRuns[0]!.closed
+			expect(fixture.store.getItem(item.id)?.extra.schedulerBackoff).toMatchObject({
+				failureCount: 2,
+				nextRunAt: now + 8,
+			})
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("forced failure fixture does not spin at 1Hz: thirty seconds spawn once before sixty-second backoff", async () => {
 		const fixture = await createFixture("failure-backoff-30s")
 		try {
 			let now = 1_800_030_000
@@ -619,11 +722,11 @@ describe("scheduler", () => {
 				await Promise.all(tick.spawnedRuns.map((run) => run.closed))
 			}
 
-			expect(spawnCount).toBeLessThanOrEqual(5)
+			expect(spawnCount).toBe(1)
 			expect(fixture.store.getItem(item.id)?.attempts).toBe(spawnCount)
 			expect(fixture.store.getItem(item.id)?.extra.schedulerBackoff).toMatchObject({
 				failureCount: spawnCount,
-				nextRunAt: 1_800_030_031,
+				nextRunAt: 1_800_030_060,
 			})
 		} finally {
 			fixture.store.close()
@@ -2915,6 +3018,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner, attemptFile], model: null },
 				runIdFactory: ({ chain, item }) => `run-${chain.id}-${item.id}-${++runSequence}`,
 				now: () => now,
+				spawnFailureBackoff: { initialSeconds: 1, maxSeconds: 2 },
 			})
 
 			const firstTick = await schedulerTick(options)

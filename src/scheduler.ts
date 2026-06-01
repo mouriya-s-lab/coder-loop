@@ -204,7 +204,7 @@ export type SchedulerChainStatuses = {
 	entry: string
 }
 
-export const DEFAULT_MAX_ITEM_ATTEMPTS = 50
+export const DEFAULT_MAX_ITEM_ATTEMPTS = 10
 export const SCHEDULER_EXHAUSTED_STATUS = "exhausted"
 
 export type SchedulerTickResult = {
@@ -220,7 +220,7 @@ const DEFAULT_ENTRY_STATUS = "queued"
 const CHAIN_COMPLETE_TRIGGER_STATE_METADATA_KEY = "coderLoopChainCompleteTrigger"
 const MAX_ITEM_ATTEMPTS_METADATA_KEY = "maxItemAttempts"
 const SCHEDULER_BACKOFF_EXTRA_KEY = "schedulerBackoff"
-const DEFAULT_SPAWN_FAILURE_BACKOFF: SchedulerSpawnFailureBackoffConfig = { initialSeconds: 1, maxSeconds: 300 }
+const DEFAULT_SPAWN_FAILURE_BACKOFF: SchedulerSpawnFailureBackoffConfig = { initialSeconds: 60, maxSeconds: 480 }
 const REVIEW_ON_EMPTY_LOCK_FILENAME = "review-on-empty.lock"
 const REVIEW_ON_EMPTY_LOCK_REASON = "chain-queue-drained"
 const REVIEW_ON_EMPTY_FALLBACK_ITEM_ID = 0

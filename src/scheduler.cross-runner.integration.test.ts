@@ -181,7 +181,10 @@ test("invalid review session id clears only review/claude and the next review sp
 		const chain = createChain(fixture.store, "cross-runner-invalid-session-chain")
 		await preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 		const item = createItem(fixture.store, chain, 316_003)
-		const options = fixture.options({ now: () => now })
+		const options = fixture.options({
+			now: () => now,
+			spawnFailureBackoff: { initialSeconds: 1, maxSeconds: 2 },
+		})
 
 		await closeOnlySpawn(await schedulerTick(options))
 		fixture.store.setItemSessionId(item.id, {
@@ -243,7 +246,10 @@ test("continuous fake runner failures exhaust at maxItemAttempts without another
 		})
 		await preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 		const item = createItem(fixture.store, chain, 316_004)
-		const options = fixture.options({ now: () => now })
+		const options = fixture.options({
+			now: () => now,
+			spawnFailureBackoff: { initialSeconds: 1, maxSeconds: 2 },
+		})
 
 		const firstTick = await schedulerTick(options)
 		expect(firstTick.spawnedRuns).toHaveLength(1)
