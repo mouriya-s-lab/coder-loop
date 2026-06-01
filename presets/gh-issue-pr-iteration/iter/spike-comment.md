@@ -10,7 +10,7 @@ For a `kind:comment` issue (spike / design question / open dialogue), the delive
 
 ## Hard constraints
 
-- The `Write` and `Edit` tools may only touch `{{CURRENT_ISSUE_FILE}}` (handoff) and files under `{{EVIDENCE_DIR}}`. Do NOT Write to any source code, preset, fragment, test, or app file. The deliverable 是 issue comment + sub-issue 列表，不得 Write 代码文件.
+- The `Write` and `Edit` tools may only touch `{{SHARED_CONTEXT_FILE}}` (chain handoff), an existing optional `{{CURRENT_ISSUE_FILE}}`, and files under `{{EVIDENCE_DIR}}`. Do NOT Write to any source code, preset, fragment, test, or app file. The deliverable 是 issue comment + sub-issue 列表，不得 Write 代码文件.
 - Do NOT create branches, commits, or pull requests.
 - Do NOT edit the issue body. Produce a new comment via `gh issue comment`.
 - Do NOT actually file the proposed sub-issues — propose them in the comment so the operator can approve. Sub-issue creation belongs to the review action layer.

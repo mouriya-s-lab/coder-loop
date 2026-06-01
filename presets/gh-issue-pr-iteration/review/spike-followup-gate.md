@@ -17,7 +17,7 @@ This gate exists because spike issues' value is in the follow-up they unlock. A 
 
 - Live issue body: `gh issue view {{ISSUE}} -R {{REPO}} --json body,comments`. Re-fetch every time; do not trust the iter trace's snapshot.
 - Latest issue comments: same call, `comments` field. The iter-posted comment is the most recent comment authored by the iter agent.
-- Iter handoff at `{{CURRENT_ISSUE_FILE}}` for the proposed sub-issue list and the iter agent's stated comment URL.
+- Iter handoff at `{{SHARED_CONTEXT_FILE}}` for the proposed sub-issue list and the iter agent's stated comment URL, plus optional issue-local details at `{{CURRENT_ISSUE_FILE}}` when that path is non-empty and exists.
 
 ## Procedure
 

@@ -2,7 +2,7 @@ import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
 import { appendFile, mkdir, writeFile } from "node:fs/promises"
 import { existsSync, realpathSync, rmSync } from "node:fs"
-import { basename, dirname, resolve } from "node:path"
+import { basename, dirname, isAbsolute, resolve } from "node:path"
 
 import {
 	buildConfigBindings,
@@ -1647,8 +1647,8 @@ export function buildSchedulerResolveContext(input: {
 	runner?: AgentRunnerKind
 }): ResolveContext {
 	const chainPaths = resolveChainRuntimePaths(input.chain.name, input.loopDataRootOptions)
-	const evidenceDir = resolveItemEvidenceDir(input.item, chainPaths.issueEvidenceDir(input.item.issueNumber))
-	const currentIssueFile = resolveItemIssueFile(input.item, chainPaths.issueFile(input.item.issueNumber))
+	const evidenceDir = resolveItemEvidenceDir(input.item, chainPaths.chainRoot, chainPaths.issueEvidenceDir(input.item.issueNumber))
+	const currentIssueFile = resolveOptionalItemIssueFile(input.item, chainPaths.chainRoot)
 	const resume = input.resume ?? (input.runner === undefined ? freshResume() : resumeDecisionForItem(input.item, input.phase.name, input.runner))
 	const resumedSessionId = resume.kind === "resume" ? resume.sessionId : ""
 	const runtime: RuntimeBindings = {
@@ -1683,14 +1683,18 @@ export function buildSchedulerResolveContext(input: {
 	return { item: input.item, config, runtime }
 }
 
-function resolveItemEvidenceDir(item: ItemRecord, fallback: string): string {
+function resolveItemEvidenceDir(item: ItemRecord, chainRoot: string, fallback: string): string {
 	if (item.evidenceDir === null || item.evidenceDir === "") return fallback
-	return item.evidenceDir
+	return resolveItemRuntimePath(chainRoot, item.evidenceDir)
 }
 
-function resolveItemIssueFile(item: ItemRecord, fallback: string): string {
-	if (item.issueFile === null || item.issueFile === "") return fallback
-	return item.issueFile
+function resolveOptionalItemIssueFile(item: ItemRecord, chainRoot: string): string {
+	if (item.issueFile === null || item.issueFile === "") return ""
+	return resolveItemRuntimePath(chainRoot, item.issueFile)
+}
+
+function resolveItemRuntimePath(chainRoot: string, path: string): string {
+	return isAbsolute(path) ? path : resolve(chainRoot, path)
 }
 
 function resolveRepoWorkflowPath(repoCwd: string): string {

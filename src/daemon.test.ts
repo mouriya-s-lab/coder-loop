@@ -110,6 +110,9 @@ describe("daemon", () => {
 				status: "active",
 				metadata: { runner: "codex" },
 			})
+			const paths = resolveChainRuntimePaths("central-state", { loopDataRoot: fixture.loopDataRoot })
+			await expect(Bun.file(paths.sharedFile).exists()).resolves.toBe(true)
+			await expect(readFile(paths.sharedFile, "utf-8")).resolves.toBe("# Shared durable context\n\n")
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -487,6 +490,40 @@ describe("daemon", () => {
 			expect(Array.isArray(listed)).toBe(true)
 			expect(listed).toHaveLength(2)
 			expect(await pathExists(resolveChainRuntimePaths("valid-chain", { loopDataRoot }).sharedFile)).toBe(true)
+		} finally {
+			await daemon.stop()
+		}
+	})
+
+	test("daemon startup repairs missing chain shared handoff file", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-repair-shared-handoff`)
+		const loopDataRoot = resolve(root, "ld")
+		await mkdir(loopDataRoot, { recursive: true })
+		const store = openSqliteStateStore({ loopDataRoot })
+		try {
+			store.createChain({
+				name: "repair-shared-handoff",
+				preset: "gh-issue-pr-iteration",
+				repository: "mouriya-s-lab/coder-loop",
+				baseBranch: "main",
+				status: "active",
+				metadata: {},
+			})
+		} finally {
+			store.close()
+		}
+
+		const paths = resolveChainRuntimePaths("repair-shared-handoff", { loopDataRoot })
+		await mkdir(paths.issuesDir, { recursive: true })
+		await mkdir(paths.evidenceDir, { recursive: true })
+		await mkdir(paths.runsDir, { recursive: true })
+		await rm(paths.sharedFile, { force: true })
+
+		const daemon = await startCoderLoopDaemon({ loopDataRoot, shutdownGraceMs: 100, scheduler: { enabled: false } })
+		try {
+			expect(daemon.snapshot().running).toBe(true)
+			await expect(Bun.file(paths.sharedFile).exists()).resolves.toBe(true)
+			await expect(readFile(paths.sharedFile, "utf-8")).resolves.toBe("# Shared durable context\n\n")
 		} finally {
 			await daemon.stop()
 		}

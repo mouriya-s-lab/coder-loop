@@ -93,8 +93,8 @@ large feature:
      "branch": null,
      "pr": null,
      "lastRunId": null,
-     "issueFile": ".coder-loop/runtime/issues/<issue-number>.md",
-     "evidenceDir": ".coder-loop/runtime/evidence/issue-<issue-number>",
+     "issueFile": null,
+     "evidenceDir": "evidence/issue-<issue-number>",
      "agentCwd": null,
      "runner": "codex"
    }

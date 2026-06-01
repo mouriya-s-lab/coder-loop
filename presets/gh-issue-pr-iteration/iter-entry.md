@@ -15,9 +15,9 @@ You are spawned by the orchestrator via `claude -p` to execute exactly one itera
 - Current issue: `#{{ISSUE}}`
 - Run ID: `{{RUN_ID}}`
 - Workflow file: `{{WORKFLOW_FILE}}`
-- Shared context file: `{{SHARED_CONTEXT_FILE}}`
+- Chain handoff/shared file: `{{SHARED_CONTEXT_FILE}}`
 - State file: the central state DB
-- Current issue handoff file: `{{CURRENT_ISSUE_FILE}}`
+- Optional per-issue handoff file: `{{CURRENT_ISSUE_FILE}}`
 - Evidence directory: `{{EVIDENCE_DIR}}`
 - Evidence root directory: `{{EVIDENCE_ROOT_DIR}}`
 - Log directory: `{{LOG_DIR}}`

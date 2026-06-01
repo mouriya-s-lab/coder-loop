@@ -6,19 +6,21 @@ Collect the selected issue context before making implementation decisions.
 
 ## Inputs
 
-Use the concrete runtime values from the entry prompt: target working directory (where state / issues / evidence live), agent working directory (your `cwd`; equals target for in-repo work, points at a different repo's checkout for cross-repo iteration), repository, base branch, current issue, run ID, workflow file, shared context file, state file, current issue handoff, evidence directory, branch/PR fields, queue status, previous run ID, run-ID generation, and resumed-from phase.
+Use the concrete runtime values from the entry prompt: target working directory (where state / issues / evidence live), agent working directory (your `cwd`; equals target for in-repo work, points at a different repo's checkout for cross-repo iteration), repository, base branch, current issue, run ID, workflow file, chain handoff/shared file, state file, optional per-issue handoff file, evidence directory, branch/PR fields, queue status, previous run ID, run-ID generation, and resumed-from phase.
 
 ## Procedure
 
 Read in order:
 
 1. workflow file;
-2. shared context file;
+2. chain handoff/shared file;
 3. state file and confirm the selected issue matches the entry prompt;
-4. current issue handoff file;
+4. optional per-issue handoff file if `CURRENT_ISSUE_FILE` is non-empty and exists;
 5. target repo `CLAUDE.md` as project reference;
 6. live GitHub issue state;
 7. linked/open PR state.
+
+`SHARED_CONTEXT_FILE` is the primary chain-level handoff/shared file and is daemon-owned. `CURRENT_ISSUE_FILE` is an optional issue-local attachment; if it is empty or missing, record that fact in the trace and continue from the chain handoff plus live GitHub issue state. Do not classify a missing per-issue handoff as infrastructure failure.
 
 Use commands shaped like:
 

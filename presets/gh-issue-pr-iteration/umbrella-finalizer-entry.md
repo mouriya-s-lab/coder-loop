@@ -16,7 +16,7 @@ Do exactly one umbrella finalizer pass. Do not loop.
 - Base branch: `{{BASE_BRANCH}}`
 - Run ID: `{{RUN_ID}}`
 - Workflow file: `{{WORKFLOW_FILE}}`
-- Shared context file: `{{SHARED_CONTEXT_FILE}}`
+- Chain handoff/shared file: `{{SHARED_CONTEXT_FILE}}`
 - Issue handoff directory: `{{ISSUE_DIR}}`
 - Evidence root directory: `{{EVIDENCE_ROOT_DIR}}`
 - Log directory: `{{LOG_DIR}}`
@@ -35,7 +35,7 @@ This finalizer does not replace per-issue PR review gates. A child issue is comp
 
 1. Read `{{PROMPT_ROOT}}/common/runtime-contract.md`, `{{PROMPT_ROOT}}/common/github-routing.md`, and `{{PROMPT_ROOT}}/common/state-contract.md`.
 2. Read `{{WORKFLOW_FILE}}` and `{{SHARED_CONTEXT_FILE}}`.
-3. Use `coder-loop status {{TARGET_CWD}} --json` and local runtime paths to identify the current chain, its umbrella metadata, queue items, issue handoffs, evidence directories, and logs.
+3. Use `coder-loop status {{TARGET_CWD}} --json` and local runtime paths to identify the current chain, its umbrella metadata, queue items, chain handoff/shared file, optional issue handoff attachments, evidence directories, and logs.
 4. Read the live GitHub umbrella issue, every sub-issue, every candidate closing PR, relevant comments, reviews, and timeline entries. Use `gh` for GitHub metadata/comments; do not use `gh` or raw URLs to read source code bytes.
 
 ## Assessment rules

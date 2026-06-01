@@ -40,7 +40,11 @@ async function makeDoctorTarget(): Promise<string> {
 	const loopDataRoot = resolve(dir, "loop-data")
 	await mkdir(resolve(dir, ".coder-loop"), { recursive: true })
 	await mkdir(loopDataRoot, { recursive: true })
+	await mkdir(resolve(loopDataRoot, "chains", "doctor-chain", "issues"), { recursive: true })
+	await mkdir(resolve(loopDataRoot, "chains", "doctor-chain", "evidence"), { recursive: true })
+	await mkdir(resolve(loopDataRoot, "chains", "doctor-chain", "runs"), { recursive: true })
 	await writeFile(resolve(dir, ".coder-loop/workflow.md"), "# placeholder workflow\n")
+	await writeFile(resolve(loopDataRoot, "chains", "doctor-chain", "shared.md"), "# Shared durable context\n\n")
 	const store = openSqliteStateStore({ loopDataRoot })
 	try {
 		const chain = store.createChain({

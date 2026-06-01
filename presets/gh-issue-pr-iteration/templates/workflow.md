@@ -20,8 +20,8 @@ requirements may all differ.
 ## Source of truth
 
 - Queue/order/state: `central SQLite state DB`
-- Current issue handoff: `loop-data/chains/<chain>/issues/<issue>.md`
-- Shared durable facts: `loop-data/chains/<chain>/shared.md`
+- Chain handoff/shared context: `loop-data/chains/<chain>/shared.md`
+- Optional per-issue handoff attachments: `loop-data/chains/<chain>/issues/<issue>.md`
 - Runtime evidence/logs: `loop-data/chains/<chain>/evidence/` and `loop-data/chains/<chain>/runs/`
 - Live GitHub issue/PR state verifies reality.
 - `CLAUDE.md` is project reference only. It is not the loop workflow.

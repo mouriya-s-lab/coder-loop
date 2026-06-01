@@ -60,7 +60,8 @@ Content the statement must convey, in whatever form (prose / list / table) you j
 
 Where to write the intent statement:
 
-- Always append it to the current issue handoff file (`{{CURRENT_ISSUE_FILE}}`) under a clearly labeled `Intent (run {{RUN_ID}})` heading. This is the durable surface review reads regardless of PR state.
+- Always append it to the chain handoff/shared file (`{{SHARED_CONTEXT_FILE}}`) under a clearly labeled `Intent (run {{RUN_ID}})` heading. This is the durable surface review reads regardless of PR state.
+- If `{{CURRENT_ISSUE_FILE}}` is non-empty and already exists, you may also append issue-local details there. Do not create a per-issue handoff file only to satisfy this step.
 - If no PR exists yet and you will create one this iteration, the intent statement also belongs in the PR body as its opening section — review reads this as the cover letter.
 - If a PR already exists (retry / resumed), the intent statement for this iteration belongs in a new PR thread comment. Do not rewrite the original PR body to update intent; PR body is immutable once posted.
 

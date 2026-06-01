@@ -2,7 +2,7 @@
 
 ## Goal
 
-Initialize the executable planning output through the current centralized chain/item contract. Create or select a chain with `coder-loop chain ...`, add actionable issues with `coder-loop item batch-add` (or repeated `coder-loop item add` only when batch input is unavailable), write per-issue handoff files under the chain runtime `issues` directory, and validate with `coder-loop status` plus `--check-runtime`.
+Initialize the executable planning output through the current centralized chain/item contract. Create or select a chain with `coder-loop chain ...`, rely on the daemon-owned chain handoff/shared file for run-to-run context, add actionable issues with `coder-loop item batch-add` (or repeated `coder-loop item add` only when batch input is unavailable), and validate with `coder-loop status` plus `--check-runtime`.
 
 ## Inputs
 
@@ -33,34 +33,23 @@ Initialize the executable planning output through the current centralized chain/
    - `no-code` references (nothing actionable);
    - issues blocked by external work not in this queue.
 
-3. **Write per-issue handoff files** under the centralized chain runtime, not under target-local runtime state. Use the path reported by `coder-loop status <target> --json` / chain runtime layout; conceptually it is:
+3. **Record planning context in the chain handoff/shared file**. The daemon owns and creates:
 
    ```text
-   loop-data/chains/<chain>/issues/<N>.md
+   loop-data/chains/<chain>/shared.md
    ```
 
-   Minimum content:
+   Append concise source-cited context for the issue set being queued. Minimum content:
 
    ```markdown
-   # Issue #<N>: <title>
+   ## Planning queue init (<run id>)
 
-   ## Scope from planning
-
-   <quote of the validated `## 问题` paragraph>
-
-   ## Expected deliverable
-
-   <quote of `## 预期结果` + which `## 验收标准` rows are critical>
-
-   ## Dependencies
-
-   - Depends on: #<M> (already queued / external)
-   - Blocks: #<P>
-
-   ## Planning notes
-
-   <any non-obvious context from intake / classify / decompose phases that the iter agent should know — e.g. "this spike's failure branch creates a design-question issue, do not implement a workaround">
+   - #<N> <title>: <validated scope / expected deliverable summary>
+   - Dependencies: depends on #<M>; blocks #<P>
+   - Notes: <non-obvious planning context the iter/review agents need>
    ```
+
+   Optional per-issue handoff files under `loop-data/chains/<chain>/issues/<N>.md` may be written for bulky issue-local notes, but they are attachments. Do not make item startup depend on them.
 
 4. **Create evidence directories** under the chain runtime, conceptually:
    ```text
@@ -68,14 +57,14 @@ Initialize the executable planning output through the current centralized chain/
    ```
    Empty directory at this stage; iter agent will populate.
 
-5. **Construct item API payloads**. Each new item passed to `coder-loop item batch-add` / daemon `item.batchAdd` contains the current item fields. `issueFile` and `evidenceDir` are relative to the chain root, so include the `issues/` or `evidence/` prefix:
+5. **Construct item API payloads**. Each new item passed to `coder-loop item batch-add` / daemon `item.batchAdd` contains the current item fields. Leave `issueFile` null unless you intentionally created an optional per-issue attachment. `evidenceDir` may be relative to the chain root when you want an issue-specific evidence directory:
    ```json
    {
      "issueNumber": <number>,
      "repoCwd": "{{TARGET_CWD}}",
      "title": "<the issue title>",
      "priority": "<high|medium|low>" or null,
-     "issueFile": "issues/<N>.md",
+     "issueFile": null,
      "evidenceDir": "evidence/issue-<N>",
      "agentCwd": null,
      "runner": null,
@@ -84,7 +73,7 @@ Initialize the executable planning output through the current centralized chain/
    ```
    - The preset-facing item id remains `issue`; the daemon API field is `issueNumber`.
    - `status` defaults to the preset's first continuable status; for this preset new items become `queued`.
-   - `issueFile` must resolve inside `loop-data/chains/<chain>/issues`; `evidenceDir` must resolve inside `loop-data/chains/<chain>/evidence`. Do not pass bare `"<N>.md"` or `"issue-<N>"`, because runtime path validation resolves item paths from the chain root.
+   - If `issueFile` is set, it must resolve inside `loop-data/chains/<chain>/issues`; if `evidenceDir` is set, it must resolve inside `loop-data/chains/<chain>/evidence`. Do not pass bare `"<N>.md"` or `"issue-<N>"`, because runtime path validation resolves item paths from the chain root.
    - `agentCwd`: leave `null` for in-repo work. Only set when the issue requires code changes in a **different repo's checkout**; then it must be an **absolute path** to an existing working directory.
    - `extra.dependsOn` stores item ids for prerequisites that already exist in the chain. If the prerequisite is created in the same batch and its DB id is not known yet, add the prerequisite first, read `item list`, then add dependents in a second batch.
 
@@ -113,10 +102,10 @@ If item creation or `--check-runtime` fails:
 
 - for `item batch-add`, trust the daemon transaction boundary: no item from the failed batch should exist; verify with `coder-loop item list <chain-name> --json`;
 - for fallback repeated `item add`, stop immediately, list what was already inserted, and emit `queue_init_failed` with the compensating action needed;
-- delete handoff/evidence artifacts that are not referenced by any item;
+- delete optional per-issue/evidence artifacts that are not referenced by any item;
 - do not leave a half-described queue in handoff prose.
 
-If an issueFile fails to write (disk full, permission), the queue item that references it will fail runtime validation. Either fix the write and re-run validation, or remove the affected item through the supported item API before handoff.
+If an optional per-issue handoff file fails to write (disk full, permission), leave `issueFile` null and put the planning note in the chain handoff/shared file instead. Do not leave an item pointing at a missing optional attachment.
 
 If you set `agentCwd` for cross-repo work and validation reports it is not absolute or does not exist, fix it to a real absolute path or set it back to `null` before handoff.
 
@@ -124,7 +113,7 @@ If you set `agentCwd` for cross-repo work and validation reports it is not absol
 
 Choose exactly one:
 
-- `queue_initialized` → read `plan/handoff`. `--check-runtime` exit 0; chain items exist; per-issue files exist.
+- `queue_initialized` → read `plan/handoff`. `--check-runtime` exit 0; chain items exist; the daemon-owned chain handoff/shared file exists.
 - `queue_init_failed` → read `plan/handoff` with the runtime check error + restoration steps taken.
 
 Do not advance to handoff while runtime is in an inconsistent state.
