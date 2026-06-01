@@ -97,6 +97,7 @@ bun src/loop.ts --target-cwd <fresh-target> --check-runtime
 | `[statuses].terminal` | string[] | 是 | 引擎跳过的 status 集合（与 continuable 合并去重） |
 | `[[phases]].name` | string | 是 | phase 名字，写入 `state.current.phase` |
 | `[[phases]].prompt` | string | 是 | 相对 preset.toml 的 entry prompt 模板路径 |
+| `[[phases]].statusWrites` | string[] | 否 | 该 phase 允许 agent 通过 `item update --status` 写入的 status 集合；省略表示不做 phase 级限制，空数组表示该 phase 不允许写 status |
 | `[[phases]].trigger` | table | 否 | 可把 phase 声明为 trigger phase。支持 `trigger = { afterPhase = "...", whenStatus = "..." }` 的 item phase trigger，或 `trigger = { on = "chain-complete" }` 的 chain lifecycle trigger |
 | `[phases.variables]` | table | 是 | 模板中 `{{KEY}}` 的解析表，详见下节 |
 | `[[fragments]].id` | string | 是 | fragment 唯一标识（如 `iter/read-context`），entry prompt 通过该 id 引用 |
@@ -112,6 +113,7 @@ bun src/loop.ts --target-cwd <fresh-target> --check-runtime
 - 同 `name` 的 phase 不可重名；
 - 同 `id` 的 fragment 不可重复；
 - `[statuses]` 的 continuable / terminal 集合不可有交集；
+- `[[phases]].statusWrites` 中每个 status 必须属于 continuable 或 terminal status，且同一 phase 内不可重复；
 - item phase trigger 的 `afterPhase` 必须指向已声明 phase，`whenStatus` 必须属于 continuable 或 terminal status；
 - chain lifecycle trigger 目前只支持 `on = "chain-complete"`，且不能同时声明 `afterPhase` / `whenStatus`；
 - 每条 `[phases.variables]` 右侧必须 match `^(item|config|runtime)\.[a-zA-Z][a-zA-Z0-9_]*$`。

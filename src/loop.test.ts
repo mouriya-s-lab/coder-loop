@@ -171,6 +171,7 @@ describe("ItemRecord prompt bindings", () => {
 		const phase: PresetPhase = {
 			name: "iteration",
 			prompt: "iteration.md",
+			statusWrites: null,
 			variables: [
 				["ISSUE", { kind: "item", field: "issue" }],
 				["PHASE", { kind: "item", field: "phase" }],

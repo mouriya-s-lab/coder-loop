@@ -103,6 +103,8 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(preset.agent.attemptTimeoutSeconds).toBe(DEFAULT_ATTEMPT_TIMEOUT_SECONDS)
 		expect([...preset.statuses.continuable]).toEqual(["queued", "in_progress", "changes_requested"])
 		expect([...preset.statuses.terminal]).toEqual(["blocked", "moot", "done", "exhausted"])
+		expect(preset.phases.find((phase) => phase.name === "iteration")?.statusWrites).toEqual(["in_progress"])
+		expect(preset.phases.find((phase) => phase.name === "review")?.statusWrites).toEqual(["changes_requested", "blocked", "moot", "done", "exhausted"])
 	})
 
 	test("phases include iteration, review, blocked responder, and umbrella finalizer triggers", async () => {
@@ -240,6 +242,37 @@ describe("parsePreset schema validation", () => {
 		expect(reviewPhaseForPreset(preset).name).toBe("review")
 		expect(triggeredPhasesAfter(preset, "review", "blocked").map((phase) => phase.name)).toEqual(["responder"])
 		expect(triggeredPhasesAfter(preset, "review", "done")).toEqual([])
+	})
+
+	test("accepts per-phase status write declarations", () => {
+		const root: Record<string, unknown> = minimalRoot()
+		root.statuses = { continuable: ["queued", "in_progress"], terminal: ["done"] }
+		root.phases = [
+			{ name: "iteration", prompt: "iter.md", statusWrites: ["in_progress"], variables: { K: "item.id" } },
+			{ name: "review", prompt: "review.md", statusWrites: ["done"], variables: { K: "item.id" } },
+		]
+
+		const preset = parsePreset(root, "/tmp")
+
+		expect(preset.phases.map((phase) => phase.statusWrites)).toEqual([["in_progress"], ["done"]])
+	})
+
+	test("rejects per-phase status write declarations outside preset statuses", () => {
+		const root: Record<string, unknown> = minimalRoot()
+		root.phases = [
+			{ name: "iteration", prompt: "iter.md", statusWrites: ["missing"], variables: { K: "item.id" } },
+		]
+
+		expect(() => parsePreset(root, "/tmp")).toThrow(/statusWrites: unknown status "missing"/)
+	})
+
+	test("rejects duplicate per-phase status write declarations", () => {
+		const root: Record<string, unknown> = minimalRoot()
+		root.phases = [
+			{ name: "iteration", prompt: "iter.md", statusWrites: ["a", "a"], variables: { K: "item.id" } },
+		]
+
+		expect(() => parsePreset(root, "/tmp")).toThrow(/statusWrites: duplicate status "a"/)
 	})
 
 	test("accepts chain-complete trigger phases", () => {

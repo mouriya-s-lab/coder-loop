@@ -926,6 +926,64 @@ describe("daemon", () => {
 		}
 	})
 
+	test("socket item.update applies preset phase status write policy", async () => {
+		const fixture = await startFixture("item-update-phase-status-policy", { schedulerEnabled: false })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "phase-policy-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			const iterationItem = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 34701,
+				repoCwd: REPO_ROOT,
+			})).item)
+			const iterationItemId = numberValue(iterationItem.id)
+
+			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				store.updateItem(iterationItemId, { phase: "iteration", updatedAt: 1_800_020_000 })
+			} finally {
+				store.close()
+			}
+
+			for (const status of ["changes_requested", "blocked", "moot", "done", "exhausted"]) {
+				const rejected = await request(fixture, "item.update", { itemId: iterationItemId, status })
+				expectInvalid(rejected)
+				if (!rejected.ok) expect(rejected.error.details).toMatchObject({ phase: "iteration", status })
+			}
+
+			const handoff = record(expectOk(await request(fixture, "item.update", {
+				itemId: iterationItemId,
+				status: "in_progress",
+			})).item)
+			expect(handoff).toMatchObject({ id: iterationItemId, status: "in_progress" })
+			expect((await readItem(fixture.loopDataRoot, chainId, 34701))?.phase).toBe("iteration")
+
+			const reviewStatuses = ["changes_requested", "blocked", "moot", "done", "exhausted"]
+			for (const [index, status] of reviewStatuses.entries()) {
+				const reviewItem = record(expectOk(await request(fixture, "item.add", {
+					chainId,
+					issueNumber: 34710 + index,
+					repoCwd: REPO_ROOT,
+				})).item)
+				const reviewItemId = numberValue(reviewItem.id)
+				const reviewStore = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+				try {
+					reviewStore.updateItem(reviewItemId, { phase: "review", updatedAt: 1_800_020_100 + index })
+				} finally {
+					reviewStore.close()
+				}
+				const updated = record(expectOk(await request(fixture, "item.update", { itemId: reviewItemId, status })).item)
+				expect(updated).toMatchObject({ id: reviewItemId, status })
+				expect((await readItem(fixture.loopDataRoot, chainId, 34710 + index))?.phase).toBe("review")
+			}
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("socket item.update rejects immutable selectors and daemon-owned fields", async () => {
 		const fixture = await startFixture("item-update-strict-fields", { schedulerEnabled: false })
 		try {
@@ -1264,6 +1322,12 @@ describe("daemon", () => {
 			})).item)
 			const itemId = numberValue(added.id)
 			await waitFor(async () => record(expectOk(await request(fixture, "daemon.status")).daemon).activeRuns, (runs) => Array.isArray(runs) && runs.length === 1)
+			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				store.updateItem(itemId, { phase: "review", updatedAt: 1_800_020_200 })
+			} finally {
+				store.close()
+			}
 
 			const updated = record(expectOk(await request(fixture, "item.update", {
 				itemId,
@@ -1458,6 +1522,12 @@ describe("daemon", () => {
 				extra: { sleepMs: 5_000, exitCode: 0 },
 			})).item)
 			await waitFor(async () => record(expectOk(await request(fixture, "daemon.status")).daemon).activeRuns, (runs) => Array.isArray(runs) && runs.length === 1)
+			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				store.updateItem(numberValue(added.id), { phase: "review", updatedAt: 1_800_020_300 })
+			} finally {
+				store.close()
+			}
 
 			const updated = record(expectOk(await request(fixture, "item.update", {
 				itemId: numberValue(added.id),
