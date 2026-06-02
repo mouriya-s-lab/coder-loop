@@ -42,6 +42,65 @@ describe("smoke: v2 central chain CLI", () => {
 		expect((await stat(fixture.legacyStatePath)).mtimeMs).toBe(beforeMtime)
 	})
 
+	test("runtime show lists preset phases with role-md runner selections", async () => {
+		const fixture = await createTarget("runtime-show")
+		const snapshot = expectJsonOk(runCli(["runtime", "show", fixture.target, "--json"]))
+		expect(snapshot.preset.name).toBe("gh-issue-pr-iteration")
+		expect(snapshot.defaults.claudeModel).toBeNull()
+		expect(snapshot.defaults.codexModel).toBeNull()
+		const phaseNames = snapshot.phases.map((p: { phase: string }) => p.phase)
+		expect(phaseNames).toEqual(["iteration", "review", "blocked-responder", "umbrella-finalizer"])
+		const review = snapshot.phases.find((p: { phase: string }) => p.phase === "review")
+		expect(review.role).toBe("review")
+		expect(review.runner.kind).toBe("claude")
+		expect(review.runner.source).toBe("role-md")
+		expect(review.runner.model).toBeNull()
+		const iter = snapshot.phases.find((p: { phase: string }) => p.phase === "iteration")
+		expect(iter.runner.kind).toBe("codex")
+		expect(iter.runner.source).toBe("role-md")
+	})
+
+	test("runtime set writes [1m]-suffixed Claude model and gpt-5.5 codex model into config.json", async () => {
+		const fixture = await createTarget("runtime-set")
+		const set = expectJsonOk(runCli([
+			"runtime", "set", fixture.target,
+			"--claude-model", "opus-4-8",
+			"--codex-model", "gpt-5.5",
+			"--json",
+		]))
+		expect(set.wrote).toBe(true)
+		expect(set.changed["claude.model"].to).toBe("claude-opus-4-8[1m]")
+		expect(set.changed["codex.model"].to).toBe("gpt-5.5")
+		const configPath = resolve(fixture.target, ".coder-loop/runtime/config.json")
+		const config = JSON.parse(await readFile(configPath, "utf-8"))
+		expect(config.claude.model).toBe("claude-opus-4-8[1m]")
+		expect(config.codex.model).toBe("gpt-5.5")
+		expect(config.loopDataRoot).toBe(fixture.loopDataRoot)
+		expect(config.runner).toBeUndefined()
+		expect(config.reviewRunner).toBeUndefined()
+
+		const snapshot = expectJsonOk(runCli(["runtime", "show", fixture.target, "--json"]))
+		expect(snapshot.defaults.claudeModel).toBe("claude-opus-4-8[1m]")
+		expect(snapshot.defaults.codexModel).toBe("gpt-5.5")
+		const review = snapshot.phases.find((p: { phase: string }) => p.phase === "review")
+		expect(review.runner.kind).toBe("claude")
+		expect(review.runner.model).toBe("claude-opus-4-8[1m]")
+		const iter = snapshot.phases.find((p: { phase: string }) => p.phase === "iteration")
+		expect(iter.runner.kind).toBe("codex")
+		expect(iter.runner.model).toBe("gpt-5.5")
+	})
+
+	test("runtime set rejects unknown enum values and no-op invocations", () => {
+		const bad = runCli(["runtime", "set", "/tmp/cl-rt-bad", "--claude-model", "sonnet-4-5"])
+		expect(bad.exitCode).toBe(1)
+		expect(bad.stderr).toContain("--claude-model must be one of opus-4-7|opus-4-8")
+		const empty = runCli(["runtime", "set", "/tmp/cl-rt-bad"])
+		expect(empty.exitCode).toBe(1)
+		expect(empty.stderr).toContain("pass at least one of")
+		const noRunnerFlag = runCli(["runtime", "set", "/tmp/cl-rt-bad", "--iteration-runner", "claude"])
+		expect(noRunnerFlag.exitCode).toBe(1)
+	})
+
 	test("daemon start dry-run resolves a chain and emits central-daemon plan", async () => {
 		const fixture = await createTarget("daemon-smoke")
 		seedChain(fixture, { issueNumber: 184, status: "queued", extra: { issueKind: "code" } })

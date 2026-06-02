@@ -47,7 +47,6 @@ const DEFAULT_ISSUE_DIR = ".coder-loop/runtime/issues"
 const DEFAULT_EVIDENCE_DIR = ".coder-loop/runtime/evidence"
 const DEFAULT_LOG_DIR = ".coder-loop/runtime/logs"
 const ENGINE_BUILTIN_RUNNER: AgentRunnerKind = "codex"
-export const CLAUDE_REVIEW_MODEL = "claude-opus-4-7"
 export const DEFAULT_ATTEMPT_TIMEOUT_SECONDS = 60 * 60
 export const ATTEMPT_TIMEOUT_KILL_MS = 5 * 1000
 const STATUS_SNAPSHOT_STATE_VERSION = 1
@@ -300,8 +299,6 @@ type LoopConfig = {
 	logDir: string | null
 	loopDataRoot: string | null
 	requireAgentBrowserScreenshots: boolean | null
-	defaultRunner: AgentRunnerKind | null
-	reviewRunner: AgentRunnerKind | null
 	claudeBinary: string | null
 	claudeExtraArgs: string[]
 	claudeModel: string | null
@@ -327,8 +324,6 @@ const StatusConfigBoundary = arkType({
 	"evidence?": {
 		"requireAgentBrowserScreenshots?": "boolean|null",
 	},
-	"runner?": arkType.or(AgentRunnerKindBoundary, "null"),
-	"reviewRunner?": arkType.or(AgentRunnerKindBoundary, "null"),
 	"claude?": {
 		"binary?": "string|null",
 		"extraArgs?": "string[]",
@@ -925,6 +920,45 @@ type CliCommand =
 	| { kind: "chain"; args: ChainCommandArgs }
 	| { kind: "item"; args: ItemCommandArgs }
 	| { kind: "queue"; args: QueueUnblockCommandArgs }
+	| { kind: "runtime"; args: RuntimeCommandArgs }
+
+type RuntimeCommandArgs =
+	| { action: "show"; targetCwd: string; configPath: string | null; output: "json" | "human" }
+	| {
+		action: "set"
+		targetCwd: string
+		configPath: string | null
+		claudeModelChoice: ClaudeModelChoice | null
+		codexModelChoice: CodexModelChoice | null
+		dryRun: boolean
+		json: boolean
+	}
+
+type ClaudeModelChoice = "opus-4-7" | "opus-4-8"
+type CodexModelChoice = "gpt-5.5"
+
+const CLAUDE_MODEL_CHOICES: readonly ClaudeModelChoice[] = ["opus-4-7", "opus-4-8"]
+const CODEX_MODEL_CHOICES: readonly CodexModelChoice[] = ["gpt-5.5"]
+
+function renderClaudeModel(choice: ClaudeModelChoice): string {
+	return `claude-${choice}[1m]`
+}
+
+function renderCodexModel(choice: CodexModelChoice): string {
+	return choice
+}
+
+function parseClaudeModelChoice(value: string | null, flagName: string): ClaudeModelChoice | null {
+	if (value === null) return null
+	if ((CLAUDE_MODEL_CHOICES as readonly string[]).includes(value)) return value as ClaudeModelChoice
+	fail(`${flagName} must be one of ${CLAUDE_MODEL_CHOICES.join("|")}, got: ${value}`)
+}
+
+function parseCodexModelChoice(value: string | null, flagName: string): CodexModelChoice | null {
+	if (value === null) return null
+	if ((CODEX_MODEL_CHOICES as readonly string[]).includes(value)) return value as CodexModelChoice
+	fail(`${flagName} must be one of ${CODEX_MODEL_CHOICES.join("|")}, got: ${value}`)
+}
 
 const statusCliCommand = command({
 	name: "status",
@@ -1465,6 +1499,59 @@ const queueCliCommand = subcommands({
 	},
 })
 
+const runtimeShowCliCommand = command({
+	name: "show",
+	description: "List preset phases (roles) with the runner/binary/model each one would use.",
+	args: {
+		target: positional({ displayName: "target", type: cmdString }),
+		json: flag({ long: "json" }),
+		config: option({ long: "config", type: optional(cmdString) }),
+	},
+	handler: (args): CliCommand => ({
+		kind: "runtime",
+		args: {
+			action: "show",
+			targetCwd: args.target,
+			configPath: args.config ?? null,
+			output: args.json ? "json" : "human",
+		},
+	}),
+})
+
+const runtimeSetCliCommand = command({
+	name: "set",
+	description: "Set the Claude/Codex model on a target's .coder-loop/runtime/config.json. Runner kind is owned by role entry md and is not a CLI surface.",
+	args: {
+		target: positional({ displayName: "target", type: cmdString }),
+		config: option({ long: "config", type: optional(cmdString) }),
+		claudeModel: option({ long: "claude-model", type: optional(cmdString) }),
+		codexModel: option({ long: "codex-model", type: optional(cmdString) }),
+		dryRun: flag({ long: "dry-run" }),
+		json: flag({ long: "json" }),
+	},
+	handler: (args): CliCommand => ({
+		kind: "runtime",
+		args: {
+			action: "set",
+			targetCwd: args.target,
+			configPath: args.config ?? null,
+			claudeModelChoice: parseClaudeModelChoice(args.claudeModel ?? null, "--claude-model"),
+			codexModelChoice: parseCodexModelChoice(args.codexModel ?? null, "--codex-model"),
+			dryRun: args.dryRun,
+			json: args.json,
+		},
+	}),
+})
+
+const runtimeCliCommand = subcommands({
+	name: "runtime",
+	description: "Inspect or change a target's default runner / model selection.",
+	cmds: {
+		show: runtimeShowCliCommand,
+		set: runtimeSetCliCommand,
+	},
+})
+
 function splitFlag(arg: string): [string, string | null] {
 	const equalsIndex = arg.indexOf("=")
 	if (equalsIndex === -1) return [arg, null]
@@ -2001,6 +2088,251 @@ async function runQueueCommand(args: string[]): Promise<void> {
 	await runQueueUnblockCommand(parsed.value.args)
 }
 
+async function runRuntimeCommand(args: string[]): Promise<void> {
+	const parsed = await runCmd(runtimeCliCommand, args)
+	if (parsed.value.kind !== "runtime") return
+	const runtimeArgs = parsed.value.args
+	if (runtimeArgs.action === "show") {
+		await runRuntimeShowCommand(runtimeArgs)
+		return
+	}
+	await runRuntimeSetCommand(runtimeArgs)
+}
+
+type RuntimePhaseRoleKind = "iteration" | "review" | "trigger"
+
+type RuntimePhaseRoleSnapshot = {
+	phase: string
+	role: RuntimePhaseRoleKind
+	trigger: string | null
+	runner: { kind: AgentRunnerKind; binary: string; model: string | null; source: AgentRunnerSource }
+}
+
+type RuntimeShowSnapshot = {
+	target: string
+	configPath: string
+	configExists: boolean
+	configFormat: ConfigFormat
+	preset: { name: string; presetDir: string } | null
+	defaults: {
+		claudeModel: string | null
+		codexModel: string | null
+	}
+	phases: RuntimePhaseRoleSnapshot[]
+}
+
+async function runRuntimeShowCommand(args: Extract<RuntimeCommandArgs, { action: "show" }>): Promise<void> {
+	const snapshot = await buildRuntimeShowSnapshot(args)
+	if (args.output === "json") {
+		process.stdout.write(`${JSON.stringify(snapshot, null, "\t")}\n`)
+		return
+	}
+	process.stdout.write(formatRuntimeShowHuman(snapshot))
+}
+
+export async function buildRuntimeShowSnapshot(input: {
+	targetCwd: string
+	configPath: string | null
+}): Promise<RuntimeShowSnapshot> {
+	const targetCwd = resolve(input.targetCwd)
+	const configPath = await resolveConfigPath(targetCwd, input.configPath)
+	const configFormat = configFormatForPath(configPath)
+	const configRead = await readStatusConfig(configPath)
+	const configExists = configRead.kind !== "missing"
+	const config: LoopConfig = configRead.kind === "ok" ? configRead.value : emptyLoopConfig()
+	if (configRead.kind === "invalid") fail(`runtime show: failed to read config ${configPath}: ${configRead.message}`)
+	const presetRead = await readStatusPreset(config, targetCwd)
+	const preset = presetRead.kind === "ok" ? presetRead.value : null
+	if (presetRead.kind === "invalid") fail(`runtime show: failed to load preset: ${presetRead.message}`)
+
+	const commands = buildAgentRunnerCommands(config)
+	const phases: RuntimePhaseRoleSnapshot[] = []
+	if (preset !== null) {
+		const phaseSelections = selectPhaseDefaultRunners(preset, commands)
+		const reviewPhase = reviewPhaseForPreset(preset)
+		for (const phase of preset.phases) {
+			const role: RuntimePhaseRoleKind = phase.name === reviewPhase.name ? "review" : phase.trigger === null ? "iteration" : "trigger"
+			const selection = phaseSelections[phase.name]!
+			phases.push({
+				phase: phase.name,
+				role,
+				trigger: describePresetTrigger(phase.trigger),
+				runner: {
+					kind: selection.kind,
+					binary: selection.binary,
+					model: selection.model,
+					source: selection.source,
+				},
+			})
+		}
+	}
+
+	return {
+		target: targetCwd,
+		configPath,
+		configExists,
+		configFormat,
+		preset: preset === null ? null : { name: preset.name, presetDir: preset.presetDir },
+		defaults: {
+			claudeModel: config.claudeModel,
+			codexModel: config.codexModel,
+		},
+		phases,
+	}
+}
+
+function describePresetTrigger(trigger: PresetPhaseTrigger | null): string | null {
+	if (trigger === null) return null
+	if ("on" in trigger) return `on=${trigger.on}`
+	return `afterPhase=${trigger.afterPhase} whenStatus=${trigger.whenStatus}`
+}
+
+function emptyLoopConfig(): LoopConfig {
+	return {
+		repository: null,
+		baseBranch: null,
+		worktree: null,
+		workflowFile: null,
+		sharedContextFile: null,
+		issueDir: null,
+		evidenceDir: null,
+		logDir: null,
+		loopDataRoot: null,
+		requireAgentBrowserScreenshots: null,
+		claudeBinary: null,
+		claudeExtraArgs: [],
+		claudeModel: null,
+		codexBinary: null,
+		codexExtraArgs: [],
+		codexModel: null,
+		preset: null,
+		presetPath: null,
+	}
+}
+
+function formatRuntimeShowHuman(snapshot: RuntimeShowSnapshot): string {
+	const lines: string[] = []
+	lines.push(`target:        ${snapshot.target}`)
+	lines.push(`config:        ${snapshot.configPath} (${snapshot.configExists ? snapshot.configFormat : "missing"})`)
+	lines.push(`preset:        ${snapshot.preset === null ? "<unloadable>" : `${snapshot.preset.name} (${snapshot.preset.presetDir})`}`)
+	lines.push(`claude.model:  ${snapshot.defaults.claudeModel ?? "<unset>"}`)
+	lines.push(`codex.model:   ${snapshot.defaults.codexModel ?? "<unset>"}`)
+	lines.push("")
+	lines.push("phases (roles):")
+	if (snapshot.phases.length === 0) {
+		lines.push("  <no preset loaded>")
+	} else {
+		const nameWidth = Math.max(...snapshot.phases.map((p) => p.phase.length))
+		for (const phase of snapshot.phases) {
+			const triggerSuffix = phase.trigger === null ? "" : `  trigger=${phase.trigger}`
+			lines.push(
+				`  ${phase.phase.padEnd(nameWidth)}  role=${phase.role.padEnd(9)}  runner=${phase.runner.kind}  binary=${phase.runner.binary}  model=${phase.runner.model ?? "<default>"}  source=${phase.runner.source}${triggerSuffix}`,
+			)
+		}
+	}
+	lines.push("")
+	return lines.join("\n")
+}
+
+type RuntimeSetResult = {
+	target: string
+	configPath: string
+	wrote: boolean
+	dryRun: boolean
+	changed: Record<string, { from: string | null; to: string | null }>
+}
+
+async function runRuntimeSetCommand(args: Extract<RuntimeCommandArgs, { action: "set" }>): Promise<void> {
+	const result = await applyRuntimeSet(args)
+	if (args.json) {
+		process.stdout.write(`${JSON.stringify(result, null, "\t")}\n`)
+		return
+	}
+	const verb = result.dryRun ? "would update" : result.wrote ? "updated" : "unchanged"
+	const lines = [`runtime set: ${verb} ${result.configPath}`]
+	for (const [key, change] of Object.entries(result.changed)) {
+		lines.push(`  ${key}: ${change.from ?? "<unset>"} -> ${change.to ?? "<unset>"}`)
+	}
+	if (Object.keys(result.changed).length === 0) lines.push("  no changes")
+	process.stdout.write(`${lines.join("\n")}\n`)
+}
+
+export async function applyRuntimeSet(input: {
+	targetCwd: string
+	configPath: string | null
+	claudeModelChoice: ClaudeModelChoice | null
+	codexModelChoice: CodexModelChoice | null
+	dryRun: boolean
+}): Promise<RuntimeSetResult> {
+	if (
+		input.claudeModelChoice === null &&
+		input.codexModelChoice === null
+	) {
+		fail("runtime set: pass at least one of --claude-model / --codex-model")
+	}
+	const targetCwd = resolve(input.targetCwd)
+	const configPath = await resolveConfigPath(targetCwd, input.configPath)
+	if (configFormatForPath(configPath) === "toml") {
+		fail(`runtime set: TOML config (${configPath}) is read-only here; convert to JSON or edit manually.`)
+	}
+	let existingRaw: string | null = null
+	try {
+		existingRaw = await readFile(configPath, "utf-8")
+	} catch (error) {
+		if (!(isNodeError(error) && error.code === "ENOENT")) throw error
+	}
+	const original: Record<string, unknown> = existingRaw === null ? {} : (() => {
+		try {
+			const parsed = JSON.parse(existingRaw)
+			if (!isObjectRecord(parsed)) fail(`runtime set: config root must be a JSON object: ${configPath}`)
+			return { ...parsed }
+		} catch (error) {
+			fail(`runtime set: failed to parse JSON config ${configPath}: ${errorMessage(error)}`)
+		}
+	})()
+
+	const next: Record<string, unknown> = { ...original }
+	const changed: Record<string, { from: string | null; to: string | null }> = {}
+
+	function recordChange(key: string, from: unknown, to: unknown): void {
+		const fromStr = from === undefined || from === null ? null : String(from)
+		const toStr = to === undefined || to === null ? null : String(to)
+		if (fromStr === toStr) return
+		changed[key] = { from: fromStr, to: toStr }
+	}
+
+	if (input.claudeModelChoice !== null) {
+		const claudeSection = isObjectRecord(next.claude) ? { ...next.claude } : {}
+		const from = claudeSection.model
+		const to = renderClaudeModel(input.claudeModelChoice)
+		claudeSection.model = to
+		next.claude = claudeSection
+		recordChange("claude.model", from, to)
+	}
+	if (input.codexModelChoice !== null) {
+		const codexSection = isObjectRecord(next.codex) ? { ...next.codex } : {}
+		const from = codexSection.model
+		const to = renderCodexModel(input.codexModelChoice)
+		codexSection.model = to
+		next.codex = codexSection
+		recordChange("codex.model", from, to)
+	}
+
+	const nextRaw = `${JSON.stringify(next, null, "\t")}\n`
+	const wouldWrite = existingRaw === null || existingRaw !== nextRaw
+	if (!input.dryRun && wouldWrite) {
+		await mkdir(dirname(configPath), { recursive: true })
+		await writeFile(configPath, nextRaw, "utf-8")
+	}
+	return {
+		target: targetCwd,
+		configPath,
+		wrote: !input.dryRun && wouldWrite,
+		dryRun: input.dryRun,
+		changed,
+	}
+}
+
 async function main() {
 	const firstArg = process.argv[2]
 	if (firstArg === "status") {
@@ -2023,6 +2355,10 @@ async function main() {
 		await runQueueCommand(process.argv.slice(3))
 		return
 	}
+	if (firstArg === "runtime") {
+		await runRuntimeCommand(process.argv.slice(3))
+		return
+	}
 	if (firstArg === "install" || firstArg === "uninstall" || firstArg === "doctor") {
 		const handled = await dispatchSubcommand(firstArg, process.argv.slice(3))
 		if (handled) return
@@ -2041,6 +2377,7 @@ function rootUsage(): string {
 		"  chain <create|list|status|stop|resume|delete>",
 		"  item <add|batch-add|list|update>",
 		"  queue unblock <target> --issue <issue>",
+		"  runtime <show|set>",
 		"  install <target>",
 		"  uninstall <target>",
 		"  doctor <target>",
@@ -2300,8 +2637,6 @@ function buildStatusRunnerDefaultsSnapshot(options: LoopOptions | null): StatusR
 		logDir: null,
 		loopDataRoot: null,
 		requireAgentBrowserScreenshots: null,
-		defaultRunner: null,
-		reviewRunner: null,
 		claudeBinary: null,
 		claudeExtraArgs: [],
 		claudeModel: null,
@@ -2313,8 +2648,8 @@ function buildStatusRunnerDefaultsSnapshot(options: LoopOptions | null): StatusR
 	}
 	return {
 		hostDefault: hostRunner,
-		default: statusRunnerSelection(selectDefaultRunner(null, buildAgentRunnerCommands(config))),
-		reviewDefault: statusRunnerSelection(selectReviewRunner(null, buildAgentRunnerCommands(config))),
+		default: statusRunnerSelection(selectDefaultRunner(buildAgentRunnerCommands(config))),
+		reviewDefault: statusRunnerSelection(selectReviewRunner(buildAgentRunnerCommands(config))),
 		phases: {},
 	}
 }
@@ -3270,8 +3605,6 @@ function loopConfigFromChain(chain: ChainRecord, loopDataRoot: string | null, ex
 		logDir: stringMetadata(metadata, "logDir") ?? explicitConfig?.logDir ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "runs"),
 		loopDataRoot,
 		requireAgentBrowserScreenshots: booleanMetadata(metadata, "requireAgentBrowserScreenshots") ?? explicitConfig?.requireAgentBrowserScreenshots ?? null,
-		defaultRunner: runnerMetadata(metadata, "runner") ?? explicitConfig?.defaultRunner ?? null,
-		reviewRunner: runnerMetadata(metadata, "reviewRunner") ?? explicitConfig?.reviewRunner ?? null,
 		claudeBinary: nestedStringMetadata(metadata, "claude", "binary") ?? explicitConfig?.claudeBinary ?? null,
 		claudeExtraArgs: nestedStringArrayMetadata(metadata, "claude", "extraArgs") ?? explicitConfig?.claudeExtraArgs ?? [],
 		claudeModel: nestedStringMetadata(metadata, "claude", "model") ?? explicitConfig?.claudeModel ?? null,
@@ -3300,11 +3633,6 @@ function stringMetadata(metadata: JsonObject, key: string): string | null {
 function booleanMetadata(metadata: JsonObject, key: string): boolean | null {
 	const value = metadata[key]
 	return typeof value === "boolean" ? value : null
-}
-
-function runnerMetadata(metadata: JsonObject, key: string): AgentRunnerKind | null {
-	const value = metadata[key]
-	return value === "claude" || value === "codex" ? value : null
 }
 
 function nestedStringMetadata(metadata: JsonObject, objectKey: string, key: string): string | null {
@@ -3598,8 +3926,6 @@ function loopConfigFromStatusInput(input: StatusConfigInput): LoopConfig {
 		logDir: input.logDir ?? null,
 		loopDataRoot: input.loopDataRoot ?? null,
 		requireAgentBrowserScreenshots: input.evidence?.requireAgentBrowserScreenshots ?? null,
-		defaultRunner: input.runner ?? null,
-		reviewRunner: input.reviewRunner ?? null,
 		claudeBinary: input.claude?.binary ?? null,
 		claudeExtraArgs: input.claude?.extraArgs ?? [],
 		claudeModel: input.claude?.model ?? null,
@@ -3638,13 +3964,12 @@ export function selectEngineBuiltinRunner(commands: AgentRunnerCommands): AgentR
 	return { ...commands[ENGINE_BUILTIN_RUNNER], source: "engine-builtin" }
 }
 
-export function selectDefaultRunner(_configuredRunner: AgentRunnerKind | null, commands: AgentRunnerCommands): AgentRunnerSelection {
+export function selectDefaultRunner(commands: AgentRunnerCommands): AgentRunnerSelection {
 	return selectEngineBuiltinRunner(commands)
 }
 
-export function selectReviewRunner(_configuredRunner: AgentRunnerKind | null, commands: AgentRunnerCommands): AgentRunnerSelection {
-	const runner = selectEngineBuiltinRunner(commands)
-	return runner.kind === "claude" ? { ...runner, model: CLAUDE_REVIEW_MODEL } : runner
+export function selectReviewRunner(commands: AgentRunnerCommands): AgentRunnerSelection {
+	return selectEngineBuiltinRunner(commands)
 }
 
 export type PhaseRunnerSelectionInput = {
@@ -3675,12 +4000,11 @@ function allowsItemRunnerOverride(preset: Preset, phase: PresetPhase): boolean {
 	return phase.trigger === null && !isReviewRunnerPhase(preset, phase)
 }
 
-export function selectPhaseDefaultRunner(phase: PresetPhase, preset: Preset, commands: AgentRunnerCommands): AgentRunnerSelection {
+export function selectPhaseDefaultRunner(phase: PresetPhase, _preset: Preset, commands: AgentRunnerCommands): AgentRunnerSelection {
 	const kind = phase.defaultRunner ?? ENGINE_BUILTIN_RUNNER
 	const command = commands[kind]
-	const model = isReviewRunnerPhase(preset, phase) && command.kind === "claude" ? CLAUDE_REVIEW_MODEL : command.model
 	const source: AgentRunnerSource = phase.defaultRunner === null ? "engine-builtin" : "role-md"
-	return { ...command, model, source }
+	return { ...command, source }
 }
 
 export function selectPhaseDefaultRunners(preset: Preset, commands: AgentRunnerCommands): Record<string, AgentRunnerSelection> {

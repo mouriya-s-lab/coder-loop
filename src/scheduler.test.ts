@@ -2471,7 +2471,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			expect(runner.source).toBe("role-md")
 		})
 
-		test("chain default → review phase returns claude with model claude-opus-4-7", async () => {
+		test("chain default → review phase returns claude with no source-side model override", async () => {
 			const chain = makeChainFixture({ metadata: {} })
 			const preset = await loadPreset(PRESET_DIR)
 			const runner = resolvePhaseRunnerFromChain({
@@ -2483,7 +2483,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			})
 			expect(runner.kind).toBe("claude")
 			expect(runner.binary).toBe("claude")
-			expect(runner.model).toBe("claude-opus-4-7")
+			expect(runner.model).toBeNull()
 			expect(runner.source).toBe("role-md")
 		})
 
@@ -2502,7 +2502,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			expect(runner.source).toBe("role-md")
 		})
 
-		test("chain metadata claude.model is force-replaced by claude-opus-4-7 for review phase (AC4)", async () => {
+		test("chain metadata claude.model flows to review phase (no source-side override)", async () => {
 			const chain = makeChainFixture({
 				metadata: {
 					claude: { model: "claude-haiku-4-5" },
@@ -2517,8 +2517,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 				item: { runner: null },
 			})
 			expect(runner.kind).toBe("claude")
-			expect(runner.model).toBe("claude-opus-4-7")
-			expect(runner.model).not.toBe("claude-haiku-4-5")
+			expect(runner.model).toBe("claude-haiku-4-5")
 		})
 
 		test("item.runner='claude' overrides codex iteration default for non-review phase", async () => {
@@ -2549,12 +2548,12 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			expect(runner.source).toBe("role-md")
 		})
 
-		test("chain metadata claude.extraArgs '--model X' is stripped from review args by buildRunnerInvocation (AC4 transitive)", async () => {
+		test("chain metadata claude.model flows into review args via buildRunnerInvocation", async () => {
 			const chain = makeChainFixture({
 				metadata: {
 					claude: {
 						model: "claude-haiku-4-5",
-						extraArgs: ["--model", "claude-haiku-4-5", "--verbose"],
+						extraArgs: ["--model", "claude-sonnet-4-7", "--verbose"],
 					},
 				},
 			})
@@ -2567,7 +2566,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 				item: { runner: null },
 			})
 			expect(runner.kind).toBe("claude")
-			expect(runner.model).toBe("claude-opus-4-7")
+			expect(runner.model).toBe("claude-haiku-4-5")
 			const invocation = buildRunnerInvocation(runner, "p", { kind: "fresh" }, {
 				targetCwd: "/repo/a",
 				agentCwd: "/repo/a",
@@ -2576,8 +2575,8 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			})
 			const modelFlagIndex = invocation.args.indexOf("--model")
 			expect(modelFlagIndex).toBeGreaterThanOrEqual(0)
-			expect(invocation.args[modelFlagIndex + 1]).toBe("claude-opus-4-7")
-			expect(invocation.args.filter((arg) => arg === "claude-haiku-4-5")).toEqual([])
+			expect(invocation.args[modelFlagIndex + 1]).toBe("claude-haiku-4-5")
+			expect(invocation.args.filter((arg) => arg === "claude-sonnet-4-7")).toEqual([])
 		})
 	})
 

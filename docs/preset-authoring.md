@@ -249,7 +249,7 @@ defaultRunner: codex
 }
 ```
 
-queue item 可加 `"runner": "claude" | "codex"` 覆盖允许 item override 的普通执行 phase；review 和 trigger 这类角色使用自己的 entry md 声明。review phase 的 effective runner 为 Claude 时引擎会把 model 强制成 `claude-opus-4-7` 并替换 `--model` extra arg。preset 作者不要把某个 runner 的 CLI 细节写进 engine contract；若某个 preset 只支持特定 runner，把它写进该 preset 的 README / target workflow，并用 `doctor` / `status` 验证 role-md runner 与 target command config 是否符合预期。
+queue item 可加 `"runner": "claude" | "codex"` 覆盖允许 item override 的普通执行 phase；review 和 trigger 这类角色使用自己的 entry md 声明。Iteration 与 review 共享同一份 `claude.model` / `codex.model` config，源码不再为 review 强制模型。preset 作者不要把某个 runner 的 CLI 细节写进 engine contract；若某个 preset 只支持特定 runner，把它写进该 preset 的 README / target workflow，并用 `doctor` / `status` 验证 role-md runner 与 target command config 是否符合预期。
 
 ---
 

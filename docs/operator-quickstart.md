@@ -82,12 +82,18 @@ coder-loop status /path/to/your-target-repo --json
 
 ### Runner 默认值与覆盖
 
-默认 runner 由每个 phase 的角色 entry md 自声明；bundled `gh-issue-pr-iteration` 中 iteration 是 `codex`，review 是 `claude`。Review 不继承 Codex 宿主或 queue item；Claude review 的模型固定为 `claude-opus-4-7`。需要固定 runner binary / model / extra args 时，在 `.coder-loop/runtime/config.json` 写：
+默认 runner 由每个 phase 的角色 entry md 自声明；bundled `gh-issue-pr-iteration` 中 iteration 是 `codex`，review 是 `claude`。Review 不继承 Codex 宿主或 queue item；模型跟随 `claude.model` / `codex.model` config，源码不再为 review 强制覆盖模型。最简单的改模型方式：
+
+```bash
+coder-loop runtime set <target> --claude-model opus-4-8 --codex-model gpt-5.5
+```
+
+`--claude-model opus-4-7|opus-4-8` 写入时强制加 `[1m]` 后缀。也可以直接编辑 `.coder-loop/runtime/config.json`：
 
 ```json
 {
-  "codex": { "binary": "codex", "model": "gpt-5.4", "extraArgs": [] },
-  "claude": { "binary": "claude", "model": "sonnet", "extraArgs": [] }
+  "codex": { "binary": "codex", "model": "gpt-5.5", "extraArgs": [] },
+  "claude": { "binary": "claude", "model": "claude-opus-4-8[1m]", "extraArgs": [] }
 }
 ```
 
@@ -125,7 +131,7 @@ coder-loop status /path/to/your-target-repo --json | jq '.state.kind, .queue, .c
 | `.queue.total` / `.queue.selected` | 有可推进 item 时 selected 不为 null |
 | `.target.runner.phases` / `.queue.selected.phaseRunners` | 每个 phase 的 effective runner；含 kind/source/binary/model |
 | `.target.runner.default` / `.queue.selected.runner` | 默认执行 phase 与 selected item 默认执行 phase runner |
-| `.target.runner.reviewDefault` / `.queue.selected.reviewRunner` | review phase runner；role md 声明为 Claude 时 model 固定为 `claude-opus-4-7` |
+| `.target.runner.reviewDefault` / `.queue.selected.reviewRunner` | review phase runner；model 跟随 `claude.model` / `codex.model` config，源码不再强制覆盖 |
 | `.current.run` | 正在跑或可 resume 的 run；null 表示当前没有 in-flight phase |
 | `.events.latest` | 当前或最近 run 的最后一条结构化事件 |
 | `.processes.live` / `.processes.scanError` | live process scan 结果；daemon 详情看 `coder-loop daemon status` |

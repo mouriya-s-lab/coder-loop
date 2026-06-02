@@ -43,6 +43,7 @@ L2: Preset（presets/<name>/）
 - **Run orchestrator directly**: `bun run src/loop.ts [N] [--target-cwd <path>] [--once]` (core loop path; operational callers should prefer daemon)
 - **Status snapshot**: `coder-loop status <target> --json [--config <path>] [--repo <owner/repo>]` — stable read-only JSON API for supervisor/scripts; do not scrape runtime files first.
 - **Daemon operations**: `coder-loop daemon status <target> --json`, `coder-loop daemon start|restart <target> [--max-iterations N] [--require-browser-evidence]`, `coder-loop daemon stop <target>` — stable central-daemon / target-chain control API.
+- **Runtime inspection / model config**: `coder-loop runtime show <target> [--json]` 列出 preset 所有 phase（角色）当前解析到的 runner/binary/model/source；`coder-loop runtime set <target> [--claude-model opus-4-7|opus-4-8] [--codex-model gpt-5.5]` 用枚举值幂等改写 `.coder-loop/runtime/config.json` 的 `claude.model` / `codex.model`（Claude 模型自动加 `[1m]` 后缀；TOML config 不可写）。Runner kind 归 role entry md，不是 CLI 表面。
 - **Check runtime**: `bun run src/loop.ts --target-cwd <path> --check-runtime`
 - **Dry run**: `bun run src/loop.ts --target-cwd <path> --dry-run` (渲染 + 选 item，不 spawn agent)
 - **Install target**: `coder-loop install <target> [--repo <owner/repo>] [--preset <name>] [--force] [--dry-run] [--install-skills]` — 幂等四层 bootstrap（slash commands + runtime 目录 + config + workflow.md + GitHub `kind:code`/`kind:comment`/`kind:code-spike`/`kind:blocked` 标签 + PATH/skill 检查）。源：`src/install-commands.ts`。
@@ -69,7 +70,7 @@ defaultRunner: codex
 2. phase 角色 entry md 的 `defaultRunner`，status 中显示 `source=role-md`。
 3. 角色 md 未声明时的 engine-builtin fallback，status 中显示 `source=engine-builtin`。
 
-Runner binary、模型与额外参数由 config 的 `claude.binary` / `claude.model` / `claude.extraArgs`、`codex.binary` / `codex.model` / `codex.extraArgs` 提供；但 review phase 的 effective runner 为 Claude 时模型强制为 `claude-opus-4-7`，会替换任何 Claude `--model` extra arg。`coder-loop status <target> --json` 暴露 `target.runner.phases.<phase>`、`target.runner.default`、`target.runner.reviewDefault`、`queue.selected.phaseRunners.<phase>`、`queue.selected.runner`、`queue.selected.reviewRunner`、`current.runner` 和 `current.phaseStatus.value.runner/model`；`doctor` 按 phase role-md 推导出的 runner binary 做 PATH 检查。不要从旧 flat log 或 agent `status.json` 反推 runner/model，除非 `status` 已经指出需要 fallback debug；新版 agent status 位于 `<logDir>/<runId>/<phase>/status.json`。
+Runner binary、模型与额外参数由 config 的 `claude.binary` / `claude.model` / `claude.extraArgs`、`codex.binary` / `codex.model` / `codex.extraArgs` 提供——iteration 与 review 共享同一份 `claude.model` / `codex.model`，源码不再为 review phase 强制覆盖模型。要改 runner / 模型推荐用 `coder-loop runtime set`，它把枚举值落到 config 里（Claude 模型固定带 `[1m]` 后缀）；手写 config 也可以。`coder-loop status <target> --json` 暴露 `target.runner.phases.<phase>`、`target.runner.default`、`target.runner.reviewDefault`、`queue.selected.phaseRunners.<phase>`、`queue.selected.runner`、`queue.selected.reviewRunner`、`current.runner` 和 `current.phaseStatus.value.runner/model`；`doctor` 按 phase role-md 推导出的 runner binary 做 PATH 检查。不要从旧 flat log 或 agent `status.json` 反推 runner/model，除非 `status` 已经指出需要 fallback debug；新版 agent status 位于 `<logDir>/<runId>/<phase>/status.json`。
 
 ### 写一个新 preset 的最小流程
 

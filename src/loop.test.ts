@@ -9,7 +9,6 @@ import {
 	buildConfigBindings,
 	buildDaemonStartPlan,
 	buildRuntimeBindings,
-	CLAUDE_REVIEW_MODEL,
 	decideResume,
 	detectHostRunner,
 	getItemId,
@@ -323,7 +322,7 @@ describe("runner and daemon helpers", () => {
 
 		expect(selectRunnerForPhase("iteration", item, options).kind).toBe("claude")
 		expect(selectRunnerForPhase(reviewPhaseForPreset(preset).name, item, options).kind).toBe("claude")
-		expect(selectRunnerForPhase(reviewPhaseForPreset(preset).name, item, options).model).toBe(CLAUDE_REVIEW_MODEL)
+		expect(selectRunnerForPhase(reviewPhaseForPreset(preset).name, item, options).model).toBeNull()
 	})
 
 	test("selectRunnerForPhase uses engine-builtin fallback when role md omits defaultRunner", () => {

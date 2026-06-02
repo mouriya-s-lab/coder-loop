@@ -1107,7 +1107,7 @@ function createFullChain(store: ReturnType<typeof openSqliteStateStore>): ChainR
 		umbrellaIssue: 176,
 		umbrellaRepo: "mouriya-s-lab/coder-loop",
 		status: "active",
-		metadata: { runner: "codex", reviewRunner: "claude", nested: { enabled: true } },
+		metadata: { flavor: "codex", tier: "claude", nested: { enabled: true } },
 		createdAt: 1_800_000_000,
 		updatedAt: 1_800_000_010,
 	})
