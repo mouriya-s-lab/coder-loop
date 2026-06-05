@@ -362,6 +362,12 @@ describe("runner and daemon helpers", () => {
 		expect(plan.commandLine).not.toContain("--target-cwd")
 		expect(plan.commandLine).not.toContain("--max-iterations")
 		expect(plan.browserEvidenceRequired).toBe(true)
+		// The central daemon is global: its stdout/stderr land under loop-data/daemon, never
+		// pinned to a chains/<chain> directory or the legacy target-local .coder-loop/runtime/logs.
+		expect(plan.stdoutPath.startsWith(resolve(TEST_ROOT, "daemon") + "/")).toBe(true)
+		expect(plan.stderrPath.startsWith(resolve(TEST_ROOT, "daemon") + "/")).toBe(true)
+		expect(plan.stdoutPath.includes("/chains/")).toBe(false)
+		expect(plan.stdoutPath.includes("runtime/logs")).toBe(false)
 	})
 
 	test("agentCodexArgs and session path helpers keep runner plumbing stable", () => {

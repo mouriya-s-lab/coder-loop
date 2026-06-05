@@ -240,7 +240,7 @@ export class CoderLoopDaemon {
 			await writeFile(this.paths.daemonPid, `${process.pid}\n`)
 			this.ownsDaemonPid = true
 			this.state = "running"
-			await this.appendDaemonLogForAllChains({ type: "daemon.start", pid: process.pid, socketPath: this.paths.daemonSocket })
+			await this.appendGlobalDaemonLog({ type: "daemon.start", pid: process.pid, socketPath: this.paths.daemonSocket })
 			this.startSchedulerLoop()
 			this.queueSchedulerTick()
 			return this
@@ -360,7 +360,7 @@ export class CoderLoopDaemon {
 		await listenOrReportSocketInUse(replacementServer, this.paths.daemonSocket)
 		this.server = replacementServer
 		this.ownsDaemonSocket = true
-		await this.appendDaemonLogForAllChains({
+		await this.appendGlobalDaemonLog({
 			type: "daemon.socket.rebind",
 			pid: process.pid,
 			socketPath: this.paths.daemonSocket,
@@ -583,10 +583,12 @@ export class CoderLoopDaemon {
 		}
 	}
 
-	private async appendDaemonLogForAllChains(event: JsonObject): Promise<void> {
-		for (const chain of this.requireStore().listChains()) {
-			await this.appendDaemonLogIfChainNameIsValid(chain, event)
-		}
+	private async appendGlobalDaemonLog(event: JsonObject): Promise<void> {
+		await mkdir(this.paths.daemonBatchDir(this.daemonBatchTimestamp), { recursive: true })
+		await appendFile(this.paths.daemonLogFile(this.daemonBatchTimestamp), `${JSON.stringify({
+			...event,
+			recordedAt: new Date().toISOString(),
+		})}\n`)
 	}
 
 	private async appendDaemonLogForChainId(chainId: number, event: JsonObject): Promise<void> {

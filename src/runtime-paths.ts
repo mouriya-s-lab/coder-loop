@@ -7,6 +7,7 @@ export const LOOP_DATA_DB_FILENAME = "db.sqlite"
 export const LOOP_DATA_DAEMON_SOCKET_FILENAME = "daemon.sock"
 export const LOOP_DATA_DAEMON_PID_FILENAME = "daemon.pid"
 export const LOOP_DATA_CHAINS_DIRNAME = "chains"
+export const LOOP_DATA_DAEMON_DIRNAME = "daemon"
 
 export const CHAIN_SHARED_FILENAME = "shared.md"
 export const CHAIN_ISSUES_DIRNAME = "issues"
@@ -49,6 +50,11 @@ export type LoopDataPaths = {
 	daemonSocket: string
 	daemonPid: string
 	chainsDir: string
+	daemonLogDir: string
+	daemonBatchDir: (timestamp: string) => string
+	daemonLogFile: (timestamp: string) => string
+	daemonStdoutFile: (timestamp: string) => string
+	daemonStderrFile: (timestamp: string) => string
 }
 
 export type ChainRuntimePaths = {
@@ -96,12 +102,19 @@ export function resolveLoopDataRoot(options: LoopDataRootOptions = {}): string {
 
 export function resolveLoopDataPaths(options: LoopDataRootOptions = {}): LoopDataPaths {
 	const root = resolveLoopDataRoot(options)
+	const daemonLogDir = resolve(root, LOOP_DATA_DAEMON_DIRNAME)
+	const daemonBatchDir = (timestamp: string) => resolve(daemonLogDir, sanitizePathComponent(timestamp, "daemon timestamp"))
 	return {
 		root,
 		dbFile: resolve(root, LOOP_DATA_DB_FILENAME),
 		daemonSocket: resolve(root, LOOP_DATA_DAEMON_SOCKET_FILENAME),
 		daemonPid: resolve(root, LOOP_DATA_DAEMON_PID_FILENAME),
 		chainsDir: resolve(root, LOOP_DATA_CHAINS_DIRNAME),
+		daemonLogDir,
+		daemonBatchDir,
+		daemonLogFile: (timestamp) => resolve(daemonBatchDir(timestamp), DAEMON_LOG_FILENAME),
+		daemonStdoutFile: (timestamp) => resolve(daemonBatchDir(timestamp), RUN_STDOUT_FILENAME),
+		daemonStderrFile: (timestamp) => resolve(daemonBatchDir(timestamp), RUN_STDERR_FILENAME),
 	}
 }
 

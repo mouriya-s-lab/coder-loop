@@ -17,13 +17,23 @@ describe("runtime path model", () => {
 	test("loop-data root default resolves under user-level coder-loop data", () => {
 		expect(defaultLoopDataRoot("/home/tester")).toBe("/home/tester/.coder-loop/loop-data")
 		expect(resolveLoopDataRoot({ homeDir: "/home/tester", env: {} })).toBe("/home/tester/.coder-loop/loop-data")
-		expect(resolveLoopDataPaths({ homeDir: "/home/tester", env: {} })).toEqual({
-			root: "/home/tester/.coder-loop/loop-data",
-			dbFile: "/home/tester/.coder-loop/loop-data/db.sqlite",
-			daemonSocket: "/home/tester/.coder-loop/loop-data/daemon.sock",
-			daemonPid: "/home/tester/.coder-loop/loop-data/daemon.pid",
-			chainsDir: "/home/tester/.coder-loop/loop-data/chains",
-		})
+		const paths = resolveLoopDataPaths({ homeDir: "/home/tester", env: {} })
+		expect(paths.root).toBe("/home/tester/.coder-loop/loop-data")
+		expect(paths.dbFile).toBe("/home/tester/.coder-loop/loop-data/db.sqlite")
+		expect(paths.daemonSocket).toBe("/home/tester/.coder-loop/loop-data/daemon.sock")
+		expect(paths.daemonPid).toBe("/home/tester/.coder-loop/loop-data/daemon.pid")
+		expect(paths.chainsDir).toBe("/home/tester/.coder-loop/loop-data/chains")
+	})
+
+	test("global daemon process logs live under the loop-data root, not under any chain", () => {
+		const paths = resolveLoopDataPaths({ loopDataRoot: "/var/lib/coder-loop/loop-data" })
+		expect(paths.daemonLogDir).toBe("/var/lib/coder-loop/loop-data/daemon")
+		expect(paths.daemonBatchDir("2026-06-05-07-22-43")).toBe("/var/lib/coder-loop/loop-data/daemon/2026-06-05-07-22-43")
+		expect(paths.daemonLogFile("2026-06-05-07-22-43")).toBe("/var/lib/coder-loop/loop-data/daemon/2026-06-05-07-22-43/daemon.log")
+		expect(paths.daemonStdoutFile("2026-06-05-07-22-43")).toBe("/var/lib/coder-loop/loop-data/daemon/2026-06-05-07-22-43/stdout.log")
+		expect(paths.daemonStderrFile("2026-06-05-07-22-43")).toBe("/var/lib/coder-loop/loop-data/daemon/2026-06-05-07-22-43/stderr.log")
+		// The daemon log location must not be nested inside chains/.
+		expect(paths.daemonLogDir.includes("/chains/")).toBe(false)
 	})
 
 	test("loop-data root env override takes precedence over default", () => {

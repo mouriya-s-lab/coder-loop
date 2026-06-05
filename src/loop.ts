@@ -3040,11 +3040,11 @@ const DAEMON_IGNORED_SIGNALS = ["SIGHUP", "SIGUSR1", "SIGUSR2", "SIGPIPE"] as co
 export function buildDaemonStartPlan(args: Extract<DaemonCommandArgs, { action: "start" }>): DaemonStartPlan {
 	const targetCwd = resolve(args.targetCwd)
 	const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")
-	const chainName = args.chainName ?? null
-	const chainPaths = chainName === null ? null : resolveChainRuntimePaths(chainName, loopDataRootOption(args.loopDataRoot ?? null))
-	const logDir = chainPaths === null ? resolve(targetCwd, DEFAULT_LOG_DIR) : chainPaths.daemonBatchDir(timestamp)
-	const stdoutPath = resolve(logDir, "stdout.log")
-	const stderrPath = resolve(logDir, "stderr.log")
+	// The central daemon is global, not per-chain: route its process stdout/stderr to the
+	// loop-data-root daemon log location instead of any chains/<chain>/daemon directory.
+	const loopDataPaths = resolveLoopDataPaths(loopDataRootOption(args.loopDataRoot ?? null))
+	const stdoutPath = loopDataPaths.daemonStdoutFile(timestamp)
+	const stderrPath = loopDataPaths.daemonStderrFile(timestamp)
 	const command = [
 		process.argv[0] ?? "bun",
 		resolve(import.meta.dir, "loop.ts"),
