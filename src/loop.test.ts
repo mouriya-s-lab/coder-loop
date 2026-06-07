@@ -21,6 +21,7 @@ import {
 	parseSessionIdFromRunnerStream,
 	renderFragmentIndex,
 	renderPrompt,
+	stripRoleEntryFrontmatter,
 	resolveBinding,
 	reviewPhaseForPreset,
 	selectRunnerForPhase,
@@ -339,6 +340,18 @@ describe("runner and daemon helpers", () => {
 		expect(parseRoleEntryMetadata("---\ndefaultRunner: claude\n---\n# role", "role").defaultRunner).toBe("claude")
 		expect(parseRoleEntryMetadata("# role", "role").defaultRunner).toBeNull()
 		expect(() => parseRoleEntryMetadata("---\ndefaultRunner: bash\n---\n# role", "role")).toThrow(/defaultRunner/)
+	})
+
+	test("stripRoleEntryFrontmatter removes leading frontmatter so prompts never start with --", () => {
+		expect(stripRoleEntryFrontmatter("---\ndefaultRunner: claude\n---\n# role\nbody")).toBe("# role\nbody")
+		// trailing blank line(s) after the closing fence are collapsed
+		expect(stripRoleEntryFrontmatter("---\ndefaultRunner: codex\n---\n\n# role")).toBe("# role")
+		// no frontmatter -> untouched
+		expect(stripRoleEntryFrontmatter("# role\nbody")).toBe("# role\nbody")
+		// a bare leading --- with no closing fence is left intact (not frontmatter)
+		expect(stripRoleEntryFrontmatter("--- not frontmatter")).toBe("--- not frontmatter")
+		// CRLF frontmatter is stripped too
+		expect(stripRoleEntryFrontmatter("---\r\ndefaultRunner: claude\r\n---\r\n# role")).toBe("# role")
 	})
 
 	test("buildDaemonStartPlan starts the central daemon without legacy loop flags", async () => {

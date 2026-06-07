@@ -3846,6 +3846,16 @@ export function parseRoleEntryMetadata(markdown: string, label: string): RoleEnt
 	return { defaultRunner }
 }
 
+// Role-entry frontmatter is preset metadata consumed by parseRoleEntryMetadata; it must never
+// reach an agent prompt. claude 2.1.160 rejects a `-p` value starting with `--`, so a leaked
+// `---` frontmatter header crashes the review runner on spawn. Strip it at the prompt seam.
+export function stripRoleEntryFrontmatter(markdown: string): string {
+	if (!markdown.startsWith("---\n") && !markdown.startsWith("---\r\n")) return markdown
+	const match = /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/.exec(markdown)
+	if (match === null) return markdown
+	return markdown.slice(match[0].length).replace(/^(?:[ \t]*\r?\n)+/, "")
+}
+
 function parseVariableSource(value: string, label: string): PresetVariableSource {
 	const match = /^(item|config|runtime)\.([a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z][a-zA-Z0-9_]*)*)$/.exec(value)
 	if (!match) presetError(`${label}: invalid variable source "${value}" (expected item.<f> | config.<f> | runtime.<k>)`)
@@ -4341,7 +4351,7 @@ export function getItemId(item: ItemRecord, preset: Preset): string {
 }
 
 export function renderPrompt(template: string, phase: PresetPhase, ctx: ResolveContext & { item: ItemRecord }): string {
-	let result = template
+	let result = stripRoleEntryFrontmatter(template)
 	for (const [key, source] of phase.variables) {
 		const value = resolveBinding(source, ctx)
 		result = result.replaceAll(`{{${key}}}`, value)
