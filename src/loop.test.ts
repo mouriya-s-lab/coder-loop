@@ -305,10 +305,19 @@ describe("runtime binding helpers", () => {
 		expect(documentedRuntimeBindingKeys(presetAuthoring)).toEqual([...RUNTIME_BINDING_KEYS])
 	})
 
-	test("reserved string registry includes the engine-parsed finalizer syntax", async () => {
+	test("reserved string registry includes engine-parsed summary enums", async () => {
 		const registry = await readFile(resolve(REPO_ROOT, "docs/reserved-strings.md"), "utf8")
 
-		for (const token of ["`FINALIZER SUMMARY:`", "`decision=complete`", "`decision=keep-active`"]) {
+		for (const token of [
+			"`FINALIZER SUMMARY:`",
+			"`decision=complete`",
+			"`decision=keep-active`",
+			"`verdict=retry`",
+			"`verdict=accepted`",
+			"`verdict=skip`",
+			"`verdict=blocked`",
+			"`verdict=stop`",
+		]) {
 			expect(registry).toContain(token)
 		}
 		expect(registry).not.toContain("`ITERATION SUMMARY:`")

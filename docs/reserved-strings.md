@@ -16,6 +16,11 @@ it does not replace runtime parsing.
 | `FINALIZER SUMMARY:` | Chain-complete trigger decision marker parsed after the bundled umbrella finalizer phase exits. | `src/loop.ts` `parseFinalizerSummaryDecisionFromText` |
 | `decision=complete` | Finalizer summary decision that permits the chain-complete trigger to finish the chain. | `src/loop.ts` `parseFinalizerSummaryDecisionFromText` |
 | `decision=keep-active` | Finalizer summary decision that keeps the chain active for remaining or uncertain umbrella scope. | `src/loop.ts` `parseFinalizerSummaryDecisionFromText` |
+| `verdict=retry` | Review summary verdict that routes the item to another iteration. | `src/loop.ts` `parseReviewSummaryVerdictFromText` |
+| `verdict=accepted` | Review summary verdict that accepts the PR or no-PR resolution. | `src/loop.ts` `parseReviewSummaryVerdictFromText` |
+| `verdict=skip` | Review summary verdict that classifies the issue as no longer requiring work. | `src/loop.ts` `parseReviewSummaryVerdictFromText` |
+| `verdict=blocked` | Review summary verdict that records an external blocker. | `src/loop.ts` `parseReviewSummaryVerdictFromText` |
+| `verdict=stop` | Review summary verdict that stops the loop because review infrastructure or global state cannot safely continue. | `src/loop.ts` `parseReviewSummaryVerdictFromText` |
 
 ## Preset-Declared Strings
 
