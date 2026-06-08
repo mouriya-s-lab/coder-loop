@@ -114,6 +114,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(preset.agent.attemptTimeoutSeconds).toBe(DEFAULT_ATTEMPT_TIMEOUT_SECONDS)
 		expect([...preset.statuses.continuable]).toEqual(["queued", "in_progress", "changes_requested"])
 		expect([...preset.statuses.terminal]).toEqual(["blocked", "moot", "done", "exhausted"])
+		expect([...preset.statuses.unblockable]).toEqual(["blocked"])
 		expect(Object.fromEntries(preset.phases.map((phase) => [phase.name, phase.summaryMarker]))).toEqual({
 			iteration: "ITERATION SUMMARY:",
 			review: "REVIEW SUMMARY:",
@@ -295,6 +296,30 @@ describe("parsePreset schema validation", () => {
 		expect(preset.phases.map((phase) => phase.exits.map((exit) => exit.status))).toEqual([["in_progress"], ["done"]])
 		expect(preset.phases[1]!.defaultRunner).toBe("claude")
 		expect(preset.phases.map((phase) => phase.summaryMarker)).toEqual(["ITER DONE:", "REVIEW DONE:"])
+	})
+
+	test("accepts manual unblock statuses declared as terminal subset", () => {
+		const root: Record<string, unknown> = minimalRoot()
+		root.statuses = { continuable: ["ready"], terminal: ["parked", "finished"], entry: "ready", unblockable: ["parked"] }
+
+		const preset = parsePreset(root, "/tmp")
+
+		expect(preset.statuses.entry).toBe("ready")
+		expect([...preset.statuses.unblockable]).toEqual(["parked"])
+	})
+
+	test("rejects manual unblock statuses outside terminal set", () => {
+		const root: Record<string, unknown> = minimalRoot()
+		root.statuses = { continuable: ["ready"], terminal: ["finished"], entry: "ready", unblockable: ["parked"] }
+
+		expect(() => parsePreset(root, "/tmp")).toThrow(/statuses\.unblockable: "parked" must be one of statuses\.terminal/)
+	})
+
+	test("rejects duplicate manual unblock statuses", () => {
+		const root: Record<string, unknown> = minimalRoot()
+		root.statuses = { continuable: ["ready"], terminal: ["parked"], entry: "ready", unblockable: ["parked", "parked"] }
+
+		expect(() => parsePreset(root, "/tmp")).toThrow(/statuses\.unblockable: duplicate status "parked"/)
 	})
 
 	test("phases without summaryMarker disable the post-summary watchdog", () => {

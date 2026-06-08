@@ -15,6 +15,7 @@
 | `item.idField` | `issue`（GitHub issue number） |
 | `statuses.continuable` | `queued / in_progress / changes_requested` |
 | `statuses.terminal` | `blocked / moot / done / exhausted` |
+| `statuses.unblockable` | `blocked`（`queue unblock` 恢复到 `statuses.entry = queued`） |
 | phases | `iteration` → `review`，以及 review 后按 `trigger` 条件运行的 side-effect phase（当前：`blocked-responder` on `blocked`）；planning 不在 phases 内，由 `/dev-plan` slash command 入口驱动 |
 | `agent.binary` | `claude` |
 | fragments | 48 个，分布在 `common/ / plan/ / iter/ / review/` 四个目录 |

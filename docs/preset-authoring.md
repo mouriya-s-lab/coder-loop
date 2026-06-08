@@ -96,6 +96,9 @@ bun src/loop.ts --target-cwd <fresh-target> --check-runtime
 | `[item.fields]` | table | 否 | preset 额外要绑定的透明 item 字段声明。每个字段值是 `"string"|"number"|"boolean"|"json"`，或 `{ type = "..." }` |
 | `[statuses].continuable` | string[] | 是 | 引擎会调度的 status 集合；item.status 落在这个集合内才被选中 |
 | `[statuses].terminal` | string[] | 是 | 引擎跳过的 status 集合（与 continuable 合并去重） |
+| `[statuses].entry` | string | 否 | 依赖解除或手动 `queue unblock` 后恢复到的 continuable status；默认取 `continuable[0]` |
+| `[statuses].success` | string[] | 否 | terminal 子集；dependsOn 依赖全部进入 success 后，下游 terminal item 会恢复到 `entry` |
+| `[statuses].unblockable` | string[] | 否 | terminal 子集；`queue unblock` 只会把这些 terminal status 恢复到 `entry` |
 | `[[phases]].name` | string | 是 | phase 名字，写入 `state.current.phase` |
 | `[[phases]].prompt` | string | 是 | 相对 preset.toml 的 entry prompt 模板路径 |
 | `[[phases]].runner` | `"claude"|"codex"` | 否 | phase 默认 runner；未声明时使用 engine-builtin fallback |
@@ -116,6 +119,7 @@ bun src/loop.ts --target-cwd <fresh-target> --check-runtime
 - 同 `name` 的 phase 不可重名；
 - 同 `id` 的 fragment 不可重复；
 - `[statuses]` 的 continuable / terminal 集合不可有交集；
+- `[statuses].entry` 必须属于 continuable；`success` 与 `unblockable` 必须属于 terminal；
 - `[[phases.exits]]` 中每个 status 必须属于 continuable 或 terminal status，且同一 phase 内不可重复；
 - item phase trigger 的 `afterPhase` 必须指向已声明 phase，`whenStatus` 必须属于 continuable 或 terminal status，且必须出现在 source phase 的 exits 里；
 - chain lifecycle trigger 目前只支持 `on = "chain-complete"`，且不能同时声明 `afterPhase` / `whenStatus`；

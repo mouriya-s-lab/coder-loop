@@ -44,6 +44,26 @@ describe("db-backed v2 loop hard cut", () => {
 		expect(await readFile(fixture.statePath, "utf-8")).toBe(beforeText)
 	})
 
+	test("queue unblock restores preset-declared terminal status to preset entry", async () => {
+		const fixture = await createFixture({
+			initialStatus: "parked",
+			extra: { blockerRepo: "owner/dependency", blockerRef: "#267" },
+			customManualUnblockPreset: true,
+		})
+
+		const result = runCli(["queue", "unblock", fixture.target, "--issue", "1", "--loop-data-root", fixture.loopDataRoot, "--chain", CHAIN_NAME])
+
+		expect(result.exitCode).toBe(0)
+		const output = JSON.parse(result.stdout) as {
+			mutation: { changed: boolean; beforeStatus: string; afterStatus: string }
+			verification: { itemStatus: string }
+		}
+		expect(output.mutation).toMatchObject({ changed: true, beforeStatus: "parked", afterStatus: "ready" })
+		expect(output.verification.itemStatus).toBe("ready")
+		expect(readItem(fixture.loopDataRoot).status).toBe("ready")
+		expect(readItem(fixture.loopDataRoot).extra.blockerRepo).toBeUndefined()
+	})
+
 	test("daemon start dry-run resolves the chain without per-target state writes", async () => {
 		const fixture = await createFixture()
 		const beforeText = await readFile(fixture.statePath, "utf-8")
@@ -85,6 +105,7 @@ describe("db-backed v2 loop hard cut", () => {
 type FixtureOptions = {
 	initialStatus?: string
 	extra?: Record<string, string>
+	customManualUnblockPreset?: boolean
 }
 
 type Fixture = {
@@ -108,19 +129,52 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
 	await writeFile(resolve(target, ".coder-loop/workflow.md"), "# workflow\n")
 	await writeFile(resolve(loopDataRoot, "chains", CHAIN_NAME, "shared.md"), "# shared\n")
 	await writeFile(statePath, `${JSON.stringify({ queue: [], recentRuns: [], current: null }, null, 2)}\n`)
-	seedDb(loopDataRoot, target, options)
+	const presetPath = options.customManualUnblockPreset === true ? await createManualUnblockPreset(root) : null
+	seedDb(loopDataRoot, target, options, presetPath)
 	return { target, loopDataRoot, statePath }
 }
 
-function seedDb(loopDataRoot: string, target: string, options: FixtureOptions): void {
+async function createManualUnblockPreset(root: string): Promise<string> {
+	const presetPath = resolve(root, "manual-unblock-preset")
+	await mkdir(presetPath, { recursive: true })
+	await writeFile(resolve(presetPath, "run.md"), "Run issue {{ISSUE}}.\n")
+	await writeFile(resolve(presetPath, "preset.toml"), `name = "manual-unblock-fixture"
+version = 1
+description = "Fixture preset for queue unblock custom statuses."
+
+[item]
+idField = "issue"
+
+[statuses]
+continuable = ["ready", "retry"]
+terminal = ["parked", "finished"]
+entry = "ready"
+unblockable = ["parked"]
+
+[[phases]]
+name = "run"
+prompt = "run.md"
+
+  [phases.variables]
+  ISSUE = "item.issue"
+
+[agent]
+binary = "echo"
+extraArgs = []
+attemptTimeoutSeconds = 3600
+`)
+	return presetPath
+}
+
+function seedDb(loopDataRoot: string, target: string, options: FixtureOptions, presetPath: string | null): void {
 	const store = openSqliteStateStore({ loopDataRoot })
 	try {
 		const chain = store.createChain({
 			name: CHAIN_NAME,
-			preset: "gh-issue-pr-iteration",
+			preset: presetPath === null ? "gh-issue-pr-iteration" : "manual-unblock-fixture",
 			repository: "fixture/repo",
 			baseBranch: "main",
-			metadata: {},
+			metadata: presetPath === null ? {} : { presetPath },
 		})
 		store.createItem({
 			chainId: chain.id,

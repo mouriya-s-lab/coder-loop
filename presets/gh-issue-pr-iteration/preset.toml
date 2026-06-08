@@ -37,6 +37,8 @@ terminal    = ["blocked", "moot", "done", "exhausted"]
 success     = ["done"]
 # entry: the actionable status the engine restores a dependency-unblocked item to.
 entry       = "queued"
+# unblockable: terminal statuses that `queue unblock` may restore to `entry`.
+unblockable = ["blocked"]
 
 [[phases]]
 name   = "iteration"

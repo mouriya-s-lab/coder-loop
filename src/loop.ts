@@ -418,7 +418,7 @@ const PresetTomlBoundary = arkType({
 	version: "number",
 	"description?": "string",
 	item: { idField: "string", "fields?": "object" },
-	statuses: { continuable: "string[]", terminal: "string[]", "success?": "string[]", "entry?": "string" },
+	statuses: { continuable: "string[]", terminal: "string[]", "success?": "string[]", "entry?": "string", "unblockable?": "string[]" },
 	phases: PresetPhaseBoundary.array(),
 	"fragments?": PresetFragmentBoundary.array(),
 	agent: { binary: "string", "extraArgs?": "string[]", "attemptTimeoutSeconds?": "number" },
@@ -511,6 +511,7 @@ export type Preset = {
 		terminal: readonly string[]
 		success: readonly string[]
 		entry: string
+		unblockable: readonly string[]
 	}
 	phases: readonly PresetPhase[]
 	fragments: readonly PresetFragment[]
@@ -1448,7 +1449,7 @@ const itemCliCommand = subcommands({
 
 const queueUnblockCliCommand = command({
 	name: "unblock",
-	description: "Requeue one blocked item and clear its blocker metadata.",
+	description: "Restore one preset-unblockable item to the preset entry status and clear blocker metadata.",
 	args: {
 		target: positional({ displayName: "target", type: cmdString }),
 		issue: option({ long: "issue", type: cmdString }),
@@ -3257,8 +3258,8 @@ export type QueueUnblockMutationOutcome =
 	| {
 			changed: true
 			issue: string
-			beforeStatus: "blocked"
-			afterStatus: "queued"
+			beforeStatus: string
+			afterStatus: string
 			clearedBlockerRepo: boolean
 			clearedBlockerRef: boolean
 			clearedCurrent: boolean
@@ -3271,7 +3272,7 @@ export type QueueUnblockMutationOutcome =
 	| {
 			changed: false
 			issue: string
-			reason: "not_blocked"
+			reason: "not_unblockable"
 			status: string
 	  }
 
@@ -3309,13 +3310,12 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 		workflowPath: null,
 	})
 	const options = runtime.options
-	assertQueueUnblockSupported(options.preset)
 	const issue = normalizeQueueIssueId(args.issue)
 	const issueNumber = parseRequiredPositiveInteger(issue, "queue unblock: --issue")
 	const store = openSqliteStateStore({ createIfMissing: false, ...loopDataRootOption(options.loopDataRoot) })
 	let mutation: QueueUnblockMutationOutcome
 	try {
-		mutation = requeueBlockedItemRecord(store, runtime.chain, options.preset, issue, issueNumber, args.dryRun)
+		mutation = restoreUnblockableItemRecord(store, runtime.chain, options.preset, issue, issueNumber, args.dryRun)
 		if (!mutation.changed && mutation.reason === "not_found") {
 			fail(`queue unblock: issue ${issue} not found in SQLite state DB`)
 		}
@@ -3384,7 +3384,7 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 	process.stdout.write(JSON.stringify(result, null, "\t") + "\n")
 }
 
-function requeueBlockedItemRecord(
+function restoreUnblockableItemRecord(
 	store: SqliteStateStore,
 	chain: ChainRecord,
 	preset: Preset,
@@ -3394,7 +3394,8 @@ function requeueBlockedItemRecord(
 ): QueueUnblockMutationOutcome {
 	const item = store.getItemByIssue(chain.id, issueNumber)
 	if (item === null) return { changed: false, issue, reason: "not_found" }
-	if (item.status !== "blocked") return { changed: false, issue, reason: "not_blocked", status: item.status }
+	if (!preset.statuses.unblockable.includes(item.status)) return { changed: false, issue, reason: "not_unblockable", status: item.status }
+	const entryStatus = preset.statuses.entry
 
 	const nextExtra = { ...item.extra }
 	const clearedBlockerRepo = hasOwnJsonKey(nextExtra, "blockerRepo")
@@ -3408,7 +3409,7 @@ function requeueBlockedItemRecord(
 
 	if (!dryRun) {
 		store.updateItem(item.id, {
-			status: "queued",
+			status: entryStatus,
 			extra: nextExtra,
 			updatedAt: unixSeconds(),
 		})
@@ -3418,8 +3419,8 @@ function requeueBlockedItemRecord(
 	return {
 		changed: true,
 		issue,
-		beforeStatus: "blocked",
-		afterStatus: "queued",
+		beforeStatus: item.status,
+		afterStatus: entryStatus,
 		clearedBlockerRepo,
 		clearedBlockerRef,
 		clearedCurrent,
@@ -3681,12 +3682,6 @@ async function inferRepositoryFromGit(targetCwd: string): Promise<string | null>
 	return null
 }
 
-function assertQueueUnblockSupported(preset: Preset): void {
-	if (!preset.statuses.terminal.includes("blocked") || !preset.statuses.continuable.includes("queued")) {
-		fail(`queue unblock: preset "${preset.name}" must declare terminal status "blocked" and continuable status "queued"`)
-	}
-}
-
 export function normalizeQueueIssueId(raw: string): string {
 	const trimmed = raw.trim()
 	if (trimmed === "") fail("queue unblock: --issue must not be empty")
@@ -3745,6 +3740,13 @@ export function parsePreset(value: unknown, presetDir: string): Preset {
 	const entryStatus = root.statuses.entry ?? root.statuses.continuable[0]
 	if (entryStatus === undefined) presetError("preset.statuses: continuable must declare at least one status")
 	if (!root.statuses.continuable.includes(entryStatus)) presetError(`preset.statuses.entry: "${entryStatus}" must be one of statuses.continuable`)
+	const unblockableStatuses = root.statuses.unblockable ?? []
+	const seenUnblockableStatuses = new Set<string>()
+	for (const status of unblockableStatuses) {
+		if (!root.statuses.terminal.includes(status)) presetError(`preset.statuses.unblockable: "${status}" must be one of statuses.terminal`)
+		if (seenUnblockableStatuses.has(status)) presetError(`preset.statuses.unblockable: duplicate status "${status}"`)
+		seenUnblockableStatuses.add(status)
+	}
 	const itemFields = parsePresetItemFields(root.item.fields ?? {}, "preset.item.fields")
 	if (itemFields.has(root.item.idField)) presetError(`preset.item.fields.${root.item.idField}: idField is already declared by preset.item.idField`)
 	const attemptTimeoutSeconds = root.agent.attemptTimeoutSeconds ?? DEFAULT_ATTEMPT_TIMEOUT_SECONDS
@@ -3832,7 +3834,7 @@ export function parsePreset(value: unknown, presetDir: string): Preset {
 		description: root.description ?? "",
 		presetDir,
 		item: { idField: root.item.idField, fields: itemFields },
-		statuses: { continuable: root.statuses.continuable, terminal: root.statuses.terminal, success: successStatuses, entry: entryStatus },
+		statuses: { continuable: root.statuses.continuable, terminal: root.statuses.terminal, success: successStatuses, entry: entryStatus, unblockable: unblockableStatuses },
 		phases,
 		fragments,
 		agent: { binary: root.agent.binary, extraArgs: root.agent.extraArgs ?? [], attemptTimeoutSeconds },
