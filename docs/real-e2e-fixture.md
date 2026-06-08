@@ -180,7 +180,7 @@ Observed result:
   `--skip-git-repo-check` to runner defaults.
 - `codex exec resume` does not accept `--sandbox`; sandbox defaults apply only to
   fresh `codex exec`.
-- Review currently reads the iteration trace, which contains
-  `ITERATION SUMMARY`; the generic summary watchdog may arm during review. In
-  the successful run review exited before the watchdog fired, but this is worth
-  tracking if future reviews are longer.
+- Review currently reads the iteration trace, which contains the iteration
+  phase summary marker. The post-summary watchdog observes only the current
+  phase's preset-declared `summaryMarker`, so review should not arm on markers
+  from the prior iteration trace.

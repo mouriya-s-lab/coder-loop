@@ -401,6 +401,7 @@ const PresetPhaseBoundary = arkType({
 	name: "string",
 	prompt: "string",
 	"runner?": "string",
+	"summaryMarker?": "string",
 	"exits?": PresetPhaseExitBoundary.array(),
 	"variables?": "object",
 	"trigger?": PresetPhaseTriggerBoundary,
@@ -482,6 +483,7 @@ export type PresetPhaseExit = {
 export type PresetPhase = {
 	name: string
 	prompt: string
+	summaryMarker: string | null
 	exits: readonly PresetPhaseExit[]
 	variables: ReadonlyArray<readonly [string, PresetVariableSource]>
 	variableDocs: ReadonlyMap<string, PresetVariableDoc>
@@ -841,8 +843,6 @@ export const BACKOFF_BUDGET_SECONDS = 7200
 const BACKOFF_INITIAL_SECONDS = 4
 const BACKOFF_MAX_INTERVAL_SECONDS = 600
 
-export const SUMMARY_WATCHDOG_MARKER = "ITERATION SUMMARY:"
-export const REVIEW_SUMMARY_WATCHDOG_MARKER = "REVIEW SUMMARY:"
 export type ReviewSummaryVerdict = "retry" | "accepted" | "skip" | "blocked" | "stop"
 export const SUMMARY_WATCHDOG_TERM_MS = Infinity
 export const SUMMARY_WATCHDOG_KILL_MS = 5 * 1000
@@ -2422,6 +2422,7 @@ async function runReview(
 		reviewOutputPath,
 		agentCwd,
 		runner,
+		summaryWatchdogConfigForPhase(reviewPhase),
 		phaseEventContext,
 	)
 	const reviewDuration = (Date.now() - reviewStart) / 1000
@@ -2443,8 +2444,9 @@ async function runReview(
 			durationSeconds: Math.round(reviewDuration),
 		})
 	}
-	const stopRequested = reviewCode === 0 && parseReviewSummaryVerdict(reviewTrace, runner.kind) === "stop"
-	if (stopRequested) log(`${reviewPhase.name} agent requested loop stop via REVIEW SUMMARY.`)
+	const reviewVerdict = reviewPhase.summaryMarker === null ? null : parseReviewSummaryVerdict(reviewTrace, reviewPhase.summaryMarker, runner.kind)
+	const stopRequested = reviewCode === 0 && reviewVerdict === "stop"
+	if (stopRequested) log(`${reviewPhase.name} agent requested loop stop via declared phase summary marker.`)
 	return { code: reviewCode, stopRequested }
 }
 
@@ -3779,11 +3781,12 @@ export function parsePreset(value: unknown, presetDir: string): Preset {
 		}
 		const trigger = parsePresetPhaseTrigger(entry.trigger ?? null, `preset.phases[${index}].trigger`)
 		const runner = parsePhaseRunner(entry.runner ?? null, `preset.phases[${index}].runner`)
+		const summaryMarker = parsePhaseSummaryMarker(entry.summaryMarker ?? null, `preset.phases[${index}].summaryMarker`)
 		const exits = parsePresetPhaseExits(entry.exits ?? [], `preset.phases[${index}].exits`)
 		if (hasOwnJsonKey(entry as JsonObject, "statusWrites")) {
 			presetError(`preset.phases[${index}].statusWrites: use [[phases.exits]] with status and when`)
 		}
-		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), exits, variables, variableDocs, trigger, defaultRunner: runner })
+		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), summaryMarker, exits, variables, variableDocs, trigger, defaultRunner: runner })
 	}
 	if (!phases.some((phase) => phase.trigger === null)) presetError("preset.phases: must include at least one non-trigger phase")
 
@@ -3912,6 +3915,13 @@ function parseConfigBindingDefaultValue(value: unknown, label: string): ConfigBi
 function parsePhaseRunner(value: unknown, label: string): AgentRunnerKind | null {
 	if (value === null) return null
 	if (value !== "claude" && value !== "codex") presetError(`${label}: must be "claude" or "codex"`)
+	return value
+}
+
+function parsePhaseSummaryMarker(value: unknown, label: string): string | null {
+	if (value === null) return null
+	if (typeof value !== "string") presetError(`${label}: must be a string`)
+	if (value.trim() === "") presetError(`${label}: must not be empty`)
 	return value
 }
 
@@ -4247,7 +4257,7 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 		const outputPath = agentOutputPath(options, finalizerRunId, phase.name)
 		const resolvedRunner = await resolvePhaseRunner(phase.name)
 		log(`Starting chain-complete trigger phase ${phase.name} for chain ${input.chain.name} (runner=${resolvedRunner.kind})...`)
-		const { output, code } = await runAgent(options, phase.name, prompt, outputPath, targetCwd, resolvedRunner)
+		const { output, code } = await runAgent(options, phase.name, prompt, outputPath, targetCwd, resolvedRunner, summaryWatchdogConfigForPhase(phase))
 		log(`Chain-complete trigger phase ${phase.name} finished: exit=${code}, output=${outputPath} (${output.length} bytes)`)
 		if (code !== 0) throw new Error(`chain-complete trigger phase ${phase.name} exited ${code}`)
 		const decision = parseFinalizerSummaryDecision(output, resolvedRunner.kind)
@@ -4730,6 +4740,7 @@ async function runAgent(
 	outputPath: string,
 	agentCwd: string,
 	runner: AgentRunnerSelection,
+	watchdog: SummaryWatchdogConfig | null,
 	eventContext?: LoopEventContext,
 ): Promise<{ output: string; code: number }> {
 	const sessionsPath = agentSessionsPath(outputPath)
@@ -4742,7 +4753,7 @@ async function runAgent(
 
 	const result = await runAgentWithBackoff({
 		spawnAttempt: ({ resume }) => {
-			const baseInput: SpawnOneAttemptInput = { options, label, prompt, outputPath, sessionsPath, resume, agentCwd, runner }
+			const baseInput: SpawnOneAttemptInput = { options, label, prompt, outputPath, sessionsPath, resume, agentCwd, runner, watchdog }
 			return spawnOneAttempt(eventContext ? { ...baseInput, eventContext } : baseInput)
 		},
 		sleep: (seconds: number) => new Promise((resolve) => setTimeout(resolve, seconds * 1000)),
@@ -4794,7 +4805,7 @@ export type SpawnOneAttemptInput = {
 	resume: ResumeDecision
 	agentCwd: string
 	runner?: AgentRunnerSelection
-	watchdog?: SummaryWatchdogConfig
+	watchdog: SummaryWatchdogConfig | null
 	attemptTimeout?: AttemptTimeoutConfig | null
 	eventContext?: LoopEventContext
 }
@@ -4811,12 +4822,6 @@ export type AttemptTimeoutConfig = {
 	attemptSeconds: number
 }
 
-const DEFAULT_SUMMARY_WATCHDOG: SummaryWatchdogConfig = {
-	marker: SUMMARY_WATCHDOG_MARKER,
-	termMs: SUMMARY_WATCHDOG_TERM_MS,
-	killMs: SUMMARY_WATCHDOG_KILL_MS,
-}
-
 export function attemptTimeoutConfigForPreset(preset: Preset): AttemptTimeoutConfig {
 	return {
 		termMs: preset.agent.attemptTimeoutSeconds * 1000,
@@ -4825,11 +4830,12 @@ export function attemptTimeoutConfigForPreset(preset: Preset): AttemptTimeoutCon
 	}
 }
 
-export function summaryWatchdogConfigForPrompt(prompt: string): SummaryWatchdogConfig {
-	const marker = prompt.includes("REVIEW SUMMARY") ? REVIEW_SUMMARY_WATCHDOG_MARKER : SUMMARY_WATCHDOG_MARKER
+export function summaryWatchdogConfigForPhase(phase: Pick<PresetPhase, "summaryMarker">): SummaryWatchdogConfig | null {
+	if (phase.summaryMarker === null) return null
 	return {
-		...DEFAULT_SUMMARY_WATCHDOG,
-		marker,
+		marker: phase.summaryMarker,
+		termMs: SUMMARY_WATCHDOG_TERM_MS,
+		killMs: SUMMARY_WATCHDOG_KILL_MS,
 	}
 }
 
@@ -4859,6 +4865,17 @@ export type SummaryWatchdog = {
 
 type SummaryWatchdogStdoutObserver = {
 	observeStdout: (chunk: string) => void
+}
+
+function createDisabledSummaryWatchdog(): SummaryWatchdog {
+	let state: SummaryWatchdogState = { kind: "idle" }
+	return {
+		observeStdout: () => {},
+		cancel: () => {
+			state = { kind: "cancelled" }
+		},
+		state: () => state,
+	}
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -4905,10 +4922,14 @@ function finalSummaryLine(text: string, marker: string): string | null {
 	return lastLine?.startsWith(marker) ? lastLine : null
 }
 
-function parseReviewSummaryVerdictFromText(text: string): ReviewSummaryVerdict | null {
-	const summaryLine = finalSummaryLine(text, REVIEW_SUMMARY_WATCHDOG_MARKER)
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
+
+function parseReviewSummaryVerdictFromText(text: string, marker: string): ReviewSummaryVerdict | null {
+	const summaryLine = finalSummaryLine(text, marker)
 	if (summaryLine === null) return null
-	const match = summaryLine.match(/^REVIEW SUMMARY:\s*verdict=(retry|accepted|skip|blocked|stop)\s*;/)
+	const match = summaryLine.match(new RegExp(`^${escapeRegExp(marker)}\\s*verdict=(retry|accepted|skip|blocked|stop)\\s*;`))
 	return match === null ? null : match[1] as ReviewSummaryVerdict
 }
 
@@ -4925,16 +4946,16 @@ function runnerAgentTextFromJsonLine(line: string, runner: AgentRunnerKind): { p
 	}
 }
 
-export function parseReviewSummaryVerdict(output: string, runner: AgentRunnerKind = "claude"): ReviewSummaryVerdict | null {
+export function parseReviewSummaryVerdict(output: string, marker: string, runner: AgentRunnerKind = "claude"): ReviewSummaryVerdict | null {
 	let sawRunnerJson = false
 	let verdict: ReviewSummaryVerdict | null = null
 	for (const line of output.split(/\r?\n/)) {
 		const parsed = runnerAgentTextFromJsonLine(line, runner)
 		sawRunnerJson = sawRunnerJson || parsed.parsedRunnerEvent
 		if (parsed.text === null) continue
-		verdict = parseReviewSummaryVerdictFromText(parsed.text)
+		verdict = parseReviewSummaryVerdictFromText(parsed.text, marker)
 	}
-	return sawRunnerJson ? verdict : parseReviewSummaryVerdictFromText(output)
+	return sawRunnerJson ? verdict : parseReviewSummaryVerdictFromText(output, marker)
 }
 
 export function createSummaryWatchdogStdoutObserver(runner: AgentRunnerKind, marker: string, watchdog: SummaryWatchdog): SummaryWatchdogStdoutObserver {
@@ -5066,7 +5087,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			})
 			return statusWriteChain
 		}
-		const watchdogConfig = input.watchdog ?? summaryWatchdogConfigForPrompt(basePrompt)
+		const watchdogConfig = input.watchdog
 		const attemptTimeoutConfig = input.attemptTimeout ?? attemptTimeoutConfigForPreset(options.preset)
 		const child = spawn(runnerPlan.binary, runnerPlan.args, {
 			cwd: input.agentCwd,
@@ -5170,25 +5191,29 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			}, attemptTimeoutConfig.termMs)
 		}
 
-		watchdog = createSummaryWatchdog({
-			config: watchdogConfig,
-			setTimer: (cb, ms) => setTimeout(cb, ms),
-			clearTimer: (handle) => {
-				if (handle !== null) clearTimeout(handle)
-			},
-			onTerm: () => {
-				log(`Agent [${label}] forced-terminate after "${watchdogConfig.marker}" + ${Math.round(watchdogConfig.termMs / 1000)}s; sending SIGTERM (pid=${child.pid ?? "?"})`)
-				emitWatchdogFire("SIGTERM")
-				sendSignalToGroup("SIGTERM")
-			},
-			onKill: () => {
-				log(`Agent [${label}] forced-terminate SIGTERM+${Math.round(watchdogConfig.killMs / 1000)}s elapsed; sending SIGKILL (pid=${child.pid ?? "?"})`)
-				emitWatchdogFire("SIGKILL")
-				sendSignalToGroup("SIGKILL")
-			},
-			log,
-		})
-		const watchdogStdout = createSummaryWatchdogStdoutObserver(selectedRunner.kind, watchdogConfig.marker, watchdog)
+		watchdog = watchdogConfig === null
+			? createDisabledSummaryWatchdog()
+			: createSummaryWatchdog({
+					config: watchdogConfig,
+					setTimer: (cb, ms) => setTimeout(cb, ms),
+					clearTimer: (handle) => {
+						if (handle !== null) clearTimeout(handle)
+					},
+					onTerm: () => {
+						log(`Agent [${label}] forced-terminate after "${watchdogConfig.marker}" + ${Math.round(watchdogConfig.termMs / 1000)}s; sending SIGTERM (pid=${child.pid ?? "?"})`)
+						emitWatchdogFire("SIGTERM")
+						sendSignalToGroup("SIGTERM")
+					},
+					onKill: () => {
+						log(`Agent [${label}] forced-terminate SIGTERM+${Math.round(watchdogConfig.killMs / 1000)}s elapsed; sending SIGKILL (pid=${child.pid ?? "?"})`)
+						emitWatchdogFire("SIGKILL")
+						sendSignalToGroup("SIGKILL")
+					},
+					log,
+				})
+		const watchdogStdout = watchdogConfig === null
+			? { observeStdout: () => {} }
+			: createSummaryWatchdogStdoutObserver(selectedRunner.kind, watchdogConfig.marker, watchdog)
 		armAttemptTimeout()
 
 		const recordChunk = (stream: "stdout" | "stderr", chunk: Buffer): void => {
@@ -5319,7 +5344,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 							phase: attemptTimeoutStateAtClose === "kill-sent" ? "kill" : "term",
 							attemptSeconds: attemptTimeoutConfig.attemptSeconds,
 						}
-					: watchdogStateAtClose.kind === "term-sent" || watchdogStateAtClose.kind === "kill-sent"
+					: watchdogConfig !== null && (watchdogStateAtClose.kind === "term-sent" || watchdogStateAtClose.kind === "kill-sent")
 					? {
 							kind: "watchdog",
 							phase: watchdogStateAtClose.kind === "kill-sent" ? "kill" : "term",
@@ -5336,7 +5361,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 					: terminated.kind === "signal"
 						? `(${terminated.name})`
 						: terminated.kind === "watchdog"
-							? `(forced-terminate after "${watchdogConfig.marker}" + ${terminated.afterSummarySeconds}s, phase=${terminated.phase})`
+							? `(forced-terminate after declared phase summary marker + ${terminated.afterSummarySeconds}s, phase=${terminated.phase})`
 							: terminated.kind === "timeout"
 								? `(absolute attempt timeout after ${terminated.attemptSeconds}s, phase=${terminated.phase})`
 							: ""

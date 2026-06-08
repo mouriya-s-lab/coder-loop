@@ -44,6 +44,7 @@ const FAKE_RUNNER_STATUS_WRITE_SNIPPET = `if (typeof input.writeStatus === "stri
 }`
 
 const FAKE_RUNNER_DEFAULT_SUMMARY = "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=fake-runner default"
+const FAKE_RUNNER_REVIEW_MARKER = "REVIEW SUMMARY:"
 
 // Mirror of the real agents' status-writing decision for fake runners: derive the status
 // the agent would have written from the phase and the item's scripted summary/exitCode.
@@ -60,7 +61,7 @@ function daemonFakeRunnerWriteStatus(phase: string, extra: Record<string, unknow
 	if (typeof summary !== "string") return null
 	// Iteration handoff is structural; review summaries carry status verdicts.
 	if (summary.startsWith("ITERATION SUMMARY")) return null
-	const verdict = parseReviewSummaryVerdict(summary, "claude")
+	const verdict = parseReviewSummaryVerdict(summary, FAKE_RUNNER_REVIEW_MARKER, "claude")
 	switch (verdict) {
 		case "accepted":
 		case "stop":

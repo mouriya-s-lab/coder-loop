@@ -3695,6 +3695,7 @@ binary = "codex"
 }
 
 const FAKE_RUNNER_DEFAULT_SUMMARY = "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=fake-runner default"
+const FAKE_RUNNER_REVIEW_MARKER = "REVIEW SUMMARY:"
 
 // Mirrors a real agent's status decision for the fake runner: review agents write a preset status via
 // `coder-loop item update --status`, and the scheduler reads it. Iteration summaries write no item
@@ -3714,7 +3715,7 @@ function fakeRunnerWriteStatus(phase: string, extra: JsonObject): string | null 
 	const summary = hasSummary ? extra.summary : FAKE_RUNNER_DEFAULT_SUMMARY
 	if (typeof summary !== "string") return null
 	if (summary.startsWith("ITERATION SUMMARY")) return null
-	const verdict = parseReviewSummaryVerdict(summary, "claude")
+	const verdict = parseReviewSummaryVerdict(summary, FAKE_RUNNER_REVIEW_MARKER, "claude")
 	switch (verdict) {
 		case "accepted":
 		case "stop":

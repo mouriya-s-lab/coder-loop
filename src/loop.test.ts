@@ -9,6 +9,7 @@ import {
 	buildConfigBindings,
 	buildDaemonStartPlan,
 	buildRuntimeBindings,
+	createSummaryWatchdog,
 	decideResume,
 	detectHostRunner,
 	getItemId,
@@ -24,6 +25,7 @@ import {
 	stripRoleEntryFrontmatter,
 	resolveBinding,
 	selectRunnerForPhase,
+	summaryWatchdogConfigForPhase,
 	type ConfigBindings,
 	type IssueRunContext,
 	type JsonObject,
@@ -184,6 +186,7 @@ describe("ItemRecord prompt bindings", () => {
 		const phase: PresetPhase = {
 			name: "iteration",
 			prompt: "iteration.md",
+			summaryMarker: null,
 			exits: [],
 			variables: [
 				["ISSUE", { kind: "item", field: "issue" }],
@@ -208,6 +211,7 @@ describe("ItemRecord prompt bindings", () => {
 		const phase: PresetPhase = {
 			name: "review",
 			prompt: "review.md",
+			summaryMarker: "DONE:",
 			exits: [{ status: "done", when: "review accepted the result" }],
 			variables: [
 				["RUNTIME_INPUTS_DOC", { kind: "runtime", key: "runtimeInputsDoc" }],
@@ -459,9 +463,46 @@ describe("small parsers", () => {
 	})
 
 	test("runner stream parsers extract review verdicts and sessions", () => {
-		expect(parseReviewSummaryVerdict("REVIEW SUMMARY: verdict=retry; issue=#333; reason=x")).toBe("retry")
+		expect(parseReviewSummaryVerdict("PHASE DONE: verdict=retry; issue=#333; reason=x", "PHASE DONE:")).toBe("retry")
 		expect(parseSessionIdFromRunnerStream("claude", "{\"type\":\"system\",\"session_id\":\"sess-1\"}\n")).toBe("sess-1")
 		expect(parseSessionIdFromRunnerStream("codex", "{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}")).toBe("thread-1")
+	})
+
+	test("summary watchdog config is driven by phase metadata", () => {
+		expect(summaryWatchdogConfigForPhase({ summaryMarker: null })).toBeNull()
+		expect(summaryWatchdogConfigForPhase({ summaryMarker: "PHASE DONE:" })?.marker).toBe("PHASE DONE:")
+	})
+
+	test("summary watchdog observes only the declared phase marker", () => {
+		const timers: Array<() => void> = []
+		let termCalls = 0
+		let killCalls = 0
+		const watchdog = createSummaryWatchdog({
+			config: { marker: "PHASE DONE:", termMs: 1, killMs: 1 },
+			setTimer: (cb) => {
+				timers.push(cb)
+				return null
+			},
+			clearTimer: () => {},
+			onTerm: () => { termCalls++ },
+			onKill: () => { killCalls++ },
+			log: () => {},
+		})
+
+		watchdog.observeStdout("other summary marker\n")
+		expect(watchdog.state()).toEqual({ kind: "idle" })
+		expect(timers.length).toBe(0)
+
+		watchdog.observeStdout("PHASE DONE: ok\n")
+		expect(watchdog.state()).toEqual({ kind: "armed" })
+		expect(timers.length).toBe(1)
+		timers[0]!()
+		expect(watchdog.state()).toEqual({ kind: "term-sent" })
+		expect(termCalls).toBe(1)
+		expect(timers.length).toBe(2)
+		timers[1]!()
+		expect(watchdog.state()).toEqual({ kind: "kill-sent" })
+		expect(killCalls).toBe(1)
 	})
 
 	test("decideResume resumes interrupted or transient prior sessions only", () => {

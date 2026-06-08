@@ -274,8 +274,8 @@ flag 冲突优先级：CLI > config > 默认。
 ### 6.3 Agent 进程与监控（fallback reference）
 
 - **Per-run events JSONL**：`<logDir>/<runId>/events.jsonl`，路径由 `coder-loop status <target> --json` 的 `events.path` 暴露。
-- **Absolute attempt timeout**：每个 agent attempt 默认 60 分钟绝对上限，可在 preset.toml `[agent] attemptTimeoutSeconds = <seconds>` 覆盖。到期且尚未观察到 phase summary marker 时，引擎对 agent 进程组发 SIGTERM，5 秒后仍未退出则 SIGKILL；attempt 记录 `terminated.kind = "timeout"`，事件流写 `attempt.timeout`。
-- **Post-summary watchdog**：iteration agent 输出 `ITERATION SUMMARY` 后 5 分钟未自然退出，引擎发 SIGTERM；再 5 秒后 SIGKILL。事件流写 `watchdog.fire`。
+- **Absolute attempt timeout**：每个 agent attempt 默认 60 分钟绝对上限，可在 preset.toml `[agent] attemptTimeoutSeconds = <seconds>` 覆盖。到期且尚未观察到当前 phase 的 `summaryMarker` 时，引擎对 agent 进程组发 SIGTERM，5 秒后仍未退出则 SIGKILL；attempt 记录 `terminated.kind = "timeout"`，事件流写 `attempt.timeout`。
+- **Post-summary watchdog**：当前 phase 声明 `summaryMarker` 且 agent stdout 出现该 marker 后，若 agent 未自然退出，引擎按 watchdog 配置发 SIGTERM，再发 SIGKILL。未声明 `summaryMarker` 的 phase 不启用 post-summary watchdog。事件流写 `watchdog.fire`。
 - **Agent --resume**：Claude CLI spawn 中断（5xx / 网络）时引擎自动 `--resume <sessionId>` 续跑，sessionId 索引在 `<logDir>/<runId>/<phase>/sessions.jsonl`。
 
 ---

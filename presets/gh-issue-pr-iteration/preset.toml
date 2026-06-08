@@ -42,6 +42,7 @@ entry       = "queued"
 name   = "iteration"
 prompt = "iter-entry.md"
 runner = "codex"
+summaryMarker = "ITERATION SUMMARY:"
 
   [phases.variables]
   TARGET_CWD               = { source = "runtime.targetCwd", label = "Target working directory (where `loop-data runtime artifacts` lives)" }
@@ -85,6 +86,7 @@ runner = "codex"
 name   = "review"
 prompt = "review-entry.md"
 runner = "claude"
+summaryMarker = "REVIEW SUMMARY:"
 
   [[phases.exits]]
   status = "changes_requested"
@@ -149,6 +151,7 @@ name    = "blocked-responder"
 prompt  = "blocked-responder-entry.md"
 trigger = { afterPhase = "review", whenStatus = "blocked" }
 runner  = "codex"
+summaryMarker = "ITERATION SUMMARY:"
 
   [phases.variables]
   TARGET_CWD               = { source = "runtime.targetCwd", label = "Current target repository working directory" }
@@ -193,6 +196,7 @@ name    = "umbrella-finalizer"
 prompt  = "umbrella-finalizer-entry.md"
 trigger = { on = "chain-complete" }
 runner  = "codex"
+summaryMarker = "FINALIZER SUMMARY:"
 
   [phases.variables]
   TARGET_CWD               = { source = "runtime.targetCwd", label = "Current target repository working directory" }
