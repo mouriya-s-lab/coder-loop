@@ -479,7 +479,7 @@ async function createChainThroughDaemon(input: {
 			repository: input.repo,
 			preset: input.preset.name,
 			baseBranch: "main",
-			metadata: {},
+			metadata: { config: { workflowFile: resolve(input.target, WORKFLOW_REL) } },
 		}))
 		if (!response.ok) fail(`${response.error.code}: ${response.error.message}`)
 		return { chainName, result: response.result as JsonValue }

@@ -53,7 +53,7 @@ summaryMarker = "ITERATION SUMMARY:"
   BASE_BRANCH              = { source = "config.baseBranch", label = "Base branch" }
   ISSUE                    = { source = "item.issue", label = "Current issue", suffix = "", style = "plain" }
   RUN_ID                   = { source = "runtime.runId", label = "Run ID" }
-  WORKFLOW_FILE            = { source = "runtime.workflowPath", label = "Workflow file" }
+  WORKFLOW_FILE            = { source = "config.workflowFile", label = "Workflow file" }
   SHARED_CONTEXT_FILE      = { source = "runtime.sharedContextPath", label = "Chain handoff/shared file" }
   STATE_FILE               = { source = "runtime.stateFile", label = "State file", style = "plain" }
   CURRENT_ISSUE_FILE       = { source = "runtime.currentIssueFile", label = "Optional per-issue handoff file" }
@@ -117,7 +117,7 @@ summaryMarker = "REVIEW SUMMARY:"
   BASE_BRANCH              = { source = "config.baseBranch", label = "Base branch" }
   ISSUE                    = { source = "item.issue", label = "Current issue", suffix = "", style = "plain" }
   RUN_ID                   = { source = "runtime.runId", label = "Run ID" }
-  WORKFLOW_FILE            = { source = "runtime.workflowPath", label = "Workflow file" }
+  WORKFLOW_FILE            = { source = "config.workflowFile", label = "Workflow file" }
   SHARED_CONTEXT_FILE      = { source = "runtime.sharedContextPath", label = "Chain handoff/shared file" }
   STATE_FILE               = { source = "runtime.stateFile", label = "State file", style = "plain" }
   CURRENT_ISSUE_FILE       = { source = "runtime.currentIssueFile", label = "Optional per-issue handoff file" }
@@ -162,7 +162,7 @@ summaryMarker = "ITERATION SUMMARY:"
   BASE_BRANCH              = "config.baseBranch"
   ISSUE                    = { source = "item.issue", label = "Current issue", suffix = "", style = "plain" }
   RUN_ID                   = { source = "runtime.runId", label = "Run ID" }
-  WORKFLOW_FILE            = "runtime.workflowPath"
+  WORKFLOW_FILE            = "config.workflowFile"
   SHARED_CONTEXT_FILE      = { source = "runtime.sharedContextPath", label = "Chain handoff/shared file" }
   STATE_FILE               = { source = "runtime.stateFile", label = "State file", style = "plain" }
   CURRENT_ISSUE_FILE       = { source = "runtime.currentIssueFile", label = "Optional per-issue handoff file" }
@@ -207,7 +207,7 @@ summaryMarker = "FINALIZER SUMMARY:"
   BASE_BRANCH              = { source = "config.baseBranch", label = "Base branch" }
   ISSUE                    = "item.issue"
   RUN_ID                   = { source = "runtime.runId", label = "Run ID" }
-  WORKFLOW_FILE            = { source = "runtime.workflowPath", label = "Workflow file" }
+  WORKFLOW_FILE            = { source = "config.workflowFile", label = "Workflow file" }
   SHARED_CONTEXT_FILE      = { source = "runtime.sharedContextPath", label = "Chain handoff/shared file" }
   STATE_FILE               = "runtime.stateFile"
   CURRENT_ISSUE_FILE       = "runtime.currentIssueFile"

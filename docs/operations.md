@@ -180,8 +180,7 @@ Runtime check failed: <N> error(s)
 |---|---|---|
 | schema 版本错 | `state.version: must be 1` | 通过 chain/item API 或备份 DB 后修正 state snapshot |
 | chain 选择不匹配 | `SQLite chain "x" repository is owner/a, expected owner/b` | 指定正确 `--chain`，或修正 centralized chain identity |
-| 必需文件 / 目录缺失 | `targetCwd: directory does not exist` / `workflow: file does not exist` | bootstrap 缺失项，先跑 `coder-loop install` / `doctor` |
-| workflow 误入 runtime | `workflow: must be project policy outside .coder-loop/runtime` | workflow.md 留在 `.coder-loop/` 而不是 runtime 内 |
+| 必需文件 / 目录缺失 | `targetCwd: directory does not exist` / `sharedContextPath: missing file: .../shared.md` | bootstrap 缺失项，先跑 `coder-loop install` / `doctor` |
 | queue item id 缺失 / 重复 | `state.queue[N].issue: must be a non-empty string or finite number` / `duplicate id "42"` | 修 chain item |
 | queue item status 非法 | `state.queue[N].status: status "foo" is not in preset.statuses` | 用 preset 声明的 status 字面量 |
 | chain handoff / runtime 目录缺失 | `sharedContextPath: missing file: .../shared.md` / `evidenceRootDir: missing directory: .../evidence` | 启动/重启 daemon 让它补齐 chain runtime layout，或手动修复对应 chain 目录 |
@@ -262,7 +261,6 @@ coder-loop item --help
 | `<N>` | positional int | 无（无限） | 最大循环轮次；不传则无限 |
 | `--target-cwd <path>` | string | `process.cwd()` | target 目录绝对 / 相对路径 |
 | `--config <path>` | string | target runtime config | config 文件路径 |
-| `--workflow <path>` | string | config 字段或 `<target>/.coder-loop/workflow.md` | workflow 文件路径 |
 | `--loop-data-root <dir>` | string | `~/.coder-loop/loop-data` | centralized DB/socket/runtime 根 |
 | `--chain <name>` | string | target/config 推导 | 指定 centralized chain |
 | `--once` | bool flag | false | 跑 1 轮就退出（等价 `1`） |

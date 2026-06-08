@@ -172,11 +172,11 @@ bundled `gh-issue-pr-iteration` preset 用这个 hook 声明 `umbrella-finalizer
 
 模板里 `{{KEY}}` 替换为 `String(...)`；多次出现都替换。
 
-### `runtime.*` 白名单（当前 16 key）
+### `runtime.*` 白名单
 
 ```
 runtime.runId               runtime.targetCwd            runtime.agentCwd
-runtime.workflowPath        runtime.sharedContextPath    runtime.currentIssueFile
+runtime.sharedContextPath   runtime.currentIssueFile
 runtime.issueDir            runtime.evidenceDir          runtime.evidenceRootDir
 runtime.logDir              runtime.presetDir            runtime.fragmentIndex
 runtime.runIdGeneration     runtime.resumedFromPhase     runtime.resumedStartedAt
@@ -188,7 +188,6 @@ runtime.issueKind
 | `runId` | 本轮 spawn 的 runId（新生成或 resumed） |
 | `targetCwd` | target 目录绝对路径 |
 | `agentCwd` | agent 子进程的实际 `cwd` 绝对路径。等于 `item.agentCwd ?? targetCwd`；跨 repo 迭代时 item 可声明绝对路径覆盖。 |
-| `workflowPath` | `.coder-loop/workflow.md` 绝对路径 |
 | `sharedContextPath` | 当前 chain handoff/shared 文件绝对路径；daemon 负责创建和恢复 |
 | `currentIssueFile` | 当前 item 的可选 per-issue handoff attachment 绝对路径（无则 `""`）；不要把它当启动必需条件 |
 | `issueDir` | issue handoff 文件根目录绝对路径 |

@@ -167,6 +167,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(iterVars.get("ISSUE_PR")).toEqual(expectedItem("pr"))
 		expect(iterVars.get("REPO")).toEqual(expectedConfig("repository"))
 		expect(iterVars.get("BASE_BRANCH")).toEqual(expectedConfig("baseBranch"))
+		expect(iterVars.get("WORKFLOW_FILE")).toEqual(expectedConfig("workflowFile"))
 		expect(iterVars.get("REQUIRE_BROWSER_EVIDENCE")).toEqual(expectedConfigDefault("requireBrowserEvidence", false))
 		expect(iterVars.get("TARGET_CWD")).toEqual(expectedRuntime("targetCwd"))
 		expect(iterVars.get("AGENT_CWD")).toEqual(expectedRuntime("agentCwd"))

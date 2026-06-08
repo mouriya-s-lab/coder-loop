@@ -41,7 +41,6 @@ const PRESET_NAME_PATTERN = /^[a-z][a-z0-9-]*$/
 
 const DEFAULT_CONFIG_FILE = ".coder-loop/runtime/config.json"
 const DEFAULT_CONFIG_FILE_TOML = ".coder-loop/runtime/config.toml"
-const DEFAULT_WORKFLOW_FILE = ".coder-loop/workflow.md"
 const DEFAULT_SHARED_FILE = ".coder-loop/runtime/shared.md"
 const DEFAULT_ISSUE_DIR = ".coder-loop/runtime/issues"
 const DEFAULT_EVIDENCE_DIR = ".coder-loop/runtime/evidence"
@@ -94,7 +93,6 @@ export type StatusCurrentRunSnapshot = {
 type BuildOptionsInput = {
 	targetCwd: string | null
 	configPath: string | null
-	workflowPath: string | null
 	loopDataRoot: string | null
 	chainName: string | null
 	dryRun: boolean
@@ -437,7 +435,6 @@ const StatusSnapshotBoundary = arkType({
 export type LoopOptions = {
 	targetCwd: string
 	configPath: string
-	workflowPath: string
 	sharedContextPath: string
 	stateDbPath: string
 	issueDir: string
@@ -589,7 +586,6 @@ export type StatusTargetSnapshot = {
 	configPath: string
 	configFormat: ConfigFormat
 	config: StatusResourceSnapshot
-	workflowPath: string
 	sharedContextPath: string
 	issueDir: string
 	evidenceRootDir: string
@@ -872,7 +868,6 @@ const RUNTIME_BINDING_KEYS = [
 	"runId",
 	"targetCwd",
 	"agentCwd",
-	"workflowPath",
 	"sharedContextPath",
 	"stateFile",
 	"currentIssueFile",
@@ -2452,7 +2447,6 @@ async function runReview(
 }
 
 function buildOptions(targetCwd: string, configPath: string, raw: BuildOptionsInput, config: LoopConfig, preset: Preset): LoopOptions {
-	const workflowPath = resolveFrom(targetCwd, raw.workflowPath ?? config.workflowFile ?? DEFAULT_WORKFLOW_FILE)
 	const sharedContextPath = resolveFrom(targetCwd, config.sharedContextFile ?? DEFAULT_SHARED_FILE)
 	const loopDataRoot = raw.loopDataRoot ?? config.loopDataRoot
 	const stateDbPath = resolveLoopDataPaths(loopDataRootOption(loopDataRoot)).dbFile
@@ -2462,7 +2456,7 @@ function buildOptions(targetCwd: string, configPath: string, raw: BuildOptionsIn
 	const worktree = raw.worktree || config.worktree === true
 	const repository = raw.chain.repository
 	const baseBranch = raw.chain.baseBranch
-	const configBindings = buildEffectiveConfigBindings(raw.chain, config.configBindings)
+	const configBindings = buildEffectiveConfigBindings(targetCwd, raw.chain, config)
 	const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")
 	const chainPaths = raw.chainName === null ? null : resolveChainRuntimePaths(raw.chainName, loopDataRootOption(loopDataRoot))
 	const hostRunner = detectHostRunner(process.env)
@@ -2473,7 +2467,6 @@ function buildOptions(targetCwd: string, configPath: string, raw: BuildOptionsIn
 	return {
 		targetCwd,
 		configPath,
-		workflowPath,
 		sharedContextPath,
 		stateDbPath,
 		issueDir,
@@ -2507,7 +2500,6 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 			baseBranch: null,
 			dryRun: false,
 			worktree: false,
-			workflowPath: null,
 		})
 	} catch (error) {
 		const targetCwd = resolve(args.targetCwd)
@@ -2605,7 +2597,6 @@ function makeStatusTargetSnapshot(
 		configPath,
 		configFormat: configFormatForPath(configPath),
 		config,
-		workflowPath: options?.workflowPath ?? resolve(targetCwd, DEFAULT_WORKFLOW_FILE),
 		sharedContextPath: options?.sharedContextPath ?? resolve(runtimeRoot, "shared.md"),
 		[STATUS_STATE_FILE_KEY]: options?.stateDbPath ?? configPath,
 		issueDir: options?.issueDir ?? resolve(runtimeRoot, "issues"),
@@ -3268,7 +3259,6 @@ function daemonCommandToTargetLookupArgs(args: Extract<DaemonCommandArgs, { acti
 			baseBranch: null,
 			dryRun: args.dryRun,
 			worktree: "worktree" in args ? args.worktree : false,
-			workflowPath: null,
 		}
 	}
 
@@ -3325,7 +3315,6 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 		baseBranch: null,
 		dryRun: args.dryRun,
 		worktree: false,
-		workflowPath: null,
 	})
 	const options = runtime.options
 	const issue = normalizeQueueIssueId(args.issue)
@@ -3461,7 +3450,6 @@ type TargetChainLookupArgs = {
 	baseBranch: string | null
 	dryRun: boolean
 	worktree: boolean
-	workflowPath: string | null
 }
 
 type LoadedTargetRuntime = {
@@ -3491,7 +3479,6 @@ async function loadTargetRuntime(args: TargetChainLookupArgs): Promise<LoadedTar
 	const options = buildOptions(targetCwd, configPath, {
 		targetCwd,
 		configPath: args.configPath,
-		workflowPath: args.workflowPath,
 		loopDataRoot: effectiveLoopDataRoot,
 		chainName: chain.name,
 		dryRun: args.dryRun,
@@ -3516,7 +3503,6 @@ async function loadLoopOptionsForTarget(
 		baseBranch: extra.baseBranch ?? null,
 		dryRun: extra.dryRun ?? false,
 		worktree: extra.worktree ?? false,
-		workflowPath: extra.workflowPath ?? null,
 	})
 	return loaded.options
 }
@@ -3602,10 +3588,11 @@ function readDbCurrentRun(loopDataRoot: string | null, chainId: number): Current
 
 function loopConfigFromChain(chain: ChainRecord, loopDataRoot: string | null, explicitConfig: LoopConfig | null): LoopConfig {
 	const metadata = chain.metadata
+	const chainBindings = chainConfigBindings(metadata)
 	const presetPath = stringMetadata(metadata, "presetPath") ?? explicitConfig?.presetPath ?? null
 	const config: LoopConfig = {
 		worktree: booleanMetadata(metadata, "worktree") ?? explicitConfig?.worktree ?? null,
-		workflowFile: stringMetadata(metadata, "workflowFile") ?? explicitConfig?.workflowFile ?? null,
+		workflowFile: stringMetadata(metadata, "workflowFile") ?? stringConfigBinding(chainBindings, "workflowFile") ?? explicitConfig?.workflowFile ?? null,
 		sharedContextFile: stringMetadata(metadata, "sharedContextFile") ?? explicitConfig?.sharedContextFile ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "shared"),
 		issueDir: stringMetadata(metadata, "issueDir") ?? explicitConfig?.issueDir ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "issues"),
 		evidenceDir: stringMetadata(metadata, "evidenceDir") ?? explicitConfig?.evidenceDir ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "evidence"),
@@ -3625,15 +3612,25 @@ function loopConfigFromChain(chain: ChainRecord, loopDataRoot: string | null, ex
 }
 
 function buildEffectiveConfigBindings(
+	targetCwd: string,
 	chain: Pick<ChainRecord, "repository" | "baseBranch" | "metadata">,
-	explicitConfigBindings: JsonObject,
+	config: Pick<LoopConfig, "configBindings" | "workflowFile">,
 ): ConfigBindings {
+	const bindings: JsonObject = {
+		...chainConfigBindings(chain.metadata),
+		...config.configBindings,
+	}
+	if (config.workflowFile !== null) bindings.workflowFile = resolveFrom(targetCwd, config.workflowFile)
 	return {
 		repository: chain.repository,
 		baseBranch: chain.baseBranch,
-		...chainConfigBindings(chain.metadata),
-		...explicitConfigBindings,
+		...bindings,
 	}
+}
+
+function stringConfigBinding(bindings: JsonObject, key: string): string | null {
+	const value = bindings[key]
+	return typeof value === "string" && value.trim() !== "" ? value : null
 }
 
 function chainConfigBindings(metadata: JsonObject): JsonObject {
@@ -4232,7 +4229,6 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 	const options = buildOptions(targetCwd, configPath, {
 		targetCwd,
 		configPath: null,
-		workflowPath: null,
 		loopDataRoot: input.loopDataRoot,
 		chainName: input.chain.name,
 		dryRun: false,
@@ -4359,10 +4355,6 @@ async function collectStatusRuntimeErrors(
 	if (options.worktree && (options.baseBranch === null || options.baseBranch.trim() === "")) pushCheckError(errors, "worktree", "worktree mode requires a non-empty baseBranch")
 
 	await checkDirectory(options.targetCwd, "targetCwd", errors)
-	await checkFile(options.workflowPath, "workflow", errors)
-	const runtimeRoot = resolve(options.targetCwd, ".coder-loop/runtime")
-	checkInside(options.targetCwd, options.workflowPath, "workflow", errors)
-	if (isWithin(runtimeRoot, options.workflowPath)) pushCheckError(errors, "workflow", "must be project policy outside .coder-loop/runtime")
 	if (chain.status !== "active") pushCheckError(errors, "chain.status", `must be active (got ${chain.status})`)
 	await checkCentralRuntimeLayout(options, chain, errors)
 
@@ -4641,7 +4633,6 @@ export function buildRuntimeBindings(input: {
 		runId: input.runId,
 		targetCwd: input.options.targetCwd,
 		agentCwd: input.agentCwd,
-		workflowPath: input.options.workflowPath,
 		sharedContextPath: paths.sharedContextPath,
 		stateFile: "the central state DB",
 		currentIssueFile: paths.currentIssueFile,

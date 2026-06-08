@@ -53,7 +53,6 @@ describe("phase C cleanup guards", () => {
 				"stateFile",
 				"targetCwd",
 				"traceFile",
-				"workflowPath",
 			].sort())
 
 			for (const forbidden of [`state${"Path"}`]) {
@@ -127,7 +126,6 @@ function makeLoopOptions(): LoopOptions {
 	return {
 		targetCwd: "/repo",
 		configPath: "/repo/config.json",
-		workflowPath: "/repo/.coder-loop/workflow.md",
 		sharedContextPath: "/loop-data/chains/main/shared.md",
 		stateDbPath: "/loop-data/db.sqlite",
 		issueDir: "/loop-data/chains/main/issues",

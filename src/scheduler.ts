@@ -1704,7 +1704,6 @@ export function buildSchedulerResolveContext(input: {
 		runId: input.runId,
 		targetCwd: input.item.repoCwd,
 		agentCwd: input.worktreePath,
-		workflowPath: resolveRepoWorkflowPath(input.item.repoCwd),
 		sharedContextPath: chainPaths.sharedFile,
 		stateFile: "the central state DB",
 		currentIssueFile,
@@ -1731,12 +1730,45 @@ export function buildSchedulerResolveContext(input: {
 		repoCwd: input.item.repoCwd,
 	}
 	const config = buildConfigBindings({
-		configBindings: {
-			repository: input.chain.repository,
-			baseBranch: input.chain.baseBranch,
-		},
+		configBindings: buildSchedulerConfigBindings(input.item.repoCwd, input.chain),
 	})
 	return { item: input.item, config, runtime }
+}
+
+function buildSchedulerConfigBindings(repoCwd: string, chain: ChainRecord): JsonObject {
+	const bindings: JsonObject = {
+		repository: chain.repository,
+		baseBranch: chain.baseBranch,
+		...chainConfigBindings(chain.metadata),
+	}
+	const workflowFile = stringMetadata(chain.metadata, "workflowFile") ?? stringConfigBinding(bindings, "workflowFile")
+	if (workflowFile !== null) bindings.workflowFile = resolveFrom(repoCwd, workflowFile)
+	return bindings
+}
+
+function chainConfigBindings(metadata: JsonObject): JsonObject {
+	const value = metadata.config
+	if (value === undefined) return {}
+	if (!isJsonObjectRecord(value)) throw new Error("chain.metadata.config must be a JSON object when provided")
+	return { ...value }
+}
+
+function isJsonObjectRecord(value: JsonValue): value is JsonObject {
+	return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function stringMetadata(metadata: JsonObject, key: string): string | null {
+	const value = metadata[key]
+	return typeof value === "string" && value.trim() !== "" ? value : null
+}
+
+function stringConfigBinding(bindings: JsonObject, key: string): string | null {
+	const value = bindings[key]
+	return typeof value === "string" && value.trim() !== "" ? value : null
+}
+
+function resolveFrom(base: string, path: string): string {
+	return isAbsolute(path) ? path : resolve(base, path)
 }
 
 function resolveItemEvidenceDir(item: ItemRecord, chainRoot: string, fallback: string): string {
@@ -1751,10 +1783,6 @@ function resolveOptionalItemIssueFile(item: ItemRecord, chainRoot: string): stri
 
 function resolveItemRuntimePath(chainRoot: string, path: string): string {
 	return isAbsolute(path) ? path : resolve(chainRoot, path)
-}
-
-function resolveRepoWorkflowPath(repoCwd: string): string {
-	return resolve(repoCwd, ".coder-loop/workflow.md")
 }
 
 function schedulerPresetDir(options: SchedulerOptions, chain: ChainRecord): string {
