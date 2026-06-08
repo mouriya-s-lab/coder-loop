@@ -23,7 +23,7 @@ import {
 	type SchedulerOptions,
 	type SchedulerWorktreeManager,
 } from "./scheduler"
-import { resolveChainRuntimePaths } from "./runtime-paths"
+import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -2632,6 +2632,40 @@ process.exitCode = 0
 				await fixture.daemon.stop()
 			}
 		})
+	})
+
+	test("recordFatalSync durably writes the uncaught stack to the global daemon.log", async () => {
+		const fixture = await startFixture("record-fatal-sync", { schedulerEnabled: false })
+		try {
+			fixture.daemon.recordFatalSync("unhandledRejection", new Error("BOOM-observability"))
+			const paths = resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot })
+			const batches = await readdir(paths.daemonLogDir)
+			const records: Array<Record<string, unknown>> = []
+			for (const batch of batches) {
+				let raw = ""
+				try {
+					raw = await readFile(resolve(paths.daemonLogDir, batch, "daemon.log"), "utf-8")
+				} catch {
+					continue
+				}
+				for (const line of raw.split("\n")) {
+					if (line.trim() === "") continue
+					try {
+						records.push(JSON.parse(line) as Record<string, unknown>)
+					} catch {
+						// ignore non-JSON lines
+					}
+				}
+			}
+			const fatal = records.find((entry) => entry.type === "daemon.fatal")
+			expect(fatal).toBeTruthy()
+			expect(fatal?.kind).toBe("unhandledRejection")
+			// the durable record must carry the stack, not just the message
+			expect(String(fatal?.error)).toContain("Error: BOOM-observability")
+			expect(String(fatal?.error)).toContain("daemon.test")
+		} finally {
+			await fixture.daemon.stop()
+		}
 	})
 })
 

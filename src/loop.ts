@@ -3082,6 +3082,17 @@ async function runDaemonUpCommand(args: Extract<DaemonCommandArgs, { action: "up
 		void daemon.stop().then(() => process.exit(0))
 	}
 	const ignoreSignal = () => undefined
+	// Fatal-error handlers: without these, an uncaught exception / unhandled rejection
+	// prints a stack to an stderr that operational daemons do not capture, then exits —
+	// leaving no durable trace of why the daemon died. Record the stack synchronously to
+	// the global daemon.log first, then exit non-zero.
+	const recordFatal = (kind: string) => (error: unknown): void => {
+		daemon?.recordFatalSync(kind, error)
+		process.exit(1)
+	}
+	const onUncaughtException = recordFatal("uncaughtException")
+	const onUnhandledRejection = recordFatal("unhandledRejection")
+	let fatalHandlersRegistered = false
 	let signalsRegistered = false
 	let started = false
 	try {
@@ -3089,6 +3100,9 @@ async function runDaemonUpCommand(args: Extract<DaemonCommandArgs, { action: "up
 			...(args.loopDataRoot === null ? {} : { loopDataRoot: args.loopDataRoot }),
 			scheduler,
 		})
+		process.on("uncaughtException", onUncaughtException)
+		process.on("unhandledRejection", onUnhandledRejection)
+		fatalHandlersRegistered = true
 		for (const signal of DAEMON_SHUTDOWN_SIGNALS) process.once(signal, shutdown)
 		for (const signal of DAEMON_IGNORED_SIGNALS) process.on(signal, ignoreSignal)
 		signalsRegistered = true
@@ -3109,6 +3123,10 @@ async function runDaemonUpCommand(args: Extract<DaemonCommandArgs, { action: "up
 		}
 		throw error
 	} finally {
+		if (fatalHandlersRegistered) {
+			process.off("uncaughtException", onUncaughtException)
+			process.off("unhandledRejection", onUnhandledRejection)
+		}
 		if (signalsRegistered) {
 			for (const signal of DAEMON_SHUTDOWN_SIGNALS) process.off(signal, shutdown)
 			for (const signal of DAEMON_IGNORED_SIGNALS) process.off(signal, ignoreSignal)

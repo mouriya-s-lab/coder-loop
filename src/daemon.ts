@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto"
 import { Buffer } from "node:buffer"
 import { createConnection, createServer, type Server, type Socket } from "node:net"
-import { existsSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync } from "node:fs"
 import { appendFile, mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises"
 import { isAbsolute, relative, resolve } from "node:path"
 
@@ -243,6 +243,10 @@ export class CoderLoopDaemon {
 			this.ownsDaemonPid = true
 			this.state = "running"
 			await this.appendGlobalDaemonLog({ type: "daemon.start", pid: process.pid, socketPath: this.paths.daemonSocket })
+			// Startup banner on stderr so that any launch path which captures the daemon's
+			// stderr to a file (executeDaemonStart) yields a non-empty, greppable record
+			// of the process coming up — and a place the OS/runtime stack lands on crash.
+			process.stderr.write(`coder-loop daemon up: pid=${process.pid} socket=${this.paths.daemonSocket} batch=${this.daemonBatchTimestamp}\n`)
 			this.startSchedulerLoop()
 			this.queueSchedulerTick()
 			return this
@@ -275,6 +279,9 @@ export class CoderLoopDaemon {
 	async stop(): Promise<void> {
 		if (this.state === "exited") return
 		if (this.state !== "shutting_down") this.state = "shutting_down"
+		// Durable shutdown marker so the global daemon.log records that the daemon
+		// stopped on purpose — distinguishing a clean stop from a fatal/external kill.
+		await this.appendGlobalDaemonLog({ type: "daemon.stop", pid: process.pid }).catch(() => undefined)
 		// Pause scheduler tick: clears the interval timer, awaits any in-flight
 		// tick, and bumps schedulerPauseDepth so requestSchedulerTick is gated
 		// out for the remainder of shutdown. The resume callback would no-op
@@ -591,6 +598,37 @@ export class CoderLoopDaemon {
 			...event,
 			recordedAt: new Date().toISOString(),
 		})}\n`)
+	}
+
+	/**
+	 * Synchronously record a fatal/uncaught error to the global daemon.log before the
+	 * process exits. An async appendFile would not flush from inside an
+	 * uncaughtException / unhandledRejection handler that ends with process.exit, so
+	 * this deliberately uses sync fs to guarantee the stack reaches durable storage.
+	 */
+	recordFatalSync(kind: string, error: unknown): void {
+		const stack = error instanceof Error ? (error.stack ?? error.message) : String(error)
+		try {
+			mkdirSync(this.paths.daemonBatchDir(this.daemonBatchTimestamp), { recursive: true })
+			appendFileSync(
+				this.paths.daemonLogFile(this.daemonBatchTimestamp),
+				`${JSON.stringify({
+					type: "daemon.fatal",
+					kind,
+					pid: process.pid,
+					error: stack,
+					recordedAt: new Date().toISOString(),
+				})}\n`,
+			)
+		} catch {
+			// Last resort: if durable logging itself fails, still surface the stack to
+			// stderr so a launcher capturing stderr keeps it.
+			try {
+				process.stderr.write(`coder-loop daemon fatal (${kind}): ${stack}\n`)
+			} catch {
+				// nothing else we can do while crashing
+			}
+		}
 	}
 
 	private async appendDaemonLogForChainId(chainId: number, event: JsonObject): Promise<void> {
@@ -1024,7 +1062,11 @@ export class CoderLoopDaemon {
 
 	private queueSchedulerTick(): void {
 		void this.requestSchedulerTick().catch((error: unknown) => {
-			console.warn(`coder-loop daemon warning: scheduler tick failed after IPC ack: ${errorMessage(error)}`)
+			const message = errorMessage(error)
+			// Durable first: console.warn alone goes to an stderr that operational daemons
+			// do not capture, so a tick failure would otherwise be invisible after the fact.
+			void this.appendGlobalDaemonLog({ type: "scheduler.tick_failed", pid: process.pid, error: message }).catch(() => undefined)
+			console.warn(`coder-loop daemon warning: scheduler tick failed after IPC ack: ${message}`)
 		})
 	}
 
