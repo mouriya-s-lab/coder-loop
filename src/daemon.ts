@@ -127,6 +127,13 @@ const MAX_ITEM_TITLE_LENGTH = 1024
 const MAX_REPO_CWD_LENGTH = 4096
 const MAX_REPOSITORY_REF_LENGTH = 200
 const STALE_RECOVERY_FORCE_AFTER_MS = 1_000
+// On daemon startup no run process from a prior daemon can still be alive (the daemon owns
+// every run process; a (re)start means all predecessors are dead). Any run row left with
+// endedAt === null is therefore an orphan left by a crash and must be reconciled, so it stops
+// gating scheduling via hasUnfinishedCurrentPhaseRun. The marker distinguishes it from a run
+// that completed normally; the exit code is the sentinel for "killed / unknown".
+const ORPHANED_RUN_STATUS = "orphaned"
+const ORPHANED_RUN_EXIT_CODE = -1
 const DAEMON_SOCKET_PATH_CHECK_INTERVAL_MS = 250
 const ORPHAN_CHAIN_DIR_PREFIX = ".orphan-"
 const RESERVED_METADATA_KEYS = new Set(["__proto__", "constructor", "prototype"])
@@ -661,35 +668,68 @@ export class CoderLoopDaemon {
 		for (const chain of store.listChains()) {
 			if (chain.status === "deleted") continue
 			const currentRun = store.getCurrentRun(chain.id)
-			if (currentRun === null) continue
+			if (currentRun !== null) {
+				const stalePid = await this.readCurrentRunProcessGroupPid(chain, currentRun.runId, currentRun.extra)
+				if (stalePid !== null) await terminateStaleProcessGroup(stalePid, Math.min(this.shutdownGraceMs, STALE_RECOVERY_FORCE_AFTER_MS))
 
-			const stalePid = await this.readCurrentRunProcessGroupPid(chain, currentRun.runId, currentRun.extra)
-			if (stalePid !== null) await terminateStaleProcessGroup(stalePid, Math.min(this.shutdownGraceMs, STALE_RECOVERY_FORCE_AFTER_MS))
+				const midFlightItemId = optionalPositiveInteger(currentRun.extra.itemId)
+				const midFlightItem = midFlightItemId !== null ? store.getItem(midFlightItemId) : null
+				const itemsToRecover = midFlightItem === null ? [] : [midFlightItem]
 
-			const midFlightItemId = optionalPositiveInteger(currentRun.extra.itemId)
-			const midFlightItem = midFlightItemId !== null ? store.getItem(midFlightItemId) : null
-			const itemsToRecover = midFlightItem === null ? [] : [midFlightItem]
-
-			store.clearCurrentRun(chain.id)
-			const recoveredAt = unixSeconds()
-			const recoveryStatus = await this.entryItemStatusForRecovery(chain)
-			for (const item of itemsToRecover) {
-				store.updateItem(item.id, { status: recoveryStatus, phase: null, updatedAt: recoveredAt })
+				store.clearCurrentRun(chain.id)
+				const recoveredAt = unixSeconds()
+				const recoveryStatus = await this.entryItemStatusForRecovery(chain)
+				for (const item of itemsToRecover) {
+					store.updateItem(item.id, { status: recoveryStatus, phase: null, updatedAt: recoveredAt })
+				}
+				await this.appendDaemonLogIfChainNameIsValid(chain, {
+					type: "scheduler.recovery",
+					reason: "stale_current_run",
+					chainId: chain.id,
+					runId: currentRun.runId,
+					pid: stalePid,
+					recoveredItems: itemsToRecover.map((item) => ({
+						itemId: item.id,
+						issueNumber: item.issueNumber,
+						fromStatus: item.status,
+						toStatus: recoveryStatus,
+					})),
+				})
 			}
-			await this.appendDaemonLogIfChainNameIsValid(chain, {
-				type: "scheduler.recovery",
-				reason: "stale_current_run",
-				chainId: chain.id,
-				runId: currentRun.runId,
-				pid: stalePid,
-				recoveredItems: itemsToRecover.map((item) => ({
-					itemId: item.id,
-					issueNumber: item.issueNumber,
-					fromStatus: item.status,
-					toStatus: recoveryStatus,
-				})),
-			})
+
+			// Reconcile every orphaned run row regardless of the current_run pointer. A crash can
+			// leave a run with endedAt === null that is no longer the current_run (e.g. an item that
+			// later moved to a terminal status); the current_run-only path above never touches it, yet
+			// the scheduler's per-repoCwd single-flight gate (hasUnfinishedCurrentPhaseRun) keeps
+			// treating it as in-flight and stalls the entire repoCwd forever. Completing it here is
+			// always safe on startup because no prior-daemon run process can still be alive.
+			await this.reconcileOrphanedRuns(chain)
 		}
+	}
+
+	private async reconcileOrphanedRuns(chain: ChainRecord): Promise<void> {
+		const store = this.requireStore()
+		const orphans = store.listRuns(chain.id).filter((run) => run.endedAt === null)
+		if (orphans.length === 0) return
+		const reconciledAt = unixSeconds()
+		const reconciled: JsonObject[] = []
+		for (const run of orphans) {
+			const stalePid = await this.readCurrentRunProcessGroupPid(chain, run.runId, run.extra)
+			if (stalePid !== null) await terminateStaleProcessGroup(stalePid, Math.min(this.shutdownGraceMs, STALE_RECOVERY_FORCE_AFTER_MS))
+			store.completeRun(run.runId, {
+				endedAt: reconciledAt,
+				exitCode: ORPHANED_RUN_EXIT_CODE,
+				status: ORPHANED_RUN_STATUS,
+				extra: { ...run.extra, reconciledBy: "daemon_startup", reconciledAt },
+			})
+			reconciled.push({ runId: run.runId, itemId: run.itemId, phase: run.phase, pid: stalePid })
+		}
+		await this.appendDaemonLogIfChainNameIsValid(chain, {
+			type: "scheduler.recovery",
+			reason: "orphaned_run_reconciled",
+			chainId: chain.id,
+			reconciledRuns: reconciled,
+		})
 	}
 
 	private async readCurrentRunProcessGroupPid(chain: ChainRecord, runId: string, extra: JsonObject): Promise<number | null> {

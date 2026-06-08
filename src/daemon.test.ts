@@ -1887,6 +1887,151 @@ describe("daemon", () => {
 		}
 	})
 
+	test("daemon startup reconciles an orphaned run on a terminal non-current item", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-orphan-run-recovery`)
+		const loopDataRoot = resolve(root, "ld")
+		await mkdir(loopDataRoot, { recursive: true })
+
+		const store = openSqliteStateStore({ loopDataRoot })
+		try {
+			const chain = store.createChain({
+				name: "orphan-run-chain",
+				preset: "gh-issue-pr-iteration",
+				repository: "mouriya-s-lab/coder-loop",
+				baseBranch: "main",
+				status: "active",
+				metadata: {},
+			})
+			// A terminal item whose last run was orphaned by a prior crash (endedAt never written) and
+			// which is NOT the chain's current_run — the exact gap the current_run-only recovery misses.
+			// Its phase still matches the orphan run's phase, so hasUnfinishedCurrentPhaseRun would gate
+			// the whole repoCwd forever until the orphan is reconciled.
+			const terminal = store.createItem({
+				chainId: chain.id,
+				issueNumber: 307,
+				repoCwd: REPO_ROOT,
+				status: "done",
+				attempts: 1,
+				phase: "iteration",
+				lastRunId: "run-orphan-307",
+				title: "terminal item with orphaned run",
+				extra: {},
+			})
+			store.recordRun({
+				runId: "run-orphan-307",
+				chainId: chain.id,
+				itemId: terminal.id,
+				phase: "iteration",
+				startedAt: 1_700_000_000,
+				extra: {},
+			})
+			// A fresh queued item in the same repoCwd that is gated by the orphan today.
+			store.createItem({
+				chainId: chain.id,
+				issueNumber: 308,
+				repoCwd: REPO_ROOT,
+				status: "queued",
+				attempts: 0,
+				title: "pending item gated by the orphan",
+				extra: {},
+			})
+			// Deliberately leave current_run unset: the orphan is the only endedAt===null run.
+		} finally {
+			store.close()
+		}
+
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			shutdownGraceMs: 50,
+			scheduler: { enabled: false },
+		})
+		try {
+			const orphan = await readRun(loopDataRoot, "run-orphan-307")
+			expect(orphan?.endedAt).not.toBeNull()
+			expect(orphan?.status).toBe("orphaned")
+			expect(orphan?.extra.reconciledBy).toBe("daemon_startup")
+			// The terminal item itself is untouched — only its dangling run row is reconciled.
+			const terminalItem = await readItem(loopDataRoot, 1, 307)
+			expect(terminalItem?.status).toBe("done")
+			expect(terminalItem?.phase).toBe("iteration")
+			// No run row remains unfinished, so the single-flight gate can no longer stall the repoCwd.
+			const stillOpen = (await listChainRuns(loopDataRoot, 1)).filter((run) => run.endedAt === null)
+			expect(stillOpen).toEqual([])
+		} finally {
+			await daemon.stop()
+		}
+	})
+
+	test("daemon startup terminates the process group of an orphaned non-current run", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-orphan-run-pgid`)
+		const loopDataRoot = resolve(root, "ld")
+		await mkdir(loopDataRoot, { recursive: true })
+		const stale = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+			detached: true,
+			stdio: "ignore",
+		})
+		stale.unref()
+		if (stale.pid === undefined) throw new Error("expected stale process pid")
+
+		const store = openSqliteStateStore({ loopDataRoot })
+		try {
+			const chain = store.createChain({
+				name: "orphan-run-pgid-chain",
+				preset: "gh-issue-pr-iteration",
+				repository: "mouriya-s-lab/coder-loop",
+				baseBranch: "main",
+				status: "active",
+				metadata: {},
+			})
+			const item = store.createItem({
+				chainId: chain.id,
+				issueNumber: 309,
+				repoCwd: REPO_ROOT,
+				status: "done",
+				attempts: 1,
+				phase: "iteration",
+				lastRunId: "run-orphan-309",
+				title: "terminal item with live orphaned run",
+				extra: {},
+			})
+			// Orphan run still has an alive process group leader recorded in its extra; recovery must
+			// terminate it before completing the row, leaving no escaped process.
+			store.recordRun({
+				runId: "run-orphan-309",
+				chainId: chain.id,
+				itemId: item.id,
+				phase: "iteration",
+				startedAt: 1_700_000_000,
+				extra: { pid: stale.pid, processGroupLeader: true },
+			})
+		} finally {
+			store.close()
+		}
+
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			shutdownGraceMs: 50,
+			scheduler: { enabled: false },
+		})
+		try {
+			expect(await waitForPidExit(stale.pid, 1_000)).toBe(true)
+			const orphan = await readRun(loopDataRoot, "run-orphan-309")
+			expect(orphan?.endedAt).not.toBeNull()
+			expect(orphan?.status).toBe("orphaned")
+		} finally {
+			try {
+				process.kill(-stale.pid, "SIGKILL")
+			} catch {
+				try {
+					process.kill(stale.pid, "SIGKILL")
+				} catch {
+					// Already reaped by daemon startup recovery.
+				}
+			}
+			await daemon.stop()
+		}
+	})
+
 	test("daemon startup rejects socket commands before stale recovery finishes", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-startup-recovery-socket`)
 		const loopDataRoot = resolve(root, "ld")
@@ -3004,6 +3149,15 @@ async function readCurrentRun(loopDataRoot: string, chainId: number) {
 	const store = openSqliteStateStore({ loopDataRoot })
 	try {
 		return store.getCurrentRun(chainId)
+	} finally {
+		store.close()
+	}
+}
+
+async function listChainRuns(loopDataRoot: string, chainId: number) {
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		return store.listRuns(chainId)
 	} finally {
 		store.close()
 	}
