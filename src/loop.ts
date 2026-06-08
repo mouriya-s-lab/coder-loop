@@ -4653,13 +4653,8 @@ export type ParsedIssueKind =
 	| { ok: true; kind: IssueKind }
 	| { ok: false; error: string }
 
-export function iterationRouteForIssueKind(kind: IssueKind): string {
-	if (kind === "comment") return "iter/spike-comment"
-	if (kind === "code-spike") return "iter/source-writing-spike"
-	if (kind === "blocked") return "iter/resolve-blocker"
-	return "iter/classify-scope"
-}
-
+// gh-issue-pr-iteration compatibility: this only populates runtime.issueKind.
+// Fragment routing belongs to the preset prompt.
 export function parseKindFromLabels(labelNames: readonly string[]): ParsedIssueKind {
 	const kindLabels = labelNames.filter((name) => name.startsWith("kind:"))
 	if (kindLabels.length === 0) return { ok: true, kind: null }

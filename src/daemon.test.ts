@@ -2402,24 +2402,24 @@ process.exitCode = 0
 				})).chain
 				const chainId = numberValue(record(result).id)
 				preInstallReviewOnEmptyLockByName("ac5-iter-chain", fixture.loopDataRoot)
-				await request(fixture, "item.add", {
+				const added = record(expectOk(await request(fixture, "item.add", {
 					chainId,
 					issueNumber: 287_301,
 					repoCwd: REPO_ROOT,
 					extra: { issueKind: "code" },
-				})
+				})).item)
+				const itemId = numberValue(added.id)
 
-				// The fake shell runner writes no status (it only proves which binary spawned), so under v1
-				// the item never reaches a terminal status. Gate on a phase.end event, which guarantees the
-				// run closed and its stdout was flushed, then read the captured binary marker.
-				await waitFor(
-					async () => fixture.schedulerEvents.filter((event) => event.type === "phase.end").length,
-					(count) => (count ?? 0) >= 1,
+				// The fake shell runner writes no terminal status, so the item can be respawned immediately.
+				// Read the run id from the completed phase.end event instead of racing item.lastRunId.
+				const iterationEnd = (await waitFor(
+					async () =>
+						fixture.schedulerEvents
+							.find((event): event is Extract<SchedulerEvent, { type: "phase.end" }> => event.type === "phase.end" && event.itemId === itemId && event.phase === "iteration") ?? null,
+					(event) => event !== null,
 					5_000,
-				)
-				const item = await readItem(fixture.loopDataRoot, chainId, 287_301)
-				expect(item).not.toBeNull()
-				const runId = item!.lastRunId!
+				)) as Extract<SchedulerEvent, { type: "phase.end" }>
+				const runId = iterationEnd.runId
 				const stdoutPath = resolveChainRuntimePaths(`ac5-iter-chain`, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(runId)
 				const stdout = await readFile(stdoutPath, "utf-8")
 				expect(stdout).toContain("BINARY:codex")

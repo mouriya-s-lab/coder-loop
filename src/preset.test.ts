@@ -186,6 +186,20 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		}
 	})
 
+	test("iteration prompt owns issue kind to fragment routing instructions", async () => {
+		const [indexPrompt, readContextPrompt] = await Promise.all([
+			Bun.file(resolve(BUNDLED_PRESET_DIR, "iter/index.md")).text(),
+			Bun.file(resolve(BUNDLED_PRESET_DIR, "iter/read-context.md")).text(),
+		])
+		const routePrompt = `${indexPrompt}\n${readContextPrompt}`
+
+		expect(routePrompt).toContain("`ISSUE_KIND` is `comment` → read `iter/spike-comment`")
+		expect(routePrompt).toContain("`ISSUE_KIND` is `code-spike` → read `iter/source-writing-spike`")
+		expect(routePrompt).toContain("`ISSUE_KIND` is `blocked` → read `iter/resolve-blocker`")
+		expect(routePrompt).toContain("`ISSUE_KIND` is `code` or empty")
+		expect(routePrompt).toContain("→ read `iter/classify-scope`")
+	})
+
 	test("blocked responder prompt carries the required cross-repo side effects", async () => {
 		const prompt = await Bun.file(resolve(BUNDLED_PRESET_DIR, "blocked-responder-entry.md")).text()
 		expect(prompt).toContain("gh")
