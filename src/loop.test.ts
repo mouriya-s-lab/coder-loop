@@ -22,6 +22,7 @@ import {
 	parseSessionIdFromRunnerStream,
 	renderFragmentIndex,
 	renderPrompt,
+	resolveWorkflowFileConfigBinding,
 	stripRoleEntryFrontmatter,
 	resolveBinding,
 	selectRunnerForPhase,
@@ -269,6 +270,12 @@ describe("ItemRecord prompt bindings", () => {
 })
 
 describe("runtime binding helpers", () => {
+	test("workflow file config binding keeps the conventional target path when chain metadata is unseeded", () => {
+		expect(resolveWorkflowFileConfigBinding(REPO_ROOT, null)).toBe(resolve(REPO_ROOT, ".coder-loop/workflow.md"))
+		expect(resolveWorkflowFileConfigBinding(REPO_ROOT, "docs/workflow.md")).toBe(resolve(REPO_ROOT, "docs/workflow.md"))
+		expect(resolveWorkflowFileConfigBinding(REPO_ROOT, resolve(REPO_ROOT, "custom/workflow.md"))).toBe(resolve(REPO_ROOT, "custom/workflow.md"))
+	})
+
 	test("buildConfigBindings returns transparent config data", () => {
 		const options = makeOptions()
 		const config = buildConfigBindings({ ...options, configBindings: { ...options.configBindings, customField: "custom" } })

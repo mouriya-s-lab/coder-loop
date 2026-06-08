@@ -2434,6 +2434,43 @@ describe("scheduler chain bindings (issue #288)", () => {
 		expect(rendered).toBe("umb_repo=[] umb_issue=[]")
 	})
 
+	test("renderSchedulerSpawnPrompt resolves WORKFLOW_FILE for existing chains without seeded config", async () => {
+		const targetCwd = resolve(TEST_ROOT, "target-unseeded-workflow")
+		const chain = makeChainFixture({ name: "unseeded-workflow-chain", metadata: {} })
+		const item = makeItemFixture(chain, { issueNumber: 999_004, repoCwd: targetCwd })
+		const rendered = await renderSchedulerSpawnPrompt({
+			rawPrompt: "workflow={{WORKFLOW_FILE}}",
+			presetDir: PRESET_DIR,
+			phase: "iteration",
+			chain,
+			item,
+			runId: "run-unseeded-workflow",
+			worktreePath: resolve(TEST_ROOT, "worktree-unseeded-workflow"),
+			issueKind: "code",
+		})
+		expect(rendered).toBe(`workflow=${resolve(targetCwd, ".coder-loop/workflow.md")}`)
+	})
+
+	test("renderSchedulerSpawnPrompt resolves WORKFLOW_FILE from chain metadata config when present", async () => {
+		const targetCwd = resolve(TEST_ROOT, "target-seeded-workflow")
+		const chain = makeChainFixture({
+			name: "seeded-workflow-chain",
+			metadata: { config: { workflowFile: "policy/workflow.md" } },
+		})
+		const item = makeItemFixture(chain, { issueNumber: 999_005, repoCwd: targetCwd })
+		const rendered = await renderSchedulerSpawnPrompt({
+			rawPrompt: "workflow={{WORKFLOW_FILE}}",
+			presetDir: PRESET_DIR,
+			phase: "iteration",
+			chain,
+			item,
+			runId: "run-seeded-workflow",
+			worktreePath: resolve(TEST_ROOT, "worktree-seeded-workflow"),
+			issueKind: "code",
+		})
+		expect(rendered).toBe(`workflow=${resolve(targetCwd, "policy/workflow.md")}`)
+	})
+
 	test("scheduler spawn end-to-end: chain literals reach agent stdout via echo runner (AC5 fixture-style integration)", async () => {
 		const fixture = await createPresetPromptIntegrationFixture("chain-binding-integration")
 		try {

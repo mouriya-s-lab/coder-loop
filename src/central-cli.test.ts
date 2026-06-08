@@ -681,6 +681,7 @@ describe("central chain/item CLI", () => {
 			await expect(Bun.file(resolve(target, ".coder-loop/runtime")).exists()).resolves.toBe(false)
 			const status = expectJsonOk(await runCli(["chain", "status", "repo", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(status.chain).toMatchObject({ name: "repo", repository: "fixture/repo", preset: "gh-issue-pr-iteration", status: "active" })
+			expect(status.chain.metadata).toMatchObject({ config: { workflowFile: resolve(target, ".coder-loop/workflow.md") } })
 		} finally {
 			await fixture.daemon.stop()
 		}

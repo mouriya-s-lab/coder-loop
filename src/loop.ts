@@ -3620,12 +3620,16 @@ function buildEffectiveConfigBindings(
 		...chainConfigBindings(chain.metadata),
 		...config.configBindings,
 	}
-	if (config.workflowFile !== null) bindings.workflowFile = resolveFrom(targetCwd, config.workflowFile)
+	bindings.workflowFile = resolveWorkflowFileConfigBinding(targetCwd, config.workflowFile ?? stringConfigBinding(bindings, "workflowFile"))
 	return {
 		repository: chain.repository,
 		baseBranch: chain.baseBranch,
 		...bindings,
 	}
+}
+
+export function resolveWorkflowFileConfigBinding(targetCwd: string, workflowFile: string | null): string {
+	return resolveFrom(targetCwd, workflowFile ?? ".coder-loop/workflow.md")
 }
 
 function stringConfigBinding(bindings: JsonObject, key: string): string | null {

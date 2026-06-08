@@ -11,6 +11,7 @@ import {
 	parseSessionIdFromRunnerStream,
 	renderFragmentIndex,
 	renderPrompt,
+	resolveWorkflowFileConfigBinding,
 	resolveIssueKind,
 	selectRunnerForPhase,
 	type AgentRunnerKind,
@@ -1742,7 +1743,7 @@ function buildSchedulerConfigBindings(repoCwd: string, chain: ChainRecord): Json
 		...chainConfigBindings(chain.metadata),
 	}
 	const workflowFile = stringMetadata(chain.metadata, "workflowFile") ?? stringConfigBinding(bindings, "workflowFile")
-	if (workflowFile !== null) bindings.workflowFile = resolveFrom(repoCwd, workflowFile)
+	bindings.workflowFile = resolveWorkflowFileConfigBinding(repoCwd, workflowFile)
 	return bindings
 }
 
