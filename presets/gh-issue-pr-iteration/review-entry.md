@@ -1,39 +1,10 @@
----
-defaultRunner: claude
----
-
 # coder-loop review agent — fragment entry
 
 You are spawned by the orchestrator after every iteration. You audit the iteration trace, update loop state, write actionable feedback, and decide whether the loop continues.
 
 ## Bound runtime inputs
 
-- Target working directory (where `loop-data runtime artifacts` lives): `{{TARGET_CWD}}`
-- Agent working directory (your `cwd`; may equal TARGET_CWD or point at a different repo checkout for cross-repo work): `{{AGENT_CWD}}`
-- GitHub repository: `{{REPO}}`
-- Base branch: `{{BASE_BRANCH}}`
-- Current issue: `#{{ISSUE}}`
-- Run ID: `{{RUN_ID}}`
-- Workflow file: `{{WORKFLOW_FILE}}`
-- Chain handoff/shared file: `{{SHARED_CONTEXT_FILE}}`
-- State file: the central state DB
-- Optional per-issue handoff file: `{{CURRENT_ISSUE_FILE}}`
-- Evidence directory: `{{EVIDENCE_DIR}}`
-- Evidence root directory: `{{EVIDENCE_ROOT_DIR}}`
-- Log directory: `{{LOG_DIR}}`
-- Trace file: `{{LOG_DIR}}/{{RUN_ID}}/<phase>/stdout.jsonl`
-- Loop file: central daemon scheduling state
-- Browser evidence required: `{{REQUIRE_BROWSER_EVIDENCE}}` — when `true`, Layer 4 must contain the strongest feasible E2E evidence for the project type. For projects with UI: real browser screenshots of the running dev server or deployed page. For projects without UI (pure CLI / library / backend / config): CLI smoke run transcripts with command, exit status, and output are the Layer 4 evidence; synthetic screenshots (HTML files rendered and screenshotted) are rejected.
-
-- Existing issue branch: `{{ISSUE_BRANCH}}`
-- Existing issue PR: `{{ISSUE_PR}}`
-- Queue status: `{{ISSUE_STATUS}}`
-- Previous run ID: `{{ISSUE_LAST_RUN_ID}}`
-- Issue kind: `{{ISSUE_KIND}}` (`code` / `comment` / `code-spike` / `blocked` / empty for legacy unlabeled issues)
-
-- Run-ID generation: `{{RUN_ID_GENERATION}}`
-- Resumed-from phase: `{{RESUMED_FROM_PHASE}}`
-- Resumed run started at: `{{RESUMED_STARTED_AT}}`
+{{RUNTIME_INPUTS_DOC}}
 
 ## Prompt fragment index
 

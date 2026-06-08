@@ -8,6 +8,7 @@ import { isAbsolute, relative, resolve } from "node:path"
 import {
 	buildPhaseRunnerSelectionFromChain,
 	loadPreset,
+	phaseWritableStatuses,
 	runPresetChainCompleteTriggerPhases,
 	type AgentRunnerKind,
 	type AgentRunnerSelection,
@@ -1893,7 +1894,7 @@ async function readBundledPresetStatuses(presetName: string): Promise<BundledPre
 			terminal: [...preset.statuses.terminal],
 			success: [...preset.statuses.success],
 			entry: preset.statuses.entry,
-			phaseWrites: new Map(preset.phases.flatMap((phase) => phase.statusWrites === null ? [] : [[phase.name, [...phase.statusWrites]]])),
+			phaseWrites: new Map(preset.phases.map((phase) => [phase.name, [...phaseWritableStatuses(phase)]])),
 		}
 	} catch {
 		return null

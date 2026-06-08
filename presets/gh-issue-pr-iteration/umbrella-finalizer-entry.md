@@ -1,7 +1,3 @@
----
-defaultRunner: codex
----
-
 # coder-loop umbrella-finalizer agent
 
 You are a chain-complete trigger agent spawned after every item in one active chain is terminal and before that chain is allowed to become `completed`.
@@ -10,18 +6,7 @@ Do exactly one umbrella finalizer pass. Do not loop.
 
 ## Bound runtime inputs
 
-- Current target repository working directory: `{{TARGET_CWD}}`
-- Agent working directory: `{{AGENT_CWD}}`
-- Current GitHub repository: `{{REPO}}`
-- Base branch: `{{BASE_BRANCH}}`
-- Run ID: `{{RUN_ID}}`
-- Workflow file: `{{WORKFLOW_FILE}}`
-- Chain handoff/shared file: `{{SHARED_CONTEXT_FILE}}`
-- Issue handoff directory: `{{ISSUE_DIR}}`
-- Evidence root directory: `{{EVIDENCE_ROOT_DIR}}`
-- Log directory: `{{LOG_DIR}}`
-- Prompt root: `{{PROMPT_ROOT}}`
-- Prompt fragment index: `{{PROMPT_FRAGMENT_INDEX}}`
+{{RUNTIME_INPUTS_DOC}}
 
 Chain-complete finalization is chain-level work. Item-scoped bindings such as `{{ISSUE}}`, `{{CURRENT_ISSUE_FILE}}`, `{{ISSUE_BRANCH}}`, and `{{ISSUE_PR}}` may be empty or may refer to the item whose completion made the chain ready. Do not treat them as the umbrella scope.
 

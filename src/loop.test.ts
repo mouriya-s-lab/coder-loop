@@ -17,7 +17,6 @@ import {
 	lastNonTriggerPhaseForPreset,
 	parseKindFromLabels,
 	parsePreset,
-	parseRoleEntryMetadata,
 	parseReviewSummaryVerdict,
 	parseSessionIdFromRunnerStream,
 	renderFragmentIndex,
@@ -109,13 +108,19 @@ function makeRuntime(overrides: Partial<RuntimeBindings> = {}): RuntimeBindings 
 		agentCwd: REPO_ROOT,
 		workflowPath: resolve(REPO_ROOT, ".coder-loop/workflow.md"),
 		sharedContextPath: resolve(TEST_ROOT, "chains/fixture/shared.md"),
+		stateFile: "the central state DB",
 		currentIssueFile: resolve(TEST_ROOT, "chains/fixture/issues/333.md"),
 		issueDir: resolve(TEST_ROOT, "chains/fixture/issues"),
 		evidenceDir: resolve(TEST_ROOT, "chains/fixture/evidence/333"),
 		evidenceRootDir: resolve(TEST_ROOT, "chains/fixture/evidence"),
 		logDir: resolve(TEST_ROOT, "chains/fixture/runs"),
+		traceFile: `${resolve(TEST_ROOT, "chains/fixture/runs")}/run-fixture/<phase>/stdout.jsonl`,
+		loopFile: "central daemon scheduling state",
 		presetDir: resolve(REPO_ROOT, "presets/fixture"),
 		fragmentIndex: "- iter/index (iter): iter/index.md",
+		runtimeInputsDoc: "",
+		phaseExitsDoc: "",
+		issueKindDoc: "",
 		runIdGeneration: "new",
 		resumedFromPhase: "",
 		resumedStartedAt: "",
@@ -173,12 +178,13 @@ describe("ItemRecord prompt bindings", () => {
 		const phase: PresetPhase = {
 			name: "iteration",
 			prompt: "iteration.md",
-			statusWrites: null,
+			exits: [],
 			variables: [
 				["ISSUE", { kind: "item", field: "issue" }],
 				["PHASE", { kind: "item", field: "phase" }],
 				["CODEX_SESSION", { kind: "item", field: "sessionIds.iteration.codex" }],
 			],
+			variableDocs: new Map(),
 			trigger: null,
 			defaultRunner: null,
 		}
@@ -190,6 +196,34 @@ describe("ItemRecord prompt bindings", () => {
 		const ctx: ResolveContext = { item, config: makeConfig(), runtime: makeRuntime() }
 
 		expect(renderPrompt("#{{ISSUE}} {{PHASE}} {{CODEX_SESSION}}", phase, ctx)).toBe("#333 iteration thread-123")
+	})
+
+	test("renderPrompt injects runtime inputs, phase exits, and issue kind docs from phase metadata", () => {
+		const phase: PresetPhase = {
+			name: "review",
+			prompt: "review.md",
+			exits: [{ status: "done", when: "review accepted the result" }],
+			variables: [
+				["RUNTIME_INPUTS_DOC", { kind: "runtime", key: "runtimeInputsDoc" }],
+				["PHASE_EXITS_DOC", { kind: "runtime", key: "phaseExitsDoc" }],
+				["ISSUE_KIND_DOC", { kind: "runtime", key: "issueKindDoc" }],
+				["TARGET_CWD", { kind: "runtime", key: "targetCwd" }],
+				["ISSUE_KIND", { kind: "runtime", key: "issueKind" }],
+			],
+			variableDocs: new Map([
+				["TARGET_CWD", { label: "Target working directory", suffix: "", style: "code", blankBefore: false }],
+				["ISSUE_KIND", { label: "Issue kind", suffix: "", style: "code", blankBefore: false }],
+			]),
+			trigger: null,
+			defaultRunner: "claude",
+		}
+		const ctx: ResolveContext = { item: makeItem(), config: makeConfig(), runtime: makeRuntime({ targetCwd: "/repo", issueKind: "code" }) }
+
+		const prompt = renderPrompt("{{RUNTIME_INPUTS_DOC}}\n\n{{PHASE_EXITS_DOC}}\n\n{{ISSUE_KIND_DOC}}", phase, ctx)
+
+		expect(prompt).toContain("- Target working directory: `/repo`")
+		expect(prompt).toContain("- Issue kind: `code` (`code` / `comment` / `code-spike` / `blocked` / empty for legacy unlabeled issues)")
+		expect(prompt).toContain("- `done`: review accepted the result")
 	})
 
 	test("resolveBinding keeps old item.issue and config.requireBrowserEvidence compatibility", () => {
@@ -308,7 +342,7 @@ describe("runtime binding helpers", () => {
 })
 
 describe("runner and daemon helpers", () => {
-	test("selectRunnerForPhase uses role-md runner for review and queue override for iteration", () => {
+	test("selectRunnerForPhase uses preset runner for review and queue override for iteration", () => {
 		const base = makePreset()
 		const preset: Preset = {
 			...base,
@@ -334,12 +368,6 @@ describe("runner and daemon helpers", () => {
 
 		expect(runner.kind).toBe("codex")
 		expect(runner.source).toBe("engine-builtin")
-	})
-
-	test("parseRoleEntryMetadata reads strict entry frontmatter", () => {
-		expect(parseRoleEntryMetadata("---\ndefaultRunner: claude\n---\n# role", "role").defaultRunner).toBe("claude")
-		expect(parseRoleEntryMetadata("# role", "role").defaultRunner).toBeNull()
-		expect(() => parseRoleEntryMetadata("---\ndefaultRunner: bash\n---\n# role", "role")).toThrow(/defaultRunner/)
 	})
 
 	test("stripRoleEntryFrontmatter removes leading frontmatter so prompts never start with --", () => {

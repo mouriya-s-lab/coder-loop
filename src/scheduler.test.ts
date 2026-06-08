@@ -2613,7 +2613,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			})
 			expect(runner.kind).toBe("codex")
 			expect(runner.binary).toBe("codex")
-			expect(runner.source).toBe("role-md")
+			expect(runner.source).toBe("preset")
 		})
 
 		test("chain default → review phase returns claude with no source-side model override", async () => {
@@ -2629,10 +2629,10 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			expect(runner.kind).toBe("claude")
 			expect(runner.binary).toBe("claude")
 			expect(runner.model).toBeNull()
-			expect(runner.source).toBe("role-md")
+			expect(runner.source).toBe("preset")
 		})
 
-		test("chain metadata reviewRunner='codex' does not override review role-md runner", async () => {
+		test("chain metadata reviewRunner='codex' does not override review preset runner", async () => {
 			const chain = makeChainFixture({ metadata: { reviewRunner: "codex" } })
 			const preset = await loadPreset(PRESET_DIR)
 			const runner = resolvePhaseRunnerFromChain({
@@ -2644,7 +2644,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			})
 			expect(runner.kind).toBe("claude")
 			expect(runner.binary).toBe("claude")
-			expect(runner.source).toBe("role-md")
+			expect(runner.source).toBe("preset")
 		})
 
 		test("chain metadata claude.model flows to review phase (no source-side override)", async () => {
@@ -2679,7 +2679,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			expect(runner.source).toBe("queue")
 		})
 
-		test("chain default → triggered/finalizer phase resolves to its role-md codex runner", async () => {
+		test("chain default → triggered/finalizer phase resolves to its preset codex runner", async () => {
 			const chain = makeChainFixture({ metadata: {} })
 			const preset = await loadPreset(PRESET_DIR)
 			const runner = resolvePhaseRunnerFromChain({
@@ -2690,7 +2690,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 				item: { runner: null },
 			})
 			expect(runner.kind).toBe("codex")
-			expect(runner.source).toBe("role-md")
+			expect(runner.source).toBe("preset")
 		})
 
 		test("chain metadata claude.model flows into review args via buildRunnerInvocation", async () => {
@@ -2837,7 +2837,7 @@ describe("runPresetChainCompleteTriggerPhases per-phase runner selection (issue 
 		}
 	})
 
-	test("chain metadata runner='claude' does not override triggered phase role-md runner", async () => {
+	test("chain metadata runner='claude' does not override triggered phase preset runner", async () => {
 		const fixture = await createFixture("trigger-claude-override")
 		try {
 			const fakeCodex = resolve(fixture.loopDataRoot, "..", "fake-codex-finalizer.sh")
@@ -3666,29 +3666,30 @@ entry = "queued"
 [agent]
 binary = "codex"
 
-[[phases]]
-name = "alpha"
-prompt = "alpha.md"
-statusWrites = []
+	[[phases]]
+	name = "alpha"
+	prompt = "alpha.md"
 
-  [phases.variables]
-  ISSUE = "item.issue"
+	  [phases.variables]
+	  ISSUE = "item.issue"
 
-[[phases]]
-name = "beta"
-prompt = "beta.md"
-statusWrites = []
+	[[phases]]
+	name = "beta"
+	prompt = "beta.md"
 
-  [phases.variables]
-  ISSUE = "item.issue"
+	  [phases.variables]
+	  ISSUE = "item.issue"
 
-[[phases]]
-name = "gamma"
-prompt = "gamma.md"
-statusWrites = ["done"]
+	[[phases]]
+	name = "gamma"
+	prompt = "gamma.md"
 
-  [phases.variables]
-  ISSUE = "item.issue"
+	  [[phases.exits]]
+	  status = "done"
+	  when = "gamma accepted"
+
+	  [phases.variables]
+	  ISSUE = "item.issue"
 `,
 	)
 }

@@ -14,7 +14,7 @@
 
 - `bun` 已安装（`bun --version` 能跑）。
 - `gh` CLI 已 auth（`gh auth status` 不报错），有目标 repo 的 issue / PR 写权限。
-- runner CLI 在 PATH：phase 默认 runner 由角色 entry md 声明，bundled workflow 需要 `codex` 和 `claude`。
+- runner CLI 在 PATH：phase 默认 runner 由 preset 声明，bundled workflow 需要 `codex` 和 `claude`。
 - 目标 repo 在本地，有可用的 base branch（通常 `main`）。
 - 用户级 skill / rule（仅 `/dev-plan` 需要，`/dev-loop` 本身不需要）：
   - `~/.claude/rules/github-issue-pr-routing.rule.md`
@@ -53,7 +53,7 @@ coder-loop install /path/to/your-target-repo --repo <owner>/<repo>
 
 - **A) target 项目文件**：写 `.claude/commands/dev-plan.md` / `dev-loop.md`、建/刷新 `.coder-loop/runtime/{issues,evidence,logs}/` 并初始化 centralized chain、merge `.coder-loop/runtime/config.json`（含 preset 绑定）、若 `workflow.md` 缺失则从 preset 模板拷一份。
 - **B) target GitHub state**：通过 `gh` 确保 `kind:code` / `kind:comment` / `kind:code-spike` / `kind:blocked` 标签存在（preset fragments 依赖它们做 issue 分类）。
-- **C) 操作员机器前置**：只做检查、不安装——`gh`(+ auth) / role-md phase runner CLI / `coder-loop` 是否在 PATH。
+- **C) 操作员机器前置**：只做检查、不安装——`gh`(+ auth) / preset phase runner CLI / `coder-loop` 是否在 PATH。
 - **D) 用户级 skill 版本**：检查 `~/.claude/skills/writing-issue/SKILL.md` 是否含新版 marker；加 `--install-skills` 会自动同步到最新。
 
 `install` 第一件事会确认 central daemon 可达；daemon 不在线时会在写 `.coder-loop/workflow.md` 之前 fail-fast。使用自定义 `--loop-data-root` 时，`daemon up` 与后续 `install` / `doctor` / `status` 要传同一个 root。
@@ -82,7 +82,7 @@ coder-loop status /path/to/your-target-repo --json
 
 ### Runner 默认值与覆盖
 
-默认 runner 由每个 phase 的角色 entry md 自声明；bundled `gh-issue-pr-iteration` 中 iteration 是 `codex`，review 是 `claude`。Review 不继承 Codex 宿主或 queue item；模型跟随 `claude.model` / `codex.model` config，源码不再为 review 强制覆盖模型。最简单的改模型方式：
+默认 runner 由 `preset.toml` 的每个 phase 声明；bundled `gh-issue-pr-iteration` 中 iteration 是 `codex`，review 是 `claude`。Review 不继承 Codex 宿主或 queue item；模型跟随 `claude.model` / `codex.model` config，源码不再为 review 强制覆盖模型。最简单的改模型方式：
 
 ```bash
 coder-loop runtime set <target> --claude-model opus-4-8 --codex-model gpt-5.5

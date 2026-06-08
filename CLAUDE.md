@@ -54,28 +54,28 @@ L2: Preset（presets/<name>/）
 
 ## Runner Selection
 
-Runner 默认值跟随角色 entry md，而不是 target config 或 `preset.toml`。每个 phase 的 `<role>-entry.md` 顶部可声明：
+Runner 默认值跟随 `preset.toml`，而不是 target config 或角色 entry md。每个 phase 可声明：
 
-```markdown
----
-defaultRunner: codex
----
+```toml
+[[phases]]
+name = "iteration"
+runner = "codex"
 ```
 
-`defaultRunner` 只能是 `claude` 或 `codex`。角色 md 未声明时走单一 engine-builtin fallback（当前为 `codex`），并在 status 中显示 `source=engine-builtin`。`target.runner.hostDefault` 只保留宿主诊断信息，不决定 phase runner。
+`runner` 只能是 `claude` 或 `codex`。phase 未声明时走单一 engine-builtin fallback（当前为 `codex`），并在 status 中显示 `source=engine-builtin`。`target.runner.hostDefault` 只保留宿主诊断信息，不决定 phase runner。
 
 覆盖顺序：
 
 1. centralized queue item 上的 `"runner": "claude" | "codex"`，只影响允许 item override 的普通执行 phase（`gh-issue-pr-iteration` 中是 iteration）。
-2. phase 角色 entry md 的 `defaultRunner`，status 中显示 `source=role-md`。
-3. 角色 md 未声明时的 engine-builtin fallback，status 中显示 `source=engine-builtin`。
+2. `preset.toml` 中 phase 的 `runner`，status 中显示 `source=preset`。
+3. phase 未声明 runner 时的 engine-builtin fallback，status 中显示 `source=engine-builtin`。
 
-Runner binary、模型与额外参数由 config 的 `claude.binary` / `claude.model` / `claude.extraArgs`、`codex.binary` / `codex.model` / `codex.extraArgs` 提供——iteration 与 review 共享同一份 `claude.model` / `codex.model`，源码不再为 review phase 强制覆盖模型。要改 runner / 模型推荐用 `coder-loop runtime set`，它把枚举值落到 config 里（Claude 模型固定带 `[1m]` 后缀）；手写 config 也可以。`coder-loop status <target> --json` 暴露 `target.runner.phases.<phase>`、`target.runner.default`、`target.runner.reviewDefault`、`queue.selected.phaseRunners.<phase>`、`queue.selected.runner`、`queue.selected.reviewRunner`、`current.runner` 和 `current.phaseStatus.value.runner/model`；`doctor` 按 phase role-md 推导出的 runner binary 做 PATH 检查。不要从旧 flat log 或 agent `status.json` 反推 runner/model，除非 `status` 已经指出需要 fallback debug；新版 agent status 位于 `<logDir>/<runId>/<phase>/status.json`。
+Runner binary、模型与额外参数由 config 的 `claude.binary` / `claude.model` / `claude.extraArgs`、`codex.binary` / `codex.model` / `codex.extraArgs` 提供——iteration 与 review 共享同一份 `claude.model` / `codex.model`，源码不再为 review phase 强制覆盖模型。要改 runner / 模型推荐用 `coder-loop runtime set`，它把枚举值落到 config 里（Claude 模型固定带 `[1m]` 后缀）；手写 config 也可以。`coder-loop status <target> --json` 暴露 `target.runner.phases.<phase>`、`target.runner.default`、`target.runner.reviewDefault`、`queue.selected.phaseRunners.<phase>`、`queue.selected.runner`、`queue.selected.reviewRunner`、`current.runner` 和 `current.phaseStatus.value.runner/model`；`doctor` 按 phase runner 推导出的 runner binary 做 PATH 检查。不要从旧 flat log 或 agent `status.json` 反推 runner/model，除非 `status` 已经指出需要 fallback debug；新版 agent status 位于 `<logDir>/<runId>/<phase>/status.json`。
 
 ### 写一个新 preset 的最小流程
 
 1. `mkdir presets/<name>/` 写 `preset.toml`（schema 见 README §「写一个新 preset」）。
-2. 给每个 phase 写一份 `<phase>-entry.md`，用 frontmatter 自声明 `defaultRunner`，正文用 `{{KEY}}` 占位符引用 preset.toml `[phases.variables]` 表的 key。
+2. 给每个 phase 写一份 `<phase>-entry.md`，正文用 `{{KEY}}` 占位符引用 preset.toml `[phases.variables]` 表的 key；phase runner 写在 `preset.toml`。
 3. target 在 `.coder-loop/runtime/config.json` 写 `{ "preset": "<name>" }` 或 `{ "presetPath": "<absolute-or-relative>" }`。
 4. `bun src/loop.ts --target-cwd <target> --check-runtime` 应输出 `preset=<name>`、exit 0。
 5. `bun src/loop.ts --target-cwd <target> --dry-run` 应输出 `selected=<id>`、exit 0。

@@ -34,7 +34,7 @@ The successful 2026-05-17 run used Codex end to end. Current runner semantics di
 
 - queue item: `runner: "codex"`;
 - `status --json`: selected runner `kind=codex`, `source=queue`;
-- `status --json`: `target.runner.phases.review` is `kind=claude`, `source=role-md`; `model` follows `claude.model` config (unset → `null`, or the value written by `coder-loop runtime set --claude-model`, e.g. `claude-opus-4-8[1m]`);
+- `status --json`: `target.runner.phases.review` is `kind=claude`, `source=preset`; `model` follows `claude.model` config (unset → `null`, or the value written by `coder-loop runtime set --claude-model`, e.g. `claude-opus-4-8[1m]`);
 - iteration phase status should record `runner: "codex"` and a Codex `thread_id`; review phase status should record `runner: "claude"` and whatever `claude.model` resolves to (no source-side override).
 
 Codex runner requires real workspace writes and GitHub CLI access for the

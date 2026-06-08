@@ -64,27 +64,33 @@ const EXPECTED_VARIABLE_KEYS = [
 	"AGENT_CWD",
 	"REPO",
 	"BASE_BRANCH",
-	"RUN_ID",
 	"ISSUE",
+	"RUN_ID",
 	"WORKFLOW_FILE",
 	"SHARED_CONTEXT_FILE",
+	"STATE_FILE",
 	"CURRENT_ISSUE_FILE",
 	"ISSUE_DIR",
 	"EVIDENCE_DIR",
 	"EVIDENCE_ROOT_DIR",
 	"LOG_DIR",
+	"TRACE_FILE",
+	"LOOP_FILE",
 	"PROMPT_ROOT",
 	"PROMPT_FRAGMENT_INDEX",
+	"RUNTIME_INPUTS_DOC",
+	"PHASE_EXITS_DOC",
+	"ISSUE_KIND_DOC",
 	"REQUIRE_BROWSER_EVIDENCE",
-	"RUN_ID_GENERATION",
-	"RESUMED_FROM_PHASE",
-	"RESUMED_STARTED_AT",
-	"RESUMED_SESSION_ID",
 	"ISSUE_BRANCH",
 	"ISSUE_PR",
 	"ISSUE_STATUS",
 	"ISSUE_LAST_RUN_ID",
 	"ISSUE_KIND",
+	"RUN_ID_GENERATION",
+	"RESUMED_FROM_PHASE",
+	"RESUMED_STARTED_AT",
+	"RESUMED_SESSION_ID",
 	"CHAIN_NAME",
 	"CHAIN_UMBRELLA_REPO",
 	"CHAIN_UMBRELLA_ISSUE",
@@ -103,8 +109,8 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(preset.agent.attemptTimeoutSeconds).toBe(DEFAULT_ATTEMPT_TIMEOUT_SECONDS)
 		expect([...preset.statuses.continuable]).toEqual(["queued", "in_progress", "changes_requested"])
 		expect([...preset.statuses.terminal]).toEqual(["blocked", "moot", "done", "exhausted"])
-		expect(preset.phases.find((phase) => phase.name === "iteration")?.statusWrites).toEqual(["in_progress"])
-		expect(preset.phases.find((phase) => phase.name === "review")?.statusWrites).toEqual(["changes_requested", "blocked", "moot", "done", "exhausted"])
+		expect(preset.phases.find((phase) => phase.name === "iteration")?.exits).toEqual([])
+		expect(preset.phases.find((phase) => phase.name === "review")?.exits.map((exit) => exit.status)).toEqual(["changes_requested", "blocked", "moot", "done", "exhausted"])
 	})
 
 	test("phases include iteration, review, blocked responder, and umbrella finalizer triggers", async () => {
@@ -126,7 +132,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		}
 	})
 
-	test("each phase declares all 29 variable bindings (24 baseline + 5 chain) with parsed sources", async () => {
+	test("each phase declares the shared variable bindings with parsed sources", async () => {
 		const preset = await loadPreset(BUNDLED_PRESET_DIR)
 		for (const phase of preset.phases) {
 			const keys = phase.variables.map(([key]) => key)
@@ -238,7 +244,7 @@ describe("parsePreset schema validation", () => {
 		root.statuses = { continuable: ["queued"], terminal: ["blocked", "done"] }
 		root.phases = [
 			{ name: "iteration", prompt: "iter.md", variables: { K: "item.id" } },
-			{ name: "review", prompt: "review.md", variables: { K: "item.id" } },
+			{ name: "review", prompt: "review.md", exits: [{ status: "blocked", when: "blocked" }], variables: { K: "item.id" } },
 			{ name: "responder", prompt: "responder.md", trigger: { afterPhase: "review", whenStatus: "blocked" }, variables: { K: "item.id" } },
 		]
 
@@ -250,35 +256,45 @@ describe("parsePreset schema validation", () => {
 		expect(triggeredPhasesAfter(preset, "review", "done")).toEqual([])
 	})
 
-	test("accepts per-phase status write declarations", () => {
+	test("accepts per-phase exit declarations", () => {
 		const root: Record<string, unknown> = minimalRoot()
 		root.statuses = { continuable: ["queued", "in_progress"], terminal: ["done"] }
 		root.phases = [
-			{ name: "iteration", prompt: "iter.md", statusWrites: ["in_progress"], variables: { K: "item.id" } },
-			{ name: "review", prompt: "review.md", statusWrites: ["done"], variables: { K: "item.id" } },
+			{ name: "iteration", prompt: "iter.md", exits: [{ status: "in_progress", when: "handoff" }], variables: { K: "item.id" } },
+			{ name: "review", prompt: "review.md", runner: "claude", exits: [{ status: "done", when: "accepted" }], variables: { K: "item.id" } },
 		]
 
 		const preset = parsePreset(root, "/tmp")
 
-		expect(preset.phases.map((phase) => phase.statusWrites)).toEqual([["in_progress"], ["done"]])
+		expect(preset.phases.map((phase) => phase.exits.map((exit) => exit.status))).toEqual([["in_progress"], ["done"]])
+		expect(preset.phases[1]!.defaultRunner).toBe("claude")
 	})
 
-	test("rejects per-phase status write declarations outside preset statuses", () => {
+	test("rejects per-phase exit declarations outside preset statuses", () => {
 		const root: Record<string, unknown> = minimalRoot()
 		root.phases = [
-			{ name: "iteration", prompt: "iter.md", statusWrites: ["missing"], variables: { K: "item.id" } },
+			{ name: "iteration", prompt: "iter.md", exits: [{ status: "missing", when: "bad" }], variables: { K: "item.id" } },
 		]
 
-		expect(() => parsePreset(root, "/tmp")).toThrow(/statusWrites: unknown status "missing"/)
+		expect(() => parsePreset(root, "/tmp")).toThrow(/exits\.status: unknown status "missing"/)
 	})
 
-	test("rejects duplicate per-phase status write declarations", () => {
+	test("rejects duplicate per-phase exit declarations", () => {
 		const root: Record<string, unknown> = minimalRoot()
 		root.phases = [
-			{ name: "iteration", prompt: "iter.md", statusWrites: ["a", "a"], variables: { K: "item.id" } },
+			{ name: "iteration", prompt: "iter.md", exits: [{ status: "a", when: "one" }, { status: "a", when: "two" }], variables: { K: "item.id" } },
 		]
 
-		expect(() => parsePreset(root, "/tmp")).toThrow(/statusWrites: duplicate status "a"/)
+		expect(() => parsePreset(root, "/tmp")).toThrow(/exits\.status: duplicate status "a"/)
+	})
+
+	test("rejects legacy statusWrites declarations", () => {
+		const root: Record<string, unknown> = minimalRoot()
+		root.phases = [
+			{ name: "iteration", prompt: "iter.md", statusWrites: ["a"], variables: { K: "item.id" } },
+		]
+
+		expect(() => parsePreset(root, "/tmp")).toThrow(/statusWrites: use \[\[phases\.exits\]\]/)
 	})
 
 	test("accepts chain-complete trigger phases", () => {
@@ -286,7 +302,7 @@ describe("parsePreset schema validation", () => {
 		root.statuses = { continuable: ["queued"], terminal: ["blocked", "done"] }
 		root.phases = [
 			{ name: "iteration", prompt: "iter.md", variables: { K: "item.id" } },
-			{ name: "review", prompt: "review.md", variables: { K: "item.id" } },
+			{ name: "review", prompt: "review.md", exits: [{ status: "blocked", when: "blocked" }], variables: { K: "item.id" } },
 			{ name: "responder", prompt: "responder.md", trigger: { afterPhase: "review", whenStatus: "blocked" }, variables: { K: "item.id" } },
 			{ name: "finalizer", prompt: "finalizer.md", trigger: { on: "chain-complete" }, variables: { K: "runtime.runId" } },
 		]

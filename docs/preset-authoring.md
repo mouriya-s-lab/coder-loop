@@ -97,9 +97,10 @@ bun src/loop.ts --target-cwd <fresh-target> --check-runtime
 | `[statuses].terminal` | string[] | 是 | 引擎跳过的 status 集合（与 continuable 合并去重） |
 | `[[phases]].name` | string | 是 | phase 名字，写入 `state.current.phase` |
 | `[[phases]].prompt` | string | 是 | 相对 preset.toml 的 entry prompt 模板路径 |
-| `[[phases]].statusWrites` | string[] | 否 | 该 phase 允许 agent 通过 `item update --status` 写入的 status 集合；省略表示不做 phase 级限制，空数组表示该 phase 不允许写 status |
+| `[[phases]].runner` | `"claude"|"codex"` | 否 | phase 默认 runner；未声明时使用 engine-builtin fallback |
+| `[[phases.exits]]` | array | 否 | 该 phase 允许 agent 写出的结构化出口。每项包含 `status` 与给 prompt 渲染用的 `when` 说明；不声明 exits 表示该 phase 不写 status |
 | `[[phases]].trigger` | table | 否 | 可把 phase 声明为 trigger phase。支持 `trigger = { afterPhase = "...", whenStatus = "..." }` 的 item phase trigger，或 `trigger = { on = "chain-complete" }` 的 chain lifecycle trigger |
-| `[phases.variables]` | table | 是 | 模板中 `{{KEY}}` 的解析表，详见下节 |
+| `[phases.variables]` | table | 是 | 模板中 `{{KEY}}` 的解析表。值可为 `"item|config|runtime.<key>"` 字符串，或 `{ source = "...", label = "...", suffix = "...", style = "code|plain" }`，后者会参与 `{{RUNTIME_INPUTS_DOC}}` 渲染 |
 | `[[fragments]].id` | string | 是 | fragment 唯一标识（如 `iter/read-context`），entry prompt 通过该 id 引用 |
 | `[[fragments]].role` | string | 是 | fragment 角色（如 `common` / `iter` / `review`），仅 metadata，引擎不校验 |
 | `[[fragments]].path` | string | 是 | 相对 preset.toml 的 markdown 文件路径，文件必须可读 |
@@ -113,10 +114,10 @@ bun src/loop.ts --target-cwd <fresh-target> --check-runtime
 - 同 `name` 的 phase 不可重名；
 - 同 `id` 的 fragment 不可重复；
 - `[statuses]` 的 continuable / terminal 集合不可有交集；
-- `[[phases]].statusWrites` 中每个 status 必须属于 continuable 或 terminal status，且同一 phase 内不可重复；
-- item phase trigger 的 `afterPhase` 必须指向已声明 phase，`whenStatus` 必须属于 continuable 或 terminal status；
+- `[[phases.exits]]` 中每个 status 必须属于 continuable 或 terminal status，且同一 phase 内不可重复；
+- item phase trigger 的 `afterPhase` 必须指向已声明 phase，`whenStatus` 必须属于 continuable 或 terminal status，且必须出现在 source phase 的 exits 里；
 - chain lifecycle trigger 目前只支持 `on = "chain-complete"`，且不能同时声明 `afterPhase` / `whenStatus`；
-- 每条 `[phases.variables]` 右侧必须 match `^(item|config|runtime)\.[a-zA-Z][a-zA-Z0-9_]*$`。
+- 每条 `[phases.variables]` source 必须 match `^(item|config|runtime)\.[a-zA-Z][a-zA-Z0-9_]*$`。
 
 任何一条失败 → preset load throws，`--check-runtime` 报错。
 
@@ -231,15 +232,16 @@ target 在 `.coder-loop/runtime/config.json`（或 `config.toml`）写：
 
 两者互斥。都不写时引擎走默认的 `gh-issue-pr-iteration`。`preset` 名只允许 `^[a-zA-Z][a-zA-Z0-9_-]*$`，禁止路径分隔符与 `..`，所以 bundled name 一定落在 `<pkg>/presets/<name>/` 内。
 
-Runner 默认值写在角色 entry md，而不是 `preset.toml` 或 target runtime config。每个 phase 的 prompt 文件顶部声明：
+Runner 默认值写在 `preset.toml`，不是角色 entry md 或 target runtime config。每个 phase 可声明：
 
-```markdown
----
-defaultRunner: codex
----
+```toml
+[[phases]]
+name = "iteration"
+prompt = "iter-entry.md"
+runner = "codex"
 ```
 
-`defaultRunner` 只能是 `claude` 或 `codex`。未声明的 phase 使用 `source=engine-builtin` fallback；已声明的 phase 在 `status --json` 中显示 `source=role-md`。target config 继续提供 runner command 参数，例如：
+`runner` 只能是 `claude` 或 `codex`。未声明的 phase 使用 `source=engine-builtin` fallback；已声明的 phase 在 `status --json` 中显示 `source=preset`。target config 继续提供 runner command 参数，例如：
 
 ```json
 {
@@ -249,7 +251,7 @@ defaultRunner: codex
 }
 ```
 
-queue item 可加 `"runner": "claude" | "codex"` 覆盖允许 item override 的普通执行 phase；review 和 trigger 这类角色使用自己的 entry md 声明。Iteration 与 review 共享同一份 `claude.model` / `codex.model` config，源码不再为 review 强制模型。preset 作者不要把某个 runner 的 CLI 细节写进 engine contract；若某个 preset 只支持特定 runner，把它写进该 preset 的 README / target workflow，并用 `doctor` / `status` 验证 role-md runner 与 target command config 是否符合预期。
+queue item 可加 `"runner": "claude" | "codex"` 覆盖允许 item override 的普通执行 phase；review 和 trigger 这类角色使用自己的 phase runner 声明。Iteration 与 review 共享同一份 `claude.model` / `codex.model` config，源码不再为 review 强制模型。preset 作者不要把某个 runner 的 CLI 细节写进 engine contract；若某个 preset 只支持特定 runner，把它写进该 preset 的 README / target workflow，并用 `doctor` / `status` 验证 preset runner 与 target command config 是否符合预期。
 
 ---
 

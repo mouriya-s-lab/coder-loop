@@ -409,10 +409,16 @@ const PresetPhaseTriggerBoundary = arkType({
 	"on?": "string",
 })
 
+const PresetPhaseExitBoundary = arkType({
+	status: "string",
+	when: "string",
+})
+
 const PresetPhaseBoundary = arkType({
 	name: "string",
 	prompt: "string",
-	"statusWrites?": "string[]",
+	"runner?": "string",
+	"exits?": PresetPhaseExitBoundary.array(),
 	"variables?": "object",
 	"trigger?": PresetPhaseTriggerBoundary,
 })
@@ -480,11 +486,24 @@ export type PresetVariableSource =
 	| { kind: "config"; field: string }
 	| { kind: "runtime"; key: string }
 
+export type PresetVariableDoc = {
+	label: string
+	suffix: string
+	style: "code" | "plain"
+	blankBefore: boolean
+}
+
+export type PresetPhaseExit = {
+	status: string
+	when: string
+}
+
 export type PresetPhase = {
 	name: string
 	prompt: string
-	statusWrites: readonly string[] | null
+	exits: readonly PresetPhaseExit[]
 	variables: ReadonlyArray<readonly [string, PresetVariableSource]>
+	variableDocs: ReadonlyMap<string, PresetVariableDoc>
 	trigger: PresetPhaseTrigger | null
 	defaultRunner: AgentRunnerKind | null
 }
@@ -522,7 +541,7 @@ export type PresetPhaseTrigger =
 
 export type AgentRunnerKind = "claude" | "codex"
 
-export type AgentRunnerSource = "role-md" | "engine-builtin" | "queue" | "config" | "iteration-default" | "review-default"
+export type AgentRunnerSource = "preset" | "engine-builtin" | "queue" | "config" | "iteration-default" | "review-default"
 
 export type AgentRunnerCommand = {
 	kind: AgentRunnerKind
@@ -866,13 +885,19 @@ const RUNTIME_BINDING_KEYS = [
 	"agentCwd",
 	"workflowPath",
 	"sharedContextPath",
+	"stateFile",
 	"currentIssueFile",
 	"issueDir",
 	"evidenceDir",
 	"evidenceRootDir",
 	"logDir",
+	"traceFile",
+	"loopFile",
 	"presetDir",
 	"fragmentIndex",
+	"runtimeInputsDoc",
+	"phaseExitsDoc",
+	"issueKindDoc",
 	"runIdGeneration",
 	"resumedFromPhase",
 	"resumedStartedAt",
@@ -3714,8 +3739,8 @@ export async function loadPreset(presetDir: string): Promise<Preset> {
 	const phases: PresetPhase[] = []
 	for (const phase of preset.phases) {
 		const prompt = await readPresetPhasePrompt(phase)
-		const metadata = parseRoleEntryMetadata(prompt, `preset phase "${phase.name}" prompt`)
-		phases.push({ ...phase, defaultRunner: metadata.defaultRunner })
+		assertRoleEntryHasNoFrontmatter(prompt, `preset phase "${phase.name}" prompt`)
+		phases.push(phase)
 	}
 	for (const fragment of preset.fragments) {
 		await assertReadable(fragment.path, `preset fragment "${fragment.id}"`)
@@ -3749,9 +3774,10 @@ export function parsePreset(value: unknown, presetDir: string): Preset {
 		const variablesRaw = entry.variables ?? {}
 		if (!isObjectRecord(variablesRaw)) presetError(`preset.phases[${index}].variables: must be an object`)
 		const variables: Array<readonly [string, PresetVariableSource]> = []
+		const variableDocs = new Map<string, PresetVariableDoc>()
 		for (const [key, val] of Object.entries(variablesRaw)) {
-			if (typeof val !== "string") presetError(`preset.phases[${index}].variables.${key}: must be a string`)
-			const source = parseVariableSource(val, `preset.phases[${index}].variables.${key}`)
+			const variable = parseVariableBinding(val, `preset.phases[${index}].variables.${key}`)
+			const source = parseVariableSource(variable.source, `preset.phases[${index}].variables.${key}`)
 			if (source.kind === "item") {
 				const itemField = itemFieldRoot(source.field)
 				if (!QUEUE_ITEM_BASE_KEYS.has(itemField) && itemField !== root.item.idField) {
@@ -3759,33 +3785,43 @@ export function parsePreset(value: unknown, presetDir: string): Preset {
 				}
 			}
 			variables.push([key, source] as const)
+			if (variable.doc !== null) variableDocs.set(key, variable.doc)
 		}
 		const trigger = parsePresetPhaseTrigger(entry.trigger ?? null, `preset.phases[${index}].trigger`)
-		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), statusWrites: entry.statusWrites ?? null, variables, trigger, defaultRunner: null })
+		const runner = parsePhaseRunner(entry.runner ?? null, `preset.phases[${index}].runner`)
+		const exits = parsePresetPhaseExits(entry.exits ?? [], `preset.phases[${index}].exits`)
+		if (hasOwnJsonKey(entry as JsonObject, "statusWrites")) {
+			presetError(`preset.phases[${index}].statusWrites: use [[phases.exits]] with status and when`)
+		}
+		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), exits, variables, variableDocs, trigger, defaultRunner: runner })
 	}
 	if (!phases.some((phase) => phase.trigger === null)) presetError("preset.phases: must include at least one non-trigger phase")
 
 	const statuses = new Set<string>([...root.statuses.continuable, ...root.statuses.terminal])
 	for (const [index, phase] of phases.entries()) {
-		if (phase.statusWrites !== null) {
-			const phaseStatusWrites = new Set<string>()
-			for (const status of phase.statusWrites) {
-				if (!statuses.has(status)) {
-					presetError(`preset.phases[${index}].statusWrites: unknown status "${status}"`)
-				}
-				if (phaseStatusWrites.has(status)) {
-					presetError(`preset.phases[${index}].statusWrites: duplicate status "${status}"`)
-				}
-				phaseStatusWrites.add(status)
+		const phaseExitStatuses = new Set<string>()
+		for (const exit of phase.exits) {
+			if (!statuses.has(exit.status)) {
+				presetError(`preset.phases[${index}].exits.status: unknown status "${exit.status}"`)
 			}
+			if (phaseExitStatuses.has(exit.status)) {
+				presetError(`preset.phases[${index}].exits.status: duplicate status "${exit.status}"`)
+			}
+			phaseExitStatuses.add(exit.status)
 		}
 		if (phase.trigger === null) continue
 		if (isChainCompleteTrigger(phase.trigger)) continue
-		if (!phaseNames.has(phase.trigger.afterPhase)) {
-			presetError(`preset.phases[${index}].trigger.afterPhase: unknown phase "${phase.trigger.afterPhase}"`)
+		const trigger = phase.trigger
+		if (!phaseNames.has(trigger.afterPhase)) {
+			presetError(`preset.phases[${index}].trigger.afterPhase: unknown phase "${trigger.afterPhase}"`)
 		}
-		if (!statuses.has(phase.trigger.whenStatus)) {
-			presetError(`preset.phases[${index}].trigger.whenStatus: unknown status "${phase.trigger.whenStatus}"`)
+		if (!statuses.has(trigger.whenStatus)) {
+			presetError(`preset.phases[${index}].trigger.whenStatus: unknown status "${trigger.whenStatus}"`)
+		}
+		const triggerSourcePhase = phases.find((candidate) => candidate.name === trigger.afterPhase)
+		const triggerSourceExits = new Set(triggerSourcePhase?.exits.map((exit) => exit.status) ?? [])
+		if (!triggerSourceExits.has(trigger.whenStatus)) {
+			presetError(`preset.phases[${index}].trigger.whenStatus: status "${trigger.whenStatus}" is not declared by phase "${trigger.afterPhase}" exits`)
 		}
 	}
 
@@ -3819,36 +3855,47 @@ async function readPresetPhasePrompt(phase: PresetPhase): Promise<string> {
 	}
 }
 
-type RoleEntryMetadata = {
-	defaultRunner: AgentRunnerKind | null
+type ParsedVariableBinding = {
+	source: string
+	doc: PresetVariableDoc | null
 }
 
-export function parseRoleEntryMetadata(markdown: string, label: string): RoleEntryMetadata {
-	if (!markdown.startsWith("---\n") && !markdown.startsWith("---\r\n")) return { defaultRunner: null }
-	const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(markdown)
-	if (match === null) presetError(`${label}: frontmatter must close with ---`)
-	const rawFrontmatter = match[1]!
-	let defaultRunner: AgentRunnerKind | null = null
-	let sawDefaultRunner = false
-	for (const line of rawFrontmatter.split(/\r?\n/)) {
-		const trimmed = line.trim()
-		if (trimmed === "") continue
-		const entry = /^([A-Za-z][A-Za-z0-9_]*):\s*([A-Za-z][A-Za-z0-9_-]*)$/.exec(trimmed)
-		if (entry === null) presetError(`${label}: invalid frontmatter line "${trimmed}"`)
-		const key = entry[1]!
-		const value = entry[2]!
-		if (key !== "defaultRunner") presetError(`${label}: unsupported frontmatter key "${key}"`)
-		if (sawDefaultRunner) presetError(`${label}: duplicate defaultRunner frontmatter key`)
-		if (value !== "claude" && value !== "codex") presetError(`${label}: defaultRunner must be "claude" or "codex"`)
-		defaultRunner = value
-		sawDefaultRunner = true
-	}
-	return { defaultRunner }
+function parseVariableBinding(value: unknown, label: string): ParsedVariableBinding {
+	if (typeof value === "string") return { source: value, doc: null }
+	if (!isObjectRecord(value)) presetError(`${label}: must be a string or { source, label } object`)
+	const source = value.source
+	if (typeof source !== "string") presetError(`${label}.source: must be a string`)
+	const labelValue = value.label
+	if (labelValue === undefined) return { source, doc: null }
+	if (typeof labelValue !== "string") presetError(`${label}.label: must be a string`)
+	const suffixValue = value.suffix
+	if (suffixValue !== undefined && typeof suffixValue !== "string") presetError(`${label}.suffix: must be a string`)
+	const styleValue = value.style ?? "code"
+	if (styleValue !== "code" && styleValue !== "plain") presetError(`${label}.style: must be "code" or "plain"`)
+	const blankBeforeValue = value.blankBefore ?? false
+	if (typeof blankBeforeValue !== "boolean") presetError(`${label}.blankBefore: must be a boolean`)
+	return { source, doc: { label: labelValue, suffix: suffixValue ?? "", style: styleValue, blankBefore: blankBeforeValue } }
 }
 
-// Role-entry frontmatter is preset metadata consumed by parseRoleEntryMetadata; it must never
-// reach an agent prompt. claude 2.1.160 rejects a `-p` value starting with `--`, so a leaked
-// `---` frontmatter header crashes the review runner on spawn. Strip it at the prompt seam.
+function parsePhaseRunner(value: unknown, label: string): AgentRunnerKind | null {
+	if (value === null) return null
+	if (value !== "claude" && value !== "codex") presetError(`${label}: must be "claude" or "codex"`)
+	return value
+}
+
+function parsePresetPhaseExits(value: unknown, label: string): PresetPhaseExit[] {
+	const exits = assertArk(PresetPhaseExitBoundary.array(), value, label)
+	return exits.map((entry) => ({ status: entry.status, when: entry.when }))
+}
+
+function assertRoleEntryHasNoFrontmatter(markdown: string, label: string): void {
+	if (!markdown.startsWith("---\n") && !markdown.startsWith("---\r\n")) return
+	presetError(`${label}: frontmatter metadata is not supported; move phase runner metadata to preset.toml`)
+}
+
+// Legacy role-entry frontmatter must never reach an agent prompt. claude 2.1.160 rejects a
+// `-p` value starting with `--`, so direct renderPrompt callers still strip it at the seam;
+// loadPreset rejects metadata frontmatter before runtime.
 export function stripRoleEntryFrontmatter(markdown: string): string {
 	if (!markdown.startsWith("---\n") && !markdown.startsWith("---\r\n")) return markdown
 	const match = /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/.exec(markdown)
@@ -4013,7 +4060,7 @@ function allowsItemRunnerOverride(preset: Preset, phase: PresetPhase): boolean {
 export function selectPhaseDefaultRunner(phase: PresetPhase, _preset: Preset, commands: AgentRunnerCommands): AgentRunnerSelection {
 	const kind = phase.defaultRunner ?? ENGINE_BUILTIN_RUNNER
 	const command = commands[kind]
-	const source: AgentRunnerSource = phase.defaultRunner === null ? "engine-builtin" : "role-md"
+	const source: AgentRunnerSource = phase.defaultRunner === null ? "engine-builtin" : "preset"
 	return { ...command, source }
 }
 
@@ -4353,10 +4400,56 @@ export function getItemId(item: ItemRecord, preset: Preset): string {
 export function renderPrompt(template: string, phase: PresetPhase, ctx: ResolveContext & { item: ItemRecord }): string {
 	let result = stripRoleEntryFrontmatter(template)
 	for (const [key, source] of phase.variables) {
-		const value = resolveBinding(source, ctx)
+		const value = resolvePhaseBinding(source, phase, ctx)
 		result = result.replaceAll(`{{${key}}}`, value)
 	}
 	return result
+}
+
+function resolvePhaseBinding(source: PresetVariableSource, phase: PresetPhase, ctx: ResolveContext): string {
+	if (source.kind === "runtime") {
+		switch (source.key) {
+			case "runtimeInputsDoc": return renderRuntimeInputsDoc(phase, ctx)
+			case "phaseExitsDoc": return renderPhaseExitsDoc(phase)
+			case "issueKindDoc": return renderIssueKindDoc(ctx.runtime.issueKind)
+		}
+	}
+	return resolveBinding(source, ctx)
+}
+
+export function renderRuntimeInputsDoc(phase: PresetPhase, ctx: ResolveContext): string {
+	const lines: string[] = []
+	for (const [key, source] of phase.variables) {
+		const doc = phase.variableDocs.get(key)
+		if (doc === undefined) continue
+		const value = resolveBinding(source, ctx)
+		if (doc.blankBefore) lines.push("")
+		if (key === "ISSUE_KIND") {
+			lines.push(renderIssueKindDoc(value))
+			continue
+		}
+		if (key === "ISSUE") {
+			lines.push(`- ${doc.label}: \`#${value}\`${doc.suffix}`)
+			continue
+		}
+		const renderedValue = doc.style === "plain" ? value : `\`${value}\``
+		lines.push(`- ${doc.label}: ${renderedValue}${doc.suffix}`)
+	}
+	return lines.join("\n")
+}
+
+export function renderPhaseExitsDoc(phase: PresetPhase): string {
+	if (phase.exits.length === 0) return ""
+	return phase.exits.map((exit) => `- \`${exit.status}\`: ${exit.when}`).join("\n")
+}
+
+export function phaseWritableStatuses(phase: PresetPhase): readonly string[] {
+	return phase.exits.map((exit) => exit.status)
+}
+
+export function renderIssueKindDoc(value: string): string {
+	const choices = ISSUE_KIND_VALUES.map((kind) => `\`${kind}\``).join(" / ")
+	return `- Issue kind: \`${value}\` (${choices} / empty for legacy unlabeled issues)`
 }
 
 function lookupItemField(item: ItemRecord, field: string): unknown {
@@ -4477,13 +4570,19 @@ export function buildRuntimeBindings(input: {
 		agentCwd: input.agentCwd,
 		workflowPath: input.options.workflowPath,
 		sharedContextPath: paths.sharedContextPath,
+		stateFile: "the central state DB",
 		currentIssueFile: paths.currentIssueFile,
 		issueDir: paths.issueDir,
 		evidenceDir: paths.evidenceDir,
 		evidenceRootDir: paths.evidenceRootDir,
 		logDir: paths.logDir,
+		traceFile: `${paths.logDir}/${input.runId}/<phase>/stdout.jsonl`,
+		loopFile: "central daemon scheduling state",
 		presetDir: input.options.preset.presetDir,
 		fragmentIndex: renderFragmentIndex(input.options.preset),
+		runtimeInputsDoc: "",
+		phaseExitsDoc: "",
+		issueKindDoc: "",
 		runIdGeneration: input.issueRun.runIdGeneration,
 		resumedFromPhase: input.issueRun.resumedFromPhase ?? "",
 		resumedStartedAt: input.issueRun.resumedStartedAt ?? "",

@@ -34,25 +34,31 @@ describe("phase C cleanup guards", () => {
 			"currentIssueFile",
 			"evidenceDir",
 			"evidenceRootDir",
-			"fragmentIndex",
-			"issueDir",
-			"issueKind",
-			"logDir",
-			"presetDir",
-			"repoCwd",
-			"resumedFromPhase",
-			"resumedSessionId",
-			"resumedStartedAt",
-			"runId",
-			"runIdGeneration",
-			"sharedContextPath",
-			"targetCwd",
-			"workflowPath",
-		].sort())
+				"fragmentIndex",
+				"issueDir",
+				"issueKind",
+				"issueKindDoc",
+				"logDir",
+				"loopFile",
+				"phaseExitsDoc",
+				"presetDir",
+				"repoCwd",
+				"resumedFromPhase",
+				"resumedSessionId",
+				"resumedStartedAt",
+				"runId",
+				"runIdGeneration",
+				"runtimeInputsDoc",
+				"sharedContextPath",
+				"stateFile",
+				"targetCwd",
+				"traceFile",
+				"workflowPath",
+			].sort())
 
-		for (const forbidden of [`state${"Path"}`, `trace${"File"}`, `loop${"File"}`]) {
-			expect(forbidden in runtime).toBe(false)
-		}
+			for (const forbidden of [`state${"Path"}`]) {
+				expect(forbidden in runtime).toBe(false)
+			}
 	})
 
 	test("preset fragments cleaned", async () => {

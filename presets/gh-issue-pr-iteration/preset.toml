@@ -36,36 +36,40 @@ entry       = "queued"
 [[phases]]
 name   = "iteration"
 prompt = "iter-entry.md"
-# Agent-owned status writes are intentionally phase-scoped. The iteration
-# phase may only hand off to review; review owns retry and terminal verdicts.
-statusWrites = ["in_progress"]
+runner = "codex"
 
   [phases.variables]
-  TARGET_CWD               = "runtime.targetCwd"
-  AGENT_CWD                = "runtime.agentCwd"
-  REPO                     = "config.repository"
-  BASE_BRANCH              = "config.baseBranch"
-  RUN_ID                   = "runtime.runId"
-  ISSUE                    = "item.issue"
-  WORKFLOW_FILE            = "runtime.workflowPath"
-  SHARED_CONTEXT_FILE      = "runtime.sharedContextPath"
-  CURRENT_ISSUE_FILE       = "runtime.currentIssueFile"
+  TARGET_CWD               = { source = "runtime.targetCwd", label = "Target working directory (where `loop-data runtime artifacts` lives)" }
+  AGENT_CWD                = { source = "runtime.agentCwd", label = "Agent working directory (your `cwd`; may equal TARGET_CWD or point at a different repo checkout for cross-repo work)" }
+  REPO                     = { source = "config.repository", label = "GitHub repository" }
+  BASE_BRANCH              = { source = "config.baseBranch", label = "Base branch" }
+  ISSUE                    = { source = "item.issue", label = "Current issue", suffix = "", style = "plain" }
+  RUN_ID                   = { source = "runtime.runId", label = "Run ID" }
+  WORKFLOW_FILE            = { source = "runtime.workflowPath", label = "Workflow file" }
+  SHARED_CONTEXT_FILE      = { source = "runtime.sharedContextPath", label = "Chain handoff/shared file" }
+  STATE_FILE               = { source = "runtime.stateFile", label = "State file", style = "plain" }
+  CURRENT_ISSUE_FILE       = { source = "runtime.currentIssueFile", label = "Optional per-issue handoff file" }
   ISSUE_DIR                = "runtime.issueDir"
-  EVIDENCE_DIR             = "runtime.evidenceDir"
-  EVIDENCE_ROOT_DIR        = "runtime.evidenceRootDir"
-  LOG_DIR                  = "runtime.logDir"
+  EVIDENCE_DIR             = { source = "runtime.evidenceDir", label = "Evidence directory" }
+  EVIDENCE_ROOT_DIR        = { source = "runtime.evidenceRootDir", label = "Evidence root directory" }
+  LOG_DIR                  = { source = "runtime.logDir", label = "Log directory" }
+  TRACE_FILE               = "runtime.traceFile"
+  LOOP_FILE                = "runtime.loopFile"
   PROMPT_ROOT              = "runtime.presetDir"
   PROMPT_FRAGMENT_INDEX    = "runtime.fragmentIndex"
-  REQUIRE_BROWSER_EVIDENCE = "config.requireBrowserEvidence"
-  RUN_ID_GENERATION        = "runtime.runIdGeneration"
-  RESUMED_FROM_PHASE       = "runtime.resumedFromPhase"
-  RESUMED_STARTED_AT       = "runtime.resumedStartedAt"
+  RUNTIME_INPUTS_DOC       = "runtime.runtimeInputsDoc"
+  PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
+  ISSUE_KIND_DOC           = "runtime.issueKindDoc"
+  REQUIRE_BROWSER_EVIDENCE = { source = "config.requireBrowserEvidence", label = "Browser evidence required", suffix = " — when `true`, Layer 4 must contain the strongest feasible E2E evidence for the project type. For projects with UI: real browser screenshots of the running dev server or deployed page. For projects without UI (pure CLI / library / backend / config): CLI smoke run transcripts with command, exit status, and output are the Layer 4 evidence; do not fabricate screenshots by creating HTML files and screenshotting them." }
+  ISSUE_BRANCH             = { source = "item.branch", label = "Existing issue branch", blankBefore = true }
+  ISSUE_PR                 = { source = "item.pr", label = "Existing issue PR" }
+  ISSUE_STATUS             = { source = "item.status", label = "Queue status" }
+  ISSUE_LAST_RUN_ID        = { source = "item.lastRunId", label = "Previous run ID" }
+  ISSUE_KIND               = { source = "runtime.issueKind", label = "Issue kind" }
+  RUN_ID_GENERATION        = { source = "runtime.runIdGeneration", label = "Run-ID generation", blankBefore = true }
+  RESUMED_FROM_PHASE       = { source = "runtime.resumedFromPhase", label = "Resumed-from phase" }
+  RESUMED_STARTED_AT       = { source = "runtime.resumedStartedAt", label = "Resumed run started at" }
   RESUMED_SESSION_ID       = "runtime.resumedSessionId"
-  ISSUE_BRANCH             = "item.branch"
-  ISSUE_PR                 = "item.pr"
-  ISSUE_STATUS             = "item.status"
-  ISSUE_LAST_RUN_ID        = "item.lastRunId"
-  ISSUE_KIND               = "runtime.issueKind"
   CHAIN_NAME               = "runtime.chainName"
   CHAIN_UMBRELLA_REPO      = "runtime.chainUmbrellaRepo"
   CHAIN_UMBRELLA_ISSUE     = "runtime.chainUmbrellaIssue"
@@ -75,34 +79,60 @@ statusWrites = ["in_progress"]
 [[phases]]
 name   = "review"
 prompt = "review-entry.md"
-statusWrites = ["changes_requested", "blocked", "moot", "done", "exhausted"]
+runner = "claude"
+
+  [[phases.exits]]
+  status = "changes_requested"
+  when   = "Evidence or code failed review, or the PR protocol is incomplete, and another iteration is required."
+
+  [[phases.exits]]
+  status = "blocked"
+  when   = "A missing external dependency prevents this issue from advancing in the current repository."
+
+  [[phases.exits]]
+  status = "moot"
+  when   = "The issue is invalid, duplicate, already satisfied, or otherwise no longer requires work."
+
+  [[phases.exits]]
+  status = "done"
+  when   = "The required PR or no-PR resolution was accepted, merged or posted as appropriate, and the GitHub issue closure condition passed."
+
+  [[phases.exits]]
+  status = "exhausted"
+  when   = "The retry budget is exhausted without reaching an acceptable result."
 
   [phases.variables]
-  TARGET_CWD               = "runtime.targetCwd"
-  AGENT_CWD                = "runtime.agentCwd"
-  REPO                     = "config.repository"
-  BASE_BRANCH              = "config.baseBranch"
-  RUN_ID                   = "runtime.runId"
-  ISSUE                    = "item.issue"
-  WORKFLOW_FILE            = "runtime.workflowPath"
-  SHARED_CONTEXT_FILE      = "runtime.sharedContextPath"
-  CURRENT_ISSUE_FILE       = "runtime.currentIssueFile"
+  TARGET_CWD               = { source = "runtime.targetCwd", label = "Target working directory (where `loop-data runtime artifacts` lives)" }
+  AGENT_CWD                = { source = "runtime.agentCwd", label = "Agent working directory (your `cwd`; may equal TARGET_CWD or point at a different repo checkout for cross-repo work)" }
+  REPO                     = { source = "config.repository", label = "GitHub repository" }
+  BASE_BRANCH              = { source = "config.baseBranch", label = "Base branch" }
+  ISSUE                    = { source = "item.issue", label = "Current issue", suffix = "", style = "plain" }
+  RUN_ID                   = { source = "runtime.runId", label = "Run ID" }
+  WORKFLOW_FILE            = { source = "runtime.workflowPath", label = "Workflow file" }
+  SHARED_CONTEXT_FILE      = { source = "runtime.sharedContextPath", label = "Chain handoff/shared file" }
+  STATE_FILE               = { source = "runtime.stateFile", label = "State file", style = "plain" }
+  CURRENT_ISSUE_FILE       = { source = "runtime.currentIssueFile", label = "Optional per-issue handoff file" }
   ISSUE_DIR                = "runtime.issueDir"
-  EVIDENCE_DIR             = "runtime.evidenceDir"
-  EVIDENCE_ROOT_DIR        = "runtime.evidenceRootDir"
-  LOG_DIR                  = "runtime.logDir"
+  EVIDENCE_DIR             = { source = "runtime.evidenceDir", label = "Evidence directory" }
+  EVIDENCE_ROOT_DIR        = { source = "runtime.evidenceRootDir", label = "Evidence root directory" }
+  LOG_DIR                  = { source = "runtime.logDir", label = "Log directory" }
+  TRACE_FILE               = { source = "runtime.traceFile", label = "Trace file" }
+  LOOP_FILE                = { source = "runtime.loopFile", label = "Loop file", style = "plain" }
   PROMPT_ROOT              = "runtime.presetDir"
   PROMPT_FRAGMENT_INDEX    = "runtime.fragmentIndex"
-  REQUIRE_BROWSER_EVIDENCE = "config.requireBrowserEvidence"
-  RUN_ID_GENERATION        = "runtime.runIdGeneration"
-  RESUMED_FROM_PHASE       = "runtime.resumedFromPhase"
-  RESUMED_STARTED_AT       = "runtime.resumedStartedAt"
+  RUNTIME_INPUTS_DOC       = "runtime.runtimeInputsDoc"
+  PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
+  ISSUE_KIND_DOC           = "runtime.issueKindDoc"
+  REQUIRE_BROWSER_EVIDENCE = { source = "config.requireBrowserEvidence", label = "Browser evidence required", suffix = " — when `true`, Layer 4 must contain the strongest feasible E2E evidence for the project type. For projects with UI: real browser screenshots of the running dev server or deployed page. For projects without UI (pure CLI / library / backend / config): CLI smoke run transcripts with command, exit status, and output are the Layer 4 evidence; synthetic screenshots (HTML files rendered and screenshotted) are rejected." }
+  ISSUE_BRANCH             = { source = "item.branch", label = "Existing issue branch", blankBefore = true }
+  ISSUE_PR                 = { source = "item.pr", label = "Existing issue PR" }
+  ISSUE_STATUS             = { source = "item.status", label = "Queue status" }
+  ISSUE_LAST_RUN_ID        = { source = "item.lastRunId", label = "Previous run ID" }
+  ISSUE_KIND               = { source = "runtime.issueKind", label = "Issue kind" }
+  RUN_ID_GENERATION        = { source = "runtime.runIdGeneration", label = "Run-ID generation", blankBefore = true }
+  RESUMED_FROM_PHASE       = { source = "runtime.resumedFromPhase", label = "Resumed-from phase" }
+  RESUMED_STARTED_AT       = { source = "runtime.resumedStartedAt", label = "Resumed run started at" }
   RESUMED_SESSION_ID       = "runtime.resumedSessionId"
-  ISSUE_BRANCH             = "item.branch"
-  ISSUE_PR                 = "item.pr"
-  ISSUE_STATUS             = "item.status"
-  ISSUE_LAST_RUN_ID        = "item.lastRunId"
-  ISSUE_KIND               = "runtime.issueKind"
   CHAIN_NAME               = "runtime.chainName"
   CHAIN_UMBRELLA_REPO      = "runtime.chainUmbrellaRepo"
   CHAIN_UMBRELLA_ISSUE     = "runtime.chainUmbrellaIssue"
@@ -113,34 +143,40 @@ statusWrites = ["changes_requested", "blocked", "moot", "done", "exhausted"]
 name    = "blocked-responder"
 prompt  = "blocked-responder-entry.md"
 trigger = { afterPhase = "review", whenStatus = "blocked" }
-statusWrites = []
+runner  = "codex"
 
   [phases.variables]
-  TARGET_CWD               = "runtime.targetCwd"
-  AGENT_CWD                = "runtime.agentCwd"
-  REPO                     = "config.repository"
+  TARGET_CWD               = { source = "runtime.targetCwd", label = "Current target repository working directory" }
+  AGENT_CWD                = { source = "runtime.agentCwd", label = "Agent working directory" }
+  REPO                     = { source = "config.repository", label = "Current GitHub repository" }
   BASE_BRANCH              = "config.baseBranch"
-  RUN_ID                   = "runtime.runId"
-  ISSUE                    = "item.issue"
+  ISSUE                    = { source = "item.issue", label = "Current issue", suffix = "", style = "plain" }
+  RUN_ID                   = { source = "runtime.runId", label = "Run ID" }
   WORKFLOW_FILE            = "runtime.workflowPath"
-  SHARED_CONTEXT_FILE      = "runtime.sharedContextPath"
-  CURRENT_ISSUE_FILE       = "runtime.currentIssueFile"
+  SHARED_CONTEXT_FILE      = { source = "runtime.sharedContextPath", label = "Chain handoff/shared file" }
+  STATE_FILE               = { source = "runtime.stateFile", label = "State file", style = "plain" }
+  CURRENT_ISSUE_FILE       = { source = "runtime.currentIssueFile", label = "Optional per-issue handoff file" }
   ISSUE_DIR                = "runtime.issueDir"
-  EVIDENCE_DIR             = "runtime.evidenceDir"
-  EVIDENCE_ROOT_DIR        = "runtime.evidenceRootDir"
-  LOG_DIR                  = "runtime.logDir"
+  EVIDENCE_DIR             = { source = "runtime.evidenceDir", label = "Evidence directory" }
+  EVIDENCE_ROOT_DIR        = { source = "runtime.evidenceRootDir", label = "Evidence root directory" }
+  LOG_DIR                  = { source = "runtime.logDir", label = "Log directory" }
+  TRACE_FILE               = "runtime.traceFile"
+  LOOP_FILE                = "runtime.loopFile"
   PROMPT_ROOT              = "runtime.presetDir"
   PROMPT_FRAGMENT_INDEX    = "runtime.fragmentIndex"
+  RUNTIME_INPUTS_DOC       = "runtime.runtimeInputsDoc"
+  PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
+  ISSUE_KIND_DOC           = "runtime.issueKindDoc"
   REQUIRE_BROWSER_EVIDENCE = "config.requireBrowserEvidence"
-  RUN_ID_GENERATION        = "runtime.runIdGeneration"
-  RESUMED_FROM_PHASE       = "runtime.resumedFromPhase"
-  RESUMED_STARTED_AT       = "runtime.resumedStartedAt"
-  RESUMED_SESSION_ID       = "runtime.resumedSessionId"
   ISSUE_BRANCH             = "item.branch"
   ISSUE_PR                 = "item.pr"
   ISSUE_STATUS             = "item.status"
   ISSUE_LAST_RUN_ID        = "item.lastRunId"
   ISSUE_KIND               = "runtime.issueKind"
+  RUN_ID_GENERATION        = "runtime.runIdGeneration"
+  RESUMED_FROM_PHASE       = "runtime.resumedFromPhase"
+  RESUMED_STARTED_AT       = "runtime.resumedStartedAt"
+  RESUMED_SESSION_ID       = "runtime.resumedSessionId"
   CHAIN_NAME               = "runtime.chainName"
   CHAIN_UMBRELLA_REPO      = "runtime.chainUmbrellaRepo"
   CHAIN_UMBRELLA_ISSUE     = "runtime.chainUmbrellaIssue"
@@ -151,34 +187,40 @@ statusWrites = []
 name    = "umbrella-finalizer"
 prompt  = "umbrella-finalizer-entry.md"
 trigger = { on = "chain-complete" }
-statusWrites = []
+runner  = "codex"
 
   [phases.variables]
-  TARGET_CWD               = "runtime.targetCwd"
-  AGENT_CWD                = "runtime.agentCwd"
-  REPO                     = "config.repository"
-  BASE_BRANCH              = "config.baseBranch"
-  RUN_ID                   = "runtime.runId"
+  TARGET_CWD               = { source = "runtime.targetCwd", label = "Current target repository working directory" }
+  AGENT_CWD                = { source = "runtime.agentCwd", label = "Agent working directory" }
+  REPO                     = { source = "config.repository", label = "Current GitHub repository" }
+  BASE_BRANCH              = { source = "config.baseBranch", label = "Base branch" }
   ISSUE                    = "item.issue"
-  WORKFLOW_FILE            = "runtime.workflowPath"
-  SHARED_CONTEXT_FILE      = "runtime.sharedContextPath"
+  RUN_ID                   = { source = "runtime.runId", label = "Run ID" }
+  WORKFLOW_FILE            = { source = "runtime.workflowPath", label = "Workflow file" }
+  SHARED_CONTEXT_FILE      = { source = "runtime.sharedContextPath", label = "Chain handoff/shared file" }
+  STATE_FILE               = "runtime.stateFile"
   CURRENT_ISSUE_FILE       = "runtime.currentIssueFile"
-  ISSUE_DIR                = "runtime.issueDir"
+  ISSUE_DIR                = { source = "runtime.issueDir", label = "Issue handoff directory" }
   EVIDENCE_DIR             = "runtime.evidenceDir"
-  EVIDENCE_ROOT_DIR        = "runtime.evidenceRootDir"
-  LOG_DIR                  = "runtime.logDir"
-  PROMPT_ROOT              = "runtime.presetDir"
-  PROMPT_FRAGMENT_INDEX    = "runtime.fragmentIndex"
+  EVIDENCE_ROOT_DIR        = { source = "runtime.evidenceRootDir", label = "Evidence root directory" }
+  LOG_DIR                  = { source = "runtime.logDir", label = "Log directory" }
+  TRACE_FILE               = "runtime.traceFile"
+  LOOP_FILE                = "runtime.loopFile"
+  PROMPT_ROOT              = { source = "runtime.presetDir", label = "Prompt root" }
+  PROMPT_FRAGMENT_INDEX    = { source = "runtime.fragmentIndex", label = "Prompt fragment index" }
+  RUNTIME_INPUTS_DOC       = "runtime.runtimeInputsDoc"
+  PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
+  ISSUE_KIND_DOC           = "runtime.issueKindDoc"
   REQUIRE_BROWSER_EVIDENCE = "config.requireBrowserEvidence"
-  RUN_ID_GENERATION        = "runtime.runIdGeneration"
-  RESUMED_FROM_PHASE       = "runtime.resumedFromPhase"
-  RESUMED_STARTED_AT       = "runtime.resumedStartedAt"
-  RESUMED_SESSION_ID       = "runtime.resumedSessionId"
   ISSUE_BRANCH             = "item.branch"
   ISSUE_PR                 = "item.pr"
   ISSUE_STATUS             = "item.status"
   ISSUE_LAST_RUN_ID        = "item.lastRunId"
   ISSUE_KIND               = "runtime.issueKind"
+  RUN_ID_GENERATION        = "runtime.runIdGeneration"
+  RESUMED_FROM_PHASE       = "runtime.resumedFromPhase"
+  RESUMED_STARTED_AT       = "runtime.resumedStartedAt"
+  RESUMED_SESSION_ID       = "runtime.resumedSessionId"
   CHAIN_NAME               = "runtime.chainName"
   CHAIN_UMBRELLA_REPO      = "runtime.chainUmbrellaRepo"
   CHAIN_UMBRELLA_ISSUE     = "runtime.chainUmbrellaIssue"

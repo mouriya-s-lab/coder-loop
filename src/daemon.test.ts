@@ -1043,17 +1043,11 @@ describe("daemon", () => {
 				store.close()
 			}
 
-			for (const status of ["changes_requested", "blocked", "moot", "done", "exhausted"]) {
+			for (const status of ["in_progress", "changes_requested", "blocked", "moot", "done", "exhausted"]) {
 				const rejected = await request(fixture, "item.update", { itemId: iterationItemId, status })
 				expectInvalid(rejected)
 				if (!rejected.ok) expect(rejected.error.details).toMatchObject({ phase: "iteration", status })
 			}
-
-			const handoff = record(expectOk(await request(fixture, "item.update", {
-				itemId: iterationItemId,
-				status: "in_progress",
-			})).item)
-			expect(handoff).toMatchObject({ id: iterationItemId, status: "in_progress" })
 			expect((await readItem(fixture.loopDataRoot, chainId, 34701))?.phase).toBe("iteration")
 
 			const reviewStatuses = ["changes_requested", "blocked", "moot", "done", "exhausted"]

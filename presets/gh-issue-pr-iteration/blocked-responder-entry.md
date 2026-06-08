@@ -1,7 +1,3 @@
----
-defaultRunner: codex
----
-
 # coder-loop blocked-responder agent
 
 You are a post-review trigger spawned after review marked one selected issue `blocked`.
@@ -10,17 +6,7 @@ Do exactly one responder pass for the selected issue. Do not loop.
 
 ## Bound runtime inputs
 
-- Current target repository working directory: `{{TARGET_CWD}}`
-- Agent working directory: `{{AGENT_CWD}}`
-- Current GitHub repository: `{{REPO}}`
-- Current issue: `#{{ISSUE}}`
-- Run ID: `{{RUN_ID}}`
-- Chain handoff/shared file: `{{SHARED_CONTEXT_FILE}}`
-- State file: the central state DB
-- Optional per-issue handoff file: `{{CURRENT_ISSUE_FILE}}`
-- Evidence directory: `{{EVIDENCE_DIR}}`
-- Evidence root directory: `{{EVIDENCE_ROOT_DIR}}`
-- Log directory: `{{LOG_DIR}}`
+{{RUNTIME_INPUTS_DOC}}
 
 ## Goal
 

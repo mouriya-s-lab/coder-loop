@@ -42,7 +42,7 @@ describe("smoke: v2 central chain CLI", () => {
 		expect((await stat(fixture.legacyStatePath)).mtimeMs).toBe(beforeMtime)
 	})
 
-	test("runtime show lists preset phases with role-md runner selections", async () => {
+	test("runtime show lists preset phases with preset runner selections", async () => {
 		const fixture = await createTarget("runtime-show")
 		const snapshot = expectJsonOk(runCli(["runtime", "show", fixture.target, "--json"]))
 		expect(snapshot.preset.name).toBe("gh-issue-pr-iteration")
@@ -53,11 +53,11 @@ describe("smoke: v2 central chain CLI", () => {
 		const review = snapshot.phases.find((p: { phase: string }) => p.phase === "review")
 		expect(review.role).toBe("review")
 		expect(review.runner.kind).toBe("claude")
-		expect(review.runner.source).toBe("role-md")
+		expect(review.runner.source).toBe("preset")
 		expect(review.runner.model).toBeNull()
 		const iter = snapshot.phases.find((p: { phase: string }) => p.phase === "iteration")
 		expect(iter.runner.kind).toBe("codex")
-		expect(iter.runner.source).toBe("role-md")
+		expect(iter.runner.source).toBe("preset")
 	})
 
 	test("runtime set writes [1m]-suffixed Claude model and gpt-5.5 codex model into config.json", async () => {
