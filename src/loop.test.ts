@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdir } from "node:fs/promises"
+import { mkdir, readFile } from "node:fs/promises"
 import { relative, resolve } from "node:path"
 
 import {
@@ -22,6 +22,7 @@ import {
 	parseSessionIdFromRunnerStream,
 	renderFragmentIndex,
 	renderPrompt,
+	RUNTIME_BINDING_KEYS,
 	resolveWorkflowFileConfigBinding,
 	stripRoleEntryFrontmatter,
 	resolveBinding,
@@ -165,6 +166,31 @@ function makeOptions(preset = makePreset()): LoopOptions {
 	}
 }
 
+const RUNTIME_KEY_BLOCK_START = "<!-- runtime-binding-keys:start -->"
+const RUNTIME_KEY_BLOCK_END = "<!-- runtime-binding-keys:end -->"
+const RUNTIME_KEY_COUNT_PATTERN = /Runtime binding key count:\s*(\d+)/g
+
+function documentedRuntimeBindingCount(markdown: string, label: string): number {
+	const matches = [...markdown.matchAll(RUNTIME_KEY_COUNT_PATTERN)]
+	expect(matches.length, `${label} should declare exactly one runtime binding key count`).toBe(1)
+	const rawCount = matches[0]?.[1]
+	expect(rawCount).toBeDefined()
+	return Number(rawCount)
+}
+
+function documentedRuntimeBindingKeys(markdown: string): string[] {
+	const start = markdown.indexOf(RUNTIME_KEY_BLOCK_START)
+	const end = markdown.indexOf(RUNTIME_KEY_BLOCK_END)
+	expect(start).toBeGreaterThanOrEqual(0)
+	expect(end).toBeGreaterThan(start)
+	const block = markdown.slice(start + RUNTIME_KEY_BLOCK_START.length, end)
+	return [...block.matchAll(/runtime\.([a-zA-Z][a-zA-Z0-9_]*)/g)].map((match) => {
+		const key = match[1]
+		expect(key).toBeDefined()
+		return key as string
+	})
+}
+
 describe("ItemRecord prompt bindings", () => {
 	test("getItemId reads issueNumber when the preset idField is issue", () => {
 		const preset = makePreset()
@@ -270,6 +296,25 @@ describe("ItemRecord prompt bindings", () => {
 })
 
 describe("runtime binding helpers", () => {
+	test("documentation keeps runtime binding count and list aligned with source", async () => {
+		const presetAuthoring = await readFile(resolve(REPO_ROOT, "docs/preset-authoring.md"), "utf8")
+		const claude = await readFile(resolve(REPO_ROOT, "CLAUDE.md"), "utf8")
+
+		expect(documentedRuntimeBindingCount(presetAuthoring, "docs/preset-authoring.md")).toBe(RUNTIME_BINDING_KEYS.length)
+		expect(documentedRuntimeBindingCount(claude, "CLAUDE.md")).toBe(RUNTIME_BINDING_KEYS.length)
+		expect(documentedRuntimeBindingKeys(presetAuthoring)).toEqual([...RUNTIME_BINDING_KEYS])
+	})
+
+	test("reserved string registry includes the engine-parsed finalizer syntax", async () => {
+		const registry = await readFile(resolve(REPO_ROOT, "docs/reserved-strings.md"), "utf8")
+
+		for (const token of ["`FINALIZER SUMMARY:`", "`decision=complete`", "`decision=keep-active`"]) {
+			expect(registry).toContain(token)
+		}
+		expect(registry).not.toContain("`ITERATION SUMMARY:`")
+		expect(registry).not.toContain("`REVIEW SUMMARY:`")
+	})
+
 	test("workflow file config binding keeps the conventional target path when chain metadata is unseeded", () => {
 		expect(resolveWorkflowFileConfigBinding(REPO_ROOT, null)).toBe(resolve(REPO_ROOT, ".coder-loop/workflow.md"))
 		expect(resolveWorkflowFileConfigBinding(REPO_ROOT, "docs/workflow.md")).toBe(resolve(REPO_ROOT, "docs/workflow.md"))

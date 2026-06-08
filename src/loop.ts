@@ -864,7 +864,7 @@ const ISSUE_KIND_VALUES = ["code", "comment", "code-spike", "blocked"] as const
 export type IssueKindValue = (typeof ISSUE_KIND_VALUES)[number]
 export type IssueKind = IssueKindValue | null
 
-const RUNTIME_BINDING_KEYS = [
+export const RUNTIME_BINDING_KEYS = [
 	"runId",
 	"targetCwd",
 	"agentCwd",

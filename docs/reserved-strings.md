@@ -14,6 +14,8 @@ it does not replace runtime parsing.
 | String | Use | Source |
 |--------|-----|--------|
 | `FINALIZER SUMMARY:` | Chain-complete trigger decision marker parsed after the bundled umbrella finalizer phase exits. | `src/loop.ts` `parseFinalizerSummaryDecisionFromText` |
+| `decision=complete` | Finalizer summary decision that permits the chain-complete trigger to finish the chain. | `src/loop.ts` `parseFinalizerSummaryDecisionFromText` |
+| `decision=keep-active` | Finalizer summary decision that keeps the chain active for remaining or uncertain umbrella scope. | `src/loop.ts` `parseFinalizerSummaryDecisionFromText` |
 
 ## Preset-Declared Strings
 
@@ -22,6 +24,10 @@ Post-summary watchdog stdout markers are declared with
 does not enable the post-summary watchdog. The bundled `gh-issue-pr-iteration`
 preset declares its phase markers in
 `presets/gh-issue-pr-iteration/preset.toml`.
+
+Preset-declared markers are not duplicated in the engine table above because
+the engine reads them from preset metadata rather than owning their literal
+values.
 
 ## Maintenance
 

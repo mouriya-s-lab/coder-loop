@@ -126,10 +126,10 @@ starter 位置：
 
 ## 当前实现 vs 分层契约的差距
 
-记录 `src/loop.ts` 仍接受 PR-shaped 概念的位置，作为下一轮重构的工单参考。这些不是 bug，是 Stage 1-3 重构尚未触及的区域：
+记录 `src/loop.ts` 仍接受 PR-shaped 概念的位置，作为 #370 登记的已知契约偏离；这些偏离是 #369 v3 前置修复队列的一部分：
 
 - **supervisor bootstrap 要手动改占位符**：项目级 bootstrap skill 应自动 dispatch 到 `<TARGET>/.coder-loop/runtime/supervisor/` 下最近活动 mission（#31）。
-- **runtime.\* 白名单**：当前 19 key，新增需改源码两处（`RUNTIME_BINDING_KEYS` 与 `buildRuntimeBindings`）。任何新 key 必须先 grep `presets/<preset>/` 证明已有 fragment 在 work-around 该值缺失（参考 #32 audit）。例外：与新 fragments / 新引擎能力同 issue 一并引入的 key（如 `issueKind` 配 commitment-gate fragments，#40；`agentCwd` 让 spawn cwd 可 per-item 覆盖跨 repo）不在 audit 适用范围。
+- **runtime.\* 白名单**：Runtime binding key count: 27. 清单与维护流程见 `docs/preset-authoring.md`；新增 key 仍需同时改 `RUNTIME_BINDING_KEYS` 与 `buildRuntimeBindings`，并用测试守护文档计数 / 清单不漂移。任何新 key 必须先 grep `presets/<preset>/` 证明已有 fragment 在 work-around 该值缺失（参考 #32 audit）。例外：与新 fragments / 新引擎能力同 issue 一并引入的 key（如 `issueKind` 配 commitment-gate fragments，#40；`agentCwd` 让 spawn cwd 可 per-item 覆盖跨 repo）不在 audit 适用范围。
 - **SQLite item 物理列**：当前 centralized DB 仍保留 `issue_number` / `branch` / `pr` 等兼容列；preset 绑定层已通过 `[item.fields]` 声明透明字段并在加载期拒绝未声明 `item.<f>`。#369 负责后续 item 自带 preset/prompt 的 DB 模型重塑。
 
 ## Tech Stack

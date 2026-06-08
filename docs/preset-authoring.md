@@ -174,14 +174,21 @@ bundled `gh-issue-pr-iteration` preset 用这个 hook 声明 `umbrella-finalizer
 
 ### `runtime.*` 白名单
 
+当前白名单由 `src/loop.ts` 的 `RUNTIME_BINDING_KEYS` 定义。Runtime binding key count: 27.
+
+<!-- runtime-binding-keys:start -->
 ```
-runtime.runId               runtime.targetCwd            runtime.agentCwd
-runtime.sharedContextPath   runtime.currentIssueFile
-runtime.issueDir            runtime.evidenceDir          runtime.evidenceRootDir
-runtime.logDir              runtime.presetDir            runtime.fragmentIndex
-runtime.runIdGeneration     runtime.resumedFromPhase     runtime.resumedStartedAt
-runtime.issueKind
+runtime.runId                runtime.targetCwd            runtime.agentCwd
+runtime.sharedContextPath    runtime.stateFile            runtime.currentIssueFile
+runtime.issueDir             runtime.evidenceDir          runtime.evidenceRootDir
+runtime.logDir               runtime.traceFile            runtime.loopFile
+runtime.presetDir            runtime.fragmentIndex        runtime.runtimeInputsDoc
+runtime.phaseExitsDoc        runtime.issueKindDoc         runtime.runIdGeneration
+runtime.resumedFromPhase     runtime.resumedStartedAt     runtime.resumedSessionId
+runtime.issueKind            runtime.chainName            runtime.chainUmbrellaRepo
+runtime.chainUmbrellaIssue   runtime.chainBaseBranch      runtime.repoCwd
 ```
+<!-- runtime-binding-keys:end -->
 
 | Key | 含义 |
 |---|---|
@@ -189,17 +196,29 @@ runtime.issueKind
 | `targetCwd` | target 目录绝对路径 |
 | `agentCwd` | agent 子进程的实际 `cwd` 绝对路径。等于 `item.agentCwd ?? targetCwd`；跨 repo 迭代时 item 可声明绝对路径覆盖。 |
 | `sharedContextPath` | 当前 chain handoff/shared 文件绝对路径；daemon 负责创建和恢复 |
+| `stateFile` | centralized SQLite state DB 的描述；默认 preset 把它展示为 state source，而不是可读文件路径。 |
 | `currentIssueFile` | 当前 item 的可选 per-issue handoff attachment 绝对路径（无则 `""`）；不要把它当启动必需条件 |
 | `issueDir` | issue handoff 文件根目录绝对路径 |
 | `evidenceDir` | 当前 item 的证据子目录绝对路径（无则 fallback `evidenceRootDir`） |
 | `evidenceRootDir` | 证据根目录绝对路径 |
 | `logDir` | 当前 chain runs/log 根目录绝对路径；agent 输出位于 `<logDir>/<runId>/<phase>/` |
+| `traceFile` | phase stdout trace 的显示路径模板：`<logDir>/<runId>/<phase>/stdout.jsonl`。 |
+| `loopFile` | central daemon scheduling state 的描述；默认 preset 用它强调调度状态不可提交。 |
 | `presetDir` | preset 目录绝对路径（让 agent prompt 能 `cat <presetDir>/iter/...md`） |
 | `fragmentIndex` | 全部 fragments 的 markdown 表格（id + role + 绝对路径），entry prompt 嵌它给 agent 当索引 |
+| `runtimeInputsDoc` | 按 phase 变量 metadata 生成的 bound runtime input 文档。 |
+| `phaseExitsDoc` | 按 phase `[[phases.exits]]` 生成的出口状态文档。 |
+| `issueKindDoc` | 默认 preset issue-kind 路由说明；其他 preset 一般不引用。 |
 | `runIdGeneration` | `"new"` / `"resumed"`，本轮 runId 是新生成还是 resume |
 | `resumedFromPhase` | 若 resume，从哪个 phase 续；否则 `""` |
 | `resumedStartedAt` | 若 resume，原 run 起始时间戳；否则 `""` |
+| `resumedSessionId` | 若 resume，上一轮 runner session id；否则 `""`。 |
 | `issueKind` | `"code"` / `"comment"` / `"code-spike"` / `"blocked"` / `""`（empty = 无 label / legacy）；从 `gh issue view --json labels` fetch，或无 repo 的本地 fixture 从 queue item `kind` 读 |
+| `chainName` | centralized chain 名称。 |
+| `chainUmbrellaRepo` | chain metadata 中登记的 umbrella repo，缺失则 `""`。 |
+| `chainUmbrellaIssue` | chain metadata 中登记的 umbrella issue number，缺失则 `""`。 |
+| `chainBaseBranch` | chain metadata 的 base branch。 |
+| `repoCwd` | 当前 item 所属 target repo cwd；跨 repo queue item 与 agent cwd 分离时用于提示。 |
 
 `runIdGeneration` 是引擎对「这次 spawn 是新生成 runId 还是从 state.current 恢复」的客观回答；preset 自行用这一信号 + `item.status` + `item.lastRunId` 派生 fresh / retry / resume 三种调度形态——引擎不识别这些领域分类。
 
