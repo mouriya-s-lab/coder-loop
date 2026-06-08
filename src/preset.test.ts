@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { resolve } from "node:path"
 import { stat } from "node:fs/promises"
 
-import { DEFAULT_ATTEMPT_TIMEOUT_SECONDS, chainCompleteTriggerPhases, loadPreset, parsePreset, reviewPhaseForPreset, triggeredPhasesAfter, type Preset, type PresetVariableSource } from "./loop"
+import { DEFAULT_ATTEMPT_TIMEOUT_SECONDS, chainCompleteTriggerPhases, lastNonTriggerPhaseForPreset, loadPreset, parsePreset, triggeredPhasesAfter, type Preset, type PresetVariableSource } from "./loop"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const BUNDLED_PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
@@ -116,7 +116,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 			"blocked-responder": "codex",
 			"umbrella-finalizer": "codex",
 		})
-		expect(reviewPhaseForPreset(preset).name).toBe("review")
+		expect(lastNonTriggerPhaseForPreset(preset).name).toBe("review")
 		expect(triggeredPhasesAfter(preset, "review", "blocked").map((phase) => phase.name)).toEqual(["blocked-responder"])
 		expect(chainCompleteTriggerPhases(preset).map((phase) => phase.name)).toEqual(["umbrella-finalizer"])
 		for (const phase of preset.phases) {
@@ -245,7 +245,7 @@ describe("parsePreset schema validation", () => {
 		const preset = parsePreset(root, "/tmp")
 
 		expect(preset.phases[2]!.trigger).toEqual({ afterPhase: "review", whenStatus: "blocked" })
-		expect(reviewPhaseForPreset(preset).name).toBe("review")
+		expect(lastNonTriggerPhaseForPreset(preset).name).toBe("review")
 		expect(triggeredPhasesAfter(preset, "review", "blocked").map((phase) => phase.name)).toEqual(["responder"])
 		expect(triggeredPhasesAfter(preset, "review", "done")).toEqual([])
 	})
@@ -295,7 +295,7 @@ describe("parsePreset schema validation", () => {
 
 		expect(preset.phases[2]!.trigger).toEqual({ afterPhase: "review", whenStatus: "blocked" })
 		expect(preset.phases[3]!.trigger).toEqual({ on: "chain-complete" })
-		expect(reviewPhaseForPreset(preset).name).toBe("review")
+		expect(lastNonTriggerPhaseForPreset(preset).name).toBe("review")
 		expect(triggeredPhasesAfter(preset, "review", "blocked").map((phase) => phase.name)).toEqual(["responder"])
 		expect(chainCompleteTriggerPhases(preset).map((phase) => phase.name)).toEqual(["finalizer"])
 	})

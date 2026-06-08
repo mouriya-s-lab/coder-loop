@@ -373,9 +373,9 @@ test("single item review retry verdict routes back through iteration before revi
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
 const input = JSON.parse(prompt)
-const status = input.phase === "review" ? "changes_requested" : "in_progress"
+const status = input.phase === "review" ? "changes_requested" : null
 const loopDataRoot = process.env.CODER_LOOP_DATA_DIR
-if (typeof loopDataRoot === "string" && typeof input.itemId === "number") {
+if (typeof status === "string" && typeof loopDataRoot === "string" && typeof input.itemId === "number") {
 	const store = openSqliteStateStore({ loopDataRoot })
 	store.updateItem(input.itemId, { status, updatedAt: Math.floor(Date.now() / 1000) })
 	store.close()
@@ -446,7 +446,7 @@ console.log(input.phase + ":" + status)
 		expect(iterTick.spawnedRuns).toHaveLength(1)
 		await iterTick.spawnedRuns[0]!.closed
 		expect(store.getItem(item.id)?.phase).toBe("iteration")
-		expect(store.getItem(item.id)?.status).toBe("in_progress")
+		expect(store.getItem(item.id)?.status).toBe("queued")
 
 		const reviewTick = await schedulerTick(options)
 		expect(reviewTick.spawnedRuns).toHaveLength(1)
@@ -458,7 +458,7 @@ console.log(input.phase + ":" + status)
 		expect(retryIterTick.spawnedRuns).toHaveLength(1)
 		await retryIterTick.spawnedRuns[0]!.closed
 		expect(store.getItem(item.id)?.phase).toBe("iteration")
-		expect(store.getItem(item.id)?.status).toBe("in_progress")
+		expect(store.getItem(item.id)?.status).toBe("changes_requested")
 
 		expect(schedulerEvents
 			.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
@@ -531,7 +531,7 @@ echo "ITERATION SUMMARY: scope=daemon-crash-restart; reason=fake-codex"
 			running: true,
 		})
 		expect(secondRun.runId).not.toBe(firstRun.runId)
-		expect(store.getItem(item.id)?.status).toBe("in_progress")
+		expect(store.getItem(item.id)?.status).toBe("queued")
 	} finally {
 		store.close()
 		for (const pid of observedRunPids) killPidOrGroup(pid)

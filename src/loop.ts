@@ -2149,7 +2149,7 @@ export async function buildRuntimeShowSnapshot(input: {
 	const phases: RuntimePhaseRoleSnapshot[] = []
 	if (preset !== null) {
 		const phaseSelections = selectPhaseDefaultRunners(preset, commands)
-		const reviewPhase = reviewPhaseForPreset(preset)
+		const reviewPhase = lastNonTriggerPhaseForPreset(preset)
 		for (const phase of preset.phases) {
 			const role: RuntimePhaseRoleKind = phase.name === reviewPhase.name ? "review" : phase.trigger === null ? "iteration" : "trigger"
 			const selection = phaseSelections[phase.name]!
@@ -2393,7 +2393,7 @@ async function runReview(
 	runner: AgentRunnerSelection,
 	eventContext?: Omit<LoopEventContext, "phase">,
 ): Promise<{ code: number; stopRequested: boolean }> {
-	const reviewPhase = reviewPhaseForPreset(options.preset)
+	const reviewPhase = lastNonTriggerPhaseForPreset(options.preset)
 	log(`Starting ${reviewPhase.name} agent...`)
 	const reviewStart = Date.now()
 	const reviewPromptRaw = await readFile(reviewPhase.prompt, "utf-8")
@@ -2462,8 +2462,8 @@ function buildOptions(targetCwd: string, configPath: string, raw: BuildOptionsIn
 	const chainPaths = raw.chainName === null ? null : resolveChainRuntimePaths(raw.chainName, loopDataRootOption(loopDataRoot))
 	const hostRunner = detectHostRunner(process.env)
 	const runnerCommands = buildAgentRunnerCommands(config)
-	const defaultRunner = selectPhaseDefaultRunner(defaultPhaseForPreset(preset), preset, runnerCommands)
-	const reviewRunner = selectPhaseDefaultRunner(reviewPhaseForPreset(preset), preset, runnerCommands)
+	const defaultRunner = selectPhaseDefaultRunner(firstNonTriggerPhaseForPreset(preset), preset, runnerCommands)
+	const reviewRunner = selectPhaseDefaultRunner(lastNonTriggerPhaseForPreset(preset), preset, runnerCommands)
 
 	return {
 		targetCwd,
@@ -2714,8 +2714,8 @@ function pickFirstSelectableStatusItem(
 	const issueFile = resolveOptionalChainIssueFile(options, chain, selected, "Selected issue file")
 	const evidenceDir = resolveChainEvidenceDir(options, chain, selected, selectedId, "Selected evidence directory")
 	const agentCwd = selected.agentCwd ?? options.targetCwd
-	const runner = selectRunnerForPhase(defaultPhaseForPreset(options.preset).name, selected, options)
-	const reviewRunner = selectRunnerForPhase(reviewPhaseForPreset(options.preset).name, selected, options)
+	const runner = selectRunnerForPhase(firstNonTriggerPhaseForPreset(options.preset).name, selected, options)
+	const reviewRunner = selectRunnerForPhase(lastNonTriggerPhaseForPreset(options.preset).name, selected, options)
 	return { item: selected, issueFile, evidenceDir, agentCwd, runner, reviewRunner }
 }
 
@@ -4047,8 +4047,8 @@ export type BuildPhaseRunnerSelectionFromChainInput = {
 export function buildPhaseRunnerSelectionFromChain(input: BuildPhaseRunnerSelectionFromChainInput): PhaseRunnerSelectionInput {
 	const config = loopConfigFromChain(input.chain, input.loopDataRoot, null)
 	const runnerCommands = buildAgentRunnerCommands(config)
-	const defaultRunner = selectPhaseDefaultRunner(defaultPhaseForPreset(input.preset), input.preset, runnerCommands)
-	const reviewRunner = selectPhaseDefaultRunner(reviewPhaseForPreset(input.preset), input.preset, runnerCommands)
+	const defaultRunner = selectPhaseDefaultRunner(firstNonTriggerPhaseForPreset(input.preset), input.preset, runnerCommands)
+	const reviewRunner = selectPhaseDefaultRunner(lastNonTriggerPhaseForPreset(input.preset), input.preset, runnerCommands)
 	return { preset: input.preset, defaultRunner, reviewRunner, runnerCommands }
 }
 
@@ -4062,18 +4062,18 @@ export function resolvePhaseRunnerFromChain(input: ResolvePhaseRunnerFromChainIn
 	return selectRunnerForPhase(input.phase, input.item, selection)
 }
 
-export function reviewPhaseForPreset(preset: Preset): PresetPhase {
+export function firstNonTriggerPhaseForPreset(preset: Preset): PresetPhase {
+	const phase = preset.phases.find((entry) => entry.trigger === null) ?? preset.phases[0]
+	if (phase === undefined) fail("preset must define at least one phase")
+	return phase
+}
+
+export function lastNonTriggerPhaseForPreset(preset: Preset): PresetPhase {
 	for (let index = preset.phases.length - 1; index >= 0; index--) {
 		const phase = preset.phases[index]!
 		if (phase.trigger === null) return phase
 	}
-	fail("preset must define at least one non-trigger phase")
-}
-
-export function defaultPhaseForPreset(preset: Preset): PresetPhase {
-	const phase = preset.phases.find((entry) => entry.trigger === null) ?? preset.phases[0]
-	if (phase === undefined) fail("preset must define at least one phase")
-	return phase
+	return firstNonTriggerPhaseForPreset(preset)
 }
 
 export function triggeredPhasesAfter(preset: Preset, afterPhase: string, status: string): readonly PresetPhase[] {

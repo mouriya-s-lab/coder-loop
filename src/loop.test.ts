@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { mkdir } from "node:fs/promises"
-import { resolve } from "node:path"
+import { relative, resolve } from "node:path"
 
 import {
 	agentCodexArgs,
@@ -14,6 +14,7 @@ import {
 	getItemId,
 	makeIssueRunContext,
 	normalizeQueueIssueId,
+	lastNonTriggerPhaseForPreset,
 	parseKindFromLabels,
 	parsePreset,
 	parseRoleEntryMetadata,
@@ -23,7 +24,6 @@ import {
 	renderPrompt,
 	stripRoleEntryFrontmatter,
 	resolveBinding,
-	reviewPhaseForPreset,
 	selectRunnerForPhase,
 	type ConfigBindings,
 	type IssueRunContext,
@@ -322,8 +322,8 @@ describe("runner and daemon helpers", () => {
 		const item = makeItem({ runner: "claude" })
 
 		expect(selectRunnerForPhase("iteration", item, options).kind).toBe("claude")
-		expect(selectRunnerForPhase(reviewPhaseForPreset(preset).name, item, options).kind).toBe("claude")
-		expect(selectRunnerForPhase(reviewPhaseForPreset(preset).name, item, options).model).toBeNull()
+		expect(selectRunnerForPhase(lastNonTriggerPhaseForPreset(preset).name, item, options).kind).toBe("claude")
+		expect(selectRunnerForPhase(lastNonTriggerPhaseForPreset(preset).name, item, options).model).toBeNull()
 	})
 
 	test("selectRunnerForPhase uses engine-builtin fallback when role md omits defaultRunner", () => {
@@ -379,8 +379,9 @@ describe("runner and daemon helpers", () => {
 		// pinned to a chains/<chain> directory or the legacy target-local .coder-loop/runtime/logs.
 		expect(plan.stdoutPath.startsWith(resolve(TEST_ROOT, "daemon") + "/")).toBe(true)
 		expect(plan.stderrPath.startsWith(resolve(TEST_ROOT, "daemon") + "/")).toBe(true)
-		expect(plan.stdoutPath.includes("/chains/")).toBe(false)
-		expect(plan.stdoutPath.includes("runtime/logs")).toBe(false)
+		const daemonStdoutPath = relative(TEST_ROOT, plan.stdoutPath)
+		expect(daemonStdoutPath.split("/")).not.toContain("chains")
+		expect(daemonStdoutPath.includes("runtime/logs")).toBe(false)
 	})
 
 	test("agentCodexArgs and session path helpers keep runner plumbing stable", () => {

@@ -12,7 +12,6 @@ import {
 	renderFragmentIndex,
 	renderPrompt,
 	resolveIssueKind,
-	reviewPhaseForPreset,
 	selectRunnerForPhase,
 	type AgentRunnerKind,
 	type AgentRunnerSelection,
@@ -29,7 +28,7 @@ import {
 	type RuntimeBindings,
 } from "./loop"
 import { detectsSessionIdInvalid } from "./runners/session-id"
-import { type ChainRecord, dependsOnItemIds, type ItemRecord, listDependencyWaitReasons, type SqliteStateStore } from "./sqlite-state"
+import { type ChainRecord, dependsOnItemIds, type ItemRecord, listDependencyWaitReasons, type RunRecord, type SqliteStateStore } from "./sqlite-state"
 import {
 	LOOP_DATA_ROOT_ENV,
 	type LoopDataRootOptions,
@@ -86,12 +85,14 @@ export type SchedulerStore = Pick<
 	SqliteStateStore,
 	| "listChains"
 	| "listItems"
+	| "listRuns"
 	| "getNextPendingItem"
 	| "updateChain"
 	| "getItem"
 	| "updateItem"
 	| "setItemSessionId"
 	| "recordRun"
+	| "getRunByRunId"
 	| "completeRun"
 	| "setCurrentRun"
 	| "getCurrentRun"
@@ -212,11 +213,11 @@ export type SchedulerTickResult = {
 	completedChainIds: number[]
 }
 
-const DEFAULT_PHASE = "iteration"
 const DEFAULT_PENDING_STATUSES = ["queued", "changes_requested"] as const
 const DEFAULT_TERMINAL_STATUSES = ["done", "moot", "blocked", SCHEDULER_EXHAUSTED_STATUS] as const
 const DEFAULT_SUCCESS_STATUSES = ["done"] as const
 const DEFAULT_ENTRY_STATUS = "queued"
+const RUNNING_RUN_STATUS = "running"
 const CHAIN_COMPLETE_TRIGGER_STATE_METADATA_KEY = "coderLoopChainCompleteTrigger"
 const MAX_ITEM_ATTEMPTS_METADATA_KEY = "maxItemAttempts"
 const SCHEDULER_BACKOFF_EXTRA_KEY = "schedulerBackoff"
@@ -250,6 +251,7 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 	for (const chain of activeChains) {
 		const chainStatuses = await schedulerStatusesForChain(options, chain)
 		let items = options.store.listItems(chain.id)
+		const runs = options.store.listRuns(chain.id)
 		const repoCwds = distinct(items.map((item) => item.repoCwd))
 		const phasePlan = await resolvePhasePlanForChain(options, chain)
 
@@ -271,6 +273,7 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 			const next = selectNextItemAndPhase({
 				repoCwd,
 				items,
+				runs,
 				chainStatuses,
 				phasePlan,
 				explicitPhase: options.phase,
@@ -278,9 +281,7 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 			})
 			if (next === null) continue
 
-			const isItemTriggerPhase = phasePlan.itemTriggerPhases.some((trigger) => trigger.name === next.phase)
-			const preserveTerminalStatus = isItemTriggerPhase && chainStatuses.terminal.includes(next.item.status)
-			const activeRun = await spawnSchedulerRun(options, chain, next.item, slot, next.phase, preserveTerminalStatus)
+			const activeRun = await spawnSchedulerRun(options, chain, next.item, slot, next.phase)
 			if (activeRun !== null) spawnedRuns.push(activeRun)
 		}
 
@@ -311,32 +312,32 @@ type SchedulerItemTriggerPhase = {
 }
 
 type SchedulerPhasePlan = {
-	iterPhase: string
-	reviewPhase: string
+	firstPhase: string
+	lastPhase: string
+	nonTriggerPhases: readonly string[]
 	itemTriggerPhases: readonly SchedulerItemTriggerPhase[]
 }
 
 async function resolvePhasePlanForChain(options: SchedulerOptions, chain: ChainRecord): Promise<SchedulerPhasePlan> {
-	if (options.phase !== undefined) return { iterPhase: options.phase, reviewPhase: options.phase, itemTriggerPhases: [] }
-	try {
-		const preset = await loadPreset(schedulerPresetDir(options, chain))
-		const iterPhase = preset.phases.find((phase) => phase.trigger === null)?.name ?? DEFAULT_PHASE
-		const reviewPhase = reviewPhaseForPreset(preset).name
-		const itemTriggerPhases = preset.phases.flatMap((phase): SchedulerItemTriggerPhase[] => {
-			const trigger = phase.trigger
-			if (trigger === null) return []
-			if (!("afterPhase" in trigger)) return []
-			return [{ name: phase.name, afterPhase: trigger.afterPhase, whenStatus: trigger.whenStatus }]
-		})
-		return { iterPhase, reviewPhase, itemTriggerPhases }
-	} catch {
-		return { iterPhase: DEFAULT_PHASE, reviewPhase: DEFAULT_PHASE, itemTriggerPhases: [] }
-	}
+	if (options.phase !== undefined) return { firstPhase: options.phase, lastPhase: options.phase, nonTriggerPhases: [options.phase], itemTriggerPhases: [] }
+	const preset = await loadPreset(schedulerPresetDir(options, chain))
+	const nonTriggerPhases = preset.phases.flatMap((phase) => phase.trigger === null ? [phase.name] : [])
+	const firstPhase = nonTriggerPhases[0]
+	if (firstPhase === undefined) throw new Error(`preset ${preset.name} has no non-trigger phases`)
+	const lastPhase = nonTriggerPhases[nonTriggerPhases.length - 1] ?? firstPhase
+	const itemTriggerPhases = preset.phases.flatMap((phase): SchedulerItemTriggerPhase[] => {
+		const trigger = phase.trigger
+		if (trigger === null) return []
+		if (!("afterPhase" in trigger)) return []
+		return [{ name: phase.name, afterPhase: trigger.afterPhase, whenStatus: trigger.whenStatus }]
+	})
+	return { firstPhase, lastPhase, nonTriggerPhases, itemTriggerPhases }
 }
 
 type SelectNextItemAndPhaseInput = {
 	repoCwd: string
 	items: readonly ItemRecord[]
+	runs: readonly RunRecord[]
 	chainStatuses: SchedulerChainStatuses
 	phasePlan: SchedulerPhasePlan
 	explicitPhase: string | undefined
@@ -356,20 +357,7 @@ function selectNextItemAndPhase(input: SelectNextItemAndPhaseInput): { item: Ite
 	}
 
 	const repoItems = input.items.filter((item) => item.repoCwd === input.repoCwd)
-	const iterDone = repoItems.find((item) =>
-		item.status === "in_progress" && item.phase === input.phasePlan.iterPhase,
-	)
-	if (iterDone !== undefined && input.phasePlan.iterPhase !== input.phasePlan.reviewPhase) {
-		return { item: iterDone, phase: input.phasePlan.reviewPhase }
-	}
-
-	const reviewIncomplete = repoItems.find((item) =>
-		item.status === "in_progress" && item.phase === input.phasePlan.reviewPhase,
-	)
-	if (reviewIncomplete !== undefined && input.phasePlan.iterPhase !== input.phasePlan.reviewPhase) {
-		return { item: reviewIncomplete, phase: input.phasePlan.reviewPhase }
-	}
-
+	const runsById = new Map(input.runs.map((run) => [run.runId, run]))
 	for (const triggerPhase of input.phasePlan.itemTriggerPhases) {
 		const triggered = repoItems.find((item) =>
 			item.phase === triggerPhase.afterPhase &&
@@ -379,6 +367,23 @@ function selectNextItemAndPhase(input: SelectNextItemAndPhaseInput): { item: Ite
 		if (triggered !== undefined) return { item: triggered, phase: triggerPhase.name }
 	}
 
+	if (repoItems.some((item) => hasUnfinishedCurrentPhaseRun(item, runsById))) return null
+
+	const phaseContinuation = repoItems
+		.flatMap((item) => {
+			const nextPhase = nextNonTriggerPhaseForItem({
+				item,
+				runsById,
+				phasePlan: input.phasePlan,
+				pendingStatuses: input.chainStatuses.pending,
+				terminalStatuses: input.chainStatuses.terminal,
+				now: input.now,
+			})
+			return nextPhase === null ? [] : [{ item, phase: nextPhase }]
+		})
+		.sort((left, right) => comparePendingItems(left.item, right.item))[0]
+	if (phaseContinuation !== undefined) return phaseContinuation
+
 	const pending = selectNextPendingItemFromSnapshot({
 		items: input.items,
 		repoCwd: input.repoCwd,
@@ -386,7 +391,42 @@ function selectNextItemAndPhase(input: SelectNextItemAndPhaseInput): { item: Ite
 		terminalStatuses: input.chainStatuses.terminal,
 		now: input.now,
 	})
-	return pending === null ? null : { item: pending, phase: input.phasePlan.iterPhase }
+	return pending === null ? null : { item: pending, phase: input.phasePlan.firstPhase }
+}
+
+function nextNonTriggerPhaseForItem(input: {
+	item: ItemRecord
+	runsById: ReadonlyMap<string, RunRecord>
+	phasePlan: SchedulerPhasePlan
+	pendingStatuses: readonly string[]
+	terminalStatuses: readonly string[]
+	now: number
+}): string | null {
+	if (!itemBackoffReady(input.item, input.now)) return null
+	if (input.item.phase === null || input.item.lastRunId === null) return null
+	if (input.terminalStatuses.includes(input.item.status)) return null
+	const latestRun = input.runsById.get(input.item.lastRunId)
+	if (latestRun === undefined) return null
+	if (latestRun.itemId !== input.item.id) return null
+	if (latestRun.phase !== input.item.phase) return null
+	if (latestRun.endedAt === null) return null
+	const currentPhaseIndex = input.phasePlan.nonTriggerPhases.indexOf(input.item.phase)
+	if (currentPhaseIndex < 0) return null
+	if (currentPhaseIndex === input.phasePlan.nonTriggerPhases.length - 1) {
+		const startStatus = typeof latestRun.extra.startStatus === "string" ? latestRun.extra.startStatus : null
+		if (startStatus === input.item.status && input.pendingStatuses.includes(input.item.status)) return input.item.phase
+	}
+	if (latestRun.exitCode !== 0) return null
+	return input.phasePlan.nonTriggerPhases[currentPhaseIndex + 1] ?? null
+}
+
+function hasUnfinishedCurrentPhaseRun(item: ItemRecord, runsById: ReadonlyMap<string, RunRecord>): boolean {
+	if (item.phase === null || item.lastRunId === null) return false
+	const latestRun = runsById.get(item.lastRunId)
+	return latestRun !== undefined
+		&& latestRun.itemId === item.id
+		&& latestRun.phase === item.phase
+		&& latestRun.endedAt === null
 }
 
 export type SchedulerPendingSelectionInput = {
@@ -434,7 +474,7 @@ async function exhaustItemsOverAttemptLimitForRepo(
 	for (const item of items) {
 		if (item.repoCwd !== repoCwd) continue
 		if (terminalStatuses.has(item.status)) continue
-		if (!pendingStatuses.has(item.status) && item.status !== "in_progress") continue
+		if (!pendingStatuses.has(item.status)) continue
 		if (item.attempts < maxItemAttempts) continue
 
 		const exhaustedAt = nowSeconds(options)
@@ -593,7 +633,6 @@ async function spawnSchedulerRun(
 	item: ItemRecord,
 	slot: SchedulerSlot,
 	phase: string,
-	preserveTerminalStatus: boolean,
 ): Promise<SchedulerActiveRun | null> {
 	const kindResolver = options.kindResolver ?? defaultSchedulerKindResolver
 	const kindResult = await kindResolver({ chain, item })
@@ -602,7 +641,12 @@ async function spawnSchedulerRun(
 			? `expected exactly one kind:* label, found 0 on ${chain.repository || "<unconfigured>"}#${item.issueNumber}`
 			: kindResult.error
 		const abortedAt = nowSeconds(options)
-		options.store.updateItem(item.id, { status: "blocked", updatedAt: abortedAt })
+		const chainStatuses = await schedulerStatusesForChain(options, chain)
+		options.store.updateItem(item.id, {
+			status: chainStatuses.entry,
+			extra: withNextSchedulerBackoff(item.extra, abortedAt, spawnFailureBackoffForChain(options, chain)),
+			updatedAt: abortedAt,
+		})
 		console.warn(`coder-loop scheduler: kind label check failed for chain=${chain.name} item=${item.id} issue=#${item.issueNumber}: ${reason}`)
 		await emit(options, {
 			type: "spawn.aborted",
@@ -612,7 +656,7 @@ async function spawnSchedulerRun(
 			itemId: item.id,
 			issueNumber: item.issueNumber,
 			reason,
-			toStatus: "blocked",
+			toStatus: chainStatuses.entry,
 		})
 		return null
 	}
@@ -629,8 +673,9 @@ async function spawnSchedulerRun(
 		chainId: chain.id,
 		itemId: item.id,
 		phase,
+		status: RUNNING_RUN_STATUS,
 		startedAt,
-		extra: { slotKey: slot.key, repoCwd: item.repoCwd, worktreePath },
+		extra: { slotKey: slot.key, repoCwd: item.repoCwd, worktreePath, startStatus: item.status, startPhase: item.phase },
 	})
 	options.store.setCurrentRun({
 		chainId: chain.id,
@@ -646,11 +691,9 @@ async function spawnSchedulerRun(
 		phase,
 		updatedAt: startedAt,
 	}
-	// A side-effect trigger phase runs on an item that was already terminal (e.g. blocked-responder on a
-	// blocked item). Overwriting its status to in_progress would lose the terminal state and let the next
-	// tick re-select it as pending. Keep the terminal status persisted; only advance phase/attempts. The
-	// new phase value also prevents the item-trigger from re-firing (its afterPhase no longer matches).
-	if (!preserveTerminalStatus) spawnUpdate.status = "in_progress"
+	// Spawn records only run/phase metadata. The agent owns status writes; trigger phases on terminal
+	// items therefore keep their terminal status, and normal phases keep their entry status until the
+	// agent writes a new one.
 	options.store.updateItem(item.id, spawnUpdate)
 
 	const presetDir = schedulerPresetDir(options, chain)
@@ -686,6 +729,7 @@ async function spawnSchedulerRun(
 		env: { ...process.env, [LOOP_DATA_ROOT_ENV]: resolveLoopDataPaths(options.loopDataRootOptions).root },
 	})
 	const activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, phase, child, runner)
+	slot.activeRun = activeRun
 	options.store.setCurrentRun({
 		chainId: chain.id,
 		phase,
@@ -701,13 +745,12 @@ async function spawnSchedulerRun(
 		startedAt,
 		endedAt: null,
 		exitCode: null,
-		status: "in_progress",
+		status: RUNNING_RUN_STATUS,
 		pid: activeRun.pid,
 		worktreePath,
 		stdoutBytes: 0,
 		stderrBytes: 0,
 	})
-	slot.activeRun = activeRun
 	await emit(options, {
 		type: "agent.spawn",
 		slotKey: slot.key,
@@ -782,6 +825,13 @@ function attachRunCloseHandler(
 						stdoutText,
 						stderrText,
 					})
+					const completedRun = options.store.getRunByRunId(runId)
+					options.store.completeRun(runId, {
+						endedAt,
+						exitCode,
+						status,
+						extra: { ...(completedRun?.extra ?? {}), stdoutBytes: stdoutText.length, stderrBytes: stderrText.length },
+					})
 
 					const currentRun = options.store.getCurrentRun(chain.id)
 					if (currentRun?.runId === runId) options.store.clearCurrentRun(chain.id)
@@ -799,7 +849,6 @@ function attachRunCloseHandler(
 						durationSeconds: Math.max(0, endedAt - startedAt),
 						status,
 					})
-					options.store.completeRun(runId, { endedAt, exitCode, status, extra: { stdoutBytes: stdoutText.length, stderrBytes: stderrText.length } })
 					const parsedSessionId = parseSessionIdFromRunnerStream(runner.kind, stdoutText)
 					const sessionIdInvalid = detectsSessionIdInvalid(runner.kind, stderrText)
 					const previousSessionId = (currentItem ?? item).sessionIds[phase]?.[runner.kind] ?? null
@@ -1389,7 +1438,7 @@ async function spawnSchedulerReviewOnEmptyRun(
 	if (slot.activeRun !== null) return null
 
 	const phasePlan = await resolvePhasePlanForChain(options, chain)
-	const reviewPhase = phasePlan.reviewPhase
+	const reviewPhase = phasePlan.lastPhase
 	const fallbackItem = makeReviewOnEmptyFallbackItem(chain, representative, reviewPhase)
 	const worktreeManager = options.worktreeManager ?? createGitWorktreeManager(options.loopDataRootOptions)
 	const worktreePath = slot.worktreePath ?? await worktreeManager({ chain, repoCwd: representative.repoCwd, slotKey: slot.key })
@@ -1733,7 +1782,7 @@ async function initializeSchedulerRunArtifacts(
 			startedAt,
 			endedAt: null,
 			exitCode: null,
-			status: "in_progress",
+			status: RUNNING_RUN_STATUS,
 			pid: null,
 			worktreePath,
 			stdoutBytes: 0,

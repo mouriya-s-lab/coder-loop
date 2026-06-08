@@ -148,7 +148,7 @@ describe("scheduler", () => {
 			expect(secondTick.spawnedRuns).toHaveLength(0)
 			expect(fixture.store.getCurrentRun(chain.id)?.extra).toMatchObject({ itemId: firstTick.spawnedRuns[0]?.itemId, pid: firstTick.spawnedRuns[0]?.pid })
 			expect(fixture.schedulerEvents.some((event) => event.type === "slot.busy")).toBe(true)
-			expect(fixture.store.listItems(chain.id).map((item) => item.status)).toEqual(["in_progress", "queued"])
+			expect(fixture.store.listItems(chain.id).map((item) => item.status)).toEqual(["queued", "queued"])
 			await firstTick.spawnedRuns[0]!.closed
 		} finally {
 			fixture.store.close()
@@ -425,7 +425,7 @@ describe("scheduler", () => {
 
 			const tick = await schedulerTick(fixture.options())
 			expect(tick.spawnedRuns).toHaveLength(1)
-			expect(fixture.store.getItem(item.id)?.status).toBe("in_progress")
+			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
 
 			fixture.store.updateItem(item.id, { status: "done", updatedAt: 1_800_000_500 })
 			const closed = await tick.spawnedRuns[0]!.terminate({ forceAfterMs: 200 })
@@ -454,14 +454,13 @@ describe("scheduler", () => {
 			expect(firstTick.spawnedRuns[0]?.itemId).toBe(first.id)
 
 			const terminated = await firstTick.spawnedRuns[0]!.terminate({ forceAfterMs: 200 })
-			// SIGTERM kills the agent mid-run, so it never writes a status; the spawn-set
-			// in_progress is what the scheduler reads back (v1 status model).
-			expect(terminated.status).toBe("in_progress")
+			// SIGTERM kills the agent mid-run, so it never writes a status; the item keeps its entry status.
+			expect(terminated.status).toBe("queued")
 			expect(fixture.store.getItem(first.id)?.attempts).toBe(1)
 			expect(fixture.store.getItem(second.id)?.attempts).toBe(0)
 
-			// Model the daemon's stale-recovery: a killed in_progress item is reset to a
-			// backoff-gated continuable status so the untouched sibling gets the next turn.
+			// Model the daemon's stale-recovery: a killed item is reset to a backoff-gated continuable
+			// status so the untouched sibling gets the next turn.
 			// Omit `extra` to preserve the spawn-failure backoff applied on termination.
 			fixture.store.updateItem(first.id, { status: "changes_requested", phase: null, updatedAt: 1_800_000_700 })
 
@@ -796,7 +795,7 @@ describe("scheduler", () => {
 
 			expect(resumedTick.spawnedRuns).toHaveLength(1)
 			expect(resumedTick.spawnedRuns[0]?.itemId).toBe(item.id)
-			expect(fixture.store.getItem(item.id)?.status).toBe("in_progress")
+			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
 			await resumedTick.spawnedRuns[0]!.closed
 		} finally {
 			fixture.store.close()
@@ -1007,7 +1006,7 @@ describe("scheduler reads the agent-written item status (v1 status model)", () =
 		}
 	})
 
-	test("an in_progress status the agent writes keeps the item continuable and the chain active", async () => {
+	test("an iteration summary leaves the item continuable through phase order", async () => {
 		const fixture = await createFixture("status-agent-in-progress")
 		try {
 			const chain = createChain(fixture.store, "status-agent-in-progress-chain")
@@ -1021,15 +1020,15 @@ describe("scheduler reads the agent-written item status (v1 status model)", () =
 			const closed = await tick.spawnedRuns[0]!.closed
 
 			expect(closed.exitCode).toBe(0)
-			expect(closed.status).toBe("in_progress")
-			expect(fixture.store.getItem(item.id)?.status).toBe("in_progress")
+			expect(closed.status).toBe("queued")
+			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
 			expect(fixture.store.getChain(chain.id)?.status).toBe("active")
 		} finally {
 			fixture.store.close()
 		}
 	})
 
-	test("when the agent writes no status the item keeps the spawn pre-set in_progress (continuable)", async () => {
+	test("when the agent writes no status the item keeps its entry status", async () => {
 		const fixture = await createFixture("status-agent-silent")
 		try {
 			const chain = createChain(fixture.store, "status-agent-silent-chain")
@@ -1042,8 +1041,8 @@ describe("scheduler reads the agent-written item status (v1 status model)", () =
 			const closed = await tick.spawnedRuns[0]!.closed
 
 			expect(closed.exitCode).toBe(0)
-			expect(closed.status).toBe("in_progress")
-			expect(fixture.store.getItem(item.id)?.status).toBe("in_progress")
+			expect(closed.status).toBe("queued")
+			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
 			expect(fixture.store.getChain(chain.id)?.status).toBe("active")
 		} finally {
 			fixture.store.close()
@@ -1117,7 +1116,7 @@ describe("scheduler reads the agent-written item status (v1 status model)", () =
 })
 
 describe("scheduler per-item phase advancement (issue #289)", () => {
-	test("AC3: queued item → first tick spawns iter phase and writes phase=iteration / status=in_progress", async () => {
+	test("AC3: queued item → first tick spawns iter phase and leaves item status unchanged", async () => {
 		const fixture = await createFixture("phase-ac3-queued-to-iter")
 		try {
 			const chain = createChain(fixture.store, "phase-ac3-queued-to-iter-chain")
@@ -1136,7 +1135,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 
 			const updated = fixture.store.getItem(item.id)
 			expect(updated?.phase).toBe("iteration")
-			expect(updated?.status).toBe("in_progress")
+			expect(updated?.status).toBe("queued")
 			expect(updated?.attempts).toBe(1)
 			expect(fixture.schedulerEvents.filter((event) => event.type === "agent.spawn")).toHaveLength(1)
 			expect(fixture.schedulerEvents.find((event) => event.type === "agent.spawn" && event.itemId === item.id)).toBeDefined()
@@ -1146,7 +1145,55 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 		}
 	})
 
-	test("AC4: in_progress + phase=iteration → next tick spawns review (does not re-spawn iter) and writes phase=review", async () => {
+	test("unfinished current phase run blocks first-phase re-selection without a status lock", async () => {
+		const fixture = await createFixture("phase-running-ledger-blocks-pending")
+		try {
+			const chain = createChain(fixture.store, "phase-running-ledger-blocks-pending-chain")
+			const item = createItem(fixture.store, chain, {
+				issueNumber: 371_002,
+				repoCwd: "/repo/a",
+				summary: "ITERATION SUMMARY: scope=unit; reason=running-ledger",
+			})
+			fixture.store.recordRun({
+				runId: "run-active-iteration-ledger",
+				chainId: chain.id,
+				itemId: item.id,
+				phase: "iteration",
+				status: "running",
+				startedAt: 1_800_000_700,
+				endedAt: null,
+				exitCode: null,
+				extra: { startStatus: "queued" },
+			})
+			fixture.store.updateItem(item.id, {
+				status: "in_progress",
+				phase: "iteration",
+				attempts: 1,
+				lastRunId: "run-active-iteration-ledger",
+				updatedAt: 1_800_000_710,
+			})
+
+			const tick = await schedulerTick(fixture.options({
+				statusesForChain: () => ({
+					pending: ["queued", "in_progress", "changes_requested"],
+					terminal: ["blocked", "moot", "done", "exhausted"],
+					success: ["done"],
+					entry: "queued",
+				}),
+			}))
+			expect(tick.spawnedRuns).toHaveLength(0)
+			expect(fixture.store.getItem(item.id)).toMatchObject({
+				status: "in_progress",
+				phase: "iteration",
+				attempts: 1,
+				lastRunId: "run-active-iteration-ledger",
+			})
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("AC4: completed iteration run → next tick spawns review without status-literal handoff", async () => {
 		const fixture = await createFixture("phase-ac4-iter-to-review")
 		try {
 			const chain = createChain(fixture.store, "phase-ac4-iter-to-review-chain")
@@ -1164,7 +1211,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 			expect(iterTick.spawnedRuns).toHaveLength(1)
 			expect(iterTick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-iteration`)
 			const iterClosed = await iterTick.spawnedRuns[0]!.closed
-			expect(iterClosed.status).toBe("in_progress")
+			expect(iterClosed.status).toBe("queued")
 			expect(fixture.store.getItem(item.id)?.phase).toBe("iteration")
 
 			const reviewTick = await schedulerTick(baseOptions)
@@ -1173,7 +1220,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 
 			const updatedAfterReviewSpawn = fixture.store.getItem(item.id)
 			expect(updatedAfterReviewSpawn?.phase).toBe("review")
-			expect(updatedAfterReviewSpawn?.status).toBe("in_progress")
+			expect(updatedAfterReviewSpawn?.status).toBe("queued")
 			expect(updatedAfterReviewSpawn?.attempts).toBe(2)
 			await reviewTick.spawnedRuns[0]!.closed
 
@@ -1183,6 +1230,57 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> => event.type === "phase.start" && event.itemId === item.id)
 				.map((event) => event.phase)
 			expect(phases).toEqual(["iteration", "review"])
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("custom three-step preset advances through the middle non-trigger phase", async () => {
+		const fixture = await createFixture("phase-order-three-step")
+		const presetDir = resolve(fixture.loopDataRoot, "..", "three-step-preset")
+		await writeThreeStepPreset(presetDir)
+		try {
+			const chain = createChain(fixture.store, "phase-order-three-step-chain", { preset: "three-step" })
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
+			const item = createItem(fixture.store, chain, { issueNumber: 371_001, repoCwd: "/repo/a", summary: null })
+			const baseOptions = fixture.options({
+				presetDir,
+				runIdFactory: ({ chain: c, item: i, phase }) => `run-${c.id}-${i.id}-${phase}`,
+				prompt: ({ item: i, runId, worktreePath, phase }) =>
+					JSON.stringify({
+						itemId: i.id,
+						issueNumber: i.issueNumber,
+						runId,
+						worktreePath,
+						eventLog: fixture.eventLog,
+						sleepMs: 5,
+						exitCode: 0,
+						summary: `PHASE SUMMARY: ${phase}`,
+						writeStatus: phase === "gamma" ? "done" : null,
+					}),
+			})
+
+			const alphaTick = await schedulerTick(baseOptions)
+			expect(alphaTick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-alpha`)
+			await alphaTick.spawnedRuns[0]!.closed
+			expect(fixture.store.getItem(item.id)).toMatchObject({ status: "queued", phase: "alpha", attempts: 1 })
+
+			const betaTick = await schedulerTick(baseOptions)
+			expect(betaTick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-beta`)
+			await betaTick.spawnedRuns[0]!.closed
+			expect(fixture.store.getItem(item.id)).toMatchObject({ status: "queued", phase: "beta", attempts: 2 })
+
+			const gammaTick = await schedulerTick(baseOptions)
+			expect(gammaTick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-gamma`)
+			await gammaTick.spawnedRuns[0]!.closed
+			expect(fixture.store.getItem(item.id)).toMatchObject({ status: "done", phase: "gamma", attempts: 3 })
+
+			const phaseStarts = fixture.schedulerEvents
+				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
+					event.type === "phase.start" && event.itemId === item.id,
+				)
+				.map((event) => event.phase)
+			expect(phaseStarts).toEqual(["alpha", "beta", "gamma"])
 		} finally {
 			fixture.store.close()
 		}
@@ -1198,8 +1296,19 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				summary: "ITERATION SUMMARY: scope=unit; reason=ac5",
 			})
 
+			fixture.store.recordRun({
+				runId: "run-pre-crash-iter",
+				chainId: chain.id,
+				itemId: item.id,
+				phase: "iteration",
+				status: "queued",
+				startedAt: 1_800_000_900,
+				endedAt: 1_800_000_950,
+				exitCode: 0,
+				extra: { startStatus: "queued" },
+			})
 			fixture.store.updateItem(item.id, {
-				status: "in_progress",
+				status: "queued",
 				phase: "iteration",
 				attempts: 1,
 				lastRunId: "run-pre-crash-iter",
@@ -1217,7 +1326,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 
 			const updated = fixture.store.getItem(item.id)
 			expect(updated?.phase).toBe("review")
-			expect(updated?.status).toBe("in_progress")
+			expect(updated?.status).toBe("queued")
 			expect(updated?.attempts).toBe(2)
 			await tick.spawnedRuns[0]!.closed
 
@@ -1232,7 +1341,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 		}
 	})
 
-	test("in_progress + phase=review → next tick retries review for a no-status review exit", async () => {
+	test("no-status review exit retries review for the same item", async () => {
 		const fixture = await createFixture("phase-review-incomplete")
 		try {
 			const chain = createChain(fixture.store, "phase-review-incomplete-chain")
@@ -1241,8 +1350,19 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				repoCwd: "/repo/a",
 				summary: null,
 			})
+			fixture.store.recordRun({
+				runId: "run-pre-review-incomplete",
+				chainId: chain.id,
+				itemId: item.id,
+				phase: "review",
+				status: "queued",
+				startedAt: 1_800_002_300,
+				endedAt: 1_800_002_350,
+				exitCode: 0,
+				extra: { startStatus: "queued" },
+			})
 			fixture.store.updateItem(item.id, {
-				status: "in_progress",
+				status: "queued",
 				phase: "review",
 				attempts: 2,
 				lastRunId: "run-pre-review-incomplete",
@@ -1257,7 +1377,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 			expect(tick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-review-retry`)
 			const spawned = fixture.store.getItem(item.id)
 			expect(spawned?.phase).toBe("review")
-			expect(spawned?.status).toBe("in_progress")
+			expect(spawned?.status).toBe("queued")
 			expect(spawned?.attempts).toBe(3)
 
 			await tick.spawnedRuns[0]!.closed
@@ -1298,7 +1418,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 			expect(tick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-iteration-retry`)
 			const spawned = fixture.store.getItem(item.id)
 			expect(spawned?.phase).toBe("iteration")
-			expect(spawned?.status).toBe("in_progress")
+			expect(spawned?.status).toBe("changes_requested")
 			expect(spawned?.attempts).toBe(3)
 
 			await tick.spawnedRuns[0]!.closed
@@ -1339,7 +1459,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 			expect(tick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-iteration-retry`)
 			const spawned = fixture.store.getItem(item.id)
 			expect(spawned?.phase).toBe("iteration")
-			expect(spawned?.status).toBe("in_progress")
+			expect(spawned?.status).toBe("changes_requested")
 			expect(spawned?.attempts).toBe(2)
 
 			await tick.spawnedRuns[0]!.closed
@@ -1355,7 +1475,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 		}
 	})
 
-	test("AC6: in_progress + phase=review + REVIEW SUMMARY verdict=accepted → item terminal=done, next tick does NOT spawn", async () => {
+	test("AC6: completed iteration run followed by review accepted → item terminal=done, next tick does NOT spawn", async () => {
 		const fixture = await createFixture("phase-ac6-review-terminal")
 		try {
 			const chain = createChain(fixture.store, "phase-ac6-review-terminal-chain")
@@ -1365,8 +1485,19 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				repoCwd: "/repo/a",
 				summary: "REVIEW SUMMARY: verdict=accepted; issue=#28906; reason=ac6",
 			})
+			fixture.store.recordRun({
+				runId: "run-pre-review-iter",
+				chainId: chain.id,
+				itemId: item.id,
+				phase: "iteration",
+				status: "queued",
+				startedAt: 1_800_001_900,
+				endedAt: 1_800_001_950,
+				exitCode: 0,
+				extra: { startStatus: "queued" },
+			})
 			fixture.store.updateItem(item.id, {
-				status: "in_progress",
+				status: "queued",
 				phase: "iteration",
 				attempts: 1,
 				lastRunId: "run-pre-review-iter",
@@ -1766,8 +1897,19 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 				repoCwd: "/repo/a",
 				summary: "REVIEW SUMMARY: verdict=blocked; issue=#29005; reason=race-review",
 			})
+			fixture.store.recordRun({
+				runId: "run-pre-race-iter",
+				chainId: chain.id,
+				itemId: item.id,
+				phase: "iteration",
+				status: "queued",
+				startedAt: 1_800_005_900,
+				endedAt: 1_800_005_950,
+				exitCode: 0,
+				extra: { startStatus: "queued" },
+			})
 			fixture.store.updateItem(item.id, {
-				status: "in_progress",
+				status: "queued",
 				phase: "iteration",
 				attempts: 1,
 				lastRunId: "run-pre-race-iter",
@@ -1856,7 +1998,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 })
 
 describe("scheduler kind-label gate", () => {
-	test("missing kind:* label aborts spawn, marks item blocked, leaves no current run", async () => {
+	test("missing kind:* label aborts spawn, restores entry status, leaves no current run", async () => {
 		const fixture = await createFixture("kind-gate-missing")
 		try {
 			const chain = createChain(fixture.store, "kind-gate-missing-chain")
@@ -1875,7 +2017,8 @@ describe("scheduler kind-label gate", () => {
 
 			expect(tick.spawnedRuns).toHaveLength(0)
 			expect(fixture.worktreeCalls).toHaveLength(0)
-			expect(fixture.store.getItem(item.id)?.status).toBe("blocked")
+			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
+			expect(fixture.store.getItem(item.id)?.extra.schedulerBackoff).toMatchObject({ failureCount: 1 })
 			expect(fixture.store.getCurrentRun(chain.id)).toBeNull()
 			expect(listActiveRuns(fixture.state)).toHaveLength(0)
 			const aborted = fixture.schedulerEvents.find((event) => event.type === "spawn.aborted")
@@ -1884,7 +2027,7 @@ describe("scheduler kind-label gate", () => {
 				chainId: chain.id,
 				itemId: item.id,
 				issueNumber: 9001,
-				toStatus: "blocked",
+				toStatus: "queued",
 			})
 			expect(warn.messages.some((line) => /kind label check failed/.test(line))).toBe(true)
 			expect(warn.messages.some((line) => /expected exactly one kind:\* label, found 0/.test(line))).toBe(true)
@@ -1911,7 +2054,8 @@ describe("scheduler kind-label gate", () => {
 			}
 
 			expect(tick.spawnedRuns).toHaveLength(0)
-			expect(fixture.store.getItem(item.id)?.status).toBe("blocked")
+			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
+			expect(fixture.store.getItem(item.id)?.extra.schedulerBackoff).toMatchObject({ failureCount: 1 })
 			expect(fixture.store.getCurrentRun(chain.id)).toBeNull()
 			const aborted = fixture.schedulerEvents.find((event) => event.type === "spawn.aborted")
 			expect(aborted).toMatchObject({
@@ -1945,7 +2089,8 @@ describe("scheduler kind-label gate", () => {
 			}
 
 			expect(tick.spawnedRuns).toHaveLength(0)
-			expect(fixture.store.getItem(item.id)?.status).toBe("blocked")
+			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
+			expect(fixture.store.getItem(item.id)?.extra.schedulerBackoff).toMatchObject({ failureCount: 1 })
 			expect(fixture.store.getCurrentRun(chain.id)).toBeNull()
 			const aborted = fixture.schedulerEvents.find((event) => event.type === "spawn.aborted")
 			expect(aborted?.type === "spawn.aborted" ? aborted.reason : null).toMatch(/unknown kind label/)
@@ -1972,8 +2117,8 @@ describe("scheduler kind-label gate", () => {
 		}
 	})
 
-	test("blocked item is treated as terminal — chain completes when only aborted item remains", async () => {
-		const fixture = await createFixture("kind-gate-chain-completes")
+	test("spawn-aborted item stays active at entry status with backoff", async () => {
+		const fixture = await createFixture("kind-gate-chain-stays-active")
 		try {
 			const chain = createChain(fixture.store, "kind-gate-chain-completes-chain")
 			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
@@ -1990,9 +2135,10 @@ describe("scheduler kind-label gate", () => {
 			}
 
 			expect(tick.spawnedRuns).toHaveLength(0)
-			expect(tick.completedChainIds).toEqual([chain.id])
-			expect(fixture.store.getItem(item.id)?.status).toBe("blocked")
-			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
+			expect(tick.completedChainIds).toEqual([])
+			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
+			expect(fixture.store.getItem(item.id)?.extra.schedulerBackoff).toMatchObject({ failureCount: 1 })
+			expect(fixture.store.getChain(chain.id)?.status).toBe("active")
 		} finally {
 			fixture.store.close()
 		}
@@ -2182,10 +2328,9 @@ describe("resolveSchedulerPresetPhasePrompt", () => {
 			expect(capturedStdout).toContain("`mouriya-s-lab/coder-loop`")
 			expect(capturedStdout).toContain("`/repo/a`")
 			expect(capturedStdout).toContain("Current issue: `#283`")
-			// The echo-prompt runner is a render probe: it never calls `coder-loop item update`, so under
-			// the v1 status model the item keeps the in_progress status the scheduler pre-set at spawn. The
-			// scheduler does not infer a terminal status from the REVIEW SUMMARY the probe echoes to stdout.
-			expect(fixture.store.getItem(item.id)?.status).toBe("in_progress")
+			// The echo-prompt runner is a render probe: it never calls `coder-loop item update`, so the
+			// item keeps its entry status. The scheduler does not infer a terminal status from stdout.
+			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
 		} finally {
 			fixture.store.close()
 		}
@@ -2319,8 +2464,8 @@ describe("scheduler chain bindings (issue #288)", () => {
 			expect(capturedStdout).toContain("chain.baseBranch=trunk")
 			expect(capturedStdout).toContain("item.repoCwd=/tmp/chain-int-repo")
 			expect(capturedStdout.match(/\{\{[A-Z_]+\}\}/g) ?? []).toEqual([])
-			// Render probe (echo-prompt runner) writes no status, so the item stays in_progress under v1.
-			expect(fixture.store.getItem(item.id)?.status).toBe("in_progress")
+			// Render probe (echo-prompt runner) writes no status, so the item keeps its entry status.
+			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
 		} finally {
 			fixture.store.close()
 		}
@@ -3484,7 +3629,7 @@ if (summary !== null) console.log(summary)
 // v1 status model: the agent owns its item status. Write it through the same SQLite store the
 // scheduler reads (the daemon's loop-data-root is passed via CODER_LOOP_DATA_DIR), mirroring a real
 // agent's \`coder-loop item update --status\`. A null writeStatus means the agent wrote nothing, so the
-// item keeps the in_progress status the scheduler pre-set at spawn (continuable).
+// item keeps the entry status it had at spawn (continuable).
 if (typeof input.writeStatus === "string" && input.itemId > 0) {
 	const loopDataRoot = process.env.CODER_LOOP_DATA_DIR
 	if (loopDataRoot) {
@@ -3495,18 +3640,64 @@ if (typeof input.writeStatus === "string" && input.itemId > 0) {
 }
 process.exit(input.exitCode)
 `,
+		)
+	}
+
+async function writeThreeStepPreset(presetDir: string): Promise<void> {
+	await mkdir(presetDir, { recursive: true })
+	await writeFile(resolve(presetDir, "alpha.md"), "# alpha\n")
+	await writeFile(resolve(presetDir, "beta.md"), "# beta\n")
+	await writeFile(resolve(presetDir, "gamma.md"), "# gamma\n")
+	await writeFile(
+		resolve(presetDir, "preset.toml"),
+		`name = "three-step"
+version = 1
+description = "Three non-trigger phase fixture."
+
+[item]
+idField = "issue"
+
+[statuses]
+continuable = ["queued", "changes_requested"]
+terminal = ["done", "exhausted"]
+success = ["done"]
+entry = "queued"
+
+[agent]
+binary = "codex"
+
+[[phases]]
+name = "alpha"
+prompt = "alpha.md"
+statusWrites = []
+
+  [phases.variables]
+  ISSUE = "item.issue"
+
+[[phases]]
+name = "beta"
+prompt = "beta.md"
+statusWrites = []
+
+  [phases.variables]
+  ISSUE = "item.issue"
+
+[[phases]]
+name = "gamma"
+prompt = "gamma.md"
+statusWrites = ["done"]
+
+  [phases.variables]
+  ISSUE = "item.issue"
+`,
 	)
 }
 
 const FAKE_RUNNER_DEFAULT_SUMMARY = "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=fake-runner default"
 
-// Mirrors a real agent's status decision for the fake runner: the agent writes a preset status via
-// `coder-loop item update --status`, and the scheduler reads it. The scheduler never derives status
-// from this — it only reads item.status. Returns null when the agent would write nothing (e.g. an
-// explicit summary:null clean exit), leaving the item in the in_progress status the scheduler pre-set
-// at spawn (continuable). The fixture agent writes whatever its verdict implies regardless of phase
-// slot; the "iteration only ever hands off in_progress" rule is a preset-prompt concern (iter/final.md),
-// not a scheduler invariant, so it is not modeled here.
+// Mirrors a real agent's status decision for the fake runner: review agents write a preset status via
+// `coder-loop item update --status`, and the scheduler reads it. Iteration summaries write no item
+// status; ordered phase progression carries the handoff to the next phase.
 const TRIGGER_PHASES = new Set(["blocked-responder", "umbrella-finalizer", "review-on-empty"])
 
 function fakeRunnerWriteStatus(phase: string, extra: JsonObject): string | null {
@@ -3521,11 +3712,7 @@ function fakeRunnerWriteStatus(phase: string, extra: JsonObject): string | null 
 	const hasSummary = Object.prototype.hasOwnProperty.call(extra, "summary")
 	const summary = hasSummary ? extra.summary : FAKE_RUNNER_DEFAULT_SUMMARY
 	if (typeof summary !== "string") return null
-	// The agent's own summary declares what it did, and the status it writes matches. An ITERATION
-	// SUMMARY means the iter agent advanced work and hands off as in_progress (never terminal); a REVIEW
-	// SUMMARY carries the terminal verdict. This mirrors the agent writing its own status, not the
-	// scheduler inferring it from stdout.
-	if (summary.startsWith("ITERATION SUMMARY")) return "in_progress"
+	if (summary.startsWith("ITERATION SUMMARY")) return null
 	const verdict = parseReviewSummaryVerdict(summary, "claude")
 	switch (verdict) {
 		case "accepted":

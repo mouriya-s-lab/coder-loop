@@ -33,7 +33,6 @@ test("cross-runner happy path stores iteration/codex and review/claude session i
 			phase: "iteration",
 			sessionId: "d400e2b2-04a4-44f8-8f13-3078f41a5593",
 			stdout: ["ITERATION SUMMARY: scope=cross-runner; reason=iteration-complete"],
-			writeStatus: "in_progress",
 		},
 		{
 			runner: "claude",
@@ -52,7 +51,7 @@ test("cross-runner happy path stores iteration/codex and review/claude session i
 		const iterTick = await schedulerTick(options)
 		expect(iterTick.spawnedRuns).toHaveLength(1)
 		const iterClosed = await iterTick.spawnedRuns[0]!.closed
-		expect(iterClosed.status).toBe("in_progress")
+		expect(iterClosed.status).toBe("queued")
 		expect(fixture.store.getItem(item.id)?.phase).toBe("iteration")
 
 		const reviewTick = await schedulerTick(options)
@@ -85,7 +84,6 @@ test("review retry verdict returns to iteration before review runs again", async
 			phase: "iteration",
 			sessionId: "d400e2b2-04a4-44f8-8f13-3078f41a5593",
 			stdout: ["ITERATION SUMMARY: scope=cross-runner; reason=iteration-complete"],
-			writeStatus: "in_progress",
 		},
 		{
 			runner: "claude",
@@ -99,7 +97,6 @@ test("review retry verdict returns to iteration before review runs again", async
 			phase: "iteration",
 			sessionId: "d400e2b2-04a4-44f8-8f13-3078f41a5594",
 			stdout: ["ITERATION SUMMARY: scope=cross-runner; reason=retry-iteration-complete"],
-			writeStatus: "in_progress",
 		},
 		{
 			runner: "claude",
@@ -126,9 +123,9 @@ test("review retry verdict returns to iteration before review runs again", async
 		const retryIterationTick = await schedulerTick(options)
 		expect(retryIterationTick.spawnedRuns).toHaveLength(1)
 		const retryIterationClosed = await retryIterationTick.spawnedRuns[0]!.closed
-		expect(retryIterationClosed.status).toBe("in_progress")
+		expect(retryIterationClosed.status).toBe("changes_requested")
 		expect(fixture.store.getItem(item.id)?.phase).toBe("iteration")
-		expect(fixture.store.getItem(item.id)?.status).toBe("in_progress")
+		expect(fixture.store.getItem(item.id)?.status).toBe("changes_requested")
 
 		const acceptedReviewTick = await schedulerTick(options)
 		expect(acceptedReviewTick.spawnedRuns).toHaveLength(1)
@@ -160,7 +157,6 @@ test("invalid review session id clears only review/claude and the next review sp
 			phase: "iteration",
 			sessionId: "d400e2b2-04a4-44f8-8f13-3078f41a5593",
 			stdout: ["ITERATION SUMMARY: scope=cross-runner; reason=iteration-complete"],
-			writeStatus: "in_progress",
 		},
 		{
 			runner: "claude",
@@ -198,9 +194,9 @@ test("invalid review session id clears only review/claude and the next review sp
 		expect(invalidReviewTick.spawnedRuns).toHaveLength(1)
 		const invalidReviewClosed = await invalidReviewTick.spawnedRuns[0]!.closed
 		expect(invalidReviewClosed.exitCode).toBe(1)
-		expect(invalidReviewClosed.status).toBe("in_progress")
+		expect(invalidReviewClosed.status).toBe("queued")
 		expect(fixture.store.getItem(item.id)?.phase).toBe("review")
-		expect(fixture.store.getItem(item.id)?.status).toBe("in_progress")
+		expect(fixture.store.getItem(item.id)?.status).toBe("queued")
 		expect(fixture.store.getItemSessionId(item.id, { phase: "review", runner: "claude" })).toBeNull()
 		expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "codex" })).toBe("d400e2b2-04a4-44f8-8f13-3078f41a5593")
 		expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({
@@ -231,10 +227,8 @@ test("invalid review session id clears only review/claude and the next review sp
 })
 
 test("continuous fake runner failures exhaust at maxItemAttempts without another spawn", async () => {
-	// v1 status model: neither failing agent writes a status. The iteration crash leaves the item in the
-	// spawn-time in_progress, so the scheduler's iterDone hand-off advances it to review (it never infers
-	// "failed" from the exit code); the review crash again writes no status, and the item exhausts at the
-	// attempt cap. The two spawns are therefore iteration(codex) then review(claude).
+	// Neither failing agent writes a status. A failed iteration run does not structurally advance to the
+	// next phase; it retries iteration after the persisted backoff and exhausts at the attempt cap.
 	const fixture = await createCrossRunnerFixture("max-attempts", [
 		{ runner: "codex", phase: "iteration", exitCode: 1, stderr: ["forced failure 1"] },
 		{ runner: "claude", phase: "review", exitCode: 1, stderr: ["forced failure 2"] },
@@ -277,7 +271,7 @@ test("continuous fake runner failures exhaust at maxItemAttempts without another
 		const fakeEvents = await readFakeRunnerEvents(fixture.eventLog)
 		expect(fakeEvents.map((event) => `${event.runner}:${event.phase}`)).toEqual([
 			"codex:iteration",
-			"claude:review",
+			"codex:iteration",
 		])
 	} finally {
 		fixture.store.close()

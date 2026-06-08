@@ -628,24 +628,25 @@ export class CoderLoopDaemon {
 
 			const midFlightItemId = optionalPositiveInteger(currentRun.extra.itemId)
 			const midFlightItem = midFlightItemId !== null ? store.getItem(midFlightItemId) : null
-			const itemsToRecover = midFlightItem !== null && midFlightItem.status === "in_progress" ? [midFlightItem] : []
+			const itemsToRecover = midFlightItem === null ? [] : [midFlightItem]
 
 			store.clearCurrentRun(chain.id)
 			const recoveredAt = unixSeconds()
+			const recoveryStatus = await this.entryItemStatusForRecovery(chain)
 			for (const item of itemsToRecover) {
-				store.updateItem(item.id, { status: "changes_requested", phase: null, updatedAt: recoveredAt })
+				store.updateItem(item.id, { status: recoveryStatus, phase: null, updatedAt: recoveredAt })
 			}
 			await this.appendDaemonLogIfChainNameIsValid(chain, {
 				type: "scheduler.recovery",
-				reason: "stale_in_progress",
+				reason: "stale_current_run",
 				chainId: chain.id,
 				runId: currentRun.runId,
 				pid: stalePid,
 				recoveredItems: itemsToRecover.map((item) => ({
 					itemId: item.id,
 					issueNumber: item.issueNumber,
-					fromStatus: "in_progress",
-					toStatus: "changes_requested",
+					fromStatus: item.status,
+					toStatus: recoveryStatus,
 				})),
 			})
 		}
@@ -1163,13 +1164,12 @@ export class CoderLoopDaemon {
 		const scheduler = this.options.scheduler ?? {}
 		if (scheduler.pendingStatuses === undefined && scheduler.terminalStatuses === undefined) {
 			const presetStatuses = await readBundledPresetStatuses(chain.preset)
-			if (presetStatuses !== null) return new Set([...presetStatuses.continuable, ...presetStatuses.terminal, "queued", "in_progress"])
+			if (presetStatuses !== null) return new Set([...presetStatuses.continuable, ...presetStatuses.terminal, "queued"])
 		}
 		return new Set([
 			...(scheduler.pendingStatuses ?? FALLBACK_PENDING_STATUSES),
 			...(scheduler.terminalStatuses ?? FALLBACK_TERMINAL_STATUSES),
 			"queued",
-			"in_progress",
 		])
 	}
 
@@ -1198,6 +1198,12 @@ export class CoderLoopDaemon {
 		const presetStatuses = await readBundledPresetStatuses(chain.preset)
 		if (presetStatuses === null) return { success: [], entry: fallbackEntry }
 		return { success: presetStatuses.success, entry: presetStatuses.entry }
+	}
+
+	private async entryItemStatusForRecovery(chain: ChainRecord): Promise<string> {
+		const pendingStatuses = await this.continuableItemStatuses(chain)
+		const { entry } = await this.unblockItemStatuses(chain, pendingStatuses)
+		return entry
 	}
 }
 

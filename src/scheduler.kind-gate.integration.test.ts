@@ -50,16 +50,13 @@ describe("scheduler kind gate live integration", () => {
 			preInstallReviewOnEmptyLockByName("kind-gate-missing-label-live-chain", fixture.loopDataRoot)
 			await request(fixture, "item.add", { chainId, issueNumber: 9101, repoCwd: REPO_ROOT })
 
-			const item = await waitFor(
-				async () => readItem(fixture.loopDataRoot, chainId, 9101),
-				(candidate) => candidate?.status === "blocked",
-				KIND_GATE_LIVE_POLL_TIMEOUT_MS,
-			)
-			expect(item?.status).toBe("blocked")
+			const aborted = await waitForSpawnAbortedEvent(fixture.schedulerEvents, 1)
+			const item = await readItem(fixture.loopDataRoot, chainId, 9101)
+			expect(item?.status).toBe("queued")
 			expect(item?.lastRunId).toBeNull()
 			expect(fixture.schedulerEvents.some((event) => event.type === "agent.spawn" && event.itemId === item!.id)).toBe(false)
-			const aborted = await waitForSpawnAbortedEvent(fixture.schedulerEvents, item!.id)
-			expect(aborted).toMatchObject({ type: "spawn.aborted", chainId, itemId: item!.id, issueNumber: 9101, toStatus: "blocked" })
+			expect(record(item!.extra).schedulerBackoff).toMatchObject({ failureCount: 1 })
+			expect(aborted).toMatchObject({ type: "spawn.aborted", chainId, itemId: item!.id, issueNumber: 9101, toStatus: "queued" })
 			expect(warnings.some((line) => line.includes("kind label check failed") && line.includes("expected exactly one kind"))).toBe(true)
 
 			const paths = resolveChainRuntimePaths("kind-gate-missing-label-live-chain", { loopDataRoot: fixture.loopDataRoot })
@@ -92,13 +89,11 @@ describe("scheduler kind gate live integration", () => {
 			preInstallReviewOnEmptyLockByName("kind-gate-multi-label-live-chain", fixture.loopDataRoot)
 			await request(fixture, "item.add", { chainId, issueNumber: 9102, repoCwd: REPO_ROOT })
 
-			const item = await waitFor(
-				async () => readItem(fixture.loopDataRoot, chainId, 9102),
-				(candidate) => candidate?.status === "blocked",
-				KIND_GATE_LIVE_POLL_TIMEOUT_MS,
-			)
-			expect(item?.status).toBe("blocked")
-			const aborted = await waitForSpawnAbortedEvent(fixture.schedulerEvents, item!.id)
+			const aborted = await waitForSpawnAbortedEvent(fixture.schedulerEvents, 1)
+			const item = await readItem(fixture.loopDataRoot, chainId, 9102)
+			expect(item?.status).toBe("queued")
+			expect(record(item!.extra).schedulerBackoff).toMatchObject({ failureCount: 1 })
+			expect(aborted.toStatus).toBe("queued")
 			expect(aborted.reason).toContain("expected exactly one kind:* label, found 2")
 			expect(warnings.some((line) => line.includes("expected exactly one kind:* label, found 2"))).toBe(true)
 		} finally {
@@ -126,13 +121,11 @@ describe("scheduler kind gate live integration", () => {
 			preInstallReviewOnEmptyLockByName("kind-gate-unknown-label-live-chain", fixture.loopDataRoot)
 			await request(fixture, "item.add", { chainId, issueNumber: 9103, repoCwd: REPO_ROOT })
 
-			const item = await waitFor(
-				async () => readItem(fixture.loopDataRoot, chainId, 9103),
-				(candidate) => candidate?.status === "blocked",
-				KIND_GATE_LIVE_POLL_TIMEOUT_MS,
-			)
-			expect(item?.status).toBe("blocked")
-			const aborted = await waitForSpawnAbortedEvent(fixture.schedulerEvents, item!.id)
+			const aborted = await waitForSpawnAbortedEvent(fixture.schedulerEvents, 1)
+			const item = await readItem(fixture.loopDataRoot, chainId, 9103)
+			expect(item?.status).toBe("queued")
+			expect(record(item!.extra).schedulerBackoff).toMatchObject({ failureCount: 1 })
+			expect(aborted.toStatus).toBe("queued")
 			expect(aborted.reason).toContain('unknown kind label "kind:foo"')
 			expect(warnings.some((line) => line.includes('unknown kind label "kind:foo"'))).toBe(true)
 		} finally {

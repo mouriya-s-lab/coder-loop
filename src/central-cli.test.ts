@@ -872,7 +872,10 @@ async function makeGitTarget(name: string, options: { workflow?: boolean } = {})
 
 async function fakeCliEnv(name: string): Promise<Record<string, string>> {
 	const bin = resolve(TEST_ROOT, `${++nextFixtureId}-${name}-bin`)
+	const home = resolve(TEST_ROOT, `${++nextFixtureId}-${name}-home`)
 	await mkdir(bin, { recursive: true })
+	await mkdir(resolve(home, ".claude/skills/writing-issue"), { recursive: true })
+	await writeFile(resolve(home, ".claude/skills/writing-issue/SKILL.md"), "docs/reserved-strings.md\n")
 	await writeExecutable(resolve(bin, "gh"), [
 		"#!/usr/bin/env bash",
 		`if [ "$1" = "auth" ]; then exit 0; fi`,
@@ -884,7 +887,7 @@ async function fakeCliEnv(name: string): Promise<Record<string, string>> {
 	for (const name of ["codex", "claude", "coder-loop"]) {
 		await writeExecutable(resolve(bin, name), "#!/usr/bin/env bash\nexit 0\n")
 	}
-	return { PATH: `${bin}:${process.env.PATH ?? ""}` }
+	return { HOME: home, PATH: `${bin}:${process.env.PATH ?? ""}` }
 }
 
 async function writeExecutable(path: string, content: string): Promise<void> {

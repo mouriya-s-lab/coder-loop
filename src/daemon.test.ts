@@ -58,9 +58,8 @@ function daemonFakeRunnerWriteStatus(phase: string, extra: Record<string, unknow
 	const hasSummary = Object.prototype.hasOwnProperty.call(extra, "summary")
 	const summary = hasSummary ? extra.summary : FAKE_RUNNER_DEFAULT_SUMMARY
 	if (typeof summary !== "string") return null
-	// The agent's own summary declares what it did: an ITERATION SUMMARY hands off as in_progress (never
-	// terminal); a REVIEW SUMMARY carries the terminal verdict.
-	if (summary.startsWith("ITERATION SUMMARY")) return "in_progress"
+	// Iteration handoff is structural; review summaries carry status verdicts.
+	if (summary.startsWith("ITERATION SUMMARY")) return null
 	const verdict = parseReviewSummaryVerdict(summary, "claude")
 	switch (verdict) {
 		case "accepted":
@@ -1442,14 +1441,12 @@ describe("daemon", () => {
 			expect(deleted).toMatchObject({
 				alreadyDeleted: false,
 				chain: { status: "deleted" },
-				// v1: a force-killed agent never wrote its own status, so the item keeps
-				// the continuable in_progress it was spawned at. The scheduler does not
-				// infer changes_requested from the non-zero exit of a terminated run.
+				// A force-killed agent never wrote its own status, so the item keeps its entry status.
 				terminatedRuns: [{
 					chainId,
 					itemId,
 					exitCode: 1,
-					status: "in_progress",
+					status: "queued",
 				}],
 				cleanup: { chainRootRemoved: true },
 			})
@@ -1459,7 +1456,7 @@ describe("daemon", () => {
 			expect(record(status.chain).status).toBe("deleted")
 			expect(status.activeRuns).toEqual([])
 			expect(record(status.summary).activeSlots).toEqual([])
-			expect(record(record(status.summary).items).byStatus).toEqual({ in_progress: 1 })
+			expect(record(record(status.summary).items).byStatus).toEqual({ queued: 1 })
 			expect(await pathExists(resolveChainRuntimePaths("delete-active-run", { loopDataRoot: fixture.loopDataRoot }).chainRoot)).toBe(false)
 		} finally {
 			await fixture.daemon.stop()
@@ -1608,7 +1605,7 @@ describe("daemon", () => {
 			const resumed = record(expectOk(await request(fixture, "chain.resume", { chainId })))
 			expect(record(resumed.chain).status).toBe("active")
 			expect(resumed.alreadyActive).toBe(false)
-			await waitFor(async () => readItem(fixture.loopDataRoot, chainId, 349_202), (item) => item?.status === "in_progress")
+			await waitFor(async () => readItem(fixture.loopDataRoot, chainId, 349_202), (item) => item?.phase === "iteration" && item.attempts > 0)
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -1876,7 +1873,7 @@ describe("daemon", () => {
 		try {
 			expect(await waitForPidExit(stale.pid, 1_000)).toBe(true)
 			const recovered = await readItem(loopDataRoot, 1, 217)
-			expect(recovered?.status).toBe("changes_requested")
+			expect(recovered?.status).toBe("queued")
 			expect(recovered?.attempts).toBe(1)
 			expect(await readCurrentRun(loopDataRoot, 1)).toBeNull()
 			const status = record(expectOk(await sendDaemonRequest(daemon.snapshot().socketPath, daemonRequest("chain.status", { chainName: "startup-recovery-chain" }))))
@@ -1962,7 +1959,7 @@ describe("daemon", () => {
 		try {
 			expect(await pathIsSocket(socketPath)).toBe(true)
 			expect(await waitForPidExit(stale.pid, 1_000)).toBe(true)
-			expect((await readItem(loopDataRoot, 1, 238))?.status).toBe("changes_requested")
+			expect((await readItem(loopDataRoot, 1, 238))?.status).toBe("queued")
 			expect(await readCurrentRun(loopDataRoot, 1)).toBeNull()
 		} finally {
 			try {
@@ -2517,21 +2514,21 @@ process.exitCode = 0
 				const terminalEvent = await waitForItemQueueTerminal(fixture, item!.id)
 				expect(terminalEvent.terminalStatus).toBe("done")
 
-				const spawnEvents = fixture.schedulerEvents.filter(
-					(event) => event.type === "agent.spawn" && event.itemId === item!.id,
-				)
-				expect(spawnEvents).toHaveLength(2)
-
 				const phaseStartEvents = fixture.schedulerEvents.filter(
 					(event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
-						event.type === "phase.start" && event.itemId === item!.id,
+						event.type === "phase.start" && event.itemId === item!.id && ["iteration", "review"].includes(event.phase),
 				)
 				const startedPhases = phaseStartEvents.map((event) => event.phase)
 				expect(startedPhases).toEqual(["iteration", "review"])
+				const workPhaseRunIds = new Set(phaseStartEvents.map((event) => event.runId))
+				const spawnEvents = fixture.schedulerEvents.filter(
+					(event) => event.type === "agent.spawn" && event.itemId === item!.id && workPhaseRunIds.has(event.runId),
+				)
+				expect(spawnEvents).toHaveLength(2)
 
 				const phaseEndEvents = fixture.schedulerEvents.filter(
 					(event): event is Extract<SchedulerEvent, { type: "phase.end" }> =>
-						event.type === "phase.end" && event.itemId === item!.id,
+						event.type === "phase.end" && event.itemId === item!.id && workPhaseRunIds.has(event.runId),
 				)
 				const endedPhases = phaseEndEvents.map((event) => event.phase)
 				expect(endedPhases).toEqual(["iteration", "review"])
