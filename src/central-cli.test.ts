@@ -128,8 +128,8 @@ describe("central chain/item CLI", () => {
 			expect(listed.items).toHaveLength(1)
 			expect(listed.items[0]).toMatchObject({ issueNumber: 181, status: "queued" })
 
-			const updated = expectJsonOk(await runCli(["item", "update", "items-chain", "--issue", "181", "--status", "done", "--pr", "191", "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			expect(updated.item).toMatchObject({ issueNumber: 181, status: "done", pr: 191 })
+			const updated = expectJsonOk(await runCli(["item", "update", "items-chain", "--issue", "181", "--status", "done", "--field-json", "{\"pr\":191}", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expect(updated.item).toMatchObject({ issueNumber: 181, status: "done", extra: { pr: 191 } })
 		} finally {
 			await fixture.daemon.stop()
 		}

@@ -30,7 +30,7 @@ If the selected queue item is blocked by another repository, create the cross-re
    - body includes an explicit `Unblocks: {{REPO}}#{{ISSUE}}` line and the `blockerRef` / source blocker context.
    - use `gh issue create --repo <blockerRepo> --label "kind:blocked" --title <title> --body <body>`.
 5. Read the target checkout's `central SQLite state DB`.
-   - If the new issue is not already present, append one queue item with `status: "queued"`, `attempts: 0`, normal null branch/PR/run fields, and an `issue` field matching the created issue number.
+   - If the new issue is not already present, append one queue item with `status: "queued"`, `attempts: 0`, no branch/PR transparent fields, and an `issue` field matching the created issue number.
    - Preserve existing queue order and all unrelated state fields.
    - Capture the central DB row id of the blocker queue item (the globally-unique `items.id`, not the GitHub issue number). If the item already existed, read its existing row id.
 6. Declare the cross-chain dependency on the current blocked item — this is the only state mutation you make to it:

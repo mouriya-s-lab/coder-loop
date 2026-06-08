@@ -104,6 +104,11 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(preset.name).toBe("gh-issue-pr-iteration")
 		expect(preset.version).toBe(1)
 		expect(preset.item.idField).toBe("issue")
+		expect(Object.fromEntries(preset.item.fields)).toEqual({
+			branch: { type: "string" },
+			pr: { type: "number" },
+			lastRunId: { type: "string" },
+		})
 		expect(preset.agent.binary).toBe("claude")
 		expect([...preset.agent.extraArgs]).toEqual([])
 		expect(preset.agent.attemptTimeoutSeconds).toBe(DEFAULT_ATTEMPT_TIMEOUT_SECONDS)
@@ -363,10 +368,25 @@ describe("parsePreset schema validation", () => {
 		expect(preset.phases[0]!.variables[0]).toEqual(["X", { kind: "item", field: "status" }])
 	})
 
+	test("accepts declared transparent item fields", () => {
+		const root: Record<string, unknown> = {
+			...minimalRoot(),
+			item: { idField: "id", fields: { branch: "string", pr: { type: "number" } } },
+			phases: [{ name: "p", prompt: "p.md", variables: { BRANCH: "item.branch", PR: "item.pr" } }],
+		}
+		const preset = parsePreset(root, "/tmp")
+		expect(Object.fromEntries(preset.item.fields)).toEqual({ branch: { type: "string" }, pr: { type: "number" } })
+		expect(preset.phases[0]!.variables).toEqual([
+			["BRANCH", { kind: "item", field: "branch" }],
+			["PR", { kind: "item", field: "pr" }],
+		])
+	})
+
 	test("accepts minimal valid preset and produces normalized shape", () => {
 		const preset = parsePreset(minimalRoot(), "/tmp")
 		expect(preset.name).toBe("x")
 		expect(preset.item.idField).toBe("id")
+		expect(Object.fromEntries(preset.item.fields)).toEqual({})
 		expect(preset.phases[0]!.variables[0]).toEqual(["K", { kind: "item", field: "id" }])
 		expect(preset.fragments[0]!.path).toBe("/tmp/f.md")
 		expect(preset.agent.attemptTimeoutSeconds).toBe(DEFAULT_ATTEMPT_TIMEOUT_SECONDS)

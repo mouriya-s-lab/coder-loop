@@ -130,7 +130,7 @@ starter 位置：
 
 - **supervisor bootstrap 要手动改占位符**：项目级 bootstrap skill 应自动 dispatch 到 `<TARGET>/.coder-loop/runtime/supervisor/` 下最近活动 mission（#31）。
 - **runtime.\* 白名单**：当前 19 key，新增需改源码两处（`RUNTIME_BINDING_KEYS` 与 `buildRuntimeBindings`）。任何新 key 必须先 grep `presets/<preset>/` 证明已有 fragment 在 work-around 该值缺失（参考 #32 audit）。例外：与新 fragments / 新引擎能力同 issue 一并引入的 key（如 `issueKind` 配 commitment-gate fragments，#40；`agentCwd` 让 spawn cwd 可 per-item 覆盖跨 repo）不在 audit 适用范围。
-- **`QueueItem` 索引签名**：preset.toml 没有声明 item 字段 schema，preset 拼错 `item.<f>` 会通过 `stringifyBindingValue` 静默生成空串。可加 `[item.fields]` schema 表把这类错误移到 preset 加载期。独立 issue 评估。
+- **SQLite item 物理列**：当前 centralized DB 仍保留 `issue_number` / `branch` / `pr` 等兼容列；preset 绑定层已通过 `[item.fields]` 声明透明字段并在加载期拒绝未声明 `item.<f>`。#369 负责后续 item 自带 preset/prompt 的 DB 模型重塑。
 
 ## Tech Stack
 

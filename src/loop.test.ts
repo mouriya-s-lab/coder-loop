@@ -170,7 +170,13 @@ describe("ItemRecord prompt bindings", () => {
 	})
 
 	test("getItemId still honors explicit extra id fields", () => {
-		const preset = makePreset({ item: { idField: "slug" } })
+		const preset = makePreset({
+			item: { idField: "slug" },
+			phases: [
+				{ name: "iteration", prompt: "iteration.md", variables: { ISSUE: "item.slug" } },
+				{ name: "review", prompt: "review.md", variables: { ISSUE: "item.slug" } },
+			],
+		})
 		expect(getItemId(makeItem({ extra: { slug: "custom-id" } }), preset)).toBe("custom-id")
 	})
 
@@ -236,11 +242,13 @@ describe("ItemRecord prompt bindings", () => {
 		expect(resolveBinding({ kind: "item", field: "issue" }, ctx)).toBe("184")
 		expect(resolveBinding({ kind: "item", field: "branch" }, ctx)).toBe("issue-184")
 		expect(resolveBinding({ kind: "item", field: "pr" }, ctx)).toBe("191")
+		expect(resolveBinding({ kind: "item", field: "branch" }, { ...ctx, item: makeItem({ branch: "legacy", extra: { branch: "extra" } }) })).toBe("extra")
 		expect(resolveBinding({ kind: "config", field: "requireBrowserEvidence" }, ctx)).toBe("true")
 	})
 
 	test("parsePreset accepts nested ItemRecord fields but rejects unknown roots", () => {
 		const preset = makePreset({
+			item: { idField: "issue", fields: { sessionIds: "json" } },
 			phases: [
 				{ name: "iteration", prompt: "iteration.md", variables: { SESSION: "item.sessionIds.iteration.codex" } },
 				{ name: "review", prompt: "review.md", variables: { PHASE: "item.phase" } },

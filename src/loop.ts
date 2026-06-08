@@ -74,8 +74,6 @@ export type StatusItemSnapshot = {
 	attempts: number | null
 	title: string | null
 	priority: string | null
-	branch: string | null
-	pr: number | null
 	lastRunId: string | null
 	issueFile: string | null
 	evidenceDir: string | null
@@ -225,8 +223,7 @@ export type ItemCommandArgs =
 			attempts: number | null
 			title: string | null
 			priority: string | null
-			branch: string | null
-			pr: number | null
+			fieldJson: JsonObject | null
 			lastRunId: string | null
 			issueFile: string | null
 			evidenceDir: string | null
@@ -256,8 +253,7 @@ export type ItemCommandArgs =
 			status: string | null
 			title: string | null
 			priority: string | null
-			branch: string | null
-			pr: number | null
+			fieldJson: JsonObject | null
 			issueFile: string | null
 			evidenceDir: string | null
 			runner: AgentRunnerKind | null
@@ -380,13 +376,19 @@ const SessionEntryBoundary = arkType({
 	log: "string",
 })
 
-const QUEUE_ITEM_BASE_KEYS = new Set([
+const ENGINE_ITEM_BINDING_KEYS = new Set([
 	"id",
-	"issue",
-	"chainId",
-	"issueNumber",
-	"repoCwd",
 	"status",
+	"agentCwd",
+	"runner",
+	"phase",
+])
+
+const LEGACY_TRANSPARENT_ITEM_FIELDS = new Set([
+	"issue",
+	"issueNumber",
+	"chainId",
+	"repoCwd",
 	"attempts",
 	"title",
 	"priority",
@@ -396,12 +398,12 @@ const QUEUE_ITEM_BASE_KEYS = new Set([
 	"sessionIds",
 	"issueFile",
 	"evidenceDir",
-	"agentCwd",
-	"runner",
-	"phase",
 	"createdAt",
 	"updatedAt",
 ])
+
+const PRESET_ITEM_FIELD_TYPES = ["string", "number", "boolean", "json"] as const
+type PresetItemFieldType = typeof PRESET_ITEM_FIELD_TYPES[number]
 
 const PresetPhaseTriggerBoundary = arkType({
 	"afterPhase?": "string",
@@ -433,7 +435,7 @@ const PresetTomlBoundary = arkType({
 	name: "string",
 	version: "number",
 	"description?": "string",
-	item: { idField: "string" },
+	item: { idField: "string", "fields?": "object" },
 	statuses: { continuable: "string[]", terminal: "string[]", "success?": "string[]", "entry?": "string" },
 	phases: PresetPhaseBoundary.array(),
 	"fragments?": PresetFragmentBoundary.array(),
@@ -519,7 +521,10 @@ export type Preset = {
 	version: number
 	description: string
 	presetDir: string
-	item: { idField: string }
+	item: {
+		idField: string
+		fields: ReadonlyMap<string, PresetItemField>
+	}
 	statuses: {
 		continuable: readonly string[]
 		terminal: readonly string[]
@@ -533,6 +538,10 @@ export type Preset = {
 		extraArgs: readonly string[]
 		attemptTimeoutSeconds: number
 	}
+}
+
+export type PresetItemField = {
+	type: PresetItemFieldType
 }
 
 export type PresetPhaseTrigger =
@@ -1332,8 +1341,7 @@ const itemAddCliCommand = command({
 		attempts: option({ long: "attempts", type: optional(cmdString) }),
 		title: option({ long: "title", type: optional(cmdString) }),
 		priority: option({ long: "priority", type: optional(cmdString) }),
-		branch: option({ long: "branch", type: optional(cmdString) }),
-		pr: option({ long: "pr", type: optional(cmdString) }),
+		fieldJson: option({ long: "field-json", type: optional(cmdString) }),
 		lastRunId: option({ long: "last-run-id", type: optional(cmdString) }),
 		issueFile: option({ long: "issue-file", type: optional(cmdString) }),
 		evidenceDir: option({ long: "evidence-dir", type: optional(cmdString) }),
@@ -1353,8 +1361,7 @@ const itemAddCliCommand = command({
 			attempts: parseOptionalNonNegativeInteger(args.attempts ?? null, "--attempts"),
 			title: args.title ?? null,
 			priority: args.priority ?? null,
-			branch: args.branch ?? null,
-			pr: parseOptionalPositiveInteger(args.pr ?? null, "--pr"),
+			fieldJson: parseOptionalJsonObjectFlag(args.fieldJson ?? null, "--field-json"),
 			lastRunId: args.lastRunId ?? null,
 			issueFile: args.issueFile ?? null,
 			evidenceDir: args.evidenceDir ?? null,
@@ -1416,8 +1423,7 @@ const itemUpdateCliCommand = command({
 		status: option({ long: "status", type: optional(cmdString) }),
 		title: option({ long: "title", type: optional(cmdString) }),
 		priority: option({ long: "priority", type: optional(cmdString) }),
-		branch: option({ long: "branch", type: optional(cmdString) }),
-		pr: option({ long: "pr", type: optional(cmdString) }),
+		fieldJson: option({ long: "field-json", type: optional(cmdString) }),
 		issueFile: option({ long: "issue-file", type: optional(cmdString) }),
 		evidenceDir: option({ long: "evidence-dir", type: optional(cmdString) }),
 		runner: option({ long: "runner", type: optional(cmdString) }),
@@ -1437,8 +1443,7 @@ const itemUpdateCliCommand = command({
 			status: args.status ?? null,
 			title: args.title ?? null,
 			priority: args.priority ?? null,
-			branch: args.branch ?? null,
-			pr: parseOptionalPositiveInteger(args.pr ?? null, "--pr"),
+			fieldJson: parseOptionalJsonObjectFlag(args.fieldJson ?? null, "--field-json"),
 			issueFile: args.issueFile ?? null,
 			evidenceDir: args.evidenceDir ?? null,
 			runner: parseOptionalRunner(args.runner ?? null, "--runner"),
@@ -1693,8 +1698,7 @@ async function runItemCommand(args: string[]): Promise<void> {
 		assignCliOptional(requestArgs, "attempts", itemArgs.attempts)
 		assignCliOptional(requestArgs, "title", itemArgs.title)
 		assignCliOptional(requestArgs, "priority", itemArgs.priority)
-		assignCliOptional(requestArgs, "branch", itemArgs.branch)
-		assignCliOptional(requestArgs, "pr", itemArgs.pr)
+		assignCliOptional(requestArgs, "extra", itemArgs.fieldJson)
 		assignCliOptional(requestArgs, "lastRunId", itemArgs.lastRunId)
 		assignCliOptional(requestArgs, "issueFile", itemArgs.issueFile)
 		assignCliOptional(requestArgs, "evidenceDir", itemArgs.evidenceDir)
@@ -1733,8 +1737,7 @@ async function runItemCommand(args: string[]): Promise<void> {
 	assignCliOptional(fields, "status", itemArgs.status)
 	assignCliOptional(fields, "title", itemArgs.title)
 	assignCliOptional(fields, "priority", itemArgs.priority)
-	assignCliOptional(fields, "branch", itemArgs.branch)
-	assignCliOptional(fields, "pr", itemArgs.pr)
+	assignCliOptional(fields, "extraPatch", itemArgs.fieldJson)
 	assignCliOptional(fields, "issueFile", itemArgs.issueFile)
 	assignCliOptional(fields, "evidenceDir", itemArgs.evidenceDir)
 	assignCliOptional(fields, "runner", itemArgs.runner)
@@ -1752,6 +1755,18 @@ function assignCliOptional(target: JsonObject, key: string, value: JsonValue | u
 
 function isJsonObjectRecord(value: unknown): value is Record<string, JsonValue> {
 	return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function parseOptionalJsonObjectFlag(raw: string | null, flagName: string): JsonObject | null {
+	if (raw === null) return null
+	let parsed: unknown
+	try {
+		parsed = JSON.parse(raw)
+	} catch (error) {
+		fail(`${flagName} must be a JSON object: ${errorMessage(error)}`)
+	}
+	if (!isJsonObject(parsed)) fail(`${flagName} must be a JSON object`)
+	return parsed
 }
 
 function parseBatchItemsJson(raw: string): JsonObject[] {
@@ -2768,15 +2783,13 @@ function buildStatusQueueSnapshotFromRecords(options: LoopOptions, items: readon
 }
 
 function statusItemSnapshot(item: ItemRecord, preset: Preset): StatusItemSnapshot {
-	const extra = { ...item.extra }
+	const extra = transparentItemExtra(item, preset)
 	if (extra[preset.item.idField] === undefined) extra[preset.item.idField] = item.issueNumber
 	return {
 		status: item.status,
 		attempts: item.attempts,
 		title: item.title,
 		priority: item.priority,
-		branch: item.branch,
-		pr: item.pr,
 		lastRunId: item.lastRunId,
 		issueFile: item.issueFile,
 		evidenceDir: item.evidenceDir,
@@ -2784,6 +2797,16 @@ function statusItemSnapshot(item: ItemRecord, preset: Preset): StatusItemSnapsho
 		runner: item.runner,
 		extra,
 	}
+}
+
+function transparentItemExtra(item: ItemRecord, preset: Preset): JsonObject {
+	const extra = { ...item.extra }
+	for (const field of preset.item.fields.keys()) {
+		if (extra[field] !== undefined) continue
+		const legacy = legacyTransparentItemField(item, field)
+		if (legacy !== undefined) extra[field] = legacy
+	}
+	return extra
 }
 
 function buildStatusRunsSnapshot(runs: readonly RunRecord[]): StatusRunsSnapshot {
@@ -3761,6 +3784,8 @@ export function parsePreset(value: unknown, presetDir: string): Preset {
 	const entryStatus = root.statuses.entry ?? root.statuses.continuable[0]
 	if (entryStatus === undefined) presetError("preset.statuses: continuable must declare at least one status")
 	if (!root.statuses.continuable.includes(entryStatus)) presetError(`preset.statuses.entry: "${entryStatus}" must be one of statuses.continuable`)
+	const itemFields = parsePresetItemFields(root.item.fields ?? {}, "preset.item.fields")
+	if (itemFields.has(root.item.idField)) presetError(`preset.item.fields.${root.item.idField}: idField is already declared by preset.item.idField`)
 	const attemptTimeoutSeconds = root.agent.attemptTimeoutSeconds ?? DEFAULT_ATTEMPT_TIMEOUT_SECONDS
 	if (!Number.isFinite(attemptTimeoutSeconds) || attemptTimeoutSeconds <= 0) {
 		presetError("preset.agent.attemptTimeoutSeconds: must be a finite positive number")
@@ -3780,8 +3805,8 @@ export function parsePreset(value: unknown, presetDir: string): Preset {
 			const source = parseVariableSource(variable.source, `preset.phases[${index}].variables.${key}`)
 			if (source.kind === "item") {
 				const itemField = itemFieldRoot(source.field)
-				if (!QUEUE_ITEM_BASE_KEYS.has(itemField) && itemField !== root.item.idField) {
-					presetError(`preset.phases[${index}].variables.${key}: unknown item field "${source.field}" (known base fields: ${[...QUEUE_ITEM_BASE_KEYS].join(", ")}; idField: ${root.item.idField})`)
+				if (!isKnownPresetItemField(itemField, root.item.idField, itemFields)) {
+					presetError(`preset.phases[${index}].variables.${key}: unknown item field "${source.field}" (engine fields: ${[...ENGINE_ITEM_BINDING_KEYS].join(", ")}; idField: ${root.item.idField}; declared fields: ${[...itemFields.keys()].join(", ") || "<none>"})`)
 				}
 			}
 			variables.push([key, source] as const)
@@ -3838,7 +3863,7 @@ export function parsePreset(value: unknown, presetDir: string): Preset {
 		version: root.version,
 		description: root.description ?? "",
 		presetDir,
-		item: { idField: root.item.idField },
+		item: { idField: root.item.idField, fields: itemFields },
 		statuses: { continuable: root.statuses.continuable, terminal: root.statuses.terminal, success: successStatuses, entry: entryStatus },
 		phases,
 		fragments,
@@ -3858,6 +3883,38 @@ async function readPresetPhasePrompt(phase: PresetPhase): Promise<string> {
 type ParsedVariableBinding = {
 	source: string
 	doc: PresetVariableDoc | null
+}
+
+function parsePresetItemFields(value: unknown, label: string): ReadonlyMap<string, PresetItemField> {
+	if (!isObjectRecord(value) || Array.isArray(value)) presetError(`${label}: must be an object`)
+	const fields = new Map<string, PresetItemField>()
+	for (const [name, rawField] of Object.entries(value)) {
+		if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(name)) presetError(`${label}.${name}: field name must match ^[a-zA-Z][a-zA-Z0-9_]*$`)
+		const fieldType = parsePresetItemFieldType(rawField, `${label}.${name}`)
+		fields.set(name, { type: fieldType })
+	}
+	return fields
+}
+
+function parsePresetItemFieldType(value: unknown, label: string): PresetItemFieldType {
+	if (typeof value === "string") {
+		if (isPresetItemFieldType(value)) return value
+		presetError(`${label}: type must be one of ${PRESET_ITEM_FIELD_TYPES.join(", ")}`)
+	}
+	if (!isObjectRecord(value) || Array.isArray(value)) presetError(`${label}: must be a field type string or { type = ... } object`)
+	const typeValue = value.type
+	if (typeof typeValue !== "string" || !isPresetItemFieldType(typeValue)) {
+		presetError(`${label}.type: must be one of ${PRESET_ITEM_FIELD_TYPES.join(", ")}`)
+	}
+	return typeValue
+}
+
+function isPresetItemFieldType(value: string): value is PresetItemFieldType {
+	return (PRESET_ITEM_FIELD_TYPES as readonly string[]).includes(value)
+}
+
+function isKnownPresetItemField(field: string, idField: string, itemFields: ReadonlyMap<string, PresetItemField>): boolean {
+	return field === idField || ENGINE_ITEM_BINDING_KEYS.has(field) || itemFields.has(field)
 }
 
 function parseVariableBinding(value: unknown, label: string): ParsedVariableBinding {
@@ -4465,11 +4522,23 @@ function lookupItemField(item: ItemRecord, field: string): unknown {
 function lookupItemRootField(item: ItemRecord, field: string): unknown {
 	switch (field) {
 		case "id": return item.id
-		case "issue": return item.issueNumber
-		case "chainId": return item.chainId
-		case "issueNumber": return item.issueNumber
-		case "repoCwd": return item.repoCwd
 		case "status": return item.status
+		case "agentCwd": return item.agentCwd
+		case "runner": return item.runner
+		case "phase": return item.phase
+		default:
+			if (item.extra[field] !== undefined) return item.extra[field]
+			return legacyTransparentItemField(item, field)
+	}
+}
+
+function legacyTransparentItemField(item: ItemRecord, field: string): JsonValue | undefined {
+	if (!LEGACY_TRANSPARENT_ITEM_FIELDS.has(field)) return undefined
+	switch (field) {
+		case "issue": return item.issueNumber
+		case "issueNumber": return item.issueNumber
+		case "chainId": return item.chainId
+		case "repoCwd": return item.repoCwd
 		case "attempts": return item.attempts
 		case "title": return item.title
 		case "priority": return item.priority
@@ -4479,12 +4548,8 @@ function lookupItemRootField(item: ItemRecord, field: string): unknown {
 		case "sessionIds": return item.sessionIds
 		case "issueFile": return item.issueFile
 		case "evidenceDir": return item.evidenceDir
-		case "agentCwd": return item.agentCwd
-		case "runner": return item.runner
-		case "phase": return item.phase
 		case "createdAt": return item.createdAt
 		case "updatedAt": return item.updatedAt
-		default: return item.extra[field]
 	}
 }
 

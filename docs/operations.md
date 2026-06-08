@@ -250,7 +250,7 @@ coder-loop item --help
 | `daemon stop <target>` | 解析 target chain 并调用 `chain.delete` | `--config <path>` `--repo <slug>` `--dry-run` |
 | `daemon restart <target>` | 解析 target chain 并确认 central daemon 可用，输出单个 JSON object | `--config <path>` `--repo <slug>` `--require-browser-evidence` `--max-iterations <N>` `--dry-run` |
 | `chain create/list/status/delete` | centralized chain CRUD | 看 `coder-loop chain --help` |
-| `item add/list/update` | centralized chain item CRUD | 看 `coder-loop item --help` |
+| `item add/list/update` | centralized chain item CRUD | `--field-json '{"branch":"issue-1","pr":2}'` 写 preset 声明的透明 item 字段；其他看 `coder-loop item --help` |
 | `queue unblock <target>` | 将一个 blocked item 改回 queued 并清除 blocker metadata；用于 `kind:blocked` accept 后反向解除源仓 block | `--issue <id>` `--start-daemon` `--require-browser-evidence` |
 
 ### 6.2 主循环 flags

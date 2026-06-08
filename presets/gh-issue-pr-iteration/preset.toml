@@ -23,6 +23,11 @@ description = "GitHub issue/PR loop with iteration, review, and post-review trig
 [item]
 idField = "issue"
 
+[item.fields]
+branch = "string"
+pr = "number"
+lastRunId = "string"
+
 [statuses]
 continuable = ["queued", "in_progress", "changes_requested"]
 terminal    = ["blocked", "moot", "done", "exhausted"]

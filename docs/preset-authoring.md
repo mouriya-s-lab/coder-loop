@@ -93,6 +93,7 @@ bun src/loop.ts --target-cwd <fresh-target> --check-runtime
 | `version` | int | 是 | preset schema 版本（手动维护，引擎当前只读不校验向后兼容） |
 | `description` | string | 否 | 给人看 |
 | `[item].idField` | string | 是 | queue item 的 id 字段名（如 `gh-issue-pr-iteration` 用 `issue`，single-phase-example 用 `id`） |
+| `[item.fields]` | table | 否 | preset 额外要绑定的透明 item 字段声明。每个字段值是 `"string"|"number"|"boolean"|"json"`，或 `{ type = "..." }` |
 | `[statuses].continuable` | string[] | 是 | 引擎会调度的 status 集合；item.status 落在这个集合内才被选中 |
 | `[statuses].terminal` | string[] | 是 | 引擎跳过的 status 集合（与 continuable 合并去重） |
 | `[[phases]].name` | string | 是 | phase 名字，写入 `state.current.phase` |
@@ -117,7 +118,8 @@ bun src/loop.ts --target-cwd <fresh-target> --check-runtime
 - `[[phases.exits]]` 中每个 status 必须属于 continuable 或 terminal status，且同一 phase 内不可重复；
 - item phase trigger 的 `afterPhase` 必须指向已声明 phase，`whenStatus` 必须属于 continuable 或 terminal status，且必须出现在 source phase 的 exits 里；
 - chain lifecycle trigger 目前只支持 `on = "chain-complete"`，且不能同时声明 `afterPhase` / `whenStatus`；
-- 每条 `[phases.variables]` source 必须 match `^(item|config|runtime)\.[a-zA-Z][a-zA-Z0-9_]*$`。
+- 每条 `[phases.variables]` source 必须 match `^(item|config|runtime)\.[a-zA-Z][a-zA-Z0-9_]*$`；
+- `item.<field>` 只能引用 `[item].idField`、引擎自有字段（`id/status/phase/runner/agentCwd`），或 `[item.fields]` 显式声明的透明字段。未声明字段在 preset 加载期报错。
 
 任何一条失败 → preset load throws，`--check-runtime` 报错。
 
@@ -159,7 +161,7 @@ bundled `gh-issue-pr-iteration` preset 用这个 hook 声明 `umbrella-finalizer
 
 | 前缀 | 来源 | 缺失 / 错误行为 |
 |---|---|---|
-| `item.<field>` | 当前 actionable queue item 字段（含 `idField` 与任意附加字段） | 缺失/null → `""`；string/number/boolean → `String(...)`；其他类型 → throw |
+| `item.<field>` | 当前 actionable queue item 字段：`idField`、`id/status/phase/runner/agentCwd`，或 `[item.fields]` 声明的透明字段 | 未声明字段 → preset load throw；缺失/null → `""`；string/number/boolean → `String(...)`；其他类型 → throw |
 | `config.<field>` | target `.coder-loop/runtime/config.{json,toml}` 字段 | 字段不存在 → throw；`null/undefined` → throw；类型同上 |
 | `runtime.<key>` | 引擎计算的运行期值 | key 必须在白名单内；否则 throw |
 

@@ -19,7 +19,7 @@
 | `agent.binary` | `claude` |
 | fragments | 48 个，分布在 `common/ / plan/ / iter/ / review/` 四个目录 |
 
-`item` 字段（除 `issue / status` 外）：
+`item` 字段（除 `issue / status` 外）。`branch` / `pr` / `lastRunId` 由 bundled preset 的 `[item.fields]` 声明，是透明 item 字段；SQLite 仍保留旧列以兼容现有 chain，新增 CLI 写入走 `--field-json`。
 
 | 字段 | 类型 | 含义 |
 |---|---|---|

@@ -11,7 +11,7 @@ The scheduler does not infer status from your output. The status you write throu
 Use the daemon-serialized CLI, which validates the status against the preset vocabulary and writes atomically:
 
 ```bash
-coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --status <status> [--pr <N>] [--branch <name>] [--blocker-repo <owner/repo>] [--blocker-ref <ref>] [--clear-blocker]
+coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --status <status> [--field-json '{"pr":123,"branch":"<name>"}'] [--blocker-repo <owner/repo>] [--blocker-ref <ref>] [--clear-blocker]
 ```
 
 Run it once per transition, then verify the write reached the store:
@@ -26,9 +26,9 @@ If the command exits non-zero or the verification does not show the intended sta
 
 For the selected queue item, run exactly the command for the chosen verdict:
 
-- `retry` → `coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --status changes_requested`. Keep branch/PR fields if known by adding `--branch {{ISSUE_BRANCH}}` / `--pr {{ISSUE_PR}}` only when you have verified values.
+- `retry` → `coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --status changes_requested`. Keep branch/PR fields if known by adding `--field-json '{"branch":"<verified-branch>","pr":123}'` only when you have verified non-empty values.
 - `expanded incomplete parent` → prepend the new child queue items first (see "Expanded parent queue rules"), then `coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --status changes_requested`, and leave the parent GitHub issue open.
-- `accepted_pr` → only after PR merge and issue close both succeeded: `coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --status done --pr <merged-pr-number>`.
+- `accepted_pr` → only after PR merge and issue close both succeeded: `coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --status done --field-json '{"pr":123}'`.
 - `accepted_no_pr` → only after issue close succeeded: `coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --status done`.
 - `skip` → only after issue close succeeded: `coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --status moot`.
 - `blocked` → `coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --status blocked --blocker-repo <owner/repo> --blocker-ref <ref>` (see "Blocked metadata"), then record the blocker in the handoff.

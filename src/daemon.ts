@@ -176,6 +176,7 @@ const ITEM_UPDATE_FIELD_KEYS = [
 	"blockerRef",
 	"clearBlocker",
 	"extra",
+	"extraPatch",
 	"dependsOn",
 ] as const
 const ITEM_UPDATE_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "fields", ...ITEM_UPDATE_FIELD_KEYS] as const
@@ -894,15 +895,24 @@ export class CoderLoopDaemon {
 		assignOptional(input, "evidenceDir", validateEvidenceDirForRequest(optionalStringOrNull(fields, "evidenceDir"), chain, this.paths.root))
 		assignOptional(input, "runner", optionalRunner(fields, "runner"))
 		const rawExtra = sizedJsonObject(fields, "extra", MAX_ITEM_EXTRA_BYTES)
+		const rawExtraPatch = sizedJsonObject(fields, "extraPatch", MAX_ITEM_EXTRA_BYTES)
+		if (rawExtra !== undefined && rawExtraPatch !== undefined) {
+			throw new DaemonError("invalid_request", "item.update fields must not combine extra and extraPatch", {})
+		}
+		const requestedExtra = rawExtra !== undefined
+			? rawExtra
+			: rawExtraPatch === undefined
+				? undefined
+				: { ...item.extra, ...rawExtraPatch }
 		const blockerMutation = blockerExtraMutationForRequest(fields)
 		const topLevelDependsOn = optionalDependsOn(fields, "dependsOn")
-		const extraDependsOn = topLevelDependsOn === undefined && rawExtra !== undefined ? optionalDependsOn(rawExtra, "dependsOn") : undefined
+		const extraDependsOn = topLevelDependsOn === undefined && requestedExtra !== undefined ? optionalDependsOn(requestedExtra, "dependsOn") : undefined
 		const dependsOn = topLevelDependsOn === undefined ? extraDependsOn : topLevelDependsOn
 		if (dependsOn !== undefined) {
 			validateDependsOnGraph(store.listItems(item.chainId), item.id, dependsOn)
-			input.extra = validateItemExtra(applyBlockerMutation(withDependsOn(rawExtra ?? item.extra, dependsOn), blockerMutation))
-		} else if (rawExtra !== undefined) {
-			input.extra = validateItemExtra(applyBlockerMutation(rawExtra, blockerMutation))
+			input.extra = validateItemExtra(applyBlockerMutation(withDependsOn(requestedExtra ?? item.extra, dependsOn), blockerMutation))
+		} else if (requestedExtra !== undefined) {
+			input.extra = validateItemExtra(applyBlockerMutation(requestedExtra, blockerMutation))
 		} else if (blockerMutation !== null) {
 			input.extra = validateItemExtra(applyBlockerMutation({ ...item.extra }, blockerMutation))
 		}
