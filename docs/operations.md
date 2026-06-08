@@ -103,7 +103,7 @@ coder-loop status <target> --json
 coder-loop chain status <chain-name> --json
 coder-loop item list --chain <chain-name> --json
 coder-loop item update ...
-coder-loop queue unblock <target> --issue <id> --start-daemon --require-browser-evidence
+coder-loop queue unblock <target> --issue <id> --start-daemon
 ```
 
 如果必须做人工恢复，先备份 DB，再用 `status` / `doctor` 定位到具体 chain 与 item；只修被诊断出的字段。旧文档里的 target-local `.coder-loop/runtime/state.json` 属于 legacy/debug 语境，不是新版 centralized chain runtime 的一线状态源。
@@ -111,7 +111,7 @@ coder-loop queue unblock <target> --issue <id> --start-daemon --require-browser-
 `--check-runtime` 仍会检查这些不变量：
 
 - `state.version === 1`；
-- 若 config `repository` 非 null，`state.repository` 必须匹配；`baseBranch` 同理；
+- centralized chain 的 `repository` / `baseBranch` 是功能性 chain identity；prompt 专用值通过 preset 的透明 `config.*` binding 读取；
 - `queue` 内 id 不可重复；
 - 每个 queue item 的 `status` 必须落在 preset 的 status 集合内；
 - 若 `current` 存在，其 id 必须能在 `queue` 找到匹配项，且该项必须是 continuable；
@@ -123,7 +123,7 @@ exit 0 时 stderr 输出类似：
 
 ```text
 Runtime check passed: target=<abs>
-Runtime check passed: repo=<owner>/<repo>          # 仅 config.repository 非 null 时
+Runtime check passed: repo=<owner>/<repo>          # 来自 centralized chain identity
 Runtime check passed: config=<abs> (json|toml)
 Runtime check passed: state=<abs-loop-data-root>/db.sqlite
 Runtime check passed: chain=<chain-name>
@@ -179,7 +179,7 @@ Runtime check failed: <N> error(s)
 | 类别 | 示例 | 修法 |
 |---|---|---|
 | schema 版本错 | `state.version: must be 1` | 通过 chain/item API 或备份 DB 后修正 state snapshot |
-| repo/base branch 不匹配 | `state.repository: must match configured repository <owner>/<repo>` | 对齐 target config 与 chain state |
+| chain 选择不匹配 | `SQLite chain "x" repository is owner/a, expected owner/b` | 指定正确 `--chain`，或修正 centralized chain identity |
 | 必需文件 / 目录缺失 | `targetCwd: directory does not exist` / `workflow: file does not exist` | bootstrap 缺失项，先跑 `coder-loop install` / `doctor` |
 | workflow 误入 runtime | `workflow: must be project policy outside .coder-loop/runtime` | workflow.md 留在 `.coder-loop/` 而不是 runtime 内 |
 | queue item id 缺失 / 重复 | `state.queue[N].issue: must be a non-empty string or finite number` / `duplicate id "42"` | 修 chain item |
@@ -242,16 +242,16 @@ coder-loop item --help
 | `install <target>` | 幂等 bootstrap | `--repo <slug>` `--preset <name>` `--force` `--dry-run` `--install-skills` `--skip-skill-check` |
 | `uninstall <target>` | 仅删 `.claude/commands/dev-*.md` | — |
 | `doctor <target>` | 只读体检 + live runtime health | `--repo <slug>` |
-| `status <target> --json` | 只读 JSON runtime/process snapshot | `--config <path>` `--repo <slug>` `--loop-data-root <dir>` `--chain <name>` |
+| `status <target> --json` | 只读 JSON runtime/process snapshot | `--config <path>` `--loop-data-root <dir>` `--chain <name>` |
 | `daemon up` | 运行 centralized daemon process | `--json` `--loop-data-root <dir>` |
 | `daemon down` | 通过 Unix socket 要求 centralized daemon 退出 | `--json` `--loop-data-root <dir>` |
-| `daemon status <target> --json` | daemon 视角 JSON snapshot | `--config <path>` `--repo <slug>` `--loop-data-root <dir>` `--chain <name>` |
-| `daemon start <target>` | 解析 target chain 并确认 daemon 可调度；已运行/已存在时幂等返回 | `--config <path>` `--repo <slug>` `--require-browser-evidence` `--max-iterations <N>` `--dry-run` |
-| `daemon stop <target>` | 解析 target chain 并调用 `chain.delete` | `--config <path>` `--repo <slug>` `--dry-run` |
-| `daemon restart <target>` | 解析 target chain 并确认 central daemon 可用，输出单个 JSON object | `--config <path>` `--repo <slug>` `--require-browser-evidence` `--max-iterations <N>` `--dry-run` |
+| `daemon status <target> --json` | daemon 视角 JSON snapshot | `--config <path>` `--loop-data-root <dir>` `--chain <name>` |
+| `daemon start <target>` | 解析 target chain 并确认 daemon 可调度；已运行/已存在时幂等返回 | `--config <path>` `--max-iterations <N>` `--dry-run` |
+| `daemon stop <target>` | 解析 target chain 并调用 `chain.delete` | `--config <path>` `--dry-run` |
+| `daemon restart <target>` | 解析 target chain 并确认 central daemon 可用，输出单个 JSON object | `--config <path>` `--max-iterations <N>` `--dry-run` |
 | `chain create/list/status/delete` | centralized chain CRUD | 看 `coder-loop chain --help` |
 | `item add/list/update` | centralized chain item CRUD | `--field-json '{"branch":"issue-1","pr":2}'` 写 preset 声明的透明 item 字段；其他看 `coder-loop item --help` |
-| `queue unblock <target>` | 将一个 blocked item 改回 queued 并清除 blocker metadata；用于 `kind:blocked` accept 后反向解除源仓 block | `--issue <id>` `--start-daemon` `--require-browser-evidence` |
+| `queue unblock <target>` | 将一个 blocked item 改回 queued 并清除 blocker metadata；用于 `kind:blocked` accept 后反向解除源仓 block | `--issue <id>` `--start-daemon` |
 
 ### 6.2 主循环 flags
 
@@ -263,10 +263,8 @@ coder-loop item --help
 | `--target-cwd <path>` | string | `process.cwd()` | target 目录绝对 / 相对路径 |
 | `--config <path>` | string | target runtime config | config 文件路径 |
 | `--workflow <path>` | string | config 字段或 `<target>/.coder-loop/workflow.md` | workflow 文件路径 |
-| `--repo <owner>/<repo>` | string | config 字段或 null | 校验 state repository 一致；不会改写 state |
 | `--loop-data-root <dir>` | string | `~/.coder-loop/loop-data` | centralized DB/socket/runtime 根 |
 | `--chain <name>` | string | target/config 推导 | 指定 centralized chain |
-| `--require-browser-evidence` | bool flag | config 字段或 false | 暴露给 preset；引擎自身不验证截图存在 |
 | `--once` | bool flag | false | 跑 1 轮就退出（等价 `1`） |
 | `--dry-run` | bool flag | false | 选中 item 后停（不 spawn agent） |
 | `--check-runtime` | bool flag | false | 校验 schema 后退出，不 spawn agent |
@@ -330,5 +328,5 @@ coder-loop item list --chain <chain-name> --json
 - **把 `.coder-loop/runtime/` 入了 git** → runtime / logs / handoff 进了 PR diff；把整个 runtime 目录加 `.gitignore` 后 `git rm --cached -r .coder-loop/runtime/`。
 - **`.coder-loop/workflow.md` 缺失或没入仓** → iter/review agent 读不到项目工作方式，行为退化为 bundled preset 默认值，往往写错命令 / 漏证据 layer。
 - **`gh` 未 auth** → `iter/read-context` 会以 `infrastructure_failure` 出局，agent 输出里能看到 `gh auth status` 失败回显。
-- **`config.json` 的 `repository` 字段与远端不一致** → `--check-runtime` 报 `repository mismatch`；改 config 或 chain state，不是只改 `--repo` 参数。
+- **chain identity 与目标 repo 不一致** → `status` / `daemon start` 会在解析 chain 时报告 repository/baseBranch 不匹配；指定正确 `--chain`，或修正 centralized chain identity。
 - **只看日志文件、不看 status** → 新版 authoritative path 来自 central chain；先看 `status` 返回的路径，避免按旧 flat-log layout 找错文件。

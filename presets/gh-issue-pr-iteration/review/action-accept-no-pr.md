@@ -19,10 +19,10 @@ Use only when `review/issue-closure-gate` proves current scope and children are 
    - Through the supported `coder-loop` CLI for that source target, re-queue the blocked item named by the back-link so it becomes actionable again, then start or restart that source target's daemon:
 
 ```bash
-coder-loop queue unblock <SOURCE_TARGET_CWD> --repo <SOURCE_REPO> --issue <SOURCE_ISSUE> --start-daemon --require-browser-evidence
+coder-loop queue unblock <SOURCE_TARGET_CWD> --issue <SOURCE_ISSUE> --start-daemon
 ```
 
-   - Verify with `coder-loop status <SOURCE_TARGET_CWD> --json --repo <SOURCE_REPO>` that the item is no longer `blocked` and that the daemon is running or was started successfully.
+   - Verify with `coder-loop status <SOURCE_TARGET_CWD> --json` that the item is no longer `blocked` and that the daemon is running or was started successfully.
 
    If the back-link, source target, re-queue command, daemon start, or status verification cannot be completed, do not close the current issue and do not write local `done`; record the exact failed command/query and use the infrastructure failure path. A no-PR accepted unblock issue without the downstream re-queue/start side effect is not complete for `kind:blocked`.
 

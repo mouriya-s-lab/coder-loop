@@ -16,7 +16,7 @@ Initialize the executable planning output through the current centralized chain/
    ```bash
    coder-loop chain status <chain-name> --json
    # if missing and this is a fresh mission:
-   coder-loop chain create <chain-name> --repo <owner>/<repo> --json
+   coder-loop chain create <chain-name> --config-json '{"repository":"<owner>/<repo>"}' --json
    ```
    Preserve existing chain metadata and current run state. Do not clear or rewrite `current` / recent run artifacts.
 

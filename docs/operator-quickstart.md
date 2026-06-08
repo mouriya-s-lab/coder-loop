@@ -270,5 +270,5 @@ run 级事件在 `<logDir>/<runId>/events.jsonl`，也由 `status.events.path` �
 - **`.coder-loop/runtime/` 入了 git** → runtime handoff / logs 进了 PR diff；把整个目录加 `.gitignore` 后 `git rm --cached -r .coder-loop/runtime/`。
 - **`.coder-loop/workflow.md` 缺失或没入仓** → iter/review agent 读不到项目工作方式，行为退化为 bundled preset 默认值，往往写错命令 / 漏证据 layer。
 - **`gh` 未 auth** → `iter/read-context` 会以 `infrastructure_failure` 出局，trace 里能看到 `gh auth status` 失败回显。
-- **`config.json` 的 `repository` 字段与远端不一致** → `--check-runtime` 报 `repository mismatch`；改文件，不是改 `--repo` 参数。
+- **chain identity 与目标 repo 不一致** → `status` / `daemon start` 会在解析 chain 时报告 repository/baseBranch 不匹配；指定正确 `--chain`，或修正 centralized chain identity。
 - **按旧 flat log / `.dev-loop` 找不到状态** → 新版以 central daemon + chain runtime 为准；先看 `coder-loop status <target> --json` 返回的 `target.logDir`、`events.path`、`processes.live`。

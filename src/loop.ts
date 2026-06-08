@@ -64,10 +64,12 @@ class CoderLoopError extends Error {
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
 export type JsonObject = { [key: string]: JsonValue }
 
-type BrowserEvidenceConfigField = `require${"Browser"}Evidence`
-const CONFIG_BROWSER_EVIDENCE_FIELD = `require${"Browser"}Evidence` as BrowserEvidenceConfigField
 const STATUS_STATE_FILE_KEY = `state${"File"}` as `state${"File"}`
-const OUTPUT_BROWSER_EVIDENCE_KEY = `require${"Browser"}Evidence` as BrowserEvidenceConfigField
+type ConfigBindingScalar = null | boolean | number | string
+
+type ConfigBindingFallback =
+	| { kind: "none" }
+	| { kind: "value"; value: ConfigBindingScalar }
 
 export type StatusItemSnapshot = {
 	status: string
@@ -95,11 +97,9 @@ type BuildOptionsInput = {
 	workflowPath: string | null
 	loopDataRoot: string | null
 	chainName: string | null
-	repository: string | null
-	browserEvidenceRequired: boolean | null
 	dryRun: boolean
 	worktree: boolean
-	baseBranch: string | null
+	chain: Pick<ChainRecord, "name" | "repository" | "baseBranch" | "metadata">
 }
 
 export type StatusCommandArgs = {
@@ -107,7 +107,6 @@ export type StatusCommandArgs = {
 	configPath: string | null
 	loopDataRoot?: string | null
 	chainName?: string | null
-	repository: string | null
 	output: "json"
 }
 
@@ -124,7 +123,6 @@ export type DaemonCommandArgs =
 			configPath: string | null
 			loopDataRoot?: string | null
 			chainName?: string | null
-			repository: string | null
 			output: "json"
 	  }
 	| {
@@ -133,12 +131,9 @@ export type DaemonCommandArgs =
 			configPath: string | null
 			loopDataRoot?: string | null
 			chainName?: string | null
-			repository: string | null
-			browserEvidenceRequired: boolean
 			iterationLimit: number | null
 			dryRun: boolean
 			worktree: boolean
-			baseBranch: string | null
 			json: boolean
 	  }
 	| {
@@ -147,7 +142,6 @@ export type DaemonCommandArgs =
 			configPath: string | null
 			loopDataRoot?: string | null
 			chainName?: string | null
-			repository: string | null
 			dryRun: boolean
 			json: boolean
 		}
@@ -157,12 +151,9 @@ export type DaemonCommandArgs =
 			configPath: string | null
 			loopDataRoot?: string | null
 			chainName?: string | null
-			repository: string | null
-			browserEvidenceRequired: boolean
 			iterationLimit: number | null
 			dryRun: boolean
 			worktree: boolean
-			baseBranch: string | null
 			json: boolean
 	  }
 	| {
@@ -175,9 +166,8 @@ export type ChainCommandArgs =
 	| {
 			action: "create"
 			name: string
-			repository: string
+			configJson: JsonObject
 			preset: string | null
-			baseBranch: string | null
 			umbrella: string | null
 			force: boolean
 			loopDataRoot: string | null
@@ -277,16 +267,12 @@ export type QueueUnblockCommandArgs = {
 	configPath: string | null
 	loopDataRoot: string | null
 	chainName: string | null
-	repository: string | null
 	issue: string
 	startDaemon: boolean
-	browserEvidenceRequired: boolean
 	dryRun: boolean
 }
 
 type LoopConfig = {
-	repository: string | null
-	baseBranch: string | null
 	worktree: boolean | null
 	workflowFile: string | null
 	sharedContextFile: string | null
@@ -294,7 +280,6 @@ type LoopConfig = {
 	evidenceDir: string | null
 	logDir: string | null
 	loopDataRoot: string | null
-	requireAgentBrowserScreenshots: boolean | null
 	claudeBinary: string | null
 	claudeExtraArgs: string[]
 	claudeModel: string | null
@@ -303,13 +288,12 @@ type LoopConfig = {
 	codexModel: string | null
 	preset: string | null
 	presetPath: string | null
+	configBindings: JsonObject
 }
 
 const AgentRunnerKindBoundary = arkType.or(arkType.unit("claude"), arkType.unit("codex"))
 
 const StatusConfigBoundary = arkType({
-	"repository?": "string|null",
-	"baseBranch?": "string|null",
 	"worktree?": "boolean|null",
 	"workflowFile?": "string|null",
 	"sharedContextFile?": "string|null",
@@ -317,9 +301,6 @@ const StatusConfigBoundary = arkType({
 	"evidenceDir?": "string|null",
 	"logDir?": "string|null",
 	"loopDataRoot?": "string|null",
-	"evidence?": {
-		"requireAgentBrowserScreenshots?": "boolean|null",
-	},
 	"claude?": {
 		"binary?": "string|null",
 		"extraArgs?": "string[]",
@@ -442,13 +423,6 @@ const PresetTomlBoundary = arkType({
 	agent: { binary: "string", "extraArgs?": "string[]", "attemptTimeoutSeconds?": "number" },
 })
 
-const CONFIG_BINDING_FIELDS: readonly ConfigBindingField[] = ["repository", "baseBranch", CONFIG_BROWSER_EVIDENCE_FIELD]
-type ConfigBindingField = "repository" | "baseBranch" | BrowserEvidenceConfigField
-
-function isConfigBindingField(field: string): field is ConfigBindingField {
-	return (CONFIG_BINDING_FIELDS as readonly string[]).includes(field)
-}
-
 const StatusSnapshotBoundary = arkType({
 	target: "object",
 	state: "object",
@@ -472,9 +446,9 @@ export type LoopOptions = {
 	logFile: string
 	repository: string | null
 	baseBranch: string | null
+	configBindings: ConfigBindings
 	chainName?: string | null
 	worktree: boolean
-	browserEvidenceRequired: boolean
 	hostRunner: AgentRunnerKind
 	defaultRunner: AgentRunnerSelection
 	reviewRunner: AgentRunnerSelection
@@ -484,6 +458,11 @@ export type LoopOptions = {
 }
 
 export type PresetVariableSource =
+	| { kind: "item"; field: string }
+	| { kind: "config"; field: string; fallback: ConfigBindingFallback }
+	| { kind: "runtime"; key: string }
+
+type ParsedVariableSource =
 	| { kind: "item"; field: string }
 	| { kind: "config"; field: string }
 	| { kind: "runtime"; key: string }
@@ -936,11 +915,7 @@ export type RuntimeBindingPaths = {
 	logDir: string
 }
 
-export type ConfigBindings = {
-	repository: string
-	baseBranch: string
-	[CONFIG_BROWSER_EVIDENCE_FIELD]: boolean
-}
+export type ConfigBindings = JsonObject
 
 export type ResolveContext = {
 	item: ItemRecord
@@ -1003,7 +978,6 @@ const statusCliCommand = command({
 		config: option({ long: "config", type: optional(cmdString) }),
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
 		chain: option({ long: "chain", type: optional(cmdString) }),
-		repo: option({ long: "repo", type: optional(cmdString) }),
 	},
 	handler: (args): CliCommand => {
 		if (!args.json) fail("status: only --json output is supported for now. Usage: coder-loop status <target> --json")
@@ -1014,7 +988,6 @@ const statusCliCommand = command({
 				configPath: args.config ?? null,
 				loopDataRoot: args.loopDataRoot ?? null,
 				chainName: args.chain ?? null,
-				repository: args.repo ?? null,
 				output: "json",
 			},
 		}
@@ -1030,7 +1003,6 @@ const daemonStatusCliCommand = command({
 		config: option({ long: "config", type: optional(cmdString) }),
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
 		chain: option({ long: "chain", type: optional(cmdString) }),
-		repo: option({ long: "repo", type: optional(cmdString) }),
 	},
 	handler: (args): CliCommand => {
 		if (!args.json) fail("daemon status: only --json output is supported for now. Usage: coder-loop daemon status <target> --json")
@@ -1042,7 +1014,6 @@ const daemonStatusCliCommand = command({
 				configPath: args.config ?? null,
 				loopDataRoot: args.loopDataRoot ?? null,
 				chainName: args.chain ?? null,
-				repository: args.repo ?? null,
 				output: "json",
 			},
 		}
@@ -1071,17 +1042,14 @@ const daemonUpCliCommand = command({
 const daemonStartCliCommand = command({
 	name: "start",
 	description: "Start coder-loop as a detached daemon for a target.",
-		args: {
-			target: positional({ displayName: "target", type: cmdString }),
-			config: option({ long: "config", type: optional(cmdString) }),
-			loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
-			chain: option({ long: "chain", type: optional(cmdString) }),
-			repo: option({ long: "repo", type: optional(cmdString) }),
-			browserEvidenceRequired: flag({ long: "require-browser-evidence" }),
-			iterationLimit: option({ long: "max-iterations", type: optional(cmdString) }),
-			dryRun: flag({ long: "dry-run" }),
-			worktree: flag({ long: "worktree" }),
-			baseBranch: option({ long: "base-branch", type: optional(cmdString) }),
+	args: {
+		target: positional({ displayName: "target", type: cmdString }),
+		config: option({ long: "config", type: optional(cmdString) }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		chain: option({ long: "chain", type: optional(cmdString) }),
+		iterationLimit: option({ long: "max-iterations", type: optional(cmdString) }),
+		dryRun: flag({ long: "dry-run" }),
+		worktree: flag({ long: "worktree" }),
 		json: flag({ long: "json" }),
 	},
 	handler: (args): CliCommand => ({
@@ -1090,14 +1058,11 @@ const daemonStartCliCommand = command({
 			action: "start",
 			targetCwd: args.target,
 			configPath: args.config ?? null,
-				loopDataRoot: args.loopDataRoot ?? null,
-				chainName: args.chain ?? null,
-				repository: args.repo ?? null,
-				browserEvidenceRequired: args.browserEvidenceRequired,
-				iterationLimit: parseDaemonIterationLimit(args.iterationLimit ?? null),
-				dryRun: args.dryRun,
-				worktree: args.worktree,
-				baseBranch: args.baseBranch ?? null,
+			loopDataRoot: args.loopDataRoot ?? null,
+			chainName: args.chain ?? null,
+			iterationLimit: parseDaemonIterationLimit(args.iterationLimit ?? null),
+			dryRun: args.dryRun,
+			worktree: args.worktree,
 			json: args.json,
 		},
 	}),
@@ -1111,7 +1076,6 @@ const daemonStopCliCommand = command({
 		config: option({ long: "config", type: optional(cmdString) }),
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
 		chain: option({ long: "chain", type: optional(cmdString) }),
-		repo: option({ long: "repo", type: optional(cmdString) }),
 		dryRun: flag({ long: "dry-run" }),
 		json: flag({ long: "json" }),
 	},
@@ -1123,7 +1087,6 @@ const daemonStopCliCommand = command({
 			configPath: args.config ?? null,
 			loopDataRoot: args.loopDataRoot ?? null,
 			chainName: args.chain ?? null,
-			repository: args.repo ?? null,
 			dryRun: args.dryRun,
 			json: args.json,
 		},
@@ -1133,17 +1096,14 @@ const daemonStopCliCommand = command({
 const daemonRestartCliCommand = command({
 	name: "restart",
 	description: "Restart the coder-loop daemon for a target.",
-		args: {
-			target: positional({ displayName: "target", type: cmdString }),
-			config: option({ long: "config", type: optional(cmdString) }),
-			loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
-			chain: option({ long: "chain", type: optional(cmdString) }),
-			repo: option({ long: "repo", type: optional(cmdString) }),
-			browserEvidenceRequired: flag({ long: "require-browser-evidence" }),
-			iterationLimit: option({ long: "max-iterations", type: optional(cmdString) }),
-			dryRun: flag({ long: "dry-run" }),
-			worktree: flag({ long: "worktree" }),
-			baseBranch: option({ long: "base-branch", type: optional(cmdString) }),
+	args: {
+		target: positional({ displayName: "target", type: cmdString }),
+		config: option({ long: "config", type: optional(cmdString) }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		chain: option({ long: "chain", type: optional(cmdString) }),
+		iterationLimit: option({ long: "max-iterations", type: optional(cmdString) }),
+		dryRun: flag({ long: "dry-run" }),
+		worktree: flag({ long: "worktree" }),
 		json: flag({ long: "json" }),
 	},
 	handler: (args): CliCommand => ({
@@ -1152,14 +1112,11 @@ const daemonRestartCliCommand = command({
 			action: "restart",
 			targetCwd: args.target,
 			configPath: args.config ?? null,
-				loopDataRoot: args.loopDataRoot ?? null,
-				chainName: args.chain ?? null,
-				repository: args.repo ?? null,
-				browserEvidenceRequired: args.browserEvidenceRequired,
-				iterationLimit: parseDaemonIterationLimit(args.iterationLimit ?? null),
-				dryRun: args.dryRun,
-				worktree: args.worktree,
-				baseBranch: args.baseBranch ?? null,
+			loopDataRoot: args.loopDataRoot ?? null,
+			chainName: args.chain ?? null,
+			iterationLimit: parseDaemonIterationLimit(args.iterationLimit ?? null),
+			dryRun: args.dryRun,
+			worktree: args.worktree,
 			json: args.json,
 		},
 	}),
@@ -1200,9 +1157,8 @@ const chainCreateCliCommand = command({
 	description: "Create a centralized coder-loop chain through the daemon socket.",
 	args: {
 		name: positional({ displayName: "name", type: cmdString }),
-		repo: option({ long: "repo", type: cmdString }),
+		configJson: option({ long: "config-json", type: cmdString }),
 		preset: option({ long: "preset", type: optional(cmdString) }),
-		baseBranch: option({ long: "base-branch", type: optional(cmdString) }),
 		umbrella: option({ long: "umbrella", type: optional(cmdString) }),
 		force: flag({ long: "force" }),
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
@@ -1213,9 +1169,8 @@ const chainCreateCliCommand = command({
 		args: {
 			action: "create",
 			name: args.name,
-			repository: args.repo,
+			configJson: parseOptionalJsonObjectFlag(args.configJson, "--config-json") ?? {},
 			preset: args.preset ?? null,
-			baseBranch: args.baseBranch ?? null,
 			umbrella: args.umbrella ?? null,
 			force: args.force,
 			loopDataRoot: args.loopDataRoot ?? null,
@@ -1500,9 +1455,7 @@ const queueUnblockCliCommand = command({
 		config: option({ long: "config", type: optional(cmdString) }),
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
 		chain: option({ long: "chain", type: optional(cmdString) }),
-			repo: option({ long: "repo", type: optional(cmdString) }),
 			startDaemon: flag({ long: "start-daemon" }),
-			browserEvidenceRequired: flag({ long: "require-browser-evidence" }),
 			dryRun: flag({ long: "dry-run" }),
 		},
 		handler: (args): CliCommand => ({
@@ -1512,10 +1465,8 @@ const queueUnblockCliCommand = command({
 			configPath: args.config ?? null,
 			loopDataRoot: args.loopDataRoot ?? null,
 			chainName: args.chain ?? null,
-				repository: args.repo ?? null,
 				issue: args.issue,
 				startDaemon: args.startDaemon,
-				browserEvidenceRequired: args.browserEvidenceRequired,
 				dryRun: args.dryRun,
 			},
 		}),
@@ -1648,13 +1599,16 @@ async function runChainCommand(args: string[]): Promise<void> {
 	if (parsed.value.kind !== "chain") return
 	const chainArgs = parsed.value.args
 	if (chainArgs.action === "create") {
+		const repository = requiredConfigString(chainArgs.configJson, "repository", "--config-json")
+		const baseBranch = optionalConfigString(chainArgs.configJson, "baseBranch", "--config-json") ?? "main"
 		const requestArgs: JsonObject = {
 			name: chainArgs.name,
-			repository: chainArgs.repository,
+			repository,
+			baseBranch,
+			metadata: { config: chainArgs.configJson },
 		}
 		if (chainArgs.preset !== null) requestArgs.preset = chainArgs.preset
-		if (chainArgs.baseBranch !== null) requestArgs.baseBranch = chainArgs.baseBranch
-		if (chainArgs.umbrella !== null) Object.assign(requestArgs, parseUmbrellaRef(chainArgs.umbrella, chainArgs.repository))
+		if (chainArgs.umbrella !== null) Object.assign(requestArgs, parseUmbrellaRef(chainArgs.umbrella, repository))
 		if (chainArgs.force) requestArgs.force = true
 		const result = await requestDaemonResult(chainArgs.loopDataRoot, "chain.create", requestArgs)
 		writeCommandResult(result, chainArgs.json, formatChainCreateResult)
@@ -1767,6 +1721,19 @@ function parseOptionalJsonObjectFlag(raw: string | null, flagName: string): Json
 	}
 	if (!isJsonObject(parsed)) fail(`${flagName} must be a JSON object`)
 	return parsed
+}
+
+function requiredConfigString(config: JsonObject, field: string, flagName: string): string {
+	const value = config[field]
+	if (typeof value !== "string" || value.trim() === "") fail(`${flagName}.${field} must be a non-empty string`)
+	return value
+}
+
+function optionalConfigString(config: JsonObject, field: string, flagName: string): string | null {
+	const value = config[field]
+	if (value === undefined || value === null) return null
+	if (typeof value !== "string" || value.trim() === "") fail(`${flagName}.${field} must be a non-empty string when provided`)
+	return value
 }
 
 function parseBatchItemsJson(raw: string): JsonObject[] {
@@ -2054,12 +2021,10 @@ function formatDaemonDownResult(result: JsonObject): string {
 
 function formatDaemonStartResult(result: JsonObject): string {
 	if (result.dryRun === true) {
-		const browserEvidenceRequired = result[OUTPUT_BROWSER_EVIDENCE_KEY] ?? false
 		return [
 			`daemon start dry-run: target=${String(result.target ?? "")}`,
 			`daemon start dry-run: chain=${String(result.chain ?? "")}`,
 			`daemon start dry-run: central-daemon=${String(result.centralDaemon ?? "required")}`,
-			`daemon start dry-run: require-browser-evidence=${String(browserEvidenceRequired)}`,
 			"",
 		].join("\n")
 	}
@@ -2104,7 +2069,6 @@ async function runDaemonCommand(args: string[]): Promise<void> {
 			configPath: daemonArgs.configPath,
 			loopDataRoot: daemonArgs.loopDataRoot ?? null,
 			chainName: daemonArgs.chainName ?? null,
-			repository: daemonArgs.repository,
 			output: "json",
 		})
 		StatusSnapshotBoundary.assert(snapshot)
@@ -2229,8 +2193,6 @@ function describePresetTrigger(trigger: PresetPhaseTrigger | null): string | nul
 
 function emptyLoopConfig(): LoopConfig {
 	return {
-		repository: null,
-		baseBranch: null,
 		worktree: null,
 		workflowFile: null,
 		sharedContextFile: null,
@@ -2238,7 +2200,6 @@ function emptyLoopConfig(): LoopConfig {
 		evidenceDir: null,
 		logDir: null,
 		loopDataRoot: null,
-		requireAgentBrowserScreenshots: null,
 		claudeBinary: null,
 		claudeExtraArgs: [],
 		claudeModel: null,
@@ -2247,6 +2208,7 @@ function emptyLoopConfig(): LoopConfig {
 		codexModel: null,
 		preset: null,
 		presetPath: null,
+		configBindings: {},
 	}
 }
 
@@ -2494,10 +2456,10 @@ function buildOptions(targetCwd: string, configPath: string, raw: BuildOptionsIn
 	const issueDir = resolveFrom(targetCwd, config.issueDir ?? DEFAULT_ISSUE_DIR)
 	const evidenceRootDir = resolveFrom(targetCwd, config.evidenceDir ?? DEFAULT_EVIDENCE_DIR)
 	const logDir = resolveFrom(targetCwd, config.logDir ?? DEFAULT_LOG_DIR)
-	const repository = raw.repository ?? config.repository
-	const browserEvidenceRequired = raw.browserEvidenceRequired ?? config.requireAgentBrowserScreenshots ?? false
 	const worktree = raw.worktree || config.worktree === true
-	const baseBranch = raw.baseBranch ?? config.baseBranch ?? (worktree ? "main" : null)
+	const repository = raw.chain.repository
+	const baseBranch = raw.chain.baseBranch
+	const configBindings = buildEffectiveConfigBindings(raw.chain, config.configBindings)
 	const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")
 	const chainPaths = raw.chainName === null ? null : resolveChainRuntimePaths(raw.chainName, loopDataRootOption(loopDataRoot))
 	const hostRunner = detectHostRunner(process.env)
@@ -2518,9 +2480,9 @@ function buildOptions(targetCwd: string, configPath: string, raw: BuildOptionsIn
 		logFile: chainPaths === null ? resolve(logDir, `coder-loop-${process.pid}.${timestamp}.log`) : chainPaths.daemonLogFile(timestamp),
 		repository,
 		baseBranch,
+		configBindings,
 		chainName: raw.chainName,
 		worktree,
-		browserEvidenceRequired,
 		hostRunner,
 		defaultRunner,
 		reviewRunner,
@@ -2537,55 +2499,54 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 			targetCwd: args.targetCwd,
 			configPath: args.configPath,
 			loopDataRoot: args.loopDataRoot ?? null,
-				chainName: args.chainName ?? null,
-				repository: args.repository,
-				baseBranch: null,
-				browserEvidenceRequired: null,
-				dryRun: false,
-				worktree: false,
-				workflowPath: null,
-			})
-		} catch (error) {
+			chainName: args.chainName ?? null,
+			repository: null,
+			baseBranch: null,
+			dryRun: false,
+			worktree: false,
+			workflowPath: null,
+		})
+	} catch (error) {
 		const targetCwd = resolve(args.targetCwd)
 		const dbFile = resolveLoopDataPaths(loopDataRootOption(args.loopDataRoot ?? null)).dbFile
 		const processes = await buildCentralStatusProcessSnapshot({
 			targetCwd,
 			loopDataRoot: args.loopDataRoot ?? null,
 		})
-			return makeUnavailableStatusSnapshot({
-				target: makeStatusTargetSnapshot(targetCwd, dbFile, args.repository, null, { kind: "missing", error: errorMessage(error) }),
-				stateKind: "missing-state",
-				stateDbPath: dbFile,
-				errorPath: "chain",
-				errorMessage: errorMessage(error),
-				processes,
+		return makeUnavailableStatusSnapshot({
+			target: makeStatusTargetSnapshot(targetCwd, dbFile, null, { kind: "missing", error: errorMessage(error) }),
+			stateKind: "missing-state",
+			stateDbPath: dbFile,
+			errorPath: "chain",
+			errorMessage: errorMessage(error),
+			processes,
 		})
-		}
-		const options = loaded.options
-		const target = makeStatusTargetSnapshot(options.targetCwd, options.configPath, args.repository, options, { kind: "loaded", error: null })
-		const items = readDbItemsForChain(options.loopDataRoot, loaded.chain.id)
-		const current = readDbCurrentRun(options.loopDataRoot, loaded.chain.id)
-		const selected = pickFirstSelectableStatusItem(options, loaded.chain, items, current)
-		const runtimeErrors = await collectStatusRuntimeErrors(options, loaded.chain, items, current)
-		const currentSnapshot = await buildStatusCurrentSnapshotFromRecords(options, items, current)
-		const events = await buildStatusEventsSnapshotFromRecords(options, current, selected, items)
-		const processes = await buildCentralStatusProcessSnapshot(options)
-		const snapshot: CoderLoopStatusSnapshot = {
-			target,
+	}
+	const options = loaded.options
+	const target = makeStatusTargetSnapshot(options.targetCwd, options.configPath, options, { kind: "loaded", error: null })
+	const items = readDbItemsForChain(options.loopDataRoot, loaded.chain.id)
+	const current = readDbCurrentRun(options.loopDataRoot, loaded.chain.id)
+	const selected = pickFirstSelectableStatusItem(options, loaded.chain, items, current)
+	const runtimeErrors = await collectStatusRuntimeErrors(options, loaded.chain, items, current)
+	const currentSnapshot = await buildStatusCurrentSnapshotFromRecords(options, items, current)
+	const events = await buildStatusEventsSnapshotFromRecords(options, current, selected, items)
+	const processes = await buildCentralStatusProcessSnapshot(options)
+	const snapshot: CoderLoopStatusSnapshot = {
+		target,
 		state: {
-				kind: runtimeErrors.length === 0 ? "ok" : "invalid-runtime",
-				ok: runtimeErrors.length === 0,
-				loaded: true,
-				path: resolveLoopDataPaths(loopDataRootOption(options.loopDataRoot)).dbFile,
-				version: STATUS_SNAPSHOT_STATE_VERSION,
-				repository: loaded.chain.repository,
-				baseBranch: loaded.chain.baseBranch,
-				errors: runtimeErrors,
-				error: null,
-			},
-			queue: buildStatusQueueSnapshotFromRecords(options, items, selected),
-			runs: buildStatusRunsSnapshot(readDbRunsForChain(options.loopDataRoot, loaded.chain.id)),
-			current: currentSnapshot,
+			kind: runtimeErrors.length === 0 ? "ok" : "invalid-runtime",
+			ok: runtimeErrors.length === 0,
+			loaded: true,
+			path: resolveLoopDataPaths(loopDataRootOption(options.loopDataRoot)).dbFile,
+			version: STATUS_SNAPSHOT_STATE_VERSION,
+			repository: loaded.chain.repository,
+			baseBranch: loaded.chain.baseBranch,
+			errors: runtimeErrors,
+			error: null,
+		},
+		queue: buildStatusQueueSnapshotFromRecords(options, items, selected),
+		runs: buildStatusRunsSnapshot(readDbRunsForChain(options.loopDataRoot, loaded.chain.id)),
+		current: currentSnapshot,
 		events,
 		processes,
 	}
@@ -2626,7 +2587,6 @@ async function readStatusPreset(config: LoopConfig, targetCwd: string): Promise<
 function makeStatusTargetSnapshot(
 	targetCwd: string,
 	configPath: string,
-	repositoryOverride: string | null,
 	options: LoopOptions | null,
 	config: StatusResourceSnapshot,
 ): StatusTargetSnapshot {
@@ -2648,7 +2608,7 @@ function makeStatusTargetSnapshot(
 		issueDir: options?.issueDir ?? resolve(runtimeRoot, "issues"),
 		evidenceRootDir: options?.evidenceRootDir ?? resolve(runtimeRoot, "evidence"),
 		logDir: options?.logDir ?? resolve(runtimeRoot, "logs"),
-		repository: options?.repository ?? repositoryOverride,
+		repository: options?.repository ?? null,
 		baseBranch: options?.baseBranch ?? null,
 		worktree: options?.worktree ?? false,
 		runner: buildStatusRunnerDefaultsSnapshot(options),
@@ -2667,8 +2627,6 @@ function buildStatusRunnerDefaultsSnapshot(options: LoopOptions | null): StatusR
 	}
 	const hostRunner = detectHostRunner(process.env)
 	const config: LoopConfig = {
-		repository: null,
-		baseBranch: null,
 			worktree: null,
 			workflowFile: null,
 			sharedContextFile: null,
@@ -2676,7 +2634,6 @@ function buildStatusRunnerDefaultsSnapshot(options: LoopOptions | null): StatusR
 		evidenceDir: null,
 		logDir: null,
 		loopDataRoot: null,
-		requireAgentBrowserScreenshots: null,
 		claudeBinary: null,
 		claudeExtraArgs: [],
 		claudeModel: null,
@@ -2685,6 +2642,7 @@ function buildStatusRunnerDefaultsSnapshot(options: LoopOptions | null): StatusR
 		codexModel: null,
 		preset: null,
 		presetPath: null,
+		configBindings: {},
 	}
 	return {
 		hostDefault: hostRunner,
@@ -3061,7 +3019,6 @@ export type DaemonStartPlan = {
 	commandLine: string
 	stdoutPath: string
 	stderrPath: string
-	browserEvidenceRequired: boolean
 }
 
 type DaemonStartResult =
@@ -3072,7 +3029,6 @@ type DaemonStartResult =
 				command: string[]
 				stdoutPath: string
 				stderrPath: string
-				browserEvidenceRequired: boolean
 	  }
 		| {
 				action: "start"
@@ -3106,7 +3062,6 @@ export function buildDaemonStartPlan(args: Extract<DaemonCommandArgs, { action: 
 		commandLine: command.map(shellQuote).join(" "),
 		stdoutPath,
 		stderrPath,
-		browserEvidenceRequired: args.browserEvidenceRequired,
 	}
 }
 
@@ -3183,7 +3138,6 @@ async function runDaemonStartCommand(args: Extract<DaemonCommandArgs, { action: 
 				chain: runtime.chain.name,
 				dryRun: true,
 				centralDaemon: "required",
-				[OUTPUT_BROWSER_EVIDENCE_KEY]: runtime.options.browserEvidenceRequired,
 			}, args.json, formatDaemonStartResult)
 		return
 	}
@@ -3203,7 +3157,6 @@ async function executeDaemonStart(args: Extract<DaemonCommandArgs, { action: "st
 		configPath: args.configPath,
 		loopDataRoot: args.loopDataRoot ?? null,
 		chainName: args.chainName ?? null,
-		repository: args.repository,
 		output: "json",
 	})
 	const live = findOwnedLiveProcess(current)
@@ -3234,7 +3187,6 @@ async function executeDaemonStart(args: Extract<DaemonCommandArgs, { action: "st
 				command: plan.command,
 				stdoutPath: plan.stdoutPath,
 				stderrPath: plan.stderrPath,
-				browserEvidenceRequired: plan.browserEvidenceRequired,
 			}
 	} finally {
 		closeSync(stdoutFd)
@@ -3291,9 +3243,8 @@ function daemonCommandToTargetLookupArgs(args: Extract<DaemonCommandArgs, { acti
 		configPath: args.configPath,
 		loopDataRoot: args.loopDataRoot ?? null,
 			chainName: args.chainName ?? null,
-			repository: args.repository,
-			baseBranch: "baseBranch" in args ? args.baseBranch : null,
-			browserEvidenceRequired: "browserEvidenceRequired" in args ? args.browserEvidenceRequired : null,
+			repository: null,
+			baseBranch: null,
 			dryRun: args.dryRun,
 			worktree: "worktree" in args ? args.worktree : false,
 			workflowPath: null,
@@ -3349,9 +3300,8 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 		configPath: args.configPath,
 		loopDataRoot: args.loopDataRoot,
 		chainName: args.chainName,
-		repository: args.repository,
+		repository: null,
 		baseBranch: null,
-		browserEvidenceRequired: null,
 		dryRun: args.dryRun,
 		worktree: false,
 		workflowPath: null,
@@ -3384,47 +3334,41 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 				action: "start",
 				targetCwd: options.targetCwd,
 				configPath: args.configPath,
-					loopDataRoot: options.loopDataRoot,
-					chainName: options.chainName ?? null,
-					repository: options.repository,
-					browserEvidenceRequired: args.browserEvidenceRequired,
-					iterationLimit: null,
-					dryRun: true,
-					worktree: options.worktree,
-					baseBranch: options.baseBranch,
+				loopDataRoot: options.loopDataRoot,
+				chainName: options.chainName ?? null,
+				iterationLimit: null,
+				dryRun: true,
+				worktree: options.worktree,
 				json: false,
 			}),
-			}
-		} else {
-			daemon = {
-				requested: true,
-				dryRun: false,
+		}
+	} else {
+		daemon = {
+			requested: true,
+			dryRun: false,
 			result: await executeDaemonStart({
 				action: "start",
 				targetCwd: options.targetCwd,
 				configPath: args.configPath,
-					loopDataRoot: options.loopDataRoot,
-					chainName: options.chainName ?? null,
-					repository: options.repository,
-					browserEvidenceRequired: args.browserEvidenceRequired,
-					iterationLimit: null,
-					dryRun: false,
-					worktree: options.worktree,
-				baseBranch: options.baseBranch,
+				loopDataRoot: options.loopDataRoot,
+				chainName: options.chainName ?? null,
+				iterationLimit: null,
+				dryRun: false,
+				worktree: options.worktree,
 				json: false,
 			}),
-			}
 		}
+	}
 
-		const item = readDbItemByIssue(options.loopDataRoot, runtime.chain.id, issueNumber)
-		const daemonRunning = daemonResultIndicatesRunning(daemon)
-		const result: QueueUnblockCommandResult = {
-			action: "queue.unblock",
-			target: options.targetCwd,
-			repository: options.repository,
-			[STATUS_STATE_FILE_KEY]: options.stateDbPath,
-			issue,
-			dryRun: args.dryRun,
+	const item = readDbItemByIssue(options.loopDataRoot, runtime.chain.id, issueNumber)
+	const daemonRunning = daemonResultIndicatesRunning(daemon)
+	const result: QueueUnblockCommandResult = {
+		action: "queue.unblock",
+		target: options.targetCwd,
+		repository: options.repository,
+		[STATUS_STATE_FILE_KEY]: options.stateDbPath,
+		issue,
+		dryRun: args.dryRun,
 		mutation,
 		daemon,
 		verification: {
@@ -3494,7 +3438,6 @@ type TargetChainLookupArgs = {
 	chainName: string | null
 	repository: string | null
 	baseBranch: string | null
-	browserEvidenceRequired: boolean | null
 	dryRun: boolean
 	worktree: boolean
 	workflowPath: string | null
@@ -3530,11 +3473,9 @@ async function loadTargetRuntime(args: TargetChainLookupArgs): Promise<LoadedTar
 		workflowPath: args.workflowPath,
 		loopDataRoot: effectiveLoopDataRoot,
 		chainName: chain.name,
-		repository: args.repository,
-		browserEvidenceRequired: args.browserEvidenceRequired,
 		dryRun: args.dryRun,
 		worktree: args.worktree,
-		baseBranch: args.baseBranch,
+		chain,
 	}, config, preset)
 	return { options, chain }
 }
@@ -3552,7 +3493,6 @@ async function loadLoopOptionsForTarget(
 		chainName: extra.chainName ?? null,
 		repository,
 		baseBranch: extra.baseBranch ?? null,
-		browserEvidenceRequired: extra.browserEvidenceRequired ?? null,
 		dryRun: extra.dryRun ?? false,
 		worktree: extra.worktree ?? false,
 		workflowPath: extra.workflowPath ?? null,
@@ -3643,16 +3583,13 @@ function loopConfigFromChain(chain: ChainRecord, loopDataRoot: string | null, ex
 	const metadata = chain.metadata
 	const presetPath = stringMetadata(metadata, "presetPath") ?? explicitConfig?.presetPath ?? null
 	const config: LoopConfig = {
-		repository: chain.repository,
-		baseBranch: chain.baseBranch,
-			worktree: booleanMetadata(metadata, "worktree") ?? explicitConfig?.worktree ?? null,
-			workflowFile: stringMetadata(metadata, "workflowFile") ?? explicitConfig?.workflowFile ?? null,
-			sharedContextFile: stringMetadata(metadata, "sharedContextFile") ?? explicitConfig?.sharedContextFile ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "shared"),
-			issueDir: stringMetadata(metadata, "issueDir") ?? explicitConfig?.issueDir ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "issues"),
+		worktree: booleanMetadata(metadata, "worktree") ?? explicitConfig?.worktree ?? null,
+		workflowFile: stringMetadata(metadata, "workflowFile") ?? explicitConfig?.workflowFile ?? null,
+		sharedContextFile: stringMetadata(metadata, "sharedContextFile") ?? explicitConfig?.sharedContextFile ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "shared"),
+		issueDir: stringMetadata(metadata, "issueDir") ?? explicitConfig?.issueDir ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "issues"),
 		evidenceDir: stringMetadata(metadata, "evidenceDir") ?? explicitConfig?.evidenceDir ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "evidence"),
 		logDir: stringMetadata(metadata, "logDir") ?? explicitConfig?.logDir ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "runs"),
 		loopDataRoot,
-		requireAgentBrowserScreenshots: booleanMetadata(metadata, "requireAgentBrowserScreenshots") ?? explicitConfig?.requireAgentBrowserScreenshots ?? null,
 		claudeBinary: nestedStringMetadata(metadata, "claude", "binary") ?? explicitConfig?.claudeBinary ?? null,
 		claudeExtraArgs: nestedStringArrayMetadata(metadata, "claude", "extraArgs") ?? explicitConfig?.claudeExtraArgs ?? [],
 		claudeModel: nestedStringMetadata(metadata, "claude", "model") ?? explicitConfig?.claudeModel ?? null,
@@ -3661,8 +3598,30 @@ function loopConfigFromChain(chain: ChainRecord, loopDataRoot: string | null, ex
 		codexModel: nestedStringMetadata(metadata, "codex", "model") ?? explicitConfig?.codexModel ?? null,
 		preset: presetPath === null ? chain.preset : null,
 		presetPath,
+		configBindings: explicitConfig?.configBindings ?? {},
 	}
 	return config
+}
+
+function buildEffectiveConfigBindings(
+	chain: Pick<ChainRecord, "repository" | "baseBranch" | "metadata">,
+	explicitConfigBindings: JsonObject,
+): ConfigBindings {
+	return {
+		repository: chain.repository,
+		baseBranch: chain.baseBranch,
+		...chainConfigBindings(chain.metadata),
+		...explicitConfigBindings,
+	}
+}
+
+function chainConfigBindings(metadata: JsonObject): JsonObject {
+	const value = metadata.config
+	if (value === undefined) return {}
+	if (!isObjectRecord(value) || Array.isArray(value) || !isJsonObject(value)) {
+		throw new Error("chain.metadata.config must be a JSON object when provided")
+	}
+	return { ...value }
 }
 
 function chainRuntimePathForConfig(chainName: string, loopDataRoot: string | null, kind: "shared" | "issues" | "evidence" | "runs"): string {
@@ -3802,7 +3761,13 @@ export function parsePreset(value: unknown, presetDir: string): Preset {
 		const variableDocs = new Map<string, PresetVariableDoc>()
 		for (const [key, val] of Object.entries(variablesRaw)) {
 			const variable = parseVariableBinding(val, `preset.phases[${index}].variables.${key}`)
-			const source = parseVariableSource(variable.source, `preset.phases[${index}].variables.${key}`)
+			const parsedSource = parseVariableSource(variable.source, `preset.phases[${index}].variables.${key}`)
+			if (parsedSource.kind !== "config" && variable.configFallback.kind !== "none") {
+				presetError(`preset.phases[${index}].variables.${key}.default: defaults are only supported for config bindings`)
+			}
+			const source: PresetVariableSource = parsedSource.kind === "config"
+				? { ...parsedSource, fallback: variable.configFallback }
+				: parsedSource
 			if (source.kind === "item") {
 				const itemField = itemFieldRoot(source.field)
 				if (!isKnownPresetItemField(itemField, root.item.idField, itemFields)) {
@@ -3883,6 +3848,7 @@ async function readPresetPhasePrompt(phase: PresetPhase): Promise<string> {
 type ParsedVariableBinding = {
 	source: string
 	doc: PresetVariableDoc | null
+	configFallback: ConfigBindingFallback
 }
 
 function parsePresetItemFields(value: unknown, label: string): ReadonlyMap<string, PresetItemField> {
@@ -3918,12 +3884,15 @@ function isKnownPresetItemField(field: string, idField: string, itemFields: Read
 }
 
 function parseVariableBinding(value: unknown, label: string): ParsedVariableBinding {
-	if (typeof value === "string") return { source: value, doc: null }
+	if (typeof value === "string") return { source: value, doc: null, configFallback: { kind: "none" } }
 	if (!isObjectRecord(value)) presetError(`${label}: must be a string or { source, label } object`)
 	const source = value.source
 	if (typeof source !== "string") presetError(`${label}.source: must be a string`)
+	const configFallback: ConfigBindingFallback = Object.hasOwn(value, "default")
+		? { kind: "value", value: parseConfigBindingDefaultValue(value.default, `${label}.default`) }
+		: { kind: "none" }
 	const labelValue = value.label
-	if (labelValue === undefined) return { source, doc: null }
+	if (labelValue === undefined) return { source, doc: null, configFallback }
 	if (typeof labelValue !== "string") presetError(`${label}.label: must be a string`)
 	const suffixValue = value.suffix
 	if (suffixValue !== undefined && typeof suffixValue !== "string") presetError(`${label}.suffix: must be a string`)
@@ -3931,7 +3900,13 @@ function parseVariableBinding(value: unknown, label: string): ParsedVariableBind
 	if (styleValue !== "code" && styleValue !== "plain") presetError(`${label}.style: must be "code" or "plain"`)
 	const blankBeforeValue = value.blankBefore ?? false
 	if (typeof blankBeforeValue !== "boolean") presetError(`${label}.blankBefore: must be a boolean`)
-	return { source, doc: { label: labelValue, suffix: suffixValue ?? "", style: styleValue, blankBefore: blankBeforeValue } }
+	return { source, doc: { label: labelValue, suffix: suffixValue ?? "", style: styleValue, blankBefore: blankBeforeValue }, configFallback }
+}
+
+function parseConfigBindingDefaultValue(value: unknown, label: string): ConfigBindingScalar {
+	if (value === null || typeof value === "string" || typeof value === "boolean") return value
+	if (typeof value === "number" && Number.isFinite(value)) return value
+	presetError(`${label}: config binding defaults must be null, string, number, or boolean`)
 }
 
 function parsePhaseRunner(value: unknown, label: string): AgentRunnerKind | null {
@@ -3960,7 +3935,7 @@ export function stripRoleEntryFrontmatter(markdown: string): string {
 	return markdown.slice(match[0].length).replace(/^(?:[ \t]*\r?\n)+/, "")
 }
 
-function parseVariableSource(value: string, label: string): PresetVariableSource {
+function parseVariableSource(value: string, label: string): ParsedVariableSource {
 	const match = /^(item|config|runtime)\.([a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z][a-zA-Z0-9_]*)*)$/.exec(value)
 	if (!match) presetError(`${label}: invalid variable source "${value}" (expected item.<f> | config.<f> | runtime.<k>)`)
 	const kind = match[1] as "item" | "config" | "runtime"
@@ -4024,14 +3999,13 @@ async function assertReadable(path: string, label: string): Promise<void> {
 function parseConfigText(raw: string, path: string): LoopConfig {
 	const format = configFormatForPath(path)
 	const parsed: unknown = format === "toml" ? Bun.TOML.parse(raw) : JSON.parse(raw)
+	if (!isObjectRecord(parsed) || Array.isArray(parsed)) throw new Error("config: must be an object")
 	const input = assertArk(StatusConfigBoundary, parsed, "config")
-	return loopConfigFromStatusInput(input)
+	return loopConfigFromStatusInput(input, extractConfigBindings(parsed))
 }
 
-function loopConfigFromStatusInput(input: StatusConfigInput): LoopConfig {
+function loopConfigFromStatusInput(input: StatusConfigInput, configBindings: JsonObject): LoopConfig {
 	return {
-		repository: input.repository ?? null,
-		baseBranch: input.baseBranch ?? null,
 		worktree: input.worktree ?? null,
 		workflowFile: input.workflowFile ?? null,
 		sharedContextFile: input.sharedContextFile ?? null,
@@ -4039,7 +4013,6 @@ function loopConfigFromStatusInput(input: StatusConfigInput): LoopConfig {
 		evidenceDir: input.evidenceDir ?? null,
 		logDir: input.logDir ?? null,
 		loopDataRoot: input.loopDataRoot ?? null,
-		requireAgentBrowserScreenshots: input.evidence?.requireAgentBrowserScreenshots ?? null,
 		claudeBinary: input.claude?.binary ?? null,
 		claudeExtraArgs: input.claude?.extraArgs ?? [],
 		claudeModel: input.claude?.model ?? null,
@@ -4048,7 +4021,17 @@ function loopConfigFromStatusInput(input: StatusConfigInput): LoopConfig {
 		codexModel: input.codex?.model ?? null,
 		preset: readPresetNameFromStatusInput(input.preset),
 		presetPath: input.presetPath ?? null,
+		configBindings,
 	}
+}
+
+function extractConfigBindings(parsed: Record<string, unknown>): JsonObject {
+	const bindings: JsonObject = {}
+	for (const [key, value] of Object.entries(parsed)) {
+		if (!isJsonValue(value)) throw new Error(`config.${key}: must be JSON-compatible for config binding`)
+		bindings[key] = value
+	}
+	return bindings
 }
 
 export function detectHostRunner(env: Record<string, string | undefined>): AgentRunnerKind {
@@ -4222,11 +4205,9 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 		workflowPath: null,
 		loopDataRoot: input.loopDataRoot,
 		chainName: input.chain.name,
-		repository: input.chain.repository,
-		browserEvidenceRequired: null,
 		dryRun: false,
 		worktree: false,
-		baseBranch: input.chain.baseBranch,
+		chain: input.chain,
 	}, config, preset)
 	const anchorRecord = selectFinalizerAnchorItem(input.items, input.runId)
 	const anchorId = getItemId(anchorRecord, preset)
@@ -4345,8 +4326,6 @@ async function collectStatusRuntimeErrors(
 	const allowedStatuses = new Set<string>([...preset.statuses.continuable, ...preset.statuses.terminal])
 	const allowedPhases = new Set<string>(preset.phases.map((phase) => phase.name))
 
-	if (options.repository !== null && chain.repository !== options.repository) pushCheckError(errors, "chain.repository", `must match configured repository ${options.repository}`)
-	if (options.baseBranch !== null && chain.baseBranch !== options.baseBranch) pushCheckError(errors, "chain.baseBranch", `must match configured baseBranch ${options.baseBranch}`)
 	if (options.worktree && (options.baseBranch === null || options.baseBranch.trim() === "")) pushCheckError(errors, "worktree", "worktree mode requires a non-empty baseBranch")
 
 	await checkDirectory(options.targetCwd, "targetCwd", errors)
@@ -4559,8 +4538,7 @@ export function resolveBinding(source: PresetVariableSource, ctx: ResolveContext
 		return stringifyBindingValue(value, `item.${source.field}`)
 	}
 	if (source.kind === "config") {
-		if (!isConfigBindingField(source.field)) throw new Error(`config.${source.field}: not in known config bindings`)
-		const value = ctx.config[source.field]
+		const value = ctx.config[source.field] ?? (source.fallback.kind === "value" ? source.fallback.value : undefined)
 		return stringifyBindingValue(value, `config.${source.field}`)
 	}
 	if (!isRuntimeBindingKey(source.key)) {
@@ -4739,14 +4717,10 @@ export async function fetchIssueKind(repository: string | null, issueId: string)
 	})
 }
 
-export type ConfigBindingsInput = Pick<LoopOptions, "repository" | "baseBranch" | "browserEvidenceRequired">
+export type ConfigBindingsInput = Pick<LoopOptions, "configBindings">
 
 export function buildConfigBindings(options: ConfigBindingsInput): ConfigBindings {
-	return {
-		repository: options.repository ?? "",
-		baseBranch: options.baseBranch ?? "",
-		[CONFIG_BROWSER_EVIDENCE_FIELD]: options.browserEvidenceRequired,
-	}
+	return { ...options.configBindings }
 }
 
 async function runAgent(

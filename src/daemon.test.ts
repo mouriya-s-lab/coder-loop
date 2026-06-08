@@ -2124,7 +2124,6 @@ describe("daemon", () => {
 				configPath: null,
 				loopDataRoot: fixture.loopDataRoot,
 				chainName,
-				repository: "mouriya-s-lab/coder-loop",
 				output: "json",
 			})
 
@@ -2150,8 +2149,6 @@ describe("daemon", () => {
 					chainName,
 					"--loop-data-root",
 					fixture.loopDataRoot,
-					"--repo",
-					"mouriya-s-lab/coder-loop",
 					"--json",
 				],
 				cwd: REPO_ROOT,

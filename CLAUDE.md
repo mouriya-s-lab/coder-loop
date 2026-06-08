@@ -41,8 +41,8 @@ L2: Preset（presets/<name>/）
 - **Type check**: `bun run typecheck` (alias for `bun x tsc --noEmit`)
 - **Run unit + smoke tests**: `bun test` (覆盖 `src/loop.test.ts` + `src/smoke.test.ts`)
 - **Run orchestrator directly**: `bun run src/loop.ts [N] [--target-cwd <path>] [--once]` (core loop path; operational callers should prefer daemon)
-- **Status snapshot**: `coder-loop status <target> --json [--config <path>] [--repo <owner/repo>]` — stable read-only JSON API for supervisor/scripts; do not scrape runtime files first.
-- **Daemon operations**: `coder-loop daemon status <target> --json`, `coder-loop daemon start|restart <target> [--max-iterations N] [--require-browser-evidence]`, `coder-loop daemon stop <target>` — stable central-daemon / target-chain control API.
+- **Status snapshot**: `coder-loop status <target> --json [--config <path>] [--chain <name>]` — stable read-only JSON API for supervisor/scripts; do not scrape runtime files first.
+- **Daemon operations**: `coder-loop daemon status <target> --json`, `coder-loop daemon start|restart <target> [--max-iterations N]`, `coder-loop daemon stop <target>` — stable central-daemon / target-chain control API.
 - **Runtime inspection / model config**: `coder-loop runtime show <target> [--json]` 列出 preset 所有 phase（角色）当前解析到的 runner/binary/model/source；`coder-loop runtime set <target> [--claude-model opus-4-7|opus-4-8] [--codex-model gpt-5.5]` 用枚举值幂等改写 `.coder-loop/runtime/config.json` 的 `claude.model` / `codex.model`（Claude 模型自动加 `[1m]` 后缀；TOML config 不可写）。Runner kind 归 role entry md，不是 CLI 表面。
 - **Check runtime**: `bun run src/loop.ts --target-cwd <path> --check-runtime`
 - **Dry run**: `bun run src/loop.ts --target-cwd <path> --dry-run` (渲染 + 选 item，不 spawn agent)

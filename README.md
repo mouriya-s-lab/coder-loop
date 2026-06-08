@@ -92,7 +92,7 @@ coder-loop status /path/to/target --json
 coder-loop daemon start /path/to/target
 coder-loop daemon status /path/to/target --json
 coder-loop daemon stop /path/to/target
-coder-loop queue unblock /path/to/source-target --issue 123 --start-daemon --require-browser-evidence
+coder-loop queue unblock /path/to/source-target --issue 123 --start-daemon
 ```
 
 `/dev-plan` 引用以下用户级规则与 skill：

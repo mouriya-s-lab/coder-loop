@@ -31,7 +31,7 @@ preset-specific starter 不在此处：
 手动等价 = 下面三步：
 
 1. Committed `<TARGET>/.coder-loop/workflow.md`（具体内容由 preset 决定；用 `gh-issue-pr-iteration` 时从 `presets/gh-issue-pr-iteration/templates/workflow.md` 起步并裁剪）
-2. `<TARGET>/.coder-loop/runtime/config.json`（写 `preset` 或 `presetPath` 字段；用默认 `gh-issue-pr-iteration` 时再加 `repository / baseBranch`）
+2. `<TARGET>/.coder-loop/runtime/config.json`（写 `preset` 或 `presetPath` 字段；GitHub repo/base branch 由 centralized chain identity 提供给 preset 的透明 `config.*` binding）
 3. 本机 `gh` 授权对应 repository（仅当 preset 用 GitHub 时）
 
 shared 与 PR-body starter 在 `gh-issue-pr-iteration` 下高度推荐但不阻塞 loop 启动。Supervisor 仅在长 multi-mission 工作下需要，短跑无需。

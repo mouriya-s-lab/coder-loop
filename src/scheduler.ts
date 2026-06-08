@@ -1731,9 +1731,10 @@ export function buildSchedulerResolveContext(input: {
 		repoCwd: input.item.repoCwd,
 	}
 	const config = buildConfigBindings({
-		repository: input.chain.repository,
-		baseBranch: input.chain.baseBranch,
-		browserEvidenceRequired: false,
+		configBindings: {
+			repository: input.chain.repository,
+			baseBranch: input.chain.baseBranch,
+		},
 	})
 	return { item: input.item, config, runtime }
 }

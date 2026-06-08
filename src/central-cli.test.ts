@@ -17,8 +17,14 @@ function preInstallReviewOnEmptyLockByName(chainName: string, loopDataRoot: stri
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/central-cli-tests", String(process.pid))
+const DEFAULT_CHAIN_CONFIG = chainConfig("mouriya-s-lab/coder-loop")
+const FIXTURE_CHAIN_CONFIG = chainConfig("fixture/repo")
 
 let nextFixtureId = 0
+
+function chainConfig(repository: string, baseBranch?: string): string {
+	return JSON.stringify(baseBranch === undefined ? { repository } : { repository, baseBranch })
+}
 
 afterAll(async () => {
 	await rm(TEST_ROOT, { recursive: true, force: true })
@@ -28,7 +34,7 @@ describe("central chain/item CLI", () => {
 	test("chain CRUD CLI", async () => {
 		const fixture = await startFixture("chain-crud")
 		try {
-			const created = expectJsonOk(await runCli(["chain", "create", "crud-chain", "--repo", "mouriya-s-lab/coder-loop", "--preset", "gh-issue-pr-iteration", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const created = expectJsonOk(await runCli(["chain", "create", "crud-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--preset", "gh-issue-pr-iteration", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(created.chain).toMatchObject({
 				name: "crud-chain",
 				repository: "mouriya-s-lab/coder-loop",
@@ -59,12 +65,12 @@ describe("central chain/item CLI", () => {
 			const deleted = expectJsonOk(await runCli(["chain", "delete", "crud-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(deleted.chain).toMatchObject({ name: "crud-chain", status: "deleted" })
 
-			const unforcedRecreate = await runCli(["chain", "create", "crud-chain", "--repo", "mouriya-s-lab/coder-loop", "--loop-data-root", fixture.loopDataRoot, "--json"])
+			const unforcedRecreate = await runCli(["chain", "create", "crud-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"])
 			expect(unforcedRecreate.exitCode).toBe(1)
 			expect(unforcedRecreate.stderr).toContain("chain_deleted")
 			expect(unforcedRecreate.stderr).toContain("force=true")
 
-			const recreated = expectJsonOk(await runCli(["chain", "create", "crud-chain", "--repo", "mouriya-s-lab/coder-loop", "--base-branch", "recreated", "--force", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const recreated = expectJsonOk(await runCli(["chain", "create", "crud-chain", "--config-json", chainConfig("mouriya-s-lab/coder-loop", "recreated"), "--force", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(recreated.chain).toMatchObject({
 				name: "crud-chain",
 				status: "active",
@@ -82,8 +88,8 @@ describe("central chain/item CLI", () => {
 				"chain",
 				"create",
 				"umbrella-chain",
-				"--repo",
-				"mouriya-s-lab/coder-loop",
+				"--config-json",
+				DEFAULT_CHAIN_CONFIG,
 				"--umbrella",
 				"mouriya-s-lab/coder-loop#176",
 				"--loop-data-root",
@@ -102,7 +108,7 @@ describe("central chain/item CLI", () => {
 	test("item CRUD CLI", async () => {
 		const fixture = await startFixture("item-crud")
 		try {
-			expectJsonOk(await runCli(["chain", "create", "items-chain", "--repo", "mouriya-s-lab/coder-loop", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expectJsonOk(await runCli(["chain", "create", "items-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			const added = expectJsonOk(await runCli([
 				"item",
 				"add",
@@ -139,7 +145,7 @@ describe("central chain/item CLI", () => {
 	test("item reorder CLI", async () => {
 		const fixture = await startFixture("item-reorder-cli")
 		try {
-			expectJsonOk(await runCli(["chain", "create", "reorder-chain", "--repo", "mouriya-s-lab/coder-loop", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expectJsonOk(await runCli(["chain", "create", "reorder-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			const itemsJson = JSON.stringify([
 				{ issueNumber: 401, repoCwd: REPO_ROOT, title: "first" },
 				{ issueNumber: 402, repoCwd: REPO_ROOT, title: "second" },
@@ -162,7 +168,7 @@ describe("central chain/item CLI", () => {
 	test("batch item add", async () => {
 		const fixture = await startFixture("batch-item-add")
 		try {
-			expectJsonOk(await runCli(["chain", "create", "batch-chain", "--repo", "mouriya-s-lab/coder-loop", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expectJsonOk(await runCli(["chain", "create", "batch-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			const itemsJson = JSON.stringify([
 				{ issueNumber: 25801, repoCwd: REPO_ROOT, title: "first batch item" },
 				{ issueNumber: 25802, repoCwd: REPO_ROOT, priority: "high" },
@@ -183,8 +189,8 @@ describe("central chain/item CLI", () => {
 	test("batch item add matches daemon", async () => {
 		const fixture = await startFixture("batch-item-add-matches-daemon")
 		try {
-			expectJsonOk(await runCli(["chain", "create", "batch-cli-chain", "--repo", "mouriya-s-lab/coder-loop", "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			expectJsonOk(await runCli(["chain", "create", "batch-daemon-chain", "--repo", "mouriya-s-lab/coder-loop", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expectJsonOk(await runCli(["chain", "create", "batch-cli-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expectJsonOk(await runCli(["chain", "create", "batch-daemon-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			const batch = [
 				{ issueNumber: 25901, repoCwd: REPO_ROOT, title: "same first", priority: "medium" },
 				{ issueNumber: 25902, repoCwd: REPO_ROOT, title: "same second", runner: "codex" },
@@ -213,7 +219,7 @@ describe("central chain/item CLI", () => {
 	test("chain status completion", async () => {
 		const fixture = await startFixture("completion", { schedulerEnabled: true })
 		try {
-			expectJsonOk(await runCli(["chain", "create", "done-chain", "--repo", "mouriya-s-lab/coder-loop", "--preset", "single-phase-example", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expectJsonOk(await runCli(["chain", "create", "done-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--preset", "single-phase-example", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			preInstallReviewOnEmptyLockByName("done-chain", fixture.loopDataRoot)
 			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
 			try {
@@ -235,7 +241,7 @@ describe("central chain/item CLI", () => {
 	test("chain status reports dependency waiting reason", async () => {
 		const fixture = await startFixture("dependency-wait-status")
 		try {
-			expectJsonOk(await runCli(["chain", "create", "dependency-wait-chain", "--repo", "mouriya-s-lab/coder-loop", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expectJsonOk(await runCli(["chain", "create", "dependency-wait-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
 			let prerequisiteId = 0
 			let dependentId = 0
@@ -530,7 +536,7 @@ describe("central chain/item CLI", () => {
 	test("json output schema stable", async () => {
 		const fixture = await startFixture("json-schema")
 		try {
-			expectJsonOk(await runCli(["chain", "create", "schema-chain", "--repo", "mouriya-s-lab/coder-loop", "--umbrella", "mouriya-s-lab/coder-loop#176", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expectJsonOk(await runCli(["chain", "create", "schema-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--umbrella", "mouriya-s-lab/coder-loop#176", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expectJsonOk(await runCli(["item", "add", "schema-chain", "--issue", "181", "--repo-cwd", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			const status = expectJsonOk(await runCli(["chain", "status", "schema-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 
@@ -553,17 +559,17 @@ describe("central chain/item CLI", () => {
 	test("daemon start chain resolve", async () => {
 		const fixture = await startFixture("target-cwd")
 		try {
-			expectJsonOk(await runCli(["chain", "create", "target-chain", "--repo", "mouriya-s-lab/coder-loop", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expectJsonOk(await runCli(["chain", "create", "target-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expectJsonOk(await runCli(["item", "add", "target-chain", "--issue", "184", "--repo-cwd", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 
-			const start = await runCli(["daemon", "start", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--dry-run", "--require-browser-evidence"])
+			const start = await runCli(["daemon", "start", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--dry-run"])
 			expect(start.exitCode).toBe(0)
 			expect(start.stdout).toContain(`daemon start dry-run: target=${REPO_ROOT}`)
 			expect(start.stdout).toContain("daemon start dry-run: chain=target-chain")
 			expect(start.stdout).not.toContain("command=")
 
-			const startJson = expectJsonOk(await runCli(["daemon", "start", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--chain", "target-chain", "--dry-run", "--require-browser-evidence", "--json"]))
-			expect(startJson).toMatchObject({ action: "start", target: REPO_ROOT, chain: "target-chain", dryRun: true, requireBrowserEvidence: true })
+			const startJson = expectJsonOk(await runCli(["daemon", "start", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--chain", "target-chain", "--dry-run", "--json"]))
+			expect(startJson).toMatchObject({ action: "start", target: REPO_ROOT, chain: "target-chain", dryRun: true })
 
 			const stopJson = expectJsonOk(await runCli(["daemon", "stop", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--chain", "target-chain", "--dry-run", "--json"]))
 			expect(stopJson).toMatchObject({ action: "stop", target: REPO_ROOT, chain: "target-chain", dryRun: true })
@@ -608,7 +614,7 @@ describe("central chain/item CLI", () => {
 		}
 
 		const result = await runCli(
-			["daemon", "start", target, "--repo", "fixture/repo", "--dry-run", "--json"],
+			["daemon", "start", target, "--dry-run", "--json"],
 			{ [LOOP_DATA_ROOT_ENV]: globalLoopDataRoot },
 		)
 		const parsed = expectJsonOk(result)
@@ -630,7 +636,7 @@ describe("central chain/item CLI", () => {
 		const fixture = await startFixture("target-cwd-ambiguous")
 		try {
 			for (const chain of ["first-chain", "second-chain"]) {
-				expectJsonOk(await runCli(["chain", "create", chain, "--repo", "mouriya-s-lab/coder-loop", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+				expectJsonOk(await runCli(["chain", "create", chain, "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 				expectJsonOk(await runCli(["item", "add", chain, "--issue", chain === "first-chain" ? "184" : "185", "--repo-cwd", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			}
 
@@ -651,7 +657,7 @@ describe("central chain/item CLI", () => {
 		const fixture = await startFixture("status-json")
 		try {
 			const target = await makeTarget("status-json-target")
-			expectJsonOk(await runCli(["chain", "create", "status-json-chain", "--repo", "fixture/repo", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expectJsonOk(await runCli(["chain", "create", "status-json-chain", "--config-json", FIXTURE_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expectJsonOk(await runCli(["item", "add", "status-json-chain", "--issue", "184", "--repo-cwd", target, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 
 			const status = expectJsonOk(await runCli(["status", target, "--loop-data-root", fixture.loopDataRoot, "--json"]))
@@ -720,7 +726,7 @@ describe("central chain/item CLI", () => {
 		try {
 			const env = await fakeCliEnv("doctor-chain")
 			const target = await makeTarget("doctor-target")
-			expectJsonOk(await runCli(["chain", "create", "doctor-chain", "--repo", "fixture/repo", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expectJsonOk(await runCli(["chain", "create", "doctor-chain", "--config-json", FIXTURE_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			const result = await runCli(["doctor", target, "--repo", "fixture/repo", "--loop-data-root", fixture.loopDataRoot, "--chain", "doctor-chain"], env)
 			expect(result.exitCode, result.stderr).toBe(0)
 			expect(result.stderr).toContain("OK: .coder-loop/workflow.md")
@@ -737,7 +743,7 @@ describe("central chain/item CLI", () => {
 			const env = await fakeCliEnv("doctor-runtime-dir")
 			const target = await makeTarget("doctor-runtime-target")
 			await mkdir(resolve(target, ".coder-loop/runtime"), { recursive: true })
-			expectJsonOk(await runCli(["chain", "create", "doctor-runtime-chain", "--repo", "fixture/repo", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expectJsonOk(await runCli(["chain", "create", "doctor-runtime-chain", "--config-json", FIXTURE_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			const result = await runCli(["doctor", target, "--repo", "fixture/repo", "--loop-data-root", fixture.loopDataRoot, "--chain", "doctor-runtime-chain"], env)
 			expect(result.exitCode, result.stderr).toBe(0)
 			expect(result.stderr).toContain("OK: .coder-loop/workflow.md")

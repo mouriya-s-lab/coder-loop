@@ -137,9 +137,12 @@ function makeLoopOptions(): LoopOptions {
 		logFile: "/loop-data/chains/main/daemon/daemon.log",
 		repository: "fixture/repo",
 		baseBranch: "main",
+		configBindings: {
+			repository: "fixture/repo",
+			baseBranch: "main",
+		},
 		chainName: "main",
 		worktree: false,
-		browserEvidenceRequired: false,
 		hostRunner: "codex",
 		defaultRunner: {
 			kind: "codex",

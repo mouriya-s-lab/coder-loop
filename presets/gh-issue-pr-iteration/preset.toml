@@ -65,7 +65,7 @@ runner = "codex"
   RUNTIME_INPUTS_DOC       = "runtime.runtimeInputsDoc"
   PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
   ISSUE_KIND_DOC           = "runtime.issueKindDoc"
-  REQUIRE_BROWSER_EVIDENCE = { source = "config.requireBrowserEvidence", label = "Browser evidence required", suffix = " — when `true`, Layer 4 must contain the strongest feasible E2E evidence for the project type. For projects with UI: real browser screenshots of the running dev server or deployed page. For projects without UI (pure CLI / library / backend / config): CLI smoke run transcripts with command, exit status, and output are the Layer 4 evidence; do not fabricate screenshots by creating HTML files and screenshotting them." }
+  REQUIRE_BROWSER_EVIDENCE = { source = "config.requireBrowserEvidence", default = false, label = "Browser evidence required", suffix = " — when `true`, Layer 4 must contain the strongest feasible E2E evidence for the project type. For projects with UI: real browser screenshots of the running dev server or deployed page. For projects without UI (pure CLI / library / backend / config): CLI smoke run transcripts with command, exit status, and output are the Layer 4 evidence; do not fabricate screenshots by creating HTML files and screenshotting them." }
   ISSUE_BRANCH             = { source = "item.branch", label = "Existing issue branch", blankBefore = true }
   ISSUE_PR                 = { source = "item.pr", label = "Existing issue PR" }
   ISSUE_STATUS             = { source = "item.status", label = "Queue status" }
@@ -128,7 +128,7 @@ runner = "claude"
   RUNTIME_INPUTS_DOC       = "runtime.runtimeInputsDoc"
   PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
   ISSUE_KIND_DOC           = "runtime.issueKindDoc"
-  REQUIRE_BROWSER_EVIDENCE = { source = "config.requireBrowserEvidence", label = "Browser evidence required", suffix = " — when `true`, Layer 4 must contain the strongest feasible E2E evidence for the project type. For projects with UI: real browser screenshots of the running dev server or deployed page. For projects without UI (pure CLI / library / backend / config): CLI smoke run transcripts with command, exit status, and output are the Layer 4 evidence; synthetic screenshots (HTML files rendered and screenshotted) are rejected." }
+  REQUIRE_BROWSER_EVIDENCE = { source = "config.requireBrowserEvidence", default = false, label = "Browser evidence required", suffix = " — when `true`, Layer 4 must contain the strongest feasible E2E evidence for the project type. For projects with UI: real browser screenshots of the running dev server or deployed page. For projects without UI (pure CLI / library / backend / config): CLI smoke run transcripts with command, exit status, and output are the Layer 4 evidence; synthetic screenshots (HTML files rendered and screenshotted) are rejected." }
   ISSUE_BRANCH             = { source = "item.branch", label = "Existing issue branch", blankBefore = true }
   ISSUE_PR                 = { source = "item.pr", label = "Existing issue PR" }
   ISSUE_STATUS             = { source = "item.status", label = "Queue status" }
@@ -172,7 +172,7 @@ runner  = "codex"
   RUNTIME_INPUTS_DOC       = "runtime.runtimeInputsDoc"
   PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
   ISSUE_KIND_DOC           = "runtime.issueKindDoc"
-  REQUIRE_BROWSER_EVIDENCE = "config.requireBrowserEvidence"
+  REQUIRE_BROWSER_EVIDENCE = { source = "config.requireBrowserEvidence", default = false }
   ISSUE_BRANCH             = "item.branch"
   ISSUE_PR                 = "item.pr"
   ISSUE_STATUS             = "item.status"
@@ -216,7 +216,7 @@ runner  = "codex"
   RUNTIME_INPUTS_DOC       = "runtime.runtimeInputsDoc"
   PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
   ISSUE_KIND_DOC           = "runtime.issueKindDoc"
-  REQUIRE_BROWSER_EVIDENCE = "config.requireBrowserEvidence"
+  REQUIRE_BROWSER_EVIDENCE = { source = "config.requireBrowserEvidence", default = false }
   ISSUE_BRANCH             = "item.branch"
   ISSUE_PR                 = "item.pr"
   ISSUE_STATUS             = "item.status"

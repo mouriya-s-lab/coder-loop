@@ -16,7 +16,7 @@ describe("buildLiveRuntimeHealthLines", () => {
 	test("summarizes status snapshot health and stale loop ownership signals", async () => {
 		const target = await makeDoctorTarget()
 		const loopDataRoot = resolve(target, "loop-data")
-		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, loopDataRoot, repository: "fixture/repo", output: "json" })
+		const snapshot = await buildCoderLoopStatusSnapshot({ targetCwd: target, configPath: null, loopDataRoot, output: "json" })
 		const lines = buildLiveRuntimeHealthLines(snapshot)
 
 		expect(lines).toContain(`OK: state ok (${resolve(loopDataRoot, "db.sqlite")})`)

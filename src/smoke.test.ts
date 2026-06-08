@@ -105,11 +105,10 @@ describe("smoke: v2 central chain CLI", () => {
 		const fixture = await createTarget("daemon-smoke")
 		seedChain(fixture, { issueNumber: 184, status: "queued", extra: { issueKind: "code" } })
 
-		const result = runCli(["daemon", "start", fixture.target, "--chain", fixture.chainName, "--dry-run", "--require-browser-evidence"])
+		const result = runCli(["daemon", "start", fixture.target, "--chain", fixture.chainName, "--dry-run"])
 		expect(result.exitCode).toBe(0)
 		expect(result.stdout).toContain(`daemon start dry-run: chain=${fixture.chainName}`)
 		expect(result.stdout).toContain("daemon start dry-run: central-daemon=required")
-		expect(result.stdout).toContain("daemon start dry-run: require-browser-evidence=true")
 	})
 })
 

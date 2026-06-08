@@ -16,7 +16,7 @@ coder-loop 是长任务 / 多 actor / 多阶段工作的调度器，不是所有
 
 ```bash
 coder-loop doctor <target> --repo <owner>/<repo>
-coder-loop chain create <chain-name> --repo <owner>/<repo> --json
+coder-loop chain create <chain-name> --config-json '{"repository":"<owner>/<repo>"}' --json
 coder-loop item add <chain-name> --issue <n> --repo-cwd <target> --json
 coder-loop daemon start <target>
 coder-loop status <target> --json

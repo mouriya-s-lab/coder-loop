@@ -151,9 +151,9 @@ function makeOptions(preset = makePreset()): LoopOptions {
 		logFile: resolve(TEST_ROOT, "runs/test.log"),
 		repository: "mouriya-s-lab/coder-loop",
 		baseBranch: "main",
+		configBindings: makeConfig(),
 		chainName: "fixture",
 		worktree: false,
-		browserEvidenceRequired: false,
 		hostRunner: "codex",
 		defaultRunner: { ...codexRunner, source: "engine-builtin" },
 		reviewRunner: { ...codexRunner, source: "engine-builtin" },
@@ -243,7 +243,8 @@ describe("ItemRecord prompt bindings", () => {
 		expect(resolveBinding({ kind: "item", field: "branch" }, ctx)).toBe("issue-184")
 		expect(resolveBinding({ kind: "item", field: "pr" }, ctx)).toBe("191")
 		expect(resolveBinding({ kind: "item", field: "branch" }, { ...ctx, item: makeItem({ branch: "legacy", extra: { branch: "extra" } }) })).toBe("extra")
-		expect(resolveBinding({ kind: "config", field: "requireBrowserEvidence" }, ctx)).toBe("true")
+		expect(resolveBinding({ kind: "config", field: "requireBrowserEvidence", fallback: { kind: "none" } }, ctx)).toBe("true")
+		expect(resolveBinding({ kind: "config", field: "missingFlag", fallback: { kind: "value", value: false } }, ctx)).toBe("false")
 	})
 
 	test("parsePreset accepts nested ItemRecord fields but rejects unknown roots", () => {
@@ -265,12 +266,13 @@ describe("ItemRecord prompt bindings", () => {
 })
 
 describe("runtime binding helpers", () => {
-	test("buildConfigBindings reads repository, baseBranch, and browser evidence flag", () => {
+	test("buildConfigBindings returns transparent config data", () => {
 		const options = makeOptions()
-		const config = buildConfigBindings({ ...options, browserEvidenceRequired: true })
+		const config = buildConfigBindings({ ...options, configBindings: { ...options.configBindings, customField: "custom" } })
 		expect(config.repository).toBe("mouriya-s-lab/coder-loop")
 		expect(config.baseBranch).toBe("main")
-		expect(config.requireBrowserEvidence).toBe(true)
+		expect(config.requireBrowserEvidence).toBe(false)
+		expect(config.customField).toBe("custom")
 	})
 
 	test("buildRuntimeBindings maps issue run context into strings", () => {
@@ -398,19 +400,16 @@ describe("runner and daemon helpers", () => {
 			configPath: null,
 			loopDataRoot: TEST_ROOT,
 			chainName: "fixture",
-			repository: "mouriya-s-lab/coder-loop",
-			browserEvidenceRequired: true,
 			iterationLimit: null,
 			dryRun: true,
 			worktree: false,
-			baseBranch: "main",
 			json: false,
 		})
 
 		expect(plan.command).toEqual([process.argv[0] ?? "bun", resolve(import.meta.dir, "loop.ts"), "daemon", "up", "--loop-data-root", TEST_ROOT])
 		expect(plan.commandLine).not.toContain("--target-cwd")
 		expect(plan.commandLine).not.toContain("--max-iterations")
-		expect(plan.browserEvidenceRequired).toBe(true)
+		expect(plan.commandLine).not.toContain("--require-browser-evidence")
 		// The central daemon is global: its stdout/stderr land under loop-data/daemon, never
 		// pinned to a chains/<chain> directory or the legacy target-local .coder-loop/runtime/logs.
 		expect(plan.stdoutPath.startsWith(resolve(TEST_ROOT, "daemon") + "/")).toBe(true)

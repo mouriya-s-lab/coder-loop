@@ -38,7 +38,7 @@ coder-loop chain delete --help
 coder-loop item add --help
 coder-loop item list --help
 coder-loop item update --help
-coder-loop queue unblock <target> --issue <id> --start-daemon --require-browser-evidence
+coder-loop queue unblock <target> --issue <id> --start-daemon
 ```
 
 ## Status truth

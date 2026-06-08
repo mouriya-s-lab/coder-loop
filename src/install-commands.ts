@@ -453,11 +453,10 @@ async function ensureGithubLabels(repo: string | null, dryRun: boolean): Promise
 // Final status smoke invocation
 // ===================================================================
 
-async function runInstallStatusSmoke(target: string, repo: string | null, loopDataRoot: string | null, chainName: string | null = null): Promise<{ code: number; output: string }> {
+async function runInstallStatusSmoke(target: string, loopDataRoot: string | null, chainName: string | null = null): Promise<{ code: number; output: string }> {
 	const entry = resolve(PKG_ROOT, "src/loop.ts")
 	const bunPath = whichBinary("bun") ?? "bun"
 	const args = [entry, "status", target, "--json"]
-	if (repo !== null) args.push("--repo", repo)
 	if (loopDataRoot !== null) args.push("--loop-data-root", loopDataRoot)
 	if (chainName !== null) args.push("--chain", chainName)
 	const child = await spawnCapture(bunPath, args)
@@ -667,7 +666,7 @@ export async function runInstallCommand(rawArgs: string[]): Promise<void> {
 		return
 	}
 	info("\n[Final] 跑 coder-loop status --json")
-	const finalCheck = await runInstallStatusSmoke(args.target, repoForChain, args.loopDataRoot, chainCreate.chainName)
+	const finalCheck = await runInstallStatusSmoke(args.target, args.loopDataRoot, chainCreate.chainName)
 	process.stderr.write(finalCheck.output)
 	if (finalCheck.code !== 0) {
 		fail(`\nInstall 部分成功，但 status smoke 退出 ${finalCheck.code}。修复后重跑 install。`)
@@ -749,7 +748,6 @@ export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
 		configPath: null,
 		loopDataRoot: args.loopDataRoot,
 		chainName: args.chainName,
-		repository: args.repo,
 		output: "json",
 	})
 
