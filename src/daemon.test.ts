@@ -1887,7 +1887,7 @@ describe("daemon", () => {
 		}
 	})
 
-	test("daemon startup reconciles an orphaned run on a terminal non-current item", async () => {
+	test("daemon startup reconciles an orphan run on a terminal non-current item", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-orphan-run-recovery`)
 		const loopDataRoot = resolve(root, "ld")
 		await mkdir(loopDataRoot, { recursive: true })
