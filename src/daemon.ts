@@ -127,6 +127,8 @@ const MAX_ITEM_TITLE_LENGTH = 1024
 const MAX_REPO_CWD_LENGTH = 4096
 const MAX_REPOSITORY_REF_LENGTH = 200
 const STALE_RECOVERY_FORCE_AFTER_MS = 1_000
+const ORPHANED_RUN_STATUS = "orphaned"
+const ORPHANED_RUN_EXIT_CODE = -1
 const DAEMON_SOCKET_PATH_CHECK_INTERVAL_MS = 250
 const ORPHAN_CHAIN_DIR_PREFIX = ".orphan-"
 const RESERVED_METADATA_KEYS = new Set(["__proto__", "constructor", "prototype"])
@@ -661,38 +663,67 @@ export class CoderLoopDaemon {
 		for (const chain of store.listChains()) {
 			if (chain.status === "deleted") continue
 			const currentRun = store.getCurrentRun(chain.id)
-			if (currentRun === null) continue
+			if (currentRun !== null) {
+				const stalePid = await this.readRunProcessGroupPid(chain, currentRun.runId, currentRun.extra)
+				if (stalePid !== null) await terminateStaleProcessGroup(stalePid, Math.min(this.shutdownGraceMs, STALE_RECOVERY_FORCE_AFTER_MS))
 
-			const stalePid = await this.readCurrentRunProcessGroupPid(chain, currentRun.runId, currentRun.extra)
-			if (stalePid !== null) await terminateStaleProcessGroup(stalePid, Math.min(this.shutdownGraceMs, STALE_RECOVERY_FORCE_AFTER_MS))
+				const midFlightItemId = optionalPositiveInteger(currentRun.extra.itemId)
+				const midFlightItem = midFlightItemId !== null ? store.getItem(midFlightItemId) : null
+				const itemsToRecover = midFlightItem === null ? [] : [midFlightItem]
 
-			const midFlightItemId = optionalPositiveInteger(currentRun.extra.itemId)
-			const midFlightItem = midFlightItemId !== null ? store.getItem(midFlightItemId) : null
-			const itemsToRecover = midFlightItem === null ? [] : [midFlightItem]
-
-			store.clearCurrentRun(chain.id)
-			const recoveredAt = unixSeconds()
-			const recoveryStatus = await this.entryItemStatusForRecovery(chain)
-			for (const item of itemsToRecover) {
-				store.updateItem(item.id, { status: recoveryStatus, phase: null, updatedAt: recoveredAt })
+				store.clearCurrentRun(chain.id)
+				const recoveredAt = unixSeconds()
+				const recoveryStatus = await this.entryItemStatusForRecovery(chain)
+				for (const item of itemsToRecover) {
+					store.updateItem(item.id, { status: recoveryStatus, phase: null, updatedAt: recoveredAt })
+				}
+				await this.appendDaemonLogIfChainNameIsValid(chain, {
+					type: "scheduler.recovery",
+					reason: "stale_current_run",
+					chainId: chain.id,
+					runId: currentRun.runId,
+					pid: stalePid,
+					recoveredItems: itemsToRecover.map((item) => ({
+						itemId: item.id,
+						issueNumber: item.issueNumber,
+						fromStatus: item.status,
+						toStatus: recoveryStatus,
+					})),
+				})
 			}
-			await this.appendDaemonLogIfChainNameIsValid(chain, {
-				type: "scheduler.recovery",
-				reason: "stale_current_run",
-				chainId: chain.id,
-				runId: currentRun.runId,
-				pid: stalePid,
-				recoveredItems: itemsToRecover.map((item) => ({
-					itemId: item.id,
-					issueNumber: item.issueNumber,
-					fromStatus: item.status,
-					toStatus: recoveryStatus,
-				})),
-			})
+
+			await this.reconcileOrphanedRuns(chain)
 		}
 	}
 
-	private async readCurrentRunProcessGroupPid(chain: ChainRecord, runId: string, extra: JsonObject): Promise<number | null> {
+	private async reconcileOrphanedRuns(chain: ChainRecord): Promise<void> {
+		const store = this.requireStore()
+		const orphanedRuns = store.listRuns(chain.id).filter((run) => run.endedAt === null)
+		if (orphanedRuns.length === 0) return
+
+		const reconciledAt = unixSeconds()
+		const reconciledRuns: JsonObject[] = []
+		for (const run of orphanedRuns) {
+			const stalePid = await this.readRunProcessGroupPid(chain, run.runId, run.extra)
+			if (stalePid !== null) await terminateStaleProcessGroup(stalePid, Math.min(this.shutdownGraceMs, STALE_RECOVERY_FORCE_AFTER_MS))
+			store.completeRun(run.runId, {
+				endedAt: reconciledAt,
+				exitCode: ORPHANED_RUN_EXIT_CODE,
+				status: ORPHANED_RUN_STATUS,
+				extra: { ...run.extra, reconciledBy: "daemon_startup", reconciledAt },
+			})
+			reconciledRuns.push({ runId: run.runId, itemId: run.itemId, phase: run.phase, pid: stalePid })
+		}
+
+		await this.appendDaemonLogIfChainNameIsValid(chain, {
+			type: "scheduler.recovery",
+			reason: "orphaned_run_reconciled",
+			chainId: chain.id,
+			reconciledRuns,
+		})
+	}
+
+	private async readRunProcessGroupPid(chain: ChainRecord, runId: string, extra: JsonObject): Promise<number | null> {
 		const extraPid = optionalPositiveInteger(extra.pid)
 		if (extraPid !== null && extra.processGroupLeader === true) return extraPid
 		try {
