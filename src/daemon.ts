@@ -181,7 +181,7 @@ const ITEM_UPDATE_FIELD_KEYS = [
 	"extraPatch",
 	"dependsOn",
 ] as const
-const ITEM_UPDATE_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "fields", ...ITEM_UPDATE_FIELD_KEYS] as const
+const ITEM_UPDATE_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "fields", "requestingRunId", ...ITEM_UPDATE_FIELD_KEYS] as const
 const ITEM_REORDER_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "position"] as const
 
 export class DaemonError extends Error {
@@ -825,8 +825,10 @@ export class CoderLoopDaemon {
 		return await Promise.all(activeRuns.map((run) => run.terminate({ forceAfterMs: this.shutdownGraceMs })))
 	}
 
-	private async terminateActiveRunsForItem(itemId: number): Promise<SchedulerCompletedRun[]> {
-		const activeRuns = listActiveRuns(this.schedulerState).filter((run) => run.itemId === itemId)
+	private async terminateActiveRunsForItem(itemId: number, exemptRunId?: string): Promise<SchedulerCompletedRun[]> {
+		const activeRuns = listActiveRuns(this.schedulerState)
+			.filter((run) => run.itemId === itemId)
+			.filter((run) => run.runId !== exemptRunId)
 		return await Promise.all(activeRuns.map((run) => run.terminate({ forceAfterMs: this.shutdownGraceMs })))
 	}
 
@@ -986,11 +988,12 @@ export class CoderLoopDaemon {
 			input.extra = validateItemExtra(applyBlockerMutation({ ...item.extra }, blockerMutation))
 		}
 		const terminalStatuses = await this.terminalItemStatuses(chain)
+		const requestingRunId = optionalString(args, "requestingRunId") ?? undefined
 		const resumeScheduler = await this.pauseSchedulerForMutation()
 		try {
 			const updated = store.updateItem(item.id, input)
 			if (input.status !== undefined && terminalStatuses.has(input.status)) {
-				await this.terminateActiveRunsForItem(updated.id)
+				await this.terminateActiveRunsForItem(updated.id, requestingRunId)
 			}
 			return { item: itemToJson(updated) }
 		} finally {

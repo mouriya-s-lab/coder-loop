@@ -25,7 +25,7 @@ import {
 	type DaemonResponse,
 } from "./daemon"
 import { dispatchSubcommand } from "./install-commands"
-import { RuntimePathError, resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
+import { RUN_ID_ENV, RuntimePathError, resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import {
 	type ChainRecord,
 	type CurrentRunRecord,
@@ -1695,6 +1695,8 @@ async function runItemCommand(args: string[]): Promise<void> {
 	assignCliOptional(fields, "blockerRef", itemArgs.blockerRef)
 	if (itemArgs.clearBlocker) fields.clearBlocker = true
 	if (Object.keys(fields).length === 0) fail("item update requires at least one field to update")
+	const runIdFromEnv = process.env[RUN_ID_ENV]
+	if (runIdFromEnv !== undefined && runIdFromEnv !== "") requestArgs.requestingRunId = runIdFromEnv
 	const result = await requestDaemonResult(itemArgs.loopDataRoot, "item.update", requestArgs)
 	writeCommandResult(result, itemArgs.json, formatItemMutationResult)
 }
