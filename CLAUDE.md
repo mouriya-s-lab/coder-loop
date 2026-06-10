@@ -130,7 +130,7 @@ starter 位置：
 
 - **supervisor bootstrap 要手动改占位符**：项目级 bootstrap skill 应自动 dispatch 到 `<TARGET>/.coder-loop/runtime/supervisor/` 下最近活动 mission（#31）。
 - **runtime.\* 白名单**：Runtime binding key count: 27. 清单与维护流程见 `docs/preset-authoring.md`；新增 key 仍需同时改 `RUNTIME_BINDING_KEYS` 与 `buildRuntimeBindings`，并用测试守护文档计数 / 清单不漂移。任何新 key 必须先 grep `presets/<preset>/` 证明已有 fragment 在 work-around 该值缺失（参考 #32 audit）。例外：与新 fragments / 新引擎能力同 issue 一并引入的 key（如 `issueKind` 配 commitment-gate fragments，#40；`agentCwd` 让 spawn cwd 可 per-item 覆盖跨 repo）不在 audit 适用范围。
-- **SQLite item 物理列**：当前 centralized DB 仍保留 `issue_number` / `branch` / `pr` 等兼容列；preset 绑定层已通过 `[item.fields]` 声明透明字段并在加载期拒绝未声明 `item.<f>`。preset 声明位收敛归 #412；`issue_number` / `branch` / `pr` 物理列的去留随 v3 chain 节点泛化（#413）重新定界。
+- **SQLite item 物理列**：当前 centralized DB 仍保留 `issue_number` / `branch` / `pr` 等兼容列；preset 绑定层已通过 `[item.fields]` 声明透明字段并在加载期拒绝未声明 `item.<f>`。preset 声明位收敛归 #412；`issue_number` / `branch` / `pr` 物理列退役归 #419。
 
 ## Tech Stack
 

@@ -48,7 +48,7 @@ schema v7 的两张核心表：
 - `chains`：`name`(unique) / `preset`(**NOT NULL**) / `repository` / `base_branch` / `umbrella_*` / `status` / `metadata`。
 - `items`：`chain_id` / `issue_number`(**NOT NULL**) / `repo_cwd` / `status` / `attempts` / `position` / `branch` / `pr` / `session_ids` / `phase` / `extra`，约束 `UNIQUE (chain_id, issue_number)`。
 
-注意这些**写死的 GitHub-PR 形状**：item 身份键焊死 `issue_number`、`branch` / `pr` 是物理列、preset 焊在 chain 级（`chains.preset NOT NULL`）。它们和第三节的状态规则硬编码一样，都是 `#5` 字符串无感契约未兑现的地方，登记在 `#370`（契约偏离）。preset 焊 chain 级由 `#412`（item 创建时可选指定 preset，本参数收敛线）收敛；item 身份键与 `branch` / `pr` 物理列的去留随 v3 chain 节点泛化（`#413`）重新定界。曾把这部分定为 v3 主体的 `#369`（item 自带 preset + prompt、chain 退为纯容器）定义错误，已作废。
+注意这些**写死的 GitHub-PR 形状**：item 身份键焊死 `issue_number`、`branch` / `pr` 是物理列、preset 焊在 chain 级（`chains.preset NOT NULL`）。它们和第三节的状态规则硬编码一样，都是 `#5` 字符串无感契约未兑现的地方，登记在 `#370`（契约偏离）。preset 焊 chain 级由 `#412`（item 创建时可选指定 preset，本参数收敛线）收敛；item 身份键与 `branch` / `pr` 物理列的退役归 `#419`（同线）。曾把这部分定为 v3 主体的 `#369`（item 自带 preset + prompt、chain 退为纯容器）定义错误，已作废。
 
 ## 五、v2 解决了什么，留下什么
 
