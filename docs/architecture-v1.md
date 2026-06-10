@@ -76,6 +76,6 @@ flowchart TD
 
 ### 主线的准确表述
 
-把这些写死项迁出的工作走的正是 `#30` 第一条 comment 被否决的那条路——**机制留在引擎，参数进 preset**，且已逐项落地：`#380`（phase 顺序按 preset 推进）、`#381`（phase metadata 入 preset.toml，含 per-phase `summaryMarker`）、`#373`（item 字段 preset 声明）、`#376`（kind 路由移出引擎）、`#386`（`[statuses]` 增 `unblockable`/`entry`，unblock 参数化）；`#369`/`#370`（v3）继续。**不要把这条主线说成「业务语义不该在引擎」**——那个表述会复现 `#30` 01:04 的误读（连机制一起拆掉）。准确的验收标准是：引擎里允许状态机、verdict 分发、kind 路由这些机制，但每个参数（词表、转移表、路由映射、marker）必须可从 preset 数据读出；grep 不到字面量只是这个性质的副产品。
+把这些写死项迁出的工作走的正是 `#30` 第一条 comment 被否决的那条路——**机制留在引擎，参数进 preset**，且已逐项落地：`#380`（phase 顺序按 preset 推进）、`#381`（phase metadata 入 preset.toml，含 per-phase `summaryMarker`）、`#373`（item 字段 preset 声明）、`#376`（kind 路由移出引擎）、`#386`（`[statuses]` 增 `unblockable`/`entry`，unblock 参数化）；`#370`（偏离登记）/`#396`（元数据闭环 umbrella）/`#412`（preset 声明位收敛）继续。这条线属 v2 参数收敛范畴，不是 v3；v3 是 chain 节点泛化（节点 = item|容器），见 `#413`（曾把 item 级 preset 定为 v3 主体的 `#369` 定义错误，已作废）。**不要把这条主线说成「业务语义不该在引擎」**——那个表述会复现 `#30` 01:04 的误读（连机制一起拆掉）。准确的验收标准是：引擎里允许状态机、verdict 分发、kind 路由这些机制，但每个参数（词表、转移表、路由映射、marker）必须可从 preset 数据读出；grep 不到字面量只是这个性质的副产品。
 
 daemon 化（见 `architecture-v2.md`）是并行的另一条线，它换的是执行模型，不解决参数焊死。两条线不要混为一谈。

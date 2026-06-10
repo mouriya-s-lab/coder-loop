@@ -41,18 +41,18 @@ flowchart TD
 
 关键：**`#345` 恢复的只是"字段谁写"，不是"参数归谁"。** 无论 `#296` 还是 `#345`，状态机制的参数仍以字面量写死在 `src/loop.ts` / 调度器里。把参数迁进 preset（机制留在引擎）是今天才推进的工作，已落地：summary marker 成为 per-phase preset 字段（`src/loop.ts:2443` 读 `reviewPhase.summaryMarker`；`#381` phase metadata 入 preset.toml）、post-review 触发是 preset 声明的 DAG 边（`preset.toml` `trigger = { afterPhase, whenStatus }`）、`#386` 给 `[statuses]` 加 `unblockable`/`entry`/`success` 让 unblock 转移参数化、`#380` phase 顺序按 preset 推进、`#376` issue-kind 路由移出引擎、`#373` item 字段经 `[item.fields]` 声明。**仍焊死的参数**：verdict 词表与 `verdict === "stop"` 映射（`src/loop.ts:843`、`:2444`）、`ISSUE_KIND_VALUES`（`:863`）、daemon fallback status 集合（`src/daemon.ts:117-118`）、SQLite 默认 statuses（`src/sqlite-state.ts:824`）。
 
-## 四、SQLite 状态与 GitHub-PR 耦合（v3 的起点）
+## 四、SQLite 状态与 GitHub-PR 耦合（遗留债）
 
 schema v7 的两张核心表：
 
 - `chains`：`name`(unique) / `preset`(**NOT NULL**) / `repository` / `base_branch` / `umbrella_*` / `status` / `metadata`。
 - `items`：`chain_id` / `issue_number`(**NOT NULL**) / `repo_cwd` / `status` / `attempts` / `position` / `branch` / `pr` / `session_ids` / `phase` / `extra`，约束 `UNIQUE (chain_id, issue_number)`。
 
-注意这些**写死的 GitHub-PR 形状**：item 身份键焊死 `issue_number`、`branch` / `pr` 是物理列、preset 焊在 chain 级（`chains.preset NOT NULL`）。它们和第三节的状态规则硬编码一样，都是 `#5` 字符串无感契约未兑现的地方，登记在 `#370`（契约偏离）、由 `#369`（v3：item 自带 preset + prompt、chain 退为纯容器）重塑。
+注意这些**写死的 GitHub-PR 形状**：item 身份键焊死 `issue_number`、`branch` / `pr` 是物理列、preset 焊在 chain 级（`chains.preset NOT NULL`）。它们和第三节的状态规则硬编码一样，都是 `#5` 字符串无感契约未兑现的地方，登记在 `#370`（契约偏离）。preset 焊 chain 级由 `#412`（item 创建时可选指定 preset，本参数收敛线）收敛；item 身份键与 `branch` / `pr` 物理列的去留随 v3 chain 节点泛化（`#413`）重新定界。曾把这部分定为 v3 主体的 `#369`（item 自带 preset + prompt、chain 退为纯容器）定义错误，已作废。
 
 ## 五、v2 解决了什么，留下什么
 
 - **解决了**（执行模型天花板）：中央 daemon 统一调度、多 chain 并发、SQLite 事务状态、统一可观测面（`status` / `daemon status`）。
 - **没解决 / 留给后续**（参数焊死）：verdict 词表、kind 词表、daemon/SQLite 默认 status 集合等机制参数仍写死引擎（清单见第三节）、item 身份焊死 issue、preset 焊 chain 级。
 
-**两条独立的演变线**：daemon 化（v1→v2，换执行模型，本文）；机制参数外部化进 preset——机制留引擎、参数进 preset（贯穿 v2 后期到 v3 的 `#373`/`#376`/`#380`/`#381`/`#386`/`#369`/`#370`，准确表述与 `#30` 转折点见 `architecture-v1.md` 第四节）。它们经常被混为一谈，但解决的是不同问题。
+**两条独立的演变线**：daemon 化（v1→v2，换执行模型，本文）；机制参数外部化进 preset——机制留引擎、参数进 preset（贯穿 v2 后期的 `#373`/`#376`/`#380`/`#381`/`#386`/`#370`/`#396`/`#412`，准确表述与 `#30` 转折点见 `architecture-v1.md` 第四节）。它们经常被混为一谈，但解决的是不同问题。
