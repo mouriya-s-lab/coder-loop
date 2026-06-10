@@ -825,13 +825,6 @@ export class CoderLoopDaemon {
 		return await Promise.all(activeRuns.map((run) => run.terminate({ forceAfterMs: this.shutdownGraceMs })))
 	}
 
-	private async terminateActiveRunsForItem(itemId: number, exemptRunId?: string): Promise<SchedulerCompletedRun[]> {
-		const activeRuns = listActiveRuns(this.schedulerState)
-			.filter((run) => run.itemId === itemId)
-			.filter((run) => run.runId !== exemptRunId)
-		return await Promise.all(activeRuns.map((run) => run.terminate({ forceAfterMs: this.shutdownGraceMs })))
-	}
-
 	private async cleanupChainRuntime(chain: ChainRecord): Promise<JsonObject> {
 		const store = this.requireStore()
 		const repoCwds = store.listItems(chain.id).map((item) => item.repoCwd)
@@ -987,14 +980,9 @@ export class CoderLoopDaemon {
 		} else if (blockerMutation !== null) {
 			input.extra = validateItemExtra(applyBlockerMutation({ ...item.extra }, blockerMutation))
 		}
-		const terminalStatuses = await this.terminalItemStatuses(chain)
-		const requestingRunId = optionalString(args, "requestingRunId") ?? undefined
 		const resumeScheduler = await this.pauseSchedulerForMutation()
 		try {
 			const updated = store.updateItem(item.id, input)
-			if (input.status !== undefined && terminalStatuses.has(input.status)) {
-				await this.terminateActiveRunsForItem(updated.id, requestingRunId)
-			}
 			return { item: itemToJson(updated) }
 		} finally {
 			resumeScheduler()

@@ -259,7 +259,7 @@ async function writeFakeRunner(path: string): Promise<void> {
 
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
-const input = JSON.parse(prompt)
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
 await appendFile(input.eventLog, JSON.stringify({ type: "unexpected-spawn", issueNumber: input.issueNumber, runId: input.runId }) + "\\n")
 console.log("ITERATION SUMMARY: scope=kind-gate-live; reason=unexpected-spawn")
 process.exit(0)

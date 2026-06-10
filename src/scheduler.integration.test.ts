@@ -38,7 +38,7 @@ test("forced spawn failures over thirty scheduler seconds are capped by persiste
 		fakeRunner,
 		`const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
-const input = JSON.parse(prompt)
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
 console.error("forced failure for item " + input.itemId)
 process.exit(1)
 `,
@@ -288,7 +288,7 @@ test("completed chain removes its real git worktree registration and local direc
 
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
-const input = JSON.parse(prompt)
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
 const loopDataRoot = process.env.CODER_LOOP_DATA_DIR
 if (typeof loopDataRoot === "string" && typeof input.itemId === "number") {
 	const store = openSqliteStateStore({ loopDataRoot })
@@ -372,7 +372,7 @@ test("single item review retry verdict routes back through iteration before revi
 
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
-const input = JSON.parse(prompt)
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
 const status = input.phase === "review" ? "changes_requested" : null
 const loopDataRoot = process.env.CODER_LOOP_DATA_DIR
 if (typeof status === "string" && typeof loopDataRoot === "string" && typeof input.itemId === "number") {

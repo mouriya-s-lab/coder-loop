@@ -117,7 +117,8 @@ function extractPrompt(args: string[]): string {
 
 function parsePrompt(prompt: string): Record<string, unknown> {
 	try {
-		const parsed = JSON.parse(prompt) as unknown
+		const firstLine = prompt.split("\n")[0] ?? prompt
+		const parsed = JSON.parse(firstLine) as unknown
 		return isObject(parsed) ? parsed : {}
 	} catch {
 		return {}

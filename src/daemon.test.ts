@@ -1482,7 +1482,7 @@ describe("daemon", () => {
 		}
 	})
 
-	test("terminal item.update terminates active run and completes chain", async () => {
+	test("terminal item.update sets terminal status; active run finishes naturally, then chain completes", async () => {
 		const fixture = await startFixture("terminal-update-active-run")
 		try {
 			const chain = record(expectOk(await request(fixture, "chain.create", {
@@ -1495,7 +1495,7 @@ describe("daemon", () => {
 				chainId,
 				issueNumber: 249,
 				repoCwd: REPO_ROOT,
-				extra: { sleepMs: 5_000, exitCode: 0 },
+				extra: { sleepMs: 500, exitCode: 0 },
 			})).item)
 			const itemId = numberValue(added.id)
 			await waitFor(async () => record(expectOk(await request(fixture, "daemon.status")).daemon).activeRuns, (runs) => Array.isArray(runs) && runs.length === 1)
@@ -1512,8 +1512,12 @@ describe("daemon", () => {
 			})).item)
 
 			expect(updated).toMatchObject({ id: itemId, status: "done" })
-			expect(await readChainStatus(fixture.loopDataRoot, chainId)).toBe("completed")
+			// item.update no longer terminates the active run. The run finishes naturally,
+			// then the close handler completes the chain (item already terminal).
+			await waitFor(async () => readChainStatus(fixture.loopDataRoot, chainId), (status) => status === "completed", 10_000)
 			expect(record(expectOk(await request(fixture, "daemon.status")).daemon).activeRuns).toEqual([])
+			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({ type: "agent.exit", itemId, status: "done" }))
+			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({ type: "chain.completed", chainId }))
 			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({ type: "agent.exit", itemId, status: "done" }))
 			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({ type: "chain.completed", chainId }))
 		} finally {
@@ -1781,7 +1785,7 @@ describe("daemon", () => {
 				chainId,
 				issueNumber: 180,
 				repoCwd: REPO_ROOT,
-				extra: { sleepMs: 5_000, exitCode: 0 },
+				extra: { sleepMs: 500, exitCode: 0 },
 			})).item)
 			await waitFor(async () => record(expectOk(await request(fixture, "daemon.status")).daemon).activeRuns, (runs) => Array.isArray(runs) && runs.length === 1)
 			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
@@ -1796,6 +1800,9 @@ describe("daemon", () => {
 				fields: { status: "done" },
 			})).item)
 			expect(updated.status).toBe("done")
+
+			// Wait for the run to finish naturally before shutdown (item.update no longer kills it).
+			await waitFor(async () => readChainStatus(fixture.loopDataRoot, chainId), (status) => status === "completed", 10_000)
 
 			const down = await request(fixture, "daemon.down")
 			expect(down.ok).toBe(true)
@@ -2492,7 +2499,7 @@ describe("daemon", () => {
 
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
-const input = JSON.parse(prompt)
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
 const writeLine = (line) => Bun.write(Bun.stdout, line + "\\n")
 await appendFile(input.eventLog, JSON.stringify({ type: "start", phase: input.phase, runId: input.runId }) + "\\n")
 await new Promise((resolve) => setTimeout(resolve, input.sleepMs))
@@ -2931,7 +2938,7 @@ async function startPhaseAdvancementFixture(name: string): Promise<PhaseAdvancem
 
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
-const input = JSON.parse(prompt)
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
 const writeLine = (line) => Bun.write(Bun.stdout, line + "\\n")
 await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, phase: input.phase, cwd: process.cwd() }) + "\\n")
 await new Promise((resolve) => setTimeout(resolve, input.sleepMs))
@@ -3367,7 +3374,7 @@ async function writeFakeRunner(path: string): Promise<void> {
 
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
-const input = JSON.parse(prompt)
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
 const writeLine = (line) => Bun.write(Bun.stdout, line + "\\n")
 await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
 await new Promise((resolve) => setTimeout(resolve, input.sleepMs))

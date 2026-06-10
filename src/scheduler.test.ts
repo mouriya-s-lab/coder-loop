@@ -3331,7 +3331,7 @@ async function writeFakeClaudeSessionRunner(path: string, sessionId: string): Pr
 
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
-const input = JSON.parse(prompt)
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
 console.log(JSON.stringify({ type: "system", subtype: "init", session_id: ${JSON.stringify(sessionId)} }))
 await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
 await new Promise((resolve) => setTimeout(resolve, input.sleepMs ?? 5))
@@ -3362,7 +3362,7 @@ async function writeFakeClaudeInvalidOnceRunner(path: string, attemptFile: strin
 const attemptFile = Bun.argv[2]
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
-const input = JSON.parse(prompt)
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
 await appendFile(input.eventLog, JSON.stringify({ type: "argv", argv: Bun.argv }) + "\\n")
 let attempt = 0
 try {
@@ -3656,7 +3656,7 @@ import { openSqliteStateStore } from ${JSON.stringify(sqliteStateModule)}
 
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
-const input = JSON.parse(prompt)
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
 await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
 await new Promise((resolve) => setTimeout(resolve, input.sleepMs))
 await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
