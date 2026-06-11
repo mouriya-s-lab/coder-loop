@@ -13,7 +13,6 @@
 		"typescript": "^5.8.0"
 	},
 	"dependencies": {
-		"arktype": "^2.2.0",
 		"cmd-ts": "^0.15.0"
 	}
 }
