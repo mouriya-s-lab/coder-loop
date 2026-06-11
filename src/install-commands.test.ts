@@ -34,6 +34,15 @@ describe("install command ownership", () => {
 		expect(source).not.toContain("\"label\", \"create\"")
 		expect(source).not.toContain("\"label\", \"list\"")
 	})
+
+	test("does not carry user-level skill bootstrap ownership", async () => {
+		const source = await readFile(resolve(REPO_ROOT, "src/install-commands.ts"), "utf-8")
+		expect(source).not.toContain([".claude", "skills"].join("/"))
+		expect(source).not.toContain(["install", "skills"].join("-"))
+		expect(source).not.toContain(["skip", "skill", "check"].join("-"))
+		expect(source).not.toContain(["WRITING", "ISSUE"].join("_"))
+		await expect(Bun.file(resolve(REPO_ROOT, "templates/skills")).exists()).resolves.toBe(false)
+	})
 })
 
 async function makeDoctorTarget(): Promise<string> {

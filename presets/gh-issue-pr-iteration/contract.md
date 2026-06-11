@@ -4,7 +4,7 @@
 
 读完后你能：照本文档写出一个 issue body，保证它能通过 review 调度者的 contract replay / spike follow-up / title-intent 验收；写出一个 PR body，保证它能通过 PR protocol / evidence form 验收。
 
-本文档不替代用户级 `writing-issue / writing-pr / review-pr` skill，只 override 与本 preset gate **解析**相关的字段。继承 / 覆盖范围见 §7。
+本文档是本 preset 写 issue / PR / review 形态的自包含契约。用户级 `writing-issue / writing-pr / review-pr` skill 若存在可作 operator 个人参考；缺失不得阻塞 planning，冲突时本文档胜。软引用边界见 §7。
 
 ---
 
@@ -156,7 +156,7 @@ contract replay 把 `## 继承验证义务` 行 concat 到 `## 验收标准` 行
 - `kind:comment` 标题偏 "Spike: 验证…" / "评估…"，body 必有 `## 验证步骤` + `## 结果分支`。
 - `kind:code-spike` 标题偏 "Spike: 验证…" / "PoC: 验证…"，body 必有 `## 验证步骤` + `## 结果分支`，并明确 no-merge / no-PR 约束。
 - `kind:blocked` 标题偏 "解除 / unblock / resolve blocker"，body 必有具体阻塞条件、`Unblocks: owner/repo#N` back-link（如适用）、`## 验收标准`，证据必须包含真实 blocked path 的 e2e/integration 复测。
-- 标题 prefix `RFC:` 偏 retroactive umbrella（用户级 writing-issue 的 retroactive 形态）；这种 issue 在 coder-loop 队列里通常用作 parent，不直接 queue 实现。
+- 标题 prefix `RFC:` 偏 retroactive umbrella（见 §7.2）；这种 issue 在 coder-loop 队列里通常用作 parent，不直接 queue 实现。
 
 ---
 
@@ -295,27 +295,33 @@ planning agent 禁止：
 
 ---
 
-## 7. vs 用户级 skill 的继承 / 覆盖
+## 7. 用户级 skill 软引用与自包含 planning 规则
 
-`writing-issue / writing-pr / review-pr` 是 repo-agnostic hygiene base，本 preset contract 在以下字段 **override** 它们：
+用户级 `writing-issue / writing-pr / review-pr` skill 是 operator 个人资产，不属于 engine 或 preset 的分发物。planning agent **可以**在本机存在这些 skill 时参考其写作习惯；不存在、不可读、版本不同都不得阻塞 `/dev-plan`，也不得要求先安装或同步。本文档是必需规则的权威来源。
 
-| 字段 | user-level skill 说 | 本 preset 强制 |
-|---|---|---|
-| 标题语言 | 用户操作员要求中文 | 继承（无差异） |
-| 原子性 | one issue, one problem | 继承（无差异） |
-| Cite 原文 | 每条动机句要 cite | 继承（无差异） |
-| `kind:*` label | （应该退出 user-level skill） | 强制单值 `kind:code` / `kind:comment` / `kind:code-spike` / `kind:blocked`，规则见 §1.3 |
-| 必备段（future-work issue） | 目标 / 上下文 / 问题 / 预期结果 / 约束 / 验收标准 / 继承验证义务 / 依赖关系 | 继承，但 §1.4 强制表格列固定 |
-| Acceptance checkpoint 形态 | "checkpoint rows with dimension, command, environment, expected result" | §1.4 强制 6 列名顺序 + Dimension 枚举 + Command 反引号 |
-| Spike `## 结果分支` | 提到但无解析规则 | §1.6 强制动词词表 + 最少 sub-issue 提议数 |
-| Retroactive umbrella | 详细描述 | 继承（这种 issue 不进 coder-loop queue 走 plan/，由用户手动 file） |
-| PR body 四层证据 | `writing-pr` 提到 | §2.3 强制层名 = Dimension 取值 + 与 `## 验收标准` Dimension 一一对应 |
-| `Closes` 关键字位置 | `writing-pr` 提到 | §2.1 强制 first line |
-| Retry on PR thread | `writing-pr` / routing rule 提到 | §2.5 强制新 thread 评论，PR body 改不算 |
+### 7.1 自包含规则索引
 
-用户级 skill 余下内容（cite 规则、retroactive 写法、parent-child API 机制、forbidden in title、cross-repo sub-issue、re-parenting）planning agent 继承全部，本 contract 不重复。
+| 规则 | 本 preset 的权威位置 |
+|---|---|
+| 标题单主语、中文、禁用多 topic 连接 | §1.1 / §1.7 / §7.2 |
+| issue 必备段 | §1.2 |
+| `kind:*` 单值 label | §1.3 |
+| `## 验收标准` 表形态 | §1.4 |
+| 继承验证义务 | §1.5 |
+| Spike `## 结果分支` | §1.6 |
+| 原子性、citation、parent/child、retroactive umbrella、re-parenting | §7.2 |
+| PR body、证据、retry 位置 | §2 |
 
-planning agent 读 `~/.claude/skills/writing-issue/SKILL.md` 作 base，**再读本 contract** 作 override；冲突时本 contract 胜。
+### 7.2 Planning hygiene base
+
+- **One issue, one problem.** 一个可执行 issue 只能有一个主问题和一个可连贯解释的 `## 问题` / `## 目标`。如果 body 需要多个互不依赖的动机段、多个 title 主语，或一个 PR 无法自然 close 全部动机，必须拆成多个 child issue；若它们共享同一个业务驱动，再建 parent umbrella 解释共同背景。
+- **Atomicity test.** 起草前先问：能否写出一个不靠列表堆叠的单段理由来证明这个 issue 的全部范围？能则保留；不能则回到分解。不要用 "顺手"、"同文件"、"同模块" 合并独立问题。
+- **Citation.** 每条动机句必须追溯到可检查来源：issue/PR body、commit message、design doc、log/evidence artifact 或用户原话。推荐格式：`> "..." — <repo>#<N> body`、`<repo>@<short-sha> commit`、`<path>:<line>`。没有来源的动机不得写进 issue；引用原文不要翻译或拼接伪造。
+- **Required sections.** Future-work issue 使用 §1.2 的段结构；`## 验收标准` 只使用 §1.4 表格，不用自然语言 checklist 替代。`## 问题` 和 `## 预期结果` 写用户/agent 可观察的痛点与收益，验证命令和实现细节放入 `## 验收标准` 或 `## 约束`。
+- **Forbidden title/body shape.** 标题不得用 `and` / `+` / `/` / `、` 拼多个主题；body 不写内部 draft id、未来源化的方案偏好、实现模块结构、protocol choice、未来态 `[ ]` checklist、或把 PR 当成有子 issue 的节点。
+- **Parent/child graph.** GitHub sub-issue 只连接 issue-to-issue；PR 只能通过 PR body 第一行 `Closes #<ISSUE>` 归属 issue。创建 parent/child 关系时用 GitHub GraphQL `addSubIssue`；child 已有 parent 时先判断是否真的需要 re-parent，记录原因，再移除旧 parent 后挂到新 parent。跨 repo child 必须写完整 `<owner>/<repo>#<N>` 引用，不能靠当前 repo 省略。
+- **Retroactive umbrella.** 已落地工作补 umbrella 时必须在 `## 背景` 或 `## 为什么` 首段明说它是 retroactive，写清落地时间窗口，并列出已合并 PR/commit。Retroactive umbrella 不写未来态验收 checklist；用已落地事实、引用和 PR 列表说明完成内容。
+- **Re-parenting and duplicate links.** 发现错误 parent 时不要复制一个新 child 或把旧链接留作模糊历史；读取当前 parent/children，说明迁移理由，执行一次明确 re-parent。`addSubIssue` 返回 duplicate 时把它当成已满足的幂等结果记录，不重复创建。
 
 ---
 

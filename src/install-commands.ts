@@ -4,7 +4,6 @@
  * Three layers:
  *   A) target project files: committed workflow.md policy
  *   B) operator machine prereqs: gh (+ auth), selected runner CLIs (verify only)
- *   C) user-level skill version: writing-issue marker check
  *
  * Idempotent by design: re-running install does not mutate files whose
  * content already matches; `--force` overrides.
@@ -18,7 +17,6 @@ import {
 	rm,
 	writeFile,
 } from "node:fs/promises"
-import { homedir } from "node:os"
 import { resolve, dirname } from "node:path"
 import { daemonRequest, sendDaemonRequest } from "./daemon"
 import { buildCoderLoopStatusSnapshot, loadPreset, type AgentRunnerKind, type AgentRunnerSelection, type CoderLoopStatusSnapshot, type JsonValue, type Preset } from "./loop"
@@ -30,9 +28,6 @@ const TEMPLATES_DIR = resolve(PKG_ROOT, "templates")
 
 const SLASH_COMMAND_FILES = ["dev-plan.md", "dev-loop.md"] as const
 
-const WRITING_ISSUE_SKILL_REL = ".claude/skills/writing-issue/SKILL.md"
-const WRITING_ISSUE_MARKER = "docs/reserved-strings.md"
-
 const WORKFLOW_REL = ".coder-loop/workflow.md"
 const SLASH_COMMANDS_REL = ".claude/commands"
 
@@ -43,8 +38,6 @@ type InstallArgs = {
 	loopDataRoot: string | null
 	force: boolean
 	dryRun: boolean
-	installSkills: boolean
-	skipSkillCheck: boolean
 }
 
 type UninstallArgs = {
@@ -131,8 +124,6 @@ function parseInstallArgs(raw: string[]): InstallArgs {
 	let loopDataRoot: string | null = null
 	let force = false
 	let dryRun = false
-	let installSkills = false
-	let skipSkillCheck = false
 
 	for (let i = 0; i < raw.length; i++) {
 		const arg = raw[i]!
@@ -167,19 +158,13 @@ function parseInstallArgs(raw: string[]): InstallArgs {
 			case "--dry-run":
 				dryRun = true
 				break
-			case "--install-skills":
-				installSkills = true
-				break
-			case "--skip-skill-check":
-				skipSkillCheck = true
-				break
 			default:
 				fail(`install: 未知参数 "${arg}"`)
 		}
 	}
 
-	if (target === null) fail("install: 缺少 target 路径。用法: coder-loop install <target> [--repo <slug>] [--preset <name>] [--loop-data-root <path>] [--force] [--dry-run] [--install-skills] [--skip-skill-check]")
-	return { target: resolve(target), repo, presetName, loopDataRoot, force, dryRun, installSkills, skipSkillCheck }
+	if (target === null) fail("install: 缺少 target 路径。用法: coder-loop install <target> [--repo <slug>] [--preset <name>] [--loop-data-root <path>] [--force] [--dry-run]")
+	return { target: resolve(target), repo, presetName, loopDataRoot, force, dryRun }
 }
 
 function parseUninstallArgs(raw: string[]): UninstallArgs {
@@ -344,36 +329,6 @@ function uniqueRequiredRunners(runners: RequiredRunnerCli[]): RequiredRunnerCli[
 function runnerInstallHint(runner: RequiredRunnerCli): string {
 	if (runner.kind === "codex") return `codex runner CLI (${runner.binary}) 未在 PATH 中。安装/配置 Codex CLI，并确认 \`${runner.binary} --version\` 可运行。`
 	return `claude runner CLI (${runner.binary}) 未在 PATH 中。安装：https://docs.anthropic.com/claude/docs/claude-code（npm: \`npm install -g @anthropic-ai/claude-code\`），并确认 \`${runner.binary} --version\` 可运行。`
-}
-
-// ===================================================================
-// Layer C: user-level skill version check (writing-issue marker)
-// ===================================================================
-
-type SkillCheckStatus = "ok" | "missing" | "outdated"
-
-async function checkLayerD(): Promise<{ status: SkillCheckStatus; detail: string; path: string }> {
-	const path = resolve(homedir(), WRITING_ISSUE_SKILL_REL)
-	const content = await readIfExists(path)
-	if (content === null) {
-		return { status: "missing", detail: `${path} 不存在`, path }
-	}
-	if (!content.includes(WRITING_ISSUE_MARKER)) {
-		return { status: "outdated", detail: `${path} 缺少新版 marker "${WRITING_ISSUE_MARKER}"（缺少 engine reserved strings issue-writing rule）`, path }
-	}
-	return { status: "ok", detail: `${path} 含新版 marker`, path }
-}
-
-async function syncWritingIssueSkill(dryRun: boolean): Promise<{ wrote: boolean; path: string; sourcePath: string }> {
-	const sourcePath = resolve(TEMPLATES_DIR, "skills/writing-issue/SKILL.md")
-	const targetPath = resolve(homedir(), WRITING_ISSUE_SKILL_REL)
-	const sourceContent = await readFile(sourcePath, "utf-8")
-	const existing = await readIfExists(targetPath)
-	if (existing === sourceContent) return { wrote: false, path: targetPath, sourcePath }
-	if (dryRun) return { wrote: false, path: targetPath, sourcePath }
-	await mkdir(dirname(targetPath), { recursive: true })
-	await writeFile(targetPath, sourceContent)
-	return { wrote: true, path: targetPath, sourcePath }
 }
 
 // ===================================================================
@@ -577,22 +532,6 @@ export async function runInstallCommand(rawArgs: string[]): Promise<void> {
 		fail(`Layer B 校验未通过：先按上面提示修复 gh / runner CLI / 认证，再重跑 install。`)
 	}
 
-	// Layer C: user-level skill
-	info("\n[Layer C] User-level skill 版本")
-	const layerC = await checkLayerD()
-	info(`  ${layerC.status === "ok" ? "OK" : "FAIL"}: ${layerC.detail}`)
-	if (layerC.status !== "ok") {
-		if (args.installSkills) {
-			info("  --install-skills: 同步 templates/skills/writing-issue/SKILL.md → user-level")
-			const sync = await syncWritingIssueSkill(args.dryRun)
-			info(`  ${sync.wrote ? "已写入" : (args.dryRun ? "would-write" : "未变化")}: ${sync.path}（源：${sync.sourcePath}）`)
-		} else if (args.skipSkillCheck) {
-			info("  --skip-skill-check 已设置：跳过 Layer C 严格校验。")
-		} else if (!args.dryRun) {
-			fail(`Layer C 校验未通过。修复路径：\n  (a) coder-loop install ${args.target} --install-skills   # 自动 sync 新版\n  (b) 手动覆盖 ${layerC.path} 为最新 writing-issue SKILL.md\n  (c) coder-loop install ${args.target} --skip-skill-check  # 临时绕过`)
-		}
-	}
-
 	// Final: status smoke (skip in dry-run)
 	if (args.dryRun) {
 		info("\n[Final] --dry-run：跳过 status smoke")
@@ -633,7 +572,7 @@ export async function runUninstallCommand(rawArgs: string[]): Promise<void> {
 			info(`  未找到（已不存在）: ${SLASH_COMMANDS_REL}/${fname}`)
 		}
 	}
-	info(`\nUninstall 完成。runtime / user-level skills 一概保留（${removed} 个 slash command 文件被移除）。`)
+	info(`\nUninstall 完成。runtime 保留（${removed} 个 slash command 文件被移除）。`)
 }
 
 export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
@@ -668,11 +607,6 @@ export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
 		info(`  ${r.ok ? "OK" : "FAIL"}: ${r.detail}`)
 		if (!r.ok) hasFailure = true
 	}
-
-	info("\n[Layer C] User-level skill 版本")
-	const dResult = await checkLayerD()
-	info(`  ${dResult.status === "ok" ? "OK" : "FAIL"}: ${dResult.detail}`)
-	if (dResult.status !== "ok") hasFailure = true
 
 	info("\n[Live Runtime] coder-loop runtime health")
 	for (const line of buildLiveRuntimeHealthLines(statusSnapshot)) {

@@ -675,7 +675,7 @@ describe("central chain/item CLI", () => {
 		try {
 			const env = await fakeCliEnv("install-chain")
 			const target = await makeGitTarget("install-chain-target")
-			const result = await runCli(["install", target, "--repo", "fixture/repo", "--loop-data-root", fixture.loopDataRoot, "--skip-skill-check"], env)
+			const result = await runCli(["install", target, "--repo", "fixture/repo", "--loop-data-root", fixture.loopDataRoot], env)
 			expect(result.exitCode, result.stderr).toBe(0)
 			await expect(Bun.file(resolve(target, ".coder-loop/workflow.md")).exists()).resolves.toBe(true)
 			await expect(Bun.file(resolve(target, ".coder-loop/runtime")).exists()).resolves.toBe(false)
@@ -690,7 +690,7 @@ describe("central chain/item CLI", () => {
 	test("install rejects non-git target before writing workflow", async () => {
 		const env = await fakeCliEnv("install-non-git")
 		const target = await makeEmptyTarget("install-non-git-target")
-		const result = await runCli(["install", target, "--dry-run", "--skip-skill-check"], env)
+		const result = await runCli(["install", target, "--dry-run"], env)
 		expect(result.exitCode).toBe(1)
 		expect(result.stderr).toContain("target is not a git repository")
 		expect(result.stderr).not.toContain("[Layer A]")
@@ -701,7 +701,7 @@ describe("central chain/item CLI", () => {
 		const env = await fakeCliEnv("install-invalid-repo")
 		const target = await makeGitTarget("install-invalid-repo-target")
 		for (const repo of ["a/b/c", "no-slash", "x/y\nbad", ""]) {
-			const result = await runCli(["install", target, "--repo", repo, "--dry-run", "--skip-skill-check"], env)
+			const result = await runCli(["install", target, "--repo", repo, "--dry-run"], env)
 			expect(result.exitCode, `repo=${JSON.stringify(repo)} stderr=${result.stderr}`).toBe(1)
 			expect(result.stderr).toContain("invalid repo slug")
 			expect(result.stderr).not.toContain("[Central] DB chain")
@@ -713,7 +713,7 @@ describe("central chain/item CLI", () => {
 		const target = await makeGitTarget("install-offline-target")
 		const loopDataRoot = resolve(TEST_ROOT, `${++nextFixtureId}-offline-loop-data`)
 		await mkdir(loopDataRoot, { recursive: true })
-		const result = await runCli(["install", target, "--repo", "fixture/repo", "--loop-data-root", loopDataRoot, "--skip-skill-check"], env)
+		const result = await runCli(["install", target, "--repo", "fixture/repo", "--loop-data-root", loopDataRoot], env)
 		expect(result.exitCode).toBe(1)
 		expect(result.stderr).toContain("central daemon is not running")
 		expect(result.stderr).toContain("coder-loop daemon up --loop-data-root")
@@ -881,8 +881,7 @@ async function fakeCliEnv(name: string): Promise<Record<string, string>> {
 	const bin = resolve(TEST_ROOT, `${++nextFixtureId}-${name}-bin`)
 	const home = resolve(TEST_ROOT, `${++nextFixtureId}-${name}-home`)
 	await mkdir(bin, { recursive: true })
-	await mkdir(resolve(home, ".claude/skills/writing-issue"), { recursive: true })
-	await writeFile(resolve(home, ".claude/skills/writing-issue/SKILL.md"), "docs/reserved-strings.md\n")
+	await mkdir(home, { recursive: true })
 	await writeExecutable(resolve(bin, "gh"), [
 		"#!/usr/bin/env bash",
 		`if [ "$1" = "auth" ]; then exit 0; fi`,

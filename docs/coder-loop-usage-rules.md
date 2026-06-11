@@ -1,6 +1,6 @@
 # 复杂任务使用 coder-loop 的触发规则
 
-coder-loop 是长任务 / 多 actor / 多阶段工作的调度器，不是所有改代码请求的默认包装层。本规则只决定是否把工作交给 chain / daemon 调度；它不覆盖 GitHub issue/PR routing，也不替代 `writing-issue`、`writing-pr`、`review-pr` 或 runtime verification 规则。
+coder-loop 是长任务 / 多 actor / 多阶段工作的调度器，不是所有改代码请求的默认包装层。本规则只决定是否把工作交给 chain / daemon 调度；它不覆盖 GitHub issue/PR routing，也不替代 preset contract、可选 operator 写作 skill，或 runtime verification 规则。
 
 ## 触发条件
 
@@ -34,7 +34,7 @@ coder-loop daemon status <target> --json
 
 ## 与既有规范的边界
 
-不触发 coder-loop 不等于跳过规范：仍然遵守 GitHub issue/PR routing、`writing-issue` / `writing-pr` / `review-pr` 的职责边界，仍然做 runtime verification。
+不触发 coder-loop 不等于跳过规范：仍然遵守 GitHub issue/PR routing、对应 repo/preset 的写作与 review 契约，仍然做 runtime verification。
 
 触发 coder-loop 也不等于让 agent 跳过规划：复杂任务应先把 issue / chain / item 拆到可执行粒度，再启动 daemon。执行中巡查使用只读巡查清单；故障时切到 Level 1/2/3 诊断流程。
 

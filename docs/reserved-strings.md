@@ -38,7 +38,7 @@ values.
 
 - Update this table in the same PR that adds, removes, or renames an engine
   marker/sentinel or preset-declared marker that may appear in agent stdout.
-- Update `templates/skills/writing-issue/SKILL.md` when the issue-writing rule
-  changes.
+- Update `presets/gh-issue-pr-iteration/contract.md` when preset issue-writing
+  rules change.
 - Run `bun test src/loop.test.ts` after changing this file or the marker
   declaration mechanism.
