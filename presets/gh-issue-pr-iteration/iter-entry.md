@@ -42,7 +42,13 @@ Decide exactly one, from the bound inputs:
 Run these yourself; each read exists to feed a specific Step 3 decision:
 
 1. `gh issue view {{ISSUE}} -R {{REPO}} --json title,body,labels,comments,state,url` → the task contract: acceptance rows, custom requirement sections, constraints, kind, and any operator instructions in late comments. This decides what the run must produce.
-2. If the issue has a linked/open PR (`gh pr list -R {{REPO}} --state all --search "{{ISSUE}} in:body" --json number,state,headRefName,url`, then `gh pr view` on the hit): the existing branch name, PR state, and the latest review thread → this is the retry instruction source and the branch-continuity input.
+2. The issue's linked PR → the retry instruction source and the branch-continuity input. Resolution order: the bound `ISSUE_PR` when set (state carries it from previous runs); otherwise the structural closing-keyword linkage — split `{{REPO}}` into owner/name and run:
+
+   ```bash
+   gh api graphql -f query='{repository(owner:"<owner>",name:"<name>"){issue(number:{{ISSUE}}){closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number state isDraft headRefName url}}}}}'
+   ```
+
+   Never discover PRs by text search (`--search "<n> in:body"` matches any PR whose body merely contains the digits — false positives). Then `gh pr view <number>` on the hit for its state and latest review thread.
 3. `{{SHARED_CONTEXT_FILE}}` → what previous runs already tried, their `Intent`/`Result` blocks → prevents re-doing or contradicting prior work.
 4. The state file's selected item → must match {{ISSUE}}. Mismatch, or unreadable state/config files → record the exact infrastructure failure and jump to Step 5 (wrap-up); do not improvise a different issue.
 5. `{{CURRENT_ISSUE_FILE}}` when present → issue-local notes from earlier runs. A missing file is normal, not a failure.

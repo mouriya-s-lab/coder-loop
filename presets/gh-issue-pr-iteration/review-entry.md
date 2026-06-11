@@ -44,9 +44,11 @@ Run these yourself, in order:
 6. Live GitHub state:
 
 ```bash
-gh issue view <ISSUE> -R <REPO> --json number,title,body,labels,comments,state,url,closedByPullRequests
+gh issue view <ISSUE> -R <REPO> --json number,title,body,labels,comments,state,url
 gh api "repos/<REPO>/issues/<ISSUE>/sub_issues" -H "X-GitHub-Api-Version: 2026-03-10"
-gh pr list -R <REPO> --state all --search "<ISSUE> in:body" --json number,title,state,mergedAt,headRefName,url,body,statusCheckRollup,mergeStateStatus
+# linked PRs: the bound ISSUE_PR when set; otherwise the structural closing-keyword
+# linkage (never text search — "<n> in:body" matches unrelated PRs containing the digits):
+gh api graphql -f query='{repository(owner:"<owner>",name:"<name>"){issue(number:<ISSUE>){closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number state isDraft headRefName url}}}}}'
 gh pr view <PR_NUMBER> -R <REPO> --json number,title,state,mergedAt,mergeCommit,url,body,comments,reviews,statusCheckRollup,mergeStateStatus,headRefName
 ```
 
