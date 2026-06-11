@@ -84,7 +84,7 @@ coder-loop status /path/to/target --json
 
 `install` 会注册 central DB chain，因此必须先有可用的 central daemon。使用自定义 `--loop-data-root` 时，`daemon up` 与后续 `install` / `doctor` / `status` 要传同一个 root。
 
-每个 phase 的默认 runner 由 `preset.toml` 的 `[[phases]].runner = "claude"|"codex"` 声明；未声明时走 engine-builtin fallback（当前为 `codex`）。单个 queue item 的 `runner` 字段只覆盖允许 item override 的普通执行 phase。Runner binary、模型与额外参数由 `.coder-loop/runtime/config.json` 的 `claude.*` / `codex.*` 提供——iteration 与 review 共享 `claude.model` / `codex.model`，源码不再为 review 强制模型。要改模型推荐用 `coder-loop runtime set --claude-model opus-4-7|opus-4-8 --codex-model gpt-5.5`（Claude 自动加 `[1m]`）。`doctor` / `status --json` 显示每个 phase 的 runner 与 source。
+每个 phase 的默认 runner 由 `preset.toml` 的 `[[phases]].runner = "claude"|"codex"` 声明；未声明时走 engine-builtin fallback（当前为 `codex`）。phase 还可用 `[[phases]].model` 声明默认模型（bundled preset 的 review phase 声明 `runner = "codex"`、`model = "gpt-5.5"`）。单个 queue item 的 `runner` 字段只覆盖允许 item override 的普通执行 phase。Runner binary、模型与额外参数由 `.coder-loop/runtime/config.json` 的 `claude.*` / `codex.*` 提供——config 显式 `claude.model` / `codex.model` 优先于 phase 的 `model` 声明，iteration 与 review 共享同一份 config 模型，源码不再为 review 强制模型。要改模型推荐用 `coder-loop runtime set --claude-model opus-4-7|opus-4-8 --codex-model gpt-5.5`（Claude 自动加 `[1m]`）。`doctor` / `status --json` 显示每个 phase 的 runner 与 source。
 
 后台循环由 daemon API 管理；`/dev-loop [N]` 也是这个 API 的人类快捷入口，不再手写 `nohup`：
 

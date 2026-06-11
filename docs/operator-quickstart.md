@@ -82,7 +82,7 @@ coder-loop status /path/to/your-target-repo --json
 
 ### Runner 默认值与覆盖
 
-默认 runner 由 `preset.toml` 的每个 phase 声明；bundled `gh-issue-pr-iteration` 中 iteration 是 `codex`，review 是 `claude`。Review 不继承 Codex 宿主或 queue item；模型跟随 `claude.model` / `codex.model` config，源码不再为 review 强制覆盖模型。最简单的改模型方式：
+默认 runner 与 model 由 `preset.toml` 的每个 phase 声明；bundled `gh-issue-pr-iteration` 中 iteration 是 `codex`，review 是 `codex` + `model = "gpt-5.5"`。Review 不继承宿主或 queue item；config 显式 `claude.model` / `codex.model` 优先于 phase 的 `model` 声明，源码不再为 review 强制覆盖模型。最简单的改模型方式：
 
 ```bash
 coder-loop runtime set <target> --claude-model opus-4-8 --codex-model gpt-5.5
@@ -97,7 +97,7 @@ coder-loop runtime set <target> --claude-model opus-4-8 --codex-model gpt-5.5
 }
 ```
 
-单个 queue item 可加 `"runner": "claude" | "codex"` 覆盖允许 item override 的普通执行 phase；review 和 trigger 角色用自己的 entry md 默认值。`doctor` 检查所有 phase runner 的实际 binary；`status --json` 暴露 `target.runner.phases`、`queue.selected.phaseRunners`、`current.runner` 与 phase status 的 runner/model。
+单个 queue item 可加 `"runner": "claude" | "codex"` 覆盖允许 item override 的普通执行 phase；review 和 trigger 角色用自己的 preset phase 声明。`doctor` 检查所有 phase runner 的实际 binary；`status --json` 暴露 `target.runner.phases`、`queue.selected.phaseRunners`、`current.runner` 与 phase status 的 runner/model。
 
 把运行期文件加 `.gitignore`：
 
@@ -131,7 +131,7 @@ coder-loop status /path/to/your-target-repo --json | jq '.state.kind, .queue, .c
 | `.queue.total` / `.queue.selected` | 有可推进 item 时 selected 不为 null |
 | `.target.runner.phases` / `.queue.selected.phaseRunners` | 每个 phase 的 effective runner；含 kind/source/binary/model |
 | `.target.runner.default` / `.queue.selected.runner` | 默认执行 phase 与 selected item 默认执行 phase runner |
-| `.target.runner.reviewDefault` / `.queue.selected.reviewRunner` | review phase runner；model 跟随 `claude.model` / `codex.model` config，源码不再强制覆盖 |
+| `.target.runner.reviewDefault` / `.queue.selected.reviewRunner` | review phase runner；model 解析为 config 显式 `claude.model` / `codex.model`（override）或 preset phase `model` 声明，源码不再强制覆盖 |
 | `.current.run` | 正在跑或可 resume 的 run；null 表示当前没有 in-flight phase |
 | `.events.latest` | 当前或最近 run 的最后一条结构化事件 |
 | `.processes.live` / `.processes.scanError` | live process scan 结果；daemon 详情看 `coder-loop daemon status` |

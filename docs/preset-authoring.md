@@ -102,6 +102,7 @@ bun src/loop.ts --target-cwd <fresh-target> --check-runtime
 | `[[phases]].name` | string | 是 | phase 名字，写入 `state.current.phase` |
 | `[[phases]].prompt` | string | 是 | 相对 preset.toml 的 entry prompt 模板路径 |
 | `[[phases]].runner` | `"claude"|"codex"` | 否 | phase 默认 runner；未声明时使用 engine-builtin fallback |
+| `[[phases]].model` | string | 否 | phase 默认 model；target config 显式 `claude.model` / `codex.model` 优先于它。只在解析出的 runner kind 与本 phase 声明的 runner 一致时生效（item override 切换 runner 后不继承） |
 | `[[phases]].summaryMarker` | string | 否 | 该 phase 在 stdout 中声明完成后的 marker；声明后 post-summary watchdog 观察该 marker，未声明则该 phase 不启用 post-summary watchdog |
 | `[[phases.exits]]` | array | 否 | 该 phase 允许 agent 写出的结构化出口。每项包含 `status` 与给 prompt 渲染用的 `when` 说明；不声明 exits 表示该 phase 不写 status |
 | `[[phases]].trigger` | table | 否 | 可把 phase 声明为 trigger phase。支持 `trigger = { afterPhase = "...", whenStatus = "..." }` 的 item phase trigger，或 `trigger = { on = "chain-complete" }` 的 chain lifecycle trigger |
@@ -257,16 +258,17 @@ target 在 `.coder-loop/runtime/config.json`（或 `config.toml`）写：
 
 两者互斥。都不写时引擎走默认的 `gh-issue-pr-iteration`。`preset` 名只允许 `^[a-zA-Z][a-zA-Z0-9_-]*$`，禁止路径分隔符与 `..`，所以 bundled name 一定落在 `<pkg>/presets/<name>/` 内。
 
-Runner 默认值写在 `preset.toml`，不是角色 entry md 或 target runtime config。每个 phase 可声明：
+Runner 与 model 默认值写在 `preset.toml`，不是角色 entry md 或 target runtime config。每个 phase 可声明：
 
 ```toml
 [[phases]]
-name = "iteration"
-prompt = "iter-entry.md"
+name = "review"
+prompt = "review-entry.md"
 runner = "codex"
+model  = "gpt-5.5"
 ```
 
-`runner` 只能是 `claude` 或 `codex`。未声明的 phase 使用 `source=engine-builtin` fallback；已声明的 phase 在 `status --json` 中显示 `source=preset`。target config 继续提供 runner command 参数，例如：
+`runner` 只能是 `claude` 或 `codex`。未声明的 phase 使用 `source=engine-builtin` fallback；已声明的 phase 在 `status --json` 中显示 `source=preset`。`model` 是该 phase 的默认模型，可省略；模型解析优先级为 target config 显式 `claude.model` / `codex.model`（override）> phase `model` 声明（preset 默认）> 无（runner CLI 自身默认）。target config 继续提供 runner command 参数，例如：
 
 ```json
 {
@@ -276,7 +278,7 @@ runner = "codex"
 }
 ```
 
-queue item 可加 `"runner": "claude" | "codex"` 覆盖允许 item override 的普通执行 phase；review 和 trigger 这类角色使用自己的 phase runner 声明。Iteration 与 review 共享同一份 `claude.model` / `codex.model` config，源码不再为 review 强制模型。preset 作者不要把某个 runner 的 CLI 细节写进 engine contract；若某个 preset 只支持特定 runner，把它写进该 preset 的 README / target workflow，并用 `doctor` / `status` 验证 preset runner 与 target command config 是否符合预期。
+queue item 可加 `"runner": "claude" | "codex"` 覆盖允许 item override 的普通执行 phase；review 和 trigger 这类角色使用自己的 phase runner 声明。item override 把 runner 切到与 phase 声明不同的 kind 时，不继承该 phase 的 `model` 声明（phase model 绑定在它声明的 runner kind 上）。Iteration 与 review 共享同一份 `claude.model` / `codex.model` config，源码不再为 review 强制模型。preset 作者不要把某个 runner 的 CLI 细节写进 engine contract；若某个 preset 只支持特定 runner，把它写进该 preset 的 README / target workflow，并用 `doctor` / `status` 验证 preset runner 与 target command config 是否符合预期。
 
 ---
 

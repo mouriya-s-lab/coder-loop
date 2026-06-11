@@ -399,6 +399,7 @@ const PresetPhaseBoundary = arkType({
 	name: "string",
 	prompt: "string",
 	"runner?": "string",
+	"model?": "string",
 	"exits?": PresetPhaseExitBoundary.array(),
 	"variables?": "object",
 	"trigger?": PresetPhaseTriggerBoundary,
@@ -485,6 +486,7 @@ export type PresetPhase = {
 	variableDocs: ReadonlyMap<string, PresetVariableDoc>
 	trigger: PresetPhaseTrigger | null
 	defaultRunner: AgentRunnerKind | null
+	defaultModel: string | null
 }
 
 export type PresetFragment = {
@@ -3801,12 +3803,13 @@ export function parsePreset(value: unknown, presetDir: string): Preset {
 		}
 		const trigger = parsePresetPhaseTrigger(entry.trigger ?? null, `preset.phases[${index}].trigger`)
 		const runner = parsePhaseRunner(entry.runner ?? null, `preset.phases[${index}].runner`)
+		const model = parsePhaseModel(entry.model ?? null, `preset.phases[${index}].model`)
 		const summaryMarker = phaseSummaryMarkerForName(entry.name)
 		const exits = parsePresetPhaseExits(entry.exits ?? [], `preset.phases[${index}].exits`)
 		if (hasOwnJsonKey(entry as JsonObject, "statusWrites")) {
 			presetError(`preset.phases[${index}].statusWrites: use [[phases.exits]] with status and when`)
 		}
-		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), summaryMarker, exits, variables, variableDocs, trigger, defaultRunner: runner })
+		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), summaryMarker, exits, variables, variableDocs, trigger, defaultRunner: runner, defaultModel: model })
 	}
 	if (!phases.some((phase) => phase.trigger === null)) presetError("preset.phases: must include at least one non-trigger phase")
 
@@ -3935,6 +3938,12 @@ function parseConfigBindingDefaultValue(value: unknown, label: string): ConfigBi
 function parsePhaseRunner(value: unknown, label: string): AgentRunnerKind | null {
 	if (value === null) return null
 	if (value !== "claude" && value !== "codex") presetError(`${label}: must be "claude" or "codex"`)
+	return value
+}
+
+function parsePhaseModel(value: unknown, label: string): string | null {
+	if (value === null) return null
+	if (typeof value !== "string" || value.trim() === "") presetError(`${label}: must be a non-empty string`)
 	return value
 }
 
@@ -4128,11 +4137,25 @@ function allowsItemRunnerOverride(preset: Preset, phase: PresetPhase): boolean {
 	return phase.trigger === null && !isReviewRunnerPhase(preset, phase)
 }
 
+function phaseDefaultRunnerKind(phase: PresetPhase): AgentRunnerKind {
+	return phase.defaultRunner ?? ENGINE_BUILTIN_RUNNER
+}
+
+// Preset-declared phase model is a default; an explicit config model (claude.model /
+// codex.model) overrides it. The phase model is bound to the phase's declared runner
+// kind, so an item override switching to a different runner does not inherit it.
+function applyPhaseDefaultModel(selection: AgentRunnerSelection, phase: PresetPhase): AgentRunnerSelection {
+	if (selection.model !== null) return selection
+	if (phase.defaultModel === null) return selection
+	if (selection.kind !== phaseDefaultRunnerKind(phase)) return selection
+	return { ...selection, model: phase.defaultModel }
+}
+
 export function selectPhaseDefaultRunner(phase: PresetPhase, _preset: Preset, commands: AgentRunnerCommands): AgentRunnerSelection {
-	const kind = phase.defaultRunner ?? ENGINE_BUILTIN_RUNNER
+	const kind = phaseDefaultRunnerKind(phase)
 	const command = commands[kind]
 	const source: AgentRunnerSource = phase.defaultRunner === null ? "engine-builtin" : "preset"
-	return { ...command, source }
+	return applyPhaseDefaultModel({ ...command, source }, phase)
 }
 
 export function selectPhaseDefaultRunners(preset: Preset, commands: AgentRunnerCommands): Record<string, AgentRunnerSelection> {
@@ -4145,7 +4168,7 @@ export function selectPhaseRunnersForItem(preset: Preset, item: Pick<ItemRecord,
 	const runners: Record<string, AgentRunnerSelection> = {}
 	for (const phase of preset.phases) {
 		const override = allowsItemRunnerOverride(preset, phase) ? selectRunnerForItemOverride(item, { runnerCommands: commands }) : null
-		runners[phase.name] = override ?? selectPhaseDefaultRunner(phase, preset, commands)
+		runners[phase.name] = override === null ? selectPhaseDefaultRunner(phase, preset, commands) : applyPhaseDefaultModel(override, phase)
 	}
 	return runners
 }
@@ -4153,7 +4176,7 @@ export function selectPhaseRunnersForItem(preset: Preset, item: Pick<ItemRecord,
 export function selectRunnerForPhase(phase: string, item: Pick<ItemRecord, "runner">, input: PhaseRunnerSelectionInput): AgentRunnerSelection {
 	const presetPhase = phaseByName(input.preset, phase)
 	const override = allowsItemRunnerOverride(input.preset, presetPhase) ? selectRunnerForItemOverride(item, input) : null
-	return override ?? selectPhaseDefaultRunner(presetPhase, input.preset, input.runnerCommands)
+	return override === null ? selectPhaseDefaultRunner(presetPhase, input.preset, input.runnerCommands) : applyPhaseDefaultModel(override, presetPhase)
 }
 
 export type BuildPhaseRunnerSelectionFromChainInput = {

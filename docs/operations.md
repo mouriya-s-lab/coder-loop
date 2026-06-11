@@ -62,7 +62,7 @@ Runner 选择也在 `status` 中显式暴露：
 | `target.runner.hostDefault` | 当前宿主推断出的 runner 诊断信息；不决定 iteration 默认值 |
 | `target.runner.phases` | 每个 phase 的 preset / engine-builtin default runner |
 | `target.runner.default` | 默认执行 phase runner；来源通常是 preset |
-| `target.runner.reviewDefault` | review phase runner；model 跟随 `claude.model` / `codex.model` config，源码不再强制覆盖 |
+| `target.runner.reviewDefault` | review phase runner；model 解析为 config 显式 `claude.model` / `codex.model`（override）或 preset phase `model` 声明，源码不再强制覆盖 |
 | `queue.selected.phaseRunners` | 当前 selected item 逐 phase effective runner；允许 item override 的 phase 可显示 `source=queue` |
 | `queue.selected.runner` | 当前 selected item 的默认执行 phase runner |
 | `queue.selected.reviewRunner` | 当前 selected item 的 review phase runner；不受 queue item `runner` 影响 |

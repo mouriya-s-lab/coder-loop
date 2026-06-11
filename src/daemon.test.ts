@@ -2681,7 +2681,7 @@ process.exitCode = 0
 			}
 		})
 
-		test("live daemon with chain metadata claude/codex.binary spawns claude script for review phase", async () => {
+		test("live daemon with chain metadata claude/codex.binary spawns codex script for review phase", async () => {
 			const fixture = await startChainBasedRunnerFixture("ac5-review", { phase: "review" })
 			try {
 				const result = expectOk(await request(fixture, "chain.create", {
@@ -2703,9 +2703,10 @@ process.exitCode = 0
 				})
 
 				// The fake shell runner writes no status (it only proves which binary spawned), so under v1
-				// the item never reaches a terminal status. gh-issue-pr-iteration runs iteration (codex)
-				// before review (claude), so gate on the review phase.end specifically — that guarantees the
-				// review run closed and its stdout was flushed — then read its captured binary marker.
+				// the item never reaches a terminal status. gh-issue-pr-iteration runs iteration before
+				// review (both codex by preset), so gate on the review phase.end specifically — that
+				// guarantees the review run closed and its stdout was flushed — then read its captured
+				// binary marker.
 				const reviewRunId = await waitFor(
 					async () =>
 						fixture.schedulerEvents
@@ -2717,8 +2718,8 @@ process.exitCode = 0
 				)
 				const stdoutPath = resolveChainRuntimePaths(`ac5-review-chain`, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(reviewRunId!)
 				const stdout = await readFile(stdoutPath, "utf-8")
-				expect(stdout).toContain("BINARY:claude")
-				expect(stdout).not.toContain("BINARY:codex")
+				expect(stdout).toContain("BINARY:codex")
+				expect(stdout).not.toContain("BINARY:claude")
 			} finally {
 				await fixture.daemon.stop()
 			}

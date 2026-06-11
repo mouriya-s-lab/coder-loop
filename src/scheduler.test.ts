@@ -32,6 +32,7 @@ import {
 	parseReviewSummaryVerdict,
 	resolvePhaseRunnerFromChain,
 	runPresetChainCompleteTriggerPhases,
+	type AgentRunnerKind,
 	type AgentRunnerSelection,
 	type JsonObject,
 } from "./loop"
@@ -2655,7 +2656,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			expect(runner.source).toBe("preset")
 		})
 
-		test("chain default → review phase returns claude with no source-side model override", async () => {
+		test("chain default → review phase returns codex with the preset-declared model", async () => {
 			const chain = makeChainFixture({ metadata: {} })
 			const preset = await loadPreset(PRESET_DIR)
 			const runner = resolvePhaseRunnerFromChain({
@@ -2665,14 +2666,14 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 				phase: "review",
 				item: { runner: null },
 			})
-			expect(runner.kind).toBe("claude")
-			expect(runner.binary).toBe("claude")
-			expect(runner.model).toBeNull()
+			expect(runner.kind).toBe("codex")
+			expect(runner.binary).toBe("codex")
+			expect(runner.model).toBe("gpt-5.5")
 			expect(runner.source).toBe("preset")
 		})
 
-		test("chain metadata reviewRunner='codex' does not override review preset runner", async () => {
-			const chain = makeChainFixture({ metadata: { reviewRunner: "codex" } })
+		test("chain metadata reviewRunner='claude' does not override review preset runner", async () => {
+			const chain = makeChainFixture({ metadata: { reviewRunner: "claude" } })
 			const preset = await loadPreset(PRESET_DIR)
 			const runner = resolvePhaseRunnerFromChain({
 				chain,
@@ -2681,15 +2682,15 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 				phase: "review",
 				item: { runner: null },
 			})
-			expect(runner.kind).toBe("claude")
-			expect(runner.binary).toBe("claude")
+			expect(runner.kind).toBe("codex")
+			expect(runner.binary).toBe("codex")
 			expect(runner.source).toBe("preset")
 		})
 
-		test("chain metadata claude.model flows to review phase (no source-side override)", async () => {
+		test("chain metadata codex.model overrides the preset-declared review model", async () => {
 			const chain = makeChainFixture({
 				metadata: {
-					claude: { model: "claude-haiku-4-5" },
+					codex: { model: "gpt-5.5-codex" },
 				},
 			})
 			const preset = await loadPreset(PRESET_DIR)
@@ -2700,8 +2701,8 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 				phase: "review",
 				item: { runner: null },
 			})
-			expect(runner.kind).toBe("claude")
-			expect(runner.model).toBe("claude-haiku-4-5")
+			expect(runner.kind).toBe("codex")
+			expect(runner.model).toBe("gpt-5.5-codex")
 		})
 
 		test("item.runner='claude' overrides codex iteration default for non-review phase", async () => {
@@ -2732,12 +2733,11 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			expect(runner.source).toBe("preset")
 		})
 
-		test("chain metadata claude.model flows into review args via buildRunnerInvocation", async () => {
+		test("preset-declared review model flows into review args via buildRunnerInvocation", async () => {
 			const chain = makeChainFixture({
 				metadata: {
-					claude: {
-						model: "claude-haiku-4-5",
-						extraArgs: ["--model", "claude-sonnet-4-7", "--verbose"],
+					codex: {
+						extraArgs: ["--model", "gpt-5-stale", "--verbose"],
 					},
 				},
 			})
@@ -2749,8 +2749,8 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 				phase: "review",
 				item: { runner: null },
 			})
-			expect(runner.kind).toBe("claude")
-			expect(runner.model).toBe("claude-haiku-4-5")
+			expect(runner.kind).toBe("codex")
+			expect(runner.model).toBe("gpt-5.5")
 			const invocation = buildRunnerInvocation(runner, "p", { kind: "fresh" }, {
 				targetCwd: "/repo/a",
 				agentCwd: "/repo/a",
@@ -2759,12 +2759,12 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			})
 			const modelFlagIndex = invocation.args.indexOf("--model")
 			expect(modelFlagIndex).toBeGreaterThanOrEqual(0)
-			expect(invocation.args[modelFlagIndex + 1]).toBe("claude-haiku-4-5")
-			expect(invocation.args.filter((arg) => arg === "claude-sonnet-4-7")).toEqual([])
+			expect(invocation.args[modelFlagIndex + 1]).toBe("gpt-5.5")
+			expect(invocation.args.filter((arg) => arg === "gpt-5-stale")).toEqual([])
 		})
 	})
 
-	test("AC5 integration: chain-based phaseRunner picks codex binary for iter spawn and claude binary for review spawn", async () => {
+	test("AC5 integration: chain-based phaseRunner honors item claude override for iter spawn while review stays on preset codex", async () => {
 		const fixture = await createFixture("ac5-integration")
 		try {
 			const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
@@ -2779,7 +2779,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 					codex: { binary: fakeCodex },
 				},
 			})
-			createItem(fixture.store, chain, { issueNumber: 287_201, repoCwd: "/repo/a" })
+			createItem(fixture.store, chain, { issueNumber: 287_201, repoCwd: "/repo/a", runner: "claude" })
 
 			const preset = await loadPreset(PRESET_DIR)
 			const phaseRunner: SchedulerPhaseRunner = ({ chain: c, phase, item }) =>
@@ -2809,8 +2809,8 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			expect(iterClosed.exitCode).toBe(0)
 			const iterPaths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
 			const iterStdout = await readFile(iterPaths.runStdoutFile(iterClosed.runId), "utf-8")
-			expect(iterStdout).toContain("BINARY:codex")
-			expect(iterStdout).not.toContain("BINARY:claude")
+			expect(iterStdout).toContain("BINARY:claude")
+			expect(iterStdout).not.toContain("BINARY:codex")
 
 			fixture.store.updateItem(fixture.store.listItems(chain.id)[0]!.id, { status: "changes_requested" })
 
@@ -2824,8 +2824,8 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			const reviewClosed = await reviewTick.spawnedRuns[0]!.closed
 			expect(reviewClosed.exitCode).toBe(0)
 			const reviewStdout = await readFile(iterPaths.runStdoutFile(reviewClosed.runId), "utf-8")
-			expect(reviewStdout).toContain("BINARY:claude")
-			expect(reviewStdout).not.toContain("BINARY:codex")
+			expect(reviewStdout).toContain("BINARY:codex")
+			expect(reviewStdout).not.toContain("BINARY:claude")
 		} finally {
 			fixture.store.close()
 		}
@@ -3627,7 +3627,7 @@ function preInstallReviewOnEmptyLock(chain: ChainRecord, loopDataRoot: string, r
 function createItem(
 	store: ReturnType<typeof openSqliteStateStore>,
 	chain: ChainRecord,
-	input: { issueNumber: number; repoCwd: string; sleepMs?: number; exitCode?: number; summary?: string | null; issueKind?: string | null },
+	input: { issueNumber: number; repoCwd: string; sleepMs?: number; exitCode?: number; summary?: string | null; issueKind?: string | null; runner?: AgentRunnerKind | null },
 ) {
 	const extra: JsonObject = {
 		sleepMs: input.sleepMs ?? 5,
@@ -3639,6 +3639,7 @@ function createItem(
 		chainId: chain.id,
 		issueNumber: input.issueNumber,
 		repoCwd: input.repoCwd,
+		runner: input.runner ?? null,
 		status: "queued",
 		attempts: 0,
 		title: `issue ${input.issueNumber}`,

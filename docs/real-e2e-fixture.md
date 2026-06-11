@@ -30,12 +30,12 @@ Do not commit `.coder-loop/runtime/`, runtime logs, or local evidence artifacts 
 
 ## Runner Coverage
 
-The successful 2026-05-17 run used Codex end to end. Current runner semantics differ for review: phase defaults now come from role entry md, so the bundled iteration role declares Codex and the bundled review role declares Claude:
+The successful 2026-05-17 run used Codex end to end. Phase runner/model defaults come from `preset.toml`: the bundled iteration phase declares Codex, and the bundled review phase declares Codex with `model = "gpt-5.5"`:
 
 - queue item: `runner: "codex"`;
 - `status --json`: selected runner `kind=codex`, `source=queue`;
-- `status --json`: `target.runner.phases.review` is `kind=claude`, `source=preset`; `model` follows `claude.model` config (unset → `null`, or the value written by `coder-loop runtime set --claude-model`, e.g. `claude-opus-4-8[1m]`);
-- iteration phase status should record `runner: "codex"` and a Codex `thread_id`; review phase status should record `runner: "claude"` and whatever `claude.model` resolves to (no source-side override).
+- `status --json`: `target.runner.phases.review` is `kind=codex`, `source=preset`; `model` resolves to the explicit `codex.model` config when set, else the preset-declared `gpt-5.5`;
+- iteration phase status should record `runner: "codex"` and a Codex `thread_id`; review phase status should record `runner: "codex"` and the resolved codex model.
 
 Codex runner requires real workspace writes and GitHub CLI access for the
 `gh-issue-pr-iteration` preset. The default fresh Codex invocation therefore

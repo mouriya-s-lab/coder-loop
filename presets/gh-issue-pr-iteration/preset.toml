@@ -86,7 +86,8 @@ runner = "codex"
 [[phases]]
 name   = "review"
 prompt = "review-entry.md"
-runner = "claude"
+runner = "codex"
+model  = "gpt-5.5"
 
   [[phases.exits]]
   status = "changes_requested"

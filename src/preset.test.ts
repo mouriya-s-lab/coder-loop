@@ -130,9 +130,15 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(preset.phases.map((p) => p.name)).toEqual(["iteration", "review", "blocked-responder", "umbrella-finalizer"])
 		expect(Object.fromEntries(preset.phases.map((phase) => [phase.name, phase.defaultRunner]))).toEqual({
 			iteration: "codex",
-			review: "claude",
+			review: "codex",
 			"blocked-responder": "codex",
 			"umbrella-finalizer": "codex",
+		})
+		expect(Object.fromEntries(preset.phases.map((phase) => [phase.name, phase.defaultModel]))).toEqual({
+			iteration: null,
+			review: "gpt-5.5",
+			"blocked-responder": null,
+			"umbrella-finalizer": null,
 		})
 		expect(lastNonTriggerPhaseForPreset(preset).name).toBe("review")
 		expect(triggeredPhasesAfter(preset, "review", "blocked").map((phase) => phase.name)).toEqual(["blocked-responder"])

@@ -222,6 +222,7 @@ describe("ItemRecord prompt bindings", () => {
 			variableDocs: new Map(),
 			trigger: null,
 			defaultRunner: null,
+			defaultModel: null,
 		}
 		const item = makeItem({
 			issueNumber: 333,
@@ -252,6 +253,7 @@ describe("ItemRecord prompt bindings", () => {
 			]),
 			trigger: null,
 			defaultRunner: "claude",
+			defaultModel: null,
 		}
 		const ctx: ResolveContext = { item: makeItem(), config: makeConfig(), runtime: makeRuntime({ targetCwd: "/repo", issueKind: "code" }) }
 
@@ -449,6 +451,72 @@ describe("runner and daemon helpers", () => {
 
 		expect(runner.kind).toBe("codex")
 		expect(runner.source).toBe("engine-builtin")
+	})
+
+	test("parsePreset reads phase model and rejects blank values", () => {
+		const preset = makePreset({
+			phases: [
+				{ name: "iteration", prompt: "iteration.md", variables: { ISSUE: "item.issue" } },
+				{ name: "review", prompt: "review.md", runner: "codex", model: "gpt-5.5", variables: { ISSUE: "item.issue" } },
+			],
+		})
+		expect(preset.phases[0]?.defaultModel).toBeNull()
+		expect(preset.phases[1]?.defaultModel).toBe("gpt-5.5")
+
+		expect(() =>
+			makePreset({
+				phases: [
+					{ name: "iteration", prompt: "iteration.md", model: "  ", variables: { ISSUE: "item.issue" } },
+					{ name: "review", prompt: "review.md", variables: { ISSUE: "item.issue" } },
+				],
+			}),
+		).toThrow(/preset\.phases\[0\]\.model: must be a non-empty string/)
+	})
+
+	test("selectRunnerForPhase resolves the preset phase model when config declares none", () => {
+		const preset = makePreset({
+			phases: [
+				{ name: "iteration", prompt: "iteration.md", variables: { ISSUE: "item.issue" } },
+				{ name: "review", prompt: "review.md", runner: "codex", model: "gpt-5.5", variables: { ISSUE: "item.issue" } },
+			],
+		})
+		const options = makeOptions(preset)
+		const review = selectRunnerForPhase("review", makeItem(), options)
+
+		expect(review.kind).toBe("codex")
+		expect(review.source).toBe("preset")
+		expect(review.model).toBe("gpt-5.5")
+	})
+
+	test("explicit config model overrides the preset phase model", () => {
+		const preset = makePreset({
+			phases: [
+				{ name: "iteration", prompt: "iteration.md", variables: { ISSUE: "item.issue" } },
+				{ name: "review", prompt: "review.md", runner: "codex", model: "gpt-5.5", variables: { ISSUE: "item.issue" } },
+			],
+		})
+		const options = makeOptions(preset)
+		options.runnerCommands = { ...options.runnerCommands, codex: { ...options.runnerCommands.codex, model: "gpt-5.5-codex" } }
+
+		expect(selectRunnerForPhase("review", makeItem(), options).model).toBe("gpt-5.5-codex")
+	})
+
+	test("item runner override to a different kind does not inherit the preset phase model", () => {
+		const preset = makePreset({
+			phases: [
+				{ name: "iteration", prompt: "iteration.md", runner: "codex", model: "gpt-5.5", variables: { ISSUE: "item.issue" } },
+				{ name: "review", prompt: "review.md", variables: { ISSUE: "item.issue" } },
+			],
+		})
+		const options = makeOptions(preset)
+
+		const sameKind = selectRunnerForPhase("iteration", makeItem({ runner: "codex" }), options)
+		expect(sameKind.source).toBe("queue")
+		expect(sameKind.model).toBe("gpt-5.5")
+
+		const otherKind = selectRunnerForPhase("iteration", makeItem({ runner: "claude" }), options)
+		expect(otherKind.kind).toBe("claude")
+		expect(otherKind.model).toBeNull()
 	})
 
 	test("stripRoleEntryFrontmatter removes leading frontmatter so prompts never start with --", () => {

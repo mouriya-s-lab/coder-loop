@@ -51,15 +51,16 @@ L2: Preset（presets/<name>/）
 
 ## Runner Selection
 
-Runner 默认值跟随 `preset.toml`，而不是 target config 或角色 entry md。每个 phase 可声明：
+Runner 与 model 默认值跟随 `preset.toml`，而不是 target config 或角色 entry md。每个 phase 可声明：
 
 ```toml
 [[phases]]
-name = "iteration"
+name = "review"
 runner = "codex"
+model  = "gpt-5.5"
 ```
 
-`runner` 只能是 `claude` 或 `codex`。phase 未声明时走单一 engine-builtin fallback（当前为 `codex`），并在 status 中显示 `source=engine-builtin`。`target.runner.hostDefault` 只保留宿主诊断信息，不决定 phase runner。
+`runner` 只能是 `claude` 或 `codex`。phase 未声明时走单一 engine-builtin fallback（当前为 `codex`），并在 status 中显示 `source=engine-builtin`。`model` 是该 phase 的默认模型；target config 显式 `claude.model` / `codex.model` 优先于它，item override 把 runner 切到与 phase 声明不同的 kind 时不继承它。`target.runner.hostDefault` 只保留宿主诊断信息，不决定 phase runner。
 
 覆盖顺序：
 
@@ -67,7 +68,7 @@ runner = "codex"
 2. `preset.toml` 中 phase 的 `runner`，status 中显示 `source=preset`。
 3. phase 未声明 runner 时的 engine-builtin fallback，status 中显示 `source=engine-builtin`。
 
-Runner binary、模型与额外参数由 config 的 `claude.binary` / `claude.model` / `claude.extraArgs`、`codex.binary` / `codex.model` / `codex.extraArgs` 提供——iteration 与 review 共享同一份 `claude.model` / `codex.model`，源码不再为 review phase 强制覆盖模型。要改 runner / 模型推荐用 `coder-loop runtime set`，它把枚举值落到 config 里（Claude 模型固定带 `[1m]` 后缀）；手写 config 也可以。`coder-loop status <target> --json` 暴露 `target.runner.phases.<phase>`、`target.runner.default`、`target.runner.reviewDefault`、`queue.selected.phaseRunners.<phase>`、`queue.selected.runner`、`queue.selected.reviewRunner`、`current.runner` 和 `current.phaseStatus.value.runner/model`；`doctor` 按 phase runner 推导出的 runner binary 做 PATH 检查。不要从旧 flat log 或 agent `status.json` 反推 runner/model，除非 `status` 已经指出需要 fallback debug；新版 agent status 位于 `<logDir>/<runId>/<phase>/status.json`。
+Runner binary、模型与额外参数由 config 的 `claude.binary` / `claude.model` / `claude.extraArgs`、`codex.binary` / `codex.model` / `codex.extraArgs` 提供——config 显式 model 是 target 级 override，优先于 phase 的 `model` 声明；iteration 与 review 共享同一份 `claude.model` / `codex.model`，源码不再为 review phase 强制覆盖模型。要改 runner / 模型推荐用 `coder-loop runtime set`，它把枚举值落到 config 里（Claude 模型固定带 `[1m]` 后缀）；手写 config 也可以。`coder-loop status <target> --json` 暴露 `target.runner.phases.<phase>`、`target.runner.default`、`target.runner.reviewDefault`、`queue.selected.phaseRunners.<phase>`、`queue.selected.runner`、`queue.selected.reviewRunner`、`current.runner` 和 `current.phaseStatus.value.runner/model`；`doctor` 按 phase runner 推导出的 runner binary 做 PATH 检查。不要从旧 flat log 或 agent `status.json` 反推 runner/model，除非 `status` 已经指出需要 fallback debug；新版 agent status 位于 `<logDir>/<runId>/<phase>/status.json`。
 
 ### 写一个新 preset 的最小流程
 
