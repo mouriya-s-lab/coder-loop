@@ -416,6 +416,7 @@ const PresetTomlBoundary = arkType({
 	version: "number",
 	"description?": "string",
 	item: { idField: "string", "fields?": "object" },
+	"runtime?": { "businessKeys?": "string[]" },
 	statuses: { continuable: "string[]", terminal: "string[]", "success?": "string[]", "entry?": "string", "unblockable?": "string[]" },
 	phases: PresetPhaseBoundary.array(),
 	"fragments?": PresetFragmentBoundary.array(),
@@ -458,7 +459,7 @@ export type LoopOptions = {
 export type PresetVariableSource =
 	| { kind: "item"; field: string }
 	| { kind: "config"; field: string; fallback: ConfigBindingFallback }
-	| { kind: "runtime"; key: string }
+	| { kind: "runtime"; key: string; ownership?: "preset" }
 
 type ParsedVariableSource =
 	| { kind: "item"; field: string }
@@ -503,6 +504,9 @@ export type Preset = {
 	item: {
 		idField: string
 		fields: ReadonlyMap<string, PresetItemField>
+	}
+	runtime: {
+		businessKeys: readonly string[]
 	}
 	statuses: {
 		continuable: readonly string[]
@@ -865,7 +869,7 @@ const ISSUE_KIND_VALUES = ["code", "comment", "code-spike", "blocked"] as const
 export type IssueKindValue = (typeof ISSUE_KIND_VALUES)[number]
 export type IssueKind = IssueKindValue | null
 
-export const RUNTIME_BINDING_KEYS = [
+export const ENGINE_RUNTIME_BINDING_KEYS = [
 	"runId",
 	"targetCwd",
 	"agentCwd",
@@ -882,12 +886,10 @@ export const RUNTIME_BINDING_KEYS = [
 	"fragmentIndex",
 	"runtimeInputsDoc",
 	"phaseExitsDoc",
-	"issueKindDoc",
 	"runIdGeneration",
 	"resumedFromPhase",
 	"resumedStartedAt",
 	"resumedSessionId",
-	"issueKind",
 	"chainName",
 	"chainUmbrellaRepo",
 	"chainUmbrellaIssue",
@@ -895,13 +897,13 @@ export const RUNTIME_BINDING_KEYS = [
 	"repoCwd",
 ] as const
 
-type RuntimeBindingKey = (typeof RUNTIME_BINDING_KEYS)[number]
+type EngineRuntimeBindingKey = (typeof ENGINE_RUNTIME_BINDING_KEYS)[number]
 
-function isRuntimeBindingKey(key: string): key is RuntimeBindingKey {
-	return (RUNTIME_BINDING_KEYS as readonly string[]).includes(key)
+function isEngineRuntimeBindingKey(key: string): key is EngineRuntimeBindingKey {
+	return (ENGINE_RUNTIME_BINDING_KEYS as readonly string[]).includes(key)
 }
 
-export type RuntimeBindings = Record<RuntimeBindingKey, string>
+export type RuntimeBindings = Record<EngineRuntimeBindingKey, string> & Readonly<Record<string, string | undefined>>
 
 export type RuntimeBindingPaths = {
 	sharedContextPath: string
@@ -3773,6 +3775,8 @@ export function parsePreset(value: unknown, presetDir: string): Preset {
 	if (!Number.isFinite(attemptTimeoutSeconds) || attemptTimeoutSeconds <= 0) {
 		presetError("preset.agent.attemptTimeoutSeconds: must be a finite positive number")
 	}
+	const runtimeBusinessKeys = parsePresetRuntimeBusinessKeys(root.runtime?.businessKeys ?? [], "preset.runtime.businessKeys")
+	const runtimeBusinessKeySet = new Set(runtimeBusinessKeys)
 
 	const phaseNames = new Set<string>()
 	const phases: PresetPhase[] = []
@@ -3797,6 +3801,14 @@ export function parsePreset(value: unknown, presetDir: string): Preset {
 				if (!isKnownPresetItemField(itemField, root.item.idField, itemFields)) {
 					presetError(`preset.phases[${index}].variables.${key}: unknown item field "${source.field}" (engine fields: ${[...ENGINE_ITEM_BINDING_KEYS].join(", ")}; idField: ${root.item.idField}; declared fields: ${[...itemFields.keys()].join(", ") || "<none>"})`)
 				}
+			}
+			if (source.kind === "runtime" && !isEngineRuntimeBindingKey(source.key)) {
+				if (!runtimeBusinessKeySet.has(source.key)) {
+					presetError(`preset.phases[${index}].variables.${key}: unknown runtime key "${source.key}" (engine facts: ${ENGINE_RUNTIME_BINDING_KEYS.join(", ")}; preset business keys: ${runtimeBusinessKeys.join(", ") || "<none>"})`)
+				}
+				variables.push([key, { ...source, ownership: "preset" }] as const)
+				if (variable.doc !== null) variableDocs.set(key, variable.doc)
+				continue
 			}
 			variables.push([key, source] as const)
 			if (variable.doc !== null) variableDocs.set(key, variable.doc)
@@ -3855,6 +3867,7 @@ export function parsePreset(value: unknown, presetDir: string): Preset {
 		description: root.description ?? "",
 		presetDir,
 		item: { idField: root.item.idField, fields: itemFields },
+		runtime: { businessKeys: runtimeBusinessKeys },
 		statuses: { continuable: root.statuses.continuable, terminal: root.statuses.terminal, success: successStatuses, entry: entryStatus, unblockable: unblockableStatuses },
 		phases,
 		fragments,
@@ -3903,6 +3916,19 @@ function parsePresetItemFieldType(value: unknown, label: string): PresetItemFiel
 
 function isPresetItemFieldType(value: string): value is PresetItemFieldType {
 	return (PRESET_ITEM_FIELD_TYPES as readonly string[]).includes(value)
+}
+
+function parsePresetRuntimeBusinessKeys(value: readonly string[], label: string): readonly string[] {
+	const keys: string[] = []
+	const seen = new Set<string>()
+	for (const [index, key] of value.entries()) {
+		if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(key)) presetError(`${label}[${index}]: key must match ^[a-zA-Z][a-zA-Z0-9_]*$`)
+		if (isEngineRuntimeBindingKey(key)) presetError(`${label}[${index}]: "${key}" is engine-owned; do not redeclare it as a preset business key`)
+		if (seen.has(key)) presetError(`${label}[${index}]: duplicate key "${key}"`)
+		seen.add(key)
+		keys.push(key)
+	}
+	return keys
 }
 
 function isKnownPresetItemField(field: string, idField: string, itemFields: ReadonlyMap<string, PresetItemField>): boolean {
@@ -4493,10 +4519,11 @@ export function renderPrompt(template: string, phase: PresetPhase, ctx: ResolveC
 
 function resolvePhaseBinding(source: PresetVariableSource, phase: PresetPhase, ctx: ResolveContext): string {
 	if (source.kind === "runtime") {
+		assertRuntimeSourceDeclared(source)
 		switch (source.key) {
 			case "runtimeInputsDoc": return renderRuntimeInputsDoc(phase, ctx)
 			case "phaseExitsDoc": return renderPhaseExitsDoc(phase)
-			case "issueKindDoc": return renderIssueKindDoc(ctx.runtime.issueKind)
+			case "issueKindDoc": return renderIssueKindDoc(runtimeBindingValue(ctx.runtime, "issueKind"))
 		}
 	}
 	return resolveBinding(source, ctx)
@@ -4590,10 +4617,20 @@ export function resolveBinding(source: PresetVariableSource, ctx: ResolveContext
 		const value = ctx.config[source.field] ?? (source.fallback.kind === "value" ? source.fallback.value : undefined)
 		return stringifyBindingValue(value, `config.${source.field}`)
 	}
-	if (!isRuntimeBindingKey(source.key)) {
-		throw new Error(`runtime.${source.key}: not in runtime binding whitelist`)
-	}
-	return ctx.runtime[source.key]
+	assertRuntimeSourceDeclared(source)
+	return runtimeBindingValue(ctx.runtime, source.key)
+}
+
+function assertRuntimeSourceDeclared(source: Extract<PresetVariableSource, { kind: "runtime" }>): void {
+	if (isEngineRuntimeBindingKey(source.key)) return
+	if (source.ownership === "preset") return
+	throw new Error(`runtime.${source.key}: not an engine runtime fact or preset-declared business key`)
+}
+
+function runtimeBindingValue(runtime: RuntimeBindings, key: string): string {
+	const value = runtime[key]
+	if (value === undefined) throw new Error(`runtime.${key}: missing runtime binding value`)
+	return value
 }
 
 function stringifyBindingValue(value: unknown, label: string): string {
