@@ -13,4 +13,4 @@ The report must contain: `Why I did it this way`; `What I actually did` with bra
 - **Boundary compliance** — no batching, no commits/PRs/GitHub writes from this step.
 - Apply `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/honesty-judge.md` — especially intent-action mismatch, cross-issue deferral, and test weakening triggers in the report itself.
 
-Code quality (style, naming, architecture) is not your gate — judge whether the task landed per contract, not whether you would have written it differently. Send back precise gap lists; do not fix code yourself.
+Your gate is the contract and the report's coherence — review's diff-audit independently reads the code against the issue design and conventions, so do not duplicate a line-by-line code review here; but a report that itself reveals a design deviation (mechanism/placement differing from what the issue names) is a gap to send back now, cheaper than at review. Send back precise gap lists; do not fix code yourself.

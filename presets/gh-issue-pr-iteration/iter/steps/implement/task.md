@@ -35,7 +35,7 @@ Append to the chain handoff file (`SHARED_CONTEXT_FILE`) under a heading `Intent
 
 ### Step 5 — Implement
 
-Make the smallest direct change that closes exactly this issue. No batching, no drive-by refactors, no style cleanups beyond the contract.
+Make the smallest direct change that closes exactly this issue. No batching, no drive-by refactors, no style cleanups beyond the contract. Within that scope the code must hold up to review: follow the issue's stated design exactly (mechanism, placement, data flow it names), match the target project's written conventions (`CLAUDE.md`, workflow file) and the idiom of the immediately surrounding code, and introduce no dead code or one-use abstractions — review independently reads the diff against the issue design and rejects on these.
 
 The moment your change touches a test file, this rule applies: never remove, skip, rename-away, or loosen an existing test unless the issue body literally demands that exact change. A test that must change because it pins the very behavior this issue changes: record old test name → new assertion, for your report. Review independently diffs the test inventory against base — an undeclared delta is treated as hidden weakening and fails the whole run.
 

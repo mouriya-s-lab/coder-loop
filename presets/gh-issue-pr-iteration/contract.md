@@ -235,7 +235,7 @@ Review 是调度者（orchestrator）：PR-backed kind 必须先派 diff-audit �
 
 | 验收点 | 执行方 | 输入 | 规则 | 失败处置 |
 |---|---|---|---|---|
-| Diff audit | diff-audit subagent 真跑 | PR diff vs base + base/head 测试清单 | 每个 changed file 映射到 issue scope；runtime artifacts / scheduling state 不入仓；测试完整性：删 / 弱化 / skip 的测试逐条枚举（空集也要声明），非 issue 契约字面要求的非空 delta 即 test-weakening 触发 | retry action |
+| Diff audit | diff-audit subagent 真跑 | PR diff vs base + base/head 测试清单 + changed code 本体 | 每个 changed file 映射到 issue scope；runtime artifacts / scheduling state 不入仓；测试完整性：删 / 弱化 / skip 的测试逐条枚举（空集也要声明），非 issue 契约字面要求的非空 delta 即 test-weakening 触发；代码审查锚定 issue 设计：逻辑错误（须可追溯失败路径）/ 偏离 issue 声明的设计（须引原句）/ 违反项目 conventions（须引来源）/ diff 内结构缺陷——发散性发现（替代设计、diff 外代码）不进 verdict | retry action |
 | Contract replay | replay subagent 真跑 | issue `## 验收标准` + `## 继承验证义务` 全部行 + packet 关键 claim + live checks | 逐行执行/复验（列 `# / Dimension / Check / Command / Env / Expect`，actual vs Expect）；packet 关键 claim 重跑比对；checks 实测观察（pending/hung 不算 mergeable） | retry action（引用全部失败行） |
 | Trace honesty | 调度者亲自 | iter 汇报/trace + GitHub live state | 每个声明有对应观察（`quality/honesty-judge.md` claim-vs-observation） | retry action |
 | PR protocol | 调度者亲自 | PR body + thread + issue comments | first line `Closes #<N>`、CI parity 行、retry 必有新 PR-thread comment | retry action / no-PR 路由 |
@@ -246,7 +246,7 @@ Review 是调度者（orchestrator）：PR-backed kind 必须先派 diff-audit �
 | Source-spike audit（`kind:code-spike`） | 调度者亲自（`review/source-spike-audit.md`） | issue comment + spike branch + 证据 | no-merge 语义、branch/SHA、命令覆盖、结果分支；有 PR 即 retry | retry action |
 | Closure | 调度者亲自 | 上面验收点综合 + child closure table | 决定 terminal action（accept-pr / accept-no-pr / retry / expand-parent / skip / blocked / stop） | 选 action 文件 |
 
-代码质量（style / conventions / 架构审美 / bug-hunting beyond contract）**不在 loop 内**——后退给人工 review。loop 保留的 code 相关检查：mergeability/CI 实测与逐行契约复验（replay 步）、scope 对应与测试完整性与 runtime artifacts 不入仓（diff-audit 步）。PR-backed kind 缺少 diff-audit 或 replay 派发报告的 verdict 无效（仅 no-PR 路由与 infra-stop 例外）。
+代码审查**在 loop 内**，锚点是 issue 声明的设计：逻辑正确性、conventions、diff 内结构由 diff-audit 步审，所有发现必须带锚（可追溯失败路径 / issue 原句 / convention 来源），**不发散**——替代设计、issue 设计之外的改进想法、diff 没碰的代码一律不进 verdict（diff 外既有问题至多在 Problems 记一行 out-of-scope observation）。其余 code 相关检查：mergeability/CI 实测与逐行契约复验（replay 步）、scope 对应与测试完整性与 runtime artifacts 不入仓（diff-audit 步）。PR-backed kind 缺少 diff-audit 或 replay 派发报告的 verdict 无效（仅 no-PR 路由与 infra-stop 例外）。
 
 ---
 

@@ -24,6 +24,13 @@ Inventory: base=<count> (<command>), head=<count> (<command>)
 
 (or a single row `none | - | -` after enumeration)
 
+## Code findings (anchored to the issue's design)
+| # | Category | Location | Finding | Anchor |
+|---|---|---|---|---|
+| <n> | logic / design-deviation / convention / structure | <file:line> | <concrete defect> | <failure path / issue sentence quote / convention source / diff evidence> |
+
+(or a single row `none | - | - | - | -` after actually reading the changed code)
+
 ## Change footprint (factual)
 <surfaces touched and the nature of each change, 3-8 lines, no quality judgments>
 

@@ -53,7 +53,7 @@ iteration / review 两个复杂角色不再是「查表自执行的 fragment 链
 - **dispatch 消息只含指针 + 运行时键值**，不转述任何规则文本；prompt 内跨文件引用全部写 `/Users/mouriya/Ext/app/coder-loop/...` 绝对路径（agent 跑在随机 worktree，运行时锚定 app 目录；fragment 不经引擎渲染，占位符无人替换）。
 - **补缺走同一 subagent**（claude: Task follow-up；codex: `send_input`），方向错了才重派。
 - **无内部超时**：时间归引擎 watchdog。
-- **bug / 代码质量审查退出 loop**：style / conventions / 架构审美 / contract 之外的 bug-hunting 后退给人工 review。loop 内保留且不可让渡：scope 对应、测试完整性、runtime artifacts 卫生（diff-audit 步）、契约逐行兑现与 CI/mergeability 实测（replay 步）、诚实、协议、closure 语义。
+- **代码审查在 loop 内、锚定 issue 设计、不发散**：diff-audit 步审 changed code 的逻辑正确性 / 设计偏离 / conventions / diff 内结构，每条发现必须带锚（可追溯失败路径 / issue 原句 / convention 来源）；替代设计、issue 设计外的改进、diff 没碰的代码不进 verdict。loop 内同样不可让渡：scope 对应、测试完整性、runtime artifacts 卫生（diff-audit 步）、契约逐行兑现与 CI/mergeability 实测（replay 步）、诚实、协议、closure 语义。
 
 plan 链不变（仍为查表式 fragment 链）；trigger 角色（blocked-responder / umbrella-finalizer）任务简单，未调度者化。
 
@@ -91,7 +91,7 @@ plan 链不变（仍为查表式 fragment 链）；trigger 角色（blocked-resp
 **review/**（19）：
 
 - `review/steps/investigate/{task,report,accept}` — 重材料读取回 verbatim 摘要
-- `review/steps/diff-audit/{task,report,accept}` — **强制派发**（PR-backed kind）：PR diff vs base 的 scope 映射（每个 changed file 归 in-scope/support/unmapped）、runtime artifacts 卫生扫描、测试完整性（base/head 测试清单两侧计数 + 删/改名/skip/弱化逐条枚举；计数下降无枚举 = 隐藏弱化硬拒）
+- `review/steps/diff-audit/{task,report,accept}` — **强制派发**（PR-backed kind）：PR diff vs base 的 scope 映射（每个 changed file 归 in-scope/support/unmapped）、runtime artifacts 卫生扫描、测试完整性（base/head 测试清单两侧计数 + 删/改名/skip/弱化逐条枚举；计数下降无枚举 = 隐藏弱化硬拒）、锚定 issue 设计的代码审查（逻辑错误带失败路径 / 设计偏离引 issue 原句 / convention 违反引来源 / diff 内结构缺陷；不发散）
 - `review/steps/replay/{task,report,accept}` — **强制派发**（PR-backed kind）：验收表逐行真跑 / artifact 核验、packet 关键 claim 重跑、checks 实测
 - `review/spike-followup`、`review/source-spike-audit` — kind 特定判断指南（调度者亲读）
 - `review/actions/{accept-pr,accept-no-pr,retry,expand-parent,skip,blocked,stop}` — 终局动作（调度者按 verdict 只读其一并亲自执行副作用）
@@ -175,7 +175,7 @@ verify 发现产品性失败 → 在清单里 verify 行前插入 scoped impleme
 
 ## 6. Review 调度者（`review-entry.md`，workflow 形态）
 
-Step 0 读契约 → Step 1 调查（**恰好六项亲自读取**；Intent/Result blocks、PR body 与最新 retry comment **verbatim 亲读**；大材料派 investigate）→ Step 2 建清单（**PR-backed kind 强制含 diff-audit 与 replay 两个派发**——缺任一份已验收报告的 verdict（含 retry）无效；"packet 一眼就有问题" 不是豁免，先拿齐两份报告一次引全）→ Step 3 执行派发并消化报告（replay = 契约真值；diff-audit = scope/测试完整性/卫生真值；stale-baseline 例外在此适用）→ Step 4 五项亲自判断（trace honesty / PR protocol / title-intent / caveat honesty / evidence form，每项输入与失败条件内联在步骤现场；先收集全部失败再 verdict，不见首败即停）→ Step 5 closure 分类 → Step 6 终局动作（retry 反馈质量线：契约发现领先措辞发现，每条具名到行号/文件/测试名/触发短语；两份报告全绿而仅剩措辞抱怨时必须对照 honesty-judge 复查再发）+ state write → Step 7 global assessment、handoff、清场、`REVIEW SUMMARY:` 一行（含 `dispatched=` 字段，`no` 仅 no-PR 路由 / stop 合法）。
+Step 0 读契约 → Step 1 调查（**恰好六项亲自读取**；Intent/Result blocks、PR body 与最新 retry comment **verbatim 亲读**；大材料派 investigate）→ Step 2 建清单（**PR-backed kind 强制含 diff-audit 与 replay 两个派发**——缺任一份已验收报告的 verdict（含 retry）无效；"packet 一眼就有问题" 不是豁免，先拿齐两份报告一次引全）→ Step 3 执行派发并消化报告（replay = 契约真值；diff-audit = scope/测试完整性/卫生/代码真值，code findings 须带锚才进 verdict；stale-baseline 例外在此适用）→ Step 4 五项亲自判断（trace honesty / PR protocol / title-intent / caveat honesty / evidence form，每项输入与失败条件内联在步骤现场；先收集全部失败再 verdict，不见首败即停）→ Step 5 closure 分类 → Step 6 终局动作（retry 反馈质量线：契约发现领先措辞发现，每条具名到行号/文件/测试名/触发短语；两份报告全绿而仅剩措辞抱怨时必须对照 honesty-judge 复查再发）+ state write → Step 7 global assessment、handoff、清场、`REVIEW SUMMARY:` 一行（含 `dispatched=` 字段，`no` 仅 no-PR 路由 / stop 合法）。
 
 **review 可独立复验但绝不替 iter 修**。kind 分流矩阵见 `review-entry.md` 的 Kind routing matrix（contract.md §4 有 issue 作者视角摘要）。
 
