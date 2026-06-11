@@ -830,15 +830,8 @@ function attachRunCloseHandler(
 ): SchedulerActiveRun {
 	const stdout: Buffer[] = []
 	const stderr: Buffer[] = []
-	const summaryClose = summaryCloseMarker(summaryTag)
-
-	const attemptTimeoutMs = options.attemptTimeoutMs ?? ATTEMPT_TIMEOUT_MS
-	const attemptKillMs = options.attemptKillMs ?? ATTEMPT_KILL_MS
-	const watchdogGraceMs = options.watchdogGraceMs ?? WATCHDOG_GRACE_MS
-	const watchdogKillMs = options.watchdogKillMs ?? WATCHDOG_KILL_MS
-
-	// --- lifecycle: attempt timeout + summary watchdog ---
-	let lifecycleCleanup: (() => void) | null = null
+	let lifecycleGc: SchedulerRunLifecycleGc | null = null
+	let terminatorCleanup: (() => void) | null = null
 
 	const closed = new Promise<SchedulerCompletedRun>((resolveClosed, rejectClosed) => {
 		child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk))
@@ -847,44 +840,12 @@ function attachRunCloseHandler(
 			stderr.push(Buffer.from(error.message))
 		})
 
-		// Attempt timeout
-		let attemptTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
-			attemptTimer = null
-			if (child.exitCode !== null || child.signalCode !== null) return
-			sendSignalToChildProcessGroup(child, "SIGTERM")
-			const killTimer = setTimeout(() => {
-				if (child.exitCode === null && child.signalCode === null) sendSignalToChildProcessGroup(child, "SIGKILL")
-			}, attemptKillMs)
-			lifecycleCleanup = combineCleanup(lifecycleCleanup, () => clearTimeout(killTimer))
-		}, attemptTimeoutMs)
-
-		// Summary watchdog: observe accumulated stdout for this run's nonce close marker
-		let watchdogArmed = false
-		let watchdogAccumulated = ""
-		let watchdogGraceTimer: ReturnType<typeof setTimeout> | null = null
-		child.stdout?.on("data", (chunk: Buffer) => {
-			if (watchdogArmed) return
-			watchdogAccumulated += chunk.toString("utf-8")
-			if (watchdogAccumulated.includes(summaryClose)) {
-				watchdogArmed = true
-				if (attemptTimer !== null) { clearTimeout(attemptTimer); attemptTimer = null }
-				watchdogGraceTimer = setTimeout(() => {
-					watchdogGraceTimer = null
-					if (child.exitCode !== null || child.signalCode !== null) return
-					sendSignalToChildProcessGroup(child, "SIGTERM")
-					const killTimer = setTimeout(() => {
-						if (child.exitCode === null && child.signalCode === null) sendSignalToChildProcessGroup(child, "SIGKILL")
-					}, watchdogKillMs)
-					lifecycleCleanup = combineCleanup(lifecycleCleanup, () => clearTimeout(killTimer))
-				}, watchdogGraceMs)
-				lifecycleCleanup = combineCleanup(lifecycleCleanup, () => { if (watchdogGraceTimer !== null) { clearTimeout(watchdogGraceTimer); watchdogGraceTimer = null } })
-			}
-		})
-
-		lifecycleCleanup = combineCleanup(lifecycleCleanup, () => { if (attemptTimer !== null) { clearTimeout(attemptTimer); attemptTimer = null } })
+		const installedGc = installSchedulerRunLifecycleGc(options, child, summaryTag)
+		lifecycleGc = installedGc
+		terminatorCleanup = installedGc.terminatorCleanup
 
 		child.on("close", (code) => {
-			if (lifecycleCleanup !== null) { lifecycleCleanup(); lifecycleCleanup = null }
+			lifecycleGc?.cleanup()
 
 			const pendingCloseHandler = (async (): Promise<SchedulerCompletedRun> => {
 				const exitCode = code ?? 1
@@ -995,7 +956,7 @@ function attachRunCloseHandler(
 				.catch(() => undefined)
 		})
 	})
-	const terminate = createRunTerminator(child, closed, lifecycleCleanup)
+	const terminate = createRunTerminator(child, closed, terminatorCleanup)
 	return { runId, pid: child.pid ?? null, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, worktreePath, startedAt, closed, terminate }
 }
 
@@ -1014,6 +975,68 @@ function combineCleanup(existing: (() => void) | null, next: () => void): () => 
 		if (existing !== null) existing()
 		next()
 	}
+}
+
+type SchedulerRunLifecycleGc = {
+	cleanup: () => void
+	terminatorCleanup: (() => void) | null
+}
+
+function installSchedulerRunLifecycleGc(
+	options: SchedulerOptions,
+	child: ReturnType<typeof spawn>,
+	summaryTag: string,
+): SchedulerRunLifecycleGc {
+	const summaryClose = summaryCloseMarker(summaryTag)
+	const attemptTimeoutMs = options.attemptTimeoutMs ?? ATTEMPT_TIMEOUT_MS
+	const attemptKillMs = options.attemptKillMs ?? ATTEMPT_KILL_MS
+	const watchdogGraceMs = options.watchdogGraceMs ?? WATCHDOG_GRACE_MS
+	const watchdogKillMs = options.watchdogKillMs ?? WATCHDOG_KILL_MS
+	let lifecycleCleanup: (() => void) | null = null
+	const addLifecycleCleanup = (cleanup: () => void): void => {
+		lifecycleCleanup = combineCleanup(lifecycleCleanup, cleanup)
+	}
+
+	// Attempt timeout
+	let attemptTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+		attemptTimer = null
+		if (child.exitCode !== null || child.signalCode !== null) return
+		sendSignalToChildProcessGroup(child, "SIGTERM")
+		const killTimer = setTimeout(() => {
+			if (child.exitCode === null && child.signalCode === null) sendSignalToChildProcessGroup(child, "SIGKILL")
+		}, attemptKillMs)
+		addLifecycleCleanup(() => clearTimeout(killTimer))
+	}, attemptTimeoutMs)
+
+	// Summary watchdog: observe accumulated stdout for this run's nonce close marker
+	let watchdogArmed = false
+	let watchdogAccumulated = ""
+	let watchdogGraceTimer: ReturnType<typeof setTimeout> | null = null
+	child.stdout?.on("data", (chunk: Buffer) => {
+		if (watchdogArmed) return
+		watchdogAccumulated += chunk.toString("utf-8")
+		if (watchdogAccumulated.includes(summaryClose)) {
+			watchdogArmed = true
+			if (attemptTimer !== null) { clearTimeout(attemptTimer); attemptTimer = null }
+			watchdogGraceTimer = setTimeout(() => {
+				watchdogGraceTimer = null
+				if (child.exitCode !== null || child.signalCode !== null) return
+				sendSignalToChildProcessGroup(child, "SIGTERM")
+				const killTimer = setTimeout(() => {
+					if (child.exitCode === null && child.signalCode === null) sendSignalToChildProcessGroup(child, "SIGKILL")
+				}, watchdogKillMs)
+				addLifecycleCleanup(() => clearTimeout(killTimer))
+			}, watchdogGraceMs)
+			addLifecycleCleanup(() => { if (watchdogGraceTimer !== null) { clearTimeout(watchdogGraceTimer); watchdogGraceTimer = null } })
+		}
+	})
+
+	addLifecycleCleanup(() => { if (attemptTimer !== null) { clearTimeout(attemptTimer); attemptTimer = null } })
+
+	const cleanup = (): void => {
+		if (lifecycleCleanup !== null) { lifecycleCleanup(); lifecycleCleanup = null }
+	}
+	return { cleanup, terminatorCleanup: lifecycleCleanup }
 }
 
 function createRunTerminator(
@@ -1637,15 +1660,9 @@ function attachReviewOnEmptyCloseHandler(
 	repoCwd: string,
 	summaryTag: string,
 ): SchedulerActiveRun {
-	const attemptTimeoutMs = options.attemptTimeoutMs ?? ATTEMPT_TIMEOUT_MS
-	const attemptKillMs = options.attemptKillMs ?? ATTEMPT_KILL_MS
-	const watchdogGraceMs = options.watchdogGraceMs ?? WATCHDOG_GRACE_MS
-	const watchdogKillMs = options.watchdogKillMs ?? WATCHDOG_KILL_MS
-	const summaryClose = summaryCloseMarker(summaryTag)
-
-	let lifecycleCleanup: (() => void) | null = null
 	const stdout: Buffer[] = []
 	const stderr: Buffer[] = []
+	let lifecycleGc: SchedulerRunLifecycleGc | null = null
 	const closed = new Promise<SchedulerCompletedRun>((resolveClosed, rejectClosed) => {
 		child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk))
 		child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk))
@@ -1653,44 +1670,10 @@ function attachReviewOnEmptyCloseHandler(
 			stderr.push(Buffer.from(error.message))
 		})
 
-		// Attempt timeout
-		let attemptTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
-			attemptTimer = null
-			if (child.exitCode !== null || child.signalCode !== null) return
-			sendSignalToChildProcessGroup(child, "SIGTERM")
-			const killTimer = setTimeout(() => {
-				if (child.exitCode === null && child.signalCode === null) sendSignalToChildProcessGroup(child, "SIGKILL")
-			}, attemptKillMs)
-			lifecycleCleanup = combineCleanup(lifecycleCleanup, () => clearTimeout(killTimer))
-		}, attemptTimeoutMs)
-
-		// Summary watchdog: observe accumulated stdout for this run's nonce close marker
-		let watchdogArmed = false
-		let watchdogAccumulated = ""
-		let watchdogGraceTimer: ReturnType<typeof setTimeout> | null = null
-		child.stdout?.on("data", (chunk: Buffer) => {
-			if (watchdogArmed) return
-			watchdogAccumulated += chunk.toString("utf-8")
-			if (watchdogAccumulated.includes(summaryClose)) {
-				watchdogArmed = true
-				if (attemptTimer !== null) { clearTimeout(attemptTimer); attemptTimer = null }
-				watchdogGraceTimer = setTimeout(() => {
-					watchdogGraceTimer = null
-					if (child.exitCode !== null || child.signalCode !== null) return
-					sendSignalToChildProcessGroup(child, "SIGTERM")
-					const killTimer = setTimeout(() => {
-						if (child.exitCode === null && child.signalCode === null) sendSignalToChildProcessGroup(child, "SIGKILL")
-					}, watchdogKillMs)
-					lifecycleCleanup = combineCleanup(lifecycleCleanup, () => clearTimeout(killTimer))
-				}, watchdogGraceMs)
-				lifecycleCleanup = combineCleanup(lifecycleCleanup, () => { if (watchdogGraceTimer !== null) { clearTimeout(watchdogGraceTimer); watchdogGraceTimer = null } })
-			}
-		})
-
-		lifecycleCleanup = combineCleanup(lifecycleCleanup, () => { if (attemptTimer !== null) { clearTimeout(attemptTimer); attemptTimer = null } })
+		lifecycleGc = installSchedulerRunLifecycleGc(options, child, summaryTag)
 
 		child.on("close", (code) => {
-			if (lifecycleCleanup !== null) { lifecycleCleanup(); lifecycleCleanup = null }
+			lifecycleGc?.cleanup()
 			const pendingCloseHandler = (async (): Promise<SchedulerCompletedRun> => {
 				const exitCode = code ?? 1
 				const stdoutText = Buffer.concat(stdout).toString("utf-8")
