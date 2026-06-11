@@ -37,7 +37,7 @@ Decide exactly one, from the bound inputs:
 - **Retry**: `RUN_ID_GENERATION` = `new` AND `ISSUE_STATUS` = `changes_requested` AND `ISSUE_LAST_RUN_ID` non-empty. The latest PR review/comment is your primary instruction; every list item in Step 3 gets scoped to that feedback.
 - **Fresh**: neither. Work starts from `{{BASE_BRANCH}}`.
 
-### Step 2 — Investigate (exactly these reads, each for its stated purpose)
+### Step 2 — Investigate (the closed read surface, each read for its stated purpose)
 
 Run these yourself; each read exists to feed a specific Step 3 decision:
 
@@ -49,11 +49,13 @@ Run these yourself; each read exists to feed a specific Step 3 decision:
    ```
 
    Never discover PRs by text search (`--search "<n> in:body"` matches any PR whose body merely contains the digits — false positives). Then `gh pr view <number>` on the hit for its state and latest review thread.
-3. `{{SHARED_CONTEXT_FILE}}` → what previous runs already tried, their `Intent`/`Result` blocks → prevents re-doing or contradicting prior work.
-4. The state file's selected item → must match {{ISSUE}}. Mismatch, or unreadable state/config files → record the exact infrastructure failure and jump to Step 5 (wrap-up); do not improvise a different issue.
-5. `{{CURRENT_ISSUE_FILE}}` when present → issue-local notes from earlier runs. A missing file is normal, not a failure.
+3. Sub-issues (`gh api "repos/{{REPO}}/issues/{{ISSUE}}/sub_issues" -H "X-GitHub-Api-Version: 2026-03-10"`) → whether this is a parent/wrapper — feeds the Step 3 planning-stage classification.
+4. `{{SHARED_CONTEXT_FILE}}` → what previous runs already tried, their `Intent`/`Result` blocks → prevents re-doing or contradicting prior work.
+5. The state file's selected item → must match {{ISSUE}}. Mismatch, or unreadable state/config files → record the exact infrastructure failure and jump to Step 5 (wrap-up); do not improvise a different issue.
+6. `{{CURRENT_ISSUE_FILE}}` when present → issue-local notes from earlier runs. A missing file is normal, not a failure.
+7. One-hop graph references: GitHub objects the issue body explicitly points at (`Unblocks: #N`, the From column of `## 继承验证义务`, a cited issue/PR) — read each via the same metadata commands, and note which Step 3 decision it feeds. One hop only: a reference found inside a referenced object is research, not your read.
 
-These five reads are your complete investigation surface. Reading anything else — source files, long comment threads, evidence directories, unfamiliar subsystems — is task work: it becomes a `research` item on the Step 3 list, with the questions you need answered written into its `Step focus`.
+That is the whole read surface: GitHub metadata of this issue, its linked PR, its one-hop references, plus the four runtime files above. Anything else — repository source files, long comment threads, evidence directories, unfamiliar subsystems — is task work: it becomes a `research` item on the Step 3 list, with the questions you need answered written into its `Step focus`. Re-fetching any of the above later (e.g. before judging a report against a possibly-stale issue body) is allowed — repetition is fine, expansion is not.
 
 ### Step 3 — Build the task list
 

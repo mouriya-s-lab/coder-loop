@@ -32,7 +32,7 @@ Read now, yourself:
 4. `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/honesty-judge.md` — your core judgment tool for Step 4, including the stale-baseline exception.
 5. `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/evidence-judge.md` — packet-form criteria for Step 4.
 
-### Step 1 — Investigate (exactly these reads, each for its stated purpose)
+### Step 1 — Investigate (the closed read surface, each read for its stated purpose)
 
 Run these yourself, in order:
 
@@ -54,7 +54,9 @@ gh pr view <PR_NUMBER> -R <REPO> --json number,title,state,mergedAt,mergeCommit,
 
    → issue contract (acceptance rows, sections), PR body and **the latest run's PR comment read verbatim**, checks state, children and their PRs when sub-issues exist.
 
-These reads are your complete self-served surface. Bulk material — very long threads, large evidence directories — is not yours to read: it becomes an `investigate` dispatch on the Step 2 list, whose report returns verbatim quotes for everything judgment-relevant.
+Plus one-hop graph references the issue body explicitly points at (`Unblocks: #N`, the From column of `## 继承验证义务`, a cited issue/PR) — same metadata commands, one hop only: a reference found inside a referenced object is an investigate dispatch, not your read.
+
+That is the whole read surface; re-fetching any of it later is allowed, expansion beyond it is not. Bulk material — very long threads, large evidence directories — is not yours to read: it becomes an `investigate` dispatch on the Step 2 list, whose report returns verbatim quotes for everything judgment-relevant.
 
 ### Step 2 — Build the review task list
 
