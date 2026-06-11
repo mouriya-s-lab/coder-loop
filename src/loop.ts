@@ -23,7 +23,7 @@ import {
 	type DaemonResponse,
 } from "./daemon"
 import { dispatchSubcommand } from "./install-commands"
-import { RUN_ID_ENV, RuntimePathError, resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
+import { RuntimePathError, resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import {
 	type ChainRecord,
 	type CurrentRunRecord,

@@ -32,7 +32,6 @@ import { detectsSessionIdInvalid } from "./runners/session-id"
 import { type ChainRecord, dependsOnItemIds, type ItemRecord, listDependencyWaitReasons, type RunRecord, type SqliteStateStore } from "./sqlite-state"
 import {
 	LOOP_DATA_ROOT_ENV,
-	RUN_ID_ENV,
 	type LoopDataRootOptions,
 	RuntimePathError,
 	resolveChainRuntimePaths,
@@ -767,7 +766,7 @@ async function spawnSchedulerRun(
 		detached: true,
 		// The agent writes its own item status via `coder-loop item update`, which must reach
 		// the daemon that owns this loop-data-root. Pass it through so the CLI resolves the same store.
-		env: { ...process.env, [LOOP_DATA_ROOT_ENV]: resolveLoopDataPaths(options.loopDataRootOptions).root, [RUN_ID_ENV]: runId },
+		env: { ...process.env, [LOOP_DATA_ROOT_ENV]: resolveLoopDataPaths(options.loopDataRootOptions).root },
 	})
 	const activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, phase, child, runner, summaryTag)
 	slot.activeRun = activeRun
@@ -1583,7 +1582,7 @@ async function spawnSchedulerReviewOnEmptyRun(
 		stdio: ["ignore", "pipe", "pipe"],
 		detached: true,
 		// Same loop-data-root passthrough as the per-item spawn so the agent's `item update` reaches this daemon.
-		env: { ...process.env, [LOOP_DATA_ROOT_ENV]: resolveLoopDataPaths(options.loopDataRootOptions).root, [RUN_ID_ENV]: runId },
+		env: { ...process.env, [LOOP_DATA_ROOT_ENV]: resolveLoopDataPaths(options.loopDataRootOptions).root },
 	})
 	const activeRun = attachReviewOnEmptyCloseHandler(
 		options,
