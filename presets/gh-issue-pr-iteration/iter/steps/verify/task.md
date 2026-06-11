@@ -14,6 +14,8 @@ Fetch the live issue body (`gh issue view <ISSUE> -R <REPO> --json body`); colle
 
 ### Step 2 — Run the executable rows
 
+Before the first row, make the worktree runnable — that is your job, not a blocker: run the project's dependency install (per its manifest/lockfile and `WORKFLOW_FILE`) and any required build step if the implement step left them undone; record the setup commands and exits. A row may be declared non-executable for environment reasons only after this setup was actually attempted — "dependencies missing" is never that reason.
+
 Per row: run the Command exactly as written, capture command + exit status + output vs Expect. A mismatch is a result to record, not a thing to fix — product code failures are findings the orchestrator routes back to implementation; you never patch product code or tests. Fix-and-rerun is allowed only for your own harness mistakes (wrong cwd, missing env var, typo in your invocation), and the correction is recorded. For rows planned as non-executable: produce the strongest feasible alternative observable proof and record the deviation explicitly next to the row.
 
 ### Step 3 — Test suite and inventory delta

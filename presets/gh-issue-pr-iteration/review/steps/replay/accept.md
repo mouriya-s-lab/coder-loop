@@ -9,7 +9,7 @@ The report must contain: `Replay strategy` with the branch/state replayed agains
 Judge the replay report against:
 
 - **Row completeness** — every row of both tables appears in the results with an actual or an exact could-not-execute error. Any silently absent row invalidates the replay: send back for the missing rows.
-- **Execution truth** — locally-runnable rows were executed, not artifact-waved; actuals carry exit/output, not summaries of the packet's own claims (a replay that just re-reads the packet is not a replay).
+- **Execution truth** — locally-runnable rows were executed, not artifact-waved; actuals carry exit/output, not summaries of the packet's own claims (a replay that just re-reads the packet is not a replay). A `could not execute` row without the attempted setup commands and their output (dependency install, build step) is a report defect — environment setup is the replay agent's job; send it back to do the setup and run the row.
 - **No verdict smuggling** — mismatches are reported raw; if the report labels mismatches "minor/cosmetic", that violates its task — the judgment is yours, and cosmetic-handwave from a replay agent gets the same hard treatment as from iteration (`/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/honesty-judge.md`).
 - **Checks observed, not assumed** — the checks section has concrete names/conclusions/timestamps; "CI is green" without them is a gap.
 - **Side effects declared** for the cleanup ledger.

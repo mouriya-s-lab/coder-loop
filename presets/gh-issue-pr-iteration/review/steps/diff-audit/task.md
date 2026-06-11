@@ -29,7 +29,7 @@ Flag staged runtime artifacts anywhere in the diff: loop-data files, scheduling 
 The load-bearing check; do it from the diff and the trees, never from the PR's prose:
 
 1. Enumerate every test **removed** (test/it block or test file deleted), **renamed**, **skipped** (`.skip`, `.todo`, commented out, condition wrapped around it), or **weakened** (assertion deleted/loosened, expected value broadened, error-path assertion removed) by this branch. Quote each: file, test name, what happened.
-2. Measure the inventory on both sides: run the project's test suite (or its enumeration mode) on base and on head; record total counts and the exact commands. A count drop with no enumerated removal is itself a finding (hidden weakening).
+2. Measure the inventory on both sides: run the project's test suite (or its enumeration mode) on base and on head; record total counts and the exact commands. Each side must first be made runnable by you — dependency install per the project's manifest on that checkout before the suite; "suite would not start" without an attempted install is your setup failure, not a measurement. A count drop with no enumerated removal is itself a finding (hidden weakening).
 3. Write the empty case explicitly — "no tests removed/renamed/skipped/weakened" — only after the enumeration, never as an assumption.
 
 ### Step 6 — Summarize the footprint
