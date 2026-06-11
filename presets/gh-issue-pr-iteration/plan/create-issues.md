@@ -11,7 +11,7 @@ Post the validated draft bodies as GitHub issues. Link parent/child relationship
 
 ## Procedure
 
-1. **Idempotently ensure this preset's `kind:*` label assets exist in the target repo**.
+1. **Idempotently ensure this preset's `kind:*` label assets exist in the target repo and match the declaration**.
 
    Asset declaration:
 
@@ -22,19 +22,26 @@ Post the validated draft bodies as GitHub issues. Link parent/child relationship
    | `kind:code-spike` | `fbca04` | `Issue 的 deliverable 是 source-writing spike evidence；不走 PR merge` |
    | `kind:blocked` | `b60205` | `Issue 的 deliverable 是解除具体阻塞条件并恢复被阻塞 loop` |
 
-   First check which declared names already exist:
+   First check which declared names already exist and what metadata they currently carry:
 
    ```bash
-   gh label list --repo <owner>/<repo> --search kind:
+   gh label list --repo <owner>/<repo> --search kind: --json name,color,description
    ```
 
-   Compare the output to the asset declaration above. For each missing declared label, create exactly that label with its declared color and description. For each existing declared label, skip creation. Do not create labels that are not declared by this preset.
+   Compare the output to the asset declaration above by `name`, `color`, and `description`. For each missing declared label, create exactly that label with its declared color and description. For each existing declared label whose color or description differs from the declaration, edit that label to the declared color and description. For each existing declared label that already matches the declaration, take no action. Do not create, edit, or delete labels that are not declared by this preset.
 
    ```bash
    gh label create kind:code --repo <owner>/<repo> --color 1f883d --description "Issue 的 deliverable 是代码 PR"
    gh label create kind:comment --repo <owner>/<repo> --color 0969da --description "Issue 的 deliverable 是 PR comment / review reply"
    gh label create kind:code-spike --repo <owner>/<repo> --color fbca04 --description "Issue 的 deliverable 是 source-writing spike evidence；不走 PR merge"
    gh label create kind:blocked --repo <owner>/<repo> --color b60205 --description "Issue 的 deliverable 是解除具体阻塞条件并恢复被阻塞 loop"
+   ```
+
+   ```bash
+   gh label edit kind:code --repo <owner>/<repo> --color 1f883d --description "Issue 的 deliverable 是代码 PR"
+   gh label edit kind:comment --repo <owner>/<repo> --color 0969da --description "Issue 的 deliverable 是 PR comment / review reply"
+   gh label edit kind:code-spike --repo <owner>/<repo> --color fbca04 --description "Issue 的 deliverable 是 source-writing spike evidence；不走 PR merge"
+   gh label edit kind:blocked --repo <owner>/<repo> --color b60205 --description "Issue 的 deliverable 是解除具体阻塞条件并恢复被阻塞 loop"
    ```
 
 2. **Order of creation** matters when issues reference each other:

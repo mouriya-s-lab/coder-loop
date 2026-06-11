@@ -76,12 +76,12 @@
 
 `gh issue create` 必须传 `--label kind:code`、`--label kind:comment`、`--label kind:code-spike` 或 `--label kind:blocked`，不要省略也不要双带。
 
-Repo 必须先有这些 label。planning agent 在 `plan/create-issues.md` 的资产声明位按名称 / 颜色 / 描述幂等确保：先查已存在 label，缺哪个建哪个，已存在则跳过，然后再 `gh issue create`。
+Repo 必须先有这些 label。planning agent 在 `plan/create-issues.md` 的资产声明位按名称 / 颜色 / 描述幂等确保：先查已存在 label，缺失的声明 label 创建，已存在但 color / description 与声明不一致的 label 更新到声明值，已匹配的 label 不动作，然后再 `gh issue create`。
 
 check：
 
 ```bash
-gh label list --repo <owner>/<repo> --search kind:
+gh label list --repo <owner>/<repo> --search kind: --json name,color,description
 ```
 
 ### 1.4 `## 验收标准` 表（review contract replay 逐行执行）

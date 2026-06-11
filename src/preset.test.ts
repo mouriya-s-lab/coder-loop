@@ -201,6 +201,26 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		}
 	})
 
+	test("planning prompt converges declared kind label metadata", async () => {
+		const createIssues = await Bun.file(resolve(BUNDLED_PRESET_DIR, "plan/create-issues.md")).text()
+		const contract = await Bun.file(resolve(BUNDLED_PRESET_DIR, "contract.md")).text()
+		const devPlan = await Bun.file(resolve(REPO_ROOT, ".claude/commands/dev-plan.md")).text()
+
+		expect(createIssues).toContain("gh label list --repo <owner>/<repo> --search kind: --json name,color,description")
+		expect(createIssues).toContain("For each missing declared label, create exactly that label with its declared color and description.")
+		expect(createIssues).toContain("For each existing declared label whose color or description differs from the declaration, edit that label")
+		expect(createIssues).toContain("For each existing declared label that already matches the declaration, take no action.")
+		expect(createIssues).toContain("Do not create, edit, or delete labels that are not declared by this preset.")
+		expect(createIssues).toContain('gh label edit kind:code --repo <owner>/<repo> --color 1f883d --description "Issue 的 deliverable 是代码 PR"')
+		expect(createIssues).toContain('gh label edit kind:comment --repo <owner>/<repo> --color 0969da --description "Issue 的 deliverable 是 PR comment / review reply"')
+		expect(createIssues).toContain('gh label edit kind:code-spike --repo <owner>/<repo> --color fbca04 --description "Issue 的 deliverable 是 source-writing spike evidence；不走 PR merge"')
+		expect(createIssues).toContain('gh label edit kind:blocked --repo <owner>/<repo> --color b60205 --description "Issue 的 deliverable 是解除具体阻塞条件并恢复被阻塞 loop"')
+		const staleCreateOnlyInstruction = ["For each existing declared label", ["skip", "creation."].join(" ")].join(", ")
+		expect(createIssues).not.toContain(staleCreateOnlyInstruction)
+		expect(contract).toContain("已存在但 color / description 与声明不一致的 label 更新到声明值")
+		expect(devPlan).toContain("updates declared labels whose color or description differs before posting issues")
+	})
+
 	test("iteration entry owns the orchestrator kind-to-step plan and dispatch discipline", async () => {
 		const entry = await Bun.file(resolve(BUNDLED_PRESET_DIR, "iter-entry.md")).text()
 

@@ -55,7 +55,7 @@ coder-loop install /path/to/your-target-repo --repo <owner>/<repo>
 - **B) 操作员机器前置**：只做检查、不安装——`gh`(+ auth) / preset phase runner CLI / `coder-loop` 是否在 PATH。
 - **C) 用户级 skill 版本**：检查 `~/.claude/skills/writing-issue/SKILL.md` 是否含新版 marker；加 `--install-skills` 会自动同步到最新。
 
-`gh-issue-pr-iteration` 需要的 `kind:*` GitHub label 资产不由 install / doctor 管理；planning agent 在 `plan/create-issues` 路径首次创建 issue 前按 preset 声明幂等确保。
+`gh-issue-pr-iteration` 需要的 `kind:*` GitHub label 资产不由 install / doctor 管理；planning agent 在 `plan/create-issues` 路径首次创建 issue 前按 preset 声明幂等确保，缺失则创建，color / description 漂移则更新。
 
 `install` 第一件事会确认 central daemon 可达；daemon 不在线时会在写 `.coder-loop/workflow.md` 之前 fail-fast。使用自定义 `--loop-data-root` 时，`daemon up` 与后续 `install` / `doctor` / `status` 要传同一个 root。
 
