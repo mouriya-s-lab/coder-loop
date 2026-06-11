@@ -2,7 +2,6 @@ import { homedir } from "node:os"
 import { isAbsolute, resolve } from "node:path"
 
 export const LOOP_DATA_ROOT_ENV = "CODER_LOOP_DATA_DIR"
-export const RUN_ID_ENV = "CODER_LOOP_RUN_ID"
 export const LOOP_DATA_DIRNAME = "loop-data"
 export const LOOP_DATA_DB_FILENAME = "db.sqlite"
 export const LOOP_DATA_DAEMON_SOCKET_FILENAME = "daemon.sock"
