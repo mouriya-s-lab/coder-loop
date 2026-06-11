@@ -12,7 +12,7 @@ Thin shell. Planning lives in the target preset's `plan/` fragment chain — rea
 
 ## Steps
 
-0. **Bootstrap check**. If `<target>/.coder-loop/runtime/config.json` does not exist, the target has never been initialized — run `coder-loop install <target>` (idempotent; also writes `.claude/commands/dev-*.md`, creates runtime dirs, ensures `kind:code` / `kind:comment` GitHub labels). If `config.json` exists but you're unsure the bootstrap is healthy, run `coder-loop doctor <target>` (read-only; reports gh auth / claude CLI / runtime layout / skill version). Both are safe to re-run.
+0. **Bootstrap check**. If `<target>/.coder-loop/runtime/config.json` does not exist, the target has never been initialized — run `coder-loop install <target>` (idempotent; creates runtime dirs and records the active preset/config). If `config.json` exists but you're unsure the bootstrap is healthy, run `coder-loop doctor <target>` (read-only; reports gh auth / runner CLI / runtime layout / skill version). Both are safe to re-run. GitHub label assets are preset-owned: when the active preset is `gh-issue-pr-iteration`, follow `contract.md` and `plan/create-issues.md` so the planning agent checks existing `kind:*` labels and creates only the missing declared labels before posting issues.
 
 1. Resolve target (`$PWD` or `--target-cwd`). Read `<target>/.coder-loop/runtime/config.json` → active preset name (default `gh-issue-pr-iteration`).
 

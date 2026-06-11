@@ -49,12 +49,13 @@ coder-loop daemon up
 coder-loop install /path/to/your-target-repo --repo <owner>/<repo>
 ```
 
-幂等。它做四层事：
+幂等。它做三层事：
 
 - **A) target 项目文件**：写 `.claude/commands/dev-plan.md` / `dev-loop.md`、建/刷新 `.coder-loop/runtime/{issues,evidence,logs}/` 并初始化 centralized chain、merge `.coder-loop/runtime/config.json`（含 preset 绑定）、若 `workflow.md` 缺失则从 preset 模板拷一份。
-- **B) target GitHub state**：通过 `gh` 确保 `kind:code` / `kind:comment` / `kind:code-spike` / `kind:blocked` 标签存在（preset fragments 依赖它们做 issue 分类）。
-- **C) 操作员机器前置**：只做检查、不安装——`gh`(+ auth) / preset phase runner CLI / `coder-loop` 是否在 PATH。
-- **D) 用户级 skill 版本**：检查 `~/.claude/skills/writing-issue/SKILL.md` 是否含新版 marker；加 `--install-skills` 会自动同步到最新。
+- **B) 操作员机器前置**：只做检查、不安装——`gh`(+ auth) / preset phase runner CLI / `coder-loop` 是否在 PATH。
+- **C) 用户级 skill 版本**：检查 `~/.claude/skills/writing-issue/SKILL.md` 是否含新版 marker；加 `--install-skills` 会自动同步到最新。
+
+`gh-issue-pr-iteration` 需要的 `kind:*` GitHub label 资产不由 install / doctor 管理；planning agent 在 `plan/create-issues` 路径首次创建 issue 前按 preset 声明幂等确保。
 
 `install` 第一件事会确认 central daemon 可达；daemon 不在线时会在写 `.coder-loop/workflow.md` 之前 fail-fast。使用自定义 `--loop-data-root` 时，`daemon up` 与后续 `install` / `doctor` / `status` 要传同一个 root。
 
@@ -62,7 +63,7 @@ coder-loop install /path/to/your-target-repo --repo <owner>/<repo>
 
 | Flag | 用途 |
 |---|---|
-| `--repo <owner>/<repo>` | 写进 config，并用来创建 GitHub 标签；省略则跳过 B 层 |
+| `--repo <owner>/<repo>` | 写进 config，用于后续 GitHub issue / PR / label 操作 |
 | `--preset <name>` | 默认 `gh-issue-pr-iteration` |
 | `--force` | 覆盖已存在的 slash command / workflow.md（其他文件仍幂等） |
 | `--dry-run` | 打印每一步将做什么，不写盘 |
@@ -110,7 +111,7 @@ echo '.dev-trace.txt' >> .gitignore
 
 `.coder-loop/workflow.md` **要**入仓——agent 读这一份判断本项目的工作方式。
 
-拆掉 slash command（保留 runtime 和 GitHub labels）：`coder-loop uninstall /path/to/your-target-repo`。
+拆掉 slash command（保留 runtime）：`coder-loop uninstall /path/to/your-target-repo`。
 
 ---
 

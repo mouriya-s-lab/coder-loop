@@ -1,11 +1,10 @@
 /**
  * coder-loop install / uninstall / doctor subcommands.
  *
- * Four layers (per issue #49):
+ * Three layers:
  *   A) target project files: committed workflow.md policy
- *   B) target GitHub state: kind:code / kind:comment / kind:code-spike / kind:blocked labels
- *   C) operator machine prereqs: gh (+ auth), selected runner CLIs (verify only)
- *   D) user-level skill version: writing-issue marker check
+ *   B) operator machine prereqs: gh (+ auth), selected runner CLIs (verify only)
+ *   C) user-level skill version: writing-issue marker check
  *
  * Idempotent by design: re-running install does not mutate files whose
  * content already matches; `--force` overrides.
@@ -30,12 +29,6 @@ const PRESETS_DIR = resolve(PKG_ROOT, "presets")
 const TEMPLATES_DIR = resolve(PKG_ROOT, "templates")
 
 const SLASH_COMMAND_FILES = ["dev-plan.md", "dev-loop.md"] as const
-const KIND_LABELS = [
-	{ name: "kind:code", color: "1f883d", description: "Issue 的 deliverable 是代码 PR" },
-	{ name: "kind:comment", color: "0969da", description: "Issue 的 deliverable 是 PR comment / review reply" },
-	{ name: "kind:code-spike", color: "fbca04", description: "Issue 的 deliverable 是 source-writing spike evidence；不走 PR merge" },
-	{ name: "kind:blocked", color: "b60205", description: "Issue 的 deliverable 是解除具体阻塞条件并恢复被阻塞 loop" },
-] as const
 
 const WRITING_ISSUE_SKILL_REL = ".claude/skills/writing-issue/SKILL.md"
 const WRITING_ISSUE_MARKER = "docs/reserved-strings.md"
@@ -292,7 +285,7 @@ function whichBinary(name: string): string | null {
 }
 
 // ===================================================================
-// Layer C: operator machine prereqs (verify only, never install)
+// Layer B: operator machine prereqs (verify only, never install)
 // ===================================================================
 
 type RequiredRunnerCli = Pick<AgentRunnerSelection, "kind" | "binary">
@@ -304,7 +297,7 @@ function requiredRunnersForPreset(preset: Preset): RequiredRunnerCli[] {
 	})
 }
 
-async function checkLayerC(requiredRunners: RequiredRunnerCli[]): Promise<CheckOutcome[]> {
+async function checkOperatorPrereqs(requiredRunners: RequiredRunnerCli[]): Promise<CheckOutcome[]> {
 	const results: CheckOutcome[] = []
 
 	const ghPath = whichBinary("gh")
@@ -354,7 +347,7 @@ function runnerInstallHint(runner: RequiredRunnerCli): string {
 }
 
 // ===================================================================
-// Layer D: user-level skill version check (writing-issue marker)
+// Layer C: user-level skill version check (writing-issue marker)
 // ===================================================================
 
 type SkillCheckStatus = "ok" | "missing" | "outdated"
@@ -396,57 +389,6 @@ async function ensureWorkflowMd(target: string, dryRun: boolean): Promise<{ wrot
 		await writeFile(path, template)
 	}
 	return { wrote: true, path }
-}
-
-// ===================================================================
-// Layer B: GitHub labels
-// ===================================================================
-
-type LabelOutcome =
-	| { name: string; status: "exists" | "created" | "skipped-no-repo" | "would-create" }
-	| { name: string; status: "failed"; reason: string }
-
-async function ensureGithubLabels(repo: string | null, dryRun: boolean): Promise<LabelOutcome[]> {
-	if (repo === null) {
-		return KIND_LABELS.map((l) => ({ name: l.name, status: "skipped-no-repo" }))
-	}
-	const list = await spawnCapture("gh", ["label", "list", "--repo", repo, "--limit", "500", "--json", "name", "--jq", "[.[].name]"])
-	let existingNames = new Set<string>()
-	if (list.code === 0) {
-		try {
-			const parsed: unknown = JSON.parse(list.stdout.trim() === "" ? "[]" : list.stdout)
-			if (Array.isArray(parsed)) {
-				for (const entry of parsed) if (typeof entry === "string") existingNames.add(entry)
-			}
-		} catch {
-			// fall through; treat as empty
-		}
-	} else {
-		return KIND_LABELS.map((l) => ({ name: l.name, status: "failed", reason: `gh label list failed: ${list.stderr.trim()}` }))
-	}
-	const out: LabelOutcome[] = []
-	for (const label of KIND_LABELS) {
-		if (existingNames.has(label.name)) {
-			out.push({ name: label.name, status: "exists" })
-			continue
-		}
-		if (dryRun) {
-			out.push({ name: label.name, status: "would-create" })
-			continue
-		}
-		const create = await spawnCapture("gh", [
-			"label", "create", label.name,
-			"--repo", repo,
-			"--color", label.color,
-			"--description", label.description,
-		])
-		if (create.code !== 0) {
-			out.push({ name: label.name, status: "failed", reason: create.stderr.trim() })
-		} else {
-			out.push({ name: label.name, status: "created" })
-		}
-	}
-	return out
 }
 
 // ===================================================================
@@ -624,40 +566,31 @@ export async function runInstallCommand(rawArgs: string[]): Promise<void> {
 	})
 	info(`  ${args.dryRun ? "would-upsert" : "upserted"} chain: ${chainCreate.chainName} (repo ${repoForChain})`)
 
-	// Layer C: prereqs
-	info("\n[Layer C] Operator 机器先决条件")
+	// Layer B: prereqs
+	info("\n[Layer B] Operator 机器先决条件")
 	const installRunners = requiredRunnersForPreset(preset)
 	info(`  INFO: role entry md runners=${installRunners.map((runner) => `${runner.kind}:${runner.binary}`).join(", ")}`)
-	const layerCResults = await checkLayerC(installRunners)
-	for (const r of layerCResults) info(`  ${r.ok ? "OK" : "FAIL"}: ${r.detail}`)
-	const layerCOk = layerCResults.every((r) => r.ok)
-	if (!layerCOk && !args.dryRun) {
-		fail(`Layer C 校验未通过：先按上面提示修复 gh / runner CLI / 认证，再重跑 install。`)
+	const layerBResults = await checkOperatorPrereqs(installRunners)
+	for (const r of layerBResults) info(`  ${r.ok ? "OK" : "FAIL"}: ${r.detail}`)
+	const layerBOk = layerBResults.every((r) => r.ok)
+	if (!layerBOk && !args.dryRun) {
+		fail(`Layer B 校验未通过：先按上面提示修复 gh / runner CLI / 认证，再重跑 install。`)
 	}
 
-	// Layer D: user-level skill
-	info("\n[Layer D] User-level skill 版本")
-	const layerD = await checkLayerD()
-	info(`  ${layerD.status === "ok" ? "OK" : "FAIL"}: ${layerD.detail}`)
-	if (layerD.status !== "ok") {
+	// Layer C: user-level skill
+	info("\n[Layer C] User-level skill 版本")
+	const layerC = await checkLayerD()
+	info(`  ${layerC.status === "ok" ? "OK" : "FAIL"}: ${layerC.detail}`)
+	if (layerC.status !== "ok") {
 		if (args.installSkills) {
 			info("  --install-skills: 同步 templates/skills/writing-issue/SKILL.md → user-level")
 			const sync = await syncWritingIssueSkill(args.dryRun)
 			info(`  ${sync.wrote ? "已写入" : (args.dryRun ? "would-write" : "未变化")}: ${sync.path}（源：${sync.sourcePath}）`)
 		} else if (args.skipSkillCheck) {
-			info("  --skip-skill-check 已设置：跳过 Layer D 严格校验。")
+			info("  --skip-skill-check 已设置：跳过 Layer C 严格校验。")
 		} else if (!args.dryRun) {
-			fail(`Layer D 校验未通过。修复路径：\n  (a) coder-loop install ${args.target} --install-skills   # 自动 sync 新版\n  (b) 手动覆盖 ${layerD.path} 为最新 writing-issue SKILL.md\n  (c) coder-loop install ${args.target} --skip-skill-check  # 临时绕过`)
+			fail(`Layer C 校验未通过。修复路径：\n  (a) coder-loop install ${args.target} --install-skills   # 自动 sync 新版\n  (b) 手动覆盖 ${layerC.path} 为最新 writing-issue SKILL.md\n  (c) coder-loop install ${args.target} --skip-skill-check  # 临时绕过`)
 		}
-	}
-
-	// Layer B: GitHub labels
-	info("\n[Layer B] Target GitHub 状态")
-	const repoForLabels = repoForChain
-	const labelOutcomes = await ensureGithubLabels(repoForLabels, args.dryRun)
-	for (const o of labelOutcomes) {
-		const desc = o.status === "failed" ? `FAIL (${o.reason})` : o.status
-		info(`  ${o.name}: ${desc}`)
 	}
 
 	// Final: status smoke (skip in dry-run)
@@ -700,7 +633,7 @@ export async function runUninstallCommand(rawArgs: string[]): Promise<void> {
 			info(`  未找到（已不存在）: ${SLASH_COMMANDS_REL}/${fname}`)
 		}
 	}
-	info(`\nUninstall 完成。runtime / GitHub labels / user-level skills 一概保留（${removed} 个 slash command 文件被移除）。`)
+	info(`\nUninstall 完成。runtime / user-level skills 一概保留（${removed} 个 slash command 文件被移除）。`)
 }
 
 export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
@@ -718,31 +651,6 @@ export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
 		if (!ok) hasFailure = true
 	}
 
-	info("\n[Layer B] Target GitHub 状态")
-	const repo = args.repo ?? (await inferRepoFromGit(args.target))
-	if (repo === null) {
-		info("  SKIP: 未提供 --repo 且 git remote 未配置；无法检查 labels")
-	} else {
-		const list = await spawnCapture("gh", ["label", "list", "--repo", repo, "--limit", "500", "--json", "name", "--jq", "[.[].name]"])
-		if (list.code !== 0) {
-			info(`  FAIL: gh label list 失败 (${list.stderr.trim()})`)
-			hasFailure = true
-		} else {
-			let names = new Set<string>()
-			try {
-				const parsed: unknown = JSON.parse(list.stdout.trim() === "" ? "[]" : list.stdout)
-				if (Array.isArray(parsed)) for (const e of parsed) if (typeof e === "string") names.add(e)
-			} catch {
-				// ignore
-			}
-			for (const label of KIND_LABELS) {
-				const ok = names.has(label.name)
-				info(`  ${ok ? "OK" : "FAIL"}: label ${label.name}（repo ${repo}）`)
-				if (!ok) hasFailure = true
-			}
-		}
-	}
-
 	const statusSnapshot = await buildCoderLoopStatusSnapshot({
 		targetCwd: args.target,
 		configPath: null,
@@ -751,17 +659,17 @@ export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
 		output: "json",
 	})
 
-	info("\n[Layer C] Operator 机器先决条件")
-	const cResults = await checkLayerC(Object.values(statusSnapshot.target.runner.phases))
+	info("\n[Layer B] Operator 机器先决条件")
+	const bResults = await checkOperatorPrereqs(Object.values(statusSnapshot.target.runner.phases))
 	info(`  INFO: target default runner=${formatStatusRunner(statusSnapshot.target.runner.default)}`)
 	info(`  INFO: review default runner=${formatStatusRunner(statusSnapshot.target.runner.reviewDefault)}`)
 	info(`  INFO: phase runners=${formatPhaseRunners(statusSnapshot.target.runner.phases)}`)
-	for (const r of cResults) {
+	for (const r of bResults) {
 		info(`  ${r.ok ? "OK" : "FAIL"}: ${r.detail}`)
 		if (!r.ok) hasFailure = true
 	}
 
-	info("\n[Layer D] User-level skill 版本")
+	info("\n[Layer C] User-level skill 版本")
 	const dResult = await checkLayerD()
 	info(`  ${dResult.status === "ok" ? "OK" : "FAIL"}: ${dResult.detail}`)
 	if (dResult.status !== "ok") hasFailure = true

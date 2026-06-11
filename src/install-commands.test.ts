@@ -27,11 +27,12 @@ describe("buildLiveRuntimeHealthLines", () => {
 	})
 })
 
-describe("install label catalog", () => {
-	test("includes the blocked issue kind label", async () => {
+describe("install command ownership", () => {
+	test("does not carry the preset kind label bootstrap asset", async () => {
 		const source = await readFile(resolve(REPO_ROOT, "src/install-commands.ts"), "utf-8")
-		expect(source).toContain('name: "kind:blocked"')
-		expect(source).toContain("解除具体阻塞条件")
+		expect(source).not.toContain("KIND_LABELS")
+		expect(source).not.toContain("\"label\", \"create\"")
+		expect(source).not.toContain("\"label\", \"list\"")
 	})
 })
 

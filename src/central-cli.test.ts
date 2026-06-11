@@ -886,8 +886,6 @@ async function fakeCliEnv(name: string): Promise<Record<string, string>> {
 	await writeExecutable(resolve(bin, "gh"), [
 		"#!/usr/bin/env bash",
 		`if [ "$1" = "auth" ]; then exit 0; fi`,
-		`if [ "$1" = "label" ] && [ "$2" = "list" ]; then printf '["kind:code","kind:comment","kind:code-spike","kind:blocked"]\\n'; exit 0; fi`,
-		`if [ "$1" = "label" ] && [ "$2" = "create" ]; then exit 0; fi`,
 		"exit 0",
 		"",
 	].join("\n"))
