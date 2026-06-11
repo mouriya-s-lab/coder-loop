@@ -47,18 +47,16 @@ override it through `codex.extraArgs`.
 From the coder-loop repo:
 
 ```bash
-bun src/loop.ts install /Users/mouriya/Ext/code/coder-loop-e2e-fixture \
+coder-loop install /Users/mouriya/Ext/code/coder-loop-e2e-fixture \
   --repo Mouriya-Emma/coder-loop-e2e-fixture
-bun src/loop.ts --target-cwd /Users/mouriya/Ext/code/coder-loop-e2e-fixture --check-runtime
-bun src/loop.ts doctor /Users/mouriya/Ext/code/coder-loop-e2e-fixture
-bun src/loop.ts status /Users/mouriya/Ext/code/coder-loop-e2e-fixture --json \
+coder-loop doctor /Users/mouriya/Ext/code/coder-loop-e2e-fixture
+coder-loop status /Users/mouriya/Ext/code/coder-loop-e2e-fixture --json \
   | jq '.state.kind, .target.runner, .queue.selected, .current'
 ```
 
 Expected:
 
 - install is idempotent and preserves existing target workflow plus centralized chain state;
-- runtime check exits 0;
 - doctor has no `FAIL`;
 - `state.kind == "ok"`;
 - selected queue item, when present, resolves to runner `codex`;
@@ -106,7 +104,7 @@ large feature:
 
    ```bash
    CODER_LOOP_IDLE_SLEEP_MS=50 \
-     bun src/loop.ts --target-cwd /Users/mouriya/Ext/code/coder-loop-e2e-fixture --once
+     coder-loop daemon start /Users/mouriya/Ext/code/coder-loop-e2e-fixture --max-iterations 1
    ```
 
 Expected result:
@@ -135,10 +133,10 @@ Successful run:
 Key verification commands:
 
 ```bash
-bun src/loop.ts install /Users/mouriya/Ext/code/coder-loop-e2e-fixture \
+coder-loop install /Users/mouriya/Ext/code/coder-loop-e2e-fixture \
   --repo Mouriya-Emma/coder-loop-e2e-fixture
 
-bun src/loop.ts doctor /Users/mouriya/Ext/code/coder-loop-e2e-fixture \
+coder-loop doctor /Users/mouriya/Ext/code/coder-loop-e2e-fixture \
   --repo Mouriya-Emma/coder-loop-e2e-fixture
 
 gh pr view 2 --repo Mouriya-Emma/coder-loop-e2e-fixture \
@@ -147,7 +145,7 @@ gh pr view 2 --repo Mouriya-Emma/coder-loop-e2e-fixture \
 gh issue view 1 --repo Mouriya-Emma/coder-loop-e2e-fixture \
   --json state,closedAt,closedByPullRequestsReferences
 
-bun src/loop.ts status /Users/mouriya/Ext/code/coder-loop-e2e-fixture --json \
+coder-loop status /Users/mouriya/Ext/code/coder-loop-e2e-fixture --json \
   | jq '.queue, .current, .processes'
 
 cd /Users/mouriya/Ext/code/coder-loop-e2e-fixture

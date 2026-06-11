@@ -136,25 +136,14 @@ coder-loop status /path/to/your-target-repo --json | jq '.state.kind, .queue, .c
 | `.events.latest` | 当前或最近 run 的最后一条结构化事件 |
 | `.processes.live` / `.processes.scanError` | live process scan 结果；daemon 详情看 `coder-loop daemon status` |
 
-如果你只想看 schema（不查 PATH / 标签 / skill），用 runtime schema check：
+如果你只想看 runtime/schema，不想同时检查 PATH、GitHub label、skill 等 bootstrap 层，直接读结构化 status：
 
 ```bash
-coder-loop --target-cwd /path/to/your-target-repo --check-runtime
+coder-loop status /path/to/your-target-repo --json \
+  | jq '.state.kind, .target.configPath, .target.preset, .queue.total, .queue.selected'
 ```
 
-期望输出类似：
-
-```
-Runtime check passed: target=...
-Runtime check passed: repo=<owner>/<repo>
-Runtime check passed: config=.coder-loop/runtime/config.json (json)
-Runtime check passed: state=/Users/.../.coder-loop/loop-data/db.sqlite
-Runtime check passed: chain=<chain-name>
-Runtime check passed: queue=0, selected=none
-Runtime check passed: preset=gh-issue-pr-iteration
-```
-
-exit 0 表示 schema OK；任何 exit 1 + `Runtime check failed:` 提示先按错误清单修文件，再继续。常见错误见 [operations#--check-runtime](./operations.md#4-fallback-check-runtime-错误分类)。
+`.state.kind == "ok"` 表示 target config、preset、central chain runtime、queue/current 都能解析；其他 kind 先按 [operations runtime health](./operations.md#4-runtime-health-错误分类) 继续排。
 
 ---
 
@@ -174,7 +163,7 @@ exit 0 表示 schema OK；任何 exit 1 + `Runtime check failed:` 提示先按�
 coder-loop status /path/to/your-target-repo --json | jq '.state.kind, .queue.total, .queue.selected'
 ```
 
-`.state.kind == "ok"` 且 `.queue.selected` 不为 null，才有东西可跑。schema 细节异常时再用 `coder-loop --target-cwd <target> --check-runtime` 看逐条错误。
+`.state.kind == "ok"` 且 `.queue.selected` 不为 null，才有东西可跑。schema 细节异常时先看 `status` 的 `.state` / `.target`，需要 bootstrap 层排查再跑 `coder-loop doctor <target> --repo <owner>/<repo>`。
 
 ---
 

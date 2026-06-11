@@ -6,7 +6,7 @@
 
 ## 一、它实际在干什么
 
-v1 是一个 `bun src/loop.ts --target-cwd <repo>` 单进程，在一个 target repo 上循环消费一个 issue 队列。规划（plan，`/dev-plan`）在循环**之外**完成；loop 进程本身只跑两个 phase：**iteration** 和 **review**。
+v1 是一个源码入口直跑的 target-local 单进程，在一个 target repo 上循环消费一个 issue 队列。规划（plan，`/dev-plan`）在循环**之外**完成；loop 进程本身只跑两个 phase：**iteration** 和 **review**。
 
 一个 issue 在 v1 里的实际流程：
 

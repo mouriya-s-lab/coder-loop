@@ -20,8 +20,8 @@
 | **按 phase 顺序 spawn agent** | 遍历 `preset.phases`：每个 phase 读 entry prompt 模板，按 `[phases.variables]` 表绑定变量替换 `{{KEY}}`，把渲染后的 prompt 传给当前 runner（`claude` 或 `codex`）。捕获 stdout/stderr 写入 `<logDir>/<runId>/<phase>/`，每个 phase spawn 完写 `status.json`。 |
 | **resume / 不丢工作** | spawn 中途崩溃，重启时根据 `state.current.phase` 跳到当前 phase 而非从头。 |
 | **daemon / chain 控制** | 新版运行期由 centralized daemon socket + chain/item state 控制；target start/stop/restart 通过 daemon API 解析 chain，而不是依赖 target-local sentinel 文件。 |
-| **`--check-runtime` 健康检查** | 不 spawn agent。校验 preset、target 文件、central chain layout、queue item id / status 是否合法、`state.current` 是否一致。返回错误清单。 |
-| **`--dry-run` 渲染检查** | 选 actionable item，跑到 spawn 前为止，输出选中的 item id；不写 trace、不调 agent。 |
+| **runtime 状态快照** | `coder-loop status <target> --json` 不 spawn agent，读取 preset、target 文件、central chain layout、queue、current、runner 与 process snapshot，供 operator / supervisor 做结构化判断。 |
+| **daemon 调度预演** | `coder-loop daemon start <target> --dry-run` 解析 target chain 与 central daemon 需求，但不启动 target run；这是 daemon 子命令自己的预演 flag。 |
 
 引擎**不知道**：phase 数量、phase 名字、status 字面量（`queued / done / pending` 之类）、item id 字段名、已知变量 KEY（`{{REPO}}` / `{{ISSUE}}` 之类）、preset 之间的差异、GitHub。
 
@@ -75,12 +75,47 @@ attemptTimeoutSeconds = 3600
 hello {{ITEM_ID}} run={{RUN_ID}} cwd={{TARGET_CWD}}
 ```
 
-跑通验证（参见 `src/smoke.test.ts`）：
+跑通验证（参见 `src/smoke.test.ts`），用一个临时 target 和独立 loop-data root：
 
 ```bash
-bun src/loop.ts --target-cwd <fresh-target> --check-runtime
-# Runtime check passed: queue=N, selected=<id>
-# Runtime check passed: preset=single-phase-example
+TARGET=$(mktemp -d)
+LOOP_DATA_ROOT="$TARGET/loop-data"
+CHAIN=single-phase-demo
+
+mkdir -p "$TARGET/.coder-loop/runtime/issues" \
+  "$TARGET/.coder-loop/runtime/evidence" \
+  "$TARGET/.coder-loop/runtime/logs"
+printf '# workflow\n' > "$TARGET/.coder-loop/workflow.md"
+printf '# shared\n' > "$TARGET/.coder-loop/runtime/shared.md"
+printf '{"preset":"single-phase-example","loopDataRoot":"%s"}\n' "$LOOP_DATA_ROOT" \
+  > "$TARGET/.coder-loop/runtime/config.json"
+
+coder-loop daemon up --loop-data-root "$LOOP_DATA_ROOT" --json \
+  > "$TARGET/daemon.out" 2> "$TARGET/daemon.err" &
+DAEMON_PID=$!
+
+coder-loop chain create "$CHAIN" \
+  --config-json '{"repository":"fixture/repo","baseBranch":"main"}' \
+  --preset single-phase-example \
+  --loop-data-root "$LOOP_DATA_ROOT" \
+  --json
+coder-loop item add "$CHAIN" \
+  --issue 1 \
+  --repo-cwd "$TARGET" \
+  --field-json '{"id":"demo-item"}' \
+  --loop-data-root "$LOOP_DATA_ROOT" \
+  --json
+coder-loop item update "$CHAIN" \
+  --issue 1 \
+  --status pending \
+  --loop-data-root "$LOOP_DATA_ROOT" \
+  --json
+coder-loop status "$TARGET" --chain "$CHAIN" --json \
+  | jq '.target.preset.name, .state.kind, .queue.selected.id'
+
+coder-loop daemon down --loop-data-root "$LOOP_DATA_ROOT" --json
+wait "$DAEMON_PID"
+rm -rf "$TARGET"
 ```
 
 ---
@@ -127,7 +162,7 @@ bun src/loop.ts --target-cwd <fresh-target> --check-runtime
 - 每条 `[phases.variables]` source 必须 match `^(item|config|runtime)\.[a-zA-Z][a-zA-Z0-9_]*$`；
 - `item.<field>` 只能引用 `[item].idField`、引擎自有字段（`id/status/phase/runner/agentCwd`），或 `[item.fields]` 显式声明的透明字段。未声明字段在 preset 加载期报错。
 
-任何一条失败 → preset load throws，`--check-runtime` 报错。
+任何一条失败 → preset load throws；`coder-loop status <target> --json` 会把 state 标成 `invalid-preset` 或相邻的 invalid runtime 状态，`doctor` 会在人类可读输出中呈现同一类问题。
 
 ### Trigger phases
 
@@ -299,7 +334,7 @@ queue item 可加 `"runner": "claude" | "codex"` 覆盖允许 item override 的�
 
 队列 / current / recentRuns 存在 centralized SQLite loop-data store 中。用 `coder-loop chain create`、`coder-loop item add`、安装/规划命令，或测试 helper 建 chain + item；不要为新版 runtime 手写 `.coder-loop/runtime/state.json` 当 authoritative queue。
 
-`bun src/loop.ts --target-cwd <target> --check-runtime` 应当 exit 0、输出 `state=<...>/db.sqlite`、`chain=<name>`、`preset=<name>` 与 `queue=N, selected=<id>`。
+`coder-loop status <target> --json --chain <chain>` 应当 exit 0，且输出里 `.target.preset.name` 是目标 preset、`.state.kind == "ok"`；有可推进 item 时 `.queue.selected.id` 应指向该 preset 的 `item.idField` 值。没有 queue 时先用 `coder-loop chain create` / `coder-loop item add` 建立 centralized chain 与 item，再读取 status。
 
 ---
 

@@ -79,8 +79,6 @@ Runner binary、模型与额外参数由 config 的 `claude.binary` / `claude.mo
 5. 队列加入 item 后，同一命令的 `.queue.selected.id` 应指向期望的下一个 item。
 6. 真跑前用 `doctor` 确保各 entry md 声明的 runner CLI 在 PATH 上可运行。
 
-注意：直跑 loop（`bun src/loop.ts [N] --target-cwd`）、`--check-runtime`、loop 级 `--dry-run` CLI 表面已退役（#411 推演、#425 登记）；其余文档中的残留引用等 #425 定出替代验证路径后批改。
-
 ## gh-issue-pr-iteration preset 的设计前提
 
 下面四条**全部是 `gh-issue-pr-iteration` preset 的前提**，不是 L1 行为。修改 `presets/gh-issue-pr-iteration/iter-entry.md` / `review-entry.md` 之前必须理解；写其他 preset 时这些可以替换或删掉。

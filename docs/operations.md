@@ -81,7 +81,7 @@ Runtime 文件仍是必要的 debug reference，但它们不是外层长期依�
 ~/.coder-loop/loop-data/db.sqlite
 ```
 
-也可通过 `--loop-data-root <dir>` 改变 loop-data 根。`--check-runtime` 会把实际 DB 路径打印为 `state=<abs-db-file>`，并打印解析出的 `chain=<name>`。
+也可通过 `--loop-data-root <dir>` 改变 loop-data 根。`coder-loop status <target> --json` 会在 `.state.path`、`.state.repository`、`.state.baseBranch` 与 `.target.*` 路径字段里暴露实际 runtime 与 chain 解析结果。
 
 内存中的 `LoopState` shape 仍是引擎内部契约：
 
@@ -108,7 +108,7 @@ coder-loop queue unblock <target> --issue <id> --start-daemon
 
 如果必须做人工恢复，先备份 DB，再用 `status` / `doctor` 定位到具体 chain 与 item；只修被诊断出的字段。旧文档里的 target-local `.coder-loop/runtime/state.json` 属于 legacy/debug 语境，不是新版 centralized chain runtime 的一线状态源。
 
-`--check-runtime` 仍会检查这些不变量：
+`coder-loop status <target> --json` 与 `coder-loop doctor <target>` 会检查并暴露这些 runtime 不变量：
 
 - `state.version === 1`；
 - centralized chain 的 `repository` / `baseBranch` 是功能性 chain identity；prompt 专用值通过 preset 的透明 `config.*` binding 读取；
@@ -119,17 +119,14 @@ coder-loop queue unblock <target> --issue <id> --start-daemon
 - 若 queue item 声明 `agentCwd`，必须是绝对路径，且必须是个已存在目录；
 - centralized chain 必须是 active，且 chain runtime layout 必须能解析。
 
-exit 0 时 stderr 输出类似：
+`status --json` 成功时输出单个 JSON object；常用字段：
 
-```text
-Runtime check passed: target=<abs>
-Runtime check passed: repo=<owner>/<repo>          # 来自 centralized chain identity
-Runtime check passed: config=<abs> (json|toml)
-Runtime check passed: state=<abs-loop-data-root>/db.sqlite
-Runtime check passed: chain=<chain-name>
-Runtime check passed: queue=<N>, selected=<id>|none
-Runtime check passed: preset=<name>
+```bash
+coder-loop status /path/to/target --json \
+  | jq '.state.kind, .state.path, .state.repository, .state.baseBranch, .target.preset.name, .queue.total, .queue.selected'
 ```
+
+`.state.kind == "ok"` 表示 target config、preset、central chain layout、queue/current 都能解析；其他 kind 说明 status 仍可读，但需要按 `.state` 里的 discriminant 继续排错。
 
 ---
 
@@ -158,21 +155,15 @@ tail -F "$(coder-loop status /path/to/target --json | jq -r '.events.path')"
 
 ---
 
-## 4. `--check-runtime` 错误分类
+## 4. Runtime Health 错误分类
 
-`coder-loop doctor <target>` 已经覆盖 bootstrap 与 live runtime health。只想校验 target runtime schema、不查 PATH / GitHub / skill 时，再用：
+`coder-loop doctor <target>` 覆盖 bootstrap 与 live runtime health。只想校验 target runtime/schema、不查 PATH / GitHub / skill 时，读结构化 status：
 
 ```bash
-coder-loop --target-cwd <path> --check-runtime
+coder-loop status <path> --json | jq '.state, .target, .queue.selected'
 ```
 
-它执行 `checkRuntime`，失败 → exit 1，stderr 列出每条错误：
-
-```text
-Runtime check failed: <N> error(s)
-- <path>: <message>
-- <path>: <message>
-```
+`status` 对 config/state 缺失或损坏仍输出 JSON；调用方按 `.state.kind` 分支，不从 stderr 猜错误类型。`doctor` 适合给人看同类问题的 bootstrap 上下文。
 
 常见错误：
 
@@ -252,22 +243,16 @@ coder-loop item --help
 | `item add/list/update` | centralized chain item CRUD | `--field-json '{"branch":"issue-1","pr":2}'` 写 preset 声明的透明 item 字段；其他看 `coder-loop item --help` |
 | `queue unblock <target>` | 将 preset 声明的 unblockable terminal item 恢复到 `statuses.entry` 并清除 blocker metadata；`gh-issue-pr-iteration` 用于 `kind:blocked` accept 后反向解除源仓 block | `--issue <id>` `--start-daemon` |
 
-### 6.2 主循环 flags
+### 6.2 Source entry
 
-`bun src/loop.ts [flags]` 或 `coder-loop [flags]`：
+本仓调试时可以用源码入口运行同一组子命令：
 
-| Flag | 类型 | 默认 | 含义 |
-|---|---|---|---|
-| `<N>` | positional int | 无（无限） | 最大循环轮次；不传则无限 |
-| `--target-cwd <path>` | string | `process.cwd()` | target 目录绝对 / 相对路径 |
-| `--config <path>` | string | target runtime config | config 文件路径 |
-| `--loop-data-root <dir>` | string | `~/.coder-loop/loop-data` | centralized DB/socket/runtime 根 |
-| `--chain <name>` | string | target/config 推导 | 指定 centralized chain |
-| `--once` | bool flag | false | 跑 1 轮就退出（等价 `1`） |
-| `--dry-run` | bool flag | false | 选中 item 后停（不 spawn agent） |
-| `--check-runtime` | bool flag | false | 校验 schema 后退出，不 spawn agent |
+```bash
+bun src/loop.ts status <target> --json
+bun src/loop.ts daemon start <target> --max-iterations 1
+```
 
-flag 冲突优先级：CLI > config > 默认。
+源码入口仍然要求第一位置参数是子命令；不带子命令时只打印 usage 并 exit 1。循环推进走 `/dev-loop` 或 `coder-loop daemon start <target> [--max-iterations <N>]`，只读健康检查走 `coder-loop status <target> --json` 或 `coder-loop doctor <target>`。
 
 ### 6.3 Agent 进程与监控（fallback reference）
 
@@ -285,10 +270,9 @@ flag 冲突优先级：CLI > config > 默认。
 ```bash
 coder-loop doctor /path/to/target --repo <owner>/<repo>
 coder-loop status /path/to/target --json | jq '.state, .target, .queue.selected'
-coder-loop --target-cwd /path/to/target --check-runtime
 ```
 
-按 `doctor/status/check-runtime` 报出的具体层修，不要先手写 DB 或删 runtime。
+按 `doctor` / `status` 报出的具体层修，不要先手写 DB 或删 runtime。
 
 ### 7.2 当前 item 卡住
 
