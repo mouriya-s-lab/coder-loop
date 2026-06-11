@@ -130,11 +130,11 @@ When the last line is `[x]`/`[-]`, go to Step 5.
 
 ### Step 5 — Wrap up (yourself)
 
-Append one run note to `{{SHARED_CONTEXT_FILE}}`: run ID; spawn classification; the final task list with checkboxes; per-line outcome in one line each (from reports — do not re-narrate execution detail); files changed; CI-parity status; test-inventory delta; artifacts; PR number/URL or comment URL; blockers/unresolved risks; proposed child issue specs when scope was incomplete. If `{{CURRENT_ISSUE_FILE}}` exists, issue-local detail may go there.
+Append one run note to `{{SHARED_CONTEXT_FILE}}`: run ID; spawn classification; the final task list with checkboxes; per-line outcome in one line each (from reports — do not re-narrate execution detail); files changed; CI-parity status; test-inventory delta; the runtime manifest and standing e2e environment from the verify report (review re-runs and tears down from this); artifacts; PR number/URL or comment URL; blockers/unresolved risks; proposed child issue specs when scope was incomplete. If `{{CURRENT_ISSUE_FILE}}` exists, issue-local detail may go there.
 
-### Step 6 — Cleanup
+### Step 6 — Cleanup (scratch only — the e2e runtime stays up)
 
-Sweep the dispatch ledger per `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/cleanup-judge.md`: kill every PID the reports declared and verify the kill took (`ps -p <pid>` empty), remove declared temp files, leave evidence artifacts and pre-existing dirty state in place, record honestly anything that could not be cleaned.
+Sweep the dispatch ledger per `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/cleanup-judge.md`, with the iteration-side scope: kill scratch PIDs the reports declared as no longer needed and verify the kill took (`ps -p <pid>` empty), remove declared temp files, leave evidence artifacts and pre-existing dirty state in place. The standing e2e environment documented in the runtime manifest is **not yours to tear down** — review replays against it and owns the teardown; killing it here recreates the "review couldn't run it" failure this design eliminates. Record honestly anything that could not be cleaned.
 
 ### Step 7 — Summary
 

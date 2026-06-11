@@ -241,7 +241,7 @@ Review 是调度者（orchestrator）：PR-backed kind 必须先派 diff-audit �
 | PR protocol | 调度者亲自 | PR body + thread + issue comments | first line `Closes #<N>`、CI parity 行、retry 必有新 PR-thread comment | retry action / no-PR 路由 |
 | Title-intent | 调度者亲自 | issue title + PR title | strip conventional prefix 后主语 noun phrase 对齐 | retry action |
 | Caveat honesty | 调度者亲自 | handoff `Intent/Result (run …)` blocks（verbatim 亲读）+ PR body/comments + diff-audit 报告（intent↔action 比对） | `quality/honesty-judge.md` 七类 scope-reduction 触发；cosmetic-handwave 一律硬拒；授权须 issue body 字面句，stale-baseline 例外见同文件 | retry action |
-| Evidence form | 调度者亲自 | PR body（opening packet）/ 最新 run 的 PR comment | `quality/evidence-judge.md`：分层齐全、claim 映射、artifact 可查、测试清单 delta 在场、`kind:blocked` 额外 blocked-path 复测要求 | retry / blocked action |
+| Evidence form | 调度者亲自 | PR body（opening packet）/ 最新 run 的 PR comment | `quality/evidence-judge.md`：分层齐全、claim 映射、artifact 可查、测试清单 delta 在场、**e2e 直跑证据**（真实入口实跑 / agent-browser 真 UI；脚本 e2e 一律不算，unit/integration 只是辅助层）、**runtime manifest** 在场且可凭其重跑（auth 只写解析位置，secret 值入包即硬拒）、`kind:blocked` 额外 blocked-path 复测要求 | retry / blocked action |
 | Spike follow-up（`kind:comment`） | 调度者亲自（`review/spike-followup.md`） | iter comment + issue `## 结果分支` | 选恰好一条分支 + 提议数 ≥ 分支动词词表要求 | retry action |
 | Source-spike audit（`kind:code-spike`） | 调度者亲自（`review/source-spike-audit.md`） | issue comment + spike branch + 证据 | no-merge 语义、branch/SHA、命令覆盖、结果分支；有 PR 即 retry | retry action |
 | Closure | 调度者亲自 | 上面验收点综合 + child closure table | 决定 terminal action（accept-pr / accept-no-pr / retry / expand-parent / skip / blocked / stop） | 选 action 文件 |

@@ -12,6 +12,7 @@ Commit: <sha(s)> on <branch>, pushed to <remote ref>
 Deliverable: PR #<n> <url> (fresh) | PR comment <url> (retry)
 Result block: appended at <handoff path>; delta verdict: matched / drifted: <why>
 Packet sections: <list of layered sections actually present in the body/comment>
+E2E + manifest: <confirmation both are in the packet; auth referenced by location only>
 Test delta line: <the exact line included in the packet>
 
 ## Problems

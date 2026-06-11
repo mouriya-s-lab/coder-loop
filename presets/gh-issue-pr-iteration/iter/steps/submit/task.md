@@ -25,13 +25,15 @@ git push -u origin <branch>
 
 ### Step 3 — Route the deliverable
 
-**An open PR already exists for this issue/branch** → retry route. Push went to the same branch; now post a **new PR-thread comment** containing: which review feedback was addressed; what changed this iteration; the full current layered evidence packet (sections per the workflow file; commands + exit + excerpts/paths; screenshots embedded as Markdown images, each mapped to what it proves; the test-inventory delta line from verification); and whether evidence was added, replaced, or deliberately unchanged and why. At this moment, the PR body is untouchable: it is the immutable opening cover letter — if it has a structural defect (missing closing keyword, wrong issue), record the defect for your report instead of editing it.
+**An open PR already exists for this issue/branch** → retry route. Push went to the same branch; now post a **new PR-thread comment** containing: which review feedback was addressed; what changed this iteration; the full current layered evidence packet (sections per the workflow file; commands + exit + excerpts/paths; screenshots embedded as Markdown images, each mapped to what it proves; the **E2E direct-run evidence** — real entry driven, observed behavior, trace artifacts; the **runtime manifest** with credentials referenced by resolution location only, never a secret value in the PR; the test-inventory delta line from verification); and whether evidence was added, replaced, or deliberately unchanged and why. At this moment, the PR body is untouchable: it is the immutable opening cover letter — if it has a structural defect (missing closing keyword, wrong issue), record the defect for your report instead of editing it.
 
 **No PR exists** → create exactly one:
 
 - body first line exactly `Closes #<ISSUE>`;
 - title/body/section/language rules per the workflow file;
 - the four-layer evidence packet from this run's verification, including CI detection + parity status and the test-inventory delta line;
+- the **E2E direct-run evidence** as the formal deliverable layer: the real entry driven (operator-style invocation / agent-browser walk), observed behavior, runtime trace artifacts — unit/integration results are supporting layers only;
+- the **runtime manifest** (binaries, services + start commands, auth by resolution location — **never a secret value in the PR** — ports, standing-environment PIDs/logs/stop commands) so review can re-run everything;
 - screenshots embedded as Markdown images whose paths resolve to committed PR-branch artifacts;
 - every artifact mapped to the behavior it proves.
 

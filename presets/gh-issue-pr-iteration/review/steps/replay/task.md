@@ -16,16 +16,19 @@ Fetch the live issue body (`gh issue view <ISSUE> -R <REPO> --json body`). Parse
 
 Check out / use the PR-bound branch state in your working directory (record the head SHA you replayed against). A fresh checkout has nothing installed — making it runnable is your job, not a reason to skip rows: run the project's dependency install (per its manifest/lockfile and `WORKFLOW_FILE`), any required build step, and a cheap toolchain probe (e.g. the project's typecheck or `--version` of the required binaries) before touching the first row. Record the setup commands and exits.
 
+Then read the iteration's **runtime manifest** (in the PR packet and the chain handoff): it lists the binaries, services + start commands, auth resolution locations, ports, and the **standing e2e environment** (PIDs/ports/logs) the iteration left up for you. Use it — the standing environment plus the manifest is how every row and claim is reachable. A needed entry the manifest does not provide (a service with no start command, auth with no resolution location, the environment already torn down) is an **iteration packet failure**: record it as a finding with what was missing; it feeds retry, it never becomes your skip.
+
 ### Step 3 — Execute every row
 
 Per row, by Env:
 
-- `local` — execute the Command exactly as written; capture exit + output; compare to Expect. `could not execute` is legal only for what Step 2's setup genuinely cannot fix from this machine (unobtainable credentials, unreachable external service, uninstallable platform binary) — record the exact error **plus the setup you attempted**; missing dependencies or an unbuilt tree are your Step 2 failures, go back and fix them. Never mark such a row passed, and never reinterpret the Command into something you can run.
-- `VM` / `container` / `CI` / `browser` / `downstream` / `integration` — locate the matching artifact in the PR evidence packet proving the row ran in its environment with the expected result; where this machine can feasibly reach the environment (browser via local tooling, a reachable service), also re-execute for the stronger signal. No matching artifact and no feasible re-execution = the row failed; cite the missing artifact.
+- `local` — execute the Command exactly as written; capture exit + output; compare to Expect. There is no auth/binary excuse: binaries you install, credentials you resolve from the manifest's stated location (or this machine's stores) — both are Step 2 work. A row you still cannot run means exactly one of two things, and you report which: your setup is unfinished (go back and finish it), or the manifest lacks the needed entry (iteration packet failure — a finding, not a skip). Never mark an unrun row passed, and never reinterpret the Command into something you can run.
+- `browser` — re-drive the real UI with agent-browser against the standing environment; the packet's screenshots corroborate but do not substitute for your own walk.
+- `VM` / `container` / `CI` / `downstream` / `integration` — locate the matching artifact in the PR evidence packet proving the row ran in its environment with the expected result; where this machine reaches the environment (per the manifest), also re-execute for the stronger signal. No matching artifact and no feasible re-execution = the row failed; cite the missing artifact.
 
 ### Step 4 — Spot-replay the packet claims
 
-For each evidence-packet claim named in `Step focus` (typically the headline runtime/e2e claims): re-run the underlying command and record the packet's claim next to your observation. Differences are recorded as differences — at this moment the rule is: no severity labels, no "minor"/"cosmetic" wording; the judgment whether a mismatch matters belongs to the orchestrator, and softening language from you violates this task.
+The packet's **e2e claim is always among your spot-replays**: re-drive it the same direct way it was (or should have been) produced — operator-style program invocation, or an agent-browser walk of the real UI against the standing environment — and record the packet's claim next to your observation. While here, check the e2e evidence's **form**: e2e produced by a test script/harness instead of direct execution is a finding (script e2e does not satisfy the e2e requirement). For every other claim named in `Step focus`: re-run the underlying command and record claim vs observation. Differences are recorded as differences — no severity labels, no "minor"/"cosmetic" wording; the judgment whether a mismatch matters belongs to the orchestrator, and softening language from you violates this task.
 
 ### Step 5 — Blocked-path e2e (only when Step focus names it)
 
@@ -37,4 +40,4 @@ From live PR state: check names, statuses, conclusions, timestamps, head SHA, el
 
 ### Step 7 — Report
 
-Stop any process you started and note what you could not stop. Report strictly per the report template path in your dispatch message: the row-results table with one line per row (including could-not-execute rows with their exact errors), packet spot-replay comparisons, the checks observation, and your side effects for the cleanup ledger.
+Report strictly per the report template path in your dispatch message: the row-results table with one line per row (including unrun rows with their exact cause — your unfinished setup vs manifest gap), packet spot-replay comparisons including the e2e re-drive, the checks observation, and **everything left running** — your own processes and the iteration's standing environment with its manifest stop commands — for the orchestrator's final sweep; the review orchestrator owns all teardown.

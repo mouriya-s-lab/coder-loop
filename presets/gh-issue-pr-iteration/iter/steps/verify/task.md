@@ -26,14 +26,24 @@ Run the project's full test suite on the issue branch. Then measure the test inv
 
 Detect the project's CI configuration and record what you found. For GitHub Actions jobs reproducible locally, run the relevant job with `act` (derive workflow path/event/job/architecture from the project; prefer native arch, record amd64 caveats). If parity cannot run (Docker, act install, image pull, network): record the exact command, failure mode, exit status, and log excerpt as an infrastructure blocker — never skip silently, never substitute remote PR checks. If parity reaches product tests and they fail or hang, that is a fixable product finding, not something to paper over.
 
-### Step 5 — Workflow commands and runtime paths
+### Step 5 — Workflow commands
 
-From `WORKFLOW_FILE`, run the build/test/lint/typecheck/migration/browser/deployment-preview commands that apply to this issue, obeying its wrappers and prohibitions; capture workflow-required artifacts. When `REQUIRE_BROWSER_EVIDENCE` is true and the change has browser-observable behavior, capture real-system screenshots per evidence-execute. Capture both positive and negative paths when the issue scope or workflow requires them.
+From `WORKFLOW_FILE`, run the build/lint/typecheck/migration/deployment-preview commands that apply to this issue, obeying its wrappers and prohibitions; capture workflow-required artifacts. Capture both positive and negative paths when the issue scope or workflow requires them.
 
-### Step 6 — Land the artifacts and close your processes
+### Step 6 — E2E: run the real thing, directly
 
-Everything lands under `EVIDENCE_DIR`: command logs as text, screenshots verified openable, each artifact named for what it proves. Long-running services you started used background + PID + log; stop them now and confirm they died — unless your `Step focus` says to leave one running, in which case say so in the report. List every PID and every file you created outside `EVIDENCE_DIR` for the report.
+This step is mandatory for every code deliverable and nothing substitutes for it — the test suite of Step 3 and the rows of Step 2 are supporting checks, never the formal deliverable evidence.
 
-### Step 7 — Report
+- Program / CLI / daemon → invoke its **real entry point the way an operator would** (real arguments, real config), exercise the path this issue changes, capture the command transcript and service logs.
+- Web app → drive the **real UI** end-to-end with agent-browser: enter, perform the changed flow, observe the persisted result; capture real screenshots. `REQUIRE_BROWSER_EVIDENCE=true` forces browser evidence whenever the change has any browser-observable behavior.
+- "It is a library" is not an exemption — run its real consuming surface.
+- **Script e2e is forbidden**: a test script/harness wrapping the calls is integration testing whatever its filename; if you find yourself writing a script to "do the e2e", stop and run the real entry instead.
+- Auth and binaries are yours to resolve per evidence-execute's two-case rule (standalone → mint the auth while starting the environment; service plugin → resolve the IaC-provisioned auth from this machine). Neither is ever a reason this step doesn't happen.
+
+### Step 7 — Land the artifacts, leave the runtime standing, write the manifest
+
+Everything lands under `EVIDENCE_DIR`: command logs as text, screenshots verified openable, each artifact named for what it proves. The e2e runtime you started **stays up for review** — teardown is review's job, not yours. Document the standing environment and everything needed to re-run, as the **runtime manifest**: binaries (+ how installed), services + start commands, credentials by resolution location only (keychain entry / config path — never the secret value), ports, env vars, fixtures, live PIDs + log paths + stop commands. Stop only scratch processes review has no use for, and list them. This manifest is what makes "review couldn't run it" impossible — an entry you omit is a gap review will charge to this run.
+
+### Step 8 — Report
 
 You had no reason to commit, push, open PRs, or write GitHub/queue state in this step — confirm you did not. Report strictly per the report template path in your dispatch message: every required field, empty sets as `none`, mismatches reported as mismatches without softening.
