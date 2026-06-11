@@ -231,12 +231,16 @@ PR protocol 验收检测"最新 retry response 是否在 issue 而非 PR" → re
 
 ## 3. Review 验收点总表
 
-Review 是调度者（orchestrator）：PR-backed kind 必须先派 diff-audit 与 replay 两个 subagent 真跑、拿到两份报告后才允许做 body 判断与 verdict；诚实性/协议判断由调度者亲自做。按 `review-entry.md` 的 phase 顺序列出每个验收点（entry 与 quality/ 文件做 ground truth）：
+Review 是调度者（orchestrator）：PR-backed kind 必须先派 diff-audit / test-integrity / replay / e2e-replay 四个 subagent 真跑、拿齐四份已验收报告后才允许做 body 判断与 verdict；诚实性/协议判断由调度者亲自做。每次 PR 回复（retry 反馈与 accept 总结）都是完整 review 报告：全部检查的逐项摘要 + 独立 `## 缺失汇总` 区块 + `## Skipped checks` 区块（每个未跑检查写明理由）。按 `review-entry.md` 的 phase 顺序列出每个验收点（entry 与 quality/ 文件做 ground truth）：
 
 | 验收点 | 执行方 | 输入 | 规则 | 失败处置 |
 |---|---|---|---|---|
-| Diff audit | diff-audit subagent 真跑 | PR diff vs base + base/head 测试清单 + changed code 本体 | 每个 changed file 映射到 issue scope；runtime artifacts / scheduling state 不入仓；测试完整性：删 / 弱化 / skip 的测试逐条枚举（空集也要声明），非 issue 契约字面要求的非空 delta 即 test-weakening 触发；代码审查锚定 issue 设计：逻辑错误（须可追溯失败路径）/ 偏离 issue 声明的设计（须引原句）/ 违反项目 conventions（须引来源）/ diff 内结构缺陷——发散性发现（替代设计、diff 外代码）不进 verdict | retry action |
-| Contract replay | replay subagent 真跑 | issue `## 验收标准` + `## 继承验证义务` 全部行 + packet 关键 claim + live checks | 逐行执行/复验（列 `# / Dimension / Check / Command / Env / Expect`，actual vs Expect）；packet 关键 claim 重跑比对；checks 实测观察（pending/hung 不算 mergeable） | retry action（引用全部失败行） |
+| Diff audit | diff-audit subagent 真跑（纯读） | PR diff vs base + changed code 本体 | 每个 changed file 映射到 issue scope；runtime artifacts / scheduling state 不入仓；代码审查锚定 issue 设计：逻辑错误（须可追溯失败路径）/ 偏离 issue 声明的设计（须引原句）/ 违反项目 conventions（须引来源）/ diff 内结构缺陷——发散性发现（替代设计、diff 外代码）不进 verdict | retry action |
+| Test integrity | test-integrity subagent 真跑（自建 scratch worktrees） | diff 的测试变更 + base/head 两侧套件实测 | 删 / 改名 / skip / 弱化逐条枚举（空集在枚举后显式声明）；两侧计数实测（先装依赖）；计数下降无枚举 = 隐藏弱化硬拒；与 packet 测试 delta 行不一致 = packet 可信度失败 | retry action |
+| Contract replay | replay subagent 真跑 | issue `## 验收标准` + `## 继承验证义务` 全部行 | 逐行执行/复验（列 `# / Dimension / Check / Command / Env / Expect`，actual vs Expect）；`kind:blocked` 必含 blocked-path e2e；未跑行仅两种合法形态：setup 未完成（附尝试记录）/ manifest 缺项（计为 packet 失败） | retry action（引用全部失败行） |
+| E2E replay | e2e-replay subagent 真跑 | packet e2e claims + runtime manifest + standing environment | 每个 e2e claim 以直跑方式亲自复演（程序真实入口 / agent-browser 真 UI）；packet 的 e2e 若为脚本产物即 form 失败；manifest 缺项计为 packet 失败 | retry action |
+| Contract integrity | 调度者亲自 | issue body 编辑历史（`userContentEdits`） | 入队后的 body 编辑、且无早于该编辑的 issue 评论字面授权 = 篡改（重点盯验收行弱化）→ 立即恢复最近合法快照 + 反馈开头红线严警 | hard retry |
+| Checks/mergeability | 调度者亲自 | live PR checks（names/conclusions/timestamps/head SHA）+ mergeStateStatus | 实测观察；pending/hung 不算 mergeable；CI 合法在跑 → retry 附 observe-again | retry action |
 | Trace honesty | 调度者亲自 | iter 汇报/trace + GitHub live state | 每个声明有对应观察（`quality/honesty-judge.md` claim-vs-observation） | retry action |
 | PR protocol | 调度者亲自 | PR body + thread + issue comments | first line `Closes #<N>`、CI parity 行、retry 必有新 PR-thread comment | retry action / no-PR 路由 |
 | Title-intent | 调度者亲自 | issue title + PR title | strip conventional prefix 后主语 noun phrase 对齐 | retry action |
@@ -246,7 +250,7 @@ Review 是调度者（orchestrator）：PR-backed kind 必须先派 diff-audit �
 | Source-spike audit（`kind:code-spike`） | 调度者亲自（`review/source-spike-audit.md`） | issue comment + spike branch + 证据 | no-merge 语义、branch/SHA、命令覆盖、结果分支；有 PR 即 retry | retry action |
 | Closure | 调度者亲自 | 上面验收点综合 + child closure table | 决定 terminal action（accept-pr / accept-no-pr / retry / expand-parent / skip / blocked / stop） | 选 action 文件 |
 
-代码审查**在 loop 内**，锚点是 issue 声明的设计：逻辑正确性、conventions、diff 内结构由 diff-audit 步审，所有发现必须带锚（可追溯失败路径 / issue 原句 / convention 来源），**不发散**——替代设计、issue 设计之外的改进想法、diff 没碰的代码一律不进 verdict（diff 外既有问题至多在 Problems 记一行 out-of-scope observation）。其余 code 相关检查：mergeability/CI 实测与逐行契约复验（replay 步）、scope 对应与测试完整性与 runtime artifacts 不入仓（diff-audit 步）。PR-backed kind 缺少 diff-audit 或 replay 派发报告的 verdict 无效（仅 no-PR 路由与 infra-stop 例外）。
+代码审查**在 loop 内**，锚点是 issue 声明的设计：逻辑正确性、conventions、diff 内结构由 diff-audit 步审，所有发现必须带锚（可追溯失败路径 / issue 原句 / convention 来源），**不发散**——替代设计、issue 设计之外的改进想法、diff 没碰的代码一律不进 verdict（diff 外既有问题至多在 Problems 记一行 out-of-scope observation）。其余 code 相关检查：逐行契约复验（replay 步）、测试完整性两侧实测（test-integrity 步）、e2e 直跑复演与脚本形态检查（e2e-replay 步）、scope 对应与 runtime artifacts 不入仓（diff-audit 步）、checks/mergeability 实测（调度者亲自）。PR-backed kind 缺少四份派发报告（diff-audit / test-integrity / replay / e2e-replay）任意一份的 verdict 无效（仅 no-PR 路由与 infra-stop 例外）。
 
 ---
 
@@ -257,6 +261,9 @@ Review 是调度者（orchestrator）：PR-backed kind 必须先派 diff-audit �
 | 验收点 | `kind:code` | `kind:blocked` | `kind:comment` | `kind:code-spike` | `""`（empty / legacy） |
 |---|---|---|---|---|---|
 | Diff audit | 跑 | 跑（PR-backed 时） | 跳（无 PR） | 跳（无 PR；有 PR 即 retry） | 跑 |
+| Test integrity | 跑 | 跑（PR-backed 时） | 跳 | 跳 | 跑 |
+| E2E replay | 跑 | 跑（PR-backed 时） | 跳 | 跳 | 跑 |
+| Contract integrity（body 篡改） | 跑 | 跑 | 跑 | 跑 | 跑 |
 | Trace honesty | 跑 | 跑 | 跑 | 跑 | 跑 |
 | PR protocol | 跑 | 跑（PR-backed unblock；无 PR 仅限 already-satisfied） | no-PR 路由 | no-PR 路由；PR 存在即 retry | 跑 |
 | Title-intent | 跑 | 跑 | 跳（无 PR） | 跳（source spike 无 PR） | 跑（legacy 也可能漂） |

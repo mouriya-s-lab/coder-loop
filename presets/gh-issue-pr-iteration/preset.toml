@@ -499,6 +499,36 @@ role = "review"
 path = "review/steps/diff-audit/accept.md"
 
 [[fragments]]
+id   = "review/steps/test-integrity/task"
+role = "review"
+path = "review/steps/test-integrity/task.md"
+
+[[fragments]]
+id   = "review/steps/test-integrity/report"
+role = "review"
+path = "review/steps/test-integrity/report.md"
+
+[[fragments]]
+id   = "review/steps/test-integrity/accept"
+role = "review"
+path = "review/steps/test-integrity/accept.md"
+
+[[fragments]]
+id   = "review/steps/e2e-replay/task"
+role = "review"
+path = "review/steps/e2e-replay/task.md"
+
+[[fragments]]
+id   = "review/steps/e2e-replay/report"
+role = "review"
+path = "review/steps/e2e-replay/report.md"
+
+[[fragments]]
+id   = "review/steps/e2e-replay/accept"
+role = "review"
+path = "review/steps/e2e-replay/accept.md"
+
+[[fragments]]
 id   = "review/spike-followup"
 role = "review"
 path = "review/spike-followup.md"

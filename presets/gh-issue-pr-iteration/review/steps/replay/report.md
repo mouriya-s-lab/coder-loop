@@ -12,14 +12,11 @@ re-executed in their environment; what could not be attempted and why>
 |---|---|---|---|---|---|
 <one line per acceptance + inherited row — every row, including could-not-execute>
 
-## Packet spot-replay
-<per replayed claim: packet's claim vs your observation, with command + exit + excerpt>
-
-## Checks and mergeability
-<check names / statuses / conclusions / timestamps / head SHA / elapsed; hung-or-running
-assessment; mergeStateStatus>
+## Blocked-path e2e
+<the named command + exit + output — or `not applicable (Step focus named none)`>
 
 ## Problems
-<rows that could not execute (exact error); environment limits; processes started
-(PIDs / log paths) and files written, for the cleanup ledger>
+<unrun rows with their two-shape cause (unfinished setup with attempts shown / named
+manifest gap); everything left running — own processes and the standing environment —
+with stop commands, for the orchestrator's sweep>
 ```

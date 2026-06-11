@@ -24,15 +24,7 @@ For **every** changed file, classify: `in-scope` (name the issue requirement/acc
 
 Flag staged runtime artifacts anywhere in the diff: loop-data files, scheduling state, run stdout logs, evidence files, target-side runtime config/state directories, editor/OS droppings, lockfile churn with no dependency change in the diff.
 
-### Step 5 — Audit test integrity
-
-The load-bearing check; do it from the diff and the trees, never from the PR's prose:
-
-1. Enumerate every test **removed** (test/it block or test file deleted), **renamed**, **skipped** (`.skip`, `.todo`, commented out, condition wrapped around it), or **weakened** (assertion deleted/loosened, expected value broadened, error-path assertion removed) by this branch. Quote each: file, test name, what happened.
-2. Measure the inventory on both sides: run the project's test suite (or its enumeration mode) on base and on head; record total counts and the exact commands. Each side must first be made runnable by you — dependency install per the project's manifest on that checkout before the suite; "suite would not start" without an attempted install is your setup failure, not a measurement. A count drop with no enumerated removal is itself a finding (hidden weakening).
-3. Write the empty case explicitly — "no tests removed/renamed/skipped/weakened" — only after the enumeration, never as an assumption.
-
-### Step 6 — Review the changed code against the issue's design
+### Step 5 — Review the changed code against the issue's design
 
 Read the changed code (and the unchanged code its correctness directly depends on — callers/callees of changed symbols). Report findings in exactly four categories, each anchored:
 
@@ -43,10 +35,10 @@ Read the changed code (and the unchanged code its correctness directly depends o
 
 The no-divergence rule binds every finding: nothing about code the diff does not touch (a pre-existing bug you trip over goes as one line in Problems marked `out-of-scope observation`, never as a finding); no alternative-design proposals; no improvement ideas beyond the issue's design; no new requirements the issue and project conventions do not state. A finding that cannot cite its anchor (failure path / issue sentence / convention source) does not go in the report.
 
-### Step 7 — Summarize the footprint
+### Step 6 — Summarize the footprint
 
 Describe the change footprint factually: surfaces touched, nature of the change per surface, 3–8 lines. The orchestrator compares this against the iteration's declared intent — you describe; you do not judge whether any mismatch matters, and at no point in the report do severity labels ("minor", "cosmetic") appear: raw findings only.
 
-### Step 8 — Report
+### Step 7 — Report
 
-Save your command logs under `EVIDENCE_DIR`. Report strictly per the report template path in your dispatch message: both SHAs, the full scope-mapping table (every changed file), hygiene findings, test-integrity inventory + enumeration, code findings with their anchors, the factual footprint, and your side effects — every section present, empty sets written as `none`.
+Save your command logs under `EVIDENCE_DIR`. Report strictly per the report template path in your dispatch message: both SHAs, the full scope-mapping table (every changed file), hygiene findings, code findings with their anchors, the factual footprint, and your side effects — every section present, empty sets written as `none`. (Test integrity — enumeration and inventory — is a separate review step, not yours.)

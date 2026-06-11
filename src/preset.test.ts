@@ -60,6 +60,12 @@ const EXPECTED_FRAGMENTS = [
 	{ id: "review/steps/diff-audit/task", role: "review", relPath: "review/steps/diff-audit/task.md" },
 	{ id: "review/steps/diff-audit/report", role: "review", relPath: "review/steps/diff-audit/report.md" },
 	{ id: "review/steps/diff-audit/accept", role: "review", relPath: "review/steps/diff-audit/accept.md" },
+	{ id: "review/steps/test-integrity/task", role: "review", relPath: "review/steps/test-integrity/task.md" },
+	{ id: "review/steps/test-integrity/report", role: "review", relPath: "review/steps/test-integrity/report.md" },
+	{ id: "review/steps/test-integrity/accept", role: "review", relPath: "review/steps/test-integrity/accept.md" },
+	{ id: "review/steps/e2e-replay/task", role: "review", relPath: "review/steps/e2e-replay/task.md" },
+	{ id: "review/steps/e2e-replay/report", role: "review", relPath: "review/steps/e2e-replay/report.md" },
+	{ id: "review/steps/e2e-replay/accept", role: "review", relPath: "review/steps/e2e-replay/accept.md" },
 	{ id: "review/spike-followup", role: "review", relPath: "review/spike-followup.md" },
 	{ id: "review/source-spike-audit", role: "review", relPath: "review/source-spike-audit.md" },
 	{ id: "review/actions/accept-pr", role: "review", relPath: "review/actions/accept-pr.md" },
@@ -251,9 +257,12 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		const entry = await Bun.file(resolve(BUNDLED_PRESET_DIR, "review-entry.md")).text()
 
 		expect(entry).toContain("You never repair the work under review.")
-		expect(entry).toContain("a verdict — including retry — produced without both accepted reports is an invalid review")
+		expect(entry).toContain("a verdict — including retry — produced without all four accepted reports is an invalid review")
 		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/steps/replay/")
 		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/steps/diff-audit/")
+		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/steps/test-integrity/")
+		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/steps/e2e-replay/")
+		expect(entry).toContain("userContentEdits")
 		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/accept-pr.md")
 		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/state-write.md")
 		expect(entry).toContain("REVIEW SUMMARY: verdict=<retry|accepted|skip|blocked|stop>")

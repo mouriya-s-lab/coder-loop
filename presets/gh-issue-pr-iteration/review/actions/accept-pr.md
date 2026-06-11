@@ -1,10 +1,29 @@
 # Action: accept PR-backed work
 
-Use only when honesty/protocol judgments, replay, and closure judgment all passed.
+Use only when all four dispatched reports (diff-audit, test-integrity, replay, e2e-replay), all judgments, and the closure judgment passed.
 
 ## Procedure
 
-1. Post an acceptance summary on the PR: state that the contract was independently replayed and list the decisive evidence/replay results.
+1. Post the acceptance review report on the PR — same fixed structure as every review reply:
+
+```markdown
+## Review verdict: accepted (<RUN_ID>)
+
+## Check reports
+### diff-audit — pass: <digest: scope mapping, hygiene, code findings (none expected)>
+### test-integrity — pass: <digest: enumeration, both counts>
+### replay — pass: <digest: rows run, all matched; blocked-path e2e when applicable>
+### e2e-replay — pass: <digest: claims re-driven, observations matched>
+### Judgments — contract integrity / trace honesty / PR protocol / title-intent / caveat honesty / evidence form / checks+mergeability: <one line each>
+
+## 缺失汇总
+none
+
+## Skipped checks
+- <check → reason — or `none`>
+```
+
+An acceptance whose 缺失汇总 is not `none` is not an acceptance — go back to the retry action.
 2. Merge:
 
 ```bash

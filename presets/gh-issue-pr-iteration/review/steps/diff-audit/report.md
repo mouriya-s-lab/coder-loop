@@ -16,14 +16,6 @@ Unmapped files: <list or `none`>
 ## Hygiene findings
 <staged runtime artifacts / scheduling state / logs / droppings, with paths — or `none`>
 
-## Test integrity
-Inventory: base=<count> (<command>), head=<count> (<command>)
-| Test | File | What happened |
-|---|---|---|
-| <name> | <path> | removed / renamed to X / skipped via Y / weakened: <how> |
-
-(or a single row `none | - | -` after enumeration)
-
 ## Code findings (anchored to the issue's design)
 | # | Category | Location | Finding | Anchor |
 |---|---|---|---|---|

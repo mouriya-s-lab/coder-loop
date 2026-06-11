@@ -26,18 +26,10 @@ Per row, by Env:
 - `browser` — re-drive the real UI with agent-browser against the standing environment; the packet's screenshots corroborate but do not substitute for your own walk.
 - `VM` / `container` / `CI` / `downstream` / `integration` — locate the matching artifact in the PR evidence packet proving the row ran in its environment with the expected result; where this machine reaches the environment (per the manifest), also re-execute for the stronger signal. No matching artifact and no feasible re-execution = the row failed; cite the missing artifact.
 
-### Step 4 — Spot-replay the packet claims
-
-The packet's **e2e claim is always among your spot-replays**: re-drive it the same direct way it was (or should have been) produced — operator-style program invocation, or an agent-browser walk of the real UI against the standing environment — and record the packet's claim next to your observation. While here, check the e2e evidence's **form**: e2e produced by a test script/harness instead of direct execution is a finding (script e2e does not satisfy the e2e requirement). For every other claim named in `Step focus`: re-run the underlying command and record claim vs observation. Differences are recorded as differences — no severity labels, no "minor"/"cosmetic" wording; the judgment whether a mismatch matters belongs to the orchestrator, and softening language from you violates this task.
-
-### Step 5 — Blocked-path e2e (only when Step focus names it)
+### Step 4 — Blocked-path e2e (only when Step focus names it)
 
 Run the named command that exercises the previously blocked path end-to-end; record exit + output. Without this succeeding, the unblock cannot be accepted — report it exactly as observed.
 
-### Step 6 — Observe checks and mergeability
+### Step 5 — Report
 
-From live PR state: check names, statuses, conclusions, timestamps, head SHA, elapsed time, your timed-out/hung assessment, and `mergeStateStatus`. Observed values only — never infer "CI is green" from absence of failures.
-
-### Step 7 — Report
-
-Report strictly per the report template path in your dispatch message: the row-results table with one line per row (including unrun rows with their exact cause — your unfinished setup vs manifest gap), packet spot-replay comparisons including the e2e re-drive, the checks observation, and **everything left running** — your own processes and the iteration's standing environment with its manifest stop commands — for the orchestrator's final sweep; the review orchestrator owns all teardown.
+Report strictly per the report template path in your dispatch message: the row-results table with one line per row (including unrun rows with their exact cause — your unfinished setup vs manifest gap), and **everything left running** — your own processes and the iteration's standing environment with its manifest stop commands — for the orchestrator's final sweep; the review orchestrator owns all teardown. (The packet's e2e claims and live checks belong to other review steps, not yours.)
