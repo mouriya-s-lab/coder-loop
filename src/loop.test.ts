@@ -22,7 +22,7 @@ import {
 	parseSessionIdFromRunnerStream,
 	renderFragmentIndex,
 	renderPrompt,
-	RUNTIME_BINDING_KEYS,
+	ENGINE_RUNTIME_BINDING_KEYS,
 	resolveWorkflowFileConfigBinding,
 	stripRoleEntryFrontmatter,
 	resolveBinding,
@@ -167,24 +167,24 @@ function makeOptions(preset = makePreset()): LoopOptions {
 	}
 }
 
-const RUNTIME_KEY_BLOCK_START = "<!-- runtime-binding-keys:start -->"
-const RUNTIME_KEY_BLOCK_END = "<!-- runtime-binding-keys:end -->"
-const RUNTIME_KEY_COUNT_PATTERN = /Runtime binding key count:\s*(\d+)/g
+const ENGINE_RUNTIME_KEY_BLOCK_START = "<!-- engine-runtime-binding-keys:start -->"
+const ENGINE_RUNTIME_KEY_BLOCK_END = "<!-- engine-runtime-binding-keys:end -->"
+const ENGINE_RUNTIME_KEY_COUNT_PATTERN = /Engine runtime fact key count:\s*(\d+)/g
 
-function documentedRuntimeBindingCount(markdown: string, label: string): number {
-	const matches = [...markdown.matchAll(RUNTIME_KEY_COUNT_PATTERN)]
-	expect(matches.length, `${label} should declare exactly one runtime binding key count`).toBe(1)
+function documentedEngineRuntimeBindingCount(markdown: string, label: string): number {
+	const matches = [...markdown.matchAll(ENGINE_RUNTIME_KEY_COUNT_PATTERN)]
+	expect(matches.length, `${label} should declare exactly one engine runtime binding key count`).toBe(1)
 	const rawCount = matches[0]?.[1]
 	expect(rawCount).toBeDefined()
 	return Number(rawCount)
 }
 
-function documentedRuntimeBindingKeys(markdown: string): string[] {
-	const start = markdown.indexOf(RUNTIME_KEY_BLOCK_START)
-	const end = markdown.indexOf(RUNTIME_KEY_BLOCK_END)
+function documentedEngineRuntimeBindingKeys(markdown: string): string[] {
+	const start = markdown.indexOf(ENGINE_RUNTIME_KEY_BLOCK_START)
+	const end = markdown.indexOf(ENGINE_RUNTIME_KEY_BLOCK_END)
 	expect(start).toBeGreaterThanOrEqual(0)
 	expect(end).toBeGreaterThan(start)
-	const block = markdown.slice(start + RUNTIME_KEY_BLOCK_START.length, end)
+	const block = markdown.slice(start + ENGINE_RUNTIME_KEY_BLOCK_START.length, end)
 	return [...block.matchAll(/runtime\.([a-zA-Z][a-zA-Z0-9_]*)/g)].map((match) => {
 		const key = match[1]
 		expect(key).toBeDefined()
@@ -244,9 +244,9 @@ describe("ItemRecord prompt bindings", () => {
 			variables: [
 				["RUNTIME_INPUTS_DOC", { kind: "runtime", key: "runtimeInputsDoc" }],
 				["PHASE_EXITS_DOC", { kind: "runtime", key: "phaseExitsDoc" }],
-				["ISSUE_KIND_DOC", { kind: "runtime", key: "issueKindDoc" }],
+				["ISSUE_KIND_DOC", { kind: "runtime", key: "issueKindDoc", ownership: "preset" }],
 				["TARGET_CWD", { kind: "runtime", key: "targetCwd" }],
-				["ISSUE_KIND", { kind: "runtime", key: "issueKind" }],
+				["ISSUE_KIND", { kind: "runtime", key: "issueKind", ownership: "preset" }],
 			],
 			variableDocs: new Map([
 				["TARGET_CWD", { label: "Target working directory", suffix: "", style: "code", blankBefore: false }],
@@ -299,13 +299,13 @@ describe("ItemRecord prompt bindings", () => {
 })
 
 describe("runtime binding helpers", () => {
-	test("documentation keeps runtime binding count and list aligned with source", async () => {
+	test("documentation keeps engine runtime binding count and list aligned with source", async () => {
 		const presetAuthoring = await readFile(resolve(REPO_ROOT, "docs/preset-authoring.md"), "utf8")
 		const claude = await readFile(resolve(REPO_ROOT, "CLAUDE.md"), "utf8")
 
-		expect(documentedRuntimeBindingCount(presetAuthoring, "docs/preset-authoring.md")).toBe(RUNTIME_BINDING_KEYS.length)
-		expect(documentedRuntimeBindingCount(claude, "CLAUDE.md")).toBe(RUNTIME_BINDING_KEYS.length)
-		expect(documentedRuntimeBindingKeys(presetAuthoring)).toEqual([...RUNTIME_BINDING_KEYS])
+		expect(documentedEngineRuntimeBindingCount(presetAuthoring, "docs/preset-authoring.md")).toBe(ENGINE_RUNTIME_BINDING_KEYS.length)
+		expect(documentedEngineRuntimeBindingCount(claude, "CLAUDE.md")).toBe(ENGINE_RUNTIME_BINDING_KEYS.length)
+		expect(documentedEngineRuntimeBindingKeys(presetAuthoring)).toEqual([...ENGINE_RUNTIME_BINDING_KEYS])
 	})
 
 	test("reserved string registry includes engine-parsed summary enums", async () => {
@@ -346,7 +346,37 @@ describe("runtime binding helpers", () => {
 	test("workflow file is a config binding, not a runtime binding", () => {
 		const ctx: ResolveContext = { item: makeItem(), config: makeConfig(), runtime: makeRuntime() }
 		expect(resolveBinding({ kind: "config", field: "workflowFile", fallback: { kind: "none" } }, ctx)).toBe(resolve(REPO_ROOT, ".coder-loop/workflow.md"))
-		expect(() => resolveBinding({ kind: "runtime", key: "workflowPath" }, ctx)).toThrow(/runtime\.workflowPath: not in runtime binding whitelist/)
+		expect(() => resolveBinding({ kind: "runtime", key: "workflowPath" }, ctx)).toThrow(/runtime\.workflowPath: not an engine runtime fact or preset-declared business key/)
+	})
+
+	test("preset-declared runtime business keys render without engine whitelist changes", () => {
+		const preset = makePreset({
+			runtime: { businessKeys: ["customBusiness"] },
+			phases: [
+				{ name: "iteration", prompt: "iteration.md", variables: { CUSTOM: "runtime.customBusiness" } },
+				{ name: "review", prompt: "review.md", variables: { RUN_ID: "runtime.runId" } },
+			],
+		})
+		const phase = preset.phases[0]!
+		const ctx: ResolveContext = {
+			item: makeItem(),
+			config: makeConfig(),
+			runtime: makeRuntime({ customBusiness: "preset-owned-value" }),
+		}
+
+		expect(phase.variables[0]).toEqual(["CUSTOM", { kind: "runtime", key: "customBusiness", ownership: "preset" }])
+		expect(renderPrompt("{{CUSTOM}}", phase, ctx)).toBe("preset-owned-value")
+		expect([...ENGINE_RUNTIME_BINDING_KEYS]).not.toContain("customBusiness")
+	})
+
+	test("parsePreset rejects undeclared runtime business keys", () => {
+		expect(() =>
+			makePreset({
+				phases: [
+					{ name: "iteration", prompt: "iteration.md", variables: { CUSTOM: "runtime.customBusiness" } },
+				],
+			}),
+		).toThrow(/unknown runtime key "customBusiness"/)
 	})
 
 	test("buildRuntimeBindings maps issue run context into strings", () => {

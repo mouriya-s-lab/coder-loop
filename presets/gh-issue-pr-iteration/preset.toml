@@ -28,6 +28,9 @@ branch = "string"
 pr = "number"
 lastRunId = "string"
 
+[runtime]
+businessKeys = ["issueKind", "issueKindDoc"]
+
 [statuses]
 continuable = ["queued", "in_progress", "changes_requested"]
 terminal    = ["blocked", "moot", "done", "exhausted"]

@@ -2,7 +2,7 @@
 
 读者：想写一个新 preset（非 `gh-issue-pr-iteration`）或修改现有 preset 的人。
 
-读完后你能：理解 `preset.toml` 全部字段、写出最小可跑 preset、知道变量绑定 DSL 三前缀边界、知道怎么往 `runtime.*` 白名单加新 key。
+读完后你能：理解 `preset.toml` 全部字段、写出最小可跑 preset、知道变量绑定 DSL 三前缀边界、知道怎么区分 engine-owned `runtime.*` fact 与 preset-declared runtime business key。
 
 不在范围内：`gh-issue-pr-iteration` 内部 fragment 跳转（看 [gh-issue-pr-iteration-fragments](./gh-issue-pr-iteration-fragments.md)）；运行期状态 / trace（看 [operations](./operations.md)）。
 
@@ -129,6 +129,7 @@ rm -rf "$TARGET"
 | `description` | string | 否 | 给人看 |
 | `[item].idField` | string | 是 | queue item 的 id 字段名（如 `gh-issue-pr-iteration` 用 `issue`，single-phase-example 用 `id`） |
 | `[item.fields]` | table | 否 | preset 额外要绑定的透明 item 字段声明。每个字段值是 `"string"|"number"|"boolean"|"json"`，或 `{ type = "..." }` |
+| `[runtime].businessKeys` | string[] | 否 | preset 拥有语义、但仍通过 `runtime.<key>` 暴露给 prompt 的业务 key。不能重声明 engine-owned fact。 |
 | `[statuses].continuable` | string[] | 是 | 引擎会调度的 status 集合；item.status 落在这个集合内才被选中 |
 | `[statuses].terminal` | string[] | 是 | 引擎跳过的 status 集合（与 continuable 合并去重） |
 | `[statuses].entry` | string | 否 | 依赖解除或手动 `queue unblock` 后恢复到的 continuable status；默认取 `continuable[0]` |
@@ -161,6 +162,7 @@ rm -rf "$TARGET"
 - chain lifecycle trigger 目前只支持 `on = "chain-complete"`，且不能同时声明 `afterPhase` / `whenStatus`；
 - 每条 `[phases.variables]` source 必须 match `^(item|config|runtime)\.[a-zA-Z][a-zA-Z0-9_]*$`；
 - `item.<field>` 只能引用 `[item].idField`、引擎自有字段（`id/status/phase/runner/agentCwd`），或 `[item.fields]` 显式声明的透明字段。未声明字段在 preset 加载期报错。
+- `runtime.<key>` 只能引用 engine-owned fact，或 `[runtime].businessKeys` 显式声明的 preset 业务 key。未声明 key 在 preset 加载期报错；声明了但运行时没有提供值则渲染时报错。
 
 任何一条失败 → preset load throws；`coder-loop status <target> --json` 会把 state 标成 `invalid-preset` 或相邻的 invalid runtime 状态，`doctor` 会在人类可读输出中呈现同一类问题。
 
@@ -204,27 +206,36 @@ bundled `gh-issue-pr-iteration` preset 用这个 hook 声明 `umbrella-finalizer
 |---|---|---|
 | `item.<field>` | 当前 actionable queue item 字段：`idField`、`id/status/phase/runner/agentCwd`，或 `[item.fields]` 声明的透明字段 | 未声明字段 → preset load throw；缺失/null → `""`；string/number/boolean → `String(...)`；其他类型 → throw |
 | `config.<field>` | target `.coder-loop/runtime/config.{json,toml}` 字段 | 字段不存在 → throw；`null/undefined` → throw；类型同上 |
-| `runtime.<key>` | 引擎计算的运行期值 | key 必须在白名单内；否则 throw |
+| `runtime.<key>` | 引擎计算的运行期值，或 preset 声明的业务运行期值 | key 必须是 engine-owned fact 或 `[runtime].businessKeys` 声明项；否则 preset load throw。声明项运行时缺值则 render throw |
 
 模板里 `{{KEY}}` 替换为 `String(...)`；多次出现都替换。
 
-### `runtime.*` 白名单
+### `runtime.*` fact 与 business key
 
-当前白名单由 `src/loop.ts` 的 `RUNTIME_BINDING_KEYS` 定义。Runtime binding key count: 27.
+Engine-owned fact 由 `src/loop.ts` 的 `ENGINE_RUNTIME_BINDING_KEYS` 定义。Engine runtime fact key count: 25.
 
-<!-- runtime-binding-keys:start -->
+<!-- engine-runtime-binding-keys:start -->
 ```
 runtime.runId                runtime.targetCwd            runtime.agentCwd
 runtime.sharedContextPath    runtime.stateFile            runtime.currentIssueFile
 runtime.issueDir             runtime.evidenceDir          runtime.evidenceRootDir
 runtime.logDir               runtime.traceFile            runtime.loopFile
 runtime.presetDir            runtime.fragmentIndex        runtime.runtimeInputsDoc
-runtime.phaseExitsDoc        runtime.issueKindDoc         runtime.runIdGeneration
-runtime.resumedFromPhase     runtime.resumedStartedAt     runtime.resumedSessionId
-runtime.issueKind            runtime.chainName            runtime.chainUmbrellaRepo
-runtime.chainUmbrellaIssue   runtime.chainBaseBranch      runtime.repoCwd
+runtime.phaseExitsDoc        runtime.runIdGeneration      runtime.resumedFromPhase
+runtime.resumedStartedAt     runtime.resumedSessionId     runtime.chainName
+runtime.chainUmbrellaRepo    runtime.chainUmbrellaIssue   runtime.chainBaseBranch
+runtime.repoCwd
 ```
-<!-- runtime-binding-keys:end -->
+<!-- engine-runtime-binding-keys:end -->
+
+Preset business key 由 `preset.toml` 声明：
+
+```toml
+[runtime]
+businessKeys = ["issueKind", "issueKindDoc"]
+```
+
+这些 key 的语义属于 preset，而不是引擎契约。引擎只负责：加载时确认 `runtime.<key>` 已声明，渲染时从运行期 binding 表取字符串值。新增业务 key 只改 preset 声明和提供该值的运行期数据面；不改 `ENGINE_RUNTIME_BINDING_KEYS`。
 
 | Key | 含义 |
 |---|---|
@@ -244,30 +255,37 @@ runtime.chainUmbrellaIssue   runtime.chainBaseBranch      runtime.repoCwd
 | `fragmentIndex` | 全部 fragments 的 markdown 表格（id + role + 绝对路径），entry prompt 嵌它给 agent 当索引 |
 | `runtimeInputsDoc` | 按 phase 变量 metadata 生成的 bound runtime input 文档。 |
 | `phaseExitsDoc` | 按 phase `[[phases.exits]]` 生成的出口状态文档。 |
-| `issueKindDoc` | 默认 preset issue-kind 路由说明；其他 preset 一般不引用。 |
 | `runIdGeneration` | `"new"` / `"resumed"`，本轮 runId 是新生成还是 resume |
 | `resumedFromPhase` | 若 resume，从哪个 phase 续；否则 `""` |
 | `resumedStartedAt` | 若 resume，原 run 起始时间戳；否则 `""` |
 | `resumedSessionId` | 若 resume，上一轮 runner session id；否则 `""`。 |
-| `issueKind` | `"code"` / `"comment"` / `"code-spike"` / `"blocked"` / `""`（empty = 无 label / legacy）；从 `gh issue view --json labels` fetch，或无 repo 的本地 fixture 从 queue item `kind` 读 |
 | `chainName` | centralized chain 名称。 |
 | `chainUmbrellaRepo` | chain metadata 中登记的 umbrella repo，缺失则 `""`。 |
 | `chainUmbrellaIssue` | chain metadata 中登记的 umbrella issue number，缺失则 `""`。 |
 | `chainBaseBranch` | chain metadata 的 base branch。 |
 | `repoCwd` | 当前 item 所属 target repo cwd；跨 repo queue item 与 agent cwd 分离时用于提示。 |
 
+Bundled `gh-issue-pr-iteration` 当前声明的 business key：
+
+| Key | 含义 |
+|---|---|
+| `issueKind` | `"code"` / `"comment"` / `"code-spike"` / `"blocked"` / `""`（empty = 无 label / legacy）；从 `gh issue view --json labels` fetch，或无 repo 的本地 fixture 从 queue item `kind` 读 |
+| `issueKindDoc` | 默认 preset issue-kind 路由说明；其他 preset 一般不引用。 |
+
 `runIdGeneration` 是引擎对「这次 spawn 是新生成 runId 还是从 state.current 恢复」的客观回答；preset 自行用这一信号 + `item.status` + `item.lastRunId` 派生 fresh / retry / resume 三种调度形态——引擎不识别这些领域分类。
 
-`issueKind` 是 `gh-issue-pr-iteration` 专用信号（issue 上的 `kind:code` / `kind:comment` / `kind:code-spike` / `kind:blocked` label），其他 preset 一般可忽略或不引用。
+`issueKind` 是 `gh-issue-pr-iteration` 专用信号（issue 上的 `kind:code` / `kind:comment` / `kind:code-spike` / `kind:blocked` label），所以它由该 preset 的 `[runtime].businessKeys` 声明；其他 preset 一般可忽略或不引用。
 
-### 扩 `runtime.*` 白名单的流程
+### 扩 `runtime.*` key 的流程
 
-新增一个白名单 key 必须**同时**改两处 `src/loop.ts`：
+新增 engine-owned fact 必须**同时**改两处 `src/loop.ts`：
 
-1. `RUNTIME_BINDING_KEYS` 数组加 key 字面量。
+1. `ENGINE_RUNTIME_BINDING_KEYS` 数组加 key 字面量。
 2. `buildRuntimeBindings` 返回对象加该 key 的赋值；类型系统会强制要求。
 
 只改其中一处会 TypeScript 编译失败。改完跑 `bun test`（binding / smoke 覆盖）+ `bun x tsc --noEmit`。
+
+新增 preset 业务 key 不改 engine-owned fact 清单。只在对应 preset 的 `[runtime].businessKeys` 加 key，并确保运行期 binding 表提供该 key 的字符串值；未声明引用会在 preset load 阶段失败，声明但缺值会在 render 阶段失败。
 
 ---
 
@@ -356,7 +374,7 @@ queue item 可加 `"runner": "claude" | "codex"` 覆盖允许 item override 的�
 ```bash
 cd /path/to/coder-loop
 bun test                  # 跑 preset.test.ts / loop.test.ts / smoke.test.ts
-bun x tsc --noEmit        # 类型检查（buildRuntimeBindings 双处一致性靠类型系统）
+bun x tsc --noEmit        # 类型检查（engine runtime fact 双处一致性靠类型系统）
 ```
 
 `preset.test.ts` 验证 bundled `gh-issue-pr-iteration` 的 fragment 集合 / 变量绑定 / phase 顺序与 src 一致；改默认 preset 后这个测试会先红，按 diff 修测试期望。
