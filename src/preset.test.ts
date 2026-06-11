@@ -116,6 +116,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 			pr: { type: "number" },
 			lastRunId: { type: "string" },
 		})
+		expect([...preset.runtime.businessKeys]).toEqual(["issueKind", "issueKindDoc"])
 		expect(preset.agent.binary).toBe("claude")
 		expect([...preset.agent.extraArgs]).toEqual([])
 		expect(preset.agent.attemptTimeoutSeconds).toBe(DEFAULT_ATTEMPT_TIMEOUT_SECONDS)
@@ -186,6 +187,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(iterVars.get("AGENT_CWD")).toEqual(expectedRuntime("agentCwd"))
 		expect(iterVars.get("PROMPT_ROOT")).toEqual(expectedRuntime("presetDir"))
 		expect(iterVars.get("PROMPT_FRAGMENT_INDEX")).toEqual(expectedRuntime("fragmentIndex"))
+		expect(iterVars.get("ISSUE_KIND")).toEqual({ kind: "runtime", key: "issueKind", ownership: "preset" })
 	})
 
 	test("fragments match PROMPT_FRAGMENTS 1:1 by id+role+path and files exist", async () => {
@@ -456,6 +458,27 @@ describe("parsePreset schema validation", () => {
 	test("rejects misspelled item field reference (e.g. item.stauts instead of item.status)", () => {
 		const root: Record<string, unknown> = { ...minimalRoot(), phases: [{ name: "p", prompt: "p.md", variables: { X: "item.stauts" } }] }
 		expect(() => parsePreset(root, "/tmp")).toThrow(/unknown item field "stauts"/)
+	})
+
+	test("accepts declared runtime business keys", () => {
+		const root: Record<string, unknown> = {
+			...minimalRoot(),
+			runtime: { businessKeys: ["customBusiness"] },
+			phases: [{ name: "p", prompt: "p.md", variables: { X: "runtime.customBusiness" } }],
+		}
+		const preset = parsePreset(root, "/tmp")
+		expect([...preset.runtime.businessKeys]).toEqual(["customBusiness"])
+		expect(preset.phases[0]!.variables[0]).toEqual(["X", { kind: "runtime", key: "customBusiness", ownership: "preset" }])
+	})
+
+	test("rejects undeclared runtime business keys", () => {
+		const root: Record<string, unknown> = { ...minimalRoot(), phases: [{ name: "p", prompt: "p.md", variables: { X: "runtime.customBusiness" } }] }
+		expect(() => parsePreset(root, "/tmp")).toThrow(/unknown runtime key "customBusiness"/)
+	})
+
+	test("rejects runtime business key declarations that collide with engine facts", () => {
+		const root: Record<string, unknown> = { ...minimalRoot(), runtime: { businessKeys: ["runId"] } }
+		expect(() => parsePreset(root, "/tmp")).toThrow(/"runId" is engine-owned/)
 	})
 
 	test("accepts item.idField reference in variables", () => {

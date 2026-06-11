@@ -449,7 +449,11 @@ function nextNonTriggerPhaseForItem(input: {
 	if (currentPhaseIndex < 0) return null
 	if (currentPhaseIndex === input.phasePlan.nonTriggerPhases.length - 1) {
 		const startStatus = typeof latestRun.extra.startStatus === "string" ? latestRun.extra.startStatus : null
-		if (startStatus === input.item.status && input.pendingStatuses.includes(input.item.status)) return input.item.phase
+		const startStatusUpdatedAt = typeof latestRun.extra.startStatusUpdatedAt === "number" ? latestRun.extra.startStatusUpdatedAt : null
+		const statusWrittenAfterRunStart = startStatusUpdatedAt !== null
+			&& input.item.statusUpdatedAt !== startStatusUpdatedAt
+			&& input.item.statusUpdatedAt >= latestRun.startedAt
+		if (startStatus === input.item.status && !statusWrittenAfterRunStart && input.pendingStatuses.includes(input.item.status)) return input.item.phase
 	}
 	if (latestRun.exitCode !== 0) return null
 	return input.phasePlan.nonTriggerPhases[currentPhaseIndex + 1] ?? null
@@ -710,7 +714,7 @@ async function spawnSchedulerRun(
 		phase,
 		status: RUNNING_RUN_STATUS,
 		startedAt,
-		extra: { slotKey: slot.key, repoCwd: item.repoCwd, worktreePath, startStatus: item.status, startPhase: item.phase },
+		extra: { slotKey: slot.key, repoCwd: item.repoCwd, worktreePath, startStatus: item.status, startStatusUpdatedAt: item.statusUpdatedAt, startPhase: item.phase },
 	})
 	options.store.setCurrentRun({
 		chainId: chain.id,
@@ -937,8 +941,9 @@ function attachRunCloseHandler(
 					const previousSessionId = (currentItem ?? item).sessionIds[phase]?.[runner.kind] ?? null
 					if (currentItem === null || !terminalStatuses.has(currentItem.status)) {
 						const itemForBackoff = currentItem ?? item
+						const statusWasWrittenDuringRun = currentItem !== null && currentItem.statusUpdatedAt !== item.statusUpdatedAt && currentItem.statusUpdatedAt >= startedAt
 						const update: Parameters<typeof options.store.updateItem>[1] = {
-							status,
+							...(statusWasWrittenDuringRun ? { status } : {}),
 							lastRunId: runId,
 							agentCwd: worktreePath,
 							extra: extraAfterRunCompletion(options, chain, itemForBackoff, exitCode, status, terminalStatuses, endedAt),
@@ -1526,6 +1531,7 @@ function makeReviewOnEmptyFallbackItem(chain: ChainRecord, representative: ItemR
 		extra: {},
 		createdAt: representative.createdAt,
 		updatedAt: representative.updatedAt,
+		statusUpdatedAt: representative.statusUpdatedAt,
 	}
 }
 

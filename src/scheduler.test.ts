@@ -1348,11 +1348,11 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 		const fixture = await createFixture("phase-review-incomplete")
 		try {
 			const chain = createChain(fixture.store, "phase-review-incomplete-chain")
-			const item = createItem(fixture.store, chain, {
+			const item = fixture.store.updateItem(createItem(fixture.store, chain, {
 				issueNumber: 34601,
 				repoCwd: "/repo/a",
 				summary: null,
-			})
+			}).id, { updatedAt: 1_800_002_200, statusUpdatedAt: 1_800_002_200 })
 			fixture.store.recordRun({
 				runId: "run-pre-review-incomplete",
 				chainId: chain.id,
@@ -1362,10 +1362,9 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				startedAt: 1_800_002_300,
 				endedAt: 1_800_002_350,
 				exitCode: 0,
-				extra: { startStatus: "queued" },
+				extra: { startStatus: "queued", startStatusUpdatedAt: item.statusUpdatedAt },
 			})
 			fixture.store.updateItem(item.id, {
-				status: "queued",
 				phase: "review",
 				attempts: 2,
 				lastRunId: "run-pre-review-incomplete",
@@ -1405,12 +1404,31 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				repoCwd: "/repo/a",
 				summary: "REVIEW SUMMARY: verdict=retry; issue=#31401; reason=review-retry",
 			})
+			const beforeReview = fixture.store.updateItem(item.id, {
+				status: "changes_requested",
+				phase: "review",
+				attempts: 1,
+				updatedAt: 1_800_002_300,
+				statusUpdatedAt: 1_800_002_300,
+			})
+			fixture.store.recordRun({
+				runId: "run-pre-review-retry",
+				chainId: chain.id,
+				itemId: item.id,
+				phase: "review",
+				status: "changes_requested",
+				startedAt: 1_800_002_350,
+				endedAt: 1_800_002_450,
+				exitCode: 0,
+				extra: { startStatus: "changes_requested", startStatusUpdatedAt: beforeReview.statusUpdatedAt },
+			})
 			fixture.store.updateItem(item.id, {
 				status: "changes_requested",
 				phase: "review",
 				attempts: 2,
 				lastRunId: "run-pre-review-retry",
 				updatedAt: 1_800_002_500,
+				statusUpdatedAt: 1_800_002_500,
 			})
 
 			const tick = await schedulerTick(fixture.options({
@@ -3471,6 +3489,7 @@ function makeItemFixture(chain: ChainRecord, overrides: Partial<ItemRecord> & Pi
 		extra: {},
 		createdAt: 1_800_000_001,
 		updatedAt: 1_800_000_001,
+		statusUpdatedAt: 1_800_000_001,
 		...overrides,
 	}
 }
