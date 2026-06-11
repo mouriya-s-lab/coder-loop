@@ -8,8 +8,10 @@ import {
 	createGitWorktreeManager,
 	createSchedulerState,
 	DEFAULT_MAX_ITEM_ATTEMPTS,
+	extractSummaryValue,
 	listActiveRuns,
 	makeRunId,
+	makeRunSummaryTag,
 	renderSchedulerSpawnPrompt,
 	resumeDecisionForItem,
 	reviewOnEmptyLockPathForChain,
@@ -3878,3 +3880,25 @@ process.exitCode = 0
 `,
 		)
 	}
+
+describe("per-run summary tag", () => {
+	test("makeRunSummaryTag generates summary-{nonce} tags unique per call", () => {
+		const first = makeRunSummaryTag()
+		const second = makeRunSummaryTag()
+		expect(first).toMatch(/^summary-[0-9a-f]{16}$/)
+		expect(second).toMatch(/^summary-[0-9a-f]{16}$/)
+		expect(first).not.toBe(second)
+	})
+
+	test("extractSummaryValue only matches this run's tag, not other nonces or the legacy static tag", () => {
+		const tag = makeRunSummaryTag()
+		const stdoutText = [
+			`<${tag}>did the work</${tag}>`,
+			"<summary-0123456789abcdef>old run</summary-0123456789abcdef>",
+			// retired static tag, built by concatenation so the literal stays out of src/ (#430)
+			`<${["sG7k", "Pq2Z"].join("")}>legacy</${["sG7k", "Pq2Z"].join("")}>`,
+		].join("\n")
+		expect(extractSummaryValue(stdoutText, tag)).toBe("did the work")
+		expect(extractSummaryValue(stdoutText, "summary-ffffffffffffffff")).toBeNull()
+	})
+})

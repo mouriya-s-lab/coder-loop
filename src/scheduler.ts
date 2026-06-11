@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process"
-import { createHash } from "node:crypto"
+import { createHash, randomBytes } from "node:crypto"
 import { appendFile, mkdir, writeFile } from "node:fs/promises"
 import { existsSync, realpathSync, rmSync } from "node:fs"
 import { basename, dirname, isAbsolute, resolve } from "node:path"
@@ -40,15 +40,34 @@ import {
 	sanitizeChainName,
 } from "./runtime-paths"
 
-const SUMMARY_TAG = "sG7kPq2Z"
-const SUMMARY_OPEN = `<${SUMMARY_TAG}>`
-const SUMMARY_CLOSE = `</${SUMMARY_TAG}>`
+// Per-run nonce tag (#430): the summary tag is generated at spawn time, so no text that
+// existed before the run — engine source, old transcripts, issue/PR bodies — can contain
+// the close marker this run's watchdog matches. Cross-run diagnostics that don't hold a
+// nonce match the `summary-<hex>` family pattern instead of any shared literal.
+const SUMMARY_TAG_PREFIX = "summary-"
+const SUMMARY_NONCE_BYTES = 8
 const WATCHDOG_GRACE_MS = 10 * 60 * 1000
 const WATCHDOG_KILL_MS = 5 * 1000
 const ATTEMPT_TIMEOUT_MS = 60 * 60 * 1000
 const ATTEMPT_KILL_MS = 5 * 1000
 
-const SUMMARY_INSTRUCTION = `\n\n当你完成所有工作后，用 ${SUMMARY_OPEN} 和 ${SUMMARY_CLOSE} 包裹一段总结，描述你做了什么。\n例如：\n${SUMMARY_OPEN}\n- 修复了登录页的 bug\n- 添加了单元测试\n${SUMMARY_CLOSE}`
+export function makeRunSummaryTag(): string {
+	return `${SUMMARY_TAG_PREFIX}${randomBytes(SUMMARY_NONCE_BYTES).toString("hex")}`
+}
+
+export function summaryOpenMarker(tag: string): string {
+	return `<${tag}>`
+}
+
+export function summaryCloseMarker(tag: string): string {
+	return `</${tag}>`
+}
+
+function summaryInstructionFor(tag: string): string {
+	const open = summaryOpenMarker(tag)
+	const close = summaryCloseMarker(tag)
+	return `\n\n当你完成所有工作后，用 ${open} 和 ${close} 包裹一段总结，描述你做了什么。\n例如：\n${open}\n- 修复了登录页的 bug\n- 添加了单元测试\n${close}`
+}
 
 export type SchedulerActiveRun = {
 	runId: string
@@ -729,7 +748,8 @@ async function spawnSchedulerRun(
 		resume: resumeDecision,
 		runner: runner.kind,
 	})
-	const finalPrompt = renderedPrompt + SUMMARY_INSTRUCTION
+	const summaryTag = makeRunSummaryTag()
+	const finalPrompt = renderedPrompt + summaryInstructionFor(summaryTag)
 	const runnerPlan = buildRunnerInvocation(
 		runner,
 		finalPrompt,
@@ -745,7 +765,7 @@ async function spawnSchedulerRun(
 		// the daemon that owns this loop-data-root. Pass it through so the CLI resolves the same store.
 		env: { ...process.env, [LOOP_DATA_ROOT_ENV]: resolveLoopDataPaths(options.loopDataRootOptions).root, [RUN_ID_ENV]: runId },
 	})
-	const activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, phase, child, runner)
+	const activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, phase, child, runner, summaryTag)
 	slot.activeRun = activeRun
 	options.store.setCurrentRun({
 		chainId: chain.id,
@@ -802,9 +822,11 @@ function attachRunCloseHandler(
 	phase: string,
 	child: ReturnType<typeof spawn>,
 	runner: AgentRunnerSelection,
+	summaryTag: string,
 ): SchedulerActiveRun {
 	const stdout: Buffer[] = []
 	const stderr: Buffer[] = []
+	const summaryClose = summaryCloseMarker(summaryTag)
 
 	const attemptTimeoutMs = options.attemptTimeoutMs ?? ATTEMPT_TIMEOUT_MS
 	const attemptKillMs = options.attemptKillMs ?? ATTEMPT_KILL_MS
@@ -832,14 +854,14 @@ function attachRunCloseHandler(
 			lifecycleCleanup = combineCleanup(lifecycleCleanup, () => clearTimeout(killTimer))
 		}, attemptTimeoutMs)
 
-		// Summary watchdog: observe accumulated stdout for SUMMARY_CLOSE marker
+		// Summary watchdog: observe accumulated stdout for this run's nonce close marker
 		let watchdogArmed = false
 		let watchdogAccumulated = ""
 		let watchdogGraceTimer: ReturnType<typeof setTimeout> | null = null
 		child.stdout?.on("data", (chunk: Buffer) => {
 			if (watchdogArmed) return
 			watchdogAccumulated += chunk.toString("utf-8")
-			if (watchdogAccumulated.includes(SUMMARY_CLOSE)) {
+			if (watchdogAccumulated.includes(summaryClose)) {
 				watchdogArmed = true
 				if (attemptTimer !== null) { clearTimeout(attemptTimer); attemptTimer = null }
 				watchdogGraceTimer = setTimeout(() => {
@@ -871,7 +893,7 @@ function attachRunCloseHandler(
 				const itemTransitionedToTerminal = !terminalStatuses.has(item.status) && terminalStatuses.has(status)
 				options.state.finalizingItemStatuses.set(item.id, status)
 				try {
-					const summary = extractSummaryValue(stdoutText)
+					const summary = extractSummaryValue(stdoutText, summaryTag)
 					await writeSchedulerRunCompletionArtifacts(options, {
 						runId,
 						chain,
@@ -972,11 +994,12 @@ function attachRunCloseHandler(
 	return { runId, pid: child.pid ?? null, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, worktreePath, startedAt, closed, terminate }
 }
 
-function extractSummaryValue(stdoutText: string): string | null {
-	const start = stdoutText.lastIndexOf(SUMMARY_OPEN)
+export function extractSummaryValue(stdoutText: string, summaryTag: string): string | null {
+	const open = summaryOpenMarker(summaryTag)
+	const start = stdoutText.lastIndexOf(open)
 	if (start === -1) return null
-	const contentStart = start + SUMMARY_OPEN.length
-	const end = stdoutText.indexOf(SUMMARY_CLOSE, contentStart)
+	const contentStart = start + open.length
+	const end = stdoutText.indexOf(summaryCloseMarker(summaryTag), contentStart)
 	if (end === -1) return null
 	return stdoutText.slice(contentStart, end).trim()
 }
@@ -1541,9 +1564,10 @@ async function spawnSchedulerReviewOnEmptyRun(
 		loopDataRootOptions: options.loopDataRootOptions,
 		resume: freshResume(),
 	})
+	const summaryTag = makeRunSummaryTag()
 	const runnerPlan = buildRunnerInvocation(
 		runner,
-		renderedPrompt + SUMMARY_INSTRUCTION,
+		renderedPrompt + summaryInstructionFor(summaryTag),
 		freshResume(),
 		invocationPaths(representative.repoCwd, worktreePath, presetDir, resolveLoopDataPaths(options.loopDataRootOptions).root),
 	)
@@ -1567,6 +1591,7 @@ async function spawnSchedulerReviewOnEmptyRun(
 		child,
 		runner,
 		representative.repoCwd,
+		summaryTag,
 	)
 	slot.activeRun = activeRun
 	await emit(options, {
@@ -1604,11 +1629,13 @@ function attachReviewOnEmptyCloseHandler(
 	child: ReturnType<typeof spawn>,
 	runner: AgentRunnerSelection,
 	repoCwd: string,
+	summaryTag: string,
 ): SchedulerActiveRun {
 	const attemptTimeoutMs = options.attemptTimeoutMs ?? ATTEMPT_TIMEOUT_MS
 	const attemptKillMs = options.attemptKillMs ?? ATTEMPT_KILL_MS
 	const watchdogGraceMs = options.watchdogGraceMs ?? WATCHDOG_GRACE_MS
 	const watchdogKillMs = options.watchdogKillMs ?? WATCHDOG_KILL_MS
+	const summaryClose = summaryCloseMarker(summaryTag)
 
 	let lifecycleCleanup: (() => void) | null = null
 	const stdout: Buffer[] = []
@@ -1631,14 +1658,14 @@ function attachReviewOnEmptyCloseHandler(
 			lifecycleCleanup = combineCleanup(lifecycleCleanup, () => clearTimeout(killTimer))
 		}, attemptTimeoutMs)
 
-		// Summary watchdog: observe accumulated stdout for SUMMARY_CLOSE marker
+		// Summary watchdog: observe accumulated stdout for this run's nonce close marker
 		let watchdogArmed = false
 		let watchdogAccumulated = ""
 		let watchdogGraceTimer: ReturnType<typeof setTimeout> | null = null
 		child.stdout?.on("data", (chunk: Buffer) => {
 			if (watchdogArmed) return
 			watchdogAccumulated += chunk.toString("utf-8")
-			if (watchdogAccumulated.includes(SUMMARY_CLOSE)) {
+			if (watchdogAccumulated.includes(summaryClose)) {
 				watchdogArmed = true
 				if (attemptTimer !== null) { clearTimeout(attemptTimer); attemptTimer = null }
 				watchdogGraceTimer = setTimeout(() => {

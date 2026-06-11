@@ -3939,8 +3939,8 @@ function parsePhaseRunner(value: unknown, label: string): AgentRunnerKind | null
 }
 
 // summaryMarker is retired from preset.toml; the daemon scheduler uses
-// hardcoded sG7kPq2Z tags. The v1 engine still needs a marker for review
-// verdict parsing; default based on phase name.
+// per-run nonce summary tags (#430). The v1 engine still needs a marker for
+// review verdict parsing; default based on phase name.
 function phaseSummaryMarkerForName(name: string): string | null {
 	if (name === "review" || name === "review-on-empty") return "REVIEW SUMMARY:"
 	return null

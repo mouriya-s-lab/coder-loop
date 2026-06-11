@@ -2929,12 +2929,11 @@ process.exitCode = 0
 			})).chain)
 			const chainId = numberValue(chain.id)
 			const summaryContent = "fixed login bug, added unit tests"
-			const summaryTagged = `<sG7kPq2Z>${summaryContent}</sG7kPq2Z>`
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
 				issueNumber: 201,
 				repoCwd: REPO_ROOT,
-				extra: { sleepMs: 5, exitCode: 0, summary: summaryTagged },
+				extra: { sleepMs: 5, exitCode: 0, summaryWrap: summaryContent },
 			})).item)
 			const itemId = numberValue(added.id)
 
@@ -2980,7 +2979,7 @@ process.exitCode = 0
 				extra: {
 					sleepMs: 5,
 					exitCode: 0,
-					summary: "<sG7kPq2Z>watchdog work</sG7kPq2Z>",
+					summaryWrap: "watchdog work",
 					extraSleepAfterSummaryMs: 500,
 				},
 			})).item)
@@ -2999,6 +2998,98 @@ process.exitCode = 0
 			const run = await readRun(fixture.loopDataRoot, item?.lastRunId ?? "")
 			expect(run?.extra).toBeDefined()
 			expect((run?.extra as Record<string, unknown>).summary).toBe("watchdog work")
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("summary tags are per-run nonces: two spawns in the same daemon get different tags", async () => {
+		const fixture = await startFixture("summary-nonce-unique")
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "summary-nonce-chain",
+				repository: "test/repo",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			for (const issueNumber of [211, 212]) {
+				expectOk(await request(fixture, "item.add", {
+					chainId,
+					issueNumber,
+					repoCwd: REPO_ROOT,
+					extra: { sleepMs: 5, exitCode: 0 },
+				}))
+			}
+
+			const exits = await waitFor(
+				async () => fixture.schedulerEvents.filter((e) => e.type === "agent.exit"),
+				(events) => events.length >= 2,
+			)
+			expect(exits.length).toBeGreaterThanOrEqual(2)
+
+			const startEvents = (await readFile(fixture.eventLog, "utf-8"))
+				.split("\n")
+				.filter((line) => line.trim() !== "")
+				.map((line) => JSON.parse(line) as Record<string, unknown>)
+				.filter((event) => event.type === "start")
+			expect(startEvents.length).toBeGreaterThanOrEqual(2)
+			const tags = startEvents.map((event) => event.summaryTag)
+			for (const tag of tags) {
+				expect(typeof tag).toBe("string")
+				expect(tag as string).toMatch(/^summary-[0-9a-f]{16}$/)
+			}
+			expect(new Set(tags).size).toBe(tags.length)
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("foreign summary close markers (other nonces, legacy static tag) neither arm the watchdog nor get captured", async () => {
+		// watchdogGraceMs is tiny: if any of the replayed markers armed the watchdog, the
+		// post-summary sleep would get the process killed (exitCode 1, like the kill test above).
+		const fixture = await startFixture("summary-foreign-tag", {
+			schedulerConfig: { maxItemAttempts: 1, watchdogGraceMs: 50, watchdogKillMs: 10 },
+		})
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "summary-foreign-tag-chain",
+				repository: "test/repo",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			// Built by concatenation so the retired static tag literal never reappears in src/ (#430).
+			const legacyTag = ["sG7k", "Pq2Z"].join("")
+			const foreignNonceTag = "summary-0123456789abcdef"
+			const replayedLines = [
+				// claude-style raw text replaying a foreign-nonce summary and the legacy static tag
+				`quoted transcript: <${foreignNonceTag}>old run summary</${foreignNonceTag}> and <${legacyTag}>legacy</${legacyTag}>`,
+				// codex-style JSON event line carrying the same foreign close markers inside the payload
+				JSON.stringify({ type: "agent_message", text: `</${foreignNonceTag}> </${legacyTag}>` }),
+			].join("\n")
+			const added = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 311,
+				repoCwd: REPO_ROOT,
+				extra: {
+					sleepMs: 5,
+					exitCode: 0,
+					summary: replayedLines,
+					extraSleepAfterSummaryMs: 400,
+				},
+			})).item)
+			const itemId = numberValue(added.id)
+
+			const agentExit = await waitFor(
+				async () => fixture.schedulerEvents.find(
+					(e): e is Extract<SchedulerEvent, { type: "agent.exit" }> =>
+						e.type === "agent.exit" && e.itemId === itemId
+				) ?? null,
+				(e) => e !== null,
+			) as Extract<SchedulerEvent, { type: "agent.exit" }>
+			expect(agentExit.exitCode).toBe(0)
+
+			const item = await readItem(fixture.loopDataRoot, chainId, 311)
+			const run = await readRun(fixture.loopDataRoot, item?.lastRunId ?? "")
+			expect(run).not.toBeNull()
+			expect((run?.extra as Record<string, unknown>).summary).toBeUndefined()
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -3260,6 +3351,7 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 					writeStatus: daemonFakeRunnerWriteStatus(phase, item.extra),
 				}
 				if (Object.prototype.hasOwnProperty.call(item.extra, "summary")) payload.summary = item.extra.summary
+				if (Object.prototype.hasOwnProperty.call(item.extra, "summaryWrap")) payload.summaryWrap = item.extra.summaryWrap
 				if (Object.prototype.hasOwnProperty.call(item.extra, "extraSleepAfterSummaryMs")) payload.extraSleepAfterSummaryMs = item.extra.extraSleepAfterSummaryMs
 				return JSON.stringify(payload)
 			},
@@ -3492,13 +3584,17 @@ async function writeFakeRunner(path: string): Promise<void> {
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
 const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+// The scheduler appends a per-run nonce summary instruction to the prompt; derive this
+// run's tag from it the same way a real agent would.
+const runSummaryTag = prompt.match(/<(summary-[0-9a-f]+)>/)?.[1] ?? null
 const writeLine = (line) => Bun.write(Bun.stdout, line + "\\n")
-await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
+await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd(), summaryTag: runSummaryTag }) + "\\n")
 await new Promise((resolve) => setTimeout(resolve, input.sleepMs))
 await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
 await writeLine("done:" + input.itemId)
 const summary = Object.prototype.hasOwnProperty.call(input, "summary") ? input.summary : "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=fake-runner default"
 if (summary !== null) await writeLine(summary)
+if (typeof input.summaryWrap === "string" && runSummaryTag !== null) await writeLine("<" + runSummaryTag + ">" + input.summaryWrap + "</" + runSummaryTag + ">")
 const extraSleepAfterSummary = Object.prototype.hasOwnProperty.call(input, "extraSleepAfterSummaryMs") ? input.extraSleepAfterSummaryMs : 0
 if (extraSleepAfterSummary > 0) await new Promise((resolve) => setTimeout(resolve, extraSleepAfterSummary))
 ${FAKE_RUNNER_STATUS_WRITE_SNIPPET}
