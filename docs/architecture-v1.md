@@ -68,7 +68,7 @@ flowchart TD
 |---|---|---|---|
 | verdict 词表 `retry / accepted / skip / blocked / stop` + `stop` 流控 | `#115`（堵 accepted_no_pr 副作用循环） | `:717` `:1577` | 词表与 verdict→动作映射为 preset 数据 |
 | `ISSUE_KIND_VALUES` + `kind="blocked" → iter/resolve-blocker` | `#41` / `#136` | `:736` `:3242` `:3279` | kind 词表与 kind→prompt 路由为 preset 数据 |
-| `ITERATION/REVIEW SUMMARY:` watchdog marker 引擎常量 | `#56` / `#98` | `docs/reserved-strings.md` | marker 为 per-phase preset 字段 |
+| `ITERATION/REVIEW SUMMARY:` watchdog marker 引擎常量 | `#56` / `#98` | `docs/reserved-strings.md` | #417 裁决 marker 收归引擎；#430 改为 per-run 随机 nonce 标签。当前仅剩 v1 verdict 解析对 `REVIEW SUMMARY:` 的过渡依赖，随 #405 收口 |
 | `queue unblock` 写死 `blocked → queued` | `#140` | `:2475-2498` | 转移对为 preset `[statuses]` 参数 |
 | 主循环固定「`phases[0]` = 干活、最后一个非 trigger phase = review」两槽 | `#134` 仅加 trigger 未改主结构 | `:1282` `:1316` `:2744` | 按 preset 有序 phase 列表推进 |
 
