@@ -181,7 +181,7 @@ const ITEM_UPDATE_FIELD_KEYS = [
 	"extraPatch",
 	"dependsOn",
 ] as const
-const ITEM_UPDATE_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "fields", "requestingRunId", ...ITEM_UPDATE_FIELD_KEYS] as const
+const ITEM_UPDATE_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "fields", ...ITEM_UPDATE_FIELD_KEYS] as const
 const ITEM_REORDER_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "position"] as const
 
 export class DaemonError extends Error {
@@ -1181,6 +1181,10 @@ export class CoderLoopDaemon {
 		if (scheduler.maxItemAttempts !== undefined) options.maxItemAttempts = scheduler.maxItemAttempts
 		if (scheduler.spawnFailureBackoff !== undefined) options.spawnFailureBackoff = scheduler.spawnFailureBackoff
 		if (scheduler.spawnFailureBackoffForChain !== undefined) options.spawnFailureBackoffForChain = scheduler.spawnFailureBackoffForChain
+		if (scheduler.attemptTimeoutMs !== undefined) options.attemptTimeoutMs = scheduler.attemptTimeoutMs
+		if (scheduler.attemptKillMs !== undefined) options.attemptKillMs = scheduler.attemptKillMs
+		if (scheduler.watchdogGraceMs !== undefined) options.watchdogGraceMs = scheduler.watchdogGraceMs
+		if (scheduler.watchdogKillMs !== undefined) options.watchdogKillMs = scheduler.watchdogKillMs
 		if (scheduler.chainCompleteTrigger !== undefined) options.chainCompleteTrigger = scheduler.chainCompleteTrigger
 		else if (scheduler.chainCompleteTriggerForChain !== undefined) options.chainCompleteTriggerForChain = scheduler.chainCompleteTriggerForChain
 		else {

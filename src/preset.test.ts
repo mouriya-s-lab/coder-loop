@@ -116,10 +116,10 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect([...preset.statuses.terminal]).toEqual(["blocked", "moot", "done", "exhausted"])
 		expect([...preset.statuses.unblockable]).toEqual(["blocked"])
 		expect(Object.fromEntries(preset.phases.map((phase) => [phase.name, phase.summaryMarker]))).toEqual({
-			iteration: "ITERATION SUMMARY:",
+			iteration: null,
 			review: "REVIEW SUMMARY:",
-			"blocked-responder": "ITERATION SUMMARY:",
-			"umbrella-finalizer": "FINALIZER SUMMARY:",
+			"blocked-responder": null,
+			"umbrella-finalizer": null,
 		})
 		expect(preset.phases.find((phase) => phase.name === "iteration")?.exits).toEqual([])
 		expect(preset.phases.find((phase) => phase.name === "review")?.exits.map((exit) => exit.status)).toEqual(["changes_requested", "blocked", "moot", "done", "exhausted"])
@@ -284,19 +284,19 @@ describe("parsePreset schema validation", () => {
 		expect(triggeredPhasesAfter(preset, "review", "done")).toEqual([])
 	})
 
-	test("accepts per-phase exit declarations", () => {
+	test("accepts per-phase exit declarations and computes summaryMarker defaults", () => {
 		const root: Record<string, unknown> = minimalRoot()
 		root.statuses = { continuable: ["queued", "in_progress"], terminal: ["done"] }
 		root.phases = [
-			{ name: "iteration", prompt: "iter.md", summaryMarker: "ITER DONE:", exits: [{ status: "in_progress", when: "handoff" }], variables: { K: "item.id" } },
-			{ name: "review", prompt: "review.md", runner: "claude", summaryMarker: "REVIEW DONE:", exits: [{ status: "done", when: "accepted" }], variables: { K: "item.id" } },
+			{ name: "iteration", prompt: "iter.md", exits: [{ status: "in_progress", when: "handoff" }], variables: { K: "item.id" } },
+			{ name: "review", prompt: "review.md", runner: "claude", exits: [{ status: "done", when: "accepted" }], variables: { K: "item.id" } },
 		]
 
 		const preset = parsePreset(root, "/tmp")
 
 		expect(preset.phases.map((phase) => phase.exits.map((exit) => exit.status))).toEqual([["in_progress"], ["done"]])
 		expect(preset.phases[1]!.defaultRunner).toBe("claude")
-		expect(preset.phases.map((phase) => phase.summaryMarker)).toEqual(["ITER DONE:", "REVIEW DONE:"])
+		expect(preset.phases.map((phase) => phase.summaryMarker)).toEqual([null, "REVIEW SUMMARY:"])
 	})
 
 	test("accepts manual unblock statuses declared as terminal subset", () => {
@@ -327,15 +327,6 @@ describe("parsePreset schema validation", () => {
 		const preset = parsePreset(minimalRoot(), "/tmp")
 
 		expect(preset.phases.map((phase) => phase.summaryMarker)).toEqual([null])
-	})
-
-	test("rejects empty summaryMarker declarations", () => {
-		const root: Record<string, unknown> = minimalRoot()
-		root.phases = [
-			{ name: "iteration", prompt: "iter.md", summaryMarker: "", variables: { K: "item.id" } },
-		]
-
-		expect(() => parsePreset(root, "/tmp")).toThrow(/summaryMarker: must not be empty/)
 	})
 
 	test("rejects per-phase exit declarations outside preset statuses", () => {
