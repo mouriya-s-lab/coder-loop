@@ -24,9 +24,12 @@ const EXPECTED_FRAGMENTS = [
 	{ id: "plan/init-queue", role: "plan", relPath: "plan/init-queue.md" },
 	{ id: "plan/handoff", role: "plan", relPath: "plan/handoff.md" },
 	{ id: "plan/final", role: "plan", relPath: "plan/final.md" },
-	{ id: "quality/evidence", role: "quality", relPath: "quality/evidence.md" },
-	{ id: "quality/honesty", role: "quality", relPath: "quality/honesty.md" },
-	{ id: "quality/cleanup", role: "quality", relPath: "quality/cleanup.md" },
+	{ id: "quality/evidence-execute", role: "quality", relPath: "quality/evidence-execute.md" },
+	{ id: "quality/evidence-judge", role: "quality", relPath: "quality/evidence-judge.md" },
+	{ id: "quality/honesty-execute", role: "quality", relPath: "quality/honesty-execute.md" },
+	{ id: "quality/honesty-judge", role: "quality", relPath: "quality/honesty-judge.md" },
+	{ id: "quality/cleanup-execute", role: "quality", relPath: "quality/cleanup-execute.md" },
+	{ id: "quality/cleanup-judge", role: "quality", relPath: "quality/cleanup-judge.md" },
 	{ id: "iter/steps/research/task", role: "iter", relPath: "iter/steps/research/task.md" },
 	{ id: "iter/steps/research/report", role: "iter", relPath: "iter/steps/research/report.md" },
 	{ id: "iter/steps/research/accept", role: "iter", relPath: "iter/steps/research/accept.md" },
@@ -54,6 +57,9 @@ const EXPECTED_FRAGMENTS = [
 	{ id: "review/steps/replay/task", role: "review", relPath: "review/steps/replay/task.md" },
 	{ id: "review/steps/replay/report", role: "review", relPath: "review/steps/replay/report.md" },
 	{ id: "review/steps/replay/accept", role: "review", relPath: "review/steps/replay/accept.md" },
+	{ id: "review/steps/diff-audit/task", role: "review", relPath: "review/steps/diff-audit/task.md" },
+	{ id: "review/steps/diff-audit/report", role: "review", relPath: "review/steps/diff-audit/report.md" },
+	{ id: "review/steps/diff-audit/accept", role: "review", relPath: "review/steps/diff-audit/accept.md" },
 	{ id: "review/spike-followup", role: "review", relPath: "review/spike-followup.md" },
 	{ id: "review/source-spike-audit", role: "review", relPath: "review/source-spike-audit.md" },
 	{ id: "review/actions/accept-pr", role: "review", relPath: "review/actions/accept-pr.md" },
@@ -223,33 +229,37 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(devPlan).toContain("updates declared labels whose color or description differs before posting issues")
 	})
 
-	test("iteration entry owns the orchestrator kind-to-step plan and dispatch discipline", async () => {
+	test("iteration entry owns the task-list workflow, kind routing, and dispatch protocol", async () => {
 		const entry = await Bun.file(resolve(BUNDLED_PRESET_DIR, "iter-entry.md")).text()
 
-		// kind → step plan table
-		expect(entry).toContain("| `code` or empty (legacy) | [research?] → implement → verify → submit |")
+		// kind → step sequence table
+		expect(entry).toContain("→ implement → verify → submit |")
 		expect(entry).toContain("| `blocked` | resolve-blocker → implement → verify → submit |")
 		expect(entry).toContain("| `code-spike` | [research?] → source-spike |")
 		expect(entry).toContain("| `comment` | [research?] → spike-comment |")
-		// orchestrator discipline: no execution, no task-file reads, absolute step paths for subagents
-		expect(entry).toContain("You schedule; you do not execute.")
-		expect(entry).toContain("Never read step task files.")
+		// task-list spine: explicit list, two-state exit, no self-execution, no subagent-file reads
+		expect(entry).toContain("The list is the run.")
+		expect(entry).toContain("[x] accepted` or `[-] skipped:")
+		expect(entry).toContain("Dispatch it; never do it yourself")
+		expect(entry).toContain("you may open **only** `accept.md` files")
 		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/iter/steps/implement/")
+		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/honesty-judge.md")
 		expect(entry).toContain("ITERATION SUMMARY:")
 	})
 
-	test("review entry owns the judgment phases, replay dispatch, and action files", async () => {
+	test("review entry owns the mandatory dispatches, judgments, and action files", async () => {
 		const entry = await Bun.file(resolve(BUNDLED_PRESET_DIR, "review-entry.md")).text()
 
-		expect(entry).toContain("Independent replay, never repair.")
+		expect(entry).toContain("You never repair the work under review.")
+		expect(entry).toContain("a verdict — including retry — produced without both accepted reports is an invalid review")
 		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/steps/replay/")
-		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/steps/replay/accept.md")
+		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/steps/diff-audit/")
 		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/accept-pr.md")
 		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/state-write.md")
 		expect(entry).toContain("REVIEW SUMMARY: verdict=<retry|accepted|skip|blocked|stop>")
-		// quality criteria are the judgment ground truth
-		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/honesty.md")
-		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/evidence.md")
+		// judge-side quality criteria are the judgment ground truth
+		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/honesty-judge.md")
+		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/evidence-judge.md")
 	})
 
 	test("blocked responder prompt carries the required cross-repo side effects", async () => {

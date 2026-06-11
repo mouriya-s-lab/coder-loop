@@ -1,10 +1,14 @@
 # Step task: implement
 
-You are an implementation subagent for one coder-loop iteration. Your dispatch message carries the runtime inputs and a `Step focus` (current scope, retry feedback to address, or gap list). Your deliverable is working code on the issue branch — not a commit, not a PR; a later step owns those.
+You are an implementation subagent for one coder-loop iteration. Your deliverable is working code on the issue branch — not a commit, not a PR; a later step owns those.
+
+## Inputs
+
+From your dispatch message you consume: `ISSUE`, `REPO`, `BASE_BRANCH`, `RUN_ID`, `ISSUE_KIND`, `AGENT_CWD` (work there), `SHARED_CONTEXT_FILE`, `ISSUE_STATUS`, `RUN_ID_GENERATION`, `ISSUE_BRANCH`/`ISSUE_PR` when set, and `Step focus` (current scope, retry feedback to address, or the orchestrator's gap list). Files you must read before changing code: the live issue body (fetch it yourself, below), the chain handoff file at `SHARED_CONTEXT_FILE`, and `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/honesty-execute.md` + `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/cleanup-execute.md` (they bind everything you do).
 
 ## Branch continuity
 
-- Retry / resumed run (per `ISSUE_STATUS` / `RUN_ID_GENERATION` in your dispatch message): continue the existing branch/PR worktree state. Inspect the existing branch, latest PR review/comments, and dirty files before changing anything. Do not restart from base unless the existing branch is unrelated to the issue.
+- Retry / resumed run (per `ISSUE_STATUS` / `RUN_ID_GENERATION`): continue the existing branch/PR worktree state. Inspect the existing branch, latest PR review/comments, and dirty files before changing anything. Do not restart from base unless the existing branch is unrelated to the issue.
 - Fresh run with code changes needed:
 
 ```bash
@@ -27,15 +31,15 @@ This is a thinking framework, not a checklist:
 
 ## Intent statement
 
-Before changing code, append your intent to the chain handoff file (`SHARED_CONTEXT_FILE` from your dispatch message) under a heading `Intent (run <RUN_ID>)`: your understanding of the issue in your own words citing the body sections you are responding to; the change classification and footprint plan (which sites this change touches vs out of scope and why); what you plan to do in this dispatch; known uncertainties. The intent statement is immutable once written — later steps record deltas, never edits.
+Before changing code, append your intent to the chain handoff file under a heading `Intent (run <RUN_ID>)`: your understanding of the issue in your own words citing the body sections you are responding to; the change classification and footprint plan (which sites this change touches vs out of scope and why); what you plan to do in this dispatch; known uncertainties. The intent statement is immutable once written — later steps record deltas, never edits.
 
 ## Implementation constraints
 
 - Small direct change that closes exactly the selected issue. No batching, no drive-by refactors, no style cleanups beyond the contract.
-- Do not weaken tests. Do not stage loop-data runtime artifacts, scheduling state, or run logs. Preserve unrelated dirty files.
-- Pre-execution constraints of `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/cleanup.md` (section A) apply: report anything you start or scatter.
+- **Tests are part of the contract.** Never remove, skip, rename-away, or loosen an existing test unless the issue body literally demands that exact change. If a test must change to stay true (the behavior it pins is the behavior this issue changes), record old name → new assertion in your report. Review independently diffs the test inventory against base; an undeclared delta is treated as hidden weakening.
+- Do not stage loop-data runtime artifacts, scheduling state, or run logs. Preserve unrelated dirty files.
 - Do not commit, push, open PRs, comment on GitHub, close issues, or write queue state.
 
 ## Report
 
-Report strictly per the report template path given in your dispatch message. Your final message is data for the orchestrator.
+Report strictly per the report template path given in your dispatch message. Every required field present; empty sets stated as empty. Your final message is data for the orchestrator.

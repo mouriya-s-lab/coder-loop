@@ -1,6 +1,6 @@
 # Report template: submit
 
-Structure your final message exactly as:
+Structure your final message exactly as below. Every section and field is required; write `none` for empty sets — never omit a field.
 
 ```markdown
 ## Why I organized it this way
@@ -8,10 +8,14 @@ Structure your final message exactly as:
 routing, anything deliberately left out and why>
 
 ## What I actually did
-<commit SHA(s) and branch; pushed where; PR number + URL (fresh) or PR comment URL (retry);
-where the Result (run …) delta was appended; one-line delta verdict (matched / drifted: <why>)>
+Commit: <sha(s)> on <branch>, pushed to <remote ref>
+Deliverable: PR #<n> <url> (fresh) | PR comment <url> (retry)
+Result block: appended at <handoff path>; delta verdict: matched / drifted: <why>
+Packet sections: <list of layered sections actually present in the body/comment>
+Test delta line: <the exact line included in the packet>
 
 ## Problems
 <anything the packet does not cover; structural defects found in an existing PR body;
-push/PR command failures with exact output; side effects for the cleanup ledger>
+push/PR command failures with exact output; side effects for the cleanup ledger
+— or `none` per item>
 ```

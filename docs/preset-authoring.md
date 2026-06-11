@@ -361,7 +361,7 @@ queue item 可加 `"runner": "claude" | "codex"` 覆盖允许 item override 的�
 引擎不要求 entry prompt 用任何特定结构。`gh-issue-pr-iteration` 当前用两套约定（其他 preset 可借鉴或自定义）：
 
 - **plan 链：查表式 fragment 链**。每个 fragment 文件以 `# Fragment: <id>` 起手；入口 prompt 把 `{{PROMPT_FRAGMENT_INDEX}}` 嵌入做索引；每个 fragment 末尾有 `## Output verdict` 段（出口 + 下一跳 fragment id），agent 按 verdict 链跑。
-- **iteration / review：调度者模式**。entry md 是调度者手册（调查 → 计划 → 派 subagent → 验收 → 补缺 → 清场）；fragment 改组为步骤三件套（`task.md` 给 subagent / `report.md` 汇报模板 / `accept.md` 验收判据）与 `quality/` 品质判据；调度者 dispatch 消息只传文件指针与运行时键值。注意：fragment 文件不经引擎渲染，跨文件引用要写运行时安装位置的绝对路径。
+- **iteration / review：调度者 workflow**。entry md 是按序编号的 workflow（不是散文手册）：调度者维护显式任务清单（两态出口 `[x] accepted` / `[-] skipped`，全勾完才能退出），每个 Step 在使用现场内联写明做什么、亲自命令闭集、派哪个 subagent、传什么、查什么、verdict 去哪。fragment 改组为步骤三件套（`task.md` 给 subagent，含 Inputs 节 / `report.md` 必填字段汇报模板 / `accept.md` 验收判据，内嵌 Required report fields）与按受众拆分的 `quality/*-execute.md`（执行者）/ `quality/*-judge.md`（调度者）——单文件双受众会双向泄漏（执行者向判据表演 / 调度者吞执行细节）。调度者 dispatch 消息只传文件指针与运行时键值。注意：fragment 文件不经引擎渲染，跨文件引用要写运行时安装位置的绝对路径。
 
 形态详见 `docs/gh-issue-pr-iteration-fragments.md`。换 preset 时这两套都不强制——你也可以让 agent 跑单一 prompt 不分 fragment。
 

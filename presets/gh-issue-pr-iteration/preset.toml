@@ -319,19 +319,34 @@ role = "plan"
 path = "plan/final.md"
 
 [[fragments]]
-id   = "quality/evidence"
+id   = "quality/evidence-execute"
 role = "quality"
-path = "quality/evidence.md"
+path = "quality/evidence-execute.md"
 
 [[fragments]]
-id   = "quality/honesty"
+id   = "quality/evidence-judge"
 role = "quality"
-path = "quality/honesty.md"
+path = "quality/evidence-judge.md"
 
 [[fragments]]
-id   = "quality/cleanup"
+id   = "quality/honesty-execute"
 role = "quality"
-path = "quality/cleanup.md"
+path = "quality/honesty-execute.md"
+
+[[fragments]]
+id   = "quality/honesty-judge"
+role = "quality"
+path = "quality/honesty-judge.md"
+
+[[fragments]]
+id   = "quality/cleanup-execute"
+role = "quality"
+path = "quality/cleanup-execute.md"
+
+[[fragments]]
+id   = "quality/cleanup-judge"
+role = "quality"
+path = "quality/cleanup-judge.md"
 
 [[fragments]]
 id   = "iter/steps/research/task"
@@ -467,6 +482,21 @@ path = "review/steps/replay/report.md"
 id   = "review/steps/replay/accept"
 role = "review"
 path = "review/steps/replay/accept.md"
+
+[[fragments]]
+id   = "review/steps/diff-audit/task"
+role = "review"
+path = "review/steps/diff-audit/task.md"
+
+[[fragments]]
+id   = "review/steps/diff-audit/report"
+role = "review"
+path = "review/steps/diff-audit/report.md"
+
+[[fragments]]
+id   = "review/steps/diff-audit/accept"
+role = "review"
+path = "review/steps/diff-audit/accept.md"
 
 [[fragments]]
 id   = "review/spike-followup"

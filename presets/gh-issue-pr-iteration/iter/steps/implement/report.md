@@ -1,6 +1,6 @@
 # Report template: implement
 
-Structure your final message exactly as:
+Structure your final message exactly as below. Every section and field is required; write `none` for empty sets — never omit a field.
 
 ```markdown
 ## Why I did it this way
@@ -8,11 +8,19 @@ Structure your final message exactly as:
 (sites touched vs left, with owners); path chosen over which alternatives>
 
 ## What I actually did
-<action-level narrative, not diff detail: which surfaces changed, branch name,
-where the intent statement was appended; which acceptance rows this addresses>
+Branch: <name> @ <head sha (uncommitted: say so)>
+Files changed: <bulleted list, every file, with one clause each on what changed>
+Intent appended: <handoff path + heading written>
+
+Row coverage:
+| Row | Addressed by | Status |
+|---|---|---|
+| <row # or custom-section name> | <which change> | addressed / deviated: <how> / deferred: <why> |
+
+Test changes: <every test added/modified/removed/renamed/skipped with old→new — or `none`>
 
 ## Problems
-<acceptance rows not yet addressed or addressed by an alternative path (with why);
-uncertainties; discoveries outside the issue scope; deviations from intent;
-processes started / files scattered (for the cleanup ledger)>
+<uncertainties; discoveries outside the issue scope; deviations from intent;
+unclassifiable footprint sites; processes started / files scattered (for the cleanup ledger)
+— or `none` per item>
 ```

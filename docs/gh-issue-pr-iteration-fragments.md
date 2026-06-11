@@ -18,7 +18,7 @@
 | `statuses.unblockable` | `blocked`（`queue unblock` 恢复到 `statuses.entry = queued`） |
 | phases | `iteration` → `review`，以及 review 后按 `trigger` 条件运行的 side-effect phase（当前：`blocked-responder` on `blocked`）；planning 不在 phases 内，由 `/dev-plan` slash command 入口驱动 |
 | `agent.binary` | `claude` |
-| fragments | 56 个，分布在 `common/ / plan/ / quality/ / iter/steps/ / review/` 五块 |
+| fragments | 62 个，分布在 `common/ / plan/ / quality/ / iter/steps/ / review/` 五块 |
 
 `item` 字段（除 `issue / status` 外）。`branch` / `pr` / `lastRunId` 由 bundled preset 的 `[item.fields]` 声明，是透明 item 字段；SQLite 仍保留旧列以兼容现有 chain，新增 CLI 写入走 `--field-json`。
 
@@ -43,22 +43,23 @@ status 字面量都是 preset 字符串，引擎只识别 `continuable / termina
 
 ## 2. 调度者架构总览
 
-iteration / review 两个复杂角色不再是「查表自执行的 fragment 链」，而是**调度者**：entry md 即调度者手册，它调查 → 计划 → 派 subagent 执行 → 按硬性条件验收 → 补缺 → 清场。设计动机：执行的复杂度会耗尽单一上下文的注意力，后段的验证 / 证据 / 收尾塌方；调度者模式把执行切片给上下文全新的 subagent，调度者的注意力只花在计划与验收（LLM 判断）上。
+iteration / review 两个复杂角色不再是「查表自执行的 fragment 链」，而是**调度者**，entry md 是按序执行的 **workflow**（不是散文手册）：每个 Step 在使用现场写明做什么、谁做（亲自的命令是闭集清单，清单外即派发）、派哪个 subagent、传什么输入、回报查什么、各 verdict 去哪。调度者的本职是**维护任务清单**：计划落成显式 checklist，每条只有 `[x] accepted`（由被验收的 subagent 汇报勾掉，不能自己做掉）或 `[-] skipped: <reason>` 两种出口，全勾完才允许退出；每次 verdict 后重印整张清单。
 
 核心约定：
 
-- **每步三件套**：`task.md`（subagent 的任务 prompt，**调度者永不读**——防 context 污染）、`report.md`（subagent 的汇报模板：为什么这么做 / 实际做了什么 / 有什么问题）、`accept.md`（调度者的验收判据，task.md 不引用它——防执行者向判据表演）。
-- **硬性条件两源**：issue 的任务要求（live issue body）+ preset 的品质判据（`quality/*.md`）。验收是 LLM 判断，不是程序检查。
+- **每步三件套**：`task.md`（subagent 的任务 prompt，含 Inputs 节声明消费哪些 dispatch 字段）、`report.md`（必填字段结构化汇报模板，空集写 `none`）、`accept.md`（调度者的验收判据，内嵌 Required report fields——调度者凭它判断结构完整性，**永不打开 task.md / report.md**；task.md 也不引用 accept.md，防执行者向判据表演）。
+- **quality 文件按受众物理拆分**：`-execute.md` 只给执行 subagent（事前约束），`-judge.md` 只给调度者（验收判断）。单文件双受众是已证实的双向泄漏源（执行者读到判据照着表演 / 调度者吞下执行细节）。
+- **硬性条件两源**：issue 的任务要求（live issue body）+ preset 的品质判据（`quality/*-judge.md`）。验收是 LLM 判断，不是程序检查；先查结构（必填字段）再判实质。
 - **dispatch 消息只含指针 + 运行时键值**，不转述任何规则文本；prompt 内跨文件引用全部写 `/Users/mouriya/Ext/app/coder-loop/...` 绝对路径（agent 跑在随机 worktree，运行时锚定 app 目录；fragment 不经引擎渲染，占位符无人替换）。
 - **补缺走同一 subagent**（claude: Task follow-up；codex: `send_input`），方向错了才重派。
 - **无内部超时**：时间归引擎 watchdog。
-- **bug / 代码质量审查退出 loop**：style / conventions / 架构审美 / contract 之外的 bug-hunting 后退给人工 review；loop 只守诚实、协议、契约兑现（复验）、mergeability/CI 实测、closure 语义。
+- **bug / 代码质量审查退出 loop**：style / conventions / 架构审美 / contract 之外的 bug-hunting 后退给人工 review。loop 内保留且不可让渡：scope 对应、测试完整性、runtime artifacts 卫生（diff-audit 步）、契约逐行兑现与 CI/mergeability 实测（replay 步）、诚实、协议、closure 语义。
 
 plan 链不变（仍为查表式 fragment 链）；trigger 角色（blocked-responder / umbrella-finalizer）任务简单，未调度者化。
 
 ---
 
-## 3. Fragment 全集（56）
+## 3. Fragment 全集（62）
 
 **common/**（4，含 contract）— 程序↔agent 边界、GitHub 路由、状态不变量、issue/PR 解析契约：
 
@@ -69,11 +70,11 @@ plan 链不变（仍为查表式 fragment 链）；trigger 角色（blocked-resp
 
 **plan/**（12，仅 `/dev-plan` 进入）：`plan/index`、`plan/intake`、`plan/classify`、`plan/triage-existing`、`plan/business-frame`、`plan/decompose`、`plan/checkpoint-author`、`plan/adversarial-validate`、`plan/create-issues`、`plan/init-queue`、`plan/handoff`、`plan/final`
 
-**quality/**（3）— iter 与 review 共用的品质判据，§A 事前约束（task.md 引用）+ §B 验收判断（accept.md / 调度者引用）：
+**quality/**（6）— iter 与 review 共用的品质判据，按受众拆成两个文件（执行者与调度者互不读对方那份）：
 
-- `quality/evidence` — 证据真实性（真实路径、log 文本化、synthetic 拒收、CI parity、弱信号不算验收）
-- `quality/honesty` — 声明=观察、六类 scope-reduction 触发（cosmetic-handwave 一律硬拒）、intent-action 对照
-- `quality/cleanup` — 副作用申报与调度者收尾清扫
+- `quality/evidence-execute` / `quality/evidence-judge` — 证据真实性：真实路径、log 文本化、synthetic 拒收、CI parity、测试清单 delta（execute 侧产出 / judge 侧要求在场）、弱信号不算验收
+- `quality/honesty-execute` / `quality/honesty-judge` — 声明=观察、七类 scope-reduction 触发（cosmetic-handwave 一律硬拒；新增 test-weakening）、intent-action 对照、字面授权规则 + stale-baseline 例外（base 前进造成的字面值过期不算缩水，复验测得新基线即接受）
+- `quality/cleanup-execute` / `quality/cleanup-judge` — 副作用申报（execute）与调度者收尾清扫（judge）
 
 **iter/steps/**（7 组 × 3 = 21）— iteration 调度者的步骤合同：
 
@@ -87,15 +88,16 @@ plan 链不变（仍为查表式 fragment 链）；trigger 角色（blocked-resp
 | `source-spike` | `kind:code-spike` 整步（PoC 分支 + 命令 + no-merge comment） |
 | `spike-comment` | `kind:comment` 整步（评论 + 结果分支 + 提议 sub-issues） |
 
-**review/**（16）：
+**review/**（19）：
 
 - `review/steps/investigate/{task,report,accept}` — 重材料读取回 verbatim 摘要
-- `review/steps/replay/{task,report,accept}` — 独立复验：验收表逐行真跑 / artifact 核验、packet 关键 claim 重跑、checks 实测
+- `review/steps/diff-audit/{task,report,accept}` — **强制派发**（PR-backed kind）：PR diff vs base 的 scope 映射（每个 changed file 归 in-scope/support/unmapped）、runtime artifacts 卫生扫描、测试完整性（base/head 测试清单两侧计数 + 删/改名/skip/弱化逐条枚举；计数下降无枚举 = 隐藏弱化硬拒）
+- `review/steps/replay/{task,report,accept}` — **强制派发**（PR-backed kind）：验收表逐行真跑 / artifact 核验、packet 关键 claim 重跑、checks 实测
 - `review/spike-followup`、`review/source-spike-audit` — kind 特定判断指南（调度者亲读）
 - `review/actions/{accept-pr,accept-no-pr,retry,expand-parent,skip,blocked,stop}` — 终局动作（调度者按 verdict 只读其一并亲自执行副作用）
 - `review/actions/state-write` — `coder-loop item update` 状态写出与 expand 队列规则
 
-fragment 总数 = 4 + 12 + 3 + 21 + 16 = 56，与 `preset.toml` 的 `[[fragments]]` 块数和 `src/preset.test.ts` 的 `EXPECTED_FRAGMENTS` 一致。
+fragment 总数 = 4 + 12 + 6 + 21 + 19 = 62，与 `preset.toml` 的 `[[fragments]]` 块数和 `src/preset.test.ts` 的 `EXPECTED_FRAGMENTS` 一致。
 
 ---
 
@@ -152,36 +154,30 @@ plan/init-queue
 
 ---
 
-## 5. Iteration 调度者（`iter-entry.md`）
+## 5. Iteration 调度者（`iter-entry.md`，workflow 形态）
 
-四个阶段：**Investigate**（亲自轻读 issue/PR/handoff/state；重调查派 research）→ **Plan**（按 `ISSUE_KIND` 定步骤计划，绑每步验收来源；判断 issue 是否真的可实现，否则记录分类直接 wrap-up 交 review）→ **Dispatch & judge**（逐步派发、按 accept.md + issue 要求验收、缺口 send_input 补派）→ **Wrap up**（handoff、按派发账清场、`ITERATION SUMMARY:` 一行）。
+Step 0 读契约（common 三件 + 两个 `-judge` 判据）→ Step 1 spawn 分类（Resume/Retry/Fresh）→ Step 2 调查（**恰好五项亲自读取**，每项标注喂哪个决策；五项之外的任何阅读都派 research）→ Step 3 **建任务清单**（按 `ISSUE_KIND` 选步骤序列，落成显式 checklist；两态出口；每 verdict 后重印）→ Step 4 逐条执行（4a 派发模板 → 4b 按 accept.md 必填字段查结构 → 4c 判实质 → 4d verdict 路由）→ Step 5 handoff → Step 6 按派发账清场 → Step 7 `ITERATION SUMMARY:` 一行（含 `list=` 与 `dispatched=` 字段）。
 
-kind → 步骤计划：
+kind → 步骤序列：
 
-| `ISSUE_KIND` | 计划 |
+| `ISSUE_KIND` | 序列（每项 = 一次派发） |
 |---|---|
 | `code` / 空（legacy） | [research?] → implement → verify → submit |
 | `blocked` | resolve-blocker → implement → verify → submit |
 | `code-spike` | [research?] → source-spike |
 | `comment` | [research?] → spike-comment |
 
-verify 发现产品性失败 → 缺口路由回 implement 补派，再**整表**重跑 verify（不是只重跑失败行）——「完整的迭代」在 iter 内闭环，不把半成品推给 review 轮转。iteration 不写 item status；scheduler 从 run ledger 推进到 review。
+verify 发现产品性失败 → 在清单里 verify 行前插入 scoped implement 行，implement 过后**整表**重跑 verify（不是只重跑失败行）——「完整的迭代」在 iter 内闭环，不把半成品推给 review 轮转。iteration 不写 item status；scheduler 从 run ledger 推进到 review。
 
-边界不变：不选别的 issue、不批处理、不建 child issue、不 merge、不关 issue、不动队列与最终状态、不 stage runtime artifacts。
+边界不变：不选别的 issue、不批处理、不建 child issue、不 merge、不关 issue、不动队列与最终状态、不 stage runtime artifacts、不删/弱化 issue 字面要求之外的测试。
 
 ---
 
-## 6. Review 调度者（`review-entry.md`）
+## 6. Review 调度者（`review-entry.md`，workflow 形态）
 
-五个阶段：
+Step 0 读契约 → Step 1 调查（**恰好六项亲自读取**；Intent/Result blocks、PR body 与最新 retry comment **verbatim 亲读**；大材料派 investigate）→ Step 2 建清单（**PR-backed kind 强制含 diff-audit 与 replay 两个派发**——缺任一份已验收报告的 verdict（含 retry）无效；"packet 一眼就有问题" 不是豁免，先拿齐两份报告一次引全）→ Step 3 执行派发并消化报告（replay = 契约真值；diff-audit = scope/测试完整性/卫生真值；stale-baseline 例外在此适用）→ Step 4 五项亲自判断（trace honesty / PR protocol / title-intent / caveat honesty / evidence form，每项输入与失败条件内联在步骤现场；先收集全部失败再 verdict，不见首败即停）→ Step 5 closure 分类 → Step 6 终局动作（retry 反馈质量线：契约发现领先措辞发现，每条具名到行号/文件/测试名/触发短语；两份报告全绿而仅剩措辞抱怨时必须对照 honesty-judge 复查再发）+ state write → Step 7 global assessment、handoff、清场、`REVIEW SUMMARY:` 一行（含 `dispatched=` 字段，`no` 仅 no-PR 路由 / stop 合法）。
 
-1. **Investigate** — 亲自轻读 + 判断关键材料（Intent/Result blocks、PR caveats、最新 retry comment）**verbatim 亲读**；大材料派 investigate 回 verbatim 摘要。
-2. **Honesty & protocol judgments**（亲自，依序）— trace honesty → PR protocol → title-intent → caveat honesty（`quality/honesty.md` §B 六类触发）→ evidence form（`quality/evidence.md` §B）。kind 特定判断按需读 `review/spike-followup.md` / `review/source-spike-audit.md`。
-3. **Replay**（派发）— 验收表逐行真跑 / artifact 核验、packet 关键 claim 重跑、checks/mergeability 实测。replay 结论是契约真值：任一行不匹配 → retry（一次引用全部失败行）；行 Command 本身坏 → 先修 issue 合同；`kind:blocked` 必须含 blocked-path e2e 成功。**review 可独立复验但绝不替 iter 修**。
-4. **Closure judgment**（亲自）— atomic / parent / child closure table / completeness 分类。
-5. **Terminal action + state write + wrap-up** — 按 verdict 只读一个 `review/actions/*.md` 亲自执行副作用，按 `state-write.md` 写状态（外部副作用先于本地终态）；global assessment 决定 scheduling state 去留；handoff、清场、`REVIEW SUMMARY:` 一行。
-
-kind 分流矩阵见 `review-entry.md` 的 Kind routing matrix（contract.md §4 有 issue 作者视角摘要）。
+**review 可独立复验但绝不替 iter 修**。kind 分流矩阵见 `review-entry.md` 的 Kind routing matrix（contract.md §4 有 issue 作者视角摘要）。
 
 ---
 

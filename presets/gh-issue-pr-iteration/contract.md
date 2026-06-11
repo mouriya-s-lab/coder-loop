@@ -231,21 +231,22 @@ PR protocol 验收检测"最新 retry response 是否在 issue 而非 PR" → re
 
 ## 3. Review 验收点总表
 
-Review 是调度者（orchestrator）：诚实性/协议判断由它亲自做，契约复验派 replay subagent 真跑。按 `review-entry.md` 的 phase 顺序列出每个验收点（entry 与 quality/ 文件做 ground truth）：
+Review 是调度者（orchestrator）：PR-backed kind 必须先派 diff-audit 与 replay 两个 subagent 真跑、拿到两份报告后才允许做 body 判断与 verdict；诚实性/协议判断由调度者亲自做。按 `review-entry.md` 的 phase 顺序列出每个验收点（entry 与 quality/ 文件做 ground truth）：
 
 | 验收点 | 执行方 | 输入 | 规则 | 失败处置 |
 |---|---|---|---|---|
-| Trace honesty | 调度者亲自 | iter 汇报/trace + GitHub live state | 每个声明有对应观察（`quality/honesty.md` §B claim-vs-observation） | retry action |
+| Diff audit | diff-audit subagent 真跑 | PR diff vs base + base/head 测试清单 | 每个 changed file 映射到 issue scope；runtime artifacts / scheduling state 不入仓；测试完整性：删 / 弱化 / skip 的测试逐条枚举（空集也要声明），非 issue 契约字面要求的非空 delta 即 test-weakening 触发 | retry action |
+| Contract replay | replay subagent 真跑 | issue `## 验收标准` + `## 继承验证义务` 全部行 + packet 关键 claim + live checks | 逐行执行/复验（列 `# / Dimension / Check / Command / Env / Expect`，actual vs Expect）；packet 关键 claim 重跑比对；checks 实测观察（pending/hung 不算 mergeable） | retry action（引用全部失败行） |
+| Trace honesty | 调度者亲自 | iter 汇报/trace + GitHub live state | 每个声明有对应观察（`quality/honesty-judge.md` claim-vs-observation） | retry action |
 | PR protocol | 调度者亲自 | PR body + thread + issue comments | first line `Closes #<N>`、CI parity 行、retry 必有新 PR-thread comment | retry action / no-PR 路由 |
 | Title-intent | 调度者亲自 | issue title + PR title | strip conventional prefix 后主语 noun phrase 对齐 | retry action |
-| Caveat honesty | 调度者亲自 | handoff `Intent/Result (run …)` blocks（verbatim 亲读）+ PR body/comments + `gh pr diff`（仅 intent↔action 比对） | `quality/honesty.md` §B 六类 scope-reduction 触发；cosmetic-handwave 一律硬拒；授权须 issue body 字面句 | retry action |
-| Evidence form | 调度者亲自 | PR body（opening packet）/ 最新 run 的 PR comment | `quality/evidence.md` §B：分层齐全、claim 映射、artifact 可查、`kind:blocked` 额外 blocked-path 复测要求 | retry / blocked action |
-| Contract replay | replay subagent 真跑 | issue `## 验收标准` + `## 继承验证义务` 全部行 + packet 关键 claim + live checks | 逐行执行/复验（列 `# / Dimension / Check / Command / Env / Expect`，actual vs Expect）；packet 关键 claim 重跑比对；checks 实测观察（pending/hung 不算 mergeable） | retry action（引用全部失败行） |
+| Caveat honesty | 调度者亲自 | handoff `Intent/Result (run …)` blocks（verbatim 亲读）+ PR body/comments + diff-audit 报告（intent↔action 比对） | `quality/honesty-judge.md` 七类 scope-reduction 触发；cosmetic-handwave 一律硬拒；授权须 issue body 字面句，stale-baseline 例外见同文件 | retry action |
+| Evidence form | 调度者亲自 | PR body（opening packet）/ 最新 run 的 PR comment | `quality/evidence-judge.md`：分层齐全、claim 映射、artifact 可查、测试清单 delta 在场、`kind:blocked` 额外 blocked-path 复测要求 | retry / blocked action |
 | Spike follow-up（`kind:comment`） | 调度者亲自（`review/spike-followup.md`） | iter comment + issue `## 结果分支` | 选恰好一条分支 + 提议数 ≥ 分支动词词表要求 | retry action |
 | Source-spike audit（`kind:code-spike`） | 调度者亲自（`review/source-spike-audit.md`） | issue comment + spike branch + 证据 | no-merge 语义、branch/SHA、命令覆盖、结果分支；有 PR 即 retry | retry action |
 | Closure | 调度者亲自 | 上面验收点综合 + child closure table | 决定 terminal action（accept-pr / accept-no-pr / retry / expand-parent / skip / blocked / stop） | 选 action 文件 |
 
-代码质量（style / conventions / 测试弱化以外的 diff 审美 / bug-hunting beyond contract）**不在 loop 内**——后退给人工 review。loop 保留的 code 相关检查只有：mergeability/CI 实测（replay 步）与 runtime artifacts 不入 commit（hygiene）。
+代码质量（style / conventions / 架构审美 / bug-hunting beyond contract）**不在 loop 内**——后退给人工 review。loop 保留的 code 相关检查：mergeability/CI 实测与逐行契约复验（replay 步）、scope 对应与测试完整性与 runtime artifacts 不入仓（diff-audit 步）。PR-backed kind 缺少 diff-audit 或 replay 派发报告的 verdict 无效（仅 no-PR 路由与 infra-stop 例外）。
 
 ---
 
@@ -255,6 +256,7 @@ Review 是调度者（orchestrator）：诚实性/协议判断由它亲自做，
 
 | 验收点 | `kind:code` | `kind:blocked` | `kind:comment` | `kind:code-spike` | `""`（empty / legacy） |
 |---|---|---|---|---|---|
+| Diff audit | 跑 | 跑（PR-backed 时） | 跳（无 PR） | 跳（无 PR；有 PR 即 retry） | 跑 |
 | Trace honesty | 跑 | 跑 | 跑 | 跑 | 跑 |
 | PR protocol | 跑 | 跑（PR-backed unblock；无 PR 仅限 already-satisfied） | no-PR 路由 | no-PR 路由；PR 存在即 retry | 跑 |
 | Title-intent | 跑 | 跑 | 跳（无 PR） | 跳（source spike 无 PR） | 跑（legacy 也可能漂） |

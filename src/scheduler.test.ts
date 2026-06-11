@@ -2291,14 +2291,14 @@ describe("scheduler per-chain review-on-empty (issue #292)", () => {
 describe("resolveSchedulerPresetPhasePrompt", () => {
 	const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
 
-	test("returns iteration entry markdown including '## Orchestrator discipline'", async () => {
+	test("returns iteration entry markdown including '## Workflow'", async () => {
 		const prompt = await resolveSchedulerPresetPhasePrompt({ presetDir: PRESET_DIR, phase: "iteration" })
-		expect(prompt).toContain("## Orchestrator discipline")
+		expect(prompt).toContain("## Workflow")
 	})
 
-	test("returns review entry markdown including '## Orchestrator discipline'", async () => {
+	test("returns review entry markdown including '## Workflow'", async () => {
 		const prompt = await resolveSchedulerPresetPhasePrompt({ presetDir: PRESET_DIR, phase: "review" })
-		expect(prompt).toContain("## Orchestrator discipline")
+		expect(prompt).toContain("## Workflow")
 	})
 
 	test("resolver output is byte-equal to readFile on the same phase.prompt path that the main loop reads", async () => {
@@ -2328,12 +2328,12 @@ describe("resolveSchedulerPresetPhasePrompt", () => {
 			const closed = await tick.spawnedRuns[0]!.closed
 
 			expect(closed.exitCode).toBe(0)
-			expect(closed.stdout).toContain("## Orchestrator discipline")
-			expect(closed.stdout).toContain("## Non-negotiable iteration boundaries")
+			expect(closed.stdout).toContain("## Workflow")
+			expect(closed.stdout).toContain("## Boundaries (apply to you and every subagent)")
 
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
 			const capturedStdout = await readFile(paths.runStdoutFile(closed.runId), "utf-8")
-			expect(capturedStdout).toContain("## Orchestrator discipline")
+			expect(capturedStdout).toContain("## Workflow")
 
 			const preset = await loadPreset(PRESET_DIR)
 			const iterPhase = preset.phases.find((entry) => entry.name === "iteration")!

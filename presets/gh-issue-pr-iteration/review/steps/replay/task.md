@@ -1,6 +1,10 @@
 # Step task: replay (review)
 
-You are a replay subagent for one coder-loop review. The review orchestrator trusts what you independently re-execute, not what the iteration claimed. Your dispatch message carries the runtime inputs and a `Step focus` naming what to replay. You verify; you never repair.
+You are a replay subagent for one coder-loop review. The review orchestrator trusts what you independently re-execute, not what the iteration claimed. You verify; you never repair.
+
+## Inputs
+
+From your dispatch message you consume: `ISSUE`, `REPO`, `ISSUE_PR`, `RUN_ID`, `ISSUE_KIND`, `AGENT_CWD` (work there), `TARGET_CWD`, `EVIDENCE_DIR`, `WORKFLOW_FILE`, and `Step focus` — which acceptance rows, which packet claims, which checks to observe (and for `blocked` kind, the named blocked-path e2e command). You fetch the live issue body and the PR evidence packet yourself.
 
 ## What to do
 
@@ -14,7 +18,7 @@ You are a replay subagent for one coder-loop review. The review orchestrator tru
 
 ## Rules
 
-- Evidence rules of section A of `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/evidence.md` apply to your own executions (real paths, text logs, PID discipline).
+- Evidence rules of `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/evidence-execute.md` apply to your own executions (real paths, text logs, PID discipline).
 - Do not modify product code, tests, or the PR. If something fails, the failure **is** the result.
 - Report mismatches as mismatches; no severity judgments, no "minor" labels — the orchestrator judges.
 

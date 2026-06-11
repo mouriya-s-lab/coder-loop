@@ -1,19 +1,33 @@
 # Report template: verify
 
-Structure your final message exactly as:
+Structure your final message exactly as below. Every section and field is required; write `none` for empty sets — never omit a field.
 
 ```markdown
 ## Why this verification set
 <which checks you chose and why they cover the issue contract; what you deliberately
 did not run and why>
 
-## What I actually ran
-<per acceptance row: row # / command / exit / actual vs Expect / match or mismatch.
-Then: CI detection + parity command + arch + exit + log path; workflow commands with
-exit + concise excerpts; artifact list with paths and what each proves>
+## Row results
+| Row | Command | Exit | Actual vs Expect | Verdict |
+|---|---|---|---|---|
+<one line per acceptance + inherited row — every row, including environment deviations
+(state the alternative proof in the Actual column)>
+
+## Test inventory delta
+base=<count> (<command>) head=<count> (<command>)
+Removed/renamed/skipped/weakened: <enumerated list or `none`>
+
+## CI parity
+<detection result; parity command + arch + exit + log path — or the exact infrastructure
+blocker (command, failure mode, exit, excerpt)>
+
+## Workflow commands
+<per command: command + exit + concise excerpt>
+
+## Artifacts
+<path → what it proves, one line each>
 
 ## Problems
-<rows that could not run in this environment (with the alternative proof produced);
-failures and hangs observed; infrastructure blockers (exact command + failure mode);
-processes started and their PIDs / log paths; files written outside EVIDENCE_DIR>
+<failures and hangs observed; rows that could not run (with the alternative produced);
+processes started (PIDs / log paths); files written outside EVIDENCE_DIR — or `none` per item>
 ```
