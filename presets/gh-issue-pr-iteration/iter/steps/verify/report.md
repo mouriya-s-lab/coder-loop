@@ -10,11 +10,13 @@ did not run and why>
 ## Row results
 | Row | Command | Exit | Actual vs Expect | Verdict |
 |---|---|---|---|---|
-<one line per acceptance + inherited row — every row, including environment deviations
-(state the alternative proof in the Actual column)>
+<one line per acceptance + inherited row — every row: browser rows carry verdict
+`deferred: e2e step`; environment deviations state the alternative proof in the
+Actual column>
 
 ## Test inventory delta
 base=<count> (<command>) head=<count> (<command>)
+Base measured in: <scratch worktree path, confirmed removed>
 Removed/renamed/skipped/weakened: <enumerated list or `none`>
 
 ## CI parity
@@ -23,18 +25,6 @@ blocker (command, failure mode, exit, excerpt)>
 
 ## Workflow commands
 <per command: command + exit + concise excerpt>
-
-## E2E run
-Surface: program / web / consuming-surface-of-library
-Entry driven: <the real command invoked as an operator would / the agent-browser path walked>
-Observed: <the end-to-end behavior seen, with transcript/log/screenshot artifact paths>
-
-## Runtime manifest
-Binaries: <name + how installed — or `none beyond toolchain`>
-Services: <start command per service — or `none`>
-Auth: <resolution location only (keychain entry / config path) — never the secret value — or `none`>
-Ports/env/fixtures: <list or `none`>
-Standing environment: <PID + port + log path + stop command per process left up — or `none`>
 
 ## Artifacts
 <path → what it proves, one line each>

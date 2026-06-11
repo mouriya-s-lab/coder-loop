@@ -4,7 +4,7 @@ You are an e2e-replay subagent for one coder-loop review. You re-drive the evide
 
 ## Inputs
 
-From your dispatch message: `ISSUE`, `REPO`, `ISSUE_PR`, `RUN_ID`, `AGENT_CWD`, `TARGET_CWD`, `EVIDENCE_DIR`, `WORKFLOW_FILE`, and `Step focus` — which packet claims to replay beyond the e2e core. Read now, before Step 1: `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/evidence-execute.md` — it binds your own executions and your auth handling (two-case rule: auth always exists; resolve it, never report it missing).
+From your dispatch message: `ISSUE`, `REPO`, `ISSUE_PR`, `RUN_ID`, `AGENT_CWD`, `TARGET_CWD`, `EVIDENCE_DIR`, `WORKFLOW_FILE`, and `Step focus` — which packet claims to replay beyond the e2e core, and the browser-Env acceptance rows the replay step deferred to you. Read now, before Step 1: `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/evidence-execute.md` — it binds your own executions and your auth handling (two-case rule: auth always exists; resolve it, never report it missing).
 
 ## Workflow
 
@@ -22,6 +22,8 @@ Re-drive each e2e claim the same direct way it should have been produced:
 
 - Program / CLI / daemon claim → invoke the **real entry point the way an operator would**, exercising the claimed path; capture transcript + logs.
 - Web claim → walk the **real UI with agent-browser** end-to-end (enter, perform the flow, observe the persisted result); capture screenshots. The packet's screenshots corroborate but never substitute for your own walk.
+
+When `Step focus` names deferred browser acceptance rows: fetch the live issue body (`gh issue view <ISSUE> -R <REPO> --json body`), quote each named row's Check, Command, and Expect, and execute it inside your UI walk — drive the row's flow, compare your observation to its Expect, record the verdict per row. These are contract rows: a silently absent row invalidates your report.
 
 Record, per claim: the packet's claim next to your observation. Differences are recorded as differences — no severity labels, no "minor"/"cosmetic" wording; softening language violates this task.
 

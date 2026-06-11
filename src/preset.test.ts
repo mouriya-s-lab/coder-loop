@@ -42,6 +42,9 @@ const EXPECTED_FRAGMENTS = [
 	{ id: "iter/steps/verify/task", role: "iter", relPath: "iter/steps/verify/task.md" },
 	{ id: "iter/steps/verify/report", role: "iter", relPath: "iter/steps/verify/report.md" },
 	{ id: "iter/steps/verify/accept", role: "iter", relPath: "iter/steps/verify/accept.md" },
+	{ id: "iter/steps/e2e/task", role: "iter", relPath: "iter/steps/e2e/task.md" },
+	{ id: "iter/steps/e2e/report", role: "iter", relPath: "iter/steps/e2e/report.md" },
+	{ id: "iter/steps/e2e/accept", role: "iter", relPath: "iter/steps/e2e/accept.md" },
 	{ id: "iter/steps/submit/task", role: "iter", relPath: "iter/steps/submit/task.md" },
 	{ id: "iter/steps/submit/report", role: "iter", relPath: "iter/steps/submit/report.md" },
 	{ id: "iter/steps/submit/accept", role: "iter", relPath: "iter/steps/submit/accept.md" },
@@ -239,8 +242,8 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		const entry = await Bun.file(resolve(BUNDLED_PRESET_DIR, "iter-entry.md")).text()
 
 		// kind → step sequence table
-		expect(entry).toContain("→ implement → verify → submit |")
-		expect(entry).toContain("| `blocked` | resolve-blocker → implement → verify → submit |")
+		expect(entry).toContain("→ implement → verify → e2e → submit |")
+		expect(entry).toContain("| `blocked` | resolve-blocker → implement → verify → e2e → submit |")
 		expect(entry).toContain("| `code-spike` | [research?] → source-spike |")
 		expect(entry).toContain("| `comment` | [research?] → spike-comment |")
 		// task-list spine: explicit list, two-state exit, no self-execution, no subagent-file reads
@@ -249,6 +252,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(entry).toContain("Dispatch it; never do it yourself")
 		expect(entry).toContain("you may open **only** `accept.md` files")
 		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/iter/steps/implement/")
+		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/iter/steps/e2e/")
 		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/honesty-judge.md")
 		expect(entry).toContain("ITERATION SUMMARY:")
 	})

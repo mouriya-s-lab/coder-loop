@@ -409,6 +409,21 @@ role = "iter"
 path = "iter/steps/verify/accept.md"
 
 [[fragments]]
+id   = "iter/steps/e2e/task"
+role = "iter"
+path = "iter/steps/e2e/task.md"
+
+[[fragments]]
+id   = "iter/steps/e2e/report"
+role = "iter"
+path = "iter/steps/e2e/report.md"
+
+[[fragments]]
+id   = "iter/steps/e2e/accept"
+role = "iter"
+path = "iter/steps/e2e/accept.md"
+
+[[fragments]]
 id   = "iter/steps/submit/task"
 role = "iter"
 path = "iter/steps/submit/task.md"

@@ -4,13 +4,15 @@ Structure your final message exactly as:
 
 ```markdown
 ## Replay strategy
-<branch/state replayed against; which rows ran locally vs were artifact-verified vs
+<branch/state replayed against; how the runtime manifest was used (which entries, what
+the standing environment provided); which rows ran locally vs were artifact-verified vs
 re-executed in their environment; what could not be attempted and why>
 
 ## Row results
 | Row | Check | Command/artifact | Actual (exit/output/ref) | Expect | Verdict |
 |---|---|---|---|---|---|
-<one line per acceptance + inherited row — every row, including could-not-execute>
+<one line per acceptance + inherited row — every row: browser rows carry verdict
+`deferred: e2e-replay`; could-not-execute rows carry their exact cause>
 
 ## Blocked-path e2e
 <the named command + exit + output — or `not applicable (Step focus named none)`>

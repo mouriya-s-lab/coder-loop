@@ -1,6 +1,6 @@
 # Step task: submit
 
-You are a submission subagent for one coder-loop iteration. Your deliverable is the committed, pushed branch plus the PR (fresh run) or PR-thread comment (retry), carrying the evidence packet that verification produced. Work through the steps in order.
+You are a submission subagent for one coder-loop iteration. Your deliverable is the committed, pushed branch plus the PR (fresh run) or PR-thread comment (retry), carrying the evidence packet the verify and e2e steps produced. Work through the steps in order.
 
 ## Inputs
 
@@ -37,7 +37,7 @@ git push -u origin <branch>
 - screenshots embedded as Markdown images whose paths resolve to committed PR-branch artifacts;
 - every artifact mapped to the behavior it proves.
 
-The PR body is a diff cover letter with evidence — do not reconstruct the issue's why or move task scope into it. Everything in the packet traces to verification's output; manufacturing a claim verification did not produce violates honesty-execute and will be caught by replay.
+The PR body is a diff cover letter with evidence — do not reconstruct the issue's why or move task scope into it. Everything in the packet traces to the verify and e2e steps' output; manufacturing a claim those steps did not produce violates honesty-execute and will be caught by replay.
 
 ### Step 4 — Verify liveness, then report
 

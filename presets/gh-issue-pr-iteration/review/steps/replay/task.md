@@ -23,7 +23,7 @@ Then read the iteration's **runtime manifest** (in the PR packet and the chain h
 Per row, by Env:
 
 - `local` — execute the Command exactly as written; capture exit + output; compare to Expect. There is no auth/binary excuse: binaries you install, credentials you resolve from the manifest's stated location (or this machine's stores) — both are Step 2 work. A row you still cannot run means exactly one of two things, and you report which: your setup is unfinished (go back and finish it), or the manifest lacks the needed entry (iteration packet failure — a finding, not a skip). Never mark an unrun row passed, and never reinterpret the Command into something you can run.
-- `browser` — re-drive the real UI with agent-browser against the standing environment; the packet's screenshots corroborate but do not substitute for your own walk.
+- `browser` — not yours: browser rows are e2e territory, owned by the e2e-replay step's real-UI walk. Record the row as `deferred: e2e-replay` in your results — it stays in your table, and the orchestrator closes it from that step's report.
 - `VM` / `container` / `CI` / `downstream` / `integration` — locate the matching artifact in the PR evidence packet proving the row ran in its environment with the expected result; where this machine reaches the environment (per the manifest), also re-execute for the stronger signal. No matching artifact and no feasible re-execution = the row failed; cite the missing artifact.
 
 ### Step 4 — Blocked-path e2e (only when Step focus names it)

@@ -70,8 +70,8 @@ Route by `ISSUE_KIND` first:
 ```
 [ ] diff-audit — produce: scope/hygiene/code audit of PR #<n> vs base (pure reading)
 [ ] test-integrity — produce: test enumeration from diff + suite inventory on base and head (own scratch worktrees)
-[ ] replay — produce: every acceptance+inherited row re-executed/verified (+ blocked-path e2e when kind:blocked)
-[ ] e2e-replay — produce: packet e2e claims re-driven directly + form check (after replay — they share the standing environment)
+[ ] replay — produce: every acceptance+inherited row re-executed/verified (browser rows deferred to e2e-replay; + blocked-path e2e when kind:blocked)
+[ ] e2e-replay — produce: packet e2e claims re-driven directly + deferred browser rows + form check (after replay — they share the standing environment)
 [ ] judgments (Step 4) — self-judgments with all reports in hand
 [ ] closure (Step 5) → terminal action (Step 6) → assessment/handoff/cleanup/summary (Step 7)
 ```
@@ -100,16 +100,16 @@ Runtime inputs:
   AGENT_CWD=<...> TARGET_CWD=<...> EVIDENCE_DIR=<...> WORKFLOW_FILE=<...>
 Step focus: <diff-audit: scope facts worth flagging; test-integrity: anything suite-specific;
   replay: which rows (blocked kind: the named blocked-path e2e command);
-  e2e-replay: which packet claims beyond the e2e core>
+  e2e-replay: which packet claims beyond the e2e core + the browser rows replay deferred>
 ```
 
 For each returned report: first check structure against the step's `accept.md` "Required report fields" — missing fields → `send_input` to the same subagent naming them; then judge substance per that `accept.md`. Gaps → `send_input` with the exact gap list; wrong direction → close and re-dispatch fresh. Accepted → `[x]`, ledger line (`step | subagent id | outcome | declared side effects`), re-print the list.
 
 What the accepted reports mean for your verdict:
 
-- **Replay is contract-row truth.** Any row whose replayed/verified actual mismatches its Expect → verdict retry, citing **every** failing row at once (iteration cannot fix piecemeal). A row failing because its Command itself is broken (typo'd flag, retired surface) → retry feedback says fix the issue body first, not reinterpret the row. A row unreachable because the iteration's runtime manifest lacks the needed entry (no start command, no auth resolution location, environment torn down) → packet failure → retry naming the gap. `blocked` kind without the blocked-path e2e succeeding → the unblock is not accepted. Literal expectation values that drifted because base moved: apply the stale-baseline exception of `quality/honesty-judge.md` — replay's fresh base measurement is exactly the provenance it requires; do not bounce retries over a stale literal.
+- **Replay is contract-row truth** (browser rows excepted — they are e2e territory: replay reports them `deferred: e2e-replay`, and you close each one from the e2e-replay report's `Browser acceptance rows` table; a deferred row that table does not close leaves the contract unverified). Any row whose replayed/verified actual mismatches its Expect → verdict retry, citing **every** failing row at once (iteration cannot fix piecemeal). A row failing because its Command itself is broken (typo'd flag, retired surface) → retry feedback says fix the issue body first, not reinterpret the row. A row unreachable because the iteration's runtime manifest lacks the needed entry (no start command, no auth resolution location, environment torn down) → packet failure → retry naming the gap. `blocked` kind without the blocked-path e2e succeeding → the unblock is not accepted. Literal expectation values that drifted because base moved: apply the stale-baseline exception of `quality/honesty-judge.md` — replay's fresh base measurement is exactly the provenance it requires; do not bounce retries over a stale literal.
 - **Test-integrity is test truth.** Non-empty removal/skip/weakening enumeration not literally demanded by the issue body → test-weakening trigger (honesty-judge) → retry. Inventory count drop the enumeration does not explain → hidden weakening → hard retry. A mismatch between this report and the packet's test-delta line → packet credibility failure → retry.
-- **E2e-replay is deliverable truth.** A re-driven e2e claim whose observation mismatches the packet → retry. Script-produced e2e in the packet (form check) → packet failure → retry even when the re-drive passed. Manifest gaps it hit → packet failures charged to iteration.
+- **E2e-replay is deliverable truth, and owns the browser contract rows.** A re-driven e2e claim whose observation mismatches the packet → retry. A deferred browser row failing against its Expect → retry exactly like a failing replay row. Script-produced e2e in the packet (form check) → packet failure → retry even when the re-drive passed. Manifest gaps it hit → packet failures charged to iteration.
 - **Diff-audit is scope/code truth.** Unmapped files the live issue body does not cover → retry finding. Staged runtime artifacts / scheduling state / run logs → hard retry finding. Anchored code findings (logic error with failure path / deviation from the issue's stated design / convention violation with cited source / structural defect within the diff) → retry citing the anchors; unanchored or divergent "findings" (alternative-design taste, code the diff does not touch) are not verdict inputs — discard them per the step's accept file.
 
 ### Step 4 — Judgments (yourself, with all reports in hand)

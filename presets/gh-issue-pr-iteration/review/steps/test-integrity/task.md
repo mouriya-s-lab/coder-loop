@@ -17,8 +17,9 @@ From your dispatch message: `ISSUE`, `REPO`, `ISSUE_PR`, `AGENT_CWD`, `EVIDENCE_
 Never disturb `AGENT_CWD`'s checked-out state — another review step may own it. Work in two detached scratch worktrees of your own:
 
 ```bash
-git worktree add --detach <scratch>/ti-base <base-sha>
-git worktree add --detach <scratch>/ti-head <head-sha>
+SCRATCH=$(mktemp -d)
+git worktree add --detach "$SCRATCH/ti-base" <base-sha>
+git worktree add --detach "$SCRATCH/ti-head" <head-sha>
 ```
 
 These are yours to remove in Step 5 and to declare in your report.

@@ -12,6 +12,12 @@ manifest gap that made it unreachable>
 |---|---|---|---|
 | <claim> | <real entry invocation / agent-browser walk> | <observation + artifact path> | yes / no |
 
+## Browser acceptance rows
+| Row | Check | Driven how | Observed vs Expect | Verdict |
+|---|---|---|---|---|
+<one line per deferred row from Step focus — or a single row `none | - | - | - | -`
+when none were deferred>
+
 ## Form check
 <e2e evidence produced by direct execution / by script-harness (= finding, name the script)>
 

@@ -63,8 +63,8 @@ Select the step sequence for `ISSUE_KIND`:
 
 | `ISSUE_KIND` | Step sequence (every entry = one dispatch) |
 |---|---|
-| `code` or empty (legacy) | [research if Step 2 left you unsure what the right change is] → implement → verify → submit |
-| `blocked` | resolve-blocker → implement → verify → submit |
+| `code` or empty (legacy) | [research if Step 2 left you unsure what the right change is] → implement → verify → e2e → submit |
+| `blocked` | resolve-blocker → implement → verify → e2e → submit |
 | `code-spike` | [research?] → source-spike |
 | `comment` | [research?] → spike-comment |
 
@@ -95,6 +95,7 @@ Step directories (each contains `task.md` + `report.md` for the subagent, `accep
 | resolve-blocker | `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/iter/steps/resolve-blocker/` |
 | implement | `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/iter/steps/implement/` |
 | verify | `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/iter/steps/verify/` |
+| e2e | `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/iter/steps/e2e/` |
 | submit | `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/iter/steps/submit/` |
 | source-spike | `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/iter/steps/source-spike/` |
 | spike-comment | `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/iter/steps/spike-comment/` |
@@ -124,13 +125,14 @@ Fill in every field with the actual bound values — task files declare which fi
 - gaps → `send_input` to the same subagent with the exact gap list; back to 4b when it responds.
 - wrong direction → close the subagent, dispatch fresh with a corrected `Step focus`; note the abandoned dispatch in the ledger.
 - accepted → mark the line `[x]`, append one ledger line: `step | subagent id | outcome | declared side effects (PIDs, temp files, branches, services)`. Re-print the task list. Take the next unchecked line.
-- verify reported a product failure → that is not a verify gap: insert `[ ] implement — fix: <failure>` before the verify line, mark the current verify attempt in the ledger, and continue the loop (the inserted implement runs first, then verify re-dispatches for the **full** contract, not just the failed row).
+- verify or e2e reported a product failure (a failing row, a mismatch against the issue contract) → that is not a step gap: insert `[ ] implement — fix: <failure>` before the verify line, mark the current attempt in the ledger, and continue the loop (the inserted implement runs first, then **both** verify and e2e re-dispatch for the **full** contract — uncheck both lines; a fix can regress either side).
+- the e2e line's `Step focus` carries the browser rows the verify report deferred (`deferred: e2e step` verdicts) plus the changed path to exercise; a deferred row still open after e2e means the contract is unverified — it never silently closes.
 
 When the last line is `[x]`/`[-]`, go to Step 5.
 
 ### Step 5 — Wrap up (yourself)
 
-Append one run note to `{{SHARED_CONTEXT_FILE}}`: run ID; spawn classification; the final task list with checkboxes; per-line outcome in one line each (from reports — do not re-narrate execution detail); files changed; CI-parity status; test-inventory delta; the runtime manifest and standing e2e environment from the verify report (review re-runs and tears down from this); artifacts; PR number/URL or comment URL; blockers/unresolved risks; proposed child issue specs when scope was incomplete. If `{{CURRENT_ISSUE_FILE}}` exists, issue-local detail may go there.
+Append one run note to `{{SHARED_CONTEXT_FILE}}`: run ID; spawn classification; the final task list with checkboxes; per-line outcome in one line each (from reports — do not re-narrate execution detail); files changed; CI-parity status; test-inventory delta; the runtime manifest and standing e2e environment from the e2e report (review re-runs and tears down from this); artifacts; PR number/URL or comment URL; blockers/unresolved risks; proposed child issue specs when scope was incomplete. If `{{CURRENT_ISSUE_FILE}}` exists, issue-local detail may go there.
 
 ### Step 6 — Cleanup (scratch only — the e2e runtime stays up)
 
