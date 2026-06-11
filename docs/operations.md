@@ -14,7 +14,7 @@ operator / supervisor 的默认入口是 `coder-loop` 自己暴露的只读或�
 
 | 场景 | 首选命令 | 何时用 |
 |---|---|---|
-| 初始化 target | `coder-loop install <target> --repo <owner>/<repo>` | 幂等写 slash command、runtime layout、config、workflow starter，并检查 PATH / skill |
+| 初始化 target | `coder-loop install <target> --repo <owner>/<repo>` | 幂等写 workflow starter、创建 centralized chain，并检查 PATH / runner CLI |
 | 体检 target | `coder-loop doctor <target> --repo <owner>/<repo>` | 只读检查 bootstrap layers 和 live runtime health |
 | 读机器状态 | `coder-loop status <target> --json` | supervisor / script 读取当前 config/state/queue/current/events/process snapshot |
 | 管理 central daemon | `coder-loop daemon up/down/status/start/stop/restart <target>` | 管理全局 daemon socket 与 target chain；避免手写 `nohup` / PID 归属逻辑 |
@@ -157,7 +157,7 @@ tail -F "$(coder-loop status /path/to/target --json | jq -r '.events.path')"
 
 ## 4. Runtime Health 错误分类
 
-`coder-loop doctor <target>` 覆盖 bootstrap 与 live runtime health。只想校验 target runtime/schema、不查 PATH / GitHub / skill 时，读结构化 status：
+`coder-loop doctor <target>` 覆盖 bootstrap 与 live runtime health。只想校验 target runtime/schema、不查 PATH / runner CLI 时，读结构化 status：
 
 ```bash
 coder-loop status <path> --json | jq '.state, .target, .queue.selected'
@@ -229,7 +229,7 @@ coder-loop item --help
 
 | 子命令 | 用途 | 主要 flag |
 |---|---|---|
-| `install <target>` | 幂等 bootstrap | `--repo <slug>` `--preset <name>` `--force` `--dry-run` `--install-skills` `--skip-skill-check` |
+| `install <target>` | 幂等 bootstrap | `--repo <slug>` `--preset <name>` `--force` `--dry-run` |
 | `uninstall <target>` | 仅删 `.claude/commands/dev-*.md` | — |
 | `doctor <target>` | 只读体检 + live runtime health | `--repo <slug>` |
 | `status <target> --json` | 只读 JSON runtime/process snapshot | `--config <path>` `--loop-data-root <dir>` `--chain <name>` |

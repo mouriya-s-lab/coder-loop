@@ -1,6 +1,6 @@
 # coder-loop 操作 skill / 命令契约
 
-本文件是 repo-owned 的 coder-loop 操作指南源。用户 home 下的 `~/.claude/skills/` 或 `~/.agents/skills/` 副本只是安装产物；命令契约变化时先改本文件和 `templates/skills/coder-loop/SKILL.md`，再按需同步 home 副本。
+本文件是 repo-owned 的 coder-loop 操作指南源。用户 home 下的 skill 副本是 operator 个人资产，不由 engine 校验、同步或分发；命令契约变化时先改本文件和相关 CLI/docs。
 
 ## 当前稳定入口
 

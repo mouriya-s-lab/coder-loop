@@ -4,7 +4,7 @@
 
 读完后你能：理解 iter / review 两个 entry 的调度者循环；找到任意步骤三件套（task / report / accept）与品质判据文件；理解 plan 链 9 个 verdict 的回退路径（plan 链仍是查表式 fragment 链）；按 §8 清单安全地改动布局。
 
-不在范围内：preset.toml 字段语义（看 [preset-authoring](./preset-authoring.md)）；写 issue / PR 内容（看 `presets/gh-issue-pr-iteration/contract.md` + 用户级 skill `writing-issue` / `writing-pr` / `review-pr`）。
+不在范围内：preset.toml 字段语义（看 [preset-authoring](./preset-authoring.md)）；写 issue / PR 内容（看 `presets/gh-issue-pr-iteration/contract.md`，用户级 skill 只可作为可选 operator 参考）。
 
 ---
 
@@ -103,7 +103,7 @@ fragment 总数 = 4 + 12 + 3 + 21 + 16 = 56，与 `preset.toml` 的 `[[fragments
 
 `/dev-plan` 是 thin-shell slash command（`.claude/commands/dev-plan.md`），把 `$ARGUMENTS` 作为 intake 输入交给 plan 链。planning 不消费 queue item，plan 不是 `preset.phases` 成员；slash command 直接读 `plan/index.md`。
 
-`plan/index` 强制先读 `<preset>/contract.md` + 用户级 `writing-issue` skill + 目标 `<target>/.coder-loop/workflow.md`，然后进 `plan/intake`。
+`plan/index` 强制先读 `<preset>/contract.md` + 目标 `<target>/.coder-loop/workflow.md`，然后进 `plan/intake`。用户级写作 skill 若存在可参考；缺失不阻塞。
 
 ```
 plan/intake

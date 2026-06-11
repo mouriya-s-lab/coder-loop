@@ -13,10 +13,10 @@ Before role-specific planning, read these fragments from the entry prompt's frag
 1. `common/runtime-contract`
 2. `common/github-routing`
 3. `common/state-contract`
-4. `contract.md` — the preset's contract on issue / PR / review shape (THIS IS THE OVERRIDE LAYER)
-5. user-level `~/.claude/skills/writing-issue/SKILL.md` — generic issue hygiene base (atomicity, citation, parent/child API)
+4. `contract.md` — the preset's self-contained contract on issue / PR / review shape, including atomicity, citation, and parent/child rules
+5. `<target>/.coder-loop/workflow.md` — target commands and conventions
 
-In all cases of conflict between user-level skill and `contract.md`, `contract.md` wins. User-level skill is hygiene base; contract is preset-specific override.
+User-level writing/review skills are optional operator references only. If present, they may inform style; if absent, planning proceeds from `contract.md` and workflow policy.
 
 ## Planning ownership
 

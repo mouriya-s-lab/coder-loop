@@ -43,9 +43,9 @@ L2: Preset（presets/<name>/）
 - **Status snapshot**: `coder-loop status <target> --json [--config <path>] [--chain <name>]` — stable read-only JSON API for supervisor/scripts; do not scrape runtime files first.
 - **Daemon operations**: `coder-loop daemon status <target> --json`, `coder-loop daemon start|restart <target> [--max-iterations N]`, `coder-loop daemon stop <target>` — stable central-daemon / target-chain control API.
 - **Runtime inspection / model config**: `coder-loop runtime show <target> [--json]` 列出 preset 所有 phase（角色）当前解析到的 runner/binary/model/source；`coder-loop runtime set <target> [--claude-model opus-4-7|opus-4-8] [--codex-model gpt-5.5]` 用枚举值幂等改写 `.coder-loop/runtime/config.json` 的 `claude.model` / `codex.model`（Claude 模型自动加 `[1m]` 后缀；TOML config 不可写）。Runner kind 归 role entry md，不是 CLI 表面。
-- **Install target**: `coder-loop install <target> [--repo <owner/repo>] [--preset <name>] [--force] [--dry-run] [--install-skills]` — 幂等四层 bootstrap（slash commands + runtime 目录 + config + workflow.md + GitHub `kind:code`/`kind:comment`/`kind:code-spike`/`kind:blocked` 标签 + PATH/skill 检查）。源：`src/install-commands.ts`。
+- **Install target**: `coder-loop install <target> [--repo <owner/repo>] [--preset <name>] [--force] [--dry-run]` — 幂等 bootstrap（workflow.md + centralized chain + runner/PATH 检查；preset-owned planning assets 由 preset 自己处理）。源：`src/install-commands.ts`。
 - **Uninstall target**: `coder-loop uninstall <target>` — 仅删 `.claude/commands/dev-*.md`；runtime 和 GitHub labels 保留。
-- **Doctor**: `coder-loop doctor <target> [--repo <owner/repo>]` — 只读四层体检（target 文件 / GitHub 标签 / 操作员 PATH / writing-issue skill 版本）并输出 live runtime health。
+- **Doctor**: `coder-loop doctor <target> [--repo <owner/repo>]` — 只读体检（target 文件 / 操作员 PATH / runner CLI）并输出 live runtime health。
 - **Plan phase**: `/dev-plan` （`gh-issue-pr-iteration` preset 配套的规划器）
 - **Loop phase**: `/dev-loop [N]` （`gh-issue-pr-iteration` preset 配套的循环入口；内部走 `coder-loop daemon start`）
 

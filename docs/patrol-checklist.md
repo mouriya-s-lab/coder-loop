@@ -6,7 +6,7 @@
 |---|---|---|---|---|
 | 1 daemon | `coder-loop daemon status <target> --json` | central daemon reachable，target chain 可解析 | daemon 活着但 target 没有 selected/current | socket 不可达、daemon 无响应、scanError 非空 |
 | 2 target | `coder-loop status <target> --json` | `.state.kind == "ok"`，queue/current/events/processes 可读 | selected 为 null 但 GitHub parent 仍 open | `missing-*` / `invalid-*` state kind |
-| 3 doctor | `coder-loop doctor <target> --repo <owner>/<repo>` | bootstrap layers 与 runner CLI 全 OK | optional skill copy stale | PATH / gh auth / preset / workflow 缺失 |
+| 3 doctor | `coder-loop doctor <target> --repo <owner>/<repo>` | bootstrap layers 与 runner CLI 全 OK | optional operator skill missing (non-blocking) | PATH / gh auth / preset / workflow 缺失 |
 | 4 chain | `coder-loop chain status <chain-name> --json` | chain active，item counts 与 status 一致 | chain completed 但 umbrella open | chain missing/deleted 或 runtime layout 不可解析 |
 | 5 item | `coder-loop item list <chain-name> --json` | queued / blocked / done 分布符合预期 | terminal item 仍有 open GitHub issue | duplicate id、非法 status、依赖未满足却被调度 |
 | 6 active run | `coder-loop status <target> --json | jq '.current, .events.latest'` | `lastEventAt` 近期更新或 phase clean exit | 长时间无新事件但进程仍有 CPU/IO | exitCode 非 0、signal 非 null、attempt timeout |

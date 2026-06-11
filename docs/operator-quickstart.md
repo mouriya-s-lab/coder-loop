@@ -16,7 +16,7 @@
 - `gh` CLI 已 auth（`gh auth status` 不报错），有目标 repo 的 issue / PR 写权限。
 - runner CLI 在 PATH：phase 默认 runner 由 preset 声明，bundled workflow 需要 `codex` 和 `claude`。
 - 目标 repo 在本地，有可用的 base branch（通常 `main`）。
-- 用户级 skill / rule（仅 `/dev-plan` 需要，`/dev-loop` 本身不需要）：
+- 可选用户级 skill / rule（仅作为 `/dev-plan` 的 operator 个人参考，缺失不阻塞；`/dev-loop` 不读取）：
   - `~/.claude/rules/github-issue-pr-routing.rule.md`
   - skill `writing-issue` / `writing-pr` / `review-pr`
 
@@ -49,11 +49,10 @@ coder-loop daemon up
 coder-loop install /path/to/your-target-repo --repo <owner>/<repo>
 ```
 
-幂等。它做三层事：
+幂等。它做这些事：
 
 - **A) target 项目文件**：写 `.claude/commands/dev-plan.md` / `dev-loop.md`、建/刷新 `.coder-loop/runtime/{issues,evidence,logs}/` 并初始化 centralized chain、merge `.coder-loop/runtime/config.json`（含 preset 绑定）、若 `workflow.md` 缺失则从 preset 模板拷一份。
 - **B) 操作员机器前置**：只做检查、不安装——`gh`(+ auth) / preset phase runner CLI / `coder-loop` 是否在 PATH。
-- **C) 用户级 skill 版本**：检查 `~/.claude/skills/writing-issue/SKILL.md` 是否含新版 marker；加 `--install-skills` 会自动同步到最新。
 
 `gh-issue-pr-iteration` 需要的 `kind:*` GitHub label 资产不由 install / doctor 管理；planning agent 在 `plan/create-issues` 路径首次创建 issue 前按 preset 声明幂等确保，缺失则创建，color / description 漂移则更新。
 
@@ -67,8 +66,6 @@ coder-loop install /path/to/your-target-repo --repo <owner>/<repo>
 | `--preset <name>` | 默认 `gh-issue-pr-iteration` |
 | `--force` | 覆盖已存在的 slash command / workflow.md（其他文件仍幂等） |
 | `--dry-run` | 打印每一步将做什么，不写盘 |
-| `--install-skills` | 同步 `writing-issue` skill 到 `~/.claude/skills/` |
-| `--skip-skill-check` | 跳过 D 层检查 |
 
 之后做一次只读体检：
 
@@ -77,7 +74,7 @@ coder-loop doctor /path/to/your-target-repo --repo <owner>/<repo>
 coder-loop status /path/to/your-target-repo --json
 ```
 
-四层全 OK 且 `status` 能输出 JSON，才能进下一步。doctor 不改任何文件——失败时按它指出的项目重跑 `install`（或修 PATH / `gh auth login`）。`status` 也只读；即使 runtime 缺失或损坏，它也会用 `state.kind` 返回机器可读状态。
+target 文件、operator 前置、live runtime health 全 OK 且 `status` 能输出 JSON，才能进下一步。doctor 不改任何文件——失败时按它指出的项目重跑 `install`（或修 PATH / `gh auth login`）。`status` 也只读；即使 runtime 缺失或损坏，它也会用 `state.kind` 返回机器可读状态。
 
 想精确看一遍 install 会做什么、不会做什么，直接 `coder-loop install <target> --repo <slug> --dry-run`——它会逐行打印每个 layer 的动作和 `would-write` 标记。
 
@@ -137,7 +134,7 @@ coder-loop status /path/to/your-target-repo --json | jq '.state.kind, .queue, .c
 | `.events.latest` | 当前或最近 run 的最后一条结构化事件 |
 | `.processes.live` / `.processes.scanError` | live process scan 结果；daemon 详情看 `coder-loop daemon status` |
 
-如果你只想看 runtime/schema，不想同时检查 PATH、GitHub label、skill 等 bootstrap 层，直接读结构化 status：
+如果你只想看 runtime/schema，不想同时检查 PATH / runner CLI 等 bootstrap 层，直接读结构化 status：
 
 ```bash
 coder-loop status /path/to/your-target-repo --json \
@@ -156,7 +153,7 @@ coder-loop status /path/to/your-target-repo --json \
 /dev-plan <design-doc-path | github-issue-url | "<用户描述>" | <repo-path> <goal>>
 ```
 
-它读源头 → 按 `writing-issue` 规则拆原子 issue（含 `## 验收标准` checkpoint 表）→ 用 `addSubIssue` 建 parent/child → 写 chain handoff / evidence 目录（per-issue handoff 只是可选附件），并把可执行 issue 推进 centralized chain queue。
+它读源头 → 按 preset contract 拆原子 issue（含 `## 验收标准` checkpoint 表）→ 用 `addSubIssue` 建 parent/child → 写 chain handoff / evidence 目录（per-issue handoff 只是可选附件），并把可执行 issue 推进 centralized chain queue。
 
 跑完后再做一次 schema 自检：
 

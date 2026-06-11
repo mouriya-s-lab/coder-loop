@@ -17,7 +17,6 @@ Supervisor 模式跟 preset 正交——它是包在 loop 外面的 cron-driven 
 | Template | Copy to | Purpose |
 |---|---|---|
 | `templates/supervisor/` | `<TARGET>/.coder-loop/runtime/supervisor/<MISSION>/` + `<TARGET>/.claude/skills/bootstrap/SKILL.md` | optional 外层 supervisor（cron 驱动跨 patrol orchestration），跨 preset 通用 |
-| `templates/skills/coder-loop/SKILL.md` | user-home skill copy（如 `~/.agents/skills/coder-loop/SKILL.md`） | repo-owned coder-loop 操作 skill 模板；同步 daemon / chain / item / queue command contract |
 
 preset-specific starter 不在此处：
 
@@ -26,7 +25,7 @@ preset-specific starter 不在此处：
 
 ## Minimum viable target setup
 
-一键路径：`coder-loop install <target> --repo <owner>/<repo>` 幂等做完下面 1-2，并补 `kind:code` / `kind:comment` / `kind:code-spike` GitHub 标签 + slash command + PATH/skill 检查。详见 [docs/operator-quickstart.md §1](../docs/operator-quickstart.md#1-bootstrap-目标-repo-的-coder-loop)。
+一键路径：`coder-loop install <target> --repo <owner>/<repo>` 幂等做完下面 1-2，并做 PATH / runner CLI 检查。`kind:code` / `kind:comment` / `kind:code-spike` GitHub 标签由 `gh-issue-pr-iteration` 的 planning path 幂等确保。详见 [docs/operator-quickstart.md §1](../docs/operator-quickstart.md#1-bootstrap-目标-repo-的-coder-loop)。
 
 手动等价 = 下面三步：
 

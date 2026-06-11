@@ -95,12 +95,12 @@ coder-loop daemon stop /path/to/target
 coder-loop queue unblock /path/to/source-target --issue 123 --start-daemon
 ```
 
-`/dev-plan` 引用以下用户级规则与 skill：
+`/dev-plan` 可软引用以下用户级规则与 skill：
 
 - `~/.claude/rules/github-issue-pr-routing.rule.md`
 - skill `writing-issue / writing-pr / review-pr`
 
-不是 coder-loop 仓库内的资产，由用户自己维护。缺失时 `/dev-plan` 仍可运行，但 issue 形式、PR 路由、review gate 设计会退化。`/dev-loop` 没有此类依赖。
+不是 coder-loop 仓库内的资产，由用户自己维护。缺失时 `/dev-plan` 仍按 preset contract 运行；这些 skill 只提供 operator 个人写作习惯参考。`/dev-loop` 没有此类依赖。
 
 新 operator 完整 bootstrap 步骤见 [docs/operator-quickstart.md](./docs/operator-quickstart.md)。
 
