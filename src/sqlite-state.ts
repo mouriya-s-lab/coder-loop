@@ -78,6 +78,7 @@ export type ItemRecord = {
 	extra: JsonObject
 	createdAt: number
 	updatedAt: number
+	statusUpdatedAt: number
 }
 
 export type ItemSessionIds = Record<string, Partial<Record<AgentRunnerKind, string>>>
@@ -102,6 +103,7 @@ export type CreateItemInput = {
 	extra?: JsonObject
 	createdAt?: number
 	updatedAt?: number
+	statusUpdatedAt?: number
 }
 
 export type UpdateItemInput = Partial<Omit<CreateItemInput, "chainId" | "issueNumber" | "createdAt">> & {
@@ -270,6 +272,7 @@ type ItemRow = {
 	extra: string
 	created_at: number
 	updated_at: number
+	status_updated_at: number
 }
 
 type RunRow = {
@@ -335,6 +338,7 @@ const ITEMS_TABLE_SCHEMA_SQL = `
 	extra TEXT NOT NULL,
 	created_at REAL NOT NULL,
 	updated_at REAL NOT NULL,
+	status_updated_at REAL NOT NULL,
 	UNIQUE (chain_id, issue_number)
 `
 
@@ -398,7 +402,7 @@ CREATE TABLE IF NOT EXISTS current_runs (
 ${STATE_INDEXES_SQL}
 `
 
-const STATE_SCHEMA_VERSION = 7
+const STATE_SCHEMA_VERSION = 8
 const V5_ITEM_SESSION_COLUMN = ["last", "session", "id"].join("_")
 
 type UserVersionRow = {
@@ -486,6 +490,7 @@ function migrateStateSchema(db: Database): void {
 		&& itemsTableHasColumn(db, "phase")
 		&& itemsTableHasColumn(db, "session_ids")
 		&& itemsTableHasColumn(db, "position")
+		&& itemsTableHasColumn(db, "status_updated_at")
 		&& !itemsTableHasColumn(db, V5_ITEM_SESSION_COLUMN)
 		&& runsTableHasColumn(db, "status")
 	) return
@@ -505,6 +510,10 @@ function migrateStateSchema(db: Database): void {
 			if (!itemsTableHasColumn(db, "position")) {
 				db.exec("ALTER TABLE items ADD COLUMN position INTEGER NOT NULL DEFAULT 0")
 				db.exec("UPDATE items SET position = id")
+			}
+			if (!itemsTableHasColumn(db, "status_updated_at")) {
+				db.exec("ALTER TABLE items ADD COLUMN status_updated_at REAL NOT NULL DEFAULT 0")
+				db.exec("UPDATE items SET status_updated_at = updated_at")
 			}
 			if (!runsTableHasColumn(db, "status")) {
 				db.exec("ALTER TABLE runs ADD COLUMN status TEXT NOT NULL DEFAULT 'unknown'")
@@ -611,6 +620,7 @@ function rebuildItemsTableForV6(db: Database): void {
 		"extra",
 		"created_at",
 		"updated_at",
+		"status_updated_at",
 	].join(", ")
 	db.exec(`CREATE TABLE items_new (${ITEMS_TABLE_SCHEMA_SQL})`)
 	db.exec(`INSERT INTO items_new (${columns}) SELECT ${columns} FROM items`)
@@ -698,7 +708,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 					umbrellaRepo: input.umbrellaRepo === undefined ? current.umbrellaRepo : input.umbrellaRepo,
 					status: input.status ?? current.status,
 					metadata: input.metadata ?? current.metadata,
-					updatedAt: input.updatedAt ?? unixSeconds(),
+						updatedAt: input.updatedAt ?? unixSeconds(),
 				}
 				db.query<unknown, SqlParams>(`
 					UPDATE chains
@@ -739,6 +749,8 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 		updateItem: (id, input) =>
 			write("update item", () => {
 				const current = requireItem(getItemRow(id), id)
+				const updatedAt = input.updatedAt ?? unixSeconds()
+				const statusUpdatedAt = input.statusUpdatedAt ?? (input.status === undefined ? current.statusUpdatedAt : updatedAt)
 				const next: ItemRecord = {
 					...current,
 					repoCwd: input.repoCwd ?? current.repoCwd,
@@ -756,14 +768,15 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 					runner: input.runner === undefined ? current.runner : input.runner,
 					phase: input.phase === undefined ? current.phase : input.phase,
 					extra: input.extra ?? current.extra,
-					updatedAt: input.updatedAt ?? unixSeconds(),
+					updatedAt,
+					statusUpdatedAt,
 				}
 				db.query<unknown, SqlParams>(`
 					UPDATE items
 					SET repo_cwd = $repoCwd, status = $status, attempts = $attempts, position = $position, title = $title,
 						priority = $priority, branch = $branch, pr = $pr, last_run_id = $lastRunId,
 						session_ids = $sessionIds, issue_file = $issueFile, evidence_dir = $evidenceDir, agent_cwd = $agentCwd,
-						runner = $runner, phase = $phase, extra = $extra, updated_at = $updatedAt
+						runner = $runner, phase = $phase, extra = $extra, updated_at = $updatedAt, status_updated_at = $statusUpdatedAt
 					WHERE id = $id
 				`).run(itemParams(next))
 				return requireItem(getItemRow(id), id)
@@ -943,15 +956,16 @@ function insertItem(db: Database, getItemRow: (id: number) => ItemRow | null, in
 	const now = unixSeconds()
 	const createdAt = input.createdAt ?? now
 	const updatedAt = input.updatedAt ?? createdAt
+	const statusUpdatedAt = input.statusUpdatedAt ?? updatedAt
 	const position = nextItemPosition(db, input.chainId)
 	const result = db.query<unknown, SqlParams>(`
 		INSERT INTO items (
 			chain_id, issue_number, repo_cwd, status, attempts, position, title, priority, branch, pr, last_run_id,
-			session_ids, issue_file, evidence_dir, agent_cwd, runner, phase, extra, created_at, updated_at
+			session_ids, issue_file, evidence_dir, agent_cwd, runner, phase, extra, created_at, updated_at, status_updated_at
 		)
 		VALUES (
 			$chainId, $issueNumber, $repoCwd, $status, $attempts, $position, $title, $priority, $branch, $pr, $lastRunId,
-			$sessionIds, $issueFile, $evidenceDir, $agentCwd, $runner, $phase, $extra, $createdAt, $updatedAt
+			$sessionIds, $issueFile, $evidenceDir, $agentCwd, $runner, $phase, $extra, $createdAt, $updatedAt, $statusUpdatedAt
 		)
 	`).run({
 		chainId: input.chainId,
@@ -974,6 +988,7 @@ function insertItem(db: Database, getItemRow: (id: number) => ItemRow | null, in
 		extra: stringifyJsonObject(input.extra ?? {}),
 		createdAt: createdAt,
 		updatedAt: updatedAt,
+		statusUpdatedAt: statusUpdatedAt,
 	})
 	return requireItem(getItemRow(Number(result.lastInsertRowid)), Number(result.lastInsertRowid))
 }
@@ -1005,6 +1020,7 @@ function rowToItem(row: ItemRow | null): ItemRecord | null {
 		extra: parseJsonObject(row.extra, `items.${row.id}.extra`),
 		createdAt: row.created_at,
 		updatedAt: row.updated_at,
+		statusUpdatedAt: row.status_updated_at,
 	}
 }
 
@@ -1094,6 +1110,7 @@ function itemParams(item: ItemRecord): SqlParams {
 		phase: item.phase,
 		extra: stringifyJsonObject(item.extra),
 		updatedAt: item.updatedAt,
+		statusUpdatedAt: item.statusUpdatedAt,
 	}
 }
 

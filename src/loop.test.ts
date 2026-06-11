@@ -66,6 +66,7 @@ function makeItem(overrides: Partial<ItemRecord> = {}): ItemRecord {
 		extra: overrides.extra ?? {},
 		createdAt: overrides.createdAt ?? 1,
 		updatedAt: overrides.updatedAt ?? 1,
+		statusUpdatedAt: overrides.statusUpdatedAt ?? overrides.updatedAt ?? 1,
 	}
 }
 

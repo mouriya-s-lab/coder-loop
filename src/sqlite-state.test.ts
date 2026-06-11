@@ -59,6 +59,7 @@ describe("sqlite state store", () => {
 				"extra",
 				"created_at",
 				"updated_at",
+				"status_updated_at",
 			])
 			expect(store.listTableColumns("runs")).toEqual([
 				"id",
@@ -198,8 +199,12 @@ describe("sqlite state store", () => {
 			expect(store.getNextPendingItem({ chainId: chain.id, repoCwd: "/repo/coder-loop" })).toEqual(first)
 			expect(store.allItemsTerminal({ chainId: chain.id, terminalStatuses: ["done", "moot", "blocked"] })).toBe(false)
 
-			const updatedFirst = store.updateItem(first.id, { status: "done", attempts: 2, branch: "issue-177", pr: 188, updatedAt: 1_800_000_101 })
+			const metadataOnly = store.updateItem(first.id, { attempts: 2, updatedAt: 1_800_000_100 })
+			expect(metadataOnly.statusUpdatedAt).toBe(first.statusUpdatedAt)
+
+			const updatedFirst = store.updateItem(first.id, { status: "done", branch: "issue-177", pr: 188, updatedAt: 1_800_000_101 })
 			expect(updatedFirst.status).toBe("done")
+			expect(updatedFirst.statusUpdatedAt).toBe(1_800_000_101)
 			expect(updatedFirst.branch).toBe("issue-177")
 			expect(updatedFirst.pr).toBe(188)
 			expect(store.updateItem(second.id, { status: "moot", updatedAt: 1_800_000_102 }).status).toBe("moot")
@@ -651,6 +656,7 @@ describe("sqlite state store", () => {
 			const item = items[0]!
 			expect(item.phase).toBeNull()
 			expect(item.issueNumber).toBe(999)
+			expect(item.statusUpdatedAt).toBe(1.0)
 			const updated = migrated.updateItem(item.id, { phase: "iteration", updatedAt: 2.0 })
 			expect(updated.phase).toBe("iteration")
 			expect(migrated.getItem(item.id)?.phase).toBe("iteration")
