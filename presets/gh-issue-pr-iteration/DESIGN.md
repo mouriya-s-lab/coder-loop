@@ -65,7 +65,7 @@ auth 和 binary 永远是执行者自己解决的，因为事实上不存在缺�
 每次 spawn 的 agent 是独立进程，无跨轮记忆；本地文件会丢、会损坏、跨机不可用。持久业务语义只能落 GitHub（issue body / labels / comments / PR thread）。由此：
 
 - issue↔PR 关联只认结构性链接（closing keyword 图，GraphQL `closedByPullRequestsReferences` 分页到穷尽），不做 body 文本搜索——数字出现在 body 里不构成关联。
-- retry 的指令源是 PR 的全量读取（body + 全部 comments + 全部 reviews + inline review threads），切片阅读会让整张任务清单построить在错误的指令上。
+- retry 的指令源是 PR 的全量读取（body + 全部 comments + 全部 reviews + inline review threads），切片阅读会让整张任务清单建立在错误的指令上。
 - 调度者的亲自阅读是闭集（恰好 N 项，每项标注喂哪个决策）+ 一跳图引用；之外的一切阅读是派发。"exactly these reads"曾因漏项而自相矛盾，闭集必须与决策清单互证。
 
 ## 写 prompt 的人最容易犯的错（本 preset 的事故记录）
