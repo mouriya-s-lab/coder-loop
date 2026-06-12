@@ -36,6 +36,7 @@ type HarnessOptions = {
 	maxAttempts: number
 	maxRuns: number
 	pollSeconds: number
+	keepStaleWorktrees: boolean
 }
 
 type WatchVerdict =
@@ -55,11 +56,19 @@ function parseArgs(argv: readonly string[]): HarnessOptions {
 		maxAttempts: 5,
 		maxRuns: 20,
 		pollSeconds: 15,
+		keepStaleWorktrees: false,
 	}
 	for (let i = 0; i < argv.length; i += 2) {
 		const flag = argv[i]
-		const value = argv[i + 1]
 		if (flag === undefined) break
+		if (flag === "--keep-stale-worktrees") {
+			// 布尔 flag：保留陈尸 scheduler worktree，让引擎的自愈路径（#466）被真实
+			// 触发——仅用于该路径的 e2e 验证。
+			options.keepStaleWorktrees = true
+			i -= 1
+			continue
+		}
+		const value = argv[i + 1]
 		if (value === undefined) fail(`flag ${flag} 缺少值`)
 		switch (flag) {
 			case "--fixture-cwd":
@@ -159,18 +168,21 @@ function resetFixture(options: HarnessOptions): void {
 	sh(["git", "clean", "-fd"], { cwd: options.fixtureCwd })
 
 	// 被杀的 daemon（tripwire / SIGKILL）会在 fixture 的 git 里留下已注册的
-	// scheduler worktree；同名注册存在时新 run 的 worktree 创建被 git 拒绝，
-	// scheduler 每 tick 失败且 status API 不可见——item 永远 queued。
-	log("reset: 清理残留 scheduler worktree 注册")
-	const worktrees = sh(["git", "worktree", "list", "--porcelain"], { cwd: options.fixtureCwd }).stdout
-	for (const line of worktrees.split("\n")) {
-		if (!line.startsWith("worktree ")) continue
-		const path = line.slice("worktree ".length).trim()
-		if (resolve(path) === resolve(options.fixtureCwd)) continue
-		log(`reset: git worktree remove --force ${path}`)
-		sh(["git", "worktree", "remove", "--force", path], { cwd: options.fixtureCwd, allowFail: true })
+	// scheduler worktree；引擎侧有自愈（#466），这里仍然清一遍保证 pristine。
+	if (options.keepStaleWorktrees) {
+		log("reset: --keep-stale-worktrees，保留残留 worktree（验证引擎自愈路径）")
+	} else {
+		log("reset: 清理残留 scheduler worktree 注册")
+		const worktrees = sh(["git", "worktree", "list", "--porcelain"], { cwd: options.fixtureCwd }).stdout
+		for (const line of worktrees.split("\n")) {
+			if (!line.startsWith("worktree ")) continue
+			const path = line.slice("worktree ".length).trim()
+			if (resolve(path) === resolve(options.fixtureCwd)) continue
+			log(`reset: git worktree remove --force ${path}`)
+			sh(["git", "worktree", "remove", "--force", path], { cwd: options.fixtureCwd, allowFail: true })
+		}
+		sh(["git", "worktree", "prune"], { cwd: options.fixtureCwd })
 	}
-	sh(["git", "worktree", "prune"], { cwd: options.fixtureCwd })
 
 	log("reset: 关残留 open PR（fixture repo 专用于 e2e，open PR 一律视为上轮残留）")
 	const openPrs = ghJson<Array<{ number: number }>>([
