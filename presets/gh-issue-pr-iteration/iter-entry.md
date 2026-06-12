@@ -109,7 +109,7 @@ Step directories (each contains `task.md` + `report.md` for the subagent, `accep
 | source-spike | `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/iter/steps/source-spike/` |
 | spike-comment | `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/iter/steps/spike-comment/` |
 
-**4a. Dispatch.** Spawn a fresh subagent with a clean context (codex: `fork_context: false`; claude: Task tool; model inherited, no override). The spawn message is pointers + runtime facts only — never restate or summarize the task file (you have not read it and must not):
+**4a. Dispatch.** Spawn a fresh subagent with a clean context, on the strongest model currently available to this runner — never a lighter model to save cost. The spawn message is pointers + runtime facts only — never restate or summarize the task file (you have not read it and must not):
 
 ```
 Read and execute: /Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/iter/steps/<step>/task.md
@@ -126,12 +126,12 @@ Step focus: <your scheduling decision for this dispatch: the scope, the retry fe
 
 Fill in every field with the actual bound values — task files declare which fields they consume; a missing field stalls the subagent.
 
-**4b. Check the report's structure.** Open the step's `accept.md`; its "Required report fields" section lists what the report must contain. Missing fields → `send_input` (codex) / follow-up (claude) to the **same** subagent naming exactly the missing fields. Do not judge substance from a structurally broken report.
+**4b. Check the report's structure.** Open the step's `accept.md`; its "Required report fields" section lists what the report must contain. Missing fields → send a follow-up message to the **same** subagent naming exactly the missing fields. Do not judge substance from a structurally broken report.
 
 **4c. Judge substance.** Against two sources, both of which you hold from Step 2/3: the issue's own requirements bound to this line (which acceptance rows / sections this step had to satisfy), and the `accept.md` judgment criteria with `quality/honesty-judge.md` + `quality/evidence-judge.md` applied to the report's claims. This is your judgment — there is no mechanical pass condition. Verdict is one of: **accepted** / **gaps** (list them) / **wrong direction**.
 
 **4d. Route the verdict.**
-- gaps → `send_input` to the same subagent with the exact gap list; back to 4b when it responds.
+- gaps → follow up with the same subagent carrying the exact gap list; back to 4b when it responds.
 - wrong direction → close the subagent, dispatch fresh with a corrected `Step focus`; note the abandoned dispatch in the ledger.
 - accepted → mark the line `[x]`, append one ledger line: `step | subagent id | outcome | declared side effects (PIDs, temp files, branches, services)`. Re-print the task list. Take the next unchecked line.
 - verify or e2e reported a product failure (a failing row, a mismatch against the issue contract) → that is not a step gap: insert `[ ] implement — fix: <failure>` before the verify line, mark the current attempt in the ledger, and continue the loop (the inserted implement runs first, then **both** verify and e2e re-dispatch for the **full** contract — uncheck both lines; a fix can regress either side).
@@ -159,4 +159,4 @@ An empty `dispatched=` is legal only when the run ended at the Step 3 planning-s
 
 ## Boundaries (apply to you and every subagent)
 
-MUST NOT: choose a different issue; batch multiple issues; create child issues or link sub-issues; merge PRs; close issues; delete central daemon scheduling state; reorder, prepend, or finalize queue items in the central state DB; mark work `done`, `moot`, or final `blocked`; treat human review as the loop review stage; stage loop-data runtime artifacts, scheduling state, or run stdout logs into feature commits; remove, skip, or weaken tests beyond what the issue body literally demands. No internal timeouts anywhere — the engine watchdog owns time. The changed code must be correct and follow the project's conventions within the issue's stated design — review audits exactly that; what stays out of scope is divergence: refactors and improvements beyond the issue's design belong to new issues, not this run.
+MUST NOT: choose a different issue; batch multiple issues; create child issues or link sub-issues; merge PRs; close issues; delete central daemon scheduling state; reorder, prepend, or finalize queue items in the central state DB; mark work `done`, `moot`, or final `blocked`; treat human review as the loop review stage; stage loop-data runtime artifacts, scheduling state, or run stdout logs into feature commits; remove, skip, or weaken tests beyond what the issue body literally demands. The changed code must be correct and follow the project's conventions within the issue's stated design — review audits exactly that; what stays out of scope is divergence: refactors and improvements beyond the issue's design belong to new issues, not this run.

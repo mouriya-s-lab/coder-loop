@@ -51,8 +51,7 @@ iteration / review 两个复杂角色不再是「查表自执行的 fragment 链
 - **quality 文件按受众物理拆分**：`-execute.md` 只给执行 subagent（事前约束），`-judge.md` 只给调度者（验收判断）。单文件双受众是已证实的双向泄漏源（执行者读到判据照着表演 / 调度者吞下执行细节）。
 - **硬性条件两源**：issue 的任务要求（live issue body）+ preset 的品质判据（`quality/*-judge.md`）。验收是 LLM 判断，不是程序检查；先查结构（必填字段）再判实质。
 - **dispatch 消息只含指针 + 运行时键值**，不转述任何规则文本；prompt 内跨文件引用全部写 `/Users/mouriya/Ext/app/coder-loop/...` 绝对路径（agent 跑在随机 worktree，运行时锚定 app 目录；fragment 不经引擎渲染，占位符无人替换）。
-- **补缺走同一 subagent**（claude: Task follow-up；codex: `send_input`），方向错了才重派。
-- **无内部超时**：时间归引擎 watchdog。
+- **补缺走同一 subagent 的 follow-up**（机制描述，不点名工具），方向错了才重派；派发一律用当前 runner 可用的最强模型，不为省成本降档。
 - **e2e 直跑是唯一正规产物**：unit/integration 必须有但只是辅助层；e2e 必须直接运行真实物（程序 → 操作者方式调真实入口；web → agent-browser 走真 UI），**禁止脚本 e2e**；auth/binary 永远是执行者自己解决（standalone → 起环境时自铸 auth；服务插件 → IaC 基建必有可解析 auth），不存在缺失项。
 - **运行环境是交付物、清理归 review**：iter 跑完 e2e 把环境留着、交 runtime manifest（binaries/services/auth 解析位置/端口/在跑 PID/停法；secret 值不入任何报告），review 凭它必然复跑得动——manifest 缺项是 packet 失败计入 retry；全部 teardown 由 review 调度者收尾执行。
 - **代码审查在 loop 内、锚定 issue 设计、不发散**：diff-audit 步审 changed code 的逻辑正确性 / 设计偏离 / conventions / diff 内结构，每条发现必须带锚（可追溯失败路径 / issue 原句 / convention 来源）；替代设计、issue 设计外的改进、diff 没碰的代码不进 verdict。loop 内同样不可让渡：scope 对应与 runtime artifacts 卫生（diff-audit 步）、测试完整性（test-integrity 步，自有 scratch worktrees 两侧清点）、契约逐行兑现（replay 步）、e2e 直跑复验（e2e-replay 步）、checks/mergeability 实测（review 调度者亲自）、契约完整性（issue body 篡改检测→恢复→红线警告）、诚实、协议、closure 语义。

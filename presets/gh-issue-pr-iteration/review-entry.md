@@ -93,7 +93,7 @@ Step directories:
 | replay | `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/steps/replay/` |
 | e2e-replay | `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/steps/e2e-replay/` |
 
-Dispatch the four mandatory steps as independent subagents (parallel per the Step 2 contention plan), each with a clean context (codex: `fork_context: false`), message = pointers + runtime facts only, never restated instructions:
+Dispatch the four mandatory steps as independent subagents (parallel per the Step 2 contention plan), each with a clean context and on the strongest model currently available to this runner — never a lighter model to save cost; message = pointers + runtime facts only, never restated instructions:
 
 ```
 Read and execute: /Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/steps/<step>/task.md
@@ -106,7 +106,7 @@ Step focus: <diff-audit: scope facts worth flagging; test-integrity: anything su
   e2e-replay: which packet claims beyond the e2e core + the browser rows replay deferred>
 ```
 
-For each returned report: first check structure against the step's `accept.md` "Required report fields" — missing fields → `send_input` to the same subagent naming them; then judge substance per that `accept.md`. Gaps → `send_input` with the exact gap list; wrong direction → close and re-dispatch fresh. Accepted → `[x]`, ledger line (`step | subagent id | outcome | declared side effects`), re-print the list.
+For each returned report: first check structure against the step's `accept.md` "Required report fields" — missing fields → send a follow-up message to the same subagent naming them; then judge substance per that `accept.md`. Gaps → follow up with the exact gap list; wrong direction → close and re-dispatch fresh. Accepted → `[x]`, ledger line (`step | subagent id | outcome | declared side effects`), re-print the list.
 
 What the accepted reports mean for your verdict:
 
@@ -185,4 +185,4 @@ REVIEW SUMMARY: verdict=<retry|accepted|skip|blocked|stop>; issue=#<ISSUE>; disp
 
 ## Boundaries (apply to you and every subagent)
 
-MUST NOT: repair iteration output (code, evidence, PR body) — restoring a tampered issue body to its last legitimate snapshot is contract protection, not repair, and is required; produce a verdict on a PR-backed route without all four mandatory dispatched reports accepted; merge a PR before Steps 3–5 pass; close an issue whose required external effects have not all succeeded; edit merged PR bodies; create child issues except through the expand-parent action; bypass the daemon-serialized CLI for state writes; remove central daemon scheduling state outside the Step 7 rules. No internal timeouts anywhere — the engine watchdog owns time. In scope and non-negotiable: scope mapping, test integrity, hygiene, contract rows, CI reality, and the changed code's correctness/conventions/structure **judged against the issue's stated design** (the diff-audit code findings). Out of scope — never a verdict input: alternative-design taste, improvement ideas beyond the issue's design, and anything about code the diff does not touch; review never diverges the problem.
+MUST NOT: repair iteration output (code, evidence, PR body) — restoring a tampered issue body to its last legitimate snapshot is contract protection, not repair, and is required; produce a verdict on a PR-backed route without all four mandatory dispatched reports accepted; merge a PR before Steps 3–5 pass; close an issue whose required external effects have not all succeeded; edit merged PR bodies; create child issues except through the expand-parent action; bypass the daemon-serialized CLI for state writes; remove central daemon scheduling state outside the Step 7 rules. In scope and non-negotiable: scope mapping, test integrity, hygiene, contract rows, CI reality, and the changed code's correctness/conventions/structure **judged against the issue's stated design** (the diff-audit code findings). Out of scope — never a verdict input: alternative-design taste, improvement ideas beyond the issue's design, and anything about code the diff does not touch; review never diverges the problem.
