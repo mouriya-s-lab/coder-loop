@@ -48,7 +48,7 @@ const SUMMARY_TAG_PREFIX = "summary-"
 const SUMMARY_NONCE_BYTES = 8
 const WATCHDOG_GRACE_MS = 10 * 60 * 1000
 const WATCHDOG_KILL_MS = 5 * 1000
-const ATTEMPT_TIMEOUT_MS = 60 * 60 * 1000
+const ATTEMPT_TIMEOUT_MS = 2 * 60 * 60 * 1000
 const ATTEMPT_KILL_MS = 5 * 1000
 
 export function makeRunSummaryTag(): string {

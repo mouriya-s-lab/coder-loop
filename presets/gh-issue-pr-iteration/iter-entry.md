@@ -72,8 +72,8 @@ Select the step sequence for `ISSUE_KIND`:
 
 | `ISSUE_KIND` | Step sequence (every entry = one dispatch) |
 |---|---|
-| `code` or empty (legacy) | [research if Step 2 left you unsure what the right change is] → implement → verify → e2e → submit |
-| `blocked` | resolve-blocker → implement → verify → e2e → submit |
+| `code` or empty (legacy) | [research if Step 2 left you unsure what the right change is] → implement → (verify ∥ e2e) → submit |
+| `blocked` | resolve-blocker → implement → (verify ∥ e2e) → submit |
 | `code-spike` | [research?] → source-spike |
 | `comment` | [research?] → spike-comment |
 
@@ -90,11 +90,13 @@ List rules — these are the core of your job:
 - You may add lines mid-run (a failed verify inserts a new scoped implement line; a surprise discovery inserts a research line). Added lines obey the same two-state exit rule.
 - You may not check a line yourself by doing its work yourself. A line is checked only by an accepted subagent report.
 
+Contention plan (mirrors the review chain's): verify (owns the `AGENT_CWD` checkout) and e2e (works in its own worktree of the issue branch — its task file makes it create one) have no data dependency on each other. Once the implement line is accepted, dispatch **both in the same round** and wait on both; judge each report as it arrives. submit waits for both to be accepted. Every other pair of steps is sequential.
+
 Planning-stage exception: if the Step 2 reads show the issue is already satisfied on base, invalid, duplicate, parent/wrapper-only, or needs splitting — do not force the sequence. Dispatch `research` to gather the live evidence if you don't have it, then the list collapses to wrap-up: record the classification and proposed child issue specs (titles, expected outcomes, acceptance, evidence requirements) in the handoff. You do not create child issues, close issues, or write final state — review owns those.
 
-### Step 4 — Execute the list, item by item
+### Step 4 — Execute the list, ready item(s) at a time
 
-Take the first unchecked line. Dispatch it; never do it yourself — you write no code, run no tests/builds, start no servers, capture no screenshots, execute no acceptance-row commands, and post no PRs/comments in this process, however small the item looks.
+Take every unchecked line whose dependencies are satisfied — per the Step 3 contention plan that is one line at a time, except verify and e2e, which become ready together and are dispatched in the same round. Dispatch them; never do the work yourself — you write no code, run no tests/builds, start no servers, capture no screenshots, execute no acceptance-row commands, and post no PRs/comments in this process, however small the item looks.
 
 Step directories (each contains `task.md` + `report.md` for the subagent, `accept.md` for you):
 
@@ -133,9 +135,9 @@ Fill in every field with the actual bound values — task files declare which fi
 **4d. Route the verdict.**
 - gaps → follow up with the same subagent carrying the exact gap list; back to 4b when it responds.
 - wrong direction → close the subagent, dispatch fresh with a corrected `Step focus`; note the abandoned dispatch in the ledger.
-- accepted → mark the line `[x]`, append one ledger line: `step | subagent id | outcome | declared side effects (PIDs, temp files, branches, services)`. Re-print the task list. Take the next unchecked line.
-- verify or e2e reported a product failure (a failing row, a mismatch against the issue contract) → that is not a step gap: insert `[ ] implement — fix: <failure>` before the verify line, mark the current attempt in the ledger, and continue the loop (the inserted implement runs first, then **both** verify and e2e re-dispatch for the **full** contract — uncheck both lines; a fix can regress either side).
-- the e2e line's `Step focus` carries the browser rows the verify report deferred (`deferred: e2e step` verdicts) plus the changed path to exercise; a deferred row still open after e2e means the contract is unverified — it never silently closes.
+- accepted → mark the line `[x]`, append one ledger line: `step | subagent id | outcome | declared side effects (PIDs, temp files, branches, services)`. Re-print the task list. Take the next ready line(s).
+- verify or e2e reported a product failure (a failing row, a mismatch against the issue contract) → that is not a step gap: insert `[ ] implement — fix: <failure>` before the verify line, mark the current attempt in the ledger, and continue the loop. If the other half of the verify/e2e pair is still running, let it finish and judge its report normally first — never leave a dispatched agent unjudged, and its failures join the same fix scope. Then the inserted implement runs, and **both** verify and e2e re-dispatch in parallel for the **full** contract — uncheck both lines; a fix can regress either side.
+- the e2e line's `Step focus` carries the browser-Env acceptance rows **you enumerate yourself** from the issue's `## 验收标准` / `## 继承验证义务` tables (every row whose Env is `browser` — the same set verify reports as `deferred: e2e step`; e2e does not wait for the verify report) plus the changed path to exercise; a deferred row still open after e2e means the contract is unverified — it never silently closes.
 
 When the last line is `[x]`/`[-]`, go to Step 5.
 

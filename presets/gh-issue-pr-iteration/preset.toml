@@ -593,4 +593,4 @@ path = "review/actions/state-write.md"
 [agent]
 binary                = "claude"
 extraArgs             = []
-attemptTimeoutSeconds = 3600
+attemptTimeoutSeconds = 7200
