@@ -250,7 +250,7 @@ Review 是调度者（orchestrator）：PR-backed kind 必须先派 diff-audit /
 | Source-spike audit（`kind:code-spike`） | 调度者亲自（`review/source-spike-audit.md`） | issue comment + spike branch + 证据 | no-merge 语义、branch/SHA、命令覆盖、结果分支；有 PR 即 retry | retry action |
 | Closure | 调度者亲自 | 上面验收点综合 + child closure table | 决定 terminal action（accept-pr / accept-no-pr / retry / expand-parent / skip / blocked / stop） | 选 action 文件 |
 
-代码审查**在 loop 内**，锚点是 issue 声明的设计：逻辑正确性、conventions、diff 内结构由 diff-audit 步审，所有发现必须带锚（可追溯失败路径 / issue 原句 / convention 来源），**不发散**——替代设计、issue 设计之外的改进想法、diff 没碰的代码一律不进 verdict（diff 外既有问题至多在 Problems 记一行 out-of-scope observation）。其余 code 相关检查：逐行契约复验（replay 步）、测试完整性两侧实测（test-integrity 步）、e2e 直跑复演与脚本形态检查（e2e-replay 步）、scope 对应与 runtime artifacts 不入仓（diff-audit 步）、checks/mergeability 实测（调度者亲自）。PR-backed kind 缺少四份派发报告（diff-audit / test-integrity / replay / e2e-replay）任意一份的 verdict 无效（仅 no-PR 路由与 infra-stop 例外）。
+代码审查**在 loop 内**，锚点是 issue 声明的设计：逻辑正确性、conventions、diff 内结构由 diff-audit 步审，所有发现必须带锚（可追溯失败路径 / issue 原句 / convention 来源），**不发散**——替代设计、issue 设计之外的改进想法、diff 没碰的代码一律不进 verdict（diff 外既有问题至多在 Problems 记一行 out-of-scope observation）。其余 code 相关检查：逐行契约复验（replay 步）、测试完整性两侧实测（test-integrity 步）、e2e 直跑复演与脚本形态检查（e2e-replay 步）、scope 对应与 runtime artifacts 不入仓（diff-audit 步）、checks/mergeability 实测（调度者亲自）。PR-backed kind 缺少四份派发报告（diff-audit / test-integrity / replay / e2e-replay）任意一份的 verdict 无效（仅 no-PR 路由与 infra-stop 例外）。review 的每条 PR 回复是全量报告：每个 check 一节，且每节必须填该检查的实测值（SHA / 计数 / 原句引用 / URL / 时间戳，见 action 文件模板）——这些值只有真做了检查才存在，填不出即检查未做。
 
 ---
 

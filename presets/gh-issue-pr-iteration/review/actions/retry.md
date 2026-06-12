@@ -10,6 +10,8 @@ Publish precise feedback for work that remains actionable.
 
 ## Feedback body — a full review report, fixed structure
 
+Every field below demands a measured value, a verbatim quote, or an identifier that only exists if the check was actually performed. A field you cannot fill is a check you have not done — go back and do it; never pad the field with prose.
+
 ```markdown
 ## Review verdict: changes requested (<RUN_ID>)
 <if contract integrity failed, the red-line warning opens here, before anything else:
@@ -18,11 +20,31 @@ been detected and reversed to the snapshot of <editedAt>; editing the contract t
 review is the one inviolable line — recurrence routes this issue out of the loop.>
 
 ## Check reports
-### diff-audit — <pass/fail; digest: scope mapping result, hygiene, code findings with anchors>
-### test-integrity — <pass/fail; digest: enumeration, both counts, correlation>
-### replay — <pass/fail; digest: rows run/matched/failed, blocked-path e2e when applicable>
-### e2e-replay — <pass/fail; digest: claims re-driven, observations, form check>
-### Judgments — contract integrity / trace honesty / PR protocol / title-intent / caveat honesty / evidence form / checks+mergeability: <one line each, pass or fail with the exact trigger quote>
+### diff-audit — <pass/fail>
+refs <base-sha>..<head-sha>; files changed <n>: in-scope <n> / support <n> / unmapped <n: list or none>;
+hygiene: <none / findings with paths>; code findings: <none / one line per finding:
+category @ file:line — anchor>
+### test-integrity — <pass/fail>
+base <count> (`<command>`) vs head <count> (`<command>`); enumerated: removed <n> /
+renamed <n> / skipped <n> / weakened <n>; correlation: <consistent / hidden weakening: what>;
+packet delta line: <agrees / mismatch: quote both>
+### replay — <pass/fail>
+head <sha>; rows <total>: matched <n> / failed <n: row #s> / deferred-browser <n: row #s> /
+artifact-verified <n>; blocked-path e2e: <command + exit / not applicable>
+### e2e-replay — <pass/fail>
+environment: <probe result; restarted: yes/no>; claims re-driven <n>: matched <n> /
+mismatched <n: which>; browser rows closed <n>/<n deferred>; form: <direct / script: name it>
+### Judgments
+- contract integrity: <body edits since enqueue: n; per edit: editedAt + editor; verdict —
+  tampered cases add `restored to snapshot <editedAt>`>
+- trace honesty: <claims cross-checked: n; one named pair: "<claim>" ↔ <observation>; verdict>
+- PR protocol: <body first line quoted verbatim; this run's PR comment URL; verdict>
+- title-intent: <"<issue title>" vs "<PR title>" after prefix strip; verdict>
+- caveat honesty: <Intent/Result blocks read: run ids; trigger phrases: none / "<exact quote>">
+- evidence form: <required packet sections: present / missing by name; manifest
+  re-runnable: yes / no + the missing entry>
+- checks/mergeability: <head sha observed; each check: name=conclusion; mergeStateStatus;
+  observed at <timestamp>>
 
 ## 缺失汇总
 - <every missing/failing item across all checks, one line each, in one place —
@@ -42,7 +64,7 @@ do not bypass coder-loop review; do not merge manually; do not close the issue m
 never edit the issue body without literal authorization on the issue thread
 ```
 
-Every check that ran appears in `Check reports` even when it passed; every check that did not run appears in `Skipped checks` with its reason. The 缺失汇总 block is the single authoritative gap list — iteration fixes everything in it in one retry.
+Every check that ran appears in `Check reports` even when it passed — with its measured values, never a bare verdict; every check that did not run appears in `Skipped checks` with its reason. The 缺失汇总 block is the single authoritative gap list — iteration fixes everything in it in one retry.
 
 ## After publishing
 
