@@ -496,6 +496,75 @@ describe("daemon", () => {
 		}
 	})
 
+	test("daemon emits validation events when existing chain preset falls back", async () => {
+		const fixture = await startFixture("existing-preset-fallback-events", { schedulerPresetDir: null, schedulerIntervalMs: 20 })
+		try {
+			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				const invalidPresetChain = store.createChain({
+					name: "invalid-preset-fallback-chain",
+					preset: "bad_name",
+					repository: "mouriya-s-lab/coder-loop",
+					baseBranch: "main",
+					status: "active",
+					metadata: {},
+				})
+				store.createItem({
+					chainId: invalidPresetChain.id,
+					issueNumber: 41101,
+					repoCwd: REPO_ROOT,
+					status: "queued",
+					attempts: 0,
+					extra: { sleepMs: 5, exitCode: 0 },
+				})
+				const unknownPresetChain = store.createChain({
+					name: "unknown-preset-fallback-chain",
+					preset: "missing-preset",
+					repository: "mouriya-s-lab/coder-loop",
+					baseBranch: "main",
+					status: "active",
+					metadata: {},
+				})
+				store.createItem({
+					chainId: unknownPresetChain.id,
+					issueNumber: 41102,
+					repoCwd: REPO_ROOT,
+					status: "queued",
+					attempts: 0,
+					extra: { sleepMs: 5, exitCode: 0 },
+				})
+			} finally {
+				store.close()
+			}
+
+			const events = await waitFor(
+				async () => await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, {
+					kind: "validation",
+					type: "preset.fallback",
+				}),
+				(result) => result.events.some((event) => event.type === "preset.fallback" && event.payload.reason === "invalid_name")
+					&& result.events.some((event) => event.type === "preset.fallback" && event.payload.reason === "unknown_preset"),
+				10_000,
+			)
+			const invalidEvent = events.events.find((event) => event.type === "preset.fallback" && event.payload.reason === "invalid_name")
+			const unknownEvent = events.events.find((event) => event.type === "preset.fallback" && event.payload.reason === "unknown_preset")
+			expect(invalidEvent).toMatchObject({
+				kind: "validation",
+				type: "preset.fallback",
+				chain: "invalid-preset-fallback-chain",
+				payload: { preset: "bad_name", fallbackPreset: "gh-issue-pr-iteration", reason: "invalid_name" },
+			})
+			expect(unknownEvent).toMatchObject({
+				kind: "validation",
+				type: "preset.fallback",
+				chain: "unknown-preset-fallback-chain",
+				payload: { preset: "missing-preset", fallbackPreset: "gh-issue-pr-iteration", reason: "unknown_preset" },
+			})
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("socket chain.create rejects oversized request and metadata payloads", async () => {
 		const fixture = await startFixture("chain-create-size-limits", { schedulerEnabled: false })
 		try {

@@ -55,6 +55,7 @@ import {
 	observabilityDecisionKey,
 	renderObservabilityEvent,
 	type ObservabilityEvent,
+	type ObservabilitySubject,
 } from "./observability"
 
 export type DaemonCommandName =
@@ -191,8 +192,12 @@ const ITEM_UPDATE_FIELD_KEYS = [
 	"extraPatch",
 	"dependsOn",
 ] as const
-const ITEM_UPDATE_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "fields", ...ITEM_UPDATE_FIELD_KEYS] as const
+const ITEM_UPDATE_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "fields", ...ITEM_UPDATE_FIELD_KEYS, "agentRunId", "agentPhase"] as const
 const ITEM_REORDER_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "position"] as const
+
+type ItemUpdateAuditAttribution =
+	| { kind: "operator"; subject: Extract<ObservabilitySubject, { kind: "operator" }> }
+	| { kind: "agent"; runId: string; phase: string; subject: Extract<ObservabilitySubject, { kind: "agent" }> }
 
 export class DaemonError extends Error {
 	constructor(
@@ -202,6 +207,192 @@ export class DaemonError extends Error {
 	) {
 		super(message)
 		this.name = "DaemonError"
+	}
+}
+
+export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: SchedulerEvent): ObservabilityEvent {
+	switch (event.type) {
+		case "slot.busy":
+			return makeObservabilityEvent({
+				kind: "decision",
+				type: "slot.busy",
+				chain: chain.name,
+				runId: event.activeRunId,
+				subject: { kind: "engine" },
+				payload: { slotKey: event.slotKey, chainId: event.chainId, repoCwd: event.repoCwd, activeRunId: event.activeRunId },
+			})
+		case "item.dependency_wait":
+			return makeObservabilityEvent({
+				kind: "decision",
+				type: "item.dependency_wait",
+				chain: chain.name,
+				item: event.itemId,
+				subject: { kind: "engine" },
+				payload: { itemId: event.itemId, dependsOn: [...event.dependsOn], unsatisfied: [...event.unsatisfied] },
+			})
+		case "item.backoff":
+			return makeObservabilityEvent({
+				kind: "decision",
+				type: "item.backoff",
+				chain: chain.name,
+				item: event.itemId,
+				subject: { kind: "engine" },
+				payload: { itemId: event.itemId, failureCount: event.failureCount, nextRunAt: event.nextRunAt },
+			})
+		case "agent.spawn":
+			return makeObservabilityEvent({
+				kind: "lifecycle",
+				type: "agent.spawn",
+				chain: chain.name,
+				item: event.itemId,
+				runId: event.runId,
+				phase: event.phase,
+				subject: { kind: "engine" },
+				payload: { slotKey: event.slotKey, pid: event.pid, worktreePath: event.worktreePath, presetDir: event.presetDir },
+			})
+		case "agent.exit":
+			return makeObservabilityEvent({
+				kind: "lifecycle",
+				type: "agent.exit",
+				chain: chain.name,
+				item: event.itemId,
+				runId: event.runId,
+				phase: event.phase,
+				subject: { kind: "agent", runId: event.runId, phase: event.phase },
+				payload: { slotKey: event.slotKey, exitCode: event.exitCode, status: event.status, excerpt: event.excerpt },
+			})
+		case "session_id.invalidated":
+			return makeObservabilityEvent({
+				kind: "validation",
+				type: "session_id.invalidated",
+				chain: chain.name,
+				item: event.itemId,
+				runId: event.runId,
+				phase: event.phase,
+				subject: { kind: "engine" },
+				payload: { runner: event.runner, previousSessionId: event.previousSessionId, reason: event.reason },
+			})
+		case "spawn.aborted":
+			return makeObservabilityEvent({
+				kind: "validation",
+				type: "spawn.aborted",
+				chain: chain.name,
+				item: event.itemId,
+				subject: { kind: "engine" },
+				payload: { slotKey: event.slotKey, chainId: event.chainId, issueNumber: event.issueNumber, reason: event.reason, toStatus: event.toStatus },
+			})
+		case "chain.complete_trigger":
+			return makeObservabilityEvent({
+				kind: "decision",
+				type: "chain.complete_trigger",
+				chain: chain.name,
+				...(event.runId === undefined ? {} : { runId: event.runId }),
+				subject: { kind: "engine" },
+				payload: {
+					chainId: event.chainId,
+					decision: event.decision,
+					...(event.reason === undefined ? {} : { reason: event.reason }),
+				},
+			})
+		case "chain.complete_trigger_failed":
+			return makeObservabilityEvent({
+				kind: "diagnostic",
+				type: "chain.complete_trigger_failed",
+				chain: chain.name,
+				...(event.runId === undefined ? {} : { runId: event.runId }),
+				subject: { kind: "engine" },
+				payload: { chainId: event.chainId, error: event.error },
+			})
+		case "chain.completed":
+			return makeObservabilityEvent({
+				kind: "lifecycle",
+				type: "chain.completed",
+				chain: chain.name,
+				...(event.runId === undefined ? {} : { runId: event.runId }),
+				subject: { kind: "engine" },
+				payload: { chainId: event.chainId },
+			})
+		case "phase.start":
+			return makeObservabilityEvent({
+				kind: "lifecycle",
+				type: "phase.start",
+				chain: chain.name,
+				item: event.itemId,
+				runId: event.runId,
+				phase: event.phase,
+				subject: { kind: "engine" },
+				payload: { repoCwd: event.repoCwd, pid: event.pid },
+			})
+		case "phase.end":
+			return makeObservabilityEvent({
+				kind: "lifecycle",
+				type: "phase.end",
+				chain: chain.name,
+				item: event.itemId,
+				runId: event.runId,
+				phase: event.phase,
+				subject: { kind: "engine" },
+				payload: { exitCode: event.exitCode, durationSeconds: event.durationSeconds, status: event.status },
+			})
+		case "attempt.timeout":
+			return makeObservabilityEvent({
+				kind: "lifecycle",
+				type: "attempt.timeout",
+				chain: chain.name,
+				item: event.itemId,
+				runId: event.runId,
+				phase: event.phase,
+				subject: { kind: "engine" },
+				payload: { signal: event.signal, attemptMs: event.attemptMs, excerpt: event.excerpt },
+			})
+		case "watchdog.armed":
+			return makeObservabilityEvent({
+				kind: "lifecycle",
+				type: "watchdog.armed",
+				chain: chain.name,
+				item: event.itemId,
+				runId: event.runId,
+				phase: event.phase,
+				subject: { kind: "engine" },
+				payload: { marker: event.marker, graceMs: event.graceMs },
+			})
+		case "watchdog.fire":
+			return makeObservabilityEvent({
+				kind: "lifecycle",
+				type: "watchdog.fire",
+				chain: chain.name,
+				item: event.itemId,
+				runId: event.runId,
+				phase: event.phase,
+				subject: { kind: "engine" },
+				payload: { signal: event.signal, graceMs: event.graceMs, excerpt: event.excerpt },
+			})
+		case "queue.terminal":
+			return makeObservabilityEvent({
+				kind: "audit",
+				type: "queue.terminal",
+				chain: chain.name,
+				item: event.itemId,
+				runId: event.runId,
+				subject: { kind: "engine" },
+				payload: { itemId: event.itemId, terminalStatus: event.terminalStatus },
+			})
+		case "item.dependency_unblocked":
+			return makeObservabilityEvent({
+				kind: "audit",
+				type: "item.dependency_unblocked",
+				chain: chain.name,
+				item: event.itemId,
+				subject: { kind: "engine" },
+				payload: {
+					itemId: event.itemId,
+					fromStatus: event.fromStatus,
+					toStatus: event.toStatus,
+					dependsOn: [...event.dependsOn],
+				},
+			})
+		default:
+			return assertNeverSchedulerEvent(event)
 	}
 }
 
@@ -222,6 +413,7 @@ export class CoderLoopDaemon {
 	private ownsDaemonSocket = false
 	private ownsDaemonPid = false
 	private readonly lastDecisionFingerprints = new Map<string, string>()
+	private readonly presetFallbackFingerprints = new Set<string>()
 	private resolveClosed: (() => void) | null = null
 	private readonly daemonBatchTimestamp = formatDaemonBatchTimestamp(new Date())
 	readonly closed: Promise<void>
@@ -1034,6 +1226,7 @@ export class CoderLoopDaemon {
 		const chain = store.getChain(item.chainId)
 		if (chain === null) throw new DaemonError("not_found", `chain ${item.chainId} was not found`, { chainId: item.chainId })
 		assertChainAllowsItemMutation(chain, "item.update")
+		const auditAttribution = itemUpdateAuditAttribution(args)
 		const input: UpdateItemInput = {}
 		const repoCwd = optionalString(fields, "repoCwd")
 		if (repoCwd !== null) assignOptional(input, "repoCwd", await validateRepoCwdForRequest(repoCwd))
@@ -1079,7 +1272,8 @@ export class CoderLoopDaemon {
 					type: "item.status",
 					chain: chain.name,
 					item: item.id,
-					subject: { kind: "operator" },
+					...(auditAttribution.kind === "agent" ? { runId: auditAttribution.runId, phase: auditAttribution.phase } : {}),
+					subject: auditAttribution.subject,
 					payload: {
 						itemId: item.id,
 						issueNumber: item.issueNumber,
@@ -1238,7 +1432,8 @@ export class CoderLoopDaemon {
 		const scheduler = this.options.scheduler ?? {}
 		const externalOnEvent = scheduler.onEvent
 		const schedulerPresetDir = scheduler.presetDir
-		const presetDirForChain = scheduler.presetDirForChain ?? ((chain: ChainRecord) => schedulerPresetDir ?? bundledPresetDirForScheduler(chain))
+		const presetDirForChain = scheduler.presetDirForChain ?? ((chain: ChainRecord) =>
+			schedulerPresetDir ?? bundledPresetDirForScheduler(chain, (reason) => this.recordPresetFallbackEventOnce(chain, reason)))
 		const presetPromptResolver = (ctx: SchedulerSpawnContext): Promise<string> =>
 			resolveSchedulerPresetPhasePrompt({ presetDir: presetDirForChain(ctx.chain), phase: ctx.phase })
 		const fallbackRunner = scheduler.runner ?? defaultDaemonRunner()
@@ -1261,7 +1456,7 @@ export class CoderLoopDaemon {
 			prompt: scheduler.prompt ?? presetPromptResolver,
 			onEvent: async (event) => {
 				if (this.store !== null) {
-					await this.recordObservabilityEventForChainId(event.chainId, (chain) => this.schedulerEventToObservabilityEvent(chain, event))
+					await this.recordObservabilityEventForChainId(event.chainId, (chain) => schedulerEventToObservabilityEvent(chain, event))
 				}
 				await externalOnEvent?.(event)
 			},
@@ -1272,7 +1467,7 @@ export class CoderLoopDaemon {
 		if (scheduler.presetDirForChain !== undefined) {
 			options.presetDirForChain = scheduler.presetDirForChain
 		} else if (schedulerPresetDir === undefined) {
-			options.presetDirForChain = (chain) => bundledPresetDirForScheduler(chain)
+			options.presetDirForChain = (chain) => bundledPresetDirForScheduler(chain, (reason) => this.recordPresetFallbackEventOnce(chain, reason))
 		}
 		if (scheduler.worktreeManager !== undefined) options.worktreeManager = scheduler.worktreeManager
 		if (scheduler.kindResolver !== undefined) options.kindResolver = scheduler.kindResolver
@@ -1316,190 +1511,11 @@ export class CoderLoopDaemon {
 		return options
 	}
 
-	private schedulerEventToObservabilityEvent(chain: ChainRecord, event: SchedulerEvent): ObservabilityEvent {
-		switch (event.type) {
-			case "slot.busy":
-				return makeObservabilityEvent({
-					kind: "decision",
-					type: "slot.busy",
-					chain: chain.name,
-					runId: event.activeRunId,
-					subject: { kind: "engine" },
-					payload: { slotKey: event.slotKey, chainId: event.chainId, repoCwd: event.repoCwd, activeRunId: event.activeRunId },
-				})
-			case "item.dependency_wait":
-				return makeObservabilityEvent({
-					kind: "decision",
-					type: "item.dependency_wait",
-					chain: chain.name,
-					item: event.itemId,
-					subject: { kind: "engine" },
-					payload: { itemId: event.itemId, dependsOn: [...event.dependsOn], unsatisfied: [...event.unsatisfied] },
-				})
-			case "item.backoff":
-				return makeObservabilityEvent({
-					kind: "decision",
-					type: "item.backoff",
-					chain: chain.name,
-					item: event.itemId,
-					subject: { kind: "engine" },
-					payload: { itemId: event.itemId, failureCount: event.failureCount, nextRunAt: event.nextRunAt },
-				})
-			case "agent.spawn":
-				return makeObservabilityEvent({
-					kind: "lifecycle",
-					type: "agent.spawn",
-					chain: chain.name,
-					item: event.itemId,
-					runId: event.runId,
-					phase: event.phase,
-					subject: { kind: "engine" },
-					payload: { slotKey: event.slotKey, pid: event.pid, worktreePath: event.worktreePath, presetDir: event.presetDir },
-				})
-			case "agent.exit":
-				return makeObservabilityEvent({
-					kind: "lifecycle",
-					type: "agent.exit",
-					chain: chain.name,
-					item: event.itemId,
-					runId: event.runId,
-					phase: event.phase,
-					subject: { kind: "agent", runId: event.runId, phase: event.phase },
-					payload: { slotKey: event.slotKey, exitCode: event.exitCode, status: event.status, excerpt: event.excerpt },
-				})
-			case "session_id.invalidated":
-				return makeObservabilityEvent({
-					kind: "validation",
-					type: "session_id.invalidated",
-					chain: chain.name,
-					item: event.itemId,
-					runId: event.runId,
-					phase: event.phase,
-					subject: { kind: "engine" },
-					payload: { runner: event.runner, previousSessionId: event.previousSessionId, reason: event.reason },
-				})
-			case "spawn.aborted":
-				return makeObservabilityEvent({
-					kind: "validation",
-					type: "spawn.aborted",
-					chain: chain.name,
-					item: event.itemId,
-					subject: { kind: "engine" },
-					payload: { slotKey: event.slotKey, chainId: event.chainId, issueNumber: event.issueNumber, reason: event.reason, toStatus: event.toStatus },
-				})
-			case "chain.complete_trigger":
-				return makeObservabilityEvent({
-					kind: "decision",
-					type: "chain.complete_trigger",
-					chain: chain.name,
-					...(event.runId === undefined ? {} : { runId: event.runId }),
-					subject: { kind: "engine" },
-					payload: {
-						chainId: event.chainId,
-						decision: event.decision,
-						...(event.reason === undefined ? {} : { reason: event.reason }),
-					},
-				})
-			case "chain.complete_trigger_failed":
-				return makeObservabilityEvent({
-					kind: "diagnostic",
-					type: "chain.complete_trigger_failed",
-					chain: chain.name,
-					...(event.runId === undefined ? {} : { runId: event.runId }),
-					subject: { kind: "engine" },
-					payload: { chainId: event.chainId, error: event.error },
-				})
-			case "chain.completed":
-				return makeObservabilityEvent({
-					kind: "lifecycle",
-					type: "chain.completed",
-					chain: chain.name,
-					...(event.runId === undefined ? {} : { runId: event.runId }),
-					subject: { kind: "engine" },
-					payload: { chainId: event.chainId },
-				})
-			case "phase.start":
-				return makeObservabilityEvent({
-					kind: "lifecycle",
-					type: "phase.start",
-					chain: chain.name,
-					item: event.itemId,
-					runId: event.runId,
-					phase: event.phase,
-					subject: { kind: "engine" },
-					payload: { repoCwd: event.repoCwd, pid: event.pid },
-				})
-			case "phase.end":
-				return makeObservabilityEvent({
-					kind: "lifecycle",
-					type: "phase.end",
-					chain: chain.name,
-					item: event.itemId,
-					runId: event.runId,
-					phase: event.phase,
-					subject: { kind: "engine" },
-					payload: { exitCode: event.exitCode, durationSeconds: event.durationSeconds, status: event.status },
-				})
-			case "attempt.timeout":
-				return makeObservabilityEvent({
-					kind: "lifecycle",
-					type: "attempt.timeout",
-					chain: chain.name,
-					item: event.itemId,
-					runId: event.runId,
-					phase: event.phase,
-					subject: { kind: "engine" },
-					payload: { signal: event.signal, attemptMs: event.attemptMs, excerpt: event.excerpt },
-				})
-			case "watchdog.armed":
-				return makeObservabilityEvent({
-					kind: "lifecycle",
-					type: "watchdog.armed",
-					chain: chain.name,
-					item: event.itemId,
-					runId: event.runId,
-					phase: event.phase,
-					subject: { kind: "engine" },
-					payload: { marker: event.marker, graceMs: event.graceMs },
-				})
-			case "watchdog.fire":
-				return makeObservabilityEvent({
-					kind: "lifecycle",
-					type: "watchdog.fire",
-					chain: chain.name,
-					item: event.itemId,
-					runId: event.runId,
-					phase: event.phase,
-					subject: { kind: "engine" },
-					payload: { signal: event.signal, graceMs: event.graceMs, excerpt: event.excerpt },
-				})
-			case "queue.terminal":
-				return makeObservabilityEvent({
-					kind: "audit",
-					type: "queue.terminal",
-					chain: chain.name,
-					item: event.itemId,
-					runId: event.runId,
-					subject: { kind: "engine" },
-					payload: { itemId: event.itemId, terminalStatus: event.terminalStatus },
-				})
-			case "item.dependency_unblocked":
-				return makeObservabilityEvent({
-					kind: "audit",
-					type: "item.dependency_unblocked",
-					chain: chain.name,
-					item: event.itemId,
-					subject: { kind: "engine" },
-					payload: {
-						itemId: event.itemId,
-						fromStatus: event.fromStatus,
-						toStatus: event.toStatus,
-						dependsOn: [...event.dependsOn],
-					},
-				})
-			default:
-				return assertNeverSchedulerEvent(event)
-		}
+	private recordPresetFallbackEventOnce(chain: ChainRecord, reason: PresetFallbackReason): void {
+		const fingerprint = `${chain.id}:${chain.preset}:${reason}`
+		if (this.presetFallbackFingerprints.has(fingerprint)) return
+		this.presetFallbackFingerprints.add(fingerprint)
+		recordPresetFallbackEvent(chain, reason, this.options)
 	}
 
 	private warnSkippedInvalidChain(chain: ChainRecord, error: RuntimePathError, context: string): void {
@@ -2186,6 +2202,7 @@ function validateItemUpdateRequest(args: JsonObject): void {
 	}
 	const fields = itemUpdateFields(args)
 	if (Object.keys(fields).length === 0) throw new DaemonError("invalid_request", "item.update requires at least one field to update")
+	validateItemUpdateAuditAttribution(args, fields)
 }
 
 function validateItemUpdateSelector(args: JsonObject): void {
@@ -2206,6 +2223,30 @@ function itemUpdateFields(args: JsonObject): JsonObject {
 		if (Object.hasOwn(args, key)) fields[key] = args[key] as JsonValue
 	}
 	return fields
+}
+
+function validateItemUpdateAuditAttribution(args: JsonObject, fields: JsonObject): void {
+	const hasRunId = Object.hasOwn(args, "agentRunId")
+	const hasPhase = Object.hasOwn(args, "agentPhase")
+	if (!hasRunId && !hasPhase) return
+	if (!hasRunId || !hasPhase) {
+		throw new DaemonError("invalid_request", "item.update agent attribution requires both agentRunId and agentPhase", {})
+	}
+	optionalString(args, "agentRunId")
+	optionalString(args, "agentPhase")
+	if (!Object.hasOwn(fields, "status")) {
+		throw new DaemonError("invalid_request", "item.update agent attribution is only valid for status writes", {})
+	}
+}
+
+function itemUpdateAuditAttribution(args: JsonObject): ItemUpdateAuditAttribution {
+	const runId = optionalString(args, "agentRunId")
+	const phase = optionalString(args, "agentPhase")
+	if (runId === null && phase === null) return { kind: "operator", subject: { kind: "operator" } }
+	if (runId === null || phase === null) {
+		throw new DaemonError("invalid_request", "item.update agent attribution requires both agentRunId and agentPhase", {})
+	}
+	return { kind: "agent", runId, phase, subject: { kind: "agent", runId, phase } }
 }
 
 function requestedChainName(args: JsonObject): string | null {
@@ -2302,18 +2343,45 @@ function bundledPresetDir(presetName: string): string {
 	return resolve(BUNDLED_PRESETS_DIR, presetName)
 }
 
-function bundledPresetDirForScheduler(chain: ChainRecord): string {
+type PresetFallbackReason = "invalid_name" | "unknown_preset"
+
+function bundledPresetDirForScheduler(chain: ChainRecord, recordFallback: (reason: PresetFallbackReason) => void): string {
 	const fallback = bundledPresetDir(DEFAULT_PRESET_NAME)
 	if (!PRESET_NAME_PATTERN.test(chain.preset)) {
-		console.warn(`coder-loop daemon warning: chain ${chain.id} has invalid preset ${JSON.stringify(chain.preset)}; using ${DEFAULT_PRESET_NAME}`)
+		recordFallback("invalid_name")
 		return fallback
 	}
 	const dir = bundledPresetDir(chain.preset)
 	if (!existsSync(resolve(dir, "preset.toml"))) {
-		console.warn(`coder-loop daemon warning: chain ${chain.id} references unknown preset ${JSON.stringify(chain.preset)}; using ${DEFAULT_PRESET_NAME}`)
+		recordFallback("unknown_preset")
 		return fallback
 	}
 	return dir
+}
+
+function recordPresetFallbackEvent(chain: ChainRecord, reason: PresetFallbackReason, loopDataRootOptions: LoopDataRootOptions): void {
+	const event = makeObservabilityEvent({
+		kind: "validation",
+		type: "preset.fallback",
+		chain: chain.name,
+		subject: { kind: "engine" },
+		payload: {
+			chainId: chain.id,
+			preset: chain.preset,
+			fallbackPreset: DEFAULT_PRESET_NAME,
+			reason,
+		},
+	})
+	try {
+		appendObservabilityEventSync(resolveLoopDataPaths(loopDataRootOptions).eventsFile, event)
+	} catch {
+		// Observability write failures must not block scheduler fallback.
+	}
+	try {
+		process.stderr.write(`${renderObservabilityEvent(event)}\n`)
+	} catch {
+		// stderr is the final derived human-readable sink.
+	}
 }
 
 function assertNeverSchedulerEvent(event: never): never {

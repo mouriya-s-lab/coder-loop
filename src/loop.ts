@@ -269,6 +269,8 @@ export type ItemCommandArgs =
 			blockerRepo: string | null
 			blockerRef: string | null
 			clearBlocker: boolean
+			agentRunId: string | null
+			agentPhase: string | null
 			loopDataRoot: string | null
 			json: boolean
 	  }
@@ -1445,6 +1447,8 @@ const itemUpdateCliCommand = command({
 		blockerRepo: option({ long: "blocker-repo", type: optional(cmdString) }),
 		blockerRef: option({ long: "blocker-ref", type: optional(cmdString) }),
 		clearBlocker: flag({ long: "clear-blocker" }),
+		agentRunId: option({ long: "agent-run-id", type: optional(cmdString) }),
+		agentPhase: option({ long: "agent-phase", type: optional(cmdString) }),
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
 		json: flag({ long: "json" }),
 	},
@@ -1465,6 +1469,8 @@ const itemUpdateCliCommand = command({
 			blockerRepo: args.blockerRepo ?? null,
 			blockerRef: args.blockerRef ?? null,
 			clearBlocker: args.clearBlocker,
+			agentRunId: args.agentRunId ?? null,
+			agentPhase: args.agentPhase ?? null,
 			loopDataRoot: args.loopDataRoot ?? null,
 			json: args.json,
 		},
@@ -1692,22 +1698,18 @@ function logsQueryFromArgs(args: LogsCommandArgs): ObservabilityEventQuery {
 }
 
 async function resolveLogsEventsFile(args: LogsCommandArgs): Promise<string> {
-	try {
-		const loaded = await loadTargetRuntime({
-			targetCwd: args.targetCwd,
-			configPath: args.configPath,
-			loopDataRoot: args.loopDataRoot ?? null,
-			chainName: args.chainName ?? null,
-			repository: null,
-			baseBranch: null,
-			dryRun: false,
-			worktree: false,
-		})
-		return resolveLoopDataPaths(loopDataRootOption(loaded.options.loopDataRoot)).eventsFile
-	} catch (error) {
-		if (args.loopDataRoot === null || args.loopDataRoot === undefined) throw error
+	if (args.loopDataRoot !== null && args.loopDataRoot !== undefined) {
 		return resolveLoopDataPaths({ loopDataRoot: args.loopDataRoot }).eventsFile
 	}
+	const targetCwd = resolve(args.targetCwd)
+	const configPath = await resolveConfigPath(targetCwd, args.configPath)
+	const configResult = await readStatusConfig(configPath)
+	if (configResult.kind === "ok") {
+		return resolveLoopDataPaths(loopDataRootOption(configResult.value.loopDataRoot)).eventsFile
+	}
+	if (configResult.kind === "invalid") throw new CoderLoopError(configResult.message)
+	if (args.configPath !== null) throw new CoderLoopError(configResult.message)
+	return resolveLoopDataPaths({}).eventsFile
 }
 
 async function runChainCommand(args: string[]): Promise<void> {
@@ -1802,6 +1804,8 @@ async function runItemCommand(args: string[]): Promise<void> {
 		issueNumber: itemArgs.issueNumber,
 		fields: {},
 	}
+	assignCliOptional(requestArgs, "agentRunId", itemArgs.agentRunId)
+	assignCliOptional(requestArgs, "agentPhase", itemArgs.agentPhase)
 	const fields = requestArgs.fields as JsonObject
 	assignCliOptional(fields, "repoCwd", itemArgs.repoCwd)
 	assignCliOptional(fields, "status", itemArgs.status)

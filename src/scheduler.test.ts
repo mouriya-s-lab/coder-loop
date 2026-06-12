@@ -25,7 +25,7 @@ import {
 	type SchedulerPhaseRunner,
 	type SchedulerWorktreeManager,
 } from "./scheduler"
-import { resolveSchedulerPresetPhasePrompt } from "./daemon"
+import { resolveSchedulerPresetPhasePrompt, schedulerEventToObservabilityEvent } from "./daemon"
 import {
 	buildRunnerInvocation,
 	loadPreset,
@@ -38,6 +38,7 @@ import {
 } from "./loop"
 import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import { type ChainRecord, type ItemRecord, openSqliteStateStore } from "./sqlite-state"
+import { appendObservabilityEvent, queryObservabilityEvents } from "./observability"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-tests", String(process.pid))
@@ -58,7 +59,7 @@ describe("scheduler", () => {
 			createItem(fixture.store, chain, { issueNumber: 180, repoCwd: "/repo/a" })
 			createItem(fixture.store, chain, { issueNumber: 181, repoCwd: "/repo/a" })
 
-			await runSchedulerUntilIdle(fixture.options())
+			await runSchedulerUntilIdle(persistedObservabilityOptions(fixture))
 
 			const events = await readRunnerEvents(fixture.eventLog)
 			expect(events.map((event) => `${event.type}:${event.issueNumber}`)).toEqual([
@@ -185,7 +186,7 @@ describe("scheduler", () => {
 			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a" })
 
-			await runSchedulerUntilIdle(fixture.options())
+			await runSchedulerUntilIdle(persistedObservabilityOptions(fixture))
 
 			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
 			expect(fixture.schedulerEvents.some((event) => event.type === "chain.completed" && event.chainId === chain.id)).toBe(true)
@@ -848,7 +849,7 @@ describe("scheduler", () => {
 			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 203, repoCwd: "/repo/a" })
 
-			await runSchedulerUntilIdle(fixture.options())
+			await runSchedulerUntilIdle(persistedObservabilityOptions(fixture))
 
 			const runId = `run-${chain.id}-${item.id}`
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
@@ -857,7 +858,7 @@ describe("scheduler", () => {
 			const stderr = await readFile(paths.runStderrFile(runId), "utf-8")
 			const phaseStdout = await readFile(paths.runPhaseStdoutFile(runId, "iteration"), "utf-8")
 			const phaseStderr = await readFile(paths.runPhaseStderrFile(runId, "iteration"), "utf-8")
-			const events = fixture.schedulerEvents.filter((event) => "runId" in event && event.runId === runId)
+			const events = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, { run: runId })
 
 			expect(status).toMatchObject({
 				runId,
@@ -875,7 +876,7 @@ describe("scheduler", () => {
 			expect(phaseStderr).toBe("")
 			expect(status.eventsPath).toBe(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile)
 			expect(existsSync(paths.runEventsFile(runId))).toBe(false)
-			expect(events.map((event) => event.type)).toEqual([
+			expect(events.events.map((event) => event.type)).toEqual([
 				"agent.spawn",
 				"phase.start",
 				"agent.exit",
@@ -895,18 +896,17 @@ describe("scheduler", () => {
 			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 286, repoCwd: "/repo/a" })
 
-			await runSchedulerUntilIdle(fixture.options())
+			await runSchedulerUntilIdle(persistedObservabilityOptions(fixture))
 
 			const runId = `run-${chain.id}-${item.id}`
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
 			expect(existsSync(paths.runEventsFile(runId))).toBe(false)
-			const persistedTypes = fixture.schedulerEvents
-				.filter((event) => "runId" in event && event.runId === runId)
-				.map((event) => event.type)
+			const persisted = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, { run: runId })
+			const persistedTypes = persisted.events.map((event) => event.type)
 
-			const phaseStartEvents = fixture.schedulerEvents.filter((event) => event.type === "phase.start")
-			const phaseEndEvents = fixture.schedulerEvents.filter((event) => event.type === "phase.end")
-			const queueTerminalEvents = fixture.schedulerEvents.filter((event) => event.type === "queue.terminal")
+			const phaseStartEvents = persisted.events.filter((event) => event.type === "phase.start")
+			const phaseEndEvents = persisted.events.filter((event) => event.type === "phase.end")
+			const queueTerminalEvents = persisted.events.filter((event) => event.type === "queue.terminal")
 
 			expect(phaseStartEvents).toHaveLength(1)
 			expect(phaseEndEvents).toHaveLength(1)
@@ -922,34 +922,33 @@ describe("scheduler", () => {
 			expect(phaseStart).toMatchObject({
 				type: "phase.start",
 				runId,
-				chainId: chain.id,
-				itemId: item.id,
-				repoCwd: "/repo/a",
+				chain: chain.name,
+				item: item.id,
 				phase: "iteration",
+				payload: { repoCwd: "/repo/a" },
 			})
 			expect(typeof phaseStart.ts).toBe("string")
 			expect(Number.isFinite(Date.parse(phaseStart.ts))).toBe(true)
-			expect(phaseStart.pid).toEqual(expect.any(Number))
+			expect(phaseStart.payload.pid).toEqual(expect.any(Number))
 
 			expect(phaseEnd).toMatchObject({
 				type: "phase.end",
 				runId,
-				chainId: chain.id,
-				itemId: item.id,
+				chain: chain.name,
+				item: item.id,
 				phase: "iteration",
-				exitCode: 0,
-				status: "done",
+				payload: { exitCode: 0, status: "done" },
 			})
 			expect(typeof phaseEnd.ts).toBe("string")
 			expect(Number.isFinite(Date.parse(phaseEnd.ts))).toBe(true)
-			expect(phaseEnd.durationSeconds).toBeGreaterThanOrEqual(0)
+			expect(phaseEnd.payload.durationSeconds).toBeGreaterThanOrEqual(0)
 
 			expect(queueTerminal).toMatchObject({
 				type: "queue.terminal",
 				runId,
-				chainId: chain.id,
-				itemId: item.id,
-				terminalStatus: "done",
+				chain: chain.name,
+				item: item.id,
+				payload: { terminalStatus: "done" },
 			})
 			expect(typeof queueTerminal.ts).toBe("string")
 			expect(Number.isFinite(Date.parse(queueTerminal.ts))).toBe(true)
@@ -3615,6 +3614,27 @@ async function createFixture(name: string): Promise<Fixture> {
 	})
 
 	return { store, state, loopDataRoot, eventLog, schedulerEvents, worktreeCalls, options }
+}
+
+function persistedObservabilityOptions(fixture: Fixture, overrides: Partial<SchedulerOptions> = {}): SchedulerOptions {
+	const options = fixture.options(overrides)
+	const baseOnEvent = options.onEvent
+	return {
+		...options,
+		onEvent: async (event) => {
+			await baseOnEvent?.(event)
+			await appendPersistedSchedulerEvent(fixture, event)
+		},
+	}
+}
+
+async function appendPersistedSchedulerEvent(fixture: Fixture, event: SchedulerEvent): Promise<void> {
+	const chain = fixture.store.getChain(event.chainId)
+	if (chain === null) throw new Error(`missing chain ${event.chainId} for scheduler event ${event.type}`)
+	await appendObservabilityEvent(
+		resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile,
+		schedulerEventToObservabilityEvent(chain, event),
+	)
 }
 
 function createChain(
