@@ -2,7 +2,7 @@
 
 ## Goal
 
-Initialize the executable planning output through the current centralized chain/item contract. Create or select a chain with `coder-loop chain ...`, rely on the daemon-owned chain handoff/shared file for run-to-run context, add actionable issues with `coder-loop item batch-add` (or repeated `coder-loop item add` only when batch input is unavailable), and validate with `coder-loop status` plus `--check-runtime`.
+Initialize the executable planning output through the current centralized chain/item contract. Create or select a chain with `coder-loop chain ...`, rely on the daemon-owned chain handoff/shared file for run-to-run context, add actionable issues with `coder-loop item batch-add` (or repeated `coder-loop item add` only when batch input is unavailable), and validate with `coder-loop status <target> --json --chain <chain-name>`.
 
 ## Inputs
 
@@ -91,14 +91,13 @@ Initialize the executable planning output through the current centralized chain/
    ```bash
    coder-loop chain status <chain-name> --json
    coder-loop item list <chain-name> --json
-   coder-loop status {{TARGET_CWD}} --json
-   coder-loop --target-cwd {{TARGET_CWD}} --check-runtime
+   coder-loop status {{TARGET_CWD}} --json --chain <chain-name>
    ```
-   Required result: the new items are visible in `chain status` / `item list`, `status` can select the expected next item, and `--check-runtime` exits 0.
+   Required result: the new items are visible in `chain status` / `item list`, `status` exits 0, the status JSON reports `.state.kind == "ok"`, and `.queue.selected.id` points at the expected next item.
 
 ## Failure handling
 
-If item creation or `--check-runtime` fails:
+If item creation fails, or `coder-loop status {{TARGET_CWD}} --json --chain <chain-name>` exits non-zero, reports `.state.kind != "ok"`, or cannot select the expected `.queue.selected.id`:
 
 - for `item batch-add`, trust the daemon transaction boundary: no item from the failed batch should exist; verify with `coder-loop item list <chain-name> --json`;
 - for fallback repeated `item add`, stop immediately, list what was already inserted, and emit `queue_init_failed` with the compensating action needed;
@@ -113,7 +112,7 @@ If you set `agentCwd` for cross-repo work and validation reports it is not absol
 
 Choose exactly one:
 
-- `queue_initialized` → read `plan/handoff`. `--check-runtime` exit 0; chain items exist; the daemon-owned chain handoff/shared file exists.
+- `queue_initialized` → read `plan/handoff`. `coder-loop status {{TARGET_CWD}} --json --chain <chain-name>` exits 0 with `.state.kind == "ok"` and the expected `.queue.selected.id`; chain items exist; the daemon-owned chain handoff/shared file exists.
 - `queue_init_failed` → read `plan/handoff` with the runtime check error + restoration steps taken.
 
 Do not advance to handoff while runtime is in an inconsistent state.

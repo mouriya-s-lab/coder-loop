@@ -30,7 +30,7 @@ Planning produces planning signal. Concretely:
 - create issues with `gh issue create` (one `kind:*` label each, §1.3);
 - link parent/child via `addSubIssue` (issue-to-issue only, never PR-as-child);
 - initialize `central state DB` queue with actionable issues;
-- run `coder-loop --target-cwd <target> --check-runtime` to confirm queue valid;
+- run `coder-loop status <target> --json --chain <chain-name>` and confirm `.state.kind == "ok"` plus the expected `.queue.selected.id` to confirm queue valid;
 - write handoff describing what was created and the queue state.
 
 Planning must not:
