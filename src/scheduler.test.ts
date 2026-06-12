@@ -479,6 +479,123 @@ describe("scheduler", () => {
 		}
 	})
 
+	test("zero-output runner is killed at the startup idle threshold and keeps retry semantics", async () => {
+		const fixture = await createFixture("startup-idle-kill")
+		try {
+			const chain = createChain(fixture.store, "startup-idle-kill-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
+			const item = createItem(fixture.store, chain, { issueNumber: 462, repoCwd: "/repo/a" })
+			const silentRunner = resolve(fixture.loopDataRoot, "..", "silent-runner.sh")
+			await writeFile(silentRunner, "#!/bin/sh\nsleep 30\n")
+			await chmod(silentRunner, 0o755)
+
+			const startedAt = Date.now()
+			const tick = await schedulerTick(fixture.options({
+				runner: { kind: "claude", source: "iteration-default", binary: silentRunner, extraArgs: [], model: null },
+				startupIdleTimeoutMs: 400,
+				startupIdleKillMs: 100,
+				attemptTimeoutMs: 60_000,
+			}))
+			expect(tick.spawnedRuns).toHaveLength(1)
+			const closed = await tick.spawnedRuns[0]!.closed
+			const elapsedMs = Date.now() - startedAt
+
+			// Reclaimed at the idle threshold, far before the 60s attempt timeout.
+			expect(elapsedMs).toBeLessThan(5_000)
+			expect(closed.exitCode).toBe(1)
+			// Killed before any status write: the item keeps its entry status and the attempt is
+			// counted — identical retry semantics to an attempt-timeout kill.
+			expect(closed.status).toBe("queued")
+			expect(fixture.store.getItem(item.id)?.attempts).toBe(1)
+			const idleEvents = fixture.schedulerEvents.filter((event) => event.type === "run.startup_idle_kill")
+			expect(idleEvents).toHaveLength(1)
+			expect(idleEvents[0]).toEqual(expect.objectContaining({
+				type: "run.startup_idle_kill",
+				itemId: item.id,
+				idleTimeoutMs: 400,
+				stdoutBytes: 0,
+			}))
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("runner that crosses the startup progress threshold outlives the idle window", async () => {
+		const fixture = await createFixture("startup-idle-progress")
+		try {
+			const chain = createChain(fixture.store, "startup-idle-progress-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
+			createItem(fixture.store, chain, { issueNumber: 463, repoCwd: "/repo/a" })
+			const noisyRunner = resolve(fixture.loopDataRoot, "..", "noisy-runner.sh")
+			await writeFile(noisyRunner, "#!/bin/sh\nprintf '%0300d\\n' 0\nsleep 1.2\nexit 0\n")
+			await chmod(noisyRunner, 0o755)
+
+			const startedAt = Date.now()
+			const tick = await schedulerTick(fixture.options({
+				runner: { kind: "claude", source: "iteration-default", binary: noisyRunner, extraArgs: [], model: null },
+				startupIdleTimeoutMs: 400,
+				startupIdleKillMs: 100,
+				attemptTimeoutMs: 60_000,
+			}))
+			expect(tick.spawnedRuns).toHaveLength(1)
+			const closed = await tick.spawnedRuns[0]!.closed
+			const elapsedMs = Date.now() - startedAt
+
+			// 300 bytes of stdout disarm the watchdog; the run lives 3x past the idle window and
+			// exits on its own terms.
+			expect(elapsedMs).toBeGreaterThanOrEqual(1_000)
+			expect(closed.exitCode).toBe(0)
+			expect(fixture.schedulerEvents.filter((event) => event.type === "run.startup_idle_kill")).toHaveLength(0)
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("codex spawns inherit a default RUST_LOG while claude spawns do not", async () => {
+		const fixture = await createFixture("rust-log-injection")
+		const savedRustLog = process.env["RUST_LOG"]
+		const savedOverride = process.env["CODER_LOOP_CODEX_RUST_LOG"]
+		delete process.env["RUST_LOG"]
+		delete process.env["CODER_LOOP_CODEX_RUST_LOG"]
+		try {
+			const chain = createChain(fixture.store, "rust-log-injection-chain")
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
+			const codexItem = createItem(fixture.store, chain, { issueNumber: 4631, repoCwd: "/repo/a" })
+			const root = resolve(fixture.loopDataRoot, "..")
+			const codexDump = resolve(root, "codex-env.txt")
+			const claudeDump = resolve(root, "claude-env.txt")
+			const makeEnvDumpRunner = async (path: string, dump: string): Promise<void> => {
+				await writeFile(path, `#!/bin/sh\necho "rust_log=\${RUST_LOG-unset}" > ${dump}\nprintf '%0300d\\n' 0\nexit 0\n`)
+				await chmod(path, 0o755)
+			}
+			const codexRunner = resolve(root, "codex-env-runner.sh")
+			await makeEnvDumpRunner(codexRunner, codexDump)
+
+			const codexTick = await schedulerTick(fixture.options({
+				runner: { kind: "codex", source: "iteration-default", binary: codexRunner, extraArgs: [], model: null },
+			}))
+			expect(codexTick.spawnedRuns).toHaveLength(1)
+			await codexTick.spawnedRuns[0]!.closed
+			expect((await readFile(codexDump, "utf-8")).trim()).toBe("rust_log=info")
+
+			// Same chain, second item through a claude-kind runner: no injection.
+			fixture.store.updateItem(codexItem.id, { status: "done", updatedAt: 1_800_000_900 })
+			createItem(fixture.store, chain, { issueNumber: 4632, repoCwd: "/repo/b" })
+			const claudeRunner = resolve(root, "claude-env-runner.sh")
+			await makeEnvDumpRunner(claudeRunner, claudeDump)
+			const claudeTick = await schedulerTick(fixture.options({
+				runner: { kind: "claude", source: "iteration-default", binary: claudeRunner, extraArgs: [], model: null },
+			}))
+			expect(claudeTick.spawnedRuns).toHaveLength(1)
+			await claudeTick.spawnedRuns[0]!.closed
+			expect((await readFile(claudeDump, "utf-8")).trim()).toBe("rust_log=unset")
+		} finally {
+			if (savedRustLog !== undefined) process.env["RUST_LOG"] = savedRustLog
+			if (savedOverride !== undefined) process.env["CODER_LOOP_CODEX_RUST_LOG"] = savedOverride
+			fixture.store.close()
+		}
+	})
+
 	test("default maxItemAttempts exhausts a continuable item at ten attempts before spawning", async () => {
 		const fixture = await createFixture("default-max-item-attempts-exhaust")
 		try {

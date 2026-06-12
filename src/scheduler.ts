@@ -50,6 +50,20 @@ const WATCHDOG_GRACE_MS = 10 * 60 * 1000
 const WATCHDOG_KILL_MS = 5 * 1000
 const ATTEMPT_TIMEOUT_MS = 2 * 60 * 60 * 1000
 const ATTEMPT_KILL_MS = 5 * 1000
+// Startup idle watchdog (#462): a runner hung at turn submission emits only its stream banner
+// (codex --json: `thread.started` + `turn.started` ≈ 101 bytes) and then nothing — observed on
+// run-1781258195574-6 which burned the full attempt timeout with stdoutBytes=101. A healthy run
+// crosses the progress threshold within seconds (first item event). Mid-run silences are
+// legitimate and long (orchestrator wait_agent gaps up to 1800s measured on real sessions), so
+// the watchdog disarms permanently once cumulative stdout crosses the threshold and never
+// re-arms. stderr intentionally does not count as progress: RUST_LOG diagnostics (#463) stream
+// there from spawn and would neutralize detection.
+const STARTUP_IDLE_TIMEOUT_MS = 10 * 60 * 1000
+const STARTUP_IDLE_PROGRESS_BYTES = 200
+const STARTUP_IDLE_KILL_MS = 5 * 1000
+// #463: codex exec writes internal diagnostics to stderr only when RUST_LOG is set; the engine
+// persists per-run stderr, so injecting a default level leaves attributable traces for hangs.
+const CODEX_RUST_LOG_DEFAULT = "info"
 
 export function makeRunSummaryTag(): string {
 	return `${SUMMARY_TAG_PREFIX}${randomBytes(SUMMARY_NONCE_BYTES).toString("hex")}`
@@ -160,6 +174,7 @@ export type SchedulerEvent =
 	| { type: "phase.start"; ts: string; runId: string; chainId: number; itemId: number; repoCwd: string; phase: string; pid: number | null }
 	| { type: "phase.end"; ts: string; runId: string; chainId: number; itemId: number; phase: string; exitCode: number; durationSeconds: number; status: string }
 	| { type: "queue.terminal"; ts: string; runId: string; chainId: number; itemId: number; terminalStatus: string }
+	| { type: "run.startup_idle_kill"; ts: string; runId: string; chainId: number; itemId: number; phase: string; idleTimeoutMs: number; stdoutBytes: number }
 	| { type: "item.dependency_unblocked"; chainId: number; itemId: number; fromStatus: string; toStatus: string; dependsOn: readonly number[] }
 
 export type SchedulerChainCompleteTriggerContext = {
@@ -227,6 +242,9 @@ export type SchedulerOptions = {
 	attemptKillMs?: number
 	watchdogGraceMs?: number
 	watchdogKillMs?: number
+	startupIdleTimeoutMs?: number
+	startupIdleProgressBytes?: number
+	startupIdleKillMs?: number
 }
 
 export type SchedulerChainStatuses = {
@@ -767,7 +785,7 @@ async function spawnSchedulerRun(
 		detached: true,
 		// The agent writes its own item status via `coder-loop item update`, which must reach
 		// the daemon that owns this loop-data-root. Pass it through so the CLI resolves the same store.
-		env: { ...process.env, [LOOP_DATA_ROOT_ENV]: resolveLoopDataPaths(options.loopDataRootOptions).root, [RUN_ID_ENV]: runId },
+		env: schedulerSpawnEnv(options, runId, runner.kind),
 	})
 	const activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, phase, child, runner, summaryTag)
 	slot.activeRun = activeRun
@@ -840,7 +858,7 @@ function attachRunCloseHandler(
 			stderr.push(Buffer.from(error.message))
 		})
 
-		const installedGc = installSchedulerRunLifecycleGc(options, child, summaryTag)
+		const installedGc = installSchedulerRunLifecycleGc(options, child, summaryTag, { runId, chainId: chain.id, itemId: item.id, phase })
 		lifecycleGc = installedGc
 		terminatorCleanup = installedGc.terminatorCleanup
 
@@ -982,10 +1000,39 @@ type SchedulerRunLifecycleGc = {
 	terminatorCleanup: (() => void) | null
 }
 
+type SchedulerRunGcContext = {
+	runId: string
+	chainId: number
+	itemId: number
+	phase: string
+}
+
+function envPositiveIntOrNull(name: string): number | null {
+	const raw = process.env[name]
+	if (raw === undefined || raw === "") return null
+	const value = Number(raw)
+	if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) return null
+	return value
+}
+
+function schedulerSpawnEnv(options: SchedulerOptions, runId: string, runnerKind: AgentRunnerKind): Record<string, string | undefined> {
+	const env: Record<string, string | undefined> = {
+		...process.env,
+		[LOOP_DATA_ROOT_ENV]: resolveLoopDataPaths(options.loopDataRootOptions).root,
+		[RUN_ID_ENV]: runId,
+	}
+	if (runnerKind === "codex") {
+		const level = process.env["CODER_LOOP_CODEX_RUST_LOG"] ?? process.env["RUST_LOG"] ?? CODEX_RUST_LOG_DEFAULT
+		if (level !== "") env["RUST_LOG"] = level
+	}
+	return env
+}
+
 function installSchedulerRunLifecycleGc(
 	options: SchedulerOptions,
 	child: ReturnType<typeof spawn>,
 	summaryTag: string,
+	run: SchedulerRunGcContext,
 ): SchedulerRunLifecycleGc {
 	const summaryClose = summaryCloseMarker(summaryTag)
 	const attemptTimeoutMs = options.attemptTimeoutMs ?? ATTEMPT_TIMEOUT_MS
@@ -1007,6 +1054,45 @@ function installSchedulerRunLifecycleGc(
 		}, attemptKillMs)
 		addLifecycleCleanup(() => clearTimeout(killTimer))
 	}, attemptTimeoutMs)
+
+	// Startup idle watchdog (#462): semantics documented at STARTUP_IDLE_TIMEOUT_MS.
+	const startupIdleTimeoutMs = options.startupIdleTimeoutMs ?? envPositiveIntOrNull("CODER_LOOP_STARTUP_IDLE_TIMEOUT_MS") ?? STARTUP_IDLE_TIMEOUT_MS
+	const startupIdleProgressBytes = options.startupIdleProgressBytes ?? envPositiveIntOrNull("CODER_LOOP_STARTUP_IDLE_PROGRESS_BYTES") ?? STARTUP_IDLE_PROGRESS_BYTES
+	const startupIdleKillMs = options.startupIdleKillMs ?? STARTUP_IDLE_KILL_MS
+	let startupStdoutBytes = 0
+	let startupIdleTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+		startupIdleTimer = null
+		if (child.exitCode !== null || child.signalCode !== null) return
+		void emit(options, {
+			type: "run.startup_idle_kill",
+			ts: nowIso(options),
+			runId: run.runId,
+			chainId: run.chainId,
+			itemId: run.itemId,
+			phase: run.phase,
+			idleTimeoutMs: startupIdleTimeoutMs,
+			stdoutBytes: startupStdoutBytes,
+		})
+		sendSignalToChildProcessGroup(child, "SIGTERM")
+		const killTimer = setTimeout(() => {
+			if (child.exitCode === null && child.signalCode === null) sendSignalToChildProcessGroup(child, "SIGKILL")
+		}, startupIdleKillMs)
+		addLifecycleCleanup(() => clearTimeout(killTimer))
+	}, startupIdleTimeoutMs)
+	child.stdout?.on("data", (chunk: Buffer) => {
+		if (startupIdleTimer === null) return
+		startupStdoutBytes += chunk.byteLength
+		if (startupStdoutBytes >= startupIdleProgressBytes) {
+			clearTimeout(startupIdleTimer)
+			startupIdleTimer = null
+		}
+	})
+	addLifecycleCleanup(() => {
+		if (startupIdleTimer !== null) {
+			clearTimeout(startupIdleTimer)
+			startupIdleTimer = null
+		}
+	})
 
 	// Summary watchdog: observe accumulated stdout for this run's nonce close marker
 	let watchdogArmed = false
@@ -1606,7 +1692,7 @@ async function spawnSchedulerReviewOnEmptyRun(
 		stdio: ["ignore", "pipe", "pipe"],
 		detached: true,
 		// Same loop-data-root passthrough as the per-item spawn so the agent's `item update` reaches this daemon.
-		env: { ...process.env, [LOOP_DATA_ROOT_ENV]: resolveLoopDataPaths(options.loopDataRootOptions).root, [RUN_ID_ENV]: runId },
+		env: schedulerSpawnEnv(options, runId, runner.kind),
 	})
 	const activeRun = attachReviewOnEmptyCloseHandler(
 		options,
@@ -1670,7 +1756,7 @@ function attachReviewOnEmptyCloseHandler(
 			stderr.push(Buffer.from(error.message))
 		})
 
-		lifecycleGc = installSchedulerRunLifecycleGc(options, child, summaryTag)
+		lifecycleGc = installSchedulerRunLifecycleGc(options, child, summaryTag, { runId, chainId: chain.id, itemId: fallbackItem.id, phase })
 
 		child.on("close", (code) => {
 			lifecycleGc?.cleanup()

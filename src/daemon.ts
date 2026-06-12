@@ -1185,6 +1185,9 @@ export class CoderLoopDaemon {
 		if (scheduler.attemptKillMs !== undefined) options.attemptKillMs = scheduler.attemptKillMs
 		if (scheduler.watchdogGraceMs !== undefined) options.watchdogGraceMs = scheduler.watchdogGraceMs
 		if (scheduler.watchdogKillMs !== undefined) options.watchdogKillMs = scheduler.watchdogKillMs
+		if (scheduler.startupIdleTimeoutMs !== undefined) options.startupIdleTimeoutMs = scheduler.startupIdleTimeoutMs
+		if (scheduler.startupIdleProgressBytes !== undefined) options.startupIdleProgressBytes = scheduler.startupIdleProgressBytes
+		if (scheduler.startupIdleKillMs !== undefined) options.startupIdleKillMs = scheduler.startupIdleKillMs
 		if (scheduler.chainCompleteTrigger !== undefined) options.chainCompleteTrigger = scheduler.chainCompleteTrigger
 		else if (scheduler.chainCompleteTriggerForChain !== undefined) options.chainCompleteTriggerForChain = scheduler.chainCompleteTriggerForChain
 		else {
