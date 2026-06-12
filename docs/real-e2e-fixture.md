@@ -33,6 +33,17 @@ fixture repo 只保留极小的提交资产：
 bun scripts/real-e2e.ts
 ```
 
+默认 preset 是 `real-e2e-minimal`（`presets/real-e2e-minimal/`）：两 phase 的最小
+GitHub loop——iteration 单发 codex 直接改文件开 PR，review 验证 + merge + 写
+`done`。e2e 的目的是验证引擎全链路（spawn、phase 推进、summary 捕获、真实
+PR/merge、终态写入），不是 agent 编排质量，所以不默认走 `gh-issue-pr-iteration`
+的 orchestrator（其单次 iteration 实测 ~16 分钟，最小 preset 每 phase 约 1-3 分
+钟）。要做 bundled preset 的全保真验证时显式选它：
+
+```bash
+bun scripts/real-e2e.ts --preset gh-issue-pr-iteration
+```
+
 它按序做完一轮完整真实 e2e：
 
 1. **preflight** — gh auth、`codex` / `claude` 在 PATH、fixture repo 可达、本地 checkout origin 一致。
@@ -56,6 +67,7 @@ exit 1。
 |---|---|---|
 | `--fixture-cwd` | `../coder-loop-e2e-fixture` | fixture 本地 checkout |
 | `--fixture-repo` | `mouriya-s-lab/coder-loop-e2e-fixture` | fixture GitHub repo |
+| `--preset` | `real-e2e-minimal` | 跑哪个 preset（全保真用 `gh-issue-pr-iteration`） |
 | `--max-wall-seconds` | 2700 | 全程 wall-time 上界 |
 | `--max-attempts` | 5 | item attempts 上界 |
 | `--max-runs` | 20 | runs 表行数上界（spin 检测） |

@@ -31,6 +31,7 @@ const TERMINAL_FAILURE = ["blocked", "moot", "exhausted"] as const
 type HarnessOptions = {
 	fixtureCwd: string
 	fixtureRepo: string
+	preset: string
 	maxWallSeconds: number
 	maxAttempts: number
 	maxRuns: number
@@ -46,6 +47,10 @@ function parseArgs(argv: readonly string[]): HarnessOptions {
 	const options: HarnessOptions = {
 		fixtureCwd: resolve(REPO_ROOT, "../coder-loop-e2e-fixture"),
 		fixtureRepo: "mouriya-s-lab/coder-loop-e2e-fixture",
+		// 默认走最小 preset：e2e 的目的是验证引擎全链路（spawn/phase 推进/PR/merge/终态），
+		// 不是 agent 编排质量；gh-issue-pr-iteration 的 orchestrator 开销（单 iter ~16min）
+		// 用 --preset gh-issue-pr-iteration 按需选跑。
+		preset: "real-e2e-minimal",
 		maxWallSeconds: 2700,
 		maxAttempts: 5,
 		maxRuns: 20,
@@ -62,6 +67,9 @@ function parseArgs(argv: readonly string[]): HarnessOptions {
 				break
 			case "--fixture-repo":
 				options.fixtureRepo = value
+				break
+			case "--preset":
+				options.preset = value
 				break
 			case "--max-wall-seconds":
 				options.maxWallSeconds = parsePositiveInt(flag, value)
@@ -469,7 +477,8 @@ async function runScenario(
 
 	log("install: bootstrap fixture target + central chain")
 	const install = sh(["bun", LOOP_ENTRY, "install", options.fixtureCwd,
-		"--repo", options.fixtureRepo, "--loop-data-root", daemon.loopDataRoot], { allowFail: true })
+		"--repo", options.fixtureRepo, "--preset", options.preset,
+		"--loop-data-root", daemon.loopDataRoot], { allowFail: true })
 	if (install.exitCode !== 0) {
 		dumpDiagnosis(options, daemon, chainName, `install 失败:\n${install.stdout}\n${install.stderr}`)
 		return 1

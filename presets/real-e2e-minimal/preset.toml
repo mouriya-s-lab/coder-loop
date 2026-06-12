@@ -1,0 +1,61 @@
+# coder-loop preset: real-e2e-minimal
+#
+# Two-phase minimal preset for the real e2e harness (scripts/real-e2e.ts).
+# Purpose: exercise the full engine path — daemon spawn, phase advance, summary
+# capture, PR/merge on a real GitHub repo, terminal status write — with the
+# cheapest possible agent work. Iteration is a single-shot "apply the trivial
+# issue, open a PR" run; review verifies, merges, and writes the terminal
+# status. Agent-quality concerns (orchestration, evidence layers, contract
+# replay) are explicitly out of scope here; that is what gh-issue-pr-iteration
+# is for.
+
+name        = "real-e2e-minimal"
+version     = 1
+description = "Minimal two-phase GitHub loop for the real e2e harness: single-shot iteration (edit -> PR) and review (verify -> merge -> done)."
+
+[item]
+idField = "issue"
+
+[statuses]
+continuable = ["queued", "in_progress", "changes_requested"]
+terminal    = ["blocked", "moot", "done", "exhausted"]
+success     = ["done"]
+entry       = "queued"
+unblockable = ["blocked"]
+
+[[phases]]
+name   = "iteration"
+prompt = "iteration-entry.md"
+runner = "codex"
+
+  [phases.variables]
+  REPO        = { source = "config.repository", label = "GitHub repository" }
+  BASE_BRANCH = { source = "config.baseBranch", label = "Base branch" }
+  ISSUE       = { source = "item.issue", label = "Issue number", style = "plain" }
+  RUN_ID      = { source = "runtime.runId", label = "Run ID" }
+  ISSUE_STATUS = { source = "item.status", label = "Queue status" }
+
+[[phases]]
+name   = "review"
+prompt = "review-entry.md"
+runner = "codex"
+
+  [[phases.exits]]
+  status = "changes_requested"
+  when   = "The PR does not satisfy the issue, or merge failed; iteration must retry."
+
+  [[phases.exits]]
+  status = "done"
+  when   = "The PR was merged and GitHub closed the issue through the closing reference."
+
+  [phases.variables]
+  REPO       = { source = "config.repository", label = "GitHub repository" }
+  BASE_BRANCH = { source = "config.baseBranch", label = "Base branch" }
+  ISSUE      = { source = "item.issue", label = "Issue number", style = "plain" }
+  RUN_ID     = { source = "runtime.runId", label = "Run ID" }
+  CHAIN_NAME = { source = "runtime.chainName", label = "Chain name" }
+
+[agent]
+binary                = "codex"
+extraArgs             = []
+attemptTimeoutSeconds = 900
