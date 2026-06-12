@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
 
 import { startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
-import { LOOP_DATA_ROOT_ENV } from "./runtime-paths"
+import { LOOP_DATA_ROOT_ENV, resolveLoopDataPaths } from "./runtime-paths"
 import { reviewOnEmptyLockPathForChainName, serializeSchedulerReviewOnEmptyLock } from "./scheduler"
 import { openSqliteStateStore } from "./sqlite-state"
 
@@ -136,6 +136,51 @@ describe("central chain/item CLI", () => {
 
 			const updated = expectJsonOk(await runCli(["item", "update", "items-chain", "--issue", "181", "--status", "done", "--field-json", "{\"pr\":191}", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(updated.item).toMatchObject({ issueNumber: 181, status: "done", extra: { pr: 191 } })
+
+			const agentRunId = "run-agent-status-181"
+			expectJsonOk(await runCli([
+				"item",
+				"update",
+				"items-chain",
+				"--issue",
+				"181",
+				"--status",
+				"changes_requested",
+				"--agent-run-id",
+				agentRunId,
+				"--agent-phase",
+				"review",
+				"--loop-data-root",
+				fixture.loopDataRoot,
+				"--json",
+			]))
+			const runLogs = expectJsonOk(await runCli(["logs", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--json", "--run", agentRunId]))
+			expect(runLogs.events).toHaveLength(1)
+			expect(runLogs.events[0]).toMatchObject({
+				kind: "audit",
+				type: "item.status",
+				chain: "items-chain",
+				runId: agentRunId,
+				phase: "review",
+				subject: { kind: "agent", runId: agentRunId, phase: "review" },
+				payload: { issueNumber: 181, fromStatus: "done", toStatus: "changes_requested", reason: "item.update" },
+			})
+			const statusAuditLogs = expectJsonOk(await runCli(["logs", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--json", "--chain", "items-chain", "--kind", "audit", "--type", "item.status"]))
+			expect(statusAuditLogs.events).toHaveLength(2)
+			expect(statusAuditLogs.events[0]).toMatchObject({
+				kind: "audit",
+				type: "item.status",
+				subject: { kind: "operator" },
+				payload: { issueNumber: 181, fromStatus: "queued", toStatus: "done" },
+			})
+			expect(statusAuditLogs.events[1]).toMatchObject({
+				kind: "audit",
+				type: "item.status",
+				runId: agentRunId,
+				phase: "review",
+				subject: { kind: "agent", runId: agentRunId, phase: "review" },
+				payload: { issueNumber: 181, fromStatus: "done", toStatus: "changes_requested" },
+			})
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -665,6 +710,69 @@ describe("central chain/item CLI", () => {
 			expect(status.queue.selected.id).toBe("184")
 			expect(Array.isArray(status.processes.live)).toBe(true)
 			expect(status.processes.scanError === null || typeof status.processes.scanError === "string").toBe(true)
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("logs --chain reads stopped and completed chain history from target config without loop-data-root flag", async () => {
+		const fixture = await startFixture("logs-non-active-chain-history", { schedulerEnabled: true })
+		try {
+			const target = await makeTarget("logs-non-active-chain-target")
+			await mkdir(resolve(target, ".coder-loop/runtime"), { recursive: true })
+			await writeFile(resolve(target, ".coder-loop/runtime/config.json"), `${JSON.stringify({ loopDataRoot: fixture.loopDataRoot }, null, "\t")}\n`)
+			expectJsonOk(await runCli(["chain", "create", "logs-stopped-history-chain", "--config-json", FIXTURE_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expectJsonOk(await runCli(["chain", "stop", "logs-stopped-history-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expectJsonOk(await runCli(["chain", "create", "logs-completed-history-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--preset", "single-phase-example", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			preInstallReviewOnEmptyLockByName("logs-completed-history-chain", fixture.loopDataRoot)
+			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				const completedChain = store.getChainByName("logs-completed-history-chain")
+				if (completedChain === null) throw new Error("expected logs-completed-history-chain")
+				store.createItem({ chainId: completedChain.id, issueNumber: 411, repoCwd: REPO_ROOT, status: "done" })
+			} finally {
+				store.close()
+			}
+			await waitForJson(() => runCli(["chain", "status", "logs-completed-history-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]), (value) => value.chain?.status === "completed")
+
+			const stoppedLogs = expectJsonOk(await runCli([
+				"logs",
+				target,
+				"--chain",
+				"logs-stopped-history-chain",
+				"--json",
+				"--kind",
+				"audit",
+				"--type",
+				"chain.status",
+			]))
+
+			expect(stoppedLogs.path).toBe(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile)
+			expect(stoppedLogs.events).toHaveLength(1)
+			expect(stoppedLogs.events[0]).toMatchObject({
+				kind: "audit",
+				type: "chain.status",
+				chain: "logs-stopped-history-chain",
+				payload: { fromStatus: "active", toStatus: "stopped" },
+			})
+			const completedLogs = expectJsonOk(await runCli([
+				"logs",
+				target,
+				"--chain",
+				"logs-completed-history-chain",
+				"--json",
+				"--kind",
+				"lifecycle",
+				"--type",
+				"chain.completed",
+			]))
+			expect(completedLogs.path).toBe(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile)
+			expect(completedLogs.events).toHaveLength(1)
+			expect(completedLogs.events[0]).toMatchObject({
+				kind: "lifecycle",
+				type: "chain.completed",
+				chain: "logs-completed-history-chain",
+			})
 		} finally {
 			await fixture.daemon.stop()
 		}

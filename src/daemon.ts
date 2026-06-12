@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto"
 import { Buffer } from "node:buffer"
 import { createConnection, createServer, type Server, type Socket } from "node:net"
-import { appendFileSync, existsSync, mkdirSync } from "node:fs"
-import { appendFile, mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises"
+import { existsSync } from "node:fs"
+import { mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises"
 import { isAbsolute, relative, resolve } from "node:path"
 
 import {
@@ -23,6 +23,7 @@ import {
 	maxItemAttemptsFromChainMetadata,
 	schedulerTick,
 	type SchedulerCompletedRun,
+	type SchedulerEvent,
 	type SchedulerOptions,
 	type SchedulerSpawnContext,
 	type SchedulerState,
@@ -46,6 +47,16 @@ import {
 	resolveLoopDataPaths,
 	sanitizeChainName,
 } from "./runtime-paths"
+import {
+	appendObservabilityEvent,
+	appendObservabilityEventSync,
+	makeObservabilityEvent,
+	observabilityDecisionFingerprint,
+	observabilityDecisionKey,
+	renderObservabilityEvent,
+	type ObservabilityEvent,
+	type ObservabilitySubject,
+} from "./observability"
 
 export type DaemonCommandName =
 	| "chain.create"
@@ -181,8 +192,12 @@ const ITEM_UPDATE_FIELD_KEYS = [
 	"extraPatch",
 	"dependsOn",
 ] as const
-const ITEM_UPDATE_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "fields", ...ITEM_UPDATE_FIELD_KEYS] as const
+const ITEM_UPDATE_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "fields", ...ITEM_UPDATE_FIELD_KEYS, "agentRunId", "agentPhase"] as const
 const ITEM_REORDER_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "position"] as const
+
+type ItemUpdateAuditAttribution =
+	| { kind: "operator"; subject: Extract<ObservabilitySubject, { kind: "operator" }> }
+	| { kind: "agent"; runId: string; phase: string; subject: Extract<ObservabilitySubject, { kind: "agent" }> }
 
 export class DaemonError extends Error {
 	constructor(
@@ -192,6 +207,192 @@ export class DaemonError extends Error {
 	) {
 		super(message)
 		this.name = "DaemonError"
+	}
+}
+
+export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: SchedulerEvent): ObservabilityEvent {
+	switch (event.type) {
+		case "slot.busy":
+			return makeObservabilityEvent({
+				kind: "decision",
+				type: "slot.busy",
+				chain: chain.name,
+				runId: event.activeRunId,
+				subject: { kind: "engine" },
+				payload: { slotKey: event.slotKey, chainId: event.chainId, repoCwd: event.repoCwd, activeRunId: event.activeRunId },
+			})
+		case "item.dependency_wait":
+			return makeObservabilityEvent({
+				kind: "decision",
+				type: "item.dependency_wait",
+				chain: chain.name,
+				item: event.itemId,
+				subject: { kind: "engine" },
+				payload: { itemId: event.itemId, dependsOn: [...event.dependsOn], unsatisfied: [...event.unsatisfied] },
+			})
+		case "item.backoff":
+			return makeObservabilityEvent({
+				kind: "decision",
+				type: "item.backoff",
+				chain: chain.name,
+				item: event.itemId,
+				subject: { kind: "engine" },
+				payload: { itemId: event.itemId, failureCount: event.failureCount, nextRunAt: event.nextRunAt },
+			})
+		case "agent.spawn":
+			return makeObservabilityEvent({
+				kind: "lifecycle",
+				type: "agent.spawn",
+				chain: chain.name,
+				item: event.itemId,
+				runId: event.runId,
+				phase: event.phase,
+				subject: { kind: "engine" },
+				payload: { slotKey: event.slotKey, pid: event.pid, worktreePath: event.worktreePath, presetDir: event.presetDir },
+			})
+		case "agent.exit":
+			return makeObservabilityEvent({
+				kind: "lifecycle",
+				type: "agent.exit",
+				chain: chain.name,
+				item: event.itemId,
+				runId: event.runId,
+				phase: event.phase,
+				subject: { kind: "agent", runId: event.runId, phase: event.phase },
+				payload: { slotKey: event.slotKey, exitCode: event.exitCode, status: event.status, excerpt: event.excerpt },
+			})
+		case "session_id.invalidated":
+			return makeObservabilityEvent({
+				kind: "validation",
+				type: "session_id.invalidated",
+				chain: chain.name,
+				item: event.itemId,
+				runId: event.runId,
+				phase: event.phase,
+				subject: { kind: "engine" },
+				payload: { runner: event.runner, previousSessionId: event.previousSessionId, reason: event.reason },
+			})
+		case "spawn.aborted":
+			return makeObservabilityEvent({
+				kind: "validation",
+				type: "spawn.aborted",
+				chain: chain.name,
+				item: event.itemId,
+				subject: { kind: "engine" },
+				payload: { slotKey: event.slotKey, chainId: event.chainId, issueNumber: event.issueNumber, reason: event.reason, toStatus: event.toStatus },
+			})
+		case "chain.complete_trigger":
+			return makeObservabilityEvent({
+				kind: "decision",
+				type: "chain.complete_trigger",
+				chain: chain.name,
+				...(event.runId === undefined ? {} : { runId: event.runId }),
+				subject: { kind: "engine" },
+				payload: {
+					chainId: event.chainId,
+					decision: event.decision,
+					...(event.reason === undefined ? {} : { reason: event.reason }),
+				},
+			})
+		case "chain.complete_trigger_failed":
+			return makeObservabilityEvent({
+				kind: "diagnostic",
+				type: "chain.complete_trigger_failed",
+				chain: chain.name,
+				...(event.runId === undefined ? {} : { runId: event.runId }),
+				subject: { kind: "engine" },
+				payload: { chainId: event.chainId, error: event.error },
+			})
+		case "chain.completed":
+			return makeObservabilityEvent({
+				kind: "lifecycle",
+				type: "chain.completed",
+				chain: chain.name,
+				...(event.runId === undefined ? {} : { runId: event.runId }),
+				subject: { kind: "engine" },
+				payload: { chainId: event.chainId },
+			})
+		case "phase.start":
+			return makeObservabilityEvent({
+				kind: "lifecycle",
+				type: "phase.start",
+				chain: chain.name,
+				item: event.itemId,
+				runId: event.runId,
+				phase: event.phase,
+				subject: { kind: "engine" },
+				payload: { repoCwd: event.repoCwd, pid: event.pid },
+			})
+		case "phase.end":
+			return makeObservabilityEvent({
+				kind: "lifecycle",
+				type: "phase.end",
+				chain: chain.name,
+				item: event.itemId,
+				runId: event.runId,
+				phase: event.phase,
+				subject: { kind: "engine" },
+				payload: { exitCode: event.exitCode, durationSeconds: event.durationSeconds, status: event.status },
+			})
+		case "attempt.timeout":
+			return makeObservabilityEvent({
+				kind: "lifecycle",
+				type: "attempt.timeout",
+				chain: chain.name,
+				item: event.itemId,
+				runId: event.runId,
+				phase: event.phase,
+				subject: { kind: "engine" },
+				payload: { signal: event.signal, attemptMs: event.attemptMs, excerpt: event.excerpt },
+			})
+		case "watchdog.armed":
+			return makeObservabilityEvent({
+				kind: "lifecycle",
+				type: "watchdog.armed",
+				chain: chain.name,
+				item: event.itemId,
+				runId: event.runId,
+				phase: event.phase,
+				subject: { kind: "engine" },
+				payload: { marker: event.marker, graceMs: event.graceMs },
+			})
+		case "watchdog.fire":
+			return makeObservabilityEvent({
+				kind: "lifecycle",
+				type: "watchdog.fire",
+				chain: chain.name,
+				item: event.itemId,
+				runId: event.runId,
+				phase: event.phase,
+				subject: { kind: "engine" },
+				payload: { signal: event.signal, graceMs: event.graceMs, excerpt: event.excerpt },
+			})
+		case "queue.terminal":
+			return makeObservabilityEvent({
+				kind: "audit",
+				type: "queue.terminal",
+				chain: chain.name,
+				item: event.itemId,
+				runId: event.runId,
+				subject: { kind: "engine" },
+				payload: { itemId: event.itemId, terminalStatus: event.terminalStatus },
+			})
+		case "item.dependency_unblocked":
+			return makeObservabilityEvent({
+				kind: "audit",
+				type: "item.dependency_unblocked",
+				chain: chain.name,
+				item: event.itemId,
+				subject: { kind: "engine" },
+				payload: {
+					itemId: event.itemId,
+					fromStatus: event.fromStatus,
+					toStatus: event.toStatus,
+					dependsOn: [...event.dependsOn],
+				},
+			})
+		default:
+			return assertNeverSchedulerEvent(event)
 	}
 }
 
@@ -211,6 +412,8 @@ export class CoderLoopDaemon {
 	private socketPathRepairInFlight: Promise<void> | null = null
 	private ownsDaemonSocket = false
 	private ownsDaemonPid = false
+	private readonly lastDecisionFingerprints = new Map<string, string>()
+	private readonly presetFallbackFingerprints = new Set<string>()
 	private resolveClosed: (() => void) | null = null
 	private readonly daemonBatchTimestamp = formatDaemonBatchTimestamp(new Date())
 	readonly closed: Promise<void>
@@ -244,11 +447,12 @@ export class CoderLoopDaemon {
 			await writeFile(this.paths.daemonPid, `${process.pid}\n`)
 			this.ownsDaemonPid = true
 			this.state = "running"
-			await this.appendGlobalDaemonLog({ type: "daemon.start", pid: process.pid, socketPath: this.paths.daemonSocket })
-			// Startup banner on stderr so that any launch path which captures the daemon's
-			// stderr to a file (executeDaemonStart) yields a non-empty, greppable record
-			// of the process coming up — and a place the OS/runtime stack lands on crash.
-			process.stderr.write(`coder-loop daemon up: pid=${process.pid} socket=${this.paths.daemonSocket} batch=${this.daemonBatchTimestamp}\n`)
+			await this.recordObservabilityEvent(makeObservabilityEvent({
+				kind: "lifecycle",
+				type: "daemon.start",
+				subject: { kind: "engine" },
+				payload: { pid: process.pid, socketPath: this.paths.daemonSocket },
+			}))
 			this.startSchedulerLoop()
 			this.queueSchedulerTick()
 			return this
@@ -283,7 +487,12 @@ export class CoderLoopDaemon {
 		if (this.state !== "shutting_down") this.state = "shutting_down"
 		// Durable shutdown marker so the global daemon.log records that the daemon
 		// stopped on purpose — distinguishing a clean stop from a fatal/external kill.
-		await this.appendGlobalDaemonLog({ type: "daemon.stop", pid: process.pid }).catch(() => undefined)
+		await this.recordObservabilityEvent(makeObservabilityEvent({
+			kind: "lifecycle",
+			type: "daemon.stop",
+			subject: { kind: "engine" },
+			payload: { pid: process.pid },
+		})).catch(() => undefined)
 		// Pause scheduler tick: clears the interval timer, awaits any in-flight
 		// tick, and bumps schedulerPauseDepth so requestSchedulerTick is gated
 		// out for the remainder of shutdown. The resume callback would no-op
@@ -312,6 +521,8 @@ export class CoderLoopDaemon {
 		try {
 			await mkdir(this.paths.root, { recursive: true })
 			await mkdir(this.paths.chainsDir, { recursive: true })
+			await mkdir(this.paths.eventsDir, { recursive: true })
+			await mkdir(this.paths.daemonLogDir, { recursive: true })
 		} catch (error) {
 			throw new DaemonError("db_unavailable", `unable to prepare loop-data directory at ${this.paths.root}: ${errorMessage(error)}`, {
 				loopDataRoot: this.paths.root,
@@ -371,11 +582,12 @@ export class CoderLoopDaemon {
 		await listenOrReportSocketInUse(replacementServer, this.paths.daemonSocket)
 		this.server = replacementServer
 		this.ownsDaemonSocket = true
-		await this.appendGlobalDaemonLog({
+		await this.recordObservabilityEvent(makeObservabilityEvent({
+			kind: "lifecycle",
 			type: "daemon.socket.rebind",
-			pid: process.pid,
-			socketPath: this.paths.daemonSocket,
-		})
+			subject: { kind: "engine" },
+			payload: { pid: process.pid, socketPath: this.paths.daemonSocket },
+		}))
 	}
 
 	private async waitForSchedulerQuiescence(): Promise<void> {
@@ -537,7 +749,13 @@ export class CoderLoopDaemon {
 			}
 		}
 		await this.ensureChainRuntimeLayout(chain.name)
-		await this.appendDaemonLog(chain.name, { type: "chain.layout", chainId: chain.id, chainName: chain.name, state: this.state })
+		await this.recordObservabilityEvent(makeObservabilityEvent({
+			kind: "audit",
+			type: "chain.layout",
+			chain: chain.name,
+			subject: { kind: "engine" },
+			payload: { chainId: chain.id, state: this.state },
+		}))
 		return { chain: chainToJson(chain) }
 	}
 
@@ -594,68 +812,73 @@ export class CoderLoopDaemon {
 		}
 	}
 
-	private async appendGlobalDaemonLog(event: JsonObject): Promise<void> {
-		await mkdir(this.paths.daemonBatchDir(this.daemonBatchTimestamp), { recursive: true })
-		await appendFile(this.paths.daemonLogFile(this.daemonBatchTimestamp), `${JSON.stringify({
-			...event,
-			recordedAt: new Date().toISOString(),
-		})}\n`)
+	private async recordObservabilityEvent(event: ObservabilityEvent): Promise<void> {
+		if (this.shouldSuppressDecisionEvent(event)) return
+		await appendObservabilityEvent(this.paths.eventsFile, event)
+		this.writeRenderedObservabilityEvent(event)
 	}
 
 	/**
-	 * Synchronously record a fatal/uncaught error to the global daemon.log before the
+	 * Synchronously record a fatal/uncaught error to the unified event stream before the
 	 * process exits. An async appendFile would not flush from inside an
 	 * uncaughtException / unhandledRejection handler that ends with process.exit, so
 	 * this deliberately uses sync fs to guarantee the stack reaches durable storage.
 	 */
 	recordFatalSync(kind: string, error: unknown): void {
 		const stack = error instanceof Error ? (error.stack ?? error.message) : String(error)
+		const event = makeObservabilityEvent({
+			kind: "lifecycle",
+			type: "daemon.fatal",
+			subject: { kind: "engine" },
+			payload: { fatalKind: kind, pid: process.pid, error: stack },
+		})
 		try {
-			mkdirSync(this.paths.daemonBatchDir(this.daemonBatchTimestamp), { recursive: true })
-			appendFileSync(
-				this.paths.daemonLogFile(this.daemonBatchTimestamp),
-				`${JSON.stringify({
-					type: "daemon.fatal",
-					kind,
-					pid: process.pid,
-					error: stack,
-					recordedAt: new Date().toISOString(),
-				})}\n`,
-			)
+			appendObservabilityEventSync(this.paths.eventsFile, event)
+			this.writeRenderedObservabilityEvent(event)
 		} catch {
 			// Last resort: if durable logging itself fails, still surface the stack to
 			// stderr so a launcher capturing stderr keeps it.
 			try {
-				process.stderr.write(`coder-loop daemon fatal (${kind}): ${stack}\n`)
+				process.stderr.write(`${renderObservabilityEvent(event)}\n`)
 			} catch {
 				// nothing else we can do while crashing
 			}
 		}
 	}
 
-	private async appendDaemonLogForChainId(chainId: number, event: JsonObject): Promise<void> {
+	private async recordObservabilityEventForChainId(chainId: number, build: (chain: ChainRecord) => ObservabilityEvent): Promise<void> {
 		const chain = this.requireStore().getChain(chainId)
 		if (chain === null) return
-		await this.appendDaemonLogIfChainNameIsValid(chain, event)
+		await this.recordObservabilityEventIfChainNameIsValid(chain, build(chain))
 	}
 
-	private async appendDaemonLogIfChainNameIsValid(chain: ChainRecord, event: JsonObject): Promise<void> {
+	private async recordObservabilityEventIfChainNameIsValid(chain: ChainRecord, event: ObservabilityEvent): Promise<void> {
 		if (chain.status === "deleted") return
 		try {
-			await this.appendDaemonLog(chain.name, event)
+			sanitizeChainName(chain.name)
+			await this.recordObservabilityEvent(event)
 		} catch (error) {
 			if (isInvalidChainNameError(error)) return
 			throw error
 		}
 	}
 
-	private async appendDaemonLog(chainName: string, event: JsonObject): Promise<void> {
-		const paths = resolveChainRuntimePaths(chainName, { loopDataRoot: this.paths.root })
-		await mkdir(paths.daemonBatchDir(this.daemonBatchTimestamp), { recursive: true })
-		await appendFile(paths.daemonLogFile(this.daemonBatchTimestamp), `${JSON.stringify({
-			...event,
-			recordedAt: new Date().toISOString(),
-		})}\n`)
+	private shouldSuppressDecisionEvent(event: ObservabilityEvent): boolean {
+		if (event.kind !== "decision") return false
+		const key = observabilityDecisionKey(event)
+		const fingerprint = observabilityDecisionFingerprint(event)
+		const previous = this.lastDecisionFingerprints.get(key)
+		if (previous === fingerprint) return true
+		this.lastDecisionFingerprints.set(key, fingerprint)
+		return false
+	}
+
+	private writeRenderedObservabilityEvent(event: ObservabilityEvent): void {
+		try {
+			process.stderr.write(`${renderObservabilityEvent(event)}\n`)
+		} catch {
+			// stderr is the final derived human-readable sink.
+		}
 	}
 
 	private async recoverStaleSchedulerState(): Promise<void> {
@@ -677,19 +900,41 @@ export class CoderLoopDaemon {
 				for (const item of itemsToRecover) {
 					store.updateItem(item.id, { status: recoveryStatus, phase: null, updatedAt: recoveredAt })
 				}
-				await this.appendDaemonLogIfChainNameIsValid(chain, {
+				await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
+					kind: "lifecycle",
 					type: "scheduler.recovery",
-					reason: "stale_current_run",
-					chainId: chain.id,
+					chain: chain.name,
 					runId: currentRun.runId,
-					pid: stalePid,
-					recoveredItems: itemsToRecover.map((item) => ({
-						itemId: item.id,
-						issueNumber: item.issueNumber,
-						fromStatus: item.status,
-						toStatus: recoveryStatus,
-					})),
-				})
+					subject: { kind: "engine" },
+					payload: {
+						reason: "stale_current_run",
+						pid: stalePid,
+						recoveredItems: itemsToRecover.map((item) => ({
+							itemId: item.id,
+							issueNumber: item.issueNumber,
+							fromStatus: item.status,
+							toStatus: recoveryStatus,
+						})),
+						reconciledRuns: [],
+					},
+				}))
+				for (const item of itemsToRecover) {
+					await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
+						kind: "audit",
+						type: "item.status",
+						chain: chain.name,
+						item: item.id,
+						runId: currentRun.runId,
+						subject: { kind: "engine" },
+						payload: {
+							itemId: item.id,
+							issueNumber: item.issueNumber,
+							fromStatus: item.status,
+							toStatus: recoveryStatus,
+							reason: "stale_current_run_recovery",
+						},
+					}))
+				}
 			}
 
 			await this.reconcileOrphanedRuns(chain)
@@ -702,7 +947,7 @@ export class CoderLoopDaemon {
 		if (orphanedRuns.length === 0) return
 
 		const reconciledAt = unixSeconds()
-		const reconciledRuns: JsonObject[] = []
+		const reconciledRuns: { runId: string; itemId: number; phase: string; pid: number | null }[] = []
 		for (const run of orphanedRuns) {
 			const stalePid = await this.readRunProcessGroupPid(chain, run.runId, run.extra)
 			if (stalePid !== null) await terminateStaleProcessGroup(stalePid, Math.min(this.shutdownGraceMs, STALE_RECOVERY_FORCE_AFTER_MS))
@@ -715,12 +960,18 @@ export class CoderLoopDaemon {
 			reconciledRuns.push({ runId: run.runId, itemId: run.itemId, phase: run.phase, pid: stalePid })
 		}
 
-		await this.appendDaemonLogIfChainNameIsValid(chain, {
+		await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
+			kind: "lifecycle",
 			type: "scheduler.recovery",
-			reason: "orphaned_run_reconciled",
-			chainId: chain.id,
-			reconciledRuns,
-		})
+			chain: chain.name,
+			subject: { kind: "engine" },
+			payload: {
+				reason: "orphaned_run_reconciled",
+				pid: null,
+				recoveredItems: [],
+				reconciledRuns,
+			},
+		}))
 	}
 
 	private async readRunProcessGroupPid(chain: ChainRecord, runId: string, extra: JsonObject): Promise<number | null> {
@@ -786,12 +1037,18 @@ export class CoderLoopDaemon {
 		try {
 			const stopped = this.requireStore().updateChain(chain.id, { status: "stopped" })
 			const terminatedRuns = await this.terminateActiveRunsForChain(chain.id)
-			await this.appendDaemonLogIfChainNameIsValid(stopped, {
-				type: "chain.stopped",
-				chainId: stopped.id,
-				chainName: stopped.name,
-				terminatedRuns: terminatedRuns.map((run) => run.runId),
-			})
+			await this.recordObservabilityEventIfChainNameIsValid(stopped, makeObservabilityEvent({
+				kind: "audit",
+				type: "chain.status",
+				chain: stopped.name,
+				subject: { kind: "operator" },
+				payload: {
+					chainId: stopped.id,
+					fromStatus: chain.status,
+					toStatus: stopped.status,
+					terminatedRunIds: terminatedRuns.map((run) => run.runId),
+				},
+			}))
 			return {
 				chain: chainToJson(stopped),
 				alreadyStopped: false,
@@ -809,11 +1066,18 @@ export class CoderLoopDaemon {
 		const resumeScheduler = await this.pauseSchedulerForMutation()
 		try {
 			const resumed = this.requireStore().updateChain(chain.id, { status: "active" })
-			await this.appendDaemonLogIfChainNameIsValid(resumed, {
-				type: "chain.resumed",
-				chainId: resumed.id,
-				chainName: resumed.name,
-			})
+			await this.recordObservabilityEventIfChainNameIsValid(resumed, makeObservabilityEvent({
+				kind: "audit",
+				type: "chain.status",
+				chain: resumed.name,
+				subject: { kind: "operator" },
+				payload: {
+					chainId: resumed.id,
+					fromStatus: chain.status,
+					toStatus: resumed.status,
+					terminatedRunIds: [],
+				},
+			}))
 			return { chain: chainToJson(resumed), alreadyActive: false }
 		} finally {
 			resumeScheduler()
@@ -861,6 +1125,14 @@ export class CoderLoopDaemon {
 		} catch (error) {
 			throw this.translateCreateItemFailure(chain, input.issueNumber, error)
 		}
+		await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
+			kind: "audit",
+			type: "item.created",
+			chain: chain.name,
+			item: item.id,
+			subject: { kind: "operator" },
+			payload: { itemId: item.id, issueNumber: item.issueNumber, status: item.status },
+		}))
 		this.queueSchedulerTick()
 		return { item: itemToJson(item) }
 	}
@@ -893,6 +1165,16 @@ export class CoderLoopDaemon {
 			const firstDuplicate = inputs.map((input) => [input.issueNumber, store.getItemByIssue(chain.id, input.issueNumber)] as const).find(([, existing]) => existing !== null)
 			if (firstDuplicate !== undefined && firstDuplicate[1] !== null) throw duplicateItemAddError(chain, firstDuplicate[0], firstDuplicate[1])
 			throw error
+		}
+		for (const item of items) {
+			await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
+				kind: "audit",
+				type: "item.created",
+				chain: chain.name,
+				item: item.id,
+				subject: { kind: "operator" },
+				payload: { itemId: item.id, issueNumber: item.issueNumber, status: item.status },
+			}))
 		}
 		this.queueSchedulerTick()
 		return { items: items.map((item) => itemToJson(item)) }
@@ -944,6 +1226,7 @@ export class CoderLoopDaemon {
 		const chain = store.getChain(item.chainId)
 		if (chain === null) throw new DaemonError("not_found", `chain ${item.chainId} was not found`, { chainId: item.chainId })
 		assertChainAllowsItemMutation(chain, "item.update")
+		const auditAttribution = itemUpdateAuditAttribution(args)
 		const input: UpdateItemInput = {}
 		const repoCwd = optionalString(fields, "repoCwd")
 		if (repoCwd !== null) assignOptional(input, "repoCwd", await validateRepoCwdForRequest(repoCwd))
@@ -983,6 +1266,23 @@ export class CoderLoopDaemon {
 		const resumeScheduler = await this.pauseSchedulerForMutation()
 		try {
 			const updated = store.updateItem(item.id, input)
+			if (updated.status !== item.status) {
+				await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
+					kind: "audit",
+					type: "item.status",
+					chain: chain.name,
+					item: item.id,
+					...(auditAttribution.kind === "agent" ? { runId: auditAttribution.runId, phase: auditAttribution.phase } : {}),
+					subject: auditAttribution.subject,
+					payload: {
+						itemId: item.id,
+						issueNumber: item.issueNumber,
+						fromStatus: item.status,
+						toStatus: updated.status,
+						reason: "item.update",
+					},
+				}))
+			}
 			return { item: itemToJson(updated) }
 		} finally {
 			resumeScheduler()
@@ -1002,6 +1302,14 @@ export class CoderLoopDaemon {
 		const resumeScheduler = await this.pauseSchedulerForMutation()
 		try {
 			const reordered = store.reorderItem(item.id, position)
+			await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
+				kind: "audit",
+				type: "item.reordered",
+				chain: chain.name,
+				item: item.id,
+				subject: { kind: "operator" },
+				payload: { itemId: item.id, issueNumber: item.issueNumber, position },
+			}))
 			return { items: reordered.map((entry) => itemToJson(entry)) }
 		} finally {
 			resumeScheduler()
@@ -1085,10 +1393,12 @@ export class CoderLoopDaemon {
 	private queueSchedulerTick(): void {
 		void this.requestSchedulerTick().catch((error: unknown) => {
 			const message = errorMessage(error)
-			// Durable first: console.warn alone goes to an stderr that operational daemons
-			// do not capture, so a tick failure would otherwise be invisible after the fact.
-			void this.appendGlobalDaemonLog({ type: "scheduler.tick_failed", pid: process.pid, error: message }).catch(() => undefined)
-			console.warn(`coder-loop daemon warning: scheduler tick failed after IPC ack: ${message}`)
+			void this.recordObservabilityEvent(makeObservabilityEvent({
+				kind: "diagnostic",
+				type: "scheduler.tick_failed",
+				subject: { kind: "engine" },
+				payload: { pid: process.pid, error: message },
+			})).catch(() => undefined)
 		})
 	}
 
@@ -1122,7 +1432,8 @@ export class CoderLoopDaemon {
 		const scheduler = this.options.scheduler ?? {}
 		const externalOnEvent = scheduler.onEvent
 		const schedulerPresetDir = scheduler.presetDir
-		const presetDirForChain = scheduler.presetDirForChain ?? ((chain: ChainRecord) => schedulerPresetDir ?? bundledPresetDirForScheduler(chain))
+		const presetDirForChain = scheduler.presetDirForChain ?? ((chain: ChainRecord) =>
+			schedulerPresetDir ?? bundledPresetDirForScheduler(chain, (reason) => this.recordPresetFallbackEventOnce(chain, reason)))
 		const presetPromptResolver = (ctx: SchedulerSpawnContext): Promise<string> =>
 			resolveSchedulerPresetPhasePrompt({ presetDir: presetDirForChain(ctx.chain), phase: ctx.phase })
 		const fallbackRunner = scheduler.runner ?? defaultDaemonRunner()
@@ -1145,7 +1456,7 @@ export class CoderLoopDaemon {
 			prompt: scheduler.prompt ?? presetPromptResolver,
 			onEvent: async (event) => {
 				if (this.store !== null) {
-					await this.appendDaemonLogForChainId(event.chainId, { type: "scheduler.event", event: event as unknown as JsonObject })
+					await this.recordObservabilityEventForChainId(event.chainId, (chain) => schedulerEventToObservabilityEvent(chain, event))
 				}
 				await externalOnEvent?.(event)
 			},
@@ -1156,7 +1467,7 @@ export class CoderLoopDaemon {
 		if (scheduler.presetDirForChain !== undefined) {
 			options.presetDirForChain = scheduler.presetDirForChain
 		} else if (schedulerPresetDir === undefined) {
-			options.presetDirForChain = (chain) => bundledPresetDirForScheduler(chain)
+			options.presetDirForChain = (chain) => bundledPresetDirForScheduler(chain, (reason) => this.recordPresetFallbackEventOnce(chain, reason))
 		}
 		if (scheduler.worktreeManager !== undefined) options.worktreeManager = scheduler.worktreeManager
 		if (scheduler.kindResolver !== undefined) options.kindResolver = scheduler.kindResolver
@@ -1198,6 +1509,13 @@ export class CoderLoopDaemon {
 				})
 		}
 		return options
+	}
+
+	private recordPresetFallbackEventOnce(chain: ChainRecord, reason: PresetFallbackReason): void {
+		const fingerprint = `${chain.id}:${chain.preset}:${reason}`
+		if (this.presetFallbackFingerprints.has(fingerprint)) return
+		this.presetFallbackFingerprints.add(fingerprint)
+		recordPresetFallbackEvent(chain, reason, this.options)
 	}
 
 	private warnSkippedInvalidChain(chain: ChainRecord, error: RuntimePathError, context: string): void {
@@ -1884,6 +2202,7 @@ function validateItemUpdateRequest(args: JsonObject): void {
 	}
 	const fields = itemUpdateFields(args)
 	if (Object.keys(fields).length === 0) throw new DaemonError("invalid_request", "item.update requires at least one field to update")
+	validateItemUpdateAuditAttribution(args, fields)
 }
 
 function validateItemUpdateSelector(args: JsonObject): void {
@@ -1904,6 +2223,30 @@ function itemUpdateFields(args: JsonObject): JsonObject {
 		if (Object.hasOwn(args, key)) fields[key] = args[key] as JsonValue
 	}
 	return fields
+}
+
+function validateItemUpdateAuditAttribution(args: JsonObject, fields: JsonObject): void {
+	const hasRunId = Object.hasOwn(args, "agentRunId")
+	const hasPhase = Object.hasOwn(args, "agentPhase")
+	if (!hasRunId && !hasPhase) return
+	if (!hasRunId || !hasPhase) {
+		throw new DaemonError("invalid_request", "item.update agent attribution requires both agentRunId and agentPhase", {})
+	}
+	optionalString(args, "agentRunId")
+	optionalString(args, "agentPhase")
+	if (!Object.hasOwn(fields, "status")) {
+		throw new DaemonError("invalid_request", "item.update agent attribution is only valid for status writes", {})
+	}
+}
+
+function itemUpdateAuditAttribution(args: JsonObject): ItemUpdateAuditAttribution {
+	const runId = optionalString(args, "agentRunId")
+	const phase = optionalString(args, "agentPhase")
+	if (runId === null && phase === null) return { kind: "operator", subject: { kind: "operator" } }
+	if (runId === null || phase === null) {
+		throw new DaemonError("invalid_request", "item.update agent attribution requires both agentRunId and agentPhase", {})
+	}
+	return { kind: "agent", runId, phase, subject: { kind: "agent", runId, phase } }
 }
 
 function requestedChainName(args: JsonObject): string | null {
@@ -2000,18 +2343,49 @@ function bundledPresetDir(presetName: string): string {
 	return resolve(BUNDLED_PRESETS_DIR, presetName)
 }
 
-function bundledPresetDirForScheduler(chain: ChainRecord): string {
+type PresetFallbackReason = "invalid_name" | "unknown_preset"
+
+function bundledPresetDirForScheduler(chain: ChainRecord, recordFallback: (reason: PresetFallbackReason) => void): string {
 	const fallback = bundledPresetDir(DEFAULT_PRESET_NAME)
 	if (!PRESET_NAME_PATTERN.test(chain.preset)) {
-		console.warn(`coder-loop daemon warning: chain ${chain.id} has invalid preset ${JSON.stringify(chain.preset)}; using ${DEFAULT_PRESET_NAME}`)
+		recordFallback("invalid_name")
 		return fallback
 	}
 	const dir = bundledPresetDir(chain.preset)
 	if (!existsSync(resolve(dir, "preset.toml"))) {
-		console.warn(`coder-loop daemon warning: chain ${chain.id} references unknown preset ${JSON.stringify(chain.preset)}; using ${DEFAULT_PRESET_NAME}`)
+		recordFallback("unknown_preset")
 		return fallback
 	}
 	return dir
+}
+
+function recordPresetFallbackEvent(chain: ChainRecord, reason: PresetFallbackReason, loopDataRootOptions: LoopDataRootOptions): void {
+	const event = makeObservabilityEvent({
+		kind: "validation",
+		type: "preset.fallback",
+		chain: chain.name,
+		subject: { kind: "engine" },
+		payload: {
+			chainId: chain.id,
+			preset: chain.preset,
+			fallbackPreset: DEFAULT_PRESET_NAME,
+			reason,
+		},
+	})
+	try {
+		appendObservabilityEventSync(resolveLoopDataPaths(loopDataRootOptions).eventsFile, event)
+	} catch {
+		// Observability write failures must not block scheduler fallback.
+	}
+	try {
+		process.stderr.write(`${renderObservabilityEvent(event)}\n`)
+	} catch {
+		// stderr is the final derived human-readable sink.
+	}
+}
+
+function assertNeverSchedulerEvent(event: never): never {
+	throw new DaemonError("internal_error", `unhandled scheduler event: ${JSON.stringify(event)}`)
 }
 
 function validateDependsOnGraph(items: readonly ItemRecord[], itemId: number | null, dependsOn: readonly number[] | null): void {

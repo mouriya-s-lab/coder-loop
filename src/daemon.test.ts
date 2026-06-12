@@ -26,6 +26,7 @@ import {
 } from "./scheduler"
 import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
+import { queryObservabilityEvents } from "./observability"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/dt", String(process.pid))
@@ -490,6 +491,75 @@ describe("daemon", () => {
 				expect(Array.isArray(listed)).toBe(true)
 				expect(listed).toHaveLength(0)
 			}
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("daemon emits validation events when existing chain preset falls back", async () => {
+		const fixture = await startFixture("existing-preset-fallback-events", { schedulerPresetDir: null, schedulerIntervalMs: 20 })
+		try {
+			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				const invalidPresetChain = store.createChain({
+					name: "invalid-preset-fallback-chain",
+					preset: "bad_name",
+					repository: "mouriya-s-lab/coder-loop",
+					baseBranch: "main",
+					status: "active",
+					metadata: {},
+				})
+				store.createItem({
+					chainId: invalidPresetChain.id,
+					issueNumber: 41101,
+					repoCwd: REPO_ROOT,
+					status: "queued",
+					attempts: 0,
+					extra: { sleepMs: 5, exitCode: 0 },
+				})
+				const unknownPresetChain = store.createChain({
+					name: "unknown-preset-fallback-chain",
+					preset: "missing-preset",
+					repository: "mouriya-s-lab/coder-loop",
+					baseBranch: "main",
+					status: "active",
+					metadata: {},
+				})
+				store.createItem({
+					chainId: unknownPresetChain.id,
+					issueNumber: 41102,
+					repoCwd: REPO_ROOT,
+					status: "queued",
+					attempts: 0,
+					extra: { sleepMs: 5, exitCode: 0 },
+				})
+			} finally {
+				store.close()
+			}
+
+			const events = await waitFor(
+				async () => await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, {
+					kind: "validation",
+					type: "preset.fallback",
+				}),
+				(result) => result.events.some((event) => event.type === "preset.fallback" && event.payload.reason === "invalid_name")
+					&& result.events.some((event) => event.type === "preset.fallback" && event.payload.reason === "unknown_preset"),
+				10_000,
+			)
+			const invalidEvent = events.events.find((event) => event.type === "preset.fallback" && event.payload.reason === "invalid_name")
+			const unknownEvent = events.events.find((event) => event.type === "preset.fallback" && event.payload.reason === "unknown_preset")
+			expect(invalidEvent).toMatchObject({
+				kind: "validation",
+				type: "preset.fallback",
+				chain: "invalid-preset-fallback-chain",
+				payload: { preset: "bad_name", fallbackPreset: "gh-issue-pr-iteration", reason: "invalid_name" },
+			})
+			expect(unknownEvent).toMatchObject({
+				kind: "validation",
+				type: "preset.fallback",
+				chain: "unknown-preset-fallback-chain",
+				payload: { preset: "missing-preset", fallbackPreset: "gh-issue-pr-iteration", reason: "unknown_preset" },
+			})
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -1407,7 +1477,12 @@ describe("daemon", () => {
 			expect(gitOutput(target, ["worktree", "list", "--porcelain"])).not.toContain(worktreePath)
 			expect(await pathExists(paths.chainRoot)).toBe(true)
 			expect(await pathExists(paths.runsDir)).toBe(true)
-			expect(await pathExists(paths.runEventsFile(completedItem.lastRunId))).toBe(true)
+			expect(await pathExists(paths.runEventsFile(completedItem.lastRunId))).toBe(false)
+			const events = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, {
+				chain: "complete-cleanup",
+				type: "chain.completed",
+			})
+			expect(events.events).toHaveLength(1)
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -2285,7 +2360,7 @@ describe("daemon", () => {
 		}
 	})
 
-	test("daemon scheduler writes run artifacts and per-chain daemon log", async () => {
+	test("daemon scheduler writes run artifacts and unified observability events", async () => {
 		const fixture = await startFixture("scheduler-artifacts", { schedulerIntervalMs: 1_000 })
 		try {
 			const chain = record(expectOk(await request(fixture, "chain.create", {
@@ -2315,18 +2390,14 @@ describe("daemon", () => {
 			const status = JSON.parse(await readFile(paths.runStatusFile(runId), "utf-8")) as Record<string, unknown>
 			const stdout = await readFile(paths.runStdoutFile(runId), "utf-8")
 			const stderr = await readFile(paths.runStderrFile(runId), "utf-8")
-			const events = (await readFile(paths.runEventsFile(runId), "utf-8"))
-				.trim()
-				.split("\n")
-				.filter(Boolean)
-				.map((line) => JSON.parse(line) as { type: string })
-			const daemonBatches = await readdir(paths.daemonDir)
-			const daemonLog = await readFile(paths.daemonLogFile(daemonBatches[0]!), "utf-8")
+			const events = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, { run: runId })
 
 			expect(status).toMatchObject({ runId, chainId, issueNumber: 203, phase: "iteration", exitCode: 0, status: "done" })
 			expect(stdout).toContain("done:")
 			expect(stderr).toBe("")
-			expect(events.map((event) => event.type)).toEqual([
+			expect(status.eventsPath).toBe(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile)
+			expect(await pathExists(paths.runEventsFile(runId))).toBe(false)
+			expect(events.events.map((event) => event.type)).toEqual([
 				"agent.spawn",
 				"phase.start",
 				"agent.exit",
@@ -2334,7 +2405,12 @@ describe("daemon", () => {
 				"queue.terminal",
 				"chain.completed",
 			])
-			expect(daemonLog).toContain("scheduler.event")
+			const exitEvent = events.events.find((event) => event.type === "agent.exit")
+			if (exitEvent?.type !== "agent.exit") throw new Error("expected agent.exit event")
+			expect(exitEvent.payload.excerpt.stdout.path).toBe(paths.runPhaseStdoutFile(runId, "iteration"))
+			expect(exitEvent.payload.excerpt.stdout.records.at(-1)).toContain("REVIEW SUMMARY")
+			expect(exitEvent.payload.excerpt.stderr.path).toBe(paths.runPhaseStderrFile(runId, "iteration"))
+			expect(exitEvent.payload.excerpt.stderr.records).toEqual([])
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -2383,7 +2459,7 @@ describe("daemon", () => {
 			expect(snapshot.state.kind).toBe("ok")
 			expect(snapshot.events.runId).toBe(item?.lastRunId ?? null)
 			expect(snapshot.events.exists).toBe(true)
-			expect(snapshot.events.path).toBe(paths.runEventsFile(item?.lastRunId ?? ""))
+			expect(snapshot.events.path).toBe(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile)
 			expect(snapshot.events.error).toBeNull()
 			const eventTypes = snapshot.events.recent.map((event) =>
 				typeof event === "object" && event !== null && !Array.isArray(event) && typeof event.type === "string" ? event.type : null,
@@ -2428,10 +2504,94 @@ describe("daemon", () => {
 			expect(cliTypes).toContain("phase.start")
 			expect(cliTypes).toContain("phase.end")
 			expect(cliTypes).toContain("queue.terminal")
+
+			const logsSince = new Date(Date.now() - 60_000).toISOString()
+			const logsCli = Bun.spawn({
+				cmd: [
+					"bun",
+					resolve(REPO_ROOT, "src/loop.ts"),
+					"logs",
+					REPO_ROOT,
+					"--chain",
+					chainName,
+					"--loop-data-root",
+					fixture.loopDataRoot,
+					"--json",
+					"--kind",
+					"lifecycle",
+					"--since",
+					logsSince,
+				],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+				env: { ...process.env, CODER_LOOP_DATA_DIR: fixture.loopDataRoot },
+			})
+			const [logsStdout, logsStderr, logsExit] = await Promise.all([
+				new Response(logsCli.stdout).text(),
+				new Response(logsCli.stderr).text(),
+				logsCli.exited,
+			])
+			if (logsExit !== 0) throw new Error(`logs CLI failed: stdout=${logsStdout} stderr=${logsStderr}`)
+			expect(logsExit).toBe(0)
+			const logsPayload = record(JSON.parse(logsStdout))
+			expect(logsPayload.path).toBe(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile)
+			const logsEvents = logsPayload.events
+			if (!Array.isArray(logsEvents)) throw new Error("expected logs events array")
+			expect(logsEvents.length).toBeGreaterThan(0)
+			for (const event of logsEvents) {
+				const eventRecord = record(event)
+				expect(eventRecord.kind).toBe("lifecycle")
+				expect(Date.parse(String(eventRecord.ts))).toBeGreaterThanOrEqual(Date.parse(logsSince))
+			}
 		} finally {
 			await fixture.daemon.stop()
 		}
 	}, 30_000)
+
+	test("daemon suppresses repeated decision events while a slot remains busy", async () => {
+		const fixture = await startFixture("decision-edge-suppression", { schedulerIntervalMs: 20 })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "decision-edge-suppression-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			preInstallReviewOnEmptyLockByName("decision-edge-suppression-chain", fixture.loopDataRoot)
+			await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 9411,
+				repoCwd: REPO_ROOT,
+				extra: { sleepMs: 500, exitCode: 0 },
+			})
+			await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 9412,
+				repoCwd: REPO_ROOT,
+				extra: { sleepMs: 5, exitCode: 0 },
+			})
+			const eventsFile = resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile
+			const initial = await waitFor(
+				async () =>
+					await queryObservabilityEvents(eventsFile, {
+						kind: "decision",
+						type: "slot.busy",
+						chain: "decision-edge-suppression-chain",
+					}),
+				(result) => result.events.length === 1,
+				5_000,
+			)
+			await new Promise((resolveWait) => setTimeout(resolveWait, 150))
+			const afterIdleTicks = await queryObservabilityEvents(eventsFile, {
+				kind: "decision",
+				type: "slot.busy",
+				chain: "decision-edge-suppression-chain",
+			})
+			expect(afterIdleTicks.events).toHaveLength(initial.events.length)
+		} finally {
+			await fixture.daemon.stop()
+		}
+	}, 10_000)
 
 	test("daemon scheduler uses bundled preset directory from the chain", async () => {
 		const fixture = await startFixture("scheduler-chain-preset", { schedulerIntervalMs: 1_000, schedulerPresetDir: null })
@@ -2585,10 +2745,13 @@ process.exitCode = 0
 				.map((event) => event.phase)
 			expect(phaseStarts).toEqual(["iteration", "review", "blocked-responder"])
 
-			const paths = resolveChainRuntimePaths("b3-blocked-responder-live-chain", { loopDataRoot })
-			const daemonBatches = await readdir(paths.daemonDir)
-			const daemonLog = await readFile(paths.daemonLogFile(daemonBatches[0]!), "utf-8")
-			expect(daemonLog).toContain("blocked-responder")
+			const events = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot }).eventsFile, {
+				kind: "lifecycle",
+				type: "phase.start",
+				chain: "b3-blocked-responder-live-chain",
+				phase: "blocked-responder",
+			})
+			expect(events.events).toHaveLength(1)
 		} finally {
 			await daemon.stop()
 		}
@@ -2778,20 +2941,13 @@ process.exitCode = 0
 				const endedPhases = phaseEndEvents.map((event) => event.phase)
 				expect(endedPhases).toEqual(["iteration", "review"])
 
-				const daemonDir = resolveChainRuntimePaths("ac7-iter-then-review-chain", { loopDataRoot: fixture.loopDataRoot }).daemonDir
-				const batchDirs = await readdir(daemonDir)
-				expect(batchDirs.length).toBeGreaterThanOrEqual(1)
-				const newestBatch = batchDirs.sort().at(-1)!
-				const persistedLogPath = resolve(daemonDir, newestBatch, "daemon.log")
-				const persistedLog = await readFile(persistedLogPath, "utf-8")
-				const persistedSpawnLines = persistedLog
-					.split("\n")
-					.filter(Boolean)
-					.filter((line) => {
-						const parsed = JSON.parse(line) as { type?: string; event?: { type?: string; itemId?: number } }
-						return parsed.type === "scheduler.event" && parsed.event?.type === "agent.spawn" && parsed.event.itemId === item!.id
-					})
-				expect(persistedSpawnLines).toHaveLength(2)
+				const persistedSpawnEvents = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, {
+					kind: "lifecycle",
+					type: "agent.spawn",
+					chain: "ac7-iter-then-review-chain",
+					item: item!.id,
+				})
+				expect(persistedSpawnEvents.events).toHaveLength(2)
 			} finally {
 				await fixture.daemon.stop()
 			}
@@ -2846,7 +3002,8 @@ process.exitCode = 0
 				const paths = resolveChainRuntimePaths("phase-runid-artifact-chain", { loopDataRoot: fixture.loopDataRoot })
 				for (const runId of [iterRunId, reviewRunId]) {
 					const runDirEntries = await readdir(paths.runDir(runId))
-					expect(runDirEntries.sort()).toEqual(["events.jsonl", "status.json", "stderr.log", "stdout.log"])
+					const expectedPhaseDir = runId === iterRunId ? "iteration" : "review"
+					expect(runDirEntries.sort()).toEqual([expectedPhaseDir, "status.json", "stderr.log", "stdout.log"])
 				}
 				const iterStatus = JSON.parse(await readFile(paths.runStatusFile(iterRunId), "utf-8")) as { phase: string }
 				const reviewStatus = JSON.parse(await readFile(paths.runStatusFile(reviewRunId), "utf-8")) as { phase: string }
@@ -2867,18 +3024,10 @@ process.exitCode = 0
 					store.close()
 				}
 
-				const iterEventLines = (await readFile(paths.runEventsFile(iterRunId), "utf-8"))
-					.trim()
-					.split("\n")
-					.filter(Boolean)
-					.map((line) => JSON.parse(line) as { type: string; phase?: string })
-				const reviewEventLines = (await readFile(paths.runEventsFile(reviewRunId), "utf-8"))
-					.trim()
-					.split("\n")
-					.filter(Boolean)
-					.map((line) => JSON.parse(line) as { type: string; phase?: string })
-				const iterPhaseEnd = iterEventLines.find((event) => event.type === "phase.end")
-				const reviewPhaseEnd = reviewEventLines.find((event) => event.type === "phase.end")
+				const iterEventLines = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, { run: iterRunId })
+				const reviewEventLines = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, { run: reviewRunId })
+				const iterPhaseEnd = iterEventLines.events.find((event) => event.type === "phase.end")
+				const reviewPhaseEnd = reviewEventLines.events.find((event) => event.type === "phase.end")
 				expect(iterPhaseEnd?.phase).toBe("iteration")
 				expect(reviewPhaseEnd?.phase).toBe("review")
 			} finally {
@@ -2887,35 +3036,19 @@ process.exitCode = 0
 		})
 	})
 
-	test("recordFatalSync durably writes the uncaught stack to the global daemon.log", async () => {
+	test("recordFatalSync durably writes the uncaught stack to the unified event stream", async () => {
 		const fixture = await startFixture("record-fatal-sync", { schedulerEnabled: false })
 		try {
 			fixture.daemon.recordFatalSync("unhandledRejection", new Error("BOOM-observability"))
 			const paths = resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot })
-			const batches = await readdir(paths.daemonLogDir)
-			const records: Array<Record<string, unknown>> = []
-			for (const batch of batches) {
-				let raw = ""
-				try {
-					raw = await readFile(resolve(paths.daemonLogDir, batch, "daemon.log"), "utf-8")
-				} catch {
-					continue
-				}
-				for (const line of raw.split("\n")) {
-					if (line.trim() === "") continue
-					try {
-						records.push(JSON.parse(line) as Record<string, unknown>)
-					} catch {
-						// ignore non-JSON lines
-					}
-				}
-			}
-			const fatal = records.find((entry) => entry.type === "daemon.fatal")
+			const records = await queryObservabilityEvents(paths.eventsFile, { kind: "lifecycle", type: "daemon.fatal" })
+			const fatal = records.events[0]
 			expect(fatal).toBeTruthy()
-			expect(fatal?.kind).toBe("unhandledRejection")
+			if (fatal?.type !== "daemon.fatal") throw new Error("expected daemon.fatal event")
+			expect(fatal.payload.fatalKind).toBe("unhandledRejection")
 			// the durable record must carry the stack, not the message
-			expect(String(fatal?.error)).toContain("Error: BOOM-observability")
-			expect(String(fatal?.error)).toContain("daemon.test")
+			expect(String(fatal.payload.error)).toContain("Error: BOOM-observability")
+			expect(String(fatal.payload.error)).toContain("daemon.test")
 		} finally {
 			await fixture.daemon.stop()
 		}

@@ -23,6 +23,8 @@ describe("runtime path model", () => {
 		expect(paths.daemonSocket).toBe("/home/tester/.coder-loop/loop-data/daemon.sock")
 		expect(paths.daemonPid).toBe("/home/tester/.coder-loop/loop-data/daemon.pid")
 		expect(paths.chainsDir).toBe("/home/tester/.coder-loop/loop-data/chains")
+		expect(paths.eventsDir).toBe("/home/tester/.coder-loop/loop-data/events")
+		expect(paths.eventsFile).toBe("/home/tester/.coder-loop/loop-data/events/events.jsonl")
 	})
 
 	test("global daemon process logs live under the loop-data root, not under any chain", () => {
@@ -32,8 +34,10 @@ describe("runtime path model", () => {
 		expect(paths.daemonLogFile("2026-06-05-07-22-43")).toBe("/var/lib/coder-loop/loop-data/daemon/2026-06-05-07-22-43/daemon.log")
 		expect(paths.daemonStdoutFile("2026-06-05-07-22-43")).toBe("/var/lib/coder-loop/loop-data/daemon/2026-06-05-07-22-43/stdout.log")
 		expect(paths.daemonStderrFile("2026-06-05-07-22-43")).toBe("/var/lib/coder-loop/loop-data/daemon/2026-06-05-07-22-43/stderr.log")
+		expect(paths.eventsFile).toBe("/var/lib/coder-loop/loop-data/events/events.jsonl")
 		// The daemon log location must not be nested inside chains/.
 		expect(paths.daemonLogDir.includes("/chains/")).toBe(false)
+		expect(paths.eventsFile.includes("/chains/")).toBe(false)
 	})
 
 	test("loop-data root env override takes precedence over default", () => {
