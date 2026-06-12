@@ -12,6 +12,8 @@ import { spawn } from "node:child_process"
 import { appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises"
 import { closeSync, createWriteStream, openSync, realpathSync, type WriteStream } from "node:fs"
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
+import { command, flag, option, optional, positional, run as runCmd, string as cmdString, subcommands } from "cmd-ts"
+import { type as arkType } from "arktype"
 import {
 	CoderLoopDaemon,
 	DaemonError,
@@ -287,54 +289,71 @@ type LoopConfig = {
 	configBindings: JsonObject
 }
 
-type Boundary<T> = {
-	readonly infer: T
-	assert(data: unknown): T
-	array(): Boundary<T[]>
-}
+const AgentRunnerKindBoundary = arkType.or(arkType.unit("claude"), arkType.unit("codex"))
 
-type RunnerConfigInput = {
-	binary?: string | null
-	extraArgs?: string[]
-	model?: string | null
-}
+const StatusConfigBoundary = arkType({
+	"worktree?": "boolean|null",
+	"workflowFile?": "string|null",
+	"sharedContextFile?": "string|null",
+	"issueDir?": "string|null",
+	"evidenceDir?": "string|null",
+	"logDir?": "string|null",
+	"loopDataRoot?": "string|null",
+	"claude?": {
+		"binary?": "string|null",
+		"extraArgs?": "string[]",
+		"model?": "string|null",
+	},
+	"codex?": {
+		"binary?": "string|null",
+		"extraArgs?": "string[]",
+		"model?": "string|null",
+	},
+	"preset?": arkType.or("string", { name: "string" }, "null"),
+	"presetPath?": "string|null",
+})
 
-type StatusConfigInput = {
-	worktree?: boolean | null
-	workflowFile?: string | null
-	sharedContextFile?: string | null
-	issueDir?: string | null
-	evidenceDir?: string | null
-	logDir?: string | null
-	loopDataRoot?: string | null
-	claude?: RunnerConfigInput
-	codex?: RunnerConfigInput
-	preset?: string | { name: string } | null
-	presetPath?: string | null
-}
+type StatusConfigInput = typeof StatusConfigBoundary.infer
 
-type AgentRunStatusInput = {
-	label: string
-	runner?: AgentRunnerKind | null
-	model?: string | null
-	pid: number | null
-	startedAt: string
-	lastEventAt: string
-	outputPath: string
-	statusPath: string
-	bytesWritten: number
-	promptChars: number
-	lastStream: "stdout" | "stderr" | null
-	exitCode: number | null
-	signal: string | null
-	error: string | null
-	sessionId: string | null
-	terminated: Terminated | null
-}
+const TerminatedBoundary = arkType.or(
+	{ kind: arkType.unit("clean") },
+	{ kind: arkType.unit("signal"), name: "string" },
+	{ kind: arkType.unit("error"), code: "string" },
+	{ kind: arkType.unit("watchdog"), phase: arkType.or(arkType.unit("term"), arkType.unit("kill")), afterSummarySeconds: "number" },
+	{ kind: arkType.unit("timeout"), phase: arkType.or(arkType.unit("term"), arkType.unit("kill")), attemptSeconds: "number" },
+)
 
-const StatusConfigBoundary = makeBoundary(assertStatusConfigInput)
-const AgentRunStatusBoundary = makeBoundary(assertAgentRunStatusInput)
-const SessionEntryBoundary = makeBoundary(assertSessionEntryInput)
+const AgentRunStatusBoundary = arkType({
+	label: "string",
+	"runner?": arkType.or(AgentRunnerKindBoundary, "null"),
+	"model?": "string|null",
+	"pid": "number|null",
+	startedAt: "string",
+	lastEventAt: "string",
+	outputPath: "string",
+	statusPath: "string",
+	bytesWritten: "number",
+	promptChars: "number",
+	"lastStream": arkType.or(arkType.unit("stdout"), arkType.unit("stderr"), "null"),
+	"exitCode": "number|null",
+	"signal": "string|null",
+	"error": "string|null",
+	"sessionId": "string|null",
+	"terminated": arkType.or(TerminatedBoundary, "null"),
+})
+
+type AgentRunStatusInput = typeof AgentRunStatusBoundary.infer
+
+const SessionEntryBoundary = arkType({
+	attempt: "string",
+	"runner?": arkType.or(AgentRunnerKindBoundary, "null"),
+	"model?": "string|null",
+	sessionId: "string|null",
+	exitCode: "number|null",
+	signal: "string|null",
+	terminated: TerminatedBoundary,
+	log: "string",
+})
 
 const ENGINE_ITEM_BINDING_KEYS = new Set([
 	"id",
@@ -365,66 +384,54 @@ const LEGACY_TRANSPARENT_ITEM_FIELDS = new Set([
 const PRESET_ITEM_FIELD_TYPES = ["string", "number", "boolean", "json"] as const
 type PresetItemFieldType = typeof PRESET_ITEM_FIELD_TYPES[number]
 
-type PresetPhaseTriggerInput = {
-	afterPhase?: string
-	whenStatus?: string
-	on?: string
-}
+const PresetPhaseTriggerBoundary = arkType({
+	"afterPhase?": "string",
+	"whenStatus?": "string",
+	"on?": "string",
+})
 
-type PresetPhaseExitInput = {
-	status: string
-	when: string
-}
+const PresetPhaseExitBoundary = arkType({
+	status: "string",
+	when: "string",
+})
 
-type PresetPhaseInput = {
-	[key: string]: unknown
-	name: string
-	prompt: string
-	runner?: string
-	model?: string
-	exits?: PresetPhaseExitInput[]
-	variables?: Record<string, unknown>
-	trigger?: PresetPhaseTriggerInput
-}
+const PresetPhaseBoundary = arkType({
+	name: "string",
+	prompt: "string",
+	"runner?": "string",
+	"model?": "string",
+	"exits?": PresetPhaseExitBoundary.array(),
+	"variables?": "object",
+	"trigger?": PresetPhaseTriggerBoundary,
+})
 
-type PresetFragmentInput = {
-	id: string
-	role: string
-	path: string
-}
+const PresetFragmentBoundary = arkType({
+	id: "string",
+	role: "string",
+	path: "string",
+})
 
-type PresetTomlInput = {
-	name: string
-	version: number
-	description?: string
-	item: { idField: string; fields?: unknown }
-	runtime?: { businessKeys?: string[] }
-	statuses: {
-		continuable: string[]
-		terminal: string[]
-		success?: string[]
-		entry?: string
-		unblockable?: string[]
-	}
-	phases: PresetPhaseInput[]
-	fragments?: PresetFragmentInput[]
-	agent: { binary: string; extraArgs?: string[]; attemptTimeoutSeconds?: number }
-}
+const PresetTomlBoundary = arkType({
+	name: "string",
+	version: "number",
+	"description?": "string",
+	item: { idField: "string", "fields?": "object" },
+	"runtime?": { "businessKeys?": "string[]" },
+	statuses: { continuable: "string[]", terminal: "string[]", "success?": "string[]", "entry?": "string", "unblockable?": "string[]" },
+	phases: PresetPhaseBoundary.array(),
+	"fragments?": PresetFragmentBoundary.array(),
+	agent: { binary: "string", "extraArgs?": "string[]", "attemptTimeoutSeconds?": "number" },
+})
 
-type StatusSnapshotInput = {
-	target: object
-	state: object
-	queue: object
-	runs: object
-	current: object
-	events: object
-	processes: object
-}
-
-const PresetPhaseTriggerBoundary = makeBoundary(assertPresetPhaseTriggerInput)
-const PresetPhaseExitBoundary = makeBoundary(assertPresetPhaseExitInput)
-const PresetTomlBoundary = makeBoundary(assertPresetTomlInput)
-const StatusSnapshotBoundary = makeBoundary(assertStatusSnapshotInput)
+const StatusSnapshotBoundary = arkType({
+	target: "object",
+	state: "object",
+	queue: "object",
+	runs: "object",
+	current: "object",
+	events: "object",
+	processes: "object",
+})
 
 export type LoopOptions = {
 	targetCwd: string
@@ -960,9 +967,6 @@ function parseCodexModelChoice(value: string | null, flagName: string): CodexMod
 	if ((CODEX_MODEL_CHOICES as readonly string[]).includes(value)) return value as CodexModelChoice
 	fail(`${flagName} must be one of ${CODEX_MODEL_CHOICES.join("|")}, got: ${value}`)
 }
-
-async function buildCliDefinitions() {
-const { command, flag, option, optional, positional, run: runCmd, string: cmdString, subcommands } = await import("cmd-ts")
 
 const statusCliCommand = command({
 	name: "status",
@@ -1528,17 +1532,6 @@ const runtimeCliCommand = subcommands({
 	},
 })
 
-return { runCmd, statusCliCommand, daemonCliCommand, chainCliCommand, itemCliCommand, queueCliCommand, runtimeCliCommand }
-}
-
-type CliDefinitions = Awaited<ReturnType<typeof buildCliDefinitions>>
-let cliDefinitions: CliDefinitions | null = null
-
-async function getCliDefinitions(): Promise<CliDefinitions> {
-	if (cliDefinitions === null) cliDefinitions = await buildCliDefinitions()
-	return cliDefinitions
-}
-
 function splitFlag(arg: string): [string, string | null] {
 	const equalsIndex = arg.indexOf("=")
 	if (equalsIndex === -1) return [arg, null]
@@ -1593,7 +1586,6 @@ function parseOptionalRunner(value: string | null, flagName: string): AgentRunne
 }
 
 async function runStatusCommand(args: string[]): Promise<void> {
-	const { runCmd, statusCliCommand } = await getCliDefinitions()
 	const parsed = await runCmd(statusCliCommand, args)
 	if (parsed.kind !== "status") return
 	const snapshot = await buildCoderLoopStatusSnapshot(parsed.args)
@@ -1602,7 +1594,6 @@ async function runStatusCommand(args: string[]): Promise<void> {
 }
 
 async function runChainCommand(args: string[]): Promise<void> {
-	const { runCmd, chainCliCommand } = await getCliDefinitions()
 	const parsed = await runCmd(chainCliCommand, args)
 	if (parsed.value.kind !== "chain") return
 	const chainArgs = parsed.value.args
@@ -1647,7 +1638,6 @@ async function runChainCommand(args: string[]): Promise<void> {
 }
 
 async function runItemCommand(args: string[]): Promise<void> {
-	const { runCmd, itemCliCommand } = await getCliDefinitions()
 	const parsed = await runCmd(itemCliCommand, args)
 	if (parsed.value.kind !== "item") return
 	const itemArgs = parsed.value.args
@@ -2061,7 +2051,6 @@ async function runDaemonCommand(args: string[]): Promise<void> {
 		await runCentralDaemonStatusCommand(args)
 		return
 	}
-	const { runCmd, daemonCliCommand } = await getCliDefinitions()
 	const parsed = await runCmd(daemonCliCommand, args)
 	if (parsed.value.kind !== "daemon") return
 	const daemonArgs = parsed.value.args
@@ -2097,14 +2086,12 @@ async function runDaemonCommand(args: string[]): Promise<void> {
 }
 
 async function runQueueCommand(args: string[]): Promise<void> {
-	const { runCmd, queueCliCommand } = await getCliDefinitions()
 	const parsed = await runCmd(queueCliCommand, args)
 	if (parsed.value.kind !== "queue") return
 	await runQueueUnblockCommand(parsed.value.args)
 }
 
 async function runRuntimeCommand(args: string[]): Promise<void> {
-	const { runCmd, runtimeCliCommand } = await getCliDefinitions()
 	const parsed = await runCmd(runtimeCliCommand, args)
 	if (parsed.value.kind !== "runtime") return
 	const runtimeArgs = parsed.value.args
@@ -5813,7 +5800,9 @@ export async function readLastSessionEntry(sessionsPath: string): Promise<Sessio
 		if (line === undefined || line.trim() === "") continue
 		try {
 			const parsed: unknown = JSON.parse(line)
-			return assertArk(SessionEntryBoundary, parsed, "session entry")
+			const result = SessionEntryBoundary(parsed)
+			if (result instanceof arkType.errors) continue
+			return result
 		} catch {
 			continue
 		}
@@ -5997,389 +5986,6 @@ function assertArk<T>(schema: ArkAssertable<T>, data: unknown, label: string): T
 	} catch (error) {
 		throw new Error(`${label}: ${errorMessage(error)}`)
 	}
-}
-
-function makeBoundary<T>(assertInput: (data: unknown) => T): Boundary<T> {
-	return {
-		infer: undefined as T,
-		assert: assertInput,
-		array: () => makeBoundary((data: unknown) => {
-			if (!Array.isArray(data)) throw new Error("must be an array")
-			return data.map((entry, index) => {
-				try {
-					return assertInput(entry)
-				} catch (error) {
-					throw new Error(`[${index}]: ${errorMessage(error)}`)
-				}
-			})
-		}),
-	}
-}
-
-function assertStatusConfigInput(data: unknown): StatusConfigInput {
-	const input = requireRecord(data, "must be an object")
-	const result: StatusConfigInput = {}
-	const worktree = optionalBooleanOrNull(input, "worktree")
-	if (worktree !== undefined) result.worktree = worktree
-	const workflowFile = optionalStringOrNull(input, "workflowFile")
-	if (workflowFile !== undefined) result.workflowFile = workflowFile
-	const sharedContextFile = optionalStringOrNull(input, "sharedContextFile")
-	if (sharedContextFile !== undefined) result.sharedContextFile = sharedContextFile
-	const issueDir = optionalStringOrNull(input, "issueDir")
-	if (issueDir !== undefined) result.issueDir = issueDir
-	const evidenceDir = optionalStringOrNull(input, "evidenceDir")
-	if (evidenceDir !== undefined) result.evidenceDir = evidenceDir
-	const logDir = optionalStringOrNull(input, "logDir")
-	if (logDir !== undefined) result.logDir = logDir
-	const loopDataRoot = optionalStringOrNull(input, "loopDataRoot")
-	if (loopDataRoot !== undefined) result.loopDataRoot = loopDataRoot
-	const claude = optionalRunnerConfig(input, "claude")
-	if (claude !== undefined) result.claude = claude
-	const codex = optionalRunnerConfig(input, "codex")
-	if (codex !== undefined) result.codex = codex
-	const preset = optionalPresetConfig(input, "preset")
-	if (preset !== undefined) result.preset = preset
-	const presetPath = optionalStringOrNull(input, "presetPath")
-	if (presetPath !== undefined) result.presetPath = presetPath
-	return result
-}
-
-function assertAgentRunStatusInput(data: unknown): AgentRunStatusInput {
-	const input = requireRecord(data, "must be an object")
-	const result: AgentRunStatusInput = {
-		label: requiredString(input, "label"),
-		pid: requiredNumberOrNull(input, "pid"),
-		startedAt: requiredString(input, "startedAt"),
-		lastEventAt: requiredString(input, "lastEventAt"),
-		outputPath: requiredString(input, "outputPath"),
-		statusPath: requiredString(input, "statusPath"),
-		bytesWritten: requiredNumber(input, "bytesWritten"),
-		promptChars: requiredNumber(input, "promptChars"),
-		lastStream: requiredStreamOrNull(input, "lastStream"),
-		exitCode: requiredNumberOrNull(input, "exitCode"),
-		signal: requiredStringOrNull(input, "signal"),
-		error: requiredStringOrNull(input, "error"),
-		sessionId: requiredStringOrNull(input, "sessionId"),
-		terminated: requiredTerminatedOrNull(input, "terminated"),
-	}
-	const runner = optionalRunnerKindOrNull(input, "runner")
-	if (runner !== undefined) result.runner = runner
-	const model = optionalStringOrNull(input, "model")
-	if (model !== undefined) result.model = model
-	return result
-}
-
-function assertSessionEntryInput(data: unknown): SessionEntry {
-	const input = requireRecord(data, "must be an object")
-	const result: SessionEntry = {
-		attempt: requiredString(input, "attempt"),
-		sessionId: requiredStringOrNull(input, "sessionId"),
-		exitCode: requiredNumberOrNull(input, "exitCode"),
-		signal: requiredStringOrNull(input, "signal"),
-		terminated: requiredTerminated(input, "terminated"),
-		log: requiredString(input, "log"),
-	}
-	const runner = optionalRunnerKindOrNull(input, "runner")
-	if (runner !== undefined) result.runner = runner
-	const model = optionalStringOrNull(input, "model")
-	if (model !== undefined) result.model = model
-	return result
-}
-
-function assertPresetPhaseTriggerInput(data: unknown): PresetPhaseTriggerInput {
-	const input = requireRecord(data, "must be an object")
-	const result: PresetPhaseTriggerInput = {}
-	const afterPhase = optionalString(input, "afterPhase")
-	if (afterPhase !== undefined) result.afterPhase = afterPhase
-	const whenStatus = optionalString(input, "whenStatus")
-	if (whenStatus !== undefined) result.whenStatus = whenStatus
-	const on = optionalString(input, "on")
-	if (on !== undefined) result.on = on
-	return result
-}
-
-function assertPresetPhaseExitInput(data: unknown): PresetPhaseExitInput {
-	const input = requireRecord(data, "must be an object")
-	return {
-		status: requiredString(input, "status"),
-		when: requiredString(input, "when"),
-	}
-}
-
-function assertPresetPhaseInput(data: unknown): PresetPhaseInput {
-	const input = requireRecord(data, "must be an object")
-	const variables = optionalRecord(input, "variables")
-	const result: PresetPhaseInput = {
-		...input,
-		name: requiredString(input, "name"),
-		prompt: requiredString(input, "prompt"),
-	}
-	const runner = optionalString(input, "runner")
-	if (runner !== undefined) result.runner = runner
-	const model = optionalString(input, "model")
-	if (model !== undefined) result.model = model
-	const exits = optionalArray(input, "exits", assertPresetPhaseExitInput)
-	if (exits !== undefined) result.exits = exits
-	if (variables !== undefined) result.variables = variables
-	const trigger = optionalBoundary(input, "trigger", assertPresetPhaseTriggerInput)
-	if (trigger !== undefined) result.trigger = trigger
-	return result
-}
-
-function assertPresetFragmentInput(data: unknown): PresetFragmentInput {
-	const input = requireRecord(data, "must be an object")
-	return {
-		id: requiredString(input, "id"),
-		role: requiredString(input, "role"),
-		path: requiredString(input, "path"),
-	}
-}
-
-function assertPresetTomlInput(data: unknown): PresetTomlInput {
-	const input = requireRecord(data, "must be an object")
-	const item = requireRecord(input.item, "item must be an object")
-	const statuses = requireRecord(input.statuses, "statuses must be an object")
-	const agent = requireRecord(input.agent, "agent must be an object")
-	const statusResult: PresetTomlInput["statuses"] = {
-		continuable: requiredStringArray(statuses, "continuable"),
-		terminal: requiredStringArray(statuses, "terminal"),
-	}
-	const success = optionalStringArray(statuses, "success")
-	if (success !== undefined) statusResult.success = success
-	const entry = optionalString(statuses, "entry")
-	if (entry !== undefined) statusResult.entry = entry
-	const unblockable = optionalStringArray(statuses, "unblockable")
-	if (unblockable !== undefined) statusResult.unblockable = unblockable
-	const agentResult: PresetTomlInput["agent"] = {
-		binary: requiredString(agent, "binary"),
-	}
-	const extraArgs = optionalStringArray(agent, "extraArgs")
-	if (extraArgs !== undefined) agentResult.extraArgs = extraArgs
-	const attemptTimeoutSeconds = optionalNumber(agent, "attemptTimeoutSeconds")
-	if (attemptTimeoutSeconds !== undefined) agentResult.attemptTimeoutSeconds = attemptTimeoutSeconds
-	const itemResult: PresetTomlInput["item"] = {
-		idField: requiredString(item, "idField"),
-	}
-	if (Object.hasOwn(item, "fields")) itemResult.fields = item.fields
-	const result: PresetTomlInput = {
-		name: requiredString(input, "name"),
-		version: requiredNumber(input, "version"),
-		item: itemResult,
-		statuses: statusResult,
-		phases: requiredArray(input, "phases", assertPresetPhaseInput),
-		agent: agentResult,
-	}
-	const description = optionalString(input, "description")
-	if (description !== undefined) result.description = description
-	const runtime = optionalPresetRuntime(input, "runtime")
-	if (runtime !== undefined) result.runtime = runtime
-	const fragments = optionalArray(input, "fragments", assertPresetFragmentInput)
-	if (fragments !== undefined) result.fragments = fragments
-	return result
-}
-
-function assertStatusSnapshotInput(data: unknown): StatusSnapshotInput {
-	const input = requireRecord(data, "must be an object")
-	return {
-		target: requiredObject(input, "target"),
-		state: requiredObject(input, "state"),
-		queue: requiredObject(input, "queue"),
-		runs: requiredObject(input, "runs"),
-		current: requiredObject(input, "current"),
-		events: requiredObject(input, "events"),
-		processes: requiredObject(input, "processes"),
-	}
-}
-
-function optionalRunnerConfig(input: Record<string, unknown>, key: string): RunnerConfigInput | undefined {
-	const value = input[key]
-	if (value === undefined) return undefined
-	const record = requireRecord(value, `${key} must be an object`)
-	const result: RunnerConfigInput = {}
-	const binary = optionalStringOrNull(record, "binary")
-	if (binary !== undefined) result.binary = binary
-	const extraArgs = optionalStringArray(record, "extraArgs")
-	if (extraArgs !== undefined) result.extraArgs = extraArgs
-	const model = optionalStringOrNull(record, "model")
-	if (model !== undefined) result.model = model
-	return result
-}
-
-function optionalPresetRuntime(input: Record<string, unknown>, key: string): PresetTomlInput["runtime"] | undefined {
-	const value = input[key]
-	if (value === undefined) return undefined
-	const record = requireRecord(value, `${key} must be an object`)
-	const result: NonNullable<PresetTomlInput["runtime"]> = {}
-	const businessKeys = optionalStringArray(record, "businessKeys")
-	if (businessKeys !== undefined) result.businessKeys = businessKeys
-	return result
-}
-
-function optionalPresetConfig(input: Record<string, unknown>, key: string): StatusConfigInput["preset"] | undefined {
-	const value = input[key]
-	if (value === undefined) return undefined
-	if (value === null || typeof value === "string") return value
-	const record = requireRecord(value, `${key} must be a string, null, or { name } object`)
-	return { name: requiredString(record, "name") }
-}
-
-function optionalRunnerKindOrNull(input: Record<string, unknown>, key: string): AgentRunnerKind | null | undefined {
-	const value = input[key]
-	if (value === undefined) return undefined
-	if (value === null) return null
-	if (value === "claude" || value === "codex") return value
-	throw new Error(`${key} must be claude, codex, or null`)
-}
-
-function requiredStreamOrNull(input: Record<string, unknown>, key: string): "stdout" | "stderr" | null {
-	const value = input[key]
-	if (value === null) return null
-	if (value === "stdout" || value === "stderr") return value
-	throw new Error(`${key} must be stdout, stderr, or null`)
-}
-
-function requiredTerminatedOrNull(input: Record<string, unknown>, key: string): Terminated | null {
-	const value = input[key]
-	if (value === null) return null
-	return assertTerminated(value, key)
-}
-
-function requiredTerminated(input: Record<string, unknown>, key: string): Terminated {
-	return assertTerminated(input[key], key)
-}
-
-function assertTerminated(value: unknown, label: string): Terminated {
-	const input = requireRecord(value, `${label} must be an object`)
-	const kind = requiredString(input, "kind")
-	if (kind === "clean") return { kind }
-	if (kind === "signal") return { kind, name: requiredString(input, "name") }
-	if (kind === "error") return { kind, code: requiredString(input, "code") }
-	if (kind === "watchdog") return { kind, phase: requiredTermPhase(input, "phase"), afterSummarySeconds: requiredNumber(input, "afterSummarySeconds") }
-	if (kind === "timeout") return { kind, phase: requiredTermPhase(input, "phase"), attemptSeconds: requiredNumber(input, "attemptSeconds") }
-	throw new Error(`${label}.kind must be clean, signal, error, watchdog, or timeout`)
-}
-
-function requiredTermPhase(input: Record<string, unknown>, key: string): "term" | "kill" {
-	const value = input[key]
-	if (value === "term" || value === "kill") return value
-	throw new Error(`${key} must be term or kill`)
-}
-
-function optionalBoundary<T>(input: Record<string, unknown>, key: string, assertInput: (data: unknown) => T): T | undefined {
-	const value = input[key]
-	return value === undefined ? undefined : assertInput(value)
-}
-
-function requiredArray<T>(input: Record<string, unknown>, key: string, assertInput: (data: unknown) => T): T[] {
-	const value = input[key]
-	if (!Array.isArray(value)) throw new Error(`${key} must be an array`)
-	return value.map((entry, index) => {
-		try {
-			return assertInput(entry)
-		} catch (error) {
-			throw new Error(`${key}[${index}]: ${errorMessage(error)}`)
-		}
-	})
-}
-
-function optionalArray<T>(input: Record<string, unknown>, key: string, assertInput: (data: unknown) => T): T[] | undefined {
-	const value = input[key]
-	if (value === undefined) return undefined
-	if (!Array.isArray(value)) throw new Error(`${key} must be an array`)
-	return value.map((entry, index) => {
-		try {
-			return assertInput(entry)
-		} catch (error) {
-			throw new Error(`${key}[${index}]: ${errorMessage(error)}`)
-		}
-	})
-}
-
-function requiredStringArray(input: Record<string, unknown>, key: string): string[] {
-	return requiredArray(input, key, (entry) => {
-		if (typeof entry !== "string") throw new Error("must be a string")
-		return entry
-	})
-}
-
-function optionalStringArray(input: Record<string, unknown>, key: string): string[] | undefined {
-	return optionalArray(input, key, (entry) => {
-		if (typeof entry !== "string") throw new Error("must be a string")
-		return entry
-	})
-}
-
-function optionalRecord(input: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
-	const value = input[key]
-	if (value === undefined) return undefined
-	return requireRecord(value, `${key} must be an object`)
-}
-
-function requiredObject(input: Record<string, unknown>, key: string): object {
-	const value = input[key]
-	if (!isObjectRecord(value) || Array.isArray(value)) throw new Error(`${key} must be an object`)
-	return value
-}
-
-function requireRecord(value: unknown, message: string): Record<string, unknown> {
-	if (!isObjectRecord(value) || Array.isArray(value)) throw new Error(message)
-	return value
-}
-
-function requiredString(input: Record<string, unknown>, key: string): string {
-	const value = input[key]
-	if (typeof value !== "string") throw new Error(`${key} must be a string`)
-	return value
-}
-
-function optionalString(input: Record<string, unknown>, key: string): string | undefined {
-	const value = input[key]
-	if (value === undefined) return undefined
-	if (typeof value !== "string") throw new Error(`${key} must be a string`)
-	return value
-}
-
-function requiredStringOrNull(input: Record<string, unknown>, key: string): string | null {
-	const value = input[key]
-	if (value === null) return null
-	if (typeof value !== "string") throw new Error(`${key} must be a string or null`)
-	return value
-}
-
-function optionalStringOrNull(input: Record<string, unknown>, key: string): string | null | undefined {
-	const value = input[key]
-	if (value === undefined) return undefined
-	if (value === null) return null
-	if (typeof value !== "string") throw new Error(`${key} must be a string or null`)
-	return value
-}
-
-function optionalBooleanOrNull(input: Record<string, unknown>, key: string): boolean | null | undefined {
-	const value = input[key]
-	if (value === undefined) return undefined
-	if (value === null) return null
-	if (typeof value !== "boolean") throw new Error(`${key} must be a boolean or null`)
-	return value
-}
-
-function requiredNumber(input: Record<string, unknown>, key: string): number {
-	const value = input[key]
-	if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`${key} must be a finite number`)
-	return value
-}
-
-function optionalNumber(input: Record<string, unknown>, key: string): number | undefined {
-	const value = input[key]
-	if (value === undefined) return undefined
-	if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`${key} must be a finite number`)
-	return value
-}
-
-function requiredNumberOrNull(input: Record<string, unknown>, key: string): number | null {
-	const value = input[key]
-	if (value === null) return null
-	if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`${key} must be a finite number or null`)
-	return value
 }
 
 function isJsonValue(value: unknown): value is JsonValue {
