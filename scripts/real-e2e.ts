@@ -302,14 +302,38 @@ async function stopDaemon(daemon: DaemonHandle): Promise<void> {
 		log(`daemon: down 命令 exit ${down.exitCode}: ${down.stderr.trim() || down.stdout.trim()}`)
 	}
 	const deadline = Date.now() + 20_000
-	while (Date.now() < deadline) {
-		if (daemon.child.exitCode !== null) return
+	while (Date.now() < deadline && daemon.child.exitCode === null) {
 		await Bun.sleep(250)
 	}
-	log("daemon: down 超时，SIGTERM 收尾")
-	daemon.child.kill("SIGTERM")
-	await Bun.sleep(2000)
-	if (daemon.child.exitCode === null) daemon.child.kill("SIGKILL")
+	if (daemon.child.exitCode === null) {
+		log("daemon: down 超时，SIGTERM 收尾")
+		daemon.child.kill("SIGTERM")
+		await Bun.sleep(2000)
+		if (daemon.child.exitCode === null) daemon.child.kill("SIGKILL")
+	}
+	killOrphanAgents(daemon.loopDataRoot)
+}
+
+// daemon down 在有 active run 时等待而非终止 agent（#467）；teardown 不能留孤儿
+// codex/claude 在 daemon 死后继续推进 GitHub 状态。agent 的命令行携带本次
+// loop-data root（--cd/--add-dir/--loop-data-root），按此匹配强杀；agent 是
+// process-group leader，先连组杀再单杀。kill 失败 = 进程已不在，忽略。
+function killOrphanAgents(loopDataRoot: string): void {
+	const result = sh(["pgrep", "-f", loopDataRoot], { allowFail: true })
+	for (const line of result.stdout.split("\n")) {
+		const pid = Number.parseInt(line.trim(), 10)
+		if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue
+		log(`teardown: 强杀残留进程 pid=${pid}`)
+		try {
+			process.kill(-pid, "SIGKILL")
+		} catch {
+			try {
+				process.kill(pid, "SIGKILL")
+			} catch {
+				// already gone
+			}
+		}
+	}
 }
 
 // ------------------------------------------------------------------- watch
