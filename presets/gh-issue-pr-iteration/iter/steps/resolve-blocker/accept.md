@@ -1,5 +1,11 @@
 # Acceptance: resolve-blocker
 
+## Required report fields
+
+The report must contain: `Why this scoping`; `What I actually determined` with the back-link (or its explicit absence), the exact blocking condition, the minimum success condition, in-scope surface, out-of-scope list, and the verification plan including the blocked-path replay command; `Problems`. Structurally incomplete → send back the missing fields before judging substance.
+
+## Judgment
+
 Judge the scoping report against:
 
 - **Concreteness** — the blocking condition names an actual command / path / service / evidence gap, quoted from the live issue, not paraphrased into vagueness. The success condition is observable.

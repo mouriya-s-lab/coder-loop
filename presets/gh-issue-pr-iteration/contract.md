@@ -4,7 +4,7 @@
 
 读完后你能：照本文档写出一个 issue body，保证它能通过 review 调度者的 contract replay / spike follow-up / title-intent 验收；写出一个 PR body，保证它能通过 PR protocol / evidence form 验收。
 
-本文档不替代用户级 `writing-issue / writing-pr / review-pr` skill，只 override 与本 preset gate **解析**相关的字段。继承 / 覆盖范围见 §7。
+本文档是本 preset 写 issue / PR / review 形态的自包含契约。用户级 `writing-issue / writing-pr / review-pr` skill 若存在可作 operator 个人参考；缺失不得阻塞 planning，冲突时本文档胜。软引用边界见 §7。
 
 ---
 
@@ -156,7 +156,7 @@ contract replay 把 `## 继承验证义务` 行 concat 到 `## 验收标准` 行
 - `kind:comment` 标题偏 "Spike: 验证…" / "评估…"，body 必有 `## 验证步骤` + `## 结果分支`。
 - `kind:code-spike` 标题偏 "Spike: 验证…" / "PoC: 验证…"，body 必有 `## 验证步骤` + `## 结果分支`，并明确 no-merge / no-PR 约束。
 - `kind:blocked` 标题偏 "解除 / unblock / resolve blocker"，body 必有具体阻塞条件、`Unblocks: owner/repo#N` back-link（如适用）、`## 验收标准`，证据必须包含真实 blocked path 的 e2e/integration 复测。
-- 标题 prefix `RFC:` 偏 retroactive umbrella（用户级 writing-issue 的 retroactive 形态）；这种 issue 在 coder-loop 队列里通常用作 parent，不直接 queue 实现。
+- 标题 prefix `RFC:` 偏 retroactive umbrella（见 §7.2）；这种 issue 在 coder-loop 队列里通常用作 parent，不直接 queue 实现。
 
 ---
 
@@ -231,21 +231,26 @@ PR protocol 验收检测"最新 retry response 是否在 issue 而非 PR" → re
 
 ## 3. Review 验收点总表
 
-Review 是调度者（orchestrator）：诚实性/协议判断由它亲自做，契约复验派 replay subagent 真跑。按 `review-entry.md` 的 phase 顺序列出每个验收点（entry 与 quality/ 文件做 ground truth）：
+Review 是调度者（orchestrator）：PR-backed kind 必须先派 diff-audit / test-integrity / replay / e2e-replay 四个 subagent 真跑、拿齐四份已验收报告后才允许做 body 判断与 verdict；诚实性/协议判断由调度者亲自做。每次 PR 回复（retry 反馈与 accept 总结）都是完整 review 报告：全部检查的逐项摘要 + 独立 `## 缺失汇总` 区块 + `## Skipped checks` 区块（每个未跑检查写明理由）。按 `review-entry.md` 的 phase 顺序列出每个验收点（entry 与 quality/ 文件做 ground truth）：
 
 | 验收点 | 执行方 | 输入 | 规则 | 失败处置 |
 |---|---|---|---|---|
-| Trace honesty | 调度者亲自 | iter 汇报/trace + GitHub live state | 每个声明有对应观察（`quality/honesty.md` §B claim-vs-observation） | retry action |
+| Diff audit | diff-audit subagent 真跑（纯读） | PR diff vs base + changed code 本体 | 每个 changed file 映射到 issue scope；runtime artifacts / scheduling state 不入仓；代码审查锚定 issue 设计：逻辑错误（须可追溯失败路径）/ 偏离 issue 声明的设计（须引原句）/ 违反项目 conventions（须引来源）/ diff 内结构缺陷——发散性发现（替代设计、diff 外代码）不进 verdict | retry action |
+| Test integrity | test-integrity subagent 真跑（自建 scratch worktrees） | diff 的测试变更 + base/head 两侧套件实测 | 删 / 改名 / skip / 弱化逐条枚举（空集在枚举后显式声明）；两侧计数实测（先装依赖）；计数下降无枚举 = 隐藏弱化硬拒；与 packet 测试 delta 行不一致 = packet 可信度失败 | retry action |
+| Contract replay | replay subagent 真跑 | issue `## 验收标准` + `## 继承验证义务` 全部行 | 逐行执行/复验（列 `# / Dimension / Check / Command / Env / Expect`，actual vs Expect）；`Env=browser` 行属 e2e 域，记 `deferred: e2e-replay` 由 E2E replay 在真 UI walk 内关闭；`kind:blocked` 必含 blocked-path e2e；其余未跑行仅两种合法形态：setup 未完成（附尝试记录）/ manifest 缺项（计为 packet 失败） | retry action（引用全部失败行） |
+| E2E replay | e2e-replay subagent 真跑 | packet e2e claims + replay 转交的 browser 验收行 + runtime manifest + standing environment | 每个 e2e claim 以直跑方式亲自复演（程序真实入口 / agent-browser 真 UI）；转交的 browser 验收行逐行执行并对照 Expect（失败 = 契约行失败）；packet 的 e2e 若为脚本产物即 form 失败；manifest 缺项计为 packet 失败 | retry action |
+| Contract integrity | 调度者亲自 | issue body 编辑历史（`userContentEdits`） | 入队后的 body 编辑、且无早于该编辑的 issue 评论字面授权 = 篡改（重点盯验收行弱化）→ 立即恢复最近合法快照 + 反馈开头红线严警 | hard retry |
+| Checks/mergeability | 调度者亲自 | live PR checks（names/conclusions/timestamps/head SHA）+ mergeStateStatus | 实测观察；pending/hung 不算 mergeable；CI 合法在跑 → retry 附 observe-again | retry action |
+| Trace honesty | 调度者亲自 | iter 汇报/trace + GitHub live state | 每个声明有对应观察（`quality/honesty-judge.md` claim-vs-observation） | retry action |
 | PR protocol | 调度者亲自 | PR body + thread + issue comments | first line `Closes #<N>`、CI parity 行、retry 必有新 PR-thread comment | retry action / no-PR 路由 |
 | Title-intent | 调度者亲自 | issue title + PR title | strip conventional prefix 后主语 noun phrase 对齐 | retry action |
-| Caveat honesty | 调度者亲自 | handoff `Intent/Result (run …)` blocks（verbatim 亲读）+ PR body/comments + `gh pr diff`（仅 intent↔action 比对） | `quality/honesty.md` §B 六类 scope-reduction 触发；cosmetic-handwave 一律硬拒；授权须 issue body 字面句 | retry action |
-| Evidence form | 调度者亲自 | PR body（opening packet）/ 最新 run 的 PR comment | `quality/evidence.md` §B：分层齐全、claim 映射、artifact 可查、`kind:blocked` 额外 blocked-path 复测要求 | retry / blocked action |
-| Contract replay | replay subagent 真跑 | issue `## 验收标准` + `## 继承验证义务` 全部行 + packet 关键 claim + live checks | 逐行执行/复验（列 `# / Dimension / Check / Command / Env / Expect`，actual vs Expect）；packet 关键 claim 重跑比对；checks 实测观察（pending/hung 不算 mergeable） | retry action（引用全部失败行） |
+| Caveat honesty | 调度者亲自 | handoff `Intent/Result (run …)` blocks（verbatim 亲读）+ PR body/comments + diff-audit 报告（intent↔action 比对） | `quality/honesty-judge.md` 七类 scope-reduction 触发；cosmetic-handwave 一律硬拒；授权须 issue body 字面句，stale-baseline 例外见同文件 | retry action |
+| Evidence form | 调度者亲自 | PR body（opening packet）/ 最新 run 的 PR comment | `quality/evidence-judge.md`：分层齐全、claim 映射、artifact 可查、测试清单 delta 在场、**e2e 直跑证据**（真实入口实跑 / agent-browser 真 UI；脚本 e2e 一律不算，unit/integration 只是辅助层）、**runtime manifest** 在场且可凭其重跑（auth 只写解析位置，secret 值入包即硬拒）、`kind:blocked` 额外 blocked-path 复测要求 | retry / blocked action |
 | Spike follow-up（`kind:comment`） | 调度者亲自（`review/spike-followup.md`） | iter comment + issue `## 结果分支` | 选恰好一条分支 + 提议数 ≥ 分支动词词表要求 | retry action |
 | Source-spike audit（`kind:code-spike`） | 调度者亲自（`review/source-spike-audit.md`） | issue comment + spike branch + 证据 | no-merge 语义、branch/SHA、命令覆盖、结果分支；有 PR 即 retry | retry action |
 | Closure | 调度者亲自 | 上面验收点综合 + child closure table | 决定 terminal action（accept-pr / accept-no-pr / retry / expand-parent / skip / blocked / stop） | 选 action 文件 |
 
-代码质量（style / conventions / 测试弱化以外的 diff 审美 / bug-hunting beyond contract）**不在 loop 内**——后退给人工 review。loop 保留的 code 相关检查只有：mergeability/CI 实测（replay 步）与 runtime artifacts 不入 commit（hygiene）。
+代码审查**在 loop 内**，锚点是 issue 声明的设计：逻辑正确性、conventions、diff 内结构由 diff-audit 步审，所有发现必须带锚（可追溯失败路径 / issue 原句 / convention 来源），**不发散**——替代设计、issue 设计之外的改进想法、diff 没碰的代码一律不进 verdict（diff 外既有问题至多在 Problems 记一行 out-of-scope observation）。其余 code 相关检查：逐行契约复验（replay 步）、测试完整性两侧实测（test-integrity 步）、e2e 直跑复演与脚本形态检查（e2e-replay 步）、scope 对应与 runtime artifacts 不入仓（diff-audit 步）、checks/mergeability 实测（调度者亲自）。PR-backed kind 缺少四份派发报告（diff-audit / test-integrity / replay / e2e-replay）任意一份的 verdict 无效（仅 no-PR 路由与 infra-stop 例外）。review 的每条 PR 回复是全量报告：每个 check 一节，且每节必须填该检查的实测值（SHA / 计数 / 原句引用 / URL / 时间戳，见 action 文件模板）——这些值只有真做了检查才存在，填不出即检查未做。
 
 ---
 
@@ -255,6 +260,10 @@ Review 是调度者（orchestrator）：诚实性/协议判断由它亲自做，
 
 | 验收点 | `kind:code` | `kind:blocked` | `kind:comment` | `kind:code-spike` | `""`（empty / legacy） |
 |---|---|---|---|---|---|
+| Diff audit | 跑 | 跑（PR-backed 时） | 跳（无 PR） | 跳（无 PR；有 PR 即 retry） | 跑 |
+| Test integrity | 跑 | 跑（PR-backed 时） | 跳 | 跳 | 跑 |
+| E2E replay | 跑 | 跑（PR-backed 时） | 跳 | 跳 | 跑 |
+| Contract integrity（body 篡改） | 跑 | 跑 | 跑 | 跑 | 跑 |
 | Trace honesty | 跑 | 跑 | 跑 | 跑 | 跑 |
 | PR protocol | 跑 | 跑（PR-backed unblock；无 PR 仅限 already-satisfied） | no-PR 路由 | no-PR 路由；PR 存在即 retry | 跑 |
 | Title-intent | 跑 | 跑 | 跳（无 PR） | 跳（source spike 无 PR） | 跑（legacy 也可能漂） |
@@ -295,27 +304,33 @@ planning agent 禁止：
 
 ---
 
-## 7. vs 用户级 skill 的继承 / 覆盖
+## 7. 用户级 skill 软引用与自包含 planning 规则
 
-`writing-issue / writing-pr / review-pr` 是 repo-agnostic hygiene base，本 preset contract 在以下字段 **override** 它们：
+用户级 `writing-issue / writing-pr / review-pr` skill 是 operator 个人资产，不属于 engine 或 preset 的分发物。planning agent **可以**在本机存在这些 skill 时参考其写作习惯；不存在、不可读、版本不同都不得阻塞 `/dev-plan`，也不得要求先安装或同步。本文档是必需规则的权威来源。
 
-| 字段 | user-level skill 说 | 本 preset 强制 |
-|---|---|---|
-| 标题语言 | 用户操作员要求中文 | 继承（无差异） |
-| 原子性 | one issue, one problem | 继承（无差异） |
-| Cite 原文 | 每条动机句要 cite | 继承（无差异） |
-| `kind:*` label | （应该退出 user-level skill） | 强制单值 `kind:code` / `kind:comment` / `kind:code-spike` / `kind:blocked`，规则见 §1.3 |
-| 必备段（future-work issue） | 目标 / 上下文 / 问题 / 预期结果 / 约束 / 验收标准 / 继承验证义务 / 依赖关系 | 继承，但 §1.4 强制表格列固定 |
-| Acceptance checkpoint 形态 | "checkpoint rows with dimension, command, environment, expected result" | §1.4 强制 6 列名顺序 + Dimension 枚举 + Command 反引号 |
-| Spike `## 结果分支` | 提到但无解析规则 | §1.6 强制动词词表 + 最少 sub-issue 提议数 |
-| Retroactive umbrella | 详细描述 | 继承（这种 issue 不进 coder-loop queue 走 plan/，由用户手动 file） |
-| PR body 四层证据 | `writing-pr` 提到 | §2.3 强制层名 = Dimension 取值 + 与 `## 验收标准` Dimension 一一对应 |
-| `Closes` 关键字位置 | `writing-pr` 提到 | §2.1 强制 first line |
-| Retry on PR thread | `writing-pr` / routing rule 提到 | §2.5 强制新 thread 评论，PR body 改不算 |
+### 7.1 自包含规则索引
 
-用户级 skill 余下内容（cite 规则、retroactive 写法、parent-child API 机制、forbidden in title、cross-repo sub-issue、re-parenting）planning agent 继承全部，本 contract 不重复。
+| 规则 | 本 preset 的权威位置 |
+|---|---|
+| 标题单主语、中文、禁用多 topic 连接 | §1.1 / §1.7 / §7.2 |
+| issue 必备段 | §1.2 |
+| `kind:*` 单值 label | §1.3 |
+| `## 验收标准` 表形态 | §1.4 |
+| 继承验证义务 | §1.5 |
+| Spike `## 结果分支` | §1.6 |
+| 原子性、citation、parent/child、retroactive umbrella、re-parenting | §7.2 |
+| PR body、证据、retry 位置 | §2 |
 
-planning agent 读 `~/.claude/skills/writing-issue/SKILL.md` 作 base，**再读本 contract** 作 override；冲突时本 contract 胜。
+### 7.2 Planning hygiene base
+
+- **One issue, one problem.** 一个可执行 issue 只能有一个主问题和一个可连贯解释的 `## 问题` / `## 目标`。如果 body 需要多个互不依赖的动机段、多个 title 主语，或一个 PR 无法自然 close 全部动机，必须拆成多个 child issue；若它们共享同一个业务驱动，再建 parent umbrella 解释共同背景。
+- **Atomicity test.** 起草前先问：能否写出一个不靠列表堆叠的单段理由来证明这个 issue 的全部范围？能则保留；不能则回到分解。不要用 "顺手"、"同文件"、"同模块" 合并独立问题。
+- **Citation.** 每条动机句必须追溯到可检查来源：issue/PR body、commit message、design doc、log/evidence artifact 或用户原话。推荐格式：`> "..." — <repo>#<N> body`、`<repo>@<short-sha> commit`、`<path>:<line>`。没有来源的动机不得写进 issue；引用原文不要翻译或拼接伪造。
+- **Required sections.** Future-work issue 使用 §1.2 的段结构；`## 验收标准` 只使用 §1.4 表格，不用自然语言 checklist 替代。`## 问题` 和 `## 预期结果` 写用户/agent 可观察的痛点与收益，验证命令和实现细节放入 `## 验收标准` 或 `## 约束`。
+- **Forbidden title/body shape.** 标题不得用 `and` / `+` / `/` / `、` 拼多个主题；body 不写内部 draft id、未来源化的方案偏好、实现模块结构、protocol choice、未来态 `[ ]` checklist、或把 PR 当成有子 issue 的节点。
+- **Parent/child graph.** GitHub sub-issue 只连接 issue-to-issue；PR 只能通过 PR body 第一行 `Closes #<ISSUE>` 归属 issue。创建 parent/child 关系时用 GitHub GraphQL `addSubIssue`；child 已有 parent 时先判断是否真的需要 re-parent，记录原因，再移除旧 parent 后挂到新 parent。跨 repo child 必须写完整 `<owner>/<repo>#<N>` 引用，不能靠当前 repo 省略。
+- **Retroactive umbrella.** 已落地工作补 umbrella 时必须在 `## 背景` 或 `## 为什么` 首段明说它是 retroactive，写清落地时间窗口，并列出已合并 PR/commit。Retroactive umbrella 不写未来态验收 checklist；用已落地事实、引用和 PR 列表说明完成内容。
+- **Re-parenting and duplicate links.** 发现错误 parent 时不要复制一个新 child 或把旧链接留作模糊历史；读取当前 parent/children，说明迁移理由，执行一次明确 re-parent。`addSubIssue` 返回 duplicate 时把它当成已满足的幂等结果记录，不重复创建。
 
 ---
 

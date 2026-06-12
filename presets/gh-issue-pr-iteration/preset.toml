@@ -316,19 +316,34 @@ role = "plan"
 path = "plan/final.md"
 
 [[fragments]]
-id   = "quality/evidence"
+id   = "quality/evidence-execute"
 role = "quality"
-path = "quality/evidence.md"
+path = "quality/evidence-execute.md"
 
 [[fragments]]
-id   = "quality/honesty"
+id   = "quality/evidence-judge"
 role = "quality"
-path = "quality/honesty.md"
+path = "quality/evidence-judge.md"
 
 [[fragments]]
-id   = "quality/cleanup"
+id   = "quality/honesty-execute"
 role = "quality"
-path = "quality/cleanup.md"
+path = "quality/honesty-execute.md"
+
+[[fragments]]
+id   = "quality/honesty-judge"
+role = "quality"
+path = "quality/honesty-judge.md"
+
+[[fragments]]
+id   = "quality/cleanup-execute"
+role = "quality"
+path = "quality/cleanup-execute.md"
+
+[[fragments]]
+id   = "quality/cleanup-judge"
+role = "quality"
+path = "quality/cleanup-judge.md"
 
 [[fragments]]
 id   = "iter/steps/research/task"
@@ -389,6 +404,21 @@ path = "iter/steps/verify/report.md"
 id   = "iter/steps/verify/accept"
 role = "iter"
 path = "iter/steps/verify/accept.md"
+
+[[fragments]]
+id   = "iter/steps/e2e/task"
+role = "iter"
+path = "iter/steps/e2e/task.md"
+
+[[fragments]]
+id   = "iter/steps/e2e/report"
+role = "iter"
+path = "iter/steps/e2e/report.md"
+
+[[fragments]]
+id   = "iter/steps/e2e/accept"
+role = "iter"
+path = "iter/steps/e2e/accept.md"
 
 [[fragments]]
 id   = "iter/steps/submit/task"
@@ -464,6 +494,51 @@ path = "review/steps/replay/report.md"
 id   = "review/steps/replay/accept"
 role = "review"
 path = "review/steps/replay/accept.md"
+
+[[fragments]]
+id   = "review/steps/diff-audit/task"
+role = "review"
+path = "review/steps/diff-audit/task.md"
+
+[[fragments]]
+id   = "review/steps/diff-audit/report"
+role = "review"
+path = "review/steps/diff-audit/report.md"
+
+[[fragments]]
+id   = "review/steps/diff-audit/accept"
+role = "review"
+path = "review/steps/diff-audit/accept.md"
+
+[[fragments]]
+id   = "review/steps/test-integrity/task"
+role = "review"
+path = "review/steps/test-integrity/task.md"
+
+[[fragments]]
+id   = "review/steps/test-integrity/report"
+role = "review"
+path = "review/steps/test-integrity/report.md"
+
+[[fragments]]
+id   = "review/steps/test-integrity/accept"
+role = "review"
+path = "review/steps/test-integrity/accept.md"
+
+[[fragments]]
+id   = "review/steps/e2e-replay/task"
+role = "review"
+path = "review/steps/e2e-replay/task.md"
+
+[[fragments]]
+id   = "review/steps/e2e-replay/report"
+role = "review"
+path = "review/steps/e2e-replay/report.md"
+
+[[fragments]]
+id   = "review/steps/e2e-replay/accept"
+role = "review"
+path = "review/steps/e2e-replay/accept.md"
 
 [[fragments]]
 id   = "review/spike-followup"

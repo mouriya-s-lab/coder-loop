@@ -9,13 +9,13 @@ Take classified deliverables and emit a draft issue body for each. At this fragm
 - Classified candidate list from `plan/classify`.
 - **Business frame from `plan/business-frame`** — the three user-facing sections (痛点 / 能多干什么 / 具体场景). Every sub-issue's `## 问题` / `## 预期结果` must cite back to this frame. If business-frame emitted `business_frame_skipped`, sub-issues are pure design-question / no-code and this constraint relaxes.
 - `contract.md` §1 (issue body shape per kind).
-- User-level `~/.claude/skills/writing-issue/SKILL.md` (hygiene base: atomicity test, citation rules, retroactive umbrella form for `parent` class).
+- `contract.md` §7.2 (self-contained hygiene base: atomicity test, citation rules, parent/child graph, retroactive umbrella form).
 
 ## Procedure
 
 1. For each `implementation` / `blocker-resolution` / `spike` / `source-writing-spike` / `parent` candidate, draft a body skeleton.
 
-2. **Atomicity test** (per user-level skill hard constraint, also in `contract.md` §5):
+2. **Atomicity test** (per `contract.md` §7.2):
    - Can you write a single coherent `## Why` (or `## 问题` / `## 目标` for future-work) paragraph that justifies the entire body without listing multiple distinct triggers?
    - If yes → keep as one issue.
    - If no → split into multiple issues; if they share a common driver, also create a `parent` umbrella.
@@ -148,7 +148,7 @@ Take classified deliverables and emit a draft issue body for each. At this fragm
 
    `parent` (umbrella; usually kind:code if it itself has a closure task, otherwise no `kind:*` label and not queued):
 
-   遵循用户级 writing-issue 的 retroactive umbrella form 或 future-work parent form。Parent body 通常含 `## 背景 / 为什么`、`## 范围`、`## 不在范围内`、`## 设计决策 / approach`、`## 时间线`、`## 实施 PR / 已挂 children`。本 contract 不重复 user-level skill 写法。
+   遵循 `contract.md` §7.2 的 retroactive umbrella form 或 future-work parent form。Parent body 通常含 `## 背景 / 为什么`、`## 范围`、`## 不在范围内`、`## 设计决策 / approach`、`## 时间线`、`## 实施 PR / 已挂 children`。若 parent 只是组织节点且没有自身 closure task，不要放入 coder-loop queue。
 
 4. **Cite verification**. Each `## 问题` / `## 目标` / `## 背景` paragraph must trace to a source quote. Mark inline as `> "..." — <repo>#<N>` body / `<repo>@<sha>` commit. No motivation sentence without cite — if you can't cite, the issue isn't yet understood well enough.
 

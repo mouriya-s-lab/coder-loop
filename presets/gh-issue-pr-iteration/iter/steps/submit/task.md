@@ -1,44 +1,46 @@
 # Step task: submit
 
-You are a submission subagent for one coder-loop iteration. Your dispatch message carries the runtime inputs and a `Step focus`. Your deliverable is the committed, pushed branch plus the PR (fresh run) or PR-thread comment (retry), carrying the evidence packet produced by verification.
+You are a submission subagent for one coder-loop iteration. Your deliverable is the committed, pushed branch plus the PR (fresh run) or PR-thread comment (retry), carrying the evidence packet the verify and e2e steps produced. Work through the steps in order.
 
-## Intent-vs-action delta first
+## Inputs
 
-Read the `Intent (run <RUN_ID>)` block in the chain handoff file (`SHARED_CONTEXT_FILE`). Compare it against what this run actually did (per your dispatch `Step focus` and the evidence under `EVIDENCE_DIR`). Append the delta to the handoff under `Result (run <RUN_ID>)`: did action match intent; what drifted and why; what was noticed that intent did not anticipate. Never edit the intent block itself — it is immutable history. A plain "intent matched action" line is fine when true; do not pad it.
+From your dispatch message: `ISSUE`, `REPO`, `RUN_ID`, `AGENT_CWD` (work there), `SHARED_CONTEXT_FILE`, `EVIDENCE_DIR` (the verified evidence you assemble from — you add no new claims), `WORKFLOW_FILE`, `ISSUE_BRANCH`/`ISSUE_PR` when set, `ISSUE_STATUS`, and `Step focus`. Read now, before Step 1: the `Intent (run <RUN_ID>)` block in `SHARED_CONTEXT_FILE`, the workflow file, `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/common/github-routing.md` (binds Step 3 routing), and `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/evidence-execute.md` + `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/honesty-execute.md`.
 
-## Commit
+## Workflow
+
+### Step 1 — Write the result delta
+
+Compare the `Intent (run <RUN_ID>)` block against what this run actually did (your `Step focus` plus the evidence under `EVIDENCE_DIR`). Append to the handoff under `Result (run <RUN_ID>)`: did action match intent; what drifted and why; what was noticed that intent did not anticipate. Never edit the intent block itself — it is immutable history. A plain "intent matched action" line is fine when true; do not pad it.
+
+### Step 2 — Commit and push
+
+Run `git status --short` and read it before staging. At the moment of `git add`, this rule applies: stage only the feature/test files and committed screenshots of this change — staging loop-data runtime artifacts, scheduling state, run logs, secrets, unrelated dirty files, or local-only evidence is forbidden; check the staged list (`git diff --cached --name-only`) against that rule before committing.
 
 ```bash
-git status --short
-git add <specific feature/test files and committed screenshots only>
+git add <specific feature/test files and committed screenshots — list them; never -A or .>
+git diff --cached --name-only   # read the staged list; any forbidden path → unstage it before committing
 git commit -m "fix(issue-<ISSUE>): <concise description>
 
 Refs: <REPO>#<ISSUE>"
 git push -u origin <branch>
 ```
 
-Never stage loop-data runtime artifacts, scheduling state, run logs, secrets, unrelated dirty files, or local-only evidence.
+### Step 3 — Route the deliverable
 
-## PR (fresh) or PR comment (retry)
+**An open PR already exists for this issue/branch** → retry route. Push went to the same branch; now post a **new PR-thread comment** containing: which review feedback was addressed; what changed this iteration; the full current layered evidence packet (sections per the workflow file; commands + exit + excerpts/paths; screenshots embedded as Markdown images, each mapped to what it proves; the **E2E direct-run evidence** — real entry driven, observed behavior, trace artifacts; the **runtime manifest** with credentials referenced by resolution location only, never a secret value in the PR; the test-inventory delta line from verification); and whether evidence was added, replaced, or deliberately unchanged and why. The PR body's boundary on this route: **repairing it is your job, rewriting it is forbidden**. If the body has a structural defect — missing/wrong closing keyword, wrong issue number, a body structure the workflow file requires but the opening run missed — fix the body now (per `common/github-routing.md`, an open PR you author is yours to keep correct) and state in this run's PR comment exactly what you changed in the body and why. What you never do to the body: rewrite or delete existing evidence narrative to answer review findings, turn it into a per-iteration test log, or smuggle in claims the verify/e2e steps did not produce — iteration history lives in the comments, and a body edit with no companion comment is a defect.
 
-Routing rules in `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/common/github-routing.md` bind this step.
-
-**If an open PR already exists for this issue/branch**: continue it. Push updates, then post a new PR-thread comment containing: which review feedback was addressed; what changed this iteration; the full current layered evidence packet (workflow-defined sections, commands + exit + excerpts/paths, screenshots embedded as Markdown images mapped to what each proves); whether evidence was added, replaced, or deliberately unchanged and why. Never rewrite the PR body — it is the immutable opening cover letter. If the existing body has a structural defect (missing closing keyword, wrong issue), report the defect in your report instead of editing it.
-
-**Otherwise create exactly one PR** following the target workflow file (`WORKFLOW_FILE`):
+**No PR exists** → create exactly one:
 
 - body first line exactly `Closes #<ISSUE>`;
-- workflow-defined title/body/section/language rules;
-- the four-layer evidence packet from this run's verification, with CI detection and parity status;
+- title/body/section/language rules per the workflow file;
+- the four-layer evidence packet from this run's verification, including CI detection + parity status and the test-inventory delta line;
+- the **E2E direct-run evidence** as the formal deliverable layer: the real entry driven (operator-style invocation / agent-browser walk), observed behavior, runtime trace artifacts — unit/integration results are supporting layers only;
+- the **runtime manifest** (binaries, services + start commands, auth by resolution location — **never a secret value in the PR** — ports, standing-environment PIDs/logs/stop commands) so review can re-run everything;
 - screenshots embedded as Markdown images whose paths resolve to committed PR-branch artifacts;
 - every artifact mapped to the behavior it proves.
 
-The PR body is a diff cover letter with evidence — do not reconstruct the issue's why or move task scope into it.
+The PR body is a diff cover letter with evidence — do not reconstruct the issue's why or move task scope into it. Everything in the packet traces to the verify and e2e steps' output; manufacturing a claim those steps did not produce violates honesty-execute and will be caught by replay.
 
-## Boundaries
+### Step 4 — Verify liveness, then report
 
-Do not merge anything, close issues, edit issue bodies, or write queue state. Evidence in the packet must satisfy section A of `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/evidence.md` — you assemble verified evidence; you do not manufacture new claims beyond what verification produced.
-
-## Report
-
-Report strictly per the report template path given in your dispatch message.
+Confirm your deliverable exists live: `gh pr view <N> -R <REPO> --json url` (fresh) or the comment URL resolving (retry). Nothing in this step merges PRs, closes issues, edits issue bodies, or writes queue state — confirm you did none. Report strictly per the report template path in your dispatch message: every required field, empty sets as `none`.

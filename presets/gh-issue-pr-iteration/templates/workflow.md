@@ -35,7 +35,7 @@ If this workflow conflicts with target `CLAUDE.md` about loop process, queue sta
 - <PR title/body language requirement, e.g. "PR title and body must be Chinese." or remove>
 - PR body must include all required evidence layers (see skeleton below) plus an `Analysis` section.
 - <Browser/E2E evidence requirement if any — keep, weaken, or remove>
-- PR body is the immutable opening cover letter and initial evidence packet; do not rewrite it as a per-iteration test log. After an implementation PR exists, every iteration/retry must post a new PR-thread comment with addressed review feedback, what changed, and the full current evidence packet. Preserving every iteration comment is required evidence history.
+- PR body is the opening cover letter and initial evidence packet; do not rewrite it as a per-iteration test log or rewrite its evidence narrative to answer review. Structural repairs (closing keyword, wrong issue, missing required section) are allowed on an open PR and must be declared in a companion PR comment. After an implementation PR exists, every iteration/retry must post a new PR-thread comment with addressed review feedback, what changed, and the full current evidence packet. Preserving every iteration comment is required evidence history; merged PR bodies are immutable.
 - Do not mark an issue done without credible evidence.
 - Review agent is the final gate: accepted PR-backed work is merged by review; retry/blocked/skipped/no-code decisions are classified by review.
 - Iteration agent must never merge PRs or close issues.

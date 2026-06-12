@@ -1,10 +1,45 @@
 # Action: accept PR-backed work
 
-Use only when honesty/protocol judgments, replay, and closure judgment all passed.
+Use only when all four dispatched reports (diff-audit, test-integrity, replay, e2e-replay), all judgments, and the closure judgment passed.
 
 ## Procedure
 
-1. Post an acceptance summary on the PR: state that the contract was independently replayed and list the decisive evidence/replay results.
+1. Post the acceptance review report on the PR — same fixed structure as every review reply. Every field demands a measured value, a verbatim quote, or an identifier that only exists if the check was actually performed; a field you cannot fill is a check you have not done:
+
+```markdown
+## Review verdict: accepted (<RUN_ID>)
+
+## Check reports
+### diff-audit — pass
+refs <base-sha>..<head-sha>; files changed <n>: in-scope <n> / support <n> / unmapped none;
+hygiene: none; code findings: none
+### test-integrity — pass
+base <count> (`<command>`) vs head <count> (`<command>`); enumerated: <per-category counts or none>;
+correlation: consistent; packet delta line: agrees
+### replay — pass
+head <sha>; rows <total>: matched <n> / deferred-browser <n: row #s> / artifact-verified <n>;
+blocked-path e2e: <command + exit / not applicable>
+### e2e-replay — pass
+environment: <probe result; restarted: yes/no>; claims re-driven <n>: all matched;
+browser rows closed <n>/<n>; form: direct
+### Judgments
+- contract integrity: <body edits since enqueue: n; per edit: editedAt + editor; all authorized — or none>
+- trace honesty: <claims cross-checked: n; one named pair: "<claim>" ↔ <observation>>
+- PR protocol: <body first line quoted verbatim; this run's PR comment URL>
+- title-intent: <"<issue title>" vs "<PR title>" after prefix strip>
+- caveat honesty: <Intent/Result blocks read: run ids; trigger phrases: none>
+- evidence form: <required packet sections all present by name; manifest re-runnable: yes>
+- checks/mergeability: <head sha observed; each check: name=conclusion; mergeStateStatus;
+  observed at <timestamp>>
+
+## 缺失汇总
+none
+
+## Skipped checks
+- <check → reason — or `none`>
+```
+
+An acceptance whose 缺失汇总 is not `none` is not an acceptance — go back to the retry action.
 2. Merge:
 
 ```bash
