@@ -17,6 +17,8 @@ Compare the `Intent (run <RUN_ID>)` block against what this run actually did (yo
 Run `git status --short` and read it before staging. At the moment of `git add`, this rule applies: stage only the feature/test files and committed screenshots of this change — staging loop-data runtime artifacts, scheduling state, run logs, secrets, unrelated dirty files, or local-only evidence is forbidden; check the staged list (`git diff --cached --name-only`) against that rule before committing.
 
 ```bash
+git add <specific feature/test files and committed screenshots — list them; never -A or .>
+git diff --cached --name-only   # read the staged list; any forbidden path → unstage it before committing
 git commit -m "fix(issue-<ISSUE>): <concise description>
 
 Refs: <REPO>#<ISSUE>"

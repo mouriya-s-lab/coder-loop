@@ -54,7 +54,7 @@ gh api graphql -f query='{repository(owner:"<owner>",name:"<name>"){issue(number
 gh pr view <PR_NUMBER> -R <REPO> --json number,title,state,mergedAt,mergeCommit,url,body,comments,reviews,statusCheckRollup,mergeStateStatus,headRefName
 ```
 
-   → issue contract (acceptance rows, sections), PR body and **the latest run's PR comment read verbatim**, checks state, children and their PRs when sub-issues exist.
+   → issue contract (acceptance rows, sections), PR body and **the latest run's PR comment read verbatim**, checks state, children and their PRs when sub-issues exist. Sub-issue API failure semantics: only a successful response listing children counts as parent evidence; a failed call (404 / unsupported / API error) is recorded as `sub-issue graph unavailable` and the issue is treated as ordinary — not an inferred parent, not an infrastructure failure, and never the basis for a "children all closed" closure claim.
 
 Plus one-hop graph references the issue body explicitly points at (`Unblocks: #N`, the From column of `## 继承验证义务`, a cited issue/PR) — same metadata commands, one hop only: a reference found inside a referenced object is an investigate dispatch, not your read.
 

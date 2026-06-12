@@ -49,7 +49,7 @@ Run these yourself; each read exists to feed a specific Step 3 decision:
    ```
 
    Never discover PRs by text search (`--search "<n> in:body"` matches any PR whose body merely contains the digits — false positives). Then `gh pr view <number>` on the hit for its state and latest review thread.
-3. Sub-issues (`gh api "repos/{{REPO}}/issues/{{ISSUE}}/sub_issues" -H "X-GitHub-Api-Version: 2026-03-10"`) → whether this is a parent/wrapper — feeds the Step 3 planning-stage classification.
+3. Sub-issues (`gh api "repos/{{REPO}}/issues/{{ISSUE}}/sub_issues" -H "X-GitHub-Api-Version: 2026-03-10"`) → whether this is a parent/wrapper — feeds the Step 3 planning-stage classification. Only a successful response listing children counts as parent/wrapper evidence; a failed call (404 / unsupported / API error) is recorded as `sub-issue graph unavailable` and the issue is treated as ordinary — neither an inferred parent nor an infrastructure failure.
 4. `{{SHARED_CONTEXT_FILE}}` → what previous runs already tried, their `Intent`/`Result` blocks → prevents re-doing or contradicting prior work.
 5. The state file's selected item → must match {{ISSUE}}. Mismatch, or unreadable state/config files → record the exact infrastructure failure and jump to Step 5 (wrap-up); do not improvise a different issue.
 6. `{{CURRENT_ISSUE_FILE}}` when present → issue-local notes from earlier runs. A missing file is normal, not a failure.
