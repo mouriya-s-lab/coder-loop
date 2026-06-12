@@ -1,184 +1,91 @@
-# Real e2e fixture
+# Real e2e fixture & harness
 
-This document records the small real-world fixture used to validate coder-loop
-against an actual GitHub issue, branch, PR, review, merge, and issue-closure
-path. It is intentionally not a unit test: the point is to catch integration
-failures across the local runner, `gh`, target bootstrap files, PR evidence, and
-review state transitions.
+真实 e2e 用一个真实的私有 GitHub repo 验证 coder-loop 的完整路径：真实 runner
+（claude / codex CLI）跑 iteration → review，产出真实 branch / PR / review /
+merge / issue closure。它故意不是单元测试：要抓的是 runner sandbox 行为、
+session resume、`gh` 交互、跨 phase 状态推进这类只在真实运行中暴露的集成失败
+（实证：#94 sandbox 阻断、#309 八项缺陷链，全部是 fake/unit 全绿时真实跑出来的）。
+
+不用任何 mock / stub / fake 替代真实 GitHub issue/PR 路径（#90 约束）。
 
 ## Fixture
 
-- Repository: `Mouriya-Emma/coder-loop-e2e-fixture`
-- Local checkout: `/Users/mouriya/Ext/code/coder-loop-e2e-fixture`
-- Visibility check:
+- Repository: `mouriya-s-lab/coder-loop-e2e-fixture`（PRIVATE）
+- 本地 checkout: `/Users/mouriya/Ext/code/coder-loop-e2e-fixture`
+- 可达性检查:
 
 ```bash
-gh repo view Mouriya-Emma/coder-loop-e2e-fixture --json nameWithOwner,visibility
+gh repo view mouriya-s-lab/coder-loop-e2e-fixture --json nameWithOwner,visibility
 ```
 
-Expected: exit 0 and `visibility` is `PRIVATE`.
+fixture repo 只保留极小的提交资产：
 
-The fixture repo keeps only tiny committed assets:
+- `message.txt` — 单行任务目标文件（pristine 态为 `status: pending`）；
+- `scripts/check-message.mjs` — 真实 check（`bun run check`），PR 证据用它；
+- `.coder-loop/workflow.md`、`CLAUDE.md` — target bootstrap 契约；
+- 运行态（`.coder-loop/runtime/`）不入库。
 
-- `message.txt`, the one-line task target;
-- `scripts/check-message.mjs`, the real check used by PR evidence;
-- `.coder-loop/workflow.md` and `.claude/commands/dev-*.md`, target bootstrap
-  contracts;
-- `CLAUDE.md`, project commands and PR boundaries for the spawned agent.
+## Harness：单命令全流程
 
-Do not commit `.coder-loop/runtime/`, runtime logs, or local evidence artifacts from this fixture. If an older fixture run left `.dev-loop` / `.dev-trace.txt`, keep those out too.
-
-## Runner Coverage
-
-The successful 2026-05-17 run used Codex end to end. Phase runner/model defaults come from `preset.toml`: the bundled iteration phase declares Codex, and the bundled review phase declares Codex with `model = "gpt-5.5"`:
-
-- queue item: `runner: "codex"`;
-- `status --json`: selected runner `kind=codex`, `source=queue`;
-- `status --json`: `target.runner.phases.review` is `kind=codex`, `source=preset`; `model` resolves to the explicit `codex.model` config when set, else the preset-declared `gpt-5.5`;
-- iteration phase status should record `runner: "codex"` and a Codex `thread_id`; review phase status should record `runner: "codex"` and the resolved codex model.
-
-Codex runner requires real workspace writes and GitHub CLI access for the
-`gh-issue-pr-iteration` preset. The default fresh Codex invocation therefore
-uses `--sandbox danger-full-access`; targets that want a narrower sandbox can
-override it through `codex.extraArgs`.
-
-## Bootstrap / Health Checks
-
-From the coder-loop repo:
+入口是本 repo 的 `scripts/real-e2e.ts`：
 
 ```bash
-coder-loop install /Users/mouriya/Ext/code/coder-loop-e2e-fixture \
-  --repo Mouriya-Emma/coder-loop-e2e-fixture
-coder-loop doctor /Users/mouriya/Ext/code/coder-loop-e2e-fixture
-coder-loop status /Users/mouriya/Ext/code/coder-loop-e2e-fixture --json \
-  | jq '.state.kind, .target.runner, .queue.selected, .current'
+bun scripts/real-e2e.ts
 ```
 
-Expected:
+它按序做完一轮完整真实 e2e：
 
-- install is idempotent and preserves existing target workflow plus centralized chain state;
-- doctor has no `FAIL`;
-- `state.kind == "ok"`;
-- selected queue item, when present, resolves to runner `codex`;
-- no stale live process / chain ownership before a clean e2e run.
+1. **preflight** — gh auth、`codex` / `claude` 在 PATH、fixture repo 可达、本地 checkout origin 一致。
+2. **reset** — fixture checkout 硬回 `origin/main`；关掉所有残留 open PR（fixture 专用于 e2e，open PR 一律视为上轮残留）；关掉残留的 `e2e-seed` label open issue；`message.txt` 不是 `status: pending` 时翻回并直接 push main。
+3. **seed** — 脚本用 `gh issue create` 建一个契约合规的 trivial issue（`kind:code` + `e2e-seed` label）：把 `message.txt` 改为 `status: complete`。
+4. **run** — 在隔离 `--loop-data-root`（`.coder-loop/runtime/real-e2e/<stamp>/loop-data`）起中央 daemon（`daemon up`），`install` bootstrap target + chain，`item add` 入队。生产 daemon（`~/.coder-loop`）完全不被触碰。
+5. **watch + tripwire** — 轮询 `status <target> --json`，越界即自动 `daemon down` + 落诊断 + 非零退出：
+   - `--max-wall-seconds`（默认 2700）
+   - `--max-attempts`（默认 5）
+   - `--max-runs`（默认 20，#309 式 1Hz spin 的信号）
+6. **assert** — item 到 `done` 后验证 GitHub 终态：seed issue CLOSED、closing PR MERGED、fixture `origin/main` 上 `message.txt == status: complete`、真实 `bun run check` 通过。
+7. **teardown + evidence** — `daemon down`，stdout 输出 evidence 摘要（issue URL、PR URL、merge commit、耗时、loop-data 路径）。
 
-If doctor reports stale runtime ownership, inspect `coder-loop daemon status ... --json` and stop/delete the target chain through the daemon API before rerunning.
+失败路径（终态 `blocked` / `moot` / `exhausted`、tripwire、install 失败）都会打印
+loop-data root、daemon stdout/stderr log 路径和最后一次 status snapshot，然后
+exit 1。
 
-## Repeatable Task Shape
+### Flags
 
-Use a deliberately tiny issue so the run validates loop mechanics rather than a
-large feature:
+| Flag | 默认 | 含义 |
+|---|---|---|
+| `--fixture-cwd` | `../coder-loop-e2e-fixture` | fixture 本地 checkout |
+| `--fixture-repo` | `mouriya-s-lab/coder-loop-e2e-fixture` | fixture GitHub repo |
+| `--max-wall-seconds` | 2700 | 全程 wall-time 上界 |
+| `--max-attempts` | 5 | item attempts 上界 |
+| `--max-runs` | 20 | runs 表行数上界（spin 检测） |
+| `--poll-seconds` | 15 | status 轮询间隔 |
 
-1. Put `message.txt` on `main` in a failing state:
+## 何时跑
 
-   ```text
-   status: pending
-   ```
+真实 e2e 不进每 commit 的 gate（`bun test` 是日常 gate）。在这些时机跑：
 
-2. Create a `kind:code` issue whose expected outcome is exactly:
+- 动 scheduler / daemon / runner spawn / preset prompt 的 PR 验收（#309 共享契约：
+  「真 chain + 真 item 的 e2e fixture 跑通才构成 acceptance」）；
+- 发版 / 同步到 app 之前；
+- 排查只在真实运行中复现的问题。
 
-   ```text
-   status: complete
-   ```
+## Runner 覆盖
 
-3. Queue that issue in the centralized chain runtime, with an item shaped like:
+phase runner/model 默认值来自 `preset.toml`：bundled `gh-issue-pr-iteration` 的
+iteration 与 review 都声明 `codex`（review 另声明 `model = "gpt-5.5"`）。Codex
+fresh 执行默认 `--sandbox danger-full-access`（#94：read-only / workspace-write
+会阻断 workspace 写入与 `gh` 网络访问）；要覆盖用 target config 的
+`codex.extraArgs`。
 
-   ```jsonc
-   {
-     "issue": <issue-number>,
-     "status": "queued",
-     "attempts": 0,
-     "branch": null,
-     "pr": null,
-     "lastRunId": null,
-     "issueFile": null,
-     "evidenceDir": "evidence/issue-<issue-number>",
-     "agentCwd": null,
-     "runner": "codex"
-   }
-   ```
+要用 Claude runner 覆盖某次运行：在 seed item 上设 `"runner": "claude"`（目前
+harness 不暴露该 flag，需要手动 `item add --runner claude`），或改 target config。
 
-4. Ensure chain `current` is null before the run (`coder-loop status ... --json | jq .current`).
+## Known pitfalls
 
-5. Run exactly one work iteration:
-
-   ```bash
-   CODER_LOOP_IDLE_SLEEP_MS=50 \
-     coder-loop daemon start /Users/mouriya/Ext/code/coder-loop-e2e-fixture --max-iterations 1
-   ```
-
-Expected result:
-
-- iteration creates a feature branch and PR;
-- PR body starts with `Closes #<issue-number>`;
-- PR evidence includes the changed `message.txt` and `bun run check`;
-- review posts an acceptance comment, merges the PR, and confirms GitHub closes
-  the issue through the closing reference;
-- local queue item becomes `status: "done"` with `pr` set;
-- `current` becomes `null`;
-- no live loop process remains and `current` becomes `null`.
-
-## 2026-05-17 Evidence
-
-Successful run:
-
-- Fixture issue: `Mouriya-Emma/coder-loop-e2e-fixture#1`
-- Fixture PR: `Mouriya-Emma/coder-loop-e2e-fixture#2`
-- Run id: `run-2026-05-16-22-31-27-929-issue-1`
-- Iteration Codex thread: `019e32ea-7b62-76d2-a2a8-8c27e8a0e173`
-- Review Codex thread: `019e32ee-5fa7-79d0-8198-486050dc6caf`
-- Fixture PR merge commit:
-  `d5b7e29aa54a75ffa7e94b726287b7190d005086`
-
-Key verification commands:
-
-```bash
-coder-loop install /Users/mouriya/Ext/code/coder-loop-e2e-fixture \
-  --repo Mouriya-Emma/coder-loop-e2e-fixture
-
-coder-loop doctor /Users/mouriya/Ext/code/coder-loop-e2e-fixture \
-  --repo Mouriya-Emma/coder-loop-e2e-fixture
-
-gh pr view 2 --repo Mouriya-Emma/coder-loop-e2e-fixture \
-  --json state,mergedAt,mergeCommit,closingIssuesReferences,comments
-
-gh issue view 1 --repo Mouriya-Emma/coder-loop-e2e-fixture \
-  --json state,closedAt,closedByPullRequestsReferences
-
-coder-loop status /Users/mouriya/Ext/code/coder-loop-e2e-fixture --json \
-  | jq '.queue, .current, .processes'
-
-cd /Users/mouriya/Ext/code/coder-loop-e2e-fixture
-git switch main
-git pull --ff-only
-bun run check
-```
-
-Observed result:
-
-- PR #2 state: `MERGED`;
-- PR #2 closing reference points to issue #1;
-- issue #1 state: `CLOSED`;
-- issue #1 `closedByPullRequestsReferences` points to PR #2;
-- install/doctor/status exit 0 after the run, with no selected item and no live
-  loop process;
-- local status has `queue.byStatus.done == 1`, `queue.selected == null`,
-  `current.run == null` and no live loop process;
-- `bun run check` on updated fixture `main` prints
-  `message fixture check passed`.
-
-## Known Pitfalls
-
-- The target repo must include `CLAUDE.md` because the bundled
-  `gh-issue-pr-iteration` read-context and review fragments require it as
-  project reference.
-- A non-git temp directory can fail Codex before sandbox evaluation with
-  `Not inside a trusted directory and --skip-git-repo-check was not specified`.
-  This fixture intentionally uses a real git repo instead of adding
-  `--skip-git-repo-check` to runner defaults.
-- `codex exec resume` does not accept `--sandbox`; sandbox defaults apply only to
-  fresh `codex exec`.
-- Review currently reads the iteration trace, which contains the iteration
-  phase summary marker. The post-summary watchdog observes only the current
-  phase's preset-declared `summaryMarker`, so review should not arm on markers
-  from the prior iteration trace.
+- target repo 必须有 `CLAUDE.md`：preset 的 read-context / review fragments 把它当项目参照。
+- `codex exec resume` 不接受 `--sandbox`，sandbox 默认值只作用于 fresh `codex exec`。
+- 中央 daemon 的活性判据是 socket 上有进程监听；`daemon.sock` / `daemon.pid`
+  文件存在 ≠ daemon 在跑（陈尸文件），见 `.claude/rules/daemon-restart-after-app-update.rule.md`。
+- harness 的 reset 会关掉 fixture repo 里**所有** open PR；不要在 fixture repo 上
+  留任何想保住的 open PR。
