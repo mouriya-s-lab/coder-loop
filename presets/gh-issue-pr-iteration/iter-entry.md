@@ -45,10 +45,19 @@ Run these yourself; each read exists to feed a specific Step 3 decision:
 2. The issue's linked PR → the retry instruction source and the branch-continuity input. Resolution order: the bound `ISSUE_PR` when set (state carries it from previous runs); otherwise the structural closing-keyword linkage — split `{{REPO}}` into owner/name and run:
 
    ```bash
-   gh api graphql -f query='{repository(owner:"<owner>",name:"<name>"){issue(number:{{ISSUE}}){closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number state isDraft headRefName url}}}}}'
+   gh api graphql -f query='{repository(owner:"<owner>",name:"<name>"){issue(number:{{ISSUE}}){closedByPullRequestsReferences(first:50,includeClosedPrs:true){pageInfo{hasNextPage endCursor}nodes{number state isDraft headRefName url}}}}}'
+   # while pageInfo.hasNextPage: re-run with after:"<endCursor>" and concatenate — the
+   # first page is never assumed to be the full set
    ```
 
-   Never discover PRs by text search (`--search "<n> in:body"` matches any PR whose body merely contains the digits — false positives). Then `gh pr view <number>` on the hit for its state and latest review thread.
+   Never discover PRs by text search (`--search "<n> in:body"` matches any PR whose body merely contains the digits — false positives). Then **full-fetch** the live PR once — partial reads of the PR are how retries get scoped to the wrong demand:
+
+   ```bash
+   gh pr view <number> -R {{REPO}} --json number,title,state,isDraft,mergeStateStatus,headRefName,url,body,comments,reviews,statusCheckRollup
+   gh api "repos/{{REPO}}/pulls/<number>/comments" --paginate   # inline review-thread comments — not included above
+   ```
+
+   Read the body, **all** comments, **all** reviews, and **all** inline review-thread comments; the retry instruction is the latest review plus everything posted after it, never just the last comment in one slice.
 3. Sub-issues (`gh api "repos/{{REPO}}/issues/{{ISSUE}}/sub_issues" -H "X-GitHub-Api-Version: 2026-03-10"`) → whether this is a parent/wrapper — feeds the Step 3 planning-stage classification. Only a successful response listing children counts as parent/wrapper evidence; a failed call (404 / unsupported / API error) is recorded as `sub-issue graph unavailable` and the issue is treated as ordinary — neither an inferred parent nor an infrastructure failure.
 4. `{{SHARED_CONTEXT_FILE}}` → what previous runs already tried, their `Intent`/`Result` blocks → prevents re-doing or contradicting prior work.
 5. The state file's selected item → must match {{ISSUE}}. Mismatch, or unreadable state/config files → record the exact infrastructure failure and jump to Step 5 (wrap-up); do not improvise a different issue.

@@ -49,9 +49,12 @@ gh api "repos/<REPO>/issues/<ISSUE>/sub_issues" -H "X-GitHub-Api-Version: 2026-0
 # issue body edit history → feeds the contract-integrity judgment (tamper detection):
 gh api graphql -f query='{repository(owner:"<owner>",name:"<name>"){issue(number:<ISSUE>){userContentEdits(first:20){nodes{editedAt editor{login} diff}}}}}'
 # linked PRs: the bound ISSUE_PR when set; otherwise the structural closing-keyword
-# linkage (never text search — "<n> in:body" matches unrelated PRs containing the digits):
-gh api graphql -f query='{repository(owner:"<owner>",name:"<name>"){issue(number:<ISSUE>){closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number state isDraft headRefName url}}}}}'
+# linkage (never text search — "<n> in:body" matches unrelated PRs containing the digits);
+# while pageInfo.hasNextPage: re-run with after:"<endCursor>" and concatenate — never
+# treat the first page as the full set:
+gh api graphql -f query='{repository(owner:"<owner>",name:"<name>"){issue(number:<ISSUE>){closedByPullRequestsReferences(first:50,includeClosedPrs:true){pageInfo{hasNextPage endCursor}nodes{number state isDraft headRefName url}}}}}'
 gh pr view <PR_NUMBER> -R <REPO> --json number,title,state,mergedAt,mergeCommit,url,body,comments,reviews,statusCheckRollup,mergeStateStatus,headRefName
+gh api "repos/<REPO>/pulls/<PR_NUMBER>/comments" --paginate   # inline review-thread comments — not in gh pr view
 ```
 
    → issue contract (acceptance rows, sections), PR body and **the latest run's PR comment read verbatim**, checks state, children and their PRs when sub-issues exist. Sub-issue API failure semantics: only a successful response listing children counts as parent evidence; a failed call (404 / unsupported / API error) is recorded as `sub-issue graph unavailable` and the issue is treated as ordinary — not an inferred parent, not an infrastructure failure, and never the basis for a "children all closed" closure claim.
