@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { mkdirSync, writeFileSync } from "node:fs"
-import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, rm, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
 import {
@@ -9,7 +9,8 @@ import {
 	type CoderLoopDaemon,
 	type DaemonResponse,
 } from "./daemon"
-import { resolveChainRuntimePaths } from "./runtime-paths"
+import { resolveLoopDataPaths } from "./runtime-paths"
+import { queryObservabilityEvents } from "./observability"
 import {
 	reviewOnEmptyLockPathForChainName,
 	schedulerSlotWorktreePath,
@@ -59,11 +60,15 @@ describe("scheduler kind gate live integration", () => {
 			expect(aborted).toMatchObject({ type: "spawn.aborted", chainId, itemId: item!.id, issueNumber: 9101, toStatus: "queued" })
 			expect(warnings.some((line) => line.includes("kind label check failed") && line.includes("expected exactly one kind"))).toBe(true)
 
-			const paths = resolveChainRuntimePaths("kind-gate-missing-label-live-chain", { loopDataRoot: fixture.loopDataRoot })
-			const daemonBatches = await readdir(paths.daemonDir)
-			const daemonLog = await readFile(paths.daemonLogFile(daemonBatches[0]!), "utf-8")
-			expect(daemonLog).toContain("spawn.aborted")
-			expect(daemonLog).toContain("expected exactly one kind")
+			const events = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, {
+				kind: "validation",
+				type: "spawn.aborted",
+				chain: "kind-gate-missing-label-live-chain",
+			})
+			expect(events.events).toHaveLength(1)
+			const [spawnAborted] = events.events
+			if (spawnAborted?.type !== "spawn.aborted") throw new Error("expected spawn.aborted event")
+			expect(spawnAborted.payload.reason).toContain("expected exactly one kind")
 		} finally {
 			console.warn = originalWarn
 			await fixture.daemon.stop()

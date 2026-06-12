@@ -36,7 +36,7 @@ import {
 	type AgentRunnerSelection,
 	type JsonObject,
 } from "./loop"
-import { resolveChainRuntimePaths } from "./runtime-paths"
+import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import { type ChainRecord, type ItemRecord, openSqliteStateStore } from "./sqlite-state"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -855,11 +855,9 @@ describe("scheduler", () => {
 			const status = JSON.parse(await readFile(paths.runStatusFile(runId), "utf-8")) as Record<string, unknown>
 			const stdout = await readFile(paths.runStdoutFile(runId), "utf-8")
 			const stderr = await readFile(paths.runStderrFile(runId), "utf-8")
-			const events = (await readFile(paths.runEventsFile(runId), "utf-8"))
-				.trim()
-				.split("\n")
-				.filter(Boolean)
-				.map((line) => JSON.parse(line) as { type: string })
+			const phaseStdout = await readFile(paths.runPhaseStdoutFile(runId, "iteration"), "utf-8")
+			const phaseStderr = await readFile(paths.runPhaseStderrFile(runId, "iteration"), "utf-8")
+			const events = fixture.schedulerEvents.filter((event) => "runId" in event && event.runId === runId)
 
 			expect(status).toMatchObject({
 				runId,
@@ -873,6 +871,10 @@ describe("scheduler", () => {
 			})
 			expect(stdout).toContain(`done:${item.id}`)
 			expect(stderr).toBe("")
+			expect(phaseStdout).toContain(`done:${item.id}`)
+			expect(phaseStderr).toBe("")
+			expect(status.eventsPath).toBe(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile)
+			expect(existsSync(paths.runEventsFile(runId))).toBe(false)
 			expect(events.map((event) => event.type)).toEqual([
 				"agent.spawn",
 				"phase.start",
@@ -897,11 +899,10 @@ describe("scheduler", () => {
 
 			const runId = `run-${chain.id}-${item.id}`
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
-			const persisted = (await readFile(paths.runEventsFile(runId), "utf-8"))
-				.trim()
-				.split("\n")
-				.filter(Boolean)
-				.map((line) => JSON.parse(line) as JsonObject)
+			expect(existsSync(paths.runEventsFile(runId))).toBe(false)
+			const persistedTypes = fixture.schedulerEvents
+				.filter((event) => "runId" in event && event.runId === runId)
+				.map((event) => event.type)
 
 			const phaseStartEvents = fixture.schedulerEvents.filter((event) => event.type === "phase.start")
 			const phaseEndEvents = fixture.schedulerEvents.filter((event) => event.type === "phase.end")
@@ -953,7 +954,6 @@ describe("scheduler", () => {
 			expect(typeof queueTerminal.ts).toBe("string")
 			expect(Number.isFinite(Date.parse(queueTerminal.ts))).toBe(true)
 
-			const persistedTypes = persisted.map((event) => event.type)
 			expect(persistedTypes.filter((type) => type === "phase.start")).toHaveLength(1)
 			expect(persistedTypes.filter((type) => type === "phase.end")).toHaveLength(1)
 			expect(persistedTypes.filter((type) => type === "queue.terminal")).toHaveLength(1)

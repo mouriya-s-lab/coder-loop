@@ -27,6 +27,12 @@ import {
 import { dispatchSubcommand } from "./install-commands"
 import { RuntimePathError, resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import {
+	parseObservabilityEventType,
+	parseObservabilityKind,
+	queryObservabilityEvents,
+	type ObservabilityEventQuery,
+} from "./observability"
+import {
 	type ChainRecord,
 	type CurrentRunRecord,
 	type ItemRecord,
@@ -159,6 +165,21 @@ export type DaemonCommandArgs =
 			loopDataRoot: string | null
 			json: boolean
 	  }
+
+export type LogsCommandArgs = {
+	targetCwd: string
+	configPath: string | null
+	loopDataRoot?: string | null
+	kind: string | null
+	type: string | null
+	chainName?: string | null
+	item: number | null
+	run: string | null
+	phase: string | null
+	since: string | null
+	follow: boolean
+	json: boolean
+}
 
 export type ChainCommandArgs =
 	| {
@@ -924,6 +945,7 @@ export type ResolveContext = {
 
 type CliCommand =
 	| { kind: "status"; args: StatusCommandArgs }
+	| { kind: "logs"; args: LogsCommandArgs }
 	| { kind: "daemon"; args: DaemonCommandArgs }
 	| { kind: "chain"; args: ChainCommandArgs }
 	| { kind: "item"; args: ItemCommandArgs }
@@ -988,6 +1010,45 @@ const statusCliCommand = command({
 				loopDataRoot: args.loopDataRoot ?? null,
 				chainName: args.chain ?? null,
 				output: "json",
+			},
+		}
+	},
+})
+
+const logsCliCommand = command({
+	name: "logs",
+	description: "Query the unified coder-loop observability event stream.",
+	args: {
+		target: positional({ displayName: "target", type: cmdString }),
+		json: flag({ long: "json" }),
+		config: option({ long: "config", type: optional(cmdString) }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		kind: option({ long: "kind", type: optional(cmdString) }),
+		type: option({ long: "type", type: optional(cmdString) }),
+		chain: option({ long: "chain", type: optional(cmdString) }),
+		item: option({ long: "item", type: optional(cmdString) }),
+		run: option({ long: "run", type: optional(cmdString) }),
+		phase: option({ long: "phase", type: optional(cmdString) }),
+		since: option({ long: "since", type: optional(cmdString) }),
+		follow: flag({ long: "follow" }),
+	},
+	handler: (args): CliCommand => {
+		if (!args.json) fail("logs: only --json output is supported for now. Usage: coder-loop logs <target> --json")
+		return {
+			kind: "logs",
+			args: {
+				targetCwd: args.target,
+				configPath: args.config ?? null,
+				loopDataRoot: args.loopDataRoot ?? null,
+				kind: args.kind ?? null,
+				type: args.type ?? null,
+				chainName: args.chain ?? null,
+				item: parseOptionalPositiveInteger(args.item ?? null, "--item"),
+				run: args.run ?? null,
+				phase: args.phase ?? null,
+				since: args.since ?? null,
+				follow: args.follow,
+				json: true,
 			},
 		}
 	},
@@ -1591,6 +1652,62 @@ async function runStatusCommand(args: string[]): Promise<void> {
 	const snapshot = await buildCoderLoopStatusSnapshot(parsed.args)
 	StatusSnapshotBoundary.assert(snapshot)
 	process.stdout.write(`${stringifyStatusSnapshot(snapshot)}\n`)
+}
+
+async function runLogsCommand(args: string[]): Promise<void> {
+	const parsed = await runCmd(logsCliCommand, args)
+	if (parsed.kind !== "logs") return
+	const logsArgs = parsed.args
+	const query = logsQueryFromArgs(logsArgs)
+	const eventsFile = await resolveLogsEventsFile(logsArgs)
+	if (!logsArgs.follow) {
+		const result = await queryObservabilityEvents(eventsFile, query)
+		process.stdout.write(`${JSON.stringify(result, null, "\t")}\n`)
+		return
+	}
+	let emitted = 0
+	while (true) {
+		const result = await queryObservabilityEvents(eventsFile, query)
+		for (const event of result.events.slice(emitted)) {
+			process.stdout.write(`${JSON.stringify(event)}\n`)
+		}
+		emitted = result.events.length
+		await sleep(1_000)
+	}
+}
+
+function logsQueryFromArgs(args: LogsCommandArgs): ObservabilityEventQuery {
+	const query: ObservabilityEventQuery = {}
+	if (args.kind !== null) query.kind = parseObservabilityKind(args.kind)
+	if (args.type !== null) query.type = parseObservabilityEventType(args.type)
+	if (args.chainName !== null && args.chainName !== undefined) query.chain = args.chainName
+	if (args.item !== null) query.item = args.item
+	if (args.run !== null) query.run = args.run
+	if (args.phase !== null) query.phase = args.phase
+	if (args.since !== null) {
+		if (Number.isNaN(Date.parse(args.since))) fail(`--since must be an ISO timestamp or Date.parse-compatible timestamp: ${args.since}`)
+		query.since = args.since
+	}
+	return query
+}
+
+async function resolveLogsEventsFile(args: LogsCommandArgs): Promise<string> {
+	try {
+		const loaded = await loadTargetRuntime({
+			targetCwd: args.targetCwd,
+			configPath: args.configPath,
+			loopDataRoot: args.loopDataRoot ?? null,
+			chainName: args.chainName ?? null,
+			repository: null,
+			baseBranch: null,
+			dryRun: false,
+			worktree: false,
+		})
+		return resolveLoopDataPaths(loopDataRootOption(loaded.options.loopDataRoot)).eventsFile
+	} catch (error) {
+		if (args.loopDataRoot === null || args.loopDataRoot === undefined) throw error
+		return resolveLoopDataPaths({ loopDataRoot: args.loopDataRoot }).eventsFile
+	}
 }
 
 async function runChainCommand(args: string[]): Promise<void> {
@@ -2340,6 +2457,10 @@ async function main() {
 		await runStatusCommand(process.argv.slice(3))
 		return
 	}
+	if (firstArg === "logs") {
+		await runLogsCommand(process.argv.slice(3))
+		return
+	}
 	if (firstArg === "daemon") {
 		await runDaemonCommand(process.argv.slice(3))
 		return
@@ -2374,6 +2495,7 @@ function rootUsage(): string {
 		"",
 		"Commands:",
 		"  status <target> --json",
+		"  logs <target> --json [--kind K] [--type T] [--chain C] [--item ID] [--run RUN_ID] [--phase P] [--since TS] [--follow]",
 		"  daemon <up|down|status|start|stop|restart>",
 		"  chain <create|list|status|stop|resume|delete>",
 		"  item <add|batch-add|list|update|reorder>",
@@ -2888,14 +3010,14 @@ async function buildStatusEventsSnapshotFromRecords(
 ): Promise<StatusEventsSnapshot> {
 	const runId = current?.runId ?? selected?.item.lastRunId ?? firstLastRunIdFromRecords(items)
 	if (runId === null) return { runId: null, path: null, exists: false, recent: [], latest: null, error: null }
-	const path = loopEventsPath(options.logDir, runId)
+	const path = resolveLoopDataPaths(loopDataRootOption(options.loopDataRoot)).eventsFile
 	try {
-		const raw = await readFile(path, "utf-8")
-		const recent = parseRecentJsonLines(raw, 20)
+		const result = await queryObservabilityEvents(path, { run: runId })
+		const recent = result.events.slice(-20).map(jsonValueFromSerializable)
 		return {
 			runId,
 			path,
-			exists: true,
+			exists: result.events.length > 0,
 			recent,
 			latest: recent[recent.length - 1] ?? null,
 			error: null,
@@ -2911,6 +3033,12 @@ function firstLastRunIdFromRecords(items: readonly ItemRecord[]): string | null 
 		if (item.lastRunId !== null) return item.lastRunId
 	}
 	return null
+}
+
+function jsonValueFromSerializable(value: unknown): JsonValue {
+	const parsed: unknown = JSON.parse(JSON.stringify(value))
+	if (!isJsonValue(parsed)) throw new Error("event is not JSON data")
+	return parsed
 }
 
 function parseRecentJsonLines(raw: string, limit: number): JsonValue[] {

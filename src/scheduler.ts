@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process"
 import { createHash, randomBytes } from "node:crypto"
-import { appendFile, mkdir, writeFile } from "node:fs/promises"
-import { existsSync, realpathSync, rmSync } from "node:fs"
+import { mkdir, writeFile } from "node:fs/promises"
+import { createWriteStream, existsSync, realpathSync, rmSync, type WriteStream } from "node:fs"
 import { basename, dirname, isAbsolute, resolve } from "node:path"
 
 import {
@@ -38,6 +38,7 @@ import {
 	resolveLoopDataPaths,
 	sanitizeChainName,
 } from "./runtime-paths"
+import { collectObservabilityExcerpt, type ObservabilityExcerpt } from "./observability"
 
 // Per-run nonce tag (#430): the summary tag is generated at spawn time, so no text that
 // existed before the run — engine source, old transcripts, issue/PR bodies — can contain
@@ -149,8 +150,10 @@ export type SchedulerWorktreeManager = (context: SchedulerWorktreeContext) => Pr
 
 export type SchedulerEvent =
 	| { type: "slot.busy"; slotKey: string; chainId: number; repoCwd: string; activeRunId: string }
-	| { type: "agent.spawn"; slotKey: string; chainId: number; itemId: number; runId: string; pid: number | null; worktreePath: string; presetDir: string }
-	| { type: "agent.exit"; slotKey: string; chainId: number; itemId: number; runId: string; exitCode: number; status: string }
+	| { type: "item.dependency_wait"; chainId: number; itemId: number; dependsOn: readonly number[]; unsatisfied: readonly number[] }
+	| { type: "item.backoff"; chainId: number; itemId: number; failureCount: number; nextRunAt: number }
+	| { type: "agent.spawn"; slotKey: string; chainId: number; itemId: number; runId: string; phase: string; pid: number | null; worktreePath: string; presetDir: string }
+	| { type: "agent.exit"; slotKey: string; chainId: number; itemId: number; runId: string; phase: string; exitCode: number; status: string; excerpt: ObservabilityExcerpt }
 	| { type: "session_id.invalidated"; ts: string; runId: string; chainId: number; itemId: number; phase: string; runner: AgentRunnerKind; previousSessionId: string | null; reason: "runner_session_id_invalid" }
 	| { type: "spawn.aborted"; slotKey: string; chainId: number; chainName: string; itemId: number; issueNumber: number; reason: string; toStatus: string }
 	| { type: "chain.complete_trigger"; chainId: number; chainName: string; runId?: string; decision: SchedulerChainCompleteDecision["decision"]; reason?: string }
@@ -158,6 +161,9 @@ export type SchedulerEvent =
 	| { type: "chain.completed"; chainId: number; chainName: string; runId?: string }
 	| { type: "phase.start"; ts: string; runId: string; chainId: number; itemId: number; repoCwd: string; phase: string; pid: number | null }
 	| { type: "phase.end"; ts: string; runId: string; chainId: number; itemId: number; phase: string; exitCode: number; durationSeconds: number; status: string }
+	| { type: "attempt.timeout"; ts: string; runId: string; chainId: number; itemId: number; phase: string; signal: "SIGTERM" | "SIGKILL"; attemptMs: number; excerpt: ObservabilityExcerpt }
+	| { type: "watchdog.armed"; ts: string; runId: string; chainId: number; itemId: number; phase: string; marker: string; graceMs: number }
+	| { type: "watchdog.fire"; ts: string; runId: string; chainId: number; itemId: number; phase: string; signal: "SIGTERM" | "SIGKILL"; graceMs: number; excerpt: ObservabilityExcerpt }
 	| { type: "queue.terminal"; ts: string; runId: string; chainId: number; itemId: number; terminalStatus: string }
 	| { type: "item.dependency_unblocked"; chainId: number; itemId: number; fromStatus: string; toStatus: string; dependsOn: readonly number[] }
 
@@ -304,6 +310,8 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 			if (hasFinalizingItemForRepo(options.state, items, repoCwd)) continue
 
 			items = await exhaustItemsOverAttemptLimitForRepo(options, chain, repoCwd, items, chainStatuses)
+			const now = nowSeconds(options)
+			await emitRepoWaitingDecisions(options, chain, repoCwd, items, chainStatuses, now)
 			const next = selectNextItemAndPhase({
 				repoCwd,
 				items,
@@ -311,7 +319,7 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 				chainStatuses,
 				phasePlan,
 				explicitPhase: options.phase,
-				now: nowSeconds(options),
+				now,
 			})
 			if (next === null) continue
 
@@ -491,6 +499,43 @@ export function selectNextPendingItemFromSnapshot(input: SchedulerPendingSelecti
 		.filter((item) => itemBackoffReady(item, input.now))
 		.sort(comparePendingItems)
 		[0] ?? null
+}
+
+async function emitRepoWaitingDecisions(
+	options: SchedulerOptions,
+	chain: ChainRecord,
+	repoCwd: string,
+	items: readonly ItemRecord[],
+	chainStatuses: SchedulerChainStatuses,
+	now: number,
+): Promise<void> {
+	for (const wait of listDependencyWaitReasons(items, {
+		repoCwd,
+		statuses: chainStatuses.pending,
+		terminalStatuses: chainStatuses.terminal,
+		resolveDependency: (id) => options.store.getItem(id),
+	})) {
+		await emit(options, {
+			type: "item.dependency_wait",
+			chainId: chain.id,
+			itemId: wait.itemId,
+			dependsOn: wait.dependsOn,
+			unsatisfied: wait.unsatisfied,
+		})
+	}
+	const pending = new Set(chainStatuses.pending)
+	for (const item of items) {
+		if (item.repoCwd !== repoCwd || !pending.has(item.status)) continue
+		const backoff = schedulerBackoffState(item.extra)
+		if (backoff === null || backoff.nextRunAt <= now) continue
+		await emit(options, {
+			type: "item.backoff",
+			chainId: chain.id,
+			itemId: item.id,
+			failureCount: backoff.failureCount,
+			nextRunAt: backoff.nextRunAt,
+		})
+	}
 }
 
 function comparePendingItems(left: ItemRecord, right: ItemRecord): number {
@@ -797,6 +842,7 @@ async function spawnSchedulerRun(
 		chainId: chain.id,
 		itemId: item.id,
 		runId,
+		phase,
 		pid: activeRun.pid,
 		worktreePath,
 		presetDir,
@@ -829,17 +875,34 @@ function attachRunCloseHandler(
 ): SchedulerActiveRun {
 	const stdout: Buffer[] = []
 	const stderr: Buffer[] = []
+	const outputPaths = schedulerPhaseOutputPaths(options, chain, runId, phase)
+	const outputWriters = createSchedulerPhaseOutputWriters(outputPaths)
 	let lifecycleGc: SchedulerRunLifecycleGc | null = null
 	let terminatorCleanup: (() => void) | null = null
 
 	const closed = new Promise<SchedulerCompletedRun>((resolveClosed, rejectClosed) => {
-		child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk))
-		child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk))
+		child.stdout?.on("data", (chunk: Buffer) => {
+			stdout.push(chunk)
+			outputWriters.stdout.write(chunk)
+		})
+		child.stderr?.on("data", (chunk: Buffer) => {
+			stderr.push(chunk)
+			outputWriters.stderr.write(chunk)
+		})
 		child.on("error", (error) => {
-			stderr.push(Buffer.from(error.message))
+			const chunk = Buffer.from(error.message)
+			stderr.push(chunk)
+			outputWriters.stderr.write(chunk)
 		})
 
-		const installedGc = installSchedulerRunLifecycleGc(options, child, summaryTag)
+		const installedGc = installSchedulerRunLifecycleGc(options, child, summaryTag, {
+			chain,
+			item,
+			runId,
+			phase,
+			stdoutPath: outputPaths.stdoutPath,
+			stderrPath: outputPaths.stderrPath,
+		})
 		lifecycleGc = installedGc
 		terminatorCleanup = installedGc.terminatorCleanup
 
@@ -857,6 +920,7 @@ function attachRunCloseHandler(
 				const itemTransitionedToTerminal = !terminalStatuses.has(item.status) && terminalStatuses.has(status)
 				options.state.finalizingItemStatuses.set(item.id, status)
 				try {
+					await closeSchedulerPhaseOutputWriters(outputWriters)
 					const summary = extractSummaryValue(stdoutText, summaryTag)
 					await writeSchedulerRunCompletionArtifacts(options, {
 						runId,
@@ -884,7 +948,11 @@ function attachRunCloseHandler(
 					if (currentRun?.runId === runId) options.store.clearCurrentRun(chain.id)
 
 					if (slot.activeRun?.runId === runId) slot.activeRun = null
-					await emit(options, { type: "agent.exit", slotKey: slot.key, chainId: chain.id, itemId: item.id, runId, exitCode, status })
+					const excerpt = await collectObservabilityExcerpt({
+						stdoutPath: outputPaths.stdoutPath,
+						stderrPath: outputPaths.stderrPath,
+					})
+					await emit(options, { type: "agent.exit", slotKey: slot.key, chainId: chain.id, itemId: item.id, runId, phase, exitCode, status, excerpt })
 					await emit(options, {
 						type: "phase.end",
 						ts: nowIso(options),
@@ -959,6 +1027,58 @@ function attachRunCloseHandler(
 	return { runId, pid: child.pid ?? null, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, worktreePath, startedAt, closed, terminate }
 }
 
+type SchedulerPhaseOutputPaths = {
+	stdoutPath: string
+	stderrPath: string
+}
+
+type SchedulerPhaseOutputWriters = {
+	stdout: WriteStream
+	stderr: WriteStream
+}
+
+function schedulerPhaseOutputPaths(
+	options: SchedulerOptions,
+	chain: ChainRecord,
+	runId: string,
+	phase: string,
+): SchedulerPhaseOutputPaths {
+	const paths = resolveChainRuntimePaths(chain.name, options.loopDataRootOptions)
+	return {
+		stdoutPath: paths.runPhaseStdoutFile(runId, phase),
+		stderrPath: paths.runPhaseStderrFile(runId, phase),
+	}
+}
+
+function createSchedulerPhaseOutputWriters(paths: SchedulerPhaseOutputPaths): SchedulerPhaseOutputWriters {
+	return {
+		stdout: createWriteStream(paths.stdoutPath, { flags: "a" }),
+		stderr: createWriteStream(paths.stderrPath, { flags: "a" }),
+	}
+}
+
+async function closeSchedulerPhaseOutputWriters(writers: SchedulerPhaseOutputWriters): Promise<void> {
+	await Promise.all([
+		closeWriteStream(writers.stdout),
+		closeWriteStream(writers.stderr),
+	])
+}
+
+async function closeWriteStream(stream: WriteStream): Promise<void> {
+	if (stream.destroyed || stream.closed) return
+	await new Promise<void>((resolveClosed, rejectClosed) => {
+		const onError = (error: Error): void => {
+			stream.off("error", onError)
+			rejectClosed(error)
+		}
+		stream.once("error", onError)
+		stream.end(() => {
+			stream.off("error", onError)
+			resolveClosed()
+		})
+	})
+}
+
 export function extractSummaryValue(stdoutText: string, summaryTag: string): string | null {
 	const open = summaryOpenMarker(summaryTag)
 	const start = stdoutText.lastIndexOf(open)
@@ -985,6 +1105,14 @@ function installSchedulerRunLifecycleGc(
 	options: SchedulerOptions,
 	child: ReturnType<typeof spawn>,
 	summaryTag: string,
+	context: {
+		chain: ChainRecord
+		item: ItemRecord
+		runId: string
+		phase: string
+		stdoutPath: string
+		stderrPath: string
+	},
 ): SchedulerRunLifecycleGc {
 	const summaryClose = summaryCloseMarker(summaryTag)
 	const attemptTimeoutMs = options.attemptTimeoutMs ?? ATTEMPT_TIMEOUT_MS
@@ -1000,9 +1128,13 @@ function installSchedulerRunLifecycleGc(
 	let attemptTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
 		attemptTimer = null
 		if (child.exitCode !== null || child.signalCode !== null) return
+		void emitSchedulerTimeoutEvent(options, context, "SIGTERM", attemptTimeoutMs).catch(() => undefined)
 		sendSignalToChildProcessGroup(child, "SIGTERM")
 		const killTimer = setTimeout(() => {
-			if (child.exitCode === null && child.signalCode === null) sendSignalToChildProcessGroup(child, "SIGKILL")
+			if (child.exitCode === null && child.signalCode === null) {
+				void emitSchedulerTimeoutEvent(options, context, "SIGKILL", attemptTimeoutMs).catch(() => undefined)
+				sendSignalToChildProcessGroup(child, "SIGKILL")
+			}
 		}, attemptKillMs)
 		addLifecycleCleanup(() => clearTimeout(killTimer))
 	}, attemptTimeoutMs)
@@ -1017,12 +1149,26 @@ function installSchedulerRunLifecycleGc(
 		if (watchdogAccumulated.includes(summaryClose)) {
 			watchdogArmed = true
 			if (attemptTimer !== null) { clearTimeout(attemptTimer); attemptTimer = null }
+			void emit(options, {
+				type: "watchdog.armed",
+				ts: nowIso(options),
+				runId: context.runId,
+				chainId: context.chain.id,
+				itemId: context.item.id,
+				phase: context.phase,
+				marker: summaryClose,
+				graceMs: watchdogGraceMs,
+			}).catch(() => undefined)
 			watchdogGraceTimer = setTimeout(() => {
 				watchdogGraceTimer = null
 				if (child.exitCode !== null || child.signalCode !== null) return
+				void emitSchedulerWatchdogFireEvent(options, context, "SIGTERM", watchdogGraceMs).catch(() => undefined)
 				sendSignalToChildProcessGroup(child, "SIGTERM")
 				const killTimer = setTimeout(() => {
-					if (child.exitCode === null && child.signalCode === null) sendSignalToChildProcessGroup(child, "SIGKILL")
+					if (child.exitCode === null && child.signalCode === null) {
+						void emitSchedulerWatchdogFireEvent(options, context, "SIGKILL", watchdogGraceMs).catch(() => undefined)
+						sendSignalToChildProcessGroup(child, "SIGKILL")
+					}
 				}, watchdogKillMs)
 				addLifecycleCleanup(() => clearTimeout(killTimer))
 			}, watchdogGraceMs)
@@ -1036,6 +1182,64 @@ function installSchedulerRunLifecycleGc(
 		if (lifecycleCleanup !== null) { lifecycleCleanup(); lifecycleCleanup = null }
 	}
 	return { cleanup, terminatorCleanup: lifecycleCleanup }
+}
+
+async function emitSchedulerTimeoutEvent(
+	options: SchedulerOptions,
+	context: {
+		chain: ChainRecord
+		item: ItemRecord
+		runId: string
+		phase: string
+		stdoutPath: string
+		stderrPath: string
+	},
+	signal: "SIGTERM" | "SIGKILL",
+	attemptMs: number,
+): Promise<void> {
+	await emit(options, {
+		type: "attempt.timeout",
+		ts: nowIso(options),
+		runId: context.runId,
+		chainId: context.chain.id,
+		itemId: context.item.id,
+		phase: context.phase,
+		signal,
+		attemptMs,
+		excerpt: await collectObservabilityExcerpt({
+			stdoutPath: context.stdoutPath,
+			stderrPath: context.stderrPath,
+		}),
+	})
+}
+
+async function emitSchedulerWatchdogFireEvent(
+	options: SchedulerOptions,
+	context: {
+		chain: ChainRecord
+		item: ItemRecord
+		runId: string
+		phase: string
+		stdoutPath: string
+		stderrPath: string
+	},
+	signal: "SIGTERM" | "SIGKILL",
+	graceMs: number,
+): Promise<void> {
+	await emit(options, {
+		type: "watchdog.fire",
+		ts: nowIso(options),
+		runId: context.runId,
+		chainId: context.chain.id,
+		itemId: context.item.id,
+		phase: context.phase,
+		signal,
+		graceMs,
+		excerpt: await collectObservabilityExcerpt({
+			stdoutPath: context.stdoutPath,
+			stderrPath: context.stderrPath,
+		}),
+	})
 }
 
 function createRunTerminator(
@@ -1628,6 +1832,7 @@ async function spawnSchedulerReviewOnEmptyRun(
 		chainId: chain.id,
 		itemId: fallbackItem.id,
 		runId,
+		phase: reviewPhase,
 		pid: activeRun.pid,
 		worktreePath,
 		presetDir,
@@ -1661,15 +1866,32 @@ function attachReviewOnEmptyCloseHandler(
 ): SchedulerActiveRun {
 	const stdout: Buffer[] = []
 	const stderr: Buffer[] = []
+	const outputPaths = schedulerPhaseOutputPaths(options, chain, runId, phase)
+	const outputWriters = createSchedulerPhaseOutputWriters(outputPaths)
 	let lifecycleGc: SchedulerRunLifecycleGc | null = null
 	const closed = new Promise<SchedulerCompletedRun>((resolveClosed, rejectClosed) => {
-		child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk))
-		child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk))
+		child.stdout?.on("data", (chunk: Buffer) => {
+			stdout.push(chunk)
+			outputWriters.stdout.write(chunk)
+		})
+		child.stderr?.on("data", (chunk: Buffer) => {
+			stderr.push(chunk)
+			outputWriters.stderr.write(chunk)
+		})
 		child.on("error", (error) => {
-			stderr.push(Buffer.from(error.message))
+			const chunk = Buffer.from(error.message)
+			stderr.push(chunk)
+			outputWriters.stderr.write(chunk)
 		})
 
-		lifecycleGc = installSchedulerRunLifecycleGc(options, child, summaryTag)
+		lifecycleGc = installSchedulerRunLifecycleGc(options, child, summaryTag, {
+			chain,
+			item: fallbackItem,
+			runId,
+			phase,
+			stdoutPath: outputPaths.stdoutPath,
+			stderrPath: outputPaths.stderrPath,
+		})
 
 		child.on("close", (code) => {
 			lifecycleGc?.cleanup()
@@ -1684,6 +1906,7 @@ function attachReviewOnEmptyCloseHandler(
 				const status = exitCode === 0 ? (chainStatuses.success[0] ?? chainStatuses.entry) : chainStatuses.entry
 				const endedAt = nowSeconds(options)
 				try {
+					await closeSchedulerPhaseOutputWriters(outputWriters)
 					await writeSchedulerRunCompletionArtifacts(options, {
 						runId,
 						chain,
@@ -1704,14 +1927,20 @@ function attachReviewOnEmptyCloseHandler(
 					await writeFile(lockPath, serializeSchedulerReviewOnEmptyLock(runId, new Date()))
 
 					if (slot.activeRun?.runId === runId) slot.activeRun = null
+					const excerpt = await collectObservabilityExcerpt({
+						stdoutPath: outputPaths.stdoutPath,
+						stderrPath: outputPaths.stderrPath,
+					})
 					await emit(options, {
 						type: "agent.exit",
 						slotKey: slot.key,
 						chainId: chain.id,
 						itemId: fallbackItem.id,
 						runId,
+						phase,
 						exitCode,
 						status,
+						excerpt,
 					})
 					await emit(options, {
 						type: "phase.end",
@@ -1928,7 +2157,6 @@ function schedulerPresetDir(options: SchedulerOptions, chain: ChainRecord): stri
 }
 
 async function emit(options: SchedulerOptions, event: SchedulerEvent): Promise<void> {
-	await appendSchedulerRunEvent(options, event)
 	await options.onEvent?.(event)
 }
 
@@ -1943,10 +2171,12 @@ async function initializeSchedulerRunArtifacts(
 ): Promise<void> {
 	const paths = resolveChainRuntimePaths(chain.name, options.loopDataRootOptions)
 	await mkdir(paths.runDir(runId), { recursive: true })
+	await mkdir(paths.runPhaseDir(runId, phase), { recursive: true })
 	await Promise.all([
 		writeFile(paths.runStdoutFile(runId), ""),
 		writeFile(paths.runStderrFile(runId), ""),
-		writeFile(paths.runEventsFile(runId), ""),
+		writeFile(paths.runPhaseStdoutFile(runId, phase), ""),
+		writeFile(paths.runPhaseStderrFile(runId, phase), ""),
 		writeSchedulerRunStatus(options, {
 			runId,
 			chain,
@@ -1983,9 +2213,12 @@ async function writeSchedulerRunCompletionArtifacts(
 ): Promise<void> {
 	const paths = resolveChainRuntimePaths(input.chain.name, options.loopDataRootOptions)
 	await mkdir(paths.runDir(input.runId), { recursive: true })
+	await mkdir(paths.runPhaseDir(input.runId, input.phase), { recursive: true })
 	await Promise.all([
 		writeFile(paths.runStdoutFile(input.runId), input.stdoutText),
 		writeFile(paths.runStderrFile(input.runId), input.stderrText),
+		writeFile(paths.runPhaseStdoutFile(input.runId, input.phase), input.stdoutText),
+		writeFile(paths.runPhaseStderrFile(input.runId, input.phase), input.stderrText),
 		writeSchedulerRunStatus(options, {
 			runId: input.runId,
 			chain: input.chain,
@@ -2041,35 +2274,8 @@ async function writeSchedulerRunStatus(
 		stderrBytes: input.stderrBytes,
 		stdoutPath: paths.runStdoutFile(input.runId),
 		stderrPath: paths.runStderrFile(input.runId),
-		eventsPath: paths.runEventsFile(input.runId),
+		eventsPath: resolveLoopDataPaths(options.loopDataRootOptions).eventsFile,
 	}, null, "\t")}\n`)
-}
-
-async function appendSchedulerRunEvent(options: SchedulerOptions, event: SchedulerEvent): Promise<void> {
-	const runId = schedulerEventRunId(event)
-	if (runId === null) return
-	const chainName = schedulerEventChainName(options, event.chainId)
-	if (chainName === null) return
-	const paths = resolveChainRuntimePaths(chainName, options.loopDataRootOptions)
-	await mkdir(paths.runDir(runId), { recursive: true })
-	await appendFile(paths.runEventsFile(runId), `${JSON.stringify({
-		...event,
-		recordedAt: nowSeconds(options),
-	})}\n`)
-}
-
-function schedulerEventRunId(event: SchedulerEvent): string | null {
-	if (event.type === "slot.busy") return event.activeRunId
-	if (event.type === "spawn.aborted") return null
-	if (event.type === "item.dependency_unblocked") return null
-	if (event.type === "chain.completed") return event.runId ?? null
-	if (event.type === "chain.complete_trigger") return event.runId ?? null
-	if (event.type === "chain.complete_trigger_failed") return event.runId ?? null
-	return event.runId
-}
-
-function schedulerEventChainName(options: SchedulerOptions, chainId: number): string | null {
-	return options.store.listChains().find((chain) => chain.id === chainId)?.name ?? null
 }
 
 function safePathComponent(input: string): string {
