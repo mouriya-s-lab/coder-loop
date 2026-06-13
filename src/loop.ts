@@ -2136,7 +2136,13 @@ function formatDaemonUpResult(result: JsonObject): string {
 
 function formatDaemonDownResult(result: JsonObject): string {
 	const daemon = result.daemon as JsonObject | undefined
-	return `daemon down: shutdown=${String(result.shutdown ?? false)} pid=${String(daemon?.pid ?? "")} socket=${String(daemon?.socketPath ?? "")}\n`
+	let output = `daemon down: shutdown=${String(result.shutdown ?? false)} pid=${String(daemon?.pid ?? "")} socket=${String(daemon?.socketPath ?? "")}\n`
+	const terminatedRuns = Array.isArray(result.terminatedRuns) ? result.terminatedRuns : []
+	for (const run of terminatedRuns) {
+		const record = run as JsonObject
+		output += `daemon down: terminated run=${String(record.runId ?? "")} exitCode=${String(record.exitCode ?? "")}\n`
+	}
+	return output
 }
 
 function formatDaemonStartResult(result: JsonObject): string {

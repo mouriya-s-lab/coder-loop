@@ -500,9 +500,23 @@ export class CoderLoopDaemon {
 		await this.pauseSchedulerForMutation()
 		await this.stopSocketPathMonitor()
 
-		// Wait for active children plus pending close handlers to finish before
-		// closing SQLite. attachRunCloseHandler may null activeRun before
-		// completeChainIfReady finishes so the chain can complete.
+		// Bounded-grace terminate instead of waiting for natural agent completion (#467).
+		// Also covers the SIGTERM path (signal handler calls stop()), which previously
+		// exited the daemon while detached agents kept running as orphans.
+		const terminatedRuns = await this.terminateAllActiveRuns()
+		if (terminatedRuns.length > 0) {
+			await this.recordObservabilityEvent(makeObservabilityEvent({
+				kind: "lifecycle",
+				type: "daemon.stop.terminated_runs",
+				subject: { kind: "engine" },
+				payload: { pid: process.pid, runIds: terminatedRuns.map((run) => run.runId) },
+			})).catch(() => undefined)
+		}
+
+		// Wait for pending close handlers to finish before closing SQLite.
+		// attachRunCloseHandler may null activeRun before completeChainIfReady
+		// finishes so the chain can complete. With active runs terminated above
+		// this drains quickly instead of blocking on agent runtime.
 		await this.waitForSchedulerQuiescence()
 
 		for (const socket of this.sockets) socket.end()
@@ -699,8 +713,15 @@ export class CoderLoopDaemon {
 				return await this.handleItemReorder(request.args)
 			case "daemon.status":
 				return { daemon: this.snapshot() as unknown as JsonObject }
-			case "daemon.down":
-				return { shutdown: true, daemon: this.snapshot() as unknown as JsonObject }
+			case "daemon.down": {
+				// Terminate before replying so the caller sees which runs were cut short (#467).
+				const terminatedRuns = await this.terminateAllActiveRuns()
+				return {
+					shutdown: true,
+					terminatedRuns: terminatedRuns.map(completedRunToJson),
+					daemon: this.snapshot() as unknown as JsonObject,
+				}
+			}
 			default:
 				throw new DaemonError("unknown_command", `unknown daemon command: ${request.command}`, { command: request.command })
 		}
@@ -1087,6 +1108,24 @@ export class CoderLoopDaemon {
 	private async terminateActiveRunsForChain(chainId: number): Promise<SchedulerCompletedRun[]> {
 		const activeRuns = listActiveRuns(this.schedulerState).filter((run) => run.chainId === chainId)
 		return await Promise.all(activeRuns.map((run) => run.terminate({ forceAfterMs: this.shutdownGraceMs })))
+	}
+
+	// Daemon shutdown must not outlive its agents (#467): waiting for natural completion
+	// blocks `daemon down` for the agent's whole runtime, and escalating to SIGTERM then
+	// exits the daemon while detached agents keep running as orphans. Terminate with the
+	// same bounded grace chain.stop/chain.delete already use. A terminate failure must
+	// not wedge shutdown: log and continue.
+	private async terminateAllActiveRuns(): Promise<SchedulerCompletedRun[]> {
+		const activeRuns = listActiveRuns(this.schedulerState)
+		const settled = await Promise.all(activeRuns.map(async (run) => {
+			try {
+				return await run.terminate({ forceAfterMs: this.shutdownGraceMs })
+			} catch (error) {
+				process.stderr.write(`coder-loop daemon: terminate run ${run.runId} (pid ${String(run.pid ?? "?")}) failed: ${errorMessage(error)}\n`)
+				return null
+			}
+		}))
+		return settled.filter((run): run is SchedulerCompletedRun => run !== null)
 	}
 
 	private async cleanupChainRuntime(chain: ChainRecord): Promise<JsonObject> {

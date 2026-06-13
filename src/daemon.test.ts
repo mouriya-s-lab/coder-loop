@@ -1716,7 +1716,7 @@ describe("daemon", () => {
 		}
 	})
 
-	test("daemon graceful shutdown waits for active runs to finish naturally", async () => {
+	test("daemon shutdown cleans runtime files and records the terminated run (#467)", async () => {
 		const fixture = await startFixture("graceful-shutdown")
 		try {
 			const chain = record(expectOk(await request(fixture, "chain.create", {
@@ -1738,29 +1738,25 @@ describe("daemon", () => {
 
 			expect(await pathExists(fixture.socketPath)).toBe(false)
 			expect(await pathExists(fixture.pidFile)).toBe(false)
+			// #467: down terminates the active run instead of waiting for natural
+			// completion — even a nearly-done agent is cut short. The item keeps its
+			// entry status and resumes on the next daemon up.
 			const item = await readItem(fixture.loopDataRoot, chainId, 180)
-			// Fake runner emits the default REVIEW SUMMARY (verdict=accepted) and exits 0;
-			// natural completion via attachRunCloseHandler maps that to "done".
-			expect(item?.status).toBe("done")
+			expect(item?.status).toBe("queued")
 			expect(typeof item?.lastRunId).toBe("string")
 			const run = await readRun(fixture.loopDataRoot, item?.lastRunId ?? "")
-			// exit 0 (natural exit, not SIGTERM/SIGKILL) is the strongest single proof
-			// that daemon waited for the child instead of force-terminating it.
-			expect(run?.exitCode).toBe(0)
+			expect(run?.exitCode).toBe(1)
 			expect(await readCurrentRun(fixture.loopDataRoot, chainId)).toBeNull()
 
 			const phaseEnd = fixture.schedulerEvents.find((event) => event.type === "phase.end")
 			expect(phaseEnd).toBeDefined()
-			expect((phaseEnd as { status?: string }).status).toBe("done")
-			const queueTerminal = fixture.schedulerEvents.find((event) => event.type === "queue.terminal")
-			expect(queueTerminal).toBeDefined()
-			expect((queueTerminal as { terminalStatus?: string }).terminalStatus).toBe("done")
+			expect((phaseEnd as { status?: string }).status).toBe("queued")
 		} finally {
 			await fixture.daemon.stop()
 		}
 	})
 
-	test("daemon shutdown does not return before active runs exit", async () => {
+	test("daemon shutdown terminates active runs with bounded grace and reports them (#467)", async () => {
 		const fixture = await startFixture("graceful-shutdown-timing")
 		try {
 			const chain = record(expectOk(await request(fixture, "chain.create", {
@@ -1768,31 +1764,35 @@ describe("daemon", () => {
 				repository: "mouriya-s-lab/coder-loop",
 			})).chain)
 			const chainId = numberValue(chain.id)
-			const childSleepMs = 500
-			await request(fixture, "item.add", {
+			// 30s sleep: pre-#467 shutdown waited for natural completion, so a bounded
+			// shutdown below proves termination rather than waiting.
+			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
 				issueNumber: 181,
 				repoCwd: REPO_ROOT,
-				extra: { sleepMs: childSleepMs, exitCode: 0 },
-			})
+				extra: { sleepMs: 30_000, exitCode: 0 },
+			})).item)
+			const itemId = numberValue(added.id)
 			const activeRuns = await waitFor(async () => record(expectOk(await request(fixture, "daemon.status")).daemon).activeRuns, (runs) => Array.isArray(runs) && runs.length === 1)
-			const startedAt = Date.now()
-			const firstRun = (activeRuns as unknown as Array<{ startedAt?: number }>)[0]
-			const spawnedAt = typeof firstRun?.startedAt === "number" ? firstRun.startedAt : startedAt
-			const remainingSleepMs = Math.max(0, spawnedAt + childSleepMs - startedAt)
+			const agentPid = (activeRuns as unknown as Array<{ pid?: number }>)[0]?.pid
 
 			const downStartedAt = Date.now()
-			expect((await request(fixture, "daemon.down")).ok).toBe(true)
+			const down = expectOk(await request(fixture, "daemon.down"))
 			await fixture.daemon.closed
-			const shutdownDurationMs = Date.now() - downStartedAt
+			expect(Date.now() - downStartedAt).toBeLessThan(10_000)
 
-			// Allow some scheduler-tick latency, but if the daemon force-killed the
-			// child mid-sleep this would resolve in tens of milliseconds.
-			expect(shutdownDurationMs).toBeGreaterThanOrEqual(Math.max(50, remainingSleepMs - 100))
-
+			// The down response names the run it cut short; the force-killed agent never
+			// wrote its own status, so the item keeps its entry status and is resumable.
+			expect(down).toMatchObject({
+				shutdown: true,
+				terminatedRuns: [{ chainId, itemId, exitCode: 1, status: "queued" }],
+			})
 			const item = await readItem(fixture.loopDataRoot, chainId, 181)
-			const run = await readRun(fixture.loopDataRoot, item?.lastRunId ?? "")
-			expect(run?.exitCode).toBe(0)
+			expect(item?.status).toBe("queued")
+			// No orphan agent survives the daemon (signal 0 probes liveness).
+			if (typeof agentPid === "number") {
+				expect(() => process.kill(agentPid, 0)).toThrow()
+			}
 		} finally {
 			await fixture.daemon.stop()
 		}
