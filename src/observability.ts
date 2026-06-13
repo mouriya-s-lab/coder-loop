@@ -33,6 +33,7 @@ const ObservabilityEventTypeBoundary = arkType.or(
 	arkType.unit("chain.complete_trigger"),
 	arkType.unit("daemon.start"),
 	arkType.unit("daemon.stop"),
+	arkType.unit("daemon.stop.terminated_runs"),
 	arkType.unit("daemon.socket.rebind"),
 	arkType.unit("daemon.fatal"),
 	arkType.unit("scheduler.recovery"),
@@ -166,6 +167,12 @@ const ObservabilityEventBoundary = arkType.or(
 		kind: arkType.unit("lifecycle"),
 		type: arkType.unit("daemon.stop"),
 		payload: { pid: "number" },
+	},
+	{
+		...EventBaseBoundary,
+		kind: arkType.unit("lifecycle"),
+		type: arkType.unit("daemon.stop.terminated_runs"),
+		payload: { pid: "number", runIds: "string[]" },
 	},
 	{
 		...EventBaseBoundary,
@@ -479,6 +486,8 @@ function renderLifecycleEvent(event: Extract<ObservabilityEvent, { kind: "lifecy
 			return `${event.ts} lifecycle daemon.start pid=${event.payload.pid} socket=${event.payload.socketPath}`
 		case "daemon.stop":
 			return `${event.ts} lifecycle daemon.stop pid=${event.payload.pid}`
+		case "daemon.stop.terminated_runs":
+			return `${event.ts} lifecycle daemon.stop.terminated_runs pid=${event.payload.pid} runs=${event.payload.runIds.join(",")}`
 		case "daemon.socket.rebind":
 			return `${event.ts} lifecycle daemon.socket.rebind pid=${event.payload.pid} socket=${event.payload.socketPath}`
 		case "daemon.fatal":
