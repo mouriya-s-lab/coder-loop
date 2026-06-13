@@ -2850,12 +2850,12 @@ function buildStatusQueueSnapshotFromRecords(options: LoopOptions, items: readon
 	const byStatus: Record<string, number> = {}
 	for (const item of items) byStatus[item.status] = (byStatus[item.status] ?? 0) + 1
 	const continuableStatuses = new Set(options.preset.statuses.continuable)
-	const terminalStatuses = new Set(options.preset.statuses.terminal)
+	const terminalStatusNames = new Set(options.preset.statuses.terminal)
 	return {
 		total: items.length,
 		byStatus,
 		continuable: items.filter((item) => continuableStatuses.has(item.status)).length,
-		terminal: items.filter((item) => terminalStatuses.has(item.status)).length,
+		terminal: items.filter((item) => terminalStatusNames.has(item.status)).length,
 		selected: selected === null ? null : {
 			id: getItemId(selected.item, options.preset),
 			item: statusItemSnapshot(selected.item, options.preset),
@@ -4399,10 +4399,11 @@ export type RunPresetChainCompleteTriggerPhasesInput = {
 	chain: ChainRecord
 	items: readonly ItemRecord[]
 	runId?: string
-	terminalStatuses: readonly string[]
+	terminalStatusNames: readonly string[]
 	loopDataRoot: string | null
 	phaseRunner?: RunPresetChainCompleteTriggerPhasesPhaseRunner
 	presetDir?: string
+	preset?: Preset
 	targetCwd?: string | null
 }
 
@@ -4412,7 +4413,7 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 	const targetCwd = resolve(rawTargetCwd)
 	const config = loopConfigFromChain(input.chain, input.loopDataRoot, null)
 	const presetDir = input.presetDir ?? resolvePresetDir(config, PKG_ROOT, targetCwd)
-	const preset = await loadPreset(presetDir)
+	const preset = input.preset ?? await loadPreset(presetDir)
 	const phases = chainCompleteTriggerPhases(preset)
 	if (phases.length === 0) return null
 

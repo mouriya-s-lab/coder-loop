@@ -496,70 +496,69 @@ describe("daemon", () => {
 		}
 	})
 
-	test("daemon emits validation events when existing chain preset falls back", async () => {
-		const fixture = await startFixture("existing-preset-fallback-events", { schedulerPresetDir: null, schedulerIntervalMs: 20 })
+	test("daemon rejects existing chains with invalid or unknown presets instead of falling back", async () => {
+		const fixture = await startFixture("existing-preset-explicit-failure", { schedulerEnabled: false })
 		try {
 			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			let invalidPresetItemId: number
+			let unknownPresetItemId: number
 			try {
 				const invalidPresetChain = store.createChain({
-					name: "invalid-preset-fallback-chain",
+					name: "invalid-preset-chain",
 					preset: "bad_name",
 					repository: "mouriya-s-lab/coder-loop",
 					baseBranch: "main",
 					status: "active",
 					metadata: {},
 				})
-				store.createItem({
+				invalidPresetItemId = store.createItem({
 					chainId: invalidPresetChain.id,
 					issueNumber: 41101,
 					repoCwd: REPO_ROOT,
 					status: "queued",
 					attempts: 0,
 					extra: { sleepMs: 5, exitCode: 0 },
-				})
+				}).id
 				const unknownPresetChain = store.createChain({
-					name: "unknown-preset-fallback-chain",
+					name: "unknown-preset-chain",
 					preset: "missing-preset",
 					repository: "mouriya-s-lab/coder-loop",
 					baseBranch: "main",
 					status: "active",
 					metadata: {},
 				})
-				store.createItem({
+				unknownPresetItemId = store.createItem({
 					chainId: unknownPresetChain.id,
 					issueNumber: 41102,
 					repoCwd: REPO_ROOT,
 					status: "queued",
 					attempts: 0,
 					extra: { sleepMs: 5, exitCode: 0 },
-				})
+				}).id
 			} finally {
 				store.close()
 			}
 
-			const events = await waitFor(
-				async () => await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, {
-					kind: "validation",
-					type: "preset.fallback",
-				}),
-				(result) => result.events.some((event) => event.type === "preset.fallback" && event.payload.reason === "invalid_name")
-					&& result.events.some((event) => event.type === "preset.fallback" && event.payload.reason === "unknown_preset"),
-				10_000,
-			)
-			const invalidEvent = events.events.find((event) => event.type === "preset.fallback" && event.payload.reason === "invalid_name")
-			const unknownEvent = events.events.find((event) => event.type === "preset.fallback" && event.payload.reason === "unknown_preset")
-			expect(invalidEvent).toMatchObject({
-				kind: "validation",
-				type: "preset.fallback",
-				chain: "invalid-preset-fallback-chain",
-				payload: { preset: "bad_name", fallbackPreset: "gh-issue-pr-iteration", reason: "invalid_name" },
+			const invalidPresetResponse = await request(fixture, "item.update", {
+				itemId: invalidPresetItemId,
+				fields: { status: "done" },
 			})
-			expect(unknownEvent).toMatchObject({
-				kind: "validation",
-				type: "preset.fallback",
-				chain: "unknown-preset-fallback-chain",
-				payload: { preset: "missing-preset", fallbackPreset: "gh-issue-pr-iteration", reason: "unknown_preset" },
+			expect(invalidPresetResponse.ok).toBe(false)
+			if (!invalidPresetResponse.ok) {
+				expect(invalidPresetResponse.error.code).toBe("invalid_request")
+				expect(invalidPresetResponse.error.message).toContain("invalid name")
+			}
+
+			const unknownPresetResponse = await request(fixture, "item.update", {
+				itemId: unknownPresetItemId,
+				fields: { status: "done" },
 			})
+			expect(unknownPresetResponse.ok).toBe(false)
+			if (!unknownPresetResponse.ok) {
+				expect(unknownPresetResponse.error.code).toBe("invalid_request")
+				expect(unknownPresetResponse.error.message).toContain("failed to load preset")
+				expect(unknownPresetResponse.error.message).toContain("missing-preset")
+			}
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -982,6 +981,100 @@ describe("daemon", () => {
 		}
 	})
 
+	test("daemon validates item statuses from custom presetPath", async () => {
+		const fixture = await startFixture("custom-preset-status-validation", { schedulerEnabled: false })
+		try {
+			const presetPath = resolve(fixture.loopDataRoot, "..", "custom-status-preset")
+			await mkdir(presetPath, { recursive: true })
+			await writeFile(resolve(presetPath, "run.md"), "Run issue {{ISSUE}}.\n")
+			await writeFile(resolve(presetPath, "preset.toml"), `name = "custom-status-fixture"
+version = 1
+description = "Fixture preset for daemon status validation."
+
+[item]
+idField = "issue"
+
+[statuses]
+continuable = ["queued", "needs_work"]
+terminal = ["custom_done"]
+entry = "queued"
+success = ["custom_done"]
+
+[[phases]]
+name = "run"
+prompt = "run.md"
+
+  [phases.variables]
+  ISSUE = "item.issue"
+
+[agent]
+binary = "echo"
+extraArgs = []
+attemptTimeoutSeconds = 3600
+`)
+
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "custom-preset-chain",
+				repository: "mouriya-s-lab/coder-loop",
+				metadata: { presetPath },
+			})).chain)
+			const added = record(expectOk(await request(fixture, "item.add", {
+				chainId: numberValue(chain.id),
+				issueNumber: 45401,
+				repoCwd: REPO_ROOT,
+			})).item)
+			expect(added.status).toBe("queued")
+
+			const rejected = await request(fixture, "item.update", {
+				itemId: numberValue(added.id),
+				status: "not_in_custom_preset",
+			})
+			expect(rejected.ok).toBe(false)
+			if (!rejected.ok) {
+				expect(rejected.error.code).toBe("invalid_request")
+				expect(rejected.error.message).toContain("custom_done")
+				expect(rejected.error.message).toContain("needs_work")
+			}
+
+			const accepted = record(expectOk(await request(fixture, "item.update", {
+				itemId: numberValue(added.id),
+				status: "custom_done",
+			})).item)
+			expect(accepted.status).toBe("custom_done")
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("daemon reports custom presetPath load failures to mutation requests", async () => {
+		const fixture = await startFixture("custom-preset-load-failure", { schedulerEnabled: false })
+		try {
+			const presetPath = resolve(fixture.loopDataRoot, "..", "bad-status-preset")
+			await mkdir(presetPath, { recursive: true })
+			await writeFile(resolve(presetPath, "preset.toml"), "name = [broken\n")
+
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "bad-custom-preset-chain",
+				repository: "mouriya-s-lab/coder-loop",
+				metadata: { presetPath },
+			})).chain)
+
+			const response = await request(fixture, "item.add", {
+				chainId: numberValue(chain.id),
+				issueNumber: 45402,
+				repoCwd: REPO_ROOT,
+			})
+			expect(response.ok).toBe(false)
+			if (!response.ok) {
+				expect(response.error.code).toBe("invalid_request")
+				expect(response.error.message).toContain("failed to load preset")
+				expect(response.error.details).toMatchObject({ presetDir: presetPath })
+			}
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("socket item.update writes typed blocker fields into extra without disturbing other keys", async () => {
 		const fixture = await startFixture("item-update-blocker", { schedulerEnabled: false })
 		try {
@@ -1080,7 +1173,7 @@ describe("daemon", () => {
 				issueNumber: 188,
 				repoCwd: REPO_ROOT,
 			})).item)
-			expect(added).toMatchObject({ issueNumber: 188, status: "queued" })
+			expect(added).toMatchObject({ issueNumber: 188, status: "pending" })
 			const pending = record(expectOk(await request(fixture, "item.update", {
 				itemId: numberValue(added.id),
 				status: "pending",

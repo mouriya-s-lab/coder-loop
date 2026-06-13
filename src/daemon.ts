@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { Buffer } from "node:buffer"
 import { createConnection, createServer, type Server, type Socket } from "node:net"
-import { existsSync } from "node:fs"
 import { mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises"
 import { isAbsolute, relative, resolve } from "node:path"
 
@@ -24,6 +23,7 @@ import {
 	schedulerTick,
 	type SchedulerCompletedRun,
 	type SchedulerEvent,
+	type SchedulerLoadedPreset,
 	type SchedulerOptions,
 	type SchedulerSpawnContext,
 	type SchedulerState,
@@ -117,16 +117,7 @@ export type DaemonSocketPathIssue = {
 	socketPath: string
 	pidFile: string
 }
-type BundledPresetStatuses = {
-	continuable: string[]
-	terminal: string[]
-	success: string[]
-	entry: string
-	phaseWrites: Map<string, string[]>
-}
 
-const FALLBACK_PENDING_STATUSES = ["queued", "changes_requested"] as const
-const FALLBACK_TERMINAL_STATUSES = ["blocked", "moot", "done"] as const
 const DEFAULT_PRESET_NAME = "gh-issue-pr-iteration"
 const BUNDLED_PRESETS_DIR = resolve(import.meta.dir, "../presets")
 const MAX_DAEMON_REQUEST_BYTES = 1_048_576
@@ -413,7 +404,7 @@ export class CoderLoopDaemon {
 	private ownsDaemonSocket = false
 	private ownsDaemonPid = false
 	private readonly lastDecisionFingerprints = new Map<string, string>()
-	private readonly presetFallbackFingerprints = new Set<string>()
+	private readonly loadedPresetCache = new Map<string, Promise<SchedulerLoadedPreset>>()
 	private resolveClosed: (() => void) | null = null
 	private readonly daemonBatchTimestamp = formatDaemonBatchTimestamp(new Date())
 	readonly closed: Promise<void>
@@ -1019,9 +1010,9 @@ export class CoderLoopDaemon {
 		const activeRuns = listActiveRuns(this.schedulerState).filter((run) => run.chainId === chain.id)
 		const pendingStatusSet = await this.continuableItemStatuses(chain)
 		const terminalStatusSet = await this.terminalItemStatuses(chain)
-		const pendingStatuses = [...pendingStatusSet]
-		const terminalStatuses = [...terminalStatusSet]
-		const dependencyWaits = listDependencyWaitReasons(items, { statuses: pendingStatuses, terminalStatuses })
+		const continuableStatusNames = [...pendingStatusSet]
+		const terminalStatusNames = [...terminalStatusSet]
+		const dependencyWaits = listDependencyWaitReasons(items, { statuses: continuableStatusNames, terminalStatusNames })
 		const dependencyWaitsByItemId = new Map(dependencyWaits.map((wait) => [wait.itemId, wait]))
 		return {
 			chain: chainToJson(chain),
@@ -1471,16 +1462,18 @@ export class CoderLoopDaemon {
 		const scheduler = this.options.scheduler ?? {}
 		const externalOnEvent = scheduler.onEvent
 		const schedulerPresetDir = scheduler.presetDir
+		const presetForChain = scheduler.presetForChain ?? ((chain: ChainRecord) =>
+			schedulerPresetDir === undefined ? this.loadedPresetForChain(chain) : loadSchedulerPresetFromDir(schedulerPresetDir))
 		const presetDirForChain = scheduler.presetDirForChain ?? ((chain: ChainRecord) =>
-			schedulerPresetDir ?? bundledPresetDirForScheduler(chain, (reason) => this.recordPresetFallbackEventOnce(chain, reason)))
+			schedulerPresetDir ?? this.presetDirForChain(chain))
 		const presetPromptResolver = (ctx: SchedulerSpawnContext): Promise<string> =>
-			resolveSchedulerPresetPhasePrompt({ presetDir: presetDirForChain(ctx.chain), phase: ctx.phase })
+			this.resolveSchedulerPresetPhasePrompt(ctx.chain, ctx.phase)
 		const fallbackRunner = scheduler.runner ?? defaultDaemonRunner()
 		const phaseRunnerSelectionForChain: SchedulerOptions["phaseRunnerSelectionForChain"] = scheduler.phaseRunnerSelectionForChain
 			?? (scheduler.phaseRunner !== undefined || scheduler.runner !== undefined
 				? undefined
 				: async (chain) => {
-					const preset = await loadPreset(presetDirForChain(chain))
+					const { preset } = await presetForChain(chain)
 					return buildPhaseRunnerSelectionFromChain({
 						chain,
 						loopDataRoot: this.paths.root,
@@ -1492,6 +1485,7 @@ export class CoderLoopDaemon {
 			state: this.schedulerState,
 			runner: fallbackRunner,
 			presetDir: schedulerPresetDir ?? bundledPresetDir(DEFAULT_PRESET_NAME),
+			presetForChain,
 			prompt: scheduler.prompt ?? presetPromptResolver,
 			onEvent: async (event) => {
 				if (this.store !== null) {
@@ -1506,20 +1500,18 @@ export class CoderLoopDaemon {
 		if (scheduler.presetDirForChain !== undefined) {
 			options.presetDirForChain = scheduler.presetDirForChain
 		} else if (schedulerPresetDir === undefined) {
-			options.presetDirForChain = (chain) => bundledPresetDirForScheduler(chain, (reason) => this.recordPresetFallbackEventOnce(chain, reason))
+			options.presetDirForChain = (chain) => this.presetDirForChain(chain)
 		}
 		if (scheduler.worktreeManager !== undefined) options.worktreeManager = scheduler.worktreeManager
 		if (scheduler.kindResolver !== undefined) options.kindResolver = scheduler.kindResolver
 		options.loopDataRootOptions = this.options
-		if (scheduler.pendingStatuses !== undefined) options.pendingStatuses = scheduler.pendingStatuses
-		if (scheduler.terminalStatuses !== undefined) options.terminalStatuses = scheduler.terminalStatuses
 		options.statusesForChain = scheduler.statusesForChain ?? (async (chain) => {
-			const pendingStatuses = await this.continuableItemStatuses(chain)
-			const terminalStatuses = await this.terminalItemStatuses(chain)
-			const { success, entry } = await this.unblockItemStatuses(chain, pendingStatuses)
+			const continuableStatusNames = await this.continuableItemStatuses(chain)
+			const terminalStatusNames = await this.terminalItemStatuses(chain)
+			const { success, entry } = await this.unblockItemStatuses(chain)
 			return {
-				pending: [...pendingStatuses],
-				terminal: [...terminalStatuses],
+				pending: [...continuableStatusNames],
+				terminal: [...terminalStatusNames],
 				success,
 				entry,
 			}
@@ -1543,18 +1535,12 @@ export class CoderLoopDaemon {
 				await runPresetChainCompleteTriggerPhases({
 					...context,
 					loopDataRoot: this.paths.root,
-					presetDir: presetDirForChain(context.chain),
+					terminalStatusNames: context.terminalStatusNames,
+					...(await presetForChain(context.chain)),
 					...(explicitRunnerOverride === null ? {} : { phaseRunner: () => explicitRunnerOverride }),
 				})
 		}
 		return options
-	}
-
-	private recordPresetFallbackEventOnce(chain: ChainRecord, reason: PresetFallbackReason): void {
-		const fingerprint = `${chain.id}:${chain.preset}:${reason}`
-		if (this.presetFallbackFingerprints.has(fingerprint)) return
-		this.presetFallbackFingerprints.add(fingerprint)
-		recordPresetFallbackEvent(chain, reason, this.options)
 	}
 
 	private warnSkippedInvalidChain(chain: ChainRecord, error: RuntimePathError, context: string): void {
@@ -1576,7 +1562,8 @@ export class CoderLoopDaemon {
 	}
 
 	private async defaultItemStatusForRequest(chain: ChainRecord): Promise<string> {
-		return await this.validateItemStatusVocabularyForRequest(chain, "queued")
+		const { preset } = await this.loadedPresetForChain(chain)
+		return preset.statuses.entry
 	}
 
 	private async validateItemStatusForPhaseRequest(chain: ChainRecord, phase: string, status: string): Promise<void> {
@@ -1591,55 +1578,92 @@ export class CoderLoopDaemon {
 	}
 
 	private async allowedItemStatusesForPhase(chain: ChainRecord, phase: string): Promise<Set<string> | null> {
-		const presetStatuses = await readBundledPresetStatuses(chain.preset)
-		const allowed = presetStatuses?.phaseWrites.get(phase)
-		return allowed === undefined ? null : new Set(allowed)
+		const { preset } = await this.loadedPresetForChain(chain)
+		const presetPhase = preset.phases.find((entry) => entry.name === phase)
+		if (presetPhase === undefined) return null
+		return new Set(phaseWritableStatuses(presetPhase))
 	}
 
 	private async allowedItemStatuses(chain: ChainRecord): Promise<Set<string>> {
-		const scheduler = this.options.scheduler ?? {}
-		if (scheduler.pendingStatuses === undefined && scheduler.terminalStatuses === undefined) {
-			const presetStatuses = await readBundledPresetStatuses(chain.preset)
-			if (presetStatuses !== null) return new Set([...presetStatuses.continuable, ...presetStatuses.terminal, "queued"])
-		}
-		return new Set([
-			...(scheduler.pendingStatuses ?? FALLBACK_PENDING_STATUSES),
-			...(scheduler.terminalStatuses ?? FALLBACK_TERMINAL_STATUSES),
-			"queued",
-		])
+		const { preset } = await this.loadedPresetForChain(chain)
+		return new Set([...preset.statuses.continuable, ...preset.statuses.terminal])
 	}
 
 	private async continuableItemStatuses(chain: ChainRecord): Promise<Set<string>> {
-		const scheduler = this.options.scheduler ?? {}
-		if (scheduler.pendingStatuses !== undefined) return new Set(scheduler.pendingStatuses)
-		if (scheduler.terminalStatuses === undefined) {
-			const presetStatuses = await readBundledPresetStatuses(chain.preset)
-			if (presetStatuses !== null) return new Set([...presetStatuses.continuable, "queued"])
-		}
-		return new Set(FALLBACK_PENDING_STATUSES)
+		const { preset } = await this.loadedPresetForChain(chain)
+		return new Set(preset.statuses.continuable)
 	}
 
 	private async terminalItemStatuses(chain: ChainRecord): Promise<Set<string>> {
-		const scheduler = this.options.scheduler ?? {}
-		if (scheduler.terminalStatuses !== undefined) return new Set(scheduler.terminalStatuses)
-		if (scheduler.pendingStatuses === undefined) {
-			const presetStatuses = await readBundledPresetStatuses(chain.preset)
-			if (presetStatuses !== null) return new Set(presetStatuses.terminal)
-		}
-		return new Set(FALLBACK_TERMINAL_STATUSES)
+		const { preset } = await this.loadedPresetForChain(chain)
+		return new Set(preset.statuses.terminal)
 	}
 
-	private async unblockItemStatuses(chain: ChainRecord, pendingStatuses: Set<string>): Promise<{ success: string[]; entry: string }> {
-		const fallbackEntry = pendingStatuses.has("queued") ? "queued" : [...pendingStatuses][0] ?? "queued"
-		const presetStatuses = await readBundledPresetStatuses(chain.preset)
-		if (presetStatuses === null) return { success: [], entry: fallbackEntry }
-		return { success: presetStatuses.success, entry: presetStatuses.entry }
+	private async unblockItemStatuses(chain: ChainRecord): Promise<{ success: readonly string[]; entry: string }> {
+		const { preset } = await this.loadedPresetForChain(chain)
+		return { success: preset.statuses.success, entry: preset.statuses.entry }
 	}
 
 	private async entryItemStatusForRecovery(chain: ChainRecord): Promise<string> {
-		const pendingStatuses = await this.continuableItemStatuses(chain)
-		const { entry } = await this.unblockItemStatuses(chain, pendingStatuses)
+		const { entry } = await this.unblockItemStatuses(chain)
 		return entry
+	}
+
+	private async resolveSchedulerPresetPhasePrompt(chain: ChainRecord, phase: string): Promise<string> {
+		const { preset, presetDir } = await this.loadedPresetForChain(chain)
+		const presetPhase = preset.phases.find((entry) => entry.name === phase)
+		if (presetPhase === undefined) {
+			throw new Error(defaultDaemonPrompt({ reason: "phase_not_found_in_preset", preset: preset.name, phase, presetDir }))
+		}
+		return await readFile(presetPhase.prompt, "utf-8")
+	}
+
+	private async loadedPresetForChain(chain: ChainRecord): Promise<SchedulerLoadedPreset> {
+		const key = this.loadedPresetCacheKey(chain)
+		const cached = this.loadedPresetCache.get(key)
+		if (cached !== undefined) return await cached
+		const loading = this.loadPresetForChain(chain)
+		this.loadedPresetCache.set(key, loading)
+		try {
+			return await loading
+		} catch (error) {
+			this.loadedPresetCache.delete(key)
+			throw error
+		}
+	}
+
+	private async loadPresetForChain(chain: ChainRecord): Promise<SchedulerLoadedPreset> {
+		const presetDir = this.presetDirForChain(chain)
+		try {
+			return await loadSchedulerPresetFromDir(presetDir)
+		} catch (error) {
+			throw new DaemonError("invalid_request", `failed to load preset for chain ${chain.name}: ${errorMessage(error)}`, {
+				chainId: chain.id,
+				chainName: chain.name,
+				preset: chain.preset,
+				presetDir,
+				error: errorMessage(error),
+			})
+		}
+	}
+
+	private presetDirForChain(chain: ChainRecord): string {
+		const presetPath = stringMetadata(chain.metadata, "presetPath")
+		if (presetPath !== null) return isAbsolute(presetPath) ? presetPath : resolve(presetPath)
+		if (!PRESET_NAME_PATTERN.test(chain.preset)) {
+			throw new DaemonError("invalid_request", `config.preset: invalid name "${chain.preset}" (must match ${PRESET_NAME_PATTERN.source})`, {
+				chainId: chain.id,
+				chainName: chain.name,
+				preset: chain.preset,
+			})
+		}
+		return bundledPresetDir(chain.preset)
+	}
+
+	private loadedPresetCacheKey(chain: ChainRecord): string {
+		const presetPath = stringMetadata(chain.metadata, "presetPath")
+		if (presetPath !== null) return `path:${isAbsolute(presetPath) ? presetPath : resolve(presetPath)}`
+		return `bundled:${chain.preset}`
 	}
 }
 
@@ -2345,22 +2369,6 @@ async function validateRepoCwdForRequest(input: string): Promise<string> {
 	return input
 }
 
-async function readBundledPresetStatuses(presetName: string): Promise<BundledPresetStatuses | null> {
-	if (!PRESET_NAME_PATTERN.test(presetName)) return null
-	try {
-		const preset = await loadPreset(bundledPresetDir(presetName))
-		return {
-			continuable: [...preset.statuses.continuable],
-			terminal: [...preset.statuses.terminal],
-			success: [...preset.statuses.success],
-			entry: preset.statuses.entry,
-			phaseWrites: new Map(preset.phases.map((phase) => [phase.name, [...phaseWritableStatuses(phase)]])),
-		}
-	} catch {
-		return null
-	}
-}
-
 async function validateBundledPresetForRequest(input: string): Promise<string> {
 	if (!PRESET_NAME_PATTERN.test(input)) {
 		throw new DaemonError("invalid_request", `preset must match ${PRESET_NAME_PATTERN.source}`, { preset: input })
@@ -2382,45 +2390,13 @@ function bundledPresetDir(presetName: string): string {
 	return resolve(BUNDLED_PRESETS_DIR, presetName)
 }
 
-type PresetFallbackReason = "invalid_name" | "unknown_preset"
-
-function bundledPresetDirForScheduler(chain: ChainRecord, recordFallback: (reason: PresetFallbackReason) => void): string {
-	const fallback = bundledPresetDir(DEFAULT_PRESET_NAME)
-	if (!PRESET_NAME_PATTERN.test(chain.preset)) {
-		recordFallback("invalid_name")
-		return fallback
-	}
-	const dir = bundledPresetDir(chain.preset)
-	if (!existsSync(resolve(dir, "preset.toml"))) {
-		recordFallback("unknown_preset")
-		return fallback
-	}
-	return dir
+async function loadSchedulerPresetFromDir(presetDir: string): Promise<SchedulerLoadedPreset> {
+	return { presetDir, preset: await loadPreset(presetDir) }
 }
 
-function recordPresetFallbackEvent(chain: ChainRecord, reason: PresetFallbackReason, loopDataRootOptions: LoopDataRootOptions): void {
-	const event = makeObservabilityEvent({
-		kind: "validation",
-		type: "preset.fallback",
-		chain: chain.name,
-		subject: { kind: "engine" },
-		payload: {
-			chainId: chain.id,
-			preset: chain.preset,
-			fallbackPreset: DEFAULT_PRESET_NAME,
-			reason,
-		},
-	})
-	try {
-		appendObservabilityEventSync(resolveLoopDataPaths(loopDataRootOptions).eventsFile, event)
-	} catch {
-		// Observability write failures must not block scheduler fallback.
-	}
-	try {
-		process.stderr.write(`${renderObservabilityEvent(event)}\n`)
-	} catch {
-		// stderr is the final derived human-readable sink.
-	}
+function stringMetadata(metadata: JsonObject, key: string): string | null {
+	const value = metadata[key]
+	return typeof value === "string" && value.trim() !== "" ? value : null
 }
 
 function assertNeverSchedulerEvent(event: never): never {

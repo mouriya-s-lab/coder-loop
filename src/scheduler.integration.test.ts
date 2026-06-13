@@ -79,7 +79,12 @@ process.exit(1)
 			// continuable here, mirroring gh-issue-pr-iteration's real `continuable` set, so the no-status
 			// failing item keeps being re-selected through the pending path on each backoff window.
 			phase: "iteration",
-			pendingStatuses: ["queued", "in_progress"],
+			statusesForChain: () => ({
+				pending: ["queued", "in_progress"],
+				terminal: ["done", "moot", "blocked", "exhausted"],
+				success: ["done"],
+				entry: "queued",
+			}),
 			runner: {
 				kind: "claude",
 				source: "iteration-default",
@@ -246,8 +251,12 @@ test("stopped chain does not block another active chain in the same scheduler ti
 			state,
 			presetDir: resolve(REPO_ROOT, "presets/gh-issue-pr-iteration"),
 			phase: "iteration",
-			pendingStatuses: ["queued"],
-			terminalStatuses: ["done"],
+			statusesForChain: () => ({
+				pending: ["queued"],
+				terminal: ["done"],
+				success: ["done"],
+				entry: "queued",
+			}),
 			runner: {
 				kind: "claude",
 				source: "iteration-default",

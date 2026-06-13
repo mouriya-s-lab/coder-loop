@@ -142,7 +142,12 @@ test("worktree create failure is contained: backoff + schedulerSpawnError in ext
 			state,
 			presetDir: resolve(REPO_ROOT, "presets/gh-issue-pr-iteration"),
 			phase: "iteration",
-			pendingStatuses: ["queued", "in_progress"],
+			statusesForChain: () => ({
+				pending: ["queued", "in_progress"],
+				terminal: ["done", "moot", "blocked", "exhausted"],
+				success: ["done"],
+				entry: "queued",
+			}),
 			runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [okRunner], model: null },
 			worktreeManager: async () => {
 				worktreeCalls += 1
