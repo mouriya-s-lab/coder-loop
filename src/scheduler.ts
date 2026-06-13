@@ -261,6 +261,7 @@ const RUNNING_RUN_STATUS = "running"
 const CHAIN_COMPLETE_TRIGGER_STATE_METADATA_KEY = "coderLoopChainCompleteTrigger"
 const MAX_ITEM_ATTEMPTS_METADATA_KEY = "maxItemAttempts"
 const SCHEDULER_BACKOFF_EXTRA_KEY = "schedulerBackoff"
+const SCHEDULER_SPAWN_ERROR_EXTRA_KEY = "schedulerSpawnError"
 const DEFAULT_SPAWN_FAILURE_BACKOFF: SchedulerSpawnFailureBackoffConfig = { initialSeconds: 60, maxSeconds: 480 }
 const REVIEW_ON_EMPTY_LOCK_FILENAME = "review-on-empty.lock"
 const REVIEW_ON_EMPTY_LOCK_REASON = "chain-queue-drained"
@@ -617,16 +618,38 @@ export function createGitWorktreeManager(options: LoopDataRootOptions = {}): Sch
 	return async ({ chain, repoCwd }) => {
 		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, options)
 		await mkdir(dirname(worktreePath), { recursive: true })
-		if (gitWorktreeListIncludesPath(repoCwd, worktreePath)) return worktreePath
+		if (gitWorktreeListIncludesPath(repoCwd, worktreePath)) {
+			if (existsSync(worktreePath)) return worktreePath
+			// Registered but the directory is gone (deleted loop-data root): clear the corpse
+			// registration so the add below can recreate the worktree.
+			git(repoCwd, ["worktree", "prune"])
+		}
 
 		const branchName = `coder-loop/${safeGitRefComponent(chain.name)}-${createHash("sha256").update(repoCwd).digest("hex").slice(0, 12)}`
 		const startRef = chooseWorktreeStartRef(repoCwd, chain.baseBranch)
-		const result = git(repoCwd, ["worktree", "add", "-B", branchName, worktreePath, startRef])
+		let result = git(repoCwd, ["worktree", "add", "-B", branchName, worktreePath, startRef])
+		if (result.exitCode !== 0 && removeStaleSlotBranchWorktree(repoCwd, result.stderr)) {
+			result = git(repoCwd, ["worktree", "add", "-B", branchName, worktreePath, startRef])
+		}
 		if (result.exitCode !== 0) {
 			throw new SchedulerError("worktree_create_failed", `failed to create scheduler worktree at ${worktreePath}: ${result.stderr}`)
 		}
 		return worktreePath
 	}
+}
+
+// A daemon killed mid-run leaves its slot worktree checked out on the engine-owned
+// `coder-loop/...` slot branch; git then refuses `worktree add -B` for that branch
+// ("already used by worktree at <path>") from any future loop-data root, permanently
+// wedging every later chain on the same repository. The slot branch name proves the
+// conflicting worktree is engine-created scrap, so force-remove the stale registration
+// and let the caller retry the add once.
+function removeStaleSlotBranchWorktree(repoCwd: string, stderr: string): boolean {
+	const match = stderr.match(/already used by worktree at '([^']+)'/)
+	if (match === null) return false
+	const removeResult = git(repoCwd, ["worktree", "remove", "--force", match[1]!])
+	if (removeResult.exitCode !== 0) git(repoCwd, ["worktree", "prune"])
+	return true
 }
 
 export type SchedulerChainWorktreeCleanup = {
@@ -745,7 +768,38 @@ async function spawnSchedulerRun(
 	}
 
 	const worktreeManager = options.worktreeManager ?? createGitWorktreeManager(options.loopDataRootOptions)
-	const worktreePath = slot.worktreePath ?? await worktreeManager({ chain, repoCwd: item.repoCwd, slotKey: slot.key })
+	let worktreePath: string
+	try {
+		worktreePath = slot.worktreePath ?? await worktreeManager({ chain, repoCwd: item.repoCwd, slotKey: slot.key })
+	} catch (error) {
+		// A worktree failure used to escape the tick entirely: no backoff, no item trace, only
+		// a daemon stderr warning — the item sat actionable while the scheduler retried at tick
+		// cadence forever. Contain it like the kind-gate abort above: persisted backoff plus an
+		// extra record so `status --json` shows why nothing spawns.
+		const failedAt = nowSeconds(options)
+		const message = errorMessage(error)
+		options.store.updateItem(item.id, {
+			extra: withSchedulerSpawnError(
+				withNextSchedulerBackoff(item.extra, failedAt, spawnFailureBackoffForChain(options, chain)),
+				failedAt,
+				phase,
+				message,
+			),
+			updatedAt: failedAt,
+		})
+		console.warn(`coder-loop scheduler: worktree create failed for chain=${chain.name} item=${item.id} issue=#${item.issueNumber}: ${message}`)
+		await emit(options, {
+			type: "spawn.aborted",
+			slotKey: slot.key,
+			chainId: chain.id,
+			chainName: chain.name,
+			itemId: item.id,
+			issueNumber: item.issueNumber,
+			reason: message,
+			toStatus: item.status,
+		})
+		return null
+	}
 	slot.worktreePath = worktreePath
 
 	const runner = await resolvePhaseRunner(options, { chain, item, phase })
@@ -774,6 +828,8 @@ async function spawnSchedulerRun(
 		phase,
 		updatedAt: startedAt,
 	}
+	const extraWithoutSpawnError = clearSchedulerSpawnError(item.extra)
+	if (extraWithoutSpawnError !== item.extra) spawnUpdate.extra = extraWithoutSpawnError
 	// Spawn records only run/phase metadata. The agent owns status writes; trigger phases on terminal
 	// items therefore keep their terminal status, and normal phases keep their entry status until the
 	// agent writes a new one.
@@ -1589,6 +1645,17 @@ function clearSchedulerBackoff(extra: JsonObject): JsonObject {
 	if (!(SCHEDULER_BACKOFF_EXTRA_KEY in extra)) return extra
 	const next = { ...extra }
 	delete next[SCHEDULER_BACKOFF_EXTRA_KEY]
+	return next
+}
+
+function withSchedulerSpawnError(extra: JsonObject, failedAt: number, phase: string, message: string): JsonObject {
+	return { ...extra, [SCHEDULER_SPAWN_ERROR_EXTRA_KEY]: { at: failedAt, phase, message } }
+}
+
+function clearSchedulerSpawnError(extra: JsonObject): JsonObject {
+	if (!(SCHEDULER_SPAWN_ERROR_EXTRA_KEY in extra)) return extra
+	const next = { ...extra }
+	delete next[SCHEDULER_SPAWN_ERROR_EXTRA_KEY]
 	return next
 }
 
