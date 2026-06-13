@@ -556,6 +556,7 @@ async function exhaustItemsOverAttemptLimitForRepo(
 	const maxItemAttempts = maxItemAttemptsForChain(options, chain)
 	const terminalStatuses = new Set(chainStatuses.terminal)
 	const pendingStatuses = new Set(chainStatuses.pending)
+	if (!terminalStatuses.has(SCHEDULER_EXHAUSTED_STATUS)) return [...items]
 	let changed = false
 	for (const item of items) {
 		if (item.repoCwd !== repoCwd) continue
@@ -1580,14 +1581,10 @@ async function schedulerStatusesForChain(options: SchedulerOptions, chain: Chain
 	const { preset } = await schedulerLoadedPreset(options, chain)
 	return {
 		pending: preset.statuses.continuable,
-		terminal: withSchedulerTerminalStatuses(preset.statuses.terminal),
+		terminal: preset.statuses.terminal,
 		success: preset.statuses.success,
 		entry: preset.statuses.entry,
 	}
-}
-
-function withSchedulerTerminalStatuses(statuses: readonly string[]): readonly string[] {
-	return statuses.includes(SCHEDULER_EXHAUSTED_STATUS) ? statuses : [...statuses, SCHEDULER_EXHAUSTED_STATUS]
 }
 
 function maxItemAttemptsForChain(options: SchedulerOptions, chain: ChainRecord): number {

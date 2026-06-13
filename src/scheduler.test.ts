@@ -779,6 +779,36 @@ describe("scheduler", () => {
 		}
 	})
 
+	test("maxItemAttempts does not write exhausted unless the preset declares it terminal", async () => {
+		const fixture = await createFixture("no-exhaustion-status")
+		const presetDir = resolve(fixture.loopDataRoot, "..", "no-exhaustion-preset")
+		await writeNoExhaustionPreset(presetDir)
+		try {
+			const chain = createChain(fixture.store, "no-exhaustion-status-chain", {
+				preset: "no-exhaustion",
+				metadata: { maxItemAttempts: 1 },
+			})
+			const item = createItem(fixture.store, chain, { issueNumber: 710_003, repoCwd: "/repo/a" })
+			fixture.store.updateItem(item.id, {
+				attempts: 1,
+				extra: { ...item.extra, schedulerBackoff: { failureCount: 1, nextRunAt: 1_800_800_100 } },
+				updatedAt: 1_800_800_000,
+			})
+
+			const tick = await schedulerTick(fixture.options({
+				presetDir,
+				now: () => 1_800_800_000,
+			}))
+
+			expect(tick.spawnedRuns).toHaveLength(0)
+			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
+			expect(fixture.store.getItem(item.id)?.extra.schedulerBackoff).toEqual({ failureCount: 1, nextRunAt: 1_800_800_100 })
+			expect(fixture.schedulerEvents.find((event) => event.type === "queue.terminal")).toBeUndefined()
+		} finally {
+			fixture.store.close()
+		}
+	})
+
 	test("completed chain skipped", async () => {
 		const fixture = await createFixture("completed-skip")
 		try {
@@ -3790,6 +3820,34 @@ idField = "issue"
 continuable = ["queued"]
 terminal = ["blocked", "done", "exhausted"]
 success = []
+entry = "queued"
+
+[agent]
+binary = "codex"
+
+[[phases]]
+name = "run"
+prompt = "run.md"
+	`,
+	)
+}
+
+async function writeNoExhaustionPreset(presetDir: string): Promise<void> {
+	await mkdir(presetDir, { recursive: true })
+	await writeFile(resolve(presetDir, "run.md"), "# run\n")
+	await writeFile(
+		resolve(presetDir, "preset.toml"),
+		`name = "no-exhaustion"
+version = 1
+description = "Fixture preset whose terminal vocabulary omits scheduler exhaustion."
+
+[item]
+idField = "issue"
+
+[statuses]
+continuable = ["queued"]
+terminal = ["done"]
+success = ["done"]
 entry = "queued"
 
 [agent]

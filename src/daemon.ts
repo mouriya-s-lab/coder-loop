@@ -1464,8 +1464,6 @@ export class CoderLoopDaemon {
 		const schedulerPresetDir = scheduler.presetDir
 		const presetForChain = scheduler.presetForChain ?? ((chain: ChainRecord) =>
 			schedulerPresetDir === undefined ? this.loadedPresetForChain(chain) : this.loadSchedulerPresetOverrideForChain(chain, schedulerPresetDir))
-		const presetDirForChain = scheduler.presetDirForChain ?? ((chain: ChainRecord) =>
-			schedulerPresetDir ?? this.presetDirForChain(chain))
 		const presetPromptResolver = (ctx: SchedulerSpawnContext): Promise<string> =>
 			this.resolveLoadedPresetPhasePrompt(ctx)
 		const fallbackRunner = scheduler.runner ?? defaultDaemonRunner()
