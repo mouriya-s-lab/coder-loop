@@ -40,6 +40,7 @@ L2: Preset（presets/<name>/）
 
 - **Type check**: `bun run typecheck` (alias for `bun x tsc --noEmit`)
 - **Run unit + smoke tests**: `bun test` (覆盖 `src/loop.test.ts` + `src/smoke.test.ts`)
+- **Real e2e（引擎全链路验收）**: `bun scripts/real-e2e.ts [--preset gh-issue-pr-iteration] [flags]` — 单命令真实 e2e：隔离 daemon（`--loop-data-root`，绝不碰生产 `~/.coder-loop`）→ 在 fixture repo `mouriya-s-lab/coder-loop-e2e-fixture` seed 一个 trivial issue → 跑完整 loop（spawn → iteration → review → PR merged → issue closed）→ 断言 GitHub 终态 → tripwire/teardown。默认 `real-e2e-minimal` preset（最小，只验引擎调度链路，~3-5min）；`--preset gh-issue-pr-iteration` 跑全保真。详细 runbook 见 `docs/real-e2e-fixture.md`。这只在 code 仓跑，不在 app 跑。
 - **Status snapshot**: `coder-loop status <target> --json [--config <path>] [--chain <name>]` — stable read-only JSON API for supervisor/scripts; do not scrape runtime files first.
 - **Daemon operations**: `coder-loop daemon status <target> --json`, `coder-loop daemon start|restart <target> [--max-iterations N]`, `coder-loop daemon stop <target>` — stable central-daemon / target-chain control API.
 - **Runtime inspection / model config**: `coder-loop runtime show <target> [--json]` 列出 preset 所有 phase（角色）当前解析到的 runner/binary/model/source；`coder-loop runtime set <target> [--claude-model opus-4-7|opus-4-8] [--codex-model gpt-5.5]` 用枚举值幂等改写 `.coder-loop/runtime/config.json` 的 `claude.model` / `codex.model`（Claude 模型自动加 `[1m]` 后缀；TOML config 不可写）。Runner kind 归 role entry md，不是 CLI 表面。
@@ -48,6 +49,10 @@ L2: Preset（presets/<name>/）
 - **Doctor**: `coder-loop doctor <target> [--repo <owner/repo>]` — 只读体检（target 文件 / 操作员 PATH / runner CLI）并输出 live runtime health。
 - **Plan phase**: `/dev-plan` （`gh-issue-pr-iteration` preset 配套的规划器）
 - **Loop phase**: `/dev-loop [N]` （`gh-issue-pr-iteration` preset 配套的循环入口；内部走 `coder-loop daemon start`）
+
+### 何时必须跑 real-e2e（引擎/调度改动的验收主线）
+
+改动 L1 引擎（`src/loop.ts`）、`src/scheduler.ts`、`src/daemon.ts` 里的调度 / worktree / 终止 / resume 语义、或 preset 加载路径后，`bun test`（unit + smoke，mock 掉真实调度）**不足以证明正确**——这类路径的 bug（如 #466 的 worktree wedge、#467 的 `daemon down` 留孤儿 codex）只在真实 daemon 调度真实 agent 时才暴露，type-check / unit test 全绿也照样带病。完成判定必须包含一次 `bun scripts/real-e2e.ts` 绿跑（观察到 PR MERGED / issue CLOSED）。它慢、真打 GitHub，不是 per-commit gate，但引擎 / 调度类改动的**验收主线是 real-e2e，不是 unit test**。
 
 ## Runner Selection
 
