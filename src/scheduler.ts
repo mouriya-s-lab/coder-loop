@@ -7,7 +7,6 @@ import { basename, dirname, isAbsolute, resolve } from "node:path"
 import {
 	buildConfigBindings,
 	buildRunnerInvocation,
-	loadPreset,
 	parseSessionIdFromRunnerStream,
 	renderFragmentIndex,
 	renderPrompt,
@@ -215,9 +214,7 @@ export type SchedulerOptions = {
 	runner?: AgentRunnerSelection
 	phaseRunner?: SchedulerPhaseRunner
 	phaseRunnerSelectionForChain?: SchedulerPhaseRunnerSelectionResolver
-	presetDir: string
-	presetDirForChain?: (chain: ChainRecord) => string
-	presetForChain?: SchedulerPresetResolver
+	presetForChain: SchedulerPresetResolver
 	phase?: string
 	prompt:
 		| string
@@ -2220,14 +2217,8 @@ function resolveItemRuntimePath(chainRoot: string, path: string): string {
 	return isAbsolute(path) ? path : resolve(chainRoot, path)
 }
 
-function schedulerPresetDir(options: SchedulerOptions, chain: ChainRecord): string {
-	return options.presetDirForChain?.(chain) ?? options.presetDir
-}
-
 async function schedulerLoadedPreset(options: SchedulerOptions, chain: ChainRecord): Promise<SchedulerLoadedPreset> {
-	if (options.presetForChain !== undefined) return await options.presetForChain(chain)
-	const presetDir = schedulerPresetDir(options, chain)
-	return { presetDir, preset: await loadPreset(presetDir) }
+	return await options.presetForChain(chain)
 }
 
 async function emit(options: SchedulerOptions, event: SchedulerEvent): Promise<void> {

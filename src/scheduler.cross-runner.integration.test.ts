@@ -13,10 +13,12 @@ import {
 	type SchedulerPhaseRunner,
 	type SchedulerWorktreeManager,
 } from "./scheduler"
+import { loadPreset } from "./loop"
 import { type ChainRecord, openSqliteStateStore } from "./sqlite-state"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
+const LOADED_PRESET = loadPreset(PRESET_DIR).then((preset) => ({ presetDir: PRESET_DIR, preset }))
 const FAKE_RUNNER = resolve(REPO_ROOT, "tests/fixtures/cross-runner-fake.ts")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-cross-runner-integration-tests", String(process.pid))
 
@@ -341,7 +343,7 @@ async function createCrossRunnerFixture(name: string, responses: FakeRunnerRespo
 	const options = (overrides: Partial<SchedulerOptions> = {}): SchedulerOptions => ({
 		store,
 		state,
-		presetDir: PRESET_DIR,
+		presetForChain: () => LOADED_PRESET,
 		phaseRunner,
 		worktreeManager,
 		loopDataRootOptions: { loopDataRoot },

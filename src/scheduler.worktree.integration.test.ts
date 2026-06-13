@@ -13,8 +13,11 @@ import {
 	type SchedulerOptions,
 } from "./scheduler"
 import { openSqliteStateStore } from "./sqlite-state"
+import { loadPreset } from "./loop"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
+const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
+const LOADED_PRESET = loadPreset(PRESET_DIR).then((preset) => ({ presetDir: PRESET_DIR, preset }))
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-worktree-tests", String(process.pid))
 
 afterAll(async () => {
@@ -140,7 +143,7 @@ test("worktree create failure is contained: backoff + schedulerSpawnError in ext
 		const options: SchedulerOptions = {
 			store,
 			state,
-			presetDir: resolve(REPO_ROOT, "presets/gh-issue-pr-iteration"),
+			presetForChain: () => LOADED_PRESET,
 			phase: "iteration",
 			runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [okRunner], model: null },
 			worktreeManager: async () => {

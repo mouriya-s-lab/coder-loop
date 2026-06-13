@@ -25,6 +25,7 @@ import {
 	type SchedulerEvent,
 	type SchedulerLoadedPreset,
 	type SchedulerOptions,
+	type SchedulerPresetResolver,
 	type SchedulerSpawnContext,
 	type SchedulerState,
 } from "./scheduler"
@@ -89,9 +90,11 @@ export type DaemonResponseError = {
 	details?: JsonObject
 }
 
-export type CoderLoopDaemonSchedulerConfig = Partial<Omit<SchedulerOptions, "store" | "state">> & {
+export type CoderLoopDaemonSchedulerConfig = Partial<Omit<SchedulerOptions, "store" | "state" | "presetForChain">> & {
 	enabled?: boolean
 	intervalMs?: number
+	presetDir?: string
+	presetForChain?: SchedulerPresetResolver
 }
 
 export type StartCoderLoopDaemonOptions = LoopDataRootOptions & {
@@ -1462,8 +1465,8 @@ export class CoderLoopDaemon {
 		const scheduler = this.options.scheduler ?? {}
 		const externalOnEvent = scheduler.onEvent
 		const schedulerPresetDir = scheduler.presetDir
-		const presetForChain = scheduler.presetForChain ?? ((chain: ChainRecord) =>
-			schedulerPresetDir === undefined ? this.loadedPresetForChain(chain) : this.loadSchedulerPresetOverrideForChain(chain, schedulerPresetDir))
+		const presetForChain: SchedulerPresetResolver = scheduler.presetForChain ?? ((chain: ChainRecord) =>
+			schedulerPresetDir === undefined ? this.loadedPresetForChain(chain) : this.loadedPresetFromDirForChain(chain, schedulerPresetDir))
 		const presetPromptResolver = (ctx: SchedulerSpawnContext): Promise<string> =>
 			this.resolveLoadedPresetPhasePrompt(ctx)
 		const fallbackRunner = scheduler.runner ?? defaultDaemonRunner()
@@ -1482,7 +1485,6 @@ export class CoderLoopDaemon {
 			store: this.requireStore(),
 			state: this.schedulerState,
 			runner: fallbackRunner,
-			presetDir: schedulerPresetDir ?? bundledPresetDir(DEFAULT_PRESET_NAME),
 			presetForChain,
 			prompt: scheduler.prompt ?? presetPromptResolver,
 			onEvent: async (event) => {
@@ -1495,11 +1497,6 @@ export class CoderLoopDaemon {
 		if (scheduler.phaseRunner !== undefined) options.phaseRunner = scheduler.phaseRunner
 		if (phaseRunnerSelectionForChain !== undefined) options.phaseRunnerSelectionForChain = phaseRunnerSelectionForChain
 		if (scheduler.phase !== undefined) options.phase = scheduler.phase
-		if (scheduler.presetDirForChain !== undefined) {
-			options.presetDirForChain = scheduler.presetDirForChain
-		} else if (schedulerPresetDir === undefined) {
-			options.presetDirForChain = (chain) => this.presetDirForChain(chain)
-		}
 		if (scheduler.worktreeManager !== undefined) options.worktreeManager = scheduler.worktreeManager
 		if (scheduler.kindResolver !== undefined) options.kindResolver = scheduler.kindResolver
 		options.loopDataRootOptions = this.options
@@ -1607,6 +1604,10 @@ export class CoderLoopDaemon {
 
 	private async loadedPresetForChain(chain: ChainRecord): Promise<SchedulerLoadedPreset> {
 		const presetDir = this.presetDirForChain(chain)
+		return await this.loadedPresetFromDirForChain(chain, presetDir)
+	}
+
+	private async loadedPresetFromDirForChain(chain: ChainRecord, presetDir: string): Promise<SchedulerLoadedPreset> {
 		const key = this.loadedPresetCacheKey(presetDir)
 		const cached = this.loadedPresetCache.get(key)
 		const loading = cached ?? loadSchedulerPresetFromDir(presetDir)
@@ -1623,15 +1624,6 @@ export class CoderLoopDaemon {
 				presetDir,
 				error: errorMessage(error),
 			})
-		}
-	}
-
-	private async loadSchedulerPresetOverrideForChain(chain: ChainRecord, presetDir: string): Promise<SchedulerLoadedPreset> {
-		try {
-			return await loadSchedulerPresetFromDir(presetDir)
-		} catch (error) {
-			await this.recordPresetLoadFailure(chain, presetDir, error)
-			throw error
 		}
 	}
 

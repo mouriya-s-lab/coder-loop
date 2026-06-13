@@ -21,6 +21,7 @@ import {
 	selectNextPendingItemFromSnapshot,
 	serializeSchedulerReviewOnEmptyLock,
 	type SchedulerEvent,
+	type SchedulerLoadedPreset,
 	type SchedulerOptions,
 	type SchedulerPhaseRunner,
 	type SchedulerWorktreeManager,
@@ -767,7 +768,7 @@ describe("scheduler", () => {
 				updatedAt: 1_800_710_002,
 			})
 
-			const tick = await schedulerTick(fixture.options({ presetDir }))
+			const tick = await schedulerTick(fixture.options({ loadedPreset: await loadedPresetFromDir(presetDir) }))
 
 			expect(tick.spawnedRuns).toHaveLength(0)
 			const unchanged = fixture.store.getItem(dependent.id)
@@ -796,7 +797,7 @@ describe("scheduler", () => {
 			})
 
 			const tick = await schedulerTick(fixture.options({
-				presetDir,
+				loadedPreset: await loadedPresetFromDir(presetDir),
 				now: () => 1_800_800_000,
 			}))
 
@@ -1297,7 +1298,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 371_001, repoCwd: "/repo/a", summary: null })
 			const baseOptions = fixture.options({
-				presetDir,
+				loadedPreset: await loadedPresetFromDir(presetDir),
 				runIdFactory: ({ chain: c, item: i, phase }) => `run-${c.id}-${i.id}-${phase}`,
 				prompt: ({ item: i, runId, worktreePath, phase }) =>
 					JSON.stringify({
@@ -2839,7 +2840,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 
 			let runSeq = 0
 			const baseOptions = fixture.options({
-				presetDir: PRESET_DIR,
+				loadedPreset: { presetDir: PRESET_DIR, preset },
 				runIdFactory: ({ chain: c, item, phase }) => `run-${c.id}-${item.id}-${phase}-${++runSeq}`,
 			})
 			delete (baseOptions as { runner?: AgentRunnerSelection }).runner
@@ -3577,7 +3578,11 @@ type Fixture = {
 	eventLog: string
 	schedulerEvents: SchedulerEvent[]
 	worktreeCalls: string[]
-	options: (overrides?: Partial<SchedulerOptions>) => SchedulerOptions
+	options: (overrides?: SchedulerFixtureOverrides) => SchedulerOptions
+}
+
+type SchedulerFixtureOverrides = Partial<Omit<SchedulerOptions, "presetForChain">> & {
+	loadedPreset?: SchedulerLoadedPreset
 }
 
 type RunnerEvent = {
@@ -3600,6 +3605,8 @@ async function createFixture(name: string): Promise<Fixture> {
 	const state = createSchedulerState()
 	const schedulerEvents: SchedulerEvent[] = []
 	const worktreeCalls: string[] = []
+	const defaultPresetDir = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
+	const defaultLoadedPreset = await loadedPresetFromDir(defaultPresetDir)
 	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
 		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
 		await mkdir(worktreePath, { recursive: true })
@@ -3607,21 +3614,23 @@ async function createFixture(name: string): Promise<Fixture> {
 		return worktreePath
 	}
 
-	const options = (overrides: Partial<SchedulerOptions> = {}): SchedulerOptions => ({
-		store,
-		state,
-		presetDir: resolve(REPO_ROOT, "presets/gh-issue-pr-iteration"),
-		runner: {
-			kind: "claude",
-			source: "iteration-default",
-			binary: "bun",
-			extraArgs: [fakeRunner],
-			model: null,
-		},
-		worktreeManager,
-		loopDataRootOptions: { loopDataRoot },
-		runIdFactory: ({ chain, item }) => `run-${chain.id}-${item.id}`,
-		prompt: ({ item, runId, worktreePath, phase }) => {
+	const options = (overrides: SchedulerFixtureOverrides = {}): SchedulerOptions => {
+		const { loadedPreset = defaultLoadedPreset, ...schedulerOverrides } = overrides
+		return {
+			store,
+			state,
+			presetForChain: () => loadedPreset,
+			runner: {
+				kind: "claude",
+				source: "iteration-default",
+				binary: "bun",
+				extraArgs: [fakeRunner],
+				model: null,
+			},
+			worktreeManager,
+			loopDataRootOptions: { loopDataRoot },
+			runIdFactory: ({ chain, item }) => `run-${chain.id}-${item.id}`,
+			prompt: ({ item, runId, worktreePath, phase }) => {
 			const payload: Record<string, unknown> = {
 				itemId: item.id,
 				issueNumber: item.issueNumber,
@@ -3638,16 +3647,17 @@ async function createFixture(name: string): Promise<Fixture> {
 			if (Object.prototype.hasOwnProperty.call(item.extra, "summary")) payload.summary = item.extra.summary
 			return JSON.stringify(payload)
 		},
-		onEvent: (event) => {
-			schedulerEvents.push(event)
-		},
-		...overrides,
-	})
+			onEvent: (event) => {
+				schedulerEvents.push(event)
+			},
+			...schedulerOverrides,
+		}
+	}
 
 	return { store, state, loopDataRoot, eventLog, schedulerEvents, worktreeCalls, options }
 }
 
-function persistedObservabilityOptions(fixture: Fixture, overrides: Partial<SchedulerOptions> = {}): SchedulerOptions {
+function persistedObservabilityOptions(fixture: Fixture, overrides: SchedulerFixtureOverrides = {}): SchedulerOptions {
 	const options = fixture.options(overrides)
 	const baseOnEvent = options.onEvent
 	return {
@@ -3666,6 +3676,10 @@ async function appendPersistedSchedulerEvent(fixture: Fixture, event: SchedulerE
 		resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile,
 		schedulerEventToObservabilityEvent(chain, event),
 	)
+}
+
+async function loadedPresetFromDir(presetDir: string): Promise<SchedulerLoadedPreset> {
+	return { presetDir, preset: await loadPreset(presetDir) }
 }
 
 function createChain(
@@ -3970,31 +3984,35 @@ async function createPresetPromptIntegrationFixture(name: string): Promise<Fixtu
 		return worktreePath
 	}
 	const presetDir = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
+	const loadedPreset = await loadedPresetFromDir(presetDir)
 
-	const options = (overrides: Partial<SchedulerOptions> = {}): SchedulerOptions => ({
-		store,
-		state,
-		presetDir,
-		runner: {
-			kind: "claude",
-			source: "iteration-default",
-			binary: "bun",
-			extraArgs: [fakeRunner],
-			model: null,
-		},
-		worktreeManager,
-		loopDataRootOptions: { loopDataRoot },
-		runIdFactory: ({ chain, item }) => `run-${chain.id}-${item.id}`,
+	const options = (overrides: SchedulerFixtureOverrides = {}): SchedulerOptions => {
+		const { loadedPreset: overrideLoadedPreset = loadedPreset, ...schedulerOverrides } = overrides
+		return {
+			store,
+			state,
+			presetForChain: () => overrideLoadedPreset,
+			runner: {
+				kind: "claude",
+				source: "iteration-default",
+				binary: "bun",
+				extraArgs: [fakeRunner],
+				model: null,
+			},
+			worktreeManager,
+			loopDataRootOptions: { loopDataRoot },
+			runIdFactory: ({ chain, item }) => `run-${chain.id}-${item.id}`,
 			prompt: async (ctx) => {
 				const phase = ctx.loadedPreset.preset.phases.find((entry) => entry.name === ctx.phase)
 				if (phase === undefined) throw new Error(`fixture preset ${ctx.loadedPreset.preset.name} does not define phase ${ctx.phase}`)
 				return await readFile(phase.prompt, "utf-8")
 			},
-		onEvent: (event) => {
-			schedulerEvents.push(event)
-		},
-		...overrides,
-	})
+			onEvent: (event) => {
+				schedulerEvents.push(event)
+			},
+			...schedulerOverrides,
+		}
+	}
 
 	return { store, state, loopDataRoot, eventLog, schedulerEvents, worktreeCalls, options }
 }

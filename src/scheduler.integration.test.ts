@@ -16,8 +16,11 @@ import {
 } from "./scheduler"
 import { resolveChainRuntimePaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
+import { loadPreset } from "./loop"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
+const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
+const LOADED_PRESET = loadPreset(PRESET_DIR).then((preset) => ({ presetDir: PRESET_DIR, preset }))
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-integration-tests", String(process.pid))
 
@@ -73,7 +76,7 @@ process.exit(1)
 		const options: SchedulerOptions = {
 			store,
 			state,
-			presetDir: resolve(REPO_ROOT, "presets/gh-issue-pr-iteration"),
+			presetForChain: () => LOADED_PRESET,
 			// Drive a single explicit phase so the iteration->review trigger (covered elsewhere) does not
 			// interleave un-backed-off review spawns into this backoff measurement.
 			phase: "iteration",
@@ -162,7 +165,7 @@ await Bun.write(${JSON.stringify(promptCapture)}, prompt)
 		const options: SchedulerOptions = {
 			store,
 			state,
-			presetDir: resolve(REPO_ROOT, "presets/gh-issue-pr-iteration"),
+			presetForChain: () => LOADED_PRESET,
 			phase: "iteration",
 			runner: {
 				kind: "claude",
@@ -241,7 +244,7 @@ test("stopped chain does not block another active chain in the same scheduler ti
 		const options: SchedulerOptions = {
 			store,
 			state,
-			presetDir: resolve(REPO_ROOT, "presets/gh-issue-pr-iteration"),
+			presetForChain: () => LOADED_PRESET,
 			phase: "iteration",
 			runner: {
 				kind: "claude",
@@ -321,7 +324,7 @@ console.log("done:" + input.itemId)
 		const options: SchedulerOptions = {
 			store,
 			state,
-			presetDir: resolve(REPO_ROOT, "presets/gh-issue-pr-iteration"),
+			presetForChain: () => LOADED_PRESET,
 			runner: {
 				kind: "claude",
 				source: "iteration-default",
@@ -408,7 +411,7 @@ console.log(input.phase + ":" + status)
 		const options: SchedulerOptions = {
 			store,
 			state,
-			presetDir: resolve(REPO_ROOT, "presets/gh-issue-pr-iteration"),
+			presetForChain: () => LOADED_PRESET,
 			runner: {
 				kind: "claude",
 				source: "iteration-default",

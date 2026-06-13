@@ -1554,7 +1554,7 @@ attemptTimeoutSeconds = 3600
 	})
 
 	test("socket completed chain remains read-only for item mutations", async () => {
-		const fixture = await startFixture("completed-chain-read-only")
+		const fixture = await startFixture("completed-chain-read-only", { schedulerEnabled: false })
 		try {
 			const chain = record(expectOk(await request(fixture, "chain.create", {
 				name: "read-only-completed-chain",
@@ -1568,9 +1568,13 @@ attemptTimeoutSeconds = 3600
 				title: "complete me",
 			})).item)
 			const itemId = numberValue(added.id)
-
-			expectOk(await request(fixture, "item.update", { itemId, status: "done" }))
-			await waitFor(async () => readChainStatus(fixture.loopDataRoot, chainId), (status) => status === "completed")
+			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				store.updateItem(itemId, { status: "done", phase: "review", updatedAt: 1_800_015_200 })
+				store.updateChain(chainId, { status: "completed", updatedAt: 1_800_015_201 })
+			} finally {
+				store.close()
+			}
 
 			expectChainNotActive(await request(fixture, "item.add", {
 				chainId,
@@ -1794,7 +1798,11 @@ attemptTimeoutSeconds = 3600
 			await waitFor(async () => readChainStatus(fixture.loopDataRoot, chainId), (status) => status === "completed", 10_000)
 			expect(record(expectOk(await request(fixture, "daemon.status")).daemon).activeRuns).toEqual([])
 			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({ type: "agent.exit", itemId, status: "done" }))
-			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({ type: "chain.completed", chainId }))
+			const chainCompleted = await waitFor(
+				async () => fixture.schedulerEvents.find((event) => event.type === "chain.completed" && event.chainId === chainId) ?? null,
+				(event) => event !== null,
+			)
+			expect(chainCompleted).toMatchObject({ type: "chain.completed", chainId })
 		} finally {
 			await fixture.daemon.stop()
 		}
