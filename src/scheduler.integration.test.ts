@@ -75,16 +75,8 @@ process.exit(1)
 			state,
 			presetDir: resolve(REPO_ROOT, "presets/gh-issue-pr-iteration"),
 			// Drive a single explicit phase so the iteration->review trigger (covered elsewhere) does not
-			// interleave un-backed-off review spawns into this backoff measurement. in_progress is declared
-			// continuable here, mirroring gh-issue-pr-iteration's real `continuable` set, so the no-status
-			// failing item keeps being re-selected through the pending path on each backoff window.
+			// interleave un-backed-off review spawns into this backoff measurement.
 			phase: "iteration",
-			statusesForChain: () => ({
-				pending: ["queued", "in_progress"],
-				terminal: ["done", "moot", "blocked", "exhausted"],
-				success: ["done"],
-				entry: "queued",
-			}),
 			runner: {
 				kind: "claude",
 				source: "iteration-default",
@@ -251,12 +243,6 @@ test("stopped chain does not block another active chain in the same scheduler ti
 			state,
 			presetDir: resolve(REPO_ROOT, "presets/gh-issue-pr-iteration"),
 			phase: "iteration",
-			statusesForChain: () => ({
-				pending: ["queued"],
-				terminal: ["done"],
-				success: ["done"],
-				entry: "queued",
-			}),
 			runner: {
 				kind: "claude",
 				source: "iteration-default",
@@ -430,12 +416,6 @@ console.log(input.phase + ":" + status)
 				extraArgs: [fakeRunner],
 				model: null,
 			},
-			statusesForChain: () => ({
-				pending: ["queued", "in_progress", "changes_requested"],
-				terminal: ["blocked", "moot", "done"],
-				success: ["done"],
-				entry: "queued",
-			}),
 			worktreeManager,
 			loopDataRootOptions: { loopDataRoot },
 			runIdFactory: ({ phase }) => `run-review-retry-${++runSequence}-${phase}`,

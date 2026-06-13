@@ -224,7 +224,6 @@ export type SchedulerOptions = {
 		| ((context: SchedulerSpawnContext) => string | Promise<string>)
 	worktreeManager?: SchedulerWorktreeManager
 	loopDataRootOptions?: LoopDataRootOptions
-	statusesForChain?: (chain: ChainRecord) => SchedulerChainStatuses | Promise<SchedulerChainStatuses>
 	now?: () => number
 	runIdFactory?: (context: { chain: ChainRecord; item: ItemRecord; phase: string }) => string
 	kindResolver?: SchedulerKindResolver
@@ -260,7 +259,6 @@ export type SchedulerTickResult = {
 	completedChainIds: number[]
 }
 
-const DEFAULT_ENTRY_STATUS = "queued"
 const RUNNING_RUN_STATUS = "running"
 const CHAIN_COMPLETE_TRIGGER_STATE_METADATA_KEY = "coderLoopChainCompleteTrigger"
 const MAX_ITEM_ATTEMPTS_METADATA_KEY = "maxItemAttempts"
@@ -846,7 +844,6 @@ async function spawnSchedulerRun(
 	const resumeDecision = resumeDecisionForItem(item, phase, runner.kind)
 	const renderedPrompt = await renderSchedulerSpawnPrompt({
 		rawPrompt,
-		presetDir,
 		preset: loadedPreset.preset,
 		phase,
 		chain,
@@ -1580,21 +1577,12 @@ function jsonObject(value: JsonValue | undefined): JsonObject | null {
 }
 
 async function schedulerStatusesForChain(options: SchedulerOptions, chain: ChainRecord): Promise<SchedulerChainStatuses> {
-	const resolved = await options.statusesForChain?.(chain)
-	if (resolved !== undefined) {
-		return {
-			pending: resolved.pending,
-			terminal: withSchedulerTerminalStatuses(resolved.terminal),
-			success: resolved.success,
-			entry: resolved.entry,
-		}
-	}
 	const { preset } = await schedulerLoadedPreset(options, chain)
 	return {
 		pending: preset.statuses.continuable,
 		terminal: withSchedulerTerminalStatuses(preset.statuses.terminal),
 		success: preset.statuses.success,
-		entry: preset.statuses.entry ?? DEFAULT_ENTRY_STATUS,
+		entry: preset.statuses.entry,
 	}
 }
 
@@ -1869,7 +1857,6 @@ async function spawnSchedulerReviewOnEmptyRun(
 	const rawPrompt = typeof options.prompt === "string" ? options.prompt : await options.prompt(context)
 	const renderedPrompt = await renderSchedulerSpawnPrompt({
 		rawPrompt,
-		presetDir,
 		preset: loadedPreset.preset,
 		phase: reviewPhase,
 		chain,
@@ -2104,8 +2091,7 @@ function invocationPaths(targetCwd: string, agentCwd: string, presetDir: string,
 
 export type SchedulerPromptRenderInput = {
 	rawPrompt: string
-	presetDir: string
-	preset?: Preset
+	preset: Preset
 	phase: string
 	chain: ChainRecord
 	item: ItemRecord
@@ -2118,7 +2104,7 @@ export type SchedulerPromptRenderInput = {
 }
 
 export async function renderSchedulerSpawnPrompt(input: SchedulerPromptRenderInput): Promise<string> {
-	const preset = input.preset ?? await loadPreset(input.presetDir)
+	const preset = input.preset
 	const presetPhase = preset.phases.find((entry) => entry.name === input.phase)
 	if (presetPhase === undefined) return input.rawPrompt
 	const ctx = buildSchedulerResolveContext({

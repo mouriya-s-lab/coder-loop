@@ -1505,17 +1505,6 @@ export class CoderLoopDaemon {
 		if (scheduler.worktreeManager !== undefined) options.worktreeManager = scheduler.worktreeManager
 		if (scheduler.kindResolver !== undefined) options.kindResolver = scheduler.kindResolver
 		options.loopDataRootOptions = this.options
-		options.statusesForChain = scheduler.statusesForChain ?? (async (chain) => {
-			const continuableStatusNames = await this.continuableItemStatuses(chain)
-			const terminalStatusNames = await this.terminalItemStatuses(chain)
-			const { success, entry } = await this.unblockItemStatuses(chain)
-			return {
-				pending: [...continuableStatusNames],
-				terminal: [...terminalStatusNames],
-				success,
-				entry,
-			}
-		})
 		if (scheduler.now !== undefined) options.now = scheduler.now
 		if (scheduler.runIdFactory !== undefined) options.runIdFactory = scheduler.runIdFactory
 		options.maxItemAttemptsForChain = scheduler.maxItemAttemptsForChain
@@ -1619,24 +1608,15 @@ export class CoderLoopDaemon {
 	}
 
 	private async loadedPresetForChain(chain: ChainRecord): Promise<SchedulerLoadedPreset> {
-		const key = this.loadedPresetCacheKey(chain)
+		const presetDir = this.presetDirForChain(chain)
+		const key = this.loadedPresetCacheKey(presetDir)
 		const cached = this.loadedPresetCache.get(key)
-		if (cached !== undefined) return await cached
-		const loading = this.loadPresetForChain(chain)
-		this.loadedPresetCache.set(key, loading)
+		const loading = cached ?? loadSchedulerPresetFromDir(presetDir)
+		if (cached === undefined) this.loadedPresetCache.set(key, loading)
 		try {
 			return await loading
 		} catch (error) {
 			this.loadedPresetCache.delete(key)
-			throw error
-		}
-	}
-
-	private async loadPresetForChain(chain: ChainRecord): Promise<SchedulerLoadedPreset> {
-		const presetDir = this.presetDirForChain(chain)
-		try {
-			return await loadSchedulerPresetFromDir(presetDir)
-		} catch (error) {
 			await this.recordPresetLoadFailure(chain, presetDir, error)
 			throw new DaemonError("invalid_request", `failed to load preset for chain ${chain.name}: ${errorMessage(error)}`, {
 				chainId: chain.id,
@@ -1673,7 +1653,7 @@ export class CoderLoopDaemon {
 	}
 
 	private presetDirForChain(chain: ChainRecord): string {
-		const presetPath = stringMetadata(chain.metadata, "presetPath")
+		const presetPath = chainPresetPath(chain.metadata)
 		if (presetPath !== null) return isAbsolute(presetPath) ? presetPath : resolve(presetPath)
 		if (!PRESET_NAME_PATTERN.test(chain.preset)) {
 			throw new DaemonError("invalid_request", `config.preset: invalid name "${chain.preset}" (must match ${PRESET_NAME_PATTERN.source})`, {
@@ -1685,10 +1665,8 @@ export class CoderLoopDaemon {
 		return bundledPresetDir(chain.preset)
 	}
 
-	private loadedPresetCacheKey(chain: ChainRecord): string {
-		const presetPath = stringMetadata(chain.metadata, "presetPath")
-		if (presetPath !== null) return `path:${isAbsolute(presetPath) ? presetPath : resolve(presetPath)}`
-		return `bundled:${chain.preset}`
+	private loadedPresetCacheKey(presetDir: string): string {
+		return isAbsolute(presetDir) ? presetDir : resolve(presetDir)
 	}
 }
 
@@ -2412,6 +2390,18 @@ async function loadSchedulerPresetFromDir(presetDir: string): Promise<SchedulerL
 
 function stringMetadata(metadata: JsonObject, key: string): string | null {
 	const value = metadata[key]
+	return typeof value === "string" && value.trim() !== "" ? value : null
+}
+
+function chainPresetPath(metadata: JsonObject): string | null {
+	const direct = stringMetadata(metadata, "presetPath")
+	if (direct !== null) return direct
+	const config = metadata.config
+	if (config === undefined) return null
+	if (config === null || typeof config !== "object" || Array.isArray(config)) {
+		throw new DaemonError("invalid_request", "chain.metadata.config must be a JSON object when provided", { field: "metadata.config" })
+	}
+	const value = config.presetPath
 	return typeof value === "string" && value.trim() !== "" ? value : null
 }
 

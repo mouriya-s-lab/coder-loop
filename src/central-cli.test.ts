@@ -186,6 +186,67 @@ describe("central chain/item CLI", () => {
 		}
 	})
 
+	test("status commands use config-json presetPath statuses", async () => {
+		const fixture = await startFixture("status-config-json-presetpath")
+		try {
+			const target = await makeTarget("status-config-json-presetpath-target")
+			const presetPath = resolve(fixture.loopDataRoot, "..", "custom-status-preset")
+			await mkdir(presetPath, { recursive: true })
+			await writeFile(resolve(presetPath, "run.md"), "Run issue {{ISSUE}}.\n")
+			await writeFile(resolve(presetPath, "preset.toml"), `name = "custom-status-fixture"
+version = 1
+description = "Fixture preset for status snapshot validation."
+
+[item]
+idField = "issue"
+
+[statuses]
+continuable = ["queued", "needs_work"]
+terminal = ["custom_done"]
+entry = "queued"
+success = ["custom_done"]
+
+[[phases]]
+name = "run"
+prompt = "run.md"
+
+  [phases.variables]
+  ISSUE = "item.issue"
+
+[agent]
+binary = "echo"
+extraArgs = []
+attemptTimeoutSeconds = 3600
+`)
+			const config = JSON.stringify({ repository: "fixture/repo", baseBranch: "main", presetPath })
+			expectJsonOk(await runCli(["chain", "create", "custom-status-chain", "--config-json", config, "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expectJsonOk(await runCli(["item", "add", "custom-status-chain", "--issue", "45401", "--repo-cwd", target, "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expectJsonOk(await runCli(["item", "update", "custom-status-chain", "--issue", "45401", "--status", "custom_done", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				const chain = store.getChainByName("custom-status-chain")
+				if (chain === null) throw new Error("expected custom-status-chain")
+				store.updateChain(chain.id, { status: "completed" })
+			} finally {
+				store.close()
+			}
+
+			const status = expectJsonOk(await runCli(["status", target, "--chain", "custom-status-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expect(status.state).toMatchObject({ kind: "ok", ok: true })
+			expect(status.target.preset).toMatchObject({ name: "custom-status-fixture", presetDir: presetPath })
+			expect(status.queue).toMatchObject({ total: 1, continuable: 0, terminal: 1, selected: null })
+			expect(status.queue.byStatus).toEqual({ custom_done: 1 })
+
+			const daemonStatus = expectJsonOk(await runCli(["daemon", "status", target, "--chain", "custom-status-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expect(daemonStatus.state).toMatchObject({ kind: "ok", ok: true })
+			expect(daemonStatus.target.preset).toMatchObject({ name: "custom-status-fixture", presetDir: presetPath })
+			expect(daemonStatus.queue).toMatchObject({ total: 1, continuable: 0, terminal: 1, selected: null })
+			expect(daemonStatus.queue.byStatus).toEqual({ custom_done: 1 })
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 
 	test("item reorder CLI", async () => {
 		const fixture = await startFixture("item-reorder-cli")

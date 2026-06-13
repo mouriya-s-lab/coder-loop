@@ -49,7 +49,6 @@ const ObservabilityEventTypeBoundary = arkType.or(
 	arkType.unit("spawn.aborted"),
 	arkType.unit("session_id.invalidated"),
 	arkType.unit("chain.invalid"),
-	arkType.unit("preset.fallback"),
 	arkType.unit("daemon.warning"),
 	arkType.unit("scheduler.tick_failed"),
 	arkType.unit("chain.complete_trigger_failed"),
@@ -273,12 +272,6 @@ const ObservabilityEventBoundary = arkType.or(
 		kind: arkType.unit("validation"),
 		type: arkType.unit("chain.invalid"),
 		payload: { chainId: "number", chainName: "string", context: "string", error: "string" },
-	},
-	{
-		...EventBaseBoundary,
-		kind: arkType.unit("validation"),
-		type: arkType.unit("preset.fallback"),
-		payload: { chainId: "number", preset: "string", fallbackPreset: "string", reason: arkType.or(arkType.unit("invalid_name"), arkType.unit("unknown_preset")) },
 	},
 	{
 		...EventBaseBoundary,
@@ -532,8 +525,6 @@ function renderValidationEvent(event: Extract<ObservabilityEvent, { kind: "valid
 			return `${event.ts} validation session_id.invalidated chain=${event.chain ?? "-"} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} runner=${event.payload.runner}`
 		case "chain.invalid":
 			return `${event.ts} validation chain.invalid chain=${event.payload.chainId} context=${event.payload.context} error=${event.payload.error}`
-		case "preset.fallback":
-			return `${event.ts} validation preset.fallback chain=${event.payload.chainId} preset=${event.payload.preset} reason=${event.payload.reason}`
 		default:
 			return assertNever(event)
 	}

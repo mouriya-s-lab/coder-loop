@@ -981,7 +981,7 @@ describe("daemon", () => {
 		}
 	})
 
-	test("daemon validates item statuses from custom presetPath", async () => {
+	test("daemon validates item statuses from config-json presetPath metadata", async () => {
 		const fixture = await startFixture("custom-preset-status-validation", { schedulerEnabled: false })
 		try {
 			const presetPath = resolve(fixture.loopDataRoot, "..", "custom-status-preset")
@@ -1016,7 +1016,7 @@ attemptTimeoutSeconds = 3600
 			const chain = record(expectOk(await request(fixture, "chain.create", {
 				name: "custom-preset-chain",
 				repository: "mouriya-s-lab/coder-loop",
-				metadata: { presetPath },
+				metadata: { config: { presetPath } },
 			})).chain)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId: numberValue(chain.id),
@@ -1046,41 +1046,64 @@ attemptTimeoutSeconds = 3600
 		}
 	})
 
-	test("daemon reports custom presetPath load failures to mutation requests", async () => {
+	test("daemon reports custom presetPath load failures to each chain mutation request", async () => {
 		const fixture = await startFixture("custom-preset-load-failure", { schedulerEnabled: false })
 		try {
 			const presetPath = resolve(fixture.loopDataRoot, "..", "bad-status-preset")
 			await mkdir(presetPath, { recursive: true })
 			await writeFile(resolve(presetPath, "preset.toml"), "name = [broken\n")
 
-			const chain = record(expectOk(await request(fixture, "chain.create", {
-				name: "bad-custom-preset-chain",
+			const firstChain = record(expectOk(await request(fixture, "chain.create", {
+				name: "bad-custom-preset-chain-a",
 				repository: "mouriya-s-lab/coder-loop",
-				metadata: { presetPath },
+				metadata: { config: { presetPath } },
+			})).chain)
+			const secondChain = record(expectOk(await request(fixture, "chain.create", {
+				name: "bad-custom-preset-chain-b",
+				repository: "mouriya-s-lab/coder-loop",
+				metadata: { config: { presetPath } },
 			})).chain)
 
-			const response = await request(fixture, "item.add", {
-				chainId: numberValue(chain.id),
-				issueNumber: 45402,
-				repoCwd: REPO_ROOT,
-			})
-			expect(response.ok).toBe(false)
-			if (!response.ok) {
-				expect(response.error.code).toBe("invalid_request")
-				expect(response.error.message).toContain("failed to load preset")
-				expect(response.error.details).toMatchObject({ presetDir: presetPath })
+			const [firstResponse, secondResponse] = await Promise.all([
+				request(fixture, "item.add", {
+					chainId: numberValue(firstChain.id),
+					issueNumber: 45402,
+					repoCwd: REPO_ROOT,
+				}),
+				request(fixture, "item.add", {
+					chainId: numberValue(secondChain.id),
+					issueNumber: 45403,
+					repoCwd: REPO_ROOT,
+				}),
+			])
+			for (const [response, chain] of [[firstResponse, firstChain], [secondResponse, secondChain]] as const) {
+				expect(response.ok).toBe(false)
+				if (!response.ok) {
+					expect(response.error.code).toBe("invalid_request")
+					expect(response.error.message).toContain(`failed to load preset for chain ${chain.name}`)
+					expect(response.error.details).toMatchObject({ chainId: numberValue(chain.id), presetDir: presetPath })
+				}
 			}
 			const events = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, { type: "daemon.preset_load_failed" })
-			const event = events.events[0]
-			expect(event?.type).toBe("daemon.preset_load_failed")
-			if (event?.type !== "daemon.preset_load_failed") throw new Error("expected daemon.preset_load_failed event")
-			expect(event.chain).toBe("bad-custom-preset-chain")
-			expect(event.payload).toMatchObject({
-				chainId: numberValue(chain.id),
+			const firstEvent = events.events.find((event) => event.chain === firstChain.name)
+			const secondEvent = events.events.find((event) => event.chain === secondChain.name)
+			expect(firstEvent?.type).toBe("daemon.preset_load_failed")
+			expect(secondEvent?.type).toBe("daemon.preset_load_failed")
+			if (firstEvent?.type !== "daemon.preset_load_failed" || secondEvent?.type !== "daemon.preset_load_failed") {
+				throw new Error("expected daemon.preset_load_failed events for both chains")
+			}
+			expect(firstEvent.payload).toMatchObject({
+				chainId: numberValue(firstChain.id),
 				preset: "gh-issue-pr-iteration",
 				presetDir: presetPath,
 			})
-			expect(event.payload.error.length).toBeGreaterThan(0)
+			expect(secondEvent.payload).toMatchObject({
+				chainId: numberValue(secondChain.id),
+				preset: "gh-issue-pr-iteration",
+				presetDir: presetPath,
+			})
+			expect(firstEvent.payload.error.length).toBeGreaterThan(0)
+			expect(secondEvent.payload.error.length).toBeGreaterThan(0)
 		} finally {
 			await fixture.daemon.stop()
 		}

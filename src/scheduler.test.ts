@@ -1203,14 +1203,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				updatedAt: 1_800_000_710,
 			})
 
-			const tick = await schedulerTick(fixture.options({
-				statusesForChain: () => ({
-					pending: ["queued", "in_progress", "changes_requested"],
-					terminal: ["blocked", "moot", "done", "exhausted"],
-					success: ["done"],
-					entry: "queued",
-				}),
-			}))
+			const tick = await schedulerTick(fixture.options())
 			expect(tick.spawnedRuns).toHaveLength(0)
 			expect(fixture.store.getItem(item.id)).toMatchObject({
 				status: "in_progress",
@@ -2392,7 +2385,7 @@ describe("scheduler chain bindings (issue #288)", () => {
 		const item = makeItemFixture(chain, { issueNumber: 999_001, repoCwd: "/tmp/no-token-repo" })
 		const rendered = await renderSchedulerSpawnPrompt({
 			rawPrompt: template,
-			presetDir: PRESET_DIR,
+			preset,
 			phase: "iteration",
 			chain,
 			item,
@@ -2405,6 +2398,7 @@ describe("scheduler chain bindings (issue #288)", () => {
 	})
 
 	test("renderSchedulerSpawnPrompt with chain.name=my-chain umbrellaRepo=owner/repo umbrellaIssue=42 substitutes those literals (AC3)", async () => {
+		const preset = await loadPreset(PRESET_DIR)
 		const chain = makeChainFixture({
 			name: "my-chain",
 			umbrellaRepo: "owner/repo",
@@ -2421,7 +2415,7 @@ describe("scheduler chain bindings (issue #288)", () => {
 				"chain.baseBranch={{CHAIN_BASE_BRANCH}}",
 				"item.repoCwd={{REPO_CWD}}",
 			].join("\n"),
-			presetDir: PRESET_DIR,
+			preset,
 			phase: "iteration",
 			chain,
 			item,
@@ -2437,6 +2431,7 @@ describe("scheduler chain bindings (issue #288)", () => {
 	})
 
 	test("renderSchedulerSpawnPrompt leaves chain.umbrellaRepo and chain.umbrellaIssue empty when chain has null umbrella (no crash, empty literals)", async () => {
+		const preset = await loadPreset(PRESET_DIR)
 		const chain = makeChainFixture({
 			name: "no-umbrella-chain",
 			umbrellaRepo: null,
@@ -2445,7 +2440,7 @@ describe("scheduler chain bindings (issue #288)", () => {
 		const item = makeItemFixture(chain, { issueNumber: 999_003, repoCwd: "/tmp/no-umbrella-repo" })
 		const rendered = await renderSchedulerSpawnPrompt({
 			rawPrompt: "umb_repo=[{{CHAIN_UMBRELLA_REPO}}] umb_issue=[{{CHAIN_UMBRELLA_ISSUE}}]",
-			presetDir: PRESET_DIR,
+			preset,
 			phase: "iteration",
 			chain,
 			item,
@@ -2457,12 +2452,13 @@ describe("scheduler chain bindings (issue #288)", () => {
 	})
 
 	test("renderSchedulerSpawnPrompt resolves WORKFLOW_FILE for existing chains without seeded config", async () => {
+		const preset = await loadPreset(PRESET_DIR)
 		const targetCwd = resolve(TEST_ROOT, "target-unseeded-workflow")
 		const chain = makeChainFixture({ name: "unseeded-workflow-chain", metadata: {} })
 		const item = makeItemFixture(chain, { issueNumber: 999_004, repoCwd: targetCwd })
 		const rendered = await renderSchedulerSpawnPrompt({
 			rawPrompt: "workflow={{WORKFLOW_FILE}}",
-			presetDir: PRESET_DIR,
+			preset,
 			phase: "iteration",
 			chain,
 			item,
@@ -2474,6 +2470,7 @@ describe("scheduler chain bindings (issue #288)", () => {
 	})
 
 	test("renderSchedulerSpawnPrompt resolves WORKFLOW_FILE from chain metadata config when present", async () => {
+		const preset = await loadPreset(PRESET_DIR)
 		const targetCwd = resolve(TEST_ROOT, "target-seeded-workflow")
 		const chain = makeChainFixture({
 			name: "seeded-workflow-chain",
@@ -2482,7 +2479,7 @@ describe("scheduler chain bindings (issue #288)", () => {
 		const item = makeItemFixture(chain, { issueNumber: 999_005, repoCwd: targetCwd })
 		const rendered = await renderSchedulerSpawnPrompt({
 			rawPrompt: "workflow={{WORKFLOW_FILE}}",
-			presetDir: PRESET_DIR,
+			preset,
 			phase: "iteration",
 			chain,
 			item,
@@ -2997,6 +2994,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 	const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
 
 	test("first spawn (no session id for phase/runner): buildRunnerInvocation argv has no --resume; rendered prompt's RESUMED_SESSION_ID is empty (AC6)", async () => {
+		const preset = await loadPreset(PRESET_DIR)
 		const chain = makeChainFixture({ name: "first-spawn-chain" })
 		const item = makeItemFixture(chain, { issueNumber: 291_001, repoCwd: "/repo/first-spawn-repo" })
 
@@ -3016,7 +3014,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 
 		const rendered = await renderSchedulerSpawnPrompt({
 			rawPrompt: "RESUMED_SESSION_ID=[{{RESUMED_SESSION_ID}}] RESUMED_FROM_PHASE=[{{RESUMED_FROM_PHASE}}] RUN_ID_GENERATION=[{{RUN_ID_GENERATION}}]",
-			presetDir: PRESET_DIR,
+			preset,
 			phase: "iteration",
 			chain,
 			item,
@@ -3028,6 +3026,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 	})
 
 	test("resume spawn (phase/runner session id set): buildRunnerInvocation argv contains --resume <id>; rendered prompt embeds the session id literal (AC4 / AC5)", async () => {
+		const preset = await loadPreset(PRESET_DIR)
 		const chain = makeChainFixture({ name: "resume-chain" })
 		const item = makeItemFixture(chain, {
 			issueNumber: 291_002,
@@ -3054,7 +3053,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 
 		const rendered = await renderSchedulerSpawnPrompt({
 			rawPrompt: "RESUMED_SESSION_ID=[{{RESUMED_SESSION_ID}}] RESUMED_FROM_PHASE=[{{RESUMED_FROM_PHASE}}] RUN_ID_GENERATION=[{{RUN_ID_GENERATION}}]",
-			presetDir: PRESET_DIR,
+			preset,
 			phase: "iteration",
 			chain,
 			item,
