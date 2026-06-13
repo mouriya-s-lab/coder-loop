@@ -137,6 +137,7 @@ export type SchedulerSpawnContext = {
 	runId: string
 	worktreePath: string
 	presetDir: string
+	loadedPreset: SchedulerLoadedPreset
 	phase: string
 }
 
@@ -259,7 +260,6 @@ export type SchedulerTickResult = {
 	completedChainIds: number[]
 }
 
-const DEFAULT_SUCCESS_STATUSES = ["done"] as const
 const DEFAULT_ENTRY_STATUS = "queued"
 const RUNNING_RUN_STATUS = "running"
 const CHAIN_COMPLETE_TRIGGER_STATE_METADATA_KEY = "coderLoopChainCompleteTrigger"
@@ -841,7 +841,7 @@ async function spawnSchedulerRun(
 
 	const loadedPreset = await schedulerLoadedPreset(options, chain)
 	const presetDir = loadedPreset.presetDir
-	const context: SchedulerSpawnContext = { chain, item, slot, runId, worktreePath, presetDir, phase }
+	const context: SchedulerSpawnContext = { chain, item, slot, runId, worktreePath, presetDir, loadedPreset, phase }
 	const rawPrompt = typeof options.prompt === "string" ? options.prompt : await options.prompt(context)
 	const resumeDecision = resumeDecisionForItem(item, phase, runner.kind)
 	const renderedPrompt = await renderSchedulerSpawnPrompt({
@@ -1593,7 +1593,7 @@ async function schedulerStatusesForChain(options: SchedulerOptions, chain: Chain
 	return {
 		pending: preset.statuses.continuable,
 		terminal: withSchedulerTerminalStatuses(preset.statuses.terminal),
-		success: preset.statuses.success.length === 0 ? DEFAULT_SUCCESS_STATUSES : preset.statuses.success,
+		success: preset.statuses.success,
 		entry: preset.statuses.entry ?? DEFAULT_ENTRY_STATUS,
 	}
 }
@@ -1865,7 +1865,7 @@ async function spawnSchedulerReviewOnEmptyRun(
 	const startedAt = nowSeconds(options)
 	const loadedPreset = await schedulerLoadedPreset(options, chain)
 	const presetDir = loadedPreset.presetDir
-	const context: SchedulerSpawnContext = { chain, item: fallbackItem, slot, runId, worktreePath, presetDir, phase: reviewPhase }
+	const context: SchedulerSpawnContext = { chain, item: fallbackItem, slot, runId, worktreePath, presetDir, loadedPreset, phase: reviewPhase }
 	const rawPrompt = typeof options.prompt === "string" ? options.prompt : await options.prompt(context)
 	const renderedPrompt = await renderSchedulerSpawnPrompt({
 		rawPrompt,

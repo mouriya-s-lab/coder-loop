@@ -36,6 +36,7 @@ const ObservabilityEventTypeBoundary = arkType.or(
 	arkType.unit("daemon.stop.terminated_runs"),
 	arkType.unit("daemon.socket.rebind"),
 	arkType.unit("daemon.fatal"),
+	arkType.unit("daemon.preset_load_failed"),
 	arkType.unit("scheduler.recovery"),
 	arkType.unit("agent.spawn"),
 	arkType.unit("agent.exit"),
@@ -185,6 +186,12 @@ const ObservabilityEventBoundary = arkType.or(
 		kind: arkType.unit("lifecycle"),
 		type: arkType.unit("daemon.fatal"),
 		payload: { fatalKind: "string", pid: "number", error: "string" },
+	},
+	{
+		...EventBaseBoundary,
+		kind: arkType.unit("lifecycle"),
+		type: arkType.unit("daemon.preset_load_failed"),
+		payload: { chainId: "number", preset: "string", presetDir: "string", error: "string" },
 	},
 	{
 		...EventBaseBoundary,
@@ -492,6 +499,8 @@ function renderLifecycleEvent(event: Extract<ObservabilityEvent, { kind: "lifecy
 			return `${event.ts} lifecycle daemon.socket.rebind pid=${event.payload.pid} socket=${event.payload.socketPath}`
 		case "daemon.fatal":
 			return `${event.ts} lifecycle daemon.fatal pid=${event.payload.pid} kind=${event.payload.fatalKind}`
+		case "daemon.preset_load_failed":
+			return `${event.ts} lifecycle daemon.preset_load_failed chain=${event.chain ?? event.payload.chainId} preset=${event.payload.preset} presetDir=${event.payload.presetDir} error=${event.payload.error}`
 		case "scheduler.recovery":
 			return `${event.ts} lifecycle scheduler.recovery chain=${event.chain ?? "-"} reason=${event.payload.reason}`
 		case "agent.spawn":

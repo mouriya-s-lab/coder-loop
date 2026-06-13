@@ -25,7 +25,7 @@ import {
 	type SchedulerPhaseRunner,
 	type SchedulerWorktreeManager,
 } from "./scheduler"
-import { resolveSchedulerPresetPhasePrompt, schedulerEventToObservabilityEvent } from "./daemon"
+import { schedulerEventToObservabilityEvent } from "./daemon"
 import {
 	buildRunnerInvocation,
 	loadPreset,
@@ -746,6 +746,34 @@ describe("scheduler", () => {
 			expect(tick.spawnedRuns).toHaveLength(0)
 			expect(tick.completedChainIds).toEqual([])
 			expect(fixture.store.getChain(chain.id)?.status).toBe("active")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("empty preset success statuses do not fall back to done for dependency unblock", async () => {
+		const fixture = await createFixture("empty-success-statuses")
+		const presetDir = resolve(fixture.loopDataRoot, "..", "empty-success-preset")
+		await writeEmptySuccessPreset(presetDir)
+		try {
+			const chain = createChain(fixture.store, "empty-success-statuses-chain", { preset: "empty-success" })
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
+			const target = createItem(fixture.store, chain, { issueNumber: 710_001, repoCwd: "/repo/a" })
+			const dependent = createItem(fixture.store, chain, { issueNumber: 710_002, repoCwd: "/repo/a" })
+			fixture.store.updateItem(target.id, { status: "done", updatedAt: 1_800_710_001 })
+			fixture.store.updateItem(dependent.id, {
+				status: "blocked",
+				extra: { ...dependent.extra, dependsOn: [target.id] },
+				updatedAt: 1_800_710_002,
+			})
+
+			const tick = await schedulerTick(fixture.options({ presetDir }))
+
+			expect(tick.spawnedRuns).toHaveLength(0)
+			const unchanged = fixture.store.getItem(dependent.id)
+			expect(unchanged?.status).toBe("blocked")
+			expect(unchanged?.extra.dependsOn).toEqual([target.id])
+			expect(fixture.schedulerEvents.find((event) => event.type === "item.dependency_unblocked")).toBeUndefined()
 		} finally {
 			fixture.store.close()
 		}
@@ -2287,36 +2315,10 @@ describe("scheduler per-chain review-on-empty (issue #292)", () => {
 	})
 })
 
-describe("resolveSchedulerPresetPhasePrompt", () => {
+describe("scheduler loaded preset prompt rendering", () => {
 	const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
 
-	test("returns iteration entry markdown including '## Workflow'", async () => {
-		const prompt = await resolveSchedulerPresetPhasePrompt({ presetDir: PRESET_DIR, phase: "iteration" })
-		expect(prompt).toContain("## Workflow")
-	})
-
-	test("returns review entry markdown including '## Workflow'", async () => {
-		const prompt = await resolveSchedulerPresetPhasePrompt({ presetDir: PRESET_DIR, phase: "review" })
-		expect(prompt).toContain("## Workflow")
-	})
-
-	test("resolver output is byte-equal to readFile on the same phase.prompt path that the main loop reads", async () => {
-		const preset = await loadPreset(PRESET_DIR)
-		for (const phaseName of ["iteration", "review"] as const) {
-			const phase = preset.phases.find((entry) => entry.name === phaseName)
-			expect(phase).not.toBeUndefined()
-			const mainLoopRaw = await readFile(phase!.prompt, "utf-8")
-			const daemonRaw = await resolveSchedulerPresetPhasePrompt({ presetDir: PRESET_DIR, phase: phaseName })
-			expect(daemonRaw).toBe(mainLoopRaw)
-			expect(Buffer.byteLength(daemonRaw, "utf-8")).toBe(Buffer.byteLength(mainLoopRaw, "utf-8"))
-		}
-	})
-
-	test("rejects unknown phase with an explicit error sentinel string", async () => {
-		await expect(resolveSchedulerPresetPhasePrompt({ presetDir: PRESET_DIR, phase: "no-such-phase" })).rejects.toThrow(/phase_not_found_in_preset/)
-	})
-
-	test("scheduler spawn renders resolver output before subprocess (entry md prose preserved, {{KEY}} placeholders replaced)", async () => {
+	test("scheduler spawn renders loaded preset prompt before subprocess (entry md prose preserved, {{KEY}} placeholders replaced)", async () => {
 		const fixture = await createPresetPromptIntegrationFixture("integration-resolver")
 		try {
 			const chain = createChain(fixture.store, "integration-resolver-chain")
@@ -3773,6 +3775,34 @@ binary = "codex"
 	)
 }
 
+async function writeEmptySuccessPreset(presetDir: string): Promise<void> {
+	await mkdir(presetDir, { recursive: true })
+	await writeFile(resolve(presetDir, "run.md"), "# run\n")
+	await writeFile(
+		resolve(presetDir, "preset.toml"),
+		`name = "empty-success"
+version = 1
+description = "Fixture preset with no success terminal statuses."
+
+[item]
+idField = "issue"
+
+[statuses]
+continuable = ["queued"]
+terminal = ["blocked", "done", "exhausted"]
+success = []
+entry = "queued"
+
+[agent]
+binary = "codex"
+
+[[phases]]
+name = "run"
+prompt = "run.md"
+`,
+	)
+}
+
 const FAKE_RUNNER_DEFAULT_SUMMARY = "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=fake-runner default"
 const FAKE_RUNNER_REVIEW_MARKER = "REVIEW SUMMARY:"
 
@@ -3898,7 +3928,11 @@ async function createPresetPromptIntegrationFixture(name: string): Promise<Fixtu
 		worktreeManager,
 		loopDataRootOptions: { loopDataRoot },
 		runIdFactory: ({ chain, item }) => `run-${chain.id}-${item.id}`,
-		prompt: (ctx) => resolveSchedulerPresetPhasePrompt({ presetDir, phase: ctx.phase }),
+			prompt: async (ctx) => {
+				const phase = ctx.loadedPreset.preset.phases.find((entry) => entry.name === ctx.phase)
+				if (phase === undefined) throw new Error(`fixture preset ${ctx.loadedPreset.preset.name} does not define phase ${ctx.phase}`)
+				return await readFile(phase.prompt, "utf-8")
+			},
 		onEvent: (event) => {
 			schedulerEvents.push(event)
 		},

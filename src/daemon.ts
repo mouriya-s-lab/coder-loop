@@ -1463,11 +1463,11 @@ export class CoderLoopDaemon {
 		const externalOnEvent = scheduler.onEvent
 		const schedulerPresetDir = scheduler.presetDir
 		const presetForChain = scheduler.presetForChain ?? ((chain: ChainRecord) =>
-			schedulerPresetDir === undefined ? this.loadedPresetForChain(chain) : loadSchedulerPresetFromDir(schedulerPresetDir))
+			schedulerPresetDir === undefined ? this.loadedPresetForChain(chain) : this.loadSchedulerPresetOverrideForChain(chain, schedulerPresetDir))
 		const presetDirForChain = scheduler.presetDirForChain ?? ((chain: ChainRecord) =>
 			schedulerPresetDir ?? this.presetDirForChain(chain))
 		const presetPromptResolver = (ctx: SchedulerSpawnContext): Promise<string> =>
-			this.resolveSchedulerPresetPhasePrompt(ctx.chain, ctx.phase)
+			this.resolveLoadedPresetPhasePrompt(ctx)
 		const fallbackRunner = scheduler.runner ?? defaultDaemonRunner()
 		const phaseRunnerSelectionForChain: SchedulerOptions["phaseRunnerSelectionForChain"] = scheduler.phaseRunnerSelectionForChain
 			?? (scheduler.phaseRunner !== undefined || scheduler.runner !== undefined
@@ -1609,11 +1609,11 @@ export class CoderLoopDaemon {
 		return entry
 	}
 
-	private async resolveSchedulerPresetPhasePrompt(chain: ChainRecord, phase: string): Promise<string> {
-		const { preset, presetDir } = await this.loadedPresetForChain(chain)
-		const presetPhase = preset.phases.find((entry) => entry.name === phase)
+	private async resolveLoadedPresetPhasePrompt(ctx: SchedulerSpawnContext): Promise<string> {
+		const { preset, presetDir } = ctx.loadedPreset
+		const presetPhase = preset.phases.find((entry) => entry.name === ctx.phase)
 		if (presetPhase === undefined) {
-			throw new Error(defaultDaemonPrompt({ reason: "phase_not_found_in_preset", preset: preset.name, phase, presetDir }))
+			throw new Error(defaultDaemonPrompt({ reason: "phase_not_found_in_preset", preset: preset.name, phase: ctx.phase, presetDir }))
 		}
 		return await readFile(presetPhase.prompt, "utf-8")
 	}
@@ -1637,6 +1637,7 @@ export class CoderLoopDaemon {
 		try {
 			return await loadSchedulerPresetFromDir(presetDir)
 		} catch (error) {
+			await this.recordPresetLoadFailure(chain, presetDir, error)
 			throw new DaemonError("invalid_request", `failed to load preset for chain ${chain.name}: ${errorMessage(error)}`, {
 				chainId: chain.id,
 				chainName: chain.name,
@@ -1645,6 +1646,30 @@ export class CoderLoopDaemon {
 				error: errorMessage(error),
 			})
 		}
+	}
+
+	private async loadSchedulerPresetOverrideForChain(chain: ChainRecord, presetDir: string): Promise<SchedulerLoadedPreset> {
+		try {
+			return await loadSchedulerPresetFromDir(presetDir)
+		} catch (error) {
+			await this.recordPresetLoadFailure(chain, presetDir, error)
+			throw error
+		}
+	}
+
+	private async recordPresetLoadFailure(chain: ChainRecord, presetDir: string, error: unknown): Promise<void> {
+		await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
+			kind: "lifecycle",
+			type: "daemon.preset_load_failed",
+			chain: chain.name,
+			subject: { kind: "engine" },
+			payload: {
+				chainId: chain.id,
+				preset: chain.preset,
+				presetDir,
+				error: errorMessage(error),
+			},
+		}))
 	}
 
 	private presetDirForChain(chain: ChainRecord): string {
@@ -1726,15 +1751,6 @@ function defaultDaemonPrompt(details: { reason: string; preset?: string; phase?:
 		details.presetDir !== undefined ? `presetDir=${details.presetDir}` : null,
 	].filter((entry): entry is string => entry !== null)
 	return `coder-loop daemon scheduler prompt resolver failed (${fields.join(", ")}); investigate scheduler configuration or preset.`
-}
-
-export async function resolveSchedulerPresetPhasePrompt(input: { presetDir: string; phase: string }): Promise<string> {
-	const preset = await loadPreset(input.presetDir)
-	const phase = preset.phases.find((entry) => entry.name === input.phase)
-	if (phase === undefined) {
-		throw new Error(defaultDaemonPrompt({ reason: "phase_not_found_in_preset", preset: preset.name, phase: input.phase, presetDir: input.presetDir }))
-	}
-	return await readFile(phase.prompt, "utf-8")
 }
 
 function validateChainNameForRequest(input: string): string {

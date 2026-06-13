@@ -1070,8 +1070,93 @@ attemptTimeoutSeconds = 3600
 				expect(response.error.message).toContain("failed to load preset")
 				expect(response.error.details).toMatchObject({ presetDir: presetPath })
 			}
+			const events = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, { type: "daemon.preset_load_failed" })
+			const event = events.events[0]
+			expect(event?.type).toBe("daemon.preset_load_failed")
+			if (event?.type !== "daemon.preset_load_failed") throw new Error("expected daemon.preset_load_failed event")
+			expect(event.chain).toBe("bad-custom-preset-chain")
+			expect(event.payload).toMatchObject({
+				chainId: numberValue(chain.id),
+				preset: "gh-issue-pr-iteration",
+				presetDir: presetPath,
+			})
+			expect(event.payload.error.length).toBeGreaterThan(0)
 		} finally {
 			await fixture.daemon.stop()
+		}
+	})
+
+	test("daemon default scheduler prompt resolver consumes scheduler presetDir loaded preset", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-scheduler-preset-dir-prompt`)
+		const loopDataRoot = resolve(root, "ld")
+		const presetDir = resolve(root, "override-preset")
+		const runner = resolve(root, "capture-prompt-runner.ts")
+		const promptCapture = resolve(root, "captured-prompt.txt")
+		const repoCwd = resolve(root, "repo")
+		await mkdir(root, { recursive: true })
+		await initGitTarget(repoCwd)
+		await writePromptCaptureRunner(runner, promptCapture)
+		await writeSinglePhasePromptPreset(presetDir, "CUSTOM_SCHEDULER_PRESET_PROMPT")
+
+		const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd: itemRepoCwd }) => {
+			const worktreePath = schedulerSlotWorktreePath(chain, itemRepoCwd, { loopDataRoot })
+			await mkdir(worktreePath, { recursive: true })
+			return worktreePath
+		}
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			shutdownGraceMs: 100,
+			scheduler: {
+				enabled: true,
+				intervalMs: 20,
+				presetDir,
+				runner: {
+					kind: "claude",
+					source: "iteration-default",
+					binary: "bun",
+					extraArgs: [runner],
+					model: null,
+				},
+				worktreeManager,
+				kindResolver: () => ({ ok: true, kind: "code" }),
+				chainCompleteTriggerForChain: () => null,
+			},
+		})
+		try {
+			const socketPath = daemon.snapshot().socketPath
+			const fixture = {
+				daemon,
+				loopDataRoot,
+				socketPath,
+				pidFile: daemon.snapshot().pidFile,
+				eventLog: resolve(root, "events.jsonl"),
+				schedulerEvents: [],
+			}
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "scheduler-preset-dir-prompt-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			await request(fixture, "item.add", {
+				chainId: numberValue(chain.id),
+				issueNumber: 45403,
+				repoCwd,
+			})
+
+			const prompt = await waitFor(
+				async () => {
+					try {
+						return await readFile(promptCapture, "utf-8")
+					} catch {
+						return ""
+					}
+				},
+				(value) => value.includes("CUSTOM_SCHEDULER_PRESET_PROMPT"),
+				5_000,
+			)
+			expect(prompt).toContain("CUSTOM_SCHEDULER_PRESET_PROMPT")
+			expect(prompt).not.toContain("Step task: implement")
+		} finally {
+			await daemon.stop()
 		}
 	})
 
@@ -3827,5 +3912,46 @@ if (extraSleepAfterSummary > 0) await new Promise((resolve) => setTimeout(resolv
 ${FAKE_RUNNER_STATUS_WRITE_SNIPPET}
 process.exitCode = input.exitCode
 `,
-		)
-	}
+	)
+}
+
+async function writePromptCaptureRunner(path: string, capturePath: string): Promise<void> {
+	await writeFile(
+		path,
+		`import { writeFile } from "node:fs/promises"
+
+const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "" : Bun.argv[promptIndex + 1] ?? ""
+await writeFile(${JSON.stringify(capturePath)}, prompt)
+process.exitCode = 0
+`,
+	)
+}
+
+async function writeSinglePhasePromptPreset(presetDir: string, prompt: string): Promise<void> {
+	await mkdir(presetDir, { recursive: true })
+	await writeFile(resolve(presetDir, "run.md"), `${prompt}\n`)
+	await writeFile(
+		resolve(presetDir, "preset.toml"),
+		`name = "scheduler-prompt-override"
+version = 1
+description = "Fixture preset for daemon scheduler prompt override."
+
+[item]
+idField = "issue"
+
+[statuses]
+continuable = ["queued"]
+terminal = ["done", "exhausted"]
+success = ["done"]
+entry = "queued"
+
+[agent]
+binary = "codex"
+
+[[phases]]
+name = "run"
+prompt = "run.md"
+`,
+	)
+}
