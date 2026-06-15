@@ -1292,12 +1292,6 @@ function normalizeSessionPhase(phase: string, code: SqliteStateErrorCode): strin
 	return phase
 }
 
-function normalizeRunStatus(status: string, code: SqliteStateErrorCode): string {
-	const trimmed = status.trim()
-	if (trimmed === "") throw new SqliteStateError(code, "run status must not be empty")
-	return trimmed
-}
-
 function isAgentRunnerKind(value: unknown): value is AgentRunnerKind {
 	return value === "claude" || value === "codex"
 }

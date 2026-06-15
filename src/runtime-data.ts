@@ -215,7 +215,6 @@ const OptionalStringArrayBoundary = arkType("string[]|undefined")
 const OptionalPositiveIntegerArrayBoundary = arkType("(number.integer > 0)[]|undefined")
 const ChainCompleteTriggerDecisionBoundary = arkType("'keep-active'|undefined")
 const JsonObjectBoundary: ArkAssertable<JsonObject> = arkType("unknown", ":", isJsonObject)
-const OptionalJsonObjectBoundary: ArkAssertable<JsonObject | undefined> = arkType("unknown", ":", isJsonObjectOrUndefined)
 
 const RUNNER_METADATA_KEYS = new Set(["binary", "model", "extraArgs"])
 const CHAIN_COMPLETE_TRIGGER_KEYS = new Set(["decision", "fingerprint", "recordedAt", "reason", "runId"])
@@ -377,17 +376,6 @@ export function itemExtraWithoutKeys(extra: ItemExtra, keys: readonly string[]):
 
 export function itemDependsOnIds(extra: ItemExtra): number[] {
 	return extra.dependsOn === undefined ? [] : [...extra.dependsOn]
-}
-
-export function withDependsOnExtra(extra: ItemExtra, dependsOn: readonly number[] | null | undefined): ItemExtra {
-	if (dependsOn === undefined) return extra
-	const next = itemExtraToJsonObject(extra)
-	if (dependsOn === null) {
-		delete next.dependsOn
-	} else {
-		next.dependsOn = [...dependsOn]
-	}
-	return storedItemExtra(next)
 }
 
 export function itemSchedulerBackoff(extra: ItemExtra): SchedulerBackoffState | null {
@@ -567,11 +555,6 @@ function optionalSchedulerSpawnErrorField(record: JsonObject, key: string, field
 	}
 }
 
-function optionalJsonObjectField(record: JsonObject, key: string, field: string): JsonObject | undefined {
-	const object = arkField(OptionalJsonObjectBoundary, record[key], field, `${field} must be a JSON object when provided`)
-	return object === undefined ? undefined : { ...object }
-}
-
 function requestJsonObject(value: BoundaryValue, field: string): JsonObject {
 	try {
 		return { ...JsonObjectBoundary.assert(value) }
@@ -671,10 +654,6 @@ function runtimeDataError(field: string, value: JsonValue | undefined, message: 
 
 function isJsonObject(value: BoundaryValue): value is JsonObject {
 	return value !== undefined && value !== null && typeof value === "object" && !Array.isArray(value) && Object.values(value).every(isJsonValue)
-}
-
-function isJsonObjectOrUndefined(value: BoundaryValue): value is JsonObject | undefined {
-	return value === undefined || isJsonObject(value)
 }
 
 function isJsonValue(value: BoundaryValue): value is JsonValue {
