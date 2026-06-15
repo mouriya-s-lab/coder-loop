@@ -13,8 +13,9 @@ import {
 	type SchedulerPhaseRunner,
 	type SchedulerWorktreeManager,
 } from "./scheduler"
-import { loadPreset } from "./loop"
+import { loadPreset, type JsonObject } from "./loop"
 import { type ChainRecord, openSqliteStateStore } from "./sqlite-state"
+import { parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
@@ -23,6 +24,10 @@ const FAKE_RUNNER = resolve(REPO_ROOT, "tests/fixtures/cross-runner-fake.ts")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-cross-runner-integration-tests", String(process.pid))
 
 let nextFixtureId = 0
+
+function runtimeStatus(value: string) {
+	return parseInternalStatus(value, "test.status")
+}
 
 afterAll(async () => {
 	await rm(TEST_ROOT, { recursive: true, force: true })
@@ -379,8 +384,9 @@ async function writeRunnerWrapper(path: string, planPath: string, eventLog: stri
 function createChain(
 	store: ReturnType<typeof openSqliteStateStore>,
 	name: string,
-	overrides: Partial<Parameters<typeof store.createChain>[0]> = {},
+	overrides: Omit<Partial<Parameters<typeof store.createChain>[0]>, "metadata"> & { metadata?: JsonObject } = {},
 ): ChainRecord {
+	const { metadata, ...rest } = overrides
 	return store.createChain({
 		name,
 		preset: "gh-issue-pr-iteration",
@@ -389,10 +395,10 @@ function createChain(
 		umbrellaIssue: 309,
 		umbrellaRepo: "mouriya-s-lab/coder-loop",
 		status: "active",
-		metadata: {},
+		metadata: storedChainMetadata(metadata ?? {}),
 		createdAt: 1_800_316_000,
 		updatedAt: 1_800_316_000,
-		...overrides,
+		...rest,
 	})
 }
 
@@ -401,10 +407,10 @@ function createItem(store: ReturnType<typeof openSqliteStateStore>, chain: Chain
 		chainId: chain.id,
 		issueNumber,
 		repoCwd: REPO_ROOT,
-		status: "queued",
+		status: runtimeStatus("queued"),
 		attempts: 0,
 		title: `issue ${issueNumber}`,
-		extra: { issueKind: "code" },
+		extra: storedItemExtra({ issueKind: "code" }),
 		createdAt: 1_800_316_001 + issueNumber,
 		updatedAt: 1_800_316_001 + issueNumber,
 	})

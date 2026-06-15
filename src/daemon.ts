@@ -43,9 +43,15 @@ import {
 	type UpdateItemInput,
 } from "./sqlite-state"
 import {
+	chainMetadataToJsonObject,
+	chainPresetPath,
+	itemDependsOnIds,
+	itemExtraToJsonObject,
+	parseInternalStatus,
 	parseChainMetadataForRequest,
 	parseItemExtraForRequest,
 	runtimeDataJsonValue,
+	storedItemExtra,
 	RuntimeDataError,
 	type InternalStatus,
 	type ItemExtra,
@@ -141,7 +147,7 @@ const MAX_ITEM_TITLE_LENGTH = 1024
 const MAX_REPO_CWD_LENGTH = 4096
 const MAX_REPOSITORY_REF_LENGTH = 200
 const STALE_RECOVERY_FORCE_AFTER_MS = 1_000
-const ORPHANED_RUN_STATUS = "orphaned"
+const ORPHANED_RUN_STATUS = parseInternalStatus("orphaned", "daemon.orphanedRunStatus")
 const ORPHANED_RUN_EXIT_CODE = -1
 const DAEMON_SOCKET_PATH_CHECK_INTERVAL_MS = 250
 const ORPHAN_CHAIN_DIR_PREFIX = ".orphan-"
@@ -979,7 +985,7 @@ export class CoderLoopDaemon {
 				endedAt: reconciledAt,
 				exitCode: ORPHANED_RUN_EXIT_CODE,
 				status: ORPHANED_RUN_STATUS,
-				extra: { ...run.extra, reconciledBy: "daemon_startup", reconciledAt },
+				extra: storedItemExtra({ ...itemExtraToJsonObject(run.extra), reconciledBy: "daemon_startup", reconciledAt }),
 			})
 			reconciledRuns.push({ runId: run.runId, itemId: run.itemId, phase: run.phase, pid: stalePid })
 		}
@@ -998,8 +1004,8 @@ export class CoderLoopDaemon {
 		}))
 	}
 
-	private async readRunProcessGroupPid(chain: ChainRecord, runId: string, extra: JsonObject): Promise<number | null> {
-		const extraPid = optionalPositiveInteger(extra.pid)
+	private async readRunProcessGroupPid(chain: ChainRecord, runId: string, extra: ItemExtra): Promise<number | null> {
+		const extraPid = extra.pid ?? null
 		if (extraPid !== null && extra.processGroupLeader === true) return extraPid
 		try {
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: this.paths.root })
@@ -1292,18 +1298,18 @@ export class CoderLoopDaemon {
 			? rawExtra
 			: rawExtraPatch === undefined
 				? undefined
-				: { ...item.extra, ...rawExtraPatch }
+				: { ...itemExtraToJsonObject(item.extra), ...rawExtraPatch }
 		const blockerMutation = blockerExtraMutationForRequest(fields)
 		const topLevelDependsOn = optionalDependsOn(fields, "dependsOn")
 		const extraDependsOn = topLevelDependsOn === undefined && requestedExtra !== undefined ? optionalDependsOn(requestedExtra, "dependsOn") : undefined
 		const dependsOn = topLevelDependsOn === undefined ? extraDependsOn : topLevelDependsOn
 		if (dependsOn !== undefined) {
 			validateDependsOnGraph(store.listItems(item.chainId), item.id, dependsOn)
-			input.extra = validateItemExtra(applyBlockerMutation(withDependsOn(requestedExtra ?? item.extra, dependsOn), blockerMutation))
+			input.extra = validateItemExtra(applyBlockerMutation(withDependsOn(requestedExtra ?? itemExtraToJsonObject(item.extra), dependsOn), blockerMutation))
 		} else if (requestedExtra !== undefined) {
 			input.extra = validateItemExtra(applyBlockerMutation(requestedExtra, blockerMutation))
 		} else if (blockerMutation !== null) {
-			input.extra = validateItemExtra(applyBlockerMutation({ ...item.extra }, blockerMutation))
+			input.extra = validateItemExtra(applyBlockerMutation(itemExtraToJsonObject(item.extra), blockerMutation))
 		}
 		const resumeScheduler = await this.pauseSchedulerForMutation()
 		try {
@@ -1540,21 +1546,20 @@ export class CoderLoopDaemon {
 		console.warn(`coder-loop daemon warning: skipped ${context} for invalid chain ${chain.id} (${JSON.stringify(chain.name)}): ${error.message}`)
 	}
 
-	private async validateItemStatusForRequest(chain: ChainRecord, item: ItemRecord, status: string): Promise<string> {
+	private async validateItemStatusForRequest(chain: ChainRecord, item: ItemRecord, status: string): Promise<InternalStatus> {
 		await this.validateItemStatusVocabularyForRequest(chain, status)
 		if (item.phase !== null) await this.validateItemStatusForPhaseRequest(chain, item.phase, status)
-		return status
+		return parseInternalStatus(status, "item.status")
 	}
 
-	private async validateItemStatusVocabularyForRequest(chain: ChainRecord, status: string): Promise<string> {
+	private async validateItemStatusVocabularyForRequest(chain: ChainRecord, status: string): Promise<void> {
 		const allowed = await this.allowedItemStatuses(chain)
 		if (!allowed.has(status)) {
 			throw new DaemonError("invalid_request", `item status must be one of: ${[...allowed].sort().join(", ")}`, { status })
 		}
-		return status
 	}
 
-	private async defaultItemStatusForRequest(chain: ChainRecord): Promise<string> {
+	private async defaultItemStatusForRequest(chain: ChainRecord): Promise<InternalStatus> {
 		const { preset } = await this.loadedPresetForChain(chain)
 		return preset.statuses.entry
 	}
@@ -1592,12 +1597,12 @@ export class CoderLoopDaemon {
 		return new Set(preset.statuses.terminal)
 	}
 
-	private async unblockItemStatuses(chain: ChainRecord): Promise<{ success: readonly string[]; entry: string }> {
+	private async unblockItemStatuses(chain: ChainRecord): Promise<{ success: readonly InternalStatus[]; entry: InternalStatus }> {
 		const { preset } = await this.loadedPresetForChain(chain)
 		return { success: preset.statuses.success, entry: preset.statuses.entry }
 	}
 
-	private async entryItemStatusForRecovery(chain: ChainRecord): Promise<string> {
+	private async entryItemStatusForRecovery(chain: ChainRecord): Promise<InternalStatus> {
 		const { entry } = await this.unblockItemStatuses(chain)
 		return entry
 	}
@@ -2385,23 +2390,6 @@ async function loadSchedulerPresetFromDir(presetDir: string): Promise<SchedulerL
 	return { presetDir, preset: await loadPreset(presetDir) }
 }
 
-function stringMetadata(metadata: JsonObject, key: string): string | null {
-	const value = metadata[key]
-	return typeof value === "string" && value.trim() !== "" ? value : null
-}
-
-function chainPresetPath(metadata: JsonObject): string | null {
-	const direct = stringMetadata(metadata, "presetPath")
-	if (direct !== null) return direct
-	const config = metadata.config
-	if (config === undefined) return null
-	if (config === null || typeof config !== "object" || Array.isArray(config)) {
-		throw new DaemonError("invalid_request", "chain.metadata.config must be a JSON object when provided", { field: "metadata.config" })
-	}
-	const value = config.presetPath
-	return typeof value === "string" && value.trim() !== "" ? value : null
-}
-
 function assertNeverSchedulerEvent(event: never): never {
 	throw new DaemonError("internal_error", `unhandled scheduler event: ${JSON.stringify(event)}`)
 }
@@ -2427,10 +2415,8 @@ function validateDependsOnGraph(items: readonly ItemRecord[], itemId: number | n
 	for (const dependencyId of dependsOn) visit(dependencyId, [])
 }
 
-function dependsOnFromStoredExtra(extra: JsonObject): number[] {
-	const raw = extra.dependsOn
-	if (!Array.isArray(raw)) return []
-	return raw.filter((value): value is number => typeof value === "number" && Number.isInteger(value) && value >= 1)
+function dependsOnFromStoredExtra(extra: ItemExtra): number[] {
+	return itemDependsOnIds(extra)
 }
 
 function withDependsOn(extra: JsonObject, dependsOn: readonly number[] | null | undefined): JsonObject {
@@ -2476,9 +2462,11 @@ function chainCreateConflicts(existing: ChainRecord, requested: CreateChainInput
 	addConflict("umbrellaIssue", existing.umbrellaIssue, requested.umbrellaIssue ?? null)
 	addConflict("umbrellaRepo", existing.umbrellaRepo, requested.umbrellaRepo ?? null)
 
-	for (const [key, requestedValue] of Object.entries(requested.metadata ?? {})) {
-		const existingHasKey = Object.hasOwn(existing.metadata, key)
-		const existingValue = existing.metadata[key]
+	const existingMetadata = chainMetadataToJsonObject(existing.metadata)
+	const requestedMetadata = requested.metadata === undefined ? {} : chainMetadataToJsonObject(requested.metadata)
+	for (const [key, requestedValue] of Object.entries(requestedMetadata)) {
+		const existingHasKey = Object.hasOwn(existingMetadata, key)
+		const existingValue = existingMetadata[key]
 		if (existingHasKey && jsonValuesEqual(existingValue, requestedValue)) continue
 		conflicts.push({
 			field: `metadata.${key}`,
@@ -2570,7 +2558,7 @@ function chainToJson(chain: ChainRecord): JsonObject {
 		umbrellaIssue: chain.umbrellaIssue,
 		umbrellaRepo: chain.umbrellaRepo,
 		status: chain.status,
-		metadata: chain.metadata,
+		metadata: chainMetadataToJsonObject(chain.metadata),
 		createdAt: chain.createdAt,
 		updatedAt: chain.updatedAt,
 	}
@@ -2594,7 +2582,7 @@ function itemToJson(item: ItemRecord, dependencyWait?: DependencyWaitReason | nu
 		evidenceDir: item.evidenceDir,
 		agentCwd: item.agentCwd,
 		runner: item.runner,
-		extra: item.extra,
+		extra: itemExtraToJsonObject(item.extra),
 		createdAt: item.createdAt,
 		updatedAt: item.updatedAt,
 	}
@@ -2731,7 +2719,7 @@ export function runToJson(run: RunRecord): JsonObject {
 		startedAt: run.startedAt,
 		endedAt: run.endedAt,
 		exitCode: run.exitCode,
-		extra: run.extra,
+		extra: itemExtraToJsonObject(run.extra),
 	}
 }
 

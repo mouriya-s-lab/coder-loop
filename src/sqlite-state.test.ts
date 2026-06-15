@@ -10,11 +10,17 @@ import {
 	type ItemRecord,
 	openSqliteStateStore,
 } from "./sqlite-state"
+import type { JsonObject } from "./loop"
+import { parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/sqlite-state-tests", String(process.pid))
 
 let nextRootId = 0
+
+function runtimeStatus(value: string) {
+	return parseInternalStatus(value, "test.status")
+}
 
 afterAll(async () => {
 	await rm(TEST_ROOT, { recursive: true, force: true })
@@ -90,7 +96,7 @@ describe("sqlite state store", () => {
 				itemId: item.id,
 				phase: "iteration",
 				startedAt: 1_800_000_001,
-				extra: { issue: 177 },
+				extra: storedItemExtra({ issue: 177 }),
 			})
 
 			const expected = {
@@ -98,7 +104,7 @@ describe("sqlite state store", () => {
 				phase: "iteration",
 				runId: "run-current",
 				startedAt: 1_800_000_001,
-				extra: { issue: 177, nested: { resumed: false } },
+				extra: storedItemExtra({ issue: 177, nested: { resumed: false } }),
 			}
 			expect(store.setCurrentRun(expected)).toEqual(expected)
 			expect(store.getCurrentRun(chain.id)).toEqual(expected)
@@ -192,9 +198,9 @@ describe("sqlite state store", () => {
 		const { store } = await openTestStore("access")
 		try {
 			const chain = createFullChain(store)
-			const first = createFullItem(store, chain, { issueNumber: 177, status: "queued" })
-			const second = createFullItem(store, chain, { issueNumber: 179, status: "queued" })
-			const otherRepo = createFullItem(store, chain, { issueNumber: 180, repoCwd: "/repo/other", status: "queued" })
+			const first = createFullItem(store, chain, { issueNumber: 177, status: runtimeStatus("queued") })
+			const second = createFullItem(store, chain, { issueNumber: 179, status: runtimeStatus("queued") })
+			const otherRepo = createFullItem(store, chain, { issueNumber: 180, repoCwd: "/repo/other", status: runtimeStatus("queued") })
 
 			expect(store.getNextPendingItem({ chainId: chain.id, repoCwd: "/repo/coder-loop" })).toEqual(first)
 			expect(store.allItemsTerminal({ chainId: chain.id, terminalStatusNames: ["done", "moot", "blocked"] })).toBe(false)
@@ -202,13 +208,13 @@ describe("sqlite state store", () => {
 			const metadataOnly = store.updateItem(first.id, { attempts: 2, updatedAt: 1_800_000_100 })
 			expect(metadataOnly.statusUpdatedAt).toBe(first.statusUpdatedAt)
 
-			const updatedFirst = store.updateItem(first.id, { status: "done", branch: "issue-177", pr: 188, updatedAt: 1_800_000_101 })
+			const updatedFirst = store.updateItem(first.id, { status: runtimeStatus("done"), branch: "issue-177", pr: 188, updatedAt: 1_800_000_101 })
 			expect(updatedFirst.status).toBe("done")
 			expect(updatedFirst.statusUpdatedAt).toBe(1_800_000_101)
 			expect(updatedFirst.branch).toBe("issue-177")
 			expect(updatedFirst.pr).toBe(188)
-			expect(store.updateItem(second.id, { status: "moot", updatedAt: 1_800_000_102 }).status).toBe("moot")
-			expect(store.updateItem(otherRepo.id, { status: "blocked", updatedAt: 1_800_000_103 }).status).toBe("blocked")
+			expect(store.updateItem(second.id, { status: runtimeStatus("moot"), updatedAt: 1_800_000_102 }).status).toBe("moot")
+			expect(store.updateItem(otherRepo.id, { status: runtimeStatus("blocked"), updatedAt: 1_800_000_103 }).status).toBe("blocked")
 			expect(store.allItemsTerminal({ chainId: chain.id, terminalStatusNames: ["done", "moot", "blocked"] })).toBe(true)
 
 			const run = store.recordRun({
@@ -217,10 +223,10 @@ describe("sqlite state store", () => {
 				itemId: first.id,
 				phase: "iteration",
 				startedAt: 1_800_000_200,
-				extra: { issue: 177 },
+				extra: storedItemExtra({ issue: 177 }),
 			})
 			expect(store.getRunByRunId("run-data-access")).toEqual(run)
-			const completedRun = store.completeRun("run-data-access", { endedAt: 1_800_000_260, exitCode: 0, status: "done" })
+			const completedRun = store.completeRun("run-data-access", { endedAt: 1_800_000_260, exitCode: 0, status: runtimeStatus("done") })
 			expect(completedRun.endedAt).toBe(1_800_000_260)
 			expect(completedRun.status).toBe("done")
 			expect(store.listRuns(chain.id).map((entry) => entry.status)).toEqual(["done"])
@@ -241,13 +247,13 @@ describe("sqlite state store", () => {
 			const chain = createFullChain(store)
 			const retried = createFullItem(store, chain, {
 				issueNumber: 177,
-				status: "changes_requested",
+				status: runtimeStatus("changes_requested"),
 				priority: null,
 				attempts: 3,
 			})
 			const untouched = createFullItem(store, chain, {
 				issueNumber: 179,
-				status: "queued",
+				status: runtimeStatus("queued"),
 				priority: null,
 				attempts: 0,
 			})
@@ -263,9 +269,9 @@ describe("sqlite state store", () => {
 		const { store } = await openTestStore("reorder")
 		try {
 			const chain = createFullChain(store)
-			const a = createFullItem(store, chain, { issueNumber: 201, status: "queued", priority: null })
-			const b = createFullItem(store, chain, { issueNumber: 202, status: "queued", priority: null })
-			const c = createFullItem(store, chain, { issueNumber: 203, status: "queued", priority: null })
+			const a = createFullItem(store, chain, { issueNumber: 201, status: runtimeStatus("queued"), priority: null })
+			const b = createFullItem(store, chain, { issueNumber: 202, status: runtimeStatus("queued"), priority: null })
+			const c = createFullItem(store, chain, { issueNumber: 203, status: runtimeStatus("queued"), priority: null })
 
 			expect([a.position, b.position, c.position]).toEqual([0, 1, 2])
 			expect(store.getNextPendingItem({ chainId: chain.id, repoCwd: "/repo/coder-loop" })?.id).toBe(a.id)
@@ -294,14 +300,14 @@ describe("sqlite state store", () => {
 		const { store } = await openTestStore("depends-gates")
 		try {
 			const chain = createFullChain(store)
-			const prerequisite = createFullItem(store, chain, { issueNumber: 2671, priority: "10", status: "queued" })
+			const prerequisite = createFullItem(store, chain, { issueNumber: 2671, priority: "10", status: runtimeStatus("queued") })
 			const dependent = createFullItem(store, chain, {
 				issueNumber: 2672,
 				priority: "00",
-				status: "queued",
+				status: runtimeStatus("queued"),
 				extra: { issue: 2672, dependsOn: [prerequisite.id] },
 			})
-			const fallback = createFullItem(store, chain, { issueNumber: 2673, priority: "20", status: "queued" })
+			const fallback = createFullItem(store, chain, { issueNumber: 2673, priority: "20", status: runtimeStatus("queued") })
 
 			expect(dependent.id).toBeGreaterThan(prerequisite.id)
 			expect(store.getNextPendingItem({
@@ -332,14 +338,14 @@ describe("sqlite state store", () => {
 		const { store } = await openTestStore("depends-release")
 		try {
 			const chain = createFullChain(store)
-			const prerequisite = createFullItem(store, chain, { issueNumber: 2674, priority: "99", status: "done" })
+			const prerequisite = createFullItem(store, chain, { issueNumber: 2674, priority: "99", status: runtimeStatus("done") })
 			const dependent = createFullItem(store, chain, {
 				issueNumber: 2675,
 				priority: "00",
-				status: "queued",
+				status: runtimeStatus("queued"),
 				extra: { issue: 2675, dependsOn: [prerequisite.id] },
 			})
-			createFullItem(store, chain, { issueNumber: 2676, priority: "10", status: "queued" })
+			createFullItem(store, chain, { issueNumber: 2676, priority: "10", status: runtimeStatus("queued") })
 
 			expect(store.getNextPendingItem({
 				chainId: chain.id,
@@ -367,7 +373,7 @@ describe("sqlite state store", () => {
 				repository: "mouriya-s-lab/coder-loop-e2e-blocker",
 				baseBranch: "main",
 				status: "active",
-				metadata: {},
+				metadata: storedChainMetadata({}),
 				createdAt: 1_800_000_000,
 				updatedAt: 1_800_000_010,
 			})
@@ -375,11 +381,11 @@ describe("sqlite state store", () => {
 				chainId: blockerChain.id,
 				issueNumber: 7,
 				repoCwd: "/repo/blocker",
-				status: "done",
+				status: runtimeStatus("done"),
 				attempts: 1,
 				title: "blocker follow-up",
 				priority: "10",
-				extra: { issue: 7 },
+				extra: storedItemExtra({ issue: 7 }),
 				createdAt: 1_800_000_020,
 				updatedAt: 1_800_000_030,
 			})
@@ -388,7 +394,7 @@ describe("sqlite state store", () => {
 			const dependent = createFullItem(store, dependentChain, {
 				issueNumber: 2680,
 				priority: "00",
-				status: "queued",
+				status: runtimeStatus("queued"),
 				extra: { issue: 2680, dependsOn: [blocker.id] },
 			})
 
@@ -408,7 +414,7 @@ describe("sqlite state store", () => {
 			})).toEqual([])
 
 			// Flip the cross-chain blocker back to in-flight: the dependent is gated again.
-			store.updateItem(blocker.id, { status: "in_progress" })
+			store.updateItem(blocker.id, { status: runtimeStatus("in_progress") })
 			expect(store.getNextPendingItem({
 				chainId: dependentChain.id,
 				repoCwd: "/repo/coder-loop",
@@ -437,9 +443,9 @@ describe("sqlite state store", () => {
 		try {
 			const chain = createFullChain(store)
 			const inputs: CreateItemInput[] = [
-				{ chainId: chain.id, issueNumber: 311, repoCwd: "/repo/coder-loop", status: "queued", title: "first" },
-				{ chainId: chain.id, issueNumber: 312, repoCwd: "/repo/coder-loop", status: "queued", title: "second" },
-				{ chainId: chain.id, issueNumber: 313, repoCwd: "/repo/coder-loop", status: "queued", title: "third" },
+				{ chainId: chain.id, issueNumber: 311, repoCwd: "/repo/coder-loop", status: runtimeStatus("queued"), title: "first" },
+				{ chainId: chain.id, issueNumber: 312, repoCwd: "/repo/coder-loop", status: runtimeStatus("queued"), title: "second" },
+				{ chainId: chain.id, issueNumber: 313, repoCwd: "/repo/coder-loop", status: runtimeStatus("queued"), title: "third" },
 			]
 			const inserted = store.createItems(inputs)
 			expect(inserted.map((item) => item.issueNumber)).toEqual([311, 312, 313])
@@ -459,9 +465,9 @@ describe("sqlite state store", () => {
 			let caught: unknown = null
 			try {
 				store.createItems([
-					{ chainId: chain.id, issueNumber: 321, repoCwd: "/repo/coder-loop", status: "queued", title: "before conflict" },
-					{ chainId: chain.id, issueNumber: 322, repoCwd: "/repo/coder-loop", status: "queued", title: "conflict (UNIQUE chain_id,issue_number)" },
-					{ chainId: chain.id, issueNumber: 323, repoCwd: "/repo/coder-loop", status: "queued", title: "after conflict" },
+					{ chainId: chain.id, issueNumber: 321, repoCwd: "/repo/coder-loop", status: runtimeStatus("queued"), title: "before conflict" },
+					{ chainId: chain.id, issueNumber: 322, repoCwd: "/repo/coder-loop", status: runtimeStatus("queued"), title: "conflict (UNIQUE chain_id,issue_number)" },
+					{ chainId: chain.id, issueNumber: 323, repoCwd: "/repo/coder-loop", status: runtimeStatus("queued"), title: "after conflict" },
 				])
 			} catch (error) {
 				caught = error
@@ -503,7 +509,7 @@ describe("sqlite state store", () => {
 			writer.exec("PRAGMA foreign_keys = ON")
 			writer.exec("BEGIN IMMEDIATE")
 			writer.query("UPDATE items SET status = $status WHERE issue_number = $issueNumber").run({
-				status: "in_progress",
+				status: runtimeStatus("in_progress"),
 				issueNumber: 177,
 			})
 
@@ -1113,22 +1119,28 @@ function createFullChain(store: ReturnType<typeof openSqliteStateStore>): ChainR
 		umbrellaIssue: 176,
 		umbrellaRepo: "mouriya-s-lab/coder-loop",
 		status: "active",
-		metadata: { flavor: "codex", tier: "claude", nested: { enabled: true } },
+		metadata: storedChainMetadata({ flavor: "codex", tier: "claude", nested: { enabled: true } }),
 		createdAt: 1_800_000_000,
 		updatedAt: 1_800_000_010,
 	})
 }
 
+type FullItemOverrides = Omit<Partial<CreateItemInput>, "status" | "extra"> & {
+	status?: string
+	extra?: JsonObject
+}
+
 function createFullItem(
 	store: ReturnType<typeof openSqliteStateStore>,
 	chain: ChainRecord,
-	overrides: Partial<CreateItemInput> = {},
+	overrides: FullItemOverrides = {},
 ): ItemRecord {
+	const { status = "queued", extra = { issue: 177, phase: "A", nested: { db: true } }, ...rest } = overrides
 	return store.createItem({
 		chainId: chain.id,
 		issueNumber: 177,
 		repoCwd: "/repo/coder-loop",
-		status: "queued",
+		status: runtimeStatus(status),
 		attempts: 1,
 		title: "feat: SQLite 状态存储与 LoopState 完整映射",
 		priority: "10",
@@ -1139,10 +1151,10 @@ function createFullItem(
 		evidenceDir: "evidence/177",
 		agentCwd: "/repo/coder-loop",
 		runner: "codex",
-		extra: { issue: 177, phase: "A", nested: { db: true } },
+		extra: storedItemExtra(extra),
 		createdAt: 1_800_000_020,
 		updatedAt: 1_800_000_030,
-		...overrides,
+		...rest,
 	})
 }
 

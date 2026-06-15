@@ -38,37 +38,38 @@ import {
 	type RuntimeBindings,
 	type StatusCurrentRunSnapshot,
 } from "./loop"
-import { parseInternalStatus } from "./runtime-data"
+import { parseInternalStatus, storedItemExtra } from "./runtime-data"
 import type { ItemRecord } from "./sqlite-state"
 import type { BoundaryRecord } from "./boundary-types"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/loop-tests")
 
-function makeItem(overrides: Partial<ItemRecord> = {}): ItemRecord {
+function makeItem(overrides: Omit<Partial<ItemRecord>, "extra"> & { extra?: JsonObject } = {}): ItemRecord {
+	const { extra, ...rest } = overrides
 	return {
-		id: overrides.id ?? 1,
-		chainId: overrides.chainId ?? 10,
-		issueNumber: overrides.issueNumber ?? 333,
-		repoCwd: overrides.repoCwd ?? REPO_ROOT,
-		status: overrides.status ?? parseInternalStatus("queued", "test.status"),
-		attempts: overrides.attempts ?? 0,
-		position: overrides.position ?? 0,
-		title: overrides.title ?? "test item",
-		priority: overrides.priority ?? null,
-		branch: overrides.branch ?? null,
-		pr: overrides.pr ?? null,
-		lastRunId: overrides.lastRunId ?? null,
-		sessionIds: overrides.sessionIds ?? {},
-		issueFile: overrides.issueFile ?? null,
-		evidenceDir: overrides.evidenceDir ?? null,
-		agentCwd: overrides.agentCwd ?? null,
-		runner: overrides.runner ?? null,
-		phase: overrides.phase ?? null,
-		extra: overrides.extra ?? {},
-		createdAt: overrides.createdAt ?? 1,
-		updatedAt: overrides.updatedAt ?? 1,
-		statusUpdatedAt: overrides.statusUpdatedAt ?? overrides.updatedAt ?? 1,
+		id: rest.id ?? 1,
+		chainId: rest.chainId ?? 10,
+		issueNumber: rest.issueNumber ?? 333,
+		repoCwd: rest.repoCwd ?? REPO_ROOT,
+		status: rest.status ?? parseInternalStatus("queued", "test.status"),
+		attempts: rest.attempts ?? 0,
+		position: rest.position ?? 0,
+		title: rest.title ?? "test item",
+		priority: rest.priority ?? null,
+		branch: rest.branch ?? null,
+		pr: rest.pr ?? null,
+		lastRunId: rest.lastRunId ?? null,
+		sessionIds: rest.sessionIds ?? {},
+		issueFile: rest.issueFile ?? null,
+		evidenceDir: rest.evidenceDir ?? null,
+		agentCwd: rest.agentCwd ?? null,
+		runner: rest.runner ?? null,
+		phase: rest.phase ?? null,
+		extra: storedItemExtra(extra ?? {}),
+		createdAt: rest.createdAt ?? 1,
+		updatedAt: rest.updatedAt ?? 1,
+		statusUpdatedAt: rest.statusUpdatedAt ?? rest.updatedAt ?? 1,
 	}
 }
 

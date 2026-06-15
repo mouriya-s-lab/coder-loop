@@ -27,7 +27,7 @@ import {
 import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
 import { queryObservabilityEvents } from "./observability"
-import { storedChainMetadata, storedItemExtra } from "./runtime-data"
+import { itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 import type { BoundaryRecord } from "./boundary-types"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -35,6 +35,10 @@ const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/dt", String(p
 const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
 
 let nextFixtureId = 0
+
+function runtimeStatus(value: string) {
+	return parseInternalStatus(value, "test.status")
+}
 
 // v1 status model: the spawned agent is the only writer of item.status. These daemon
 // integration tests use fake runners, so the fake runner reproduces the real agent's
@@ -530,15 +534,15 @@ describe("daemon", () => {
 					repository: "mouriya-s-lab/coder-loop",
 					baseBranch: "main",
 					status: "active",
-					metadata: {},
+					metadata: storedChainMetadata({}),
 				})
 				invalidPresetItemId = store.createItem({
 					chainId: invalidPresetChain.id,
 					issueNumber: 41101,
 					repoCwd: REPO_ROOT,
-					status: "queued",
+					status: runtimeStatus("queued"),
 					attempts: 0,
-					extra: { sleepMs: 5, exitCode: 0 },
+					extra: storedItemExtra({ sleepMs: 5, exitCode: 0 }),
 				}).id
 				const unknownPresetChain = store.createChain({
 					name: "unknown-preset-chain",
@@ -546,15 +550,15 @@ describe("daemon", () => {
 					repository: "mouriya-s-lab/coder-loop",
 					baseBranch: "main",
 					status: "active",
-					metadata: {},
+					metadata: storedChainMetadata({}),
 				})
 				unknownPresetItemId = store.createItem({
 					chainId: unknownPresetChain.id,
 					issueNumber: 41102,
 					repoCwd: REPO_ROOT,
-					status: "queued",
+					status: runtimeStatus("queued"),
 					attempts: 0,
-					extra: { sleepMs: 5, exitCode: 0 },
+					extra: storedItemExtra({ sleepMs: 5, exitCode: 0 }),
 				}).id
 			} finally {
 				store.close()
@@ -562,7 +566,7 @@ describe("daemon", () => {
 
 			const invalidPresetResponse = await request(fixture, "item.update", {
 				itemId: invalidPresetItemId,
-				fields: { status: "done" },
+				fields: { status: runtimeStatus("done") },
 			})
 			expect(invalidPresetResponse.ok).toBe(false)
 			if (!invalidPresetResponse.ok) {
@@ -572,7 +576,7 @@ describe("daemon", () => {
 
 			const unknownPresetResponse = await request(fixture, "item.update", {
 				itemId: unknownPresetItemId,
-				fields: { status: "done" },
+				fields: { status: runtimeStatus("done") },
 			})
 			expect(unknownPresetResponse.ok).toBe(false)
 			if (!unknownPresetResponse.ok) {
@@ -619,7 +623,7 @@ describe("daemon", () => {
 				repository: "mouriya-s-lab/coder-loop",
 				baseBranch: "main",
 				status: "active",
-				metadata: {},
+				metadata: storedChainMetadata({}),
 			})
 			store.createChain({
 				name: "valid-chain",
@@ -627,7 +631,7 @@ describe("daemon", () => {
 				repository: "mouriya-s-lab/coder-loop",
 				baseBranch: "main",
 				status: "active",
-				metadata: {},
+				metadata: storedChainMetadata({}),
 			})
 		} finally {
 			store.close()
@@ -657,7 +661,7 @@ describe("daemon", () => {
 				repository: "mouriya-s-lab/coder-loop",
 				baseBranch: "main",
 				status: "active",
-				metadata: {},
+				metadata: storedChainMetadata({}),
 			})
 		} finally {
 			store.close()
@@ -718,7 +722,7 @@ describe("daemon", () => {
 				title: "feat: 单进程 daemon",
 				extra: { sleepMs: 5 },
 			})).item)
-			expect(added).toMatchObject({ issueNumber: 180, status: "queued", title: "feat: 单进程 daemon" })
+			expect(added).toMatchObject({ issueNumber: 180, status: runtimeStatus("queued"), title: "feat: 单进程 daemon" })
 
 			const listed = expectOk(await request(fixture, "item.list", { chainId })).items
 			expect(Array.isArray(listed)).toBe(true)
@@ -726,9 +730,9 @@ describe("daemon", () => {
 
 			const updated = record(expectOk(await request(fixture, "item.update", {
 				itemId: numberValue(added.id),
-				fields: { status: "done", pr: 190, title: "updated daemon item" },
+				fields: { status: runtimeStatus("done"), pr: 190, title: "updated daemon item" },
 			})).item)
-			expect(updated).toMatchObject({ status: "done", pr: 190, title: "updated daemon item" })
+			expect(updated).toMatchObject({ status: runtimeStatus("done"), pr: 190, title: "updated daemon item" })
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -899,7 +903,7 @@ describe("daemon", () => {
 			})).item)
 			expect(added).toMatchObject({
 				issueNumber: 246,
-				status: "queued",
+				status: runtimeStatus("queued"),
 				attempts: 0,
 				priority: "high",
 				branch: "feature/issue-246",
@@ -912,7 +916,7 @@ describe("daemon", () => {
 			})
 
 			const invalidRequests = [
-				{ issueNumber: 601, repoCwd: REPO_ROOT, status: "done" },
+				{ issueNumber: 601, repoCwd: REPO_ROOT, status: runtimeStatus("done") },
 				{ issueNumber: 602, repoCwd: REPO_ROOT, attempts: 999 },
 				{ issueNumber: 603, repoCwd: REPO_ROOT, lastRunId: "hacked" },
 				{ issueNumber: 604, repoCwd: REPO_ROOT, agentCwd: "/etc/passwd" },
@@ -968,7 +972,7 @@ describe("daemon", () => {
 				repoCwd: REPO_ROOT,
 			})).item)
 
-			expect(added).toMatchObject({ issueNumber: 185, status: "queued", repoCwd: REPO_ROOT })
+			expect(added).toMatchObject({ issueNumber: 185, status: runtimeStatus("queued"), repoCwd: REPO_ROOT })
 			await waitFor(async () => readItem(fixture.loopDataRoot, chainId, 185), (item) => item?.status === "queued")
 			await new Promise((resolveWait) => setTimeout(resolveWait, 120))
 			expect(record(expectOk(await request(fixture, "daemon.status")).daemon).running).toBe(true)
@@ -1224,7 +1228,7 @@ attemptTimeoutSeconds = 3600
 			// Typed blocker flags land as named keys inside extra; the pre-existing dependsOn key survives.
 			const blocked = record(expectOk(await request(fixture, "item.update", {
 				itemId,
-				status: "blocked",
+				status: runtimeStatus("blocked"),
 				blockerRepo: "mouriya-s-lab/other",
 				blockerRef: "#267",
 			})).item)
@@ -1233,7 +1237,7 @@ attemptTimeoutSeconds = 3600
 			expect(blocked.agentCwd).toBeNull()
 
 			// clearBlocker removes only the blocker keys, leaving dependsOn intact.
-			const cleared = record(expectOk(await request(fixture, "item.update", { itemId, status: "changes_requested", clearBlocker: true })).item)
+			const cleared = record(expectOk(await request(fixture, "item.update", { itemId, status: runtimeStatus("changes_requested"), clearBlocker: true })).item)
 			expect(record(cleared.extra)).not.toHaveProperty("blockerRepo")
 			expect(record(cleared.extra)).not.toHaveProperty("blockerRef")
 			expect(record(cleared.extra).dependsOn).toEqual([numberValue(anchor.id)])
@@ -1286,7 +1290,7 @@ attemptTimeoutSeconds = 3600
 						chainId: chain.id,
 						issueNumber: 455,
 						repoCwd: REPO_ROOT,
-						status: "queued",
+						status: runtimeStatus("queued"),
 						extra: storedItemExtra({
 							slotKey: "legacy-slot",
 							blockerRepo: "mouriya-s-lab/coder-loop",
@@ -1384,7 +1388,7 @@ attemptTimeoutSeconds = 3600
 			})).item)
 			expect(pending).toMatchObject({ issueNumber: 188, status: "pending" })
 
-			expectInvalid(await request(fixture, "item.update", { itemId: numberValue(added.id), status: "changes_requested" }))
+			expectInvalid(await request(fixture, "item.update", { itemId: numberValue(added.id), status: runtimeStatus("changes_requested") }))
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -1464,11 +1468,11 @@ attemptTimeoutSeconds = 3600
 
 			const invalidRequests = [
 				{ itemId },
-				{ itemId, chainId: otherChainId, status: "done" },
-				{ itemId, issueNumber: 999, status: "done" },
-				{ itemId, id: itemId, status: "done" },
-				{ itemId, createdAt: 1, status: "done" },
-				{ itemId, updatedAt: 1, status: "done" },
+				{ itemId, chainId: otherChainId, status: runtimeStatus("done") },
+				{ itemId, issueNumber: 999, status: runtimeStatus("done") },
+				{ itemId, id: itemId, status: runtimeStatus("done") },
+				{ itemId, createdAt: 1, status: runtimeStatus("done") },
+				{ itemId, updatedAt: 1, status: runtimeStatus("done") },
 				{ itemId, attempts: 5 },
 				{ itemId, lastRunId: "run-forged" },
 				{ itemId, agentCwd: "/etc/passwd" },
@@ -1489,7 +1493,7 @@ attemptTimeoutSeconds = 3600
 				id: itemId,
 				chainId,
 				issueNumber: 221,
-				status: "queued",
+				status: runtimeStatus("queued"),
 				attempts: 0,
 				lastRunId: null,
 				agentCwd: null,
@@ -1501,9 +1505,9 @@ attemptTimeoutSeconds = 3600
 			const updated = record(expectOk(await request(fixture, "item.update", {
 				chainId,
 				issueNumber: 221,
-				fields: { status: "done", title: "strict item update" },
+				fields: { status: runtimeStatus("done"), title: "strict item update" },
 			})).item)
-			expect(updated).toMatchObject({ id: itemId, chainId, issueNumber: 221, status: "done", title: "strict item update" })
+			expect(updated).toMatchObject({ id: itemId, chainId, issueNumber: 221, status: runtimeStatus("done"), title: "strict item update" })
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -1638,7 +1642,7 @@ attemptTimeoutSeconds = 3600
 				issueNumber: 227,
 				repoCwd: REPO_ROOT,
 			}))
-			expectChainDeleted(await request(fixture, "item.update", { itemId, status: "done" }))
+			expectChainDeleted(await request(fixture, "item.update", { itemId, status: runtimeStatus("done") }))
 
 			const listed = expectOk(await request(fixture, "item.list", { chainId })).items
 			expect(Array.isArray(listed)).toBe(true)
@@ -1666,7 +1670,7 @@ attemptTimeoutSeconds = 3600
 			const itemId = numberValue(added.id)
 			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
 			try {
-				store.updateItem(itemId, { status: "done", phase: "review", updatedAt: 1_800_015_200 })
+				store.updateItem(itemId, { status: runtimeStatus("done"), phase: "review", updatedAt: 1_800_015_200 })
 				store.updateChain(chainId, { status: "completed", updatedAt: 1_800_015_201 })
 			} finally {
 				store.close()
@@ -1694,7 +1698,7 @@ attemptTimeoutSeconds = 3600
 			expect(record(listed[0])).toMatchObject({
 				id: itemId,
 				issueNumber: 228,
-				status: "done",
+				status: runtimeStatus("done"),
 				title: "complete me",
 			})
 			expect(record(expectOk(await request(fixture, "chain.status", { chainId })).chain).status).toBe("completed")
@@ -1818,7 +1822,7 @@ attemptTimeoutSeconds = 3600
 					chainId,
 					itemId,
 					exitCode: 1,
-					status: "queued",
+					status: runtimeStatus("queued"),
 				}],
 				cleanup: { chainRootRemoved: true },
 			})
@@ -1850,7 +1854,7 @@ attemptTimeoutSeconds = 3600
 			})).item)
 			await request(fixture, "item.update", {
 				itemId: numberValue(added.id),
-				status: "done",
+				status: runtimeStatus("done"),
 			})
 
 			await waitFor(async () => readChainStatus(fixture.loopDataRoot, chainId), (status) => status === "completed")
@@ -1885,15 +1889,15 @@ attemptTimeoutSeconds = 3600
 
 			const updated = record(expectOk(await request(fixture, "item.update", {
 				itemId,
-				status: "done",
+				status: runtimeStatus("done"),
 			})).item)
 
-			expect(updated).toMatchObject({ id: itemId, status: "done" })
+			expect(updated).toMatchObject({ id: itemId, status: runtimeStatus("done") })
 			// item.update no longer terminates the active run. The run finishes naturally,
 			// then the close handler completes the chain (item already terminal).
 			await waitFor(async () => readChainStatus(fixture.loopDataRoot, chainId), (status) => status === "completed", 10_000)
 			expect(record(expectOk(await request(fixture, "daemon.status")).daemon).activeRuns).toEqual([])
-			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({ type: "agent.exit", itemId, status: "done" }))
+			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({ type: "agent.exit", itemId, status: runtimeStatus("done") }))
 			const chainCompleted = await waitFor(
 				async () => fixture.schedulerEvents.find((event) => event.type === "chain.completed" && event.chainId === chainId) ?? null,
 				(event) => event !== null,
@@ -1940,7 +1944,7 @@ attemptTimeoutSeconds = 3600
 
 			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
 			try {
-				store.updateItem(itemId, { status: "done", updatedAt: 1_800_034_900 })
+				store.updateItem(itemId, { status: runtimeStatus("done"), updatedAt: 1_800_034_900 })
 			} finally {
 				store.close()
 			}
@@ -1968,13 +1972,13 @@ attemptTimeoutSeconds = 3600
 					chainId,
 					issueNumber: 349_202,
 					repoCwd: REPO_ROOT,
-					status: "queued",
+					status: runtimeStatus("queued"),
 					attempts: 0,
-					extra: {
+					extra: storedItemExtra({
 						issueKind: "code",
 						sleepMs: 200,
 						summary: "ITERATION SUMMARY: fake iteration in progress",
-					},
+					}),
 				})
 			} finally {
 				store.close()
@@ -2003,7 +2007,7 @@ attemptTimeoutSeconds = 3600
 			})).item)
 			await request(fixture, "item.update", {
 				itemId: numberValue(added.id),
-				status: "done",
+				status: runtimeStatus("done"),
 			})
 			await waitFor(async () => readChainStatus(fixture.loopDataRoot, numberValue(first.id)), (status) => status === "completed")
 
@@ -2090,7 +2094,7 @@ attemptTimeoutSeconds = 3600
 			// wrote its own status, so the item keeps its entry status and is resumable.
 			expect(down).toMatchObject({
 				shutdown: true,
-				terminatedRuns: [{ chainId, itemId, exitCode: 1, status: "queued" }],
+				terminatedRuns: [{ chainId, itemId, exitCode: 1, status: runtimeStatus("queued") }],
 			})
 			const item = await readItem(fixture.loopDataRoot, chainId, 181)
 			expect(item?.status).toBe("queued")
@@ -2176,7 +2180,7 @@ attemptTimeoutSeconds = 3600
 
 			const updated = record(expectOk(await request(fixture, "item.update", {
 				itemId: numberValue(added.id),
-				fields: { status: "done" },
+				fields: { status: runtimeStatus("done") },
 			})).item)
 			expect(updated.status).toBe("done")
 
@@ -2211,37 +2215,37 @@ attemptTimeoutSeconds = 3600
 			const chain = store.createChain({
 				name: "startup-recovery-chain",
 				preset: "gh-issue-pr-iteration",
-				repository: "mouriya-s-lab/coder-loop",
-				baseBranch: "main",
-				status: "active",
-				metadata: {},
-			})
+					repository: "mouriya-s-lab/coder-loop",
+					baseBranch: "main",
+					status: "active",
+					metadata: storedChainMetadata({}),
+				})
 			const item = store.createItem({
 				chainId: chain.id,
 				issueNumber: 217,
 				repoCwd: REPO_ROOT,
-				status: "in_progress",
+				status: runtimeStatus("in_progress"),
 				attempts: 1,
-				lastRunId: "run-stale-217",
-				agentCwd: resolve(root, "worktree"),
-				title: "stale item",
-				extra: {},
-			})
+					lastRunId: "run-stale-217",
+					agentCwd: resolve(root, "worktree"),
+					title: "stale item",
+					extra: storedItemExtra({}),
+				})
 			store.recordRun({
 				runId: "run-stale-217",
 				chainId: chain.id,
-				itemId: item.id,
-				phase: "iteration",
-				startedAt: 1_800_000_000,
-				extra: {},
-			})
+					itemId: item.id,
+					phase: "iteration",
+					startedAt: 1_800_000_000,
+					extra: storedItemExtra({}),
+				})
 			store.setCurrentRun({
 				chainId: chain.id,
-				phase: "iteration",
-				runId: "run-stale-217",
-				startedAt: 1_800_000_000,
-				extra: { itemId: item.id, pid: stale.pid, processGroupLeader: true },
-			})
+					phase: "iteration",
+					runId: "run-stale-217",
+					startedAt: 1_800_000_000,
+					extra: storedItemExtra({ itemId: item.id, pid: stale.pid, processGroupLeader: true }),
+				})
 		} finally {
 			store.close()
 		}
@@ -2283,39 +2287,39 @@ attemptTimeoutSeconds = 3600
 			const chain = store.createChain({
 				name: "orphan-run-chain",
 				preset: "gh-issue-pr-iteration",
-				repository: "mouriya-s-lab/coder-loop",
-				baseBranch: "main",
-				status: "active",
-				metadata: {},
-			})
+					repository: "mouriya-s-lab/coder-loop",
+					baseBranch: "main",
+					status: "active",
+					metadata: storedChainMetadata({}),
+				})
 			const terminal = store.createItem({
 				chainId: chain.id,
 				issueNumber: 307,
 				repoCwd: REPO_ROOT,
-				status: "done",
+				status: runtimeStatus("done"),
 				attempts: 1,
 				phase: "iteration",
-				lastRunId: "run-orphan-307",
-				title: "terminal item with orphaned run",
-				extra: {},
-			})
+					lastRunId: "run-orphan-307",
+					title: "terminal item with orphaned run",
+					extra: storedItemExtra({}),
+				})
 			store.recordRun({
 				runId: "run-orphan-307",
 				chainId: chain.id,
-				itemId: terminal.id,
-				phase: "iteration",
-				startedAt: 1_700_000_000,
-				extra: {},
-			})
+					itemId: terminal.id,
+					phase: "iteration",
+					startedAt: 1_700_000_000,
+					extra: storedItemExtra({}),
+				})
 			store.createItem({
 				chainId: chain.id,
 				issueNumber: 308,
 				repoCwd: REPO_ROOT,
-				status: "queued",
-				attempts: 0,
-				title: "pending item gated by the orphan",
-				extra: {},
-			})
+					status: runtimeStatus("queued"),
+					attempts: 0,
+					title: "pending item gated by the orphan",
+					extra: storedItemExtra({}),
+				})
 		} finally {
 			store.close()
 		}
@@ -2330,8 +2334,9 @@ attemptTimeoutSeconds = 3600
 			expect(orphan?.endedAt).not.toBeNull()
 			expect(orphan?.exitCode).toBe(-1)
 			expect(orphan?.status).toBe("orphaned")
-			expect(orphan?.extra.reconciledBy).toBe("daemon_startup")
-			expect(typeof orphan?.extra.reconciledAt).toBe("number")
+				const orphanExtra = orphan === null ? null : itemExtraToJsonObject(orphan.extra)
+				expect(orphanExtra?.reconciledBy).toBe("daemon_startup")
+				expect(typeof orphanExtra?.reconciledAt).toBe("number")
 
 			const terminalItem = await readItem(loopDataRoot, 1, 307)
 			expect(terminalItem?.status).toBe("done")
@@ -2358,30 +2363,30 @@ attemptTimeoutSeconds = 3600
 			const chain = store.createChain({
 				name: "orphan-run-pgid-chain",
 				preset: "gh-issue-pr-iteration",
-				repository: "mouriya-s-lab/coder-loop",
-				baseBranch: "main",
-				status: "active",
-				metadata: {},
-			})
+					repository: "mouriya-s-lab/coder-loop",
+					baseBranch: "main",
+					status: "active",
+					metadata: storedChainMetadata({}),
+				})
 			const item = store.createItem({
 				chainId: chain.id,
 				issueNumber: 309,
 				repoCwd: REPO_ROOT,
-				status: "done",
+				status: runtimeStatus("done"),
 				attempts: 1,
 				phase: "iteration",
-				lastRunId: "run-orphan-309",
-				title: "terminal item with live orphaned run",
-				extra: {},
-			})
+					lastRunId: "run-orphan-309",
+					title: "terminal item with live orphaned run",
+					extra: storedItemExtra({}),
+				})
 			store.recordRun({
 				runId: "run-orphan-309",
 				chainId: chain.id,
-				itemId: item.id,
-				phase: "iteration",
-				startedAt: 1_700_000_000,
-				extra: { pid: stale.pid, processGroupLeader: true },
-			})
+					itemId: item.id,
+					phase: "iteration",
+					startedAt: 1_700_000_000,
+					extra: storedItemExtra({ pid: stale.pid, processGroupLeader: true }),
+				})
 		} finally {
 			store.close()
 		}
@@ -2425,39 +2430,39 @@ attemptTimeoutSeconds = 3600
 			const chain = store.createChain({
 				name: "orphan-run-scheduler-unblock-chain",
 				preset: "gh-issue-pr-iteration",
-				repository: "mouriya-s-lab/coder-loop",
-				baseBranch: "main",
-				status: "active",
-				metadata: {},
-			})
+					repository: "mouriya-s-lab/coder-loop",
+					baseBranch: "main",
+					status: "active",
+					metadata: storedChainMetadata({}),
+				})
 			const terminal = store.createItem({
 				chainId: chain.id,
 				issueNumber: 307,
 				repoCwd: REPO_ROOT,
-				status: "done",
+				status: runtimeStatus("done"),
 				attempts: 1,
 				phase: "iteration",
-				lastRunId: "run-orphan-307",
-				title: "terminal item with orphaned run",
-				extra: {},
-			})
+					lastRunId: "run-orphan-307",
+					title: "terminal item with orphaned run",
+					extra: storedItemExtra({}),
+				})
 			store.recordRun({
 				runId: "run-orphan-307",
 				chainId: chain.id,
-				itemId: terminal.id,
-				phase: "iteration",
-				startedAt: 1_700_000_000,
-				extra: {},
-			})
+					itemId: terminal.id,
+					phase: "iteration",
+					startedAt: 1_700_000_000,
+					extra: storedItemExtra({}),
+				})
 			queuedItemId = store.createItem({
 				chainId: chain.id,
 				issueNumber: 308,
 				repoCwd: REPO_ROOT,
-				status: "queued",
-				attempts: 0,
-				title: "pending item gated by the orphan",
-				extra: { sleepMs: 5 },
-			}).id
+					status: runtimeStatus("queued"),
+					attempts: 0,
+					title: "pending item gated by the orphan",
+					extra: storedItemExtra({ sleepMs: 5 }),
+				}).id
 		} finally {
 			store.close()
 		}
@@ -2536,37 +2541,37 @@ attemptTimeoutSeconds = 3600
 			const chain = store.createChain({
 				name: "startup-recovery-socket-chain",
 				preset: "gh-issue-pr-iteration",
-				repository: "mouriya-s-lab/coder-loop",
-				baseBranch: "main",
-				status: "active",
-				metadata: {},
-			})
+					repository: "mouriya-s-lab/coder-loop",
+					baseBranch: "main",
+					status: "active",
+					metadata: storedChainMetadata({}),
+				})
 			const item = store.createItem({
 				chainId: chain.id,
 				issueNumber: 238,
 				repoCwd: REPO_ROOT,
-				status: "in_progress",
+				status: runtimeStatus("in_progress"),
 				attempts: 1,
-				lastRunId: "run-stale-238",
-				agentCwd: resolve(root, "worktree"),
-				title: "stale item",
-				extra: {},
-			})
+					lastRunId: "run-stale-238",
+					agentCwd: resolve(root, "worktree"),
+					title: "stale item",
+					extra: storedItemExtra({}),
+				})
 			store.recordRun({
 				runId: "run-stale-238",
 				chainId: chain.id,
-				itemId: item.id,
-				phase: "iteration",
-				startedAt: 1_800_000_000,
-				extra: {},
-			})
+					itemId: item.id,
+					phase: "iteration",
+					startedAt: 1_800_000_000,
+					extra: storedItemExtra({}),
+				})
 			store.setCurrentRun({
 				chainId: chain.id,
-				phase: "iteration",
-				runId: "run-stale-238",
-				startedAt: 1_800_000_000,
-				extra: { itemId: item.id, pid: stale.pid, processGroupLeader: true },
-			})
+					phase: "iteration",
+					runId: "run-stale-238",
+					startedAt: 1_800_000_000,
+					extra: storedItemExtra({ itemId: item.id, pid: stale.pid, processGroupLeader: true }),
+				})
 		} finally {
 			store.close()
 		}
@@ -2617,7 +2622,7 @@ attemptTimeoutSeconds = 3600
 			})).item)
 			await request(fixture, "item.update", {
 				itemId: numberValue(added.id),
-				status: "in_progress",
+				status: runtimeStatus("in_progress"),
 			})
 
 			const status = record(expectOk(await request(fixture, "chain.status", { chainId })))
@@ -2697,7 +2702,7 @@ attemptTimeoutSeconds = 3600
 			const stderr = await readFile(paths.runStderrFile(runId), "utf-8")
 			const events = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, { run: runId })
 
-			expect(status).toMatchObject({ runId, chainId, issueNumber: 203, phase: "iteration", exitCode: 0, status: "done" })
+			expect(status).toMatchObject({ runId, chainId, issueNumber: 203, phase: "iteration", exitCode: 0, status: runtimeStatus("done") })
 			expect(stdout).toContain("done:")
 			expect(stderr).toBe("")
 			expect(status.eventsPath).toBe(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile)
@@ -3385,17 +3390,17 @@ process.exitCode = 0
 			) as Extract<SchedulerEvent, { type: "agent.exit" }>
 			expect(agentExit.exitCode).toBe(0)
 
-			const run = await waitFor(
-				async () => {
-					const item = await readItem(fixture.loopDataRoot, chainId, 201)
-					if (item?.lastRunId === undefined || item.lastRunId === null) return null
-					return await readRun(fixture.loopDataRoot, item.lastRunId)
-				},
-				(run): run is NonNullable<typeof run> => run !== null && (run.extra as BoundaryRecord | undefined)?.summary !== undefined,
-			)
-			expect(run).not.toBeNull()
-			expect(run!.extra).toBeDefined()
-			expect((run!.extra as BoundaryRecord).summary).toBe(summaryContent)
+				const run = await waitFor(
+					async () => {
+						const item = await readItem(fixture.loopDataRoot, chainId, 201)
+						if (item?.lastRunId === undefined || item.lastRunId === null) return null
+						return await readRun(fixture.loopDataRoot, item.lastRunId)
+					},
+					(run): run is NonNullable<typeof run> => run !== null && itemExtraToJsonObject(run.extra).summary !== undefined,
+				)
+				expect(run).not.toBeNull()
+				expect(run!.extra).toBeDefined()
+				expect(itemExtraToJsonObject(run!.extra).summary).toBe(summaryContent)
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -3433,10 +3438,10 @@ process.exitCode = 0
 			) as Extract<SchedulerEvent, { type: "agent.exit" }>
 			expect(agentExit.exitCode).toBe(1)
 
-			const item = await readItem(fixture.loopDataRoot, chainId, 301)
-			const run = await readRun(fixture.loopDataRoot, item?.lastRunId ?? "")
-			expect(run?.extra).toBeDefined()
-			expect((run?.extra as BoundaryRecord).summary).toBe("watchdog work")
+				const item = await readItem(fixture.loopDataRoot, chainId, 301)
+				const run = await readRun(fixture.loopDataRoot, item?.lastRunId ?? "")
+				expect(run?.extra).toBeDefined()
+				expect(run === null ? undefined : itemExtraToJsonObject(run.extra).summary).toBe("watchdog work")
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -3525,10 +3530,10 @@ process.exitCode = 0
 			) as Extract<SchedulerEvent, { type: "agent.exit" }>
 			expect(agentExit.exitCode).toBe(0)
 
-			const item = await readItem(fixture.loopDataRoot, chainId, 311)
-			const run = await readRun(fixture.loopDataRoot, item?.lastRunId ?? "")
-			expect(run).not.toBeNull()
-			expect((run?.extra as BoundaryRecord).summary).toBeUndefined()
+				const item = await readItem(fixture.loopDataRoot, chainId, 311)
+				const run = await readRun(fixture.loopDataRoot, item?.lastRunId ?? "")
+				expect(run).not.toBeNull()
+				expect(run === null ? undefined : itemExtraToJsonObject(run.extra).summary).toBeUndefined()
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -3783,18 +3788,19 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 			worktreeManager,
 			kindResolver: () => ({ ok: true, kind: "code" }),
 			prompt: ({ item, runId, phase }) => {
+				const extra = itemExtraToJsonObject(item.extra)
 				const payload: BoundaryRecord = {
 					itemId: item.id,
 					issueNumber: item.issueNumber,
 					runId,
 					eventLog,
-					sleepMs: typeof item.extra.sleepMs === "number" ? item.extra.sleepMs : 5,
-					exitCode: typeof item.extra.exitCode === "number" ? item.extra.exitCode : 0,
-					writeStatus: daemonFakeRunnerWriteStatus(phase, item.extra),
+					sleepMs: typeof extra.sleepMs === "number" ? extra.sleepMs : 5,
+					exitCode: typeof extra.exitCode === "number" ? extra.exitCode : 0,
+					writeStatus: daemonFakeRunnerWriteStatus(phase, extra),
 				}
-				if (Object.prototype.hasOwnProperty.call(item.extra, "summary")) payload.summary = item.extra.summary
-				if (Object.prototype.hasOwnProperty.call(item.extra, "summaryWrap")) payload.summaryWrap = item.extra.summaryWrap
-				if (Object.prototype.hasOwnProperty.call(item.extra, "extraSleepAfterSummaryMs")) payload.extraSleepAfterSummaryMs = item.extra.extraSleepAfterSummaryMs
+				if (Object.prototype.hasOwnProperty.call(extra, "summary")) payload.summary = extra.summary
+				if (Object.prototype.hasOwnProperty.call(extra, "summaryWrap")) payload.summaryWrap = extra.summaryWrap
+				if (Object.prototype.hasOwnProperty.call(extra, "extraSleepAfterSummaryMs")) payload.extraSleepAfterSummaryMs = extra.extraSleepAfterSummaryMs
 				return JSON.stringify(payload)
 			},
 			chainCompleteTriggerForChain: options.chainCompleteTriggerForChain ?? (() => null),

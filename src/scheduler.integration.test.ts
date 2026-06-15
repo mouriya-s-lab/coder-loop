@@ -17,6 +17,7 @@ import {
 import { resolveChainRuntimePaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
 import { loadPreset } from "./loop"
+import { parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 import type { BoundaryRecord } from "./boundary-types"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -24,6 +25,10 @@ const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
 const LOADED_PRESET = loadPreset(PRESET_DIR).then((preset) => ({ presetDir: PRESET_DIR, preset }))
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-integration-tests", String(process.pid))
+
+function runtimeStatus(value: string) {
+	return parseInternalStatus(value, "test.status")
+}
 
 afterAll(async () => {
 	await rm(TEST_ROOT, { recursive: true, force: true })
@@ -56,15 +61,15 @@ process.exit(1)
 			repository: "mouriya-s-lab/coder-loop",
 			baseBranch: "main",
 			status: "active",
-			metadata: { maxItemAttempts: 50 },
+			metadata: storedChainMetadata({ maxItemAttempts: 50 }),
 		})
 		const item = store.createItem({
 			chainId: chain.id,
 			issueNumber: 313_001,
 			repoCwd: REPO_ROOT,
-			status: "queued",
+			status: runtimeStatus("queued"),
 			attempts: 0,
-			extra: { issueKind: "code" },
+			extra: storedItemExtra({ issueKind: "code" }),
 		})
 		const state = createSchedulerState()
 		const schedulerEvents: SchedulerEvent[] = []
@@ -142,7 +147,7 @@ await Bun.write(${JSON.stringify(promptCapture)}, prompt)
 			repository: "mouriya-s-lab/coder-loop",
 			baseBranch: "main",
 			status: "active",
-			metadata: {},
+			metadata: storedChainMetadata({}),
 		})
 		const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot })
 		await mkdir(paths.chainRoot, { recursive: true })
@@ -151,11 +156,11 @@ await Bun.write(${JSON.stringify(promptCapture)}, prompt)
 			chainId: chain.id,
 			issueNumber: 357_001,
 			repoCwd: REPO_ROOT,
-			status: "queued",
+			status: runtimeStatus("queued"),
 			attempts: 0,
 			issueFile: null,
 			evidenceDir: null,
-			extra: { issueKind: "code" },
+			extra: storedItemExtra({ issueKind: "code" }),
 		})
 		const state = createSchedulerState()
 		const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
@@ -210,7 +215,7 @@ test("stopped chain does not block another active chain in the same scheduler ti
 			repository: "mouriya-s-lab/coder-loop",
 			baseBranch: "main",
 			status: "stopped",
-			metadata: {},
+			metadata: storedChainMetadata({}),
 		})
 		const active = store.createChain({
 			name: "active-sibling-chain",
@@ -218,23 +223,23 @@ test("stopped chain does not block another active chain in the same scheduler ti
 			repository: "mouriya-s-lab/coder-loop",
 			baseBranch: "main",
 			status: "active",
-			metadata: {},
+			metadata: storedChainMetadata({}),
 		})
 		const stoppedItem = store.createItem({
 			chainId: stopped.id,
 			issueNumber: 349_101,
 			repoCwd: REPO_ROOT,
-			status: "queued",
+			status: runtimeStatus("queued"),
 			attempts: 0,
-			extra: { issueKind: "code" },
+			extra: storedItemExtra({ issueKind: "code" }),
 		})
 		const activeItem = store.createItem({
 			chainId: active.id,
 			issueNumber: 349_102,
 			repoCwd: REPO_ROOT,
-			status: "queued",
+			status: runtimeStatus("queued"),
 			attempts: 0,
-			extra: { issueKind: "code" },
+			extra: storedItemExtra({ issueKind: "code" }),
 		})
 		const state = createSchedulerState()
 		const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
@@ -284,6 +289,7 @@ test("completed chain removes its real git worktree registration and local direc
 	await writeFile(
 		fakeRunner,
 		`import { openSqliteStateStore } from ${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))}
+import { parseInternalStatus } from ${JSON.stringify(resolve(REPO_ROOT, "src/runtime-data.ts"))}
 
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
@@ -291,7 +297,7 @@ const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
 const loopDataRoot = process.env.CODER_LOOP_DATA_DIR
 if (typeof loopDataRoot === "string" && typeof input.itemId === "number") {
 	const store = openSqliteStateStore({ loopDataRoot })
-	store.updateItem(input.itemId, { status: "done", updatedAt: Math.floor(Date.now() / 1000) })
+	store.updateItem(input.itemId, { status: parseInternalStatus("done", "fixture.status"), updatedAt: Math.floor(Date.now() / 1000) })
 	store.close()
 }
 console.log("done:" + input.itemId)
@@ -306,15 +312,15 @@ console.log("done:" + input.itemId)
 			repository: "mouriya-s-lab/coder-loop",
 			baseBranch: "main",
 			status: "active",
-			metadata: {},
+			metadata: storedChainMetadata({}),
 		})
 		const item = store.createItem({
 			chainId: chain.id,
 			issueNumber: 351_002,
 			repoCwd: target,
-			status: "queued",
+			status: runtimeStatus("queued"),
 			attempts: 0,
-			extra: { issueKind: "code" },
+			extra: storedItemExtra({ issueKind: "code" }),
 		})
 		const lockPath = reviewOnEmptyLockPathForChainName(chain.name, { loopDataRoot })
 		await mkdir(dirname(lockPath), { recursive: true })
@@ -391,15 +397,15 @@ console.log(input.phase + ":" + status)
 			repository: "mouriya-s-lab/coder-loop",
 			baseBranch: "main",
 			status: "active",
-			metadata: {},
+			metadata: storedChainMetadata({}),
 		})
 		const item = store.createItem({
 			chainId: chain.id,
 			issueNumber: 346_001,
 			repoCwd: REPO_ROOT,
-			status: "queued",
+			status: runtimeStatus("queued"),
 			attempts: 0,
-			extra: { issueKind: "code" },
+			extra: storedItemExtra({ issueKind: "code" }),
 		})
 		const state = createSchedulerState()
 		const schedulerEvents: SchedulerEvent[] = []
@@ -492,15 +498,15 @@ echo "ITERATION SUMMARY: scope=daemon-crash-restart; reason=fake-codex"
 			repository: "mouriya-s-lab/coder-loop",
 			baseBranch: "main",
 			status: "active",
-			metadata: {},
+			metadata: storedChainMetadata({}),
 		})
 		const item = store.createItem({
 			chainId: chain.id,
 			issueNumber: 359_001,
 			repoCwd: REPO_ROOT,
-			status: "queued",
+			status: runtimeStatus("queued"),
 			attempts: 0,
-			extra: { issueKind: "code" },
+			extra: storedItemExtra({ issueKind: "code" }),
 		})
 
 		const env = { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` }

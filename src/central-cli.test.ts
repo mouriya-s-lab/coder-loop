@@ -7,6 +7,7 @@ import { startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
 import { LOOP_DATA_ROOT_ENV, resolveLoopDataPaths } from "./runtime-paths"
 import { reviewOnEmptyLockPathForChainName, serializeSchedulerReviewOnEmptyLock } from "./scheduler"
 import { openSqliteStateStore } from "./sqlite-state"
+import { parseInternalStatus, storedItemExtra } from "./runtime-data"
 import type { BoundaryRecord } from "./boundary-types"
 
 function preInstallReviewOnEmptyLockByName(chainName: string, loopDataRoot: string, runId = "test-pre-installed"): void {
@@ -332,7 +333,7 @@ attemptTimeoutSeconds = 3600
 			try {
 				const chain = store.getChainByName("done-chain")
 				if (chain === null) throw new Error("expected done-chain")
-				store.createItem({ chainId: chain.id, issueNumber: 181, repoCwd: REPO_ROOT, status: "done" })
+				store.createItem({ chainId: chain.id, issueNumber: 181, repoCwd: REPO_ROOT, status: parseInternalStatus("done", "test.status") })
 			} finally {
 				store.close()
 			}
@@ -355,14 +356,14 @@ attemptTimeoutSeconds = 3600
 			try {
 				const chain = store.getChainByName("dependency-wait-chain")
 				if (chain === null) throw new Error("expected dependency-wait-chain")
-				const prerequisite = store.createItem({ chainId: chain.id, issueNumber: 2671, repoCwd: REPO_ROOT, status: "queued", priority: "10" })
+				const prerequisite = store.createItem({ chainId: chain.id, issueNumber: 2671, repoCwd: REPO_ROOT, status: parseInternalStatus("queued", "test.status"), priority: "10" })
 				const dependent = store.createItem({
 					chainId: chain.id,
 					issueNumber: 2672,
 					repoCwd: REPO_ROOT,
-					status: "queued",
+					status: parseInternalStatus("queued", "test.status"),
 					priority: "00",
-					extra: { dependsOn: [prerequisite.id] },
+					extra: storedItemExtra({ dependsOn: [prerequisite.id] }),
 				})
 				prerequisiteId = prerequisite.id
 				dependentId = dependent.id
@@ -791,7 +792,7 @@ attemptTimeoutSeconds = 3600
 			try {
 				const completedChain = store.getChainByName("logs-completed-history-chain")
 				if (completedChain === null) throw new Error("expected logs-completed-history-chain")
-				store.createItem({ chainId: completedChain.id, issueNumber: 411, repoCwd: REPO_ROOT, status: "done" })
+				store.createItem({ chainId: completedChain.id, issueNumber: 411, repoCwd: REPO_ROOT, status: parseInternalStatus("done", "test.status") })
 			} finally {
 				store.close()
 			}

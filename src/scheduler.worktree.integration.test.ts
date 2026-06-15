@@ -14,11 +14,16 @@ import {
 } from "./scheduler"
 import { openSqliteStateStore } from "./sqlite-state"
 import { loadPreset } from "./loop"
+import { parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
 const LOADED_PRESET = loadPreset(PRESET_DIR).then((preset) => ({ presetDir: PRESET_DIR, preset }))
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-worktree-tests", String(process.pid))
+
+function runtimeStatus(value: string) {
+	return parseInternalStatus(value, "test.status")
+}
 
 afterAll(async () => {
 	await rm(TEST_ROOT, { recursive: true, force: true })
@@ -52,7 +57,7 @@ function makeChain(store: ReturnType<typeof openSqliteStateStore>, name: string)
 		repository: "fixture/worktree",
 		baseBranch: "main",
 		status: "active",
-		metadata: {},
+		metadata: storedChainMetadata({}),
 	})
 }
 
@@ -129,9 +134,9 @@ test("worktree create failure is contained: backoff + schedulerSpawnError in ext
 			chainId: chain.id,
 			issueNumber: 466_001,
 			repoCwd: REPO_ROOT,
-			status: "queued",
+			status: runtimeStatus("queued"),
 			attempts: 0,
-			extra: { issueKind: "code" },
+			extra: storedItemExtra({ issueKind: "code" }),
 		})
 		const state = createSchedulerState()
 		const events: SchedulerEvent[] = []

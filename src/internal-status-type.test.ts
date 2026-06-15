@@ -6,6 +6,7 @@ import { resolve } from "node:path"
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/internal-status-type-tests", String(process.pid))
 const RUNTIME_DATA_PATH = resolve(REPO_ROOT, "src/runtime-data.ts")
+const TSC_BIN = resolve(REPO_ROOT, "node_modules/.bin/tsc")
 
 afterAll(async () => {
 	await rm(TEST_ROOT, { recursive: true, force: true })
@@ -40,9 +41,7 @@ void status
 
 async function runTypeScriptNoEmit(path: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
 	return await new Promise((resolveResult, reject) => {
-		const child = spawn("bun", [
-			"x",
-			"tsc",
+		const child = spawn(TSC_BIN, [
 			"--strict",
 			"--target",
 			"ESNext",

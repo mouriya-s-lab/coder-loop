@@ -29,16 +29,21 @@ import {
 } from "./loop"
 import {
 	chainCompleteTriggerState,
+	chainConfigBindings as metadataConfigBindings,
+	chainMetadataToJsonObject,
 	clearSchedulerBackoff as clearItemSchedulerBackoff,
 	clearSchedulerSpawnError as clearItemSchedulerSpawnError,
 	itemSchedulerBackoff,
+	itemExtraToJsonObject,
+	itemExtraWithoutKeys,
+	metadataString,
 	parseInternalStatus,
+	storedItemExtra,
 	withChainCompleteTriggerState,
 	withoutChainCompleteTriggerState,
 	withSchedulerBackoff,
 	withSchedulerSpawnError as withItemSchedulerSpawnError,
 	type InternalStatus,
-	type ChainCompleteTriggerState,
 	type SchedulerBackoffState,
 	type SchedulerSpawnError,
 } from "./runtime-data"
@@ -824,21 +829,21 @@ async function spawnSchedulerRun(
 		phase,
 		status: RUNNING_RUN_STATUS,
 		startedAt,
-			extra: {
+			extra: storedItemExtra({
 				slotKey: slot.key,
 				repoCwd: item.repoCwd,
 				worktreePath,
 				startStatus: item.status,
 				startStatusUpdatedAt: item.statusUpdatedAt,
 				...(item.phase === null ? {} : { startPhase: item.phase }),
-			},
+			}),
 		})
 	options.store.setCurrentRun({
 		chainId: chain.id,
 		phase,
 		runId,
 		startedAt,
-		extra: { slotKey: slot.key, itemId: item.id, repoCwd: item.repoCwd },
+		extra: storedItemExtra({ slotKey: slot.key, itemId: item.id, repoCwd: item.repoCwd }),
 	})
 	const spawnUpdate: Parameters<typeof options.store.updateItem>[1] = {
 		attempts: item.attempts + 1,
@@ -896,14 +901,14 @@ async function spawnSchedulerRun(
 		phase,
 		runId,
 		startedAt,
-			extra: {
+			extra: storedItemExtra({
 				slotKey: slot.key,
 				itemId: item.id,
 				repoCwd: item.repoCwd,
 				worktreePath,
 				...(activeRun.pid === null ? {} : { pid: activeRun.pid }),
 				processGroupLeader: true,
-			},
+			}),
 	})
 	await writeSchedulerRunStatus(options, {
 		runId,
@@ -1024,7 +1029,12 @@ function attachRunCloseHandler(
 						endedAt,
 						exitCode,
 						status,
-						extra: { ...(completedRun?.extra ?? {}), stdoutBytes: stdoutText.length, stderrBytes: stderrText.length, ...(summary !== null ? { summary } : {}) },
+						extra: storedItemExtra({
+							...(completedRun === null ? {} : itemExtraToJsonObject(completedRun.extra)),
+							stdoutBytes: stdoutText.length,
+							stderrBytes: stderrText.length,
+							...(summary !== null ? { summary } : {}),
+						}),
 					})
 
 					const currentRun = options.store.getCurrentRun(chain.id)
@@ -1403,8 +1413,7 @@ async function unblockDependencySatisfiedItems(
 		// (selectNextPendingItemFromSnapshot) resolves deps only within the per-chain snapshot, so
 		// leaving a cross-chain dependsOn on the restored item would re-gate it and it would never
 		// be selected into iteration. The dependency is fulfilled, so the record has served its job.
-		const nextExtra: JsonObject = { ...item.extra }
-		delete nextExtra.dependsOn
+		const nextExtra = itemExtraWithoutKeys(item.extra, ["dependsOn"])
 		options.store.updateItem(item.id, { status: chainStatuses.entry, extra: nextExtra, updatedAt: nowSeconds(options) })
 		await emit(options, {
 			type: "item.dependency_unblocked",
@@ -1519,7 +1528,7 @@ function persistKeepActiveTriggerState(
 	runId: string | undefined,
 ): void {
 	const recordedAt = nowSeconds(options)
-	const state: ChainCompleteTriggerState = {
+	const state: { decision: "keep-active"; fingerprint: string; recordedAt: number; reason?: string; runId?: string } = {
 		decision: decision.decision,
 		fingerprint,
 		recordedAt,
@@ -1563,7 +1572,7 @@ function chainCompletionFingerprint(chain: ChainRecord, items: readonly ItemReco
 				agentCwd: item.agentCwd,
 				runner: item.runner,
 				phase: item.phase,
-				extra: item.extra,
+				extra: itemExtraToJsonObject(item.extra),
 				createdAt: item.createdAt,
 				updatedAt: item.updatedAt,
 			}))
@@ -1573,7 +1582,7 @@ function chainCompletionFingerprint(chain: ChainRecord, items: readonly ItemReco
 }
 
 function chainMetadataForFingerprint(metadata: ChainRecord["metadata"]): JsonObject {
-	return withoutChainCompleteTriggerState(metadata)
+	return chainMetadataToJsonObject(withoutChainCompleteTriggerState(metadata))
 }
 
 function stableJsonStringify(value: JsonValue): string {
@@ -1812,7 +1821,7 @@ function makeReviewOnEmptyFallbackItem(chain: ChainRecord, representative: ItemR
 		agentCwd: representative.agentCwd,
 		runner: null,
 		phase: reviewPhase,
-		extra: {},
+		extra: storedItemExtra({}),
 		createdAt: representative.createdAt,
 		updatedAt: representative.updatedAt,
 		statusUpdatedAt: representative.statusUpdatedAt,
@@ -2054,7 +2063,7 @@ export function resumeDecisionForItem(item: ItemRecord, phase: string, runner: A
 
 export async function defaultSchedulerKindResolver(context: { chain: ChainRecord; item: ItemRecord }): Promise<ParsedIssueKind> {
 	const repository = context.chain.repository === "" ? null : context.chain.repository
-	return await resolveIssueKind(repository, String(context.item.issueNumber), context.item.extra)
+	return await resolveIssueKind(repository, String(context.item.issueNumber), itemExtraToJsonObject(context.item.extra))
 }
 
 async function resolvePhaseRunner(
@@ -2165,27 +2174,11 @@ function buildSchedulerConfigBindings(repoCwd: string, chain: ChainRecord): Json
 	const bindings: JsonObject = {
 		repository: chain.repository,
 		baseBranch: chain.baseBranch,
-		...chainConfigBindings(chain.metadata),
+		...metadataConfigBindings(chain.metadata),
 	}
-	const workflowFile = stringMetadata(chain.metadata, "workflowFile") ?? stringConfigBinding(bindings, "workflowFile")
+	const workflowFile = metadataString(chain.metadata, "workflowFile") ?? stringConfigBinding(bindings, "workflowFile")
 	bindings.workflowFile = resolveWorkflowFileConfigBinding(repoCwd, workflowFile)
 	return bindings
-}
-
-function chainConfigBindings(metadata: JsonObject): JsonObject {
-	const value = metadata.config
-	if (value === undefined) return {}
-	if (!isJsonObjectRecord(value)) throw new Error("chain.metadata.config must be a JSON object when provided")
-	return { ...value }
-}
-
-function isJsonObjectRecord(value: JsonValue): value is JsonObject {
-	return typeof value === "object" && value !== null && !Array.isArray(value)
-}
-
-function stringMetadata(metadata: JsonObject, key: string): string | null {
-	const value = metadata[key]
-	return typeof value === "string" && value.trim() !== "" ? value : null
 }
 
 function stringConfigBinding(bindings: JsonObject, key: string): string | null {

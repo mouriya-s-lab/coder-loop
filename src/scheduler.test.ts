@@ -40,13 +40,17 @@ import {
 import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import { type ChainRecord, type ItemRecord, openSqliteStateStore } from "./sqlite-state"
 import { appendObservabilityEvent, queryObservabilityEvents } from "./observability"
-import { parseInternalStatus } from "./runtime-data"
+import { itemExtraJsonValue, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 import type { BoundaryRecord } from "./boundary-types"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-tests", String(process.pid))
 
 let nextFixtureId = 0
+
+function runtimeStatus(value: string) {
+	return parseInternalStatus(value, "test.status")
+}
 
 afterAll(async () => {
 	await rm(TEST_ROOT, { recursive: true, force: true })
@@ -347,7 +351,7 @@ describe("scheduler", () => {
 			expect(fixture.schedulerEvents.filter((event) => event.type === "chain.complete_trigger")).toHaveLength(1)
 
 			const followUp = createItem(fixture.store, chain, { issueNumber: 2696, repoCwd: "/repo/a" })
-			fixture.store.updateItem(followUp.id, { status: "done", updatedAt: 1_800_000_999 })
+			fixture.store.updateItem(followUp.id, { status: runtimeStatus("done"), updatedAt: 1_800_000_999 })
 			const thirdTick = await schedulerTick(options)
 			expect(thirdTick.spawnedRuns).toHaveLength(0)
 			expect(thirdTick.completedChainIds).toEqual([])
@@ -410,7 +414,7 @@ describe("scheduler", () => {
 			const chain = createChain(fixture.store, "manual-terminal-completion-chain")
 			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 249, repoCwd: "/repo/a" })
-			fixture.store.updateItem(item.id, { status: "done", updatedAt: 1_800_000_500 })
+			fixture.store.updateItem(item.id, { status: runtimeStatus("done"), updatedAt: 1_800_000_500 })
 
 			const tick = await schedulerTick(fixture.options())
 
@@ -434,7 +438,7 @@ describe("scheduler", () => {
 			expect(tick.spawnedRuns).toHaveLength(1)
 			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
 
-			fixture.store.updateItem(item.id, { status: "done", updatedAt: 1_800_000_500 })
+			fixture.store.updateItem(item.id, { status: runtimeStatus("done"), updatedAt: 1_800_000_500 })
 			const closed = await tick.spawnedRuns[0]!.terminate({ forceAfterMs: 200 })
 
 			expect(closed.exitCode).toBe(1)
@@ -469,7 +473,7 @@ describe("scheduler", () => {
 			// Model the daemon's stale-recovery: a killed item is reset to a backoff-gated continuable
 			// status so the untouched sibling gets the next turn.
 			// Omit `extra` to preserve the spawn-failure backoff applied on termination.
-			fixture.store.updateItem(first.id, { status: "changes_requested", phase: null, updatedAt: 1_800_000_700 })
+			fixture.store.updateItem(first.id, { status: runtimeStatus("changes_requested"), phase: null, updatedAt: 1_800_000_700 })
 
 			const secondTick = await schedulerTick(fixture.options())
 			expect(secondTick.spawnedRuns).toHaveLength(1)
@@ -491,10 +495,10 @@ describe("scheduler", () => {
 			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 7008, repoCwd: "/repo/a" })
 			fixture.store.updateItem(item.id, {
-				status: "changes_requested",
+				status: runtimeStatus("changes_requested"),
 				attempts: DEFAULT_MAX_ITEM_ATTEMPTS,
 				lastRunId: "run-prior-default-failure",
-				extra: { ...item.extra, schedulerBackoff: { failureCount: DEFAULT_MAX_ITEM_ATTEMPTS, nextRunAt: 1_800_000_000 } },
+				extra: storedItemExtra({ ...itemExtraToJsonObject(item.extra), schedulerBackoff: { failureCount: DEFAULT_MAX_ITEM_ATTEMPTS, nextRunAt: 1_800_000_000 } }),
 				updatedAt: 1_800_000_500,
 			})
 
@@ -517,18 +521,18 @@ describe("scheduler", () => {
 	})
 
 	test("maxItemAttempts metadata override exhausts a continuable item before spawning and emits queue.terminal", async () => {
-		const fixture = await createFixture("max-item-attempts-exhaust")
-		try {
-			const chain = createChain(fixture.store, "max-item-attempts-exhaust-chain", {
-				metadata: { maxItemAttempts: 2 },
-			})
+			const fixture = await createFixture("max-item-attempts-exhaust")
+			try {
+				const chain = createChain(fixture.store, "max-item-attempts-exhaust-chain", {
+					metadata: { maxItemAttempts: 2 },
+				})
 			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 7003, repoCwd: "/repo/a" })
 			fixture.store.updateItem(item.id, {
-				status: "changes_requested",
+				status: runtimeStatus("changes_requested"),
 				attempts: 2,
 				lastRunId: "run-prior-failure",
-				extra: { ...item.extra, schedulerBackoff: { failureCount: 2, nextRunAt: 1_800_000_000 } },
+				extra: storedItemExtra({ ...itemExtraToJsonObject(item.extra), schedulerBackoff: { failureCount: 2, nextRunAt: 1_800_000_000 } }),
 				updatedAt: 1_800_000_500,
 			})
 
@@ -552,11 +556,11 @@ describe("scheduler", () => {
 
 	test("failed spawns enter exponential backoff and a held item does not starve a sibling", async () => {
 		const fixture = await createFixture("failure-backoff-sibling")
-		try {
-			let now = 1_800_010_000
-			const chain = createChain(fixture.store, "failure-backoff-sibling-chain", {
-				metadata: { maxItemAttempts: 10 },
-			})
+			try {
+				let now = 1_800_010_000
+				const chain = createChain(fixture.store, "failure-backoff-sibling-chain", {
+					metadata: { maxItemAttempts: 10 },
+				})
 			const failing = createItem(fixture.store, chain, {
 				issueNumber: 7004,
 				repoCwd: "/repo/a",
@@ -704,11 +708,11 @@ describe("scheduler", () => {
 
 	test("forced failure fixture does not spin at 1Hz: thirty seconds spawn once before sixty-second backoff", async () => {
 		const fixture = await createFixture("failure-backoff-30s")
-		try {
-			let now = 1_800_030_000
-			const chain = createChain(fixture.store, "failure-backoff-30s-chain", {
-				metadata: { maxItemAttempts: 50 },
-			})
+			try {
+				let now = 1_800_030_000
+				const chain = createChain(fixture.store, "failure-backoff-30s-chain", {
+					metadata: { maxItemAttempts: 50 },
+				})
 			const item = createItem(fixture.store, chain, {
 				issueNumber: 7007,
 				repoCwd: "/repo/a",
@@ -763,10 +767,10 @@ describe("scheduler", () => {
 			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const target = createItem(fixture.store, chain, { issueNumber: 710_001, repoCwd: "/repo/a" })
 			const dependent = createItem(fixture.store, chain, { issueNumber: 710_002, repoCwd: "/repo/a" })
-			fixture.store.updateItem(target.id, { status: "done", updatedAt: 1_800_710_001 })
+			fixture.store.updateItem(target.id, { status: runtimeStatus("done"), updatedAt: 1_800_710_001 })
 			fixture.store.updateItem(dependent.id, {
-				status: "blocked",
-				extra: { ...dependent.extra, dependsOn: [target.id] },
+				status: runtimeStatus("blocked"),
+				extra: storedItemExtra({ ...itemExtraToJsonObject(dependent.extra), dependsOn: [target.id] }),
 				updatedAt: 1_800_710_002,
 			})
 
@@ -786,15 +790,15 @@ describe("scheduler", () => {
 		const fixture = await createFixture("no-exhaustion-status")
 		const presetDir = resolve(fixture.loopDataRoot, "..", "no-exhaustion-preset")
 		await writeNoExhaustionPreset(presetDir)
-		try {
-			const chain = createChain(fixture.store, "no-exhaustion-status-chain", {
-				preset: "no-exhaustion",
-				metadata: { maxItemAttempts: 1 },
-			})
+			try {
+				const chain = createChain(fixture.store, "no-exhaustion-status-chain", {
+					preset: "no-exhaustion",
+					metadata: { maxItemAttempts: 1 },
+				})
 			const item = createItem(fixture.store, chain, { issueNumber: 710_003, repoCwd: "/repo/a" })
 			fixture.store.updateItem(item.id, {
 				attempts: 1,
-				extra: { ...item.extra, schedulerBackoff: { failureCount: 1, nextRunAt: 1_800_800_100 } },
+				extra: storedItemExtra({ ...itemExtraToJsonObject(item.extra), schedulerBackoff: { failureCount: 1, nextRunAt: 1_800_800_100 } }),
 				updatedAt: 1_800_800_000,
 			})
 
@@ -929,7 +933,7 @@ describe("scheduler", () => {
 				issueNumber: 203,
 				phase: "iteration",
 				exitCode: 0,
-				status: "done",
+				status: runtimeStatus("done"),
 			})
 			expect(stdout).toContain(`done:${item.id}`)
 			expect(stderr).toBe("")
@@ -998,7 +1002,7 @@ describe("scheduler", () => {
 				chain: chain.name,
 				item: item.id,
 				phase: "iteration",
-				payload: { exitCode: 0, status: "done" },
+				payload: { exitCode: 0, status: runtimeStatus("done") },
 			})
 			expect(typeof phaseEnd.ts).toBe("string")
 			expect(Number.isFinite(Date.parse(phaseEnd.ts))).toBe(true)
@@ -1222,14 +1226,14 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				chainId: chain.id,
 				itemId: item.id,
 				phase: "iteration",
-				status: "running",
+				status: runtimeStatus("running"),
 				startedAt: 1_800_000_700,
 				endedAt: null,
 				exitCode: null,
-				extra: { startStatus: "queued" },
+				extra: storedItemExtra({ startStatus: "queued" }),
 			})
 			fixture.store.updateItem(item.id, {
-				status: "in_progress",
+				status: runtimeStatus("in_progress"),
 				phase: "iteration",
 				attempts: 1,
 				lastRunId: "run-active-iteration-ledger",
@@ -1239,7 +1243,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 			const tick = await schedulerTick(fixture.options())
 			expect(tick.spawnedRuns).toHaveLength(0)
 			expect(fixture.store.getItem(item.id)).toMatchObject({
-				status: "in_progress",
+				status: runtimeStatus("in_progress"),
 				phase: "iteration",
 				attempts: 1,
 				lastRunId: "run-active-iteration-ledger",
@@ -1319,17 +1323,17 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 			const alphaTick = await schedulerTick(baseOptions)
 			expect(alphaTick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-alpha`)
 			await alphaTick.spawnedRuns[0]!.closed
-			expect(fixture.store.getItem(item.id)).toMatchObject({ status: "queued", phase: "alpha", attempts: 1 })
+			expect(fixture.store.getItem(item.id)).toMatchObject({ status: runtimeStatus("queued"), phase: "alpha", attempts: 1 })
 
 			const betaTick = await schedulerTick(baseOptions)
 			expect(betaTick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-beta`)
 			await betaTick.spawnedRuns[0]!.closed
-			expect(fixture.store.getItem(item.id)).toMatchObject({ status: "queued", phase: "beta", attempts: 2 })
+			expect(fixture.store.getItem(item.id)).toMatchObject({ status: runtimeStatus("queued"), phase: "beta", attempts: 2 })
 
 			const gammaTick = await schedulerTick(baseOptions)
 			expect(gammaTick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-gamma`)
 			await gammaTick.spawnedRuns[0]!.closed
-			expect(fixture.store.getItem(item.id)).toMatchObject({ status: "done", phase: "gamma", attempts: 3 })
+			expect(fixture.store.getItem(item.id)).toMatchObject({ status: runtimeStatus("done"), phase: "gamma", attempts: 3 })
 
 			const phaseStarts = fixture.schedulerEvents
 				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
@@ -1357,14 +1361,14 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				chainId: chain.id,
 				itemId: item.id,
 				phase: "iteration",
-				status: "queued",
+				status: runtimeStatus("queued"),
 				startedAt: 1_800_000_900,
 				endedAt: 1_800_000_950,
 				exitCode: 0,
-				extra: { startStatus: "queued" },
+				extra: storedItemExtra({ startStatus: "queued" }),
 			})
 			fixture.store.updateItem(item.id, {
-				status: "queued",
+				status: runtimeStatus("queued"),
 				phase: "iteration",
 				attempts: 1,
 				lastRunId: "run-pre-crash-iter",
@@ -1411,11 +1415,11 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				chainId: chain.id,
 				itemId: item.id,
 				phase: "review",
-				status: "queued",
+				status: runtimeStatus("queued"),
 				startedAt: 1_800_002_300,
 				endedAt: 1_800_002_350,
 				exitCode: 0,
-				extra: { startStatus: "queued", startStatusUpdatedAt: item.statusUpdatedAt },
+				extra: storedItemExtra({ startStatus: "queued", startStatusUpdatedAt: item.statusUpdatedAt }),
 			})
 			fixture.store.updateItem(item.id, {
 				phase: "review",
@@ -1458,7 +1462,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				summary: "REVIEW SUMMARY: verdict=retry; issue=#31401; reason=review-retry",
 			})
 			const beforeReview = fixture.store.updateItem(item.id, {
-				status: "changes_requested",
+				status: runtimeStatus("changes_requested"),
 				phase: "review",
 				attempts: 1,
 				updatedAt: 1_800_002_300,
@@ -1469,14 +1473,14 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				chainId: chain.id,
 				itemId: item.id,
 				phase: "review",
-				status: "changes_requested",
+				status: runtimeStatus("changes_requested"),
 				startedAt: 1_800_002_350,
 				endedAt: 1_800_002_450,
 				exitCode: 0,
-				extra: { startStatus: "changes_requested", startStatusUpdatedAt: beforeReview.statusUpdatedAt },
+				extra: storedItemExtra({ startStatus: "changes_requested", startStatusUpdatedAt: beforeReview.statusUpdatedAt }),
 			})
 			fixture.store.updateItem(item.id, {
-				status: "changes_requested",
+				status: runtimeStatus("changes_requested"),
 				phase: "review",
 				attempts: 2,
 				lastRunId: "run-pre-review-retry",
@@ -1518,7 +1522,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				summary: "ITERATION SUMMARY: scope=unit; reason=iter-retry",
 			})
 			fixture.store.updateItem(item.id, {
-				status: "changes_requested",
+				status: runtimeStatus("changes_requested"),
 				phase: "iteration",
 				attempts: 1,
 				lastRunId: "run-pre-iter-retry",
@@ -1564,14 +1568,14 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				chainId: chain.id,
 				itemId: item.id,
 				phase: "iteration",
-				status: "queued",
+				status: runtimeStatus("queued"),
 				startedAt: 1_800_001_900,
 				endedAt: 1_800_001_950,
 				exitCode: 0,
-				extra: { startStatus: "queued" },
+				extra: storedItemExtra({ startStatus: "queued" }),
 			})
 			fixture.store.updateItem(item.id, {
-				status: "queued",
+				status: runtimeStatus("queued"),
 				phase: "iteration",
 				attempts: 1,
 				lastRunId: "run-pre-review-iter",
@@ -1610,7 +1614,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 				summary: "REVIEW SUMMARY: verdict=accepted; issue=#29002; reason=trigger-default",
 			})
 			fixture.store.updateItem(item.id, {
-				status: "blocked",
+				status: runtimeStatus("blocked"),
 				phase: "review",
 				attempts: 2,
 				lastRunId: "run-pre-blocked-review",
@@ -1667,7 +1671,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 				summary: "ITERATION SUMMARY: blocked_responder=created; issue=#29003; blockerRepo=mouriya-s-lab/coder-loop-e2e-blocker; followup=https://example/1; queue=injected; daemon=started; reason=unblock",
 			})
 			fixture.store.updateItem(item.id, {
-				status: "blocked",
+				status: runtimeStatus("blocked"),
 				phase: "review",
 				attempts: 2,
 				lastRunId: "run-pre-blocked-review",
@@ -1715,7 +1719,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 29004, repoCwd: "/repo/a" })
 			fixture.store.updateItem(item.id, {
-				status: "blocked",
+				status: runtimeStatus("blocked"),
 				phase: "iteration",
 				attempts: 1,
 				lastRunId: "run-pre-blocked-iter",
@@ -1747,7 +1751,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 				status: "completed",
 			})
 			const blocker = createItem(fixture.store, blockerChain, { issueNumber: 7, repoCwd: "/repo/blocker", summary: null })
-			fixture.store.updateItem(blocker.id, { status: "done", phase: "review", updatedAt: 1_800_010_000 })
+			fixture.store.updateItem(blocker.id, { status: runtimeStatus("done"), phase: "review", updatedAt: 1_800_010_000 })
 
 			const dependentChain = createChain(fixture.store, "depends-unblock-dependent-chain")
 			preInstallReviewOnEmptyLock(dependentChain, fixture.loopDataRoot)
@@ -1755,10 +1759,10 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			// Lifecycle: blocked-responder already ran (phase=blocked-responder) and declared the
 			// cross-chain dependency; the item is parked in the stable blocked terminal state.
 			fixture.store.updateItem(dependent.id, {
-				status: "blocked",
+				status: runtimeStatus("blocked"),
 				phase: "blocked-responder",
 				attempts: 3,
-				extra: { ...dependent.extra, dependsOn: [blocker.id] },
+				extra: storedItemExtra({ ...itemExtraToJsonObject(dependent.extra), dependsOn: [blocker.id] }),
 				updatedAt: 1_800_010_100,
 			})
 
@@ -1813,16 +1817,16 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 				status: "completed",
 			})
 			const blocker = createItem(fixture.store, blockerChain, { issueNumber: 8, repoCwd: "/repo/blocker", summary: null })
-			fixture.store.updateItem(blocker.id, { status: "in_progress", phase: "iteration", updatedAt: 1_800_011_000 })
+			fixture.store.updateItem(blocker.id, { status: runtimeStatus("in_progress"), phase: "iteration", updatedAt: 1_800_011_000 })
 
 			const dependentChain = createChain(fixture.store, "depends-unblock-neg-dependent-chain")
 			preInstallReviewOnEmptyLock(dependentChain, fixture.loopDataRoot)
 			const dependent = createItem(fixture.store, dependentChain, { issueNumber: 29011, repoCwd: "/repo/a", summary: null })
 			fixture.store.updateItem(dependent.id, {
-				status: "blocked",
+				status: runtimeStatus("blocked"),
 				phase: "blocked-responder",
 				attempts: 3,
-				extra: { ...dependent.extra, dependsOn: [blocker.id] },
+				extra: storedItemExtra({ ...itemExtraToJsonObject(dependent.extra), dependsOn: [blocker.id] }),
 				updatedAt: 1_800_011_100,
 			})
 
@@ -1833,7 +1837,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			expect(fixture.store.getItem(dependent.id)?.extra.dependsOn).toEqual([blocker.id])
 
 			// Dep ends in a non-success terminal status (exhausted) → still no awakening.
-			fixture.store.updateItem(blocker.id, { status: "exhausted", updatedAt: 1_800_011_200 })
+			fixture.store.updateItem(blocker.id, { status: runtimeStatus("exhausted"), updatedAt: 1_800_011_200 })
 			const exhaustedTick = await schedulerTick(fixture.options())
 			expect(fixture.store.getItem(dependent.id)?.status).toBe("blocked")
 			expect(fixture.store.getItem(dependent.id)?.extra.dependsOn).toEqual([blocker.id])
@@ -1861,16 +1865,16 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 				status: "completed",
 			})
 			const blocker = createItem(fixture.store, blockerChain, { issueNumber: 9, repoCwd: "/repo/blocker", summary: null })
-			fixture.store.updateItem(blocker.id, { status: "in_progress", phase: "iteration", updatedAt: 1_800_012_000 })
+			fixture.store.updateItem(blocker.id, { status: runtimeStatus("in_progress"), phase: "iteration", updatedAt: 1_800_012_000 })
 
 			const dependentChain = createChain(fixture.store, "depends-guard-dependent-chain")
 			preInstallReviewOnEmptyLock(dependentChain, fixture.loopDataRoot)
 			const dependent = createItem(fixture.store, dependentChain, { issueNumber: 29012, repoCwd: "/repo/a", summary: null })
 			fixture.store.updateItem(dependent.id, {
-				status: "blocked",
+				status: runtimeStatus("blocked"),
 				phase: "blocked-responder",
 				attempts: 3,
-				extra: { ...dependent.extra, dependsOn: [blocker.id] },
+				extra: storedItemExtra({ ...itemExtraToJsonObject(dependent.extra), dependsOn: [blocker.id] }),
 				updatedAt: 1_800_012_100,
 			})
 
@@ -1881,7 +1885,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			expect(fixture.store.getChain(dependentChain.id)?.status).toBe("active")
 
 			// Once the dep reaches success terminal, the same chain unblocks then proceeds normally.
-			fixture.store.updateItem(blocker.id, { status: "done", updatedAt: 1_800_012_200 })
+			fixture.store.updateItem(blocker.id, { status: runtimeStatus("done"), updatedAt: 1_800_012_200 })
 			const unblockTick = await schedulerTick(fixture.options())
 			expect(unblockTick.completedChainIds).toEqual([])
 			expect(fixture.store.getItem(dependent.id)?.status).toBe("queued")
@@ -1907,10 +1911,10 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			preInstallReviewOnEmptyLock(dependentChain, fixture.loopDataRoot)
 			const dependent = createItem(fixture.store, dependentChain, { issueNumber: 29013, repoCwd: "/repo/a" })
 			fixture.store.updateItem(dependent.id, {
-				status: "blocked",
+				status: runtimeStatus("blocked"),
 				phase: "blocked-responder",
 				attempts: 3,
-				extra: { ...dependent.extra, dependsOn: [blocker.id] },
+				extra: storedItemExtra({ ...itemExtraToJsonObject(dependent.extra), dependsOn: [blocker.id] }),
 				updatedAt: 1_800_013_000,
 			})
 
@@ -1976,14 +1980,14 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 				chainId: chain.id,
 				itemId: item.id,
 				phase: "iteration",
-				status: "queued",
+				status: runtimeStatus("queued"),
 				startedAt: 1_800_005_900,
 				endedAt: 1_800_005_950,
 				exitCode: 0,
-				extra: { startStatus: "queued" },
+				extra: storedItemExtra({ startStatus: "queued" }),
 			})
 			fixture.store.updateItem(item.id, {
-				status: "queued",
+				status: runtimeStatus("queued"),
 				phase: "iteration",
 				attempts: 1,
 				lastRunId: "run-pre-race-iter",
@@ -2007,10 +2011,10 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			expect(reviewTick.completedChainIds).toEqual([])
 
 			fixture.store.updateItem(item.id, {
-				extra: {
-					...fixture.store.getItem(item.id)!.extra,
+				extra: storedItemExtra({
+					...itemExtraToJsonObject(fixture.store.getItem(item.id)!.extra),
 					summary: "REVIEW SUMMARY: verdict=blocked; issue=#29005; reason=stay-blocked",
-				},
+				}),
 			})
 			const triggerTick = await schedulerTick(baseOptions)
 			expect(triggerTick.spawnedRuns).toHaveLength(1)
@@ -2035,7 +2039,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 				summary: "REVIEW SUMMARY: verdict=accepted; issue=#29006; reason=real-spawn-trigger",
 			})
 			fixture.store.updateItem(item.id, {
-				status: "blocked",
+				status: runtimeStatus("blocked"),
 				phase: "review",
 				attempts: 2,
 				lastRunId: "run-pre-real-spawn-review",
@@ -2286,7 +2290,7 @@ describe("scheduler per-chain review-on-empty (issue #292)", () => {
 			const chain = createChain(fixture.store, "review-on-empty-lock-respected-chain")
 			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot, "lock-pre-existing")
 			const item = createItem(fixture.store, chain, { issueNumber: 14003, repoCwd: "/repo/a" })
-			fixture.store.updateItem(item.id, { status: "done", updatedAt: 1_800_006_000 })
+			fixture.store.updateItem(item.id, { status: runtimeStatus("done"), updatedAt: 1_800_006_000 })
 
 			const tick = await schedulerTick(fixture.options())
 			expect(tick.spawnedRuns).toHaveLength(0)
@@ -2307,7 +2311,7 @@ describe("scheduler per-chain review-on-empty (issue #292)", () => {
 			const chain = createChain(fixture.store, "review-on-empty-lock-with-new-item-chain")
 			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot, "lock-from-prior-drain")
 			const done = createItem(fixture.store, chain, { issueNumber: 14004, repoCwd: "/repo/a" })
-			fixture.store.updateItem(done.id, { status: "done", updatedAt: 1_800_007_000 })
+			fixture.store.updateItem(done.id, { status: runtimeStatus("done"), updatedAt: 1_800_007_000 })
 			const fresh = createItem(fixture.store, chain, { issueNumber: 14005, repoCwd: "/repo/a" })
 
 			const tick = await schedulerTick(fixture.options())
@@ -2487,7 +2491,7 @@ describe("scheduler chain bindings (issue #288)", () => {
 	test("renderSchedulerSpawnPrompt resolves WORKFLOW_FILE for existing chains without seeded config", async () => {
 		const preset = await loadPreset(PRESET_DIR)
 		const targetCwd = resolve(TEST_ROOT, "target-unseeded-workflow")
-		const chain = makeChainFixture({ name: "unseeded-workflow-chain", metadata: {} })
+		const chain = makeChainFixture({ name: "unseeded-workflow-chain", metadata: storedChainMetadata({}) })
 		const item = makeItemFixture(chain, { issueNumber: 999_004, repoCwd: targetCwd })
 		const rendered = await renderSchedulerSpawnPrompt({
 			rawPrompt: "workflow={{WORKFLOW_FILE}}",
@@ -2507,7 +2511,7 @@ describe("scheduler chain bindings (issue #288)", () => {
 		const targetCwd = resolve(TEST_ROOT, "target-seeded-workflow")
 		const chain = makeChainFixture({
 			name: "seeded-workflow-chain",
-			metadata: { config: { workflowFile: "policy/workflow.md" } },
+			metadata: storedChainMetadata({ config: { workflowFile: "policy/workflow.md" } }),
 		})
 		const item = makeItemFixture(chain, { issueNumber: 999_005, repoCwd: targetCwd })
 		const rendered = await renderSchedulerSpawnPrompt({
@@ -2691,7 +2695,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 		const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
 
 		test("chain default → iteration phase returns codex with binary 'codex'", async () => {
-			const chain = makeChainFixture({ metadata: {} })
+			const chain = makeChainFixture({ metadata: storedChainMetadata({}) })
 			const preset = await loadPreset(PRESET_DIR)
 			const runner = resolvePhaseRunnerFromChain({
 				chain,
@@ -2706,7 +2710,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 		})
 
 		test("chain default → review phase returns codex with the preset-declared model", async () => {
-			const chain = makeChainFixture({ metadata: {} })
+			const chain = makeChainFixture({ metadata: storedChainMetadata({}) })
 			const preset = await loadPreset(PRESET_DIR)
 			const runner = resolvePhaseRunnerFromChain({
 				chain,
@@ -2722,7 +2726,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 		})
 
 		test("chain metadata reviewRunner='claude' does not override review preset runner", async () => {
-			const chain = makeChainFixture({ metadata: { reviewRunner: "claude" } })
+			const chain = makeChainFixture({ metadata: storedChainMetadata({ reviewRunner: "claude" }) })
 			const preset = await loadPreset(PRESET_DIR)
 			const runner = resolvePhaseRunnerFromChain({
 				chain,
@@ -2738,9 +2742,9 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 
 		test("chain metadata codex.model overrides the preset-declared review model", async () => {
 			const chain = makeChainFixture({
-				metadata: {
+				metadata: storedChainMetadata({
 					codex: { model: "gpt-5.5-codex" },
-				},
+				}),
 			})
 			const preset = await loadPreset(PRESET_DIR)
 			const runner = resolvePhaseRunnerFromChain({
@@ -2755,7 +2759,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 		})
 
 		test("item.runner='claude' overrides codex iteration default for non-review phase", async () => {
-			const chain = makeChainFixture({ metadata: {} })
+			const chain = makeChainFixture({ metadata: storedChainMetadata({}) })
 			const preset = await loadPreset(PRESET_DIR)
 			const runner = resolvePhaseRunnerFromChain({
 				chain,
@@ -2769,7 +2773,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 		})
 
 		test("chain default → triggered/finalizer phase resolves to its preset codex runner", async () => {
-			const chain = makeChainFixture({ metadata: {} })
+			const chain = makeChainFixture({ metadata: storedChainMetadata({}) })
 			const preset = await loadPreset(PRESET_DIR)
 			const runner = resolvePhaseRunnerFromChain({
 				chain,
@@ -2784,11 +2788,11 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 
 		test("preset-declared review model flows into review args via buildRunnerInvocation", async () => {
 			const chain = makeChainFixture({
-				metadata: {
+				metadata: storedChainMetadata({
 					codex: {
 						extraArgs: ["--model", "gpt-5-stale", "--verbose"],
 					},
-				},
+				}),
 			})
 			const preset = await loadPreset(PRESET_DIR)
 			const runner = resolvePhaseRunnerFromChain({
@@ -2861,7 +2865,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			expect(iterStdout).toContain("BINARY:claude")
 			expect(iterStdout).not.toContain("BINARY:codex")
 
-			fixture.store.updateItem(fixture.store.listItems(chain.id)[0]!.id, { status: "changes_requested" })
+			fixture.store.updateItem(fixture.store.listItems(chain.id)[0]!.id, { status: runtimeStatus("changes_requested") })
 
 			const reviewTick = await schedulerTick({
 				...baseOptions,
@@ -3262,7 +3266,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			// set the item to a pending-eligible status so the explicit review tick selects it.
 			const iterTick = await schedulerTick({ ...sessionOptions, phase: "iteration" })
 			await iterTick.spawnedRuns[0]!.closed
-			fixture.store.updateItem(item.id, { status: "changes_requested", updatedAt: 1_800_000_500 })
+			fixture.store.updateItem(item.id, { status: runtimeStatus("changes_requested"), updatedAt: 1_800_000_500 })
 			const reviewTick = await schedulerTick({ ...sessionOptions, phase: "review" })
 			await reviewTick.spawnedRuns[0]!.closed
 
@@ -3311,7 +3315,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			// The agent exited non-zero without writing a status, so the spawn-set in_progress
 			// remains; model the daemon recovery back to a continuable status so the next tick
 			// re-selects a fresh iteration spawn rather than advancing to review.
-			fixture.store.updateItem(item.id, { status: "changes_requested", phase: null, updatedAt: now })
+			fixture.store.updateItem(item.id, { status: runtimeStatus("changes_requested"), phase: null, updatedAt: now })
 
 			now += 2
 			const secondTick = await schedulerTick(options)
@@ -3494,7 +3498,7 @@ function makeChainFixture(overrides: Partial<ChainRecord> = {}): ChainRecord {
 		umbrellaIssue: 282,
 		umbrellaRepo: "mouriya-s-lab/coder-loop",
 		status: "active",
-		metadata: {},
+		metadata: storedChainMetadata({}),
 		createdAt: 1_800_000_000,
 		updatedAt: 1_800_000_000,
 		...overrides,
@@ -3519,7 +3523,7 @@ function makeItemFixture(chain: ChainRecord, overrides: Partial<ItemRecord> & Pi
 		agentCwd: null,
 		runner: null,
 		phase: null,
-		extra: {},
+		extra: storedItemExtra({}),
 		createdAt: 1_800_000_001,
 		updatedAt: 1_800_000_001,
 		statusUpdatedAt: 1_800_000_001,
@@ -3633,20 +3637,21 @@ async function createFixture(name: string): Promise<Fixture> {
 			loopDataRootOptions: { loopDataRoot },
 			runIdFactory: ({ chain, item }) => `run-${chain.id}-${item.id}`,
 			prompt: ({ item, runId, worktreePath, phase }) => {
+			const extra = itemExtraToJsonObject(item.extra)
 			const payload: BoundaryRecord = {
 				itemId: item.id,
 				issueNumber: item.issueNumber,
 				runId,
 				worktreePath,
 				eventLog,
-				sleepMs: typeof item.extra.sleepMs === "number" ? item.extra.sleepMs : 5,
-				exitCode: typeof item.extra.exitCode === "number" ? item.extra.exitCode : 0,
+				sleepMs: typeof extra.sleepMs === "number" ? extra.sleepMs : 5,
+				exitCode: typeof extra.exitCode === "number" ? extra.exitCode : 0,
 				// v1 status model: the fake runner writes this status to the store itself, simulating the
 				// real agent's `coder-loop item update --status`. The scheduler only reads item.status; it
 				// never derives status from the runner's stdout or exit code.
-				writeStatus: fakeRunnerWriteStatus(phase, item.extra),
+				writeStatus: fakeRunnerWriteStatus(phase, extra),
 			}
-			if (Object.prototype.hasOwnProperty.call(item.extra, "summary")) payload.summary = item.extra.summary
+			if (Object.prototype.hasOwnProperty.call(extra, "summary")) payload.summary = extra.summary
 			return JSON.stringify(payload)
 		},
 			onEvent: (event) => {
@@ -3687,8 +3692,9 @@ async function loadedPresetFromDir(presetDir: string): Promise<SchedulerLoadedPr
 function createChain(
 	store: ReturnType<typeof openSqliteStateStore>,
 	name: string,
-	overrides: Partial<Parameters<typeof store.createChain>[0]> = {},
+	overrides: Omit<Partial<Parameters<typeof store.createChain>[0]>, "metadata"> & { metadata?: JsonObject } = {},
 ): ChainRecord {
+	const { metadata, ...rest } = overrides
 	return store.createChain({
 		name,
 		preset: "gh-issue-pr-iteration",
@@ -3697,10 +3703,10 @@ function createChain(
 		umbrellaIssue: 176,
 		umbrellaRepo: "mouriya-s-lab/coder-loop",
 		status: "active",
-		metadata: {},
+		metadata: storedChainMetadata(metadata ?? {}),
 		createdAt: 1_800_000_000,
 		updatedAt: 1_800_000_000,
-		...overrides,
+		...rest,
 	})
 }
 
@@ -3718,18 +3724,19 @@ function createItem(
 	const extra: JsonObject = {
 		sleepMs: input.sleepMs ?? 5,
 		exitCode: input.exitCode ?? 0,
-		issueKind: input.issueKind === undefined ? "code" : input.issueKind,
 	}
+	if (input.issueKind === undefined) extra.issueKind = "code"
+	if (input.issueKind !== undefined && input.issueKind !== null) extra.issueKind = input.issueKind
 	if (Object.prototype.hasOwnProperty.call(input, "summary")) extra.summary = input.summary ?? null
 	return store.createItem({
 		chainId: chain.id,
 		issueNumber: input.issueNumber,
 		repoCwd: input.repoCwd,
 		runner: input.runner ?? null,
-		status: "queued",
+		status: runtimeStatus("queued"),
 		attempts: 0,
 		title: `issue ${input.issueNumber}`,
-		extra,
+		extra: storedItemExtra(extra),
 		createdAt: 1_800_000_001 + input.issueNumber,
 		updatedAt: 1_800_000_001 + input.issueNumber,
 	})

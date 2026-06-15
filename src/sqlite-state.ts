@@ -3,6 +3,8 @@ import { existsSync } from "node:fs"
 
 import type { AgentRunnerKind, JsonObject, JsonValue } from "./loop"
 import {
+	chainMetadataToJsonObject,
+	itemExtraToJsonObject,
 	itemDependsOnIds,
 	parseInternalStatus,
 	storedChainMetadata,
@@ -33,7 +35,6 @@ export class SqliteStateError extends Error {
 
 const CHAIN_STATUSES = ["active", "completed", "deleted", "stopped"] as const
 export type ChainStatus = typeof CHAIN_STATUSES[number]
-type StatusInput = string | InternalStatus
 
 export type ChainRecord = {
 	id: number
@@ -97,7 +98,7 @@ export type CreateItemInput = {
 	chainId: number
 	issueNumber: number
 	repoCwd: string
-	status: StatusInput
+	status: InternalStatus
 	attempts?: number
 	title?: string | null
 	priority?: string | null
@@ -138,7 +139,7 @@ export type RecordRunInput = {
 	chainId: number
 	itemId: number
 	phase: string
-	status?: StatusInput
+	status?: InternalStatus
 	startedAt: number
 	endedAt?: number | null
 	exitCode?: number | null
@@ -148,7 +149,7 @@ export type RecordRunInput = {
 export type CompleteRunInput = {
 	endedAt: number
 	exitCode: number
-	status: StatusInput
+	status: InternalStatus
 	extra?: ItemExtra
 }
 
@@ -691,7 +692,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 					umbrellaIssue: input.umbrellaIssue ?? null,
 					umbrellaRepo: input.umbrellaRepo ?? null,
 					status: input.status ?? "active",
-						metadata: stringifyJsonObject(metadata),
+						metadata: stringifyJsonObject(chainMetadataToJsonObject(metadata)),
 					createdAt: createdAt,
 					updatedAt: updatedAt,
 				})
@@ -874,7 +875,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 
 		recordRun: (input) =>
 			write("record run", () => {
-					const status = parseInternalStatus(input.status ?? "in_progress", "runs.status")
+					const status = input.status ?? parseInternalStatus("in_progress", "runs.status")
 				const result = db.query<unknown, SqlParams>(`
 					INSERT INTO runs (run_id, chain_id, item_id, phase, status, started_at, ended_at, exit_code, extra)
 					VALUES ($runId, $chainId, $itemId, $phase, $status, $startedAt, $endedAt, $exitCode, $extra)
@@ -887,7 +888,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 					startedAt: input.startedAt,
 					endedAt: input.endedAt ?? null,
 					exitCode: input.exitCode ?? null,
-					extra: stringifyJsonObject(input.extra ?? {}),
+					extra: stringifyJsonObject(input.extra === undefined ? {} : itemExtraToJsonObject(input.extra)),
 				})
 				return requireRun(getRunRowByRunId(input.runId), Number(result.lastInsertRowid))
 			}),
@@ -913,7 +914,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 					endedAt: input.endedAt,
 					exitCode: input.exitCode,
 					status,
-					extra: stringifyJsonObject(nextExtra),
+					extra: stringifyJsonObject(itemExtraToJsonObject(nextExtra)),
 				})
 				return requireRun(getRunRowByRunId(runId), runId)
 			}),
@@ -970,6 +971,7 @@ function insertItem(db: Database, getItemRow: (id: number) => ItemRow | null, in
 	const updatedAt = input.updatedAt ?? createdAt
 	const statusUpdatedAt = input.statusUpdatedAt ?? updatedAt
 	const position = nextItemPosition(db, input.chainId)
+	const status = parseInternalStatus(input.status, "items.status")
 	const result = db.query<unknown, SqlParams>(`
 		INSERT INTO items (
 			chain_id, issue_number, repo_cwd, status, attempts, position, title, priority, branch, pr, last_run_id,
@@ -983,7 +985,7 @@ function insertItem(db: Database, getItemRow: (id: number) => ItemRow | null, in
 		chainId: input.chainId,
 		issueNumber: input.issueNumber,
 		repoCwd: input.repoCwd,
-		status: input.status,
+		status,
 		attempts: input.attempts ?? 0,
 		position: position,
 		title: input.title ?? null,
@@ -997,7 +999,7 @@ function insertItem(db: Database, getItemRow: (id: number) => ItemRow | null, in
 		agentCwd: input.agentCwd ?? null,
 		runner: input.runner ?? null,
 		phase: input.phase ?? null,
-		extra: stringifyJsonObject(input.extra ?? {}),
+		extra: stringifyJsonObject(input.extra === undefined ? {} : itemExtraToJsonObject(input.extra)),
 		createdAt: createdAt,
 		updatedAt: updatedAt,
 		statusUpdatedAt: statusUpdatedAt,
@@ -1097,7 +1099,7 @@ function chainParams(chain: ChainRecord): SqlParams {
 		umbrellaIssue: chain.umbrellaIssue,
 		umbrellaRepo: chain.umbrellaRepo,
 		status: chain.status,
-		metadata: stringifyJsonObject(chain.metadata),
+		metadata: stringifyJsonObject(chainMetadataToJsonObject(chain.metadata)),
 		updatedAt: chain.updatedAt,
 	}
 }
@@ -1120,7 +1122,7 @@ function itemParams(item: ItemRecord): SqlParams {
 		agentCwd: item.agentCwd,
 		runner: item.runner,
 		phase: item.phase,
-		extra: stringifyJsonObject(item.extra),
+		extra: stringifyJsonObject(itemExtraToJsonObject(item.extra)),
 		updatedAt: item.updatedAt,
 		statusUpdatedAt: item.statusUpdatedAt,
 	}
@@ -1132,7 +1134,7 @@ function currentRunParams(input: SetCurrentRunInput): SqlParams {
 		phase: input.phase,
 		runId: input.runId,
 		startedAt: input.startedAt,
-		extra: stringifyJsonObject(input.extra),
+		extra: stringifyJsonObject(itemExtraToJsonObject(input.extra)),
 	}
 }
 

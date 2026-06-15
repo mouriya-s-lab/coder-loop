@@ -43,6 +43,10 @@ import {
 } from "./sqlite-state"
 import {
 	chainConfigBindings as metadataConfigBindings,
+	itemExtraHasJsonKey,
+	itemExtraJsonValue,
+	itemExtraToJsonObject,
+	itemExtraWithoutKeys,
 	metadataBoolean,
 	metadataNestedString,
 	metadataNestedStringArray,
@@ -2909,7 +2913,7 @@ function statusItemSnapshot(item: ItemRecord, preset: Preset): StatusItemSnapsho
 }
 
 function transparentItemExtra(item: ItemRecord, preset: Preset): JsonObject {
-	const extra = { ...item.extra }
+	const extra = itemExtraToJsonObject(item.extra)
 	for (const field of preset.item.fields.keys()) {
 		if (extra[field] !== undefined) continue
 		const legacy = legacyTransparentItemField(item, field)
@@ -2962,7 +2966,7 @@ function statusCurrentRunSnapshot(current: CurrentRunRecord): StatusCurrentRunSn
 		phase: current.phase,
 		runId: current.runId,
 		startedAt: new Date(current.startedAt * 1000).toISOString(),
-		extra: current.extra,
+		extra: itemExtraToJsonObject(current.extra),
 	}
 }
 
@@ -2978,7 +2982,7 @@ function currentItemFromRecords(current: CurrentRunRecord, items: readonly ItemR
 }
 
 function currentIdFromRecord(current: CurrentRunRecord, preset: Preset): string | null {
-	const value = current.extra[preset.item.idField]
+	const value = itemExtraJsonValue(current.extra, preset.item.idField)
 	if (typeof value === "string" && value.length > 0) return value
 	if (typeof value === "number" && Number.isFinite(value)) return String(value)
 	return null
@@ -3545,8 +3549,8 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 		daemon,
 		verification: {
 			itemStatus: item?.status ?? null,
-			blockerRepoPresent: item === null ? null : hasOwnJsonKey(item.extra, "blockerRepo"),
-			blockerRefPresent: item === null ? null : hasOwnJsonKey(item.extra, "blockerRef"),
+			blockerRepoPresent: item === null ? null : itemExtraHasJsonKey(item.extra, "blockerRepo"),
+			blockerRefPresent: item === null ? null : itemExtraHasJsonKey(item.extra, "blockerRef"),
 			stateKind: "ok",
 			daemonRunning,
 		},
@@ -3567,11 +3571,9 @@ function restoreUnblockableItemRecord(
 	if (!preset.statuses.unblockable.includes(item.status)) return { changed: false, issue, reason: "not_unblockable", status: item.status }
 	const entryStatus = preset.statuses.entry
 
-	const nextExtra = { ...item.extra }
-	const clearedBlockerRepo = hasOwnJsonKey(nextExtra, "blockerRepo")
-	const clearedBlockerRef = hasOwnJsonKey(nextExtra, "blockerRef")
-	delete nextExtra.blockerRepo
-	delete nextExtra.blockerRef
+	const clearedBlockerRepo = itemExtraHasJsonKey(item.extra, "blockerRepo")
+	const clearedBlockerRef = itemExtraHasJsonKey(item.extra, "blockerRef")
+	const nextExtra = itemExtraWithoutKeys(item.extra, ["blockerRepo", "blockerRef"])
 
 	const current = store.getCurrentRun(chain.id)
 	const currentItem = current === null ? null : currentItemFromRecords(current, [item], preset)
@@ -4657,7 +4659,7 @@ export function makeIssueRunContext(current: StatusCurrentRunSnapshot | null): I
 }
 
 export function getItemId(item: ItemRecord, preset: Preset): string {
-	const value = item.extra[preset.item.idField]
+	const value = itemExtraJsonValue(item.extra, preset.item.idField)
 	if (typeof value === "string" && value.length > 0) return value
 	if (typeof value === "number" && Number.isFinite(value)) return String(value)
 	if (preset.item.idField === "issue") return String(item.issueNumber)
@@ -4738,7 +4740,10 @@ function lookupItemRootField(item: ItemRecord, field: string): JsonValue | undef
 		case "runner": return item.runner
 		case "phase": return item.phase
 		default:
-			if (item.extra[field] !== undefined) return item.extra[field]
+			{
+				const extraValue = itemExtraJsonValue(item.extra, field)
+				if (extraValue !== undefined) return extraValue
+			}
 			return legacyTransparentItemField(item, field)
 	}
 }
