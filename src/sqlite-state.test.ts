@@ -203,7 +203,7 @@ describe("sqlite state store", () => {
 			const otherRepo = createFullItem(store, chain, { issueNumber: 180, repoCwd: "/repo/other", status: runtimeStatus("queued") })
 
 			expect(store.getNextPendingItem({ chainId: chain.id, repoCwd: "/repo/coder-loop" })).toEqual(first)
-			expect(store.allItemsTerminal({ chainId: chain.id, terminalStatusNames: ["done", "moot", "blocked"] })).toBe(false)
+			expect(store.allItemsTerminal({ chainId: chain.id, terminalStatusNames: [runtimeStatus("done"), runtimeStatus("moot"), runtimeStatus("blocked")] })).toBe(false)
 
 			const metadataOnly = store.updateItem(first.id, { attempts: 2, updatedAt: 1_800_000_100 })
 			expect(metadataOnly.statusUpdatedAt).toBe(first.statusUpdatedAt)
@@ -215,7 +215,7 @@ describe("sqlite state store", () => {
 			expect(updatedFirst.pr).toBe(188)
 			expect(store.updateItem(second.id, { status: runtimeStatus("moot"), updatedAt: 1_800_000_102 }).status).toBe("moot")
 			expect(store.updateItem(otherRepo.id, { status: runtimeStatus("blocked"), updatedAt: 1_800_000_103 }).status).toBe("blocked")
-			expect(store.allItemsTerminal({ chainId: chain.id, terminalStatusNames: ["done", "moot", "blocked"] })).toBe(true)
+			expect(store.allItemsTerminal({ chainId: chain.id, terminalStatusNames: [runtimeStatus("done"), runtimeStatus("moot"), runtimeStatus("blocked")] })).toBe(true)
 
 			const run = store.recordRun({
 				runId: "run-data-access",
@@ -313,14 +313,14 @@ describe("sqlite state store", () => {
 			expect(store.getNextPendingItem({
 				chainId: chain.id,
 				repoCwd: "/repo/coder-loop",
-				statuses: ["queued"],
-				terminalStatusNames: ["done", "moot", "blocked"],
+				statuses: [runtimeStatus("queued")],
+				terminalStatusNames: [runtimeStatus("done"), runtimeStatus("moot"), runtimeStatus("blocked")],
 			})).toEqual(prerequisite)
 			expect(store.listDependencyWaits({
 				chainId: chain.id,
 				repoCwd: "/repo/coder-loop",
-				statuses: ["queued"],
-				terminalStatusNames: ["done", "moot", "blocked"],
+				statuses: [runtimeStatus("queued")],
+				terminalStatusNames: [runtimeStatus("done"), runtimeStatus("moot"), runtimeStatus("blocked")],
 			})).toEqual([{
 				itemId: dependent.id,
 				issueNumber: 2672,
@@ -350,14 +350,14 @@ describe("sqlite state store", () => {
 			expect(store.getNextPendingItem({
 				chainId: chain.id,
 				repoCwd: "/repo/coder-loop",
-				statuses: ["queued"],
-				terminalStatusNames: ["done", "moot", "blocked"],
+				statuses: [runtimeStatus("queued")],
+				terminalStatusNames: [runtimeStatus("done"), runtimeStatus("moot"), runtimeStatus("blocked")],
 			})).toEqual(dependent)
 			expect(store.listDependencyWaits({
 				chainId: chain.id,
 				repoCwd: "/repo/coder-loop",
-				statuses: ["queued"],
-				terminalStatusNames: ["done", "moot", "blocked"],
+				statuses: [runtimeStatus("queued")],
+				terminalStatusNames: [runtimeStatus("done"), runtimeStatus("moot"), runtimeStatus("blocked")],
 			})).toEqual([])
 		} finally {
 			store.close()
@@ -403,14 +403,14 @@ describe("sqlite state store", () => {
 			expect(store.getNextPendingItem({
 				chainId: dependentChain.id,
 				repoCwd: "/repo/coder-loop",
-				statuses: ["queued"],
-				terminalStatusNames: ["done", "moot", "blocked"],
+				statuses: [runtimeStatus("queued")],
+				terminalStatusNames: [runtimeStatus("done"), runtimeStatus("moot"), runtimeStatus("blocked")],
 			})).toEqual(dependent)
 			expect(store.listDependencyWaits({
 				chainId: dependentChain.id,
 				repoCwd: "/repo/coder-loop",
-				statuses: ["queued"],
-				terminalStatusNames: ["done", "moot", "blocked"],
+				statuses: [runtimeStatus("queued")],
+				terminalStatusNames: [runtimeStatus("done"), runtimeStatus("moot"), runtimeStatus("blocked")],
 			})).toEqual([])
 
 			// Flip the cross-chain blocker back to in-flight: the dependent is gated again.
@@ -418,14 +418,14 @@ describe("sqlite state store", () => {
 			expect(store.getNextPendingItem({
 				chainId: dependentChain.id,
 				repoCwd: "/repo/coder-loop",
-				statuses: ["queued"],
-				terminalStatusNames: ["done", "moot", "blocked"],
+				statuses: [runtimeStatus("queued")],
+				terminalStatusNames: [runtimeStatus("done"), runtimeStatus("moot"), runtimeStatus("blocked")],
 			})).toBeNull()
 			expect(store.listDependencyWaits({
 				chainId: dependentChain.id,
 				repoCwd: "/repo/coder-loop",
-				statuses: ["queued"],
-				terminalStatusNames: ["done", "moot", "blocked"],
+				statuses: [runtimeStatus("queued")],
+				terminalStatusNames: [runtimeStatus("done"), runtimeStatus("moot"), runtimeStatus("blocked")],
 			})).toEqual([{
 				itemId: dependent.id,
 				issueNumber: 2680,

@@ -30,13 +30,13 @@ import {
 import {
 	chainCompleteTriggerState,
 	chainConfigBindings as metadataConfigBindings,
+	chainConfigWorkflowFile,
 	chainMetadataToJsonObject,
 	clearSchedulerBackoff as clearItemSchedulerBackoff,
 	clearSchedulerSpawnError as clearItemSchedulerSpawnError,
 	itemSchedulerBackoff,
 	itemExtraToJsonObject,
 	itemExtraWithoutKeys,
-	metadataString,
 	parseInternalStatus,
 	storedItemExtra,
 	withChainCompleteTriggerState,
@@ -472,7 +472,7 @@ function nextNonTriggerPhaseForItem(input: {
 	const currentPhaseIndex = input.phasePlan.nonTriggerPhases.indexOf(input.item.phase)
 	if (currentPhaseIndex < 0) return null
 	if (currentPhaseIndex === input.phasePlan.nonTriggerPhases.length - 1) {
-		const startStatus = typeof latestRun.extra.startStatus === "string" ? parseInternalStatus(latestRun.extra.startStatus, "runs.extra.startStatus") : null
+		const startStatus = latestRun.extra.startStatus ?? null
 		const startStatusUpdatedAt = typeof latestRun.extra.startStatusUpdatedAt === "number" ? latestRun.extra.startStatusUpdatedAt : null
 		const statusWrittenAfterRunStart = startStatusUpdatedAt !== null
 			&& input.item.statusUpdatedAt !== startStatusUpdatedAt
@@ -495,8 +495,8 @@ function hasUnfinishedCurrentPhaseRun(item: ItemRecord, runsById: ReadonlyMap<st
 export type SchedulerPendingSelectionInput = {
 	items: readonly ItemRecord[]
 	repoCwd: string
-	statuses: readonly string[]
-	terminalStatuses: readonly string[]
+	statuses: readonly InternalStatus[]
+	terminalStatuses: readonly InternalStatus[]
 	now: number
 }
 
@@ -2176,14 +2176,9 @@ function buildSchedulerConfigBindings(repoCwd: string, chain: ChainRecord): Json
 		baseBranch: chain.baseBranch,
 		...metadataConfigBindings(chain.metadata),
 	}
-	const workflowFile = metadataString(chain.metadata, "workflowFile") ?? stringConfigBinding(bindings, "workflowFile")
+	const workflowFile = chain.metadata.workflowFile ?? chainConfigWorkflowFile(chain.metadata)
 	bindings.workflowFile = resolveWorkflowFileConfigBinding(repoCwd, workflowFile)
 	return bindings
-}
-
-function stringConfigBinding(bindings: JsonObject, key: string): string | null {
-	const value = bindings[key]
-	return typeof value === "string" && value.trim() !== "" ? value : null
 }
 
 function resolveFrom(base: string, path: string): string {

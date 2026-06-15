@@ -27,7 +27,7 @@ import {
 import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
 import { queryObservabilityEvents } from "./observability"
-import { itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
+import { chainConfigBindings, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 import type { BoundaryRecord } from "./boundary-types"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -1312,7 +1312,7 @@ attemptTimeoutSeconds = 3600
 			try {
 				const chain = store.getChainByName("legacy-runtime-data-chain")
 				if (chain === null) throw new Error("expected seeded chain")
-				expect(chain.metadata.config).toEqual({ workflowFile: "legacy-workflow.md" })
+				expect(chainConfigBindings(chain.metadata)).toEqual({ workflowFile: "legacy-workflow.md" })
 				expect(chain.metadata.maxItemAttempts).toBe(3)
 				const item = store.getItem(seededItemId)
 				if (item === null) throw new Error("expected seeded item")

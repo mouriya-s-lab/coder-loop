@@ -2913,7 +2913,7 @@ describe("runPresetChainCompleteTriggerPhases per-phase runner selection (issue 
 				chain,
 				items,
 				runId,
-				terminalStatusNames: ["done", "moot", "blocked"],
+				terminalStatusNames: [runtimeStatus("done"), runtimeStatus("moot"), runtimeStatus("blocked")],
 				loopDataRoot: fixture.loopDataRoot,
 				presetDir: PRESET_DIR,
 				targetCwd,
@@ -2955,7 +2955,7 @@ describe("runPresetChainCompleteTriggerPhases per-phase runner selection (issue 
 				chain,
 				items,
 				runId,
-				terminalStatusNames: ["done", "moot", "blocked"],
+				terminalStatusNames: [runtimeStatus("done"), runtimeStatus("moot"), runtimeStatus("blocked")],
 				loopDataRoot: fixture.loopDataRoot,
 				presetDir: PRESET_DIR,
 				targetCwd,
@@ -3005,7 +3005,7 @@ describe("runPresetChainCompleteTriggerPhases per-phase runner selection (issue 
 				chain,
 				items,
 				runId,
-				terminalStatusNames: ["done", "moot", "blocked"],
+				terminalStatusNames: [runtimeStatus("done"), runtimeStatus("moot"), runtimeStatus("blocked")],
 				loopDataRoot: fixture.loopDataRoot,
 				presetDir: PRESET_DIR,
 				targetCwd,
@@ -3146,8 +3146,8 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 		const selected = selectNextPendingItemFromSnapshot({
 			items: [laterCritical, firstNoPriority],
 			repoCwd: "/repo/order",
-			statuses: ["queued"],
-			terminalStatuses: ["done", "moot", "blocked"],
+			statuses: [runtimeStatus("queued")],
+			terminalStatuses: [runtimeStatus("done"), runtimeStatus("moot"), runtimeStatus("blocked")],
 			now: 1_800_000_100,
 		})
 		expect(selected?.id).toBe(firstNoPriority.id)
@@ -3161,8 +3161,8 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 		const selected = selectNextPendingItemFromSnapshot({
 			items: [formerHead, reorderedToHead, middle],
 			repoCwd: "/repo/reorder",
-			statuses: ["queued"],
-			terminalStatuses: ["done", "moot", "blocked"],
+			statuses: [runtimeStatus("queued")],
+			terminalStatuses: [runtimeStatus("done"), runtimeStatus("moot"), runtimeStatus("blocked")],
 			now: 1_800_000_100,
 		})
 		expect(selected?.id).toBe(reorderedToHead.id)

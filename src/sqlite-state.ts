@@ -35,6 +35,10 @@ export class SqliteStateError extends Error {
 
 const CHAIN_STATUSES = ["active", "completed", "deleted", "stopped"] as const
 export type ChainStatus = typeof CHAIN_STATUSES[number]
+const DEFAULT_PENDING_ITEM_STATUSES: readonly InternalStatus[] = [
+	parseInternalStatus("queued", "items.defaultPendingStatuses[0]"),
+	parseInternalStatus("changes_requested", "items.defaultPendingStatuses[1]"),
+]
 
 export type ChainRecord = {
 	id: number
@@ -166,16 +170,16 @@ export type SetCurrentRunInput = CurrentRunRecord
 export type GetNextPendingItemInput = {
 	chainId: number
 	repoCwd: string
-	statuses?: readonly string[]
-	terminalStatusNames?: readonly string[]
+	statuses?: readonly InternalStatus[]
+	terminalStatusNames?: readonly InternalStatus[]
 	resolveDependency?: DependencyResolver
 }
 
 export type ListDependencyWaitsInput = {
 	chainId: number
 	repoCwd?: string
-	statuses: readonly string[]
-	terminalStatusNames: readonly string[]
+	statuses: readonly InternalStatus[]
+	terminalStatusNames: readonly InternalStatus[]
 	resolveDependency?: DependencyResolver
 }
 
@@ -193,7 +197,7 @@ export type DependencyResolver = (id: number) => ItemRecord | null
 
 export type AllItemsTerminalInput = {
 	chainId: number
-	terminalStatusNames: readonly string[]
+	terminalStatusNames: readonly InternalStatus[]
 }
 
 export type ItemSessionIdInput = {
@@ -847,7 +851,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 
 		getNextPendingItem: (input) =>
 			read("get next pending item", () => {
-				const statuses = input.statuses ?? ["queued", "changes_requested"]
+				const statuses = input.statuses ?? DEFAULT_PENDING_ITEM_STATUSES
 				const terminalStatusNames = input.terminalStatusNames ?? []
 				return selectNextPendingItem(
 					db.query<ItemRow, SqlParams>("SELECT * FROM items WHERE chain_id = $chainId ORDER BY id ASC").all({
@@ -870,7 +874,9 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 		allItemsTerminal: (input) =>
 			read("check all items terminal", () => {
 				const terminal = new Set(input.terminalStatusNames)
-				return db.query<ItemRow, SqlParams>("SELECT * FROM items WHERE chain_id = $chainId").all({ chainId: input.chainId }).every((row) => terminal.has(row.status))
+				return db.query<ItemRow, SqlParams>("SELECT * FROM items WHERE chain_id = $chainId").all({ chainId: input.chainId })
+					.map((row) => requireItem(row, row.id))
+					.every((item) => terminal.has(item.status))
 			}),
 
 		recordRun: (input) =>
@@ -1140,8 +1146,8 @@ function currentRunParams(input: SetCurrentRunInput): SqlParams {
 
 type PendingSelectionOptions = {
 	repoCwd?: string
-	statuses: readonly string[]
-	terminalStatusNames: readonly string[]
+	statuses: readonly InternalStatus[]
+	terminalStatusNames: readonly InternalStatus[]
 	resolveDependency?: DependencyResolver
 }
 
@@ -1170,7 +1176,7 @@ export function listDependencyWaitReasons(items: readonly ItemRecord[], options:
 
 function dependencyWaitsByItemId(
 	items: readonly ItemRecord[],
-	terminalStatusNames: readonly string[],
+	terminalStatusNames: readonly InternalStatus[],
 	resolveDependency?: DependencyResolver,
 ): Map<number, DependencyWaitReason> {
 	const terminal = new Set(terminalStatusNames)

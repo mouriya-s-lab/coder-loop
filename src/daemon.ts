@@ -1587,12 +1587,12 @@ export class CoderLoopDaemon {
 		return new Set([...preset.statuses.continuable, ...preset.statuses.terminal])
 	}
 
-	private async continuableItemStatuses(chain: ChainRecord): Promise<Set<string>> {
+	private async continuableItemStatuses(chain: ChainRecord): Promise<Set<InternalStatus>> {
 		const { preset } = await this.loadedPresetForChain(chain)
 		return new Set(preset.statuses.continuable)
 	}
 
-	private async terminalItemStatuses(chain: ChainRecord): Promise<Set<string>> {
+	private async terminalItemStatuses(chain: ChainRecord): Promise<Set<InternalStatus>> {
 		const { preset } = await this.loadedPresetForChain(chain)
 		return new Set(preset.statuses.terminal)
 	}

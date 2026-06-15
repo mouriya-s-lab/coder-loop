@@ -61,8 +61,19 @@ export class ChainCompleteTriggerState extends RuntimeDataRecord {
 	}
 }
 
+export class ChainConfigBindings extends RuntimeDataRecord {
+	presetPath?: string
+	workflowFile?: string
+
+	constructor(input: ChainConfigBindingsInput, remainder: JsonObject) {
+		super(remainder)
+		if (input.presetPath !== undefined) this.presetPath = input.presetPath
+		if (input.workflowFile !== undefined) this.workflowFile = input.workflowFile
+	}
+}
+
 export class ChainMetadata extends RuntimeDataRecord {
-	config?: JsonObject
+	config?: ChainConfigBindings
 	presetPath?: string
 	workflowFile?: string
 	sharedContextFile?: string
@@ -77,7 +88,7 @@ export class ChainMetadata extends RuntimeDataRecord {
 
 	constructor(input: ChainMetadataInput, remainder: JsonObject) {
 		super(remainder)
-		if (input.config !== undefined) this.config = { ...input.config }
+		if (input.config !== undefined) this.config = input.config
 		if (input.presetPath !== undefined) this.presetPath = input.presetPath
 		if (input.workflowFile !== undefined) this.workflowFile = input.workflowFile
 		if (input.sharedContextFile !== undefined) this.sharedContextFile = input.sharedContextFile
@@ -114,7 +125,7 @@ export class ItemExtra extends RuntimeDataRecord {
 	itemId?: number
 	repoCwd?: string
 	worktreePath?: string
-	startStatus?: string
+	startStatus?: InternalStatus
 	startStatusUpdatedAt?: number
 	startPhase?: string
 	pid?: number
@@ -155,7 +166,7 @@ export type ChainCompleteTriggerStateInput = {
 }
 
 type ChainMetadataInput = {
-	config?: JsonObject
+	config?: ChainConfigBindings
 	presetPath?: string
 	workflowFile?: string
 	sharedContextFile?: string
@@ -169,6 +180,11 @@ type ChainMetadataInput = {
 	coderLoopChainCompleteTrigger?: ChainCompleteTriggerState
 }
 
+type ChainConfigBindingsInput = {
+	presetPath?: string
+	workflowFile?: string
+}
+
 type ItemExtraInput = {
 	dependsOn?: number[]
 	blockerRepo?: string
@@ -180,7 +196,7 @@ type ItemExtraInput = {
 	itemId?: number
 	repoCwd?: string
 	worktreePath?: string
-	startStatus?: string
+	startStatus?: InternalStatus
 	startStatusUpdatedAt?: number
 	startPhase?: string
 	pid?: number
@@ -203,6 +219,7 @@ const OptionalJsonObjectBoundary: ArkAssertable<JsonObject | undefined> = arkTyp
 
 const RUNNER_METADATA_KEYS = new Set(["binary", "model", "extraArgs"])
 const CHAIN_COMPLETE_TRIGGER_KEYS = new Set(["decision", "fingerprint", "recordedAt", "reason", "runId"])
+const CHAIN_CONFIG_BINDING_KEYS = new Set(["presetPath", "workflowFile"])
 const CHAIN_METADATA_KEYS = new Set([
 	"config",
 	"presetPath",
@@ -255,7 +272,7 @@ export function parseChainMetadataForRequest(value: BoundaryValue, field = "meta
 
 export function chainMetadataToJsonObject(metadata: ChainMetadata): JsonObject {
 	const result: JsonObject = { ...runtimeRemainder(metadata) }
-	assignJson(result, "config", metadata.config)
+	assignJson(result, "config", metadata.config === undefined ? undefined : chainConfigBindingsToJsonObject(metadata.config))
 	assignJson(result, "presetPath", metadata.presetPath)
 	assignJson(result, "workflowFile", metadata.workflowFile)
 	assignJson(result, "sharedContextFile", metadata.sharedContextFile)
@@ -275,14 +292,21 @@ export function chainMetadataToJsonObject(metadata: ChainMetadata): JsonObject {
 }
 
 export function chainConfigBindings(metadata: ChainMetadata): JsonObject {
-	return metadata.config === undefined ? {} : { ...metadata.config }
+	return metadata.config === undefined ? {} : chainConfigBindingsToJsonObject(metadata.config)
+}
+
+export function chainConfigPresetPath(metadata: ChainMetadata): string | null {
+	return metadata.config?.presetPath ?? null
+}
+
+export function chainConfigWorkflowFile(metadata: ChainMetadata): string | null {
+	return metadata.config?.workflowFile ?? null
 }
 
 export function chainPresetPath(metadata: ChainMetadata): string | null {
 	const direct = metadataString(metadata, "presetPath")
 	if (direct !== null) return direct
-	const value = metadata.config?.presetPath
-	return typeof value === "string" && value.trim() !== "" ? value : null
+	return chainConfigPresetPath(metadata)
 }
 
 export function metadataString(metadata: ChainMetadata, key: keyof ChainMetadata & string): string | null {
@@ -343,10 +367,6 @@ export function itemExtraJsonValue(extra: ItemExtra, key: string): JsonValue | u
 
 export function itemExtraHasJsonKey(extra: ItemExtra, key: string): boolean {
 	return Object.prototype.hasOwnProperty.call(itemExtraToJsonObject(extra), key)
-}
-
-export function itemExtraWithJsonPatch(extra: ItemExtra, patch: JsonObject): ItemExtra {
-	return storedItemExtra({ ...itemExtraToJsonObject(extra), ...patch })
 }
 
 export function itemExtraWithoutKeys(extra: ItemExtra, keys: readonly string[]): ItemExtra {
@@ -420,7 +440,7 @@ export function runtimeDataJsonValue(value: BoundaryValue): JsonValue {
 
 function parseChainMetadata(value: JsonObject, field: string): ChainMetadata {
 	const input: ChainMetadataInput = {}
-	const config = optionalJsonObjectField(value, "config", `${field}.config`)
+	const config = optionalChainConfigBindingsField(value, "config", `${field}.config`)
 	if (config !== undefined) input.config = config
 	const presetPath = optionalStringField(value, "presetPath", `${field}.presetPath`)
 	if (presetPath !== undefined) input.presetPath = presetPath
@@ -470,7 +490,7 @@ function parseItemExtra(value: JsonObject, field: string): ItemExtra {
 	const worktreePath = optionalStringField(value, "worktreePath", `${field}.worktreePath`)
 	if (worktreePath !== undefined) input.worktreePath = worktreePath
 	const startStatus = optionalStringField(value, "startStatus", `${field}.startStatus`)
-	if (startStatus !== undefined) input.startStatus = startStatus
+	if (startStatus !== undefined) input.startStatus = parseInternalStatus(startStatus, `${field}.startStatus`)
 	const startStatusUpdatedAt = optionalPositiveIntegerField(value, "startStatusUpdatedAt", `${field}.startStatusUpdatedAt`)
 	if (startStatusUpdatedAt !== undefined) input.startStatusUpdatedAt = startStatusUpdatedAt
 	const startPhase = optionalStringField(value, "startPhase", `${field}.startPhase`)
@@ -480,6 +500,18 @@ function parseItemExtra(value: JsonObject, field: string): ItemExtra {
 	const processGroupLeader = optionalBooleanField(value, "processGroupLeader", `${field}.processGroupLeader`)
 	if (processGroupLeader !== undefined) input.processGroupLeader = processGroupLeader
 	return new ItemExtra(input, remainderExcept(value, ITEM_EXTRA_KEYS))
+}
+
+function optionalChainConfigBindingsField(record: JsonObject, key: string, field: string): ChainConfigBindings | undefined {
+	const value = record[key]
+	if (value === undefined) return undefined
+	const object = jsonObjectFieldValue(value, field)
+	const input: ChainConfigBindingsInput = {}
+	const presetPath = optionalStringField(object, "presetPath", `${field}.presetPath`)
+	if (presetPath !== undefined) input.presetPath = presetPath
+	const workflowFile = optionalStringField(object, "workflowFile", `${field}.workflowFile`)
+	if (workflowFile !== undefined) input.workflowFile = workflowFile
+	return new ChainConfigBindings(input, remainderExcept(object, CHAIN_CONFIG_BINDING_KEYS))
 }
 
 function optionalRunnerMetadataField(record: JsonObject, key: string, field: string): RunnerMetadata | undefined {
@@ -609,6 +641,13 @@ function runnerMetadataToJsonObject(metadata: RunnerMetadata): JsonObject {
 	assignJson(result, "binary", metadata.binary)
 	assignJson(result, "model", metadata.model)
 	assignJson(result, "extraArgs", metadata.extraArgs === undefined ? undefined : [...metadata.extraArgs])
+	return result
+}
+
+function chainConfigBindingsToJsonObject(config: ChainConfigBindings): JsonObject {
+	const result: JsonObject = { ...runtimeRemainder(config) }
+	assignJson(result, "presetPath", config.presetPath)
+	assignJson(result, "workflowFile", config.workflowFile)
 	return result
 }
 

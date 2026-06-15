@@ -43,6 +43,8 @@ import {
 } from "./sqlite-state"
 import {
 	chainConfigBindings as metadataConfigBindings,
+	chainConfigPresetPath,
+	chainConfigWorkflowFile,
 	itemExtraHasJsonKey,
 	itemExtraJsonValue,
 	itemExtraToJsonObject,
@@ -3767,11 +3769,10 @@ function readDbCurrentRun(loopDataRoot: string | null, chainId: number): Current
 
 function loopConfigFromChain(chain: ChainRecord, loopDataRoot: string | null, explicitConfig: LoopConfig | null): LoopConfig {
 	const metadata = chain.metadata
-	const chainBindings = metadataConfigBindings(metadata)
-	const presetPath = metadataString(metadata, "presetPath") ?? stringConfigBinding(chainBindings, "presetPath") ?? explicitConfig?.presetPath ?? null
+	const presetPath = metadataString(metadata, "presetPath") ?? chainConfigPresetPath(metadata) ?? explicitConfig?.presetPath ?? null
 	const config: LoopConfig = {
 		worktree: metadataBoolean(metadata, "worktree") ?? explicitConfig?.worktree ?? null,
-		workflowFile: metadataString(metadata, "workflowFile") ?? stringConfigBinding(chainBindings, "workflowFile") ?? explicitConfig?.workflowFile ?? null,
+		workflowFile: metadataString(metadata, "workflowFile") ?? chainConfigWorkflowFile(metadata) ?? explicitConfig?.workflowFile ?? null,
 		sharedContextFile: metadataString(metadata, "sharedContextFile") ?? explicitConfig?.sharedContextFile ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "shared"),
 		issueDir: metadataString(metadata, "issueDir") ?? explicitConfig?.issueDir ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "issues"),
 		evidenceDir: metadataString(metadata, "evidenceDir") ?? explicitConfig?.evidenceDir ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "evidence"),
@@ -3799,7 +3800,8 @@ function buildEffectiveConfigBindings(
 		...metadataConfigBindings(chain.metadata),
 		...config.configBindings,
 	}
-	bindings.workflowFile = resolveWorkflowFileConfigBinding(targetCwd, config.workflowFile ?? stringConfigBinding(bindings, "workflowFile"))
+	const workflowFile = config.workflowFile ?? stringConfigBinding(config.configBindings, "workflowFile") ?? chainConfigWorkflowFile(chain.metadata)
+	bindings.workflowFile = resolveWorkflowFileConfigBinding(targetCwd, workflowFile)
 	return {
 		repository: chain.repository,
 		baseBranch: chain.baseBranch,
@@ -4409,7 +4411,7 @@ export type RunPresetChainCompleteTriggerPhasesInput = {
 	chain: ChainRecord
 	items: readonly ItemRecord[]
 	runId?: string
-	terminalStatusNames: readonly string[]
+	terminalStatusNames: readonly InternalStatus[]
 	loopDataRoot: string | null
 	phaseRunner?: RunPresetChainCompleteTriggerPhasesPhaseRunner
 	presetDir?: string
