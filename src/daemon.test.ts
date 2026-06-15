@@ -496,70 +496,69 @@ describe("daemon", () => {
 		}
 	})
 
-	test("daemon emits validation events when existing chain preset falls back", async () => {
-		const fixture = await startFixture("existing-preset-fallback-events", { schedulerPresetDir: null, schedulerIntervalMs: 20 })
+	test("daemon rejects existing chains with invalid or unknown presets instead of falling back", async () => {
+		const fixture = await startFixture("existing-preset-explicit-failure", { schedulerEnabled: false })
 		try {
 			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			let invalidPresetItemId: number
+			let unknownPresetItemId: number
 			try {
 				const invalidPresetChain = store.createChain({
-					name: "invalid-preset-fallback-chain",
+					name: "invalid-preset-chain",
 					preset: "bad_name",
 					repository: "mouriya-s-lab/coder-loop",
 					baseBranch: "main",
 					status: "active",
 					metadata: {},
 				})
-				store.createItem({
+				invalidPresetItemId = store.createItem({
 					chainId: invalidPresetChain.id,
 					issueNumber: 41101,
 					repoCwd: REPO_ROOT,
 					status: "queued",
 					attempts: 0,
 					extra: { sleepMs: 5, exitCode: 0 },
-				})
+				}).id
 				const unknownPresetChain = store.createChain({
-					name: "unknown-preset-fallback-chain",
+					name: "unknown-preset-chain",
 					preset: "missing-preset",
 					repository: "mouriya-s-lab/coder-loop",
 					baseBranch: "main",
 					status: "active",
 					metadata: {},
 				})
-				store.createItem({
+				unknownPresetItemId = store.createItem({
 					chainId: unknownPresetChain.id,
 					issueNumber: 41102,
 					repoCwd: REPO_ROOT,
 					status: "queued",
 					attempts: 0,
 					extra: { sleepMs: 5, exitCode: 0 },
-				})
+				}).id
 			} finally {
 				store.close()
 			}
 
-			const events = await waitFor(
-				async () => await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, {
-					kind: "validation",
-					type: "preset.fallback",
-				}),
-				(result) => result.events.some((event) => event.type === "preset.fallback" && event.payload.reason === "invalid_name")
-					&& result.events.some((event) => event.type === "preset.fallback" && event.payload.reason === "unknown_preset"),
-				10_000,
-			)
-			const invalidEvent = events.events.find((event) => event.type === "preset.fallback" && event.payload.reason === "invalid_name")
-			const unknownEvent = events.events.find((event) => event.type === "preset.fallback" && event.payload.reason === "unknown_preset")
-			expect(invalidEvent).toMatchObject({
-				kind: "validation",
-				type: "preset.fallback",
-				chain: "invalid-preset-fallback-chain",
-				payload: { preset: "bad_name", fallbackPreset: "gh-issue-pr-iteration", reason: "invalid_name" },
+			const invalidPresetResponse = await request(fixture, "item.update", {
+				itemId: invalidPresetItemId,
+				fields: { status: "done" },
 			})
-			expect(unknownEvent).toMatchObject({
-				kind: "validation",
-				type: "preset.fallback",
-				chain: "unknown-preset-fallback-chain",
-				payload: { preset: "missing-preset", fallbackPreset: "gh-issue-pr-iteration", reason: "unknown_preset" },
+			expect(invalidPresetResponse.ok).toBe(false)
+			if (!invalidPresetResponse.ok) {
+				expect(invalidPresetResponse.error.code).toBe("invalid_request")
+				expect(invalidPresetResponse.error.message).toContain("invalid name")
+			}
+
+			const unknownPresetResponse = await request(fixture, "item.update", {
+				itemId: unknownPresetItemId,
+				fields: { status: "done" },
 			})
+			expect(unknownPresetResponse.ok).toBe(false)
+			if (!unknownPresetResponse.ok) {
+				expect(unknownPresetResponse.error.code).toBe("invalid_request")
+				expect(unknownPresetResponse.error.message).toContain("failed to load preset")
+				expect(unknownPresetResponse.error.message).toContain("missing-preset")
+			}
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -982,6 +981,208 @@ describe("daemon", () => {
 		}
 	})
 
+	test("daemon validates item statuses from config-json presetPath metadata", async () => {
+		const fixture = await startFixture("custom-preset-status-validation", { schedulerEnabled: false })
+		try {
+			const presetPath = resolve(fixture.loopDataRoot, "..", "custom-status-preset")
+			await mkdir(presetPath, { recursive: true })
+			await writeFile(resolve(presetPath, "run.md"), "Run issue {{ISSUE}}.\n")
+			await writeFile(resolve(presetPath, "preset.toml"), `name = "custom-status-fixture"
+version = 1
+description = "Fixture preset for daemon status validation."
+
+[item]
+idField = "issue"
+
+[statuses]
+continuable = ["queued", "needs_work"]
+terminal = ["custom_done"]
+entry = "queued"
+success = ["custom_done"]
+
+[[phases]]
+name = "run"
+prompt = "run.md"
+
+  [phases.variables]
+  ISSUE = "item.issue"
+
+[agent]
+binary = "echo"
+extraArgs = []
+attemptTimeoutSeconds = 3600
+`)
+
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "custom-preset-chain",
+				repository: "mouriya-s-lab/coder-loop",
+				metadata: { config: { presetPath } },
+			})).chain)
+			const added = record(expectOk(await request(fixture, "item.add", {
+				chainId: numberValue(chain.id),
+				issueNumber: 45401,
+				repoCwd: REPO_ROOT,
+			})).item)
+			expect(added.status).toBe("queued")
+
+			const rejected = await request(fixture, "item.update", {
+				itemId: numberValue(added.id),
+				status: "not_in_custom_preset",
+			})
+			expect(rejected.ok).toBe(false)
+			if (!rejected.ok) {
+				expect(rejected.error.code).toBe("invalid_request")
+				expect(rejected.error.message).toContain("custom_done")
+				expect(rejected.error.message).toContain("needs_work")
+			}
+
+			const accepted = record(expectOk(await request(fixture, "item.update", {
+				itemId: numberValue(added.id),
+				status: "custom_done",
+			})).item)
+			expect(accepted.status).toBe("custom_done")
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("daemon reports custom presetPath load failures to each chain mutation request", async () => {
+		const fixture = await startFixture("custom-preset-load-failure", { schedulerEnabled: false })
+		try {
+			const presetPath = resolve(fixture.loopDataRoot, "..", "bad-status-preset")
+			await mkdir(presetPath, { recursive: true })
+			await writeFile(resolve(presetPath, "preset.toml"), "name = [broken\n")
+
+			const firstChain = record(expectOk(await request(fixture, "chain.create", {
+				name: "bad-custom-preset-chain-a",
+				repository: "mouriya-s-lab/coder-loop",
+				metadata: { config: { presetPath } },
+			})).chain)
+			const secondChain = record(expectOk(await request(fixture, "chain.create", {
+				name: "bad-custom-preset-chain-b",
+				repository: "mouriya-s-lab/coder-loop",
+				metadata: { config: { presetPath } },
+			})).chain)
+
+			const [firstResponse, secondResponse] = await Promise.all([
+				request(fixture, "item.add", {
+					chainId: numberValue(firstChain.id),
+					issueNumber: 45402,
+					repoCwd: REPO_ROOT,
+				}),
+				request(fixture, "item.add", {
+					chainId: numberValue(secondChain.id),
+					issueNumber: 45403,
+					repoCwd: REPO_ROOT,
+				}),
+			])
+			for (const [response, chain] of [[firstResponse, firstChain], [secondResponse, secondChain]] as const) {
+				expect(response.ok).toBe(false)
+				if (!response.ok) {
+					expect(response.error.code).toBe("invalid_request")
+					expect(response.error.message).toContain(`failed to load preset for chain ${chain.name}`)
+					expect(response.error.details).toMatchObject({ chainId: numberValue(chain.id), presetDir: presetPath })
+				}
+			}
+			const events = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, { type: "daemon.preset_load_failed" })
+			const firstEvent = events.events.find((event) => event.chain === firstChain.name)
+			const secondEvent = events.events.find((event) => event.chain === secondChain.name)
+			expect(firstEvent?.type).toBe("daemon.preset_load_failed")
+			expect(secondEvent?.type).toBe("daemon.preset_load_failed")
+			if (firstEvent?.type !== "daemon.preset_load_failed" || secondEvent?.type !== "daemon.preset_load_failed") {
+				throw new Error("expected daemon.preset_load_failed events for both chains")
+			}
+			expect(firstEvent.payload).toMatchObject({
+				chainId: numberValue(firstChain.id),
+				preset: "gh-issue-pr-iteration",
+				presetDir: presetPath,
+			})
+			expect(secondEvent.payload).toMatchObject({
+				chainId: numberValue(secondChain.id),
+				preset: "gh-issue-pr-iteration",
+				presetDir: presetPath,
+			})
+			expect(firstEvent.payload.error.length).toBeGreaterThan(0)
+			expect(secondEvent.payload.error.length).toBeGreaterThan(0)
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("daemon default scheduler prompt resolver consumes scheduler presetDir loaded preset", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-scheduler-preset-dir-prompt`)
+		const loopDataRoot = resolve(root, "ld")
+		const presetDir = resolve(root, "override-preset")
+		const runner = resolve(root, "capture-prompt-runner.ts")
+		const promptCapture = resolve(root, "captured-prompt.txt")
+		const repoCwd = resolve(root, "repo")
+		await mkdir(root, { recursive: true })
+		await initGitTarget(repoCwd)
+		await writePromptCaptureRunner(runner, promptCapture)
+		await writeSinglePhasePromptPreset(presetDir, "CUSTOM_SCHEDULER_PRESET_PROMPT")
+
+		const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd: itemRepoCwd }) => {
+			const worktreePath = schedulerSlotWorktreePath(chain, itemRepoCwd, { loopDataRoot })
+			await mkdir(worktreePath, { recursive: true })
+			return worktreePath
+		}
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			shutdownGraceMs: 100,
+			scheduler: {
+				enabled: true,
+				intervalMs: 20,
+				presetDir,
+				runner: {
+					kind: "claude",
+					source: "iteration-default",
+					binary: "bun",
+					extraArgs: [runner],
+					model: null,
+				},
+				worktreeManager,
+				kindResolver: () => ({ ok: true, kind: "code" }),
+				chainCompleteTriggerForChain: () => null,
+			},
+		})
+		try {
+			const socketPath = daemon.snapshot().socketPath
+			const fixture = {
+				daemon,
+				loopDataRoot,
+				socketPath,
+				pidFile: daemon.snapshot().pidFile,
+				eventLog: resolve(root, "events.jsonl"),
+				schedulerEvents: [],
+			}
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "scheduler-preset-dir-prompt-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			await request(fixture, "item.add", {
+				chainId: numberValue(chain.id),
+				issueNumber: 45403,
+				repoCwd,
+			})
+
+			const prompt = await waitFor(
+				async () => {
+					try {
+						return await readFile(promptCapture, "utf-8")
+					} catch {
+						return ""
+					}
+				},
+				(value) => value.includes("CUSTOM_SCHEDULER_PRESET_PROMPT"),
+				5_000,
+			)
+			expect(prompt).toContain("CUSTOM_SCHEDULER_PRESET_PROMPT")
+			expect(prompt).not.toContain("Step task: implement")
+		} finally {
+			await daemon.stop()
+		}
+	})
+
 	test("socket item.update writes typed blocker fields into extra without disturbing other keys", async () => {
 		const fixture = await startFixture("item-update-blocker", { schedulerEnabled: false })
 		try {
@@ -1080,7 +1281,7 @@ describe("daemon", () => {
 				issueNumber: 188,
 				repoCwd: REPO_ROOT,
 			})).item)
-			expect(added).toMatchObject({ issueNumber: 188, status: "queued" })
+			expect(added).toMatchObject({ issueNumber: 188, status: "pending" })
 			const pending = record(expectOk(await request(fixture, "item.update", {
 				itemId: numberValue(added.id),
 				status: "pending",
@@ -1353,7 +1554,7 @@ describe("daemon", () => {
 	})
 
 	test("socket completed chain remains read-only for item mutations", async () => {
-		const fixture = await startFixture("completed-chain-read-only")
+		const fixture = await startFixture("completed-chain-read-only", { schedulerEnabled: false })
 		try {
 			const chain = record(expectOk(await request(fixture, "chain.create", {
 				name: "read-only-completed-chain",
@@ -1367,9 +1568,13 @@ describe("daemon", () => {
 				title: "complete me",
 			})).item)
 			const itemId = numberValue(added.id)
-
-			expectOk(await request(fixture, "item.update", { itemId, status: "done" }))
-			await waitFor(async () => readChainStatus(fixture.loopDataRoot, chainId), (status) => status === "completed")
+			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				store.updateItem(itemId, { status: "done", phase: "review", updatedAt: 1_800_015_200 })
+				store.updateChain(chainId, { status: "completed", updatedAt: 1_800_015_201 })
+			} finally {
+				store.close()
+			}
 
 			expectChainNotActive(await request(fixture, "item.add", {
 				chainId,
@@ -1593,7 +1798,11 @@ describe("daemon", () => {
 			await waitFor(async () => readChainStatus(fixture.loopDataRoot, chainId), (status) => status === "completed", 10_000)
 			expect(record(expectOk(await request(fixture, "daemon.status")).daemon).activeRuns).toEqual([])
 			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({ type: "agent.exit", itemId, status: "done" }))
-			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({ type: "chain.completed", chainId }))
+			const chainCompleted = await waitFor(
+				async () => fixture.schedulerEvents.find((event) => event.type === "chain.completed" && event.chainId === chainId) ?? null,
+				(event) => event !== null,
+			)
+			expect(chainCompleted).toMatchObject({ type: "chain.completed", chainId })
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -3734,5 +3943,46 @@ if (extraSleepAfterSummary > 0) await new Promise((resolve) => setTimeout(resolv
 ${FAKE_RUNNER_STATUS_WRITE_SNIPPET}
 process.exitCode = input.exitCode
 `,
-		)
-	}
+	)
+}
+
+async function writePromptCaptureRunner(path: string, capturePath: string): Promise<void> {
+	await writeFile(
+		path,
+		`import { writeFile } from "node:fs/promises"
+
+const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "" : Bun.argv[promptIndex + 1] ?? ""
+await writeFile(${JSON.stringify(capturePath)}, prompt)
+process.exitCode = 0
+`,
+	)
+}
+
+async function writeSinglePhasePromptPreset(presetDir: string, prompt: string): Promise<void> {
+	await mkdir(presetDir, { recursive: true })
+	await writeFile(resolve(presetDir, "run.md"), `${prompt}\n`)
+	await writeFile(
+		resolve(presetDir, "preset.toml"),
+		`name = "scheduler-prompt-override"
+version = 1
+description = "Fixture preset for daemon scheduler prompt override."
+
+[item]
+idField = "issue"
+
+[statuses]
+continuable = ["queued"]
+terminal = ["done", "exhausted"]
+success = ["done"]
+entry = "queued"
+
+[agent]
+binary = "codex"
+
+[[phases]]
+name = "run"
+prompt = "run.md"
+`,
+	)
+}

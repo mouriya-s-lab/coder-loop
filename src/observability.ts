@@ -36,6 +36,7 @@ const ObservabilityEventTypeBoundary = arkType.or(
 	arkType.unit("daemon.stop.terminated_runs"),
 	arkType.unit("daemon.socket.rebind"),
 	arkType.unit("daemon.fatal"),
+	arkType.unit("daemon.preset_load_failed"),
 	arkType.unit("scheduler.recovery"),
 	arkType.unit("agent.spawn"),
 	arkType.unit("agent.exit"),
@@ -48,7 +49,6 @@ const ObservabilityEventTypeBoundary = arkType.or(
 	arkType.unit("spawn.aborted"),
 	arkType.unit("session_id.invalidated"),
 	arkType.unit("chain.invalid"),
-	arkType.unit("preset.fallback"),
 	arkType.unit("daemon.warning"),
 	arkType.unit("scheduler.tick_failed"),
 	arkType.unit("chain.complete_trigger_failed"),
@@ -189,6 +189,12 @@ const ObservabilityEventBoundary = arkType.or(
 	{
 		...EventBaseBoundary,
 		kind: arkType.unit("lifecycle"),
+		type: arkType.unit("daemon.preset_load_failed"),
+		payload: { chainId: "number", preset: "string", presetDir: "string", error: "string" },
+	},
+	{
+		...EventBaseBoundary,
+		kind: arkType.unit("lifecycle"),
 		type: arkType.unit("scheduler.recovery"),
 		payload: {
 			reason: arkType.or(arkType.unit("stale_current_run"), arkType.unit("orphaned_run_reconciled")),
@@ -266,12 +272,6 @@ const ObservabilityEventBoundary = arkType.or(
 		kind: arkType.unit("validation"),
 		type: arkType.unit("chain.invalid"),
 		payload: { chainId: "number", chainName: "string", context: "string", error: "string" },
-	},
-	{
-		...EventBaseBoundary,
-		kind: arkType.unit("validation"),
-		type: arkType.unit("preset.fallback"),
-		payload: { chainId: "number", preset: "string", fallbackPreset: "string", reason: arkType.or(arkType.unit("invalid_name"), arkType.unit("unknown_preset")) },
 	},
 	{
 		...EventBaseBoundary,
@@ -492,6 +492,8 @@ function renderLifecycleEvent(event: Extract<ObservabilityEvent, { kind: "lifecy
 			return `${event.ts} lifecycle daemon.socket.rebind pid=${event.payload.pid} socket=${event.payload.socketPath}`
 		case "daemon.fatal":
 			return `${event.ts} lifecycle daemon.fatal pid=${event.payload.pid} kind=${event.payload.fatalKind}`
+		case "daemon.preset_load_failed":
+			return `${event.ts} lifecycle daemon.preset_load_failed chain=${event.chain ?? event.payload.chainId} preset=${event.payload.preset} presetDir=${event.payload.presetDir} error=${event.payload.error}`
 		case "scheduler.recovery":
 			return `${event.ts} lifecycle scheduler.recovery chain=${event.chain ?? "-"} reason=${event.payload.reason}`
 		case "agent.spawn":
@@ -523,8 +525,6 @@ function renderValidationEvent(event: Extract<ObservabilityEvent, { kind: "valid
 			return `${event.ts} validation session_id.invalidated chain=${event.chain ?? "-"} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} runner=${event.payload.runner}`
 		case "chain.invalid":
 			return `${event.ts} validation chain.invalid chain=${event.payload.chainId} context=${event.payload.context} error=${event.payload.error}`
-		case "preset.fallback":
-			return `${event.ts} validation preset.fallback chain=${event.payload.chainId} preset=${event.payload.preset} reason=${event.payload.reason}`
 		default:
 			return assertNever(event)
 	}
