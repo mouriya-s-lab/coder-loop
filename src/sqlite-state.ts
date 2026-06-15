@@ -156,7 +156,7 @@ export type GetNextPendingItemInput = {
 	chainId: number
 	repoCwd: string
 	statuses?: readonly string[]
-	terminalStatuses?: readonly string[]
+	terminalStatusNames?: readonly string[]
 	resolveDependency?: DependencyResolver
 }
 
@@ -164,7 +164,7 @@ export type ListDependencyWaitsInput = {
 	chainId: number
 	repoCwd?: string
 	statuses: readonly string[]
-	terminalStatuses: readonly string[]
+	terminalStatusNames: readonly string[]
 	resolveDependency?: DependencyResolver
 }
 
@@ -182,7 +182,7 @@ export type DependencyResolver = (id: number) => ItemRecord | null
 
 export type AllItemsTerminalInput = {
 	chainId: number
-	terminalStatuses: readonly string[]
+	terminalStatusNames: readonly string[]
 }
 
 export type ItemSessionIdInput = {
@@ -835,12 +835,12 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 		getNextPendingItem: (input) =>
 			read("get next pending item", () => {
 				const statuses = input.statuses ?? ["queued", "changes_requested"]
-				const terminalStatuses = input.terminalStatuses ?? []
+				const terminalStatusNames = input.terminalStatusNames ?? []
 				return selectNextPendingItem(
 					db.query<ItemRow, SqlParams>("SELECT * FROM items WHERE chain_id = $chainId ORDER BY id ASC").all({
 						chainId: input.chainId,
 					}).map((row) => requireItem(row, row.id)),
-					{ repoCwd: input.repoCwd, statuses, terminalStatuses, resolveDependency: input.resolveDependency ?? ((id) => rowToItem(getItemRow(id))) },
+					{ repoCwd: input.repoCwd, statuses, terminalStatusNames, resolveDependency: input.resolveDependency ?? ((id) => rowToItem(getItemRow(id))) },
 				)
 			}),
 
@@ -856,7 +856,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 
 		allItemsTerminal: (input) =>
 			read("check all items terminal", () => {
-				const terminal = new Set(input.terminalStatuses)
+				const terminal = new Set(input.terminalStatusNames)
 				return db.query<ItemRow, SqlParams>("SELECT * FROM items WHERE chain_id = $chainId").all({ chainId: input.chainId }).every((row) => terminal.has(row.status))
 			}),
 
@@ -1127,13 +1127,13 @@ function currentRunParams(input: SetCurrentRunInput): SqlParams {
 type PendingSelectionOptions = {
 	repoCwd?: string
 	statuses: readonly string[]
-	terminalStatuses: readonly string[]
+	terminalStatusNames: readonly string[]
 	resolveDependency?: DependencyResolver
 }
 
 function selectNextPendingItem(items: ItemRecord[], options: PendingSelectionOptions): ItemRecord | null {
 	const eligible = new Set(options.statuses)
-	const waitsByItemId = dependencyWaitsByItemId(items, options.terminalStatuses, options.resolveDependency)
+	const waitsByItemId = dependencyWaitsByItemId(items, options.terminalStatusNames, options.resolveDependency)
 	return items
 		.filter((item) => options.repoCwd === undefined || item.repoCwd === options.repoCwd)
 		.filter((item) => eligible.has(item.status))
@@ -1146,7 +1146,7 @@ function selectNextPendingItem(items: ItemRecord[], options: PendingSelectionOpt
 
 export function listDependencyWaitReasons(items: readonly ItemRecord[], options: PendingSelectionOptions): DependencyWaitReason[] {
 	const eligible = new Set(options.statuses)
-	const waitsByItemId = dependencyWaitsByItemId(items, options.terminalStatuses, options.resolveDependency)
+	const waitsByItemId = dependencyWaitsByItemId(items, options.terminalStatusNames, options.resolveDependency)
 	return items
 		.filter((item) => options.repoCwd === undefined || item.repoCwd === options.repoCwd)
 		.filter((item) => eligible.has(item.status))
@@ -1156,10 +1156,10 @@ export function listDependencyWaitReasons(items: readonly ItemRecord[], options:
 
 function dependencyWaitsByItemId(
 	items: readonly ItemRecord[],
-	terminalStatuses: readonly string[],
+	terminalStatusNames: readonly string[],
 	resolveDependency?: DependencyResolver,
 ): Map<number, DependencyWaitReason> {
-	const terminal = new Set(terminalStatuses)
+	const terminal = new Set(terminalStatusNames)
 	const byId = new Map(items.map((item) => [item.id, item]))
 	// A dependency may live in another chain (item ids are globally unique). Fall back to the
 	// cross-chain resolver when the id is not in the per-chain snapshot, otherwise a cross-chain

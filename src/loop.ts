@@ -1719,11 +1719,12 @@ async function runChainCommand(args: string[]): Promise<void> {
 	if (chainArgs.action === "create") {
 		const repository = requiredConfigString(chainArgs.configJson, "repository", "--config-json")
 		const baseBranch = optionalConfigString(chainArgs.configJson, "baseBranch", "--config-json") ?? "main"
+		const configJson = normalizeChainCreateConfig(chainArgs.configJson)
 		const requestArgs: JsonObject = {
 			name: chainArgs.name,
 			repository,
 			baseBranch,
-			metadata: { config: chainArgs.configJson },
+			metadata: { config: configJson },
 		}
 		if (chainArgs.preset !== null) requestArgs.preset = chainArgs.preset
 		if (chainArgs.umbrella !== null) Object.assign(requestArgs, parseUmbrellaRef(chainArgs.umbrella, repository))
@@ -2635,6 +2636,7 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 			baseBranch: null,
 			dryRun: false,
 			worktree: false,
+			chainStatusScope: "status-snapshot",
 		})
 	} catch (error) {
 		const targetCwd = resolve(args.targetCwd)
@@ -2850,12 +2852,12 @@ function buildStatusQueueSnapshotFromRecords(options: LoopOptions, items: readon
 	const byStatus: Record<string, number> = {}
 	for (const item of items) byStatus[item.status] = (byStatus[item.status] ?? 0) + 1
 	const continuableStatuses = new Set(options.preset.statuses.continuable)
-	const terminalStatuses = new Set(options.preset.statuses.terminal)
+	const terminalStatusNames = new Set(options.preset.statuses.terminal)
 	return {
 		total: items.length,
 		byStatus,
 		continuable: items.filter((item) => continuableStatuses.has(item.status)).length,
-		terminal: items.filter((item) => terminalStatuses.has(item.status)).length,
+		terminal: items.filter((item) => terminalStatusNames.has(item.status)).length,
 		selected: selected === null ? null : {
 			id: getItemId(selected.item, options.preset),
 			item: statusItemSnapshot(selected.item, options.preset),
@@ -3591,7 +3593,10 @@ type TargetChainLookupArgs = {
 	baseBranch: string | null
 	dryRun: boolean
 	worktree: boolean
+	chainStatusScope?: TargetChainStatusScope
 }
+
+type TargetChainStatusScope = "active-only" | "status-snapshot"
 
 type LoadedTargetRuntime = {
 	options: LoopOptions
@@ -3650,6 +3655,7 @@ async function loadLoopOptionsForTarget(
 
 async function resolveDbChainForTarget(args: TargetChainLookupArgs): Promise<ChainRecord> {
 	const loopDataRoot = args.loopDataRoot
+	const statusScope = args.chainStatusScope ?? "active-only"
 	const store = openSqliteStateStore({ createIfMissing: false, ...loopDataRootOption(loopDataRoot) })
 	try {
 		const requestedRepo = args.repository ?? await inferRepositoryFromGit(args.targetCwd)
@@ -3657,7 +3663,7 @@ async function resolveDbChainForTarget(args: TargetChainLookupArgs): Promise<Cha
 		if (args.chainName !== null) {
 			const chain = store.getChainByName(args.chainName)
 			if (chain === null) throw new CoderLoopError(`SQLite state DB has no chain named "${args.chainName}"`)
-			if (chain.status !== "active") throw new CoderLoopError(`SQLite chain "${chain.name}" is ${chain.status}, expected active`)
+			if (!chainStatusAllowedForTargetLookup(statusScope, chain.status)) throw new CoderLoopError(`SQLite chain "${chain.name}" is ${chain.status}, expected ${targetChainStatusExpectation(statusScope)}`)
 			if (requestedRepo !== null && chain.repository !== requestedRepo) {
 				throw new CoderLoopError(`SQLite chain "${chain.name}" repository is ${chain.repository}, expected ${requestedRepo}`)
 			}
@@ -3669,7 +3675,7 @@ async function resolveDbChainForTarget(args: TargetChainLookupArgs): Promise<Cha
 
 		const targetCwd = resolve(args.targetCwd)
 		const active = store.listChains().filter((chain) =>
-			chain.status === "active"
+			chainStatusAllowedForTargetLookup(statusScope, chain.status)
 			&& (requestedRepo === null || chain.repository === requestedRepo)
 			&& (requestedBase === null || chain.baseBranch === requestedBase)
 		)
@@ -3678,17 +3684,27 @@ async function resolveDbChainForTarget(args: TargetChainLookupArgs): Promise<Cha
 		)
 		if (matchingByRepoCwd.length === 1) return matchingByRepoCwd[0]!
 		if (matchingByRepoCwd.length > 1) {
-			throw new CoderLoopError(`target ${targetCwd} matches multiple active chains by repo_cwd: ${matchingByRepoCwd.map((chain) => chain.name).join(", ")}; pass --chain <name>`)
+			throw new CoderLoopError(`target ${targetCwd} matches multiple ${targetChainStatusExpectation(statusScope)} chains by repo_cwd: ${matchingByRepoCwd.map((chain) => chain.name).join(", ")}; pass --chain <name>`)
 		}
 		if (active.length === 1) return active[0]!
 		if (active.length === 0) {
 			const repoLabel = requestedRepo === null ? "any repository" : `repository ${requestedRepo}`
-			throw new CoderLoopError(`SQLite state DB has no active chain for ${repoLabel} and target ${targetCwd}`)
+			throw new CoderLoopError(`SQLite state DB has no ${targetChainStatusExpectation(statusScope)} chain for ${repoLabel} and target ${targetCwd}`)
 		}
-		throw new CoderLoopError(`target ${targetCwd} is ambiguous across active chains: ${active.map((chain) => chain.name).join(", ")}; pass --chain <name>`)
+		throw new CoderLoopError(`target ${targetCwd} is ambiguous across ${targetChainStatusExpectation(statusScope)} chains: ${active.map((chain) => chain.name).join(", ")}; pass --chain <name>`)
 	} finally {
 		store.close()
 	}
+}
+
+function chainStatusAllowedForTargetLookup(scope: TargetChainStatusScope, status: ChainRecord["status"]): boolean {
+	if (scope === "active-only") return status === "active"
+	return status === "active" || status === "completed"
+}
+
+function targetChainStatusExpectation(scope: TargetChainStatusScope): string {
+	if (scope === "active-only") return "active"
+	return "active or completed"
 }
 
 function readDbItemsForChain(loopDataRoot: string | null, chainId: number): ItemRecord[] {
@@ -3730,7 +3746,7 @@ function readDbCurrentRun(loopDataRoot: string | null, chainId: number): Current
 function loopConfigFromChain(chain: ChainRecord, loopDataRoot: string | null, explicitConfig: LoopConfig | null): LoopConfig {
 	const metadata = chain.metadata
 	const chainBindings = chainConfigBindings(metadata)
-	const presetPath = stringMetadata(metadata, "presetPath") ?? explicitConfig?.presetPath ?? null
+	const presetPath = stringMetadata(metadata, "presetPath") ?? stringConfigBinding(chainBindings, "presetPath") ?? explicitConfig?.presetPath ?? null
 	const config: LoopConfig = {
 		worktree: booleanMetadata(metadata, "worktree") ?? explicitConfig?.worktree ?? null,
 		workflowFile: stringMetadata(metadata, "workflowFile") ?? stringConfigBinding(chainBindings, "workflowFile") ?? explicitConfig?.workflowFile ?? null,
@@ -4399,10 +4415,11 @@ export type RunPresetChainCompleteTriggerPhasesInput = {
 	chain: ChainRecord
 	items: readonly ItemRecord[]
 	runId?: string
-	terminalStatuses: readonly string[]
+	terminalStatusNames: readonly string[]
 	loopDataRoot: string | null
 	phaseRunner?: RunPresetChainCompleteTriggerPhasesPhaseRunner
 	presetDir?: string
+	preset?: Preset
 	targetCwd?: string | null
 }
 
@@ -4412,7 +4429,7 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 	const targetCwd = resolve(rawTargetCwd)
 	const config = loopConfigFromChain(input.chain, input.loopDataRoot, null)
 	const presetDir = input.presetDir ?? resolvePresetDir(config, PKG_ROOT, targetCwd)
-	const preset = await loadPreset(presetDir)
+	const preset = input.preset ?? await loadPreset(presetDir)
 	const phases = chainCompleteTriggerPhases(preset)
 	if (phases.length === 0) return null
 
@@ -4513,6 +4530,15 @@ function readPresetNameFromStatusInput(value: StatusConfigInput["preset"]): stri
 	return value.name
 }
 
+function normalizeChainCreateConfig(config: JsonObject): JsonObject {
+	const presetPath = stringConfigBinding(config, "presetPath")
+	if (presetPath === null) return config
+	return {
+		...config,
+		presetPath: isAbsolute(presetPath) ? presetPath : resolve(process.cwd(), presetPath),
+	}
+}
+
 export function resolvePresetDir(
 	config: { preset: string | null; presetPath: string | null },
 	pkgRoot: string,
@@ -4546,7 +4572,7 @@ async function collectStatusRuntimeErrors(
 	if (options.worktree && (options.baseBranch === null || options.baseBranch.trim() === "")) pushCheckError(errors, "worktree", "worktree mode requires a non-empty baseBranch")
 
 	await checkDirectory(options.targetCwd, "targetCwd", errors)
-	if (chain.status !== "active") pushCheckError(errors, "chain.status", `must be active (got ${chain.status})`)
+	if (chain.status !== "active" && chain.status !== "completed") pushCheckError(errors, "chain.status", `must be active or completed (got ${chain.status})`)
 	await checkCentralRuntimeLayout(options, chain, errors)
 
 	for (const [index, item] of items.entries()) {
