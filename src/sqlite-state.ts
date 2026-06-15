@@ -2,6 +2,15 @@ import { Database } from "bun:sqlite"
 import { existsSync } from "node:fs"
 
 import type { AgentRunnerKind, JsonObject, JsonValue } from "./loop"
+import {
+	itemDependsOnIds,
+	parseInternalStatus,
+	storedChainMetadata,
+	storedItemExtra,
+	type ChainMetadata,
+	type InternalStatus,
+	type ItemExtra,
+} from "./runtime-data"
 import { type LoopDataRootOptions, resolveLoopDataPaths } from "./runtime-paths"
 
 export type SqliteStateErrorCode =
@@ -24,6 +33,7 @@ export class SqliteStateError extends Error {
 
 const CHAIN_STATUSES = ["active", "completed", "deleted", "stopped"] as const
 export type ChainStatus = typeof CHAIN_STATUSES[number]
+type StatusInput = string | InternalStatus
 
 export type ChainRecord = {
 	id: number
@@ -34,7 +44,7 @@ export type ChainRecord = {
 	umbrellaIssue: number | null
 	umbrellaRepo: string | null
 	status: ChainStatus
-	metadata: JsonObject
+	metadata: ChainMetadata
 	createdAt: number
 	updatedAt: number
 }
@@ -47,7 +57,7 @@ export type CreateChainInput = {
 	umbrellaIssue?: number | null
 	umbrellaRepo?: string | null
 	status?: ChainStatus
-	metadata?: JsonObject
+	metadata?: ChainMetadata
 	createdAt?: number
 	updatedAt?: number
 }
@@ -61,7 +71,7 @@ export type ItemRecord = {
 	chainId: number
 	issueNumber: number
 	repoCwd: string
-	status: string
+	status: InternalStatus
 	attempts: number
 	position: number
 	title: string | null
@@ -75,7 +85,7 @@ export type ItemRecord = {
 	agentCwd: string | null
 	runner: AgentRunnerKind | null
 	phase: string | null
-	extra: JsonObject
+	extra: ItemExtra
 	createdAt: number
 	updatedAt: number
 	statusUpdatedAt: number
@@ -87,7 +97,7 @@ export type CreateItemInput = {
 	chainId: number
 	issueNumber: number
 	repoCwd: string
-	status: string
+	status: StatusInput
 	attempts?: number
 	title?: string | null
 	priority?: string | null
@@ -100,7 +110,7 @@ export type CreateItemInput = {
 	agentCwd?: string | null
 	runner?: AgentRunnerKind | null
 	phase?: string | null
-	extra?: JsonObject
+	extra?: ItemExtra
 	createdAt?: number
 	updatedAt?: number
 	statusUpdatedAt?: number
@@ -116,11 +126,11 @@ export type RunRecord = {
 	chainId: number
 	itemId: number
 	phase: string
-	status: string
+	status: InternalStatus
 	startedAt: number
 	endedAt: number | null
 	exitCode: number | null
-	extra: JsonObject
+	extra: ItemExtra
 }
 
 export type RecordRunInput = {
@@ -128,18 +138,18 @@ export type RecordRunInput = {
 	chainId: number
 	itemId: number
 	phase: string
-	status?: string
+	status?: StatusInput
 	startedAt: number
 	endedAt?: number | null
 	exitCode?: number | null
-	extra?: JsonObject
+	extra?: ItemExtra
 }
 
 export type CompleteRunInput = {
 	endedAt: number
 	exitCode: number
-	status: string
-	extra?: JsonObject
+	status: StatusInput
+	extra?: ItemExtra
 }
 
 export type CurrentRunRecord = {
@@ -147,7 +157,7 @@ export type CurrentRunRecord = {
 	phase: string
 	runId: string
 	startedAt: number
-	extra: JsonObject
+	extra: ItemExtra
 }
 
 export type SetCurrentRunInput = CurrentRunRecord
@@ -669,7 +679,8 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 				const now = unixSeconds()
 				const createdAt = input.createdAt ?? now
 				const updatedAt = input.updatedAt ?? createdAt
-				const result = db.query<unknown, SqlParams>(`
+					const metadata = input.metadata ?? storedChainMetadata({})
+					const result = db.query<unknown, SqlParams>(`
 					INSERT INTO chains (name, preset, repository, base_branch, umbrella_issue, umbrella_repo, status, metadata, created_at, updated_at)
 					VALUES ($name, $preset, $repository, $baseBranch, $umbrellaIssue, $umbrellaRepo, $status, $metadata, $createdAt, $updatedAt)
 				`).run({
@@ -680,7 +691,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 					umbrellaIssue: input.umbrellaIssue ?? null,
 					umbrellaRepo: input.umbrellaRepo ?? null,
 					status: input.status ?? "active",
-					metadata: stringifyJsonObject(input.metadata ?? {}),
+						metadata: stringifyJsonObject(metadata),
 					createdAt: createdAt,
 					updatedAt: updatedAt,
 				})
@@ -707,7 +718,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 					umbrellaIssue: input.umbrellaIssue === undefined ? current.umbrellaIssue : input.umbrellaIssue,
 					umbrellaRepo: input.umbrellaRepo === undefined ? current.umbrellaRepo : input.umbrellaRepo,
 					status: input.status ?? current.status,
-					metadata: input.metadata ?? current.metadata,
+						metadata: input.metadata ?? current.metadata,
 						updatedAt: input.updatedAt ?? unixSeconds(),
 				}
 				db.query<unknown, SqlParams>(`
@@ -750,11 +761,12 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 			write("update item", () => {
 				const current = requireItem(getItemRow(id), id)
 				const updatedAt = input.updatedAt ?? unixSeconds()
-				const statusUpdatedAt = input.statusUpdatedAt ?? (input.status === undefined ? current.statusUpdatedAt : updatedAt)
-				const next: ItemRecord = {
+					const status = input.status === undefined ? current.status : parseInternalStatus(input.status, `items.${id}.status`)
+					const statusUpdatedAt = input.statusUpdatedAt ?? (input.status === undefined ? current.statusUpdatedAt : updatedAt)
+					const next: ItemRecord = {
 					...current,
 					repoCwd: input.repoCwd ?? current.repoCwd,
-					status: input.status ?? current.status,
+						status,
 					attempts: input.attempts ?? current.attempts,
 					title: input.title === undefined ? current.title : input.title,
 					priority: input.priority === undefined ? current.priority : input.priority,
@@ -862,7 +874,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 
 		recordRun: (input) =>
 			write("record run", () => {
-				const status = normalizeRunStatus(input.status ?? "in_progress", "invalid_input")
+					const status = parseInternalStatus(input.status ?? "in_progress", "runs.status")
 				const result = db.query<unknown, SqlParams>(`
 					INSERT INTO runs (run_id, chain_id, item_id, phase, status, started_at, ended_at, exit_code, extra)
 					VALUES ($runId, $chainId, $itemId, $phase, $status, $startedAt, $endedAt, $exitCode, $extra)
@@ -891,7 +903,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 			write("complete run", () => {
 				const current = requireRun(getRunRowByRunId(runId), runId)
 				const nextExtra = input.extra ?? current.extra
-				const status = normalizeRunStatus(input.status, "invalid_input")
+					const status = parseInternalStatus(input.status, `runs.${runId}.status`)
 				db.query<unknown, SqlParams>(`
 					UPDATE runs
 					SET ended_at = $endedAt, exit_code = $exitCode, status = $status, extra = $extra
@@ -941,7 +953,7 @@ function rowToChain(row: ChainRow | null): ChainRecord | null {
 		umbrellaIssue: row.umbrella_issue,
 		umbrellaRepo: row.umbrella_repo,
 		status: row.status,
-		metadata: parseJsonObject(row.metadata, `chains.${row.id}.metadata`),
+		metadata: storedChainMetadata(parseJsonObject(row.metadata, `chains.${row.id}.metadata`)),
 		createdAt: row.created_at,
 		updatedAt: row.updated_at,
 	}
@@ -1003,7 +1015,7 @@ function rowToItem(row: ItemRow | null): ItemRecord | null {
 		chainId: row.chain_id,
 		issueNumber: row.issue_number,
 		repoCwd: row.repo_cwd,
-		status: row.status,
+		status: parseInternalStatus(row.status, `items.${row.id}.status`),
 		attempts: row.attempts,
 		position: row.position,
 		title: row.title,
@@ -1017,7 +1029,7 @@ function rowToItem(row: ItemRow | null): ItemRecord | null {
 		agentCwd: row.agent_cwd,
 		runner: row.runner,
 		phase: row.phase,
-		extra: parseJsonObject(row.extra, `items.${row.id}.extra`),
+		extra: storedItemExtra(parseJsonObject(row.extra, `items.${row.id}.extra`)),
 		createdAt: row.created_at,
 		updatedAt: row.updated_at,
 		statusUpdatedAt: row.status_updated_at,
@@ -1032,11 +1044,11 @@ function rowToRun(row: RunRow | null): RunRecord | null {
 		chainId: row.chain_id,
 		itemId: row.item_id,
 		phase: row.phase,
-		status: row.status,
+		status: parseInternalStatus(row.status, `runs.${row.id}.status`),
 		startedAt: row.started_at,
 		endedAt: row.ended_at,
 		exitCode: row.exit_code,
-		extra: parseJsonObject(row.extra, `runs.${row.id}.extra`),
+		extra: storedItemExtra(parseJsonObject(row.extra, `runs.${row.id}.extra`)),
 	}
 }
 
@@ -1047,7 +1059,7 @@ function rowToCurrentRun(row: CurrentRunRow | null): CurrentRunRecord | null {
 		phase: row.phase,
 		runId: row.run_id,
 		startedAt: row.started_at,
-		extra: parseJsonObject(row.extra, `current_runs.${row.chain_id}.extra`),
+		extra: storedItemExtra(parseJsonObject(row.extra, `current_runs.${row.chain_id}.extra`)),
 	}
 }
 
@@ -1185,10 +1197,8 @@ function dependencyWaitsByItemId(
 	return waits
 }
 
-export function dependsOnItemIds(extra: JsonObject): number[] {
-	const raw = extra.dependsOn
-	if (!Array.isArray(raw)) return []
-	return raw.filter((value): value is number => typeof value === "number" && Number.isInteger(value) && value >= 1)
+export function dependsOnItemIds(extra: ItemExtra): number[] {
+	return itemDependsOnIds(extra)
 }
 
 function parseItemSessionIds(raw: string, label: string): ItemSessionIds {

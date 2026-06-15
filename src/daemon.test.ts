@@ -27,6 +27,8 @@ import {
 import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
 import { queryObservabilityEvents } from "./observability"
+import { storedChainMetadata, storedItemExtra } from "./runtime-data"
+import type { BoundaryRecord } from "./boundary-types"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/dt", String(process.pid))
@@ -52,7 +54,7 @@ const FAKE_RUNNER_REVIEW_MARKER = "REVIEW SUMMARY:"
 // the agent would have written from the phase and the item's scripted summary/exitCode.
 const TRIGGER_PHASES = new Set(["blocked-responder", "umbrella-finalizer", "review-on-empty"])
 
-function daemonFakeRunnerWriteStatus(phase: string, extra: Record<string, unknown>): string | null {
+function daemonFakeRunnerWriteStatus(phase: string, extra: BoundaryRecord): string | null {
 	// Trigger phases run as side effects and must not mutate the triggering item's status (the engine
 	// preserves its terminal status). Work phases (iteration / review / single-phase `run`) write status.
 	if (TRIGGER_PHASES.has(phase)) return null
@@ -461,8 +463,27 @@ describe("daemon", () => {
 				expect(listed).toHaveLength(0)
 			}
 
+			expectInvalidDetails(
+				await request(fixture, "chain.create", {
+					name: "metadata-config-array",
+					repository: "mouriya-s-lab/coder-loop",
+					metadata: { config: ["not", "an", "object"] },
+				}),
+				"metadata.config",
+				["not", "an", "object"],
+			)
+			expectInvalidDetails(
+				await request(fixture, "chain.create", {
+					name: "metadata-attempts-string",
+					repository: "mouriya-s-lab/coder-loop",
+					metadata: { maxItemAttempts: "seven" },
+				}),
+				"metadata.maxItemAttempts",
+				"seven",
+			)
+
 			expect(Object.prototype).not.toHaveProperty("polluted")
-			const validMetadata = { runner: "codex", maxItemAttempts: 7, nested: nestedMetadata(7), list: [{ leaf: "ok" }] }
+			const validMetadata = { config: { workflowFile: "workflow.md" }, runner: "codex", maxItemAttempts: 7, nested: nestedMetadata(7), list: [{ leaf: "ok" }] }
 			const created = record(expectOk(await request(fixture, "chain.create", {
 				name: "metadata-valid",
 				repository: "mouriya-s-lab/coder-loop",
@@ -761,7 +782,7 @@ describe("daemon", () => {
 			})).chain)
 			const chainId = numberValue(chain.id)
 			expectOk(await request(fixture, "item.add", { chainId, issueNumber: 25901, repoCwd: REPO_ROOT, title: "occupant" }))
-			const baseline = expectOk(await request(fixture, "item.list", { chainId })).items as Record<string, unknown>[]
+			const baseline = expectOk(await request(fixture, "item.list", { chainId })).items as BoundaryRecord[]
 			expect(baseline).toHaveLength(1)
 
 			const failed = await request(fixture, "item.batchAdd", {
@@ -774,7 +795,7 @@ describe("daemon", () => {
 			})
 			expectConflict(failed)
 
-			const after = expectOk(await request(fixture, "item.list", { chainId })).items as Record<string, unknown>[]
+			const after = expectOk(await request(fixture, "item.list", { chainId })).items as BoundaryRecord[]
 			expect(after.map((item) => Number(item.issueNumber))).toEqual([25901])
 			expect(after.map((item) => item.id)).toEqual(baseline.map((item) => item.id))
 		} finally {
@@ -1219,10 +1240,85 @@ attemptTimeoutSeconds = 3600
 
 			// agentCwd remains daemon-owned: it cannot be set through item.update.
 			expectInvalid(await request(fixture, "item.update", { itemId, fields: { agentCwd: "/abs/elsewhere" } }))
+			expectInvalidDetails(
+				await request(fixture, "item.update", { itemId, blockerRepo: { owner: "mouriya-s-lab", repo: "other" } }),
+				"blockerRepo",
+				{ owner: "mouriya-s-lab", repo: "other" },
+			)
+			expectInvalidDetails(
+				await request(fixture, "item.update", { itemId, extraPatch: { schedulerBackoff: { failureCount: "bad", nextRunAt: 1_800_000_000 } } }),
+				"extra.schedulerBackoff.failureCount",
+				"bad",
+			)
+			const legalExtra = record(expectOk(await request(fixture, "item.update", {
+				itemId,
+				extraPatch: { schedulerBackoff: { failureCount: 1, nextRunAt: 1_800_000_000 } },
+			})).item)
+			expect(record(legalExtra.extra).schedulerBackoff).toEqual({ failureCount: 1, nextRunAt: 1_800_000_000 })
 			// Invalid blocker repo (not owner/repo) is rejected at the boundary.
 			expectInvalid(await request(fixture, "item.update", { itemId, blockerRepo: "not-a-repo-ref" }))
 			// clearBlocker cannot be combined with a blocker value.
 			expectInvalid(await request(fixture, "item.update", { itemId, clearBlocker: true, blockerRef: "#9" }))
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("daemon loads legacy-shaped metadata and item extra from existing SQLite data before scheduling", async () => {
+		let seededItemId = 0
+		const fixture = await startFixture("legacy-db-typed-runtime-data", {
+			schedulerIntervalMs: 20,
+			beforeStart: ({ loopDataRoot }) => {
+				const store = openSqliteStateStore({ loopDataRoot, createIfMissing: true })
+				try {
+					const chain = store.createChain({
+						name: "legacy-runtime-data-chain",
+						preset: "gh-issue-pr-iteration",
+						repository: "mouriya-s-lab/coder-loop",
+						baseBranch: "main",
+						metadata: storedChainMetadata({
+							config: { workflowFile: "legacy-workflow.md" },
+							maxItemAttempts: 3,
+							coderLoopChainCompleteTrigger: { decision: "keep-active", fingerprint: "old-fingerprint", recordedAt: 1_800_000_000 },
+						}),
+					})
+					const item = store.createItem({
+						chainId: chain.id,
+						issueNumber: 455,
+						repoCwd: REPO_ROOT,
+						status: "queued",
+						extra: storedItemExtra({
+							slotKey: "legacy-slot",
+							blockerRepo: "mouriya-s-lab/coder-loop",
+							blockerRef: "#454",
+							schedulerBackoff: { failureCount: 1, nextRunAt: 1 },
+							summary: "REVIEW SUMMARY: verdict=accepted; issue=#455; reason=legacy db compatibility",
+						}),
+					})
+					seededItemId = item.id
+				} finally {
+					store.close()
+				}
+			},
+		})
+		try {
+			const terminal = await waitForItemQueueTerminal(fixture, seededItemId, 10_000)
+			expect(terminal.terminalStatus).toBe("done")
+			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot, createIfMissing: false })
+			try {
+				const chain = store.getChainByName("legacy-runtime-data-chain")
+				if (chain === null) throw new Error("expected seeded chain")
+				expect(chain.metadata.config).toEqual({ workflowFile: "legacy-workflow.md" })
+				expect(chain.metadata.maxItemAttempts).toBe(3)
+				const item = store.getItem(seededItemId)
+				if (item === null) throw new Error("expected seeded item")
+				expect(item.status).toBe("done")
+				expect(item.extra.blockerRepo).toBe("mouriya-s-lab/coder-loop")
+				expect(item.extra.blockerRef).toBe("#454")
+				expect(item.extra.schedulerBackoff).toEqual({ failureCount: 1, nextRunAt: 1 })
+			} finally {
+				store.close()
+			}
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -1240,15 +1336,15 @@ attemptTimeoutSeconds = 3600
 			const b = record(expectOk(await request(fixture, "item.add", { chainId, issueNumber: 302, repoCwd: REPO_ROOT })).item)
 			const c = record(expectOk(await request(fixture, "item.add", { chainId, issueNumber: 303, repoCwd: REPO_ROOT })).item)
 
-			const baseline = expectOk(await request(fixture, "item.list", { chainId })).items as Record<string, unknown>[]
+			const baseline = expectOk(await request(fixture, "item.list", { chainId })).items as BoundaryRecord[]
 			expect(baseline.map((item) => Number(item.issueNumber))).toEqual([301, 302, 303])
 			expect(baseline.map((item) => Number(item.position))).toEqual([0, 1, 2])
 
-			const moved = expectOk(await request(fixture, "item.reorder", { itemId: numberValue(c.id), position: 0 })).items as Record<string, unknown>[]
+			const moved = expectOk(await request(fixture, "item.reorder", { itemId: numberValue(c.id), position: 0 })).items as BoundaryRecord[]
 			expect(moved.map((item) => Number(item.issueNumber))).toEqual([303, 301, 302])
 			expect(moved.map((item) => Number(item.position))).toEqual([0, 1, 2])
 
-			const after = expectOk(await request(fixture, "item.list", { chainId })).items as Record<string, unknown>[]
+			const after = expectOk(await request(fixture, "item.list", { chainId })).items as BoundaryRecord[]
 			expect(after.map((item) => Number(item.issueNumber))).toEqual([303, 301, 302])
 			expect(after.map((item) => Number(item.position))).toEqual([0, 1, 2])
 
@@ -2596,7 +2692,7 @@ attemptTimeoutSeconds = 3600
 			const item = await readItem(fixture.loopDataRoot, chainId, 203)
 			const runId = item?.lastRunId ?? ""
 			const paths = resolveChainRuntimePaths("scheduler-artifacts-chain", { loopDataRoot: fixture.loopDataRoot })
-			const status = JSON.parse(await readFile(paths.runStatusFile(runId), "utf-8")) as Record<string, unknown>
+			const status = JSON.parse(await readFile(paths.runStatusFile(runId), "utf-8")) as BoundaryRecord
 			const stdout = await readFile(paths.runStdoutFile(runId), "utf-8")
 			const stderr = await readFile(paths.runStderrFile(runId), "utf-8")
 			const events = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, { run: runId })
@@ -2706,8 +2802,8 @@ attemptTimeoutSeconds = 3600
 			expect(cliExit).toBe(0)
 			const cliPayload = JSON.parse(cliStdout) as { events: { recent: unknown[] } }
 			const cliTypes = cliPayload.events.recent.map((event) =>
-				typeof event === "object" && event !== null && !Array.isArray(event) && typeof (event as Record<string, unknown>).type === "string"
-					? ((event as Record<string, unknown>).type as string)
+				typeof event === "object" && event !== null && !Array.isArray(event) && typeof (event as BoundaryRecord).type === "string"
+					? ((event as BoundaryRecord).type as string)
 					: null,
 			)
 			expect(cliTypes).toContain("phase.start")
@@ -3295,11 +3391,11 @@ process.exitCode = 0
 					if (item?.lastRunId === undefined || item.lastRunId === null) return null
 					return await readRun(fixture.loopDataRoot, item.lastRunId)
 				},
-				(run): run is NonNullable<typeof run> => run !== null && (run.extra as Record<string, unknown> | undefined)?.summary !== undefined,
+				(run): run is NonNullable<typeof run> => run !== null && (run.extra as BoundaryRecord | undefined)?.summary !== undefined,
 			)
 			expect(run).not.toBeNull()
 			expect(run!.extra).toBeDefined()
-			expect((run!.extra as Record<string, unknown>).summary).toBe(summaryContent)
+			expect((run!.extra as BoundaryRecord).summary).toBe(summaryContent)
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -3340,7 +3436,7 @@ process.exitCode = 0
 			const item = await readItem(fixture.loopDataRoot, chainId, 301)
 			const run = await readRun(fixture.loopDataRoot, item?.lastRunId ?? "")
 			expect(run?.extra).toBeDefined()
-			expect((run?.extra as Record<string, unknown>).summary).toBe("watchdog work")
+			expect((run?.extra as BoundaryRecord).summary).toBe("watchdog work")
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -3372,7 +3468,7 @@ process.exitCode = 0
 			const startEvents = (await readFile(fixture.eventLog, "utf-8"))
 				.split("\n")
 				.filter((line) => line.trim() !== "")
-				.map((line) => JSON.parse(line) as Record<string, unknown>)
+				.map((line) => JSON.parse(line) as BoundaryRecord)
 				.filter((event) => event.type === "start")
 			expect(startEvents.length).toBeGreaterThanOrEqual(2)
 			const tags = startEvents.map((event) => event.summaryTag)
@@ -3432,7 +3528,7 @@ process.exitCode = 0
 			const item = await readItem(fixture.loopDataRoot, chainId, 311)
 			const run = await readRun(fixture.loopDataRoot, item?.lastRunId ?? "")
 			expect(run).not.toBeNull()
-			expect((run?.extra as Record<string, unknown>).summary).toBeUndefined()
+			expect((run?.extra as BoundaryRecord).summary).toBeUndefined()
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -3642,6 +3738,7 @@ type FixtureOptions = {
 	kindResolver?: SchedulerKindResolver
 	chainCompleteTriggerForChain?: SchedulerOptions["chainCompleteTriggerForChain"]
 	schedulerConfig?: Partial<CoderLoopDaemonSchedulerConfig>
+	beforeStart?: (input: { root: string; loopDataRoot: string; eventLog: string; fakeRunner: string }) => Promise<void> | void
 }
 
 function preInstallReviewOnEmptyLockByName(chainName: string, loopDataRoot: string, runId = "test-pre-installed"): void {
@@ -3656,7 +3753,9 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 	const fakeRunner = resolve(root, "fake-runner.ts")
 	const eventLog = resolve(root, "events.jsonl")
 	await mkdir(root, { recursive: true })
+	await mkdir(loopDataRoot, { recursive: true })
 	await writeFakeRunner(fakeRunner)
+	await options.beforeStart?.({ root, loopDataRoot, eventLog, fakeRunner })
 
 	const schedulerEvents: SchedulerEvent[] = []
 	const worktreeManager: SchedulerWorktreeManager = options.worktreeManager ?? (options.realWorktreeManager ? createGitWorktreeManager({ loopDataRoot }) : async ({ chain, repoCwd }) => {
@@ -3684,7 +3783,7 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 			worktreeManager,
 			kindResolver: () => ({ ok: true, kind: "code" }),
 			prompt: ({ item, runId, phase }) => {
-				const payload: Record<string, unknown> = {
+				const payload: BoundaryRecord = {
 					itemId: item.id,
 					issueNumber: item.issueNumber,
 					runId,
@@ -3722,6 +3821,14 @@ function expectInvalid(response: DaemonResponse): void {
 	if (!response.ok) expect(response.error.code).toBe("invalid_request")
 }
 
+function expectInvalidDetails(response: DaemonResponse, field: string, value: unknown): void {
+	expectInvalid(response)
+	if (!response.ok) {
+		const details = record(response.error.details)
+		expect(details).toMatchObject({ field, value })
+	}
+}
+
 function expectChainDeleted(response: DaemonResponse): void {
 	expect(response.ok).toBe(false)
 	if (!response.ok) expect(response.error.code).toBe("chain_deleted")
@@ -3753,12 +3860,12 @@ function expectTooLarge(response: DaemonResponse): void {
 	if (!response.ok) expect(response.error.code).toBe("request_too_large")
 }
 
-function record(value: unknown): Record<string, unknown> {
+function record(value: unknown): BoundaryRecord {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("expected object")
-	return value as Record<string, unknown>
+	return value as BoundaryRecord
 }
 
-function nestedMetadata(depth: number): Record<string, unknown> {
+function nestedMetadata(depth: number): BoundaryRecord {
 	let value: unknown = "ok"
 	for (let index = 0; index < depth; index++) value = { nest: value }
 	return record(value)

@@ -23,6 +23,7 @@ import {
 	schedulerTick,
 	type SchedulerCompletedRun,
 	type SchedulerEvent,
+	type SchedulerChainWorktreeCleanup,
 	type SchedulerLoadedPreset,
 	type SchedulerOptions,
 	type SchedulerPresetResolver,
@@ -41,6 +42,14 @@ import {
 	type SqliteStateStore,
 	type UpdateItemInput,
 } from "./sqlite-state"
+import {
+	parseChainMetadataForRequest,
+	parseItemExtraForRequest,
+	runtimeDataJsonValue,
+	RuntimeDataError,
+	type InternalStatus,
+	type ItemExtra,
+} from "./runtime-data"
 import {
 	type LoopDataRootOptions,
 	RuntimePathError,
@@ -113,7 +122,7 @@ export type CoderLoopDaemonSnapshot = {
 }
 
 type DaemonState = "starting" | "running" | "shutting_down" | "exited"
-type UnknownRecord = Record<string, unknown>
+type UnknownRecord = { [key: string]: unknown }
 export type DaemonSocketPathIssue = {
 	kind: "daemon_socket_unlinked"
 	pid: number
@@ -706,14 +715,14 @@ export class CoderLoopDaemon {
 			case "item.reorder":
 				return await this.handleItemReorder(request.args)
 			case "daemon.status":
-				return { daemon: this.snapshot() as unknown as JsonObject }
+				return { daemon: daemonSnapshotToJson(this.snapshot()) }
 			case "daemon.down": {
 				// Terminate before replying so the caller sees which runs were cut short (#467).
 				const terminatedRuns = await this.terminateAllActiveRuns()
 				return {
 					shutdown: true,
 					terminatedRuns: terminatedRuns.map(completedRunToJson),
-					daemon: this.snapshot() as unknown as JsonObject,
+					daemon: daemonSnapshotToJson(this.snapshot()),
 				}
 			}
 			default:
@@ -1129,13 +1138,13 @@ export class CoderLoopDaemon {
 		try {
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: this.paths.root })
 			await rm(paths.chainRoot, { recursive: true, force: true })
-			return { chainRoot: paths.chainRoot, chainRootRemoved: true, worktrees: worktrees as unknown as JsonValue }
+			return { chainRoot: paths.chainRoot, chainRootRemoved: true, worktrees: schedulerWorktreeCleanupsToJson(worktrees) }
 		} catch (error) {
 			if (isInvalidChainNameError(error)) {
 				return {
 					chainRoot: null,
 					chainRootRemoved: false,
-					worktrees: worktrees as unknown as JsonValue,
+					worktrees: schedulerWorktreeCleanupsToJson(worktrees),
 					error: errorMessage(error),
 				}
 			}
@@ -2047,7 +2056,12 @@ function optionalStringOrNull(record: UnknownRecord, key: string): string | null
 	const value = record[key]
 	if (value === undefined) return undefined
 	if (value === null) return null
-	if (typeof value !== "string") throw new DaemonError("invalid_request", `${key} must be a string or null when provided`)
+	if (typeof value !== "string") {
+		throw new DaemonError("invalid_request", `${key} must be a string or null when provided`, {
+			field: key,
+			value: toJsonValue(value),
+		})
+	}
 	return value
 }
 
@@ -2122,25 +2136,14 @@ function sizedJsonObject(record: UnknownRecord, key: string, limitBytes: number)
 	return value
 }
 
-function validateChainMetadata(metadata: JsonObject): JsonObject {
+function validateChainMetadata(metadata: JsonObject): ReturnType<typeof parseChainMetadataForRequest> {
 	validateJsonObjectSafety(metadata, "metadata", MAX_CHAIN_METADATA_DEPTH, "metadata")
-	validateOptionalPositiveIntegerMetadata(metadata, "maxItemAttempts")
-	return metadata
+	return parseRuntimeData(() => parseChainMetadataForRequest(metadata, "metadata"))
 }
 
-function validateOptionalPositiveIntegerMetadata(metadata: JsonObject, key: string): void {
-	const value = metadata[key]
-	if (value === undefined) return
-	if (typeof value === "number" && Number.isInteger(value) && value >= 1) return
-	throw new DaemonError("invalid_request", `metadata.${key} must be a positive integer when provided`, {
-		field: `metadata.${key}`,
-		value: toJsonValue(value),
-	})
-}
-
-function validateItemExtra(extra: JsonObject): JsonObject {
+function validateItemExtra(extra: JsonObject): ItemExtra {
 	validateJsonObjectSafety(extra, "extra", MAX_ITEM_EXTRA_DEPTH, "extra")
-	return extra
+	return parseRuntimeData(() => parseItemExtraForRequest(extra, "extra"))
 }
 
 // Typed blocker metadata mutation for item.update. blockerRepo/blockerRef are first-class typed
@@ -2201,7 +2204,7 @@ function validateJsonObjectSafety(value: JsonValue, path: string, maxDepth: numb
 		value.forEach((item, index) => validateJsonObjectSafety(item, `${path}[${index}]`, maxDepth, label, depth + 1))
 		return
 	}
-	if (!isRecord(value)) return
+	if (!isJsonObjectValue(value)) return
 
 	for (const [key, child] of Object.entries(value)) {
 		const field = key === "" ? `${path}.<empty>` : `${path}.${key}`
@@ -2211,7 +2214,7 @@ function validateJsonObjectSafety(value: JsonValue, path: string, maxDepth: numb
 		if (RESERVED_METADATA_KEYS.has(key)) {
 			throw new DaemonError("invalid_request", `${label} key not allowed: ${key}`, { field })
 		}
-		validateJsonObjectSafety(child as JsonValue, field, maxDepth, label, depth + 1)
+		validateJsonObjectSafety(child, field, maxDepth, label, depth + 1)
 	}
 }
 
@@ -2267,7 +2270,11 @@ function itemUpdateFields(args: JsonObject): JsonObject {
 	if (nestedFields !== undefined) return nestedFields
 	const fields: JsonObject = {}
 	for (const key of ITEM_UPDATE_FIELD_KEYS) {
-		if (Object.hasOwn(args, key)) fields[key] = args[key] as JsonValue
+		if (Object.hasOwn(args, key)) {
+			const value = args[key]
+			if (value === undefined) throw new DaemonError("invalid_request", `item.update field ${key} must be a JSON value`, { field: key })
+			fields[key] = value
+		}
 	}
 	return fields
 }
@@ -2309,8 +2316,8 @@ function requiredJsonObjectArray(record: UnknownRecord, key: string): JsonObject
 	const value = record[key]
 	if (!Array.isArray(value)) throw new DaemonError("invalid_request", `${key} must be an array of item objects`, { field: key })
 	return value.map((entry, index) => {
-		if (!isRecord(entry) || Array.isArray(entry)) throw new DaemonError("invalid_request", `${key}[${index}] must be an item object`, { field: `${key}[${index}]` })
-		return entry as JsonObject
+		if (!isRecord(entry) || !isJsonObject(entry)) throw new DaemonError("invalid_request", `${key}[${index}] must be an item object`, { field: `${key}[${index}]` })
+		return entry
 	})
 }
 
@@ -2437,8 +2444,22 @@ function withDependsOn(extra: JsonObject, dependsOn: readonly number[] | null | 
 	return next
 }
 
+function parseRuntimeData<T>(parse: () => T): T {
+	try {
+		return parse()
+	} catch (error) {
+		if (error instanceof RuntimeDataError) {
+			throw new DaemonError("invalid_request", error.message, {
+				field: error.issue.field,
+				value: error.issue.value,
+			})
+		}
+		throw error
+	}
+}
+
 function toJsonValue(value: unknown): JsonValue {
-	return isJsonValue(value) ? value : String(value)
+	return runtimeDataJsonValue(value)
 }
 
 function chainCreateConflicts(existing: ChainRecord, requested: CreateChainInput): JsonObject[] {
@@ -2485,14 +2506,38 @@ function jsonValuesEqual(left: JsonValue | undefined, right: JsonValue | undefin
 		if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false
 		return left.every((value, index) => jsonValuesEqual(value, right[index]))
 	}
-	if (isRecord(left) || isRecord(right)) {
-		if (!isRecord(left) || !isRecord(right)) return false
+	if (isJsonObjectValue(left) || isJsonObjectValue(right)) {
+		if (!isJsonObjectValue(left) || !isJsonObjectValue(right)) return false
 		const leftKeys = Object.keys(left).sort()
 		const rightKeys = Object.keys(right).sort()
 		if (leftKeys.length !== rightKeys.length) return false
-		return leftKeys.every((key, index) => key === rightKeys[index] && jsonValuesEqual(left[key] as JsonValue | undefined, right[key] as JsonValue | undefined))
+		return leftKeys.every((key, index) => key === rightKeys[index] && jsonValuesEqual(left[key], right[key]))
 	}
 	return false
+}
+
+function daemonSnapshotToJson(snapshot: CoderLoopDaemonSnapshot): JsonObject {
+	return {
+		pid: snapshot.pid,
+		socketPath: snapshot.socketPath,
+		pidFile: snapshot.pidFile,
+		running: snapshot.running,
+		shuttingDown: snapshot.shuttingDown,
+		schedulerEnabled: snapshot.schedulerEnabled,
+		activeRuns: snapshot.activeRuns,
+	}
+}
+
+function schedulerWorktreeCleanupsToJson(worktrees: readonly SchedulerChainWorktreeCleanup[]): JsonValue {
+	return worktrees.map((worktree): JsonObject => ({
+		repoCwd: worktree.repoCwd,
+		worktreePath: worktree.worktreePath,
+		registered: worktree.registered,
+		removed: worktree.removed,
+		directoryRemoved: worktree.directoryRemoved,
+		pruned: worktree.pruned,
+		error: worktree.error,
+	}))
 }
 
 function isRecord(value: unknown): value is UnknownRecord {
@@ -2501,6 +2546,10 @@ function isRecord(value: unknown): value is UnknownRecord {
 
 function isJsonObject(value: UnknownRecord): value is JsonObject {
 	return Object.values(value).every(isJsonValue)
+}
+
+function isJsonObjectValue(value: JsonValue | undefined): value is JsonObject {
+	return value !== undefined && value !== null && typeof value === "object" && !Array.isArray(value)
 }
 
 function isJsonValue(value: unknown): value is JsonValue {

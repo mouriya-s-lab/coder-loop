@@ -14,6 +14,7 @@ import { closeSync, createWriteStream, openSync, realpathSync, type WriteStream 
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
 import { command, flag, option, optional, positional, run as runCmd, string as cmdString, subcommands } from "cmd-ts"
 import { type as arkType } from "arktype"
+import type { BoundaryError, BoundaryRecord, BoundaryValue } from "./boundary-types"
 import {
 	CoderLoopDaemon,
 	DaemonError,
@@ -40,6 +41,16 @@ import {
 	type RunRecord,
 	type SqliteStateStore,
 } from "./sqlite-state"
+import {
+	chainConfigBindings as metadataConfigBindings,
+	metadataBoolean,
+	metadataNestedString,
+	metadataNestedStringArray,
+	metadataString,
+	parseInternalStatus,
+	type InternalStatus,
+	type ItemExtra,
+} from "./runtime-data"
 
 const PKG_ROOT = resolve(import.meta.dir, "..")
 const DEFAULT_PRESET_NAME = "gh-issue-pr-iteration"
@@ -497,7 +508,7 @@ export type PresetVariableDoc = {
 }
 
 export type PresetPhaseExit = {
-	status: string
+	status: InternalStatus
 	when: string
 }
 
@@ -531,13 +542,13 @@ export type Preset = {
 	runtime: {
 		businessKeys: readonly string[]
 	}
-	statuses: {
-		continuable: readonly string[]
-		terminal: readonly string[]
-		success: readonly string[]
-		entry: string
-		unblockable: readonly string[]
-	}
+		statuses: {
+			continuable: readonly InternalStatus[]
+			terminal: readonly InternalStatus[]
+			success: readonly InternalStatus[]
+			entry: InternalStatus
+			unblockable: readonly InternalStatus[]
+		}
 	phases: readonly PresetPhase[]
 	fragments: readonly PresetFragment[]
 	agent: {
@@ -552,7 +563,7 @@ export type PresetItemField = {
 }
 
 export type PresetPhaseTrigger =
-	| { afterPhase: string; whenStatus: string }
+	| { afterPhase: string; whenStatus: InternalStatus }
 	| { on: "chain-complete" }
 
 export type AgentRunnerKind = "claude" | "codex"
@@ -615,6 +626,7 @@ export type StatusTargetSnapshot = {
 	configFormat: ConfigFormat
 	config: StatusResourceSnapshot
 	sharedContextPath: string
+	[STATUS_STATE_FILE_KEY]: string
 	issueDir: string
 	evidenceRootDir: string
 	logDir: string
@@ -628,7 +640,6 @@ export type StatusTargetSnapshot = {
 		description: string
 		presetDir: string
 	} | null
-	[key: string]: unknown
 }
 
 export type StatusResourceSnapshot =
@@ -868,7 +879,8 @@ export const BACKOFF_BUDGET_SECONDS = 7200
 const BACKOFF_INITIAL_SECONDS = 4
 const BACKOFF_MAX_INTERVAL_SECONDS = 600
 
-export type ReviewSummaryVerdict = "retry" | "accepted" | "skip" | "blocked" | "stop"
+const REVIEW_SUMMARY_VERDICTS = ["retry", "accepted", "skip", "blocked", "stop"] as const
+export type ReviewSummaryVerdict = (typeof REVIEW_SUMMARY_VERDICTS)[number]
 export const SUMMARY_WATCHDOG_TERM_MS = Infinity
 export const SUMMARY_WATCHDOG_KILL_MS = 5 * 1000
 
@@ -982,14 +994,18 @@ function renderCodexModel(choice: CodexModelChoice): string {
 
 function parseClaudeModelChoice(value: string | null, flagName: string): ClaudeModelChoice | null {
 	if (value === null) return null
-	if ((CLAUDE_MODEL_CHOICES as readonly string[]).includes(value)) return value as ClaudeModelChoice
+	if (includesStringLiteral(CLAUDE_MODEL_CHOICES, value)) return value
 	fail(`${flagName} must be one of ${CLAUDE_MODEL_CHOICES.join("|")}, got: ${value}`)
 }
 
 function parseCodexModelChoice(value: string | null, flagName: string): CodexModelChoice | null {
 	if (value === null) return null
-	if ((CODEX_MODEL_CHOICES as readonly string[]).includes(value)) return value as CodexModelChoice
+	if (includesStringLiteral(CODEX_MODEL_CHOICES, value)) return value
 	fail(`${flagName} must be one of ${CODEX_MODEL_CHOICES.join("|")}, got: ${value}`)
+}
+
+function includesStringLiteral<const Values extends readonly string[]>(values: Values, value: string): value is Values[number] {
+	return values.some((entry) => entry === value)
 }
 
 const statusCliCommand = command({
@@ -1800,14 +1816,14 @@ async function runItemCommand(args: string[]): Promise<void> {
 		writeCommandResult(result, itemArgs.json, formatItemListResult)
 		return
 	}
+	const fields: JsonObject = {}
 	const requestArgs: JsonObject = {
 		chainName: itemArgs.chainName,
 		issueNumber: itemArgs.issueNumber,
-		fields: {},
+		fields,
 	}
 	assignCliOptional(requestArgs, "agentRunId", itemArgs.agentRunId)
 	assignCliOptional(requestArgs, "agentPhase", itemArgs.agentPhase)
-	const fields = requestArgs.fields as JsonObject
 	assignCliOptional(fields, "repoCwd", itemArgs.repoCwd)
 	assignCliOptional(fields, "status", itemArgs.status)
 	assignCliOptional(fields, "title", itemArgs.title)
@@ -1828,13 +1844,13 @@ function assignCliOptional(target: JsonObject, key: string, value: JsonValue | u
 	if (value !== undefined && value !== null) target[key] = value
 }
 
-function isJsonObjectRecord(value: unknown): value is Record<string, JsonValue> {
-	return typeof value === "object" && value !== null && !Array.isArray(value)
+function isJsonObjectRecord(value: BoundaryValue): value is JsonObject {
+	return isJsonObject(value)
 }
 
 function parseOptionalJsonObjectFlag(raw: string | null, flagName: string): JsonObject | null {
 	if (raw === null) return null
-	let parsed: unknown
+	let parsed: BoundaryValue
 	try {
 		parsed = JSON.parse(raw)
 	} catch (error) {
@@ -1858,7 +1874,7 @@ function optionalConfigString(config: JsonObject, field: string, flagName: strin
 }
 
 function parseBatchItemsJson(raw: string): JsonObject[] {
-	let parsed: unknown
+	let parsed: BoundaryValue
 	try {
 		parsed = JSON.parse(raw)
 	} catch (error) {
@@ -1867,7 +1883,7 @@ function parseBatchItemsJson(raw: string): JsonObject[] {
 	if (!Array.isArray(parsed)) fail("--items-json must be a JSON array")
 	return parsed.map((entry, index) => {
 		if (!isJsonObjectRecord(entry)) fail(`--items-json[${index}] must be an object`)
-		const item = { ...entry } as JsonObject
+			const item: JsonObject = { ...entry }
 		if (typeof item.issue === "number" && item.issueNumber === undefined) {
 			item.issueNumber = item.issue
 			delete item.issue
@@ -1931,7 +1947,7 @@ function parseCentralDaemonSocketOptions(args: string[], usage: string): { loopD
 				json = true
 				break
 			default:
-				fail(`${usage}: unknown argument ${arg}`)
+				fail(`${usage}: unrecognized argument ${arg}`)
 		}
 	}
 	return { loopDataRoot, json }
@@ -1994,7 +2010,7 @@ type DaemonConnectionFailure = {
 	details: JsonObject
 }
 
-async function daemonConnectionFailure(loopDataRoot: string | null, error: unknown): Promise<DaemonConnectionFailure> {
+async function daemonConnectionFailure(loopDataRoot: string | null, error: BoundaryError): Promise<DaemonConnectionFailure> {
 	const pathOptions = loopDataRoot === null ? {} : { loopDataRoot }
 	const paths = resolveLoopDataPaths(pathOptions)
 	const pathIssue = await detectDaemonSocketPathIssue(paths.daemonSocket, paths.daemonPid)
@@ -2018,13 +2034,13 @@ async function daemonConnectionFailure(loopDataRoot: string | null, error: unkno
 	}
 }
 
-function centralDaemonNotRunningMessage(loopDataRoot: string | null, socketPath: string, error: unknown): string {
+function centralDaemonNotRunningMessage(loopDataRoot: string | null, socketPath: string, error: BoundaryError): string {
 	const hint = loopDataRoot === null ? "coder-loop daemon up" : `coder-loop daemon up --loop-data-root ${loopDataRoot}`
 	const detail = isNodeError(error) && typeof error.code === "string" ? `${error.code}: ${errorMessage(error)}` : errorMessage(error)
 	return `central daemon is not running at ${socketPath}; start it with \`${hint}\`. ${detail}`
 }
 
-function daemonCliErrorResponse(error: unknown, fallbackCode: string): JsonObject {
+function daemonCliErrorResponse(error: BoundaryError, fallbackCode: string): JsonObject {
 	if (error instanceof DaemonError) return daemonErrorResponse(error.code, error.message, error.details)
 	if (error instanceof RuntimePathError) {
 		return daemonErrorResponse(error.code, error.message, { input: error.input })
@@ -2056,7 +2072,7 @@ function writeJsonOrText(result: JsonObject, json: boolean, formatText: (result:
 }
 
 function formatChainCreateResult(result: JsonObject): string {
-	const chain = result.chain as JsonObject | undefined
+	const chain = jsonObjectEntry(result.chain)
 	return `created chain ${String(chain?.name ?? "")}\n`
 }
 
@@ -2064,15 +2080,15 @@ function formatChainListResult(result: JsonObject): string {
 	const chains = Array.isArray(result.chains) ? result.chains : []
 	if (chains.length === 0) return "no chains\n"
 	return chains.map((raw) => {
-		const chain = raw as JsonObject
+		const chain = jsonObjectEntry(raw) ?? {}
 		return `${String(chain.name)}\t${String(chain.status)}\t${String(chain.repository)}\n`
 	}).join("")
 }
 
 function formatChainStatusResult(result: JsonObject): string {
-	const chain = result.chain as JsonObject | undefined
-	const summary = result.summary as JsonObject | undefined
-	const items = summary?.items as JsonObject | undefined
+	const chain = jsonObjectEntry(result.chain)
+	const summary = jsonObjectEntry(result.summary)
+	const items = jsonObjectEntry(summary?.items)
 	const total = typeof items?.total === "number" ? items.total : 0
 	const activeSlots = Array.isArray(summary?.activeSlots) ? summary.activeSlots.length : 0
 	return [
@@ -2086,22 +2102,22 @@ function formatChainStatusResult(result: JsonObject): string {
 }
 
 function formatChainStopResult(result: JsonObject): string {
-	const chain = result.chain as JsonObject | undefined
+	const chain = jsonObjectEntry(result.chain)
 	return `stopped chain ${String(chain?.name ?? "")}\n`
 }
 
 function formatChainResumeResult(result: JsonObject): string {
-	const chain = result.chain as JsonObject | undefined
+	const chain = jsonObjectEntry(result.chain)
 	return `resumed chain ${String(chain?.name ?? "")}\n`
 }
 
 function formatChainDeleteResult(result: JsonObject): string {
-	const chain = result.chain as JsonObject | undefined
+	const chain = jsonObjectEntry(result.chain)
 	return `deleted chain ${String(chain?.name ?? "")}\n`
 }
 
 function formatItemMutationResult(result: JsonObject): string {
-	const item = result.item as JsonObject | undefined
+	const item = jsonObjectEntry(result.item)
 	return `item ${String(item?.issueNumber ?? "")}: ${String(item?.status ?? "")}\n`
 }
 
@@ -2114,13 +2130,13 @@ function formatItemListResult(result: JsonObject): string {
 	const items = Array.isArray(result.items) ? result.items : []
 	if (items.length === 0) return "no items\n"
 	return items.map((raw) => {
-		const item = raw as JsonObject
+		const item = jsonObjectEntry(raw) ?? {}
 		return `${String(item.issueNumber)}\t${String(item.status)}\t${String(item.repoCwd)}\n`
 	}).join("")
 }
 
 function formatDaemonStatusResult(result: JsonObject): string {
-	const daemon = result.daemon as JsonObject | undefined
+	const daemon = jsonObjectEntry(result.daemon)
 	const activeRuns = Array.isArray(daemon?.activeRuns) ? daemon.activeRuns.length : 0
 	return [
 		`pid: ${String(daemon?.pid ?? "")}`,
@@ -2136,11 +2152,11 @@ function formatDaemonUpResult(result: JsonObject): string {
 }
 
 function formatDaemonDownResult(result: JsonObject): string {
-	const daemon = result.daemon as JsonObject | undefined
+	const daemon = jsonObjectEntry(result.daemon)
 	let output = `daemon down: shutdown=${String(result.shutdown ?? false)} pid=${String(daemon?.pid ?? "")} socket=${String(daemon?.socketPath ?? "")}\n`
 	const terminatedRuns = Array.isArray(result.terminatedRuns) ? result.terminatedRuns : []
 	for (const run of terminatedRuns) {
-		const record = run as JsonObject
+		const record = jsonObjectEntry(run) ?? {}
 		output += `daemon down: terminated run=${String(record.runId ?? "")} exitCode=${String(record.exitCode ?? "")}\n`
 	}
 	return output
@@ -2155,14 +2171,14 @@ function formatDaemonStartResult(result: JsonObject): string {
 			"",
 		].join("\n")
 	}
-	const daemon = result.daemon as JsonObject | undefined
+	const daemon = jsonObjectEntry(result.daemon)
 	return `daemon start: target=${String(result.target ?? "")} chain=${String(result.chain ?? "")} already-running=${String(result.alreadyRunning ?? false)} pid=${String(daemon?.pid ?? "")}\n`
 }
 
 function formatDaemonStopResult(result: JsonObject): string {
 	if (result.dryRun === true) return `daemon stop dry-run: target=${String(result.target ?? "")} chain=${String(result.chain ?? "")}\n`
-	const mutation = result.result as JsonObject | undefined
-	const chain = mutation?.chain as JsonObject | undefined
+	const mutation = jsonObjectEntry(result.result)
+	const chain = jsonObjectEntry(mutation?.chain)
 	return `daemon stop: target=${String(result.target ?? "")} chain=${String(result.chain ?? "")} status=${String(chain?.status ?? "")}\n`
 }
 
@@ -2170,8 +2186,12 @@ function formatDaemonRestartResult(result: JsonObject): string {
 	if (result.dryRun === true) {
 		return `daemon restart dry-run: target=${String(result.target ?? "")} chain=${String(result.chain ?? "")} central-daemon=${String(result.centralDaemon ?? "required")}\n`
 	}
-	const daemon = result.daemon as JsonObject | undefined
+	const daemon = jsonObjectEntry(result.daemon)
 	return `daemon restart: target=${String(result.target ?? "")} chain=${String(result.chain ?? "")} restarted=${String(result.restarted ?? false)} pid=${String(daemon?.pid ?? "")}\n`
+}
+
+function jsonObjectEntry(value: JsonValue | undefined): JsonObject | undefined {
+	return isJsonObject(value) ? value : undefined
 }
 
 async function runDaemonCommand(args: string[]): Promise<void> {
@@ -2410,20 +2430,20 @@ export async function applyRuntimeSet(input: {
 	} catch (error) {
 		if (!(isNodeError(error) && error.code === "ENOENT")) throw error
 	}
-	const original: Record<string, unknown> = existingRaw === null ? {} : (() => {
+	const original: JsonObject = existingRaw === null ? {} : (() => {
 		try {
 			const parsed = JSON.parse(existingRaw)
-			if (!isObjectRecord(parsed)) fail(`runtime set: config root must be a JSON object: ${configPath}`)
+			if (!isJsonObject(parsed)) fail(`runtime set: config root must be a JSON object: ${configPath}`)
 			return { ...parsed }
 		} catch (error) {
 			fail(`runtime set: failed to parse JSON config ${configPath}: ${errorMessage(error)}`)
 		}
 	})()
 
-	const next: Record<string, unknown> = { ...original }
+	const next: JsonObject = { ...original }
 	const changed: Record<string, { from: string | null; to: string | null }> = {}
 
-	function recordChange(key: string, from: unknown, to: unknown): void {
+	function recordChange(key: string, from: JsonValue | undefined, to: JsonValue | undefined): void {
 		const fromStr = from === undefined || from === null ? null : String(from)
 		const toStr = to === undefined || to === null ? null : String(to)
 		if (fromStr === toStr) return
@@ -2431,7 +2451,7 @@ export async function applyRuntimeSet(input: {
 	}
 
 	if (input.claudeModelChoice !== null) {
-		const claudeSection = isObjectRecord(next.claude) ? { ...next.claude } : {}
+		const claudeSection = isJsonObject(next.claude) ? { ...next.claude } : {}
 		const from = claudeSection.model
 		const to = renderClaudeModel(input.claudeModelChoice)
 		claudeSection.model = to
@@ -2439,7 +2459,7 @@ export async function applyRuntimeSet(input: {
 		recordChange("claude.model", from, to)
 	}
 	if (input.codexModelChoice !== null) {
-		const codexSection = isObjectRecord(next.codex) ? { ...next.codex } : {}
+		const codexSection = isJsonObject(next.codex) ? { ...next.codex } : {}
 		const from = codexSection.model
 		const to = renderCodexModel(input.codexModelChoice)
 		codexSection.model = to
@@ -2812,10 +2832,10 @@ function makeUnavailableStatusSnapshot(input: {
 	}
 }
 
-function flattenExtraReplacer(_key: string, value: unknown): unknown {
+function flattenExtraReplacer(_key: string, value: BoundaryValue): BoundaryValue {
 	if (!isObjectRecord(value) || !("extra" in value) || !isJsonObject(value.extra)) return value
 	const extra = value.extra
-	const rest: Record<string, unknown> = {}
+	const rest: BoundaryRecord = {}
 	for (const [k, v] of Object.entries(value)) {
 		if (k !== "extra") rest[k] = v
 	}
@@ -2983,7 +3003,7 @@ function statusRunnerSelections(selections: Record<string, AgentRunnerSelection>
 async function readAgentPhaseStatus(path: string): Promise<StatusPhaseStatusSnapshot> {
 	try {
 		const raw = await readFile(path, "utf-8")
-		const parsed: unknown = JSON.parse(raw)
+		const parsed: BoundaryValue = JSON.parse(raw)
 		const status = agentStatusFromInput(assertArk(AgentRunStatusBoundary, parsed, "agent status"))
 		return { path, exists: true, value: status, error: null }
 	} catch (error) {
@@ -3047,8 +3067,8 @@ function firstLastRunIdFromRecords(items: readonly ItemRecord[]): string | null 
 	return null
 }
 
-function jsonValueFromSerializable(value: unknown): JsonValue {
-	const parsed: unknown = JSON.parse(JSON.stringify(value))
+function jsonValueFromSerializable(value: BoundaryValue): JsonValue {
+	const parsed: BoundaryValue = JSON.parse(JSON.stringify(value))
 	if (!isJsonValue(parsed)) throw new Error("event is not JSON data")
 	return parsed
 }
@@ -3057,7 +3077,7 @@ function parseRecentJsonLines(raw: string, limit: number): JsonValue[] {
 	const lines = raw.split("\n").filter((line) => line.trim() !== "")
 	const recent = lines.slice(-limit)
 	return recent.map((line) => {
-		const parsed: unknown = JSON.parse(line)
+		const parsed: BoundaryValue = JSON.parse(line)
 		if (!isJsonValue(parsed)) throw new Error("event line is not JSON data")
 		return parsed
 	})
@@ -3220,7 +3240,7 @@ async function runDaemonUpCommand(args: Extract<DaemonCommandArgs, { action: "up
 	// prints a stack to an stderr that operational daemons do not capture, then exits —
 	// leaving no durable trace of why the daemon died. Record the stack synchronously to
 	// the global daemon.log first, then exit non-zero.
-	const recordFatal = (kind: string) => (error: unknown): void => {
+	const recordFatal = (kind: string) => (error: BoundaryError): void => {
 		daemon?.recordFatalSync(kind, error)
 		process.exit(1)
 	}
@@ -3431,6 +3451,7 @@ type QueueUnblockCommandResult = {
 	action: "queue.unblock"
 	target: string
 	repository: string | null
+	[STATUS_STATE_FILE_KEY]: string
 	issue: string
 	dryRun: boolean
 	mutation: QueueUnblockMutationOutcome
@@ -3445,7 +3466,6 @@ type QueueUnblockCommandResult = {
 		stateKind: StatusStateKind
 		daemonRunning: boolean
 		}
-	[key: string]: unknown
 }
 
 async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<void> {
@@ -3745,22 +3765,22 @@ function readDbCurrentRun(loopDataRoot: string | null, chainId: number): Current
 
 function loopConfigFromChain(chain: ChainRecord, loopDataRoot: string | null, explicitConfig: LoopConfig | null): LoopConfig {
 	const metadata = chain.metadata
-	const chainBindings = chainConfigBindings(metadata)
-	const presetPath = stringMetadata(metadata, "presetPath") ?? stringConfigBinding(chainBindings, "presetPath") ?? explicitConfig?.presetPath ?? null
+	const chainBindings = metadataConfigBindings(metadata)
+	const presetPath = metadataString(metadata, "presetPath") ?? stringConfigBinding(chainBindings, "presetPath") ?? explicitConfig?.presetPath ?? null
 	const config: LoopConfig = {
-		worktree: booleanMetadata(metadata, "worktree") ?? explicitConfig?.worktree ?? null,
-		workflowFile: stringMetadata(metadata, "workflowFile") ?? stringConfigBinding(chainBindings, "workflowFile") ?? explicitConfig?.workflowFile ?? null,
-		sharedContextFile: stringMetadata(metadata, "sharedContextFile") ?? explicitConfig?.sharedContextFile ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "shared"),
-		issueDir: stringMetadata(metadata, "issueDir") ?? explicitConfig?.issueDir ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "issues"),
-		evidenceDir: stringMetadata(metadata, "evidenceDir") ?? explicitConfig?.evidenceDir ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "evidence"),
-		logDir: stringMetadata(metadata, "logDir") ?? explicitConfig?.logDir ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "runs"),
+		worktree: metadataBoolean(metadata, "worktree") ?? explicitConfig?.worktree ?? null,
+		workflowFile: metadataString(metadata, "workflowFile") ?? stringConfigBinding(chainBindings, "workflowFile") ?? explicitConfig?.workflowFile ?? null,
+		sharedContextFile: metadataString(metadata, "sharedContextFile") ?? explicitConfig?.sharedContextFile ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "shared"),
+		issueDir: metadataString(metadata, "issueDir") ?? explicitConfig?.issueDir ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "issues"),
+		evidenceDir: metadataString(metadata, "evidenceDir") ?? explicitConfig?.evidenceDir ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "evidence"),
+		logDir: metadataString(metadata, "logDir") ?? explicitConfig?.logDir ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "runs"),
 		loopDataRoot,
-		claudeBinary: nestedStringMetadata(metadata, "claude", "binary") ?? explicitConfig?.claudeBinary ?? null,
-		claudeExtraArgs: nestedStringArrayMetadata(metadata, "claude", "extraArgs") ?? explicitConfig?.claudeExtraArgs ?? [],
-		claudeModel: nestedStringMetadata(metadata, "claude", "model") ?? explicitConfig?.claudeModel ?? null,
-		codexBinary: nestedStringMetadata(metadata, "codex", "binary") ?? explicitConfig?.codexBinary ?? null,
-		codexExtraArgs: nestedStringArrayMetadata(metadata, "codex", "extraArgs") ?? explicitConfig?.codexExtraArgs ?? [],
-		codexModel: nestedStringMetadata(metadata, "codex", "model") ?? explicitConfig?.codexModel ?? null,
+		claudeBinary: metadataNestedString(metadata, "claude", "binary") ?? explicitConfig?.claudeBinary ?? null,
+		claudeExtraArgs: metadataNestedStringArray(metadata, "claude", "extraArgs") ?? explicitConfig?.claudeExtraArgs ?? [],
+		claudeModel: metadataNestedString(metadata, "claude", "model") ?? explicitConfig?.claudeModel ?? null,
+		codexBinary: metadataNestedString(metadata, "codex", "binary") ?? explicitConfig?.codexBinary ?? null,
+		codexExtraArgs: metadataNestedStringArray(metadata, "codex", "extraArgs") ?? explicitConfig?.codexExtraArgs ?? [],
+		codexModel: metadataNestedString(metadata, "codex", "model") ?? explicitConfig?.codexModel ?? null,
 		preset: presetPath === null ? chain.preset : null,
 		presetPath,
 		configBindings: explicitConfig?.configBindings ?? {},
@@ -3774,7 +3794,7 @@ function buildEffectiveConfigBindings(
 	config: Pick<LoopConfig, "configBindings" | "workflowFile">,
 ): ConfigBindings {
 	const bindings: JsonObject = {
-		...chainConfigBindings(chain.metadata),
+		...metadataConfigBindings(chain.metadata),
 		...config.configBindings,
 	}
 	bindings.workflowFile = resolveWorkflowFileConfigBinding(targetCwd, config.workflowFile ?? stringConfigBinding(bindings, "workflowFile"))
@@ -3794,45 +3814,12 @@ function stringConfigBinding(bindings: JsonObject, key: string): string | null {
 	return typeof value === "string" && value.trim() !== "" ? value : null
 }
 
-function chainConfigBindings(metadata: JsonObject): JsonObject {
-	const value = metadata.config
-	if (value === undefined) return {}
-	if (!isObjectRecord(value) || Array.isArray(value) || !isJsonObject(value)) {
-		throw new Error("chain.metadata.config must be a JSON object when provided")
-	}
-	return { ...value }
-}
-
 function chainRuntimePathForConfig(chainName: string, loopDataRoot: string | null, kind: "shared" | "issues" | "evidence" | "runs"): string {
 	const paths = resolveChainRuntimePaths(chainName, loopDataRootOption(loopDataRoot))
 	if (kind === "shared") return paths.sharedFile
 	if (kind === "issues") return paths.issuesDir
 	if (kind === "evidence") return paths.evidenceDir
 	return paths.runsDir
-}
-
-function stringMetadata(metadata: JsonObject, key: string): string | null {
-	const value = metadata[key]
-	return typeof value === "string" && value.trim() !== "" ? value : null
-}
-
-function booleanMetadata(metadata: JsonObject, key: string): boolean | null {
-	const value = metadata[key]
-	return typeof value === "boolean" ? value : null
-}
-
-function nestedStringMetadata(metadata: JsonObject, objectKey: string, key: string): string | null {
-	const object = metadata[objectKey]
-	if (!isObjectRecord(object)) return null
-	const value = object[key]
-	return typeof value === "string" && value.trim() !== "" ? value : null
-}
-
-function nestedStringArrayMetadata(metadata: JsonObject, objectKey: string, key: string): string[] | null {
-	const object = metadata[objectKey]
-	if (!isObjectRecord(object)) return null
-	const value = object[key]
-	return Array.isArray(value) && value.every((entry) => typeof entry === "string") ? [...value] : null
 }
 
 async function inferRepositoryFromGit(targetCwd: string): Promise<string | null> {
@@ -3889,7 +3876,7 @@ async function waitForPidExit(pid: number, timeoutMs: number): Promise<boolean> 
 export async function loadPreset(presetDir: string): Promise<Preset> {
 	const tomlPath = resolve(presetDir, "preset.toml")
 	const raw = await readFile(tomlPath, "utf-8")
-	const parsed: unknown = Bun.TOML.parse(raw)
+	const parsed: BoundaryValue = Bun.TOML.parse(raw)
 	const preset = parsePreset(parsed, presetDir)
 	const phases: PresetPhase[] = []
 	for (const phase of preset.phases) {
@@ -3903,26 +3890,32 @@ export async function loadPreset(presetDir: string): Promise<Preset> {
 	return { ...preset, phases }
 }
 
-export function parsePreset(value: unknown, presetDir: string): Preset {
+export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 	const root = assertArk(PresetTomlBoundary, value, "preset")
 
 	for (const status of root.statuses.continuable) {
 		if (root.statuses.terminal.includes(status)) presetError(`preset.statuses: "${status}" appears in both continuable and terminal`)
 	}
-	const successStatuses = root.statuses.success ?? []
-	for (const status of successStatuses) {
+	const continuableStatuses = root.statuses.continuable.map((status, index) => parseInternalStatus(status, `preset.statuses.continuable[${index}]`))
+	const terminalStatuses = root.statuses.terminal.map((status, index) => parseInternalStatus(status, `preset.statuses.terminal[${index}]`))
+	const successStatusNames = root.statuses.success ?? []
+	const successStatuses = successStatusNames.map((status, index) => parseInternalStatus(status, `preset.statuses.success[${index}]`))
+	for (const status of successStatusNames) {
 		if (!root.statuses.terminal.includes(status)) presetError(`preset.statuses.success: "${status}" must be one of statuses.terminal`)
 	}
-	const entryStatus = root.statuses.entry ?? root.statuses.continuable[0]
-	if (entryStatus === undefined) presetError("preset.statuses: continuable must declare at least one status")
-	if (!root.statuses.continuable.includes(entryStatus)) presetError(`preset.statuses.entry: "${entryStatus}" must be one of statuses.continuable`)
-	const unblockableStatuses = root.statuses.unblockable ?? []
+	const entryStatusName = root.statuses.entry ?? root.statuses.continuable[0]
+	if (entryStatusName === undefined) presetError("preset.statuses: continuable must declare at least one status")
+	if (!root.statuses.continuable.includes(entryStatusName)) presetError(`preset.statuses.entry: "${entryStatusName}" must be one of statuses.continuable`)
+	const entryStatus = parseInternalStatus(entryStatusName, "preset.statuses.entry")
+	const unblockableStatusNames = root.statuses.unblockable ?? []
+	const unblockableStatuses = unblockableStatusNames.map((status, index) => parseInternalStatus(status, `preset.statuses.unblockable[${index}]`))
 	const seenUnblockableStatuses = new Set<string>()
-	for (const status of unblockableStatuses) {
+	for (const status of unblockableStatusNames) {
 		if (!root.statuses.terminal.includes(status)) presetError(`preset.statuses.unblockable: "${status}" must be one of statuses.terminal`)
 		if (seenUnblockableStatuses.has(status)) presetError(`preset.statuses.unblockable: duplicate status "${status}"`)
 		seenUnblockableStatuses.add(status)
 	}
+	const statusNames = new Set<string>([...root.statuses.continuable, ...root.statuses.terminal])
 	const itemFields = parsePresetItemFields(root.item.fields ?? {}, "preset.item.fields")
 	if (itemFields.has(root.item.idField)) presetError(`preset.item.fields.${root.item.idField}: idField is already declared by preset.item.idField`)
 	const attemptTimeoutSeconds = root.agent.attemptTimeoutSeconds ?? DEFAULT_ATTEMPT_TIMEOUT_SECONDS
@@ -3953,12 +3946,12 @@ export function parsePreset(value: unknown, presetDir: string): Preset {
 			if (source.kind === "item") {
 				const itemField = itemFieldRoot(source.field)
 				if (!isKnownPresetItemField(itemField, root.item.idField, itemFields)) {
-					presetError(`preset.phases[${index}].variables.${key}: unknown item field "${source.field}" (engine fields: ${[...ENGINE_ITEM_BINDING_KEYS].join(", ")}; idField: ${root.item.idField}; declared fields: ${[...itemFields.keys()].join(", ") || "<none>"})`)
+					presetError(`preset.phases[${index}].variables.${key}: unrecognized item field "${source.field}" (engine fields: ${[...ENGINE_ITEM_BINDING_KEYS].join(", ")}; idField: ${root.item.idField}; declared fields: ${[...itemFields.keys()].join(", ") || "<none>"})`)
 				}
 			}
 			if (source.kind === "runtime" && !isEngineRuntimeBindingKey(source.key)) {
 				if (!runtimeBusinessKeySet.has(source.key)) {
-					presetError(`preset.phases[${index}].variables.${key}: unknown runtime key "${source.key}" (engine facts: ${ENGINE_RUNTIME_BINDING_KEYS.join(", ")}; preset business keys: ${runtimeBusinessKeys.join(", ") || "<none>"})`)
+					presetError(`preset.phases[${index}].variables.${key}: unrecognized runtime key "${source.key}" (engine facts: ${ENGINE_RUNTIME_BINDING_KEYS.join(", ")}; preset business keys: ${runtimeBusinessKeys.join(", ") || "<none>"})`)
 				}
 				variables.push([key, { ...source, ownership: "preset" }] as const)
 				if (variable.doc !== null) variableDocs.set(key, variable.doc)
@@ -3967,25 +3960,24 @@ export function parsePreset(value: unknown, presetDir: string): Preset {
 			variables.push([key, source] as const)
 			if (variable.doc !== null) variableDocs.set(key, variable.doc)
 		}
-		const trigger = parsePresetPhaseTrigger(entry.trigger ?? null, `preset.phases[${index}].trigger`)
-		const runner = parsePhaseRunner(entry.runner ?? null, `preset.phases[${index}].runner`)
-		const model = parsePhaseModel(entry.model ?? null, `preset.phases[${index}].model`)
-		const summaryMarker = phaseSummaryMarkerForName(entry.name)
-		const exits = parsePresetPhaseExits(entry.exits ?? [], `preset.phases[${index}].exits`)
-		if (hasOwnJsonKey(entry as JsonObject, "statusWrites")) {
+			const trigger = parsePresetPhaseTrigger(entry.trigger ?? null, `preset.phases[${index}].trigger`)
+			const runner = parsePhaseRunner(entry.runner ?? null, `preset.phases[${index}].runner`)
+			const model = parsePhaseModel(entry.model ?? null, `preset.phases[${index}].model`)
+			const summaryMarker = phaseSummaryMarkerForName(entry.name)
+			const exits = parsePresetPhaseExits(entry.exits ?? [], `preset.phases[${index}].exits`)
+		if (Object.hasOwn(entry, "statusWrites")) {
 			presetError(`preset.phases[${index}].statusWrites: use [[phases.exits]] with status and when`)
 		}
 		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), summaryMarker, exits, variables, variableDocs, trigger, defaultRunner: runner, defaultModel: model })
 	}
 	if (!phases.some((phase) => phase.trigger === null)) presetError("preset.phases: must include at least one non-trigger phase")
 
-	const statuses = new Set<string>([...root.statuses.continuable, ...root.statuses.terminal])
-	for (const [index, phase] of phases.entries()) {
-		const phaseExitStatuses = new Set<string>()
-		for (const exit of phase.exits) {
-			if (!statuses.has(exit.status)) {
-				presetError(`preset.phases[${index}].exits.status: unknown status "${exit.status}"`)
-			}
+		for (const [index, phase] of phases.entries()) {
+			const phaseExitStatuses = new Set<string>()
+			for (const exit of phase.exits) {
+				if (!statusNames.has(exit.status)) {
+					presetError(`preset.phases[${index}].exits.status: unrecognized status "${exit.status}"`)
+				}
 			if (phaseExitStatuses.has(exit.status)) {
 				presetError(`preset.phases[${index}].exits.status: duplicate status "${exit.status}"`)
 			}
@@ -3995,11 +3987,11 @@ export function parsePreset(value: unknown, presetDir: string): Preset {
 		if (isChainCompleteTrigger(phase.trigger)) continue
 		const trigger = phase.trigger
 		if (!phaseNames.has(trigger.afterPhase)) {
-			presetError(`preset.phases[${index}].trigger.afterPhase: unknown phase "${trigger.afterPhase}"`)
+			presetError(`preset.phases[${index}].trigger.afterPhase: unrecognized phase "${trigger.afterPhase}"`)
 		}
-		if (!statuses.has(trigger.whenStatus)) {
-			presetError(`preset.phases[${index}].trigger.whenStatus: unknown status "${trigger.whenStatus}"`)
-		}
+			if (!statusNames.has(trigger.whenStatus)) {
+				presetError(`preset.phases[${index}].trigger.whenStatus: unrecognized status "${trigger.whenStatus}"`)
+			}
 		const triggerSourcePhase = phases.find((candidate) => candidate.name === trigger.afterPhase)
 		const triggerSourceExits = new Set(triggerSourcePhase?.exits.map((exit) => exit.status) ?? [])
 		if (!triggerSourceExits.has(trigger.whenStatus)) {
@@ -4022,7 +4014,7 @@ export function parsePreset(value: unknown, presetDir: string): Preset {
 		presetDir,
 		item: { idField: root.item.idField, fields: itemFields },
 		runtime: { businessKeys: runtimeBusinessKeys },
-		statuses: { continuable: root.statuses.continuable, terminal: root.statuses.terminal, success: successStatuses, entry: entryStatus, unblockable: unblockableStatuses },
+			statuses: { continuable: continuableStatuses, terminal: terminalStatuses, success: successStatuses, entry: entryStatus, unblockable: unblockableStatuses },
 		phases,
 		fragments,
 		agent: { binary: root.agent.binary, extraArgs: root.agent.extraArgs ?? [], attemptTimeoutSeconds },
@@ -4044,7 +4036,7 @@ type ParsedVariableBinding = {
 	configFallback: ConfigBindingFallback
 }
 
-function parsePresetItemFields(value: unknown, label: string): ReadonlyMap<string, PresetItemField> {
+function parsePresetItemFields(value: BoundaryValue, label: string): ReadonlyMap<string, PresetItemField> {
 	if (!isObjectRecord(value) || Array.isArray(value)) presetError(`${label}: must be an object`)
 	const fields = new Map<string, PresetItemField>()
 	for (const [name, rawField] of Object.entries(value)) {
@@ -4055,7 +4047,7 @@ function parsePresetItemFields(value: unknown, label: string): ReadonlyMap<strin
 	return fields
 }
 
-function parsePresetItemFieldType(value: unknown, label: string): PresetItemFieldType {
+function parsePresetItemFieldType(value: BoundaryValue, label: string): PresetItemFieldType {
 	if (typeof value === "string") {
 		if (isPresetItemFieldType(value)) return value
 		presetError(`${label}: type must be one of ${PRESET_ITEM_FIELD_TYPES.join(", ")}`)
@@ -4089,7 +4081,7 @@ function isKnownPresetItemField(field: string, idField: string, itemFields: Read
 	return field === idField || ENGINE_ITEM_BINDING_KEYS.has(field) || itemFields.has(field)
 }
 
-function parseVariableBinding(value: unknown, label: string): ParsedVariableBinding {
+function parseVariableBinding(value: BoundaryValue, label: string): ParsedVariableBinding {
 	if (typeof value === "string") return { source: value, doc: null, configFallback: { kind: "none" } }
 	if (!isObjectRecord(value)) presetError(`${label}: must be a string or { source, label } object`)
 	const source = value.source
@@ -4109,19 +4101,19 @@ function parseVariableBinding(value: unknown, label: string): ParsedVariableBind
 	return { source, doc: { label: labelValue, suffix: suffixValue ?? "", style: styleValue, blankBefore: blankBeforeValue }, configFallback }
 }
 
-function parseConfigBindingDefaultValue(value: unknown, label: string): ConfigBindingScalar {
+function parseConfigBindingDefaultValue(value: BoundaryValue, label: string): ConfigBindingScalar {
 	if (value === null || typeof value === "string" || typeof value === "boolean") return value
 	if (typeof value === "number" && Number.isFinite(value)) return value
 	presetError(`${label}: config binding defaults must be null, string, number, or boolean`)
 }
 
-function parsePhaseRunner(value: unknown, label: string): AgentRunnerKind | null {
+function parsePhaseRunner(value: BoundaryValue, label: string): AgentRunnerKind | null {
 	if (value === null) return null
 	if (value !== "claude" && value !== "codex") presetError(`${label}: must be "claude" or "codex"`)
 	return value
 }
 
-function parsePhaseModel(value: unknown, label: string): string | null {
+function parsePhaseModel(value: BoundaryValue, label: string): string | null {
 	if (value === null) return null
 	if (typeof value !== "string" || value.trim() === "") presetError(`${label}: must be a non-empty string`)
 	return value
@@ -4135,9 +4127,9 @@ function phaseSummaryMarkerForName(name: string): string | null {
 	return null
 }
 
-function parsePresetPhaseExits(value: unknown, label: string): PresetPhaseExit[] {
+function parsePresetPhaseExits(value: BoundaryValue, label: string): PresetPhaseExit[] {
 	const exits = assertArk(PresetPhaseExitBoundary.array(), value, label)
-	return exits.map((entry) => ({ status: entry.status, when: entry.when }))
+	return exits.map((entry, index) => ({ status: parseInternalStatus(entry.status, `${label}[${index}].status`), when: entry.when }))
 }
 
 function assertRoleEntryHasNoFrontmatter(markdown: string, label: string): void {
@@ -4178,7 +4170,7 @@ function parsePresetPhaseTrigger(value: typeof PresetPhaseTriggerBoundary.infer 
 		if (hasAfterPhase || hasWhenStatus) presetError(`${label}: chain-complete trigger cannot also declare afterPhase/whenStatus`)
 		return { on: "chain-complete" }
 	}
-	if (hasAfterPhase && hasWhenStatus) return { afterPhase: value.afterPhase!, whenStatus: value.whenStatus! }
+	if (hasAfterPhase && hasWhenStatus) return { afterPhase: value.afterPhase!, whenStatus: parseInternalStatus(value.whenStatus!, `${label}.whenStatus`) }
 	presetError(`${label}: trigger must declare either afterPhase + whenStatus or on = "chain-complete"`)
 }
 
@@ -4218,7 +4210,7 @@ async function assertReadable(path: string, label: string): Promise<void> {
 
 function parseConfigText(raw: string, path: string): LoopConfig {
 	const format = configFormatForPath(path)
-	const parsed: unknown = format === "toml" ? Bun.TOML.parse(raw) : JSON.parse(raw)
+	const parsed: BoundaryValue = format === "toml" ? Bun.TOML.parse(raw) : JSON.parse(raw)
 	if (!isObjectRecord(parsed) || Array.isArray(parsed)) throw new Error("config: must be an object")
 	const input = assertArk(StatusConfigBoundary, parsed, "config")
 	return loopConfigFromStatusInput(input, extractConfigBindings(parsed))
@@ -4245,7 +4237,7 @@ function loopConfigFromStatusInput(input: StatusConfigInput, configBindings: Jso
 	}
 }
 
-function extractConfigBindings(parsed: Record<string, unknown>): JsonObject {
+function extractConfigBindings(parsed: BoundaryRecord): JsonObject {
 	const bindings: JsonObject = {}
 	for (const [key, value] of Object.entries(parsed)) {
 		if (!isJsonValue(value)) throw new Error(`config.${key}: must be JSON-compatible for config binding`)
@@ -4397,7 +4389,7 @@ export function lastNonTriggerPhaseForPreset(preset: Preset): PresetPhase {
 	return firstNonTriggerPhaseForPreset(preset)
 }
 
-export function triggeredPhasesAfter(preset: Preset, afterPhase: string, status: string): readonly PresetPhase[] {
+export function triggeredPhasesAfter(preset: Preset, afterPhase: string, status: InternalStatus): readonly PresetPhase[] {
 	return preset.phases.filter((phase) => phase.trigger !== null && !isChainCompleteTrigger(phase.trigger) && phase.trigger.afterPhase === afterPhase && phase.trigger.whenStatus === status)
 }
 
@@ -4719,7 +4711,7 @@ export function renderPhaseExitsDoc(phase: PresetPhase): string {
 	return phase.exits.map((exit) => `- \`${exit.status}\`: ${exit.when}`).join("\n")
 }
 
-export function phaseWritableStatuses(phase: PresetPhase): readonly string[] {
+export function phaseWritableStatuses(phase: PresetPhase): readonly InternalStatus[] {
 	return phase.exits.map((exit) => exit.status)
 }
 
@@ -4728,17 +4720,17 @@ export function renderIssueKindDoc(value: string): string {
 	return `- Issue kind: \`${value}\` (${choices} / empty for legacy unlabeled issues)`
 }
 
-function lookupItemField(item: ItemRecord, field: string): unknown {
+function lookupItemField(item: ItemRecord, field: string): JsonValue | undefined {
 	const [root, ...path] = field.split(".")
 	let value = lookupItemRootField(item, root ?? field)
 	for (const segment of path) {
-		if (!isObjectRecord(value)) return undefined
+		if (!isJsonObject(value)) return undefined
 		value = value[segment]
 	}
 	return value
 }
 
-function lookupItemRootField(item: ItemRecord, field: string): unknown {
+function lookupItemRootField(item: ItemRecord, field: string): JsonValue | undefined {
 	switch (field) {
 		case "id": return item.id
 		case "status": return item.status
@@ -4797,7 +4789,7 @@ function runtimeBindingValue(runtime: RuntimeBindings, key: string): string {
 	return value
 }
 
-function stringifyBindingValue(value: unknown, label: string): string {
+function stringifyBindingValue(value: JsonValue | undefined, label: string): string {
 	if (value === null || value === undefined) return ""
 	if (typeof value === "string") return value
 	if (typeof value === "number" && Number.isFinite(value)) return String(value)
@@ -4902,13 +4894,13 @@ export function parseKindFromLabels(labelNames: readonly string[]): ParsedIssueK
 	}
 	const value = kindLabels[0]!.slice("kind:".length)
 	if (!isIssueKindValue(value)) {
-		return { ok: false, error: `unknown kind label "kind:${value}" (allowed: ${ISSUE_KIND_VALUES.map((kind) => `kind:${kind}`).join(", ")})` }
+		return { ok: false, error: `unrecognized kind label "kind:${value}" (allowed: ${ISSUE_KIND_VALUES.map((kind) => `kind:${kind}`).join(", ")})` }
 	}
 	return { ok: true, kind: value }
 }
 
 function isIssueKindValue(value: string): value is IssueKindValue {
-	return ISSUE_KIND_VALUES.includes(value as IssueKindValue)
+	return includesStringLiteral(ISSUE_KIND_VALUES, value)
 }
 
 function parseIssueKindFromExtra(extra: JsonObject): ParsedIssueKind {
@@ -4947,7 +4939,7 @@ export async function fetchIssueKind(repository: string | null, issueId: string)
 			}
 			const stdout = Buffer.concat(out).toString("utf-8").trim()
 			try {
-				const parsed: unknown = JSON.parse(stdout)
+				const parsed: BoundaryValue = JSON.parse(stdout)
 				if (!Array.isArray(parsed) || !parsed.every((entry) => typeof entry === "string")) {
 					resolveResult({ ok: false, error: `gh issue view returned non-string-array labels for ${repository}#${issueId}: ${stdout}` })
 					return
@@ -5112,18 +5104,18 @@ function createDisabledSummaryWatchdog(): SummaryWatchdog {
 	}
 }
 
-function isObjectRecord(value: unknown): value is Record<string, unknown> {
+function isObjectRecord(value: BoundaryValue): value is BoundaryRecord {
 	return typeof value === "object" && value !== null
 }
 
-function codexAgentMessageText(event: unknown): string | null {
+function codexAgentMessageText(event: BoundaryValue): string | null {
 	if (!isObjectRecord(event)) return null
 	if (event.type === "agent_message" && typeof event.text === "string") return event.text
 	if (event.type !== "item.completed" || !isObjectRecord(event.item)) return null
 	return event.item.type === "agent_message" && typeof event.item.text === "string" ? event.item.text : null
 }
 
-function claudeAgentMessageText(event: unknown): string | null {
+function claudeAgentMessageText(event: BoundaryValue): string | null {
 	if (!isObjectRecord(event) || event.type !== "assistant" || !isObjectRecord(event.message)) return null
 	const content = event.message.content
 	if (!Array.isArray(content)) return null
@@ -5164,14 +5156,15 @@ function parseReviewSummaryVerdictFromText(text: string, marker: string): Review
 	const summaryLine = finalSummaryLine(text, marker)
 	if (summaryLine === null) return null
 	const match = summaryLine.match(new RegExp(`^${escapeRegExp(marker)}\\s*verdict=(retry|accepted|skip|blocked|stop)\\s*;`))
-	return match === null ? null : match[1] as ReviewSummaryVerdict
+	const verdict = match?.[1]
+	return verdict !== undefined && includesStringLiteral(REVIEW_SUMMARY_VERDICTS, verdict) ? verdict : null
 }
 
 function runnerAgentTextFromJsonLine(line: string, runner: AgentRunnerKind): { parsedRunnerEvent: boolean; text: string | null } {
 	const trimmed = line.trim()
 	if (trimmed === "" || !trimmed.startsWith("{")) return { parsedRunnerEvent: false, text: null }
 	try {
-		const event: unknown = JSON.parse(trimmed)
+		const event: BoundaryValue = JSON.parse(trimmed)
 		if (!isObjectRecord(event) || typeof event.type !== "string") return { parsedRunnerEvent: false, text: null }
 		const text = runner === "codex" ? codexAgentMessageText(event) : claudeAgentMessageText(event)
 		return { parsedRunnerEvent: true, text }
@@ -5316,7 +5309,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 		let statusWriteChain = Promise.resolve()
 		const writeStatus = (): Promise<void> => {
 			const payload = `${JSON.stringify(status, null, "\t")}\n`
-			statusWriteChain = statusWriteChain.then(() => writeFile(statusPath, payload)).catch((error: unknown) => {
+			statusWriteChain = statusWriteChain.then(() => writeFile(statusPath, payload)).catch((error: BoundaryError) => {
 				log(`Agent [${label}] status write failed: ${error instanceof Error ? error.message : String(error)}`)
 			})
 			return statusWriteChain
@@ -5851,7 +5844,7 @@ export function parseSessionIdFromStream(text: string): string | null {
 	const firstLine = text.slice(0, newlineIdx).trim()
 	if (firstLine === "") return null
 	try {
-		const event: unknown = JSON.parse(firstLine)
+		const event: BoundaryValue = JSON.parse(firstLine)
 		if (isObjectRecord(event) && typeof event.session_id === "string" && event.session_id !== "") return event.session_id
 		return null
 	} catch {
@@ -5864,7 +5857,7 @@ export function parseCodexThreadIdFromStream(text: string): string | null {
 		const trimmed = line.trim()
 		if (trimmed === "") continue
 		try {
-			const event: unknown = JSON.parse(trimmed)
+			const event: BoundaryValue = JSON.parse(trimmed)
 			if (isObjectRecord(event) && event.type === "thread.started" && typeof event.thread_id === "string" && event.thread_id !== "") return event.thread_id
 		} catch {
 			continue
@@ -5883,7 +5876,7 @@ export function extractErrorCode(stdoutText: string, stderrText: string): string
 		const line = lines[i]
 		if (line === undefined || line.trim() === "") continue
 		try {
-			const parsed: unknown = JSON.parse(line)
+			const parsed: BoundaryValue = JSON.parse(line)
 			if (!isObjectRecord(parsed)) continue
 			const isError = parsed["is_error"] === true || parsed["type"] === "error"
 			if (!isError) continue
@@ -5902,7 +5895,7 @@ export function extractErrorCode(stdoutText: string, stderrText: string): string
 	if (httpMatch) return `${httpMatch[1]}_http`
 	const keywordMatch = stderrText.toLowerCase().match(/overloaded|rate[\s_-]?limit|service[\s_-]?unavailable/)
 	if (keywordMatch) return keywordMatch[0]
-	return "unknown"
+	return "unclassified"
 }
 
 export type ClassifyInput = {
@@ -5963,7 +5956,7 @@ export async function readLastSessionEntry(sessionsPath: string): Promise<Sessio
 		const line = lines[i]
 		if (line === undefined || line.trim() === "") continue
 		try {
-			const parsed: unknown = JSON.parse(line)
+			const parsed: BoundaryValue = JSON.parse(line)
 			const result = SessionEntryBoundary(parsed)
 			if (result instanceof arkType.errors) continue
 			return result
@@ -6141,10 +6134,10 @@ function formatMaxIterations(value: number): string {
 }
 
 type ArkAssertable<T> = {
-	assert(data: unknown): T
+	assert(data: BoundaryValue): T
 }
 
-function assertArk<T>(schema: ArkAssertable<T>, data: unknown, label: string): T {
+function assertArk<T>(schema: ArkAssertable<T>, data: BoundaryValue, label: string): T {
 	try {
 		return schema.assert(data)
 	} catch (error) {
@@ -6152,7 +6145,7 @@ function assertArk<T>(schema: ArkAssertable<T>, data: unknown, label: string): T
 	}
 }
 
-function isJsonValue(value: unknown): value is JsonValue {
+function isJsonValue(value: BoundaryValue): value is JsonValue {
 	if (value === null) return true
 	const kind = typeof value
 	if (kind === "string" || kind === "number" || kind === "boolean") return kind !== "number" || Number.isFinite(value)
@@ -6161,17 +6154,17 @@ function isJsonValue(value: unknown): value is JsonValue {
 	return isJsonObject(value)
 }
 
-function isJsonObject(value: unknown): value is JsonObject {
+function isJsonObject(value: BoundaryValue): value is JsonObject {
 	if (!isObjectRecord(value) || Array.isArray(value)) return false
 	return Object.values(value).every(isJsonValue)
 }
 
 
-function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+function isNodeError(error: BoundaryError): error is NodeJS.ErrnoException {
 	return typeof error === "object" && error !== null && "code" in error
 }
 
-function errorMessage(error: unknown): string {
+function errorMessage(error: BoundaryError): string {
 	if (error instanceof Error) return error.message
 	if (typeof error === "string") return error
 	try {
@@ -6186,7 +6179,7 @@ function fail(message: string): never {
 }
 
 if (import.meta.main) {
-	main().catch((error: unknown) => {
+	main().catch((error: BoundaryError) => {
 		const message = errorMessage(error)
 		console.error(message)
 		process.exit(1)

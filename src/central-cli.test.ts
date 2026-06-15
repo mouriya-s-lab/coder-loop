@@ -7,6 +7,7 @@ import { startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
 import { LOOP_DATA_ROOT_ENV, resolveLoopDataPaths } from "./runtime-paths"
 import { reviewOnEmptyLockPathForChainName, serializeSchedulerReviewOnEmptyLock } from "./scheduler"
 import { openSqliteStateStore } from "./sqlite-state"
+import type { BoundaryRecord } from "./boundary-types"
 
 function preInstallReviewOnEmptyLockByName(chainName: string, loopDataRoot: string, runId = "test-pre-installed"): void {
 	const lockPath = reviewOnEmptyLockPathForChainName(chainName, { loopDataRoot })
@@ -260,12 +261,12 @@ attemptTimeoutSeconds = 3600
 			expectJsonOk(await runCli(["item", "batch-add", "reorder-chain", "--items-json", itemsJson, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 
 			const moved = expectJsonOk(await runCli(["item", "reorder", "reorder-chain", "--issue", "403", "--position", "0", "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			expect(moved.items.map((item: Record<string, unknown>) => item.issueNumber)).toEqual([403, 401, 402])
-			expect(moved.items.map((item: Record<string, unknown>) => item.position)).toEqual([0, 1, 2])
+			expect(moved.items.map((item: BoundaryRecord) => item.issueNumber)).toEqual([403, 401, 402])
+			expect(moved.items.map((item: BoundaryRecord) => item.position)).toEqual([0, 1, 2])
 
 			const listed = expectJsonOk(await runCli(["item", "list", "reorder-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			expect(listed.items.map((item: Record<string, unknown>) => item.issueNumber)).toEqual([403, 401, 402])
-			expect(listed.items.map((item: Record<string, unknown>) => item.position)).toEqual([0, 1, 2])
+			expect(listed.items.map((item: BoundaryRecord) => item.issueNumber)).toEqual([403, 401, 402])
+			expect(listed.items.map((item: BoundaryRecord) => item.position)).toEqual([0, 1, 2])
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -282,11 +283,11 @@ attemptTimeoutSeconds = 3600
 			])
 			const added = expectJsonOk(await runCli(["item", "batch-add", "batch-chain", "--items-json", itemsJson, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(added.items).toHaveLength(3)
-			expect(added.items.map((item: Record<string, unknown>) => item.issueNumber)).toEqual([25801, 25802, 25803])
+			expect(added.items.map((item: BoundaryRecord) => item.issueNumber)).toEqual([25801, 25802, 25803])
 
 			const listed = expectJsonOk(await runCli(["item", "list", "batch-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(listed.items).toHaveLength(3)
-			expect(listed.items.map((item: Record<string, unknown>) => item.issueNumber)).toEqual([25801, 25802, 25803])
+			expect(listed.items.map((item: BoundaryRecord) => item.issueNumber)).toEqual([25801, 25802, 25803])
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -304,7 +305,7 @@ attemptTimeoutSeconds = 3600
 			const cli = expectJsonOk(await runCli(["item", "batch-add", "batch-cli-chain", "--items-json", JSON.stringify(batch), "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			const daemon = expectJsonOk(await runCli(["item", "batch-add", "batch-daemon-chain", "--items-json", JSON.stringify(batch), "--loop-data-root", fixture.loopDataRoot, "--json"]))
 
-			const comparable = (items: Record<string, unknown>[]) => items.map((item) => ({
+			const comparable = (items: BoundaryRecord[]) => items.map((item) => ({
 				issueNumber: item.issueNumber,
 				repoCwd: item.repoCwd,
 				status: item.status,
@@ -370,7 +371,7 @@ attemptTimeoutSeconds = 3600
 			}
 
 			const status = expectJsonOk(await runCli(["chain", "status", "dependency-wait-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			const dependentStatus = status.items.find((item: Record<string, unknown>) => item.id === dependentId)
+			const dependentStatus = status.items.find((item: BoundaryRecord) => item.id === dependentId)
 			expect(dependentStatus?.waiting).toEqual({
 				reason: "blocked-by-dependency",
 				itemId: dependentId,
@@ -622,7 +623,7 @@ attemptTimeoutSeconds = 3600
 			const daemonPid = Number((await readFile(resolve(loopDataRoot, "daemon.pid"), "utf-8")).trim())
 
 			const status = expectJsonOk(await runCli(["daemon", "status", REPO_ROOT, "--loop-data-root", loopDataRoot, "--json"]))
-			const liveDaemon = status.processes.live.find((entry: Record<string, unknown>) => entry.pid === daemonPid)
+			const liveDaemon = status.processes.live.find((entry: BoundaryRecord) => entry.pid === daemonPid)
 			expect(liveDaemon).toMatchObject({
 				pid: daemonPid,
 				source: "daemon-socket",
@@ -1072,7 +1073,7 @@ function expectJsonOk(result: { exitCode: number | null; stdout: string; stderr:
 	return JSON.parse(result.stdout)
 }
 
-function expectJsonError(result: { exitCode: number | null; stdout: string; stderr: string }): { ok: false; error: { code: string; message: string; details?: Record<string, unknown> } } {
+function expectJsonError(result: { exitCode: number | null; stdout: string; stderr: string }): { ok: false; error: { code: string; message: string; details?: BoundaryRecord } } {
 	expect(result.exitCode, result.stderr).toBe(1)
 	const parsed = JSON.parse(result.stdout)
 	expect(parsed.ok).toBe(false)

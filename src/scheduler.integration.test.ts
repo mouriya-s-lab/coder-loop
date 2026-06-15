@@ -17,6 +17,7 @@ import {
 import { resolveChainRuntimePaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
 import { loadPreset } from "./loop"
+import type { BoundaryRecord } from "./boundary-types"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
@@ -595,13 +596,13 @@ async function waitForActiveRun(socketPath: string, itemId: number, excludedRunI
 	}, 5_000)
 }
 
-async function daemonStatus(socketPath: string): Promise<Record<string, unknown>> {
+async function daemonStatus(socketPath: string): Promise<BoundaryRecord> {
 	const response = await sendDaemonRequest(socketPath, daemonRequest("daemon.status"))
 	if (!response.ok) throw new Error(`${response.error.code}: ${response.error.message}`)
 	return response.result
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+function isRecord(value: unknown): value is BoundaryRecord {
 	return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 

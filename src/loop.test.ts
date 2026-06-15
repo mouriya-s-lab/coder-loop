@@ -38,7 +38,9 @@ import {
 	type RuntimeBindings,
 	type StatusCurrentRunSnapshot,
 } from "./loop"
+import { parseInternalStatus } from "./runtime-data"
 import type { ItemRecord } from "./sqlite-state"
+import type { BoundaryRecord } from "./boundary-types"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/loop-tests")
@@ -49,7 +51,7 @@ function makeItem(overrides: Partial<ItemRecord> = {}): ItemRecord {
 		chainId: overrides.chainId ?? 10,
 		issueNumber: overrides.issueNumber ?? 333,
 		repoCwd: overrides.repoCwd ?? REPO_ROOT,
-		status: overrides.status ?? "queued",
+		status: overrides.status ?? parseInternalStatus("queued", "test.status"),
 		attempts: overrides.attempts ?? 0,
 		position: overrides.position ?? 0,
 		title: overrides.title ?? "test item",
@@ -70,7 +72,7 @@ function makeItem(overrides: Partial<ItemRecord> = {}): ItemRecord {
 	}
 }
 
-function minimalPresetRoot(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function minimalPresetRoot(overrides: BoundaryRecord = {}): BoundaryRecord {
 	return {
 		name: "fixture",
 		version: Number("1"),
@@ -93,7 +95,7 @@ function minimalPresetRoot(overrides: Record<string, unknown> = {}): Record<stri
 	}
 }
 
-function makePreset(overrides: Record<string, unknown> = {}): Preset {
+function makePreset(overrides: BoundaryRecord = {}): Preset {
 	return parsePreset(minimalPresetRoot(overrides), resolve(REPO_ROOT, "presets/fixture"))
 }
 
@@ -240,7 +242,7 @@ describe("ItemRecord prompt bindings", () => {
 			name: "review",
 			prompt: "review.md",
 			summaryMarker: "DONE:",
-			exits: [{ status: "done", when: "review accepted the result" }],
+			exits: [{ status: parseInternalStatus("done", "test.status"), when: "review accepted the result" }],
 			variables: [
 				["RUNTIME_INPUTS_DOC", { kind: "runtime", key: "runtimeInputsDoc" }],
 				["PHASE_EXITS_DOC", { kind: "runtime", key: "phaseExitsDoc" }],
@@ -294,7 +296,7 @@ describe("ItemRecord prompt bindings", () => {
 			makePreset({
 				phases: [{ name: "iteration", prompt: "iteration.md", variables: { BAD: "item.notARecordField.value" } }],
 			}),
-		).toThrow(/unknown item field/)
+		).toThrow(/unrecognized item field/)
 	})
 })
 
@@ -376,7 +378,7 @@ describe("runtime binding helpers", () => {
 					{ name: "iteration", prompt: "iteration.md", variables: { CUSTOM: "runtime.customBusiness" } },
 				],
 			}),
-		).toThrow(/unknown runtime key "customBusiness"/)
+		).toThrow(/unrecognized runtime key "customBusiness"/)
 	})
 
 	test("buildRuntimeBindings maps issue run context into strings", () => {

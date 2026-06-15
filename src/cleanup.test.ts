@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { readdir, readFile, stat } from "node:fs/promises"
 import { extname, join, relative, resolve } from "node:path"
 import { buildRuntimeBindings, type LoopOptions } from "./loop"
+import { parseInternalStatus } from "./runtime-data"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const SRC_DIR = resolve(REPO_ROOT, "src")
@@ -168,7 +169,13 @@ function makeLoopOptions(): LoopOptions {
 			presetDir: PRESET_DIR,
 			item: { idField: "issue", fields: new Map() },
 			runtime: { businessKeys: [] },
-			statuses: { continuable: ["queued"], terminal: ["done"], success: ["done"], entry: "queued", unblockable: [] },
+				statuses: {
+					continuable: [parseInternalStatus("queued", "test.status")],
+					terminal: [parseInternalStatus("done", "test.status")],
+					success: [parseInternalStatus("done", "test.status")],
+					entry: parseInternalStatus("queued", "test.status"),
+					unblockable: [],
+				},
 			phases: [],
 			fragments: [],
 			agent: { binary: "claude", extraArgs: [], attemptTimeoutSeconds: 3600 },

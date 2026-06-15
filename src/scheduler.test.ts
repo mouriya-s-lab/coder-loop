@@ -40,6 +40,8 @@ import {
 import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import { type ChainRecord, type ItemRecord, openSqliteStateStore } from "./sqlite-state"
 import { appendObservabilityEvent, queryObservabilityEvents } from "./observability"
+import { parseInternalStatus } from "./runtime-data"
+import type { BoundaryRecord } from "./boundary-types"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-tests", String(process.pid))
@@ -912,7 +914,7 @@ describe("scheduler", () => {
 
 			const runId = `run-${chain.id}-${item.id}`
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
-			const status = JSON.parse(await readFile(paths.runStatusFile(runId), "utf-8")) as Record<string, unknown>
+			const status = JSON.parse(await readFile(paths.runStatusFile(runId), "utf-8")) as BoundaryRecord
 			const stdout = await readFile(paths.runStdoutFile(runId), "utf-8")
 			const stderr = await readFile(paths.runStderrFile(runId), "utf-8")
 			const phaseStdout = await readFile(paths.runPhaseStdoutFile(runId, "iteration"), "utf-8")
@@ -2268,7 +2270,7 @@ describe("scheduler per-chain review-on-empty (issue #292)", () => {
 
 			const lockPath = reviewOnEmptyLockPathForChain(chain, { loopDataRoot: fixture.loopDataRoot })
 			expect(existsSync(lockPath)).toBe(true)
-			const lockPayload = JSON.parse(await readFile(lockPath, "utf-8")) as Record<string, unknown>
+			const lockPayload = JSON.parse(await readFile(lockPath, "utf-8")) as BoundaryRecord
 			expect(lockPayload.runId).toBe(reviewRun.runId)
 			expect(typeof lockPayload.acquiredAt).toBe("string")
 			expect(Number.isFinite(Date.parse(String(lockPayload.acquiredAt)))).toBe(true)
@@ -2292,7 +2294,7 @@ describe("scheduler per-chain review-on-empty (issue #292)", () => {
 			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
 
 			const lockPath = reviewOnEmptyLockPathForChain(chain, { loopDataRoot: fixture.loopDataRoot })
-			const lockPayload = JSON.parse(await readFile(lockPath, "utf-8")) as Record<string, unknown>
+			const lockPayload = JSON.parse(await readFile(lockPath, "utf-8")) as BoundaryRecord
 			expect(lockPayload.runId).toBe("lock-pre-existing")
 		} finally {
 			fixture.store.close()
@@ -3461,7 +3463,7 @@ async function readArgvEvents(path: string): Promise<Array<{ argv: string[] }>> 
 	return text
 		.split("\n")
 		.filter((line) => line.trim() !== "")
-		.map((line) => JSON.parse(line) as Record<string, unknown>)
+		.map((line) => JSON.parse(line) as BoundaryRecord)
 		.filter((event): event is { argv: string[] } =>
 			Array.isArray(event.argv) && event.argv.every((arg) => typeof arg === "string"),
 		)
@@ -3503,7 +3505,7 @@ function makeItemFixture(chain: ChainRecord, overrides: Partial<ItemRecord> & Pi
 	return {
 		id: 1,
 		chainId: chain.id,
-		status: "queued",
+		status: parseInternalStatus("queued", "test.status"),
 		attempts: 0,
 		position: 0,
 		title: null,
@@ -3631,7 +3633,7 @@ async function createFixture(name: string): Promise<Fixture> {
 			loopDataRootOptions: { loopDataRoot },
 			runIdFactory: ({ chain, item }) => `run-${chain.id}-${item.id}`,
 			prompt: ({ item, runId, worktreePath, phase }) => {
-			const payload: Record<string, unknown> = {
+			const payload: BoundaryRecord = {
 				itemId: item.id,
 				issueNumber: item.issueNumber,
 				runId,
