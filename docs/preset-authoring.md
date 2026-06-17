@@ -142,9 +142,10 @@ rm -rf "$TARGET"
 | `[[phases]].summaryMarker` | string | 否 | 该 phase 在 stdout 中声明完成后的 marker；声明后 post-summary watchdog 观察该 marker，未声明则该 phase 不启用 post-summary watchdog |
 | `[[phases.exits]]` | array | 否 | 该 phase 允许 agent 写出的结构化出口。每项包含 `status` 与给 prompt 渲染用的 `when` 说明；不声明 exits 表示该 phase 不写 status |
 | `[[phases]].trigger` | table | 否 | 可把 phase 声明为 trigger phase。支持 `trigger = { afterPhase = "...", whenStatus = "..." }` 的 item phase trigger，或 `trigger = { on = "chain-complete" }` 的 chain lifecycle trigger |
+| `[[phases]].roles` | string[] | preset 声明 fragments 时必填，否则可省 | 该 phase 渲染 `{{PROMPT_FRAGMENT_INDEX}}` 时可见的 fragment role 集合（issue #400）。引擎从不通过 phase 名猜 role；只列在这里的 role 对应的 fragment 才会进该 phase 的索引切片。`[[fragments]]` 中未出现的 role 名会在加载期报错。 |
 | `[phases.variables]` | table | 是 | 模板中 `{{KEY}}` 的解析表。值可为 `"item|config|runtime.<key>"` 字符串，或 `{ source = "...", label = "...", suffix = "...", style = "code|plain" }`，后者会参与 `{{RUNTIME_INPUTS_DOC}}` 渲染 |
 | `[[fragments]].id` | string | 是 | fragment 唯一标识（如 `iter/read-context`），entry prompt 通过该 id 引用 |
-| `[[fragments]].role` | string | 是 | fragment 角色（如 `common` / `iter` / `review`），仅 metadata，引擎不校验 |
+| `[[fragments]].role` | string | 是 | fragment 角色（如 `common` / `iter` / `review`）。issue #400 后，该字段参与 `[[phases]].roles` 切片：当前 phase 渲染的 fragment 索引仅含 role 出现在该 phase `roles` 数组里的条目。fragment 文件完整性校验（`assertReadable`）仍覆盖全量。 |
 | `[[fragments]].path` | string | 是 | 相对 preset.toml 的 markdown 文件路径，文件必须可读 |
 | `[agent].binary` | string | 是 | schema 保留字段；实际 spawn 由 target runtime 的 runner selection 决定。新 preset 可填 `"claude"` 作为兼容占位 |
 | `[agent].extraArgs` | string[] | 否 | schema 保留字段；实际 runner args 用 target config 的 `claude.model` / `claude.extraArgs`、`codex.model` / `codex.extraArgs` |
@@ -158,6 +159,7 @@ rm -rf "$TARGET"
 - `[statuses]` 的 continuable / terminal 集合不可有交集；
 - `[statuses].entry` 必须属于 continuable；`success` 与 `unblockable` 必须属于 terminal；
 - `[[phases.exits]]` 中每个 status 必须属于 continuable 或 terminal status，且同一 phase 内不可重复；
+- preset 声明任何 `[[fragments]]` 时，每个 `[[phases]]` 必须声明 `roles` 数组（issue #400：phase↔role 映射必须显式，引擎不按 phase 名推断）；数组内每个 role 必须出现在某个 `[[fragments]].role` 里，且不可重复；preset 无 fragments 时可省 `roles`；
 - item phase trigger 的 `afterPhase` 必须指向已声明 phase，`whenStatus` 必须属于 continuable 或 terminal status，且必须出现在 source phase 的 exits 里；
 - chain lifecycle trigger 目前只支持 `on = "chain-complete"`，且不能同时声明 `afterPhase` / `whenStatus`；
 - 每条 `[phases.variables]` source 必须 match `^(item|config|runtime)\.[a-zA-Z][a-zA-Z0-9_]*$`；
@@ -252,7 +254,7 @@ businessKeys = ["issueKind", "issueKindDoc"]
 | `traceFile` | phase stdout trace 的显示路径模板：`<logDir>/<runId>/<phase>/stdout.jsonl`。 |
 | `loopFile` | central daemon scheduling state 的描述；默认 preset 用它强调调度状态不可提交。 |
 | `presetDir` | preset 目录绝对路径（让 agent prompt 能 `cat <presetDir>/iter/...md`） |
-| `fragmentIndex` | 全部 fragments 的 markdown 表格（id + role + 绝对路径），entry prompt 嵌它给 agent 当索引 |
+| `fragmentIndex` | 按当前 phase 的 `[[phases]].roles` 切片后的 fragments markdown 表格（id + role + 绝对路径）；entry prompt 嵌它给 agent 当索引。issue #400：phase↔role 映射来自 preset 元数据，引擎不通过 phase 名猜；preset 声明 fragments 但 phase 缺 `roles` 时 loadPreset 报错。fragment 完整性校验（`assertReadable`）仍覆盖全量 fragments，与可见性切片相互独立。 |
 | `runtimeInputsDoc` | 按 phase 变量 metadata 生成的 bound runtime input 文档。 |
 | `phaseExitsDoc` | 按 phase `[[phases.exits]]` 生成的出口状态文档。 |
 | `runIdGeneration` | `"new"` / `"resumed"`，本轮 runId 是新生成还是 resume |
