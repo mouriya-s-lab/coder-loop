@@ -13,6 +13,8 @@ import {
 	type AgentRunnerSelection,
 	type JsonObject,
 	type JsonValue,
+	type LoadPresetOptions,
+	type PresetPlaceholderFinding,
 } from "./loop"
 import {
 	cleanupSchedulerChainWorktrees,
@@ -1624,12 +1626,23 @@ export class CoderLoopDaemon {
 	private async loadedPresetFromDirForChain(chain: ChainRecord, presetDir: string): Promise<SchedulerLoadedPreset> {
 		const key = this.loadedPresetCacheKey(presetDir)
 		const cached = this.loadedPresetCache.get(key)
-		const loading = cached ?? loadSchedulerPresetFromDir(presetDir)
+		const collectedFindings: PresetPlaceholderFinding[] = []
+		// Findings are emitted only when the cache is cold so we don't double-write per chain.
+		const loading = cached ?? loadSchedulerPresetFromDir(presetDir, {
+			onValidationFinding: (finding) => collectedFindings.push(finding),
+		})
 		if (cached === undefined) this.loadedPresetCache.set(key, loading)
 		try {
-			return await loading
+			const loaded = await loading
+			for (const finding of collectedFindings) {
+				await this.recordPlaceholderFinding(chain, finding)
+			}
+			return loaded
 		} catch (error) {
 			this.loadedPresetCache.delete(key)
+			for (const finding of collectedFindings) {
+				await this.recordPlaceholderFinding(chain, finding)
+			}
 			await this.recordPresetLoadFailure(chain, presetDir, error)
 			throw new DaemonError("invalid_request", `failed to load preset for chain ${chain.name}: ${errorMessage(error)}`, {
 				chainId: chain.id,
@@ -1652,6 +1665,21 @@ export class CoderLoopDaemon {
 				preset: chain.preset,
 				presetDir,
 				error: errorMessage(error),
+			},
+		}))
+	}
+
+	private async recordPlaceholderFinding(chain: ChainRecord, finding: PresetPlaceholderFinding): Promise<void> {
+		await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
+			kind: "validation",
+			type: "preset.placeholder_check",
+			chain: chain.name,
+			subject: { kind: "engine" },
+			payload: {
+				file: finding.file,
+				key: finding.key,
+				direction: finding.direction,
+				verdict: finding.verdict,
 			},
 		}))
 	}
@@ -2386,8 +2414,8 @@ function bundledPresetDir(presetName: string): string {
 	return resolve(BUNDLED_PRESETS_DIR, presetName)
 }
 
-async function loadSchedulerPresetFromDir(presetDir: string): Promise<SchedulerLoadedPreset> {
-	return { presetDir, preset: await loadPreset(presetDir) }
+async function loadSchedulerPresetFromDir(presetDir: string, options: LoadPresetOptions = {}): Promise<SchedulerLoadedPreset> {
+	return { presetDir, preset: await loadPreset(presetDir, options) }
 }
 
 function assertNeverSchedulerEvent(event: never): never {

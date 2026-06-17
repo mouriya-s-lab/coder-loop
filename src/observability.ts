@@ -49,9 +49,20 @@ const ObservabilityEventTypeBoundary = arkType.or(
 	arkType.unit("spawn.aborted"),
 	arkType.unit("session_id.invalidated"),
 	arkType.unit("chain.invalid"),
+	arkType.unit("preset.placeholder_check"),
 	arkType.unit("daemon.warning"),
 	arkType.unit("scheduler.tick_failed"),
 	arkType.unit("chain.complete_trigger_failed"),
+)
+
+const PresetPlaceholderDirectionBoundary = arkType.or(
+	arkType.unit("template-undeclared"),
+	arkType.unit("declared-unused"),
+)
+
+const PresetPlaceholderVerdictBoundary = arkType.or(
+	arkType.unit("error"),
+	arkType.unit("warn"),
 )
 
 const ExcerptSourceBoundary = arkType({
@@ -275,6 +286,17 @@ const ObservabilityEventBoundary = arkType.or(
 	},
 	{
 		...EventBaseBoundary,
+		kind: arkType.unit("validation"),
+		type: arkType.unit("preset.placeholder_check"),
+		payload: {
+			file: "string",
+			key: "string",
+			direction: PresetPlaceholderDirectionBoundary,
+			verdict: PresetPlaceholderVerdictBoundary,
+		},
+	},
+	{
+		...EventBaseBoundary,
 		kind: arkType.unit("diagnostic"),
 		type: arkType.unit("daemon.warning"),
 		payload: { message: "string" },
@@ -298,6 +320,9 @@ export type ObservabilityKind = typeof ObservabilityKindBoundary.infer
 export type ObservabilityEventType = typeof ObservabilityEventTypeBoundary.infer
 export type ObservabilityExcerpt = Extract<ObservabilityEvent, { type: "agent.exit" }>["payload"]["excerpt"]
 export type ObservabilitySubject = NonNullable<ObservabilityEvent["subject"]>
+export type PresetPlaceholderDirection = typeof PresetPlaceholderDirectionBoundary.infer
+export type PresetPlaceholderVerdict = typeof PresetPlaceholderVerdictBoundary.infer
+export type PresetPlaceholderEventPayload = Extract<ObservabilityEvent, { type: "preset.placeholder_check" }>["payload"]
 
 export const OBSERVABILITY_EXCERPT_RECORD_LIMIT = 5
 // Real runner JSONL records can inline large file bodies; this is an explicit excerpt payload contract.
@@ -525,6 +550,8 @@ function renderValidationEvent(event: Extract<ObservabilityEvent, { kind: "valid
 			return `${event.ts} validation session_id.invalidated chain=${event.chain ?? "-"} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} runner=${event.payload.runner}`
 		case "chain.invalid":
 			return `${event.ts} validation chain.invalid chain=${event.payload.chainId} context=${event.payload.context} error=${event.payload.error}`
+		case "preset.placeholder_check":
+			return `${event.ts} validation preset.placeholder_check chain=${event.chain ?? "-"} file=${event.payload.file} key=${event.payload.key} direction=${event.payload.direction} verdict=${event.payload.verdict}`
 		default:
 			return assertNever(event)
 	}

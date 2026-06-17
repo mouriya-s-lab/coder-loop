@@ -12,6 +12,7 @@ import {
 	createSummaryWatchdog,
 	decideResume,
 	detectHostRunner,
+	extractPromptPlaceholders,
 	getItemId,
 	makeIssueRunContext,
 	normalizeQueueIssueId,
@@ -28,6 +29,7 @@ import {
 	resolveBinding,
 	selectRunnerForPhase,
 	summaryWatchdogConfigForPhase,
+	validatePresetPhaseTemplate,
 	type ConfigBindings,
 	type IssueRunContext,
 	type JsonObject,
@@ -696,5 +698,79 @@ describe("small parsers", () => {
 			terminated: { kind: "signal", name: "SIGTERM" },
 			log: "stdout.jsonl",
 		})).toEqual({ kind: "resume", sessionId: "thread-ok" })
+	})
+})
+
+describe("renderPrompt placeholder validation (issue #399)", () => {
+	function makePhase(variables: ReadonlyArray<readonly [string, ReturnType<typeof parsePreset>["phases"][number]["variables"][number][1]]>): PresetPhase {
+		return {
+			name: "iteration",
+			prompt: "iteration.md",
+			summaryMarker: null,
+			exits: [],
+			variables,
+			variableDocs: new Map(),
+			trigger: null,
+			defaultRunner: null,
+			defaultModel: null,
+		}
+	}
+
+	test("extractPromptPlaceholders finds positional matches and distinguishes escapes", () => {
+		const template = "head {{A}} mid \\{{B}} {{A}} tail"
+		const matches = extractPromptPlaceholders(template)
+		expect(matches.length).toBe(3)
+		expect(matches[0]).toMatchObject({ kind: "placeholder", key: "A" })
+		expect(matches[1]).toMatchObject({ kind: "escape", key: "B" })
+		expect(matches[2]).toMatchObject({ kind: "placeholder", key: "A" })
+	})
+
+	test("validatePresetPhaseTemplate flags template-undeclared as error and declared-unused as warn", () => {
+		const phase = makePhase([
+			["DECLARED", { kind: "item", field: "issue" }],
+			["UNUSED", { kind: "item", field: "branch" }],
+		])
+		const findings = validatePresetPhaseTemplate("Hello {{DECLARED}} {{TYPO}}", phase, "/tmp/iter-entry.md")
+		expect(findings).toEqual([
+			{ file: "/tmp/iter-entry.md", key: "TYPO", direction: "template-undeclared", verdict: "error" },
+			{ file: "/tmp/iter-entry.md", key: "UNUSED", direction: "declared-unused", verdict: "warn" },
+		])
+	})
+
+	test("validatePresetPhaseTemplate skips escaped literals when checking template-undeclared", () => {
+		const phase = makePhase([
+			["KEY", { kind: "item", field: "issue" }],
+		])
+		// `\{{DOC}}` is the documentation-escape form; must not count as undeclared.
+		const findings = validatePresetPhaseTemplate("Use \\{{DOC}} as a literal; {{KEY}} resolves", phase, "/tmp/x.md")
+		expect(findings).toEqual([])
+	})
+
+	test("renderPrompt does positional substitution so values containing `{{` are not flagged as residue", () => {
+		const phase = makePhase([
+			["QUOTED", { kind: "item", field: "title" }],
+		])
+		const item = makeItem({ title: "literal {{NOT_A_KEY}} content" })
+		const ctx: ResolveContext = { item, config: makeConfig(), runtime: makeRuntime() }
+		const out = renderPrompt("before {{QUOTED}} after", phase, ctx)
+		expect(out).toBe("before literal {{NOT_A_KEY}} content after")
+	})
+
+	test("renderPrompt renders escape `\\{{KEY}}` as literal `{{KEY}}`", () => {
+		const phase = makePhase([
+			["KEY", { kind: "item", field: "issue" }],
+		])
+		const item = makeItem({ issueNumber: 42 })
+		const ctx: ResolveContext = { item, config: makeConfig(), runtime: makeRuntime() }
+		const out = renderPrompt("doc: \\{{KEY}} live: {{KEY}}", phase, ctx)
+		expect(out).toBe("doc: {{KEY}} live: 42")
+	})
+
+	test("renderPrompt throws on undeclared placeholder (defense-in-depth — loadPreset normally catches this earlier)", () => {
+		const phase = makePhase([
+			["DECLARED", { kind: "item", field: "issue" }],
+		])
+		const ctx: ResolveContext = { item: makeItem(), config: makeConfig(), runtime: makeRuntime() }
+		expect(() => renderPrompt("text {{UNDECLARED}}", phase, ctx)).toThrow(/undeclared placeholder \{\{UNDECLARED\}\}/)
 	})
 })
