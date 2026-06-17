@@ -227,8 +227,7 @@ async function readIfExists(path: string): Promise<string | null> {
 	try {
 		return await readFile(path, "utf-8")
 	} catch (error) {
-		const code = (error as NodeJS.ErrnoException).code
-		if (code === "ENOENT") return null
+		if (isNodeError(error) && error.code === "ENOENT") return null
 		throw error
 	}
 }
@@ -379,10 +378,14 @@ async function createChainThroughDaemon(input: {
 			metadata: { config: { workflowFile: resolve(input.target, WORKFLOW_REL) } },
 		}))
 		if (!response.ok) fail(`${response.error.code}: ${response.error.message}`)
-		return { chainName, result: response.result as JsonValue }
+		return { chainName, result: response.result }
 	} catch (error) {
 		fail(formatCentralDaemonNotRunning(input.loopDataRoot, socketPath, error))
 	}
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+	return error instanceof Error && "code" in error
 }
 
 function defaultChainName(repo: string): string {

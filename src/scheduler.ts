@@ -27,6 +27,26 @@ import {
 	type RunnerInvocationPaths,
 	type RuntimeBindings,
 } from "./loop"
+import {
+	chainCompleteTriggerState,
+	chainConfigBindings as metadataConfigBindings,
+	chainConfigWorkflowFile,
+	chainMetadataToJsonObject,
+	clearSchedulerBackoff as clearItemSchedulerBackoff,
+	clearSchedulerSpawnError as clearItemSchedulerSpawnError,
+	itemSchedulerBackoff,
+	itemExtraToJsonObject,
+	itemExtraWithoutKeys,
+	parseInternalStatus,
+	storedItemExtra,
+	withChainCompleteTriggerState,
+	withoutChainCompleteTriggerState,
+	withSchedulerBackoff,
+	withSchedulerSpawnError as withItemSchedulerSpawnError,
+	type InternalStatus,
+	type SchedulerBackoffState,
+	type SchedulerSpawnError,
+} from "./runtime-data"
 import { detectsSessionIdInvalid } from "./runners/session-id"
 import { type ChainRecord, dependsOnItemIds, type ItemRecord, listDependencyWaitReasons, type RunRecord, type SqliteStateStore } from "./sqlite-state"
 import {
@@ -92,7 +112,7 @@ export type SchedulerCompletedRun = {
 	exitCode: number
 	stdout: string
 	stderr: string
-	status: string
+	status: InternalStatus
 }
 
 export type SchedulerSlot = {
@@ -106,7 +126,7 @@ export type SchedulerSlot = {
 
 export type SchedulerState = {
 	slots: Map<string, SchedulerSlot>
-	finalizingItemStatuses: Map<number, string>
+	finalizingItemStatuses: Map<number, InternalStatus>
 	finalizingChainIds: Set<number>
 	pendingCloseHandlers: Set<Promise<unknown>>
 }
@@ -153,25 +173,25 @@ export type SchedulerEvent =
 	| { type: "item.dependency_wait"; chainId: number; itemId: number; dependsOn: readonly number[]; unsatisfied: readonly number[] }
 	| { type: "item.backoff"; chainId: number; itemId: number; failureCount: number; nextRunAt: number }
 	| { type: "agent.spawn"; slotKey: string; chainId: number; itemId: number; runId: string; phase: string; pid: number | null; worktreePath: string; presetDir: string }
-	| { type: "agent.exit"; slotKey: string; chainId: number; itemId: number; runId: string; phase: string; exitCode: number; status: string; excerpt: ObservabilityExcerpt }
+	| { type: "agent.exit"; slotKey: string; chainId: number; itemId: number; runId: string; phase: string; exitCode: number; status: InternalStatus; excerpt: ObservabilityExcerpt }
 	| { type: "session_id.invalidated"; ts: string; runId: string; chainId: number; itemId: number; phase: string; runner: AgentRunnerKind; previousSessionId: string | null; reason: "runner_session_id_invalid" }
-	| { type: "spawn.aborted"; slotKey: string; chainId: number; chainName: string; itemId: number; issueNumber: number; reason: string; toStatus: string }
+	| { type: "spawn.aborted"; slotKey: string; chainId: number; chainName: string; itemId: number; issueNumber: number; reason: string; toStatus: InternalStatus }
 	| { type: "chain.complete_trigger"; chainId: number; chainName: string; runId?: string; decision: SchedulerChainCompleteDecision["decision"]; reason?: string }
 	| { type: "chain.complete_trigger_failed"; chainId: number; chainName: string; runId?: string; error: string }
 	| { type: "chain.completed"; chainId: number; chainName: string; runId?: string }
 	| { type: "phase.start"; ts: string; runId: string; chainId: number; itemId: number; repoCwd: string; phase: string; pid: number | null }
-	| { type: "phase.end"; ts: string; runId: string; chainId: number; itemId: number; phase: string; exitCode: number; durationSeconds: number; status: string }
+	| { type: "phase.end"; ts: string; runId: string; chainId: number; itemId: number; phase: string; exitCode: number; durationSeconds: number; status: InternalStatus }
 	| { type: "attempt.timeout"; ts: string; runId: string; chainId: number; itemId: number; phase: string; signal: "SIGTERM" | "SIGKILL"; attemptMs: number; excerpt: ObservabilityExcerpt }
 	| { type: "watchdog.armed"; ts: string; runId: string; chainId: number; itemId: number; phase: string; marker: string; graceMs: number }
 	| { type: "watchdog.fire"; ts: string; runId: string; chainId: number; itemId: number; phase: string; signal: "SIGTERM" | "SIGKILL"; graceMs: number; excerpt: ObservabilityExcerpt }
-	| { type: "queue.terminal"; ts: string; runId: string; chainId: number; itemId: number; terminalStatus: string }
-	| { type: "item.dependency_unblocked"; chainId: number; itemId: number; fromStatus: string; toStatus: string; dependsOn: readonly number[] }
+	| { type: "queue.terminal"; ts: string; runId: string; chainId: number; itemId: number; terminalStatus: InternalStatus }
+	| { type: "item.dependency_unblocked"; chainId: number; itemId: number; fromStatus: InternalStatus; toStatus: InternalStatus; dependsOn: readonly number[] }
 
 export type SchedulerChainCompleteTriggerContext = {
 	chain: ChainRecord
 	items: readonly ItemRecord[]
 	runId?: string
-	terminalStatusNames: readonly string[]
+	terminalStatusNames: readonly InternalStatus[]
 }
 
 export type SchedulerChainCompleteDecision =
@@ -238,29 +258,26 @@ export type SchedulerOptions = {
 }
 
 export type SchedulerChainStatuses = {
-	pending: readonly string[]
-	terminal: readonly string[]
+	pending: readonly InternalStatus[]
+	terminal: readonly InternalStatus[]
 	// success: subset of terminal that means an item succeeded. Drives cross-chain dependsOn
 	// unblock — a terminal item is restored to `entry` only when all its dependsOn targets
 	// reached a success-terminal status.
-	success: readonly string[]
+	success: readonly InternalStatus[]
 	// entry: the actionable status a dependency-unblocked item is restored to.
-	entry: string
+	entry: InternalStatus
 }
 
 export const DEFAULT_MAX_ITEM_ATTEMPTS = 10
-export const SCHEDULER_EXHAUSTED_STATUS = "exhausted"
+export const SCHEDULER_EXHAUSTED_STATUS = parseInternalStatus("exhausted", "scheduler.exhaustedStatus")
+const RUNNING_RUN_STATUS = parseInternalStatus("running", "scheduler.runningRunStatus")
+const REVIEW_ON_EMPTY_STATUS = parseInternalStatus("review-on-empty", "scheduler.reviewOnEmptyStatus")
 
 export type SchedulerTickResult = {
 	spawnedRuns: SchedulerActiveRun[]
 	completedChainIds: number[]
 }
 
-const RUNNING_RUN_STATUS = "running"
-const CHAIN_COMPLETE_TRIGGER_STATE_METADATA_KEY = "coderLoopChainCompleteTrigger"
-const MAX_ITEM_ATTEMPTS_METADATA_KEY = "maxItemAttempts"
-const SCHEDULER_BACKOFF_EXTRA_KEY = "schedulerBackoff"
-const SCHEDULER_SPAWN_ERROR_EXTRA_KEY = "schedulerSpawnError"
 const DEFAULT_SPAWN_FAILURE_BACKOFF: SchedulerSpawnFailureBackoffConfig = { initialSeconds: 60, maxSeconds: 480 }
 const REVIEW_ON_EMPTY_LOCK_FILENAME = "review-on-empty.lock"
 const REVIEW_ON_EMPTY_LOCK_REASON = "chain-queue-drained"
@@ -272,8 +289,8 @@ export function createSchedulerState(): SchedulerState {
 	return { slots: new Map(), finalizingItemStatuses: new Map(), finalizingChainIds: new Set(), pendingCloseHandlers: new Set() }
 }
 
-export function maxItemAttemptsFromChainMetadata(metadata: JsonObject): number {
-	const value = metadata[MAX_ITEM_ATTEMPTS_METADATA_KEY]
+export function maxItemAttemptsFromChainMetadata(metadata: ChainRecord["metadata"]): number {
+	const value = metadata.maxItemAttempts
 	if (isPositiveInteger(value)) return value
 	return DEFAULT_MAX_ITEM_ATTEMPTS
 }
@@ -350,7 +367,7 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 type SchedulerItemTriggerPhase = {
 	name: string
 	afterPhase: string
-	whenStatus: string
+	whenStatus: InternalStatus
 }
 
 type SchedulerPhasePlan = {
@@ -439,11 +456,11 @@ function selectNextItemAndPhase(input: SelectNextItemAndPhaseInput): { item: Ite
 function nextNonTriggerPhaseForItem(input: {
 	item: ItemRecord
 	runsById: ReadonlyMap<string, RunRecord>
-	phasePlan: SchedulerPhasePlan
-	pendingStatuses: readonly string[]
-	terminalStatuses: readonly string[]
-	now: number
-}): string | null {
+		phasePlan: SchedulerPhasePlan
+		pendingStatuses: readonly InternalStatus[]
+		terminalStatuses: readonly InternalStatus[]
+		now: number
+	}): string | null {
 	if (!itemBackoffReady(input.item, input.now)) return null
 	if (input.item.phase === null || input.item.lastRunId === null) return null
 	if (input.terminalStatuses.includes(input.item.status)) return null
@@ -455,7 +472,7 @@ function nextNonTriggerPhaseForItem(input: {
 	const currentPhaseIndex = input.phasePlan.nonTriggerPhases.indexOf(input.item.phase)
 	if (currentPhaseIndex < 0) return null
 	if (currentPhaseIndex === input.phasePlan.nonTriggerPhases.length - 1) {
-		const startStatus = typeof latestRun.extra.startStatus === "string" ? latestRun.extra.startStatus : null
+		const startStatus = latestRun.extra.startStatus ?? null
 		const startStatusUpdatedAt = typeof latestRun.extra.startStatusUpdatedAt === "number" ? latestRun.extra.startStatusUpdatedAt : null
 		const statusWrittenAfterRunStart = startStatusUpdatedAt !== null
 			&& input.item.statusUpdatedAt !== startStatusUpdatedAt
@@ -478,8 +495,8 @@ function hasUnfinishedCurrentPhaseRun(item: ItemRecord, runsById: ReadonlyMap<st
 export type SchedulerPendingSelectionInput = {
 	items: readonly ItemRecord[]
 	repoCwd: string
-	statuses: readonly string[]
-	terminalStatuses: readonly string[]
+	statuses: readonly InternalStatus[]
+	terminalStatuses: readonly InternalStatus[]
 	now: number
 }
 
@@ -526,7 +543,7 @@ async function emitRepoWaitingDecisions(
 	const pending = new Set(chainStatuses.pending)
 	for (const item of items) {
 		if (item.repoCwd !== repoCwd || !pending.has(item.status)) continue
-		const backoff = schedulerBackoffState(item.extra)
+			const backoff = itemSchedulerBackoff(item.extra)
 		if (backoff === null || backoff.nextRunAt <= now) continue
 		await emit(options, {
 			type: "item.backoff",
@@ -562,7 +579,7 @@ async function exhaustItemsOverAttemptLimitForRepo(
 		if (item.attempts < maxItemAttempts) continue
 
 		const exhaustedAt = nowSeconds(options)
-		const extra = clearSchedulerBackoff(item.extra)
+			const extra = clearItemSchedulerBackoff(item.extra)
 		options.store.updateItem(item.id, {
 			status: SCHEDULER_EXHAUSTED_STATUS,
 			extra,
@@ -780,7 +797,7 @@ async function spawnSchedulerRun(
 		const message = errorMessage(error)
 		options.store.updateItem(item.id, {
 			extra: withSchedulerSpawnError(
-				withNextSchedulerBackoff(item.extra, failedAt, spawnFailureBackoffForChain(options, chain)),
+					withNextSchedulerBackoff(item.extra, failedAt, spawnFailureBackoffForChain(options, chain)),
 				failedAt,
 				phase,
 				message,
@@ -805,21 +822,28 @@ async function spawnSchedulerRun(
 	const runner = await resolvePhaseRunner(options, { chain, item, phase })
 	const runId = options.runIdFactory?.({ chain, item, phase }) ?? makeRunId(item.id, phase)
 	const startedAt = nowSeconds(options)
-	options.store.recordRun({
+		options.store.recordRun({
 		runId,
 		chainId: chain.id,
 		itemId: item.id,
 		phase,
 		status: RUNNING_RUN_STATUS,
 		startedAt,
-		extra: { slotKey: slot.key, repoCwd: item.repoCwd, worktreePath, startStatus: item.status, startStatusUpdatedAt: item.statusUpdatedAt, startPhase: item.phase },
-	})
+			extra: storedItemExtra({
+				slotKey: slot.key,
+				repoCwd: item.repoCwd,
+				worktreePath,
+				startStatus: item.status,
+				startStatusUpdatedAt: item.statusUpdatedAt,
+				...(item.phase === null ? {} : { startPhase: item.phase }),
+			}),
+		})
 	options.store.setCurrentRun({
 		chainId: chain.id,
 		phase,
 		runId,
 		startedAt,
-		extra: { slotKey: slot.key, itemId: item.id, repoCwd: item.repoCwd },
+		extra: storedItemExtra({ slotKey: slot.key, itemId: item.id, repoCwd: item.repoCwd }),
 	})
 	const spawnUpdate: Parameters<typeof options.store.updateItem>[1] = {
 		attempts: item.attempts + 1,
@@ -828,7 +852,7 @@ async function spawnSchedulerRun(
 		phase,
 		updatedAt: startedAt,
 	}
-	const extraWithoutSpawnError = clearSchedulerSpawnError(item.extra)
+		const extraWithoutSpawnError = clearItemSchedulerSpawnError(item.extra)
 	if (extraWithoutSpawnError !== item.extra) spawnUpdate.extra = extraWithoutSpawnError
 	// Spawn records only run/phase metadata. The agent owns status writes; trigger phases on terminal
 	// items therefore keep their terminal status, and normal phases keep their entry status until the
@@ -877,7 +901,14 @@ async function spawnSchedulerRun(
 		phase,
 		runId,
 		startedAt,
-		extra: { slotKey: slot.key, itemId: item.id, repoCwd: item.repoCwd, worktreePath, pid: activeRun.pid, processGroupLeader: true },
+			extra: storedItemExtra({
+				slotKey: slot.key,
+				itemId: item.id,
+				repoCwd: item.repoCwd,
+				worktreePath,
+				...(activeRun.pid === null ? {} : { pid: activeRun.pid }),
+				processGroupLeader: true,
+			}),
 	})
 	await writeSchedulerRunStatus(options, {
 		runId,
@@ -998,7 +1029,12 @@ function attachRunCloseHandler(
 						endedAt,
 						exitCode,
 						status,
-						extra: { ...(completedRun?.extra ?? {}), stdoutBytes: stdoutText.length, stderrBytes: stderrText.length, ...(summary !== null ? { summary } : {}) },
+						extra: storedItemExtra({
+							...(completedRun === null ? {} : itemExtraToJsonObject(completedRun.extra)),
+							stdoutBytes: stdoutText.length,
+							stderrBytes: stderrText.length,
+							...(summary !== null ? { summary } : {}),
+						}),
 					})
 
 					const currentRun = options.store.getCurrentRun(chain.id)
@@ -1063,7 +1099,7 @@ function attachRunCloseHandler(
 						})
 					}
 					await completeChainIfReady(options, chain, runId, [...terminalStatuses])
-					return { runId, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, exitCode, stdout: stdoutText, stderr: stderrText, status }
+			return { runId, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, exitCode, stdout: stdoutText, stderr: stderrText, status }
 				} catch (error) {
 					if (slot.activeRun?.runId === runId) slot.activeRun = null
 					throw error
@@ -1377,8 +1413,7 @@ async function unblockDependencySatisfiedItems(
 		// (selectNextPendingItemFromSnapshot) resolves deps only within the per-chain snapshot, so
 		// leaving a cross-chain dependsOn on the restored item would re-gate it and it would never
 		// be selected into iteration. The dependency is fulfilled, so the record has served its job.
-		const nextExtra: JsonObject = { ...item.extra }
-		delete nextExtra.dependsOn
+		const nextExtra = itemExtraWithoutKeys(item.extra, ["dependsOn"])
 		options.store.updateItem(item.id, { status: chainStatuses.entry, extra: nextExtra, updatedAt: nowSeconds(options) })
 		await emit(options, {
 			type: "item.dependency_unblocked",
@@ -1398,7 +1433,7 @@ async function unblockDependencySatisfiedItems(
 // item. Used to keep the chain active so the daemon keeps ticking until the dependency settles.
 // Dangling (missing) targets do not count: they can never resolve, so they must not pin the
 // chain open forever.
-function hasInflightDependency(options: SchedulerOptions, items: readonly ItemRecord[], terminalStatuses: readonly string[]): boolean {
+function hasInflightDependency(options: SchedulerOptions, items: readonly ItemRecord[], terminalStatuses: readonly InternalStatus[]): boolean {
 	const terminal = new Set(terminalStatuses)
 	return items.some((item) =>
 		dependsOnItemIds(item.extra).some((id) => {
@@ -1408,7 +1443,7 @@ function hasInflightDependency(options: SchedulerOptions, items: readonly ItemRe
 	)
 }
 
-async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecord, runId?: string, terminalStatuses?: readonly string[]): Promise<boolean> {
+async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecord, runId?: string, terminalStatuses?: readonly InternalStatus[]): Promise<boolean> {
 	if (hasActiveSlotForChain(options.state, chain.id, runId)) return false
 	const effectiveTerminalStatuses = terminalStatuses ?? (await schedulerStatusesForChain(options, chain)).terminal
 	const current = options.store.listChains().find((candidate) => candidate.id === chain.id)
@@ -1439,7 +1474,7 @@ async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecor
 	}
 }
 
-async function chainCompletionTriggerAllowsCompletion(options: SchedulerOptions, chain: ChainRecord, runId: string | undefined, terminalStatuses: readonly string[]): Promise<boolean> {
+async function chainCompletionTriggerAllowsCompletion(options: SchedulerOptions, chain: ChainRecord, runId: string | undefined, terminalStatuses: readonly InternalStatus[]): Promise<boolean> {
 	try {
 		const items = listItemsIncludingFinalizing(options, chain.id)
 		const fingerprint = chainCompletionFingerprint(chain, items, terminalStatuses)
@@ -1481,7 +1516,7 @@ async function chainCompletionTriggerAllowsCompletion(options: SchedulerOptions,
 }
 
 function keepActiveTriggerStateApplies(chain: ChainRecord, fingerprint: string): boolean {
-	const state = jsonObject(chain.metadata[CHAIN_COMPLETE_TRIGGER_STATE_METADATA_KEY])
+	const state = chainCompleteTriggerState(chain.metadata)
 	return state?.decision === "keep-active" && state.fingerprint === fingerprint
 }
 
@@ -1493,7 +1528,7 @@ function persistKeepActiveTriggerState(
 	runId: string | undefined,
 ): void {
 	const recordedAt = nowSeconds(options)
-	const state: JsonObject = {
+	const state: { decision: "keep-active"; fingerprint: string; recordedAt: number; reason?: string; runId?: string } = {
 		decision: decision.decision,
 		fingerprint,
 		recordedAt,
@@ -1501,15 +1536,12 @@ function persistKeepActiveTriggerState(
 	if (decision.reason !== undefined) state.reason = decision.reason
 	if (runId !== undefined) state.runId = runId
 	options.store.updateChain(chain.id, {
-		metadata: {
-			...chain.metadata,
-			[CHAIN_COMPLETE_TRIGGER_STATE_METADATA_KEY]: state,
-		},
+		metadata: withChainCompleteTriggerState(chain.metadata, state),
 		updatedAt: recordedAt,
 	})
 }
 
-function chainCompletionFingerprint(chain: ChainRecord, items: readonly ItemRecord[], terminalStatuses: readonly string[]): string {
+function chainCompletionFingerprint(chain: ChainRecord, items: readonly ItemRecord[], terminalStatuses: readonly InternalStatus[]): string {
 	const payload: JsonObject = {
 		chain: {
 			id: chain.id,
@@ -1540,7 +1572,7 @@ function chainCompletionFingerprint(chain: ChainRecord, items: readonly ItemReco
 				agentCwd: item.agentCwd,
 				runner: item.runner,
 				phase: item.phase,
-				extra: item.extra,
+				extra: itemExtraToJsonObject(item.extra),
 				createdAt: item.createdAt,
 				updatedAt: item.updatedAt,
 			}))
@@ -1549,13 +1581,8 @@ function chainCompletionFingerprint(chain: ChainRecord, items: readonly ItemReco
 	return createHash("sha256").update(stableJsonStringify(payload)).digest("hex")
 }
 
-function chainMetadataForFingerprint(metadata: JsonObject): JsonObject {
-	const result: JsonObject = {}
-	for (const [key, value] of Object.entries(metadata)) {
-		if (key === CHAIN_COMPLETE_TRIGGER_STATE_METADATA_KEY) continue
-		result[key] = value
-	}
-	return result
+function chainMetadataForFingerprint(metadata: ChainRecord["metadata"]): JsonObject {
+	return chainMetadataToJsonObject(withoutChainCompleteTriggerState(metadata))
 }
 
 function stableJsonStringify(value: JsonValue): string {
@@ -1605,71 +1632,47 @@ function extraAfterRunCompletion(
 	chain: ChainRecord,
 	item: ItemRecord,
 	exitCode: number,
-	status: string,
-	terminalStatuses: ReadonlySet<string>,
+	status: InternalStatus,
+	terminalStatuses: ReadonlySet<InternalStatus>,
 	endedAt: number,
-): JsonObject {
+): ItemRecord["extra"] {
 	if (exitCode !== 0 && !terminalStatuses.has(status)) {
 		return withNextSchedulerBackoff(item.extra, endedAt, spawnFailureBackoffForChain(options, chain))
 	}
-	return clearSchedulerBackoff(item.extra)
+	return clearItemSchedulerBackoff(item.extra)
 }
 
 function itemBackoffReady(item: ItemRecord, now: number): boolean {
-	const backoff = schedulerBackoffState(item.extra)
+	const backoff = itemSchedulerBackoff(item.extra)
 	return backoff === null || backoff.nextRunAt <= now
 }
 
 function withNextSchedulerBackoff(
-	extra: JsonObject,
+	extra: ItemRecord["extra"],
 	endedAt: number,
 	config: SchedulerSpawnFailureBackoffConfig,
-): JsonObject {
-	const current = schedulerBackoffState(extra)
+): ItemRecord["extra"] {
+	const current = itemSchedulerBackoff(extra)
 	const failureCount = (current?.failureCount ?? 0) + 1
 	const exponent = Math.min(failureCount - 1, 30)
 	const delaySeconds = Math.min(config.maxSeconds, config.initialSeconds * (2 ** exponent))
-	return {
-		...extra,
-		[SCHEDULER_BACKOFF_EXTRA_KEY]: {
-			failureCount,
-			nextRunAt: endedAt + delaySeconds,
-		},
+	const state: SchedulerBackoffState = {
+		failureCount,
+		nextRunAt: endedAt + delaySeconds,
 	}
+	return withSchedulerBackoff(extra, state)
 }
 
-function clearSchedulerBackoff(extra: JsonObject): JsonObject {
-	if (!(SCHEDULER_BACKOFF_EXTRA_KEY in extra)) return extra
-	const next = { ...extra }
-	delete next[SCHEDULER_BACKOFF_EXTRA_KEY]
-	return next
-}
-
-function withSchedulerSpawnError(extra: JsonObject, failedAt: number, phase: string, message: string): JsonObject {
-	return { ...extra, [SCHEDULER_SPAWN_ERROR_EXTRA_KEY]: { at: failedAt, phase, message } }
-}
-
-function clearSchedulerSpawnError(extra: JsonObject): JsonObject {
-	if (!(SCHEDULER_SPAWN_ERROR_EXTRA_KEY in extra)) return extra
-	const next = { ...extra }
-	delete next[SCHEDULER_SPAWN_ERROR_EXTRA_KEY]
-	return next
-}
-
-function schedulerBackoffState(extra: JsonObject): { failureCount: number; nextRunAt: number } | null {
-	const raw = jsonObject(extra[SCHEDULER_BACKOFF_EXTRA_KEY])
-	if (raw === null) return null
-	const failureCount = raw.failureCount
-	const nextRunAt = raw.nextRunAt
-	if (!isPositiveInteger(failureCount) || !isPositiveInteger(nextRunAt)) return null
-	return { failureCount, nextRunAt }
+function withSchedulerSpawnError(extra: ItemRecord["extra"], failedAt: number, phase: string, message: string): ItemRecord["extra"] {
+	const error: SchedulerSpawnError = { at: failedAt, phase, message }
+	return withItemSchedulerSpawnError(extra, error)
 }
 
 function isPositiveInteger(value: unknown): value is number {
 	return typeof value === "number" && Number.isInteger(value) && value >= 1
 }
 
-function allItemsTerminalIncludingFinalizing(options: SchedulerOptions, chainId: number, terminalStatuses: readonly string[]): boolean {
+function allItemsTerminalIncludingFinalizing(options: SchedulerOptions, chainId: number, terminalStatuses: readonly InternalStatus[]): boolean {
 	const terminal = new Set(terminalStatuses)
 	return listItemsIncludingFinalizing(options, chainId).every((item) => terminal.has(item.status))
 }
@@ -1781,7 +1784,7 @@ function shouldRunReviewOnEmpty(
 	options: SchedulerOptions,
 	chain: ChainRecord,
 	items: readonly ItemRecord[],
-	terminalStatuses: readonly string[],
+	terminalStatuses: readonly InternalStatus[],
 ): boolean {
 	if (items.length === 0) return false
 	if (hasActiveSlotForChain(options.state, chain.id)) return false
@@ -1804,7 +1807,7 @@ function makeReviewOnEmptyFallbackItem(chain: ChainRecord, representative: ItemR
 		chainId: chain.id,
 		issueNumber: 0,
 		repoCwd: representative.repoCwd,
-		status: "",
+		status: REVIEW_ON_EMPTY_STATUS,
 		attempts: 0,
 		position: 0,
 		title: null,
@@ -1818,7 +1821,7 @@ function makeReviewOnEmptyFallbackItem(chain: ChainRecord, representative: ItemR
 		agentCwd: representative.agentCwd,
 		runner: null,
 		phase: reviewPhase,
-		extra: {},
+		extra: storedItemExtra({}),
 		createdAt: representative.createdAt,
 		updatedAt: representative.updatedAt,
 		statusUpdatedAt: representative.statusUpdatedAt,
@@ -2060,7 +2063,7 @@ export function resumeDecisionForItem(item: ItemRecord, phase: string, runner: A
 
 export async function defaultSchedulerKindResolver(context: { chain: ChainRecord; item: ItemRecord }): Promise<ParsedIssueKind> {
 	const repository = context.chain.repository === "" ? null : context.chain.repository
-	return await resolveIssueKind(repository, String(context.item.issueNumber), context.item.extra)
+	return await resolveIssueKind(repository, String(context.item.issueNumber), itemExtraToJsonObject(context.item.extra))
 }
 
 async function resolvePhaseRunner(
@@ -2171,32 +2174,11 @@ function buildSchedulerConfigBindings(repoCwd: string, chain: ChainRecord): Json
 	const bindings: JsonObject = {
 		repository: chain.repository,
 		baseBranch: chain.baseBranch,
-		...chainConfigBindings(chain.metadata),
+		...metadataConfigBindings(chain.metadata),
 	}
-	const workflowFile = stringMetadata(chain.metadata, "workflowFile") ?? stringConfigBinding(bindings, "workflowFile")
+	const workflowFile = chain.metadata.workflowFile ?? chainConfigWorkflowFile(chain.metadata)
 	bindings.workflowFile = resolveWorkflowFileConfigBinding(repoCwd, workflowFile)
 	return bindings
-}
-
-function chainConfigBindings(metadata: JsonObject): JsonObject {
-	const value = metadata.config
-	if (value === undefined) return {}
-	if (!isJsonObjectRecord(value)) throw new Error("chain.metadata.config must be a JSON object when provided")
-	return { ...value }
-}
-
-function isJsonObjectRecord(value: JsonValue): value is JsonObject {
-	return typeof value === "object" && value !== null && !Array.isArray(value)
-}
-
-function stringMetadata(metadata: JsonObject, key: string): string | null {
-	const value = metadata[key]
-	return typeof value === "string" && value.trim() !== "" ? value : null
-}
-
-function stringConfigBinding(bindings: JsonObject, key: string): string | null {
-	const value = bindings[key]
-	return typeof value === "string" && value.trim() !== "" ? value : null
 }
 
 function resolveFrom(base: string, path: string): string {

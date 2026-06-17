@@ -3,11 +3,16 @@ import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
 import { openSqliteStateStore } from "./sqlite-state"
+import { parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/db-main-loop-tests", String(process.pid))
 const CHAIN_NAME = "db-main-loop"
+
+function runtimeStatus(value: string) {
+	return parseInternalStatus(value, "test.status")
+}
 
 afterAll(async () => {
 	await rm(TEST_ROOT, { recursive: true, force: true })
@@ -174,16 +179,16 @@ function seedDb(loopDataRoot: string, target: string, options: FixtureOptions, p
 			preset: presetPath === null ? "gh-issue-pr-iteration" : "manual-unblock-fixture",
 			repository: "fixture/repo",
 			baseBranch: "main",
-			metadata: presetPath === null ? {} : { presetPath },
+			metadata: storedChainMetadata(presetPath === null ? {} : { presetPath }),
 		})
 		store.createItem({
 			chainId: chain.id,
 			issueNumber: 1,
 			repoCwd: target,
-			status: options.initialStatus ?? "queued",
+			status: runtimeStatus(options.initialStatus ?? "queued"),
 			issueFile: null,
 			evidenceDir: null,
-			extra: { issueKind: "code", ...(options.extra ?? {}) },
+			extra: storedItemExtra({ issueKind: "code", ...(options.extra ?? {}) }),
 		})
 	} finally {
 		store.close()

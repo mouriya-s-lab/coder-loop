@@ -3,9 +3,15 @@ import { resolve } from "node:path"
 import { stat } from "node:fs/promises"
 
 import { DEFAULT_ATTEMPT_TIMEOUT_SECONDS, chainCompleteTriggerPhases, lastNonTriggerPhaseForPreset, loadPreset, parsePreset, triggeredPhasesAfter, type Preset, type PresetVariableSource } from "./loop"
+import { parseInternalStatus } from "./runtime-data"
+import type { BoundaryRecord } from "./boundary-types"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const BUNDLED_PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
+
+function status(value: string) {
+	return parseInternalStatus(value, "test.status")
+}
 
 const EXPECTED_FRAGMENTS = [
 	{ id: "common/runtime-contract", role: "common", relPath: "common/runtime-contract.md" },
@@ -164,7 +170,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 			"umbrella-finalizer": null,
 		})
 		expect(lastNonTriggerPhaseForPreset(preset).name).toBe("review")
-		expect(triggeredPhasesAfter(preset, "review", "blocked").map((phase) => phase.name)).toEqual(["blocked-responder"])
+			expect(triggeredPhasesAfter(preset, "review", status("blocked")).map((phase) => phase.name)).toEqual(["blocked-responder"])
 		expect(chainCompleteTriggerPhases(preset).map((phase) => phase.name)).toEqual(["umbrella-finalizer"])
 		for (const phase of preset.phases) {
 			expect(phase.prompt.startsWith(BUNDLED_PRESET_DIR)).toBe(true)
@@ -341,7 +347,7 @@ describe("parsePreset schema validation", () => {
 	})
 
 	test("accepts trigger phases and keeps review as the last non-trigger phase", () => {
-		const root: Record<string, unknown> = minimalRoot()
+		const root: BoundaryRecord = minimalRoot()
 		root.statuses = { continuable: ["queued"], terminal: ["blocked", "done"] }
 		root.phases = [
 			{ name: "iteration", prompt: "iter.md", variables: { K: "item.id" } },
@@ -351,14 +357,14 @@ describe("parsePreset schema validation", () => {
 
 		const preset = parsePreset(root, "/tmp")
 
-		expect(preset.phases[2]!.trigger).toEqual({ afterPhase: "review", whenStatus: "blocked" })
-		expect(lastNonTriggerPhaseForPreset(preset).name).toBe("review")
-		expect(triggeredPhasesAfter(preset, "review", "blocked").map((phase) => phase.name)).toEqual(["responder"])
-		expect(triggeredPhasesAfter(preset, "review", "done")).toEqual([])
+			expect(preset.phases[2]!.trigger).toEqual({ afterPhase: "review", whenStatus: status("blocked") })
+			expect(lastNonTriggerPhaseForPreset(preset).name).toBe("review")
+			expect(triggeredPhasesAfter(preset, "review", status("blocked")).map((phase) => phase.name)).toEqual(["responder"])
+			expect(triggeredPhasesAfter(preset, "review", status("done"))).toEqual([])
 	})
 
 	test("accepts per-phase exit declarations and computes summaryMarker defaults", () => {
-		const root: Record<string, unknown> = minimalRoot()
+		const root: BoundaryRecord = minimalRoot()
 		root.statuses = { continuable: ["queued", "in_progress"], terminal: ["done"] }
 		root.phases = [
 			{ name: "iteration", prompt: "iter.md", exits: [{ status: "in_progress", when: "handoff" }], variables: { K: "item.id" } },
@@ -367,13 +373,13 @@ describe("parsePreset schema validation", () => {
 
 		const preset = parsePreset(root, "/tmp")
 
-		expect(preset.phases.map((phase) => phase.exits.map((exit) => exit.status))).toEqual([["in_progress"], ["done"]])
+			expect(preset.phases.map((phase) => phase.exits.map((exit) => exit.status))).toEqual([[status("in_progress")], [status("done")]])
 		expect(preset.phases[1]!.defaultRunner).toBe("claude")
 		expect(preset.phases.map((phase) => phase.summaryMarker)).toEqual([null, "REVIEW SUMMARY:"])
 	})
 
 	test("accepts manual unblock statuses declared as terminal subset", () => {
-		const root: Record<string, unknown> = minimalRoot()
+		const root: BoundaryRecord = minimalRoot()
 		root.statuses = { continuable: ["ready"], terminal: ["parked", "finished"], entry: "ready", unblockable: ["parked"] }
 
 		const preset = parsePreset(root, "/tmp")
@@ -383,14 +389,14 @@ describe("parsePreset schema validation", () => {
 	})
 
 	test("rejects manual unblock statuses outside terminal set", () => {
-		const root: Record<string, unknown> = minimalRoot()
+		const root: BoundaryRecord = minimalRoot()
 		root.statuses = { continuable: ["ready"], terminal: ["finished"], entry: "ready", unblockable: ["parked"] }
 
 		expect(() => parsePreset(root, "/tmp")).toThrow(/statuses\.unblockable: "parked" must be one of statuses\.terminal/)
 	})
 
 	test("rejects duplicate manual unblock statuses", () => {
-		const root: Record<string, unknown> = minimalRoot()
+		const root: BoundaryRecord = minimalRoot()
 		root.statuses = { continuable: ["ready"], terminal: ["parked"], entry: "ready", unblockable: ["parked", "parked"] }
 
 		expect(() => parsePreset(root, "/tmp")).toThrow(/statuses\.unblockable: duplicate status "parked"/)
@@ -403,16 +409,16 @@ describe("parsePreset schema validation", () => {
 	})
 
 	test("rejects per-phase exit declarations outside preset statuses", () => {
-		const root: Record<string, unknown> = minimalRoot()
+		const root: BoundaryRecord = minimalRoot()
 		root.phases = [
 			{ name: "iteration", prompt: "iter.md", exits: [{ status: "missing", when: "bad" }], variables: { K: "item.id" } },
 		]
 
-		expect(() => parsePreset(root, "/tmp")).toThrow(/exits\.status: unknown status "missing"/)
+		expect(() => parsePreset(root, "/tmp")).toThrow(/exits\.status: unrecognized status "missing"/)
 	})
 
 	test("rejects duplicate per-phase exit declarations", () => {
-		const root: Record<string, unknown> = minimalRoot()
+		const root: BoundaryRecord = minimalRoot()
 		root.phases = [
 			{ name: "iteration", prompt: "iter.md", exits: [{ status: "a", when: "one" }, { status: "a", when: "two" }], variables: { K: "item.id" } },
 		]
@@ -421,7 +427,7 @@ describe("parsePreset schema validation", () => {
 	})
 
 	test("rejects legacy statusWrites declarations", () => {
-		const root: Record<string, unknown> = minimalRoot()
+		const root: BoundaryRecord = minimalRoot()
 		root.phases = [
 			{ name: "iteration", prompt: "iter.md", statusWrites: ["a"], variables: { K: "item.id" } },
 		]
@@ -430,7 +436,7 @@ describe("parsePreset schema validation", () => {
 	})
 
 	test("accepts chain-complete trigger phases", () => {
-		const root: Record<string, unknown> = minimalRoot()
+		const root: BoundaryRecord = minimalRoot()
 		root.statuses = { continuable: ["queued"], terminal: ["blocked", "done"] }
 		root.phases = [
 			{ name: "iteration", prompt: "iter.md", variables: { K: "item.id" } },
@@ -441,32 +447,32 @@ describe("parsePreset schema validation", () => {
 
 		const preset = parsePreset(root, "/tmp")
 
-		expect(preset.phases[2]!.trigger).toEqual({ afterPhase: "review", whenStatus: "blocked" })
-		expect(preset.phases[3]!.trigger).toEqual({ on: "chain-complete" })
-		expect(lastNonTriggerPhaseForPreset(preset).name).toBe("review")
-		expect(triggeredPhasesAfter(preset, "review", "blocked").map((phase) => phase.name)).toEqual(["responder"])
+			expect(preset.phases[2]!.trigger).toEqual({ afterPhase: "review", whenStatus: status("blocked") })
+			expect(preset.phases[3]!.trigger).toEqual({ on: "chain-complete" })
+			expect(lastNonTriggerPhaseForPreset(preset).name).toBe("review")
+			expect(triggeredPhasesAfter(preset, "review", status("blocked")).map((phase) => phase.name)).toEqual(["responder"])
 		expect(chainCompleteTriggerPhases(preset).map((phase) => phase.name)).toEqual(["finalizer"])
 	})
 
 	test("rejects trigger afterPhase that does not name a declared phase", () => {
-		const root: Record<string, unknown> = minimalRoot()
+		const root: BoundaryRecord = minimalRoot()
 		root.statuses = { continuable: ["queued"], terminal: ["blocked"] }
 		root.phases = [
 			{ name: "iteration", prompt: "iter.md", variables: { K: "item.id" } },
 			{ name: "responder", prompt: "responder.md", trigger: { afterPhase: "review", whenStatus: "blocked" }, variables: { K: "item.id" } },
 		]
 
-		expect(() => parsePreset(root, "/tmp")).toThrow(/trigger\.afterPhase: unknown phase "review"/)
+		expect(() => parsePreset(root, "/tmp")).toThrow(/trigger\.afterPhase: unrecognized phase "review"/)
 	})
 
 	test("rejects trigger whenStatus outside preset statuses", () => {
-		const root: Record<string, unknown> = minimalRoot()
+		const root: BoundaryRecord = minimalRoot()
 		root.phases = [
 			{ name: "iteration", prompt: "iter.md", variables: { K: "item.id" } },
 			{ name: "responder", prompt: "responder.md", trigger: { afterPhase: "iteration", whenStatus: "blocked" }, variables: { K: "item.id" } },
 		]
 
-		expect(() => parsePreset(root, "/tmp")).toThrow(/trigger\.whenStatus: unknown status "blocked"/)
+		expect(() => parsePreset(root, "/tmp")).toThrow(/trigger\.whenStatus: unrecognized status "blocked"/)
 	})
 
 	test("rejects duplicate fragment id", () => {
@@ -479,12 +485,12 @@ describe("parsePreset schema validation", () => {
 	})
 
 	test("rejects misspelled item field reference (e.g. item.stauts instead of item.status)", () => {
-		const root: Record<string, unknown> = { ...minimalRoot(), phases: [{ name: "p", prompt: "p.md", variables: { X: "item.stauts" } }] }
-		expect(() => parsePreset(root, "/tmp")).toThrow(/unknown item field "stauts"/)
+		const root: BoundaryRecord = { ...minimalRoot(), phases: [{ name: "p", prompt: "p.md", variables: { X: "item.stauts" } }] }
+		expect(() => parsePreset(root, "/tmp")).toThrow(/unrecognized item field "stauts"/)
 	})
 
 	test("accepts declared runtime business keys", () => {
-		const root: Record<string, unknown> = {
+		const root: BoundaryRecord = {
 			...minimalRoot(),
 			runtime: { businessKeys: ["customBusiness"] },
 			phases: [{ name: "p", prompt: "p.md", variables: { X: "runtime.customBusiness" } }],
@@ -495,29 +501,29 @@ describe("parsePreset schema validation", () => {
 	})
 
 	test("rejects undeclared runtime business keys", () => {
-		const root: Record<string, unknown> = { ...minimalRoot(), phases: [{ name: "p", prompt: "p.md", variables: { X: "runtime.customBusiness" } }] }
-		expect(() => parsePreset(root, "/tmp")).toThrow(/unknown runtime key "customBusiness"/)
+		const root: BoundaryRecord = { ...minimalRoot(), phases: [{ name: "p", prompt: "p.md", variables: { X: "runtime.customBusiness" } }] }
+		expect(() => parsePreset(root, "/tmp")).toThrow(/unrecognized runtime key "customBusiness"/)
 	})
 
 	test("rejects runtime business key declarations that collide with engine facts", () => {
-		const root: Record<string, unknown> = { ...minimalRoot(), runtime: { businessKeys: ["runId"] } }
+		const root: BoundaryRecord = { ...minimalRoot(), runtime: { businessKeys: ["runId"] } }
 		expect(() => parsePreset(root, "/tmp")).toThrow(/"runId" is engine-owned/)
 	})
 
 	test("accepts item.idField reference in variables", () => {
-		const root: Record<string, unknown> = { ...minimalRoot(), phases: [{ name: "p", prompt: "p.md", variables: { X: "item.id" } }] }
+		const root: BoundaryRecord = { ...minimalRoot(), phases: [{ name: "p", prompt: "p.md", variables: { X: "item.id" } }] }
 		const preset = parsePreset(root, "/tmp")
 		expect(preset.phases[0]!.variables[0]).toEqual(["X", { kind: "item", field: "id" }])
 	})
 
 	test("accepts known base item field reference in variables", () => {
-		const root: Record<string, unknown> = { ...minimalRoot(), phases: [{ name: "p", prompt: "p.md", variables: { X: "item.status" } }] }
+		const root: BoundaryRecord = { ...minimalRoot(), phases: [{ name: "p", prompt: "p.md", variables: { X: "item.status" } }] }
 		const preset = parsePreset(root, "/tmp")
 		expect(preset.phases[0]!.variables[0]).toEqual(["X", { kind: "item", field: "status" }])
 	})
 
 	test("accepts declared transparent item fields", () => {
-		const root: Record<string, unknown> = {
+		const root: BoundaryRecord = {
 			...minimalRoot(),
 			item: { idField: "id", fields: { branch: "string", pr: { type: "number" } } },
 			phases: [{ name: "p", prompt: "p.md", variables: { BRANCH: "item.branch", PR: "item.pr" } }],
@@ -541,14 +547,14 @@ describe("parsePreset schema validation", () => {
 	})
 
 	test("accepts agent attemptTimeoutSeconds override", () => {
-		const root: Record<string, unknown> = minimalRoot()
+		const root: BoundaryRecord = minimalRoot()
 		root.agent = { binary: "echo", attemptTimeoutSeconds: 120 }
 		const preset = parsePreset(root, "/tmp")
 		expect(preset.agent.attemptTimeoutSeconds).toBe(120)
 	})
 
 	test("rejects non-positive agent attemptTimeoutSeconds", () => {
-		const root: Record<string, unknown> = minimalRoot()
+		const root: BoundaryRecord = minimalRoot()
 		root.agent = { binary: "echo", attemptTimeoutSeconds: 0 }
 		expect(() => parsePreset(root, "/tmp")).toThrow(/attemptTimeoutSeconds/)
 	})
