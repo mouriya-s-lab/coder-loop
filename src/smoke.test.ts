@@ -3,10 +3,15 @@ import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
 import { openSqliteStateStore } from "./sqlite-state"
+import { parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/smoke-tests", String(process.pid))
+
+function runtimeStatus(value: string) {
+	return parseInternalStatus(value, "test.status")
+}
 
 afterAll(async () => {
 	await rm(TEST_ROOT, { recursive: true, force: true })
@@ -155,16 +160,16 @@ function seedChain(fixture: Fixture, options: SeedOptions): void {
 			preset: "gh-issue-pr-iteration",
 			repository: "fixture/repo",
 			baseBranch: "main",
-			metadata: {},
+			metadata: storedChainMetadata({}),
 		})
 		store.createItem({
 			chainId: chain.id,
 			issueNumber: options.issueNumber,
 			repoCwd: fixture.target,
-			status: options.status,
+			status: runtimeStatus(options.status),
 			issueFile: null,
 			evidenceDir: null,
-			extra: options.extra ?? {},
+			extra: storedItemExtra(options.extra ?? {}),
 		})
 	} finally {
 		store.close()

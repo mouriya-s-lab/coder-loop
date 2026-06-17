@@ -11,6 +11,7 @@ import {
 } from "./daemon"
 import { resolveLoopDataPaths } from "./runtime-paths"
 import { queryObservabilityEvents } from "./observability"
+import type { BoundaryRecord } from "./boundary-types"
 import {
 	reviewOnEmptyLockPathForChainName,
 	schedulerSlotWorktreePath,
@@ -247,9 +248,9 @@ function expectOk(response: DaemonResponse) {
 	return response.result
 }
 
-function record(value: unknown): Record<string, unknown> {
+function record(value: unknown): BoundaryRecord {
 	if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`expected object, got ${JSON.stringify(value)}`)
-	return value as Record<string, unknown>
+	return value as BoundaryRecord
 }
 
 function numberValue(value: unknown): number {
