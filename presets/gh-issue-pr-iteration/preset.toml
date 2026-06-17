@@ -43,7 +43,8 @@ unblockable = ["blocked"]
 [[phases]]
 name   = "iteration"
 prompt = "iter-entry.md"
-runner = "codex"
+runner = "claude"
+model  = "claude-opus-4-7[1m]"
 
   [phases.variables]
   TARGET_CWD               = { source = "runtime.targetCwd", label = "Target working directory (where `loop-data runtime artifacts` lives)" }
@@ -86,8 +87,8 @@ runner = "codex"
 [[phases]]
 name   = "review"
 prompt = "review-entry.md"
-runner = "codex"
-model  = "gpt-5.5"
+runner = "claude"
+model  = "claude-opus-4-7[1m]"
 
   [[phases.exits]]
   status = "changes_requested"
@@ -151,7 +152,8 @@ model  = "gpt-5.5"
 name    = "blocked-responder"
 prompt  = "blocked-responder-entry.md"
 trigger = { afterPhase = "review", whenStatus = "blocked" }
-runner  = "codex"
+runner  = "claude"
+model   = "claude-opus-4-7[1m]"
 
   [phases.variables]
   TARGET_CWD               = { source = "runtime.targetCwd", label = "Current target repository working directory" }
@@ -195,7 +197,8 @@ runner  = "codex"
 name    = "umbrella-finalizer"
 prompt  = "umbrella-finalizer-entry.md"
 trigger = { on = "chain-complete" }
-runner  = "codex"
+runner  = "claude"
+model   = "claude-opus-4-7[1m]"
 
   [phases.variables]
   TARGET_CWD               = { source = "runtime.targetCwd", label = "Current target repository working directory" }
