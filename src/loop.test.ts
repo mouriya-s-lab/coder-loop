@@ -76,7 +76,6 @@ function makeItem(overrides: Omit<Partial<ItemRecord>, "extra"> & { extra?: Json
 function minimalPresetRoot(overrides: BoundaryRecord = {}): BoundaryRecord {
 	return {
 		name: "fixture",
-		version: Number("1"),
 		item: { idField: "issue" },
 		statuses: { continuable: ["queued", "changes_requested"], terminal: ["done", "blocked"] },
 		phases: [
@@ -219,11 +218,10 @@ describe("ItemRecord prompt bindings", () => {
 			summaryMarker: null,
 			exits: [],
 			variables: [
-				["ISSUE", { kind: "item", field: "issue" }],
-				["PHASE", { kind: "item", field: "phase" }],
-				["CODEX_SESSION", { kind: "item", field: "sessionIds.iteration.codex" }],
+				{ key: "ISSUE", source: { kind: "item", field: "issue" }, doc: null },
+				{ key: "PHASE", source: { kind: "item", field: "phase" }, doc: null },
+				{ key: "CODEX_SESSION", source: { kind: "item", field: "sessionIds.iteration.codex" }, doc: null },
 			],
-			variableDocs: new Map(),
 			trigger: null,
 			defaultRunner: null,
 			defaultModel: null,
@@ -246,16 +244,12 @@ describe("ItemRecord prompt bindings", () => {
 			summaryMarker: "DONE:",
 			exits: [{ status: parseInternalStatus("done", "test.status"), when: "review accepted the result" }],
 			variables: [
-				["RUNTIME_INPUTS_DOC", { kind: "runtime", key: "runtimeInputsDoc" }],
-				["PHASE_EXITS_DOC", { kind: "runtime", key: "phaseExitsDoc" }],
-				["ISSUE_KIND_DOC", { kind: "runtime", key: "issueKindDoc", ownership: "preset" }],
-				["TARGET_CWD", { kind: "runtime", key: "targetCwd" }],
-				["ISSUE_KIND", { kind: "runtime", key: "issueKind", ownership: "preset" }],
+				{ key: "RUNTIME_INPUTS_DOC", source: { kind: "runtime", key: "runtimeInputsDoc" }, doc: null },
+				{ key: "PHASE_EXITS_DOC", source: { kind: "runtime", key: "phaseExitsDoc" }, doc: null },
+				{ key: "ISSUE_KIND_DOC", source: { kind: "runtime", key: "issueKindDoc", ownership: "preset" }, doc: null },
+				{ key: "TARGET_CWD", source: { kind: "runtime", key: "targetCwd" }, doc: { label: "Target working directory", suffix: "", style: "code", blankBefore: false } },
+				{ key: "ISSUE_KIND", source: { kind: "runtime", key: "issueKind", ownership: "preset" }, doc: { label: "Issue kind", suffix: "", style: "code", blankBefore: false } },
 			],
-			variableDocs: new Map([
-				["TARGET_CWD", { label: "Target working directory", suffix: "", style: "code", blankBefore: false }],
-				["ISSUE_KIND", { label: "Issue kind", suffix: "", style: "code", blankBefore: false }],
-			]),
 			trigger: null,
 			defaultRunner: "claude",
 			defaultModel: null,
@@ -293,7 +287,7 @@ describe("ItemRecord prompt bindings", () => {
 				{ name: "review", prompt: "review.md", variables: { PHASE: "item.phase" } },
 			],
 		})
-		expect(preset.phases[0]?.variables[0]).toEqual(["SESSION", { kind: "item", field: "sessionIds.iteration.codex" }])
+		expect(preset.phases[0]?.variables[0]).toEqual({ key: "SESSION", source: { kind: "item", field: "sessionIds.iteration.codex" }, doc: null })
 
 		expect(() =>
 			makePreset({
@@ -369,7 +363,7 @@ describe("runtime binding helpers", () => {
 			runtime: makeRuntime({ customBusiness: "preset-owned-value" }),
 		}
 
-		expect(phase.variables[0]).toEqual(["CUSTOM", { kind: "runtime", key: "customBusiness", ownership: "preset" }])
+		expect(phase.variables[0]).toEqual({ key: "CUSTOM", source: { kind: "runtime", key: "customBusiness", ownership: "preset" }, doc: null })
 		expect(renderPrompt("{{CUSTOM}}", phase, ctx)).toBe("preset-owned-value")
 		expect([...ENGINE_RUNTIME_BINDING_KEYS]).not.toContain("customBusiness")
 	})
