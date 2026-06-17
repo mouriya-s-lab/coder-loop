@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { readdir, readFile, stat } from "node:fs/promises"
 import { extname, join, relative, resolve } from "node:path"
-import { buildRuntimeBindings, type LoopOptions } from "./loop"
+import { buildRuntimeBindings, type LoopOptions, type PresetPhase } from "./loop"
 import { parseInternalStatus } from "./runtime-data"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -11,8 +11,10 @@ const LOOP_ENTRY = resolve(SRC_DIR, "loop.ts")
 
 describe("phase C cleanup guards", () => {
 	test("runtime binding keys trimmed", async () => {
+		const phase: Pick<PresetPhase, "roles"> = { roles: [] }
 		const runtime = buildRuntimeBindings({
 			options: makeLoopOptions(),
+			phase,
 			runId: "run-cleanup",
 			currentIssueFile: null,
 			evidenceDir: null,
