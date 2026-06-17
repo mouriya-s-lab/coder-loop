@@ -30,7 +30,9 @@ From `git diff <base>...<head>`, enumerate every test **removed** (test/it block
 
 ### Step 4 — Run the inventory on both sides
 
-In each worktree: install dependencies per the project's manifest/lockfile and `WORKFLOW_FILE` (setup is your job — a suite that "would not start" without an attempted install is your failure, not a measurement), then run the project's test suite (or its enumeration mode). Record total counts and the exact commands per side. Compare against Step 3: a count drop with no enumerated removal is itself a finding (hidden weakening). Save logs under `EVIDENCE_DIR`.
+This step is bound by `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/common/test-inventory-protocol.md`. Read it now if not already in context; the rules below are the protocol applied to this step and never override it.
+
+In each worktree: install dependencies per the project's manifest/lockfile and `WORKFLOW_FILE` (setup is your job — a suite that "would not start" without an attempted install is your failure, not a measurement), then run the canonical full-suite command named in `WORKFLOW_FILE`, captured with `2>&1 | tee <log under EVIDENCE_DIR>`, and parse the integer from the runner's own aggregated summary line per the protocol's runner-specific rule — never a static `rg` / `grep` count of `test(` / `it(` declarations, which the protocol forbids. Record the command, the parsed integer, and the relative log path per side, in the protocol's single-line format. Compare against Step 3: a count drop with no enumerated removal is itself a finding (hidden weakening). When your integer disagrees with the iteration packet's integer, trace the cause from the logs and PR push history (evolving `HEAD`, dependency drift, parse error) before judging packet credibility — both sides followed the same protocol, so a difference points to an investigable cause, not an automatic credibility failure.
 
 ### Step 5 — Remove your worktrees
 

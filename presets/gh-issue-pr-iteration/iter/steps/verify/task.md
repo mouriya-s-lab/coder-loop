@@ -26,16 +26,18 @@ Per row: run the Command exactly as written, capture command + exit status + out
 
 ### Step 3 — Test suite and inventory delta
 
-Run the project's full test suite on the issue branch and record the head-side count. Then measure the base side **without disturbing your checkout**, in a detached scratch worktree of your own:
+This step is bound by `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/common/test-inventory-protocol.md`. Read it now if not already in context; the rules below are the protocol applied to this step and never override it.
+
+Run the canonical full-suite command named in `WORKFLOW_FILE` on the issue branch, captured with `2>&1 | tee <log under EVIDENCE_DIR>`, and parse the head-side integer from the runner's own aggregated summary line per the protocol's runner-specific rule. Then measure the base side **without disturbing your checkout**, in a detached scratch worktree of your own:
 
 ```bash
 SCRATCH=$(mktemp -d)
-git worktree add --detach "$SCRATCH/base" "$(git merge-base <BASE_BRANCH> HEAD)"
-# install deps there per the project's manifest/lockfile, then run the suite (or its enumeration mode)
-git worktree remove "$SCRATCH/base"   # confirm gone; record the path and removal in your report
+git worktree add --detach "$SCRATCH/verify-base" "$(git merge-base <BASE_BRANCH> HEAD)"
+# install deps there per the project's manifest/lockfile, then run the same canonical command and tee its output to a log
+git worktree remove "$SCRATCH/verify-base"   # confirm gone; record the path and removal in your report
 ```
 
-Record total counts on both sides with the exact commands used, plus the enumerated list of tests removed/renamed/skipped/weakened by this branch (per evidence-execute) — explicit `none` only after enumerating, never as an assumption. This delta goes into the evidence packet; review re-measures it independently, and a mismatch destroys the whole packet's credibility.
+Record the command, the parsed integer, and the relative log path for each side, plus the enumerated list of tests removed/renamed/skipped/weakened by this branch (per evidence-execute) — explicit `none` only after enumerating, never as an assumption. Publish the delta in the protocol's single-line format. The published integer is the runner-emitted total, not a static `rg` / `grep` count of `test(` / `it(` declarations — that path is forbidden by the protocol. This delta goes into the evidence packet; review re-measures it from the same protocol, and any mismatch is traced to either the runner log or a setup drift before the packet's credibility is judged.
 
 ### Step 4 — CI parity
 

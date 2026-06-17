@@ -25,7 +25,8 @@ Read now, yourself:
 1. `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/common/runtime-contract.md` — which state transitions belong to the program vs to you.
 2. `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/common/github-routing.md` — where PRs/comments are allowed to go.
 3. `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/common/state-contract.md` — what queue state you may and may not touch.
-4. `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/honesty-judge.md` and `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/evidence-judge.md` — the criteria you will apply to every step report in Step 4.
+4. `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/common/test-inventory-protocol.md` — the single measurement protocol the verify step and the review's test-integrity step both follow.
+5. `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/honesty-judge.md` and `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/evidence-judge.md` — the criteria you will apply to every step report in Step 4.
 
 (The fragment-chain protocol described inside `common/runtime-contract.md` applies to the plan chain, not to you; this workflow is your protocol.)
 
