@@ -30,8 +30,9 @@ Read now, yourself:
 2. `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/common/github-routing.md` — where feedback/comments must go.
 3. `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/common/state-contract.md` — which state writes are yours.
 4. `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/common/test-inventory-protocol.md` — the single measurement protocol the test-integrity step and the iteration's verify step both follow.
-5. `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/honesty-judge.md` — your core judgment tool for Step 4, including the stale-baseline exception.
-6. `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/evidence-judge.md` — packet-form criteria for Step 4.
+5. `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/common/dispatch-contract.md` — how every `Agent` dispatch is transported across turns under the claude `-p` async harness; binds Step 3 unconditionally.
+6. `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/honesty-judge.md` — your core judgment tool for Step 4, including the stale-baseline exception.
+7. `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/evidence-judge.md` — packet-form criteria for Step 4.
 
 ### Step 1 — Investigate (the closed read surface, each read for its stated purpose)
 
@@ -80,7 +81,7 @@ Route by `ISSUE_KIND` first:
 [ ] closure (Step 5) → terminal action (Step 6) → assessment/handoff/cleanup/summary (Step 7)
 ```
 
-Contention plan: diff-audit (read-only) ∥ test-integrity (own worktrees) ∥ replay (owns the `AGENT_CWD` checkout) may run in parallel; **e2e-replay runs after replay completes** — both drive the standing environment. List rules: you exit only when every line is `[x]` or `[-] skipped: <reason recorded in handoff>`; re-print the list with checkboxes after each completed line; no line is checked by you doing its work yourself.
+Contention plan: diff-audit (read-only) ∥ test-integrity (own worktrees) ∥ replay (owns the `AGENT_CWD` checkout) form one async dispatch round (three `Agent` calls in the same turn per `common/dispatch-contract.md`); **e2e-replay runs as its own separate round after replay's `<task-notification>` is accepted** — both drive the standing environment, and starting e2e-replay before replay's report has been judged would race for that environment. List rules: you exit only when every line is `[x]` or `[-] skipped: <reason recorded in handoff>`; re-print the list with checkboxes after each completed line; no line is checked by you doing its work yourself.
 
 ### Step 3 — Execute the dispatches
 
@@ -94,7 +95,7 @@ Step directories:
 | replay | `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/steps/replay/` |
 | e2e-replay | `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/steps/e2e-replay/` |
 
-Dispatch the four mandatory steps as independent subagents (parallel per the Step 2 contention plan), each with a clean context and on the strongest model currently available to this runner — never a lighter model to save cost; message = pointers + runtime facts only, never restated instructions:
+Dispatch the four mandatory steps as independent subagents (the three-way diff-audit ∥ test-integrity ∥ replay round, then a separate e2e-replay round once replay's report has been accepted, per the Step 2 contention plan). Every dispatch follows `common/dispatch-contract.md`: each `Agent` call is async — its tool_result is the launch receipt only, the report lands in a later turn as the `<result>` block inside a `<task-notification>` (do not `Read` the `<output-file>`; that is the subagent's conversation transcript JSONL and will overflow context). After every dispatch round end the turn; `<task-notification>` is the reliable mechanism here — empirical e2e-replay rounds take up to ~11 min, normal rounds 1–5 min, and notifications have not been lost. Use the optional `ScheduleWakeup` long-timeout safety net (delay ≥ 2400s) only for the e2e-replay round if you want a stuck-subagent backstop; do not pair routine rounds with short wakeups. Each call uses a clean context and the strongest model currently available to this runner — never a lighter model to save cost; message = pointers + runtime facts only, never restated instructions:
 
 ```
 Read and execute: /Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/steps/<step>/task.md
@@ -107,7 +108,7 @@ Step focus: <diff-audit: scope facts worth flagging; test-integrity: anything su
   e2e-replay: which packet claims beyond the e2e core + the browser rows replay deferred>
 ```
 
-For each returned report: first check structure against the step's `accept.md` "Required report fields" — missing fields → send a follow-up message to the same subagent naming them; then judge substance per that `accept.md`. Gaps → follow up with the exact gap list; wrong direction → close and re-dispatch fresh. Accepted → `[x]`, ledger line (`step | subagent id | outcome | declared side effects`), re-print the list.
+When the harness re-invokes you with one or more `<task-notification>` blocks: for each notification, the report is the `<result>` block inside the notification — read it from the turn's user message text directly (do not `Read` the `<output-file>`; that path is the subagent's conversation transcript JSONL and overflows context). Check structure against the step's `accept.md` "Required report fields". Then judge substance per that `accept.md`. Routing under `common/dispatch-contract.md` — no continue-the-same-subagent path exists on this runner, so every non-accepted outcome is the same shape: `TaskStop(to=<task-id>)` then a fresh `Agent(...)` whose `Step focus` folds in the missing fields (structural gap), the gap list (substance gap), or the corrected scope (wrong direction). Ledger records both `abandoned: <reason>` + `dispatched: <new task-id>`. Accepted → `[x]`, ledger line (`step | task-id | accepted | declared side effects`), re-print the list. If the round has subagents still outstanding (no notification yet), do not advance past their workflow lines — end the turn after processing the notifications you did receive, and the harness will re-invoke you for the next one. Never reason about a report's content before its notification arrives.
 
 What the accepted reports mean for your verdict:
 
