@@ -47,6 +47,7 @@ unblockable = ["blocked"]
 name   = "iteration"
 prompt = "iter-entry.md"
 runner = "codex"
+roles  = ["common", "quality", "iter"]
 
   [phases.variables]
   TARGET_CWD               = { source = "runtime.targetCwd", label = "Target working directory (where `loop-data runtime artifacts` lives)" }
@@ -91,6 +92,7 @@ name   = "review"
 prompt = "review-entry.md"
 runner = "codex"
 model  = "gpt-5.5"
+roles  = ["common", "quality", "review"]
 
   [[phases.exits]]
   status = "changes_requested"
@@ -155,6 +157,7 @@ name    = "blocked-responder"
 prompt  = "blocked-responder-entry.md"
 trigger = { afterPhase = "review", whenStatus = "blocked" }
 runner  = "codex"
+roles   = ["common"]
 
   [phases.variables]
   TARGET_CWD               = { source = "runtime.targetCwd", label = "Current target repository working directory" }
@@ -199,6 +202,7 @@ name    = "umbrella-finalizer"
 prompt  = "umbrella-finalizer-entry.md"
 trigger = { on = "chain-complete" }
 runner  = "codex"
+roles   = ["common"]
 
   [phases.variables]
   TARGET_CWD               = { source = "runtime.targetCwd", label = "Current target repository working directory" }

@@ -2149,7 +2149,7 @@ export function buildSchedulerResolveContext(input: {
 		traceFile: `${chainPaths.runsDir}/${input.runId}/<phase>/stdout.jsonl`,
 		loopFile: "central daemon scheduling state",
 		presetDir: input.preset.presetDir,
-		fragmentIndex: renderFragmentIndex(input.preset),
+		fragmentIndex: renderFragmentIndex(input.preset, input.phase),
 		runtimeInputsDoc: "",
 		phaseExitsDoc: "",
 		issueKindDoc: "",
