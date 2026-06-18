@@ -10,8 +10,6 @@
 # is for.
 
 name        = "real-e2e-minimal"
-version     = 1
-description = "Minimal two-phase GitHub loop for the real e2e harness: single-shot iteration (edit -> PR) and review (verify -> merge -> done)."
 
 [item]
 idField = "issue"

@@ -14,7 +14,7 @@
 
 | 引擎职责 | 说明 |
 |---|---|
-| **加载 preset** | 从 `<pkg>/presets/<name>/` 或 target 的 `presetPath` 读 `preset.toml`，解析 `name / version / item.idField / statuses / phases / fragments / agent`。每个 fragment 路径必须可读。 |
+| **加载 preset** | 从 `<pkg>/presets/<name>/` 或 target 的 `presetPath` 读 `preset.toml`，解析 `name / item.idField / statuses / phases / fragments / agent`。每个 fragment 路径必须可读。 |
 | **加载 target runtime** | 读 target `.coder-loop/runtime/config.{json,toml}`、`.coder-loop/runtime/shared.md`、`.coder-loop/workflow.md`，并从 centralized SQLite loop-data store 解析 active chain / queue / current。 |
 | **选 actionable item** | 若 `state.current` 存在且其 status 在 preset 的 `statuses.continuable` 内，继续它；否则在队列里找首个 `continuable` item。`continuable` 外的所有 item 视为 terminal，引擎不动。 |
 | **按 phase 顺序 spawn agent** | 遍历 `preset.phases`：每个 phase 读 entry prompt 模板，按 `[phases.variables]` 表绑定变量替换 `{{KEY}}`，把渲染后的 prompt 传给当前 runner（`claude` 或 `codex`）。捕获 stdout/stderr 写入 `<logDir>/<runId>/<phase>/`，每个 phase spawn 完写 `status.json`。 |
@@ -44,8 +44,6 @@ presets/<preset-name>/
 
 ```toml
 name        = "single-phase-example"
-version     = 1
-description = "Minimal 1-phase preset for engine smoke testing."
 
 [item]
 idField = "id"
@@ -125,8 +123,6 @@ rm -rf "$TARGET"
 | Section / Field | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `name` | string | 是 | preset 标识，必须 match `^[a-zA-Z][a-zA-Z0-9_-]*$`，禁止路径分隔符与 `..`，所以 bundled name 一定落在 `<pkg>/presets/<name>/` 内 |
-| `version` | int | 是 | preset schema 版本（手动维护，引擎当前只读不校验向后兼容） |
-| `description` | string | 否 | 给人看 |
 | `[item].idField` | string | 是 | queue item 的 id 字段名（如 `gh-issue-pr-iteration` 用 `issue`，single-phase-example 用 `id`） |
 | `[item.fields]` | table | 否 | preset 额外要绑定的透明 item 字段声明。每个字段值是 `"string"|"number"|"boolean"|"json"`，或 `{ type = "..." }` |
 | `[runtime].businessKeys` | string[] | 否 | preset 拥有语义、但仍通过 `runtime.<key>` 暴露给 prompt 的业务 key。不能重声明 engine-owned fact。 |

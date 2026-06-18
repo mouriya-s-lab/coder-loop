@@ -196,8 +196,6 @@ describe("central chain/item CLI", () => {
 			await mkdir(presetPath, { recursive: true })
 			await writeFile(resolve(presetPath, "run.md"), "Run issue {{ISSUE}}.\n")
 			await writeFile(resolve(presetPath, "preset.toml"), `name = "custom-status-fixture"
-version = 1
-description = "Fixture preset for status snapshot validation."
 
 [item]
 idField = "issue"

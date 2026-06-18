@@ -1,6 +1,4 @@
 name        = "single-phase-example"
-version     = 1
-description = "Minimal 1-phase preset for engine smoke testing."
 
 [item]
 idField = "id"

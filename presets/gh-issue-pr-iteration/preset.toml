@@ -17,8 +17,6 @@
 # reference fragments declared in [[fragments]] below.
 
 name        = "gh-issue-pr-iteration"
-version     = 1
-description = "GitHub issue/PR loop with iteration, review, and post-review trigger phases. Default preset bundled with coder-loop."
 
 [item]
 idField = "issue"
