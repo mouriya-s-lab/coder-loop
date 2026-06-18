@@ -390,13 +390,10 @@ type SchedulerPhasePlan = {
 	itemTriggerPhases: readonly SchedulerItemTriggerPhase[]
 }
 
-async function resolvePhasePlanForChain(options: SchedulerOptions, chain: ChainRecord): Promise<SchedulerPhasePlan> {
-	if (options.phase !== undefined) return { firstPhase: options.phase, lastPhase: options.phase, nonTriggerPhases: [options.phase], itemTriggerPhases: [] }
-	const { preset } = await schedulerLoadedPreset(options, chain)
-	return buildPhasePlanFromPreset(preset)
-}
-
-// #412 variant that prefers the representative item's preset over the chain's legacy default seed.
+// #412: phase plan resolution always flows from a representative item's preset. The earlier
+// chain-only variant (`resolvePhasePlanForChain`) was removed once mixed-preset chains became
+// legal — when chain.preset != items[0].preset, the chain-seed phase plan disagreed with the
+// per-item preset load and rendered runs failed with `phase_not_found_in_preset`.
 async function resolvePhasePlanForChainWithItems(
 	options: SchedulerOptions,
 	chain: ChainRecord,
@@ -1488,7 +1485,11 @@ async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecor
 	if (!reviewOnEmptyLockExistsForChain(chain, options.loopDataRootOptions)) return false
 	options.state.finalizingChainIds.add(chain.id)
 	try {
-		const phasePlan = await resolvePhasePlanForChain(options, chain)
+		// #412 mixed-preset chain: phase plan must come from a representative item's preset (matching
+		// the tick loop at L326), not the chain's seed. Without this, `hasPendingItemLevelTrigger` reads
+		// item-trigger phases from the wrong preset and either gates completion incorrectly or misses a
+		// pending trigger phase from the real preset.
+		const phasePlan = await resolvePhasePlanForChainWithItems(options, chain, items)
 		if (hasPendingItemLevelTrigger(options, chain.id, phasePlan)) return false
 		if (!await chainCompletionTriggerAllowsCompletion(options, current, runId, effectiveTerminalStatuses)) return false
 		const refreshed = options.store.listChains().find((candidate) => candidate.id === chain.id)
@@ -1888,7 +1889,15 @@ async function spawnSchedulerReviewOnEmptyRun(
 	const slot = getOrCreateSlot(options.state, chain, representative.repoCwd)
 	if (slot.activeRun !== null) return null
 
-	const phasePlan = await resolvePhasePlanForChain(options, chain)
+	// #412 mixed-preset chain bug: phase plan and preset load must come from the same source. Earlier
+	// shape called resolvePhasePlanForChain(chain) here while the preset was loaded via the representative
+	// item below, so when chain.preset != items[0].preset the rendered run picked phase names from
+	// chain.preset and the preset directory of item.preset — `phase_not_found_in_preset` at spawn. Load
+	// the representative item's preset first, then derive the phase plan from it.
+	const loadedPreset = await schedulerLoadedPresetForItem(options, chain, representative)
+	const phasePlan = options.phase !== undefined
+		? { firstPhase: options.phase, lastPhase: options.phase, nonTriggerPhases: [options.phase], itemTriggerPhases: [] }
+		: buildPhasePlanFromPreset(loadedPreset.preset)
 	const reviewPhase = phasePlan.lastPhase
 	const fallbackItem = makeReviewOnEmptyFallbackItem(chain, representative, reviewPhase)
 	const worktreeManager = options.worktreeManager ?? createGitWorktreeManager(options.loopDataRootOptions)
@@ -1898,9 +1907,6 @@ async function spawnSchedulerReviewOnEmptyRun(
 	const runner = await resolvePhaseRunner(options, { chain, item: fallbackItem, phase: reviewPhase })
 	const runId = options.runIdFactory?.({ chain, item: fallbackItem, phase: reviewPhase }) ?? makeReviewOnEmptyRunId(chain)
 	const startedAt = nowSeconds(options)
-	// #412: derived fallback item carries the representative's preset, so per-item resolution finds the
-	// right preset directory rather than reaching back into chain.preset.
-	const loadedPreset = await schedulerLoadedPresetForItem(options, chain, fallbackItem)
 	const presetDir = loadedPreset.presetDir
 	const context: SchedulerSpawnContext = { chain, item: fallbackItem, slot, runId, worktreePath, presetDir, loadedPreset, phase: reviewPhase }
 	const rawPrompt = typeof options.prompt === "string" ? options.prompt : await options.prompt(context)
