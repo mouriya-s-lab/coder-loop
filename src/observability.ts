@@ -322,7 +322,6 @@ export type ObservabilityExcerpt = Extract<ObservabilityEvent, { type: "agent.ex
 export type ObservabilitySubject = NonNullable<ObservabilityEvent["subject"]>
 export type PresetPlaceholderDirection = typeof PresetPlaceholderDirectionBoundary.infer
 export type PresetPlaceholderVerdict = typeof PresetPlaceholderVerdictBoundary.infer
-export type PresetPlaceholderEventPayload = Extract<ObservabilityEvent, { type: "preset.placeholder_check" }>["payload"]
 
 export const OBSERVABILITY_EXCERPT_RECORD_LIMIT = 5
 // Real runner JSONL records can inline large file bodies; this is an explicit excerpt payload contract.

@@ -4737,13 +4737,12 @@ export function getItemId(item: ItemRecord, preset: Preset): string {
 }
 
 // Placeholder grammar shared by load-time validation and render-time substitution:
-//   - real placeholder: `{{KEY}}` where KEY matches PLACEHOLDER_KEY_PATTERN.
+//   - real placeholder: `{{KEY}}` where KEY matches `[A-Za-z_][A-Za-z0-9_]*`.
 //   - literal escape:   `\{{KEY}}` — renders as `{{KEY}}`, never resolved.
 // The single regex captures both so the scan stays positional: a value injected
 // at render time can legitimately contain `{{...}}` (e.g. when a binding source
 // quotes another template) and is never mistaken for residue because it lives
 // in a value-position, not a template-position.
-const PLACEHOLDER_KEY_PATTERN = /[A-Za-z_][A-Za-z0-9_]*/
 const PLACEHOLDER_SCAN_PATTERN = /(\\)?\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}/g
 
 export type PromptPlaceholderMatch =
