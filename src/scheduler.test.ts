@@ -28,6 +28,7 @@ import {
 } from "./scheduler"
 import { schedulerEventToObservabilityEvent } from "./daemon"
 import {
+	buildPhaseRunnerSelectionFromChain,
 	buildRunnerInvocation,
 	loadPreset,
 	parseReviewSummaryVerdict,
@@ -2343,6 +2344,134 @@ describe("scheduler per-chain review-on-empty (issue #292)", () => {
 			fixture.store.close()
 		}
 	})
+
+	// #412 fix-loop regression test (e2e AC#7): when chain.preset != items[0].preset (mixed-preset
+	// chain), the review-on-empty spawn used to take phasePlan from chain.preset (lastPhase = "run")
+	// while loading the preset from the representative item (real-e2e-minimal, with phases
+	// iteration+review). The mismatched phase name made the spawn fail with phase_not_found_in_preset.
+	// This test pins the fix: phase plan flows from the representative item's preset, so the spawned
+	// review-on-empty run uses the item-preset's last phase (review).
+	test("mixed-preset chain: review-on-empty spawn takes phase plan from representative item's preset, not chain.preset", async () => {
+		const fixture = await createFixture("review-on-empty-mixed-preset")
+		try {
+			const chainPresetDir = resolve(REPO_ROOT, "presets/single-phase-example")
+			const itemPresetDir = resolve(REPO_ROOT, "presets/real-e2e-minimal")
+			const chainLoaded = await loadedPresetFromDir(chainPresetDir)
+			const itemLoaded = await loadedPresetFromDir(itemPresetDir)
+			// chain.preset = single-phase-example (phases=[run]); items[0].preset = real-e2e-minimal
+			// (phases=[iteration, review]). createChain seeds chain.preset = "gh-issue-pr-iteration" by
+			// default; override it via the chain row to make the mismatch explicit.
+			const chain = createChain(fixture.store, "review-on-empty-mixed-preset-chain", { preset: "single-phase-example" })
+			const item = createItem(fixture.store, chain, { issueNumber: 41201, repoCwd: "/repo/a" })
+			// Mark item with the item-side preset (real-e2e-minimal) and put it in that preset's terminal
+			// "done" status so the chain drains and review-on-empty becomes eligible on the next tick.
+			fixture.store.updateItem(item.id, { preset: "real-e2e-minimal", status: runtimeStatus("done"), updatedAt: 1_800_010_000 })
+
+			// presetForChain returns chain.preset (single-phase-example); presetForItem returns
+			// real-e2e-minimal when the item is the real one (or its derived fallback that inherits
+			// item.preset). This mirrors the production daemon's per-item resolver shape.
+			const presetForItem = async (_chain: ChainRecord, candidate: ItemRecord): Promise<SchedulerLoadedPreset> => {
+				if (candidate.preset === "real-e2e-minimal" || candidate.presetPath?.includes("real-e2e-minimal") === true) return itemLoaded
+				if (candidate.preset === "single-phase-example") return chainLoaded
+				// fallback item with no explicit preset would have meant the bug; assert by routing the
+				// chain-preset (single-phase-example) so phase plan would resolve to "run" and the test
+				// would fail without the fix.
+				return chainLoaded
+			}
+
+			const tick = await schedulerTick(fixture.options({
+				loadedPreset: chainLoaded,
+				presetForItem,
+			}))
+			expect(tick.spawnedRuns).toHaveLength(1)
+			const reviewRun = tick.spawnedRuns[0]!
+			expect(reviewRun.itemId).toBe(0)
+			const phaseStart = fixture.schedulerEvents
+				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> => event.type === "phase.start")
+				.find((event) => event.runId === reviewRun.runId)
+			// Pre-fix value was "run" (chain.preset.lastPhase). Post-fix value is "review" (the
+			// representative item's preset.lastPhase).
+			expect(phaseStart?.phase).toBe("review")
+			// Sanity-check the inverse: "run" is the lastPhase of single-phase-example. The assertion
+			// above is meaningful only because the two presets disagree.
+			expect(chainLoaded.preset.phases.map((p) => p.name)).toEqual(["run"])
+			expect(itemLoaded.preset.phases.map((p) => p.name)).toEqual(["iteration", "review"])
+			await reviewRun.closed
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	// #412 retry: cover the second mixed-preset path the original PR missed —
+	// resolvePhaseRunner must consult phaseRunnerSelectionForItem when set, not just
+	// phaseRunnerSelectionForChain. Without the per-item resolver, the chain selection's preset is
+	// queried for the item's phase name, which on a mixed-preset chain throws
+	// `preset X does not define phase "<item phase>"`. The fix is `resolvePhaseRunner` preferring
+	// the per-item resolver. This test pins it: when both resolvers are present and disagree, the
+	// per-item one wins; when only the chain resolver is present and the phase doesn't exist there,
+	// the spawn surfaces the chain-vs-item phase mismatch — that's the bug the per-item resolver
+	// fixes.
+	test("mixed-preset chain: resolvePhaseRunner prefers phaseRunnerSelectionForItem over phaseRunnerSelectionForChain so spawn uses the item's preset", async () => {
+		const fixture = await createFixture("phase-runner-per-item-resolver")
+		try {
+			const chainPresetDir = resolve(REPO_ROOT, "presets/single-phase-example")
+			const itemPresetDir = resolve(REPO_ROOT, "presets/real-e2e-minimal")
+			const chainLoaded = await loadedPresetFromDir(chainPresetDir)
+			const itemLoaded = await loadedPresetFromDir(itemPresetDir)
+			// chain.preset = single-phase-example (phases=[run]) — no "iteration" phase.
+			// item.preset = real-e2e-minimal (phases=[iteration, review]).
+			const chain = createChain(fixture.store, "phase-runner-per-item-resolver-chain", { preset: "single-phase-example" })
+			const item = createItem(fixture.store, chain, { issueNumber: 41202, repoCwd: "/repo/a" })
+			fixture.store.updateItem(item.id, { preset: "real-e2e-minimal", updatedAt: 1_800_010_000 })
+
+			const presetForChain = () => chainLoaded
+			const presetForItem = async (_chain: ChainRecord, candidate: ItemRecord): Promise<SchedulerLoadedPreset> => {
+				if (candidate.preset === "real-e2e-minimal") return itemLoaded
+				return chainLoaded
+			}
+
+			// Observe which preset each resolver receives. We deliberately make
+			// phaseRunnerSelectionForChain return a selection built against the chain's preset
+			// (single-phase-example) — selectRunnerForPhase would throw "preset single-phase-example
+			// does not define phase 'iteration'" if resolvePhaseRunner falls back to it. The fix
+			// requires resolvePhaseRunner to prefer phaseRunnerSelectionForItem.
+			let chainResolverCalls = 0
+			let itemResolverCalls = 0
+
+			const baseOptions = fixture.options({
+				loadedPreset: chainLoaded,
+				presetForItem,
+			})
+			delete (baseOptions as { runner?: AgentRunnerSelection }).runner
+
+			const tick = await schedulerTick({
+				...baseOptions,
+				presetForChain,
+				phaseRunnerSelectionForChain: (passedChain) => {
+					chainResolverCalls++
+					return buildPhaseRunnerSelectionFromChain({ chain: passedChain, loopDataRoot: null, preset: chainLoaded.preset })
+				},
+				phaseRunnerSelectionForItem: async (passedChain, passedItem) => {
+					itemResolverCalls++
+					const { preset } = await presetForItem(passedChain, passedItem)
+					return buildPhaseRunnerSelectionFromChain({ chain: passedChain, loopDataRoot: null, preset })
+				},
+			})
+			expect(tick.spawnedRuns).toHaveLength(1)
+			expect(itemResolverCalls).toBeGreaterThan(0)
+			expect(chainResolverCalls).toBe(0)
+			const phaseStart = fixture.schedulerEvents
+				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> => event.type === "phase.start")
+				.find((event) => event.itemId === item.id)
+			// phaseStart fires with the item's preset's first non-trigger phase. real-e2e-minimal's
+			// firstNonTriggerPhase is "iteration"; single-phase-example's would be "run". The chain
+			// resolver was bypassed so the phase must come from item.preset.
+			expect(phaseStart?.phase).toBe("iteration")
+			await tick.spawnedRuns[0]!.closed
+		} finally {
+			fixture.store.close()
+		}
+	})
 })
 
 describe("scheduler loaded preset prompt rendering", () => {
@@ -3523,6 +3652,9 @@ function makeItemFixture(chain: ChainRecord, overrides: Partial<ItemRecord> & Pi
 		agentCwd: null,
 		runner: null,
 		phase: null,
+		// #412: per-item preset declaration; default null in fixtures so chain.preset fallback applies.
+		preset: null,
+		presetPath: null,
 		extra: storedItemExtra({}),
 		createdAt: 1_800_000_001,
 		updatedAt: 1_800_000_001,

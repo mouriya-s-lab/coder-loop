@@ -522,10 +522,13 @@ async function runScenario(
 
 	const issueNumber = createSeedIssue(options)
 
-	log(`item: 入队 issue #${issueNumber} → chain ${chainName}`)
+	log(`item: 入队 issue #${issueNumber} → chain ${chainName} (preset=${options.preset})`)
+	// #412: preset is required per-item; pass the same bundled preset the harness installed with so the
+	// engine renders against the same preset for spawn / iteration / review.
 	sh(["bun", LOOP_ENTRY, "item", "add", chainName,
 		"--issue", String(issueNumber),
 		"--repo-cwd", options.fixtureCwd,
+		"--preset", options.preset,
 		"--loop-data-root", daemon.loopDataRoot])
 
 	const verdict = await watch(options, daemon.loopDataRoot, chainName)

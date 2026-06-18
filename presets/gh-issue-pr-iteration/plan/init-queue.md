@@ -57,11 +57,12 @@ Initialize the executable planning output through the current centralized chain/
    ```
    Empty directory at this stage; iter agent will populate.
 
-5. **Construct item API payloads**. Each new item passed to `coder-loop item batch-add` / daemon `item.batchAdd` contains the current item fields. Leave `issueFile` null unless you intentionally created an optional per-issue attachment. `evidenceDir` may be relative to the chain root when you want an issue-specific evidence directory:
+5. **Construct item API payloads**. Each new item passed to `coder-loop item batch-add` / daemon `item.batchAdd` contains the current item fields. Leave `issueFile` null unless you intentionally created an optional per-issue attachment. `evidenceDir` may be relative to the chain root when you want an issue-specific evidence directory. **Since #412 `preset` is required per item** (the daemon rejects items without a preset); pass exactly one of `preset` (bundled preset name) or `presetPath` (absolute filesystem path):
    ```json
    {
      "issueNumber": <number>,
      "repoCwd": "{{TARGET_CWD}}",
+     "preset": "gh-issue-pr-iteration",
      "title": "<the issue title>",
      "priority": "<high|medium|low>" or null,
      "issueFile": null,
@@ -72,6 +73,7 @@ Initialize the executable planning output through the current centralized chain/
    }
    ```
    - The preset-facing item id remains `issue`; the daemon API field is `issueNumber`.
+   - `preset` is required for every item (#412). Use the same preset the chain was installed with unless the plan explicitly mixes presets in one chain. To use an out-of-tree preset, drop `preset` and pass `presetPath` (absolute) instead. Passing neither or both is a hard error and aborts the batch.
    - `status` defaults to the preset's first continuable status; for this preset new items become `queued`.
    - If `issueFile` is set, it must resolve inside `loop-data/chains/<chain>/issues`; if `evidenceDir` is set, it must resolve inside `loop-data/chains/<chain>/evidence`. Do not pass bare `"<N>.md"` or `"issue-<N>"`, because runtime path validation resolves item paths from the chain root.
    - `agentCwd`: leave `null` for in-repo work. Only set when the issue requires code changes in a **different repo's checkout**; then it must be an **absolute path** to an existing working directory.
@@ -83,7 +85,7 @@ Initialize the executable planning output through the current centralized chain/
    ```
    If the local binary does not yet expose `batch-add`, use repeated compatible fallback calls and document that fallback in handoff:
    ```bash
-   coder-loop item add <chain-name> --issue <N> --repo-cwd {{TARGET_CWD}} --title '<title>' --json
+   coder-loop item add <chain-name> --issue <N> --repo-cwd {{TARGET_CWD}} --preset gh-issue-pr-iteration --title '<title>' --json
    ```
    Do not hand-write SQLite rows, target-local state files, or a legacy queue structure.
 
