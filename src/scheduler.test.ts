@@ -2369,7 +2369,7 @@ describe("scheduler loaded preset prompt rendering", () => {
 			const preset = await loadPreset(PRESET_DIR)
 			const iterPhase = preset.phases.find((entry) => entry.name === "iteration")!
 			const mainLoopRaw = await readFile(iterPhase.prompt, "utf-8")
-			const declaredKeys = new Set(iterPhase.variables.map(([key]) => key))
+			const declaredKeys = new Set(iterPhase.variables.map((variable) => variable.key))
 			const rawTokens = new Set(mainLoopRaw.match(/\{\{[A-Z_]+\}\}/g) ?? [])
 			expect(rawTokens.size).toBeGreaterThan(0)
 			for (const token of rawTokens) {
@@ -2404,8 +2404,8 @@ describe("scheduler chain bindings (issue #288)", () => {
 		for (const phase of preset.phases) {
 			const bindings = new Set(
 				phase.variables
-					.filter(([, source]) => source.kind === "runtime")
-					.map(([key, source]) => [key, source.kind, source.kind === "runtime" ? source.key : ""].join(" ")),
+					.filter((variable) => variable.source.kind === "runtime")
+					.map((variable) => [variable.key, variable.source.kind, variable.source.kind === "runtime" ? variable.source.key : ""].join(" ")),
 			)
 			for (const entry of expected) {
 				expect(bindings.has(entry)).toBe(true)
@@ -2416,7 +2416,7 @@ describe("scheduler chain bindings (issue #288)", () => {
 	test("renderSchedulerSpawnPrompt against a template that references every declared iteration binding leaves zero residual {{[A-Z_]+}} tokens (AC2)", async () => {
 		const preset = await loadPreset(PRESET_DIR)
 		const iterPhase = preset.phases.find((entry) => entry.name === "iteration")!
-		const declaredKeys = iterPhase.variables.map(([key]) => key)
+		const declaredKeys = iterPhase.variables.map((variable) => variable.key)
 		const template = declaredKeys.map((key) => `${key}={{${key}}}`).join("\n")
 		const chain = makeChainFixture({ name: "render-zero-token-chain" })
 		const item = makeItemFixture(chain, { issueNumber: 999_001, repoCwd: "/tmp/no-token-repo" })

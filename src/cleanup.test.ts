@@ -166,8 +166,6 @@ function makeLoopOptions(): LoopOptions {
 		dryRun: false,
 		preset: {
 			name: "cleanup-test",
-			version: Number("1"),
-			description: "cleanup test preset",
 			presetDir: PRESET_DIR,
 			item: { idField: "issue", fields: new Map() },
 			runtime: { businessKeys: [] },

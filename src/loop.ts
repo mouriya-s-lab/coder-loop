@@ -456,8 +456,6 @@ const PresetFragmentBoundary = arkType({
 
 const PresetTomlBoundary = arkType({
 	name: "string",
-	version: "number",
-	"description?": "string",
 	item: { idField: "string", "fields?": "object" },
 	"runtime?": { "businessKeys?": "string[]" },
 	statuses: { continuable: "string[]", terminal: "string[]", "success?": "string[]", "entry?": "string", "unblockable?": "string[]" },
@@ -516,6 +514,12 @@ export type PresetVariableDoc = {
 	blankBefore: boolean
 }
 
+export type PresetPhaseVariable = {
+	key: string
+	source: PresetVariableSource
+	doc: PresetVariableDoc | null
+}
+
 export type PresetPhaseExit = {
 	status: InternalStatus
 	when: string
@@ -526,8 +530,7 @@ export type PresetPhase = {
 	prompt: string
 	summaryMarker: string | null
 	exits: readonly PresetPhaseExit[]
-	variables: ReadonlyArray<readonly [string, PresetVariableSource]>
-	variableDocs: ReadonlyMap<string, PresetVariableDoc>
+	variables: readonly PresetPhaseVariable[]
 	trigger: PresetPhaseTrigger | null
 	defaultRunner: AgentRunnerKind | null
 	defaultModel: string | null
@@ -545,8 +548,6 @@ export type PresetFragment = {
 
 export type Preset = {
 	name: string
-	version: number
-	description: string
 	presetDir: string
 	item: {
 		idField: string
@@ -649,8 +650,6 @@ export type StatusTargetSnapshot = {
 	runner: StatusRunnerDefaultsSnapshot
 	preset: {
 		name: string
-		version: number
-		description: string
 		presetDir: string
 	} | null
 }
@@ -2758,8 +2757,6 @@ function makeStatusTargetSnapshot(
 	const runtimeRoot = resolve(targetCwd, ".coder-loop/runtime")
 	const preset = options === null ? null : {
 		name: options.preset.name,
-		version: options.preset.version,
-		description: options.preset.description,
 		presetDir: options.preset.presetDir,
 	}
 	return {
@@ -3972,33 +3969,30 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 		phaseNames.add(entry.name)
 		const variablesRaw = entry.variables ?? {}
 		if (!isObjectRecord(variablesRaw)) presetError(`preset.phases[${index}].variables: must be an object`)
-		const variables: Array<readonly [string, PresetVariableSource]> = []
-		const variableDocs = new Map<string, PresetVariableDoc>()
+		const variables: PresetPhaseVariable[] = []
 		for (const [key, val] of Object.entries(variablesRaw)) {
 			const variable = parseVariableBinding(val, `preset.phases[${index}].variables.${key}`)
 			const parsedSource = parseVariableSource(variable.source, `preset.phases[${index}].variables.${key}`)
 			if (parsedSource.kind !== "config" && variable.configFallback.kind !== "none") {
 				presetError(`preset.phases[${index}].variables.${key}.default: defaults are only supported for config bindings`)
 			}
-			const source: PresetVariableSource = parsedSource.kind === "config"
+			const baseSource: PresetVariableSource = parsedSource.kind === "config"
 				? { ...parsedSource, fallback: variable.configFallback }
 				: parsedSource
-			if (source.kind === "item") {
-				const itemField = itemFieldRoot(source.field)
+			if (baseSource.kind === "item") {
+				const itemField = itemFieldRoot(baseSource.field)
 				if (!isKnownPresetItemField(itemField, root.item.idField, itemFields)) {
-					presetError(`preset.phases[${index}].variables.${key}: unrecognized item field "${source.field}" (engine fields: ${[...ENGINE_ITEM_BINDING_KEYS].join(", ")}; idField: ${root.item.idField}; declared fields: ${[...itemFields.keys()].join(", ") || "<none>"})`)
+					presetError(`preset.phases[${index}].variables.${key}: unrecognized item field "${baseSource.field}" (engine fields: ${[...ENGINE_ITEM_BINDING_KEYS].join(", ")}; idField: ${root.item.idField}; declared fields: ${[...itemFields.keys()].join(", ") || "<none>"})`)
 				}
 			}
-			if (source.kind === "runtime" && !isEngineRuntimeBindingKey(source.key)) {
-				if (!runtimeBusinessKeySet.has(source.key)) {
-					presetError(`preset.phases[${index}].variables.${key}: unrecognized runtime key "${source.key}" (engine facts: ${ENGINE_RUNTIME_BINDING_KEYS.join(", ")}; preset business keys: ${runtimeBusinessKeys.join(", ") || "<none>"})`)
+			let source: PresetVariableSource = baseSource
+			if (baseSource.kind === "runtime" && !isEngineRuntimeBindingKey(baseSource.key)) {
+				if (!runtimeBusinessKeySet.has(baseSource.key)) {
+					presetError(`preset.phases[${index}].variables.${key}: unrecognized runtime key "${baseSource.key}" (engine facts: ${ENGINE_RUNTIME_BINDING_KEYS.join(", ")}; preset business keys: ${runtimeBusinessKeys.join(", ") || "<none>"})`)
 				}
-				variables.push([key, { ...source, ownership: "preset" }] as const)
-				if (variable.doc !== null) variableDocs.set(key, variable.doc)
-				continue
+				source = { ...baseSource, ownership: "preset" }
 			}
-			variables.push([key, source] as const)
-			if (variable.doc !== null) variableDocs.set(key, variable.doc)
+			variables.push({ key, source, doc: variable.doc })
 		}
 			const trigger = parsePresetPhaseTrigger(entry.trigger ?? null, `preset.phases[${index}].trigger`)
 			const runner = parsePhaseRunner(entry.runner ?? null, `preset.phases[${index}].runner`)
@@ -4014,7 +4008,7 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 			fragmentRoles,
 			`preset.phases[${index}].roles`,
 		)
-		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), summaryMarker, exits, variables, variableDocs, trigger, defaultRunner: runner, defaultModel: model, roles })
+		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), summaryMarker, exits, variables, trigger, defaultRunner: runner, defaultModel: model, roles })
 	}
 	if (!phases.some((phase) => phase.trigger === null)) presetError("preset.phases: must include at least one non-trigger phase")
 
@@ -4047,8 +4041,6 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 
 	return {
 		name: root.name,
-		version: root.version,
-		description: root.description ?? "",
 		presetDir,
 		item: { idField: root.item.idField, fields: itemFields },
 		runtime: { businessKeys: runtimeBusinessKeys },
@@ -4780,7 +4772,7 @@ export function validatePresetPhaseTemplate(
 	phase: PresetPhase,
 	file: string,
 ): readonly PresetPlaceholderFinding[] {
-	const declared = new Set(phase.variables.map(([key]) => key))
+	const declared = new Set(phase.variables.map((variable) => variable.key))
 	const stripped = stripRoleEntryFrontmatter(template)
 	const matches = extractPromptPlaceholders(stripped)
 	const findings: PresetPlaceholderFinding[] = []
@@ -4806,7 +4798,7 @@ export function validatePresetPhaseTemplate(
 export function renderPrompt(template: string, phase: PresetPhase, ctx: ResolveContext & { item: ItemRecord }): string {
 	const stripped = stripRoleEntryFrontmatter(template)
 	const matches = extractPromptPlaceholders(stripped)
-	const declared = new Map(phase.variables.map(([key, source]) => [key, source] as const))
+	const declared = new Map(phase.variables.map((variable) => [variable.key, variable.source] as const))
 	const parts: string[] = []
 	let cursor = 0
 	for (const match of matches) {
@@ -4845,16 +4837,16 @@ function resolvePhaseBinding(source: PresetVariableSource, phase: PresetPhase, c
 
 export function renderRuntimeInputsDoc(phase: PresetPhase, ctx: ResolveContext): string {
 	const lines: string[] = []
-	for (const [key, source] of phase.variables) {
-		const doc = phase.variableDocs.get(key)
-		if (doc === undefined) continue
-		const value = resolveBinding(source, ctx)
+	for (const variable of phase.variables) {
+		const doc = variable.doc
+		if (doc === null) continue
+		const value = resolveBinding(variable.source, ctx)
 		if (doc.blankBefore) lines.push("")
-		if (key === "ISSUE_KIND") {
+		if (variable.key === "ISSUE_KIND") {
 			lines.push(renderIssueKindDoc(value))
 			continue
 		}
-		if (key === "ISSUE") {
+		if (variable.key === "ISSUE") {
 			lines.push(`- ${doc.label}: \`#${value}\`${doc.suffix}`)
 			continue
 		}

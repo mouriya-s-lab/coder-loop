@@ -141,10 +141,9 @@ const EXPECTED_VARIABLE_KEYS = [
 ] as const
 
 describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
-	test("loads name, version, item.idField, agent.binary, statuses sets", async () => {
+	test("loads name, item.idField, agent.binary, statuses sets", async () => {
 		const preset: Preset = await loadPreset(BUNDLED_PRESET_DIR)
 		expect(preset.name).toBe("gh-issue-pr-iteration")
-		expect(preset.version).toBe(1)
 		expect(preset.item.idField).toBe("issue")
 		expect(Object.fromEntries(preset.item.fields)).toEqual({
 			branch: { type: "string" },
@@ -196,17 +195,17 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 	test("each phase declares the shared variable bindings with parsed sources", async () => {
 		const preset = await loadPreset(BUNDLED_PRESET_DIR)
 		for (const phase of preset.phases) {
-			const keys = phase.variables.map(([key]) => key)
+			const keys = phase.variables.map((variable) => variable.key)
 			expect(keys).toEqual([...EXPECTED_VARIABLE_KEYS])
-			for (const [, source] of phase.variables) {
-				expect(["item", "config", "runtime"]).toContain(source.kind)
+			for (const variable of phase.variables) {
+				expect(["item", "config", "runtime"]).toContain(variable.source.kind)
 			}
 		}
 	})
 
 	test("specific variable bindings reflect renderPrompt source mapping", async () => {
 		const preset = await loadPreset(BUNDLED_PRESET_DIR)
-		const iterVars = new Map(preset.phases[0]!.variables)
+		const iterVars = new Map(preset.phases[0]!.variables.map((variable) => [variable.key, variable.source] as const))
 		const expectedItem = (field: string): PresetVariableSource => ({ kind: "item", field })
 		const expectedConfig = (field: string): PresetVariableSource => ({ kind: "config", field, fallback: { kind: "none" } })
 		const expectedConfigDefault = (field: string, value: boolean): PresetVariableSource => ({ kind: "config", field, fallback: { kind: "value", value } })
@@ -325,7 +324,6 @@ describe("parsePreset schema validation", () => {
 	// own `fragments` + `roles`.
 	const minimalRoot = () => ({
 		name: "x",
-		version: Number("1"),
 		item: { idField: "id" },
 		statuses: { continuable: ["a"], terminal: ["b"] },
 		phases: [
@@ -514,7 +512,7 @@ describe("parsePreset schema validation", () => {
 		}
 		const preset = parsePreset(root, "/tmp")
 		expect([...preset.runtime.businessKeys]).toEqual(["customBusiness"])
-		expect(preset.phases[0]!.variables[0]).toEqual(["X", { kind: "runtime", key: "customBusiness", ownership: "preset" }])
+		expect(preset.phases[0]!.variables[0]).toEqual({ key: "X", source: { kind: "runtime", key: "customBusiness", ownership: "preset" }, doc: null })
 	})
 
 	test("rejects undeclared runtime business keys", () => {
@@ -530,13 +528,13 @@ describe("parsePreset schema validation", () => {
 	test("accepts item.idField reference in variables", () => {
 		const root: BoundaryRecord = { ...minimalRoot(), phases: [{ name: "p", prompt: "p.md", variables: { X: "item.id" } }] }
 		const preset = parsePreset(root, "/tmp")
-		expect(preset.phases[0]!.variables[0]).toEqual(["X", { kind: "item", field: "id" }])
+		expect(preset.phases[0]!.variables[0]).toEqual({ key: "X", source: { kind: "item", field: "id" }, doc: null })
 	})
 
 	test("accepts known base item field reference in variables", () => {
 		const root: BoundaryRecord = { ...minimalRoot(), phases: [{ name: "p", prompt: "p.md", variables: { X: "item.status" } }] }
 		const preset = parsePreset(root, "/tmp")
-		expect(preset.phases[0]!.variables[0]).toEqual(["X", { kind: "item", field: "status" }])
+		expect(preset.phases[0]!.variables[0]).toEqual({ key: "X", source: { kind: "item", field: "status" }, doc: null })
 	})
 
 	test("accepts declared transparent item fields", () => {
@@ -548,8 +546,8 @@ describe("parsePreset schema validation", () => {
 		const preset = parsePreset(root, "/tmp")
 		expect(Object.fromEntries(preset.item.fields)).toEqual({ branch: { type: "string" }, pr: { type: "number" } })
 		expect(preset.phases[0]!.variables).toEqual([
-			["BRANCH", { kind: "item", field: "branch" }],
-			["PR", { kind: "item", field: "pr" }],
+			{ key: "BRANCH", source: { kind: "item", field: "branch" }, doc: null },
+			{ key: "PR", source: { kind: "item", field: "pr" }, doc: null },
 		])
 	})
 
@@ -563,7 +561,7 @@ describe("parsePreset schema validation", () => {
 		expect(preset.name).toBe("x")
 		expect(preset.item.idField).toBe("id")
 		expect(Object.fromEntries(preset.item.fields)).toEqual({})
-		expect(preset.phases[0]!.variables[0]).toEqual(["K", { kind: "item", field: "id" }])
+		expect(preset.phases[0]!.variables[0]).toEqual({ key: "K", source: { kind: "item", field: "id" }, doc: null })
 		expect(preset.phases[0]!.roles).toEqual(["x"])
 		expect(preset.fragments[0]!.path).toBe("/tmp/f.md")
 		expect(preset.agent.attemptTimeoutSeconds).toBe(DEFAULT_ATTEMPT_TIMEOUT_SECONDS)
@@ -713,7 +711,6 @@ describe("issue #400 — fragment index slicing per phase", () => {
 	test("Row #4: phase↔role mapping comes from metadata and accepts non-convention names without engine guessing", () => {
 		const root: BoundaryRecord = {
 			name: "non-convention",
-			version: Number("1"),
 			item: { idField: "id" },
 			statuses: { continuable: ["a"], terminal: ["b"] },
 			phases: [
@@ -741,7 +738,6 @@ describe("issue #400 — fragment index slicing per phase", () => {
 	test("Row #4 (second half): missing phase.roles raises a load-time error when the preset declares fragments", () => {
 		const root: BoundaryRecord = {
 			name: "needs-roles",
-			version: Number("1"),
 			item: { idField: "id" },
 			statuses: { continuable: ["a"], terminal: ["b"] },
 			phases: [
@@ -759,7 +755,6 @@ describe("issue #400 — fragment index slicing per phase", () => {
 	test("rejects phase.roles entries that name a role no fragment declares", () => {
 		const root: BoundaryRecord = {
 			name: "bad-role",
-			version: Number("1"),
 			item: { idField: "id" },
 			statuses: { continuable: ["a"], terminal: ["b"] },
 			phases: [
@@ -776,7 +771,6 @@ describe("issue #400 — fragment index slicing per phase", () => {
 	test("rejects duplicate role entries within a single phase", () => {
 		const root: BoundaryRecord = {
 			name: "dup-role",
-			version: Number("1"),
 			item: { idField: "id" },
 			statuses: { continuable: ["a"], terminal: ["b"] },
 			phases: [

@@ -144,8 +144,6 @@ async function createManualUnblockPreset(root: string): Promise<string> {
 	await mkdir(presetPath, { recursive: true })
 	await writeFile(resolve(presetPath, "run.md"), "Run issue {{ISSUE}}.\n")
 	await writeFile(resolve(presetPath, "preset.toml"), `name = "manual-unblock-fixture"
-version = 1
-description = "Fixture preset for queue unblock custom statuses."
 
 [item]
 idField = "issue"
