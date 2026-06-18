@@ -445,6 +445,7 @@ const PresetPhaseBoundary = arkType({
 	"exits?": PresetPhaseExitBoundary.array(),
 	"variables?": "object",
 	"trigger?": PresetPhaseTriggerBoundary,
+	"roles?": "string[]",
 })
 
 const PresetFragmentBoundary = arkType({
@@ -530,6 +531,10 @@ export type PresetPhase = {
 	trigger: PresetPhaseTrigger | null
 	defaultRunner: AgentRunnerKind | null
 	defaultModel: string | null
+	// Visible fragment roles for this phase (issue #400). Fragment index injected
+	// into this phase's prompt is sliced to roles named here. Empty when the
+	// preset declares no fragments (slicing yields an empty index either way).
+	roles: readonly string[]
 }
 
 export type PresetFragment = {
@@ -3947,6 +3952,19 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 	const runtimeBusinessKeys = parsePresetRuntimeBusinessKeys(root.runtime?.businessKeys ?? [], "preset.runtime.businessKeys")
 	const runtimeBusinessKeySet = new Set(runtimeBusinessKeys)
 
+	// Parse fragments before phases so phase.roles validation can check the
+	// declared role universe (issue #400: phase↔role mapping is preset
+	// metadata; the engine never infers roles from phase names).
+	const fragmentIds = new Set<string>()
+	const fragments: PresetFragment[] = []
+	const fragmentRoles = new Set<string>()
+	for (const [index, entry] of (root.fragments ?? []).entries()) {
+		if (fragmentIds.has(entry.id)) presetError(`preset.fragments[${index}].id: duplicate id "${entry.id}"`)
+		fragmentIds.add(entry.id)
+		fragmentRoles.add(entry.role)
+		fragments.push({ id: entry.id, role: entry.role, path: resolve(presetDir, entry.path) })
+	}
+
 	const phaseNames = new Set<string>()
 	const phases: PresetPhase[] = []
 	for (const [index, entry] of root.phases.entries()) {
@@ -3990,7 +4008,13 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 		if (Object.hasOwn(entry, "statusWrites")) {
 			presetError(`preset.phases[${index}].statusWrites: use [[phases.exits]] with status and when`)
 		}
-		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), summaryMarker, exits, variables, variableDocs, trigger, defaultRunner: runner, defaultModel: model })
+		const roles = parsePresetPhaseRoles(
+			entry.roles ?? null,
+			fragments.length > 0,
+			fragmentRoles,
+			`preset.phases[${index}].roles`,
+		)
+		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), summaryMarker, exits, variables, variableDocs, trigger, defaultRunner: runner, defaultModel: model, roles })
 	}
 	if (!phases.some((phase) => phase.trigger === null)) presetError("preset.phases: must include at least one non-trigger phase")
 
@@ -4019,14 +4043,6 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 		if (!triggerSourceExits.has(trigger.whenStatus)) {
 			presetError(`preset.phases[${index}].trigger.whenStatus: status "${trigger.whenStatus}" is not declared by phase "${trigger.afterPhase}" exits`)
 		}
-	}
-
-	const fragmentIds = new Set<string>()
-	const fragments: PresetFragment[] = []
-	for (const [index, entry] of (root.fragments ?? []).entries()) {
-		if (fragmentIds.has(entry.id)) presetError(`preset.fragments[${index}].id: duplicate id "${entry.id}"`)
-		fragmentIds.add(entry.id)
-		fragments.push({ id: entry.id, role: entry.role, path: resolve(presetDir, entry.path) })
 	}
 
 	return {
@@ -4133,6 +4149,39 @@ function parsePhaseRunner(value: BoundaryValue, label: string): AgentRunnerKind 
 	if (value === null) return null
 	if (value !== "claude" && value !== "codex") presetError(`${label}: must be "claude" or "codex"`)
 	return value
+}
+
+// Parse the `[[phases]].roles` field and validate against the declared fragment
+// role universe. Issue #400: when a preset declares any fragments, every phase
+// must declare which fragment roles it sees — the engine never infers role
+// membership from phase name. Presets with zero fragments may omit `roles`;
+// the index slice is empty either way.
+function parsePresetPhaseRoles(
+	value: readonly string[] | null,
+	presetHasFragments: boolean,
+	declaredRoles: ReadonlySet<string>,
+	label: string,
+): readonly string[] {
+	if (value === null) {
+		if (presetHasFragments) {
+			const known = [...declaredRoles].sort().join(", ") || "<none>"
+			presetError(`${label}: required when preset declares fragments (declared fragment roles: ${known})`)
+		}
+		return []
+	}
+	const seen = new Set<string>()
+	const result: string[] = []
+	for (const [index, role] of value.entries()) {
+		if (role.trim() === "") presetError(`${label}[${index}]: must be a non-empty string`)
+		if (seen.has(role)) presetError(`${label}[${index}]: duplicate role "${role}"`)
+		seen.add(role)
+		if (!declaredRoles.has(role)) {
+			const known = [...declaredRoles].sort().join(", ") || "<none>"
+			presetError(`${label}[${index}]: unrecognized role "${role}" (declared fragment roles: ${known})`)
+		}
+		result.push(role)
+	}
+	return result
 }
 
 function parsePhaseModel(value: BoundaryValue, label: string): string | null {
@@ -4475,6 +4524,7 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 			config: buildConfigBindings(options),
 			runtime: buildRuntimeBindings({
 				options,
+				phase,
 				runId: finalizerRunId,
 				currentIssueFile,
 				evidenceDir,
@@ -4909,10 +4959,24 @@ function stringifyBindingValue(value: JsonValue | undefined, label: string): str
 	throw new Error(`${label}: cannot stringify value of type ${typeof value}`)
 }
 
-export function renderFragmentIndex(preset: Preset): string {
-	return preset.fragments
+// Render the fragment index for a specific phase (issue #400: minimum-
+// visibility slicing). Only fragments whose role appears in `phase.roles`
+// reach the agent prompt; cross-role fragments are filtered out. `assertReadable`
+// in `loadPreset` still covers the full set — visibility and existence are
+// separate concerns.
+export function renderFragmentIndex(preset: Preset, phase: Pick<PresetPhase, "roles">): string {
+	return sliceFragmentsForPhase(preset.fragments, phase.roles)
 		.map((fragment) => `- ${fragment.id} (${fragment.role}): ${fragment.path}`)
 		.join("\n")
+}
+
+export function sliceFragmentsForPhase(
+	fragments: readonly PresetFragment[],
+	roles: readonly string[],
+): readonly PresetFragment[] {
+	if (roles.length === 0) return []
+	const allowed = new Set<string>(roles)
+	return fragments.filter((fragment) => allowed.has(fragment.role))
 }
 
 export function buildCentralRuntimeBindingPaths(input: {
@@ -4943,6 +5007,7 @@ export type ChainRuntimeBinding = {
 
 export function buildRuntimeBindings(input: {
 	options: LoopOptions
+	phase: Pick<PresetPhase, "roles">
 	runId: string
 	currentIssueFile: string | null
 	evidenceDir: string | null
@@ -4975,7 +5040,7 @@ export function buildRuntimeBindings(input: {
 		traceFile: `${paths.logDir}/${input.runId}/<phase>/stdout.jsonl`,
 		loopFile: "central daemon scheduling state",
 		presetDir: input.options.preset.presetDir,
-		fragmentIndex: renderFragmentIndex(input.options.preset),
+		fragmentIndex: renderFragmentIndex(input.options.preset, input.phase),
 		runtimeInputsDoc: "",
 		phaseExitsDoc: "",
 		issueKindDoc: "",
