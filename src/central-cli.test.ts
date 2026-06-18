@@ -119,6 +119,8 @@ describe("central chain/item CLI", () => {
 				"181",
 				"--repo-cwd",
 				REPO_ROOT,
+				"--preset",
+				"gh-issue-pr-iteration",
 				"--title",
 				"feat: 引入 chain-item-daemon CLI 命令族",
 				"--loop-data-root",
@@ -220,7 +222,8 @@ attemptTimeoutSeconds = 3600
 `)
 			const config = JSON.stringify({ repository: "fixture/repo", baseBranch: "main", presetPath })
 			expectJsonOk(await runCli(["chain", "create", "custom-status-chain", "--config-json", config, "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			expectJsonOk(await runCli(["item", "add", "custom-status-chain", "--issue", "45401", "--repo-cwd", target, "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			// #412: per-item preset required; mirror the chain's custom presetPath.
+			expectJsonOk(await runCli(["item", "add", "custom-status-chain", "--issue", "45401", "--repo-cwd", target, "--preset-path", presetPath, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expectJsonOk(await runCli(["item", "update", "custom-status-chain", "--issue", "45401", "--status", "custom_done", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
 			try {
@@ -247,15 +250,62 @@ attemptTimeoutSeconds = 3600
 		}
 	})
 
+	// #412 retry — AC #3: in a mixed-preset chain (chain.preset != items[*].preset, or two items
+	// declaring different presets), `coder-loop status --json` must resolve continuable / terminal
+	// / idField from each item's own preset rather than the chain seed. Pre-fix, the chain-seed
+	// `gh-issue-pr-iteration` preset's vocabulary was applied to every item: the foreign-preset
+	// `single-phase-example` item's status ("pending") was not in the seed's continuable set, so
+	// `state.kind` flipped to `invalid-runtime` and `queue.selected` became null once the
+	// seed-preset items finished. The fix loads each item's preset and gates membership per-item.
+	test("status CLI on mixed-preset chain selects foreign-preset item by its own continuable set (AC #3)", async () => {
+		const fixture = await startFixture("status-mixed-preset")
+		try {
+			const target = await makeTarget("status-mixed-preset-target")
+			expectJsonOk(await runCli(["chain", "create", "mixed-preset-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--preset", "gh-issue-pr-iteration", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+
+			// Item A: gh-issue-pr-iteration (chain seed). Advance it to `done` to drain the seed-preset
+			// half of the queue, leaving only the foreign-preset item live.
+			expectJsonOk(await runCli(["item", "add", "mixed-preset-chain", "--issue", "55501", "--repo-cwd", target, "--preset", "gh-issue-pr-iteration", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expectJsonOk(await runCli(["item", "update", "mixed-preset-chain", "--issue", "55501", "--status", "done", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+
+			// Item B: single-phase-example (foreign preset). idField=`id`, continuable=[`pending`],
+			// terminal=[`done`]. We add it via single-phase-example so its idField bind requires
+			// `id` rather than `issue`; pass `--field-json` for the id binding.
+			expectJsonOk(await runCli([
+				"item", "add", "mixed-preset-chain",
+				"--issue", "55502",
+				"--repo-cwd", target,
+				"--preset", "single-phase-example",
+				"--field-json", JSON.stringify({ id: "55502" }),
+				"--loop-data-root", fixture.loopDataRoot,
+				"--json",
+			]))
+
+			const status = expectJsonOk(await runCli(["status", target, "--chain", "mixed-preset-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expect(status.state).toMatchObject({ kind: "ok", ok: true })
+			// queue.continuable counts items whose status is in their own preset's continuable set.
+			// "pending" is continuable under single-phase-example (item B); "done" is terminal under
+			// gh-issue-pr-iteration (item A). Pre-fix this would be 0 (foreign "pending" not in
+			// seed continuable) and state.kind=invalid-runtime.
+			expect(status.queue).toMatchObject({ total: 2, continuable: 1, terminal: 1 })
+			expect(status.queue.selected).not.toBeNull()
+			expect(status.queue.selected.item.preset).toBe("single-phase-example")
+			// idField for single-phase-example is `id`; the snapshot resolves `id` via per-item preset.
+			expect(status.queue.selected.id).toBe("55502")
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
 
 	test("item reorder CLI", async () => {
 		const fixture = await startFixture("item-reorder-cli")
 		try {
 			expectJsonOk(await runCli(["chain", "create", "reorder-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			// #412: per-item preset required.
 			const itemsJson = JSON.stringify([
-				{ issueNumber: 401, repoCwd: REPO_ROOT, title: "first" },
-				{ issueNumber: 402, repoCwd: REPO_ROOT, title: "second" },
-				{ issueNumber: 403, repoCwd: REPO_ROOT, title: "third" },
+				{ issueNumber: 401, repoCwd: REPO_ROOT, title: "first", preset: "gh-issue-pr-iteration" },
+				{ issueNumber: 402, repoCwd: REPO_ROOT, title: "second", preset: "gh-issue-pr-iteration" },
+				{ issueNumber: 403, repoCwd: REPO_ROOT, title: "third", preset: "gh-issue-pr-iteration" },
 			])
 			expectJsonOk(await runCli(["item", "batch-add", "reorder-chain", "--items-json", itemsJson, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 
@@ -275,10 +325,11 @@ attemptTimeoutSeconds = 3600
 		const fixture = await startFixture("batch-item-add")
 		try {
 			expectJsonOk(await runCli(["chain", "create", "batch-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			// #412: per-item preset required.
 			const itemsJson = JSON.stringify([
-				{ issueNumber: 25801, repoCwd: REPO_ROOT, title: "first batch item" },
-				{ issueNumber: 25802, repoCwd: REPO_ROOT, priority: "high" },
-				{ issueNumber: 25803, repoCwd: REPO_ROOT, runner: "codex" },
+				{ issueNumber: 25801, repoCwd: REPO_ROOT, title: "first batch item", preset: "gh-issue-pr-iteration" },
+				{ issueNumber: 25802, repoCwd: REPO_ROOT, priority: "high", preset: "gh-issue-pr-iteration" },
+				{ issueNumber: 25803, repoCwd: REPO_ROOT, runner: "codex", preset: "gh-issue-pr-iteration" },
 			])
 			const added = expectJsonOk(await runCli(["item", "batch-add", "batch-chain", "--items-json", itemsJson, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(added.items).toHaveLength(3)
@@ -297,9 +348,10 @@ attemptTimeoutSeconds = 3600
 		try {
 			expectJsonOk(await runCli(["chain", "create", "batch-cli-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expectJsonOk(await runCli(["chain", "create", "batch-daemon-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			// #412: per-item preset required.
 			const batch = [
-				{ issueNumber: 25901, repoCwd: REPO_ROOT, title: "same first", priority: "medium" },
-				{ issueNumber: 25902, repoCwd: REPO_ROOT, title: "same second", runner: "codex" },
+				{ issueNumber: 25901, repoCwd: REPO_ROOT, title: "same first", priority: "medium", preset: "gh-issue-pr-iteration" },
+				{ issueNumber: 25902, repoCwd: REPO_ROOT, title: "same second", runner: "codex", preset: "gh-issue-pr-iteration" },
 			]
 			const cli = expectJsonOk(await runCli(["item", "batch-add", "batch-cli-chain", "--items-json", JSON.stringify(batch), "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			const daemon = expectJsonOk(await runCli(["item", "batch-add", "batch-daemon-chain", "--items-json", JSON.stringify(batch), "--loop-data-root", fixture.loopDataRoot, "--json"]))
@@ -643,7 +695,7 @@ attemptTimeoutSeconds = 3600
 		const fixture = await startFixture("json-schema")
 		try {
 			expectJsonOk(await runCli(["chain", "create", "schema-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--umbrella", "mouriya-s-lab/coder-loop#176", "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			expectJsonOk(await runCli(["item", "add", "schema-chain", "--issue", "181", "--repo-cwd", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expectJsonOk(await runCli(["item", "add", "schema-chain", "--issue", "181", "--repo-cwd", REPO_ROOT, "--preset", "gh-issue-pr-iteration", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			const status = expectJsonOk(await runCli(["chain", "status", "schema-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 
 			expect(Object.keys(status).sort()).toEqual(["activeRuns", "chain", "items", "summary"])
@@ -666,7 +718,7 @@ attemptTimeoutSeconds = 3600
 		const fixture = await startFixture("target-cwd")
 		try {
 			expectJsonOk(await runCli(["chain", "create", "target-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			expectJsonOk(await runCli(["item", "add", "target-chain", "--issue", "184", "--repo-cwd", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expectJsonOk(await runCli(["item", "add", "target-chain", "--issue", "184", "--repo-cwd", REPO_ROOT, "--preset", "gh-issue-pr-iteration", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 
 			const start = await runCli(["daemon", "start", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--dry-run"])
 			expect(start.exitCode).toBe(0)
@@ -743,7 +795,7 @@ attemptTimeoutSeconds = 3600
 		try {
 			for (const chain of ["first-chain", "second-chain"]) {
 				expectJsonOk(await runCli(["chain", "create", chain, "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
-				expectJsonOk(await runCli(["item", "add", chain, "--issue", chain === "first-chain" ? "184" : "185", "--repo-cwd", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--json"]))
+				expectJsonOk(await runCli(["item", "add", chain, "--issue", chain === "first-chain" ? "184" : "185", "--repo-cwd", REPO_ROOT, "--preset", "gh-issue-pr-iteration", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			}
 
 			const ambiguous = await runCli(["daemon", "start", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--dry-run"])
@@ -764,7 +816,7 @@ attemptTimeoutSeconds = 3600
 		try {
 			const target = await makeTarget("status-json-target")
 			expectJsonOk(await runCli(["chain", "create", "status-json-chain", "--config-json", FIXTURE_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			expectJsonOk(await runCli(["item", "add", "status-json-chain", "--issue", "184", "--repo-cwd", target, "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expectJsonOk(await runCli(["item", "add", "status-json-chain", "--issue", "184", "--repo-cwd", target, "--preset", "gh-issue-pr-iteration", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 
 			const status = expectJsonOk(await runCli(["status", target, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(status.state).toMatchObject({ kind: "ok", ok: true, path: resolve(fixture.loopDataRoot, "db.sqlite") })

@@ -216,12 +216,26 @@ export type SchedulerPhaseRunner = (input: SchedulerPhaseRunnerInput) => AgentRu
 
 export type SchedulerPhaseRunnerSelectionResolver = (chain: ChainRecord) => PhaseRunnerSelectionInput | Promise<PhaseRunnerSelectionInput>
 
+// #412: per-item phase runner selection. Mixed-preset chains need to resolve runner (preset,
+// defaultRunner, reviewRunner, runnerCommands) against the item's own preset — not the chain
+// seed — because the phase being spawned belongs to the item's preset's phase plan. If the
+// caller wires `phaseRunnerSelectionForItem`, the scheduler prefers it over the chain-wide form.
+// The chain-wide form is preserved for callers that only have a chain in hand (chain-complete
+// trigger phase evaluation) and for single-preset compatibility.
+export type SchedulerPhaseRunnerSelectionForItemResolver = (chain: ChainRecord, item: ItemRecord) => PhaseRunnerSelectionInput | Promise<PhaseRunnerSelectionInput>
+
 export type SchedulerLoadedPreset = {
 	presetDir: string
 	preset: Preset
 }
 
 export type SchedulerPresetResolver = (chain: ChainRecord) => SchedulerLoadedPreset | Promise<SchedulerLoadedPreset>
+// #412: per-item preset resolution. The scheduler reaches for this whenever it has an item in hand
+// (spawn paths, review-on-empty using the representative item, status snapshots). Chain-wide checks
+// without an item context (chain-complete trigger eval, vocabulary lookups for an empty chain) keep
+// using `presetForChain`. Daemon supplies a default that delegates per-item when items carry the
+// new preset/presetPath columns and falls back to chain-level otherwise.
+export type SchedulerPresetItemResolver = (chain: ChainRecord, item: ItemRecord) => SchedulerLoadedPreset | Promise<SchedulerLoadedPreset>
 
 export type SchedulerSpawnFailureBackoffConfig = {
 	initialSeconds: number
@@ -234,7 +248,14 @@ export type SchedulerOptions = {
 	runner?: AgentRunnerSelection
 	phaseRunner?: SchedulerPhaseRunner
 	phaseRunnerSelectionForChain?: SchedulerPhaseRunnerSelectionResolver
+	// #412: per-item phase runner resolver. When set, `resolvePhaseRunner` prefers it over
+	// `phaseRunnerSelectionForChain` so mixed-preset chains pick the runner from the item's own
+	// preset rather than the chain seed.
+	phaseRunnerSelectionForItem?: SchedulerPhaseRunnerSelectionForItemResolver
 	presetForChain: SchedulerPresetResolver
+	// Optional per-item resolver — #412. If unset, the scheduler treats `presetForChain` as both
+	// chain-wide and per-item, which preserves pre-#412 single-preset-per-chain behavior.
+	presetForItem?: SchedulerPresetItemResolver
 	phase?: string
 	prompt:
 		| string
@@ -306,11 +327,15 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 	removeIdleSlotsForInactiveChains(options.state, activeChainIds)
 
 	for (const chain of activeChains) {
-		const chainStatuses = await schedulerStatusesForChain(options, chain)
 		let items = options.store.listItems(chain.id)
+		// #412: an empty chain with no chain-level preset has nothing to drive — skip cleanly instead
+		// of crashing chain-wide preset resolution. The chain becomes actionable as soon as the first
+		// item (with its own preset) is added.
+		if (items.length === 0 && chain.preset === null) continue
+		const chainStatuses = await schedulerStatusesForChainWithItems(options, chain, items)
 		const runs = options.store.listRuns(chain.id)
 		const repoCwds = distinct(items.map((item) => item.repoCwd))
-		const phasePlan = await resolvePhasePlanForChain(options, chain)
+		const phasePlan = await resolvePhasePlanForChainWithItems(options, chain, items)
 
 		for (const repoCwd of repoCwds) {
 			const slot = getOrCreateSlot(options.state, chain, repoCwd)
@@ -377,9 +402,21 @@ type SchedulerPhasePlan = {
 	itemTriggerPhases: readonly SchedulerItemTriggerPhase[]
 }
 
-async function resolvePhasePlanForChain(options: SchedulerOptions, chain: ChainRecord): Promise<SchedulerPhasePlan> {
+// #412: phase plan resolution always flows from a representative item's preset. The earlier
+// chain-only variant (`resolvePhasePlanForChain`) was removed once mixed-preset chains became
+// legal — when chain.preset != items[0].preset, the chain-seed phase plan disagreed with the
+// per-item preset load and rendered runs failed with `phase_not_found_in_preset`.
+async function resolvePhasePlanForChainWithItems(
+	options: SchedulerOptions,
+	chain: ChainRecord,
+	items: readonly ItemRecord[],
+): Promise<SchedulerPhasePlan> {
 	if (options.phase !== undefined) return { firstPhase: options.phase, lastPhase: options.phase, nonTriggerPhases: [options.phase], itemTriggerPhases: [] }
-	const { preset } = await schedulerLoadedPreset(options, chain)
+	const { preset } = await schedulerLoadedPresetForChainItems(options, chain, items)
+	return buildPhasePlanFromPreset(preset)
+}
+
+function buildPhasePlanFromPreset(preset: SchedulerLoadedPreset["preset"]): SchedulerPhasePlan {
 	const nonTriggerPhases = preset.phases.flatMap((phase) => phase.trigger === null ? [phase.name] : [])
 	const firstPhase = nonTriggerPhases[0]
 	if (firstPhase === undefined) throw new Error(`preset ${preset.name} has no non-trigger phases`)
@@ -859,7 +896,10 @@ async function spawnSchedulerRun(
 	// agent writes a new one.
 	options.store.updateItem(item.id, spawnUpdate)
 
-	const loadedPreset = await schedulerLoadedPreset(options, chain)
+	// #412: spawn resolves the item's own preset rather than the chain's default seed so multi-preset
+	// chains render the right phase prompts. `schedulerLoadedPresetForItem` falls back to chain-level
+	// resolution when the caller hasn't wired `presetForItem` (preserves single-preset behavior).
+	const loadedPreset = await schedulerLoadedPresetForItem(options, chain, item)
 	const presetDir = loadedPreset.presetDir
 	const context: SchedulerSpawnContext = { chain, item, slot, runId, worktreePath, presetDir, loadedPreset, phase }
 	const rawPrompt = typeof options.prompt === "string" ? options.prompt : await options.prompt(context)
@@ -1457,7 +1497,11 @@ async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecor
 	if (!reviewOnEmptyLockExistsForChain(chain, options.loopDataRootOptions)) return false
 	options.state.finalizingChainIds.add(chain.id)
 	try {
-		const phasePlan = await resolvePhasePlanForChain(options, chain)
+		// #412 mixed-preset chain: phase plan must come from a representative item's preset (matching
+		// the tick loop at L326), not the chain's seed. Without this, `hasPendingItemLevelTrigger` reads
+		// item-trigger phases from the wrong preset and either gates completion incorrectly or misses a
+		// pending trigger phase from the real preset.
+		const phasePlan = await resolvePhasePlanForChainWithItems(options, chain, items)
 		if (hasPendingItemLevelTrigger(options, chain.id, phasePlan)) return false
 		if (!await chainCompletionTriggerAllowsCompletion(options, current, runId, effectiveTerminalStatuses)) return false
 		const refreshed = options.store.listChains().find((candidate) => candidate.id === chain.id)
@@ -1603,6 +1647,20 @@ function jsonObject(value: JsonValue | undefined): JsonObject | null {
 
 async function schedulerStatusesForChain(options: SchedulerOptions, chain: ChainRecord): Promise<SchedulerChainStatuses> {
 	const { preset } = await schedulerLoadedPreset(options, chain)
+	return statusesFromPreset(preset)
+}
+
+// #412 variant that prefers the representative item's preset over the chain's legacy default seed.
+async function schedulerStatusesForChainWithItems(
+	options: SchedulerOptions,
+	chain: ChainRecord,
+	items: readonly ItemRecord[],
+): Promise<SchedulerChainStatuses> {
+	const { preset } = await schedulerLoadedPresetForChainItems(options, chain, items)
+	return statusesFromPreset(preset)
+}
+
+function statusesFromPreset(preset: SchedulerLoadedPreset["preset"]): SchedulerChainStatuses {
 	return {
 		pending: preset.statuses.continuable,
 		terminal: preset.statuses.terminal,
@@ -1821,6 +1879,11 @@ function makeReviewOnEmptyFallbackItem(chain: ChainRecord, representative: ItemR
 		agentCwd: representative.agentCwd,
 		runner: null,
 		phase: reviewPhase,
+		// #412: engine-derived items must inherit the source (representative) item's preset; they may
+		// not silently fall back to the chain's seed preset because the chain may carry items with
+		// different presets.
+		preset: representative.preset,
+		presetPath: representative.presetPath,
 		extra: storedItemExtra({}),
 		createdAt: representative.createdAt,
 		updatedAt: representative.updatedAt,
@@ -1838,7 +1901,15 @@ async function spawnSchedulerReviewOnEmptyRun(
 	const slot = getOrCreateSlot(options.state, chain, representative.repoCwd)
 	if (slot.activeRun !== null) return null
 
-	const phasePlan = await resolvePhasePlanForChain(options, chain)
+	// #412 mixed-preset chain bug: phase plan and preset load must come from the same source. Earlier
+	// shape called resolvePhasePlanForChain(chain) here while the preset was loaded via the representative
+	// item below, so when chain.preset != items[0].preset the rendered run picked phase names from
+	// chain.preset and the preset directory of item.preset — `phase_not_found_in_preset` at spawn. Load
+	// the representative item's preset first, then derive the phase plan from it.
+	const loadedPreset = await schedulerLoadedPresetForItem(options, chain, representative)
+	const phasePlan = options.phase !== undefined
+		? { firstPhase: options.phase, lastPhase: options.phase, nonTriggerPhases: [options.phase], itemTriggerPhases: [] }
+		: buildPhasePlanFromPreset(loadedPreset.preset)
 	const reviewPhase = phasePlan.lastPhase
 	const fallbackItem = makeReviewOnEmptyFallbackItem(chain, representative, reviewPhase)
 	const worktreeManager = options.worktreeManager ?? createGitWorktreeManager(options.loopDataRootOptions)
@@ -1848,7 +1919,6 @@ async function spawnSchedulerReviewOnEmptyRun(
 	const runner = await resolvePhaseRunner(options, { chain, item: fallbackItem, phase: reviewPhase })
 	const runId = options.runIdFactory?.({ chain, item: fallbackItem, phase: reviewPhase }) ?? makeReviewOnEmptyRunId(chain)
 	const startedAt = nowSeconds(options)
-	const loadedPreset = await schedulerLoadedPreset(options, chain)
 	const presetDir = loadedPreset.presetDir
 	const context: SchedulerSpawnContext = { chain, item: fallbackItem, slot, runId, worktreePath, presetDir, loadedPreset, phase: reviewPhase }
 	const rawPrompt = typeof options.prompt === "string" ? options.prompt : await options.prompt(context)
@@ -2071,6 +2141,14 @@ async function resolvePhaseRunner(
 	input: SchedulerPhaseRunnerInput,
 ): Promise<AgentRunnerSelection> {
 	if (options.phaseRunner !== undefined) return await options.phaseRunner(input)
+	// #412: prefer the per-item resolver. In mixed-preset chains the chain seed's preset declares a
+	// different phase plan than the item's, so resolving runner against the chain seed throws
+	// `preset X does not define phase "<phase from item.preset>"`. The per-item resolver loads
+	// the item's preset and supplies `PhaseRunnerSelectionInput` aligned with that preset.
+	if (options.phaseRunnerSelectionForItem !== undefined) {
+		const selection = await options.phaseRunnerSelectionForItem(input.chain, input.item)
+		return selectRunnerForPhase(input.phase, input.item, selection)
+	}
 	if (options.phaseRunnerSelectionForChain !== undefined) {
 		const selection = await options.phaseRunnerSelectionForChain(input.chain)
 		return selectRunnerForPhase(input.phase, input.item, selection)
@@ -2078,7 +2156,7 @@ async function resolvePhaseRunner(
 	if (options.runner !== undefined) return options.runner
 	throw new SchedulerError(
 		"spawn_failed",
-		`scheduler: no runner configured for chain=${input.chain.name} item=${input.item.id} phase=${input.phase}; set SchedulerOptions.phaseRunner, .phaseRunnerSelectionForChain, or .runner`,
+		`scheduler: no runner configured for chain=${input.chain.name} item=${input.item.id} phase=${input.phase}; set SchedulerOptions.phaseRunner, .phaseRunnerSelectionForItem, .phaseRunnerSelectionForChain, or .runner`,
 	)
 }
 
@@ -2201,6 +2279,28 @@ function resolveItemRuntimePath(chainRoot: string, path: string): string {
 
 async function schedulerLoadedPreset(options: SchedulerOptions, chain: ChainRecord): Promise<SchedulerLoadedPreset> {
 	return await options.presetForChain(chain)
+}
+
+// #412 per-item preset resolution. Falls back to chain-level resolution when the caller has not
+// supplied a `presetForItem` resolver — preserves pre-#412 single-preset-per-chain behavior.
+async function schedulerLoadedPresetForItem(options: SchedulerOptions, chain: ChainRecord, item: ItemRecord): Promise<SchedulerLoadedPreset> {
+	if (options.presetForItem !== undefined) return await options.presetForItem(chain, item)
+	return await options.presetForChain(chain)
+}
+
+// #412 chain-wide resolution that prefers a representative item's preset over the chain's legacy
+// default seed. Used by scheduler tick paths that need the chain's status / phase vocabulary but
+// run before any single item is selected: the first persisted item's preset is the canonical seed,
+// chain.preset is consulted only when the chain has no items. This keeps `chain.preset = null`
+// (post-#412 chains) workable as long as items themselves declare their preset.
+async function schedulerLoadedPresetForChainItems(
+	options: SchedulerOptions,
+	chain: ChainRecord,
+	items: readonly ItemRecord[],
+): Promise<SchedulerLoadedPreset> {
+	const representative = items.find((item) => item.preset !== null || item.presetPath !== null)
+	if (representative !== undefined) return await schedulerLoadedPresetForItem(options, chain, representative)
+	return await schedulerLoadedPreset(options, chain)
 }
 
 async function emit(options: SchedulerOptions, event: SchedulerEvent): Promise<void> {

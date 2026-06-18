@@ -50,7 +50,7 @@ describe("scheduler kind gate live integration", () => {
 			})).chain)
 			const chainId = numberValue(chain.id)
 			preInstallReviewOnEmptyLockByName("kind-gate-missing-label-live-chain", fixture.loopDataRoot)
-			await request(fixture, "item.add", { chainId, issueNumber: 9101, repoCwd: REPO_ROOT })
+			await request(fixture, "item.add", { chainId, issueNumber: 9101, repoCwd: REPO_ROOT, preset: "gh-issue-pr-iteration" })
 
 			const aborted = await waitForSpawnAbortedEvent(fixture.schedulerEvents, 1)
 			const item = await readItem(fixture.loopDataRoot, chainId, 9101)
@@ -93,7 +93,7 @@ describe("scheduler kind gate live integration", () => {
 			})).chain)
 			const chainId = numberValue(chain.id)
 			preInstallReviewOnEmptyLockByName("kind-gate-multi-label-live-chain", fixture.loopDataRoot)
-			await request(fixture, "item.add", { chainId, issueNumber: 9102, repoCwd: REPO_ROOT })
+			await request(fixture, "item.add", { chainId, issueNumber: 9102, repoCwd: REPO_ROOT, preset: "gh-issue-pr-iteration" })
 
 			const aborted = await waitForSpawnAbortedEvent(fixture.schedulerEvents, 1)
 			const item = await readItem(fixture.loopDataRoot, chainId, 9102)
@@ -125,7 +125,7 @@ describe("scheduler kind gate live integration", () => {
 			})).chain)
 			const chainId = numberValue(chain.id)
 			preInstallReviewOnEmptyLockByName("kind-gate-unknown-label-live-chain", fixture.loopDataRoot)
-			await request(fixture, "item.add", { chainId, issueNumber: 9103, repoCwd: REPO_ROOT })
+			await request(fixture, "item.add", { chainId, issueNumber: 9103, repoCwd: REPO_ROOT, preset: "gh-issue-pr-iteration" })
 
 			const aborted = await waitForSpawnAbortedEvent(fixture.schedulerEvents, 1)
 			const item = await readItem(fixture.loopDataRoot, chainId, 9103)
