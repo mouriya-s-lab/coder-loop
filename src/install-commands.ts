@@ -508,7 +508,7 @@ export async function runInstallCommand(rawArgs: string[]): Promise<void> {
 	if (repoForChain === null) fail("install: missing --repo and git origin is not a GitHub repository; cannot create chain")
 	await assertCentralDaemonReachable(args.loopDataRoot, args.dryRun)
 
-	info(`==> coder-loop install: target=${args.target}, preset=${preset.name}@${preset.version}, dry-run=${args.dryRun}`)
+	info(`==> coder-loop install: target=${args.target}, preset=${preset.name}, dry-run=${args.dryRun}`)
 
 	info("\n[Layer A] Target committed policy")
 	const workflowResult = await ensureWorkflowMd(args.target, args.dryRun)

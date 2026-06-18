@@ -1013,8 +1013,6 @@ describe("daemon", () => {
 			await mkdir(presetPath, { recursive: true })
 			await writeFile(resolve(presetPath, "run.md"), "Run issue {{ISSUE}}.\n")
 			await writeFile(resolve(presetPath, "preset.toml"), `name = "custom-status-fixture"
-version = 1
-description = "Fixture preset for daemon status validation."
 
 [item]
 idField = "issue"
@@ -4078,8 +4076,6 @@ async function writeSinglePhasePromptPreset(presetDir: string, prompt: string): 
 	await writeFile(
 		resolve(presetDir, "preset.toml"),
 		`name = "scheduler-prompt-override"
-version = 1
-description = "Fixture preset for daemon scheduler prompt override."
 
 [item]
 idField = "issue"
