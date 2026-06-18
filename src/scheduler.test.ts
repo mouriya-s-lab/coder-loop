@@ -3523,6 +3523,9 @@ function makeItemFixture(chain: ChainRecord, overrides: Partial<ItemRecord> & Pi
 		agentCwd: null,
 		runner: null,
 		phase: null,
+		// #412: per-item preset declaration; default null in fixtures so chain.preset fallback applies.
+		preset: null,
+		presetPath: null,
 		extra: storedItemExtra({}),
 		createdAt: 1_800_000_001,
 		updatedAt: 1_800_000_001,

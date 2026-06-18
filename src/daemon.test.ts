@@ -13,7 +13,7 @@ import {
 	type CoderLoopDaemonSchedulerConfig,
 	type DaemonResponse,
 } from "./daemon"
-import { buildCoderLoopStatusSnapshot, parseReviewSummaryVerdict } from "./loop"
+import { buildCoderLoopStatusSnapshot, parseReviewSummaryVerdict, type JsonObject, type JsonValue } from "./loop"
 import {
 	createGitWorktreeManager,
 	reviewOnEmptyLockPathForChainName,
@@ -1081,24 +1081,27 @@ attemptTimeoutSeconds = 3600
 			const firstChain = record(expectOk(await request(fixture, "chain.create", {
 				name: "bad-custom-preset-chain-a",
 				repository: "mouriya-s-lab/coder-loop",
-				metadata: { config: { presetPath } },
 			})).chain)
 			const secondChain = record(expectOk(await request(fixture, "chain.create", {
 				name: "bad-custom-preset-chain-b",
 				repository: "mouriya-s-lab/coder-loop",
-				metadata: { config: { presetPath } },
 			})).chain)
 
+			// #412: presetPath now lives on the item, not on chain.metadata.config. Both items declare
+			// the same broken presetPath to verify chain-mutation load-failure reporting is per-request
+			// (each chain gets its own failure event) and the bad path is surfaced verbatim.
 			const [firstResponse, secondResponse] = await Promise.all([
 				request(fixture, "item.add", {
 					chainId: numberValue(firstChain.id),
 					issueNumber: 45402,
 					repoCwd: REPO_ROOT,
+					presetPath,
 				}),
 				request(fixture, "item.add", {
 					chainId: numberValue(secondChain.id),
 					issueNumber: 45403,
 					repoCwd: REPO_ROOT,
+					presetPath,
 				}),
 			])
 			for (const [response, chain] of [[firstResponse, firstChain], [secondResponse, secondChain]] as const) {
@@ -1366,7 +1369,7 @@ attemptTimeoutSeconds = 3600
 		}
 	})
 
-	test("socket item status validation follows the chain preset", async () => {
+	test("socket item status validation follows the item preset (post-#412)", async () => {
 		const fixture = await startFixture("item-status-preset", { schedulerEnabled: false })
 		try {
 			const chain = record(expectOk(await request(fixture, "chain.create", {
@@ -1376,10 +1379,13 @@ attemptTimeoutSeconds = 3600
 			})).chain)
 			const chainId = numberValue(chain.id)
 
+			// #412: item carries its own preset; chain.preset is no longer the source of truth.
+			// The item explicitly declares the same preset as the chain to exercise status vocab.
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
 				issueNumber: 188,
 				repoCwd: REPO_ROOT,
+				preset: "single-phase-example",
 			})).item)
 			expect(added).toMatchObject({ issueNumber: 188, status: "pending" })
 			const pending = record(expectOk(await request(fixture, "item.update", {
@@ -2903,7 +2909,7 @@ attemptTimeoutSeconds = 3600
 		}
 	}, 10_000)
 
-	test("daemon scheduler uses bundled preset directory from the chain", async () => {
+	test("daemon scheduler uses bundled preset directory declared on the item (post-#412)", async () => {
 		const fixture = await startFixture("scheduler-chain-preset", { schedulerIntervalMs: 1_000, schedulerPresetDir: null })
 		try {
 			const chain = record(expectOk(await request(fixture, "chain.create", {
@@ -2912,11 +2918,15 @@ attemptTimeoutSeconds = 3600
 				repository: "mouriya-s-lab/coder-loop",
 			})).chain)
 			const chainId = numberValue(chain.id)
+			// #412: the item declares its preset; the scheduler resolves the preset directory from
+			// item.preset (not chain.preset). Explicit `single-phase-example` matches the chain seed
+			// so the spawn-event presetDir assertion below remains the bundled single-phase preset.
 			await request(fixture, "item.add", {
 				chainId,
 				issueNumber: 215,
 				repoCwd: REPO_ROOT,
 				extra: { sleepMs: 5, exitCode: 0 },
+				preset: "single-phase-example",
 			})
 
 			await waitFor(async () => readItem(fixture.loopDataRoot, chainId, 215), (candidate) => candidate?.status === "done")
@@ -3028,7 +3038,7 @@ process.exitCode = 0
 			}))).chain)
 			const chainId = numberValue(chain.id)
 			preInstallReviewOnEmptyLockByName("b3-blocked-responder-live-chain", loopDataRoot)
-			expectOk(await sendDaemonRequest(socketPath, daemonRequest("item.add", { chainId, issueNumber: 29011, repoCwd: REPO_ROOT })))
+			expectOk(await sendDaemonRequest(socketPath, daemonRequest("item.add", { chainId, issueNumber: 29011, repoCwd: REPO_ROOT, preset: "gh-issue-pr-iteration" })))
 
 			// A trigger phase running on an already-terminal (blocked) item must not change that
 			// terminal status. The blocked-responder fake runner writes no status, and the engine
@@ -3813,8 +3823,35 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 	return { daemon, loopDataRoot, socketPath: snapshot.socketPath, pidFile: snapshot.pidFile, eventLog, schedulerEvents }
 }
 
-async function request(fixture: Fixture, command: string, args = {}): Promise<DaemonResponse> {
-	return await sendDaemonRequest(fixture.socketPath, { id: `${command}-${Date.now()}`, command, args })
+async function request(fixture: Fixture, command: string, args: JsonObject = {}): Promise<DaemonResponse> {
+	// #412: tests that don't explicitly opt into a preset get the bundled default applied here. The
+	// daemon API requires per-item preset; without this shim, every test that does not invoke a
+	// preset-validation path (the vast majority — they exercise scheduling / state / observability,
+	// not preset wiring) would need a noisy boilerplate change. The shim only fires when the caller
+	// has not passed preset/presetPath, so preset-validation tests still get their explicit input.
+	const augmented = injectTestPresetDefault(command, args)
+	return await sendDaemonRequest(fixture.socketPath, { id: `${command}-${Date.now()}`, command, args: augmented })
+}
+
+function injectTestPresetDefault(command: string, args: JsonObject): JsonObject {
+	if (command === "item.add") {
+		if (args.preset === undefined && args.presetPath === undefined) {
+			return { ...args, preset: "gh-issue-pr-iteration" }
+		}
+		return args
+	}
+	if (command === "item.batchAdd" && Array.isArray(args.items)) {
+		const items: JsonValue[] = args.items.map((rawItem): JsonValue => {
+			if (typeof rawItem !== "object" || rawItem === null || Array.isArray(rawItem)) return rawItem
+			const itemObj: JsonObject = rawItem
+			if (itemObj.preset === undefined && itemObj.presetPath === undefined) {
+				return { ...itemObj, preset: "gh-issue-pr-iteration" }
+			}
+			return itemObj
+		})
+		return { ...args, items }
+	}
+	return args
 }
 
 function expectOk(response: DaemonResponse) {
@@ -3871,10 +3908,11 @@ function record(value: unknown): BoundaryRecord {
 	return value as BoundaryRecord
 }
 
-function nestedMetadata(depth: number): BoundaryRecord {
-	let value: unknown = "ok"
+function nestedMetadata(depth: number): JsonObject {
+	let value: JsonValue = "ok"
 	for (let index = 0; index < depth; index++) value = { nest: value }
-	return record(value)
+	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("expected object")
+	return value
 }
 
 function numberValue(value: unknown): number {

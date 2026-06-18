@@ -66,6 +66,10 @@ function makeItem(overrides: Omit<Partial<ItemRecord>, "extra"> & { extra?: Json
 		agentCwd: rest.agentCwd ?? null,
 		runner: rest.runner ?? null,
 		phase: rest.phase ?? null,
+		// #412: per-item preset declaration. Tests default to null (legacy item; resolves via
+		// chain.preset fallback) unless the caller overrides.
+		preset: rest.preset ?? null,
+		presetPath: rest.presetPath ?? null,
 		extra: storedItemExtra(extra ?? {}),
 		createdAt: rest.createdAt ?? 1,
 		updatedAt: rest.updatedAt ?? 1,

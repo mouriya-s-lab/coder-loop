@@ -43,7 +43,10 @@ const DEFAULT_PENDING_ITEM_STATUSES: readonly InternalStatus[] = [
 export type ChainRecord = {
 	id: number
 	name: string
-	preset: string
+	// preset is nullable since schema v9 (#412): the canonical preset declaration site moved
+	// from chain to item. This column is retained as a legacy default seed (preserved across
+	// migrations so v8 items keep resolving). Physical retirement is tracked in #419.
+	preset: string | null
 	repository: string
 	baseBranch: string
 	umbrellaIssue: number | null
@@ -56,7 +59,9 @@ export type ChainRecord = {
 
 export type CreateChainInput = {
 	name: string
-	preset: string
+	// preset retained for legacy default-seed (#412 / #419). New chain creators may still
+	// pass it but it is no longer the source of truth — items carry their own preset.
+	preset?: string | null
 	repository: string
 	baseBranch: string
 	umbrellaIssue?: number | null
@@ -90,6 +95,12 @@ export type ItemRecord = {
 	agentCwd: string | null
 	runner: AgentRunnerKind | null
 	phase: string | null
+	// Preset declaration site for this item — issue #412 moved preset from chain to item.
+	// preset = bundled preset name (PRESET_NAME_PATTERN); presetPath = absolute filesystem path.
+	// API enforces exactly one is set for new items; legacy items pre-#412 may have both null
+	// and fall back to chains.preset until back-fill migration runs.
+	preset: string | null
+	presetPath: string | null
 	extra: ItemExtra
 	createdAt: number
 	updatedAt: number
@@ -103,6 +114,12 @@ export type CreateItemInput = {
 	issueNumber: number
 	repoCwd: string
 	status: InternalStatus
+	// preset / presetPath are required at the daemon API boundary for new items (#412).
+	// The store accepts them as nullable so the migration back-fill path can express
+	// legacy items, and so tests / lower-level callers can still construct rows; the
+	// daemon's handleItemAdd / handleItemBatchAdd reject `null` at the boundary.
+	preset?: string | null
+	presetPath?: string | null
 	attempts?: number
 	title?: string | null
 	priority?: string | null
@@ -254,7 +271,8 @@ type SqlParams = Record<string, SqlParamValue>
 type ChainRow = {
 	id: number
 	name: string
-	preset: string
+	// nullable since schema v9 (#412); see CHAINS_TABLE_SCHEMA_SQL.
+	preset: string | null
 	repository: string
 	base_branch: string
 	umbrella_issue: number | null
@@ -284,6 +302,8 @@ type ItemRow = {
 	agent_cwd: string | null
 	runner: string | null
 	phase: string | null
+	preset: string | null
+	preset_path: string | null
 	extra: string
 	created_at: number
 	updated_at: number
@@ -350,6 +370,8 @@ const ITEMS_TABLE_SCHEMA_SQL = `
 	agent_cwd TEXT,
 	runner TEXT CHECK (runner IN ('claude', 'codex') OR runner IS NULL),
 	phase TEXT,
+	preset TEXT,
+	preset_path TEXT,
 	extra TEXT NOT NULL,
 	created_at REAL NOT NULL,
 	updated_at REAL NOT NULL,
@@ -370,10 +392,15 @@ const RUN_STATUS_INDEX_SQL = `
 CREATE INDEX IF NOT EXISTS idx_runs_chain_phase_status ON runs(chain_id, phase, status);
 `
 
+// chains.preset became nullable in schema v9 (#412): the preset declaration site
+// moved from chain to item, so a chain no longer needs a single preset. The column
+// is retained as a legacy default-seed (the create-time preset is still recorded for
+// back-fill of items predating the migration), but no engine path treats it as the
+// canonical preset of in-flight work. Physical column retirement is tracked in #419.
 const CHAINS_TABLE_SCHEMA_SQL = `
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	name TEXT NOT NULL UNIQUE,
-	preset TEXT NOT NULL,
+	preset TEXT,
 	repository TEXT NOT NULL,
 	base_branch TEXT NOT NULL,
 	umbrella_issue INTEGER,
@@ -417,8 +444,13 @@ CREATE TABLE IF NOT EXISTS current_runs (
 ${STATE_INDEXES_SQL}
 `
 
-const STATE_SCHEMA_VERSION = 8
+const STATE_SCHEMA_VERSION = 9
 const V5_ITEM_SESSION_COLUMN = ["last", "session", "id"].join("_")
+// v9 moves preset declaration from chains.preset to items.preset / items.preset_path (#412).
+// Existing rows are back-filled from chains.preset so the engine resolves the legacy preset
+// for them until they cycle out. New items must specify preset explicitly at the API.
+const V9_ITEMS_PRESET_COLUMN = "preset"
+const V9_ITEMS_PRESET_PATH_COLUMN = "preset_path"
 
 type UserVersionRow = {
 	user_version: number
@@ -486,6 +518,16 @@ function chainsTableAllowsStopped(db: Database): boolean {
 	return sql.includes("'stopped'")
 }
 
+function chainsTableHasNotNullPreset(db: Database): boolean {
+	// v8 schema declared `preset TEXT NOT NULL`; v9 (#412) makes it nullable. PRAGMA exposes
+	// the constraint via `notnull = 1`. Detect this to trigger the chain table rebuild on upgrade.
+	const presetCol = db
+		.query<{ name: string; notnull: number }, []>("PRAGMA table_info(chains)")
+		.all()
+		.find((row) => row.name === "preset")
+	return presetCol?.notnull === 1
+}
+
 function itemsTableHasColumn(db: Database, columnName: string): boolean {
 	return tableHasColumn(db, "items", columnName)
 }
@@ -497,7 +539,10 @@ function runsTableHasColumn(db: Database, columnName: string): boolean {
 function migrateStateSchema(db: Database): void {
 	const beforeVersion = readUserVersion(db)
 	const needsItemTableRebuild = itemsTableHasColumn(db, V5_ITEM_SESSION_COLUMN)
-	const needsChainTableRebuild = stateSchemaExists(db) && !chainsTableAllowsStopped(db)
+	const needsChainTableRebuildForStopped = stateSchemaExists(db) && !chainsTableAllowsStopped(db)
+	// v9 (#412): chains.preset moves from NOT NULL to NULL — SQLite has no ALTER COLUMN, so rebuild.
+	const needsChainTableRebuildForNullablePreset = stateSchemaExists(db) && chainsTableHasNotNullPreset(db)
+	const needsChainTableRebuild = needsChainTableRebuildForStopped || needsChainTableRebuildForNullablePreset
 	if (
 		beforeVersion >= STATE_SCHEMA_VERSION
 		&& stateSchemaExists(db)
@@ -506,6 +551,8 @@ function migrateStateSchema(db: Database): void {
 		&& itemsTableHasColumn(db, "session_ids")
 		&& itemsTableHasColumn(db, "position")
 		&& itemsTableHasColumn(db, "status_updated_at")
+		&& itemsTableHasColumn(db, V9_ITEMS_PRESET_COLUMN)
+		&& itemsTableHasColumn(db, V9_ITEMS_PRESET_PATH_COLUMN)
 		&& !itemsTableHasColumn(db, V5_ITEM_SESSION_COLUMN)
 		&& runsTableHasColumn(db, "status")
 	) return
@@ -514,7 +561,7 @@ function migrateStateSchema(db: Database): void {
 		db.transaction(() => {
 			db.exec(STATE_SCHEMA_SQL)
 			if (needsChainTableRebuild) {
-				rebuildChainsTableForV7(db)
+				rebuildChainsTableForV9(db)
 			}
 			if (!itemsTableHasColumn(db, "phase")) {
 				db.exec("ALTER TABLE items ADD COLUMN phase TEXT")
@@ -533,6 +580,22 @@ function migrateStateSchema(db: Database): void {
 			if (!runsTableHasColumn(db, "status")) {
 				db.exec("ALTER TABLE runs ADD COLUMN status TEXT NOT NULL DEFAULT 'unknown'")
 			}
+			// v9 (#412): add items.preset / items.preset_path and back-fill from chains.preset so legacy
+			// items keep resolving the chain's preset until they cycle out / are recreated.
+			const addedPresetColumn = !itemsTableHasColumn(db, V9_ITEMS_PRESET_COLUMN)
+			if (addedPresetColumn) {
+				db.exec(`ALTER TABLE items ADD COLUMN ${V9_ITEMS_PRESET_COLUMN} TEXT`)
+			}
+			if (!itemsTableHasColumn(db, V9_ITEMS_PRESET_PATH_COLUMN)) {
+				db.exec(`ALTER TABLE items ADD COLUMN ${V9_ITEMS_PRESET_PATH_COLUMN} TEXT`)
+			}
+			if (addedPresetColumn) {
+				// Back-fill from chains.preset where the chain still has one set (it can legitimately
+				// be NULL for chains created against the v9 schema after #412).
+				db.exec(`UPDATE items
+					SET preset = (SELECT chains.preset FROM chains WHERE chains.id = items.chain_id)
+					WHERE preset IS NULL`)
+			}
 			if (itemsTableHasColumn(db, V5_ITEM_SESSION_COLUMN)) {
 				migrateV5ItemSessionIds(db)
 				rebuildItemsTableForV6(db)
@@ -547,7 +610,7 @@ function migrateStateSchema(db: Database): void {
 	}
 }
 
-function rebuildChainsTableForV7(db: Database): void {
+function rebuildChainsTableForV9(db: Database): void {
 	const columns = [
 		"id",
 		"name",
@@ -613,6 +676,8 @@ function v5ItemSessionRunner(row: Pick<V5ItemSessionRow, "id" | "runner" | "chai
 }
 
 function rebuildItemsTableForV6(db: Database): void {
+	// v9 (#412) added `preset` / `preset_path`; preserve them across rebuild for chains whose
+	// items have already been back-filled.
 	const columns = [
 		"id",
 		"chain_id",
@@ -632,6 +697,8 @@ function rebuildItemsTableForV6(db: Database): void {
 		"agent_cwd",
 		"runner",
 		"phase",
+		"preset",
+		"preset_path",
 		"extra",
 		"created_at",
 		"updated_at",
@@ -690,7 +757,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 					VALUES ($name, $preset, $repository, $baseBranch, $umbrellaIssue, $umbrellaRepo, $status, $metadata, $createdAt, $updatedAt)
 				`).run({
 					name: input.name,
-					preset: input.preset,
+					preset: input.preset ?? null,
 					repository: input.repository,
 					baseBranch: input.baseBranch,
 					umbrellaIssue: input.umbrellaIssue ?? null,
@@ -717,7 +784,8 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 				const next: ChainRecord = {
 					...current,
 					name: input.name ?? current.name,
-					preset: input.preset ?? current.preset,
+					// preset is nullable since v9; distinguish "field omitted" (undefined) from "explicitly null".
+					preset: input.preset === undefined ? current.preset : input.preset,
 					repository: input.repository ?? current.repository,
 					baseBranch: input.baseBranch ?? current.baseBranch,
 					umbrellaIssue: input.umbrellaIssue === undefined ? current.umbrellaIssue : input.umbrellaIssue,
@@ -784,6 +852,11 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 					agentCwd: input.agentCwd === undefined ? current.agentCwd : input.agentCwd,
 					runner: input.runner === undefined ? current.runner : input.runner,
 					phase: input.phase === undefined ? current.phase : input.phase,
+					// preset / preset_path may be mutated through store-level callers (e.g. tests, migrations,
+					// future preset-swap commands). The daemon item.update API does not currently surface
+					// preset mutation, but the store keeps the field consistent with the rest of the row.
+					preset: input.preset === undefined ? current.preset : input.preset,
+					presetPath: input.presetPath === undefined ? current.presetPath : input.presetPath,
 					extra: input.extra ?? current.extra,
 					updatedAt,
 					statusUpdatedAt,
@@ -793,7 +866,8 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 					SET repo_cwd = $repoCwd, status = $status, attempts = $attempts, position = $position, title = $title,
 						priority = $priority, branch = $branch, pr = $pr, last_run_id = $lastRunId,
 						session_ids = $sessionIds, issue_file = $issueFile, evidence_dir = $evidenceDir, agent_cwd = $agentCwd,
-						runner = $runner, phase = $phase, extra = $extra, updated_at = $updatedAt, status_updated_at = $statusUpdatedAt
+						runner = $runner, phase = $phase, preset = $preset, preset_path = $presetPath,
+						extra = $extra, updated_at = $updatedAt, status_updated_at = $statusUpdatedAt
 					WHERE id = $id
 				`).run(itemParams(next))
 				return requireItem(getItemRow(id), id)
@@ -981,11 +1055,13 @@ function insertItem(db: Database, getItemRow: (id: number) => ItemRow | null, in
 	const result = db.query<unknown, SqlParams>(`
 		INSERT INTO items (
 			chain_id, issue_number, repo_cwd, status, attempts, position, title, priority, branch, pr, last_run_id,
-			session_ids, issue_file, evidence_dir, agent_cwd, runner, phase, extra, created_at, updated_at, status_updated_at
+			session_ids, issue_file, evidence_dir, agent_cwd, runner, phase, preset, preset_path, extra,
+			created_at, updated_at, status_updated_at
 		)
 		VALUES (
 			$chainId, $issueNumber, $repoCwd, $status, $attempts, $position, $title, $priority, $branch, $pr, $lastRunId,
-			$sessionIds, $issueFile, $evidenceDir, $agentCwd, $runner, $phase, $extra, $createdAt, $updatedAt, $statusUpdatedAt
+			$sessionIds, $issueFile, $evidenceDir, $agentCwd, $runner, $phase, $preset, $presetPath, $extra,
+			$createdAt, $updatedAt, $statusUpdatedAt
 		)
 	`).run({
 		chainId: input.chainId,
@@ -1005,6 +1081,8 @@ function insertItem(db: Database, getItemRow: (id: number) => ItemRow | null, in
 		agentCwd: input.agentCwd ?? null,
 		runner: input.runner ?? null,
 		phase: input.phase ?? null,
+		preset: input.preset ?? null,
+		presetPath: input.presetPath ?? null,
 		extra: stringifyJsonObject(input.extra === undefined ? {} : itemExtraToJsonObject(input.extra)),
 		createdAt: createdAt,
 		updatedAt: updatedAt,
@@ -1037,6 +1115,8 @@ function rowToItem(row: ItemRow | null): ItemRecord | null {
 		agentCwd: row.agent_cwd,
 		runner: row.runner,
 		phase: row.phase,
+		preset: row.preset,
+		presetPath: row.preset_path,
 		extra: storedItemExtra(parseJsonObject(row.extra, `items.${row.id}.extra`)),
 		createdAt: row.created_at,
 		updatedAt: row.updated_at,
@@ -1128,6 +1208,8 @@ function itemParams(item: ItemRecord): SqlParams {
 		agentCwd: item.agentCwd,
 		runner: item.runner,
 		phase: item.phase,
+		preset: item.preset,
+		presetPath: item.presetPath,
 		extra: stringifyJsonObject(itemExtraToJsonObject(item.extra)),
 		updatedAt: item.updatedAt,
 		statusUpdatedAt: item.statusUpdatedAt,

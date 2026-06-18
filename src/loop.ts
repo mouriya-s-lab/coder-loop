@@ -103,6 +103,10 @@ export type StatusItemSnapshot = {
 	evidenceDir: string | null
 	agentCwd: string | null
 	runner: AgentRunnerKind | null
+	// #412 per-item preset declaration (string = bundled name; path = absolute filesystem path).
+	// Both null = legacy item resolving via chain fallback.
+	preset: string | null
+	presetPath: string | null
 	extra: JsonObject
 }
 
@@ -245,6 +249,10 @@ export type ItemCommandArgs =
 			chainName: string
 			issueNumber: number
 			repoCwd: string
+			// #412: exactly one of preset/presetPath is set; the CLI parser enforces this before
+			// constructing the discriminated union variant.
+			preset: string | null
+			presetPath: string | null
 			status: string | null
 			attempts: number | null
 			title: string | null
@@ -704,6 +712,18 @@ export type StatusSelectedIssue = {
 	runner: StatusRunnerSelectionSnapshot
 	reviewRunner: StatusRunnerSelectionSnapshot
 	phaseRunners: Record<string, StatusRunnerSelectionSnapshot>
+	// #412 resolved per-item preset: source (which item field decided it) + resolved preset directory.
+	// Supervisor consumers see exactly which preset rendered the selected item without re-loading it.
+	preset: StatusItemPresetSnapshot
+}
+
+export type StatusItemPresetSnapshot = {
+	// "item-preset" / "item-preset-path" = honored item.preset / item.presetPath columns.
+	// "chain-fallback" = legacy item with no per-item preset; resolved via chain.preset.
+	source: "item-preset" | "item-preset-path" | "chain-fallback"
+	name: string | null
+	path: string | null
+	presetDir: string
 }
 
 export type StatusQueueSnapshot = {
@@ -1376,11 +1396,15 @@ const chainCliCommand = subcommands({
 
 const itemAddCliCommand = command({
 	name: "add",
-	description: "Add an item to a centralized coder-loop chain through the daemon socket.",
+	description: "Add an item to a centralized coder-loop chain through the daemon socket. Exactly one of --preset or --preset-path is required (#412).",
 	args: {
 		chain: positional({ displayName: "chain", type: cmdString }),
 		issue: option({ long: "issue", type: cmdString }),
 		repoCwd: option({ long: "repo-cwd", type: cmdString }),
+		// #412: preset must be specified per-item; the CLI surfaces both bundled-name and absolute-path
+		// variants. The daemon rejects requests that pass neither or both.
+		preset: option({ long: "preset", type: optional(cmdString) }),
+		presetPath: option({ long: "preset-path", type: optional(cmdString) }),
 		status: option({ long: "status", type: optional(cmdString) }),
 		attempts: option({ long: "attempts", type: optional(cmdString) }),
 		title: option({ long: "title", type: optional(cmdString) }),
@@ -1394,27 +1418,32 @@ const itemAddCliCommand = command({
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
 		json: flag({ long: "json" }),
 	},
-	handler: (args): CliCommand => ({
-		kind: "item",
-		args: {
-			action: "add",
-			chainName: args.chain,
-			issueNumber: parseRequiredPositiveInteger(args.issue, "--issue"),
-			repoCwd: resolve(args.repoCwd),
-			status: args.status ?? null,
-			attempts: parseOptionalNonNegativeInteger(args.attempts ?? null, "--attempts"),
-			title: args.title ?? null,
-			priority: args.priority ?? null,
-			fieldJson: parseOptionalJsonObjectFlag(args.fieldJson ?? null, "--field-json"),
-			lastRunId: args.lastRunId ?? null,
-			issueFile: args.issueFile ?? null,
-			evidenceDir: args.evidenceDir ?? null,
-			agentCwd: args.agentCwd === undefined ? null : resolve(args.agentCwd),
-			runner: parseOptionalRunner(args.runner ?? null, "--runner"),
-			loopDataRoot: args.loopDataRoot ?? null,
-			json: args.json,
-		},
-	}),
+	handler: (args): CliCommand => {
+		const presetSpec = parseItemPresetSpec(args.preset ?? null, args.presetPath ?? null)
+		return {
+			kind: "item",
+			args: {
+				action: "add",
+				chainName: args.chain,
+				issueNumber: parseRequiredPositiveInteger(args.issue, "--issue"),
+				repoCwd: resolve(args.repoCwd),
+				preset: presetSpec.preset,
+				presetPath: presetSpec.presetPath,
+				status: args.status ?? null,
+				attempts: parseOptionalNonNegativeInteger(args.attempts ?? null, "--attempts"),
+				title: args.title ?? null,
+				priority: args.priority ?? null,
+				fieldJson: parseOptionalJsonObjectFlag(args.fieldJson ?? null, "--field-json"),
+				lastRunId: args.lastRunId ?? null,
+				issueFile: args.issueFile ?? null,
+				evidenceDir: args.evidenceDir ?? null,
+				agentCwd: args.agentCwd === undefined ? null : resolve(args.agentCwd),
+				runner: parseOptionalRunner(args.runner ?? null, "--runner"),
+				loopDataRoot: args.loopDataRoot ?? null,
+				json: args.json,
+			},
+		}
+	},
 })
 
 const itemBatchAddCliCommand = command({
@@ -1679,6 +1708,22 @@ function parseOptionalRunner(value: string | null, flagName: string): AgentRunne
 	fail(`${flagName} must be claude or codex, got: ${value}`)
 }
 
+// #412 CLI item-preset parser: exactly one of --preset or --preset-path is required for `coder-loop
+// item add`. The CLI rejects locally so the operator gets an immediate, friendlier message before the
+// daemon's structured error fires.
+function parseItemPresetSpec(presetName: string | null, presetPath: string | null): { preset: string | null; presetPath: string | null } {
+	if (presetName === null && presetPath === null) {
+		fail("item add requires exactly one of --preset (bundled name) or --preset-path (absolute dir). Pass --preset gh-issue-pr-iteration / --preset single-phase-example / --preset-path /abs/path. Since #412 a chain no longer supplies preset to items.")
+	}
+	if (presetName !== null && presetPath !== null) {
+		fail(`item add: --preset and --preset-path are mutually exclusive (got --preset=${presetName}, --preset-path=${presetPath})`)
+	}
+	if (presetPath !== null) {
+		return { preset: null, presetPath: resolve(presetPath) }
+	}
+	return { preset: presetName, presetPath: null }
+}
+
 async function runStatusCommand(args: string[]): Promise<void> {
 	const parsed = await runCmd(statusCliCommand, args)
 	if (parsed.kind !== "status") return
@@ -1794,6 +1839,9 @@ async function runItemCommand(args: string[]): Promise<void> {
 			issueNumber: itemArgs.issueNumber,
 			repoCwd: itemArgs.repoCwd,
 		}
+		// #412 preset is required per-item; the CLI parser guarantees exactly one of these is set.
+		assignCliOptional(requestArgs, "preset", itemArgs.preset)
+		assignCliOptional(requestArgs, "presetPath", itemArgs.presetPath)
 		assignCliOptional(requestArgs, "status", itemArgs.status)
 		assignCliOptional(requestArgs, "attempts", itemArgs.attempts)
 		assignCliOptional(requestArgs, "title", itemArgs.title)
@@ -2898,8 +2946,26 @@ function buildStatusQueueSnapshotFromRecords(options: LoopOptions, items: readon
 			runner: statusRunnerSelection(selected.runner),
 			reviewRunner: statusRunnerSelection(selected.reviewRunner),
 			phaseRunners: statusRunnerSelections(selectPhaseRunnersForItem(options.preset, selected.item, options.runnerCommands)),
+			preset: resolveStatusItemPresetSnapshot(selected.item, options.preset),
 		},
 	}
+}
+
+// #412: report the source + resolved directory of an item's preset for supervisor consumers.
+// `presetDir` resolves the directory the engine would load for this item, computed without
+// loading the preset (consumers can re-load if they need the full Preset; status callers only
+// need to know which directory rendered the agent prompt).
+function resolveStatusItemPresetSnapshot(item: ItemRecord, chainPreset: Preset): StatusItemPresetSnapshot {
+	if (item.presetPath !== null) {
+		return { source: "item-preset-path", name: null, path: item.presetPath, presetDir: item.presetPath }
+	}
+	if (item.preset !== null) {
+		// Reuse the canonical bundled-preset resolver so item-level preset rendering matches the
+		// engine's resolution exactly, without loading the preset's preset.toml.
+		const presetDir = resolvePresetDir({ preset: item.preset, presetPath: null }, PKG_ROOT, item.repoCwd)
+		return { source: "item-preset", name: item.preset, path: null, presetDir }
+	}
+	return { source: "chain-fallback", name: chainPreset.name, path: null, presetDir: chainPreset.presetDir }
 }
 
 function statusItemSnapshot(item: ItemRecord, preset: Preset): StatusItemSnapshot {
@@ -2915,6 +2981,10 @@ function statusItemSnapshot(item: ItemRecord, preset: Preset): StatusItemSnapsho
 		evidenceDir: item.evidenceDir,
 		agentCwd: item.agentCwd,
 		runner: item.runner,
+		// #412: surface the item's stored preset declaration; downstream supervisors / dashboards
+		// consume this to know which preset rendered each item without re-loading the preset directory.
+		preset: item.preset,
+		presetPath: item.presetPath,
 		extra,
 	}
 }

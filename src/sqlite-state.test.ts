@@ -62,6 +62,10 @@ describe("sqlite state store", () => {
 				"agent_cwd",
 				"runner",
 				"phase",
+				// #412: per-item preset declaration columns. Items carry their own preset since the
+				// chain-level chains.preset became a legacy default-seed (NULLable in v9).
+				"preset",
+				"preset_path",
 				"extra",
 				"created_at",
 				"updated_at",

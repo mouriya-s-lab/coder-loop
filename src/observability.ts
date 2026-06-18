@@ -190,7 +190,10 @@ const ObservabilityEventBoundary = arkType.or(
 		...EventBaseBoundary,
 		kind: arkType.unit("lifecycle"),
 		type: arkType.unit("daemon.preset_load_failed"),
-		payload: { chainId: "number", preset: "string", presetDir: "string", error: "string" },
+		// `preset` is nullable since #412 (chain may carry no preset; chain-wide fall back to chain.preset
+		// only applies when items are absent). Item-scoped failures will populate it with the item's preset
+		// name; chain-only failures with no item context may emit null.
+		payload: { chainId: "number", "preset": arkType.or("string", "null"), presetDir: "string", error: "string" },
 	},
 	{
 		...EventBaseBoundary,

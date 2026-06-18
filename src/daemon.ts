@@ -27,6 +27,7 @@ import {
 	type SchedulerLoadedPreset,
 	type SchedulerOptions,
 	type SchedulerPresetResolver,
+	type SchedulerPresetItemResolver,
 	type SchedulerSpawnContext,
 	type SchedulerState,
 } from "./scheduler"
@@ -110,6 +111,7 @@ export type CoderLoopDaemonSchedulerConfig = Partial<Omit<SchedulerOptions, "sto
 	intervalMs?: number
 	presetDir?: string
 	presetForChain?: SchedulerPresetResolver
+	presetForItem?: SchedulerPresetItemResolver
 }
 
 export type StartCoderLoopDaemonOptions = LoopDataRootOptions & {
@@ -154,6 +156,9 @@ const ORPHAN_CHAIN_DIR_PREFIX = ".orphan-"
 const RESERVED_METADATA_KEYS = new Set(["__proto__", "constructor", "prototype"])
 const ITEM_PRIORITY_VALUES = ["low", "medium", "high", "critical"] as const
 const PRESET_NAME_PATTERN = /^[a-z][a-z0-9-]*$/
+// Shared by repoCwd and item-level presetPath validation — defining as a constant avoids escaping
+// the raw control characters inline at every call site.
+const PRESET_PATH_CONTROL_CHAR_REGEX: RegExp = new RegExp("[\\u0000-\\u001f\\u007f]", "u")
 const REPOSITORY_REF_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}[A-Za-z0-9])?\/[A-Za-z0-9._-]{1,100}$/
 const CHAIN_CREATE_ARG_KEYS = [
 	"name",
@@ -178,6 +183,10 @@ const ITEM_ADD_ARG_KEYS = [
 	"issueFile",
 	"evidenceDir",
 	"runner",
+	// #412: preset declaration site moved from chain to item. Exactly one of `preset` (bundled name)
+	// or `presetPath` (absolute filesystem dir) is required at the API boundary.
+	"preset",
+	"presetPath",
 	"extra",
 	"dependsOn",
 ] as const
@@ -738,9 +747,22 @@ export class CoderLoopDaemon {
 
 	private async handleChainCreate(args: JsonObject): Promise<JsonObject> {
 		validateKnownKeys(args, "chain.create args", CHAIN_CREATE_ARG_KEYS)
+		// Since #412, chain.preset is a legacy default-seed: it no longer drives any item's preset
+		// (item.add now requires per-item preset) but it still seeds chain-wide vocabulary queries
+		// for code paths that operate on a chain without an item in hand (chain status, complete
+		// trigger eval, recovery). To preserve install / supervisor flows, retain the
+		// `gh-issue-pr-iteration` default; callers that explicitly want a presetless chain pass
+		// `preset: null`. Physical column retirement is tracked in #419.
+		const rawPresetArg = args.preset
+		const rawChainPreset = rawPresetArg === undefined
+			? DEFAULT_PRESET_NAME
+			: optionalStringOrNull(args, "preset")
+		const chainPreset = rawChainPreset === null || rawChainPreset === undefined
+			? null
+			: await validateBundledPresetForRequest(rawChainPreset)
 		const input: CreateChainInput = {
 			name: validateChainNameForRequest(requiredString(args, "name")),
-			preset: await validateBundledPresetForRequest(optionalString(args, "preset") ?? DEFAULT_PRESET_NAME),
+			preset: chainPreset,
 			repository: validateRepositoryForRequest(requiredString(args, "repository")),
 			baseBranch: validateBaseBranchForRequest(optionalString(args, "baseBranch") ?? "main"),
 			status: "active",
@@ -1026,8 +1048,20 @@ export class CoderLoopDaemon {
 		const chain = this.resolveChain(args)
 		const items = this.requireStore().listItems(chain.id)
 		const activeRuns = listActiveRuns(this.schedulerState).filter((run) => run.chainId === chain.id)
-		const pendingStatusSet = await this.continuableItemStatuses(chain)
-		const terminalStatusSet = await this.terminalItemStatuses(chain)
+		// #412: when chain.preset is null (post-#412 chain) but items are present, resolve status
+		// vocabulary from the representative item's preset. When the chain has no resolvable preset
+		// at all (post-#412 chain with no items declaring preset and no legacy chain.preset seed),
+		// status reports as no waits — that's the genuine "nothing to schedule" state, not an error
+		// to mask. Real load failures (broken preset dir, malformed preset.toml) still propagate.
+		const presetForStatus = this.canResolvePresetForChainOrItems(chain, items)
+			? await this.loadedPresetForChainOrItems(chain, items)
+			: null
+		const pendingStatusSet = presetForStatus === null
+			? new Set<InternalStatus>()
+			: new Set(presetForStatus.preset.statuses.continuable)
+		const terminalStatusSet = presetForStatus === null
+			? new Set<InternalStatus>()
+			: new Set(presetForStatus.preset.statuses.terminal)
 		const continuableStatusNames = [...pendingStatusSet]
 		const terminalStatusNames = [...terminalStatusSet]
 		const dependencyWaits = listDependencyWaitReasons(items, { statuses: continuableStatusNames, terminalStatusNames })
@@ -1038,6 +1072,26 @@ export class CoderLoopDaemon {
 			items: items.map((item) => itemToJson(item, dependencyWaitsByItemId.get(item.id) ?? null)),
 			activeRuns: activeRuns.map(activeRunToJson),
 		}
+	}
+
+	// #412 helper: resolve a SchedulerLoadedPreset for chain status / vocabulary queries. Prefers the
+	// representative item's preset (so post-#412 chains with chain.preset=null still work as long as
+	// items declare their own preset) and falls back to the chain's legacy default seed.
+	private async loadedPresetForChainOrItems(chain: ChainRecord, items: readonly ItemRecord[]): Promise<SchedulerLoadedPreset> {
+		const representative = items.find((item) => item.preset !== null || item.presetPath !== null)
+		if (representative !== undefined) return await this.loadedPresetForItem(chain, representative)
+		return await this.loadedPresetForChain(chain)
+	}
+
+	// #412: predicate paired with `loadedPresetForChainOrItems` — answers "is there any preset
+	// source to attempt loading?" without catching load errors. Used by paths that must distinguish
+	// "no preset configured" (legitimately empty status) from "preset configured but broken" (real
+	// error, must propagate).
+	private canResolvePresetForChainOrItems(chain: ChainRecord, items: readonly ItemRecord[]): boolean {
+		const representative = items.find((item) => item.preset !== null || item.presetPath !== null)
+		if (representative !== undefined) return true
+		if (chainPresetPath(chain.metadata) !== null) return true
+		return chain.preset !== null
 	}
 
 	private async handleChainDelete(args: JsonObject): Promise<JsonObject> {
@@ -1234,11 +1288,22 @@ export class CoderLoopDaemon {
 		const extraDependsOn = topLevelDependsOn === undefined ? optionalDependsOn(rawExtra, "dependsOn") : undefined
 		const dependsOn = topLevelDependsOn === undefined ? extraDependsOn : topLevelDependsOn
 		if (dependsOn !== undefined) validateDependsOnGraph(existingItems, null, dependsOn)
+		// #412: preset must be specified on every new item. The candidate set was killed by the operator:
+		// no chain-level default, no engine-builtin default, no inherit-from-chain — only explicit per-item
+		// preset survives. Engine-derived items (review-on-empty etc.) bypass this API entirely.
+		const presetSpec = await this.requireItemPresetForRequest(args, label)
+		// Derive the new item's default status from its OWN preset, not the chain's. This makes it valid
+		// to create the first item on a chain whose chains.preset column is null (post-#412 chains).
+		// Load failures are surfaced per-chain so the standard `daemon.preset_load_failed` observability
+		// event fires and the error message stays consistent with chain-mutation paths.
+		const defaultStatus = await this.defaultItemStatusForPresetSpecOnChain(chain, presetSpec)
 		const input: CreateItemInput = {
 			chainId: chain.id,
 			issueNumber: requiredPositiveInteger(args, "issueNumber"),
 			repoCwd: await validateRepoCwdForRequest(requiredString(args, "repoCwd")),
-			status: await this.defaultItemStatusForRequest(chain),
+			status: defaultStatus,
+			preset: presetSpec.preset,
+			presetPath: presetSpec.presetPath,
 			extra: validateItemExtra(withDependsOn(rawExtra, dependsOn)),
 		}
 		assignOptional(input, "title", validateItemTitleForRequest(optionalStringOrNull(args, "title")))
@@ -1249,6 +1314,35 @@ export class CoderLoopDaemon {
 		assignOptional(input, "evidenceDir", validateEvidenceDirForRequest(optionalStringOrNull(args, "evidenceDir"), chain, this.paths.root))
 		assignOptional(input, "runner", optionalRunner(args, "runner"))
 		return input
+	}
+
+	private async requireItemPresetForRequest(args: JsonObject, label: string): Promise<{ preset: string | null; presetPath: string | null }> {
+		const presetName = optionalStringOrNull(args, "preset")
+		const presetPath = optionalStringOrNull(args, "presetPath")
+		if ((presetName === null || presetName === undefined) && (presetPath === null || presetPath === undefined)) {
+			throw new DaemonError(
+				"invalid_request",
+				`${label}: preset is required (pass "preset" with a bundled preset name or "presetPath" with an absolute path; item creators may not silently inherit a chain/config/default preset since #412)`,
+				{ field: "preset" },
+			)
+		}
+		if (presetName !== null && presetName !== undefined && presetPath !== null && presetPath !== undefined) {
+			throw new DaemonError(
+				"invalid_request",
+				`${label}: "preset" and "presetPath" are mutually exclusive (got preset="${presetName}", presetPath="${presetPath}")`,
+				{ field: "preset" },
+			)
+		}
+		if (presetName !== null && presetName !== undefined) {
+			const validated = await validateBundledPresetForRequest(presetName)
+			return { preset: validated, presetPath: null }
+		}
+		if (presetPath !== null && presetPath !== undefined) {
+			const validated = await validateItemPresetPathForRequest(presetPath)
+			return { preset: null, presetPath: validated }
+		}
+		// Both null/undefined was handled above; the remaining branches are exhaustive.
+		throw new DaemonError("invalid_request", `${label}: preset specification could not be resolved`, { field: "preset" })
 	}
 
 	private translateCreateItemFailure(chain: ChainRecord, issueNumber: number, error: unknown): never {
@@ -1482,6 +1576,11 @@ export class CoderLoopDaemon {
 		const schedulerPresetDir = scheduler.presetDir
 		const presetForChain: SchedulerPresetResolver = scheduler.presetForChain ?? ((chain: ChainRecord) =>
 			schedulerPresetDir === undefined ? this.loadedPresetForChain(chain) : this.loadedPresetFromDirForChain(chain, schedulerPresetDir))
+		// #412: per-item preset resolution. Test fixtures can override `presetForItem` directly; production
+		// uses the daemon's `loadedPresetForItem` which honors item.preset / item.presetPath first and
+		// falls back to chain-level resolution for legacy items.
+		const presetForItem: SchedulerPresetItemResolver = scheduler.presetForItem ?? ((chain: ChainRecord, item: ItemRecord) =>
+			schedulerPresetDir === undefined ? this.loadedPresetForItem(chain, item) : this.loadedPresetFromDirForChain(chain, schedulerPresetDir))
 		const presetPromptResolver = (ctx: SchedulerSpawnContext): Promise<string> =>
 			this.resolveLoadedPresetPhasePrompt(ctx)
 		const fallbackRunner = scheduler.runner ?? defaultDaemonRunner()
@@ -1501,6 +1600,7 @@ export class CoderLoopDaemon {
 			state: this.schedulerState,
 			runner: fallbackRunner,
 			presetForChain,
+			presetForItem,
 			prompt: scheduler.prompt ?? presetPromptResolver,
 			onEvent: async (event) => {
 				if (this.store !== null) {
@@ -1564,6 +1664,18 @@ export class CoderLoopDaemon {
 		return preset.statuses.entry
 	}
 
+	// #412 per-item flavor: derive the entry status from the item's declared preset rather than the
+	// chain's. The chain-aware variant routes load failures through `loadedPresetFromDirForChain`
+	// so each chain that hits a bad preset gets its own `daemon.preset_load_failed` observability
+	// event and a consistent "failed to load preset for chain <name>" error message.
+	private async defaultItemStatusForPresetSpecOnChain(chain: ChainRecord, spec: { preset: string | null; presetPath: string | null }): Promise<InternalStatus> {
+		const presetDir = spec.presetPath !== null
+			? (isAbsolute(spec.presetPath) ? spec.presetPath : resolve(spec.presetPath))
+			: bundledPresetDir(spec.preset ?? "")
+		const { preset } = await this.loadedPresetFromDirForChain(chain, presetDir)
+		return preset.statuses.entry
+	}
+
 	private async validateItemStatusForPhaseRequest(chain: ChainRecord, phase: string, status: string): Promise<void> {
 		const allowed = await this.allowedItemStatusesForPhase(chain, phase)
 		if (allowed === null || allowed.has(status)) return
@@ -1621,6 +1733,13 @@ export class CoderLoopDaemon {
 		return await this.loadedPresetFromDirForChain(chain, presetDir)
 	}
 
+	// #412 per-item preset loader. Resolves preset from item.preset / item.presetPath, falling back
+	// to the chain-level resolver for legacy items.
+	private async loadedPresetForItem(chain: ChainRecord, item: ItemRecord): Promise<SchedulerLoadedPreset> {
+		const presetDir = this.presetDirForItem(chain, item)
+		return await this.loadedPresetFromDirForChain(chain, presetDir)
+	}
+
 	private async loadedPresetFromDirForChain(chain: ChainRecord, presetDir: string): Promise<SchedulerLoadedPreset> {
 		const key = this.loadedPresetCacheKey(presetDir)
 		const cached = this.loadedPresetCache.get(key)
@@ -1657,16 +1776,52 @@ export class CoderLoopDaemon {
 	}
 
 	private presetDirForChain(chain: ChainRecord): string {
+		// Chain-wide preset resolver — used by code paths that operate on a chain without an item
+		// context (e.g. chain-complete trigger eval, listing chain-level status vocab). Per-item
+		// paths (spawn, status snapshot) prefer `presetDirForItem`.
+		//
+		// Resolution order:
+		// 1. `chain.metadata.presetPath` (explicit override carried in chain metadata).
+		// 2. `chain.preset` — legacy default-seed retained for back-compat (#412 / #419 docs).
+		// 3. Error: chain has no preset and no item context to derive one from.
 		const presetPath = chainPresetPath(chain.metadata)
 		if (presetPath !== null) return isAbsolute(presetPath) ? presetPath : resolve(presetPath)
-		if (!PRESET_NAME_PATTERN.test(chain.preset)) {
-			throw new DaemonError("invalid_request", `config.preset: invalid name "${chain.preset}" (must match ${PRESET_NAME_PATTERN.source})`, {
+		const legacyPreset = chain.preset
+		if (legacyPreset === null) {
+			throw new DaemonError(
+				"invalid_request",
+				`chain ${chain.name} has no preset and no items to derive one from; chain-level preset resolution requires either chains.preset (legacy) or an item context (#412 moved preset to items)`,
+				{ chainId: chain.id, chainName: chain.name },
+			)
+		}
+		if (!PRESET_NAME_PATTERN.test(legacyPreset)) {
+			throw new DaemonError("invalid_request", `config.preset: invalid name "${legacyPreset}" (must match ${PRESET_NAME_PATTERN.source})`, {
 				chainId: chain.id,
 				chainName: chain.name,
-				preset: chain.preset,
+				preset: legacyPreset,
 			})
 		}
-		return bundledPresetDir(chain.preset)
+		return bundledPresetDir(legacyPreset)
+	}
+
+	private presetDirForItem(chain: ChainRecord, item: ItemRecord): string {
+		// Per-item preset resolver — the post-#412 primary path. Resolution order:
+		// 1. `item.presetPath` (absolute path; daemon API validates on insert).
+		// 2. `item.preset` (bundled name; daemon API validates on insert).
+		// 3. Fall back to chain-level resolution for legacy items still carrying null preset/presetPath
+		//    (back-fill migration handles most of these; this path covers any that slipped through).
+		if (item.presetPath !== null) return isAbsolute(item.presetPath) ? item.presetPath : resolve(item.presetPath)
+		if (item.preset !== null) {
+			if (!PRESET_NAME_PATTERN.test(item.preset)) {
+				throw new DaemonError("invalid_request", `item ${item.id}: invalid preset name "${item.preset}" (must match ${PRESET_NAME_PATTERN.source})`, {
+					itemId: item.id,
+					issueNumber: item.issueNumber,
+					preset: item.preset,
+				})
+			}
+			return bundledPresetDir(item.preset)
+		}
+		return this.presetDirForChain(chain)
 	}
 
 	private loadedPresetCacheKey(presetDir: string): string {
@@ -2382,6 +2537,25 @@ async function validateBundledPresetForRequest(input: string): Promise<string> {
 	return input
 }
 
+// #412 item-level presetPath: must be an absolute path to a directory containing preset.toml.
+// Relative paths are rejected to avoid ambiguity about the resolution base — items live in the
+// central DB and may be read from any working directory.
+async function validateItemPresetPathForRequest(input: string): Promise<string> {
+	if (!isAbsolute(input)) throw new DaemonError("invalid_request", "presetPath must be an absolute path", { presetPath: input })
+	if (PRESET_PATH_CONTROL_CHAR_REGEX.test(input)) throw new DaemonError("invalid_request", "presetPath must not contain control characters", { presetPath: input })
+	const presetFile = resolve(input, "preset.toml")
+	try {
+		const presetStat = await stat(presetFile)
+		if (!presetStat.isFile()) {
+			throw new DaemonError("invalid_request", `presetPath does not contain a preset.toml: ${input}`, { presetPath: input })
+		}
+	} catch (error) {
+		if (error instanceof DaemonError) throw error
+		throw new DaemonError("invalid_request", `presetPath is not loadable: ${input}`, { presetPath: input, error: errorMessage(error) })
+	}
+	return input
+}
+
 function bundledPresetDir(presetName: string): string {
 	return resolve(BUNDLED_PRESETS_DIR, presetName)
 }
@@ -2455,7 +2629,9 @@ function chainCreateConflicts(existing: ChainRecord, requested: CreateChainInput
 		conflicts.push({ field, existing: existingValue, requested: requestedValue })
 	}
 
-	addConflict("preset", existing.preset, requested.preset)
+	// `requested.preset` may be undefined since #412 made the chain-level preset optional; treat absent
+	// as explicit-null so the conflict comparison is well-defined.
+	addConflict("preset", existing.preset, requested.preset ?? null)
 	addConflict("repository", existing.repository, requested.repository)
 	addConflict("baseBranch", existing.baseBranch, requested.baseBranch)
 	addConflict("status", existing.status, requested.status ?? "active")
