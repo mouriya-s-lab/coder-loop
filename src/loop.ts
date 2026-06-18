@@ -32,6 +32,8 @@ import {
 	parseObservabilityKind,
 	queryObservabilityEvents,
 	type ObservabilityEventQuery,
+	type PresetPlaceholderDirection,
+	type PresetPlaceholderVerdict,
 } from "./observability"
 import {
 	type ChainRecord,
@@ -3879,16 +3881,32 @@ async function waitForPidExit(pid: number, timeoutMs: number): Promise<boolean> 
 	return !isPidAlive(pid)
 }
 
-export async function loadPreset(presetDir: string): Promise<Preset> {
+export type LoadPresetOptions = {
+	onValidationFinding?: (finding: PresetPlaceholderFinding) => void
+}
+
+export async function loadPreset(presetDir: string, options: LoadPresetOptions = {}): Promise<Preset> {
 	const tomlPath = resolve(presetDir, "preset.toml")
 	const raw = await readFile(tomlPath, "utf-8")
 	const parsed: BoundaryValue = Bun.TOML.parse(raw)
 	const preset = parsePreset(parsed, presetDir)
 	const phases: PresetPhase[] = []
+	const placeholderErrors: PresetPlaceholderFinding[] = []
 	for (const phase of preset.phases) {
 		const prompt = await readPresetPhasePrompt(phase)
 		assertRoleEntryHasNoFrontmatter(prompt, `preset phase "${phase.name}" prompt`)
+		const findings = validatePresetPhaseTemplate(prompt, phase, phase.prompt)
+		for (const finding of findings) {
+			options.onValidationFinding?.(finding)
+			if (finding.verdict === "error") placeholderErrors.push(finding)
+		}
 		phases.push(phase)
+	}
+	if (placeholderErrors.length > 0) {
+		const lines = placeholderErrors.map((f) => `  ${f.file}: {{${f.key}}} (${f.direction})`)
+		presetError(
+			`preset ${preset.name}: template contains undeclared placeholders — every {{KEY}} must be declared in the phase's [phases.variables] block.\n${lines.join("\n")}`,
+		)
 	}
 	for (const fragment of preset.fragments) {
 		await assertReadable(fragment.path, `preset fragment "${fragment.id}"`)
@@ -4710,13 +4728,99 @@ export function getItemId(item: ItemRecord, preset: Preset): string {
 	throw new Error(`queue item is missing required id field "${preset.item.idField}"`)
 }
 
-export function renderPrompt(template: string, phase: PresetPhase, ctx: ResolveContext & { item: ItemRecord }): string {
-	let result = stripRoleEntryFrontmatter(template)
-	for (const variable of phase.variables) {
-		const value = resolvePhaseBinding(variable.source, phase, ctx)
-		result = result.replaceAll(`{{${variable.key}}}`, value)
+// Placeholder grammar shared by load-time validation and render-time substitution:
+//   - real placeholder: `{{KEY}}` where KEY matches `[A-Za-z_][A-Za-z0-9_]*`.
+//   - literal escape:   `\{{KEY}}` — renders as `{{KEY}}`, never resolved.
+// The single regex captures both so the scan stays positional: a value injected
+// at render time can legitimately contain `{{...}}` (e.g. when a binding source
+// quotes another template) and is never mistaken for residue because it lives
+// in a value-position, not a template-position.
+const PLACEHOLDER_SCAN_PATTERN = /(\\)?\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}/g
+
+export type PromptPlaceholderMatch =
+	| { kind: "placeholder"; key: string; start: number; end: number }
+	| { kind: "escape"; key: string; start: number; end: number }
+
+export function extractPromptPlaceholders(template: string): readonly PromptPlaceholderMatch[] {
+	const matches: PromptPlaceholderMatch[] = []
+	for (const match of template.matchAll(PLACEHOLDER_SCAN_PATTERN)) {
+		const start = match.index ?? 0
+		const end = start + match[0].length
+		const key = match[2]
+		if (key === undefined) continue
+		const isEscape = match[1] === "\\"
+		matches.push(isEscape ? { kind: "escape", key, start, end } : { kind: "placeholder", key, start, end })
 	}
-	return result
+	return matches
+}
+
+export type PresetPlaceholderFinding = {
+	file: string
+	key: string
+	direction: PresetPlaceholderDirection
+	verdict: PresetPlaceholderVerdict
+}
+
+// Validate one phase's prompt template against its declared variables.
+// `template-undeclared` is always an error (every {{KEY}} in the template must
+// resolve to a phase.variables entry, else the bug reaches the agent prompt).
+// `declared-unused` is a warn because variables are sometimes referenced only
+// by fragments that this validator doesn't see; raising it to error would
+// generate noise without protecting agents from a real failure mode.
+export function validatePresetPhaseTemplate(
+	template: string,
+	phase: PresetPhase,
+	file: string,
+): readonly PresetPlaceholderFinding[] {
+	const declared = new Set(phase.variables.map((variable) => variable.key))
+	const stripped = stripRoleEntryFrontmatter(template)
+	const matches = extractPromptPlaceholders(stripped)
+	const findings: PresetPlaceholderFinding[] = []
+	const seenUndeclared = new Set<string>()
+	const usedDeclared = new Set<string>()
+	for (const match of matches) {
+		if (match.kind === "escape") continue
+		if (declared.has(match.key)) {
+			usedDeclared.add(match.key)
+			continue
+		}
+		if (seenUndeclared.has(match.key)) continue
+		seenUndeclared.add(match.key)
+		findings.push({ file, key: match.key, direction: "template-undeclared", verdict: "error" })
+	}
+	for (const key of declared) {
+		if (usedDeclared.has(key)) continue
+		findings.push({ file, key, direction: "declared-unused", verdict: "warn" })
+	}
+	return findings
+}
+
+export function renderPrompt(template: string, phase: PresetPhase, ctx: ResolveContext & { item: ItemRecord }): string {
+	const stripped = stripRoleEntryFrontmatter(template)
+	const matches = extractPromptPlaceholders(stripped)
+	const declared = new Map(phase.variables.map((variable) => [variable.key, variable.source] as const))
+	const parts: string[] = []
+	let cursor = 0
+	for (const match of matches) {
+		parts.push(stripped.slice(cursor, match.start))
+		if (match.kind === "escape") {
+			// Emit the literal `{{KEY}}` (drop the leading backslash).
+			parts.push(stripped.slice(match.start + 1, match.end))
+			cursor = match.end
+			continue
+		}
+		const source = declared.get(match.key)
+		if (source === undefined) {
+			throw new Error(
+				`renderPrompt: phase "${phase.name}" template contains undeclared placeholder {{${match.key}}} ` +
+					"(load-time validation should have caught this; running renderPrompt against a non-loadPreset template is unsupported)",
+			)
+		}
+		parts.push(resolvePhaseBinding(source, phase, ctx))
+		cursor = match.end
+	}
+	parts.push(stripped.slice(cursor))
+	return parts.join("")
 }
 
 function resolvePhaseBinding(source: PresetVariableSource, phase: PresetPhase, ctx: ResolveContext): string {
