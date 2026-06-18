@@ -38,6 +38,7 @@ import {
 } from "./loop"
 import { resolveChainRuntimePaths } from "./runtime-paths"
 import { type ChainRecord, type ItemRecord, openSqliteStateStore } from "./sqlite-state"
+import { type RateLimitReset } from "./rate-limit"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-tests", String(process.pid))
@@ -3723,6 +3724,8 @@ async function createFixture(name: string): Promise<Fixture> {
 				writeStatus: fakeRunnerWriteStatus(phase, item.extra),
 			}
 			if (Object.prototype.hasOwnProperty.call(item.extra, "summary")) payload.summary = item.extra.summary
+			if (typeof item.extra.rateLimitResetsAt === "number") payload.rateLimitResetsAt = item.extra.rateLimitResetsAt
+			if (typeof item.extra.rateLimitType === "string") payload.rateLimitType = item.extra.rateLimitType
 			return JSON.stringify(payload)
 		},
 		onEvent: (event) => {
@@ -3763,7 +3766,7 @@ function preInstallReviewOnEmptyLock(chain: ChainRecord, loopDataRoot: string, r
 function createItem(
 	store: ReturnType<typeof openSqliteStateStore>,
 	chain: ChainRecord,
-	input: { issueNumber: number; repoCwd: string; sleepMs?: number; exitCode?: number; summary?: string | null; issueKind?: string | null; runner?: AgentRunnerKind | null },
+	input: { issueNumber: number; repoCwd: string; sleepMs?: number; exitCode?: number; summary?: string | null; issueKind?: string | null; runner?: AgentRunnerKind | null; rateLimitResetsAt?: number; rateLimitType?: string },
 ) {
 	const extra: JsonObject = {
 		sleepMs: input.sleepMs ?? 5,
@@ -3771,6 +3774,8 @@ function createItem(
 		issueKind: input.issueKind === undefined ? "code" : input.issueKind,
 	}
 	if (Object.prototype.hasOwnProperty.call(input, "summary")) extra.summary = input.summary ?? null
+	if (typeof input.rateLimitResetsAt === "number") extra.rateLimitResetsAt = input.rateLimitResetsAt
+	if (typeof input.rateLimitType === "string") extra.rateLimitType = input.rateLimitType
 	return store.createItem({
 		chainId: chain.id,
 		issueNumber: input.issueNumber,
@@ -3799,6 +3804,11 @@ const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
 await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
 await new Promise((resolve) => setTimeout(resolve, input.sleepMs))
 await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
+if (typeof input.rateLimitResetsAt === "number") {
+  console.log(JSON.stringify({type:"rate_limit_event",rate_limit_info:{status:"rejected",resetsAt:input.rateLimitResetsAt,rateLimitType:input.rateLimitType||"five_hour",overageStatus:"rejected",overageDisabledReason:"org_level_disabled"}}))
+  console.log(JSON.stringify({type:"result",is_error:true,api_error_status:429,result:"You've hit your session limit"}))
+  process.exit(1)
+}
 console.log("done:" + input.itemId)
 const summary = Object.prototype.hasOwnProperty.call(input, "summary") ? input.summary : "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=fake-runner default"
 if (summary !== null) console.log(summary)
@@ -4037,5 +4047,109 @@ describe("per-run summary tag", () => {
 		].join("\n")
 		expect(extractSummaryValue(stdoutText, tag)).toBe("did the work")
 		expect(extractSummaryValue(stdoutText, "summary-ffffffffffffffff")).toBeNull()
+	})
+})
+
+describe("rate-limit cooldown (issue #478)", () => {
+	test("rate-limit exit rolls back attempts, clears schedulerBackoff, and notifies the daemon cooldown (AC4/AC7)", async () => {
+		const fixture = await createFixture("rate-limit-rollback")
+		try {
+			const now = 1_800_030_000
+			const chain = createChain(fixture.store, "rate-limit-rollback-chain", { metadata: { maxItemAttempts: 10 } })
+			const item = createItem(fixture.store, chain, {
+				issueNumber: 7100,
+				repoCwd: "/repo/a",
+				rateLimitResetsAt: now + 600,
+				rateLimitType: "five_hour",
+			})
+			const rateLimitNotices: { runId: string; chainId: number; itemId: number; reset: RateLimitReset; stdoutText: string }[] = []
+			const options = fixture.options({
+				now: () => now,
+				runIdFactory: ({ item: selected }) => `run-rl-${selected.id}`,
+				onRateLimitObserved: async (info) => { rateLimitNotices.push(info) },
+			})
+
+			const tick = await schedulerTick(options)
+			expect(tick.spawnedRuns).toHaveLength(1)
+			await tick.spawnedRuns[0]!.closed
+
+			const after = fixture.store.getItem(item.id)
+			expect(after?.attempts).toBe(0)
+			expect(after?.extra.schedulerBackoff).toBeUndefined()
+			expect(after?.status).toBe("queued")
+			expect(rateLimitNotices).toHaveLength(1)
+			expect(rateLimitNotices[0]?.reset.resetsAt).toBe(now + 600)
+			expect(rateLimitNotices[0]?.reset.rateLimitType).toBe("five_hour")
+			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({
+				type: "scheduler.rate_limited",
+				itemId: item.id,
+				resetsAt: now + 600,
+			}))
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("non-rate-limit failure enters blind exponential backoff and consumes an attempt (AC7 contrast)", async () => {
+		const fixture = await createFixture("rate-limit-contrast")
+		try {
+			const now = 1_800_030_100
+			const chain = createChain(fixture.store, "rate-limit-contrast-chain", { metadata: { maxItemAttempts: 10 } })
+			const item = createItem(fixture.store, chain, { issueNumber: 7101, repoCwd: "/repo/a", exitCode: 1, summary: null })
+			const options = fixture.options({
+				now: () => now,
+				runIdFactory: ({ item: selected }) => `run-contrast-${selected.id}`,
+			})
+
+			const tick = await schedulerTick(options)
+			await tick.spawnedRuns[0]!.closed
+
+			const after = fixture.store.getItem(item.id)
+			expect(after?.attempts).toBe(1)
+			expect(after?.extra.schedulerBackoff).toEqual({ failureCount: 1, nextRunAt: now + 60 })
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("maxSpawns=0 gate stops spawns while account cooldown is active (AC4b)", async () => {
+		const fixture = await createFixture("rate-limit-gate")
+		try {
+			const now = 1_800_030_200
+			const chain = createChain(fixture.store, "rate-limit-gate-chain", { metadata: { maxItemAttempts: 10 } })
+			const item = createItem(fixture.store, chain, { issueNumber: 7102, repoCwd: "/repo/a" })
+			const options = fixture.options({
+				now: () => now,
+				runIdFactory: ({ item: selected }) => `run-gate-${selected.id}`,
+			})
+
+			const tick = await schedulerTick(options, { maxSpawns: 0 })
+			expect(tick.spawnedRuns).toHaveLength(0)
+			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
+			expect(fixture.schedulerEvents.find((e) => e.type === "agent.spawn")).toBeUndefined()
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("maxSpawns=1 staggered resume allows at most one spawn per tick (AC5)", async () => {
+		const fixture = await createFixture("rate-limit-stagger")
+		try {
+			const now = 1_800_030_300
+			const chain = createChain(fixture.store, "rate-limit-stagger-chain", { metadata: { maxItemAttempts: 10 } })
+			createItem(fixture.store, chain, { issueNumber: 7103, repoCwd: "/repo/a" })
+			createItem(fixture.store, chain, { issueNumber: 7104, repoCwd: "/repo/b" })
+			createItem(fixture.store, chain, { issueNumber: 7105, repoCwd: "/repo/c" })
+			const options = fixture.options({
+				now: () => now,
+				runIdFactory: ({ item: selected }) => `run-stagger-${selected.id}`,
+			})
+
+			const tick = await schedulerTick(options, { maxSpawns: 1 })
+			expect(tick.spawnedRuns).toHaveLength(1)
+			await Promise.all(tick.spawnedRuns.map((run) => run.closed))
+		} finally {
+			fixture.store.close()
+		}
 	})
 })

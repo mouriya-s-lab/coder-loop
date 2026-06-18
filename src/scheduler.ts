@@ -29,6 +29,7 @@ import {
 	type RuntimeBindings,
 } from "./loop"
 import { detectsSessionIdInvalid } from "./runners/session-id"
+import { classifyRateLimitFromStdout, isRateLimitErrorCode, type RateLimitReset } from "./rate-limit"
 import { type ChainRecord, dependsOnItemIds, type ItemRecord, listDependencyWaitReasons, type RunRecord, type SqliteStateStore } from "./sqlite-state"
 import {
 	LOOP_DATA_ROOT_ENV,
@@ -124,6 +125,7 @@ export type SchedulerState = {
 	finalizingItemStatuses: Map<number, string>
 	finalizingChainIds: Set<number>
 	pendingCloseHandlers: Set<Promise<unknown>>
+	rateLimitedUntilMs: number | null
 }
 
 export type SchedulerStore = Pick<
@@ -176,6 +178,7 @@ export type SchedulerEvent =
 	| { type: "queue.terminal"; ts: string; runId: string; chainId: number; itemId: number; terminalStatus: string }
 	| { type: "run.startup_idle_kill"; ts: string; runId: string; chainId: number; itemId: number; phase: string; idleTimeoutMs: number; stdoutBytes: number }
 	| { type: "item.dependency_unblocked"; chainId: number; itemId: number; fromStatus: string; toStatus: string; dependsOn: readonly number[] }
+	| { type: "scheduler.rate_limited"; ts: string; chainId: number; itemId: number; runId: string; resetsAt: number; resetAtIso: string; rateLimitType: string | null }
 
 export type SchedulerChainCompleteTriggerContext = {
 	chain: ChainRecord
@@ -245,6 +248,7 @@ export type SchedulerOptions = {
 	startupIdleTimeoutMs?: number
 	startupIdleProgressBytes?: number
 	startupIdleKillMs?: number
+	onRateLimitObserved?: (info: { runId: string; chainId: number; itemId: number; reset: RateLimitReset; stdoutText: string }) => void | Promise<void>
 }
 
 export type SchedulerChainStatuses = {
@@ -282,7 +286,7 @@ const REVIEW_ON_EMPTY_FALLBACK_ITEM_ID = 0
 let fallbackRunSequence = 0
 
 export function createSchedulerState(): SchedulerState {
-	return { slots: new Map(), finalizingItemStatuses: new Map(), finalizingChainIds: new Set(), pendingCloseHandlers: new Set() }
+	return { slots: new Map(), finalizingItemStatuses: new Map(), finalizingChainIds: new Set(), pendingCloseHandlers: new Set(), rateLimitedUntilMs: null }
 }
 
 export function maxItemAttemptsFromChainMetadata(metadata: JsonObject): number {
@@ -291,7 +295,14 @@ export function maxItemAttemptsFromChainMetadata(metadata: JsonObject): number {
 	return DEFAULT_MAX_ITEM_ATTEMPTS
 }
 
-export async function schedulerTick(options: SchedulerOptions): Promise<SchedulerTickResult> {
+export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpawns?: number }): Promise<SchedulerTickResult> {
+	const tickNowMs = nowSeconds(options) * 1000
+	// In-state paused gate: a rate-limit cooldown armed synchronously by a prior run's close handler
+	// takes effect immediately, before the daemon-level async persist can land. This prevents the next
+	// tick from re-spawning the rate-limited item and consuming another attempt slot.
+	const statePaused = options.state.rateLimitedUntilMs !== null && tickNowMs < options.state.rateLimitedUntilMs
+	const maxSpawns = statePaused ? 0 : limits?.maxSpawns
+	const spawnCapped = (): boolean => maxSpawns !== undefined && spawnedRuns.length >= maxSpawns
 	const activeChains = options.store
 		.listChains()
 		.filter((chain) => chain.status === "active" && hasValidChainName(chain.name))
@@ -309,6 +320,7 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 		const phasePlan = await resolvePhasePlanForChain(options, chain)
 
 		for (const repoCwd of repoCwds) {
+			if (spawnCapped()) break
 			const slot = getOrCreateSlot(options.state, chain, repoCwd)
 			if (slot.activeRun !== null) {
 				await emit(options, {
@@ -345,6 +357,7 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 		items = await unblockDependencySatisfiedItems(options, chain, items, chainStatuses)
 
 		if (shouldRunReviewOnEmpty(options, chain, items, chainStatuses.terminal)) {
+			if (spawnCapped()) continue
 			const reviewOnEmptyRun = await spawnSchedulerReviewOnEmptyRun(options, chain, items)
 			if (reviewOnEmptyRun !== null) {
 				spawnedRuns.push(reviewOnEmptyRun)
@@ -869,6 +882,14 @@ function attachRunCloseHandler(
 				const exitCode = code ?? 1
 				const stdoutText = Buffer.concat(stdout).toString("utf-8")
 				const stderrText = Buffer.concat(stderr).toString("utf-8")
+				// Detect account rate-limit and arm the in-state cooldown gate synchronously, before the
+				// first await in this close handler. The next scheduler tick can fire while this handler
+				// is still awaiting artifact writes / status resolution; without an early gate that tick
+				// would re-spawn the rate-limited item and consume another attempt slot.
+				const rateLimit = classifyRateLimitFromStdout(stdoutText)
+				if (rateLimit.reset !== null) {
+					options.state.rateLimitedUntilMs = rateLimit.reset.resetsAt * 1000
+				}
 				const terminalStatuses = new Set((await schedulerStatusesForChain(options, chain)).terminal)
 				const currentItem = options.store.getItem(item.id)
 				const status = (currentItem ?? item).status
@@ -915,21 +936,42 @@ function attachRunCloseHandler(
 						durationSeconds: Math.max(0, endedAt - startedAt),
 						status,
 					})
-					const parsedSessionId = parseSessionIdFromRunnerStream(runner.kind, stdoutText)
-					const sessionIdInvalid = detectsSessionIdInvalid(runner.kind, stderrText)
-					const previousSessionId = (currentItem ?? item).sessionIds[phase]?.[runner.kind] ?? null
-					if (currentItem === null || !terminalStatuses.has(currentItem.status)) {
-						const itemForBackoff = currentItem ?? item
-						const statusWasWrittenDuringRun = currentItem !== null && currentItem.statusUpdatedAt !== item.statusUpdatedAt && currentItem.statusUpdatedAt >= startedAt
-						const update: Parameters<typeof options.store.updateItem>[1] = {
-							...(statusWasWrittenDuringRun ? { status } : {}),
-							lastRunId: runId,
-							agentCwd: worktreePath,
-							extra: extraAfterRunCompletion(options, chain, itemForBackoff, exitCode, status, terminalStatuses, endedAt),
-							updatedAt: endedAt,
-						}
-						options.store.updateItem(item.id, update)
+				const parsedSessionId = parseSessionIdFromRunnerStream(runner.kind, stdoutText)
+				const sessionIdInvalid = detectsSessionIdInvalid(runner.kind, stderrText)
+				const previousSessionId = (currentItem ?? item).sessionIds[phase]?.[runner.kind] ?? null
+				const rateLimitExit = (rateLimit.code !== null && isRateLimitErrorCode(rateLimit.code)) || rateLimit.reset !== null
+				if (currentItem === null || !terminalStatuses.has(currentItem.status)) {
+					const itemForBackoff = currentItem ?? item
+					const statusWasWrittenDuringRun = currentItem !== null && currentItem.statusUpdatedAt !== item.statusUpdatedAt && currentItem.statusUpdatedAt >= startedAt
+					// Rate-limit exits do not consume an attempt slot (the spawn-time +1 is rolled back
+					// to the pre-spawn value) and do not enter the blind exponential spawn-failure
+					// backoff — the account cooldown is owned by the daemon-level gate.
+					const extra = rateLimitExit
+						? clearSchedulerBackoff(itemForBackoff.extra)
+						: extraAfterRunCompletion(options, chain, itemForBackoff, exitCode, status, terminalStatuses, endedAt)
+					const update: Parameters<typeof options.store.updateItem>[1] = {
+						...(statusWasWrittenDuringRun ? { status } : {}),
+						...(rateLimitExit ? { attempts: item.attempts } : {}),
+						lastRunId: runId,
+						agentCwd: worktreePath,
+						extra,
+						updatedAt: endedAt,
 					}
+					options.store.updateItem(item.id, update)
+				}
+				if (rateLimitExit && rateLimit.reset !== null) {
+					await emit(options, {
+						type: "scheduler.rate_limited",
+						ts: nowIso(options),
+						chainId: chain.id,
+						itemId: item.id,
+						runId,
+						resetsAt: rateLimit.reset.resetsAt,
+						resetAtIso: rateLimit.reset.resetAtIso,
+						rateLimitType: rateLimit.reset.rateLimitType,
+					})
+					await options.onRateLimitObserved?.({ runId, chainId: chain.id, itemId: item.id, reset: rateLimit.reset, stdoutText })
+				}
 					if (sessionIdInvalid) {
 						options.store.setItemSessionId(item.id, { phase, runner: runner.kind, sessionId: null, updatedAt: endedAt })
 						await emit(options, {

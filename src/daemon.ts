@@ -27,6 +27,7 @@ import {
 	type SchedulerSpawnContext,
 	type SchedulerState,
 } from "./scheduler"
+import { type RateLimitReset } from "./rate-limit"
 import {
 	type ChainRecord,
 	type CreateChainInput,
@@ -88,6 +89,44 @@ export type StartCoderLoopDaemonOptions = LoopDataRootOptions & {
 	shutdownGraceMs?: number
 }
 
+export const DAEMON_RATE_LIMIT_STAGGER_MS = 30_000
+
+export type DaemonRateLimitState = {
+	reset: RateLimitReset | null
+	observedAt: string | null
+	sourceRunId: string | null
+	sourceItemId: number | null
+	sourceChainId: number | null
+	nextResumeAtMs: number | null
+}
+
+export type DaemonRateLimitDecision =
+	| { kind: "normal"; maxSpawns: undefined }
+	| { kind: "paused"; maxSpawns: 0 }
+	| { kind: "stagger-wait"; maxSpawns: 0 }
+	| { kind: "stagger-ready"; maxSpawns: 1 }
+
+export function createDaemonRateLimitState(): DaemonRateLimitState {
+	return {
+		reset: null,
+		observedAt: null,
+		sourceRunId: null,
+		sourceItemId: null,
+		sourceChainId: null,
+		nextResumeAtMs: null,
+	}
+}
+
+export function daemonRateLimitDecision(state: DaemonRateLimitState, nowMs: number): DaemonRateLimitDecision {
+	if (state.reset === null) return { kind: "normal", maxSpawns: undefined }
+	const resetMs = state.reset.resetsAt * 1000
+	if (nowMs < resetMs) return { kind: "paused", maxSpawns: 0 }
+	if (state.nextResumeAtMs !== null && nowMs < state.nextResumeAtMs) {
+		return { kind: "stagger-wait", maxSpawns: 0 }
+	}
+	return { kind: "stagger-ready", maxSpawns: 1 }
+}
+
 export type CoderLoopDaemonSnapshot = {
 	pid: number
 	socketPath: string
@@ -96,6 +135,7 @@ export type CoderLoopDaemonSnapshot = {
 	shuttingDown: boolean
 	schedulerEnabled: boolean
 	activeRuns: JsonObject[]
+	rateLimit: JsonObject
 }
 
 type DaemonState = "starting" | "running" | "shutting_down" | "exited"
@@ -198,6 +238,7 @@ export class DaemonError extends Error {
 export class CoderLoopDaemon {
 	private readonly paths: ReturnType<typeof resolveLoopDataPaths>
 	private readonly schedulerState: SchedulerState = createSchedulerState()
+	private rateLimitState: DaemonRateLimitState = createDaemonRateLimitState()
 	private readonly sockets = new Set<Socket>()
 	private readonly shutdownGraceMs: number
 	private server: Server | null = null
@@ -241,6 +282,7 @@ export class CoderLoopDaemon {
 			await this.quarantineOrphanChainDirectories()
 			await this.ensureRuntimeLayoutForExistingChains()
 			await this.recoverStaleSchedulerState()
+			await this.loadPersistedRateLimitState()
 			await writeFile(this.paths.daemonPid, `${process.pid}\n`)
 			this.ownsDaemonPid = true
 			this.state = "running"
@@ -275,7 +317,123 @@ export class CoderLoopDaemon {
 				worktreePath: run.worktreePath,
 				startedAt: run.startedAt,
 			})),
+			rateLimit: this.rateLimitStatus(Date.now()),
 		}
+	}
+
+	private rateLimitStatus(nowMs: number): JsonObject {
+		const decision = daemonRateLimitDecision(this.rateLimitState, nowMs)
+		return {
+			active: decision.kind === "paused" || decision.kind === "stagger-wait",
+			mode: decision.kind,
+			rateLimitedUntil: this.rateLimitState.reset?.resetAtIso ?? null,
+			rateLimitedUntilUnix: this.rateLimitState.reset?.resetsAt ?? null,
+			rateLimitType: this.rateLimitState.reset?.rateLimitType ?? null,
+			observedAt: this.rateLimitState.observedAt,
+			sourceRunId: this.rateLimitState.sourceRunId,
+			sourceItemId: this.rateLimitState.sourceItemId,
+			sourceChainId: this.rateLimitState.sourceChainId,
+			nextResumeAt: this.rateLimitState.nextResumeAtMs === null ? null : new Date(this.rateLimitState.nextResumeAtMs).toISOString(),
+			staggerMs: DAEMON_RATE_LIMIT_STAGGER_MS,
+		}
+	}
+
+	private rateLimitStatePath(): string {
+		return resolve(this.paths.daemonLogDir, "rate-limit.json")
+	}
+
+	private async loadPersistedRateLimitState(): Promise<void> {
+		let raw: string
+		try {
+			raw = await readFile(this.rateLimitStatePath(), "utf-8")
+		} catch (error) {
+			if (isNodeError(error) && error.code === "ENOENT") return
+			throw error
+		}
+		try {
+			const parsed: unknown = JSON.parse(raw)
+			if (typeof parsed !== "object" || parsed === null || (parsed as { reset?: unknown }).reset === null) return
+			const reset = (parsed as { reset?: Record<string, unknown> }).reset
+			if (typeof reset !== "object" || reset === null || typeof reset.resetsAt !== "number") return
+			if (reset.resetsAt * 1000 <= Date.now()) return
+			this.rateLimitState = {
+				reset: {
+					resetsAt: reset.resetsAt,
+					resetAtIso: typeof reset.resetAtIso === "string" ? reset.resetAtIso : new Date(reset.resetsAt * 1000).toISOString(),
+					rateLimitType: typeof reset.rateLimitType === "string" ? reset.rateLimitType : null,
+				},
+				observedAt: typeof (parsed as { observedAt?: unknown }).observedAt === "string" ? (parsed as { observedAt?: string }).observedAt ?? null : null,
+				sourceRunId: typeof (parsed as { sourceRunId?: unknown }).sourceRunId === "string" ? (parsed as { sourceRunId?: string }).sourceRunId ?? null : null,
+				sourceItemId: typeof (parsed as { sourceItemId?: unknown }).sourceItemId === "number" ? (parsed as { sourceItemId?: number }).sourceItemId ?? null : null,
+				sourceChainId: typeof (parsed as { sourceChainId?: unknown }).sourceChainId === "number" ? (parsed as { sourceChainId?: number }).sourceChainId ?? null : null,
+			nextResumeAtMs: null,
+		}
+		this.schedulerState.rateLimitedUntilMs = this.rateLimitState.reset === null ? null : this.rateLimitState.reset.resetsAt * 1000
+	} catch {
+			// corrupted persist file — ignore and start fresh
+		}
+	}
+
+	private async persistRateLimitState(): Promise<void> {
+		const path = this.rateLimitStatePath()
+		if (this.rateLimitState.reset === null) {
+			await unlinkIfExists(path)
+			return
+		}
+		await mkdir(this.paths.daemonLogDir, { recursive: true })
+		await writeFile(path, JSON.stringify(this.rateLimitState) + "\n")
+	}
+
+	private async applyRateLimitNotice(info: { runId: string; chainId: number; itemId: number; reset: RateLimitReset }): Promise<void> {
+		const existingResetMs = this.rateLimitState.reset?.resetsAt === undefined ? 0 : this.rateLimitState.reset.resetsAt * 1000
+		if (existingResetMs > info.reset.resetsAt * 1000) return
+		this.rateLimitState = {
+			reset: info.reset,
+			observedAt: new Date().toISOString(),
+			sourceRunId: info.runId,
+			sourceItemId: info.itemId,
+			sourceChainId: info.chainId,
+			nextResumeAtMs: null,
+		}
+		await this.persistRateLimitState()
+		await this.appendGlobalDaemonLog({
+			type: "rate_limit.observed",
+			runId: info.runId,
+			chainId: info.chainId,
+			itemId: info.itemId,
+			resetsAt: info.reset.resetsAt,
+			resetAtIso: info.reset.resetAtIso,
+			rateLimitType: info.reset.rateLimitType,
+		}).catch(() => undefined)
+	}
+
+	private async updateRateLimitAfterTick(spawnedCount: number, nowMs: number): Promise<void> {
+		if (this.rateLimitState.reset === null) return
+		const resetMs = this.rateLimitState.reset.resetsAt * 1000
+		if (nowMs < resetMs) return
+		if (spawnedCount > 0) {
+			this.rateLimitState.nextResumeAtMs = nowMs + DAEMON_RATE_LIMIT_STAGGER_MS
+			await this.persistRateLimitState()
+			await this.appendGlobalDaemonLog({
+				type: "rate_limit.staggered_resume",
+				spawned: spawnedCount,
+				nextResumeAt: new Date(this.rateLimitState.nextResumeAtMs).toISOString(),
+			}).catch(() => undefined)
+			return
+		}
+		if (listActiveRuns(this.schedulerState).length > 0) return
+		await this.appendGlobalDaemonLog({
+			type: "rate_limit.recovered",
+			rateLimitedUntil: this.rateLimitState.reset.resetAtIso,
+		}).catch(() => undefined)
+		this.rateLimitState = createDaemonRateLimitState()
+		this.schedulerState.rateLimitedUntilMs = null
+		await this.persistRateLimitState()
+	}
+
+	private schedulerNowMs(): number {
+		const injected = this.options.scheduler?.now
+		return injected ? injected() * 1000 : Date.now()
 	}
 
 	async stop(): Promise<void> {
@@ -1152,7 +1310,11 @@ export class CoderLoopDaemon {
 	private async runSchedulerTicks(): Promise<void> {
 		do {
 			this.schedulerTickRequested = false
-			await schedulerTick(this.buildSchedulerOptions())
+			const nowMs = this.schedulerNowMs()
+			const decision = daemonRateLimitDecision(this.rateLimitState, nowMs)
+			const limits = decision.maxSpawns === undefined ? undefined : { maxSpawns: decision.maxSpawns }
+			const tick = await schedulerTick(this.buildSchedulerOptions(), limits)
+			await this.updateRateLimitAfterTick(tick.spawnedRuns.length, nowMs)
 		} while (this.schedulerTickRequested && this.state === "running")
 	}
 
@@ -1186,6 +1348,9 @@ export class CoderLoopDaemon {
 					await this.appendDaemonLogForChainId(event.chainId, { type: "scheduler.event", event: event as unknown as JsonObject })
 				}
 				await externalOnEvent?.(event)
+			},
+			onRateLimitObserved: async (info) => {
+				await this.applyRateLimitNotice(info)
 			},
 		}
 		if (scheduler.phaseRunner !== undefined) options.phaseRunner = scheduler.phaseRunner

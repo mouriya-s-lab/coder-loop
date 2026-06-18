@@ -3128,6 +3128,180 @@ process.exitCode = 0
 	})
 })
 
+describe("daemon rate-limit cooldown (issue #478)", () => {
+	test("rate-limit exit writes account cooldown visible in daemon status, pauses further spawns, and rolls back attempts (AC4/AC4b/AC7)", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-rate-limit-cooldown`)
+		const loopDataRoot = resolve(root, "ld")
+		const fakeRunner = resolve(root, "fake-runner.ts")
+		const eventLog = resolve(root, "events.jsonl")
+		const socketPath = resolve(loopDataRoot, "daemon.sock")
+		await mkdir(loopDataRoot, { recursive: true })
+		await writeFakeRunner(fakeRunner)
+		const schedulerEvents: SchedulerEvent[] = []
+		const now = 1_800_040_000
+		const resetsAt = now + 600
+		const store = openSqliteStateStore({ loopDataRoot })
+		let chainId = 0
+		let itemAId = 0
+		let itemBId = 0
+		try {
+			const chain = store.createChain({
+				name: "rate-limit-cooldown-chain",
+				preset: "gh-issue-pr-iteration",
+				repository: "mouriya-s-lab/coder-loop",
+				baseBranch: "main",
+				status: "active",
+				metadata: {},
+			})
+			chainId = chain.id
+			itemAId = store.createItem({ chainId: chain.id, issueNumber: 7200, repoCwd: REPO_ROOT, status: "queued", attempts: 0, title: "rate-limit item", extra: {} }).id
+			itemBId = store.createItem({ chainId: chain.id, issueNumber: 7201, repoCwd: REPO_ROOT, status: "queued", attempts: 0, title: "post-cooldown item", extra: {} }).id
+		} finally {
+			store.close()
+		}
+		const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
+			const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+			await mkdir(worktreePath, { recursive: true })
+			return worktreePath
+		}
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			shutdownGraceMs: 50,
+			scheduler: {
+				enabled: true,
+				intervalMs: 20,
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
+				presetDir: PRESET_DIR,
+				worktreeManager,
+				kindResolver: () => ({ ok: true, kind: "code" }),
+				now: () => now,
+				prompt: ({ item, runId }) => JSON.stringify({
+					itemId: item.id,
+					issueNumber: item.issueNumber,
+					runId,
+					eventLog,
+					sleepMs: 5,
+					...(item.id === itemAId ? { rateLimitResetsAt: resetsAt, rateLimitType: "five_hour" } : { exitCode: 0, writeStatus: "done" }),
+				}),
+				chainCompleteTriggerForChain: () => null,
+				onEvent: (event) => { schedulerEvents.push(event) },
+			},
+		})
+		try {
+			await waitFor(
+				() => Promise.resolve(schedulerEvents.find((e) => e.type === "scheduler.rate_limited") ?? null),
+				(e) => e !== null,
+				10_000,
+			)
+			// AC4: daemon.status exposes rateLimitedUntil (ISO + unix + active flag)
+			const statusResp = expectOk(await sendDaemonRequest(socketPath, daemonRequest("daemon.status")))
+			const rateLimit = record(statusResp.daemon).rateLimit as Record<string, unknown>
+			expect(rateLimit.rateLimitedUntilUnix).toBe(resetsAt)
+			expect(rateLimit.active).toBe(true)
+			expect(typeof rateLimit.rateLimitedUntil).toBe("string")
+			// AC7: rate-limit attempt did not consume an attempt slot
+			const itemA = await readItem(loopDataRoot, chainId, 7200)
+			expect(itemA?.attempts).toBe(0)
+			// AC6 precondition: the rejected run's sessionId was stored for resume
+			expect(itemA?.sessionIds.iteration?.claude).toBe(`sess-rl-${itemAId}`)
+			// AC4b: while now < rateLimitedUntil, a queued sibling is not spawned
+			await new Promise((resolve) => setTimeout(resolve, 300))
+			const itemB = await readItem(loopDataRoot, chainId, 7201)
+			expect(itemB?.status).toBe("queued")
+			expect(schedulerEvents.find((e) => e.type === "agent.spawn" && e.itemId === itemBId)).toBeUndefined()
+		} finally {
+			await daemon.stop()
+		}
+	})
+
+	test("staggered resume resumes the rate-limited item with --resume after cooldown (AC5/AC6)", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-rate-limit-staggered`)
+		const loopDataRoot = resolve(root, "ld")
+		const fakeRunner = resolve(root, "fake-runner.ts")
+		const eventLog = resolve(root, "events.jsonl")
+		await mkdir(loopDataRoot, { recursive: true })
+		await writeFakeRunner(fakeRunner)
+		const schedulerEvents: SchedulerEvent[] = []
+		let now = 1_800_040_500
+		const resetsAt = now + 2
+		const store = openSqliteStateStore({ loopDataRoot })
+		let chainId = 0
+		let itemAId = 0
+		try {
+			const chain = store.createChain({
+				name: "rate-limit-staggered-chain",
+				preset: "gh-issue-pr-iteration",
+				repository: "mouriya-s-lab/coder-loop",
+				baseBranch: "main",
+				status: "active",
+				metadata: {},
+			})
+			chainId = chain.id
+			itemAId = store.createItem({ chainId: chain.id, issueNumber: 7202, repoCwd: REPO_ROOT, status: "queued", attempts: 0, title: "rate-limit resume item", extra: {} }).id
+		} finally {
+			store.close()
+		}
+		const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
+			const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+			await mkdir(worktreePath, { recursive: true })
+			return worktreePath
+		}
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			shutdownGraceMs: 50,
+			scheduler: {
+				enabled: true,
+				intervalMs: 20,
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
+				presetDir: PRESET_DIR,
+				worktreeManager,
+				kindResolver: () => ({ ok: true, kind: "code" }),
+				now: () => now,
+				prompt: ({ item, runId }) => JSON.stringify({
+					itemId: item.id,
+					issueNumber: item.issueNumber,
+					runId,
+					eventLog,
+					sleepMs: 5,
+					...(schedulerEvents.find((e) => e.type === "scheduler.rate_limited") === undefined && item.id === itemAId
+						? { rateLimitResetsAt: resetsAt, rateLimitType: "five_hour" }
+						: { exitCode: 0, writeStatus: "done" }),
+				}),
+				chainCompleteTriggerForChain: () => null,
+				onEvent: (event) => { schedulerEvents.push(event) },
+			},
+		})
+		try {
+			await waitFor(
+				() => Promise.resolve(schedulerEvents.find((e) => e.type === "scheduler.rate_limited") ?? null),
+				(e) => e !== null,
+				10_000,
+			)
+			// Advance virtual time past the cooldown window so daemonRateLimitDecision flips to stagger-ready.
+			now = resetsAt + 1
+			// AC5 + AC6: wait until the resumed fake runner actually starts and records that it received
+			// --resume <sessionId> on its argv. (Waiting on the agent.spawn event alone would return before
+			// the child process runs.)
+			const resumeStart = await waitFor(
+				async () => {
+					const content = await readFile(eventLog, "utf-8")
+					const entry = content
+						.split("\n")
+						.filter((line) => line.includes('"type":"start"'))
+						.map((line) => { try { return JSON.parse(line) as { itemId?: number; resumedFrom?: string | null } } catch { return null } })
+						.find((parsed) => parsed !== null && parsed.itemId === itemAId && parsed.resumedFrom !== null && parsed.resumedFrom !== undefined)
+					return entry ?? null
+				},
+				(value) => value !== null,
+				10_000,
+			)
+			expect(resumeStart?.resumedFrom ?? null).toBe(`sess-rl-${itemAId}`)
+		} finally {
+			await daemon.stop()
+		}
+	})
+})
+
 type PhaseAdvancementFixture = Fixture & {
 	fakePhaseAwareRunner: string
 }
@@ -3588,10 +3762,18 @@ const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
 // The scheduler appends a per-run nonce summary instruction to the prompt; derive this
 // run's tag from it the same way a real agent would.
 const runSummaryTag = prompt.match(/<(summary-[0-9a-f]+)>/)?.[1] ?? null
+const resumeIndex = Bun.argv.indexOf("--resume")
+const resumedFrom = resumeIndex !== -1 ? Bun.argv[resumeIndex + 1] ?? null : null
 const writeLine = (line) => Bun.write(Bun.stdout, line + "\\n")
-await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd(), summaryTag: runSummaryTag }) + "\\n")
+await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd(), summaryTag: runSummaryTag, resumedFrom }) + "\\n")
 await new Promise((resolve) => setTimeout(resolve, input.sleepMs))
 await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
+if (typeof input.rateLimitResetsAt === "number") {
+  console.log(JSON.stringify({ type: "system", session_id: "sess-rl-" + input.itemId }))
+  console.log(JSON.stringify({ type: "rate_limit_event", rate_limit_info: { status: "rejected", resetsAt: input.rateLimitResetsAt, rateLimitType: input.rateLimitType || "five_hour", overageStatus: "rejected", overageDisabledReason: "org_level_disabled" } }))
+  console.log(JSON.stringify({ type: "result", is_error: true, api_error_status: 429, result: "You've hit your session limit" }))
+  process.exit(1)
+}
 await writeLine("done:" + input.itemId)
 const summary = Object.prototype.hasOwnProperty.call(input, "summary") ? input.summary : "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=fake-runner default"
 if (summary !== null) await writeLine(summary)

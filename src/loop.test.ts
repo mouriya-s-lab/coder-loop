@@ -9,10 +9,13 @@ import {
 	buildConfigBindings,
 	buildDaemonStartPlan,
 	buildRuntimeBindings,
+	classifyTermination,
 	createSummaryWatchdog,
 	decideResume,
 	detectHostRunner,
+	extractErrorCode,
 	getItemId,
+	isTransient5xx,
 	makeIssueRunContext,
 	normalizeQueueIssueId,
 	lastNonTriggerPhaseForPreset,
@@ -22,12 +25,15 @@ import {
 	parseSessionIdFromRunnerStream,
 	renderFragmentIndex,
 	renderPrompt,
+	runAgentWithBackoff,
 	RUNTIME_BINDING_KEYS,
 	resolveWorkflowFileConfigBinding,
 	stripRoleEntryFrontmatter,
 	resolveBinding,
 	selectRunnerForPhase,
 	summaryWatchdogConfigForPhase,
+	type AttemptOutcome,
+	type ClassifyInput,
 	type ConfigBindings,
 	type IssueRunContext,
 	type JsonObject,
@@ -38,6 +44,7 @@ import {
 	type RuntimeBindings,
 	type StatusCurrentRunSnapshot,
 } from "./loop"
+import { RATE_LIMIT_ERROR_CODE } from "./rate-limit"
 import type { ItemRecord } from "./sqlite-state"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -663,5 +670,112 @@ describe("small parsers", () => {
 			terminated: { kind: "signal", name: "SIGTERM" },
 			log: "stdout.jsonl",
 		})).toEqual({ kind: "resume", sessionId: "thread-ok" })
+	})
+})
+
+describe("rate-limit detection (issue #478)", () => {
+	test("extractErrorCode recognizes a 429 result event on stdout (AC1)", () => {
+		const stdout = `{"type":"result","is_error":true,"api_error_status":429,"result":"You've hit your session limit · resets 1:30am (Asia/Tokyo)"}`
+		expect(extractErrorCode(stdout, "")).toBe(RATE_LIMIT_ERROR_CODE)
+	})
+
+	test("extractErrorCode recognizes a rejected rate_limit_event on stdout (AC1)", () => {
+		const stdout = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1779204000,"rateLimitType":"five_hour"}}`
+		expect(extractErrorCode(stdout, "")).toBe(RATE_LIMIT_ERROR_CODE)
+	})
+
+	test("extractErrorCode recognizes a synthetic error=rate_limit event on stdout (AC1)", () => {
+		const stdout = `{"type":"assistant","error":"rate_limit"}`
+		expect(extractErrorCode(stdout, "")).toBe(RATE_LIMIT_ERROR_CODE)
+	})
+
+	test("isTransient5xx treats the rate-limit code as transient (AC2)", () => {
+		expect(isTransient5xx(RATE_LIMIT_ERROR_CODE)).toBe(true)
+		expect(isTransient5xx("rate_limit_429")).toBe(true)
+	})
+
+	test("classifyTermination attaches the extracted reset to the error variant (AC3)", () => {
+		const stdout = [
+			`{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1779204000,"rateLimitType":"five_hour"}}`,
+			`{"type":"result","is_error":true,"api_error_status":429,"result":"You've hit your session limit"}`,
+		].join("\n")
+		const input: ClassifyInput = { exitCode: 1, signal: null, stdoutText: stdout, stderrText: "" }
+		const terminated = classifyTermination(input)
+		expect(terminated).toEqual({
+			kind: "error",
+			code: RATE_LIMIT_ERROR_CODE,
+			rateLimit: {
+				resetsAt: 1779204000,
+				resetAtIso: new Date(1779204000 * 1000).toISOString(),
+				rateLimitType: "five_hour",
+			},
+		})
+	})
+
+	test("classifyTermination returns a plain error when a 429 has no rejected event to extract a reset from", () => {
+		const stdout = `{"type":"result","is_error":true,"api_error_status":429,"result":"hit your limit"}`
+		const terminated = classifyTermination({ exitCode: 1, signal: null, stdoutText: stdout, stderrText: "" })
+		expect(terminated.kind).toBe("error")
+		if (terminated.kind === "error") {
+			expect(terminated.code).toBe(RATE_LIMIT_ERROR_CODE)
+			expect(terminated.rateLimit).toBe(undefined)
+		}
+	})
+
+	test("decideResume resumes a prior session after a rate-limit error (rate-limit is transient)", () => {
+		expect(decideResume({
+			attempt: "a",
+			runner: "claude",
+			model: null,
+			sessionId: "sess-rl",
+			exitCode: 1,
+			signal: null,
+			terminated: { kind: "error", code: RATE_LIMIT_ERROR_CODE, rateLimit: { resetsAt: 1779204000, resetAtIso: "x", rateLimitType: "five_hour" } },
+			log: "stdout.jsonl",
+		})).toEqual({ kind: "resume", sessionId: "sess-rl" })
+	})
+
+	test("runAgentWithBackoff short-circuits on a rate-limit outcome without sleeping through blind exponential backoff (AC7 unit)", async () => {
+		const reset = { resetsAt: 1779204000, resetAtIso: new Date(1779204000 * 1000).toISOString(), rateLimitType: "five_hour" }
+		let sleepCalls = 0
+		let spawnCalls = 0
+		const outcome: AttemptOutcome = {
+			output: `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1779204000}}`,
+			exitCode: 1,
+			signal: null,
+			sessionId: "sess-rl",
+			terminated: { kind: "error", code: RATE_LIMIT_ERROR_CODE, rateLimit: reset },
+			rateLimit: reset,
+		}
+		const result = await runAgentWithBackoff({
+			spawnAttempt: async () => { spawnCalls++; return outcome },
+			sleep: async () => { sleepCalls++ },
+			log: () => {},
+			now: () => Date.now(),
+			initialResume: { kind: "fresh" },
+		})
+		expect(spawnCalls).toBe(1)
+		expect(sleepCalls).toBe(0)
+		expect(result.rateLimit).toEqual(reset)
+		expect(result.attempts).toBe(1)
+	})
+
+	test("runAgentWithBackoff still uses exponential backoff for a non-rate-limit transient 5xx", async () => {
+		let sleepCalls = 0
+		let spawnCalls = 0
+		const outcomes: AttemptOutcome[] = [
+			{ output: "err", exitCode: 1, signal: null, sessionId: "sess-a", terminated: { kind: "error", code: "503_http" }, rateLimit: null },
+			{ output: "ok", exitCode: 0, signal: null, sessionId: "sess-a", terminated: { kind: "clean" }, rateLimit: null },
+		]
+		const result = await runAgentWithBackoff({
+			spawnAttempt: async () => { const o = outcomes[spawnCalls]!; spawnCalls++; return o },
+			sleep: async () => { sleepCalls++ },
+			log: () => {},
+			now: () => Date.now(),
+			initialResume: { kind: "fresh" },
+		})
+		expect(spawnCalls).toBe(2)
+		expect(sleepCalls).toBe(1)
+		expect(result.rateLimit).toBe(null)
 	})
 })
