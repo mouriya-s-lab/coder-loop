@@ -252,6 +252,52 @@ attemptTimeoutSeconds = 3600
 		}
 	})
 
+	// #412 retry — AC #3: in a mixed-preset chain (chain.preset != items[*].preset, or two items
+	// declaring different presets), `coder-loop status --json` must resolve continuable / terminal
+	// / idField from each item's own preset rather than the chain seed. Pre-fix, the chain-seed
+	// `gh-issue-pr-iteration` preset's vocabulary was applied to every item: the foreign-preset
+	// `single-phase-example` item's status ("pending") was not in the seed's continuable set, so
+	// `state.kind` flipped to `invalid-runtime` and `queue.selected` became null once the
+	// seed-preset items finished. The fix loads each item's preset and gates membership per-item.
+	test("status CLI on mixed-preset chain selects foreign-preset item by its own continuable set (AC #3)", async () => {
+		const fixture = await startFixture("status-mixed-preset")
+		try {
+			const target = await makeTarget("status-mixed-preset-target")
+			expectJsonOk(await runCli(["chain", "create", "mixed-preset-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--preset", "gh-issue-pr-iteration", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+
+			// Item A: gh-issue-pr-iteration (chain seed). Advance it to `done` to drain the seed-preset
+			// half of the queue, leaving only the foreign-preset item live.
+			expectJsonOk(await runCli(["item", "add", "mixed-preset-chain", "--issue", "55501", "--repo-cwd", target, "--preset", "gh-issue-pr-iteration", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expectJsonOk(await runCli(["item", "update", "mixed-preset-chain", "--issue", "55501", "--status", "done", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+
+			// Item B: single-phase-example (foreign preset). idField=`id`, continuable=[`pending`],
+			// terminal=[`done`]. We add it via single-phase-example so its idField bind requires
+			// `id` rather than `issue`; pass `--field-json` for the id binding.
+			expectJsonOk(await runCli([
+				"item", "add", "mixed-preset-chain",
+				"--issue", "55502",
+				"--repo-cwd", target,
+				"--preset", "single-phase-example",
+				"--field-json", JSON.stringify({ id: "55502" }),
+				"--loop-data-root", fixture.loopDataRoot,
+				"--json",
+			]))
+
+			const status = expectJsonOk(await runCli(["status", target, "--chain", "mixed-preset-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expect(status.state).toMatchObject({ kind: "ok", ok: true })
+			// queue.continuable counts items whose status is in their own preset's continuable set.
+			// "pending" is continuable under single-phase-example (item B); "done" is terminal under
+			// gh-issue-pr-iteration (item A). Pre-fix this would be 0 (foreign "pending" not in
+			// seed continuable) and state.kind=invalid-runtime.
+			expect(status.queue).toMatchObject({ total: 2, continuable: 1, terminal: 1 })
+			expect(status.queue.selected).not.toBeNull()
+			expect(status.queue.selected.item.preset).toBe("single-phase-example")
+			// idField for single-phase-example is `id`; the snapshot resolves `id` via per-item preset.
+			expect(status.queue.selected.id).toBe("55502")
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
 
 	test("item reorder CLI", async () => {
 		const fixture = await startFixture("item-reorder-cli")

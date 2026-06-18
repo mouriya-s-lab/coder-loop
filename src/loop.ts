@@ -2737,9 +2737,14 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 	const target = makeStatusTargetSnapshot(options.targetCwd, options.configPath, options, { kind: "loaded", error: null })
 	const items = readDbItemsForChain(options.loopDataRoot, loaded.chain.id)
 	const current = readDbCurrentRun(options.loopDataRoot, loaded.chain.id)
-	const selected = pickFirstSelectableStatusItem(options, loaded.chain, items, current)
-	const runtimeErrors = await collectStatusRuntimeErrors(options, loaded.chain, items, current)
-	const currentSnapshot = await buildStatusCurrentSnapshotFromRecords(options, items, current)
+	// #412: status snapshot must resolve continuable / terminal / idField from each item's own preset
+	// so mixed-preset chains stay selectable after chain-preset items finish. The resolver caches
+	// loaded presets by directory so we read each preset.toml at most once per snapshot, and falls
+	// back to the chain seed `options.preset` for legacy items that declare no preset.
+	const itemPresets = await loadStatusItemPresets(options, items)
+	const selected = pickFirstSelectableStatusItem(options, loaded.chain, items, current, itemPresets)
+	const runtimeErrors = await collectStatusRuntimeErrors(options, loaded.chain, items, current, itemPresets)
+	const currentSnapshot = await buildStatusCurrentSnapshotFromRecords(options, items, current, itemPresets)
 	const events = await buildStatusEventsSnapshotFromRecords(options, current, selected, items)
 	const processes = await buildCentralStatusProcessSnapshot(options)
 	const snapshot: CoderLoopStatusSnapshot = {
@@ -2755,7 +2760,7 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 			errors: runtimeErrors,
 			error: null,
 		},
-		queue: buildStatusQueueSnapshotFromRecords(options, items, selected),
+		queue: buildStatusQueueSnapshotFromRecords(options, items, selected, itemPresets),
 		runs: buildStatusRunsSnapshot(readDbRunsForChain(options.loopDataRoot, loaded.chain.id)),
 		current: currentSnapshot,
 		events,
@@ -2763,6 +2768,47 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 	}
 	StatusSnapshotBoundary.assert(snapshot)
 	return snapshot
+}
+
+// #412: per-item preset resolver used by status snapshot paths. The resolver loads each unique
+// preset directory at most once per snapshot (TOML + phase prompt readability checks are not
+// free) and returns the chain seed `options.preset` for items that declare no preset of their
+// own. Failures loading an item-declared preset propagate — a broken preset is a real config
+// error, not a fall-back-silently case.
+export type StatusItemPresetResolver = {
+	presetForItem(item: ItemRecord): Preset
+	presetDirForItem(item: ItemRecord): string
+}
+
+async function loadStatusItemPresets(options: LoopOptions, items: readonly ItemRecord[]): Promise<StatusItemPresetResolver> {
+	const cache = new Map<string, Preset>()
+	cache.set(options.preset.presetDir, options.preset)
+	for (const item of items) {
+		if (item.preset === null && item.presetPath === null) continue
+		const presetDir = resolveItemPresetDirForStatus(item)
+		if (cache.has(presetDir)) continue
+		const loaded = await loadPreset(presetDir)
+		cache.set(presetDir, loaded)
+	}
+	return {
+		presetForItem(item: ItemRecord): Preset {
+			if (item.preset === null && item.presetPath === null) return options.preset
+			const presetDir = resolveItemPresetDirForStatus(item)
+			const cached = cache.get(presetDir)
+			if (cached === undefined) throw new Error(`status: preset cache miss for item id=${item.id} presetDir=${presetDir}`)
+			return cached
+		},
+		presetDirForItem(item: ItemRecord): string {
+			if (item.preset === null && item.presetPath === null) return options.preset.presetDir
+			return resolveItemPresetDirForStatus(item)
+		},
+	}
+}
+
+function resolveItemPresetDirForStatus(item: ItemRecord): string {
+	if (item.presetPath !== null) return item.presetPath
+	if (item.preset !== null) return resolvePresetDir({ preset: item.preset, presetPath: null }, PKG_ROOT, item.repoCwd)
+	throw new Error(`resolveItemPresetDirForStatus: item id=${item.id} declares neither preset nor presetPath`)
 }
 
 type StatusReadResult<T> =
@@ -2910,42 +2956,86 @@ function pickFirstSelectableStatusItem(
 	chain: ChainRecord,
 	items: readonly ItemRecord[],
 	current: CurrentRunRecord | null,
+	itemPresets: StatusItemPresetResolver,
 ): SelectedIssue | null {
-	const continuable = options.preset.statuses.continuable
-	const currentItem = current === null ? null : currentItemFromRecords(current, items, options.preset)
-	const selected = currentItem !== null && continuable.includes(currentItem.status)
+	// #412: continuable membership is a per-item preset question — different items in a mixed-preset
+	// chain may have entirely disjoint status vocabularies. Reading `options.preset.statuses` here
+	// (the chain seed) makes foreign-preset items unselectable once chain-preset items finish.
+	const currentItem = current === null ? null : findCurrentItem(current, items, itemPresets)
+	const isContinuableForItem = (item: ItemRecord): boolean =>
+		itemPresets.presetForItem(item).statuses.continuable.includes(item.status)
+	const selected = currentItem !== null && isContinuableForItem(currentItem)
 		? currentItem
-		: items.find((item) => continuable.includes(item.status)) ?? null
+		: items.find(isContinuableForItem) ?? null
 	if (selected === null) return null
 
-	const selectedId = getItemId(selected, options.preset)
+	const selectedPreset = itemPresets.presetForItem(selected)
+	const selectedId = getItemId(selected, selectedPreset)
 	const issueFile = resolveOptionalChainIssueFile(options, chain, selected, "Selected issue file")
 	const evidenceDir = resolveChainEvidenceDir(options, chain, selected, selectedId, "Selected evidence directory")
 	const agentCwd = selected.agentCwd ?? options.targetCwd
-	const runner = selectRunnerForPhase(firstNonTriggerPhaseForPreset(options.preset).name, selected, options)
-	const reviewRunner = selectRunnerForPhase(lastNonTriggerPhaseForPreset(options.preset).name, selected, options)
+	const selectedInput = phaseRunnerSelectionInputForPreset(options, selectedPreset)
+	const runner = selectRunnerForPhase(firstNonTriggerPhaseForPreset(selectedPreset).name, selected, selectedInput)
+	const reviewRunner = selectRunnerForPhase(lastNonTriggerPhaseForPreset(selectedPreset).name, selected, selectedInput)
 	return { item: selected, issueFile, evidenceDir, agentCwd, runner, reviewRunner }
 }
 
-function buildStatusQueueSnapshotFromRecords(options: LoopOptions, items: readonly ItemRecord[], selected: SelectedIssue | null): StatusQueueSnapshot {
+// #412: try each item's own preset when looking up the current run's item, since the run was
+// originally spawned against the item's preset (not the chain seed). The first preset whose
+// idField matches yields the item — if none match, fall back to chain-seed lookup so legacy items
+// without their own preset still resolve.
+function findCurrentItem(
+	current: CurrentRunRecord,
+	items: readonly ItemRecord[],
+	itemPresets: StatusItemPresetResolver,
+): ItemRecord | null {
+	const itemId = current.extra.itemId
+	if (typeof itemId === "number" && Number.isInteger(itemId)) {
+		const byItemId = items.find((item) => item.id === itemId)
+		if (byItemId !== undefined) return byItemId
+	}
+	for (const item of items) {
+		const preset = itemPresets.presetForItem(item)
+		const currentId = currentIdFromRecord(current, preset)
+		if (currentId !== null && getItemId(item, preset) === currentId) return item
+	}
+	return items.find((item) => item.lastRunId === current.runId) ?? null
+}
+
+function phaseRunnerSelectionInputForPreset(options: LoopOptions, preset: Preset): PhaseRunnerSelectionInput {
+	if (preset === options.preset) return options
+	const defaultRunner = selectPhaseDefaultRunner(firstNonTriggerPhaseForPreset(preset), preset, options.runnerCommands)
+	const reviewRunner = selectPhaseDefaultRunner(lastNonTriggerPhaseForPreset(preset), preset, options.runnerCommands)
+	return { preset, defaultRunner, reviewRunner, runnerCommands: options.runnerCommands }
+}
+
+function buildStatusQueueSnapshotFromRecords(
+	options: LoopOptions,
+	items: readonly ItemRecord[],
+	selected: SelectedIssue | null,
+	itemPresets: StatusItemPresetResolver,
+): StatusQueueSnapshot {
 	const byStatus: Record<string, number> = {}
 	for (const item of items) byStatus[item.status] = (byStatus[item.status] ?? 0) + 1
-	const continuableStatuses = new Set(options.preset.statuses.continuable)
-	const terminalStatusNames = new Set(options.preset.statuses.terminal)
+	// #412: in a mixed-preset chain, a single status name (e.g. `pending`) can be continuable
+	// under one preset and absent under another. Decide per item, against the item's own preset.
+	const isContinuable = (item: ItemRecord): boolean => itemPresets.presetForItem(item).statuses.continuable.includes(item.status)
+	const isTerminal = (item: ItemRecord): boolean => itemPresets.presetForItem(item).statuses.terminal.includes(item.status)
+	const selectedPreset = selected === null ? null : itemPresets.presetForItem(selected.item)
 	return {
 		total: items.length,
 		byStatus,
-		continuable: items.filter((item) => continuableStatuses.has(item.status)).length,
-		terminal: items.filter((item) => terminalStatusNames.has(item.status)).length,
-		selected: selected === null ? null : {
-			id: getItemId(selected.item, options.preset),
-			item: statusItemSnapshot(selected.item, options.preset),
+		continuable: items.filter(isContinuable).length,
+		terminal: items.filter(isTerminal).length,
+		selected: selected === null || selectedPreset === null ? null : {
+			id: getItemId(selected.item, selectedPreset),
+			item: statusItemSnapshot(selected.item, selectedPreset),
 			issueFile: selected.issueFile,
 			evidenceDir: selected.evidenceDir,
 			agentCwd: selected.agentCwd,
 			runner: statusRunnerSelection(selected.runner),
 			reviewRunner: statusRunnerSelection(selected.reviewRunner),
-			phaseRunners: statusRunnerSelections(selectPhaseRunnersForItem(options.preset, selected.item, options.runnerCommands)),
+			phaseRunners: statusRunnerSelections(selectPhaseRunnersForItem(selectedPreset, selected.item, options.runnerCommands)),
 			preset: resolveStatusItemPresetSnapshot(selected.item, options.preset),
 		},
 	}
@@ -3018,22 +3108,29 @@ async function buildStatusCurrentSnapshotFromRecords(
 	options: LoopOptions,
 	items: readonly ItemRecord[],
 	current: CurrentRunRecord | null,
+	itemPresets: StatusItemPresetResolver,
 ): Promise<StatusCurrentSnapshot> {
 	if (current === null) return { run: null, id: null, item: null, runner: null, phaseStatus: null }
 	let id: string | null = null
 	let item: ItemRecord | null = null
 	try {
-		item = currentItemFromRecords(current, items, options.preset)
-		id = item === null ? currentIdFromRecord(current, options.preset) : getItemId(item, options.preset)
+		item = findCurrentItem(current, items, itemPresets)
+		const fallbackPreset = item === null ? options.preset : itemPresets.presetForItem(item)
+		id = item === null ? currentIdFromRecord(current, fallbackPreset) : getItemId(item, fallbackPreset)
 	} catch {
 		id = null
 	}
 	const outputPath = agentOutputPath(options, current.runId, current.phase)
+	// #412: current-run runner resolution must use the running item's preset (the scheduler spawned
+	// against that preset's phase plan). selectRunnerForPhase would otherwise look up the phase in
+	// the chain seed and throw "preset X does not define phase Y" on a foreign-preset item.
+	const itemPreset = item === null ? null : itemPresets.presetForItem(item)
+	const selectionInput = itemPreset === null ? null : phaseRunnerSelectionInputForPreset(options, itemPreset)
 	return {
 		run: statusCurrentRunSnapshot(current),
 		id,
-		item: item === null ? null : statusItemSnapshot(item, options.preset),
-		runner: item === null ? null : statusRunnerSelection(selectRunnerForPhase(current.phase, item, options)),
+		item: item === null || itemPreset === null ? null : statusItemSnapshot(item, itemPreset),
+		runner: item === null || selectionInput === null ? null : statusRunnerSelection(selectRunnerForPhase(current.phase, item, selectionInput)),
 		phaseStatus: await readAgentPhaseStatus(agentStatusPath(outputPath)),
 	}
 }
@@ -4678,12 +4775,10 @@ async function collectStatusRuntimeErrors(
 	chain: ChainRecord,
 	items: readonly ItemRecord[],
 	current: CurrentRunRecord | null,
+	itemPresets: StatusItemPresetResolver,
 ): Promise<RuntimeCheckError[]> {
 	const errors: RuntimeCheckError[] = []
 	const seenIds = new Set<string>()
-	const preset = options.preset
-	const allowedStatuses = new Set<string>([...preset.statuses.continuable, ...preset.statuses.terminal])
-	const allowedPhases = new Set<string>(preset.phases.map((phase) => phase.name))
 
 	if (options.worktree && (options.baseBranch === null || options.baseBranch.trim() === "")) pushCheckError(errors, "worktree", "worktree mode requires a non-empty baseBranch")
 
@@ -4693,10 +4788,16 @@ async function collectStatusRuntimeErrors(
 
 	for (const [index, item] of items.entries()) {
 		const label = `state.queue[${index}]`
-		const idAsString = getItemId(item, preset)
-		if (seenIds.has(idAsString)) pushCheckError(errors, `${label}.${preset.item.idField}`, `duplicate id "${idAsString}"`)
+		// #412: validate each item against its own preset's vocabulary. A status that's terminal under
+		// one preset can be `pending` under another, so the chain-seed allowedStatuses is not a valid
+		// gate in a mixed-preset chain. id duplication is checked per item-preset idField rather than
+		// per chain-seed idField because two different presets may use different idField names.
+		const itemPreset = itemPresets.presetForItem(item)
+		const allowedStatusesForItem = new Set<string>([...itemPreset.statuses.continuable, ...itemPreset.statuses.terminal])
+		const idAsString = getItemId(item, itemPreset)
+		if (seenIds.has(idAsString)) pushCheckError(errors, `${label}.${itemPreset.item.idField}`, `duplicate id "${idAsString}"`)
 		seenIds.add(idAsString)
-		if (!allowedStatuses.has(item.status)) pushCheckError(errors, `${label}.status`, `status "${item.status}" is not in preset.statuses (continuable + terminal)`)
+		if (!allowedStatusesForItem.has(item.status)) pushCheckError(errors, `${label}.status`, `status "${item.status}" is not in preset.statuses (continuable + terminal)`)
 		if (!Number.isInteger(item.attempts) || item.attempts < 0) pushCheckError(errors, `${label}.attempts`, "must be a non-negative integer")
 		if (item.title !== null && item.title.trim() === "") pushCheckError(errors, `${label}.title`, "must be null or non-empty")
 		if (item.priority !== null && item.priority.trim() === "") pushCheckError(errors, `${label}.priority`, "must be null or non-empty")
@@ -4720,10 +4821,16 @@ async function collectStatusRuntimeErrors(
 	}
 
 	if (current !== null) {
-		const currentItem = currentItemFromRecords(current, items, preset)
-		if (currentItem === null) pushCheckError(errors, `state.current.${preset.item.idField}`, "current item is not present in queue")
-		else if (!preset.statuses.continuable.includes(currentItem.status)) pushCheckError(errors, `state.current.${preset.item.idField}`, `id "${getItemId(currentItem, preset)}" has non-continuable status ${currentItem.status}`)
-		if (!allowedPhases.has(current.phase)) pushCheckError(errors, "state.current.phase", `phase "${current.phase}" is not declared in preset.phases`)
+		// #412: validate the current run against the running item's preset, not the chain seed.
+		// The active phase and continuable-status check both belong to the item's preset because
+		// the scheduler spawned the run from that preset's phase plan.
+		const currentItem = findCurrentItem(current, items, itemPresets)
+		const currentItemPreset = currentItem === null ? options.preset : itemPresets.presetForItem(currentItem)
+		const allowedPhasesForCurrent = new Set<string>(currentItemPreset.phases.map((phase) => phase.name))
+		const currentIdField = currentItemPreset.item.idField
+		if (currentItem === null) pushCheckError(errors, `state.current.${currentIdField}`, "current item is not present in queue")
+		else if (!currentItemPreset.statuses.continuable.includes(currentItem.status)) pushCheckError(errors, `state.current.${currentIdField}`, `id "${getItemId(currentItem, currentItemPreset)}" has non-continuable status ${currentItem.status}`)
+		if (!allowedPhasesForCurrent.has(current.phase)) pushCheckError(errors, "state.current.phase", `phase "${current.phase}" is not declared in preset.phases`)
 		if (current.runId.trim() === "") pushCheckError(errors, "state.current.runId", "must not be empty")
 	}
 

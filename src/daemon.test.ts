@@ -739,6 +739,47 @@ describe("daemon", () => {
 	})
 
 
+	// #412 retry: itemToJson must surface per-item preset / presetPath so `item list --json` is
+	// consistent with `coder-loop status --json` `queue.selected.preset.*` exposure. Supervisors
+	// reading `item list` need to know each item's preset to drive routing decisions; pre-fix the
+	// view omitted both fields.
+	test("socket item list exposes per-item preset and presetPath (post-#412)", async () => {
+		const fixture = await startFixture("item-list-preset-exposure", { schedulerEnabled: false })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "item-list-preset-exposure-chain",
+				preset: "gh-issue-pr-iteration",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+
+			const presetPathDir = resolve(REPO_ROOT, "presets/single-phase-example")
+			expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 41280,
+				repoCwd: REPO_ROOT,
+				preset: "gh-issue-pr-iteration",
+			}))
+			expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 41281,
+				repoCwd: REPO_ROOT,
+				presetPath: presetPathDir,
+			}))
+
+			const listed = expectOk(await request(fixture, "item.list", { chainId })).items
+			if (!Array.isArray(listed)) throw new Error("expected item.list items array")
+			expect(listed).toHaveLength(2)
+			const bundled = listed.map(record).find((item) => item.issueNumber === 41280)
+			const pathItem = listed.map(record).find((item) => item.issueNumber === 41281)
+			if (bundled === undefined || pathItem === undefined) throw new Error("expected both items in list")
+			expect(bundled).toMatchObject({ preset: "gh-issue-pr-iteration", presetPath: null })
+			expect(pathItem).toMatchObject({ preset: null, presetPath: presetPathDir })
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("socket item batch add short-circuits on invalid input without partial write", async () => {
 		const fixture = await startFixture("item-batch-add-invalid-input", { schedulerEnabled: false })
 		try {

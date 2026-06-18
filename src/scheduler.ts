@@ -216,6 +216,14 @@ export type SchedulerPhaseRunner = (input: SchedulerPhaseRunnerInput) => AgentRu
 
 export type SchedulerPhaseRunnerSelectionResolver = (chain: ChainRecord) => PhaseRunnerSelectionInput | Promise<PhaseRunnerSelectionInput>
 
+// #412: per-item phase runner selection. Mixed-preset chains need to resolve runner (preset,
+// defaultRunner, reviewRunner, runnerCommands) against the item's own preset — not the chain
+// seed — because the phase being spawned belongs to the item's preset's phase plan. If the
+// caller wires `phaseRunnerSelectionForItem`, the scheduler prefers it over the chain-wide form.
+// The chain-wide form is preserved for callers that only have a chain in hand (chain-complete
+// trigger phase evaluation) and for single-preset compatibility.
+export type SchedulerPhaseRunnerSelectionForItemResolver = (chain: ChainRecord, item: ItemRecord) => PhaseRunnerSelectionInput | Promise<PhaseRunnerSelectionInput>
+
 export type SchedulerLoadedPreset = {
 	presetDir: string
 	preset: Preset
@@ -240,6 +248,10 @@ export type SchedulerOptions = {
 	runner?: AgentRunnerSelection
 	phaseRunner?: SchedulerPhaseRunner
 	phaseRunnerSelectionForChain?: SchedulerPhaseRunnerSelectionResolver
+	// #412: per-item phase runner resolver. When set, `resolvePhaseRunner` prefers it over
+	// `phaseRunnerSelectionForChain` so mixed-preset chains pick the runner from the item's own
+	// preset rather than the chain seed.
+	phaseRunnerSelectionForItem?: SchedulerPhaseRunnerSelectionForItemResolver
 	presetForChain: SchedulerPresetResolver
 	// Optional per-item resolver — #412. If unset, the scheduler treats `presetForChain` as both
 	// chain-wide and per-item, which preserves pre-#412 single-preset-per-chain behavior.
@@ -2129,6 +2141,14 @@ async function resolvePhaseRunner(
 	input: SchedulerPhaseRunnerInput,
 ): Promise<AgentRunnerSelection> {
 	if (options.phaseRunner !== undefined) return await options.phaseRunner(input)
+	// #412: prefer the per-item resolver. In mixed-preset chains the chain seed's preset declares a
+	// different phase plan than the item's, so resolving runner against the chain seed throws
+	// `preset X does not define phase "<phase from item.preset>"`. The per-item resolver loads
+	// the item's preset and supplies `PhaseRunnerSelectionInput` aligned with that preset.
+	if (options.phaseRunnerSelectionForItem !== undefined) {
+		const selection = await options.phaseRunnerSelectionForItem(input.chain, input.item)
+		return selectRunnerForPhase(input.phase, input.item, selection)
+	}
 	if (options.phaseRunnerSelectionForChain !== undefined) {
 		const selection = await options.phaseRunnerSelectionForChain(input.chain)
 		return selectRunnerForPhase(input.phase, input.item, selection)
@@ -2136,7 +2156,7 @@ async function resolvePhaseRunner(
 	if (options.runner !== undefined) return options.runner
 	throw new SchedulerError(
 		"spawn_failed",
-		`scheduler: no runner configured for chain=${input.chain.name} item=${input.item.id} phase=${input.phase}; set SchedulerOptions.phaseRunner, .phaseRunnerSelectionForChain, or .runner`,
+		`scheduler: no runner configured for chain=${input.chain.name} item=${input.item.id} phase=${input.phase}; set SchedulerOptions.phaseRunner, .phaseRunnerSelectionForItem, .phaseRunnerSelectionForChain, or .runner`,
 	)
 }
 

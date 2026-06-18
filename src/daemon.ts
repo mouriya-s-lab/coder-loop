@@ -1595,6 +1595,21 @@ export class CoderLoopDaemon {
 						preset,
 					})
 				})
+		// #412: per-item phase runner resolver. resolvePhaseRunner prefers this over the chain-wide
+		// form so mixed-preset chains pick runner+phases from the item's own preset. Production
+		// dispatches via the same `presetForItem` codepath the scheduler already uses for spawn;
+		// test fixtures can override via scheduler.phaseRunnerSelectionForItem.
+		const phaseRunnerSelectionForItem: SchedulerOptions["phaseRunnerSelectionForItem"] = scheduler.phaseRunnerSelectionForItem
+			?? (scheduler.phaseRunner !== undefined || scheduler.runner !== undefined
+				? undefined
+				: async (chain, item) => {
+					const { preset } = await presetForItem(chain, item)
+					return buildPhaseRunnerSelectionFromChain({
+						chain,
+						loopDataRoot: this.paths.root,
+						preset,
+					})
+				})
 		const options: SchedulerOptions = {
 			store: this.requireStore(),
 			state: this.schedulerState,
@@ -1611,6 +1626,7 @@ export class CoderLoopDaemon {
 		}
 		if (scheduler.phaseRunner !== undefined) options.phaseRunner = scheduler.phaseRunner
 		if (phaseRunnerSelectionForChain !== undefined) options.phaseRunnerSelectionForChain = phaseRunnerSelectionForChain
+		if (phaseRunnerSelectionForItem !== undefined) options.phaseRunnerSelectionForItem = phaseRunnerSelectionForItem
 		if (scheduler.phase !== undefined) options.phase = scheduler.phase
 		if (scheduler.worktreeManager !== undefined) options.worktreeManager = scheduler.worktreeManager
 		if (scheduler.kindResolver !== undefined) options.kindResolver = scheduler.kindResolver
@@ -2758,6 +2774,11 @@ function itemToJson(item: ItemRecord, dependencyWait?: DependencyWaitReason | nu
 		evidenceDir: item.evidenceDir,
 		agentCwd: item.agentCwd,
 		runner: item.runner,
+		// #412: surface the item's stored preset declaration so `item list --json` is consistent
+		// with `coder-loop status --json` `queue.selected.preset.*` exposure. Supervisors reading
+		// `item list` need to see per-item preset to drive routing decisions.
+		preset: item.preset,
+		presetPath: item.presetPath,
 		extra: itemExtraToJsonObject(item.extra),
 		createdAt: item.createdAt,
 		updatedAt: item.updatedAt,
