@@ -322,7 +322,6 @@ describe("parsePreset schema validation", () => {
 	// own `fragments` + `roles`.
 	const minimalRoot = () => ({
 		name: "x",
-		version: Number("1"),
 		item: { idField: "id" },
 		statuses: { continuable: ["a"], terminal: ["b"] },
 		phases: [
@@ -617,7 +616,6 @@ describe("issue #400 — fragment index slicing per phase", () => {
 	test("Row #4: phase↔role mapping comes from metadata and accepts non-convention names without engine guessing", () => {
 		const root: BoundaryRecord = {
 			name: "non-convention",
-			version: Number("1"),
 			item: { idField: "id" },
 			statuses: { continuable: ["a"], terminal: ["b"] },
 			phases: [
@@ -645,7 +643,6 @@ describe("issue #400 — fragment index slicing per phase", () => {
 	test("Row #4 (second half): missing phase.roles raises a load-time error when the preset declares fragments", () => {
 		const root: BoundaryRecord = {
 			name: "needs-roles",
-			version: Number("1"),
 			item: { idField: "id" },
 			statuses: { continuable: ["a"], terminal: ["b"] },
 			phases: [
@@ -663,7 +660,6 @@ describe("issue #400 — fragment index slicing per phase", () => {
 	test("rejects phase.roles entries that name a role no fragment declares", () => {
 		const root: BoundaryRecord = {
 			name: "bad-role",
-			version: Number("1"),
 			item: { idField: "id" },
 			statuses: { continuable: ["a"], terminal: ["b"] },
 			phases: [
@@ -680,7 +676,6 @@ describe("issue #400 — fragment index slicing per phase", () => {
 	test("rejects duplicate role entries within a single phase", () => {
 		const root: BoundaryRecord = {
 			name: "dup-role",
-			version: Number("1"),
 			item: { idField: "id" },
 			statuses: { continuable: ["a"], terminal: ["b"] },
 			phases: [
