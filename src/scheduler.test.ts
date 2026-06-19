@@ -2635,12 +2635,15 @@ describe("scheduler chain bindings (issue #288)", () => {
 		expect(rendered).toBe(`workflow=${resolve(targetCwd, ".coder-loop/workflow.md")}`)
 	})
 
-	test("renderSchedulerSpawnPrompt resolves WORKFLOW_FILE from chain metadata config when present", async () => {
+	// #433: WORKFLOW_FILE binding now reads from `metadata.bindings.workflowFile` (chain bindings
+	// hold what the retired `metadata.config` wrapper used to). The legacy `metadata.config` shape
+	// throws at parse time, so this test seeds the new shape.
+	test("renderSchedulerSpawnPrompt resolves WORKFLOW_FILE from chain metadata bindings when present", async () => {
 		const preset = await loadPreset(PRESET_DIR)
 		const targetCwd = resolve(TEST_ROOT, "target-seeded-workflow")
 		const chain = makeChainFixture({
 			name: "seeded-workflow-chain",
-			metadata: storedChainMetadata({ config: { workflowFile: "policy/workflow.md" } }),
+			metadata: storedChainMetadata({ bindings: { workflowFile: "policy/workflow.md" } }),
 		})
 		const item = makeItemFixture(chain, { issueNumber: 999_005, repoCwd: targetCwd })
 		const rendered = await renderSchedulerSpawnPrompt({
@@ -2709,7 +2712,9 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 				observedPhases.push(phase)
 				return {
 					kind: "claude",
-					source: "config",
+					// #433: "config" source value is retired (no target-side preferences file
+					// left). Iteration phases now stamp the "iteration-default" source label.
+					source: "iteration-default",
 					binary: "bun",
 					extraArgs: [fakeIter],
 					model: null,
@@ -2761,7 +2766,8 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 				}
 				return {
 					kind: "claude",
-					source: "config",
+					// #433: same retirement as above — non-review fallback path is "iteration-default".
+					source: "iteration-default",
 					binary: "bun",
 					extraArgs: [fakeIter],
 					model: null,
@@ -2854,19 +2860,11 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			expect(runner.source).toBe("preset")
 		})
 
-		test("chain metadata reviewRunner='claude' does not override review preset runner", async () => {
-			const chain = makeChainFixture({ metadata: storedChainMetadata({ reviewRunner: "claude" }) })
-			const preset = await loadPreset(PRESET_DIR)
-			const runner = resolvePhaseRunnerFromChain({
-				chain,
-				loopDataRoot: null,
-				preset,
-				phase: "review",
-				item: { runner: null },
-			})
-			expect(runner.kind).toBe("codex")
-			expect(runner.binary).toBe("codex")
-			expect(runner.source).toBe("preset")
+		// #433: the legacy `metadata.reviewRunner` top-level field is retired. Parsing chain
+		// metadata that carries it must now fail loudly (no silent-ignore fallback), so the
+		// preset's declared review runner remains the single source of truth for that phase.
+		test("chain metadata reviewRunner='claude' is retired and rejected at parse time (#433)", () => {
+			expect(() => storedChainMetadata({ reviewRunner: "claude" })).toThrow(/reviewRunner is retired \(#433\)/)
 		})
 
 		test("chain metadata codex.model overrides the preset-declared review model", async () => {
@@ -3058,43 +3056,22 @@ describe("runPresetChainCompleteTriggerPhases per-phase runner selection (issue 
 		}
 	})
 
-	test("chain metadata runner='claude' does not override triggered phase preset runner", async () => {
-		const fixture = await createFixture("trigger-claude-override")
+	// #433: the legacy `metadata.runner` top-level field is retired. The retirement is enforced at
+	// parse time (createChain → parseChainMetadata), so the chain never makes it to the trigger
+	// phase code. This locks in the "no silent-ignore" stance: operators who try the old shape get
+	// a loud error pointing at the new bindings/per-runner channels.
+	test("chain metadata runner='claude' is retired and rejected at chain.create time (#433)", async () => {
+		const fixture = await createFixture("trigger-claude-retired")
 		try {
-			const fakeCodex = resolve(fixture.loopDataRoot, "..", "fake-codex-finalizer.sh")
-			const fakeClaude = resolve(fixture.loopDataRoot, "..", "fake-claude-finalizer.sh")
-			await writeShellFinalizerMarkerScript(fakeCodex, "BINARY:codex")
-			await writeShellFinalizerMarkerScript(fakeClaude, "BINARY:claude")
-
-			const targetCwd = resolve(fixture.loopDataRoot, "..", "target-trigger-claude")
-			await mkdir(targetCwd, { recursive: true })
-
-			const chain = createChain(fixture.store, "trigger-claude-chain", {
-				metadata: {
-					runner: "claude",
-					claude: { binary: fakeClaude },
-					codex: { binary: fakeCodex },
-				},
-			})
-			createItem(fixture.store, chain, { issueNumber: 287_802, repoCwd: targetCwd })
-			const items = fixture.store.listItems(chain.id)
-
-			const runId = `trigger-${chain.id}-claude`
-			const decision = await runPresetChainCompleteTriggerPhases({
-				chain,
-				items,
-				runId,
-				terminalStatusNames: [runtimeStatus("done"), runtimeStatus("moot"), runtimeStatus("blocked")],
-				loopDataRoot: fixture.loopDataRoot,
-				presetDir: PRESET_DIR,
-				targetCwd,
-			})
-			expect(decision).toEqual({ decision: "complete" })
-
-			const chainPaths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
-			const stdout = await readFile(chainPaths.runPhaseStdoutFile(runId, "umbrella-finalizer"), "utf-8")
-			expect(stdout).toContain("BINARY:codex")
-			expect(stdout).not.toContain("BINARY:claude")
+			expect(() =>
+				createChain(fixture.store, "trigger-claude-retired-chain", {
+					metadata: {
+						runner: "claude",
+						claude: { binary: "fake-claude" },
+						codex: { binary: "fake-codex" },
+					},
+				}),
+			).toThrow(/runner is retired \(#433\)/)
 		} finally {
 			fixture.store.close()
 		}

@@ -25,6 +25,12 @@ describe("smoke: v2 central chain CLI", () => {
 		expect(result.stdout).toContain("daemon <up|down|status|start|stop|restart>")
 	})
 
+	// #433: usage must not advertise the retired `runtime` command group.
+	test("usage no longer lists the retired runtime CLI", () => {
+		const result = runCli([])
+		expect(result.stdout).not.toContain("runtime")
+	})
+
 	test("status and queue unblock use SQLite state", async () => {
 		const fixture = await createTarget("chain-smoke")
 		seedChain(fixture, {
@@ -35,11 +41,11 @@ describe("smoke: v2 central chain CLI", () => {
 		const beforeState = await readFile(fixture.legacyStatePath, "utf-8")
 		const beforeMtime = (await stat(fixture.legacyStatePath)).mtimeMs
 
-		const unblocked = expectJsonOk(runCli(["queue", "unblock", fixture.target, "--issue", "333", "--chain", fixture.chainName]))
+		const unblocked = expectJsonOk(runCli(["queue", "unblock", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--issue", "333", "--chain", fixture.chainName]))
 		expect(unblocked.mutation.changed).toBe(true)
 		expect(unblocked.verification.itemStatus).toBe("queued")
 
-		const snapshot = expectJsonOk(runCli(["status", fixture.target, "--chain", fixture.chainName, "--json"]))
+		const snapshot = expectJsonOk(runCli(["status", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--chain", fixture.chainName, "--json"]))
 		expect(snapshot.state.kind).toBe("ok")
 		expect(snapshot.queue.total).toBe(1)
 		expect(snapshot.queue.selected.id).toBe("333")
@@ -47,71 +53,43 @@ describe("smoke: v2 central chain CLI", () => {
 		expect((await stat(fixture.legacyStatePath)).mtimeMs).toBe(beforeMtime)
 	})
 
-	test("runtime show lists preset phases with preset runner selections", async () => {
-		const fixture = await createTarget("runtime-show")
-		const snapshot = expectJsonOk(runCli(["runtime", "show", fixture.target, "--json"]))
-		expect(snapshot.preset.name).toBe("gh-issue-pr-iteration")
-		expect(snapshot.defaults.claudeModel).toBeNull()
-		expect(snapshot.defaults.codexModel).toBeNull()
-		const phaseNames = snapshot.phases.map((p: { phase: string }) => p.phase)
-		expect(phaseNames).toEqual(["iteration", "review", "blocked-responder", "umbrella-finalizer"])
-		const review = snapshot.phases.find((p: { phase: string }) => p.phase === "review")
-		expect(review.role).toBe("review")
-		expect(review.runner.kind).toBe("codex")
-		expect(review.runner.source).toBe("preset")
-		// preset-declared phase model resolves even with no config model set
-		expect(review.runner.model).toBe("gpt-5.5")
-		const iter = snapshot.phases.find((p: { phase: string }) => p.phase === "iteration")
-		expect(iter.runner.kind).toBe("codex")
-		expect(iter.runner.source).toBe("preset")
+	// #433: status output is flag-insensitive to the retired target config file. Whether or not
+	// any legacy `.coder-loop/runtime/config.{json,toml}` exists on disk, the engine reads the
+	// same chain.metadata and reports the same runner view. Acceptance row 3.
+	test("status --json runner view does not change when a stale target config file is dropped in", async () => {
+		const fixture = await createTarget("status-runner-flag")
+		seedChain(fixture, { issueNumber: 191, status: "queued", extra: { issueKind: "code" } })
+
+		const baseline = expectJsonOk(runCli(["status", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--chain", fixture.chainName, "--json"]))
+
+		// Drop a stale legacy file in. With #433, the engine no longer reads it; everything must
+		// resolve via centralized chain metadata, so the runner view is identical.
+		const legacyConfigPath = resolve(fixture.target, ".coder-loop/runtime/cl433-legacy-prefs.json")
+		await writeFile(legacyConfigPath, `${JSON.stringify({ claude: { model: "should-be-ignored" }, codex: { model: "should-also-be-ignored" } }, null, 2)}\n`)
+
+		const afterLegacy = expectJsonOk(runCli(["status", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--chain", fixture.chainName, "--json"]))
+
+		expect(afterLegacy.target.runner).toEqual(baseline.target.runner)
+		expect(afterLegacy.queue.selected.runner).toEqual(baseline.queue.selected.runner)
+		expect(afterLegacy.queue.selected.reviewRunner).toEqual(baseline.queue.selected.reviewRunner)
 	})
 
-	test("runtime set writes [1m]-suffixed Claude model and gpt-5.5 codex model into config.json", async () => {
-		const fixture = await createTarget("runtime-set")
-		const set = expectJsonOk(runCli([
-			"runtime", "set", fixture.target,
-			"--claude-model", "opus-4-8",
-			"--codex-model", "gpt-5.5",
-			"--json",
-		]))
-		expect(set.wrote).toBe(true)
-		expect(set.changed["claude.model"].to).toBe("claude-opus-4-8[1m]")
-		expect(set.changed["codex.model"].to).toBe("gpt-5.5")
-		const configPath = resolve(fixture.target, ".coder-loop/runtime/config.json")
-		const config = JSON.parse(await readFile(configPath, "utf-8"))
-		expect(config.claude.model).toBe("claude-opus-4-8[1m]")
-		expect(config.codex.model).toBe("gpt-5.5")
-		expect(config.loopDataRoot).toBe(fixture.loopDataRoot)
-		expect(config.runner).toBeUndefined()
-		expect(config.reviewRunner).toBeUndefined()
-
-		const snapshot = expectJsonOk(runCli(["runtime", "show", fixture.target, "--json"]))
-		expect(snapshot.defaults.claudeModel).toBe("claude-opus-4-8[1m]")
-		expect(snapshot.defaults.codexModel).toBe("gpt-5.5")
-		const review = snapshot.phases.find((p: { phase: string }) => p.phase === "review")
-		expect(review.runner.kind).toBe("codex")
-		expect(review.runner.model).toBe("gpt-5.5")
-		const iter = snapshot.phases.find((p: { phase: string }) => p.phase === "iteration")
-		expect(iter.runner.kind).toBe("codex")
-		expect(iter.runner.model).toBe("gpt-5.5")
-	})
-
-	test("runtime set rejects unknown enum values and no-op invocations", () => {
-		const bad = runCli(["runtime", "set", "/tmp/cl-rt-bad", "--claude-model", "sonnet-4-5"])
-		expect(bad.exitCode).toBe(1)
-		expect(bad.stderr).toContain("--claude-model must be one of opus-4-7|opus-4-8")
-		const empty = runCli(["runtime", "set", "/tmp/cl-rt-bad"])
-		expect(empty.exitCode).toBe(1)
-		expect(empty.stderr).toContain("pass at least one of")
-		const noRunnerFlag = runCli(["runtime", "set", "/tmp/cl-rt-bad", "--iteration-runner", "claude"])
-		expect(noRunnerFlag.exitCode).toBe(1)
+	// #433: the supervisor-visible status schema no longer carries config/configPath/configFormat.
+	test("status --json target keys do not include any retired config fields", async () => {
+		const fixture = await createTarget("status-no-config")
+		seedChain(fixture, { issueNumber: 192, status: "queued" })
+		const snapshot = expectJsonOk(runCli(["status", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--chain", fixture.chainName, "--json"]))
+		const keys = Object.keys(snapshot.target)
+		for (const retired of ["config", "configPath", "configFormat"]) {
+			expect(keys).not.toContain(retired)
+		}
 	})
 
 	test("daemon start dry-run resolves a chain and emits central-daemon plan", async () => {
 		const fixture = await createTarget("daemon-smoke")
 		seedChain(fixture, { issueNumber: 184, status: "queued", extra: { issueKind: "code" } })
 
-		const result = runCli(["daemon", "start", fixture.target, "--chain", fixture.chainName, "--dry-run"])
+		const result = runCli(["daemon", "start", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--chain", fixture.chainName, "--dry-run"])
 		expect(result.exitCode).toBe(0)
 		expect(result.stdout).toContain(`daemon start dry-run: chain=${fixture.chainName}`)
 		expect(result.stdout).toContain("daemon start dry-run: central-daemon=required")
@@ -146,7 +124,9 @@ async function createTarget(name: string): Promise<Fixture> {
 	await writeFile(resolve(target, ".coder-loop/workflow.md"), "# workflow\n")
 	await writeFile(resolve(loopDataRoot, "chains", chainName, "shared.md"), "# shared\n")
 	await writeFile(resolve(runtime, "shared.md"), "# shared\n")
-	await writeFile(resolve(runtime, "config.json"), JSON.stringify({ loopDataRoot }, null, 2))
+	// #433: the engine no longer reads any target on-disk runtime config; loop-data root is
+	// passed via flag or env. Just keep a benign legacy state.json placeholder around so the
+	// "do not touch legacy files" smoke check still has something to mtime-pin.
 	const legacyStatePath = resolve(runtime, "state.json")
 	await writeFile(legacyStatePath, `${JSON.stringify({ queue: [], recentRuns: [], current: null }, null, 2)}\n`)
 	return { target, loopDataRoot, chainName, legacyStatePath }

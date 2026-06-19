@@ -1839,7 +1839,7 @@ export class CoderLoopDaemon {
 			)
 		}
 		if (!PRESET_NAME_PATTERN.test(legacyPreset)) {
-			throw new DaemonError("invalid_request", `config.preset: invalid name "${legacyPreset}" (must match ${PRESET_NAME_PATTERN.source})`, {
+			throw new DaemonError("invalid_request", `chain.preset: invalid name "${legacyPreset}" (must match ${PRESET_NAME_PATTERN.source})`, {
 				chainId: chain.id,
 				chainName: chain.name,
 				preset: legacyPreset,

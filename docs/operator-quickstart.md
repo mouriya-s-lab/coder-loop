@@ -51,7 +51,7 @@ coder-loop install /path/to/your-target-repo --repo <owner>/<repo>
 
 幂等。它做这些事：
 
-- **A) target 项目文件**：写 `.claude/commands/dev-plan.md` / `dev-loop.md`、建/刷新 `.coder-loop/runtime/{issues,evidence,logs}/` 并初始化 centralized chain、merge `.coder-loop/runtime/config.json`（含 preset 绑定）、若 `workflow.md` 缺失则从 preset 模板拷一份。
+- **A) target 项目文件**：写 `.claude/commands/dev-plan.md` / `dev-loop.md`、建/刷新 `.coder-loop/runtime/{issues,evidence,logs}/` 并初始化 centralized chain、若 `workflow.md` 缺失则从 preset 模板拷一份。
 - **B) 操作员机器前置**：只做检查、不安装——`gh`(+ auth) / preset phase runner CLI / `coder-loop` 是否在 PATH。
 
 `gh-issue-pr-iteration` 需要的 `kind:*` GitHub label 资产不由 install / doctor 管理；planning agent 在 `plan/create-issues` 路径首次创建 issue 前按 preset 声明幂等确保，缺失则创建，color / description 漂移则更新。
@@ -62,7 +62,7 @@ coder-loop install /path/to/your-target-repo --repo <owner>/<repo>
 
 | Flag | 用途 |
 |---|---|
-| `--repo <owner>/<repo>` | 写进 config，用于后续 GitHub issue / PR / label 操作 |
+| `--repo <owner>/<repo>` | 写进 chain identity（`chain.repository`），用于后续 GitHub issue / PR / label 操作 |
 | `--preset <name>` | 默认 `gh-issue-pr-iteration` |
 | `--force` | 覆盖已存在的 slash command / workflow.md（其他文件仍幂等） |
 | `--dry-run` | 打印每一步将做什么，不写盘 |
@@ -80,20 +80,7 @@ target 文件、operator 前置、live runtime health 全 OK 且 `status` 能输
 
 ### Runner 默认值与覆盖
 
-默认 runner 与 model 由 `preset.toml` 的每个 phase 声明；bundled `gh-issue-pr-iteration` 中 iteration 是 `codex`，review 是 `codex` + `model = "gpt-5.5"`。Review 不继承宿主或 queue item；config 显式 `claude.model` / `codex.model` 优先于 phase 的 `model` 声明，源码不再为 review 强制覆盖模型。最简单的改模型方式：
-
-```bash
-coder-loop runtime set <target> --claude-model opus-4-8 --codex-model gpt-5.5
-```
-
-`--claude-model opus-4-7|opus-4-8` 写入时强制加 `[1m]` 后缀。也可以直接编辑 `.coder-loop/runtime/config.json`：
-
-```json
-{
-  "codex": { "binary": "codex", "model": "gpt-5.5", "extraArgs": [] },
-  "claude": { "binary": "claude", "model": "claude-opus-4-8[1m]", "extraArgs": [] }
-}
-```
+默认 runner 与 model 由 `preset.toml` 的每个 phase 声明；bundled `gh-issue-pr-iteration` 中 iteration 是 `codex`，review 是 `codex` + `model = "gpt-5.5"`。Review 不继承宿主或 queue item。#433 起 target 级 runtime 文件退役——要改默认模型直接改 preset.toml 该 phase 的 `model` 字段，没有 per-target override 通道。
 
 单个 queue item 可加 `"runner": "claude" | "codex"` 覆盖允许 item override 的普通执行 phase；review 和 trigger 角色用自己的 preset phase 声明。`doctor` 检查所有 phase runner 的实际 binary；`status --json` 暴露 `target.runner.phases`、`queue.selected.phaseRunners`、`current.runner` 与 phase status 的 runner/model。
 
@@ -125,11 +112,11 @@ coder-loop status /path/to/your-target-repo --json | jq '.state.kind, .queue, .c
 
 | 字段 | 期望 |
 |---|---|
-| `.state.kind` | `"ok"` 表示 config/state/preset/runtime 都可读；其他值按错误继续排 |
+| `.state.kind` | `"ok"` 表示 state/preset/runtime 都可读；其他值按错误继续排 |
 | `.queue.total` / `.queue.selected` | 有可推进 item 时 selected 不为 null |
 | `.target.runner.phases` / `.queue.selected.phaseRunners` | 每个 phase 的 effective runner；含 kind/source/binary/model |
 | `.target.runner.default` / `.queue.selected.runner` | 默认执行 phase 与 selected item 默认执行 phase runner |
-| `.target.runner.reviewDefault` / `.queue.selected.reviewRunner` | review phase runner；model 解析为 config 显式 `claude.model` / `codex.model`（override）或 preset phase `model` 声明，源码不再强制覆盖 |
+| `.target.runner.reviewDefault` / `.queue.selected.reviewRunner` | review phase runner；model 解析为 preset phase `model` 声明（无 target 级 override） |
 | `.current.run` | 正在跑或可 resume 的 run；null 表示当前没有 in-flight phase |
 | `.events.latest` | 当前或最近 run 的最后一条结构化事件 |
 | `.processes.live` / `.processes.scanError` | live process scan 结果；daemon 详情看 `coder-loop daemon status` |
@@ -138,10 +125,10 @@ coder-loop status /path/to/your-target-repo --json | jq '.state.kind, .queue, .c
 
 ```bash
 coder-loop status /path/to/your-target-repo --json \
-  | jq '.state.kind, .target.configPath, .target.preset, .queue.total, .queue.selected'
+  | jq '.state.kind, .target.preset, .queue.total, .queue.selected'
 ```
 
-`.state.kind == "ok"` 表示 target config、preset、central chain runtime、queue/current 都能解析；其他 kind 先按 [operations runtime health](./operations.md#4-runtime-health-错误分类) 继续排。
+`.state.kind == "ok"` 表示 preset、central chain runtime、queue/current 都能解析；其他 kind 先按 [operations runtime health](./operations.md#4-runtime-health-错误分类) 继续排。
 
 ---
 

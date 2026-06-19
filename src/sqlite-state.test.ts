@@ -976,6 +976,10 @@ describe("sqlite state store", () => {
 				);
 				PRAGMA user_version = 5;
 			`)
+			// #433: this fixture intentionally writes the pre-#433 v5 shape (top-level
+			// `runner`/`reviewRunner`) — that's how real v5 operator disks look. The v9→v10
+			// migration (`migrateChainsMetadataForCl433`) drops these keys after the v5→v6
+			// session-id migration runs (which still depends on the `runner` hint).
 			legacy.exec(`
 				INSERT INTO chains (name, preset, repository, base_branch, status, metadata, created_at, updated_at)
 				VALUES ('legacy-session-ids', 'gh-issue-pr-iteration', 'mouriya-s-lab/coder-loop', 'main', 'active', '{"runner":"codex","reviewRunner":"claude"}', 1.0, 1.0)

@@ -61,11 +61,11 @@ export class ChainCompleteTriggerState extends RuntimeDataRecord {
 	}
 }
 
-export class ChainConfigBindings extends RuntimeDataRecord {
+export class ChainBindings extends RuntimeDataRecord {
 	presetPath?: string
 	workflowFile?: string
 
-	constructor(input: ChainConfigBindingsInput, remainder: JsonObject) {
+	constructor(input: ChainBindingsInput, remainder: JsonObject) {
 		super(remainder)
 		if (input.presetPath !== undefined) this.presetPath = input.presetPath
 		if (input.workflowFile !== undefined) this.workflowFile = input.workflowFile
@@ -73,7 +73,7 @@ export class ChainConfigBindings extends RuntimeDataRecord {
 }
 
 export class ChainMetadata extends RuntimeDataRecord {
-	config?: ChainConfigBindings
+	bindings?: ChainBindings
 	presetPath?: string
 	workflowFile?: string
 	sharedContextFile?: string
@@ -88,7 +88,7 @@ export class ChainMetadata extends RuntimeDataRecord {
 
 	constructor(input: ChainMetadataInput, remainder: JsonObject) {
 		super(remainder)
-		if (input.config !== undefined) this.config = input.config
+		if (input.bindings !== undefined) this.bindings = input.bindings
 		if (input.presetPath !== undefined) this.presetPath = input.presetPath
 		if (input.workflowFile !== undefined) this.workflowFile = input.workflowFile
 		if (input.sharedContextFile !== undefined) this.sharedContextFile = input.sharedContextFile
@@ -166,7 +166,7 @@ export type ChainCompleteTriggerStateInput = {
 }
 
 type ChainMetadataInput = {
-	config?: ChainConfigBindings
+	bindings?: ChainBindings
 	presetPath?: string
 	workflowFile?: string
 	sharedContextFile?: string
@@ -180,7 +180,7 @@ type ChainMetadataInput = {
 	coderLoopChainCompleteTrigger?: ChainCompleteTriggerState
 }
 
-type ChainConfigBindingsInput = {
+type ChainBindingsInput = {
 	presetPath?: string
 	workflowFile?: string
 }
@@ -218,9 +218,9 @@ const JsonObjectBoundary: ArkAssertable<JsonObject> = arkType("unknown", ":", is
 
 const RUNNER_METADATA_KEYS = new Set(["binary", "model", "extraArgs"])
 const CHAIN_COMPLETE_TRIGGER_KEYS = new Set(["decision", "fingerprint", "recordedAt", "reason", "runId"])
-const CHAIN_CONFIG_BINDING_KEYS = new Set(["presetPath", "workflowFile"])
+const CHAIN_BINDING_KEYS = new Set(["presetPath", "workflowFile"])
 const CHAIN_METADATA_KEYS = new Set([
-	"config",
+	"bindings",
 	"presetPath",
 	"workflowFile",
 	"sharedContextFile",
@@ -233,6 +233,10 @@ const CHAIN_METADATA_KEYS = new Set([
 	"maxItemAttempts",
 	"coderLoopChainCompleteTrigger",
 ])
+// Retired keys (#433): the chain-metadata DSL no longer accepts these. We reject explicitly so a
+// stale row carrying `metadata.config` or a stray top-level `runner`/`reviewRunner` cannot be
+// silently ignored — supervisor must rewrite the row through the new shape.
+const RETIRED_CHAIN_METADATA_KEYS = new Set(["config", "runner", "reviewRunner"])
 const ITEM_EXTRA_KEYS = new Set([
 	"dependsOn",
 	"blockerRepo",
@@ -271,7 +275,7 @@ export function parseChainMetadataForRequest(value: BoundaryValue, field = "meta
 
 export function chainMetadataToJsonObject(metadata: ChainMetadata): JsonObject {
 	const result: JsonObject = { ...runtimeRemainder(metadata) }
-	assignJson(result, "config", metadata.config === undefined ? undefined : chainConfigBindingsToJsonObject(metadata.config))
+	assignJson(result, "bindings", metadata.bindings === undefined ? undefined : chainBindingsToJsonObject(metadata.bindings))
 	assignJson(result, "presetPath", metadata.presetPath)
 	assignJson(result, "workflowFile", metadata.workflowFile)
 	assignJson(result, "sharedContextFile", metadata.sharedContextFile)
@@ -290,22 +294,22 @@ export function chainMetadataToJsonObject(metadata: ChainMetadata): JsonObject {
 	return result
 }
 
-export function chainConfigBindings(metadata: ChainMetadata): JsonObject {
-	return metadata.config === undefined ? {} : chainConfigBindingsToJsonObject(metadata.config)
+export function chainBindings(metadata: ChainMetadata): JsonObject {
+	return metadata.bindings === undefined ? {} : chainBindingsToJsonObject(metadata.bindings)
 }
 
-export function chainConfigPresetPath(metadata: ChainMetadata): string | null {
-	return metadata.config?.presetPath ?? null
+export function chainBindingsPresetPath(metadata: ChainMetadata): string | null {
+	return metadata.bindings?.presetPath ?? null
 }
 
-export function chainConfigWorkflowFile(metadata: ChainMetadata): string | null {
-	return metadata.config?.workflowFile ?? null
+export function chainBindingsWorkflowFile(metadata: ChainMetadata): string | null {
+	return metadata.bindings?.workflowFile ?? null
 }
 
 export function chainPresetPath(metadata: ChainMetadata): string | null {
 	const direct = metadataString(metadata, "presetPath")
 	if (direct !== null) return direct
-	return chainConfigPresetPath(metadata)
+	return chainBindingsPresetPath(metadata)
 }
 
 export function metadataString(metadata: ChainMetadata, key: keyof ChainMetadata & string): string | null {
@@ -427,9 +431,21 @@ export function runtimeDataJsonValue(value: BoundaryValue): JsonValue {
 }
 
 function parseChainMetadata(value: JsonObject, field: string): ChainMetadata {
+	// #433: enforce the new shape — retired keys (`config`, top-level `runner` / `reviewRunner`)
+	// raise an explicit error rather than slipping through as remainder, so stale rows surface as
+	// the supervisor reads them instead of getting silently masked.
+	for (const retiredKey of RETIRED_CHAIN_METADATA_KEYS) {
+		if (Object.prototype.hasOwnProperty.call(value, retiredKey)) {
+			throw runtimeDataError(
+				`${field}.${retiredKey}`,
+				runtimeDataJsonValue(value[retiredKey] ?? null),
+				`${field}.${retiredKey} is retired (#433); migrate "config" → "bindings" and drop top-level "runner"/"reviewRunner"`,
+			)
+		}
+	}
 	const input: ChainMetadataInput = {}
-	const config = optionalChainConfigBindingsField(value, "config", `${field}.config`)
-	if (config !== undefined) input.config = config
+	const bindings = optionalChainBindingsField(value, "bindings", `${field}.bindings`)
+	if (bindings !== undefined) input.bindings = bindings
 	const presetPath = optionalStringField(value, "presetPath", `${field}.presetPath`)
 	if (presetPath !== undefined) input.presetPath = presetPath
 	const workflowFile = optionalStringField(value, "workflowFile", `${field}.workflowFile`)
@@ -490,16 +506,16 @@ function parseItemExtra(value: JsonObject, field: string): ItemExtra {
 	return new ItemExtra(input, remainderExcept(value, ITEM_EXTRA_KEYS))
 }
 
-function optionalChainConfigBindingsField(record: JsonObject, key: string, field: string): ChainConfigBindings | undefined {
+function optionalChainBindingsField(record: JsonObject, key: string, field: string): ChainBindings | undefined {
 	const value = record[key]
 	if (value === undefined) return undefined
 	const object = jsonObjectFieldValue(value, field)
-	const input: ChainConfigBindingsInput = {}
+	const input: ChainBindingsInput = {}
 	const presetPath = optionalStringField(object, "presetPath", `${field}.presetPath`)
 	if (presetPath !== undefined) input.presetPath = presetPath
 	const workflowFile = optionalStringField(object, "workflowFile", `${field}.workflowFile`)
 	if (workflowFile !== undefined) input.workflowFile = workflowFile
-	return new ChainConfigBindings(input, remainderExcept(object, CHAIN_CONFIG_BINDING_KEYS))
+	return new ChainBindings(input, remainderExcept(object, CHAIN_BINDING_KEYS))
 }
 
 function optionalRunnerMetadataField(record: JsonObject, key: string, field: string): RunnerMetadata | undefined {
@@ -627,10 +643,10 @@ function runnerMetadataToJsonObject(metadata: RunnerMetadata): JsonObject {
 	return result
 }
 
-function chainConfigBindingsToJsonObject(config: ChainConfigBindings): JsonObject {
-	const result: JsonObject = { ...runtimeRemainder(config) }
-	assignJson(result, "presetPath", config.presetPath)
-	assignJson(result, "workflowFile", config.workflowFile)
+function chainBindingsToJsonObject(bindings: ChainBindings): JsonObject {
+	const result: JsonObject = { ...runtimeRemainder(bindings) }
+	assignJson(result, "presetPath", bindings.presetPath)
+	assignJson(result, "workflowFile", bindings.workflowFile)
 	return result
 }
 

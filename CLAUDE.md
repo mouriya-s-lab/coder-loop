@@ -25,7 +25,7 @@ L2: Preset（presets/<name>/）
 
 目标侧策略：<TARGET>/.coder-loop/
     - workflow.md: committed 项目级策略（具体内容由 preset 定义）
-    - runtime/{config,state,shared,issues,evidence,logs}: ignored 本地运行态
+    - runtime/{shared,issues,evidence,logs}: ignored 本地运行态（chain 元数据归 centralized SQLite，无 target 侧 config）
 ```
 
 每层职责互不重叠：
@@ -41,9 +41,8 @@ L2: Preset（presets/<name>/）
 - **Type check**: `bun run typecheck` (alias for `bun x tsc --noEmit`)
 - **Run unit + smoke tests**: `bun test` (覆盖 `src/loop.test.ts` + `src/smoke.test.ts`)
 - **Real e2e（引擎全链路验收）**: `bun scripts/real-e2e.ts [--preset gh-issue-pr-iteration] [flags]` — 单命令真实 e2e：隔离 daemon（`--loop-data-root`，绝不碰生产 `~/.coder-loop`）→ 在 fixture repo `mouriya-s-lab/coder-loop-e2e-fixture` seed 一个 trivial issue → 跑完整 loop（spawn → iteration → review → PR merged → issue closed）→ 断言 GitHub 终态 → tripwire/teardown。默认 `real-e2e-minimal` preset（最小，只验引擎调度链路，~3-5min）；`--preset gh-issue-pr-iteration` 跑全保真。详细 runbook 见 `docs/real-e2e-fixture.md`。这只在 code 仓跑，不在 app 跑。
-- **Status snapshot**: `coder-loop status <target> --json [--config <path>] [--chain <name>]` — stable read-only JSON API for supervisor/scripts; do not scrape runtime files first.
+- **Status snapshot**: `coder-loop status <target> --json [--chain <name>]` — stable read-only JSON API for supervisor/scripts; do not scrape runtime files first.
 - **Daemon operations**: `coder-loop daemon status <target> --json`, `coder-loop daemon start|restart <target> [--max-iterations N]`, `coder-loop daemon stop <target>` — stable central-daemon / target-chain control API.
-- **Runtime inspection / model config**: `coder-loop runtime show <target> [--json]` 列出 preset 所有 phase（角色）当前解析到的 runner/binary/model/source；`coder-loop runtime set <target> [--claude-model opus-4-7|opus-4-8] [--codex-model gpt-5.5]` 用枚举值幂等改写 `.coder-loop/runtime/config.json` 的 `claude.model` / `codex.model`（Claude 模型自动加 `[1m]` 后缀；TOML config 不可写）。Runner kind 归 role entry md，不是 CLI 表面。
 - **Install target**: `coder-loop install <target> [--repo <owner/repo>] [--preset <name>] [--force] [--dry-run]` — 幂等 bootstrap（workflow.md + centralized chain + runner/PATH 检查；preset-owned planning assets 由 preset 自己处理）。源：`src/install-commands.ts`。
 - **Uninstall target**: `coder-loop uninstall <target>` — 仅删 `.claude/commands/dev-*.md`；runtime 和 GitHub labels 保留。
 - **Doctor**: `coder-loop doctor <target> [--repo <owner/repo>]` — 只读体检（target 文件 / 操作员 PATH / runner CLI）并输出 live runtime health。
@@ -56,7 +55,7 @@ L2: Preset（presets/<name>/）
 
 ## Runner Selection
 
-Runner 与 model 默认值跟随 `preset.toml`，而不是 target config 或角色 entry md。每个 phase 可声明：
+Runner 与 model 默认值跟随 `preset.toml`，而不是角色 entry md。每个 phase 可声明：
 
 ```toml
 [[phases]]
@@ -65,7 +64,7 @@ runner = "codex"
 model  = "gpt-5.5"
 ```
 
-`runner` 只能是 `claude` 或 `codex`。phase 未声明时走单一 engine-builtin fallback（当前为 `codex`），并在 status 中显示 `source=engine-builtin`。`model` 是该 phase 的默认模型；target config 显式 `claude.model` / `codex.model` 优先于它，item override 把 runner 切到与 phase 声明不同的 kind 时不继承它。`target.runner.hostDefault` 只保留宿主诊断信息，不决定 phase runner。
+`runner` 只能是 `claude` 或 `codex`。phase 未声明时走单一 engine-builtin fallback（当前为 `codex`），并在 status 中显示 `source=engine-builtin`。`model` 是该 phase 的默认模型；item override 把 runner 切到与 phase 声明不同的 kind 时不继承它。`target.runner.hostDefault` 只保留宿主诊断信息，不决定 phase runner。
 
 覆盖顺序：
 
@@ -73,13 +72,13 @@ model  = "gpt-5.5"
 2. `preset.toml` 中 phase 的 `runner`，status 中显示 `source=preset`。
 3. phase 未声明 runner 时的 engine-builtin fallback，status 中显示 `source=engine-builtin`。
 
-Runner binary、模型与额外参数由 config 的 `claude.binary` / `claude.model` / `claude.extraArgs`、`codex.binary` / `codex.model` / `codex.extraArgs` 提供——config 显式 model 是 target 级 override，优先于 phase 的 `model` 声明；iteration 与 review 共享同一份 `claude.model` / `codex.model`，源码不再为 review phase 强制覆盖模型。要改 runner / 模型推荐用 `coder-loop runtime set`，它把枚举值落到 config 里（Claude 模型固定带 `[1m]` 后缀）；手写 config 也可以。`coder-loop status <target> --json` 暴露 `target.runner.phases.<phase>`、`target.runner.default`、`target.runner.reviewDefault`、`queue.selected.phaseRunners.<phase>`、`queue.selected.runner`、`queue.selected.reviewRunner`、`current.runner` 和 `current.phaseStatus.value.runner/model`；`doctor` 按 phase runner 推导出的 runner binary 做 PATH 检查。不要从旧 flat log 或 agent `status.json` 反推 runner/model，除非 `status` 已经指出需要 fallback debug；新版 agent status 位于 `<logDir>/<runId>/<phase>/status.json`。
+Runner binary 直接是 `claude` / `codex`（在 PATH 上），不再可被 target 覆盖；模型 / 额外参数来自 phase 的 `model` 声明。`coder-loop status <target> --json` 暴露 `target.runner.phases.<phase>`、`target.runner.default`、`target.runner.reviewDefault`、`queue.selected.phaseRunners.<phase>`、`queue.selected.runner`、`queue.selected.reviewRunner`、`current.runner` 和 `current.phaseStatus.value.runner/model`；`doctor` 按 phase runner 推导出的 runner binary 做 PATH 检查。不要从旧 flat log 或 agent `status.json` 反推 runner/model，除非 `status` 已经指出需要 fallback debug；新版 agent status 位于 `<logDir>/<runId>/<phase>/status.json`。
 
 ### 写一个新 preset 的最小流程
 
 1. `mkdir presets/<name>/` 写 `preset.toml`（schema 见 README §「写一个新 preset」）。
 2. 给每个 phase 写一份 `<phase>-entry.md`，正文用 `{{KEY}}` 占位符引用 preset.toml `[phases.variables]` 表的 key；phase runner 写在 `preset.toml`。
-3. target 在 `.coder-loop/runtime/config.json` 写 `{ "preset": "<name>" }` 或 `{ "presetPath": "<absolute-or-relative>" }`。
+3. 创建 chain 时通过 `coder-loop chain create <name> --preset <name>`（或 `--config-json '{"presetPath":"..."}'`）把 preset 落到 chain.metadata.bindings；target 侧没有 config 文件。
 4. `coder-loop status <target> --json` 应输出 `.target.preset.name == "<name>"` 且 `.state.kind == "ok"`。
 5. 队列加入 item 后，同一命令的 `.queue.selected.id` 应指向期望的下一个 item。
 6. 真跑前用 `doctor` 确保各 entry md 声明的 runner CLI 在 PATH 上可运行。
@@ -137,7 +136,7 @@ starter 位置：
 
 ## Tech Stack
 
-Bun + TypeScript (strict, ESM). Runtime dependencies are external CLIs: `gh` plus the selected iteration/review runner CLIs (`claude` or `codex`, optionally via config custom binary) on PATH。
+Bun + TypeScript (strict, ESM). Runtime dependencies are external CLIs: `gh` plus the selected iteration/review runner CLIs (`claude` or `codex`) on PATH。
 
 ## Conventions
 
