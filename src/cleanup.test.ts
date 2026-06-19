@@ -128,7 +128,6 @@ function formerFileSignals(): string[] {
 function makeLoopOptions(): LoopOptions {
 	return {
 		targetCwd: "/repo",
-		configPath: "/repo/config.json",
 		sharedContextPath: "/loop-data/chains/main/shared.md",
 		stateDbPath: "/loop-data/db.sqlite",
 		issueDir: "/loop-data/chains/main/issues",
@@ -138,7 +137,7 @@ function makeLoopOptions(): LoopOptions {
 		logFile: "/loop-data/chains/main/daemon/daemon.log",
 		repository: "fixture/repo",
 		baseBranch: "main",
-		configBindings: {
+		bindings: {
 			repository: "fixture/repo",
 			baseBranch: "main",
 		},
@@ -178,7 +177,8 @@ function makeLoopOptions(): LoopOptions {
 				},
 			phases: [],
 			fragments: [],
-			agent: { binary: "claude", extraArgs: [], attemptTimeoutSeconds: 3600 },
+			// #433: [agent].binary/extraArgs retired; preset.agent is now { attemptTimeoutSeconds }.
+			agent: { attemptTimeoutSeconds: 3600 },
 		},
 	}
 }

@@ -444,7 +444,11 @@ CREATE TABLE IF NOT EXISTS current_runs (
 ${STATE_INDEXES_SQL}
 `
 
-const STATE_SCHEMA_VERSION = 9
+// #433: bumping to 10 — chain.metadata schema retired the top-level `runner` / `reviewRunner`
+// fields plus the `config` wrapper (renamed to `bindings`). The v9→v10 migration rewrites any
+// pre-existing chain rows so subsequent strict parseChainMetadata loads do not reject historical
+// disks. New writes go through parseChainMetadata directly and are already in the new shape.
+const STATE_SCHEMA_VERSION = 10
 const V5_ITEM_SESSION_COLUMN = ["last", "session", "id"].join("_")
 // v9 moves preset declaration from chains.preset to items.preset / items.preset_path (#412).
 // Existing rows are back-filled from chains.preset so the engine resolves the legacy preset
@@ -600,6 +604,13 @@ function migrateStateSchema(db: Database): void {
 				migrateV5ItemSessionIds(db)
 				rebuildItemsTableForV6(db)
 			}
+			// #433 v9→v10: drop the retired top-level `runner`/`reviewRunner` keys and rename the
+			// `config` wrapper to `bindings` on the chains.metadata column. parseChainMetadata
+			// rejects these post-#433; this rewrite keeps historical disks loadable. Runs after
+			// migrateV5ItemSessionIds, which still depends on the legacy `metadata.runner` hint.
+			if (beforeVersion < STATE_SCHEMA_VERSION) {
+				migrateChainsMetadataForCl433(db)
+			}
 			db.exec(STATE_INDEXES_SQL)
 			db.exec(ITEM_NEXT_PENDING_INDEX_SQL)
 			db.exec(RUN_STATUS_INDEX_SQL)
@@ -673,6 +684,44 @@ function v5ItemSessionRunner(row: Pick<V5ItemSessionRow, "id" | "runner" | "chai
 	const metadata = parseJsonObject(row.chain_metadata, `chains metadata for items.${row.id}`)
 	if (isAgentRunnerKind(metadata.runner)) return metadata.runner
 	throw new SqliteStateError("invalid_json", `cannot migrate items.${row.id} session id without chain.metadata.runner`, { id: row.id })
+}
+
+// #433 v9→v10: rewrite chain.metadata JSON for every row, stripping retired top-level keys and
+// renaming `config` to `bindings`. Reads/writes via raw JSON.parse so this never trips
+// parseChainMetadata's retired-key rejection. Idempotent: a row already in the new shape parses
+// to itself unchanged.
+function migrateChainsMetadataForCl433(db: Database): void {
+	type ChainRow = { id: number; metadata: string }
+	const rows = db.query<ChainRow, []>("SELECT id, metadata FROM chains").all()
+	for (const row of rows) {
+		let parsed: unknown
+		try {
+			parsed = JSON.parse(row.metadata)
+		} catch {
+			// Leave malformed rows alone; the next read will surface the error with row context.
+			continue
+		}
+		if (!isJsonObject(parsed)) continue
+		const rewritten: JsonObject = {}
+		let mutated = false
+		for (const [key, value] of Object.entries(parsed)) {
+			if (key === "runner" || key === "reviewRunner") {
+				mutated = true
+				continue
+			}
+			if (key === "config" && isJsonObject(value)) {
+				rewritten.bindings = { ...value }
+				mutated = true
+				continue
+			}
+			rewritten[key] = value
+		}
+		if (!mutated) continue
+		db.query<unknown, SqlParams>("UPDATE chains SET metadata = $metadata WHERE id = $id").run({
+			id: row.id,
+			metadata: JSON.stringify(rewritten),
+		})
+	}
 }
 
 function rebuildItemsTableForV6(db: Database): void {

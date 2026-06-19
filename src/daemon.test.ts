@@ -27,7 +27,7 @@ import {
 import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
 import { queryObservabilityEvents } from "./observability"
-import { chainConfigBindings, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
+import { chainBindings, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 import type { BoundaryRecord } from "./boundary-types"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -162,12 +162,15 @@ describe("daemon", () => {
 	test("socket chain.create", async () => {
 		const fixture = await startFixture("chain-create", { schedulerEnabled: false })
 		try {
+			// #433: top-level `metadata.runner` is retired. Operators who want the chain to expose
+			// a particular runner kind set it via the per-runner channel (`metadata.codex.binary`)
+			// instead; the bare runner alias is gone.
 			const result = expectOk(await request(fixture, "chain.create", {
 				name: "central-state",
 				repository: "mouriya-s-lab/coder-loop",
 				baseBranch: "main",
 				umbrellaIssue: 176,
-				metadata: { runner: "codex" },
+				metadata: { codex: { binary: "codex" } },
 			}))
 
 			expect(result.chain).toMatchObject({
@@ -175,7 +178,7 @@ describe("daemon", () => {
 				repository: "mouriya-s-lab/coder-loop",
 				baseBranch: "main",
 				status: "active",
-				metadata: { runner: "codex" },
+				metadata: { codex: { binary: "codex" } },
 			})
 			const paths = resolveChainRuntimePaths("central-state", { loopDataRoot: fixture.loopDataRoot })
 			await expect(Bun.file(paths.sharedFile).exists()).resolves.toBe(true)
@@ -192,39 +195,39 @@ describe("daemon", () => {
 				name: "stable-chain",
 				repository: "mouriya-s-lab/coder-loop",
 				baseBranch: "main",
-				metadata: { runner: "codex" },
+				metadata: { codex: { binary: "codex" } },
 			})).chain)
 
 			const repeated = record(expectOk(await request(fixture, "chain.create", {
 				name: "stable-chain",
 				repository: "mouriya-s-lab/coder-loop",
 				baseBranch: "main",
-				metadata: { runner: "codex" },
+				metadata: { codex: { binary: "codex" } },
 			})).chain)
 			expect(repeated.id).toBe(first.id)
 			expect(repeated).toMatchObject({
 				repository: "mouriya-s-lab/coder-loop",
 				baseBranch: "main",
-				metadata: { runner: "codex" },
+				metadata: { codex: { binary: "codex" } },
 			})
 
 			expectConflict(await request(fixture, "chain.create", {
 				name: "stable-chain",
 				repository: "mouriya-s-lab/different",
 				baseBranch: "main",
-				metadata: { runner: "codex" },
+				metadata: { codex: { binary: "codex" } },
 			}))
 			expectConflict(await request(fixture, "chain.create", {
 				name: "stable-chain",
 				repository: "mouriya-s-lab/coder-loop",
 				baseBranch: "develop",
-				metadata: { runner: "codex" },
+				metadata: { codex: { binary: "codex" } },
 			}))
 			expectConflict(await request(fixture, "chain.create", {
 				name: "stable-chain",
 				repository: "mouriya-s-lab/coder-loop",
 				baseBranch: "main",
-				metadata: { runner: "claude" },
+				metadata: { claude: { binary: "claude" } },
 			}))
 
 			const listed = expectOk(await request(fixture, "chain.list")).chains
@@ -232,7 +235,7 @@ describe("daemon", () => {
 			if (!Array.isArray(listed)) throw new Error("expected chain list array")
 			expect(listed).toHaveLength(1)
 			const [listedChain] = listed
-			expect(record(listedChain)).toMatchObject({ repository: "mouriya-s-lab/coder-loop", baseBranch: "main", metadata: { runner: "codex" } })
+			expect(record(listedChain)).toMatchObject({ repository: "mouriya-s-lab/coder-loop", baseBranch: "main", metadata: { codex: { binary: "codex" } } })
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -467,13 +470,24 @@ describe("daemon", () => {
 				expect(listed).toHaveLength(0)
 			}
 
+			// #433: `metadata.config` is retired; the parser rejects it explicitly so a stale row
+			// or a stale supervisor write fails fast instead of silently masking the value.
 			expectInvalidDetails(
 				await request(fixture, "chain.create", {
-					name: "metadata-config-array",
+					name: "metadata-config-retired",
 					repository: "mouriya-s-lab/coder-loop",
-					metadata: { config: ["not", "an", "object"] },
+					metadata: { config: { workflowFile: "workflow.md" } },
 				}),
 				"metadata.config",
+				{ workflowFile: "workflow.md" },
+			)
+			expectInvalidDetails(
+				await request(fixture, "chain.create", {
+					name: "metadata-bindings-array",
+					repository: "mouriya-s-lab/coder-loop",
+					metadata: { bindings: ["not", "an", "object"] },
+				}),
+				"metadata.bindings",
 				["not", "an", "object"],
 			)
 			expectInvalidDetails(
@@ -485,9 +499,20 @@ describe("daemon", () => {
 				"metadata.maxItemAttempts",
 				"seven",
 			)
+			// #433: top-level `runner` / `reviewRunner` are also retired (dead keys with no read site
+			// pre-#433). The parser raises explicitly so the rejection is observable.
+			expectInvalidDetails(
+				await request(fixture, "chain.create", {
+					name: "metadata-runner-retired",
+					repository: "mouriya-s-lab/coder-loop",
+					metadata: { runner: "codex" },
+				}),
+				"metadata.runner",
+				"codex",
+			)
 
 			expect(Object.prototype).not.toHaveProperty("polluted")
-			const validMetadata = { config: { workflowFile: "workflow.md" }, runner: "codex", maxItemAttempts: 7, nested: nestedMetadata(7), list: [{ leaf: "ok" }] }
+			const validMetadata = { bindings: { workflowFile: "workflow.md" }, maxItemAttempts: 7, nested: nestedMetadata(7), list: [{ leaf: "ok" }] }
 			const created = record(expectOk(await request(fixture, "chain.create", {
 				name: "metadata-valid",
 				repository: "mouriya-s-lab/coder-loop",
@@ -1072,15 +1097,15 @@ prompt = "run.md"
   ISSUE = "item.issue"
 
 [agent]
-binary = "echo"
-extraArgs = []
 attemptTimeoutSeconds = 3600
 `)
 
 			const chain = record(expectOk(await request(fixture, "chain.create", {
 				name: "custom-preset-chain",
 				repository: "mouriya-s-lab/coder-loop",
-				metadata: { config: { presetPath } },
+				// #433: presetPath now lives at metadata.bindings.presetPath (the retired
+				// metadata.config wrapper is gone).
+				metadata: { bindings: { presetPath } },
 			})).chain)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId: numberValue(chain.id),
@@ -1323,7 +1348,11 @@ attemptTimeoutSeconds = 3600
 						repository: "mouriya-s-lab/coder-loop",
 						baseBranch: "main",
 						metadata: storedChainMetadata({
-							config: { workflowFile: "legacy-workflow.md" },
+							// #433: legacy `metadata.config` is retired; chain bindings now live at
+							// `metadata.bindings`. parseChainMetadata raises an explicit error on the
+							// retired key — that rejection is exercised in the metadata boundary tests
+							// above (`metadata-config-array`, etc.).
+							bindings: { workflowFile: "legacy-workflow.md" },
 							maxItemAttempts: 3,
 							coderLoopChainCompleteTrigger: { decision: "keep-active", fingerprint: "old-fingerprint", recordedAt: 1_800_000_000 },
 						}),
@@ -1354,7 +1383,7 @@ attemptTimeoutSeconds = 3600
 			try {
 				const chain = store.getChainByName("legacy-runtime-data-chain")
 				if (chain === null) throw new Error("expected seeded chain")
-				expect(chainConfigBindings(chain.metadata)).toEqual({ workflowFile: "legacy-workflow.md" })
+				expect(chainBindings(chain.metadata)).toEqual({ workflowFile: "legacy-workflow.md" })
 				expect(chain.metadata.maxItemAttempts).toBe(3)
 				const item = store.getItem(seededItemId)
 				if (item === null) throw new Error("expected seeded item")
@@ -2805,7 +2834,6 @@ attemptTimeoutSeconds = 3600
 
 			const snapshot = await buildCoderLoopStatusSnapshot({
 				targetCwd: REPO_ROOT,
-				configPath: null,
 				loopDataRoot: fixture.loopDataRoot,
 				chainName,
 				output: "json",

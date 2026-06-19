@@ -27,8 +27,8 @@ prompt = "iteration-entry.md"
 runner = "codex"
 
   [phases.variables]
-  REPO        = { source = "config.repository", label = "GitHub repository" }
-  BASE_BRANCH = { source = "config.baseBranch", label = "Base branch" }
+  REPO        = { source = "chain.repository", label = "GitHub repository" }
+  BASE_BRANCH = { source = "chain.baseBranch", label = "Base branch" }
   ISSUE       = { source = "item.issue", label = "Issue number", style = "plain" }
   RUN_ID      = { source = "runtime.runId", label = "Run ID" }
   ISSUE_STATUS = { source = "item.status", label = "Queue status" }
@@ -47,13 +47,11 @@ runner = "codex"
   when   = "The PR was merged and GitHub closed the issue through the closing reference."
 
   [phases.variables]
-  REPO       = { source = "config.repository", label = "GitHub repository" }
-  BASE_BRANCH = { source = "config.baseBranch", label = "Base branch" }
+  REPO       = { source = "chain.repository", label = "GitHub repository" }
+  BASE_BRANCH = { source = "chain.baseBranch", label = "Base branch" }
   ISSUE      = { source = "item.issue", label = "Issue number", style = "plain" }
   RUN_ID     = { source = "runtime.runId", label = "Run ID" }
   CHAIN_NAME = { source = "runtime.chainName", label = "Chain name" }
 
 [agent]
-binary                = "codex"
-extraArgs             = []
 attemptTimeoutSeconds = 900

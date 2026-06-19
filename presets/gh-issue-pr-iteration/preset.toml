@@ -10,7 +10,7 @@
 # binding right-hand sides use the three-prefix DSL described in RFC #5:
 #
 #   item.<field>     - field of the queue item
-#   config.<field>   - field of target runtime/config.{json,toml}
+#   chain.<field>    - field of the chain.metadata.bindings object
 #   runtime.<key>    - engine-computed runtime value
 #
 # Fragments are the canonical fragment list. Entry prompts may only
@@ -50,11 +50,11 @@ roles  = ["common", "quality", "iter"]
   [phases.variables]
   TARGET_CWD               = { source = "runtime.targetCwd", label = "Target working directory (where `loop-data runtime artifacts` lives)" }
   AGENT_CWD                = { source = "runtime.agentCwd", label = "Agent working directory (your `cwd`; may equal TARGET_CWD or point at a different repo checkout for cross-repo work)" }
-  REPO                     = { source = "config.repository", label = "GitHub repository" }
-  BASE_BRANCH              = { source = "config.baseBranch", label = "Base branch" }
+  REPO                     = { source = "chain.repository", label = "GitHub repository" }
+  BASE_BRANCH              = { source = "chain.baseBranch", label = "Base branch" }
   ISSUE                    = { source = "item.issue", label = "Current issue", suffix = "", style = "plain" }
   RUN_ID                   = { source = "runtime.runId", label = "Run ID" }
-  WORKFLOW_FILE            = { source = "config.workflowFile", label = "Workflow file" }
+  WORKFLOW_FILE            = { source = "chain.workflowFile", label = "Workflow file" }
   SHARED_CONTEXT_FILE      = { source = "runtime.sharedContextPath", label = "Chain handoff/shared file" }
   STATE_FILE               = { source = "runtime.stateFile", label = "State file", style = "plain" }
   CURRENT_ISSUE_FILE       = { source = "runtime.currentIssueFile", label = "Optional per-issue handoff file" }
@@ -69,7 +69,7 @@ roles  = ["common", "quality", "iter"]
   RUNTIME_INPUTS_DOC       = "runtime.runtimeInputsDoc"
   PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
   ISSUE_KIND_DOC           = "runtime.issueKindDoc"
-  REQUIRE_BROWSER_EVIDENCE = { source = "config.requireBrowserEvidence", default = false, label = "Browser evidence required", suffix = " — when `true`, Layer 4 must contain the strongest feasible E2E evidence for the project type. For projects with UI: real browser screenshots of the running dev server or deployed page. For projects without UI (pure CLI / library / backend / config): CLI smoke run transcripts with command, exit status, and output are the Layer 4 evidence; do not fabricate screenshots by creating HTML files and screenshotting them." }
+  REQUIRE_BROWSER_EVIDENCE = { source = "chain.requireBrowserEvidence", default = false, label = "Browser evidence required", suffix = " — when `true`, Layer 4 must contain the strongest feasible E2E evidence for the project type. For projects with UI: real browser screenshots of the running dev server or deployed page. For projects without UI (pure CLI / library / backend / config): CLI smoke run transcripts with command, exit status, and output are the Layer 4 evidence; do not fabricate screenshots by creating HTML files and screenshotting them." }
   ISSUE_BRANCH             = { source = "item.branch", label = "Existing issue branch", blankBefore = true }
   ISSUE_PR                 = { source = "item.pr", label = "Existing issue PR" }
   ISSUE_STATUS             = { source = "item.status", label = "Queue status" }
@@ -115,11 +115,11 @@ roles  = ["common", "quality", "review"]
   [phases.variables]
   TARGET_CWD               = { source = "runtime.targetCwd", label = "Target working directory (where `loop-data runtime artifacts` lives)" }
   AGENT_CWD                = { source = "runtime.agentCwd", label = "Agent working directory (your `cwd`; may equal TARGET_CWD or point at a different repo checkout for cross-repo work)" }
-  REPO                     = { source = "config.repository", label = "GitHub repository" }
-  BASE_BRANCH              = { source = "config.baseBranch", label = "Base branch" }
+  REPO                     = { source = "chain.repository", label = "GitHub repository" }
+  BASE_BRANCH              = { source = "chain.baseBranch", label = "Base branch" }
   ISSUE                    = { source = "item.issue", label = "Current issue", suffix = "", style = "plain" }
   RUN_ID                   = { source = "runtime.runId", label = "Run ID" }
-  WORKFLOW_FILE            = { source = "config.workflowFile", label = "Workflow file" }
+  WORKFLOW_FILE            = { source = "chain.workflowFile", label = "Workflow file" }
   SHARED_CONTEXT_FILE      = { source = "runtime.sharedContextPath", label = "Chain handoff/shared file" }
   STATE_FILE               = { source = "runtime.stateFile", label = "State file", style = "plain" }
   CURRENT_ISSUE_FILE       = { source = "runtime.currentIssueFile", label = "Optional per-issue handoff file" }
@@ -134,7 +134,7 @@ roles  = ["common", "quality", "review"]
   RUNTIME_INPUTS_DOC       = "runtime.runtimeInputsDoc"
   PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
   ISSUE_KIND_DOC           = "runtime.issueKindDoc"
-  REQUIRE_BROWSER_EVIDENCE = { source = "config.requireBrowserEvidence", default = false, label = "Browser evidence required", suffix = " — when `true`, Layer 4 must contain the strongest feasible E2E evidence for the project type. For projects with UI: real browser screenshots of the running dev server or deployed page. For projects without UI (pure CLI / library / backend / config): CLI smoke run transcripts with command, exit status, and output are the Layer 4 evidence; synthetic screenshots (HTML files rendered and screenshotted) are rejected." }
+  REQUIRE_BROWSER_EVIDENCE = { source = "chain.requireBrowserEvidence", default = false, label = "Browser evidence required", suffix = " — when `true`, Layer 4 must contain the strongest feasible E2E evidence for the project type. For projects with UI: real browser screenshots of the running dev server or deployed page. For projects without UI (pure CLI / library / backend / config): CLI smoke run transcripts with command, exit status, and output are the Layer 4 evidence; synthetic screenshots (HTML files rendered and screenshotted) are rejected." }
   ISSUE_BRANCH             = { source = "item.branch", label = "Existing issue branch", blankBefore = true }
   ISSUE_PR                 = { source = "item.pr", label = "Existing issue PR" }
   ISSUE_STATUS             = { source = "item.status", label = "Queue status" }
@@ -160,11 +160,11 @@ roles   = ["common"]
   [phases.variables]
   TARGET_CWD               = { source = "runtime.targetCwd", label = "Current target repository working directory" }
   AGENT_CWD                = { source = "runtime.agentCwd", label = "Agent working directory" }
-  REPO                     = { source = "config.repository", label = "Current GitHub repository" }
-  BASE_BRANCH              = "config.baseBranch"
+  REPO                     = { source = "chain.repository", label = "Current GitHub repository" }
+  BASE_BRANCH              = "chain.baseBranch"
   ISSUE                    = { source = "item.issue", label = "Current issue", suffix = "", style = "plain" }
   RUN_ID                   = { source = "runtime.runId", label = "Run ID" }
-  WORKFLOW_FILE            = "config.workflowFile"
+  WORKFLOW_FILE            = "chain.workflowFile"
   SHARED_CONTEXT_FILE      = { source = "runtime.sharedContextPath", label = "Chain handoff/shared file" }
   STATE_FILE               = { source = "runtime.stateFile", label = "State file", style = "plain" }
   CURRENT_ISSUE_FILE       = { source = "runtime.currentIssueFile", label = "Optional per-issue handoff file" }
@@ -179,7 +179,7 @@ roles   = ["common"]
   RUNTIME_INPUTS_DOC       = "runtime.runtimeInputsDoc"
   PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
   ISSUE_KIND_DOC           = "runtime.issueKindDoc"
-  REQUIRE_BROWSER_EVIDENCE = { source = "config.requireBrowserEvidence", default = false }
+  REQUIRE_BROWSER_EVIDENCE = { source = "chain.requireBrowserEvidence", default = false }
   ISSUE_BRANCH             = "item.branch"
   ISSUE_PR                 = "item.pr"
   ISSUE_STATUS             = "item.status"
@@ -205,11 +205,11 @@ roles   = ["common"]
   [phases.variables]
   TARGET_CWD               = { source = "runtime.targetCwd", label = "Current target repository working directory" }
   AGENT_CWD                = { source = "runtime.agentCwd", label = "Agent working directory" }
-  REPO                     = { source = "config.repository", label = "Current GitHub repository" }
-  BASE_BRANCH              = { source = "config.baseBranch", label = "Base branch" }
+  REPO                     = { source = "chain.repository", label = "Current GitHub repository" }
+  BASE_BRANCH              = { source = "chain.baseBranch", label = "Base branch" }
   ISSUE                    = "item.issue"
   RUN_ID                   = { source = "runtime.runId", label = "Run ID" }
-  WORKFLOW_FILE            = { source = "config.workflowFile", label = "Workflow file" }
+  WORKFLOW_FILE            = { source = "chain.workflowFile", label = "Workflow file" }
   SHARED_CONTEXT_FILE      = { source = "runtime.sharedContextPath", label = "Chain handoff/shared file" }
   STATE_FILE               = "runtime.stateFile"
   CURRENT_ISSUE_FILE       = "runtime.currentIssueFile"
@@ -224,7 +224,7 @@ roles   = ["common"]
   RUNTIME_INPUTS_DOC       = "runtime.runtimeInputsDoc"
   PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
   ISSUE_KIND_DOC           = "runtime.issueKindDoc"
-  REQUIRE_BROWSER_EVIDENCE = { source = "config.requireBrowserEvidence", default = false }
+  REQUIRE_BROWSER_EVIDENCE = { source = "chain.requireBrowserEvidence", default = false }
   ISSUE_BRANCH             = "item.branch"
   ISSUE_PR                 = "item.pr"
   ISSUE_STATUS             = "item.status"
@@ -596,6 +596,4 @@ role = "review"
 path = "review/actions/state-write.md"
 
 [agent]
-binary                = "claude"
-extraArgs             = []
 attemptTimeoutSeconds = 3600
