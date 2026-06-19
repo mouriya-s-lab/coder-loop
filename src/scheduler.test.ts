@@ -488,10 +488,10 @@ describe("scheduler", () => {
 		}
 	})
 
-	test("default maxItemAttempts exhausts a continuable item at ten attempts before spawning", async () => {
+	test("default maxItemAttempts exhausts a continuable item at twenty attempts before spawning", async () => {
 		const fixture = await createFixture("default-max-item-attempts-exhaust")
 		try {
-			expect(DEFAULT_MAX_ITEM_ATTEMPTS).toBe(10)
+			expect(DEFAULT_MAX_ITEM_ATTEMPTS).toBe(20)
 			const chain = createChain(fixture.store, "default-max-item-attempts-exhaust-chain")
 			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 7008, repoCwd: "/repo/a" })
