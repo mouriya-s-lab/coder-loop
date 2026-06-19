@@ -1,0 +1,45 @@
+# coder-loop preset: business-key-example
+#
+# Minimal verification fixture for issue #448 — demonstrates that a preset can
+# declare a runtime business key AND supply its value entirely within its own
+# preset files, with zero engine knowledge of the key's semantics.
+#
+# Contract pinned by issue #448 acceptance:
+#   - path:         presets/business-key-example/
+#   - business key: auditDemo
+#   - template var: AUDIT_DEMO (binds runtime.auditDemo)
+#   - expected:    "business-key-e2e-ok" when rendered through the real spawn
+#                  path (buildSchedulerResolveContext -> renderPrompt)
+#
+# The supply form below (`[runtime.businessKeyValues]` table) is the mechanism
+# introduced by the implementation of #448 — fixture must NOT add any code in
+# `src/` to make this render.
+
+name = "business-key-example"
+
+[item]
+idField = "id"
+
+[runtime]
+businessKeys = ["auditDemo"]
+
+  [runtime.businessKeyValues]
+  auditDemo = { literal = "business-key-e2e-ok" }
+
+[statuses]
+continuable = ["pending"]
+terminal    = ["done"]
+
+[[phases]]
+name   = "audit"
+prompt = "audit-entry.md"
+
+  [phases.variables]
+  ITEM_ID    = "item.id"
+  RUN_ID     = "runtime.runId"
+  AUDIT_DEMO = "runtime.auditDemo"
+
+[agent]
+binary                = "echo"
+extraArgs             = []
+attemptTimeoutSeconds = 3600
