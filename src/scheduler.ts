@@ -290,7 +290,7 @@ export type SchedulerChainStatuses = {
 	entry: InternalStatus
 }
 
-export const DEFAULT_MAX_ITEM_ATTEMPTS = 10
+export const DEFAULT_MAX_ITEM_ATTEMPTS = 20
 export const SCHEDULER_EXHAUSTED_STATUS = parseInternalStatus("exhausted", "scheduler.exhaustedStatus")
 const RUNNING_RUN_STATUS = parseInternalStatus("running", "scheduler.runningRunStatus")
 const REVIEW_ON_EMPTY_STATUS = parseInternalStatus("review-on-empty", "scheduler.reviewOnEmptyStatus")
