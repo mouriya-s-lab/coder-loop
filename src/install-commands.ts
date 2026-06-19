@@ -343,6 +343,7 @@ function uniqueRequiredRunners(runners: RequiredRunnerCli[]): RequiredRunnerCli[
 
 function runnerInstallHint(runner: RequiredRunnerCli): string {
 	if (runner.kind === "codex") return `codex runner CLI (${runner.binary}) 未在 PATH 中。安装/配置 Codex CLI，并确认 \`${runner.binary} --version\` 可运行。`
+	if (runner.kind === "opencode") return `opencode runner CLI (${runner.binary}) 未在 PATH 中。安装：https://opencode.ai（macOS: \`brew install opencode\`；其他平台见官网），并 \`opencode providers login\` 配好对应 provider（GLM 模型走 OpenCode Go provider），确认 \`${runner.binary} --version\` 可运行。`
 	return `claude runner CLI (${runner.binary}) 未在 PATH 中。安装：https://docs.anthropic.com/claude/docs/claude-code（npm: \`npm install -g @anthropic-ai/claude-code\`），并确认 \`${runner.binary} --version\` 可运行。`
 }
 

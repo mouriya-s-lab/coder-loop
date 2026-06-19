@@ -159,6 +159,7 @@ function makeLoopOptions(): LoopOptions {
 		runnerCommands: {
 			claude: { kind: "claude", binary: "claude", extraArgs: [], model: null },
 			codex: { kind: "codex", binary: "codex", extraArgs: [], model: null },
+			opencode: { kind: "opencode", binary: "opencode", extraArgs: [], model: null },
 		},
 		dryRun: false,
 		preset: {

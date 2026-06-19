@@ -2147,7 +2147,7 @@ function optionalRunner(record: UnknownRecord, key: string): AgentRunnerKind | n
 	const value = record[key]
 	if (value === undefined) return undefined
 	if (value === null) return null
-	if (value !== "claude" && value !== "codex") throw new DaemonError("invalid_request", `${key} must be claude, codex, or null`)
+	if (value !== "claude" && value !== "codex" && value !== "opencode") throw new DaemonError("invalid_request", `${key} must be claude, codex, opencode, or null`)
 	return value
 }
 

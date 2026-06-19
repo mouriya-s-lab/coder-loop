@@ -333,7 +333,7 @@ const ITEMS_TABLE_SCHEMA_SQL = `
 	issue_file TEXT,
 	evidence_dir TEXT,
 	agent_cwd TEXT,
-	runner TEXT CHECK (runner IN ('claude', 'codex') OR runner IS NULL),
+	runner TEXT CHECK (runner IN ('claude', 'codex', 'opencode') OR runner IS NULL),
 	phase TEXT,
 	extra TEXT NOT NULL,
 	created_at REAL NOT NULL,
@@ -402,7 +402,7 @@ CREATE TABLE IF NOT EXISTS current_runs (
 ${STATE_INDEXES_SQL}
 `
 
-const STATE_SCHEMA_VERSION = 8
+const STATE_SCHEMA_VERSION = 9
 const V5_ITEM_SESSION_COLUMN = ["last", "session", "id"].join("_")
 
 type UserVersionRow = {
@@ -471,6 +471,11 @@ function chainsTableAllowsStopped(db: Database): boolean {
 	return sql.includes("'stopped'")
 }
 
+function itemsTableAllowsOpencodeRunner(db: Database): boolean {
+	const sql = db.query<TableSqlRow, []>("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'items'").get()?.sql ?? ""
+	return sql.includes("'opencode'")
+}
+
 function itemsTableHasColumn(db: Database, columnName: string): boolean {
 	return tableHasColumn(db, "items", columnName)
 }
@@ -481,12 +486,15 @@ function runsTableHasColumn(db: Database, columnName: string): boolean {
 
 function migrateStateSchema(db: Database): void {
 	const beforeVersion = readUserVersion(db)
-	const needsItemTableRebuild = itemsTableHasColumn(db, V5_ITEM_SESSION_COLUMN)
+	const needsItemTableRebuildForV6 = itemsTableHasColumn(db, V5_ITEM_SESSION_COLUMN)
 	const needsChainTableRebuild = stateSchemaExists(db) && !chainsTableAllowsStopped(db)
+	const needsItemTableRebuildForV9 = stateSchemaExists(db) && !itemsTableAllowsOpencodeRunner(db)
+	const needsItemTableRebuild = needsItemTableRebuildForV6 || needsItemTableRebuildForV9
 	if (
 		beforeVersion >= STATE_SCHEMA_VERSION
 		&& stateSchemaExists(db)
 		&& !needsChainTableRebuild
+		&& !needsItemTableRebuildForV9
 		&& itemsTableHasColumn(db, "phase")
 		&& itemsTableHasColumn(db, "session_ids")
 		&& itemsTableHasColumn(db, "position")
@@ -520,6 +528,8 @@ function migrateStateSchema(db: Database): void {
 			}
 			if (itemsTableHasColumn(db, V5_ITEM_SESSION_COLUMN)) {
 				migrateV5ItemSessionIds(db)
+				rebuildItemsTableForV6(db)
+			} else if (needsItemTableRebuildForV9) {
 				rebuildItemsTableForV6(db)
 			}
 			db.exec(STATE_INDEXES_SQL)
@@ -995,7 +1005,7 @@ function insertItem(db: Database, getItemRow: (id: number) => ItemRow | null, in
 
 function rowToItem(row: ItemRow | null): ItemRecord | null {
 	if (row === null) return null
-	if (row.runner !== null && row.runner !== "claude" && row.runner !== "codex") {
+	if (row.runner !== null && !isAgentRunnerKind(row.runner)) {
 		throw new SqliteStateError("invalid_json", `invalid item runner in DB row: ${row.runner}`, { id: row.id })
 	}
 	return {
@@ -1281,7 +1291,7 @@ function normalizeRunStatus(status: string, code: SqliteStateErrorCode): string 
 }
 
 function isAgentRunnerKind(value: unknown): value is AgentRunnerKind {
-	return value === "claude" || value === "codex"
+	return value === "claude" || value === "codex" || value === "opencode"
 }
 
 function stringifyJsonObject(value: JsonObject): string {

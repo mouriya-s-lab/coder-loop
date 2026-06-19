@@ -293,12 +293,15 @@ type LoopConfig = {
 	codexBinary: string | null
 	codexExtraArgs: string[]
 	codexModel: string | null
+	opencodeBinary: string | null
+	opencodeExtraArgs: string[]
+	opencodeModel: string | null
 	preset: string | null
 	presetPath: string | null
 	configBindings: JsonObject
 }
 
-const AgentRunnerKindBoundary = arkType.or(arkType.unit("claude"), arkType.unit("codex"))
+const AgentRunnerKindBoundary = arkType.or(arkType.unit("claude"), arkType.unit("codex"), arkType.unit("opencode"))
 
 const StatusConfigBoundary = arkType({
 	"worktree?": "boolean|null",
@@ -314,6 +317,11 @@ const StatusConfigBoundary = arkType({
 		"model?": "string|null",
 	},
 	"codex?": {
+		"binary?": "string|null",
+		"extraArgs?": "string[]",
+		"model?": "string|null",
+	},
+	"opencode?": {
 		"binary?": "string|null",
 		"extraArgs?": "string[]",
 		"model?": "string|null",
@@ -537,7 +545,7 @@ export type PresetPhaseTrigger =
 	| { afterPhase: string; whenStatus: string }
 	| { on: "chain-complete" }
 
-export type AgentRunnerKind = "claude" | "codex"
+export type AgentRunnerKind = "claude" | "codex" | "opencode"
 
 export type AgentRunnerSource = "preset" | "engine-builtin" | "queue" | "config" | "iteration-default" | "review-default"
 
@@ -555,6 +563,7 @@ export type AgentRunnerSelection = AgentRunnerCommand & {
 export type AgentRunnerCommands = {
 	claude: AgentRunnerCommand
 	codex: AgentRunnerCommand
+	opencode: AgentRunnerCommand
 }
 
 export type RuntimeCheckError = {
@@ -945,21 +954,28 @@ type RuntimeCommandArgs =
 		configPath: string | null
 		claudeModelChoice: ClaudeModelChoice | null
 		codexModelChoice: CodexModelChoice | null
+		opencodeModelChoice: OpencodeModelChoice | null
 		dryRun: boolean
 		json: boolean
 	}
 
 type ClaudeModelChoice = "opus-4-7" | "opus-4-8"
 type CodexModelChoice = "gpt-5.5"
+type OpencodeModelChoice = "opencode-go/glm-5.2" | "opencode-go/glm-5.1"
 
 const CLAUDE_MODEL_CHOICES: readonly ClaudeModelChoice[] = ["opus-4-7", "opus-4-8"]
 const CODEX_MODEL_CHOICES: readonly CodexModelChoice[] = ["gpt-5.5"]
+const OPENCODE_MODEL_CHOICES: readonly OpencodeModelChoice[] = ["opencode-go/glm-5.2", "opencode-go/glm-5.1"]
 
 function renderClaudeModel(choice: ClaudeModelChoice): string {
 	return `claude-${choice}[1m]`
 }
 
 function renderCodexModel(choice: CodexModelChoice): string {
+	return choice
+}
+
+function renderOpencodeModel(choice: OpencodeModelChoice): string {
 	return choice
 }
 
@@ -973,6 +989,12 @@ function parseCodexModelChoice(value: string | null, flagName: string): CodexMod
 	if (value === null) return null
 	if ((CODEX_MODEL_CHOICES as readonly string[]).includes(value)) return value as CodexModelChoice
 	fail(`${flagName} must be one of ${CODEX_MODEL_CHOICES.join("|")}, got: ${value}`)
+}
+
+function parseOpencodeModelChoice(value: string | null, flagName: string): OpencodeModelChoice | null {
+	if (value === null) return null
+	if ((OPENCODE_MODEL_CHOICES as readonly string[]).includes(value)) return value as OpencodeModelChoice
+	fail(`${flagName} must be one of ${OPENCODE_MODEL_CHOICES.join("|")}, got: ${value}`)
 }
 
 const statusCliCommand = command({
@@ -1507,12 +1529,13 @@ const runtimeShowCliCommand = command({
 
 const runtimeSetCliCommand = command({
 	name: "set",
-	description: "Set the Claude/Codex model on a target's .coder-loop/runtime/config.json. Runner kind is owned by role entry md and is not a CLI surface.",
+	description: "Set the Claude/Codex/Opencode model on a target's .coder-loop/runtime/config.json. Runner kind is owned by role entry md and is not a CLI surface.",
 	args: {
 		target: positional({ displayName: "target", type: cmdString }),
 		config: option({ long: "config", type: optional(cmdString) }),
 		claudeModel: option({ long: "claude-model", type: optional(cmdString) }),
 		codexModel: option({ long: "codex-model", type: optional(cmdString) }),
+		opencodeModel: option({ long: "opencode-model", type: optional(cmdString) }),
 		dryRun: flag({ long: "dry-run" }),
 		json: flag({ long: "json" }),
 	},
@@ -1524,6 +1547,7 @@ const runtimeSetCliCommand = command({
 			configPath: args.config ?? null,
 			claudeModelChoice: parseClaudeModelChoice(args.claudeModel ?? null, "--claude-model"),
 			codexModelChoice: parseCodexModelChoice(args.codexModel ?? null, "--codex-model"),
+			opencodeModelChoice: parseOpencodeModelChoice(args.opencodeModel ?? null, "--opencode-model"),
 			dryRun: args.dryRun,
 			json: args.json,
 		},
@@ -1588,8 +1612,8 @@ function parseRequiredNonNegativeInteger(value: string, flagName: string): numbe
 
 function parseOptionalRunner(value: string | null, flagName: string): AgentRunnerKind | null {
 	if (value === null) return null
-	if (value === "claude" || value === "codex") return value
-	fail(`${flagName} must be claude or codex, got: ${value}`)
+	if (value === "claude" || value === "codex" || value === "opencode") return value
+	fail(`${flagName} must be claude, codex, or opencode, got: ${value}`)
 }
 
 async function runStatusCommand(args: string[]): Promise<void> {
@@ -2133,6 +2157,7 @@ type RuntimeShowSnapshot = {
 	defaults: {
 		claudeModel: string | null
 		codexModel: string | null
+		opencodeModel: string | null
 	}
 	phases: RuntimePhaseRoleSnapshot[]
 }
@@ -2192,6 +2217,7 @@ export async function buildRuntimeShowSnapshot(input: {
 		defaults: {
 			claudeModel: config.claudeModel,
 			codexModel: config.codexModel,
+			opencodeModel: config.opencodeModel,
 		},
 		phases,
 	}
@@ -2218,6 +2244,9 @@ function emptyLoopConfig(): LoopConfig {
 		codexBinary: null,
 		codexExtraArgs: [],
 		codexModel: null,
+		opencodeBinary: null,
+		opencodeExtraArgs: [],
+		opencodeModel: null,
 		preset: null,
 		presetPath: null,
 		configBindings: {},
@@ -2229,8 +2258,9 @@ function formatRuntimeShowHuman(snapshot: RuntimeShowSnapshot): string {
 	lines.push(`target:        ${snapshot.target}`)
 	lines.push(`config:        ${snapshot.configPath} (${snapshot.configExists ? snapshot.configFormat : "missing"})`)
 	lines.push(`preset:        ${snapshot.preset === null ? "<unloadable>" : `${snapshot.preset.name} (${snapshot.preset.presetDir})`}`)
-	lines.push(`claude.model:  ${snapshot.defaults.claudeModel ?? "<unset>"}`)
-	lines.push(`codex.model:   ${snapshot.defaults.codexModel ?? "<unset>"}`)
+	lines.push(`claude.model:    ${snapshot.defaults.claudeModel ?? "<unset>"}`)
+	lines.push(`codex.model:     ${snapshot.defaults.codexModel ?? "<unset>"}`)
+	lines.push(`opencode.model:  ${snapshot.defaults.opencodeModel ?? "<unset>"}`)
 	lines.push("")
 	lines.push("phases (roles):")
 	if (snapshot.phases.length === 0) {
@@ -2276,13 +2306,15 @@ export async function applyRuntimeSet(input: {
 	configPath: string | null
 	claudeModelChoice: ClaudeModelChoice | null
 	codexModelChoice: CodexModelChoice | null
+	opencodeModelChoice: OpencodeModelChoice | null
 	dryRun: boolean
 }): Promise<RuntimeSetResult> {
 	if (
 		input.claudeModelChoice === null &&
-		input.codexModelChoice === null
+		input.codexModelChoice === null &&
+		input.opencodeModelChoice === null
 	) {
-		fail("runtime set: pass at least one of --claude-model / --codex-model")
+		fail("runtime set: pass at least one of --claude-model / --codex-model / --opencode-model")
 	}
 	const targetCwd = resolve(input.targetCwd)
 	const configPath = await resolveConfigPath(targetCwd, input.configPath)
@@ -2330,6 +2362,14 @@ export async function applyRuntimeSet(input: {
 		codexSection.model = to
 		next.codex = codexSection
 		recordChange("codex.model", from, to)
+	}
+	if (input.opencodeModelChoice !== null) {
+		const opencodeSection = isObjectRecord(next.opencode) ? { ...next.opencode } : {}
+		const from = opencodeSection.model
+		const to = renderOpencodeModel(input.opencodeModelChoice)
+		opencodeSection.model = to
+		next.opencode = opencodeSection
+		recordChange("opencode.model", from, to)
 	}
 
 	const nextRaw = `${JSON.stringify(next, null, "\t")}\n`
@@ -2650,6 +2690,9 @@ function buildStatusRunnerDefaultsSnapshot(options: LoopOptions | null): StatusR
 		codexBinary: null,
 		codexExtraArgs: [],
 		codexModel: null,
+		opencodeBinary: null,
+		opencodeExtraArgs: [],
+		opencodeModel: null,
 		preset: null,
 		presetPath: null,
 		configBindings: {},
@@ -3620,6 +3663,9 @@ function loopConfigFromChain(chain: ChainRecord, loopDataRoot: string | null, ex
 		codexBinary: nestedStringMetadata(metadata, "codex", "binary") ?? explicitConfig?.codexBinary ?? null,
 		codexExtraArgs: nestedStringArrayMetadata(metadata, "codex", "extraArgs") ?? explicitConfig?.codexExtraArgs ?? [],
 		codexModel: nestedStringMetadata(metadata, "codex", "model") ?? explicitConfig?.codexModel ?? null,
+		opencodeBinary: nestedStringMetadata(metadata, "opencode", "binary") ?? explicitConfig?.opencodeBinary ?? null,
+		opencodeExtraArgs: nestedStringArrayMetadata(metadata, "opencode", "extraArgs") ?? explicitConfig?.opencodeExtraArgs ?? [],
+		opencodeModel: nestedStringMetadata(metadata, "opencode", "model") ?? explicitConfig?.opencodeModel ?? null,
 		preset: presetPath === null ? chain.preset : null,
 		presetPath,
 		configBindings: explicitConfig?.configBindings ?? {},
@@ -4074,6 +4120,9 @@ function loopConfigFromStatusInput(input: StatusConfigInput, configBindings: Jso
 		codexBinary: input.codex?.binary ?? null,
 		codexExtraArgs: input.codex?.extraArgs ?? [],
 		codexModel: input.codex?.model ?? null,
+		opencodeBinary: input.opencode?.binary ?? null,
+		opencodeExtraArgs: input.opencode?.extraArgs ?? [],
+		opencodeModel: input.opencode?.model ?? null,
 		preset: readPresetNameFromStatusInput(input.preset),
 		presetPath: input.presetPath ?? null,
 		configBindings,
@@ -4108,6 +4157,12 @@ export function buildAgentRunnerCommands(config: LoopConfig): AgentRunnerCommand
 			binary: config.codexBinary ?? "codex",
 			extraArgs: config.codexExtraArgs,
 			model: config.codexModel,
+		},
+		opencode: {
+			kind: "opencode",
+			binary: config.opencodeBinary ?? "opencode",
+			extraArgs: config.opencodeExtraArgs,
+			model: config.opencodeModel,
 		},
 	}
 }
@@ -4951,6 +5006,18 @@ function claudeAgentMessageText(event: unknown): string | null {
 	return textParts.length === 0 ? null : textParts.join("\n")
 }
 
+function opencodeAgentMessageText(event: unknown): string | null {
+	if (!isObjectRecord(event) || event.type !== "text" || !isObjectRecord(event.part)) return null
+	if (event.part.type !== "text" || typeof event.part.text !== "string") return null
+	return event.part.text
+}
+
+function runnerAgentTextOf(runner: AgentRunnerKind, event: unknown): string | null {
+	if (runner === "codex") return codexAgentMessageText(event)
+	if (runner === "opencode") return opencodeAgentMessageText(event)
+	return claudeAgentMessageText(event)
+}
+
 function containsSummaryMarkerLine(text: string, marker: string): boolean {
 	return text.split(/\r?\n/).some((line) => line.trimStart().startsWith(marker))
 }
@@ -4960,6 +5027,18 @@ export function codexSummaryTextFromJsonLine(line: string, marker: string): stri
 	if (trimmed === "") return null
 	try {
 		const text = codexAgentMessageText(JSON.parse(trimmed))
+		if (text === null || !containsSummaryMarkerLine(text, marker)) return null
+		return text
+	} catch {
+		return null
+	}
+}
+
+export function opencodeSummaryTextFromJsonLine(line: string, marker: string): string | null {
+	const trimmed = line.trim()
+	if (trimmed === "") return null
+	try {
+		const text = opencodeAgentMessageText(JSON.parse(trimmed))
 		if (text === null || !containsSummaryMarkerLine(text, marker)) return null
 		return text
 	} catch {
@@ -4990,7 +5069,7 @@ function runnerAgentTextFromJsonLine(line: string, runner: AgentRunnerKind): { p
 	try {
 		const event: unknown = JSON.parse(trimmed)
 		if (!isObjectRecord(event) || typeof event.type !== "string") return { parsedRunnerEvent: false, text: null }
-		const text = runner === "codex" ? codexAgentMessageText(event) : claudeAgentMessageText(event)
+		const text = runnerAgentTextOf(runner, event)
 		return { parsedRunnerEvent: true, text }
 	} catch {
 		return { parsedRunnerEvent: false, text: null }
@@ -5010,12 +5089,13 @@ export function parseReviewSummaryVerdict(output: string, marker: string, runner
 }
 
 export function createSummaryWatchdogStdoutObserver(runner: AgentRunnerKind, marker: string, watchdog: SummaryWatchdog): SummaryWatchdogStdoutObserver {
-	if (runner !== "codex") {
+	if (runner === "claude") {
 		return {
 			observeStdout: (chunk) => watchdog.observeStdout(chunk),
 		}
 	}
 
+	const summaryTextFromJsonLine = runner === "opencode" ? opencodeSummaryTextFromJsonLine : codexSummaryTextFromJsonLine
 	let bufferedLine = ""
 	const maxBufferedLineChars = 1_000_000
 	return {
@@ -5025,7 +5105,7 @@ export function createSummaryWatchdogStdoutObserver(runner: AgentRunnerKind, mar
 			while (newlineIndex >= 0) {
 				const line = bufferedLine.slice(0, newlineIndex)
 				bufferedLine = bufferedLine.slice(newlineIndex + 1)
-				const summaryText = codexSummaryTextFromJsonLine(line, marker)
+				const summaryText = summaryTextFromJsonLine(line, marker)
 				if (summaryText !== null) watchdog.observeStdout(summaryText)
 				newlineIndex = bufferedLine.indexOf("\n")
 			}
@@ -5588,6 +5668,13 @@ export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: stri
 			args: agentClaudeArgs(runner.extraArgs, prompt, resume, additionalDirs, runner.model),
 		}
 	}
+	if (runner.kind === "opencode") {
+		return {
+			kind: "spawn",
+			binary: runner.binary,
+			args: agentOpencodeArgs(runner.extraArgs, prompt, resume, paths.agentCwd, runner.model),
+		}
+	}
 	return {
 		kind: "spawn",
 		binary: runner.binary,
@@ -5605,6 +5692,24 @@ function distinctPaths(paths: readonly string[]): string[] {
 		if (!result.some((existing) => samePath(existing, path))) result.push(path)
 	}
 	return result
+}
+
+export function agentOpencodeArgs(
+	extraArgs: readonly string[],
+	prompt: string,
+	resume: ResumeDecision,
+	agentCwd: string,
+	model: string | null = null,
+): string[] {
+	const runnerArgs = model === null ? [...extraArgs] : stripModelArgs(extraArgs, ["--model", "-m"])
+	const args = ["run", ...runnerArgs]
+	if (!args.includes("--format") && !args.some((arg) => arg.startsWith("--format="))) args.push("--format", "json")
+	if (!args.includes("--dangerously-skip-permissions")) args.push("--dangerously-skip-permissions")
+	if (!args.includes("--dir") && !args.some((arg) => arg.startsWith("--dir="))) args.push("--dir", agentCwd)
+	if (model !== null) args.push("-m", model)
+	if (resume.kind === "resume") args.push("-s", resume.sessionId)
+	args.push(prompt)
+	return args
 }
 
 export function agentCodexArgs(
@@ -5691,8 +5796,24 @@ export function parseCodexThreadIdFromStream(text: string): string | null {
 	return null
 }
 
+export function parseOpencodeSessionIdFromStream(text: string): string | null {
+	for (const line of text.split("\n")) {
+		const trimmed = line.trim()
+		if (trimmed === "") continue
+		try {
+			const event: unknown = JSON.parse(trimmed)
+			if (isObjectRecord(event) && typeof event.sessionID === "string" && event.sessionID !== "") return event.sessionID
+		} catch {
+			continue
+		}
+	}
+	return null
+}
+
 export function parseSessionIdFromRunnerStream(runner: AgentRunnerKind, text: string): string | null {
-	return runner === "codex" ? parseCodexThreadIdFromStream(text) : parseSessionIdFromStream(text)
+	if (runner === "codex") return parseCodexThreadIdFromStream(text)
+	if (runner === "opencode") return parseOpencodeSessionIdFromStream(text)
+	return parseSessionIdFromStream(text)
 }
 
 export function extractErrorCode(stdoutText: string, stderrText: string): string {

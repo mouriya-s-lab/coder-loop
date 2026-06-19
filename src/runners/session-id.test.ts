@@ -4,6 +4,7 @@ import {
 	claudeSessionIdInvalidDetector,
 	codexSessionIdInvalidDetector,
 	detectsSessionIdInvalid,
+	opencodeSessionIdInvalidDetector,
 } from "./session-id"
 
 describe("runner session id invalid detection", () => {
@@ -19,8 +20,18 @@ describe("runner session id invalid detection", () => {
 		expect(detectsSessionIdInvalid("claude", stderr)).toBe(true)
 	})
 
+	test("opencode detects missing session ids (with ANSI color codes from --format default; also bare phrase)", () => {
+		const stderrWithAnsi = "[91m[1mError: [0mSession not found\n"
+		const stderrBare = "Error: Session not found"
+		expect(opencodeSessionIdInvalidDetector.detectsSessionIdInvalid(stderrWithAnsi)).toBe(true)
+		expect(opencodeSessionIdInvalidDetector.detectsSessionIdInvalid(stderrBare)).toBe(true)
+		expect(detectsSessionIdInvalid("opencode", stderrWithAnsi)).toBe(true)
+		expect(detectsSessionIdInvalid("opencode", stderrBare)).toBe(true)
+	})
+
 	test("does not treat ordinary runner stderr as session-id invalid", () => {
 		expect(detectsSessionIdInvalid("codex", "transient network failure")).toBe(false)
 		expect(detectsSessionIdInvalid("claude", "rate limit exceeded")).toBe(false)
+		expect(detectsSessionIdInvalid("opencode", "Error: provider authentication failed")).toBe(false)
 	})
 })

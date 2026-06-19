@@ -4,6 +4,7 @@ import { relative, resolve } from "node:path"
 
 import {
 	agentCodexArgs,
+	agentOpencodeArgs,
 	agentSessionsPath,
 	buildCentralRuntimeBindingPaths,
 	buildConfigBindings,
@@ -150,6 +151,7 @@ function makeRuntime(overrides: Partial<RuntimeBindings> = {}): RuntimeBindings 
 function makeOptions(preset = makePreset()): LoopOptions {
 	const claudeRunner = { kind: "claude" as const, binary: "claude", extraArgs: [], model: null }
 	const codexRunner = { kind: "codex" as const, binary: "codex", extraArgs: [], model: null }
+	const opencodeRunner = { kind: "opencode" as const, binary: "opencode", extraArgs: [], model: null }
 	return {
 		targetCwd: REPO_ROOT,
 		configPath: resolve(TEST_ROOT, "config.json"),
@@ -168,7 +170,7 @@ function makeOptions(preset = makePreset()): LoopOptions {
 		hostRunner: "codex",
 		defaultRunner: { ...codexRunner, source: "engine-builtin" },
 		reviewRunner: { ...codexRunner, source: "engine-builtin" },
-		runnerCommands: { claude: claudeRunner, codex: codexRunner },
+		runnerCommands: { claude: claudeRunner, codex: codexRunner, opencode: opencodeRunner },
 		dryRun: false,
 		preset,
 	}
@@ -579,6 +581,47 @@ describe("runner and daemon helpers", () => {
 		])
 		expect(agentSessionsPath("/repo/runs/run-1/iteration/stdout.jsonl")).toBe("/repo/runs/run-1/iteration/sessions.jsonl")
 	})
+
+	test("agentOpencodeArgs renders run subcommand with json format, model, dir, and optional resume", () => {
+		const freshArgs = agentOpencodeArgs([], "do the thing", { kind: "fresh" }, "/repo/wt", "opencode-go/glm-5.2")
+		expect(freshArgs).toEqual([
+			"run",
+			"--format",
+			"json",
+			"--dangerously-skip-permissions",
+			"--dir",
+			"/repo/wt",
+			"-m",
+			"opencode-go/glm-5.2",
+			"do the thing",
+		])
+		const resumeArgs = agentOpencodeArgs([], "continue", { kind: "resume", sessionId: "ses_abc" }, "/repo/wt", "opencode-go/glm-5.2")
+		expect(resumeArgs).toEqual([
+			"run",
+			"--format",
+			"json",
+			"--dangerously-skip-permissions",
+			"--dir",
+			"/repo/wt",
+			"-m",
+			"opencode-go/glm-5.2",
+			"-s",
+			"ses_abc",
+			"continue",
+		])
+		const nullModelArgs = agentOpencodeArgs(["-m", "opencode-go/glm-5.1"], "p", { kind: "fresh" }, "/repo/wt", null)
+		expect(nullModelArgs).toEqual([
+			"run",
+			"-m",
+			"opencode-go/glm-5.1",
+			"--format",
+			"json",
+			"--dangerously-skip-permissions",
+			"--dir",
+			"/repo/wt",
+			"p",
+		])
+	})
 })
 
 describe("small parsers", () => {
@@ -609,6 +652,19 @@ describe("small parsers", () => {
 		expect(parseReviewSummaryVerdict("PHASE DONE: verdict=retry; issue=#333; reason=x", "PHASE DONE:")).toBe("retry")
 		expect(parseSessionIdFromRunnerStream("claude", "{\"type\":\"system\",\"session_id\":\"sess-1\"}\n")).toBe("sess-1")
 		expect(parseSessionIdFromRunnerStream("codex", "{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}")).toBe("thread-1")
+		expect(parseSessionIdFromRunnerStream(
+			"opencode",
+			"{\"type\":\"step_start\",\"sessionID\":\"ses_xyz\",\"part\":{}}\n{\"type\":\"text\",\"sessionID\":\"ses_xyz\"}\n",
+		)).toBe("ses_xyz")
+	})
+
+	test("opencode review verdict is parsed from --format json text events", () => {
+		const stream = [
+			"{\"type\":\"step_start\",\"sessionID\":\"ses_abc\",\"part\":{}}",
+			"{\"type\":\"text\",\"sessionID\":\"ses_abc\",\"part\":{\"type\":\"text\",\"text\":\"PHASE DONE: verdict=stop; issue=#1; reason=done\"}}",
+			"{\"type\":\"step_finish\",\"sessionID\":\"ses_abc\",\"part\":{}}",
+		].join("\n")
+		expect(parseReviewSummaryVerdict(stream, "PHASE DONE:", "opencode")).toBe("stop")
 	})
 
 	test("summary watchdog config is driven by phase metadata", () => {
