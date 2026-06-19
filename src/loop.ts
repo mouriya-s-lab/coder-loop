@@ -44,9 +44,9 @@ import {
 	type SqliteStateStore,
 } from "./sqlite-state"
 import {
-	chainConfigBindings as metadataConfigBindings,
-	chainConfigPresetPath,
-	chainConfigWorkflowFile,
+	chainBindings as metadataBindings,
+	chainBindingsPresetPath,
+	chainBindingsWorkflowFile,
 	itemExtraHasJsonKey,
 	itemExtraJsonValue,
 	itemExtraToJsonObject,
@@ -64,8 +64,12 @@ const PKG_ROOT = resolve(import.meta.dir, "..")
 const DEFAULT_PRESET_NAME = "gh-issue-pr-iteration"
 const PRESET_NAME_PATTERN = /^[a-z][a-z0-9-]*$/
 
-const DEFAULT_CONFIG_FILE = ".coder-loop/runtime/config.json"
-const DEFAULT_CONFIG_FILE_TOML = ".coder-loop/runtime/config.toml"
+// Per-target runtime defaults retained for legacy in-target paths that the engine
+// still falls back to when chain metadata leaves the corresponding bindings unset
+// (workflow.md / shared / issue / evidence / log are all chain-derived in normal
+// flow; the constants below are the last-resort relative paths for the rare path
+// that still wants a target-relative anchor). #433 retired the on-disk target
+// settings file entirely — the engine no longer reads any target settings file.
 const DEFAULT_SHARED_FILE = ".coder-loop/runtime/shared.md"
 const DEFAULT_ISSUE_DIR = ".coder-loop/runtime/issues"
 const DEFAULT_EVIDENCE_DIR = ".coder-loop/runtime/evidence"
@@ -89,11 +93,11 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | { [key:
 export type JsonObject = { [key: string]: JsonValue }
 
 const STATUS_STATE_FILE_KEY = `state${"File"}` as `state${"File"}`
-type ConfigBindingScalar = null | boolean | number | string
+type ChainBindingScalar = null | boolean | number | string
 
-type ConfigBindingFallback =
+type ChainBindingFallback =
 	| { kind: "none" }
-	| { kind: "value"; value: ConfigBindingScalar }
+	| { kind: "value"; value: ChainBindingScalar }
 
 export type StatusItemSnapshot = {
 	status: string
@@ -121,7 +125,6 @@ export type StatusCurrentRunSnapshot = {
 
 type BuildOptionsInput = {
 	targetCwd: string | null
-	configPath: string | null
 	loopDataRoot: string | null
 	chainName: string | null
 	dryRun: boolean
@@ -131,7 +134,6 @@ type BuildOptionsInput = {
 
 export type StatusCommandArgs = {
 	targetCwd: string
-	configPath: string | null
 	loopDataRoot?: string | null
 	chainName?: string | null
 	output: "json"
@@ -147,7 +149,6 @@ export type DaemonCommandArgs =
 	| {
 			action: "status"
 			targetCwd: string
-			configPath: string | null
 			loopDataRoot?: string | null
 			chainName?: string | null
 			output: "json"
@@ -155,7 +156,6 @@ export type DaemonCommandArgs =
 	| {
 			action: "start"
 			targetCwd: string
-			configPath: string | null
 			loopDataRoot?: string | null
 			chainName?: string | null
 			iterationLimit: number | null
@@ -166,7 +166,6 @@ export type DaemonCommandArgs =
 	| {
 			action: "stop"
 			targetCwd: string
-			configPath: string | null
 			loopDataRoot?: string | null
 			chainName?: string | null
 			dryRun: boolean
@@ -175,7 +174,6 @@ export type DaemonCommandArgs =
 	| {
 			action: "restart"
 			targetCwd: string
-			configPath: string | null
 			loopDataRoot?: string | null
 			chainName?: string | null
 			iterationLimit: number | null
@@ -191,7 +189,6 @@ export type DaemonCommandArgs =
 
 export type LogsCommandArgs = {
 	targetCwd: string
-	configPath: string | null
 	loopDataRoot?: string | null
 	kind: string | null
 	type: string | null
@@ -312,7 +309,6 @@ export type ItemCommandArgs =
 
 export type QueueUnblockCommandArgs = {
 	targetCwd: string
-	configPath: string | null
 	loopDataRoot: string | null
 	chainName: string | null
 	issue: string
@@ -320,50 +316,11 @@ export type QueueUnblockCommandArgs = {
 	dryRun: boolean
 }
 
-type LoopConfig = {
-	worktree: boolean | null
-	workflowFile: string | null
-	sharedContextFile: string | null
-	issueDir: string | null
-	evidenceDir: string | null
-	logDir: string | null
-	loopDataRoot: string | null
-	claudeBinary: string | null
-	claudeExtraArgs: string[]
-	claudeModel: string | null
-	codexBinary: string | null
-	codexExtraArgs: string[]
-	codexModel: string | null
-	preset: string | null
-	presetPath: string | null
-	configBindings: JsonObject
-}
+// #433: per-target on-disk runtime preferences are retired. Every fact the engine spawns against
+// reaches it via chain metadata now (see chainResolvedFromChain). The composed-options struct
+// below holds the live shape that the loop builds from a `ChainRecord` alone.
 
 const AgentRunnerKindBoundary = arkType.or(arkType.unit("claude"), arkType.unit("codex"))
-
-const StatusConfigBoundary = arkType({
-	"worktree?": "boolean|null",
-	"workflowFile?": "string|null",
-	"sharedContextFile?": "string|null",
-	"issueDir?": "string|null",
-	"evidenceDir?": "string|null",
-	"logDir?": "string|null",
-	"loopDataRoot?": "string|null",
-	"claude?": {
-		"binary?": "string|null",
-		"extraArgs?": "string[]",
-		"model?": "string|null",
-	},
-	"codex?": {
-		"binary?": "string|null",
-		"extraArgs?": "string[]",
-		"model?": "string|null",
-	},
-	"preset?": arkType.or("string", { name: "string" }, "null"),
-	"presetPath?": "string|null",
-})
-
-type StatusConfigInput = typeof StatusConfigBoundary.infer
 
 const TerminatedBoundary = arkType.or(
 	{ kind: arkType.unit("clean") },
@@ -469,7 +426,9 @@ const PresetTomlBoundary = arkType({
 	statuses: { continuable: "string[]", terminal: "string[]", "success?": "string[]", "entry?": "string", "unblockable?": "string[]" },
 	phases: PresetPhaseBoundary.array(),
 	"fragments?": PresetFragmentBoundary.array(),
-	agent: { binary: "string", "extraArgs?": "string[]", "attemptTimeoutSeconds?": "number" },
+	// #433: [agent].binary / [agent].extraArgs retired (zombie schema with no read site). Runner
+	// binaries now resolve from kind→PATH name (claude/codex) inside buildAgentRunnerCommands.
+	"agent?": { "attemptTimeoutSeconds?": "number" },
 })
 
 const StatusSnapshotBoundary = arkType({
@@ -484,7 +443,6 @@ const StatusSnapshotBoundary = arkType({
 
 export type LoopOptions = {
 	targetCwd: string
-	configPath: string
 	sharedContextPath: string
 	stateDbPath: string
 	issueDir: string
@@ -494,7 +452,7 @@ export type LoopOptions = {
 	logFile: string
 	repository: string | null
 	baseBranch: string | null
-	configBindings: ConfigBindings
+	bindings: RenderBindings
 	chainName?: string | null
 	worktree: boolean
 	hostRunner: AgentRunnerKind
@@ -507,12 +465,12 @@ export type LoopOptions = {
 
 export type PresetVariableSource =
 	| { kind: "item"; field: string }
-	| { kind: "config"; field: string; fallback: ConfigBindingFallback }
+	| { kind: "chain"; field: string; fallback: ChainBindingFallback }
 	| { kind: "runtime"; key: string; ownership?: "preset" }
 
 type ParsedVariableSource =
 	| { kind: "item"; field: string }
-	| { kind: "config"; field: string }
+	| { kind: "chain"; field: string }
 	| { kind: "runtime"; key: string }
 
 export type PresetVariableDoc = {
@@ -584,8 +542,6 @@ export type Preset = {
 	phases: readonly PresetPhase[]
 	fragments: readonly PresetFragment[]
 	agent: {
-		binary: string
-		extraArgs: readonly string[]
 		attemptTimeoutSeconds: number
 	}
 }
@@ -600,7 +556,11 @@ export type PresetPhaseTrigger =
 
 export type AgentRunnerKind = "claude" | "codex"
 
-export type AgentRunnerSource = "preset" | "engine-builtin" | "queue" | "config" | "iteration-default" | "review-default"
+// #433: "config" source value is retired — there is no longer a target-side runtime preferences
+// file to override phase runner choice from. Phase runner source is now one of: queue (item
+// override), preset (phase declaration), engine-builtin (fallback), iteration-default /
+// review-default (engine defaults for the two well-known phases).
+export type AgentRunnerSource = "preset" | "engine-builtin" | "queue" | "iteration-default" | "review-default"
 
 export type AgentRunnerCommand = {
 	kind: AgentRunnerKind
@@ -654,9 +614,6 @@ export type CoderLoopStatusSnapshot = {
 
 export type StatusTargetSnapshot = {
 	cwd: string
-	configPath: string
-	configFormat: ConfigFormat
-	config: StatusResourceSnapshot
 	sharedContextPath: string
 	[STATUS_STATE_FILE_KEY]: string
 	issueDir: string
@@ -671,11 +628,6 @@ export type StatusTargetSnapshot = {
 		presetDir: string
 	} | null
 }
-
-export type StatusResourceSnapshot =
-	| { kind: "loaded"; error: null }
-	| { kind: "missing"; error: string }
-	| { kind: "invalid"; error: string }
 
 export type StatusRunnerSelectionSnapshot = {
 	kind: AgentRunnerKind
@@ -694,8 +646,6 @@ export type StatusRunnerDefaultsSnapshot = {
 
 export type StatusStateKind =
 	| "ok"
-	| "missing-config"
-	| "invalid-config"
 	| "missing-preset"
 	| "invalid-preset"
 	| "missing-state"
@@ -991,11 +941,11 @@ export type RuntimeBindingPaths = {
 	logDir: string
 }
 
-export type ConfigBindings = JsonObject
+export type RenderBindings = JsonObject
 
 export type ResolveContext = {
 	item: ItemRecord
-	config: ConfigBindings
+	chain: RenderBindings
 	runtime: RuntimeBindings
 }
 
@@ -1006,45 +956,10 @@ type CliCommand =
 	| { kind: "chain"; args: ChainCommandArgs }
 	| { kind: "item"; args: ItemCommandArgs }
 	| { kind: "queue"; args: QueueUnblockCommandArgs }
-	| { kind: "runtime"; args: RuntimeCommandArgs }
 
-type RuntimeCommandArgs =
-	| { action: "show"; targetCwd: string; configPath: string | null; output: "json" | "human" }
-	| {
-		action: "set"
-		targetCwd: string
-		configPath: string | null
-		claudeModelChoice: ClaudeModelChoice | null
-		codexModelChoice: CodexModelChoice | null
-		dryRun: boolean
-		json: boolean
-	}
-
-type ClaudeModelChoice = "opus-4-7" | "opus-4-8"
-type CodexModelChoice = "gpt-5.5"
-
-const CLAUDE_MODEL_CHOICES: readonly ClaudeModelChoice[] = ["opus-4-7", "opus-4-8"]
-const CODEX_MODEL_CHOICES: readonly CodexModelChoice[] = ["gpt-5.5"]
-
-function renderClaudeModel(choice: ClaudeModelChoice): string {
-	return `claude-${choice}[1m]`
-}
-
-function renderCodexModel(choice: CodexModelChoice): string {
-	return choice
-}
-
-function parseClaudeModelChoice(value: string | null, flagName: string): ClaudeModelChoice | null {
-	if (value === null) return null
-	if (includesStringLiteral(CLAUDE_MODEL_CHOICES, value)) return value
-	fail(`${flagName} must be one of ${CLAUDE_MODEL_CHOICES.join("|")}, got: ${value}`)
-}
-
-function parseCodexModelChoice(value: string | null, flagName: string): CodexModelChoice | null {
-	if (value === null) return null
-	if (includesStringLiteral(CODEX_MODEL_CHOICES, value)) return value
-	fail(`${flagName} must be one of ${CODEX_MODEL_CHOICES.join("|")}, got: ${value}`)
-}
+// #433: the per-target runner / model CLI is retired; runner / model resolution is read from
+// `coder-loop status <target> --json`'s runner view, set in preset.toml's per-phase `runner` /
+// `model`, and the enum-renderer / [1m] suffix that lived here is gone with it.
 
 function includesStringLiteral<const Values extends readonly string[]>(values: Values, value: string): value is Values[number] {
 	return values.some((entry) => entry === value)
@@ -1056,7 +971,6 @@ const statusCliCommand = command({
 	args: {
 		target: positional({ displayName: "target", type: cmdString }),
 		json: flag({ long: "json" }),
-		config: option({ long: "config", type: optional(cmdString) }),
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
 		chain: option({ long: "chain", type: optional(cmdString) }),
 	},
@@ -1066,7 +980,6 @@ const statusCliCommand = command({
 			kind: "status",
 			args: {
 				targetCwd: args.target,
-				configPath: args.config ?? null,
 				loopDataRoot: args.loopDataRoot ?? null,
 				chainName: args.chain ?? null,
 				output: "json",
@@ -1081,7 +994,6 @@ const logsCliCommand = command({
 	args: {
 		target: positional({ displayName: "target", type: cmdString }),
 		json: flag({ long: "json" }),
-		config: option({ long: "config", type: optional(cmdString) }),
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
 		kind: option({ long: "kind", type: optional(cmdString) }),
 		type: option({ long: "type", type: optional(cmdString) }),
@@ -1098,7 +1010,6 @@ const logsCliCommand = command({
 			kind: "logs",
 			args: {
 				targetCwd: args.target,
-				configPath: args.config ?? null,
 				loopDataRoot: args.loopDataRoot ?? null,
 				kind: args.kind ?? null,
 				type: args.type ?? null,
@@ -1120,7 +1031,6 @@ const daemonStatusCliCommand = command({
 	args: {
 		target: positional({ displayName: "target", type: cmdString }),
 		json: flag({ long: "json" }),
-		config: option({ long: "config", type: optional(cmdString) }),
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
 		chain: option({ long: "chain", type: optional(cmdString) }),
 	},
@@ -1131,7 +1041,6 @@ const daemonStatusCliCommand = command({
 			args: {
 				action: "status",
 				targetCwd: args.target,
-				configPath: args.config ?? null,
 				loopDataRoot: args.loopDataRoot ?? null,
 				chainName: args.chain ?? null,
 				output: "json",
@@ -1164,7 +1073,6 @@ const daemonStartCliCommand = command({
 	description: "Start coder-loop as a detached daemon for a target.",
 	args: {
 		target: positional({ displayName: "target", type: cmdString }),
-		config: option({ long: "config", type: optional(cmdString) }),
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
 		chain: option({ long: "chain", type: optional(cmdString) }),
 		iterationLimit: option({ long: "max-iterations", type: optional(cmdString) }),
@@ -1177,7 +1085,6 @@ const daemonStartCliCommand = command({
 		args: {
 			action: "start",
 			targetCwd: args.target,
-			configPath: args.config ?? null,
 			loopDataRoot: args.loopDataRoot ?? null,
 			chainName: args.chain ?? null,
 			iterationLimit: parseDaemonIterationLimit(args.iterationLimit ?? null),
@@ -1193,7 +1100,6 @@ const daemonStopCliCommand = command({
 	description: "Stop the coder-loop daemon for a target.",
 	args: {
 		target: positional({ displayName: "target", type: cmdString }),
-		config: option({ long: "config", type: optional(cmdString) }),
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
 		chain: option({ long: "chain", type: optional(cmdString) }),
 		dryRun: flag({ long: "dry-run" }),
@@ -1204,7 +1110,6 @@ const daemonStopCliCommand = command({
 		args: {
 			action: "stop",
 			targetCwd: args.target,
-			configPath: args.config ?? null,
 			loopDataRoot: args.loopDataRoot ?? null,
 			chainName: args.chain ?? null,
 			dryRun: args.dryRun,
@@ -1218,7 +1123,6 @@ const daemonRestartCliCommand = command({
 	description: "Restart the coder-loop daemon for a target.",
 	args: {
 		target: positional({ displayName: "target", type: cmdString }),
-		config: option({ long: "config", type: optional(cmdString) }),
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
 		chain: option({ long: "chain", type: optional(cmdString) }),
 		iterationLimit: option({ long: "max-iterations", type: optional(cmdString) }),
@@ -1231,7 +1135,6 @@ const daemonRestartCliCommand = command({
 		args: {
 			action: "restart",
 			targetCwd: args.target,
-			configPath: args.config ?? null,
 			loopDataRoot: args.loopDataRoot ?? null,
 			chainName: args.chain ?? null,
 			iterationLimit: parseDaemonIterationLimit(args.iterationLimit ?? null),
@@ -1585,7 +1488,6 @@ const queueUnblockCliCommand = command({
 	args: {
 		target: positional({ displayName: "target", type: cmdString }),
 		issue: option({ long: "issue", type: cmdString }),
-		config: option({ long: "config", type: optional(cmdString) }),
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
 		chain: option({ long: "chain", type: optional(cmdString) }),
 			startDaemon: flag({ long: "start-daemon" }),
@@ -1595,7 +1497,6 @@ const queueUnblockCliCommand = command({
 		kind: "queue",
 		args: {
 			targetCwd: args.target,
-			configPath: args.config ?? null,
 			loopDataRoot: args.loopDataRoot ?? null,
 			chainName: args.chain ?? null,
 				issue: args.issue,
@@ -1613,58 +1514,10 @@ const queueCliCommand = subcommands({
 	},
 })
 
-const runtimeShowCliCommand = command({
-	name: "show",
-	description: "List preset phases (roles) with the runner/binary/model each one would use.",
-	args: {
-		target: positional({ displayName: "target", type: cmdString }),
-		json: flag({ long: "json" }),
-		config: option({ long: "config", type: optional(cmdString) }),
-	},
-	handler: (args): CliCommand => ({
-		kind: "runtime",
-		args: {
-			action: "show",
-			targetCwd: args.target,
-			configPath: args.config ?? null,
-			output: args.json ? "json" : "human",
-		},
-	}),
-})
-
-const runtimeSetCliCommand = command({
-	name: "set",
-	description: "Set the Claude/Codex model on a target's .coder-loop/runtime/config.json. Runner kind is owned by role entry md and is not a CLI surface.",
-	args: {
-		target: positional({ displayName: "target", type: cmdString }),
-		config: option({ long: "config", type: optional(cmdString) }),
-		claudeModel: option({ long: "claude-model", type: optional(cmdString) }),
-		codexModel: option({ long: "codex-model", type: optional(cmdString) }),
-		dryRun: flag({ long: "dry-run" }),
-		json: flag({ long: "json" }),
-	},
-	handler: (args): CliCommand => ({
-		kind: "runtime",
-		args: {
-			action: "set",
-			targetCwd: args.target,
-			configPath: args.config ?? null,
-			claudeModelChoice: parseClaudeModelChoice(args.claudeModel ?? null, "--claude-model"),
-			codexModelChoice: parseCodexModelChoice(args.codexModel ?? null, "--codex-model"),
-			dryRun: args.dryRun,
-			json: args.json,
-		},
-	}),
-})
-
-const runtimeCliCommand = subcommands({
-	name: "runtime",
-	description: "Inspect or change a target's default runner / model selection.",
-	cmds: {
-		show: runtimeShowCliCommand,
-		set: runtimeSetCliCommand,
-	},
-})
+// #433: the legacy runtime-inspection / model-mutation CLI command group is retired (both the
+// read and write sub-commands). To inspect runner / model resolution, read the `target.runner` /
+// `queue.selected.*Runner` view of `coder-loop status <target> --json`. To change phase models,
+// edit the preset.toml's per-phase `model` declaration in source.
 
 function splitFlag(arg: string): [string, string | null] {
 	const equalsIndex = arg.indexOf("=")
@@ -1781,17 +1634,11 @@ function logsQueryFromArgs(args: LogsCommandArgs): ObservabilityEventQuery {
 }
 
 async function resolveLogsEventsFile(args: LogsCommandArgs): Promise<string> {
+	// #433: the engine no longer reads a target config file; logs events are anchored at the loop
+	// data root, picked from `--loop-data-root` or the default.
 	if (args.loopDataRoot !== null && args.loopDataRoot !== undefined) {
 		return resolveLoopDataPaths({ loopDataRoot: args.loopDataRoot }).eventsFile
 	}
-	const targetCwd = resolve(args.targetCwd)
-	const configPath = await resolveConfigPath(targetCwd, args.configPath)
-	const configResult = await readStatusConfig(configPath)
-	if (configResult.kind === "ok") {
-		return resolveLoopDataPaths(loopDataRootOption(configResult.value.loopDataRoot)).eventsFile
-	}
-	if (configResult.kind === "invalid") throw new CoderLoopError(configResult.message)
-	if (args.configPath !== null) throw new CoderLoopError(configResult.message)
 	return resolveLoopDataPaths({}).eventsFile
 }
 
@@ -1800,14 +1647,19 @@ async function runChainCommand(args: string[]): Promise<void> {
 	if (parsed.value.kind !== "chain") return
 	const chainArgs = parsed.value.args
 	if (chainArgs.action === "create") {
-		const repository = requiredConfigString(chainArgs.configJson, "repository", "--config-json")
-		const baseBranch = optionalConfigString(chainArgs.configJson, "baseBranch", "--config-json") ?? "main"
-		const configJson = normalizeChainCreateConfig(chainArgs.configJson)
+		const repository = requiredChainCreateString(chainArgs.configJson, "repository", "--config-json")
+		const baseBranch = optionalChainCreateString(chainArgs.configJson, "baseBranch", "--config-json") ?? "main"
+		// #433: `--config-json` retains the input shape (the operator surface stayed because it's the
+		// chain-bindings entry point), but the wire shape now writes `metadata.bindings` and strips
+		// non-binding chain-create scalars (repository/baseBranch are top-level chain-create fields,
+		// not bindings). `normalizeChainCreateBindings` rejects nested misshapes — that arktype-driven
+		// rejection is also enforced daemon-side, so a stray key fails fast either path.
+		const bindings = normalizeChainCreateBindings(chainArgs.configJson)
 		const requestArgs: JsonObject = {
 			name: chainArgs.name,
 			repository,
 			baseBranch,
-			metadata: { config: configJson },
+			metadata: { bindings },
 		}
 		if (chainArgs.preset !== null) requestArgs.preset = chainArgs.preset
 		if (chainArgs.umbrella !== null) Object.assign(requestArgs, parseUmbrellaRef(chainArgs.umbrella, repository))
@@ -1930,13 +1782,13 @@ function parseOptionalJsonObjectFlag(raw: string | null, flagName: string): Json
 	return parsed
 }
 
-function requiredConfigString(config: JsonObject, field: string, flagName: string): string {
+function requiredChainCreateString(config: JsonObject, field: string, flagName: string): string {
 	const value = config[field]
 	if (typeof value !== "string" || value.trim() === "") fail(`${flagName}.${field} must be a non-empty string`)
 	return value
 }
 
-function optionalConfigString(config: JsonObject, field: string, flagName: string): string | null {
+function optionalChainCreateString(config: JsonObject, field: string, flagName: string): string | null {
 	const value = config[field]
 	if (value === undefined || value === null) return null
 	if (typeof value !== "string" || value.trim() === "") fail(`${flagName}.${field} must be a non-empty string when provided`)
@@ -2283,7 +2135,6 @@ async function runDaemonCommand(args: string[]): Promise<void> {
 	if (daemonArgs.action === "status") {
 		const snapshot = await buildCoderLoopStatusSnapshot({
 			targetCwd: daemonArgs.targetCwd,
-			configPath: daemonArgs.configPath,
 			loopDataRoot: daemonArgs.loopDataRoot ?? null,
 			chainName: daemonArgs.chainName ?? null,
 			output: "json",
@@ -2309,248 +2160,9 @@ async function runQueueCommand(args: string[]): Promise<void> {
 	await runQueueUnblockCommand(parsed.value.args)
 }
 
-async function runRuntimeCommand(args: string[]): Promise<void> {
-	const parsed = await runCmd(runtimeCliCommand, args)
-	if (parsed.value.kind !== "runtime") return
-	const runtimeArgs = parsed.value.args
-	if (runtimeArgs.action === "show") {
-		await runRuntimeShowCommand(runtimeArgs)
-		return
-	}
-	await runRuntimeSetCommand(runtimeArgs)
-}
-
-type RuntimePhaseRoleKind = "iteration" | "review" | "trigger"
-
-type RuntimePhaseRoleSnapshot = {
-	phase: string
-	role: RuntimePhaseRoleKind
-	trigger: string | null
-	runner: { kind: AgentRunnerKind; binary: string; model: string | null; source: AgentRunnerSource }
-}
-
-type RuntimeShowSnapshot = {
-	target: string
-	configPath: string
-	configExists: boolean
-	configFormat: ConfigFormat
-	preset: { name: string; presetDir: string } | null
-	defaults: {
-		claudeModel: string | null
-		codexModel: string | null
-	}
-	phases: RuntimePhaseRoleSnapshot[]
-}
-
-async function runRuntimeShowCommand(args: Extract<RuntimeCommandArgs, { action: "show" }>): Promise<void> {
-	const snapshot = await buildRuntimeShowSnapshot(args)
-	if (args.output === "json") {
-		process.stdout.write(`${JSON.stringify(snapshot, null, "\t")}\n`)
-		return
-	}
-	process.stdout.write(formatRuntimeShowHuman(snapshot))
-}
-
-export async function buildRuntimeShowSnapshot(input: {
-	targetCwd: string
-	configPath: string | null
-}): Promise<RuntimeShowSnapshot> {
-	const targetCwd = resolve(input.targetCwd)
-	const configPath = await resolveConfigPath(targetCwd, input.configPath)
-	const configFormat = configFormatForPath(configPath)
-	const configRead = await readStatusConfig(configPath)
-	const configExists = configRead.kind !== "missing"
-	const config: LoopConfig = configRead.kind === "ok" ? configRead.value : emptyLoopConfig()
-	if (configRead.kind === "invalid") fail(`runtime show: failed to read config ${configPath}: ${configRead.message}`)
-	const presetRead = await readStatusPreset(config, targetCwd)
-	const preset = presetRead.kind === "ok" ? presetRead.value : null
-	if (presetRead.kind === "invalid") fail(`runtime show: failed to load preset: ${presetRead.message}`)
-
-	const commands = buildAgentRunnerCommands(config)
-	const phases: RuntimePhaseRoleSnapshot[] = []
-	if (preset !== null) {
-		const phaseSelections = selectPhaseDefaultRunners(preset, commands)
-		const reviewPhase = lastNonTriggerPhaseForPreset(preset)
-		for (const phase of preset.phases) {
-			const role: RuntimePhaseRoleKind = phase.name === reviewPhase.name ? "review" : phase.trigger === null ? "iteration" : "trigger"
-			const selection = phaseSelections[phase.name]!
-			phases.push({
-				phase: phase.name,
-				role,
-				trigger: describePresetTrigger(phase.trigger),
-				runner: {
-					kind: selection.kind,
-					binary: selection.binary,
-					model: selection.model,
-					source: selection.source,
-				},
-			})
-		}
-	}
-
-	return {
-		target: targetCwd,
-		configPath,
-		configExists,
-		configFormat,
-		preset: preset === null ? null : { name: preset.name, presetDir: preset.presetDir },
-		defaults: {
-			claudeModel: config.claudeModel,
-			codexModel: config.codexModel,
-		},
-		phases,
-	}
-}
-
-function describePresetTrigger(trigger: PresetPhaseTrigger | null): string | null {
-	if (trigger === null) return null
-	if ("on" in trigger) return `on=${trigger.on}`
-	return `afterPhase=${trigger.afterPhase} whenStatus=${trigger.whenStatus}`
-}
-
-function emptyLoopConfig(): LoopConfig {
-	return {
-		worktree: null,
-		workflowFile: null,
-		sharedContextFile: null,
-		issueDir: null,
-		evidenceDir: null,
-		logDir: null,
-		loopDataRoot: null,
-		claudeBinary: null,
-		claudeExtraArgs: [],
-		claudeModel: null,
-		codexBinary: null,
-		codexExtraArgs: [],
-		codexModel: null,
-		preset: null,
-		presetPath: null,
-		configBindings: {},
-	}
-}
-
-function formatRuntimeShowHuman(snapshot: RuntimeShowSnapshot): string {
-	const lines: string[] = []
-	lines.push(`target:        ${snapshot.target}`)
-	lines.push(`config:        ${snapshot.configPath} (${snapshot.configExists ? snapshot.configFormat : "missing"})`)
-	lines.push(`preset:        ${snapshot.preset === null ? "<unloadable>" : `${snapshot.preset.name} (${snapshot.preset.presetDir})`}`)
-	lines.push(`claude.model:  ${snapshot.defaults.claudeModel ?? "<unset>"}`)
-	lines.push(`codex.model:   ${snapshot.defaults.codexModel ?? "<unset>"}`)
-	lines.push("")
-	lines.push("phases (roles):")
-	if (snapshot.phases.length === 0) {
-		lines.push("  <no preset loaded>")
-	} else {
-		const nameWidth = Math.max(...snapshot.phases.map((p) => p.phase.length))
-		for (const phase of snapshot.phases) {
-			const triggerSuffix = phase.trigger === null ? "" : `  trigger=${phase.trigger}`
-			lines.push(
-				`  ${phase.phase.padEnd(nameWidth)}  role=${phase.role.padEnd(9)}  runner=${phase.runner.kind}  binary=${phase.runner.binary}  model=${phase.runner.model ?? "<default>"}  source=${phase.runner.source}${triggerSuffix}`,
-			)
-		}
-	}
-	lines.push("")
-	return lines.join("\n")
-}
-
-type RuntimeSetResult = {
-	target: string
-	configPath: string
-	wrote: boolean
-	dryRun: boolean
-	changed: Record<string, { from: string | null; to: string | null }>
-}
-
-async function runRuntimeSetCommand(args: Extract<RuntimeCommandArgs, { action: "set" }>): Promise<void> {
-	const result = await applyRuntimeSet(args)
-	if (args.json) {
-		process.stdout.write(`${JSON.stringify(result, null, "\t")}\n`)
-		return
-	}
-	const verb = result.dryRun ? "would update" : result.wrote ? "updated" : "unchanged"
-	const lines = [`runtime set: ${verb} ${result.configPath}`]
-	for (const [key, change] of Object.entries(result.changed)) {
-		lines.push(`  ${key}: ${change.from ?? "<unset>"} -> ${change.to ?? "<unset>"}`)
-	}
-	if (Object.keys(result.changed).length === 0) lines.push("  no changes")
-	process.stdout.write(`${lines.join("\n")}\n`)
-}
-
-export async function applyRuntimeSet(input: {
-	targetCwd: string
-	configPath: string | null
-	claudeModelChoice: ClaudeModelChoice | null
-	codexModelChoice: CodexModelChoice | null
-	dryRun: boolean
-}): Promise<RuntimeSetResult> {
-	if (
-		input.claudeModelChoice === null &&
-		input.codexModelChoice === null
-	) {
-		fail("runtime set: pass at least one of --claude-model / --codex-model")
-	}
-	const targetCwd = resolve(input.targetCwd)
-	const configPath = await resolveConfigPath(targetCwd, input.configPath)
-	if (configFormatForPath(configPath) === "toml") {
-		fail(`runtime set: TOML config (${configPath}) is read-only here; convert to JSON or edit manually.`)
-	}
-	let existingRaw: string | null = null
-	try {
-		existingRaw = await readFile(configPath, "utf-8")
-	} catch (error) {
-		if (!(isNodeError(error) && error.code === "ENOENT")) throw error
-	}
-	const original: JsonObject = existingRaw === null ? {} : (() => {
-		try {
-			const parsed = JSON.parse(existingRaw)
-			if (!isJsonObject(parsed)) fail(`runtime set: config root must be a JSON object: ${configPath}`)
-			return { ...parsed }
-		} catch (error) {
-			fail(`runtime set: failed to parse JSON config ${configPath}: ${errorMessage(error)}`)
-		}
-	})()
-
-	const next: JsonObject = { ...original }
-	const changed: Record<string, { from: string | null; to: string | null }> = {}
-
-	function recordChange(key: string, from: JsonValue | undefined, to: JsonValue | undefined): void {
-		const fromStr = from === undefined || from === null ? null : String(from)
-		const toStr = to === undefined || to === null ? null : String(to)
-		if (fromStr === toStr) return
-		changed[key] = { from: fromStr, to: toStr }
-	}
-
-	if (input.claudeModelChoice !== null) {
-		const claudeSection = isJsonObject(next.claude) ? { ...next.claude } : {}
-		const from = claudeSection.model
-		const to = renderClaudeModel(input.claudeModelChoice)
-		claudeSection.model = to
-		next.claude = claudeSection
-		recordChange("claude.model", from, to)
-	}
-	if (input.codexModelChoice !== null) {
-		const codexSection = isJsonObject(next.codex) ? { ...next.codex } : {}
-		const from = codexSection.model
-		const to = renderCodexModel(input.codexModelChoice)
-		codexSection.model = to
-		next.codex = codexSection
-		recordChange("codex.model", from, to)
-	}
-
-	const nextRaw = `${JSON.stringify(next, null, "\t")}\n`
-	const wouldWrite = existingRaw === null || existingRaw !== nextRaw
-	if (!input.dryRun && wouldWrite) {
-		await mkdir(dirname(configPath), { recursive: true })
-		await writeFile(configPath, nextRaw, "utf-8")
-	}
-	return {
-		target: targetCwd,
-		configPath,
-		wrote: !input.dryRun && wouldWrite,
-		dryRun: input.dryRun,
-		changed,
-	}
-}
+// #433: the `runtime` CLI command group and all its helpers are retired. Inspect runner / model
+// resolution via the `target.runner` / `queue.selected.*Runner` view of `status --json`; change
+// phase models by editing the preset.toml per-phase `model` declaration in source.
 
 async function main() {
 	const firstArg = process.argv[2]
@@ -2578,10 +2190,6 @@ async function main() {
 		await runQueueCommand(process.argv.slice(3))
 		return
 	}
-	if (firstArg === "runtime") {
-		await runRuntimeCommand(process.argv.slice(3))
-		return
-	}
 	if (firstArg === "install" || firstArg === "uninstall" || firstArg === "doctor") {
 		const handled = await dispatchSubcommand(firstArg, process.argv.slice(3))
 		if (handled) return
@@ -2601,7 +2209,6 @@ function rootUsage(): string {
 		"  chain <create|list|status|stop|resume|delete>",
 		"  item <add|batch-add|list|update|reorder>",
 		"  queue unblock <target> --issue <issue>",
-		"  runtime <show|set>",
 		"  install <target>",
 		"  uninstall <target>",
 		"  doctor <target>",
@@ -2672,27 +2279,26 @@ async function runReview(
 	return { code: reviewCode, stopRequested }
 }
 
-function buildOptions(targetCwd: string, configPath: string, raw: BuildOptionsInput, config: LoopConfig, preset: Preset): LoopOptions {
-	const sharedContextPath = resolveFrom(targetCwd, config.sharedContextFile ?? DEFAULT_SHARED_FILE)
-	const loopDataRoot = raw.loopDataRoot ?? config.loopDataRoot
+function buildOptions(targetCwd: string, raw: BuildOptionsInput, resolved: ChainResolved, preset: Preset): LoopOptions {
+	const sharedContextPath = resolveFrom(targetCwd, resolved.sharedContextFile ?? DEFAULT_SHARED_FILE)
+	const loopDataRoot = raw.loopDataRoot ?? resolved.loopDataRoot
 	const stateDbPath = resolveLoopDataPaths(loopDataRootOption(loopDataRoot)).dbFile
-	const issueDir = resolveFrom(targetCwd, config.issueDir ?? DEFAULT_ISSUE_DIR)
-	const evidenceRootDir = resolveFrom(targetCwd, config.evidenceDir ?? DEFAULT_EVIDENCE_DIR)
-	const logDir = resolveFrom(targetCwd, config.logDir ?? DEFAULT_LOG_DIR)
-	const worktree = raw.worktree || config.worktree === true
+	const issueDir = resolveFrom(targetCwd, resolved.issueDir ?? DEFAULT_ISSUE_DIR)
+	const evidenceRootDir = resolveFrom(targetCwd, resolved.evidenceDir ?? DEFAULT_EVIDENCE_DIR)
+	const logDir = resolveFrom(targetCwd, resolved.logDir ?? DEFAULT_LOG_DIR)
+	const worktree = raw.worktree || resolved.worktree === true
 	const repository = raw.chain.repository
 	const baseBranch = raw.chain.baseBranch
-	const configBindings = buildEffectiveConfigBindings(targetCwd, raw.chain, config)
+	const bindings = buildEffectiveBindings(targetCwd, raw.chain, resolved)
 	const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")
 	const chainPaths = raw.chainName === null ? null : resolveChainRuntimePaths(raw.chainName, loopDataRootOption(loopDataRoot))
 	const hostRunner = detectHostRunner(process.env)
-	const runnerCommands = buildAgentRunnerCommands(config)
+	const runnerCommands = buildAgentRunnerCommands(resolved)
 	const defaultRunner = selectPhaseDefaultRunner(firstNonTriggerPhaseForPreset(preset), preset, runnerCommands)
 	const reviewRunner = selectPhaseDefaultRunner(lastNonTriggerPhaseForPreset(preset), preset, runnerCommands)
 
 	return {
 		targetCwd,
-		configPath,
 		sharedContextPath,
 		stateDbPath,
 		issueDir,
@@ -2702,7 +2308,7 @@ function buildOptions(targetCwd: string, configPath: string, raw: BuildOptionsIn
 		logFile: chainPaths === null ? resolve(logDir, `coder-loop-${process.pid}.${timestamp}.log`) : chainPaths.daemonLogFile(timestamp),
 		repository,
 		baseBranch,
-		configBindings,
+		bindings,
 		chainName: raw.chainName,
 		worktree,
 		hostRunner,
@@ -2719,7 +2325,6 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 	try {
 		loaded = await loadTargetRuntime({
 			targetCwd: args.targetCwd,
-			configPath: args.configPath,
 			loopDataRoot: args.loopDataRoot ?? null,
 			chainName: args.chainName ?? null,
 			repository: null,
@@ -2736,7 +2341,7 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 			loopDataRoot: args.loopDataRoot ?? null,
 		})
 		return makeUnavailableStatusSnapshot({
-			target: makeStatusTargetSnapshot(targetCwd, dbFile, null, { kind: "missing", error: errorMessage(error) }),
+			target: makeStatusTargetSnapshot(targetCwd, dbFile, null),
 			stateKind: "missing-state",
 			stateDbPath: dbFile,
 			errorPath: "chain",
@@ -2745,7 +2350,7 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 		})
 	}
 	const options = loaded.options
-	const target = makeStatusTargetSnapshot(options.targetCwd, options.configPath, options, { kind: "loaded", error: null })
+	const target = makeStatusTargetSnapshot(options.targetCwd, options.stateDbPath, options)
 	const items = readDbItemsForChain(options.loopDataRoot, loaded.chain.id)
 	const current = readDbCurrentRun(options.loopDataRoot, loaded.chain.id)
 	// #412: status snapshot must resolve continuable / terminal / idField from each item's own preset
@@ -2827,36 +2432,14 @@ type StatusReadResult<T> =
 	| { kind: "missing"; message: string }
 	| { kind: "invalid"; message: string }
 
-async function readStatusConfig(path: string): Promise<StatusReadResult<LoopConfig>> {
-	try {
-		const raw = await readFile(path, "utf-8")
-		return { kind: "ok", value: parseConfigText(raw, path) }
-	} catch (error) {
-		if (isNodeError(error) && error.code === "ENOENT") return { kind: "missing", message: `missing config file: ${path}` }
-		return { kind: "invalid", message: errorMessage(error) }
-	}
-}
-
-async function readStatusPreset(config: LoopConfig, targetCwd: string): Promise<StatusReadResult<Preset>> {
-	let presetDir: string
-	try {
-		presetDir = resolvePresetDir(config, PKG_ROOT, targetCwd)
-	} catch (error) {
-		return { kind: "invalid", message: errorMessage(error) }
-	}
-	try {
-		return { kind: "ok", value: await loadPreset(presetDir) }
-	} catch (error) {
-		if (isNodeError(error) && error.code === "ENOENT") return { kind: "missing", message: `missing preset file: ${resolve(presetDir, "preset.toml")}` }
-		return { kind: "invalid", message: errorMessage(error) }
-	}
-}
+// #433: target-side runtime readers retired — `loadTargetRuntime` reads from chain metadata
+// directly. Status snapshot still calls `makeStatusTargetSnapshot` for the unavailable snapshot
+// branch, where there's no `options` yet because chain load failed.
 
 function makeStatusTargetSnapshot(
 	targetCwd: string,
-	configPath: string,
+	stateDbPath: string,
 	options: LoopOptions | null,
-	config: StatusResourceSnapshot,
 ): StatusTargetSnapshot {
 	const runtimeRoot = resolve(targetCwd, ".coder-loop/runtime")
 	const preset = options === null ? null : {
@@ -2865,11 +2448,8 @@ function makeStatusTargetSnapshot(
 	}
 	return {
 		cwd: targetCwd,
-		configPath,
-		configFormat: configFormatForPath(configPath),
-		config,
 		sharedContextPath: options?.sharedContextPath ?? resolve(runtimeRoot, "shared.md"),
-		[STATUS_STATE_FILE_KEY]: options?.stateDbPath ?? configPath,
+		[STATUS_STATE_FILE_KEY]: options?.stateDbPath ?? stateDbPath,
 		issueDir: options?.issueDir ?? resolve(runtimeRoot, "issues"),
 		evidenceRootDir: options?.evidenceRootDir ?? resolve(runtimeRoot, "evidence"),
 		logDir: options?.logDir ?? resolve(runtimeRoot, "logs"),
@@ -2891,28 +2471,18 @@ function buildStatusRunnerDefaultsSnapshot(options: LoopOptions | null): StatusR
 		}
 	}
 	const hostRunner = detectHostRunner(process.env)
-	const config: LoopConfig = {
-			worktree: null,
-			workflowFile: null,
-			sharedContextFile: null,
-			issueDir: null,
-		evidenceDir: null,
-		logDir: null,
-		loopDataRoot: null,
+	const resolved: Pick<ChainResolved, "claudeBinary" | "claudeModel" | "claudeExtraArgs" | "codexBinary" | "codexModel" | "codexExtraArgs"> = {
 		claudeBinary: null,
-		claudeExtraArgs: [],
 		claudeModel: null,
+		claudeExtraArgs: [],
 		codexBinary: null,
-		codexExtraArgs: [],
 		codexModel: null,
-		preset: null,
-		presetPath: null,
-		configBindings: {},
+		codexExtraArgs: [],
 	}
 	return {
 		hostDefault: hostRunner,
-		default: statusRunnerSelection(selectDefaultRunner(buildAgentRunnerCommands(config))),
-		reviewDefault: statusRunnerSelection(selectReviewRunner(buildAgentRunnerCommands(config))),
+		default: statusRunnerSelection(selectDefaultRunner(buildAgentRunnerCommands(resolved))),
+		reviewDefault: statusRunnerSelection(selectReviewRunner(buildAgentRunnerCommands(resolved))),
 		phases: {},
 	}
 }
@@ -3516,7 +3086,6 @@ async function runDaemonStartCommand(args: Extract<DaemonCommandArgs, { action: 
 async function executeDaemonStart(args: Extract<DaemonCommandArgs, { action: "start" }>, plan = buildDaemonStartPlan(args)): Promise<DaemonStartResult> {
 	const current = await buildCoderLoopStatusSnapshot({
 		targetCwd: args.targetCwd,
-		configPath: args.configPath,
 		loopDataRoot: args.loopDataRoot ?? null,
 		chainName: args.chainName ?? null,
 		output: "json",
@@ -3602,7 +3171,6 @@ async function runDaemonRestartCommand(args: Extract<DaemonCommandArgs, { action
 function daemonCommandToTargetLookupArgs(args: Extract<DaemonCommandArgs, { action: "start" | "stop" | "restart" }>): TargetChainLookupArgs {
 	return {
 		targetCwd: args.targetCwd,
-		configPath: args.configPath,
 		loopDataRoot: args.loopDataRoot ?? null,
 			chainName: args.chainName ?? null,
 			repository: null,
@@ -3658,7 +3226,6 @@ type QueueUnblockCommandResult = {
 async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<void> {
 	const runtime = await loadTargetRuntime({
 		targetCwd: args.targetCwd,
-		configPath: args.configPath,
 		loopDataRoot: args.loopDataRoot,
 		chainName: args.chainName,
 		repository: null,
@@ -3692,7 +3259,6 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 			plan: buildDaemonStartPlan({
 				action: "start",
 				targetCwd: options.targetCwd,
-				configPath: args.configPath,
 				loopDataRoot: options.loopDataRoot,
 				chainName: options.chainName ?? null,
 				iterationLimit: null,
@@ -3708,7 +3274,6 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 			result: await executeDaemonStart({
 				action: "start",
 				targetCwd: options.targetCwd,
-				configPath: args.configPath,
 				loopDataRoot: options.loopDataRoot,
 				chainName: options.chainName ?? null,
 				iterationLimit: null,
@@ -3791,7 +3356,6 @@ function daemonResultIndicatesRunning(daemon: QueueUnblockCommandResult["daemon"
 
 type TargetChainLookupArgs = {
 	targetCwd: string
-	configPath: string | null
 	loopDataRoot: string | null
 	chainName: string | null
 	repository: string | null
@@ -3809,45 +3373,34 @@ type LoadedTargetRuntime = {
 }
 
 async function loadTargetRuntime(args: TargetChainLookupArgs): Promise<LoadedTargetRuntime> {
+	// #433: target config file is retired — every per-target fact now comes from chain metadata.
+	// `loadTargetRuntime` reads no on-disk config file; the only effective root is the explicit
+	// flag (or the engine default), and chain metadata is the single source for preset/path
+	// overrides.
 	const targetCwd = resolve(args.targetCwd)
-	const configPath = await resolveConfigPath(targetCwd, args.configPath)
-	let explicitConfig: LoopConfig | null = null
-	if (args.configPath !== null || args.loopDataRoot === null) {
-		const configResult = await readStatusConfig(configPath)
-		explicitConfig = configResult.kind === "ok" ? configResult.value : null
-		if (args.configPath !== null && configResult.kind !== "ok") {
-			throw new CoderLoopError(configResult.message)
-		}
-		if (configResult.kind === "invalid") {
-			throw new CoderLoopError(configResult.message)
-		}
-	}
-	const effectiveLoopDataRoot = args.loopDataRoot ?? explicitConfig?.loopDataRoot ?? null
+	const effectiveLoopDataRoot = args.loopDataRoot
 	const chain = await resolveDbChainForTarget({ ...args, loopDataRoot: effectiveLoopDataRoot })
-	const config = loopConfigFromChain(chain, effectiveLoopDataRoot, explicitConfig)
-	const presetDir = resolvePresetDir(config, PKG_ROOT, targetCwd)
+	const resolved = chainResolvedFromChain(chain, effectiveLoopDataRoot)
+	const presetDir = resolvePresetDir(resolved, PKG_ROOT, targetCwd)
 	const preset = await loadPreset(presetDir)
-	const options = buildOptions(targetCwd, configPath, {
+	const options = buildOptions(targetCwd, {
 		targetCwd,
-		configPath: args.configPath,
 		loopDataRoot: effectiveLoopDataRoot,
 		chainName: chain.name,
 		dryRun: args.dryRun,
 		worktree: args.worktree,
 		chain,
-	}, config, preset)
+	}, resolved, preset)
 	return { options, chain }
 }
 
 async function loadLoopOptionsForTarget(
 	targetCwdInput: string,
-	configPathInput: string | null,
 	repository: string | null,
 	extra: Partial<TargetChainLookupArgs> = {},
 ): Promise<LoopOptions> {
 	const loaded = await loadTargetRuntime({
 		targetCwd: targetCwdInput,
-		configPath: configPathInput,
 		loopDataRoot: extra.loopDataRoot ?? null,
 		chainName: extra.chainName ?? null,
 		repository,
@@ -3948,41 +3501,62 @@ function readDbCurrentRun(loopDataRoot: string | null, chainId: number): Current
 	}
 }
 
-function loopConfigFromChain(chain: ChainRecord, loopDataRoot: string | null, explicitConfig: LoopConfig | null): LoopConfig {
-	const metadata = chain.metadata
-	const presetPath = metadataString(metadata, "presetPath") ?? chainConfigPresetPath(metadata) ?? explicitConfig?.presetPath ?? null
-	const config: LoopConfig = {
-		worktree: metadataBoolean(metadata, "worktree") ?? explicitConfig?.worktree ?? null,
-		workflowFile: metadataString(metadata, "workflowFile") ?? chainConfigWorkflowFile(metadata) ?? explicitConfig?.workflowFile ?? null,
-		sharedContextFile: metadataString(metadata, "sharedContextFile") ?? explicitConfig?.sharedContextFile ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "shared"),
-		issueDir: metadataString(metadata, "issueDir") ?? explicitConfig?.issueDir ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "issues"),
-		evidenceDir: metadataString(metadata, "evidenceDir") ?? explicitConfig?.evidenceDir ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "evidence"),
-		logDir: metadataString(metadata, "logDir") ?? explicitConfig?.logDir ?? chainRuntimePathForConfig(chain.name, loopDataRoot, "runs"),
-		loopDataRoot,
-		claudeBinary: metadataNestedString(metadata, "claude", "binary") ?? explicitConfig?.claudeBinary ?? null,
-		claudeExtraArgs: metadataNestedStringArray(metadata, "claude", "extraArgs") ?? explicitConfig?.claudeExtraArgs ?? [],
-		claudeModel: metadataNestedString(metadata, "claude", "model") ?? explicitConfig?.claudeModel ?? null,
-		codexBinary: metadataNestedString(metadata, "codex", "binary") ?? explicitConfig?.codexBinary ?? null,
-		codexExtraArgs: metadataNestedStringArray(metadata, "codex", "extraArgs") ?? explicitConfig?.codexExtraArgs ?? [],
-		codexModel: metadataNestedString(metadata, "codex", "model") ?? explicitConfig?.codexModel ?? null,
-		preset: presetPath === null ? chain.preset : null,
-		presetPath,
-		configBindings: explicitConfig?.configBindings ?? {},
-	}
-	return config
+// #433: chain metadata is now the sole source for per-target overrides; the engine no longer
+// reads any target config file. `ChainResolved` carries the small set of facts the engine
+// derives from chain metadata + runtime defaults — preset resolution, optional path overrides,
+// model selections — for the rest of the loop assembly.
+export type ChainResolved = {
+	worktree: boolean | null
+	workflowFile: string | null
+	sharedContextFile: string | null
+	issueDir: string | null
+	evidenceDir: string | null
+	logDir: string | null
+	loopDataRoot: string | null
+	// #433: per-runner overrides flow exclusively through chain.metadata.{claude,codex}.{binary,model,extraArgs}.
+	// The retired target on-disk preferences file is no longer in the lookup chain.
+	claudeBinary: string | null
+	claudeModel: string | null
+	claudeExtraArgs: readonly string[]
+	codexBinary: string | null
+	codexModel: string | null
+	codexExtraArgs: readonly string[]
+	preset: string | null
+	presetPath: string | null
 }
 
-function buildEffectiveConfigBindings(
+function chainResolvedFromChain(chain: ChainRecord, loopDataRoot: string | null): ChainResolved {
+	const metadata = chain.metadata
+	const presetPath = metadataString(metadata, "presetPath") ?? chainBindingsPresetPath(metadata) ?? null
+	return {
+		worktree: metadataBoolean(metadata, "worktree") ?? null,
+		workflowFile: metadataString(metadata, "workflowFile") ?? chainBindingsWorkflowFile(metadata) ?? null,
+		sharedContextFile: metadataString(metadata, "sharedContextFile") ?? chainRuntimePathForKind(chain.name, loopDataRoot, "shared"),
+		issueDir: metadataString(metadata, "issueDir") ?? chainRuntimePathForKind(chain.name, loopDataRoot, "issues"),
+		evidenceDir: metadataString(metadata, "evidenceDir") ?? chainRuntimePathForKind(chain.name, loopDataRoot, "evidence"),
+		logDir: metadataString(metadata, "logDir") ?? chainRuntimePathForKind(chain.name, loopDataRoot, "runs"),
+		loopDataRoot,
+		claudeBinary: metadataNestedString(metadata, "claude", "binary") ?? null,
+		claudeModel: metadataNestedString(metadata, "claude", "model") ?? null,
+		claudeExtraArgs: metadataNestedStringArray(metadata, "claude", "extraArgs") ?? [],
+		codexBinary: metadataNestedString(metadata, "codex", "binary") ?? null,
+		codexModel: metadataNestedString(metadata, "codex", "model") ?? null,
+		codexExtraArgs: metadataNestedStringArray(metadata, "codex", "extraArgs") ?? [],
+		preset: presetPath === null ? chain.preset : null,
+		presetPath,
+	}
+}
+
+function buildEffectiveBindings(
 	targetCwd: string,
 	chain: Pick<ChainRecord, "repository" | "baseBranch" | "metadata">,
-	config: Pick<LoopConfig, "configBindings" | "workflowFile">,
-): ConfigBindings {
+	resolved: Pick<ChainResolved, "workflowFile">,
+): RenderBindings {
 	const bindings: JsonObject = {
-		...metadataConfigBindings(chain.metadata),
-		...config.configBindings,
+		...metadataBindings(chain.metadata),
 	}
-	const workflowFile = config.workflowFile ?? stringConfigBinding(config.configBindings, "workflowFile") ?? chainConfigWorkflowFile(chain.metadata)
-	bindings.workflowFile = resolveWorkflowFileConfigBinding(targetCwd, workflowFile)
+	const workflowFile = resolved.workflowFile ?? chainBindingsWorkflowFile(chain.metadata)
+	bindings.workflowFile = resolveWorkflowFileBinding(targetCwd, workflowFile)
 	return {
 		repository: chain.repository,
 		baseBranch: chain.baseBranch,
@@ -3990,16 +3564,11 @@ function buildEffectiveConfigBindings(
 	}
 }
 
-export function resolveWorkflowFileConfigBinding(targetCwd: string, workflowFile: string | null): string {
+export function resolveWorkflowFileBinding(targetCwd: string, workflowFile: string | null): string {
 	return resolveFrom(targetCwd, workflowFile ?? ".coder-loop/workflow.md")
 }
 
-function stringConfigBinding(bindings: JsonObject, key: string): string | null {
-	const value = bindings[key]
-	return typeof value === "string" && value.trim() !== "" ? value : null
-}
-
-function chainRuntimePathForConfig(chainName: string, loopDataRoot: string | null, kind: "shared" | "issues" | "evidence" | "runs"): string {
+function chainRuntimePathForKind(chainName: string, loopDataRoot: string | null, kind: "shared" | "issues" | "evidence" | "runs"): string {
 	const paths = resolveChainRuntimePaths(chainName, loopDataRootOption(loopDataRoot))
 	if (kind === "shared") return paths.sharedFile
 	if (kind === "issues") return paths.issuesDir
@@ -4119,7 +3688,7 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 	const statusNames = new Set<string>([...root.statuses.continuable, ...root.statuses.terminal])
 	const itemFields = parsePresetItemFields(root.item.fields ?? {}, "preset.item.fields")
 	if (itemFields.has(root.item.idField)) presetError(`preset.item.fields.${root.item.idField}: idField is already declared by preset.item.idField`)
-	const attemptTimeoutSeconds = root.agent.attemptTimeoutSeconds ?? DEFAULT_ATTEMPT_TIMEOUT_SECONDS
+	const attemptTimeoutSeconds = root.agent?.attemptTimeoutSeconds ?? DEFAULT_ATTEMPT_TIMEOUT_SECONDS
 	if (!Number.isFinite(attemptTimeoutSeconds) || attemptTimeoutSeconds <= 0) {
 		presetError("preset.agent.attemptTimeoutSeconds: must be a finite positive number")
 	}
@@ -4155,11 +3724,11 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 		for (const [key, val] of Object.entries(variablesRaw)) {
 			const variable = parseVariableBinding(val, `preset.phases[${index}].variables.${key}`)
 			const parsedSource = parseVariableSource(variable.source, `preset.phases[${index}].variables.${key}`)
-			if (parsedSource.kind !== "config" && variable.configFallback.kind !== "none") {
-				presetError(`preset.phases[${index}].variables.${key}.default: defaults are only supported for config bindings`)
+			if (parsedSource.kind !== "chain" && variable.chainFallback.kind !== "none") {
+				presetError(`preset.phases[${index}].variables.${key}.default: defaults are only supported for chain bindings`)
 			}
-			const baseSource: PresetVariableSource = parsedSource.kind === "config"
-				? { ...parsedSource, fallback: variable.configFallback }
+			const baseSource: PresetVariableSource = parsedSource.kind === "chain"
+				? { ...parsedSource, fallback: variable.chainFallback }
 				: parsedSource
 			if (baseSource.kind === "item") {
 				const itemField = itemFieldRoot(baseSource.field)
@@ -4229,7 +3798,7 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 			statuses: { continuable: continuableStatuses, terminal: terminalStatuses, success: successStatuses, entry: entryStatus, unblockable: unblockableStatuses },
 		phases,
 		fragments,
-		agent: { binary: root.agent.binary, extraArgs: root.agent.extraArgs ?? [], attemptTimeoutSeconds },
+		agent: { attemptTimeoutSeconds },
 	}
 }
 
@@ -4245,7 +3814,7 @@ async function readPresetPhasePrompt(phase: PresetPhase): Promise<string> {
 type ParsedVariableBinding = {
 	source: string
 	doc: PresetVariableDoc | null
-	configFallback: ConfigBindingFallback
+	chainFallback: ChainBindingFallback
 }
 
 function parsePresetItemFields(value: BoundaryValue, label: string): ReadonlyMap<string, PresetItemField> {
@@ -4329,15 +3898,15 @@ function isKnownPresetItemField(field: string, idField: string, itemFields: Read
 }
 
 function parseVariableBinding(value: BoundaryValue, label: string): ParsedVariableBinding {
-	if (typeof value === "string") return { source: value, doc: null, configFallback: { kind: "none" } }
+	if (typeof value === "string") return { source: value, doc: null, chainFallback: { kind: "none" } }
 	if (!isObjectRecord(value)) presetError(`${label}: must be a string or { source, label } object`)
 	const source = value.source
 	if (typeof source !== "string") presetError(`${label}.source: must be a string`)
-	const configFallback: ConfigBindingFallback = Object.hasOwn(value, "default")
-		? { kind: "value", value: parseConfigBindingDefaultValue(value.default, `${label}.default`) }
+	const chainFallback: ChainBindingFallback = Object.hasOwn(value, "default")
+		? { kind: "value", value: parseChainBindingDefaultValue(value.default, `${label}.default`) }
 		: { kind: "none" }
 	const labelValue = value.label
-	if (labelValue === undefined) return { source, doc: null, configFallback }
+	if (labelValue === undefined) return { source, doc: null, chainFallback }
 	if (typeof labelValue !== "string") presetError(`${label}.label: must be a string`)
 	const suffixValue = value.suffix
 	if (suffixValue !== undefined && typeof suffixValue !== "string") presetError(`${label}.suffix: must be a string`)
@@ -4345,13 +3914,13 @@ function parseVariableBinding(value: BoundaryValue, label: string): ParsedVariab
 	if (styleValue !== "code" && styleValue !== "plain") presetError(`${label}.style: must be "code" or "plain"`)
 	const blankBeforeValue = value.blankBefore ?? false
 	if (typeof blankBeforeValue !== "boolean") presetError(`${label}.blankBefore: must be a boolean`)
-	return { source, doc: { label: labelValue, suffix: suffixValue ?? "", style: styleValue, blankBefore: blankBeforeValue }, configFallback }
+	return { source, doc: { label: labelValue, suffix: suffixValue ?? "", style: styleValue, blankBefore: blankBeforeValue }, chainFallback }
 }
 
-function parseConfigBindingDefaultValue(value: BoundaryValue, label: string): ConfigBindingScalar {
+function parseChainBindingDefaultValue(value: BoundaryValue, label: string): ChainBindingScalar {
 	if (value === null || typeof value === "string" || typeof value === "boolean") return value
 	if (typeof value === "number" && Number.isFinite(value)) return value
-	presetError(`${label}: config binding defaults must be null, string, number, or boolean`)
+	presetError(`${label}: chain binding defaults must be null, string, number, or boolean`)
 }
 
 function parsePhaseRunner(value: BoundaryValue, label: string): AgentRunnerKind | null {
@@ -4428,12 +3997,17 @@ export function stripRoleEntryFrontmatter(markdown: string): string {
 }
 
 function parseVariableSource(value: string, label: string): ParsedVariableSource {
-	const match = /^(item|config|runtime)\.([a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z][a-zA-Z0-9_]*)*)$/.exec(value)
-	if (!match) presetError(`${label}: invalid variable source "${value}" (expected item.<f> | config.<f> | runtime.<k>)`)
-	const kind = match[1] as "item" | "config" | "runtime"
+	const match = /^(item|chain|runtime)\.([a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z][a-zA-Z0-9_]*)*)$/.exec(value)
+	if (!match) presetError(`${label}: invalid variable source "${value}" (expected item.<f> | chain.<f> | runtime.<k>)`)
+	const kind = parseVariableSourceKind(match[1]!, label)
 	const fieldOrKey = match[2]!
 	if (kind !== "item" && fieldOrKey.includes(".")) presetError(`${label}: ${kind} bindings do not support nested paths`)
 	return kind === "runtime" ? { kind, key: fieldOrKey } : { kind, field: fieldOrKey }
+}
+
+function parseVariableSourceKind(value: string, label: string): "item" | "chain" | "runtime" {
+	if (value === "item" || value === "chain" || value === "runtime") return value
+	presetError(`${label}: invalid variable source prefix "${value}"`)
 }
 
 function itemFieldRoot(field: string): string {
@@ -4463,21 +4037,8 @@ function presetError(message: string): never {
 }
 
 
-export type ConfigFormat = "json" | "toml"
-
-export function configFormatForPath(path: string): ConfigFormat {
-	if (path.endsWith(".toml")) return "toml"
-	return "json"
-}
-
-async function resolveConfigPath(targetCwd: string, override: string | null): Promise<string> {
-	if (override !== null) return resolveFrom(targetCwd, override)
-	const jsonPath = resolveFrom(targetCwd, DEFAULT_CONFIG_FILE)
-	if (await exists(jsonPath)) return jsonPath
-	const tomlPath = resolveFrom(targetCwd, DEFAULT_CONFIG_FILE_TOML)
-	if (await exists(tomlPath)) return tomlPath
-	return jsonPath
-}
+// #433: per-target on-disk runtime readers are retired. The only on-disk reader the engine keeps
+// is the preset.toml itself; chain metadata covers everything else.
 
 async function assertReadable(path: string, label: string): Promise<void> {
 	try {
@@ -4488,63 +4049,28 @@ async function assertReadable(path: string, label: string): Promise<void> {
 	}
 }
 
-function parseConfigText(raw: string, path: string): LoopConfig {
-	const format = configFormatForPath(path)
-	const parsed: BoundaryValue = format === "toml" ? Bun.TOML.parse(raw) : JSON.parse(raw)
-	if (!isObjectRecord(parsed) || Array.isArray(parsed)) throw new Error("config: must be an object")
-	const input = assertArk(StatusConfigBoundary, parsed, "config")
-	return loopConfigFromStatusInput(input, extractConfigBindings(parsed))
-}
-
-function loopConfigFromStatusInput(input: StatusConfigInput, configBindings: JsonObject): LoopConfig {
-	return {
-		worktree: input.worktree ?? null,
-		workflowFile: input.workflowFile ?? null,
-		sharedContextFile: input.sharedContextFile ?? null,
-		issueDir: input.issueDir ?? null,
-		evidenceDir: input.evidenceDir ?? null,
-		logDir: input.logDir ?? null,
-		loopDataRoot: input.loopDataRoot ?? null,
-		claudeBinary: input.claude?.binary ?? null,
-		claudeExtraArgs: input.claude?.extraArgs ?? [],
-		claudeModel: input.claude?.model ?? null,
-		codexBinary: input.codex?.binary ?? null,
-		codexExtraArgs: input.codex?.extraArgs ?? [],
-		codexModel: input.codex?.model ?? null,
-		preset: readPresetNameFromStatusInput(input.preset),
-		presetPath: input.presetPath ?? null,
-		configBindings,
-	}
-}
-
-function extractConfigBindings(parsed: BoundaryRecord): JsonObject {
-	const bindings: JsonObject = {}
-	for (const [key, value] of Object.entries(parsed)) {
-		if (!isJsonValue(value)) throw new Error(`config.${key}: must be JSON-compatible for config binding`)
-		bindings[key] = value
-	}
-	return bindings
-}
-
 export function detectHostRunner(env: Record<string, string | undefined>): AgentRunnerKind {
 	if (env.CODEX_SHELL === "1" || env.CODEX_THREAD_ID !== undefined || env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE?.toLowerCase().includes("codex") === true) return "codex"
 	if (env.CLAUDECODE !== undefined || env.CLAUDE_CODE !== undefined || env.CLAUDE_SESSION_ID !== undefined || env.CLAUDE_PROJECT_DIR !== undefined) return "claude"
 	return "claude"
 }
 
-export function buildAgentRunnerCommands(config: LoopConfig): AgentRunnerCommands {
+// #433: runner binary / model / extraArgs come exclusively from chain.metadata.<kind> now —
+// the retired target on-disk preferences file no longer layers anything on top. Defaults are
+// the kind name on PATH (claude/codex) with no extra args.
+export function buildAgentRunnerCommands(resolved: Pick<ChainResolved, "claudeBinary" | "claudeModel" | "claudeExtraArgs" | "codexBinary" | "codexModel" | "codexExtraArgs">): AgentRunnerCommands {
 	return {
 		claude: {
 			kind: "claude",
-			binary: config.claudeBinary ?? "claude",
-			extraArgs: config.claudeExtraArgs,
-			model: config.claudeModel,
+			binary: resolved.claudeBinary ?? "claude",
+			extraArgs: [...resolved.claudeExtraArgs],
+			model: resolved.claudeModel,
 		},
 		codex: {
 			kind: "codex",
-			binary: config.codexBinary ?? "codex",
-			extraArgs: config.codexExtraArgs,
-			model: config.codexModel,
+			binary: resolved.codexBinary ?? "codex",
+			extraArgs: [...resolved.codexExtraArgs],
+			model: resolved.codexModel,
 		},
 	}
 }
@@ -4638,8 +4164,8 @@ export type BuildPhaseRunnerSelectionFromChainInput = {
 }
 
 export function buildPhaseRunnerSelectionFromChain(input: BuildPhaseRunnerSelectionFromChainInput): PhaseRunnerSelectionInput {
-	const config = loopConfigFromChain(input.chain, input.loopDataRoot, null)
-	const runnerCommands = buildAgentRunnerCommands(config)
+	const resolved = chainResolvedFromChain(input.chain, input.loopDataRoot)
+	const runnerCommands = buildAgentRunnerCommands(resolved)
 	const defaultRunner = selectPhaseDefaultRunner(firstNonTriggerPhaseForPreset(input.preset), input.preset, runnerCommands)
 	const reviewRunner = selectPhaseDefaultRunner(lastNonTriggerPhaseForPreset(input.preset), input.preset, runnerCommands)
 	return { preset: input.preset, defaultRunner, reviewRunner, runnerCommands }
@@ -4699,22 +4225,20 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 	const rawTargetCwd = input.targetCwd ?? input.items[0]?.repoCwd
 	if (rawTargetCwd === undefined || rawTargetCwd.trim() === "") throw new Error(`chain ${input.chain.id} has no item repoCwd for chain-complete trigger`)
 	const targetCwd = resolve(rawTargetCwd)
-	const config = loopConfigFromChain(input.chain, input.loopDataRoot, null)
-	const presetDir = input.presetDir ?? resolvePresetDir(config, PKG_ROOT, targetCwd)
+	const resolved = chainResolvedFromChain(input.chain, input.loopDataRoot)
+	const presetDir = input.presetDir ?? resolvePresetDir(resolved, PKG_ROOT, targetCwd)
 	const preset = input.preset ?? await loadPreset(presetDir)
 	const phases = chainCompleteTriggerPhases(preset)
 	if (phases.length === 0) return null
 
-	const configPath = resolveLoopDataPaths(loopDataRootOption(input.loopDataRoot)).dbFile
-	const options = buildOptions(targetCwd, configPath, {
+	const options = buildOptions(targetCwd, {
 		targetCwd,
-		configPath: null,
 		loopDataRoot: input.loopDataRoot,
 		chainName: input.chain.name,
 		dryRun: false,
 		worktree: false,
 		chain: input.chain,
-	}, config, preset)
+	}, resolved, preset)
 	const anchorRecord = selectFinalizerAnchorItem(input.items, input.runId)
 	const anchorId = getItemId(anchorRecord, preset)
 	const currentIssueFile = resolveOptionalChainIssueFile(options, input.chain, anchorRecord, "Chain-complete trigger issue file")
@@ -4730,7 +4254,7 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 	for (const phase of phases) {
 		const ctx: ResolveContext = {
 			item: anchorRecord,
-			config: buildConfigBindings(options),
+			chain: buildRenderBindings(options),
 			runtime: buildRuntimeBindings({
 				options,
 				phase,
@@ -4797,19 +4321,28 @@ function parseFinalizerSummaryDecisionFromText(text: string): PresetChainComplet
 		: { decision: match[1] as "complete" | "keep-active", reason }
 }
 
-function readPresetNameFromStatusInput(value: StatusConfigInput["preset"]): string | null {
-	if (value === undefined || value === null) return null
-	if (typeof value === "string") return value
-	return value.name
-}
+// #433: derive the chain-bindings object that wraps into `metadata.bindings`. Strips the
+// chain-create top-level scalars (repository / baseBranch — those are first-class chain.create
+// fields, not bindings), normalizes a relative `presetPath` to absolute, and rejects nested
+// objects under bindings (the issue body explicitly calls out `bindings.metadata.workflowFile`
+// as a stale-shape failure mode). The daemon repeats the shape check via arktype, so a stray
+// nesting fails fast on either path.
+const CHAIN_CREATE_NON_BINDING_KEYS = new Set(["repository", "baseBranch"])
 
-function normalizeChainCreateConfig(config: JsonObject): JsonObject {
-	const presetPath = stringConfigBinding(config, "presetPath")
-	if (presetPath === null) return config
-	return {
-		...config,
-		presetPath: isAbsolute(presetPath) ? presetPath : resolve(process.cwd(), presetPath),
+function normalizeChainCreateBindings(config: JsonObject): JsonObject {
+	const bindings: JsonObject = {}
+	for (const [key, value] of Object.entries(config)) {
+		if (CHAIN_CREATE_NON_BINDING_KEYS.has(key)) continue
+		if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+			fail(`--config-json.${key}: nested objects are not allowed inside chain bindings (got ${JSON.stringify(value)})`)
+		}
+		bindings[key] = value
 	}
+	const presetPath = bindings.presetPath
+	if (typeof presetPath === "string" && presetPath.trim() !== "" && !isAbsolute(presetPath)) {
+		bindings.presetPath = resolve(process.cwd(), presetPath)
+	}
+	return bindings
 }
 
 export function resolvePresetDir(
@@ -5149,9 +4682,9 @@ export function resolveBinding(source: PresetVariableSource, ctx: ResolveContext
 		const value = lookupItemField(ctx.item, source.field)
 		return stringifyBindingValue(value, `item.${source.field}`)
 	}
-	if (source.kind === "config") {
-		const value = ctx.config[source.field] ?? (source.fallback.kind === "value" ? source.fallback.value : undefined)
-		return stringifyBindingValue(value, `config.${source.field}`)
+	if (source.kind === "chain") {
+		const value = ctx.chain[source.field] ?? (source.fallback.kind === "value" ? source.fallback.value : undefined)
+		return stringifyBindingValue(value, `chain.${source.field}`)
 	}
 	assertRuntimeSourceDeclared(source)
 	return runtimeBindingValue(ctx.runtime, source.key)
@@ -5371,10 +4904,10 @@ export async function fetchIssueKind(repository: string | null, issueId: string)
 	})
 }
 
-export type ConfigBindingsInput = Pick<LoopOptions, "configBindings">
+export type RenderBindingsInput = Pick<LoopOptions, "bindings">
 
-export function buildConfigBindings(options: ConfigBindingsInput): ConfigBindings {
-	return { ...options.configBindings }
+export function buildRenderBindings(options: RenderBindingsInput): RenderBindings {
+	return { ...options.bindings }
 }
 
 async function runAgent(

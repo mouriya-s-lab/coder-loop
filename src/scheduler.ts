@@ -5,13 +5,13 @@ import { createWriteStream, existsSync, realpathSync, rmSync, type WriteStream }
 import { basename, dirname, isAbsolute, resolve } from "node:path"
 
 import {
-	buildConfigBindings,
+	buildRenderBindings,
 	buildRunnerInvocation,
 	parseSessionIdFromRunnerStream,
 	renderFragmentIndex,
 	renderPrompt,
 	resolvePresetBusinessKeyValues,
-	resolveWorkflowFileConfigBinding,
+	resolveWorkflowFileBinding,
 	resolveIssueKind,
 	selectRunnerForPhase,
 	type AgentRunnerKind,
@@ -30,8 +30,8 @@ import {
 } from "./loop"
 import {
 	chainCompleteTriggerState,
-	chainConfigBindings as metadataConfigBindings,
-	chainConfigWorkflowFile,
+	chainBindings as metadataBindings,
+	chainBindingsWorkflowFile,
 	chainMetadataToJsonObject,
 	clearSchedulerBackoff as clearItemSchedulerBackoff,
 	clearSchedulerSpawnError as clearItemSchedulerSpawnError,
@@ -2248,20 +2248,20 @@ export function buildSchedulerResolveContext(input: {
 		chainBaseBranch: input.chain.baseBranch,
 		repoCwd: input.item.repoCwd,
 	}
-	const config = buildConfigBindings({
-		configBindings: buildSchedulerConfigBindings(input.item.repoCwd, input.chain),
+	const chain = buildRenderBindings({
+		bindings: buildSchedulerChainBindings(input.item.repoCwd, input.chain),
 	})
-	return { item: input.item, config, runtime }
+	return { item: input.item, chain, runtime }
 }
 
-function buildSchedulerConfigBindings(repoCwd: string, chain: ChainRecord): JsonObject {
+function buildSchedulerChainBindings(repoCwd: string, chain: ChainRecord): JsonObject {
 	const bindings: JsonObject = {
 		repository: chain.repository,
 		baseBranch: chain.baseBranch,
-		...metadataConfigBindings(chain.metadata),
+		...metadataBindings(chain.metadata),
 	}
-	const workflowFile = chain.metadata.workflowFile ?? chainConfigWorkflowFile(chain.metadata)
-	bindings.workflowFile = resolveWorkflowFileConfigBinding(repoCwd, workflowFile)
+	const workflowFile = chain.metadata.workflowFile ?? chainBindingsWorkflowFile(chain.metadata)
+	bindings.workflowFile = resolveWorkflowFileBinding(repoCwd, workflowFile)
 	return bindings
 }
 

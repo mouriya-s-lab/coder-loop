@@ -375,7 +375,9 @@ async function createChainThroughDaemon(input: {
 			repository: input.repo,
 			preset: input.preset.name,
 			baseBranch: "main",
-			metadata: { config: { workflowFile: resolve(input.target, WORKFLOW_REL) } },
+			// #433: chain bindings now live at `metadata.bindings`; the retired `metadata.config`
+			// path raises an error if it ever reaches the daemon's chain-metadata boundary.
+			metadata: { bindings: { workflowFile: resolve(input.target, WORKFLOW_REL) } },
 		}))
 		if (!response.ok) fail(`${response.error.code}: ${response.error.message}`)
 		return { chainName, result: response.result }
@@ -595,7 +597,6 @@ export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
 
 	const statusSnapshot = await buildCoderLoopStatusSnapshot({
 		targetCwd: args.target,
-		configPath: null,
 		loopDataRoot: args.loopDataRoot,
 		chainName: args.chainName,
 		output: "json",
