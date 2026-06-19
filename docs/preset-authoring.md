@@ -350,7 +350,7 @@ queue item 可加 `"runner": "claude" | "codex"` 覆盖允许 item override 的�
     logs/                       # legacy/local fallback；新版 runs/log path 由 chain runtime 决定
 ```
 
-Preset 选择与 chain binding 都在 centralized SQLite loop-data store 的 chain.metadata.bindings 里（由 `coder-loop chain create --preset <name> --config-json '{...}'` 写入），target 侧没有 `.coder-loop/runtime/config.{json,toml}`。队列 / current / recentRuns 同样存在该 store 中。用 `coder-loop chain create`、`coder-loop item add`、安装/规划命令，或测试 helper 建 chain + item；不要为新版 runtime 手写 `.coder-loop/runtime/state.json` 当 authoritative queue。
+Preset 选择与 chain binding 都在 centralized SQLite loop-data store 的 chain.metadata.bindings 里（由 `coder-loop chain create --preset <name> --config-json '{...}'` 写入），target spawn cwd 只承载 `.coder-loop/workflow.md` 等政策文件，不承载引擎可读的状态或绑定源。队列 / current / recentRuns 同样存在该 store 中。用 `coder-loop chain create`、`coder-loop item add`、安装/规划命令，或测试 helper 建 chain + item；不要为新版 runtime 手写 `.coder-loop/runtime/state.json` 当 authoritative queue。
 
 `coder-loop status <target> --json --chain <chain>` 应当 exit 0，且输出里 `.target.preset.name` 是目标 preset、`.state.kind == "ok"`；有可推进 item 时 `.queue.selected.id` 应指向该 preset 的 `item.idField` 值。没有 queue 时先用 `coder-loop chain create` / `coder-loop item add` 建立 centralized chain 与 item，再读取 status。
 
