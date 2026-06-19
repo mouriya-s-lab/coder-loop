@@ -6,7 +6,7 @@ import {
 	agentCodexArgs,
 	agentSessionsPath,
 	buildCentralRuntimeBindingPaths,
-	buildConfigBindings,
+	buildRenderBindings,
 	buildDaemonStartPlan,
 	buildRuntimeBindings,
 	createSummaryWatchdog,
@@ -24,13 +24,13 @@ import {
 	renderFragmentIndex,
 	renderPrompt,
 	ENGINE_RUNTIME_BINDING_KEYS,
-	resolveWorkflowFileConfigBinding,
+	resolveWorkflowFileBinding,
 	stripRoleEntryFrontmatter,
 	resolveBinding,
 	selectRunnerForPhase,
 	summaryWatchdogConfigForPhase,
 	validatePresetPhaseTemplate,
-	type ConfigBindings,
+	type RenderBindings,
 	type IssueRunContext,
 	type JsonObject,
 	type LoopOptions,
@@ -96,7 +96,6 @@ function minimalPresetRoot(overrides: BoundaryRecord = {}): BoundaryRecord {
 				variables: { ISSUE: "item.issue" },
 			},
 		],
-		agent: { binary: "claude" },
 		...overrides,
 	}
 }
@@ -105,7 +104,7 @@ function makePreset(overrides: BoundaryRecord = {}): Preset {
 	return parsePreset(minimalPresetRoot(overrides), resolve(REPO_ROOT, "presets/fixture"))
 }
 
-function makeConfig(overrides: Partial<ConfigBindings> = {}): ConfigBindings {
+function makeChainBindings(overrides: Partial<RenderBindings> = {}): RenderBindings {
 	return {
 		repository: "mouriya-s-lab/coder-loop",
 		baseBranch: "main",
@@ -153,7 +152,6 @@ function makeOptions(preset = makePreset()): LoopOptions {
 	const codexRunner = { kind: "codex" as const, binary: "codex", extraArgs: [], model: null }
 	return {
 		targetCwd: REPO_ROOT,
-		configPath: resolve(TEST_ROOT, "config.json"),
 		sharedContextPath: resolve(TEST_ROOT, "shared.md"),
 		stateDbPath: resolve(TEST_ROOT, "db.sqlite"),
 		issueDir: resolve(TEST_ROOT, "issues"),
@@ -163,7 +161,7 @@ function makeOptions(preset = makePreset()): LoopOptions {
 		logFile: resolve(TEST_ROOT, "runs/test.log"),
 		repository: "mouriya-s-lab/coder-loop",
 		baseBranch: "main",
-		configBindings: makeConfig(),
+		bindings: makeChainBindings(),
 		chainName: "fixture",
 		worktree: false,
 		hostRunner: "codex",
@@ -238,7 +236,7 @@ describe("ItemRecord prompt bindings", () => {
 			phase: "iteration",
 			sessionIds: { iteration: { codex: "thread-123" } },
 		})
-		const ctx: ResolveContext = { item, config: makeConfig(), runtime: makeRuntime() }
+		const ctx: ResolveContext = { item, chain: makeChainBindings(), runtime: makeRuntime() }
 
 		expect(renderPrompt("#{{ISSUE}} {{PHASE}} {{CODEX_SESSION}}", phase, ctx)).toBe("#333 iteration thread-123")
 	})
@@ -261,7 +259,7 @@ describe("ItemRecord prompt bindings", () => {
 			defaultModel: null,
 			roles: [],
 		}
-		const ctx: ResolveContext = { item: makeItem(), config: makeConfig(), runtime: makeRuntime({ targetCwd: "/repo", issueKind: "code" }) }
+		const ctx: ResolveContext = { item: makeItem(), chain: makeChainBindings(), runtime: makeRuntime({ targetCwd: "/repo", issueKind: "code" }) }
 
 		const prompt = renderPrompt("{{RUNTIME_INPUTS_DOC}}\n\n{{PHASE_EXITS_DOC}}\n\n{{ISSUE_KIND_DOC}}", phase, ctx)
 
@@ -270,10 +268,10 @@ describe("ItemRecord prompt bindings", () => {
 		expect(prompt).toContain("- `done`: review accepted the result")
 	})
 
-	test("resolveBinding keeps old item.issue and config.requireBrowserEvidence compatibility", () => {
+	test("resolveBinding keeps old item.issue and chain.requireBrowserEvidence compatibility", () => {
 		const ctx: ResolveContext = {
 			item: makeItem({ issueNumber: 184, branch: "issue-184", pr: 191 }),
-			config: makeConfig({ requireBrowserEvidence: true }),
+			chain: makeChainBindings({ requireBrowserEvidence: true }),
 			runtime: makeRuntime(),
 		}
 
@@ -281,8 +279,8 @@ describe("ItemRecord prompt bindings", () => {
 		expect(resolveBinding({ kind: "item", field: "branch" }, ctx)).toBe("issue-184")
 		expect(resolveBinding({ kind: "item", field: "pr" }, ctx)).toBe("191")
 		expect(resolveBinding({ kind: "item", field: "branch" }, { ...ctx, item: makeItem({ branch: "legacy", extra: { branch: "extra" } }) })).toBe("extra")
-		expect(resolveBinding({ kind: "config", field: "requireBrowserEvidence", fallback: { kind: "none" } }, ctx)).toBe("true")
-		expect(resolveBinding({ kind: "config", field: "missingFlag", fallback: { kind: "value", value: false } }, ctx)).toBe("false")
+		expect(resolveBinding({ kind: "chain", field: "requireBrowserEvidence", fallback: { kind: "none" } }, ctx)).toBe("true")
+		expect(resolveBinding({ kind: "chain", field: "missingFlag", fallback: { kind: "value", value: false } }, ctx)).toBe("false")
 	})
 
 	test("parsePreset accepts nested ItemRecord fields but rejects unknown roots", () => {
@@ -332,25 +330,25 @@ describe("runtime binding helpers", () => {
 		expect(registry).not.toContain("`REVIEW SUMMARY:`")
 	})
 
-	test("workflow file config binding keeps the conventional target path when chain metadata is unseeded", () => {
-		expect(resolveWorkflowFileConfigBinding(REPO_ROOT, null)).toBe(resolve(REPO_ROOT, ".coder-loop/workflow.md"))
-		expect(resolveWorkflowFileConfigBinding(REPO_ROOT, "docs/workflow.md")).toBe(resolve(REPO_ROOT, "docs/workflow.md"))
-		expect(resolveWorkflowFileConfigBinding(REPO_ROOT, resolve(REPO_ROOT, "custom/workflow.md"))).toBe(resolve(REPO_ROOT, "custom/workflow.md"))
+	test("workflow file chain binding keeps the conventional target path when chain metadata is unseeded", () => {
+		expect(resolveWorkflowFileBinding(REPO_ROOT, null)).toBe(resolve(REPO_ROOT, ".coder-loop/workflow.md"))
+		expect(resolveWorkflowFileBinding(REPO_ROOT, "docs/workflow.md")).toBe(resolve(REPO_ROOT, "docs/workflow.md"))
+		expect(resolveWorkflowFileBinding(REPO_ROOT, resolve(REPO_ROOT, "custom/workflow.md"))).toBe(resolve(REPO_ROOT, "custom/workflow.md"))
 	})
 
-	test("buildConfigBindings returns transparent config data", () => {
+	test("buildRenderBindings returns transparent chain data", () => {
 		const options = makeOptions()
-		const config = buildConfigBindings({ ...options, configBindings: { ...options.configBindings, customField: "custom" } })
-		expect(config.repository).toBe("mouriya-s-lab/coder-loop")
-		expect(config.baseBranch).toBe("main")
-		expect(config.workflowFile).toBe(resolve(REPO_ROOT, ".coder-loop/workflow.md"))
-		expect(config.requireBrowserEvidence).toBe(false)
-		expect(config.customField).toBe("custom")
+		const bindings = buildRenderBindings({ ...options, bindings: { ...options.bindings, customField: "custom" } })
+		expect(bindings.repository).toBe("mouriya-s-lab/coder-loop")
+		expect(bindings.baseBranch).toBe("main")
+		expect(bindings.workflowFile).toBe(resolve(REPO_ROOT, ".coder-loop/workflow.md"))
+		expect(bindings.requireBrowserEvidence).toBe(false)
+		expect(bindings.customField).toBe("custom")
 	})
 
-	test("workflow file is a config binding, not a runtime binding", () => {
-		const ctx: ResolveContext = { item: makeItem(), config: makeConfig(), runtime: makeRuntime() }
-		expect(resolveBinding({ kind: "config", field: "workflowFile", fallback: { kind: "none" } }, ctx)).toBe(resolve(REPO_ROOT, ".coder-loop/workflow.md"))
+	test("workflow file is a chain binding, not a runtime binding", () => {
+		const ctx: ResolveContext = { item: makeItem(), chain: makeChainBindings(), runtime: makeRuntime() }
+		expect(resolveBinding({ kind: "chain", field: "workflowFile", fallback: { kind: "none" } }, ctx)).toBe(resolve(REPO_ROOT, ".coder-loop/workflow.md"))
 		expect(() => resolveBinding({ kind: "runtime", key: "workflowPath" }, ctx)).toThrow(/runtime\.workflowPath: not an engine runtime fact or preset-declared business key/)
 	})
 
@@ -365,7 +363,7 @@ describe("runtime binding helpers", () => {
 		const phase = preset.phases[0]!
 		const ctx: ResolveContext = {
 			item: makeItem(),
-			config: makeConfig(),
+			chain: makeChainBindings(),
 			runtime: makeRuntime({ customBusiness: "preset-owned-value" }),
 		}
 
@@ -641,7 +639,6 @@ describe("runner and daemon helpers", () => {
 		const plan = buildDaemonStartPlan({
 			action: "start",
 			targetCwd: REPO_ROOT,
-			configPath: null,
 			loopDataRoot: TEST_ROOT,
 			chainName: "fixture",
 			iterationLimit: null,
@@ -820,7 +817,7 @@ describe("renderPrompt placeholder validation (issue #399)", () => {
 			["QUOTED", { kind: "item", field: "title" }],
 		])
 		const item = makeItem({ title: "literal {{NOT_A_KEY}} content" })
-		const ctx: ResolveContext = { item, config: makeConfig(), runtime: makeRuntime() }
+		const ctx: ResolveContext = { item, chain: makeChainBindings(), runtime: makeRuntime() }
 		const out = renderPrompt("before {{QUOTED}} after", phase, ctx)
 		expect(out).toBe("before literal {{NOT_A_KEY}} content after")
 	})
@@ -830,7 +827,7 @@ describe("renderPrompt placeholder validation (issue #399)", () => {
 			["KEY", { kind: "item", field: "issue" }],
 		])
 		const item = makeItem({ issueNumber: 42 })
-		const ctx: ResolveContext = { item, config: makeConfig(), runtime: makeRuntime() }
+		const ctx: ResolveContext = { item, chain: makeChainBindings(), runtime: makeRuntime() }
 		const out = renderPrompt("doc: \\{{KEY}} live: {{KEY}}", phase, ctx)
 		expect(out).toBe("doc: {{KEY}} live: 42")
 	})
@@ -839,7 +836,7 @@ describe("renderPrompt placeholder validation (issue #399)", () => {
 		const phase = makePhase([
 			["DECLARED", { kind: "item", field: "issue" }],
 		])
-		const ctx: ResolveContext = { item: makeItem(), config: makeConfig(), runtime: makeRuntime() }
+		const ctx: ResolveContext = { item: makeItem(), chain: makeChainBindings(), runtime: makeRuntime() }
 		expect(() => renderPrompt("text {{UNDECLARED}}", phase, ctx)).toThrow(/undeclared placeholder \{\{UNDECLARED\}\}/)
 	})
 })

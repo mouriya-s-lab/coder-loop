@@ -141,7 +141,7 @@ const EXPECTED_VARIABLE_KEYS = [
 ] as const
 
 describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
-	test("loads name, item.idField, agent.binary, statuses sets", async () => {
+	test("loads name, item.idField, agent.attemptTimeoutSeconds, statuses sets", async () => {
 		const preset: Preset = await loadPreset(BUNDLED_PRESET_DIR)
 		expect(preset.name).toBe("gh-issue-pr-iteration")
 		expect(preset.item.idField).toBe("issue")
@@ -151,8 +151,8 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 			lastRunId: { type: "string" },
 		})
 		expect([...preset.runtime.businessKeys]).toEqual(["issueKind", "issueKindDoc"])
-		expect(preset.agent.binary).toBe("claude")
-		expect([...preset.agent.extraArgs]).toEqual([])
+		// #433: [agent].binary and [agent].extraArgs were zombie schema; retired with the rest of
+		// the runtime/config concept. Runner binary is now kind→PATH only.
 		expect(preset.agent.attemptTimeoutSeconds).toBe(DEFAULT_ATTEMPT_TIMEOUT_SECONDS)
 		expect([...preset.statuses.continuable]).toEqual(["queued", "in_progress", "changes_requested"])
 		expect([...preset.statuses.terminal]).toEqual(["blocked", "moot", "done", "exhausted"])
@@ -198,7 +198,8 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 			const keys = phase.variables.map((variable) => variable.key)
 			expect(keys).toEqual([...EXPECTED_VARIABLE_KEYS])
 			for (const variable of phase.variables) {
-				expect(["item", "config", "runtime"]).toContain(variable.source.kind)
+				// #433: DSL prefixes are item / chain / runtime (the retired `config.*` prefix is gone).
+				expect(["item", "chain", "runtime"]).toContain(variable.source.kind)
 			}
 		}
 	})
@@ -207,16 +208,16 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		const preset = await loadPreset(BUNDLED_PRESET_DIR)
 		const iterVars = new Map(preset.phases[0]!.variables.map((variable) => [variable.key, variable.source] as const))
 		const expectedItem = (field: string): PresetVariableSource => ({ kind: "item", field })
-		const expectedConfig = (field: string): PresetVariableSource => ({ kind: "config", field, fallback: { kind: "none" } })
-		const expectedConfigDefault = (field: string, value: boolean): PresetVariableSource => ({ kind: "config", field, fallback: { kind: "value", value } })
+		const expectedChain = (field: string): PresetVariableSource => ({ kind: "chain", field, fallback: { kind: "none" } })
+		const expectedChainDefault = (field: string, value: boolean): PresetVariableSource => ({ kind: "chain", field, fallback: { kind: "value", value } })
 		const expectedRuntime = (key: string): PresetVariableSource => ({ kind: "runtime", key })
 		expect(iterVars.get("ISSUE")).toEqual(expectedItem("issue"))
 		expect(iterVars.get("ISSUE_BRANCH")).toEqual(expectedItem("branch"))
 		expect(iterVars.get("ISSUE_PR")).toEqual(expectedItem("pr"))
-		expect(iterVars.get("REPO")).toEqual(expectedConfig("repository"))
-		expect(iterVars.get("BASE_BRANCH")).toEqual(expectedConfig("baseBranch"))
-		expect(iterVars.get("WORKFLOW_FILE")).toEqual(expectedConfig("workflowFile"))
-		expect(iterVars.get("REQUIRE_BROWSER_EVIDENCE")).toEqual(expectedConfigDefault("requireBrowserEvidence", false))
+		expect(iterVars.get("REPO")).toEqual(expectedChain("repository"))
+		expect(iterVars.get("BASE_BRANCH")).toEqual(expectedChain("baseBranch"))
+		expect(iterVars.get("WORKFLOW_FILE")).toEqual(expectedChain("workflowFile"))
+		expect(iterVars.get("REQUIRE_BROWSER_EVIDENCE")).toEqual(expectedChainDefault("requireBrowserEvidence", false))
 		expect(iterVars.get("TARGET_CWD")).toEqual(expectedRuntime("targetCwd"))
 		expect(iterVars.get("AGENT_CWD")).toEqual(expectedRuntime("agentCwd"))
 		expect(iterVars.get("PROMPT_ROOT")).toEqual(expectedRuntime("presetDir"))

@@ -740,12 +740,14 @@ attemptTimeoutSeconds = 3600
 	})
 
 	test("daemon start ignores target-local legacy loop-data when loop-data root is omitted", async () => {
+		// #433: the engine no longer reads any target runtime file — `--loop-data-root` / env wins
+		// without exception. The legacy target-local layout below is just a noise directory; the
+		// global store wins on its own merits.
 		const target = await makeTarget("target-cwd-legacy-local")
 		const globalLoopDataRoot = await makeLoopDataRoot("target-cwd-global")
 		const targetLocalLoopDataRoot = resolve(target, ".coder-loop/runtime/loop-data")
 		await mkdir(globalLoopDataRoot, { recursive: true })
 		await mkdir(targetLocalLoopDataRoot, { recursive: true })
-		await writeFile(resolve(target, ".coder-loop/runtime/config.json"), "{}\n")
 
 		const globalStore = openSqliteStateStore({ loopDataRoot: globalLoopDataRoot })
 		try {
@@ -828,12 +830,14 @@ attemptTimeoutSeconds = 3600
 		}
 	})
 
-	test("logs --chain reads stopped and completed chain history from target config without loop-data-root flag", async () => {
+	test("logs --chain reads stopped and completed chain history with explicit loop-data-root flag", async () => {
+		// #433: `--loop-data-root` (or env) is now the only loop-data root source — target config
+		// files are retired. Keep this test by passing the flag explicitly everywhere it was
+		// previously implied by the target-local config file.
 		const fixture = await startFixture("logs-non-active-chain-history", { schedulerEnabled: true })
 		try {
 			const target = await makeTarget("logs-non-active-chain-target")
 			await mkdir(resolve(target, ".coder-loop/runtime"), { recursive: true })
-			await writeFile(resolve(target, ".coder-loop/runtime/config.json"), `${JSON.stringify({ loopDataRoot: fixture.loopDataRoot }, null, "\t")}\n`)
 			expectJsonOk(await runCli(["chain", "create", "logs-stopped-history-chain", "--config-json", FIXTURE_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expectJsonOk(await runCli(["chain", "stop", "logs-stopped-history-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expectJsonOk(await runCli(["chain", "create", "logs-completed-history-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--preset", "single-phase-example", "--loop-data-root", fixture.loopDataRoot, "--json"]))
@@ -851,6 +855,8 @@ attemptTimeoutSeconds = 3600
 			const stoppedLogs = expectJsonOk(await runCli([
 				"logs",
 				target,
+				"--loop-data-root",
+				fixture.loopDataRoot,
 				"--chain",
 				"logs-stopped-history-chain",
 				"--json",
@@ -871,6 +877,8 @@ attemptTimeoutSeconds = 3600
 			const completedLogs = expectJsonOk(await runCli([
 				"logs",
 				target,
+				"--loop-data-root",
+				fixture.loopDataRoot,
 				"--chain",
 				"logs-completed-history-chain",
 				"--json",
@@ -902,7 +910,8 @@ attemptTimeoutSeconds = 3600
 			await expect(Bun.file(resolve(target, ".coder-loop/runtime")).exists()).resolves.toBe(false)
 			const status = expectJsonOk(await runCli(["chain", "status", "repo", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(status.chain).toMatchObject({ name: "repo", repository: "fixture/repo", preset: "gh-issue-pr-iteration", status: "active" })
-			expect(status.chain.metadata).toMatchObject({ config: { workflowFile: resolve(target, ".coder-loop/workflow.md") } })
+			// #433: install writes the workflow path to `metadata.bindings`, not the retired `metadata.config`.
+			expect(status.chain.metadata).toMatchObject({ bindings: { workflowFile: resolve(target, ".coder-loop/workflow.md") } })
 		} finally {
 			await fixture.daemon.stop()
 		}
