@@ -4191,4 +4191,65 @@ describe("per-run summary tag", () => {
 		expect(extractSummaryValue(stdoutText, tag)).toBe("did the work")
 		expect(extractSummaryValue(stdoutText, "summary-ffffffffffffffff")).toBeNull()
 	})
+
+	// #448: preset-supplied business key literals must flow through the real
+	// spawn render path (renderSchedulerSpawnPrompt -> buildSchedulerResolveContext
+	// -> renderPrompt). The bundled fixture preset uses the path / key / variable
+	// / expected value pinned by issue #448's acceptance contract.
+	test("renderSchedulerSpawnPrompt resolves business-key-example fixture preset's preset-supplied literal", async () => {
+		const preset = await loadPreset(resolve(REPO_ROOT, "presets/business-key-example"))
+		const phase = preset.phases.find((entry) => entry.name === "audit")
+		expect(phase).toBeDefined()
+		const chain: ChainRecord = {
+			id: 1,
+			name: "business-key-example-test-chain",
+			preset: null,
+			repository: "owner/repo",
+			baseBranch: "main",
+			umbrellaIssue: null,
+			umbrellaRepo: null,
+			status: "active",
+			metadata: storedChainMetadata({}),
+			createdAt: 0,
+			updatedAt: 0,
+		}
+		const item: ItemRecord = {
+			id: 1,
+			chainId: 1,
+			issueNumber: 1,
+			repoCwd: "/fake",
+			status: parseInternalStatus("pending", "test.status"),
+			attempts: 0,
+			position: 0,
+			title: null,
+			priority: null,
+			branch: null,
+			pr: null,
+			lastRunId: null,
+			sessionIds: {},
+			issueFile: null,
+			evidenceDir: null,
+			agentCwd: null,
+			runner: null,
+			phase: null,
+			preset: null,
+			presetPath: null,
+			extra: storedItemExtra({}),
+			createdAt: 0,
+			updatedAt: 0,
+			statusUpdatedAt: 0,
+		}
+		const rendered = await renderSchedulerSpawnPrompt({
+			rawPrompt: "{{AUDIT_DEMO}}",
+			preset,
+			phase: "audit",
+			chain,
+			item,
+			runId: "run-bk-fixture",
+			worktreePath: "/fake",
+			issueKind: null,
+			resume: { kind: "fresh" },
+		})
+		expect(rendered).toBe("business-key-e2e-ok")
+	})
 })

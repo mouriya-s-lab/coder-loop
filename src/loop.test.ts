@@ -381,7 +381,43 @@ describe("runtime binding helpers", () => {
 					{ name: "iteration", prompt: "iteration.md", variables: { CUSTOM: "runtime.customBusiness" } },
 				],
 			}),
-		).toThrow(/unrecognized runtime key "customBusiness"/)
+		).toThrow(/unknown runtime key "customBusiness"/)
+	})
+
+	// #448: preset-supplied business key literals flow into RuntimeBindings via
+	// buildRuntimeBindings so renderPrompt can resolve them with no engine
+	// changes.
+	test("buildRuntimeBindings merges preset-supplied businessKeyValues literals", () => {
+		const preset = makePreset({
+			runtime: {
+				businessKeys: ["auditDemo"],
+				businessKeyValues: { auditDemo: { literal: "preset-literal-ok" } },
+			},
+			phases: [
+				{ name: "iteration", prompt: "iteration.md", variables: { AUDIT_DEMO: "runtime.auditDemo" } },
+			],
+		})
+		const phase = preset.phases[0]!
+		const options = { ...makeOptions(), preset }
+		const issueRun: IssueRunContext = {
+			runIdGeneration: "new",
+			resumedFromPhase: null,
+			resumedStartedAt: null,
+			resumedSessionId: null,
+		}
+		const runtime = buildRuntimeBindings({
+			options,
+			phase,
+			runId: "run-bk",
+			currentIssueFile: null,
+			evidenceDir: null,
+			agentCwd: REPO_ROOT,
+			issueRun,
+			issueKind: null,
+		})
+		expect(runtime.auditDemo).toBe("preset-literal-ok")
+		const ctx: ResolveContext = { item: makeItem(), config: makeConfig(), runtime }
+		expect(renderPrompt("{{AUDIT_DEMO}}", phase, ctx)).toBe("preset-literal-ok")
 	})
 
 	test("buildRuntimeBindings maps issue run context into strings", () => {
