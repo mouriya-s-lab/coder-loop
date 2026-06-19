@@ -125,7 +125,8 @@ rm -rf "$TARGET"
 | `name` | string | 是 | preset 标识，必须 match `^[a-zA-Z][a-zA-Z0-9_-]*$`，禁止路径分隔符与 `..`，所以 bundled name 一定落在 `<pkg>/presets/<name>/` 内 |
 | `[item].idField` | string | 是 | queue item 的 id 字段名（如 `gh-issue-pr-iteration` 用 `issue`，single-phase-example 用 `id`） |
 | `[item.fields]` | table | 否 | preset 额外要绑定的透明 item 字段声明。每个字段值是 `"string"|"number"|"boolean"|"json"`，或 `{ type = "..." }` |
-| `[runtime].businessKeys` | string[] | 否 | preset 拥有语义、但仍通过 `runtime.<key>` 暴露给 prompt 的业务 key。不能重声明 engine-owned fact。 |
+| `[runtime].businessKeys` | string[] | 否 | preset 拥有语义、但仍通过 `runtime.<key>` 暴露给 prompt 的业务 key。不能重声明 engine-owned fact。仅声明 key 名字；值的来源由下面 `businessKeyValues` 或引擎 runtime 数据面提供。 |
+| `[runtime.businessKeyValues]` | table | 否 | 为 `businessKeys` 中声明的 key 在 preset 文件内供值。每条形如 `<key> = { literal = "<string>" }`；当前唯一支持 `literal`。每个 key 必须出现在 `businessKeys` 中。未在此表中供值的 key 由引擎运行期数据面补；都没补 → render 报 `missing runtime binding value`。 |
 | `[statuses].continuable` | string[] | 是 | 引擎会调度的 status 集合；item.status 落在这个集合内才被选中 |
 | `[statuses].terminal` | string[] | 是 | 引擎跳过的 status 集合（与 continuable 合并去重） |
 | `[statuses].entry` | string | 否 | 依赖解除或手动 `queue unblock` 后恢复到的 continuable status；默认取 `continuable[0]` |
@@ -226,14 +227,27 @@ runtime.repoCwd
 ```
 <!-- engine-runtime-binding-keys:end -->
 
-Preset business key 由 `preset.toml` 声明：
+Preset business key 通过 `preset.toml` 两步声明 + 供值（issue #448）：
+
+**1. 声明 key 名字**（必填）：
 
 ```toml
 [runtime]
-businessKeys = ["issueKind", "issueKindDoc"]
+businessKeys = ["issueKind", "issueKindDoc", "auditDemo"]
 ```
 
-这些 key 的语义属于 preset，而不是引擎契约。引擎只负责：加载时确认 `runtime.<key>` 已声明，渲染时从运行期 binding 表取字符串值。新增业务 key 只改 preset 声明和提供该值的运行期数据面；不改 `ENGINE_RUNTIME_BINDING_KEYS`。
+**2. 在 preset 文件内为 key 供值**（可选；不供值时该 key 必须由引擎为对应 preset 提供值，否则 render 期报错）：
+
+```toml
+[runtime.businessKeyValues]
+auditDemo = { literal = "business-key-e2e-ok" }
+```
+
+每条 value spec 是 inline table，目前唯一支持的形式是 `{ literal = "<string>" }`。`businessKeyValues` 中的每个 key 必须出现在 `businessKeys` 中；engine-owned key 不能出现（声明面已拦截）。
+
+这些 key 的语义属于 preset，而不是引擎契约。引擎只负责：加载时确认 `runtime.<key>` 已声明、`businessKeyValues` 中的 key 都已 declared，渲染时把 preset 提供的 literal 合并进 `RuntimeBindings`，并按字符串值供模板替换。新增业务 key 只改 preset 声明 + 供值；不改 `ENGINE_RUNTIME_BINDING_KEYS`、不改 `src/`。
+
+bundled `gh-issue-pr-iteration` 的 `issueKind` / `issueKindDoc` 走「声明在 preset，值由引擎补」的路径——`issueKind` 反映 GitHub issue 的 `kind:*` label，是动态运行期事实而非 preset 文件内 literal；`issueKindDoc` 由引擎在 `resolvePhaseBinding` 渲染成路由说明。后续新增动态业务 key 仍可走这条路径；但**操作员对外新增业务 key 时优先用 `businessKeyValues` literal 供值**——只改 preset 文件即可，不动 `src/`。
 
 | Key | 含义 |
 |---|---|
@@ -283,7 +297,9 @@ Bundled `gh-issue-pr-iteration` 当前声明的 business key：
 
 只改其中一处会 TypeScript 编译失败。改完跑 `bun test`（binding / smoke 覆盖）+ `bun x tsc --noEmit`。
 
-新增 preset 业务 key 不改 engine-owned fact 清单。只在对应 preset 的 `[runtime].businessKeys` 加 key，并确保运行期 binding 表提供该 key 的字符串值；未声明引用会在 preset load 阶段失败，声明但缺值会在 render 阶段失败。
+新增 preset 业务 key 不改 engine-owned fact 清单。只在对应 preset 的 `[runtime].businessKeys` 加 key 名字（声明步），并在 `[runtime.businessKeyValues]` 中通过 `<key> = { literal = "<string>" }` 提供值（供值步）；引擎在 `buildSchedulerResolveContext` / `buildRuntimeBindings` 中把这些 literal 合并进 runtime 表，无须改 `src/`。未声明 key 在 preset load 阶段失败，声明但缺值（既无 `businessKeyValues` literal 也无引擎运行期数据面补值）则在 render 阶段失败。
+
+复合验收 fixture：`presets/business-key-example/` 用最小形态演示「声明 + literal 供值」一步式新增——`businessKeys = ["auditDemo"]` + `[runtime.businessKeyValues] auditDemo = { literal = "business-key-e2e-ok" }`，phase 模板 `{{AUDIT_DEMO}}` 在真实 spawn 路径渲染等于 `business-key-e2e-ok`，引擎源码无该 fixture 字面量。
 
 ---
 

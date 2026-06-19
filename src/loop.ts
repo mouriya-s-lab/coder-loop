@@ -465,7 +465,7 @@ const PresetFragmentBoundary = arkType({
 const PresetTomlBoundary = arkType({
 	name: "string",
 	item: { idField: "string", "fields?": "object" },
-	"runtime?": { "businessKeys?": "string[]" },
+	"runtime?": { "businessKeys?": "string[]", "businessKeyValues?": "object" },
 	statuses: { continuable: "string[]", terminal: "string[]", "success?": "string[]", "entry?": "string", "unblockable?": "string[]" },
 	phases: PresetPhaseBoundary.array(),
 	"fragments?": PresetFragmentBoundary.array(),
@@ -554,6 +554,9 @@ export type PresetFragment = {
 	path: string
 }
 
+export type PresetBusinessKeyValue =
+	| { kind: "literal"; value: string }
+
 export type Preset = {
 	name: string
 	presetDir: string
@@ -563,6 +566,13 @@ export type Preset = {
 	}
 	runtime: {
 		businessKeys: readonly string[]
+		// preset-supplied values for declared business keys. Keys not present here
+		// have no preset-side value supply — the engine must inject the value at
+		// `buildSchedulerResolveContext` / `buildRuntimeBindings` time (e.g.
+		// bundled `issueKind`). A key present here is rendered from the preset
+		// value with zero engine knowledge of its semantics — fulfilling
+		// #448 / #422 "新增业务绑定只改 preset 文件".
+		businessKeyValues: ReadonlyMap<string, PresetBusinessKeyValue>
 	}
 		statuses: {
 			continuable: readonly InternalStatus[]
@@ -4115,6 +4125,11 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 	}
 	const runtimeBusinessKeys = parsePresetRuntimeBusinessKeys(root.runtime?.businessKeys ?? [], "preset.runtime.businessKeys")
 	const runtimeBusinessKeySet = new Set(runtimeBusinessKeys)
+	const runtimeBusinessKeyValues = parsePresetRuntimeBusinessKeyValues(
+		root.runtime?.businessKeyValues,
+		runtimeBusinessKeys,
+		"preset.runtime.businessKeyValues",
+	)
 
 	// Parse fragments before phases so phase.roles validation can check the
 	// declared role universe (issue #400: phase↔role mapping is preset
@@ -4155,7 +4170,7 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 			let source: PresetVariableSource = baseSource
 			if (baseSource.kind === "runtime" && !isEngineRuntimeBindingKey(baseSource.key)) {
 				if (!runtimeBusinessKeySet.has(baseSource.key)) {
-					presetError(`preset.phases[${index}].variables.${key}: unrecognized runtime key "${baseSource.key}" (engine facts: ${ENGINE_RUNTIME_BINDING_KEYS.join(", ")}; preset business keys: ${runtimeBusinessKeys.join(", ") || "<none>"})`)
+					presetError(`preset.phases[${index}].variables.${key}: unknown runtime key "${baseSource.key}" (engine facts: ${ENGINE_RUNTIME_BINDING_KEYS.join(", ")}; preset business keys: ${runtimeBusinessKeys.join(", ") || "<none>"})`)
 				}
 				source = { ...baseSource, ownership: "preset" }
 			}
@@ -4210,7 +4225,7 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 		name: root.name,
 		presetDir,
 		item: { idField: root.item.idField, fields: itemFields },
-		runtime: { businessKeys: runtimeBusinessKeys },
+		runtime: { businessKeys: runtimeBusinessKeys, businessKeyValues: runtimeBusinessKeyValues },
 			statuses: { continuable: continuableStatuses, terminal: terminalStatuses, success: successStatuses, entry: entryStatus, unblockable: unblockableStatuses },
 		phases,
 		fragments,
@@ -4272,6 +4287,41 @@ function parsePresetRuntimeBusinessKeys(value: readonly string[], label: string)
 		keys.push(key)
 	}
 	return keys
+}
+
+// Parse `[runtime.businessKeyValues]`: optional table mapping declared business
+// key names to a value spec the preset supplies. Each value spec is currently
+// `{ literal = "<string>" }` — leaving room to grow other supply kinds without
+// breaking the existing inline-table shape. Validated against the declared
+// `businessKeys` list (issue #448): every key in this table must be declared,
+// engine-owned keys are rejected (already enforced for declarations).
+function parsePresetRuntimeBusinessKeyValues(
+	value: BoundaryValue,
+	declaredKeys: readonly string[],
+	label: string,
+): ReadonlyMap<string, PresetBusinessKeyValue> {
+	const result = new Map<string, PresetBusinessKeyValue>()
+	if (value === undefined) return result
+	if (!isObjectRecord(value) || Array.isArray(value)) presetError(`${label}: must be a table`)
+	const declaredSet = new Set(declaredKeys)
+	for (const [key, raw] of Object.entries(value)) {
+		if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(key)) presetError(`${label}.${key}: key must match ^[a-zA-Z][a-zA-Z0-9_]*$`)
+		if (!declaredSet.has(key)) {
+			presetError(`${label}.${key}: not declared in preset.runtime.businessKeys (declared: ${declaredKeys.join(", ") || "<none>"})`)
+		}
+		if (!isObjectRecord(raw) || Array.isArray(raw)) presetError(`${label}.${key}: must be a value spec table (e.g. { literal = "..." })`)
+		const keys = Object.keys(raw)
+		if (keys.length === 0) presetError(`${label}.${key}: value spec must declare one of: literal`)
+		if (keys.length > 1) presetError(`${label}.${key}: value spec must declare exactly one of: literal (got ${keys.join(", ")})`)
+		if (Object.hasOwn(raw, "literal")) {
+			const literal = raw.literal
+			if (typeof literal !== "string") presetError(`${label}.${key}.literal: must be a string`)
+			result.set(key, { kind: "literal", value: literal })
+			continue
+		}
+		presetError(`${label}.${key}: unrecognized value spec key "${keys[0]}" (supported: literal)`)
+	}
+	return result
 }
 
 function isKnownPresetItemField(field: string, idField: string, itemFields: ReadonlyMap<string, PresetItemField>): boolean {
@@ -5119,6 +5169,24 @@ function runtimeBindingValue(runtime: RuntimeBindings, key: string): string {
 	return value
 }
 
+// Resolve every preset-supplied business key value to its string form. Exposed
+// to engine code that builds `RuntimeBindings` so preset-declared business keys
+// no longer hit `runtimeBindingValue`'s "missing runtime binding value" throw
+// when the preset itself supplied the value (issue #448). The engine remains
+// agnostic about the semantics of any individual business key — it just merges
+// the resolved map into the runtime record alongside engine facts.
+export function resolvePresetBusinessKeyValues(preset: Preset): Record<string, string> {
+	const out: Record<string, string> = {}
+	for (const [key, spec] of preset.runtime.businessKeyValues) {
+		switch (spec.kind) {
+			case "literal":
+				out[key] = spec.value
+				break
+		}
+	}
+	return out
+}
+
 function stringifyBindingValue(value: JsonValue | undefined, label: string): string {
 	if (value === null || value === undefined) return ""
 	if (typeof value === "string") return value
@@ -5195,6 +5263,11 @@ export function buildRuntimeBindings(input: {
 		logDir: input.options.logDir,
 	}
 	return {
+		// Preset-supplied business key values are merged first so engine facts
+		// can never be shadowed by a preset literal (#448 guard: declaration-side
+		// `parsePresetRuntimeBusinessKeys` already rejects engine-owned keys, so
+		// this ordering is belt-and-suspenders rather than the primary defense).
+		...resolvePresetBusinessKeyValues(input.options.preset),
 		runId: input.runId,
 		targetCwd: input.options.targetCwd,
 		agentCwd: input.agentCwd,

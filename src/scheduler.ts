@@ -10,6 +10,7 @@ import {
 	parseSessionIdFromRunnerStream,
 	renderFragmentIndex,
 	renderPrompt,
+	resolvePresetBusinessKeyValues,
 	resolveWorkflowFileConfigBinding,
 	resolveIssueKind,
 	selectRunnerForPhase,
@@ -2214,6 +2215,11 @@ export function buildSchedulerResolveContext(input: {
 	const resume = input.resume ?? (input.runner === undefined ? freshResume() : resumeDecisionForItem(input.item, input.phase.name, input.runner))
 	const resumedSessionId = resume.kind === "resume" ? resume.sessionId : ""
 	const runtime: RuntimeBindings = {
+		// Preset-supplied business key values are spread first (#448): the preset
+		// is the source of truth for its declared business keys. Engine facts
+		// declared below can never be shadowed because
+		// `parsePresetRuntimeBusinessKeys` rejects engine-owned keys at load.
+		...resolvePresetBusinessKeyValues(input.preset),
 		runId: input.runId,
 		targetCwd: input.item.repoCwd,
 		agentCwd: input.worktreePath,

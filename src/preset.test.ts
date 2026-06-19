@@ -517,12 +517,71 @@ describe("parsePreset schema validation", () => {
 
 	test("rejects undeclared runtime business keys", () => {
 		const root: BoundaryRecord = { ...minimalRoot(), phases: [{ name: "p", prompt: "p.md", variables: { X: "runtime.customBusiness" } }] }
-		expect(() => parsePreset(root, "/tmp")).toThrow(/unrecognized runtime key "customBusiness"/)
+		expect(() => parsePreset(root, "/tmp")).toThrow(/unknown runtime key "customBusiness"/)
 	})
 
 	test("rejects runtime business key declarations that collide with engine facts", () => {
 		const root: BoundaryRecord = { ...minimalRoot(), runtime: { businessKeys: ["runId"] } }
 		expect(() => parsePreset(root, "/tmp")).toThrow(/"runId" is engine-owned/)
+	})
+
+	// #448: preset can supply business key values entirely within its own file
+	// via `[runtime.businessKeyValues]`.
+	test("accepts preset-supplied literal business key values", () => {
+		const root: BoundaryRecord = {
+			...minimalRoot(),
+			runtime: {
+				businessKeys: ["auditDemo"],
+				businessKeyValues: { auditDemo: { literal: "demo-value" } },
+			},
+			phases: [{ name: "p", prompt: "p.md", variables: { X: "runtime.auditDemo" } }],
+		}
+		const preset = parsePreset(root, "/tmp")
+		expect(preset.runtime.businessKeyValues.get("auditDemo")).toEqual({ kind: "literal", value: "demo-value" })
+	})
+
+	test("rejects businessKeyValues entries not declared in businessKeys", () => {
+		const root: BoundaryRecord = {
+			...minimalRoot(),
+			runtime: {
+				businessKeys: ["auditDemo"],
+				businessKeyValues: { strayKey: { literal: "x" } },
+			},
+		}
+		expect(() => parsePreset(root, "/tmp")).toThrow(/strayKey: not declared in preset\.runtime\.businessKeys/)
+	})
+
+	test("rejects businessKeyValues entries with no value spec key", () => {
+		const root: BoundaryRecord = {
+			...minimalRoot(),
+			runtime: {
+				businessKeys: ["auditDemo"],
+				businessKeyValues: { auditDemo: {} },
+			},
+		}
+		expect(() => parsePreset(root, "/tmp")).toThrow(/auditDemo: value spec must declare one of/)
+	})
+
+	test("rejects businessKeyValues literal that is not a string", () => {
+		const root: BoundaryRecord = {
+			...minimalRoot(),
+			runtime: {
+				businessKeys: ["auditDemo"],
+				businessKeyValues: { auditDemo: { literal: 42 } },
+			},
+		}
+		expect(() => parsePreset(root, "/tmp")).toThrow(/auditDemo\.literal: must be a string/)
+	})
+
+	test("rejects businessKeyValues with multiple competing spec keys", () => {
+		const root: BoundaryRecord = {
+			...minimalRoot(),
+			runtime: {
+				businessKeys: ["auditDemo"],
+				businessKeyValues: { auditDemo: { literal: "x", other: "y" } },
+			},
+		}
+		expect(() => parsePreset(root, "/tmp")).toThrow(/auditDemo: value spec must declare exactly one of/)
 	})
 
 	test("accepts item.idField reference in variables", () => {
