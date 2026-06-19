@@ -414,7 +414,7 @@ describe("runtime binding helpers", () => {
 			issueKind: null,
 		})
 		expect(runtime.auditDemo).toBe("preset-literal-ok")
-		const ctx: ResolveContext = { item: makeItem(), config: makeConfig(), runtime }
+		const ctx: ResolveContext = { item: makeItem(), chain: makeChainBindings(), runtime }
 		expect(renderPrompt("{{AUDIT_DEMO}}", phase, ctx)).toBe("preset-literal-ok")
 	})
 
