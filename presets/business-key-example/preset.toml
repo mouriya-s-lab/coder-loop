@@ -40,6 +40,4 @@ prompt = "audit-entry.md"
   AUDIT_DEMO = "runtime.auditDemo"
 
 [agent]
-binary                = "echo"
-extraArgs             = []
 attemptTimeoutSeconds = 3600
