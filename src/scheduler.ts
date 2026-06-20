@@ -49,6 +49,7 @@ import { detectsSessionIdInvalid } from "./runners/session-id"
 import { type ChainRecord, dependsOnItemIds, type ItemRecord, listDependencyWaitReasons, type RunRecord, type SqliteStateStore } from "./sqlite-state"
 import {
 	LOOP_DATA_ROOT_ENV,
+	LOOP_RUN_CREDENTIAL_ENV,
 	type LoopDataRootOptions,
 	RuntimePathError,
 	resolveChainRuntimePaths,
@@ -268,6 +269,31 @@ export type SchedulerOptions = {
 	attemptKillMs?: number
 	watchdogGraceMs?: number
 	watchdogKillMs?: number
+	// #406: run-scoped credential supplier. The scheduler mints one credential per spawn
+	// (`mint(...)`), injects its value into the runner process env, and revokes it from the
+	// supplier when the run process closes. When unset (test fixtures that don't exercise the
+	// caller-admission gate), the scheduler still spawns the agent but the env var is absent,
+	// so any item.update from the agent flows the operator path through the daemon gate.
+	runCredentials?: SchedulerRunCredentialIssuer
+}
+
+// #406: minted run credential. The string is the secret value the daemon's caller-admission
+// gate matches against an active-run table at the request boundary. The scheduler treats it as
+// opaque — only the daemon's registry knows the binding to (chain, item, run).
+export type SchedulerRunCredential = {
+	readonly value: string
+}
+
+export type SchedulerRunCredentialContext = {
+	chainId: number
+	itemId: number
+	runId: string
+	phase: string
+}
+
+export type SchedulerRunCredentialIssuer = {
+	mint: (context: SchedulerRunCredentialContext) => SchedulerRunCredential
+	revoke: (credential: SchedulerRunCredential, context: SchedulerRunCredentialContext) => void
 }
 
 export type SchedulerChainStatuses = {
@@ -906,15 +932,27 @@ async function spawnSchedulerRun(
 		invocationPaths(item.repoCwd, worktreePath, presetDir, resolveLoopDataPaths(options.loopDataRootOptions).root),
 	)
 	await initializeSchedulerRunArtifacts(options, chain, item, runId, phase, startedAt, worktreePath)
+	// #406: mint the run-scoped credential before spawn. The supplier registers the binding
+	// (chain, item, run, phase) on its side; the scheduler hands the value to the runner process
+	// purely through env (never into prompt/trace — see `LOOP_RUN_CREDENTIAL_ENV` rationale).
+	// `null` when no issuer is wired (test fixtures that don't exercise the caller-admission gate):
+	// the env var is omitted entirely so the CLI flows the operator path.
+	const credentialContext: SchedulerRunCredentialContext = { chainId: chain.id, itemId: item.id, runId, phase }
+	const credential = options.runCredentials?.mint(credentialContext) ?? null
+	const spawnEnv: NodeJS.ProcessEnv = {
+		...process.env,
+		[LOOP_DATA_ROOT_ENV]: resolveLoopDataPaths(options.loopDataRootOptions).root,
+	}
+	if (credential !== null) spawnEnv[LOOP_RUN_CREDENTIAL_ENV] = credential.value
 	const child = spawn(runnerPlan.binary, runnerPlan.args, {
 		cwd: worktreePath,
 		stdio: ["ignore", "pipe", "pipe"],
 		detached: true,
 		// The agent writes its own item status via `coder-loop item update`, which must reach
 		// the daemon that owns this loop-data-root. Pass it through so the CLI resolves the same store.
-		env: { ...process.env, [LOOP_DATA_ROOT_ENV]: resolveLoopDataPaths(options.loopDataRootOptions).root },
+		env: spawnEnv,
 	})
-	const activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, phase, child, runner, summaryTag)
+	const activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, phase, child, runner, summaryTag, credential, credentialContext)
 	slot.activeRun = activeRun
 	options.store.setCurrentRun({
 		chainId: chain.id,
@@ -980,6 +1018,12 @@ function attachRunCloseHandler(
 	child: ReturnType<typeof spawn>,
 	runner: AgentRunnerSelection,
 	summaryTag: string,
+	// #406: the credential minted at spawn for this run, revoked here when the run closes
+	// (`completeRun` + `clearCurrentRun` adjacency). `null` when no issuer is wired (test fixtures
+	// that bypass the caller-admission gate). Revocation runs even when the close path takes the
+	// error branch — the run is no longer active either way.
+	credential: SchedulerRunCredential | null,
+	credentialContext: SchedulerRunCredentialContext,
 ): SchedulerActiveRun {
 	const stdout: Buffer[] = []
 	const stderr: Buffer[] = []
@@ -1131,6 +1175,12 @@ function attachRunCloseHandler(
 					throw error
 				} finally {
 					options.state.finalizingItemStatuses.delete(item.id)
+					// #406: revoke the run credential exactly once per run close. Composing with
+					// #417's double GC: this path runs after the natural close; explicit
+					// `terminateAllActiveRuns` (e.g. daemon shutdown) drives child exit through the
+					// same close event so this same `finally` runs. The supplier is responsible for
+					// idempotency if a revoke ever arrives twice.
+					if (credential !== null) options.runCredentials?.revoke(credential, credentialContext)
 				}
 			})()
 			options.state.pendingCloseHandlers.add(pendingCloseHandler)
@@ -1934,12 +1984,29 @@ async function spawnSchedulerReviewOnEmptyRun(
 		invocationPaths(representative.repoCwd, worktreePath, presetDir, resolveLoopDataPaths(options.loopDataRootOptions).root),
 	)
 	await initializeSchedulerRunArtifacts(options, chain, fallbackItem, runId, reviewPhase, startedAt, worktreePath)
+	// #406: review-on-empty agents have no concrete item to write — the fallback item id is the
+	// sentinel `REVIEW_ON_EMPTY_FALLBACK_ITEM_ID` (0). Minting a credential here keeps the
+	// caller-admission gate exhaustive across spawn sites: if the agent attempts to write to a real
+	// item (parallel-slot misfire), the daemon resolves the credential to itemId=0 and the
+	// `wrong-item` deny branch fires.
+	const reviewCredentialContext: SchedulerRunCredentialContext = {
+		chainId: chain.id,
+		itemId: fallbackItem.id,
+		runId,
+		phase: reviewPhase,
+	}
+	const reviewCredential = options.runCredentials?.mint(reviewCredentialContext) ?? null
+	const reviewSpawnEnv: NodeJS.ProcessEnv = {
+		...process.env,
+		[LOOP_DATA_ROOT_ENV]: resolveLoopDataPaths(options.loopDataRootOptions).root,
+	}
+	if (reviewCredential !== null) reviewSpawnEnv[LOOP_RUN_CREDENTIAL_ENV] = reviewCredential.value
 	const child = spawn(runnerPlan.binary, runnerPlan.args, {
 		cwd: worktreePath,
 		stdio: ["ignore", "pipe", "pipe"],
 		detached: true,
 		// Same loop-data-root passthrough as the per-item spawn so the agent's `item update` reaches this daemon.
-		env: { ...process.env, [LOOP_DATA_ROOT_ENV]: resolveLoopDataPaths(options.loopDataRootOptions).root },
+		env: reviewSpawnEnv,
 	})
 	const activeRun = attachReviewOnEmptyCloseHandler(
 		options,
@@ -1954,6 +2021,8 @@ async function spawnSchedulerReviewOnEmptyRun(
 		runner,
 		representative.repoCwd,
 		summaryTag,
+		reviewCredential,
+		reviewCredentialContext,
 	)
 	slot.activeRun = activeRun
 	await emit(options, {
@@ -1993,6 +2062,11 @@ function attachReviewOnEmptyCloseHandler(
 	runner: AgentRunnerSelection,
 	repoCwd: string,
 	summaryTag: string,
+	// #406: same credential-revocation hookup as `attachRunCloseHandler`. Review-on-empty agents
+	// bind to the sentinel itemId (`REVIEW_ON_EMPTY_FALLBACK_ITEM_ID`); any cross-item write attempt
+	// is then a `wrong-item` deny at the daemon gate.
+	credential: SchedulerRunCredential | null,
+	credentialContext: SchedulerRunCredentialContext,
 ): SchedulerActiveRun {
 	const stdout: Buffer[] = []
 	const stderr: Buffer[] = []
@@ -2088,6 +2162,9 @@ function attachReviewOnEmptyCloseHandler(
 				} catch (error) {
 					if (slot.activeRun?.runId === runId) slot.activeRun = null
 					throw error
+				} finally {
+					// #406 review-on-empty parallel: revoke the run credential exactly once on close.
+					if (credential !== null) options.runCredentials?.revoke(credential, credentialContext)
 				}
 			})()
 			options.state.pendingCloseHandlers.add(pendingCloseHandler)

@@ -30,6 +30,9 @@ import {
 	type SchedulerOptions,
 	type SchedulerPresetResolver,
 	type SchedulerPresetItemResolver,
+	type SchedulerRunCredential,
+	type SchedulerRunCredentialContext,
+	type SchedulerRunCredentialIssuer,
 	type SchedulerSpawnContext,
 	type SchedulerState,
 } from "./scheduler"
@@ -63,6 +66,7 @@ import {
 	type ItemExtra,
 } from "./runtime-data"
 import {
+	LOOP_RUN_CREDENTIAL_ENV,
 	type LoopDataRootOptions,
 	RuntimePathError,
 	resolveChainRuntimePaths,
@@ -216,12 +220,44 @@ const ITEM_UPDATE_FIELD_KEYS = [
 	"extraPatch",
 	"dependsOn",
 ] as const
-const ITEM_UPDATE_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "fields", ...ITEM_UPDATE_FIELD_KEYS, "agentRunId", "agentPhase"] as const
+// #406: `agentRunId` / `agentPhase` are retired from the request boundary in favor of
+// the env-borne credential (see `CALLER_REJECTED_LEGACY_ATTRIBUTION_KEYS` below). They are
+// rejected with `unsupported field` so the only way for an agent to claim a (run, phase) is via
+// a credential the engine itself minted — agents cannot hand-write their identity.
+const ITEM_UPDATE_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "fields", ...ITEM_UPDATE_FIELD_KEYS, "agentCredential"] as const
 const ITEM_REORDER_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "position"] as const
 
-type ItemUpdateAuditAttribution =
+// #406: parsed item-mutation caller — the typed result of the daemon's boundary parse of the
+// `agentCredential` request field. `operator` carries no run binding (the operator path takes
+// no credential at all); `agent` carries the binding the daemon resolved from the credential's
+// active-run registry entry — runId/phase here are the engine-bound values, NOT a caller claim.
+// Downstream handlers switch exhaustively on `kind` so "anonymous mutation" is unrepresentable.
+type ItemMutationCaller =
 	| { kind: "operator"; subject: Extract<ObservabilitySubject, { kind: "operator" }> }
 	| { kind: "agent"; runId: string; phase: string; subject: Extract<ObservabilitySubject, { kind: "agent" }> }
+
+// #406 caller-admission deny reasons. Co-located with the observability event union (every
+// reason here appears in `item.mutation.caller_admission.payload.reason`). Mirrors the threat-
+// model branches from issue body:
+//   - `missing-credential`: agentCredential present but empty / not in registry → "stale or never-minted"
+//   - `unknown-credential`: credential value doesn't match any registered active run
+//   - `inactive-run`: credential resolves to a run no longer active (revoked but not yet GC'd)
+//   - `wrong-item`: credential's bound itemId doesn't match the request's target item
+//   - `legacy-attribution-args`: caller shipped the retired agentRunId/agentPhase fields
+type CallerAdmissionDenyReason =
+	| "missing-credential"
+	| "unknown-credential"
+	| "inactive-run"
+	| "wrong-item"
+	| "legacy-attribution-args"
+
+// #406: the daemon-owned credential issuer. Implements `SchedulerRunCredentialIssuer` so the
+// scheduler can mint/revoke without knowing it talks to a Map. Keyed by credential value because
+// the request boundary has only the value in hand — the binding is what the registry returns.
+type RunCredentialRegistration = {
+	value: string
+	context: SchedulerRunCredentialContext
+}
 
 export class DaemonError extends Error {
 	constructor(
@@ -438,6 +474,11 @@ export class CoderLoopDaemon {
 	private ownsDaemonPid = false
 	private readonly lastDecisionFingerprints = new Map<string, string>()
 	private readonly loadedPresetCache = new Map<string, Promise<SchedulerLoadedPreset>>()
+	// #406 run credential registry. Map keyed on credential value → run binding. Lifetime is the
+	// daemon process: when daemon down kills all active runs (#467), the registry dies with it,
+	// matching the "credentials die with the process" invariant. Not persisted to SQLite — credentials
+	// are process-instance-scoped, not durable state.
+	private readonly runCredentialRegistry = new Map<string, RunCredentialRegistration>()
 	private resolveClosed: (() => void) | null = null
 	private readonly daemonBatchTimestamp = formatDaemonBatchTimestamp(new Date())
 	readonly closed: Promise<void>
@@ -1374,13 +1415,16 @@ export class CoderLoopDaemon {
 		const chain = store.getChain(item.chainId)
 		if (chain === null) throw new DaemonError("not_found", `chain ${item.chainId} was not found`, { chainId: item.chainId })
 		assertChainAllowsItemMutation(chain, "item.update")
-		const auditAttribution = itemUpdateAuditAttribution(args)
+		// #406: parse the caller at boundary into the typed ADT. Downstream switches over the
+		// ADT, not over loose strings; the operator/agent split — and the runId/phase the agent
+		// path carries — both come from the registry-validated credential, not from caller claims.
+		const caller = await this.admitItemMutationCaller(chain, item, args)
 		const input: UpdateItemInput = {}
 		const repoCwd = optionalString(fields, "repoCwd")
 		if (repoCwd !== null) assignOptional(input, "repoCwd", await validateRepoCwdForRequest(repoCwd))
 		const status = optionalString(fields, "status")
 		if (status !== null) {
-			assignOptional(input, "status", await this.admitItemStatusForRequest(chain, item, status, auditAttribution.subject))
+			assignOptional(input, "status", await this.admitItemStatusForRequest(chain, item, status, caller.subject))
 		}
 		assignOptional(input, "title", validateItemTitleForRequest(optionalStringOrNull(fields, "title")))
 		assignOptional(input, "priority", validateItemPriorityForRequest(optionalStringOrNull(fields, "priority")))
@@ -1415,13 +1459,21 @@ export class CoderLoopDaemon {
 		try {
 			const updated = store.updateItem(item.id, input)
 			if (updated.status !== item.status) {
+				// #406: emit `item.status` with the caller's true subject. The exhaustive switch on
+				// `caller.kind` is how runId/phase enter the event base — they come from the
+				// registry-validated credential binding, not from caller-supplied fields. Adding a
+				// new caller variant in the future = a typechecker error here (the assertNever in
+				// observability.ts already enforces exhaustiveness on the rendering side).
+				const callerExtras = caller.kind === "agent"
+					? { runId: caller.runId, phase: caller.phase }
+					: {}
 				await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
 					kind: "audit",
 					type: "item.status",
 					chain: chain.name,
 					item: item.id,
-					...(auditAttribution.kind === "agent" ? { runId: auditAttribution.runId, phase: auditAttribution.phase } : {}),
-					subject: auditAttribution.subject,
+					...callerExtras,
+					subject: caller.subject,
 					payload: {
 						itemId: item.id,
 						issueNumber: item.issueNumber,
@@ -1638,6 +1690,10 @@ export class CoderLoopDaemon {
 		options.loopDataRootOptions = this.options
 		if (scheduler.now !== undefined) options.now = scheduler.now
 		if (scheduler.runIdFactory !== undefined) options.runIdFactory = scheduler.runIdFactory
+		// #406: wire the daemon-owned credential issuer. Test fixtures may pass their own issuer
+		// through scheduler.runCredentials (for unit tests that want to inspect bindings directly);
+		// production defaults to the daemon's instance-bound registry.
+		options.runCredentials = scheduler.runCredentials ?? this.buildRunCredentialIssuer()
 		options.maxItemAttemptsForChain = scheduler.maxItemAttemptsForChain
 			?? ((chain) => maxItemAttemptsFromChainMetadata(chain.metadata))
 		if (scheduler.maxItemAttempts !== undefined) options.maxItemAttempts = scheduler.maxItemAttempts
@@ -1793,6 +1849,168 @@ export class CoderLoopDaemon {
 				reason: input.reason,
 			},
 		}))
+	}
+
+	// #406 caller-admission gate. Boundary parse on `handleItemUpdate`: the request is either
+	// agent-attributed (env-borne credential present) or operator-attributed (no credential).
+	// Mismatches raise `DaemonError("invalid_caller", ...)` with the structured deny reason; every
+	// allow and deny outcome is recorded as one `item.mutation.caller_admission` audit event so a
+	// rejection is replayable from the event stream alongside `agent.exit` / `item.status`. The
+	// returned `ItemMutationCaller` is the type-level proof that "anonymous mutation" did not slip
+	// through — downstream code consumes `caller.subject` directly rather than reconstructing it.
+	private async admitItemMutationCaller(
+		chain: ChainRecord,
+		item: ItemRecord,
+		args: JsonObject,
+	): Promise<ItemMutationCaller> {
+		// Pre-406 free-claim attribution keys (`agentRunId` / `agentPhase`) are rejected one layer
+		// earlier by `validateKnownKeys` in `validateItemUpdateRequest` — they are no longer in
+		// `ITEM_UPDATE_ARG_KEYS`. By the time control reaches this gate, the args object cannot
+		// contain them. The `legacy-attribution-args` deny reason in the audit-event union
+		// remains as a documented record of what was retired, available for any future code path
+		// that wants to record a legacy-claim-attempt explicitly.
+		const credentialField = args.agentCredential
+		if (credentialField === undefined) {
+			// Operator path: no credential field at all → caller is the operator.
+			const subject: Extract<ObservabilitySubject, { kind: "operator" }> = { kind: "operator" }
+			await this.recordCallerAdmissionEvent(chain, {
+				item,
+				subject,
+				claimedRunId: null,
+				claimedPhase: null,
+				outcome: "allow",
+				reason: "operator",
+			})
+			return { kind: "operator", subject }
+		}
+		if (typeof credentialField !== "string" || credentialField === "") {
+			await this.recordCallerAdmissionEvent(chain, {
+				item,
+				subject: { kind: "operator" },
+				claimedRunId: null,
+				claimedPhase: null,
+				outcome: "deny",
+				reason: "missing-credential",
+			})
+			throw new DaemonError("invalid_caller", "agentCredential must be a non-empty string when provided", {
+				field: "agentCredential",
+			})
+		}
+		const registration = this.runCredentialRegistry.get(credentialField)
+		if (registration === undefined) {
+			await this.recordCallerAdmissionEvent(chain, {
+				item,
+				subject: { kind: "operator" },
+				claimedRunId: null,
+				claimedPhase: null,
+				outcome: "deny",
+				reason: "unknown-credential",
+			})
+			throw new DaemonError(
+				"invalid_caller",
+				"agentCredential did not match any active run; the run may have ended (credential revoked on run close) " +
+					"or the credential value was never minted by this daemon.",
+				{},
+			)
+		}
+		// Defense in depth: confirm the bound run is still active in the scheduler state. The
+		// scheduler revokes the credential in the close-handler `finally`, but if a revocation
+		// ever fails to fire (process crash inside the handler), this catches the staleness.
+		const activeRuns = listActiveRuns(this.schedulerState)
+		const stillActive = activeRuns.some((run) => run.runId === registration.context.runId)
+		if (!stillActive) {
+			await this.recordCallerAdmissionEvent(chain, {
+				item,
+				subject: { kind: "agent", runId: registration.context.runId, phase: registration.context.phase },
+				claimedRunId: registration.context.runId,
+				claimedPhase: registration.context.phase,
+				outcome: "deny",
+				reason: "inactive-run",
+			})
+			// Also evict the stale binding so further requests fail with the cleaner
+			// `unknown-credential` reason instead of repeatedly tripping this branch.
+			this.runCredentialRegistry.delete(credentialField)
+			throw new DaemonError(
+				"invalid_caller",
+				`agentCredential resolves to run ${registration.context.runId}, which is no longer active.`,
+				{ runId: registration.context.runId },
+			)
+		}
+		if (registration.context.itemId !== item.id) {
+			await this.recordCallerAdmissionEvent(chain, {
+				item,
+				subject: { kind: "agent", runId: registration.context.runId, phase: registration.context.phase },
+				claimedRunId: registration.context.runId,
+				claimedPhase: registration.context.phase,
+				outcome: "deny",
+				reason: "wrong-item",
+			})
+			throw new DaemonError(
+				"invalid_caller",
+				`agentCredential is bound to item ${registration.context.itemId}, not ${item.id}; ` +
+					"parallel-slot misfire — the agent attempted to mutate an item it does not own.",
+				{ boundItemId: registration.context.itemId, requestItemId: item.id },
+			)
+		}
+		const subject: Extract<ObservabilitySubject, { kind: "agent" }> = {
+			kind: "agent",
+			runId: registration.context.runId,
+			phase: registration.context.phase,
+		}
+		await this.recordCallerAdmissionEvent(chain, {
+			item,
+			subject,
+			claimedRunId: registration.context.runId,
+			claimedPhase: registration.context.phase,
+			outcome: "allow",
+			reason: "agent-credential-admitted",
+		})
+		return { kind: "agent", runId: registration.context.runId, phase: registration.context.phase, subject }
+	}
+
+	private async recordCallerAdmissionEvent(chain: ChainRecord, input: {
+		item: ItemRecord
+		subject: ObservabilitySubject
+		claimedRunId: string | null
+		claimedPhase: string | null
+		outcome: "allow" | "deny"
+		reason: "operator" | "agent-credential-admitted" | CallerAdmissionDenyReason
+	}): Promise<void> {
+		await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
+			kind: "audit",
+			type: "item.mutation.caller_admission",
+			chain: chain.name,
+			item: input.item.id,
+			...(input.subject.kind === "agent"
+				? { runId: input.subject.runId, phase: input.subject.phase }
+				: {}),
+			subject: input.subject,
+			payload: {
+				itemId: input.item.id,
+				issueNumber: input.item.issueNumber,
+				claimedRunId: input.claimedRunId,
+				claimedPhase: input.claimedPhase,
+				outcome: input.outcome,
+				reason: input.reason,
+			},
+		}))
+	}
+
+	// #406: build the credential issuer the daemon hands to the scheduler. Mint generates an
+	// opaque UUID and registers it; revoke deletes the entry. Both are idempotent in shape — mint
+	// never collides because UUID v4 is the source of the value; revoke tolerates a missing entry
+	// (the registry may have already evicted it via the inactive-run branch of the admission gate).
+	private buildRunCredentialIssuer(): SchedulerRunCredentialIssuer {
+		return {
+			mint: (context: SchedulerRunCredentialContext): SchedulerRunCredential => {
+				const value = randomUUID()
+				this.runCredentialRegistry.set(value, { value, context: { ...context } })
+				return { value }
+			},
+			revoke: (credential: SchedulerRunCredential, _context: SchedulerRunCredentialContext): void => {
+				this.runCredentialRegistry.delete(credential.value)
+			},
+		}
 	}
 
 	private async allowedItemStatuses(chain: ChainRecord): Promise<Set<string>> {
@@ -2526,6 +2744,12 @@ function validateItemBatchAddRequest(args: JsonObject): void {
 }
 
 function validateItemUpdateRequest(args: JsonObject): void {
+	// #406 boundary parse step 1: top-level known-keys gate. `validateKnownKeys` rejects
+	// `agentRunId` / `agentPhase` (they are not in `ITEM_UPDATE_ARG_KEYS` since #406 retired the
+	// free-claim attribution surface). The deeper caller-admission gate also rejects them with a
+	// typed deny reason (`legacy-attribution-args`), but that gate only runs after the request
+	// has been routed; this surface keeps a single message-shape for "unsupported field" against
+	// all retired keys.
 	validateKnownKeys(args, "item.update args", ITEM_UPDATE_ARG_KEYS)
 	validateItemUpdateSelector(args)
 	const nestedFields = optionalJsonObject(args, "fields")
@@ -2539,7 +2763,6 @@ function validateItemUpdateRequest(args: JsonObject): void {
 	}
 	const fields = itemUpdateFields(args)
 	if (Object.keys(fields).length === 0) throw new DaemonError("invalid_request", "item.update requires at least one field to update")
-	validateItemUpdateAuditAttribution(args, fields)
 }
 
 function validateItemUpdateSelector(args: JsonObject): void {
@@ -2564,30 +2787,6 @@ function itemUpdateFields(args: JsonObject): JsonObject {
 		}
 	}
 	return fields
-}
-
-function validateItemUpdateAuditAttribution(args: JsonObject, fields: JsonObject): void {
-	const hasRunId = Object.hasOwn(args, "agentRunId")
-	const hasPhase = Object.hasOwn(args, "agentPhase")
-	if (!hasRunId && !hasPhase) return
-	if (!hasRunId || !hasPhase) {
-		throw new DaemonError("invalid_request", "item.update agent attribution requires both agentRunId and agentPhase", {})
-	}
-	optionalString(args, "agentRunId")
-	optionalString(args, "agentPhase")
-	if (!Object.hasOwn(fields, "status")) {
-		throw new DaemonError("invalid_request", "item.update agent attribution is only valid for status writes", {})
-	}
-}
-
-function itemUpdateAuditAttribution(args: JsonObject): ItemUpdateAuditAttribution {
-	const runId = optionalString(args, "agentRunId")
-	const phase = optionalString(args, "agentPhase")
-	if (runId === null && phase === null) return { kind: "operator", subject: { kind: "operator" } }
-	if (runId === null || phase === null) {
-		throw new DaemonError("invalid_request", "item.update agent attribution requires both agentRunId and agentPhase", {})
-	}
-	return { kind: "agent", runId, phase, subject: { kind: "agent", runId, phase } }
 }
 
 function requestedChainName(args: JsonObject): string | null {

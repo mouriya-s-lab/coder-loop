@@ -54,6 +54,76 @@ describe("smoke: v2 central chain CLI", () => {
 		expect((await stat(fixture.legacyStatePath)).mtimeMs).toBe(beforeMtime)
 	})
 
+	// #406 row 4 — operator vs agent+run distinguishability for `queue unblock`. The CLI's
+	// `queue unblock` writes SQLite directly (no daemon socket round-trip — the daemon may even
+	// be down), so the daemon's caller-admission gate cannot speak for this path. To keep the
+	// audit stream uniform with the daemon-mediated operator `item update` path, the CLI itself
+	// emits an `item.mutation.caller_admission` audit event tagged `subject: {kind: "operator"}`.
+	// The test:
+	//   1. seeds a blocked item and unblocks it.
+	//   2. queries `coder-loop logs --kind audit --type item.mutation.caller_admission --json`.
+	//   3. asserts exactly one event with operator subject + reason=operator + outcome=allow.
+	//   4. asserts no agent-subject event for this fixture (no agent ever spawned).
+	// Together with the daemon-side fixture in daemon.test.ts (`socket item.update operator path
+	// emits operator-attributed caller-admission audit`) and the existing daemon test exercising
+	// the agent-credential admit/deny matrix, `coder-loop logs --kind audit --json` is the single
+	// stream where an auditor reads off "who wrote": operator subject for operator-direct paths;
+	// agent subject + runId/phase for credential-admitted agent paths.
+	test("queue unblock emits operator-subject caller-admission audit (#406 row 4)", async () => {
+		const fixture = await createTarget("queue-unblock-audit")
+		seedChain(fixture, {
+			issueNumber: 406_400,
+			status: "blocked",
+			extra: { blockerRepo: "owner/dependency", blockerRef: "#406" },
+		})
+		const unblocked = expectJsonOk(runCli(["queue", "unblock", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--issue", "406400", "--chain", fixture.chainName]))
+		expect(unblocked.mutation.changed).toBe(true)
+		expect(unblocked.verification.itemStatus).toBe("queued")
+
+		const auditLogs = expectJsonOk(runCli([
+			"logs",
+			fixture.target,
+			"--loop-data-root",
+			fixture.loopDataRoot,
+			"--chain",
+			fixture.chainName,
+			"--kind",
+			"audit",
+			"--type",
+			"item.mutation.caller_admission",
+			"--json",
+		]))
+		expect(Array.isArray(auditLogs.events)).toBe(true)
+		expect(auditLogs.events).toHaveLength(1)
+		expect(auditLogs.events[0]).toMatchObject({
+			kind: "audit",
+			type: "item.mutation.caller_admission",
+			subject: { kind: "operator" },
+			payload: {
+				issueNumber: 406_400,
+				claimedRunId: null,
+				claimedPhase: null,
+				outcome: "allow",
+				reason: "operator",
+			},
+		})
+		// No agent-subject event exists in this fixture: no scheduler run, no minted credential.
+		// `subject.kind === "agent"` would imply a credential-admitted path, which never happened.
+		const allAudit = expectJsonOk(runCli([
+			"logs",
+			fixture.target,
+			"--loop-data-root",
+			fixture.loopDataRoot,
+			"--chain",
+			fixture.chainName,
+			"--kind",
+			"audit",
+			"--json",
+		]))
+		const agentSubjectEvents = (allAudit.events as Array<{ subject?: { kind: string } }>).filter((event) => event.subject?.kind === "agent")
+		expect(agentSubjectEvents).toHaveLength(0)
+	})
+
 	// #433: status output is flag-insensitive to the retired target config file. Whether or not
 	// any legacy `.coder-loop/runtime/config.{json,toml}` exists on disk, the engine reads the
 	// same chain.metadata and reports the same runner view. Acceptance row 3.

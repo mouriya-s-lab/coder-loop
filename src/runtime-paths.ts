@@ -2,6 +2,12 @@ import { homedir } from "node:os"
 import { isAbsolute, resolve } from "node:path"
 
 export const LOOP_DATA_ROOT_ENV = "CODER_LOOP_DATA_DIR"
+// #406: run-scoped credential the engine mints at spawn time and injects into the runner process
+// env. The CLI auto-attaches it to `item.update` socket requests; the daemon resolves it to an
+// active run (chain + item + run) and rejects mismatches. The env name is deliberately distinct
+// from prompt placeholders ({{RUN_ID}} et al.) so a prompt/trace grep for the credential value
+// returns zero hits — agents see only their own env, never the secret rendered into text.
+export const LOOP_RUN_CREDENTIAL_ENV = "CODER_LOOP_RUN_CRED"
 export const LOOP_DATA_DIRNAME = "loop-data"
 export const LOOP_DATA_DB_FILENAME = "db.sqlite"
 export const LOOP_DATA_DAEMON_SOCKET_FILENAME = "daemon.sock"

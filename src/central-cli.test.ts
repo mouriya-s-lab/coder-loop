@@ -146,8 +146,26 @@ describe("central chain/item CLI", () => {
 			const updated = expectJsonOk(await runCli(["item", "update", "items-chain", "--issue", "181", "--status", "done", "--field-json", "{\"pr\":191}", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(updated.item).toMatchObject({ issueNumber: 181, status: "done", extra: { pr: 191 } })
 
-			const agentRunId = "run-agent-status-181"
-			expectJsonOk(await runCli([
+			// #406 row 4 — operator path: no env credential, no claim flags → audit subject is
+			// `{kind: "operator"}`. Pre-#406 this test also asserted an agent-attributed update via
+			// the freely-claimed `--agent-run-id` / `--agent-phase` flags; those flags are retired
+			// (the daemon now binds agent identity from the spawn-time env credential, never from
+			// caller claims). The agent path is exercised end-to-end in the daemon integration
+			// fixture (`daemon.test.ts > caller-admission gate`), where the scheduler spawns a real
+			// run and the CLI auto-attaches the engine-minted credential from env.
+			const operatorAuditLogs = expectJsonOk(await runCli(["logs", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--json", "--chain", "items-chain", "--kind", "audit", "--type", "item.status"]))
+			expect(operatorAuditLogs.events).toHaveLength(1)
+			expect(operatorAuditLogs.events[0]).toMatchObject({
+				kind: "audit",
+				type: "item.status",
+				subject: { kind: "operator" },
+				payload: { issueNumber: 181, fromStatus: "queued", toStatus: "done" },
+			})
+
+			// #406 retire-claim: pre-existing CLI flag `--agent-run-id` is no longer accepted —
+			// cmd-ts rejects it as an unknown flag. This is the operator-side visible signal that
+			// agent attribution moved off CLI claims onto engine-bound env credentials.
+			const claimedAgentRetry = await runCli([
 				"item",
 				"update",
 				"items-chain",
@@ -156,40 +174,35 @@ describe("central chain/item CLI", () => {
 				"--status",
 				"changes_requested",
 				"--agent-run-id",
-				agentRunId,
+				"run-agent-status-181",
 				"--agent-phase",
 				"review",
 				"--loop-data-root",
 				fixture.loopDataRoot,
 				"--json",
-			]))
-			const runLogs = expectJsonOk(await runCli(["logs", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--json", "--run", agentRunId]))
-			expect(runLogs.events).toHaveLength(1)
-			expect(runLogs.events[0]).toMatchObject({
-				kind: "audit",
-				type: "item.status",
-				chain: "items-chain",
-				runId: agentRunId,
-				phase: "review",
-				subject: { kind: "agent", runId: agentRunId, phase: "review" },
-				payload: { issueNumber: 181, fromStatus: "done", toStatus: "changes_requested", reason: "item.update" },
-			})
-			const statusAuditLogs = expectJsonOk(await runCli(["logs", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--json", "--chain", "items-chain", "--kind", "audit", "--type", "item.status"]))
-			expect(statusAuditLogs.events).toHaveLength(2)
-			expect(statusAuditLogs.events[0]).toMatchObject({
-				kind: "audit",
-				type: "item.status",
-				subject: { kind: "operator" },
-				payload: { issueNumber: 181, fromStatus: "queued", toStatus: "done" },
-			})
-			expect(statusAuditLogs.events[1]).toMatchObject({
-				kind: "audit",
-				type: "item.status",
-				runId: agentRunId,
-				phase: "review",
-				subject: { kind: "agent", runId: agentRunId, phase: "review" },
-				payload: { issueNumber: 181, fromStatus: "done", toStatus: "changes_requested" },
-			})
+			])
+			expect(claimedAgentRetry.exitCode).not.toBe(0)
+
+			// #406 unknown-credential rejection: an env-borne credential value that does not map
+			// to any active run gets rejected at the daemon's caller-admission gate. Operator
+			// invocations only see this if the env is mis-set; agents would never hit it during a
+			// normal run (the scheduler mints the value, registers it, then injects). Asserting
+			// here keeps the deny branch test-covered without spinning up a real spawn.
+			const fabricatedCred = await runCli([
+				"item",
+				"update",
+				"items-chain",
+				"--issue",
+				"181",
+				"--status",
+				"changes_requested",
+				"--loop-data-root",
+				fixture.loopDataRoot,
+				"--json",
+			], { CODER_LOOP_RUN_CRED: "credential-that-was-never-minted" })
+			expect(fabricatedCred.exitCode).not.toBe(0)
+			expect(fabricatedCred.stderr).toContain("invalid_caller")
+			expect(fabricatedCred.stderr).toContain("agentCredential")
 		} finally {
 			await fixture.daemon.stop()
 		}
