@@ -5,6 +5,8 @@ import { basename, dirname, resolve } from "node:path"
 
 import { type as arkType } from "arktype"
 
+import type { ItemRecord } from "./sqlite-state"
+
 const SubjectBoundary = arkType.or(
 	{ kind: arkType.unit("engine") },
 	{ kind: arkType.unit("operator") },
@@ -53,6 +55,10 @@ const ObservabilityEventTypeBoundary = arkType.or(
 	arkType.unit("daemon.warning"),
 	arkType.unit("scheduler.tick_failed"),
 	arkType.unit("chain.complete_trigger_failed"),
+	// #397: per-phase admission gate audit. One event per item.status write request the daemon
+	// runs through `admitItemStatusForRequest` — both allow and deny outcomes — so a default-deny
+	// rejection is replayable from the event stream alongside the lifecycle context.
+	arkType.unit("item.status.write_admission"),
 )
 
 const PresetPlaceholderDirectionBoundary = arkType.or(
@@ -316,6 +322,32 @@ const ObservabilityEventBoundary = arkType.or(
 		type: arkType.unit("chain.complete_trigger_failed"),
 		payload: { chainId: "number", error: "string" },
 	},
+	{
+		...EventBaseBoundary,
+		kind: arkType.unit("audit"),
+		type: arkType.unit("item.status.write_admission"),
+		// outcome=allow → request passed both vocabulary check and per-phase admission (or the
+		// item carried no active phase, in which case only vocabulary applied). outcome=deny →
+		// rejected; `reason` records which leg failed.
+		// `phase` is null when item.phase is null at write time (operator mid-run path / brand-new
+		// item before its first phase). `declaredExits` is the preset's `[[phases.exits]]` set for
+		// the active phase ([] when phase has no exits declared = default-deny under #397), and is
+		// always an empty list when phase is null (the per-phase leg does not run).
+		payload: {
+			itemId: "number",
+			issueNumber: "number",
+			"phase": arkType.or("string", "null"),
+			requestedStatus: "string",
+			declaredExits: "string[]",
+			outcome: arkType.or(arkType.unit("allow"), arkType.unit("deny")),
+			reason: arkType.or(
+				arkType.unit("vocabulary"),
+				arkType.unit("phase-exits"),
+				arkType.unit("no-phase-active"),
+				arkType.unit("admitted"),
+			),
+		},
+	},
 )
 
 export type ObservabilityEvent = typeof ObservabilityEventBoundary.infer
@@ -325,6 +357,35 @@ export type ObservabilityExcerpt = Extract<ObservabilityEvent, { type: "agent.ex
 export type ObservabilitySubject = NonNullable<ObservabilityEvent["subject"]>
 export type PresetPlaceholderDirection = typeof PresetPlaceholderDirectionBoundary.infer
 export type PresetPlaceholderVerdict = typeof PresetPlaceholderVerdictBoundary.infer
+
+// #397 in-memory companion to the `item.status.write_admission` audit-event schema above.
+// Co-located with that schema so the wire shape (arktype, payload of ObservabilityEvent) and the
+// in-memory shape the daemon hands to its admission-event emitter evolve together.
+//
+// Discriminated on `outcome`: every `outcome=allow` carries `reason` from the admit-side vocabulary
+// (`"admitted" | "no-phase-active"`) and every `outcome=deny` carries `reason` from the reject-side
+// vocabulary (`"vocabulary" | "phase-exits"`). The four logically-impossible cross-product entries
+// (`allow×vocabulary`, `allow×phase-exits`, `deny×admitted`, `deny×no-phase-active`) are
+// unrepresentable at the type level — the typechecker rejects any caller trying to construct them.
+export type ItemStatusAdmissionRecord =
+	| {
+		item: ItemRecord
+		phase: string | null
+		requestedStatus: string
+		declaredExits: readonly string[]
+		subject: ObservabilitySubject
+		outcome: "allow"
+		reason: "admitted" | "no-phase-active"
+	}
+	| {
+		item: ItemRecord
+		phase: string | null
+		requestedStatus: string
+		declaredExits: readonly string[]
+		subject: ObservabilitySubject
+		outcome: "deny"
+		reason: "vocabulary" | "phase-exits"
+	}
 
 export const OBSERVABILITY_EXCERPT_RECORD_LIMIT = 5
 // Real runner JSONL records can inline large file bodies; this is an explicit excerpt payload contract.
@@ -487,6 +548,11 @@ function renderAuditEvent(event: Extract<ObservabilityEvent, { kind: "audit" }>)
 			return `${event.ts} audit queue.terminal chain=${event.chain ?? "-"} item=${event.item ?? event.payload.itemId} status=${event.payload.terminalStatus}`
 		case "item.dependency_unblocked":
 			return `${event.ts} audit item.dependency_unblocked chain=${event.chain ?? "-"} item=${event.item ?? event.payload.itemId} ${event.payload.fromStatus}->${event.payload.toStatus}`
+		case "item.status.write_admission":
+			// #397: render shape mirrors the payload — outcome + reason carry the deny diagnostic
+			// (allowed exits set follows so operators reading a default-deny rejection see what the
+			// phase actually exposes). `phase=-` indicates the no-active-phase mid-run path.
+			return `${event.ts} audit item.status.write_admission chain=${event.chain ?? "-"} item=${event.item ?? event.payload.itemId} phase=${event.payload.phase ?? "-"} requested=${event.payload.requestedStatus} outcome=${event.payload.outcome} reason=${event.payload.reason} exits=${event.payload.declaredExits.join(",") || "-"}`
 		default:
 			return assertNever(event)
 	}

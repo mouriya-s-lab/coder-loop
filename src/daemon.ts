@@ -46,8 +46,10 @@ import {
 	type UpdateItemInput,
 } from "./sqlite-state"
 import {
+	assertRequestAdmittedItemStatus,
 	chainMetadataToJsonObject,
 	chainPresetPath,
+	engineLifecycleAdmittedItemStatus,
 	itemDependsOnIds,
 	itemExtraToJsonObject,
 	parseInternalStatus,
@@ -56,6 +58,7 @@ import {
 	runtimeDataJsonValue,
 	storedItemExtra,
 	RuntimeDataError,
+	type AdmittedItemStatus,
 	type InternalStatus,
 	type ItemExtra,
 } from "./runtime-data"
@@ -73,6 +76,7 @@ import {
 	observabilityDecisionFingerprint,
 	observabilityDecisionKey,
 	renderObservabilityEvent,
+	type ItemStatusAdmissionRecord,
 	type ObservabilityEvent,
 	type ObservabilitySubject,
 } from "./observability"
@@ -1376,7 +1380,7 @@ export class CoderLoopDaemon {
 		if (repoCwd !== null) assignOptional(input, "repoCwd", await validateRepoCwdForRequest(repoCwd))
 		const status = optionalString(fields, "status")
 		if (status !== null) {
-			assignOptional(input, "status", await this.validateItemStatusForRequest(chain, item, status))
+			assignOptional(input, "status", await this.admitItemStatusForRequest(chain, item, status, auditAttribution.subject))
 		}
 		assignOptional(input, "title", validateItemTitleForRequest(optionalStringOrNull(fields, "title")))
 		assignOptional(input, "priority", validateItemPriorityForRequest(optionalStringOrNull(fields, "priority")))
@@ -1663,41 +1667,101 @@ export class CoderLoopDaemon {
 		console.warn(`coder-loop daemon warning: skipped ${context} for invalid chain ${chain.id} (${JSON.stringify(chain.name)}): ${error.message}`)
 	}
 
-	private async validateItemStatusForRequest(chain: ChainRecord, item: ItemRecord, status: string): Promise<InternalStatus> {
-		await this.validateItemStatusVocabularyForRequest(chain, status)
-		if (item.phase !== null) await this.validateItemStatusForPhaseRequest(chain, item.phase, status)
-		return parseInternalStatus(status, "item.status")
-	}
-
-	private async validateItemStatusVocabularyForRequest(chain: ChainRecord, status: string): Promise<void> {
-		const allowed = await this.allowedItemStatuses(chain)
-		if (!allowed.has(status)) {
-			throw new DaemonError("invalid_request", `item status must be one of: ${[...allowed].sort().join(", ")}`, { status })
+	// #397 default-deny admission gate. Replaces the old `validateItemStatusForRequest` (which
+	// returned `InternalStatus`) — the rename and the return type (`AdmittedItemStatus`) are how
+	// the typechecker enumerates every status-write path: any code calling `store.updateItem({
+	// status })` needs an `AdmittedItemStatus`, which is producible only here (request flow) or
+	// via the narrow `engineLifecycleAdmittedItemStatus` constructor in runtime-data.ts.
+	//
+	// Both legs of the admission emit one `item.status.write_admission` audit event so a
+	// default-deny rejection can be replayed from the event stream (#411-style audit obligation;
+	// see issue #397 comment "log 义务").
+	private async admitItemStatusForRequest(chain: ChainRecord, item: ItemRecord, status: string, subject: ObservabilitySubject): Promise<AdmittedItemStatus> {
+		await this.admitItemStatusVocabularyForRequest(chain, item, status, subject)
+		const phase = item.phase
+		if (phase === null) {
+			// Operator mid-run path (#397 acceptance row 7): no active phase → vocabulary-only.
+			// Audit records the no-phase outcome so the no-special-casing claim is auditable.
+			await this.recordItemStatusAdmissionEvent(chain, {
+				item,
+				phase: null,
+				requestedStatus: status,
+				declaredExits: [],
+				outcome: "allow",
+				reason: "no-phase-active",
+				subject,
+			})
+		} else {
+			await this.admitItemStatusForPhaseRequest(chain, item, phase, status, subject)
 		}
+		const parsed = parseInternalStatus(status, "item.status")
+		assertRequestAdmittedItemStatus(parsed)
+		return parsed
 	}
 
-	private async defaultItemStatusForRequest(chain: ChainRecord): Promise<InternalStatus> {
-		const { preset } = await this.loadedPresetForChain(chain)
-		return preset.statuses.entry
+	private async admitItemStatusVocabularyForRequest(chain: ChainRecord, item: ItemRecord, status: string, subject: ObservabilitySubject): Promise<void> {
+		const allowed = await this.allowedItemStatuses(chain)
+		if (allowed.has(status)) return
+		await this.recordItemStatusAdmissionEvent(chain, {
+			item,
+			phase: item.phase,
+			requestedStatus: status,
+			declaredExits: [],
+			outcome: "deny",
+			reason: "vocabulary",
+			subject,
+		})
+		throw new DaemonError("invalid_request", `item status must be one of: ${[...allowed].sort().join(", ")}`, { status })
 	}
 
 	// #412 per-item flavor: derive the entry status from the item's declared preset rather than the
 	// chain's. The chain-aware variant routes load failures through `loadedPresetFromDirForChain`
 	// so each chain that hits a bad preset gets its own `daemon.preset_load_failed` observability
 	// event and a consistent "failed to load preset for chain <name>" error message.
-	private async defaultItemStatusForPresetSpecOnChain(chain: ChainRecord, spec: { preset: string | null; presetPath: string | null }): Promise<InternalStatus> {
+	private async defaultItemStatusForPresetSpecOnChain(chain: ChainRecord, spec: { preset: string | null; presetPath: string | null }): Promise<AdmittedItemStatus> {
 		const presetDir = spec.presetPath !== null
 			? (isAbsolute(spec.presetPath) ? spec.presetPath : resolve(spec.presetPath))
 			: bundledPresetDir(spec.preset ?? "")
 		const { preset } = await this.loadedPresetFromDirForChain(chain, presetDir)
-		return preset.statuses.entry
+		return engineLifecycleAdmittedItemStatus(preset.statuses.entry, "item.created-default-from-preset")
 	}
 
-	private async validateItemStatusForPhaseRequest(chain: ChainRecord, phase: string, status: string): Promise<void> {
+	// #397 default-deny: when the active phase is unknown to the preset, or when the phase has
+	// no `[[phases.exits]]` declared (writable set is empty), every status write is rejected. The
+	// pre-#397 gate returned `null` from `allowedItemStatusesForPhase` and short-circuited to
+	// "allow" for unknown phases — the failure mode the issue body anchors as "iteration phase 正
+	// 是无 exits" (iteration's writable set is empty under the new default-deny semantics, so
+	// agent attempts to write status from iteration are rejected at this gate even though the
+	// prompt convention says iteration writes no status).
+	private async admitItemStatusForPhaseRequest(chain: ChainRecord, item: ItemRecord, phase: string, status: string, subject: ObservabilitySubject): Promise<void> {
 		const allowed = await this.allowedItemStatusesForPhase(chain, phase)
-		if (allowed === null || allowed.has(status)) return
-		const allowedList = [...allowed].sort()
-		throw new DaemonError("invalid_request", `item status ${status} is not allowed while item phase is ${phase}; allowed statuses: ${allowedList.join(", ") || "<none>"}`, {
+		const allowedList = allowed === null ? [] : [...allowed].sort()
+		const declaredExits: readonly string[] = allowedList
+		if (allowed !== null && allowed.has(status)) {
+			await this.recordItemStatusAdmissionEvent(chain, {
+				item,
+				phase,
+				requestedStatus: status,
+				declaredExits,
+				outcome: "allow",
+				reason: "admitted",
+				subject,
+			})
+			return
+		}
+		await this.recordItemStatusAdmissionEvent(chain, {
+			item,
+			phase,
+			requestedStatus: status,
+			declaredExits,
+			outcome: "deny",
+			reason: "phase-exits",
+			subject,
+		})
+		const phaseContext = allowed === null
+			? `phase ${phase} is not declared in the preset; default-deny rejects all status writes from an unknown phase`
+			: `item status ${status} is not allowed while item phase is ${phase}; allowed statuses: ${allowedList.join(", ") || "<none> (default-deny: phase declares no [[phases.exits]])"}`
+		throw new DaemonError("invalid_request", phaseContext, {
 			status,
 			phase,
 			allowed: allowedList,
@@ -1709,6 +1773,26 @@ export class CoderLoopDaemon {
 		const presetPhase = preset.phases.find((entry) => entry.name === phase)
 		if (presetPhase === undefined) return null
 		return new Set(phaseWritableStatuses(presetPhase))
+	}
+
+	private async recordItemStatusAdmissionEvent(chain: ChainRecord, input: ItemStatusAdmissionRecord): Promise<void> {
+		await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
+			kind: "audit",
+			type: "item.status.write_admission",
+			chain: chain.name,
+			item: input.item.id,
+			...(input.phase === null ? {} : { phase: input.phase }),
+			subject: input.subject,
+			payload: {
+				itemId: input.item.id,
+				issueNumber: input.item.issueNumber,
+				phase: input.phase,
+				requestedStatus: input.requestedStatus,
+				declaredExits: [...input.declaredExits],
+				outcome: input.outcome,
+				reason: input.reason,
+			},
+		}))
 	}
 
 	private async allowedItemStatuses(chain: ChainRecord): Promise<Set<string>> {
@@ -1731,9 +1815,9 @@ export class CoderLoopDaemon {
 		return { success: preset.statuses.success, entry: preset.statuses.entry }
 	}
 
-	private async entryItemStatusForRecovery(chain: ChainRecord): Promise<InternalStatus> {
+	private async entryItemStatusForRecovery(chain: ChainRecord): Promise<AdmittedItemStatus> {
 		const { entry } = await this.unblockItemStatuses(chain)
-		return entry
+		return engineLifecycleAdmittedItemStatus(entry, "scheduler.recovery-entry-restore")
 	}
 
 	private async resolveLoadedPresetPhasePrompt(ctx: SchedulerSpawnContext): Promise<string> {
