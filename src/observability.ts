@@ -59,6 +59,13 @@ const ObservabilityEventTypeBoundary = arkType.or(
 	// runs through `admitItemStatusForRequest` — both allow and deny outcomes — so a default-deny
 	// rejection is replayable from the event stream alongside the lifecycle context.
 	arkType.unit("item.status.write_admission"),
+	// #406: caller-admission audit. One event per item.update request the daemon runs through
+	// the credential gate (allow or deny). The pair (`item.mutation.caller_admission` +
+	// `item.status.write_admission`) gives an auditor two-leg replay: who wrote ("谁能写") and
+	// what they wrote ("能写什么"). The event's `subject` field is the true caller (operator |
+	// agent+run) — not a self-attributed claim — because the daemon constructs the subject from
+	// the validated credential, not from caller-supplied fields.
+	arkType.unit("item.mutation.caller_admission"),
 )
 
 const PresetPlaceholderDirectionBoundary = arkType.or(
@@ -325,6 +332,33 @@ const ObservabilityEventBoundary = arkType.or(
 	{
 		...EventBaseBoundary,
 		kind: arkType.unit("audit"),
+		type: arkType.unit("item.mutation.caller_admission"),
+		// #406 caller-admission audit. `outcome=allow` records the caller the daemon accepted
+		// (operator or a credential-bound agent); the `subject` field on the event base already
+		// carries the typed `operator | agent` ADT, so the payload duplicates only the fields
+		// auditors need for fast queries without parsing the subject union.
+		// `outcome=deny` records why the agent path was rejected — every reason maps 1:1 to one
+		// of the issue's threat-model branches (stale credential after run end; cross-item write
+		// from a parallel slot; CLI flags shipped without env-borne credential).
+		payload: {
+			itemId: "number",
+			issueNumber: "number",
+			"claimedRunId": arkType.or("string", "null"),
+			"claimedPhase": arkType.or("string", "null"),
+			outcome: arkType.or(arkType.unit("allow"), arkType.unit("deny")),
+			reason: arkType.or(
+				arkType.unit("operator"),
+				arkType.unit("agent-credential-admitted"),
+				arkType.unit("missing-credential"),
+				arkType.unit("unknown-credential"),
+				arkType.unit("wrong-item"),
+				arkType.unit("inactive-run"),
+			),
+		},
+	},
+	{
+		...EventBaseBoundary,
+		kind: arkType.unit("audit"),
 		type: arkType.unit("item.status.write_admission"),
 		// outcome=allow → request passed both vocabulary check and per-phase admission (or the
 		// item carried no active phase, in which case only vocabulary applied). outcome=deny →
@@ -553,6 +587,12 @@ function renderAuditEvent(event: Extract<ObservabilityEvent, { kind: "audit" }>)
 			// (allowed exits set follows so operators reading a default-deny rejection see what the
 			// phase actually exposes). `phase=-` indicates the no-active-phase mid-run path.
 			return `${event.ts} audit item.status.write_admission chain=${event.chain ?? "-"} item=${event.item ?? event.payload.itemId} phase=${event.payload.phase ?? "-"} requested=${event.payload.requestedStatus} outcome=${event.payload.outcome} reason=${event.payload.reason} exits=${event.payload.declaredExits.join(",") || "-"}`
+		case "item.mutation.caller_admission":
+			// #406: render shape names the credential outcome and the bound vs claimed run when an
+			// agent path is rejected. `claimedRunId=-` / `claimedPhase=-` mark the operator path
+			// (no claim made); a populated value with `outcome=deny` is the diagnostic surface for
+			// "agent shipped CLI flags without env credential" or similar misconfigurations.
+			return `${event.ts} audit item.mutation.caller_admission chain=${event.chain ?? "-"} item=${event.item ?? event.payload.itemId} claimedRunId=${event.payload.claimedRunId ?? "-"} claimedPhase=${event.payload.claimedPhase ?? "-"} outcome=${event.payload.outcome} reason=${event.payload.reason}`
 		default:
 			return assertNever(event)
 	}

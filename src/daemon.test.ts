@@ -4,6 +4,8 @@ import { mkdir, readdir, readFile, rm, stat, unlink, writeFile } from "node:fs/p
 import { mkdirSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
 
+import { type as arkType } from "arktype"
+
 import {
 	DaemonError,
 	daemonRequest,
@@ -39,6 +41,16 @@ let nextFixtureId = 0
 function runtimeStatus(value: string) {
 	return engineLifecycleAdmittedItemStatus(parseInternalStatus(value, "test.status"), "test")
 }
+
+// #406 fake-runner event-log line shape. The fake runners inline-render lines like
+// `{"type": "running", "itemId": <n>, "runId": "<s>"}` via JSON.stringify. Tests that need
+// the runId/itemId back must boundary-parse rather than `as`-cast onto an anonymous shape
+// (issue body 代码红线: 禁止真 as 断言 + 禁止匿名形状).
+const FakeRunnerRunningEventBoundary = arkType({
+	type: arkType.unit("running"),
+	itemId: "number",
+	runId: "string",
+})
 
 // v1 status model: the spawned agent is the only writer of item.status. These daemon
 // integration tests use fake runners, so the fake runner reproduces the real agent's
@@ -3234,6 +3246,592 @@ attemptTimeoutSeconds = 3600
 				chainId,
 				presetDir: resolve(REPO_ROOT, "presets/single-phase-example"),
 			})
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	// #406 caller-admission gate (operator path). Boundary parse on item.update accepts a request
+	// with no `agentCredential` as `kind: "operator"` and records one `item.mutation.caller_admission`
+	// audit event with reason=operator. Subject on every downstream audit event for that mutation
+	// is `{kind: "operator"}` — typechecker exhaustiveness in `handleItemUpdate` enforces this.
+	test("socket item.update operator path emits operator-attributed caller-admission audit (#406)", async () => {
+		const fixture = await startFixture("item-update-caller-operator", { schedulerEnabled: false })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "caller-operator-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			const added = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 406_001,
+				repoCwd: REPO_ROOT,
+			})).item)
+			const itemId = numberValue(added.id)
+			const updated = record(expectOk(await request(fixture, "item.update", {
+				itemId,
+				status: runtimeStatus("done"),
+			})).item)
+			expect(updated).toMatchObject({ id: itemId, status: runtimeStatus("done") })
+
+			const eventsPath = resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile
+			const allEvents = (await queryObservabilityEvents(eventsPath)).events
+			const callerAllow = allEvents.find((event) => event.kind === "audit" && event.type === "item.mutation.caller_admission" && event.item === itemId)
+			expect(callerAllow).toBeDefined()
+			if (callerAllow !== undefined && callerAllow.kind === "audit" && callerAllow.type === "item.mutation.caller_admission") {
+				expect(callerAllow.subject).toEqual({ kind: "operator" })
+				expect(callerAllow.payload).toMatchObject({
+					itemId,
+					issueNumber: 406_001,
+					claimedRunId: null,
+					claimedPhase: null,
+					outcome: "allow",
+					reason: "operator",
+				})
+			}
+			const statusEvent = allEvents.find((event) => event.kind === "audit" && event.type === "item.status" && event.item === itemId)
+			expect(statusEvent).toBeDefined()
+			if (statusEvent !== undefined && statusEvent.kind === "audit" && statusEvent.type === "item.status") {
+				expect(statusEvent.subject).toEqual({ kind: "operator" })
+			}
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	// #406 caller-admission gate (unknown-credential deny). A request that carries an
+	// `agentCredential` value that does not match any registered active run is rejected with
+	// `invalid_caller` and the audit event records `reason: unknown-credential`.
+	test("socket item.update rejects an unknown agentCredential value (#406)", async () => {
+		const fixture = await startFixture("item-update-caller-unknown-credential", { schedulerEnabled: false })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "caller-unknown-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			const added = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 406_002,
+				repoCwd: REPO_ROOT,
+			})).item)
+			const itemId = numberValue(added.id)
+			const denied = await request(fixture, "item.update", {
+				itemId,
+				status: runtimeStatus("done"),
+				agentCredential: "credential-not-in-registry",
+			})
+			expect(denied.ok).toBe(false)
+			if (!denied.ok) expect(denied.error.code).toBe("invalid_caller")
+
+			const eventsPath = resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile
+			const allEvents = (await queryObservabilityEvents(eventsPath)).events
+			const callerDeny = allEvents.find((event) => event.kind === "audit" && event.type === "item.mutation.caller_admission" && event.item === itemId && event.payload.outcome === "deny")
+			expect(callerDeny).toBeDefined()
+			if (callerDeny !== undefined && callerDeny.kind === "audit" && callerDeny.type === "item.mutation.caller_admission") {
+				expect(callerDeny.payload.reason).toBe("unknown-credential")
+			}
+			// The store was untouched — the gate ran before any state mutation.
+			const items = expectOk(await request(fixture, "item.list", { chainId })).items
+			if (!Array.isArray(items) || items.length === 0) throw new Error("expected an item in caller-unknown-chain")
+			const stillQueued = record(items[0])
+			expect(stillQueued.status).toBe(runtimeStatus("queued"))
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	// #406 caller-admission gate (legacy attribution flags). The retired `agentRunId` /
+	// `agentPhase` keys are rejected by `validateKnownKeys` (they are not in ITEM_UPDATE_ARG_KEYS).
+	// This pins the substitutive contract: agents can no longer hand-write their identity.
+	test("socket item.update rejects retired agentRunId / agentPhase attribution claims (#406)", async () => {
+		const fixture = await startFixture("item-update-caller-legacy-args", { schedulerEnabled: false })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "caller-legacy-args-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			const added = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 406_003,
+				repoCwd: REPO_ROOT,
+			})).item)
+			const itemId = numberValue(added.id)
+			for (const legacy of [
+				{ itemId, status: runtimeStatus("done"), agentRunId: "fake-run", agentPhase: "review" },
+				{ itemId, status: runtimeStatus("done"), agentRunId: "fake-run" },
+				{ itemId, status: runtimeStatus("done"), agentPhase: "review" },
+			]) {
+				expectInvalid(await request(fixture, "item.update", legacy))
+			}
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	// #406 caller-admission gate (live spawn → wrong-item). Two items in the same chain spawn
+	// sequentially under the default fake runner. We capture the active credential from inside
+	// the runner's process env, then use it to attempt an item.update against a sibling item the
+	// credential is NOT bound to. The daemon's `wrong-item` deny branch fires and the audit log
+	// carries reason=wrong-item.
+	test("socket item.update rejects cross-item write with the wrong-item deny branch (live spawn, #406)", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-caller-wrong-item-live`)
+		const loopDataRoot = resolve(root, "ld")
+		const capturePath = resolve(root, "captured-credential.txt")
+		const promptCapturePath = resolve(root, "captured-prompt.txt")
+		const fakeRunner = resolve(root, "fake-runner.ts")
+		const eventLog = resolve(root, "events.jsonl")
+		await mkdir(loopDataRoot, { recursive: true })
+		// #406 dedicated runner: captures `CODER_LOOP_RUN_CRED` env + the rendered prompt to side
+		// files, sleeps long enough for the test to drive an item.update against another item, then
+		// exits 0 leaving the per-run status untouched (no writeStatus needed).
+		await writeFile(
+			fakeRunner,
+			`import { writeFile, appendFile } from "node:fs/promises"
+
+const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+await writeFile(${JSON.stringify(capturePath)}, process.env.CODER_LOOP_RUN_CRED ?? "")
+await writeFile(${JSON.stringify(promptCapturePath)}, prompt)
+await appendFile(input.eventLog, JSON.stringify({ type: "running", itemId: input.itemId, runId: input.runId }) + "\\n")
+await new Promise((r) => setTimeout(r, input.sleepMs ?? 3000))
+process.exitCode = 0
+`,
+		)
+
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			shutdownGraceMs: 100,
+			scheduler: {
+				enabled: true,
+				intervalMs: 20,
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
+				presetDir: PRESET_DIR,
+				worktreeManager: async ({ chain, repoCwd }) => {
+					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+					await mkdir(worktreePath, { recursive: true })
+					return worktreePath
+				},
+				prompt: ({ item, runId }) => JSON.stringify({
+					itemId: item.id,
+					issueNumber: item.issueNumber,
+					runId,
+					eventLog,
+					sleepMs: 2_500,
+				}),
+				chainCompleteTriggerForChain: () => null,
+			},
+		})
+		try {
+			const snapshot = daemon.snapshot()
+			const chain = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("chain.create", {
+				name: "caller-wrong-item-chain",
+				preset: "gh-issue-pr-iteration",
+				repository: "mouriya-s-lab/coder-loop",
+			}))).chain)
+			const chainId = numberValue(chain.id)
+			const itemA = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
+				chainId,
+				issueNumber: 406_010,
+				repoCwd: REPO_ROOT,
+				preset: "gh-issue-pr-iteration",
+			}))).item)
+			const itemB = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
+				chainId,
+				issueNumber: 406_011,
+				repoCwd: REPO_ROOT,
+				preset: "gh-issue-pr-iteration",
+			}))).item)
+			const itemAId = numberValue(itemA.id)
+			const itemBId = numberValue(itemB.id)
+
+			// Wait for itemA's spawn and the credential capture.
+			await waitFor(async () => {
+				try {
+					return (await readFile(capturePath, "utf-8")).trim()
+				} catch {
+					return ""
+				}
+			}, (value) => value.length > 0, 8_000)
+			const credential = (await readFile(capturePath, "utf-8")).trim()
+			expect(credential.length).toBeGreaterThan(0)
+
+			// Same credential against the sibling item: the wrong-item deny branch must fire.
+			const denied = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.update", {
+				itemId: itemBId,
+				status: runtimeStatus("done"),
+				agentCredential: credential,
+			}))
+			expect(denied.ok).toBe(false)
+			if (!denied.ok) expect(denied.error.code).toBe("invalid_caller")
+
+			// Audit replay: the deny is recorded against itemB with reason=wrong-item.
+			const eventsPath = resolveLoopDataPaths({ loopDataRoot }).eventsFile
+			const events = (await queryObservabilityEvents(eventsPath)).events
+			const denyEvent = events.find((event) =>
+				event.kind === "audit"
+				&& event.type === "item.mutation.caller_admission"
+				&& event.item === itemBId
+				&& event.payload.outcome === "deny"
+			)
+			expect(denyEvent).toBeDefined()
+			if (denyEvent !== undefined && denyEvent.kind === "audit" && denyEvent.type === "item.mutation.caller_admission") {
+				expect(denyEvent.payload.reason).toBe("wrong-item")
+			}
+
+			// #406 row 6 — prompt/trace leak guard: the credential value never enters the rendered
+			// prompt (or, by extension, anything the agent could exfiltrate via its own writes).
+			const promptCapture = await readFile(promptCapturePath, "utf-8")
+			expect(promptCapture.includes(credential)).toBe(false)
+			// Run trace artifacts (stdout/stderr) likewise must not carry the credential value.
+			const paths = resolveChainRuntimePaths("caller-wrong-item-chain", { loopDataRoot })
+			// Allow the run to finish so the close handler writes the trace artifacts.
+			await waitFor(async () => {
+				try {
+					return await readFile(paths.runStdoutFile(stringValue(itemA.lastRunId ?? "")), "utf-8")
+				} catch {
+					return null
+				}
+			}, () => true, 8_000)
+			// Walk the per-run dir and grep every file for the credential value.
+			const runDir = paths.runDir(stringValue((await readItem(loopDataRoot, chainId, 406_010))?.lastRunId ?? ""))
+			let leak = false
+			async function walk(dir: string): Promise<void> {
+				let names: string[]
+				try {
+					names = await readdir(dir)
+				} catch {
+					return
+				}
+				for (const name of names) {
+					const child = resolve(dir, name)
+					let entryStat
+					try {
+						entryStat = await stat(child)
+					} catch {
+						continue
+					}
+					if (entryStat.isDirectory()) {
+						await walk(child)
+					} else if (entryStat.isFile()) {
+						try {
+							const body = await readFile(child, "utf-8")
+							if (body.includes(credential)) leak = true
+						} catch {
+							// Binary or unreadable — skip.
+						}
+					}
+				}
+			}
+			await walk(runDir)
+			expect(leak).toBe(false)
+		} finally {
+			await daemon.stop()
+		}
+	})
+
+	// #406 row 3 — affirmative admit: with the agent credential env captured, `item update` on
+	// the bound item returns ok AND the SQLite item.status reflects the declared exit AND the
+	// emitted audit event carries `subject.kind === "agent"` with the runId. The dedicated row-3
+	// observation that distinguishes "credential admitted" from "request rejected": this test
+	// FAILS if `admitItemMutationCaller` ever regresses to the operator branch (or a deny) for an
+	// agent's own credential against its own bound item — the deny-sibling/expiry tests only catch
+	// regressions where credentials are wrongly accepted, never where they're wrongly rejected.
+	test("socket item.update admits the agent's own credential against its bound item (live spawn, #406 row 3)", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-caller-admit-bound-item-live`)
+		const loopDataRoot = resolve(root, "ld")
+		const capturePath = resolve(root, "captured-credential.txt")
+		const fakeRunner = resolve(root, "fake-runner.ts")
+		const eventLog = resolve(root, "events.jsonl")
+		await mkdir(loopDataRoot, { recursive: true })
+		// Capture credential to a side file, then sleep long enough for the test to drive an
+		// affirmative item.update against the bound item before exiting.
+		await writeFile(
+			fakeRunner,
+			`import { writeFile, appendFile } from "node:fs/promises"
+
+const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+await writeFile(${JSON.stringify(capturePath)}, process.env.CODER_LOOP_RUN_CRED ?? "")
+await appendFile(input.eventLog, JSON.stringify({ type: "running", itemId: input.itemId, runId: input.runId }) + "\\n")
+await new Promise((r) => setTimeout(r, input.sleepMs ?? 3500))
+process.exitCode = 0
+`,
+		)
+
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			shutdownGraceMs: 100,
+			scheduler: {
+				enabled: true,
+				intervalMs: 20,
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
+				presetDir: PRESET_DIR,
+				worktreeManager: async ({ chain, repoCwd }) => {
+					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+					await mkdir(worktreePath, { recursive: true })
+					return worktreePath
+				},
+				prompt: ({ item, runId }) => JSON.stringify({
+					itemId: item.id,
+					issueNumber: item.issueNumber,
+					runId,
+					eventLog,
+					sleepMs: 3_000,
+				}),
+				chainCompleteTriggerForChain: () => null,
+			},
+		})
+		try {
+			const snapshot = daemon.snapshot()
+			const chain = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("chain.create", {
+				name: "caller-admit-bound-item-chain",
+				preset: "gh-issue-pr-iteration",
+				repository: "mouriya-s-lab/coder-loop",
+			}))).chain)
+			const chainId = numberValue(chain.id)
+			const item = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
+				chainId,
+				issueNumber: 406_300,
+				repoCwd: REPO_ROOT,
+				preset: "gh-issue-pr-iteration",
+			}))).item)
+			const itemId = numberValue(item.id)
+
+			// Wait until the runner has spawned and captured the credential into the side file.
+			await waitFor(async () => {
+				try {
+					return (await readFile(capturePath, "utf-8")).trim()
+				} catch {
+					return ""
+				}
+			}, (value) => value.length > 0, 8_000)
+			const credential = (await readFile(capturePath, "utf-8")).trim()
+			expect(credential.length).toBeGreaterThan(0)
+
+			// The scheduler stamps `phase="iteration"` at spawn, and the gh-issue-pr-iteration
+			// preset declares zero exits for iteration. The agent-realistic affirmative path runs
+			// in review (whose declared exits include `changes_requested`); since we can't drive
+			// a real iteration→review transition mid-test without racing the run's natural close,
+			// we manually rewrite the item's phase to "review" while the runner is still alive
+			// (so the daemon's active-run registry still holds this credential). The caller-
+			// admission gate (which only checks `chain + item + credential-still-active`) admits
+			// the call exactly as it would for a real review-phase agent; the per-phase write
+			// gate then runs against `phase="review"` and allows `changes_requested`.
+			const store = openSqliteStateStore({ loopDataRoot })
+			try {
+				store.updateItem(itemId, { phase: "review", updatedAt: Math.floor(Date.now() / 1000) })
+			} finally {
+				store.close()
+			}
+
+			// Affirmative row 3: bound item + active credential → ok + status reflected + audit
+			// subject = {agent, runId, phase}. If the admit code regresses to denying the bound
+			// item (caller becomes `operator` for an agent credential, or the gate returns deny),
+			// `response.ok` flips to false and the subject assertions stall — the wrong-item /
+			// expiry tests would still pass because they only exercise the deny side.
+			const response = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.update", {
+				itemId,
+				status: runtimeStatus("changes_requested"),
+				agentCredential: credential,
+			}))
+			expect(response.ok).toBe(true)
+			if (!response.ok) throw new Error(`expected admit, got error ${response.error.code}: ${response.error.message}`)
+			const updatedItem = record(response.result.item)
+			expect(updatedItem.id).toBe(itemId)
+			expect(updatedItem.status).toBe(runtimeStatus("changes_requested"))
+
+			// SQLite cross-check: bypass the daemon and read the row directly. If the admit path
+			// flipped to "allow but skip write" the response would still be ok=true with a stale
+			// status; this assertion catches that.
+			const persisted = await readItem(loopDataRoot, chainId, 406_300)
+			expect(persisted?.status).toBe(runtimeStatus("changes_requested"))
+
+			// Audit replay: the caller-admission allow event for this mutation must carry
+			// `subject.kind === "agent"` with the runId that was bound to this credential at
+			// spawn time. Find the run id from the eventLog the fake runner wrote.
+			const runIdLine = (await readFile(eventLog, "utf-8")).split("\n").find((line) => line.trim() !== "") ?? ""
+			// Boundary-parse the fake-runner event-log entry instead of casting onto an anonymous
+			// shape (#406 红线).
+			const runIdRecord = FakeRunnerRunningEventBoundary.assert(JSON.parse(runIdLine))
+			const eventsPath = resolveLoopDataPaths({ loopDataRoot }).eventsFile
+			const events = (await queryObservabilityEvents(eventsPath)).events
+			const admissionAllow = events.find((event) =>
+				event.kind === "audit"
+				&& event.type === "item.mutation.caller_admission"
+				&& event.item === itemId
+				&& event.payload.outcome === "allow"
+				&& event.payload.reason === "agent-credential-admitted"
+			)
+			expect(admissionAllow).toBeDefined()
+			if (admissionAllow !== undefined && admissionAllow.kind === "audit" && admissionAllow.type === "item.mutation.caller_admission") {
+				expect(admissionAllow.subject).toEqual({ kind: "agent", runId: runIdRecord.runId, phase: "iteration" })
+				expect(admissionAllow.payload.claimedRunId).toBe(runIdRecord.runId)
+			}
+			// And the downstream `item.status` audit must inherit the agent subject + runId; this is
+			// the observation row 3 names — operator-attribution slipping through would tag this
+			// event `{kind: "operator"}`.
+			const statusEvent = events.find((event) =>
+				event.kind === "audit"
+				&& event.type === "item.status"
+				&& event.item === itemId
+				&& "runId" in event
+				&& event.runId === runIdRecord.runId
+			)
+			expect(statusEvent).toBeDefined()
+			if (statusEvent !== undefined && statusEvent.kind === "audit" && statusEvent.type === "item.status") {
+				expect(statusEvent.subject).toEqual({ kind: "agent", runId: runIdRecord.runId, phase: "iteration" })
+				expect(statusEvent.payload.toStatus).toBe("changes_requested")
+			}
+		} finally {
+			await daemon.stop()
+		}
+	})
+
+	// #406 caller-admission gate (run-end → credential invalidation). A credential captured during
+	// an active run is rejected after the run closes — the scheduler's `finally` revokes it from
+	// the registry, and the unknown-credential deny branch fires.
+	test("socket item.update rejects an expired credential after the run ends (live spawn, #406)", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-caller-credential-expiry-live`)
+		const loopDataRoot = resolve(root, "ld")
+		const capturePath = resolve(root, "captured-credential.txt")
+		const fakeRunner = resolve(root, "fake-runner.ts")
+		const eventLog = resolve(root, "events.jsonl")
+		await mkdir(loopDataRoot, { recursive: true })
+		await writeFile(
+			fakeRunner,
+			`import { writeFile, appendFile } from "node:fs/promises"
+
+const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+await writeFile(${JSON.stringify(capturePath)}, process.env.CODER_LOOP_RUN_CRED ?? "")
+await appendFile(input.eventLog, JSON.stringify({ type: "running", itemId: input.itemId, runId: input.runId }) + "\\n")
+// Exit non-zero with no status write — the item stays queued (the scheduler honors the agent's
+// non-write outcome and applies attempt backoff). This keeps the chain non-terminal so the
+// post-run item.update attempt reaches the caller-admission gate (not chain_not_active).
+process.exitCode = 1
+`,
+		)
+
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			shutdownGraceMs: 100,
+			scheduler: {
+				enabled: true,
+				intervalMs: 20,
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
+				presetDir: PRESET_DIR,
+				worktreeManager: async ({ chain, repoCwd }) => {
+					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+					await mkdir(worktreePath, { recursive: true })
+					return worktreePath
+				},
+				prompt: ({ item, runId }) => JSON.stringify({ itemId: item.id, issueNumber: item.issueNumber, runId, eventLog }),
+				chainCompleteTriggerForChain: () => null,
+			},
+		})
+		try {
+			const snapshot = daemon.snapshot()
+			const chain = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("chain.create", {
+				name: "caller-expiry-chain",
+				preset: "gh-issue-pr-iteration",
+				repository: "mouriya-s-lab/coder-loop",
+			}))).chain)
+			const chainId = numberValue(chain.id)
+			const item = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
+				chainId,
+				issueNumber: 406_020,
+				repoCwd: REPO_ROOT,
+				preset: "gh-issue-pr-iteration",
+			}))).item)
+			const itemId = numberValue(item.id)
+
+			// Wait for the credential to be captured (it appears as soon as the runner starts).
+			await waitFor(async () => {
+				try {
+					return (await readFile(capturePath, "utf-8")).trim()
+				} catch {
+					return ""
+				}
+			}, (value) => value.length > 0, 8_000)
+			const credential = (await readFile(capturePath, "utf-8")).trim()
+			expect(credential.length).toBeGreaterThan(0)
+
+			// Wait for the run to end (active runs returns to empty).
+			await waitFor(
+				async () => record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("daemon.status"))).daemon).activeRuns,
+				(runs) => Array.isArray(runs) && runs.length === 0,
+				10_000,
+			)
+
+			// Same credential against the same item after the run closed: deny with
+			// `unknown-credential` (the scheduler's finally already revoked it).
+			const denied = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.update", {
+				itemId,
+				status: runtimeStatus("changes_requested"),
+				agentCredential: credential,
+			}))
+			expect(denied.ok).toBe(false)
+			if (!denied.ok) {
+				expect(denied.error.code).toBe("invalid_caller")
+				expect(denied.error.message).toContain("agentCredential")
+			}
+
+			const eventsPath = resolveLoopDataPaths({ loopDataRoot }).eventsFile
+			const events = (await queryObservabilityEvents(eventsPath)).events
+			const denyEvent = events.find((event) =>
+				event.kind === "audit"
+				&& event.type === "item.mutation.caller_admission"
+				&& event.item === itemId
+				&& event.payload.outcome === "deny"
+			)
+			expect(denyEvent).toBeDefined()
+			if (denyEvent !== undefined && denyEvent.kind === "audit" && denyEvent.type === "item.mutation.caller_admission") {
+				expect(denyEvent.payload.reason).toBe("unknown-credential")
+			}
+		} finally {
+			await daemon.stop()
+		}
+	})
+
+	// #406 row 5 / #417 composition: review agent self-tagging terminal status exits cleanly without
+	// any explicit reaper kill (`terminateActiveRunsForItem` stays uncalled). The credential
+	// revocation runs in the scheduler's natural close-handler `finally`, NOT via a daemon-side
+	// kill. This pins the "#417 行为不回退" contract.
+	test("active run terminating naturally invalidates its credential without explicit kill (#406 + #417)", async () => {
+		const fixture = await startFixture("caller-no-reaper-kill")
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "caller-no-reaper-kill-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			preInstallReviewOnEmptyLockByName("caller-no-reaper-kill-chain", fixture.loopDataRoot)
+			const added = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 406_030,
+				repoCwd: REPO_ROOT,
+				extra: { sleepMs: 100, exitCode: 0 },
+			})).item)
+			const itemId = numberValue(added.id)
+
+			// Run completes naturally.
+			await waitFor(async () => readChainStatus(fixture.loopDataRoot, chainId), (status) => status === "completed", 10_000)
+			const finalItem = await readItem(fixture.loopDataRoot, chainId, 406_030)
+			expect(finalItem?.lastRunId).not.toBeNull()
+			const lastRun = await readRun(fixture.loopDataRoot, finalItem?.lastRunId ?? "")
+			expect(lastRun).not.toBeNull()
+			// 143 = SIGTERM exit code. The natural close must be exitCode=0, not 143 (the #417
+			// reaper-kill signature). If a kill leaks back in, this would be 143.
+			expect(lastRun?.exitCode).toBe(0)
+			// itemId asserted defined for tooling; not referenced further.
+			expect(finalItem).not.toBeNull()
+			expect(itemId).toBe(finalItem?.id ?? -1)
 		} finally {
 			await fixture.daemon.stop()
 		}

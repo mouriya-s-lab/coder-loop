@@ -7,14 +7,16 @@ Apply the transition chosen by the terminal action by writing the item status yo
 The daemon-serialized CLI validates against the preset vocabulary and writes atomically:
 
 ```bash
-coder-loop item update <CHAIN_NAME> --issue <ISSUE> --status <status> --agent-run-id <RUN_ID> --agent-phase review [--field-json '{"pr":123,"branch":"<name>"}'] [--blocker-repo <owner/repo>] [--blocker-ref <ref>] [--clear-blocker]
+coder-loop item update <CHAIN_NAME> --issue <ISSUE> --status <status> [--field-json '{"pr":123,"branch":"<name>"}'] [--blocker-repo <owner/repo>] [--blocker-ref <ref>] [--clear-blocker]
 ```
 
 Run once per transition, then verify the write landed:
 
 ```bash
-coder-loop item update <CHAIN_NAME> --issue <ISSUE> --status <status> --agent-run-id <RUN_ID> --agent-phase review --json
+coder-loop item update <CHAIN_NAME> --issue <ISSUE> --status <status> --json
 ```
+
+The engine binds your identity to this run automatically: the spawn environment carries the run-scoped credential (`CODER_LOOP_RUN_CRED` env var), the CLI auto-attaches it to the daemon request, and the daemon resolves it to the active (chain, item, run). Never copy any env value into the prompt, into another command line, or into trace artifacts — the credential is the engine's, not yours to forward.
 
 Non-zero exit or verification not showing the intended status = the write did not land; do not report the transition as applied — treat state as untrustworthy in global assessment.
 
