@@ -15,7 +15,7 @@ import {
 } from "./scheduler"
 import { loadPreset, type JsonObject } from "./loop"
 import { type ChainRecord, openSqliteStateStore } from "./sqlite-state"
-import { parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
+import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
@@ -25,8 +25,9 @@ const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-cro
 
 let nextFixtureId = 0
 
+// #397 test brand helper — see install-commands.test.ts for rationale.
 function runtimeStatus(value: string) {
-	return parseInternalStatus(value, "test.status")
+	return engineLifecycleAdmittedItemStatus(parseInternalStatus(value, "test.status"), "test")
 }
 
 afterAll(async () => {

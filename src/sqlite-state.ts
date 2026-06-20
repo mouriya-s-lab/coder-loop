@@ -9,6 +9,7 @@ import {
 	parseInternalStatus,
 	storedChainMetadata,
 	storedItemExtra,
+	type AdmittedItemStatus,
 	type ChainMetadata,
 	type InternalStatus,
 	type ItemExtra,
@@ -113,7 +114,12 @@ export type CreateItemInput = {
 	chainId: number
 	issueNumber: number
 	repoCwd: string
-	status: InternalStatus
+	// #397 default-deny gate: writing `status` to the store requires the `AdmittedItemStatus`
+	// brand, which is producible only via the daemon's request-flow gate
+	// (`admitItemStatusForRequest`) or the narrow engine-lifecycle constructor
+	// (`engineLifecycleAdmittedItemStatus`). The typechecker therefore enumerates every status
+	// write path; no fall-through admits arbitrary strings to items.status.
+	status: AdmittedItemStatus
 	// preset / presetPath are required at the daemon API boundary for new items (#412).
 	// The store accepts them as nullable so the migration back-fill path can express
 	// legacy items, and so tests / lower-level callers can still construct rows; the

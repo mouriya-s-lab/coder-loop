@@ -31,6 +31,7 @@ import {
 	chainMetadataToJsonObject,
 	clearSchedulerBackoff as clearItemSchedulerBackoff,
 	clearSchedulerSpawnError as clearItemSchedulerSpawnError,
+	engineLifecycleAdmittedItemStatus,
 	itemSchedulerBackoff,
 	itemExtraToJsonObject,
 	itemExtraWithoutKeys,
@@ -40,6 +41,7 @@ import {
 	withoutChainCompleteTriggerState,
 	withSchedulerBackoff,
 	withSchedulerSpawnError as withItemSchedulerSpawnError,
+	type AdmittedItemStatus,
 	type InternalStatus,
 	type SchedulerBackoffState,
 	type SchedulerSpawnError,
@@ -616,7 +618,12 @@ async function exhaustItemsOverAttemptLimitForRepo(
 		const exhaustedAt = nowSeconds(options)
 			const extra = clearItemSchedulerBackoff(item.extra)
 		options.store.updateItem(item.id, {
-			status: exhaustedStatus,
+			// #397: brand the preset-derived exhausted status at the call site. Exhausting on
+			// max attempts is an engine-lifecycle write (no caller-provided status), so it
+			// bypasses the per-phase request gate and brands through the narrow engine-lifecycle
+			// constructor. #402 made the underlying string value preset-declared; the brand only
+			// uplifts the static type at the store-write boundary.
+			status: engineLifecycleAdmittedItemStatus(exhaustedStatus, "scheduler.exhausted-on-max-attempts"),
 			extra,
 			updatedAt: exhaustedAt,
 		})
@@ -1085,7 +1092,13 @@ function attachRunCloseHandler(
 						const itemForBackoff = currentItem ?? item
 						const statusWasWrittenDuringRun = currentItem !== null && currentItem.statusUpdatedAt !== item.statusUpdatedAt && currentItem.statusUpdatedAt >= startedAt
 						const update: Parameters<typeof options.store.updateItem>[1] = {
-							...(statusWasWrittenDuringRun ? { status } : {}),
+							// #397: when the agent wrote a status via the gated `item.update` during the
+							// run, the scheduler forwards that same status back into store on the
+							// post-run bookkeeping write. The agent-side write already passed the
+							// admission gate (see `admitItemStatusForRequest` in daemon.ts), so re-
+							// branding here under `scheduler.run-status-forwarded` records that this
+							// is engine-internal carry, not a fresh caller-provided write.
+							...(statusWasWrittenDuringRun ? { status: engineLifecycleAdmittedItemStatus(status, "scheduler.run-status-forwarded") } : {}),
 							lastRunId: runId,
 							agentCwd: worktreePath,
 							extra: extraAfterRunCompletion(options, chain, itemForBackoff, exitCode, status, terminalStatuses, endedAt),
@@ -1435,7 +1448,11 @@ async function unblockDependencySatisfiedItems(
 		// leaving a cross-chain dependsOn on the restored item would re-gate it and it would never
 		// be selected into iteration. The dependency is fulfilled, so the record has served its job.
 		const nextExtra = itemExtraWithoutKeys(item.extra, ["dependsOn"])
-		options.store.updateItem(item.id, { status: chainStatuses.entry, extra: nextExtra, updatedAt: nowSeconds(options) })
+		options.store.updateItem(item.id, {
+			status: engineLifecycleAdmittedItemStatus(chainStatuses.entry, "scheduler.dependency-unblock-restore"),
+			extra: nextExtra,
+			updatedAt: nowSeconds(options),
+		})
 		await emit(options, {
 			type: "item.dependency_unblocked",
 			chainId: chain.id,
