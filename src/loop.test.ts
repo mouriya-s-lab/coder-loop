@@ -83,7 +83,7 @@ function minimalPresetRoot(overrides: BoundaryRecord = {}): BoundaryRecord {
 	return {
 		name: "fixture",
 		item: { idField: "issue" },
-		statuses: { continuable: ["queued", "changes_requested"], terminal: ["done", "blocked"] },
+		statuses: { continuable: ["queued", "changes_requested"], terminal: ["done", "blocked"], exhausted: "blocked" },
 		phases: [
 			{
 				name: "iteration",

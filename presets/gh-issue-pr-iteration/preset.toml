@@ -40,6 +40,13 @@ success     = ["done"]
 entry       = "queued"
 # unblockable: terminal statuses that `queue unblock` may restore to `entry`.
 unblockable = ["blocked"]
+# exhausted (#402): the status the engine writes when the per-item attempts budget
+# is spent without a terminal verdict from any phase. Required by the preset schema
+# (D2 verdict — "未声明则禁用" silently disables the runaway-retry safety; an
+# undeclared sentinel produces a status outside the preset vocabulary). Must be one
+# of `terminal`. The review phase also lists this as a possible verdict so an agent
+# can pre-emptively yield to the same terminal落点.
+exhausted   = "exhausted"
 
 [[phases]]
 name   = "iteration"

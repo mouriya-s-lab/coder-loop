@@ -174,6 +174,8 @@ function makeLoopOptions(): LoopOptions {
 					success: [parseInternalStatus("done", "test.status")],
 					entry: parseInternalStatus("queued", "test.status"),
 					unblockable: [],
+					// #402: required by Preset.statuses.
+					exhausted: parseInternalStatus("done", "test.status"),
 				},
 			phases: [],
 			fragments: [],

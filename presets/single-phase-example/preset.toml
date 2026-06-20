@@ -5,7 +5,12 @@ idField = "id"
 
 [statuses]
 continuable = ["pending"]
-terminal    = ["done"]
+terminal    = ["done", "exhausted"]
+# exhausted (#402): required preset declaration. The single-phase example has no
+# distinct "failure" verdict, so the attempts-exhausted落点 is its own terminal
+# status declared explicitly here and added to `terminal` so the schema validation
+# (`exhausted ∈ terminal`) passes.
+exhausted   = "exhausted"
 
 [[phases]]
 name   = "run"

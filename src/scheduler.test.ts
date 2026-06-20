@@ -555,6 +555,65 @@ describe("scheduler", () => {
 		}
 	})
 
+	// #402: the engine no longer owns the "exhausted" literal. The exhausted落点 status comes
+	// from the preset metadata (`statuses.exhausted`), so a preset declaring a different terminal
+	// label as its exhausted落点 must see that label written, not the legacy engine value. The
+	// daemon's schedulerEventToObservabilityEvent mapping classifies the emitted queue.terminal
+	// event as kind=audit / subject={kind:"engine"} per #411 — asserted alongside so the wire
+	// shape stays explicit.
+	test("attempts-exhausted落点 status comes from the preset and emits an audit/engine event (#402, #411)", async () => {
+		const fixture = await createFixture("custom-exhausted-from-preset")
+		const presetDir = resolve(fixture.loopDataRoot, "..", "custom-exhausted-preset")
+		await writeCustomExhaustedPreset(presetDir)
+		try {
+			const chain = createChain(fixture.store, "custom-exhausted-chain", {
+				preset: "custom-exhausted",
+				metadata: { maxItemAttempts: 1 },
+			})
+			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
+			const item = createItem(fixture.store, chain, { issueNumber: 710_004, repoCwd: "/repo/a" })
+			fixture.store.updateItem(item.id, {
+				status: runtimeStatus("queued"),
+				attempts: 1,
+				lastRunId: "run-prior-custom-failure",
+				extra: storedItemExtra({ ...itemExtraToJsonObject(item.extra), schedulerBackoff: { failureCount: 1, nextRunAt: 1_800_900_000 } }),
+				updatedAt: 1_800_900_500,
+			})
+
+			const tick = await schedulerTick(fixture.options({
+				loadedPreset: await loadedPresetFromDir(presetDir),
+			}))
+
+			expect(tick.spawnedRuns).toHaveLength(0)
+			const stored = fixture.store.getItem(item.id)
+			// The落点 comes from preset.statuses.exhausted ("custom_exhausted"), not the retired
+			// engine literal "exhausted" — the engine no longer holds a literal.
+			expect(stored?.status).toBe("custom_exhausted")
+			expect(stored?.extra.schedulerBackoff).toBeUndefined()
+
+			const queueTerminal = fixture.schedulerEvents.find((event) => event.type === "queue.terminal" && event.itemId === item.id)
+			expect(queueTerminal).toBeDefined()
+			expect(queueTerminal).toMatchObject({
+				type: "queue.terminal",
+				itemId: item.id,
+				runId: "run-prior-custom-failure",
+				terminalStatus: "custom_exhausted",
+			})
+
+			// #411: the unified observability envelope must classify the engine-driven exhaustion
+			// transition as kind=audit / subject={kind:"engine"} per the event classification table.
+			const observabilityEvent = schedulerEventToObservabilityEvent(chain, queueTerminal!)
+			expect(observabilityEvent.kind).toBe("audit")
+			expect(observabilityEvent.type).toBe("queue.terminal")
+			expect(observabilityEvent.subject).toEqual({ kind: "engine" })
+			if (observabilityEvent.type === "queue.terminal") {
+				expect(observabilityEvent.payload.terminalStatus).toBe("custom_exhausted")
+			}
+		} finally {
+			fixture.store.close()
+		}
+	})
+
 	test("failed spawns enter exponential backoff and a held item does not starve a sibling", async () => {
 		const fixture = await createFixture("failure-backoff-sibling")
 			try {
@@ -787,31 +846,25 @@ describe("scheduler", () => {
 		}
 	})
 
-	test("maxItemAttempts does not write exhausted unless the preset declares it terminal", async () => {
-		const fixture = await createFixture("no-exhaustion-status")
-		const presetDir = resolve(fixture.loopDataRoot, "..", "no-exhaustion-preset")
-		await writeNoExhaustionPreset(presetDir)
+	// #402: replaces "maxItemAttempts does not write exhausted unless the preset declares it terminal".
+	// That assertion pinned the OLD opt-out behavior (preset terminal vocabulary omits "exhausted" →
+	// engine silently disables the transition). D2 verdict retired the opt-out: a preset that does not
+	// declare `statuses.exhausted` must fail to load with an explicit error.
+	test("loadPreset rejects a preset that omits statuses.exhausted (#402: required, no opt-out)", async () => {
+		const fixture = await createFixture("missing-exhausted-declaration")
+		const presetDir = resolve(fixture.loopDataRoot, "..", "missing-exhausted-preset")
+		await writeMissingExhaustedDeclarationPreset(presetDir)
+		try {
+			let error: unknown = null
 			try {
-				const chain = createChain(fixture.store, "no-exhaustion-status-chain", {
-					preset: "no-exhaustion",
-					metadata: { maxItemAttempts: 1 },
-				})
-			const item = createItem(fixture.store, chain, { issueNumber: 710_003, repoCwd: "/repo/a" })
-			fixture.store.updateItem(item.id, {
-				attempts: 1,
-				extra: storedItemExtra({ ...itemExtraToJsonObject(item.extra), schedulerBackoff: { failureCount: 1, nextRunAt: 1_800_800_100 } }),
-				updatedAt: 1_800_800_000,
-			})
-
-			const tick = await schedulerTick(fixture.options({
-				loadedPreset: await loadedPresetFromDir(presetDir),
-				now: () => 1_800_800_000,
-			}))
-
-			expect(tick.spawnedRuns).toHaveLength(0)
-			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
-			expect(fixture.store.getItem(item.id)?.extra.schedulerBackoff).toEqual({ failureCount: 1, nextRunAt: 1_800_800_100 })
-			expect(fixture.schedulerEvents.find((event) => event.type === "queue.terminal")).toBeUndefined()
+				await loadPreset(presetDir)
+			} catch (caught) {
+				error = caught
+			}
+			expect(error).toBeInstanceOf(Error)
+			const message = error instanceof Error ? error.message : String(error)
+			// The arktype boundary surfaces the missing field path; the engine wraps it in a presetError.
+			expect(message).toContain("exhausted")
 		} finally {
 			fixture.store.close()
 		}
@@ -3904,6 +3957,7 @@ continuable = ["queued", "changes_requested"]
 terminal = ["done", "exhausted"]
 success = ["done"]
 entry = "queued"
+exhausted = "exhausted"
 
 [agent]
 binary = "codex"
@@ -3953,6 +4007,7 @@ continuable = ["queued"]
 terminal = ["blocked", "done", "exhausted"]
 success = []
 entry = "queued"
+exhausted = "exhausted"
 
 [agent]
 binary = "codex"
@@ -3964,14 +4019,50 @@ prompt = "run.md"
 	)
 }
 
-async function writeNoExhaustionPreset(presetDir: string): Promise<void> {
+// #402: fixture preset whose `statuses.exhausted` declaration points at a non-default
+// terminal label, so the scheduler test can assert the落点 status flows from preset metadata
+// rather than the retired engine literal "exhausted".
+async function writeCustomExhaustedPreset(presetDir: string): Promise<void> {
 	await mkdir(presetDir, { recursive: true })
 	await writeFile(resolve(presetDir, "run.md"), "# run\n")
 	await writeFile(
 		resolve(presetDir, "preset.toml"),
-		`name = "no-exhaustion"
+		`name = "custom-exhausted"
 version = 1
-description = "Fixture preset whose terminal vocabulary omits scheduler exhaustion."
+description = "Fixture preset whose attempts-exhausted落点 is a non-default terminal label."
+
+[item]
+idField = "issue"
+
+[statuses]
+continuable = ["queued"]
+terminal = ["done", "custom_exhausted"]
+success = ["done"]
+entry = "queued"
+exhausted = "custom_exhausted"
+
+[agent]
+binary = "codex"
+
+[[phases]]
+name = "run"
+prompt = "run.md"
+`,
+	)
+}
+
+// #402: fixture preset that omits the required `statuses.exhausted` declaration so the
+// loader rejects it. The previous shape (terminal vocab without "exhausted") used to silently
+// disable the engine's attempts-exhausted transition; the D2 verdict retired that opt-out, so
+// the new test asserts the load-time error instead.
+async function writeMissingExhaustedDeclarationPreset(presetDir: string): Promise<void> {
+	await mkdir(presetDir, { recursive: true })
+	await writeFile(resolve(presetDir, "run.md"), "# run\n")
+	await writeFile(
+		resolve(presetDir, "preset.toml"),
+		`name = "missing-exhausted-declaration"
+version = 1
+description = "Fixture preset that omits the required statuses.exhausted declaration (#402)."
 
 [item]
 idField = "issue"

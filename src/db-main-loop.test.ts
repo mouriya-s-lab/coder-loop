@@ -153,6 +153,7 @@ continuable = ["ready", "retry"]
 terminal = ["parked", "finished"]
 entry = "ready"
 unblockable = ["parked"]
+exhausted = "parked"
 
 [[phases]]
 name = "run"
