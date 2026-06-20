@@ -52,7 +52,7 @@ mismatched <n: which>; browser rows closed <n>/<n deferred>; form: <direct / scr
   with its anchor, every manifest gap, every judgment trigger — or `none`>
 
 ## Skipped checks
-- <check → reason (kind-matrix routing / no-PR route / infra) — or `none`>
+- <check → reason (deliverable-route routing / no-PR route / infra) — or `none`>
 
 ## Required changes
 <concrete fixes, one per 缺失 item; a row failing because the issue body's Command

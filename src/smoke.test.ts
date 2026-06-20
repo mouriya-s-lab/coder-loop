@@ -58,7 +58,7 @@ describe("smoke: v2 central chain CLI", () => {
 	// same chain.metadata and reports the same runner view. Acceptance row 3.
 	test("status --json runner view does not change when a stale target config file is dropped in", async () => {
 		const fixture = await createTarget("status-runner-flag")
-		seedChain(fixture, { issueNumber: 191, status: "queued", extra: { issueKind: "code" } })
+		seedChain(fixture, { issueNumber: 191, status: "queued" })
 
 		const baseline = expectJsonOk(runCli(["status", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--chain", fixture.chainName, "--json"]))
 
@@ -87,7 +87,7 @@ describe("smoke: v2 central chain CLI", () => {
 
 	test("daemon start dry-run resolves a chain and emits central-daemon plan", async () => {
 		const fixture = await createTarget("daemon-smoke")
-		seedChain(fixture, { issueNumber: 184, status: "queued", extra: { issueKind: "code" } })
+		seedChain(fixture, { issueNumber: 184, status: "queued" })
 
 		const result = runCli(["daemon", "start", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--chain", fixture.chainName, "--dry-run"])
 		expect(result.exitCode).toBe(0)

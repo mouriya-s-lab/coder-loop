@@ -1,11 +1,11 @@
-# Judgment guide: source-writing spike audit (`kind:code-spike`)
+# Judgment guide: source-writing spike audit (source-writing-spike-deliverable)
 
-A `kind:code-spike` issue produces a no-merge spike: PoC branch, command evidence, and an issue comment. Audit it without treating it as PR-backed implementation.
+A source-writing-spike-deliverable issue produces a no-merge spike: PoC branch, command evidence, and an issue comment. Audit it without treating it as PR-backed implementation.
 
 ## Route check first
 
 - No PR exists → audit below.
-- A PR exists for the issue → retry immediately: spike output must not be represented as an implementation PR unless the issue was relabeled `kind:code`. Feedback goes on the issue.
+- A PR exists for the issue → retry immediately: spike output must not be represented as an implementation PR. The only legal route flip is if the issue body itself was rewritten into the implementation-PR-deliverable shape per `contract.md` §1.2 / §1.6 (deliberate scope change, recorded on the issue). Feedback goes on the issue.
 
 ## Inputs
 

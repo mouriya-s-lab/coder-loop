@@ -41,7 +41,7 @@ Decide exactly one, from the bound inputs:
 
 Run these yourself; each read exists to feed a specific Step 3 decision:
 
-1. `gh issue view {{ISSUE}} -R {{REPO}} --json title,body,labels,comments,state,url` → the task contract: acceptance rows, custom requirement sections, constraints, kind, and any operator instructions in late comments. This decides what the run must produce.
+1. `gh issue view {{ISSUE}} -R {{REPO}} --json title,body,labels,comments,state,url` → the task contract: acceptance rows, custom requirement sections, constraints, the deliverable signal that tells you which Step 3 sequence to pick, and any operator instructions in late comments. This decides what the run must produce.
 2. The issue's linked PR → the retry instruction source and the branch-continuity input. Resolution order: the bound `ISSUE_PR` when set (state carries it from previous runs); otherwise the structural closing-keyword linkage — split `{{REPO}}` into owner/name and run:
 
    ```bash
@@ -68,14 +68,16 @@ That is the whole read surface: GitHub metadata of this issue, its linked PR, it
 
 ### Step 3 — Build the task list
 
-Select the step sequence for `ISSUE_KIND`:
+Read the issue body from Step 2 and decide which deliverable this issue actually demands, then pick the matching step sequence below. There is no label that picks the route for you; the routing decision is yours, anchored in what the issue body asks for and what the acceptance rows require.
 
-| `ISSUE_KIND` | Step sequence (every entry = one dispatch) |
+| Deliverable signal in the issue body | Step sequence (every entry = one dispatch) |
 |---|---|
-| `code` or empty (legacy) | [research if Step 2 left you unsure what the right change is] → implement → verify → e2e → submit |
-| `blocked` | resolve-blocker → implement → verify → e2e → submit |
-| `code-spike` | [research?] → source-spike |
-| `comment` | [research?] → spike-comment |
+| An implementation PR is the deliverable (default — the issue describes a code/config/docs change with `## 验收标准` rows replayable against a diff). | [research if Step 2 left you unsure what the right change is] → implement → verify → e2e → submit |
+| Unblocking another issue is the deliverable (the body names a concrete blocker, usually carries an `Unblocks: owner/repo#N` back-link, and the acceptance rows include a real blocked-path replay). | resolve-blocker → implement → verify → e2e → submit |
+| A source-writing spike is the deliverable (the body explicitly demands PoC/source/runtime evidence with a no-merge constraint — never become a production PR). | [research?] → source-spike |
+| An issue comment is the deliverable (a spike / design dialogue whose `## 结果分支` pins what the comment must say — no code change). | [research?] → spike-comment |
+
+When the body's signal is ambiguous between two rows, dispatch `research` to pin it down before committing the sequence; do not split the difference by running both.
 
 Then **write the task list out explicitly** before dispatching anything, one line per step:
 
@@ -115,7 +117,7 @@ Step directories (each contains `task.md` + `report.md` for the subagent, `accep
 Read and execute: /Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/iter/steps/<step>/task.md
 Report strictly per: /Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/iter/steps/<step>/report.md
 Runtime inputs:
-  ISSUE=<...> REPO=<...> BASE_BRANCH=<...> RUN_ID=<...> ISSUE_KIND=<...>
+  ISSUE=<...> REPO=<...> BASE_BRANCH=<...> RUN_ID=<...>
   AGENT_CWD=<...> TARGET_CWD=<...>
   SHARED_CONTEXT_FILE=<...> CURRENT_ISSUE_FILE=<...> EVIDENCE_DIR=<...> ISSUE_DIR=<...>
   WORKFLOW_FILE=<...> REQUIRE_BROWSER_EVIDENCE=<...>

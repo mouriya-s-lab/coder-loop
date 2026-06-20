@@ -10,18 +10,18 @@ If the intake includes already-open issues that the operator asked to triage (re
 
 - Intake notes from `plan/intake` (the quoted source passages + any surveyed overlapping issues).
 - `workflow.md` extracts (commands, conventions).
-- `contract.md` §1.2 (which body sections each kind requires).
+- `contract.md` §1.2 (which body sections each deliverable shape requires).
 
 ## Classes
 
 | Class | Definition | Queue outcome |
 |---|---|---|
-| `implementation` | future code / config / docs change; landed deliverable is a PR | queued as `kind:code` issue |
-| `spike` | risky undocumented assumption blocks implementation; deliverable is an issue comment validating / falsifying | queued as `kind:comment` issue, `Blocks: #<impl>` |
-| `source-writing-spike` | the assumption needs PoC/source/runtime evidence but must not merge into production | queued as `kind:code-spike` issue, `Blocks: #<impl>` |
-| `blocker-resolution` | future code / config / docs change whose only purpose is to remove a concrete blocker for another queued item | queued as `kind:blocked` issue with `Unblocks: owner/repo#N` |
+| `implementation` | future code / config / docs change; landed deliverable is a PR | queued; body follows `contract.md` §1.2 implementation-PR-deliverable shape |
+| `spike` | risky undocumented assumption blocks implementation; deliverable is an issue comment validating / falsifying | queued, `Blocks: #<impl>`; body follows §1.2 comment-spike-deliverable shape |
+| `source-writing-spike` | the assumption needs PoC/source/runtime evidence but must not merge into production | queued, `Blocks: #<impl>`; body follows §1.2 source-writing-spike-deliverable shape (with `## 约束` declaring no-merge / no-PR) |
+| `blocker-resolution` | future code / config / docs change whose only purpose is to remove a concrete blocker for another queued item | queued; body follows §1.2 unblock-deliverable shape with `Unblocks: owner/repo#N` |
 | `parent` | umbrella that coordinates ≥ 2 child deliverables; itself has no atomic Why | created but NOT queued (no concrete action); children get queued |
-| `design-question` | source has missing / contradictory facts that planning can't resolve; needs operator answer first | filed as `kind:comment` issue, NOT queued; operator answers in issue thread |
+| `design-question` | source has missing / contradictory facts that planning can't resolve; needs operator answer first | filed; body follows §1.2 comment-spike-deliverable shape but NOT queued; operator answers in issue thread |
 | `no-code` | already satisfied / duplicate / invalid / out of scope | filed (or referenced existing) but never queued |
 
 ## Procedure

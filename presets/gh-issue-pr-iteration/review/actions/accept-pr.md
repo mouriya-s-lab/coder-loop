@@ -46,7 +46,7 @@ An acceptance whose 缺失汇总 is not `none` is not an acceptance — go back 
 gh pr merge <PR_NUMBER> -R <REPO> --squash --delete-branch
 ```
 
-3. If merge succeeds and `ISSUE_KIND` is `blocked`, perform the unblock side effect before closing:
+3. If merge succeeds and the issue is an unblock-deliverable issue (its body carries `Unblocks:` and `## 阻塞条件` per `contract.md` §1.2), perform the unblock side effect before closing:
    - Re-fetch the issue body; parse the `Unblocks: owner/repo#N` back-link. Multiple `Unblocks:` lines → do not guess; retry or stop with the ambiguity recorded.
    - No back-link at all → log `skip-no-cross-repo-back-link` in the handoff and proceed to close (compatibility path).
    - Resolve the source repository's target checkout/runtime from local state, handoff, supervisor state, or paths in the issue history. Do not ask for credentials or paths in chat.

@@ -7,7 +7,7 @@ The report must contain: `Why I did it this way`; `What I actually did` with bra
 ## Judgment
 
 - **Contract coverage** — every acceptance row and custom-section requirement of the live issue body is either addressed, or flagged with a concrete deviation reason in the row-coverage table. Silent drops are gaps. (Cross-check the table against the issue body you read during investigation; re-fetch if stale.)
-- **Classification sanity** — the declared change kind matches what the issue demands; for substitutive/removal work the footprint list exists and each site has an owner. "Added the new thing" with the old thing unaccounted for is the classic trap — a gap.
+- **Classification sanity** — the declared change classification (additive / substitutive / corrective / removal / investigative / mixed, per the step's task file) matches what the issue demands; for substitutive/removal work the footprint list exists and each site has an owner. "Added the new thing" with the old thing unaccounted for is the classic trap — a gap.
 - **Test integrity** — a non-empty test-changes enumeration must be justified by the issue contract; removal/skip/loosening the issue body does not literally demand is a gap to send back now (cheaper here than at review's diff-audit).
 - **Intent landed** — the handoff file contains an `Intent (run …)` block for this run. Missing intent on a substantive change is a gap (review will hard-fail it later).
 - **Boundary compliance** — no batching, no commits/PRs/GitHub writes from this step.

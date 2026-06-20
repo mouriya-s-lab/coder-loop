@@ -122,13 +122,11 @@ const EXPECTED_VARIABLE_KEYS = [
 	"PROMPT_FRAGMENT_INDEX",
 	"RUNTIME_INPUTS_DOC",
 	"PHASE_EXITS_DOC",
-	"ISSUE_KIND_DOC",
 	"REQUIRE_BROWSER_EVIDENCE",
 	"ISSUE_BRANCH",
 	"ISSUE_PR",
 	"ISSUE_STATUS",
 	"ISSUE_LAST_RUN_ID",
-	"ISSUE_KIND",
 	"RUN_ID_GENERATION",
 	"RESUMED_FROM_PHASE",
 	"RESUMED_STARTED_AT",
@@ -150,7 +148,10 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 			pr: { type: "number" },
 			lastRunId: { type: "string" },
 		})
-		expect([...preset.runtime.businessKeys]).toEqual(["issueKind", "issueKindDoc"])
+		// #450 retired the kind taxonomy: the preset no longer declares any business
+		// keys. The engine still computes runtime.issueKind during the transition
+		// before #420 retires the fetch mechanism, but no preset variable consumes it.
+		expect([...preset.runtime.businessKeys]).toEqual([])
 		// #433: [agent].binary and [agent].extraArgs were zombie schema; retired with the rest of
 		// the runtime/config concept. Runner binary is now kind→PATH only.
 		expect(preset.agent.attemptTimeoutSeconds).toBe(DEFAULT_ATTEMPT_TIMEOUT_SECONDS)
@@ -225,7 +226,11 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(iterVars.get("AGENT_CWD")).toEqual(expectedRuntime("agentCwd"))
 		expect(iterVars.get("PROMPT_ROOT")).toEqual(expectedRuntime("presetDir"))
 		expect(iterVars.get("PROMPT_FRAGMENT_INDEX")).toEqual(expectedRuntime("fragmentIndex"))
-		expect(iterVars.get("ISSUE_KIND")).toEqual({ kind: "runtime", key: "issueKind", ownership: "preset" })
+		// #450 retired the kind taxonomy — ISSUE_KIND / ISSUE_KIND_DOC bindings are gone
+		// from every phase, the renderer never injects the value, and the variable map
+		// must not contain those keys.
+		expect(iterVars.has("ISSUE_KIND")).toBe(false)
+		expect(iterVars.has("ISSUE_KIND_DOC")).toBe(false)
 	})
 
 	test("fragments match PROMPT_FRAGMENTS 1:1 by id+role+path and files exist", async () => {
@@ -241,40 +246,70 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		}
 	})
 
-	test("planning prompt converges declared kind label metadata", async () => {
+	test("planning prompts no longer carry the retired kind label taxonomy", async () => {
+		// #450 retired the entire kind label taxonomy: planning prompts must not declare,
+		// ensure, or route by `kind:*` labels. The deliverable shape lives in the issue
+		// body (per contract.md §1.2 / §1.6), not in any label, and create-issues now
+		// posts via title+body only.
 		const createIssues = await Bun.file(resolve(BUNDLED_PRESET_DIR, "plan/create-issues.md")).text()
 		const contract = await Bun.file(resolve(BUNDLED_PRESET_DIR, "contract.md")).text()
-		const devPlan = await Bun.file(resolve(REPO_ROOT, ".claude/commands/dev-plan.md")).text()
 
-		expect(createIssues).toContain("gh label list --repo <owner>/<repo> --search kind: --json name,color,description")
-		expect(createIssues).toContain("For each missing declared label, create exactly that label with its declared color and description.")
-		expect(createIssues).toContain("For each existing declared label whose color or description differs from the declaration, edit that label")
-		expect(createIssues).toContain("For each existing declared label that already matches the declaration, take no action.")
-		expect(createIssues).toContain("Do not create, edit, or delete labels that are not declared by this preset.")
-		expect(createIssues).toContain('gh label edit kind:code --repo <owner>/<repo> --color 1f883d --description "Issue 的 deliverable 是代码 PR"')
-		expect(createIssues).toContain('gh label edit kind:comment --repo <owner>/<repo> --color 0969da --description "Issue 的 deliverable 是 PR comment / review reply"')
-		expect(createIssues).toContain('gh label edit kind:code-spike --repo <owner>/<repo> --color fbca04 --description "Issue 的 deliverable 是 source-writing spike evidence；不走 PR merge"')
-		expect(createIssues).toContain('gh label edit kind:blocked --repo <owner>/<repo> --color b60205 --description "Issue 的 deliverable 是解除具体阻塞条件并恢复被阻塞 loop"')
-		const staleCreateOnlyInstruction = ["For each existing declared label", ["skip", "creation."].join(" ")].join(", ")
-		expect(createIssues).not.toContain(staleCreateOnlyInstruction)
-		expect(contract).toContain("已存在但 color / description 与声明不一致的 label 更新到声明值")
-		expect(devPlan).toContain("updates declared labels whose color or description differs before posting issues")
+		// No `kind` token leaks through any planning prompt or contract surface.
+		const planFiles = [
+			"plan/create-issues.md",
+			"plan/classify.md",
+			"plan/checkpoint-author.md",
+			"plan/decompose.md",
+			"plan/triage-existing.md",
+			"plan/init-queue.md",
+			"plan/index.md",
+			"plan/adversarial-validate.md",
+			"plan/handoff.md",
+			"contract.md",
+		]
+		for (const relPath of planFiles) {
+			const text = await Bun.file(resolve(BUNDLED_PRESET_DIR, relPath)).text()
+			expect({ relPath, hasKind: /kind/i.test(text) }).toEqual({ relPath, hasKind: false })
+		}
+
+		// create-issues posts with title+body only — no label flag in the documented command.
+		expect(createIssues).toContain("gh issue create --repo <owner>/<repo>")
+		expect(createIssues).not.toContain("--label")
+		// Deliverable shape routing is encoded in the body sections, not labels.
+		expect(createIssues).toContain("body must follow §1.2 implementation-PR-deliverable shape")
+		expect(createIssues).toContain("body must follow §1.2 unblock-deliverable shape")
+
+		// contract.md still describes the four deliverable shapes by content, with no kind taxonomy.
+		expect(contract).toContain("实现-PR-deliverable")
+		expect(contract).toContain("Unblock-deliverable")
+		expect(contract).toContain("Comment-spike-deliverable")
+		expect(contract).toContain("Source-writing-spike-deliverable")
 	})
 
-	test("iteration entry owns the task-list workflow, kind routing, and dispatch protocol", async () => {
+	test("iteration entry owns the task-list workflow, deliverable-shape routing, and dispatch protocol", async () => {
 		const entry = await Bun.file(resolve(BUNDLED_PRESET_DIR, "iter-entry.md")).text()
 
-		// kind → step sequence table
-		expect(entry).toContain("→ implement → verify → e2e → submit |")
-		expect(entry).toContain("| `blocked` | resolve-blocker → implement → verify → e2e → submit |")
-		expect(entry).toContain("| `code-spike` | [research?] → source-spike |")
-		expect(entry).toContain("| `comment` | [research?] → spike-comment |")
+		// #450: deliverable-shape routing — agent reads issue body to decide the step
+		// sequence; there is no `kind:*` label table. The four step sequences must all
+		// still be visible so step selection guidance is observable in the rendered prompt.
+		expect(/kind/i.test(entry)).toBe(false)
+		expect(entry).toContain("[research if Step 2 left you unsure what the right change is] → implement → verify → e2e → submit")
+		expect(entry).toContain("resolve-blocker → implement → verify → e2e → submit")
+		expect(entry).toContain("[research?] → source-spike")
+		expect(entry).toContain("[research?] → spike-comment")
+		expect(entry).toContain("the routing decision is yours, anchored in what the issue body asks for")
+
 		// task-list spine: explicit list, two-state exit, no self-execution, no subagent-file reads
 		expect(entry).toContain("The list is the run.")
 		expect(entry).toContain("[x] accepted` or `[-] skipped:")
 		expect(entry).toContain("Dispatch it; never do it yourself")
 		expect(entry).toContain("you may open **only** `accept.md` files")
+		// All four deliverable step directories are still referenced so the routing
+		// language above remains executable (the four-workflow capability survives).
 		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/iter/steps/implement/")
+		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/iter/steps/resolve-blocker/")
+		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/iter/steps/source-spike/")
+		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/iter/steps/spike-comment/")
 		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/iter/steps/e2e/")
 		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/honesty-judge.md")
 		expect(entry).toContain("ITERATION SUMMARY:")
@@ -301,7 +336,9 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 	test("blocked responder prompt carries the required cross-repo side effects", async () => {
 		const prompt = await Bun.file(resolve(BUNDLED_PRESET_DIR, "blocked-responder-entry.md")).text()
 		expect(prompt).toContain("gh")
-		expect(prompt).toContain("kind:blocked")
+		// #450: the cross-repo unblock is wired by the body's `Unblocks:` back-link,
+		// not by any `kind:*` label — the responder must not declare the retired label.
+		expect(/kind/i.test(prompt)).toBe(false)
 		expect(prompt).toContain("Unblocks: {{REPO}}#{{ISSUE}}")
 		expect(prompt).toContain("central state DB")
 		expect(prompt).toContain("coder-loop daemon start <targetRepoPath>")
