@@ -160,7 +160,6 @@ test("worktree create failure is contained: backoff + schedulerSpawnError in ext
 			now: () => now,
 			runIdFactory: ({ item: selected }) => `run-containment-${selected.id}-${now}`,
 			prompt: () => "containment-test-prompt",
-			kindResolver: () => ({ ok: true, kind: "code" }),
 			onEvent: (event) => {
 				events.push(event)
 			},

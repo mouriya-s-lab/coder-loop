@@ -1631,7 +1631,6 @@ export class CoderLoopDaemon {
 		if (phaseRunnerSelectionForItem !== undefined) options.phaseRunnerSelectionForItem = phaseRunnerSelectionForItem
 		if (scheduler.phase !== undefined) options.phase = scheduler.phase
 		if (scheduler.worktreeManager !== undefined) options.worktreeManager = scheduler.worktreeManager
-		if (scheduler.kindResolver !== undefined) options.kindResolver = scheduler.kindResolver
 		options.loopDataRootOptions = this.options
 		if (scheduler.now !== undefined) options.now = scheduler.now
 		if (scheduler.runIdFactory !== undefined) options.runIdFactory = scheduler.runIdFactory

@@ -17,7 +17,6 @@ import {
 	makeIssueRunContext,
 	normalizeQueueIssueId,
 	lastNonTriggerPhaseForPreset,
-	parseKindFromLabels,
 	parsePreset,
 	parseReviewSummaryVerdict,
 	parseSessionIdFromRunnerStream,
@@ -686,17 +685,6 @@ describe("small parsers", () => {
 	test("normalizeQueueIssueId accepts local and cross-repo forms", () => {
 		expect(normalizeQueueIssueId("#333")).toBe("333")
 		expect(normalizeQueueIssueId("mouriya-s-lab/coder-loop#333")).toBe("333")
-	})
-
-	test("parseKindFromLabels recognizes the four issue kinds", () => {
-		const code = parseKindFromLabels(["kind:code"])
-		const comment = parseKindFromLabels(["kind:comment"])
-		const spike = parseKindFromLabels(["kind:code-spike"])
-		const blocked = parseKindFromLabels(["kind:blocked"])
-		expect(code.ok && code.kind).toBe("code")
-		expect(comment.ok && comment.kind).toBe("comment")
-		expect(spike.ok && spike.kind).toBe("code-spike")
-		expect(blocked.ok && blocked.kind).toBe("blocked")
 	})
 
 	test("runner stream parsers extract review verdicts and sessions", () => {
