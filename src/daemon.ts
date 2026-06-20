@@ -76,6 +76,7 @@ import {
 	observabilityDecisionFingerprint,
 	observabilityDecisionKey,
 	renderObservabilityEvent,
+	type ItemStatusAdmissionRecord,
 	type ObservabilityEvent,
 	type ObservabilitySubject,
 } from "./observability"
@@ -1775,15 +1776,7 @@ export class CoderLoopDaemon {
 		return new Set(phaseWritableStatuses(presetPhase))
 	}
 
-	private async recordItemStatusAdmissionEvent(chain: ChainRecord, input: {
-		item: ItemRecord
-		phase: string | null
-		requestedStatus: string
-		declaredExits: readonly string[]
-		outcome: "allow" | "deny"
-		reason: "vocabulary" | "phase-exits" | "no-phase-active" | "admitted"
-		subject: ObservabilitySubject
-	}): Promise<void> {
+	private async recordItemStatusAdmissionEvent(chain: ChainRecord, input: ItemStatusAdmissionRecord): Promise<void> {
 		await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
 			kind: "audit",
 			type: "item.status.write_admission",

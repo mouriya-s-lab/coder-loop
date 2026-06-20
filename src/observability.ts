@@ -5,6 +5,8 @@ import { basename, dirname, resolve } from "node:path"
 
 import { type as arkType } from "arktype"
 
+import type { ItemRecord } from "./sqlite-state"
+
 const SubjectBoundary = arkType.or(
 	{ kind: arkType.unit("engine") },
 	{ kind: arkType.unit("operator") },
@@ -355,6 +357,35 @@ export type ObservabilityExcerpt = Extract<ObservabilityEvent, { type: "agent.ex
 export type ObservabilitySubject = NonNullable<ObservabilityEvent["subject"]>
 export type PresetPlaceholderDirection = typeof PresetPlaceholderDirectionBoundary.infer
 export type PresetPlaceholderVerdict = typeof PresetPlaceholderVerdictBoundary.infer
+
+// #397 in-memory companion to the `item.status.write_admission` audit-event schema above.
+// Co-located with that schema so the wire shape (arktype, payload of ObservabilityEvent) and the
+// in-memory shape the daemon hands to its admission-event emitter evolve together.
+//
+// Discriminated on `outcome`: every `outcome=allow` carries `reason` from the admit-side vocabulary
+// (`"admitted" | "no-phase-active"`) and every `outcome=deny` carries `reason` from the reject-side
+// vocabulary (`"vocabulary" | "phase-exits"`). The four logically-impossible cross-product entries
+// (`allow×vocabulary`, `allow×phase-exits`, `deny×admitted`, `deny×no-phase-active`) are
+// unrepresentable at the type level — the typechecker rejects any caller trying to construct them.
+export type ItemStatusAdmissionRecord =
+	| {
+		item: ItemRecord
+		phase: string | null
+		requestedStatus: string
+		declaredExits: readonly string[]
+		subject: ObservabilitySubject
+		outcome: "allow"
+		reason: "admitted" | "no-phase-active"
+	}
+	| {
+		item: ItemRecord
+		phase: string | null
+		requestedStatus: string
+		declaredExits: readonly string[]
+		subject: ObservabilitySubject
+		outcome: "deny"
+		reason: "vocabulary" | "phase-exits"
+	}
 
 export const OBSERVABILITY_EXCERPT_RECORD_LIMIT = 5
 // Real runner JSONL records can inline large file bodies; this is an explicit excerpt payload contract.
