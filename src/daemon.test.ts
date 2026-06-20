@@ -2122,7 +2122,6 @@ attemptTimeoutSeconds = 3600
 				issueNumber: 349_201,
 				repoCwd: REPO_ROOT,
 				extra: {
-					issueKind: "code",
 					sleepMs: 5_000,
 					summary: "ITERATION SUMMARY: fake iteration in progress",
 				},
@@ -2175,7 +2174,6 @@ attemptTimeoutSeconds = 3600
 					status: runtimeStatus("queued"),
 					attempts: 0,
 					extra: storedItemExtra({
-						issueKind: "code",
 						sleepMs: 200,
 						summary: "ITERATION SUMMARY: fake iteration in progress",
 					}),
@@ -3331,7 +3329,7 @@ process.exitCode = 0
 					chainId,
 					issueNumber: 287_301,
 					repoCwd: REPO_ROOT,
-					extra: { issueKind: "code" },
+					extra: {},
 				})).item)
 				const itemId = numberValue(added.id)
 
@@ -3372,7 +3370,7 @@ process.exitCode = 0
 					chainId,
 					issueNumber: 287_302,
 					repoCwd: REPO_ROOT,
-					extra: { issueKind: "code" },
+					extra: {},
 				})
 
 				// The fake shell runner writes no status (it only proves which binary spawned), so under v1
@@ -3414,7 +3412,7 @@ process.exitCode = 0
 					chainId,
 					issueNumber: 289_001,
 					repoCwd: REPO_ROOT,
-					extra: { issueKind: "code" },
+					extra: {},
 				})
 
 				const item = await waitFor(
@@ -3480,7 +3478,7 @@ process.exitCode = 0
 					chainId,
 					issueNumber: 294_001,
 					repoCwd: REPO_ROOT,
-					extra: { issueKind: "code" },
+					extra: {},
 				})
 
 				const item = await waitFor(

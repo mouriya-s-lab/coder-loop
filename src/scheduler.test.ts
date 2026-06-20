@@ -2130,14 +2130,6 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 	})
 })
 
-// #450 retired the scheduler's spawn-time kind gate. The describe block that used to
-// live here pinned the abort-on-missing-or-invalid-kind-label behavior; that behavior is
-// gone (zero / many / unknown `kind:*` labels no longer block spawn for any preset). The
-// positive replacement — "no-kind item still spawns" — is exercised by the integration
-// path in src/smoke.test.ts (gh-issue-pr-iteration items with no `extra.issueKind` flow
-// through) and by the per-chain review-on-empty suite below, whose `createItem` no
-// longer needs to fake a kind label to clear the gate.
-
 describe("scheduler per-chain review-on-empty (issue #292)", () => {
 	test("chain drained + lock missing → next tick spawns review-on-empty once with phase=review", async () => {
 		const fixture = await createFixture("review-on-empty-spawn")
@@ -2471,7 +2463,6 @@ describe("scheduler chain bindings (issue #288)", () => {
 			item,
 			runId: "run-zero-token",
 			worktreePath: "/tmp/render-zero-token-worktree",
-			issueKind: "code",
 		})
 		const residual = rendered.match(/\{\{[A-Z_]+\}\}/g) ?? []
 		expect(residual).toEqual([])
@@ -2501,7 +2492,6 @@ describe("scheduler chain bindings (issue #288)", () => {
 			item,
 			runId: "run-chain-binding",
 			worktreePath: "/tmp/chain-binding-worktree",
-			issueKind: "code",
 		})
 		expect(rendered).toContain("chain.name=my-chain")
 		expect(rendered).toContain("umbrella.repo=owner/repo")
@@ -2526,7 +2516,6 @@ describe("scheduler chain bindings (issue #288)", () => {
 			item,
 			runId: "run-no-umbrella",
 			worktreePath: "/tmp/no-umbrella-worktree",
-			issueKind: "code",
 		})
 		expect(rendered).toBe("umb_repo=[] umb_issue=[]")
 	})
@@ -3041,7 +3030,6 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			item,
 			runId: "run-fresh",
 			worktreePath: "/repo/fresh-worktree",
-			issueKind: "code",
 		})
 		expect(rendered).toBe("RESUMED_SESSION_ID=[] RESUMED_FROM_PHASE=[] RUN_ID_GENERATION=[new]")
 	})
@@ -3080,7 +3068,6 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			item,
 			runId: "run-resume",
 			worktreePath: "/repo/resume-worktree",
-			issueKind: "code",
 			resume: decision,
 		})
 		expect(rendered).toBe("RESUMED_SESSION_ID=[sess-deadbeef-cafe] RESUMED_FROM_PHASE=[iteration] RUN_ID_GENERATION=[resumed]")
@@ -3706,14 +3693,12 @@ function preInstallReviewOnEmptyLock(chain: ChainRecord, loopDataRoot: string, r
 function createItem(
 	store: ReturnType<typeof openSqliteStateStore>,
 	chain: ChainRecord,
-	input: { issueNumber: number; repoCwd: string; sleepMs?: number; exitCode?: number; summary?: string | null; issueKind?: string | null; runner?: AgentRunnerKind | null },
+	input: { issueNumber: number; repoCwd: string; sleepMs?: number; exitCode?: number; summary?: string | null; runner?: AgentRunnerKind | null },
 ) {
 	const extra: JsonObject = {
 		sleepMs: input.sleepMs ?? 5,
 		exitCode: input.exitCode ?? 0,
 	}
-	if (input.issueKind === undefined) extra.issueKind = "code"
-	if (input.issueKind !== undefined && input.issueKind !== null) extra.issueKind = input.issueKind
 	if (Object.prototype.hasOwnProperty.call(input, "summary")) extra.summary = input.summary ?? null
 	return store.createItem({
 		chainId: chain.id,
@@ -4140,7 +4125,6 @@ describe("per-run summary tag", () => {
 			item,
 			runId: "run-bk-fixture",
 			worktreePath: "/fake",
-			issueKind: null,
 			resume: { kind: "fresh" },
 		})
 		expect(rendered).toBe("business-key-e2e-ok")

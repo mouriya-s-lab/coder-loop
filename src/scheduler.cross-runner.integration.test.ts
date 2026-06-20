@@ -410,7 +410,7 @@ function createItem(store: ReturnType<typeof openSqliteStateStore>, chain: Chain
 		status: runtimeStatus("queued"),
 		attempts: 0,
 		title: `issue ${issueNumber}`,
-		extra: storedItemExtra({ issueKind: "code" }),
+		extra: storedItemExtra({}),
 		createdAt: 1_800_316_001 + issueNumber,
 		updatedAt: 1_800_316_001 + issueNumber,
 	})

@@ -25,7 +25,6 @@ describe("phase C cleanup guards", () => {
 				resumedStartedAt: null,
 				resumedSessionId: null,
 			},
-			issueKind: "code",
 		})
 
 		expect(Object.keys(runtime).sort()).toEqual([
@@ -39,8 +38,6 @@ describe("phase C cleanup guards", () => {
 			"evidenceRootDir",
 				"fragmentIndex",
 				"issueDir",
-				"issueKind",
-				"issueKindDoc",
 				"logDir",
 				"loopFile",
 				"phaseExitsDoc",
