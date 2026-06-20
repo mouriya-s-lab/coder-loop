@@ -1637,8 +1637,6 @@ function chainCompletionFingerprint(chain: ChainRecord, items: readonly ItemReco
 			preset: chain.preset,
 			repository: chain.repository,
 			baseBranch: chain.baseBranch,
-			umbrellaIssue: chain.umbrellaIssue,
-			umbrellaRepo: chain.umbrellaRepo,
 			metadata: chainMetadataForFingerprint(chain.metadata),
 		},
 		terminalStatuses: [...terminalStatuses].sort(),
@@ -2308,9 +2306,6 @@ export function buildSchedulerResolveContext(input: {
 		resumedStartedAt: "",
 		resumedSessionId,
 		chainName: input.chain.name,
-		chainUmbrellaRepo: input.chain.umbrellaRepo ?? "",
-		chainUmbrellaIssue: input.chain.umbrellaIssue === null ? "" : String(input.chain.umbrellaIssue),
-		chainBaseBranch: input.chain.baseBranch,
 		repoCwd: input.item.repoCwd,
 	}
 	const chain = buildRenderBindings({

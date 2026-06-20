@@ -7,8 +7,10 @@ Apply the transition chosen by the terminal action by writing the item status yo
 The daemon-serialized CLI validates against the preset vocabulary and writes atomically:
 
 ```bash
-coder-loop item update <CHAIN_NAME> --issue <ISSUE> --status <status> [--field-json '{"pr":123,"branch":"<name>"}'] [--blocker-repo <owner/repo>] [--blocker-ref <ref>] [--clear-blocker]
+coder-loop item update <CHAIN_NAME> --issue <ISSUE> --status <status> [--field-json '{"pr":123,"branch":"<name>"}']
 ```
+
+Blocker metadata for the `blocked` transition lives inside `--field-json` as an `extraPatch` block — see the Blocker metadata section below.
 
 Run once per transition, then verify the write landed:
 
@@ -27,10 +29,26 @@ Non-zero exit or verification not showing the intended status = the write did no
 - `accepted_pr` → only after PR merge AND issue close both succeeded: `--status done --field-json '{"pr":123}'`.
 - `accepted_no_pr` → only after issue close succeeded: `--status done`.
 - `skip` → only after issue close succeeded: `--status moot`.
-- `blocked` → `--status blocked --blocker-repo <owner/repo> --blocker-ref <ref>`.
+- `blocked` → `--status blocked --field-json '{"extraPatch":{"blockerRepo":"<owner/repo>","blockerRef":"<ref>"}}'`.
 
 If merge fails, close fails, the issue remains open, checks are not green, or expansion fails: do not write a terminal status — keep the item actionable with exact feedback.
 
 ## Blocker metadata
 
-Only `blocked` writes blocker metadata, via the typed flags (never raw JSON): `--blocker-repo owner/repo`, `--blocker-ref '#267'` (or `owner/repo#267`, or a concise condition string). The daemon merges them into the item's `extra` without disturbing other keys (e.g. `dependsOn`), so `blocked-responder` can read them. For non-blocked transitions never pass blocker flags; clear stale metadata with `--clear-blocker` when moving out of blocked. Cross-repo blockers: record repo+ref so `blocked-responder` can resolve the blocking repository; the item's `agentCwd` is daemon-owned and cannot be set here — state the cross-repo context in the handoff instead.
+Only `blocked` writes blocker metadata. Since #457 the engine no longer carries a first-class blocker mutation; the preset writes blocker info through the generic `extraPatch` path inside `--field-json`:
+
+```bash
+--field-json '{"extraPatch":{"blockerRepo":"owner/repo","blockerRef":"#267"}}'
+```
+
+`blockerRepo` is `owner/repo` (use the current `REPO` if the blocker is in-repo); `blockerRef` is `#123` / `owner/repo#123` or a concise condition string when no concrete issue exists. The daemon merges this patch into the item's `extra` without disturbing other keys (e.g. `dependsOn`), so `blocked-responder` can read them.
+
+For non-blocked transitions never write these keys. When moving an item OUT of `blocked`, rebuild the full `extra` object without the blocker keys (the engine no longer offers a typed "clear blocker" op — it does not own those keys' semantics any more):
+
+```bash
+--field-json '{"extra":{"dependsOn":[42]}}'
+```
+
+(Inspect the item's current extra with `coder-loop item list <CHAIN_NAME> --json` first to know which other keys to preserve.)
+
+Cross-repo blockers: record repo+ref so `blocked-responder` can resolve the blocking repository; the item's `agentCwd` is daemon-owned and cannot be set here — state the cross-repo context in the handoff instead.

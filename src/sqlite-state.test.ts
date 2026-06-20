@@ -11,7 +11,7 @@ import {
 	openSqliteStateStore,
 } from "./sqlite-state"
 import type { JsonObject } from "./loop"
-import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
+import { chainBindings, engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/sqlite-state-tests", String(process.pid))
@@ -28,17 +28,18 @@ afterAll(async () => {
 })
 
 describe("sqlite state store", () => {
-	test("schema covers umbrella contract", async () => {
+	test("schema covers chain core columns (umbrella retired #457)", async () => {
 		const { store } = await openTestStore("schema")
 		try {
+			// #457: chains.umbrella_issue / umbrella_repo columns retired. Existing data is moved
+			// into chain.metadata.bindings by the v10→v11 migration; new chains write umbrella
+			// values straight into metadata.bindings via the declared-field path.
 			expect(store.listTableColumns("chains")).toEqual([
 				"id",
 				"name",
 				"preset",
 				"repository",
 				"base_branch",
-				"umbrella_issue",
-				"umbrella_repo",
 				"status",
 				"metadata",
 				"created_at",
@@ -909,6 +910,136 @@ describe("sqlite state store", () => {
 		}
 	})
 
+	// #457 acceptance row 4: pre-migration loop-data carrying values inside the retired
+	// chains.umbrella_issue / umbrella_repo first-class columns must remain readable after the
+	// v10→v11 migration runs. Existing column values move into chain.metadata.bindings.umbrellaIssue
+	// / umbrellaRepo so the bundled preset reads them through the declared-binding namespace
+	// (chain.umbrellaRepo / chain.umbrellaIssue). After migration the columns no longer exist.
+	test("v10 to v11 migration moves chains.umbrella_issue / umbrella_repo into metadata.bindings (acceptance row 4, #457)", async () => {
+		const loopDataRoot = resolve(TEST_ROOT, `chain-umbrella-v10-v11-${Date.now()}-${++nextRootId}`)
+		await mkdir(loopDataRoot, { recursive: true })
+		const dbFile = resolve(loopDataRoot, "db.sqlite")
+
+		const legacy = new Database(dbFile, { create: true, readwrite: true, strict: true })
+		try {
+			legacy.exec("PRAGMA foreign_keys = ON")
+			legacy.exec("PRAGMA journal_mode = WAL")
+			legacy.exec(`
+				CREATE TABLE chains (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					name TEXT NOT NULL UNIQUE,
+					preset TEXT,
+					repository TEXT NOT NULL,
+					base_branch TEXT NOT NULL,
+					umbrella_issue INTEGER,
+					umbrella_repo TEXT,
+					status TEXT NOT NULL CHECK (status IN ('active', 'completed', 'deleted', 'stopped')),
+					metadata TEXT NOT NULL,
+					created_at REAL NOT NULL,
+					updated_at REAL NOT NULL
+				);
+				CREATE TABLE items (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+					issue_number INTEGER NOT NULL,
+					repo_cwd TEXT NOT NULL,
+					status TEXT NOT NULL,
+					attempts INTEGER NOT NULL,
+					position INTEGER NOT NULL DEFAULT 0,
+					status_updated_at REAL NOT NULL DEFAULT 0,
+					title TEXT,
+					priority TEXT,
+					branch TEXT,
+					pr INTEGER,
+					last_run_id TEXT,
+					session_ids TEXT NOT NULL DEFAULT '{}',
+					issue_file TEXT,
+					evidence_dir TEXT,
+					agent_cwd TEXT,
+					runner TEXT CHECK (runner IN ('claude', 'codex') OR runner IS NULL),
+					phase TEXT,
+					preset TEXT,
+					preset_path TEXT,
+					extra TEXT NOT NULL,
+					created_at REAL NOT NULL,
+					updated_at REAL NOT NULL,
+					UNIQUE (chain_id, issue_number)
+				);
+				CREATE TABLE runs (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					run_id TEXT NOT NULL UNIQUE,
+					chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+					item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+					phase TEXT NOT NULL,
+					status TEXT NOT NULL DEFAULT 'unknown',
+					started_at REAL NOT NULL,
+					ended_at REAL,
+					exit_code INTEGER,
+					extra TEXT NOT NULL
+				);
+				CREATE TABLE current_runs (
+					chain_id INTEGER PRIMARY KEY REFERENCES chains(id) ON DELETE CASCADE,
+					phase TEXT NOT NULL,
+					run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+					started_at REAL NOT NULL,
+					extra TEXT NOT NULL
+				);
+				PRAGMA user_version = 10;
+			`)
+			legacy.exec(`
+				INSERT INTO chains (name, preset, repository, base_branch, umbrella_issue, umbrella_repo, status, metadata, created_at, updated_at)
+				VALUES
+					('legacy-umbrella', 'gh-issue-pr-iteration', 'mouriya-s-lab/coder-loop', 'main', 176, 'mouriya-s-lab/coder-loop', 'active', '{}', 1.0, 1.0),
+					('null-umbrella', 'gh-issue-pr-iteration', 'mouriya-s-lab/coder-loop', 'main', NULL, NULL, 'active', '{}', 1.0, 1.0),
+					('partial-umbrella', 'gh-issue-pr-iteration', 'mouriya-s-lab/coder-loop', 'main', 309, NULL, 'active', '{}', 1.0, 1.0)
+			`)
+		} finally {
+			legacy.close()
+		}
+
+		const migrated = openSqliteStateStore({ loopDataRoot })
+		try {
+			// Columns are gone post-migration.
+			expect(migrated.listTableColumns("chains")).not.toContain("umbrella_issue")
+			expect(migrated.listTableColumns("chains")).not.toContain("umbrella_repo")
+
+			// Values landed inside metadata.bindings under the same names.
+			const legacyChain = migrated.getChainByName("legacy-umbrella")
+			expect(legacyChain).not.toBeNull()
+			expect(chainBindings(legacyChain!.metadata)).toEqual({
+				umbrellaIssue: 176,
+				umbrellaRepo: "mouriya-s-lab/coder-loop",
+			})
+
+			// Null-only rows leave the bindings untouched.
+			const nullChain = migrated.getChainByName("null-umbrella")
+			expect(nullChain).not.toBeNull()
+			expect(chainBindings(nullChain!.metadata)).toEqual({})
+
+			// Partial values only move the non-null entry.
+			const partialChain = migrated.getChainByName("partial-umbrella")
+			expect(partialChain).not.toBeNull()
+			expect(chainBindings(partialChain!.metadata)).toEqual({ umbrellaIssue: 309 })
+		} finally {
+			migrated.close()
+		}
+
+		// Re-open: post-migration writes go straight through the new shape; the rows survive a
+		// second open without re-running the column-drop logic.
+		const reopened = openSqliteStateStore({ loopDataRoot })
+		try {
+			expect(reopened.listTableColumns("chains")).not.toContain("umbrella_issue")
+			const legacyChain = reopened.getChainByName("legacy-umbrella")
+			expect(legacyChain).not.toBeNull()
+			expect(chainBindings(legacyChain!.metadata)).toEqual({
+				umbrellaIssue: 176,
+				umbrellaRepo: "mouriya-s-lab/coder-loop",
+			})
+		} finally {
+			reopened.close()
+		}
+	})
+
 	test("v5 to v6 migration maps legacy last_session_id by current phase and chain runner (issue #330 AC8)", async () => {
 		const loopDataRoot = resolve(TEST_ROOT, `session-ids-v5-v6-${Date.now()}-${++nextRootId}`)
 		await mkdir(loopDataRoot, { recursive: true })
@@ -1125,10 +1256,16 @@ function createFullChain(store: ReturnType<typeof openSqliteStateStore>): ChainR
 		preset: "gh-issue-pr-iteration",
 		repository: "mouriya-s-lab/coder-loop",
 		baseBranch: "main",
-		umbrellaIssue: 176,
-		umbrellaRepo: "mouriya-s-lab/coder-loop",
 		status: "active",
-		metadata: storedChainMetadata({ flavor: "codex", tier: "claude", nested: { enabled: true } }),
+		// #457: umbrella values previously stored in chains.umbrella_issue / umbrella_repo first-class
+		// columns. The columns are retired; bundled preset reads umbrella through metadata.bindings
+		// (chain.umbrellaRepo / chain.umbrellaIssue declared-binding namespace).
+		metadata: storedChainMetadata({
+			flavor: "codex",
+			tier: "claude",
+			nested: { enabled: true },
+			bindings: { umbrellaIssue: 176, umbrellaRepo: "mouriya-s-lab/coder-loop" },
+		}),
 		createdAt: 1_800_000_000,
 		updatedAt: 1_800_000_010,
 	})

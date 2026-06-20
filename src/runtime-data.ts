@@ -142,10 +142,11 @@ export type SchedulerSpawnError = {
 	message: string
 }
 
+// #457: `blockerRepo` / `blockerRef` are no longer engine-typed ItemExtra fields. Presets that store
+// blocker info on an item write the keys as preset-owned strings inside the same JSON blob; they round
+// trip through `runtimeRemainder` exactly like any other preset-owned extra key.
 export class ItemExtra extends RuntimeDataRecord {
 	dependsOn?: number[]
-	blockerRepo?: string
-	blockerRef?: string
 	schedulerBackoff?: SchedulerBackoffState
 	schedulerSpawnError?: SchedulerSpawnError
 	slotKey?: string
@@ -161,8 +162,6 @@ export class ItemExtra extends RuntimeDataRecord {
 	constructor(input: ItemExtraInput, remainder: JsonObject) {
 		super(remainder)
 		if (input.dependsOn !== undefined) this.dependsOn = [...input.dependsOn]
-		if (input.blockerRepo !== undefined) this.blockerRepo = input.blockerRepo
-		if (input.blockerRef !== undefined) this.blockerRef = input.blockerRef
 		if (input.schedulerBackoff !== undefined) this.schedulerBackoff = { ...input.schedulerBackoff }
 		if (input.schedulerSpawnError !== undefined) this.schedulerSpawnError = { ...input.schedulerSpawnError }
 		if (input.slotKey !== undefined) this.slotKey = input.slotKey
@@ -211,8 +210,6 @@ type ChainBindingsInput = {
 
 type ItemExtraInput = {
 	dependsOn?: number[]
-	blockerRepo?: string
-	blockerRef?: string
 	schedulerBackoff?: SchedulerBackoffState
 	schedulerSpawnError?: SchedulerSpawnError
 	slotKey?: string
@@ -261,8 +258,6 @@ const CHAIN_METADATA_KEYS = new Set([
 const RETIRED_CHAIN_METADATA_KEYS = new Set(["config", "runner", "reviewRunner"])
 const ITEM_EXTRA_KEYS = new Set([
 	"dependsOn",
-	"blockerRepo",
-	"blockerRef",
 	"schedulerBackoff",
 	"schedulerSpawnError",
 	"slotKey",
@@ -393,8 +388,6 @@ export function parseItemExtraForRequest(value: BoundaryValue, field = "extra"):
 export function itemExtraToJsonObject(extra: ItemExtra): JsonObject {
 	const result: JsonObject = { ...runtimeRemainder(extra) }
 	assignJson(result, "dependsOn", extra.dependsOn === undefined ? undefined : [...extra.dependsOn])
-	assignJson(result, "blockerRepo", extra.blockerRepo)
-	assignJson(result, "blockerRef", extra.blockerRef)
 	assignJson(result, "schedulerBackoff", extra.schedulerBackoff === undefined ? undefined : { ...extra.schedulerBackoff })
 	assignJson(result, "schedulerSpawnError", extra.schedulerSpawnError === undefined ? undefined : { ...extra.schedulerSpawnError })
 	assignJson(result, "slotKey", extra.slotKey)
@@ -411,10 +404,6 @@ export function itemExtraToJsonObject(extra: ItemExtra): JsonObject {
 
 export function itemExtraJsonValue(extra: ItemExtra, key: string): JsonValue | undefined {
 	return itemExtraToJsonObject(extra)[key]
-}
-
-export function itemExtraHasJsonKey(extra: ItemExtra, key: string): boolean {
-	return Object.prototype.hasOwnProperty.call(itemExtraToJsonObject(extra), key)
 }
 
 export function itemExtraWithoutKeys(extra: ItemExtra, keys: readonly string[]): ItemExtra {
@@ -518,10 +507,6 @@ function parseItemExtra(value: JsonObject, field: string): ItemExtra {
 	const input: ItemExtraInput = {}
 	const dependsOn = optionalPositiveIntegerArrayField(value, "dependsOn", `${field}.dependsOn`, `${field}.dependsOn must be an array of positive item ids when provided`)
 	if (dependsOn !== undefined) input.dependsOn = dependsOn
-	const blockerRepo = optionalStringField(value, "blockerRepo", `${field}.blockerRepo`)
-	if (blockerRepo !== undefined) input.blockerRepo = blockerRepo
-	const blockerRef = optionalStringField(value, "blockerRef", `${field}.blockerRef`)
-	if (blockerRef !== undefined) input.blockerRef = blockerRef
 	const schedulerBackoff = optionalSchedulerBackoffField(value, "schedulerBackoff", `${field}.schedulerBackoff`)
 	if (schedulerBackoff !== undefined) input.schedulerBackoff = schedulerBackoff
 	const schedulerSpawnError = optionalSchedulerSpawnErrorField(value, "schedulerSpawnError", `${field}.schedulerSpawnError`)

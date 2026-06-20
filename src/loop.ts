@@ -48,10 +48,8 @@ import {
 import {
 	chainBindings as metadataBindings,
 	chainBindingsPresetPath,
-	itemExtraHasJsonKey,
 	itemExtraJsonValue,
 	itemExtraToJsonObject,
-	itemExtraWithoutKeys,
 	metadataBoolean,
 	metadataNestedString,
 	metadataNestedStringArray,
@@ -296,11 +294,10 @@ export type ItemCommandArgs =
 			issueFile: string | null
 			evidenceDir: string | null
 			runner: AgentRunnerKind | null
-			blockerRepo: string | null
-			blockerRef: string | null
-			clearBlocker: boolean
 			// #406: `agentRunId` / `agentPhase` retired. Agent identity is bound by the spawn-time
 			// `CODER_LOOP_RUN_CRED` env credential (`withInjectedRunCredential` auto-attaches).
+			// #457: `blockerRepo` / `blockerRef` / `clearBlocker` retired as first-class engine fields;
+			// blocker semantics moved to preset's generic `extraPatch` path inside `--field-json`.
 			loopDataRoot: string | null
 			json: boolean
 	  }
@@ -951,9 +948,6 @@ export const ENGINE_RUNTIME_BINDING_KEYS = [
 	"resumedStartedAt",
 	"resumedSessionId",
 	"chainName",
-	"chainUmbrellaRepo",
-	"chainUmbrellaIssue",
-	"chainBaseBranch",
 	"repoCwd",
 ] as const
 
@@ -1447,12 +1441,11 @@ const itemUpdateCliCommand = command({
 		issueFile: option({ long: "issue-file", type: optional(cmdString) }),
 		evidenceDir: option({ long: "evidence-dir", type: optional(cmdString) }),
 		runner: option({ long: "runner", type: optional(cmdString) }),
-		blockerRepo: option({ long: "blocker-repo", type: optional(cmdString) }),
-		blockerRef: option({ long: "blocker-ref", type: optional(cmdString) }),
-		clearBlocker: flag({ long: "clear-blocker" }),
 		// #406: `--agent-run-id` / `--agent-phase` flags retired. The spawn-time env credential
 		// (`CODER_LOOP_RUN_CRED`) auto-attaches via `withInjectedRunCredential`. Operators run the
 		// CLI in their own env (no credential) and the daemon admits them as `operator`.
+		// #457: `--blocker-repo` / `--blocker-ref` / `--clear-blocker` flags retired as first-class
+		// engine fields; blocker semantics moved to preset's generic `--field-json` `extraPatch` path.
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
 		json: flag({ long: "json" }),
 	},
@@ -1470,9 +1463,8 @@ const itemUpdateCliCommand = command({
 			issueFile: args.issueFile ?? null,
 			evidenceDir: args.evidenceDir ?? null,
 			runner: parseOptionalRunner(args.runner ?? null, "--runner"),
-			blockerRepo: args.blockerRepo ?? null,
-			blockerRef: args.blockerRef ?? null,
-			clearBlocker: args.clearBlocker,
+			// #406: `agentRunId` / `agentPhase` retired (env-credential path).
+			// #457: `blockerRepo` / `blockerRef` / `clearBlocker` retired (extraPatch path).
 			loopDataRoot: args.loopDataRoot ?? null,
 			json: args.json,
 		},
@@ -1719,6 +1711,18 @@ async function runChainCommand(args: string[]): Promise<void> {
 		// not bindings). `normalizeChainCreateBindings` rejects nested misshapes — that arktype-driven
 		// rejection is also enforced daemon-side, so a stray key fails fast either path.
 		const bindings = normalizeChainCreateBindings(chainArgs.configJson)
+		// #457: `--umbrella owner/repo#123` is operator shorthand that merges
+		// `umbrellaRepo` / `umbrellaIssue` into the chain bindings. The engine has no first-class
+		// understanding of these — they live as preset-declared chain bindings (consumed by the
+		// bundled preset via `chain.umbrellaRepo` / `chain.umbrellaIssue`). Explicit
+		// `--config-json '{"umbrellaRepo":"...","umbrellaIssue":...}'` keys win on conflict so the
+		// operator can still override the shorthand.
+		if (chainArgs.umbrella !== null) {
+			const umbrellaBindings = parseUmbrellaRef(chainArgs.umbrella, repository)
+			for (const [key, value] of Object.entries(umbrellaBindings)) {
+				if (!Object.hasOwn(bindings, key)) bindings[key] = value
+			}
+		}
 		const requestArgs: JsonObject = {
 			name: chainArgs.name,
 			repository,
@@ -1726,7 +1730,6 @@ async function runChainCommand(args: string[]): Promise<void> {
 			metadata: { bindings },
 		}
 		if (chainArgs.preset !== null) requestArgs.preset = chainArgs.preset
-		if (chainArgs.umbrella !== null) Object.assign(requestArgs, parseUmbrellaRef(chainArgs.umbrella, repository))
 		if (chainArgs.force) requestArgs.force = true
 		const result = await requestDaemonResult(chainArgs.loopDataRoot, "chain.create", requestArgs)
 		writeCommandResult(result, chainArgs.json, formatChainCreateResult)
@@ -1832,9 +1835,6 @@ async function runItemCommand(args: string[]): Promise<void> {
 	assignCliOptional(fields, "issueFile", itemArgs.issueFile)
 	assignCliOptional(fields, "evidenceDir", itemArgs.evidenceDir)
 	assignCliOptional(fields, "runner", itemArgs.runner)
-	assignCliOptional(fields, "blockerRepo", itemArgs.blockerRepo)
-	assignCliOptional(fields, "blockerRef", itemArgs.blockerRef)
-	if (itemArgs.clearBlocker) fields.clearBlocker = true
 	if (Object.keys(fields).length === 0) fail("item update requires at least one field to update")
 	const result = await requestDaemonResult(itemArgs.loopDataRoot, "item.update", requestArgs)
 	writeCommandResult(result, itemArgs.json, formatItemMutationResult)
@@ -1893,6 +1893,10 @@ function parseBatchItemsJson(raw: string): JsonObject[] {
 	})
 }
 
+// #457: parses `owner/repo#123` / `#123` into chain-binding pairs the caller
+// merges into `metadata.bindings`. Umbrella values are not engine first-class
+// fields any more — the bundled preset reads them via `chain.umbrellaRepo`
+// / `chain.umbrellaIssue` against the declared-binding namespace.
 function parseUmbrellaRef(raw: string, defaultRepo: string): JsonObject {
 	const trimmed = raw.trim()
 	const match = /^(?:(?<repo>[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+))?#(?<issue>[1-9][0-9]*)$/.exec(trimmed)
@@ -3296,8 +3300,6 @@ export type QueueUnblockMutationOutcome =
 			issue: string
 			beforeStatus: string
 			afterStatus: string
-			clearedBlockerRepo: boolean
-			clearedBlockerRef: boolean
 			clearedCurrent: boolean
 	  }
 	| {
@@ -3326,8 +3328,6 @@ type QueueUnblockCommandResult = {
 		| { requested: true; dryRun: false; result: DaemonStartResult }
 	verification: {
 		itemStatus: string | null
-		blockerRepoPresent: boolean | null
-		blockerRefPresent: boolean | null
 		stateKind: StatusStateKind
 		daemonRunning: boolean
 		}
@@ -3429,8 +3429,6 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 		daemon,
 		verification: {
 			itemStatus: item?.status ?? null,
-			blockerRepoPresent: item === null ? null : itemExtraHasJsonKey(item.extra, "blockerRepo"),
-			blockerRefPresent: item === null ? null : itemExtraHasJsonKey(item.extra, "blockerRef"),
 			stateKind: "ok",
 			daemonRunning,
 		},
@@ -3451,10 +3449,6 @@ function restoreUnblockableItemRecord(
 	if (!preset.statuses.unblockable.includes(item.status)) return { changed: false, issue, reason: "not_unblockable", status: item.status }
 	const entryStatus = preset.statuses.entry
 
-	const clearedBlockerRepo = itemExtraHasJsonKey(item.extra, "blockerRepo")
-	const clearedBlockerRef = itemExtraHasJsonKey(item.extra, "blockerRef")
-	const nextExtra = itemExtraWithoutKeys(item.extra, ["blockerRepo", "blockerRef"])
-
 	const current = store.getCurrentRun(chain.id)
 	const currentItem = current === null ? null : currentItemFromRecords(current, [item], preset)
 	const clearedCurrent = currentItem?.id === item.id
@@ -3467,7 +3461,8 @@ function restoreUnblockableItemRecord(
 			// constructor rather than passing back through the request gate (the item is currently
 			// terminal/blocked with phase=null; the per-phase leg of the gate would no-op anyway).
 			status: engineLifecycleAdmittedItemStatus(entryStatus, "queue.unblock-entry-restore"),
-			extra: nextExtra,
+			// #457: extra is untouched — any preset-owned blocker keys are inert once the item is no
+			// longer in a blocked status; the engine no longer knows or owns those keys' meanings.
 			updatedAt: unixSeconds(),
 		})
 		if (clearedCurrent) store.clearCurrentRun(chain.id)
@@ -3478,8 +3473,6 @@ function restoreUnblockableItemRecord(
 		issue,
 		beforeStatus: item.status,
 		afterStatus: entryStatus,
-		clearedBlockerRepo,
-		clearedBlockerRef,
 		clearedCurrent,
 	}
 }
@@ -4953,9 +4946,6 @@ export function buildCentralRuntimeBindingPaths(input: {
 
 export type ChainRuntimeBinding = {
 	name: string
-	umbrellaRepo: string | null
-	umbrellaIssue: number | null
-	baseBranch: string
 }
 
 export function buildRuntimeBindings(input: {
@@ -5005,9 +4995,6 @@ export function buildRuntimeBindings(input: {
 		resumedStartedAt: input.issueRun.resumedStartedAt ?? "",
 		resumedSessionId: input.issueRun.resumedSessionId ?? "",
 		chainName: input.chain?.name ?? "",
-		chainUmbrellaRepo: input.chain?.umbrellaRepo ?? "",
-		chainUmbrellaIssue: input.chain?.umbrellaIssue !== undefined && input.chain.umbrellaIssue !== null ? String(input.chain.umbrellaIssue) : "",
-		chainBaseBranch: input.chain?.baseBranch ?? "",
 		repoCwd: input.repoCwd ?? "",
 	}
 }
