@@ -7,7 +7,12 @@ import { startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
 import { LOOP_DATA_ROOT_ENV, resolveLoopDataPaths } from "./runtime-paths"
 import { reviewOnEmptyLockPathForChainName, serializeSchedulerReviewOnEmptyLock } from "./scheduler"
 import { openSqliteStateStore } from "./sqlite-state"
-import { parseInternalStatus, storedItemExtra } from "./runtime-data"
+import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedItemExtra } from "./runtime-data"
+
+// #397 test brand helper — see install-commands.test.ts for rationale.
+function admittedTestStatus(value: string) {
+	return engineLifecycleAdmittedItemStatus(parseInternalStatus(value, "test.status"), "test")
+}
 import type { BoundaryRecord } from "./boundary-types"
 
 function preInstallReviewOnEmptyLockByName(chainName: string, loopDataRoot: string, runId = "test-pre-installed"): void {
@@ -384,7 +389,7 @@ attemptTimeoutSeconds = 3600
 			try {
 				const chain = store.getChainByName("done-chain")
 				if (chain === null) throw new Error("expected done-chain")
-				store.createItem({ chainId: chain.id, issueNumber: 181, repoCwd: REPO_ROOT, status: parseInternalStatus("done", "test.status") })
+				store.createItem({ chainId: chain.id, issueNumber: 181, repoCwd: REPO_ROOT, status: admittedTestStatus("done") })
 			} finally {
 				store.close()
 			}
@@ -407,12 +412,12 @@ attemptTimeoutSeconds = 3600
 			try {
 				const chain = store.getChainByName("dependency-wait-chain")
 				if (chain === null) throw new Error("expected dependency-wait-chain")
-				const prerequisite = store.createItem({ chainId: chain.id, issueNumber: 2671, repoCwd: REPO_ROOT, status: parseInternalStatus("queued", "test.status"), priority: "10" })
+				const prerequisite = store.createItem({ chainId: chain.id, issueNumber: 2671, repoCwd: REPO_ROOT, status: admittedTestStatus("queued"), priority: "10" })
 				const dependent = store.createItem({
 					chainId: chain.id,
 					issueNumber: 2672,
 					repoCwd: REPO_ROOT,
-					status: parseInternalStatus("queued", "test.status"),
+					status: admittedTestStatus("queued"),
 					priority: "00",
 					extra: storedItemExtra({ dependsOn: [prerequisite.id] }),
 				})
@@ -847,7 +852,7 @@ attemptTimeoutSeconds = 3600
 			try {
 				const completedChain = store.getChainByName("logs-completed-history-chain")
 				if (completedChain === null) throw new Error("expected logs-completed-history-chain")
-				store.createItem({ chainId: completedChain.id, issueNumber: 411, repoCwd: REPO_ROOT, status: parseInternalStatus("done", "test.status") })
+				store.createItem({ chainId: completedChain.id, issueNumber: 411, repoCwd: REPO_ROOT, status: admittedTestStatus("done") })
 			} finally {
 				store.close()
 			}

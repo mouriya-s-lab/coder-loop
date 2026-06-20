@@ -56,6 +56,8 @@ import {
 	metadataNestedStringArray,
 	metadataString,
 	parseInternalStatus,
+	engineLifecycleAdmittedItemStatus,
+	type AdmittedItemStatus,
 	type InternalStatus,
 	type ItemExtra,
 } from "./runtime-data"
@@ -3335,7 +3337,12 @@ function restoreUnblockableItemRecord(
 
 	if (!dryRun) {
 		store.updateItem(item.id, {
-			status: entryStatus,
+			// #397: `queue unblock` is an operator-issued lifecycle nudge that restores the item
+			// to the preset's entry status; the value written (`preset.statuses.entry`) is
+			// preset-derived not caller-provided, so it brands through the narrow engine-lifecycle
+			// constructor rather than passing back through the request gate (the item is currently
+			// terminal/blocked with phase=null; the per-phase leg of the gate would no-op anyway).
+			status: engineLifecycleAdmittedItemStatus(entryStatus, "queue.unblock-entry-restore"),
 			extra: nextExtra,
 			updatedAt: unixSeconds(),
 		})

@@ -4,9 +4,41 @@ import type { BoundaryValue } from "./boundary-types"
 import type { JsonObject, JsonValue } from "./loop"
 
 declare const internalStatusBrand: unique symbol
+declare const admittedItemStatusBrand: unique symbol
 const runtimeDataRemainderKey: unique symbol = Symbol("runtimeDataRemainder")
 
 export type InternalStatus = string & { readonly [internalStatusBrand]: "InternalStatus" }
+
+// #397: `AdmittedItemStatus` is the sub-brand the store's `CreateItemInput.status` and
+// `UpdateItemInput.status` require. Constructing one is the *only* way to land an item
+// status in SQLite — every TS callsite that writes status to the store must therefore
+// flow either:
+//   1. through the daemon's per-phase admission gate (`admitItemStatusForRequest`, the
+//      only request-flow constructor; rejects unknown phase + status outside the
+//      phase's declared exits, emits one `item.status.write_admission` audit event per
+//      allow/deny), or
+//   2. through the narrow engine-lifecycle constructor below (`engineLifecycleAdmittedItemStatus`),
+//      whose call sites are scheduler-internal lifecycle writes whose source value is preset-derived
+//      or already-validated (not caller-provided).
+// The brand makes the property "every agent-reachable status write path is admission-gated"
+// (D8, see issue #397 / #396 master record) a typechecker-enforced enumeration rather than a
+// hand-maintained path list.
+export type AdmittedItemStatus = InternalStatus & { readonly [admittedItemStatusBrand]: "AdmittedItemStatus" }
+
+// Reason tag for `engineLifecycleAdmittedItemStatus`. Every reason corresponds to a known
+// engine-internal write path that does not consume caller-provided status, and whose own
+// observability event carries the lifecycle context (`scheduler.recovery`, `queue.terminal`,
+// `spawn.aborted`, `item.dependency_unblocked`, `item.created`). Adding a new value here
+// = declaring a new engine-lifecycle status-write path is intentional.
+export type EngineLifecycleAdmissionReason =
+	| "scheduler.exhausted-on-max-attempts"
+	| "scheduler.spawn-aborted-entry-restore"
+	| "scheduler.run-status-forwarded"
+	| "scheduler.dependency-unblock-restore"
+	| "scheduler.recovery-entry-restore"
+	| "queue.unblock-entry-restore"
+	| "item.created-default-from-preset"
+	| "test"
 
 export type RuntimeDataIssue = {
 	field: string
@@ -263,6 +295,36 @@ export function parseInternalStatus(value: string, field: string): InternalStatu
 export function assertInternalStatus(value: string, field: string): asserts value is InternalStatus {
 	if (value.trim() !== "") return
 	throw new RuntimeDataError(`${field} must be a non-empty status`, { field, value })
+}
+
+// #397: brand a status as admitted under the named engine-lifecycle reason. The reason tag is
+// not a runtime value — it carries no behavior — but every call site is grep-able by reason, and
+// adding a new reason requires extending `EngineLifecycleAdmissionReason`. Combined with the
+// branded `AdmittedItemStatus` requirement on `UpdateItemInput.status` / `CreateItemInput.status`,
+// this gives a typechecker-enforced enumeration of every status-write path that bypasses the
+// per-phase request gate. Request-flow writes go through `admitItemStatusForRequest` in daemon.ts
+// instead — that path emits the `item.status.write_admission` audit event.
+export function engineLifecycleAdmittedItemStatus(status: InternalStatus, reason: EngineLifecycleAdmissionReason): AdmittedItemStatus {
+	assertAdmittedItemStatus(status, reason)
+	return status
+}
+
+// Assertion predicate that narrows `InternalStatus` to `AdmittedItemStatus`. The brand is a
+// phantom type symbol that has no runtime presence, so the only legitimate ways to obtain a
+// value of the brand are this assertion (called by `engineLifecycleAdmittedItemStatus`) and
+// the daemon's request-flow admission gate. No `as` assertion is used.
+function assertAdmittedItemStatus(_value: InternalStatus, _reason: EngineLifecycleAdmissionReason): asserts _value is AdmittedItemStatus {
+	// Brand-only assertion. No runtime check beyond the input being a valid `InternalStatus`,
+	// which is already guaranteed by the parameter type. The named reason flows out as the
+	// call site's documentation.
+}
+
+// Brand-only assertion the daemon's request gate uses after running the vocabulary + per-phase
+// admission check. Exported so the gate (in daemon.ts) can elevate a parsed `InternalStatus`
+// to `AdmittedItemStatus` without `as`, matching the pattern above. The daemon emits its own
+// `item.status.write_admission` audit event alongside this call.
+export function assertRequestAdmittedItemStatus(_value: InternalStatus): asserts _value is AdmittedItemStatus {
+	// Brand-only assertion; the caller has already run the gate.
 }
 
 export function storedChainMetadata(value: JsonObject, field = "metadata"): ChainMetadata {

@@ -4,13 +4,17 @@ import { resolve } from "node:path"
 import { buildLiveRuntimeHealthLines } from "./install-commands"
 import { buildCoderLoopStatusSnapshot } from "./loop"
 import { openSqliteStateStore } from "./sqlite-state"
-import { parseInternalStatus, storedItemExtra } from "./runtime-data"
+import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedItemExtra } from "./runtime-data"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/install-command-tests", String(process.pid))
 
+// #397 test brand helper: tests that bypass the daemon and write status directly to SQLite
+// (simulating an already-admitted value) brand through the `"test"` lifecycle reason rather
+// than going through the request gate. The production path is still typechecker-enforced;
+// see `AdmittedItemStatus` in src/runtime-data.ts.
 function runtimeStatus(value: string) {
-	return parseInternalStatus(value, "test.status")
+	return engineLifecycleAdmittedItemStatus(parseInternalStatus(value, "test.status"), "test")
 }
 
 afterAll(async () => {

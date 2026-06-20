@@ -27,7 +27,7 @@ import {
 import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
 import { queryObservabilityEvents } from "./observability"
-import { chainBindings, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
+import { chainBindings, engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 import type { BoundaryRecord } from "./boundary-types"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -36,8 +36,9 @@ const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
 
 let nextFixtureId = 0
 
+// #397 test brand helper — see install-commands.test.ts for rationale.
 function runtimeStatus(value: string) {
-	return parseInternalStatus(value, "test.status")
+	return engineLifecycleAdmittedItemStatus(parseInternalStatus(value, "test.status"), "test")
 }
 
 // v1 status model: the spawned agent is the only writer of item.status. These daemon
@@ -1494,9 +1495,59 @@ attemptTimeoutSeconds = 3600
 			for (const status of ["in_progress", "changes_requested", "blocked", "moot", "done", "exhausted"]) {
 				const rejected = await request(fixture, "item.update", { itemId: iterationItemId, status })
 				expectInvalid(rejected)
-				if (!rejected.ok) expect(rejected.error.details).toMatchObject({ phase: "iteration", status })
+				if (!rejected.ok) expect(rejected.error.details).toMatchObject({ phase: "iteration", status, allowed: [] })
 			}
 			expect((await readItem(fixture.loopDataRoot, chainId, 34701))?.phase).toBe("iteration")
+
+			// #397: review write that exits the phase's declared exits set (queued is vocab-valid but
+			// not in review's [[phases.exits]]) is rejected under default-deny.
+			const reviewExitOutsideItem = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 34715,
+				repoCwd: REPO_ROOT,
+			})).item)
+			const reviewExitOutsideItemId = numberValue(reviewExitOutsideItem.id)
+			const exitOutsideStore = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				exitOutsideStore.updateItem(reviewExitOutsideItemId, { phase: "review", updatedAt: 1_800_020_098 })
+			} finally {
+				exitOutsideStore.close()
+			}
+			const reviewExitOutsideRejected = await request(fixture, "item.update", { itemId: reviewExitOutsideItemId, status: "queued" })
+			expectInvalid(reviewExitOutsideRejected)
+			if (!reviewExitOutsideRejected.ok) {
+				expect(reviewExitOutsideRejected.error.details).toMatchObject({
+					phase: "review",
+					status: "queued",
+					allowed: ["blocked", "changes_requested", "done", "exhausted", "moot"],
+				})
+			}
+
+			// #397: an unknown phase (not declared in the preset) is now rejected — pre-#397 this
+			// case short-circuited to "allow" via `allowed === null`, the actual default-allow leak
+			// the issue body anchors. Default-deny rejects any status write from an unknown phase.
+			const unknownPhaseItem = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 34716,
+				repoCwd: REPO_ROOT,
+			})).item)
+			const unknownPhaseItemId = numberValue(unknownPhaseItem.id)
+			const unknownPhaseStore = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				unknownPhaseStore.updateItem(unknownPhaseItemId, { phase: "some-undeclared-phase", updatedAt: 1_800_020_099 })
+			} finally {
+				unknownPhaseStore.close()
+			}
+			const unknownPhaseRejected = await request(fixture, "item.update", { itemId: unknownPhaseItemId, status: "done" })
+			expectInvalid(unknownPhaseRejected)
+			if (!unknownPhaseRejected.ok) {
+				expect(unknownPhaseRejected.error.details).toMatchObject({
+					phase: "some-undeclared-phase",
+					status: "done",
+					allowed: [],
+				})
+				expect(unknownPhaseRejected.error.message).toContain("not declared in the preset")
+			}
 
 			const reviewStatuses = ["changes_requested", "blocked", "moot", "done", "exhausted"]
 			for (const [index, status] of reviewStatuses.entries()) {
@@ -1515,6 +1566,82 @@ attemptTimeoutSeconds = 3600
 				const updated = record(expectOk(await request(fixture, "item.update", { itemId: reviewItemId, status })).item)
 				expect(updated).toMatchObject({ id: reviewItemId, status })
 				expect((await readItem(fixture.loopDataRoot, chainId, 34710 + index))?.phase).toBe("review")
+			}
+
+			// #397 log obligation (issue comment "log 义务"): every allow and deny outcome of the
+			// per-phase admission gate emits an `item.status.write_admission` audit event carrying
+			// the subject, item, phase, requested status, declared exits, outcome, and reason. Pull
+			// the event stream and assert iteration-deny / review-deny-vocab / unknown-phase-deny /
+			// review-allow shapes are all present.
+			const { events: admissionEvents } = await queryObservabilityEvents(
+				resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile,
+				{ type: "item.status.write_admission", chain: stringValue(chain.name) },
+			)
+			const denyEvents = admissionEvents.filter((event) => event.kind === "audit" && event.type === "item.status.write_admission" && event.payload.outcome === "deny")
+			const allowEvents = admissionEvents.filter((event) => event.kind === "audit" && event.type === "item.status.write_admission" && event.payload.outcome === "allow")
+			expect(denyEvents.length).toBeGreaterThanOrEqual(8) // 6 iteration + 1 review-queued + 1 unknown-phase
+			expect(allowEvents.length).toBe(reviewStatuses.length) // every review write was allowed
+			const iterationDeny = denyEvents.find((event) => event.kind === "audit" && event.type === "item.status.write_admission" && event.payload.phase === "iteration" && event.payload.requestedStatus === "done")
+			expect(iterationDeny).toBeDefined()
+			if (iterationDeny !== undefined && iterationDeny.kind === "audit" && iterationDeny.type === "item.status.write_admission") {
+				expect(iterationDeny.payload.declaredExits).toEqual([])
+				expect(iterationDeny.payload.reason).toBe("phase-exits")
+			}
+			const unknownDeny = denyEvents.find((event) => event.kind === "audit" && event.type === "item.status.write_admission" && event.payload.phase === "some-undeclared-phase")
+			expect(unknownDeny).toBeDefined()
+			if (unknownDeny !== undefined && unknownDeny.kind === "audit" && unknownDeny.type === "item.status.write_admission") {
+				expect(unknownDeny.payload.declaredExits).toEqual([])
+				expect(unknownDeny.payload.reason).toBe("phase-exits")
+			}
+			const reviewAllow = allowEvents.find((event) => event.kind === "audit" && event.type === "item.status.write_admission" && event.payload.phase === "review" && event.payload.requestedStatus === "done")
+			expect(reviewAllow).toBeDefined()
+			if (reviewAllow !== undefined && reviewAllow.kind === "audit" && reviewAllow.type === "item.status.write_admission") {
+				expect([...reviewAllow.payload.declaredExits].sort()).toEqual(["blocked", "changes_requested", "done", "exhausted", "moot"])
+				expect(reviewAllow.payload.reason).toBe("admitted")
+				// The subject envelope must carry "operator" since the request flowed without
+				// `agentRunId`/`agentPhase` attribution (operator mid-run path).
+				expect(reviewAllow.subject).toEqual({ kind: "operator" })
+			}
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("socket item.update with no active phase records no-phase-active admission audit", async () => {
+		// #397 acceptance row 7: operator mid-run path. When the item carries phase=null (no active
+		// run), the gate runs only the vocabulary leg and records a `no-phase-active` audit so the
+		// operator-shortcut is auditable rather than silent.
+		const fixture = await startFixture("item-update-no-phase-admission", { schedulerEnabled: false })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "no-phase-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			const item = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 34801,
+				repoCwd: REPO_ROOT,
+			})).item)
+			const itemId = numberValue(item.id)
+			// Item has phase=null after creation; the write below is the operator mid-run write
+			// path covered by acceptance row 7.
+			expect((await readItem(fixture.loopDataRoot, chainId, 34801))?.phase).toBeNull()
+
+			const accepted = record(expectOk(await request(fixture, "item.update", { itemId, status: "changes_requested" })).item)
+			expect(accepted).toMatchObject({ id: itemId, status: "changes_requested" })
+
+			const { events: admissionEvents } = await queryObservabilityEvents(
+				resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile,
+				{ type: "item.status.write_admission", chain: stringValue(chain.name) },
+			)
+			const noPhaseEntry = admissionEvents.find((event) => event.kind === "audit" && event.type === "item.status.write_admission" && event.payload.phase === null)
+			expect(noPhaseEntry).toBeDefined()
+			if (noPhaseEntry !== undefined && noPhaseEntry.kind === "audit" && noPhaseEntry.type === "item.status.write_admission") {
+				expect(noPhaseEntry.payload.outcome).toBe("allow")
+				expect(noPhaseEntry.payload.reason).toBe("no-phase-active")
+				expect(noPhaseEntry.payload.declaredExits).toEqual([])
+				expect(noPhaseEntry.payload.requestedStatus).toBe("changes_requested")
 			}
 		} finally {
 			await fixture.daemon.stop()
@@ -3985,6 +4112,11 @@ function nestedMetadata(depth: number): JsonObject {
 
 function numberValue(value: unknown): number {
 	if (typeof value !== "number") throw new Error("expected number")
+	return value
+}
+
+function stringValue(value: unknown): string {
+	if (typeof value !== "string") throw new Error("expected string")
 	return value
 }
 

@@ -14,15 +14,16 @@ import {
 } from "./scheduler"
 import { openSqliteStateStore } from "./sqlite-state"
 import { loadPreset } from "./loop"
-import { parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
+import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
 const LOADED_PRESET = loadPreset(PRESET_DIR).then((preset) => ({ presetDir: PRESET_DIR, preset }))
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-worktree-tests", String(process.pid))
 
+// #397 test brand helper — see install-commands.test.ts for rationale.
 function runtimeStatus(value: string) {
-	return parseInternalStatus(value, "test.status")
+	return engineLifecycleAdmittedItemStatus(parseInternalStatus(value, "test.status"), "test")
 }
 
 afterAll(async () => {

@@ -11,15 +11,16 @@ import {
 	openSqliteStateStore,
 } from "./sqlite-state"
 import type { JsonObject } from "./loop"
-import { parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
+import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/sqlite-state-tests", String(process.pid))
 
 let nextRootId = 0
 
+// #397 test brand helper — see install-commands.test.ts for rationale.
 function runtimeStatus(value: string) {
-	return parseInternalStatus(value, "test.status")
+	return engineLifecycleAdmittedItemStatus(parseInternalStatus(value, "test.status"), "test")
 }
 
 afterAll(async () => {

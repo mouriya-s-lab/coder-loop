@@ -16,6 +16,14 @@ exhausted   = "exhausted"
 name   = "run"
 prompt = "run-entry.md"
 
+  # #397 default-deny gate: declare the single terminal status this phase writes. The smoke
+  # preset's `run` phase is the only writer, and its sole transition is to `done`. Without this
+  # declaration the default-deny gate would reject the run phase's status write at runtime
+  # (matching the gate behavior tested in daemon.test.ts).
+  [[phases.exits]]
+  status = "done"
+  when   = "The smoke item completed successfully and no further work remains."
+
   [phases.variables]
   ITEM_ID    = "item.id"
   RUN_ID     = "runtime.runId"
