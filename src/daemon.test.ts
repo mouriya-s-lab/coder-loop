@@ -1646,6 +1646,115 @@ attemptTimeoutSeconds = 3600
 		}
 	})
 
+	test("socket item.exits returns typed phase exits and parity with write-side allowed", async () => {
+		// #451 typed phase-exits query face. Three scenarios in one fixture:
+		//   1. Multi-option phase (gh-issue-pr-iteration/review) returns its declared 5 exits and
+		//      the flat `allowed` list matches the write-side gate's `allowed` payload.
+		//   2. Single-option phase (single-phase-example/run) returns exactly one exit — the
+		//      uniform protocol shape multi-option and single-option phases share.
+		//   3. Unknown phase is rejected with `invalid_request` listing the known phase names.
+		// Acceptance rows covered: 1 (query face), 2 (write parity), 3 (single-option completion).
+		const fixture = await startFixture("item-exits-typed-query", { schedulerEnabled: false })
+		try {
+			// Scenario 1: multi-option review phase from gh-issue-pr-iteration.
+			const reviewChain = record(expectOk(await request(fixture, "chain.create", {
+				name: "exits-review-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const reviewChainId = numberValue(reviewChain.id)
+			const reviewItem = record(expectOk(await request(fixture, "item.add", {
+				chainId: reviewChainId,
+				issueNumber: 45101,
+				repoCwd: REPO_ROOT,
+			})).item)
+			const reviewItemId = numberValue(reviewItem.id)
+
+			const reviewExits = expectOk(await request(fixture, "item.exits", {
+				itemId: reviewItemId,
+				agentRunId: "run-exits-test-1",
+				agentPhase: "review",
+			}))
+			expect(reviewExits.phase).toBe("review")
+			expect(reviewExits.allowed).toEqual(["blocked", "changes_requested", "done", "exhausted", "moot"])
+			const reviewExitsArray = Array.isArray(reviewExits.exits) ? reviewExits.exits : []
+			expect(reviewExitsArray.length).toBe(5)
+			for (const raw of reviewExitsArray) {
+				const exit = record(raw)
+				expect(typeof exit.status).toBe("string")
+				expect(typeof exit.when).toBe("string")
+				expect((exit.when as string).length).toBeGreaterThan(0)
+			}
+
+			// Cross-check write-side parity (#397): the gate's `allowed` payload on a deny equals the
+			// query's `allowed` list, so the agent that queries-then-writes sees one consistent set.
+			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				store.updateItem(reviewItemId, { phase: "review", updatedAt: 1_800_030_000 })
+			} finally {
+				store.close()
+			}
+			const writeDenied = await request(fixture, "item.update", { itemId: reviewItemId, status: "queued" })
+			expectInvalid(writeDenied)
+			if (!writeDenied.ok) {
+				expect(writeDenied.error.details).toMatchObject({
+					phase: "review",
+					allowed: reviewExits.allowed,
+				})
+			}
+
+			// Scenario 2: single-option `run` phase from single-phase-example. Same protocol shape;
+			// the only exit is `done` and writing it marks the item complete.
+			const runChain = record(expectOk(await request(fixture, "chain.create", {
+				name: "exits-single-phase-chain",
+				preset: "single-phase-example",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const runChainId = numberValue(runChain.id)
+			const runItem = record(expectOk(await request(fixture, "item.add", {
+				chainId: runChainId,
+				issueNumber: 45102,
+				repoCwd: REPO_ROOT,
+				preset: "single-phase-example",
+			})).item)
+			const runItemId = numberValue(runItem.id)
+
+			const runExits = expectOk(await request(fixture, "item.exits", {
+				itemId: runItemId,
+				agentRunId: "run-exits-test-2",
+				agentPhase: "run",
+			}))
+			expect(runExits.phase).toBe("run")
+			expect(runExits.allowed).toEqual(["done"])
+			const runExitsArray = Array.isArray(runExits.exits) ? runExits.exits : []
+			expect(runExitsArray.length).toBe(1)
+			const onlyExit = record(runExitsArray[0])
+			expect(onlyExit.status).toBe("done")
+
+			// Scenario 3: unknown phase rejected with typed `invalid_request` listing known phases.
+			const unknownPhase = await request(fixture, "item.exits", {
+				itemId: reviewItemId,
+				agentRunId: "run-exits-test-3",
+				agentPhase: "no-such-phase",
+			})
+			expect(unknownPhase.ok).toBe(false)
+			if (!unknownPhase.ok) {
+				expect(unknownPhase.error.code).toBe("invalid_request")
+				expect(unknownPhase.error.message).toContain("no-such-phase")
+				expect(unknownPhase.error.details).toMatchObject({ phase: "no-such-phase" })
+			}
+
+			// Missing agent attribution is rejected (the query face is per-agent-run by design).
+			const missingAttribution = await request(fixture, "item.exits", { itemId: reviewItemId, agentRunId: "run-x" })
+			expect(missingAttribution.ok).toBe(false)
+			if (!missingAttribution.ok) {
+				expect(missingAttribution.error.code).toBe("invalid_request")
+				expect(missingAttribution.error.message).toContain("agentRunId and agentPhase")
+			}
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("socket item.update rejects immutable selectors and daemon-owned fields", async () => {
 		const fixture = await startFixture("item-update-strict-fields", { schedulerEnabled: false })
 		try {
