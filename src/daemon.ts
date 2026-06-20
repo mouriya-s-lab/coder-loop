@@ -1107,7 +1107,7 @@ export class CoderLoopDaemon {
 		// status reports as no waits — that's the genuine "nothing to schedule" state, not an error
 		// to mask. Real load failures (broken preset dir, malformed preset.toml) still propagate.
 		const presetForStatus = this.canResolvePresetForChainOrItems(chain, items)
-			? await this.loadedPresetForChainOrItems(chain, items)
+			? await this.loadedPresetForChainOrItems(chain, items, "chain.status")
 			: null
 		const pendingStatusSet = presetForStatus === null
 			? new Set<InternalStatus>()
@@ -1130,10 +1130,10 @@ export class CoderLoopDaemon {
 	// #412 helper: resolve a SchedulerLoadedPreset for chain status / vocabulary queries. Prefers the
 	// representative item's preset (so post-#412 chains with chain.preset=null still work as long as
 	// items declare their own preset) and falls back to the chain's legacy default seed.
-	private async loadedPresetForChainOrItems(chain: ChainRecord, items: readonly ItemRecord[]): Promise<SchedulerLoadedPreset> {
+	private async loadedPresetForChainOrItems(chain: ChainRecord, items: readonly ItemRecord[], operation: string): Promise<SchedulerLoadedPreset> {
 		const representative = items.find((item) => item.preset !== null || item.presetPath !== null)
-		if (representative !== undefined) return await this.loadedPresetForItem(chain, representative)
-		return await this.loadedPresetForChain(chain)
+		if (representative !== undefined) return await this.loadedPresetForItem(chain, representative, operation)
+		return await this.loadedPresetForChain(chain, operation)
 	}
 
 	// #412: predicate paired with `loadedPresetForChainOrItems` — answers "is there any preset
@@ -1544,7 +1544,7 @@ export class CoderLoopDaemon {
 		const store = this.requireStore()
 		const chain = store.getChain(item.chainId)
 		if (chain === null) throw new DaemonError("not_found", `chain ${item.chainId} was not found`, { chainId: item.chainId })
-		const { preset } = await this.loadedPresetForItem(chain, item)
+		const { preset } = await this.loadedPresetForItem(chain, item, "item.exits")
 		const presetPhase = preset.phases.find((entry) => entry.name === agentPhase)
 		if (presetPhase === undefined) {
 			const knownPhases = preset.phases.map((entry) => entry.name)
@@ -1680,12 +1680,12 @@ export class CoderLoopDaemon {
 		const externalOnEvent = scheduler.onEvent
 		const schedulerPresetDir = scheduler.presetDir
 		const presetForChain: SchedulerPresetResolver = scheduler.presetForChain ?? ((chain: ChainRecord) =>
-			schedulerPresetDir === undefined ? this.loadedPresetForChain(chain) : this.loadedPresetFromDirForChain(chain, schedulerPresetDir))
+			schedulerPresetDir === undefined ? this.loadedPresetForChain(chain, "scheduler.tick") : this.loadedPresetFromDirForChain(chain, schedulerPresetDir, "scheduler.tick"))
 		// #412: per-item preset resolution. Test fixtures can override `presetForItem` directly; production
 		// uses the daemon's `loadedPresetForItem` which honors item.preset / item.presetPath first and
 		// falls back to chain-level resolution for legacy items.
 		const presetForItem: SchedulerPresetItemResolver = scheduler.presetForItem ?? ((chain: ChainRecord, item: ItemRecord) =>
-			schedulerPresetDir === undefined ? this.loadedPresetForItem(chain, item) : this.loadedPresetFromDirForChain(chain, schedulerPresetDir))
+			schedulerPresetDir === undefined ? this.loadedPresetForItem(chain, item, "scheduler.tick") : this.loadedPresetFromDirForChain(chain, schedulerPresetDir, "scheduler.tick"))
 		const presetPromptResolver = (ctx: SchedulerSpawnContext): Promise<string> =>
 			this.resolveLoadedPresetPhasePrompt(ctx)
 		const fallbackRunner = scheduler.runner ?? defaultDaemonRunner()
@@ -1825,7 +1825,7 @@ export class CoderLoopDaemon {
 		const presetDir = spec.presetPath !== null
 			? (isAbsolute(spec.presetPath) ? spec.presetPath : resolve(spec.presetPath))
 			: bundledPresetDir(spec.preset ?? "")
-		const { preset } = await this.loadedPresetFromDirForChain(chain, presetDir)
+		const { preset } = await this.loadedPresetFromDirForChain(chain, presetDir, "item.create.default-status")
 		return engineLifecycleAdmittedItemStatus(preset.statuses.entry, "item.created-default-from-preset")
 	}
 
@@ -1872,7 +1872,7 @@ export class CoderLoopDaemon {
 	}
 
 	private async allowedItemStatusesForPhase(chain: ChainRecord, phase: string): Promise<Set<string> | null> {
-		const { preset } = await this.loadedPresetForChain(chain)
+		const { preset } = await this.loadedPresetForChain(chain, "item.status.admit-phase")
 		const presetPhase = preset.phases.find((entry) => entry.name === phase)
 		if (presetPhase === undefined) return null
 		return new Set(phaseWritableStatuses(presetPhase))
@@ -2059,22 +2059,22 @@ export class CoderLoopDaemon {
 	}
 
 	private async allowedItemStatuses(chain: ChainRecord): Promise<Set<string>> {
-		const { preset } = await this.loadedPresetForChain(chain)
+		const { preset } = await this.loadedPresetForChain(chain, "item.status.allowed")
 		return new Set([...preset.statuses.continuable, ...preset.statuses.terminal])
 	}
 
 	private async continuableItemStatuses(chain: ChainRecord): Promise<Set<InternalStatus>> {
-		const { preset } = await this.loadedPresetForChain(chain)
+		const { preset } = await this.loadedPresetForChain(chain, "chain.continuable-statuses")
 		return new Set(preset.statuses.continuable)
 	}
 
 	private async terminalItemStatuses(chain: ChainRecord): Promise<Set<InternalStatus>> {
-		const { preset } = await this.loadedPresetForChain(chain)
+		const { preset } = await this.loadedPresetForChain(chain, "chain.terminal-statuses")
 		return new Set(preset.statuses.terminal)
 	}
 
 	private async unblockItemStatuses(chain: ChainRecord): Promise<{ success: readonly InternalStatus[]; entry: InternalStatus }> {
-		const { preset } = await this.loadedPresetForChain(chain)
+		const { preset } = await this.loadedPresetForChain(chain, "chain.unblock-statuses")
 		return { success: preset.statuses.success, entry: preset.statuses.entry }
 	}
 
@@ -2092,19 +2092,19 @@ export class CoderLoopDaemon {
 		return await readFile(presetPhase.prompt, "utf-8")
 	}
 
-	private async loadedPresetForChain(chain: ChainRecord): Promise<SchedulerLoadedPreset> {
+	private async loadedPresetForChain(chain: ChainRecord, operation: string): Promise<SchedulerLoadedPreset> {
 		const presetDir = this.presetDirForChain(chain)
-		return await this.loadedPresetFromDirForChain(chain, presetDir)
+		return await this.loadedPresetFromDirForChain(chain, presetDir, operation)
 	}
 
 	// #412 per-item preset loader. Resolves preset from item.preset / item.presetPath, falling back
 	// to the chain-level resolver for legacy items.
-	private async loadedPresetForItem(chain: ChainRecord, item: ItemRecord): Promise<SchedulerLoadedPreset> {
+	private async loadedPresetForItem(chain: ChainRecord, item: ItemRecord, operation: string): Promise<SchedulerLoadedPreset> {
 		const presetDir = this.presetDirForItem(chain, item)
-		return await this.loadedPresetFromDirForChain(chain, presetDir)
+		return await this.loadedPresetFromDirForChain(chain, presetDir, operation)
 	}
 
-	private async loadedPresetFromDirForChain(chain: ChainRecord, presetDir: string): Promise<SchedulerLoadedPreset> {
+	private async loadedPresetFromDirForChain(chain: ChainRecord, presetDir: string, operation: string): Promise<SchedulerLoadedPreset> {
 		const key = this.loadedPresetCacheKey(presetDir)
 		const cached = this.loadedPresetCache.get(key)
 		const collectedFindings: PresetPlaceholderFinding[] = []
@@ -2124,20 +2124,30 @@ export class CoderLoopDaemon {
 			for (const finding of collectedFindings) {
 				await this.recordPlaceholderFinding(chain, finding)
 			}
-			await this.recordPresetLoadFailure(chain, presetDir, error)
-			throw new DaemonError("invalid_request", `failed to load preset for chain ${chain.name}: ${errorMessage(error)}`, {
-				chainId: chain.id,
-				chainName: chain.name,
-				preset: chain.preset,
-				presetDir,
-				error: errorMessage(error),
-			})
+			await this.recordPresetLoadFailure(chain, presetDir, operation, error)
+			// #403: the error message names chain, target (chainName), preset, presetDir, and the
+			// refused operation. "Generic 'preset error'" is forbidden by the issue's constraints.
+			throw new DaemonError(
+				"invalid_request",
+				`failed to load preset for chain ${chain.name} (operation ${operation}, presetDir ${presetDir}): ${errorMessage(error)}`,
+				{
+					chainId: chain.id,
+					chainName: chain.name,
+					preset: chain.preset,
+					presetDir,
+					operation,
+					error: errorMessage(error),
+				},
+			)
 		}
 	}
 
-	private async recordPresetLoadFailure(chain: ChainRecord, presetDir: string, error: unknown): Promise<void> {
+	private async recordPresetLoadFailure(chain: ChainRecord, presetDir: string, operation: string, error: unknown): Promise<void> {
+		// #403: validation event (migrated from lifecycle in this issue). The event is emitted from
+		// the single load-failure choke point so every refusal — regardless of the calling surface —
+		// goes through the unified observability stream with consistent payload shape.
 		await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
-			kind: "lifecycle",
+			kind: "validation",
 			type: "daemon.preset_load_failed",
 			chain: chain.name,
 			subject: { kind: "engine" },
@@ -2146,6 +2156,7 @@ export class CoderLoopDaemon {
 				preset: chain.preset,
 				presetDir,
 				error: errorMessage(error),
+				operation,
 			},
 		}))
 	}
