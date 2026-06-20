@@ -26,8 +26,10 @@ import {
 	type DaemonResponse,
 } from "./daemon"
 import { dispatchSubcommand } from "./install-commands"
-import { RuntimePathError, resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
+import { LOOP_RUN_CREDENTIAL_ENV, RuntimePathError, resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import {
+	appendObservabilityEvent,
+	makeObservabilityEvent,
 	parseObservabilityEventType,
 	parseObservabilityKind,
 	queryObservabilityEvents,
@@ -297,8 +299,8 @@ export type ItemCommandArgs =
 			blockerRepo: string | null
 			blockerRef: string | null
 			clearBlocker: boolean
-			agentRunId: string | null
-			agentPhase: string | null
+			// #406: `agentRunId` / `agentPhase` retired. Agent identity is bound by the spawn-time
+			// `CODER_LOOP_RUN_CRED` env credential (`withInjectedRunCredential` auto-attaches).
 			loopDataRoot: string | null
 			json: boolean
 	  }
@@ -1448,8 +1450,9 @@ const itemUpdateCliCommand = command({
 		blockerRepo: option({ long: "blocker-repo", type: optional(cmdString) }),
 		blockerRef: option({ long: "blocker-ref", type: optional(cmdString) }),
 		clearBlocker: flag({ long: "clear-blocker" }),
-		agentRunId: option({ long: "agent-run-id", type: optional(cmdString) }),
-		agentPhase: option({ long: "agent-phase", type: optional(cmdString) }),
+		// #406: `--agent-run-id` / `--agent-phase` flags retired. The spawn-time env credential
+		// (`CODER_LOOP_RUN_CRED`) auto-attaches via `withInjectedRunCredential`. Operators run the
+		// CLI in their own env (no credential) and the daemon admits them as `operator`.
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
 		json: flag({ long: "json" }),
 	},
@@ -1470,8 +1473,6 @@ const itemUpdateCliCommand = command({
 			blockerRepo: args.blockerRepo ?? null,
 			blockerRef: args.blockerRef ?? null,
 			clearBlocker: args.clearBlocker,
-			agentRunId: args.agentRunId ?? null,
-			agentPhase: args.agentPhase ?? null,
 			loopDataRoot: args.loopDataRoot ?? null,
 			json: args.json,
 		},
@@ -1820,8 +1821,9 @@ async function runItemCommand(args: string[]): Promise<void> {
 		issueNumber: itemArgs.issueNumber,
 		fields,
 	}
-	assignCliOptional(requestArgs, "agentRunId", itemArgs.agentRunId)
-	assignCliOptional(requestArgs, "agentPhase", itemArgs.agentPhase)
+	// #406: agent attribution no longer takes flat args here. `withInjectedRunCredential` attaches
+	// `agentCredential` from `CODER_LOOP_RUN_CRED` env when the caller is an engine-spawned agent;
+	// operator runs leave it unset and the daemon admits them as `operator`.
 	assignCliOptional(fields, "repoCwd", itemArgs.repoCwd)
 	assignCliOptional(fields, "status", itemArgs.status)
 	assignCliOptional(fields, "title", itemArgs.title)
@@ -1954,15 +1956,35 @@ function parseCentralDaemonSocketOptions(args: string[], usage: string): { loopD
 async function requestDaemonResult(loopDataRoot: string | null, command: DaemonCommandName, args: JsonObject = {}): Promise<JsonObject> {
 	const pathOptions = loopDataRoot === null ? {} : { loopDataRoot }
 	const socketPath = resolveLoopDataPaths(pathOptions).daemonSocket
+	// #406: auto-attach the run-scoped credential from the spawn-time env. The agent is the only
+	// caller whose process env carries `CODER_LOOP_RUN_CRED` (scheduler.ts injects it at spawn);
+	// operator invocations see no env var, so `agentCredential` is omitted and the daemon's
+	// caller-admission gate flows the operator branch. Zero hand-copy by design — the agent
+	// neither sees the value (it lives only in env) nor has to forward it (the CLI does).
+	const augmentedArgs = withInjectedRunCredential(command, args)
 	let response: Awaited<ReturnType<typeof sendDaemonRequest>>
 	try {
-		response = await sendDaemonRequest(socketPath, daemonRequest(command, args))
+		response = await sendDaemonRequest(socketPath, daemonRequest(command, augmentedArgs))
 	} catch (error) {
 		const failure = await daemonConnectionFailure(loopDataRoot, error)
 		fail(failure.message)
 	}
 	if (!response.ok) fail(`${response.error.code}: ${response.error.message}`)
 	return response.result
+}
+
+// #406: command-scoped credential auto-injection. Only `item.update` consumes the credential
+// today (the caller-admission gate is wired there); other commands are unchanged. The scoping
+// keeps the credential value from leaking into request payloads where the daemon does not
+// validate it — narrow attack surface.
+function withInjectedRunCredential(command: DaemonCommandName, args: JsonObject): JsonObject {
+	if (command !== "item.update") return args
+	const value = process.env[LOOP_RUN_CREDENTIAL_ENV]
+	if (typeof value !== "string" || value === "") return args
+	// Operator path explicitness: if the caller already supplied agentCredential (test fixtures
+	// that exercise the gate directly), respect it instead of overwriting from env.
+	if (Object.hasOwn(args, "agentCredential")) return args
+	return { ...args, agentCredential: value }
 }
 
 async function requestDaemonResultForDaemonCommand(loopDataRoot: string | null, command: DaemonCommandName, args: JsonObject, json: boolean): Promise<JsonObject | null> {
@@ -3326,13 +3348,35 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 	const issueNumber = parseRequiredPositiveInteger(issue, "queue unblock: --issue")
 	const store = openSqliteStateStore({ createIfMissing: false, ...loopDataRootOption(options.loopDataRoot) })
 	let mutation: QueueUnblockMutationOutcome
+	let mutatedItemId: number | null = null
 	try {
 		mutation = restoreUnblockableItemRecord(store, runtime.chain, options.preset, issue, issueNumber, args.dryRun)
 		if (!mutation.changed && mutation.reason === "not_found") {
 			fail(`queue unblock: issue ${issue} not found in SQLite state DB`)
 		}
+		// #406 row 4: the operator-direct `queue unblock` SQLite mutation does NOT pass through the
+		// daemon's `handleItemUpdate` caller-admission gate (no daemon round-trip — the CLI writes
+		// the store from the operator process). For the audit stream to satisfy "operator and
+		// agent+run distinguishable in `coder-loop logs --kind audit --json`", the operator-path
+		// mutation has to emit the same `item.mutation.caller_admission` event the daemon emits on
+		// the agent path, just carrying `subject: {kind: "operator"}` and `reason: "operator"`. The
+		// itemId for the event comes from the same store handle that just performed the mutation,
+		// so the event always reflects the same row that was written (no readback race against an
+		// unrelated concurrent write).
+		if (mutation.changed) {
+			const mutatedItem = store.getItemByIssue(runtime.chain.id, issueNumber)
+			if (mutatedItem !== null) mutatedItemId = mutatedItem.id
+		}
 	} finally {
 		store.close()
+	}
+	if (mutation.changed && mutatedItemId !== null && !args.dryRun) {
+		await emitOperatorCallerAdmissionAudit({
+			loopDataRoot: options.loopDataRoot,
+			chainName: runtime.chain.name,
+			itemId: mutatedItemId,
+			issueNumber,
+		})
 	}
 
 	let daemon: QueueUnblockCommandResult["daemon"]
@@ -3438,6 +3482,37 @@ function restoreUnblockableItemRecord(
 		clearedBlockerRef,
 		clearedCurrent,
 	}
+}
+
+// #406 row 4: operator-direct mutation paths that don't go through the daemon's
+// `handleItemUpdate` still emit a caller-admission audit event so `coder-loop logs --kind
+// audit --json` can distinguish operator-attributed mutations from agent+run-attributed ones.
+// `queue unblock` is the canonical operator-direct path today (it writes SQLite from the CLI
+// process). Future operator-direct callers should reuse this helper rather than open-coding the
+// event shape, keeping the audit surface uniform.
+async function emitOperatorCallerAdmissionAudit(input: {
+	loopDataRoot: string | null
+	chainName: string
+	itemId: number
+	issueNumber: number
+}): Promise<void> {
+	const eventsFile = resolveLoopDataPaths(loopDataRootOption(input.loopDataRoot)).eventsFile
+	const event = makeObservabilityEvent({
+		kind: "audit",
+		type: "item.mutation.caller_admission",
+		chain: input.chainName,
+		item: input.itemId,
+		subject: { kind: "operator" },
+		payload: {
+			itemId: input.itemId,
+			issueNumber: input.issueNumber,
+			claimedRunId: null,
+			claimedPhase: null,
+			outcome: "allow",
+			reason: "operator",
+		},
+	})
+	await appendObservabilityEvent(eventsFile, event)
 }
 
 function daemonResultIndicatesRunning(daemon: QueueUnblockCommandResult["daemon"]): boolean {
