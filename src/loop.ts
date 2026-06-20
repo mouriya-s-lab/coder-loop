@@ -310,6 +310,20 @@ export type ItemCommandArgs =
 			loopDataRoot: string | null
 			json: boolean
 	  }
+	// #451 typed phase-exits query face: agent asks the daemon "what can I write
+	// from my current phase?" before issuing the write. Both `agentRunId` and
+	// `agentPhase` are required so the query pins to the phase the agent is
+	// actively running (the item's last-write phase column is not necessarily
+	// the agent's currently-running phase).
+	| {
+			action: "exits"
+			chainName: string
+			issueNumber: number
+			agentRunId: string
+			agentPhase: string
+			loopDataRoot: string | null
+			json: boolean
+	  }
 
 export type QueueUnblockCommandArgs = {
 	targetCwd: string
@@ -443,6 +457,20 @@ const StatusSnapshotBoundary = arkType({
 	current: "object",
 	events: "object",
 	processes: "object",
+})
+
+// #451: boundary parser for the `item.exits` wire-verb response. The CLI uses
+// it to validate the daemon's reply before rendering — keeps the protocol shape
+// pinned and forces both ends to stay in sync.
+const ItemExitsResponseEntryBoundary = arkType({
+	status: "string",
+	when: "string",
+})
+
+export const ItemExitsResponseBoundary = arkType({
+	phase: "string",
+	exits: ItemExitsResponseEntryBoundary.array(),
+	allowed: "string[]",
 })
 
 export type LoopOptions = {
@@ -1473,6 +1501,37 @@ const itemReorderCliCommand = command({
 	}),
 })
 
+// #451 typed phase-exits query CLI. Issued by an agent (so both --agent-run-id
+// and --agent-phase are required, matching the `item update` audit-attribution
+// precedent) to ask the daemon which statuses the agent's currently-running
+// phase is allowed to write. The returned list is sourced from
+// `[[phases.exits]]` of the item's resolved preset and is per-phase sliced
+// (#396 contract row 5: no global state machine, no other phases' exits).
+const itemExitsCliCommand = command({
+	name: "exits",
+	description: "Query the typed phase-exits for an item in its current run phase (agent surface for the completion protocol).",
+	args: {
+		chain: positional({ displayName: "chain", type: cmdString }),
+		issue: option({ long: "issue", type: cmdString }),
+		agentRunId: option({ long: "agent-run-id", type: cmdString }),
+		agentPhase: option({ long: "agent-phase", type: cmdString }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		json: flag({ long: "json" }),
+	},
+	handler: (args): CliCommand => ({
+		kind: "item",
+		args: {
+			action: "exits",
+			chainName: args.chain,
+			issueNumber: parseRequiredPositiveInteger(args.issue, "--issue"),
+			agentRunId: args.agentRunId,
+			agentPhase: args.agentPhase,
+			loopDataRoot: args.loopDataRoot ?? null,
+			json: args.json,
+		},
+	}),
+})
+
 const itemCliCommand = subcommands({
 	name: "item",
 	description: "Operate centralized coder-loop chain items through the daemon socket.",
@@ -1482,6 +1541,7 @@ const itemCliCommand = subcommands({
 		list: itemListCliCommand,
 		update: itemUpdateCliCommand,
 		reorder: itemReorderCliCommand,
+		exits: itemExitsCliCommand,
 	},
 })
 
@@ -1739,6 +1799,19 @@ async function runItemCommand(args: string[]): Promise<void> {
 			position: itemArgs.position,
 		})
 		writeCommandResult(result, itemArgs.json, formatItemListResult)
+		return
+	}
+	if (itemArgs.action === "exits") {
+		// #451: typed phase-exits query. Both agent-run-id and agent-phase travel
+		// to the daemon so the handler resolves the right phase (the item's
+		// last-write phase column is not the agent's currently-running phase).
+		const result = await requestDaemonResult(itemArgs.loopDataRoot, "item.exits", {
+			chainName: itemArgs.chainName,
+			issueNumber: itemArgs.issueNumber,
+			agentRunId: itemArgs.agentRunId,
+			agentPhase: itemArgs.agentPhase,
+		})
+		writeCommandResult(result, itemArgs.json, formatItemExitsResult)
 		return
 	}
 	const fields: JsonObject = {}
@@ -2058,6 +2131,18 @@ function formatItemListResult(result: JsonObject): string {
 		const item = jsonObjectEntry(raw) ?? {}
 		return `${String(item.issueNumber)}\t${String(item.status)}\t${String(item.repoCwd)}\n`
 	}).join("")
+}
+
+// #451 text formatter for the typed phase-exits query. Parses the wire shape
+// through the arktype boundary before rendering — guarantees that a daemon
+// version drift cannot quietly print malformed exits to the agent.
+function formatItemExitsResult(result: JsonObject): string {
+	const parsed = ItemExitsResponseBoundary.assert(result)
+	if (parsed.exits.length === 0) {
+		return `phase: ${parsed.phase}\nexits: <none> (phase declares no [[phases.exits]]; default-deny rejects all status writes)\n`
+	}
+	const rows = parsed.exits.map((exit) => `  - ${exit.status}: ${exit.when}`).join("\n")
+	return `phase: ${parsed.phase}\nexits:\n${rows}\n`
 }
 
 function formatDaemonStatusResult(result: JsonObject): string {
@@ -4619,6 +4704,39 @@ export function renderPhaseExitsDoc(phase: PresetPhase): string {
 
 export function phaseWritableStatuses(phase: PresetPhase): readonly InternalStatus[] {
 	return phase.exits.map((exit) => exit.status)
+}
+
+// #451 unified completion-protocol epilogue. Engine-owned, zero business
+// literals: references only the engine's own CLI surface (`coder-loop item
+// exits` and `coder-loop item update --status`). The same string is appended
+// to every daemon-spawned phase prompt so the agent has one uniform protocol
+// for "I am done" — multi-option phases pick one of several exits, single-option
+// phases mark themselves complete by writing the only option. Phases that
+// declare no `[[phases.exits]]` still receive the epilogue: the query face will
+// truthfully report `<none>` and the write gate rejects all writes (default-deny
+// per #397), which is the right teaching for those phases too.
+export function phaseExitsEpilogue(): string {
+	return [
+		"",
+		"",
+		"## 完成协议（统一）",
+		"",
+		"无论本 phase 的目标是什么，做完工作后用同一条两步协议收尾：",
+		"",
+		"1. 查询当前 phase 在元数据中声明的可选下一步状态：",
+		"   ```",
+		"   coder-loop item exits <CHAIN> --issue <ISSUE> --agent-run-id <RUN_ID> --agent-phase <PHASE> --json",
+		"   ```",
+		"   返回的 `exits` 列表是本 phase 唯一允许写入的状态集合（per-phase 切片，不暴露其他 phase 出边）。",
+		"",
+		"2. 从返回的 `exits` 中选一个 status，写回 item：",
+		"   ```",
+		"   coder-loop item update <CHAIN> --issue <ISSUE> --agent-run-id <RUN_ID> --agent-phase <PHASE> --status <chosen-status>",
+		"   ```",
+		"   写返回集合以外的 status 会被默认拒绝（default-deny）。",
+		"",
+		"协议对所有 phase 一致：多选项 phase 选其一表达裁决；单选项 phase 调用即标记完成。不要凭空捏造任何元数据未声明的状态。",
+	].join("\n")
 }
 
 function lookupItemField(item: ItemRecord, field: string): JsonValue | undefined {
