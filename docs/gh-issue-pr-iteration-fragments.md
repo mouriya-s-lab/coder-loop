@@ -84,7 +84,7 @@ plan 链不变（仍为查表式 fragment 链）；trigger 角色（blocked-resp
 | `research` | 可选调查步（实现方向不明时派） |
 | `resolve-blocker` | `kind:blocked` 前置 scoping（阻塞条件 / 最小成功条件 / replay 计划） |
 | `implement` | 写代码（分支续接、读契约、思考框架、intent statement；不 commit） |
-| `verify` | 跑验收行（browser 行转交 e2e 步）+ 测试套件两侧清点（base 侧用 scratch worktree）+ CI parity + workflow 命令 |
+| `verify` | 跑验收行（browser 行转交 e2e 步）+ 测试套件两侧清点（base 侧用 scratch worktree）+ CI parity + 项目命令（自 target 的 `CLAUDE.md` / `AGENTS.md`） |
 | `e2e` | 直跑真实物（操作者方式调真实入口 / agent-browser 真 UI，含转交的 browser 验收行；禁脚本 e2e）+ 留 standing environment + 写 runtime manifest |
 | `submit` | intent-vs-action delta、commit、push、PR（fresh）或 PR comment（retry） |
 | `source-spike` | `kind:code-spike` 整步（PoC 分支 + 命令 + no-merge comment） |
@@ -109,7 +109,7 @@ fragment 总数 = 4 + 12 + 6 + 24 + 25 = 71，与 `preset.toml` 的 `[[fragments
 
 `/dev-plan` 是 thin-shell slash command（`.claude/commands/dev-plan.md`），把 `$ARGUMENTS` 作为 intake 输入交给 plan 链。planning 不消费 queue item，plan 不是 `preset.phases` 成员；slash command 直接读 `plan/index.md`。
 
-`plan/index` 强制先读 `<preset>/contract.md` + 目标 `<target>/.coder-loop/workflow.md`，然后进 `plan/intake`。用户级写作 skill 若存在可参考；缺失不阻塞。
+`plan/index` 强制先读 `<preset>/contract.md` + 目标 `<target>/CLAUDE.md` 与 `<target>/AGENTS.md`（whichever exists；都没有则 plan/intake 直接 `intake_needs_clarification`），然后进 `plan/intake`。用户级写作 skill 若存在可参考；缺失不阻塞。
 
 ```
 plan/intake

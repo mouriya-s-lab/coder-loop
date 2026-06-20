@@ -17,19 +17,18 @@ The slash command (`/dev-plan <input>`) passes one of:
 Plus implicit context:
 
 - target repository at `{{TARGET_CWD}}`;
-- target's `.coder-loop/workflow.md` (project-specific commands, PR / evidence conventions, CI parity);
+- target's `CLAUDE.md` / `AGENTS.md` (project-specific commands, conventions, CI parity);
 - existing GitHub issues / PRs in the target repo that may overlap.
 
 ## Procedure
 
 1. Read the slash command argument and any referenced design source verbatim. Quote the section(s) the planning will key on.
 
-2. Read `{{TARGET_CWD}}/.coder-loop/workflow.md` end-to-end. Extract:
+2. Read `{{TARGET_CWD}}/CLAUDE.md` and `{{TARGET_CWD}}/AGENTS.md` end-to-end (whichever exists; both is normal). Extract:
    - project test / build / lint commands (e.g. `mise run test`, `bun test`, `pnpm build`);
-   - PR title / body conventions;
-   - evidence layer expectations beyond the four-layer baseline;
+   - PR title / body conventions specific to this repo (the four required evidence layers + `Analysis` plus any project-specific additions);
    - CI parity command (or "no CI" note).
-   These become the `Command` column source for `## 验收标准` rows. Without reading workflow.md, checkpoints will drift from target reality.
+   These become the `Command` column source for `## 验收标准` rows. Without reading the project's agent-instruction files, checkpoints will drift from target reality.
 
 3. Survey existing GitHub state. Run:
    ```bash
@@ -42,7 +41,7 @@ Plus implicit context:
    - source unambiguously specifies the user-visible problem;
    - source specifies the expected outcome (not the implementation);
    - source distinguishes hard external constraints from soft preferences;
-   - source either gives concrete environment hints (target OS / runtime / dependencies) or the project's `workflow.md` does.
+   - source either gives concrete environment hints (target OS / runtime / dependencies) or the project's `CLAUDE.md` / `AGENTS.md` does.
 
 5. If source is insufficient, ambiguous, or contradicts itself:
    - quote the missing / conflicting passage;
@@ -53,7 +52,7 @@ Plus implicit context:
 
 If source is insufficient, emit `intake_needs_clarification`. The handoff fragment will record the questions; the slash command shell shows them to the operator and stops the planning run. Operator answers → re-invoke `/dev-plan` with augmented input.
 
-If `workflow.md` is missing or empty, emit `intake_needs_clarification` with feedback "target repo needs `.coder-loop/workflow.md` describing project commands and conventions before planning can produce realistic checkpoints" — do not proceed by guessing project commands.
+If neither `CLAUDE.md` nor `AGENTS.md` exists in `{{TARGET_CWD}}` (or both are empty placeholders without commands / conventions), emit `intake_needs_clarification` with feedback "target repo needs `CLAUDE.md` or `AGENTS.md` describing project commands and conventions before planning can produce realistic checkpoints" — do not proceed by guessing project commands.
 
 ## Output verdict
 
@@ -61,6 +60,6 @@ Choose exactly one:
 
 - `intake_clear` → read `plan/classify`. Source is sufficient to start classification.
 - `intake_needs_clarification` → read `plan/handoff` with the unanswered questions. Planning stops, operator clarifies, re-invoke.
-- `intake_blocked` → read `plan/handoff` with the exact infrastructure failure (target repo not accessible, `workflow.md` unreadable, `gh` auth failure).
+- `intake_blocked` → read `plan/handoff` with the exact infrastructure failure (target repo not accessible, both `CLAUDE.md` and `AGENTS.md` unreadable due to filesystem error, `gh` auth failure).
 
 Do not classify or decompose under `intake_needs_clarification` / `intake_blocked`.

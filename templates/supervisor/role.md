@@ -26,7 +26,7 @@ Current state is always **derived**, never read from a hand-written snapshot:
 4. `coder-loop status <TARGET_DIR> --json` — queue/current/events/process snapshot.
 5. `coder-loop daemon status <TARGET_DIR> --json` — daemon ownership and liveness.
 6. `gh issue list / pr list / pr view` — GitHub truth for `<TARGET_REPO>`.
-7. `<TARGET_DIR>/.coder-loop/workflow.md` — coder-loop's PR/evidence rules only when PR/review semantics matter for the patrol.
+7. `<TARGET_DIR>/CLAUDE.md` and `<TARGET_DIR>/AGENTS.md` — project commands and PR conventions, only when PR/review semantics matter for the patrol. Loop-internal policy (evidence layers, verdict semantics) lives in the active preset's fragments.
 8. Memory index at `<MEMORY_PROJECT_DIR>MEMORY.md` if the target project uses auto-memory.
 
 ## Patrol procedure

@@ -2,7 +2,7 @@
 
 Supervisor 模式跟 preset 正交——它是包在 loop 外面的 cron-driven 跨 patrol orchestrator，跨 preset 通用。这一层现在唯一的 starter 在这里。
 
-具体到「target 跑 coder-loop 需要哪些 starter」，那些已经按 preset 切分到 `presets/<preset-name>/templates/`（如 `presets/gh-issue-pr-iteration/templates/` 下的 `workflow.md / shared.md / pr-body.md`），不在本目录。详见仓库根 README 的「内置 preset：`gh-issue-pr-iteration`」一节。
+具体到「target 跑 coder-loop 需要哪些 starter」，那些已经按 preset 切分到 `presets/<preset-name>/templates/`（如 `presets/gh-issue-pr-iteration/templates/` 下的 `shared.md / pr-body.md`），不在本目录。详见仓库根 README 的「内置 preset：`gh-issue-pr-iteration`」一节。
 
 ## What coder-loop actually is
 
@@ -20,7 +20,7 @@ Supervisor 模式跟 preset 正交——它是包在 loop 外面的 cron-driven 
 
 preset-specific starter 不在此处：
 
-- `presets/gh-issue-pr-iteration/templates/` — `gh-issue-pr-iteration` preset 的 target-side starter（`workflow.md / shared.md / pr-body.md`）
+- `presets/gh-issue-pr-iteration/templates/` — `gh-issue-pr-iteration` preset 的 target-side starter（`shared.md / pr-body.md`）。项目命令 / PR 约定从 #434 起改由 target 自有的 `CLAUDE.md` / `AGENTS.md` 承载，不再有 `workflow.md` starter。
 - 其他 preset 各自的 `templates/` 子目录
 
 ## Minimum viable target setup
@@ -29,7 +29,7 @@ preset-specific starter 不在此处：
 
 手动等价 = 下面三步：
 
-1. Committed `<TARGET>/.coder-loop/workflow.md`（具体内容由 preset 决定；用 `gh-issue-pr-iteration` 时从 `presets/gh-issue-pr-iteration/templates/workflow.md` 起步并裁剪）
+1. Committed `<TARGET>/CLAUDE.md` 或 `<TARGET>/AGENTS.md`（项目命令、约定、PR 形态；`gh-issue-pr-iteration` preset 的 plan/intake 把这两份 agent 指令文件作为权威源读入）
 2. `coder-loop chain create <chain> --preset <name> --config-json '{...}'` 把 preset / repo / baseBranch / 其他 `chain.<field>` binding 写进 centralized DB 的 chain.metadata.bindings（target 侧没有 config 文件，#433 起退役）
 3. 本机 `gh` 授权对应 repository（仅当 preset 用 GitHub 时）
 

@@ -22,7 +22,7 @@ fixture repo 只保留极小的提交资产：
 
 - `message.txt` — 单行任务目标文件（pristine 态为 `status: pending`）；
 - `scripts/check-message.mjs` — 真实 check（`bun run check`），PR 证据用它；
-- `.coder-loop/workflow.md`、`CLAUDE.md` — target bootstrap 契约；
+- `CLAUDE.md` / `AGENTS.md` — target bootstrap 契约（自 #434 起 `.coder-loop/workflow.md` 退役；fixture 通过这两份 agent 指令文件提供项目命令）；
 - 运行态（`.coder-loop/runtime/`）不入库。
 
 ## Harness：单命令全流程

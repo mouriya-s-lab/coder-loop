@@ -19,7 +19,7 @@ The orchestrator selects an actionable `state.current` item before the front of 
 - run stdout log is per-run trace output for review. It is not durable task history.
 - `loop-data/chains/<chain>/shared.md` is the daemon-owned chain handoff/shared file and primary append-only local handoff for every phase.
 - `loop-data/chains/<chain>/issues/<issue>.md` is an optional issue-local attachment. Its absence must not block iteration or review startup.
-- `.coder-loop/workflow.md`, `.coder-loop/prompts/`, and `.coder-loop/templates/` are committed target policy/configuration when present.
+- Per-target policy / project commands / PR conventions live in the repo's own `CLAUDE.md` / `AGENTS.md`, not in `.coder-loop/`. Loop-internal policy (PR evidence layers, verdict semantics, CI parity rules) lives inside the preset fragments.
 - `loop-data runtime artifacts`, central daemon scheduling state, and run stdout log must not be staged into feature commits.
 
 ## Final state invariants

@@ -9,7 +9,7 @@ If the intake includes already-open issues that the operator asked to triage (re
 ## Inputs
 
 - Intake notes from `plan/intake` (the quoted source passages + any surveyed overlapping issues).
-- `workflow.md` extracts (commands, conventions).
+- Project commands and conventions extracted from the target repo's `CLAUDE.md` / `AGENTS.md` during intake.
 - `contract.md` §1.2 (which body sections each deliverable shape requires).
 
 ## Classes

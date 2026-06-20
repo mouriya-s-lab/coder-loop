@@ -14,9 +14,9 @@ Before role-specific planning, read these fragments from the entry prompt's frag
 2. `common/github-routing`
 3. `common/state-contract`
 4. `contract.md` — the preset's self-contained contract on issue / PR / review shape, including atomicity, citation, and parent/child rules
-5. `<target>/.coder-loop/workflow.md` — target commands and conventions
+5. `<target>/CLAUDE.md` and `<target>/AGENTS.md` — target commands and conventions (whichever exists; both is normal)
 
-User-level writing/review skills are optional operator references only. If present, they may inform style; if absent, planning proceeds from `contract.md` and workflow policy.
+User-level writing/review skills are optional operator references only. If present, they may inform style; if absent, planning proceeds from `contract.md` and the target's agent-instruction files.
 
 ## Planning ownership
 

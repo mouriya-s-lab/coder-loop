@@ -108,7 +108,6 @@ const EXPECTED_VARIABLE_KEYS = [
 	"BASE_BRANCH",
 	"ISSUE",
 	"RUN_ID",
-	"WORKFLOW_FILE",
 	"SHARED_CONTEXT_FILE",
 	"STATE_FILE",
 	"CURRENT_ISSUE_FILE",
@@ -220,7 +219,6 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(iterVars.get("ISSUE_PR")).toEqual(expectedItem("pr"))
 		expect(iterVars.get("REPO")).toEqual(expectedChain("repository"))
 		expect(iterVars.get("BASE_BRANCH")).toEqual(expectedChain("baseBranch"))
-		expect(iterVars.get("WORKFLOW_FILE")).toEqual(expectedChain("workflowFile"))
 		expect(iterVars.get("REQUIRE_BROWSER_EVIDENCE")).toEqual(expectedChainDefault("requireBrowserEvidence", false))
 		expect(iterVars.get("TARGET_CWD")).toEqual(expectedRuntime("targetCwd"))
 		expect(iterVars.get("AGENT_CWD")).toEqual(expectedRuntime("agentCwd"))

@@ -46,7 +46,6 @@ import {
 import {
 	chainBindings as metadataBindings,
 	chainBindingsPresetPath,
-	chainBindingsWorkflowFile,
 	itemExtraHasJsonKey,
 	itemExtraJsonValue,
 	itemExtraToJsonObject,
@@ -66,10 +65,13 @@ const PRESET_NAME_PATTERN = /^[a-z][a-z0-9-]*$/
 
 // Per-target runtime defaults retained for legacy in-target paths that the engine
 // still falls back to when chain metadata leaves the corresponding bindings unset
-// (workflow.md / shared / issue / evidence / log are all chain-derived in normal
-// flow; the constants below are the last-resort relative paths for the rare path
-// that still wants a target-relative anchor). #433 retired the on-disk target
+// (shared / issue / evidence / log are all chain-derived in normal flow; the
+// constants below are the last-resort relative paths for the rare path that
+// still wants a target-relative anchor). #433 retired the on-disk target
 // settings file entirely — the engine no longer reads any target settings file.
+// #434 retired the `.coder-loop/workflow.md` per-target policy file; project
+// commands now come from the repo's own CLAUDE.md / AGENTS.md, loop policy is
+// inlined in preset fragments, per-target overrides flow through chain.metadata.
 const DEFAULT_SHARED_FILE = ".coder-loop/runtime/shared.md"
 const DEFAULT_ISSUE_DIR = ".coder-loop/runtime/issues"
 const DEFAULT_EVIDENCE_DIR = ".coder-loop/runtime/evidence"
@@ -2295,7 +2297,7 @@ function buildOptions(targetCwd: string, raw: BuildOptionsInput, resolved: Chain
 	const worktree = raw.worktree || resolved.worktree === true
 	const repository = raw.chain.repository
 	const baseBranch = raw.chain.baseBranch
-	const bindings = buildEffectiveBindings(targetCwd, raw.chain, resolved)
+	const bindings = buildEffectiveBindings(raw.chain)
 	const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")
 	const chainPaths = raw.chainName === null ? null : resolveChainRuntimePaths(raw.chainName, loopDataRootOption(loopDataRoot))
 	const hostRunner = detectHostRunner(process.env)
@@ -3513,7 +3515,6 @@ function readDbCurrentRun(loopDataRoot: string | null, chainId: number): Current
 // model selections — for the rest of the loop assembly.
 export type ChainResolved = {
 	worktree: boolean | null
-	workflowFile: string | null
 	sharedContextFile: string | null
 	issueDir: string | null
 	evidenceDir: string | null
@@ -3536,7 +3537,6 @@ function chainResolvedFromChain(chain: ChainRecord, loopDataRoot: string | null)
 	const presetPath = metadataString(metadata, "presetPath") ?? chainBindingsPresetPath(metadata) ?? null
 	return {
 		worktree: metadataBoolean(metadata, "worktree") ?? null,
-		workflowFile: metadataString(metadata, "workflowFile") ?? chainBindingsWorkflowFile(metadata) ?? null,
 		sharedContextFile: metadataString(metadata, "sharedContextFile") ?? chainRuntimePathForKind(chain.name, loopDataRoot, "shared"),
 		issueDir: metadataString(metadata, "issueDir") ?? chainRuntimePathForKind(chain.name, loopDataRoot, "issues"),
 		evidenceDir: metadataString(metadata, "evidenceDir") ?? chainRuntimePathForKind(chain.name, loopDataRoot, "evidence"),
@@ -3554,24 +3554,13 @@ function chainResolvedFromChain(chain: ChainRecord, loopDataRoot: string | null)
 }
 
 function buildEffectiveBindings(
-	targetCwd: string,
 	chain: Pick<ChainRecord, "repository" | "baseBranch" | "metadata">,
-	resolved: Pick<ChainResolved, "workflowFile">,
 ): RenderBindings {
-	const bindings: JsonObject = {
-		...metadataBindings(chain.metadata),
-	}
-	const workflowFile = resolved.workflowFile ?? chainBindingsWorkflowFile(chain.metadata)
-	bindings.workflowFile = resolveWorkflowFileBinding(targetCwd, workflowFile)
 	return {
 		repository: chain.repository,
 		baseBranch: chain.baseBranch,
-		...bindings,
+		...metadataBindings(chain.metadata),
 	}
-}
-
-export function resolveWorkflowFileBinding(targetCwd: string, workflowFile: string | null): string {
-	return resolveFrom(targetCwd, workflowFile ?? ".coder-loop/workflow.md")
 }
 
 function chainRuntimePathForKind(chainName: string, loopDataRoot: string | null, kind: "shared" | "issues" | "evidence" | "runs"): string {
@@ -4338,9 +4327,8 @@ function parseFinalizerSummaryDecisionFromText(text: string): PresetChainComplet
 // #433: derive the chain-bindings object that wraps into `metadata.bindings`. Strips the
 // chain-create top-level scalars (repository / baseBranch — those are first-class chain.create
 // fields, not bindings), normalizes a relative `presetPath` to absolute, and rejects nested
-// objects under bindings (the issue body explicitly calls out `bindings.metadata.workflowFile`
-// as a stale-shape failure mode). The daemon repeats the shape check via arktype, so a stray
-// nesting fails fast on either path.
+// objects under bindings (e.g. `bindings.metadata.<key>` is a stale-shape failure mode the
+// daemon also checks via arktype, so a stray nesting fails fast on either path).
 const CHAIN_CREATE_NON_BINDING_KEYS = new Set(["repository", "baseBranch"])
 
 function normalizeChainCreateBindings(config: JsonObject): JsonObject {

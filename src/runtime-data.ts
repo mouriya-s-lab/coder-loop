@@ -63,19 +63,16 @@ export class ChainCompleteTriggerState extends RuntimeDataRecord {
 
 export class ChainBindings extends RuntimeDataRecord {
 	presetPath?: string
-	workflowFile?: string
 
 	constructor(input: ChainBindingsInput, remainder: JsonObject) {
 		super(remainder)
 		if (input.presetPath !== undefined) this.presetPath = input.presetPath
-		if (input.workflowFile !== undefined) this.workflowFile = input.workflowFile
 	}
 }
 
 export class ChainMetadata extends RuntimeDataRecord {
 	bindings?: ChainBindings
 	presetPath?: string
-	workflowFile?: string
 	sharedContextFile?: string
 	issueDir?: string
 	evidenceDir?: string
@@ -90,7 +87,6 @@ export class ChainMetadata extends RuntimeDataRecord {
 		super(remainder)
 		if (input.bindings !== undefined) this.bindings = input.bindings
 		if (input.presetPath !== undefined) this.presetPath = input.presetPath
-		if (input.workflowFile !== undefined) this.workflowFile = input.workflowFile
 		if (input.sharedContextFile !== undefined) this.sharedContextFile = input.sharedContextFile
 		if (input.issueDir !== undefined) this.issueDir = input.issueDir
 		if (input.evidenceDir !== undefined) this.evidenceDir = input.evidenceDir
@@ -168,7 +164,6 @@ export type ChainCompleteTriggerStateInput = {
 type ChainMetadataInput = {
 	bindings?: ChainBindings
 	presetPath?: string
-	workflowFile?: string
 	sharedContextFile?: string
 	issueDir?: string
 	evidenceDir?: string
@@ -182,7 +177,6 @@ type ChainMetadataInput = {
 
 type ChainBindingsInput = {
 	presetPath?: string
-	workflowFile?: string
 }
 
 type ItemExtraInput = {
@@ -218,11 +212,10 @@ const JsonObjectBoundary: ArkAssertable<JsonObject> = arkType("unknown", ":", is
 
 const RUNNER_METADATA_KEYS = new Set(["binary", "model", "extraArgs"])
 const CHAIN_COMPLETE_TRIGGER_KEYS = new Set(["decision", "fingerprint", "recordedAt", "reason", "runId"])
-const CHAIN_BINDING_KEYS = new Set(["presetPath", "workflowFile"])
+const CHAIN_BINDING_KEYS = new Set(["presetPath"])
 const CHAIN_METADATA_KEYS = new Set([
 	"bindings",
 	"presetPath",
-	"workflowFile",
 	"sharedContextFile",
 	"issueDir",
 	"evidenceDir",
@@ -277,7 +270,6 @@ export function chainMetadataToJsonObject(metadata: ChainMetadata): JsonObject {
 	const result: JsonObject = { ...runtimeRemainder(metadata) }
 	assignJson(result, "bindings", metadata.bindings === undefined ? undefined : chainBindingsToJsonObject(metadata.bindings))
 	assignJson(result, "presetPath", metadata.presetPath)
-	assignJson(result, "workflowFile", metadata.workflowFile)
 	assignJson(result, "sharedContextFile", metadata.sharedContextFile)
 	assignJson(result, "issueDir", metadata.issueDir)
 	assignJson(result, "evidenceDir", metadata.evidenceDir)
@@ -300,10 +292,6 @@ export function chainBindings(metadata: ChainMetadata): JsonObject {
 
 export function chainBindingsPresetPath(metadata: ChainMetadata): string | null {
 	return metadata.bindings?.presetPath ?? null
-}
-
-export function chainBindingsWorkflowFile(metadata: ChainMetadata): string | null {
-	return metadata.bindings?.workflowFile ?? null
 }
 
 export function chainPresetPath(metadata: ChainMetadata): string | null {
@@ -448,8 +436,6 @@ function parseChainMetadata(value: JsonObject, field: string): ChainMetadata {
 	if (bindings !== undefined) input.bindings = bindings
 	const presetPath = optionalStringField(value, "presetPath", `${field}.presetPath`)
 	if (presetPath !== undefined) input.presetPath = presetPath
-	const workflowFile = optionalStringField(value, "workflowFile", `${field}.workflowFile`)
-	if (workflowFile !== undefined) input.workflowFile = workflowFile
 	const sharedContextFile = optionalStringField(value, "sharedContextFile", `${field}.sharedContextFile`)
 	if (sharedContextFile !== undefined) input.sharedContextFile = sharedContextFile
 	const issueDir = optionalStringField(value, "issueDir", `${field}.issueDir`)
@@ -513,8 +499,6 @@ function optionalChainBindingsField(record: JsonObject, key: string, field: stri
 	const input: ChainBindingsInput = {}
 	const presetPath = optionalStringField(object, "presetPath", `${field}.presetPath`)
 	if (presetPath !== undefined) input.presetPath = presetPath
-	const workflowFile = optionalStringField(object, "workflowFile", `${field}.workflowFile`)
-	if (workflowFile !== undefined) input.workflowFile = workflowFile
 	return new ChainBindings(input, remainderExcept(object, CHAIN_BINDING_KEYS))
 }
 
@@ -646,7 +630,6 @@ function runnerMetadataToJsonObject(metadata: RunnerMetadata): JsonObject {
 function chainBindingsToJsonObject(bindings: ChainBindings): JsonObject {
 	const result: JsonObject = { ...runtimeRemainder(bindings) }
 	assignJson(result, "presetPath", bindings.presetPath)
-	assignJson(result, "workflowFile", bindings.workflowFile)
 	return result
 }
 
