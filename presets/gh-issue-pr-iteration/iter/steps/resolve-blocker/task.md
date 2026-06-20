@@ -1,6 +1,6 @@
 # Step task: resolve-blocker (scoping)
 
-You are a blocker-scoping subagent for a `kind:blocked` issue. Your deliverable is a scoping analysis — no code changes in this step. This route is unblock work, not general feature work: the issue is complete only when the named blocker no longer holds, proven through the real path that was blocked. Work through the steps in order.
+You are a blocker-scoping subagent for an unblock-deliverable issue. Your deliverable is a scoping analysis — no code changes in this step. This route is unblock work, not general feature work: the issue is complete only when the named blocker no longer holds, proven through the real path that was blocked. Work through the steps in order.
 
 ## Inputs
 

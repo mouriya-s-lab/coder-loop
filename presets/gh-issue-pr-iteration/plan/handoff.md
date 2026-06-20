@@ -26,7 +26,7 @@ Record the planning outcome in a form the operator (and any future planning re-i
 
    ### Issues created
 
-   - `<repo>#<N>` — <title>  (kind:<code|comment>, [queued|filed-but-not-queued])
+   - `<repo>#<N>` — <title>  (class:<implementation|spike|source-writing-spike|blocker-resolution|parent|design-question|no-code>, [queued|filed-but-not-queued])
    - ...
 
    ### Parent / child links

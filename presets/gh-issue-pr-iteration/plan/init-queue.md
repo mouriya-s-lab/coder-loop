@@ -20,15 +20,15 @@ Initialize the executable planning output through the current centralized chain/
    ```
    Preserve existing chain metadata and current run state. Do not clear or rewrite `current` / recent run artifacts.
 
-2. **Queue selection** — only add these as chain items:
-   - `kind:code` `implementation` issues that are ready to run (have unmet `Blocks:` dependencies that ARE other queued issues, not external blockers);
-   - `kind:comment` `spike` issues that block downstream implementation;
-   - `kind:code-spike` source-writing spikes that block downstream implementation and must not merge into production;
-   - `kind:blocked` unblock issues that have a concrete blocker description and are ready to resolve;
+2. **Queue selection** — only add these as chain items (route by the `plan/classify` class assigned to the candidate, not by any label):
+   - `implementation` issues that are ready to run (have unmet `Blocks:` dependencies that ARE other queued issues, not external blockers);
+   - `spike` issues that block downstream implementation;
+   - `source-writing-spike` issues that block downstream implementation and must not merge into production;
+   - `blocker-resolution` issues that have a concrete blocker description and are ready to resolve;
    - prerequisites before dependents (when both queue, model the dependency instead of relying on text order alone).
 
    Don't queue:
-   - `parent` umbrella issues that are coordinator-only (no `kind:*` label);
+   - `parent` umbrella issues that are coordinator-only (no own atomic Why);
    - `design-question` issues (operator must answer first);
    - `no-code` references (nothing actionable);
    - issues blocked by external work not in this queue.
@@ -95,11 +95,11 @@ Initialize the executable planning output through the current centralized chain/
    coder-loop item list <chain-name> --json
    coder-loop status {{TARGET_CWD}} --json --chain <chain-name>
    ```
-   Required result: the new items are visible in `chain status` / `item list`, `status` exits 0, the status JSON reports `.state.kind == "ok"`, and `.queue.selected.id` points at the expected next item.
+   Required result: the new items are visible in `chain status` / `item list`, `status` exits 0, the status JSON reports `.state.ok == true`, and `.queue.selected.id` points at the expected next item.
 
 ## Failure handling
 
-If item creation fails, or `coder-loop status {{TARGET_CWD}} --json --chain <chain-name>` exits non-zero, reports `.state.kind != "ok"`, or cannot select the expected `.queue.selected.id`:
+If item creation fails, or `coder-loop status {{TARGET_CWD}} --json --chain <chain-name>` exits non-zero, reports `.state.ok != true`, or cannot select the expected `.queue.selected.id`:
 
 - for `item batch-add`, trust the daemon transaction boundary: no item from the failed batch should exist; verify with `coder-loop item list <chain-name> --json`;
 - for fallback repeated `item add`, stop immediately, list what was already inserted, and emit `queue_init_failed` with the compensating action needed;
@@ -114,7 +114,7 @@ If you set `agentCwd` for cross-repo work and validation reports it is not absol
 
 Choose exactly one:
 
-- `queue_initialized` → read `plan/handoff`. `coder-loop status {{TARGET_CWD}} --json --chain <chain-name>` exits 0 with `.state.kind == "ok"` and the expected `.queue.selected.id`; chain items exist; the daemon-owned chain handoff/shared file exists.
+- `queue_initialized` → read `plan/handoff`. `coder-loop status {{TARGET_CWD}} --json --chain <chain-name>` exits 0 with `.state.ok == true` and the expected `.queue.selected.id`; chain items exist; the daemon-owned chain handoff/shared file exists.
 - `queue_init_failed` → read `plan/handoff` with the runtime check error + restoration steps taken.
 
 Do not advance to handoff while runtime is in an inconsistent state.

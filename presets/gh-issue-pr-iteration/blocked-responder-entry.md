@@ -10,7 +10,7 @@ Do exactly one responder pass for the selected issue. Do not loop.
 
 ## Goal
 
-If the selected queue item is blocked by another repository, create the cross-repo `kind:blocked` follow-up issue, inject that issue into the blocking repository's coder-loop queue, and start that repository's daemon.
+If the selected queue item is blocked by another repository, create the cross-repo unblock follow-up issue, inject that issue into the blocking repository's coder-loop queue, and start that repository's daemon. The follow-up's deliverable is the unblock — an explicit `Unblocks:` back-link in the body is what wires the cross-repo dependency, not any label.
 
 ## Procedure
 
@@ -25,10 +25,9 @@ If the selected queue item is blocked by another repository, create the cross-re
    - Otherwise discover a local checkout by inspecting nearby/operator repo roots and verifying the git remote owner/name; never trust basename alone.
    - If no checkout can be verified, append a handoff note and exit non-zero.
 4. In `blockerRepo`, create exactly one follow-up issue:
-   - label: `kind:blocked`;
    - title: concise blocker-resolution title referencing `{{REPO}}#{{ISSUE}}`;
-   - body includes an explicit `Unblocks: {{REPO}}#{{ISSUE}}` line and the `blockerRef` / source blocker context.
-   - use `gh issue create --repo <blockerRepo> --label "kind:blocked" --title <title> --body <body>`.
+   - body includes an explicit `Unblocks: {{REPO}}#{{ISSUE}}` line (this back-link is the unblock contract — without it the cross-repo dependency does not wire up) and the `blockerRef` / source blocker context.
+   - use `gh issue create --repo <blockerRepo> --title <title> --body <body>`.
 5. Read the target checkout's `central SQLite state DB`.
    - If the new issue is not already present, append one queue item with `status: "queued"`, `attempts: 0`, no branch/PR transparent fields, and an `issue` field matching the created issue number.
    - Preserve existing queue order and all unrelated state fields.

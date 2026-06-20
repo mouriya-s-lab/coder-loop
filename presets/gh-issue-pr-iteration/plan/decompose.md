@@ -8,7 +8,7 @@ Take classified deliverables and emit a draft issue body for each. At this fragm
 
 - Classified candidate list from `plan/classify`.
 - **Business frame from `plan/business-frame`** — the three user-facing sections (痛点 / 能多干什么 / 具体场景). Every sub-issue's `## 问题` / `## 预期结果` must cite back to this frame. If business-frame emitted `business_frame_skipped`, sub-issues are pure design-question / no-code and this constraint relaxes.
-- `contract.md` §1 (issue body shape per kind).
+- `contract.md` §1 (issue body shape per deliverable form).
 - `contract.md` §7.2 (self-contained hygiene base: atomicity test, citation rules, parent/child graph, retroactive umbrella form).
 
 ## Procedure
@@ -22,7 +22,7 @@ Take classified deliverables and emit a draft issue body for each. At this fragm
 
 3. **Section skeleton by class**:
 
-   `implementation` (kind:code):
+   `implementation` (deliverable: implementation PR):
 
    ```markdown
    ## 目标
@@ -59,7 +59,7 @@ Take classified deliverables and emit a draft issue body for each. At this fragm
    - Blocks: #<M>（<原因>）
    ```
 
-   `blocker-resolution` (kind:blocked):
+   `blocker-resolution` (deliverable: unblock PR + cross-issue unblock side effect):
 
    ```markdown
    ## 目标
@@ -85,7 +85,7 @@ Take classified deliverables and emit a draft issue body for each. At this fragm
    - Unblocks: <owner/repo#N>
    ```
 
-   `spike` (kind:comment):
+   `spike` (deliverable: issue comment):
 
    ```markdown
    ## 目标
@@ -111,7 +111,7 @@ Take classified deliverables and emit a draft issue body for each. At this fragm
    - Blocks: #<N>（依赖该假设的 implementation issue）
    ```
 
-   `source-writing-spike` (kind:code-spike):
+   `source-writing-spike` (deliverable: no-merge PoC branch + evidence + issue comment):
 
    ```markdown
    ## 目标
@@ -146,7 +146,7 @@ Take classified deliverables and emit a draft issue body for each. At this fragm
    - Blocks: #<N>（依赖该 source-writing spike 的 implementation issue）
    ```
 
-   `parent` (umbrella; usually kind:code if it itself has a closure task, otherwise no `kind:*` label and not queued):
+   `parent` (umbrella; written in implementation-PR-deliverable shape when it has its own closure task, otherwise pure coordinator and not queued):
 
    遵循 `contract.md` §7.2 的 retroactive umbrella form 或 future-work parent form。Parent body 通常含 `## 背景 / 为什么`、`## 范围`、`## 不在范围内`、`## 设计决策 / approach`、`## 时间线`、`## 实施 PR / 已挂 children`。若 parent 只是组织节点且没有自身 closure task，不要放入 coder-loop queue。
 
@@ -168,7 +168,7 @@ Take classified deliverables and emit a draft issue body for each. At this fragm
 
 If any candidate's draft body can't pass atomicity test even after splitting (e.g. the work is genuinely one PR but its Why has multiple unrelated motivations), emit `not_atomic_resplit` and return to `plan/classify` to re-decide. Don't write multi-motivation issues.
 
-If `kind:comment` candidate's `## 结果分支` can't be drafted (you don't know what should happen on pass vs fail), the spike is under-specified — emit `intake_needs_clarification` and bounce back to operator.
+If a comment-spike candidate's `## 结果分支` can't be drafted (you don't know what should happen on pass vs fail), the spike is under-specified — emit `intake_needs_clarification` and bounce back to operator.
 
 ## Output verdict
 

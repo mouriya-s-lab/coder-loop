@@ -1,6 +1,6 @@
-# Judgment guide: spike follow-up (`kind:comment`)
+# Judgment guide: spike follow-up (comment-spike-deliverable)
 
-For `kind:comment` issues the deliverable is the iteration-posted issue comment; its value is the follow-up it unlocks. A comment that answers the question without delivering what `## 结果分支` requires has not delivered.
+For comment-spike-deliverable issues the deliverable is the iteration-posted issue comment; its value is the follow-up it unlocks. A comment that answers the question without delivering what `## 结果分支` requires has not delivered.
 
 ## Inputs (read yourself)
 
