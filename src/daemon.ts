@@ -93,6 +93,10 @@ export type DaemonCommandName =
 	| "item.list"
 	| "item.update"
 	| "item.reorder"
+	// #451 typed phase-exits query face. Read-side companion to the #397
+	// write-side default-deny gate: the agent asks "what may I write from my
+	// currently-running phase?" before issuing the write.
+	| "item.exits"
 	| "daemon.status"
 	| "daemon.down"
 
@@ -218,6 +222,13 @@ const ITEM_UPDATE_FIELD_KEYS = [
 ] as const
 const ITEM_UPDATE_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "fields", ...ITEM_UPDATE_FIELD_KEYS, "agentRunId", "agentPhase"] as const
 const ITEM_REORDER_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "position"] as const
+// #451 typed phase-exits query. Same selector vocabulary as `item.update`; the
+// agent attribution pair (`agentRunId` + `agentPhase`) is required (not
+// optional like on `item.update`) because the query face exists specifically to
+// answer "what can THIS agent run, in THIS phase, write?" — the item's
+// last-write phase column is not necessarily the same phase the agent is
+// running right now.
+const ITEM_EXITS_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "agentRunId", "agentPhase"] as const
 
 type ItemUpdateAuditAttribution =
 	| { kind: "operator"; subject: Extract<ObservabilitySubject, { kind: "operator" }> }
@@ -735,6 +746,8 @@ export class CoderLoopDaemon {
 				return await this.handleItemUpdate(request.args)
 			case "item.reorder":
 				return await this.handleItemReorder(request.args)
+			case "item.exits":
+				return await this.handleItemExits(request.args)
 			case "daemon.status":
 				return { daemon: daemonSnapshotToJson(this.snapshot()) }
 			case "daemon.down": {
@@ -1462,6 +1475,50 @@ export class CoderLoopDaemon {
 		} finally {
 			resumeScheduler()
 		}
+	}
+
+	// #451 typed phase-exits query face. Read-side companion to the #397
+	// write-side default-deny gate at `admitItemStatusForPhaseRequest`: returns
+	// the typed `[[phases.exits]]` for the agent's currently-running phase so
+	// the agent can pick a status from the declared set before issuing the
+	// write. Reuses `allowedItemStatusesForPhase` so the read side cannot drift
+	// from the write side — both speak the same source-of-truth helper.
+	//
+	// Unknown phase (`allowed === null`) is rejected as a typed
+	// `invalid_request` error rather than collapsed to empty exits: empty exits
+	// on a *known* phase is a real signal ("phase declares no [[phases.exits]];
+	// default-deny rejects all status writes") while unknown phase means the
+	// caller has lost track of the preset shape — different problems, different
+	// agent responses.
+	private async handleItemExits(args: JsonObject): Promise<JsonObject> {
+		validateKnownKeys(args, "item.exits args", ITEM_EXITS_ARG_KEYS)
+		validateItemUpdateSelector(args)
+		const agentRunId = optionalString(args, "agentRunId")
+		const agentPhase = optionalString(args, "agentPhase")
+		if (agentRunId === null || agentPhase === null) {
+			throw new DaemonError("invalid_request", "item.exits requires both agentRunId and agentPhase (the query is per-agent-run, per-phase)", {})
+		}
+		const item = this.resolveItem(args)
+		const store = this.requireStore()
+		const chain = store.getChain(item.chainId)
+		if (chain === null) throw new DaemonError("not_found", `chain ${item.chainId} was not found`, { chainId: item.chainId })
+		const { preset } = await this.loadedPresetForItem(chain, item)
+		const presetPhase = preset.phases.find((entry) => entry.name === agentPhase)
+		if (presetPhase === undefined) {
+			const knownPhases = preset.phases.map((entry) => entry.name)
+			throw new DaemonError(
+				"invalid_request",
+				`item.exits: phase "${agentPhase}" is not declared in preset "${preset.name}" (known phases: ${knownPhases.join(", ") || "<none>"})`,
+				{ phase: agentPhase, knownPhases },
+			)
+		}
+		// Query is read-only — no audit event is emitted (the write-side gate at
+		// `admitItemStatusForPhaseRequest` already records the write attempt the
+		// query informs). Adding a "queried" audit type was considered out of
+		// scope per the issue body's "本 issue 范围之外不应改动" boundary.
+		const exits = presetPhase.exits.map((exit) => ({ status: exit.status, when: exit.when }))
+		const allowed = phaseWritableStatuses(presetPhase).slice().sort()
+		return { phase: agentPhase, exits, allowed }
 	}
 
 	private resolveChain(args: JsonObject): ChainRecord {

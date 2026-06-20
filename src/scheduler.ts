@@ -8,6 +8,7 @@ import {
 	buildRenderBindings,
 	buildRunnerInvocation,
 	parseSessionIdFromRunnerStream,
+	phaseExitsEpilogue,
 	renderFragmentIndex,
 	renderPrompt,
 	resolvePresetBusinessKeyValues,
@@ -898,7 +899,10 @@ async function spawnSchedulerRun(
 		runner: runner.kind,
 	})
 	const summaryTag = makeRunSummaryTag()
-	const finalPrompt = renderedPrompt + summaryInstructionFor(summaryTag)
+	// #451 unified completion-protocol epilogue. Engine-injected, zero business
+	// literals: appended after the summary instruction so every daemon-spawned
+	// phase prompt ends with the same "query then write" protocol.
+	const finalPrompt = renderedPrompt + summaryInstructionFor(summaryTag) + phaseExitsEpilogue()
 	const runnerPlan = buildRunnerInvocation(
 		runner,
 		finalPrompt,
@@ -1927,9 +1931,12 @@ async function spawnSchedulerReviewOnEmptyRun(
 		resume: freshResume(),
 	})
 	const summaryTag = makeRunSummaryTag()
+	// #451 unified completion-protocol epilogue — same engine-injected suffix as
+	// the per-item spawn path above. Review-on-empty is a daemon-spawned phase
+	// too, so the agent contract is identical here.
 	const runnerPlan = buildRunnerInvocation(
 		runner,
-		renderedPrompt + summaryInstructionFor(summaryTag),
+		renderedPrompt + summaryInstructionFor(summaryTag) + phaseExitsEpilogue(),
 		freshResume(),
 		invocationPaths(representative.repoCwd, worktreePath, presetDir, resolveLoopDataPaths(options.loopDataRootOptions).root),
 	)
