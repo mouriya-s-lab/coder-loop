@@ -14,7 +14,7 @@ operator / supervisor 的默认入口是 `coder-loop` 自己暴露的只读或�
 
 | 场景 | 首选命令 | 何时用 |
 |---|---|---|
-| 初始化 target | `coder-loop install <target> --repo <owner>/<repo>` | 幂等写 workflow starter、创建 centralized chain，并检查 PATH / runner CLI |
+| 初始化 target | `coder-loop install <target> --repo <owner>/<repo>` | 幂等创建 centralized chain，并检查 PATH / runner CLI（自 #434 起 install 写出的 `.coder-loop/workflow.md` 已无引擎读者，待 #436 退役） |
 | 体检 target | `coder-loop doctor <target> --repo <owner>/<repo>` | 只读检查 bootstrap layers 和 live runtime health |
 | 读机器状态 | `coder-loop status <target> --json` | supervisor / script 读取当前 state/queue/current/events/process snapshot |
 | 管理 central daemon | `coder-loop daemon up/down/status/start/stop/restart <target>` | 管理全局 daemon socket 与 target chain；避免手写 `nohup` / PID 归属逻辑 |
@@ -47,7 +47,7 @@ coder-loop daemon down --json                    # 关闭 central daemon socket 
 
 | 字段 | 含义 |
 |---|---|
-| `target` | target cwd、workflow/shared/runtime/log 路径、preset metadata、runner policy |
+| `target` | target cwd、shared / runtime / log 路径、preset metadata、runner policy |
 | `state` | `ok` 与 `kind` discriminant；如 `ok`、`missing-preset`、`invalid-preset`、`missing-state`、`invalid-state`、`invalid-runtime` |
 | `queue` | 队列总数、按 status 计数、continuable/terminal 数、当前 selected item |
 | `runs` | SQLite `runs.status` 聚合出的 run 总数与 phase × status 计数 |
@@ -308,7 +308,7 @@ coder-loop item list --chain <chain-name> --json
 ## 8. 常见坑
 
 - **把 `.coder-loop/runtime/` 入了 git** → runtime / logs / handoff 进了 PR diff；把整个 runtime 目录加 `.gitignore` 后 `git rm --cached -r .coder-loop/runtime/`。
-- **`.coder-loop/workflow.md` 缺失或没入仓** → iter/review agent 读不到项目工作方式，行为退化为 bundled preset 默认值，往往写错命令 / 漏证据 layer。
+- **target 的 `CLAUDE.md` / `AGENTS.md` 缺失或没入仓** → plan/iter/review agent 读不到项目工作方式（项目命令 / PR 约定），行为退化为推测项目命令，往往写错命令 / 漏证据 layer；plan/intake 会直接 `intake_needs_clarification` 要求先补这两份。
 - **`gh` 未 auth** → `iter/read-context` 会以 `infrastructure_failure` 出局，agent 输出里能看到 `gh auth status` 失败回显。
 - **chain identity 与目标 repo 不一致** → `status` / `daemon start` 会在解析 chain 时报告 repository/baseBranch 不匹配；指定正确 `--chain`，或修正 centralized chain identity。
 - **只看日志文件、不看 status** → 新版 authoritative path 来自 central chain；先看 `status` 返回的路径，避免按旧 flat-log layout 找错文件。

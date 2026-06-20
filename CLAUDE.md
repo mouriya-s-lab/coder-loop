@@ -23,9 +23,9 @@ L2: Preset（presets/<name>/）
     - <phase>-entry.md + fragments: 角色 prompt 与状态机语义
     - templates/: 目标侧 starter（仅当该 preset 需要 target-side policy 时）
 
-目标侧策略：<TARGET>/.coder-loop/
-    - workflow.md: committed 项目级策略（具体内容由 preset 定义）
-    - runtime/{shared,issues,evidence,logs}: ignored 本地运行态（chain 元数据归 centralized SQLite，无 target 侧 config）
+目标侧策略：target 自有的 agent 指令文件 + .coder-loop/
+    - <TARGET>/CLAUDE.md / <TARGET>/AGENTS.md: 项目命令 / 约定 / PR 形态（committed；preset prompt 显式读取）
+    - <TARGET>/.coder-loop/runtime/{shared,issues,evidence,logs}: ignored 本地运行态（chain 元数据归 centralized SQLite，无 target 侧 config）
 ```
 
 每层职责互不重叠：
@@ -43,7 +43,7 @@ L2: Preset（presets/<name>/）
 - **Real e2e（引擎全链路验收）**: `bun scripts/real-e2e.ts [--preset gh-issue-pr-iteration] [flags]` — 单命令真实 e2e：隔离 daemon（`--loop-data-root`，绝不碰生产 `~/.coder-loop`）→ 在 fixture repo `mouriya-s-lab/coder-loop-e2e-fixture` seed 一个 trivial issue → 跑完整 loop（spawn → iteration → review → PR merged → issue closed）→ 断言 GitHub 终态 → tripwire/teardown。默认 `real-e2e-minimal` preset（最小，只验引擎调度链路，~3-5min）；`--preset gh-issue-pr-iteration` 跑全保真。详细 runbook 见 `docs/real-e2e-fixture.md`。这只在 code 仓跑，不在 app 跑。
 - **Status snapshot**: `coder-loop status <target> --json [--chain <name>]` — stable read-only JSON API for supervisor/scripts; do not scrape runtime files first.
 - **Daemon operations**: `coder-loop daemon status <target> --json`, `coder-loop daemon start|restart <target> [--max-iterations N]`, `coder-loop daemon stop <target>` — stable central-daemon / target-chain control API.
-- **Install target**: `coder-loop install <target> [--repo <owner/repo>] [--preset <name>] [--force] [--dry-run]` — 幂等 bootstrap（workflow.md + centralized chain + runner/PATH 检查；preset-owned planning assets 由 preset 自己处理）。源：`src/install-commands.ts`。
+- **Install target**: `coder-loop install <target> [--repo <owner/repo>] [--preset <name>] [--force] [--dry-run]` — 幂等 bootstrap（centralized chain + runner/PATH 检查；preset-owned planning assets 由 preset 自己处理。注意：install 仍在 target 写 `.coder-loop/workflow.md`，但自 #434 起该文件已无引擎读者，留待 #436 退役）。源：`src/install-commands.ts`。
 - **Uninstall target**: `coder-loop uninstall <target>` — 仅删 `.claude/commands/dev-*.md`；runtime 和 GitHub labels 保留。
 - **Doctor**: `coder-loop doctor <target> [--repo <owner/repo>]` — 只读体检（target 文件 / 操作员 PATH / runner CLI）并输出 live runtime health。
 - **Plan phase**: `/dev-plan` （`gh-issue-pr-iteration` preset 配套的规划器）
@@ -117,11 +117,11 @@ supervisor 的正常接口是 coder-loop 运维 API：
 
 ## Templates for target projects
 
-`coder-loop` 是 stateless program loop——它不内置 PR 形态、证据规则、queue 策略、跨 issue 记忆。这些规则的具体内容由 preset 决定（preset 的 entry prompt 引用 target 的 `workflow.md / shared.md`），target 拷 starter 后改本项目命令。
+`coder-loop` 是 stateless program loop——它不内置 PR 形态、证据规则、queue 策略、跨 issue 记忆。这些规则的具体内容由 preset 决定：loop 政策（PR 证据层、verdict 约定、CI parity）内联在 preset fragments 内部；项目命令 / 项目级 PR 约定 / 项目专属注意事项由 target 自有的 `CLAUDE.md` / `AGENTS.md` 承载，preset prompt 显式读取这两份 agent 指令文件（不依赖 runner 原生注入行为）。
 
 starter 位置：
 
-- `presets/<preset-name>/templates/` — 该 preset 配套的目标侧 starter（如 `gh-issue-pr-iteration/templates/{workflow,shared,pr-body}.md`）
+- `presets/<preset-name>/templates/` — 该 preset 配套的目标侧 starter（如 `gh-issue-pr-iteration/templates/{shared,pr-body}.md`；#434 起 `workflow.md` 退役）
 - `templates/supervisor/` — 跨 preset 通用的 supervisor starter
 
 详见 `templates/README.md`。

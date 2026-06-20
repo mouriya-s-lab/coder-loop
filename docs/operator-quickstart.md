@@ -51,12 +51,12 @@ coder-loop install /path/to/your-target-repo --repo <owner>/<repo>
 
 幂等。它做这些事：
 
-- **A) target 项目文件**：写 `.claude/commands/dev-plan.md` / `dev-loop.md`、建/刷新 `.coder-loop/runtime/{issues,evidence,logs}/` 并初始化 centralized chain、若 `workflow.md` 缺失则从 preset 模板拷一份。
+- **A) target 项目文件**：写 `.claude/commands/dev-plan.md` / `dev-loop.md`、建/刷新 `.coder-loop/runtime/{issues,evidence,logs}/` 并初始化 centralized chain。**注**：install 仍兼容地写 `.coder-loop/workflow.md`，但 #434 起引擎不再读它；项目命令 / PR 约定的权威源是 target 自有的 `CLAUDE.md` / `AGENTS.md`，preset prompt 显式读取。该 install 写入路径将在 #436 退役。
 - **B) 操作员机器前置**：只做检查、不安装——`gh`(+ auth) / preset phase runner CLI / `coder-loop` 是否在 PATH。
 
 `gh-issue-pr-iteration` 需要的 `kind:*` GitHub label 资产不由 install / doctor 管理；planning agent 在 `plan/create-issues` 路径首次创建 issue 前按 preset 声明幂等确保，缺失则创建，color / description 漂移则更新。
 
-`install` 第一件事会确认 central daemon 可达；daemon 不在线时会在写 `.coder-loop/workflow.md` 之前 fail-fast。使用自定义 `--loop-data-root` 时，`daemon up` 与后续 `install` / `doctor` / `status` 要传同一个 root。
+`install` 第一件事会确认 central daemon 可达；daemon 不在线时会在写任何 target 文件之前 fail-fast。使用自定义 `--loop-data-root` 时，`daemon up` 与后续 `install` / `doctor` / `status` 要传同一个 root。
 
 常用 flag：
 
@@ -64,7 +64,7 @@ coder-loop install /path/to/your-target-repo --repo <owner>/<repo>
 |---|---|
 | `--repo <owner>/<repo>` | 写进 chain identity（`chain.repository`），用于后续 GitHub issue / PR / label 操作 |
 | `--preset <name>` | 默认 `gh-issue-pr-iteration` |
-| `--force` | 覆盖已存在的 slash command / workflow.md（其他文件仍幂等） |
+| `--force` | 覆盖已存在的 slash command（其他文件仍幂等；`.coder-loop/workflow.md` 在 #436 退役前仍由 install 写出但引擎不读） |
 | `--dry-run` | 打印每一步将做什么，不写盘 |
 
 之后做一次只读体检：
@@ -93,7 +93,7 @@ echo '.dev-loop' >> .gitignore
 echo '.dev-trace.txt' >> .gitignore
 ```
 
-`.coder-loop/workflow.md` **要**入仓——agent 读这一份判断本项目的工作方式。
+项目命令 / PR 约定 / 项目专属注意事项要落在 target 自有的 `CLAUDE.md` / `AGENTS.md`（committed）——`gh-issue-pr-iteration` preset 的 plan / iter / review prompts 全部显式读取这两份。（旧版本曾让 install 在 target 写 `.coder-loop/workflow.md` 当真源，自 #434 起该文件已无引擎读者，#436 退役。）
 
 拆掉 slash command（保留 runtime）：`coder-loop uninstall /path/to/your-target-repo`。
 
@@ -242,7 +242,7 @@ run 级事件在 `<logDir>/<runId>/events.jsonl`，也由 `status.events.path` �
 ## 6. 常见坑
 
 - **`.coder-loop/runtime/` 入了 git** → runtime handoff / logs 进了 PR diff；把整个目录加 `.gitignore` 后 `git rm --cached -r .coder-loop/runtime/`。
-- **`.coder-loop/workflow.md` 缺失或没入仓** → iter/review agent 读不到项目工作方式，行为退化为 bundled preset 默认值，往往写错命令 / 漏证据 layer。
+- **target 的 `CLAUDE.md` / `AGENTS.md` 缺失或没入仓** → plan/iter/review agent 读不到项目工作方式（项目命令 / PR 约定），行为退化为推测项目命令，往往写错命令 / 漏证据 layer；plan/intake 会直接 `intake_needs_clarification` 要求先补这两份。
 - **`gh` 未 auth** → `iter/read-context` 会以 `infrastructure_failure` 出局，trace 里能看到 `gh auth status` 失败回显。
 - **chain identity 与目标 repo 不一致** → `status` / `daemon start` 会在解析 chain 时报告 repository/baseBranch 不匹配；指定正确 `--chain`，或修正 centralized chain identity。
 - **按旧 flat log / `.dev-loop` 找不到状态** → 新版以 central daemon + chain runtime 为准；先看 `coder-loop status <target> --json` 返回的 `target.logDir`、`events.path`、`processes.live`。

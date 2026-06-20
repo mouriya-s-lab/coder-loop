@@ -15,7 +15,7 @@
 | 引擎职责 | 说明 |
 |---|---|
 | **加载 preset** | 从 `<pkg>/presets/<name>/` 或 target 的 `presetPath` 读 `preset.toml`，解析 `name / item.idField / statuses / phases / fragments / agent`。每个 fragment 路径必须可读。 |
-| **加载 target runtime** | 读 target `.coder-loop/runtime/shared.md`、`.coder-loop/workflow.md`，并从 centralized SQLite loop-data store 解析 active chain / queue / current（preset 选择与 binding 来自 chain.metadata.bindings，不再读 target-side config 文件）。 |
+| **加载 target runtime** | 读 target `.coder-loop/runtime/shared.md`，并从 centralized SQLite loop-data store 解析 active chain / queue / current（preset 选择与 binding 来自 chain.metadata.bindings，不再读 target-side 的 config / workflow 文件）。 |
 | **选 actionable item** | 若 `state.current` 存在且其 status 在 preset 的 `statuses.continuable` 内，继续它；否则在队列里找首个 `continuable` item。`continuable` 外的所有 item 视为 terminal，引擎不动。 |
 | **按 phase 顺序 spawn agent** | 遍历 `preset.phases`：每个 phase 读 entry prompt 模板，按 `[phases.variables]` 表绑定变量替换 `{{KEY}}`，把渲染后的 prompt 传给当前 runner（`claude` 或 `codex`）。捕获 stdout/stderr 写入 `<logDir>/<runId>/<phase>/`，每个 phase spawn 完写 `status.json`。 |
 | **resume / 不丢工作** | spawn 中途崩溃，重启时根据 `state.current.phase` 跳到当前 phase 而非从头。 |
@@ -83,7 +83,6 @@ CHAIN=single-phase-demo
 mkdir -p "$TARGET/.coder-loop/runtime/issues" \
   "$TARGET/.coder-loop/runtime/evidence" \
   "$TARGET/.coder-loop/runtime/logs"
-printf '# workflow\n' > "$TARGET/.coder-loop/workflow.md"
 printf '# shared\n' > "$TARGET/.coder-loop/runtime/shared.md"
 
 coder-loop daemon up --loop-data-root "$LOOP_DATA_ROOT" --json \
@@ -332,7 +331,7 @@ model  = "gpt-5.5"
 
 `runner` 只能是 `claude` 或 `codex`。未声明的 phase 使用 `source=engine-builtin` fallback；已声明的 phase 在 `status --json` 中显示 `source=preset`。`model` 是该 phase 的默认模型，可省略（缺省即让 runner CLI 用自身默认）。Runner binary 直接是 `claude` / `codex`（在 PATH 上），不再有 target 级覆盖通道。
 
-queue item 可加 `"runner": "claude" | "codex"` 覆盖允许 item override 的普通执行 phase；review 和 trigger 这类角色使用自己的 phase runner 声明。item override 把 runner 切到与 phase 声明不同的 kind 时，不继承该 phase 的 `model` 声明（phase model 绑定在它声明的 runner kind 上）。preset 作者不要把某个 runner 的 CLI 细节写进 engine contract；若某个 preset 只支持特定 runner，把它写进该 preset 的 README / target workflow，并用 `doctor` / `status` 验证 preset runner 是否符合预期。
+queue item 可加 `"runner": "claude" | "codex"` 覆盖允许 item override 的普通执行 phase；review 和 trigger 这类角色使用自己的 phase runner 声明。item override 把 runner 切到与 phase 声明不同的 kind 时，不继承该 phase 的 `model` 声明（phase model 绑定在它声明的 runner kind 上）。preset 作者不要把某个 runner 的 CLI 细节写进 engine contract；若某个 preset 只支持特定 runner，把它写进该 preset 的 README 或 target 自有的 `CLAUDE.md` / `AGENTS.md`，并用 `doctor` / `status` 验证 preset runner 是否符合预期。
 
 ---
 
@@ -341,8 +340,8 @@ queue item 可加 `"runner": "claude" | "codex"` 覆盖允许 item override 的�
 跑一个新 preset 所需的最小 target（参见 `src/smoke.test.ts`）：
 
 ```
+<target>/CLAUDE.md 或 AGENTS.md      # 项目命令 / 约定 / PR 形态；plan/iter/review prompts 显式读取
 <target>/.coder-loop/
-  workflow.md                   # 占位即可，preset 是否引用看 entry prompt
   runtime/
     shared.md                   # 占位；central chain 也可有自己的 shared context
     issues/                     # handoff 文件目录
@@ -350,7 +349,7 @@ queue item 可加 `"runner": "claude" | "codex"` 覆盖允许 item override 的�
     logs/                       # legacy/local fallback；新版 runs/log path 由 chain runtime 决定
 ```
 
-Preset 选择与 chain binding 都在 centralized SQLite loop-data store 的 chain.metadata.bindings 里（由 `coder-loop chain create --preset <name> --config-json '{...}'` 写入），target spawn cwd 只承载 `.coder-loop/workflow.md` 等政策文件，不承载引擎可读的状态或绑定源。队列 / current / recentRuns 同样存在该 store 中。用 `coder-loop chain create`、`coder-loop item add`、安装/规划命令，或测试 helper 建 chain + item；不要为新版 runtime 手写 `.coder-loop/runtime/state.json` 当 authoritative queue。
+Preset 选择与 chain binding 都在 centralized SQLite loop-data store 的 chain.metadata.bindings 里（由 `coder-loop chain create --preset <name> --config-json '{...}'` 写入），target spawn cwd 只承载 `CLAUDE.md` / `AGENTS.md` 等 agent 指令文件作为项目命令源，不承载引擎可读的状态或绑定源。队列 / current / recentRuns 同样存在该 store 中。用 `coder-loop chain create`、`coder-loop item add`、安装/规划命令，或测试 helper 建 chain + item；不要为新版 runtime 手写 `.coder-loop/runtime/state.json` 当 authoritative queue。
 
 `coder-loop status <target> --json --chain <chain>` 应当 exit 0，且输出里 `.target.preset.name` 是目标 preset、`.state.kind == "ok"`；有可推进 item 时 `.queue.selected.id` 应指向该 preset 的 `item.idField` 值。没有 queue 时先用 `coder-loop chain create` / `coder-loop item add` 建立 centralized chain 与 item，再读取 status。
 
