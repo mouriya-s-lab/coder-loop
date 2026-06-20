@@ -3,6 +3,7 @@ import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
 import { openSqliteStateStore } from "./sqlite-state"
+import { parseObservabilityEvent, type ObservabilityEvent } from "./observability"
 import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -120,8 +121,19 @@ describe("smoke: v2 central chain CLI", () => {
 			"audit",
 			"--json",
 		]))
-		const agentSubjectEvents = (allAudit.events as Array<{ subject?: { kind: string } }>).filter((event) => event.subject?.kind === "agent")
-		expect(agentSubjectEvents).toHaveLength(0)
+		// Re-parse each wire-shaped event through the arktype boundary so the filter operates on the
+		// precise `ObservabilityEvent` tagged union, not an `any`/anonymous cast (#406 red-line).
+		// `subject.kind === "agent"` is only meaningful on the caller-admission audit branch, so we
+		// narrow on `event.kind === "audit" && event.type === "item.mutation.caller_admission"` first
+		// and then read the typed `subject` off that branch.
+		const allAuditEvents = parseObservabilityEventArray(allAudit.events)
+		const agentSubjectAdmissionEvents = allAuditEvents.filter(
+			(event) =>
+				event.kind === "audit" &&
+				event.type === "item.mutation.caller_admission" &&
+				event.subject?.kind === "agent",
+		)
+		expect(agentSubjectAdmissionEvents).toHaveLength(0)
 	})
 
 	// #433: status output is flag-insensitive to the retired target config file. Whether or not
@@ -243,4 +255,17 @@ function runCli(args: string[]): { exitCode: number | null; stdout: string; stde
 function expectJsonOk(result: { exitCode: number | null; stdout: string; stderr: string }): any {
 	expect(result.exitCode, result.stderr).toBe(0)
 	return JSON.parse(result.stdout)
+}
+
+// Boundary parser for `coder-loop logs --json` event arrays. The CLI stdout is opaque text
+// (`expectJsonOk` returns `any` by necessity since each command emits a different envelope);
+// this helper re-parses each entry through the arktype `ObservabilityEvent` boundary so the
+// caller gets the precise tagged union — discharging an opaque external payload at a real
+// boundary parse entry, with no `as` cast onto an anonymous shape (#406 红线).
+function parseObservabilityEventArray(rawEvents: Iterable<unknown>): ObservabilityEvent[] {
+	const events: ObservabilityEvent[] = []
+	for (const raw of rawEvents) {
+		events.push(parseObservabilityEvent(raw))
+	}
+	return events
 }

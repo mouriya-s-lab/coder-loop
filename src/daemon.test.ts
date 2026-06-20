@@ -4,6 +4,8 @@ import { mkdir, readdir, readFile, rm, stat, unlink, writeFile } from "node:fs/p
 import { mkdirSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
 
+import { type as arkType } from "arktype"
+
 import {
 	DaemonError,
 	daemonRequest,
@@ -39,6 +41,16 @@ let nextFixtureId = 0
 function runtimeStatus(value: string) {
 	return engineLifecycleAdmittedItemStatus(parseInternalStatus(value, "test.status"), "test")
 }
+
+// #406 fake-runner event-log line shape. The fake runners inline-render lines like
+// `{"type": "running", "itemId": <n>, "runId": "<s>"}` via JSON.stringify. Tests that need
+// the runId/itemId back must boundary-parse rather than `as`-cast onto an anonymous shape
+// (issue body 代码红线: 禁止真 as 断言 + 禁止匿名形状).
+const FakeRunnerRunningEventBoundary = arkType({
+	type: arkType.unit("running"),
+	itemId: "number",
+	runId: "string",
+})
 
 // v1 status model: the spawned agent is the only writer of item.status. These daemon
 // integration tests use fake runners, so the fake runner reproduces the real agent's
@@ -3534,7 +3546,9 @@ process.exitCode = 0
 			// `subject.kind === "agent"` with the runId that was bound to this credential at
 			// spawn time. Find the run id from the eventLog the fake runner wrote.
 			const runIdLine = (await readFile(eventLog, "utf-8")).split("\n").find((line) => line.trim() !== "") ?? ""
-			const runIdRecord = JSON.parse(runIdLine) as { runId: string; itemId: number }
+			// Boundary-parse the fake-runner event-log entry instead of casting onto an anonymous
+			// shape (#406 红线).
+			const runIdRecord = FakeRunnerRunningEventBoundary.assert(JSON.parse(runIdLine))
 			const eventsPath = resolveLoopDataPaths({ loopDataRoot }).eventsFile
 			const events = (await queryObservabilityEvents(eventsPath)).events
 			const admissionAllow = events.find((event) =>

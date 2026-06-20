@@ -243,13 +243,11 @@ type ItemMutationCaller =
 //   - `unknown-credential`: credential value doesn't match any registered active run
 //   - `inactive-run`: credential resolves to a run no longer active (revoked but not yet GC'd)
 //   - `wrong-item`: credential's bound itemId doesn't match the request's target item
-//   - `legacy-attribution-args`: caller shipped the retired agentRunId/agentPhase fields
 type CallerAdmissionDenyReason =
 	| "missing-credential"
 	| "unknown-credential"
 	| "inactive-run"
 	| "wrong-item"
-	| "legacy-attribution-args"
 
 // #406: the daemon-owned credential issuer. Implements `SchedulerRunCredentialIssuer` so the
 // scheduler can mint/revoke without knowing it talks to a Map. Keyed by credential value because
@@ -1866,9 +1864,7 @@ export class CoderLoopDaemon {
 		// Pre-406 free-claim attribution keys (`agentRunId` / `agentPhase`) are rejected one layer
 		// earlier by `validateKnownKeys` in `validateItemUpdateRequest` — they are no longer in
 		// `ITEM_UPDATE_ARG_KEYS`. By the time control reaches this gate, the args object cannot
-		// contain them. The `legacy-attribution-args` deny reason in the audit-event union
-		// remains as a documented record of what was retired, available for any future code path
-		// that wants to record a legacy-claim-attempt explicitly.
+		// contain them, so no `legacy-attribution-args` branch is reachable here.
 		const credentialField = args.agentCredential
 		if (credentialField === undefined) {
 			// Operator path: no credential field at all → caller is the operator.
@@ -2746,10 +2742,8 @@ function validateItemBatchAddRequest(args: JsonObject): void {
 function validateItemUpdateRequest(args: JsonObject): void {
 	// #406 boundary parse step 1: top-level known-keys gate. `validateKnownKeys` rejects
 	// `agentRunId` / `agentPhase` (they are not in `ITEM_UPDATE_ARG_KEYS` since #406 retired the
-	// free-claim attribution surface). The deeper caller-admission gate also rejects them with a
-	// typed deny reason (`legacy-attribution-args`), but that gate only runs after the request
-	// has been routed; this surface keeps a single message-shape for "unsupported field" against
-	// all retired keys.
+	// free-claim attribution surface). This is the only layer that produces an "unsupported field"
+	// rejection for the retired keys — the deeper caller-admission gate cannot observe them.
 	validateKnownKeys(args, "item.update args", ITEM_UPDATE_ARG_KEYS)
 	validateItemUpdateSelector(args)
 	const nestedFields = optionalJsonObject(args, "fields")

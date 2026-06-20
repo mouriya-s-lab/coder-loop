@@ -353,7 +353,6 @@ const ObservabilityEventBoundary = arkType.or(
 				arkType.unit("unknown-credential"),
 				arkType.unit("wrong-item"),
 				arkType.unit("inactive-run"),
-				arkType.unit("legacy-attribution-args"),
 			),
 		},
 	},
