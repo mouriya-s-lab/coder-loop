@@ -131,7 +131,6 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
 	await mkdir(resolve(loopDataRoot, "chains", CHAIN_NAME, "issues"), { recursive: true })
 	await mkdir(resolve(loopDataRoot, "chains", CHAIN_NAME, "evidence"), { recursive: true })
 	await mkdir(resolve(loopDataRoot, "chains", CHAIN_NAME, "runs"), { recursive: true })
-	await writeFile(resolve(target, ".coder-loop/workflow.md"), "# workflow\n")
 	await writeFile(resolve(loopDataRoot, "chains", CHAIN_NAME, "shared.md"), "# shared\n")
 	await writeFile(statePath, `${JSON.stringify({ queue: [], recentRuns: [], current: null }, null, 2)}\n`)
 	const presetPath = options.customManualUnblockPreset === true ? await createManualUnblockPreset(root) : null

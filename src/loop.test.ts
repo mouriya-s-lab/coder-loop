@@ -23,7 +23,6 @@ import {
 	renderFragmentIndex,
 	renderPrompt,
 	ENGINE_RUNTIME_BINDING_KEYS,
-	resolveWorkflowFileBinding,
 	stripRoleEntryFrontmatter,
 	resolveBinding,
 	selectRunnerForPhase,
@@ -107,7 +106,6 @@ function makeChainBindings(overrides: Partial<RenderBindings> = {}): RenderBindi
 	return {
 		repository: "mouriya-s-lab/coder-loop",
 		baseBranch: "main",
-		workflowFile: resolve(REPO_ROOT, ".coder-loop/workflow.md"),
 		requireBrowserEvidence: false,
 		...overrides,
 	}
@@ -329,26 +327,13 @@ describe("runtime binding helpers", () => {
 		expect(registry).not.toContain("`REVIEW SUMMARY:`")
 	})
 
-	test("workflow file chain binding keeps the conventional target path when chain metadata is unseeded", () => {
-		expect(resolveWorkflowFileBinding(REPO_ROOT, null)).toBe(resolve(REPO_ROOT, ".coder-loop/workflow.md"))
-		expect(resolveWorkflowFileBinding(REPO_ROOT, "docs/workflow.md")).toBe(resolve(REPO_ROOT, "docs/workflow.md"))
-		expect(resolveWorkflowFileBinding(REPO_ROOT, resolve(REPO_ROOT, "custom/workflow.md"))).toBe(resolve(REPO_ROOT, "custom/workflow.md"))
-	})
-
 	test("buildRenderBindings returns transparent chain data", () => {
 		const options = makeOptions()
 		const bindings = buildRenderBindings({ ...options, bindings: { ...options.bindings, customField: "custom" } })
 		expect(bindings.repository).toBe("mouriya-s-lab/coder-loop")
 		expect(bindings.baseBranch).toBe("main")
-		expect(bindings.workflowFile).toBe(resolve(REPO_ROOT, ".coder-loop/workflow.md"))
 		expect(bindings.requireBrowserEvidence).toBe(false)
 		expect(bindings.customField).toBe("custom")
-	})
-
-	test("workflow file is a chain binding, not a runtime binding", () => {
-		const ctx: ResolveContext = { item: makeItem(), chain: makeChainBindings(), runtime: makeRuntime() }
-		expect(resolveBinding({ kind: "chain", field: "workflowFile", fallback: { kind: "none" } }, ctx)).toBe(resolve(REPO_ROOT, ".coder-loop/workflow.md"))
-		expect(() => resolveBinding({ kind: "runtime", key: "workflowPath" }, ctx)).toThrow(/runtime\.workflowPath: not an engine runtime fact or preset-declared business key/)
 	})
 
 	test("preset-declared runtime business keys render without engine whitelist changes", () => {

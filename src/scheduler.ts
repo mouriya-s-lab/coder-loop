@@ -11,7 +11,6 @@ import {
 	renderFragmentIndex,
 	renderPrompt,
 	resolvePresetBusinessKeyValues,
-	resolveWorkflowFileBinding,
 	selectRunnerForPhase,
 	type AgentRunnerKind,
 	type AgentRunnerSelection,
@@ -29,7 +28,6 @@ import {
 import {
 	chainCompleteTriggerState,
 	chainBindings as metadataBindings,
-	chainBindingsWorkflowFile,
 	chainMetadataToJsonObject,
 	clearSchedulerBackoff as clearItemSchedulerBackoff,
 	clearSchedulerSpawnError as clearItemSchedulerSpawnError,
@@ -2229,20 +2227,17 @@ export function buildSchedulerResolveContext(input: {
 		repoCwd: input.item.repoCwd,
 	}
 	const chain = buildRenderBindings({
-		bindings: buildSchedulerChainBindings(input.item.repoCwd, input.chain),
+		bindings: buildSchedulerChainBindings(input.chain),
 	})
 	return { item: input.item, chain, runtime }
 }
 
-function buildSchedulerChainBindings(repoCwd: string, chain: ChainRecord): JsonObject {
-	const bindings: JsonObject = {
+function buildSchedulerChainBindings(chain: ChainRecord): JsonObject {
+	return {
 		repository: chain.repository,
 		baseBranch: chain.baseBranch,
 		...metadataBindings(chain.metadata),
 	}
-	const workflowFile = chain.metadata.workflowFile ?? chainBindingsWorkflowFile(chain.metadata)
-	bindings.workflowFile = resolveWorkflowFileBinding(repoCwd, workflowFile)
-	return bindings
 }
 
 function resolveFrom(base: string, path: string): string {

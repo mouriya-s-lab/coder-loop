@@ -2530,47 +2530,11 @@ describe("scheduler chain bindings (issue #288)", () => {
 		expect(rendered).toBe("umb_repo=[] umb_issue=[]")
 	})
 
-	test("renderSchedulerSpawnPrompt resolves WORKFLOW_FILE for existing chains without seeded config", async () => {
-		const preset = await loadPreset(PRESET_DIR)
-		const targetCwd = resolve(TEST_ROOT, "target-unseeded-workflow")
-		const chain = makeChainFixture({ name: "unseeded-workflow-chain", metadata: storedChainMetadata({}) })
-		const item = makeItemFixture(chain, { issueNumber: 999_004, repoCwd: targetCwd })
-		const rendered = await renderSchedulerSpawnPrompt({
-			rawPrompt: "workflow={{WORKFLOW_FILE}}",
-			preset,
-			phase: "iteration",
-			chain,
-			item,
-			runId: "run-unseeded-workflow",
-			worktreePath: resolve(TEST_ROOT, "worktree-unseeded-workflow"),
-			issueKind: "code",
-		})
-		expect(rendered).toBe(`workflow=${resolve(targetCwd, ".coder-loop/workflow.md")}`)
-	})
-
-	// #433: WORKFLOW_FILE binding now reads from `metadata.bindings.workflowFile` (chain bindings
-	// hold what the retired `metadata.config` wrapper used to). The legacy `metadata.config` shape
-	// throws at parse time, so this test seeds the new shape.
-	test("renderSchedulerSpawnPrompt resolves WORKFLOW_FILE from chain metadata bindings when present", async () => {
-		const preset = await loadPreset(PRESET_DIR)
-		const targetCwd = resolve(TEST_ROOT, "target-seeded-workflow")
-		const chain = makeChainFixture({
-			name: "seeded-workflow-chain",
-			metadata: storedChainMetadata({ bindings: { workflowFile: "policy/workflow.md" } }),
-		})
-		const item = makeItemFixture(chain, { issueNumber: 999_005, repoCwd: targetCwd })
-		const rendered = await renderSchedulerSpawnPrompt({
-			rawPrompt: "workflow={{WORKFLOW_FILE}}",
-			preset,
-			phase: "iteration",
-			chain,
-			item,
-			runId: "run-seeded-workflow",
-			worktreePath: resolve(TEST_ROOT, "worktree-seeded-workflow"),
-			issueKind: "code",
-		})
-		expect(rendered).toBe(`workflow=${resolve(targetCwd, "policy/workflow.md")}`)
-	})
+	// #434: `WORKFLOW_FILE` retired; the per-target `.coder-loop/workflow.md` file is no
+	// longer an engine concept. Project commands / PR conventions live in the target repo's
+	// own `CLAUDE.md` / `AGENTS.md`, read directly by preset prompts. The two tests that
+	// used to verify the WORKFLOW_FILE binding resolution path were deleted along with the
+	// concept.
 
 	test("scheduler spawn end-to-end: chain literals reach agent stdout via echo runner (AC5 fixture-style integration)", async () => {
 		const fixture = await createPresetPromptIntegrationFixture("chain-binding-integration")
