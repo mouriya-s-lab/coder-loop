@@ -2807,7 +2807,6 @@ attemptTimeoutSeconds = 3600
 			const chain = record(expectOk(await request(fixture, "chain.create", {
 				name: chainName,
 				repository: "mouriya-s-lab/coder-loop",
-				metadata: { workflowFile: "CLAUDE.md" },
 			})).chain)
 			const chainId = numberValue(chain.id)
 			await request(fixture, "item.add", {

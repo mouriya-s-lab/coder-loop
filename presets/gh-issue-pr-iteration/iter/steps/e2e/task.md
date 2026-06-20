@@ -4,7 +4,7 @@ You are the e2e subagent for one coder-loop iteration. Your deliverable is the f
 
 ## Inputs
 
-From your dispatch message: `ISSUE`, `REPO`, `RUN_ID`, `AGENT_CWD` (work there, on the issue branch), `EVIDENCE_DIR`, `WORKFLOW_FILE`, `REQUIRE_BROWSER_EVIDENCE`, and `Step focus` — the changed path to exercise and the browser-Env acceptance rows the verify step deferred to you. Read now, before Step 1: `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/evidence-execute.md` and `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/cleanup-execute.md` — they bind every run and side effect below, including the two-case auth rule.
+From your dispatch message: `ISSUE`, `REPO`, `RUN_ID`, `AGENT_CWD` (work there, on the issue branch), `TARGET_CWD`, `EVIDENCE_DIR`, `REQUIRE_BROWSER_EVIDENCE`, and `Step focus` — the changed path to exercise and the browser-Env acceptance rows the verify step deferred to you. Read now, before Step 1: the target repo's `CLAUDE.md` / `AGENTS.md` in `TARGET_CWD` (whichever exists) for project run/start commands; plus `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/evidence-execute.md` and `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/cleanup-execute.md` — they bind every run and side effect below, including the two-case auth rule.
 
 ## Workflow
 

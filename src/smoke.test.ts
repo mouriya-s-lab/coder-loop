@@ -121,7 +121,6 @@ async function createTarget(name: string): Promise<Fixture> {
 	await mkdir(resolve(loopDataRoot, "chains", chainName, "issues"), { recursive: true })
 	await mkdir(resolve(loopDataRoot, "chains", chainName, "evidence"), { recursive: true })
 	await mkdir(resolve(loopDataRoot, "chains", chainName, "runs"), { recursive: true })
-	await writeFile(resolve(target, ".coder-loop/workflow.md"), "# workflow\n")
 	await writeFile(resolve(loopDataRoot, "chains", chainName, "shared.md"), "# shared\n")
 	await writeFile(resolve(runtime, "shared.md"), "# shared\n")
 	// #433: the engine no longer reads any target on-disk runtime config; loop-data root is

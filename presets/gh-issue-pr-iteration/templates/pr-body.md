@@ -1,6 +1,6 @@
 <!--
-PR body skeleton template (copy into target as `.coder-loop/templates/pr-body.md`
-or fold into `workflow.md`'s "Required PR body skeleton" section).
+PR body skeleton template (reference; fold into the project's `CLAUDE.md` /
+`AGENTS.md` PR-conventions section if your repo wants the skeleton checked in).
 
 `coder-loop` does not enforce this shape — it is project policy. Drop layers
 your project genuinely doesn't need (e.g. Layer 3 startup ordering for a pure

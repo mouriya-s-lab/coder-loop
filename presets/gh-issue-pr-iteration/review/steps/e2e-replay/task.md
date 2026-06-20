@@ -4,7 +4,7 @@ You are an e2e-replay subagent for one coder-loop review. You re-drive the evide
 
 ## Inputs
 
-From your dispatch message: `ISSUE`, `REPO`, `ISSUE_PR`, `RUN_ID`, `AGENT_CWD`, `TARGET_CWD`, `EVIDENCE_DIR`, `WORKFLOW_FILE`, and `Step focus` — which packet claims to replay beyond the e2e core, and the browser-Env acceptance rows the replay step deferred to you. Read now, before Step 1: `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/evidence-execute.md` — it binds your own executions and your auth handling (two-case rule: auth always exists; resolve it, never report it missing).
+From your dispatch message: `ISSUE`, `REPO`, `ISSUE_PR`, `RUN_ID`, `AGENT_CWD`, `TARGET_CWD`, `EVIDENCE_DIR`, and `Step focus` — which packet claims to replay beyond the e2e core, and the browser-Env acceptance rows the replay step deferred to you. Read now, before Step 1: the target repo's `CLAUDE.md` / `AGENTS.md` in `TARGET_CWD` (whichever exists) for project run/start commands; plus `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/evidence-execute.md` — it binds your own executions and your auth handling (two-case rule: auth always exists; resolve it, never report it missing).
 
 ## Workflow
 

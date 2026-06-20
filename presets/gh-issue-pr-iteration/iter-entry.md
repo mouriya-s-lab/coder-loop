@@ -120,13 +120,13 @@ Runtime inputs:
   ISSUE=<...> REPO=<...> BASE_BRANCH=<...> RUN_ID=<...>
   AGENT_CWD=<...> TARGET_CWD=<...>
   SHARED_CONTEXT_FILE=<...> CURRENT_ISSUE_FILE=<...> EVIDENCE_DIR=<...> ISSUE_DIR=<...>
-  WORKFLOW_FILE=<...> REQUIRE_BROWSER_EVIDENCE=<...>
+  REQUIRE_BROWSER_EVIDENCE=<...>
   ISSUE_BRANCH=<...> ISSUE_PR=<...> ISSUE_STATUS=<...> RUN_ID_GENERATION=<...>
 Step focus: <your scheduling decision for this dispatch: the scope, the retry feedback
   to address, or the gap list from your previous verdict — one to three sentences>
 ```
 
-Fill in every field with the actual bound values — task files declare which fields they consume; a missing field stalls the subagent.
+Fill in every field with the actual bound values — task files declare which fields they consume; a missing field stalls the subagent. Subagents read the target repo's own `CLAUDE.md` / `AGENTS.md` (in `TARGET_CWD`) end-to-end for project commands and conventions — those files are the authoritative source for build / test / lint commands and PR/body shape, and the dispatch envelope must not duplicate that content.
 
 **4b. Check the report's structure.** Open the step's `accept.md`; its "Required report fields" section lists what the report must contain. Missing fields → send a follow-up message to the **same** subagent naming exactly the missing fields. Do not judge substance from a structurally broken report.
 
