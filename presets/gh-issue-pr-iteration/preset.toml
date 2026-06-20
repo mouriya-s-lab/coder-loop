@@ -58,7 +58,6 @@ roles  = ["common", "quality", "iter"]
   BASE_BRANCH              = { source = "chain.baseBranch", label = "Base branch" }
   ISSUE                    = { source = "item.issue", label = "Current issue", suffix = "", style = "plain" }
   RUN_ID                   = { source = "runtime.runId", label = "Run ID" }
-  WORKFLOW_FILE            = { source = "chain.workflowFile", label = "Workflow file" }
   SHARED_CONTEXT_FILE      = { source = "runtime.sharedContextPath", label = "Chain handoff/shared file" }
   STATE_FILE               = { source = "runtime.stateFile", label = "State file", style = "plain" }
   CURRENT_ISSUE_FILE       = { source = "runtime.currentIssueFile", label = "Optional per-issue handoff file" }
@@ -121,7 +120,6 @@ roles  = ["common", "quality", "review"]
   BASE_BRANCH              = { source = "chain.baseBranch", label = "Base branch" }
   ISSUE                    = { source = "item.issue", label = "Current issue", suffix = "", style = "plain" }
   RUN_ID                   = { source = "runtime.runId", label = "Run ID" }
-  WORKFLOW_FILE            = { source = "chain.workflowFile", label = "Workflow file" }
   SHARED_CONTEXT_FILE      = { source = "runtime.sharedContextPath", label = "Chain handoff/shared file" }
   STATE_FILE               = { source = "runtime.stateFile", label = "State file", style = "plain" }
   CURRENT_ISSUE_FILE       = { source = "runtime.currentIssueFile", label = "Optional per-issue handoff file" }
@@ -164,7 +162,6 @@ roles   = ["common"]
   BASE_BRANCH              = "chain.baseBranch"
   ISSUE                    = { source = "item.issue", label = "Current issue", suffix = "", style = "plain" }
   RUN_ID                   = { source = "runtime.runId", label = "Run ID" }
-  WORKFLOW_FILE            = "chain.workflowFile"
   SHARED_CONTEXT_FILE      = { source = "runtime.sharedContextPath", label = "Chain handoff/shared file" }
   STATE_FILE               = { source = "runtime.stateFile", label = "State file", style = "plain" }
   CURRENT_ISSUE_FILE       = { source = "runtime.currentIssueFile", label = "Optional per-issue handoff file" }
@@ -207,7 +204,6 @@ roles   = ["common"]
   BASE_BRANCH              = { source = "chain.baseBranch", label = "Base branch" }
   ISSUE                    = "item.issue"
   RUN_ID                   = { source = "runtime.runId", label = "Run ID" }
-  WORKFLOW_FILE            = { source = "chain.workflowFile", label = "Workflow file" }
   SHARED_CONTEXT_FILE      = { source = "runtime.sharedContextPath", label = "Chain handoff/shared file" }
   STATE_FILE               = "runtime.stateFile"
   CURRENT_ISSUE_FILE       = "runtime.currentIssueFile"

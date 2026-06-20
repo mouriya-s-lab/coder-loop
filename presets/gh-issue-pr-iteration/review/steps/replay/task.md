@@ -4,7 +4,7 @@ You are a replay subagent for one coder-loop review. The review orchestrator tru
 
 ## Inputs
 
-From your dispatch message: `ISSUE`, `REPO`, `ISSUE_PR`, `RUN_ID`, `AGENT_CWD` (work there), `TARGET_CWD`, `EVIDENCE_DIR`, `WORKFLOW_FILE`, and `Step focus` — which acceptance rows, which packet claims, which checks to observe; when the issue's deliverable is unblocking another issue, the `Step focus` will name the blocked-path e2e command for this dispatch. Read now, before Step 1: `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/evidence-execute.md` — it binds your own executions (real paths, text logs, PID discipline, artifacts under `EVIDENCE_DIR`).
+From your dispatch message: `ISSUE`, `REPO`, `ISSUE_PR`, `RUN_ID`, `AGENT_CWD` (work there), `TARGET_CWD`, `EVIDENCE_DIR`, and `Step focus` — which acceptance rows, which packet claims, which checks to observe; when the issue's deliverable is unblocking another issue, the `Step focus` will name the blocked-path e2e command for this dispatch. Read now, before Step 1: the target repo's `CLAUDE.md` / `AGENTS.md` in `TARGET_CWD` (whichever exists; both is normal) for project install / build / test commands and PR conventions; plus `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/evidence-execute.md` — it binds your own executions (real paths, text logs, PID discipline, artifacts under `EVIDENCE_DIR`).
 
 ## Workflow
 
@@ -14,7 +14,7 @@ Fetch the live issue body (`gh issue view <ISSUE> -R <REPO> --json body`). Parse
 
 ### Step 2 — Make the checkout runnable
 
-Check out / use the PR-bound branch state in your working directory (record the head SHA you replayed against). A fresh checkout has nothing installed — making it runnable is your job, not a reason to skip rows: run the project's dependency install (per its manifest/lockfile and `WORKFLOW_FILE`), any required build step, and a cheap toolchain probe (e.g. the project's typecheck or `--version` of the required binaries) before touching the first row. Record the setup commands and exits.
+Check out / use the PR-bound branch state in your working directory (record the head SHA you replayed against). A fresh checkout has nothing installed — making it runnable is your job, not a reason to skip rows: run the project's dependency install (per its manifest/lockfile and the target repo's `CLAUDE.md` / `AGENTS.md`), any required build step, and a cheap toolchain probe (e.g. the project's typecheck or `--version` of the required binaries) before touching the first row. Record the setup commands and exits.
 
 Then read the iteration's **runtime manifest** (in the PR packet and the chain handoff): it lists the binaries, services + start commands, auth resolution locations, ports, and the **standing e2e environment** (PIDs/ports/logs) the iteration left up for you. Use it — the standing environment plus the manifest is how every row and claim is reachable. A needed entry the manifest does not provide (a service with no start command, auth with no resolution location, the environment already torn down) is an **iteration packet failure**: record it as a finding with what was missing; it feeds retry, it never becomes your skip.
 

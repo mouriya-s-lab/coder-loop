@@ -19,7 +19,7 @@ This finalizer does not replace per-issue PR review gates. A child issue is comp
 ## Required reads
 
 1. Read `{{PROMPT_ROOT}}/common/runtime-contract.md`, `{{PROMPT_ROOT}}/common/github-routing.md`, and `{{PROMPT_ROOT}}/common/state-contract.md`.
-2. Read `{{WORKFLOW_FILE}}` and `{{SHARED_CONTEXT_FILE}}`.
+2. Read `{{TARGET_CWD}}/CLAUDE.md` and `{{TARGET_CWD}}/AGENTS.md` (whichever exist; both is normal) for project commands / conventions, and `{{SHARED_CONTEXT_FILE}}` for the chain handoff.
 3. Use `coder-loop status {{TARGET_CWD}} --json` and local runtime paths to identify the current chain, its umbrella metadata, queue items, chain handoff/shared file, optional issue handoff attachments, evidence directories, and logs.
 4. Read the live GitHub umbrella issue, every sub-issue, every candidate closing PR, relevant comments, reviews, and timeline entries. Use `gh` for GitHub metadata/comments; do not use `gh` or raw URLs to read source code bytes.
 
@@ -31,7 +31,7 @@ This finalizer does not replace per-issue PR review gates. A child issue is comp
 - Treat a merged PR as reviewer-consumable evidence, not as proof that umbrella scope is complete by itself.
 - Do not merge PRs. Do not edit merged PR bodies, do not close child issues, and do not rewrite per-issue review records.
 - If remaining scope is clear and executable, create one or more follow-up issues and add them to the current chain queue. If creation or queue injection is not safe, propose the follow-up titles and keep the chain active.
-- If the umbrella is complete, post a final umbrella assessment comment. Close the umbrella only when the comment and child closure table prove all scope is complete and GitHub closure is allowed by repository workflow.
+- If the umbrella is complete, post a final umbrella assessment comment. Close the umbrella only when the comment and child closure table prove all scope is complete and GitHub closure is allowed by repository conventions (see the target repo's `CLAUDE.md` / `AGENTS.md`).
 
 ## Comment format
 

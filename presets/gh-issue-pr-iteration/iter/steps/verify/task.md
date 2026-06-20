@@ -1,10 +1,10 @@
 # Step task: verify
 
-You are a verification subagent for one coder-loop iteration. Your deliverable is executed verification plus a reviewer-consumable evidence trail under `EVIDENCE_DIR`. The e2e direct run is a separate later step — your scope is the contract rows, the test suite, CI parity, and workflow commands. Work through the steps in order.
+You are a verification subagent for one coder-loop iteration. Your deliverable is executed verification plus a reviewer-consumable evidence trail under `EVIDENCE_DIR`. The e2e direct run is a separate later step — your scope is the contract rows, the test suite, CI parity, and the project's build/lint/typecheck commands. Work through the steps in order.
 
 ## Inputs
 
-From your dispatch message: `ISSUE`, `REPO`, `BASE_BRANCH`, `RUN_ID`, `AGENT_CWD` (work there, on the issue branch the implement step produced), `EVIDENCE_DIR`, `WORKFLOW_FILE`, and `Step focus`. Read now, before Step 1: `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/evidence-execute.md` and `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/cleanup-execute.md` — every artifact you produce below is bound by them (real path only, logs as text, artifacts under `EVIDENCE_DIR`).
+From your dispatch message: `ISSUE`, `REPO`, `BASE_BRANCH`, `RUN_ID`, `AGENT_CWD` (work there, on the issue branch the implement step produced), `EVIDENCE_DIR`, `TARGET_CWD`, and `Step focus`. Read now, before Step 1: the target repo's `CLAUDE.md` / `AGENTS.md` in `TARGET_CWD` (whichever exists; both is normal) for project test / build / lint / typecheck commands and CI parity guidance; plus `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/evidence-execute.md` and `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/cleanup-execute.md` — every artifact you produce below is bound by them (real path only, logs as text, artifacts under `EVIDENCE_DIR`).
 
 ## Workflow
 
@@ -20,7 +20,7 @@ Write the per-row plan (execute here / deferred to e2e / alternative proof, and 
 
 ### Step 2 — Run the executable rows
 
-Before the first row, make the worktree runnable — that is your job, not a blocker: run the project's dependency install (per its manifest/lockfile and `WORKFLOW_FILE`) and any required build step if the implement step left them undone; record the setup commands and exits. A row may be declared non-executable for environment reasons only after this setup was actually attempted — "dependencies missing" is never that reason.
+Before the first row, make the worktree runnable — that is your job, not a blocker: run the project's dependency install (per its manifest/lockfile and the target repo's `CLAUDE.md` / `AGENTS.md`) and any required build step if the implement step left them undone; record the setup commands and exits. A row may be declared non-executable for environment reasons only after this setup was actually attempted — "dependencies missing" is never that reason.
 
 Per row: run the Command exactly as written, capture command + exit status + output vs Expect. A mismatch is a result to record, not a thing to fix — product code failures are findings the orchestrator routes back to implementation; you never patch product code or tests. Fix-and-rerun is allowed only for your own harness mistakes (wrong cwd, missing env var, typo in your invocation), and the correction is recorded. For rows planned as non-executable: produce the strongest feasible alternative observable proof and record the deviation explicitly next to the row.
 
@@ -41,9 +41,9 @@ Record total counts on both sides with the exact commands used, plus the enumera
 
 Detect the project's CI configuration and record what you found. For GitHub Actions jobs reproducible locally, run the relevant job with `act` (derive workflow path/event/job/architecture from the project; prefer native arch, record amd64 caveats). If parity cannot run (Docker, act install, image pull, network): record the exact command, failure mode, exit status, and log excerpt as an infrastructure blocker — never skip silently, never substitute remote PR checks. If parity reaches product tests and they fail or hang, that is a fixable product finding, not something to paper over.
 
-### Step 5 — Workflow commands
+### Step 5 — Project commands
 
-From `WORKFLOW_FILE`, run the build/lint/typecheck/migration/deployment-preview commands that apply to this issue, obeying its wrappers and prohibitions; capture workflow-required artifacts. Capture both positive and negative paths when the issue scope or workflow requires them.
+From the target repo's `CLAUDE.md` / `AGENTS.md`, run the build / lint / typecheck / migration / deployment-preview commands that apply to this issue, obeying their wrappers and prohibitions; capture the artifacts the project's conventions require. Capture both positive and negative paths when the issue scope or the project's conventions require them.
 
 ### Step 6 — Land the artifacts and report
 

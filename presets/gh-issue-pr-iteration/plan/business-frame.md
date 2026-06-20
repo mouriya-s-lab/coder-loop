@@ -16,7 +16,7 @@ For pure-`design-question` or pure-`no-code` intake (no `implementation` / `spik
 
 - Classified candidate list from `plan/classify`.
 - Intake quotes from `plan/intake` (source design doc / RFC / user task).
-- Target repo conventions (workflow.md extracts).
+- Target repo conventions (extracts from `CLAUDE.md` / `AGENTS.md`).
 
 ## Required outputs (three named sections)
 

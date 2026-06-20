@@ -8,7 +8,7 @@ For each draft body, fill in the `## 验收标准` table (and `## 结果分支` 
 
 - Draft bodies from `plan/decompose`.
 - `contract.md` §1.3 (table column spec) + §1.5 (`## 结果分支` spec).
-- `workflow.md` extracts (concrete project commands to use in `Command` column).
+- Project command extracts from the target repo's `CLAUDE.md` / `AGENTS.md` (concrete commands to use in the `Command` column).
 
 ## Procedure
 
@@ -25,7 +25,7 @@ For each draft body, fill in the `## 验收标准` table (and `## 结果分支` 
    - `#` — sequential, starting at 1.
    - `Dimension` — exactly one of `function` / `environment` / `integration` / `assumption`. No other values.
    - `Check` — Chinese short sentence describing what this row verifies. Outcome-focused, not implementation-choice-focused. "调用 `foo()` 函数" ❌; "无效输入返回 4xx" ✅.
-   - `Command` — backtick-wrapped executable command. Must really run in `Env`. Use `\|` to escape pipe characters inside the table cell. Source commands from `workflow.md` extracts where possible: `` `mise run test` `` / `` `bun test` `` / `` `pnpm build` `` / `` `gh pr view <N> --json mergeable --jq .mergeable` ``.
+   - `Command` — backtick-wrapped executable command. Must really run in `Env`. Use `\|` to escape pipe characters inside the table cell. Source commands from the target repo's `CLAUDE.md` / `AGENTS.md` extracts where possible: `` `mise run test` `` / `` `bun test` `` / `` `pnpm build` `` / `` `gh pr view <N> --json mergeable --jq .mergeable` ``.
    - `Env` — exactly one of `local` / `VM` / `container` / `CI` / `browser` / `downstream` / `integration`.
    - `Expect` — concrete actual: exit code (`exit 0`), grep count (`≥ 1`), boolean string, file existence, etc.
 

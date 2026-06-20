@@ -40,7 +40,7 @@ Run these yourself, in order:
 2. `{{SHARED_CONTEXT_FILE}}` → the run's task list, and the `Intent (run …)` / `Result (run …)` blocks. **Read these blocks verbatim, yourself** — scope-reduction trigger phrases do not survive summarization.
 3. The state file's selected item → must match {{ISSUE}}; no selected issue at all → skip to Step 7's global assessment.
 4. `{{CURRENT_ISSUE_FILE}}` when present → issue-local history (missing file is normal).
-5. Target repo `CLAUDE.md` → project conventions referenced by the workflow file.
+5. Target repo `CLAUDE.md` / `AGENTS.md` → project commands and conventions; preset prompts read these directly rather than via a per-target policy file.
 6. Live GitHub state:
 
 ```bash
@@ -100,11 +100,13 @@ Read and execute: /Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteratio
 Report strictly per: /Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/steps/<step>/report.md
 Runtime inputs:
   ISSUE=<...> REPO=<...> ISSUE_PR=<...> RUN_ID=<...>
-  AGENT_CWD=<...> TARGET_CWD=<...> EVIDENCE_DIR=<...> WORKFLOW_FILE=<...>
+  AGENT_CWD=<...> TARGET_CWD=<...> EVIDENCE_DIR=<...>
 Step focus: <diff-audit: scope facts worth flagging; test-integrity: anything suite-specific;
   replay: which rows (when the issue is unblocking another issue: the named blocked-path e2e command);
   e2e-replay: which packet claims beyond the e2e core + the browser rows replay deferred>
 ```
+
+Subagents pull project commands and PR/body conventions from the target repo's own `CLAUDE.md` / `AGENTS.md` (in `TARGET_CWD`) — read them end-to-end; the dispatch envelope must not duplicate that content.
 
 For each returned report: first check structure against the step's `accept.md` "Required report fields" — missing fields → send a follow-up message to the same subagent naming them; then judge substance per that `accept.md`. Gaps → follow up with the exact gap list; wrong direction → close and re-dispatch fresh. Accepted → `[x]`, ledger line (`step | subagent id | outcome | declared side effects`), re-print the list.
 
@@ -121,7 +123,7 @@ Run each judgment the routing matrix at the bottom of this file marks `run` for 
 
 0. **Contract integrity (issue body tamper check)** — input: the issue body edit history from Step 1 (`userContentEdits`: editor, editedAt, full body snapshot per edit). Any body edit made **after this item entered the queue** is tampering unless a comment on the issue, posted before the edit, literally authorizes that exact change — pay special attention to weakened acceptance rows (relaxed Expect, deleted rows, broadened Env, removed constraints). On confirmed tampering you act immediately, before any other judgment: **restore** the body to the latest pre-tamper snapshot from the edit history (`gh issue edit <ISSUE> -R <REPO> --body-file <restored>`) — this restoration is contract protection, explicitly not "repairing iteration's work" — then record a hard retry finding whose feedback must open with a stern red-line warning: the issue body is the contract; editing it to pass review is the one inviolable line, the tampering was detected and reversed, and any recurrence routes the issue out of the loop.
 1. **Trace honesty** — input: iteration's handoff claims + trace + live GitHub state. Check claim-vs-observation (honesty-judge): claimed reads/commands with no trace, claimed tests with no output, claimed PR/comment that does not exist live, claimed-blocked without the obvious next command attempted, a retry that left no new PR-thread comment (body edits do not count).
-2. **PR protocol** — input: PR body + thread + issue comments. Check: exactly one implementation PR closing exactly this issue; body first line exactly `Closes #<ISSUE>`; the title/body/section/language rules of `{{WORKFLOW_FILE}}`; each retry has a new PR-thread comment carrying the full current packet; CI detection + local parity status stated; implementation discussion on the PR thread, not the issue. No-PR continuation is legal only for: already-satisfied-on-base, invalid/duplicate/no-code/moot, parent/wrapper, incomplete parent expansion, blocked, implementation failure pending retry, and the source-writing-spike and comment-spike deliverable routes.
+2. **PR protocol** — input: PR body + thread + issue comments. Check: exactly one implementation PR closing exactly this issue; body first line exactly `Closes #<ISSUE>`; the title / body / required-section / language rules — the four required evidence layers (Layer 1 Change preview / Layer 2 Landing checks / Layer 3 Startup / Layer 4 End-to-end) plus an `Analysis` section, with any project-specific additions documented in the target repo's `CLAUDE.md` / `AGENTS.md`; each retry has a new PR-thread comment carrying the full current packet; CI detection + local parity status stated; implementation discussion on the PR thread, not the issue. No-PR continuation is legal only for: already-satisfied-on-base, invalid/duplicate/no-code/moot, parent/wrapper, incomplete parent expansion, blocked, implementation failure pending retry, and the source-writing-spike and comment-spike deliverable routes.
 3. **Title-intent** — input: issue title + PR title. Strip conventional/RFC prefixes; the two subjects must align (exact / synonym / strict narrowing with matching `Closes`). Different concrete artifacts = drift → retry with rename+rescope or close-PR+new-issue instruction. Never retitle the issue to fit the PR.
 4. **Caveat honesty** — input: the verbatim `Intent`/`Result` blocks and PR body/comment from Step 1, plus the diff-audit's change footprint. Check every scope-reduction trigger of honesty-judge (path bypass, invariant downgrade, cosmetic handwave — uniformly a hard fail, cross-issue deferral, precondition admission, intent-action mismatch against the footprint, test weakening). A trigger stands unless the live issue body contains a literal authorizing sentence; stale-baseline exception applies as written.
 5. **Evidence form** — input: the packet (PR body for the opening packet; the latest run's PR comment for retries — evidence that only exists via PR-body rewrite is rejected). Check against evidence-judge: layered sections present, every claim mapped to an observation, artifacts inspectable, screenshots real and resolvable, CI parity stated or its exact blocker recorded, test-inventory delta line present, e2e direct-run evidence and runtime manifest present.
