@@ -98,7 +98,6 @@ process.exit(1)
 			now: () => now,
 			runIdFactory: ({ item: selected }) => `run-forced-failure-${selected.id}-${now}`,
 			prompt: ({ item, runId }) => JSON.stringify({ itemId: item.id, issueNumber: item.issueNumber, runId }),
-			kindResolver: () => ({ ok: true, kind: "code" }),
 			onEvent: (event) => {
 				schedulerEvents.push(event)
 			},
@@ -184,7 +183,6 @@ await Bun.write(${JSON.stringify(promptCapture)}, prompt)
 			loopDataRootOptions: { loopDataRoot },
 			runIdFactory: ({ item: selected }) => `run-optional-handoff-${selected.id}`,
 			prompt: "shared={{SHARED_CONTEXT_FILE}}\ncurrent={{CURRENT_ISSUE_FILE}}\nevidence={{EVIDENCE_DIR}}\n",
-			kindResolver: () => ({ ok: true, kind: "code" }),
 		}
 
 		const tick = await schedulerTick(options)
@@ -263,7 +261,6 @@ test("stopped chain does not block another active chain in the same scheduler ti
 			loopDataRootOptions: { loopDataRoot },
 			runIdFactory: ({ chain, item }) => `run-stopped-sibling-${chain.id}-${item.id}`,
 			prompt: ({ item }) => JSON.stringify({ itemId: item.id }),
-			kindResolver: () => ({ ok: true, kind: "code" }),
 		}
 
 		const tick = await schedulerTick(options)
@@ -343,7 +340,6 @@ console.log("done:" + input.itemId)
 			loopDataRootOptions: { loopDataRoot },
 			runIdFactory: ({ item: selected }) => `run-complete-cleanup-${selected.id}`,
 			prompt: ({ item: selected }) => JSON.stringify({ itemId: selected.id, issueNumber: selected.issueNumber }),
-			kindResolver: () => ({ ok: true, kind: "code" }),
 			onEvent: (event) => {
 				schedulerEvents.push(event)
 			},
@@ -435,7 +431,6 @@ console.log(input.phase + ":" + status)
 				runId,
 				phase,
 			}),
-			kindResolver: () => ({ ok: true, kind: "code" }),
 			onEvent: (event) => {
 				schedulerEvents.push(event)
 			},

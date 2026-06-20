@@ -352,7 +352,6 @@ async function createCrossRunnerFixture(name: string, responses: FakeRunnerRespo
 		phaseRunner,
 		worktreeManager,
 		loopDataRootOptions: { loopDataRoot },
-		kindResolver: () => ({ ok: true, kind: "code" }),
 		runIdFactory: ({ chain, item, phase }) => `run-${chain.id}-${item.id}-${phase}-${++runSequence}`,
 		prompt: ({ item, runId, phase }) => JSON.stringify({
 			itemId: item.id,

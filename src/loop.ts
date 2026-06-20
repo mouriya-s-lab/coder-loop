@@ -4845,77 +4845,16 @@ export function buildRuntimeBindings(input: {
 	}
 }
 
-export type ParsedIssueKind =
-	| { ok: true; kind: IssueKind }
-	| { ok: false; error: string }
-
-// gh-issue-pr-iteration compatibility: this only populates runtime.issueKind.
-// Fragment routing belongs to the preset prompt.
-export function parseKindFromLabels(labelNames: readonly string[]): ParsedIssueKind {
-	const kindLabels = labelNames.filter((name) => name.startsWith("kind:"))
-	if (kindLabels.length === 0) return { ok: true, kind: null }
-	if (kindLabels.length > 1) {
-		return { ok: false, error: `expected exactly one kind:* label, found ${kindLabels.length}: ${kindLabels.join(", ")}` }
-	}
-	const value = kindLabels[0]!.slice("kind:".length)
-	if (!isIssueKindValue(value)) {
-		return { ok: false, error: `unrecognized kind label "kind:${value}" (allowed: ${ISSUE_KIND_VALUES.map((kind) => `kind:${kind}`).join(", ")})` }
-	}
-	return { ok: true, kind: value }
-}
-
+// #420 retired the engine's kind-label取值 chain: the gh-label fetch helper,
+// the取值 resolver, and the extra/label parsers are gone — kind values are no
+// longer consumed anywhere in the rendered prompt (#450), so the entire
+// mechanism became dead code with `gh` as a residual network side effect on the
+// scheduler's spawn path. `IssueKind` / `ISSUE_KIND_VALUES` /
+// `isIssueKindValue` / `renderIssueKindDoc` stay until #401 finishes retiring
+// the engine vocabulary; `runtime.issueKind` now renders as the empty string
+// for every spawn.
 function isIssueKindValue(value: string): value is IssueKindValue {
 	return includesStringLiteral(ISSUE_KIND_VALUES, value)
-}
-
-function parseIssueKindFromExtra(extra: JsonObject): ParsedIssueKind {
-	const raw = extra.issueKind ?? extra.kind
-	if (raw === null || raw === undefined || raw === "") return { ok: true, kind: null }
-	if (typeof raw !== "string") return { ok: false, error: `queue item issue kind must be a string when repository is not configured` }
-	const label = raw.startsWith("kind:") ? raw : `kind:${raw}`
-	return parseKindFromLabels([label])
-}
-
-export async function resolveIssueKind(repository: string | null, issueId: string, extra: JsonObject): Promise<ParsedIssueKind> {
-	const itemKind = parseIssueKindFromExtra(extra)
-	if (!itemKind.ok || itemKind.kind !== null) return itemKind
-	if (repository !== null && /^\d+$/.test(issueId)) return fetchIssueKind(repository, issueId)
-	return itemKind
-}
-
-export async function fetchIssueKind(repository: string | null, issueId: string): Promise<ParsedIssueKind> {
-	if (repository === null) return { ok: true, kind: null }
-	return new Promise((resolveResult) => {
-		const child = spawn("gh", ["issue", "view", issueId, "--repo", repository, "--json", "labels", "--jq", "[.labels[].name]"], {
-			stdio: ["ignore", "pipe", "pipe"],
-		})
-		const out: Buffer[] = []
-		const err: Buffer[] = []
-		child.stdout.on("data", (chunk: Buffer) => out.push(chunk))
-		child.stderr.on("data", (chunk: Buffer) => err.push(chunk))
-		child.on("error", (error) => {
-			resolveResult({ ok: false, error: `gh issue view failed to spawn: ${error.message}` })
-		})
-		child.on("close", (code) => {
-			if (code !== 0) {
-				const stderr = Buffer.concat(err).toString("utf-8").trim()
-				resolveResult({ ok: false, error: `gh issue view exited ${code} for ${repository}#${issueId}: ${stderr}` })
-				return
-			}
-			const stdout = Buffer.concat(out).toString("utf-8").trim()
-			try {
-				const parsed: BoundaryValue = JSON.parse(stdout)
-				if (!Array.isArray(parsed) || !parsed.every((entry) => typeof entry === "string")) {
-					resolveResult({ ok: false, error: `gh issue view returned non-string-array labels for ${repository}#${issueId}: ${stdout}` })
-					return
-				}
-				resolveResult(parseKindFromLabels(parsed))
-			} catch (parseError) {
-				const message = parseError instanceof Error ? parseError.message : String(parseError)
-				resolveResult({ ok: false, error: `gh issue view returned invalid JSON for ${repository}#${issueId}: ${message}` })
-			}
-		})
-	})
 }
 
 export type RenderBindingsInput = Pick<LoopOptions, "bindings">
