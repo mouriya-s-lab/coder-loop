@@ -70,7 +70,7 @@ process.exit(1)
 			repoCwd: REPO_ROOT,
 			status: runtimeStatus("queued"),
 			attempts: 0,
-			extra: storedItemExtra({ issueKind: "code" }),
+			extra: storedItemExtra({}),
 		})
 		const state = createSchedulerState()
 		const schedulerEvents: SchedulerEvent[] = []
@@ -160,7 +160,7 @@ await Bun.write(${JSON.stringify(promptCapture)}, prompt)
 			attempts: 0,
 			issueFile: null,
 			evidenceDir: null,
-			extra: storedItemExtra({ issueKind: "code" }),
+			extra: storedItemExtra({}),
 		})
 		const state = createSchedulerState()
 		const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
@@ -230,7 +230,7 @@ test("stopped chain does not block another active chain in the same scheduler ti
 			repoCwd: REPO_ROOT,
 			status: runtimeStatus("queued"),
 			attempts: 0,
-			extra: storedItemExtra({ issueKind: "code" }),
+			extra: storedItemExtra({}),
 		})
 		const activeItem = store.createItem({
 			chainId: active.id,
@@ -238,7 +238,7 @@ test("stopped chain does not block another active chain in the same scheduler ti
 			repoCwd: REPO_ROOT,
 			status: runtimeStatus("queued"),
 			attempts: 0,
-			extra: storedItemExtra({ issueKind: "code" }),
+			extra: storedItemExtra({}),
 		})
 		const state = createSchedulerState()
 		const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
@@ -318,7 +318,7 @@ console.log("done:" + input.itemId)
 			repoCwd: target,
 			status: runtimeStatus("queued"),
 			attempts: 0,
-			extra: storedItemExtra({ issueKind: "code" }),
+			extra: storedItemExtra({}),
 		})
 		const lockPath = reviewOnEmptyLockPathForChainName(chain.name, { loopDataRoot })
 		await mkdir(dirname(lockPath), { recursive: true })
@@ -402,7 +402,7 @@ console.log(input.phase + ":" + status)
 			repoCwd: REPO_ROOT,
 			status: runtimeStatus("queued"),
 			attempts: 0,
-			extra: storedItemExtra({ issueKind: "code" }),
+			extra: storedItemExtra({}),
 		})
 		const state = createSchedulerState()
 		const schedulerEvents: SchedulerEvent[] = []
@@ -502,7 +502,7 @@ echo "ITERATION SUMMARY: scope=daemon-crash-restart; reason=fake-codex"
 			repoCwd: REPO_ROOT,
 			status: runtimeStatus("queued"),
 			attempts: 0,
-			extra: storedItemExtra({ issueKind: "code" }),
+			extra: storedItemExtra({}),
 		})
 
 		const env = { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` }

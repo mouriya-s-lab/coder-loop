@@ -14,7 +14,6 @@ import {
 	selectRunnerForPhase,
 	type AgentRunnerKind,
 	type AgentRunnerSelection,
-	type IssueKind,
 	type JsonObject,
 	type JsonValue,
 	type Preset,
@@ -803,12 +802,6 @@ async function spawnSchedulerRun(
 	slot: SchedulerSlot,
 	phase: string,
 ): Promise<SchedulerActiveRun | null> {
-	// #420 retired the engine's kind取值 mechanism: `gh issue view` is no longer spawned and
-	// the resolver pipe is gone. The renderer's `issueKind` parameter is held over until #401
-	// finishes retiring `runtime.issueKind` / `renderIssueKindDoc`; every spawn now passes the
-	// empty-kind path (null → "") to the prompt renderer.
-	const resolvedIssueKind: IssueKind = null
-
 	const worktreeManager = options.worktreeManager ?? createGitWorktreeManager(options.loopDataRootOptions)
 	let worktreePath: string
 	try {
@@ -900,7 +893,6 @@ async function spawnSchedulerRun(
 		item,
 		runId,
 		worktreePath,
-		issueKind: resolvedIssueKind,
 		loopDataRootOptions: options.loopDataRootOptions,
 		resume: resumeDecision,
 		runner: runner.kind,
@@ -1931,7 +1923,6 @@ async function spawnSchedulerReviewOnEmptyRun(
 		item: fallbackItem,
 		runId,
 		worktreePath,
-		issueKind: null,
 		loopDataRootOptions: options.loopDataRootOptions,
 		resume: freshResume(),
 	})
@@ -2168,7 +2159,6 @@ export type SchedulerPromptRenderInput = {
 	item: ItemRecord
 	runId: string
 	worktreePath: string
-	issueKind: IssueKind
 	loopDataRootOptions?: LoopDataRootOptions | undefined
 	resume?: ResumeDecision
 	runner?: AgentRunnerKind
@@ -2185,7 +2175,6 @@ export async function renderSchedulerSpawnPrompt(input: SchedulerPromptRenderInp
 		item: input.item,
 		runId: input.runId,
 		worktreePath: input.worktreePath,
-		issueKind: input.issueKind,
 		loopDataRootOptions: input.loopDataRootOptions,
 		resume: input.resume ?? (input.runner === undefined ? freshResume() : resumeDecisionForItem(input.item, input.phase, input.runner)),
 	})
@@ -2199,7 +2188,6 @@ export function buildSchedulerResolveContext(input: {
 	item: ItemRecord
 	runId: string
 	worktreePath: string
-	issueKind: IssueKind
 	loopDataRootOptions?: LoopDataRootOptions | undefined
 	resume?: ResumeDecision
 	runner?: AgentRunnerKind
@@ -2231,12 +2219,10 @@ export function buildSchedulerResolveContext(input: {
 		fragmentIndex: renderFragmentIndex(input.preset, input.phase),
 		runtimeInputsDoc: "",
 		phaseExitsDoc: "",
-		issueKindDoc: "",
 		runIdGeneration: resumedSessionId === "" ? "new" : "resumed",
 		resumedFromPhase: resumedSessionId === "" ? "" : input.phase.name,
 		resumedStartedAt: "",
 		resumedSessionId,
-		issueKind: input.issueKind ?? "",
 		chainName: input.chain.name,
 		chainUmbrellaRepo: input.chain.umbrellaRepo ?? "",
 		chainUmbrellaIssue: input.chain.umbrellaIssue === null ? "" : String(input.chain.umbrellaIssue),

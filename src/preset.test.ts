@@ -148,8 +148,8 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 			lastRunId: { type: "string" },
 		})
 		// #450 retired the kind taxonomy: the preset no longer declares any business
-		// keys. The engine still computes runtime.issueKind during the transition
-		// before #420 retires the fetch mechanism, but no preset variable consumes it.
+		// keys. After #420 / #401 the engine itself no longer carries any kind
+		// vocabulary, fetch mechanism, or render surface either.
 		expect([...preset.runtime.businessKeys]).toEqual([])
 		// #433: [agent].binary and [agent].extraArgs were zombie schema; retired with the rest of
 		// the runtime/config concept. Runner binary is now kind→PATH only.
@@ -224,11 +224,9 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(iterVars.get("AGENT_CWD")).toEqual(expectedRuntime("agentCwd"))
 		expect(iterVars.get("PROMPT_ROOT")).toEqual(expectedRuntime("presetDir"))
 		expect(iterVars.get("PROMPT_FRAGMENT_INDEX")).toEqual(expectedRuntime("fragmentIndex"))
-		// #450 retired the kind taxonomy — ISSUE_KIND / ISSUE_KIND_DOC bindings are gone
-		// from every phase, the renderer never injects the value, and the variable map
-		// must not contain those keys.
-		expect(iterVars.has("ISSUE_KIND")).toBe(false)
-		expect(iterVars.has("ISSUE_KIND_DOC")).toBe(false)
+		// #450 retired the kind taxonomy and #401 finished retiring the engine
+		// vocabulary — the keys === EXPECTED_VARIABLE_KEYS assertion above already
+		// covers the absence of the retired bindings positively.
 	})
 
 	test("fragments match PROMPT_FRAGMENTS 1:1 by id+role+path and files exist", async () => {

@@ -228,7 +228,7 @@ Preset business key 通过 `preset.toml` 两步声明 + 供值（issue #448）�
 
 ```toml
 [runtime]
-businessKeys = ["issueKind", "issueKindDoc", "auditDemo"]
+businessKeys = ["auditDemo"]
 ```
 
 **2. 在 preset 文件内为 key 供值**（可选；不供值时该 key 必须由引擎为对应 preset 提供值，否则 render 期报错）：
@@ -242,7 +242,7 @@ auditDemo = { literal = "business-key-e2e-ok" }
 
 这些 key 的语义属于 preset，而不是引擎契约。引擎只负责：加载时确认 `runtime.<key>` 已声明、`businessKeyValues` 中的 key 都已 declared，渲染时把 preset 提供的 literal 合并进 `RuntimeBindings`，并按字符串值供模板替换。新增业务 key 只改 preset 声明 + 供值；不改 `ENGINE_RUNTIME_BINDING_KEYS`、不改 `src/`。
 
-bundled `gh-issue-pr-iteration` 的 `issueKind` / `issueKindDoc` 走「声明在 preset，值由引擎补」的路径——`issueKind` 反映 GitHub issue 的 `kind:*` label，是动态运行期事实而非 preset 文件内 literal；`issueKindDoc` 由引擎在 `resolvePhaseBinding` 渲染成路由说明。后续新增动态业务 key 仍可走这条路径；但**操作员对外新增业务 key 时优先用 `businessKeyValues` literal 供值**——只改 preset 文件即可，不动 `src/`。
+新增业务 key 时**优先用 `businessKeyValues` literal 供值**——只改 preset 文件即可，不动 `src/`。如果业务 key 的值必须由运行期动态计算（preset 无法用 literal 表达），需要把数据面写进 `buildSchedulerResolveContext` / `buildRuntimeBindings`，此时改 `src/` 不可避免。
 
 | Key | 含义 |
 |---|---|
@@ -272,16 +272,9 @@ bundled `gh-issue-pr-iteration` 的 `issueKind` / `issueKindDoc` 走「声明在
 | `chainBaseBranch` | chain metadata 的 base branch。 |
 | `repoCwd` | 当前 item 所属 target repo cwd；跨 repo queue item 与 agent cwd 分离时用于提示。 |
 
-Bundled `gh-issue-pr-iteration` 当前声明的 business key：
-
-| Key | 含义 |
-|---|---|
-| `issueKind` | `"code"` / `"comment"` / `"code-spike"` / `"blocked"` / `""`（empty = 无 label / legacy）；从 `gh issue view --json labels` fetch，或无 repo 的本地 fixture 从 queue item `kind` 读 |
-| `issueKindDoc` | 默认 preset issue-kind 路由说明；其他 preset 一般不引用。 |
+Bundled `gh-issue-pr-iteration` 当前不声明任何 business key（#450 / #420 / #401 链先后退役了引擎侧的 kind 分类机制 / 取值机制 / 词表与渲染面，preset 不再消费 kind 信号）。
 
 `runIdGeneration` 是引擎对「这次 spawn 是新生成 runId 还是从 state.current 恢复」的客观回答；preset 自行用这一信号 + `item.status` + `item.lastRunId` 派生 fresh / retry / resume 三种调度形态——引擎不识别这些领域分类。
-
-`issueKind` 是 `gh-issue-pr-iteration` 专用信号（issue 上的 `kind:code` / `kind:comment` / `kind:code-spike` / `kind:blocked` label），所以它由该 preset 的 `[runtime].businessKeys` 声明；其他 preset 一般可忽略或不引用。
 
 ### 扩 `runtime.*` key 的流程
 

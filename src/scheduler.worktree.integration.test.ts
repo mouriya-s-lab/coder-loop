@@ -137,7 +137,7 @@ test("worktree create failure is contained: backoff + schedulerSpawnError in ext
 			repoCwd: REPO_ROOT,
 			status: runtimeStatus("queued"),
 			attempts: 0,
-			extra: storedItemExtra({ issueKind: "code" }),
+			extra: storedItemExtra({}),
 		})
 		const state = createSchedulerState()
 		const events: SchedulerEvent[] = []

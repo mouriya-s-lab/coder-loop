@@ -528,12 +528,9 @@ export type Preset = {
 	}
 	runtime: {
 		businessKeys: readonly string[]
-		// preset-supplied values for declared business keys. Keys not present here
-		// have no preset-side value supply — the engine must inject the value at
-		// `buildSchedulerResolveContext` / `buildRuntimeBindings` time (e.g.
-		// bundled `issueKind`). A key present here is rendered from the preset
-		// value with zero engine knowledge of its semantics — fulfilling
-		// #448 / #422 "新增业务绑定只改 preset 文件".
+		// preset-supplied values for declared business keys. A key present here is
+		// rendered from the preset value with zero engine knowledge of its
+		// semantics — fulfilling #448 / #422 "新增业务绑定只改 preset 文件".
 		businessKeyValues: ReadonlyMap<string, PresetBusinessKeyValue>
 	}
 		statuses: {
@@ -901,10 +898,6 @@ export type IssueRunContext = {
 	resumedStartedAt: string | null
 	resumedSessionId: string | null
 }
-
-const ISSUE_KIND_VALUES = ["code", "comment", "code-spike", "blocked"] as const
-export type IssueKindValue = (typeof ISSUE_KIND_VALUES)[number]
-export type IssueKind = IssueKindValue | null
 
 export const ENGINE_RUNTIME_BINDING_KEYS = [
 	"runId",
@@ -4273,7 +4266,6 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 				evidenceDir,
 				agentCwd: targetCwd,
 				issueRun: { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null, resumedSessionId: null },
-				issueKind: null,
 				paths: buildCentralRuntimeBindingPaths({
 					options,
 					chain: input.chain,
@@ -4598,7 +4590,6 @@ function resolvePhaseBinding(source: PresetVariableSource, phase: PresetPhase, c
 		switch (source.key) {
 			case "runtimeInputsDoc": return renderRuntimeInputsDoc(phase, ctx)
 			case "phaseExitsDoc": return renderPhaseExitsDoc(phase)
-			case "issueKindDoc": return renderIssueKindDoc(runtimeBindingValue(ctx.runtime, "issueKind"))
 		}
 	}
 	return resolveBinding(source, ctx)
@@ -4611,10 +4602,6 @@ export function renderRuntimeInputsDoc(phase: PresetPhase, ctx: ResolveContext):
 		if (doc === null) continue
 		const value = resolveBinding(variable.source, ctx)
 		if (doc.blankBefore) lines.push("")
-		if (variable.key === "ISSUE_KIND") {
-			lines.push(renderIssueKindDoc(value))
-			continue
-		}
 		if (variable.key === "ISSUE") {
 			lines.push(`- ${doc.label}: \`#${value}\`${doc.suffix}`)
 			continue
@@ -4632,11 +4619,6 @@ export function renderPhaseExitsDoc(phase: PresetPhase): string {
 
 export function phaseWritableStatuses(phase: PresetPhase): readonly InternalStatus[] {
 	return phase.exits.map((exit) => exit.status)
-}
-
-export function renderIssueKindDoc(value: string): string {
-	const choices = ISSUE_KIND_VALUES.map((kind) => `\`${kind}\``).join(" / ")
-	return `- Issue kind: \`${value}\` (${choices} / empty for legacy unlabeled issues)`
 }
 
 function lookupItemField(item: ItemRecord, field: string): JsonValue | undefined {
@@ -4791,7 +4773,6 @@ export function buildRuntimeBindings(input: {
 	evidenceDir: string | null
 	agentCwd: string
 	issueRun: IssueRunContext
-	issueKind: IssueKind
 	paths?: RuntimeBindingPaths
 	chain?: ChainRuntimeBinding
 	repoCwd?: string
@@ -4826,30 +4807,16 @@ export function buildRuntimeBindings(input: {
 		fragmentIndex: renderFragmentIndex(input.options.preset, input.phase),
 		runtimeInputsDoc: "",
 		phaseExitsDoc: "",
-		issueKindDoc: "",
 		runIdGeneration: input.issueRun.runIdGeneration,
 		resumedFromPhase: input.issueRun.resumedFromPhase ?? "",
 		resumedStartedAt: input.issueRun.resumedStartedAt ?? "",
 		resumedSessionId: input.issueRun.resumedSessionId ?? "",
-		issueKind: input.issueKind ?? "",
 		chainName: input.chain?.name ?? "",
 		chainUmbrellaRepo: input.chain?.umbrellaRepo ?? "",
 		chainUmbrellaIssue: input.chain?.umbrellaIssue !== undefined && input.chain.umbrellaIssue !== null ? String(input.chain.umbrellaIssue) : "",
 		chainBaseBranch: input.chain?.baseBranch ?? "",
 		repoCwd: input.repoCwd ?? "",
 	}
-}
-
-// #420 retired the engine's kind-label取值 chain: the gh-label fetch helper,
-// the取值 resolver, and the extra/label parsers are gone — kind values are no
-// longer consumed anywhere in the rendered prompt (#450), so the entire
-// mechanism became dead code with `gh` as a residual network side effect on the
-// scheduler's spawn path. `IssueKind` / `ISSUE_KIND_VALUES` /
-// `isIssueKindValue` / `renderIssueKindDoc` stay until #401 finishes retiring
-// the engine vocabulary; `runtime.issueKind` now renders as the empty string
-// for every spawn.
-function isIssueKindValue(value: string): value is IssueKindValue {
-	return includesStringLiteral(ISSUE_KIND_VALUES, value)
 }
 
 export type RenderBindingsInput = Pick<LoopOptions, "bindings">

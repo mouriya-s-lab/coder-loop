@@ -148,7 +148,6 @@ export class ItemExtra extends RuntimeDataRecord {
 	blockerRef?: string
 	schedulerBackoff?: SchedulerBackoffState
 	schedulerSpawnError?: SchedulerSpawnError
-	issueKind?: string
 	slotKey?: string
 	itemId?: number
 	repoCwd?: string
@@ -166,7 +165,6 @@ export class ItemExtra extends RuntimeDataRecord {
 		if (input.blockerRef !== undefined) this.blockerRef = input.blockerRef
 		if (input.schedulerBackoff !== undefined) this.schedulerBackoff = { ...input.schedulerBackoff }
 		if (input.schedulerSpawnError !== undefined) this.schedulerSpawnError = { ...input.schedulerSpawnError }
-		if (input.issueKind !== undefined) this.issueKind = input.issueKind
 		if (input.slotKey !== undefined) this.slotKey = input.slotKey
 		if (input.itemId !== undefined) this.itemId = input.itemId
 		if (input.repoCwd !== undefined) this.repoCwd = input.repoCwd
@@ -217,7 +215,6 @@ type ItemExtraInput = {
 	blockerRef?: string
 	schedulerBackoff?: SchedulerBackoffState
 	schedulerSpawnError?: SchedulerSpawnError
-	issueKind?: string
 	slotKey?: string
 	itemId?: number
 	repoCwd?: string
@@ -268,7 +265,6 @@ const ITEM_EXTRA_KEYS = new Set([
 	"blockerRef",
 	"schedulerBackoff",
 	"schedulerSpawnError",
-	"issueKind",
 	"slotKey",
 	"itemId",
 	"repoCwd",
@@ -401,7 +397,6 @@ export function itemExtraToJsonObject(extra: ItemExtra): JsonObject {
 	assignJson(result, "blockerRef", extra.blockerRef)
 	assignJson(result, "schedulerBackoff", extra.schedulerBackoff === undefined ? undefined : { ...extra.schedulerBackoff })
 	assignJson(result, "schedulerSpawnError", extra.schedulerSpawnError === undefined ? undefined : { ...extra.schedulerSpawnError })
-	assignJson(result, "issueKind", extra.issueKind)
 	assignJson(result, "slotKey", extra.slotKey)
 	assignJson(result, "itemId", extra.itemId)
 	assignJson(result, "repoCwd", extra.repoCwd)
@@ -531,8 +526,6 @@ function parseItemExtra(value: JsonObject, field: string): ItemExtra {
 	if (schedulerBackoff !== undefined) input.schedulerBackoff = schedulerBackoff
 	const schedulerSpawnError = optionalSchedulerSpawnErrorField(value, "schedulerSpawnError", `${field}.schedulerSpawnError`)
 	if (schedulerSpawnError !== undefined) input.schedulerSpawnError = schedulerSpawnError
-	const issueKind = optionalStringField(value, "issueKind", `${field}.issueKind`)
-	if (issueKind !== undefined) input.issueKind = issueKind
 	const slotKey = optionalStringField(value, "slotKey", `${field}.slotKey`)
 	if (slotKey !== undefined) input.slotKey = slotKey
 	const itemId = optionalPositiveIntegerField(value, "itemId", `${field}.itemId`)
