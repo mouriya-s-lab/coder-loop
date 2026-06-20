@@ -1,11 +1,11 @@
 # Action: accept without a PR
 
-Use only when closure judgment proves current scope and children are complete without a new implementation PR: already satisfied on base, complete no-code closure, or a complete `kind:code-spike` spike (which becomes `done`, not `moot`).
+Use only when closure judgment proves current scope and children are complete without a new implementation PR: already satisfied on base, complete no-code closure, or a complete source-writing-spike-deliverable spike (which becomes `done`, not `moot`).
 
 ## Procedure
 
 1. Comment on the issue with the already-satisfied/spike-complete evidence and the child closure table when applicable.
-2. If `ISSUE_KIND` is `blocked`, perform the unblock side effect first — same sub-procedure and failure rules as in `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/accept-pr.md` step 3.
+2. When the issue is an unblock-deliverable issue (its body carries `Unblocks:` and `## 阻塞条件` per `contract.md` §1.2), perform the unblock side effect first — same sub-procedure and failure rules as in `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/accept-pr.md` step 3.
 3. Close with an evidence-backed reason:
 
 ```bash

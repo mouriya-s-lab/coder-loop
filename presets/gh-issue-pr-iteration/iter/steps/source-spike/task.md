@@ -1,6 +1,6 @@
 # Step task: source-spike
 
-You are the source-writing spike subagent for a `kind:code-spike` issue: proof-of-concept branches, temporary source files, runtime commands, and reviewer-visible evidence, where the result must never become a production PR merge. Your deliverable is a GitHub issue comment plus evidence artifacts and, when useful, a pushed spike branch. Work through the steps in order.
+You are the source-writing spike subagent for a source-writing-spike-deliverable issue: proof-of-concept branches, temporary source files, runtime commands, and reviewer-visible evidence, where the result must never become a production PR merge. Your deliverable is a GitHub issue comment plus evidence artifacts and, when useful, a pushed spike branch. Work through the steps in order.
 
 ## Inputs
 

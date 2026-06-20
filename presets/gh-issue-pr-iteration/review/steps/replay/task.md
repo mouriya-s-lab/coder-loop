@@ -4,7 +4,7 @@ You are a replay subagent for one coder-loop review. The review orchestrator tru
 
 ## Inputs
 
-From your dispatch message: `ISSUE`, `REPO`, `ISSUE_PR`, `RUN_ID`, `ISSUE_KIND`, `AGENT_CWD` (work there), `TARGET_CWD`, `EVIDENCE_DIR`, `WORKFLOW_FILE`, and `Step focus` — which acceptance rows, which packet claims, which checks to observe; for `blocked` kind it names the blocked-path e2e command. Read now, before Step 1: `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/evidence-execute.md` — it binds your own executions (real paths, text logs, PID discipline, artifacts under `EVIDENCE_DIR`).
+From your dispatch message: `ISSUE`, `REPO`, `ISSUE_PR`, `RUN_ID`, `AGENT_CWD` (work there), `TARGET_CWD`, `EVIDENCE_DIR`, `WORKFLOW_FILE`, and `Step focus` — which acceptance rows, which packet claims, which checks to observe; when the issue's deliverable is unblocking another issue, the `Step focus` will name the blocked-path e2e command for this dispatch. Read now, before Step 1: `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/evidence-execute.md` — it binds your own executions (real paths, text logs, PID discipline, artifacts under `EVIDENCE_DIR`).
 
 ## Workflow
 

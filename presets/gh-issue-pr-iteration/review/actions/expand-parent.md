@@ -62,7 +62,7 @@ gh api graphql -f query='
   -f p="$PARENT_ID" -f c="$CHILD_ID"
 ```
 
-Before creating, self-check: one coherent problem; no unchecked-checkbox acceptance; no prescribed implementation internals; no loop run IDs or local scaffolding in the GitHub body. Each child also needs `kind:code` (or the appropriate single `kind:*`) label.
+Before creating, self-check: one coherent problem; no unchecked-checkbox acceptance; no prescribed implementation internals; no loop run IDs or local scaffolding in the GitHub body. Each child's body must follow the §1.2 deliverable shape (implementation-PR / unblock / comment-spike / source-writing-spike) that matches its intended work; the deliverable signal lives in the body, not in any label.
 
 ## Queue front-insertion
 

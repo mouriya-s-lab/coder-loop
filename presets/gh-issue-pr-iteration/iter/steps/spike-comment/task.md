@@ -1,6 +1,6 @@
 # Step task: spike-comment
 
-You are the spike subagent for a `kind:comment` issue (spike / design question / open dialogue). Your deliverable is a GitHub issue comment with cited evidence plus proposed follow-up sub-issue titles — no code. Work through the steps in order.
+You are the spike subagent for a comment-spike-deliverable issue (spike / design question / open dialogue). Your deliverable is a GitHub issue comment with cited evidence plus proposed follow-up sub-issue titles — no code. Work through the steps in order.
 
 ## Inputs
 

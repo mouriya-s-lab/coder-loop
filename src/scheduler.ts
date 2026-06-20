@@ -795,32 +795,14 @@ async function spawnSchedulerRun(
 	slot: SchedulerSlot,
 	phase: string,
 ): Promise<SchedulerActiveRun | null> {
+	// #450 retired the spawn-time kind gate: an item with zero/many/unknown `kind:*` labels
+	// (or an unconfigured repository) no longer aborts spawn. The engine still computes the
+	// kind value for the renderer as a transition-state injection point until #420 and #401
+	// retire the fetch mechanism and engine vocabulary; a fetch failure simply renders as the
+	// empty-kind legacy path instead of blocking the item.
 	const kindResolver = options.kindResolver ?? defaultSchedulerKindResolver
 	const kindResult = await kindResolver({ chain, item })
-	if (!kindResult.ok || kindResult.kind === null) {
-		const reason = kindResult.ok
-			? `expected exactly one kind:* label, found 0 on ${chain.repository || "<unconfigured>"}#${item.issueNumber}`
-			: kindResult.error
-		const abortedAt = nowSeconds(options)
-		const chainStatuses = await schedulerStatusesForChain(options, chain)
-		options.store.updateItem(item.id, {
-			status: chainStatuses.entry,
-			extra: withNextSchedulerBackoff(item.extra, abortedAt, spawnFailureBackoffForChain(options, chain)),
-			updatedAt: abortedAt,
-		})
-		console.warn(`coder-loop scheduler: kind label check failed for chain=${chain.name} item=${item.id} issue=#${item.issueNumber}: ${reason}`)
-		await emit(options, {
-			type: "spawn.aborted",
-			slotKey: slot.key,
-			chainId: chain.id,
-			chainName: chain.name,
-			itemId: item.id,
-			issueNumber: item.issueNumber,
-			reason,
-			toStatus: chainStatuses.entry,
-		})
-		return null
-	}
+	const resolvedIssueKind: IssueKind = kindResult.ok ? kindResult.kind : null
 
 	const worktreeManager = options.worktreeManager ?? createGitWorktreeManager(options.loopDataRootOptions)
 	let worktreePath: string
@@ -829,8 +811,8 @@ async function spawnSchedulerRun(
 	} catch (error) {
 		// A worktree failure used to escape the tick entirely: no backoff, no item trace, only
 		// a daemon stderr warning — the item sat actionable while the scheduler retried at tick
-		// cadence forever. Contain it like the kind-gate abort above: persisted backoff plus an
-		// extra record so `status --json` shows why nothing spawns.
+		// cadence forever. Contain it with a persisted backoff plus an extra record so
+		// `status --json` shows why nothing spawns.
 		const failedAt = nowSeconds(options)
 		const message = errorMessage(error)
 		options.store.updateItem(item.id, {
@@ -913,7 +895,7 @@ async function spawnSchedulerRun(
 		item,
 		runId,
 		worktreePath,
-		issueKind: kindResult.kind,
+		issueKind: resolvedIssueKind,
 		loopDataRootOptions: options.loopDataRootOptions,
 		resume: resumeDecision,
 		runner: runner.kind,

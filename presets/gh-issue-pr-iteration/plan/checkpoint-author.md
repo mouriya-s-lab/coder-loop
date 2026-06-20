@@ -2,17 +2,17 @@
 
 ## Goal
 
-For each draft body, fill in the `## 验收标准` table (and `## 结果分支` for spikes). Tables must satisfy `contract.md` §1.4 / §1.6 — column names, order, content quality — so review's contract replay / spike follow-up acceptance can parse them.
+For each draft body, fill in the `## 验收标准` table (and `## 结果分支` for spikes). Tables must satisfy `contract.md` §1.3 / §1.5 — column names, order, content quality — so review's contract replay / spike follow-up acceptance can parse them.
 
 ## Inputs
 
 - Draft bodies from `plan/decompose`.
-- `contract.md` §1.4 (table column spec) + §1.6 (`## 结果分支` spec).
+- `contract.md` §1.3 (table column spec) + §1.5 (`## 结果分支` spec).
 - `workflow.md` extracts (concrete project commands to use in `Command` column).
 
 ## Procedure
 
-### For each `kind:code` or `kind:blocked` issue
+### For each implementation-PR-deliverable or unblock-deliverable issue
 
 1. Write the `## 验收标准` table with column header exactly:
    ```
@@ -44,11 +44,11 @@ For each draft body, fill in the `## 验收标准` table (and `## 结果分支` 
    - exit code is consistent with the spec (passing `Expect` shape is fine; if the work hasn't landed yet the command may still error meaningfully).
    If a row's `Command` doesn't even parse, the issue is unrunnable — revise before posting.
 
-6. **Skip the table only when trivially small**. Per `contract.md` §6, allowed to omit `## 验收标准` for truly trivial `kind:code` work (rename, format-only). `kind:blocked` issues must not omit the table because review needs the blocked-path proof. When omitting for `kind:code`, write inline:
+6. **Skip the table only when trivially small**. Per `contract.md` §6, allowed to omit `## 验收标准` for truly trivial implementation-PR-deliverable work (rename, format-only). Unblock-deliverable issues must not omit the table because review needs the blocked-path proof. When omitting for an implementation-PR-deliverable issue, write inline:
    > 本 issue trivial，无 `## 验收标准` 表；依赖 PR 四层证据。
    Without that explicit note, omission looks like a write error.
 
-7. For `kind:blocked`, include at least one `integration` or target-environment row whose command/artifact replays the blocked path after the fix and proves it no longer reproduces. The issue body must also include the `Unblocks:` back-link or explicitly say why no back-link exists.
+7. For unblock-deliverable issues, include at least one `integration` or target-environment row whose command/artifact replays the blocked path after the fix and proves it no longer reproduces. The issue body must also include the `Unblocks:` back-link or explicitly say why no back-link exists.
 
 8. **`## 继承验证义务` table** (if applicable). Same column shape as `## 验收标准` except first columns:
    ```
@@ -56,11 +56,11 @@ For each draft body, fill in the `## 验收标准` table (and `## 结果分支` 
    ```
    Inherited rows cannot be deferred a second time. If you'd write a row that the current environment also can't run, that's a sign the row belongs on a different downstream issue — re-route, don't defer twice.
 
-### For each `kind:comment` or `kind:code-spike` spike issue
+### For each comment-spike-deliverable or source-writing-spike-deliverable issue
 
 1. Write the `## 验收标准` table (same column spec as above). Even spikes need executable verification — typically `assumption` Dimension rows. "What command, in what env, proves the assumption holds / fails?"
 
-2. Write the `## 结果分支` section per `contract.md` §1.6:
+2. Write the `## 结果分支` section per `contract.md` §1.5:
    ```
    ## 结果分支
 
@@ -76,7 +76,7 @@ For each draft body, fill in the `## 验收标准` table (and `## 结果分支` 
 
 3. Spike issue's `## 依赖关系` must include `Blocks: #<impl>` where `#<impl>` is the implementation issue that depends on the spike outcome.
 
-4. For `kind:code-spike`, include at least one row whose command or artifact proves the source-writing/runtime PoC. Also include the no-merge expectation in `## 约束`; review will reject a PR-backed result on this route.
+4. For source-writing-spike-deliverable issues, include at least one row whose command or artifact proves the source-writing/runtime PoC. Also include the no-merge expectation in `## 约束`; review will reject a PR-backed result on this route.
 
 ## Failure handling
 

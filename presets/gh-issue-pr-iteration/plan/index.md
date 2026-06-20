@@ -25,12 +25,12 @@ Planning produces planning signal. Concretely:
 - read user input (design doc / issue link / large task description / repo + goal);
 - classify each candidate deliverable (`implementation` / `spike` / `parent` / `design-question` / `no-code`);
 - decompose into atomic issues, each with one coherent `## Why` paragraph;
-- author `## 验收标准` (and `## 结果分支` for spikes) per `contract.md` §1.4 / §1.6;
+- author `## 验收标准` (and `## 结果分支` for spikes) per `contract.md` §1.3 / §1.5;
 - run adversarial validation against minimum-effort agent path;
-- create issues with `gh issue create` (one `kind:*` label each, §1.3);
+- create issues with `gh issue create` (body sections encode the deliverable shape per §1.2; no label routing is required);
 - link parent/child via `addSubIssue` (issue-to-issue only, never PR-as-child);
 - initialize `central state DB` queue with actionable issues;
-- run `coder-loop status <target> --json --chain <chain-name>` and confirm `.state.kind == "ok"` plus the expected `.queue.selected.id` to confirm queue valid;
+- run `coder-loop status <target> --json --chain <chain-name>` and confirm `.state.ok == true` plus the expected `.queue.selected.id` to confirm queue valid;
 - write handoff describing what was created and the queue state.
 
 Planning must not:

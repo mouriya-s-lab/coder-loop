@@ -26,9 +26,6 @@ branch = "string"
 pr = "number"
 lastRunId = "string"
 
-[runtime]
-businessKeys = ["issueKind", "issueKindDoc"]
-
 [statuses]
 continuable = ["queued", "in_progress", "changes_requested"]
 terminal    = ["blocked", "moot", "done", "exhausted"]
@@ -68,13 +65,11 @@ roles  = ["common", "quality", "iter"]
   PROMPT_FRAGMENT_INDEX    = "runtime.fragmentIndex"
   RUNTIME_INPUTS_DOC       = "runtime.runtimeInputsDoc"
   PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
-  ISSUE_KIND_DOC           = "runtime.issueKindDoc"
   REQUIRE_BROWSER_EVIDENCE = { source = "chain.requireBrowserEvidence", default = false, label = "Browser evidence required", suffix = " — when `true`, Layer 4 must contain the strongest feasible E2E evidence for the project type. For projects with UI: real browser screenshots of the running dev server or deployed page. For projects without UI (pure CLI / library / backend / config): CLI smoke run transcripts with command, exit status, and output are the Layer 4 evidence; do not fabricate screenshots by creating HTML files and screenshotting them." }
   ISSUE_BRANCH             = { source = "item.branch", label = "Existing issue branch", blankBefore = true }
   ISSUE_PR                 = { source = "item.pr", label = "Existing issue PR" }
   ISSUE_STATUS             = { source = "item.status", label = "Queue status" }
   ISSUE_LAST_RUN_ID        = { source = "item.lastRunId", label = "Previous run ID" }
-  ISSUE_KIND               = { source = "runtime.issueKind", label = "Issue kind" }
   RUN_ID_GENERATION        = { source = "runtime.runIdGeneration", label = "Run-ID generation", blankBefore = true }
   RESUMED_FROM_PHASE       = { source = "runtime.resumedFromPhase", label = "Resumed-from phase" }
   RESUMED_STARTED_AT       = { source = "runtime.resumedStartedAt", label = "Resumed run started at" }
@@ -133,13 +128,11 @@ roles  = ["common", "quality", "review"]
   PROMPT_FRAGMENT_INDEX    = "runtime.fragmentIndex"
   RUNTIME_INPUTS_DOC       = "runtime.runtimeInputsDoc"
   PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
-  ISSUE_KIND_DOC           = "runtime.issueKindDoc"
   REQUIRE_BROWSER_EVIDENCE = { source = "chain.requireBrowserEvidence", default = false, label = "Browser evidence required", suffix = " — when `true`, Layer 4 must contain the strongest feasible E2E evidence for the project type. For projects with UI: real browser screenshots of the running dev server or deployed page. For projects without UI (pure CLI / library / backend / config): CLI smoke run transcripts with command, exit status, and output are the Layer 4 evidence; synthetic screenshots (HTML files rendered and screenshotted) are rejected." }
   ISSUE_BRANCH             = { source = "item.branch", label = "Existing issue branch", blankBefore = true }
   ISSUE_PR                 = { source = "item.pr", label = "Existing issue PR" }
   ISSUE_STATUS             = { source = "item.status", label = "Queue status" }
   ISSUE_LAST_RUN_ID        = { source = "item.lastRunId", label = "Previous run ID" }
-  ISSUE_KIND               = { source = "runtime.issueKind", label = "Issue kind" }
   RUN_ID_GENERATION        = { source = "runtime.runIdGeneration", label = "Run-ID generation", blankBefore = true }
   RESUMED_FROM_PHASE       = { source = "runtime.resumedFromPhase", label = "Resumed-from phase" }
   RESUMED_STARTED_AT       = { source = "runtime.resumedStartedAt", label = "Resumed run started at" }
@@ -178,13 +171,11 @@ roles   = ["common"]
   PROMPT_FRAGMENT_INDEX    = "runtime.fragmentIndex"
   RUNTIME_INPUTS_DOC       = "runtime.runtimeInputsDoc"
   PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
-  ISSUE_KIND_DOC           = "runtime.issueKindDoc"
   REQUIRE_BROWSER_EVIDENCE = { source = "chain.requireBrowserEvidence", default = false }
   ISSUE_BRANCH             = "item.branch"
   ISSUE_PR                 = "item.pr"
   ISSUE_STATUS             = "item.status"
   ISSUE_LAST_RUN_ID        = "item.lastRunId"
-  ISSUE_KIND               = "runtime.issueKind"
   RUN_ID_GENERATION        = "runtime.runIdGeneration"
   RESUMED_FROM_PHASE       = "runtime.resumedFromPhase"
   RESUMED_STARTED_AT       = "runtime.resumedStartedAt"
@@ -223,13 +214,11 @@ roles   = ["common"]
   PROMPT_FRAGMENT_INDEX    = { source = "runtime.fragmentIndex", label = "Prompt fragment index" }
   RUNTIME_INPUTS_DOC       = "runtime.runtimeInputsDoc"
   PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
-  ISSUE_KIND_DOC           = "runtime.issueKindDoc"
   REQUIRE_BROWSER_EVIDENCE = { source = "chain.requireBrowserEvidence", default = false }
   ISSUE_BRANCH             = "item.branch"
   ISSUE_PR                 = "item.pr"
   ISSUE_STATUS             = "item.status"
   ISSUE_LAST_RUN_ID        = "item.lastRunId"
-  ISSUE_KIND               = "runtime.issueKind"
   RUN_ID_GENERATION        = "runtime.runIdGeneration"
   RESUMED_FROM_PHASE       = "runtime.resumedFromPhase"
   RESUMED_STARTED_AT       = "runtime.resumedStartedAt"

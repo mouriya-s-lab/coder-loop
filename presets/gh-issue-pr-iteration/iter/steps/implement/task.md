@@ -4,7 +4,7 @@ You are an implementation subagent for one coder-loop iteration. Your deliverabl
 
 ## Inputs
 
-From your dispatch message: `ISSUE`, `REPO`, `BASE_BRANCH`, `RUN_ID`, `ISSUE_KIND`, `AGENT_CWD` (work there), `SHARED_CONTEXT_FILE`, `ISSUE_STATUS`, `RUN_ID_GENERATION`, `ISSUE_BRANCH`/`ISSUE_PR` when set, and `Step focus` (current scope, retry feedback to address, or the orchestrator's gap list). Read now, before Step 1: `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/honesty-execute.md` and `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/cleanup-execute.md` — they bind every claim and side effect below.
+From your dispatch message: `ISSUE`, `REPO`, `BASE_BRANCH`, `RUN_ID`, `AGENT_CWD` (work there), `SHARED_CONTEXT_FILE`, `ISSUE_STATUS`, `RUN_ID_GENERATION`, `ISSUE_BRANCH`/`ISSUE_PR` when set, and `Step focus` (current scope, retry feedback to address, or the orchestrator's gap list). Read now, before Step 1: `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/honesty-execute.md` and `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/cleanup-execute.md` — they bind every claim and side effect below.
 
 ## Workflow
 

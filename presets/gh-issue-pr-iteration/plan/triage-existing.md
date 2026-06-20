@@ -13,7 +13,7 @@ triage 与新 issue planning 共存：一次 `/dev-plan` 调用既可以 triage 
   - "内容没问题 → 改写 body 到 §1 正规格式"
   - "有问题 + 已有 PR → 在 PR thread 回复"
   - "有问题 + 无 PR → 关掉"（默认走 review 关；operator 显式写"plan 直接关"才进 `close_with_operator_auth`）
-- `contract.md` §1（issue body 必备段、`kind:*` 单值规则、`## 验收标准` 表 6 列契约）。
+- `contract.md` §1（issue body 必备段、deliverable 形态契约、`## 验收标准` 表 6 列契约）。
 - `contract.md` §2（PR body `Closes` 首行、四层证据、CI parity、retry 在 PR thread）。
 - 每个候选 issue 的当前 GitHub 状态：`gh issue view <repo>#<N> --json title,body,state,labels,linkedPullRequests`。
 
@@ -23,7 +23,7 @@ triage 与新 issue planning 共存：一次 `/dev-plan` 调用既可以 triage 
 
 | 动作 | 触发条件 | plan 做什么 | 副作用 |
 |---|---|---|---|
-| `rewrite_body` | issue content 符合 operator 意图，但 body format 不合 §1（缺必备段 / `## 验收标准` 表列错 / kind label 缺或多）→ 内容留、形态正规化 | 草拟新 body 文本 → 实际跑 `gh issue edit <repo>#<N> --body-file <tmp>` → 视需要补 `gh issue edit ... --add-label kind:code` 或 `--remove-label kind:foo` | 改 issue body / labels |
+| `rewrite_body` | issue content 符合 operator 意图，但 body format 不合 §1（缺必备段 / `## 验收标准` 表列错 / deliverable 形态在 body 内没表达清楚）→ 内容留、形态正规化 | 草拟新 body 文本 → 实际跑 `gh issue edit <repo>#<N> --body-file <tmp>` | 改 issue body |
 | `pr_reply` | issue content 有问题且 GitHub 上 issue 已有关联 open / merged PR | 草拟 review feedback comment → 实际跑 `gh pr comment <repo>#<PR> --body-file <tmp>`（不动 issue body，不关 issue —— 路由规则要求 PR 存在后讨论留 PR thread） | PR thread 新评论 |
 | `close_with_operator_auth` | issue content 有问题、无关联 PR、operator intake **显式授权 plan 关** | 草拟 close 理由 comment → 实际跑 `gh issue comment <repo>#<N> --body-file <tmp>` 再 `gh issue close <repo>#<N>` | 关 issue + 留 close 理由 |
 | `close_propose_to_review` | issue content 有问题、无关联 PR、operator **未显式授权** plan 关 | 写进 handoff 文件的 "Suggested closures（need review approval）" 段 + 草拟理由文本，等 `/dev-loop` review phase 走 `review/issue-closure-gate` 决定 | 不动 GitHub；只写 handoff |
@@ -36,8 +36,8 @@ triage 与新 issue planning 共存：一次 `/dev-plan` 调用既可以 triage 
 1. 列出 intake 给的所有既存 issue 候选。一条 bullet 一个 issue，附 `<repo>#<N>` + 当前 title。
 
 2. 对每个 issue 跑 `gh issue view <repo>#<N> --json title,body,state,labels,linkedPullRequests`。检查：
-   - `kind:*` label 数量（§1.3：必须恰好 1 个，且 value ∈ `{code, comment, code-spike, blocked}`）；
-   - 必备段是否齐全（§1.2 / §1.4 / §1.6）；
+   - 必备段是否齐全（§1.2 / §1.3 / §1.5）；
+   - 标题与 body 是否匹配 §1.6 的某一 deliverable 形态（实现-PR / unblock / comment-spike / source-writing-spike）；标题动词与必备段对不上 → `rewrite_body`；
    - 关联 PR 状态（影响 `pr_reply` vs `close_*` 分支）。
 
 3. 把 operator policy 文本逐条匹配到 issue。每个 issue 选**恰好一个**动作。
@@ -45,7 +45,7 @@ triage 与新 issue planning 共存：一次 `/dev-plan` 调用既可以 triage 
    - operator policy 未覆盖某个 issue → 走 `no_op` 或 `close_propose_to_review`（取决于 content / format 状态），trace 注明 "policy 未覆盖，按 default 走 X"。
 
 4. 按动作分组草拟产物。每组写到本 fragment 的 trace 段：
-   - `rewrite_body`: issue #N → 完整新 body markdown 草稿（满足 §1.2 必备段、§1.4 表 6 列、§1.6 spike 分支）；
+   - `rewrite_body`: issue #N → 完整新 body markdown 草稿（满足 §1.2 必备段、§1.3 表 6 列、§1.5 spike 分支）；
    - `pr_reply`: issue #N + PR #M → comment markdown 草稿（引用 review feedback 来源 + 具体下一步）；
    - `close_with_operator_auth`: issue #N → close-reason comment 草稿；
    - `close_propose_to_review`: issue #N → 同上 + 显式标 "needs review approval"；
@@ -63,7 +63,7 @@ triage 与新 issue planning 共存：一次 `/dev-plan` 调用既可以 triage 
 ## Failure handling
 
 - 任意 issue 的 `gh` 写入命令 exit 非零、或写后 verify 显示 GitHub 实际 state 与 plan 草稿 diverge → 该 issue 进 `triage_blocked` 集合。trace 完整记录命令、stderr、当前 GitHub state。
-- operator policy 与 contract.md §1 / §2 冲突（如 "policy 要求 kind:foo" 但 §1.3 仅允许 `{code, comment, code-spike, blocked}`）→ 不要走 `rewrite_body`，emit `triage_blocked` 并把冲突写进 handoff 让 operator 仲裁。
+- operator policy 与 contract.md §1 / §2 冲突（如 policy 要求一种 §1.2 / §1.6 都不支持的 deliverable 形态）→ 不要走 `rewrite_body`，emit `triage_blocked` 并把冲突写进 handoff 让 operator 仲裁。
 - 候选 issue 已 closed 但 operator policy 要求 "改 body" → 该 issue 进 `triage_blocked`，trace 记 "issue closed; cannot rewrite"，不重开 issue（不在 plan 授权范围）。
 
 ## Output verdict
