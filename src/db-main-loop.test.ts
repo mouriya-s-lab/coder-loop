@@ -187,7 +187,7 @@ function seedDb(loopDataRoot: string, target: string, options: FixtureOptions, p
 			status: runtimeStatus(options.initialStatus ?? "queued"),
 			issueFile: null,
 			evidenceDir: null,
-			extra: storedItemExtra({ issueKind: "code", ...(options.extra ?? {}) }),
+			extra: storedItemExtra(options.extra ?? {}),
 		})
 	} finally {
 		store.close()

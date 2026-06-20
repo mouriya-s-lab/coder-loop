@@ -39,7 +39,7 @@ flowchart TD
 - **v2 一度偏离**（`#296`，`7c4a54f`「map item status from SUMMARY marker」）：让调度器从 agent stdout 的 SUMMARY marker **推导** status，等于让引擎接管了本该 agent 写的字段——这违反 `#5`「判断交 LLM、引擎不推导」。
 - **`#345`（`04f567a`「引擎回到 v1 状态模型」）恢复**：撤销 stdout 推导，`item.status` 字段重新由 **agent 显式写、调度器只读**。
 
-关键：**`#345` 恢复的只是"字段谁写"，不是"参数归谁"。** 无论 `#296` 还是 `#345`，状态机制的参数仍以字面量写死在 `src/loop.ts` / 调度器里。把参数迁进 preset（机制留在引擎）是今天才推进的工作，已落地：summary marker 成为 per-phase preset 字段（`src/loop.ts:2443` 读 `reviewPhase.summaryMarker`；`#381` phase metadata 入 preset.toml）、post-review 触发是 preset 声明的 DAG 边（`preset.toml` `trigger = { afterPhase, whenStatus }`）、`#386` 给 `[statuses]` 加 `unblockable`/`entry`/`success` 让 unblock 转移参数化、`#380` phase 顺序按 preset 推进、`#376` issue-kind 路由移出引擎、`#373` item 字段经 `[item.fields]` 声明。**仍焊死的参数**：verdict 词表与 `verdict === "stop"` 映射（`src/loop.ts:843`、`:2444`）、`ISSUE_KIND_VALUES`（`:863`）、daemon fallback status 集合（`src/daemon.ts:117-118`）、SQLite 默认 statuses（`src/sqlite-state.ts:824`）。
+关键：**`#345` 恢复的只是"字段谁写"，不是"参数归谁"。** 无论 `#296` 还是 `#345`，状态机制的参数仍以字面量写死在 `src/loop.ts` / 调度器里。把参数迁进 preset（机制留在引擎）是今天才推进的工作，已落地：summary marker 成为 per-phase preset 字段（`src/loop.ts:2443` 读 `reviewPhase.summaryMarker`；`#381` phase metadata 入 preset.toml）、post-review 触发是 preset 声明的 DAG 边（`preset.toml` `trigger = { afterPhase, whenStatus }`）、`#386` 给 `[statuses]` 加 `unblockable`/`entry`/`success` 让 unblock 转移参数化、`#380` phase 顺序按 preset 推进、`#376`→`#450`/`#420`/`#401` 把 issue-kind 路由 + 词表 + 取值机制 + 渲染面整链退出引擎、`#373` item 字段经 `[item.fields]` 声明。**仍焊死的参数**：verdict 词表与 `verdict === "stop"` 映射（`src/loop.ts:843`、`:2444`）、daemon fallback status 集合（`src/daemon.ts:117-118`）、SQLite 默认 statuses（`src/sqlite-state.ts:824`）。
 
 ## 四、SQLite 状态与 GitHub-PR 耦合（遗留债）
 

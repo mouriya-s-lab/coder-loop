@@ -129,12 +129,10 @@ function makeRuntime(overrides: Partial<RuntimeBindings> = {}): RuntimeBindings 
 		fragmentIndex: "- iter/index (iter): iter/index.md",
 		runtimeInputsDoc: "",
 		phaseExitsDoc: "",
-		issueKindDoc: "",
 		runIdGeneration: "new",
 		resumedFromPhase: "",
 		resumedStartedAt: "",
 		resumedSessionId: "",
-		issueKind: "code",
 		chainName: "fixture",
 		chainUmbrellaRepo: "",
 		chainUmbrellaIssue: "",
@@ -238,7 +236,7 @@ describe("ItemRecord prompt bindings", () => {
 		expect(renderPrompt("#{{ISSUE}} {{PHASE}} {{CODEX_SESSION}}", phase, ctx)).toBe("#333 iteration thread-123")
 	})
 
-	test("renderPrompt injects runtime inputs, phase exits, and issue kind docs from phase metadata", () => {
+	test("renderPrompt injects runtime inputs and phase exits docs from phase metadata", () => {
 		const phase: PresetPhase = {
 			name: "review",
 			prompt: "review.md",
@@ -247,21 +245,18 @@ describe("ItemRecord prompt bindings", () => {
 			variables: [
 				{ key: "RUNTIME_INPUTS_DOC", source: { kind: "runtime", key: "runtimeInputsDoc" }, doc: null },
 				{ key: "PHASE_EXITS_DOC", source: { kind: "runtime", key: "phaseExitsDoc" }, doc: null },
-				{ key: "ISSUE_KIND_DOC", source: { kind: "runtime", key: "issueKindDoc", ownership: "preset" }, doc: null },
 				{ key: "TARGET_CWD", source: { kind: "runtime", key: "targetCwd" }, doc: { label: "Target working directory", suffix: "", style: "code", blankBefore: false } },
-				{ key: "ISSUE_KIND", source: { kind: "runtime", key: "issueKind", ownership: "preset" }, doc: { label: "Issue kind", suffix: "", style: "code", blankBefore: false } },
 			],
 			trigger: null,
 			defaultRunner: "claude",
 			defaultModel: null,
 			roles: [],
 		}
-		const ctx: ResolveContext = { item: makeItem(), chain: makeChainBindings(), runtime: makeRuntime({ targetCwd: "/repo", issueKind: "code" }) }
+		const ctx: ResolveContext = { item: makeItem(), chain: makeChainBindings(), runtime: makeRuntime({ targetCwd: "/repo" }) }
 
-		const prompt = renderPrompt("{{RUNTIME_INPUTS_DOC}}\n\n{{PHASE_EXITS_DOC}}\n\n{{ISSUE_KIND_DOC}}", phase, ctx)
+		const prompt = renderPrompt("{{RUNTIME_INPUTS_DOC}}\n\n{{PHASE_EXITS_DOC}}", phase, ctx)
 
 		expect(prompt).toContain("- Target working directory: `/repo`")
-		expect(prompt).toContain("- Issue kind: `code` (`code` / `comment` / `code-spike` / `blocked` / empty for legacy unlabeled issues)")
 		expect(prompt).toContain("- `done`: review accepted the result")
 	})
 
@@ -395,7 +390,6 @@ describe("runtime binding helpers", () => {
 			evidenceDir: null,
 			agentCwd: REPO_ROOT,
 			issueRun,
-			issueKind: null,
 		})
 		expect(runtime.auditDemo).toBe("preset-literal-ok")
 		const ctx: ResolveContext = { item: makeItem(), chain: makeChainBindings(), runtime }
@@ -419,12 +413,10 @@ describe("runtime binding helpers", () => {
 			evidenceDir: "/repo/evidence/333",
 			agentCwd: REPO_ROOT,
 			issueRun,
-			issueKind: "code",
 		})
 		expect(runtime.runIdGeneration).toBe("resumed")
 		expect(runtime.resumedFromPhase).toBe("iteration")
 		expect(runtime.resumedSessionId).toBe("thread-resume")
-		expect(runtime.issueKind).toBe("code")
 	})
 
 	test("runtime bindings keep per-issue handoff optional", () => {
@@ -444,7 +436,6 @@ describe("runtime binding helpers", () => {
 			evidenceDir: null,
 			agentCwd: REPO_ROOT,
 			issueRun,
-			issueKind: "code",
 		})
 		expect(runtime.sharedContextPath).toBe(options.sharedContextPath)
 		expect(runtime.currentIssueFile).toBe("")
