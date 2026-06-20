@@ -1148,18 +1148,86 @@ attemptTimeoutSeconds = 3600
 			if (firstEvent?.type !== "daemon.preset_load_failed" || secondEvent?.type !== "daemon.preset_load_failed") {
 				throw new Error("expected daemon.preset_load_failed events for both chains")
 			}
+			// #403: event kind migrated from `lifecycle` to `validation` — preset-resolution refusal is
+			// a per-operation validation event, not a daemon lifecycle transition.
+			expect(firstEvent.kind).toBe("validation")
+			expect(secondEvent.kind).toBe("validation")
 			expect(firstEvent.payload).toMatchObject({
 				chainId: numberValue(firstChain.id),
 				preset: "gh-issue-pr-iteration",
 				presetDir: presetPath,
+				// #403: every refusal carries the refused operation name. `item.add` triggers
+				// `defaultItemStatusForPresetSpecOnChain`, which the daemon records as
+				// `item.create.default-status`.
+				operation: "item.create.default-status",
 			})
 			expect(secondEvent.payload).toMatchObject({
 				chainId: numberValue(secondChain.id),
 				preset: "gh-issue-pr-iteration",
 				presetDir: presetPath,
+				operation: "item.create.default-status",
 			})
 			expect(firstEvent.payload.error.length).toBeGreaterThan(0)
 			expect(secondEvent.payload.error.length).toBeGreaterThan(0)
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	// #403 log obligation. When the engine's fallback status vocabularies are removed, every
+	// preset-resolution failure must surface as a *validation* event through the unified observability
+	// stream, naming the refused operation (chain.status, scheduler.tick, item.exits, ...). This test
+	// drives `chain.status` against a chain whose `metadata.presetPath` points to a broken preset.toml
+	// and asserts (1) the request fails with a precise error naming chain/operation/presetDir, and (2)
+	// the emitted event is `kind: "validation"` with `payload.operation: "chain.status"`.
+	test("daemon emits validation event naming chain.status when preset resolution refuses chain.status", async () => {
+		const fixture = await startFixture("preset-load-failure-chain-status", { schedulerEnabled: false })
+		try {
+			const presetPath = resolve(fixture.loopDataRoot, "..", "bad-status-preset-chain-status")
+			await mkdir(presetPath, { recursive: true })
+			await writeFile(resolve(presetPath, "preset.toml"), "this is not toml { ][\n")
+
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "validation-event-chain-status",
+				repository: "mouriya-s-lab/coder-loop",
+				// `chain.metadata.presetPath` makes `canResolvePresetForChainOrItems` return true even
+				// when no items exist, so `chain.status` will try to load and fail on the broken
+				// preset.toml.
+				metadata: { presetPath },
+			})).chain)
+
+			const statusResponse = await request(fixture, "chain.status", { chainId: numberValue(chain.id) })
+			expect(statusResponse.ok).toBe(false)
+			if (!statusResponse.ok) {
+				expect(statusResponse.error.code).toBe("invalid_request")
+				expect(statusResponse.error.message).toContain(`failed to load preset for chain ${chain.name}`)
+				expect(statusResponse.error.message).toContain("operation chain.status")
+				expect(statusResponse.error.message).toContain(presetPath)
+				expect(statusResponse.error.details).toMatchObject({
+					chainId: numberValue(chain.id),
+					chainName: chain.name,
+					presetDir: presetPath,
+					operation: "chain.status",
+				})
+			}
+
+			const events = await queryObservabilityEvents(
+				resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile,
+				{ type: "daemon.preset_load_failed" },
+			)
+			const event = events.events.find((entry) =>
+				entry.chain === chain.name && entry.type === "daemon.preset_load_failed" && entry.payload.operation === "chain.status"
+			)
+			if (event === undefined || event.type !== "daemon.preset_load_failed") {
+				throw new Error("expected a daemon.preset_load_failed event for chain.status on this chain")
+			}
+			expect(event.kind).toBe("validation")
+			expect(event.payload).toMatchObject({
+				chainId: numberValue(chain.id),
+				presetDir: presetPath,
+				operation: "chain.status",
+			})
+			expect(event.payload.error.length).toBeGreaterThan(0)
 		} finally {
 			await fixture.daemon.stop()
 		}
