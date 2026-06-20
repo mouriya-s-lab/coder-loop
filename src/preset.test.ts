@@ -168,7 +168,11 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		// #433: [agent].binary and [agent].extraArgs were zombie schema; retired with the rest of
 		// the runtime/config concept. Runner binary is now kind→PATH only.
 		expect(preset.agent.attemptTimeoutSeconds).toBe(DEFAULT_ATTEMPT_TIMEOUT_SECONDS)
-		expect([...preset.statuses.continuable]).toEqual(["queued", "in_progress", "changes_requested"])
+		// #404: the dead `in_progress` continuable member was retired alongside the
+		// md-status-cleanup. The engine never wrote `items.status = "in_progress"`;
+		// keeping it in continuable let the preset claim "actionable" semantics for
+		// a status the engine never produced.
+		expect([...preset.statuses.continuable]).toEqual(["queued", "changes_requested"])
 		expect([...preset.statuses.terminal]).toEqual(["blocked", "moot", "done", "exhausted"])
 		expect([...preset.statuses.unblockable]).toEqual(["blocked"])
 		// #402: bundled preset declares the attempts-exhausted落点 explicitly; engine no longer
@@ -177,6 +181,9 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		// #405: `summaryMarker` is null for every phase now — the only non-null seed
 		// (`"REVIEW SUMMARY:"` for review) was the verdict-marker hook the stdout parser
 		// consumed; with verdict retirement the marker has no consumer.
+		// #404: bundled preset declares the retry continuable status so md doc builders
+		// can inject it instead of fragments naming the literal.
+		expect(preset.statuses.retry).toBe("changes_requested")
 		expect(Object.fromEntries(preset.phases.map((phase) => [phase.name, phase.summaryMarker]))).toEqual({
 			iteration: null,
 			review: null,
@@ -219,9 +226,23 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 
 	test("each phase declares the shared variable bindings with parsed sources", async () => {
 		const preset = await loadPreset(BUNDLED_PRESET_DIR)
+		// #404 introduced per-phase-sliced doc builders so phases legitimately differ
+		// by the addition of their own slice keys (contract-5 minimum visibility,
+		// issue #396 comment 4666115115). Iteration's slice adds RETRY_STATUS_DOC;
+		// review's slice adds STATUS_VOCABULARY_DOC and RUN_VERDICT_VOCABULARY_DOC;
+		// blocked-responder and umbrella-finalizer add none. The shared base set
+		// (every phase's vars must include it) stays EXPECTED_VARIABLE_KEYS.
+		const PHASE_EXTRA_KEYS: Record<string, readonly string[]> = {
+			iteration: ["RETRY_STATUS_DOC"],
+			review: ["STATUS_VOCABULARY_DOC", "RUN_VERDICT_VOCABULARY_DOC"],
+			"blocked-responder": [],
+			"umbrella-finalizer": [],
+		}
 		for (const phase of preset.phases) {
 			const keys = phase.variables.map((variable) => variable.key)
-			expect(keys).toEqual([...EXPECTED_VARIABLE_KEYS])
+			const expectedExtras = PHASE_EXTRA_KEYS[phase.name] ?? []
+			const expected = [...EXPECTED_VARIABLE_KEYS, ...expectedExtras]
+			expect(new Set(keys)).toEqual(new Set(expected))
 			for (const variable of phase.variables) {
 				// #433: DSL prefixes are item / chain / runtime (the retired `config.*` prefix is gone).
 				expect(["item", "chain", "runtime"]).toContain(variable.source.kind)
@@ -279,6 +300,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 			item: { issue: 457 } as unknown as ItemRecord,
 			chain: { umbrellaRepo: "mouriya-s-lab/coder-loop", umbrellaIssue: 457, repository: "x", baseBranch: "main" },
 			runtime: makeMinimalRuntimeBindings(),
+			preset,
 		}
 		expect(resolveBinding(umbrellaRepoVar!.source, populated)).toBe("mouriya-s-lab/coder-loop")
 		expect(resolveBinding(umbrellaIssueVar!.source, populated)).toBe("457")
@@ -287,6 +309,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 			item: { issue: 457 } as unknown as ItemRecord,
 			chain: { repository: "x", baseBranch: "main" },
 			runtime: makeMinimalRuntimeBindings(),
+			preset,
 		}
 		expect(resolveBinding(umbrellaRepoVar!.source, empty)).toBe("")
 		expect(resolveBinding(umbrellaIssueVar!.source, empty)).toBe("")
@@ -386,9 +409,11 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(entry).toContain("userContentEdits")
 		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/accept-pr.md")
 		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/state-write.md")
-		// #405 retired: the `REVIEW SUMMARY: verdict=...` template line and the five-word
-		// verdict format are gone from review-entry.md. Review terminal action now routes
-		// through `coder-loop item exits` + the appropriate writer per ADT branch.
+		// #405 retired the `REVIEW SUMMARY: verdict=...` template line and the five-word
+		// verdict format from review-entry.md (review terminal action routes through
+		// `coder-loop item exits` + the appropriate writer per ADT branch). #404's
+		// row #1 grep (`verdict=<|changes_requested|exhausted`) requires the same
+		// absence; this single assertion guards both contracts.
 		expect(/REVIEW SUMMARY:|verdict=/.test(entry)).toBe(false)
 		// judge-side quality criteria are the judgment ground truth
 		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/honesty-judge.md")

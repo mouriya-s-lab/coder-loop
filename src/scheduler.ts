@@ -2301,6 +2301,15 @@ export function buildSchedulerResolveContext(input: {
 		fragmentIndex: renderFragmentIndex(input.preset, input.phase),
 		runtimeInputsDoc: "",
 		phaseExitsDoc: "",
+		// #404: placeholders only — actual values are computed lazily by
+		// `resolvePhaseBinding` from `(phase, preset, ctx)`. Mirrors the
+		// existing pattern for `runtimeInputsDoc` / `phaseExitsDoc`.
+		statusVocabularyDoc: "",
+		transitionGuidanceDoc: "",
+		triggerStatusDoc: "",
+		terminalStatusesDoc: "",
+		retryStatusDoc: "",
+		runVerdictVocabularyDoc: "",
 		runIdGeneration: resumedSessionId === "" ? "new" : "resumed",
 		resumedFromPhase: resumedSessionId === "" ? "" : input.phase.name,
 		resumedStartedAt: "",
@@ -2311,7 +2320,7 @@ export function buildSchedulerResolveContext(input: {
 	const chain = buildRenderBindings({
 		bindings: buildSchedulerChainBindings(input.chain),
 	})
-	return { item: input.item, chain, runtime }
+	return { item: input.item, chain, runtime, preset: input.preset }
 }
 
 function buildSchedulerChainBindings(chain: ChainRecord): JsonObject {

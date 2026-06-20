@@ -129,6 +129,7 @@ rm -rf "$TARGET"
 | `[statuses].entry` | string | 否 | 依赖解除或手动 `queue unblock` 后恢复到的 continuable status；默认取 `continuable[0]` |
 | `[statuses].success` | string[] | 否 | terminal 子集；dependsOn 依赖全部进入 success 后，下游 terminal item 会恢复到 `entry` |
 | `[statuses].unblockable` | string[] | 否 | terminal 子集；`queue unblock` 只会把这些 terminal status 恢复到 `entry` |
+| `[statuses].retry` | string | 否 | continuable status，表示"上一轮被打回需重跑"。声明后 `retryStatusDoc` doc builder 把它注入到 md 中需要引用 retry 概念的位置（issue #404），preset prose 不再硬编码 status 字面量 |
 | `[[phases]].name` | string | 是 | phase 名字，写入 `state.current.phase` |
 | `[[phases]].prompt` | string | 是 | 相对 preset.toml 的 entry prompt 模板路径 |
 | `[[phases]].runner` | `"claude"|"codex"` | 否 | phase 默认 runner；未声明时使用 engine-builtin fallback |
@@ -149,7 +150,7 @@ rm -rf "$TARGET"
 - 同 `name` 的 phase 不可重名；
 - 同 `id` 的 fragment 不可重复；
 - `[statuses]` 的 continuable / terminal 集合不可有交集；
-- `[statuses].entry` 必须属于 continuable；`success` 与 `unblockable` 必须属于 terminal；
+- `[statuses].entry` 必须属于 continuable；`success` 与 `unblockable` 必须属于 terminal；`[statuses].retry` 声明后必须属于 continuable；
 - `[[phases.exits]]` 中每个 status 必须属于 continuable 或 terminal status，且同一 phase 内不可重复；
 - preset 声明任何 `[[fragments]]` 时，每个 `[[phases]]` 必须声明 `roles` 数组（issue #400：phase↔role 映射必须显式，引擎不按 phase 名推断）；数组内每个 role 必须出现在某个 `[[fragments]].role` 里，且不可重复；preset 无 fragments 时可省 `roles`；
 - item phase trigger 的 `afterPhase` 必须指向已声明 phase，`whenStatus` 必须属于 continuable 或 terminal status，且必须出现在 source phase 的 exits 里；
@@ -206,17 +207,19 @@ bundled `gh-issue-pr-iteration` preset 用这个 hook 声明 `umbrella-finalizer
 
 ### `runtime.*` fact 与 business key
 
-Engine-owned fact 由 `src/loop.ts` 的 `ENGINE_RUNTIME_BINDING_KEYS` 定义。Engine runtime fact key count: 22.
+Engine-owned fact 由 `src/loop.ts` 的 `ENGINE_RUNTIME_BINDING_KEYS` 定义。Engine runtime fact key count: 28.
 
 <!-- engine-runtime-binding-keys:start -->
 ```
-runtime.runId                runtime.targetCwd            runtime.agentCwd
-runtime.sharedContextPath    runtime.stateFile            runtime.currentIssueFile
-runtime.issueDir             runtime.evidenceDir          runtime.evidenceRootDir
-runtime.logDir               runtime.traceFile            runtime.loopFile
-runtime.presetDir            runtime.fragmentIndex        runtime.runtimeInputsDoc
-runtime.phaseExitsDoc        runtime.runIdGeneration      runtime.resumedFromPhase
-runtime.resumedStartedAt     runtime.resumedSessionId     runtime.chainName
+runtime.runId                  runtime.targetCwd              runtime.agentCwd
+runtime.sharedContextPath      runtime.stateFile              runtime.currentIssueFile
+runtime.issueDir               runtime.evidenceDir            runtime.evidenceRootDir
+runtime.logDir                 runtime.traceFile              runtime.loopFile
+runtime.presetDir              runtime.fragmentIndex          runtime.runtimeInputsDoc
+runtime.phaseExitsDoc          runtime.statusVocabularyDoc    runtime.transitionGuidanceDoc
+runtime.triggerStatusDoc       runtime.terminalStatusesDoc    runtime.retryStatusDoc
+runtime.runVerdictVocabularyDoc runtime.runIdGeneration       runtime.resumedFromPhase
+runtime.resumedStartedAt       runtime.resumedSessionId       runtime.chainName
 runtime.repoCwd
 ```
 <!-- engine-runtime-binding-keys:end -->
@@ -261,6 +264,12 @@ auditDemo = { literal = "business-key-e2e-ok" }
 | `fragmentIndex` | 按当前 phase 的 `[[phases]].roles` 切片后的 fragments markdown 表格（id + role + 绝对路径）；entry prompt 嵌它给 agent 当索引。issue #400：phase↔role 映射来自 preset 元数据，引擎不通过 phase 名猜；preset 声明 fragments 但 phase 缺 `roles` 时 loadPreset 报错。fragment 完整性校验（`assertReadable`）仍覆盖全量 fragments，与可见性切片相互独立。 |
 | `runtimeInputsDoc` | 按 phase 变量 metadata 生成的 bound runtime input 文档。 |
 | `phaseExitsDoc` | 按 phase `[[phases.exits]]` 生成的出口状态文档。 |
+| `statusVocabularyDoc` | #404：按 phase 切片的 status 词表（`actionable` / `non-actionable` 分组）；trigger phase 只渲染 `whenStatus`，普通工作 phase 渲染 continuable，含 `[[phases.exits]]` 的 phase（如 review）渲染 continuable + terminal。 |
+| `transitionGuidanceDoc` | #404：按 phase `[[phases.exits]]` 生成的 phase exit 转移指引 markdown 表（status × when）。无 exits 的 phase 渲染空串。 |
+| `triggerStatusDoc` | #404：当前 phase 的 trigger 关注 status 字面量（仅 trigger phase 非 chain-complete 时非空）。 |
+| `terminalStatusesDoc` | #404：`preset.statuses.terminal` 的逗号分隔字面表，供 phase prose 引用「不可写入的终态集合」。 |
+| `retryStatusDoc` | #404：preset 声明的 retry continuable status（`[statuses].retry`）加 backtick；未声明则为空串。 |
+| `runVerdictVocabularyDoc` | #404：review phase 的 `REVIEW SUMMARY` 行 verdict 选项子串（来自 engine-owned `REVIEW_SUMMARY_VERDICTS` 常量；非 review phase 为空串）。 |
 | `runIdGeneration` | `"new"` / `"resumed"`，本轮 runId 是新生成还是 resume |
 | `resumedFromPhase` | 若 resume，从哪个 phase 续；否则 `""` |
 | `resumedStartedAt` | 若 resume，原 run 起始时间戳；否则 `""` |

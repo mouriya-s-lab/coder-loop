@@ -34,7 +34,7 @@ Read now, yourself:
 Decide exactly one, from the bound inputs:
 
 - **Resume**: `RUN_ID_GENERATION` = `resumed`. If `RESUMED_FROM_PHASE` is the iteration phase → continue from the existing branch/PR/handoff/ledger state; do not restart work, do not open a replacement PR. If `RESUMED_FROM_PHASE` is the review phase → you should not be running at all: print the mismatch in the Step 7 summary and exit non-zero.
-- **Retry**: `RUN_ID_GENERATION` = `new` AND `ISSUE_STATUS` = `changes_requested` AND `ISSUE_LAST_RUN_ID` non-empty. The latest PR review/comment is your primary instruction; every list item in Step 3 gets scoped to that feedback.
+- **Retry**: `RUN_ID_GENERATION` = `new` AND `ISSUE_STATUS` = {{RETRY_STATUS_DOC}} AND `ISSUE_LAST_RUN_ID` non-empty. The latest PR review/comment is your primary instruction; every list item in Step 3 gets scoped to that feedback.
 - **Fresh**: neither. Work starts from `{{BASE_BRANCH}}`.
 
 ### Step 2 — Investigate (the closed read surface, each read for its stated purpose)

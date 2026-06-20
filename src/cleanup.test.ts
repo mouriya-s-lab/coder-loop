@@ -43,13 +43,19 @@ describe("phase C cleanup guards", () => {
 				"resumedFromPhase",
 				"resumedSessionId",
 				"resumedStartedAt",
+				"retryStatusDoc",
 				"runId",
 				"runIdGeneration",
+				"runVerdictVocabularyDoc",
 				"runtimeInputsDoc",
 				"sharedContextPath",
 				"stateFile",
+				"statusVocabularyDoc",
 				"targetCwd",
+				"terminalStatusesDoc",
 				"traceFile",
+				"transitionGuidanceDoc",
+				"triggerStatusDoc",
 			].sort())
 
 			for (const forbidden of [`state${"Path"}`]) {
@@ -170,6 +176,8 @@ function makeLoopOptions(): LoopOptions {
 					unblockable: [],
 					// #402: required by Preset.statuses.
 					exhausted: parseInternalStatus("done", "test.status"),
+					// #404: optional preset-declared retry status; this fixture has no retry concept.
+					retry: null,
 				},
 			phases: [],
 			fragments: [],
