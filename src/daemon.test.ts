@@ -20,7 +20,6 @@ import {
 	schedulerSlotWorktreePath,
 	serializeSchedulerReviewOnEmptyLock,
 	type SchedulerEvent,
-	type SchedulerKindResolver,
 	type SchedulerOptions,
 	type SchedulerWorktreeManager,
 } from "./scheduler"
@@ -1234,7 +1233,6 @@ attemptTimeoutSeconds = 3600
 					model: null,
 				},
 				worktreeManager,
-				kindResolver: () => ({ ok: true, kind: "code" }),
 				chainCompleteTriggerForChain: () => null,
 			},
 		})
@@ -2562,7 +2560,6 @@ attemptTimeoutSeconds = 3600
 				},
 				presetDir: PRESET_DIR,
 				worktreeManager,
-				kindResolver: () => ({ ok: true, kind: "code" }),
 				prompt: ({ item, runId }) => JSON.stringify({
 					itemId: item.id,
 					issueNumber: item.issueNumber,
@@ -3081,7 +3078,6 @@ process.exitCode = 0
 				runner: runnerSelection,
 				presetDir: PRESET_DIR,
 				worktreeManager,
-				kindResolver: () => ({ ok: true, kind: "code" }),
 				prompt: ({ item, runId, phase }) => JSON.stringify({
 					itemId: item.id,
 					issueNumber: item.issueNumber,
@@ -3705,7 +3701,6 @@ process.exitCode = 0
 			runner: fakeRunnerSelection,
 			presetDir: PRESET_DIR,
 			worktreeManager,
-			kindResolver: () => ({ ok: true, kind: "code" }),
 			prompt: ({ item, runId, phase }) => JSON.stringify({
 				itemId: item.id,
 				issueNumber: item.issueNumber,
@@ -3781,7 +3776,6 @@ exit 0
 			enabled: true,
 			intervalMs: 20,
 			worktreeManager,
-			kindResolver: () => ({ ok: true, kind: "code" }),
 			phase: options.phase,
 			prompt: () => "ac5-phase-prompt",
 			chainCompleteTriggerForChain: () => null,
@@ -3818,7 +3812,6 @@ type FixtureOptions = {
 	schedulerPresetDir?: string | null
 	realWorktreeManager?: boolean
 	worktreeManager?: SchedulerWorktreeManager
-	kindResolver?: SchedulerKindResolver
 	chainCompleteTriggerForChain?: SchedulerOptions["chainCompleteTriggerForChain"]
 	schedulerConfig?: Partial<CoderLoopDaemonSchedulerConfig>
 	beforeStart?: (input: { root: string; loopDataRoot: string; eventLog: string; fakeRunner: string }) => Promise<void> | void
@@ -3864,7 +3857,6 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 			runner: scheduler,
 			...(options.schedulerPresetDir === null ? {} : { presetDir: options.schedulerPresetDir ?? PRESET_DIR }),
 			worktreeManager,
-			kindResolver: () => ({ ok: true, kind: "code" }),
 			prompt: ({ item, runId, phase }) => {
 				const extra = itemExtraToJsonObject(item.extra)
 				const payload: BoundaryRecord = {

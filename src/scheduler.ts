@@ -12,14 +12,12 @@ import {
 	renderPrompt,
 	resolvePresetBusinessKeyValues,
 	resolveWorkflowFileBinding,
-	resolveIssueKind,
 	selectRunnerForPhase,
 	type AgentRunnerKind,
 	type AgentRunnerSelection,
 	type IssueKind,
 	type JsonObject,
 	type JsonValue,
-	type ParsedIssueKind,
 	type Preset,
 	type PresetPhase,
 	type PhaseRunnerSelectionInput,
@@ -202,11 +200,6 @@ export type SchedulerChainCompleteDecision =
 export type SchedulerChainCompleteTrigger = (context: SchedulerChainCompleteTriggerContext) => Promise<SchedulerChainCompleteDecision> | SchedulerChainCompleteDecision
 export type SchedulerChainCompleteTriggerForChain = (context: SchedulerChainCompleteTriggerContext) => Promise<SchedulerChainCompleteDecision | null> | SchedulerChainCompleteDecision | null
 
-export type SchedulerKindResolver = (context: {
-	chain: ChainRecord
-	item: ItemRecord
-}) => Promise<ParsedIssueKind> | ParsedIssueKind
-
 export type SchedulerPhaseRunnerInput = {
 	chain: ChainRecord
 	item: ItemRecord
@@ -265,7 +258,6 @@ export type SchedulerOptions = {
 	loopDataRootOptions?: LoopDataRootOptions
 	now?: () => number
 	runIdFactory?: (context: { chain: ChainRecord; item: ItemRecord; phase: string }) => string
-	kindResolver?: SchedulerKindResolver
 	maxItemAttempts?: number
 	maxItemAttemptsForChain?: (chain: ChainRecord) => number
 	spawnFailureBackoff?: SchedulerSpawnFailureBackoffConfig
@@ -806,14 +798,11 @@ async function spawnSchedulerRun(
 	slot: SchedulerSlot,
 	phase: string,
 ): Promise<SchedulerActiveRun | null> {
-	// #450 retired the spawn-time kind gate: an item with zero/many/unknown `kind:*` labels
-	// (or an unconfigured repository) no longer aborts spawn. The engine still computes the
-	// kind value for the renderer as a transition-state injection point until #420 and #401
-	// retire the fetch mechanism and engine vocabulary; a fetch failure simply renders as the
-	// empty-kind legacy path instead of blocking the item.
-	const kindResolver = options.kindResolver ?? defaultSchedulerKindResolver
-	const kindResult = await kindResolver({ chain, item })
-	const resolvedIssueKind: IssueKind = kindResult.ok ? kindResult.kind : null
+	// #420 retired the engine's kind取值 mechanism: `gh issue view` is no longer spawned and
+	// the resolver pipe is gone. The renderer's `issueKind` parameter is held over until #401
+	// finishes retiring `runtime.issueKind` / `renderIssueKindDoc`; every spawn now passes the
+	// empty-kind path (null → "") to the prompt renderer.
+	const resolvedIssueKind: IssueKind = null
 
 	const worktreeManager = options.worktreeManager ?? createGitWorktreeManager(options.loopDataRootOptions)
 	let worktreePath: string
@@ -2126,11 +2115,6 @@ export function resumeDecisionForItem(item: ItemRecord, phase: string, runner: A
 	const sessionId = item.sessionIds[phase]?.[runner] ?? null
 	if (sessionId === null || sessionId === "") return freshResume()
 	return { kind: "resume", sessionId }
-}
-
-export async function defaultSchedulerKindResolver(context: { chain: ChainRecord; item: ItemRecord }): Promise<ParsedIssueKind> {
-	const repository = context.chain.repository === "" ? null : context.chain.repository
-	return await resolveIssueKind(repository, String(context.item.issueNumber), itemExtraToJsonObject(context.item.extra))
 }
 
 async function resolvePhaseRunner(
