@@ -157,6 +157,9 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect([...preset.statuses.continuable]).toEqual(["queued", "in_progress", "changes_requested"])
 		expect([...preset.statuses.terminal]).toEqual(["blocked", "moot", "done", "exhausted"])
 		expect([...preset.statuses.unblockable]).toEqual(["blocked"])
+		// #402: bundled preset declares the attempts-exhausted落点 explicitly; engine no longer
+		// owns the "exhausted" literal.
+		expect(preset.statuses.exhausted).toBe("exhausted")
 		expect(Object.fromEntries(preset.phases.map((phase) => [phase.name, phase.summaryMarker]))).toEqual({
 			iteration: null,
 			review: "REVIEW SUMMARY:",
@@ -326,7 +329,9 @@ describe("parsePreset schema validation", () => {
 	const minimalRoot = () => ({
 		name: "x",
 		item: { idField: "id" },
-		statuses: { continuable: ["a"], terminal: ["b"] },
+		// #402: every preset must declare `exhausted` (D2 verdict) and the value must be
+		// a member of `terminal`. Tests that pin the rejection path override this directly.
+		statuses: { continuable: ["a"], terminal: ["b"], exhausted: "b" },
 		phases: [
 			{ name: "p", prompt: "p.md", variables: { K: "item.id" } },
 		],
@@ -347,8 +352,29 @@ describe("parsePreset schema validation", () => {
 
 	test("rejects continuable / terminal overlap", () => {
 		const root = minimalRoot()
-		root.statuses = { continuable: ["a", "b"], terminal: ["b", "c"] }
+		root.statuses = { continuable: ["a", "b"], terminal: ["b", "c"], exhausted: "b" }
 		expect(() => parsePreset(root, "/tmp")).toThrow(/both continuable and terminal/)
+	})
+
+	// #402: D2 verdict — `statuses.exhausted` is a required preset declaration. The
+	// arktype boundary rejects a missing field with the field path inside the error.
+	test("rejects a preset that omits statuses.exhausted (#402)", () => {
+		// parsePreset accepts BoundaryValue (= unknown). The arktype boundary is the
+		// runtime gate; constructing a deliberately-incomplete object is how we exercise
+		// the load-time rejection — the TypeScript type of minimalRoot() carries the
+		// declared shape, so we route through a record-typed variable to construct an
+		// input that statically lacks `exhausted`.
+		const root: BoundaryRecord = { ...minimalRoot(), statuses: { continuable: ["a"], terminal: ["b"] } }
+		expect(() => parsePreset(root, "/tmp")).toThrow(/exhausted/)
+	})
+
+	// #402: load-time validation also rejects an exhausted落点 that is not in the
+	// terminal vocabulary — engine writes the value directly, so it must be reachable
+	// as a terminal status.
+	test("rejects a preset whose statuses.exhausted is not in terminal (#402)", () => {
+		const root = minimalRoot()
+		root.statuses = { continuable: ["a"], terminal: ["b"], exhausted: "not_a_terminal_status" }
+		expect(() => parsePreset(root, "/tmp")).toThrow(/preset\.statuses\.exhausted.*must be one of statuses\.terminal/)
 	})
 
 	test("rejects duplicate phase name", () => {
@@ -362,7 +388,7 @@ describe("parsePreset schema validation", () => {
 
 	test("accepts trigger phases and keeps review as the last non-trigger phase", () => {
 		const root: BoundaryRecord = minimalRoot()
-		root.statuses = { continuable: ["queued"], terminal: ["blocked", "done"] }
+		root.statuses = {continuable: ["queued"], terminal: ["blocked", "done"], exhausted: "done" }
 		root.phases = [
 			{ name: "iteration", prompt: "iter.md", variables: { K: "item.id" } },
 			{ name: "review", prompt: "review.md", exits: [{ status: "blocked", when: "blocked" }], variables: { K: "item.id" } },
@@ -379,7 +405,7 @@ describe("parsePreset schema validation", () => {
 
 	test("accepts per-phase exit declarations and computes summaryMarker defaults", () => {
 		const root: BoundaryRecord = minimalRoot()
-		root.statuses = { continuable: ["queued", "in_progress"], terminal: ["done"] }
+		root.statuses = {continuable: ["queued", "in_progress"], terminal: ["done"], exhausted: "done" }
 		root.phases = [
 			{ name: "iteration", prompt: "iter.md", exits: [{ status: "in_progress", when: "handoff" }], variables: { K: "item.id" } },
 			{ name: "review", prompt: "review.md", runner: "claude", exits: [{ status: "done", when: "accepted" }], variables: { K: "item.id" } },
@@ -394,7 +420,7 @@ describe("parsePreset schema validation", () => {
 
 	test("accepts manual unblock statuses declared as terminal subset", () => {
 		const root: BoundaryRecord = minimalRoot()
-		root.statuses = { continuable: ["ready"], terminal: ["parked", "finished"], entry: "ready", unblockable: ["parked"] }
+		root.statuses = {continuable: ["ready"], terminal: ["parked", "finished"], entry: "ready", unblockable: ["parked"], exhausted: "finished" }
 
 		const preset = parsePreset(root, "/tmp")
 
@@ -404,14 +430,14 @@ describe("parsePreset schema validation", () => {
 
 	test("rejects manual unblock statuses outside terminal set", () => {
 		const root: BoundaryRecord = minimalRoot()
-		root.statuses = { continuable: ["ready"], terminal: ["finished"], entry: "ready", unblockable: ["parked"] }
+		root.statuses = {continuable: ["ready"], terminal: ["finished"], entry: "ready", unblockable: ["parked"], exhausted: "finished" }
 
 		expect(() => parsePreset(root, "/tmp")).toThrow(/statuses\.unblockable: "parked" must be one of statuses\.terminal/)
 	})
 
 	test("rejects duplicate manual unblock statuses", () => {
 		const root: BoundaryRecord = minimalRoot()
-		root.statuses = { continuable: ["ready"], terminal: ["parked"], entry: "ready", unblockable: ["parked", "parked"] }
+		root.statuses = {continuable: ["ready"], terminal: ["parked"], entry: "ready", unblockable: ["parked", "parked"], exhausted: "parked" }
 
 		expect(() => parsePreset(root, "/tmp")).toThrow(/statuses\.unblockable: duplicate status "parked"/)
 	})
@@ -451,7 +477,7 @@ describe("parsePreset schema validation", () => {
 
 	test("accepts chain-complete trigger phases", () => {
 		const root: BoundaryRecord = minimalRoot()
-		root.statuses = { continuable: ["queued"], terminal: ["blocked", "done"] }
+		root.statuses = {continuable: ["queued"], terminal: ["blocked", "done"], exhausted: "done" }
 		root.phases = [
 			{ name: "iteration", prompt: "iter.md", variables: { K: "item.id" } },
 			{ name: "review", prompt: "review.md", exits: [{ status: "blocked", when: "blocked" }], variables: { K: "item.id" } },
@@ -470,7 +496,7 @@ describe("parsePreset schema validation", () => {
 
 	test("rejects trigger afterPhase that does not name a declared phase", () => {
 		const root: BoundaryRecord = minimalRoot()
-		root.statuses = { continuable: ["queued"], terminal: ["blocked"] }
+		root.statuses = {continuable: ["queued"], terminal: ["blocked"], exhausted: "blocked" }
 		root.phases = [
 			{ name: "iteration", prompt: "iter.md", variables: { K: "item.id" } },
 			{ name: "responder", prompt: "responder.md", trigger: { afterPhase: "review", whenStatus: "blocked" }, variables: { K: "item.id" } },
@@ -661,6 +687,7 @@ title = "string"
 [statuses]
 continuable = ["pending"]
 terminal    = ["done"]
+exhausted   = "done"
 
 [[phases]]
 name   = "run"
@@ -772,7 +799,7 @@ describe("issue #400 — fragment index slicing per phase", () => {
 		const root: BoundaryRecord = {
 			name: "non-convention",
 			item: { idField: "id" },
-			statuses: { continuable: ["a"], terminal: ["b"] },
+			statuses: { continuable: ["a"], terminal: ["b"], exhausted: "b" },
 			phases: [
 				{ name: "alpha", prompt: "alpha.md", variables: { K: "item.id" }, roles: ["roleA", "shared"] },
 				{ name: "beta", prompt: "beta.md", variables: { K: "item.id" }, roles: ["roleB", "shared"] },
@@ -799,7 +826,7 @@ describe("issue #400 — fragment index slicing per phase", () => {
 		const root: BoundaryRecord = {
 			name: "needs-roles",
 			item: { idField: "id" },
-			statuses: { continuable: ["a"], terminal: ["b"] },
+			statuses: { continuable: ["a"], terminal: ["b"], exhausted: "b" },
 			phases: [
 				// `roles` deliberately omitted — engine must NOT infer roles from the phase name.
 				{ name: "alpha", prompt: "alpha.md", variables: { K: "item.id" } },
@@ -816,7 +843,7 @@ describe("issue #400 — fragment index slicing per phase", () => {
 		const root: BoundaryRecord = {
 			name: "bad-role",
 			item: { idField: "id" },
-			statuses: { continuable: ["a"], terminal: ["b"] },
+			statuses: { continuable: ["a"], terminal: ["b"], exhausted: "b" },
 			phases: [
 				{ name: "p", prompt: "p.md", variables: { K: "item.id" }, roles: ["roleA", "ghost"] },
 			],
@@ -832,7 +859,7 @@ describe("issue #400 — fragment index slicing per phase", () => {
 		const root: BoundaryRecord = {
 			name: "dup-role",
 			item: { idField: "id" },
-			statuses: { continuable: ["a"], terminal: ["b"] },
+			statuses: { continuable: ["a"], terminal: ["b"], exhausted: "b" },
 			phases: [
 				{ name: "p", prompt: "p.md", variables: { K: "item.id" }, roles: ["roleA", "roleA"] },
 			],

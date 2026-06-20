@@ -423,7 +423,7 @@ const PresetTomlBoundary = arkType({
 	name: "string",
 	item: { idField: "string", "fields?": "object" },
 	"runtime?": { "businessKeys?": "string[]", "businessKeyValues?": "object" },
-	statuses: { continuable: "string[]", terminal: "string[]", "success?": "string[]", "entry?": "string", "unblockable?": "string[]" },
+	statuses: { continuable: "string[]", terminal: "string[]", "success?": "string[]", "entry?": "string", "unblockable?": "string[]", exhausted: "string" },
 	phases: PresetPhaseBoundary.array(),
 	"fragments?": PresetFragmentBoundary.array(),
 	// #433: [agent].binary / [agent].extraArgs retired (zombie schema with no read site). Runner
@@ -538,6 +538,12 @@ export type Preset = {
 			success: readonly InternalStatus[]
 			entry: InternalStatus
 			unblockable: readonly InternalStatus[]
+			// #402: status the scheduler writes when the attempts budget is spent without a
+			// terminal verdict from any phase. Required (D2 verdict): "未声明则禁用" silently
+			// disables the runaway-retry safety, "隐形停选" produces a status outside the preset
+			// vocabulary. Validated at load time as a member of `terminal` so the engine can write
+			// it without re-validating downstream.
+			exhausted: InternalStatus
 		}
 	phases: readonly PresetPhase[]
 	fragments: readonly PresetFragment[]
@@ -3685,6 +3691,14 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 		if (seenUnblockableStatuses.has(status)) presetError(`preset.statuses.unblockable: duplicate status "${status}"`)
 		seenUnblockableStatuses.add(status)
 	}
+	// #402: exhaustedStatus is a required preset declaration (D2 verdict). The arktype boundary
+	// already rejects a missing field with the field path, but the value must also be a member of
+	// the terminal vocabulary so the engine can write it without re-validating the contract on
+	// each transition.
+	if (!root.statuses.terminal.includes(root.statuses.exhausted)) {
+		presetError(`preset.statuses.exhausted: "${root.statuses.exhausted}" must be one of statuses.terminal`)
+	}
+	const exhaustedStatus = parseInternalStatus(root.statuses.exhausted, "preset.statuses.exhausted")
 	const statusNames = new Set<string>([...root.statuses.continuable, ...root.statuses.terminal])
 	const itemFields = parsePresetItemFields(root.item.fields ?? {}, "preset.item.fields")
 	if (itemFields.has(root.item.idField)) presetError(`preset.item.fields.${root.item.idField}: idField is already declared by preset.item.idField`)
@@ -3795,7 +3809,7 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 		presetDir,
 		item: { idField: root.item.idField, fields: itemFields },
 		runtime: { businessKeys: runtimeBusinessKeys, businessKeyValues: runtimeBusinessKeyValues },
-			statuses: { continuable: continuableStatuses, terminal: terminalStatuses, success: successStatuses, entry: entryStatus, unblockable: unblockableStatuses },
+			statuses: { continuable: continuableStatuses, terminal: terminalStatuses, success: successStatuses, entry: entryStatus, unblockable: unblockableStatuses, exhausted: exhaustedStatus },
 		phases,
 		fragments,
 		agent: { attemptTimeoutSeconds },

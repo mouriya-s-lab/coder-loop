@@ -28,7 +28,9 @@ businessKeys = ["auditDemo"]
 
 [statuses]
 continuable = ["pending"]
-terminal    = ["done"]
+terminal    = ["done", "exhausted"]
+# exhausted (#402): required preset declaration for the attempts-exhausted落点.
+exhausted   = "exhausted"
 
 [[phases]]
 name   = "audit"

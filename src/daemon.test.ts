@@ -1088,6 +1088,7 @@ continuable = ["queued", "needs_work"]
 terminal = ["custom_done"]
 entry = "queued"
 success = ["custom_done"]
+exhausted = "custom_done"
 
 [[phases]]
 name = "run"
@@ -4192,6 +4193,7 @@ continuable = ["queued"]
 terminal = ["done", "exhausted"]
 success = ["done"]
 entry = "queued"
+exhausted = "exhausted"
 
 [agent]
 binary = "codex"
