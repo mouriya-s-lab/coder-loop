@@ -2350,17 +2350,27 @@ describe("scheduler per-chain review-on-empty (issue #292)", () => {
 			})
 			delete (baseOptions as { runner?: AgentRunnerSelection }).runner
 
+			// Replace runnerCommands with fake-runner shape so spawn drives the fixture's bun-driven
+			// fake binary instead of the PATH-resolved real claude/codex. The test's assertion target
+			// is the resolver-preference order, not the spawned process behavior; without this the
+			// real claude binary would not exit within bun-test's 5s timeout.
+			const fakeRunnerCommands = {
+				claude: { kind: "claude" as const, binary: "bun", extraArgs: [fixture.fakeRunner], model: null },
+				codex:  { kind: "codex"  as const, binary: "bun", extraArgs: [fixture.fakeRunner], model: null },
+			}
 			const tick = await schedulerTick({
 				...baseOptions,
 				presetForChain,
 				phaseRunnerSelectionForChain: (passedChain) => {
 					chainResolverCalls++
-					return buildPhaseRunnerSelectionFromChain({ chain: passedChain, loopDataRoot: null, preset: chainLoaded.preset })
+					const selection = buildPhaseRunnerSelectionFromChain({ chain: passedChain, loopDataRoot: null, preset: chainLoaded.preset })
+					return { ...selection, runnerCommands: fakeRunnerCommands }
 				},
 				phaseRunnerSelectionForItem: async (passedChain, passedItem) => {
 					itemResolverCalls++
 					const { preset } = await presetForItem(passedChain, passedItem)
-					return buildPhaseRunnerSelectionFromChain({ chain: passedChain, loopDataRoot: null, preset })
+					const selection = buildPhaseRunnerSelectionFromChain({ chain: passedChain, loopDataRoot: null, preset })
+					return { ...selection, runnerCommands: fakeRunnerCommands }
 				},
 			})
 			expect(tick.spawnedRuns).toHaveLength(1)
@@ -3558,6 +3568,7 @@ type Fixture = {
 	eventLog: string
 	schedulerEvents: SchedulerEvent[]
 	worktreeCalls: string[]
+	fakeRunner: string
 	options: (overrides?: SchedulerFixtureOverrides) => SchedulerOptions
 }
 
@@ -3635,7 +3646,7 @@ async function createFixture(name: string): Promise<Fixture> {
 		}
 	}
 
-	return { store, state, loopDataRoot, eventLog, schedulerEvents, worktreeCalls, options }
+	return { store, state, loopDataRoot, eventLog, schedulerEvents, worktreeCalls, fakeRunner, options }
 }
 
 function persistedObservabilityOptions(fixture: Fixture, overrides: SchedulerFixtureOverrides = {}): SchedulerOptions {
@@ -4033,7 +4044,7 @@ async function createPresetPromptIntegrationFixture(name: string): Promise<Fixtu
 		}
 	}
 
-	return { store, state, loopDataRoot, eventLog, schedulerEvents, worktreeCalls, options }
+	return { store, state, loopDataRoot, eventLog, schedulerEvents, worktreeCalls, fakeRunner, options }
 }
 
 async function writeEchoPromptRunner(path: string): Promise<void> {
