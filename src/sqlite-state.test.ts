@@ -208,7 +208,15 @@ describe("sqlite state store", () => {
 			const second = createFullItem(store, chain, { issueNumber: 179, status: runtimeStatus("queued") })
 			const otherRepo = createFullItem(store, chain, { issueNumber: 180, repoCwd: "/repo/other", status: runtimeStatus("queued") })
 
-			expect(store.getNextPendingItem({ chainId: chain.id, repoCwd: "/repo/coder-loop" })).toEqual(first)
+			expect(store.getNextPendingItem({
+				chainId: chain.id,
+				repoCwd: "/repo/coder-loop",
+				// #403: statuses / terminalStatusNames are required — the store no longer carries a
+				// default vocabulary. The values below mirror what a `gh-issue-pr-iteration` preset
+				// would resolve to, but the test is what supplies them; the store is preset-agnostic.
+				statuses: [runtimeStatus("queued"), runtimeStatus("changes_requested")],
+				terminalStatusNames: [runtimeStatus("done"), runtimeStatus("moot"), runtimeStatus("blocked")],
+			})).toEqual(first)
 			expect(store.allItemsTerminal({ chainId: chain.id, terminalStatusNames: [runtimeStatus("done"), runtimeStatus("moot"), runtimeStatus("blocked")] })).toBe(false)
 
 			const metadataOnly = store.updateItem(first.id, { attempts: 2, updatedAt: 1_800_000_100 })
@@ -265,7 +273,13 @@ describe("sqlite state store", () => {
 			})
 
 			expect(retried.id).toBeLessThan(untouched.id)
-			expect(store.getNextPendingItem({ chainId: chain.id, repoCwd: "/repo/coder-loop" })).toEqual(retried)
+			expect(store.getNextPendingItem({
+				chainId: chain.id,
+				repoCwd: "/repo/coder-loop",
+				// #403: caller-supplied status vocabulary; store no longer fills it in.
+				statuses: [runtimeStatus("queued"), runtimeStatus("changes_requested")],
+				terminalStatusNames: [runtimeStatus("done"), runtimeStatus("moot"), runtimeStatus("blocked")],
+			})).toEqual(retried)
 		} finally {
 			store.close()
 		}
@@ -280,7 +294,13 @@ describe("sqlite state store", () => {
 			const c = createFullItem(store, chain, { issueNumber: 203, status: runtimeStatus("queued"), priority: null })
 
 			expect([a.position, b.position, c.position]).toEqual([0, 1, 2])
-			expect(store.getNextPendingItem({ chainId: chain.id, repoCwd: "/repo/coder-loop" })?.id).toBe(a.id)
+			expect(store.getNextPendingItem({
+				chainId: chain.id,
+				repoCwd: "/repo/coder-loop",
+				// #403: caller-supplied status vocabulary; store no longer fills it in.
+				statuses: [runtimeStatus("queued"), runtimeStatus("changes_requested")],
+				terminalStatusNames: [runtimeStatus("done"), runtimeStatus("moot"), runtimeStatus("blocked")],
+			})?.id).toBe(a.id)
 
 			const movedC = store.reorderItem(c.id, 0)
 			expect(movedC.map((item) => item.id)).toEqual([c.id, a.id, b.id])
@@ -290,7 +310,13 @@ describe("sqlite state store", () => {
 			expect(store.getItem(c.id)?.position).toBe(0)
 			expect(store.getItem(a.id)?.position).toBe(1)
 			expect(store.getItem(b.id)?.position).toBe(2)
-			expect(store.getNextPendingItem({ chainId: chain.id, repoCwd: "/repo/coder-loop" })?.id).toBe(c.id)
+			expect(store.getNextPendingItem({
+				chainId: chain.id,
+				repoCwd: "/repo/coder-loop",
+				// #403: caller-supplied status vocabulary; store no longer fills it in.
+				statuses: [runtimeStatus("queued"), runtimeStatus("changes_requested")],
+				terminalStatusNames: [runtimeStatus("done"), runtimeStatus("moot"), runtimeStatus("blocked")],
+			})?.id).toBe(c.id)
 
 			const movedCToEnd = store.reorderItem(c.id, 99)
 			expect(movedCToEnd.map((item) => item.id)).toEqual([a.id, b.id, c.id])

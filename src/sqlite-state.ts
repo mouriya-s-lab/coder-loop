@@ -36,10 +36,14 @@ export class SqliteStateError extends Error {
 
 const CHAIN_STATUSES = ["active", "completed", "deleted", "stopped"] as const
 export type ChainStatus = typeof CHAIN_STATUSES[number]
-const DEFAULT_PENDING_ITEM_STATUSES: readonly InternalStatus[] = [
-	parseInternalStatus("queued", "items.defaultPendingStatuses[0]"),
-	parseInternalStatus("changes_requested", "items.defaultPendingStatuses[1]"),
-]
+// #403: the engine no longer carries a default pending-status vocabulary. The previous
+// `DEFAULT_PENDING_ITEM_STATUSES` literal (queued / changes_requested) was a `gh-issue-pr-iteration`-
+// shaped engine preset hiding behind a `??` fallback in `getNextPendingItem`. After #403 the only
+// source of status vocabularies is the preset declared on chain/item, resolved through the daemon.
+// `GetNextPendingItemInput.statuses` and `.terminalStatusNames` are therefore required (see types
+// above) — undefined cannot seep into this read path where `??` would catch it. Callers that lack
+// a resolved preset must surface a typed preset-resolution error at the boundary, not synthesize a
+// fallback vocabulary deep in the store layer.
 
 export type ChainRecord = {
 	id: number
@@ -197,8 +201,10 @@ export type SetCurrentRunInput = CurrentRunRecord
 export type GetNextPendingItemInput = {
 	chainId: number
 	repoCwd: string
-	statuses?: readonly InternalStatus[]
-	terminalStatusNames?: readonly InternalStatus[]
+	// #403: required. The store does not synthesize a default status vocabulary — callers must pass
+	// the already-resolved set from the active preset (no `??` fallback path remains in the body).
+	statuses: readonly InternalStatus[]
+	terminalStatusNames: readonly InternalStatus[]
 	resolveDependency?: DependencyResolver
 }
 
@@ -1042,13 +1048,19 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 
 		getNextPendingItem: (input) =>
 			read("get next pending item", () => {
-				const statuses = input.statuses ?? DEFAULT_PENDING_ITEM_STATUSES
-				const terminalStatusNames = input.terminalStatusNames ?? []
+				// #403: no `??` fallback — `statuses` and `terminalStatusNames` are required on the
+				// input type. Callers must resolve the active preset's vocabulary at the boundary; the
+				// store never invents one.
 				return selectNextPendingItem(
 					db.query<ItemRow, SqlParams>("SELECT * FROM items WHERE chain_id = $chainId ORDER BY id ASC").all({
 						chainId: input.chainId,
 					}).map((row) => requireItem(row, row.id)),
-					{ repoCwd: input.repoCwd, statuses, terminalStatusNames, resolveDependency: input.resolveDependency ?? ((id) => rowToItem(getItemRow(id))) },
+					{
+						repoCwd: input.repoCwd,
+						statuses: input.statuses,
+						terminalStatusNames: input.terminalStatusNames,
+						resolveDependency: input.resolveDependency ?? ((id) => rowToItem(getItemRow(id))),
+					},
 				)
 			}),
 

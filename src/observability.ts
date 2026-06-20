@@ -212,12 +212,27 @@ const ObservabilityEventBoundary = arkType.or(
 	},
 	{
 		...EventBaseBoundary,
-		kind: arkType.unit("lifecycle"),
+		// #403: migrated from `lifecycle` to `validation`. The fail-fast policy that replaced engine
+		// fallback status vocabularies turns every preset-resolution refusal into a *validation* event
+		// (an operation declined because the preset cannot be resolved), not a lifecycle transition.
+		// The new `operation` payload field carries the refused operation name (`chain.status`,
+		// `scheduler.tick`, `item.exits`, ...) so the event is per-operation-resolvable rather than
+		// a generic "preset broken" log line.
+		kind: arkType.unit("validation"),
 		type: arkType.unit("daemon.preset_load_failed"),
 		// `preset` is nullable since #412 (chain may carry no preset; chain-wide fall back to chain.preset
 		// only applies when items are absent). Item-scoped failures will populate it with the item's preset
 		// name; chain-only failures with no item context may emit null.
-		payload: { chainId: "number", "preset": arkType.or("string", "null"), presetDir: "string", error: "string" },
+		payload: {
+			chainId: "number",
+			"preset": arkType.or("string", "null"),
+			presetDir: "string",
+			error: "string",
+			// #403: operation that was refused because the preset could not be resolved. Required so
+			// operators can correlate the refusal back to the calling surface without parsing stack
+			// traces.
+			operation: "string",
+		},
 	},
 	{
 		...EventBaseBoundary,
@@ -625,8 +640,6 @@ function renderLifecycleEvent(event: Extract<ObservabilityEvent, { kind: "lifecy
 			return `${event.ts} lifecycle daemon.socket.rebind pid=${event.payload.pid} socket=${event.payload.socketPath}`
 		case "daemon.fatal":
 			return `${event.ts} lifecycle daemon.fatal pid=${event.payload.pid} kind=${event.payload.fatalKind}`
-		case "daemon.preset_load_failed":
-			return `${event.ts} lifecycle daemon.preset_load_failed chain=${event.chain ?? event.payload.chainId} preset=${event.payload.preset} presetDir=${event.payload.presetDir} error=${event.payload.error}`
 		case "scheduler.recovery":
 			return `${event.ts} lifecycle scheduler.recovery chain=${event.chain ?? "-"} reason=${event.payload.reason}`
 		case "agent.spawn":
@@ -660,6 +673,12 @@ function renderValidationEvent(event: Extract<ObservabilityEvent, { kind: "valid
 			return `${event.ts} validation chain.invalid chain=${event.payload.chainId} context=${event.payload.context} error=${event.payload.error}`
 		case "preset.placeholder_check":
 			return `${event.ts} validation preset.placeholder_check chain=${event.chain ?? "-"} file=${event.payload.file} key=${event.payload.key} direction=${event.payload.direction} verdict=${event.payload.verdict}`
+		case "daemon.preset_load_failed":
+			// #403: migrated from `lifecycle` to `validation`. The fail-fast policy that replaced the
+			// engine fallback status vocabularies turns every preset-resolution refusal into a
+			// validation event. `operation` names the refused surface (chain.status, scheduler.tick,
+			// item.exits, ...).
+			return `${event.ts} validation daemon.preset_load_failed chain=${event.chain ?? event.payload.chainId} operation=${event.payload.operation} preset=${event.payload.preset} presetDir=${event.payload.presetDir} error=${event.payload.error}`
 		default:
 			return assertNever(event)
 	}
