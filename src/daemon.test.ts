@@ -177,12 +177,14 @@ describe("daemon", () => {
 			// #433: top-level `metadata.runner` is retired. Operators who want the chain to expose
 			// a particular runner kind set it via the per-runner channel (`metadata.codex.binary`)
 			// instead; the bare runner alias is gone.
+			// #457: umbrella values now flow through metadata.bindings rather than a first-class
+			// chain.create field; the daemon no longer validates `umbrellaIssue` / `umbrellaRepo`
+			// as engine-typed fields, so the test exercises the declared-binding path instead.
 			const result = expectOk(await request(fixture, "chain.create", {
 				name: "central-state",
 				repository: "mouriya-s-lab/coder-loop",
 				baseBranch: "main",
-				umbrellaIssue: 176,
-				metadata: { codex: { binary: "codex" } },
+				metadata: { codex: { binary: "codex" }, bindings: { umbrellaIssue: 176 } },
 			}))
 
 			expect(result.chain).toMatchObject({
@@ -190,7 +192,7 @@ describe("daemon", () => {
 				repository: "mouriya-s-lab/coder-loop",
 				baseBranch: "main",
 				status: "active",
-				metadata: { codex: { binary: "codex" } },
+				metadata: { codex: { binary: "codex" }, bindings: { umbrellaIssue: 176 } },
 			})
 			const paths = resolveChainRuntimePaths("central-state", { loopDataRoot: fixture.loopDataRoot })
 			await expect(Bun.file(paths.sharedFile).exists()).resolves.toBe(true)
@@ -353,83 +355,32 @@ describe("daemon", () => {
 		}
 	})
 
-	test("socket chain.create validates umbrellaIssue as positive or null", async () => {
-		const fixture = await startFixture("chain-create-invalid-umbrella-issue", { schedulerEnabled: false })
+	// #457: `umbrellaIssue` / `umbrellaRepo` are no longer first-class chain.create fields. They flow
+	// through `metadata.bindings`, where the operator (or the `--umbrella owner/repo#123` CLI
+	// shorthand) writes them as preset-declared chain bindings. The daemon rejects the legacy keys
+	// at the strict-args gate so stale callers fail loudly instead of silently dropping their value.
+	test("socket chain.create rejects legacy first-class umbrellaIssue / umbrellaRepo args (#457)", async () => {
+		const fixture = await startFixture("chain-create-rejects-legacy-umbrella", { schedulerEnabled: false })
 		try {
-			for (const umbrellaIssue of [0, -1]) {
-				const response = await request(fixture, "chain.create", {
-					name: `umbrella-check-${umbrellaIssue}`,
-					repository: "mouriya-s-lab/coder-loop",
-					umbrellaIssue,
-				})
-
-				expectInvalid(response)
-				const listed = expectOk(await request(fixture, "chain.list")).chains
-				expect(Array.isArray(listed)).toBe(true)
-				expect(listed).toHaveLength(0)
-			}
-
-			const nullUmbrella = record(expectOk(await request(fixture, "chain.create", {
-				name: "null-umbrella",
+			expectInvalid(await request(fixture, "chain.create", {
+				name: "legacy-umbrella-issue",
 				repository: "mouriya-s-lab/coder-loop",
-				umbrellaIssue: null,
-			})).chain)
-			expect(nullUmbrella).toMatchObject({ umbrellaIssue: null })
-
-			const positiveUmbrella = record(expectOk(await request(fixture, "chain.create", {
-				name: "positive-umbrella",
-				repository: "mouriya-s-lab/coder-loop",
-				umbrellaIssue: 1,
-			})).chain)
-			expect(positiveUmbrella).toMatchObject({ umbrellaIssue: 1 })
-		} finally {
-			await fixture.daemon.stop()
-		}
-	})
-
-	test("socket chain.create validates umbrellaRepo format", async () => {
-		const fixture = await startFixture("chain-create-invalid-umbrella-repo", { schedulerEnabled: false })
-		try {
-			const invalidUmbrellaRepos = [
-				"/etc/passwd",
-				"no-slash",
-				"a/b/c",
-				"foo",
-				"https://github.com/owner/repo",
-				"bad owner/repo",
-				"owner/.",
-				"owner/..",
-				"owner/repo\u007f",
-				"owner-/repo",
-			]
-
-			for (const [index, umbrellaRepo] of invalidUmbrellaRepos.entries()) {
-				const response = await request(fixture, "chain.create", {
-					name: `umbrella-repo-check-${index}`,
-					repository: "mouriya-s-lab/coder-loop",
-					umbrellaRepo,
-				})
-
-				expectInvalid(response)
-				if (!response.ok) expect(response.error.message).toContain("umbrellaRepo")
-				const listed = expectOk(await request(fixture, "chain.list")).chains
-				expect(Array.isArray(listed)).toBe(true)
-				expect(listed).toHaveLength(0)
-			}
-
-			const nullUmbrellaRepo = record(expectOk(await request(fixture, "chain.create", {
-				name: "null-umbrella-repo",
-				repository: "mouriya-s-lab/coder-loop",
-				umbrellaRepo: null,
-			})).chain)
-			expect(nullUmbrellaRepo).toMatchObject({ umbrellaRepo: null })
-
-			const validUmbrellaRepo = record(expectOk(await request(fixture, "chain.create", {
-				name: "valid-umbrella-repo",
+				umbrellaIssue: 176,
+			}))
+			expectInvalid(await request(fixture, "chain.create", {
+				name: "legacy-umbrella-repo",
 				repository: "mouriya-s-lab/coder-loop",
 				umbrellaRepo: "mouriya-s-lab/coder-loop",
+			}))
+
+			const created = record(expectOk(await request(fixture, "chain.create", {
+				name: "umbrella-via-bindings",
+				repository: "mouriya-s-lab/coder-loop",
+				metadata: { bindings: { umbrellaIssue: 176, umbrellaRepo: "mouriya-s-lab/coder-loop" } },
 			})).chain)
-			expect(validUmbrellaRepo).toMatchObject({ umbrellaRepo: "mouriya-s-lab/coder-loop" })
+			expect(created).toMatchObject({
+				metadata: { bindings: { umbrellaIssue: 176, umbrellaRepo: "mouriya-s-lab/coder-loop" } },
+			})
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -1304,30 +1255,37 @@ attemptTimeoutSeconds = 3600
 			})).item)
 			const itemId = numberValue(item.id)
 
-			// Typed blocker flags land as named keys inside extra; the pre-existing dependsOn key survives.
+			// #457: blocker fields are no longer first-class engine flags. The preset writes them
+			// through the generic `extraPatch` channel as preset-owned string keys. The legacy
+			// `blockerRepo` / `blockerRef` / `clearBlocker` top-level args are rejected at the
+			// strict-args gate.
 			const blocked = record(expectOk(await request(fixture, "item.update", {
 				itemId,
 				status: runtimeStatus("blocked"),
-				blockerRepo: "mouriya-s-lab/other",
-				blockerRef: "#267",
+				extraPatch: { blockerRepo: "mouriya-s-lab/other", blockerRef: "#267" },
 			})).item)
 			expect(record(blocked.extra)).toMatchObject({ blockerRepo: "mouriya-s-lab/other", blockerRef: "#267", dependsOn: [numberValue(anchor.id)] })
 			expect(blocked.status).toBe("blocked")
 			expect(blocked.agentCwd).toBeNull()
 
-			// clearBlocker removes only the blocker keys, leaving dependsOn intact.
-			const cleared = record(expectOk(await request(fixture, "item.update", { itemId, status: runtimeStatus("changes_requested"), clearBlocker: true })).item)
+			// To drop preset-owned blocker keys the agent rebuilds the full `extra` without them
+			// (the engine no longer has a "clear blocker" first-class op). dependsOn must be
+			// preserved by the agent in its rebuilt extra.
+			const cleared = record(expectOk(await request(fixture, "item.update", {
+				itemId,
+				status: runtimeStatus("changes_requested"),
+				extra: { dependsOn: [numberValue(anchor.id)] },
+			})).item)
 			expect(record(cleared.extra)).not.toHaveProperty("blockerRepo")
 			expect(record(cleared.extra)).not.toHaveProperty("blockerRef")
 			expect(record(cleared.extra).dependsOn).toEqual([numberValue(anchor.id)])
 
 			// agentCwd remains daemon-owned: it cannot be set through item.update.
 			expectInvalid(await request(fixture, "item.update", { itemId, fields: { agentCwd: "/abs/elsewhere" } }))
-			expectInvalidDetails(
-				await request(fixture, "item.update", { itemId, blockerRepo: { owner: "mouriya-s-lab", repo: "other" } }),
-				"blockerRepo",
-				{ owner: "mouriya-s-lab", repo: "other" },
-			)
+			// #457: legacy first-class blocker mutation args are rejected at the strict-args gate.
+			expectInvalid(await request(fixture, "item.update", { itemId, blockerRepo: "mouriya-s-lab/other" }))
+			expectInvalid(await request(fixture, "item.update", { itemId, blockerRef: "#9" }))
+			expectInvalid(await request(fixture, "item.update", { itemId, clearBlocker: true }))
 			expectInvalidDetails(
 				await request(fixture, "item.update", { itemId, extraPatch: { schedulerBackoff: { failureCount: "bad", nextRunAt: 1_800_000_000 } } }),
 				"extra.schedulerBackoff.failureCount",
@@ -1338,10 +1296,6 @@ attemptTimeoutSeconds = 3600
 				extraPatch: { schedulerBackoff: { failureCount: 1, nextRunAt: 1_800_000_000 } },
 			})).item)
 			expect(record(legalExtra.extra).schedulerBackoff).toEqual({ failureCount: 1, nextRunAt: 1_800_000_000 })
-			// Invalid blocker repo (not owner/repo) is rejected at the boundary.
-			expectInvalid(await request(fixture, "item.update", { itemId, blockerRepo: "not-a-repo-ref" }))
-			// clearBlocker cannot be combined with a blocker value.
-			expectInvalid(await request(fixture, "item.update", { itemId, clearBlocker: true, blockerRef: "#9" }))
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -1400,8 +1354,12 @@ attemptTimeoutSeconds = 3600
 				const item = store.getItem(seededItemId)
 				if (item === null) throw new Error("expected seeded item")
 				expect(item.status).toBe("done")
-				expect(item.extra.blockerRepo).toBe("mouriya-s-lab/coder-loop")
-				expect(item.extra.blockerRef).toBe("#454")
+				// #457: blockerRepo / blockerRef are no longer engine-typed ItemExtra fields — they
+				// round-trip through `runtimeRemainder` like any preset-owned key. The store JSON
+				// view exposes them through `itemExtraToJsonObject`.
+				const extraJson = itemExtraToJsonObject(item.extra)
+				expect(extraJson.blockerRepo).toBe("mouriya-s-lab/coder-loop")
+				expect(extraJson.blockerRef).toBe("#454")
 				expect(item.extra.schedulerBackoff).toEqual({ failureCount: 1, nextRunAt: 1 })
 			} finally {
 				store.close()

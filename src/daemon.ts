@@ -180,8 +180,6 @@ const CHAIN_CREATE_ARG_KEYS = [
 	"repository",
 	"baseBranch",
 	"metadata",
-	"umbrellaIssue",
-	"umbrellaRepo",
 	"force",
 ] as const
 const ITEM_ADD_ARG_KEYS = [
@@ -217,9 +215,6 @@ const ITEM_UPDATE_FIELD_KEYS = [
 	"issueFile",
 	"evidenceDir",
 	"runner",
-	"blockerRepo",
-	"blockerRef",
-	"clearBlocker",
 	"extra",
 	"extraPatch",
 	"dependsOn",
@@ -826,10 +821,10 @@ export class CoderLoopDaemon {
 			status: "active",
 			metadata: validateChainMetadata(sizedJsonObject(args, "metadata", MAX_CHAIN_METADATA_BYTES) ?? {}),
 		}
-		const umbrellaIssue = validateUmbrellaIssueForRequest(optionalIntegerOrNull(args, "umbrellaIssue"))
-		if (umbrellaIssue !== undefined) input.umbrellaIssue = umbrellaIssue
-		const umbrellaRepo = optionalStringOrNull(args, "umbrellaRepo")
-		if (umbrellaRepo !== undefined) input.umbrellaRepo = umbrellaRepo === null ? null : validateRepositoryRefForRequest(umbrellaRepo, "umbrellaRepo")
+		// #457: umbrella-shaped values now live inside metadata.bindings (declared-field path).
+		// Preset's own arktype boundary for the bindings shape rejects malformed entries; the
+		// daemon retired the first-class umbrella validator and no longer surfaces those as
+		// chain-create request fields.
 		const store = this.requireStore()
 		const existing = store.getChainByName(input.name)
 		const force = optionalBoolean(args, "force") ?? false
@@ -1454,17 +1449,14 @@ export class CoderLoopDaemon {
 			: rawExtraPatch === undefined
 				? undefined
 				: { ...itemExtraToJsonObject(item.extra), ...rawExtraPatch }
-		const blockerMutation = blockerExtraMutationForRequest(fields)
 		const topLevelDependsOn = optionalDependsOn(fields, "dependsOn")
 		const extraDependsOn = topLevelDependsOn === undefined && requestedExtra !== undefined ? optionalDependsOn(requestedExtra, "dependsOn") : undefined
 		const dependsOn = topLevelDependsOn === undefined ? extraDependsOn : topLevelDependsOn
 		if (dependsOn !== undefined) {
 			validateDependsOnGraph(store.listItems(item.chainId), item.id, dependsOn)
-			input.extra = validateItemExtra(applyBlockerMutation(withDependsOn(requestedExtra ?? itemExtraToJsonObject(item.extra), dependsOn), blockerMutation))
+			input.extra = validateItemExtra(withDependsOn(requestedExtra ?? itemExtraToJsonObject(item.extra), dependsOn))
 		} else if (requestedExtra !== undefined) {
-			input.extra = validateItemExtra(applyBlockerMutation(requestedExtra, blockerMutation))
-		} else if (blockerMutation !== null) {
-			input.extra = validateItemExtra(applyBlockerMutation(itemExtraToJsonObject(item.extra), blockerMutation))
+			input.extra = validateItemExtra(requestedExtra)
 		}
 		const resumeScheduler = await this.pauseSchedulerForMutation()
 		try {
@@ -2307,13 +2299,15 @@ function isInvalidChainNameError(error: unknown): error is RuntimePathError {
 	return error instanceof RuntimePathError && error.code === "invalid_chain_name"
 }
 
-type RepositoryRefField = "repository" | "umbrellaRepo" | "blockerRepo"
-
+// #457: only `repository` remains as an engine-side `owner/repo` field — the engine column survives
+// because chain-identity check (resolveDbChainForTarget at src/loop.ts:3433-3438) and worktree-create
+// mechanism (validateWorktreePrerequisites) consume it. Other GitHub-shaped owner/repo fields
+// retired as engine first-class fields; a preset needing an `owner/repo` style chain binding or
+// item field declares it through the generic chain `metadata.bindings` / `[item.fields]` /
+// `extraPatch` paths and parses the string itself. The function used to take a field-name union
+// parameter — collapsed since no other field shares the validator.
 function validateRepositoryForRequest(input: string): string {
-	return validateRepositoryRefForRequest(input, "repository")
-}
-
-function validateRepositoryRefForRequest(input: string, field: RepositoryRefField): string {
+	const field = "repository" as const
 	const details: JsonObject = { [field]: input }
 	if (input.length > MAX_REPOSITORY_REF_LENGTH) {
 		throw new DaemonError("invalid_request", `${field} must be ${MAX_REPOSITORY_REF_LENGTH} characters or fewer`, details)
@@ -2435,14 +2429,6 @@ function hasParentPathSegment(value: string): boolean {
 function isPathInsideOrEqual(root: string, candidate: string): boolean {
 	const fromRoot = relative(root, candidate)
 	return fromRoot === "" || (!fromRoot.startsWith("..") && !isAbsolute(fromRoot))
-}
-
-function validateUmbrellaIssueForRequest(value: number | null | undefined): number | null | undefined {
-	if (value === undefined || value === null) return value
-	if (value < 1) {
-		throw new DaemonError("invalid_request", "umbrellaIssue must be a positive integer or null", { umbrellaIssue: value })
-	}
-	return value
 }
 
 function formatDaemonBatchTimestamp(date: Date): string {
@@ -2704,51 +2690,6 @@ function validateItemExtra(extra: JsonObject): ItemExtra {
 	return parseRuntimeData(() => parseItemExtraForRequest(extra, "extra"))
 }
 
-// Typed blocker metadata mutation for item.update. blockerRepo/blockerRef are first-class typed
-// fields at the CLI and daemon boundary; they are stored as named keys inside the item.extra map
-// (the sqlite extra column is the pre-existing JsonObject storage). `clearBlocker` removes both.
-// Returns null when the request carries no blocker fields, so callers leave extra untouched.
-type BlockerExtraMutation = { clear: true } | { clear: false; repo: string | null | undefined; ref: string | null | undefined }
-
-function blockerExtraMutationForRequest(fields: JsonObject): BlockerExtraMutation | null {
-	const clear = fields.clearBlocker === true
-	const repo = optionalStringOrNull(fields, "blockerRepo")
-	const ref = optionalStringOrNull(fields, "blockerRef")
-	if (clear) {
-		if (repo !== undefined || ref !== undefined) {
-			throw new DaemonError("invalid_request", "clearBlocker must not be combined with blockerRepo or blockerRef", {})
-		}
-		return { clear: true }
-	}
-	if (repo === undefined && ref === undefined) return null
-	if (repo !== undefined && repo !== null) validateRepositoryRefForRequest(repo, "blockerRepo")
-	if (ref !== undefined && ref !== null && /[\u0000-\u001f\u007f]/u.test(ref)) {
-		throw new DaemonError("invalid_request", "blockerRef must not contain control characters", { blockerRef: ref })
-	}
-	return { clear: false, repo, ref }
-}
-
-function applyBlockerMutation(extra: JsonObject, mutation: BlockerExtraMutation | null): JsonObject {
-	if (mutation === null) return extra
-	const next: JsonObject = { ...extra }
-	if (mutation.clear) {
-		delete next.blockerRepo
-		delete next.blockerRef
-		return next
-	}
-	applyBlockerField(next, "blockerRepo", mutation.repo)
-	applyBlockerField(next, "blockerRef", mutation.ref)
-	return next
-}
-
-function applyBlockerField(extra: JsonObject, key: "blockerRepo" | "blockerRef", value: string | null | undefined): void {
-	if (value === undefined) return
-	if (value === null) {
-		delete extra[key]
-		return
-	}
-	extra[key] = value
-}
 
 function validateJsonObjectSafety(value: JsonValue, path: string, maxDepth: number, label: string, depth = 0): void {
 	if (depth > maxDepth) {
@@ -3012,8 +2953,6 @@ function chainCreateConflicts(existing: ChainRecord, requested: CreateChainInput
 	addConflict("repository", existing.repository, requested.repository)
 	addConflict("baseBranch", existing.baseBranch, requested.baseBranch)
 	addConflict("status", existing.status, requested.status ?? "active")
-	addConflict("umbrellaIssue", existing.umbrellaIssue, requested.umbrellaIssue ?? null)
-	addConflict("umbrellaRepo", existing.umbrellaRepo, requested.umbrellaRepo ?? null)
 
 	const existingMetadata = chainMetadataToJsonObject(existing.metadata)
 	const requestedMetadata = requested.metadata === undefined ? {} : chainMetadataToJsonObject(requested.metadata)
@@ -3108,8 +3047,6 @@ function chainToJson(chain: ChainRecord): JsonObject {
 		preset: chain.preset,
 		repository: chain.repository,
 		baseBranch: chain.baseBranch,
-		umbrellaIssue: chain.umbrellaIssue,
-		umbrellaRepo: chain.umbrellaRepo,
 		status: chain.status,
 		metadata: chainMetadataToJsonObject(chain.metadata),
 		createdAt: chain.createdAt,
@@ -3203,10 +3140,8 @@ function chainStatusSummary(
 			state: chain.status,
 			completedAt: chain.status === "completed" ? chain.updatedAt : null,
 		},
-		umbrella: {
-			repo: chain.umbrellaRepo,
-			issue: chain.umbrellaIssue,
-		},
+		// #457: chain-summary no longer surfaces umbrella-shaped first-class fields. Supervisors that
+		// need umbrella metadata read the preset-declared keys from `chain.metadata.bindings` directly.
 		items: {
 			total: items.length,
 			byStatus,

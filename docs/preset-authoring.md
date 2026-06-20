@@ -206,7 +206,7 @@ bundled `gh-issue-pr-iteration` preset 用这个 hook 声明 `umbrella-finalizer
 
 ### `runtime.*` fact 与 business key
 
-Engine-owned fact 由 `src/loop.ts` 的 `ENGINE_RUNTIME_BINDING_KEYS` 定义。Engine runtime fact key count: 25.
+Engine-owned fact 由 `src/loop.ts` 的 `ENGINE_RUNTIME_BINDING_KEYS` 定义。Engine runtime fact key count: 22.
 
 <!-- engine-runtime-binding-keys:start -->
 ```
@@ -217,7 +217,6 @@ runtime.logDir               runtime.traceFile            runtime.loopFile
 runtime.presetDir            runtime.fragmentIndex        runtime.runtimeInputsDoc
 runtime.phaseExitsDoc        runtime.runIdGeneration      runtime.resumedFromPhase
 runtime.resumedStartedAt     runtime.resumedSessionId     runtime.chainName
-runtime.chainUmbrellaRepo    runtime.chainUmbrellaIssue   runtime.chainBaseBranch
 runtime.repoCwd
 ```
 <!-- engine-runtime-binding-keys:end -->
@@ -267,10 +266,9 @@ auditDemo = { literal = "business-key-e2e-ok" }
 | `resumedStartedAt` | 若 resume，原 run 起始时间戳；否则 `""` |
 | `resumedSessionId` | 若 resume，上一轮 runner session id；否则 `""`。 |
 | `chainName` | centralized chain 名称。 |
-| `chainUmbrellaRepo` | chain metadata 中登记的 umbrella repo，缺失则 `""`。 |
-| `chainUmbrellaIssue` | chain metadata 中登记的 umbrella issue number，缺失则 `""`。 |
-| `chainBaseBranch` | chain metadata 的 base branch。 |
 | `repoCwd` | 当前 item 所属 target repo cwd；跨 repo queue item 与 agent cwd 分离时用于提示。 |
+
+> #457：`chainUmbrellaRepo` / `chainUmbrellaIssue` / `chainBaseBranch` 引擎 fact 已退役。`baseBranch` 仍然是 chain 一等列（worktree 创建机制消费）；prompt 业务侧通过 `chain.baseBranch` 命名空间读取（`buildSchedulerChainBindings` 的常规展开）。umbrella 值降为 chain 声明字段（`chain.umbrellaRepo` / `chain.umbrellaIssue`），存在 `metadata.bindings` 里，bundled `gh-issue-pr-iteration` preset 通过 `chain.<field>` 读取并带 `default = ""` fallback。引擎不再注入这些 runtime fact。
 
 Bundled `gh-issue-pr-iteration` 当前不声明任何 business key（#450 / #420 / #401 链先后退役了引擎侧的 kind 分类机制 / 取值机制 / 词表与渲染面，preset 不再消费 kind 信号）。
 

@@ -2437,23 +2437,36 @@ describe("scheduler loaded preset prompt rendering", () => {
 describe("scheduler chain bindings (issue #288)", () => {
 	const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
 
-	test("preset.toml declares CHAIN_NAME / CHAIN_UMBRELLA_REPO / CHAIN_UMBRELLA_ISSUE / CHAIN_BASE_BRANCH / REPO_CWD in every actionable phase (AC4)", async () => {
+	// #457: CHAIN_UMBRELLA_REPO / CHAIN_UMBRELLA_ISSUE moved from `runtime.chainUmbrella*` (engine
+	// fact) to `chain.umbrella*` (declared chain binding via metadata.bindings). CHAIN_BASE_BRANCH
+	// retired entirely; BASE_BRANCH at chain.baseBranch covers the prompt-business need. The
+	// remaining engine-runtime chain facts (CHAIN_NAME, REPO_CWD) are unchanged.
+	test("preset.toml declares CHAIN_NAME / CHAIN_UMBRELLA_REPO / CHAIN_UMBRELLA_ISSUE / REPO_CWD in every actionable phase (AC4, post-#457)", async () => {
 		const preset = await loadPreset(PRESET_DIR)
-		const expected = new Set([
-			["CHAIN_NAME", "runtime", "chainName"],
-			["CHAIN_UMBRELLA_REPO", "runtime", "chainUmbrellaRepo"],
-			["CHAIN_UMBRELLA_ISSUE", "runtime", "chainUmbrellaIssue"],
-			["CHAIN_BASE_BRANCH", "runtime", "chainBaseBranch"],
-			["REPO_CWD", "runtime", "repoCwd"],
+		const expectedRuntime = new Set([
+			["CHAIN_NAME", "chainName"],
+			["REPO_CWD", "repoCwd"],
+		].map((entry) => entry.join(" ")))
+		const expectedChain = new Set([
+			["CHAIN_UMBRELLA_REPO", "umbrellaRepo"],
+			["CHAIN_UMBRELLA_ISSUE", "umbrellaIssue"],
 		].map((entry) => entry.join(" ")))
 		for (const phase of preset.phases) {
-			const bindings = new Set(
+			const runtimeBindings = new Set(
 				phase.variables
 					.filter((variable) => variable.source.kind === "runtime")
-					.map((variable) => [variable.key, variable.source.kind, variable.source.kind === "runtime" ? variable.source.key : ""].join(" ")),
+					.map((variable) => [variable.key, variable.source.kind === "runtime" ? variable.source.key : ""].join(" ")),
 			)
-			for (const entry of expected) {
-				expect(bindings.has(entry)).toBe(true)
+			const chainBindings = new Set(
+				phase.variables
+					.filter((variable) => variable.source.kind === "chain")
+					.map((variable) => [variable.key, variable.source.kind === "chain" ? variable.source.field : ""].join(" ")),
+			)
+			for (const entry of expectedRuntime) {
+				expect(runtimeBindings.has(entry)).toBe(true)
+			}
+			for (const entry of expectedChain) {
+				expect(chainBindings.has(entry)).toBe(true)
 			}
 		}
 	})
@@ -2478,7 +2491,12 @@ describe("scheduler chain bindings (issue #288)", () => {
 		expect(residual).toEqual([])
 	})
 
-	test("renderSchedulerSpawnPrompt with chain.name=my-chain umbrellaRepo=owner/repo umbrellaIssue=42 substitutes those literals (AC3)", async () => {
+	// #457: umbrella values now arrive via `chain.umbrellaRepo` / `chain.umbrellaIssue`. The
+	// `--config-json` / `--umbrella` CLI surface writes them to `metadata.bindings`, where
+	// `chainBindings()` exposes them through the declared chain-binding namespace. The bundled
+	// preset retired `CHAIN_BASE_BRANCH` since BASE_BRANCH (chain.baseBranch) already covers
+	// the same prompt-business need.
+	test("renderSchedulerSpawnPrompt with chain.name=my-chain umbrellaRepo=owner/repo umbrellaIssue=42 substitutes those literals (AC3, post-#457)", async () => {
 		const preset = await loadPreset(PRESET_DIR)
 		const chain = makeChainFixture({
 			name: "my-chain",
@@ -2493,7 +2511,7 @@ describe("scheduler chain bindings (issue #288)", () => {
 				"chain.name={{CHAIN_NAME}}",
 				"umbrella.repo={{CHAIN_UMBRELLA_REPO}}",
 				"umbrella.issue={{CHAIN_UMBRELLA_ISSUE}}",
-				"chain.baseBranch={{CHAIN_BASE_BRANCH}}",
+				"chain.baseBranch={{BASE_BRANCH}}",
 				"item.repoCwd={{REPO_CWD}}",
 			].join("\n"),
 			preset,
@@ -2510,12 +2528,14 @@ describe("scheduler chain bindings (issue #288)", () => {
 		expect(rendered).toContain("item.repoCwd=/tmp/chain-binding-repo")
 	})
 
-	test("renderSchedulerSpawnPrompt leaves chain.umbrellaRepo and chain.umbrellaIssue empty when chain has null umbrella (no crash, empty literals)", async () => {
+	// #457: when metadata.bindings has no umbrella entries, the declared `chain.umbrellaRepo` /
+	// `chain.umbrellaIssue` bindings fall back to `default = ""` (per the bundled preset's
+	// variable spec) so the render emits empty literals instead of crashing.
+	test("renderSchedulerSpawnPrompt leaves chain.umbrellaRepo and chain.umbrellaIssue empty when metadata.bindings has no umbrella entries", async () => {
 		const preset = await loadPreset(PRESET_DIR)
 		const chain = makeChainFixture({
 			name: "no-umbrella-chain",
-			umbrellaRepo: null,
-			umbrellaIssue: null,
+			metadata: storedChainMetadata({}),
 		})
 		const item = makeItemFixture(chain, { issueNumber: 999_003, repoCwd: "/tmp/no-umbrella-repo" })
 		const rendered = await renderSchedulerSpawnPrompt({
@@ -2546,12 +2566,14 @@ describe("scheduler chain bindings (issue #288)", () => {
 			})
 			const item = createItem(fixture.store, chain, { issueNumber: 288_001, repoCwd: "/tmp/chain-int-repo" })
 
+			// #457: chain.baseBranch is read via the BASE_BRANCH binding (preset declares it as
+			// `chain.baseBranch`); the engine-fact `CHAIN_BASE_BRANCH` runtime key is retired.
 			const customPrompt = [
 				"=== chain bindings probe ===",
 				"chain.name={{CHAIN_NAME}}",
 				"chain.umbrellaRepo={{CHAIN_UMBRELLA_REPO}}",
 				"chain.umbrellaIssue={{CHAIN_UMBRELLA_ISSUE}}",
-				"chain.baseBranch={{CHAIN_BASE_BRANCH}}",
+				"chain.baseBranch={{BASE_BRANCH}}",
 				"item.repoCwd={{REPO_CWD}}",
 			].join("\n")
 			const tick = await schedulerTick(fixture.options({ prompt: () => customPrompt }))
@@ -3469,20 +3491,37 @@ exit 0
 	await chmod(path, 0o755)
 }
 
-function makeChainFixture(overrides: Partial<ChainRecord> = {}): ChainRecord {
+// #457: chain umbrella values now live inside `metadata.bindings`. `makeChainFixture` accepts
+// `umbrellaIssue` / `umbrellaRepo` as shorthand overrides and folds them into the metadata so the
+// large number of existing call sites do not have to be touched. The shorthand is fixture-only;
+// engine code never sees it as a ChainRecord first-class field.
+type ChainFixtureOverrides = Partial<ChainRecord> & {
+	umbrellaIssue?: number | null
+	umbrellaRepo?: string | null
+}
+
+function makeChainFixture(overrides: ChainFixtureOverrides = {}): ChainRecord {
+	const { umbrellaIssue, umbrellaRepo, metadata, ...rest } = overrides
+	const explicitMetadata = metadata !== undefined
+	const bindingsOverride: JsonObject = {}
+	if (umbrellaIssue !== undefined && umbrellaIssue !== null) bindingsOverride.umbrellaIssue = umbrellaIssue
+	if (umbrellaRepo !== undefined && umbrellaRepo !== null) bindingsOverride.umbrellaRepo = umbrellaRepo
+	const resolvedMetadata = explicitMetadata
+		? metadata
+		: storedChainMetadata(Object.keys(bindingsOverride).length > 0
+			? { bindings: { umbrellaIssue: 282, umbrellaRepo: "mouriya-s-lab/coder-loop", ...bindingsOverride } }
+			: { bindings: { umbrellaIssue: 282, umbrellaRepo: "mouriya-s-lab/coder-loop" } })
 	return {
 		id: 1,
 		name: "phase-runner-fixture",
 		preset: "gh-issue-pr-iteration",
 		repository: "mouriya-s-lab/coder-loop",
 		baseBranch: "main",
-		umbrellaIssue: 282,
-		umbrellaRepo: "mouriya-s-lab/coder-loop",
 		status: "active",
-		metadata: storedChainMetadata({}),
+		metadata: resolvedMetadata,
 		createdAt: 1_800_000_000,
 		updatedAt: 1_800_000_000,
-		...overrides,
+		...rest,
 	}
 }
 
@@ -3674,21 +3713,35 @@ async function loadedPresetFromDir(presetDir: string): Promise<SchedulerLoadedPr
 	return { presetDir, preset: await loadPreset(presetDir) }
 }
 
+// #457: chain umbrella values now flow through `metadata.bindings.umbrellaIssue / umbrellaRepo`.
+// Fixture helper accepts `umbrellaIssue` / `umbrellaRepo` as shorthand overrides and folds them into
+// metadata so call sites do not have to change shape. Engine code never sees the shorthand.
+type CreateChainShorthandOverrides = Omit<Partial<Parameters<ReturnType<typeof openSqliteStateStore>["createChain"]>[0]>, "metadata"> & {
+	metadata?: JsonObject
+	umbrellaIssue?: number | null
+	umbrellaRepo?: string | null
+}
+
 function createChain(
 	store: ReturnType<typeof openSqliteStateStore>,
 	name: string,
-	overrides: Omit<Partial<Parameters<typeof store.createChain>[0]>, "metadata"> & { metadata?: JsonObject } = {},
+	overrides: CreateChainShorthandOverrides = {},
 ): ChainRecord {
-	const { metadata, ...rest } = overrides
+	const { metadata, umbrellaIssue, umbrellaRepo, ...rest } = overrides
+	const baseBindings: JsonObject = {
+		umbrellaIssue: umbrellaIssue ?? 176,
+		umbrellaRepo: umbrellaRepo ?? "mouriya-s-lab/coder-loop",
+	}
+	const baseMetadata: JsonObject = metadata !== undefined && Object.hasOwn(metadata, "bindings")
+		? { ...metadata }
+		: { ...(metadata ?? {}), bindings: baseBindings }
 	return store.createChain({
 		name,
 		preset: "gh-issue-pr-iteration",
 		repository: "mouriya-s-lab/coder-loop",
 		baseBranch: "main",
-		umbrellaIssue: 176,
-		umbrellaRepo: "mouriya-s-lab/coder-loop",
 		status: "active",
-		metadata: storedChainMetadata(metadata ?? {}),
+		metadata: storedChainMetadata(baseMetadata),
 		createdAt: 1_800_000_000,
 		updatedAt: 1_800_000_000,
 		...rest,
@@ -4095,8 +4148,6 @@ describe("per-run summary tag", () => {
 			preset: null,
 			repository: "owner/repo",
 			baseBranch: "main",
-			umbrellaIssue: null,
-			umbrellaRepo: null,
 			status: "active",
 			metadata: storedChainMetadata({}),
 			createdAt: 0,

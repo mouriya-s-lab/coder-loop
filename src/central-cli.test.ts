@@ -103,9 +103,11 @@ describe("central chain/item CLI", () => {
 				fixture.loopDataRoot,
 				"--json",
 			]))
+			// #457: umbrella values flow through metadata.bindings rather than first-class
+			// chain columns. `chain.create` shorthand (`--umbrella owner/repo#176`) still
+			// works but writes to `metadata.bindings.umbrellaRepo / umbrellaIssue`.
 			expect(created.chain).toMatchObject({
-				umbrellaRepo: "mouriya-s-lab/coder-loop",
-				umbrellaIssue: 176,
+				metadata: { bindings: { umbrellaRepo: "mouriya-s-lab/coder-loop", umbrellaIssue: 176 } },
 			})
 		} finally {
 			await fixture.daemon.stop()
@@ -718,14 +720,15 @@ attemptTimeoutSeconds = 3600
 			const status = expectJsonOk(await runCli(["chain", "status", "schema-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 
 			expect(Object.keys(status).sort()).toEqual(["activeRuns", "chain", "items", "summary"])
-			expect(Object.keys(status.summary).sort()).toEqual(["activeSlots", "completion", "items", "recovery", "umbrella", "waiting"])
+			// #457: `summary.umbrella` retired — supervisors should read umbrella values from
+			// `chain.metadata.bindings.umbrellaRepo / umbrellaIssue` directly.
+			expect(Object.keys(status.summary).sort()).toEqual(["activeSlots", "completion", "items", "recovery", "waiting"])
 			expect(status.summary.recovery).toEqual({ needed: false, staleInProgressItems: [] })
 			expect(status.chain).toMatchObject({
 				name: "schema-chain",
 				preset: "gh-issue-pr-iteration",
 				repository: "mouriya-s-lab/coder-loop",
-				umbrellaRepo: "mouriya-s-lab/coder-loop",
-				umbrellaIssue: 176,
+				metadata: { bindings: { umbrellaRepo: "mouriya-s-lab/coder-loop", umbrellaIssue: 176 } },
 			})
 			expect(status.items[0]).toMatchObject({ issueNumber: 181, status: "queued", repoCwd: REPO_ROOT })
 		} finally {

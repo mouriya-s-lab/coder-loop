@@ -81,9 +81,8 @@ roles  = ["common", "quality", "iter"]
   RESUMED_STARTED_AT       = { source = "runtime.resumedStartedAt", label = "Resumed run started at" }
   RESUMED_SESSION_ID       = "runtime.resumedSessionId"
   CHAIN_NAME               = "runtime.chainName"
-  CHAIN_UMBRELLA_REPO      = "runtime.chainUmbrellaRepo"
-  CHAIN_UMBRELLA_ISSUE     = "runtime.chainUmbrellaIssue"
-  CHAIN_BASE_BRANCH        = "runtime.chainBaseBranch"
+  CHAIN_UMBRELLA_REPO      = { source = "chain.umbrellaRepo", default = "" }
+  CHAIN_UMBRELLA_ISSUE     = { source = "chain.umbrellaIssue", default = "" }
   REPO_CWD                 = "runtime.repoCwd"
 
 [[phases]]
@@ -143,9 +142,8 @@ roles  = ["common", "quality", "review"]
   RESUMED_STARTED_AT       = { source = "runtime.resumedStartedAt", label = "Resumed run started at" }
   RESUMED_SESSION_ID       = "runtime.resumedSessionId"
   CHAIN_NAME               = "runtime.chainName"
-  CHAIN_UMBRELLA_REPO      = "runtime.chainUmbrellaRepo"
-  CHAIN_UMBRELLA_ISSUE     = "runtime.chainUmbrellaIssue"
-  CHAIN_BASE_BRANCH        = "runtime.chainBaseBranch"
+  CHAIN_UMBRELLA_REPO      = { source = "chain.umbrellaRepo", default = "" }
+  CHAIN_UMBRELLA_ISSUE     = { source = "chain.umbrellaIssue", default = "" }
   REPO_CWD                 = "runtime.repoCwd"
 
 [[phases]]
@@ -185,9 +183,8 @@ roles   = ["common"]
   RESUMED_STARTED_AT       = "runtime.resumedStartedAt"
   RESUMED_SESSION_ID       = "runtime.resumedSessionId"
   CHAIN_NAME               = "runtime.chainName"
-  CHAIN_UMBRELLA_REPO      = "runtime.chainUmbrellaRepo"
-  CHAIN_UMBRELLA_ISSUE     = "runtime.chainUmbrellaIssue"
-  CHAIN_BASE_BRANCH        = "runtime.chainBaseBranch"
+  CHAIN_UMBRELLA_REPO      = { source = "chain.umbrellaRepo", default = "" }
+  CHAIN_UMBRELLA_ISSUE     = { source = "chain.umbrellaIssue", default = "" }
   REPO_CWD                 = "runtime.repoCwd"
 
 [[phases]]
@@ -227,9 +224,8 @@ roles   = ["common"]
   RESUMED_STARTED_AT       = "runtime.resumedStartedAt"
   RESUMED_SESSION_ID       = "runtime.resumedSessionId"
   CHAIN_NAME               = "runtime.chainName"
-  CHAIN_UMBRELLA_REPO      = "runtime.chainUmbrellaRepo"
-  CHAIN_UMBRELLA_ISSUE     = "runtime.chainUmbrellaIssue"
-  CHAIN_BASE_BRANCH        = "runtime.chainBaseBranch"
+  CHAIN_UMBRELLA_REPO      = { source = "chain.umbrellaRepo", default = "" }
+  CHAIN_UMBRELLA_ISSUE     = { source = "chain.umbrellaIssue", default = "" }
   REPO_CWD                 = "runtime.repoCwd"
 
 [[fragments]]

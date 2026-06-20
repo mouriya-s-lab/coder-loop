@@ -134,9 +134,6 @@ function makeRuntime(overrides: Partial<RuntimeBindings> = {}): RuntimeBindings 
 		resumedStartedAt: "",
 		resumedSessionId: "",
 		chainName: "fixture",
-		chainUmbrellaRepo: "",
-		chainUmbrellaIssue: "",
-		chainBaseBranch: "main",
 		repoCwd: REPO_ROOT,
 		...overrides,
 	}
