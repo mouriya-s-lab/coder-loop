@@ -387,15 +387,17 @@ function createChain(
 	overrides: Omit<Partial<Parameters<typeof store.createChain>[0]>, "metadata"> & { metadata?: JsonObject } = {},
 ): ChainRecord {
 	const { metadata, ...rest } = overrides
+	// #457: umbrella values now flow through metadata.bindings rather than first-class chain columns.
+	const resolvedMetadata = metadata !== undefined && Object.hasOwn(metadata, "bindings")
+		? metadata
+		: { ...(metadata ?? {}), bindings: { umbrellaIssue: 309, umbrellaRepo: "mouriya-s-lab/coder-loop" } }
 	return store.createChain({
 		name,
 		preset: "gh-issue-pr-iteration",
 		repository: "mouriya-s-lab/coder-loop",
 		baseBranch: "main",
-		umbrellaIssue: 309,
-		umbrellaRepo: "mouriya-s-lab/coder-loop",
 		status: "active",
-		metadata: storedChainMetadata(metadata ?? {}),
+		metadata: storedChainMetadata(resolvedMetadata),
 		createdAt: 1_800_316_000,
 		updatedAt: 1_800_316_000,
 		...rest,

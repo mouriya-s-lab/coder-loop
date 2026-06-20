@@ -5,19 +5,24 @@ import { tmpdir } from "node:os"
 
 import {
 	DEFAULT_ATTEMPT_TIMEOUT_SECONDS,
+	ENGINE_RUNTIME_BINDING_KEYS,
 	chainCompleteTriggerPhases,
 	lastNonTriggerPhaseForPreset,
 	loadPreset,
 	parsePreset,
 	renderFragmentIndex,
+	resolveBinding,
 	sliceFragmentsForPhase,
 	triggeredPhasesAfter,
 	type Preset,
 	type PresetPhase,
 	type PresetPlaceholderFinding,
 	type PresetVariableSource,
+	type ResolveContext,
+	type RuntimeBindings,
 } from "./loop"
 import { parseInternalStatus } from "./runtime-data"
+import type { ItemRecord } from "./sqlite-state"
 import type { BoundaryRecord } from "./boundary-types"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -25,6 +30,16 @@ const BUNDLED_PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
 
 function status(value: string) {
 	return parseInternalStatus(value, "test.status")
+}
+
+// Minimum-shape `RuntimeBindings` for the #457 declared-binding driver test (acceptance row 2):
+// the runtime channel must satisfy the `Record<EngineRuntimeBindingKey, string>` requirement, but
+// the umbrella resolution path under test exercises only the `chain.<field>` channel, so every
+// engine fact is filled with a placeholder. ENGINE_RUNTIME_BINDING_KEYS is the source of truth for
+// the key set — using it keeps this helper aligned with the post-#457 count automatically.
+function makeMinimalRuntimeBindings(): RuntimeBindings {
+	const placeholder = Object.fromEntries(ENGINE_RUNTIME_BINDING_KEYS.map((key) => [key, ""])) as Record<string, string>
+	return placeholder as RuntimeBindings
 }
 
 const EXPECTED_FRAGMENTS = [
@@ -133,7 +148,6 @@ const EXPECTED_VARIABLE_KEYS = [
 	"CHAIN_NAME",
 	"CHAIN_UMBRELLA_REPO",
 	"CHAIN_UMBRELLA_ISSUE",
-	"CHAIN_BASE_BRANCH",
 	"REPO_CWD",
 ] as const
 
@@ -224,9 +238,50 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(iterVars.get("AGENT_CWD")).toEqual(expectedRuntime("agentCwd"))
 		expect(iterVars.get("PROMPT_ROOT")).toEqual(expectedRuntime("presetDir"))
 		expect(iterVars.get("PROMPT_FRAGMENT_INDEX")).toEqual(expectedRuntime("fragmentIndex"))
+		// #457: CHAIN_UMBRELLA_REPO / CHAIN_UMBRELLA_ISSUE now resolve via the declared chain-binding
+		// namespace (metadata.bindings.*) instead of the retired engine-runtime facts. Empty-string
+		// default keeps the prompt safe when metadata.bindings carries no umbrella entry.
+		expect(iterVars.get("CHAIN_UMBRELLA_REPO")).toEqual({ kind: "chain", field: "umbrellaRepo", fallback: { kind: "value", value: "" } })
+		expect(iterVars.get("CHAIN_UMBRELLA_ISSUE")).toEqual({ kind: "chain", field: "umbrellaIssue", fallback: { kind: "value", value: "" } })
 		// #450 retired the kind taxonomy and #401 finished retiring the engine
 		// vocabulary — the keys === EXPECTED_VARIABLE_KEYS assertion above already
 		// covers the absence of the retired bindings positively.
+	})
+
+	// #457 acceptance row 2: bundled preset's umbrella binding resolves through the declared
+	// chain-binding mechanism (metadata.bindings.umbrellaRepo / umbrellaIssue) rather than the
+	// retired engine-runtime facts (runtime.chainUmbrellaRepo / chainUmbrellaIssue). Rendering
+	// produces identical literals to the pre-#457 path; an empty metadata.bindings yields empty
+	// strings via the declared `default = ""` fallback (no crash).
+	test("bundled umbrella binding flows through declared chain-binding mechanism (acceptance row 2)", async () => {
+		const preset = await loadPreset(BUNDLED_PRESET_DIR)
+		const iterPhase = preset.phases.find((entry) => entry.name === "iteration")
+		expect(iterPhase).toBeDefined()
+		const variableByKey = new Map(iterPhase!.variables.map((variable) => [variable.key, variable] as const))
+		const umbrellaRepoVar = variableByKey.get("CHAIN_UMBRELLA_REPO")
+		const umbrellaIssueVar = variableByKey.get("CHAIN_UMBRELLA_ISSUE")
+		expect(umbrellaRepoVar).toBeDefined()
+		expect(umbrellaIssueVar).toBeDefined()
+		// The retired runtime fact is gone: no variable should still source umbrella from runtime.
+		for (const variable of iterPhase!.variables) {
+			expect(variable.source.kind === "runtime" && (variable.source.key === "chainUmbrellaRepo" || variable.source.key === "chainUmbrellaIssue")).toBe(false)
+		}
+		// Populated metadata.bindings produces the literal value.
+		const populated: ResolveContext = {
+			item: { issue: 457 } as unknown as ItemRecord,
+			chain: { umbrellaRepo: "mouriya-s-lab/coder-loop", umbrellaIssue: 457, repository: "x", baseBranch: "main" },
+			runtime: makeMinimalRuntimeBindings(),
+		}
+		expect(resolveBinding(umbrellaRepoVar!.source, populated)).toBe("mouriya-s-lab/coder-loop")
+		expect(resolveBinding(umbrellaIssueVar!.source, populated)).toBe("457")
+		// Empty metadata.bindings: declared fallback emits "" rather than crashing.
+		const empty: ResolveContext = {
+			item: { issue: 457 } as unknown as ItemRecord,
+			chain: { repository: "x", baseBranch: "main" },
+			runtime: makeMinimalRuntimeBindings(),
+		}
+		expect(resolveBinding(umbrellaRepoVar!.source, empty)).toBe("")
+		expect(resolveBinding(umbrellaIssueVar!.source, empty)).toBe("")
 	})
 
 	test("fragments match PROMPT_FRAGMENTS 1:1 by id+role+path and files exist", async () => {

@@ -3,7 +3,7 @@ import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
 import { openSqliteStateStore } from "./sqlite-state"
-import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
+import { engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
@@ -46,7 +46,10 @@ describe("db-backed v2 loop hard cut", () => {
 		const result = runCli(["queue", "unblock", fixture.target, "--issue", "1", "--loop-data-root", fixture.loopDataRoot, "--chain", CHAIN_NAME])
 		expect(result.exitCode).toBe(0)
 		expect(readItem(fixture.loopDataRoot).status).toBe("queued")
-		expect(readItem(fixture.loopDataRoot).extra.blockerRepo).toBeUndefined()
+		// #457: queue unblock no longer clears preset-owned blocker keys — the engine has no
+		// concept of "blocker" any more, so any keys the preset wrote into extra remain in place.
+		// The keys live in `runtimeRemainder` because they are no longer engine-typed ItemExtra fields.
+		expect(itemExtraToJsonObject(readItem(fixture.loopDataRoot).extra).blockerRepo).toBe("owner/dependency")
 		expect(await readFile(fixture.statePath, "utf-8")).toBe(beforeText)
 	})
 
@@ -67,7 +70,8 @@ describe("db-backed v2 loop hard cut", () => {
 		expect(output.mutation).toMatchObject({ changed: true, beforeStatus: "parked", afterStatus: "ready" })
 		expect(output.verification.itemStatus).toBe("ready")
 		expect(readItem(fixture.loopDataRoot).status).toBe("ready")
-		expect(readItem(fixture.loopDataRoot).extra.blockerRepo).toBeUndefined()
+		// #457: preset-owned blocker keys survive queue unblock (see test above).
+		expect(itemExtraToJsonObject(readItem(fixture.loopDataRoot).extra).blockerRepo).toBe("owner/dependency")
 	})
 
 	test("daemon start dry-run resolves the chain without per-target state writes", async () => {
