@@ -20,6 +20,8 @@ terminal    = ["blocked", "moot", "done", "exhausted"]
 success     = ["done"]
 entry       = "queued"
 unblockable = ["blocked"]
+# exhausted (#402): required preset declaration for the attempts-exhausted落点.
+exhausted   = "exhausted"
 
 [[phases]]
 name   = "iteration"

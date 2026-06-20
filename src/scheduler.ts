@@ -288,10 +288,14 @@ export type SchedulerChainStatuses = {
 	success: readonly InternalStatus[]
 	// entry: the actionable status a dependency-unblocked item is restored to.
 	entry: InternalStatus
+	// exhausted: the status the scheduler writes when the per-item attempts budget is spent
+	// without a terminal verdict. #402 moved this from an engine literal to a required preset
+	// declaration; load-time validation guarantees membership in `terminal`, so the scheduler
+	// writes it without re-checking the vocabulary on each transition.
+	exhausted: InternalStatus
 }
 
 export const DEFAULT_MAX_ITEM_ATTEMPTS = 20
-export const SCHEDULER_EXHAUSTED_STATUS = parseInternalStatus("exhausted", "scheduler.exhaustedStatus")
 const RUNNING_RUN_STATUS = parseInternalStatus("running", "scheduler.runningRunStatus")
 const REVIEW_ON_EMPTY_STATUS = parseInternalStatus("review-on-empty", "scheduler.reviewOnEmptyStatus")
 
@@ -608,7 +612,10 @@ async function exhaustItemsOverAttemptLimitForRepo(
 	const maxItemAttempts = maxItemAttemptsForChain(options, chain)
 	const terminalStatuses = new Set(chainStatuses.terminal)
 	const pendingStatuses = new Set(chainStatuses.pending)
-	if (!terminalStatuses.has(SCHEDULER_EXHAUSTED_STATUS)) return [...items]
+	// #402: exhausted落点 status now comes from the preset; loadPreset has already validated it
+	// is a member of `statuses.terminal`, so the engine no longer guards against the preset
+	// vocabulary missing it. No more engine-side terminal-set injection.
+	const exhaustedStatus = chainStatuses.exhausted
 	let changed = false
 	for (const item of items) {
 		if (item.repoCwd !== repoCwd) continue
@@ -619,18 +626,22 @@ async function exhaustItemsOverAttemptLimitForRepo(
 		const exhaustedAt = nowSeconds(options)
 			const extra = clearItemSchedulerBackoff(item.extra)
 		options.store.updateItem(item.id, {
-			status: SCHEDULER_EXHAUSTED_STATUS,
+			status: exhaustedStatus,
 			extra,
 			updatedAt: exhaustedAt,
 		})
 		changed = true
+		// #402 / #411: engine-driven transitions emit an audit-classified event under the unified
+		// observability stream (daemon mapping in schedulerEventToObservabilityEvent: queue.terminal
+		// → kind=audit, subject={kind:"engine"}). The transition source is implied by the run-id
+		// shape returned by makeAttemptLimitRunId when no prior run was recorded.
 		await emit(options, {
 			type: "queue.terminal",
 			ts: nowIso(options),
 			runId: item.lastRunId ?? makeAttemptLimitRunId(chain, item, exhaustedAt),
 			chainId: chain.id,
 			itemId: item.id,
-			terminalStatus: SCHEDULER_EXHAUSTED_STATUS,
+			terminalStatus: exhaustedStatus,
 		})
 	}
 	return changed ? options.store.listItems(chain.id) : [...items]
@@ -1667,6 +1678,9 @@ function statusesFromPreset(preset: SchedulerLoadedPreset["preset"]): SchedulerC
 		terminal: preset.statuses.terminal,
 		success: preset.statuses.success,
 		entry: preset.statuses.entry,
+		// #402: exhausted落点 flows from the preset declaration. Membership in `terminal` is
+		// load-time-checked, so consumers can use this value directly as a write target.
+		exhausted: preset.statuses.exhausted,
 	}
 }
 
