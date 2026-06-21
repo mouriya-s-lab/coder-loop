@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test"
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
+import { startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
 import { openSqliteStateStore } from "./sqlite-state"
 import { parseObservabilityEvent, type ObservabilityEvent } from "./observability"
 import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
@@ -43,33 +44,38 @@ describe("smoke: v2 central chain CLI", () => {
 		const beforeState = await readFile(fixture.legacyStatePath, "utf-8")
 		const beforeMtime = (await stat(fixture.legacyStatePath)).mtimeMs
 
-		const unblocked = expectJsonOk(runCli(["queue", "unblock", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--issue", "333", "--chain", fixture.chainName]))
-		expect(unblocked.mutation.changed).toBe(true)
-		expect(unblocked.verification.itemStatus).toBe("queued")
+		// #409: queue unblock now daemonizes (the mutation goes through the daemon's hard-deny
+		// gate so an agent process can't write blocker state). Run an in-process daemon for the
+		// CLI subprocess to talk to; the test uses `runCliAsync` (not spawnSync) so the daemon
+		// can process the request while the subprocess is alive. Operator path = no credential
+		// → daemon caller-resolution treats it as `kind: "operator"`.
+		const daemon = await startCoderLoopDaemon({ loopDataRoot: fixture.loopDataRoot, shutdownGraceMs: 100, scheduler: { enabled: false } })
+		try {
+			const unblocked = expectJsonOk(await runCliAsync(["queue", "unblock", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--issue", "333", "--chain", fixture.chainName]))
+			expect(unblocked.mutation.changed).toBe(true)
+			expect(unblocked.verification.itemStatus).toBe("queued")
 
-		const snapshot = expectJsonOk(runCli(["status", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--chain", fixture.chainName, "--json"]))
-		expect(snapshot.state.kind).toBe("ok")
-		expect(snapshot.queue.total).toBe(1)
-		expect(snapshot.queue.selected.id).toBe("333")
-		expect(await readFile(fixture.legacyStatePath, "utf-8")).toBe(beforeState)
-		expect((await stat(fixture.legacyStatePath)).mtimeMs).toBe(beforeMtime)
-	})
+			const snapshot = expectJsonOk(await runCliAsync(["status", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--chain", fixture.chainName, "--json"]))
+			expect(snapshot.state.kind).toBe("ok")
+			expect(snapshot.queue.total).toBe(1)
+			expect(snapshot.queue.selected.id).toBe("333")
+			expect(await readFile(fixture.legacyStatePath, "utf-8")).toBe(beforeState)
+			expect((await stat(fixture.legacyStatePath)).mtimeMs).toBe(beforeMtime)
+		} finally {
+			await daemon.stop()
+		}
+	}, 30_000)
 
-	// #406 row 4 — operator vs agent+run distinguishability for `queue unblock`. The CLI's
-	// `queue unblock` writes SQLite directly (no daemon socket round-trip — the daemon may even
-	// be down), so the daemon's caller-admission gate cannot speak for this path. To keep the
-	// audit stream uniform with the daemon-mediated operator `item update` path, the CLI itself
-	// emits an `item.mutation.caller_admission` audit event tagged `subject: {kind: "operator"}`.
+	// #406 row 4 / #409 — operator vs agent+run distinguishability for `queue unblock`. The
+	// CLI's `queue unblock` now daemonizes (the mutation goes through the daemon's hard-deny
+	// gate so an agent process can't write blocker state). The daemon emits the
+	// `item.mutation.caller_admission` audit event tagged `subject: {kind: "operator"}` so the
+	// audit stream stays uniform with the daemon-mediated operator `item update` path.
 	// The test:
-	//   1. seeds a blocked item and unblocks it.
+	//   1. seeds a blocked item and unblocks it through the daemon.
 	//   2. queries `coder-loop logs --kind audit --type item.mutation.caller_admission --json`.
 	//   3. asserts exactly one event with operator subject + reason=operator + outcome=allow.
 	//   4. asserts no agent-subject event for this fixture (no agent ever spawned).
-	// Together with the daemon-side fixture in daemon.test.ts (`socket item.update operator path
-	// emits operator-attributed caller-admission audit`) and the existing daemon test exercising
-	// the agent-credential admit/deny matrix, `coder-loop logs --kind audit --json` is the single
-	// stream where an auditor reads off "who wrote": operator subject for operator-direct paths;
-	// agent subject + runId/phase for credential-admitted agent paths.
 	test("queue unblock emits operator-subject caller-admission audit (#406 row 4)", async () => {
 		const fixture = await createTarget("queue-unblock-audit")
 		seedChain(fixture, {
@@ -77,64 +83,66 @@ describe("smoke: v2 central chain CLI", () => {
 			status: "blocked",
 			extra: { blockerRepo: "owner/dependency", blockerRef: "#406" },
 		})
-		const unblocked = expectJsonOk(runCli(["queue", "unblock", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--issue", "406400", "--chain", fixture.chainName]))
-		expect(unblocked.mutation.changed).toBe(true)
-		expect(unblocked.verification.itemStatus).toBe("queued")
+		const daemon = await startCoderLoopDaemon({ loopDataRoot: fixture.loopDataRoot, shutdownGraceMs: 100, scheduler: { enabled: false } })
+		try {
+			const unblocked = expectJsonOk(await runCliAsync(["queue", "unblock", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--issue", "406400", "--chain", fixture.chainName]))
+			expect(unblocked.mutation.changed).toBe(true)
+			expect(unblocked.verification.itemStatus).toBe("queued")
 
-		const auditLogs = expectJsonOk(runCli([
-			"logs",
-			fixture.target,
-			"--loop-data-root",
-			fixture.loopDataRoot,
-			"--chain",
-			fixture.chainName,
-			"--kind",
-			"audit",
-			"--type",
-			"item.mutation.caller_admission",
-			"--json",
-		]))
-		expect(Array.isArray(auditLogs.events)).toBe(true)
-		expect(auditLogs.events).toHaveLength(1)
-		expect(auditLogs.events[0]).toMatchObject({
-			kind: "audit",
-			type: "item.mutation.caller_admission",
-			subject: { kind: "operator" },
-			payload: {
-				issueNumber: 406_400,
-				claimedRunId: null,
-				claimedPhase: null,
-				outcome: "allow",
-				reason: "operator",
-			},
-		})
-		// No agent-subject event exists in this fixture: no scheduler run, no minted credential.
-		// `subject.kind === "agent"` would imply a credential-admitted path, which never happened.
-		const allAudit = expectJsonOk(runCli([
-			"logs",
-			fixture.target,
-			"--loop-data-root",
-			fixture.loopDataRoot,
-			"--chain",
-			fixture.chainName,
-			"--kind",
-			"audit",
-			"--json",
-		]))
-		// Re-parse each wire-shaped event through the arktype boundary so the filter operates on the
-		// precise `ObservabilityEvent` tagged union, not an `any`/anonymous cast (#406 red-line).
-		// `subject.kind === "agent"` is only meaningful on the caller-admission audit branch, so we
-		// narrow on `event.kind === "audit" && event.type === "item.mutation.caller_admission"` first
-		// and then read the typed `subject` off that branch.
-		const allAuditEvents = parseObservabilityEventArray(allAudit.events)
-		const agentSubjectAdmissionEvents = allAuditEvents.filter(
-			(event) =>
-				event.kind === "audit" &&
-				event.type === "item.mutation.caller_admission" &&
-				event.subject?.kind === "agent",
-		)
-		expect(agentSubjectAdmissionEvents).toHaveLength(0)
-	})
+			const auditLogs = expectJsonOk(await runCliAsync([
+				"logs",
+				fixture.target,
+				"--loop-data-root",
+				fixture.loopDataRoot,
+				"--chain",
+				fixture.chainName,
+				"--kind",
+				"audit",
+				"--type",
+				"item.mutation.caller_admission",
+				"--json",
+			]))
+			expect(Array.isArray(auditLogs.events)).toBe(true)
+			expect(auditLogs.events).toHaveLength(1)
+			expect(auditLogs.events[0]).toMatchObject({
+				kind: "audit",
+				type: "item.mutation.caller_admission",
+				subject: { kind: "operator" },
+				payload: {
+					issueNumber: 406_400,
+					claimedRunId: null,
+					claimedPhase: null,
+					outcome: "allow",
+					reason: "operator",
+				},
+			})
+			// No agent-subject event exists in this fixture: no scheduler run, no minted credential.
+			// `subject.kind === "agent"` would imply a credential-admitted path, which never happened.
+			const allAudit = expectJsonOk(await runCliAsync([
+				"logs",
+				fixture.target,
+				"--loop-data-root",
+				fixture.loopDataRoot,
+				"--chain",
+				fixture.chainName,
+				"--kind",
+				"audit",
+				"--json",
+			]))
+			// Re-parse each wire-shaped event through the arktype boundary so the filter operates on
+			// the precise `ObservabilityEvent` tagged union, not an `any`/anonymous cast (red-line).
+			const allAuditEvents = parseObservabilityEventArray(allAudit.events)
+			const agentSubjectAdmissionEvents = allAuditEvents.filter(
+				(event) =>
+					event.kind === "audit" &&
+					event.type === "item.mutation.caller_admission" &&
+					event.subject?.kind === "agent",
+			)
+			expect(agentSubjectAdmissionEvents).toHaveLength(0)
+		} finally {
+			await daemon.stop()
+		}
+	}, 30_000)
 
 	// #433: status output is flag-insensitive to the retired target config file. Whether or not
 	// any legacy `.coder-loop/runtime/config.{json,toml}` exists on disk, the engine reads the
@@ -252,6 +260,24 @@ function runCli(args: string[]): { exitCode: number | null; stdout: string; stde
 		stdout: new TextDecoder().decode(proc.stdout),
 		stderr: new TextDecoder().decode(proc.stderr),
 	}
+}
+
+// #409: async variant required when the CLI talks to an in-process daemon in the same Bun
+// runtime. `Bun.spawnSync` blocks the event loop, which deadlocks the daemon (it can't accept
+// connections while spawnSync is waiting on the subprocess that's trying to connect).
+async function runCliAsync(args: string[]): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
+	const proc = Bun.spawn({
+		cmd: ["bun", LOOP_ENTRY, ...args],
+		cwd: REPO_ROOT,
+		stdout: "pipe",
+		stderr: "pipe",
+	})
+	const [stdout, stderr, exitCode] = await Promise.all([
+		new Response(proc.stdout).text(),
+		new Response(proc.stderr).text(),
+		proc.exited,
+	])
+	return { exitCode, stdout, stderr }
 }
 
 function expectJsonOk(result: { exitCode: number | null; stdout: string; stderr: string }): any {

@@ -114,13 +114,16 @@ runner = "codex"
 model  = "gpt-5.5"
 roles  = ["common", "quality", "review"]
 
-  # #407 per-phase rights segment. Review is the only phase that legitimately creates queue items
-  # — the expanded-incomplete-parent flow inserts child items before flipping the parent back to
-  # changes_requested (see review/actions/state-write.md). Iteration / blocked-responder /
-  # umbrella-finalizer omit the segment intentionally so they inherit the default-deny (#407
-  # acceptance row #1: no-create-grant phase via agent credential is rejected).
+  # #407 / #409 per-phase rights segment. Review is the only phase that legitimately creates queue
+  # items (the expanded-incomplete-parent flow inserts child items before flipping the parent back
+  # to changes_requested — see review/actions/state-write.md) AND the only phase with a real
+  # privileged-op need: after inserting expanded children, review reorders them to the front of
+  # the queue via `coder-loop item reorder` (see review/update-state.md). Iteration /
+  # blocked-responder / umbrella-finalizer omit the segment intentionally so they inherit
+  # default-deny on both axes (#407 row #1 / #409 hard-deny + per-phase grant absence).
   [phases.rights]
-  createItems = true
+  createItems   = true
+  privilegedOps = ["item.reorder"]
 
   [[phases.exits]]
   status = "changes_requested"

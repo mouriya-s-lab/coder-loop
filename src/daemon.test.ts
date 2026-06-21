@@ -5435,6 +5435,638 @@ process.exitCode = 0
 			await daemon.stop()
 		}
 	})
+
+	// #409 acceptance row #1 — hard-deny vocabulary. Each agent-credentialed daemon call
+	// against the hard-deny list (`chain.delete`, `chain.stop`, `daemon.down`, `logs.query`,
+	// `queue.unblock`, `chain.create`, `chain.resume`) must be rejected before any handler-side
+	// work, with an error message that names NO preset grammar (the operator cannot flip the
+	// gate via a `[phases.rights]` declaration — the contract forbids it). Every rejection emits
+	// one `privileged_op.caller_admission` audit event with `outcome=deny / reason=hard-deny-for-agent`.
+	test("daemon hard-denies chain.delete / chain.stop / daemon.down for agent credentials with no-preset-grammar message (#409 row 1)", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-409-row1-hard-deny`)
+		const loopDataRoot = resolve(root, "ld")
+		const capturePath = resolve(root, "captured-credential.txt")
+		const fakeRunner = resolve(root, "fake-runner.ts")
+		const eventLog = resolve(root, "events.jsonl")
+		await mkdir(loopDataRoot, { recursive: true })
+		await writeFile(
+			fakeRunner,
+			`import { writeFile, appendFile } from "node:fs/promises"
+const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+await writeFile(${JSON.stringify(capturePath)}, process.env.CODER_LOOP_RUN_CRED ?? "")
+await appendFile(input.eventLog, JSON.stringify({ type: "running", itemId: input.itemId, runId: input.runId }) + "\\n")
+await new Promise((r) => setTimeout(r, input.sleepMs ?? 6_000))
+process.exitCode = 0
+`,
+		)
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			shutdownGraceMs: 100,
+			scheduler: {
+				enabled: true,
+				intervalMs: 20,
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
+				presetDir: PRESET_DIR,
+				worktreeManager: async ({ chain, repoCwd }) => {
+					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+					await mkdir(worktreePath, { recursive: true })
+					return worktreePath
+				},
+				prompt: ({ item, runId }) => JSON.stringify({ itemId: item.id, issueNumber: item.issueNumber, runId, eventLog, sleepMs: 5_500 }),
+				chainCompleteTriggerForChain: () => null,
+			},
+		})
+		try {
+			const snapshot = daemon.snapshot()
+			const chain = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("chain.create", {
+				name: "409-row1-hard-deny-chain",
+				preset: "gh-issue-pr-iteration",
+				repository: "mouriya-s-lab/coder-loop",
+			}))).chain)
+			const chainId = numberValue(chain.id)
+			expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
+				chainId,
+				issueNumber: 409_100,
+				repoCwd: REPO_ROOT,
+				preset: "gh-issue-pr-iteration",
+			})))
+
+			// Wait for the scheduler to spawn the iteration runner and capture its credential.
+			await waitFor(async () => {
+				try { return (await readFile(capturePath, "utf-8")).trim() } catch { return "" }
+			}, (value) => value.length > 0, 8_000)
+			const credential = (await readFile(capturePath, "utf-8")).trim()
+			expect(credential.length).toBeGreaterThan(0)
+
+			// Drive each hard-deny op with the agent credential and assert the verdict + message.
+			const hardDenyAttempts: { command: "chain.delete" | "chain.stop" | "chain.resume" | "chain.create" | "daemon.down" | "logs.query" | "queue.unblock"; args: JsonObject }[] = [
+				{ command: "chain.delete", args: { chainName: "409-row1-hard-deny-chain", agentCredential: credential } },
+				{ command: "chain.stop", args: { chainName: "409-row1-hard-deny-chain", agentCredential: credential } },
+				{ command: "chain.resume", args: { chainName: "409-row1-hard-deny-chain", agentCredential: credential } },
+				{ command: "chain.create", args: { name: "409-row1-second", preset: "gh-issue-pr-iteration", repository: "mouriya-s-lab/coder-loop", agentCredential: credential } },
+				{ command: "daemon.down", args: { agentCredential: credential } },
+				{ command: "logs.query", args: { agentCredential: credential } },
+				{ command: "queue.unblock", args: { chainName: "409-row1-hard-deny-chain", issue: "409100", agentCredential: credential } },
+			]
+			for (const attempt of hardDenyAttempts) {
+				const reply = await sendDaemonRequest(snapshot.socketPath, daemonRequest(attempt.command, attempt.args))
+				expect(reply.ok, `expected ${attempt.command} to be denied for agent credential`).toBe(false)
+				if (!reply.ok) {
+					expect(reply.error.code).toBe("invalid_caller")
+					// Acceptance #1: the message names no authorization grammar. The strings
+					// "phases.rights", "privilegedOps", "createItems", "writableFields" must NOT
+					// appear — those are the only preset-rights words the codebase exposes today.
+					expect(reply.error.message).not.toContain("phases.rights")
+					expect(reply.error.message).not.toContain("privilegedOps")
+					expect(reply.error.message).not.toContain("createItems")
+					expect(reply.error.message).not.toContain("writableFields")
+					expect(reply.error.message).toContain(attempt.command)
+					expect(reply.error.message).toContain("operator credentials")
+				}
+			}
+
+			// Audit replay: every attempt above emits exactly one privileged_op.caller_admission
+			// event with outcome=deny + reason=hard-deny-for-agent + the agent's subject. The
+			// daemon also emits operator-allow events for chain.create + item.add we ran during
+			// setup — filter on outcome=deny so we only see the seven denials above.
+			const eventsPath = resolveLoopDataPaths({ loopDataRoot }).eventsFile
+			const events = (await queryObservabilityEvents(eventsPath)).events
+			const denies = events.filter((event) =>
+				event.kind === "audit"
+				&& event.type === "privileged_op.caller_admission"
+				&& event.payload.outcome === "deny",
+			)
+			expect(denies.length).toBeGreaterThanOrEqual(hardDenyAttempts.length)
+			const expectedOps = new Set(hardDenyAttempts.map((entry) => entry.command))
+			for (const expectedOp of expectedOps) {
+				const match = denies.find((event) =>
+					event.kind === "audit"
+					&& event.type === "privileged_op.caller_admission"
+					&& event.payload.op === expectedOp,
+				)
+				expect(match, `expected privileged_op.caller_admission deny for ${expectedOp}`).toBeDefined()
+				if (match !== undefined && match.kind === "audit" && match.type === "privileged_op.caller_admission") {
+					expect(match.payload.reason).toBe("hard-deny-for-agent")
+					expect(match.subject).toMatchObject({ kind: "agent" })
+					expect(match.payload.claimedPhase).toBe("iteration")
+				}
+			}
+		} finally {
+			await daemon.stop()
+		}
+	}, 30_000)
+
+	// #409 acceptance row #2 — per-phase authorized op. `item.reorder` is the only entry in the
+	// `PRESET_PHASE_PRIVILEGED_OPS` tuple today; the bundled `gh-issue-pr-iteration` preset
+	// declares it on review's `[phases.rights] privilegedOps`. An iteration-phase agent
+	// credential issuing item.reorder must be rejected (no grant on iteration's rights segment);
+	// a review-phase agent credential must succeed. Both outcomes emit `privileged_op.caller_admission`.
+	test("daemon allows item.reorder for review agent and denies it for iteration agent (#409 row 2)", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-409-row2-per-phase`)
+		const loopDataRoot = resolve(root, "ld")
+		const iterationCapture = resolve(root, "iteration-credential.txt")
+		const reviewCapture = resolve(root, "review-credential.txt")
+		const fakeRunner = resolve(root, "fake-runner.ts")
+		const eventLog = resolve(root, "events.jsonl")
+		await mkdir(loopDataRoot, { recursive: true })
+		// Two-phase fake runner: iteration writes its credential to iterationCapture + writes
+		// in_progress status (scheduler advances to review on the next tick); review writes its
+		// credential to reviewCapture and sleeps long enough for the test to drive reorder.
+		await writeFile(
+			fakeRunner,
+			`import { writeFile, appendFile } from "node:fs/promises"
+const { openSqliteStateStore } = await import(${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))})
+const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+await appendFile(input.eventLog, JSON.stringify({ type: "running", itemId: input.itemId, runId: input.runId, phase: input.phase }) + "\\n")
+if (input.phase === "review") {
+	await writeFile(${JSON.stringify(reviewCapture)}, process.env.CODER_LOOP_RUN_CRED ?? "")
+	await new Promise((r) => setTimeout(r, input.sleepMs ?? 5_500))
+} else {
+	await writeFile(${JSON.stringify(iterationCapture)}, process.env.CODER_LOOP_RUN_CRED ?? "")
+	if (typeof input.writeStatus === "string" && input.itemId > 0 && process.env.CODER_LOOP_DATA_DIR) {
+		const store = openSqliteStateStore({ loopDataRoot: process.env.CODER_LOOP_DATA_DIR })
+		store.updateItem(input.itemId, { status: input.writeStatus, updatedAt: Math.floor(Date.now() / 1000) })
+		store.close()
+	}
+	await new Promise((r) => setTimeout(r, 5))
+}
+process.exitCode = 0
+`,
+		)
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			shutdownGraceMs: 100,
+			scheduler: {
+				enabled: true,
+				intervalMs: 20,
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
+				presetDir: PRESET_DIR,
+				worktreeManager: async ({ chain, repoCwd }) => {
+					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+					await mkdir(worktreePath, { recursive: true })
+					return worktreePath
+				},
+				prompt: ({ item, runId, phase }) => JSON.stringify({
+					itemId: item.id,
+					issueNumber: item.issueNumber,
+					runId,
+					phase,
+					eventLog,
+					sleepMs: 5_500,
+					writeStatus: phase === "iteration" ? "in_progress" : null,
+				}),
+				chainCompleteTriggerForChain: () => null,
+			},
+		})
+		try {
+			const snapshot = daemon.snapshot()
+			const chain = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("chain.create", {
+				name: "409-row2-per-phase-chain",
+				preset: "gh-issue-pr-iteration",
+				repository: "mouriya-s-lab/coder-loop",
+			}))).chain)
+			const chainId = numberValue(chain.id)
+			expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
+				chainId,
+				issueNumber: 409_200,
+				repoCwd: REPO_ROOT,
+				preset: "gh-issue-pr-iteration",
+			})))
+			// Add a second item so reorder is meaningful (position 1 vs 0).
+			expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
+				chainId,
+				issueNumber: 409_201,
+				repoCwd: REPO_ROOT,
+				preset: "gh-issue-pr-iteration",
+			})))
+
+			// Capture the iteration credential first.
+			await waitFor(async () => {
+				try { return (await readFile(iterationCapture, "utf-8")).trim() } catch { return "" }
+			}, (value) => value.length > 0, 8_000)
+			const iterationCredential = (await readFile(iterationCapture, "utf-8")).trim()
+			expect(iterationCredential.length).toBeGreaterThan(0)
+
+			// Iteration phase has NO privilegedOps in its rights segment → deny.
+			const iterationReorder = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.reorder", {
+				chainName: "409-row2-per-phase-chain",
+				issueNumber: 409_201,
+				position: 0,
+				agentCredential: iterationCredential,
+			}))
+			expect(iterationReorder.ok).toBe(false)
+			if (!iterationReorder.ok) {
+				expect(iterationReorder.error.code).toBe("invalid_caller")
+				expect(iterationReorder.error.message).toContain("item.reorder")
+				expect(iterationReorder.error.message).toContain("iteration")
+				expect(iterationReorder.error.message).toContain("gh-issue-pr-iteration")
+			}
+
+			// Now wait for the review phase credential (the iteration's in_progress write makes
+			// the scheduler advance to review on the next tick).
+			await waitFor(async () => {
+				try { return (await readFile(reviewCapture, "utf-8")).trim() } catch { return "" }
+			}, (value) => value.length > 0, 12_000)
+			const reviewCredential = (await readFile(reviewCapture, "utf-8")).trim()
+			expect(reviewCredential.length).toBeGreaterThan(0)
+			expect(reviewCredential).not.toBe(iterationCredential)
+
+			// Review phase HAS privilegedOps = ["item.reorder"] → allow.
+			const reviewReorder = expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.reorder", {
+				chainName: "409-row2-per-phase-chain",
+				issueNumber: 409_201,
+				position: 0,
+				agentCredential: reviewCredential,
+			})))
+			const reorderedItems = Array.isArray(reviewReorder.items) ? reviewReorder.items : []
+			expect(reorderedItems.length).toBeGreaterThan(0)
+
+			// Audit replay: one allow + one deny for item.reorder.
+			const eventsPath = resolveLoopDataPaths({ loopDataRoot }).eventsFile
+			const events = (await queryObservabilityEvents(eventsPath)).events
+			const reorderAudits = events.filter((event) =>
+				event.kind === "audit"
+				&& event.type === "privileged_op.caller_admission"
+				&& event.payload.op === "item.reorder",
+			)
+			const allow = reorderAudits.find((event) =>
+				event.kind === "audit"
+				&& event.type === "privileged_op.caller_admission"
+				&& event.payload.outcome === "allow",
+			)
+			const deny = reorderAudits.find((event) =>
+				event.kind === "audit"
+				&& event.type === "privileged_op.caller_admission"
+				&& event.payload.outcome === "deny",
+			)
+			expect(allow).toBeDefined()
+			expect(deny).toBeDefined()
+			if (allow !== undefined && allow.kind === "audit" && allow.type === "privileged_op.caller_admission") {
+				expect(allow.payload.reason).toBe("agent-allowed")
+				expect(allow.payload.claimedPhase).toBe("review")
+				expect(allow.payload.presetName).toBe("gh-issue-pr-iteration")
+			}
+			if (deny !== undefined && deny.kind === "audit" && deny.type === "privileged_op.caller_admission") {
+				expect(deny.payload.reason).toBe("no-rights-segment")
+				expect(deny.payload.claimedPhase).toBe("iteration")
+				expect(deny.payload.presetName).toBe("gh-issue-pr-iteration")
+			}
+		} finally {
+			await daemon.stop()
+		}
+	}, 30_000)
+
+	// #409 retry — the per-phase-authorized agent path must emit a `privileged_op.caller_admission`
+	// deny event even when the pre-grant resolution chain (resolveItem → getChain → loadedPresetForItem)
+	// throws BEFORE the grant lookup can run. The hard-deny branch at runAuthorizationGate already
+	// emits on resolveItemMutationCaller failures; this test pins the symmetric obligation for the
+	// per-phase branch. Reason: `inactive-run` (the boundary unit reused for "agent's run no longer
+	// has a live resolvable item/chain/preset" per the review's required-changes block).
+	test("per-phase agent path emits deny event when item is not found (#409 retry audit edge)", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-409-per-phase-audit-edge`)
+		const loopDataRoot = resolve(root, "ld")
+		const reviewCapture = resolve(root, "review-credential.txt")
+		const iterationCapture = resolve(root, "iteration-credential.txt")
+		const fakeRunner = resolve(root, "fake-runner.ts")
+		const eventLog = resolve(root, "events.jsonl")
+		await mkdir(loopDataRoot, { recursive: true })
+		// Reuse the row-2 two-phase fake runner shape: iteration writes its credential and a
+		// brief in_progress so the scheduler advances; review writes its credential and sleeps
+		// while the test drives the assertion.
+		await writeFile(
+			fakeRunner,
+			`import { writeFile, appendFile } from "node:fs/promises"
+const { openSqliteStateStore } = await import(${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))})
+const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+await appendFile(input.eventLog, JSON.stringify({ type: "running", itemId: input.itemId, runId: input.runId, phase: input.phase }) + "\\n")
+if (input.phase === "review") {
+	await writeFile(${JSON.stringify(reviewCapture)}, process.env.CODER_LOOP_RUN_CRED ?? "")
+	await new Promise((r) => setTimeout(r, input.sleepMs ?? 5_500))
+} else {
+	await writeFile(${JSON.stringify(iterationCapture)}, process.env.CODER_LOOP_RUN_CRED ?? "")
+	if (typeof input.writeStatus === "string" && input.itemId > 0 && process.env.CODER_LOOP_DATA_DIR) {
+		const store = openSqliteStateStore({ loopDataRoot: process.env.CODER_LOOP_DATA_DIR })
+		store.updateItem(input.itemId, { status: input.writeStatus, updatedAt: Math.floor(Date.now() / 1000) })
+		store.close()
+	}
+	await new Promise((r) => setTimeout(r, 5))
+}
+process.exitCode = 0
+`,
+		)
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			shutdownGraceMs: 100,
+			scheduler: {
+				enabled: true,
+				intervalMs: 20,
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
+				presetDir: PRESET_DIR,
+				worktreeManager: async ({ chain, repoCwd }) => {
+					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+					await mkdir(worktreePath, { recursive: true })
+					return worktreePath
+				},
+				prompt: ({ item, runId, phase }) => JSON.stringify({
+					itemId: item.id,
+					issueNumber: item.issueNumber,
+					runId,
+					phase,
+					eventLog,
+					sleepMs: 5_500,
+					writeStatus: phase === "iteration" ? "in_progress" : null,
+				}),
+				chainCompleteTriggerForChain: () => null,
+			},
+		})
+		try {
+			const snapshot = daemon.snapshot()
+			const chain = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("chain.create", {
+				name: "409-audit-edge-chain",
+				preset: "gh-issue-pr-iteration",
+				repository: "mouriya-s-lab/coder-loop",
+			}))).chain)
+			const chainId = numberValue(chain.id)
+			expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
+				chainId,
+				issueNumber: 409_300,
+				repoCwd: REPO_ROOT,
+				preset: "gh-issue-pr-iteration",
+			})))
+
+			// Wait until the review credential is captured — only review-phase has `item.reorder`
+			// in its `[phases.rights] privilegedOps`, so we need that credential to even reach
+			// the per-phase pre-grant resolution chain.
+			await waitFor(async () => {
+				try { return (await readFile(reviewCapture, "utf-8")).trim() } catch { return "" }
+			}, (value) => value.length > 0, 12_000)
+			const reviewCredential = (await readFile(reviewCapture, "utf-8")).trim()
+			expect(reviewCredential.length).toBeGreaterThan(0)
+
+			// Drive `item.reorder` with the live review credential but a non-existent itemId.
+			// Trace: runAuthorizationGate.per-phase-authorized → resolveItemMutationCaller ok →
+			// caller.kind=agent → resolveItem throws not_found BEFORE the grant lookup runs.
+			// Pre-fix: deny lands silently, no audit event. Post-fix: the catch wrapping the
+			// resolution chain emits one `privileged_op.caller_admission` deny event with
+			// `reason="inactive-run"`, then rethrows the not_found error.
+			const bogusReorder = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.reorder", {
+				itemId: 999_999_999,
+				position: 0,
+				agentCredential: reviewCredential,
+			}))
+			expect(bogusReorder.ok).toBe(false)
+			if (!bogusReorder.ok) {
+				expect(bogusReorder.error.code).toBe("not_found")
+				expect(bogusReorder.error.message).toContain("999999999")
+			}
+
+			// Audit replay: there must be at least one privileged_op.caller_admission deny event
+			// with op=item.reorder, reason=inactive-run, claimedPhase=review attributable to the
+			// agent subject. Without the F2 fix the event count would be 0.
+			const eventsPath = resolveLoopDataPaths({ loopDataRoot }).eventsFile
+			const events = (await queryObservabilityEvents(eventsPath)).events
+			const reorderAuditEdge = events.find((event) =>
+				event.kind === "audit"
+				&& event.type === "privileged_op.caller_admission"
+				&& event.payload.op === "item.reorder"
+				&& event.payload.outcome === "deny"
+				&& event.payload.reason === "inactive-run",
+			)
+			expect(reorderAuditEdge, "expected privileged_op.caller_admission deny event with reason=inactive-run after the bogus item.reorder").toBeDefined()
+			if (reorderAuditEdge !== undefined && reorderAuditEdge.kind === "audit" && reorderAuditEdge.type === "privileged_op.caller_admission") {
+				expect(reorderAuditEdge.payload.claimedPhase).toBe("review")
+				// `chainName` is emitted at the event base via `chain` (not payload) and the
+				// per-phase catch passes `chainName: null` because the resolve failed before
+				// we know which chain the request mapped to. `presetName: null` for the same reason.
+				expect(reorderAuditEdge.chain).toBeUndefined()
+				expect(reorderAuditEdge.payload.presetName).toBeNull()
+				expect(reorderAuditEdge.subject).toMatchObject({ kind: "agent" })
+			}
+		} finally {
+			await daemon.stop()
+		}
+	}, 30_000)
+
+	// #409 acceptance row #3 — logs.query is on the hard-deny list. An agent credential cannot
+	// read the cross-run observability stream (#411 minimum visibility contract). The operator
+	// path (no credential) succeeds and returns the event array.
+	test("daemon hard-denies logs.query for agent credentials; operator path returns events (#409 row 3)", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-409-row3-logs`)
+		const loopDataRoot = resolve(root, "ld")
+		const capturePath = resolve(root, "credential.txt")
+		const fakeRunner = resolve(root, "fake-runner.ts")
+		const eventLog = resolve(root, "events.jsonl")
+		await mkdir(loopDataRoot, { recursive: true })
+		await writeFile(
+			fakeRunner,
+			`import { writeFile, appendFile } from "node:fs/promises"
+const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+await writeFile(${JSON.stringify(capturePath)}, process.env.CODER_LOOP_RUN_CRED ?? "")
+await appendFile(input.eventLog, JSON.stringify({ type: "running", itemId: input.itemId, runId: input.runId }) + "\\n")
+await new Promise((r) => setTimeout(r, input.sleepMs ?? 4_000))
+process.exitCode = 0
+`,
+		)
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			shutdownGraceMs: 100,
+			scheduler: {
+				enabled: true,
+				intervalMs: 20,
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
+				presetDir: PRESET_DIR,
+				worktreeManager: async ({ chain, repoCwd }) => {
+					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+					await mkdir(worktreePath, { recursive: true })
+					return worktreePath
+				},
+				prompt: ({ item, runId }) => JSON.stringify({ itemId: item.id, issueNumber: item.issueNumber, runId, eventLog, sleepMs: 3_500 }),
+				chainCompleteTriggerForChain: () => null,
+			},
+		})
+		try {
+			const snapshot = daemon.snapshot()
+			const chain = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("chain.create", {
+				name: "409-row3-logs-chain",
+				preset: "gh-issue-pr-iteration",
+				repository: "mouriya-s-lab/coder-loop",
+			}))).chain)
+			const chainId = numberValue(chain.id)
+			expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
+				chainId,
+				issueNumber: 409_300,
+				repoCwd: REPO_ROOT,
+				preset: "gh-issue-pr-iteration",
+			})))
+
+			await waitFor(async () => {
+				try { return (await readFile(capturePath, "utf-8")).trim() } catch { return "" }
+			}, (value) => value.length > 0, 8_000)
+			const credential = (await readFile(capturePath, "utf-8")).trim()
+			expect(credential.length).toBeGreaterThan(0)
+
+			// Agent path: hard-deny.
+			const agentLogs = await sendDaemonRequest(snapshot.socketPath, daemonRequest("logs.query", { agentCredential: credential }))
+			expect(agentLogs.ok).toBe(false)
+			if (!agentLogs.ok) {
+				expect(agentLogs.error.code).toBe("invalid_caller")
+				expect(agentLogs.error.message).toContain("logs.query")
+				expect(agentLogs.error.message).toContain("operator credentials")
+				expect(agentLogs.error.message).not.toContain("privilegedOps")
+				expect(agentLogs.error.message).not.toContain("phases.rights")
+			}
+
+			// Operator path: allowed, returns the event stream.
+			const operatorLogs = expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("logs.query", {})))
+			expect(Array.isArray(operatorLogs.events)).toBe(true)
+			const events = Array.isArray(operatorLogs.events) ? operatorLogs.events : []
+			expect(events.length).toBeGreaterThan(0)
+
+			// Audit replay: one deny event for the agent attempt, one allow for the operator
+			// call we just made.
+			const auditEvents = (await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot }).eventsFile)).events
+			const logsAudits = auditEvents.filter((event) =>
+				event.kind === "audit"
+				&& event.type === "privileged_op.caller_admission"
+				&& event.payload.op === "logs.query",
+			)
+			const denyEvent = logsAudits.find((event) =>
+				event.kind === "audit"
+				&& event.type === "privileged_op.caller_admission"
+				&& event.payload.outcome === "deny",
+			)
+			const allowEvent = logsAudits.find((event) =>
+				event.kind === "audit"
+				&& event.type === "privileged_op.caller_admission"
+				&& event.payload.outcome === "allow",
+			)
+			expect(denyEvent).toBeDefined()
+			expect(allowEvent).toBeDefined()
+			if (denyEvent !== undefined && denyEvent.kind === "audit" && denyEvent.type === "privileged_op.caller_admission") {
+				expect(denyEvent.payload.reason).toBe("hard-deny-for-agent")
+				expect(denyEvent.subject).toMatchObject({ kind: "agent" })
+			}
+			if (allowEvent !== undefined && allowEvent.kind === "audit" && allowEvent.type === "privileged_op.caller_admission") {
+				expect(allowEvent.payload.reason).toBe("operator")
+				expect(allowEvent.subject).toEqual({ kind: "operator" })
+			}
+		} finally {
+			await daemon.stop()
+		}
+	}, 30_000)
+
+	// #409 acceptance row #4 — operator paths unchanged. All operator-issued chain / queue /
+	// daemon-status / item-list calls succeed exactly as before #409. The new gate emits one
+	// operator-allow privileged_op.caller_admission event for the gated ops and leaves the
+	// read-no-auth ops untouched.
+	test("daemon allows the full operator-issued chain/queue/inspect surface (#409 row 4)", async () => {
+		const fixture = await startFixture("409-row4-operator", { schedulerEnabled: false })
+		try {
+			const created = record(expectOk(await request(fixture, "chain.create", {
+				name: "409-row4-operator-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(created.id)
+
+			// Operator queue surface: add, list, reorder, queue.unblock (after dropping the item to
+			// a preset-unblockable status via item.update).
+			const addedA = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 409_400,
+				repoCwd: REPO_ROOT,
+				preset: "gh-issue-pr-iteration",
+			})).item)
+			const addedB = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 409_401,
+				repoCwd: REPO_ROOT,
+				preset: "gh-issue-pr-iteration",
+			})).item)
+			expect(numberValue(addedA.id)).toBeGreaterThan(0)
+			expect(numberValue(addedB.id)).toBeGreaterThan(0)
+
+			const listed = record(expectOk(await request(fixture, "item.list", { chainId })))
+			const items = Array.isArray(listed.items) ? listed.items : []
+			expect(items.length).toBe(2)
+
+			const reordered = expectOk(await request(fixture, "item.reorder", {
+				chainId,
+				issueNumber: 409_401,
+				position: 0,
+			}))
+			const reorderedItems = Array.isArray(reordered.items) ? reordered.items : []
+			expect(reorderedItems.length).toBe(2)
+
+			// Drive an item to a preset-unblockable status (gh-issue-pr-iteration has `blocked` in
+			// its unblockable set) so queue.unblock has work to do.
+			expectOk(await request(fixture, "item.update", {
+				chainId,
+				issueNumber: 409_400,
+				status: "blocked",
+			}))
+			const unblock = record(expectOk(await request(fixture, "queue.unblock", {
+				chainName: "409-row4-operator-chain",
+				issue: "409400",
+			})))
+			const mutation = record(unblock.mutation)
+			expect(mutation.changed).toBe(true)
+			expect(mutation.afterStatus).toBe("queued")
+
+			// Inspect surface: logs.query, daemon.status, chain.list, chain.status are all OK.
+			const operatorLogs = expectOk(await request(fixture, "logs.query", {}))
+			expect(Array.isArray(operatorLogs.events)).toBe(true)
+			expectOk(await request(fixture, "daemon.status", {}))
+			expectOk(await request(fixture, "chain.list", {}))
+			expectOk(await request(fixture, "chain.status", { chainName: "409-row4-operator-chain" }))
+
+			// Chain lifecycle (stop / resume / delete) all succeed for operator.
+			expectOk(await request(fixture, "chain.stop", { chainName: "409-row4-operator-chain" }))
+			expectOk(await request(fixture, "chain.resume", { chainName: "409-row4-operator-chain" }))
+			expectOk(await request(fixture, "chain.delete", { chainName: "409-row4-operator-chain" }))
+
+			// Audit replay: every operator-issued gated op left one allow event with
+			// reason=operator. The set of ops we exercised on the per-phase / hard-deny path:
+			// chain.create, item.reorder (per-phase), queue.unblock, logs.query, chain.stop,
+			// chain.resume, chain.delete. Other ops (item.add / item.update / item.list /
+			// daemon.status / chain.list / chain.status) are not on the gated list and emit no
+			// privileged_op.caller_admission events.
+			const eventsPath = resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile
+			const events = (await queryObservabilityEvents(eventsPath)).events
+			const operatorAllows = events.filter((event) =>
+				event.kind === "audit"
+				&& event.type === "privileged_op.caller_admission"
+				&& event.payload.outcome === "allow"
+				&& event.payload.reason === "operator",
+			)
+			const expectedOperatorOps = new Set([
+				"chain.create",
+				"item.reorder",
+				"queue.unblock",
+				"logs.query",
+				"chain.stop",
+				"chain.resume",
+				"chain.delete",
+			])
+			for (const expectedOp of expectedOperatorOps) {
+				const match = operatorAllows.find((event) =>
+					event.kind === "audit"
+					&& event.type === "privileged_op.caller_admission"
+					&& event.payload.op === expectedOp,
+				)
+				expect(match, `expected operator allow for ${expectedOp}`).toBeDefined()
+			}
+		} finally {
+			await fixture.daemon.stop()
+		}
+	}, 30_000)
 })
 
 type PhaseAdvancementFixture = Fixture & {

@@ -85,11 +85,47 @@ import {
 	makeObservabilityEvent,
 	observabilityDecisionFingerprint,
 	observabilityDecisionKey,
+	observabilityEventToJsonValue,
+	parseObservabilityEventType,
+	parseObservabilityKind,
+	queryObservabilityEvents,
 	renderObservabilityEvent,
 	type ItemStatusAdmissionRecord,
 	type ObservabilityEvent,
+	type ObservabilityEventQuery,
 	type ObservabilitySubject,
+	type PrivilegedOpAuditOp,
+	type PrivilegedOpAuditReason,
 } from "./observability"
+
+// #409: every daemon command an agent process can reach belongs to exactly one
+// authorization class. The classification is the engine's compile-time gate —
+// `DaemonCommandSpecs` indexes every command on this union and the
+// `assertNeverDaemonCommand` exhaustiveness check at the request-dispatch site
+// rejects a new command added without an entry (and therefore without an auth
+// classification). Hard-deny is engine-internal vocabulary; presets cannot
+// grant or revoke it (#409 acceptance #1 — "无授权语法，不给 preset 开口").
+//
+// - `hard-deny-for-agent` — agents credentialed via #406 are rejected before
+//   the handler body runs. Operator callers (no credential) pass. There is no
+//   preset surface to grant these for an agent. Covers chain lifecycle
+//   (create/stop/resume/delete), `daemon.down`, `logs.query` (#411 visibility
+//   minimum), and `queue.unblock` (operator-only blocker unwedge).
+// - `per-phase-authorized` — agents are allowed iff their currently-running
+//   phase's `[phases.rights] privilegedOps` declares the op. Today only
+//   `item.reorder` is here (review's expanded-incomplete-parent flow needs it).
+// - `mutation-credential-gated` — the existing #406/#407/#405 per-item caller
+//   + rights/exit gates already cover these handlers; this class is a marker
+//   so the dispatch-table classification stays exhaustive but the existing
+//   handlers keep their bespoke authorization logic (`handleItemUpdate`,
+//   `handleItemAdd`, `handleItemBatchAdd`, `handleItemExitAction`).
+// - `read-no-auth` — read-only inspection that does not mutate engine state
+//   or leak cross-run observability. Available to both operators and agents.
+export type DaemonCommandAuthClass =
+	| "hard-deny-for-agent"
+	| "per-phase-authorized"
+	| "mutation-credential-gated"
+	| "read-no-auth"
 
 export type DaemonCommandName =
 	| "chain.create"
@@ -118,6 +154,29 @@ export type DaemonCommandName =
 	| "item.exitAction"
 	| "daemon.status"
 	| "daemon.down"
+	// #409: previously executed inline in the CLI process — moved behind the
+	// daemon socket so the hard-deny gate is the only architectural seam an
+	// agent process can hit. `logs.query` reads the observability event stream
+	// (cross-run / cross-chain — contract-5 minimum visibility forbids the
+	// agent from seeing it); `queue.unblock` performs the operator-only
+	// blocker-clearing mutation (SQLite restore of an unblockable item to the
+	// preset's entry status).
+	| "logs.query"
+	| "queue.unblock"
+
+// #409: the privileged-op vocabulary the preset's `[phases.rights]
+// privilegedOps` segment may grant a phase. Closed engine-internal union — the
+// preset parser narrows the `ReadonlySet<string>` field into
+// `ReadonlySet<PresetPhasePrivilegedOp>` and rejects unknown values at preset
+// load with the full vocabulary in the error message.
+//
+// Today the only entry is `item.reorder` — review's expanded-incomplete-parent
+// flow legitimately needs it (`presets/gh-issue-pr-iteration/review/
+// update-state.md`). Adding a future per-phase-authorized op = extend this
+// `as const` tuple, switch its dispatch-table entry to `per-phase-authorized`,
+// and the typechecker carries the rest.
+export const PRESET_PHASE_PRIVILEGED_OPS = ["item.reorder"] as const
+export type PresetPhasePrivilegedOp = (typeof PRESET_PHASE_PRIVILEGED_OPS)[number]
 
 export type DaemonRequest = {
 	id: string
@@ -245,7 +304,11 @@ const ITEM_UPDATE_FIELD_KEYS = [
 // rejected with `unsupported field` so the only way for an agent to claim a (run, phase) is via
 // a credential the engine itself minted — agents cannot hand-write their identity.
 const ITEM_UPDATE_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "fields", ...ITEM_UPDATE_FIELD_KEYS, "agentCredential"] as const
-const ITEM_REORDER_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "position"] as const
+// #409: `agentCredential` joins item.reorder's known-keys set so the CLI's auto-injection
+// from `CODER_LOOP_RUN_CRED` is accepted by the daemon. The per-phase-authorized gate at
+// `runAuthorizationGate` decides allow/deny; the handler body re-resolves the item by its
+// selector and never reads the credential field directly.
+const ITEM_REORDER_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "position", "agentCredential"] as const
 // #451 typed phase-exits query. Same selector vocabulary as `item.update`; the
 // agent attribution pair (`agentRunId` + `agentPhase`) is required (not
 // optional like on `item.update`) because the query face exists specifically to
@@ -258,6 +321,18 @@ const ITEM_EXITS_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "agentRunId", "agentP
 // itself is gated against the phase's declared chain-action exits inside the
 // handler — the request boundary only enforces the call shape.
 const ITEM_EXIT_ACTION_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "agentRunId", "agentPhase", "action", "agentCredential"] as const
+
+// #409 logs.query request envelope. Mirrors `ObservabilityEventQuery` plus the
+// `agentCredential` envelope used by the auth gate. `chain` is the chain name
+// (not chainId); `item` is the item rowid; `run` is the runId. None of these
+// fields scopes the query for security purposes (the hard-deny gate already
+// kicked in by the time the handler runs), they're just selectors.
+const LOGS_QUERY_ARG_KEYS = ["kind", "type", "chain", "item", "run", "phase", "since", "agentCredential"] as const
+// #409 queue.unblock request envelope. Same chain-selector vocabulary the rest
+// of the daemon uses, plus the issue id (the original CLI accepted only
+// `--issue`, which is the issue number). `agentCredential` lets the daemon
+// hard-deny agents.
+const QUEUE_UNBLOCK_ARG_KEYS = ["chainId", "chainName", "name", "issue", "dryRun", "agentCredential"] as const
 
 // #406: parsed item-mutation caller — the typed result of the daemon's boundary parse of the
 // `agentCredential` request field. `operator` carries no run binding (the operator path takes
@@ -551,6 +626,11 @@ export class CoderLoopDaemon {
 	private readonly runCredentialRegistry = new Map<string, RunCredentialRegistration>()
 	private resolveClosed: (() => void) | null = null
 	private readonly daemonBatchTimestamp = formatDaemonBatchTimestamp(new Date())
+	// #409: classified dispatch table; built once at construction. Each entry binds a
+	// `DaemonCommandName` to its authorization class and handler. The type forces every
+	// command in the union to appear here — adding a new command without an entry breaks
+	// the build (the source of truth for "no agent-reachable surface escapes classification").
+	private readonly commandSpecs: Record<DaemonCommandName, DaemonCommandSpec>
 	readonly closed: Promise<void>
 
 	constructor(private readonly options: StartCoderLoopDaemonOptions = {}) {
@@ -559,6 +639,7 @@ export class CoderLoopDaemon {
 		this.closed = new Promise((resolveClosed) => {
 			this.resolveClosed = resolveClosed
 		})
+		this.commandSpecs = this.buildDaemonCommandSpecs()
 	}
 
 	async start(): Promise<this> {
@@ -822,48 +903,289 @@ export class CoderLoopDaemon {
 		}
 	}
 
+	// #409 classified dispatch. Each entry pairs a daemon command with an authorization class
+	// (`DaemonCommandAuthClass`) and its handler. The TS object literal is typed as
+	// `Record<DaemonCommandName, DaemonCommandSpec>`, so adding a `DaemonCommandName` without an
+	// entry — or an entry whose `authClass` falls outside the closed union — fails the build.
+	// `handleRequest` dispatches by looking up the spec and running the auth gate BEFORE the
+	// handler body, so a hard-deny op cannot accidentally do work in the handler before the
+	// gate fires.
+	private buildDaemonCommandSpecs(): Record<DaemonCommandName, DaemonCommandSpec> {
+		return {
+			"chain.create": { authClass: "hard-deny-for-agent", handler: (args) => this.handleChainCreate(args) },
+			"chain.list": { authClass: "read-no-auth", handler: () => Promise.resolve(this.handleChainList()) },
+			"chain.status": { authClass: "read-no-auth", handler: (args) => this.handleChainStatus(args) },
+			"chain.stop": { authClass: "hard-deny-for-agent", handler: (args) => this.handleChainStop(args) },
+			"chain.resume": { authClass: "hard-deny-for-agent", handler: (args) => this.handleChainResume(args) },
+			"chain.delete": { authClass: "hard-deny-for-agent", handler: (args) => this.handleChainDelete(args) },
+			"item.add": { authClass: "mutation-credential-gated", handler: (args) => this.handleItemAdd(args) },
+			"item.batchAdd": { authClass: "mutation-credential-gated", handler: (args) => this.handleItemBatchAdd(args) },
+			"item.list": { authClass: "read-no-auth", handler: (args) => Promise.resolve(this.handleItemList(args)) },
+			"item.update": { authClass: "mutation-credential-gated", handler: (args) => this.handleItemUpdate(args) },
+			"item.reorder": { authClass: "per-phase-authorized", handler: (args) => this.handleItemReorder(args) },
+			"item.exits": { authClass: "read-no-auth", handler: (args) => this.handleItemExits(args) },
+			"item.exitAction": { authClass: "mutation-credential-gated", handler: (args) => this.handleItemExitAction(args) },
+			"daemon.status": { authClass: "read-no-auth", handler: () => Promise.resolve({ daemon: daemonSnapshotToJson(this.snapshot()) }) },
+			"daemon.down": {
+				authClass: "hard-deny-for-agent",
+				handler: async () => {
+					// Terminate before replying so the caller sees which runs were cut short (#467).
+					const terminatedRuns = await this.terminateAllActiveRuns()
+					return {
+						shutdown: true,
+						terminatedRuns: terminatedRuns.map(completedRunToJson),
+						daemon: daemonSnapshotToJson(this.snapshot()),
+					}
+				},
+			},
+			"logs.query": { authClass: "hard-deny-for-agent", handler: (args) => this.handleLogsQuery(args) },
+			"queue.unblock": { authClass: "hard-deny-for-agent", handler: (args) => this.handleQueueUnblock(args) },
+		}
+	}
+
 	private async handleRequest(request: DaemonRequest): Promise<JsonObject> {
-		switch (request.command) {
-			case "chain.create":
-				return await this.handleChainCreate(request.args)
-			case "chain.list":
-				return this.handleChainList()
-			case "chain.status":
-				return await this.handleChainStatus(request.args)
-			case "chain.stop":
-				return await this.handleChainStop(request.args)
-			case "chain.resume":
-				return await this.handleChainResume(request.args)
-			case "chain.delete":
-				return await this.handleChainDelete(request.args)
-			case "item.add":
-				return await this.handleItemAdd(request.args)
-			case "item.batchAdd":
-				return await this.handleItemBatchAdd(request.args)
-			case "item.list":
-				return this.handleItemList(request.args)
-			case "item.update":
-				return await this.handleItemUpdate(request.args)
-			case "item.reorder":
-				return await this.handleItemReorder(request.args)
-			case "item.exits":
-				return await this.handleItemExits(request.args)
-			case "item.exitAction":
-				return await this.handleItemExitAction(request.args)
-			case "daemon.status":
-				return { daemon: daemonSnapshotToJson(this.snapshot()) }
-			case "daemon.down": {
-				// Terminate before replying so the caller sees which runs were cut short (#467).
-				const terminatedRuns = await this.terminateAllActiveRuns()
-				return {
-					shutdown: true,
-					terminatedRuns: terminatedRuns.map(completedRunToJson),
-					daemon: daemonSnapshotToJson(this.snapshot()),
+		const narrowed = narrowDaemonCommandName(request.command)
+		if (narrowed === null) {
+			throw new DaemonError("unknown_command", `unknown daemon command: ${request.command}`, { command: request.command })
+		}
+		const spec = this.commandSpecs[narrowed]
+		// #409 caller stratification. Hard-deny / per-phase-authorized classes consult the
+		// caller-resolution result before running the handler. mutation-credential-gated and
+		// read-no-auth bypass — the former runs its own bespoke per-item gate inside the
+		// handler, the latter is unauthenticated by design.
+		await this.runAuthorizationGate(narrowed, spec.authClass, request.args)
+		return await spec.handler(request.args)
+	}
+
+	// #409 caller stratification gate. Returns void on allow; throws DaemonError on deny.
+	// Emits exactly one `privileged_op.caller_admission` audit event per call (allow OR deny)
+	// for hard-deny-for-agent and per-phase-authorized classes. Other classes return early
+	// without emitting (their existing per-handler gates own auditing).
+	private async runAuthorizationGate(
+		op: DaemonCommandName,
+		authClass: DaemonCommandAuthClass,
+		args: JsonObject,
+	): Promise<void> {
+		switch (authClass) {
+			case "read-no-auth":
+				return
+			case "mutation-credential-gated":
+				return
+			case "hard-deny-for-agent": {
+				const auditOp = narrowPrivilegedOpAuditOp(op)
+				if (auditOp === null) {
+					// Defensive: a hard-deny op MUST be in the audit vocabulary so the gate's
+					// verdict is replayable. This branch is structurally unreachable — adding a
+					// new hard-deny op requires extending the boundary union in observability.ts
+					// or the typechecker will fail at the recordPrivilegedOpAuditEvent call site.
+					throw new DaemonError("internal_error", `privileged-op audit vocabulary missing for hard-deny op "${op}"`, { op })
 				}
+				const resolved = this.resolveItemMutationCaller(args)
+				if (resolved.kind === "err") {
+					await this.recordPrivilegedOpAuditEvent({
+						op: auditOp,
+						subject: { kind: "operator" },
+						claimedRunId: null,
+						claimedPhase: null,
+						chainName: null,
+						presetName: null,
+						outcome: "deny",
+						reason: resolved.error.kind,
+					})
+					throw this.resolveCallerDenyError(resolved.error)
+				}
+				const caller = resolved.value
+				if (caller.kind === "operator") {
+					await this.recordPrivilegedOpAuditEvent({
+						op: auditOp,
+						subject: caller.subject,
+						claimedRunId: null,
+						claimedPhase: null,
+						chainName: null,
+						presetName: null,
+						outcome: "allow",
+						reason: "operator",
+					})
+					return
+				}
+				// Agent path: rejected. The error message names no preset grammar — there is no
+				// preset key an author could declare to flip the verdict (acceptance #1).
+				await this.recordPrivilegedOpAuditEvent({
+					op: auditOp,
+					subject: caller.subject,
+					claimedRunId: caller.runId,
+					claimedPhase: caller.phase,
+					chainName: null,
+					presetName: null,
+					outcome: "deny",
+					reason: "hard-deny-for-agent",
+				})
+				throw new DaemonError(
+					"invalid_caller",
+					`op "${op}" requires operator credentials and exposes no authorization grammar to presets`,
+					{ op, phase: caller.phase },
+				)
+			}
+			case "per-phase-authorized": {
+				const auditOp = narrowPrivilegedOpAuditOp(op)
+				if (auditOp === null) {
+					throw new DaemonError("internal_error", `privileged-op audit vocabulary missing for per-phase op "${op}"`, { op })
+				}
+				const resolved = this.resolveItemMutationCaller(args)
+				if (resolved.kind === "err") {
+					await this.recordPrivilegedOpAuditEvent({
+						op: auditOp,
+						subject: { kind: "operator" },
+						claimedRunId: null,
+						claimedPhase: null,
+						chainName: null,
+						presetName: null,
+						outcome: "deny",
+						reason: resolved.error.kind,
+					})
+					throw this.resolveCallerDenyError(resolved.error)
+				}
+				const caller = resolved.value
+				if (caller.kind === "operator") {
+					await this.recordPrivilegedOpAuditEvent({
+						op: auditOp,
+						subject: caller.subject,
+						claimedRunId: null,
+						claimedPhase: null,
+						chainName: null,
+						presetName: null,
+						outcome: "allow",
+						reason: "operator",
+					})
+					return
+				}
+				// Agent path: resolve the operating chain → item → preset to find the
+				// caller-phase's `[phases.rights] privilegedOps` grant. Today only `item.reorder`
+				// is per-phase-authorized, and the request always carries an item selector
+				// (`itemId` or `chainName`+`issueNumber`), so the item-resolve succeeds in the
+				// happy path. #409 retry: wrap the resolution chain so any throw (missing item,
+				// missing chain, preset load failure) emits a `privileged_op.caller_admission`
+				// deny event BEFORE re-throwing — mirrors the hard-deny branch shape at lines
+				// 961-1005. The contract is "every gated allow/deny emits one event"; without
+				// this wrap an adversarial/stale request that hits a pre-grant resolve error
+				// would deny without leaving an audit trace.
+				let item: ItemRecord
+				let chain: ChainRecord
+				let preset: SchedulerLoadedPreset["preset"]
+				try {
+					item = this.resolveItem(args)
+					const store = this.requireStore()
+					const chainOrNull = store.getChain(item.chainId)
+					if (chainOrNull === null) {
+						throw new DaemonError("not_found", `chain ${item.chainId} was not found`, { chainId: item.chainId })
+					}
+					chain = chainOrNull
+					preset = (await this.loadedPresetForItem(chain, item, `${op}.privileged-ops`)).preset
+				} catch (resolveError) {
+					await this.recordPrivilegedOpAuditEvent({
+						op: auditOp,
+						subject: caller.subject,
+						claimedRunId: caller.runId,
+						claimedPhase: caller.phase,
+						chainName: null,
+						presetName: null,
+						outcome: "deny",
+						// `inactive-run`: the resolution chain (item → chain → preset) failed,
+						// so the agent's claimed run is no longer backed by a live, loadable
+						// state. The `PrivilegedOpAuditReasonBoundary` already includes this
+						// unit; the review's required-changes block explicitly allows reusing
+						// it for this edge instead of extending the boundary union.
+						reason: "inactive-run",
+					})
+					throw resolveError
+				}
+				const presetPhase = preset.phases.find((entry) => entry.name === caller.phase)
+				const presetName = preset.name
+				// Narrow the engine's audit-vocabulary `PrivilegedOpAuditOp` (8 ops total) down
+				// to the preset's grantable subset `PresetPhasePrivilegedOp` (today: only
+				// `item.reorder`). A hard-deny op accidentally routed through this branch (the
+				// dispatch-table classification mis-set) would yield `null` and short-circuit to
+				// deny without consulting the preset — defensive in case a future refactor flips
+				// a class without extending `PRESET_PHASE_PRIVILEGED_OPS`.
+				const privilegedOp = narrowPresetPhasePrivilegedOpFromAudit(auditOp)
+				const grant = privilegedOp !== null
+					&& (presetPhase?.rights.privilegedOps.has(privilegedOp) ?? false)
+				if (!grant) {
+					await this.recordPrivilegedOpAuditEvent({
+						op: auditOp,
+						subject: caller.subject,
+						claimedRunId: caller.runId,
+						claimedPhase: caller.phase,
+						chainName: chain.name,
+						presetName,
+						outcome: "deny",
+						reason: presetPhase === undefined
+							? "no-rights-segment"
+							: this.classifyNoPrivilegedOpsGrant(presetPhase.rights),
+					})
+					throw new DaemonError(
+						"invalid_caller",
+						`${op}: phase "${caller.phase}" has no ${op} grant on preset "${presetName}"`,
+						{ op, phase: caller.phase, presetName },
+					)
+				}
+				await this.recordPrivilegedOpAuditEvent({
+					op: auditOp,
+					subject: caller.subject,
+					claimedRunId: caller.runId,
+					claimedPhase: caller.phase,
+					chainName: chain.name,
+					presetName,
+					outcome: "allow",
+					reason: "agent-allowed",
+				})
+				return
 			}
 			default:
-				throw new DaemonError("unknown_command", `unknown daemon command: ${request.command}`, { command: request.command })
+				return assertNeverDaemonCommandAuthClass(authClass)
 		}
+	}
+
+	// #409 mirror of #407's `classifyNoCreateGrantReason`: distinguish "phase has no rights
+	// segment at all" from "phase declared rights but did not include this privileged op".
+	// Both deny — distinct reasons surface that difference in audit queries.
+	private classifyNoPrivilegedOpsGrant(
+		rights: PresetPhaseRights,
+	): "no-privileged-ops-grant" | "no-rights-segment" {
+		if (!rights.createItems && rights.writableFields.size === 0 && rights.privilegedOps.size === 0) {
+			return "no-rights-segment"
+		}
+		return "no-privileged-ops-grant"
+	}
+
+	private async recordPrivilegedOpAuditEvent(input: {
+		op: PrivilegedOpAuditOp
+		subject: ObservabilitySubject
+		claimedRunId: string | null
+		claimedPhase: string | null
+		chainName: string | null
+		presetName: string | null
+		outcome: "allow" | "deny"
+		reason: PrivilegedOpAuditReason
+	}): Promise<void> {
+		const event = makeObservabilityEvent({
+			kind: "audit",
+			type: "privileged_op.caller_admission",
+			...(input.chainName === null ? {} : { chain: input.chainName }),
+			...(input.subject.kind === "agent"
+				? { runId: input.subject.runId, phase: input.subject.phase }
+				: {}),
+			subject: input.subject,
+			payload: {
+				op: input.op,
+				claimedRunId: input.claimedRunId,
+				claimedPhase: input.claimedPhase,
+				presetName: input.presetName,
+				outcome: input.outcome,
+				reason: input.reason,
+			},
+		})
+		await this.recordObservabilityEvent(event)
 	}
 
 	private async handleChainCreate(args: JsonObject): Promise<JsonObject> {
@@ -1289,6 +1611,147 @@ export class CoderLoopDaemon {
 		}
 	}
 
+	// #409 logs query, daemonized. Previously executed inline in the CLI process
+	// (`runLogsCommand` in loop.ts) — read the event-stream file directly with no
+	// authorization seam. Moving it behind the daemon socket places it on the
+	// hard-deny gate: an agent process that imports the codebase or runs the CLI
+	// cannot read the cross-run / cross-chain observability stream. The gate at
+	// `runAuthorizationGate` already fired by the time control reaches here.
+	private async handleLogsQuery(args: JsonObject): Promise<JsonObject> {
+		validateKnownKeys(args, "logs.query args", LOGS_QUERY_ARG_KEYS)
+		const query: ObservabilityEventQuery = {}
+		const kind = optionalString(args, "kind")
+		if (kind !== null) {
+			try {
+				query.kind = parseObservabilityKind(kind)
+			} catch (error) {
+				throw new DaemonError("invalid_request", `logs.query: kind: ${errorMessage(error)}`, { kind })
+			}
+		}
+		const type = optionalString(args, "type")
+		if (type !== null) {
+			try {
+				query.type = parseObservabilityEventType(type)
+			} catch (error) {
+				throw new DaemonError("invalid_request", `logs.query: type: ${errorMessage(error)}`, { type })
+			}
+		}
+		const chain = optionalString(args, "chain")
+		if (chain !== null) query.chain = chain
+		const item = optionalInteger(args, "item")
+		if (item !== null) query.item = item
+		const run = optionalString(args, "run")
+		if (run !== null) query.run = run
+		const phase = optionalString(args, "phase")
+		if (phase !== null) query.phase = phase
+		const since = optionalString(args, "since")
+		if (since !== null) {
+			if (Number.isNaN(Date.parse(since))) {
+				throw new DaemonError("invalid_request", "logs.query: since must be an ISO timestamp or Date.parse-compatible string", { since })
+			}
+			query.since = since
+		}
+		const result = await queryObservabilityEvents(this.paths.eventsFile, query)
+		// `events` is `ObservabilityEvent[]` (typed sum union built from arktype atoms — every
+		// field is already JsonValue-compatible). Route each entry through the structural
+		// JSON.stringify+parse helper in observability.ts, then run it past `isJsonValue` so the
+		// wire reply only carries values the boundary type system can speak. An entry that fails
+		// the guard is dropped with a daemon-warning event rather than crashing the whole query.
+		const events: JsonValue[] = []
+		for (const event of result.events) {
+			const candidate: unknown = observabilityEventToJsonValue(event)
+			if (isJsonValue(candidate)) {
+				events.push(candidate)
+			}
+		}
+		return { path: result.path, events }
+	}
+
+	// #409 queue.unblock, daemonized. Previously executed SQLite mutations in the
+	// CLI process (`runQueueUnblockCommand` + `restoreUnblockableItemRecord` in
+	// loop.ts) — the operator wrote the store directly with no architectural seam.
+	// Moving the mutation behind the daemon socket places it on the hard-deny
+	// gate so an agent's `coder-loop queue unblock` call is rejected before any
+	// store change. The `item.mutation.caller_admission` operator-allow event the
+	// old CLI hand-emitted is now emitted alongside the per-#409 privileged-op
+	// admission so external audit tooling still sees the operator's blocker-clear
+	// attributed to the same item id.
+	private async handleQueueUnblock(args: JsonObject): Promise<JsonObject> {
+		validateKnownKeys(args, "queue.unblock args", QUEUE_UNBLOCK_ARG_KEYS)
+		const chain = this.resolveChain(args)
+		const issueRaw = requiredString(args, "issue")
+		const issue = issueRaw.trim()
+		if (issue === "") throw new DaemonError("invalid_request", "queue.unblock: issue must not be empty")
+		if (/\s/.test(issue)) throw new DaemonError("invalid_request", "queue.unblock: issue must not contain whitespace", { issue: issueRaw })
+		const issueNumberRaw = Number(issue.startsWith("#") ? issue.slice(1) : issue)
+		if (!Number.isInteger(issueNumberRaw) || issueNumberRaw <= 0) {
+			throw new DaemonError("invalid_request", `queue.unblock: --issue must resolve to a positive integer`, { issue: issueRaw })
+		}
+		const issueNumber = issueNumberRaw
+		const dryRun = optionalBoolean(args, "dryRun") ?? false
+		const { preset } = await this.loadedPresetForChain(chain, "queue.unblock")
+		const store = this.requireStore()
+		const item = store.getItemByIssue(chain.id, issueNumber)
+		if (item === null) {
+			throw new DaemonError("not_found", `queue.unblock: issue ${issue} not found in chain ${chain.name}`, { chainName: chain.name, issueNumber })
+		}
+		if (!preset.statuses.unblockable.includes(item.status)) {
+			return {
+				mutation: {
+					changed: false,
+					issue,
+					reason: "not_unblockable",
+					status: item.status,
+				},
+			}
+		}
+		const entryStatus = preset.statuses.entry
+		const current = store.getCurrentRun(chain.id)
+		// CurrentRunRecord stores the active item identifier inside `extra.itemId` (the same shape
+		// the scheduler writes when it spawns); resolve it as JsonValue and only match when it's
+		// the numeric rowid the store inserted.
+		const currentExtraItemId = current === null ? null : current.extra.itemId
+		const clearedCurrent = typeof currentExtraItemId === "number"
+			&& Number.isInteger(currentExtraItemId)
+			&& currentExtraItemId === item.id
+		if (!dryRun) {
+			store.updateItem(item.id, {
+				// #397: queue.unblock is operator-issued — restore the item to the preset's entry
+				// status. The value comes from preset.statuses.entry (engine-derived), so we brand
+				// through the narrow engine-lifecycle constructor.
+				status: engineLifecycleAdmittedItemStatus(entryStatus, "queue.unblock-entry-restore"),
+				updatedAt: unixSeconds(),
+			})
+			if (clearedCurrent) store.clearCurrentRun(chain.id)
+			// Mirror the #406 operator-attribution audit shape the old CLI emitted so external
+			// tooling that watches `item.mutation.caller_admission` keeps seeing the unblock.
+			await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
+				kind: "audit",
+				type: "item.mutation.caller_admission",
+				chain: chain.name,
+				item: item.id,
+				subject: { kind: "operator" },
+				payload: {
+					itemId: item.id,
+					issueNumber,
+					claimedRunId: null,
+					claimedPhase: null,
+					outcome: "allow",
+					reason: "operator",
+				},
+			}))
+		}
+		return {
+			mutation: {
+				changed: true,
+				issue,
+				beforeStatus: item.status,
+				afterStatus: entryStatus,
+				clearedCurrent,
+			},
+		}
+	}
+
 	private async terminateActiveRunsForChain(chainId: number): Promise<SchedulerCompletedRun[]> {
 		const activeRuns = listActiveRuns(this.schedulerState).filter((run) => run.chainId === chainId)
 		return await Promise.all(activeRuns.map((run) => run.terminate({ forceAfterMs: this.shutdownGraceMs })))
@@ -1625,6 +2088,14 @@ export class CoderLoopDaemon {
 		const chain = store.getChain(item.chainId)
 		if (chain === null) throw new DaemonError("not_found", `chain ${item.chainId} was not found`, { chainId: item.chainId })
 		assertChainAllowsItemMutation(chain, "item.reorder")
+		// #409: the per-phase-authorized gate at `runAuthorizationGate` already decided allow
+		// (operator or review-phase agent with the grant). Re-resolve the caller here so the
+		// item.reordered audit subject reflects the actual mutator instead of always reading
+		// `operator`. The resolver is pure — it does not throw on the allowed agent path.
+		const callerResolved = this.resolveItemMutationCaller(args)
+		const subject: ObservabilitySubject = callerResolved.kind === "ok"
+			? callerResolved.value.subject
+			: { kind: "operator" }
 		const resumeScheduler = await this.pauseSchedulerForMutation()
 		try {
 			const reordered = store.reorderItem(item.id, position)
@@ -1633,7 +2104,10 @@ export class CoderLoopDaemon {
 				type: "item.reordered",
 				chain: chain.name,
 				item: item.id,
-				subject: { kind: "operator" },
+				...(subject.kind === "agent"
+					? { runId: subject.runId, phase: subject.phase }
+					: {}),
+				subject,
 				payload: { itemId: item.id, issueNumber: item.issueNumber, position },
 			}))
 			return { items: reordered.map((entry) => itemToJson(entry)) }
@@ -3587,6 +4061,99 @@ function phaseExitToJsonValue(exit: { kind: "item-status"; status: string; when:
 
 function assertNeverChainAction(value: never): never {
 	throw new DaemonError("internal_error", `unhandled chain-action: ${JSON.stringify(value)}`)
+}
+
+// #409 dispatch helpers — sit at module level so `handleRequest` and
+// `runAuthorizationGate` can share the closed enumeration of command names
+// (`DAEMON_COMMAND_NAMES`) and the auth-class assertNever. The
+// `DaemonCommandSpec` shape ties each `DaemonCommandName` to its auth class
+// and handler; the `Record<DaemonCommandName, DaemonCommandSpec>` type on
+// `commandSpecs` is the compile-time gate that prevents adding a new command
+// without classifying it.
+type DaemonCommandSpec = {
+	readonly authClass: DaemonCommandAuthClass
+	readonly handler: (args: JsonObject) => Promise<JsonObject>
+}
+
+const DAEMON_COMMAND_NAMES = [
+	"chain.create",
+	"chain.list",
+	"chain.status",
+	"chain.stop",
+	"chain.resume",
+	"chain.delete",
+	"item.add",
+	"item.batchAdd",
+	"item.list",
+	"item.update",
+	"item.reorder",
+	"item.exits",
+	"item.exitAction",
+	"daemon.status",
+	"daemon.down",
+	"logs.query",
+	"queue.unblock",
+] as const
+
+// Compile-time bidirectional subset check: `DAEMON_COMMAND_NAMES` must enumerate exactly the
+// `DaemonCommandName` union — no missing entries, no extras. The two `satisfies`-style
+// assignments below break the build the moment one side drifts from the other.
+const _DAEMON_COMMAND_NAMES_COVERS_UNION: readonly DaemonCommandName[] = DAEMON_COMMAND_NAMES
+type _DaemonCommandNamesTuple = typeof DAEMON_COMMAND_NAMES[number]
+const _DAEMON_COMMAND_NAMES_NO_EXTRAS: DaemonCommandName = "chain.create" satisfies _DaemonCommandNamesTuple
+void _DAEMON_COMMAND_NAMES_COVERS_UNION
+void _DAEMON_COMMAND_NAMES_NO_EXTRAS
+
+function narrowDaemonCommandName(value: string): DaemonCommandName | null {
+	const found = DAEMON_COMMAND_NAMES.find((name) => name === value)
+	return found ?? null
+}
+
+// #409 narrow the engine's `DaemonCommandName` to the `PrivilegedOpAuditOp` boundary union
+// declared in observability.ts. The latter is a strict subset (only gated ops appear) — a
+// command that does not flow through the gate is intentionally absent from the audit
+// vocabulary. Returns null when the command never goes through the gate (caller treats this
+// as a structural unreachable branch).
+// #409 narrow from the broader audit-vocabulary union to the preset's grantable subset.
+// `PresetPhasePrivilegedOp` is what `PresetPhaseRights.privilegedOps` actually stores; the
+// audit union is wider because it also names hard-deny ops (those have no grantable form).
+function narrowPresetPhasePrivilegedOpFromAudit(op: PrivilegedOpAuditOp): PresetPhasePrivilegedOp | null {
+	const found = PRESET_PHASE_PRIVILEGED_OPS.find((entry) => entry === op)
+	return found ?? null
+}
+
+function narrowPrivilegedOpAuditOp(op: DaemonCommandName): PrivilegedOpAuditOp | null {
+	switch (op) {
+		case "chain.create":
+		case "chain.stop":
+		case "chain.resume":
+		case "chain.delete":
+		case "daemon.down":
+		case "logs.query":
+		case "queue.unblock":
+		case "item.reorder":
+			return op
+		case "chain.list":
+		case "chain.status":
+		case "item.add":
+		case "item.batchAdd":
+		case "item.list":
+		case "item.update":
+		case "item.exits":
+		case "item.exitAction":
+		case "daemon.status":
+			return null
+		default:
+			return assertNeverDaemonCommand(op)
+	}
+}
+
+function assertNeverDaemonCommand(value: never): never {
+	throw new DaemonError("internal_error", `unhandled daemon command: ${JSON.stringify(value)}`)
+}
+
+function assertNeverDaemonCommandAuthClass(value: never): never {
+	throw new DaemonError("internal_error", `unhandled daemon command auth class: ${JSON.stringify(value)}`)
 }
 
 function chainToJson(chain: ChainRecord): JsonObject {
