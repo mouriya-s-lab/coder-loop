@@ -5497,6 +5497,139 @@ process.exitCode = 0
 		}
 	}, 30_000)
 
+	// #409 retry — the per-phase-authorized agent path must emit a `privileged_op.caller_admission`
+	// deny event even when the pre-grant resolution chain (resolveItem → getChain → loadedPresetForItem)
+	// throws BEFORE the grant lookup can run. The hard-deny branch at runAuthorizationGate already
+	// emits on resolveItemMutationCaller failures; this test pins the symmetric obligation for the
+	// per-phase branch. Reason: `inactive-run` (the boundary unit reused for "agent's run no longer
+	// has a live resolvable item/chain/preset" per the review's required-changes block).
+	test("per-phase agent path emits deny event when item is not found (#409 retry audit edge)", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-409-per-phase-audit-edge`)
+		const loopDataRoot = resolve(root, "ld")
+		const reviewCapture = resolve(root, "review-credential.txt")
+		const iterationCapture = resolve(root, "iteration-credential.txt")
+		const fakeRunner = resolve(root, "fake-runner.ts")
+		const eventLog = resolve(root, "events.jsonl")
+		await mkdir(loopDataRoot, { recursive: true })
+		// Reuse the row-2 two-phase fake runner shape: iteration writes its credential and a
+		// brief in_progress so the scheduler advances; review writes its credential and sleeps
+		// while the test drives the assertion.
+		await writeFile(
+			fakeRunner,
+			`import { writeFile, appendFile } from "node:fs/promises"
+const { openSqliteStateStore } = await import(${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))})
+const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+await appendFile(input.eventLog, JSON.stringify({ type: "running", itemId: input.itemId, runId: input.runId, phase: input.phase }) + "\\n")
+if (input.phase === "review") {
+	await writeFile(${JSON.stringify(reviewCapture)}, process.env.CODER_LOOP_RUN_CRED ?? "")
+	await new Promise((r) => setTimeout(r, input.sleepMs ?? 5_500))
+} else {
+	await writeFile(${JSON.stringify(iterationCapture)}, process.env.CODER_LOOP_RUN_CRED ?? "")
+	if (typeof input.writeStatus === "string" && input.itemId > 0 && process.env.CODER_LOOP_DATA_DIR) {
+		const store = openSqliteStateStore({ loopDataRoot: process.env.CODER_LOOP_DATA_DIR })
+		store.updateItem(input.itemId, { status: input.writeStatus, updatedAt: Math.floor(Date.now() / 1000) })
+		store.close()
+	}
+	await new Promise((r) => setTimeout(r, 5))
+}
+process.exitCode = 0
+`,
+		)
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			shutdownGraceMs: 100,
+			scheduler: {
+				enabled: true,
+				intervalMs: 20,
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
+				presetDir: PRESET_DIR,
+				worktreeManager: async ({ chain, repoCwd }) => {
+					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+					await mkdir(worktreePath, { recursive: true })
+					return worktreePath
+				},
+				prompt: ({ item, runId, phase }) => JSON.stringify({
+					itemId: item.id,
+					issueNumber: item.issueNumber,
+					runId,
+					phase,
+					eventLog,
+					sleepMs: 5_500,
+					writeStatus: phase === "iteration" ? "in_progress" : null,
+				}),
+				chainCompleteTriggerForChain: () => null,
+			},
+		})
+		try {
+			const snapshot = daemon.snapshot()
+			const chain = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("chain.create", {
+				name: "409-audit-edge-chain",
+				preset: "gh-issue-pr-iteration",
+				repository: "mouriya-s-lab/coder-loop",
+			}))).chain)
+			const chainId = numberValue(chain.id)
+			expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
+				chainId,
+				issueNumber: 409_300,
+				repoCwd: REPO_ROOT,
+				preset: "gh-issue-pr-iteration",
+			})))
+
+			// Wait until the review credential is captured — only review-phase has `item.reorder`
+			// in its `[phases.rights] privilegedOps`, so we need that credential to even reach
+			// the per-phase pre-grant resolution chain.
+			await waitFor(async () => {
+				try { return (await readFile(reviewCapture, "utf-8")).trim() } catch { return "" }
+			}, (value) => value.length > 0, 12_000)
+			const reviewCredential = (await readFile(reviewCapture, "utf-8")).trim()
+			expect(reviewCredential.length).toBeGreaterThan(0)
+
+			// Drive `item.reorder` with the live review credential but a non-existent itemId.
+			// Trace: runAuthorizationGate.per-phase-authorized → resolveItemMutationCaller ok →
+			// caller.kind=agent → resolveItem throws not_found BEFORE the grant lookup runs.
+			// Pre-fix: deny lands silently, no audit event. Post-fix: the catch wrapping the
+			// resolution chain emits one `privileged_op.caller_admission` deny event with
+			// `reason="inactive-run"`, then rethrows the not_found error.
+			const bogusReorder = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.reorder", {
+				itemId: 999_999_999,
+				position: 0,
+				agentCredential: reviewCredential,
+			}))
+			expect(bogusReorder.ok).toBe(false)
+			if (!bogusReorder.ok) {
+				expect(bogusReorder.error.code).toBe("not_found")
+				expect(bogusReorder.error.message).toContain("999999999")
+			}
+
+			// Audit replay: there must be at least one privileged_op.caller_admission deny event
+			// with op=item.reorder, reason=inactive-run, claimedPhase=review attributable to the
+			// agent subject. Without the F2 fix the event count would be 0.
+			const eventsPath = resolveLoopDataPaths({ loopDataRoot }).eventsFile
+			const events = (await queryObservabilityEvents(eventsPath)).events
+			const reorderAuditEdge = events.find((event) =>
+				event.kind === "audit"
+				&& event.type === "privileged_op.caller_admission"
+				&& event.payload.op === "item.reorder"
+				&& event.payload.outcome === "deny"
+				&& event.payload.reason === "inactive-run",
+			)
+			expect(reorderAuditEdge, "expected privileged_op.caller_admission deny event with reason=inactive-run after the bogus item.reorder").toBeDefined()
+			if (reorderAuditEdge !== undefined && reorderAuditEdge.kind === "audit" && reorderAuditEdge.type === "privileged_op.caller_admission") {
+				expect(reorderAuditEdge.payload.claimedPhase).toBe("review")
+				// `chainName` is emitted at the event base via `chain` (not payload) and the
+				// per-phase catch passes `chainName: null` because the resolve failed before
+				// we know which chain the request mapped to. `presetName: null` for the same reason.
+				expect(reorderAuditEdge.chain).toBeUndefined()
+				expect(reorderAuditEdge.payload.presetName).toBeNull()
+				expect(reorderAuditEdge.subject).toMatchObject({ kind: "agent" })
+			}
+		} finally {
+			await daemon.stop()
+		}
+	}, 30_000)
+
 	// #409 acceptance row #3 — logs.query is on the hard-deny list. An agent credential cannot
 	// read the cross-run observability stream (#411 minimum visibility contract). The operator
 	// path (no credential) succeeds and returns the event array.

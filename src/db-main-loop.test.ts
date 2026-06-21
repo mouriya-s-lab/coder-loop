@@ -75,12 +75,13 @@ describe("db-backed v2 loop hard cut", () => {
 			const result = await runCliAsync(["queue", "unblock", fixture.target, "--issue", "1", "--loop-data-root", fixture.loopDataRoot, "--chain", CHAIN_NAME])
 
 			expect(result.exitCode, `${result.stdout}\n${result.stderr}`).toBe(0)
-			const output = JSON.parse(result.stdout) as {
-				mutation: { changed: boolean; beforeStatus: string; afterStatus: string }
-				verification: { itemStatus: string }
-			}
-			expect(output.mutation).toMatchObject({ changed: true, beforeStatus: "parked", afterStatus: "ready" })
-			expect(output.verification.itemStatus).toBe("ready")
+			// #409 retry: drop the `as { … }` anonymous-shape cast — assert structurally via
+			// toMatchObject so the test no longer relies on a real `as` cast (代码红线 from
+			// issue #409 `## 约束`: 禁止真 `as` 断言（`as const` 除外）+ 不引入匿名形状).
+			expect(JSON.parse(result.stdout)).toMatchObject({
+				mutation: { changed: true, beforeStatus: "parked", afterStatus: "ready" },
+				verification: { itemStatus: "ready" },
+			})
 			expect(readItem(fixture.loopDataRoot).status).toBe("ready")
 			// #457: preset-owned blocker keys survive queue unblock (see test above).
 			expect(itemExtraToJsonObject(readItem(fixture.loopDataRoot).extra).blockerRepo).toBe("owner/dependency")

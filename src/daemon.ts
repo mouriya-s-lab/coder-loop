@@ -1040,14 +1040,43 @@ export class CoderLoopDaemon {
 				// Agent path: resolve the operating chain → item → preset to find the
 				// caller-phase's `[phases.rights] privilegedOps` grant. Today only `item.reorder`
 				// is per-phase-authorized, and the request always carries an item selector
-				// (`itemId` or `chainName`+`issueNumber`), so the item-resolve succeeds.
-				const item = this.resolveItem(args)
-				const store = this.requireStore()
-				const chain = store.getChain(item.chainId)
-				if (chain === null) {
-					throw new DaemonError("not_found", `chain ${item.chainId} was not found`, { chainId: item.chainId })
+				// (`itemId` or `chainName`+`issueNumber`), so the item-resolve succeeds in the
+				// happy path. #409 retry: wrap the resolution chain so any throw (missing item,
+				// missing chain, preset load failure) emits a `privileged_op.caller_admission`
+				// deny event BEFORE re-throwing — mirrors the hard-deny branch shape at lines
+				// 961-1005. The contract is "every gated allow/deny emits one event"; without
+				// this wrap an adversarial/stale request that hits a pre-grant resolve error
+				// would deny without leaving an audit trace.
+				let item: ItemRecord
+				let chain: ChainRecord
+				let preset: SchedulerLoadedPreset["preset"]
+				try {
+					item = this.resolveItem(args)
+					const store = this.requireStore()
+					const chainOrNull = store.getChain(item.chainId)
+					if (chainOrNull === null) {
+						throw new DaemonError("not_found", `chain ${item.chainId} was not found`, { chainId: item.chainId })
+					}
+					chain = chainOrNull
+					preset = (await this.loadedPresetForItem(chain, item, `${op}.privileged-ops`)).preset
+				} catch (resolveError) {
+					await this.recordPrivilegedOpAuditEvent({
+						op: auditOp,
+						subject: caller.subject,
+						claimedRunId: caller.runId,
+						claimedPhase: caller.phase,
+						chainName: null,
+						presetName: null,
+						outcome: "deny",
+						// `inactive-run`: the resolution chain (item → chain → preset) failed,
+						// so the agent's claimed run is no longer backed by a live, loadable
+						// state. The `PrivilegedOpAuditReasonBoundary` already includes this
+						// unit; the review's required-changes block explicitly allows reusing
+						// it for this edge instead of extending the boundary union.
+						reason: "inactive-run",
+					})
+					throw resolveError
 				}
-				const { preset } = await this.loadedPresetForItem(chain, item, `${op}.privileged-ops`)
 				const presetPhase = preset.phases.find((entry) => entry.name === caller.phase)
 				const presetName = preset.name
 				// Narrow the engine's audit-vocabulary `PrivilegedOpAuditOp` (8 ops total) down

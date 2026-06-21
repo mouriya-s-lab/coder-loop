@@ -513,9 +513,7 @@ attemptTimeoutSeconds = 3600
 				{ CODER_LOOP_RUN_CRED: "fabricated-credential-from-agent-env" },
 			)
 			expect(agentDown.exitCode).not.toBe(0)
-			const agentDownPayload = JSON.parse(agentDown.stdout) as Record<string, unknown>
-			expect(agentDownPayload.ok).toBe(false)
-			expect(agentDownPayload.error).toMatchObject({ code: "invalid_caller" })
+			expect(JSON.parse(agentDown.stdout)).toMatchObject({ ok: false, error: { code: "invalid_caller" } })
 			expect(isPidAlive(daemonPid), "agent-credentialed daemon down must NOT kill the daemon").toBe(true)
 
 			// Operator path (no env): the credential is omitted, the daemon resolves the caller
