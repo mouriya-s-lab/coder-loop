@@ -46,8 +46,14 @@ const ObservabilityEventTypeBoundary = arkType.or(
 	arkType.unit("phase.end"),
 	arkType.unit("chain.completed"),
 	arkType.unit("attempt.timeout"),
-	arkType.unit("watchdog.armed"),
-	arkType.unit("watchdog.fire"),
+	// #452: recycle-zone lifecycle. `pending_entered` arms on a successful agent state
+	// write; `timeout_kill` fires when the window elapsed without natural exit and the
+	// engine SIGKILLed the process group; `natural_exit` records that the child closed
+	// during the recycle window without timeout. Replaces the retired stdout-summary
+	// watchdog (`watchdog.armed` / `watchdog.fire`).
+	arkType.unit("recycle.pending_entered"),
+	arkType.unit("recycle.timeout_kill"),
+	arkType.unit("recycle.natural_exit"),
 	arkType.unit("spawn.aborted"),
 	arkType.unit("session_id.invalidated"),
 	arkType.unit("chain.invalid"),
@@ -325,16 +331,34 @@ const ObservabilityEventBoundary = arkType.or(
 		payload: { signal: arkType.or(arkType.unit("SIGTERM"), arkType.unit("SIGKILL")), attemptMs: "number", excerpt: ExcerptBoundary },
 	},
 	{
+		// #452 recycle-zone lifecycle: armed exactly once when the daemon observes a
+		// successful agent-attributed state write; followed by exactly one of
+		// `recycle.timeout_kill` (window elapsed without exit) or `recycle.natural_exit`
+		// (child closed within the window). `recycleAfterMs` is the configured window so
+		// that consumers do not need to re-derive it from scheduler config.
 		...EventBaseBoundary,
 		kind: arkType.unit("lifecycle"),
-		type: arkType.unit("watchdog.armed"),
-		payload: { marker: "string", graceMs: "number" },
+		type: arkType.unit("recycle.pending_entered"),
+		payload: { recycleAfterMs: "number" },
 	},
 	{
+		// #452 recycle-zone fire: SIGKILL-only because the agent has already declared
+		// completion via its state write; SIGTERM-first would only delay the inevitable
+		// for an already-acknowledged-done process. Carries the same excerpt shape as
+		// `attempt.timeout` / `watchdog.fire` did, so existing log consumers stay aligned.
 		...EventBaseBoundary,
 		kind: arkType.unit("lifecycle"),
-		type: arkType.unit("watchdog.fire"),
-		payload: { signal: arkType.or(arkType.unit("SIGTERM"), arkType.unit("SIGKILL")), graceMs: "number", excerpt: ExcerptBoundary },
+		type: arkType.unit("recycle.timeout_kill"),
+		payload: { signal: arkType.unit("SIGKILL"), recycleAfterMs: "number", excerpt: ExcerptBoundary },
+	},
+	{
+		// #452 recycle-zone natural exit: child closed during the recycle window. The
+		// `elapsedMs` field lets lifecycle consumers histogram how fast agents close
+		// after writing state without paging through the full event stream.
+		...EventBaseBoundary,
+		kind: arkType.unit("lifecycle"),
+		type: arkType.unit("recycle.natural_exit"),
+		payload: { elapsedMs: "number" },
 	},
 	{
 		...EventBaseBoundary,
@@ -785,10 +809,12 @@ function renderLifecycleEvent(event: Extract<ObservabilityEvent, { kind: "lifecy
 			return `${event.ts} lifecycle chain.completed chain=${event.chain ?? event.payload.chainId}`
 		case "attempt.timeout":
 			return `${event.ts} lifecycle attempt.timeout chain=${event.chain ?? "-"} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} signal=${event.payload.signal}`
-		case "watchdog.armed":
-			return `${event.ts} lifecycle watchdog.armed chain=${event.chain ?? "-"} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} graceMs=${event.payload.graceMs}`
-		case "watchdog.fire":
-			return `${event.ts} lifecycle watchdog.fire chain=${event.chain ?? "-"} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} signal=${event.payload.signal}`
+		case "recycle.pending_entered":
+			return `${event.ts} lifecycle recycle.pending_entered chain=${event.chain ?? "-"} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} recycleAfterMs=${event.payload.recycleAfterMs}`
+		case "recycle.timeout_kill":
+			return `${event.ts} lifecycle recycle.timeout_kill chain=${event.chain ?? "-"} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} signal=${event.payload.signal} recycleAfterMs=${event.payload.recycleAfterMs}`
+		case "recycle.natural_exit":
+			return `${event.ts} lifecycle recycle.natural_exit chain=${event.chain ?? "-"} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} elapsedMs=${event.payload.elapsedMs}`
 		case "chain.stop.from_phase_exit":
 			return `${event.ts} lifecycle chain.stop.from_phase_exit chain=${event.chain ?? event.payload.chainId} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} alreadyStopped=${event.payload.alreadyStopped} terminatedRuns=${event.payload.terminatedRunIds.join(",") || "-"}`
 		default:
