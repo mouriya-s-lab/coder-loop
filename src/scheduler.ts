@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process"
-import { createHash, randomBytes } from "node:crypto"
+import { createHash } from "node:crypto"
 import { mkdir, writeFile } from "node:fs/promises"
 import { createWriteStream, existsSync, realpathSync, rmSync, type WriteStream } from "node:fs"
 import { basename, dirname, isAbsolute, resolve } from "node:path"
@@ -59,34 +59,33 @@ import {
 } from "./runtime-paths"
 import { collectObservabilityExcerpt, type ObservabilityExcerpt } from "./observability"
 
-// Per-run nonce tag (#430): the summary tag is generated at spawn time, so no text that
-// existed before the run — engine source, old transcripts, issue/PR bodies — can contain
-// the close marker this run's watchdog matches. Cross-run diagnostics that don't hold a
-// nonce match the `summary-<hex>` family pattern instead of any shared literal.
-const SUMMARY_TAG_PREFIX = "summary-"
-const SUMMARY_NONCE_BYTES = 8
-const WATCHDOG_GRACE_MS = 10 * 60 * 1000
-const WATCHDOG_KILL_MS = 5 * 1000
+// #452: completion signal is the daemon-observed state write, not a stdout marker.
+// The previous "per-run nonce summary tag" prompt injection + stdout watchdog
+// (retired here together with `summaryInstructionFor`, `makeRunSummaryTag`,
+// `extractSummaryValue`, the close-marker observe-stdout state machine, and the
+// `watchdogGraceMs`/`watchdogKillMs` knobs) gated completion on the agent emitting
+// a particular string. Under the unified completion protocol (#451) the agent
+// writes status through the daemon-serialised `coder-loop item update` path, and
+// the daemon hands the scheduler a `markRunPendingRecycle(runId)` signal at that
+// moment — that is the only thing the engine treats as "this run is done"; stdout
+// content, including forged close markers, has zero effect on recycle timing or
+// completion classification.
+//
+// `ATTEMPT_TIMEOUT_MS` / `ATTEMPT_KILL_MS` are unchanged — they remain the
+// time-based fallback for runs that never write state AND never exit (the floor
+// the issue's acceptance #4 pins).
+//
+// `RECYCLE_AFTER_STATE_WRITE_MS` is the post-state-write recycle window: once the
+// daemon marks a run as pending recycle, the engine grants the agent process this
+// long to exit naturally before SIGKILLing the process group. The default mirrors
+// the operator's verbatim example (500s). It is configurable via
+// `SchedulerOptions.recycleAfterStateWriteMs`, but the recycle semantics
+// themselves (state-write → recycle zone → timeout kill) are mandatory and not
+// opt-out, per the operator's 2026-06-12 decree.
 const ATTEMPT_TIMEOUT_MS = 60 * 60 * 1000
 const ATTEMPT_KILL_MS = 5 * 1000
-
-export function makeRunSummaryTag(): string {
-	return `${SUMMARY_TAG_PREFIX}${randomBytes(SUMMARY_NONCE_BYTES).toString("hex")}`
-}
-
-export function summaryOpenMarker(tag: string): string {
-	return `<${tag}>`
-}
-
-export function summaryCloseMarker(tag: string): string {
-	return `</${tag}>`
-}
-
-function summaryInstructionFor(tag: string): string {
-	const open = summaryOpenMarker(tag)
-	const close = summaryCloseMarker(tag)
-	return `\n\n当你完成所有工作后，用 ${open} 和 ${close} 包裹一段总结，描述你做了什么。\n例如：\n${open}\n- 修复了登录页的 bug\n- 添加了单元测试\n${close}`
-}
+const RECYCLE_AFTER_STATE_WRITE_MS = 500 * 1000
+const RECYCLE_KILL_GRACE_MS = 5 * 1000
 
 export type SchedulerActiveRun = {
 	runId: string
@@ -124,11 +123,20 @@ export type SchedulerSlot = {
 	activeRun: SchedulerActiveRun | null
 }
 
+// #452: per-run recycle-zone trigger. The scheduler installs a callback into this map for
+// every spawned run (see `installSchedulerRunLifecycleGc`); the daemon, after a successful
+// agent-attributed `item.update` status write, looks the runId up via
+// `markRunPendingRecycle` and fires the callback exactly once. The callback arms the recycle
+// timer and emits `recycle.pending_entered`. The map is cleared in the run's close handler
+// regardless of whether recycle armed, so a missed write never leaks a callback.
+export type SchedulerRecycleTrigger = () => void
+
 export type SchedulerState = {
 	slots: Map<string, SchedulerSlot>
 	finalizingItemStatuses: Map<number, InternalStatus>
 	finalizingChainIds: Set<number>
 	pendingCloseHandlers: Set<Promise<unknown>>
+	recycleTriggers: Map<string, SchedulerRecycleTrigger>
 }
 
 export type SchedulerStore = Pick<
@@ -182,8 +190,15 @@ export type SchedulerEvent =
 	| { type: "phase.start"; ts: string; runId: string; chainId: number; itemId: number; repoCwd: string; phase: string; pid: number | null }
 	| { type: "phase.end"; ts: string; runId: string; chainId: number; itemId: number; phase: string; exitCode: number; durationSeconds: number; status: InternalStatus }
 	| { type: "attempt.timeout"; ts: string; runId: string; chainId: number; itemId: number; phase: string; signal: "SIGTERM" | "SIGKILL"; attemptMs: number; excerpt: ObservabilityExcerpt }
-	| { type: "watchdog.armed"; ts: string; runId: string; chainId: number; itemId: number; phase: string; marker: string; graceMs: number }
-	| { type: "watchdog.fire"; ts: string; runId: string; chainId: number; itemId: number; phase: string; signal: "SIGTERM" | "SIGKILL"; graceMs: number; excerpt: ObservabilityExcerpt }
+	// #452 recycle-zone lifecycle. The three events are mutually exclusive per run after
+	// state has been written: `recycle.pending_entered` fires exactly once when the daemon
+	// signals the agent's status-write succeeded; from there the run goes to either
+	// `recycle.natural_exit` (child closed within the window) or `recycle.timeout_kill`
+	// (window elapsed and the engine SIGKILLed the process group). A run that never
+	// writes state takes neither — it falls through to `attempt.timeout` instead.
+	| { type: "recycle.pending_entered"; ts: string; runId: string; chainId: number; itemId: number; phase: string; recycleAfterMs: number }
+	| { type: "recycle.timeout_kill"; ts: string; runId: string; chainId: number; itemId: number; phase: string; signal: "SIGKILL"; recycleAfterMs: number; excerpt: ObservabilityExcerpt }
+	| { type: "recycle.natural_exit"; ts: string; runId: string; chainId: number; itemId: number; phase: string; elapsedMs: number }
 	| { type: "queue.terminal"; ts: string; runId: string; chainId: number; itemId: number; terminalStatus: InternalStatus }
 	| { type: "item.dependency_unblocked"; chainId: number; itemId: number; fromStatus: InternalStatus; toStatus: InternalStatus; dependsOn: readonly number[] }
 
@@ -268,8 +283,13 @@ export type SchedulerOptions = {
 	onEvent?: (event: SchedulerEvent) => void | Promise<void>
 	attemptTimeoutMs?: number
 	attemptKillMs?: number
-	watchdogGraceMs?: number
-	watchdogKillMs?: number
+	// #452: post-state-write recycle window. Once the daemon notifies the scheduler that this
+	// run wrote item status (via `markRunPendingRecycle`), the engine waits at most this long
+	// for the child to exit naturally before SIGKILLing the process group. The semantics are
+	// mandatory; the knob only tunes the duration. `recycleKillGraceMs` is the post-kill grace
+	// before a follow-up SIGKILL retry on stuck signal delivery (mirrors attemptKillMs shape).
+	recycleAfterStateWriteMs?: number
+	recycleKillGraceMs?: number
 	// #406: run-scoped credential supplier. The scheduler mints one credential per spawn
 	// (`mint(...)`), injects its value into the runner process env, and revokes it from the
 	// supplier when the run process closes. When unset (test fixtures that don't exercise the
@@ -330,7 +350,24 @@ const REVIEW_ON_EMPTY_FALLBACK_ITEM_ID = 0
 let fallbackRunSequence = 0
 
 export function createSchedulerState(): SchedulerState {
-	return { slots: new Map(), finalizingItemStatuses: new Map(), finalizingChainIds: new Set(), pendingCloseHandlers: new Set() }
+	return {
+		slots: new Map(),
+		finalizingItemStatuses: new Map(),
+		finalizingChainIds: new Set(),
+		pendingCloseHandlers: new Set(),
+		recycleTriggers: new Map(),
+	}
+}
+
+// #452: the daemon calls this once per agent-attributed `item.update` status write that
+// passed admission (see daemon.ts handleItemUpdate). Idempotent — if the run has already
+// entered recycle or the run is unknown, this is a no-op. The lookup is by runId so the
+// daemon does not need a handle into per-run scheduler internals.
+export function markRunPendingRecycle(state: SchedulerState, runId: string): void {
+	const trigger = state.recycleTriggers.get(runId)
+	if (trigger === undefined) return
+	state.recycleTriggers.delete(runId)
+	trigger()
 }
 
 export function maxItemAttemptsFromChainMetadata(metadata: ChainRecord["metadata"]): number {
@@ -924,11 +961,13 @@ async function spawnSchedulerRun(
 		resume: resumeDecision,
 		runner: runner.kind,
 	})
-	const summaryTag = makeRunSummaryTag()
 	// #451 unified completion-protocol epilogue. Engine-injected, zero business
-	// literals: appended after the summary instruction so every daemon-spawned
-	// phase prompt ends with the same "query then write" protocol.
-	const finalPrompt = renderedPrompt + summaryInstructionFor(summaryTag) + phaseExitsEpilogue()
+	// literals: every daemon-spawned phase prompt ends with the same "query then
+	// write" protocol. #452 retired the prior summary-tag injection above this
+	// line — the engine no longer asks the agent to wrap a summary in nonce tags
+	// because completion now flows entirely through the daemon-observed state
+	// write, not stdout content.
+	const finalPrompt = renderedPrompt + phaseExitsEpilogue()
 	const runnerPlan = buildRunnerInvocation(
 		runner,
 		finalPrompt,
@@ -956,7 +995,7 @@ async function spawnSchedulerRun(
 		// the daemon that owns this loop-data-root. Pass it through so the CLI resolves the same store.
 		env: spawnEnv,
 	})
-	const activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, phase, child, runner, summaryTag, credential, credentialContext)
+	const activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, phase, child, runner, credential, credentialContext)
 	slot.activeRun = activeRun
 	options.store.setCurrentRun({
 		chainId: chain.id,
@@ -1021,7 +1060,6 @@ function attachRunCloseHandler(
 	phase: string,
 	child: ReturnType<typeof spawn>,
 	runner: AgentRunnerSelection,
-	summaryTag: string,
 	// #406: the credential minted at spawn for this run, revoked here when the run closes
 	// (`completeRun` + `clearCurrentRun` adjacency). `null` when no issuer is wired (test fixtures
 	// that bypass the caller-admission gate). Revocation runs even when the close path takes the
@@ -1051,13 +1089,14 @@ function attachRunCloseHandler(
 			outputWriters.stderr.write(chunk)
 		})
 
-		const installedGc = installSchedulerRunLifecycleGc(options, child, summaryTag, {
+		const installedGc = installSchedulerRunLifecycleGc(options, child, {
 			chain,
 			item,
 			runId,
 			phase,
 			stdoutPath: outputPaths.stdoutPath,
 			stderrPath: outputPaths.stderrPath,
+			startedAt,
 		})
 		lifecycleGc = installedGc
 		terminatorCleanup = installedGc.terminatorCleanup
@@ -1077,7 +1116,6 @@ function attachRunCloseHandler(
 				options.state.finalizingItemStatuses.set(item.id, status)
 				try {
 					await closeSchedulerPhaseOutputWriters(outputWriters)
-					const summary = extractSummaryValue(stdoutText, summaryTag)
 					await writeSchedulerRunCompletionArtifacts(options, {
 						runId,
 						chain,
@@ -1101,7 +1139,6 @@ function attachRunCloseHandler(
 							...(completedRun === null ? {} : itemExtraToJsonObject(completedRun.extra)),
 							stdoutBytes: stdoutText.length,
 							stderrBytes: stderrText.length,
-							...(summary !== null ? { summary } : {}),
 						}),
 					})
 
@@ -1252,16 +1289,6 @@ async function closeWriteStream(stream: WriteStream): Promise<void> {
 	})
 }
 
-export function extractSummaryValue(stdoutText: string, summaryTag: string): string | null {
-	const open = summaryOpenMarker(summaryTag)
-	const start = stdoutText.lastIndexOf(open)
-	if (start === -1) return null
-	const contentStart = start + open.length
-	const end = stdoutText.indexOf(summaryCloseMarker(summaryTag), contentStart)
-	if (end === -1) return null
-	return stdoutText.slice(contentStart, end).trim()
-}
-
 function combineCleanup(existing: (() => void) | null, next: () => void): () => void {
 	return () => {
 		if (existing !== null) existing()
@@ -1274,10 +1301,25 @@ type SchedulerRunLifecycleGc = {
 	terminatorCleanup: (() => void) | null
 }
 
+// #452 lifecycle GC. The retired stdout-driven summary watchdog used to live here; the
+// replacement is a recycle zone armed by the daemon via `markRunPendingRecycle(runId)`.
+//
+// Two parallel timers:
+//   1. Attempt timeout (`attemptTimeoutMs`) — unchanged baseline floor. Catches runs that
+//      never write state AND never exit. SIGTERM, then SIGKILL after `attemptKillMs`.
+//   2. Recycle zone (`recycleAfterStateWriteMs`) — armed only when the daemon calls
+//      `markRunPendingRecycle(context.runId)`. From arm, the child has `recycleAfterMs`
+//      to exit naturally. If it does, the close handler emits `recycle.natural_exit`.
+//      If it doesn't, the engine SIGKILLs the process group via
+//      `sendSignalToChildProcessGroup` and emits `recycle.timeout_kill`. The SIGKILL goes
+//      directly (no SIGTERM first) because the agent has already declared completion by
+//      writing state — the only reason it is still alive is wedge / cleanup loop.
+//
+// stdout content is read for nothing in this function — acceptance row 4's "stdout 内容
+// （含伪造标签）零影响" is guaranteed by absence of any stdout observer here.
 function installSchedulerRunLifecycleGc(
 	options: SchedulerOptions,
 	child: ReturnType<typeof spawn>,
-	summaryTag: string,
 	context: {
 		chain: ChainRecord
 		item: ItemRecord
@@ -1285,19 +1327,21 @@ function installSchedulerRunLifecycleGc(
 		phase: string
 		stdoutPath: string
 		stderrPath: string
+		startedAt: number
 	},
 ): SchedulerRunLifecycleGc {
-	const summaryClose = summaryCloseMarker(summaryTag)
 	const attemptTimeoutMs = options.attemptTimeoutMs ?? ATTEMPT_TIMEOUT_MS
 	const attemptKillMs = options.attemptKillMs ?? ATTEMPT_KILL_MS
-	const watchdogGraceMs = options.watchdogGraceMs ?? WATCHDOG_GRACE_MS
-	const watchdogKillMs = options.watchdogKillMs ?? WATCHDOG_KILL_MS
+	const recycleAfterMs = options.recycleAfterStateWriteMs ?? RECYCLE_AFTER_STATE_WRITE_MS
+	const recycleKillGraceMs = options.recycleKillGraceMs ?? RECYCLE_KILL_GRACE_MS
+	type LifecyclePhase = "running" | "recycling" | "killing" | "settled"
+	let lifecyclePhase: LifecyclePhase = "running"
 	let lifecycleCleanup: (() => void) | null = null
 	const addLifecycleCleanup = (cleanup: () => void): void => {
 		lifecycleCleanup = combineCleanup(lifecycleCleanup, cleanup)
 	}
 
-	// Attempt timeout
+	// Attempt timeout (preserved as the time-based fallback floor — acceptance row 4).
 	let attemptTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
 		attemptTimer = null
 		if (child.exitCode !== null || child.signalCode !== null) return
@@ -1312,44 +1356,68 @@ function installSchedulerRunLifecycleGc(
 		addLifecycleCleanup(() => clearTimeout(killTimer))
 	}, attemptTimeoutMs)
 
-	// Summary watchdog: observe accumulated stdout for this run's nonce close marker
-	let watchdogArmed = false
-	let watchdogAccumulated = ""
-	let watchdogGraceTimer: ReturnType<typeof setTimeout> | null = null
-	child.stdout?.on("data", (chunk: Buffer) => {
-		if (watchdogArmed) return
-		watchdogAccumulated += chunk.toString("utf-8")
-		if (watchdogAccumulated.includes(summaryClose)) {
-			watchdogArmed = true
-			if (attemptTimer !== null) { clearTimeout(attemptTimer); attemptTimer = null }
+	addLifecycleCleanup(() => { if (attemptTimer !== null) { clearTimeout(attemptTimer); attemptTimer = null } })
+
+	// Recycle zone arm trigger — registered against runId so the daemon's `handleItemUpdate`
+	// can fire it after a successful agent-attributed status write. Idempotent against
+	// re-arming: once `recycling` has begun, further calls are no-ops.
+	let recycleTimer: ReturnType<typeof setTimeout> | null = null
+	let recycleKillTimer: ReturnType<typeof setTimeout> | null = null
+	let recycleEnteredAtMs: number | null = null
+	const armRecycle = (): void => {
+		if (lifecyclePhase !== "running") return
+		lifecyclePhase = "recycling"
+		recycleEnteredAtMs = Date.now()
+		// The attempt-timeout fallback no longer applies once the agent has signalled
+		// completion via the state write — recycle owns the timeline from here.
+		if (attemptTimer !== null) { clearTimeout(attemptTimer); attemptTimer = null }
+		void emit(options, {
+			type: "recycle.pending_entered",
+			ts: nowIso(options),
+			runId: context.runId,
+			chainId: context.chain.id,
+			itemId: context.item.id,
+			phase: context.phase,
+			recycleAfterMs,
+		}).catch(() => undefined)
+		recycleTimer = setTimeout(() => {
+			recycleTimer = null
+			if (child.exitCode !== null || child.signalCode !== null) return
+			lifecyclePhase = "killing"
+			void emitSchedulerRecycleTimeoutKillEvent(options, context, recycleAfterMs).catch(() => undefined)
+			sendSignalToChildProcessGroup(child, "SIGKILL")
+			recycleKillTimer = setTimeout(() => {
+				recycleKillTimer = null
+				if (child.exitCode === null && child.signalCode === null) {
+					sendSignalToChildProcessGroup(child, "SIGKILL")
+				}
+			}, recycleKillGraceMs)
+		}, recycleAfterMs)
+	}
+	options.state.recycleTriggers.set(context.runId, armRecycle)
+
+	addLifecycleCleanup(() => {
+		options.state.recycleTriggers.delete(context.runId)
+		if (recycleTimer !== null) { clearTimeout(recycleTimer); recycleTimer = null }
+		if (recycleKillTimer !== null) { clearTimeout(recycleKillTimer); recycleKillTimer = null }
+		// Natural exit (or any non-timeout close) while recycle was armed — emit the
+		// `recycle.natural_exit` classifier so the lifecycle stream can distinguish it from
+		// `recycle.timeout_kill`. Killing-state exits are already classified by the
+		// timeout-kill event emitted above; do not double-emit.
+		if (lifecyclePhase === "recycling" && recycleEnteredAtMs !== null) {
+			const elapsedMs = Math.max(0, Date.now() - recycleEnteredAtMs)
 			void emit(options, {
-				type: "watchdog.armed",
+				type: "recycle.natural_exit",
 				ts: nowIso(options),
 				runId: context.runId,
 				chainId: context.chain.id,
 				itemId: context.item.id,
 				phase: context.phase,
-				marker: summaryClose,
-				graceMs: watchdogGraceMs,
+				elapsedMs,
 			}).catch(() => undefined)
-			watchdogGraceTimer = setTimeout(() => {
-				watchdogGraceTimer = null
-				if (child.exitCode !== null || child.signalCode !== null) return
-				void emitSchedulerWatchdogFireEvent(options, context, "SIGTERM", watchdogGraceMs).catch(() => undefined)
-				sendSignalToChildProcessGroup(child, "SIGTERM")
-				const killTimer = setTimeout(() => {
-					if (child.exitCode === null && child.signalCode === null) {
-						void emitSchedulerWatchdogFireEvent(options, context, "SIGKILL", watchdogGraceMs).catch(() => undefined)
-						sendSignalToChildProcessGroup(child, "SIGKILL")
-					}
-				}, watchdogKillMs)
-				addLifecycleCleanup(() => clearTimeout(killTimer))
-			}, watchdogGraceMs)
-			addLifecycleCleanup(() => { if (watchdogGraceTimer !== null) { clearTimeout(watchdogGraceTimer); watchdogGraceTimer = null } })
 		}
+		lifecyclePhase = "settled"
 	})
-
-	addLifecycleCleanup(() => { if (attemptTimer !== null) { clearTimeout(attemptTimer); attemptTimer = null } })
 
 	const cleanup = (): void => {
 		if (lifecycleCleanup !== null) { lifecycleCleanup(); lifecycleCleanup = null }
@@ -1386,7 +1454,10 @@ async function emitSchedulerTimeoutEvent(
 	})
 }
 
-async function emitSchedulerWatchdogFireEvent(
+// #452 recycle-zone fire event. SIGKILL-only because the agent has already declared
+// completion via the state write; SIGTERM-first would just delay the inevitable for an
+// already-acknowledged-done process.
+async function emitSchedulerRecycleTimeoutKillEvent(
 	options: SchedulerOptions,
 	context: {
 		chain: ChainRecord
@@ -1396,18 +1467,17 @@ async function emitSchedulerWatchdogFireEvent(
 		stdoutPath: string
 		stderrPath: string
 	},
-	signal: "SIGTERM" | "SIGKILL",
-	graceMs: number,
+	recycleAfterMs: number,
 ): Promise<void> {
 	await emit(options, {
-		type: "watchdog.fire",
+		type: "recycle.timeout_kill",
 		ts: nowIso(options),
 		runId: context.runId,
 		chainId: context.chain.id,
 		itemId: context.item.id,
 		phase: context.phase,
-		signal,
-		graceMs,
+		signal: "SIGKILL",
+		recycleAfterMs,
 		excerpt: await collectObservabilityExcerpt({
 			stdoutPath: context.stdoutPath,
 			stderrPath: context.stderrPath,
@@ -1978,13 +2048,13 @@ async function spawnSchedulerReviewOnEmptyRun(
 		loopDataRootOptions: options.loopDataRootOptions,
 		resume: freshResume(),
 	})
-	const summaryTag = makeRunSummaryTag()
 	// #451 unified completion-protocol epilogue — same engine-injected suffix as
 	// the per-item spawn path above. Review-on-empty is a daemon-spawned phase
-	// too, so the agent contract is identical here.
+	// too, so the agent contract is identical here. #452 dropped the summary-tag
+	// instruction layer that used to sit between renderedPrompt and the epilogue.
 	const runnerPlan = buildRunnerInvocation(
 		runner,
-		renderedPrompt + summaryInstructionFor(summaryTag) + phaseExitsEpilogue(),
+		renderedPrompt + phaseExitsEpilogue(),
 		freshResume(),
 		invocationPaths(representative.repoCwd, worktreePath, presetDir, resolveLoopDataPaths(options.loopDataRootOptions).root),
 	)
@@ -2025,7 +2095,6 @@ async function spawnSchedulerReviewOnEmptyRun(
 		child,
 		runner,
 		representative.repoCwd,
-		summaryTag,
 		reviewCredential,
 		reviewCredentialContext,
 	)
@@ -2066,7 +2135,6 @@ function attachReviewOnEmptyCloseHandler(
 	child: ReturnType<typeof spawn>,
 	runner: AgentRunnerSelection,
 	repoCwd: string,
-	summaryTag: string,
 	// #406: same credential-revocation hookup as `attachRunCloseHandler`. Review-on-empty agents
 	// bind to the sentinel itemId (`REVIEW_ON_EMPTY_FALLBACK_ITEM_ID`); any cross-item write attempt
 	// is then a `wrong-item` deny at the daemon gate.
@@ -2093,13 +2161,14 @@ function attachReviewOnEmptyCloseHandler(
 			outputWriters.stderr.write(chunk)
 		})
 
-		lifecycleGc = installSchedulerRunLifecycleGc(options, child, summaryTag, {
+		lifecycleGc = installSchedulerRunLifecycleGc(options, child, {
 			chain,
 			item: fallbackItem,
 			runId,
 			phase,
 			stdoutPath: outputPaths.stdoutPath,
 			stderrPath: outputPaths.stderrPath,
+			startedAt,
 		})
 
 		child.on("close", (code) => {
