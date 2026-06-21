@@ -54,7 +54,6 @@ describe("phase C cleanup guards", () => {
 				"targetCwd",
 				"terminalStatusesDoc",
 				"traceFile",
-				"transitionGuidanceDoc",
 				"triggerStatusDoc",
 			].sort())
 

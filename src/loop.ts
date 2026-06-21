@@ -614,11 +614,10 @@ export type Preset = {
 			exhausted: InternalStatus
 			// #404: the continuable status reserved for "previous attempt requires another
 			// iteration". Declared in `[statuses]` so the preset is the single source of
-			// truth for the retry status name — engine-rendered doc builders
-			// (`retryStatusDoc`, `transitionGuidanceDoc`) read this value instead of
-			// hard-coding it in prose. Validated at load time as a member of `continuable`.
-			// Optional: a preset with no retry concept may omit it; doc builders that need it
-			// will render the empty string.
+			// truth for the retry status name — the `retryStatusDoc` engine-rendered doc
+			// builder reads this value instead of hard-coding it in prose. Validated at
+			// load time as a member of `continuable`. Optional: a preset with no retry
+			// concept may omit it; doc builders that need it will render the empty string.
 			retry: InternalStatus | null
 		}
 	phases: readonly PresetPhase[]
@@ -996,16 +995,20 @@ export const ENGINE_RUNTIME_BINDING_KEYS = [
 	"fragmentIndex",
 	"runtimeInputsDoc",
 	"phaseExitsDoc",
-	// #404: per-phase doc builders that inject status / verdict / transition
-	// vocabulary into preset md fragments so the prose layer never carries a
-	// hand-written copy of preset metadata. Each builder enforces its own
-	// per-phase slice (contract-5 minimum visibility, issue #396 comment
-	// 4666115115) — iteration sees only the statuses it legitimately reasons
-	// about; review sees the broader vocabulary it must classify against;
-	// trigger phases see only their own trigger status. Engine fact key
-	// count: 28 — keep `docs/preset-authoring.md` and CLAUDE.md in sync.
+	// #404: per-phase doc builders that inject status / verdict vocabulary
+	// into preset md fragments so the prose layer never carries a hand-written
+	// copy of preset metadata. Each builder enforces its own per-phase slice
+	// (contract-5 minimum visibility, issue #396 comment 4666115115) —
+	// iteration sees only the statuses it legitimately reasons about; review
+	// sees the broader vocabulary it must classify against; trigger phases see
+	// only their own trigger status. Engine fact key count: 27 — keep
+	// `docs/preset-authoring.md` and CLAUDE.md in sync.
+	//
+	// (Retry on #495 dropped `transitionGuidanceDoc`: it duplicated
+	// `phaseExitsDoc`'s rendering of `phase.exits` in a different layout and
+	// had no distinct consumer; keeping a redundant builder violated
+	// contract-5 minimum surface.)
 	"statusVocabularyDoc",
-	"transitionGuidanceDoc",
 	"triggerStatusDoc",
 	"terminalStatusesDoc",
 	"retryStatusDoc",
@@ -4895,7 +4898,6 @@ function resolvePhaseBinding(source: PresetVariableSource, phase: PresetPhase, c
 			// (caller does not pre-slice) so a new phase added to a preset cannot
 			// silently widen the visibility surface.
 			case "statusVocabularyDoc": return renderStatusVocabularyDoc(phase, ctx.preset)
-			case "transitionGuidanceDoc": return renderTransitionGuidanceDoc(phase, ctx.preset)
 			case "triggerStatusDoc": return renderTriggerStatusDoc(phase)
 			case "terminalStatusesDoc": return renderTerminalStatusesDoc(phase, ctx.preset)
 			case "retryStatusDoc": return renderRetryStatusDoc(ctx.preset)
@@ -4981,25 +4983,6 @@ function statusVocabularySlice(phase: PresetPhase, preset: Preset): ReadonlySet<
 
 function joinStatusList(statuses: readonly string[]): string {
 	return statuses.map((status) => `\`${status}\``).join(", ")
-}
-
-// Per-phase transition guidance doc. Only the review phase (the phase that
-// owns the verdict→transition mapping via `[[phases.exits]]`) gets the table
-// rendered; trigger phases and ordinary work phases return the empty string
-// (they do not own transitions and their prompts do not bind this key).
-// Rendered shape: a markdown table mapping each `verdict` (REVIEW_SUMMARY_VERDICTS)
-// to the local status the action file writes, derived from review's
-// `[[phases.exits]]` `when` text the preset author wrote (single source of
-// truth — never duplicated in prose).
-export function renderTransitionGuidanceDoc(phase: PresetPhase, preset: Preset): string {
-	if (phase.exits.length === 0) return ""
-	const lines: string[] = []
-	lines.push("| Phase exit status | Trigger condition |")
-	lines.push("|---|---|")
-	for (const exit of phase.exits) {
-		lines.push(`| \`${exit.status}\` | ${exit.when} |`)
-	}
-	return lines.join("\n")
 }
 
 // Per-phase trigger status doc. Renders the single status string that gates a
@@ -5301,7 +5284,6 @@ export function buildRuntimeBindings(input: {
 		// `resolvePhaseBinding` from `(phase, preset, ctx)`. Mirrors the
 		// existing pattern for `runtimeInputsDoc` / `phaseExitsDoc`.
 		statusVocabularyDoc: "",
-		transitionGuidanceDoc: "",
 		triggerStatusDoc: "",
 		terminalStatusesDoc: "",
 		retryStatusDoc: "",

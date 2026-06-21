@@ -132,7 +132,6 @@ function makeRuntime(overrides: Partial<RuntimeBindings> = {}): RuntimeBindings 
 		// builders called by `resolvePhaseBinding`. The runtime record only
 		// carries empty strings to satisfy the Record<EngineRuntimeBindingKey, string> type.
 		statusVocabularyDoc: "",
-		transitionGuidanceDoc: "",
 		triggerStatusDoc: "",
 		terminalStatusesDoc: "",
 		retryStatusDoc: "",

@@ -228,14 +228,17 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		const preset = await loadPreset(BUNDLED_PRESET_DIR)
 		// #404 introduced per-phase-sliced doc builders so phases legitimately differ
 		// by the addition of their own slice keys (contract-5 minimum visibility,
-		// issue #396 comment 4666115115). Iteration's slice adds RETRY_STATUS_DOC;
+		// issue #396 comment 4666115115). Iteration's slice adds RETRY_STATUS_DOC
+		// (used in the Step 1 "Retry" classification branch) and
+		// TERMINAL_STATUSES_DOC (used in the MUST-NOT-write boundary list);
 		// review's slice adds STATUS_VOCABULARY_DOC and RUN_VERDICT_VOCABULARY_DOC;
-		// blocked-responder and umbrella-finalizer add none. The shared base set
-		// (every phase's vars must include it) stays EXPECTED_VARIABLE_KEYS.
+		// blocked-responder's slice adds TRIGGER_STATUS_DOC (the literal status
+		// word the responder reacts to); umbrella-finalizer adds none. The shared
+		// base set (every phase's vars must include it) stays EXPECTED_VARIABLE_KEYS.
 		const PHASE_EXTRA_KEYS: Record<string, readonly string[]> = {
-			iteration: ["RETRY_STATUS_DOC"],
+			iteration: ["RETRY_STATUS_DOC", "TERMINAL_STATUSES_DOC"],
 			review: ["STATUS_VOCABULARY_DOC", "RUN_VERDICT_VOCABULARY_DOC"],
-			"blocked-responder": [],
+			"blocked-responder": ["TRIGGER_STATUS_DOC"],
 			"umbrella-finalizer": [],
 		}
 		for (const phase of preset.phases) {

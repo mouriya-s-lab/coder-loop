@@ -86,11 +86,13 @@ roles  = ["common", "quality", "iter"]
   PROMPT_FRAGMENT_INDEX    = "runtime.fragmentIndex"
   RUNTIME_INPUTS_DOC       = "runtime.runtimeInputsDoc"
   PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
-  # #404: iteration only needs the retry status name (used in the Step 1
-  # classification "Retry" branch). It does not classify the queue and does
-  # not own transitions, so STATUS_VOCABULARY_DOC / TRANSITION_GUIDANCE_DOC
-  # are not declared here (contract-5 minimum visibility).
+  # #404: iteration needs (a) the retry status name (Step 1 "Retry" branch)
+  # and (b) the terminal vocabulary as a boundary statement for the MUST-NOT
+  # list — iteration is forbidden from writing any terminal status. It does
+  # not classify the queue and does not own transitions, so
+  # STATUS_VOCABULARY_DOC is not declared here (contract-5 minimum visibility).
   RETRY_STATUS_DOC         = "runtime.retryStatusDoc"
+  TERMINAL_STATUSES_DOC    = "runtime.terminalStatusesDoc"
   REQUIRE_BROWSER_EVIDENCE = { source = "chain.requireBrowserEvidence", default = false, label = "Browser evidence required", suffix = " — when `true`, Layer 4 must contain the strongest feasible E2E evidence for the project type. For projects with UI: real browser screenshots of the running dev server or deployed page. For projects without UI (pure CLI / library / backend / config): CLI smoke run transcripts with command, exit status, and output are the Layer 4 evidence; do not fabricate screenshots by creating HTML files and screenshotting them." }
   ISSUE_BRANCH             = { source = "item.branch", label = "Existing issue branch", blankBefore = true }
   ISSUE_PR                 = { source = "item.pr", label = "Existing issue PR" }
@@ -211,6 +213,13 @@ roles   = ["common"]
   PROMPT_FRAGMENT_INDEX    = "runtime.fragmentIndex"
   RUNTIME_INPUTS_DOC       = "runtime.runtimeInputsDoc"
   PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
+  # #404 (retry on #495): the trigger status word the responder reacts to.
+  # blocked-responder's prose references the gating status in two places
+  # (the opening "you are spawned after review marked one selected issue"
+  # sentence and the Procedure step 2 precondition); both consume this
+  # doc-builder rather than hand-writing the literal. Per-phase slice in
+  # `renderTriggerStatusDoc` renders only `phase.trigger.whenStatus`.
+  TRIGGER_STATUS_DOC       = "runtime.triggerStatusDoc"
   REQUIRE_BROWSER_EVIDENCE = { source = "chain.requireBrowserEvidence", default = false }
   ISSUE_BRANCH             = "item.branch"
   ISSUE_PR                 = "item.pr"

@@ -207,7 +207,7 @@ bundled `gh-issue-pr-iteration` preset 用这个 hook 声明 `umbrella-finalizer
 
 ### `runtime.*` fact 与 business key
 
-Engine-owned fact 由 `src/loop.ts` 的 `ENGINE_RUNTIME_BINDING_KEYS` 定义。Engine runtime fact key count: 28.
+Engine-owned fact 由 `src/loop.ts` 的 `ENGINE_RUNTIME_BINDING_KEYS` 定义。Engine runtime fact key count: 27.
 
 <!-- engine-runtime-binding-keys:start -->
 ```
@@ -216,11 +216,10 @@ runtime.sharedContextPath      runtime.stateFile              runtime.currentIss
 runtime.issueDir               runtime.evidenceDir            runtime.evidenceRootDir
 runtime.logDir                 runtime.traceFile              runtime.loopFile
 runtime.presetDir              runtime.fragmentIndex          runtime.runtimeInputsDoc
-runtime.phaseExitsDoc          runtime.statusVocabularyDoc    runtime.transitionGuidanceDoc
-runtime.triggerStatusDoc       runtime.terminalStatusesDoc    runtime.retryStatusDoc
-runtime.runVerdictVocabularyDoc runtime.runIdGeneration       runtime.resumedFromPhase
-runtime.resumedStartedAt       runtime.resumedSessionId       runtime.chainName
-runtime.repoCwd
+runtime.phaseExitsDoc          runtime.statusVocabularyDoc    runtime.triggerStatusDoc
+runtime.terminalStatusesDoc    runtime.retryStatusDoc         runtime.runVerdictVocabularyDoc
+runtime.runIdGeneration        runtime.resumedFromPhase       runtime.resumedStartedAt
+runtime.resumedSessionId       runtime.chainName              runtime.repoCwd
 ```
 <!-- engine-runtime-binding-keys:end -->
 
@@ -265,7 +264,6 @@ auditDemo = { literal = "business-key-e2e-ok" }
 | `runtimeInputsDoc` | 按 phase 变量 metadata 生成的 bound runtime input 文档。 |
 | `phaseExitsDoc` | 按 phase `[[phases.exits]]` 生成的出口状态文档。 |
 | `statusVocabularyDoc` | #404：按 phase 切片的 status 词表（`actionable` / `non-actionable` 分组）；trigger phase 只渲染 `whenStatus`，普通工作 phase 渲染 continuable，含 `[[phases.exits]]` 的 phase（如 review）渲染 continuable + terminal。 |
-| `transitionGuidanceDoc` | #404：按 phase `[[phases.exits]]` 生成的 phase exit 转移指引 markdown 表（status × when）。无 exits 的 phase 渲染空串。 |
 | `triggerStatusDoc` | #404：当前 phase 的 trigger 关注 status 字面量（仅 trigger phase 非 chain-complete 时非空）。 |
 | `terminalStatusesDoc` | #404：`preset.statuses.terminal` 的逗号分隔字面表，供 phase prose 引用「不可写入的终态集合」。 |
 | `retryStatusDoc` | #404：preset 声明的 retry continuable status（`[statuses].retry`）加 backtick；未声明则为空串。 |

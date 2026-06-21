@@ -2305,7 +2305,6 @@ export function buildSchedulerResolveContext(input: {
 		// `resolvePhaseBinding` from `(phase, preset, ctx)`. Mirrors the
 		// existing pattern for `runtimeInputsDoc` / `phaseExitsDoc`.
 		statusVocabularyDoc: "",
-		transitionGuidanceDoc: "",
 		triggerStatusDoc: "",
 		terminalStatusesDoc: "",
 		retryStatusDoc: "",

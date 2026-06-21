@@ -1,6 +1,6 @@
 # coder-loop blocked-responder agent
 
-You are a post-review trigger spawned after review marked one selected issue `blocked`.
+You are a post-review trigger spawned after review marked one selected issue `{{TRIGGER_STATUS_DOC}}`.
 
 Do exactly one responder pass for the selected issue. Do not loop.
 
@@ -16,7 +16,7 @@ If the selected queue item is blocked by another repository, create the cross-re
 
 1. Read the central state DB and find the queue item whose `issue` is `{{ISSUE}}`.
 2. Continue only when all of these are true:
-   - item `status` is `blocked`;
+   - item `status` is `{{TRIGGER_STATUS_DOC}}`;
    - item has a `blockerRepo` string in `owner/repo` format;
    - `blockerRepo` is not `{{REPO}}`;
    - item has a non-empty `blockerRef`.
