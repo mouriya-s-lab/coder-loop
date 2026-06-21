@@ -34,15 +34,13 @@ coder-loop queue unblock <target> --issue <id> --start-daemon
 
 ## Runner / model 真相
 
-Runner 选择是 target runtime contract，不由 host 身份或旧 flat log 推断。以 `coder-loop status <target> --json` 为准，读取：
+Runner 选择是 target runtime contract，不由 host 身份或旧 flat log 推断。以 `coder-loop status <target> --json` 为准，读取（#456 起，per-phase 字段是唯一的 runner face；任何角色专属字段已退场，PR body 须显式列出 shape diff）：
 
 - `target.runner.hostDefault`
 - `target.runner.phases`
 - `target.runner.default`
-- `target.runner.reviewDefault`
 - `queue.selected.phaseRunners`
 - `queue.selected.runner`
-- `queue.selected.reviewRunner`
 - `current.runner`
 - `current.phaseStatus.value.runner`
 - `current.phaseStatus.value.model`

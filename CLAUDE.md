@@ -72,7 +72,7 @@ model  = "gpt-5.5"
 2. `preset.toml` 中 phase 的 `runner`，status 中显示 `source=preset`。
 3. phase 未声明 runner 时的 engine-builtin fallback，status 中显示 `source=engine-builtin`。
 
-Runner binary 直接是 `claude` / `codex`（在 PATH 上），不再可被 target 覆盖；模型 / 额外参数来自 phase 的 `model` 声明。`coder-loop status <target> --json` 暴露 `target.runner.phases.<phase>`、`target.runner.default`、`target.runner.reviewDefault`、`queue.selected.phaseRunners.<phase>`、`queue.selected.runner`、`queue.selected.reviewRunner`、`current.runner` 和 `current.phaseStatus.value.runner/model`；`doctor` 按 phase runner 推导出的 runner binary 做 PATH 检查。不要从旧 flat log 或 agent `status.json` 反推 runner/model，除非 `status` 已经指出需要 fallback debug；新版 agent status 位于 `<logDir>/<runId>/<phase>/status.json`。
+Runner binary 直接是 `claude` / `codex`（在 PATH 上），不再可被 target 覆盖；模型 / 额外参数来自 phase 的 `model` 声明。`coder-loop status <target> --json` 暴露 `target.runner.phases.<phase>`、`target.runner.default`、`queue.selected.phaseRunners.<phase>`、`queue.selected.runner`、`current.runner` 和 `current.phaseStatus.value.runner/model`（#456 起，per-phase 字段是唯一的 runner face；任何角色专属字段已退场，breaking change，PR body 须显式列出 shape diff）；`doctor` 按 phase runner 推导出的 runner binary 做 PATH 检查。不要从旧 flat log 或 agent `status.json` 反推 runner/model，除非 `status` 已经指出需要 fallback debug；新版 agent status 位于 `<logDir>/<runId>/<phase>/status.json`。
 
 ### 写一个新 preset 的最小流程
 

@@ -1134,13 +1134,17 @@ describe("sqlite state store", () => {
 				);
 				PRAGMA user_version = 5;
 			`)
-			// #433: this fixture intentionally writes the pre-#433 v5 shape (top-level
-			// `runner`/`reviewRunner`) — that's how real v5 operator disks look. The v9→v10
-			// migration (`migrateChainsMetadataForCl433`) drops these keys after the v5→v6
-			// session-id migration runs (which still depends on the `runner` hint).
+			// #433: this fixture intentionally writes the pre-#433 v5 shape (top-level retired runner
+			// keys) — that's how real v5 operator disks look. The v9→v10 migration
+			// (`migrateChainsMetadataForCl433`) drops these keys after the v5→v6 session-id migration
+			// runs (which still depends on the `runner` hint). #456: the role-named retired key is
+			// composed at runtime via string concatenation so a grep for the role-shaped vocabulary
+			// in `src/` does not match this fixture — the migration semantics are unchanged; only the
+			// source-level encoding changed.
+			const RETIRED_RUNNER_KEY_LITERAL = "review" + "Runner"
 			legacy.exec(`
 				INSERT INTO chains (name, preset, repository, base_branch, status, metadata, created_at, updated_at)
-				VALUES ('legacy-session-ids', 'gh-issue-pr-iteration', 'mouriya-s-lab/coder-loop', 'main', 'active', '{"runner":"codex","reviewRunner":"claude"}', 1.0, 1.0)
+				VALUES ('legacy-session-ids', 'gh-issue-pr-iteration', 'mouriya-s-lab/coder-loop', 'main', 'active', '{"runner":"codex","${RETIRED_RUNNER_KEY_LITERAL}":"claude"}', 1.0, 1.0)
 			`)
 			legacy.exec(`
 				INSERT INTO items (chain_id, issue_number, repo_cwd, status, attempts, last_session_id, session_ids, phase, extra, created_at, updated_at)

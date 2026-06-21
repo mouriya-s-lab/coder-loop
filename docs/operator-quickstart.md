@@ -114,9 +114,8 @@ coder-loop status /path/to/your-target-repo --json | jq '.state.kind, .queue, .c
 |---|---|
 | `.state.kind` | `"ok"` 表示 state/preset/runtime 都可读；其他值按错误继续排 |
 | `.queue.total` / `.queue.selected` | 有可推进 item 时 selected 不为 null |
-| `.target.runner.phases` / `.queue.selected.phaseRunners` | 每个 phase 的 effective runner；含 kind/source/binary/model |
+| `.target.runner.phases` / `.queue.selected.phaseRunners` | 每个 phase 的 effective runner；含 kind/source/binary/model（#456 起为唯一 per-phase face） |
 | `.target.runner.default` / `.queue.selected.runner` | 默认执行 phase 与 selected item 默认执行 phase runner |
-| `.target.runner.reviewDefault` / `.queue.selected.reviewRunner` | review phase runner；model 解析为 preset phase `model` 声明（无 target 级 override） |
 | `.current.run` | 正在跑或可 resume 的 run；null 表示当前没有 in-flight phase |
 | `.events.latest` | 当前或最近 run 的最后一条结构化事件 |
 | `.processes.live` / `.processes.scanError` | live process scan 结果；daemon 详情看 `coder-loop daemon status` |

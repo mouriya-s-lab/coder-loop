@@ -227,10 +227,10 @@ export type SchedulerPhaseRunner = (input: SchedulerPhaseRunnerInput) => AgentRu
 export type SchedulerPhaseRunnerSelectionResolver = (chain: ChainRecord) => PhaseRunnerSelectionInput | Promise<PhaseRunnerSelectionInput>
 
 // #412: per-item phase runner selection. Mixed-preset chains need to resolve runner (preset,
-// defaultRunner, reviewRunner, runnerCommands) against the item's own preset — not the chain
-// seed — because the phase being spawned belongs to the item's preset's phase plan. If the
-// caller wires `phaseRunnerSelectionForItem`, the scheduler prefers it over the chain-wide form.
-// The chain-wide form is preserved for callers that only have a chain in hand (chain-complete
+// defaultRunner, runnerCommands per `PhaseRunnerSelectionInput`) against the item's own preset —
+// not the chain seed — because the phase being spawned belongs to the item's preset's phase plan.
+// If the caller wires `phaseRunnerSelectionForItem`, the scheduler prefers it over the chain-wide
+// form. The chain-wide form is preserved for callers that only have a chain in hand (chain-complete
 // trigger phase evaluation) and for single-preset compatibility.
 export type SchedulerPhaseRunnerSelectionForItemResolver = (chain: ChainRecord, item: ItemRecord) => PhaseRunnerSelectionInput | Promise<PhaseRunnerSelectionInput>
 
@@ -335,7 +335,6 @@ export type SchedulerChainStatuses = {
 
 export const DEFAULT_MAX_ITEM_ATTEMPTS = 20
 const RUNNING_RUN_STATUS = parseInternalStatus("running", "scheduler.runningRunStatus")
-const REVIEW_ON_EMPTY_STATUS = parseInternalStatus("review-on-empty", "scheduler.reviewOnEmptyStatus")
 
 export type SchedulerTickResult = {
 	spawnedRuns: SchedulerActiveRun[]
@@ -343,9 +342,6 @@ export type SchedulerTickResult = {
 }
 
 const DEFAULT_SPAWN_FAILURE_BACKOFF: SchedulerSpawnFailureBackoffConfig = { initialSeconds: 60, maxSeconds: 480 }
-const REVIEW_ON_EMPTY_LOCK_FILENAME = "review-on-empty.lock"
-const REVIEW_ON_EMPTY_LOCK_REASON = "chain-queue-drained"
-const REVIEW_ON_EMPTY_FALLBACK_ITEM_ID = 0
 
 let fallbackRunSequence = 0
 
@@ -431,17 +427,12 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 
 		// Restore dependency-unblocked terminal items AFTER selection so a freshly-unblocked item is
 		// not also selected in the same tick — it becomes actionable now and is picked up on the next
-		// tick. Running it before review-on-empty / completion keeps the chain from draining or
-		// completing while an item has just become actionable again.
+		// tick. Running it before chain completion keeps the chain from draining or completing while
+		// an item has just become actionable again. #456: the legacy review-on-empty branch retired
+		// here — chain-drain side effects flow through the DSL chain-complete trigger path
+		// (`runPresetChainCompleteTriggerPhases`), which `completeChainIfReady` consults via
+		// `chainCompletionTriggerAllowsCompletion` below.
 		items = await unblockDependencySatisfiedItems(options, chain, items, chainStatuses)
-
-		if (shouldRunReviewOnEmpty(options, chain, items, chainStatuses.terminal)) {
-			const reviewOnEmptyRun = await spawnSchedulerReviewOnEmptyRun(options, chain, items)
-			if (reviewOnEmptyRun !== null) {
-				spawnedRuns.push(reviewOnEmptyRun)
-				continue
-			}
-		}
 
 		if (await completeChainIfReady(options, chain, undefined, chainStatuses.terminal)) completedChainIds.push(chain.id)
 	}
@@ -457,7 +448,6 @@ type SchedulerItemTriggerPhase = {
 
 type SchedulerPhasePlan = {
 	firstPhase: string
-	lastPhase: string
 	nonTriggerPhases: readonly string[]
 	itemTriggerPhases: readonly SchedulerItemTriggerPhase[]
 }
@@ -471,7 +461,7 @@ async function resolvePhasePlanForChainWithItems(
 	chain: ChainRecord,
 	items: readonly ItemRecord[],
 ): Promise<SchedulerPhasePlan> {
-	if (options.phase !== undefined) return { firstPhase: options.phase, lastPhase: options.phase, nonTriggerPhases: [options.phase], itemTriggerPhases: [] }
+	if (options.phase !== undefined) return { firstPhase: options.phase, nonTriggerPhases: [options.phase], itemTriggerPhases: [] }
 	const { preset } = await schedulerLoadedPresetForChainItems(options, chain, items)
 	return buildPhasePlanFromPreset(preset)
 }
@@ -480,14 +470,13 @@ function buildPhasePlanFromPreset(preset: SchedulerLoadedPreset["preset"]): Sche
 	const nonTriggerPhases = preset.phases.flatMap((phase) => phase.trigger === null ? [phase.name] : [])
 	const firstPhase = nonTriggerPhases[0]
 	if (firstPhase === undefined) throw new Error(`preset ${preset.name} has no non-trigger phases`)
-	const lastPhase = nonTriggerPhases[nonTriggerPhases.length - 1] ?? firstPhase
 	const itemTriggerPhases = preset.phases.flatMap((phase): SchedulerItemTriggerPhase[] => {
 		const trigger = phase.trigger
 		if (trigger === null) return []
 		if (!("afterPhase" in trigger)) return []
 		return [{ name: phase.name, afterPhase: trigger.afterPhase, whenStatus: trigger.whenStatus }]
 	})
-	return { firstPhase, lastPhase, nonTriggerPhases, itemTriggerPhases }
+	return { firstPhase, nonTriggerPhases, itemTriggerPhases }
 }
 
 type SelectNextItemAndPhaseInput = {
@@ -1608,7 +1597,11 @@ async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecor
 	if (hasInflightDependency(options, items, effectiveTerminalStatuses)) return false
 	if (!allItemsTerminalIncludingFinalizing(options, chain.id, effectiveTerminalStatuses)) return false
 	if (options.state.finalizingChainIds.has(chain.id)) return false
-	if (!reviewOnEmptyLockExistsForChain(chain, options.loopDataRootOptions)) return false
+	// #456: the legacy `reviewOnEmptyLockExistsForChain` gate is retired with the review-on-empty
+	// path. Chain-drain side effects (the bundled gh-issue-pr-iteration umbrella finalizer, for
+	// example) now flow through `chainCompletionTriggerAllowsCompletion` below — the preset declares
+	// `trigger = { on = "chain-complete" }` and `runPresetChainCompleteTriggerPhases` runs them with
+	// `keep-active` semantics that delay completion as long as the trigger demands it.
 	options.state.finalizingChainIds.add(chain.id)
 	try {
 		// #412 mixed-preset chain: phase plan must come from a representative item's preset (matching
@@ -1932,337 +1925,14 @@ function sanitizeRunIdPhaseSegment(phase: string): string {
 	return replaced === "" ? "phase" : replaced
 }
 
-function makeReviewOnEmptyRunId(chain: ChainRecord): string {
-	return `run-${Date.now()}-${++fallbackRunSequence}-chain-${chain.id}-review-on-empty`
-}
-
-export function reviewOnEmptyLockPathForChainName(chainName: string, options: LoopDataRootOptions | undefined): string {
-	const chainPaths = resolveChainRuntimePaths(chainName, options ?? {})
-	return resolve(chainPaths.chainRoot, REVIEW_ON_EMPTY_LOCK_FILENAME)
-}
-
-export function reviewOnEmptyLockPathForChain(chain: ChainRecord, options: LoopDataRootOptions | undefined): string {
-	return reviewOnEmptyLockPathForChainName(chain.name, options)
-}
-
-function reviewOnEmptyLockExistsForChain(chain: ChainRecord, options: LoopDataRootOptions | undefined): boolean {
-	return existsSync(reviewOnEmptyLockPathForChain(chain, options))
-}
-
-export function serializeSchedulerReviewOnEmptyLock(runId: string, acquiredAt: Date): string {
-	return `${JSON.stringify({ acquiredAt: acquiredAt.toISOString(), runId, reason: REVIEW_ON_EMPTY_LOCK_REASON }, null, "\t")}\n`
-}
-
-function shouldRunReviewOnEmpty(
-	options: SchedulerOptions,
-	chain: ChainRecord,
-	items: readonly ItemRecord[],
-	terminalStatuses: readonly InternalStatus[],
-): boolean {
-	if (items.length === 0) return false
-	if (hasActiveSlotForChain(options.state, chain.id)) return false
-	if (!allItemsTerminalIncludingFinalizing(options, chain.id, terminalStatuses)) return false
-	if (options.state.finalizingChainIds.has(chain.id)) return false
-	if (reviewOnEmptyLockExistsForChain(chain, options.loopDataRootOptions)) return false
-	return true
-}
-
-function pickReviewOnEmptyRepresentativeItem(items: readonly ItemRecord[]): ItemRecord {
-	const sorted = [...items].sort((a, b) => b.updatedAt - a.updatedAt || b.id - a.id)
-	const first = sorted[0]
-	if (first === undefined) throw new Error("scheduler: review-on-empty representative item requested from empty queue")
-	return first
-}
-
-function makeReviewOnEmptyFallbackItem(chain: ChainRecord, representative: ItemRecord, reviewPhase: string): ItemRecord {
-	return {
-		id: REVIEW_ON_EMPTY_FALLBACK_ITEM_ID,
-		chainId: chain.id,
-		issueNumber: 0,
-		repoCwd: representative.repoCwd,
-		status: REVIEW_ON_EMPTY_STATUS,
-		attempts: 0,
-		position: 0,
-		title: null,
-		priority: null,
-		branch: null,
-		pr: null,
-		lastRunId: null,
-		sessionIds: {},
-		issueFile: null,
-		evidenceDir: null,
-		agentCwd: representative.agentCwd,
-		runner: null,
-		phase: reviewPhase,
-		// #412: engine-derived items must inherit the source (representative) item's preset; they may
-		// not silently fall back to the chain's seed preset because the chain may carry items with
-		// different presets.
-		preset: representative.preset,
-		presetPath: representative.presetPath,
-		extra: storedItemExtra({}),
-		createdAt: representative.createdAt,
-		updatedAt: representative.updatedAt,
-		statusUpdatedAt: representative.statusUpdatedAt,
-	}
-}
-
-async function spawnSchedulerReviewOnEmptyRun(
-	options: SchedulerOptions,
-	chain: ChainRecord,
-	items: readonly ItemRecord[],
-): Promise<SchedulerActiveRun | null> {
-	if (items.length === 0) return null
-	const representative = pickReviewOnEmptyRepresentativeItem(items)
-	const slot = getOrCreateSlot(options.state, chain, representative.repoCwd)
-	if (slot.activeRun !== null) return null
-
-	// #412 mixed-preset chain bug: phase plan and preset load must come from the same source. Earlier
-	// shape called resolvePhasePlanForChain(chain) here while the preset was loaded via the representative
-	// item below, so when chain.preset != items[0].preset the rendered run picked phase names from
-	// chain.preset and the preset directory of item.preset — `phase_not_found_in_preset` at spawn. Load
-	// the representative item's preset first, then derive the phase plan from it.
-	const loadedPreset = await schedulerLoadedPresetForItem(options, chain, representative)
-	const phasePlan = options.phase !== undefined
-		? { firstPhase: options.phase, lastPhase: options.phase, nonTriggerPhases: [options.phase], itemTriggerPhases: [] }
-		: buildPhasePlanFromPreset(loadedPreset.preset)
-	const reviewPhase = phasePlan.lastPhase
-	const fallbackItem = makeReviewOnEmptyFallbackItem(chain, representative, reviewPhase)
-	const worktreeManager = options.worktreeManager ?? createGitWorktreeManager(options.loopDataRootOptions)
-	const worktreePath = slot.worktreePath ?? await worktreeManager({ chain, repoCwd: representative.repoCwd, slotKey: slot.key })
-	slot.worktreePath = worktreePath
-
-	const runner = await resolvePhaseRunner(options, { chain, item: fallbackItem, phase: reviewPhase })
-	const runId = options.runIdFactory?.({ chain, item: fallbackItem, phase: reviewPhase }) ?? makeReviewOnEmptyRunId(chain)
-	const startedAt = nowSeconds(options)
-	const presetDir = loadedPreset.presetDir
-	const context: SchedulerSpawnContext = { chain, item: fallbackItem, slot, runId, worktreePath, presetDir, loadedPreset, phase: reviewPhase }
-	const rawPrompt = typeof options.prompt === "string" ? options.prompt : await options.prompt(context)
-	const renderedPrompt = await renderSchedulerSpawnPrompt({
-		rawPrompt,
-		preset: loadedPreset.preset,
-		phase: reviewPhase,
-		chain,
-		item: fallbackItem,
-		runId,
-		worktreePath,
-		loopDataRootOptions: options.loopDataRootOptions,
-		resume: freshResume(),
-	})
-	// #451 unified completion-protocol epilogue — same engine-injected suffix as
-	// the per-item spawn path above. Review-on-empty is a daemon-spawned phase
-	// too, so the agent contract is identical here. #452 dropped the summary-tag
-	// instruction layer that used to sit between renderedPrompt and the epilogue.
-	const runnerPlan = buildRunnerInvocation(
-		runner,
-		renderedPrompt + phaseExitsEpilogue(),
-		freshResume(),
-		invocationPaths(representative.repoCwd, worktreePath, presetDir, resolveLoopDataPaths(options.loopDataRootOptions).root),
-	)
-	await initializeSchedulerRunArtifacts(options, chain, fallbackItem, runId, reviewPhase, startedAt, worktreePath)
-	// #406: review-on-empty agents have no concrete item to write — the fallback item id is the
-	// sentinel `REVIEW_ON_EMPTY_FALLBACK_ITEM_ID` (0). Minting a credential here keeps the
-	// caller-admission gate exhaustive across spawn sites: if the agent attempts to write to a real
-	// item (parallel-slot misfire), the daemon resolves the credential to itemId=0 and the
-	// `wrong-item` deny branch fires.
-	const reviewCredentialContext: SchedulerRunCredentialContext = {
-		chainId: chain.id,
-		itemId: fallbackItem.id,
-		runId,
-		phase: reviewPhase,
-	}
-	const reviewCredential = options.runCredentials?.mint(reviewCredentialContext) ?? null
-	const reviewSpawnEnv: NodeJS.ProcessEnv = {
-		...process.env,
-		[LOOP_DATA_ROOT_ENV]: resolveLoopDataPaths(options.loopDataRootOptions).root,
-	}
-	if (reviewCredential !== null) reviewSpawnEnv[LOOP_RUN_CREDENTIAL_ENV] = reviewCredential.value
-	const child = spawn(runnerPlan.binary, runnerPlan.args, {
-		cwd: worktreePath,
-		stdio: ["ignore", "pipe", "pipe"],
-		detached: true,
-		// Same loop-data-root passthrough as the per-item spawn so the agent's `item update` reaches this daemon.
-		env: reviewSpawnEnv,
-	})
-	const activeRun = attachReviewOnEmptyCloseHandler(
-		options,
-		chain,
-		fallbackItem,
-		slot,
-		runId,
-		worktreePath,
-		startedAt,
-		reviewPhase,
-		child,
-		runner,
-		representative.repoCwd,
-		reviewCredential,
-		reviewCredentialContext,
-	)
-	slot.activeRun = activeRun
-	await emit(options, {
-		type: "agent.spawn",
-		slotKey: slot.key,
-		chainId: chain.id,
-		itemId: fallbackItem.id,
-		runId,
-		phase: reviewPhase,
-		pid: activeRun.pid,
-		worktreePath,
-		presetDir,
-	})
-	await emit(options, {
-		type: "phase.start",
-		ts: nowIso(options),
-		runId,
-		chainId: chain.id,
-		itemId: fallbackItem.id,
-		repoCwd: representative.repoCwd,
-		phase: reviewPhase,
-		pid: activeRun.pid,
-	})
-	return activeRun
-}
-
-function attachReviewOnEmptyCloseHandler(
-	options: SchedulerOptions,
-	chain: ChainRecord,
-	fallbackItem: ItemRecord,
-	slot: SchedulerSlot,
-	runId: string,
-	worktreePath: string,
-	startedAt: number,
-	phase: string,
-	child: ReturnType<typeof spawn>,
-	runner: AgentRunnerSelection,
-	repoCwd: string,
-	// #406: same credential-revocation hookup as `attachRunCloseHandler`. Review-on-empty agents
-	// bind to the sentinel itemId (`REVIEW_ON_EMPTY_FALLBACK_ITEM_ID`); any cross-item write attempt
-	// is then a `wrong-item` deny at the daemon gate.
-	credential: SchedulerRunCredential | null,
-	credentialContext: SchedulerRunCredentialContext,
-): SchedulerActiveRun {
-	const stdout: Buffer[] = []
-	const stderr: Buffer[] = []
-	const outputPaths = schedulerPhaseOutputPaths(options, chain, runId, phase)
-	const outputWriters = createSchedulerPhaseOutputWriters(outputPaths)
-	let lifecycleGc: SchedulerRunLifecycleGc | null = null
-	const closed = new Promise<SchedulerCompletedRun>((resolveClosed, rejectClosed) => {
-		child.stdout?.on("data", (chunk: Buffer) => {
-			stdout.push(chunk)
-			outputWriters.stdout.write(chunk)
-		})
-		child.stderr?.on("data", (chunk: Buffer) => {
-			stderr.push(chunk)
-			outputWriters.stderr.write(chunk)
-		})
-		child.on("error", (error) => {
-			const chunk = Buffer.from(error.message)
-			stderr.push(chunk)
-			outputWriters.stderr.write(chunk)
-		})
-
-		lifecycleGc = installSchedulerRunLifecycleGc(options, child, {
-			chain,
-			item: fallbackItem,
-			runId,
-			phase,
-			stdoutPath: outputPaths.stdoutPath,
-			stderrPath: outputPaths.stderrPath,
-			startedAt,
-		})
-
-		child.on("close", (code) => {
-			lifecycleGc?.cleanup()
-			const pendingCloseHandler = (async (): Promise<SchedulerCompletedRun> => {
-				const exitCode = code ?? 1
-				const stdoutText = Buffer.concat(stdout).toString("utf-8")
-				const stderrText = Buffer.concat(stderr).toString("utf-8")
-				const chainStatuses = await schedulerStatusesForChain(options, chain)
-				// Synthetic review-on-empty / chain-complete trigger run: there is no real item whose status
-				// the agent owns, so the run outcome is recorded from the exit code using the chain's own
-				// status vocabulary (no stdout parsing, no hardcoded literal). This run mutates no item.
-				const status = exitCode === 0 ? (chainStatuses.success[0] ?? chainStatuses.entry) : chainStatuses.entry
-				const endedAt = nowSeconds(options)
-				try {
-					await closeSchedulerPhaseOutputWriters(outputWriters)
-					await writeSchedulerRunCompletionArtifacts(options, {
-						runId,
-						chain,
-						item: fallbackItem,
-						phase,
-						startedAt,
-						endedAt,
-						exitCode,
-						status,
-						pid: child.pid ?? null,
-						worktreePath,
-						stdoutText,
-						stderrText,
-					})
-
-					const lockPath = reviewOnEmptyLockPathForChain(chain, options.loopDataRootOptions)
-					await mkdir(dirname(lockPath), { recursive: true })
-					await writeFile(lockPath, serializeSchedulerReviewOnEmptyLock(runId, new Date()))
-
-					if (slot.activeRun?.runId === runId) slot.activeRun = null
-					const excerpt = await collectObservabilityExcerpt({
-						stdoutPath: outputPaths.stdoutPath,
-						stderrPath: outputPaths.stderrPath,
-					})
-					await emit(options, {
-						type: "agent.exit",
-						slotKey: slot.key,
-						chainId: chain.id,
-						itemId: fallbackItem.id,
-						runId,
-						phase,
-						exitCode,
-						status,
-						excerpt,
-					})
-					await emit(options, {
-						type: "phase.end",
-						ts: nowIso(options),
-						runId,
-						chainId: chain.id,
-						itemId: fallbackItem.id,
-						phase,
-						exitCode,
-						durationSeconds: Math.max(0, endedAt - startedAt),
-						status,
-					})
-					await completeChainIfReady(options, chain, runId, [...chainStatuses.terminal])
-					return { runId, itemId: fallbackItem.id, chainId: chain.id, repoCwd, exitCode, stdout: stdoutText, stderr: stderrText, status }
-				} catch (error) {
-					if (slot.activeRun?.runId === runId) slot.activeRun = null
-					throw error
-				} finally {
-					// #406 review-on-empty parallel: revoke the run credential exactly once on close.
-					if (credential !== null) options.runCredentials?.revoke(credential, credentialContext)
-				}
-			})()
-			options.state.pendingCloseHandlers.add(pendingCloseHandler)
-			void pendingCloseHandler
-				.then(resolveClosed, rejectClosed)
-				.finally(() => {
-					options.state.pendingCloseHandlers.delete(pendingCloseHandler)
-				})
-				.catch(() => undefined)
-		})
-	})
-	const terminate = createRunTerminator(child, closed)
-	return {
-		runId,
-		pid: child.pid ?? null,
-		itemId: fallbackItem.id,
-		chainId: chain.id,
-		repoCwd,
-		worktreePath,
-		startedAt,
-		closed,
-		terminate,
-	}
-}
+// #456: the chain-drain auto-fire family (the dispatch / representative-item / fallback-item /
+// spawn / close-handler functions, the related constants, lock helpers and run-id factory) is
+// retired. Side effects on chain-drain flow exclusively through the preset-declared
+// `trigger = { on = "chain-complete" }` phases, driven by
+// `chainCompletionTriggerAllowsCompletion` → `runPresetChainCompleteTriggerPhases`. The bundled
+// gh-issue-pr-iteration preset's `umbrella-finalizer` phase, declared with
+// `trigger = { on = "chain-complete" }`, gives bundled chains the same drain behavior they had
+// before the role-named auto-fire path existed.
 
 function freshResume(): ResumeDecision {
 	return { kind: "fresh" }
