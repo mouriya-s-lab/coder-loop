@@ -8,10 +8,8 @@ import {
 	createGitWorktreeManager,
 	createSchedulerState,
 	DEFAULT_MAX_ITEM_ATTEMPTS,
-	extractSummaryValue,
 	listActiveRuns,
 	makeRunId,
-	makeRunSummaryTag,
 	renderSchedulerSpawnPrompt,
 	resumeDecisionForItem,
 	reviewOnEmptyLockPathForChain,
@@ -4144,25 +4142,13 @@ process.exitCode = 0
 	}
 
 describe("per-run summary tag", () => {
-	test("makeRunSummaryTag generates summary-{nonce} tags unique per call", () => {
-		const first = makeRunSummaryTag()
-		const second = makeRunSummaryTag()
-		expect(first).toMatch(/^summary-[0-9a-f]{16}$/)
-		expect(second).toMatch(/^summary-[0-9a-f]{16}$/)
-		expect(first).not.toBe(second)
-	})
-
-	test("extractSummaryValue only matches this run's tag, not other nonces or the legacy static tag", () => {
-		const tag = makeRunSummaryTag()
-		const stdoutText = [
-			`<${tag}>did the work</${tag}>`,
-			"<summary-0123456789abcdef>old run</summary-0123456789abcdef>",
-			// retired static tag, built by concatenation so the literal stays out of src/ (#430)
-			`<${["sG7k", "Pq2Z"].join("")}>legacy</${["sG7k", "Pq2Z"].join("")}>`,
-		].join("\n")
-		expect(extractSummaryValue(stdoutText, tag)).toBe("did the work")
-		expect(extractSummaryValue(stdoutText, "summary-ffffffffffffffff")).toBeNull()
-	})
+	// #452: `makeRunSummaryTag` / `extractSummaryValue` and their per-run nonce-tag
+	// contract were retired together with the summary-injection prompt path and the
+	// stdout-driven completion watchdog. The two tests this block used to host (unique
+	// nonce per call, foreign tags ignored) had no production consumer left after the
+	// retirement — both surfaces only mattered for the stdout-summary completion signal.
+	// The successor surface, recycle-zone semantics, is exercised in `daemon.test.ts`
+	// against the real daemon+scheduler integration (acceptance rows #1–#4 there).
 
 	// #448: preset-supplied business key literals must flow through the real
 	// spawn render path (renderSchedulerSpawnPrompt -> buildSchedulerResolveContext

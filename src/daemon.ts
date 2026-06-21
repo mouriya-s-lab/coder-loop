@@ -25,6 +25,7 @@ import {
 	createSchedulerState,
 	listActiveRuns,
 	listPendingCloseHandlers,
+	markRunPendingRecycle,
 	maxItemAttemptsFromChainMetadata,
 	schedulerTick,
 	type SchedulerCompletedRun,
@@ -453,27 +454,47 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 				subject: { kind: "engine" },
 				payload: { signal: event.signal, attemptMs: event.attemptMs, excerpt: event.excerpt },
 			})
-		case "watchdog.armed":
+		case "recycle.pending_entered":
+			// #452 lifecycle: agent wrote item status, recycle clock armed. Carries the
+			// window duration so an observer can pair this with the eventual
+			// `recycle.timeout_kill` or `recycle.natural_exit` event for the same runId.
 			return makeObservabilityEvent({
 				kind: "lifecycle",
-				type: "watchdog.armed",
+				type: "recycle.pending_entered",
 				chain: chain.name,
 				item: event.itemId,
 				runId: event.runId,
 				phase: event.phase,
 				subject: { kind: "engine" },
-				payload: { marker: event.marker, graceMs: event.graceMs },
+				payload: { recycleAfterMs: event.recycleAfterMs },
 			})
-		case "watchdog.fire":
+		case "recycle.timeout_kill":
+			// #452 lifecycle: recycle window elapsed without natural exit; engine SIGKILLed
+			// the process group. Carries the excerpt for diagnostics so an auditor can see
+			// what the wedge was doing without re-reading the run logs.
 			return makeObservabilityEvent({
 				kind: "lifecycle",
-				type: "watchdog.fire",
+				type: "recycle.timeout_kill",
 				chain: chain.name,
 				item: event.itemId,
 				runId: event.runId,
 				phase: event.phase,
 				subject: { kind: "engine" },
-				payload: { signal: event.signal, graceMs: event.graceMs, excerpt: event.excerpt },
+				payload: { signal: event.signal, recycleAfterMs: event.recycleAfterMs, excerpt: event.excerpt },
+			})
+		case "recycle.natural_exit":
+			// #452 lifecycle: child closed during the recycle window without timeout.
+			// Carries `elapsedMs` so the lifecycle stream tells whether agents tend to
+			// exit fast after writing state (small elapsedMs) or sit on the window edge.
+			return makeObservabilityEvent({
+				kind: "lifecycle",
+				type: "recycle.natural_exit",
+				chain: chain.name,
+				item: event.itemId,
+				runId: event.runId,
+				phase: event.phase,
+				subject: { kind: "engine" },
+				payload: { elapsedMs: event.elapsedMs },
 			})
 		case "queue.terminal":
 			return makeObservabilityEvent({
@@ -1575,6 +1596,17 @@ export class CoderLoopDaemon {
 						reason: "item.update",
 					},
 				}))
+				// #452: completion signal switched from stdout marker to state write. An
+				// agent-attributed status write that mutated `item.status` (i.e. survived
+				// the #397 admission gate above and actually transitioned) is "this run is
+				// done" — hand the scheduler the runId so its lifecycle GC can enter the
+				// recycle zone. Operator-path writes do not arm recycle (no per-run window
+				// is meaningful: there is no in-flight run binding the operator's hand).
+				// `markRunPendingRecycle` is idempotent against unknown / already-armed
+				// runIds, so a credential pointing at a run that already closed is harmless.
+				if (caller.kind === "agent") {
+					markRunPendingRecycle(this.schedulerState, caller.runId)
+				}
 			}
 			return { item: itemToJson(updated) }
 		} finally {
@@ -2017,8 +2049,11 @@ export class CoderLoopDaemon {
 		if (scheduler.spawnFailureBackoffForChain !== undefined) options.spawnFailureBackoffForChain = scheduler.spawnFailureBackoffForChain
 		if (scheduler.attemptTimeoutMs !== undefined) options.attemptTimeoutMs = scheduler.attemptTimeoutMs
 		if (scheduler.attemptKillMs !== undefined) options.attemptKillMs = scheduler.attemptKillMs
-		if (scheduler.watchdogGraceMs !== undefined) options.watchdogGraceMs = scheduler.watchdogGraceMs
-		if (scheduler.watchdogKillMs !== undefined) options.watchdogKillMs = scheduler.watchdogKillMs
+		// #452: the retired `watchdogGraceMs`/`watchdogKillMs` knobs configured the
+		// stdout-summary watchdog. Their replacement is the recycle-zone window that
+		// arms only after the daemon observes a successful agent state write.
+		if (scheduler.recycleAfterStateWriteMs !== undefined) options.recycleAfterStateWriteMs = scheduler.recycleAfterStateWriteMs
+		if (scheduler.recycleKillGraceMs !== undefined) options.recycleKillGraceMs = scheduler.recycleKillGraceMs
 		if (scheduler.chainCompleteTrigger !== undefined) options.chainCompleteTrigger = scheduler.chainCompleteTrigger
 		else if (scheduler.chainCompleteTriggerForChain !== undefined) options.chainCompleteTriggerForChain = scheduler.chainCompleteTriggerForChain
 		else {

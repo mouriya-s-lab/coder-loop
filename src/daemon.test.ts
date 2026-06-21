@@ -56,11 +56,55 @@ const FakeRunnerRunningEventBoundary = arkType({
 // integration tests use fake runners, so the fake runner reproduces the real agent's
 // `coder-loop item update --status` by writing the test-computed `writeStatus` straight
 // into the shared SQLite store (the scheduler then reads it back as the source of truth).
+// This is the legacy bypass — it sidesteps the daemon's #397 admission gate and is the
+// right shape for tests that exercise the iteration phase (which has no `[[phases.exits]]`
+// declared and would otherwise default-deny every status write).
 const FAKE_RUNNER_STATUS_WRITE_SNIPPET = `if (typeof input.writeStatus === "string" && input.itemId > 0 && process.env.CODER_LOOP_DATA_DIR) {
 	const { openSqliteStateStore } = await import(${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))})
 	const store = openSqliteStateStore({ loopDataRoot: process.env.CODER_LOOP_DATA_DIR })
 	store.updateItem(input.itemId, { status: input.writeStatus, updatedAt: Math.floor(Date.now() / 1000) })
 	store.close()
+}`
+
+// #452 credentialed write path. Used by recycle-zone tests that need the write to flow
+// through the real daemon socket so `handleItemUpdate` runs admission and calls
+// `markRunPendingRecycle`. The daemon's caller-admission binds the credential to a
+// specific runId, so this branch fires only when the scheduler injected
+// `CODER_LOOP_RUN_CRED` into the spawn env — which it always does in production, but is
+// gated by the test fixture installing a presetDir whose target phase declares
+// `[[phases.exits]]` for the requested status (otherwise the #397 default-deny gate
+// rejects the write before the recycle hook can fire).
+const FAKE_RUNNER_CREDENTIALED_STATUS_WRITE_SNIPPET = `if (typeof input.writeStatus === "string" && input.itemId > 0 && process.env.CODER_LOOP_DATA_DIR) {
+	const credential = process.env.CODER_LOOP_RUN_CRED
+	if (typeof credential === "string" && credential.length > 0) {
+		const { createConnection } = await import("node:net")
+		const { randomUUID } = await import("node:crypto")
+		const socketPath = process.env.CODER_LOOP_DATA_DIR + "/daemon.sock"
+		await new Promise((resolveSend, rejectSend) => {
+			const socket = createConnection(socketPath)
+			let buffer = ""
+			socket.setEncoding("utf-8")
+			socket.on("connect", () => {
+				socket.write(JSON.stringify({
+					id: randomUUID(),
+					command: "item.update",
+					args: { itemId: input.itemId, status: input.writeStatus, agentCredential: credential },
+				}) + "\\n")
+			})
+			socket.on("data", (chunk) => {
+				buffer += chunk
+				if (buffer.indexOf("\\n") === -1) return
+				socket.destroy()
+				resolveSend(undefined)
+			})
+			socket.on("error", rejectSend)
+		})
+	} else {
+		const { openSqliteStateStore } = await import(${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))})
+		const store = openSqliteStateStore({ loopDataRoot: process.env.CODER_LOOP_DATA_DIR })
+		store.updateItem(input.itemId, { status: input.writeStatus, updatedAt: Math.floor(Date.now() / 1000) })
+		store.close()
+	}
 }`
 
 // #405: with the stdout verdict parser retired, the fake runner no longer derives
@@ -3203,10 +3247,12 @@ attemptTimeoutSeconds = 3600
 			const exitEvent = events.events.find((event) => event.type === "agent.exit")
 			if (exitEvent?.type !== "agent.exit") throw new Error("expected agent.exit event")
 			expect(exitEvent.payload.excerpt.stdout.path).toBe(paths.runPhaseStdoutFile(runId, "iteration"))
-			// #405: fake-runner default summary line was retired with the verdict family; the
-			// excerpt sanity check now asserts the neutral "PHASE DONE:" stamp the fake runner
-			// emits as its last stdout record.
-			expect(exitEvent.payload.excerpt.stdout.records.at(-1)).toContain("PHASE DONE:")
+			// #452: the fake runner's only stdout line (other than test-provided
+			// `stdoutLines`) is now `done:<itemId>`. The retired "PHASE DONE:" line was
+			// part of the stdout-summary contract that #452 removed wholesale — the engine
+			// stopped reading stdout for completion classification, so the fake runner
+			// stopped emitting completion-marker lines too.
+			expect(exitEvent.payload.excerpt.stdout.records.at(-1)).toContain("done:")
 			expect(exitEvent.payload.excerpt.stderr.path).toBe(paths.runPhaseStderrFile(runId, "iteration"))
 			expect(exitEvent.payload.excerpt.stderr.records).toEqual([])
 		} finally {
@@ -4442,159 +4488,81 @@ process.exitCode = 0
 		}
 	})
 
-	test("scheduler extracts summary from stdout and stores in run extra", async () => {
-		const fixture = await startFixture("summary-extraction")
-		try {
-			const chain = record(expectOk(await request(fixture, "chain.create", {
-				name: "summary-test-chain",
-				repository: "test/repo",
-			})).chain)
-			const chainId = numberValue(chain.id)
-			const summaryContent = "fixed login bug, added unit tests"
-			const added = record(expectOk(await request(fixture, "item.add", {
-				chainId,
-				issueNumber: 201,
-				repoCwd: REPO_ROOT,
-				extra: { sleepMs: 5, exitCode: 0, summaryWrap: summaryContent },
-			})).item)
-			const itemId = numberValue(added.id)
-
-			const agentExit = await waitFor(
-				async () => fixture.schedulerEvents.find(
-					(e): e is Extract<SchedulerEvent, { type: "agent.exit" }> =>
-						e.type === "agent.exit" && e.itemId === itemId
-				) ?? null,
-				(e) => e !== null,
-			) as Extract<SchedulerEvent, { type: "agent.exit" }>
-			expect(agentExit.exitCode).toBe(0)
-
-				const run = await waitFor(
-					async () => {
-						const item = await readItem(fixture.loopDataRoot, chainId, 201)
-						if (item?.lastRunId === undefined || item.lastRunId === null) return null
-						return await readRun(fixture.loopDataRoot, item.lastRunId)
-					},
-					(run): run is NonNullable<typeof run> => run !== null && itemExtraToJsonObject(run.extra).summary !== undefined,
-				)
-				expect(run).not.toBeNull()
-				expect(run!.extra).toBeDefined()
-				expect(itemExtraToJsonObject(run!.extra).summary).toBe(summaryContent)
-		} finally {
-			await fixture.daemon.stop()
-		}
-	})
-
-	test("watchdog kills process after summary close marker", async () => {
-		const fixture = await startFixture("watchdog-kill", {
-			schedulerConfig: { maxItemAttempts: 1, watchdogGraceMs: 100, watchdogKillMs: 10 },
+	// #452 acceptance row 1: the engine no longer asks the agent to wrap a summary in
+	// nonce tags. Spawn captures the rendered prompt and asserts neither the Chinese
+	// summary instruction text nor any `<summary-...>` close-marker form appears.
+	// `beforeStart` overwrites the default fake runner with a prompt-capturing one that
+	// dumps `-p` arg straight to disk so we can inspect the engine's finalPrompt directly.
+	test("(#452) finalPrompt contains no summary-tag instruction", async () => {
+		const promptCaptureKey = { value: "" }
+		const fixture = await startFixture("summary-injection-retired", {
+			beforeStart: async ({ root, fakeRunner }) => {
+				const capturePath = resolve(root, "captured-final-prompt.txt")
+				promptCaptureKey.value = capturePath
+				await writePromptCaptureRunner(fakeRunner, capturePath)
+			},
 		})
 		try {
 			const chain = record(expectOk(await request(fixture, "chain.create", {
-				name: "watchdog-test-chain",
+				name: "summary-injection-chain",
 				repository: "test/repo",
 			})).chain)
 			const chainId = numberValue(chain.id)
-			const added = record(expectOk(await request(fixture, "item.add", {
+			expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 301,
+				issueNumber: 4521,
 				repoCwd: REPO_ROOT,
-				extra: {
-					sleepMs: 5,
-					exitCode: 0,
-					summaryWrap: "watchdog work",
-					extraSleepAfterSummaryMs: 500,
+				extra: { sleepMs: 5, exitCode: 0 },
+			}))
+			const captured = await waitFor(
+				async () => {
+					try { return await readFile(promptCaptureKey.value, "utf-8") } catch { return "" }
 				},
-			})).item)
-			const itemId = numberValue(added.id)
-
-			const agentExit = await waitFor(
-				async () => fixture.schedulerEvents.find(
-					(e): e is Extract<SchedulerEvent, { type: "agent.exit" }> =>
-						e.type === "agent.exit" && e.itemId === itemId
-				) ?? null,
-				(e) => e !== null,
-			) as Extract<SchedulerEvent, { type: "agent.exit" }>
-			expect(agentExit.exitCode).toBe(1)
-
-				const item = await readItem(fixture.loopDataRoot, chainId, 301)
-				const run = await readRun(fixture.loopDataRoot, item?.lastRunId ?? "")
-				expect(run?.extra).toBeDefined()
-				expect(run === null ? undefined : itemExtraToJsonObject(run.extra).summary).toBe("watchdog work")
-		} finally {
-			await fixture.daemon.stop()
-		}
-	})
-
-	test("summary tags are per-run nonces: two spawns in the same daemon get different tags", async () => {
-		const fixture = await startFixture("summary-nonce-unique")
-		try {
-			const chain = record(expectOk(await request(fixture, "chain.create", {
-				name: "summary-nonce-chain",
-				repository: "test/repo",
-			})).chain)
-			const chainId = numberValue(chain.id)
-			for (const issueNumber of [211, 212]) {
-				expectOk(await request(fixture, "item.add", {
-					chainId,
-					issueNumber,
-					repoCwd: REPO_ROOT,
-					extra: { sleepMs: 5, exitCode: 0 },
-				}))
-			}
-
-			const exits = await waitFor(
-				async () => fixture.schedulerEvents.filter((e) => e.type === "agent.exit"),
-				(events) => events.length >= 2,
+				(value) => value.length > 0,
 			)
-			expect(exits.length).toBeGreaterThanOrEqual(2)
-
-			const startEvents = (await readFile(fixture.eventLog, "utf-8"))
-				.split("\n")
-				.filter((line) => line.trim() !== "")
-				.map((line) => JSON.parse(line) as BoundaryRecord)
-				.filter((event) => event.type === "start")
-			expect(startEvents.length).toBeGreaterThanOrEqual(2)
-			const tags = startEvents.map((event) => event.summaryTag)
-			for (const tag of tags) {
-				expect(typeof tag).toBe("string")
-				expect(tag as string).toMatch(/^summary-[0-9a-f]{16}$/)
-			}
-			expect(new Set(tags).size).toBe(tags.length)
+			expect(captured.includes("包裹一段总结")).toBe(false)
+			expect(/<summary-[0-9a-f]+>/.test(captured)).toBe(false)
+			expect(/<\/summary-[0-9a-f]+>/.test(captured)).toBe(false)
 		} finally {
 			await fixture.daemon.stop()
 		}
 	})
 
-	test("foreign summary close markers (other nonces, legacy static tag) neither arm the watchdog nor get captured", async () => {
-		// watchdogGraceMs is tiny: if any of the replayed markers armed the watchdog, the
-		// post-summary sleep would get the process killed (exitCode 1, like the kill test above).
-		const fixture = await startFixture("summary-foreign-tag", {
-			schedulerConfig: { maxItemAttempts: 1, watchdogGraceMs: 50, watchdogKillMs: 10 },
+	// #452 acceptance row 2: an agent that writes status through the credentialed daemon
+	// path and then stays alive past the recycle window MUST be SIGKILLed by the engine.
+	// The recycle window is tiny (60ms) so the fake runner — sleeping 800ms after the
+	// state write — cannot exit naturally before the window expires.
+	// Note: scheduler `phase: "review"` so the only spawned phase declares
+	// `[[phases.exits]]` for `done`. The iteration phase has no `[[phases.exits]]`
+	// declared (#397 default-deny) and would reject the agent-attributed write,
+	// defeating the recycle test by preventing the markRunPendingRecycle hook.
+	test("(#452) recycle zone SIGKILLs process after state write + timeout", async () => {
+		const fixture = await startFixture("recycle-timeout-kill", {
+			schedulerConfig: {
+				maxItemAttempts: 1,
+				recycleAfterStateWriteMs: 60,
+				recycleKillGraceMs: 10,
+				phase: "review",
+			},
+			beforeStart: async ({ fakeRunner }) => {
+				await writeCredentialedFakeRunner(fakeRunner)
+			},
 		})
 		try {
 			const chain = record(expectOk(await request(fixture, "chain.create", {
-				name: "summary-foreign-tag-chain",
+				name: "recycle-timeout-chain",
 				repository: "test/repo",
 			})).chain)
 			const chainId = numberValue(chain.id)
-			// Built by concatenation so the retired static tag literal never reappears in src/ (#430).
-			const legacyTag = ["sG7k", "Pq2Z"].join("")
-			const foreignNonceTag = "summary-0123456789abcdef"
-			const replayedLines = [
-				// claude-style raw text replaying a foreign-nonce summary and the legacy static tag
-				`quoted transcript: <${foreignNonceTag}>old run summary</${foreignNonceTag}> and <${legacyTag}>legacy</${legacyTag}>`,
-				// codex-style JSON event line carrying the same foreign close markers inside the payload
-				JSON.stringify({ type: "agent_message", text: `</${foreignNonceTag}> </${legacyTag}>` }),
-			].join("\n")
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 311,
+				issueNumber: 4522,
 				repoCwd: REPO_ROOT,
 				extra: {
 					sleepMs: 5,
 					exitCode: 0,
-					summary: replayedLines,
-					extraSleepAfterSummaryMs: 400,
+					// review-phase default writeStatus is "done"; keep that and ride the post-write sleep.
+					extraSleepAfterStatusWriteMs: 800,
 				},
 			})).item)
 			const itemId = numberValue(added.id)
@@ -4602,16 +4570,160 @@ process.exitCode = 0
 			const agentExit = await waitFor(
 				async () => fixture.schedulerEvents.find(
 					(e): e is Extract<SchedulerEvent, { type: "agent.exit" }> =>
-						e.type === "agent.exit" && e.itemId === itemId
+						e.type === "agent.exit" && e.itemId === itemId,
+				) ?? null,
+				(e) => e !== null,
+			) as Extract<SchedulerEvent, { type: "agent.exit" }>
+			expect(agentExit.exitCode).not.toBe(0)
+
+			// Lifecycle stream carries pending_entered → timeout_kill for this run.
+			const pendingEntered = fixture.schedulerEvents.find(
+				(e): e is Extract<SchedulerEvent, { type: "recycle.pending_entered" }> =>
+					e.type === "recycle.pending_entered" && e.itemId === itemId,
+			)
+			const timeoutKill = fixture.schedulerEvents.find(
+				(e): e is Extract<SchedulerEvent, { type: "recycle.timeout_kill" }> =>
+					e.type === "recycle.timeout_kill" && e.itemId === itemId,
+			)
+			expect(pendingEntered).toBeDefined()
+			expect(timeoutKill).toBeDefined()
+			expect(timeoutKill?.signal).toBe("SIGKILL")
+			expect(timeoutKill?.recycleAfterMs).toBe(60)
+
+			// The agent's status write is preserved as the run's terminal outcome — kill happened
+			// AFTER the write was admitted, so the item carries the written status.
+			const item = await readItem(fixture.loopDataRoot, chainId, 4522)
+			expect(item?.status).toBe("done")
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	// #452 acceptance row 3: an agent that writes status and exits cleanly within the
+	// recycle window is NOT killed. The lifecycle stream classifies the close as
+	// `recycle.natural_exit`. The previous summary-extraction test that asserted
+	// run.extra.summary === <content> was retired with the summary capture surface;
+	// nothing in production consumes that field.
+	test("(#452) recycle zone admits natural exit when agent closes within window", async () => {
+		const fixture = await startFixture("recycle-natural-exit", {
+			schedulerConfig: {
+				maxItemAttempts: 1,
+				recycleAfterStateWriteMs: 5_000,
+				phase: "review",
+			},
+			beforeStart: async ({ fakeRunner }) => {
+				await writeCredentialedFakeRunner(fakeRunner)
+			},
+		})
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "recycle-natural-exit-chain",
+				repository: "test/repo",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			const added = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 4523,
+				repoCwd: REPO_ROOT,
+				extra: { sleepMs: 5, exitCode: 0 },
+			})).item)
+			const itemId = numberValue(added.id)
+
+			const agentExit = await waitFor(
+				async () => fixture.schedulerEvents.find(
+					(e): e is Extract<SchedulerEvent, { type: "agent.exit" }> =>
+						e.type === "agent.exit" && e.itemId === itemId,
 				) ?? null,
 				(e) => e !== null,
 			) as Extract<SchedulerEvent, { type: "agent.exit" }>
 			expect(agentExit.exitCode).toBe(0)
 
-				const item = await readItem(fixture.loopDataRoot, chainId, 311)
-				const run = await readRun(fixture.loopDataRoot, item?.lastRunId ?? "")
-				expect(run).not.toBeNull()
-				expect(run === null ? undefined : itemExtraToJsonObject(run.extra).summary).toBeUndefined()
+			const pendingEntered = fixture.schedulerEvents.find(
+				(e): e is Extract<SchedulerEvent, { type: "recycle.pending_entered" }> =>
+					e.type === "recycle.pending_entered" && e.itemId === itemId,
+			)
+			const naturalExit = fixture.schedulerEvents.find(
+				(e): e is Extract<SchedulerEvent, { type: "recycle.natural_exit" }> =>
+					e.type === "recycle.natural_exit" && e.itemId === itemId,
+			)
+			const timeoutKill = fixture.schedulerEvents.find(
+				(e): e is Extract<SchedulerEvent, { type: "recycle.timeout_kill" }> =>
+					e.type === "recycle.timeout_kill" && e.itemId === itemId,
+			)
+			expect(pendingEntered).toBeDefined()
+			expect(naturalExit).toBeDefined()
+			expect(timeoutKill).toBeUndefined()
+
+			// The run extra MUST NOT carry a captured `summary` field — that surface is gone.
+			const item = await readItem(fixture.loopDataRoot, chainId, 4523)
+			const run = await readRun(fixture.loopDataRoot, item?.lastRunId ?? "")
+			expect(run === null ? undefined : itemExtraToJsonObject(run.extra).summary).toBeUndefined()
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	// #452 acceptance row 4 part A: an agent that emits forged close-marker shapes on
+	// stdout but NEVER writes state, NEVER exits, gets time-base reclaimed by the
+	// existing attempt-timeout fallback (not by anything that read stdout). The recycle
+	// window is set huge — it must never fire — and the attempt timer reclaims this run.
+	test("(#452) stdout content (including forged tags) does not arm recycle; attempt timeout reclaims", async () => {
+		const fixture = await startFixture("recycle-stdout-zero-effect", {
+			schedulerConfig: {
+				maxItemAttempts: 1,
+				attemptTimeoutMs: 150,
+				attemptKillMs: 10,
+				recycleAfterStateWriteMs: 60_000,
+			},
+		})
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "recycle-stdout-zero-effect-chain",
+				repository: "test/repo",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			// Tag literal built by concatenation so retired tag string never reappears in src/.
+			const legacyTag = ["sG7k", "Pq2Z"].join("")
+			const forgedTag = "summary-0123456789abcdef"
+			const added = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 4524,
+				repoCwd: REPO_ROOT,
+				extra: {
+					// Sleep long enough that the attempt timeout — not natural exit — closes it.
+					sleepMs: 3_000,
+					exitCode: 0,
+					// No writeStatus → no state write → recycle MUST stay disarmed.
+					writeStatus: null,
+					stdoutLines: [
+						`quoted transcript: <${forgedTag}>old summary</${forgedTag}> and <${legacyTag}>legacy</${legacyTag}>`,
+						JSON.stringify({ type: "agent_message", text: `</${forgedTag}> </${legacyTag}>` }),
+					],
+				},
+			})).item)
+			const itemId = numberValue(added.id)
+
+			const agentExit = await waitFor(
+				async () => fixture.schedulerEvents.find(
+					(e): e is Extract<SchedulerEvent, { type: "agent.exit" }> =>
+						e.type === "agent.exit" && e.itemId === itemId,
+				) ?? null,
+				(e) => e !== null,
+			) as Extract<SchedulerEvent, { type: "agent.exit" }>
+			expect(agentExit.exitCode).not.toBe(0)
+
+			// No recycle events at all for this run — stdout content had zero effect.
+			const recycleEvents = fixture.schedulerEvents.filter((event) =>
+				(event.type === "recycle.pending_entered" || event.type === "recycle.timeout_kill" || event.type === "recycle.natural_exit")
+				&& event.itemId === itemId,
+			)
+			expect(recycleEvents.length).toBe(0)
+			// The attempt-timeout fallback reclaimed it instead.
+			const attemptTimeout = fixture.schedulerEvents.find(
+				(e): e is Extract<SchedulerEvent, { type: "attempt.timeout" }> =>
+					e.type === "attempt.timeout" && e.itemId === itemId,
+			)
+			expect(attemptTimeout).toBeDefined()
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -5437,9 +5549,13 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 					exitCode: typeof extra.exitCode === "number" ? extra.exitCode : 0,
 					writeStatus: daemonFakeRunnerWriteStatus(phase, extra),
 				}
-				if (Object.prototype.hasOwnProperty.call(extra, "summary")) payload.summary = extra.summary
-				if (Object.prototype.hasOwnProperty.call(extra, "summaryWrap")) payload.summaryWrap = extra.summaryWrap
-				if (Object.prototype.hasOwnProperty.call(extra, "extraSleepAfterSummaryMs")) payload.extraSleepAfterSummaryMs = extra.extraSleepAfterSummaryMs
+				// #452: the prompt forwards optional stdout-fuzz / recycle-sleep knobs the test
+				// uses to exercise recycle semantics. `stdoutLines` lets a fixture emit arbitrary
+				// stdout (including forged close-marker shapes) — protects acceptance row 4's
+				// "stdout content has zero effect" claim. `extraSleepAfterStatusWriteMs` keeps
+				// the agent alive past the status write, exercising the recycle window.
+				if (Object.prototype.hasOwnProperty.call(extra, "stdoutLines")) payload.stdoutLines = extra.stdoutLines
+				if (Object.prototype.hasOwnProperty.call(extra, "extraSleepAfterStatusWriteMs")) payload.extraSleepAfterStatusWriteMs = extra.extraSleepAfterStatusWriteMs
 				return JSON.stringify(payload)
 			},
 			chainCompleteTriggerForChain: options.chainCompleteTriggerForChain ?? (() => null),
@@ -5705,6 +5821,19 @@ function gitOutput(cwd: string, args: readonly string[]): string {
 }
 
 async function writeFakeRunner(path: string): Promise<void> {
+	// #452: the previous fake runner derived a per-run summary tag from the prompt and
+	// wrapped a `summaryWrap` payload in it. Both inputs are gone — the scheduler no
+	// longer injects a tag instruction (acceptance row 1) and the engine no longer
+	// reads stdout for completion classification (acceptance row 4). The new shape:
+	//   1. start event
+	//   2. sleep
+	//   3. stdout lines the test wants (including forged tags via stdoutLines for
+	//      acceptance row 4's stdout-zero-effect proof)
+	//   4. status write through the legacy direct-SQLite bypass (admission-skipping)
+	//   5. optional post-status sleep to exercise the recycle window
+	//   6. exit
+	// Use `writeCredentialedFakeRunner` for the credentialed-write variant that flows
+	// through the daemon socket and exercises the recycle hook.
 	await writeFile(
 		path,
 		`import { appendFile } from "node:fs/promises"
@@ -5712,20 +5841,45 @@ async function writeFakeRunner(path: string): Promise<void> {
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
 const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
-// The scheduler appends a per-run nonce summary instruction to the prompt; derive this
-// run's tag from it the same way a real agent would.
-const runSummaryTag = prompt.match(/<(summary-[0-9a-f]+)>/)?.[1] ?? null
 const writeLine = (line) => Bun.write(Bun.stdout, line + "\\n")
-await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd(), summaryTag: runSummaryTag }) + "\\n")
+await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
 await new Promise((resolve) => setTimeout(resolve, input.sleepMs))
 await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
 await writeLine("done:" + input.itemId)
-const summary = Object.prototype.hasOwnProperty.call(input, "summary") ? input.summary : "PHASE DONE: itemId=" + input.itemId + " reason=fake-runner default"
-if (summary !== null) await writeLine(summary)
-if (typeof input.summaryWrap === "string" && runSummaryTag !== null) await writeLine("<" + runSummaryTag + ">" + input.summaryWrap + "</" + runSummaryTag + ">")
-const extraSleepAfterSummary = Object.prototype.hasOwnProperty.call(input, "extraSleepAfterSummaryMs") ? input.extraSleepAfterSummaryMs : 0
-if (extraSleepAfterSummary > 0) await new Promise((resolve) => setTimeout(resolve, extraSleepAfterSummary))
+if (Array.isArray(input.stdoutLines)) {
+	for (const line of input.stdoutLines) await writeLine(line)
+}
 ${FAKE_RUNNER_STATUS_WRITE_SNIPPET}
+const extraSleepAfterStatusWrite = typeof input.extraSleepAfterStatusWriteMs === "number" ? input.extraSleepAfterStatusWriteMs : 0
+if (extraSleepAfterStatusWrite > 0) await new Promise((resolve) => setTimeout(resolve, extraSleepAfterStatusWrite))
+process.exitCode = input.exitCode
+`,
+	)
+}
+
+// #452 credentialed variant. Routes the status write through the daemon socket so the
+// real admission gate runs and `markRunPendingRecycle` fires for the bound runId. The
+// recycle-zone tests use this variant so the production lifecycle they exercise matches
+// the lifecycle a real agent goes through.
+async function writeCredentialedFakeRunner(path: string): Promise<void> {
+	await writeFile(
+		path,
+		`import { appendFile } from "node:fs/promises"
+
+const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+const writeLine = (line) => Bun.write(Bun.stdout, line + "\\n")
+await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
+await new Promise((resolve) => setTimeout(resolve, input.sleepMs))
+await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
+await writeLine("done:" + input.itemId)
+if (Array.isArray(input.stdoutLines)) {
+	for (const line of input.stdoutLines) await writeLine(line)
+}
+${FAKE_RUNNER_CREDENTIALED_STATUS_WRITE_SNIPPET}
+const extraSleepAfterStatusWrite = typeof input.extraSleepAfterStatusWriteMs === "number" ? input.extraSleepAfterStatusWriteMs : 0
+if (extraSleepAfterStatusWrite > 0) await new Promise((resolve) => setTimeout(resolve, extraSleepAfterStatusWrite))
 process.exitCode = input.exitCode
 `,
 	)
