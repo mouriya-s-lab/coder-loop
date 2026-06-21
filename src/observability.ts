@@ -80,6 +80,12 @@ const ObservabilityEventTypeBoundary = arkType.or(
 	// phase-exit path emits `chain.status` plus this lifecycle event with the originating
 	// (runId, phase, itemId, issueNumber) bound.
 	arkType.unit("chain.stop.from_phase_exit"),
+	// #407: item.add / item.batchAdd per-phase rights admission. One event per create request
+	// (allow or deny). Operator path emits with reason=operator; agent path emits with
+	// reason=agent-allowed / no-create-grant / no-rights-segment. Pairs with
+	// `item.mutation.caller_admission` (mutate gate) and `item.status.write_admission` (transition
+	// gate) to give the auditor a three-leg replay of the item-mutation surface.
+	arkType.unit("item.add.rights_admission"),
 )
 
 const PresetPlaceholderDirectionBoundary = arkType.or(
@@ -447,6 +453,29 @@ const ObservabilityEventBoundary = arkType.or(
 			terminatedRunIds: "string[]",
 		},
 	},
+	{
+		...EventBaseBoundary,
+		kind: arkType.unit("audit"),
+		type: arkType.unit("item.add.rights_admission"),
+		// #407 rights admission. `claimedPhase` is the agent's bound phase from the credential
+		// (null on the operator path); `presetName` is the new item's preset (bundled name or
+		// absolute presetPath, identical to how the per-item preset is declared by the request).
+		// `reason` enumerates the four mutually-exclusive outcomes — operator (always allow),
+		// agent-allowed (rights segment declared createItems=true on caller phase),
+		// no-create-grant (rights segment present but createItems missing or false),
+		// no-rights-segment (rights segment absent or all-default; matches #407 acceptance #4).
+		payload: {
+			"claimedPhase": arkType.or("string", "null"),
+			presetName: "string",
+			outcome: arkType.or(arkType.unit("allow"), arkType.unit("deny")),
+			reason: arkType.or(
+				arkType.unit("operator"),
+				arkType.unit("agent-allowed"),
+				arkType.unit("no-create-grant"),
+				arkType.unit("no-rights-segment"),
+			),
+		},
+	},
 )
 
 export type ObservabilityEvent = typeof ObservabilityEventBoundary.infer
@@ -662,6 +691,12 @@ function renderAuditEvent(event: Extract<ObservabilityEvent, { kind: "audit" }>)
 			// #405: render shape names the selected exit branch + the phase's declared options so
 			// a default-deny rejection reads end-to-end without re-loading the preset.
 			return `${event.ts} audit item.exit.selected chain=${event.chain ?? "-"} item=${event.item ?? event.payload.itemId} run=${event.runId ?? "-"} phase=${event.payload.phase} kind=${event.payload.selectionKind} action=${event.payload.selectedAction} outcome=${event.payload.outcome} reason=${event.payload.reason} declaredChainActions=${event.payload.declaredChainActions.join(",") || "-"}`
+		case "item.add.rights_admission":
+			// #407: render shape names the new item's preset (where the rights live) and the
+			// caller's bound phase (when the agent path runs). `claimedPhase=-` marks the operator
+			// path (always allowed). The reason field is the most useful filter — agents looking
+			// at deny lines want to know "no-create-grant" vs "no-rights-segment" at a glance.
+			return `${event.ts} audit item.add.rights_admission chain=${event.chain ?? "-"} preset=${event.payload.presetName} claimedPhase=${event.payload.claimedPhase ?? "-"} outcome=${event.payload.outcome} reason=${event.payload.reason}`
 		default:
 			return assertNever(event)
 	}
