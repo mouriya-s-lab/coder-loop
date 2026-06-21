@@ -24,12 +24,14 @@ Non-zero exit or verification not showing the intended status = the write did no
 
 ## Transitions
 
-- `retry` → `--status changes_requested`. Add `--field-json '{"branch":"<verified>","pr":123}'` only for verified non-empty values.
-- `expanded incomplete parent` → first insert the child batch, then set the parent `--status changes_requested`; leave the parent GitHub issue open. Batch insertion: read latest items with `coder-loop item list <CHAIN_NAME> --json`; skip child numbers already queued; add via `coder-loop item batch-add <CHAIN_NAME> --items-json '<json-array>'`. Since #412, every child item JSON must declare `preset` (or `presetPath`); inherit the parent item's preset by setting `"preset": "<the parent's preset name>"` so the child renders against the same preset family the parent assumed. If the parent sits before the new children, move children forward with `coder-loop item reorder <CHAIN_NAME> --issue <child> --position <n>` so they are selected before the parent retry and before older queued siblings.
-- `accepted_pr` → only after PR merge AND issue close both succeeded: `--status done --field-json '{"pr":123}'`.
-- `accepted_no_pr` → only after issue close succeeded: `--status done`.
-- `skip` → only after issue close succeeded: `--status moot`.
-- `blocked` → `--status blocked --field-json '{"extraPatch":{"blockerRepo":"<owner/repo>","blockerRef":"<ref>"}}'`.
+Resolve the status name for each verdict from the preset metadata, not from this fragment: run `coder-loop item exits <CHAIN_NAME> --issue <ISSUE> --agent-run-id <RUN_ID> --agent-phase review --json` to list the allowed status set for the review phase, then pick the status whose `when` text matches the verdict you reached. The `--status <chosen>` value below is described in semantic terms — the literal name comes from your `exits` query.
+
+- `retry` → write the preset's retry continuable status (the status the engine restores `current: null` items to for re-iteration). Add `--field-json '{"branch":"<verified>","pr":123}'` only for verified non-empty values.
+- `expanded incomplete parent` → first insert the child batch, then set the parent to the same retry continuable status `retry` writes; leave the parent GitHub issue open. Batch insertion: read latest items with `coder-loop item list <CHAIN_NAME> --json`; skip child numbers already queued; add via `coder-loop item batch-add <CHAIN_NAME> --items-json '<json-array>'`. Since #412, every child item JSON must declare `preset` (or `presetPath`); inherit the parent item's preset by setting `"preset": "<the parent's preset name>"` so the child renders against the same preset family the parent assumed. If the parent sits before the new children, move children forward with `coder-loop item reorder <CHAIN_NAME> --issue <child> --position <n>` so they are selected before the parent retry and before older queued siblings.
+- `accepted_pr` → only after PR merge AND issue close both succeeded: write the preset's success-terminal status (member of `[statuses].success`) and `--field-json '{"pr":123}'`.
+- `accepted_no_pr` → only after issue close succeeded: write the preset's success-terminal status.
+- `skip` → only after issue close succeeded: write the preset's "no-longer-applicable" terminal status (the one the `moot` verdict's `when` text marks).
+- `blocked` → write the preset's blocked terminal status with `--field-json '{"extraPatch":{"blockerRepo":"<owner/repo>","blockerRef":"<ref>"}}'`.
 
 If merge fails, close fails, the issue remains open, checks are not green, or expansion fails: do not write a terminal status — keep the item actionable with exact feedback.
 

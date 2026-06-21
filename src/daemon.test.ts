@@ -1520,7 +1520,19 @@ attemptTimeoutSeconds = 3600
 				store.close()
 			}
 
-			for (const status of ["in_progress", "changes_requested", "blocked", "moot", "done", "exhausted"]) {
+			// #404: `in_progress` is no longer a member of the preset's status vocabulary, so it
+			// falls through the earlier vocabulary gate (`admitItemStatusVocabularyForRequest`)
+			// before the phase gate ever runs — the rejection details carry just the requested
+			// status (the vocabulary gate's shape) rather than the phase-gate's
+			// `{ phase, status, allowed }`. The remaining statuses are still vocab-valid and
+			// reach the phase gate, where iteration's empty `[[phases.exits]]` set denies them.
+			const vocabRejected = await request(fixture, "item.update", { itemId: iterationItemId, status: "in_progress" })
+			expectInvalid(vocabRejected)
+			if (!vocabRejected.ok) {
+				expect(vocabRejected.error.details).toEqual({ status: "in_progress" })
+				expect(vocabRejected.error.message).toContain("item status must be one of:")
+			}
+			for (const status of ["changes_requested", "blocked", "moot", "done", "exhausted"]) {
 				const rejected = await request(fixture, "item.update", { itemId: iterationItemId, status })
 				expectInvalid(rejected)
 				if (!rejected.ok) expect(rejected.error.details).toMatchObject({ phase: "iteration", status, allowed: [] })
@@ -3081,10 +3093,19 @@ attemptTimeoutSeconds = 3600
 				issueNumber: 217,
 				repoCwd: REPO_ROOT,
 			})).item)
-			await request(fixture, "item.update", {
-				itemId: numberValue(added.id),
-				status: runtimeStatus("in_progress"),
-			})
+			// #404: the bundled preset retired `in_progress` from its continuable vocabulary, so the
+			// daemon's request-flow vocabulary gate now rejects `item.update --status in_progress`.
+			// The stale-detection branch under test exists precisely to surface items wedged at the
+			// legacy `in_progress` sentinel (left over from older databases / crash recovery).
+			// Reproduce that wedged-state by writing the sentinel through the SQLite store, which
+			// does not gate vocabulary — bypassing the request layer the way a crash or migration
+			// from an older preset would.
+			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				store.updateItem(numberValue(added.id), { status: runtimeStatus("in_progress") })
+			} finally {
+				store.close()
+			}
 
 			const status = record(expectOk(await request(fixture, "chain.status", { chainId })))
 			expect(record(status.summary).activeSlots).toEqual([])

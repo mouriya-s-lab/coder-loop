@@ -11,7 +11,7 @@ The orchestrator may decide only facts that are fully programmable:
 - which state/config files exist and are readable;
 - whether `state.current` exists;
 - whether `state.current.phase` is `iteration` or `review`;
-- whether a queue item status is actionable (`queued`, `in_progress`, `changes_requested`);
+- whether a queue item status is actionable (membership in the preset's `[statuses].continuable` set);
 - which issue/run/prompt path to bind into an agent invocation;
 - whether an agent process exited with code `0`;
 - whether central daemon scheduling state still exists.

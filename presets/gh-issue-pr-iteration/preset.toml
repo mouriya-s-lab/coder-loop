@@ -27,7 +27,16 @@ pr = "number"
 lastRunId = "string"
 
 [statuses]
-continuable = ["queued", "in_progress", "changes_requested"]
+# #404: removed the dead "in-flight" status sentinel from continuable — the
+# engine never writes that value into `items.status`. (Verification recorded
+# in PR body: the only readers of the sentinel string under `src/` are a
+# stale-detection filter in `daemon.ts:chainStatusSummary` and the
+# `runs.status` default in `sqlite-state.ts:recordRun`, both of which target
+# vocabularies separate from `items.status`.) Keeping a dead vocabulary
+# member would let the preset claim "actionable" semantics for a status the
+# engine never produces; #408 will warn at load time on any further dead-word
+# regressions.
+continuable = ["queued", "changes_requested"]
 terminal    = ["blocked", "moot", "done", "exhausted"]
 # success: subset of terminal that means the item succeeded. Used by the engine's
 # cross-chain dependsOn unblock: a terminal item is restored to `entry` only when ALL
@@ -44,6 +53,12 @@ unblockable = ["blocked"]
 # of `terminal`. The review phase also lists this as a possible verdict so an agent
 # can pre-emptively yield to the same terminal落点.
 exhausted   = "exhausted"
+# retry (#404): the continuable status review writes when an iteration needs
+# another attempt. Declared at the preset metadata layer so the `retryStatusDoc`
+# doc builder can inject the value into md fragments that need to reference
+# the retry status by name — md prose no longer hand-writes the literal.
+# Must be a member of `continuable`.
+retry       = "changes_requested"
 
 [[phases]]
 name   = "iteration"
@@ -71,6 +86,13 @@ roles  = ["common", "quality", "iter"]
   PROMPT_FRAGMENT_INDEX    = "runtime.fragmentIndex"
   RUNTIME_INPUTS_DOC       = "runtime.runtimeInputsDoc"
   PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
+  # #404: iteration needs (a) the retry status name (Step 1 "Retry" branch)
+  # and (b) the terminal vocabulary as a boundary statement for the MUST-NOT
+  # list — iteration is forbidden from writing any terminal status. It does
+  # not classify the queue and does not own transitions, so
+  # STATUS_VOCABULARY_DOC is not declared here (contract-5 minimum visibility).
+  RETRY_STATUS_DOC         = "runtime.retryStatusDoc"
+  TERMINAL_STATUSES_DOC    = "runtime.terminalStatusesDoc"
   REQUIRE_BROWSER_EVIDENCE = { source = "chain.requireBrowserEvidence", default = false, label = "Browser evidence required", suffix = " — when `true`, Layer 4 must contain the strongest feasible E2E evidence for the project type. For projects with UI: real browser screenshots of the running dev server or deployed page. For projects without UI (pure CLI / library / backend / config): CLI smoke run transcripts with command, exit status, and output are the Layer 4 evidence; do not fabricate screenshots by creating HTML files and screenshotting them." }
   ISSUE_BRANCH             = { source = "item.branch", label = "Existing issue branch", blankBefore = true }
   ISSUE_PR                 = { source = "item.pr", label = "Existing issue PR" }
@@ -142,6 +164,15 @@ roles  = ["common", "quality", "review"]
   PROMPT_FRAGMENT_INDEX    = "runtime.fragmentIndex"
   RUNTIME_INPUTS_DOC       = "runtime.runtimeInputsDoc"
   PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
+  # #404: review is the orchestrator of the acceptance gate and the writer
+  # of item transitions, so it needs the broader status vocabulary
+  # (continuable + terminal) for global queue classification (Step 7). This
+  # is the contract-1 / contract-5 documented exception — the issue comment
+  # 4666115115 explicitly carves out review as needing more. (Post-rebase
+  # on main #497: the SUMMARY-line verdict tuple binding was retired with
+  # `runVerdictVocabularyDoc` after #497 removed both the SUMMARY line and
+  # the engine-owned `REVIEW_SUMMARY_VERDICTS` constant the builder read.)
+  STATUS_VOCABULARY_DOC    = "runtime.statusVocabularyDoc"
   REQUIRE_BROWSER_EVIDENCE = { source = "chain.requireBrowserEvidence", default = false, label = "Browser evidence required", suffix = " — when `true`, Layer 4 must contain the strongest feasible E2E evidence for the project type. For projects with UI: real browser screenshots of the running dev server or deployed page. For projects without UI (pure CLI / library / backend / config): CLI smoke run transcripts with command, exit status, and output are the Layer 4 evidence; synthetic screenshots (HTML files rendered and screenshotted) are rejected." }
   ISSUE_BRANCH             = { source = "item.branch", label = "Existing issue branch", blankBefore = true }
   ISSUE_PR                 = { source = "item.pr", label = "Existing issue PR" }
@@ -183,6 +214,13 @@ roles   = ["common"]
   PROMPT_FRAGMENT_INDEX    = "runtime.fragmentIndex"
   RUNTIME_INPUTS_DOC       = "runtime.runtimeInputsDoc"
   PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
+  # #404 (retry on #495): the trigger status word the responder reacts to.
+  # blocked-responder's prose references the gating status in two places
+  # (the opening "you are spawned after review marked one selected issue"
+  # sentence and the Procedure step 2 precondition); both consume this
+  # doc-builder rather than hand-writing the literal. Per-phase slice in
+  # `renderTriggerStatusDoc` renders only `phase.trigger.whenStatus`.
+  TRIGGER_STATUS_DOC       = "runtime.triggerStatusDoc"
   REQUIRE_BROWSER_EVIDENCE = { source = "chain.requireBrowserEvidence", default = false }
   ISSUE_BRANCH             = "item.branch"
   ISSUE_PR                 = "item.pr"

@@ -128,6 +128,13 @@ function makeRuntime(overrides: Partial<RuntimeBindings> = {}): RuntimeBindings 
 		fragmentIndex: "- iter/index (iter): iter/index.md",
 		runtimeInputsDoc: "",
 		phaseExitsDoc: "",
+		// #404: placeholder slots — actual values come from the per-phase doc
+		// builders called by `resolvePhaseBinding`. The runtime record only
+		// carries empty strings to satisfy the Record<EngineRuntimeBindingKey, string> type.
+		statusVocabularyDoc: "",
+		triggerStatusDoc: "",
+		terminalStatusesDoc: "",
+		retryStatusDoc: "",
 		runIdGeneration: "new",
 		resumedFromPhase: "",
 		resumedStartedAt: "",
@@ -227,7 +234,7 @@ describe("ItemRecord prompt bindings", () => {
 			phase: "iteration",
 			sessionIds: { iteration: { codex: "thread-123" } },
 		})
-		const ctx: ResolveContext = { item, chain: makeChainBindings(), runtime: makeRuntime() }
+		const ctx: ResolveContext = { item, chain: makeChainBindings(), runtime: makeRuntime(), preset: makePreset() }
 
 		expect(renderPrompt("#{{ISSUE}} {{PHASE}} {{CODEX_SESSION}}", phase, ctx)).toBe("#333 iteration thread-123")
 	})
@@ -248,7 +255,7 @@ describe("ItemRecord prompt bindings", () => {
 			defaultModel: null,
 			roles: [],
 		}
-		const ctx: ResolveContext = { item: makeItem(), chain: makeChainBindings(), runtime: makeRuntime({ targetCwd: "/repo" }) }
+		const ctx: ResolveContext = { item: makeItem(), chain: makeChainBindings(), runtime: makeRuntime({ targetCwd: "/repo" }), preset: makePreset() }
 
 		const prompt = renderPrompt("{{RUNTIME_INPUTS_DOC}}\n\n{{PHASE_EXITS_DOC}}", phase, ctx)
 
@@ -264,6 +271,7 @@ describe("ItemRecord prompt bindings", () => {
 			item: makeItem({ issueNumber: 184, branch: "issue-184", pr: 191 }),
 			chain: makeChainBindings({ requireBrowserEvidence: true }),
 			runtime: makeRuntime(),
+			preset: makePreset(),
 		}
 
 		expect(resolveBinding({ kind: "item", field: "issue" }, ctx)).toBe("184")
@@ -348,6 +356,7 @@ describe("runtime binding helpers", () => {
 			item: makeItem(),
 			chain: makeChainBindings(),
 			runtime: makeRuntime({ customBusiness: "preset-owned-value" }),
+			preset,
 		}
 
 		expect(phase.variables[0]).toEqual({ key: "CUSTOM", source: { kind: "runtime", key: "customBusiness", ownership: "preset" }, doc: null })
@@ -396,7 +405,7 @@ describe("runtime binding helpers", () => {
 			issueRun,
 		})
 		expect(runtime.auditDemo).toBe("preset-literal-ok")
-		const ctx: ResolveContext = { item: makeItem(), chain: makeChainBindings(), runtime }
+		const ctx: ResolveContext = { item: makeItem(), chain: makeChainBindings(), runtime, preset }
 		expect(renderPrompt("{{AUDIT_DEMO}}", phase, ctx)).toBe("preset-literal-ok")
 	})
 
@@ -784,7 +793,7 @@ describe("renderPrompt placeholder validation (issue #399)", () => {
 			["QUOTED", { kind: "item", field: "title" }],
 		])
 		const item = makeItem({ title: "literal {{NOT_A_KEY}} content" })
-		const ctx: ResolveContext = { item, chain: makeChainBindings(), runtime: makeRuntime() }
+		const ctx: ResolveContext = { item, chain: makeChainBindings(), runtime: makeRuntime(), preset: makePreset() }
 		const out = renderPrompt("before {{QUOTED}} after", phase, ctx)
 		expect(out).toBe("before literal {{NOT_A_KEY}} content after")
 	})
@@ -794,7 +803,7 @@ describe("renderPrompt placeholder validation (issue #399)", () => {
 			["KEY", { kind: "item", field: "issue" }],
 		])
 		const item = makeItem({ issueNumber: 42 })
-		const ctx: ResolveContext = { item, chain: makeChainBindings(), runtime: makeRuntime() }
+		const ctx: ResolveContext = { item, chain: makeChainBindings(), runtime: makeRuntime(), preset: makePreset() }
 		const out = renderPrompt("doc: \\{{KEY}} live: {{KEY}}", phase, ctx)
 		expect(out).toBe("doc: {{KEY}} live: 42")
 	})
@@ -803,7 +812,7 @@ describe("renderPrompt placeholder validation (issue #399)", () => {
 		const phase = makePhase([
 			["DECLARED", { kind: "item", field: "issue" }],
 		])
-		const ctx: ResolveContext = { item: makeItem(), chain: makeChainBindings(), runtime: makeRuntime() }
+		const ctx: ResolveContext = { item: makeItem(), chain: makeChainBindings(), runtime: makeRuntime(), preset: makePreset() }
 		expect(() => renderPrompt("text {{UNDECLARED}}", phase, ctx)).toThrow(/undeclared placeholder \{\{UNDECLARED\}\}/)
 	})
 })

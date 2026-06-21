@@ -465,7 +465,7 @@ const PresetTomlBoundary = arkType({
 	name: "string",
 	item: { idField: "string", "fields?": "object" },
 	"runtime?": { "businessKeys?": "string[]", "businessKeyValues?": "object" },
-	statuses: { continuable: "string[]", terminal: "string[]", "success?": "string[]", "entry?": "string", "unblockable?": "string[]", exhausted: "string" },
+	statuses: { continuable: "string[]", terminal: "string[]", "success?": "string[]", "entry?": "string", "unblockable?": "string[]", exhausted: "string", "retry?": "string" },
 	phases: PresetPhaseBoundary.array(),
 	"fragments?": PresetFragmentBoundary.array(),
 	// #433: [agent].binary / [agent].extraArgs retired (zombie schema with no read site). Runner
@@ -612,6 +612,13 @@ export type Preset = {
 			// vocabulary. Validated at load time as a member of `terminal` so the engine can write
 			// it without re-validating downstream.
 			exhausted: InternalStatus
+			// #404: the continuable status reserved for "previous attempt requires another
+			// iteration". Declared in `[statuses]` so the preset is the single source of
+			// truth for the retry status name — the `retryStatusDoc` engine-rendered doc
+			// builder reads this value instead of hard-coding it in prose. Validated at
+			// load time as a member of `continuable`. Optional: a preset with no retry
+			// concept may omit it; doc builders that need it will render the empty string.
+			retry: InternalStatus | null
 		}
 	phases: readonly PresetPhase[]
 	fragments: readonly PresetFragment[]
@@ -988,6 +995,26 @@ export const ENGINE_RUNTIME_BINDING_KEYS = [
 	"fragmentIndex",
 	"runtimeInputsDoc",
 	"phaseExitsDoc",
+	// #404: per-phase doc builders that inject status vocabulary into preset md
+	// fragments so the prose layer never carries a hand-written copy of preset
+	// metadata. Each builder enforces its own per-phase slice (contract-5
+	// minimum visibility, issue #396 comment 4666115115) — iteration sees only
+	// the statuses it legitimately reasons about; review sees the broader
+	// vocabulary it must classify against; trigger phases see only their own
+	// trigger status. Engine fact key count: 26 — keep
+	// `docs/preset-authoring.md` and CLAUDE.md in sync.
+	//
+	// (Retry on #495 dropped `transitionGuidanceDoc`: it duplicated
+	// `phaseExitsDoc`'s rendering of `phase.exits` in a different layout and
+	// had no distinct consumer; keeping a redundant builder violated
+	// contract-5 minimum surface. The post-rebase retry against main #497
+	// also dropped `runVerdictVocabularyDoc` for the same reason — its only
+	// consumer was the SUMMARY line #497 retired, and its data source
+	// `REVIEW_SUMMARY_VERDICTS` was deleted by the same PR.)
+	"statusVocabularyDoc",
+	"triggerStatusDoc",
+	"terminalStatusesDoc",
+	"retryStatusDoc",
 	"runIdGeneration",
 	"resumedFromPhase",
 	"resumedStartedAt",
@@ -1019,6 +1046,11 @@ export type ResolveContext = {
 	item: ItemRecord
 	chain: RenderBindings
 	runtime: RuntimeBindings
+	// #404: preset reference required so per-phase doc builders
+	// (status/transition/verdict vocabulary) can read declared status names,
+	// trigger metadata, and other phase definitions without the prose layer
+	// carrying hand-written copies of preset.toml.
+	preset: Preset
 }
 
 type CliCommand =
@@ -3923,6 +3955,15 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 		presetError(`preset.statuses.exhausted: "${root.statuses.exhausted}" must be one of statuses.terminal`)
 	}
 	const exhaustedStatus = parseInternalStatus(root.statuses.exhausted, "preset.statuses.exhausted")
+	// #404: preset declares the retry status name so doc builders never carry it as a literal.
+	const retryStatusName = root.statuses.retry ?? null
+	let retryStatus: InternalStatus | null = null
+	if (retryStatusName !== null) {
+		if (!root.statuses.continuable.includes(retryStatusName)) {
+			presetError(`preset.statuses.retry: "${retryStatusName}" must be one of statuses.continuable`)
+		}
+		retryStatus = parseInternalStatus(retryStatusName, "preset.statuses.retry")
+	}
 	const statusNames = new Set<string>([...root.statuses.continuable, ...root.statuses.terminal])
 	const itemFields = parsePresetItemFields(root.item.fields ?? {}, "preset.item.fields")
 	if (itemFields.has(root.item.idField)) presetError(`preset.item.fields.${root.item.idField}: idField is already declared by preset.item.idField`)
@@ -4050,7 +4091,7 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 		presetDir,
 		item: { idField: root.item.idField, fields: itemFields },
 		runtime: { businessKeys: runtimeBusinessKeys, businessKeyValues: runtimeBusinessKeyValues },
-			statuses: { continuable: continuableStatuses, terminal: terminalStatuses, success: successStatuses, entry: entryStatus, unblockable: unblockableStatuses, exhausted: exhaustedStatus },
+			statuses: { continuable: continuableStatuses, terminal: terminalStatuses, success: successStatuses, entry: entryStatus, unblockable: unblockableStatuses, exhausted: exhaustedStatus, retry: retryStatus },
 		phases,
 		fragments,
 		agent: { attemptTimeoutSeconds },
@@ -4538,6 +4579,7 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 					evidenceDir,
 				}),
 			}),
+			preset,
 		}
 		const promptRaw = await readFile(phase.prompt, "utf-8")
 		const prompt = renderPrompt(promptRaw, phase, ctx)
@@ -4854,6 +4896,13 @@ function resolvePhaseBinding(source: PresetVariableSource, phase: PresetPhase, c
 		switch (source.key) {
 			case "runtimeInputsDoc": return renderRuntimeInputsDoc(phase, ctx)
 			case "phaseExitsDoc": return renderPhaseExitsDoc(phase)
+			// #404: per-phase-sliced docs. The render function owns the slice policy
+			// (caller does not pre-slice) so a new phase added to a preset cannot
+			// silently widen the visibility surface.
+			case "statusVocabularyDoc": return renderStatusVocabularyDoc(phase, ctx.preset)
+			case "triggerStatusDoc": return renderTriggerStatusDoc(phase)
+			case "terminalStatusesDoc": return renderTerminalStatusesDoc(phase, ctx.preset)
+			case "retryStatusDoc": return renderRetryStatusDoc(ctx.preset)
 		}
 	}
 	return resolveBinding(source, ctx)
@@ -4892,6 +4941,93 @@ export function renderPhaseExitsDoc(phase: PresetPhase): string {
 		}
 	}).join("\n")
 }
+
+// #404 doc builders. Each function owns its per-phase visibility slice so
+// callers cannot widen the surface by mistake — contract-5 minimum visibility
+// (#396 comment 4666115115). A phase whose slice is empty receives an empty
+// string; the template author writes the surrounding prose to make sense of
+// the empty case (e.g. only review's classification table needs the broader
+// vocabulary; other phases bind the placeholder only where they actually use it).
+
+// Per-phase status vocabulary doc. The slice policy:
+//   - phases declaring `[[phases.exits]]` (e.g. review): full continuable + terminal
+//     vocabulary, so the phase can classify any item it observes in the queue.
+//   - trigger phases (e.g. blocked-responder): only the single status that
+//     gates the trigger — they never reason about other statuses.
+//   - all other phases (e.g. iteration): continuable statuses only — the
+//     actionable set the phase legitimately encounters.
+// Output is two markdown bullet groups (`actionable` / `non-actionable`) when
+// the slice spans both halves; a single bullet when it's one status. Render
+// the empty string only when no status falls in the slice.
+export function renderStatusVocabularyDoc(phase: PresetPhase, preset: Preset): string {
+	const continuable = new Set<string>(preset.statuses.continuable)
+	const terminal = new Set<string>(preset.statuses.terminal)
+	const slice = statusVocabularySlice(phase, preset)
+	if (slice.size === 0) return ""
+	const actionable = [...slice].filter((status) => continuable.has(status))
+	const nonActionable = [...slice].filter((status) => terminal.has(status))
+	const lines: string[] = []
+	if (actionable.length > 0) lines.push(`- actionable: ${joinStatusList(actionable)}`)
+	if (nonActionable.length > 0) lines.push(`- non-actionable: ${joinStatusList(nonActionable)}`)
+	return lines.join("\n")
+}
+
+function statusVocabularySlice(phase: PresetPhase, preset: Preset): ReadonlySet<string> {
+	if (phase.trigger !== null && !isChainCompleteTrigger(phase.trigger)) {
+		return new Set<string>([phase.trigger.whenStatus])
+	}
+	if (phase.exits.length > 0) {
+		return new Set<string>([...preset.statuses.continuable, ...preset.statuses.terminal])
+	}
+	return new Set<string>(preset.statuses.continuable)
+}
+
+function joinStatusList(statuses: readonly string[]): string {
+	return statuses.map((status) => `\`${status}\``).join(", ")
+}
+
+// Per-phase trigger status doc. Renders the single status string that gates a
+// trigger phase (e.g. blocked-responder's `whenStatus`). Non-trigger phases
+// render the empty string — their prompts should not bind this key.
+export function renderTriggerStatusDoc(phase: PresetPhase): string {
+	if (phase.trigger === null) return ""
+	if (isChainCompleteTrigger(phase.trigger)) return ""
+	return phase.trigger.whenStatus
+}
+
+// Per-phase terminal-statuses doc. The slice policy:
+//   - phases that classify items (review): full terminal vocabulary.
+//   - all other phases: terminal vocabulary they must not write themselves
+//     (boundary-statement doc) — useful for iteration's MUST-NOT prose.
+// Always renders the full `preset.statuses.terminal` list because there is no
+// meaningful narrower slice (a phase's "you must not write these" set is the
+// whole terminal set, by definition of terminal). Empty when the preset
+// declares no terminal statuses.
+export function renderTerminalStatusesDoc(phase: PresetPhase, preset: Preset): string {
+	// `phase` is part of the signature for symmetry with the other builders and to
+	// keep call-sites uniform; the slice policy is preset-wide today.
+	if (preset.statuses.terminal.length === 0) return ""
+	void phase
+	return joinStatusList(preset.statuses.terminal)
+}
+
+// Single retry status doc. Renders `preset.statuses.retry` verbatim (backticks
+// added) so md fragments can reference the "previous attempt requires another
+// iteration" status without copying the string. A preset that did not declare
+// `[statuses].retry` renders the empty string — fragments that bind this key
+// require the preset to declare the field.
+export function renderRetryStatusDoc(preset: Preset): string {
+	const retry = preset.statuses.retry
+	if (retry === null) return ""
+	return `\`${retry}\``
+}
+
+// Run-verdict vocabulary doc was retired alongside #405's SUMMARY-line drop:
+// the only consumer (`REVIEW SUMMARY: verdict={{RUN_VERDICT_VOCABULARY_DOC}}`)
+// is gone, and the engine-owned `REVIEW_SUMMARY_VERDICTS` constant the builder
+// read was deleted by #497. Keeping the builder would leave an engine fact key
+// with no data source and no consumer — a contract-5 minimum-surface
+// violation symmetric with this PR's earlier `transitionGuidanceDoc` drop.
 
 export function phaseWritableStatuses(phase: PresetPhase): readonly InternalStatus[] {
 	// #405 narrow: only item-status branches participate in the per-phase status
@@ -5141,6 +5277,13 @@ export function buildRuntimeBindings(input: {
 		fragmentIndex: renderFragmentIndex(input.options.preset, input.phase),
 		runtimeInputsDoc: "",
 		phaseExitsDoc: "",
+		// #404: placeholders only — actual values are computed lazily by
+		// `resolvePhaseBinding` from `(phase, preset, ctx)`. Mirrors the
+		// existing pattern for `runtimeInputsDoc` / `phaseExitsDoc`.
+		statusVocabularyDoc: "",
+		triggerStatusDoc: "",
+		terminalStatusesDoc: "",
+		retryStatusDoc: "",
 		runIdGeneration: input.issueRun.runIdGeneration,
 		resumedFromPhase: input.issueRun.resumedFromPhase ?? "",
 		resumedStartedAt: input.issueRun.resumedStartedAt ?? "",
