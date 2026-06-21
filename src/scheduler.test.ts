@@ -31,7 +31,6 @@ import {
 	buildPhaseRunnerSelectionFromChain,
 	buildRunnerInvocation,
 	loadPreset,
-	parseReviewSummaryVerdict,
 	resolvePhaseRunnerFromChain,
 	runPresetChainCompleteTriggerPhases,
 	type AgentRunnerKind,
@@ -64,9 +63,13 @@ describe("scheduler", () => {
 		try {
 			const chain = createChain(fixture.store, "serial-chain")
 			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
-			createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a" })
-			createItem(fixture.store, chain, { issueNumber: 180, repoCwd: "/repo/a" })
-			createItem(fixture.store, chain, { issueNumber: 181, repoCwd: "/repo/a" })
+			// #405: pin iteration's status write to `done` so each item terminates in a single
+			// iteration run, mirroring the historical test cadence. Without the override the new
+			// (post-verdict-retirement) flow would legitimately advance iteration → review per
+			// item and double the spawn count — captured in dedicated multi-phase tests.
+			createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", writeStatus: "done" })
+			createItem(fixture.store, chain, { issueNumber: 180, repoCwd: "/repo/a", writeStatus: "done" })
+			createItem(fixture.store, chain, { issueNumber: 181, repoCwd: "/repo/a", writeStatus: "done" })
 
 			await runSchedulerUntilIdle(persistedObservabilityOptions(fixture))
 
@@ -93,8 +96,8 @@ describe("scheduler", () => {
 		try {
 			const chain = createChain(fixture.store, "multi-repo-chain")
 			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
-			createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", sleepMs: 80 })
-			createItem(fixture.store, chain, { issueNumber: 180, repoCwd: "/repo/b", sleepMs: 80 })
+			createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", sleepMs: 80, writeStatus: "done" })
+			createItem(fixture.store, chain, { issueNumber: 180, repoCwd: "/repo/b", sleepMs: 80, writeStatus: "done" })
 
 			const tick = await schedulerTick(fixture.options())
 			expect(tick.spawnedRuns).toHaveLength(2)
@@ -115,7 +118,7 @@ describe("scheduler", () => {
 			const invalid = createChain(fixture.store, "..")
 			const valid = createChain(fixture.store, "valid-chain")
 			createItem(fixture.store, invalid, { issueNumber: 178, repoCwd: "/repo/a" })
-			createItem(fixture.store, valid, { issueNumber: 179, repoCwd: "/repo/a" })
+			createItem(fixture.store, valid, { issueNumber: 179, repoCwd: "/repo/a", writeStatus: "done" })
 
 			const tick = await schedulerTick(fixture.options())
 			expect(tick.spawnedRuns).toHaveLength(1)
@@ -172,8 +175,8 @@ describe("scheduler", () => {
 		const fixture = await createFixture("advance")
 		try {
 			const chain = createChain(fixture.store, "advance-chain")
-			const first = createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", sleepMs: 10 })
-			const second = createItem(fixture.store, chain, { issueNumber: 180, repoCwd: "/repo/a", sleepMs: 10 })
+			const first = createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", sleepMs: 10, writeStatus: "done" })
+			const second = createItem(fixture.store, chain, { issueNumber: 180, repoCwd: "/repo/a", sleepMs: 10, writeStatus: "done" })
 
 			const firstTick = await schedulerTick(fixture.options())
 			await firstTick.spawnedRuns[0]!.closed
@@ -193,7 +196,7 @@ describe("scheduler", () => {
 		try {
 			const chain = createChain(fixture.store, "completion-chain")
 			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
-			createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a" })
+			createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", writeStatus: "done" })
 
 			await runSchedulerUntilIdle(persistedObservabilityOptions(fixture))
 
@@ -211,7 +214,7 @@ describe("scheduler", () => {
 		try {
 			const chain = createChain(fixture.store, "completion-cleanup-idempotent-chain")
 			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
-			createItem(fixture.store, chain, { issueNumber: 351_001, repoCwd: target })
+			createItem(fixture.store, chain, { issueNumber: 351_001, repoCwd: target, writeStatus: "done" })
 
 			await runSchedulerUntilIdle(fixture.options({
 				worktreeManager: createGitWorktreeManager({ loopDataRoot: fixture.loopDataRoot }),
@@ -246,7 +249,7 @@ describe("scheduler", () => {
 		try {
 			const chain = createChain(fixture.store, "completion-trigger-chain")
 			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
-			createItem(fixture.store, chain, { issueNumber: 2691, repoCwd: "/repo/a" })
+			createItem(fixture.store, chain, { issueNumber: 2691, repoCwd: "/repo/a", writeStatus: "done" })
 			const observedChainStatuses: string[] = []
 
 			await runSchedulerUntilIdle(fixture.options({
@@ -277,7 +280,7 @@ describe("scheduler", () => {
 		try {
 			const chain = createChain(fixture.store, "completion-trigger-overlap-chain")
 			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
-			createItem(fixture.store, chain, { issueNumber: 2696, repoCwd: "/repo/a" })
+			createItem(fixture.store, chain, { issueNumber: 2696, repoCwd: "/repo/a", writeStatus: "done" })
 			const triggerStarted = createDeferred()
 			const releaseTrigger = createDeferred()
 			let triggerCalls = 0
@@ -321,7 +324,7 @@ describe("scheduler", () => {
 		try {
 			const chain = createChain(fixture.store, "completion-trigger-active-chain")
 			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
-			createItem(fixture.store, chain, { issueNumber: 2692, repoCwd: "/repo/a" })
+			createItem(fixture.store, chain, { issueNumber: 2692, repoCwd: "/repo/a", writeStatus: "done" })
 			let triggerCalls = 0
 			const options = fixture.options({
 				chainCompleteTrigger: () => {
@@ -367,7 +370,7 @@ describe("scheduler", () => {
 		try {
 			const chain = createChain(followUpFixture.store, "completion-trigger-follow-up-chain")
 			preInstallReviewOnEmptyLock(chain, followUpFixture.loopDataRoot)
-			createItem(followUpFixture.store, chain, { issueNumber: 2693, repoCwd: "/repo/a" })
+			createItem(followUpFixture.store, chain, { issueNumber: 2693, repoCwd: "/repo/a", writeStatus: "done" })
 
 			const tick = await schedulerTick(followUpFixture.options({
 				chainCompleteTrigger: ({ chain: triggerChain }) => {
@@ -388,7 +391,7 @@ describe("scheduler", () => {
 		try {
 			const chain = createChain(failingFixture.store, "completion-trigger-failing-chain")
 			preInstallReviewOnEmptyLock(chain, failingFixture.loopDataRoot)
-			createItem(failingFixture.store, chain, { issueNumber: 2695, repoCwd: "/repo/a" })
+			createItem(failingFixture.store, chain, { issueNumber: 2695, repoCwd: "/repo/a", writeStatus: "done" })
 
 			const tick = await schedulerTick(failingFixture.options({
 				chainCompleteTrigger: () => {
@@ -628,7 +631,7 @@ describe("scheduler", () => {
 				exitCode: 1,
 				summary: null,
 			})
-			const sibling = createItem(fixture.store, chain, { issueNumber: 7005, repoCwd: "/repo/a" })
+			const sibling = createItem(fixture.store, chain, { issueNumber: 7005, repoCwd: "/repo/a", writeStatus: "done" })
 			const options = fixture.options({
 				now: () => now,
 				runIdFactory: ({ item }) => `run-backoff-${item.id}-${now}`,
@@ -946,7 +949,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("subprocess")
 		try {
 			const chain = createChain(fixture.store, "subprocess-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a" })
+			const item = createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", writeStatus: "done" })
 
 			const tick = await schedulerTick(fixture.options())
 			const closed = await tick.spawnedRuns[0]!.closed
@@ -967,11 +970,13 @@ describe("scheduler", () => {
 		try {
 			const chain = createChain(fixture.store, "run-artifacts-chain")
 			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
-			const item = createItem(fixture.store, chain, { issueNumber: 203, repoCwd: "/repo/a" })
+			const item = createItem(fixture.store, chain, { issueNumber: 203, repoCwd: "/repo/a", writeStatus: "done" })
 
 			await runSchedulerUntilIdle(persistedObservabilityOptions(fixture))
 
-			const runId = `run-${chain.id}-${item.id}`
+			// #405: runIdFactory is now phase-aware (`run-<chainId>-<itemId>-<phase>-<attempt>`)
+			// so a single iteration run on a fresh item yields attempt 1 of the iteration phase.
+			const runId = `run-${chain.id}-${item.id}-iteration-1`
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
 			const status = JSON.parse(await readFile(paths.runStatusFile(runId), "utf-8")) as BoundaryRecord
 			const stdout = await readFile(paths.runStdoutFile(runId), "utf-8")
@@ -1014,11 +1019,15 @@ describe("scheduler", () => {
 		try {
 			const chain = createChain(fixture.store, "phase-events-chain")
 			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
-			const item = createItem(fixture.store, chain, { issueNumber: 286, repoCwd: "/repo/a" })
+			// #405: pin iteration's write to `done` so the test's "single phase event run"
+			// assertion stays single. Previously the retired verdict mapper coincidentally
+			// landed iteration at done via the default REVIEW SUMMARY token; explicitly
+			// requesting it via `writeStatus` is the principled mirror under the new model.
+			const item = createItem(fixture.store, chain, { issueNumber: 286, repoCwd: "/repo/a", writeStatus: "done" })
 
 			await runSchedulerUntilIdle(persistedObservabilityOptions(fixture))
 
-			const runId = `run-${chain.id}-${item.id}`
+			const runId = `run-${chain.id}-${item.id}-iteration-1`
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
 			expect(existsSync(paths.runEventsFile(runId))).toBe(false)
 			const persisted = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, { run: runId })
@@ -1114,7 +1123,12 @@ describe("scheduler reads the agent-written item status (v1 status model)", () =
 			const item = createItem(fixture.store, chain, {
 				issueNumber: 5002,
 				repoCwd: "/repo/a",
-				summary: "REVIEW SUMMARY: verdict=skip; issue=#5002; reason=unit",
+				// #405: previously the test drove the agent's status decision via a
+				// `REVIEW SUMMARY: verdict=skip` stdout token parsed by the retired
+				// `parseReviewSummaryVerdict` consumer. The fake runner now writes the
+				// status directly via `extra.writeStatus`, mirroring the real agent's
+				// `coder-loop item update --status` write through the typed phase-exits face.
+				writeStatus: "moot",
 			})
 
 			const tick = await schedulerTick(fixture.options())
@@ -1207,12 +1221,14 @@ describe("scheduler reads the agent-written item status (v1 status model)", () =
 		const fixture = await createFixture("status-respawn")
 		try {
 			const chain = createChain(fixture.store, "status-respawn-chain")
-			// verdict=retry → the agent writes changes_requested each run, so the item stays pending and is
+			// #405: the agent writes changes_requested each run, so the item stays pending and is
 			// re-selected for iteration on the next tick (no exit-code backoff gate, since exit is 0).
+			// Previously the test drove this via a `REVIEW SUMMARY: verdict=retry` stdout token; the
+			// fake runner now writes the status directly via `extra.writeStatus`.
 			const item = createItem(fixture.store, chain, {
 				issueNumber: 5004,
 				repoCwd: "/repo/a",
-				summary: "REVIEW SUMMARY: verdict=retry; issue=#5004; reason=keep-retrying",
+				writeStatus: "changes_requested",
 			})
 
 			let runCounter = 0
@@ -1960,11 +1976,11 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 				repository: "mouriya-s-lab/coder-loop-e2e-blocker",
 			})
 			preInstallReviewOnEmptyLock(blockerChain, fixture.loopDataRoot)
-			const blocker = createItem(fixture.store, blockerChain, { issueNumber: 41, repoCwd: "/repo/blocker" })
+			const blocker = createItem(fixture.store, blockerChain, { issueNumber: 41, repoCwd: "/repo/blocker", writeStatus: "done" })
 
 			const dependentChain = createChain(fixture.store, "depends-e2e-dependent-chain")
 			preInstallReviewOnEmptyLock(dependentChain, fixture.loopDataRoot)
-			const dependent = createItem(fixture.store, dependentChain, { issueNumber: 29013, repoCwd: "/repo/a" })
+			const dependent = createItem(fixture.store, dependentChain, { issueNumber: 29013, repoCwd: "/repo/a", writeStatus: "done" })
 			fixture.store.updateItem(dependent.id, {
 				status: runtimeStatus("blocked"),
 				phase: "blocked-responder",
@@ -2020,15 +2036,18 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 		}
 	})
 
-	test("race: review exit with verdict=blocked keeps chain active until item-level trigger spawns", async () => {
+	test("race: review writes blocked, chain stays active until item-level trigger spawns", async () => {
 		const fixture = await createFixture("trigger-b3-race")
 		try {
 			const chain = createChain(fixture.store, "trigger-b3-race-chain")
 			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
+			// #405: agent's blocked-status decision now comes through `extra.writeStatus`
+			// (mirror of `coder-loop item update --status blocked`), not a `REVIEW SUMMARY:
+			// verdict=blocked` stdout token.
 			const item = createItem(fixture.store, chain, {
 				issueNumber: 29005,
 				repoCwd: "/repo/a",
-				summary: "REVIEW SUMMARY: verdict=blocked; issue=#29005; reason=race-review",
+				writeStatus: "blocked",
 			})
 			fixture.store.recordRun({
 				runId: "run-pre-race-iter",
@@ -2068,7 +2087,10 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			fixture.store.updateItem(item.id, {
 				extra: storedItemExtra({
 					...itemExtraToJsonObject(fixture.store.getItem(item.id)!.extra),
-					summary: "REVIEW SUMMARY: verdict=blocked; issue=#29005; reason=stay-blocked",
+					// #405: the second-tick `blocked-responder` trigger phase is a side-effect run
+					// and never writes status (TRIGGER_PHASES set). Preserve the existing
+					// writeStatus so the fake runner's status mirror stays self-consistent.
+					writeStatus: "blocked",
 				}),
 			})
 			const triggerTick = await schedulerTick(baseOptions)
@@ -2135,7 +2157,7 @@ describe("scheduler per-chain review-on-empty (issue #292)", () => {
 		const fixture = await createFixture("review-on-empty-spawn")
 		try {
 			const chain = createChain(fixture.store, "review-on-empty-spawn-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 14001, repoCwd: "/repo/a" })
+			const item = createItem(fixture.store, chain, { issueNumber: 14001, repoCwd: "/repo/a", writeStatus: "done" })
 
 			const firstTick = await schedulerTick(fixture.options())
 			expect(firstTick.spawnedRuns).toHaveLength(1)
@@ -2169,7 +2191,7 @@ describe("scheduler per-chain review-on-empty (issue #292)", () => {
 		const fixture = await createFixture("review-on-empty-lock-write")
 		try {
 			const chain = createChain(fixture.store, "review-on-empty-lock-write-chain")
-			createItem(fixture.store, chain, { issueNumber: 14002, repoCwd: "/repo/a" })
+			createItem(fixture.store, chain, { issueNumber: 14002, repoCwd: "/repo/a", writeStatus: "done" })
 
 			const iterTick = await schedulerTick(fixture.options())
 			await iterTick.spawnedRuns[0]!.closed
@@ -2697,7 +2719,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 		const fixture = await createFixture("phase-runner-fallback")
 		try {
 			const chain = createChain(fixture.store, "phase-runner-fallback-chain")
-			createItem(fixture.store, chain, { issueNumber: 287_103, repoCwd: "/repo/a" })
+			createItem(fixture.store, chain, { issueNumber: 287_103, repoCwd: "/repo/a", writeStatus: "done" })
 
 			const tick = await schedulerTick(fixture.options())
 			const closed = await tick.spawnedRuns[0]!.closed
@@ -3210,7 +3232,9 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			const tick = await schedulerTick({ ...options, phase: "iteration" })
 			await tick.spawnedRuns[0]!.closed
 
-			const runId = `run-${chain.id}-${item.id}`
+			// #405: phase-aware runIdFactory — single iteration tick yields the iteration phase's
+			// first attempt.
+			const runId = `run-${chain.id}-${item.id}-iteration-1`
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
 			const stdout = await readFile(paths.runStdoutFile(runId), "utf-8")
 			const argvLine = stdout.split("\n").find((line) => line.startsWith("{") && line.includes("\"argv\""))
@@ -3659,7 +3683,7 @@ async function createFixture(name: string): Promise<Fixture> {
 			},
 			worktreeManager,
 			loopDataRootOptions: { loopDataRoot },
-			runIdFactory: ({ chain, item }) => `run-${chain.id}-${item.id}`,
+			runIdFactory: makeAttemptTrackingRunIdFactory(),
 			prompt: ({ item, runId, worktreePath, phase }) => {
 			const extra = itemExtraToJsonObject(item.extra)
 			const payload: BoundaryRecord = {
@@ -3757,13 +3781,17 @@ function preInstallReviewOnEmptyLock(chain: ChainRecord, loopDataRoot: string, r
 function createItem(
 	store: ReturnType<typeof openSqliteStateStore>,
 	chain: ChainRecord,
-	input: { issueNumber: number; repoCwd: string; sleepMs?: number; exitCode?: number; summary?: string | null; runner?: AgentRunnerKind | null },
+	input: { issueNumber: number; repoCwd: string; sleepMs?: number; exitCode?: number; summary?: string | null; runner?: AgentRunnerKind | null; writeStatus?: string | null },
 ) {
 	const extra: JsonObject = {
 		sleepMs: input.sleepMs ?? 5,
 		exitCode: input.exitCode ?? 0,
 	}
 	if (Object.prototype.hasOwnProperty.call(input, "summary")) extra.summary = input.summary ?? null
+	// #405: tests can pin the fake-runner's status-write decision directly via `extra.writeStatus`,
+	// mirroring the real agent's `coder-loop item update --status` call. When omitted the
+	// fake runner falls back to the phase-aware default (see fakeRunnerWriteStatus).
+	if (Object.prototype.hasOwnProperty.call(input, "writeStatus")) extra.writeStatus = input.writeStatus ?? null
 	return store.createItem({
 		chainId: chain.id,
 		issueNumber: input.issueNumber,
@@ -3957,40 +3985,42 @@ prompt = "run.md"
 	)
 }
 
-const FAKE_RUNNER_DEFAULT_SUMMARY = "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=fake-runner default"
-const FAKE_RUNNER_REVIEW_MARKER = "REVIEW SUMMARY:"
-
-// Mirrors a real agent's status decision for the fake runner: review agents write a preset status via
-// `coder-loop item update --status`, and the scheduler reads it. Iteration summaries write no item
-// status; ordered phase progression carries the handoff to the next phase.
+// #405: fake-runner status decision no longer parses a stdout verdict marker. Tests
+// drive the desired status via `extra.writeStatus` (the mirror of the real agent's
+// `coder-loop item update --status` write). Defaults preserve historical behavior:
+// trigger phases write nothing, iteration leaves status to the next phase via the
+// trigger DAG, review defaults to `done` when no explicit writeStatus is set.
 const TRIGGER_PHASES = new Set(["blocked-responder", "umbrella-finalizer", "review-on-empty"])
 
 function fakeRunnerWriteStatus(phase: string, extra: JsonObject): string | null {
-	// Trigger phases (blocked-responder, umbrella-finalizer, review-on-empty) run as side effects and
-	// must not mutate the triggering item's status, so the scheduler's preserveTerminalStatus keeps the
-	// pre-trigger terminal status intact. Work phases (iteration / review / single-phase `run`) write it.
 	if (TRIGGER_PHASES.has(phase)) return null
 	const exitCode = typeof extra.exitCode === "number" ? extra.exitCode : 0
-	// A failed run requests a retry so the item stays pending and the scheduler's spawn-failure backoff
-	// can gate it. This is the agent/recovery writing changes_requested, not the scheduler inferring it.
 	if (exitCode !== 0) return "changes_requested"
-	const hasSummary = Object.prototype.hasOwnProperty.call(extra, "summary")
-	const summary = hasSummary ? extra.summary : FAKE_RUNNER_DEFAULT_SUMMARY
-	if (typeof summary !== "string") return null
-	if (summary.startsWith("ITERATION SUMMARY")) return null
-	const verdict = parseReviewSummaryVerdict(summary, FAKE_RUNNER_REVIEW_MARKER, "claude")
-	switch (verdict) {
-		case "accepted":
-		case "stop":
-			return "done"
-		case "skip":
-			return "moot"
-		case "blocked":
-			return "blocked"
-		case "retry":
-			return "changes_requested"
-		default:
-			return "changes_requested"
+	const writeStatusOverride = extra.writeStatus
+	if (typeof writeStatusOverride === "string") return writeStatusOverride
+	if (writeStatusOverride === null) return null
+	if (phase === "iteration") return null
+	if (phase === "review") return "done"
+	return null
+}
+
+// #405: per-(chain,item,phase) attempt-tracking runIdFactory. The retired
+// verdict mapper used to mask multi-phase progression by mapping any
+// "REVIEW SUMMARY" stdout line to "done" even when the spawned phase was
+// iteration — items therefore landed terminal on a single iteration run and
+// the deterministic factory `run-${chain.id}-${item.id}` never collided. With
+// the verdict mapper gone, items legitimately spawn iteration then review then
+// (on retry) iteration again; the runId must be unique per spawn or the
+// scheduler trips a `runs.run_id` UNIQUE constraint. A per-(chain,item,phase)
+// counter keeps the runId deterministic enough for assertions while guaranteeing
+// uniqueness across spawns.
+function makeAttemptTrackingRunIdFactory(): (context: { chain: { id: number }; item: { id: number }; phase: string }) => string {
+	const attempts = new Map<string, number>()
+	return ({ chain, item, phase }) => {
+		const key = `${chain.id}-${item.id}-${phase}`
+		const next = (attempts.get(key) ?? 0) + 1
+		attempts.set(key, next)
+		return `run-${chain.id}-${item.id}-${phase}-${next}`
 	}
 }
 
@@ -4084,7 +4114,7 @@ async function createPresetPromptIntegrationFixture(name: string): Promise<Fixtu
 			},
 			worktreeManager,
 			loopDataRootOptions: { loopDataRoot },
-			runIdFactory: ({ chain, item }) => `run-${chain.id}-${item.id}`,
+			runIdFactory: makeAttemptTrackingRunIdFactory(),
 			prompt: async (ctx) => {
 				const phase = ctx.loadedPreset.preset.phases.find((entry) => entry.name === ctx.phase)
 				if (phase === undefined) throw new Error(`fixture preset ${ctx.loadedPreset.preset.name} does not define phase ${ctx.phase}`)

@@ -15,7 +15,7 @@ import {
 	type CoderLoopDaemonSchedulerConfig,
 	type DaemonResponse,
 } from "./daemon"
-import { buildCoderLoopStatusSnapshot, parseReviewSummaryVerdict, type JsonObject, type JsonValue } from "./loop"
+import { buildCoderLoopStatusSnapshot, type JsonObject, type JsonValue } from "./loop"
 import {
 	createGitWorktreeManager,
 	reviewOnEmptyLockPathForChainName,
@@ -63,38 +63,29 @@ const FAKE_RUNNER_STATUS_WRITE_SNIPPET = `if (typeof input.writeStatus === "stri
 	store.close()
 }`
 
-const FAKE_RUNNER_DEFAULT_SUMMARY = "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=fake-runner default"
-const FAKE_RUNNER_REVIEW_MARKER = "REVIEW SUMMARY:"
-
-// Mirror of the real agents' status-writing decision for fake runners: derive the status
-// the agent would have written from the phase and the item's scripted summary/exitCode.
+// #405: with the stdout verdict parser retired, the fake runner no longer derives
+// status from a `summary` string token. Test fixtures pass `extra.writeStatus`
+// directly when the test wants the fake runner to write a specific status; the
+// helper below applies the default review status (`done`) when no fixture
+// override is set. Iteration / trigger phases inherit the historical behavior:
+// trigger phases never mutate the triggering item, iteration leaves status to
+// review (`null` here = "let the scheduler advance via phase trigger").
 const TRIGGER_PHASES = new Set(["blocked-responder", "umbrella-finalizer", "review-on-empty"])
 
 function daemonFakeRunnerWriteStatus(phase: string, extra: BoundaryRecord): string | null {
-	// Trigger phases run as side effects and must not mutate the triggering item's status (the engine
-	// preserves its terminal status). Work phases (iteration / review / single-phase `run`) write status.
 	if (TRIGGER_PHASES.has(phase)) return null
 	const exitCode = typeof extra.exitCode === "number" ? extra.exitCode : 0
 	if (exitCode !== 0) return "changes_requested"
-	const hasSummary = Object.prototype.hasOwnProperty.call(extra, "summary")
-	const summary = hasSummary ? extra.summary : FAKE_RUNNER_DEFAULT_SUMMARY
-	if (typeof summary !== "string") return null
-	// Iteration handoff is structural; review summaries carry status verdicts.
-	if (summary.startsWith("ITERATION SUMMARY")) return null
-	const verdict = parseReviewSummaryVerdict(summary, FAKE_RUNNER_REVIEW_MARKER, "claude")
-	switch (verdict) {
-		case "accepted":
-		case "stop":
-			return "done"
-		case "skip":
-			return "moot"
-		case "blocked":
-			return "blocked"
-		case "retry":
-			return "changes_requested"
-		default:
-			return "changes_requested"
-	}
+	// Explicit fixture-override path: a test that says "write status X" wins.
+	const writeStatusOverride = extra.writeStatus
+	if (typeof writeStatusOverride === "string") return writeStatusOverride
+	if (writeStatusOverride === null) return null
+	// Iteration handoff is structural; the scheduler advances via phase trigger.
+	if (phase === "iteration") return null
+	// Default review behavior pre-#405 was to land at `done`; preserve that for fixtures
+	// that did not set an explicit writeStatus override.
+	if (phase === "review") return "done"
+	return null
 }
 
 afterAll(async () => {
@@ -1333,7 +1324,8 @@ attemptTimeoutSeconds = 3600
 							blockerRepo: "mouriya-s-lab/coder-loop",
 							blockerRef: "#454",
 							schedulerBackoff: { failureCount: 1, nextRunAt: 1 },
-							summary: "REVIEW SUMMARY: verdict=accepted; issue=#455; reason=legacy db compatibility",
+							summary: "PHASE DONE: issue=#455; reason=legacy db compatibility",
+							writeStatus: "done",
 						}),
 					})
 					seededItemId = item.id
@@ -1645,18 +1637,32 @@ attemptTimeoutSeconds = 3600
 				agentPhase: "review",
 			}))
 			expect(reviewExits.phase).toBe("review")
-			expect(reviewExits.allowed).toEqual(["blocked", "changes_requested", "done", "exhausted", "moot"])
+			// #405 ADT: the typed phase-exits face now splits the allowed payload into
+			// `allowedStatuses` (item-status branch) and `allowedChainActions` (chain-action
+			// branch). Review declares its five item-status exits plus the chain-action `stop`
+			// exit (the controlled stop-chain channel — agent direct `chain stop` rejected
+			// per #409).
+			expect(reviewExits.allowedStatuses).toEqual(["blocked", "changes_requested", "done", "exhausted", "moot"])
+			expect(reviewExits.allowedChainActions).toEqual(["stop"])
 			const reviewExitsArray = Array.isArray(reviewExits.exits) ? reviewExits.exits : []
-			expect(reviewExitsArray.length).toBe(5)
+			expect(reviewExitsArray.length).toBe(6)
 			for (const raw of reviewExitsArray) {
 				const exit = record(raw)
-				expect(typeof exit.status).toBe("string")
 				expect(typeof exit.when).toBe("string")
 				expect((exit.when as string).length).toBeGreaterThan(0)
+				if (exit.kind === "item-status") {
+					expect(typeof exit.status).toBe("string")
+				} else if (exit.kind === "chain-action") {
+					expect(exit.action).toBe("stop")
+				} else {
+					throw new Error(`unknown exit kind: ${JSON.stringify(exit)}`)
+				}
 			}
 
-			// Cross-check write-side parity (#397): the gate's `allowed` payload on a deny equals the
-			// query's `allowed` list, so the agent that queries-then-writes sees one consistent set.
+			// Cross-check write-side parity (#397): the gate's `allowed` payload on a deny equals
+			// the query's `allowedStatuses` list (chain-action exits do not participate in the
+			// item-status write gate), so the agent that queries-then-writes sees one consistent
+			// item-status set.
 			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
 			try {
 				store.updateItem(reviewItemId, { phase: "review", updatedAt: 1_800_030_000 })
@@ -1668,7 +1674,7 @@ attemptTimeoutSeconds = 3600
 			if (!writeDenied.ok) {
 				expect(writeDenied.error.details).toMatchObject({
 					phase: "review",
-					allowed: reviewExits.allowed,
+					allowed: reviewExits.allowedStatuses,
 				})
 			}
 
@@ -1694,10 +1700,15 @@ attemptTimeoutSeconds = 3600
 				agentPhase: "run",
 			}))
 			expect(runExits.phase).toBe("run")
-			expect(runExits.allowed).toEqual(["done"])
+			// #405 ADT: single-option phase only declares item-status exits, so
+			// `allowedChainActions` is empty here while `allowedStatuses` mirrors the historical
+			// `allowed` projection.
+			expect(runExits.allowedStatuses).toEqual(["done"])
+			expect(runExits.allowedChainActions).toEqual([])
 			const runExitsArray = Array.isArray(runExits.exits) ? runExits.exits : []
 			expect(runExitsArray.length).toBe(1)
 			const onlyExit = record(runExitsArray[0])
+			expect(onlyExit.kind).toBe("item-status")
 			expect(onlyExit.status).toBe("done")
 
 			// Scenario 3: unknown phase rejected with typed `invalid_request` listing known phases.
@@ -1720,6 +1731,112 @@ attemptTimeoutSeconds = 3600
 				expect(missingAttribution.error.code).toBe("invalid_request")
 				expect(missingAttribution.error.message).toContain("agentRunId and agentPhase")
 			}
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	// #405 chain-action exit selection face. Three scenarios cover the protocol surface:
+	//   1. Selecting a declared chain-action (`stop`) maps to the operator chain.stop semantics —
+	//      chain status flips to `stopped`, the audit + lifecycle events fire (#411 obligation), and
+	//      operator `chain.resume` reversibly restores active status.
+	//   2. Selecting a chain-action that the phase does not declare is rejected as `invalid_request`
+	//      with the typed declared-options list (default-deny per the #397 pattern).
+	//   3. Agent direct `chain.stop` calls remain rejected through the credential gate — this CLI
+	//      is the only controlled channel for an agent to stop the chain it owns (#409).
+	test("socket item.exitAction stop maps to chain.stop and emits the audit + lifecycle events (#405 + #411)", async () => {
+		const fixture = await startFixture("item-exit-action-stop", { schedulerEnabled: false })
+		try {
+			const chainRecord = record(expectOk(await request(fixture, "chain.create", {
+				name: "exit-action-stop-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chainRecord.id)
+			const item = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 45201,
+				repoCwd: REPO_ROOT,
+			})).item)
+			const itemId = numberValue(item.id)
+			const eventsFile = resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile
+
+			// Scenario 2a: vocabulary-invalid action is rejected by the request boundary before the
+			// per-phase admission gate fires. The error message echoes the engine vocabulary.
+			const bogusVocab = await request(fixture, "item.exitAction", {
+				itemId,
+				agentRunId: "run-exit-action-test-1a",
+				agentPhase: "review",
+				action: "not_a_real_action",
+			})
+			expect(bogusVocab.ok).toBe(false)
+			if (!bogusVocab.ok) {
+				expect(bogusVocab.error.code).toBe("invalid_request")
+				expect(bogusVocab.error.message).toMatch(/action must be one of: stop/)
+			}
+
+			// Scenario 2b: vocabulary-valid but phase-undeclared action is rejected by the per-phase
+			// admission gate (default-deny per #397 pattern). Iteration declares no chain-action exits
+			// at all (its `[[phases.exits]]` is empty), so `action=stop` against `agentPhase=iteration`
+			// is admitted at the vocabulary leg and denied at the per-phase leg — producing the
+			// `item.exit.selected` audit event with `outcome=deny reason=phase-exits`.
+			const undeclared = await request(fixture, "item.exitAction", {
+				itemId,
+				agentRunId: "run-exit-action-test-1b",
+				agentPhase: "iteration",
+				action: "stop",
+			})
+			expect(undeclared.ok).toBe(false)
+			if (!undeclared.ok) {
+				expect(undeclared.error.code).toBe("invalid_request")
+				expect(undeclared.error.message).toMatch(/chain action "stop" is not declared by phase "iteration"/)
+			}
+
+			// Scenario 1a: agent-attribution-bypass operator-style call (no agentCredential) succeeds —
+			// the chain stops and both observability events fire. Agents go through the credential
+			// gate; operator path is the same handler with no credential field.
+			const accepted = expectOk(await request(fixture, "item.exitAction", {
+				itemId,
+				agentRunId: "run-exit-action-test-2",
+				agentPhase: "review",
+				action: "stop",
+			}))
+			expect(accepted.action).toBe("stop")
+			const acceptedChain = record(accepted.chain)
+			expect(acceptedChain.status).toBe("stopped")
+
+			// #411 audit event: `item.exit.selected` fired for the deny + allow attempts.
+			const { events: auditEvents } = await queryObservabilityEvents(eventsFile, { type: "item.exit.selected" })
+			expect(auditEvents.length).toBeGreaterThanOrEqual(2)
+			const denyEvent = auditEvents.find((event) => event.type === "item.exit.selected" && event.payload.outcome === "deny")
+			const allowEvent = auditEvents.find((event) => event.type === "item.exit.selected" && event.payload.outcome === "allow")
+			if (denyEvent?.type !== "item.exit.selected") throw new Error("expected deny item.exit.selected audit")
+			if (allowEvent?.type !== "item.exit.selected") throw new Error("expected allow item.exit.selected audit")
+			expect(denyEvent.payload.selectionKind).toBe("chain-action")
+			expect(denyEvent.payload.reason).toBe("phase-exits")
+			expect(denyEvent.payload.declaredChainActions).toEqual([]) // iteration declares no chain-action exits
+			expect(denyEvent.phase).toBe("iteration")
+			expect(allowEvent.payload.selectedAction).toBe("stop")
+			expect(allowEvent.payload.reason).toBe("admitted")
+			expect(allowEvent.payload.declaredChainActions).toEqual(["stop"]) // review declares stop
+			expect(allowEvent.phase).toBe("review")
+
+			// #411 lifecycle distinguisher: `chain.stop.from_phase_exit` fires alongside the existing
+			// `chain.status` audit event the chain-stop dispatcher already emits.
+			const { events: lifecycleEvents } = await queryObservabilityEvents(eventsFile, { type: "chain.stop.from_phase_exit" })
+			expect(lifecycleEvents.length).toBe(1)
+			const lifecycleEvent = lifecycleEvents[0]
+			if (lifecycleEvent?.type !== "chain.stop.from_phase_exit") throw new Error("expected chain.stop.from_phase_exit lifecycle event")
+			expect(lifecycleEvent.payload.chainId).toBe(chainId)
+			expect(lifecycleEvent.payload.issueNumber).toBe(45201)
+			expect(lifecycleEvent.payload.alreadyStopped).toBe(false)
+			expect(lifecycleEvent.phase).toBe("review")
+			expect(lifecycleEvent.runId).toBe("run-exit-action-test-2")
+
+			// Scenario 1b: chain.resume reversibly restores active status — confirms the chain-action
+			// exit path is the same code path operator `chain stop` runs (D1 semantics).
+			const resumed = expectOk(await request(fixture, "chain.resume", { chainId }))
+			const resumedChain = record(resumed.chain)
+			expect(resumedChain.status).toBe("active")
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -2959,7 +3076,10 @@ attemptTimeoutSeconds = 3600
 				chainId,
 				issueNumber: 203,
 				repoCwd: REPO_ROOT,
-				extra: { sleepMs: 5, exitCode: 0 },
+				// #405: pin the iteration write so the test's single-phase event assertion stays
+				// single-phase (previously the retired stdout verdict mapper coincidentally landed
+				// iteration at done via the default REVIEW SUMMARY token).
+				extra: { sleepMs: 5, exitCode: 0, writeStatus: "done" },
 			})
 
 			// The run's events file must end with chain.completed, which the scheduler appends last.
@@ -2994,7 +3114,10 @@ attemptTimeoutSeconds = 3600
 			const exitEvent = events.events.find((event) => event.type === "agent.exit")
 			if (exitEvent?.type !== "agent.exit") throw new Error("expected agent.exit event")
 			expect(exitEvent.payload.excerpt.stdout.path).toBe(paths.runPhaseStdoutFile(runId, "iteration"))
-			expect(exitEvent.payload.excerpt.stdout.records.at(-1)).toContain("REVIEW SUMMARY")
+			// #405: fake-runner default summary line was retired with the verdict family; the
+			// excerpt sanity check now asserts the neutral "PHASE DONE:" stamp the fake runner
+			// emits as its last stdout record.
+			expect(exitEvent.payload.excerpt.stdout.records.at(-1)).toContain("PHASE DONE:")
 			expect(exitEvent.payload.excerpt.stderr.path).toBe(paths.runPhaseStderrFile(runId, "iteration"))
 			expect(exitEvent.payload.excerpt.stderr.records).toEqual([])
 		} finally {
@@ -3017,13 +3140,14 @@ attemptTimeoutSeconds = 3600
 				chainId,
 				issueNumber: 304,
 				repoCwd: REPO_ROOT,
-				extra: { sleepMs: 5, exitCode: 0 },
+				// #405: pin iteration writes — see note on the prior test.
+				extra: { sleepMs: 5, exitCode: 0, writeStatus: "done" },
 			})
 			await request(fixture, "item.add", {
 				chainId,
 				issueNumber: 305,
 				repoCwd: REPO_ROOT,
-				extra: { sleepMs: 5, exitCode: 0 },
+				extra: { sleepMs: 5, exitCode: 0, writeStatus: "done" },
 			})
 			const item = await waitFor(async () => readItem(fixture.loopDataRoot, chainId, 304), (candidate) => candidate?.status === "done")
 			expect(item?.lastRunId).not.toBeNull()
@@ -3193,7 +3317,9 @@ attemptTimeoutSeconds = 3600
 				chainId,
 				issueNumber: 215,
 				repoCwd: REPO_ROOT,
-				extra: { sleepMs: 5, exitCode: 0 },
+				// #405: single-phase-example's `run` phase isn't review, so the
+				// fakeRunner default returns null (no write). Pin the write explicitly.
+				extra: { sleepMs: 5, exitCode: 0, writeStatus: "done" },
 				preset: "single-phase-example",
 			})
 
@@ -3838,8 +3964,8 @@ await appendFile(input.eventLog, JSON.stringify({ type: "start", phase: input.ph
 await new Promise((resolve) => setTimeout(resolve, input.sleepMs))
 await appendFile(input.eventLog, JSON.stringify({ type: "end", phase: input.phase, runId: input.runId }) + "\\n")
 if (input.phase === "iteration") await writeLine("ITERATION SUMMARY: scope=b3-live; reason=iter-marker")
-else if (input.phase === "review") await writeLine("REVIEW SUMMARY: verdict=blocked; issue=#0; reason=b3-live-blocked")
-else if (input.phase === "blocked-responder") await writeLine("REVIEW SUMMARY: verdict=accepted; issue=#0; reason=b3-live-unblock-accepted")
+else if (input.phase === "review") await writeLine("PHASE DONE: phase=review reason=b3-live-blocked")
+else if (input.phase === "blocked-responder") await writeLine("PHASE DONE: phase=blocked-responder reason=b3-live-unblock-accepted")
 ${FAKE_RUNNER_STATUS_WRITE_SNIPPET}
 process.exitCode = 0
 `,
@@ -4457,7 +4583,7 @@ await new Promise((resolve) => setTimeout(resolve, input.sleepMs))
 await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, phase: input.phase, cwd: process.cwd() }) + "\\n")
 await writeLine("done:" + input.itemId + ":" + input.phase)
 if (input.phase === "review") {
-	await writeLine("REVIEW SUMMARY: verdict=accepted; issue=#" + input.issueNumber + "; reason=phase-aware-runner review")
+	await writeLine("PHASE DONE: issue=#" + input.issueNumber + "; reason=phase-aware-runner review")
 } else {
 	await writeLine("ITERATION SUMMARY: scope=phase-aware-runner; reason=iter-marker")
 }
@@ -4535,7 +4661,7 @@ async function startChainBasedRunnerFixture(name: string, options: { phase: stri
 		`#!/bin/sh
 echo "BINARY:codex"
 echo "ITERATION SUMMARY: scope=ac5; reason=marker"
-echo "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=marker"
+echo "PHASE DONE: issue=#0; reason=marker"
 exit 0
 `,
 	)
@@ -4544,7 +4670,7 @@ exit 0
 		`#!/bin/sh
 echo "BINARY:claude"
 echo "ITERATION SUMMARY: scope=ac5; reason=marker"
-echo "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=marker"
+echo "PHASE DONE: issue=#0; reason=marker"
 exit 0
 `,
 	)
@@ -4940,7 +5066,7 @@ await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.i
 await new Promise((resolve) => setTimeout(resolve, input.sleepMs))
 await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
 await writeLine("done:" + input.itemId)
-const summary = Object.prototype.hasOwnProperty.call(input, "summary") ? input.summary : "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=fake-runner default"
+const summary = Object.prototype.hasOwnProperty.call(input, "summary") ? input.summary : "PHASE DONE: itemId=" + input.itemId + " reason=fake-runner default"
 if (summary !== null) await writeLine(summary)
 if (typeof input.summaryWrap === "string" && runSummaryTag !== null) await writeLine("<" + runSummaryTag + ">" + input.summaryWrap + "</" + runSummaryTag + ">")
 const extraSleepAfterSummary = Object.prototype.hasOwnProperty.call(input, "extraSleepAfterSummaryMs") ? input.extraSleepAfterSummaryMs : 0

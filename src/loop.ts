@@ -323,6 +323,23 @@ export type ItemCommandArgs =
 			loopDataRoot: string | null
 			json: boolean
 	  }
+	// #405 chain-action exit-selection face: agent selects a `chain-action` exit
+	// declared in `[[phases.exits]]` (currently only `stop`). Both `agentRunId`
+	// and `agentPhase` are required for the same reason as `exits` — the daemon
+	// pins the gate to the phase the agent is running, not the item's last-write
+	// phase column. The selected action is mapped engine-side to the existing
+	// chain.stop API path (D1 semantics: scheduler stops selecting from this
+	// chain, in-flight runs naturally complete, `chain resume` reversible).
+	| {
+			action: "exit-action"
+			chainName: string
+			issueNumber: number
+			agentRunId: string
+			agentPhase: string
+			chainAction: PresetPhaseChainAction
+			loopDataRoot: string | null
+			json: boolean
+	  }
 
 export type QueueUnblockCommandArgs = {
 	targetCwd: string
@@ -414,10 +431,18 @@ const PresetPhaseTriggerBoundary = arkType({
 	"on?": "string",
 })
 
-const PresetPhaseExitBoundary = arkType({
-	status: "string",
-	when: "string",
-})
+// #405 typed phase-exits ADT. Each exit declared in `[[phases.exits]]` is either
+// an item-status branch (the historical shape — preset declares a status the
+// agent may write to advance the item) or a chain-action branch (currently only
+// `stop`, mapped by the engine to the existing chain.stop API path). The two
+// branches are disjoint by intent: an item-status exit advances the item, a
+// chain-action exit performs a chain-level side effect with no item-status
+// implication. arktype `or` keeps the wire shape ambiguous-free — a row with
+// both `status` and `chainAction` (or with neither) fails parse at preset load.
+const PresetPhaseExitBoundary = arkType.or(
+	{ status: "string", when: "string" },
+	{ chainAction: arkType.unit("stop"), when: "string" },
+)
 
 const PresetPhaseBoundary = arkType({
 	name: "string",
@@ -458,18 +483,22 @@ const StatusSnapshotBoundary = arkType({
 	processes: "object",
 })
 
-// #451: boundary parser for the `item.exits` wire-verb response. The CLI uses
-// it to validate the daemon's reply before rendering — keeps the protocol shape
-// pinned and forces both ends to stay in sync.
-const ItemExitsResponseEntryBoundary = arkType({
-	status: "string",
-	when: "string",
-})
+// #451 + #405: boundary parser for the `item.exits` wire-verb response. The CLI
+// uses it to validate the daemon's reply before rendering — keeps the protocol
+// shape pinned and forces both ends to stay in sync. After #405 the entry shape
+// is the discriminated ADT (item-status | chain-action) so the read side
+// mirrors the preset declaration without flattening the chain-action branch into
+// a fake status string.
+const ItemExitsResponseEntryBoundary = arkType.or(
+	{ kind: arkType.unit("item-status"), status: "string", when: "string" },
+	{ kind: arkType.unit("chain-action"), action: arkType.unit("stop"), when: "string" },
+)
 
 export const ItemExitsResponseBoundary = arkType({
 	phase: "string",
 	exits: ItemExitsResponseEntryBoundary.array(),
-	allowed: "string[]",
+	allowedStatuses: "string[]",
+	allowedChainActions: arkType.unit("stop").array(),
 })
 
 export type LoopOptions = {
@@ -517,10 +546,21 @@ export type PresetPhaseVariable = {
 	doc: PresetVariableDoc | null
 }
 
-export type PresetPhaseExit = {
-	status: InternalStatus
-	when: string
-}
+// #405 ADT: each declared phase-exit is one of two disjoint branches. Code
+// switching on `kind` must remain exhaustive — adding a new branch (future
+// chain-action verbs, etc.) is a typechecker error at every consumer.
+export type PresetPhaseExit =
+	| { kind: "item-status"; status: InternalStatus; when: string }
+	| { kind: "chain-action"; action: "stop"; when: string }
+
+// #405 narrow helpers: most consumers (status admission gate, allowed-statuses
+// projection) only care about the item-status branch. Co-located so the
+// narrowing rule stays single-source — adding a new chain-action verb in the
+// future will also require updating these projections.
+export type PresetPhaseExitItemStatus = Extract<PresetPhaseExit, { kind: "item-status" }>
+export type PresetPhaseExitChainAction = Extract<PresetPhaseExit, { kind: "chain-action" }>
+export const PRESET_PHASE_CHAIN_ACTIONS = ["stop"] as const
+export type PresetPhaseChainAction = (typeof PRESET_PHASE_CHAIN_ACTIONS)[number]
 
 export type PresetPhase = {
 	name: string
@@ -905,8 +945,13 @@ export const BACKOFF_BUDGET_SECONDS = 7200
 const BACKOFF_INITIAL_SECONDS = 4
 const BACKOFF_MAX_INTERVAL_SECONDS = 600
 
-const REVIEW_SUMMARY_VERDICTS = ["retry", "accepted", "skip", "blocked", "stop"] as const
-export type ReviewSummaryVerdict = (typeof REVIEW_SUMMARY_VERDICTS)[number]
+// #405 retired: the entire stdout verdict-parser family — the five-word vocab,
+// the discriminated TS type, the per-runner stream parsers, and the v1
+// `runReview` consumer that read the marker — has been deleted. Review's
+// terminal action now flows entirely through #451's typed phase-exits selection
+// face (`coder-loop item exits` + write via `coder-loop item update --status`
+// for item-status branches, or `coder-loop item exit-action --action stop` for
+// chain-action branches). No stdout-derived flow word survives in any code path.
 export const SUMMARY_WATCHDOG_TERM_MS = Infinity
 export const SUMMARY_WATCHDOG_KILL_MS = 5 * 1000
 
@@ -1525,6 +1570,41 @@ const itemExitsCliCommand = command({
 	}),
 })
 
+// #405 chain-action exit-selection CLI. Companion to the #451 typed query face:
+// agents call `coder-loop item exits` to learn what their phase declares, then
+// dispatch one of two writers — `item update --status` for item-status exits or
+// this command for chain-action exits. The single chain action today is `stop`,
+// which the engine maps to the chain.stop API path (D1: scheduler stops
+// selecting from this chain, in-flight runs naturally complete, `chain resume`
+// reversible). Agent direct `chain stop` calls are rejected (#409); this CLI is
+// the only controlled channel that an agent may use to stop the chain it owns.
+const itemExitActionCliCommand = command({
+	name: "exit-action",
+	description: "Select a chain-action exit declared in the item's current run phase (agent surface for chain-side completion verbs).",
+	args: {
+		chain: positional({ displayName: "chain", type: cmdString }),
+		issue: option({ long: "issue", type: cmdString }),
+		agentRunId: option({ long: "agent-run-id", type: cmdString }),
+		agentPhase: option({ long: "agent-phase", type: cmdString }),
+		action: option({ long: "action", type: cmdString }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		json: flag({ long: "json" }),
+	},
+	handler: (args): CliCommand => ({
+		kind: "item",
+		args: {
+			action: "exit-action",
+			chainName: args.chain,
+			issueNumber: parseRequiredPositiveInteger(args.issue, "--issue"),
+			agentRunId: args.agentRunId,
+			agentPhase: args.agentPhase,
+			chainAction: parsePresetPhaseChainActionFlag(args.action),
+			loopDataRoot: args.loopDataRoot ?? null,
+			json: args.json,
+		},
+	}),
+})
+
 const itemCliCommand = subcommands({
 	name: "item",
 	description: "Operate centralized coder-loop chain items through the daemon socket.",
@@ -1535,6 +1615,7 @@ const itemCliCommand = subcommands({
 		update: itemUpdateCliCommand,
 		reorder: itemReorderCliCommand,
 		exits: itemExitsCliCommand,
+		"exit-action": itemExitActionCliCommand,
 	},
 })
 
@@ -1620,6 +1701,18 @@ function parseRequiredNonNegativeInteger(value: string, flagName: string): numbe
 	const parsed = parseOptionalNonNegativeInteger(value, flagName)
 	if (parsed === null) fail(`${flagName} is required`)
 	return parsed
+}
+
+// #405 chain-action flag parser. Rejects values outside the engine's declared
+// `PRESET_PHASE_CHAIN_ACTIONS` vocabulary at the CLI boundary — the daemon
+// re-validates against the phase's declared options as a second leg, but the
+// CLI fail-fast keeps operator/agent feedback friendly.
+function parsePresetPhaseChainActionFlag(value: string): PresetPhaseChainAction {
+	const found = PRESET_PHASE_CHAIN_ACTIONS.find((action) => action === value)
+	if (found === undefined) {
+		fail(`--action must be one of: ${PRESET_PHASE_CHAIN_ACTIONS.join(", ")}; got: ${value}`)
+	}
+	return found
 }
 
 function parseOptionalRunner(value: string | null, flagName: string): AgentRunnerKind | null {
@@ -1818,6 +1911,23 @@ async function runItemCommand(args: string[]): Promise<void> {
 		writeCommandResult(result, itemArgs.json, formatItemExitsResult)
 		return
 	}
+	if (itemArgs.action === "exit-action") {
+		// #405: chain-action exit selection. Same agent-binding shape as the
+		// `exits` query — both agent-run-id and agent-phase travel to the daemon
+		// so the gate can confirm the phase actually declares the requested
+		// action and the bound run owns this item. Credential auto-attaches from
+		// `CODER_LOOP_RUN_CRED` env via `withInjectedRunCredential`; operators
+		// have no credential and are admitted through the operator branch.
+		const result = await requestDaemonResult(itemArgs.loopDataRoot, "item.exitAction", {
+			chainName: itemArgs.chainName,
+			issueNumber: itemArgs.issueNumber,
+			agentRunId: itemArgs.agentRunId,
+			agentPhase: itemArgs.agentPhase,
+			action: itemArgs.chainAction,
+		})
+		writeCommandResult(result, itemArgs.json, formatItemExitActionResult)
+		return
+	}
 	const fields: JsonObject = {}
 	const requestArgs: JsonObject = {
 		chainName: itemArgs.chainName,
@@ -1977,12 +2087,14 @@ async function requestDaemonResult(loopDataRoot: string | null, command: DaemonC
 	return response.result
 }
 
-// #406: command-scoped credential auto-injection. Only `item.update` consumes the credential
-// today (the caller-admission gate is wired there); other commands are unchanged. The scoping
-// keeps the credential value from leaking into request payloads where the daemon does not
-// validate it — narrow attack surface.
+// #406 + #405: command-scoped credential auto-injection. The credential-bound
+// command set has grown beyond `item.update`: `item.exitAction` (#405's
+// chain-action exit selection) also takes the same agent credential. The
+// scoping keeps the value from leaking into request payloads where the daemon
+// does not validate it — narrow attack surface.
+const CREDENTIAL_BEARING_DAEMON_COMMANDS = new Set<DaemonCommandName>(["item.update", "item.exitAction"])
 function withInjectedRunCredential(command: DaemonCommandName, args: JsonObject): JsonObject {
-	if (command !== "item.update") return args
+	if (!CREDENTIAL_BEARING_DAEMON_COMMANDS.has(command)) return args
 	const value = process.env[LOOP_RUN_CREDENTIAL_ENV]
 	if (typeof value !== "string" || value === "") return args
 	// Operator path explicitness: if the caller already supplied agentCredential (test fixtures
@@ -2159,16 +2271,43 @@ function formatItemListResult(result: JsonObject): string {
 	}).join("")
 }
 
-// #451 text formatter for the typed phase-exits query. Parses the wire shape
-// through the arktype boundary before rendering — guarantees that a daemon
-// version drift cannot quietly print malformed exits to the agent.
+// #451 + #405 text formatter for the typed phase-exits query. Parses the wire
+// shape through the arktype boundary before rendering — guarantees that a
+// daemon version drift cannot quietly print malformed exits to the agent. The
+// ADT (item-status | chain-action) renders each branch with the writer command
+// the agent must use to select it.
 function formatItemExitsResult(result: JsonObject): string {
 	const parsed = ItemExitsResponseBoundary.assert(result)
 	if (parsed.exits.length === 0) {
-		return `phase: ${parsed.phase}\nexits: <none> (phase declares no [[phases.exits]]; default-deny rejects all status writes)\n`
+		return `phase: ${parsed.phase}\nexits: <none> (phase declares no [[phases.exits]]; default-deny rejects all status writes and chain-action selections)\n`
 	}
-	const rows = parsed.exits.map((exit) => `  - ${exit.status}: ${exit.when}`).join("\n")
+	const rows = parsed.exits.map((exit) => {
+		switch (exit.kind) {
+			case "item-status":
+				return `  - item-status ${exit.status} (writer: coder-loop item update --status ${exit.status}): ${exit.when}`
+			case "chain-action":
+				return `  - chain-action ${exit.action} (writer: coder-loop item exit-action --action ${exit.action}): ${exit.when}`
+			default:
+				return assertNeverPhaseExit(exit)
+		}
+	}).join("\n")
 	return `phase: ${parsed.phase}\nexits:\n${rows}\n`
+}
+
+// #405 text formatter for the chain-action exit-selection response. The daemon
+// returns the chain status after the action takes effect (e.g., `stopped` after
+// `action: stop`) plus a brief account of terminated/ongoing runs.
+function formatItemExitActionResult(result: JsonObject): string {
+	const chain = jsonObjectEntry(result.chain)
+	const action = typeof result.action === "string" ? result.action : ""
+	const chainStatus = chain === undefined ? "" : String(chain.status ?? "")
+	const terminatedRuns = Array.isArray(result.terminatedRuns) ? result.terminatedRuns : []
+	const header = `exit-action: action=${action} chain=${String(chain?.name ?? "")} chainStatus=${chainStatus}\n`
+	if (terminatedRuns.length === 0) return header
+	return header + terminatedRuns.map((run) => {
+		const record = jsonObjectEntry(run) ?? {}
+		return `terminatedRun: runId=${String(record.runId ?? "")} exitCode=${String(record.exitCode ?? "")}\n`
+	}).join("")
 }
 
 function formatDaemonStatusResult(result: JsonObject): string {
@@ -2321,7 +2460,7 @@ function rootUsage(): string {
 		"  logs <target> --json [--kind K] [--type T] [--chain C] [--item ID] [--run RUN_ID] [--phase P] [--since TS] [--follow]",
 		"  daemon <up|down|status|start|stop|restart>",
 		"  chain <create|list|status|stop|resume|delete>",
-		"  item <add|batch-add|list|update|reorder>",
+		"  item <add|batch-add|list|update|reorder|exits|exit-action>",
 		"  queue unblock <target> --issue <issue>",
 		"  install <target>",
 		"  uninstall <target>",
@@ -2330,68 +2469,11 @@ function rootUsage(): string {
 	].join("\n")
 }
 
-async function runReview(
-	options: LoopOptions,
-	runId: string,
-	ctx: ResolveContext,
-	agentCwd: string,
-	runner: AgentRunnerSelection,
-	eventContext?: Omit<LoopEventContext, "phase">,
-): Promise<{ code: number; stopRequested: boolean }> {
-	const reviewPhase = lastNonTriggerPhaseForPreset(options.preset)
-	log(`Starting ${reviewPhase.name} agent...`)
-	const reviewStart = Date.now()
-	const reviewPromptRaw = await readFile(reviewPhase.prompt, "utf-8")
-	const reviewPrompt = renderPrompt(reviewPromptRaw, reviewPhase, ctx)
-	const reviewOutputPath = agentOutputPath(options, runId, reviewPhase.name)
-	const phaseEventContext: LoopEventContext | undefined = eventContext
-		? { ...eventContext, phase: reviewPhase.name }
-		: undefined
-	if (phaseEventContext) {
-		await phaseEventContext.emit({
-			type: "phase.start",
-			ts: new Date().toISOString(),
-			runId: phaseEventContext.runId,
-			issueId: phaseEventContext.issueId,
-			pr: phaseEventContext.pr,
-			branch: phaseEventContext.branch,
-			phase: reviewPhase.name,
-		})
-	}
-	const { output: reviewTrace, code: reviewCode } = await runAgent(
-		options,
-		reviewPhase.name,
-		reviewPrompt,
-		reviewOutputPath,
-		agentCwd,
-		runner,
-		summaryWatchdogConfigForPhase(reviewPhase),
-		phaseEventContext,
-	)
-	const reviewDuration = (Date.now() - reviewStart) / 1000
-
-	log(`${reviewPhase.name} agent finished: exit=${reviewCode}, duration=${reviewDuration.toFixed(0)}s, output=${reviewOutputPath} (${reviewTrace.length} bytes)`)
-	if (reviewTrace.trim().length > 0) {
-		await appendFile(options.logFile, `\n--- ${reviewPhase.name} output ${new Date().toISOString()} ---\n${reviewTrace}\n`)
-	}
-	if (phaseEventContext) {
-		await phaseEventContext.emit({
-			type: "phase.end",
-			ts: new Date().toISOString(),
-			runId: phaseEventContext.runId,
-			issueId: phaseEventContext.issueId,
-			pr: phaseEventContext.pr,
-			branch: phaseEventContext.branch,
-			phase: reviewPhase.name,
-			exitCode: reviewCode,
-			durationSeconds: Math.round(reviewDuration),
-		})
-	}
-	const reviewVerdict = reviewPhase.summaryMarker === null ? null : parseReviewSummaryVerdict(reviewTrace, reviewPhase.summaryMarker, runner.kind)
-	const stopRequested = reviewCode === 0 && reviewVerdict === "stop"
-	if (stopRequested) log(`${reviewPhase.name} agent requested loop stop via declared phase summary marker.`)
-	return { code: reviewCode, stopRequested }
-}
+// #405 retired: the v1 review-driver function (and its stop-request derivative)
+// had zero callers — the v2 daemon path spawns the review phase through
+// `scheduler.ts` and never consumed any stdout flow signal. The function and
+// the stdout-parser family it depended on are deleted; review's terminal action
+// now flows through #451's typed phase-exits face exclusively.
 
 function buildOptions(targetCwd: string, raw: BuildOptionsInput, resolved: ChainResolved, preset: Preset): LoopOptions {
 	const sharedContextPath = resolveFrom(targetCwd, resolved.sharedContextFile ?? DEFAULT_SHARED_FILE)
@@ -3921,30 +4003,47 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 
 		for (const [index, phase] of phases.entries()) {
 			const phaseExitStatuses = new Set<string>()
+			const phaseExitChainActions = new Set<string>()
 			for (const exit of phase.exits) {
-				if (!statusNames.has(exit.status)) {
-					presetError(`preset.phases[${index}].exits.status: unrecognized status "${exit.status}"`)
+				switch (exit.kind) {
+					case "item-status": {
+						if (!statusNames.has(exit.status)) {
+							presetError(`preset.phases[${index}].exits.status: unrecognized status "${exit.status}"`)
+						}
+						if (phaseExitStatuses.has(exit.status)) {
+							presetError(`preset.phases[${index}].exits.status: duplicate status "${exit.status}"`)
+						}
+						phaseExitStatuses.add(exit.status)
+						break
+					}
+					case "chain-action": {
+						if (phaseExitChainActions.has(exit.action)) {
+							presetError(`preset.phases[${index}].exits.chainAction: duplicate action "${exit.action}"`)
+						}
+						phaseExitChainActions.add(exit.action)
+						break
+					}
+					default:
+						assertNeverPhaseExit(exit)
 				}
-			if (phaseExitStatuses.has(exit.status)) {
-				presetError(`preset.phases[${index}].exits.status: duplicate status "${exit.status}"`)
 			}
-			phaseExitStatuses.add(exit.status)
-		}
-		if (phase.trigger === null) continue
-		if (isChainCompleteTrigger(phase.trigger)) continue
-		const trigger = phase.trigger
-		if (!phaseNames.has(trigger.afterPhase)) {
-			presetError(`preset.phases[${index}].trigger.afterPhase: unrecognized phase "${trigger.afterPhase}"`)
-		}
+			if (phase.trigger === null) continue
+			if (isChainCompleteTrigger(phase.trigger)) continue
+			const trigger = phase.trigger
+			if (!phaseNames.has(trigger.afterPhase)) {
+				presetError(`preset.phases[${index}].trigger.afterPhase: unrecognized phase "${trigger.afterPhase}"`)
+			}
 			if (!statusNames.has(trigger.whenStatus)) {
 				presetError(`preset.phases[${index}].trigger.whenStatus: unrecognized status "${trigger.whenStatus}"`)
 			}
-		const triggerSourcePhase = phases.find((candidate) => candidate.name === trigger.afterPhase)
-		const triggerSourceExits = new Set(triggerSourcePhase?.exits.map((exit) => exit.status) ?? [])
-		if (!triggerSourceExits.has(trigger.whenStatus)) {
-			presetError(`preset.phases[${index}].trigger.whenStatus: status "${trigger.whenStatus}" is not declared by phase "${trigger.afterPhase}" exits`)
+			const triggerSourcePhase = phases.find((candidate) => candidate.name === trigger.afterPhase)
+			// #405: trigger linkage is keyed on item-status only (no chain-action exit can be
+			// the `whenStatus` of another phase — chain-action exits do not write item status).
+			const triggerSourceExits = new Set((triggerSourcePhase?.exits ?? []).flatMap((exit) => exit.kind === "item-status" ? [exit.status] : []))
+			if (!triggerSourceExits.has(trigger.whenStatus)) {
+				presetError(`preset.phases[${index}].trigger.whenStatus: status "${trigger.whenStatus}" is not declared by phase "${trigger.afterPhase}" item-status exits`)
+			}
 		}
-	}
 
 	return {
 		name: root.name,
@@ -4124,17 +4223,29 @@ function parsePhaseModel(value: BoundaryValue, label: string): string | null {
 	return value
 }
 
-// summaryMarker is retired from preset.toml; the daemon scheduler uses
-// per-run nonce summary tags (#430). The v1 engine still needs a marker for
-// review verdict parsing; default based on phase name.
-function phaseSummaryMarkerForName(name: string): string | null {
-	if (name === "review" || name === "review-on-empty") return "REVIEW SUMMARY:"
+// #405 retired: `phaseSummaryMarkerForName` previously seeded the literal review
+// marker as the only non-null value — that marker existed solely to feed the
+// deleted v1 review driver / stdout flow parser. With those consumers gone the
+// seed has no live receiver; the field is set to `null` for every phase. The
+// `summaryMarker` field on `PresetPhase` and `summaryWatchdogConfigForPhase`
+// stay as inert hooks (out of scope per the issue's #452 boundary — summary
+// injection redesign is owned there).
+function phaseSummaryMarkerForName(_name: string): string | null {
 	return null
 }
 
 function parsePresetPhaseExits(value: BoundaryValue, label: string): PresetPhaseExit[] {
+	// #405 ADT: arktype's `or` returns a union — narrow per entry on the
+	// discriminating field present in the wire shape. The discriminated TS shape
+	// (`kind`) is inserted here so downstream consumers stay union-switching
+	// rather than re-detecting from the wire fields.
 	const exits = assertArk(PresetPhaseExitBoundary.array(), value, label)
-	return exits.map((entry, index) => ({ status: parseInternalStatus(entry.status, `${label}[${index}].status`), when: entry.when }))
+	return exits.map((entry, index) => {
+		if ("status" in entry) {
+			return { kind: "item-status" as const, status: parseInternalStatus(entry.status, `${label}[${index}].status`), when: entry.when }
+		}
+		return { kind: "chain-action" as const, action: entry.chainAction, when: entry.when }
+	})
 }
 
 function assertRoleEntryHasNoFrontmatter(markdown: string, label: string): void {
@@ -4767,22 +4878,54 @@ export function renderRuntimeInputsDoc(phase: PresetPhase, ctx: ResolveContext):
 
 export function renderPhaseExitsDoc(phase: PresetPhase): string {
 	if (phase.exits.length === 0) return ""
-	return phase.exits.map((exit) => `- \`${exit.status}\`: ${exit.when}`).join("\n")
+	// #405 ADT: doc renders both branches with stable, distinguishable shapes —
+	// item-status branches show the status word the agent must write; chain-action
+	// branches show the action verb and route the agent to the dedicated CLI.
+	return phase.exits.map((exit) => {
+		switch (exit.kind) {
+			case "item-status":
+				return `- status \`${exit.status}\`: ${exit.when}`
+			case "chain-action":
+				return `- chain-action \`${exit.action}\`: ${exit.when}`
+			default:
+				return assertNeverPhaseExit(exit)
+		}
+	}).join("\n")
 }
 
 export function phaseWritableStatuses(phase: PresetPhase): readonly InternalStatus[] {
-	return phase.exits.map((exit) => exit.status)
+	// #405 narrow: only item-status branches participate in the per-phase status
+	// admission gate (#397). Chain-action branches contribute zero allowed
+	// statuses — they are not item-status writes.
+	return phase.exits.flatMap((exit) => exit.kind === "item-status" ? [exit.status] : [])
 }
 
-// #451 unified completion-protocol epilogue. Engine-owned, zero business
+export function phaseChainActions(phase: PresetPhase): readonly PresetPhaseChainAction[] {
+	// #405 narrow: chain-action branches the agent may select via the dedicated
+	// exit-action CLI. Used by the engine to gate `coder-loop item exit-action`
+	// against the phase's declared options.
+	return phase.exits.flatMap((exit) => exit.kind === "chain-action" ? [exit.action] : [])
+}
+
+function assertNeverPhaseExit(value: never): never {
+	throw new Error(`unhandled phase-exit kind: ${JSON.stringify(value)}`)
+}
+
+// #451 + #405 unified completion-protocol epilogue. Engine-owned, zero business
 // literals: references only the engine's own CLI surface (`coder-loop item
-// exits` and `coder-loop item update --status`). The same string is appended
-// to every daemon-spawned phase prompt so the agent has one uniform protocol
-// for "I am done" — multi-option phases pick one of several exits, single-option
-// phases mark themselves complete by writing the only option. Phases that
-// declare no `[[phases.exits]]` still receive the epilogue: the query face will
-// truthfully report `<none>` and the write gate rejects all writes (default-deny
-// per #397), which is the right teaching for those phases too.
+// exits` for the query face, `coder-loop item update --status` for item-status
+// exits, `coder-loop item exit-action --action` for chain-action exits). The
+// same string is appended to every daemon-spawned phase prompt so the agent has
+// one uniform protocol for "I am done" — multi-option phases pick one branch,
+// single-option phases mark themselves complete by writing the only option.
+// Phases that declare no `[[phases.exits]]` still receive the epilogue: the
+// query face will truthfully report `<none>` and the write gate rejects all
+// writes (default-deny per #397), which is the right teaching for those phases
+// too. The chain-action branch is the only controlled channel for stop-chain —
+// agent direct `coder-loop chain stop` calls are rejected at the daemon gate
+// (#409); the engine maps the selected `chain-action: stop` exit to the same
+// code path operator `chain stop` runs (D1: scheduler stops selecting from this
+// chain, in-flight runs naturally complete, `chain resume` reversible).
 export function phaseExitsEpilogue(): string {
 	return [
 		"",
@@ -4791,19 +4934,27 @@ export function phaseExitsEpilogue(): string {
 		"",
 		"无论本 phase 的目标是什么，做完工作后用同一条两步协议收尾：",
 		"",
-		"1. 查询当前 phase 在元数据中声明的可选下一步状态：",
+		"1. 查询当前 phase 在元数据中声明的可选下一步出边：",
 		"   ```",
 		"   coder-loop item exits <CHAIN> --issue <ISSUE> --agent-run-id <RUN_ID> --agent-phase <PHASE> --json",
 		"   ```",
-		"   返回的 `exits` 列表是本 phase 唯一允许写入的状态集合（per-phase 切片，不暴露其他 phase 出边）。",
+		"   返回的 `exits` 列表是本 phase 唯一允许选择的出边集合（per-phase 切片，不暴露其他 phase 出边）。每个 exit 是两种 kind 之一：",
+		"   - `kind: \"item-status\"` 带 `status` 字段：表示在本 phase 写回该 item status 即可推进 item 到下一步。",
+		"   - `kind: \"chain-action\"` 带 `action` 字段：表示在本 phase 触发一个 chain 级副作用（如 `action: \"stop\"` 停链），不是 item 终态。",
 		"",
-		"2. 从返回的 `exits` 中选一个 status，写回 item：",
-		"   ```",
-		"   coder-loop item update <CHAIN> --issue <ISSUE> --agent-run-id <RUN_ID> --agent-phase <PHASE> --status <chosen-status>",
-		"   ```",
-		"   写返回集合以外的 status 会被默认拒绝（default-deny）。",
+		"2. 按所选 exit 的 kind 执行对应写入：",
+		"   - item-status 分支 → 用 `item update --status`：",
+		"     ```",
+		"     coder-loop item update <CHAIN> --issue <ISSUE> --status <chosen-status>",
+		"     ```",
+		"     `agent-run-id` / `agent-phase` 不需要手填——本 phase 进程的 env 已自动携带凭据。写返回集合以外的 status 会被默认拒绝（default-deny）。",
+		"   - chain-action 分支 → 用 `item exit-action --action`：",
+		"     ```",
+		"     coder-loop item exit-action <CHAIN> --issue <ISSUE> --agent-run-id <RUN_ID> --agent-phase <PHASE> --action <chosen-action>",
+		"     ```",
+		"     选返回集合以外的 action（或绕过此通道直接调 `coder-loop chain stop`）都会被引擎拒绝。",
 		"",
-		"协议对所有 phase 一致：多选项 phase 选其一表达裁决；单选项 phase 调用即标记完成。不要凭空捏造任何元数据未声明的状态。",
+		"协议对所有 phase 一致：多选项 phase 选其一表达裁决；单选项 phase 调用即标记完成。不要凭空捏造任何元数据未声明的状态或动作。",
 	].join("\n")
 }
 
@@ -5194,17 +5345,11 @@ function finalSummaryLine(text: string, marker: string): string | null {
 	return lastLine?.startsWith(marker) ? lastLine : null
 }
 
-function escapeRegExp(value: string): string {
-	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-}
-
-function parseReviewSummaryVerdictFromText(text: string, marker: string): ReviewSummaryVerdict | null {
-	const summaryLine = finalSummaryLine(text, marker)
-	if (summaryLine === null) return null
-	const match = summaryLine.match(new RegExp(`^${escapeRegExp(marker)}\\s*verdict=(retry|accepted|skip|blocked|stop)\\s*;`))
-	const verdict = match?.[1]
-	return verdict !== undefined && includesStringLiteral(REVIEW_SUMMARY_VERDICTS, verdict) ? verdict : null
-}
+// #405 retired: the regex-escape helper and the per-text/per-stream stdout
+// flow-word parsers were deleted together — they only existed to assemble the
+// regex that captured the five-word stdout vocabulary. `finalSummaryLine` and
+// `runnerAgentTextFromJsonLine` are still used by the chain-complete finalizer
+// (`parseFinalizerSummaryDecision`) — out of scope for this issue.
 
 function runnerAgentTextFromJsonLine(line: string, runner: AgentRunnerKind): { parsedRunnerEvent: boolean; text: string | null } {
 	const trimmed = line.trim()
@@ -5219,17 +5364,11 @@ function runnerAgentTextFromJsonLine(line: string, runner: AgentRunnerKind): { p
 	}
 }
 
-export function parseReviewSummaryVerdict(output: string, marker: string, runner: AgentRunnerKind = "claude"): ReviewSummaryVerdict | null {
-	let sawRunnerJson = false
-	let verdict: ReviewSummaryVerdict | null = null
-	for (const line of output.split(/\r?\n/)) {
-		const parsed = runnerAgentTextFromJsonLine(line, runner)
-		sawRunnerJson = sawRunnerJson || parsed.parsedRunnerEvent
-		if (parsed.text === null) continue
-		verdict = parseReviewSummaryVerdictFromText(parsed.text, marker)
-	}
-	return sawRunnerJson ? verdict : parseReviewSummaryVerdictFromText(output, marker)
-}
+// #405 retired: the public stdout-flow parser deleted along with the rest of
+// the family. The exported surface — including the function the daemon test
+// fixtures used to reconstruct fake-runner status writes — is gone; tests now
+// route through `extra.writeStatus` directly (mirror of the real agent calling
+// `coder-loop item update --status`).
 
 export function createSummaryWatchdogStdoutObserver(runner: AgentRunnerKind, marker: string, watchdog: SummaryWatchdog): SummaryWatchdogStdoutObserver {
 	if (runner !== "codex") {
