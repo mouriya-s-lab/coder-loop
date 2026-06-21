@@ -1693,7 +1693,7 @@ export class CoderLoopDaemon {
 		if (chain === null) throw new DaemonError("not_found", `chain ${item.chainId} was not found`, { chainId: item.chainId })
 		assertChainAllowsItemMutation(chain, "item.exitAction")
 		const caller = await this.admitItemMutationCaller(chain, item, args)
-		const { preset } = await this.loadedPresetForItem(chain, item)
+		const { preset } = await this.loadedPresetForItem(chain, item, "item.exitAction")
 		const presetPhase = preset.phases.find((entry) => entry.name === agentPhase)
 		if (presetPhase === undefined) {
 			const knownPhases = preset.phases.map((entry) => entry.name)
