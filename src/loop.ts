@@ -444,6 +444,16 @@ const PresetPhaseExitBoundary = arkType.or(
 	{ chainAction: arkType.unit("stop"), when: "string" },
 )
 
+// #407 per-phase rights segment. First definition (#396 D10 verdict): #409 (privileged ops)
+// and #410 (writable fields) consume the same shape rather than inventing parallel sections.
+// All three fields are optional at the boundary; the parser normalizes the missing form to a
+// default-deny runtime record so downstream gates never have to branch on "rights absent".
+const PresetPhaseRightsBoundary = arkType({
+	"createItems?": "boolean",
+	"writableFields?": "string[]",
+	"privilegedOps?": "string[]",
+})
+
 const PresetPhaseBoundary = arkType({
 	name: "string",
 	prompt: "string",
@@ -453,6 +463,7 @@ const PresetPhaseBoundary = arkType({
 	"variables?": "object",
 	"trigger?": PresetPhaseTriggerBoundary,
 	"roles?": "string[]",
+	"rights?": PresetPhaseRightsBoundary,
 })
 
 const PresetFragmentBoundary = arkType({
@@ -562,6 +573,18 @@ export type PresetPhaseExitChainAction = Extract<PresetPhaseExit, { kind: "chain
 export const PRESET_PHASE_CHAIN_ACTIONS = ["stop"] as const
 export type PresetPhaseChainAction = (typeof PRESET_PHASE_CHAIN_ACTIONS)[number]
 
+// #407 per-phase rights — the in-memory shape of the optional `[phases.rights]` toml segment.
+// All three fields are non-optional: the parser normalizes a missing segment to default-deny
+// (createItems=false, writableFields=∅, privilegedOps=∅) so downstream consumers (the create-
+// gate here, #410's writable-fields gate, #409's privileged-ops gate) all read the same shape.
+// `writableFields` / `privilegedOps` are `ReadonlySet<string>` so membership checks are O(1) and
+// the type makes the "this is a set, not a list" intent explicit at every call site.
+export type PresetPhaseRights = {
+	createItems: boolean
+	writableFields: ReadonlySet<string>
+	privilegedOps: ReadonlySet<string>
+}
+
 export type PresetPhase = {
 	name: string
 	prompt: string
@@ -575,6 +598,8 @@ export type PresetPhase = {
 	// into this phase's prompt is sliced to roles named here. Empty when the
 	// preset declares no fragments (slicing yields an empty index either way).
 	roles: readonly string[]
+	// #407 per-phase rights, always present at runtime (parser fills default-deny).
+	rights: PresetPhaseRights
 }
 
 export type PresetFragment = {
@@ -2087,14 +2112,21 @@ async function requestDaemonResult(loopDataRoot: string | null, command: DaemonC
 	return response.result
 }
 
-// #406 + #405: command-scoped credential auto-injection. The credential-bound
-// command set has grown beyond `item.update`: `item.exitAction` (#405's
-// chain-action exit selection) also takes the same agent credential. The
-// scoping keeps the value from leaking into request payloads where the daemon
-// does not validate it — narrow attack surface.
-const CREDENTIAL_BEARING_DAEMON_COMMANDS = new Set<DaemonCommandName>(["item.update", "item.exitAction"])
+// #406 / #407 / #405: command-scoped credential auto-injection. The credential gate is consumed by
+// the item-mutation commands listed below — `item.update` (write fields, #406), `item.add` and
+// `item.batchAdd` (create items, #407), and `item.exitAction` (chain-action exit selection, #405).
+// Other commands are unchanged; the narrow scoping keeps the credential value from leaking into
+// request payloads where the daemon does not validate it. `as const` literal union here is the
+// only `as` form the project allows — it's a literal narrow, not a type-bypass cast.
+const ITEM_MUTATION_CREDENTIAL_COMMANDS = ["item.update", "item.add", "item.batchAdd", "item.exitAction"] as const
+type ItemMutationCredentialCommand = typeof ITEM_MUTATION_CREDENTIAL_COMMANDS[number]
+
+function isItemMutationCredentialCommand(command: DaemonCommandName): command is ItemMutationCredentialCommand {
+	return (ITEM_MUTATION_CREDENTIAL_COMMANDS as readonly DaemonCommandName[]).includes(command)
+}
+
 function withInjectedRunCredential(command: DaemonCommandName, args: JsonObject): JsonObject {
-	if (!CREDENTIAL_BEARING_DAEMON_COMMANDS.has(command)) return args
+	if (!isItemMutationCredentialCommand(command)) return args
 	const value = process.env[LOOP_RUN_CREDENTIAL_ENV]
 	if (typeof value !== "string" || value === "") return args
 	// Operator path explicitness: if the caller already supplied agentCredential (test fixtures
@@ -3997,7 +4029,11 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 			fragmentRoles,
 			`preset.phases[${index}].roles`,
 		)
-		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), summaryMarker, exits, variables, trigger, defaultRunner: runner, defaultModel: model, roles })
+		// #407 normalize the optional `[phases.rights]` segment to a default-deny runtime record.
+		// Missing segment → every field false / empty set; the gate downstream never has to branch
+		// on "rights absent". Schema parsing is the only place that knows about the toml-side shape.
+		const rights = parsePresetPhaseRights(entry.rights ?? null, `preset.phases[${index}].rights`)
+		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), summaryMarker, exits, variables, trigger, defaultRunner: runner, defaultModel: model, roles, rights })
 	}
 	if (!phases.some((phase) => phase.trigger === null)) presetError("preset.phases: must include at least one non-trigger phase")
 
@@ -4182,6 +4218,37 @@ function parsePhaseRunner(value: BoundaryValue, label: string): AgentRunnerKind 
 	if (value === null) return null
 	if (value !== "claude" && value !== "codex") presetError(`${label}: must be "claude" or "codex"`)
 	return value
+}
+
+// Parse the `[[phases]].rights` segment into the runtime `PresetPhaseRights` ADT (#407).
+// Missing segment / missing fields → default-deny so the create-gate (and #410/#409 once
+// they consume the same shape) never has to branch on "rights absent". `writableFields` /
+// `privilegedOps` become `ReadonlySet<string>` for O(1) membership checks at gate sites.
+// A duplicate string in either array is a preset authoring error (rejected here so the
+// downstream consumers see a clean set).
+function parsePresetPhaseRights(
+	value: typeof PresetPhaseRightsBoundary.infer | null,
+	label: string,
+): PresetPhaseRights {
+	if (value === null) {
+		return { createItems: false, writableFields: new Set(), privilegedOps: new Set() }
+	}
+	return {
+		createItems: value.createItems ?? false,
+		writableFields: parsePresetPhaseRightsStringSet(value.writableFields ?? null, `${label}.writableFields`),
+		privilegedOps: parsePresetPhaseRightsStringSet(value.privilegedOps ?? null, `${label}.privilegedOps`),
+	}
+}
+
+function parsePresetPhaseRightsStringSet(value: readonly string[] | null, label: string): ReadonlySet<string> {
+	if (value === null) return new Set()
+	const set = new Set<string>()
+	for (const [index, entry] of value.entries()) {
+		if (entry.trim() === "") presetError(`${label}[${index}]: must be a non-empty string`)
+		if (set.has(entry)) presetError(`${label}[${index}]: duplicate entry "${entry}"`)
+		set.add(entry)
+	}
+	return set
 }
 
 // Parse the `[[phases]].roles` field and validate against the declared fragment

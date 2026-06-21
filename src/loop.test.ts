@@ -221,6 +221,7 @@ describe("ItemRecord prompt bindings", () => {
 			defaultRunner: null,
 			defaultModel: null,
 			roles: [],
+			rights: { createItems: false, writableFields: new Set(), privilegedOps: new Set() },
 		}
 		const item = makeItem({
 			issueNumber: 333,
@@ -247,6 +248,7 @@ describe("ItemRecord prompt bindings", () => {
 			defaultRunner: "claude",
 			defaultModel: null,
 			roles: [],
+			rights: { createItems: false, writableFields: new Set(), privilegedOps: new Set() },
 		}
 		const ctx: ResolveContext = { item: makeItem(), chain: makeChainBindings(), runtime: makeRuntime({ targetCwd: "/repo" }) }
 
@@ -746,6 +748,7 @@ describe("renderPrompt placeholder validation (issue #399)", () => {
 			defaultRunner: null,
 			defaultModel: null,
 			roles: [],
+			rights: { createItems: false, writableFields: new Set(), privilegedOps: new Set() },
 		}
 	}
 

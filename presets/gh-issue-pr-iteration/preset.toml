@@ -92,6 +92,14 @@ runner = "codex"
 model  = "gpt-5.5"
 roles  = ["common", "quality", "review"]
 
+  # #407 per-phase rights segment. Review is the only phase that legitimately creates queue items
+  # — the expanded-incomplete-parent flow inserts child items before flipping the parent back to
+  # changes_requested (see review/actions/state-write.md). Iteration / blocked-responder /
+  # umbrella-finalizer omit the segment intentionally so they inherit the default-deny (#407
+  # acceptance row #1: no-create-grant phase via agent credential is rejected).
+  [phases.rights]
+  createItems = true
+
   [[phases.exits]]
   status = "changes_requested"
   when   = "Evidence or code failed review, or the PR protocol is incomplete, and another iteration is required."

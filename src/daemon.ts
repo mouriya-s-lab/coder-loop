@@ -17,6 +17,7 @@ import {
 	type JsonValue,
 	type LoadPresetOptions,
 	type PresetPhaseChainAction,
+	type PresetPhaseRights,
 	type PresetPlaceholderFinding,
 } from "./loop"
 import {
@@ -213,9 +214,15 @@ const ITEM_ADD_ARG_KEYS = [
 	"presetPath",
 	"extra",
 	"dependsOn",
+	// #407: env-borne credential threaded through `withInjectedRunCredential` (loop.ts). Present
+	// only when the request originates inside an active agent run; operator CLI invocations have no
+	// such env so the field is absent and the caller-admission gate routes through the operator leg.
+	"agentCredential",
 ] as const
-const ITEM_BATCH_ADD_ARG_KEYS = ["chainId", "chainName", "name", "items"] as const
-const ITEM_BATCH_ADD_ITEM_KEYS = ITEM_ADD_ARG_KEYS.filter((key) => key !== "chainId" && key !== "chainName" && key !== "name")
+// #407 batch-add: `agentCredential` is a BATCH-level field (one credential per request, validated
+// once) — explicitly NOT per-item, so it is removed from `ITEM_BATCH_ADD_ITEM_KEYS` below.
+const ITEM_BATCH_ADD_ARG_KEYS = ["chainId", "chainName", "name", "items", "agentCredential"] as const
+const ITEM_BATCH_ADD_ITEM_KEYS = ITEM_ADD_ARG_KEYS.filter((key) => key !== "chainId" && key !== "chainName" && key !== "name" && key !== "agentCredential")
 const ITEM_UPDATE_SELECTOR_KEYS = ["itemId", "chainId", "chainName", "name", "issueNumber"] as const
 const ITEM_UPDATE_FIELD_KEYS = [
 	"repoCwd",
@@ -1288,6 +1295,17 @@ export class CoderLoopDaemon {
 		validateItemAddRequest(args)
 		const chain = this.resolveChain(args)
 		assertChainAllowsItemMutation(chain, "item.add")
+		// #407 caller + rights gate runs BEFORE buildCreateItemInput so a no-create-grant agent is
+		// rejected before any further field validation work happens (cheap-fail). The per-item
+		// preset spec is parsed first because the rights live on the new item's preset, not the
+		// chain's preset. #412 invariants (preset required per item) stay intact — the same
+		// `requireItemPresetForRequest` call still runs inside buildCreateItemInput; we just look
+		// up the spec twice (once here to enforce rights, once inside buildCreateItemInput to
+		// build the CreateItemInput). The duplicate parse is the simplest code-self-consistent
+		// shape and the spec parse is cheap (no preset.toml load).
+		const presetSpec = await this.requireItemPresetForRequest(args, "item.add")
+		const caller = this.resolveItemMutationCaller(args)
+		await this.assertItemAddRightsForCaller(chain, caller, presetSpec, "item.add")
 		const store = this.requireStore()
 		const existingItems = store.listItems(chain.id)
 		const input = await this.buildCreateItemInput(chain, args, existingItems, "item.add")
@@ -1299,12 +1317,20 @@ export class CoderLoopDaemon {
 		} catch (error) {
 			throw this.translateCreateItemFailure(chain, input.issueNumber, error)
 		}
+		// #407: emit `item.created` with the caller's true subject (operator | agent+run). The
+		// previous hard-coded `{ kind: "operator" }` lied about who created the item the moment
+		// agent paths became reachable; the exhaustive switch on caller.kind here is how
+		// runId/phase enter the event base for the agent path.
+		const createdCallerExtras = caller.kind === "agent"
+			? { runId: caller.runId, phase: caller.phase }
+			: {}
 		await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
 			kind: "audit",
 			type: "item.created",
 			chain: chain.name,
 			item: item.id,
-			subject: { kind: "operator" },
+			...createdCallerExtras,
+			subject: caller.subject,
 			payload: { itemId: item.id, issueNumber: item.issueNumber, status: item.status },
 		}))
 		this.queueSchedulerTick()
@@ -1318,11 +1344,18 @@ export class CoderLoopDaemon {
 		const store = this.requireStore()
 		const rawItems = requiredJsonObjectArray(args, "items")
 		if (rawItems.length === 0) throw new DaemonError("invalid_request", "item.batchAdd requires at least one item", { field: "items" })
+		// #407 caller is batch-level — one credential per request validated once before per-item
+		// work begins. Each child item still carries its own preset declaration so the rights
+		// check is run per-item (a batch may legitimately mix presets); a single deny aborts the
+		// entire batch (整批拒/整批放行).
+		const caller = this.resolveItemMutationCaller(args)
 		const existingItems = store.listItems(chain.id)
 		const inputs: CreateItemInput[] = []
 		const requestedIssues = new Set<number>()
 		for (const [index, rawItem] of rawItems.entries()) {
 			validateKnownKeys(rawItem, `item.batchAdd items[${index}]`, ITEM_BATCH_ADD_ITEM_KEYS)
+			const presetSpec = await this.requireItemPresetForRequest(rawItem, `items[${index}]`)
+			await this.assertItemAddRightsForCaller(chain, caller, presetSpec, `items[${index}]`)
 			const input = await this.buildCreateItemInput(chain, rawItem, existingItems, `items[${index}]`)
 			if (requestedIssues.has(input.issueNumber)) {
 				throw new DaemonError("conflict", `batch contains duplicate issueNumber ${input.issueNumber}`, { chainId: chain.id, chainName: chain.name, issueNumber: input.issueNumber })
@@ -1340,13 +1373,18 @@ export class CoderLoopDaemon {
 			if (firstDuplicate !== undefined && firstDuplicate[1] !== null) throw duplicateItemAddError(chain, firstDuplicate[0], firstDuplicate[1])
 			throw error
 		}
+		// #407: emit `item.created` with the caller's true subject for each created child.
+		const createdCallerExtras = caller.kind === "agent"
+			? { runId: caller.runId, phase: caller.phase }
+			: {}
 		for (const item of items) {
 			await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
 				kind: "audit",
 				type: "item.created",
 				chain: chain.name,
 				item: item.id,
-				subject: { kind: "operator" },
+				...createdCallerExtras,
+				subject: caller.subject,
 				payload: { itemId: item.id, issueNumber: item.issueNumber, status: item.status },
 			}))
 		}
@@ -2096,59 +2134,29 @@ export class CoderLoopDaemon {
 		}))
 	}
 
-	// #406 caller-admission gate. Boundary parse on `handleItemUpdate`: the request is either
-	// agent-attributed (env-borne credential present) or operator-attributed (no credential).
-	// Mismatches raise `DaemonError("invalid_caller", ...)` with the structured deny reason; every
-	// allow and deny outcome is recorded as one `item.mutation.caller_admission` audit event so a
-	// rejection is replayable from the event stream alongside `agent.exit` / `item.status`. The
-	// returned `ItemMutationCaller` is the type-level proof that "anonymous mutation" did not slip
-	// through — downstream code consumes `caller.subject` directly rather than reconstructing it.
-	private async admitItemMutationCaller(
-		chain: ChainRecord,
-		item: ItemRecord,
-		args: JsonObject,
-	): Promise<ItemMutationCaller> {
-		// Pre-406 free-claim attribution keys (`agentRunId` / `agentPhase`) are rejected one layer
-		// earlier by `validateKnownKeys` in `validateItemUpdateRequest` — they are no longer in
-		// `ITEM_UPDATE_ARG_KEYS`. By the time control reaches this gate, the args object cannot
-		// contain them, so no `legacy-attribution-args` branch is reachable here.
+	// #406/#407 caller resolution. Boundary parse of `agentCredential`: the request is either
+	// agent-attributed (env-borne credential present) or operator-attributed (no credential). The
+	// item-bound `wrong-item` check is NOT performed here — that leg is item-specific and lives in
+	// `admitItemMutationCaller` (used by `item.update`). The `item.add` / `item.batchAdd` callers
+	// have no item to compare against (it is being created), so they call this resolver directly
+	// and rely on the rights gate to enforce phase authorization. This function does not emit
+	// audit events — emission is the caller's job because the audit schema differs between the
+	// update path (`item.mutation.caller_admission` requires itemId) and the add path
+	// (`item.add.rights_admission` carries the credential outcome inside its `reason`).
+	private resolveItemMutationCaller(args: JsonObject): ItemMutationCaller {
 		const credentialField = args.agentCredential
 		if (credentialField === undefined) {
 			// Operator path: no credential field at all → caller is the operator.
 			const subject: Extract<ObservabilitySubject, { kind: "operator" }> = { kind: "operator" }
-			await this.recordCallerAdmissionEvent(chain, {
-				item,
-				subject,
-				claimedRunId: null,
-				claimedPhase: null,
-				outcome: "allow",
-				reason: "operator",
-			})
 			return { kind: "operator", subject }
 		}
 		if (typeof credentialField !== "string" || credentialField === "") {
-			await this.recordCallerAdmissionEvent(chain, {
-				item,
-				subject: { kind: "operator" },
-				claimedRunId: null,
-				claimedPhase: null,
-				outcome: "deny",
-				reason: "missing-credential",
-			})
 			throw new DaemonError("invalid_caller", "agentCredential must be a non-empty string when provided", {
 				field: "agentCredential",
 			})
 		}
 		const registration = this.runCredentialRegistry.get(credentialField)
 		if (registration === undefined) {
-			await this.recordCallerAdmissionEvent(chain, {
-				item,
-				subject: { kind: "operator" },
-				claimedRunId: null,
-				claimedPhase: null,
-				outcome: "deny",
-				reason: "unknown-credential",
-			})
 			throw new DaemonError(
 				"invalid_caller",
 				"agentCredential did not match any active run; the run may have ended (credential revoked on run close) " +
@@ -2162,14 +2170,6 @@ export class CoderLoopDaemon {
 		const activeRuns = listActiveRuns(this.schedulerState)
 		const stillActive = activeRuns.some((run) => run.runId === registration.context.runId)
 		if (!stillActive) {
-			await this.recordCallerAdmissionEvent(chain, {
-				item,
-				subject: { kind: "agent", runId: registration.context.runId, phase: registration.context.phase },
-				claimedRunId: registration.context.runId,
-				claimedPhase: registration.context.phase,
-				outcome: "deny",
-				reason: "inactive-run",
-			})
 			// Also evict the stale binding so further requests fail with the cleaner
 			// `unknown-credential` reason instead of repeatedly tripping this branch.
 			this.runCredentialRegistry.delete(credentialField)
@@ -2179,12 +2179,72 @@ export class CoderLoopDaemon {
 				{ runId: registration.context.runId },
 			)
 		}
-		if (registration.context.itemId !== item.id) {
+		const subject: Extract<ObservabilitySubject, { kind: "agent" }> = {
+			kind: "agent",
+			runId: registration.context.runId,
+			phase: registration.context.phase,
+		}
+		return { kind: "agent", runId: registration.context.runId, phase: registration.context.phase, subject }
+	}
+
+	// #406 caller-admission gate for `item.update`. Reuses the registry-lookup helper above and
+	// layers the item-specific `wrong-item` check on top. Emits one `item.mutation.caller_admission`
+	// audit event per outcome (allow or deny) so a rejection is replayable from the event stream
+	// alongside `agent.exit` / `item.status`. The returned `ItemMutationCaller` is the type-level
+	// proof that "anonymous mutation" did not slip through — downstream code consumes
+	// `caller.subject` directly rather than reconstructing it.
+	private async admitItemMutationCaller(
+		chain: ChainRecord,
+		item: ItemRecord,
+		args: JsonObject,
+	): Promise<ItemMutationCaller> {
+		// Pre-406 free-claim attribution keys (`agentRunId` / `agentPhase`) are rejected one layer
+		// earlier by `validateKnownKeys` in `validateItemUpdateRequest` — they are no longer in
+		// `ITEM_UPDATE_ARG_KEYS`. By the time control reaches this gate, the args object cannot
+		// contain them, so no `legacy-attribution-args` branch is reachable here.
+		const credentialFieldRaw = args.agentCredential
+		let caller: ItemMutationCaller
+		try {
+			caller = this.resolveItemMutationCaller(args)
+		} catch (error) {
+			if (error instanceof DaemonError && error.code === "invalid_caller") {
+				const reason = this.classifyResolveCallerDenyReason(credentialFieldRaw, error.message)
+				await this.recordCallerAdmissionEvent(chain, {
+					item,
+					subject: { kind: "operator" },
+					claimedRunId: null,
+					claimedPhase: null,
+					outcome: "deny",
+					reason,
+				})
+			}
+			throw error
+		}
+		if (caller.kind === "operator") {
 			await this.recordCallerAdmissionEvent(chain, {
 				item,
-				subject: { kind: "agent", runId: registration.context.runId, phase: registration.context.phase },
-				claimedRunId: registration.context.runId,
-				claimedPhase: registration.context.phase,
+				subject: caller.subject,
+				claimedRunId: null,
+				claimedPhase: null,
+				outcome: "allow",
+				reason: "operator",
+			})
+			return caller
+		}
+		// Agent path: enforce item-binding (parallel-slot misfire protection). The credential
+		// already resolved in the helper above; re-fetch the registration here to compare bound
+		// itemId vs request item.id. The registry returns undefined only on a race with revocation
+		// — the cleaner failure mode (the resolve helper would itself throw `unknown-credential`)
+		// already handled the absent case earlier, so the undefined branch here is structurally
+		// unreachable. Keep a defensive guard so a future race condition still hits a clean error.
+		const credentialKey = typeof credentialFieldRaw === "string" ? credentialFieldRaw : ""
+		const registration = this.runCredentialRegistry.get(credentialKey)
+		if (registration !== undefined && registration.context.itemId !== item.id) {
+			await this.recordCallerAdmissionEvent(chain, {
+				item,
+				subject: caller.subject,
+				claimedRunId: caller.runId,
+				claimedPhase: caller.phase,
 				outcome: "deny",
 				reason: "wrong-item",
 			})
@@ -2195,20 +2255,29 @@ export class CoderLoopDaemon {
 				{ boundItemId: registration.context.itemId, requestItemId: item.id },
 			)
 		}
-		const subject: Extract<ObservabilitySubject, { kind: "agent" }> = {
-			kind: "agent",
-			runId: registration.context.runId,
-			phase: registration.context.phase,
-		}
 		await this.recordCallerAdmissionEvent(chain, {
 			item,
-			subject,
-			claimedRunId: registration.context.runId,
-			claimedPhase: registration.context.phase,
+			subject: caller.subject,
+			claimedRunId: caller.runId,
+			claimedPhase: caller.phase,
 			outcome: "allow",
 			reason: "agent-credential-admitted",
 		})
-		return { kind: "agent", runId: registration.context.runId, phase: registration.context.phase, subject }
+		return caller
+	}
+
+	// #407 classify the resolver-thrown `invalid_caller` deny reason into the
+	// `CallerAdmissionDenyReason` ADT for audit emission. The resolver itself does not return a
+	// structured reason (its callers diverge on whether they emit `item.mutation.caller_admission`
+	// or `item.add.rights_admission`); this helper recovers the structured reason from the
+	// observable inputs (presence/shape of credentialField + the error message text).
+	private classifyResolveCallerDenyReason(
+		credentialField: unknown,
+		errorMessage: string,
+	): Extract<CallerAdmissionDenyReason, "missing-credential" | "unknown-credential" | "inactive-run"> {
+		if (typeof credentialField !== "string" || credentialField === "") return "missing-credential"
+		if (errorMessage.includes("no longer active")) return "inactive-run"
+		return "unknown-credential"
 	}
 
 	private async recordCallerAdmissionEvent(chain: ChainRecord, input: {
@@ -2233,6 +2302,115 @@ export class CoderLoopDaemon {
 				issueNumber: input.item.issueNumber,
 				claimedRunId: input.claimedRunId,
 				claimedPhase: input.claimedPhase,
+				outcome: input.outcome,
+				reason: input.reason,
+			},
+		}))
+	}
+
+	// #407 per-phase item-creation rights gate. Operators (no agentCredential) bypass entirely —
+	// CLI invocations on the operator's machine are out of scope by design (acceptance row #3).
+	// Agents must hold a `[phases.rights] createItems = true` segment under their currently-bound
+	// phase on the NEW item's preset (not the chain's, not the agent's currently-running preset —
+	// item.add binds the rights check to where the new item will run, identical in form to the
+	// status-write gate's "active phase of THIS item" check). A missing `[phases.rights]` segment
+	// → default-deny (acceptance row #4); a present-but-false `createItems` → deny. Allow + deny
+	// are both audited via `item.add.rights_admission`. The deny path throws `invalid_caller` so
+	// the wire-level shape matches the existing #406 caller-admission rejection family.
+	private async assertItemAddRightsForCaller(
+		chain: ChainRecord,
+		caller: ItemMutationCaller,
+		presetSpec: { preset: string | null; presetPath: string | null },
+		label: string,
+	): Promise<void> {
+		const presetName = presetSpec.preset ?? presetSpec.presetPath ?? "<unknown>"
+		if (caller.kind === "operator") {
+			await this.recordItemAddRightsAdmissionEvent(chain, {
+				caller,
+				outcome: "allow",
+				reason: "operator",
+				presetName,
+			})
+			return
+		}
+		// Load the new item's preset to look up the caller-phase rights. Failures route through
+		// the standard preset_load_failed path so a malformed preset surfaces in the event stream
+		// the same way scheduler-side loads do.
+		const presetDir = presetSpec.presetPath !== null
+			? (isAbsolute(presetSpec.presetPath) ? presetSpec.presetPath : resolve(presetSpec.presetPath))
+			: bundledPresetDir(presetSpec.preset ?? "")
+		const { preset } = await this.loadedPresetFromDirForChain(chain, presetDir, `${label}.rights`)
+		const callerPhase = preset.phases.find((entry) => entry.name === caller.phase)
+		if (callerPhase === undefined) {
+			// The caller's bound phase is not declared in the new item's preset — treat as
+			// default-deny since a phase we don't know cannot have been granted createItems.
+			await this.recordItemAddRightsAdmissionEvent(chain, {
+				caller,
+				outcome: "deny",
+				reason: "no-rights-segment",
+				presetName,
+			})
+			throw new DaemonError(
+				"invalid_caller",
+				`${label}: phase "${caller.phase}" is not declared in preset "${presetName}"; no creation grant available (default-deny)`,
+				{ phase: caller.phase, presetName },
+			)
+		}
+		if (!callerPhase.rights.createItems) {
+			// The phase exists but has no createItems grant — distinguish the "segment absent
+			// entirely" (no-rights-segment) from "segment present, createItems explicitly false or
+			// omitted" (no-create-grant) for fast audit queries.
+			const reason = this.classifyNoCreateGrantReason(callerPhase.rights)
+			await this.recordItemAddRightsAdmissionEvent(chain, {
+				caller,
+				outcome: "deny",
+				reason,
+				presetName,
+			})
+			throw new DaemonError(
+				"invalid_caller",
+				`${label}: phase "${caller.phase}" has no createItems grant on preset "${presetName}"`,
+				{ phase: caller.phase, presetName },
+			)
+		}
+		await this.recordItemAddRightsAdmissionEvent(chain, {
+			caller,
+			outcome: "allow",
+			reason: "agent-allowed",
+			presetName,
+		})
+	}
+
+	// #407 classify the absence of createItems into the two reason variants. A segment that is
+	// completely missing from the preset.toml is interpreted as "default-deny + author has not yet
+	// declared any rights"; a segment declared without createItems (or with createItems=false) is
+	// "author saw the rights segment but withheld createItems". Both deny — distinct reasons
+	// surface that difference in audit queries.
+	private classifyNoCreateGrantReason(rights: PresetPhaseRights): "no-rights-segment" | "no-create-grant" {
+		if (!rights.createItems && rights.writableFields.size === 0 && rights.privilegedOps.size === 0) {
+			return "no-rights-segment"
+		}
+		return "no-create-grant"
+	}
+
+	private async recordItemAddRightsAdmissionEvent(chain: ChainRecord, input: {
+		caller: ItemMutationCaller
+		outcome: "allow" | "deny"
+		reason: "operator" | "agent-allowed" | "no-create-grant" | "no-rights-segment"
+		presetName: string
+	}): Promise<void> {
+		const claimedPhase = input.caller.kind === "agent" ? input.caller.phase : null
+		await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
+			kind: "audit",
+			type: "item.add.rights_admission",
+			chain: chain.name,
+			...(input.caller.kind === "agent"
+				? { runId: input.caller.runId, phase: input.caller.phase }
+				: {}),
+			subject: input.caller.subject,
+			payload: {
+				claimedPhase,
+				presetName: input.presetName,
 				outcome: input.outcome,
 				reason: input.reason,
 			},
