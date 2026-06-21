@@ -94,6 +94,7 @@ import {
 	type ObservabilityEvent,
 	type ObservabilityEventQuery,
 	type ObservabilitySubject,
+	type ItemUpdateFieldWriteReason,
 	type PrivilegedOpAuditOp,
 	type PrivilegedOpAuditReason,
 } from "./observability"
@@ -177,6 +178,66 @@ export type DaemonCommandName =
 // and the typechecker carries the rest.
 export const PRESET_PHASE_PRIVILEGED_OPS = ["item.reorder"] as const
 export type PresetPhasePrivilegedOp = (typeof PRESET_PHASE_PRIVILEGED_OPS)[number]
+
+// #410 field-write rights — engine domain classification of `item.update`'s field axis. Three
+// disjoint domains plus the #397 status field. The control-plane domain is the engine's seam
+// between scheduler/executor decisions and item state; agents are default-denied here and
+// presets cannot grant — the preset parser refuses any control-plane name in `writableFields`
+// with a clear vocabulary error. Passthrough fields are open to per-phase grant. `extra` /
+// `extraPatch` are aggregate carriers — the gate expands them and gates each inner key
+// individually (with `dependsOn` short-circuited to control-plane regardless of carrier,
+// because the existing extra-flatten path in `handleItemUpdate` lifts it to top-level).
+//
+// The classification helper `classifyItemUpdateField` runs an exhaustive switch over this union
+// and uses `assertNever` to force a new field added to `ITEM_UPDATE_FIELD_KEYS` to receive a
+// verdict before the project builds. The control-plane set below is the single source of truth
+// the preset parser cross-checks against, so the two sides of the contract cannot drift.
+export const PRESET_PHASE_RIGHTS_CONTROL_PLANE_FIELDS = ["repoCwd", "runner", "dependsOn", "priority"] as const
+export type ItemUpdateControlPlaneField = (typeof PRESET_PHASE_RIGHTS_CONTROL_PLANE_FIELDS)[number]
+// Passthrough = the agent-grantable subset. `extra` / `extraPatch` are aggregates and are NOT in
+// either set — their grant happens via the inner-key expansion against `writableFields`.
+const PRESET_PHASE_RIGHTS_PASSTHROUGH_FIELDS = ["title", "branch", "pr", "issueFile", "evidenceDir"] as const
+type ItemUpdatePassthroughField = (typeof PRESET_PHASE_RIGHTS_PASSTHROUGH_FIELDS)[number]
+
+// #410 the exhaustive classification verdict for `ItemUpdateFieldName`. Reading any update
+// field through this discriminated union forces every call site to handle every domain.
+export type ItemUpdateFieldClassification =
+	| { kind: "status" }
+	| { kind: "control-plane"; field: ItemUpdateControlPlaneField }
+	| { kind: "passthrough"; field: ItemUpdatePassthroughField }
+	| { kind: "aggregate"; field: "extra" | "extraPatch" }
+
+export function classifyItemUpdateField(field: ItemUpdateFieldName): ItemUpdateFieldClassification {
+	switch (field) {
+		case "status":
+			return { kind: "status" }
+		case "repoCwd":
+		case "runner":
+		case "dependsOn":
+		case "priority":
+			return { kind: "control-plane", field }
+		case "title":
+		case "branch":
+		case "pr":
+		case "issueFile":
+		case "evidenceDir":
+			return { kind: "passthrough", field }
+		case "extra":
+		case "extraPatch":
+			return { kind: "aggregate", field }
+		default:
+			return assertNeverItemUpdateField(field)
+	}
+}
+
+function assertNeverItemUpdateField(field: never): never {
+	throw new DaemonError("internal_error", `unhandled item.update field axis: ${JSON.stringify(field)}`, {})
+}
+
+// #410 the set form used by the preset parser to reject control-plane name attempts. Built once
+// from the `as const` tuple so the parser and the classifier consume the same source of truth.
+export const PRESET_PHASE_RIGHTS_CONTROL_PLANE_FIELD_SET: ReadonlySet<string> =
+	new Set(PRESET_PHASE_RIGHTS_CONTROL_PLANE_FIELDS)
 
 export type DaemonRequest = {
 	id: string
@@ -285,7 +346,13 @@ const ITEM_ADD_ARG_KEYS = [
 const ITEM_BATCH_ADD_ARG_KEYS = ["chainId", "chainName", "name", "items", "agentCredential"] as const
 const ITEM_BATCH_ADD_ITEM_KEYS = ITEM_ADD_ARG_KEYS.filter((key) => key !== "chainId" && key !== "chainName" && key !== "name" && key !== "agentCredential")
 const ITEM_UPDATE_SELECTOR_KEYS = ["itemId", "chainId", "chainName", "name", "issueNumber"] as const
-const ITEM_UPDATE_FIELD_KEYS = [
+// #410 exported: the engine's compile-time vocabulary of writable item-update fields. The
+// per-phase field-write gate (`gateItemUpdateFieldWrites`) exhausts this union — adding a new
+// entry forces a classification verdict in `classifyItemUpdateField`, which the typechecker
+// enforces via `assertNever`. Preset authors only see this vocabulary indirectly through the
+// `[phases.rights] writableFields` declaration; the engine refuses any name in `writableFields`
+// that classifies as control-plane (see `PRESET_PHASE_RIGHTS_CONTROL_PLANE_FIELDS` below).
+export const ITEM_UPDATE_FIELD_KEYS = [
 	"repoCwd",
 	"status",
 	"title",
@@ -299,6 +366,7 @@ const ITEM_UPDATE_FIELD_KEYS = [
 	"extraPatch",
 	"dependsOn",
 ] as const
+export type ItemUpdateFieldName = (typeof ITEM_UPDATE_FIELD_KEYS)[number]
 // #406: `agentRunId` / `agentPhase` are retired from the request boundary in favor of
 // the env-borne credential (see `CALLER_REJECTED_LEGACY_ATTRIBUTION_KEYS` below). They are
 // rejected with `unsupported field` so the only way for an agent to claim a (run, phase) is via
@@ -2000,6 +2068,16 @@ export class CoderLoopDaemon {
 		// ADT, not over loose strings; the operator/agent split — and the runId/phase the agent
 		// path carries — both come from the registry-validated credential, not from caller claims.
 		const caller = await this.admitItemMutationCaller(chain, item, args)
+		// #410: per-phase field-write gate. Runs at request-parse-point AFTER caller admission —
+		// the per-field-shape validation below stays untouched. Operator path is always allowed
+		// (the rights segment is the agent-grant surface; operators bypass entirely). Agent path
+		// loads the item's preset and checks each requested field (including extra-inner keys)
+		// against the phase's `writableFields`. Control-plane fields (`runner`/`repoCwd`/
+		// `dependsOn`/`priority`) are default-deny with no preset surface — same shape as #409's
+		// hard-deny-for-agent class but on the field axis. Throws DaemonError on deny; the
+		// throw happens BEFORE any store write or per-field shape validation, so a denied request
+		// never produces partial state. The audit event is emitted in both allow and deny paths.
+		await this.admitItemUpdateFieldWrites(chain, item, caller, fields)
 		const input: UpdateItemInput = {}
 		const repoCwd = optionalString(fields, "repoCwd")
 		if (repoCwd !== null) assignOptional(input, "repoCwd", await validateRepoCwdForRequest(repoCwd))
@@ -2981,6 +3059,132 @@ export class CoderLoopDaemon {
 		}))
 	}
 
+	// #410 per-phase field-write gate. Runs at the request-parse-point of `item.update`. Parses
+	// the requested field set once (top-level update fields + expanded `extra` / `extraPatch`
+	// inner keys), classifies each via `classifyItemUpdateField`, then judges the matrix in one
+	// pass against the caller-phase's `[phases.rights] writableFields`. Operator path skips
+	// classification entirely (the rights segment is the agent-grant surface). Throws
+	// `invalid_caller` on deny BEFORE any store write — denied requests produce no partial state.
+	//
+	// Two structurally distinct deny variants surface separately so audit consumers can tell
+	// "preset author can fix this" from "no preset surface can ever grant this":
+	//   - `control-plane-denied`  → request touched `runner`/`repoCwd`/`dependsOn`/`priority`
+	//     (top-level or inside extra/extraPatch). Default-deny, no preset surface.
+	//   - `field-not-granted`     → only passthrough fields / extra-inner keys not declared in
+	//     the phase's `writableFields`. Recoverable by extending the preset's writable set.
+	private async admitItemUpdateFieldWrites(
+		chain: ChainRecord,
+		item: ItemRecord,
+		caller: ItemMutationCaller,
+		fields: JsonObject,
+	): Promise<void> {
+		const requested = collectItemUpdateFieldKeys(fields)
+		if (caller.kind === "operator") {
+			// Operator path: always allow. Emit one allow event with reason=operator so the
+			// audit trail records every item.update through this gate uniformly (mirrors
+			// `item.mutation.caller_admission`'s operator-allow event).
+			await this.recordItemUpdateFieldWriteAdmissionEvent(chain, {
+				item,
+				caller,
+				outcome: "allow",
+				reason: "operator",
+				presetName: null,
+				requestedFields: [...requested.all].sort(),
+				grantedFields: [...requested.all].sort(),
+				deniedFields: [],
+			})
+			return
+		}
+		// Agent path: load the item's preset to find the caller-phase's writableFields. Routes
+		// load failures through the standard preset_load_failed path.
+		const { preset } = await this.loadedPresetForItem(chain, item, "item.update.field-rights")
+		const callerPhase = preset.phases.find((entry) => entry.name === caller.phase)
+		const presetName = preset.name
+		// Phase missing from the new item's preset — the caller phase cannot have grants in a
+		// preset that does not declare it. Default-deny via the same `no-rights-segment` reason
+		// the #407 gate emits, so audit queries grouped by reason stay consistent.
+		if (callerPhase === undefined) {
+			await this.recordItemUpdateFieldWriteAdmissionEvent(chain, {
+				item,
+				caller,
+				outcome: "deny",
+				reason: "no-rights-segment",
+				presetName,
+				requestedFields: [...requested.all].sort(),
+				grantedFields: [],
+				deniedFields: [...requested.all].sort(),
+			})
+			throw new DaemonError(
+				"invalid_caller",
+				`item.update: phase "${caller.phase}" is not declared in preset "${presetName}"; no field-write grant available (default-deny)`,
+				{ phase: caller.phase, presetName },
+			)
+		}
+		const verdict = judgeItemUpdateFieldWrites(requested, callerPhase.rights)
+		if (verdict.kind === "allow") {
+			await this.recordItemUpdateFieldWriteAdmissionEvent(chain, {
+				item,
+				caller,
+				outcome: "allow",
+				reason: verdict.reason,
+				presetName,
+				requestedFields: [...requested.all].sort(),
+				grantedFields: [...verdict.granted].sort(),
+				deniedFields: [],
+			})
+			return
+		}
+		await this.recordItemUpdateFieldWriteAdmissionEvent(chain, {
+			item,
+			caller,
+			outcome: "deny",
+			reason: verdict.reason,
+			presetName,
+			requestedFields: [...requested.all].sort(),
+			grantedFields: [...verdict.granted].sort(),
+			deniedFields: [...verdict.denied].sort(),
+		})
+		throw new DaemonError(
+			"invalid_caller",
+			`item.update: phase "${caller.phase}" on preset "${presetName}" has no write grant for field(s) ${[...verdict.denied].sort().map((field) => `"${field}"`).join(", ")} (reason=${verdict.reason})`,
+			{ phase: caller.phase, presetName, deniedFields: [...verdict.denied].sort(), reason: verdict.reason },
+		)
+	}
+
+	private async recordItemUpdateFieldWriteAdmissionEvent(chain: ChainRecord, input: {
+		item: ItemRecord
+		caller: ItemMutationCaller
+		outcome: "allow" | "deny"
+		reason: ItemUpdateFieldWriteReason
+		presetName: string | null
+		requestedFields: string[]
+		grantedFields: string[]
+		deniedFields: string[]
+	}): Promise<void> {
+		const claimedPhase = input.caller.kind === "agent" ? input.caller.phase : null
+		await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
+			kind: "audit",
+			type: "item.update.field_write_admission",
+			chain: chain.name,
+			item: input.item.id,
+			...(input.caller.kind === "agent"
+				? { runId: input.caller.runId, phase: input.caller.phase }
+				: {}),
+			subject: input.caller.subject,
+			payload: {
+				itemId: input.item.id,
+				issueNumber: input.item.issueNumber,
+				claimedPhase,
+				presetName: input.presetName,
+				requestedFields: input.requestedFields,
+				grantedFields: input.grantedFields,
+				deniedFields: input.deniedFields,
+				outcome: input.outcome,
+				reason: input.reason,
+			},
+		}))
+	}
+
 	// #406: build the credential issuer the daemon hands to the scheduler. Mint generates an
 	// opaque UUID and registers it; revoke deletes the entry. Both are idempotent in shape — mint
 	// never collides because UUID v4 is the source of the value; revoke tolerates a missing entry
@@ -3764,6 +3968,141 @@ function itemUpdateFields(args: JsonObject): JsonObject {
 		}
 	}
 	return fields
+}
+
+// #410 carrier-aware view of a single requested item-update field. The gate cares about three
+// things per field: (1) the top-level field name in the engine vocabulary (always set), (2) the
+// inner extra keys when the carrier is `extra`/`extraPatch` (so the matrix gates each key
+// individually instead of pretending the wrapper is the unit), and (3) the carrier itself
+// (so the renderer can name the carrier in the requested field set). The expanded inner keys
+// are *separate from* the top-level field — both are surfaced to the gate so the deny message
+// can name the actual key the agent attempted to write (e.g. "blockerRepo") rather than the
+// generic carrier "extra".
+type ItemUpdateRequestedFields = {
+	topLevel: ReadonlySet<ItemUpdateFieldName>
+	innerKeys: ReadonlySet<string>
+	all: ReadonlySet<string>
+}
+
+// Collect the set of fields the request is attempting to write. `extra` and `extraPatch` carriers
+// are expanded one level — each top-level inner key in the wrapper joins the set the matrix
+// gates. Nested objects inside extra (e.g. `extra.dependsOn = [42]`) surface as the inner key
+// name (`dependsOn`), not a recursive walk; the gate runs the classifier on each name and treats
+// `dependsOn` as control-plane regardless of carrier (the existing top-level extraction in
+// `handleItemUpdate` lifts it to the dependsOn field for graph validation, so the policy is
+// uniform). The wrapper (`extra` / `extraPatch`) is also recorded as a top-level field so the
+// audit trail surfaces it; on its own the wrapper is not classified — only its inner keys are.
+function collectItemUpdateFieldKeys(fields: JsonObject): ItemUpdateRequestedFields {
+	const topLevel = new Set<ItemUpdateFieldName>()
+	const innerKeys = new Set<string>()
+	const all = new Set<string>()
+	for (const key of ITEM_UPDATE_FIELD_KEYS) {
+		if (!Object.hasOwn(fields, key)) continue
+		topLevel.add(key)
+		all.add(key)
+		if (key === "extra" || key === "extraPatch") {
+			const value = fields[key]
+			if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+				for (const innerKey of Object.keys(value)) {
+					innerKeys.add(innerKey)
+					all.add(innerKey)
+				}
+			}
+		}
+	}
+	return { topLevel, innerKeys, all }
+}
+
+// #410 the matrix verdict — exhaustive on the requested field set against the phase rights.
+type ItemUpdateFieldWriteVerdict =
+	| { kind: "allow"; reason: "agent-allowed"; granted: ReadonlySet<string> }
+	| { kind: "deny"; reason: "no-rights-segment" | "field-not-granted" | "control-plane-denied"; granted: ReadonlySet<string>; denied: ReadonlySet<string> }
+
+// Judge the requested field set in one pass. Status is delegated to the existing #397 admission
+// gate so we ignore it here. Aggregate wrappers (`extra` / `extraPatch`) are not themselves
+// gated — their grant is decided per inner key (which we already collected). Control-plane
+// fields anywhere in the requested set short-circuit to `control-plane-denied` (no preset
+// surface can recover this — it is structurally distinct from `field-not-granted`).
+function judgeItemUpdateFieldWrites(
+	requested: ItemUpdateRequestedFields,
+	rights: PresetPhaseRights,
+): ItemUpdateFieldWriteVerdict {
+	// Short-circuit: an empty rights segment (default-deny shape from a missing or all-default
+	// `[phases.rights]`) is the same audit shape as #407's `no-rights-segment` — distinct from
+	// `field-not-granted` for audit query grouping. A request with only the `status` field
+	// would still leave the requested set empty (status is delegated upstream) — in that case
+	// allow trivially even on an empty rights segment, since the gate has nothing to judge.
+	const gatedFields = new Set<string>()
+	const granted = new Set<string>()
+	const deniedPassthrough = new Set<string>()
+	const deniedControlPlane = new Set<string>()
+	for (const field of requested.topLevel) {
+		const classification = classifyItemUpdateField(field)
+		switch (classification.kind) {
+			case "status":
+				// Delegated to #397's admission gate; not classified here.
+				continue
+			case "control-plane":
+				gatedFields.add(field)
+				deniedControlPlane.add(field)
+				break
+			case "passthrough":
+				gatedFields.add(field)
+				if (rights.writableFields.has(field)) {
+					granted.add(field)
+				} else {
+					deniedPassthrough.add(field)
+				}
+				break
+			case "aggregate":
+				// The wrapper itself is not gated — its inner keys are gated below. If the
+				// wrapper appears with no inner keys (e.g. `extra: {}`), nothing to gate;
+				// proceed without contributing to either set.
+				break
+			default:
+				return assertNeverItemUpdateClassification(classification)
+		}
+	}
+	// Inner keys (from `extra` / `extraPatch`). `dependsOn` short-circuits to control-plane
+	// regardless of carrier — the existing `handleItemUpdate` flatten path lifts
+	// `extra.dependsOn` to the top-level dependsOn field for graph validation.
+	for (const innerKey of requested.innerKeys) {
+		gatedFields.add(innerKey)
+		if (PRESET_PHASE_RIGHTS_CONTROL_PLANE_FIELD_SET.has(innerKey)) {
+			deniedControlPlane.add(innerKey)
+			continue
+		}
+		if (rights.writableFields.has(innerKey)) {
+			granted.add(innerKey)
+		} else {
+			deniedPassthrough.add(innerKey)
+		}
+	}
+	if (gatedFields.size === 0) {
+		// Nothing to judge (e.g. status-only update). Allow without consulting rights.
+		return { kind: "allow", reason: "agent-allowed", granted: new Set() }
+	}
+	if (deniedControlPlane.size > 0) {
+		// Control-plane denial dominates — it's structurally non-recoverable by preset config,
+		// so surface it as the primary deny reason even when passthrough denials are also present.
+		const allDenied = new Set<string>([...deniedControlPlane, ...deniedPassthrough])
+		return { kind: "deny", reason: "control-plane-denied", granted, denied: allDenied }
+	}
+	if (deniedPassthrough.size > 0) {
+		// Distinguish `no-rights-segment` (rights are all default-deny shape — preset author
+		// didn't declare any writable fields for this phase) from `field-not-granted` (preset
+		// declared some fields but not the requested one). Mirrors #407's two-reason split.
+		const reason: "no-rights-segment" | "field-not-granted" =
+			rights.writableFields.size === 0 && !rights.createItems && rights.privilegedOps.size === 0
+				? "no-rights-segment"
+				: "field-not-granted"
+		return { kind: "deny", reason, granted, denied: deniedPassthrough }
+	}
+	return { kind: "allow", reason: "agent-allowed", granted }
+}
+
+function assertNeverItemUpdateClassification(value: never): never {
+	throw new DaemonError("internal_error", `unhandled item.update field classification: ${JSON.stringify(value)}`, {})
 }
 
 function requestedChainName(args: JsonObject): string | null {

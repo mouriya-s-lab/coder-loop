@@ -6067,6 +6067,476 @@ process.exitCode = 0
 			await fixture.daemon.stop()
 		}
 	}, 30_000)
+
+	// #410 acceptance row #2 — review writes its declared passthrough fields (top-level + inner
+	// blocker keys via extraPatch). Uses the same two-phase fake runner shape as #409 row 2:
+	// iteration captures its credential + writes in_progress; review captures its credential and
+	// sleeps while the test drives the live `item.update` calls. The fixture preset has
+	// `writableFields = ["branch", "pr", "blockerRepo", "blockerRef"]` on the review phase, so a
+	// review-CRED update of `branch` + `pr` succeeds and a review-CRED `extraPatch` write of
+	// `blockerRepo` + `blockerRef` succeeds. The deny half (control-plane denial + undeclared
+	// field) is covered in the row #1 test below.
+	test("daemon allows review-phase agent to write declared passthrough fields branch + pr + extra blocker keys (#410 row 2)", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-410-row2-allow`)
+		const loopDataRoot = resolve(root, "ld")
+		const iterationCapture = resolve(root, "iteration-credential.txt")
+		const reviewCapture = resolve(root, "review-credential.txt")
+		const fakeRunner = resolve(root, "fake-runner.ts")
+		const eventLog = resolve(root, "events.jsonl")
+		await mkdir(loopDataRoot, { recursive: true })
+		await writeFile(
+			fakeRunner,
+			`import { writeFile, appendFile } from "node:fs/promises"
+const { openSqliteStateStore } = await import(${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))})
+const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+await appendFile(input.eventLog, JSON.stringify({ type: "running", itemId: input.itemId, runId: input.runId, phase: input.phase }) + "\\n")
+if (input.phase === "review") {
+	await writeFile(${JSON.stringify(reviewCapture)}, process.env.CODER_LOOP_RUN_CRED ?? "")
+	await new Promise((r) => setTimeout(r, input.sleepMs ?? 5_500))
+} else {
+	await writeFile(${JSON.stringify(iterationCapture)}, process.env.CODER_LOOP_RUN_CRED ?? "")
+	if (typeof input.writeStatus === "string" && input.itemId > 0 && process.env.CODER_LOOP_DATA_DIR) {
+		const store = openSqliteStateStore({ loopDataRoot: process.env.CODER_LOOP_DATA_DIR })
+		store.updateItem(input.itemId, { status: input.writeStatus, updatedAt: Math.floor(Date.now() / 1000) })
+		store.close()
+	}
+	await new Promise((r) => setTimeout(r, 5))
+}
+process.exitCode = 0
+`,
+		)
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			shutdownGraceMs: 100,
+			scheduler: {
+				enabled: true,
+				intervalMs: 20,
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
+				presetDir: PRESET_DIR,
+				worktreeManager: async ({ chain, repoCwd }) => {
+					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+					await mkdir(worktreePath, { recursive: true })
+					return worktreePath
+				},
+				prompt: ({ item, runId, phase }) => JSON.stringify({
+					itemId: item.id,
+					issueNumber: item.issueNumber,
+					runId,
+					phase,
+					eventLog,
+					sleepMs: 6_000,
+					writeStatus: phase === "iteration" ? "in_progress" : null,
+				}),
+				chainCompleteTriggerForChain: () => null,
+			},
+		})
+		try {
+			const snapshot = daemon.snapshot()
+			const chain = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("chain.create", {
+				name: "410-row2-allow-chain",
+				preset: "gh-issue-pr-iteration",
+				repository: "mouriya-s-lab/coder-loop",
+			}))).chain)
+			const chainId = numberValue(chain.id)
+			const added = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
+				chainId,
+				issueNumber: 410_200,
+				repoCwd: REPO_ROOT,
+				preset: "gh-issue-pr-iteration",
+			}))).item)
+			const itemId = numberValue(added.id)
+			expect(itemId).toBeGreaterThan(0)
+
+			// Wait for the review credential — the scheduler advances iteration → review on the
+			// next tick after iteration writes in_progress.
+			await waitFor(async () => {
+				try { return (await readFile(reviewCapture, "utf-8")).trim() } catch { return "" }
+			}, (value) => value.length > 0, 12_000)
+			const reviewCredential = (await readFile(reviewCapture, "utf-8")).trim()
+			expect(reviewCredential.length).toBeGreaterThan(0)
+
+			// Allow #1: branch + pr declared in preset.review.writableFields → admit, write lands.
+			const allowed = expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.update", {
+				itemId,
+				fields: { branch: "feat/issue-410", pr: 1042 },
+				agentCredential: reviewCredential,
+			})))
+			const updatedA = record(allowed.item)
+			expect(updatedA.branch).toBe("feat/issue-410")
+			expect(numberValue(updatedA.pr)).toBe(1042)
+
+			// Allow #2: extraPatch with blockerRepo + blockerRef inner keys — both declared in
+			// writableFields → admit. The merge preserves any prior extra contents.
+			const allowedExtra = expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.update", {
+				itemId,
+				fields: { extraPatch: { blockerRepo: "mouriya-s-lab/other", blockerRef: "#999" } },
+				agentCredential: reviewCredential,
+			})))
+			const updatedB = record(allowedExtra.item)
+			const extra = record(updatedB.extra)
+			expect(extra.blockerRepo).toBe("mouriya-s-lab/other")
+			expect(extra.blockerRef).toBe("#999")
+
+			// Audit replay: both calls emitted item.update.field_write_admission allow events with
+			// reason=agent-allowed, claimedPhase=review, presetName=gh-issue-pr-iteration, the
+			// declared field set in `grantedFields`, and an empty deniedFields list.
+			const eventsPath = resolveLoopDataPaths({ loopDataRoot }).eventsFile
+			const events = (await queryObservabilityEvents(eventsPath)).events
+			const reviewAllows = events.filter((event) =>
+				event.kind === "audit"
+				&& event.type === "item.update.field_write_admission"
+				&& event.item === itemId
+				&& event.payload.outcome === "allow"
+				&& event.payload.claimedPhase === "review",
+			)
+			expect(reviewAllows.length).toBeGreaterThanOrEqual(2)
+			const allowBranchPr = reviewAllows.find((event) =>
+				event.kind === "audit"
+				&& event.type === "item.update.field_write_admission"
+				&& event.payload.grantedFields.includes("branch")
+				&& event.payload.grantedFields.includes("pr"),
+			)
+			expect(allowBranchPr).toBeDefined()
+			if (allowBranchPr !== undefined && allowBranchPr.kind === "audit" && allowBranchPr.type === "item.update.field_write_admission") {
+				expect(allowBranchPr.payload.reason).toBe("agent-allowed")
+				expect(allowBranchPr.payload.deniedFields).toEqual([])
+				expect(allowBranchPr.payload.presetName).toBe("gh-issue-pr-iteration")
+			}
+			const allowBlocker = reviewAllows.find((event) =>
+				event.kind === "audit"
+				&& event.type === "item.update.field_write_admission"
+				&& event.payload.grantedFields.includes("blockerRepo")
+				&& event.payload.grantedFields.includes("blockerRef"),
+			)
+			expect(allowBlocker).toBeDefined()
+		} finally {
+			await daemon.stop()
+		}
+	}, 30_000)
+
+	// #410 acceptance row #1 — control-plane fields (`runner` / `repoCwd` / `dependsOn` /
+	// `priority`) cannot be granted by any preset and the review agent (the only phase with a
+	// rights segment) is rejected when it tries to write them. The audit event carries
+	// reason=control-plane-denied. Also covers the undeclared-passthrough case (`title` is a
+	// passthrough field but NOT in review's writableFields) → reason=field-not-granted.
+	test("daemon denies review-phase agent on control-plane fields and undeclared passthrough (#410 row 1)", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-410-row1-deny`)
+		const loopDataRoot = resolve(root, "ld")
+		const iterationCapture = resolve(root, "iteration-credential.txt")
+		const reviewCapture = resolve(root, "review-credential.txt")
+		const fakeRunner = resolve(root, "fake-runner.ts")
+		const eventLog = resolve(root, "events.jsonl")
+		await mkdir(loopDataRoot, { recursive: true })
+		await writeFile(
+			fakeRunner,
+			`import { writeFile, appendFile } from "node:fs/promises"
+const { openSqliteStateStore } = await import(${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))})
+const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+await appendFile(input.eventLog, JSON.stringify({ type: "running", itemId: input.itemId, runId: input.runId, phase: input.phase }) + "\\n")
+if (input.phase === "review") {
+	await writeFile(${JSON.stringify(reviewCapture)}, process.env.CODER_LOOP_RUN_CRED ?? "")
+	await new Promise((r) => setTimeout(r, input.sleepMs ?? 6_000))
+} else {
+	await writeFile(${JSON.stringify(iterationCapture)}, process.env.CODER_LOOP_RUN_CRED ?? "")
+	if (typeof input.writeStatus === "string" && input.itemId > 0 && process.env.CODER_LOOP_DATA_DIR) {
+		const store = openSqliteStateStore({ loopDataRoot: process.env.CODER_LOOP_DATA_DIR })
+		store.updateItem(input.itemId, { status: input.writeStatus, updatedAt: Math.floor(Date.now() / 1000) })
+		store.close()
+	}
+	await new Promise((r) => setTimeout(r, 5))
+}
+process.exitCode = 0
+`,
+		)
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			shutdownGraceMs: 100,
+			scheduler: {
+				enabled: true,
+				intervalMs: 20,
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
+				presetDir: PRESET_DIR,
+				worktreeManager: async ({ chain, repoCwd }) => {
+					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+					await mkdir(worktreePath, { recursive: true })
+					return worktreePath
+				},
+				prompt: ({ item, runId, phase }) => JSON.stringify({
+					itemId: item.id,
+					issueNumber: item.issueNumber,
+					runId,
+					phase,
+					eventLog,
+					sleepMs: 6_500,
+					writeStatus: phase === "iteration" ? "in_progress" : null,
+				}),
+				chainCompleteTriggerForChain: () => null,
+			},
+		})
+		try {
+			const snapshot = daemon.snapshot()
+			const chain = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("chain.create", {
+				name: "410-row1-deny-chain",
+				preset: "gh-issue-pr-iteration",
+				repository: "mouriya-s-lab/coder-loop",
+			}))).chain)
+			const chainId = numberValue(chain.id)
+			const added = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
+				chainId,
+				issueNumber: 410_100,
+				repoCwd: REPO_ROOT,
+				preset: "gh-issue-pr-iteration",
+			}))).item)
+			const itemId = numberValue(added.id)
+
+			await waitFor(async () => {
+				try { return (await readFile(reviewCapture, "utf-8")).trim() } catch { return "" }
+			}, (value) => value.length > 0, 12_000)
+			const reviewCredential = (await readFile(reviewCapture, "utf-8")).trim()
+			expect(reviewCredential.length).toBeGreaterThan(0)
+
+			// Deny #1: control-plane field `runner` (top-level) — no preset can grant.
+			const denyRunner = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.update", {
+				itemId,
+				fields: { runner: "codex" },
+				agentCredential: reviewCredential,
+			}))
+			expect(denyRunner.ok).toBe(false)
+			if (!denyRunner.ok) {
+				expect(denyRunner.error.code).toBe("invalid_caller")
+				expect(denyRunner.error.message).toContain("runner")
+				expect(denyRunner.error.message).toContain("review")
+				expect(denyRunner.error.message).toContain("control-plane-denied")
+			}
+
+			// Deny #2: control-plane field `repoCwd` (top-level).
+			const denyRepoCwd = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.update", {
+				itemId,
+				fields: { repoCwd: REPO_ROOT },
+				agentCredential: reviewCredential,
+			}))
+			expect(denyRepoCwd.ok).toBe(false)
+			if (!denyRepoCwd.ok) {
+				expect(denyRepoCwd.error.message).toContain("repoCwd")
+			}
+
+			// Deny #3: control-plane field `dependsOn` (top-level).
+			const denyDependsOn = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.update", {
+				itemId,
+				fields: { dependsOn: [] },
+				agentCredential: reviewCredential,
+			}))
+			expect(denyDependsOn.ok).toBe(false)
+			if (!denyDependsOn.ok) {
+				expect(denyDependsOn.error.message).toContain("dependsOn")
+			}
+
+			// Deny #4: control-plane field `priority` (top-level).
+			const denyPriority = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.update", {
+				itemId,
+				fields: { priority: "high" },
+				agentCredential: reviewCredential,
+			}))
+			expect(denyPriority.ok).toBe(false)
+			if (!denyPriority.ok) {
+				expect(denyPriority.error.message).toContain("priority")
+			}
+
+			// Deny #5: `dependsOn` smuggled through `extra` — gate normalizes it to control-plane.
+			const denyExtraDependsOn = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.update", {
+				itemId,
+				fields: { extra: { dependsOn: [] } },
+				agentCredential: reviewCredential,
+			}))
+			expect(denyExtraDependsOn.ok).toBe(false)
+			if (!denyExtraDependsOn.ok) {
+				expect(denyExtraDependsOn.error.message).toContain("dependsOn")
+				expect(denyExtraDependsOn.error.message).toContain("control-plane-denied")
+			}
+
+			// Deny #6: passthrough field `title` is NOT in review's writableFields → field-not-granted.
+			const denyTitle = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.update", {
+				itemId,
+				fields: { title: "should be denied" },
+				agentCredential: reviewCredential,
+			}))
+			expect(denyTitle.ok).toBe(false)
+			if (!denyTitle.ok) {
+				expect(denyTitle.error.message).toContain("title")
+				expect(denyTitle.error.message).toContain("field-not-granted")
+			}
+
+			// Deny #7: undeclared extra inner key → field-not-granted.
+			const denyExtraKey = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.update", {
+				itemId,
+				fields: { extraPatch: { madeUpKey: "x" } },
+				agentCredential: reviewCredential,
+			}))
+			expect(denyExtraKey.ok).toBe(false)
+			if (!denyExtraKey.ok) {
+				expect(denyExtraKey.error.message).toContain("madeUpKey")
+				expect(denyExtraKey.error.message).toContain("field-not-granted")
+			}
+
+			// Audit replay: one deny event per attempt. Spot-check control-plane and undeclared.
+			const eventsPath = resolveLoopDataPaths({ loopDataRoot }).eventsFile
+			const events = (await queryObservabilityEvents(eventsPath)).events
+			const denies = events.filter((event) =>
+				event.kind === "audit"
+				&& event.type === "item.update.field_write_admission"
+				&& event.item === itemId
+				&& event.payload.outcome === "deny",
+			)
+			expect(denies.length).toBeGreaterThanOrEqual(7)
+			const controlPlaneRunner = denies.find((event) =>
+				event.kind === "audit"
+				&& event.type === "item.update.field_write_admission"
+				&& event.payload.reason === "control-plane-denied"
+				&& event.payload.deniedFields.includes("runner"),
+			)
+			expect(controlPlaneRunner).toBeDefined()
+			if (controlPlaneRunner !== undefined && controlPlaneRunner.kind === "audit" && controlPlaneRunner.type === "item.update.field_write_admission") {
+				expect(controlPlaneRunner.payload.claimedPhase).toBe("review")
+				expect(controlPlaneRunner.payload.presetName).toBe("gh-issue-pr-iteration")
+				expect(controlPlaneRunner.subject).toMatchObject({ kind: "agent" })
+			}
+			const titleDeny = denies.find((event) =>
+				event.kind === "audit"
+				&& event.type === "item.update.field_write_admission"
+				&& event.payload.reason === "field-not-granted"
+				&& event.payload.deniedFields.includes("title"),
+			)
+			expect(titleDeny).toBeDefined()
+			// Store state untouched on the denied paths: branch/pr/extra all default.
+			const stillQueued = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.list", { chainId }))))
+			const itemsList = Array.isArray(stillQueued.items) ? stillQueued.items : []
+			expect(itemsList.length).toBe(1)
+			const stillRecord = record(itemsList[0])
+			expect(stillRecord.branch).toBeNull()
+			expect(stillRecord.pr).toBeNull()
+		} finally {
+			await daemon.stop()
+		}
+	}, 30_000)
+
+	// #410 acceptance row #3 — operators bypass the gate entirely. The fixture writes every kind
+	// of field (control-plane + passthrough + extra inner keys) via the no-credential operator
+	// path; every call succeeds and the audit trail records each as outcome=allow / reason=operator.
+	test("daemon allows operator path to write every item.update field (#410 row 3)", async () => {
+		const fixture = await startFixture("410-row3-operator-bypass", { schedulerEnabled: false })
+		try {
+			const created = record(expectOk(await request(fixture, "chain.create", {
+				name: "410-row3-operator-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(created.id)
+			const added = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 410_300,
+				repoCwd: REPO_ROOT,
+				preset: "gh-issue-pr-iteration",
+			})).item)
+			const itemId = numberValue(added.id)
+			// Operator can write each control-plane field without a credential — no gate hits.
+			expectOk(await request(fixture, "item.update", { itemId, runner: "codex" }))
+			expectOk(await request(fixture, "item.update", { itemId, repoCwd: REPO_ROOT }))
+			expectOk(await request(fixture, "item.update", { itemId, priority: "high" }))
+			// Passthrough fields work too — including ones not in any preset's writableFields.
+			expectOk(await request(fixture, "item.update", { itemId, title: "operator-set title" }))
+			expectOk(await request(fixture, "item.update", { itemId, branch: "operator/branch" }))
+			expectOk(await request(fixture, "item.update", { itemId, pr: 7 }))
+			// Extra payloads with arbitrary inner keys.
+			const finalUpdate = record(expectOk(await request(fixture, "item.update", {
+				itemId,
+				extraPatch: { blockerRepo: "owner/dep", blockerRef: "#1", arbitrary: "key" },
+			})).item)
+			const extra = record(finalUpdate.extra)
+			expect(extra.blockerRepo).toBe("owner/dep")
+			expect(extra.arbitrary).toBe("key")
+
+			// Audit replay: every item.update emitted one field_write_admission allow with
+			// reason=operator. The subject is operator on every event.
+			const eventsPath = resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile
+			const events = (await queryObservabilityEvents(eventsPath)).events
+			const operatorAllows = events.filter((event) =>
+				event.kind === "audit"
+				&& event.type === "item.update.field_write_admission"
+				&& event.item === itemId
+				&& event.payload.outcome === "allow"
+				&& event.payload.reason === "operator",
+			)
+			expect(operatorAllows.length).toBeGreaterThanOrEqual(7)
+			for (const event of operatorAllows) {
+				if (event.kind === "audit" && event.type === "item.update.field_write_admission") {
+					expect(event.subject).toEqual({ kind: "operator" })
+					expect(event.payload.claimedPhase).toBeNull()
+					expect(event.payload.presetName).toBeNull()
+					expect(event.payload.deniedFields).toEqual([])
+				}
+			}
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	// #410 preset-parser side — declaring a control-plane field in `writableFields` fails preset
+	// load with a clear error naming the engine's control-plane vocabulary. Loaded via item-level
+	// `presetPath` (the per-item preset declaration site since #412) so the parse failure
+	// surfaces through the normal item.add load chain.
+	test("preset load rejects control-plane field in [phases.rights] writableFields (#410 parse-side)", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-410-preset-parse-control-plane`)
+		const presetDir = resolve(root, "broken-preset")
+		await mkdir(presetDir, { recursive: true })
+		await writeFile(resolve(presetDir, "preset.toml"), `name = "broken-control-plane-grant"
+
+[item]
+idField = "issue"
+
+[item.fields]
+
+[statuses]
+continuable = ["queued"]
+terminal    = ["done"]
+success     = ["done"]
+entry       = "queued"
+exhausted   = "done"
+
+[[phases]]
+name   = "iteration"
+prompt = "iter.md"
+
+  [phases.rights]
+  writableFields = ["runner"]
+`)
+		await writeFile(resolve(presetDir, "iter.md"), "minimal entry\n")
+		const fixture = await startFixture("410-preset-parse-control-plane", { schedulerEnabled: false })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "410-broken-grant-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			// Loading the broken preset via the per-item path surfaces the parse failure.
+			const reply = await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 410_400,
+				repoCwd: REPO_ROOT,
+				presetPath: presetDir,
+			})
+			expect(reply.ok).toBe(false)
+			if (!reply.ok) {
+				expect(reply.error.message).toContain("writableFields")
+				expect(reply.error.message).toContain("runner")
+				expect(reply.error.message).toContain("control-plane")
+			}
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
 })
 
 type PhaseAdvancementFixture = Fixture & {

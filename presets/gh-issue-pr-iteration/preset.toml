@@ -114,16 +114,28 @@ runner = "codex"
 model  = "gpt-5.5"
 roles  = ["common", "quality", "review"]
 
-  # #407 / #409 per-phase rights segment. Review is the only phase that legitimately creates queue
-  # items (the expanded-incomplete-parent flow inserts child items before flipping the parent back
-  # to changes_requested — see review/actions/state-write.md) AND the only phase with a real
-  # privileged-op need: after inserting expanded children, review reorders them to the front of
-  # the queue via `coder-loop item reorder` (see review/update-state.md). Iteration /
-  # blocked-responder / umbrella-finalizer omit the segment intentionally so they inherit
-  # default-deny on both axes (#407 row #1 / #409 hard-deny + per-phase grant absence).
+  # #407 / #409 / #410 per-phase rights segment. Review is the only phase that legitimately:
+  #   - creates queue items (expanded-incomplete-parent flow inserts child items before flipping
+  #     the parent back to changes_requested — see review/actions/state-write.md);
+  #   - holds a privileged-op grant: after inserting expanded children, review reorders them to
+  #     the front of the queue via `coder-loop item reorder` (see review/update-state.md);
+  #   - writes non-status item fields: `branch` and `pr` carry the verified PR identifiers
+  #     onto the item record on `done`/`changes_requested`/`accepted_pr` transitions, and
+  #     `blockerRepo` / `blockerRef` (inside the `extra` carrier via `--field-json
+  #     '{"extraPatch":{"blockerRepo":...,"blockerRef":...}}'`) capture the blocker pointer on the
+  #     `blocked` transition (review/actions/state-write.md — "Blocker metadata" section).
+  # Iteration / blocked-responder / umbrella-finalizer omit the segment intentionally so they
+  # inherit default-deny on all three axes (#407 row #1 / #409 hard-deny + per-phase grant
+  # absence / #410 no field-write grant).
+  #
+  # #410 control-plane fields (`runner` / `repoCwd` / `dependsOn` / `priority`) cannot be granted
+  # on any phase — the preset parser rejects them in `writableFields` with the engine's
+  # control-plane vocabulary in the error. Default-deny + no preset surface (mirrors #409
+  # acceptance #1 for the privileged-op axis).
   [phases.rights]
-  createItems   = true
-  privilegedOps = ["item.reorder"]
+  createItems    = true
+  privilegedOps  = ["item.reorder"]
+  writableFields = ["branch", "pr", "blockerRepo", "blockerRef"]
 
   [[phases.exits]]
   status = "changes_requested"
