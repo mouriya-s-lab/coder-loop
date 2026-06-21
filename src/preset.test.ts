@@ -174,14 +174,22 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		// #402: bundled preset declares the attempts-exhausted落点 explicitly; engine no longer
 		// owns the "exhausted" literal.
 		expect(preset.statuses.exhausted).toBe("exhausted")
+		// #405: `summaryMarker` is null for every phase now — the only non-null seed
+		// (`"REVIEW SUMMARY:"` for review) was the verdict-marker hook the stdout parser
+		// consumed; with verdict retirement the marker has no consumer.
 		expect(Object.fromEntries(preset.phases.map((phase) => [phase.name, phase.summaryMarker]))).toEqual({
 			iteration: null,
-			review: "REVIEW SUMMARY:",
+			review: null,
 			"blocked-responder": null,
 			"umbrella-finalizer": null,
 		})
 		expect(preset.phases.find((phase) => phase.name === "iteration")?.exits).toEqual([])
-		expect(preset.phases.find((phase) => phase.name === "review")?.exits.map((exit) => exit.status)).toEqual(["changes_requested", "blocked", "moot", "done", "exhausted"])
+		// #405: review's exits now include a chain-action branch (`stop`) alongside the
+		// item-status branches. The projection below narrows on the ADT discriminator so a future
+		// extra chain-action exit will land in the chain-action assertion automatically.
+		const reviewExits = preset.phases.find((phase) => phase.name === "review")?.exits ?? []
+		expect(reviewExits.flatMap((exit) => exit.kind === "item-status" ? [exit.status] : [])).toEqual(["changes_requested", "blocked", "moot", "done", "exhausted"])
+		expect(reviewExits.flatMap((exit) => exit.kind === "chain-action" ? [exit.action] : [])).toEqual(["stop"])
 	})
 
 	test("phases include iteration, review, blocked responder, and umbrella finalizer triggers", async () => {
@@ -378,7 +386,10 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(entry).toContain("userContentEdits")
 		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/accept-pr.md")
 		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/state-write.md")
-		expect(entry).toContain("REVIEW SUMMARY: verdict=<retry|accepted|skip|blocked|stop>")
+		// #405 retired: the `REVIEW SUMMARY: verdict=...` template line and the five-word
+		// verdict format are gone from review-entry.md. Review terminal action now routes
+		// through `coder-loop item exits` + the appropriate writer per ADT branch.
+		expect(/REVIEW SUMMARY:|verdict=/.test(entry)).toBe(false)
 		// judge-side quality criteria are the judgment ground truth
 		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/honesty-judge.md")
 		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/evidence-judge.md")
@@ -501,9 +512,13 @@ describe("parsePreset schema validation", () => {
 
 		const preset = parsePreset(root, "/tmp")
 
-			expect(preset.phases.map((phase) => phase.exits.map((exit) => exit.status))).toEqual([[status("in_progress")], [status("done")]])
+			// #405 ADT projection: this test's phases all use the item-status branch so the
+			// narrowed view yields the same shape the pre-ADT projection used.
+			expect(preset.phases.map((phase) => phase.exits.flatMap((exit) => exit.kind === "item-status" ? [exit.status] : []))).toEqual([[status("in_progress")], [status("done")]])
 		expect(preset.phases[1]!.defaultRunner).toBe("claude")
-		expect(preset.phases.map((phase) => phase.summaryMarker)).toEqual([null, "REVIEW SUMMARY:"])
+		// #405: `summaryMarker` no longer seeded for the `review` phase — verdict-marker hook
+		// retired with the stdout parser family.
+		expect(preset.phases.map((phase) => phase.summaryMarker)).toEqual([null, null])
 	})
 
 	test("accepts manual unblock statuses declared as terminal subset", () => {

@@ -7,13 +7,16 @@ import { isAbsolute, relative, resolve } from "node:path"
 import {
 	buildPhaseRunnerSelectionFromChain,
 	loadPreset,
+	phaseChainActions,
 	phaseWritableStatuses,
 	runPresetChainCompleteTriggerPhases,
+	PRESET_PHASE_CHAIN_ACTIONS,
 	type AgentRunnerKind,
 	type AgentRunnerSelection,
 	type JsonObject,
 	type JsonValue,
 	type LoadPresetOptions,
+	type PresetPhaseChainAction,
 	type PresetPlaceholderFinding,
 } from "./loop"
 import {
@@ -101,6 +104,15 @@ export type DaemonCommandName =
 	// write-side default-deny gate: the agent asks "what may I write from my
 	// currently-running phase?" before issuing the write.
 	| "item.exits"
+	// #405 chain-action exit-selection write face. Agent picks a chain-action
+	// exit (today only `stop`) declared in the phase's [[phases.exits]] — the
+	// daemon gates against the phase's declared options and routes the selected
+	// action through the same code path as operator `chain.stop` (D1: scheduler
+	// stops selecting from this chain, in-flight runs naturally complete,
+	// `chain resume` reversible). Agent direct `chain.stop` calls are still
+	// rejected (#409); this is the only controlled channel for an agent to stop
+	// the chain it owns.
+	| "item.exitAction"
 	| "daemon.status"
 	| "daemon.down"
 
@@ -232,6 +244,11 @@ const ITEM_REORDER_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "position"] as cons
 // last-write phase column is not necessarily the same phase the agent is
 // running right now.
 const ITEM_EXITS_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "agentRunId", "agentPhase"] as const
+// #405: same selector + agent-binding pair as `item.exits`, plus the chosen
+// `action` and the optional `agentCredential` envelope. The action vocabulary
+// itself is gated against the phase's declared chain-action exits inside the
+// handler — the request boundary only enforces the call shape.
+const ITEM_EXIT_ACTION_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "agentRunId", "agentPhase", "action", "agentCredential"] as const
 
 // #406: parsed item-mutation caller — the typed result of the daemon's boundary parse of the
 // `agentCredential` request field. `operator` carries no run binding (the operator path takes
@@ -782,6 +799,8 @@ export class CoderLoopDaemon {
 				return await this.handleItemReorder(request.args)
 			case "item.exits":
 				return await this.handleItemExits(request.args)
+			case "item.exitAction":
+				return await this.handleItemExitAction(request.args)
 			case "daemon.status":
 				return { daemon: daemonSnapshotToJson(this.snapshot()) }
 			case "daemon.down": {
@@ -1555,12 +1574,191 @@ export class CoderLoopDaemon {
 			)
 		}
 		// Query is read-only — no audit event is emitted (the write-side gate at
-		// `admitItemStatusForPhaseRequest` already records the write attempt the
-		// query informs). Adding a "queried" audit type was considered out of
-		// scope per the issue body's "本 issue 范围之外不应改动" boundary.
-		const exits = presetPhase.exits.map((exit) => ({ status: exit.status, when: exit.when }))
-		const allowed = phaseWritableStatuses(presetPhase).slice().sort()
-		return { phase: agentPhase, exits, allowed }
+		// `admitItemStatusForPhaseRequest` and `handleItemExitAction` already
+		// record the write attempt the query informs). The ADT response carries
+		// both branches typed so the CLI cannot collapse a chain-action exit
+		// into a fake status string.
+		const exits: JsonValue[] = presetPhase.exits.map((exit) => phaseExitToJsonValue(exit))
+		const allowedStatuses = phaseWritableStatuses(presetPhase).slice().sort()
+		const allowedChainActions = phaseChainActions(presetPhase).slice().sort()
+		return { phase: agentPhase, exits, allowedStatuses, allowedChainActions }
+	}
+
+	// #405 chain-action exit selection. Companion write-side surface to the
+	// #451 typed query: agent calls `item.exits` to learn what its phase
+	// declares, then dispatches one of two writers — `item.update --status` for
+	// item-status exits or this handler for chain-action exits. Today the only
+	// chain action is `stop`, mapped to the chain.stop API path (D1 semantics:
+	// scheduler stops selecting, in-flight runs naturally complete, `chain
+	// resume` reversible). Three gates:
+	//   1. Caller admission via `admitItemMutationCaller` (operator or
+	//      credential-bound agent). The chain-action selection is a privileged
+	//      write — unauthenticated callers and stale credentials cannot fire it.
+	//   2. Per-phase action vocabulary — the action must be declared in the
+	//      requesting phase's `[[phases.exits]]` chain-action branch; default-deny
+	//      otherwise (mirrors the #397 default-deny status admission).
+	//   3. The phase the agent claims must actually be the agent's currently
+	//      running phase (the caller-admission gate confirms the credential
+	//      binding includes the same phase).
+	// Two observability events:
+	//   - `item.exit.selected` (audit) — records the agent's selection regardless
+	//     of whether the engine proceeds; pairs with the existing `item.status.write_admission`
+	//     pattern for status writes.
+	//   - `chain.stop.from_phase_exit` (lifecycle) — records the engine's
+	//     execution of the chain-stop side effect, distinguishing operator vs
+	//     phase-exit-driven stops in the lifecycle stream.
+	private async handleItemExitAction(args: JsonObject): Promise<JsonObject> {
+		validateKnownKeys(args, "item.exitAction args", ITEM_EXIT_ACTION_ARG_KEYS)
+		validateItemUpdateSelector(args)
+		const agentRunId = optionalString(args, "agentRunId")
+		const agentPhase = optionalString(args, "agentPhase")
+		if (agentRunId === null || agentPhase === null) {
+			throw new DaemonError("invalid_request", "item.exitAction requires both agentRunId and agentPhase (the gate is per-agent-run, per-phase)", {})
+		}
+		const action = parseChainActionFromRequest(args)
+		const item = this.resolveItem(args)
+		const store = this.requireStore()
+		const chain = store.getChain(item.chainId)
+		if (chain === null) throw new DaemonError("not_found", `chain ${item.chainId} was not found`, { chainId: item.chainId })
+		assertChainAllowsItemMutation(chain, "item.exitAction")
+		const caller = await this.admitItemMutationCaller(chain, item, args)
+		const { preset } = await this.loadedPresetForItem(chain, item)
+		const presetPhase = preset.phases.find((entry) => entry.name === agentPhase)
+		if (presetPhase === undefined) {
+			const knownPhases = preset.phases.map((entry) => entry.name)
+			throw new DaemonError(
+				"invalid_request",
+				`item.exitAction: phase "${agentPhase}" is not declared in preset "${preset.name}" (known phases: ${knownPhases.join(", ") || "<none>"})`,
+				{ phase: agentPhase, knownPhases },
+			)
+		}
+		const declaredActions = phaseChainActions(presetPhase)
+		const declaredActionList = declaredActions.slice().sort()
+		const isDeclared = declaredActions.includes(action)
+		await this.recordExitSelectionAuditEvent(chain, {
+			item,
+			phase: agentPhase,
+			runId: agentRunId,
+			selection: { kind: "chain-action", action },
+			declaredChainActions: declaredActionList,
+			declaredItemStatuses: phaseWritableStatuses(presetPhase).slice().sort(),
+			outcome: isDeclared ? "allow" : "deny",
+			reason: isDeclared ? "admitted" : "phase-exits",
+			subject: caller.subject,
+		})
+		if (!isDeclared) {
+			throw new DaemonError(
+				"invalid_request",
+				`item.exitAction: chain action "${action}" is not declared by phase "${agentPhase}" (declared chain actions: ${declaredActionList.join(", ") || "<none> (default-deny)"})`,
+				{ action, phase: agentPhase, declaredChainActions: declaredActionList },
+			)
+		}
+		switch (action) {
+			case "stop": {
+				const result = await this.performChainStopFromPhaseExit(chain, {
+					itemId: item.id,
+					issueNumber: item.issueNumber,
+					runId: agentRunId,
+					phase: agentPhase,
+					subject: caller.subject,
+				})
+				return { action, chain: chainToJson(result.chain), terminatedRuns: result.terminatedRuns.map(completedRunToJson) }
+			}
+			default:
+				return assertNeverChainAction(action)
+		}
+	}
+
+	// #405: chain-action: stop dispatcher. Drives the same code path the
+	// operator `chain.stop` handler runs (state mutation + active-run termination
+	// + audit event) and then emits the lifecycle distinguisher.
+	private async performChainStopFromPhaseExit(chain: ChainRecord, source: { itemId: number; issueNumber: number; runId: string; phase: string; subject: ObservabilitySubject }): Promise<{ chain: ChainRecord; terminatedRuns: SchedulerCompletedRun[] }> {
+		const resumeScheduler = await this.pauseSchedulerForMutation()
+		try {
+			const store = this.requireStore()
+			// Mirror handleChainStop: idempotent if already stopped.
+			if (chain.status === "stopped") {
+				await this.recordChainStopFromPhaseExitLifecycle(chain, { ...source, alreadyStopped: true, terminatedRunIds: [] })
+				return { chain, terminatedRuns: [] }
+			}
+			assertChainCanTransition(chain, "item.exitAction:stop", "active", "stopped")
+			const stopped = store.updateChain(chain.id, { status: "stopped" })
+			const terminatedRuns = await this.terminateActiveRunsForChain(chain.id)
+			const terminatedRunIds = terminatedRuns.map((run) => run.runId)
+			await this.recordObservabilityEventIfChainNameIsValid(stopped, makeObservabilityEvent({
+				kind: "audit",
+				type: "chain.status",
+				chain: stopped.name,
+				item: source.itemId,
+				runId: source.runId,
+				phase: source.phase,
+				subject: source.subject,
+				payload: {
+					chainId: stopped.id,
+					fromStatus: chain.status,
+					toStatus: stopped.status,
+					terminatedRunIds,
+				},
+			}))
+			await this.recordChainStopFromPhaseExitLifecycle(stopped, { ...source, alreadyStopped: false, terminatedRunIds })
+			return { chain: stopped, terminatedRuns }
+		} finally {
+			resumeScheduler()
+		}
+	}
+
+	private async recordChainStopFromPhaseExitLifecycle(chain: ChainRecord, source: { itemId: number; issueNumber: number; runId: string; phase: string; subject: ObservabilitySubject; alreadyStopped: boolean; terminatedRunIds: string[] }): Promise<void> {
+		await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
+			kind: "lifecycle",
+			type: "chain.stop.from_phase_exit",
+			chain: chain.name,
+			item: source.itemId,
+			runId: source.runId,
+			phase: source.phase,
+			subject: source.subject,
+			payload: {
+				chainId: chain.id,
+				issueNumber: source.issueNumber,
+				alreadyStopped: source.alreadyStopped,
+				terminatedRunIds: source.terminatedRunIds,
+			},
+		}))
+	}
+
+	// #405: emits one `item.exit.selected` audit event per chain-action exit
+	// selection request — both admit and deny outcomes — so the audit stream
+	// records the agent's intent independent of whether the engine proceeded.
+	private async recordExitSelectionAuditEvent(chain: ChainRecord, input: {
+		item: ItemRecord
+		phase: string
+		runId: string
+		selection: { kind: "chain-action"; action: PresetPhaseChainAction }
+		declaredItemStatuses: readonly string[]
+		declaredChainActions: readonly string[]
+		outcome: "allow" | "deny"
+		reason: "admitted" | "phase-exits"
+		subject: ObservabilitySubject
+	}): Promise<void> {
+		await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
+			kind: "audit",
+			type: "item.exit.selected",
+			chain: chain.name,
+			item: input.item.id,
+			runId: input.runId,
+			phase: input.phase,
+			subject: input.subject,
+			payload: {
+				itemId: input.item.id,
+				issueNumber: input.item.issueNumber,
+				phase: input.phase,
+				selectionKind: input.selection.kind,
+				selectedAction: input.selection.action,
+				declaredItemStatuses: [...input.declaredItemStatuses],
+				declaredChainActions: [...input.declaredChainActions],
+				outcome: input.outcome,
+				reason: input.reason,
+			},
+		}))
 	}
 
 	private resolveChain(args: JsonObject): ChainRecord {
@@ -3049,6 +3247,44 @@ function isJsonValue(value: unknown): value is JsonValue {
 	if (Array.isArray(value)) return value.every(isJsonValue)
 	if (isRecord(value)) return Object.values(value).every(isJsonValue)
 	return false
+}
+
+// #405: parse the request's `action` field against the engine's chain-action
+// vocabulary at the boundary. The handler then re-checks against the phase's
+// declared chain-action exits as a second leg (vocabulary + per-phase admission,
+// same shape as #397's status admission).
+function parseChainActionFromRequest(args: JsonObject): PresetPhaseChainAction {
+	const raw = requiredString(args, "action")
+	const found = PRESET_PHASE_CHAIN_ACTIONS.find((action) => action === raw)
+	if (found === undefined) {
+		throw new DaemonError("invalid_request", `item.exitAction: action must be one of: ${PRESET_PHASE_CHAIN_ACTIONS.join(", ")}; got: ${raw}`, { action: raw })
+	}
+	return found
+}
+
+// #405 exhaustiveness guards: forces consumers to update every site when the
+// `PresetPhaseExit` / `PresetPhaseChainAction` ADTs gain a new branch.
+function assertNeverPhaseExitInDaemon(value: never): never {
+	throw new DaemonError("internal_error", `unhandled phase-exit kind: ${JSON.stringify(value)}`)
+}
+
+// #405: project the typed `PresetPhaseExit` ADT to a JsonValue wire-shape entry.
+// The explicit JsonObject return type prevents TS from inferring the inferred
+// union-shape with `action?: undefined` / `status?: undefined` discriminators that
+// JsonValue rejects (the test `InternalStatus type branding` checks this).
+function phaseExitToJsonValue(exit: { kind: "item-status"; status: string; when: string } | { kind: "chain-action"; action: "stop"; when: string }): JsonObject {
+	switch (exit.kind) {
+		case "item-status":
+			return { kind: "item-status", status: exit.status, when: exit.when }
+		case "chain-action":
+			return { kind: "chain-action", action: exit.action, when: exit.when }
+		default:
+			return assertNeverPhaseExitInDaemon(exit)
+	}
+}
+
+function assertNeverChainAction(value: never): never {
+	throw new DaemonError("internal_error", `unhandled chain-action: ${JSON.stringify(value)}`)
 }
 
 function chainToJson(chain: ChainRecord): JsonObject {

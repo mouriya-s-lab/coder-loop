@@ -112,6 +112,16 @@ roles  = ["common", "quality", "review"]
   status = "exhausted"
   when   = "The retry budget is exhausted without reaching an acceptable result."
 
+  # #405 chain-action exit. Review is the only role with a controlled stop-chain
+  # channel — agent direct `coder-loop chain stop` calls are rejected (#409);
+  # selecting this exit through the typed exit-action CLI is the engine-mapped
+  # equivalent (same code path operator chain stop runs, in-flight runs naturally
+  # complete, `chain resume` reversible). Use only for mechanical completion or
+  # review-infrastructure failure per `review/actions/stop.md`.
+  [[phases.exits]]
+  chainAction = "stop"
+  when        = "Mechanical completion (no actionable queue item remaining) or review infrastructure is broken and continuing would corrupt state — selected via `coder-loop item exit-action --action stop`."
+
   [phases.variables]
   TARGET_CWD               = { source = "runtime.targetCwd", label = "Target working directory (where `loop-data runtime artifacts` lives)" }
   AGENT_CWD                = { source = "runtime.agentCwd", label = "Agent working directory (your `cwd`; may equal TARGET_CWD or point at a different repo checkout for cross-repo work)" }

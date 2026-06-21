@@ -66,6 +66,20 @@ const ObservabilityEventTypeBoundary = arkType.or(
 	// agent+run) — not a self-attributed claim — because the daemon constructs the subject from
 	// the validated credential, not from caller-supplied fields.
 	arkType.unit("item.mutation.caller_admission"),
+	// #405 chain-action exit-selection audit. One event per `item.exitAction` request — both
+	// allow (action declared by phase) and deny (action not declared = default-deny per #397
+	// pattern) outcomes. The `selectionKind` discriminator is "chain-action" today; future
+	// item-status-via-exit-select paths would add a "item-status" branch and the discriminator
+	// surface stays the same. Companion to the existing `item.status.write_admission` event;
+	// together they cover both write faces an agent may use to advance an item or its chain.
+	arkType.unit("item.exit.selected"),
+	// #405 chain-stop lifecycle distinguisher. The daemon emits this alongside the existing
+	// `chain.status` audit event whenever the engine executes chain.stop on behalf of a
+	// phase-exit selection (i.e., NOT operator-direct chain.stop). Reading the lifecycle stream
+	// gives `(timestamp, who, why)` for every chain stop: operator path emits only `chain.status`;
+	// phase-exit path emits `chain.status` plus this lifecycle event with the originating
+	// (runId, phase, itemId, issueNumber) bound.
+	arkType.unit("chain.stop.from_phase_exit"),
 )
 
 const PresetPlaceholderDirectionBoundary = arkType.or(
@@ -397,6 +411,42 @@ const ObservabilityEventBoundary = arkType.or(
 			),
 		},
 	},
+	{
+		// #405 chain-action exit-selection audit. Mirrors `item.status.write_admission` but for
+		// the chain-action branch of the exit ADT. `selectionKind=chain-action` discriminates
+		// the selected branch; today only `selectedAction=stop` is in the vocabulary. The two
+		// `declared*` lists together echo back the phase's full declared exit set so an auditor
+		// can replay the gate's view without re-reading the preset.
+		...EventBaseBoundary,
+		kind: arkType.unit("audit"),
+		type: arkType.unit("item.exit.selected"),
+		payload: {
+			itemId: "number",
+			issueNumber: "number",
+			phase: "string",
+			selectionKind: arkType.unit("chain-action"),
+			selectedAction: arkType.unit("stop"),
+			declaredItemStatuses: "string[]",
+			declaredChainActions: "string[]",
+			outcome: arkType.or(arkType.unit("allow"), arkType.unit("deny")),
+			reason: arkType.or(arkType.unit("admitted"), arkType.unit("phase-exits")),
+		},
+	},
+	{
+		// #405 chain-stop lifecycle distinguisher for the phase-exit-driven path. Pairs with the
+		// existing `chain.status` audit event already emitted by the chain stop dispatcher. The
+		// `terminatedRunIds` field mirrors the operator-chain-stop audit shape so downstream
+		// lifecycle consumers can reuse the same parse.
+		...EventBaseBoundary,
+		kind: arkType.unit("lifecycle"),
+		type: arkType.unit("chain.stop.from_phase_exit"),
+		payload: {
+			chainId: "number",
+			issueNumber: "number",
+			alreadyStopped: "boolean",
+			terminatedRunIds: "string[]",
+		},
+	},
 )
 
 export type ObservabilityEvent = typeof ObservabilityEventBoundary.infer
@@ -608,6 +658,10 @@ function renderAuditEvent(event: Extract<ObservabilityEvent, { kind: "audit" }>)
 			// (no claim made); a populated value with `outcome=deny` is the diagnostic surface for
 			// "agent shipped CLI flags without env credential" or similar misconfigurations.
 			return `${event.ts} audit item.mutation.caller_admission chain=${event.chain ?? "-"} item=${event.item ?? event.payload.itemId} claimedRunId=${event.payload.claimedRunId ?? "-"} claimedPhase=${event.payload.claimedPhase ?? "-"} outcome=${event.payload.outcome} reason=${event.payload.reason}`
+		case "item.exit.selected":
+			// #405: render shape names the selected exit branch + the phase's declared options so
+			// a default-deny rejection reads end-to-end without re-loading the preset.
+			return `${event.ts} audit item.exit.selected chain=${event.chain ?? "-"} item=${event.item ?? event.payload.itemId} run=${event.runId ?? "-"} phase=${event.payload.phase} kind=${event.payload.selectionKind} action=${event.payload.selectedAction} outcome=${event.payload.outcome} reason=${event.payload.reason} declaredChainActions=${event.payload.declaredChainActions.join(",") || "-"}`
 		default:
 			return assertNever(event)
 	}
@@ -658,6 +712,8 @@ function renderLifecycleEvent(event: Extract<ObservabilityEvent, { kind: "lifecy
 			return `${event.ts} lifecycle watchdog.armed chain=${event.chain ?? "-"} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} graceMs=${event.payload.graceMs}`
 		case "watchdog.fire":
 			return `${event.ts} lifecycle watchdog.fire chain=${event.chain ?? "-"} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} signal=${event.payload.signal}`
+		case "chain.stop.from_phase_exit":
+			return `${event.ts} lifecycle chain.stop.from_phase_exit chain=${event.chain ?? event.payload.chainId} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} alreadyStopped=${event.payload.alreadyStopped} terminatedRuns=${event.payload.terminatedRunIds.join(",") || "-"}`
 		default:
 			return assertNever(event)
 	}
