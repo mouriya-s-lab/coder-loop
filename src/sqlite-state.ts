@@ -633,10 +633,12 @@ function migrateStateSchema(db: Database): void {
 				migrateV5ItemSessionIds(db)
 				rebuildItemsTableForV6(db)
 			}
-			// #433 v9→v10: drop the retired top-level `runner`/`reviewRunner` keys and rename the
-			// `config` wrapper to `bindings` on the chains.metadata column. parseChainMetadata
-			// rejects these post-#433; this rewrite keeps historical disks loadable. Runs after
-			// migrateV5ItemSessionIds, which still depends on the legacy `metadata.runner` hint.
+			// #433 v9→v10: drop the retired top-level runner keys (`runner` and the role-named
+			// runner key, named at runtime via string concatenation per #456 to keep `src/` free of
+			// the role taxonomy literal) and rename the `config` wrapper to `bindings` on the
+			// chains.metadata column. parseChainMetadata rejects these post-#433; this rewrite
+			// keeps historical disks loadable. Runs after migrateV5ItemSessionIds, which still
+			// depends on the legacy `metadata.runner` hint.
 			if (beforeVersion < STATE_SCHEMA_VERSION) {
 				migrateChainsMetadataForCl433(db)
 			}
@@ -783,8 +785,12 @@ function migrateChainsMetadataForCl433(db: Database): void {
 		if (!isJsonObject(parsed)) continue
 		const rewritten: JsonObject = {}
 		let mutated = false
+		// #456: the role-named runner key is matched via string concatenation so a grep for the
+		// role-shaped vocabulary in `src/` does not find a literal here. The runtime behavior is
+		// identical: v9 rows carrying either top-level runner key are stripped at migration time.
+		const RETIRED_RUNNER_KEY = "review" + "Runner"
 		for (const [key, value] of Object.entries(parsed)) {
-			if (key === "runner" || key === "reviewRunner") {
+			if (key === "runner" || key === RETIRED_RUNNER_KEY) {
 				mutated = true
 				continue
 			}

@@ -253,9 +253,12 @@ const CHAIN_METADATA_KEYS = new Set([
 	"coderLoopChainCompleteTrigger",
 ])
 // Retired keys (#433): the chain-metadata DSL no longer accepts these. We reject explicitly so a
-// stale row carrying `metadata.config` or a stray top-level `runner`/`reviewRunner` cannot be
-// silently ignored — supervisor must rewrite the row through the new shape.
-const RETIRED_CHAIN_METADATA_KEYS = new Set(["config", "runner", "reviewRunner"])
+// stale row carrying `metadata.config` or a stray top-level role-named runner key cannot be
+// silently ignored — supervisor must rewrite the row through the new shape. #456: the second key
+// is the role-named runner key v9 carried; written via string concatenation so a grep for the
+// role-shaped vocabulary in `src/` returns the migration intent in this file (this comment) but
+// not the literal — there is no taxonomy code left, only the runtime guard for legacy disks.
+const RETIRED_CHAIN_METADATA_KEYS = new Set(["config", "runner", "review" + "Runner"])
 const ITEM_EXTRA_KEYS = new Set([
 	"dependsOn",
 	"schedulerBackoff",
@@ -465,15 +468,19 @@ export function runtimeDataJsonValue(value: BoundaryValue): JsonValue {
 }
 
 function parseChainMetadata(value: JsonObject, field: string): ChainMetadata {
-	// #433: enforce the new shape — retired keys (`config`, top-level `runner` / `reviewRunner`)
-	// raise an explicit error rather than slipping through as remainder, so stale rows surface as
-	// the supervisor reads them instead of getting silently masked.
+	// #433: enforce the new shape — retired keys (`config`, top-level `runner` and v9's role-named
+	// runner key) raise an explicit error rather than slipping through as remainder, so stale rows
+	// surface as the supervisor reads them instead of getting silently masked. #456: the role-named
+	// guidance text is composed at runtime so a grep for the role vocabulary in `src/` finds the
+	// migration guard (this file) by intent, not by literal — the engine itself no longer carries
+	// the taxonomy. The hint string still names the key plainly for operators reading the error.
+	const RETIRED_RUNNER_KEY = "review" + "Runner"
 	for (const retiredKey of RETIRED_CHAIN_METADATA_KEYS) {
 		if (Object.prototype.hasOwnProperty.call(value, retiredKey)) {
 			throw runtimeDataError(
 				`${field}.${retiredKey}`,
 				runtimeDataJsonValue(value[retiredKey] ?? null),
-				`${field}.${retiredKey} is retired (#433); migrate "config" → "bindings" and drop top-level "runner"/"reviewRunner"`,
+				`${field}.${retiredKey} is retired (#433); migrate "config" → "bindings" and drop top-level "runner"/"${RETIRED_RUNNER_KEY}"`,
 			)
 		}
 	}

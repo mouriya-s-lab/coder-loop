@@ -1,7 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { spawn } from "node:child_process"
 import { mkdir, readdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises"
-import { mkdirSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
 
 import { type as arkType } from "arktype"
@@ -18,9 +17,7 @@ import {
 import { buildCoderLoopStatusSnapshot, type JsonObject, type JsonValue } from "./loop"
 import {
 	createGitWorktreeManager,
-	reviewOnEmptyLockPathForChainName,
 	schedulerSlotWorktreePath,
-	serializeSchedulerReviewOnEmptyLock,
 	type SchedulerEvent,
 	type SchedulerOptions,
 	type SchedulerWorktreeManager,
@@ -497,8 +494,10 @@ describe("daemon", () => {
 				"metadata.maxItemAttempts",
 				"seven",
 			)
-			// #433: top-level `runner` / `reviewRunner` are also retired (dead keys with no read site
-			// pre-#433). The parser raises explicitly so the rejection is observable.
+			// #433: top-level `runner` and the role-named runner companion are also retired (dead keys
+			// with no read site pre-#433; the role companion's name is composed at runtime in the
+			// runtime-data guard per #456 so it does not appear as a literal in `src/`). The parser
+			// raises explicitly so the rejection is observable.
 			expectInvalidDetails(
 				await request(fixture, "chain.create", {
 					name: "metadata-runner-retired",
@@ -2514,7 +2513,6 @@ attemptTimeoutSeconds = 3600
 				repository: "mouriya-s-lab/coder-loop",
 			})).chain)
 			const chainId = numberValue(chain.id)
-			preInstallReviewOnEmptyLockByName("terminal-update-active-run-chain", fixture.loopDataRoot)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
 				issueNumber: 249,
@@ -2559,7 +2557,6 @@ attemptTimeoutSeconds = 3600
 				repository: "mouriya-s-lab/coder-loop",
 			})).chain)
 			const chainId = numberValue(chain.id)
-			preInstallReviewOnEmptyLockByName("chain-stop-active-run", fixture.loopDataRoot)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
 				issueNumber: 349_201,
@@ -2769,7 +2766,6 @@ attemptTimeoutSeconds = 3600
 				repository: "mouriya-s-lab/coder-loop",
 			})).chain)
 			const chainId = numberValue(chain.id)
-			preInstallReviewOnEmptyLockByName(chainName, fixture.loopDataRoot)
 			await request(fixture, "item.add", {
 				chainId,
 				issueNumber: 317,
@@ -3327,7 +3323,6 @@ attemptTimeoutSeconds = 3600
 				repository: "mouriya-s-lab/coder-loop",
 			})).chain)
 			const chainId = numberValue(chain.id)
-			preInstallReviewOnEmptyLockByName("scheduler-artifacts-chain", fixture.loopDataRoot)
 			await request(fixture, "item.add", {
 				chainId,
 				issueNumber: 203,
@@ -3523,7 +3518,6 @@ attemptTimeoutSeconds = 3600
 				repository: "mouriya-s-lab/coder-loop",
 			})).chain)
 			const chainId = numberValue(chain.id)
-			preInstallReviewOnEmptyLockByName("decision-edge-suppression-chain", fixture.loopDataRoot)
 			await request(fixture, "item.add", {
 				chainId,
 				issueNumber: 9411,
@@ -4153,7 +4147,6 @@ process.exitCode = 1
 				repository: "mouriya-s-lab/coder-loop",
 			})).chain)
 			const chainId = numberValue(chain.id)
-			preInstallReviewOnEmptyLockByName("caller-no-reaper-kill-chain", fixture.loopDataRoot)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
 				issueNumber: 406_030,
@@ -4274,7 +4267,6 @@ process.exitCode = 0
 				repository: "mouriya-s-lab/coder-loop",
 			}))).chain)
 			const chainId = numberValue(chain.id)
-			preInstallReviewOnEmptyLockByName("b3-blocked-responder-live-chain", loopDataRoot)
 			expectOk(await sendDaemonRequest(socketPath, daemonRequest("item.add", { chainId, issueNumber: 29011, repoCwd: REPO_ROOT, preset: "gh-issue-pr-iteration" })))
 
 			// A trigger phase running on an already-terminal (blocked) item must not change that
@@ -4373,7 +4365,6 @@ process.exitCode = 0
 					},
 				})).chain
 				const chainId = numberValue(record(result).id)
-				preInstallReviewOnEmptyLockByName("ac5-iter-chain", fixture.loopDataRoot)
 				const added = record(expectOk(await request(fixture, "item.add", {
 					chainId,
 					issueNumber: 287_301,
@@ -4414,7 +4405,6 @@ process.exitCode = 0
 					},
 				})).chain
 				const chainId = numberValue(record(result).id)
-				preInstallReviewOnEmptyLockByName("ac5-review-chain", fixture.loopDataRoot)
 				await request(fixture, "item.add", {
 					chainId,
 					issueNumber: 287_302,
@@ -4456,7 +4446,6 @@ process.exitCode = 0
 					repository: "mouriya-s-lab/coder-loop",
 				})).chain
 				const chainId = numberValue(record(result).id)
-				preInstallReviewOnEmptyLockByName("ac7-iter-then-review-chain", fixture.loopDataRoot)
 				await request(fixture, "item.add", {
 					chainId,
 					issueNumber: 289_001,
@@ -4522,7 +4511,6 @@ process.exitCode = 0
 				})).chain
 				const chain = record(result)
 				const chainId = numberValue(chain.id)
-				preInstallReviewOnEmptyLockByName("phase-runid-artifact-chain", fixture.loopDataRoot)
 				await request(fixture, "item.add", {
 					chainId,
 					issueNumber: 294_001,
@@ -5621,11 +5609,10 @@ type FixtureOptions = {
 	beforeStart?: (input: { root: string; loopDataRoot: string; eventLog: string; fakeRunner: string }) => Promise<void> | void
 }
 
-function preInstallReviewOnEmptyLockByName(chainName: string, loopDataRoot: string, runId = "test-pre-installed"): void {
-	const lockPath = reviewOnEmptyLockPathForChainName(chainName, { loopDataRoot })
-	mkdirSync(resolve(lockPath, ".."), { recursive: true })
-	writeFileSync(lockPath, serializeSchedulerReviewOnEmptyLock(runId, new Date(0)))
-}
+// #456: the legacy chain-drain auto-fire suppressor helper retired with the path itself. The
+// helper existed to keep chain-completion / item-update tests from racing the auto-fired phase;
+// with that path deleted, the suppressor is no longer needed and every former call site is removed
+// in the same change.
 
 async function startFixture(name: string, options: FixtureOptions = {}): Promise<Fixture> {
 	const root = resolve(TEST_ROOT, `${++nextFixtureId}-${name}`)

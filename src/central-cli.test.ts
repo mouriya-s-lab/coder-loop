@@ -1,11 +1,9 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
-import { mkdirSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
 
 import { startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
 import { LOOP_DATA_ROOT_ENV, resolveLoopDataPaths } from "./runtime-paths"
-import { reviewOnEmptyLockPathForChainName, serializeSchedulerReviewOnEmptyLock } from "./scheduler"
 import { openSqliteStateStore } from "./sqlite-state"
 import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedItemExtra } from "./runtime-data"
 
@@ -15,11 +13,8 @@ function admittedTestStatus(value: string) {
 }
 import type { BoundaryRecord } from "./boundary-types"
 
-function preInstallReviewOnEmptyLockByName(chainName: string, loopDataRoot: string, runId = "test-pre-installed"): void {
-	const lockPath = reviewOnEmptyLockPathForChainName(chainName, { loopDataRoot })
-	mkdirSync(resolve(lockPath, ".."), { recursive: true })
-	writeFileSync(lockPath, serializeSchedulerReviewOnEmptyLock(runId, new Date(0)))
-}
+// #456: the legacy chain-drain auto-fire suppressor helper retired with the path itself; tests
+// that used to pre-install its lock now rely on the DSL chain-complete trigger driver only.
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
@@ -407,7 +402,6 @@ attemptTimeoutSeconds = 3600
 		const fixture = await startFixture("completion", { schedulerEnabled: true })
 		try {
 			expectJsonOk(await runCli(["chain", "create", "done-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--preset", "single-phase-example", "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			preInstallReviewOnEmptyLockByName("done-chain", fixture.loopDataRoot)
 			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
 			try {
 				const chain = store.getChainByName("done-chain")
@@ -871,7 +865,6 @@ attemptTimeoutSeconds = 3600
 			expectJsonOk(await runCli(["chain", "create", "logs-stopped-history-chain", "--config-json", FIXTURE_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expectJsonOk(await runCli(["chain", "stop", "logs-stopped-history-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expectJsonOk(await runCli(["chain", "create", "logs-completed-history-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--preset", "single-phase-example", "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			preInstallReviewOnEmptyLockByName("logs-completed-history-chain", fixture.loopDataRoot)
 			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
 			try {
 				const completedChain = store.getChainByName("logs-completed-history-chain")

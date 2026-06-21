@@ -426,9 +426,12 @@ export function buildLiveRuntimeHealthLines(snapshot: CoderLoopStatusSnapshot): 
 
 	const selected = snapshot.queue.selected?.id ?? "<none>"
 	lines.push(`INFO: queue total=${snapshot.queue.total}, continuable=${snapshot.queue.continuable}, terminal=${snapshot.queue.terminal}, selected=${selected}`)
-	lines.push(`INFO: runner hostDefault=${snapshot.target.runner.hostDefault}, default=${formatStatusRunner(snapshot.target.runner.default)}, reviewDefault=${formatStatusRunner(snapshot.target.runner.reviewDefault)}`)
+	// #456: role-shaped runner-default summary segments retired. Per-phase runner enumeration
+	// below is the canonical display — every preset-declared phase appears once, regardless of
+	// whether it happens to be named "review" or anything else.
+	lines.push(`INFO: runner hostDefault=${snapshot.target.runner.hostDefault}, default=${formatStatusRunner(snapshot.target.runner.default)}`)
 	lines.push(`INFO: phase runners=${formatPhaseRunners(snapshot.target.runner.phases)}`)
-	if (snapshot.queue.selected !== null) lines.push(`INFO: selected runner=${formatStatusRunner(snapshot.queue.selected.runner)}, review=${formatStatusRunner(snapshot.queue.selected.reviewRunner)}`)
+	if (snapshot.queue.selected !== null) lines.push(`INFO: selected runner=${formatStatusRunner(snapshot.queue.selected.runner)}`)
 
 	if (snapshot.current.run === null) {
 		lines.push("INFO: current run=<none>")
@@ -605,7 +608,7 @@ export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
 	info("\n[Layer B] Operator 机器先决条件")
 	const bResults = await checkOperatorPrereqs(Object.values(statusSnapshot.target.runner.phases))
 	info(`  INFO: target default runner=${formatStatusRunner(statusSnapshot.target.runner.default)}`)
-	info(`  INFO: review default runner=${formatStatusRunner(statusSnapshot.target.runner.reviewDefault)}`)
+	// #456: per-phase enumeration replaces the legacy `review default runner=` line.
 	info(`  INFO: phase runners=${formatPhaseRunners(statusSnapshot.target.runner.phases)}`)
 	for (const r of bResults) {
 		info(`  ${r.ok ? "OK" : "FAIL"}: ${r.detail}`)

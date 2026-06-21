@@ -1,15 +1,13 @@
 import { afterAll, expect, test } from "bun:test"
 import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
-import { dirname, resolve } from "node:path"
+import { resolve } from "node:path"
 
 import { daemonRequest, sendDaemonRequest } from "./daemon"
 import {
 	createGitWorktreeManager,
 	createSchedulerState,
-	reviewOnEmptyLockPathForChainName,
 	schedulerSlotWorktreePath,
 	schedulerTick,
-	serializeSchedulerReviewOnEmptyLock,
 	type SchedulerEvent,
 	type SchedulerOptions,
 	type SchedulerWorktreeManager,
@@ -320,9 +318,9 @@ console.log("done:" + input.itemId)
 			attempts: 0,
 			extra: storedItemExtra({}),
 		})
-		const lockPath = reviewOnEmptyLockPathForChainName(chain.name, { loopDataRoot })
-		await mkdir(dirname(lockPath), { recursive: true })
-		await writeFile(lockPath, serializeSchedulerReviewOnEmptyLock("test-pre-installed", new Date(0)))
+		// #456: previously this also pre-installed a `review-on-empty.lock` file via
+		// `reviewOnEmptyLockPathForChainName` to suppress the legacy auto-fired phase. The
+		// review-on-empty path is retired, so the suppressor is no longer needed.
 
 		const state = createSchedulerState()
 		const schedulerEvents: SchedulerEvent[] = []

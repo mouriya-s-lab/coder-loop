@@ -16,7 +16,6 @@ import {
 	getItemId,
 	makeIssueRunContext,
 	normalizeQueueIssueId,
-	lastNonTriggerPhaseForPreset,
 	parsePreset,
 	parseSessionIdFromRunnerStream,
 	renderFragmentIndex,
@@ -164,7 +163,6 @@ function makeOptions(preset = makePreset()): LoopOptions {
 		worktree: false,
 		hostRunner: "codex",
 		defaultRunner: { ...codexRunner, source: "engine-builtin" },
-		reviewRunner: { ...codexRunner, source: "engine-builtin" },
 		runnerCommands: { claude: claudeRunner, codex: codexRunner },
 		dryRun: false,
 		preset,
@@ -217,7 +215,6 @@ describe("ItemRecord prompt bindings", () => {
 		const phase: PresetPhase = {
 			name: "iteration",
 			prompt: "iteration.md",
-			summaryMarker: null,
 			exits: [],
 			variables: [
 				{ key: "ISSUE", source: { kind: "item", field: "issue" }, doc: null },
@@ -244,7 +241,6 @@ describe("ItemRecord prompt bindings", () => {
 		const phase: PresetPhase = {
 			name: "review",
 			prompt: "review.md",
-			summaryMarker: "DONE:",
 			exits: [{ kind: "item-status", status: parseInternalStatus("done", "test.status"), when: "review accepted the result" }],
 			variables: [
 				{ key: "RUNTIME_INPUTS_DOC", source: { kind: "runtime", key: "runtimeInputsDoc" }, doc: null },
@@ -518,7 +514,10 @@ describe("runtime binding helpers", () => {
 })
 
 describe("runner and daemon helpers", () => {
-	test("selectRunnerForPhase uses preset runner for review and queue override for iteration", () => {
+	// #456: item.runner override now applies uniformly to every non-trigger phase — the engine no
+	// longer special-cases "the last non-trigger phase" (review under the bundled preset). Both
+	// phases pick up the item override; phase-name-based gating belongs to preset declaration only.
+	test("selectRunnerForPhase honors queue override on every non-trigger phase, regardless of phase name", () => {
 		const base = makePreset()
 		const preset: Preset = {
 			...base,
@@ -532,8 +531,11 @@ describe("runner and daemon helpers", () => {
 		const item = makeItem({ runner: "claude" })
 
 		expect(selectRunnerForPhase("iteration", item, options).kind).toBe("claude")
-		expect(selectRunnerForPhase(lastNonTriggerPhaseForPreset(preset).name, item, options).kind).toBe("claude")
-		expect(selectRunnerForPhase(lastNonTriggerPhaseForPreset(preset).name, item, options).model).toBeNull()
+		// The second phase in the fixture preset is named "review"; the engine no longer reads its
+		// name — the queue override flows through because `trigger === null` is the only gate.
+		expect(selectRunnerForPhase("review", item, options).kind).toBe("claude")
+		expect(selectRunnerForPhase("review", item, options).source).toBe("queue")
+		expect(selectRunnerForPhase("review", item, options).model).toBeNull()
 	})
 
 	test("selectRunnerForPhase uses engine-builtin fallback when role md omits defaultRunner", () => {
@@ -683,9 +685,16 @@ describe("small parsers", () => {
 		expect(parseSessionIdFromRunnerStream("codex", "{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}")).toBe("thread-1")
 	})
 
-	test("summary watchdog config is driven by phase metadata", () => {
-		expect(summaryWatchdogConfigForPhase({ summaryMarker: null })).toBeNull()
-		expect(summaryWatchdogConfigForPhase({ summaryMarker: "PHASE DONE:" })?.marker).toBe("PHASE DONE:")
+	// #456: `summaryWatchdogConfigForPhase` is preserved as a typed hook for #452's pending
+	// summary-injection redesign, but the role-shaped marker field on `PresetPhase` was retired
+	// together with the rest of the role taxonomy. The function now reports "no marker
+	// configured" for every phase regardless of its name or declaration. The test pins that
+	// terminal behavior so #452 can lift it intentionally rather than accidentally.
+	test("summary watchdog config returns null for every phase until #452 lands a DSL-declared injection point", () => {
+		const preset = makePreset()
+		for (const phase of preset.phases) {
+			expect(summaryWatchdogConfigForPhase(phase)).toBeNull()
+		}
 	})
 
 	test("summary watchdog observes only the declared phase marker", () => {
@@ -750,7 +759,6 @@ describe("renderPrompt placeholder validation (issue #399)", () => {
 		return {
 			name: "iteration",
 			prompt: "iteration.md",
-			summaryMarker: null,
 			exits: [],
 			variables: variables.map(([key, source]) => ({ key, source, doc: null })),
 			trigger: null,
