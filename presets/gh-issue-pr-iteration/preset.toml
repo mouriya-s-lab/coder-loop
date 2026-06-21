@@ -166,12 +166,13 @@ roles  = ["common", "quality", "review"]
   PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
   # #404: review is the orchestrator of the acceptance gate and the writer
   # of item transitions, so it needs the broader status vocabulary
-  # (continuable + terminal) for global queue classification (Step 7) and the
-  # SUMMARY-line verdict tuple (engine-owned `REVIEW_SUMMARY_VERDICTS`).
-  # This is the contract-1 / contract-5 documented exception — the issue
-  # comment 4666115115 explicitly carves out review as needing more.
+  # (continuable + terminal) for global queue classification (Step 7). This
+  # is the contract-1 / contract-5 documented exception — the issue comment
+  # 4666115115 explicitly carves out review as needing more. (Post-rebase
+  # on main #497: the SUMMARY-line verdict tuple binding was retired with
+  # `runVerdictVocabularyDoc` after #497 removed both the SUMMARY line and
+  # the engine-owned `REVIEW_SUMMARY_VERDICTS` constant the builder read.)
   STATUS_VOCABULARY_DOC    = "runtime.statusVocabularyDoc"
-  RUN_VERDICT_VOCABULARY_DOC = "runtime.runVerdictVocabularyDoc"
   REQUIRE_BROWSER_EVIDENCE = { source = "chain.requireBrowserEvidence", default = false, label = "Browser evidence required", suffix = " — when `true`, Layer 4 must contain the strongest feasible E2E evidence for the project type. For projects with UI: real browser screenshots of the running dev server or deployed page. For projects without UI (pure CLI / library / backend / config): CLI smoke run transcripts with command, exit status, and output are the Layer 4 evidence; synthetic screenshots (HTML files rendered and screenshotted) are rejected." }
   ISSUE_BRANCH             = { source = "item.branch", label = "Existing issue branch", blankBefore = true }
   ISSUE_PR                 = { source = "item.pr", label = "Existing issue PR" }

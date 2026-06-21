@@ -2308,7 +2308,6 @@ export function buildSchedulerResolveContext(input: {
 		triggerStatusDoc: "",
 		terminalStatusesDoc: "",
 		retryStatusDoc: "",
-		runVerdictVocabularyDoc: "",
 		runIdGeneration: resumedSessionId === "" ? "new" : "resumed",
 		resumedFromPhase: resumedSessionId === "" ? "" : input.phase.name,
 		resumedStartedAt: "",

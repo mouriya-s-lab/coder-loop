@@ -46,7 +46,6 @@ describe("phase C cleanup guards", () => {
 				"retryStatusDoc",
 				"runId",
 				"runIdGeneration",
-				"runVerdictVocabularyDoc",
 				"runtimeInputsDoc",
 				"sharedContextPath",
 				"stateFile",

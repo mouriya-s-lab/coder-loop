@@ -207,7 +207,7 @@ bundled `gh-issue-pr-iteration` preset 用这个 hook 声明 `umbrella-finalizer
 
 ### `runtime.*` fact 与 business key
 
-Engine-owned fact 由 `src/loop.ts` 的 `ENGINE_RUNTIME_BINDING_KEYS` 定义。Engine runtime fact key count: 27.
+Engine-owned fact 由 `src/loop.ts` 的 `ENGINE_RUNTIME_BINDING_KEYS` 定义。Engine runtime fact key count: 26.
 
 <!-- engine-runtime-binding-keys:start -->
 ```
@@ -217,9 +217,9 @@ runtime.issueDir               runtime.evidenceDir            runtime.evidenceRo
 runtime.logDir                 runtime.traceFile              runtime.loopFile
 runtime.presetDir              runtime.fragmentIndex          runtime.runtimeInputsDoc
 runtime.phaseExitsDoc          runtime.statusVocabularyDoc    runtime.triggerStatusDoc
-runtime.terminalStatusesDoc    runtime.retryStatusDoc         runtime.runVerdictVocabularyDoc
-runtime.runIdGeneration        runtime.resumedFromPhase       runtime.resumedStartedAt
-runtime.resumedSessionId       runtime.chainName              runtime.repoCwd
+runtime.terminalStatusesDoc    runtime.retryStatusDoc         runtime.runIdGeneration
+runtime.resumedFromPhase       runtime.resumedStartedAt       runtime.resumedSessionId
+runtime.chainName              runtime.repoCwd
 ```
 <!-- engine-runtime-binding-keys:end -->
 
@@ -267,7 +267,6 @@ auditDemo = { literal = "business-key-e2e-ok" }
 | `triggerStatusDoc` | #404：当前 phase 的 trigger 关注 status 字面量（仅 trigger phase 非 chain-complete 时非空）。 |
 | `terminalStatusesDoc` | #404：`preset.statuses.terminal` 的逗号分隔字面表，供 phase prose 引用「不可写入的终态集合」。 |
 | `retryStatusDoc` | #404：preset 声明的 retry continuable status（`[statuses].retry`）加 backtick；未声明则为空串。 |
-| `runVerdictVocabularyDoc` | #404：review phase 的 `REVIEW SUMMARY` 行 verdict 选项子串（来自 engine-owned `REVIEW_SUMMARY_VERDICTS` 常量；非 review phase 为空串）。 |
 | `runIdGeneration` | `"new"` / `"resumed"`，本轮 runId 是新生成还是 resume |
 | `resumedFromPhase` | 若 resume，从哪个 phase 续；否则 `""` |
 | `resumedStartedAt` | 若 resume，原 run 起始时间戳；否则 `""` |

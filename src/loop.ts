@@ -995,24 +995,26 @@ export const ENGINE_RUNTIME_BINDING_KEYS = [
 	"fragmentIndex",
 	"runtimeInputsDoc",
 	"phaseExitsDoc",
-	// #404: per-phase doc builders that inject status / verdict vocabulary
-	// into preset md fragments so the prose layer never carries a hand-written
-	// copy of preset metadata. Each builder enforces its own per-phase slice
-	// (contract-5 minimum visibility, issue #396 comment 4666115115) —
-	// iteration sees only the statuses it legitimately reasons about; review
-	// sees the broader vocabulary it must classify against; trigger phases see
-	// only their own trigger status. Engine fact key count: 27 — keep
+	// #404: per-phase doc builders that inject status vocabulary into preset md
+	// fragments so the prose layer never carries a hand-written copy of preset
+	// metadata. Each builder enforces its own per-phase slice (contract-5
+	// minimum visibility, issue #396 comment 4666115115) — iteration sees only
+	// the statuses it legitimately reasons about; review sees the broader
+	// vocabulary it must classify against; trigger phases see only their own
+	// trigger status. Engine fact key count: 26 — keep
 	// `docs/preset-authoring.md` and CLAUDE.md in sync.
 	//
 	// (Retry on #495 dropped `transitionGuidanceDoc`: it duplicated
 	// `phaseExitsDoc`'s rendering of `phase.exits` in a different layout and
 	// had no distinct consumer; keeping a redundant builder violated
-	// contract-5 minimum surface.)
+	// contract-5 minimum surface. The post-rebase retry against main #497
+	// also dropped `runVerdictVocabularyDoc` for the same reason — its only
+	// consumer was the SUMMARY line #497 retired, and its data source
+	// `REVIEW_SUMMARY_VERDICTS` was deleted by the same PR.)
 	"statusVocabularyDoc",
 	"triggerStatusDoc",
 	"terminalStatusesDoc",
 	"retryStatusDoc",
-	"runVerdictVocabularyDoc",
 	"runIdGeneration",
 	"resumedFromPhase",
 	"resumedStartedAt",
@@ -4901,7 +4903,6 @@ function resolvePhaseBinding(source: PresetVariableSource, phase: PresetPhase, c
 			case "triggerStatusDoc": return renderTriggerStatusDoc(phase)
 			case "terminalStatusesDoc": return renderTerminalStatusesDoc(phase, ctx.preset)
 			case "retryStatusDoc": return renderRetryStatusDoc(ctx.preset)
-			case "runVerdictVocabularyDoc": return renderRunVerdictVocabularyDoc(phase)
 		}
 	}
 	return resolveBinding(source, ctx)
@@ -5021,16 +5022,12 @@ export function renderRetryStatusDoc(preset: Preset): string {
 	return `\`${retry}\``
 }
 
-// Run-verdict vocabulary doc. Renders the engine-owned typed verdict tuple
-// `REVIEW_SUMMARY_VERDICTS` as the substring used in the review SUMMARY line.
-// Restricted to the review phase (the only phase that emits the SUMMARY line);
-// other phases render the empty string. The list itself comes from the typed
-// engine constant — no preset-side declaration — keeping the run-verdict
-// concept retirement (issue #405) isolated to deletion of the constant.
-export function renderRunVerdictVocabularyDoc(phase: PresetPhase): string {
-	if (phase.name !== "review") return ""
-	return `<${REVIEW_SUMMARY_VERDICTS.join("|")}>`
-}
+// Run-verdict vocabulary doc was retired alongside #405's SUMMARY-line drop:
+// the only consumer (`REVIEW SUMMARY: verdict={{RUN_VERDICT_VOCABULARY_DOC}}`)
+// is gone, and the engine-owned `REVIEW_SUMMARY_VERDICTS` constant the builder
+// read was deleted by #497. Keeping the builder would leave an engine fact key
+// with no data source and no consumer — a contract-5 minimum-surface
+// violation symmetric with this PR's earlier `transitionGuidanceDoc` drop.
 
 export function phaseWritableStatuses(phase: PresetPhase): readonly InternalStatus[] {
 	// #405 narrow: only item-status branches participate in the per-phase status
@@ -5287,7 +5284,6 @@ export function buildRuntimeBindings(input: {
 		triggerStatusDoc: "",
 		terminalStatusesDoc: "",
 		retryStatusDoc: "",
-		runVerdictVocabularyDoc: "",
 		runIdGeneration: input.issueRun.runIdGeneration,
 		resumedFromPhase: input.issueRun.resumedFromPhase ?? "",
 		resumedStartedAt: input.issueRun.resumedStartedAt ?? "",

@@ -135,7 +135,6 @@ function makeRuntime(overrides: Partial<RuntimeBindings> = {}): RuntimeBindings 
 		triggerStatusDoc: "",
 		terminalStatusesDoc: "",
 		retryStatusDoc: "",
-		runVerdictVocabularyDoc: "",
 		runIdGeneration: "new",
 		resumedFromPhase: "",
 		resumedStartedAt: "",
