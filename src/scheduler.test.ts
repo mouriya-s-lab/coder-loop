@@ -3917,6 +3917,13 @@ binary = "codex"
 [[phases]]
 name = "run"
 prompt = "run.md"
+
+  # #408: minimal leaving edge so R2 passes for "queued". The empty-success
+  # test asserts dependency-unblock semantics; the exit set is inert from the
+  # test's perspective.
+  [[phases.exits]]
+  status = "done"
+  when = "Run finished cleanly; item lands in a terminal status."
 	`,
 	)
 }
@@ -3949,6 +3956,14 @@ binary = "codex"
 [[phases]]
 name = "run"
 prompt = "run.md"
+
+  # #408: minimal leaving edge so R2 passes for "queued". The scheduler
+  # attempts-exhausted test only cares about the engine writing
+  # custom_exhausted via the retry-budget sink, which is independent of this
+  # preset-declared phase exit.
+  [[phases.exits]]
+  status = "done"
+  when = "Run finished cleanly; item lands in success-terminal vocabulary."
 `,
 	)
 }

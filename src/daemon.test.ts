@@ -1048,6 +1048,13 @@ exhausted = "custom_done"
 name = "run"
 prompt = "run.md"
 
+  # #408: minimal leaving edge so R2 (deadlock-continuable) passes for the
+  # fixture. The status-validation test surface is unchanged; "run → custom_done"
+  # only matters to the new checker, not to this test's assertions.
+  [[phases.exits]]
+  status = "custom_done"
+  when = "Run finished and the item reached the success-terminal vocabulary."
+
   [phases.variables]
   ISSUE = "item.issue"
 
@@ -1219,6 +1226,122 @@ attemptTimeoutSeconds = 3600
 				operation: "chain.status",
 			})
 			expect(event.payload.error.length).toBeGreaterThan(0)
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	// #408: cross-table DAG findings (deadlock-continuable error AND
+	// dead-vocabulary warn) must surface on the unified observability stream as
+	// `preset.dag_check` validation events. The error verdict triggers the
+	// existing `daemon.preset_load_failed` path; both event types must land,
+	// with the DAG-check finding emitted BEFORE the generic load-failure event
+	// so an auditor sees the structural cause first.
+	test("daemon emits preset.dag_check validation events for cross-table DAG findings (issue #408)", async () => {
+		const fixture = await startFixture("preset-dag-check-daemon", { schedulerEnabled: false })
+		try {
+			// Fixture preset: `pending` is continuable but no phase exit / engine
+			// transition ever writes a status != pending (`run`'s only exit writes
+			// `pending` itself). `dead_word` is continuable but no producer can
+			// write it — the warn-verdict cause.
+			const presetPath = resolve(fixture.loopDataRoot, "..", "broken-dag-preset")
+			await mkdir(presetPath, { recursive: true })
+			await writeFile(resolve(presetPath, "run.md"), "Run issue {{ISSUE}}.\n")
+			await writeFile(resolve(presetPath, "preset.toml"), `name = "broken-dag-fixture"
+
+[item]
+idField = "issue"
+
+[statuses]
+continuable = ["queued", "pending", "dead_word"]
+terminal    = ["done", "exhausted"]
+entry       = "queued"
+success     = ["done"]
+exhausted   = "exhausted"
+
+[[phases]]
+name   = "run"
+prompt = "run.md"
+
+  # \`pending\` has no leaving edge (the only exit writes pending itself), so
+  # R2 fires with deadlock-continuable on \`pending\`. \`dead_word\` is never
+  # produced anywhere → R3 fires with dead-vocabulary as a warn.
+  [[phases.exits]]
+  status = "pending"
+  when   = "Always re-asserts pending — the deadlock."
+
+  [phases.variables]
+  ISSUE = "item.issue"
+
+[agent]
+attemptTimeoutSeconds = 3600
+`)
+
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "broken-dag-chain",
+				repository: "mouriya-s-lab/coder-loop",
+				metadata: { presetPath },
+			})).chain)
+
+			// Drive a request that loads the preset. `chain.status` resolves the
+			// chain-wide preset (metadata.presetPath set), so it goes through the
+			// load path and rejects on the deadlock finding.
+			const statusResponse = await request(fixture, "chain.status", { chainId: numberValue(chain.id) })
+			expect(statusResponse.ok).toBe(false)
+			if (!statusResponse.ok) {
+				expect(statusResponse.error.code).toBe("invalid_request")
+				expect(statusResponse.error.message).toContain(`failed to load preset for chain ${chain.name}`)
+				expect(statusResponse.error.message).toContain("cross-table DAG check")
+				expect(statusResponse.error.message).toContain("pending")
+			}
+
+			// Validate the new event type's payload shape and content.
+			const dagEvents = await queryObservabilityEvents(
+				resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile,
+				{ type: "preset.dag_check" },
+			)
+			const chainDagEvents = dagEvents.events.filter((entry) => entry.chain === chain.name && entry.type === "preset.dag_check")
+			expect(chainDagEvents.length).toBeGreaterThanOrEqual(2)
+			const deadlockEvent = chainDagEvents.find((entry) => entry.type === "preset.dag_check" && entry.payload.kind === "deadlock-continuable")
+			const deadVocabEvent = chainDagEvents.find((entry) => entry.type === "preset.dag_check" && entry.payload.kind === "dead-vocabulary")
+			if (deadlockEvent === undefined || deadlockEvent.type !== "preset.dag_check") {
+				throw new Error("expected a deadlock-continuable preset.dag_check event")
+			}
+			if (deadVocabEvent === undefined || deadVocabEvent.type !== "preset.dag_check") {
+				throw new Error("expected a dead-vocabulary preset.dag_check event")
+			}
+			expect(deadlockEvent.kind).toBe("validation")
+			expect(deadlockEvent.payload).toMatchObject({
+				kind: "deadlock-continuable",
+				verdict: "error",
+				table: "statuses.continuable",
+				status: "pending",
+			})
+			expect(deadlockEvent.payload.message.length).toBeGreaterThan(0)
+			expect(deadVocabEvent.kind).toBe("validation")
+			expect(deadVocabEvent.payload).toMatchObject({
+				kind: "dead-vocabulary",
+				verdict: "warn",
+				table: "statuses.continuable",
+				status: "dead_word",
+			})
+
+			// The error-finding path also emits the unified `daemon.preset_load_failed`
+			// event so auditors can correlate "preset failed to load" against the
+			// upstream structural finding. Ordering: every DAG-check event has a
+			// timestamp <= the load-failed event's, since findings are recorded
+			// before `recordPresetLoadFailure` runs.
+			const loadFailedEvents = await queryObservabilityEvents(
+				resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile,
+				{ type: "daemon.preset_load_failed" },
+			)
+			const chainLoadFailed = loadFailedEvents.events.find((entry) => entry.chain === chain.name)
+			if (chainLoadFailed === undefined || chainLoadFailed.type !== "daemon.preset_load_failed") {
+				throw new Error("expected a daemon.preset_load_failed event for the broken DAG chain")
+			}
+			expect(chainLoadFailed.kind).toBe("validation")
+			expect(Date.parse(deadlockEvent.ts)).toBeLessThanOrEqual(Date.parse(chainLoadFailed.ts))
+			expect(Date.parse(deadVocabEvent.ts)).toBeLessThanOrEqual(Date.parse(chainLoadFailed.ts))
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -5767,6 +5890,13 @@ binary = "codex"
 [[phases]]
 name = "run"
 prompt = "run.md"
+
+  # #408: minimal leaving edge so R2 passes for "queued". The scheduler-prompt
+  # override harness only inspects the rendered prompt, so the exits set is
+  # inert from this test's perspective.
+  [[phases.exits]]
+  status = "done"
+  when = "Run finished and the item should land in success-terminal vocabulary."
 `,
 	)
 }
