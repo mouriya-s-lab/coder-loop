@@ -16,6 +16,7 @@ import {
 	type JsonObject,
 	type JsonValue,
 	type LoadPresetOptions,
+	type PresetDagFinding,
 	type PresetPhaseChainAction,
 	type PresetPhaseRights,
 	type PresetPlaceholderFinding,
@@ -2538,9 +2539,15 @@ export class CoderLoopDaemon {
 		const key = this.loadedPresetCacheKey(presetDir)
 		const cached = this.loadedPresetCache.get(key)
 		const collectedFindings: PresetPlaceholderFinding[] = []
+		// #408 cross-table DAG findings flow alongside the placeholder findings — both warn AND error
+		// findings need to land on the unified observability stream, so the collector runs even when
+		// the load eventually throws (error-verdict findings always come WITH the throw, but the
+		// warn-verdict findings are real informational events the operator must still see).
+		const collectedDagFindings: PresetDagFinding[] = []
 		// Findings are emitted only when the cache is cold so we don't double-write per chain.
 		const loading = cached ?? loadSchedulerPresetFromDir(presetDir, {
 			onValidationFinding: (finding) => collectedFindings.push(finding),
+			onDagFinding: (finding) => collectedDagFindings.push(finding),
 		})
 		if (cached === undefined) this.loadedPresetCache.set(key, loading)
 		try {
@@ -2548,11 +2555,17 @@ export class CoderLoopDaemon {
 			for (const finding of collectedFindings) {
 				await this.recordPlaceholderFinding(chain, finding)
 			}
+			for (const finding of collectedDagFindings) {
+				await this.recordDagFinding(chain, finding)
+			}
 			return loaded
 		} catch (error) {
 			this.loadedPresetCache.delete(key)
 			for (const finding of collectedFindings) {
 				await this.recordPlaceholderFinding(chain, finding)
+			}
+			for (const finding of collectedDagFindings) {
+				await this.recordDagFinding(chain, finding)
 			}
 			await this.recordPresetLoadFailure(chain, presetDir, operation, error)
 			// #403: the error message names chain, target (chainName), preset, presetDir, and the
@@ -2602,6 +2615,28 @@ export class CoderLoopDaemon {
 				key: finding.key,
 				direction: finding.direction,
 				verdict: finding.verdict,
+			},
+		}))
+	}
+
+	// #408 cross-table DAG checker emitter. Mirrors `recordPlaceholderFinding`'s
+	// shape so the unified observability stream carries both preset-validation
+	// families side-by-side. The error path additionally produces a
+	// `daemon.preset_load_failed` event via `recordPresetLoadFailure`; auditors
+	// looking at a deadlock see the structural finding first, then the generic
+	// load-failure event with the operation context.
+	private async recordDagFinding(chain: ChainRecord, finding: PresetDagFinding): Promise<void> {
+		await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
+			kind: "validation",
+			type: "preset.dag_check",
+			chain: chain.name,
+			subject: { kind: "engine" },
+			payload: {
+				kind: finding.kind,
+				verdict: finding.verdict,
+				table: finding.table,
+				status: finding.status,
+				message: finding.message,
 			},
 		}))
 	}

@@ -52,6 +52,14 @@ const ObservabilityEventTypeBoundary = arkType.or(
 	arkType.unit("session_id.invalidated"),
 	arkType.unit("chain.invalid"),
 	arkType.unit("preset.placeholder_check"),
+	// #408: per-finding emission from the cross-table preset DAG checker. One
+	// event per `PresetDagFinding` the checker returned during a daemon-driven
+	// preset load — both `verdict=warn` (dead-vocabulary drift) and
+	// `verdict=error` (deadlock-continuable; load throws right after). Pairs
+	// with `daemon.preset_load_failed` on the error path so an operator
+	// inspecting an event stream sees the structural cause before the generic
+	// load-failure event.
+	arkType.unit("preset.dag_check"),
 	arkType.unit("daemon.warning"),
 	arkType.unit("scheduler.tick_failed"),
 	arkType.unit("chain.complete_trigger_failed"),
@@ -96,6 +104,21 @@ const PresetPlaceholderDirectionBoundary = arkType.or(
 const PresetPlaceholderVerdictBoundary = arkType.or(
 	arkType.unit("error"),
 	arkType.unit("warn"),
+)
+
+// #408 cross-table DAG checker payload literals. `kind` discriminates the
+// finding variant; `table` names the metadata table the offending status lives
+// in (today `statuses.continuable` for both variants — every R2/R3 finding
+// pinpoints a continuable status). `verdict` reuses the placeholder verdict
+// vocabulary so a downstream consumer rendering "preset validation" events can
+// switch on a single shared error/warn enum.
+const PresetDagFindingKindBoundary = arkType.or(
+	arkType.unit("deadlock-continuable"),
+	arkType.unit("dead-vocabulary"),
+)
+
+const PresetDagFindingTableBoundary = arkType.or(
+	arkType.unit("statuses.continuable"),
 )
 
 const ExcerptSourceBoundary = arkType({
@@ -344,6 +367,25 @@ const ObservabilityEventBoundary = arkType.or(
 			key: "string",
 			direction: PresetPlaceholderDirectionBoundary,
 			verdict: PresetPlaceholderVerdictBoundary,
+		},
+	},
+	{
+		// #408 cross-table preset DAG checker finding. Payload mirrors the
+		// shape `PresetDagFinding` exposes at the boundary: `kind` discriminates
+		// the variant; `table` is the metadata table the status lives in (today
+		// `statuses.continuable` for both R2 and R3); `status` is the offending
+		// status string; `message` is the renderable diagnostic. `verdict`
+		// reuses the placeholder vocabulary (`error|warn`) so both validation
+		// event families share one verdict enum across the unified stream.
+		...EventBaseBoundary,
+		kind: arkType.unit("validation"),
+		type: arkType.unit("preset.dag_check"),
+		payload: {
+			kind: PresetDagFindingKindBoundary,
+			verdict: PresetPlaceholderVerdictBoundary,
+			table: PresetDagFindingTableBoundary,
+			status: "string",
+			message: "string",
 		},
 	},
 	{
@@ -764,6 +806,13 @@ function renderValidationEvent(event: Extract<ObservabilityEvent, { kind: "valid
 			return `${event.ts} validation chain.invalid chain=${event.payload.chainId} context=${event.payload.context} error=${event.payload.error}`
 		case "preset.placeholder_check":
 			return `${event.ts} validation preset.placeholder_check chain=${event.chain ?? "-"} file=${event.payload.file} key=${event.payload.key} direction=${event.payload.direction} verdict=${event.payload.verdict}`
+		case "preset.dag_check":
+			// #408: render shape names the finding kind, the offending status,
+			// and the metadata table. The `message` field carries the full
+			// human-readable diagnostic; the rendered line stays one-tuple so
+			// operators grepping the event stream can pivot on `verdict=` or
+			// `kind=` cheaply without parsing JSON.
+			return `${event.ts} validation preset.dag_check chain=${event.chain ?? "-"} kind=${event.payload.kind} verdict=${event.payload.verdict} table=${event.payload.table} status=${event.payload.status}`
 		case "daemon.preset_load_failed":
 			// #403: migrated from `lifecycle` to `validation`. The fail-fast policy that replaced the
 			// engine fallback status vocabularies turns every preset-resolution refusal into a
