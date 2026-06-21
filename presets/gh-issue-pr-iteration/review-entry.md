@@ -137,17 +137,17 @@ Classification rules: parent/wrapper is not by itself a skip; `skip` only for du
 
 ### Step 6 — Terminal action and state write
 
-Pick exactly one verdict and read **only** its action file; execute its side effects yourself:
+Pick exactly one outcome below and read **only** its action file; execute its side effects yourself. Each action file ends by writing the corresponding exit through the typed phase-exits selection face (`{{PHASE_EXITS_DOC}}` above) — for `item-status` exits via `coder-loop item update --status <S>`; for the `chain-action` exit (stop) via `coder-loop item exit-action --action stop`. The retired stdout summary-line family is gone — selection happens through the CLI, not a stdout token.
 
-| Verdict | Action file |
-|---|---|
-| accept (PR-backed) | `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/accept-pr.md` |
-| accept (no PR / spike done) | `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/accept-no-pr.md` |
-| retry | `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/retry.md` |
-| expand incomplete parent | `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/expand-parent.md` |
-| skip | `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/skip.md` |
-| blocked | `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/blocked.md` |
-| stop | `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/stop.md` |
+| Outcome | Exit selected on this phase | Action file |
+|---|---|---|
+| accept (PR-backed) | item-status `done` | `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/accept-pr.md` |
+| accept (no PR / spike done) | item-status `done` | `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/accept-no-pr.md` |
+| retry (changes requested) | item-status `changes_requested` | `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/retry.md` |
+| expand incomplete parent | item-status `changes_requested` | `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/expand-parent.md` |
+| skip (moot) | item-status `moot` | `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/skip.md` |
+| blocked | item-status `blocked` | `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/blocked.md` |
+| stop chain | chain-action `stop` | `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/stop.md` |
 
 **Every PR reply you post — retry feedback and acceptance summary alike — is a full review report**, structured per the action file: the digest of **every** check (each dispatched report and each Step 4 judgment, pass or fail), a dedicated `## 缺失汇总` block listing every missing/failing item in one place (`none` when clean), and a `## Skipped checks` block naming each check not run **with its reason** (deliverable-route routing, no-PR route, infra). Each check's section must carry the measured values the action file's template names — SHAs, counts, verbatim quotes, URLs, timestamps; these exist only if the check was performed, so a field you cannot fill is a check you must go back and do. A reply that only narrates the failures, omits the passing checks' values, or replaces a measured field with prose is not acceptable output.
 
@@ -155,18 +155,12 @@ Retry feedback quality bar (applies inside the retry action): a contract-integri
 
 Then write item state per `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/state-write.md`. External effects come first; never write a final-ish local status whose required external effect failed.
 
-### Step 7 — Global assessment, handoff, cleanup, summary
+### Step 7 — Global assessment, handoff, cleanup
 
 1. **Global assessment**: re-read the state file; classify every queue item (actionable: `queued`/`in_progress`/`changes_requested`; non-actionable: `blocked`/`moot`/`done`/`exhausted`); print the classification table and counts. Actionable > 0 → leave central daemon scheduling state untouched; actionable == 0 → remove it; review infrastructure broken → remove it. Never remove it merely because the current issue needs retry.
-2. **Handoff**: append to `{{SHARED_CONTEXT_FILE}}`: verdict, reasons, the final task list with checkboxes, dispatched-report outcomes, judgments failed/passed, actions performed, state transition, child closure table when applicable, next action.
+2. **Handoff**: append to `{{SHARED_CONTEXT_FILE}}`: the outcome you chose (and the exit it maps to per Step 6), reasons, the final task list with checkboxes, dispatched-report outcomes, judgments failed/passed, actions performed, state transition, child closure table when applicable, next action.
 3. **Cleanup — review owns all teardown**: sweep per `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/cleanup-judge.md` — your own dispatches' declared side effects **and** the standing e2e environment iteration left up (kill via the runtime manifest's stop commands), verify each kill took, remove declared temp files, keep evidence in place. After this sweep nothing this issue's runs started may still be running.
-4. **Summary** — print exactly one final line:
-
-```text
-REVIEW SUMMARY: verdict=<retry|accepted|skip|blocked|stop>; issue=#<ISSUE>; dispatched=<diff-audit:yes/no,test-integrity:yes/no,replay:yes/no,e2e-replay:yes/no>; actionable=<N>; reason=<short reason>
-```
-
-(An expanded incomplete parent is `verdict=retry` with `expanded incomplete parent into child issues #…` in the reason. `dispatched=no` on any slot is legal only for no-PR routes or stop.)
+4. **Final exit selection**: per the unified completion protocol appended to your prompt, the exit the action file chose for you (Step 6 table — item-status or chain-action) is the only signal the engine consumes. Issue the corresponding CLI call (`coder-loop item update --status <S>` for an item-status exit, `coder-loop item exit-action --action stop` for the chain-action exit). Do not print any stdout summary token in place of the CLI call — stdout is no longer a flow channel; an unwritten exit leaves the run reported as inactive without status (caught by #452's fallback).
 
 ## Deliverable routing matrix
 

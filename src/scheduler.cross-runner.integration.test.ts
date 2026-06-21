@@ -46,7 +46,7 @@ test("cross-runner happy path stores iteration/codex and review/claude session i
 			runner: "claude",
 			phase: "review",
 			sessionId: "019e6cf2-5b39-7b83-9bc5-8c8b96122682",
-			stdout: ["REVIEW SUMMARY: verdict=accepted; issue=#31601; reason=review-complete"],
+			stdout: ["PHASE DONE: issue=#31601; reason=review-complete"],
 			writeStatus: "done",
 		},
 	])
@@ -85,7 +85,7 @@ test("cross-runner happy path stores iteration/codex and review/claude session i
 	}
 })
 
-test("review retry verdict returns to iteration before review runs again", async () => {
+test("review writing changes_requested returns to iteration before review runs again", async () => {
 	const fixture = await createCrossRunnerFixture("review-retry", [
 		{
 			runner: "codex",
@@ -97,7 +97,7 @@ test("review retry verdict returns to iteration before review runs again", async
 			runner: "claude",
 			phase: "review",
 			sessionId: "019e6cf2-5b39-7b83-9bc5-8c8b96122682",
-			stdout: ["REVIEW SUMMARY: verdict=retry; issue=#31602; reason=review-wants-changes"],
+			stdout: ["PHASE DONE: issue=#31602; reason=review-wants-changes"],
 			writeStatus: "changes_requested",
 		},
 		{
@@ -110,7 +110,7 @@ test("review retry verdict returns to iteration before review runs again", async
 			runner: "claude",
 			phase: "review",
 			sessionId: "019e6cf2-5b39-7b83-9bc5-8c8b96122683",
-			stdout: ["REVIEW SUMMARY: verdict=accepted; issue=#31602; reason=review-retry-complete"],
+			stdout: ["PHASE DONE: issue=#31602; reason=review-retry-complete"],
 			writeStatus: "done",
 		},
 	])
@@ -176,7 +176,7 @@ test("invalid review session id clears only review/claude and the next review sp
 			runner: "claude",
 			phase: "review",
 			sessionId: freshReviewSessionId,
-			stdout: ["REVIEW SUMMARY: verdict=accepted; issue=#31603; reason=fresh-review-complete"],
+			stdout: ["PHASE DONE: issue=#31603; reason=fresh-review-complete"],
 			writeStatus: "done",
 		},
 	])

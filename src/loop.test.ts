@@ -18,7 +18,6 @@ import {
 	normalizeQueueIssueId,
 	lastNonTriggerPhaseForPreset,
 	parsePreset,
-	parseReviewSummaryVerdict,
 	parseSessionIdFromRunnerStream,
 	renderFragmentIndex,
 	renderPrompt,
@@ -238,7 +237,7 @@ describe("ItemRecord prompt bindings", () => {
 			name: "review",
 			prompt: "review.md",
 			summaryMarker: "DONE:",
-			exits: [{ status: parseInternalStatus("done", "test.status"), when: "review accepted the result" }],
+			exits: [{ kind: "item-status", status: parseInternalStatus("done", "test.status"), when: "review accepted the result" }],
 			variables: [
 				{ key: "RUNTIME_INPUTS_DOC", source: { kind: "runtime", key: "runtimeInputsDoc" }, doc: null },
 				{ key: "PHASE_EXITS_DOC", source: { kind: "runtime", key: "phaseExitsDoc" }, doc: null },
@@ -254,7 +253,10 @@ describe("ItemRecord prompt bindings", () => {
 		const prompt = renderPrompt("{{RUNTIME_INPUTS_DOC}}\n\n{{PHASE_EXITS_DOC}}", phase, ctx)
 
 		expect(prompt).toContain("- Target working directory: `/repo`")
-		expect(prompt).toContain("- `done`: review accepted the result")
+		// #405 ADT: phase-exits doc renders the branch discriminator ("status" for the
+		// item-status branch, "chain-action" for the chain-action branch) so a CLI reader
+		// distinguishes a status write from a chain-side action without guessing.
+		expect(prompt).toContain("- status `done`: review accepted the result")
 	})
 
 	test("resolveBinding keeps old item.issue and chain.requireBrowserEvidence compatibility", () => {
@@ -300,21 +302,26 @@ describe("runtime binding helpers", () => {
 		expect(documentedEngineRuntimeBindingKeys(presetAuthoring)).toEqual([...ENGINE_RUNTIME_BINDING_KEYS])
 	})
 
-	test("reserved string registry includes engine-parsed summary enums", async () => {
+	test("reserved string registry includes engine-parsed summary enums (verdict words retired per #405)", async () => {
 		const registry = await readFile(resolve(REPO_ROOT, "docs/reserved-strings.md"), "utf8")
 
+		// FINALIZER SUMMARY / decision=* survive — they feed `parseFinalizerSummaryDecisionFromText`
+		// in the chain-complete trigger phase, which is out of scope for #405.
 		for (const token of [
 			"`FINALIZER SUMMARY:`",
 			"`decision=complete`",
 			"`decision=keep-active`",
-			"`verdict=retry`",
-			"`verdict=accepted`",
-			"`verdict=skip`",
-			"`verdict=blocked`",
-			"`verdict=stop`",
 		]) {
 			expect(registry).toContain(token)
 		}
+		// #405: the review-summary five-word vocabulary is retired alongside the stdout parser
+		// family. The registry must NOT carry any `verdict=...` entry as a reserved string — the
+		// only "stop"-shaped flow signal goes through the typed phase-exits selection face.
+		expect(registry).not.toContain("`verdict=retry`")
+		expect(registry).not.toContain("`verdict=accepted`")
+		expect(registry).not.toContain("`verdict=skip`")
+		expect(registry).not.toContain("`verdict=blocked`")
+		expect(registry).not.toContain("`verdict=stop`")
 		expect(registry).not.toContain("`ITERATION SUMMARY:`")
 		expect(registry).not.toContain("`REVIEW SUMMARY:`")
 	})
@@ -660,8 +667,7 @@ describe("small parsers", () => {
 		expect(normalizeQueueIssueId("mouriya-s-lab/coder-loop#333")).toBe("333")
 	})
 
-	test("runner stream parsers extract review verdicts and sessions", () => {
-		expect(parseReviewSummaryVerdict("PHASE DONE: verdict=retry; issue=#333; reason=x", "PHASE DONE:")).toBe("retry")
+	test("runner stream parsers extract sessions (verdict parser retired per #405)", () => {
 		expect(parseSessionIdFromRunnerStream("claude", "{\"type\":\"system\",\"session_id\":\"sess-1\"}\n")).toBe("sess-1")
 		expect(parseSessionIdFromRunnerStream("codex", "{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}")).toBe("thread-1")
 	})
