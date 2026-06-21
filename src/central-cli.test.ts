@@ -233,6 +233,14 @@ exhausted = "custom_done"
 name = "run"
 prompt = "run.md"
 
+  # #408 cross-table DAG check requires every continuable status to have a
+  # leaving phase-exit edge. The fixture's run phase had no exits declared —
+  # this minimal exit keeps the status-snapshot test surface unchanged while
+  # satisfying R2 (both continuable statuses can leave via "run → custom_done").
+  [[phases.exits]]
+  status = "custom_done"
+  when = "Run finished and the item reached the success-terminal vocabulary."
+
   [phases.variables]
   ISSUE = "item.issue"
 

@@ -163,6 +163,17 @@ exhausted = "parked"
 name = "run"
 prompt = "run.md"
 
+  # #408: minimal leaving edges so R2 passes for both continuable statuses.
+  # The manual-unblock test surface is unchanged — these exits are inert from
+  # the test's perspective (the test drives status directly through the store).
+  [[phases.exits]]
+  status = "finished"
+  when = "Run finished and the item should land in the success-terminal vocabulary."
+
+  [[phases.exits]]
+  status = "parked"
+  when = "Run failed structurally and the item should park for manual unblock."
+
   [phases.variables]
   ISSUE = "item.issue"
 
