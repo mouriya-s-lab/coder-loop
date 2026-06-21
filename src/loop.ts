@@ -19,6 +19,8 @@ import {
 	CoderLoopDaemon,
 	DaemonError,
 	PRESET_PHASE_PRIVILEGED_OPS,
+	PRESET_PHASE_RIGHTS_CONTROL_PLANE_FIELDS,
+	PRESET_PHASE_RIGHTS_CONTROL_PLANE_FIELD_SET,
 	daemonRequest,
 	daemonSocketPathIssueError,
 	detectDaemonSocketPathIssue,
@@ -4276,17 +4278,32 @@ function parsePresetPhaseRights(
 	}
 	return {
 		createItems: value.createItems ?? false,
-		writableFields: parsePresetPhaseRightsStringSet(value.writableFields ?? null, `${label}.writableFields`),
+		writableFields: parsePresetPhaseRightsWritableFields(value.writableFields ?? null, `${label}.writableFields`),
 		privilegedOps: parsePresetPhaseRightsPrivilegedOps(value.privilegedOps ?? null, `${label}.privilegedOps`),
 	}
 }
 
-function parsePresetPhaseRightsStringSet(value: readonly string[] | null, label: string): ReadonlySet<string> {
+// #410 parser for `[phases.rights] writableFields`. Open-vocabulary (preset declares its own
+// universe of writable keys — both top-level item-update fields and inner `extra` keys) BUT
+// closed-rejection on the engine's control-plane vocabulary: `runner` / `repoCwd` / `dependsOn` /
+// `priority` are scheduler/executor decisions and cannot be granted to any agent. The reserved
+// set lives in `daemon.ts` (PRESET_PHASE_RIGHTS_CONTROL_PLANE_FIELDS) so the parser and the
+// per-request gate share one source of truth — a future control-plane addition only changes the
+// tuple in daemon.ts. The error message names the forbidden field, lists the engine's full
+// control-plane vocabulary, and clarifies why no preset can grant it (default-deny + no preset
+// surface, mirrors #409 acceptance #1 for the privileged-op axis).
+function parsePresetPhaseRightsWritableFields(value: readonly string[] | null, label: string): ReadonlySet<string> {
 	if (value === null) return new Set()
 	const set = new Set<string>()
 	for (const [index, entry] of value.entries()) {
 		if (entry.trim() === "") presetError(`${label}[${index}]: must be a non-empty string`)
 		if (set.has(entry)) presetError(`${label}[${index}]: duplicate entry "${entry}"`)
+		if (PRESET_PHASE_RIGHTS_CONTROL_PLANE_FIELD_SET.has(entry)) {
+			presetError(
+				`${label}[${index}]: "${entry}" is a control-plane field (engine control-plane vocabulary: ${PRESET_PHASE_RIGHTS_CONTROL_PLANE_FIELDS.join(", ")}); ` +
+					"control-plane fields are agent-default-deny with no preset surface to grant them",
+			)
+		}
 		set.add(entry)
 	}
 	return set

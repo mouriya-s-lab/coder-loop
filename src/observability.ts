@@ -110,6 +110,13 @@ const ObservabilityEventTypeBoundary = arkType.or(
 	// `item.mutation.caller_admission` and `item.add.rights_admission` to give the auditor a full
 	// matrix of "who can do what" across the daemon surface.
 	arkType.unit("privileged_op.caller_admission"),
+	// #410: item.update non-status field-write admission. One event per item.update request
+	// after caller admission — both allow (operator path, or agent path with every requested
+	// field in the phase's `writableFields`) and deny (operator-impossible: operators always
+	// allow; agent path with at least one undeclared or control-plane field). Pairs with
+	// `item.mutation.caller_admission` (caller gate) and `item.status.write_admission` (status
+	// transition gate) to give the auditor a full per-field replay of every item-mutation surface.
+	arkType.unit("item.update.field_write_admission"),
 )
 
 // #409: vocabulary of daemon ops that flow through the privileged-op caller-admission gate.
@@ -136,6 +143,24 @@ const PrivilegedOpAuditReasonBoundary = arkType.or(
 	arkType.unit("missing-credential"),
 	arkType.unit("unknown-credential"),
 	arkType.unit("inactive-run"),
+)
+
+// #410: item.update field-write admission reason vocabulary.
+//   `operator`          — operator path (no agentCredential); always allow.
+//   `agent-allowed`     — every requested field/inner-key is in the phase's writableFields.
+//   `no-rights-segment` — agent phase's `[phases.rights]` is the default-deny shape (no grants
+//                         declared at all); structurally equivalent to a missing segment.
+//   `field-not-granted` — at least one requested passthrough field or extra-inner-key is not in
+//                         the phase's writableFields (and no control-plane field is involved).
+//   `control-plane-denied` — at least one requested field (top-level or inside extra/extraPatch)
+//                         classifies as control-plane; takes precedence over `field-not-granted`
+//                         since the deny is structurally non-recoverable by preset config.
+const ItemUpdateFieldWriteReasonBoundary = arkType.or(
+	arkType.unit("operator"),
+	arkType.unit("agent-allowed"),
+	arkType.unit("no-rights-segment"),
+	arkType.unit("field-not-granted"),
+	arkType.unit("control-plane-denied"),
 )
 
 const PresetPlaceholderDirectionBoundary = arkType.or(
@@ -601,6 +626,30 @@ const ObservabilityEventBoundary = arkType.or(
 			reason: PrivilegedOpAuditReasonBoundary,
 		},
 	},
+	{
+		// #410 item.update field-write admission. Emitted once per item.update request after
+		// caller admission. `requestedFields` is the union of top-level update fields named in
+		// the request plus expanded inner keys for any `extra` / `extraPatch` payload (so an
+		// `extra: { blockerRepo: ..., blockerRef: ... }` write surfaces those two inner keys
+		// alongside the top-level "extra" carrier). `deniedFields` is the subset that failed
+		// the matrix (control-plane fields or fields missing from the phase's writableFields);
+		// empty on allow. `presetName` is null on the operator path (gate skipped entirely)
+		// and the bundled preset name / absolute presetPath on the agent path.
+		...EventBaseBoundary,
+		kind: arkType.unit("audit"),
+		type: arkType.unit("item.update.field_write_admission"),
+		payload: {
+			itemId: "number",
+			issueNumber: "number",
+			"claimedPhase": arkType.or("string", "null"),
+			"presetName": arkType.or("string", "null"),
+			requestedFields: "string[]",
+			grantedFields: "string[]",
+			deniedFields: "string[]",
+			outcome: arkType.or(arkType.unit("allow"), arkType.unit("deny")),
+			reason: ItemUpdateFieldWriteReasonBoundary,
+		},
+	},
 )
 
 export type ObservabilityEvent = typeof ObservabilityEventBoundary.infer
@@ -614,6 +663,9 @@ export type PresetPlaceholderVerdict = typeof PresetPlaceholderVerdictBoundary.i
 // type-assert every `op` it writes belongs to the closed boundary union.
 export type PrivilegedOpAuditOp = typeof PrivilegedOpAuditOpBoundary.infer
 export type PrivilegedOpAuditReason = typeof PrivilegedOpAuditReasonBoundary.infer
+// #410: re-export the field-write reason vocabulary so daemon.ts (the only emitter) can
+// type-assert every `reason` it writes belongs to the closed boundary union.
+export type ItemUpdateFieldWriteReason = typeof ItemUpdateFieldWriteReasonBoundary.infer
 
 // #397 in-memory companion to the `item.status.write_admission` audit-event schema above.
 // Co-located with that schema so the wire shape (arktype, payload of ObservabilityEvent) and the
@@ -841,6 +893,12 @@ function renderAuditEvent(event: Extract<ObservabilityEvent, { kind: "audit" }>)
 			// a preset; `preset=<name>` for per-phase-authorized ops where the gate looked up the
 			// caller-phase's `[phases.rights] privilegedOps` grant.
 			return `${event.ts} audit privileged_op.caller_admission chain=${event.chain ?? "-"} op=${event.payload.op} claimedRunId=${event.payload.claimedRunId ?? "-"} claimedPhase=${event.payload.claimedPhase ?? "-"} preset=${event.payload.presetName ?? "-"} outcome=${event.payload.outcome} reason=${event.payload.reason}`
+		case "item.update.field_write_admission":
+			// #410: render shape names the caller phase / preset, the requested field set, the
+			// granted / denied subsets, and the gate verdict. The deny lines are the most useful
+			// audit row — surface `denied=<csv>` first so an operator scanning for "what was
+			// blocked" sees it without parsing the rest.
+			return `${event.ts} audit item.update.field_write_admission chain=${event.chain ?? "-"} item=${event.item ?? event.payload.itemId} preset=${event.payload.presetName ?? "-"} claimedPhase=${event.payload.claimedPhase ?? "-"} outcome=${event.payload.outcome} reason=${event.payload.reason} denied=${event.payload.deniedFields.join(",") || "-"} requested=${event.payload.requestedFields.join(",") || "-"} granted=${event.payload.grantedFields.join(",") || "-"}`
 		default:
 			return assertNever(event)
 	}
