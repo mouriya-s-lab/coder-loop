@@ -60,6 +60,9 @@ import {
 	type InternalStatus,
 	type ItemExtra,
 } from "./runtime-data"
+import { checkPresetDag, type PresetDagFinding } from "./preset-dag-check"
+export { checkPresetDag } from "./preset-dag-check"
+export type { PresetDagFinding, PresetDagFindingKind, PresetDagFindingVerdict, PresetDagFindingTable, PresetDagFindingDeadlockContinuable, PresetDagFindingDeadVocabulary } from "./preset-dag-check"
 
 const PKG_ROOT = resolve(import.meta.dir, "..")
 const DEFAULT_PRESET_NAME = "gh-issue-pr-iteration"
@@ -3923,6 +3926,12 @@ async function waitForPidExit(pid: number, timeoutMs: number): Promise<boolean> 
 
 export type LoadPresetOptions = {
 	onValidationFinding?: (finding: PresetPlaceholderFinding) => void
+	// #408 cross-table DAG checker callback. Invoked once per finding before
+	// loadPreset throws (for error verdicts) so daemons can record warn AND
+	// error findings on the unified observability stream alongside the
+	// placeholder findings — both run in the same load attempt, both feed the
+	// same audit surface.
+	onDagFinding?: (finding: PresetDagFinding) => void
 }
 
 export async function loadPreset(presetDir: string, options: LoadPresetOptions = {}): Promise<Preset> {
@@ -3930,6 +3939,24 @@ export async function loadPreset(presetDir: string, options: LoadPresetOptions =
 	const raw = await readFile(tomlPath, "utf-8")
 	const parsed: BoundaryValue = Bun.TOML.parse(raw)
 	const preset = parsePreset(parsed, presetDir)
+	// #408 cross-table DAG check runs immediately after `parsePreset` returns
+	// the parsed shape and BEFORE per-phase prompt template validation. Order
+	// matters for the operator-facing error: a deadlock or dead-vocabulary
+	// finding is structural metadata drift (a phase-exit table missing an
+	// edge) and is more actionable than a placeholder typo in a prompt the
+	// drift would have made unreachable anyway.
+	const dagFindings = checkPresetDag(preset)
+	const dagErrors: PresetDagFinding[] = []
+	for (const finding of dagFindings) {
+		options.onDagFinding?.(finding)
+		if (finding.verdict === "error") dagErrors.push(finding)
+	}
+	if (dagErrors.length > 0) {
+		const lines = dagErrors.map((f) => `  ${f.message}`)
+		presetError(
+			`preset ${preset.name}: cross-table DAG check found ${dagErrors.length} error finding(s).\n${lines.join("\n")}`,
+		)
+	}
 	const phases: PresetPhase[] = []
 	const placeholderErrors: PresetPlaceholderFinding[] = []
 	for (const phase of preset.phases) {

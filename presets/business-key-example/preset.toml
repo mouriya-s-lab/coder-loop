@@ -36,6 +36,17 @@ exhausted   = "exhausted"
 name   = "audit"
 prompt = "audit-entry.md"
 
+  # #408 cross-table DAG check requires every continuable status to have at
+  # least one leaving phase-exit edge. The fixture's `audit` phase had no
+  # exits declared (it only exists to verify `{{AUDIT_DEMO}}` rendering, not
+  # to drive a state machine), which made `pending` a deadlock under R2.
+  # Declaring the single terminal exit the fixture would naturally write keeps
+  # the render-test path identical and makes the fixture a positive bundled
+  # example for the new checker.
+  [[phases.exits]]
+  status = "done"
+  when   = "Audit rendering complete; the business-key fixture has nothing else to do."
+
   [phases.variables]
   ITEM_ID    = "item.id"
   RUN_ID     = "runtime.runId"
