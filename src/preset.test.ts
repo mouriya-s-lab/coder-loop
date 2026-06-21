@@ -7,7 +7,6 @@ import {
 	DEFAULT_ATTEMPT_TIMEOUT_SECONDS,
 	ENGINE_RUNTIME_BINDING_KEYS,
 	chainCompleteTriggerPhases,
-	lastNonTriggerPhaseForPreset,
 	loadPreset,
 	parsePreset,
 	renderFragmentIndex,
@@ -179,18 +178,13 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		// #402: bundled preset declares the attempts-exhausted落点 explicitly; engine no longer
 		// owns the "exhausted" literal.
 		expect(preset.statuses.exhausted).toBe("exhausted")
-		// #405: `summaryMarker` is null for every phase now — the only non-null seed
-		// (`"REVIEW SUMMARY:"` for review) was the verdict-marker hook the stdout parser
-		// consumed; with verdict retirement the marker has no consumer.
 		// #404: bundled preset declares the retry continuable status so md doc builders
 		// can inject it instead of fragments naming the literal.
+		// #456: the role-shaped `summaryMarker` field on `PresetPhase` was retired with the
+		// taxonomy; #452 will lift the summary-injection redesign on a DSL-declared hook. The
+		// previous "marker is null for every phase" assertion is now unrepresentable (no field) and
+		// has been dropped.
 		expect(preset.statuses.retry).toBe("changes_requested")
-		expect(Object.fromEntries(preset.phases.map((phase) => [phase.name, phase.summaryMarker]))).toEqual({
-			iteration: null,
-			review: null,
-			"blocked-responder": null,
-			"umbrella-finalizer": null,
-		})
 		expect(preset.phases.find((phase) => phase.name === "iteration")?.exits).toEqual([])
 		// #405: review's exits now include a chain-action branch (`stop`) alongside the
 		// item-status branches. The projection below narrows on the ADT discriminator so a future
@@ -215,8 +209,12 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 			"blocked-responder": null,
 			"umbrella-finalizer": null,
 		})
-		expect(lastNonTriggerPhaseForPreset(preset).name).toBe("review")
-			expect(triggeredPhasesAfter(preset, "review", status("blocked")).map((phase) => phase.name)).toEqual(["blocked-responder"])
+		// #456: previously this also asserted the "last non-trigger phase" position via an engine
+		// helper. That helper enforced an engine assumption the DSL never declared; with the
+		// taxonomy retired the engine no longer cares about that position. The preset's phase
+		// ordering (asserted above) keeps "review" before the trigger phases by preset declaration
+		// — no engine helper needed.
+		expect(triggeredPhasesAfter(preset, "review", status("blocked")).map((phase) => phase.name)).toEqual(["blocked-responder"])
 		expect(chainCompleteTriggerPhases(preset).map((phase) => phase.name)).toEqual(["umbrella-finalizer"])
 		for (const phase of preset.phases) {
 			expect(phase.prompt.startsWith(BUNDLED_PRESET_DIR)).toBe(true)
@@ -518,7 +516,10 @@ describe("parsePreset schema validation", () => {
 		expect(() => parsePreset(root, "/tmp")).toThrow(/duplicate name "p"/)
 	})
 
-	test("accepts trigger phases and keeps review as the last non-trigger phase", () => {
+	// #456: previously asserted the "last non-trigger phase" position via an engine helper. That
+	// helper enforced an engine assumption the DSL never declared; with the taxonomy retired the
+	// test pins the trigger declaration itself.
+	test("accepts trigger phases and exposes them via triggeredPhasesAfter", () => {
 		const root: BoundaryRecord = minimalRoot()
 		root.statuses = {continuable: ["queued"], terminal: ["blocked", "done"], exhausted: "done" }
 		root.phases = [
@@ -530,12 +531,15 @@ describe("parsePreset schema validation", () => {
 		const preset = parsePreset(root, "/tmp")
 
 			expect(preset.phases[2]!.trigger).toEqual({ afterPhase: "review", whenStatus: status("blocked") })
-			expect(lastNonTriggerPhaseForPreset(preset).name).toBe("review")
+			expect(preset.phases.filter((phase) => phase.trigger === null).map((phase) => phase.name)).toEqual(["iteration", "review"])
 			expect(triggeredPhasesAfter(preset, "review", status("blocked")).map((phase) => phase.name)).toEqual(["responder"])
 			expect(triggeredPhasesAfter(preset, "review", status("done"))).toEqual([])
 	})
 
-	test("accepts per-phase exit declarations and computes summaryMarker defaults", () => {
+	// #456: the role-shaped `summaryMarker` field on `PresetPhase` is retired with the taxonomy;
+	// this test now pins per-phase exits and the explicit phase runner instead. The prior
+	// "summaryMarker defaults to null for both phases" assertion is unrepresentable (no field).
+	test("accepts per-phase exit declarations and per-phase runner overrides", () => {
 		const root: BoundaryRecord = minimalRoot()
 		root.statuses = {continuable: ["queued", "in_progress"], terminal: ["done"], exhausted: "done" }
 		root.phases = [
@@ -549,9 +553,6 @@ describe("parsePreset schema validation", () => {
 			// narrowed view yields the same shape the pre-ADT projection used.
 			expect(preset.phases.map((phase) => phase.exits.flatMap((exit) => exit.kind === "item-status" ? [exit.status] : []))).toEqual([[status("in_progress")], [status("done")]])
 		expect(preset.phases[1]!.defaultRunner).toBe("claude")
-		// #405: `summaryMarker` no longer seeded for the `review` phase — verdict-marker hook
-		// retired with the stdout parser family.
-		expect(preset.phases.map((phase) => phase.summaryMarker)).toEqual([null, null])
 	})
 
 	test("accepts manual unblock statuses declared as terminal subset", () => {
@@ -578,11 +579,11 @@ describe("parsePreset schema validation", () => {
 		expect(() => parsePreset(root, "/tmp")).toThrow(/statuses\.unblockable: duplicate status "parked"/)
 	})
 
-	test("phases without summaryMarker disable the post-summary watchdog", () => {
-		const preset = parsePreset(minimalRoot(), "/tmp")
-
-		expect(preset.phases.map((phase) => phase.summaryMarker)).toEqual([null])
-	})
+	// #456: the per-phase `summaryMarker` field on `PresetPhase` was retired with the role
+	// taxonomy; the watchdog hook (`summaryWatchdogConfigForPhase`) now reports null for every
+	// phase until #452 lands a DSL-declared injection point. The prior "no marker → watchdog
+	// disabled" assertion is unrepresentable here (no field); see the loop.test.ts watchdog
+	// terminal-behavior test for the equivalent pin.
 
 	test("rejects per-phase exit declarations outside preset statuses", () => {
 		const root: BoundaryRecord = minimalRoot()
@@ -625,7 +626,11 @@ describe("parsePreset schema validation", () => {
 
 			expect(preset.phases[2]!.trigger).toEqual({ afterPhase: "review", whenStatus: status("blocked") })
 			expect(preset.phases[3]!.trigger).toEqual({ on: "chain-complete" })
-			expect(lastNonTriggerPhaseForPreset(preset).name).toBe("review")
+			// #456: previously this also asserted the "last non-trigger phase" position via an engine
+			// helper. With the role-shaped helper retired the test pins the non-trigger phase order
+			// via preset structure directly; "review" being the last non-trigger phase is now a
+			// property of the test fixture, not engine knowledge.
+			expect(preset.phases.filter((phase) => phase.trigger === null).map((phase) => phase.name)).toEqual(["iteration", "review"])
 			expect(triggeredPhasesAfter(preset, "review", status("blocked")).map((phase) => phase.name)).toEqual(["responder"])
 		expect(chainCompleteTriggerPhases(preset).map((phase) => phase.name)).toEqual(["finalizer"])
 	})

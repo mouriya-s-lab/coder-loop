@@ -154,7 +154,9 @@ describe("smoke: v2 central chain CLI", () => {
 
 		expect(afterLegacy.target.runner).toEqual(baseline.target.runner)
 		expect(afterLegacy.queue.selected.runner).toEqual(baseline.queue.selected.runner)
-		expect(afterLegacy.queue.selected.reviewRunner).toEqual(baseline.queue.selected.reviewRunner)
+		// #456: the per-phase runner enumeration (`queue.selected.phaseRunners`,
+		// `target.runner.phases`) is the only runner face after role taxonomy retirement.
+		expect(afterLegacy.queue.selected.phaseRunners).toEqual(baseline.queue.selected.phaseRunners)
 	})
 
 	// #433: the supervisor-visible status schema no longer carries config/configPath/configFormat.

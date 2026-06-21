@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises"
-import { existsSync, mkdirSync, writeFileSync } from "node:fs"
+import { existsSync } from "node:fs"
 import { resolve } from "node:path"
 
 import {
@@ -12,12 +12,10 @@ import {
 	makeRunId,
 	renderSchedulerSpawnPrompt,
 	resumeDecisionForItem,
-	reviewOnEmptyLockPathForChain,
 	runSchedulerUntilIdle,
 	schedulerSlotWorktreePath,
 	schedulerTick,
 	selectNextPendingItemFromSnapshot,
-	serializeSchedulerReviewOnEmptyLock,
 	type SchedulerEvent,
 	type SchedulerLoadedPreset,
 	type SchedulerOptions,
@@ -60,7 +58,6 @@ describe("scheduler", () => {
 		const fixture = await createFixture("serial")
 		try {
 			const chain = createChain(fixture.store, "serial-chain")
-			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			// #405: pin iteration's status write to `done` so each item terminates in a single
 			// iteration run, mirroring the historical test cadence. Without the override the new
 			// (post-verdict-retirement) flow would legitimately advance iteration → review per
@@ -93,7 +90,6 @@ describe("scheduler", () => {
 		const fixture = await createFixture("multi-repo")
 		try {
 			const chain = createChain(fixture.store, "multi-repo-chain")
-			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", sleepMs: 80, writeStatus: "done" })
 			createItem(fixture.store, chain, { issueNumber: 180, repoCwd: "/repo/b", sleepMs: 80, writeStatus: "done" })
 
@@ -193,7 +189,6 @@ describe("scheduler", () => {
 		const fixture = await createFixture("completion")
 		try {
 			const chain = createChain(fixture.store, "completion-chain")
-			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", writeStatus: "done" })
 
 			await runSchedulerUntilIdle(persistedObservabilityOptions(fixture))
@@ -211,7 +206,6 @@ describe("scheduler", () => {
 		await initGitTarget(target)
 		try {
 			const chain = createChain(fixture.store, "completion-cleanup-idempotent-chain")
-			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			createItem(fixture.store, chain, { issueNumber: 351_001, repoCwd: target, writeStatus: "done" })
 
 			await runSchedulerUntilIdle(fixture.options({
@@ -246,7 +240,6 @@ describe("scheduler", () => {
 		const fixture = await createFixture("completion-trigger")
 		try {
 			const chain = createChain(fixture.store, "completion-trigger-chain")
-			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			createItem(fixture.store, chain, { issueNumber: 2691, repoCwd: "/repo/a", writeStatus: "done" })
 			const observedChainStatuses: string[] = []
 
@@ -277,7 +270,6 @@ describe("scheduler", () => {
 		const fixture = await createFixture("completion-trigger-overlap")
 		try {
 			const chain = createChain(fixture.store, "completion-trigger-overlap-chain")
-			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			createItem(fixture.store, chain, { issueNumber: 2696, repoCwd: "/repo/a", writeStatus: "done" })
 			const triggerStarted = createDeferred()
 			const releaseTrigger = createDeferred()
@@ -321,7 +313,6 @@ describe("scheduler", () => {
 		const fixture = await createFixture("completion-trigger-active")
 		try {
 			const chain = createChain(fixture.store, "completion-trigger-active-chain")
-			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			createItem(fixture.store, chain, { issueNumber: 2692, repoCwd: "/repo/a", writeStatus: "done" })
 			let triggerCalls = 0
 			const options = fixture.options({
@@ -367,7 +358,6 @@ describe("scheduler", () => {
 		const followUpFixture = await createFixture("completion-trigger-follow-up")
 		try {
 			const chain = createChain(followUpFixture.store, "completion-trigger-follow-up-chain")
-			preInstallReviewOnEmptyLock(chain, followUpFixture.loopDataRoot)
 			createItem(followUpFixture.store, chain, { issueNumber: 2693, repoCwd: "/repo/a", writeStatus: "done" })
 
 			const tick = await schedulerTick(followUpFixture.options({
@@ -388,7 +378,6 @@ describe("scheduler", () => {
 		const failingFixture = await createFixture("completion-trigger-failing")
 		try {
 			const chain = createChain(failingFixture.store, "completion-trigger-failing-chain")
-			preInstallReviewOnEmptyLock(chain, failingFixture.loopDataRoot)
 			createItem(failingFixture.store, chain, { issueNumber: 2695, repoCwd: "/repo/a", writeStatus: "done" })
 
 			const tick = await schedulerTick(failingFixture.options({
@@ -415,7 +404,6 @@ describe("scheduler", () => {
 		const fixture = await createFixture("manual-terminal-completion")
 		try {
 			const chain = createChain(fixture.store, "manual-terminal-completion-chain")
-			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 249, repoCwd: "/repo/a" })
 			fixture.store.updateItem(item.id, { status: runtimeStatus("done"), updatedAt: 1_800_000_500 })
 
@@ -434,7 +422,6 @@ describe("scheduler", () => {
 		const fixture = await createFixture("terminal-preserve")
 		try {
 			const chain = createChain(fixture.store, "terminal-preserve-chain")
-			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", sleepMs: 5_000 })
 
 			const tick = await schedulerTick(fixture.options())
@@ -495,7 +482,6 @@ describe("scheduler", () => {
 		try {
 			expect(DEFAULT_MAX_ITEM_ATTEMPTS).toBe(20)
 			const chain = createChain(fixture.store, "default-max-item-attempts-exhaust-chain")
-			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 7008, repoCwd: "/repo/a" })
 			fixture.store.updateItem(item.id, {
 				status: runtimeStatus("changes_requested"),
@@ -529,7 +515,6 @@ describe("scheduler", () => {
 				const chain = createChain(fixture.store, "max-item-attempts-exhaust-chain", {
 					metadata: { maxItemAttempts: 2 },
 				})
-			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 7003, repoCwd: "/repo/a" })
 			fixture.store.updateItem(item.id, {
 				status: runtimeStatus("changes_requested"),
@@ -572,7 +557,6 @@ describe("scheduler", () => {
 				preset: "custom-exhausted",
 				metadata: { maxItemAttempts: 1 },
 			})
-			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 710_004, repoCwd: "/repo/a" })
 			fixture.store.updateItem(item.id, {
 				status: runtimeStatus("queued"),
@@ -826,7 +810,6 @@ describe("scheduler", () => {
 		await writeEmptySuccessPreset(presetDir)
 		try {
 			const chain = createChain(fixture.store, "empty-success-statuses-chain", { preset: "empty-success" })
-			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const target = createItem(fixture.store, chain, { issueNumber: 710_001, repoCwd: "/repo/a" })
 			const dependent = createItem(fixture.store, chain, { issueNumber: 710_002, repoCwd: "/repo/a" })
 			fixture.store.updateItem(target.id, { status: runtimeStatus("done"), updatedAt: 1_800_710_001 })
@@ -967,7 +950,6 @@ describe("scheduler", () => {
 		const fixture = await createFixture("run-artifacts")
 		try {
 			const chain = createChain(fixture.store, "run-artifacts-chain")
-			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 203, repoCwd: "/repo/a", writeStatus: "done" })
 
 			await runSchedulerUntilIdle(persistedObservabilityOptions(fixture))
@@ -1016,7 +998,6 @@ describe("scheduler", () => {
 		const fixture = await createFixture("phase-events")
 		try {
 			const chain = createChain(fixture.store, "phase-events-chain")
-			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			// #405: pin iteration's write to `done` so the test's "single phase event run"
 			// assertion stays single. Previously the retired verdict mapper coincidentally
 			// landed iteration at done via the default REVIEW SUMMARY token; explicitly
@@ -1370,7 +1351,6 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 		await writeThreeStepPreset(presetDir)
 		try {
 			const chain = createChain(fixture.store, "phase-order-three-step-chain", { preset: "three-step" })
-			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 371_001, repoCwd: "/repo/a", summary: null })
 			const baseOptions = fixture.options({
 				loadedPreset: await loadedPresetFromDir(presetDir),
@@ -1626,7 +1606,6 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 		const fixture = await createFixture("phase-ac6-review-terminal")
 		try {
 			const chain = createChain(fixture.store, "phase-ac6-review-terminal-chain")
-			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, {
 				issueNumber: 28906,
 				repoCwd: "/repo/a",
@@ -1676,7 +1655,6 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 		const fixture = await createFixture("trigger-b3-blocked-spawn")
 		try {
 			const chain = createChain(fixture.store, "trigger-b3-blocked-spawn-chain")
-			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, {
 				issueNumber: 29002,
 				repoCwd: "/repo/a",
@@ -1730,7 +1708,6 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 		const fixture = await createFixture("trigger-b3-unblock")
 		try {
 			const chain = createChain(fixture.store, "trigger-b3-unblock-chain")
-			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			// The production blocked-responder ends with an ITERATION-shaped marker on a non-iteration
 			// phase. Under the old fall-through this mapped to changes_requested and pulled the
 			// terminal item back into iteration → review. The fix keeps the pre-trigger terminal status.
@@ -1785,7 +1762,6 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 		const fixture = await createFixture("trigger-b3-no-match")
 		try {
 			const chain = createChain(fixture.store, "trigger-b3-no-match-chain")
-			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 29004, repoCwd: "/repo/a" })
 			fixture.store.updateItem(item.id, {
 				status: runtimeStatus("blocked"),
@@ -1823,7 +1799,6 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			fixture.store.updateItem(blocker.id, { status: runtimeStatus("done"), phase: "review", updatedAt: 1_800_010_000 })
 
 			const dependentChain = createChain(fixture.store, "depends-unblock-dependent-chain")
-			preInstallReviewOnEmptyLock(dependentChain, fixture.loopDataRoot)
 			const dependent = createItem(fixture.store, dependentChain, { issueNumber: 29010, repoCwd: "/repo/a", summary: null })
 			// Lifecycle: blocked-responder already ran (phase=blocked-responder) and declared the
 			// cross-chain dependency; the item is parked in the stable blocked terminal state.
@@ -1889,7 +1864,6 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			fixture.store.updateItem(blocker.id, { status: runtimeStatus("in_progress"), phase: "iteration", updatedAt: 1_800_011_000 })
 
 			const dependentChain = createChain(fixture.store, "depends-unblock-neg-dependent-chain")
-			preInstallReviewOnEmptyLock(dependentChain, fixture.loopDataRoot)
 			const dependent = createItem(fixture.store, dependentChain, { issueNumber: 29011, repoCwd: "/repo/a", summary: null })
 			fixture.store.updateItem(dependent.id, {
 				status: runtimeStatus("blocked"),
@@ -1937,7 +1911,6 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			fixture.store.updateItem(blocker.id, { status: runtimeStatus("in_progress"), phase: "iteration", updatedAt: 1_800_012_000 })
 
 			const dependentChain = createChain(fixture.store, "depends-guard-dependent-chain")
-			preInstallReviewOnEmptyLock(dependentChain, fixture.loopDataRoot)
 			const dependent = createItem(fixture.store, dependentChain, { issueNumber: 29012, repoCwd: "/repo/a", summary: null })
 			fixture.store.updateItem(dependent.id, {
 				status: runtimeStatus("blocked"),
@@ -1947,8 +1920,10 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 				updatedAt: 1_800_012_100,
 			})
 
-			// All chain items are terminal AND the review-on-empty lock exists, so completion would
-			// normally fire — but the in-flight cross-chain dep keeps the chain active.
+			// All chain items are terminal, so completion would normally fire — but the in-flight
+			// cross-chain dep keeps the chain active. #456: the legacy review-on-empty lock
+			// prerequisite is gone; chain-complete is now gated solely on terminal-status uniformity
+			// and the declared chain-complete trigger phases (none in this fixture).
 			const guardedTick = await schedulerTick(fixture.options())
 			expect(guardedTick.completedChainIds).toEqual([])
 			expect(fixture.store.getChain(dependentChain.id)?.status).toBe("active")
@@ -1973,11 +1948,9 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			const blockerChain = createChain(fixture.store, "depends-e2e-blocker-chain", {
 				repository: "mouriya-s-lab/coder-loop-e2e-blocker",
 			})
-			preInstallReviewOnEmptyLock(blockerChain, fixture.loopDataRoot)
 			const blocker = createItem(fixture.store, blockerChain, { issueNumber: 41, repoCwd: "/repo/blocker", writeStatus: "done" })
 
 			const dependentChain = createChain(fixture.store, "depends-e2e-dependent-chain")
-			preInstallReviewOnEmptyLock(dependentChain, fixture.loopDataRoot)
 			const dependent = createItem(fixture.store, dependentChain, { issueNumber: 29013, repoCwd: "/repo/a", writeStatus: "done" })
 			fixture.store.updateItem(dependent.id, {
 				status: runtimeStatus("blocked"),
@@ -2038,7 +2011,6 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 		const fixture = await createFixture("trigger-b3-race")
 		try {
 			const chain = createChain(fixture.store, "trigger-b3-race-chain")
-			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			// #405: agent's blocked-status decision now comes through `extra.writeStatus`
 			// (mirror of `coder-loop item update --status blocked`), not a `REVIEW SUMMARY:
 			// verdict=blocked` stdout token.
@@ -2150,266 +2122,6 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 	})
 })
 
-describe("scheduler per-chain review-on-empty (issue #292)", () => {
-	test("chain drained + lock missing → next tick spawns review-on-empty once with phase=review", async () => {
-		const fixture = await createFixture("review-on-empty-spawn")
-		try {
-			const chain = createChain(fixture.store, "review-on-empty-spawn-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 14001, repoCwd: "/repo/a", writeStatus: "done" })
-
-			const firstTick = await schedulerTick(fixture.options())
-			expect(firstTick.spawnedRuns).toHaveLength(1)
-			const iterClosed = await firstTick.spawnedRuns[0]!.closed
-			expect(iterClosed.status).toBe("done")
-			expect(fixture.store.getItem(item.id)?.status).toBe("done")
-			expect(fixture.store.getChain(chain.id)?.status).toBe("active")
-
-			const lockPath = reviewOnEmptyLockPathForChain(chain, { loopDataRoot: fixture.loopDataRoot })
-			expect(existsSync(lockPath)).toBe(false)
-
-			const reviewTick = await schedulerTick(fixture.options())
-			expect(reviewTick.spawnedRuns).toHaveLength(1)
-			expect(reviewTick.completedChainIds).toEqual([])
-
-			const reviewRun = reviewTick.spawnedRuns[0]!
-			expect(reviewRun.itemId).toBe(0)
-			const phaseStartReview = fixture.schedulerEvents
-				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> => event.type === "phase.start")
-				.find((event) => event.runId === reviewRun.runId)
-			expect(phaseStartReview?.phase).toBe("review")
-			expect(phaseStartReview?.itemId).toBe(0)
-
-			await reviewRun.closed
-		} finally {
-			fixture.store.close()
-		}
-	})
-
-	test("review-on-empty close writes lock file with runId + ISO acquiredAt", async () => {
-		const fixture = await createFixture("review-on-empty-lock-write")
-		try {
-			const chain = createChain(fixture.store, "review-on-empty-lock-write-chain")
-			createItem(fixture.store, chain, { issueNumber: 14002, repoCwd: "/repo/a", writeStatus: "done" })
-
-			const iterTick = await schedulerTick(fixture.options())
-			await iterTick.spawnedRuns[0]!.closed
-
-			const reviewTick = await schedulerTick(fixture.options())
-			expect(reviewTick.spawnedRuns).toHaveLength(1)
-			const reviewRun = reviewTick.spawnedRuns[0]!
-			await reviewRun.closed
-
-			const lockPath = reviewOnEmptyLockPathForChain(chain, { loopDataRoot: fixture.loopDataRoot })
-			expect(existsSync(lockPath)).toBe(true)
-			const lockPayload = JSON.parse(await readFile(lockPath, "utf-8")) as BoundaryRecord
-			expect(lockPayload.runId).toBe(reviewRun.runId)
-			expect(typeof lockPayload.acquiredAt).toBe("string")
-			expect(Number.isFinite(Date.parse(String(lockPayload.acquiredAt)))).toBe(true)
-			expect(lockPayload.reason).toBe("chain-queue-drained")
-		} finally {
-			fixture.store.close()
-		}
-	})
-
-	test("lock present + chain drained → next tick does NOT re-spawn review-on-empty", async () => {
-		const fixture = await createFixture("review-on-empty-lock-respected")
-		try {
-			const chain = createChain(fixture.store, "review-on-empty-lock-respected-chain")
-			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot, "lock-pre-existing")
-			const item = createItem(fixture.store, chain, { issueNumber: 14003, repoCwd: "/repo/a" })
-			fixture.store.updateItem(item.id, { status: runtimeStatus("done"), updatedAt: 1_800_006_000 })
-
-			const tick = await schedulerTick(fixture.options())
-			expect(tick.spawnedRuns).toHaveLength(0)
-			expect(tick.completedChainIds).toEqual([chain.id])
-			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
-
-			const lockPath = reviewOnEmptyLockPathForChain(chain, { loopDataRoot: fixture.loopDataRoot })
-			const lockPayload = JSON.parse(await readFile(lockPath, "utf-8")) as BoundaryRecord
-			expect(lockPayload.runId).toBe("lock-pre-existing")
-		} finally {
-			fixture.store.close()
-		}
-	})
-
-	test("lock present + new queued item appears → next tick spawns iter for the queued item, not review-on-empty", async () => {
-		const fixture = await createFixture("review-on-empty-lock-with-new-item")
-		try {
-			const chain = createChain(fixture.store, "review-on-empty-lock-with-new-item-chain")
-			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot, "lock-from-prior-drain")
-			const done = createItem(fixture.store, chain, { issueNumber: 14004, repoCwd: "/repo/a" })
-			fixture.store.updateItem(done.id, { status: runtimeStatus("done"), updatedAt: 1_800_007_000 })
-			const fresh = createItem(fixture.store, chain, { issueNumber: 14005, repoCwd: "/repo/a" })
-
-			const tick = await schedulerTick(fixture.options())
-			expect(tick.spawnedRuns).toHaveLength(1)
-			const spawnedRun = tick.spawnedRuns[0]!
-			expect(spawnedRun.itemId).toBe(fresh.id)
-			const phaseStart = fixture.schedulerEvents
-				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> => event.type === "phase.start")
-				.find((event) => event.runId === spawnedRun.runId)
-			expect(phaseStart?.phase).toBe("iteration")
-			await spawnedRun.closed
-		} finally {
-			fixture.store.close()
-		}
-	})
-
-	test("empty chain (no items) does not spawn review-on-empty", async () => {
-		const fixture = await createFixture("review-on-empty-no-items")
-		try {
-			const chain = createChain(fixture.store, "review-on-empty-no-items-chain")
-
-			const tick = await schedulerTick(fixture.options())
-			expect(tick.spawnedRuns).toHaveLength(0)
-			expect(tick.completedChainIds).toEqual([])
-			expect(fixture.store.getChain(chain.id)?.status).toBe("active")
-			const lockPath = reviewOnEmptyLockPathForChain(chain, { loopDataRoot: fixture.loopDataRoot })
-			expect(existsSync(lockPath)).toBe(false)
-		} finally {
-			fixture.store.close()
-		}
-	})
-
-	// #412 fix-loop regression test (e2e AC#7): when chain.preset != items[0].preset (mixed-preset
-	// chain), the review-on-empty spawn used to take phasePlan from chain.preset (lastPhase = "run")
-	// while loading the preset from the representative item (real-e2e-minimal, with phases
-	// iteration+review). The mismatched phase name made the spawn fail with phase_not_found_in_preset.
-	// This test pins the fix: phase plan flows from the representative item's preset, so the spawned
-	// review-on-empty run uses the item-preset's last phase (review).
-	test("mixed-preset chain: review-on-empty spawn takes phase plan from representative item's preset, not chain.preset", async () => {
-		const fixture = await createFixture("review-on-empty-mixed-preset")
-		try {
-			const chainPresetDir = resolve(REPO_ROOT, "presets/single-phase-example")
-			const itemPresetDir = resolve(REPO_ROOT, "presets/real-e2e-minimal")
-			const chainLoaded = await loadedPresetFromDir(chainPresetDir)
-			const itemLoaded = await loadedPresetFromDir(itemPresetDir)
-			// chain.preset = single-phase-example (phases=[run]); items[0].preset = real-e2e-minimal
-			// (phases=[iteration, review]). createChain seeds chain.preset = "gh-issue-pr-iteration" by
-			// default; override it via the chain row to make the mismatch explicit.
-			const chain = createChain(fixture.store, "review-on-empty-mixed-preset-chain", { preset: "single-phase-example" })
-			const item = createItem(fixture.store, chain, { issueNumber: 41201, repoCwd: "/repo/a" })
-			// Mark item with the item-side preset (real-e2e-minimal) and put it in that preset's terminal
-			// "done" status so the chain drains and review-on-empty becomes eligible on the next tick.
-			fixture.store.updateItem(item.id, { preset: "real-e2e-minimal", status: runtimeStatus("done"), updatedAt: 1_800_010_000 })
-
-			// presetForChain returns chain.preset (single-phase-example); presetForItem returns
-			// real-e2e-minimal when the item is the real one (or its derived fallback that inherits
-			// item.preset). This mirrors the production daemon's per-item resolver shape.
-			const presetForItem = async (_chain: ChainRecord, candidate: ItemRecord): Promise<SchedulerLoadedPreset> => {
-				if (candidate.preset === "real-e2e-minimal" || candidate.presetPath?.includes("real-e2e-minimal") === true) return itemLoaded
-				if (candidate.preset === "single-phase-example") return chainLoaded
-				// fallback item with no explicit preset would have meant the bug; assert by routing the
-				// chain-preset (single-phase-example) so phase plan would resolve to "run" and the test
-				// would fail without the fix.
-				return chainLoaded
-			}
-
-			const tick = await schedulerTick(fixture.options({
-				loadedPreset: chainLoaded,
-				presetForItem,
-			}))
-			expect(tick.spawnedRuns).toHaveLength(1)
-			const reviewRun = tick.spawnedRuns[0]!
-			expect(reviewRun.itemId).toBe(0)
-			const phaseStart = fixture.schedulerEvents
-				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> => event.type === "phase.start")
-				.find((event) => event.runId === reviewRun.runId)
-			// Pre-fix value was "run" (chain.preset.lastPhase). Post-fix value is "review" (the
-			// representative item's preset.lastPhase).
-			expect(phaseStart?.phase).toBe("review")
-			// Sanity-check the inverse: "run" is the lastPhase of single-phase-example. The assertion
-			// above is meaningful only because the two presets disagree.
-			expect(chainLoaded.preset.phases.map((p) => p.name)).toEqual(["run"])
-			expect(itemLoaded.preset.phases.map((p) => p.name)).toEqual(["iteration", "review"])
-			await reviewRun.closed
-		} finally {
-			fixture.store.close()
-		}
-	})
-
-	// #412 retry: cover the second mixed-preset path the original PR missed —
-	// resolvePhaseRunner must consult phaseRunnerSelectionForItem when set, not just
-	// phaseRunnerSelectionForChain. Without the per-item resolver, the chain selection's preset is
-	// queried for the item's phase name, which on a mixed-preset chain throws
-	// `preset X does not define phase "<item phase>"`. The fix is `resolvePhaseRunner` preferring
-	// the per-item resolver. This test pins it: when both resolvers are present and disagree, the
-	// per-item one wins; when only the chain resolver is present and the phase doesn't exist there,
-	// the spawn surfaces the chain-vs-item phase mismatch — that's the bug the per-item resolver
-	// fixes.
-	test("mixed-preset chain: resolvePhaseRunner prefers phaseRunnerSelectionForItem over phaseRunnerSelectionForChain so spawn uses the item's preset", async () => {
-		const fixture = await createFixture("phase-runner-per-item-resolver")
-		try {
-			const chainPresetDir = resolve(REPO_ROOT, "presets/single-phase-example")
-			const itemPresetDir = resolve(REPO_ROOT, "presets/real-e2e-minimal")
-			const chainLoaded = await loadedPresetFromDir(chainPresetDir)
-			const itemLoaded = await loadedPresetFromDir(itemPresetDir)
-			// chain.preset = single-phase-example (phases=[run]) — no "iteration" phase.
-			// item.preset = real-e2e-minimal (phases=[iteration, review]).
-			const chain = createChain(fixture.store, "phase-runner-per-item-resolver-chain", { preset: "single-phase-example" })
-			const item = createItem(fixture.store, chain, { issueNumber: 41202, repoCwd: "/repo/a" })
-			fixture.store.updateItem(item.id, { preset: "real-e2e-minimal", updatedAt: 1_800_010_000 })
-
-			const presetForChain = () => chainLoaded
-			const presetForItem = async (_chain: ChainRecord, candidate: ItemRecord): Promise<SchedulerLoadedPreset> => {
-				if (candidate.preset === "real-e2e-minimal") return itemLoaded
-				return chainLoaded
-			}
-
-			// Observe which preset each resolver receives. We deliberately make
-			// phaseRunnerSelectionForChain return a selection built against the chain's preset
-			// (single-phase-example) — selectRunnerForPhase would throw "preset single-phase-example
-			// does not define phase 'iteration'" if resolvePhaseRunner falls back to it. The fix
-			// requires resolvePhaseRunner to prefer phaseRunnerSelectionForItem.
-			let chainResolverCalls = 0
-			let itemResolverCalls = 0
-
-			const baseOptions = fixture.options({
-				loadedPreset: chainLoaded,
-				presetForItem,
-			})
-			delete (baseOptions as { runner?: AgentRunnerSelection }).runner
-
-			// Replace runnerCommands with fake-runner shape so spawn drives the fixture's bun-driven
-			// fake binary instead of the PATH-resolved real claude/codex. The test's assertion target
-			// is the resolver-preference order, not the spawned process behavior; without this the
-			// real claude binary would not exit within bun-test's 5s timeout.
-			const fakeRunnerCommands = {
-				claude: { kind: "claude" as const, binary: "bun", extraArgs: [fixture.fakeRunner], model: null },
-				codex:  { kind: "codex"  as const, binary: "bun", extraArgs: [fixture.fakeRunner], model: null },
-			}
-			const tick = await schedulerTick({
-				...baseOptions,
-				presetForChain,
-				phaseRunnerSelectionForChain: (passedChain) => {
-					chainResolverCalls++
-					const selection = buildPhaseRunnerSelectionFromChain({ chain: passedChain, loopDataRoot: null, preset: chainLoaded.preset })
-					return { ...selection, runnerCommands: fakeRunnerCommands }
-				},
-				phaseRunnerSelectionForItem: async (passedChain, passedItem) => {
-					itemResolverCalls++
-					const { preset } = await presetForItem(passedChain, passedItem)
-					const selection = buildPhaseRunnerSelectionFromChain({ chain: passedChain, loopDataRoot: null, preset })
-					return { ...selection, runnerCommands: fakeRunnerCommands }
-				},
-			})
-			expect(tick.spawnedRuns).toHaveLength(1)
-			expect(itemResolverCalls).toBeGreaterThan(0)
-			expect(chainResolverCalls).toBe(0)
-			const phaseStart = fixture.schedulerEvents
-				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> => event.type === "phase.start")
-				.find((event) => event.itemId === item.id)
-			// phaseStart fires with the item's preset's first non-trigger phase. real-e2e-minimal's
-			// firstNonTriggerPhase is "iteration"; single-phase-example's would be "run". The chain
-			// resolver was bypassed so the phase must come from item.preset.
-			expect(phaseStart?.phase).toBe("iteration")
-			await tick.spawnedRuns[0]!.closed
-		} finally {
-			fixture.store.close()
-		}
-	})
-})
-
 describe("scheduler loaded preset prompt rendering", () => {
 	const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
 
@@ -2417,7 +2129,6 @@ describe("scheduler loaded preset prompt rendering", () => {
 		const fixture = await createPresetPromptIntegrationFixture("integration-resolver")
 		try {
 			const chain = createChain(fixture.store, "integration-resolver-chain")
-			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 283, repoCwd: "/repo/a" })
 
 			const tick = await schedulerTick(fixture.options())
@@ -2863,7 +2574,16 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 		})
 	})
 
-	test("AC5 integration: chain-based phaseRunner honors item claude override for iter spawn while review stays on preset codex", async () => {
+	// #456: item.runner override now applies uniformly to every non-trigger phase. The bundled
+	// preset's `review` phase has `trigger === null`, so an item-level `runner: "claude"` flows
+	// through both `iteration` and `review` — there is no engine-side carve-out keeping `review`
+	// on its preset default once the item declares an override. The previous assertion that review
+	// stayed on `BINARY:codex` encoded the retired role-name carve-out (`selectReviewRunner` /
+	// `lastNonTriggerPhaseForPreset`); after #456's policy unification, every non-trigger phase
+	// honors the same override. Phase-name-based gating, when a preset wants it, belongs to preset
+	// declaration (e.g., setting `[[phases]].runner` on `review` makes the preset default explicit
+	// — but item override still wins because `trigger === null`).
+	test("AC5 integration: chain-based phaseRunner honors item claude override on every non-trigger phase (iteration + review), regardless of phase name", async () => {
 		const fixture = await createFixture("ac5-integration")
 		try {
 			const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
@@ -2923,8 +2643,11 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			const reviewClosed = await reviewTick.spawnedRuns[0]!.closed
 			expect(reviewClosed.exitCode).toBe(0)
 			const reviewStdout = await readFile(iterPaths.runStdoutFile(reviewClosed.runId), "utf-8")
-			expect(reviewStdout).toContain("BINARY:codex")
-			expect(reviewStdout).not.toContain("BINARY:claude")
+			// Unified policy: item.runner = "claude" propagates to every non-trigger phase, including
+			// review under the bundled preset (which has `trigger === null`). The role-named carve-out
+			// is gone, so review emits the same `BINARY:claude` as iteration.
+			expect(reviewStdout).toContain("BINARY:claude")
+			expect(reviewStdout).not.toContain("BINARY:codex")
 		} finally {
 			fixture.store.close()
 		}
@@ -3272,7 +2995,6 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 		const fixture = await createFixture("session-id-capture-phase-runner")
 		try {
 			const chain = createChain(fixture.store, "session-id-capture-phase-runner-chain")
-			preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 			const item = createItem(fixture.store, chain, { issueNumber: 311_010, repoCwd: "/repo/session-phase-runner" })
 			const fakeCodex = resolve(fixture.loopDataRoot, "..", "fake-codex-session.sh")
 			const fakeClaude = resolve(fixture.loopDataRoot, "..", "fake-claude-session.ts")
@@ -3770,11 +3492,9 @@ function createChain(
 	})
 }
 
-function preInstallReviewOnEmptyLock(chain: ChainRecord, loopDataRoot: string, runId = "test-pre-installed"): void {
-	const lockPath = reviewOnEmptyLockPathForChain(chain, { loopDataRoot })
-	mkdirSync(resolve(lockPath, ".."), { recursive: true })
-	writeFileSync(lockPath, serializeSchedulerReviewOnEmptyLock(runId, new Date(0)))
-}
+// #456: `preInstallReviewOnEmptyLock` helper retired with the review-on-empty path. The helper
+// existed only to suppress that legacy auto-fired phase during tests of chain completion; once the
+// path is gone, every former call site became deletable noise (no behavior change to delete).
 
 function createItem(
 	store: ReturnType<typeof openSqliteStateStore>,
@@ -4003,7 +3723,9 @@ prompt = "run.md"
 // `coder-loop item update --status` write). Defaults preserve historical behavior:
 // trigger phases write nothing, iteration leaves status to the next phase via the
 // trigger DAG, review defaults to `done` when no explicit writeStatus is set.
-const TRIGGER_PHASES = new Set(["blocked-responder", "umbrella-finalizer", "review-on-empty"])
+// #456: `review-on-empty` removed from this fake-runner trigger set together with the path
+// itself. Only the preset-declared item-trigger / chain-complete-trigger phases remain.
+const TRIGGER_PHASES = new Set(["blocked-responder", "umbrella-finalizer"])
 
 function fakeRunnerWriteStatus(phase: string, extra: JsonObject): string | null {
 	if (TRIGGER_PHASES.has(phase)) return null

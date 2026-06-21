@@ -149,13 +149,6 @@ function makeLoopOptions(): LoopOptions {
 			model: null,
 			source: "iteration-default",
 		},
-		reviewRunner: {
-			kind: "claude",
-			binary: "claude",
-			extraArgs: [],
-			model: null,
-			source: "review-default",
-		},
 		runnerCommands: {
 			claude: { kind: "claude", binary: "claude", extraArgs: [], model: null },
 			codex: { kind: "codex", binary: "codex", extraArgs: [], model: null },

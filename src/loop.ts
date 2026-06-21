@@ -531,7 +531,6 @@ export type LoopOptions = {
 	worktree: boolean
 	hostRunner: AgentRunnerKind
 	defaultRunner: AgentRunnerSelection
-	reviewRunner: AgentRunnerSelection
 	runnerCommands: AgentRunnerCommands
 	dryRun: boolean
 	preset: Preset
@@ -591,7 +590,6 @@ export type PresetPhaseRights = {
 export type PresetPhase = {
 	name: string
 	prompt: string
-	summaryMarker: string | null
 	exits: readonly PresetPhaseExit[]
 	variables: readonly PresetPhaseVariable[]
 	trigger: PresetPhaseTrigger | null
@@ -666,9 +664,11 @@ export type PresetPhaseTrigger =
 export type AgentRunnerKind = "claude" | "codex"
 
 // #433: "config" source value is retired — there is no longer a target-side runtime preferences
-// file to override phase runner choice from. Phase runner source is now one of: queue (item
-// override), preset (phase declaration), engine-builtin (fallback), iteration-default /
-// review-default (engine defaults for the two well-known phases).
+// file to override phase runner choice from. #456: role-named source values (`iteration-default` /
+// `review-default`) survive only as legacy enum tags in fixture-driven tests; the engine never
+// produces them, so they are not emitted in `status --json` from any current code path. New code
+// must not produce them — runner source flows from preset declaration / queue override / engine
+// fallback only.
 export type AgentRunnerSource = "preset" | "engine-builtin" | "queue" | "iteration-default" | "review-default"
 
 export type AgentRunnerCommand = {
@@ -749,7 +749,6 @@ export type StatusRunnerSelectionSnapshot = {
 export type StatusRunnerDefaultsSnapshot = {
 	hostDefault: AgentRunnerKind
 	default: StatusRunnerSelectionSnapshot
-	reviewDefault: StatusRunnerSelectionSnapshot
 	phases: Record<string, StatusRunnerSelectionSnapshot>
 }
 
@@ -780,7 +779,6 @@ export type StatusSelectedIssue = {
 	evidenceDir: string | null
 	agentCwd: string
 	runner: StatusRunnerSelectionSnapshot
-	reviewRunner: StatusRunnerSelectionSnapshot
 	phaseRunners: Record<string, StatusRunnerSelectionSnapshot>
 	// #412 resolved per-item preset: source (which item field decided it) + resolved preset directory.
 	// Supervisor consumers see exactly which preset rendered the selected item without re-loading it.
@@ -996,7 +994,6 @@ export type SelectedIssue = {
 	evidenceDir: string | null
 	agentCwd: string
 	runner: AgentRunnerSelection
-	reviewRunner: AgentRunnerSelection
 }
 
 export type IssueRunContext = {
@@ -2558,7 +2555,6 @@ function buildOptions(targetCwd: string, raw: BuildOptionsInput, resolved: Chain
 	const hostRunner = detectHostRunner(process.env)
 	const runnerCommands = buildAgentRunnerCommands(resolved)
 	const defaultRunner = selectPhaseDefaultRunner(firstNonTriggerPhaseForPreset(preset), preset, runnerCommands)
-	const reviewRunner = selectPhaseDefaultRunner(lastNonTriggerPhaseForPreset(preset), preset, runnerCommands)
 
 	return {
 		targetCwd,
@@ -2576,7 +2572,6 @@ function buildOptions(targetCwd: string, raw: BuildOptionsInput, resolved: Chain
 		worktree,
 		hostRunner,
 		defaultRunner,
-		reviewRunner,
 		runnerCommands,
 		dryRun: raw.dryRun,
 		preset,
@@ -2725,11 +2720,14 @@ function makeStatusTargetSnapshot(
 }
 
 function buildStatusRunnerDefaultsSnapshot(options: LoopOptions | null): StatusRunnerDefaultsSnapshot {
+	// #456: no more role-shaped runner default field. The single `default` slot still surfaces the
+	// engine-builtin fallback for hosts that haven't loaded a preset; per-phase runners live entirely
+	// under `phases`. Supervisor / doctor consumers read per-phase exclusively (DSL-declared phase
+	// names; no engine assumption about which phase is "review").
 	if (options !== null) {
 		return {
 			hostDefault: options.hostRunner,
 			default: statusRunnerSelection(options.defaultRunner),
-			reviewDefault: statusRunnerSelection(options.reviewRunner),
 			phases: statusRunnerSelections(selectPhaseDefaultRunners(options.preset, options.runnerCommands)),
 		}
 	}
@@ -2745,7 +2743,6 @@ function buildStatusRunnerDefaultsSnapshot(options: LoopOptions | null): StatusR
 	return {
 		hostDefault: hostRunner,
 		default: statusRunnerSelection(selectDefaultRunner(buildAgentRunnerCommands(resolved))),
-		reviewDefault: statusRunnerSelection(selectReviewRunner(buildAgentRunnerCommands(resolved))),
 		phases: {},
 	}
 }
@@ -2818,8 +2815,7 @@ function pickFirstSelectableStatusItem(
 	const agentCwd = selected.agentCwd ?? options.targetCwd
 	const selectedInput = phaseRunnerSelectionInputForPreset(options, selectedPreset)
 	const runner = selectRunnerForPhase(firstNonTriggerPhaseForPreset(selectedPreset).name, selected, selectedInput)
-	const reviewRunner = selectRunnerForPhase(lastNonTriggerPhaseForPreset(selectedPreset).name, selected, selectedInput)
-	return { item: selected, issueFile, evidenceDir, agentCwd, runner, reviewRunner }
+	return { item: selected, issueFile, evidenceDir, agentCwd, runner }
 }
 
 // #412: try each item's own preset when looking up the current run's item, since the run was
@@ -2847,8 +2843,7 @@ function findCurrentItem(
 function phaseRunnerSelectionInputForPreset(options: LoopOptions, preset: Preset): PhaseRunnerSelectionInput {
 	if (preset === options.preset) return options
 	const defaultRunner = selectPhaseDefaultRunner(firstNonTriggerPhaseForPreset(preset), preset, options.runnerCommands)
-	const reviewRunner = selectPhaseDefaultRunner(lastNonTriggerPhaseForPreset(preset), preset, options.runnerCommands)
-	return { preset, defaultRunner, reviewRunner, runnerCommands: options.runnerCommands }
+	return { preset, defaultRunner, runnerCommands: options.runnerCommands }
 }
 
 function buildStatusQueueSnapshotFromRecords(
@@ -2876,7 +2871,6 @@ function buildStatusQueueSnapshotFromRecords(
 			evidenceDir: selected.evidenceDir,
 			agentCwd: selected.agentCwd,
 			runner: statusRunnerSelection(selected.runner),
-			reviewRunner: statusRunnerSelection(selected.reviewRunner),
 			phaseRunners: statusRunnerSelections(selectPhaseRunnersForItem(selectedPreset, selected.item, options.runnerCommands)),
 			preset: resolveStatusItemPresetSnapshot(selected.item, options.preset),
 		},
@@ -4086,7 +4080,6 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 			const trigger = parsePresetPhaseTrigger(entry.trigger ?? null, `preset.phases[${index}].trigger`)
 			const runner = parsePhaseRunner(entry.runner ?? null, `preset.phases[${index}].runner`)
 			const model = parsePhaseModel(entry.model ?? null, `preset.phases[${index}].model`)
-			const summaryMarker = phaseSummaryMarkerForName(entry.name)
 			const exits = parsePresetPhaseExits(entry.exits ?? [], `preset.phases[${index}].exits`)
 		if (Object.hasOwn(entry, "statusWrites")) {
 			presetError(`preset.phases[${index}].statusWrites: use [[phases.exits]] with status and when`)
@@ -4101,7 +4094,7 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 		// Missing segment → every field false / empty set; the gate downstream never has to branch
 		// on "rights absent". Schema parsing is the only place that knows about the toml-side shape.
 		const rights = parsePresetPhaseRights(entry.rights ?? null, `preset.phases[${index}].rights`)
-		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), summaryMarker, exits, variables, trigger, defaultRunner: runner, defaultModel: model, roles, rights })
+		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), exits, variables, trigger, defaultRunner: runner, defaultModel: model, roles, rights })
 	}
 	if (!phases.some((phase) => phase.trigger === null)) presetError("preset.phases: must include at least one non-trigger phase")
 
@@ -4358,17 +4351,6 @@ function parsePhaseModel(value: BoundaryValue, label: string): string | null {
 	return value
 }
 
-// #405 retired: `phaseSummaryMarkerForName` previously seeded the literal review
-// marker as the only non-null value — that marker existed solely to feed the
-// deleted v1 review driver / stdout flow parser. With those consumers gone the
-// seed has no live receiver; the field is set to `null` for every phase. The
-// `summaryMarker` field on `PresetPhase` and `summaryWatchdogConfigForPhase`
-// stay as inert hooks (out of scope per the issue's #452 boundary — summary
-// injection redesign is owned there).
-function phaseSummaryMarkerForName(_name: string): string | null {
-	return null
-}
-
 function parsePresetPhaseExits(value: BoundaryValue, label: string): PresetPhaseExit[] {
 	// #405 ADT: arktype's `or` returns a union — narrow per entry on the
 	// discriminating field present in the wire shape. The discriminated TS shape
@@ -4485,14 +4467,9 @@ export function selectDefaultRunner(commands: AgentRunnerCommands): AgentRunnerS
 	return selectEngineBuiltinRunner(commands)
 }
 
-export function selectReviewRunner(commands: AgentRunnerCommands): AgentRunnerSelection {
-	return selectEngineBuiltinRunner(commands)
-}
-
 export type PhaseRunnerSelectionInput = {
 	preset: Preset
 	defaultRunner: AgentRunnerSelection
-	reviewRunner: AgentRunnerSelection
 	runnerCommands: AgentRunnerCommands
 }
 
@@ -4507,14 +4484,13 @@ function phaseByName(preset: Preset, phaseName: string): PresetPhase {
 	return phase
 }
 
-function isReviewRunnerPhase(preset: Preset, phase: PresetPhase): boolean {
-	const nonTriggerPhases = preset.phases.filter((entry) => entry.trigger === null)
-	if (nonTriggerPhases.length < 2) return false
-	return nonTriggerPhases[nonTriggerPhases.length - 1]!.name === phase.name
-}
-
-function allowsItemRunnerOverride(preset: Preset, phase: PresetPhase): boolean {
-	return phase.trigger === null && !isReviewRunnerPhase(preset, phase)
+// #456: item override applies to every non-trigger phase, no engine assumption about which phase is
+// "review" or "the last non-trigger phase". A preset that wants to lock a phase to its declared
+// runner can omit `item.runner` from its queue intake (or override the phase runner at the preset
+// level); the engine no longer special-cases phase names. Trigger phases stay engine-managed because
+// they're spawned from the chain-complete / per-item-trigger drivers, not from the per-item queue.
+function allowsItemRunnerOverride(phase: PresetPhase): boolean {
+	return phase.trigger === null
 }
 
 function phaseDefaultRunnerKind(phase: PresetPhase): AgentRunnerKind {
@@ -4547,7 +4523,7 @@ export function selectPhaseDefaultRunners(preset: Preset, commands: AgentRunnerC
 export function selectPhaseRunnersForItem(preset: Preset, item: Pick<ItemRecord, "runner">, commands: AgentRunnerCommands): Record<string, AgentRunnerSelection> {
 	const runners: Record<string, AgentRunnerSelection> = {}
 	for (const phase of preset.phases) {
-		const override = allowsItemRunnerOverride(preset, phase) ? selectRunnerForItemOverride(item, { runnerCommands: commands }) : null
+		const override = allowsItemRunnerOverride(phase) ? selectRunnerForItemOverride(item, { runnerCommands: commands }) : null
 		runners[phase.name] = override === null ? selectPhaseDefaultRunner(phase, preset, commands) : applyPhaseDefaultModel(override, phase)
 	}
 	return runners
@@ -4555,7 +4531,7 @@ export function selectPhaseRunnersForItem(preset: Preset, item: Pick<ItemRecord,
 
 export function selectRunnerForPhase(phase: string, item: Pick<ItemRecord, "runner">, input: PhaseRunnerSelectionInput): AgentRunnerSelection {
 	const presetPhase = phaseByName(input.preset, phase)
-	const override = allowsItemRunnerOverride(input.preset, presetPhase) ? selectRunnerForItemOverride(item, input) : null
+	const override = allowsItemRunnerOverride(presetPhase) ? selectRunnerForItemOverride(item, input) : null
 	return override === null ? selectPhaseDefaultRunner(presetPhase, input.preset, input.runnerCommands) : applyPhaseDefaultModel(override, presetPhase)
 }
 
@@ -4569,8 +4545,7 @@ export function buildPhaseRunnerSelectionFromChain(input: BuildPhaseRunnerSelect
 	const resolved = chainResolvedFromChain(input.chain, input.loopDataRoot)
 	const runnerCommands = buildAgentRunnerCommands(resolved)
 	const defaultRunner = selectPhaseDefaultRunner(firstNonTriggerPhaseForPreset(input.preset), input.preset, runnerCommands)
-	const reviewRunner = selectPhaseDefaultRunner(lastNonTriggerPhaseForPreset(input.preset), input.preset, runnerCommands)
-	return { preset: input.preset, defaultRunner, reviewRunner, runnerCommands }
+	return { preset: input.preset, defaultRunner, runnerCommands }
 }
 
 export type ResolvePhaseRunnerFromChainInput = BuildPhaseRunnerSelectionFromChainInput & {
@@ -4587,14 +4562,6 @@ export function firstNonTriggerPhaseForPreset(preset: Preset): PresetPhase {
 	const phase = preset.phases.find((entry) => entry.trigger === null) ?? preset.phases[0]
 	if (phase === undefined) fail("preset must define at least one phase")
 	return phase
-}
-
-export function lastNonTriggerPhaseForPreset(preset: Preset): PresetPhase {
-	for (let index = preset.phases.length - 1; index >= 0; index--) {
-		const phase = preset.phases[index]!
-		if (phase.trigger === null) return phase
-	}
-	return firstNonTriggerPhaseForPreset(preset)
 }
 
 export function triggeredPhasesAfter(preset: Preset, afterPhase: string, status: InternalStatus): readonly PresetPhase[] {
@@ -5490,13 +5457,12 @@ export function attemptTimeoutConfigForPreset(preset: Preset): AttemptTimeoutCon
 	}
 }
 
-export function summaryWatchdogConfigForPhase(phase: Pick<PresetPhase, "summaryMarker">): SummaryWatchdogConfig | null {
-	if (phase.summaryMarker === null) return null
-	return {
-		marker: phase.summaryMarker,
-		termMs: SUMMARY_WATCHDOG_TERM_MS,
-		killMs: SUMMARY_WATCHDOG_KILL_MS,
-	}
+// #456: `PresetPhase.summaryMarker` is retired with the role taxonomy. The watchdog hook is
+// preserved as a no-op call site (`#452` boundary owns the redesign of summary injection); every
+// caller still passes a phase but the function now reports "no marker configured" unconditionally
+// until #452 lands a DSL-declared injection point. Signature kept so callers don't churn.
+export function summaryWatchdogConfigForPhase(_phase: PresetPhase): SummaryWatchdogConfig | null {
+	return null
 }
 
 export type SummaryWatchdogTimerHandle = ReturnType<typeof setTimeout> | null

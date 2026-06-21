@@ -1,13 +1,11 @@
 import { afterAll, expect, test } from "bun:test"
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises"
-import { dirname, resolve } from "node:path"
+import { resolve } from "node:path"
 
 import {
 	createSchedulerState,
-	reviewOnEmptyLockPathForChain,
 	schedulerSlotWorktreePath,
 	schedulerTick,
-	serializeSchedulerReviewOnEmptyLock,
 	type SchedulerEvent,
 	type SchedulerOptions,
 	type SchedulerPhaseRunner,
@@ -52,7 +50,6 @@ test("cross-runner happy path stores iteration/codex and review/claude session i
 	])
 	try {
 		const chain = createChain(fixture.store, "cross-runner-happy-chain")
-		await preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 		const item = createItem(fixture.store, chain, 316_001)
 		const options = fixture.options()
 
@@ -116,7 +113,6 @@ test("review writing changes_requested returns to iteration before review runs a
 	])
 	try {
 		const chain = createChain(fixture.store, "cross-runner-review-retry-chain")
-		await preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 		const item = createItem(fixture.store, chain, 316_002)
 		const options = fixture.options()
 
@@ -183,7 +179,6 @@ test("invalid review session id clears only review/claude and the next review sp
 	try {
 		let now = 1_800_316_000
 		const chain = createChain(fixture.store, "cross-runner-invalid-session-chain")
-		await preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 		const item = createItem(fixture.store, chain, 316_003)
 		const options = fixture.options({
 			now: () => now,
@@ -246,7 +241,6 @@ test("continuous fake runner failures exhaust at maxItemAttempts without another
 		const chain = createChain(fixture.store, "cross-runner-max-attempts-chain", {
 			metadata: { maxItemAttempts: 2 },
 		})
-		await preInstallReviewOnEmptyLock(chain, fixture.loopDataRoot)
 		const item = createItem(fixture.store, chain, 316_004)
 		const options = fixture.options({
 			now: () => now,
@@ -418,11 +412,8 @@ function createItem(store: ReturnType<typeof openSqliteStateStore>, chain: Chain
 	})
 }
 
-async function preInstallReviewOnEmptyLock(chain: ChainRecord, loopDataRoot: string): Promise<void> {
-	const lockPath = reviewOnEmptyLockPathForChain(chain, { loopDataRoot })
-	await mkdir(dirname(lockPath), { recursive: true })
-	await writeFile(lockPath, serializeSchedulerReviewOnEmptyLock("test-review-on-empty-preinstalled", new Date(0)))
-}
+// #456: the legacy chain-drain auto-fire suppressor helper retired with the path itself; the
+// cross-runner integration tests now rely on the DSL chain-complete trigger driver only.
 
 async function closeOnlySpawn(tick: { spawnedRuns: Array<{ closed: Promise<unknown> }> }): Promise<void> {
 	expect(tick.spawnedRuns).toHaveLength(1)
