@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test"
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
+import { startCoderLoopDaemon } from "./daemon"
 import { openSqliteStateStore } from "./sqlite-state"
 import { engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 
@@ -43,15 +44,24 @@ describe("db-backed v2 loop hard cut", () => {
 	test("queue unblock mutates SQLite only", async () => {
 		const fixture = await createFixture({ initialStatus: "blocked", extra: { blockerRepo: "owner/dependency", blockerRef: "#267" } })
 		const beforeText = await readFile(fixture.statePath, "utf-8")
-		const result = runCli(["queue", "unblock", fixture.target, "--issue", "1", "--loop-data-root", fixture.loopDataRoot, "--chain", CHAIN_NAME])
-		expect(result.exitCode).toBe(0)
-		expect(readItem(fixture.loopDataRoot).status).toBe("queued")
-		// #457: queue unblock no longer clears preset-owned blocker keys — the engine has no
-		// concept of "blocker" any more, so any keys the preset wrote into extra remain in place.
-		// The keys live in `runtimeRemainder` because they are no longer engine-typed ItemExtra fields.
-		expect(itemExtraToJsonObject(readItem(fixture.loopDataRoot).extra).blockerRepo).toBe("owner/dependency")
-		expect(await readFile(fixture.statePath, "utf-8")).toBe(beforeText)
-	})
+		// #409: queue.unblock daemonizes. Start an in-process daemon so the CLI subprocess can
+		// reach it via Unix socket; operator-path call (no env credential) flows through the
+		// daemon's hard-deny gate as `kind: "operator"` and the existing assertion that the
+		// item moves blocked→queued holds without per-test mutation.
+		const daemon = await startCoderLoopDaemon({ loopDataRoot: fixture.loopDataRoot, shutdownGraceMs: 100, scheduler: { enabled: false } })
+		try {
+			const result = await runCliAsync(["queue", "unblock", fixture.target, "--issue", "1", "--loop-data-root", fixture.loopDataRoot, "--chain", CHAIN_NAME])
+			expect(result.exitCode, `${result.stdout}\n${result.stderr}`).toBe(0)
+			expect(readItem(fixture.loopDataRoot).status).toBe("queued")
+			// #457: queue unblock no longer clears preset-owned blocker keys — the engine has no
+			// concept of "blocker" any more, so any keys the preset wrote into extra remain in place.
+			// The keys live in `runtimeRemainder` because they are no longer engine-typed ItemExtra fields.
+			expect(itemExtraToJsonObject(readItem(fixture.loopDataRoot).extra).blockerRepo).toBe("owner/dependency")
+			expect(await readFile(fixture.statePath, "utf-8")).toBe(beforeText)
+		} finally {
+			await daemon.stop()
+		}
+	}, 30_000)
 
 	test("queue unblock restores preset-declared terminal status to preset entry", async () => {
 		const fixture = await createFixture({
@@ -60,19 +70,24 @@ describe("db-backed v2 loop hard cut", () => {
 			customManualUnblockPreset: true,
 		})
 
-		const result = runCli(["queue", "unblock", fixture.target, "--issue", "1", "--loop-data-root", fixture.loopDataRoot, "--chain", CHAIN_NAME])
+		const daemon = await startCoderLoopDaemon({ loopDataRoot: fixture.loopDataRoot, shutdownGraceMs: 100, scheduler: { enabled: false } })
+		try {
+			const result = await runCliAsync(["queue", "unblock", fixture.target, "--issue", "1", "--loop-data-root", fixture.loopDataRoot, "--chain", CHAIN_NAME])
 
-		expect(result.exitCode).toBe(0)
-		const output = JSON.parse(result.stdout) as {
-			mutation: { changed: boolean; beforeStatus: string; afterStatus: string }
-			verification: { itemStatus: string }
+			expect(result.exitCode, `${result.stdout}\n${result.stderr}`).toBe(0)
+			const output = JSON.parse(result.stdout) as {
+				mutation: { changed: boolean; beforeStatus: string; afterStatus: string }
+				verification: { itemStatus: string }
+			}
+			expect(output.mutation).toMatchObject({ changed: true, beforeStatus: "parked", afterStatus: "ready" })
+			expect(output.verification.itemStatus).toBe("ready")
+			expect(readItem(fixture.loopDataRoot).status).toBe("ready")
+			// #457: preset-owned blocker keys survive queue unblock (see test above).
+			expect(itemExtraToJsonObject(readItem(fixture.loopDataRoot).extra).blockerRepo).toBe("owner/dependency")
+		} finally {
+			await daemon.stop()
 		}
-		expect(output.mutation).toMatchObject({ changed: true, beforeStatus: "parked", afterStatus: "ready" })
-		expect(output.verification.itemStatus).toBe("ready")
-		expect(readItem(fixture.loopDataRoot).status).toBe("ready")
-		// #457: preset-owned blocker keys survive queue unblock (see test above).
-		expect(itemExtraToJsonObject(readItem(fixture.loopDataRoot).extra).blockerRepo).toBe("owner/dependency")
-	})
+	}, 30_000)
 
 	test("daemon start dry-run resolves the chain without per-target state writes", async () => {
 		const fixture = await createFixture()
@@ -210,6 +225,24 @@ function runCli(args: string[]): { exitCode: number | null; stdout: string; stde
 		stdout: new TextDecoder().decode(proc.stdout),
 		stderr: new TextDecoder().decode(proc.stderr),
 	}
+}
+
+// #409: async variant required when the CLI talks to an in-process daemon in the same Bun
+// runtime. `Bun.spawnSync` blocks the event loop, which deadlocks the daemon (it cannot accept
+// connections while spawnSync waits on the subprocess that is trying to connect).
+async function runCliAsync(args: string[]): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
+	const proc = Bun.spawn({
+		cmd: ["bun", LOOP_ENTRY, ...args],
+		cwd: REPO_ROOT,
+		stdout: "pipe",
+		stderr: "pipe",
+	})
+	const [stdout, stderr, exitCode] = await Promise.all([
+		new Response(proc.stdout).text(),
+		new Response(proc.stderr).text(),
+		proc.exited,
+	])
+	return { exitCode, stdout, stderr }
 }
 
 function readItem(loopDataRoot: string) {

@@ -18,18 +18,18 @@ import type { BoundaryError, BoundaryRecord, BoundaryValue } from "./boundary-ty
 import {
 	CoderLoopDaemon,
 	DaemonError,
+	PRESET_PHASE_PRIVILEGED_OPS,
 	daemonRequest,
 	daemonSocketPathIssueError,
 	detectDaemonSocketPathIssue,
 	sendDaemonRequest,
 	type DaemonCommandName,
 	type DaemonResponse,
+	type PresetPhasePrivilegedOp,
 } from "./daemon"
 import { dispatchSubcommand } from "./install-commands"
 import { LOOP_RUN_CREDENTIAL_ENV, RuntimePathError, resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import {
-	appendObservabilityEvent,
-	makeObservabilityEvent,
 	parseObservabilityEventType,
 	parseObservabilityKind,
 	queryObservabilityEvents,
@@ -55,7 +55,6 @@ import {
 	metadataNestedStringArray,
 	metadataString,
 	parseInternalStatus,
-	engineLifecycleAdmittedItemStatus,
 	type AdmittedItemStatus,
 	type InternalStatus,
 	type ItemExtra,
@@ -577,12 +576,14 @@ export type PresetPhaseChainAction = (typeof PRESET_PHASE_CHAIN_ACTIONS)[number]
 // All three fields are non-optional: the parser normalizes a missing segment to default-deny
 // (createItems=false, writableFields=∅, privilegedOps=∅) so downstream consumers (the create-
 // gate here, #410's writable-fields gate, #409's privileged-ops gate) all read the same shape.
-// `writableFields` / `privilegedOps` are `ReadonlySet<string>` so membership checks are O(1) and
-// the type makes the "this is a set, not a list" intent explicit at every call site.
+// `writableFields` is `ReadonlySet<string>` (open vocabulary — preset declares its own field
+// universe). `privilegedOps` is narrowed to the engine's closed `PresetPhasePrivilegedOp` union
+// at preset-load time (#409): unknown ops are rejected with the full vocabulary in the error
+// message, so the runtime set never carries a string the gate could not decide on.
 export type PresetPhaseRights = {
 	createItems: boolean
 	writableFields: ReadonlySet<string>
-	privilegedOps: ReadonlySet<string>
+	privilegedOps: ReadonlySet<PresetPhasePrivilegedOp>
 }
 
 export type PresetPhase = {
@@ -1802,50 +1803,51 @@ async function runStatusCommand(args: string[]): Promise<void> {
 	process.stdout.write(`${stringifyStatusSnapshot(snapshot)}\n`)
 }
 
+// #409: `coder-loop logs` is daemonized. The CLI no longer reads the events file from disk —
+// every read goes through the daemon's `logs.query` op, which is on the hard-deny-for-agent
+// list. This closes the gap where an agent process that imports the codebase or runs the CLI
+// could read the cross-run observability stream without any authorization seam. The CLI's
+// `--follow` mode polls the daemon, identical to the old disk-poll cadence.
 async function runLogsCommand(args: string[]): Promise<void> {
 	const parsed = await runCmd(logsCliCommand, args)
 	if (parsed.kind !== "logs") return
 	const logsArgs = parsed.args
-	const query = logsQueryFromArgs(logsArgs)
-	const eventsFile = await resolveLogsEventsFile(logsArgs)
+	const requestArgs = logsQueryRequestArgs(logsArgs)
+	const loopDataRoot = logsArgs.loopDataRoot ?? null
 	if (!logsArgs.follow) {
-		const result = await queryObservabilityEvents(eventsFile, query)
+		const result = await requestDaemonResult(loopDataRoot, "logs.query", requestArgs)
 		process.stdout.write(`${JSON.stringify(result, null, "\t")}\n`)
 		return
 	}
 	let emitted = 0
 	while (true) {
-		const result = await queryObservabilityEvents(eventsFile, query)
-		for (const event of result.events.slice(emitted)) {
+		const result = await requestDaemonResult(loopDataRoot, "logs.query", requestArgs)
+		const events = Array.isArray(result.events) ? result.events : []
+		for (const event of events.slice(emitted)) {
 			process.stdout.write(`${JSON.stringify(event)}\n`)
 		}
-		emitted = result.events.length
+		emitted = events.length
 		await sleep(1_000)
 	}
 }
 
-function logsQueryFromArgs(args: LogsCommandArgs): ObservabilityEventQuery {
-	const query: ObservabilityEventQuery = {}
-	if (args.kind !== null) query.kind = parseObservabilityKind(args.kind)
-	if (args.type !== null) query.type = parseObservabilityEventType(args.type)
-	if (args.chainName !== null && args.chainName !== undefined) query.chain = args.chainName
-	if (args.item !== null) query.item = args.item
-	if (args.run !== null) query.run = args.run
-	if (args.phase !== null) query.phase = args.phase
+function logsQueryRequestArgs(args: LogsCommandArgs): JsonObject {
+	const requestArgs: JsonObject = {}
+	if (args.kind !== null) {
+		// CLI-side parse mirrors the pre-#409 fail-fast so the operator sees a friendlier message
+		// before the daemon's structured error fires. The daemon re-parses defensively.
+		requestArgs.kind = parseObservabilityKind(args.kind)
+	}
+	if (args.type !== null) requestArgs.type = parseObservabilityEventType(args.type)
+	if (args.chainName !== null && args.chainName !== undefined) requestArgs.chain = args.chainName
+	if (args.item !== null) requestArgs.item = args.item
+	if (args.run !== null) requestArgs.run = args.run
+	if (args.phase !== null) requestArgs.phase = args.phase
 	if (args.since !== null) {
 		if (Number.isNaN(Date.parse(args.since))) fail(`--since must be an ISO timestamp or Date.parse-compatible timestamp: ${args.since}`)
-		query.since = args.since
+		requestArgs.since = args.since
 	}
-	return query
-}
-
-async function resolveLogsEventsFile(args: LogsCommandArgs): Promise<string> {
-	// #433: the engine no longer reads a target config file; logs events are anchored at the loop
-	// data root, picked from `--loop-data-root` or the default.
-	if (args.loopDataRoot !== null && args.loopDataRoot !== undefined) {
-		return resolveLoopDataPaths({ loopDataRoot: args.loopDataRoot }).eventsFile
-	}
-	return resolveLoopDataPaths({}).eventsFile
+	return requestArgs
 }
 
 async function runChainCommand(args: string[]): Promise<void> {
@@ -2144,21 +2146,47 @@ async function requestDaemonResult(loopDataRoot: string | null, command: DaemonC
 	return response.result
 }
 
-// #406 / #407 / #405: command-scoped credential auto-injection. The credential gate is consumed by
-// the item-mutation commands listed below — `item.update` (write fields, #406), `item.add` and
-// `item.batchAdd` (create items, #407), and `item.exitAction` (chain-action exit selection, #405).
-// Other commands are unchanged; the narrow scoping keeps the credential value from leaking into
-// request payloads where the daemon does not validate it. `as const` literal union here is the
-// only `as` form the project allows — it's a literal narrow, not a type-bypass cast.
-const ITEM_MUTATION_CREDENTIAL_COMMANDS = ["item.update", "item.add", "item.batchAdd", "item.exitAction"] as const
-type ItemMutationCredentialCommand = typeof ITEM_MUTATION_CREDENTIAL_COMMANDS[number]
+// #406 / #407 / #405 / #409: command-scoped credential auto-injection. Every daemon command an
+// agent might reach where the daemon makes an authorization decision (item-mutation gates AND
+// caller-stratified hard-deny / per-phase gates) is listed here so the daemon sees the agent's
+// env-borne credential and routes the request through the correct branch.
+//
+// Pre-#409 this set covered only the item-mutation gates; an agent's `coder-loop chain delete`
+// or `daemon down` call therefore reached the daemon WITHOUT `agentCredential`, the resolver
+// treated it as an operator, and the request landed — exactly the gap #409 closes. The set now
+// also covers the #409 hard-deny family (chain lifecycle / daemon.down / logs.query /
+// queue.unblock) and the per-phase-authorized family (item.reorder) so the daemon's caller
+// stratification has the credential to decide on.
+//
+// Commands explicitly omitted (read-only or daemon-internal):
+//   - chain.list / chain.status / item.list / item.exits / daemon.status — read-no-auth class.
+//   - the credential is never injected into requests the daemon would ignore, so its lifetime
+//     stays bound to the agent's run process even when CLI tooling broadens.
+//
+// `as const` literal union here is the only `as` form the project allows — a literal narrow,
+// not a type-bypass cast.
+const AGENT_ATTRIBUTED_COMMANDS = [
+	"item.update",
+	"item.add",
+	"item.batchAdd",
+	"item.exitAction",
+	"item.reorder",
+	"chain.create",
+	"chain.stop",
+	"chain.resume",
+	"chain.delete",
+	"daemon.down",
+	"logs.query",
+	"queue.unblock",
+] as const
+type AgentAttributedCommand = typeof AGENT_ATTRIBUTED_COMMANDS[number]
 
-function isItemMutationCredentialCommand(command: DaemonCommandName): command is ItemMutationCredentialCommand {
-	return (ITEM_MUTATION_CREDENTIAL_COMMANDS as readonly DaemonCommandName[]).includes(command)
+function isAgentAttributedCommand(command: DaemonCommandName): command is AgentAttributedCommand {
+	return (AGENT_ATTRIBUTED_COMMANDS as readonly DaemonCommandName[]).includes(command)
 }
 
 function withInjectedRunCredential(command: DaemonCommandName, args: JsonObject): JsonObject {
-	if (!isItemMutationCredentialCommand(command)) return args
+	if (!isAgentAttributedCommand(command)) return args
 	const value = process.env[LOOP_RUN_CREDENTIAL_ENV]
 	if (typeof value !== "string" || value === "") return args
 	// Operator path explicitness: if the caller already supplied agentCredential (test fixtures
@@ -2192,8 +2220,16 @@ async function sendDaemonRequestForDaemonCommand(loopDataRoot: string | null, co
 		throw error
 	}
 
+	// #409: thread the agent's env-borne credential through this transport too. Pre-fix,
+	// `runDaemonDownCommand` reached the daemon via this helper without going through
+	// `withInjectedRunCredential`, so `daemon.down`'s `hard-deny-for-agent` classification
+	// became unreachable dead code — an agent could `coder-loop daemon down` cleanly while
+	// row 1 of #409 demands the opposite. The injector itself is a no-op when `command` is
+	// not in `AGENT_ATTRIBUTED_COMMANDS` (e.g. `daemon.status`, which the other caller of
+	// this helper uses), so the operator path is preserved on read commands too.
+	const augmentedArgs = withInjectedRunCredential(command, args)
 	try {
-		return await sendDaemonRequest(socketPath, daemonRequest(command, args))
+		return await sendDaemonRequest(socketPath, daemonRequest(command, augmentedArgs))
 	} catch (error) {
 		const failure = await daemonConnectionFailure(loopDataRoot, error)
 		if (json) {
@@ -2983,17 +3019,11 @@ function statusCurrentRunSnapshot(current: CurrentRunRecord): StatusCurrentRunSn
 	}
 }
 
-function currentItemFromRecords(current: CurrentRunRecord, items: readonly ItemRecord[], preset: Preset): ItemRecord | null {
-	const itemId = current.extra.itemId
-	if (typeof itemId === "number" && Number.isInteger(itemId)) {
-		const byItemId = items.find((item) => item.id === itemId)
-		if (byItemId !== undefined) return byItemId
-	}
-	const currentId = currentIdFromRecord(current, preset)
-	if (currentId !== null) return items.find((item) => getItemId(item, preset) === currentId) ?? null
-	return items.find((item) => item.lastRunId === current.runId) ?? null
-}
-
+// #409: `currentItemFromRecords` retired alongside the inline `restoreUnblockableItemRecord`
+// helper that fired the operator's CLI queue.unblock mutation — the daemon's
+// `handleQueueUnblock` is the only writer now. `currentIdFromRecord` survives because
+// `statusCurrentRunSnapshot` callers still use it to derive a current-item handle for read
+// paths.
 function currentIdFromRecord(current: CurrentRunRecord, preset: Preset): string | null {
 	const value = itemExtraJsonValue(current.extra, preset.item.idField)
 	if (typeof value === "string" && value.length > 0) return value
@@ -3492,37 +3522,19 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 	const options = runtime.options
 	const issue = normalizeQueueIssueId(args.issue)
 	const issueNumber = parseRequiredPositiveInteger(issue, "queue unblock: --issue")
-	const store = openSqliteStateStore({ createIfMissing: false, ...loopDataRootOption(options.loopDataRoot) })
-	let mutation: QueueUnblockMutationOutcome
-	let mutatedItemId: number | null = null
-	try {
-		mutation = restoreUnblockableItemRecord(store, runtime.chain, options.preset, issue, issueNumber, args.dryRun)
-		if (!mutation.changed && mutation.reason === "not_found") {
-			fail(`queue unblock: issue ${issue} not found in SQLite state DB`)
-		}
-		// #406 row 4: the operator-direct `queue unblock` SQLite mutation does NOT pass through the
-		// daemon's `handleItemUpdate` caller-admission gate (no daemon round-trip — the CLI writes
-		// the store from the operator process). For the audit stream to satisfy "operator and
-		// agent+run distinguishable in `coder-loop logs --kind audit --json`", the operator-path
-		// mutation has to emit the same `item.mutation.caller_admission` event the daemon emits on
-		// the agent path, just carrying `subject: {kind: "operator"}` and `reason: "operator"`. The
-		// itemId for the event comes from the same store handle that just performed the mutation,
-		// so the event always reflects the same row that was written (no readback race against an
-		// unrelated concurrent write).
-		if (mutation.changed) {
-			const mutatedItem = store.getItemByIssue(runtime.chain.id, issueNumber)
-			if (mutatedItem !== null) mutatedItemId = mutatedItem.id
-		}
-	} finally {
-		store.close()
-	}
-	if (mutation.changed && mutatedItemId !== null && !args.dryRun) {
-		await emitOperatorCallerAdmissionAudit({
-			loopDataRoot: options.loopDataRoot,
-			chainName: runtime.chain.name,
-			itemId: mutatedItemId,
-			issueNumber,
-		})
+	// #409: queue.unblock now daemonizes. The daemon's `handleQueueUnblock` performs the SQLite
+	// mutation (default-deny for agents via the hard-deny gate) and the operator-attribution
+	// `item.mutation.caller_admission` audit event so external tooling watching the audit stream
+	// still sees the operator's unblock. The CLI's role shrinks to: send the request, read the
+	// resulting item status, and (optionally) bounce the daemon if `--start-daemon` was passed.
+	const mutationResponse = await requestDaemonResult(options.loopDataRoot, "queue.unblock", {
+		chainName: runtime.chain.name,
+		issue,
+		dryRun: args.dryRun,
+	})
+	const mutation = parseQueueUnblockMutationResponse(mutationResponse, issue)
+	if (!mutation.changed && mutation.reason === "not_found") {
+		fail(`queue unblock: issue ${issue} not found in SQLite state DB`)
 	}
 
 	let daemon: QueueUnblockCommandResult["daemon"]
@@ -3582,76 +3594,38 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 	process.stdout.write(JSON.stringify(result, null, "\t") + "\n")
 }
 
-function restoreUnblockableItemRecord(
-	store: SqliteStateStore,
-	chain: ChainRecord,
-	preset: Preset,
-	issue: string,
-	issueNumber: number,
-	dryRun: boolean,
-): QueueUnblockMutationOutcome {
-	const item = store.getItemByIssue(chain.id, issueNumber)
-	if (item === null) return { changed: false, issue, reason: "not_found" }
-	if (!preset.statuses.unblockable.includes(item.status)) return { changed: false, issue, reason: "not_unblockable", status: item.status }
-	const entryStatus = preset.statuses.entry
-
-	const current = store.getCurrentRun(chain.id)
-	const currentItem = current === null ? null : currentItemFromRecords(current, [item], preset)
-	const clearedCurrent = currentItem?.id === item.id
-
-	if (!dryRun) {
-		store.updateItem(item.id, {
-			// #397: `queue unblock` is an operator-issued lifecycle nudge that restores the item
-			// to the preset's entry status; the value written (`preset.statuses.entry`) is
-			// preset-derived not caller-provided, so it brands through the narrow engine-lifecycle
-			// constructor rather than passing back through the request gate (the item is currently
-			// terminal/blocked with phase=null; the per-phase leg of the gate would no-op anyway).
-			status: engineLifecycleAdmittedItemStatus(entryStatus, "queue.unblock-entry-restore"),
-			// #457: extra is untouched — any preset-owned blocker keys are inert once the item is no
-			// longer in a blocked status; the engine no longer knows or owns those keys' meanings.
-			updatedAt: unixSeconds(),
-		})
-		if (clearedCurrent) store.clearCurrentRun(chain.id)
+// #409: queue.unblock mutation response parser. The daemon emits
+// `{ mutation: <QueueUnblockMutationOutcome JSON shape> }` from `handleQueueUnblock`; this CLI
+// helper boundary-parses each variant. Failure to match any variant is treated as a daemon
+// protocol bug (the daemon would not emit a malformed reply for an op the CLI sent), so the
+// helper throws via `fail(...)` rather than silently coercing.
+function parseQueueUnblockMutationResponse(response: JsonObject, requestedIssue: string): QueueUnblockMutationOutcome {
+	const mutation = response.mutation
+	if (mutation === undefined || mutation === null || typeof mutation !== "object" || Array.isArray(mutation)) {
+		fail(`queue unblock: daemon reply missing or malformed 'mutation' field`)
 	}
-
-	return {
-		changed: true,
-		issue,
-		beforeStatus: item.status,
-		afterStatus: entryStatus,
-		clearedCurrent,
+	const mutationObj: JsonObject = mutation
+	const changed = mutationObj.changed
+	const issueValue = mutationObj.issue
+	const issue = typeof issueValue === "string" ? issueValue : requestedIssue
+	if (changed === false) {
+		const reason = mutationObj.reason
+		if (reason === "not_found") return { changed: false, issue, reason: "not_found" }
+		if (reason === "not_unblockable") {
+			const status = mutationObj.status
+			if (typeof status !== "string") fail(`queue unblock: daemon 'not_unblockable' reply missing status`)
+			return { changed: false, issue, reason: "not_unblockable", status }
+		}
+		fail(`queue unblock: daemon reply has unknown reason ${JSON.stringify(reason)}`)
 	}
-}
-
-// #406 row 4: operator-direct mutation paths that don't go through the daemon's
-// `handleItemUpdate` still emit a caller-admission audit event so `coder-loop logs --kind
-// audit --json` can distinguish operator-attributed mutations from agent+run-attributed ones.
-// `queue unblock` is the canonical operator-direct path today (it writes SQLite from the CLI
-// process). Future operator-direct callers should reuse this helper rather than open-coding the
-// event shape, keeping the audit surface uniform.
-async function emitOperatorCallerAdmissionAudit(input: {
-	loopDataRoot: string | null
-	chainName: string
-	itemId: number
-	issueNumber: number
-}): Promise<void> {
-	const eventsFile = resolveLoopDataPaths(loopDataRootOption(input.loopDataRoot)).eventsFile
-	const event = makeObservabilityEvent({
-		kind: "audit",
-		type: "item.mutation.caller_admission",
-		chain: input.chainName,
-		item: input.itemId,
-		subject: { kind: "operator" },
-		payload: {
-			itemId: input.itemId,
-			issueNumber: input.issueNumber,
-			claimedRunId: null,
-			claimedPhase: null,
-			outcome: "allow",
-			reason: "operator",
-		},
-	})
-	await appendObservabilityEvent(eventsFile, event)
+	if (changed !== true) fail(`queue unblock: daemon reply has invalid 'changed' field ${JSON.stringify(changed)}`)
+	const beforeStatus = mutationObj.beforeStatus
+	const afterStatus = mutationObj.afterStatus
+	const clearedCurrent = mutationObj.clearedCurrent
+	if (typeof beforeStatus !== "string" || typeof afterStatus !== "string" || typeof clearedCurrent !== "boolean") {
+		fail(`queue unblock: daemon 'changed' reply missing status/clearedCurrent fields`)
+	}
+	return { changed: true, issue, beforeStatus, afterStatus, clearedCurrent }
 }
 
 function daemonResultIndicatesRunning(daemon: QueueUnblockCommandResult["daemon"]): boolean {
@@ -4264,9 +4238,15 @@ function parsePhaseRunner(value: BoundaryValue, label: string): AgentRunnerKind 
 // Parse the `[[phases]].rights` segment into the runtime `PresetPhaseRights` ADT (#407).
 // Missing segment / missing fields → default-deny so the create-gate (and #410/#409 once
 // they consume the same shape) never has to branch on "rights absent". `writableFields` /
-// `privilegedOps` become `ReadonlySet<string>` for O(1) membership checks at gate sites.
+// `privilegedOps` become `ReadonlySet<...>` for O(1) membership checks at gate sites.
 // A duplicate string in either array is a preset authoring error (rejected here so the
 // downstream consumers see a clean set).
+//
+// #409: `privilegedOps` is narrowed against the engine's closed
+// `PresetPhasePrivilegedOp` union (`PRESET_PHASE_PRIVILEGED_OPS` tuple) at the parser
+// boundary. An unknown value fails preset load with the full vocabulary in the error
+// message — runtime gates therefore never have to defend against unknown op strings.
+// `writableFields` stays open-vocabulary because the field universe is preset-declared.
 function parsePresetPhaseRights(
 	value: typeof PresetPhaseRightsBoundary.infer | null,
 	label: string,
@@ -4277,7 +4257,7 @@ function parsePresetPhaseRights(
 	return {
 		createItems: value.createItems ?? false,
 		writableFields: parsePresetPhaseRightsStringSet(value.writableFields ?? null, `${label}.writableFields`),
-		privilegedOps: parsePresetPhaseRightsStringSet(value.privilegedOps ?? null, `${label}.privilegedOps`),
+		privilegedOps: parsePresetPhaseRightsPrivilegedOps(value.privilegedOps ?? null, `${label}.privilegedOps`),
 	}
 }
 
@@ -4290,6 +4270,33 @@ function parsePresetPhaseRightsStringSet(value: readonly string[] | null, label:
 		set.add(entry)
 	}
 	return set
+}
+
+// #409: narrow each entry to `PresetPhasePrivilegedOp` at preset load. Unknown ops fail with
+// the full engine vocabulary in the error so the preset author sees what they can declare.
+function parsePresetPhaseRightsPrivilegedOps(
+	value: readonly string[] | null,
+	label: string,
+): ReadonlySet<PresetPhasePrivilegedOp> {
+	if (value === null) return new Set()
+	const set = new Set<PresetPhasePrivilegedOp>()
+	for (const [index, entry] of value.entries()) {
+		if (entry.trim() === "") presetError(`${label}[${index}]: must be a non-empty string`)
+		const narrowed = narrowPresetPhasePrivilegedOp(entry)
+		if (narrowed === null) {
+			presetError(
+				`${label}[${index}]: unknown privileged op "${entry}" (declared engine vocabulary: ${PRESET_PHASE_PRIVILEGED_OPS.join(", ")})`,
+			)
+		}
+		if (set.has(narrowed)) presetError(`${label}[${index}]: duplicate entry "${entry}"`)
+		set.add(narrowed)
+	}
+	return set
+}
+
+function narrowPresetPhasePrivilegedOp(value: string): PresetPhasePrivilegedOp | null {
+	const found = PRESET_PHASE_PRIVILEGED_OPS.find((op) => op === value)
+	return found ?? null
 }
 
 // Parse the `[[phases]].roles` field and validate against the declared fragment

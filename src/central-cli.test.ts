@@ -487,6 +487,54 @@ attemptTimeoutSeconds = 3600
 		}
 	})
 
+	// #409 CLI-layer regression: `coder-loop daemon down` must inject the agent's env-borne
+	// `CODER_LOOP_RUN_CRED` onto the wire so the daemon's `daemon.down` hard-deny-for-agent gate
+	// actually fires for agent callers. Pre-fix, `runDaemonDownCommand` used
+	// `sendDaemonRequestForDaemonCommand` which bypassed `withInjectedRunCredential`, so the
+	// credential was silently stripped at the CLI layer and the daemon resolved the caller as
+	// the operator — an agent could shut the daemon down cleanly while #409 row 1 demands the
+	// opposite. A fabricated credential value is enough to prove the wiring: the daemon rejects
+	// any non-empty credential it didn't mint, so a non-zero exit + intact daemon proves the
+	// CLI attached `agentCredential`; without the fix the daemon would have killed itself
+	// regardless of the env value. The "real agent credential → hard-deny-for-agent" branch is
+	// covered separately in daemon.test.ts (`#409 row 1`).
+	test("daemon down with CODER_LOOP_RUN_CRED env attaches agentCredential and is rejected by daemon (#409 CLI wiring)", async () => {
+		const loopDataRoot = await makeLoopDataRoot("daemon-down-agent-cred")
+		const daemonProcess = spawnDaemonUp(loopDataRoot)
+		try {
+			await waitForDaemonFiles(loopDataRoot)
+			const daemonPid = Number((await readFile(resolve(loopDataRoot, "daemon.pid"), "utf-8")).trim())
+			// Agent-credential path: the credential value is unknown to the registry (no run
+			// minted it), so the daemon's caller-admission resolver returns `unknown-credential`
+			// at the hard-deny gate. Both `unknown-credential` and `hard-deny-for-agent` prove
+			// that the credential reached the daemon — operator path returns no error at all.
+			const agentDown = await runCli(
+				["daemon", "down", "--loop-data-root", loopDataRoot, "--json"],
+				{ CODER_LOOP_RUN_CRED: "fabricated-credential-from-agent-env" },
+			)
+			expect(agentDown.exitCode).not.toBe(0)
+			const agentDownPayload = JSON.parse(agentDown.stdout) as Record<string, unknown>
+			expect(agentDownPayload.ok).toBe(false)
+			expect(agentDownPayload.error).toMatchObject({ code: "invalid_caller" })
+			expect(isPidAlive(daemonPid), "agent-credentialed daemon down must NOT kill the daemon").toBe(true)
+
+			// Operator path (no env): the credential is omitted, the daemon resolves the caller
+			// as operator, and the shutdown proceeds normally. Proves the fix did not regress the
+			// operator path (#409 row 4 in the issue's acceptance table).
+			const operatorDown = await runCli(["daemon", "down", "--loop-data-root", loopDataRoot, "--json"])
+			expect(operatorDown.exitCode).toBe(0)
+			expect(JSON.parse(operatorDown.stdout)).toMatchObject({ ok: true, result: { shutdown: true } })
+			expect(await daemonProcess.exited).toBe(0)
+		} finally {
+			try {
+				daemonProcess.kill()
+			} catch {
+				// Process may already have exited after operator daemon down.
+			}
+			await daemonProcess.exited.catch(() => undefined)
+		}
+	})
+
 	test("daemon up ignores reload/debug signals and SIGQUIT shuts down gracefully", async () => {
 		const loopDataRoot = await makeLoopDataRoot("daemon-signal-policy")
 		const daemonProcess = spawnDaemonUp(loopDataRoot)

@@ -86,6 +86,42 @@ const ObservabilityEventTypeBoundary = arkType.or(
 	// `item.mutation.caller_admission` (mutate gate) and `item.status.write_admission` (transition
 	// gate) to give the auditor a three-leg replay of the item-mutation surface.
 	arkType.unit("item.add.rights_admission"),
+	// #409: privileged-op caller admission. One event per daemon request that runs through the
+	// caller-stratification gate — both `hard-deny-for-agent` (chain lifecycle / daemon.down /
+	// logs.query / queue.unblock) and `per-phase-authorized` (item.reorder). Operator path emits
+	// reason=operator; agent path emits reason=agent-allowed / hard-deny-for-agent /
+	// no-privileged-ops-grant / no-rights-segment. The `op` payload field is the engine-internal
+	// DaemonCommandName the gate decided on (closed union — adding a new gated op extends the
+	// dispatch table and forces this audit event to surface it). Pairs with
+	// `item.mutation.caller_admission` and `item.add.rights_admission` to give the auditor a full
+	// matrix of "who can do what" across the daemon surface.
+	arkType.unit("privileged_op.caller_admission"),
+)
+
+// #409: vocabulary of daemon ops that flow through the privileged-op caller-admission gate.
+// Closed boundary so a corrupted / forged event file can't smuggle an unknown op past the
+// reader. The daemon's `DaemonCommandName` is the source of truth; a compile-time check inside
+// daemon.ts asserts every emitted op value satisfies this union (so the two stay in lockstep).
+const PrivilegedOpAuditOpBoundary = arkType.or(
+	arkType.unit("chain.create"),
+	arkType.unit("chain.stop"),
+	arkType.unit("chain.resume"),
+	arkType.unit("chain.delete"),
+	arkType.unit("daemon.down"),
+	arkType.unit("logs.query"),
+	arkType.unit("queue.unblock"),
+	arkType.unit("item.reorder"),
+)
+
+const PrivilegedOpAuditReasonBoundary = arkType.or(
+	arkType.unit("operator"),
+	arkType.unit("agent-allowed"),
+	arkType.unit("hard-deny-for-agent"),
+	arkType.unit("no-privileged-ops-grant"),
+	arkType.unit("no-rights-segment"),
+	arkType.unit("missing-credential"),
+	arkType.unit("unknown-credential"),
+	arkType.unit("inactive-run"),
 )
 
 const PresetPlaceholderDirectionBoundary = arkType.or(
@@ -476,6 +512,29 @@ const ObservabilityEventBoundary = arkType.or(
 			),
 		},
 	},
+	{
+		// #409 privileged-op caller admission. Emitted once per request the daemon runs through
+		// the caller-stratification gate (hard-deny-for-agent + per-phase-authorized classes).
+		// The pair `(op, reason)` is the diagnostic surface: `op` is the engine's typed daemon
+		// command name (PrivilegedOpAuditOpBoundary above); `reason` enumerates the gate
+		// branches (operator allow, per-phase agent allow, four kinds of agent deny). The
+		// `subject` field on the event base carries the typed operator|agent ADT so an auditor
+		// can index "all denies for agent X in run Y" without re-parsing the payload.
+		...EventBaseBoundary,
+		kind: arkType.unit("audit"),
+		type: arkType.unit("privileged_op.caller_admission"),
+		payload: {
+			op: PrivilegedOpAuditOpBoundary,
+			"claimedRunId": arkType.or("string", "null"),
+			"claimedPhase": arkType.or("string", "null"),
+			// `presetName` is meaningful only for the per-phase-authorized class (the gate
+			// reads the agent's phase's rights from this preset). Hard-deny rejects without
+			// consulting a preset, so callers pass `null`.
+			"presetName": arkType.or("string", "null"),
+			outcome: arkType.or(arkType.unit("allow"), arkType.unit("deny")),
+			reason: PrivilegedOpAuditReasonBoundary,
+		},
+	},
 )
 
 export type ObservabilityEvent = typeof ObservabilityEventBoundary.infer
@@ -485,6 +544,10 @@ export type ObservabilityExcerpt = Extract<ObservabilityEvent, { type: "agent.ex
 export type ObservabilitySubject = NonNullable<ObservabilityEvent["subject"]>
 export type PresetPlaceholderDirection = typeof PresetPlaceholderDirectionBoundary.infer
 export type PresetPlaceholderVerdict = typeof PresetPlaceholderVerdictBoundary.infer
+// #409: re-export the privileged-op vocabulary so daemon.ts (the only emitter) can
+// type-assert every `op` it writes belongs to the closed boundary union.
+export type PrivilegedOpAuditOp = typeof PrivilegedOpAuditOpBoundary.infer
+export type PrivilegedOpAuditReason = typeof PrivilegedOpAuditReasonBoundary.infer
 
 // #397 in-memory companion to the `item.status.write_admission` audit-event schema above.
 // Co-located with that schema so the wire shape (arktype, payload of ObservabilityEvent) and the
@@ -538,6 +601,15 @@ export type ObservabilityQueryResult = {
 
 export function makeObservabilityEvent(input: Omit<ObservabilityEvent, "ts">, now = new Date()): ObservabilityEvent {
 	return ObservabilityEventBoundary.assert({ ...input, ts: now.toISOString() })
+}
+
+// #409: structural roundtrip from an ObservabilityEvent to a generic JsonValue. Used by the
+// `logs.query` daemon handler to embed event entries inside the daemon's JsonObject reply
+// without forging an `as` cast across the type boundary. The arktype-asserted event is
+// already JSON-serializable (the boundary union is built from arktype primitives), so the
+// JSON.stringify → JSON.parse pair safely produces a plain JsonValue tree.
+export function observabilityEventToJsonValue(event: ObservabilityEvent): unknown {
+	return JSON.parse(JSON.stringify(event))
 }
 
 export function parseObservabilityEvent(input: unknown): ObservabilityEvent {
@@ -697,6 +769,12 @@ function renderAuditEvent(event: Extract<ObservabilityEvent, { kind: "audit" }>)
 			// path (always allowed). The reason field is the most useful filter — agents looking
 			// at deny lines want to know "no-create-grant" vs "no-rights-segment" at a glance.
 			return `${event.ts} audit item.add.rights_admission chain=${event.chain ?? "-"} preset=${event.payload.presetName} claimedPhase=${event.payload.claimedPhase ?? "-"} outcome=${event.payload.outcome} reason=${event.payload.reason}`
+		case "privileged_op.caller_admission":
+			// #409: render shape names the gated op, the caller (claimedRunId/Phase or `-` for
+			// operator), and the gate verdict. `preset=-` for hard-deny ops which do not consult
+			// a preset; `preset=<name>` for per-phase-authorized ops where the gate looked up the
+			// caller-phase's `[phases.rights] privilegedOps` grant.
+			return `${event.ts} audit privileged_op.caller_admission chain=${event.chain ?? "-"} op=${event.payload.op} claimedRunId=${event.payload.claimedRunId ?? "-"} claimedPhase=${event.payload.claimedPhase ?? "-"} preset=${event.payload.presetName ?? "-"} outcome=${event.payload.outcome} reason=${event.payload.reason}`
 		default:
 			return assertNever(event)
 	}
