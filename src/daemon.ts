@@ -279,6 +279,26 @@ type CallerAdmissionDenyReason =
 	| "inactive-run"
 	| "wrong-item"
 
+// #407 review-feedback refactor: the subset of `CallerAdmissionDenyReason` reachable from the
+// boundary-parse resolver (`resolveItemMutationCaller`). `wrong-item` is item-bound and emitted
+// later in `admitItemMutationCaller` after the resolver succeeds, so it is intentionally absent
+// here. The resolver returns a typed `err` variant of exactly this shape — there is no string-
+// match recovery of the reason from a thrown error, and no `unknown` widening of the credential
+// field. Each err variant carries the typed payload the downstream audit / DaemonError needs.
+type ResolveCallerDenyReason =
+	| { kind: "missing-credential" }
+	| { kind: "unknown-credential" }
+	| { kind: "inactive-run"; runId: string }
+
+// #407 review-feedback refactor: minimal Result sum type. The codebase has no Result/Either lib;
+// rather than pull one in for one call site, declare the ADT inline. Exhaustive case analysis is
+// the type-system contract — adding a new variant of either arm forces every consumer to handle
+// it (no catch-all default in any switch). Defined locally to daemon.ts to keep the surface area
+// of the type minimal until a second caller appears.
+type Result<T, E> =
+	| { kind: "ok"; value: T }
+	| { kind: "err"; error: E }
+
 // #406: the daemon-owned credential issuer. Implements `SchedulerRunCredentialIssuer` so the
 // scheduler can mint/revoke without knowing it talks to a Map. Keyed by credential value because
 // the request boundary has only the value in hand — the binding is what the registry returns.
@@ -1304,7 +1324,14 @@ export class CoderLoopDaemon {
 		// build the CreateItemInput). The duplicate parse is the simplest code-self-consistent
 		// shape and the spec parse is cheap (no preset.toml load).
 		const presetSpec = await this.requireItemPresetForRequest(args, "item.add")
-		const caller = this.resolveItemMutationCaller(args)
+		// #407 review-feedback refactor: resolver returns typed `Result`. Invalid-credential cases
+		// throw the equivalent DaemonError without emitting an audit event — preserves pre-refactor
+		// behavior on the add path (the previous code threw from inside the resolver and the
+		// caller never wrapped it in a `recordCallerAdmissionEvent` because the add path's audit
+		// schema is `item.add.rights_admission`, which is emitted later by the rights gate).
+		const resolvedCaller = this.resolveItemMutationCaller(args)
+		if (resolvedCaller.kind === "err") throw this.resolveCallerDenyError(resolvedCaller.error)
+		const caller = resolvedCaller.value
 		await this.assertItemAddRightsForCaller(chain, caller, presetSpec, "item.add")
 		const store = this.requireStore()
 		const existingItems = store.listItems(chain.id)
@@ -1348,7 +1375,13 @@ export class CoderLoopDaemon {
 		// work begins. Each child item still carries its own preset declaration so the rights
 		// check is run per-item (a batch may legitimately mix presets); a single deny aborts the
 		// entire batch (整批拒/整批放行).
-		const caller = this.resolveItemMutationCaller(args)
+		//
+		// #407 review-feedback refactor: identical Result-unwrap shape as handleItemAdd above —
+		// invalid credential throws the equivalent DaemonError without audit emission, preserving
+		// pre-refactor wire behavior.
+		const resolvedCaller = this.resolveItemMutationCaller(args)
+		if (resolvedCaller.kind === "err") throw this.resolveCallerDenyError(resolvedCaller.error)
+		const caller = resolvedCaller.value
 		const existingItems = store.listItems(chain.id)
 		const inputs: CreateItemInput[] = []
 		const requestedIssues = new Set<number>()
@@ -2143,26 +2176,32 @@ export class CoderLoopDaemon {
 	// audit events — emission is the caller's job because the audit schema differs between the
 	// update path (`item.mutation.caller_admission` requires itemId) and the add path
 	// (`item.add.rights_admission` carries the credential outcome inside its `reason`).
-	private resolveItemMutationCaller(args: JsonObject): ItemMutationCaller {
-		const credentialField = args.agentCredential
+	//
+	// Returns a `Result<ItemMutationCaller, ResolveCallerDenyReason>` — the typed err variant
+	// carries the reason directly (no thrown DaemonError, no string-match recovery of the reason,
+	// no `unknown` widening of `args.agentCredential` past its boundary-parsed `JsonValue` type).
+	// The reason is constructed at the branch that decides it, so a future variant addition forces
+	// every consumer to handle it (exhaustive switch in `admitItemMutationCaller`).
+	private resolveItemMutationCaller(args: JsonObject): Result<ItemMutationCaller, ResolveCallerDenyReason> {
+		// `args` came in through the JsonObject boundary parser already, so `args[K]` for any K
+		// is `JsonValue | undefined` — a typed sum type, NOT `unknown`. This reads `JsonValue`
+		// directly without widening.
+		const credentialField: JsonValue | undefined = args.agentCredential
 		if (credentialField === undefined) {
 			// Operator path: no credential field at all → caller is the operator.
 			const subject: Extract<ObservabilitySubject, { kind: "operator" }> = { kind: "operator" }
-			return { kind: "operator", subject }
+			return { kind: "ok", value: { kind: "operator", subject } }
 		}
 		if (typeof credentialField !== "string" || credentialField === "") {
-			throw new DaemonError("invalid_caller", "agentCredential must be a non-empty string when provided", {
-				field: "agentCredential",
-			})
+			// `JsonValue` narrows here: not a non-empty string → either null/boolean/number/array/
+			// nested object, or the empty string. Both surface as `missing-credential` because the
+			// only legitimate shape is a registered UUID, and treating "wrong type" as the same
+			// reason as "absent" matches the pre-refactor behavior preserved for wire compat.
+			return { kind: "err", error: { kind: "missing-credential" } }
 		}
 		const registration = this.runCredentialRegistry.get(credentialField)
 		if (registration === undefined) {
-			throw new DaemonError(
-				"invalid_caller",
-				"agentCredential did not match any active run; the run may have ended (credential revoked on run close) " +
-					"or the credential value was never minted by this daemon.",
-				{},
-			)
+			return { kind: "err", error: { kind: "unknown-credential" } }
 		}
 		// Defense in depth: confirm the bound run is still active in the scheduler state. The
 		// scheduler revokes the credential in the close-handler `finally`, but if a revocation
@@ -2173,18 +2212,45 @@ export class CoderLoopDaemon {
 			// Also evict the stale binding so further requests fail with the cleaner
 			// `unknown-credential` reason instead of repeatedly tripping this branch.
 			this.runCredentialRegistry.delete(credentialField)
-			throw new DaemonError(
-				"invalid_caller",
-				`agentCredential resolves to run ${registration.context.runId}, which is no longer active.`,
-				{ runId: registration.context.runId },
-			)
+			return { kind: "err", error: { kind: "inactive-run", runId: registration.context.runId } }
 		}
 		const subject: Extract<ObservabilitySubject, { kind: "agent" }> = {
 			kind: "agent",
 			runId: registration.context.runId,
 			phase: registration.context.phase,
 		}
-		return { kind: "agent", runId: registration.context.runId, phase: registration.context.phase, subject }
+		return {
+			kind: "ok",
+			value: { kind: "agent", runId: registration.context.runId, phase: registration.context.phase, subject },
+		}
+	}
+
+	// #407 review-feedback refactor: convert a typed `ResolveCallerDenyReason` err variant into
+	// the `DaemonError` the wire callers throw. Centralised here so the `invalid_caller` code,
+	// message text, and `details` payload remain identical to the pre-refactor throws — the wire
+	// shape is part of the public daemon protocol and pinned by socket integration tests. The
+	// exhaustive switch enforces that any new variant added to `ResolveCallerDenyReason` must
+	// gain a corresponding throw shape (TS reports the missing case otherwise).
+	private resolveCallerDenyError(reason: ResolveCallerDenyReason): DaemonError {
+		switch (reason.kind) {
+			case "missing-credential":
+				return new DaemonError("invalid_caller", "agentCredential must be a non-empty string when provided", {
+					field: "agentCredential",
+				})
+			case "unknown-credential":
+				return new DaemonError(
+					"invalid_caller",
+					"agentCredential did not match any active run; the run may have ended (credential revoked on run close) " +
+						"or the credential value was never minted by this daemon.",
+					{},
+				)
+			case "inactive-run":
+				return new DaemonError(
+					"invalid_caller",
+					`agentCredential resolves to run ${reason.runId}, which is no longer active.`,
+					{ runId: reason.runId },
+				)
+		}
 	}
 
 	// #406 caller-admission gate for `item.update`. Reuses the registry-lookup helper above and
@@ -2202,24 +2268,26 @@ export class CoderLoopDaemon {
 		// earlier by `validateKnownKeys` in `validateItemUpdateRequest` — they are no longer in
 		// `ITEM_UPDATE_ARG_KEYS`. By the time control reaches this gate, the args object cannot
 		// contain them, so no `legacy-attribution-args` branch is reachable here.
-		const credentialFieldRaw = args.agentCredential
-		let caller: ItemMutationCaller
-		try {
-			caller = this.resolveItemMutationCaller(args)
-		} catch (error) {
-			if (error instanceof DaemonError && error.code === "invalid_caller") {
-				const reason = this.classifyResolveCallerDenyReason(credentialFieldRaw, error.message)
-				await this.recordCallerAdmissionEvent(chain, {
-					item,
-					subject: { kind: "operator" },
-					claimedRunId: null,
-					claimedPhase: null,
-					outcome: "deny",
-					reason,
-				})
-			}
-			throw error
+		//
+		// #407 review-feedback refactor: the resolver returns a typed `Result`. The deny reason
+		// for the `item.mutation.caller_admission` audit event is read directly off the err
+		// variant — no thrown DaemonError to inspect, no errorMessage.includes(...) string match,
+		// no `unknown` widening of `args.agentCredential`. Variant name lines up 1:1 with the
+		// `CallerAdmissionDenyReason` literal expected by the audit payload.
+		const credentialFieldRaw: JsonValue | undefined = args.agentCredential
+		const resolved = this.resolveItemMutationCaller(args)
+		if (resolved.kind === "err") {
+			await this.recordCallerAdmissionEvent(chain, {
+				item,
+				subject: { kind: "operator" },
+				claimedRunId: null,
+				claimedPhase: null,
+				outcome: "deny",
+				reason: resolved.error.kind,
+			})
+			throw this.resolveCallerDenyError(resolved.error)
 		}
+		const caller = resolved.value
 		if (caller.kind === "operator") {
 			await this.recordCallerAdmissionEvent(chain, {
 				item,
@@ -2264,20 +2332,6 @@ export class CoderLoopDaemon {
 			reason: "agent-credential-admitted",
 		})
 		return caller
-	}
-
-	// #407 classify the resolver-thrown `invalid_caller` deny reason into the
-	// `CallerAdmissionDenyReason` ADT for audit emission. The resolver itself does not return a
-	// structured reason (its callers diverge on whether they emit `item.mutation.caller_admission`
-	// or `item.add.rights_admission`); this helper recovers the structured reason from the
-	// observable inputs (presence/shape of credentialField + the error message text).
-	private classifyResolveCallerDenyReason(
-		credentialField: unknown,
-		errorMessage: string,
-	): Extract<CallerAdmissionDenyReason, "missing-credential" | "unknown-credential" | "inactive-run"> {
-		if (typeof credentialField !== "string" || credentialField === "") return "missing-credential"
-		if (errorMessage.includes("no longer active")) return "inactive-run"
-		return "unknown-credential"
 	}
 
 	private async recordCallerAdmissionEvent(chain: ChainRecord, input: {
