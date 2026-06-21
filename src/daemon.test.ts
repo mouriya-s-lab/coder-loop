@@ -4647,6 +4647,571 @@ process.exitCode = 0
 			await fixture.daemon.stop()
 		}
 	})
+
+	// #407 acceptance row #1 — iteration phase has no `[phases.rights]` segment in
+	// gh-issue-pr-iteration preset.toml, so an item.add request bearing an iteration-phase
+	// agentCredential is rejected with the rights-segment-default-deny branch. The audit
+	// event must record outcome=deny / reason=no-rights-segment (iteration has zero rights
+	// declared → classifyNoCreateGrantReason returns no-rights-segment, NOT no-create-grant
+	// which is the segment-present-without-grant case). Item-list cross-check confirms the
+	// child was NOT inserted, i.e. the gate ran BEFORE buildCreateItemInput / store.createItem.
+	test("socket item.add denies an iteration-phase agentCredential with no-rights-segment (#407 row 1)", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-407-row1-iter-deny`)
+		const loopDataRoot = resolve(root, "ld")
+		const capturePath = resolve(root, "captured-credential.txt")
+		const fakeRunner = resolve(root, "fake-runner.ts")
+		const eventLog = resolve(root, "events.jsonl")
+		await mkdir(loopDataRoot, { recursive: true })
+		// Fake iteration runner: capture CODER_LOOP_RUN_CRED, then sleep long enough for the
+		// test to drive an item.add against the daemon before the run closes (closing the run
+		// would revoke the credential from the registry and the gate would short-circuit on
+		// `unknown-credential` before ever reaching the rights check).
+		await writeFile(
+			fakeRunner,
+			`import { writeFile, appendFile } from "node:fs/promises"
+
+const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+await writeFile(${JSON.stringify(capturePath)}, process.env.CODER_LOOP_RUN_CRED ?? "")
+await appendFile(input.eventLog, JSON.stringify({ type: "running", itemId: input.itemId, runId: input.runId }) + "\\n")
+await new Promise((r) => setTimeout(r, input.sleepMs ?? 4000))
+process.exitCode = 0
+`,
+		)
+
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			shutdownGraceMs: 100,
+			scheduler: {
+				enabled: true,
+				intervalMs: 20,
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
+				presetDir: PRESET_DIR,
+				worktreeManager: async ({ chain, repoCwd }) => {
+					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+					await mkdir(worktreePath, { recursive: true })
+					return worktreePath
+				},
+				prompt: ({ item, runId }) => JSON.stringify({
+					itemId: item.id,
+					issueNumber: item.issueNumber,
+					runId,
+					eventLog,
+					sleepMs: 3_500,
+				}),
+				chainCompleteTriggerForChain: () => null,
+			},
+		})
+		try {
+			const snapshot = daemon.snapshot()
+			const chain = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("chain.create", {
+				name: "407-row1-iter-deny-chain",
+				preset: "gh-issue-pr-iteration",
+				repository: "mouriya-s-lab/coder-loop",
+			}))).chain)
+			const chainId = numberValue(chain.id)
+			// Parent item the scheduler will spawn against (iteration phase, no rights).
+			const parent = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
+				chainId,
+				issueNumber: 407_100,
+				repoCwd: REPO_ROOT,
+				preset: "gh-issue-pr-iteration",
+			}))).item)
+			const parentId = numberValue(parent.id)
+
+			// Wait for the scheduler to spawn the iteration runner and capture the credential.
+			await waitFor(async () => {
+				try {
+					return (await readFile(capturePath, "utf-8")).trim()
+				} catch {
+					return ""
+				}
+			}, (value) => value.length > 0, 8_000)
+			const credential = (await readFile(capturePath, "utf-8")).trim()
+			expect(credential.length).toBeGreaterThan(0)
+
+			// Issue the item.add with the iteration agent's credential. Iteration phase has NO
+			// `[phases.rights]` segment in preset.toml → classifyNoCreateGrantReason yields
+			// `no-rights-segment` (createItems=false AND writableFields empty AND privilegedOps empty).
+			const denied = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
+				chainId,
+				issueNumber: 407_101,
+				repoCwd: REPO_ROOT,
+				preset: "gh-issue-pr-iteration",
+				agentCredential: credential,
+			}))
+			expect(denied.ok).toBe(false)
+			if (!denied.ok) {
+				expect(denied.error.code).toBe("invalid_caller")
+				expect(denied.error.message).toContain("iteration")
+				expect(denied.error.message).toContain("createItems")
+			}
+
+			// Audit replay: exactly one `item.add.rights_admission` event for the iteration phase,
+			// outcome=deny, reason=no-rights-segment. The subject must be `agent` (not operator —
+			// the credential resolved successfully). The deny event MUST exist before the agent's
+			// run-close handler revokes the credential, so we read the events file immediately.
+			const eventsPath = resolveLoopDataPaths({ loopDataRoot }).eventsFile
+			const events = (await queryObservabilityEvents(eventsPath)).events
+			const denyEvent = events.find((event) =>
+				event.kind === "audit"
+				&& event.type === "item.add.rights_admission"
+				&& event.payload.outcome === "deny",
+			)
+			expect(denyEvent).toBeDefined()
+			if (denyEvent !== undefined && denyEvent.kind === "audit" && denyEvent.type === "item.add.rights_admission") {
+				expect(denyEvent.payload.reason).toBe("no-rights-segment")
+				expect(denyEvent.payload.claimedPhase).toBe("iteration")
+				expect(denyEvent.subject).toMatchObject({ kind: "agent" })
+				expect(denyEvent.payload.presetName).toBe("gh-issue-pr-iteration")
+			}
+
+			// Item-list cross-check: only the parent item exists; the child the agent attempted to
+			// create was rejected BEFORE store.createItem. (parentId asserted defined for tooling.)
+			const listed = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.list", { chainId }))))
+			const items = Array.isArray(listed.items) ? listed.items : []
+			expect(items.length).toBe(1)
+			expect(parentId).toBe(numberValue(record(items[0] ?? {}).id))
+		} finally {
+			await daemon.stop()
+		}
+	})
+
+	// #407 acceptance row #2 — review phase declares `[phases.rights] createItems = true` in
+	// gh-issue-pr-iteration preset.toml, so an item.add request bearing a review-phase agent
+	// credential is admitted. The audit event records outcome=allow / reason=agent-allowed.
+	// item.list cross-check confirms the child WAS inserted into the queue. Pipeline reaches
+	// the review phase via the realistic iteration→review transition (iteration writes
+	// `in_progress` status with exitCode=0, scheduler advances to review on the next tick).
+	test("socket item.add admits a review-phase agentCredential and inserts the child (#407 row 2)", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-407-row2-review-allow`)
+		const loopDataRoot = resolve(root, "ld")
+		const capturePath = resolve(root, "captured-credential.txt")
+		const fakeRunner = resolve(root, "fake-runner.ts")
+		const eventLog = resolve(root, "events.jsonl")
+		await mkdir(loopDataRoot, { recursive: true })
+		// Fake runner branches on `input.phase`: iteration writes `in_progress` status with
+		// exitCode 0 (scheduler then advances to review). Review captures the credential and
+		// sleeps long enough for the test to drive the item.add. The runner uses
+		// FAKE_RUNNER_STATUS_WRITE_SNIPPET shape: it consumes input.writeStatus from the prompt
+		// (the scheduler-side `prompt` lambda below maps phase→writeStatus the same way
+		// startPhaseAdvancementFixture does).
+		await writeFile(
+			fakeRunner,
+			`import { writeFile, appendFile } from "node:fs/promises"
+const { openSqliteStateStore } = await import(${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))})
+
+const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+await appendFile(input.eventLog, JSON.stringify({ type: "running", itemId: input.itemId, runId: input.runId, phase: input.phase }) + "\\n")
+if (input.phase === "review") {
+	await writeFile(${JSON.stringify(capturePath)}, process.env.CODER_LOOP_RUN_CRED ?? "")
+	await new Promise((r) => setTimeout(r, input.sleepMs ?? 4000))
+} else {
+	// Iteration: write in_progress status and exit 0 so the scheduler advances to review.
+	if (typeof input.writeStatus === "string" && input.itemId > 0 && process.env.CODER_LOOP_DATA_DIR) {
+		const store = openSqliteStateStore({ loopDataRoot: process.env.CODER_LOOP_DATA_DIR })
+		store.updateItem(input.itemId, { status: input.writeStatus, updatedAt: Math.floor(Date.now() / 1000) })
+		store.close()
+	}
+	await new Promise((r) => setTimeout(r, 5))
+}
+process.exitCode = 0
+`,
+		)
+
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			shutdownGraceMs: 100,
+			scheduler: {
+				enabled: true,
+				intervalMs: 20,
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
+				presetDir: PRESET_DIR,
+				worktreeManager: async ({ chain, repoCwd }) => {
+					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+					await mkdir(worktreePath, { recursive: true })
+					return worktreePath
+				},
+				prompt: ({ item, runId, phase }) => JSON.stringify({
+					itemId: item.id,
+					issueNumber: item.issueNumber,
+					runId,
+					phase,
+					eventLog,
+					sleepMs: 3_500,
+					writeStatus: phase === "iteration" ? "in_progress" : null,
+				}),
+				chainCompleteTriggerForChain: () => null,
+			},
+		})
+		try {
+			const snapshot = daemon.snapshot()
+			const chain = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("chain.create", {
+				name: "407-row2-review-allow-chain",
+				preset: "gh-issue-pr-iteration",
+				repository: "mouriya-s-lab/coder-loop",
+			}))).chain)
+			const chainId = numberValue(chain.id)
+			const parent = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
+				chainId,
+				issueNumber: 407_200,
+				repoCwd: REPO_ROOT,
+				preset: "gh-issue-pr-iteration",
+			}))).item)
+			const parentId = numberValue(parent.id)
+
+			// Wait for the scheduler to advance iteration→review and the review runner to capture
+			// its credential. The 12s timeout accommodates two scheduler ticks (iteration spawn
+			// + review spawn) on a busy CI host.
+			await waitFor(async () => {
+				try {
+					return (await readFile(capturePath, "utf-8")).trim()
+				} catch {
+					return ""
+				}
+			}, (value) => value.length > 0, 12_000)
+			const credential = (await readFile(capturePath, "utf-8")).trim()
+			expect(credential.length).toBeGreaterThan(0)
+
+			// Issue item.add with the review-phase credential. Review has createItems=true →
+			// allow. The new item appears in the queue.
+			const created = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
+				chainId,
+				issueNumber: 407_201,
+				repoCwd: REPO_ROOT,
+				preset: "gh-issue-pr-iteration",
+				agentCredential: credential,
+			}))
+			expect(created.ok).toBe(true)
+			if (!created.ok) throw new Error(`expected allow, got ${created.error.code}: ${created.error.message}`)
+			const newItem = record(created.result.item)
+			expect(numberValue(newItem.issueNumber)).toBe(407_201)
+
+			// item.list cross-check: parent + child both present (2 items).
+			const listed = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.list", { chainId }))))
+			const items = Array.isArray(listed.items) ? listed.items : []
+			const issueNumbers = items.map((entry) => numberValue(record(entry).issueNumber)).sort((a, b) => a - b)
+			expect(issueNumbers).toEqual([407_200, 407_201])
+			expect(parentId).toBeGreaterThan(0)
+
+			// Audit replay: outcome=allow, reason=agent-allowed, subject.kind=agent, phase=review.
+			const eventsPath = resolveLoopDataPaths({ loopDataRoot }).eventsFile
+			const events = (await queryObservabilityEvents(eventsPath)).events
+			const allow = events.find((event) =>
+				event.kind === "audit"
+				&& event.type === "item.add.rights_admission"
+				&& event.payload.outcome === "allow"
+				&& event.payload.reason === "agent-allowed",
+			)
+			expect(allow).toBeDefined()
+			if (allow !== undefined && allow.kind === "audit" && allow.type === "item.add.rights_admission") {
+				expect(allow.payload.claimedPhase).toBe("review")
+				expect(allow.subject).toMatchObject({ kind: "agent" })
+				expect(allow.payload.presetName).toBe("gh-issue-pr-iteration")
+			}
+		} finally {
+			await daemon.stop()
+		}
+	})
+
+	// #407 acceptance row #3 — the operator path (no agentCredential field at all) is NEVER
+	// gated by the rights segment. The boundary parse treats absent `agentCredential` as
+	// `kind: "operator"`, the gate emits one `item.add.rights_admission` allow event with
+	// reason=operator, and the item is created. Mirrors the existing #406 operator-path test
+	// at line ~3216 but on the create path instead of the update path.
+	test("socket item.add operator path bypasses the rights gate with reason=operator (#407 row 3)", async () => {
+		const fixture = await startFixture("407-row3-operator-bypass", { schedulerEnabled: false })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "407-row3-operator-bypass-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			const added = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				issueNumber: 407_300,
+				repoCwd: REPO_ROOT,
+				preset: "gh-issue-pr-iteration",
+			})).item)
+			const itemId = numberValue(added.id)
+			expect(itemId).toBeGreaterThan(0)
+
+			const eventsPath = resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile
+			const events = (await queryObservabilityEvents(eventsPath)).events
+			const allow = events.find((event) =>
+				event.kind === "audit"
+				&& event.type === "item.add.rights_admission"
+				&& event.payload.outcome === "allow",
+			)
+			expect(allow).toBeDefined()
+			if (allow !== undefined && allow.kind === "audit" && allow.type === "item.add.rights_admission") {
+				expect(allow.payload.reason).toBe("operator")
+				expect(allow.subject).toEqual({ kind: "operator" })
+				expect(allow.payload.claimedPhase).toBeNull()
+				expect(allow.payload.presetName).toBe("gh-issue-pr-iteration")
+			}
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	// #407 acceptance row #4 — single-phase-example preset has no `[phases.rights]` segment
+	// anywhere (the run phase omits it). An agent credential bound to its `run` phase that
+	// tries item.add against the same chain is rejected with reason=no-rights-segment. The
+	// operator-variant inside the same test confirms operator path is unaffected (mirrors
+	// row #3 but on the smoke preset).
+	test("socket item.add default-deny on single-phase-example for agents; operator path still allowed (#407 row 4)", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-407-row4-default-deny`)
+		const loopDataRoot = resolve(root, "ld")
+		const capturePath = resolve(root, "captured-credential.txt")
+		const fakeRunner = resolve(root, "fake-runner.ts")
+		const eventLog = resolve(root, "events.jsonl")
+		const smokePresetDir = resolve(REPO_ROOT, "presets/single-phase-example")
+		await mkdir(loopDataRoot, { recursive: true })
+		// Capture-credential fake runner; sleeps long enough for the test to drive item.add.
+		await writeFile(
+			fakeRunner,
+			`import { writeFile, appendFile } from "node:fs/promises"
+
+const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+await writeFile(${JSON.stringify(capturePath)}, process.env.CODER_LOOP_RUN_CRED ?? "")
+await appendFile(input.eventLog, JSON.stringify({ type: "running", itemId: input.itemId, runId: input.runId, phase: input.phase }) + "\\n")
+await new Promise((r) => setTimeout(r, input.sleepMs ?? 4000))
+process.exitCode = 0
+`,
+		)
+
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			shutdownGraceMs: 100,
+			scheduler: {
+				enabled: true,
+				intervalMs: 20,
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
+				presetDir: smokePresetDir,
+				worktreeManager: async ({ chain, repoCwd }) => {
+					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+					await mkdir(worktreePath, { recursive: true })
+					return worktreePath
+				},
+				prompt: ({ item, runId, phase }) => JSON.stringify({
+					itemId: item.id,
+					issueNumber: item.issueNumber,
+					runId,
+					phase,
+					eventLog,
+					sleepMs: 3_500,
+				}),
+				chainCompleteTriggerForChain: () => null,
+			},
+		})
+		try {
+			const snapshot = daemon.snapshot()
+			const chain = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("chain.create", {
+				name: "407-row4-default-deny-chain",
+				preset: "single-phase-example",
+				repository: "mouriya-s-lab/coder-loop",
+			}))).chain)
+			const chainId = numberValue(chain.id)
+			// Operator-path variant first (precondition for row 4's "operator path always allowed"):
+			// no credential → allow with reason=operator. Issue this BEFORE the scheduler spawns the
+			// agent runner so chain has at least one item to schedule.
+			const operatorItem = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
+				chainId,
+				issueNumber: 407_400,
+				repoCwd: REPO_ROOT,
+				preset: "single-phase-example",
+			}))).item)
+			expect(numberValue(operatorItem.id)).toBeGreaterThan(0)
+
+			// Wait for the run-phase credential to land in the capture file.
+			await waitFor(async () => {
+				try {
+					return (await readFile(capturePath, "utf-8")).trim()
+				} catch {
+					return ""
+				}
+			}, (value) => value.length > 0, 8_000)
+			const credential = (await readFile(capturePath, "utf-8")).trim()
+			expect(credential.length).toBeGreaterThan(0)
+
+			// Agent path: the `run` phase has no rights segment → default-deny.
+			const denied = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
+				chainId,
+				issueNumber: 407_401,
+				repoCwd: REPO_ROOT,
+				preset: "single-phase-example",
+				agentCredential: credential,
+			}))
+			expect(denied.ok).toBe(false)
+			if (!denied.ok) expect(denied.error.code).toBe("invalid_caller")
+
+			// Audit replay: agent deny event MUST carry reason=no-rights-segment + agent subject.
+			// Also assert the operator allow event from the precondition exists.
+			const eventsPath = resolveLoopDataPaths({ loopDataRoot }).eventsFile
+			const events = (await queryObservabilityEvents(eventsPath)).events
+			const operatorAllow = events.find((event) =>
+				event.kind === "audit"
+				&& event.type === "item.add.rights_admission"
+				&& event.payload.outcome === "allow"
+				&& event.payload.reason === "operator",
+			)
+			expect(operatorAllow).toBeDefined()
+			if (operatorAllow !== undefined && operatorAllow.kind === "audit" && operatorAllow.type === "item.add.rights_admission") {
+				expect(operatorAllow.payload.presetName).toBe("single-phase-example")
+				expect(operatorAllow.subject).toEqual({ kind: "operator" })
+			}
+			const agentDeny = events.find((event) =>
+				event.kind === "audit"
+				&& event.type === "item.add.rights_admission"
+				&& event.payload.outcome === "deny",
+			)
+			expect(agentDeny).toBeDefined()
+			if (agentDeny !== undefined && agentDeny.kind === "audit" && agentDeny.type === "item.add.rights_admission") {
+				expect(agentDeny.payload.reason).toBe("no-rights-segment")
+				expect(agentDeny.payload.claimedPhase).toBe("run")
+				expect(agentDeny.subject).toMatchObject({ kind: "agent" })
+				expect(agentDeny.payload.presetName).toBe("single-phase-example")
+			}
+		} finally {
+			await daemon.stop()
+		}
+	})
+
+	// #407 acceptance row #5 — field-validation parity with item.update. A review-phase agent
+	// credential (createItems=true) issues item.add carrying an illegal priority value. The
+	// daemon's `validateItemPriorityForRequest` (shared between item.add and item.update) must
+	// reject with the SAME shape as the update path: code=invalid_request, message includes
+	// the allowed list (low, medium, high, critical). The point is to pin that the new gate
+	// does not change downstream field validation — it runs BEFORE buildCreateItemInput, and
+	// buildCreateItemInput still enforces field shape exactly as before.
+	test("socket item.add review credential rejects illegal priority with the same invalid_request shape as item.update (#407 row 5)", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-407-row5-priority-validation`)
+		const loopDataRoot = resolve(root, "ld")
+		const capturePath = resolve(root, "captured-credential.txt")
+		const fakeRunner = resolve(root, "fake-runner.ts")
+		const eventLog = resolve(root, "events.jsonl")
+		await mkdir(loopDataRoot, { recursive: true })
+		await writeFile(
+			fakeRunner,
+			`import { writeFile, appendFile } from "node:fs/promises"
+const { openSqliteStateStore } = await import(${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))})
+
+const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+await appendFile(input.eventLog, JSON.stringify({ type: "running", itemId: input.itemId, runId: input.runId, phase: input.phase }) + "\\n")
+if (input.phase === "review") {
+	await writeFile(${JSON.stringify(capturePath)}, process.env.CODER_LOOP_RUN_CRED ?? "")
+	await new Promise((r) => setTimeout(r, input.sleepMs ?? 4000))
+} else {
+	if (typeof input.writeStatus === "string" && input.itemId > 0 && process.env.CODER_LOOP_DATA_DIR) {
+		const store = openSqliteStateStore({ loopDataRoot: process.env.CODER_LOOP_DATA_DIR })
+		store.updateItem(input.itemId, { status: input.writeStatus, updatedAt: Math.floor(Date.now() / 1000) })
+		store.close()
+	}
+	await new Promise((r) => setTimeout(r, 5))
+}
+process.exitCode = 0
+`,
+		)
+
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			shutdownGraceMs: 100,
+			scheduler: {
+				enabled: true,
+				intervalMs: 20,
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
+				presetDir: PRESET_DIR,
+				worktreeManager: async ({ chain, repoCwd }) => {
+					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+					await mkdir(worktreePath, { recursive: true })
+					return worktreePath
+				},
+				prompt: ({ item, runId, phase }) => JSON.stringify({
+					itemId: item.id,
+					issueNumber: item.issueNumber,
+					runId,
+					phase,
+					eventLog,
+					sleepMs: 3_500,
+					writeStatus: phase === "iteration" ? "in_progress" : null,
+				}),
+				chainCompleteTriggerForChain: () => null,
+			},
+		})
+		try {
+			const snapshot = daemon.snapshot()
+			const chain = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("chain.create", {
+				name: "407-row5-priority-validation-chain",
+				preset: "gh-issue-pr-iteration",
+				repository: "mouriya-s-lab/coder-loop",
+			}))).chain)
+			const chainId = numberValue(chain.id)
+			expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
+				chainId,
+				issueNumber: 407_500,
+				repoCwd: REPO_ROOT,
+				preset: "gh-issue-pr-iteration",
+			})))
+
+			// Wait for the review phase credential to be captured.
+			await waitFor(async () => {
+				try {
+					return (await readFile(capturePath, "utf-8")).trim()
+				} catch {
+					return ""
+				}
+			}, (value) => value.length > 0, 12_000)
+			const credential = (await readFile(capturePath, "utf-8")).trim()
+			expect(credential.length).toBeGreaterThan(0)
+
+			// Issue item.add carrying an illegal priority value. Even though the agent's review
+			// credential WOULD pass the rights gate, the request must be rejected for the
+			// priority shape: code=invalid_request, message includes the allowed enum.
+			const denied = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
+				chainId,
+				issueNumber: 407_501,
+				repoCwd: REPO_ROOT,
+				preset: "gh-issue-pr-iteration",
+				agentCredential: credential,
+				priority: "super-critical",
+			}))
+			expect(denied.ok).toBe(false)
+			if (!denied.ok) {
+				expect(denied.error.code).toBe("invalid_request")
+				expect(denied.error.message).toContain("priority must be one of")
+				expect(denied.error.message).toContain("critical")
+			}
+
+			// Cross-check the equivalence on item.update: same illegal priority value, same code
+			// + message. This pins "review path uses validateItemPriorityForRequest just like update".
+			// We need a real item to update against; the scheduler's parent item works.
+			const parent = await waitFor(
+				async () => await readItem(loopDataRoot, chainId, 407_500),
+				(value) => value !== null,
+				6_000,
+			)
+			expect(parent).not.toBeNull()
+			const updateDenied = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.update", {
+				itemId: parent?.id ?? -1,
+				priority: "super-critical",
+			}))
+			expect(updateDenied.ok).toBe(false)
+			if (!updateDenied.ok && !denied.ok) {
+				expect(updateDenied.error.code).toBe(denied.error.code)
+				expect(updateDenied.error.message).toBe(denied.error.message)
+			}
+		} finally {
+			await daemon.stop()
+		}
+	})
 })
 
 type PhaseAdvancementFixture = Fixture & {
