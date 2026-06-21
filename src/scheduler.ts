@@ -448,7 +448,6 @@ type SchedulerItemTriggerPhase = {
 
 type SchedulerPhasePlan = {
 	firstPhase: string
-	lastPhase: string
 	nonTriggerPhases: readonly string[]
 	itemTriggerPhases: readonly SchedulerItemTriggerPhase[]
 }
@@ -462,7 +461,7 @@ async function resolvePhasePlanForChainWithItems(
 	chain: ChainRecord,
 	items: readonly ItemRecord[],
 ): Promise<SchedulerPhasePlan> {
-	if (options.phase !== undefined) return { firstPhase: options.phase, lastPhase: options.phase, nonTriggerPhases: [options.phase], itemTriggerPhases: [] }
+	if (options.phase !== undefined) return { firstPhase: options.phase, nonTriggerPhases: [options.phase], itemTriggerPhases: [] }
 	const { preset } = await schedulerLoadedPresetForChainItems(options, chain, items)
 	return buildPhasePlanFromPreset(preset)
 }
@@ -471,14 +470,13 @@ function buildPhasePlanFromPreset(preset: SchedulerLoadedPreset["preset"]): Sche
 	const nonTriggerPhases = preset.phases.flatMap((phase) => phase.trigger === null ? [phase.name] : [])
 	const firstPhase = nonTriggerPhases[0]
 	if (firstPhase === undefined) throw new Error(`preset ${preset.name} has no non-trigger phases`)
-	const lastPhase = nonTriggerPhases[nonTriggerPhases.length - 1] ?? firstPhase
 	const itemTriggerPhases = preset.phases.flatMap((phase): SchedulerItemTriggerPhase[] => {
 		const trigger = phase.trigger
 		if (trigger === null) return []
 		if (!("afterPhase" in trigger)) return []
 		return [{ name: phase.name, afterPhase: trigger.afterPhase, whenStatus: trigger.whenStatus }]
 	})
-	return { firstPhase, lastPhase, nonTriggerPhases, itemTriggerPhases }
+	return { firstPhase, nonTriggerPhases, itemTriggerPhases }
 }
 
 type SelectNextItemAndPhaseInput = {
