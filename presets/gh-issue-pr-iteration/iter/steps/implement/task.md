@@ -14,7 +14,7 @@ Fetch the live issue body: `gh issue view <ISSUE> -R <REPO> --json title,body`. 
 
 ### Step 2 — Take the branch
 
-- Retry / resumed run (`ISSUE_STATUS` = `changes_requested`, or `RUN_ID_GENERATION` = `resumed`): continue the existing branch (`ISSUE_BRANCH`). Before changing anything, inspect three things and write down what you find: `git log --oneline <BASE_BRANCH>..HEAD` (what previous runs already committed — your change builds on it, not over it), `git status --short` (which dirty files are previous-run work in progress vs unrelated — unrelated dirty files are preserved untouched, never staged, never reverted), and the latest PR review/comments (the demands your `Step focus` answers). Restart from base only when the branch's commits are unrelated to this issue — record why.
+- Retry / resumed run (`ISSUE_STATUS` is the preset's retry continuable status — the orchestrator's Step 1 classification calls this the "Retry" branch; or `RUN_ID_GENERATION` = `resumed`): continue the existing branch (`ISSUE_BRANCH`). Before changing anything, inspect three things and write down what you find: `git log --oneline <BASE_BRANCH>..HEAD` (what previous runs already committed — your change builds on it, not over it), `git status --short` (which dirty files are previous-run work in progress vs unrelated — unrelated dirty files are preserved untouched, never staged, never reverted), and the latest PR review/comments (the demands your `Step focus` answers). Restart from base only when the branch's commits are unrelated to this issue — record why.
 - Fresh run:
 
 ```bash
