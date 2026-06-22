@@ -183,7 +183,10 @@ export type SchedulerEvent =
 	| { type: "agent.spawn"; slotKey: string; chainId: number; itemId: number; runId: string; phase: string; pid: number | null; worktreePath: string; presetDir: string }
 	| { type: "agent.exit"; slotKey: string; chainId: number; itemId: number; runId: string; phase: string; exitCode: number; status: InternalStatus; excerpt: ObservabilityExcerpt }
 	| { type: "session_id.invalidated"; ts: string; runId: string; chainId: number; itemId: number; phase: string; runner: AgentRunnerKind; previousSessionId: string | null; reason: "runner_session_id_invalid" }
-	| { type: "spawn.aborted"; slotKey: string; chainId: number; chainName: string; itemId: number; issueNumber: number; reason: string; toStatus: InternalStatus }
+	// #419: `spawn.aborted` payload retires the integer `issueNumber` field. The `id` here is the
+	// item's opaque preset-declared string id (formerly `issueNumber`-as-int). `itemId` remains
+	// the rowid (integer). Supervisor consumers must read `id` for the issue/item identity.
+	| { type: "spawn.aborted"; slotKey: string; chainId: number; chainName: string; itemId: number; id: string; reason: string; toStatus: InternalStatus }
 	| { type: "chain.complete_trigger"; chainId: number; chainName: string; runId?: string; decision: SchedulerChainCompleteDecision["decision"]; reason?: string }
 	| { type: "chain.complete_trigger_failed"; chainId: number; chainName: string; runId?: string; error: string }
 	| { type: "chain.completed"; chainId: number; chainName: string; runId?: string }
@@ -593,7 +596,9 @@ export function selectNextPendingItemFromSnapshot(input: SchedulerPendingSelecti
 			repoCwd: input.repoCwd,
 			statuses: input.statuses,
 			terminalStatusNames: input.terminalStatuses,
-		}).map((wait) => wait.itemId),
+			// #419: DependencyWaitReason carries `rowId` (items.id rowid) and `itemId` (opaque
+			// preset string). Build the wait-set on rowid so the lookup `item.id` (number) matches.
+		}).map((wait) => wait.rowId),
 	)
 	return input.items
 		.filter((item) => item.repoCwd === input.repoCwd)
@@ -621,7 +626,10 @@ async function emitRepoWaitingDecisions(
 		await emit(options, {
 			type: "item.dependency_wait",
 			chainId: chain.id,
-			itemId: wait.itemId,
+			// #419: DependencyWaitReason now splits `rowId` (items.id rowid) and `itemId` (opaque
+			// preset-declared string id). The decision event's `itemId` field continues to be the
+			// integer rowid (the same FK shape as `runs.item_id` used in scheduler internals).
+			itemId: wait.rowId,
 			dependsOn: wait.dependsOn,
 			unsatisfied: wait.unsatisfied,
 		})
@@ -875,14 +883,14 @@ async function spawnSchedulerRun(
 			),
 			updatedAt: failedAt,
 		})
-		console.warn(`coder-loop scheduler: worktree create failed for chain=${chain.name} item=${item.id} issue=#${item.issueNumber}: ${message}`)
+		console.warn(`coder-loop scheduler: worktree create failed for chain=${chain.name} item=${item.id} id=${item.itemId}: ${message}`)
 		await emit(options, {
 			type: "spawn.aborted",
 			slotKey: slot.key,
 			chainId: chain.id,
 			chainName: chain.name,
 			itemId: item.id,
-			issueNumber: item.issueNumber,
+			id: item.itemId,
 			reason: message,
 			toStatus: item.status,
 		})
@@ -1706,14 +1714,17 @@ function chainCompletionFingerprint(chain: ChainRecord, items: readonly ItemReco
 		items: items
 			.map((item) => ({
 				id: item.id,
-				issueNumber: item.issueNumber,
+				// #419: fingerprint replaces `issueNumber` (integer) with the opaque preset
+				// `itemId` string and removes the top-level `branch` / `pr` projections —
+				// presets that need them declare them in `[item.fields]` and they round-trip
+				// through the included `extra` JSON, so a chain-complete decision driven by
+				// branch/pr churn still sees them inside `extra` and the fingerprint covers it.
+				itemId: item.itemId,
 				repoCwd: item.repoCwd,
 				status: item.status,
 				attempts: item.attempts,
 				title: item.title,
 				priority: item.priority,
-				branch: item.branch,
-				pr: item.pr,
 				lastRunId: item.lastRunId,
 				sessionIds: item.sessionIds,
 				issueFile: item.issueFile,
@@ -2014,7 +2025,7 @@ export function buildSchedulerResolveContext(input: {
 	runner?: AgentRunnerKind
 }): ResolveContext {
 	const chainPaths = resolveChainRuntimePaths(input.chain.name, input.loopDataRootOptions)
-	const evidenceDir = resolveItemEvidenceDir(input.item, chainPaths.chainRoot, chainPaths.issueEvidenceDir(input.item.issueNumber))
+	const evidenceDir = resolveItemEvidenceDir(input.item, chainPaths.chainRoot, chainPaths.issueEvidenceDir(input.item.itemId))
 	const currentIssueFile = resolveOptionalItemIssueFile(input.item, chainPaths.chainRoot)
 	const resume = input.resume ?? (input.runner === undefined ? freshResume() : resumeDecisionForItem(input.item, input.phase.name, input.runner))
 	const resumedSessionId = resume.kind === "resume" ? resume.sessionId : ""
@@ -2215,8 +2226,10 @@ async function writeSchedulerRunStatus(
 		runId: input.runId,
 		chainId: input.chain.id,
 		chainName: input.chain.name,
-		itemId: input.item.id,
-		issueNumber: input.item.issueNumber,
+		// #419: split rowid (`rowId`) and opaque preset id (`itemId`). `itemId` was the rowid
+		// pre-#419; both fields now travel so supervisor consumers see one consistent shape.
+		rowId: input.item.id,
+		itemId: input.item.itemId,
 		phase: input.phase,
 		pid: input.pid,
 		processGroupLeader: input.pid !== null,

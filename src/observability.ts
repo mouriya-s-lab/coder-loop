@@ -92,7 +92,8 @@ const ObservabilityEventTypeBoundary = arkType.or(
 	// phase-exit selection (i.e., NOT operator-direct chain.stop). Reading the lifecycle stream
 	// gives `(timestamp, who, why)` for every chain stop: operator path emits only `chain.status`;
 	// phase-exit path emits `chain.status` plus this lifecycle event with the originating
-	// (runId, phase, itemId, issueNumber) bound.
+	// (runId, phase, itemId) bound. #419 retired the integer `issueNumber` field —
+	// the opaque preset-declared `itemId` string is the canonical id.
 	arkType.unit("chain.stop.from_phase_exit"),
 	// #407: item.add / item.batchAdd per-phase rights admission. One event per create request
 	// (allow or deny). Operator path emits with reason=operator; agent path emits with
@@ -200,15 +201,21 @@ const ExcerptBoundary = arkType({
 	stderr: ExcerptSourceBoundary,
 })
 
+// #419: split the integer rowid (`rowId`) from the opaque preset-declared id (`itemId` string).
+// Same shape change applied across every audit / lifecycle payload below.
 const RecoveredItemBoundary = arkType({
-	itemId: "number",
-	issueNumber: "number",
+	rowId: "number",
+	itemId: "string",
 	fromStatus: "string",
 	toStatus: "string",
 })
 
 const ReconciledRunBoundary = arkType({
 	runId: "string",
+	// `itemId` here is the integer rowid (FK to items.id) — `runs.item_id`. Kept as `itemId` for
+	// back-compat with the run-record shape; the per-item-update audit payloads use `rowId` /
+	// `itemId` split (rowid + opaque string) — `runs` does not yet need the opaque string in this
+	// shape because it references items by rowid through the FK column.
 	itemId: "number",
 	phase: "string",
 	"pid": arkType.or("number", "null"),
@@ -240,19 +247,19 @@ const ObservabilityEventBoundary = arkType.or(
 		...EventBaseBoundary,
 		kind: arkType.unit("audit"),
 		type: arkType.unit("item.created"),
-		payload: { itemId: "number", issueNumber: "number", status: "string" },
+		payload: { rowId: "number", itemId: "string", status: "string" },
 	},
 	{
 		...EventBaseBoundary,
 		kind: arkType.unit("audit"),
 		type: arkType.unit("item.status"),
-		payload: { itemId: "number", issueNumber: "number", fromStatus: "string", toStatus: "string", reason: "string" },
+		payload: { rowId: "number", itemId: "string", fromStatus: "string", toStatus: "string", reason: "string" },
 	},
 	{
 		...EventBaseBoundary,
 		kind: arkType.unit("audit"),
 		type: arkType.unit("item.reordered"),
-		payload: { itemId: "number", issueNumber: "number", position: "number" },
+		payload: { rowId: "number", itemId: "string", position: "number" },
 	},
 	{
 		...EventBaseBoundary,
@@ -425,7 +432,7 @@ const ObservabilityEventBoundary = arkType.or(
 		...EventBaseBoundary,
 		kind: arkType.unit("validation"),
 		type: arkType.unit("spawn.aborted"),
-		payload: { slotKey: "string", chainId: "number", issueNumber: "number", reason: "string", toStatus: "string" },
+		payload: { slotKey: "string", chainId: "number", id: "string", reason: "string", toStatus: "string" },
 	},
 	{
 		...EventBaseBoundary,
@@ -503,8 +510,8 @@ const ObservabilityEventBoundary = arkType.or(
 		// of the issue's threat-model branches (stale credential after run end; cross-item write
 		// from a parallel slot; CLI flags shipped without env-borne credential).
 		payload: {
-			itemId: "number",
-			issueNumber: "number",
+			rowId: "number",
+			itemId: "string",
 			"claimedRunId": arkType.or("string", "null"),
 			"claimedPhase": arkType.or("string", "null"),
 			outcome: arkType.or(arkType.unit("allow"), arkType.unit("deny")),
@@ -530,8 +537,8 @@ const ObservabilityEventBoundary = arkType.or(
 		// the active phase ([] when phase has no exits declared = default-deny under #397), and is
 		// always an empty list when phase is null (the per-phase leg does not run).
 		payload: {
-			itemId: "number",
-			issueNumber: "number",
+			rowId: "number",
+			itemId: "string",
 			"phase": arkType.or("string", "null"),
 			requestedStatus: "string",
 			declaredExits: "string[]",
@@ -554,8 +561,8 @@ const ObservabilityEventBoundary = arkType.or(
 		kind: arkType.unit("audit"),
 		type: arkType.unit("item.exit.selected"),
 		payload: {
-			itemId: "number",
-			issueNumber: "number",
+			rowId: "number",
+			itemId: "string",
 			phase: "string",
 			selectionKind: arkType.unit("chain-action"),
 			selectedAction: arkType.unit("stop"),
@@ -575,7 +582,7 @@ const ObservabilityEventBoundary = arkType.or(
 		type: arkType.unit("chain.stop.from_phase_exit"),
 		payload: {
 			chainId: "number",
-			issueNumber: "number",
+			id: "string",
 			alreadyStopped: "boolean",
 			terminatedRunIds: "string[]",
 		},
@@ -639,8 +646,8 @@ const ObservabilityEventBoundary = arkType.or(
 		kind: arkType.unit("audit"),
 		type: arkType.unit("item.update.field_write_admission"),
 		payload: {
-			itemId: "number",
-			issueNumber: "number",
+			rowId: "number",
+			itemId: "string",
 			"claimedPhase": arkType.or("string", "null"),
 			"presetName": arkType.or("string", "null"),
 			requestedFields: "string[]",

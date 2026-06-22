@@ -88,15 +88,18 @@ export type UpdateChainInput = Partial<Omit<CreateChainInput, "createdAt">> & {
 export type ItemRecord = {
 	id: number
 	chainId: number
-	issueNumber: number
+	// #419: item身份键不再焊死 `issue_number`。`itemId` 是 preset `idField` 声明语义下的字符串身份；
+	// 任何整数/字符串身份值在创建时进入 `extra.<idField>` (legacy migration 把 `issue_number` 整数列复制到
+	// `extra.issue` 字符串值)。物理表用 `item_id TEXT NOT NULL` + `UNIQUE (chain_id, item_id)`。
+	itemId: string
 	repoCwd: string
 	status: InternalStatus
 	attempts: number
 	position: number
 	title: string | null
 	priority: string | null
-	branch: string | null
-	pr: number | null
+	// #419: `branch` / `pr` 不再是引擎一等列。继续 import 它们的 preset (e.g. `gh-issue-pr-iteration`)
+	// 把它们声明在 `[item.fields]` 并经 `extra.branch` / `extra.pr` 透明字段读写；engine 只读 `extra`。
 	lastRunId: string | null
 	sessionIds: ItemSessionIds
 	issueFile: string | null
@@ -120,7 +123,10 @@ export type ItemSessionIds = Record<string, Partial<Record<AgentRunnerKind, stri
 
 export type CreateItemInput = {
 	chainId: number
-	issueNumber: number
+	// #419: opaque string item id (preset `idField`-valued). Persisted in `items.item_id` and
+	// uniqued per chain. `branch` / `pr` are no longer engine-typed and must travel as
+	// preset-declared keys inside `extra` for presets that need them.
+	itemId: string
 	repoCwd: string
 	// #397 default-deny gate: writing `status` to the store requires the `AdmittedItemStatus`
 	// brand, which is producible only via the daemon's request-flow gate
@@ -137,8 +143,6 @@ export type CreateItemInput = {
 	attempts?: number
 	title?: string | null
 	priority?: string | null
-	branch?: string | null
-	pr?: number | null
 	lastRunId?: string | null
 	sessionIds?: ItemSessionIds
 	issueFile?: string | null
@@ -152,7 +156,7 @@ export type CreateItemInput = {
 	statusUpdatedAt?: number
 }
 
-export type UpdateItemInput = Partial<Omit<CreateItemInput, "chainId" | "issueNumber" | "createdAt">> & {
+export type UpdateItemInput = Partial<Omit<CreateItemInput, "chainId" | "itemId" | "createdAt">> & {
 	updatedAt?: number
 }
 
@@ -217,8 +221,11 @@ export type ListDependencyWaitsInput = {
 }
 
 export type DependencyWaitReason = {
-	itemId: number
-	issueNumber: number
+	// `rowId` = the items.id integer rowid (referenced by `runs.item_id`); `itemId` = the preset
+	// `idField`-valued opaque string identity introduced in #419. Both are surfaced so callers
+	// can either route by rowid (engine internals) or by string id (preset-facing audit emissions).
+	rowId: number
+	itemId: string
 	repoCwd: string
 	dependsOn: number[]
 	unsatisfied: number[]
@@ -262,7 +269,8 @@ export type SqliteStateStore = {
 	createItem: (input: CreateItemInput) => ItemRecord
 	createItems: (input: readonly CreateItemInput[]) => ItemRecord[]
 	getItem: (id: number) => ItemRecord | null
-	getItemByIssue: (chainId: number, issueNumber: number) => ItemRecord | null
+	// #419: lookup by preset-declared opaque string id (formerly `issueNumber` integer).
+	getItemById: (chainId: number, itemId: string) => ItemRecord | null
 	listItems: (chainId: number) => ItemRecord[]
 	updateItem: (id: number, input: UpdateItemInput) => ItemRecord
 	reorderItem: (id: number, position: number) => ItemRecord[]
@@ -300,15 +308,16 @@ type ChainRow = {
 type ItemRow = {
 	id: number
 	chain_id: number
-	issue_number: number
+	// #419 schema v12: opaque string item id (preset `idField`-valued). Replaces `issue_number INTEGER`.
+	item_id: string
 	repo_cwd: string
 	status: string
 	attempts: number
 	position: number
 	title: string | null
 	priority: string | null
-	branch: string | null
-	pr: number | null
+	// #419 schema v12: `branch` / `pr` physical columns retired. Presets that still use them
+	// (e.g. `gh-issue-pr-iteration` declares them in `[item.fields]`) read/write via `extra`.
 	last_run_id: string | null
 	session_ids: string
 	issue_file: string | null
@@ -365,18 +374,19 @@ type MaxPositionRow = {
 	max_position: number | null
 }
 
+// #419 schema v12: `issue_number` (integer) → `item_id` (opaque string, preset `idField`-valued);
+// `branch` / `pr` physical columns retired (presets that still use them declare them in
+// `[item.fields]` and they round-trip through `extra`). UNIQUE re-anchored on `(chain_id, item_id)`.
 const ITEMS_TABLE_SCHEMA_SQL = `
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
-	issue_number INTEGER NOT NULL,
+	item_id TEXT NOT NULL,
 	repo_cwd TEXT NOT NULL,
 	status TEXT NOT NULL,
 	attempts INTEGER NOT NULL,
 	position INTEGER NOT NULL DEFAULT 0,
 	title TEXT,
 	priority TEXT,
-	branch TEXT,
-	pr INTEGER,
 	last_run_id TEXT,
 	session_ids TEXT NOT NULL DEFAULT '{}',
 	issue_file TEXT,
@@ -390,7 +400,7 @@ const ITEMS_TABLE_SCHEMA_SQL = `
 	created_at REAL NOT NULL,
 	updated_at REAL NOT NULL,
 	status_updated_at REAL NOT NULL,
-	UNIQUE (chain_id, issue_number)
+	UNIQUE (chain_id, item_id)
 `
 
 const STATE_INDEXES_SQL = `
@@ -456,6 +466,11 @@ CREATE TABLE IF NOT EXISTS current_runs (
 ${STATE_INDEXES_SQL}
 `
 
+// #419 v11→v12: items 物理层退出 GitHub 形状。items.`issue_number INTEGER NOT NULL` → `item_id TEXT NOT NULL`;
+// drop `branch TEXT` / `pr INTEGER` 物理列;`UNIQUE (chain_id, issue_number)` → `UNIQUE (chain_id, item_id)`.
+// 迁移把每行的 `issue_number` 整数复制为 `extra.issue` 字符串（兼容 `gh-issue-pr-iteration` 的 idField="issue"
+// 在 [item.fields] 声明 issue 透明字段后的读路径），同时把非 NULL 的 `branch`/`pr` 落到 `extra.branch`/`extra.pr`
+// 保留 gh-issue-pr-iteration 经透明字段使用它们的生产路径。Idempotent: 已经在新形状下的盘原样跳过。
 // #457: bumping to 11 — chains.umbrella_issue / umbrella_repo columns retired. The v10→v11
 // migration copies any non-null column values into the chain's metadata.bindings (as
 // umbrellaIssue / umbrellaRepo entries; column values win on conflict because they were the
@@ -463,7 +478,7 @@ ${STATE_INDEXES_SQL}
 // without those columns. Idempotent: rows already migrated (column values were NULL when the
 // migration runs) are left alone. The engine no longer reads these columns; bundled preset
 // resolves them via the declared-binding namespace (chain.umbrellaRepo / chain.umbrellaIssue).
-const STATE_SCHEMA_VERSION = 11
+const STATE_SCHEMA_VERSION = 12
 const V5_ITEM_SESSION_COLUMN = ["last", "session", "id"].join("_")
 // v9 moves preset declaration from chains.preset to items.preset / items.preset_path (#412).
 // Existing rows are back-filled from chains.preset so the engine resolves the legacy preset
@@ -569,10 +584,16 @@ function migrateStateSchema(db: Database): void {
 	const needsChainTableRebuild = needsChainTableRebuildForStopped
 		|| needsChainTableRebuildForNullablePreset
 		|| needsChainTableRebuildForUmbrellaColumnDrop
+	// #419 v11→v12: items.`issue_number` integer 列、`branch` / `pr` 物理列退役。任何还带这三列之一
+	// 的盘需要走 v12 rebuild —— 先把 `issue_number` 拷为 `extra.issue` 字符串、把非 NULL `branch`/`pr` 拷为
+	// `extra.branch` / `extra.pr`,再 swap 到只有 `item_id TEXT NOT NULL` + `UNIQUE (chain_id, item_id)` 的新表。
+	const needsItemTableRebuildForGitHubShapeRetire = stateSchemaExists(db)
+		&& (itemsTableHasColumn(db, "issue_number") || itemsTableHasColumn(db, "branch") || itemsTableHasColumn(db, "pr"))
 	if (
 		beforeVersion >= STATE_SCHEMA_VERSION
 		&& stateSchemaExists(db)
 		&& !needsChainTableRebuild
+		&& !needsItemTableRebuildForGitHubShapeRetire
 		&& itemsTableHasColumn(db, "phase")
 		&& itemsTableHasColumn(db, "session_ids")
 		&& itemsTableHasColumn(db, "position")
@@ -582,7 +603,7 @@ function migrateStateSchema(db: Database): void {
 		&& !itemsTableHasColumn(db, V5_ITEM_SESSION_COLUMN)
 		&& runsTableHasColumn(db, "status")
 	) return
-	if (needsItemTableRebuild || needsChainTableRebuild) db.exec("PRAGMA foreign_keys = OFF")
+	if (needsItemTableRebuild || needsChainTableRebuild || needsItemTableRebuildForGitHubShapeRetire) db.exec("PRAGMA foreign_keys = OFF")
 	try {
 		db.transaction(() => {
 			db.exec(STATE_SCHEMA_SQL)
@@ -633,6 +654,13 @@ function migrateStateSchema(db: Database): void {
 				migrateV5ItemSessionIds(db)
 				rebuildItemsTableForV6(db)
 			}
+			// #419 v11→v12: items GitHub-shape retire. Run AFTER the v5/v6 rebuild path above (which
+			// would otherwise re-create the table from the old SELECT list); the call below detects
+			// the legacy `issue_number` / `branch` / `pr` columns on whatever the current `items` table
+			// looks like, copies them into `extra`, then swaps to the v12 shape (item_id + no branch/pr).
+			if (itemsTableHasColumn(db, "issue_number") || itemsTableHasColumn(db, "branch") || itemsTableHasColumn(db, "pr")) {
+				migrateItemsToOpaqueItemId(db)
+			}
 			// #433 v9→v10: drop the retired top-level runner keys (`runner` and the role-named
 			// runner key, named at runtime via string concatenation per #456 to keep `src/` free of
 			// the role taxonomy literal) and rename the `config` wrapper to `bindings` on the
@@ -648,8 +676,124 @@ function migrateStateSchema(db: Database): void {
 			db.exec(`PRAGMA user_version = ${STATE_SCHEMA_VERSION}`)
 		}).immediate()
 	} finally {
-		if (needsItemTableRebuild || needsChainTableRebuild) db.exec("PRAGMA foreign_keys = ON")
+		if (needsItemTableRebuild || needsChainTableRebuild || needsItemTableRebuildForGitHubShapeRetire) db.exec("PRAGMA foreign_keys = ON")
 	}
+}
+
+// #419 v11→v12 migration: salvage `issue_number` (integer), `branch` (text) and `pr` (integer)
+// into the per-row `extra` JSON, then rebuild items in the v12 shape — `item_id TEXT NOT NULL` +
+// `UNIQUE (chain_id, item_id)`, no `branch` / `pr` physical columns. Idempotent: rows already in
+// v12 shape (no legacy columns) cause this whole function to be skipped at the call site.
+//
+// Identity migration rule:
+//   - if the row's `extra` already carries a string at the preset-declared idField key, prefer it
+//     (post-#412 a row may have been created against a non-GitHub preset and still carry the
+//     historical `issue_number` integer column from a pre-rebuild migration step);
+//   - otherwise stringify `issue_number` (the historical default for `gh-issue-pr-iteration`,
+//     whose `idField = "issue"`, and the only writer of `issue_number` before this rebuild).
+//
+// We do not invent an `idField` here — the migration cannot know the preset; we instead always
+// write the stringified `issue_number` to **both** `extra.issue` (the legacy GitHub-shape default
+// idField) and leave any existing `extra.<other-id-key>` untouched. Item rows whose original
+// preset's idField was not `"issue"` (e.g. `single-phase-example` with `idField = "id"`) already
+// stored the real id under `extra.id` before this migration runs (per the existing back-fill at
+// `statusItemSnapshot`), so we copy `extra.id` into the new `item_id` column when present and
+// fall back to the stringified `issue_number` otherwise.
+function migrateItemsToOpaqueItemId(db: Database): void {
+	type LegacyItemRow = {
+		id: number
+		issue_number: number | null
+		branch: string | null
+		pr: number | null
+		extra: string
+	}
+	// SELECT only the columns we know exist on whatever the current items table shape is. We
+	// reach for them via PRAGMA-style fall-through: if the column is gone (idempotent re-run
+	// caught by the outer guard), we'd never enter this function. Inside we always have all three.
+	const rows = db.query<LegacyItemRow, []>("SELECT id, issue_number, branch, pr, extra FROM items").all()
+	for (const row of rows) {
+		let parsed: unknown
+		try {
+			parsed = JSON.parse(row.extra)
+		} catch {
+			parsed = {}
+		}
+		// Narrow `parsed` to the project's `JsonObject` shape via the established structural guard.
+		// `isJsonObject` is the same narrower used elsewhere in this module (e.g.
+		// `migrateChainsUmbrellaToBindings`); reusing it keeps the migration on the JsonObject
+		// contract without an `as` cast on the `unknown` input.
+		const extra: JsonObject = isJsonObject(parsed) ? { ...parsed } : {}
+		const issueAsString = row.issue_number === null ? null : String(row.issue_number)
+		if (issueAsString !== null && extra.issue === undefined) {
+			extra.issue = issueAsString
+		}
+		if (row.branch !== null && extra.branch === undefined) {
+			extra.branch = row.branch
+		}
+		if (row.pr !== null && extra.pr === undefined) {
+			extra.pr = row.pr
+		}
+		// Choose the row's new opaque item_id: prefer an existing string/number in `extra.id`
+		// (used by `idField = "id"` presets), else `extra.issue` if it round-trips through
+		// JSON as a string, else the stringified `issue_number` column. The migration cannot
+		// know the preset; this fall-through covers every preset shipped today.
+		let nextItemId: string | null = null
+		const existingExtraId = extra.id
+		if (typeof existingExtraId === "string" && existingExtraId.length > 0) {
+			nextItemId = existingExtraId
+		} else if (typeof existingExtraId === "number" && Number.isFinite(existingExtraId)) {
+			nextItemId = String(existingExtraId)
+		} else {
+			const existingExtraIssue = extra.issue
+			if (typeof existingExtraIssue === "string" && existingExtraIssue.length > 0) {
+				nextItemId = existingExtraIssue
+			} else if (typeof existingExtraIssue === "number" && Number.isFinite(existingExtraIssue)) {
+				nextItemId = String(existingExtraIssue)
+			} else if (issueAsString !== null) {
+				nextItemId = issueAsString
+			}
+		}
+		if (nextItemId === null || nextItemId.length === 0) {
+			throw new SqliteStateError("invalid_json", `items.${row.id}: cannot derive opaque item id during v11→v12 migration (no extra.id / extra.issue / issue_number)`, { id: row.id })
+		}
+		db.query<unknown, SqlParams>("UPDATE items SET extra = $extra WHERE id = $id").run({
+			id: row.id,
+			extra: JSON.stringify(extra),
+		})
+		// Stash the resolved item id in a session-only temp column we will read inside the
+		// items_new INSERT below; do this by writing it to a sentinel key inside extra and
+		// reading it back via json_extract. Avoids needing a separate Map between transactions.
+		db.query<unknown, SqlParams>("UPDATE items SET extra = json_set(extra, '$.__migrate_v12_item_id', $itemId) WHERE id = $id").run({
+			id: row.id,
+			itemId: nextItemId,
+		})
+	}
+	rebuildItemsTableForV12(db)
+}
+
+function rebuildItemsTableForV12(db: Database): void {
+	// New columns mirror the v12 ITEMS_TABLE_SCHEMA_SQL above (no branch / no pr; item_id replaces
+	// issue_number). The temp sentinel inside `extra.__migrate_v12_item_id` (written in
+	// `migrateItemsToOpaqueItemId`) supplies the new item_id; we strip it back out in the same
+	// statement to avoid leaking the sentinel into v12 rows.
+	db.exec(`CREATE TABLE items_new (${ITEMS_TABLE_SCHEMA_SQL})`)
+	db.exec(`INSERT INTO items_new (
+		id, chain_id, item_id, repo_cwd, status, attempts, position, title, priority, last_run_id,
+		session_ids, issue_file, evidence_dir, agent_cwd, runner, phase, preset, preset_path, extra,
+		created_at, updated_at, status_updated_at
+	)
+	SELECT
+		id, chain_id,
+		json_extract(extra, '$.__migrate_v12_item_id') AS item_id,
+		repo_cwd, status, attempts, position, title, priority, last_run_id,
+		session_ids, issue_file, evidence_dir, agent_cwd, runner, phase, preset, preset_path,
+		json_remove(extra, '$.__migrate_v12_item_id') AS extra,
+		created_at, updated_at, status_updated_at
+	FROM items`)
+	db.exec("DROP TABLE items")
+	db.exec("ALTER TABLE items_new RENAME TO items")
+	db.exec(STATE_INDEXES_SQL)
+	db.exec(ITEM_NEXT_PENDING_INDEX_SQL)
 }
 
 // Renamed from `rebuildChainsTableForV9` — #457's v10→v11 retires `umbrella_issue` / `umbrella_repo`
@@ -811,7 +955,12 @@ function migrateChainsMetadataForCl433(db: Database): void {
 
 function rebuildItemsTableForV6(db: Database): void {
 	// v9 (#412) added `preset` / `preset_path`; preserve them across rebuild for chains whose
-	// items have already been back-filled.
+	// items have already been back-filled. The legacy v5/v6 rebuild path runs ONLY when a v5-shaped
+	// session column is present on the source items table. Because v5-shape disks predate #419 by
+	// many versions, the source table here still carries the historical `issue_number` / `branch`
+	// / `pr` columns; copy them through unchanged. The subsequent v11→v12 retire step
+	// (`migrateItemsToOpaqueItemId`) handles the actual GitHub-shape salvage + rebuild and is
+	// gated by the same legacy-column presence check.
 	const columns = [
 		"id",
 		"chain_id",
@@ -838,11 +987,45 @@ function rebuildItemsTableForV6(db: Database): void {
 		"updated_at",
 		"status_updated_at",
 	].join(", ")
-	db.exec(`CREATE TABLE items_new (${ITEMS_TABLE_SCHEMA_SQL})`)
+	// Issue an intermediate-shape table that still carries the v5/v6 columns. The v12 ITEMS_TABLE_SCHEMA_SQL
+	// (which doesn't carry branch/pr/issue_number) cannot be used here directly because
+	// migrateItemsToOpaqueItemId hasn't yet run to salvage those values into extra. We build a
+	// transient legacy schema for this rebuild only.
+	const LEGACY_ITEMS_TABLE_SCHEMA_SQL = `
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+		issue_number INTEGER NOT NULL,
+		repo_cwd TEXT NOT NULL,
+		status TEXT NOT NULL,
+		attempts INTEGER NOT NULL,
+		position INTEGER NOT NULL DEFAULT 0,
+		title TEXT,
+		priority TEXT,
+		branch TEXT,
+		pr INTEGER,
+		last_run_id TEXT,
+		session_ids TEXT NOT NULL DEFAULT '{}',
+		issue_file TEXT,
+		evidence_dir TEXT,
+		agent_cwd TEXT,
+		runner TEXT CHECK (runner IN ('claude', 'codex') OR runner IS NULL),
+		phase TEXT,
+		preset TEXT,
+		preset_path TEXT,
+		extra TEXT NOT NULL,
+		created_at REAL NOT NULL,
+		updated_at REAL NOT NULL,
+		status_updated_at REAL NOT NULL,
+		UNIQUE (chain_id, issue_number)
+	`
+	db.exec(`CREATE TABLE items_new (${LEGACY_ITEMS_TABLE_SCHEMA_SQL})`)
 	db.exec(`INSERT INTO items_new (${columns}) SELECT ${columns} FROM items`)
 	db.exec("DROP TABLE items")
 	db.exec("ALTER TABLE items_new RENAME TO items")
-	db.exec(STATE_INDEXES_SQL)
+	// Don't issue STATE_INDEXES_SQL here — it would target the v12 schema's column names. The
+	// subsequent v11→v12 step (`migrateItemsToOpaqueItemId` → `rebuildItemsTableForV12`) issues
+	// the indexes against the final v12 shape, and the caller's outer migrateStateSchema body
+	// also reissues STATE_INDEXES_SQL after the v12 swap completes.
 }
 
 function createSqliteStateStore(db: Database): SqliteStateStore {
@@ -944,12 +1127,12 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 
 		getItem: (id) => read("get item", () => rowToItem(getItemRow(id))),
 
-		getItemByIssue: (chainId, issueNumber) =>
-			read("get item by issue", () =>
+		getItemById: (chainId, itemId) =>
+			read("get item by id", () =>
 				rowToItem(
-					db.query<ItemRow, SqlParams>("SELECT * FROM items WHERE chain_id = $chainId AND issue_number = $issueNumber").get({
+					db.query<ItemRow, SqlParams>("SELECT * FROM items WHERE chain_id = $chainId AND item_id = $itemId").get({
 						chainId: chainId,
-						issueNumber: issueNumber,
+						itemId: itemId,
 					}),
 				),
 			),
@@ -972,8 +1155,9 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 					attempts: input.attempts ?? current.attempts,
 					title: input.title === undefined ? current.title : input.title,
 					priority: input.priority === undefined ? current.priority : input.priority,
-					branch: input.branch === undefined ? current.branch : input.branch,
-					pr: input.pr === undefined ? current.pr : input.pr,
+					// #419: `branch` / `pr` are no longer engine-typed fields. Preset-declared transparent
+					// fields with those names round-trip via the `extra` JSON (gh-issue-pr-iteration's
+					// `[item.fields]` already declares them).
 					lastRunId: input.lastRunId === undefined ? current.lastRunId : input.lastRunId,
 					sessionIds: input.sessionIds === undefined ? current.sessionIds : normalizeItemSessionIds(input.sessionIds),
 					issueFile: input.issueFile === undefined ? current.issueFile : input.issueFile,
@@ -993,7 +1177,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 				db.query<unknown, SqlParams>(`
 					UPDATE items
 					SET repo_cwd = $repoCwd, status = $status, attempts = $attempts, position = $position, title = $title,
-						priority = $priority, branch = $branch, pr = $pr, last_run_id = $lastRunId,
+						priority = $priority, last_run_id = $lastRunId,
 						session_ids = $sessionIds, issue_file = $issueFile, evidence_dir = $evidenceDir, agent_cwd = $agentCwd,
 						runner = $runner, phase = $phase, preset = $preset, preset_path = $presetPath,
 						extra = $extra, updated_at = $updatedAt, status_updated_at = $statusUpdatedAt
@@ -1185,28 +1369,29 @@ function insertItem(db: Database, getItemRow: (id: number) => ItemRow | null, in
 	const statusUpdatedAt = input.statusUpdatedAt ?? updatedAt
 	const position = nextItemPosition(db, input.chainId)
 	const status = parseInternalStatus(input.status, "items.status")
+	if (input.itemId === "") {
+		throw new SqliteStateError("invalid_input", "items.itemId must be a non-empty string", { chainId: input.chainId })
+	}
 	const result = db.query<unknown, SqlParams>(`
 		INSERT INTO items (
-			chain_id, issue_number, repo_cwd, status, attempts, position, title, priority, branch, pr, last_run_id,
+			chain_id, item_id, repo_cwd, status, attempts, position, title, priority, last_run_id,
 			session_ids, issue_file, evidence_dir, agent_cwd, runner, phase, preset, preset_path, extra,
 			created_at, updated_at, status_updated_at
 		)
 		VALUES (
-			$chainId, $issueNumber, $repoCwd, $status, $attempts, $position, $title, $priority, $branch, $pr, $lastRunId,
+			$chainId, $itemId, $repoCwd, $status, $attempts, $position, $title, $priority, $lastRunId,
 			$sessionIds, $issueFile, $evidenceDir, $agentCwd, $runner, $phase, $preset, $presetPath, $extra,
 			$createdAt, $updatedAt, $statusUpdatedAt
 		)
 	`).run({
 		chainId: input.chainId,
-		issueNumber: input.issueNumber,
+		itemId: input.itemId,
 		repoCwd: input.repoCwd,
 		status,
 		attempts: input.attempts ?? 0,
 		position: position,
 		title: input.title ?? null,
 		priority: input.priority ?? null,
-		branch: input.branch ?? null,
-		pr: input.pr ?? null,
 		lastRunId: input.lastRunId ?? null,
 		sessionIds: stringifyItemSessionIds(input.sessionIds ?? {}),
 		issueFile: input.issueFile ?? null,
@@ -1232,15 +1417,13 @@ function rowToItem(row: ItemRow | null): ItemRecord | null {
 	return {
 		id: row.id,
 		chainId: row.chain_id,
-		issueNumber: row.issue_number,
+		itemId: row.item_id,
 		repoCwd: row.repo_cwd,
 		status: parseInternalStatus(row.status, `items.${row.id}.status`),
 		attempts: row.attempts,
 		position: row.position,
 		title: row.title,
 		priority: row.priority,
-		branch: row.branch,
-		pr: row.pr,
 		lastRunId: row.last_run_id,
 		sessionIds: parseItemSessionIds(row.session_ids, `items.${row.id}.session_ids`),
 		issueFile: row.issue_file,
@@ -1330,8 +1513,6 @@ function itemParams(item: ItemRecord): SqlParams {
 		position: item.position,
 		title: item.title,
 		priority: item.priority,
-		branch: item.branch,
-		pr: item.pr,
 		lastRunId: item.lastRunId,
 		sessionIds: stringifyItemSessionIds(item.sessionIds),
 		issueFile: item.issueFile,
@@ -1408,8 +1589,8 @@ function dependencyWaitsByItemId(
 		})
 		if (unsatisfied.length === 0) continue
 		waits.set(item.id, {
-			itemId: item.id,
-			issueNumber: item.issueNumber,
+			rowId: item.id,
+			itemId: item.itemId,
 			repoCwd: item.repoCwd,
 			dependsOn,
 			unsatisfied,

@@ -133,7 +133,7 @@ test("worktree create failure is contained: backoff + schedulerSpawnError in ext
 		const chain = makeChain(store, "containment-chain")
 		const item = store.createItem({
 			chainId: chain.id,
-			issueNumber: 466_001,
+			itemId: "466001",
 			repoCwd: REPO_ROOT,
 			status: runtimeStatus("queued"),
 			attempts: 0,

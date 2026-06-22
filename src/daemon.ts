@@ -195,8 +195,12 @@ export type PresetPhasePrivilegedOp = (typeof PRESET_PHASE_PRIVILEGED_OPS)[numbe
 export const PRESET_PHASE_RIGHTS_CONTROL_PLANE_FIELDS = ["repoCwd", "runner", "dependsOn", "priority"] as const
 export type ItemUpdateControlPlaneField = (typeof PRESET_PHASE_RIGHTS_CONTROL_PLANE_FIELDS)[number]
 // Passthrough = the agent-grantable subset. `extra` / `extraPatch` are aggregates and are NOT in
-// either set — their grant happens via the inner-key expansion against `writableFields`.
-const PRESET_PHASE_RIGHTS_PASSTHROUGH_FIELDS = ["title", "branch", "pr", "issueFile", "evidenceDir"] as const
+// either set — their grant happens via the inner-key expansion against `writableFields`. #419:
+// `branch` / `pr` retired from the top-level passthrough set; presets that need to grant them now
+// declare them in `[item.fields]` and the agent writes via `extraPatch` (the same gate matrix
+// runs through the extra-inner expansion path in `collectItemUpdateFieldKeys`, so the per-phase
+// `writableFields` declaration on review continues to authorize them).
+const PRESET_PHASE_RIGHTS_PASSTHROUGH_FIELDS = ["title", "issueFile", "evidenceDir"] as const
 type ItemUpdatePassthroughField = (typeof PRESET_PHASE_RIGHTS_PASSTHROUGH_FIELDS)[number]
 
 // #410 the exhaustive classification verdict for `ItemUpdateFieldName`. Reading any update
@@ -217,8 +221,6 @@ export function classifyItemUpdateField(field: ItemUpdateFieldName): ItemUpdateF
 		case "priority":
 			return { kind: "control-plane", field }
 		case "title":
-		case "branch":
-		case "pr":
 		case "issueFile":
 		case "evidenceDir":
 			return { kind: "passthrough", field }
@@ -321,12 +323,14 @@ const ITEM_ADD_ARG_KEYS = [
 	"chainId",
 	"chainName",
 	"name",
-	"issueNumber",
+	// #419: opaque string item id (replaces `issueNumber` integer wire field).
+	"itemId",
 	"repoCwd",
 	"title",
 	"priority",
-	"branch",
-	"pr",
+	// #419: `branch` / `pr` are retired from the top-level item.add wire. Presets that declare
+	// them in `[item.fields]` (e.g. `gh-issue-pr-iteration`) accept them via the `extra` carrier
+	// instead — same admission path as any other preset-declared transparent field.
 	"issueFile",
 	"evidenceDir",
 	"runner",
@@ -345,20 +349,29 @@ const ITEM_ADD_ARG_KEYS = [
 // once) — explicitly NOT per-item, so it is removed from `ITEM_BATCH_ADD_ITEM_KEYS` below.
 const ITEM_BATCH_ADD_ARG_KEYS = ["chainId", "chainName", "name", "items", "agentCredential"] as const
 const ITEM_BATCH_ADD_ITEM_KEYS = ITEM_ADD_ARG_KEYS.filter((key) => key !== "chainId" && key !== "chainName" && key !== "name" && key !== "agentCredential")
-const ITEM_UPDATE_SELECTOR_KEYS = ["itemId", "chainId", "chainName", "name", "issueNumber"] as const
+// #419: itemId here is the opaque string preset-id identifier (string), distinct from the rowid
+// integer selector that the daemon also accepts. Both are routed in `resolveItem`: a numeric
+// `itemId` is the rowid; a string `itemId` is the preset-declared opaque identity. The legacy
+// `issueNumber` wire selector is retired (no compatibility alias — wire is breaking-renamed per
+// #456 precedent).
+const ITEM_UPDATE_SELECTOR_KEYS = ["itemId", "chainId", "chainName", "name"] as const
 // #410 exported: the engine's compile-time vocabulary of writable item-update fields. The
 // per-phase field-write gate (`gateItemUpdateFieldWrites`) exhausts this union — adding a new
 // entry forces a classification verdict in `classifyItemUpdateField`, which the typechecker
 // enforces via `assertNever`. Preset authors only see this vocabulary indirectly through the
 // `[phases.rights] writableFields` declaration; the engine refuses any name in `writableFields`
 // that classifies as control-plane (see `PRESET_PHASE_RIGHTS_CONTROL_PLANE_FIELDS` below).
+// #419: `branch` / `pr` retired from the top-level item.update field vocabulary. Presets that
+// declare them in `[item.fields]` (gh-issue-pr-iteration ships with `branch = "string"` / `pr =
+// "number"`) now route writes through the `extra` / `extraPatch` aggregate path; the same gate
+// matrix expands the inner keys and checks them against the caller-phase's `writableFields`, so
+// gh-issue-pr-iteration's `phases.rights.writableFields = ["branch", "pr", ...]` continues to
+// authorize review-phase writes without any admission-gate code change.
 export const ITEM_UPDATE_FIELD_KEYS = [
 	"repoCwd",
 	"status",
 	"title",
 	"priority",
-	"branch",
-	"pr",
 	"issueFile",
 	"evidenceDir",
 	"runner",
@@ -532,7 +545,7 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 				chain: chain.name,
 				item: event.itemId,
 				subject: { kind: "engine" },
-				payload: { slotKey: event.slotKey, chainId: event.chainId, issueNumber: event.issueNumber, reason: event.reason, toStatus: event.toStatus },
+				payload: { slotKey: event.slotKey, chainId: event.chainId, id: event.id, reason: event.reason, toStatus: event.toStatus },
 			})
 		case "chain.complete_trigger":
 			return makeObservabilityEvent({
@@ -1130,7 +1143,8 @@ export class CoderLoopDaemon {
 				// Agent path: resolve the operating chain → item → preset to find the
 				// caller-phase's `[phases.rights] privilegedOps` grant. Today only `item.reorder`
 				// is per-phase-authorized, and the request always carries an item selector
-				// (`itemId` or `chainName`+`issueNumber`), so the item-resolve succeeds in the
+				// (`itemId` — opaque preset-declared string id since #419; numeric rowid is also
+				// accepted via the same `itemId` field), so the item-resolve succeeds in the
 				// happy path. #409 retry: wrap the resolution chain so any throw (missing item,
 				// missing chain, preset load failure) emits a `privileged_op.caller_admission`
 				// deny event BEFORE re-throwing — mirrors the hard-deny branch shape at lines
@@ -1473,8 +1487,8 @@ export class CoderLoopDaemon {
 						reason: "stale_current_run",
 						pid: stalePid,
 						recoveredItems: itemsToRecover.map((item) => ({
-							itemId: item.id,
-							issueNumber: item.issueNumber,
+							rowId: item.id,
+							itemId: item.itemId,
 							fromStatus: item.status,
 							toStatus: recoveryStatus,
 						})),
@@ -1490,8 +1504,8 @@ export class CoderLoopDaemon {
 						runId: currentRun.runId,
 						subject: { kind: "engine" },
 						payload: {
-							itemId: item.id,
-							issueNumber: item.issueNumber,
+							rowId: item.id,
+							itemId: item.itemId,
 							fromStatus: item.status,
 							toStatus: recoveryStatus,
 							reason: "stale_current_run_recovery",
@@ -1576,11 +1590,13 @@ export class CoderLoopDaemon {
 		const continuableStatusNames = [...pendingStatusSet]
 		const terminalStatusNames = [...terminalStatusSet]
 		const dependencyWaits = listDependencyWaitReasons(items, { statuses: continuableStatusNames, terminalStatusNames })
-		const dependencyWaitsByItemId = new Map(dependencyWaits.map((wait) => [wait.itemId, wait]))
+		// #419: key by `rowId` (items.id integer). `wait.itemId` is now the opaque preset id
+		// string, which is unique per chain but not what items.id collates against.
+		const dependencyWaitsByRowId = new Map(dependencyWaits.map((wait) => [wait.rowId, wait]))
 		return {
 			chain: chainToJson(chain),
 			summary: chainStatusSummary(chain, items, activeRuns, dependencyWaits),
-			items: items.map((item) => itemToJson(item, dependencyWaitsByItemId.get(item.id) ?? null)),
+			items: items.map((item) => itemToJson(item, dependencyWaitsByRowId.get(item.id) ?? null)),
 			activeRuns: activeRuns.map(activeRunToJson),
 		}
 	}
@@ -1751,17 +1767,17 @@ export class CoderLoopDaemon {
 		const issue = issueRaw.trim()
 		if (issue === "") throw new DaemonError("invalid_request", "queue.unblock: issue must not be empty")
 		if (/\s/.test(issue)) throw new DaemonError("invalid_request", "queue.unblock: issue must not contain whitespace", { issue: issueRaw })
-		const issueNumberRaw = Number(issue.startsWith("#") ? issue.slice(1) : issue)
-		if (!Number.isInteger(issueNumberRaw) || issueNumberRaw <= 0) {
-			throw new DaemonError("invalid_request", `queue.unblock: --issue must resolve to a positive integer`, { issue: issueRaw })
-		}
-		const issueNumber = issueNumberRaw
+		// #419: opaque item id (string). Historical `#123` shorthand still maps to the literal id
+		// without the `#` prefix so operators don't have to think about whether their preset uses
+		// numeric ids; the preset-declared idField decides what's valid downstream.
+		const itemId = issue.startsWith("#") ? issue.slice(1) : issue
+		if (itemId === "") throw new DaemonError("invalid_request", `queue.unblock: issue must contain an id after #`, { issue: issueRaw })
 		const dryRun = optionalBoolean(args, "dryRun") ?? false
 		const { preset } = await this.loadedPresetForChain(chain, "queue.unblock")
 		const store = this.requireStore()
-		const item = store.getItemByIssue(chain.id, issueNumber)
+		const item = store.getItemById(chain.id, itemId)
 		if (item === null) {
-			throw new DaemonError("not_found", `queue.unblock: issue ${issue} not found in chain ${chain.name}`, { chainName: chain.name, issueNumber })
+			throw new DaemonError("not_found", `queue.unblock: item ${issue} not found in chain ${chain.name}`, { chainName: chain.name, itemId })
 		}
 		if (!preset.statuses.unblockable.includes(item.status)) {
 			return {
@@ -1800,8 +1816,8 @@ export class CoderLoopDaemon {
 				item: item.id,
 				subject: { kind: "operator" },
 				payload: {
-					itemId: item.id,
-					issueNumber,
+					rowId: item.id,
+					itemId,
 					claimedRunId: null,
 					claimedPhase: null,
 					outcome: "allow",
@@ -1889,13 +1905,13 @@ export class CoderLoopDaemon {
 		const store = this.requireStore()
 		const existingItems = store.listItems(chain.id)
 		const input = await this.buildCreateItemInput(chain, args, existingItems, "item.add")
-		const existing = store.getItemByIssue(chain.id, input.issueNumber)
-		if (existing !== null) throw duplicateItemAddError(chain, input.issueNumber, existing)
+		const existing = store.getItemById(chain.id, input.itemId)
+		if (existing !== null) throw duplicateItemAddError(chain, input.itemId, existing)
 		let item: ItemRecord
 		try {
 			item = store.createItem(input)
 		} catch (error) {
-			throw this.translateCreateItemFailure(chain, input.issueNumber, error)
+			throw this.translateCreateItemFailure(chain, input.itemId, error)
 		}
 		// #407: emit `item.created` with the caller's true subject (operator | agent+run). The
 		// previous hard-coded `{ kind: "operator" }` lied about who created the item the moment
@@ -1911,7 +1927,7 @@ export class CoderLoopDaemon {
 			item: item.id,
 			...createdCallerExtras,
 			subject: caller.subject,
-			payload: { itemId: item.id, issueNumber: item.issueNumber, status: item.status },
+			payload: { rowId: item.id, itemId: item.itemId, status: item.status },
 		}))
 		this.queueSchedulerTick()
 		return { item: itemToJson(item) }
@@ -1937,25 +1953,25 @@ export class CoderLoopDaemon {
 		const caller = resolvedCaller.value
 		const existingItems = store.listItems(chain.id)
 		const inputs: CreateItemInput[] = []
-		const requestedIssues = new Set<number>()
+		const requestedIds = new Set<string>()
 		for (const [index, rawItem] of rawItems.entries()) {
 			validateKnownKeys(rawItem, `item.batchAdd items[${index}]`, ITEM_BATCH_ADD_ITEM_KEYS)
 			const presetSpec = await this.requireItemPresetForRequest(rawItem, `items[${index}]`)
 			await this.assertItemAddRightsForCaller(chain, caller, presetSpec, `items[${index}]`)
 			const input = await this.buildCreateItemInput(chain, rawItem, existingItems, `items[${index}]`)
-			if (requestedIssues.has(input.issueNumber)) {
-				throw new DaemonError("conflict", `batch contains duplicate issueNumber ${input.issueNumber}`, { chainId: chain.id, chainName: chain.name, issueNumber: input.issueNumber })
+			if (requestedIds.has(input.itemId)) {
+				throw new DaemonError("conflict", `batch contains duplicate itemId ${input.itemId}`, { chainId: chain.id, chainName: chain.name, itemId: input.itemId })
 			}
-			requestedIssues.add(input.issueNumber)
-			const existing = store.getItemByIssue(chain.id, input.issueNumber)
-			if (existing !== null) throw duplicateItemAddError(chain, input.issueNumber, existing)
+			requestedIds.add(input.itemId)
+			const existing = store.getItemById(chain.id, input.itemId)
+			if (existing !== null) throw duplicateItemAddError(chain, input.itemId, existing)
 			inputs.push(input)
 		}
 		let items: ItemRecord[]
 		try {
 			items = store.createItems(inputs)
 		} catch (error) {
-			const firstDuplicate = inputs.map((input) => [input.issueNumber, store.getItemByIssue(chain.id, input.issueNumber)] as const).find(([, existing]) => existing !== null)
+			const firstDuplicate = inputs.map((input) => [input.itemId, store.getItemById(chain.id, input.itemId)] as const).find(([, existing]) => existing !== null)
 			if (firstDuplicate !== undefined && firstDuplicate[1] !== null) throw duplicateItemAddError(chain, firstDuplicate[0], firstDuplicate[1])
 			throw error
 		}
@@ -1971,7 +1987,7 @@ export class CoderLoopDaemon {
 				item: item.id,
 				...createdCallerExtras,
 				subject: caller.subject,
-				payload: { itemId: item.id, issueNumber: item.issueNumber, status: item.status },
+				payload: { rowId: item.id, itemId: item.itemId, status: item.status },
 			}))
 		}
 		this.queueSchedulerTick()
@@ -1993,19 +2009,44 @@ export class CoderLoopDaemon {
 		// Load failures are surfaced per-chain so the standard `daemon.preset_load_failed` observability
 		// event fires and the error message stays consistent with chain-mutation paths.
 		const defaultStatus = await this.defaultItemStatusForPresetSpecOnChain(chain, presetSpec)
+		// #419: opaque-string item id is the wire-level identity. We back-fill it into `extra` under
+		// the preset-declared idField key so the standard binding pipeline (`getItemId` →
+		// `itemExtraJsonValue(idField)`) keeps resolving the per-issue `{{<idField>}}` placeholder
+		// without engine-side preset literals. `validateItemId` rejects empty / whitespace-bearing
+		// values and any extra carrier that already declares a conflicting idField value.
+		const itemIdRaw = validateItemId(requiredString(args, "itemId"))
+		const presetForIdField = await this.loadedPresetFromSpec(chain, presetSpec, label)
+		const idFieldKey = presetForIdField.preset.item.idField
+		const extraWithDependsOn = withDependsOn(rawExtra, dependsOn)
+		const existingIdInExtra = extraWithDependsOn[idFieldKey]
+		if (existingIdInExtra !== undefined) {
+			const asString = typeof existingIdInExtra === "string"
+				? existingIdInExtra
+				: typeof existingIdInExtra === "number" && Number.isFinite(existingIdInExtra)
+					? String(existingIdInExtra)
+					: null
+			if (asString === null || asString !== itemIdRaw) {
+				throw new DaemonError(
+					"invalid_request",
+					`${label}: extra.${idFieldKey} (${JSON.stringify(existingIdInExtra)}) conflicts with itemId (${JSON.stringify(itemIdRaw)})`,
+					{ field: `extra.${idFieldKey}` },
+				)
+			}
+		}
+		const extraWithIdField: JsonObject = { ...extraWithDependsOn, [idFieldKey]: itemIdRaw }
 		const input: CreateItemInput = {
 			chainId: chain.id,
-			issueNumber: requiredPositiveInteger(args, "issueNumber"),
+			itemId: itemIdRaw,
 			repoCwd: await validateRepoCwdForRequest(requiredString(args, "repoCwd")),
 			status: defaultStatus,
 			preset: presetSpec.preset,
 			presetPath: presetSpec.presetPath,
-			extra: validateItemExtra(withDependsOn(rawExtra, dependsOn)),
+			extra: validateItemExtra(extraWithIdField),
 		}
 		assignOptional(input, "title", validateItemTitleForRequest(optionalStringOrNull(args, "title")))
 		assignOptional(input, "priority", validateItemPriorityForRequest(optionalStringOrNull(args, "priority")))
-		assignOptional(input, "branch", validateItemBranchForRequest(optionalStringOrNull(args, "branch")))
-		assignOptional(input, "pr", validateItemPrForRequest(optionalIntegerOrNull(args, "pr")))
+		// #419: `branch` / `pr` no longer accepted as top-level item.add fields; presets that need
+		// them declare them in `[item.fields]` and the caller passes them inside `extra`.
 		assignOptional(input, "issueFile", validateRelativeItemPathForRequest(optionalStringOrNull(args, "issueFile"), "issueFile"))
 		assignOptional(input, "evidenceDir", validateEvidenceDirForRequest(optionalStringOrNull(args, "evidenceDir"), chain, this.paths.root))
 		assignOptional(input, "runner", optionalRunner(args, "runner"))
@@ -2041,10 +2082,10 @@ export class CoderLoopDaemon {
 		throw new DaemonError("invalid_request", `${label}: preset specification could not be resolved`, { field: "preset" })
 	}
 
-	private translateCreateItemFailure(chain: ChainRecord, issueNumber: number, error: unknown): never {
+	private translateCreateItemFailure(chain: ChainRecord, itemId: string, error: unknown): never {
 		try {
-			const existingAfterFailure = this.requireStore().getItemByIssue(chain.id, issueNumber)
-			if (existingAfterFailure !== null) throw duplicateItemAddError(chain, issueNumber, existingAfterFailure)
+			const existingAfterFailure = this.requireStore().getItemById(chain.id, itemId)
+			if (existingAfterFailure !== null) throw duplicateItemAddError(chain, itemId, existingAfterFailure)
 		} catch (lookupError) {
 			if (lookupError instanceof DaemonError) throw lookupError
 		}
@@ -2087,8 +2128,11 @@ export class CoderLoopDaemon {
 		}
 		assignOptional(input, "title", validateItemTitleForRequest(optionalStringOrNull(fields, "title")))
 		assignOptional(input, "priority", validateItemPriorityForRequest(optionalStringOrNull(fields, "priority")))
-		assignOptional(input, "branch", validateItemBranchForRequest(optionalStringOrNull(fields, "branch")))
-		assignOptional(input, "pr", validateItemPrForRequest(optionalIntegerOrNull(fields, "pr")))
+		// #419: `branch` / `pr` no longer accepted as top-level update fields. Presets that declare them
+		// in `[item.fields]` (gh-issue-pr-iteration does) accept them via the `extra` / `extraPatch`
+		// carriers below; `validateItemExtraInnerKeys` runs the same git-branch / positive-int shape
+		// checks the legacy top-level validators ran, so review-phase writes to `extra.branch` /
+		// `extra.pr` are validated identically to the pre-#419 top-level write.
 		assignOptional(input, "issueFile", validateRelativeItemPathForRequest(optionalStringOrNull(fields, "issueFile"), "issueFile"))
 		assignOptional(input, "evidenceDir", validateEvidenceDirForRequest(optionalStringOrNull(fields, "evidenceDir"), chain, this.paths.root))
 		assignOptional(input, "runner", optionalRunner(fields, "runner"))
@@ -2102,6 +2146,35 @@ export class CoderLoopDaemon {
 			: rawExtraPatch === undefined
 				? undefined
 				: { ...itemExtraToJsonObject(item.extra), ...rawExtraPatch }
+		// #419: when a write touches the extra-inner `branch` / `pr` keys (typical
+		// gh-issue-pr-iteration review-phase write), run the same shape validation the legacy
+		// top-level validators ran (git-branch grammar via `validateGitBranchNameForRequest`;
+		// positive-int via `validateItemPrForRequest`). The fields are now preset-declared
+		// transparent fields; the engine has no business-shape knowledge of them outside this
+		// validation block. The block fires off the carrier that actually carries the write
+		// (`rawExtra` for replacement, `rawExtraPatch` for patch) — both surface the inner key
+		// at the same level after the merge.
+		const extraInnerCarrier = rawExtra ?? rawExtraPatch
+		if (extraInnerCarrier !== undefined) {
+			if (Object.hasOwn(extraInnerCarrier, "branch")) {
+				const branchValue = extraInnerCarrier.branch
+				if (branchValue !== null && typeof branchValue === "string") {
+					validateGitBranchNameForRequest(branchValue, "extra.branch")
+				} else if (branchValue !== null) {
+					throw new DaemonError("invalid_request", "extra.branch must be a string or null", { field: "extra.branch" })
+				}
+			}
+			if (Object.hasOwn(extraInnerCarrier, "pr")) {
+				const prValue = extraInnerCarrier.pr
+				if (prValue !== null && typeof prValue === "number") {
+					if (!Number.isInteger(prValue) || prValue < 1) {
+						throw new DaemonError("invalid_request", "extra.pr must be a positive integer or null", { field: "extra.pr", value: prValue })
+					}
+				} else if (prValue !== null) {
+					throw new DaemonError("invalid_request", "extra.pr must be an integer or null", { field: "extra.pr" })
+				}
+			}
+		}
 		const topLevelDependsOn = optionalDependsOn(fields, "dependsOn")
 		const extraDependsOn = topLevelDependsOn === undefined && requestedExtra !== undefined ? optionalDependsOn(requestedExtra, "dependsOn") : undefined
 		const dependsOn = topLevelDependsOn === undefined ? extraDependsOn : topLevelDependsOn
@@ -2131,8 +2204,8 @@ export class CoderLoopDaemon {
 					...callerExtras,
 					subject: caller.subject,
 					payload: {
-						itemId: item.id,
-						issueNumber: item.issueNumber,
+						rowId: item.id,
+						itemId: item.itemId,
 						fromStatus: item.status,
 						toStatus: updated.status,
 						reason: "item.update",
@@ -2186,7 +2259,7 @@ export class CoderLoopDaemon {
 					? { runId: subject.runId, phase: subject.phase }
 					: {}),
 				subject,
-				payload: { itemId: item.id, issueNumber: item.issueNumber, position },
+				payload: { rowId: item.id, itemId: item.itemId, position },
 			}))
 			return { items: reordered.map((entry) => itemToJson(entry)) }
 		} finally {
@@ -2312,8 +2385,8 @@ export class CoderLoopDaemon {
 		switch (action) {
 			case "stop": {
 				const result = await this.performChainStopFromPhaseExit(chain, {
-					itemId: item.id,
-					issueNumber: item.issueNumber,
+					rowId: item.id,
+					itemId: item.itemId,
 					runId: agentRunId,
 					phase: agentPhase,
 					subject: caller.subject,
@@ -2328,7 +2401,7 @@ export class CoderLoopDaemon {
 	// #405: chain-action: stop dispatcher. Drives the same code path the
 	// operator `chain.stop` handler runs (state mutation + active-run termination
 	// + audit event) and then emits the lifecycle distinguisher.
-	private async performChainStopFromPhaseExit(chain: ChainRecord, source: { itemId: number; issueNumber: number; runId: string; phase: string; subject: ObservabilitySubject }): Promise<{ chain: ChainRecord; terminatedRuns: SchedulerCompletedRun[] }> {
+	private async performChainStopFromPhaseExit(chain: ChainRecord, source: { rowId: number; itemId: string; runId: string; phase: string; subject: ObservabilitySubject }): Promise<{ chain: ChainRecord; terminatedRuns: SchedulerCompletedRun[] }> {
 		const resumeScheduler = await this.pauseSchedulerForMutation()
 		try {
 			const store = this.requireStore()
@@ -2345,7 +2418,8 @@ export class CoderLoopDaemon {
 				kind: "audit",
 				type: "chain.status",
 				chain: stopped.name,
-				item: source.itemId,
+				// event.item is the items.id integer rowid (FK shape; matches `runs.item_id`).
+				item: source.rowId,
 				runId: source.runId,
 				phase: source.phase,
 				subject: source.subject,
@@ -2363,18 +2437,20 @@ export class CoderLoopDaemon {
 		}
 	}
 
-	private async recordChainStopFromPhaseExitLifecycle(chain: ChainRecord, source: { itemId: number; issueNumber: number; runId: string; phase: string; subject: ObservabilitySubject; alreadyStopped: boolean; terminatedRunIds: string[] }): Promise<void> {
+	private async recordChainStopFromPhaseExitLifecycle(chain: ChainRecord, source: { rowId: number; itemId: string; runId: string; phase: string; subject: ObservabilitySubject; alreadyStopped: boolean; terminatedRunIds: string[] }): Promise<void> {
 		await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
 			kind: "lifecycle",
 			type: "chain.stop.from_phase_exit",
 			chain: chain.name,
-			item: source.itemId,
+			// event.item is the items.id integer rowid (FK shape; matches `runs.item_id`).
+			item: source.rowId,
 			runId: source.runId,
 			phase: source.phase,
 			subject: source.subject,
 			payload: {
 				chainId: chain.id,
-				issueNumber: source.issueNumber,
+				// `id` here is the opaque preset-declared string id (formerly `issueNumber`).
+				id: source.itemId,
 				alreadyStopped: source.alreadyStopped,
 				terminatedRunIds: source.terminatedRunIds,
 			},
@@ -2404,8 +2480,8 @@ export class CoderLoopDaemon {
 			phase: input.phase,
 			subject: input.subject,
 			payload: {
-				itemId: input.item.id,
-				issueNumber: input.item.issueNumber,
+				rowId: input.item.id,
+				itemId: input.item.itemId,
 				phase: input.phase,
 				selectionKind: input.selection.kind,
 				selectedAction: input.selection.action,
@@ -2447,16 +2523,21 @@ export class CoderLoopDaemon {
 	}
 
 	private resolveItem(args: JsonObject): ItemRecord {
-		const itemId = optionalInteger(args, "itemId")
-		if (itemId !== null) {
-			const item = this.requireStore().getItem(itemId)
-			if (item === null) throw new DaemonError("not_found", `item ${itemId} was not found`, { itemId })
+		// #419: the `itemId` wire field accepts either a numeric rowid (engine-internal) or the
+		// preset-declared opaque string id (the only identity surface for agents / operators after
+		// the items table de-GitHub-shaping). Numbers route to `getItem(rowid)`; strings route via
+		// `getItemById(chain.id, itemId)` against the new `items.item_id` column. The legacy
+		// `issueNumber` integer selector is retired (breaking wire change, #456 precedent).
+		const rawItemId = args["itemId"]
+		if (typeof rawItemId === "number" && Number.isInteger(rawItemId) && rawItemId > 0) {
+			const item = this.requireStore().getItem(rawItemId)
+			if (item === null) throw new DaemonError("not_found", `item ${rawItemId} was not found`, { itemId: rawItemId })
 			return item
 		}
 		const chain = this.resolveChain(args)
-		const issueNumber = requiredPositiveInteger(args, "issueNumber")
-		const item = this.requireStore().getItemByIssue(chain.id, issueNumber)
-		if (item === null) throw new DaemonError("not_found", `item for issue ${issueNumber} was not found`, { chainId: chain.id, issueNumber })
+		const itemId = validateItemId(requiredString(args, "itemId"))
+		const item = this.requireStore().getItemById(chain.id, itemId)
+		if (item === null) throw new DaemonError("not_found", `item ${itemId} was not found in chain ${chain.name}`, { chainId: chain.id, itemId })
 		return item
 	}
 
@@ -2744,8 +2825,8 @@ export class CoderLoopDaemon {
 			...(input.phase === null ? {} : { phase: input.phase }),
 			subject: input.subject,
 			payload: {
-				itemId: input.item.id,
-				issueNumber: input.item.issueNumber,
+				rowId: input.item.id,
+				itemId: input.item.itemId,
 				phase: input.phase,
 				requestedStatus: input.requestedStatus,
 				declaredExits: [...input.declaredExits],
@@ -2940,8 +3021,8 @@ export class CoderLoopDaemon {
 				: {}),
 			subject: input.subject,
 			payload: {
-				itemId: input.item.id,
-				issueNumber: input.item.issueNumber,
+				rowId: input.item.id,
+				itemId: input.item.itemId,
 				claimedRunId: input.claimedRunId,
 				claimedPhase: input.claimedPhase,
 				outcome: input.outcome,
@@ -3172,8 +3253,8 @@ export class CoderLoopDaemon {
 				: {}),
 			subject: input.caller.subject,
 			payload: {
-				itemId: input.item.id,
-				issueNumber: input.item.issueNumber,
+				rowId: input.item.id,
+				itemId: input.item.itemId,
 				claimedPhase,
 				presetName: input.presetName,
 				requestedFields: input.requestedFields,
@@ -3239,6 +3320,20 @@ export class CoderLoopDaemon {
 	private async loadedPresetForChain(chain: ChainRecord, operation: string): Promise<SchedulerLoadedPreset> {
 		const presetDir = this.presetDirForChain(chain)
 		return await this.loadedPresetFromDirForChain(chain, presetDir, operation)
+	}
+
+	// #419 helper: resolve+load a preset from the spec returned by `requireItemPresetForRequest`. Used
+	// by `buildCreateItemInput` to consult the item's preset for `idField` without having to commit a
+	// row to the store first.
+	private async loadedPresetFromSpec(chain: ChainRecord, spec: { preset: string | null; presetPath: string | null }, operation: string): Promise<SchedulerLoadedPreset> {
+		if (spec.presetPath !== null) {
+			const dir = isAbsolute(spec.presetPath) ? spec.presetPath : resolve(spec.presetPath)
+			return await this.loadedPresetFromDirForChain(chain, dir, operation)
+		}
+		if (spec.preset !== null) {
+			return await this.loadedPresetFromDirForChain(chain, bundledPresetDir(spec.preset), operation)
+		}
+		return await this.loadedPresetForChain(chain, operation)
 	}
 
 	// #412 per-item preset loader. Resolves preset from item.preset / item.presetPath, falling back
@@ -3393,8 +3488,8 @@ export class CoderLoopDaemon {
 		if (item.preset !== null) {
 			if (!PRESET_NAME_PATTERN.test(item.preset)) {
 				throw new DaemonError("invalid_request", `item ${item.id}: invalid preset name "${item.preset}" (must match ${PRESET_NAME_PATTERN.source})`, {
-					itemId: item.id,
-					issueNumber: item.issueNumber,
+					rowId: item.id,
+					itemId: item.itemId,
 					preset: item.preset,
 				})
 			}
@@ -3551,6 +3646,17 @@ function validateItemPriorityForRequest(value: string | null | undefined): strin
 function validateItemBranchForRequest(value: string | null | undefined): string | null | undefined {
 	if (value === undefined || value === null) return value
 	validateGitBranchNameForRequest(value, "branch")
+	return value
+}
+
+// #419: shape validation for the wire-level opaque item id. Rejects empty / whitespace-bearing
+// values. Identity uniqueness is enforced by the SQLite `UNIQUE (chain_id, item_id)` constraint
+// (translated by `translateCreateItemFailure` into a `duplicate_item` DaemonError surface).
+const MAX_ITEM_ID_LENGTH = 256
+function validateItemId(value: string): string {
+	if (value === "") throw new DaemonError("invalid_request", "itemId must be a non-empty string", { field: "itemId" })
+	if (/\s/.test(value)) throw new DaemonError("invalid_request", "itemId must not contain whitespace", { field: "itemId", value })
+	if (value.length > MAX_ITEM_ID_LENGTH) throw new DaemonError("invalid_request", `itemId length ${value.length} exceeds ${MAX_ITEM_ID_LENGTH} characters`, { field: "itemId" })
 	return value
 }
 
@@ -3947,11 +4053,16 @@ function validateItemUpdateRequest(args: JsonObject): void {
 }
 
 function validateItemUpdateSelector(args: JsonObject): void {
-	const itemId = optionalInteger(args, "itemId")
-	if (itemId === null) return
-	for (const key of ["chainId", "chainName", "name", "issueNumber"] as const) {
+	// #419: `itemId` accepts either a numeric rowid (legacy / engine internal) or the opaque
+	// preset-declared string id. When the caller passes a rowid we still reject duplicate chain
+	// selectors (rowid is globally unique; chain coords are redundant). When the caller passes a
+	// string the chain selector remains required (string ids are per-chain unique, not global).
+	const rawItemId = args["itemId"]
+	const isNumericItemId = typeof rawItemId === "number" && Number.isInteger(rawItemId) && rawItemId > 0
+	if (!isNumericItemId) return
+	for (const key of ["chainId", "chainName", "name"] as const) {
 		if (Object.hasOwn(args, key)) {
-			throw new DaemonError("invalid_request", `item.update with itemId must not include selector field ${key}`, { field: key })
+			throw new DaemonError("invalid_request", `item.update with rowid itemId must not include selector field ${key}`, { field: key })
 		}
 	}
 }
@@ -4295,11 +4406,14 @@ function chainCreateConflicts(existing: ChainRecord, requested: CreateChainInput
 	return conflicts
 }
 
-function duplicateItemAddError(chain: ChainRecord, issueNumber: number, existing: ItemRecord): DaemonError {
-	return new DaemonError("conflict", `item with issueNumber ${issueNumber} already exists in chain ${chain.name}`, {
+// #419: now keys on the opaque preset-declared `itemId` string (formerly `issueNumber`
+// integer). `existingItemId` continues to surface the existing row's rowid so callers can
+// route by it; the new `itemId` payload field holds the conflicting opaque id.
+function duplicateItemAddError(chain: ChainRecord, itemId: string, existing: ItemRecord): DaemonError {
+	return new DaemonError("conflict", `item with id ${itemId} already exists in chain ${chain.name}`, {
 		chainId: chain.id,
 		chainName: chain.name,
-		issueNumber,
+		itemId,
 		existingItemId: existing.id,
 	})
 }
@@ -4510,18 +4624,22 @@ function chainToJson(chain: ChainRecord): JsonObject {
 }
 
 function itemToJson(item: ItemRecord, dependencyWait?: DependencyWaitReason | null): JsonObject {
+	// #419: wire schema retires top-level `issueNumber` (int), `branch`, `pr`. The opaque
+	// preset-declared identity surfaces as `itemId` (string); the rowid stays on `id` (int).
+	// Supervisors that wanted branch/pr previously read them as first-class fields now read
+	// them off `extra` (gh-issue-pr-iteration declares both in `[item.fields]`, so they
+	// continue to round-trip through `extra.branch` / `extra.pr`). Breaking wire change —
+	// PR body enumerates the shape diff per #456 precedent.
 	const result: JsonObject = {
 		id: item.id,
 		chainId: item.chainId,
-		issueNumber: item.issueNumber,
+		itemId: item.itemId,
 		repoCwd: item.repoCwd,
 		status: item.status,
 		attempts: item.attempts,
 		position: item.position,
 		title: item.title,
 		priority: item.priority,
-		branch: item.branch,
-		pr: item.pr,
 		lastRunId: item.lastRunId,
 		issueFile: item.issueFile,
 		evidenceDir: item.evidenceDir,
@@ -4584,8 +4702,8 @@ function chainStatusSummary(
 	const staleInProgressItems = items
 		.filter((item) => item.status === "in_progress" && !activeItemIds.has(item.id))
 		.map((item) => ({
-			itemId: item.id,
-			issueNumber: item.issueNumber,
+			rowId: item.id,
+			itemId: item.itemId,
 			runId: item.lastRunId,
 			repoCwd: item.repoCwd,
 			agentCwd: item.agentCwd,
@@ -4623,8 +4741,11 @@ function chainStatusSummary(
 function dependencyWaitToJson(wait: DependencyWaitReason): JsonObject {
 	return {
 		reason: "blocked-by-dependency",
+		// #419: DependencyWaitReason now carries `rowId` (items.id integer rowid) and `itemId`
+		// (opaque preset-declared string id). Wire schema follows the same `rowId` / `itemId`
+		// split itemToJson uses so supervisors see one shape everywhere.
+		rowId: wait.rowId,
 		itemId: wait.itemId,
-		issueNumber: wait.issueNumber,
 		repoCwd: wait.repoCwd,
 		dependsOn: wait.dependsOn,
 		unsatisfied: wait.unsatisfied,

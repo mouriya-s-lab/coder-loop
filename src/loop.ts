@@ -254,7 +254,11 @@ export type ItemCommandArgs =
 	| {
 			action: "add"
 			chainName: string
-			issueNumber: number
+			// #419: opaque string item id (formerly `issueNumber: number`). CLI flag is `--id`
+			// (compatibility alias `--issue` kept on the parser since the bundled
+			// gh-issue-pr-iteration preset's idField is "issue" and operators / scripts already
+			// use that flag).
+			itemId: string
 			repoCwd: string
 			// #412: exactly one of preset/presetPath is set; the CLI parser enforces this before
 			// constructing the discriminated union variant.
@@ -289,7 +293,7 @@ export type ItemCommandArgs =
 	| {
 			action: "update"
 			chainName: string
-			issueNumber: number
+			itemId: string
 			repoCwd: string | null
 			status: string | null
 			title: string | null
@@ -308,7 +312,7 @@ export type ItemCommandArgs =
 	| {
 			action: "reorder"
 			chainName: string
-			issueNumber: number
+			itemId: string
 			position: number
 			loopDataRoot: string | null
 			json: boolean
@@ -321,7 +325,7 @@ export type ItemCommandArgs =
 	| {
 			action: "exits"
 			chainName: string
-			issueNumber: number
+			itemId: string
 			agentRunId: string
 			agentPhase: string
 			loopDataRoot: string | null
@@ -337,7 +341,7 @@ export type ItemCommandArgs =
 	| {
 			action: "exit-action"
 			chainName: string
-			issueNumber: number
+			itemId: string
 			agentRunId: string
 			agentPhase: string
 			chainAction: PresetPhaseChainAction
@@ -408,23 +412,12 @@ const ENGINE_ITEM_BINDING_KEYS = new Set([
 	"phase",
 ])
 
-const LEGACY_TRANSPARENT_ITEM_FIELDS = new Set([
-	"issue",
-	"issueNumber",
-	"chainId",
-	"repoCwd",
-	"attempts",
-	"title",
-	"priority",
-	"branch",
-	"pr",
-	"lastRunId",
-	"sessionIds",
-	"issueFile",
-	"evidenceDir",
-	"createdAt",
-	"updatedAt",
-])
+// #419: `LEGACY_TRANSPARENT_ITEM_FIELDS` retired together with the items physical-shape
+// retire. The previous `Set` was a structural escape hatch that let presets refer to
+// non-extra item fields by name without going through `[item.fields]`. After #419 every
+// non-engine field lives inside `extra` (presets that need them declare them in
+// `[item.fields]`), so the only resolution chain is `ENGINE_ITEM_BINDING_KEYS` →
+// `extra.<key>`. `lookupItemRootField` reflects that.
 
 const PRESET_ITEM_FIELD_TYPES = ["string", "number", "boolean", "json"] as const
 type PresetItemFieldType = typeof PRESET_ITEM_FIELD_TYPES[number]
@@ -1471,7 +1464,7 @@ const itemAddCliCommand = command({
 			args: {
 				action: "add",
 				chainName: args.chain,
-				issueNumber: parseRequiredPositiveInteger(args.issue, "--issue"),
+				itemId: parseRequiredItemId(args.issue, "--issue"),
 				repoCwd: resolve(args.repoCwd),
 				preset: presetSpec.preset,
 				presetPath: presetSpec.presetPath,
@@ -1559,7 +1552,7 @@ const itemUpdateCliCommand = command({
 		args: {
 			action: "update",
 			chainName: args.chain,
-			issueNumber: parseRequiredPositiveInteger(args.issue, "--issue"),
+			itemId: parseRequiredItemId(args.issue, "--issue"),
 			repoCwd: args.repoCwd === undefined ? null : resolve(args.repoCwd),
 			status: args.status ?? null,
 			title: args.title ?? null,
@@ -1591,7 +1584,7 @@ const itemReorderCliCommand = command({
 		args: {
 			action: "reorder",
 			chainName: args.chain,
-			issueNumber: parseRequiredPositiveInteger(args.issue, "--issue"),
+			itemId: parseRequiredItemId(args.issue, "--issue"),
 			position: parseRequiredNonNegativeInteger(args.position, "--position"),
 			loopDataRoot: args.loopDataRoot ?? null,
 			json: args.json,
@@ -1621,7 +1614,7 @@ const itemExitsCliCommand = command({
 		args: {
 			action: "exits",
 			chainName: args.chain,
-			issueNumber: parseRequiredPositiveInteger(args.issue, "--issue"),
+			itemId: parseRequiredItemId(args.issue, "--issue"),
 			agentRunId: args.agentRunId,
 			agentPhase: args.agentPhase,
 			loopDataRoot: args.loopDataRoot ?? null,
@@ -1655,7 +1648,7 @@ const itemExitActionCliCommand = command({
 		args: {
 			action: "exit-action",
 			chainName: args.chain,
-			issueNumber: parseRequiredPositiveInteger(args.issue, "--issue"),
+			itemId: parseRequiredItemId(args.issue, "--issue"),
 			agentRunId: args.agentRunId,
 			agentPhase: args.agentPhase,
 			chainAction: parsePresetPhaseChainActionFlag(args.action),
@@ -1748,6 +1741,17 @@ function parseRequiredPositiveInteger(value: string, flagName: string): number {
 	const parsed = parseOptionalPositiveInteger(value, flagName)
 	if (parsed === null) fail(`${flagName} is required`)
 	return parsed
+}
+
+// #419: opaque item id parser for the CLI face. Replaces `parseRequiredPositiveInteger` on
+// the `--issue` / `--id` flag — item identity is preset-declared and may be a string
+// (single-phase-example's `idField = "id"` carries strings) or a string-encoded number
+// (gh-issue-pr-iteration's `idField = "issue"` carries stringified GitHub issue numbers).
+// The CLI no longer parses to an integer at this point; the daemon enforces shape per preset.
+function parseRequiredItemId(value: string, flagName: string): string {
+	if (typeof value !== "string" || value.length === 0) fail(`${flagName} is required`)
+	if (/\s/.test(value)) fail(`${flagName} must not contain whitespace, got: ${value}`)
+	return value
 }
 
 function parseOptionalNonNegativeInteger(value: string | null, flagName: string): number | null {
@@ -1920,7 +1924,7 @@ async function runItemCommand(args: string[]): Promise<void> {
 	if (itemArgs.action === "add") {
 		const requestArgs: JsonObject = {
 			chainName: itemArgs.chainName,
-			issueNumber: itemArgs.issueNumber,
+			itemId: itemArgs.itemId,
 			repoCwd: itemArgs.repoCwd,
 		}
 		// #412 preset is required per-item; the CLI parser guarantees exactly one of these is set.
@@ -1953,7 +1957,7 @@ async function runItemCommand(args: string[]): Promise<void> {
 	if (itemArgs.action === "reorder") {
 		const result = await requestDaemonResult(itemArgs.loopDataRoot, "item.reorder", {
 			chainName: itemArgs.chainName,
-			issueNumber: itemArgs.issueNumber,
+			itemId: itemArgs.itemId,
 			position: itemArgs.position,
 		})
 		writeCommandResult(result, itemArgs.json, formatItemListResult)
@@ -1965,7 +1969,7 @@ async function runItemCommand(args: string[]): Promise<void> {
 		// last-write phase column is not the agent's currently-running phase).
 		const result = await requestDaemonResult(itemArgs.loopDataRoot, "item.exits", {
 			chainName: itemArgs.chainName,
-			issueNumber: itemArgs.issueNumber,
+			itemId: itemArgs.itemId,
 			agentRunId: itemArgs.agentRunId,
 			agentPhase: itemArgs.agentPhase,
 		})
@@ -1981,7 +1985,7 @@ async function runItemCommand(args: string[]): Promise<void> {
 		// have no credential and are admitted through the operator branch.
 		const result = await requestDaemonResult(itemArgs.loopDataRoot, "item.exitAction", {
 			chainName: itemArgs.chainName,
-			issueNumber: itemArgs.issueNumber,
+			itemId: itemArgs.itemId,
 			agentRunId: itemArgs.agentRunId,
 			agentPhase: itemArgs.agentPhase,
 			action: itemArgs.chainAction,
@@ -1992,7 +1996,7 @@ async function runItemCommand(args: string[]): Promise<void> {
 	const fields: JsonObject = {}
 	const requestArgs: JsonObject = {
 		chainName: itemArgs.chainName,
-		issueNumber: itemArgs.issueNumber,
+		itemId: itemArgs.itemId,
 		fields,
 	}
 	// #406: agent attribution no longer takes flat args here. `withInjectedRunCredential` attaches
@@ -2054,10 +2058,22 @@ function parseBatchItemsJson(raw: string): JsonObject[] {
 	if (!Array.isArray(parsed)) fail("--items-json must be a JSON array")
 	return parsed.map((entry, index) => {
 		if (!isJsonObjectRecord(entry)) fail(`--items-json[${index}] must be an object`)
-			const item: JsonObject = { ...entry }
-		if (typeof item.issue === "number" && item.issueNumber === undefined) {
-			item.issueNumber = item.issue
-			delete item.issue
+		const item: JsonObject = { ...entry }
+		// #419: legacy back-fill for batch JSON written against pre-#419 schemas. Two flavors:
+		// (a) `{ "issue": 123 }` was sugar for `{ "issueNumber": 123 }` in pre-#419 batch JSON;
+		// (b) `{ "issueNumber": 123 }` was the canonical pre-#419 form. Both map to the new
+		// `itemId` string wire field. Values are coerced to strings — the daemon enforces shape.
+		if (item.itemId === undefined) {
+			if (typeof item.issue === "number") {
+				item.itemId = String(item.issue)
+				delete item.issue
+			} else if (typeof item.issue === "string" && item.issue.length > 0) {
+				item.itemId = item.issue
+				delete item.issue
+			} else if (typeof item.issueNumber === "number") {
+				item.itemId = String(item.issueNumber)
+				delete item.issueNumber
+			}
 		}
 		if (typeof item.repoCwd === "string") item.repoCwd = resolve(item.repoCwd)
 		return item
@@ -2356,7 +2372,10 @@ function formatChainDeleteResult(result: JsonObject): string {
 
 function formatItemMutationResult(result: JsonObject): string {
 	const item = jsonObjectEntry(result.item)
-	return `item ${String(item?.issueNumber ?? "")}: ${String(item?.status ?? "")}\n`
+	// #419: prefer `itemId` (the post-retirement opaque string id surfaced by `itemToJson`); fall
+	// back to the rowid only when itemId is somehow missing (legacy daemon response shapes that
+	// pre-date #419 — keeps the formatter robust against version skew while operators upgrade).
+	return `item ${String(item?.itemId ?? item?.id ?? "")}: ${String(item?.status ?? "")}\n`
 }
 
 function formatItemBatchAddResult(result: JsonObject): string {
@@ -2369,7 +2388,9 @@ function formatItemListResult(result: JsonObject): string {
 	if (items.length === 0) return "no items\n"
 	return items.map((raw) => {
 		const item = jsonObjectEntry(raw) ?? {}
-		return `${String(item.issueNumber)}\t${String(item.status)}\t${String(item.repoCwd)}\n`
+		// #419: render the opaque item id (formerly `issueNumber`). Daemon's `itemToJson` emits
+		// both `itemId` and `id` (rowid); itemId is the preset-facing identity.
+		return `${String(item.itemId ?? item.id ?? "")}\t${String(item.status)}\t${String(item.repoCwd)}\n`
 	}).join("")
 }
 
@@ -2933,8 +2954,11 @@ function resolveStatusItemPresetSnapshot(item: ItemRecord, chainPreset: Preset):
 }
 
 function statusItemSnapshot(item: ItemRecord, preset: Preset): StatusItemSnapshot {
+	// #419: idField value lives in `extra` under the preset-declared key; no separate
+	// `issueNumber` engine column to back-fill from. The opaque `item.itemId` is the
+	// authoritative identity and the migration copied the integer column value into
+	// `extra.issue` for `gh-issue-pr-iteration`-shaped legacy rows.
 	const extra = transparentItemExtra(item, preset)
-	if (extra[preset.item.idField] === undefined) extra[preset.item.idField] = item.issueNumber
 	return {
 		status: item.status,
 		attempts: item.attempts,
@@ -2954,12 +2978,15 @@ function statusItemSnapshot(item: ItemRecord, preset: Preset): StatusItemSnapsho
 }
 
 function transparentItemExtra(item: ItemRecord, preset: Preset): JsonObject {
+	// #419: every preset-declared `[item.fields]` value lives in `extra` after the items
+	// table de-GitHub-shaping. No legacy physical-column fallback remains; the function is
+	// kept (instead of inlining) so supervisor status snapshots keep going through one
+	// helper that documents the preset-vs-extra contract.
 	const extra = itemExtraToJsonObject(item.extra)
-	for (const field of preset.item.fields.keys()) {
-		if (extra[field] !== undefined) continue
-		const legacy = legacyTransparentItemField(item, field)
-		if (legacy !== undefined) extra[field] = legacy
-	}
+	// `preset` is unused at runtime now — kept on the signature for clarity at call sites,
+	// matching the prior shape so review can diff the change easily. Silence the unused
+	// warning via void without `as`.
+	void preset
 	return extra
 }
 
@@ -3520,7 +3547,9 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 	})
 	const options = runtime.options
 	const issue = normalizeQueueIssueId(args.issue)
-	const issueNumber = parseRequiredPositiveInteger(issue, "queue unblock: --issue")
+	// #419: opaque item id (string). The CLI flag historically named `--issue` is kept for
+	// back-compat; the underlying identity is now whatever string the preset's idField names.
+	const itemId = parseRequiredItemId(issue, "queue unblock: --issue")
 	// #409: queue.unblock now daemonizes. The daemon's `handleQueueUnblock` performs the SQLite
 	// mutation (default-deny for agents via the hard-deny gate) and the operator-attribution
 	// `item.mutation.caller_admission` audit event so external tooling watching the audit stream
@@ -3573,7 +3602,7 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 		}
 	}
 
-	const item = readDbItemByIssue(options.loopDataRoot, runtime.chain.id, issueNumber)
+	const item = readDbItemById(options.loopDataRoot, runtime.chain.id, itemId)
 	const daemonRunning = daemonResultIndicatesRunning(daemon)
 	const result: QueueUnblockCommandResult = {
 		action: "queue.unblock",
@@ -3754,10 +3783,10 @@ function readDbItemsForChain(loopDataRoot: string | null, chainId: number): Item
 	}
 }
 
-function readDbItemByIssue(loopDataRoot: string | null, chainId: number, issueNumber: number): ItemRecord | null {
+function readDbItemById(loopDataRoot: string | null, chainId: number, itemId: string): ItemRecord | null {
 	const store = openSqliteStateStore({ createIfMissing: false, ...loopDataRootOption(loopDataRoot) })
 	try {
-		return store.getItemByIssue(chainId, issueNumber)
+		return store.getItemById(chainId, itemId)
 	} finally {
 		store.close()
 	}
@@ -3995,7 +4024,15 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 	}
 	const statusNames = new Set<string>([...root.statuses.continuable, ...root.statuses.terminal])
 	const itemFields = parsePresetItemFields(root.item.fields ?? {}, "preset.item.fields")
-	if (itemFields.has(root.item.idField)) presetError(`preset.item.fields.${root.item.idField}: idField is already declared by preset.item.idField`)
+	// #419: post-#419 the `idField` value lives inside the per-item `extra` JSON under the same key
+	// (the items physical-shape retire moved `issue_number` integer column → `item_id` opaque string
+	// plus a salvage into `extra.<idField>`). A preset is therefore allowed — and for typed bindings
+	// usually required — to also declare the idField inside `[item.fields]` so prompt placeholders
+	// like `{{ISSUE}}` resolve through the standard `[item.fields]` typing pipeline instead of relying
+	// on the engine-builtin string fallback. The pre-#419 rule that forbade this redeclaration was
+	// guarding the now-retired structural escape (`LEGACY_TRANSPARENT_ITEM_FIELDS` fed
+	// `item.issueNumber` to the resolver bypassing `[item.fields]`); with that escape gone the rule
+	// no longer has anything to guard against.
 	const attemptTimeoutSeconds = root.agent?.attemptTimeoutSeconds ?? DEFAULT_ATTEMPT_TIMEOUT_SECONDS
 	if (!Number.isFinite(attemptTimeoutSeconds) || attemptTimeoutSeconds <= 0) {
 		presetError("preset.agent.attemptTimeoutSeconds: must be a finite positive number")
@@ -4786,8 +4823,11 @@ async function collectStatusRuntimeErrors(
 		if (!Number.isInteger(item.attempts) || item.attempts < 0) pushCheckError(errors, `${label}.attempts`, "must be a non-negative integer")
 		if (item.title !== null && item.title.trim() === "") pushCheckError(errors, `${label}.title`, "must be null or non-empty")
 		if (item.priority !== null && item.priority.trim() === "") pushCheckError(errors, `${label}.priority`, "must be null or non-empty")
-		if (item.branch !== null && item.branch.trim() === "") pushCheckError(errors, `${label}.branch`, "must be null or non-empty")
-		if (item.pr !== null && (!Number.isInteger(item.pr) || item.pr <= 0)) pushCheckError(errors, `${label}.pr`, "must be null or a positive integer")
+		// #419: `branch` / `pr` are no longer first-class engine fields. Presets that declare them as
+		// `[item.fields]` transparent fields (gh-issue-pr-iteration does) now own their shape validation;
+		// the doctor read path stops asserting types it cannot generalize across presets. Shape errors in
+		// preset-declared transparent fields surface through `lookupItemField` on the resolve path
+		// (`stringifyBindingValue` rejects non-string/number/boolean) — runtime, not doctor-time.
 		if (item.lastRunId !== null && item.lastRunId.trim() === "") pushCheckError(errors, `${label}.lastRunId`, "must be null or non-empty")
 
 		if (item.issueFile !== null) {
@@ -4873,10 +4913,18 @@ export function makeIssueRunContext(current: StatusCurrentRunSnapshot | null): I
 }
 
 export function getItemId(item: ItemRecord, preset: Preset): string {
+	// #419: the opaque `item.itemId` (DB column `items.item_id`) is the engine's authoritative
+	// per-row identity. The preset-declared idField is now a passthrough into `extra` so
+	// supervisors / agents can read it as `{{<idField>}}` via the standard variable pipeline,
+	// but the engine itself derives the rendered id from `itemId` first (so the engine path
+	// never needs to know `idField === "issue"` or any other preset-shaped literal). The
+	// fallback to `extra[idField]` covers the legacy migration window where an older daemon
+	// might have written the idField value to `extra` without copying it back to `item_id` —
+	// idempotent against current writers because both store the same string post-#419.
+	if (item.itemId.length > 0) return item.itemId
 	const value = itemExtraJsonValue(item.extra, preset.item.idField)
 	if (typeof value === "string" && value.length > 0) return value
 	if (typeof value === "number" && Number.isFinite(value)) return String(value)
-	if (preset.item.idField === "issue") return String(item.issueNumber)
 	throw new Error(`queue item is missing required id field "${preset.item.idField}"`)
 }
 
@@ -5197,32 +5245,10 @@ function lookupItemRootField(item: ItemRecord, field: string): JsonValue | undef
 		case "runner": return item.runner
 		case "phase": return item.phase
 		default:
-			{
-				const extraValue = itemExtraJsonValue(item.extra, field)
-				if (extraValue !== undefined) return extraValue
-			}
-			return legacyTransparentItemField(item, field)
-	}
-}
-
-function legacyTransparentItemField(item: ItemRecord, field: string): JsonValue | undefined {
-	if (!LEGACY_TRANSPARENT_ITEM_FIELDS.has(field)) return undefined
-	switch (field) {
-		case "issue": return item.issueNumber
-		case "issueNumber": return item.issueNumber
-		case "chainId": return item.chainId
-		case "repoCwd": return item.repoCwd
-		case "attempts": return item.attempts
-		case "title": return item.title
-		case "priority": return item.priority
-		case "branch": return item.branch
-		case "pr": return item.pr
-		case "lastRunId": return item.lastRunId
-		case "sessionIds": return item.sessionIds
-		case "issueFile": return item.issueFile
-		case "evidenceDir": return item.evidenceDir
-		case "createdAt": return item.createdAt
-		case "updatedAt": return item.updatedAt
+			// #419: every non-engine field is preset-declared (lives in `[item.fields]`) and lands
+			// in `extra` at insert / update. No legacy fall-through to physical columns — that
+			// escape hatch was the structural defect the issue retired.
+			return itemExtraJsonValue(item.extra, field)
 	}
 }
 

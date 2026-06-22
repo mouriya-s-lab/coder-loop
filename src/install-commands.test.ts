@@ -73,7 +73,10 @@ async function makeDoctorTarget(): Promise<string> {
 		})
 		store.createItem({
 			chainId: chain.id,
-			issueNumber: 1,
+			// #419: items.item_id is now the preset-declared opaque string identity (idField=`id`
+			// for `single-phase-example`). The fixture writes "alpha" here so `getItemId` returns
+			// the preset id directly without falling through to `extra.id`.
+			itemId: "alpha",
 			repoCwd: dir,
 			status: runtimeStatus("pending"),
 			extra: storedItemExtra({ id: "alpha" }),

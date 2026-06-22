@@ -350,7 +350,7 @@ async function createCrossRunnerFixture(name: string, responses: FakeRunnerRespo
 		runIdFactory: ({ chain, item, phase }) => `run-${chain.id}-${item.id}-${phase}-${++runSequence}`,
 		prompt: ({ item, runId, phase }) => JSON.stringify({
 			itemId: item.id,
-			issueNumber: item.issueNumber,
+			issueNumber: Number(item.itemId),
 			runId,
 			phase,
 		}),
@@ -401,7 +401,7 @@ function createChain(
 function createItem(store: ReturnType<typeof openSqliteStateStore>, chain: ChainRecord, issueNumber: number) {
 	return store.createItem({
 		chainId: chain.id,
-		issueNumber,
+		itemId: String(issueNumber),
 		repoCwd: REPO_ROOT,
 		status: runtimeStatus("queued"),
 		attempts: 0,

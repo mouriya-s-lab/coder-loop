@@ -130,7 +130,8 @@ describe("central chain/item CLI", () => {
 				"--json",
 			]))
 			expect(added.item).toMatchObject({
-				issueNumber: 181,
+				// #419: wire `issueNumber: int` retired; `itemId: string` is the canonical id.
+				itemId: "181",
 				repoCwd: REPO_ROOT,
 				status: "queued",
 				title: "feat: 引入 chain-item-daemon CLI 命令族",
@@ -138,10 +139,10 @@ describe("central chain/item CLI", () => {
 
 			const listed = expectJsonOk(await runCli(["item", "list", "items-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(listed.items).toHaveLength(1)
-			expect(listed.items[0]).toMatchObject({ issueNumber: 181, status: "queued" })
+			expect(listed.items[0]).toMatchObject({ itemId: "181", status: "queued" })
 
 			const updated = expectJsonOk(await runCli(["item", "update", "items-chain", "--issue", "181", "--status", "done", "--field-json", "{\"pr\":191}", "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			expect(updated.item).toMatchObject({ issueNumber: 181, status: "done", extra: { pr: 191 } })
+			expect(updated.item).toMatchObject({ itemId: "181", status: "done", extra: { pr: 191 } })
 
 			// #406 row 4 — operator path: no env credential, no claim flags → audit subject is
 			// `{kind: "operator"}`. Pre-#406 this test also asserted an agent-attributed update via
@@ -156,7 +157,8 @@ describe("central chain/item CLI", () => {
 				kind: "audit",
 				type: "item.status",
 				subject: { kind: "operator" },
-				payload: { issueNumber: 181, fromStatus: "queued", toStatus: "done" },
+				// #419: audit payload retired `issueNumber: int`; new shape is `rowId` + `itemId: string`.
+				payload: { itemId: "181", fromStatus: "queued", toStatus: "done" },
 			})
 
 			// #406 retire-claim: pre-existing CLI flag `--agent-run-id` is no longer accepted —
@@ -327,18 +329,19 @@ attemptTimeoutSeconds = 3600
 			expectJsonOk(await runCli(["chain", "create", "reorder-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			// #412: per-item preset required.
 			const itemsJson = JSON.stringify([
-				{ issueNumber: 401, repoCwd: REPO_ROOT, title: "first", preset: "gh-issue-pr-iteration" },
-				{ issueNumber: 402, repoCwd: REPO_ROOT, title: "second", preset: "gh-issue-pr-iteration" },
-				{ issueNumber: 403, repoCwd: REPO_ROOT, title: "third", preset: "gh-issue-pr-iteration" },
+				// #419: wire input retires `issueNumber: int`; daemon accepts only `itemId: string`.
+				{ itemId: "401", repoCwd: REPO_ROOT, title: "first", preset: "gh-issue-pr-iteration" },
+				{ itemId: "402", repoCwd: REPO_ROOT, title: "second", preset: "gh-issue-pr-iteration" },
+				{ itemId: "403", repoCwd: REPO_ROOT, title: "third", preset: "gh-issue-pr-iteration" },
 			])
 			expectJsonOk(await runCli(["item", "batch-add", "reorder-chain", "--items-json", itemsJson, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 
 			const moved = expectJsonOk(await runCli(["item", "reorder", "reorder-chain", "--issue", "403", "--position", "0", "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			expect(moved.items.map((item: BoundaryRecord) => item.issueNumber)).toEqual([403, 401, 402])
+			expect(moved.items.map((item: BoundaryRecord) => item.itemId)).toEqual(["403", "401", "402"])
 			expect(moved.items.map((item: BoundaryRecord) => item.position)).toEqual([0, 1, 2])
 
 			const listed = expectJsonOk(await runCli(["item", "list", "reorder-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			expect(listed.items.map((item: BoundaryRecord) => item.issueNumber)).toEqual([403, 401, 402])
+			expect(listed.items.map((item: BoundaryRecord) => item.itemId)).toEqual(["403", "401", "402"])
 			expect(listed.items.map((item: BoundaryRecord) => item.position)).toEqual([0, 1, 2])
 		} finally {
 			await fixture.daemon.stop()
@@ -351,17 +354,18 @@ attemptTimeoutSeconds = 3600
 			expectJsonOk(await runCli(["chain", "create", "batch-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			// #412: per-item preset required.
 			const itemsJson = JSON.stringify([
-				{ issueNumber: 25801, repoCwd: REPO_ROOT, title: "first batch item", preset: "gh-issue-pr-iteration" },
-				{ issueNumber: 25802, repoCwd: REPO_ROOT, priority: "high", preset: "gh-issue-pr-iteration" },
-				{ issueNumber: 25803, repoCwd: REPO_ROOT, runner: "codex", preset: "gh-issue-pr-iteration" },
+				// #419: wire input retires `issueNumber: int`; daemon accepts only `itemId: string`.
+				{ itemId: "25801", repoCwd: REPO_ROOT, title: "first batch item", preset: "gh-issue-pr-iteration" },
+				{ itemId: "25802", repoCwd: REPO_ROOT, priority: "high", preset: "gh-issue-pr-iteration" },
+				{ itemId: "25803", repoCwd: REPO_ROOT, runner: "codex", preset: "gh-issue-pr-iteration" },
 			])
 			const added = expectJsonOk(await runCli(["item", "batch-add", "batch-chain", "--items-json", itemsJson, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(added.items).toHaveLength(3)
-			expect(added.items.map((item: BoundaryRecord) => item.issueNumber)).toEqual([25801, 25802, 25803])
+			expect(added.items.map((item: BoundaryRecord) => item.itemId)).toEqual(["25801", "25802", "25803"])
 
 			const listed = expectJsonOk(await runCli(["item", "list", "batch-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(listed.items).toHaveLength(3)
-			expect(listed.items.map((item: BoundaryRecord) => item.issueNumber)).toEqual([25801, 25802, 25803])
+			expect(listed.items.map((item: BoundaryRecord) => item.itemId)).toEqual(["25801", "25802", "25803"])
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -374,14 +378,15 @@ attemptTimeoutSeconds = 3600
 			expectJsonOk(await runCli(["chain", "create", "batch-daemon-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			// #412: per-item preset required.
 			const batch = [
-				{ issueNumber: 25901, repoCwd: REPO_ROOT, title: "same first", priority: "medium", preset: "gh-issue-pr-iteration" },
-				{ issueNumber: 25902, repoCwd: REPO_ROOT, title: "same second", runner: "codex", preset: "gh-issue-pr-iteration" },
+				// #419: wire input retires `issueNumber: int`; daemon accepts only `itemId: string`.
+				{ itemId: "25901", repoCwd: REPO_ROOT, title: "same first", priority: "medium", preset: "gh-issue-pr-iteration" },
+				{ itemId: "25902", repoCwd: REPO_ROOT, title: "same second", runner: "codex", preset: "gh-issue-pr-iteration" },
 			]
 			const cli = expectJsonOk(await runCli(["item", "batch-add", "batch-cli-chain", "--items-json", JSON.stringify(batch), "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			const daemon = expectJsonOk(await runCli(["item", "batch-add", "batch-daemon-chain", "--items-json", JSON.stringify(batch), "--loop-data-root", fixture.loopDataRoot, "--json"]))
 
 			const comparable = (items: BoundaryRecord[]) => items.map((item) => ({
-				issueNumber: item.issueNumber,
+				itemId: item.itemId,
 				repoCwd: item.repoCwd,
 				status: item.status,
 				title: item.title,
@@ -406,7 +411,7 @@ attemptTimeoutSeconds = 3600
 			try {
 				const chain = store.getChainByName("done-chain")
 				if (chain === null) throw new Error("expected done-chain")
-				store.createItem({ chainId: chain.id, issueNumber: 181, repoCwd: REPO_ROOT, status: admittedTestStatus("done") })
+				store.createItem({ chainId: chain.id, itemId: "181", repoCwd: REPO_ROOT, status: admittedTestStatus("done") })
 			} finally {
 				store.close()
 			}
@@ -429,10 +434,10 @@ attemptTimeoutSeconds = 3600
 			try {
 				const chain = store.getChainByName("dependency-wait-chain")
 				if (chain === null) throw new Error("expected dependency-wait-chain")
-				const prerequisite = store.createItem({ chainId: chain.id, issueNumber: 2671, repoCwd: REPO_ROOT, status: admittedTestStatus("queued"), priority: "10" })
+				const prerequisite = store.createItem({ chainId: chain.id, itemId: "2671", repoCwd: REPO_ROOT, status: admittedTestStatus("queued"), priority: "10" })
 				const dependent = store.createItem({
 					chainId: chain.id,
-					issueNumber: 2672,
+					itemId: "2672",
 					repoCwd: REPO_ROOT,
 					status: admittedTestStatus("queued"),
 					priority: "00",
@@ -448,8 +453,10 @@ attemptTimeoutSeconds = 3600
 			const dependentStatus = status.items.find((item: BoundaryRecord) => item.id === dependentId)
 			expect(dependentStatus?.waiting).toEqual({
 				reason: "blocked-by-dependency",
-				itemId: dependentId,
-				issueNumber: 2672,
+				// #419: DependencyWaitReason renamed: `itemId: rowid` → `rowId: rowid`;
+				// `issueNumber: int` → `itemId: string`.
+				rowId: dependentId,
+				itemId: "2672",
 				repoCwd: REPO_ROOT,
 				dependsOn: [prerequisiteId],
 				unsatisfied: [prerequisiteId],
@@ -778,7 +785,7 @@ attemptTimeoutSeconds = 3600
 				repository: "mouriya-s-lab/coder-loop",
 				metadata: { bindings: { umbrellaRepo: "mouriya-s-lab/coder-loop", umbrellaIssue: 176 } },
 			})
-			expect(status.items[0]).toMatchObject({ issueNumber: 181, status: "queued", repoCwd: REPO_ROOT })
+			expect(status.items[0]).toMatchObject({ itemId: "181", status: "queued", repoCwd: REPO_ROOT })
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -915,7 +922,7 @@ attemptTimeoutSeconds = 3600
 			try {
 				const completedChain = store.getChainByName("logs-completed-history-chain")
 				if (completedChain === null) throw new Error("expected logs-completed-history-chain")
-				store.createItem({ chainId: completedChain.id, issueNumber: 411, repoCwd: REPO_ROOT, status: admittedTestStatus("done") })
+				store.createItem({ chainId: completedChain.id, itemId: "411", repoCwd: REPO_ROOT, status: admittedTestStatus("done") })
 			} finally {
 				store.close()
 			}

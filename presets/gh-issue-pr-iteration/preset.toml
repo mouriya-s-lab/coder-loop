@@ -22,6 +22,14 @@ name        = "gh-issue-pr-iteration"
 idField = "issue"
 
 [item.fields]
+# #419: the idField itself ("issue") is declared as a typed transparent field. After the items
+# table de-GitHub-shaping, the per-issue identity value lives in `extra.issue` (the engine
+# back-fills it from the wire-level `itemId` on item.add), and prompt placeholders like
+# `{{ISSUE}}` resolve through this `[item.fields]` typing pipeline instead of relying on
+# the retired engine-builtin fallback (`LEGACY_TRANSPARENT_ITEM_FIELDS` retired in #419).
+issue = "number"
+# `branch` / `pr` — historically engine-typed first-class columns on the items table — are now
+# preset-declared transparent fields. They round-trip through `extra.branch` / `extra.pr`.
 branch = "string"
 pr = "number"
 lastRunId = "string"
