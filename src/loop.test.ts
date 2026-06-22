@@ -43,20 +43,66 @@ import type { BoundaryRecord } from "./boundary-types"
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/loop-tests")
 
-function makeItem(overrides: Omit<Partial<ItemRecord>, "extra"> & { extra?: JsonObject } = {}): ItemRecord {
-	const { extra, ...rest } = overrides
+// #419: ItemRecord retired top-level `issueNumber` / `branch` / `pr`. Tests still want the
+// legibility of passing those names — accept them as shim aliases and fold into `itemId` /
+// `extra` for the actual record shape.
+type MakeItemOverrides = Omit<Partial<ItemRecord>, "extra"> & {
+	extra?: JsonObject
+	issueNumber?: number
+	branch?: string | null
+	pr?: number | null
+}
+
+function itemSessionIdsToJsonObject(value: ItemRecord["sessionIds"]): JsonObject {
+	// Structural narrowing for the test fixture: walk the typed `Record<string, Partial<Record<runner, string>>>`
+	// and emit a JsonObject with only the present runner strings. Avoids `as JsonObject` (the #419 review's
+	// C1 red-line on real casts). Empty runner maps are still emitted as empty objects to match the
+	// underlying ItemRecord shape — tests don't currently exercise that branch but the helper stays honest.
+	const result: JsonObject = {}
+	for (const [phase, runners] of Object.entries(value)) {
+		const runnerMap: JsonObject = {}
+		for (const [runner, sessionId] of Object.entries(runners)) {
+			if (typeof sessionId === "string") runnerMap[runner] = sessionId
+		}
+		result[phase] = runnerMap
+	}
+	return result
+}
+
+function makeItem(overrides: MakeItemOverrides = {}): ItemRecord {
+	const { extra, issueNumber, branch, pr, ...rest } = overrides
+	const extraWithLegacy: JsonObject = { ...(extra ?? {}) }
+	// #419: bundled preset's idField is `issue` and reads from `extra.issue` via the
+	// preset-declared transparent-field path. Tests that pass `issueNumber:` as a shim alias
+	// also want the value visible there (resolveBinding({kind:"item", field:"issue"}) reads
+	// `extra.issue`). Don't overwrite when the caller already supplied a custom value.
+	if (issueNumber !== undefined && extraWithLegacy.issue === undefined) extraWithLegacy.issue = issueNumber
+	// Caller-supplied `extra.branch` / `extra.pr` win over the shim alias — mirrors the
+	// engine semantics where a preset-declared transparent field already in extra is
+	// authoritative against any legacy top-level passthrough.
+	if (branch !== undefined && branch !== null && extraWithLegacy.branch === undefined) extraWithLegacy.branch = branch
+	if (pr !== undefined && pr !== null && extraWithLegacy.pr === undefined) extraWithLegacy.pr = pr
+	// #419: `lookupItemRootField` only resolves engine fields (id/status/agentCwd/runner/phase)
+	// from physical columns. Every other preset-readable field — including `title` and
+	// `sessionIds` — is read from `extra`. Mirror the engine path so test fixtures don't
+	// silently desync between physical and preset-visible state.
+	if (rest.title !== undefined && rest.title !== null && extraWithLegacy.title === undefined) extraWithLegacy.title = rest.title
+	// #419 review C1: structural narrowing instead of `as JsonObject` so the test honors the
+	// red-line on real `as` casts. `ItemSessionIds = Record<string, Partial<Record<runner, string>>>`
+	// is structurally JsonObject-compatible at runtime (no `undefined` values after normalize), but
+	// the TS-level `Partial<...>` widens runner values to `string | undefined` which JsonValue rejects.
+	// `itemSessionIdsToJsonObject` walks the typed structure, skipping `undefined` runner entries.
+	if (rest.sessionIds !== undefined && extraWithLegacy.sessionIds === undefined) extraWithLegacy.sessionIds = itemSessionIdsToJsonObject(rest.sessionIds)
 	return {
 		id: rest.id ?? 1,
 		chainId: rest.chainId ?? 10,
-		issueNumber: rest.issueNumber ?? 333,
+		itemId: rest.itemId ?? (issueNumber !== undefined ? String(issueNumber) : ""),
 		repoCwd: rest.repoCwd ?? REPO_ROOT,
 		status: rest.status ?? parseInternalStatus("queued", "test.status"),
 		attempts: rest.attempts ?? 0,
 		position: rest.position ?? 0,
 		title: rest.title ?? "test item",
 		priority: rest.priority ?? null,
-		branch: rest.branch ?? null,
-		pr: rest.pr ?? null,
 		lastRunId: rest.lastRunId ?? null,
 		sessionIds: rest.sessionIds ?? {},
 		issueFile: rest.issueFile ?? null,
@@ -68,7 +114,7 @@ function makeItem(overrides: Omit<Partial<ItemRecord>, "extra"> & { extra?: Json
 		// chain.preset fallback) unless the caller overrides.
 		preset: rest.preset ?? null,
 		presetPath: rest.presetPath ?? null,
-		extra: storedItemExtra(extra ?? {}),
+		extra: storedItemExtra(extraWithLegacy),
 		createdAt: rest.createdAt ?? 1,
 		updatedAt: rest.updatedAt ?? 1,
 		statusUpdatedAt: rest.statusUpdatedAt ?? rest.updatedAt ?? 1,

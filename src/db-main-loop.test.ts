@@ -213,7 +213,7 @@ function seedDb(loopDataRoot: string, target: string, options: FixtureOptions, p
 		})
 		store.createItem({
 			chainId: chain.id,
-			issueNumber: 1,
+			itemId: "1",
 			repoCwd: target,
 			status: runtimeStatus(options.initialStatus ?? "queued"),
 			issueFile: null,
@@ -262,7 +262,7 @@ function readItem(loopDataRoot: string) {
 	try {
 		const chain = store.getChainByName(CHAIN_NAME)
 		if (chain === null) throw new Error("missing chain")
-		const item = store.getItemByIssue(chain.id, 1)
+		const item = store.getItemById(chain.id, "1")
 		if (item === null) throw new Error("missing item")
 		return item
 	} finally {

@@ -118,8 +118,8 @@ describe("scheduler", () => {
 			expect(tick.spawnedRuns).toHaveLength(1)
 			await tick.spawnedRuns[0]!.closed
 
-			expect(fixture.store.getItemByIssue(invalid.id, 178)?.status).toBe("queued")
-			expect(fixture.store.getItemByIssue(valid.id, 179)?.status).toBe("done")
+			expect(fixture.store.getItemById(invalid.id, "178")?.status).toBe("queued")
+			expect(fixture.store.getItemById(valid.id, "179")?.status).toBe("done")
 			expect(fixture.worktreeCalls).toHaveLength(1)
 			expect(fixture.worktreeCalls[0]).toContain("valid-chain")
 		} finally {
@@ -498,9 +498,10 @@ describe("scheduler", () => {
 			const exhausted = fixture.store.getItem(item.id)
 			expect(exhausted?.status).toBe("exhausted")
 			expect(exhausted?.extra.schedulerBackoff).toBeUndefined()
+			// #419 review I2: scheduler event field renamed `itemId` (rowid) → `rowId`.
 			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({
 				type: "queue.terminal",
-				itemId: item.id,
+				rowId: item.id,
 				runId: "run-prior-default-failure",
 				terminalStatus: "exhausted",
 			}))
@@ -531,9 +532,10 @@ describe("scheduler", () => {
 			const exhausted = fixture.store.getItem(item.id)
 			expect(exhausted?.status).toBe("exhausted")
 			expect(exhausted?.extra.schedulerBackoff).toBeUndefined()
+			// #419 review I2: scheduler event field renamed `itemId` (rowid) → `rowId`.
 			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({
 				type: "queue.terminal",
-				itemId: item.id,
+				rowId: item.id,
 				runId: "run-prior-failure",
 				terminalStatus: "exhausted",
 			}))
@@ -577,11 +579,13 @@ describe("scheduler", () => {
 			expect(stored?.status).toBe("custom_exhausted")
 			expect(stored?.extra.schedulerBackoff).toBeUndefined()
 
-			const queueTerminal = fixture.schedulerEvents.find((event) => event.type === "queue.terminal" && event.itemId === item.id)
+			// #419 review I2: scheduler event field renamed `itemId` (rowid) → `rowId` to free
+			// `itemId` for the opaque string identity convention used on split-shape `item.*` events.
+			const queueTerminal = fixture.schedulerEvents.find((event) => event.type === "queue.terminal" && event.rowId === item.id)
 			expect(queueTerminal).toBeDefined()
 			expect(queueTerminal).toMatchObject({
 				type: "queue.terminal",
-				itemId: item.id,
+				rowId: item.id,
 				runId: "run-prior-custom-failure",
 				terminalStatus: "custom_exhausted",
 			})
@@ -969,8 +973,10 @@ describe("scheduler", () => {
 				runId,
 				chainId: chain.id,
 				chainName: chain.name,
-				itemId: item.id,
-				issueNumber: 203,
+				// #419: split rowid (`rowId`) and opaque preset id (`itemId`). Was `itemId: rowid`
+				// and `issueNumber: int` pre-#419.
+				rowId: item.id,
+				itemId: "203",
 				phase: "iteration",
 				exitCode: 0,
 				status: runtimeStatus("done"),
@@ -1176,7 +1182,7 @@ describe("scheduler reads the agent-written item status (v1 status model)", () =
 				prompt: ({ item: i, runId, worktreePath }) =>
 					JSON.stringify({
 						itemId: i.id,
-						issueNumber: i.issueNumber,
+						issueNumber: Number(i.itemId),
 						runId,
 						worktreePath,
 						eventLog: fixture.eventLog,
@@ -1358,7 +1364,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				prompt: ({ item: i, runId, worktreePath, phase }) =>
 					JSON.stringify({
 						itemId: i.id,
-						issueNumber: i.issueNumber,
+						issueNumber: Number(i.itemId),
 						runId,
 						worktreePath,
 						eventLog: fixture.eventLog,
@@ -1825,9 +1831,10 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			expect(afterUnblock?.extra.dependsOn).toBeUndefined()
 			expect(fixture.store.getChain(dependentChain.id)?.status).toBe("active")
 
+			// #419 review I2: scheduler event field renamed `itemId` (rowid) → `rowId`.
 			const unblockedEvents = fixture.schedulerEvents.filter(
 				(event): event is Extract<SchedulerEvent, { type: "item.dependency_unblocked" }> =>
-					event.type === "item.dependency_unblocked" && event.itemId === dependent.id,
+					event.type === "item.dependency_unblocked" && event.rowId === dependent.id,
 			)
 			expect(unblockedEvents).toHaveLength(1)
 			expect(unblockedEvents[0]?.fromStatus).toBe("blocked")
@@ -1889,8 +1896,9 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 				(event) => event.type === "phase.start" && event.itemId === dependent.id,
 			)
 			expect(phaseStarts).toHaveLength(0)
+			// #419 review I2: scheduler event field renamed `itemId` (rowid) → `rowId`.
 			const unblockedEvents = fixture.schedulerEvents.filter(
-				(event) => event.type === "item.dependency_unblocked" && event.itemId === dependent.id,
+				(event) => event.type === "item.dependency_unblocked" && event.rowId === dependent.id,
 			)
 			expect(unblockedEvents).toHaveLength(0)
 		} finally {
@@ -1984,9 +1992,10 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			expect(fixture.store.getChain(blockerChain.id)?.status).toBe("completed")
 			expect(fixture.store.getChain(dependentChain.id)?.status).toBe("completed")
 
+			// #419 review I2: scheduler event field renamed `itemId` (rowid) → `rowId`.
 			const unblockedEvents = fixture.schedulerEvents.filter(
 				(event): event is Extract<SchedulerEvent, { type: "item.dependency_unblocked" }> =>
-					event.type === "item.dependency_unblocked" && event.itemId === dependent.id,
+					event.type === "item.dependency_unblocked" && event.rowId === dependent.id,
 			)
 			expect(unblockedEvents).toHaveLength(1)
 			expect(unblockedEvents[0]?.fromStatus).toBe("blocked")
@@ -3269,17 +3278,34 @@ function makeChainFixture(overrides: ChainFixtureOverrides = {}): ChainRecord {
 	}
 }
 
-function makeItemFixture(chain: ChainRecord, overrides: Partial<ItemRecord> & Pick<ItemRecord, "issueNumber" | "repoCwd">): ItemRecord {
+// #419: ItemRecord lost top-level `issueNumber` / `branch` / `pr`. Shim params for fixture
+// callers; fold them into `itemId` / `extra` so the call sites stay legible.
+type MakeItemFixtureOverrides = Partial<Omit<ItemRecord, "extra">> & {
+	extra?: ItemRecord["extra"]
+	issueNumber?: number
+	branch?: string | null
+	pr?: number | null
+	repoCwd: string
+}
+
+function makeItemFixture(chain: ChainRecord, overrides: MakeItemFixtureOverrides): ItemRecord {
+	const { extra, issueNumber, branch, pr, ...rest } = overrides
+	let resolvedExtra = extra ?? storedItemExtra({})
+	if (branch !== undefined || pr !== undefined) {
+		const flat = itemExtraToJsonObject(resolvedExtra)
+		if (branch !== undefined && branch !== null) flat.branch = branch
+		if (pr !== undefined && pr !== null) flat.pr = pr
+		resolvedExtra = storedItemExtra(flat)
+	}
 	return {
 		id: 1,
 		chainId: chain.id,
+		itemId: rest.itemId ?? String(issueNumber ?? 0),
 		status: parseInternalStatus("queued", "test.status"),
 		attempts: 0,
 		position: 0,
 		title: null,
 		priority: null,
-		branch: null,
-		pr: null,
 		lastRunId: null,
 		sessionIds: {},
 		issueFile: null,
@@ -3290,11 +3316,11 @@ function makeItemFixture(chain: ChainRecord, overrides: Partial<ItemRecord> & Pi
 		// #412: per-item preset declaration; default null in fixtures so chain.preset fallback applies.
 		preset: null,
 		presetPath: null,
-		extra: storedItemExtra({}),
+		extra: resolvedExtra,
 		createdAt: 1_800_000_001,
 		updatedAt: 1_800_000_001,
 		statusUpdatedAt: 1_800_000_001,
-		...overrides,
+		...rest,
 	}
 }
 
@@ -3408,7 +3434,7 @@ async function createFixture(name: string): Promise<Fixture> {
 			const extra = itemExtraToJsonObject(item.extra)
 			const payload: BoundaryRecord = {
 				itemId: item.id,
-				issueNumber: item.issueNumber,
+				issueNumber: Number(item.itemId),
 				runId,
 				worktreePath,
 				eventLog,
@@ -3502,6 +3528,11 @@ function createItem(
 	input: { issueNumber: number; repoCwd: string; sleepMs?: number; exitCode?: number; summary?: string | null; runner?: AgentRunnerKind | null; writeStatus?: string | null },
 ) {
 	const extra: JsonObject = {
+		// #419: the bundled preset's `idField` is `issue` and reads from `extra.issue` via the
+		// preset-declared transparent-field path. Carry the value into extra so `{{ISSUE}}`
+		// renders in the spawn prompt (where the engine's `lookupItemField("issue")` resolves
+		// to `extra.issue`).
+		issue: input.issueNumber,
 		sleepMs: input.sleepMs ?? 5,
 		exitCode: input.exitCode ?? 0,
 	}
@@ -3512,7 +3543,7 @@ function createItem(
 	if (Object.prototype.hasOwnProperty.call(input, "writeStatus")) extra.writeStatus = input.writeStatus ?? null
 	return store.createItem({
 		chainId: chain.id,
-		issueNumber: input.issueNumber,
+		itemId: String(input.issueNumber),
 		repoCwd: input.repoCwd,
 		runner: input.runner ?? null,
 		status: runtimeStatus("queued"),
@@ -3909,15 +3940,13 @@ describe("per-run summary tag", () => {
 		const item: ItemRecord = {
 			id: 1,
 			chainId: 1,
-			issueNumber: 1,
+			itemId: "1",
 			repoCwd: "/fake",
 			status: parseInternalStatus("pending", "test.status"),
 			attempts: 0,
 			position: 0,
 			title: null,
 			priority: null,
-			branch: null,
-			pr: null,
 			lastRunId: null,
 			sessionIds: {},
 			issueFile: null,

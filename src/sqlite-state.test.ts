@@ -11,7 +11,7 @@ import {
 	openSqliteStateStore,
 } from "./sqlite-state"
 import type { JsonObject } from "./loop"
-import { chainBindings, engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
+import { chainBindings, engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/sqlite-state-tests", String(process.pid))
@@ -48,15 +48,16 @@ describe("sqlite state store", () => {
 			expect(store.listTableColumns("items")).toEqual([
 				"id",
 				"chain_id",
-				"issue_number",
+				// #419: `issue_number INTEGER` retired in favor of opaque `item_id TEXT`; `branch`
+				// and `pr` first-class columns retired (now live inside the `extra` JSON column as
+				// preset-declared transparent fields).
+				"item_id",
 				"repo_cwd",
 				"status",
 				"attempts",
 				"position",
 				"title",
 				"priority",
-				"branch",
-				"pr",
 				"last_run_id",
 				"session_ids",
 				"issue_file",
@@ -127,7 +128,7 @@ describe("sqlite state store", () => {
 			const chain = createFullChain(store)
 			const item = createFullItem(store, chain)
 			expect(store.getItem(item.id)).toEqual(item)
-			expect(store.getItemByIssue(chain.id, 177)).toEqual(item)
+			expect(store.getItemById(chain.id, "177")).toEqual(item)
 		} finally {
 			store.close()
 		}
@@ -222,11 +223,21 @@ describe("sqlite state store", () => {
 			const metadataOnly = store.updateItem(first.id, { attempts: 2, updatedAt: 1_800_000_100 })
 			expect(metadataOnly.statusUpdatedAt).toBe(first.statusUpdatedAt)
 
-			const updatedFirst = store.updateItem(first.id, { status: runtimeStatus("done"), branch: "issue-177", pr: 188, updatedAt: 1_800_000_101 })
+			// #419: `branch` / `pr` retired as top-level UpdateItemInput fields; they now flow
+			// through the `extra` JSON column as preset-declared transparent fields. The
+			// updater must fold new values onto existing extra so unrelated keys (e.g. the
+			// fixture-default `issue` / `phase` / `nested`) survive — `UpdateItemInput.extra`
+			// is a full replacement, so the test passes the merged object explicitly.
+			const firstExtraBefore = itemExtraToJsonObject(first.extra)
+			const updatedFirst = store.updateItem(first.id, {
+				status: runtimeStatus("done"),
+				extra: storedItemExtra({ ...firstExtraBefore, branch: "issue-177", pr: 188 }),
+				updatedAt: 1_800_000_101,
+			})
 			expect(updatedFirst.status).toBe("done")
 			expect(updatedFirst.statusUpdatedAt).toBe(1_800_000_101)
-			expect(updatedFirst.branch).toBe("issue-177")
-			expect(updatedFirst.pr).toBe(188)
+			expect(itemExtraToJsonObject(updatedFirst.extra).branch).toBe("issue-177")
+			expect(itemExtraToJsonObject(updatedFirst.extra).pr).toBe(188)
 			expect(store.updateItem(second.id, { status: runtimeStatus("moot"), updatedAt: 1_800_000_102 }).status).toBe("moot")
 			expect(store.updateItem(otherRepo.id, { status: runtimeStatus("blocked"), updatedAt: 1_800_000_103 }).status).toBe("blocked")
 			expect(store.allItemsTerminal({ chainId: chain.id, terminalStatusNames: [runtimeStatus("done"), runtimeStatus("moot"), runtimeStatus("blocked")] })).toBe(true)
@@ -354,8 +365,8 @@ describe("sqlite state store", () => {
 				statuses: [runtimeStatus("queued")],
 				terminalStatusNames: [runtimeStatus("done"), runtimeStatus("moot"), runtimeStatus("blocked")],
 			})).toEqual([{
-				itemId: dependent.id,
-				issueNumber: 2672,
+				rowId: dependent.id,
+				itemId: "2672",
 				repoCwd: "/repo/coder-loop",
 				dependsOn: [prerequisite.id],
 				unsatisfied: [prerequisite.id],
@@ -411,7 +422,7 @@ describe("sqlite state store", () => {
 			})
 			const blocker = store.createItem({
 				chainId: blockerChain.id,
-				issueNumber: 7,
+				itemId: "7",
 				repoCwd: "/repo/blocker",
 				status: runtimeStatus("done"),
 				attempts: 1,
@@ -459,8 +470,8 @@ describe("sqlite state store", () => {
 				statuses: [runtimeStatus("queued")],
 				terminalStatusNames: [runtimeStatus("done"), runtimeStatus("moot"), runtimeStatus("blocked")],
 			})).toEqual([{
-				itemId: dependent.id,
-				issueNumber: 2680,
+				rowId: dependent.id,
+				itemId: "2680",
 				repoCwd: "/repo/coder-loop",
 				dependsOn: [blocker.id],
 				unsatisfied: [blocker.id],
@@ -475,13 +486,13 @@ describe("sqlite state store", () => {
 		try {
 			const chain = createFullChain(store)
 			const inputs: CreateItemInput[] = [
-				{ chainId: chain.id, issueNumber: 311, repoCwd: "/repo/coder-loop", status: runtimeStatus("queued"), title: "first" },
-				{ chainId: chain.id, issueNumber: 312, repoCwd: "/repo/coder-loop", status: runtimeStatus("queued"), title: "second" },
-				{ chainId: chain.id, issueNumber: 313, repoCwd: "/repo/coder-loop", status: runtimeStatus("queued"), title: "third" },
+				{ chainId: chain.id, itemId: "311", repoCwd: "/repo/coder-loop", status: runtimeStatus("queued"), title: "first" },
+				{ chainId: chain.id, itemId: "312", repoCwd: "/repo/coder-loop", status: runtimeStatus("queued"), title: "second" },
+				{ chainId: chain.id, itemId: "313", repoCwd: "/repo/coder-loop", status: runtimeStatus("queued"), title: "third" },
 			]
 			const inserted = store.createItems(inputs)
-			expect(inserted.map((item) => item.issueNumber)).toEqual([311, 312, 313])
-			expect(store.listItems(chain.id).map((item) => item.issueNumber)).toEqual([311, 312, 313])
+			expect(inserted.map((item) => item.itemId)).toEqual(["311", "312", "313"])
+			expect(store.listItems(chain.id).map((item) => item.itemId)).toEqual(["311", "312", "313"])
 		} finally {
 			store.close()
 		}
@@ -497,9 +508,9 @@ describe("sqlite state store", () => {
 			let caught: unknown = null
 			try {
 				store.createItems([
-					{ chainId: chain.id, issueNumber: 321, repoCwd: "/repo/coder-loop", status: runtimeStatus("queued"), title: "before conflict" },
-					{ chainId: chain.id, issueNumber: 322, repoCwd: "/repo/coder-loop", status: runtimeStatus("queued"), title: "conflict (UNIQUE chain_id,issue_number)" },
-					{ chainId: chain.id, issueNumber: 323, repoCwd: "/repo/coder-loop", status: runtimeStatus("queued"), title: "after conflict" },
+					{ chainId: chain.id, itemId: "321", repoCwd: "/repo/coder-loop", status: runtimeStatus("queued"), title: "before conflict" },
+					{ chainId: chain.id, itemId: "322", repoCwd: "/repo/coder-loop", status: runtimeStatus("queued"), title: "conflict (UNIQUE chain_id,item_id)" },
+					{ chainId: chain.id, itemId: "323", repoCwd: "/repo/coder-loop", status: runtimeStatus("queued"), title: "after conflict" },
 				])
 			} catch (error) {
 				caught = error
@@ -509,9 +520,9 @@ describe("sqlite state store", () => {
 			expect((caught as SqliteStateError).code).toBe("sqlite_error")
 			expect((caught as SqliteStateError).message).toContain("create items")
 
-			expect(store.getItemByIssue(chain.id, 321)).toBeNull()
-			expect(store.getItemByIssue(chain.id, 323)).toBeNull()
-			const occupantAfter = store.getItemByIssue(chain.id, 322)
+			expect(store.getItemById(chain.id, "321")).toBeNull()
+			expect(store.getItemById(chain.id, "323")).toBeNull()
+			const occupantAfter = store.getItemById(chain.id, "322")
 			expect(occupantAfter).not.toBeNull()
 			expect(occupantAfter?.id).toBe(occupant.id)
 			expect(occupantAfter?.title).toBe("occupant")
@@ -540,14 +551,16 @@ describe("sqlite state store", () => {
 			writer = new Database(dbFile, { readwrite: true, strict: true })
 			writer.exec("PRAGMA foreign_keys = ON")
 			writer.exec("BEGIN IMMEDIATE")
-			writer.query("UPDATE items SET status = $status WHERE issue_number = $issueNumber").run({
+			// #419: items now keyed by opaque `item_id TEXT` (UNIQUE chain_id,item_id) instead of
+			// the retired integer `issue_number` column.
+			writer.query("UPDATE items SET status = $status WHERE item_id = $itemId").run({
 				status: runtimeStatus("in_progress"),
-				issueNumber: 177,
+				itemId: "177",
 			})
 
 			const readerStore = openSqliteStateStore({ loopDataRoot: dbFileRoot(dbFile) })
 			try {
-				const visibleItem = readerStore.getItemByIssue(chain.id, 177)
+				const visibleItem = readerStore.getItemById(chain.id, "177")
 				expect(visibleItem?.status).toBe("queued")
 			} finally {
 				readerStore.close()
@@ -693,7 +706,7 @@ describe("sqlite state store", () => {
 			expect(items).toHaveLength(1)
 			const item = items[0]!
 			expect(item.phase).toBeNull()
-			expect(item.issueNumber).toBe(999)
+			expect(item.itemId).toBe("999")
 			expect(item.statusUpdatedAt).toBe(1.0)
 			const updated = migrated.updateItem(item.id, { phase: "iteration", updatedAt: 2.0 })
 			expect(updated.phase).toBe("iteration")
@@ -704,7 +717,7 @@ describe("sqlite state store", () => {
 
 		const reopened = openSqliteStateStore({ loopDataRoot })
 		try {
-			const item = reopened.getItemByIssue(1, 999)
+			const item = reopened.getItemById(1, "999")
 			expect(item?.phase).toBe("iteration")
 		} finally {
 			reopened.close()
@@ -1066,6 +1079,153 @@ describe("sqlite state store", () => {
 		}
 	})
 
+	// #419 acceptance row 1: pre-migration loop-data carrying values inside the retired
+	// items.issue_number / branch / pr first-class columns must remain readable after the v11→v12
+	// migration runs. issue_number is moved into the new opaque `item_id TEXT` column (and folded
+	// into extra.issue), while branch / pr are flattened into `extra.branch` / `extra.pr` so the
+	// preset's transparent-fields path reads them through the declared-binding namespace. After
+	// migration the legacy columns no longer exist on the items table.
+	test("v11 to v12 migration retires issue_number/branch/pr into extra and item_id (acceptance row 1, #419)", async () => {
+		const loopDataRoot = resolve(TEST_ROOT, `items-opaque-v11-v12-${Date.now()}-${++nextRootId}`)
+		await mkdir(loopDataRoot, { recursive: true })
+		const dbFile = resolve(loopDataRoot, "db.sqlite")
+
+		const legacy = new Database(dbFile, { create: true, readwrite: true, strict: true })
+		try {
+			legacy.exec("PRAGMA foreign_keys = ON")
+			legacy.exec("PRAGMA journal_mode = WAL")
+			legacy.exec(`
+				CREATE TABLE chains (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					name TEXT NOT NULL UNIQUE,
+					preset TEXT,
+					repository TEXT NOT NULL,
+					base_branch TEXT NOT NULL,
+					status TEXT NOT NULL CHECK (status IN ('active', 'completed', 'deleted', 'stopped')),
+					metadata TEXT NOT NULL,
+					created_at REAL NOT NULL,
+					updated_at REAL NOT NULL
+				);
+				CREATE TABLE items (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+					issue_number INTEGER NOT NULL,
+					repo_cwd TEXT NOT NULL,
+					status TEXT NOT NULL,
+					attempts INTEGER NOT NULL,
+					position INTEGER NOT NULL DEFAULT 0,
+					status_updated_at REAL NOT NULL DEFAULT 0,
+					title TEXT,
+					priority TEXT,
+					branch TEXT,
+					pr INTEGER,
+					last_run_id TEXT,
+					session_ids TEXT NOT NULL DEFAULT '{}',
+					issue_file TEXT,
+					evidence_dir TEXT,
+					agent_cwd TEXT,
+					runner TEXT CHECK (runner IN ('claude', 'codex') OR runner IS NULL),
+					phase TEXT,
+					preset TEXT,
+					preset_path TEXT,
+					extra TEXT NOT NULL,
+					created_at REAL NOT NULL,
+					updated_at REAL NOT NULL,
+					UNIQUE (chain_id, issue_number)
+				);
+				CREATE TABLE runs (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					run_id TEXT NOT NULL UNIQUE,
+					chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+					item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+					phase TEXT NOT NULL,
+					status TEXT NOT NULL DEFAULT 'unknown',
+					started_at REAL NOT NULL,
+					ended_at REAL,
+					exit_code INTEGER,
+					extra TEXT NOT NULL
+				);
+				CREATE TABLE current_runs (
+					chain_id INTEGER PRIMARY KEY REFERENCES chains(id) ON DELETE CASCADE,
+					phase TEXT NOT NULL,
+					run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+					started_at REAL NOT NULL,
+					extra TEXT NOT NULL
+				);
+				PRAGMA user_version = 11;
+			`)
+			legacy.exec(`
+				INSERT INTO chains (name, preset, repository, base_branch, status, metadata, created_at, updated_at)
+				VALUES ('legacy-v11-items', 'gh-issue-pr-iteration', 'mouriya-s-lab/coder-loop', 'main', 'active', '{}', 1.0, 1.0)
+			`)
+			legacy.exec(`
+				INSERT INTO items (chain_id, issue_number, repo_cwd, status, attempts, position, status_updated_at, branch, pr, session_ids, extra, created_at, updated_at)
+				VALUES (1, 181, '/repo/coder-loop', 'queued', 0, 0, 1.0, 'issue-181', 191, '{}', '{}', 1.0, 1.0)
+			`)
+		} finally {
+			legacy.close()
+		}
+
+		const migrated = openSqliteStateStore({ loopDataRoot })
+		try {
+			// Physical column retirement: issue_number, branch, pr gone; item_id present.
+			const itemCols = migrated.listTableColumns("items")
+			expect(itemCols).not.toContain("issue_number")
+			expect(itemCols).not.toContain("branch")
+			expect(itemCols).not.toContain("pr")
+			expect(itemCols).toContain("item_id")
+
+			const chain = migrated.getChainByName("legacy-v11-items")
+			expect(chain).not.toBeNull()
+			const chainId = chain!.id
+
+			// issue_number folded into the opaque `item_id` (stringified per migration rules).
+			const item = migrated.getItemById(chainId, "181")
+			expect(item).not.toBeNull()
+			expect(item!.itemId).toBe("181")
+
+			// branch / pr round-trip through the JSON extra column, indistinguishable from the
+			// preset-declared transparent-field path that current writers go through.
+			const extra = itemExtraToJsonObject(item!.extra)
+			expect(extra.branch).toBe("issue-181")
+			expect(extra.pr).toBe(191)
+
+			// Lookup by an unknown opaque id returns null without throwing.
+			expect(migrated.getItemById(chainId, "999")).toBeNull()
+
+			// UNIQUE (chain_id, item_id) is enforced post-migration: inserting a second item with
+			// the same opaque id in the same chain throws.
+			expect(() =>
+				migrated.createItem({
+					chainId,
+					itemId: "181",
+					repoCwd: "/repo/coder-loop",
+					status: runtimeStatus("queued"),
+					attempts: 0,
+					extra: storedItemExtra({}),
+				}),
+			).toThrow()
+		} finally {
+			migrated.close()
+		}
+
+		// Re-open: migration is idempotent. The rows survive a second open without re-running
+		// the rebuild logic, and the columns remain in their v12 shape.
+		const reopened = openSqliteStateStore({ loopDataRoot })
+		try {
+			const reopenedCols = reopened.listTableColumns("items")
+			expect(reopenedCols).not.toContain("issue_number")
+			expect(reopenedCols).toContain("item_id")
+			const chain = reopened.getChainByName("legacy-v11-items")
+			expect(chain).not.toBeNull()
+			const item = reopened.getItemById(chain!.id, "181")
+			expect(item).not.toBeNull()
+			expect(itemExtraToJsonObject(item!.extra).branch).toBe("issue-181")
+		} finally {
+			reopened.close()
+		}
+	})
+
 	test("v5 to v6 migration maps legacy last_session_id by current phase and chain runner (issue #330 AC8)", async () => {
 		const loopDataRoot = resolve(TEST_ROOT, `session-ids-v5-v6-${Date.now()}-${++nextRootId}`)
 		await mkdir(loopDataRoot, { recursive: true })
@@ -1161,7 +1321,7 @@ describe("sqlite state store", () => {
 		try {
 			expect(migrated.listTableColumns("items")).not.toContain("last_session_id")
 			expect(migrated.listTableColumns("items")).toContain("session_ids")
-			const item = migrated.getItemByIssue(1, 330)
+			const item = migrated.getItemById(1, "330")
 			expect(item?.sessionIds).toEqual({
 				iteration: { codex: "d400e2b2-04a4-44f8-8f13-3078f41a5593" },
 			})
@@ -1301,9 +1461,15 @@ function createFullChain(store: ReturnType<typeof openSqliteStateStore>): ChainR
 	})
 }
 
+// #419: ItemRecord/CreateItemInput retired top-level `issueNumber` / `branch` / `pr`. Tests use
+// `issueNumber` / `branch` / `pr` as shim aliases for clarity; the fixture folds them into
+// `itemId` and `extra` so the actual DB write matches the new shape.
 type FullItemOverrides = Omit<Partial<CreateItemInput>, "status" | "extra"> & {
 	status?: string
 	extra?: JsonObject
+	issueNumber?: number
+	branch?: string | null
+	pr?: number | null
 }
 
 function createFullItem(
@@ -1311,23 +1477,37 @@ function createFullItem(
 	chain: ChainRecord,
 	overrides: FullItemOverrides = {},
 ): ItemRecord {
-	const { status = "queued", extra = { issue: 177, phase: "A", nested: { db: true } }, ...rest } = overrides
+	const {
+		status = "queued",
+		extra,
+		issueNumber,
+		branch,
+		pr,
+		itemId,
+		...rest
+	} = overrides
+	const resolvedIssueNumber = issueNumber ?? 177
+	const resolvedBranch = branch !== undefined ? branch : "issue-177"
+	const resolvedPr = pr !== undefined ? pr : 188
+	const defaultExtra: JsonObject = { issue: resolvedIssueNumber, phase: "A", nested: { db: true } }
+	const baseExtra: JsonObject = extra ?? defaultExtra
+	const extraWithLegacy: JsonObject = { ...baseExtra }
+	if (resolvedBranch !== null) extraWithLegacy.branch = resolvedBranch
+	if (resolvedPr !== null) extraWithLegacy.pr = resolvedPr
 	return store.createItem({
 		chainId: chain.id,
-		issueNumber: 177,
+		itemId: itemId ?? String(resolvedIssueNumber),
 		repoCwd: "/repo/coder-loop",
 		status: runtimeStatus(status),
 		attempts: 1,
 		title: "feat: SQLite 状态存储与 LoopState 完整映射",
 		priority: "10",
-		branch: "issue-177",
-		pr: 188,
 		lastRunId: "run-177",
 		issueFile: "issues/177.md",
 		evidenceDir: "evidence/177",
 		agentCwd: "/repo/coder-loop",
 		runner: "codex",
-		extra: storedItemExtra(extra),
+		extra: storedItemExtra(extraWithLegacy),
 		createdAt: 1_800_000_020,
 		updatedAt: 1_800_000_030,
 		...rest,

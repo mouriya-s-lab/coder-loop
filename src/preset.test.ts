@@ -157,6 +157,11 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(preset.name).toBe("gh-issue-pr-iteration")
 		expect(preset.item.idField).toBe("issue")
 		expect(Object.fromEntries(preset.item.fields)).toEqual({
+			// #419: the idField "issue" is now declared in [item.fields] so prompts resolve
+			// `{{ISSUE}}` through the typed pipeline (the engine-builtin string fallback was
+			// retired with `LEGACY_TRANSPARENT_ITEM_FIELDS`). `branch` / `pr` were always
+			// preset-declared transparent fields; they continue to round-trip via `extra`.
+			issue: { type: "number" },
 			branch: { type: "string" },
 			pr: { type: "number" },
 			lastRunId: { type: "string" },

@@ -64,7 +64,7 @@ process.exit(1)
 		})
 		const item = store.createItem({
 			chainId: chain.id,
-			issueNumber: 313_001,
+			itemId: "313001",
 			repoCwd: REPO_ROOT,
 			status: runtimeStatus("queued"),
 			attempts: 0,
@@ -96,7 +96,7 @@ process.exit(1)
 			loopDataRootOptions: { loopDataRoot },
 			now: () => now,
 			runIdFactory: ({ item: selected }) => `run-forced-failure-${selected.id}-${now}`,
-			prompt: ({ item, runId }) => JSON.stringify({ itemId: item.id, issueNumber: item.issueNumber, runId }),
+			prompt: ({ item, runId }) => JSON.stringify({ itemId: item.id, issueNumber: Number(item.itemId), runId }),
 			onEvent: (event) => {
 				schedulerEvents.push(event)
 			},
@@ -152,7 +152,7 @@ await Bun.write(${JSON.stringify(promptCapture)}, prompt)
 		await writeFile(paths.sharedFile, "# Shared durable context\n\n")
 		const item = store.createItem({
 			chainId: chain.id,
-			issueNumber: 357_001,
+			itemId: "357001",
 			repoCwd: REPO_ROOT,
 			status: runtimeStatus("queued"),
 			attempts: 0,
@@ -191,7 +191,7 @@ await Bun.write(${JSON.stringify(promptCapture)}, prompt)
 		const rendered = await readFile(promptCapture, "utf-8")
 		expect(rendered).toContain(`shared=${paths.sharedFile}`)
 		expect(rendered).toContain("current=\n")
-		expect(rendered).toContain(`evidence=${paths.issueEvidenceDir(item.issueNumber)}`)
+		expect(rendered).toContain(`evidence=${paths.issueEvidenceDir(item.itemId)}`)
 	} finally {
 		store.close()
 	}
@@ -224,7 +224,7 @@ test("stopped chain does not block another active chain in the same scheduler ti
 		})
 		const stoppedItem = store.createItem({
 			chainId: stopped.id,
-			issueNumber: 349_101,
+			itemId: "349101",
 			repoCwd: REPO_ROOT,
 			status: runtimeStatus("queued"),
 			attempts: 0,
@@ -232,7 +232,7 @@ test("stopped chain does not block another active chain in the same scheduler ti
 		})
 		const activeItem = store.createItem({
 			chainId: active.id,
-			issueNumber: 349_102,
+			itemId: "349102",
 			repoCwd: REPO_ROOT,
 			status: runtimeStatus("queued"),
 			attempts: 0,
@@ -312,7 +312,7 @@ console.log("done:" + input.itemId)
 		})
 		const item = store.createItem({
 			chainId: chain.id,
-			issueNumber: 351_002,
+			itemId: "351002",
 			repoCwd: target,
 			status: runtimeStatus("queued"),
 			attempts: 0,
@@ -338,7 +338,7 @@ console.log("done:" + input.itemId)
 			worktreeManager: createGitWorktreeManager({ loopDataRoot }),
 			loopDataRootOptions: { loopDataRoot },
 			runIdFactory: ({ item: selected }) => `run-complete-cleanup-${selected.id}`,
-			prompt: ({ item: selected }) => JSON.stringify({ itemId: selected.id, issueNumber: selected.issueNumber }),
+			prompt: ({ item: selected }) => JSON.stringify({ itemId: selected.id, issueNumber: Number(selected.itemId) }),
 			onEvent: (event) => {
 				schedulerEvents.push(event)
 			},
@@ -396,7 +396,7 @@ console.log(input.phase + ":" + status)
 		})
 		const item = store.createItem({
 			chainId: chain.id,
-			issueNumber: 346_001,
+			itemId: "346001",
 			repoCwd: REPO_ROOT,
 			status: runtimeStatus("queued"),
 			attempts: 0,
@@ -426,7 +426,7 @@ console.log(input.phase + ":" + status)
 			runIdFactory: ({ phase }) => `run-review-retry-${++runSequence}-${phase}`,
 			prompt: ({ item: selected, runId, phase }) => JSON.stringify({
 				itemId: selected.id,
-				issueNumber: selected.issueNumber,
+				issueNumber: Number(selected.itemId),
 				runId,
 				phase,
 			}),
@@ -496,7 +496,7 @@ echo "ITERATION SUMMARY: scope=daemon-crash-restart; reason=fake-codex"
 		})
 		const item = store.createItem({
 			chainId: chain.id,
-			issueNumber: 359_001,
+			itemId: "359001",
 			repoCwd: REPO_ROOT,
 			status: runtimeStatus("queued"),
 			attempts: 0,

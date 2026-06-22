@@ -560,7 +560,7 @@ describe("daemon", () => {
 				})
 				invalidPresetItemId = store.createItem({
 					chainId: invalidPresetChain.id,
-					issueNumber: 41101,
+					itemId: "41101",
 					repoCwd: REPO_ROOT,
 					status: runtimeStatus("queued"),
 					attempts: 0,
@@ -576,7 +576,7 @@ describe("daemon", () => {
 				})
 				unknownPresetItemId = store.createItem({
 					chainId: unknownPresetChain.id,
-					issueNumber: 41102,
+					itemId: "41102",
 					repoCwd: REPO_ROOT,
 					status: runtimeStatus("queued"),
 					attempts: 0,
@@ -739,12 +739,12 @@ describe("daemon", () => {
 
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 180,
+				itemId: "180",
 				repoCwd: REPO_ROOT,
 				title: "feat: 单进程 daemon",
 				extra: { sleepMs: 5 },
 			})).item)
-			expect(added).toMatchObject({ issueNumber: 180, status: runtimeStatus("queued"), title: "feat: 单进程 daemon" })
+			expect(added).toMatchObject({ itemId: "180", status: runtimeStatus("queued"), title: "feat: 单进程 daemon" })
 
 			const listed = expectOk(await request(fixture, "item.list", { chainId })).items
 			expect(Array.isArray(listed)).toBe(true)
@@ -752,9 +752,9 @@ describe("daemon", () => {
 
 			const updated = record(expectOk(await request(fixture, "item.update", {
 				itemId: numberValue(added.id),
-				fields: { status: runtimeStatus("done"), pr: 190, title: "updated daemon item" },
+				fields: { status: runtimeStatus("done"), title: "updated daemon item", extraPatch: { pr: 190 } },
 			})).item)
-			expect(updated).toMatchObject({ status: runtimeStatus("done"), pr: 190, title: "updated daemon item" })
+			expect(updated).toMatchObject({ status: runtimeStatus("done"), title: "updated daemon item", extra: expect.objectContaining({ pr: 190 }) })
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -778,13 +778,13 @@ describe("daemon", () => {
 			const presetPathDir = resolve(REPO_ROOT, "presets/single-phase-example")
 			expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 41280,
+				itemId: "41280",
 				repoCwd: REPO_ROOT,
 				preset: "gh-issue-pr-iteration",
 			}))
 			expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 41281,
+				itemId: "41281",
 				repoCwd: REPO_ROOT,
 				presetPath: presetPathDir,
 			}))
@@ -792,8 +792,8 @@ describe("daemon", () => {
 			const listed = expectOk(await request(fixture, "item.list", { chainId })).items
 			if (!Array.isArray(listed)) throw new Error("expected item.list items array")
 			expect(listed).toHaveLength(2)
-			const bundled = listed.map(record).find((item) => item.issueNumber === 41280)
-			const pathItem = listed.map(record).find((item) => item.issueNumber === 41281)
+			const bundled = listed.map(record).find((item) => item.itemId === "41280")
+			const pathItem = listed.map(record).find((item) => item.itemId === "41281")
 			if (bundled === undefined || pathItem === undefined) throw new Error("expected both items in list")
 			expect(bundled).toMatchObject({ preset: "gh-issue-pr-iteration", presetPath: null })
 			expect(pathItem).toMatchObject({ preset: null, presetPath: presetPathDir })
@@ -814,9 +814,9 @@ describe("daemon", () => {
 			const failed = await request(fixture, "item.batchAdd", {
 				chainId,
 				items: [
-					{ issueNumber: 25811, repoCwd: REPO_ROOT, title: "valid before invalid" },
-					{ issueNumber: 0, repoCwd: REPO_ROOT, title: "invalid issue" },
-					{ issueNumber: 25813, repoCwd: REPO_ROOT, title: "valid after invalid" },
+					{ itemId: "25811", repoCwd: REPO_ROOT, title: "valid before invalid" },
+					{ itemId: "", repoCwd: REPO_ROOT, title: "invalid issue" },
+					{ itemId: "25813", repoCwd: REPO_ROOT, title: "valid after invalid" },
 				],
 			})
 			expectInvalid(failed)
@@ -828,9 +828,9 @@ describe("daemon", () => {
 			const added = expectOk(await request(fixture, "item.batchAdd", {
 				chainId,
 				items: [
-					{ issueNumber: 25821, repoCwd: REPO_ROOT, title: "valid one" },
-					{ issueNumber: 25822, repoCwd: REPO_ROOT, title: "valid two" },
-					{ issueNumber: 25823, repoCwd: REPO_ROOT, title: "valid three" },
+					{ itemId: "25821", repoCwd: REPO_ROOT, title: "valid one" },
+					{ itemId: "25822", repoCwd: REPO_ROOT, title: "valid two" },
+					{ itemId: "25823", repoCwd: REPO_ROOT, title: "valid three" },
 				],
 			})).items
 			expect(Array.isArray(added)).toBe(true)
@@ -848,22 +848,22 @@ describe("daemon", () => {
 				repository: "mouriya-s-lab/coder-loop",
 			})).chain)
 			const chainId = numberValue(chain.id)
-			expectOk(await request(fixture, "item.add", { chainId, issueNumber: 25901, repoCwd: REPO_ROOT, title: "occupant" }))
+			expectOk(await request(fixture, "item.add", { chainId, itemId: "25901", repoCwd: REPO_ROOT, title: "occupant" }))
 			const baseline = expectOk(await request(fixture, "item.list", { chainId })).items as BoundaryRecord[]
 			expect(baseline).toHaveLength(1)
 
 			const failed = await request(fixture, "item.batchAdd", {
 				chainId,
 				items: [
-					{ issueNumber: 25902, repoCwd: REPO_ROOT, title: "would-be first" },
-					{ issueNumber: 25901, repoCwd: REPO_ROOT, title: "conflict with occupant" },
-					{ issueNumber: 25903, repoCwd: REPO_ROOT, title: "would-be third" },
+					{ itemId: "25902", repoCwd: REPO_ROOT, title: "would-be first" },
+					{ itemId: "25901", repoCwd: REPO_ROOT, title: "conflict with occupant" },
+					{ itemId: "25903", repoCwd: REPO_ROOT, title: "would-be third" },
 				],
 			})
 			expectConflict(failed)
 
 			const after = expectOk(await request(fixture, "item.list", { chainId })).items as BoundaryRecord[]
-			expect(after.map((item) => Number(item.issueNumber))).toEqual([25901])
+			expect(after.map((item) => Number(item.itemId))).toEqual([25901])
 			expect(after.map((item) => item.id)).toEqual(baseline.map((item) => item.id))
 		} finally {
 			await fixture.daemon.stop()
@@ -880,32 +880,32 @@ describe("daemon", () => {
 			const chainId = numberValue(chain.id)
 			const first = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 242,
+				itemId: "242",
 				repoCwd: REPO_ROOT,
 			})).item)
 
 			const duplicate = await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 242,
+				itemId: "242",
 				repoCwd: REPO_ROOT,
 			})
 			expectConflict(duplicate)
 			if (duplicate.ok) throw new Error("expected duplicate item.add to fail")
-			expect(duplicate.error.message).toBe("item with issueNumber 242 already exists in chain duplicate-item-chain")
+			expect(duplicate.error.message).toBe("item with id 242 already exists in chain duplicate-item-chain")
 			expect(JSON.stringify(duplicate.error)).not.toContain("UNIQUE constraint")
 			expect(JSON.stringify(duplicate.error)).not.toContain("items.chain_id")
 			expect(JSON.stringify(duplicate.error)).not.toContain("items.issue_number")
 			expect(record(duplicate.error.details)).toMatchObject({
 				chainId,
 				chainName: "duplicate-item-chain",
-				issueNumber: 242,
+				itemId: "242",
 				existingItemId: numberValue(first.id),
 			})
 
 			const listed = expectOk(await request(fixture, "item.list", { chainId })).items
 			if (!Array.isArray(listed)) throw new Error("expected item.list items array")
 			expect(listed).toHaveLength(1)
-			expect(record(listed[0])).toMatchObject({ id: numberValue(first.id), issueNumber: 242 })
+			expect(record(listed[0])).toMatchObject({ id: numberValue(first.id), itemId: "242" })
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -920,12 +920,12 @@ describe("daemon", () => {
 			})).chain)
 			const chainId = numberValue(chain.id)
 			const invalidRequests = [
-				{ issueNumber: 0, repoCwd: REPO_ROOT },
-				{ issueNumber: -1, repoCwd: REPO_ROOT },
-				{ issueNumber: 181, repoCwd: "relative/path" },
-				{ issueNumber: 182, repoCwd: resolve(REPO_ROOT, "missing-coder-loop-test-dir") },
-				{ issueNumber: 183, repoCwd: `${REPO_ROOT}\nchild` },
-				{ issueNumber: 184, repoCwd: `${REPO_ROOT}\u0000child` },
+				{ itemId: "", repoCwd: REPO_ROOT },
+				{ itemId: "bad with space", repoCwd: REPO_ROOT },
+				{ itemId: "181", repoCwd: "relative/path" },
+				{ itemId: "182", repoCwd: resolve(REPO_ROOT, "missing-coder-loop-test-dir") },
+				{ itemId: "183", repoCwd: `${REPO_ROOT}\nchild` },
+				{ itemId: "184", repoCwd: `${REPO_ROOT}\u0000child` },
 			]
 
 			for (const args of invalidRequests) {
@@ -953,56 +953,53 @@ describe("daemon", () => {
 
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 246,
+				itemId: "246",
 				repoCwd: REPO_ROOT,
 				title: "strict add item",
 				priority: "high",
-				branch: "feature/issue-246",
-				pr: 254,
 				issueFile: "issues/246.md",
 				evidenceDir: absoluteEvidenceDir,
 				runner: "codex",
-				extra: { note: "allowed" },
+				extra: { note: "allowed", branch: "feature/issue-246", pr: 254 },
 			})).item)
 			expect(added).toMatchObject({
-				issueNumber: 246,
+				itemId: "246",
 				status: runtimeStatus("queued"),
 				attempts: 0,
 				priority: "high",
-				branch: "feature/issue-246",
-				pr: 254,
 				issueFile: "issues/246.md",
 				evidenceDir: absoluteEvidenceDir,
 				lastRunId: null,
 				agentCwd: null,
 				runner: "codex",
+				extra: expect.objectContaining({ note: "allowed", branch: "feature/issue-246", pr: 254 }),
 			})
 
 			const invalidRequests = [
-				{ issueNumber: 601, repoCwd: REPO_ROOT, status: runtimeStatus("done") },
-				{ issueNumber: 602, repoCwd: REPO_ROOT, attempts: 999 },
-				{ issueNumber: 603, repoCwd: REPO_ROOT, lastRunId: "hacked" },
-				{ issueNumber: 604, repoCwd: REPO_ROOT, agentCwd: "/etc/passwd" },
-				{ issueNumber: 605, repoCwd: REPO_ROOT, id: 1 },
-				{ issueNumber: 606, repoCwd: REPO_ROOT, createdAt: 1 },
-				{ issueNumber: 607, repoCwd: REPO_ROOT, updatedAt: 1 },
-				{ issueNumber: 608, repoCwd: REPO_ROOT, branch: "../../etc/passwd" },
-				{ issueNumber: 609, repoCwd: REPO_ROOT, issueFile: "../../etc/passwd" },
-				{ issueNumber: 610, repoCwd: REPO_ROOT, evidenceDir: "/etc/coder-loop-evidence" },
-				{ issueNumber: 611, repoCwd: REPO_ROOT, random_field: "hack" },
-				{ issueNumber: 612, repoCwd: REPO_ROOT, title: "bad\nline" },
-				{ issueNumber: 613, repoCwd: REPO_ROOT, priority: "garbage-xyz" },
-				{ issueNumber: 614, repoCwd: REPO_ROOT, priority: 999 },
-				{ issueNumber: 615, repoCwd: REPO_ROOT, pr: -1 },
-				{ issueNumber: 616, repoCwd: REPO_ROOT, extra: JSON.parse(`{"__proto__":{"polluted":1}}`) },
-				{ issueNumber: 617, repoCwd: REPO_ROOT, extra: { "": "empty-key" } },
-				{ issueNumber: 618, repoCwd: REPO_ROOT, extra: nestedMetadata(9) },
+				{ itemId: "601", repoCwd: REPO_ROOT, status: runtimeStatus("done") },
+				{ itemId: "602", repoCwd: REPO_ROOT, attempts: 999 },
+				{ itemId: "603", repoCwd: REPO_ROOT, lastRunId: "hacked" },
+				{ itemId: "604", repoCwd: REPO_ROOT, agentCwd: "/etc/passwd" },
+				{ itemId: "605", repoCwd: REPO_ROOT, id: 1 },
+				{ itemId: "606", repoCwd: REPO_ROOT, createdAt: 1 },
+				{ itemId: "607", repoCwd: REPO_ROOT, updatedAt: 1 },
+				{ itemId: "608", repoCwd: REPO_ROOT, branch: "../../etc/passwd" },
+				{ itemId: "609", repoCwd: REPO_ROOT, issueFile: "../../etc/passwd" },
+				{ itemId: "610", repoCwd: REPO_ROOT, evidenceDir: "/etc/coder-loop-evidence" },
+				{ itemId: "611", repoCwd: REPO_ROOT, random_field: "hack" },
+				{ itemId: "612", repoCwd: REPO_ROOT, title: "bad\nline" },
+				{ itemId: "613", repoCwd: REPO_ROOT, priority: "garbage-xyz" },
+				{ itemId: "614", repoCwd: REPO_ROOT, priority: 999 },
+				{ itemId: "615", repoCwd: REPO_ROOT, pr: -1 },
+				{ itemId: "616", repoCwd: REPO_ROOT, extra: JSON.parse(`{"__proto__":{"polluted":1}}`) },
+				{ itemId: "617", repoCwd: REPO_ROOT, extra: { "": "empty-key" } },
+				{ itemId: "618", repoCwd: REPO_ROOT, extra: nestedMetadata(9) },
 			]
 			for (const args of invalidRequests) expectInvalid(await request(fixture, "item.add", { chainId, ...args }))
 
 			expectTooLarge(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 619,
+				itemId: "619",
 				repoCwd: REPO_ROOT,
 				extra: { k: "x".repeat(17 * 1024) },
 			}))
@@ -1010,7 +1007,7 @@ describe("daemon", () => {
 			const listed = expectOk(await request(fixture, "item.list", { chainId })).items
 			expect(Array.isArray(listed)).toBe(true)
 			expect(listed).toHaveLength(1)
-			expect(record(Array.isArray(listed) ? listed[0] : null)).toMatchObject({ issueNumber: 246 })
+			expect(record(Array.isArray(listed) ? listed[0] : null)).toMatchObject({ itemId: "246" })
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -1031,11 +1028,11 @@ describe("daemon", () => {
 			const chainId = numberValue(chain.id)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 185,
+				itemId: "185",
 				repoCwd: REPO_ROOT,
 			})).item)
 
-			expect(added).toMatchObject({ issueNumber: 185, status: runtimeStatus("queued"), repoCwd: REPO_ROOT })
+			expect(added).toMatchObject({ itemId: "185", status: runtimeStatus("queued"), repoCwd: REPO_ROOT })
 			await waitFor(async () => readItem(fixture.loopDataRoot, chainId, 185), (item) => item?.status === "queued")
 			await new Promise((resolveWait) => setTimeout(resolveWait, 120))
 			expect(record(expectOk(await request(fixture, "daemon.status")).daemon).running).toBe(true)
@@ -1052,8 +1049,8 @@ describe("daemon", () => {
 				repository: "mouriya-s-lab/coder-loop",
 			})).chain)
 			const chainId = numberValue(chain.id)
-			const first = record(expectOk(await request(fixture, "item.add", { chainId, issueNumber: 186, repoCwd: REPO_ROOT })).item)
-			const second = record(expectOk(await request(fixture, "item.add", { chainId, issueNumber: 187, repoCwd: REPO_ROOT })).item)
+			const first = record(expectOk(await request(fixture, "item.add", { chainId, itemId: "186", repoCwd: REPO_ROOT })).item)
+			const second = record(expectOk(await request(fixture, "item.add", { chainId, itemId: "187", repoCwd: REPO_ROOT })).item)
 			const firstId = numberValue(first.id)
 			const secondId = numberValue(second.id)
 
@@ -1114,7 +1111,7 @@ attemptTimeoutSeconds = 3600
 			})).chain)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId: numberValue(chain.id),
-				issueNumber: 45401,
+				itemId: "45401",
 				repoCwd: REPO_ROOT,
 			})).item)
 			expect(added.status).toBe("queued")
@@ -1162,13 +1159,13 @@ attemptTimeoutSeconds = 3600
 			const [firstResponse, secondResponse] = await Promise.all([
 				request(fixture, "item.add", {
 					chainId: numberValue(firstChain.id),
-					issueNumber: 45402,
+					itemId: "45402",
 					repoCwd: REPO_ROOT,
 					presetPath,
 				}),
 				request(fixture, "item.add", {
 					chainId: numberValue(secondChain.id),
-					issueNumber: 45403,
+					itemId: "45403",
 					repoCwd: REPO_ROOT,
 					presetPath,
 				}),
@@ -1441,7 +1438,7 @@ attemptTimeoutSeconds = 3600
 			})).chain)
 			await request(fixture, "item.add", {
 				chainId: numberValue(chain.id),
-				issueNumber: 45403,
+				itemId: "45403",
 				repoCwd,
 			})
 
@@ -1471,10 +1468,10 @@ attemptTimeoutSeconds = 3600
 				repository: "mouriya-s-lab/coder-loop",
 			})).chain)
 			const chainId = numberValue(chain.id)
-			const anchor = record(expectOk(await request(fixture, "item.add", { chainId, issueNumber: 500, repoCwd: REPO_ROOT })).item)
+			const anchor = record(expectOk(await request(fixture, "item.add", { chainId, itemId: "500", repoCwd: REPO_ROOT })).item)
 			const item = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 501,
+				itemId: "501",
 				repoCwd: REPO_ROOT,
 				dependsOn: [numberValue(anchor.id)],
 			})).item)
@@ -1550,7 +1547,7 @@ attemptTimeoutSeconds = 3600
 					})
 					const item = store.createItem({
 						chainId: chain.id,
-						issueNumber: 455,
+						itemId: "455",
 						repoCwd: REPO_ROOT,
 						status: runtimeStatus("queued"),
 						extra: storedItemExtra({
@@ -1603,20 +1600,20 @@ attemptTimeoutSeconds = 3600
 				repository: "mouriya-s-lab/coder-loop",
 			})).chain)
 			const chainId = numberValue(chain.id)
-			const a = record(expectOk(await request(fixture, "item.add", { chainId, issueNumber: 301, repoCwd: REPO_ROOT })).item)
-			const b = record(expectOk(await request(fixture, "item.add", { chainId, issueNumber: 302, repoCwd: REPO_ROOT })).item)
-			const c = record(expectOk(await request(fixture, "item.add", { chainId, issueNumber: 303, repoCwd: REPO_ROOT })).item)
+			const a = record(expectOk(await request(fixture, "item.add", { chainId, itemId: "301", repoCwd: REPO_ROOT })).item)
+			const b = record(expectOk(await request(fixture, "item.add", { chainId, itemId: "302", repoCwd: REPO_ROOT })).item)
+			const c = record(expectOk(await request(fixture, "item.add", { chainId, itemId: "303", repoCwd: REPO_ROOT })).item)
 
 			const baseline = expectOk(await request(fixture, "item.list", { chainId })).items as BoundaryRecord[]
-			expect(baseline.map((item) => Number(item.issueNumber))).toEqual([301, 302, 303])
+			expect(baseline.map((item) => Number(item.itemId))).toEqual([301, 302, 303])
 			expect(baseline.map((item) => Number(item.position))).toEqual([0, 1, 2])
 
 			const moved = expectOk(await request(fixture, "item.reorder", { itemId: numberValue(c.id), position: 0 })).items as BoundaryRecord[]
-			expect(moved.map((item) => Number(item.issueNumber))).toEqual([303, 301, 302])
+			expect(moved.map((item) => Number(item.itemId))).toEqual([303, 301, 302])
 			expect(moved.map((item) => Number(item.position))).toEqual([0, 1, 2])
 
 			const after = expectOk(await request(fixture, "item.list", { chainId })).items as BoundaryRecord[]
-			expect(after.map((item) => Number(item.issueNumber))).toEqual([303, 301, 302])
+			expect(after.map((item) => Number(item.itemId))).toEqual([303, 301, 302])
 			expect(after.map((item) => Number(item.position))).toEqual([0, 1, 2])
 
 			expectInvalid(await request(fixture, "item.reorder", { itemId: numberValue(a.id), position: -1 }))
@@ -1647,16 +1644,16 @@ attemptTimeoutSeconds = 3600
 			// The item explicitly declares the same preset as the chain to exercise status vocab.
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 188,
+				itemId: "188",
 				repoCwd: REPO_ROOT,
 				preset: "single-phase-example",
 			})).item)
-			expect(added).toMatchObject({ issueNumber: 188, status: "pending" })
+			expect(added).toMatchObject({ itemId: "188", status: "pending" })
 			const pending = record(expectOk(await request(fixture, "item.update", {
 				itemId: numberValue(added.id),
 				status: "pending",
 			})).item)
-			expect(pending).toMatchObject({ issueNumber: 188, status: "pending" })
+			expect(pending).toMatchObject({ itemId: "188", status: "pending" })
 
 			expectInvalid(await request(fixture, "item.update", { itemId: numberValue(added.id), status: runtimeStatus("changes_requested") }))
 		} finally {
@@ -1674,7 +1671,7 @@ attemptTimeoutSeconds = 3600
 			const chainId = numberValue(chain.id)
 			const iterationItem = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 34701,
+				itemId: "34701",
 				repoCwd: REPO_ROOT,
 			})).item)
 			const iterationItemId = numberValue(iterationItem.id)
@@ -1709,7 +1706,7 @@ attemptTimeoutSeconds = 3600
 			// not in review's [[phases.exits]]) is rejected under default-deny.
 			const reviewExitOutsideItem = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 34715,
+				itemId: "34715",
 				repoCwd: REPO_ROOT,
 			})).item)
 			const reviewExitOutsideItemId = numberValue(reviewExitOutsideItem.id)
@@ -1734,7 +1731,7 @@ attemptTimeoutSeconds = 3600
 			// the issue body anchors. Default-deny rejects any status write from an unknown phase.
 			const unknownPhaseItem = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 34716,
+				itemId: "34716",
 				repoCwd: REPO_ROOT,
 			})).item)
 			const unknownPhaseItemId = numberValue(unknownPhaseItem.id)
@@ -1759,7 +1756,7 @@ attemptTimeoutSeconds = 3600
 			for (const [index, status] of reviewStatuses.entries()) {
 				const reviewItem = record(expectOk(await request(fixture, "item.add", {
 					chainId,
-					issueNumber: 34710 + index,
+					itemId: String(34710 + index),
 					repoCwd: REPO_ROOT,
 				})).item)
 				const reviewItemId = numberValue(reviewItem.id)
@@ -1826,7 +1823,7 @@ attemptTimeoutSeconds = 3600
 			const chainId = numberValue(chain.id)
 			const item = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 34801,
+				itemId: "34801",
 				repoCwd: REPO_ROOT,
 			})).item)
 			const itemId = numberValue(item.id)
@@ -1872,7 +1869,7 @@ attemptTimeoutSeconds = 3600
 			const reviewChainId = numberValue(reviewChain.id)
 			const reviewItem = record(expectOk(await request(fixture, "item.add", {
 				chainId: reviewChainId,
-				issueNumber: 45101,
+				itemId: "45101",
 				repoCwd: REPO_ROOT,
 			})).item)
 			const reviewItemId = numberValue(reviewItem.id)
@@ -1934,7 +1931,7 @@ attemptTimeoutSeconds = 3600
 			const runChainId = numberValue(runChain.id)
 			const runItem = record(expectOk(await request(fixture, "item.add", {
 				chainId: runChainId,
-				issueNumber: 45102,
+				itemId: "45102",
 				repoCwd: REPO_ROOT,
 				preset: "single-phase-example",
 			})).item)
@@ -2000,7 +1997,7 @@ attemptTimeoutSeconds = 3600
 			const chainId = numberValue(chainRecord.id)
 			const item = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 45201,
+				itemId: "45201",
 				repoCwd: REPO_ROOT,
 			})).item)
 			const itemId = numberValue(item.id)
@@ -2073,7 +2070,7 @@ attemptTimeoutSeconds = 3600
 			const lifecycleEvent = lifecycleEvents[0]
 			if (lifecycleEvent?.type !== "chain.stop.from_phase_exit") throw new Error("expected chain.stop.from_phase_exit lifecycle event")
 			expect(lifecycleEvent.payload.chainId).toBe(chainId)
-			expect(lifecycleEvent.payload.issueNumber).toBe(45201)
+			expect(lifecycleEvent.payload.id).toBe("45201")
 			expect(lifecycleEvent.payload.alreadyStopped).toBe(false)
 			expect(lifecycleEvent.phase).toBe("review")
 			expect(lifecycleEvent.runId).toBe("run-exit-action-test-2")
@@ -2103,7 +2100,7 @@ attemptTimeoutSeconds = 3600
 			const otherChainId = numberValue(secondChain.id)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 221,
+				itemId: "221",
 				repoCwd: REPO_ROOT,
 			})).item)
 			const itemId = numberValue(added.id)
@@ -2111,7 +2108,6 @@ attemptTimeoutSeconds = 3600
 			const invalidRequests = [
 				{ itemId },
 				{ itemId, chainId: otherChainId, status: runtimeStatus("done") },
-				{ itemId, issueNumber: 999, status: runtimeStatus("done") },
 				{ itemId, id: itemId, status: runtimeStatus("done") },
 				{ itemId, createdAt: 1, status: runtimeStatus("done") },
 				{ itemId, updatedAt: 1, status: runtimeStatus("done") },
@@ -2134,7 +2130,7 @@ attemptTimeoutSeconds = 3600
 			expect(record(unchangedItems[0])).toMatchObject({
 				id: itemId,
 				chainId,
-				issueNumber: 221,
+				itemId: "221",
 				status: runtimeStatus("queued"),
 				attempts: 0,
 				lastRunId: null,
@@ -2146,10 +2142,11 @@ attemptTimeoutSeconds = 3600
 
 			const updated = record(expectOk(await request(fixture, "item.update", {
 				chainId,
-				issueNumber: 221,
+				itemId: "221",
 				fields: { status: runtimeStatus("done"), title: "strict item update" },
 			})).item)
-			expect(updated).toMatchObject({ id: itemId, chainId, issueNumber: 221, status: runtimeStatus("done"), title: "strict item update" })
+			expect(updated).toMatchObject({ id: itemId, chainId, status: runtimeStatus("done"), title: "strict item update" })
+			expect((updated as { itemId: string }).itemId).toBe("221")
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -2272,7 +2269,7 @@ attemptTimeoutSeconds = 3600
 			const chainId = numberValue(chain.id)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 226,
+				itemId: "226",
 				repoCwd: REPO_ROOT,
 			})).item)
 			const itemId = numberValue(added.id)
@@ -2281,7 +2278,7 @@ attemptTimeoutSeconds = 3600
 
 			expectChainDeleted(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 227,
+				itemId: "227",
 				repoCwd: REPO_ROOT,
 			}))
 			expectChainDeleted(await request(fixture, "item.update", { itemId, status: runtimeStatus("done") }))
@@ -2305,7 +2302,7 @@ attemptTimeoutSeconds = 3600
 			const chainId = numberValue(chain.id)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 228,
+				itemId: "228",
 				repoCwd: REPO_ROOT,
 				title: "complete me",
 			})).item)
@@ -2320,14 +2317,14 @@ attemptTimeoutSeconds = 3600
 
 			expectChainNotActive(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 229,
+				itemId: "229",
 				repoCwd: REPO_ROOT,
 			}), "completed", "item.add")
 			expectChainNotActive(await request(fixture, "item.batchAdd", {
 				chainId,
 				items: [
-					{ issueNumber: 230, repoCwd: REPO_ROOT },
-					{ issueNumber: 231, repoCwd: REPO_ROOT },
+					{ itemId: "230", repoCwd: REPO_ROOT },
+					{ itemId: "231", repoCwd: REPO_ROOT },
 				],
 			}), "completed", "item.batchAdd")
 			expectChainNotActive(await request(fixture, "item.update", { itemId, title: "mutated after completion" }), "completed", "item.update")
@@ -2339,7 +2336,7 @@ attemptTimeoutSeconds = 3600
 			expect(listed).toHaveLength(1)
 			expect(record(listed[0])).toMatchObject({
 				id: itemId,
-				issueNumber: 228,
+				itemId: "228",
 				status: runtimeStatus("done"),
 				title: "complete me",
 			})
@@ -2360,7 +2357,7 @@ attemptTimeoutSeconds = 3600
 				baseBranch: "main",
 			})).chain)
 			const chainId = numberValue(chain.id)
-			await request(fixture, "item.add", { chainId, issueNumber: 225, repoCwd: target, extra: { sleepMs: 5_000 } })
+			await request(fixture, "item.add", { chainId, itemId: "225", repoCwd: target, extra: { sleepMs: 5_000 } })
 			await waitFor(async () => record(expectOk(await request(fixture, "daemon.status")).daemon).activeRuns, (runs) => Array.isArray(runs) && runs.length === 1)
 
 			const storedChain = await readChain(fixture.loopDataRoot, chainId)
@@ -2402,7 +2399,7 @@ attemptTimeoutSeconds = 3600
 				baseBranch: "main",
 			})).chain)
 			const chainId = numberValue(chain.id)
-			await request(fixture, "item.add", { chainId, issueNumber: 351_003, repoCwd: target })
+			await request(fixture, "item.add", { chainId, itemId: "351003", repoCwd: target })
 			await waitFor(
 				async () =>
 					fixture.schedulerEvents.find(
@@ -2445,7 +2442,7 @@ attemptTimeoutSeconds = 3600
 			const chainId = numberValue(chain.id)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 220,
+				itemId: "220",
 				repoCwd: REPO_ROOT,
 				extra: { sleepMs: 5_000, exitCode: 0 },
 			})).item)
@@ -2491,7 +2488,7 @@ attemptTimeoutSeconds = 3600
 			const chainId = numberValue(chain.id)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 180,
+				itemId: "180",
 				repoCwd: REPO_ROOT,
 			})).item)
 			await request(fixture, "item.update", {
@@ -2515,7 +2512,7 @@ attemptTimeoutSeconds = 3600
 			const chainId = numberValue(chain.id)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 249,
+				itemId: "249",
 				repoCwd: REPO_ROOT,
 				extra: { sleepMs: 500, exitCode: 0 },
 			})).item)
@@ -2559,7 +2556,7 @@ attemptTimeoutSeconds = 3600
 			const chainId = numberValue(chain.id)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 349_201,
+				itemId: "349201",
 				repoCwd: REPO_ROOT,
 				extra: {
 					sleepMs: 5_000,
@@ -2609,7 +2606,7 @@ attemptTimeoutSeconds = 3600
 			try {
 				store.createItem({
 					chainId,
-					issueNumber: 349_202,
+					itemId: "349202",
 					repoCwd: REPO_ROOT,
 					status: runtimeStatus("queued"),
 					attempts: 0,
@@ -2640,7 +2637,7 @@ attemptTimeoutSeconds = 3600
 			})).chain)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId: numberValue(first.id),
-				issueNumber: 180,
+				itemId: "180",
 				repoCwd: REPO_ROOT,
 			})).item)
 			await request(fixture, "item.update", {
@@ -2673,7 +2670,7 @@ attemptTimeoutSeconds = 3600
 			const chainId = numberValue(chain.id)
 			await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 180,
+				itemId: "180",
 				repoCwd: REPO_ROOT,
 				extra: { sleepMs: 400, exitCode: 0 },
 			})
@@ -2715,7 +2712,7 @@ attemptTimeoutSeconds = 3600
 			// shutdown below proves termination rather than waiting.
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 181,
+				itemId: "181",
 				repoCwd: REPO_ROOT,
 				extra: { sleepMs: 30_000, exitCode: 0 },
 			})).item)
@@ -2768,7 +2765,7 @@ attemptTimeoutSeconds = 3600
 			const chainId = numberValue(chain.id)
 			await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 317,
+				itemId: "317",
 				repoCwd: REPO_ROOT,
 				extra: { sleepMs: 5, exitCode: 0 },
 			})
@@ -2803,7 +2800,7 @@ attemptTimeoutSeconds = 3600
 			const chainId = numberValue(chain.id)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 180,
+				itemId: "180",
 				repoCwd: REPO_ROOT,
 				extra: { sleepMs: 500, exitCode: 0 },
 			})).item)
@@ -2859,7 +2856,7 @@ attemptTimeoutSeconds = 3600
 				})
 			const item = store.createItem({
 				chainId: chain.id,
-				issueNumber: 217,
+				itemId: "217",
 				repoCwd: REPO_ROOT,
 				status: runtimeStatus("in_progress"),
 				attempts: 1,
@@ -2931,7 +2928,7 @@ attemptTimeoutSeconds = 3600
 				})
 			const terminal = store.createItem({
 				chainId: chain.id,
-				issueNumber: 307,
+				itemId: "307",
 				repoCwd: REPO_ROOT,
 				status: runtimeStatus("done"),
 				attempts: 1,
@@ -2950,7 +2947,7 @@ attemptTimeoutSeconds = 3600
 				})
 			store.createItem({
 				chainId: chain.id,
-				issueNumber: 308,
+				itemId: "308",
 				repoCwd: REPO_ROOT,
 					status: runtimeStatus("queued"),
 					attempts: 0,
@@ -3007,7 +3004,7 @@ attemptTimeoutSeconds = 3600
 				})
 			const item = store.createItem({
 				chainId: chain.id,
-				issueNumber: 309,
+				itemId: "309",
 				repoCwd: REPO_ROOT,
 				status: runtimeStatus("done"),
 				attempts: 1,
@@ -3074,7 +3071,7 @@ attemptTimeoutSeconds = 3600
 				})
 			const terminal = store.createItem({
 				chainId: chain.id,
-				issueNumber: 307,
+				itemId: "307",
 				repoCwd: REPO_ROOT,
 				status: runtimeStatus("done"),
 				attempts: 1,
@@ -3093,7 +3090,7 @@ attemptTimeoutSeconds = 3600
 				})
 			queuedItemId = store.createItem({
 				chainId: chain.id,
-				issueNumber: 308,
+				itemId: "308",
 				repoCwd: REPO_ROOT,
 					status: runtimeStatus("queued"),
 					attempts: 0,
@@ -3126,7 +3123,7 @@ attemptTimeoutSeconds = 3600
 				worktreeManager,
 				prompt: ({ item, runId }) => JSON.stringify({
 					itemId: item.id,
-					issueNumber: item.issueNumber,
+					issueNumber: Number(item.itemId),
 					runId,
 					eventLog,
 					sleepMs: 5,
@@ -3184,7 +3181,7 @@ attemptTimeoutSeconds = 3600
 				})
 			const item = store.createItem({
 				chainId: chain.id,
-				issueNumber: 238,
+				itemId: "238",
 				repoCwd: REPO_ROOT,
 				status: runtimeStatus("in_progress"),
 				attempts: 1,
@@ -3253,7 +3250,7 @@ attemptTimeoutSeconds = 3600
 			const chainId = numberValue(chain.id)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 217,
+				itemId: "217",
 				repoCwd: REPO_ROOT,
 			})).item)
 			// #404: the bundled preset retired `in_progress` from its continuable vocabulary, so the
@@ -3275,7 +3272,7 @@ attemptTimeoutSeconds = 3600
 			expect(record(record(status.summary).items).byStatus).toEqual({ in_progress: 1 })
 			expect(record(status.summary).recovery).toMatchObject({
 				needed: true,
-				staleInProgressItems: [{ issueNumber: 217, repoCwd: REPO_ROOT }],
+				staleInProgressItems: [{ itemId: "217", repoCwd: REPO_ROOT }],
 			})
 		} finally {
 			await fixture.daemon.stop()
@@ -3292,7 +3289,7 @@ attemptTimeoutSeconds = 3600
 			const chainId = numberValue(chain.id)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 180,
+				itemId: "180",
 				repoCwd: REPO_ROOT,
 				extra: { sleepMs: 5, exitCode: 7 },
 			})).item)
@@ -3325,7 +3322,7 @@ attemptTimeoutSeconds = 3600
 			const chainId = numberValue(chain.id)
 			await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 203,
+				itemId: "203",
 				repoCwd: REPO_ROOT,
 				// #405: pin the iteration write so the test's single-phase event assertion stays
 				// single-phase (previously the retired stdout verdict mapper coincidentally landed
@@ -3349,7 +3346,7 @@ attemptTimeoutSeconds = 3600
 			const stderr = await readFile(paths.runStderrFile(runId), "utf-8")
 			const events = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, { run: runId })
 
-			expect(status).toMatchObject({ runId, chainId, issueNumber: 203, phase: "iteration", exitCode: 0, status: runtimeStatus("done") })
+			expect(status).toMatchObject({ runId, chainId, itemId: "203", phase: "iteration", exitCode: 0, status: runtimeStatus("done") })
 			expect(stdout).toContain("done:")
 			expect(stderr).toBe("")
 			expect(status.eventsPath).toBe(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile)
@@ -3391,14 +3388,14 @@ attemptTimeoutSeconds = 3600
 			const chainId = numberValue(chain.id)
 			await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 304,
+				itemId: "304",
 				repoCwd: REPO_ROOT,
 				// #405: pin iteration writes — see note on the prior test.
 				extra: { sleepMs: 5, exitCode: 0, writeStatus: "done" },
 			})
 			await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 305,
+				itemId: "305",
 				repoCwd: REPO_ROOT,
 				extra: { sleepMs: 5, exitCode: 0, writeStatus: "done" },
 			})
@@ -3520,13 +3517,13 @@ attemptTimeoutSeconds = 3600
 			const chainId = numberValue(chain.id)
 			await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 9411,
+				itemId: "9411",
 				repoCwd: REPO_ROOT,
 				extra: { sleepMs: 500, exitCode: 0 },
 			})
 			await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 9412,
+				itemId: "9412",
 				repoCwd: REPO_ROOT,
 				extra: { sleepMs: 5, exitCode: 0 },
 			})
@@ -3567,7 +3564,7 @@ attemptTimeoutSeconds = 3600
 			// so the spawn-event presetDir assertion below remains the bundled single-phase preset.
 			await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 215,
+				itemId: "215",
 				repoCwd: REPO_ROOT,
 				// #405: single-phase-example's `run` phase isn't review, so the
 				// fakeRunner default returns null (no write). Pin the write explicitly.
@@ -3601,7 +3598,7 @@ attemptTimeoutSeconds = 3600
 			const chainId = numberValue(chain.id)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 406_001,
+				itemId: "406001",
 				repoCwd: REPO_ROOT,
 			})).item)
 			const itemId = numberValue(added.id)
@@ -3618,8 +3615,8 @@ attemptTimeoutSeconds = 3600
 			if (callerAllow !== undefined && callerAllow.kind === "audit" && callerAllow.type === "item.mutation.caller_admission") {
 				expect(callerAllow.subject).toEqual({ kind: "operator" })
 				expect(callerAllow.payload).toMatchObject({
-					itemId,
-					issueNumber: 406_001,
+					rowId: itemId,
+					itemId: "406001",
 					claimedRunId: null,
 					claimedPhase: null,
 					outcome: "allow",
@@ -3649,7 +3646,7 @@ attemptTimeoutSeconds = 3600
 			const chainId = numberValue(chain.id)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 406_002,
+				itemId: "406002",
 				repoCwd: REPO_ROOT,
 			})).item)
 			const itemId = numberValue(added.id)
@@ -3691,7 +3688,7 @@ attemptTimeoutSeconds = 3600
 			const chainId = numberValue(chain.id)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 406_003,
+				itemId: "406003",
 				repoCwd: REPO_ROOT,
 			})).item)
 			const itemId = numberValue(added.id)
@@ -3753,7 +3750,7 @@ process.exitCode = 0
 				},
 				prompt: ({ item, runId }) => JSON.stringify({
 					itemId: item.id,
-					issueNumber: item.issueNumber,
+					issueNumber: Number(item.itemId),
 					runId,
 					eventLog,
 					sleepMs: 2_500,
@@ -3771,13 +3768,13 @@ process.exitCode = 0
 			const chainId = numberValue(chain.id)
 			const itemA = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
-				issueNumber: 406_010,
+				itemId: "406010",
 				repoCwd: REPO_ROOT,
 				preset: "gh-issue-pr-iteration",
 			}))).item)
 			const itemB = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
-				issueNumber: 406_011,
+				itemId: "406011",
 				repoCwd: REPO_ROOT,
 				preset: "gh-issue-pr-iteration",
 			}))).item)
@@ -3914,7 +3911,7 @@ process.exitCode = 0
 				},
 				prompt: ({ item, runId }) => JSON.stringify({
 					itemId: item.id,
-					issueNumber: item.issueNumber,
+					issueNumber: Number(item.itemId),
 					runId,
 					eventLog,
 					sleepMs: 3_000,
@@ -3932,7 +3929,7 @@ process.exitCode = 0
 			const chainId = numberValue(chain.id)
 			const item = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
-				issueNumber: 406_300,
+				itemId: "406300",
 				repoCwd: REPO_ROOT,
 				preset: "gh-issue-pr-iteration",
 			}))).item)
@@ -4067,7 +4064,7 @@ process.exitCode = 1
 					await mkdir(worktreePath, { recursive: true })
 					return worktreePath
 				},
-				prompt: ({ item, runId }) => JSON.stringify({ itemId: item.id, issueNumber: item.issueNumber, runId, eventLog }),
+				prompt: ({ item, runId }) => JSON.stringify({ itemId: item.id, issueNumber: Number(item.itemId), runId, eventLog }),
 				chainCompleteTriggerForChain: () => null,
 			},
 		})
@@ -4081,7 +4078,7 @@ process.exitCode = 1
 			const chainId = numberValue(chain.id)
 			const item = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
-				issueNumber: 406_020,
+				itemId: "406020",
 				repoCwd: REPO_ROOT,
 				preset: "gh-issue-pr-iteration",
 			}))).item)
@@ -4149,7 +4146,7 @@ process.exitCode = 1
 			const chainId = numberValue(chain.id)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 406_030,
+				itemId: "406030",
 				repoCwd: REPO_ROOT,
 				extra: { sleepMs: 100, exitCode: 0 },
 			})).item)
@@ -4246,7 +4243,7 @@ process.exitCode = 0
 				worktreeManager,
 				prompt: ({ item, runId, phase }) => JSON.stringify({
 					itemId: item.id,
-					issueNumber: item.issueNumber,
+					issueNumber: Number(item.itemId),
 					runId,
 					phase,
 					eventLog,
@@ -4267,7 +4264,7 @@ process.exitCode = 0
 				repository: "mouriya-s-lab/coder-loop",
 			}))).chain)
 			const chainId = numberValue(chain.id)
-			expectOk(await sendDaemonRequest(socketPath, daemonRequest("item.add", { chainId, issueNumber: 29011, repoCwd: REPO_ROOT, preset: "gh-issue-pr-iteration" })))
+			expectOk(await sendDaemonRequest(socketPath, daemonRequest("item.add", { chainId, itemId: "29011", repoCwd: REPO_ROOT, preset: "gh-issue-pr-iteration" })))
 
 			// A trigger phase running on an already-terminal (blocked) item must not change that
 			// terminal status. The blocked-responder fake runner writes no status, and the engine
@@ -4321,7 +4318,7 @@ process.exitCode = 0
 			const chainId = numberValue(chain.id)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 7284,
+				itemId: "7284",
 				repoCwd: REPO_ROOT,
 				extra: { sleepMs: 5, exitCode: 0, summary: null },
 			})).item)
@@ -4367,7 +4364,7 @@ process.exitCode = 0
 				const chainId = numberValue(record(result).id)
 				const added = record(expectOk(await request(fixture, "item.add", {
 					chainId,
-					issueNumber: 287_301,
+					itemId: "287301",
 					repoCwd: REPO_ROOT,
 					extra: {},
 				})).item)
@@ -4407,7 +4404,7 @@ process.exitCode = 0
 				const chainId = numberValue(record(result).id)
 				await request(fixture, "item.add", {
 					chainId,
-					issueNumber: 287_302,
+					itemId: "287302",
 					repoCwd: REPO_ROOT,
 					extra: {},
 				})
@@ -4448,7 +4445,7 @@ process.exitCode = 0
 				const chainId = numberValue(record(result).id)
 				await request(fixture, "item.add", {
 					chainId,
-					issueNumber: 289_001,
+					itemId: "289001",
 					repoCwd: REPO_ROOT,
 					extra: {},
 				})
@@ -4513,7 +4510,7 @@ process.exitCode = 0
 				const chainId = numberValue(chain.id)
 				await request(fixture, "item.add", {
 					chainId,
-					issueNumber: 294_001,
+					itemId: "294001",
 					repoCwd: REPO_ROOT,
 					extra: {},
 				})
@@ -4621,7 +4618,7 @@ process.exitCode = 0
 			const chainId = numberValue(chain.id)
 			expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 4521,
+				itemId: "4521",
 				repoCwd: REPO_ROOT,
 				extra: { sleepMs: 5, exitCode: 0 },
 			}))
@@ -4667,7 +4664,7 @@ process.exitCode = 0
 			const chainId = numberValue(chain.id)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 4522,
+				itemId: "4522",
 				repoCwd: REPO_ROOT,
 				extra: {
 					sleepMs: 5,
@@ -4734,7 +4731,7 @@ process.exitCode = 0
 			const chainId = numberValue(chain.id)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 4523,
+				itemId: "4523",
 				repoCwd: REPO_ROOT,
 				extra: { sleepMs: 5, exitCode: 0 },
 			})).item)
@@ -4798,7 +4795,7 @@ process.exitCode = 0
 			const forgedTag = "summary-0123456789abcdef"
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 4524,
+				itemId: "4524",
 				repoCwd: REPO_ROOT,
 				extra: {
 					// Sleep long enough that the attempt timeout — not natural exit — closes it.
@@ -4852,7 +4849,7 @@ process.exitCode = 0
 			const chainId = numberValue(chain.id)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 401,
+				itemId: "401",
 				repoCwd: REPO_ROOT,
 				extra: { sleepMs: 500, exitCode: 0 },
 			})).item)
@@ -4918,7 +4915,7 @@ process.exitCode = 0
 				},
 				prompt: ({ item, runId }) => JSON.stringify({
 					itemId: item.id,
-					issueNumber: item.issueNumber,
+					issueNumber: Number(item.itemId),
 					runId,
 					eventLog,
 					sleepMs: 3_500,
@@ -4937,7 +4934,7 @@ process.exitCode = 0
 			// Parent item the scheduler will spawn against (iteration phase, no rights).
 			const parent = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
-				issueNumber: 407_100,
+				itemId: "407100",
 				repoCwd: REPO_ROOT,
 				preset: "gh-issue-pr-iteration",
 			}))).item)
@@ -4959,7 +4956,7 @@ process.exitCode = 0
 			// `no-rights-segment` (createItems=false AND writableFields empty AND privilegedOps empty).
 			const denied = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
-				issueNumber: 407_101,
+				itemId: "407101",
 				repoCwd: REPO_ROOT,
 				preset: "gh-issue-pr-iteration",
 				agentCredential: credential,
@@ -5060,7 +5057,7 @@ process.exitCode = 0
 				},
 				prompt: ({ item, runId, phase }) => JSON.stringify({
 					itemId: item.id,
-					issueNumber: item.issueNumber,
+					issueNumber: Number(item.itemId),
 					runId,
 					phase,
 					eventLog,
@@ -5080,7 +5077,7 @@ process.exitCode = 0
 			const chainId = numberValue(chain.id)
 			const parent = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
-				issueNumber: 407_200,
+				itemId: "407200",
 				repoCwd: REPO_ROOT,
 				preset: "gh-issue-pr-iteration",
 			}))).item)
@@ -5103,7 +5100,7 @@ process.exitCode = 0
 			// allow. The new item appears in the queue.
 			const created = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
-				issueNumber: 407_201,
+				itemId: "407201",
 				repoCwd: REPO_ROOT,
 				preset: "gh-issue-pr-iteration",
 				agentCredential: credential,
@@ -5111,13 +5108,13 @@ process.exitCode = 0
 			expect(created.ok).toBe(true)
 			if (!created.ok) throw new Error(`expected allow, got ${created.error.code}: ${created.error.message}`)
 			const newItem = record(created.result.item)
-			expect(numberValue(newItem.issueNumber)).toBe(407_201)
+			expect(stringValue(newItem.itemId)).toBe("407201")
 
 			// item.list cross-check: parent + child both present (2 items).
 			const listed = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.list", { chainId }))))
 			const items = Array.isArray(listed.items) ? listed.items : []
-			const issueNumbers = items.map((entry) => numberValue(record(entry).issueNumber)).sort((a, b) => a - b)
-			expect(issueNumbers).toEqual([407_200, 407_201])
+			const itemIds = items.map((entry) => stringValue(record(entry).itemId)).sort()
+			expect(itemIds).toEqual(["407200", "407201"])
 			expect(parentId).toBeGreaterThan(0)
 
 			// Audit replay: outcome=allow, reason=agent-allowed, subject.kind=agent, phase=review.
@@ -5155,7 +5152,7 @@ process.exitCode = 0
 			const chainId = numberValue(chain.id)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 407_300,
+				itemId: "407300",
 				repoCwd: REPO_ROOT,
 				preset: "gh-issue-pr-iteration",
 			})).item)
@@ -5224,7 +5221,7 @@ process.exitCode = 0
 				},
 				prompt: ({ item, runId, phase }) => JSON.stringify({
 					itemId: item.id,
-					issueNumber: item.issueNumber,
+					issueNumber: Number(item.itemId),
 					runId,
 					phase,
 					eventLog,
@@ -5246,7 +5243,7 @@ process.exitCode = 0
 			// agent runner so chain has at least one item to schedule.
 			const operatorItem = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
-				issueNumber: 407_400,
+				itemId: "407400",
 				repoCwd: REPO_ROOT,
 				preset: "single-phase-example",
 			}))).item)
@@ -5266,7 +5263,7 @@ process.exitCode = 0
 			// Agent path: the `run` phase has no rights segment → default-deny.
 			const denied = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
-				issueNumber: 407_401,
+				itemId: "407401",
 				repoCwd: REPO_ROOT,
 				preset: "single-phase-example",
 				agentCredential: credential,
@@ -5359,7 +5356,7 @@ process.exitCode = 0
 				},
 				prompt: ({ item, runId, phase }) => JSON.stringify({
 					itemId: item.id,
-					issueNumber: item.issueNumber,
+					issueNumber: Number(item.itemId),
 					runId,
 					phase,
 					eventLog,
@@ -5379,7 +5376,7 @@ process.exitCode = 0
 			const chainId = numberValue(chain.id)
 			expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
-				issueNumber: 407_500,
+				itemId: "407500",
 				repoCwd: REPO_ROOT,
 				preset: "gh-issue-pr-iteration",
 			})))
@@ -5400,7 +5397,7 @@ process.exitCode = 0
 			// priority shape: code=invalid_request, message includes the allowed enum.
 			const denied = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
-				issueNumber: 407_501,
+				itemId: "407501",
 				repoCwd: REPO_ROOT,
 				preset: "gh-issue-pr-iteration",
 				agentCredential: credential,
@@ -5474,7 +5471,7 @@ process.exitCode = 0
 					await mkdir(worktreePath, { recursive: true })
 					return worktreePath
 				},
-				prompt: ({ item, runId }) => JSON.stringify({ itemId: item.id, issueNumber: item.issueNumber, runId, eventLog, sleepMs: 5_500 }),
+				prompt: ({ item, runId }) => JSON.stringify({ itemId: item.id, issueNumber: Number(item.itemId), runId, eventLog, sleepMs: 5_500 }),
 				chainCompleteTriggerForChain: () => null,
 			},
 		})
@@ -5488,7 +5485,7 @@ process.exitCode = 0
 			const chainId = numberValue(chain.id)
 			expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
-				issueNumber: 409_100,
+				itemId: "409100",
 				repoCwd: REPO_ROOT,
 				preset: "gh-issue-pr-iteration",
 			})))
@@ -5574,6 +5571,14 @@ process.exitCode = 0
 		// Two-phase fake runner: iteration writes its credential to iterationCapture + writes
 		// in_progress status (scheduler advances to review on the next tick); review writes its
 		// credential to reviewCapture and sleeps long enough for the test to drive reorder.
+		// #419 review M2: iteration's sleep extended from 5ms to `iterationSleepMs` (default 3_000ms)
+		// so the iteration agent's run stays in the daemon's active-runs map while the test sends
+		// the deny-path `item.reorder`. The original 5ms window raced under full-suite concurrent
+		// load — the run had already closed (revoking the credential) before the request landed,
+		// turning the expected "deny + reason=no-rights-segment" into an "inactive-run" rejection.
+		// The longer sleep is bounded by the scheduler's slot-busy semantics: review can't spawn
+		// until iteration's run closes, so this just pushes review's start a few seconds later,
+		// well within the test's 30s budget.
 		await writeFile(
 			fakeRunner,
 			`import { writeFile, appendFile } from "node:fs/promises"
@@ -5592,7 +5597,7 @@ if (input.phase === "review") {
 		store.updateItem(input.itemId, { status: input.writeStatus, updatedAt: Math.floor(Date.now() / 1000) })
 		store.close()
 	}
-	await new Promise((r) => setTimeout(r, 5))
+	await new Promise((r) => setTimeout(r, input.iterationSleepMs ?? 3_000))
 }
 process.exitCode = 0
 `,
@@ -5612,11 +5617,15 @@ process.exitCode = 0
 				},
 				prompt: ({ item, runId, phase }) => JSON.stringify({
 					itemId: item.id,
-					issueNumber: item.issueNumber,
+					issueNumber: Number(item.itemId),
 					runId,
 					phase,
 					eventLog,
 					sleepMs: 5_500,
+					// #419 review M2: keep iteration alive ~3s so the deny-path reorder request below
+					// hits the active-credential gate instead of the inactive-run branch when the test
+					// suite runs concurrently.
+					iterationSleepMs: 3_000,
 					writeStatus: phase === "iteration" ? "in_progress" : null,
 				}),
 				chainCompleteTriggerForChain: () => null,
@@ -5632,14 +5641,14 @@ process.exitCode = 0
 			const chainId = numberValue(chain.id)
 			expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
-				issueNumber: 409_200,
+				itemId: "409200",
 				repoCwd: REPO_ROOT,
 				preset: "gh-issue-pr-iteration",
 			})))
 			// Add a second item so reorder is meaningful (position 1 vs 0).
 			expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
-				issueNumber: 409_201,
+				itemId: "409201",
 				repoCwd: REPO_ROOT,
 				preset: "gh-issue-pr-iteration",
 			})))
@@ -5651,10 +5660,27 @@ process.exitCode = 0
 			const iterationCredential = (await readFile(iterationCapture, "utf-8")).trim()
 			expect(iterationCredential.length).toBeGreaterThan(0)
 
+			// #419 review M2: confirm the iteration run is still active before issuing the deny-path
+			// reorder. Otherwise — under full-suite concurrent load — the iteration runner may have
+			// already exited and revoked its credential, and the daemon would reject with
+			// `agentCredential resolves to run … which is no longer active` instead of the
+			// per-phase rights deny we are asserting on. The DaemonActiveRun wire shape only
+			// exposes `runId`, not `phase`, so we identify the iteration run by the runId pattern
+			// (`run-<ts>-<seq>-iteration-item-<n>`) which the engine bakes into the runId at
+			// agent.spawn (via makeRunIdFactory — see loop.ts).
+			await waitFor(async () => {
+				const status = expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("daemon.status"))).daemon
+				const activeRuns = record(status).activeRuns
+				return Array.isArray(activeRuns) ? activeRuns : []
+			}, (runs) => runs.some((run) => {
+				const runId = record(run).runId
+				return typeof runId === "string" && runId.includes("-iteration-item-")
+			}), 8_000)
+
 			// Iteration phase has NO privilegedOps in its rights segment → deny.
 			const iterationReorder = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.reorder", {
 				chainName: "409-row2-per-phase-chain",
-				issueNumber: 409_201,
+				itemId: "409201",
 				position: 0,
 				agentCredential: iterationCredential,
 			}))
@@ -5678,7 +5704,7 @@ process.exitCode = 0
 			// Review phase HAS privilegedOps = ["item.reorder"] → allow.
 			const reviewReorder = expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.reorder", {
 				chainName: "409-row2-per-phase-chain",
-				issueNumber: 409_201,
+				itemId: "409201",
 				position: 0,
 				agentCredential: reviewCredential,
 			})))
@@ -5775,7 +5801,7 @@ process.exitCode = 0
 				},
 				prompt: ({ item, runId, phase }) => JSON.stringify({
 					itemId: item.id,
-					issueNumber: item.issueNumber,
+					issueNumber: Number(item.itemId),
 					runId,
 					phase,
 					eventLog,
@@ -5795,7 +5821,7 @@ process.exitCode = 0
 			const chainId = numberValue(chain.id)
 			expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
-				issueNumber: 409_300,
+				itemId: "409300",
 				repoCwd: REPO_ROOT,
 				preset: "gh-issue-pr-iteration",
 			})))
@@ -5888,7 +5914,7 @@ process.exitCode = 0
 					await mkdir(worktreePath, { recursive: true })
 					return worktreePath
 				},
-				prompt: ({ item, runId }) => JSON.stringify({ itemId: item.id, issueNumber: item.issueNumber, runId, eventLog, sleepMs: 3_500 }),
+				prompt: ({ item, runId }) => JSON.stringify({ itemId: item.id, issueNumber: Number(item.itemId), runId, eventLog, sleepMs: 3_500 }),
 				chainCompleteTriggerForChain: () => null,
 			},
 		})
@@ -5902,7 +5928,7 @@ process.exitCode = 0
 			const chainId = numberValue(chain.id)
 			expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
-				issueNumber: 409_300,
+				itemId: "409300",
 				repoCwd: REPO_ROOT,
 				preset: "gh-issue-pr-iteration",
 			})))
@@ -5980,13 +6006,13 @@ process.exitCode = 0
 			// a preset-unblockable status via item.update).
 			const addedA = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 409_400,
+				itemId: "409400",
 				repoCwd: REPO_ROOT,
 				preset: "gh-issue-pr-iteration",
 			})).item)
 			const addedB = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 409_401,
+				itemId: "409401",
 				repoCwd: REPO_ROOT,
 				preset: "gh-issue-pr-iteration",
 			})).item)
@@ -5999,7 +6025,7 @@ process.exitCode = 0
 
 			const reordered = expectOk(await request(fixture, "item.reorder", {
 				chainId,
-				issueNumber: 409_401,
+				itemId: "409401",
 				position: 0,
 			}))
 			const reorderedItems = Array.isArray(reordered.items) ? reordered.items : []
@@ -6009,7 +6035,7 @@ process.exitCode = 0
 			// its unblockable set) so queue.unblock has work to do.
 			expectOk(await request(fixture, "item.update", {
 				chainId,
-				issueNumber: 409_400,
+				itemId: "409400",
 				status: "blocked",
 			}))
 			const unblock = record(expectOk(await request(fixture, "queue.unblock", {
@@ -6122,7 +6148,7 @@ process.exitCode = 0
 				},
 				prompt: ({ item, runId, phase }) => JSON.stringify({
 					itemId: item.id,
-					issueNumber: item.issueNumber,
+					issueNumber: Number(item.itemId),
 					runId,
 					phase,
 					eventLog,
@@ -6142,7 +6168,7 @@ process.exitCode = 0
 			const chainId = numberValue(chain.id)
 			const added = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
-				issueNumber: 410_200,
+				itemId: "410200",
 				repoCwd: REPO_ROOT,
 				preset: "gh-issue-pr-iteration",
 			}))).item)
@@ -6160,12 +6186,13 @@ process.exitCode = 0
 			// Allow #1: branch + pr declared in preset.review.writableFields → admit, write lands.
 			const allowed = expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.update", {
 				itemId,
-				fields: { branch: "feat/issue-410", pr: 1042 },
+				fields: { extraPatch: { branch: "feat/issue-410", pr: 1042 } },
 				agentCredential: reviewCredential,
 			})))
 			const updatedA = record(allowed.item)
-			expect(updatedA.branch).toBe("feat/issue-410")
-			expect(numberValue(updatedA.pr)).toBe(1042)
+			const updatedAExtra = record(updatedA.extra)
+			expect(updatedAExtra.branch).toBe("feat/issue-410")
+			expect(numberValue(updatedAExtra.pr)).toBe(1042)
 
 			// Allow #2: extraPatch with blockerRepo + blockerRef inner keys — both declared in
 			// writableFields → admit. The merge preserves any prior extra contents.
@@ -6267,7 +6294,7 @@ process.exitCode = 0
 				},
 				prompt: ({ item, runId, phase }) => JSON.stringify({
 					itemId: item.id,
-					issueNumber: item.issueNumber,
+					issueNumber: Number(item.itemId),
 					runId,
 					phase,
 					eventLog,
@@ -6287,7 +6314,7 @@ process.exitCode = 0
 			const chainId = numberValue(chain.id)
 			const added = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
-				issueNumber: 410_100,
+				itemId: "410100",
 				repoCwd: REPO_ROOT,
 				preset: "gh-issue-pr-iteration",
 			}))).item)
@@ -6411,13 +6438,17 @@ process.exitCode = 0
 				&& event.payload.deniedFields.includes("title"),
 			)
 			expect(titleDeny).toBeDefined()
-			// Store state untouched on the denied paths: branch/pr/extra all default.
+			// Store state untouched on the denied paths: branch/pr (preset-declared transparent
+			// fields after #419) and the rest of extra all default.
 			const stillQueued = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.list", { chainId }))))
 			const itemsList = Array.isArray(stillQueued.items) ? stillQueued.items : []
 			expect(itemsList.length).toBe(1)
 			const stillRecord = record(itemsList[0])
-			expect(stillRecord.branch).toBeNull()
-			expect(stillRecord.pr).toBeNull()
+			// #419: `branch` / `pr` are no longer top-level wire fields. After denial they must
+			// still be absent from the `extra` carrier where presets declare them.
+			const stillExtra = record(stillRecord.extra)
+			expect(stillExtra.branch).toBeUndefined()
+			expect(stillExtra.pr).toBeUndefined()
 		} finally {
 			await daemon.stop()
 		}
@@ -6436,7 +6467,7 @@ process.exitCode = 0
 			const chainId = numberValue(created.id)
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 410_300,
+				itemId: "410300",
 				repoCwd: REPO_ROOT,
 				preset: "gh-issue-pr-iteration",
 			})).item)
@@ -6447,8 +6478,8 @@ process.exitCode = 0
 			expectOk(await request(fixture, "item.update", { itemId, priority: "high" }))
 			// Passthrough fields work too — including ones not in any preset's writableFields.
 			expectOk(await request(fixture, "item.update", { itemId, title: "operator-set title" }))
-			expectOk(await request(fixture, "item.update", { itemId, branch: "operator/branch" }))
-			expectOk(await request(fixture, "item.update", { itemId, pr: 7 }))
+			expectOk(await request(fixture, "item.update", { itemId, extraPatch: { branch: "operator/branch" } }))
+			expectOk(await request(fixture, "item.update", { itemId, extraPatch: { pr: 7 } }))
 			// Extra payloads with arbitrary inner keys.
 			const finalUpdate = record(expectOk(await request(fixture, "item.update", {
 				itemId,
@@ -6523,7 +6554,7 @@ prompt = "iter.md"
 			// Loading the broken preset via the per-item path surfaces the parse failure.
 			const reply = await request(fixture, "item.add", {
 				chainId,
-				issueNumber: 410_400,
+				itemId: "410400",
 				repoCwd: REPO_ROOT,
 				presetPath: presetDir,
 			})
@@ -6597,7 +6628,7 @@ process.exitCode = 0
 			worktreeManager,
 			prompt: ({ item, runId, phase }) => JSON.stringify({
 				itemId: item.id,
-				issueNumber: item.issueNumber,
+				issueNumber: Number(item.itemId),
 				runId,
 				phase,
 				eventLog,
@@ -6754,7 +6785,7 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 				const extra = itemExtraToJsonObject(item.extra)
 				const payload: BoundaryRecord = {
 					itemId: item.id,
-					issueNumber: item.issueNumber,
+					issueNumber: Number(item.itemId),
 					runId,
 					eventLog,
 					sleepMs: typeof extra.sleepMs === "number" ? extra.sleepMs : 5,
@@ -6903,7 +6934,7 @@ async function readChain(loopDataRoot: string, chainId: number) {
 async function readItem(loopDataRoot: string, chainId: number, issueNumber: number) {
 	const store = openSqliteStateStore({ loopDataRoot })
 	try {
-		return store.getItemByIssue(chainId, issueNumber)
+		return store.getItemById(chainId, String(issueNumber))
 	} finally {
 		store.close()
 	}
@@ -6959,7 +6990,10 @@ async function waitForItemQueueTerminal(
 	return (await waitFor(
 		async () =>
 			fixture.schedulerEvents.find(
-				(event): event is Extract<SchedulerEvent, { type: "queue.terminal" }> => event.type === "queue.terminal" && event.itemId === itemId,
+				// #419 review I2: scheduler event field renamed `itemId` (rowid) → `rowId`. The
+				// caller still passes the items.id rowid as `itemId` parameter for grep-friendly
+				// call sites; we match it against the renamed field.
+				(event): event is Extract<SchedulerEvent, { type: "queue.terminal" }> => event.type === "queue.terminal" && event.rowId === itemId,
 			) ?? null,
 		(event) => event !== null,
 		timeoutMs,
