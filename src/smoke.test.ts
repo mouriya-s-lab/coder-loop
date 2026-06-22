@@ -109,7 +109,9 @@ describe("smoke: v2 central chain CLI", () => {
 				type: "item.mutation.caller_admission",
 				subject: { kind: "operator" },
 				payload: {
-					issueNumber: 406_400,
+					// #419: payload retired `issueNumber: int` in favor of `rowId` (items.id rowid)
+					// + `itemId` (preset-declared opaque string).
+					itemId: "406400",
 					claimedRunId: null,
 					claimedPhase: null,
 					outcome: "allow",
@@ -236,7 +238,7 @@ function seedChain(fixture: Fixture, options: SeedOptions): void {
 		})
 		store.createItem({
 			chainId: chain.id,
-			issueNumber: options.issueNumber,
+			itemId: String(options.issueNumber),
 			repoCwd: fixture.target,
 			status: runtimeStatus(options.status),
 			issueFile: null,

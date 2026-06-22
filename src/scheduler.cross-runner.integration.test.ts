@@ -266,7 +266,8 @@ test("continuous fake runner failures exhaust at maxItemAttempts without another
 		expect(fixture.schedulerEvents.filter((event) => event.type === "agent.spawn" && event.itemId === item.id)).toHaveLength(2)
 		expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({
 			type: "queue.terminal",
-			itemId: item.id,
+			// #419 review I2: scheduler event field renamed `itemId` (rowid) → `rowId`.
+			rowId: item.id,
 			terminalStatus: "exhausted",
 		}))
 
@@ -350,7 +351,7 @@ async function createCrossRunnerFixture(name: string, responses: FakeRunnerRespo
 		runIdFactory: ({ chain, item, phase }) => `run-${chain.id}-${item.id}-${phase}-${++runSequence}`,
 		prompt: ({ item, runId, phase }) => JSON.stringify({
 			itemId: item.id,
-			issueNumber: item.issueNumber,
+			issueNumber: Number(item.itemId),
 			runId,
 			phase,
 		}),
@@ -401,7 +402,7 @@ function createChain(
 function createItem(store: ReturnType<typeof openSqliteStateStore>, chain: ChainRecord, issueNumber: number) {
 	return store.createItem({
 		chainId: chain.id,
-		issueNumber,
+		itemId: String(issueNumber),
 		repoCwd: REPO_ROOT,
 		status: runtimeStatus("queued"),
 		attempts: 0,
