@@ -254,10 +254,11 @@ export type ItemCommandArgs =
 	| {
 			action: "add"
 			chainName: string
-			// #419: opaque string item id (formerly `issueNumber: number`). CLI flag is `--id`
-			// (compatibility alias `--issue` kept on the parser since the bundled
-			// gh-issue-pr-iteration preset's idField is "issue" and operators / scripts already
-			// use that flag).
+			// #419: opaque string item id (formerly `issueNumber: number`). The CLI flag stays
+			// `--issue` for backward compatibility with operators / scripts already using it;
+			// the parser now accepts opaque string ids via `parseRequiredItemId` instead of the
+			// old numeric `parseRequiredIssueNumber`. Only the discriminated-union field name was
+			// renamed (`issueNumber` → `itemId`); no `--id` flag exists.
 			itemId: string
 			repoCwd: string
 			// #412: exactly one of preset/presetPath is set; the CLI parser enforces this before
@@ -1744,7 +1745,7 @@ function parseRequiredPositiveInteger(value: string, flagName: string): number {
 }
 
 // #419: opaque item id parser for the CLI face. Replaces `parseRequiredPositiveInteger` on
-// the `--issue` / `--id` flag — item identity is preset-declared and may be a string
+// the `--issue` flag (kept for backward compat) — item identity is preset-declared and may be a string
 // (single-phase-example's `idField = "id"` carries strings) or a string-encoded number
 // (gh-issue-pr-iteration's `idField = "issue"` carries stringified GitHub issue numbers).
 // The CLI no longer parses to an integer at this point; the daemon enforces shape per preset.

@@ -492,18 +492,21 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 				kind: "decision",
 				type: "item.dependency_wait",
 				chain: chain.name,
-				item: event.itemId,
+				// #419 review I2: `event.item` on the observability envelope carries the rowid
+				// (which legacy consumers grep for); the typed payload now exposes that integer
+				// on `rowId` instead of the colliding `itemId` field.
+				item: event.rowId,
 				subject: { kind: "engine" },
-				payload: { itemId: event.itemId, dependsOn: [...event.dependsOn], unsatisfied: [...event.unsatisfied] },
+				payload: { rowId: event.rowId, dependsOn: [...event.dependsOn], unsatisfied: [...event.unsatisfied] },
 			})
 		case "item.backoff":
 			return makeObservabilityEvent({
 				kind: "decision",
 				type: "item.backoff",
 				chain: chain.name,
-				item: event.itemId,
+				item: event.rowId,
 				subject: { kind: "engine" },
-				payload: { itemId: event.itemId, failureCount: event.failureCount, nextRunAt: event.nextRunAt },
+				payload: { rowId: event.rowId, failureCount: event.failureCount, nextRunAt: event.nextRunAt },
 			})
 		case "agent.spawn":
 			return makeObservabilityEvent({
@@ -658,20 +661,23 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 				kind: "audit",
 				type: "queue.terminal",
 				chain: chain.name,
-				item: event.itemId,
+				// #419 review I2: envelope `item` slot carries the rowid for grep-friendly correlation
+				// against runs.item_id; the typed payload moved the integer from `itemId` (which now
+				// uniformly means opaque string identity) to `rowId` to match the split convention.
+				item: event.rowId,
 				runId: event.runId,
 				subject: { kind: "engine" },
-				payload: { itemId: event.itemId, terminalStatus: event.terminalStatus },
+				payload: { rowId: event.rowId, terminalStatus: event.terminalStatus },
 			})
 		case "item.dependency_unblocked":
 			return makeObservabilityEvent({
 				kind: "audit",
 				type: "item.dependency_unblocked",
 				chain: chain.name,
-				item: event.itemId,
+				item: event.rowId,
 				subject: { kind: "engine" },
 				payload: {
-					itemId: event.itemId,
+					rowId: event.rowId,
 					fromStatus: event.fromStatus,
 					toStatus: event.toStatus,
 					dependsOn: [...event.dependsOn],

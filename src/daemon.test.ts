@@ -5571,6 +5571,14 @@ process.exitCode = 0
 		// Two-phase fake runner: iteration writes its credential to iterationCapture + writes
 		// in_progress status (scheduler advances to review on the next tick); review writes its
 		// credential to reviewCapture and sleeps long enough for the test to drive reorder.
+		// #419 review M2: iteration's sleep extended from 5ms to `iterationSleepMs` (default 3_000ms)
+		// so the iteration agent's run stays in the daemon's active-runs map while the test sends
+		// the deny-path `item.reorder`. The original 5ms window raced under full-suite concurrent
+		// load — the run had already closed (revoking the credential) before the request landed,
+		// turning the expected "deny + reason=no-rights-segment" into an "inactive-run" rejection.
+		// The longer sleep is bounded by the scheduler's slot-busy semantics: review can't spawn
+		// until iteration's run closes, so this just pushes review's start a few seconds later,
+		// well within the test's 30s budget.
 		await writeFile(
 			fakeRunner,
 			`import { writeFile, appendFile } from "node:fs/promises"
@@ -5589,7 +5597,7 @@ if (input.phase === "review") {
 		store.updateItem(input.itemId, { status: input.writeStatus, updatedAt: Math.floor(Date.now() / 1000) })
 		store.close()
 	}
-	await new Promise((r) => setTimeout(r, 5))
+	await new Promise((r) => setTimeout(r, input.iterationSleepMs ?? 3_000))
 }
 process.exitCode = 0
 `,
@@ -5614,6 +5622,10 @@ process.exitCode = 0
 					phase,
 					eventLog,
 					sleepMs: 5_500,
+					// #419 review M2: keep iteration alive ~3s so the deny-path reorder request below
+					// hits the active-credential gate instead of the inactive-run branch when the test
+					// suite runs concurrently.
+					iterationSleepMs: 3_000,
 					writeStatus: phase === "iteration" ? "in_progress" : null,
 				}),
 				chainCompleteTriggerForChain: () => null,
@@ -5647,6 +5659,23 @@ process.exitCode = 0
 			}, (value) => value.length > 0, 8_000)
 			const iterationCredential = (await readFile(iterationCapture, "utf-8")).trim()
 			expect(iterationCredential.length).toBeGreaterThan(0)
+
+			// #419 review M2: confirm the iteration run is still active before issuing the deny-path
+			// reorder. Otherwise — under full-suite concurrent load — the iteration runner may have
+			// already exited and revoked its credential, and the daemon would reject with
+			// `agentCredential resolves to run … which is no longer active` instead of the
+			// per-phase rights deny we are asserting on. The DaemonActiveRun wire shape only
+			// exposes `runId`, not `phase`, so we identify the iteration run by the runId pattern
+			// (`run-<ts>-<seq>-iteration-item-<n>`) which the engine bakes into the runId at
+			// agent.spawn (via makeRunIdFactory — see loop.ts).
+			await waitFor(async () => {
+				const status = expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("daemon.status"))).daemon
+				const activeRuns = record(status).activeRuns
+				return Array.isArray(activeRuns) ? activeRuns : []
+			}, (runs) => runs.some((run) => {
+				const runId = record(run).runId
+				return typeof runId === "string" && runId.includes("-iteration-item-")
+			}), 8_000)
 
 			// Iteration phase has NO privilegedOps in its rights segment → deny.
 			const iterationReorder = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.reorder", {
@@ -6961,7 +6990,10 @@ async function waitForItemQueueTerminal(
 	return (await waitFor(
 		async () =>
 			fixture.schedulerEvents.find(
-				(event): event is Extract<SchedulerEvent, { type: "queue.terminal" }> => event.type === "queue.terminal" && event.itemId === itemId,
+				// #419 review I2: scheduler event field renamed `itemId` (rowid) → `rowId`. The
+				// caller still passes the items.id rowid as `itemId` parameter for grep-friendly
+				// call sites; we match it against the renamed field.
+				(event): event is Extract<SchedulerEvent, { type: "queue.terminal" }> => event.type === "queue.terminal" && event.rowId === itemId,
 			) ?? null,
 		(event) => event !== null,
 		timeoutMs,

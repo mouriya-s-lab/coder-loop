@@ -265,13 +265,18 @@ const ObservabilityEventBoundary = arkType.or(
 		...EventBaseBoundary,
 		kind: arkType.unit("audit"),
 		type: arkType.unit("queue.terminal"),
-		payload: { itemId: "number", terminalStatus: "string" },
+		// #419 review I2: `itemId: "number"` (rowid) → `rowId: "number"`. The audit wire's `itemId`
+		// field now uniformly carries the opaque preset-declared string identity (used by other
+		// `item.*` audit events via the split shape `{ rowId, itemId }`); these decision/audit
+		// events only need the rowid and therefore expose it on `rowId`.
+		payload: { rowId: "number", terminalStatus: "string" },
 	},
 	{
 		...EventBaseBoundary,
 		kind: arkType.unit("audit"),
 		type: arkType.unit("item.dependency_unblocked"),
-		payload: { itemId: "number", fromStatus: "string", toStatus: "string", dependsOn: "number[]" },
+		// #419 review I2: same rename — rowid moves from `itemId` to `rowId`.
+		payload: { rowId: "number", fromStatus: "string", toStatus: "string", dependsOn: "number[]" },
 	},
 	{
 		...EventBaseBoundary,
@@ -283,13 +288,16 @@ const ObservabilityEventBoundary = arkType.or(
 		...EventBaseBoundary,
 		kind: arkType.unit("decision"),
 		type: arkType.unit("item.dependency_wait"),
-		payload: { itemId: "number", dependsOn: "number[]", unsatisfied: "number[]" },
+		// #419 review I2: `itemId: "number"` (rowid) → `rowId: "number"` for wire-shape consistency
+		// with the split convention `{ rowId: number, itemId: string }` adopted on `item.*` audit events.
+		payload: { rowId: "number", dependsOn: "number[]", unsatisfied: "number[]" },
 	},
 	{
 		...EventBaseBoundary,
 		kind: arkType.unit("decision"),
 		type: arkType.unit("item.backoff"),
-		payload: { itemId: "number", failureCount: "number", nextRunAt: "number" },
+		// #419 review I2: same rename — rowid moves from `itemId` to `rowId`.
+		payload: { rowId: "number", failureCount: "number", nextRunAt: "number" },
 	},
 	{
 		...EventBaseBoundary,
@@ -801,9 +809,10 @@ export function observabilityDecisionKey(event: Extract<ObservabilityEvent, { ki
 		case "slot.busy":
 			return `${event.type}:${event.chain ?? String(event.payload.chainId)}:${event.payload.slotKey}`
 		case "item.dependency_wait":
-			return `${event.type}:${event.chain ?? ""}:${event.item ?? event.payload.itemId}`
+			// #419 review I2: rowid moved from `payload.itemId` to `payload.rowId`.
+			return `${event.type}:${event.chain ?? ""}:${event.item ?? event.payload.rowId}`
 		case "item.backoff":
-			return `${event.type}:${event.chain ?? ""}:${event.item ?? event.payload.itemId}`
+			return `${event.type}:${event.chain ?? ""}:${event.item ?? event.payload.rowId}`
 		case "chain.complete_trigger":
 			return `${event.type}:${event.chain ?? String(event.payload.chainId)}:${event.runId ?? ""}`
 		default:
@@ -870,9 +879,10 @@ function renderAuditEvent(event: Extract<ObservabilityEvent, { kind: "audit" }>)
 		case "item.reordered":
 			return `${event.ts} audit item.reordered chain=${event.chain ?? "-"} item=${event.item ?? event.payload.itemId} position=${event.payload.position}`
 		case "queue.terminal":
-			return `${event.ts} audit queue.terminal chain=${event.chain ?? "-"} item=${event.item ?? event.payload.itemId} status=${event.payload.terminalStatus}`
+			// #419 review I2: rowid moved from `payload.itemId` to `payload.rowId`.
+			return `${event.ts} audit queue.terminal chain=${event.chain ?? "-"} item=${event.item ?? event.payload.rowId} status=${event.payload.terminalStatus}`
 		case "item.dependency_unblocked":
-			return `${event.ts} audit item.dependency_unblocked chain=${event.chain ?? "-"} item=${event.item ?? event.payload.itemId} ${event.payload.fromStatus}->${event.payload.toStatus}`
+			return `${event.ts} audit item.dependency_unblocked chain=${event.chain ?? "-"} item=${event.item ?? event.payload.rowId} ${event.payload.fromStatus}->${event.payload.toStatus}`
 		case "item.status.write_admission":
 			// #397: render shape mirrors the payload — outcome + reason carry the deny diagnostic
 			// (allowed exits set follows so operators reading a default-deny rejection see what the
@@ -916,9 +926,10 @@ function renderDecisionEvent(event: Extract<ObservabilityEvent, { kind: "decisio
 		case "slot.busy":
 			return `${event.ts} decision slot.busy chain=${event.chain ?? event.payload.chainId} run=${event.payload.activeRunId} slot=${JSON.stringify(event.payload.slotKey)}`
 		case "item.dependency_wait":
-			return `${event.ts} decision item.dependency_wait chain=${event.chain ?? "-"} item=${event.item ?? event.payload.itemId} unsatisfied=${event.payload.unsatisfied.join(",")}`
+			// #419 review I2: rowid moved from `payload.itemId` to `payload.rowId`.
+			return `${event.ts} decision item.dependency_wait chain=${event.chain ?? "-"} item=${event.item ?? event.payload.rowId} unsatisfied=${event.payload.unsatisfied.join(",")}`
 		case "item.backoff":
-			return `${event.ts} decision item.backoff chain=${event.chain ?? "-"} item=${event.item ?? event.payload.itemId} nextRunAt=${event.payload.nextRunAt}`
+			return `${event.ts} decision item.backoff chain=${event.chain ?? "-"} item=${event.item ?? event.payload.rowId} nextRunAt=${event.payload.nextRunAt}`
 		case "chain.complete_trigger":
 			return `${event.ts} decision chain.complete_trigger chain=${event.chain ?? event.payload.chainId} decision=${event.payload.decision}`
 		default:

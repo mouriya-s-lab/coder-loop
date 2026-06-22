@@ -498,9 +498,10 @@ describe("scheduler", () => {
 			const exhausted = fixture.store.getItem(item.id)
 			expect(exhausted?.status).toBe("exhausted")
 			expect(exhausted?.extra.schedulerBackoff).toBeUndefined()
+			// #419 review I2: scheduler event field renamed `itemId` (rowid) → `rowId`.
 			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({
 				type: "queue.terminal",
-				itemId: item.id,
+				rowId: item.id,
 				runId: "run-prior-default-failure",
 				terminalStatus: "exhausted",
 			}))
@@ -531,9 +532,10 @@ describe("scheduler", () => {
 			const exhausted = fixture.store.getItem(item.id)
 			expect(exhausted?.status).toBe("exhausted")
 			expect(exhausted?.extra.schedulerBackoff).toBeUndefined()
+			// #419 review I2: scheduler event field renamed `itemId` (rowid) → `rowId`.
 			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({
 				type: "queue.terminal",
-				itemId: item.id,
+				rowId: item.id,
 				runId: "run-prior-failure",
 				terminalStatus: "exhausted",
 			}))
@@ -577,11 +579,13 @@ describe("scheduler", () => {
 			expect(stored?.status).toBe("custom_exhausted")
 			expect(stored?.extra.schedulerBackoff).toBeUndefined()
 
-			const queueTerminal = fixture.schedulerEvents.find((event) => event.type === "queue.terminal" && event.itemId === item.id)
+			// #419 review I2: scheduler event field renamed `itemId` (rowid) → `rowId` to free
+			// `itemId` for the opaque string identity convention used on split-shape `item.*` events.
+			const queueTerminal = fixture.schedulerEvents.find((event) => event.type === "queue.terminal" && event.rowId === item.id)
 			expect(queueTerminal).toBeDefined()
 			expect(queueTerminal).toMatchObject({
 				type: "queue.terminal",
-				itemId: item.id,
+				rowId: item.id,
 				runId: "run-prior-custom-failure",
 				terminalStatus: "custom_exhausted",
 			})
@@ -1827,9 +1831,10 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			expect(afterUnblock?.extra.dependsOn).toBeUndefined()
 			expect(fixture.store.getChain(dependentChain.id)?.status).toBe("active")
 
+			// #419 review I2: scheduler event field renamed `itemId` (rowid) → `rowId`.
 			const unblockedEvents = fixture.schedulerEvents.filter(
 				(event): event is Extract<SchedulerEvent, { type: "item.dependency_unblocked" }> =>
-					event.type === "item.dependency_unblocked" && event.itemId === dependent.id,
+					event.type === "item.dependency_unblocked" && event.rowId === dependent.id,
 			)
 			expect(unblockedEvents).toHaveLength(1)
 			expect(unblockedEvents[0]?.fromStatus).toBe("blocked")
@@ -1891,8 +1896,9 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 				(event) => event.type === "phase.start" && event.itemId === dependent.id,
 			)
 			expect(phaseStarts).toHaveLength(0)
+			// #419 review I2: scheduler event field renamed `itemId` (rowid) → `rowId`.
 			const unblockedEvents = fixture.schedulerEvents.filter(
-				(event) => event.type === "item.dependency_unblocked" && event.itemId === dependent.id,
+				(event) => event.type === "item.dependency_unblocked" && event.rowId === dependent.id,
 			)
 			expect(unblockedEvents).toHaveLength(0)
 		} finally {
@@ -1986,9 +1992,10 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			expect(fixture.store.getChain(blockerChain.id)?.status).toBe("completed")
 			expect(fixture.store.getChain(dependentChain.id)?.status).toBe("completed")
 
+			// #419 review I2: scheduler event field renamed `itemId` (rowid) → `rowId`.
 			const unblockedEvents = fixture.schedulerEvents.filter(
 				(event): event is Extract<SchedulerEvent, { type: "item.dependency_unblocked" }> =>
-					event.type === "item.dependency_unblocked" && event.itemId === dependent.id,
+					event.type === "item.dependency_unblocked" && event.rowId === dependent.id,
 			)
 			expect(unblockedEvents).toHaveLength(1)
 			expect(unblockedEvents[0]?.fromStatus).toBe("blocked")

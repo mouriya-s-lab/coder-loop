@@ -266,7 +266,8 @@ test("continuous fake runner failures exhaust at maxItemAttempts without another
 		expect(fixture.schedulerEvents.filter((event) => event.type === "agent.spawn" && event.itemId === item.id)).toHaveLength(2)
 		expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({
 			type: "queue.terminal",
-			itemId: item.id,
+			// #419 review I2: scheduler event field renamed `itemId` (rowid) → `rowId`.
+			rowId: item.id,
 			terminalStatus: "exhausted",
 		}))
 

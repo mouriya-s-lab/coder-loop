@@ -53,6 +53,22 @@ type MakeItemOverrides = Omit<Partial<ItemRecord>, "extra"> & {
 	pr?: number | null
 }
 
+function itemSessionIdsToJsonObject(value: ItemRecord["sessionIds"]): JsonObject {
+	// Structural narrowing for the test fixture: walk the typed `Record<string, Partial<Record<runner, string>>>`
+	// and emit a JsonObject with only the present runner strings. Avoids `as JsonObject` (the #419 review's
+	// C1 red-line on real casts). Empty runner maps are still emitted as empty objects to match the
+	// underlying ItemRecord shape — tests don't currently exercise that branch but the helper stays honest.
+	const result: JsonObject = {}
+	for (const [phase, runners] of Object.entries(value)) {
+		const runnerMap: JsonObject = {}
+		for (const [runner, sessionId] of Object.entries(runners)) {
+			if (typeof sessionId === "string") runnerMap[runner] = sessionId
+		}
+		result[phase] = runnerMap
+	}
+	return result
+}
+
 function makeItem(overrides: MakeItemOverrides = {}): ItemRecord {
 	const { extra, issueNumber, branch, pr, ...rest } = overrides
 	const extraWithLegacy: JsonObject = { ...(extra ?? {}) }
@@ -71,7 +87,12 @@ function makeItem(overrides: MakeItemOverrides = {}): ItemRecord {
 	// `sessionIds` — is read from `extra`. Mirror the engine path so test fixtures don't
 	// silently desync between physical and preset-visible state.
 	if (rest.title !== undefined && rest.title !== null && extraWithLegacy.title === undefined) extraWithLegacy.title = rest.title
-	if (rest.sessionIds !== undefined && extraWithLegacy.sessionIds === undefined) extraWithLegacy.sessionIds = rest.sessionIds as JsonObject
+	// #419 review C1: structural narrowing instead of `as JsonObject` so the test honors the
+	// red-line on real `as` casts. `ItemSessionIds = Record<string, Partial<Record<runner, string>>>`
+	// is structurally JsonObject-compatible at runtime (no `undefined` values after normalize), but
+	// the TS-level `Partial<...>` widens runner values to `string | undefined` which JsonValue rejects.
+	// `itemSessionIdsToJsonObject` walks the typed structure, skipping `undefined` runner entries.
+	if (rest.sessionIds !== undefined && extraWithLegacy.sessionIds === undefined) extraWithLegacy.sessionIds = itemSessionIdsToJsonObject(rest.sessionIds)
 	return {
 		id: rest.id ?? 1,
 		chainId: rest.chainId ?? 10,

@@ -129,6 +129,8 @@ coder-loop status /path/to/your-target-repo --json \
 
 `.state.kind == "ok"` 表示 preset、central chain runtime、queue/current 都能解析；其他 kind 先按 [operations runtime health](./operations.md#4-runtime-health-错误分类) 继续排。
 
+> **Wire-shape diff (#419, breaking)**：`items` 表退出 GitHub-PR 形状（schema v12）。`status --json` 中 `queue.selected.item` 不再有顶层 `issueNumber` / `branch` / `pr` 字段——身份键改为 `queue.selected.id` 字符串，`branch` / `pr` 经 preset 透明字段下沉到 `queue.selected.item.extra.branch` / `extra.pr`。daemon wire 上 `item.add` / `item.update` 的 `issueNumber: number` 已重命名为 `itemId: string`；CLI flag 仍是 `--issue`（接受 opaque 字符串 id）。完整映射表见 [operations §1 wire-shape diff](./operations.md#wire-shape-diff-419)。
+
 ---
 
 ## 3. 用 `/dev-plan` 灌队列

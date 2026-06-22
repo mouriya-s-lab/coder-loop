@@ -55,6 +55,20 @@ coder-loop daemon down --json                    # 关闭 central daemon socket 
 | `events` | 当前或最近 run 的 events JSONL 路径、最近事件、解析错误 |
 | `processes` | central/process scan 结果：`live[]` 与 `scanError` |
 
+#### Wire-shape diff (#419)
+
+`items` 表退出 GitHub-PR 形状（v12，breaking）。`status --json` 与 daemon API 上的 item 暴露形态随之变化；supervisor 与脚本需要按下列映射更新读取路径：
+
+| 旧顶层字段（v11 及之前） | 新读取路径（v12 起） | 说明 |
+|---|---|---|
+| `queue.selected.item.issueNumber: number` | `queue.selected.id: string` 或 `queue.selected.item.extra.issue: string` | 引擎层不再焊死整数 issue number；`id` 是 preset `idField`-valued opaque string identity，`gh-issue-pr-iteration` 中是 GitHub issue number 的字符串编码。`item.issue`/`item.extra.issue` 来自 preset `[item.fields].issue = "number"` 透明字段声明。 |
+| `queue.selected.item.branch: string \| null` | `queue.selected.item.extra.branch: string \| null` | `branch` 不再是引擎一等列；`gh-issue-pr-iteration` 经 `[item.fields].branch` 透明字段写入 `extra`。 |
+| `queue.selected.item.pr: number \| null` | `queue.selected.item.extra.pr: number \| null` | 同上，`pr` 经 `[item.fields].pr` 透明字段写入 `extra`。 |
+| daemon wire `item.add` / `item.update` `issueNumber: number` | daemon wire `itemId: string` | discriminated-union field name 重命名；CLI flag 仍是 `--issue`（接受 opaque string）。 |
+| audit/decision event payload `itemId: number` (rowid，4 events) | `rowId: number` | `queue.terminal` / `item.dependency_unblocked` / `item.dependency_wait` / `item.backoff` 改用 `rowId` 携带 rowid 整数；`itemId` 在 wire 上统一保留给 opaque string identity。 |
+
+`coder-loop item update` / `item add` 的 `--field-json` 仍接受 `{"branch": "...", "pr": N}`——它们走 preset 声明的 `[item.fields]` 透明字段路径，与 schema 物理层无关。
+
 Runner 选择也在 `status` 中显式暴露：
 
 | JSON path | 含义 |
