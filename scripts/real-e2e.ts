@@ -4,7 +4,7 @@
  *
  * 单命令驱动一轮完整真实 loop：
  *   reset fixture → 脚本建 seed issue → 隔离 loop-data 起中央 daemon →
- *   install + item add → 真实 runner 跑 iter→review→PR→merge→issue close →
+ *   chain create + item add → 真实 runner 跑 iter→review→PR→merge→issue close →
  *   tripwire 盯防 → 终态断言 → evidence 摘要。
  *
  * 不用任何 mock：runner 是真实 claude/codex CLI，GitHub 路径是真实 issue/PR
@@ -511,12 +511,18 @@ async function runScenario(
 ): Promise<number> {
 	await waitForDaemonSocket(daemon, 15)
 
-	log("install: bootstrap fixture target + central chain")
-	const install = sh(["bun", LOOP_ENTRY, "install", options.fixtureCwd,
-		"--repo", options.fixtureRepo, "--preset", options.preset,
+	// #436: install/uninstall subcommands retired. The five-layer bootstrap reduced to a single
+	// `chain create` on the central daemon socket. Target directory needs no bootstrap files —
+	// CLAUDE.md / AGENTS.md ride in the fixture repo itself, preset's planning agent ensures
+	// GitHub label assets on first issue creation.
+	log(`chain create: ${chainName} → ${options.fixtureRepo} (preset=${options.preset})`)
+	const chainCreate = sh(["bun", LOOP_ENTRY, "chain", "create", chainName,
+		"--config-json", JSON.stringify({ repository: options.fixtureRepo, baseBranch: "main" }),
+		"--preset", options.preset,
+		"--force",
 		"--loop-data-root", daemon.loopDataRoot], { allowFail: true })
-	if (install.exitCode !== 0) {
-		dumpDiagnosis(options, daemon, chainName, `install 失败:\n${install.stdout}\n${install.stderr}`)
+	if (chainCreate.exitCode !== 0) {
+		dumpDiagnosis(options, daemon, chainName, `chain create 失败:\n${chainCreate.stdout}\n${chainCreate.stderr}`)
 		return 1
 	}
 

@@ -36,7 +36,7 @@ describe("buildLiveRuntimeHealthLines", () => {
 	})
 })
 
-describe("install command ownership", () => {
+describe("doctor command ownership", () => {
 	test("does not carry the preset kind label bootstrap asset", async () => {
 		const source = await readFile(resolve(REPO_ROOT, "src/install-commands.ts"), "utf-8")
 		expect(source).not.toContain("KIND_LABELS")
@@ -51,6 +51,19 @@ describe("install command ownership", () => {
 		expect(source).not.toContain(["skip", "skill", "check"].join("-"))
 		expect(source).not.toContain(["WRITING", "ISSUE"].join("_"))
 		await expect(Bun.file(resolve(REPO_ROOT, "templates/skills")).exists()).resolves.toBe(false)
+	})
+
+	// #436: install / uninstall surface deleted entirely. doctor is the only survivor.
+	test("does not carry install / uninstall surface or target file checks", async () => {
+		const source = await readFile(resolve(REPO_ROOT, "src/install-commands.ts"), "utf-8")
+		expect(source).not.toContain("runInstallCommand")
+		expect(source).not.toContain("runUninstallCommand")
+		expect(source).not.toContain("SLASH_COMMAND_FILES")
+		expect(source).not.toContain("WORKFLOW_REL")
+		expect(source).not.toContain("ensureWorkflowMd")
+		expect(source).not.toContain(["workflow", "md"].join("."))
+		expect(source).not.toContain("[Layer A]")
+		await expect(Bun.file(resolve(REPO_ROOT, "templates/workflow.md")).exists()).resolves.toBe(false)
 	})
 })
 

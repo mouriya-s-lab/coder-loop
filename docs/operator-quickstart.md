@@ -2,7 +2,7 @@
 
 读者：第一次想在一个 repo 上跑通 coder-loop 的人。
 
-读完后你能：bootstrap 一个新 repo 的 `.coder-loop/`、用稳定 CLI 体检 target、用 `/dev-plan` 灌一批 GitHub issue 进队列、通过 daemon API 起停 `/dev-loop`、用 `coder-loop status <target> --json` 判断当前进度。
+读完后你能：用一条 `chain create` 把新 target 接入中央 daemon、用稳定 CLI 体检 operator 机器与 live runtime、用 `/dev-plan` 灌一批 GitHub issue 进队列、通过 daemon API 起停 `/dev-loop`、用 `coder-loop status <target> --json` 判断当前进度。
 
 不在范围内：preset 内部怎么写（看 [preset-authoring](./preset-authoring.md)）、`gh-issue-pr-iteration` fragments 跳转细节（看 [gh-issue-pr-iteration-fragments](./gh-issue-pr-iteration-fragments.md)）、centralized runtime / chain debug 细节（看 [operations](./operations.md)）。
 
@@ -31,41 +31,28 @@ bun link                                              # 注册 `coder-loop` 全�
 
 不 `bun link` 也行——把后面命令里的 `coder-loop` 换成 `bun /path/to/coder-loop/src/loop.ts`。
 
-slash command（`/dev-plan` `/dev-loop`）有两种 scope：
+slash command（`/dev-plan` `/dev-loop`）是用户级：一份文件挂在 `~/.claude/commands/dev-*.md`，在任意 target repo 内都可调（参数化 target）。手工拷一次：
 
-- **per-target**（仅在该 target repo 内可用）：下一步的 `coder-loop install <target>` 会自动写到 `<target>/.claude/commands/`，不用手工拷。
-- **global**（所有 repo 内都可用）：必须手工 `cp .claude/commands/dev-*.md ~/.claude/commands/`，install 子命令不碰 home 目录。
+```bash
+cp .claude/commands/dev-*.md ~/.claude/commands/
+```
 
-只用一个 target 的话 per-target 就够；常态 operator 通常两个都做。
+本仓库 `.claude/commands/dev-plan.md` 与 `dev-loop.md` 保留为 dogfood 实例——既是 operator 拷贝源，也演示 slash command 形态本身。
 
 ---
 
-## 1. Bootstrap 目标 repo 的 `.coder-loop/`
+## 1. 把新 target 接入中央 daemon
 
-在**目标 repo**（不是本 repo）里先启动 central daemon，再执行 install：
+新接入只需中央 socket 上一条 `chain create`；target 目录不需要任何 bootstrap 文件，工作流约定 / 项目命令的真源是 target 自有的 `CLAUDE.md` / `AGENTS.md`（committed），preset prompt 显式读取。
 
 ```bash
 coder-loop daemon up
-coder-loop install /path/to/your-target-repo --repo <owner>/<repo>
+coder-loop chain create <name> --repository <owner>/<repo> --preset gh-issue-pr-iteration
 ```
 
-幂等。它做这些事：
+可选 `--config-json '{"baseBranch":"main", "bindings":{"<key>":"<value>"}}'` 在 chain 上额外声明 per-target 偏差。`gh-issue-pr-iteration` 需要的 GitHub label 资产由该 preset 的 planning agent 在 `plan/create-issues` 路径首次创建 issue 前按 preset 声明幂等确保，缺失则创建，color / description 漂移则更新——不由本 CLI 负责。
 
-- **A) target 项目文件**：写 `.claude/commands/dev-plan.md` / `dev-loop.md`、建/刷新 `.coder-loop/runtime/{issues,evidence,logs}/` 并初始化 centralized chain。**注**：install 仍兼容地写 `.coder-loop/workflow.md`，但 #434 起引擎不再读它；项目命令 / PR 约定的权威源是 target 自有的 `CLAUDE.md` / `AGENTS.md`，preset prompt 显式读取。该 install 写入路径将在 #436 退役。
-- **B) 操作员机器前置**：只做检查、不安装——`gh`(+ auth) / preset phase runner CLI / `coder-loop` 是否在 PATH。
-
-`gh-issue-pr-iteration` 需要的 `kind:*` GitHub label 资产不由 install / doctor 管理；planning agent 在 `plan/create-issues` 路径首次创建 issue 前按 preset 声明幂等确保，缺失则创建，color / description 漂移则更新。
-
-`install` 第一件事会确认 central daemon 可达；daemon 不在线时会在写任何 target 文件之前 fail-fast。使用自定义 `--loop-data-root` 时，`daemon up` 与后续 `install` / `doctor` / `status` 要传同一个 root。
-
-常用 flag：
-
-| Flag | 用途 |
-|---|---|
-| `--repo <owner>/<repo>` | 写进 chain identity（`chain.repository`），用于后续 GitHub issue / PR / label 操作 |
-| `--preset <name>` | 默认 `gh-issue-pr-iteration` |
-| `--force` | 覆盖已存在的 slash command（其他文件仍幂等；`.coder-loop/workflow.md` 在 #436 退役前仍由 install 写出但引擎不读） |
-| `--dry-run` | 打印每一步将做什么，不写盘 |
+使用自定义 `--loop-data-root` 时，`daemon up` 与后续 `chain create` / `doctor` / `status` 要传同一个 root。
 
 之后做一次只读体检：
 
@@ -74,15 +61,15 @@ coder-loop doctor /path/to/your-target-repo --repo <owner>/<repo>
 coder-loop status /path/to/your-target-repo --json
 ```
 
-target 文件、operator 前置、live runtime health 全 OK 且 `status` 能输出 JSON，才能进下一步。doctor 不改任何文件——失败时按它指出的项目重跑 `install`（或修 PATH / `gh auth login`）。`status` 也只读；即使 runtime 缺失或损坏，它也会用 `state.kind` 返回机器可读状态。
+`doctor` 只看 operator 机器（gh + auth、preset phase 声明的 runner CLI、`coder-loop` 在 PATH）和中央 daemon / chain 的 live runtime（state、queue、events、live process）——零 target 文件检查。失败时按它指出的项目修 PATH / `gh auth login` / 起 daemon。`status` 也只读；即使 runtime 缺失或损坏，它也会用 `state.kind` 返回机器可读状态。
 
-想精确看一遍 install 会做什么、不会做什么，直接 `coder-loop install <target> --repo <slug> --dry-run`——它会逐行打印每个 layer 的动作和 `would-write` 标记。
+（#436 起 install / uninstall 子命令退役。原五层 bootstrap：Layer A target 政策文件随 #434 退役、Layer B operator PATH 收编到 `doctor`、Layer C central chain 收编到 `chain create`、Layer D 用户级 skill vendoring 随 #435 退役、Layer 资产 GitHub label 随 #421 收回到 preset 的 planning agent。整条 install 表面已无内容可做。）
 
 ### Runner 默认值与覆盖
 
 默认 runner 与 model 由 `preset.toml` 的每个 phase 声明；bundled `gh-issue-pr-iteration` 中 iteration 是 `codex`，review 是 `codex` + `model = "gpt-5.5"`。Review 不继承宿主或 queue item。#433 起 target 级 runtime 文件退役——要改默认模型直接改 preset.toml 该 phase 的 `model` 字段，没有 per-target override 通道。
 
-单个 queue item 可加 `"runner": "claude" | "codex"` 覆盖允许 item override 的普通执行 phase；review 和 trigger 角色用自己的 preset phase 声明。`doctor` 检查所有 phase runner 的实际 binary；`status --json` 暴露 `target.runner.phases`、`queue.selected.phaseRunners`、`current.runner` 与 phase status 的 runner/model。
+单个 queue item 可加 `"runner": "claude" | "codex"` 覆盖允许 item override 的普通执行 phase；review 和 trigger 角色用自己的 preset phase 声明。`doctor` 按所有 phase runner 检查实际 binary 是否在 PATH；`status --json` 暴露 `target.runner.phases`、`queue.selected.phaseRunners`、`current.runner` 与 phase status 的 runner/model。
 
 把运行期文件加 `.gitignore`：
 
@@ -93,9 +80,9 @@ echo '.dev-loop' >> .gitignore
 echo '.dev-trace.txt' >> .gitignore
 ```
 
-项目命令 / PR 约定 / 项目专属注意事项要落在 target 自有的 `CLAUDE.md` / `AGENTS.md`（committed）——`gh-issue-pr-iteration` preset 的 plan / iter / review prompts 全部显式读取这两份。（旧版本曾让 install 在 target 写 `.coder-loop/workflow.md` 当真源，自 #434 起该文件已无引擎读者，#436 退役。）
+项目命令 / PR 约定 / 项目专属注意事项要落在 target 自有的 `CLAUDE.md` / `AGENTS.md`（committed）——`gh-issue-pr-iteration` preset 的 plan / iter / review prompts 全部显式读取这两份。（旧版本曾让 install 在 target 写 `.coder-loop/workflow.md` 当真源，自 #434 起该文件已无引擎读者，#436 起 install/uninstall 子命令本身也退役。）
 
-拆掉 slash command（保留 runtime）：`coder-loop uninstall /path/to/your-target-repo`。
+要从某 target 撤出 coder-loop：直接 `coder-loop chain delete <name>` 删除 chain；用户级 slash command 不绑定 target，按需 `rm ~/.claude/commands/dev-{plan,loop}.md`。
 
 ---
 
@@ -108,7 +95,7 @@ coder-loop doctor /path/to/your-target-repo --repo <owner>/<repo>
 coder-loop status /path/to/your-target-repo --json | jq '.state.kind, .queue, .current, .processes.live'
 ```
 
-`doctor` 给人看 bootstrap / live runtime health；`status --json` 给 supervisor、脚本、cron 看结构化状态。常见判断：
+`doctor` 给人看 operator 机器先决条件 + live runtime health；`status --json` 给 supervisor、脚本、cron 看结构化状态。常见判断：
 
 | 字段 | 期望 |
 |---|---|
@@ -120,7 +107,7 @@ coder-loop status /path/to/your-target-repo --json | jq '.state.kind, .queue, .c
 | `.events.latest` | 当前或最近 run 的最后一条结构化事件 |
 | `.processes.live` / `.processes.scanError` | live process scan 结果；daemon 详情看 `coder-loop daemon status` |
 
-如果你只想看 runtime/schema，不想同时检查 PATH / runner CLI 等 bootstrap 层，直接读结构化 status：
+如果你只想看 runtime/schema，不想同时检查 PATH / runner CLI 等 operator 机器层，直接读结构化 status：
 
 ```bash
 coder-loop status /path/to/your-target-repo --json \
@@ -147,7 +134,7 @@ coder-loop status /path/to/your-target-repo --json \
 coder-loop status /path/to/your-target-repo --json | jq '.state.kind, .queue.total, .queue.selected'
 ```
 
-`.state.kind == "ok"` 且 `.queue.selected` 不为 null，才有东西可跑。schema 细节异常时先看 `status` 的 `.state` / `.target`，需要 bootstrap 层排查再跑 `coder-loop doctor <target> --repo <owner>/<repo>`。
+`.state.kind == "ok"` 且 `.queue.selected` 不为 null，才有东西可跑。schema 细节异常时先看 `status` 的 `.state` / `.target`，需要 operator 机器层排查再跑 `coder-loop doctor <target> --repo <owner>/<repo>`。
 
 ---
 
@@ -158,7 +145,7 @@ coder-loop status /path/to/your-target-repo --json | jq '.state.kind, .queue.tot
 /dev-loop 10       # 最多 10 轮
 ```
 
-`/dev-loop` 是人类在 target 内的快捷入口。它会先跑 `coder-loop doctor "$PWD"` 和 `coder-loop status "$PWD" --json`，再调用 daemon API。脚本或 supervisor 直接用 daemon 命令：
+`/dev-loop` 是人类在 target 内的快捷入口（一份用户级 slash command，参数化 target = `$PWD`）。它会先跑 `coder-loop doctor "$PWD"` 和 `coder-loop status "$PWD" --json` 体检，再调用 daemon API 起循环。脚本或 supervisor 直接用 daemon 命令：
 
 ```bash
 coder-loop daemon start /path/to/your-target-repo

@@ -1,48 +1,26 @@
 /**
- * coder-loop install / uninstall / doctor subcommands.
+ * coder-loop doctor subcommand.
  *
- * Three layers:
- *   A) target project files: committed workflow.md policy
- *   B) operator machine prereqs: gh (+ auth), selected runner CLIs (verify only)
+ * #436 capstone of umbrella #432: the prior bootstrap surface (target policy
+ * file write, slash command vendoring, label asset creation, in-process chain
+ * registration, post-bootstrap status smoke) reduced to nothing — each layer
+ * either died with a prior child (#434/#435/#421) or moved to the daemon API
+ * (`chain create`). What remains is a single read-only operator-facing health
+ * check.
  *
- * Idempotent by design: re-running install does not mutate files whose
- * content already matches; `--force` overrides.
+ * `doctor` surface:
+ *   - operator machine prerequisites: `gh` (+ auth), the runner CLIs declared
+ *     by the bundled preset, `coder-loop` itself on PATH.
+ *   - live runtime: the same snapshot `coder-loop status --json` returns,
+ *     formatted as one human-readable line per signal.
+ *
+ * Zero target-file checks, zero mutation.
  */
 
 import { spawn, type ChildProcess } from "node:child_process"
-import {
-	access,
-	mkdir,
-	readFile,
-	rm,
-	writeFile,
-} from "node:fs/promises"
-import { resolve, dirname } from "node:path"
-import { daemonRequest, sendDaemonRequest } from "./daemon"
-import { buildCoderLoopStatusSnapshot, loadPreset, type AgentRunnerKind, type AgentRunnerSelection, type CoderLoopStatusSnapshot, type JsonValue, type Preset } from "./loop"
-import { resolveLoopDataPaths } from "./runtime-paths"
-
-const PKG_ROOT = resolve(import.meta.dir, "..")
-const PRESETS_DIR = resolve(PKG_ROOT, "presets")
-const TEMPLATES_DIR = resolve(PKG_ROOT, "templates")
-
-const SLASH_COMMAND_FILES = ["dev-plan.md", "dev-loop.md"] as const
-
-const WORKFLOW_REL = ".coder-loop/workflow.md"
-const SLASH_COMMANDS_REL = ".claude/commands"
-
-type InstallArgs = {
-	target: string
-	repo: string | null
-	presetName: string
-	loopDataRoot: string | null
-	force: boolean
-	dryRun: boolean
-}
-
-type UninstallArgs = {
-	target: string
-}
+import { resolve } from "node:path"
+import type { AgentRunnerSelection, CoderLoopStatusSnapshot, JsonValue } from "./loop"
+import { buildCoderLoopStatusSnapshot } from "./loop"
 
 type DoctorArgs = {
 	target: string
@@ -68,42 +46,6 @@ function info(message: string): void {
 	console.error(message)
 }
 
-type RepoSlug = {
-	owner: string
-	name: string
-	slug: string
-}
-
-function repoSlugError(repo: string): string {
-	return `install: invalid repo slug ${JSON.stringify(repo)}`
-}
-
-function parseRepoSlug(input: string): RepoSlug | null {
-	if (input.trim() !== input) return null
-	const parts = input.split("/")
-	if (parts.length !== 2) return null
-	const owner = parts[0]!
-	const name = parts[1]!
-	if (!isRepoSlugSegment(owner) || !isRepoSlugSegment(name)) return null
-	return { owner, name, slug: `${owner}/${name}` }
-}
-
-function isRepoSlugSegment(input: string): boolean {
-	return input.length > 0 && input.length <= 255 && /^[A-Za-z0-9._-]+$/.test(input)
-}
-
-function requireInstallRepoSlug(repo: string): RepoSlug {
-	const parsed = parseRepoSlug(repo)
-	if (parsed === null) fail(repoSlugError(repo))
-	return parsed
-}
-
-async function assertInstallTargetIsGitRepository(target: string): Promise<void> {
-	if (!(await pathExists(resolve(target, ".git")))) {
-		fail(`install: target is not a git repository: ${target}`)
-	}
-}
-
 function joinArgs(remaining: string[], index: number, inlineValue: string | null, name: string): { value: string; consumed: number } {
 	if (inlineValue !== null) return { value: inlineValue, consumed: 0 }
 	const value = remaining[index + 1]
@@ -115,67 +57,6 @@ function splitFlag(arg: string): [string, string | null] {
 	const eq = arg.indexOf("=")
 	if (eq === -1) return [arg, null]
 	return [arg.slice(0, eq), arg.slice(eq + 1)]
-}
-
-function parseInstallArgs(raw: string[]): InstallArgs {
-	let target: string | null = null
-	let repo: string | null = null
-	let presetName = "gh-issue-pr-iteration"
-	let loopDataRoot: string | null = null
-	let force = false
-	let dryRun = false
-
-	for (let i = 0; i < raw.length; i++) {
-		const arg = raw[i]!
-		if (!arg.startsWith("--")) {
-			if (target !== null) fail(`install: 多余位置参数 "${arg}"（target 已为 ${target}）`)
-			target = arg
-			continue
-		}
-		const [name, inline] = splitFlag(arg)
-		switch (name) {
-			case "--repo": {
-				const { value, consumed } = joinArgs(raw, i, inline, name)
-				repo = value
-				i += consumed
-				break
-			}
-			case "--preset": {
-				const { value, consumed } = joinArgs(raw, i, inline, name)
-				presetName = value
-				i += consumed
-				break
-			}
-			case "--loop-data-root": {
-				const { value, consumed } = joinArgs(raw, i, inline, name)
-				loopDataRoot = value
-				i += consumed
-				break
-			}
-			case "--force":
-				force = true
-				break
-			case "--dry-run":
-				dryRun = true
-				break
-			default:
-				fail(`install: 未知参数 "${arg}"`)
-		}
-	}
-
-	if (target === null) fail("install: 缺少 target 路径。用法: coder-loop install <target> [--repo <slug>] [--preset <name>] [--loop-data-root <path>] [--force] [--dry-run]")
-	return { target: resolve(target), repo, presetName, loopDataRoot, force, dryRun }
-}
-
-function parseUninstallArgs(raw: string[]): UninstallArgs {
-	let target: string | null = null
-	for (const arg of raw) {
-		if (arg.startsWith("--")) fail(`uninstall: 未知参数 "${arg}"`)
-		if (target !== null) fail(`uninstall: 多余位置参数 "${arg}"`)
-		target = arg
-	}
-	if (target === null) fail("uninstall: 缺少 target 路径。用法: coder-loop uninstall <target>")
-	return { target: resolve(target) }
 }
 
 function parseDoctorArgs(raw: string[]): DoctorArgs {
@@ -212,24 +93,6 @@ function parseDoctorArgs(raw: string[]): DoctorArgs {
 		fail(`doctor: 未知参数 "${arg}"`)
 	}
 	return { target: resolve(target ?? process.cwd()), repo, loopDataRoot, chainName }
-}
-
-async function pathExists(path: string): Promise<boolean> {
-	try {
-		await access(path)
-		return true
-	} catch {
-		return false
-	}
-}
-
-async function readIfExists(path: string): Promise<string | null> {
-	try {
-		return await readFile(path, "utf-8")
-	} catch (error) {
-		if (isNodeError(error) && error.code === "ENOENT") return null
-		throw error
-	}
 }
 
 async function spawnCapture(cmd: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -269,17 +132,10 @@ function whichBinary(name: string): string | null {
 }
 
 // ===================================================================
-// Layer B: operator machine prereqs (verify only, never install)
+// Operator machine prerequisites (verify only, never install)
 // ===================================================================
 
 type RequiredRunnerCli = Pick<AgentRunnerSelection, "kind" | "binary">
-
-function requiredRunnersForPreset(preset: Preset): RequiredRunnerCli[] {
-	return preset.phases.map((phase) => {
-		const kind: AgentRunnerKind = phase.defaultRunner ?? "codex"
-		return { kind, binary: kind }
-	})
-}
 
 async function checkOperatorPrereqs(requiredRunners: RequiredRunnerCli[]): Promise<CheckOutcome[]> {
 	const results: CheckOutcome[] = []
@@ -328,90 +184,6 @@ function uniqueRequiredRunners(runners: RequiredRunnerCli[]): RequiredRunnerCli[
 function runnerInstallHint(runner: RequiredRunnerCli): string {
 	if (runner.kind === "codex") return `codex runner CLI (${runner.binary}) 未在 PATH 中。安装/配置 Codex CLI，并确认 \`${runner.binary} --version\` 可运行。`
 	return `claude runner CLI (${runner.binary}) 未在 PATH 中。安装：https://docs.anthropic.com/claude/docs/claude-code（npm: \`npm install -g @anthropic-ai/claude-code\`），并确认 \`${runner.binary} --version\` 可运行。`
-}
-
-// ===================================================================
-// Layer A: target project files
-// ===================================================================
-
-async function ensureWorkflowMd(target: string, dryRun: boolean): Promise<{ wrote: boolean; path: string }> {
-	const path = resolve(target, WORKFLOW_REL)
-	if (await pathExists(path)) return { wrote: false, path }
-	const template = await readFile(resolve(TEMPLATES_DIR, "workflow.md"), "utf-8")
-	if (!dryRun) {
-		await mkdir(dirname(path), { recursive: true })
-		await writeFile(path, template)
-	}
-	return { wrote: true, path }
-}
-
-// ===================================================================
-// Final status smoke invocation
-// ===================================================================
-
-async function runInstallStatusSmoke(target: string, loopDataRoot: string | null, chainName: string | null = null): Promise<{ code: number; output: string }> {
-	const entry = resolve(PKG_ROOT, "src/loop.ts")
-	const bunPath = whichBinary("bun") ?? "bun"
-	const args = [entry, "status", target, "--json"]
-	if (loopDataRoot !== null) args.push("--loop-data-root", loopDataRoot)
-	if (chainName !== null) args.push("--chain", chainName)
-	const child = await spawnCapture(bunPath, args)
-	return { code: child.code, output: `${child.stdout}\n${child.stderr}` }
-}
-
-async function createChainThroughDaemon(input: {
-	target: string
-	repo: string
-	preset: Preset
-	loopDataRoot: string | null
-	dryRun: boolean
-}): Promise<{ chainName: string; result: JsonValue | null }> {
-	const chainName = defaultChainName(input.repo)
-	if (input.dryRun) return { chainName, result: null }
-	const socketPath = centralDaemonSocketPath(input.loopDataRoot)
-	try {
-		const response = await sendDaemonRequest(socketPath, daemonRequest("chain.create", {
-			name: chainName,
-			repository: input.repo,
-			preset: input.preset.name,
-			baseBranch: "main",
-			// #433: chain bindings now live at `metadata.bindings`; the retired `metadata.config`
-			// path raises an error if it ever reaches the daemon's chain-metadata boundary.
-			metadata: { bindings: { workflowFile: resolve(input.target, WORKFLOW_REL) } },
-		}))
-		if (!response.ok) fail(`${response.error.code}: ${response.error.message}`)
-		return { chainName, result: response.result }
-	} catch (error) {
-		fail(formatCentralDaemonNotRunning(input.loopDataRoot, socketPath, error))
-	}
-}
-
-function isNodeError(error: unknown): error is NodeJS.ErrnoException {
-	return error instanceof Error && "code" in error
-}
-
-function defaultChainName(repo: string): string {
-	return requireInstallRepoSlug(repo).name
-}
-
-async function assertCentralDaemonReachable(loopDataRoot: string | null, dryRun: boolean): Promise<void> {
-	if (dryRun) return
-	const socketPath = centralDaemonSocketPath(loopDataRoot)
-	try {
-		const response = await sendDaemonRequest(socketPath, daemonRequest("chain.list"))
-		if (!response.ok) fail(`${response.error.code}: ${response.error.message}`)
-	} catch (error) {
-		fail(formatCentralDaemonNotRunning(loopDataRoot, socketPath, error))
-	}
-}
-
-function centralDaemonSocketPath(loopDataRoot: string | null): string {
-	return resolveLoopDataPaths(loopDataRoot === null ? {} : { loopDataRoot }).daemonSocket
-}
-
-function formatCentralDaemonNotRunning(loopDataRoot: string | null, socketPath: string, error: unknown): string {
-	const hint = loopDataRoot === null ? "coder-loop daemon up" : `coder-loop daemon up --loop-data-root ${loopDataRoot}`
-	return `central daemon is not running at ${socketPath}; start it with \`${hint}\`. ${error instanceof Error ? error.message : String(error)}`
 }
 
 // ===================================================================
@@ -481,122 +253,13 @@ function eventType(value: JsonValue | null): string {
 }
 
 // ===================================================================
-// install / uninstall / doctor entry points
+// doctor entry point
 // ===================================================================
-
-async function loadAvailablePresets(): Promise<string[]> {
-	try {
-		const fs = await import("node:fs/promises")
-		const entries = await fs.readdir(PRESETS_DIR, { withFileTypes: true })
-		return entries.filter((e) => e.isDirectory()).map((e) => e.name).sort()
-	} catch {
-		return []
-	}
-}
-
-async function loadPresetForName(name: string): Promise<Preset> {
-	const presetDir = resolve(PRESETS_DIR, name)
-	if (!(await pathExists(presetDir))) {
-		const available = await loadAvailablePresets()
-		console.error(`install: 未知 preset "${name}"。可用 preset: ${available.length === 0 ? "<none>" : available.join(", ")}`)
-		process.exit(1)
-	}
-	return loadPreset(presetDir)
-}
-
-export async function runInstallCommand(rawArgs: string[]): Promise<void> {
-	const args = parseInstallArgs(rawArgs)
-	await assertInstallTargetIsGitRepository(args.target)
-	const explicitRepo = args.repo === null ? null : requireInstallRepoSlug(args.repo).slug
-	const preset = await loadPresetForName(args.presetName)
-	const repoForChain = explicitRepo ?? (await inferRepoFromGit(args.target))
-	if (repoForChain === null) fail("install: missing --repo and git origin is not a GitHub repository; cannot create chain")
-	await assertCentralDaemonReachable(args.loopDataRoot, args.dryRun)
-
-	info(`==> coder-loop install: target=${args.target}, preset=${preset.name}, dry-run=${args.dryRun}`)
-
-	info("\n[Layer A] Target committed policy")
-	const workflowResult = await ensureWorkflowMd(args.target, args.dryRun)
-	info(`  ${workflowResult.wrote ? (args.dryRun ? "would-write" : "已写入") : "未变化（保留 operator 自定义）"}: ${WORKFLOW_REL}`)
-
-	info("\n[Central] DB chain")
-	const chainCreate = await createChainThroughDaemon({
-		target: args.target,
-		repo: repoForChain,
-		preset,
-		loopDataRoot: args.loopDataRoot,
-		dryRun: args.dryRun,
-	})
-	info(`  ${args.dryRun ? "would-upsert" : "upserted"} chain: ${chainCreate.chainName} (repo ${repoForChain})`)
-
-	// Layer B: prereqs
-	info("\n[Layer B] Operator 机器先决条件")
-	const installRunners = requiredRunnersForPreset(preset)
-	info(`  INFO: role entry md runners=${installRunners.map((runner) => `${runner.kind}:${runner.binary}`).join(", ")}`)
-	const layerBResults = await checkOperatorPrereqs(installRunners)
-	for (const r of layerBResults) info(`  ${r.ok ? "OK" : "FAIL"}: ${r.detail}`)
-	const layerBOk = layerBResults.every((r) => r.ok)
-	if (!layerBOk && !args.dryRun) {
-		fail(`Layer B 校验未通过：先按上面提示修复 gh / runner CLI / 认证，再重跑 install。`)
-	}
-
-	// Final: status smoke (skip in dry-run)
-	if (args.dryRun) {
-		info("\n[Final] --dry-run：跳过 status smoke")
-		return
-	}
-	info("\n[Final] 跑 coder-loop status --json")
-	const finalCheck = await runInstallStatusSmoke(args.target, args.loopDataRoot, chainCreate.chainName)
-	process.stderr.write(finalCheck.output)
-	if (finalCheck.code !== 0) {
-		fail(`\nInstall 部分成功，但 status smoke 退出 ${finalCheck.code}。修复后重跑 install。`)
-	}
-	info("\nInstall 完成。下一步：在 target 跑 `/dev-plan <design-doc-or-issue>`。")
-}
-
-async function inferRepoFromGit(target: string): Promise<string | null> {
-	const result = await spawnCapture("git", ["-C", target, "remote", "get-url", "origin"])
-	if (result.code !== 0) return null
-	const url = result.stdout.trim()
-	// Forms: git@github.com:owner/repo.git, https://github.com/owner/repo(.git)
-	const sshMatch = /^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/.exec(url)
-	if (sshMatch) return parseRepoSlug(`${sshMatch[1]}/${sshMatch[2]}`)?.slug ?? null
-	const httpsMatch = /^https?:\/\/github\.com\/([^/]+)\/(.+?)(?:\.git)?\/?$/.exec(url)
-	if (httpsMatch) return parseRepoSlug(`${httpsMatch[1]}/${httpsMatch[2]}`)?.slug ?? null
-	return null
-}
-
-export async function runUninstallCommand(rawArgs: string[]): Promise<void> {
-	const args = parseUninstallArgs(rawArgs)
-	info(`==> coder-loop uninstall: target=${args.target}`)
-	let removed = 0
-	for (const fname of SLASH_COMMAND_FILES) {
-		const p = resolve(args.target, SLASH_COMMANDS_REL, fname)
-		if (await pathExists(p)) {
-			await rm(p)
-			info(`  已删除: ${SLASH_COMMANDS_REL}/${fname}`)
-			removed++
-		} else {
-			info(`  未找到（已不存在）: ${SLASH_COMMANDS_REL}/${fname}`)
-		}
-	}
-	info(`\nUninstall 完成。runtime 保留（${removed} 个 slash command 文件被移除）。`)
-}
 
 export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
 	const args = parseDoctorArgs(rawArgs)
 	let hasFailure = false
 	info(`==> coder-loop doctor: target=${args.target}`)
-
-	info("\n[Layer A] Target 项目文件")
-	const aChecks: { label: string; check: Promise<boolean> }[] = [
-		{ label: WORKFLOW_REL, check: pathExists(resolve(args.target, WORKFLOW_REL)) },
-	]
-	for (const c of aChecks) {
-		const ok = await c.check
-		info(`  ${ok ? "OK" : "FAIL"}: ${c.label}`)
-		if (!ok) hasFailure = true
-	}
 
 	const statusSnapshot = await buildCoderLoopStatusSnapshot({
 		targetCwd: args.target,
@@ -605,7 +268,7 @@ export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
 		output: "json",
 	})
 
-	info("\n[Layer B] Operator 机器先决条件")
+	info("\n[Operator machine] gh / runner CLI / coder-loop on PATH")
 	const bResults = await checkOperatorPrereqs(Object.values(statusSnapshot.target.runner.phases))
 	info(`  INFO: target default runner=${formatStatusRunner(statusSnapshot.target.runner.default)}`)
 	// #456: per-phase enumeration replaces the legacy `review default runner=` line.
@@ -621,19 +284,11 @@ export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
 		if (line.trimStart().startsWith("FAIL:")) hasFailure = true
 	}
 
-	info("\nDoctor 完成（read-only）。任何 FAIL 项需 `coder-loop install <target>` 或手动修复。")
+	info("\nDoctor 完成（read-only）。FAIL 项按提示手动修复（PATH / `gh auth login` / runner CLI / central daemon）。")
 	if (hasFailure) process.exitCode = 1
 }
 
 export async function dispatchSubcommand(subcommand: string, rest: string[]): Promise<boolean> {
-	if (subcommand === "install") {
-		await runInstallCommand(rest)
-		return true
-	}
-	if (subcommand === "uninstall") {
-		await runUninstallCommand(rest)
-		return true
-	}
 	if (subcommand === "doctor") {
 		await runDoctorCommand(rest)
 		return true
