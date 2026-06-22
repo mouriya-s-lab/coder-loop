@@ -10,8 +10,8 @@
 
 import { spawn } from "node:child_process"
 import { appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises"
-import { closeSync, createWriteStream, openSync, realpathSync, type WriteStream } from "node:fs"
-import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
+import { closeSync, createWriteStream, openSync, type WriteStream } from "node:fs"
+import { dirname, isAbsolute, relative, resolve } from "node:path"
 import { command, flag, option, optional, positional, run as runCmd, string as cmdString, subcommands } from "cmd-ts"
 import { type as arkType } from "arktype"
 import type { BoundaryError, BoundaryRecord, BoundaryValue } from "./boundary-types"
@@ -69,19 +69,18 @@ const PKG_ROOT = resolve(import.meta.dir, "..")
 const DEFAULT_PRESET_NAME = "gh-issue-pr-iteration"
 const PRESET_NAME_PATTERN = /^[a-z][a-z0-9-]*$/
 
-// Per-target runtime defaults retained for legacy in-target paths that the engine
-// still falls back to when chain metadata leaves the corresponding bindings unset
-// (shared / issue / evidence / log are all chain-derived in normal flow; the
-// constants below are the last-resort relative paths for the rare path that
-// still wants a target-relative anchor). #433 retired the on-disk target
-// settings file entirely — the engine no longer reads any target settings file.
-// #434 retired the `.coder-loop/workflow.md` per-target policy file; project
-// commands now come from the repo's own CLAUDE.md / AGENTS.md, loop policy is
-// inlined in preset fragments, per-target overrides flow through chain.metadata.
-const DEFAULT_SHARED_FILE = ".coder-loop/runtime/shared.md"
-const DEFAULT_ISSUE_DIR = ".coder-loop/runtime/issues"
-const DEFAULT_EVIDENCE_DIR = ".coder-loop/runtime/evidence"
-const DEFAULT_LOG_DIR = ".coder-loop/runtime/logs"
+// #505: the four target-relative runtime-path defaults (shared / issue /
+// evidence / log) have been retired. The chain-side resolution path
+// (chainResolvedFromChain -> chainRuntimePathForKind) is now the sole source —
+// every chain has both a name and a loopDataRoot, so the derived
+// `<loopDataRoot>/chains/<name>/...` path is always available. The
+// makeStatusTargetSnapshot chain-load-failed branch is the only place where
+// these paths can be absent, and now surfaces them as empty strings to mark
+// them unavailable.
+// History: #433 retired the on-disk target settings file; #434 retired the
+// per-target policy markdown — project commands now come from the repo's own
+// AGENTS / CLAUDE markdown, loop policy is inlined in preset fragments, and
+// per-target overrides flow through chain.metadata exclusively.
 const ENGINE_BUILTIN_RUNNER: AgentRunnerKind = "codex"
 export const DEFAULT_ATTEMPT_TIMEOUT_SECONDS = 60 * 60
 export const ATTEMPT_TIMEOUT_KILL_MS = 5 * 1000
@@ -2576,12 +2575,16 @@ function rootUsage(): string {
 // now flows through #451's typed phase-exits face exclusively.
 
 function buildOptions(targetCwd: string, raw: BuildOptionsInput, resolved: ChainResolved, preset: Preset): LoopOptions {
-	const sharedContextPath = resolveFrom(targetCwd, resolved.sharedContextFile ?? DEFAULT_SHARED_FILE)
+	// #505: `resolved.{sharedContextFile,issueDir,evidenceDir,logDir}` are produced
+	// by `chainResolvedFromChain` and always non-null (chain.metadata.X if present,
+	// else the chain-derived path from `chainRuntimePathForKind`). The previous
+	// `?? DEFAULT_*` target-relative fallback was dead and has been retired.
+	const sharedContextPath = resolveFrom(targetCwd, resolved.sharedContextFile)
 	const loopDataRoot = raw.loopDataRoot ?? resolved.loopDataRoot
 	const stateDbPath = resolveLoopDataPaths(loopDataRootOption(loopDataRoot)).dbFile
-	const issueDir = resolveFrom(targetCwd, resolved.issueDir ?? DEFAULT_ISSUE_DIR)
-	const evidenceRootDir = resolveFrom(targetCwd, resolved.evidenceDir ?? DEFAULT_EVIDENCE_DIR)
-	const logDir = resolveFrom(targetCwd, resolved.logDir ?? DEFAULT_LOG_DIR)
+	const issueDir = resolveFrom(targetCwd, resolved.issueDir)
+	const evidenceRootDir = resolveFrom(targetCwd, resolved.evidenceDir)
+	const logDir = resolveFrom(targetCwd, resolved.logDir)
 	const worktree = raw.worktree || resolved.worktree === true
 	const repository = raw.chain.repository
 	const baseBranch = raw.chain.baseBranch
@@ -2729,24 +2732,28 @@ type StatusReadResult<T> =
 // #433: target-side runtime readers retired — `loadTargetRuntime` reads from chain metadata
 // directly. Status snapshot still calls `makeStatusTargetSnapshot` for the unavailable snapshot
 // branch, where there's no `options` yet because chain load failed.
+// #505: the previous target-relative runtimeRoot fallback (formerly resolved under the
+// target's own runtime directory) is retired. When `options === null` (chain failed to
+// load — the only path here) the four chain-derived path fields are surfaced as empty
+// strings to mark them unavailable; callers either render the empty value or branch on
+// `state.kind !== "ok"` first.
 
 function makeStatusTargetSnapshot(
 	targetCwd: string,
 	stateDbPath: string,
 	options: LoopOptions | null,
 ): StatusTargetSnapshot {
-	const runtimeRoot = resolve(targetCwd, ".coder-loop/runtime")
 	const preset = options === null ? null : {
 		name: options.preset.name,
 		presetDir: options.preset.presetDir,
 	}
 	return {
 		cwd: targetCwd,
-		sharedContextPath: options?.sharedContextPath ?? resolve(runtimeRoot, "shared.md"),
+		sharedContextPath: options?.sharedContextPath ?? "",
 		[STATUS_STATE_FILE_KEY]: options?.stateDbPath ?? stateDbPath,
-		issueDir: options?.issueDir ?? resolve(runtimeRoot, "issues"),
-		evidenceRootDir: options?.evidenceRootDir ?? resolve(runtimeRoot, "evidence"),
-		logDir: options?.logDir ?? resolve(runtimeRoot, "logs"),
+		issueDir: options?.issueDir ?? "",
+		evidenceRootDir: options?.evidenceRootDir ?? "",
+		logDir: options?.logDir ?? "",
 		repository: options?.repository ?? null,
 		baseBranch: options?.baseBranch ?? null,
 		worktree: options?.worktree ?? false,
@@ -3781,14 +3788,18 @@ function readDbCurrentRun(loopDataRoot: string | null, chainId: number): Current
 
 // #433: chain metadata is now the sole source for per-target overrides; the engine no longer
 // reads any target config file. `ChainResolved` carries the small set of facts the engine
-// derives from chain metadata + runtime defaults — preset resolution, optional path overrides,
+// derives from chain metadata + runtime defaults — preset resolution, path overrides,
 // model selections — for the rest of the loop assembly.
+// #505: the four runtime path fields are non-null. `chainResolvedFromChain` sources them from
+// chain.metadata.X if present, else from the derived `<loopDataRoot>/chains/<name>/...` path
+// (`chainRuntimePathForKind`). The target-relative runtime-path fallback that previously lived
+// under the target's own runtime directory has been retired.
 export type ChainResolved = {
 	worktree: boolean | null
-	sharedContextFile: string | null
-	issueDir: string | null
-	evidenceDir: string | null
-	logDir: string | null
+	sharedContextFile: string
+	issueDir: string
+	evidenceDir: string
+	logDir: string
 	loopDataRoot: string | null
 	// #433: per-runner overrides flow exclusively through chain.metadata.{claude,codex}.{binary,model,extraArgs}.
 	// The retired target on-disk preferences file is no longer in the lookup chain.
@@ -6044,116 +6055,16 @@ export function agentClaudeArgs(extraArgs: readonly string[], prompt: string, re
 export type RunnerInvocation =
 	| { kind: "spawn"; binary: string; args: string[] }
 
-// --- git worktree management ---
-
-type GitExecResult = { stdout: string; stderr: string; exitCode: number }
-
-function realpathForComparison(path: string): string {
-	try { return realpathSync(path) } catch { return path }
-}
-
-function gitWorktreeListIncludesPath(stdout: string, expectedPath: string): boolean {
-	const expectedRealPath = realpathForComparison(expectedPath)
-	return stdout
-		.split("\n")
-		.filter((line) => line.startsWith("worktree "))
-		.map((line) => line.slice("worktree ".length))
-		.some((listedPath) => listedPath === expectedPath || realpathForComparison(listedPath) === expectedRealPath)
-}
-
-function gitExec(cwd: string, args: readonly string[]): GitExecResult {
-	const proc = Bun.spawnSync({ cmd: ["git", ...args], cwd, stdout: "pipe", stderr: "pipe" })
-	return {
-		stdout: new TextDecoder().decode(proc.stdout).trim(),
-		stderr: new TextDecoder().decode(proc.stderr).trim(),
-		exitCode: proc.exitCode,
-	}
-}
-
-export function worktreeBasePath(targetCwd: string): string {
-	return resolve(targetCwd, "..", ".coder-loop-worktrees", basename(targetCwd))
-}
-
-export function worktreePathForItem(targetCwd: string, itemId: string): string {
-	const safeId = itemId.replace(/[^a-zA-Z0-9_-]/g, "_")
-	return resolve(worktreeBasePath(targetCwd), safeId)
-}
-
-export function validateWorktreePrerequisites(targetCwd: string, baseBranch: string): void {
-	const fetchResult = gitExec(targetCwd, ["fetch", "origin"])
-	if (fetchResult.exitCode !== 0) {
-		throw new CoderLoopError(`worktree: git fetch origin failed (exit ${fetchResult.exitCode}) in ${targetCwd}: ${fetchResult.stderr}`)
-	}
-	const revResult = gitExec(targetCwd, ["rev-parse", "--verify", `origin/${baseBranch}`])
-	if (revResult.exitCode !== 0) {
-		throw new CoderLoopError(`worktree: remote branch origin/${baseBranch} does not exist`)
-	}
-}
-
-export function ensureWorktreeForItem(
-	targetCwd: string,
-	baseBranch: string,
-	itemId: string,
-	existingAgentCwd: string | null,
-): string {
-	const wtPath = worktreePathForItem(targetCwd, itemId)
-
-	if (existingAgentCwd === wtPath) {
-		const check = gitExec(targetCwd, ["worktree", "list", "--porcelain"])
-		if (check.exitCode === 0 && gitWorktreeListIncludesPath(check.stdout, wtPath)) return wtPath
-	}
-
-	const branchName = `coder-loop/${itemId.replace(/[^a-zA-Z0-9_-]/g, "_")}`
-	const result = gitExec(targetCwd, ["worktree", "add", "-b", branchName, wtPath, `origin/${baseBranch}`])
-	if (result.exitCode === 0) return wtPath
-
-	const retry = gitExec(targetCwd, ["worktree", "add", wtPath, branchName])
-	if (retry.exitCode === 0) return wtPath
-
-	throw new CoderLoopError(
-		`worktree: failed to create worktree at ${wtPath} for item ${itemId} (exit ${retry.exitCode}): ${retry.stderr}`,
-	)
-}
-
-export function removeWorktreeForItem(
-	targetCwd: string,
-	itemId: string,
-	logFn: (message: string) => void,
-): void {
-	const wtPath = worktreePathForItem(targetCwd, itemId)
-	const result = gitExec(targetCwd, ["worktree", "remove", "--force", wtPath])
-	if (result.exitCode !== 0) {
-		logFn(`worktree: removal of ${wtPath} failed (exit ${result.exitCode}): ${result.stderr}; continuing`)
-	}
-}
-
-export function cleanupStaleWorktrees(
-	targetCwd: string,
-	activeItemIds: Set<string>,
-	logFn: (message: string) => void,
-): void {
-	gitExec(targetCwd, ["worktree", "prune"])
-
-	const base = worktreeBasePath(targetCwd)
-	let realBase: string
-	try { realBase = realpathSync(base) } catch { realBase = base }
-	const listResult = gitExec(targetCwd, ["worktree", "list", "--porcelain"])
-	if (listResult.exitCode !== 0) return
-
-	const worktreePaths = listResult.stdout
-		.split("\n")
-		.filter((line) => line.startsWith("worktree "))
-		.map((line) => line.slice("worktree ".length))
-		.filter((path) => path.startsWith(realBase))
-
-	for (const wtPath of worktreePaths) {
-		const itemDir = basename(wtPath)
-		if (!activeItemIds.has(itemDir)) {
-			logFn(`worktree: cleaning stale worktree ${wtPath}`)
-			gitExec(targetCwd, ["worktree", "remove", "--force", wtPath])
-		}
-	}
-}
+// #505: the loop-process-side git worktree helpers (worktreeBasePath /
+// worktreePathForItem / ensureWorktreeForItem / removeWorktreeForItem /
+// cleanupStaleWorktrees / validateWorktreePrerequisites) have been retired
+// along with their internal helpers (gitExec / gitWorktreeListIncludesPath /
+// realpathForComparison). They were exported but had zero callers anywhere
+// in the tree — every live worktree path now flows through the central
+// daemon's `<loopDataRoot>/chains/<name>/worktrees/` namespace, owned by
+// `src/scheduler.ts`. Removing the dead block also retires the engine's
+// previous engine-owned worktree namespace literal (sibling-of-target dot
+// directory), which was the last remaining target-relative reference here.
 
 // --- runner invocation ---
 
