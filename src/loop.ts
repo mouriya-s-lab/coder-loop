@@ -2545,7 +2545,7 @@ async function main() {
 		await runQueueCommand(process.argv.slice(3))
 		return
 	}
-	if (firstArg === "install" || firstArg === "uninstall" || firstArg === "doctor") {
+	if (firstArg === "doctor") {
 		const handled = await dispatchSubcommand(firstArg, process.argv.slice(3))
 		if (handled) return
 	}
@@ -2564,8 +2564,6 @@ function rootUsage(): string {
 		"  chain <create|list|status|stop|resume|delete>",
 		"  item <add|batch-add|list|update|reorder|exits|exit-action>",
 		"  queue unblock <target> --issue <issue>",
-		"  install <target>",
-		"  uninstall <target>",
 		"  doctor <target>",
 		"",
 	].join("\n")
@@ -3191,7 +3189,7 @@ function scanLoopProcesses(targetCwd: string): StatusReadResult<StatusProcessInf
 		const ppid = Number(match[2])
 		const commandText = match[3] ?? ""
 		const invokesLoop = commandText.includes("src/loop.ts") || /(^|\s)coder-loop(\s|$)/.test(commandText)
-		const looksLikeLoop = invokesLoop && !/(^|\s)(status|daemon|install|uninstall|doctor)(\s|$)/.test(commandText)
+		const looksLikeLoop = invokesLoop && !/(^|\s)(status|daemon|doctor)(\s|$)/.test(commandText)
 		const matchesTarget = commandText.includes(targetCwd)
 		if (!looksLikeLoop) continue
 		live.push({

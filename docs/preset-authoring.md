@@ -15,7 +15,7 @@
 | 引擎职责 | 说明 |
 |---|---|
 | **加载 preset** | 从 `<pkg>/presets/<name>/` 或 target 的 `presetPath` 读 `preset.toml`，解析 `name / item.idField / statuses / phases / fragments / agent`。每个 fragment 路径必须可读。 |
-| **加载 target runtime** | 读 target `.coder-loop/runtime/shared.md`，并从 centralized SQLite loop-data store 解析 active chain / queue / current（preset 选择与 binding 来自 chain.metadata.bindings，不再读 target-side 的 config / workflow 文件）。 |
+| **加载 target runtime** | 读 target `.coder-loop/runtime/shared.md`，并从 centralized SQLite loop-data store 解析 active chain / queue / current（preset 选择与 binding 来自 chain.metadata.bindings；target-side 的 config / workflow 文件随 #433 / #434 退役，install/uninstall 子命令随 #436 退役）。 |
 | **选 actionable item** | 若 `state.current` 存在且其 status 在 preset 的 `statuses.continuable` 内，继续它；否则在队列里找首个 `continuable` item。`continuable` 外的所有 item 视为 terminal，引擎不动。 |
 | **按 phase 顺序 spawn agent** | 遍历 `preset.phases`：每个 phase 读 entry prompt 模板，按 `[phases.variables]` 表绑定变量替换 `{{KEY}}`，把渲染后的 prompt 传给当前 runner（`claude` 或 `codex`）。捕获 stdout/stderr 写入 `<logDir>/<runId>/<phase>/`，每个 phase spawn 完写 `status.json`。 |
 | **resume / 不丢工作** | spawn 中途崩溃，重启时根据 `state.current.phase` 跳到当前 phase 而非从头。 |

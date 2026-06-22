@@ -43,11 +43,9 @@ L2: Preset（presets/<name>/）
 - **Real e2e（引擎全链路验收）**: `bun scripts/real-e2e.ts [--preset gh-issue-pr-iteration] [flags]` — 单命令真实 e2e：隔离 daemon（`--loop-data-root`，绝不碰生产 `~/.coder-loop`）→ 在 fixture repo `mouriya-s-lab/coder-loop-e2e-fixture` seed 一个 trivial issue → 跑完整 loop（spawn → iteration → review → PR merged → issue closed）→ 断言 GitHub 终态 → tripwire/teardown。默认 `real-e2e-minimal` preset（最小，只验引擎调度链路，~3-5min）；`--preset gh-issue-pr-iteration` 跑全保真。详细 runbook 见 `docs/real-e2e-fixture.md`。这只在 code 仓跑，不在 app 跑。
 - **Status snapshot**: `coder-loop status <target> --json [--chain <name>]` — stable read-only JSON API for supervisor/scripts; do not scrape runtime files first.
 - **Daemon operations**: `coder-loop daemon status <target> --json`, `coder-loop daemon start|restart <target> [--max-iterations N]`, `coder-loop daemon stop <target>` — stable central-daemon / target-chain control API.
-- **Install target**: `coder-loop install <target> [--repo <owner/repo>] [--preset <name>] [--force] [--dry-run]` — 幂等 bootstrap（centralized chain + runner/PATH 检查；preset-owned planning assets 由 preset 自己处理。注意：install 仍在 target 写 `.coder-loop/workflow.md`，但自 #434 起该文件已无引擎读者，留待 #436 退役）。源：`src/install-commands.ts`。
-- **Uninstall target**: `coder-loop uninstall <target>` — 仅删 `.claude/commands/dev-*.md`；runtime 和 GitHub labels 保留。
-- **Doctor**: `coder-loop doctor <target> [--repo <owner/repo>]` — 只读体检（target 文件 / 操作员 PATH / runner CLI）并输出 live runtime health。
-- **Plan phase**: `/dev-plan` （`gh-issue-pr-iteration` preset 配套的规划器）
-- **Loop phase**: `/dev-loop [N]` （`gh-issue-pr-iteration` preset 配套的循环入口；内部走 `coder-loop daemon start`）
+- **新接入 target**: `coder-loop chain create <name> --repository <owner>/<repo> --preset <name> [--config-json '{"baseBranch":"..."}']` — 中央 daemon socket 一次写入 chain metadata（含 per-target `bindings`），target 目录不需要任何 bootstrap 文件。preset 业务资产（如 GitHub labels）由该 preset 的 planning agent 在运行中幂等确保。源：`src/loop.ts` chain command 入口。（#436 起 install/uninstall 子命令退役，原五层 bootstrap 已逐层归位到 preset / chain / operator 机器。）
+- **Doctor**: `coder-loop doctor <target> [--repo <owner/repo>]` — 只读体检：operator 机器先决条件（gh + auth、phase 声明的 runner CLI、`coder-loop` 在 PATH）+ live runtime health（state、queue、当前 run、events、live processes）。零 target 文件检查。
+- **Plan / Loop phase**: `/dev-plan` 和 `/dev-loop [N]` 是用户级 slash command（一份，参数化 target，安装到 `~/.claude/commands/` 即可在任意 target repo 内用）。本 repo `.claude/commands/dev-plan.md` 和 `dev-loop.md` 保留为 dogfood 实例。`/dev-plan` 灌队列；`/dev-loop [N]` 内部走 `coder-loop daemon start [--max-iterations N]`。
 
 ### 何时必须跑 real-e2e（引擎/调度改动的验收主线）
 
@@ -109,7 +107,8 @@ Agent 不是「判断力差」——是没人教它怎么判断。当前 prompt 
 
 supervisor 的正常接口是 coder-loop 运维 API：
 
-- bootstrap / repair: `coder-loop install <target>` then `coder-loop doctor <target>`
+- bootstrap: `coder-loop chain create <name> --repository <owner>/<repo> --preset <name>`（中央 socket，一条命令）
+- repair / verify: `coder-loop doctor <target>`（read-only：operator machine prereqs + live runtime health）
 - observe: `coder-loop status <target> --json` or `coder-loop daemon status <target> --json`
 - control: `coder-loop daemon start|stop|restart <target>`
 
@@ -121,7 +120,7 @@ supervisor 的正常接口是 coder-loop 运维 API：
 
 starter 位置：
 
-- `presets/<preset-name>/templates/` — 该 preset 配套的目标侧 starter（如 `gh-issue-pr-iteration/templates/{shared,pr-body}.md`；#434 起 `workflow.md` 退役）
+- `presets/<preset-name>/templates/` — 该 preset 配套的目标侧 starter（如 `gh-issue-pr-iteration/templates/{shared,pr-body}.md`；`workflow.md` 已自 #434 + #436 全面退役）
 - `templates/supervisor/` — 跨 preset 通用的 supervisor starter
 
 详见 `templates/README.md`。

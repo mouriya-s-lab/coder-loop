@@ -25,12 +25,10 @@ preset-specific starter 不在此处：
 
 ## Minimum viable target setup
 
-一键路径：`coder-loop install <target> --repo <owner>/<repo>` 幂等做完下面 1-2，并做 PATH / runner CLI 检查。`kind:code` / `kind:comment` / `kind:code-spike` GitHub 标签由 `gh-issue-pr-iteration` 的 planning path 幂等确保。详见 [docs/operator-quickstart.md §1](../docs/operator-quickstart.md#1-bootstrap-目标-repo-的-coder-loop)。
-
-手动等价 = 下面三步：
+新接入 target 三步（#436 起 install/uninstall 子命令退役，无一键包装；`doctor` 体检 operator 机器与 live runtime，详见 [docs/operator-quickstart.md §1](../docs/operator-quickstart.md#1-把新-target-接入中央-daemon)）：
 
 1. Committed `<TARGET>/CLAUDE.md` 或 `<TARGET>/AGENTS.md`（项目命令、约定、PR 形态；`gh-issue-pr-iteration` preset 的 plan/intake 把这两份 agent 指令文件作为权威源读入）
-2. `coder-loop chain create <chain> --preset <name> --config-json '{...}'` 把 preset / repo / baseBranch / 其他 `chain.<field>` binding 写进 centralized DB 的 chain.metadata.bindings（target 侧没有 config 文件，#433 起退役）
+2. `coder-loop chain create <chain> --repository <owner>/<repo> --preset <name>` 把 chain identity 写进中央 DB；`gh-issue-pr-iteration` 需要的 GitHub label 由该 preset 的 planning path 在首次创建 issue 前幂等确保（color / description 漂移则更新）
 3. 本机 `gh` 授权对应 repository（仅当 preset 用 GitHub 时）
 
 shared 与 PR-body starter 在 `gh-issue-pr-iteration` 下高度推荐但不阻塞 loop 启动。Supervisor 仅在长 multi-mission 工作下需要，短跑无需。

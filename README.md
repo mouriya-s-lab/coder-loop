@@ -68,21 +68,21 @@ issue #69 事后分析：Phase 3 验收标准全是功能维度，但 7 个 bug 
 ```bash
 bun install                                          # 安装 devDependencies
 bun link                                             # 注册 coder-loop bin 到全局
-cp .claude/commands/dev-*.md ~/.claude/commands/     # 注册 slash commands
+cp .claude/commands/dev-*.md ~/.claude/commands/     # 注册 slash commands 为用户级（一份，参数化 target）
 ```
 
-之后 `coder-loop` 命令和 `/dev-plan` `/dev-loop` 在任意目录可用。也可以不 `bun link`，调用改成 `bun /path/to/coder-loop/src/loop.ts`。
+之后 `coder-loop` 命令和 `/dev-plan` `/dev-loop` 在任意目录可用（slash command 是用户级——一份文件挂在 `~/.claude/commands/` 即可在任意 target repo 内调）。也可以不 `bun link`，调用改成 `bun /path/to/coder-loop/src/loop.ts`。
 
-在目标 repo 上启动前，先通过 `install` 建立 target-side bootstrap 契约：
+在目标 repo 上启动前，只需在中央 daemon 起一个 chain；target 目录不需要任何 bootstrap 文件：
 
 ```bash
 coder-loop daemon up
-coder-loop install /path/to/target --repo <owner>/<repo>
-coder-loop doctor /path/to/target --repo <owner>/<repo>
+coder-loop chain create <name> --repository <owner>/<repo> --preset gh-issue-pr-iteration
+coder-loop doctor /path/to/target --repo <owner>/<repo>     # operator 机器 + live runtime 体检
 coder-loop status /path/to/target --json
 ```
 
-`install` 会注册 central DB chain，因此必须先有可用的 central daemon。使用自定义 `--loop-data-root` 时，`daemon up` 与后续 `install` / `doctor` / `status` 要传同一个 root。
+`chain create` 是中央 daemon socket 上一条写入；preset 业务资产（如 GitHub labels）由 preset 的 planning agent 在运行中幂等确保。使用自定义 `--loop-data-root` 时，`daemon up` 与后续 `chain create` / `doctor` / `status` 要传同一个 root。（#436 起 `install` / `uninstall` 子命令退役——原五层 bootstrap 已逐层归位到 preset / chain / operator 机器。）
 
 每个 phase 的默认 runner 由 `preset.toml` 的 `[[phases]].runner = "claude"|"codex"` 声明；未声明时走 engine-builtin fallback（当前为 `codex`）。phase 还可用 `[[phases]].model` 声明默认模型（bundled preset 的 review phase 声明 `runner = "codex"`、`model = "gpt-5.5"`）。单个 queue item 的 `runner` 字段只覆盖允许 item override 的普通执行 phase。Runner binary 直接是 `claude` / `codex`（在 PATH 上）；模型来自 phase 的 `model` 声明，没有 target 级 override 通道。`doctor` / `status --json` 显示每个 phase 的 runner 与 source。
 
