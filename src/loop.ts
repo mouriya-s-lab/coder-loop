@@ -10,8 +10,8 @@
 
 import { spawn } from "node:child_process"
 import { appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises"
-import { closeSync, createWriteStream, openSync, realpathSync, type WriteStream } from "node:fs"
-import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
+import { closeSync, createWriteStream, openSync, type WriteStream } from "node:fs"
+import { dirname, isAbsolute, relative, resolve } from "node:path"
 import { command, flag, option, optional, positional, run as runCmd, string as cmdString, subcommands } from "cmd-ts"
 import { type as arkType } from "arktype"
 import type { BoundaryError, BoundaryRecord, BoundaryValue } from "./boundary-types"
