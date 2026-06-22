@@ -968,60 +968,23 @@ attemptTimeoutSeconds = 3600
 		}
 	})
 
-	test("install no runtime dir; install writes workflow; install creates chain row", async () => {
-		const fixture = await startFixture("install-chain")
-		try {
-			const env = await fakeCliEnv("install-chain")
-			const target = await makeGitTarget("install-chain-target")
-			const result = await runCli(["install", target, "--repo", "fixture/repo", "--loop-data-root", fixture.loopDataRoot], env)
-			expect(result.exitCode, result.stderr).toBe(0)
-			await expect(Bun.file(resolve(target, ".coder-loop/workflow.md")).exists()).resolves.toBe(true)
-			await expect(Bun.file(resolve(target, ".coder-loop/runtime")).exists()).resolves.toBe(false)
-			const status = expectJsonOk(await runCli(["chain", "status", "repo", "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			expect(status.chain).toMatchObject({ name: "repo", repository: "fixture/repo", preset: "gh-issue-pr-iteration", status: "active" })
-			// #433: install writes the workflow path to `metadata.bindings`, not the retired `metadata.config`.
-			expect(status.chain.metadata).toMatchObject({ bindings: { workflowFile: resolve(target, ".coder-loop/workflow.md") } })
-		} finally {
-			await fixture.daemon.stop()
-		}
+	// #436: install/uninstall surface deleted. The two doctor tests below remain — neither
+	// looks at target files (zero target-file check is the K1 property doctor must satisfy).
+	test("install and uninstall subcommands no longer exist", async () => {
+		const env = await fakeCliEnv("install-retired")
+		const installResult = await runCli(["install", "/tmp/x"], env)
+		expect(installResult.exitCode).toBe(1)
+		expect(installResult.stdout).toContain("Usage:")
+		expect(installResult.stdout).not.toContain("install <target>")
+		expect(installResult.stdout).not.toContain("uninstall <target>")
+		const uninstallResult = await runCli(["uninstall", "/tmp/x"], env)
+		expect(uninstallResult.exitCode).toBe(1)
+		expect(uninstallResult.stdout).toContain("Usage:")
+		expect(uninstallResult.stdout).not.toContain("install <target>")
+		expect(uninstallResult.stdout).not.toContain("uninstall <target>")
 	})
 
-	test("install rejects non-git target before writing workflow", async () => {
-		const env = await fakeCliEnv("install-non-git")
-		const target = await makeEmptyTarget("install-non-git-target")
-		const result = await runCli(["install", target, "--dry-run"], env)
-		expect(result.exitCode).toBe(1)
-		expect(result.stderr).toContain("target is not a git repository")
-		expect(result.stderr).not.toContain("[Layer A]")
-		await expect(Bun.file(resolve(target, ".coder-loop/workflow.md")).exists()).resolves.toBe(false)
-	})
-
-	test("install rejects malformed repo slugs before chain creation", async () => {
-		const env = await fakeCliEnv("install-invalid-repo")
-		const target = await makeGitTarget("install-invalid-repo-target")
-		for (const repo of ["a/b/c", "no-slash", "x/y\nbad", ""]) {
-			const result = await runCli(["install", target, "--repo", repo, "--dry-run"], env)
-			expect(result.exitCode, `repo=${JSON.stringify(repo)} stderr=${result.stderr}`).toBe(1)
-			expect(result.stderr).toContain("invalid repo slug")
-			expect(result.stderr).not.toContain("[Central] DB chain")
-		}
-	})
-
-	test("install daemon offline explicit fail", async () => {
-		const env = await fakeCliEnv("install-offline")
-		const target = await makeGitTarget("install-offline-target")
-		const loopDataRoot = resolve(TEST_ROOT, `${++nextFixtureId}-offline-loop-data`)
-		await mkdir(loopDataRoot, { recursive: true })
-		const result = await runCli(["install", target, "--repo", "fixture/repo", "--loop-data-root", loopDataRoot], env)
-		expect(result.exitCode).toBe(1)
-		expect(result.stderr).toContain("central daemon is not running")
-		expect(result.stderr).toContain("coder-loop daemon up --loop-data-root")
-		expect(result.stderr).not.toContain("[Layer A]")
-		await expect(Bun.file(resolve(target, ".coder-loop/workflow.md")).exists()).resolves.toBe(false)
-		await expect(Bun.file(resolve(target, ".coder-loop/runtime")).exists()).resolves.toBe(false)
-	})
-
-	test("doctor passes without runtime dir", async () => {
+	test("doctor checks operator machine and live runtime; no target file checks", async () => {
 		const fixture = await startFixture("doctor-chain")
 		try {
 			const env = await fakeCliEnv("doctor-chain")
@@ -1029,15 +992,21 @@ attemptTimeoutSeconds = 3600
 			expectJsonOk(await runCli(["chain", "create", "doctor-chain", "--config-json", FIXTURE_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			const result = await runCli(["doctor", target, "--repo", "fixture/repo", "--loop-data-root", fixture.loopDataRoot, "--chain", "doctor-chain"], env)
 			expect(result.exitCode, result.stderr).toBe(0)
-			expect(result.stderr).toContain("OK: .coder-loop/workflow.md")
+			// #436: zero target-file checks. Doctor must not enumerate workflow.md / labels / skills /
+			// any other target-relative artifact. Only operator-machine + live-runtime sections.
+			expect(result.stderr).not.toContain("workflow.md")
+			expect(result.stderr).not.toContain("[Layer A]")
+			expect(result.stderr).not.toContain("[Layer D]")
+			expect(result.stderr).not.toContain("Target 项目文件")
 			expect(result.stderr).not.toContain("legacy local runtime")
-			expect(result.stderr).not.toContain(".coder-loop/runtime absent")
+			expect(result.stderr).toContain("[Operator machine]")
+			expect(result.stderr).toContain("[Live Runtime]")
 		} finally {
 			await fixture.daemon.stop()
 		}
 	})
 
-	test("doctor does not warn when runtime dir exists", async () => {
+	test("doctor passes regardless of target .coder-loop/runtime presence", async () => {
 		const fixture = await startFixture("doctor-runtime-dir")
 		try {
 			const env = await fakeCliEnv("doctor-runtime-dir")
@@ -1046,9 +1015,9 @@ attemptTimeoutSeconds = 3600
 			expectJsonOk(await runCli(["chain", "create", "doctor-runtime-chain", "--config-json", FIXTURE_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			const result = await runCli(["doctor", target, "--repo", "fixture/repo", "--loop-data-root", fixture.loopDataRoot, "--chain", "doctor-runtime-chain"], env)
 			expect(result.exitCode, result.stderr).toBe(0)
-			expect(result.stderr).toContain("OK: .coder-loop/workflow.md")
-			expect(result.stderr).not.toContain("legacy local runtime")
+			expect(result.stderr).not.toContain("workflow.md")
 			expect(result.stderr).not.toContain("WARN: .coder-loop/runtime")
+			expect(result.stderr).not.toContain("legacy local runtime")
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -1146,33 +1115,14 @@ async function waitForFirstExit(processes: NamedDaemonProcess[]): Promise<{ name
 	})))
 }
 
+// #436: target directories no longer seed `.coder-loop/workflow.md` — the engine
+// retired the per-target policy file in #434 and the doctor surface that asserted
+// its existence in #436. Plain empty directories are sufficient for the remaining
+// tests (status snapshot, doctor live-runtime output, etc.) which only need a
+// stable filesystem anchor for spawn cwd / chain bookkeeping.
 async function makeTarget(name: string): Promise<string> {
 	const target = resolve(TEST_ROOT, `${++nextFixtureId}-${name}`)
-	await mkdir(resolve(target, ".coder-loop"), { recursive: true })
-	await writeFile(resolve(target, ".coder-loop/workflow.md"), "# workflow\n")
-	return target
-}
-
-async function makeEmptyTarget(name: string): Promise<string> {
-	const target = resolve(TEST_ROOT, `${++nextFixtureId}-${name}`)
 	await mkdir(target, { recursive: true })
-	return target
-}
-
-async function makeGitTarget(name: string, options: { workflow?: boolean } = {}): Promise<string> {
-	const target = await makeEmptyTarget(name)
-	const init = Bun.spawnSync({
-		cmd: ["git", "init"],
-		cwd: target,
-		stdin: "ignore",
-		stdout: "pipe",
-		stderr: "pipe",
-	})
-	if (init.exitCode !== 0) throw new Error(new TextDecoder().decode(init.stderr))
-	if (options.workflow === true) {
-		await mkdir(resolve(target, ".coder-loop"), { recursive: true })
-		await writeFile(resolve(target, ".coder-loop/workflow.md"), "# workflow\n")
-	}
 	return target
 }
 

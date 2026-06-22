@@ -5,7 +5,7 @@
 ## 当前稳定入口
 
 ```bash
-coder-loop install <target> --repo <owner>/<repo>
+coder-loop chain create <name> --repository <owner>/<repo> --preset <name>
 coder-loop doctor <target> --repo <owner>/<repo>
 coder-loop status <target> --json
 coder-loop daemon up --json
@@ -26,7 +26,7 @@ coder-loop queue unblock <target> --issue <id> --start-daemon
 
 ## 操作顺序
 
-1. **Bootstrap / verify**: 先 `install`，再 `doctor`，最后 `status`。
+1. **接入 / 体检**: 用 `coder-loop chain create` 在中央 daemon 上写 chain（target 目录零 bootstrap），再 `doctor` 看 operator 机器与 live runtime，最后 `status` 读 schema/queue（#436 起 install/uninstall 子命令退役）。
 2. **Daemon 生命周期**: `daemon up/down` 管 central socket service；`daemon start/stop/restart <target>` 管一个 target 对应的 chain。
 3. **Chain / item 变更**: 用 `chain create/list/status/delete` 与 `item add/list/update` 表达队列操作，不手写 runtime 文件。
 4. **Fallback 阅读边界**: 先从 `coder-loop status <target> --json` 读取 `events.path`、`current.phaseStatus.value.outputPath`、`statusPath`，再按路径读 run artifacts。

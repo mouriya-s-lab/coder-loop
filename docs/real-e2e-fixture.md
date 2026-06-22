@@ -49,7 +49,7 @@ bun scripts/real-e2e.ts --preset gh-issue-pr-iteration
 1. **preflight** — gh auth、`codex` / `claude` 在 PATH、fixture repo 可达、本地 checkout origin 一致。
 2. **reset** — fixture checkout 硬回 `origin/main`；关掉所有残留 open PR（fixture 专用于 e2e，open PR 一律视为上轮残留）；关掉残留的 `e2e-seed` label open issue；`message.txt` 不是 `status: pending` 时翻回并直接 push main。
 3. **seed** — 脚本用 `gh issue create` 建一个契约合规的 trivial issue（`kind:code` + `e2e-seed` label）：把 `message.txt` 改为 `status: complete`。
-4. **run** — 在隔离 `--loop-data-root`（`.coder-loop/runtime/real-e2e/<stamp>/loop-data`）起中央 daemon（`daemon up`），`install` bootstrap target + chain，`item add` 入队。生产 daemon（`~/.coder-loop`）完全不被触碰。
+4. **run** — 在隔离 `--loop-data-root`（`.coder-loop/runtime/real-e2e/<stamp>/loop-data`）起中央 daemon（`daemon up`），`chain create` 在中央 socket 写入 chain（#436 起 install/uninstall 子命令退役，target 目录零 bootstrap），`item add` 入队。生产 daemon（`~/.coder-loop`）完全不被触碰。
 5. **watch + tripwire** — 轮询 `status <target> --json`，越界即自动 `daemon down` + 落诊断 + 非零退出：
    - `--max-wall-seconds`（默认 2700）
    - `--max-attempts`（默认 5）
@@ -57,7 +57,7 @@ bun scripts/real-e2e.ts --preset gh-issue-pr-iteration
 6. **assert** — item 到 `done` 后验证 GitHub 终态：seed issue CLOSED、closing PR MERGED、fixture `origin/main` 上 `message.txt == status: complete`、真实 `bun run check` 通过。
 7. **teardown + evidence** — `daemon down`，stdout 输出 evidence 摘要（issue URL、PR URL、merge commit、耗时、loop-data 路径）。
 
-失败路径（终态 `blocked` / `moot` / `exhausted`、tripwire、install 失败）都会打印
+失败路径（终态 `blocked` / `moot` / `exhausted`、tripwire、`chain create` 失败）都会打印
 loop-data root、daemon stdout/stderr log 路径和最后一次 status snapshot，然后
 exit 1。
 

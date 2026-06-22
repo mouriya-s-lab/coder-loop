@@ -14,8 +14,8 @@ operator / supervisor 的默认入口是 `coder-loop` 自己暴露的只读或�
 
 | 场景 | 首选命令 | 何时用 |
 |---|---|---|
-| 初始化 target | `coder-loop install <target> --repo <owner>/<repo>` | 幂等创建 centralized chain，并检查 PATH / runner CLI（自 #434 起 install 写出的 `.coder-loop/workflow.md` 已无引擎读者，待 #436 退役） |
-| 体检 target | `coder-loop doctor <target> --repo <owner>/<repo>` | 只读检查 bootstrap layers 和 live runtime health |
+| 接入 target | `coder-loop chain create <name> --repository <owner>/<repo> --preset <name>` | 中央 daemon socket 一次写入 chain metadata；target 目录零文件依赖（#436 起 install 子命令退役） |
+| 体检 target | `coder-loop doctor <target> --repo <owner>/<repo>` | 只读检查 operator 机器先决条件 + live runtime health（零 target 文件检查） |
 | 读机器状态 | `coder-loop status <target> --json` | supervisor / script 读取当前 state/queue/current/events/process snapshot |
 | 管理 central daemon | `coder-loop daemon up/down/status/start/stop/restart <target>` | 管理全局 daemon socket 与 target chain；避免手写 `nohup` / PID 归属逻辑 |
 | 管理 chain | `coder-loop chain create/list/status/delete ...` | 直接操作 centralized coder-loop chain |
@@ -155,13 +155,13 @@ tail -F "$(coder-loop status /path/to/target --json | jq -r '.events.path')"
 
 ## 4. Runtime Health 错误分类
 
-`coder-loop doctor <target>` 覆盖 bootstrap 与 live runtime health。只想校验 target runtime/schema、不查 PATH / runner CLI 时，读结构化 status：
+`coder-loop doctor <target>` 覆盖 operator 机器先决条件与 live runtime health。只想校验 target runtime/schema、不查 PATH / runner CLI 时，读结构化 status：
 
 ```bash
 coder-loop status <path> --json | jq '.state, .target, .queue.selected'
 ```
 
-`status` 对 state 缺失或损坏仍输出 JSON；调用方按 `.state.kind` 分支，不从 stderr 猜错误类型。`doctor` 适合给人看同类问题的 bootstrap 上下文。
+`status` 对 state 缺失或损坏仍输出 JSON；调用方按 `.state.kind` 分支，不从 stderr 猜错误类型。`doctor` 适合给人看同类问题的 operator 机器 / live runtime 上下文。
 
 常见错误：
 
@@ -169,7 +169,7 @@ coder-loop status <path> --json | jq '.state, .target, .queue.selected'
 |---|---|---|
 | schema 版本错 | `state.version: must be 1` | 通过 chain/item API 或备份 DB 后修正 state snapshot |
 | chain 选择不匹配 | `SQLite chain "x" repository is owner/a, expected owner/b` | 指定正确 `--chain`，或修正 centralized chain identity |
-| 必需文件 / 目录缺失 | `targetCwd: directory does not exist` / `sharedContextPath: missing file: .../shared.md` | bootstrap 缺失项，先跑 `coder-loop install` / `doctor` |
+| 必需文件 / 目录缺失 | `targetCwd: directory does not exist` / `sharedContextPath: missing file: .../shared.md` | 先跑 `coder-loop doctor`；缺 chain 时 `coder-loop chain create <name> --repository <owner>/<repo>` |
 | queue item id 缺失 / 重复 | `state.queue[N].issue: must be a non-empty string or finite number` / `duplicate id "42"` | 修 chain item |
 | queue item status 非法 | `state.queue[N].status: status "foo" is not in preset.statuses` | 用 preset 声明的 status 字面量 |
 | chain handoff / runtime 目录缺失 | `sharedContextPath: missing file: .../shared.md` / `evidenceRootDir: missing directory: .../evidence` | 启动/重启 daemon 让它补齐 chain runtime layout，或手动修复对应 chain 目录 |
@@ -215,7 +215,7 @@ Resume 时引擎注入：
 
 ### 6.1 子命令（必须作为第一位置参数）
 
-`coder-loop install / uninstall / doctor / status / daemon / chain / item / queue`。子命令 help 可用：
+`coder-loop doctor / status / daemon / chain / item / queue`。子命令 help 可用：
 
 ```bash
 coder-loop daemon --help
@@ -227,9 +227,7 @@ coder-loop item --help
 
 | 子命令 | 用途 | 主要 flag |
 |---|---|---|
-| `install <target>` | 幂等 bootstrap | `--repo <slug>` `--preset <name>` `--force` `--dry-run` |
-| `uninstall <target>` | 仅删 `.claude/commands/dev-*.md` | — |
-| `doctor <target>` | 只读体检 + live runtime health | `--repo <slug>` |
+| `doctor <target>` | 只读体检：operator 机器先决条件 + live runtime health（零 target 文件检查） | `--repo <slug>` `--loop-data-root <dir>` `--chain <name>` |
 | `status <target> --json` | 只读 JSON runtime/process snapshot | `--loop-data-root <dir>` `--chain <name>` |
 | `daemon up` | 运行 centralized daemon process | `--json` `--loop-data-root <dir>` |
 | `daemon down` | 通过 Unix socket 要求 centralized daemon 退出 | `--json` `--loop-data-root <dir>` |

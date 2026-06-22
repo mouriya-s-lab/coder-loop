@@ -94,10 +94,14 @@ Use the JSON snapshots to derive:
 - daemon / process liveness from `processes.live` and
   `processes.scanError`
 
-If `doctor` reports a bootstrap failure, repair with `coder-loop install
-"$TARGET_DIR" --repo "$TARGET_REPO"` when that is obviously safe, then rerun
-`doctor`. If `status` reports an invalid runtime state, record the blocker in
-`log.md` before attempting manual file repair.
+If `doctor` reports a missing chain for this target, create it with
+`coder-loop chain create <name> --repository "$TARGET_REPO" --preset <preset>`,
+then rerun `doctor`. If `doctor` reports a missing operator-machine prereq
+(PATH / `gh auth` / runner CLI), repair it on the machine (no coder-loop
+subcommand does this) and rerun `doctor`. (The `install` / `uninstall`
+subcommands were retired in #436; bootstrap moved into `chain create` and the
+preset's planning agent.) If `status` reports an invalid runtime state, record
+the blocker in `log.md` before attempting manual file repair.
 
 Runner note: do not assume Claude. coder-loop role entry md declares phase
 defaults, and queue items may override allowed execution phases. Trust `status`
