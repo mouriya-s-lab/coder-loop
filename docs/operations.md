@@ -61,11 +61,13 @@ coder-loop daemon down --json                    # 关闭 central daemon socket 
 
 | 旧顶层字段（v11 及之前） | 新读取路径（v12 起） | 说明 |
 |---|---|---|
-| `queue.selected.item.issueNumber: number` | `queue.selected.id: string` 或 `queue.selected.item.extra.issue: string` | 引擎层不再焊死整数 issue number；`id` 是 preset `idField`-valued opaque string identity，`gh-issue-pr-iteration` 中是 GitHub issue number 的字符串编码。`item.issue`/`item.extra.issue` 来自 preset `[item.fields].issue = "number"` 透明字段声明。 |
-| `queue.selected.item.branch: string \| null` | `queue.selected.item.extra.branch: string \| null` | `branch` 不再是引擎一等列；`gh-issue-pr-iteration` 经 `[item.fields].branch` 透明字段写入 `extra`。 |
-| `queue.selected.item.pr: number \| null` | `queue.selected.item.extra.pr: number \| null` | 同上，`pr` 经 `[item.fields].pr` 透明字段写入 `extra`。 |
+| `queue.selected.item.issueNumber: number` | `queue.selected.id: string` 或 `queue.selected.item.issue: string` | 引擎层不再焊死整数 issue number；`id` 是 preset `idField`-valued opaque string identity，`gh-issue-pr-iteration` 中是 GitHub issue number 的字符串编码。`item.issue` 来自 preset `[item.fields].issue = "number"` 透明字段声明，在 wire 层平铺到 `queue.selected.item.issue`，不在 `extra` 嵌套下。 |
+| `queue.selected.item.branch: string \| null` | `queue.selected.item.branch: string \| null` | `branch` 不再是引擎一等物理列；`gh-issue-pr-iteration` 经 `[item.fields].branch` 透明字段在底层存到 `extra`，但 status JSON 序列化时平铺到 `queue.selected.item.branch`。读路径名不变，存储路径变了。 |
+| `queue.selected.item.pr: number \| null` | `queue.selected.item.pr: number \| null` | 同上，`pr` 经 `[item.fields].pr` 透明字段路径走，wire 上仍读 `queue.selected.item.pr`。 |
 | daemon wire `item.add` / `item.update` `issueNumber: number` | daemon wire `itemId: string` | discriminated-union field name 重命名；CLI flag 仍是 `--issue`（接受 opaque string）。 |
 | audit/decision event payload `itemId: number` (rowid，4 events) | `rowId: number` | `queue.terminal` / `item.dependency_unblocked` / `item.dependency_wait` / `item.backoff` 改用 `rowId` 携带 rowid 整数；`itemId` 在 wire 上统一保留给 opaque string identity。 |
+
+> **关于 `extra` 在 wire 上的形态**：preset `[item.fields]` 声明的透明字段（`gh-issue-pr-iteration` 的 `issue` / `branch` / `pr`）在 SQLite 层落在每个 item 行的 `extra` JSON object 里，但 `coder-loop status --json` 与 `coder-loop daemon status --json` 走的是 `stringifyStatusSnapshot`（`src/loop.ts`），通过 `flattenExtraReplacer` 在 emit 时把任何记录的 `extra` 键平铺到父级，因此**消费者按字段名直接在 `queue.selected.item.<field>` 上读，不要走 `queue.selected.item.extra.<field>` 嵌套路径**——`queue.selected.item.extra` 在 wire 上是 `null`。该平铺只影响 status JSON 的序列化形态，不改变内部 `ItemRecord.extra` 的存储层语义。
 
 `coder-loop item update` / `item add` 的 `--field-json` 仍接受 `{"branch": "...", "pr": N}`——它们走 preset 声明的 `[item.fields]` 透明字段路径，与 schema 物理层无关。
 
