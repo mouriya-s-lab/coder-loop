@@ -46,6 +46,7 @@ const EXPECTED_FRAGMENTS = [
 	{ id: "common/runtime-contract", role: "common", relPath: "common/runtime-contract.md" },
 	{ id: "common/github-routing", role: "common", relPath: "common/github-routing.md" },
 	{ id: "common/state-contract", role: "common", relPath: "common/state-contract.md" },
+	{ id: "common/dispatch-contract", role: "common", relPath: "common/dispatch-contract.md" },
 	{ id: "contract", role: "common", relPath: "contract.md" },
 	{ id: "plan/index", role: "plan", relPath: "plan/index.md" },
 	{ id: "plan/intake", role: "plan", relPath: "plan/intake.md" },
@@ -395,7 +396,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		// task-list spine: explicit list, two-state exit, no self-execution, no subagent-file reads
 		expect(entry).toContain("The list is the run.")
 		expect(entry).toContain("[x] accepted` or `[-] skipped:")
-		expect(entry).toContain("Dispatch it; never do it yourself")
+		expect(entry).toContain("never do the work yourself")
 		expect(entry).toContain("you may open **only** `accept.md` files")
 		// All four deliverable step directories are still referenced so the routing
 		// language above remains executable (the four-workflow capability survives).
