@@ -203,16 +203,16 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		const preset = await loadPreset(BUNDLED_PRESET_DIR)
 		expect(preset.phases.map((p) => p.name)).toEqual(["iteration", "review", "blocked-responder", "umbrella-finalizer"])
 		expect(Object.fromEntries(preset.phases.map((phase) => [phase.name, phase.defaultRunner]))).toEqual({
-			iteration: "codex",
-			review: "codex",
-			"blocked-responder": "codex",
-			"umbrella-finalizer": "codex",
+			iteration: "claude",
+			review: "claude",
+			"blocked-responder": "claude",
+			"umbrella-finalizer": "claude",
 		})
 		expect(Object.fromEntries(preset.phases.map((phase) => [phase.name, phase.defaultModel]))).toEqual({
-			iteration: null,
-			review: "gpt-5.5",
-			"blocked-responder": null,
-			"umbrella-finalizer": null,
+			iteration: "claude-opus-4-7[1m]",
+			review: "claude-opus-4-7[1m]",
+			"blocked-responder": "claude-opus-4-7[1m]",
+			"umbrella-finalizer": "claude-opus-4-7[1m]",
 		})
 		// #456: previously this also asserted the "last non-trigger phase" position via an engine
 		// helper. That helper enforced an engine assumption the DSL never declared; with the
