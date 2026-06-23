@@ -3458,7 +3458,7 @@ async function runDaemonStopCommand(args: Extract<DaemonCommandArgs, { action: "
 		}, args.json, formatDaemonStopResult)
 		return
 	}
-	const result = await requestDaemonResult(args.loopDataRoot ?? null, "chain.delete", { chainName: runtime.chain.name })
+	const result = await requestDaemonResult(args.loopDataRoot ?? null, "chain.stop", { chainName: runtime.chain.name })
 	writeJsonOrText({
 		action: "stop",
 		target: runtime.options.targetCwd,

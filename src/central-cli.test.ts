@@ -816,6 +816,28 @@ attemptTimeoutSeconds = 3600
 		}
 	})
 
+	test("daemon stop preserves chain as stopped (regression: PR #194 wired it to chain.delete)", async () => {
+		const fixture = await startFixture("daemon-stop-keeps-chain")
+		try {
+			expectJsonOk(await runCli(["chain", "create", "target-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expectJsonOk(await runCli(["item", "add", "target-chain", "--issue", "184", "--repo-cwd", REPO_ROOT, "--preset", "gh-issue-pr-iteration", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+
+			const stopJson = expectJsonOk(await runCli(["daemon", "stop", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--chain", "target-chain", "--json"]))
+			expect(stopJson).toMatchObject({ action: "stop", target: REPO_ROOT, chain: "target-chain" })
+			expect(stopJson.result.chain).toMatchObject({ name: "target-chain", status: "stopped" })
+			expect(stopJson.result.chain.status).not.toBe("deleted")
+			expect(stopJson.result.alreadyStopped).toBe(false)
+
+			const status = expectJsonOk(await runCli(["chain", "status", "target-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expect(status.chain).toMatchObject({ name: "target-chain", status: "stopped" })
+
+			const resumed = expectJsonOk(await runCli(["chain", "resume", "target-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expect(resumed.chain).toMatchObject({ name: "target-chain", status: "active" })
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("daemon start ignores target-local legacy loop-data when loop-data root is omitted", async () => {
 		// #433: the engine no longer reads any target runtime file — `--loop-data-root` / env wins
 		// without exception. The legacy target-local layout below is just a noise directory; the
