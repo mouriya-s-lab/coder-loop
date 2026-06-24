@@ -331,6 +331,11 @@ role = "common"
 path = "common/dispatch-contract.md"
 
 [[fragments]]
+id   = "common/test-inventory-protocol"
+role = "common"
+path = "common/test-inventory-protocol.md"
+
+[[fragments]]
 id   = "contract"
 role = "common"
 path = "contract.md"

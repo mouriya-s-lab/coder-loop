@@ -47,6 +47,7 @@ const EXPECTED_FRAGMENTS = [
 	{ id: "common/github-routing", role: "common", relPath: "common/github-routing.md" },
 	{ id: "common/state-contract", role: "common", relPath: "common/state-contract.md" },
 	{ id: "common/dispatch-contract", role: "common", relPath: "common/dispatch-contract.md" },
+	{ id: "common/test-inventory-protocol", role: "common", relPath: "common/test-inventory-protocol.md" },
 	{ id: "contract", role: "common", relPath: "contract.md" },
 	{ id: "plan/index", role: "plan", relPath: "plan/index.md" },
 	{ id: "plan/intake", role: "plan", relPath: "plan/intake.md" },
