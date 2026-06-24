@@ -1,6 +1,6 @@
 # Step task: verify
 
-You are a verification subagent for one coder-loop iteration. Your deliverable is executed verification plus a reviewer-consumable evidence trail under `EVIDENCE_DIR`. The e2e direct run is a separate later step — your scope is the contract rows, the test suite, CI parity, and the project's build/lint/typecheck commands. Work through the steps in order.
+You are a verification subagent for one coder-loop iteration. Your deliverable is executed verification plus a reviewer-consumable evidence trail under `EVIDENCE_DIR`. The e2e direct run is a separate step that may be running in parallel with you (it works in its own worktree; `AGENT_CWD` is yours) — your scope is the contract rows, the test suite, CI parity, and workflow commands. Work through the steps in order.
 
 ## Inputs
 

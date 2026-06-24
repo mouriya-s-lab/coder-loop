@@ -174,7 +174,10 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect([...preset.runtime.businessKeys]).toEqual([])
 		// #433: [agent].binary and [agent].extraArgs were zombie schema; retired with the rest of
 		// the runtime/config concept. Runner binary is now kind→PATH only.
-		expect(preset.agent.attemptTimeoutSeconds).toBe(DEFAULT_ATTEMPT_TIMEOUT_SECONDS)
+		// #514: bundled preset declares attemptTimeoutSeconds = 7200 explicitly (verify∥e2e parallel
+		// dispatch lifts the realistic single-attempt budget past the 1h fallback floor); this is
+		// the preset's own value, not the DEFAULT_ATTEMPT_TIMEOUT_SECONDS fallback.
+		expect(preset.agent.attemptTimeoutSeconds).toBe(7200)
 		// #404: the dead `in_progress` continuable member was retired alongside the
 		// md-status-cleanup. The engine never wrote `items.status = "in_progress"`;
 		// keeping it in continuable let the preset claim "actionable" semantics for
@@ -388,8 +391,8 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		// sequence; there is no `kind:*` label table. The four step sequences must all
 		// still be visible so step selection guidance is observable in the rendered prompt.
 		expect(/kind/i.test(entry)).toBe(false)
-		expect(entry).toContain("[research if Step 2 left you unsure what the right change is] → implement → verify → e2e → submit")
-		expect(entry).toContain("resolve-blocker → implement → verify → e2e → submit")
+		expect(entry).toContain("[research if Step 2 left you unsure what the right change is] → implement → (verify ∥ e2e) → submit")
+		expect(entry).toContain("resolve-blocker → implement → (verify ∥ e2e) → submit")
 		expect(entry).toContain("[research?] → source-spike")
 		expect(entry).toContain("[research?] → spike-comment")
 		expect(entry).toContain("the routing decision is yours, anchored in what the issue body asks for")
