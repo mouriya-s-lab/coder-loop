@@ -135,6 +135,11 @@ export type DaemonCommandName =
 	| "chain.stop"
 	| "chain.resume"
 	| "chain.delete"
+	// #481: patch runner-slot bindings on a chain (claude / codex / opencode `.model`).
+	// Operator surface only; hard-deny for agents. Used by the `coder-loop runtime set` CLI
+	// to idempotently rewrite per-runner model overrides without round-tripping the full
+	// chain.metadata blob.
+	| "chain.updateBindings"
 	| "item.add"
 	| "item.batchAdd"
 	| "item.list"
@@ -1005,6 +1010,7 @@ export class CoderLoopDaemon {
 			"chain.stop": { authClass: "hard-deny-for-agent", handler: (args) => this.handleChainStop(args) },
 			"chain.resume": { authClass: "hard-deny-for-agent", handler: (args) => this.handleChainResume(args) },
 			"chain.delete": { authClass: "hard-deny-for-agent", handler: (args) => this.handleChainDelete(args) },
+			"chain.updateBindings": { authClass: "hard-deny-for-agent", handler: (args) => this.handleChainUpdateBindings(args) },
 			"item.add": { authClass: "mutation-credential-gated", handler: (args) => this.handleItemAdd(args) },
 			"item.batchAdd": { authClass: "mutation-credential-gated", handler: (args) => this.handleItemBatchAdd(args) },
 			"item.list": { authClass: "read-no-auth", handler: (args) => Promise.resolve(this.handleItemList(args)) },
@@ -1699,6 +1705,57 @@ export class CoderLoopDaemon {
 		} finally {
 			resumeScheduler()
 		}
+	}
+
+	// #481 chain.updateBindings: patch a small set of runner-binding overrides on a chain
+	// (currently claude / codex / opencode `.model`) idempotently. Operator-only surface; the
+	// `coder-loop runtime set <target>` CLI is the entry point. Semantics:
+	//   - The `patch` JSON object has shape `{ "<kind>": { "model": "<string>" } }` where `<kind>`
+	//     is `"claude" | "codex" | "opencode"`. Other shapes (other keys, missing kind block) are
+	//     ignored — the operator can pass an empty patch as a read-back / no-op.
+	//   - The chain need not be active. A stopped chain's bindings can be patched too — runner
+	//     choices are read at every spawn from the latest chain metadata, so the next time the
+	//     chain resumes the new model wins.
+	private async handleChainUpdateBindings(args: JsonObject): Promise<JsonObject> {
+		const chain = this.resolveChain(args)
+		const patchValue = args.patch
+		if (patchValue === undefined) throw new DaemonError("invalid_request", "chain.updateBindings requires a `patch` object", { chainName: chain.name })
+		if (patchValue === null || typeof patchValue !== "object" || Array.isArray(patchValue)) {
+			throw new DaemonError("invalid_request", "chain.updateBindings: `patch` must be a JSON object", { chainName: chain.name, patchType: Array.isArray(patchValue) ? "array" : typeof patchValue })
+		}
+		const patch = patchValue as JsonObject
+		const merged = chainMetadataToJsonObject(chain.metadata)
+		const beforeJson = JSON.stringify(merged)
+		const updatedKinds: string[] = []
+		for (const kind of ["claude", "codex", "opencode"] as const) {
+			const block = patch[kind]
+			if (block === undefined || block === null) continue
+			if (typeof block !== "object" || Array.isArray(block)) {
+				throw new DaemonError("invalid_request", `chain.updateBindings: patch.${kind} must be a JSON object when provided`, { chainName: chain.name, kind })
+			}
+			const blockObject = block as JsonObject
+			const newModel = blockObject.model
+			if (newModel === undefined) continue
+			if (typeof newModel !== "string" || newModel === "") {
+				throw new DaemonError("invalid_request", `chain.updateBindings: patch.${kind}.model must be a non-empty string when provided`, { chainName: chain.name, kind, modelType: typeof newModel })
+			}
+			const existing = merged[kind]
+			const existingObject = existing !== null && typeof existing === "object" && !Array.isArray(existing) ? existing : {}
+			merged[kind] = { ...existingObject, model: newModel }
+			updatedKinds.push(kind)
+		}
+		const afterJson = JSON.stringify(merged)
+		const isNoOp = beforeJson === afterJson
+		if (isNoOp) return { chain: chainToJson(chain), alreadyMatched: true, updatedKinds: [] }
+		const updated = this.requireStore().updateChain(chain.id, { metadata: validateChainMetadata(merged) })
+		await this.recordObservabilityEventIfChainNameIsValid(updated, makeObservabilityEvent({
+			kind: "audit",
+			type: "chain.layout",
+			chain: updated.name,
+			subject: { kind: "operator" },
+			payload: { chainId: updated.id, updatedKinds, state: this.state },
+		}))
+		return { chain: chainToJson(updated), alreadyMatched: false, updatedKinds }
 	}
 
 	// #409 logs query, daemonized. Previously executed inline in the CLI process
@@ -4257,7 +4314,7 @@ function optionalRunner(record: UnknownRecord, key: string): AgentRunnerKind | n
 	const value = record[key]
 	if (value === undefined) return undefined
 	if (value === null) return null
-	if (value !== "claude" && value !== "codex") throw new DaemonError("invalid_request", `${key} must be claude, codex, or null`)
+	if (value !== "claude" && value !== "codex" && value !== "opencode") throw new DaemonError("invalid_request", `${key} must be claude, codex, opencode, or null`)
 	return value
 }
 
@@ -4541,6 +4598,7 @@ const DAEMON_COMMAND_NAMES = [
 	"chain.stop",
 	"chain.resume",
 	"chain.delete",
+	"chain.updateBindings",
 	"item.add",
 	"item.batchAdd",
 	"item.list",
@@ -4587,6 +4645,7 @@ function narrowPrivilegedOpAuditOp(op: DaemonCommandName): PrivilegedOpAuditOp |
 		case "chain.stop":
 		case "chain.resume":
 		case "chain.delete":
+		case "chain.updateBindings":
 		case "daemon.down":
 		case "logs.query":
 		case "queue.unblock":

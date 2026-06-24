@@ -560,6 +560,23 @@ describe("parsePreset schema validation", () => {
 		expect(preset.phases[1]!.defaultRunner).toBe("claude")
 	})
 
+	test("preset loader accepts opencode runner", () => {
+		// #481 acceptance #1: `runner = "opencode"` on a preset phase must round-trip through
+		// the loader and produce `defaultRunner = "opencode"`. Mirrors the per-phase override
+		// test above; the only diff is the third runner kind. Catches any regression where the
+		// ark boundary, `parsePhaseRunner`, or the AgentRunnerKind union slips back to a
+		// `claude | codex` binary.
+		const root: BoundaryRecord = minimalRoot()
+		root.statuses = { continuable: ["queued", "in_progress"], terminal: ["done"], exhausted: "done" }
+		root.phases = [
+			{ name: "iteration", prompt: "iter.md", runner: "opencode", exits: [{ status: "in_progress", when: "handoff" }], variables: { K: "item.id" } },
+			{ name: "review", prompt: "review.md", exits: [{ status: "done", when: "accepted" }], variables: { K: "item.id" } },
+		]
+
+		const preset = parsePreset(root, "/tmp")
+		expect(preset.phases[0]!.defaultRunner).toBe("opencode")
+	})
+
 	test("accepts manual unblock statuses declared as terminal subset", () => {
 		const root: BoundaryRecord = minimalRoot()
 		root.statuses = {continuable: ["ready"], terminal: ["parked", "finished"], entry: "ready", unblockable: ["parked"], exhausted: "finished" }

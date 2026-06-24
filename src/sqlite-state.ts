@@ -392,7 +392,7 @@ const ITEMS_TABLE_SCHEMA_SQL = `
 	issue_file TEXT,
 	evidence_dir TEXT,
 	agent_cwd TEXT,
-	runner TEXT CHECK (runner IN ('claude', 'codex') OR runner IS NULL),
+	runner TEXT CHECK (runner IN ('claude', 'codex', 'opencode') OR runner IS NULL),
 	phase TEXT,
 	preset TEXT,
 	preset_path TEXT,
@@ -478,7 +478,14 @@ ${STATE_INDEXES_SQL}
 // without those columns. Idempotent: rows already migrated (column values were NULL when the
 // migration runs) are left alone. The engine no longer reads these columns; bundled preset
 // resolves them via the declared-binding namespace (chain.umbrellaRepo / chain.umbrellaIssue).
-const STATE_SCHEMA_VERSION = 12
+// #481 v12→v13: items.runner CHECK constraint widens from `('claude','codex')` to
+// `('claude','codex','opencode')` so the third runner kind round-trips through SQLite. A CHECK
+// constraint cannot be modified in place on SQLite — `rebuildItemsTableForV13` copies rows into
+// a freshly-CREATE'd table whose schema text comes from the current ITEMS_TABLE_SCHEMA_SQL (which
+// now carries the widened CHECK). Idempotent: rows already on v13 cause `user_version` to skip
+// the rebuild, and rows being copied through the new schema satisfy the new constraint (existing
+// runner values are all `claude` / `codex` / NULL — strict subset of the new accepted set).
+const STATE_SCHEMA_VERSION = 13
 const V5_ITEM_SESSION_COLUMN = ["last", "session", "id"].join("_")
 // v9 moves preset declaration from chains.preset to items.preset / items.preset_path (#412).
 // Existing rows are back-filled from chains.preset so the engine resolves the legacy preset
@@ -562,6 +569,17 @@ function chainsTableHasNotNullPreset(db: Database): boolean {
 	return presetCol?.notnull === 1
 }
 
+// #481 v12→v13: items.runner CHECK constraint widens from `('claude','codex')` to
+// `('claude','codex','opencode')`. SQLite has no `ALTER TABLE ... DROP/MODIFY CHECK`, so detect
+// the legacy constraint by inspecting the items table's CREATE SQL and trigger a full rebuild
+// (`rebuildItemsTableForV13`). Conservative: any items table whose CREATE SQL does NOT mention
+// `opencode` inside the runner CHECK clause is considered legacy.
+function itemsTableRunnerCheckAllowsOpencode(db: Database): boolean {
+	const sql = db.query<TableSqlRow, []>("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'items'").get()?.sql ?? ""
+	if (sql === "") return false
+	return /runner\s+TEXT\s+CHECK[^)]*['"]opencode['"]/i.test(sql)
+}
+
 function itemsTableHasColumn(db: Database, columnName: string): boolean {
 	return tableHasColumn(db, "items", columnName)
 }
@@ -589,11 +607,18 @@ function migrateStateSchema(db: Database): void {
 	// `extra.branch` / `extra.pr`,再 swap 到只有 `item_id TEXT NOT NULL` + `UNIQUE (chain_id, item_id)` 的新表。
 	const needsItemTableRebuildForGitHubShapeRetire = stateSchemaExists(db)
 		&& (itemsTableHasColumn(db, "issue_number") || itemsTableHasColumn(db, "branch") || itemsTableHasColumn(db, "pr"))
+	// #481 v12→v13: items.runner CHECK constraint widens to include 'opencode'. Any items table
+	// whose CREATE SQL lacks `opencode` in the runner CHECK list needs a rebuild via
+	// `rebuildItemsTableForV13`. The widened ITEMS_TABLE_SCHEMA_SQL already encodes the new
+	// check; the rebuild simply CREATEs `items_new` from that SQL and copies rows over.
+	const needsItemTableRebuildForOpencodeCheck = stateSchemaExists(db)
+		&& !itemsTableRunnerCheckAllowsOpencode(db)
 	if (
 		beforeVersion >= STATE_SCHEMA_VERSION
 		&& stateSchemaExists(db)
 		&& !needsChainTableRebuild
 		&& !needsItemTableRebuildForGitHubShapeRetire
+		&& !needsItemTableRebuildForOpencodeCheck
 		&& itemsTableHasColumn(db, "phase")
 		&& itemsTableHasColumn(db, "session_ids")
 		&& itemsTableHasColumn(db, "position")
@@ -603,7 +628,7 @@ function migrateStateSchema(db: Database): void {
 		&& !itemsTableHasColumn(db, V5_ITEM_SESSION_COLUMN)
 		&& runsTableHasColumn(db, "status")
 	) return
-	if (needsItemTableRebuild || needsChainTableRebuild || needsItemTableRebuildForGitHubShapeRetire) db.exec("PRAGMA foreign_keys = OFF")
+	if (needsItemTableRebuild || needsChainTableRebuild || needsItemTableRebuildForGitHubShapeRetire || needsItemTableRebuildForOpencodeCheck) db.exec("PRAGMA foreign_keys = OFF")
 	try {
 		db.transaction(() => {
 			db.exec(STATE_SCHEMA_SQL)
@@ -660,6 +685,16 @@ function migrateStateSchema(db: Database): void {
 			// looks like, copies them into `extra`, then swaps to the v12 shape (item_id + no branch/pr).
 			if (itemsTableHasColumn(db, "issue_number") || itemsTableHasColumn(db, "branch") || itemsTableHasColumn(db, "pr")) {
 				migrateItemsToOpaqueItemId(db)
+			}
+			// #481 v12→v13: items.runner CHECK widens to include 'opencode'. The v11→v12 rebuild
+			// (`migrateItemsToOpaqueItemId` → `rebuildItemsTableForV12`) already runs the table
+			// through the current ITEMS_TABLE_SCHEMA_SQL, so any disk going through v11→v12 in
+			// this same migration pass picks up the widened CHECK for free. A disk that was already
+			// on v12 from a prior coder-loop build still carries the narrow CHECK —
+			// `rebuildItemsTableForV13` handles that case (and is a no-op when the table already
+			// shows `opencode` in its CHECK SQL).
+			if (!itemsTableRunnerCheckAllowsOpencode(db)) {
+				rebuildItemsTableForV13(db)
 			}
 			// #433 v9→v10: drop the retired top-level runner keys (`runner` and the role-named
 			// runner key, named at runtime via string concatenation per #456 to keep `src/` free of
@@ -769,6 +804,30 @@ function migrateItemsToOpaqueItemId(db: Database): void {
 		})
 	}
 	rebuildItemsTableForV12(db)
+}
+
+// #481 v12→v13 migration: items.runner CHECK widens to include 'opencode'. The v12 columns
+// stay identical — only the CHECK clause text changes. We CREATE items_new from the current
+// ITEMS_TABLE_SCHEMA_SQL (which now carries the widened CHECK) and copy every row over. Every
+// pre-v13 row has runner ∈ {'claude','codex',NULL}, all of which satisfy the widened CHECK,
+// so the copy never raises a constraint violation. Idempotent: gated on
+// `itemsTableRunnerCheckAllowsOpencode` at the call site.
+function rebuildItemsTableForV13(db: Database): void {
+	db.exec(`CREATE TABLE items_new (${ITEMS_TABLE_SCHEMA_SQL})`)
+	db.exec(`INSERT INTO items_new (
+		id, chain_id, item_id, repo_cwd, status, attempts, position, title, priority, last_run_id,
+		session_ids, issue_file, evidence_dir, agent_cwd, runner, phase, preset, preset_path, extra,
+		created_at, updated_at, status_updated_at
+	)
+	SELECT
+		id, chain_id, item_id, repo_cwd, status, attempts, position, title, priority, last_run_id,
+		session_ids, issue_file, evidence_dir, agent_cwd, runner, phase, preset, preset_path, extra,
+		created_at, updated_at, status_updated_at
+	FROM items`)
+	db.exec("DROP TABLE items")
+	db.exec("ALTER TABLE items_new RENAME TO items")
+	db.exec(STATE_INDEXES_SQL)
+	db.exec(ITEM_NEXT_PENDING_INDEX_SQL)
 }
 
 function rebuildItemsTableForV12(db: Database): void {
@@ -1008,7 +1067,7 @@ function rebuildItemsTableForV6(db: Database): void {
 		issue_file TEXT,
 		evidence_dir TEXT,
 		agent_cwd TEXT,
-		runner TEXT CHECK (runner IN ('claude', 'codex') OR runner IS NULL),
+		runner TEXT CHECK (runner IN ('claude', 'codex', 'opencode') OR runner IS NULL),
 		phase TEXT,
 		preset TEXT,
 		preset_path TEXT,
@@ -1411,7 +1470,7 @@ function insertItem(db: Database, getItemRow: (id: number) => ItemRow | null, in
 
 function rowToItem(row: ItemRow | null): ItemRecord | null {
 	if (row === null) return null
-	if (row.runner !== null && row.runner !== "claude" && row.runner !== "codex") {
+	if (row.runner !== null && row.runner !== "claude" && row.runner !== "codex" && row.runner !== "opencode") {
 		throw new SqliteStateError("invalid_json", `invalid item runner in DB row: ${row.runner}`, { id: row.id })
 	}
 	return {
@@ -1687,7 +1746,7 @@ function normalizeSessionPhase(phase: string, code: SqliteStateErrorCode): strin
 }
 
 function isAgentRunnerKind(value: unknown): value is AgentRunnerKind {
-	return value === "claude" || value === "codex"
+	return value === "claude" || value === "codex" || value === "opencode"
 }
 
 function stringifyJsonObject(value: JsonObject): string {
