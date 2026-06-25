@@ -4,6 +4,7 @@ import {
 	claudeSessionIdInvalidDetector,
 	codexSessionIdInvalidDetector,
 	detectsSessionIdInvalid,
+	opencodeSessionIdInvalidDetector,
 } from "./session-id"
 
 describe("runner session id invalid detection", () => {
@@ -22,5 +23,23 @@ describe("runner session id invalid detection", () => {
 	test("does not treat ordinary runner stderr as session-id invalid", () => {
 		expect(detectsSessionIdInvalid("codex", "transient network failure")).toBe(false)
 		expect(detectsSessionIdInvalid("claude", "rate limit exceeded")).toBe(false)
+		expect(detectsSessionIdInvalid("opencode", "transient network failure")).toBe(false)
+	})
+
+	test("opencode detects missing session ids with ANSI color codes", () => {
+		// Real shape observed from `opencode run -s <fake-ses-id>` on the operator's machine:
+		// stderr is a single colored line — `\x1b[91m\x1b[1mError: \x1b[0mSession not found\n`.
+		// The `\b` word-boundary anchor in the detector regex must work even though the ANSI CSI
+		// terminator byte right before `Session` is `m` (a word character). The detector strips
+		// CSI sequences before matching, so the boundary check sees `Error: Session not found`.
+		const ansiStderr = "\x1b[91m\x1b[1mError: \x1b[0mSession not found\n"
+		expect(opencodeSessionIdInvalidDetector.detectsSessionIdInvalid(ansiStderr)).toBe(true)
+		expect(detectsSessionIdInvalid("opencode", ansiStderr)).toBe(true)
+		// The bare un-colored phrase (e.g., when stderr is piped through a stripping wrapper)
+		// must also match — the colored form is the only one observed in the wild but the
+		// detector should remain robust either way.
+		const bareStderr = "Error: Session not found"
+		expect(opencodeSessionIdInvalidDetector.detectsSessionIdInvalid(bareStderr)).toBe(true)
+		expect(detectsSessionIdInvalid("opencode", bareStderr)).toBe(true)
 	})
 })

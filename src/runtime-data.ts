@@ -112,6 +112,8 @@ export class ChainMetadata extends RuntimeDataRecord {
 	worktree?: boolean
 	claude?: RunnerMetadata
 	codex?: RunnerMetadata
+	// #481: opencode joins the typed slot list with the same shape as claude/codex.
+	opencode?: RunnerMetadata
 	maxItemAttempts?: number
 	coderLoopChainCompleteTrigger?: ChainCompleteTriggerState
 
@@ -126,6 +128,7 @@ export class ChainMetadata extends RuntimeDataRecord {
 		if (input.worktree !== undefined) this.worktree = input.worktree
 		if (input.claude !== undefined) this.claude = input.claude
 		if (input.codex !== undefined) this.codex = input.codex
+		if (input.opencode !== undefined) this.opencode = input.opencode
 		if (input.maxItemAttempts !== undefined) this.maxItemAttempts = input.maxItemAttempts
 		if (input.coderLoopChainCompleteTrigger !== undefined) this.coderLoopChainCompleteTrigger = input.coderLoopChainCompleteTrigger
 	}
@@ -200,6 +203,7 @@ type ChainMetadataInput = {
 	worktree?: boolean
 	claude?: RunnerMetadata
 	codex?: RunnerMetadata
+	opencode?: RunnerMetadata
 	maxItemAttempts?: number
 	coderLoopChainCompleteTrigger?: ChainCompleteTriggerState
 }
@@ -249,6 +253,7 @@ const CHAIN_METADATA_KEYS = new Set([
 	"worktree",
 	"claude",
 	"codex",
+	"opencode",
 	"maxItemAttempts",
 	"coderLoopChainCompleteTrigger",
 ])
@@ -333,6 +338,7 @@ export function chainMetadataToJsonObject(metadata: ChainMetadata): JsonObject {
 	assignJson(result, "worktree", metadata.worktree)
 	assignJson(result, "claude", metadata.claude === undefined ? undefined : runnerMetadataToJsonObject(metadata.claude))
 	assignJson(result, "codex", metadata.codex === undefined ? undefined : runnerMetadataToJsonObject(metadata.codex))
+	assignJson(result, "opencode", metadata.opencode === undefined ? undefined : runnerMetadataToJsonObject(metadata.opencode))
 	assignJson(result, "maxItemAttempts", metadata.maxItemAttempts)
 	assignJson(
 		result,
@@ -366,14 +372,14 @@ export function metadataBoolean(metadata: ChainMetadata, key: keyof ChainMetadat
 	return typeof value === "boolean" ? value : null
 }
 
-export function metadataNestedString(metadata: ChainMetadata, objectKey: "claude" | "codex", key: keyof RunnerMetadata & string): string | null {
+export function metadataNestedString(metadata: ChainMetadata, objectKey: "claude" | "codex" | "opencode", key: keyof RunnerMetadata & string): string | null {
 	const object = metadata[objectKey]
 	if (object === undefined) return null
 	const value = object[key]
 	return typeof value === "string" && value.trim() !== "" ? value : null
 }
 
-export function metadataNestedStringArray(metadata: ChainMetadata, objectKey: "claude" | "codex", key: keyof RunnerMetadata & string): string[] | null {
+export function metadataNestedStringArray(metadata: ChainMetadata, objectKey: "claude" | "codex" | "opencode", key: keyof RunnerMetadata & string): string[] | null {
 	const object = metadata[objectKey]
 	if (object === undefined) return null
 	const value = object[key]
@@ -503,6 +509,8 @@ function parseChainMetadata(value: JsonObject, field: string): ChainMetadata {
 	if (claude !== undefined) input.claude = claude
 	const codex = optionalRunnerMetadataField(value, "codex", `${field}.codex`)
 	if (codex !== undefined) input.codex = codex
+	const opencode = optionalRunnerMetadataField(value, "opencode", `${field}.opencode`)
+	if (opencode !== undefined) input.opencode = opencode
 	const maxItemAttempts = optionalPositiveIntegerField(value, "maxItemAttempts", `${field}.maxItemAttempts`)
 	if (maxItemAttempts !== undefined) input.maxItemAttempts = maxItemAttempts
 	const trigger = optionalChainCompleteTriggerStateField(value, "coderLoopChainCompleteTrigger", `${field}.coderLoopChainCompleteTrigger`)

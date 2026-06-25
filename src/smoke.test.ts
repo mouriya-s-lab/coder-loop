@@ -28,10 +28,12 @@ describe("smoke: v2 central chain CLI", () => {
 		expect(result.stdout).toContain("daemon <up|down|status|start|stop|restart>")
 	})
 
-	// #433: usage must not advertise the retired `runtime` command group.
-	test("usage no longer lists the retired runtime CLI", () => {
+	// #433 retired the broader `runtime` command group; #481 reintroduced a narrow `runtime set`
+	// surface scoped to per-runner model overrides (claude / codex / opencode). Usage must list
+	// the new line shape exactly so operators see the supported flags.
+	test("usage lists narrow `runtime set` reintroduced for opencode model override (#481)", () => {
 		const result = runCli([])
-		expect(result.stdout).not.toContain("runtime")
+		expect(result.stdout).toContain("runtime set <target> [--claude-model M] [--codex-model M] [--opencode-model M]")
 	})
 
 	test("status and queue unblock use SQLite state", async () => {

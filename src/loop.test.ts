@@ -4,6 +4,7 @@ import { relative, resolve } from "node:path"
 
 import {
 	agentCodexArgs,
+	agentOpencodeArgs,
 	agentSessionsPath,
 	buildCentralRuntimeBindingPaths,
 	buildRenderBindings,
@@ -193,6 +194,7 @@ function makeRuntime(overrides: Partial<RuntimeBindings> = {}): RuntimeBindings 
 function makeOptions(preset = makePreset()): LoopOptions {
 	const claudeRunner = { kind: "claude" as const, binary: "claude", extraArgs: [], model: null }
 	const codexRunner = { kind: "codex" as const, binary: "codex", extraArgs: [], model: null }
+	const opencodeRunner = { kind: "opencode" as const, binary: "opencode", extraArgs: [], model: null }
 	return {
 		targetCwd: REPO_ROOT,
 		sharedContextPath: resolve(TEST_ROOT, "shared.md"),
@@ -209,7 +211,7 @@ function makeOptions(preset = makePreset()): LoopOptions {
 		worktree: false,
 		hostRunner: "codex",
 		defaultRunner: { ...codexRunner, source: "engine-builtin" },
-		runnerCommands: { claude: claudeRunner, codex: codexRunner },
+		runnerCommands: { claude: claudeRunner, codex: codexRunner, opencode: opencodeRunner },
 		dryRun: false,
 		preset,
 	}
@@ -710,6 +712,61 @@ describe("runner and daemon helpers", () => {
 			"prompt",
 		])
 		expect(agentSessionsPath("/repo/runs/run-1/iteration/stdout.jsonl")).toBe("/repo/runs/run-1/iteration/sessions.jsonl")
+	})
+
+	test("agentOpencodeArgs renders run subcommand with json format model dir and optional resume", () => {
+		// #481 acceptance #4: opencode invocation must match what the operator's local
+		// `opencode 1.17.5` accepts — `opencode run --format json --dangerously-skip-permissions
+		// -m <model> [-s <sessionID>] <prompt>` — and must preserve user-supplied extra args
+		// while stripping any user-supplied `-m`/`--model` so the engine's resolved model wins.
+
+		// Fresh start: no resume, default model fallback (`opencode-go/glm-5.2` from
+		// DEFAULT_OPENCODE_MODEL when caller passes null).
+		expect(agentOpencodeArgs([], "do thing", { kind: "fresh" }, null)).toEqual([
+			"run",
+			"--format",
+			"json",
+			"--dangerously-skip-permissions",
+			"-m",
+			"opencode-go/glm-5.2",
+			"do thing",
+		])
+
+		// Resume: `-s <sessionId>` appended after model and before prompt.
+		expect(agentOpencodeArgs([], "continue", { kind: "resume", sessionId: "ses_abc" }, "opencode-go/glm-5.2")).toEqual([
+			"run",
+			"--format",
+			"json",
+			"--dangerously-skip-permissions",
+			"-m",
+			"opencode-go/glm-5.2",
+			"-s",
+			"ses_abc",
+			"continue",
+		])
+
+		// User-supplied `-m` is stripped (engine model wins); other extra args are preserved
+		// verbatim. We feed `--quiet` so the test exercises both behaviors at once.
+		expect(agentOpencodeArgs(["-m", "other/model", "--quiet"], "hi", { kind: "fresh" }, "opencode-go/glm-5.2")).toEqual([
+			"run",
+			"--format",
+			"json",
+			"--dangerously-skip-permissions",
+			"--quiet",
+			"-m",
+			"opencode-go/glm-5.2",
+			"hi",
+		])
+	})
+
+	test("parseSessionIdFromRunnerStream extracts opencode sessionID from JSONL first line", () => {
+		// #481: the engine consumes opencode's JSONL stdout and reads `sessionID` off the first
+		// event. This shape is what `opencode run --format json -m … "…"` actually writes — the
+		// `step_start` event arrives first and already carries `sessionID`.
+		const stdout = `{"type":"step_start","timestamp":1781852083376,"sessionID":"ses_12156f631ffekbejfp2hbSJNs5","part":{"id":"prt_x"}}\n{"type":"text","sessionID":"ses_12156f631ffekbejfp2hbSJNs5"}\n`
+		expect(parseSessionIdFromRunnerStream("opencode", stdout)).toBe("ses_12156f631ffekbejfp2hbSJNs5")
+		expect(parseSessionIdFromRunnerStream("opencode", "")).toBe(null)
+		expect(parseSessionIdFromRunnerStream("opencode", "not json\n")).toBe(null)
 	})
 })
 
