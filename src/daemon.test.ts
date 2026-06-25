@@ -4349,7 +4349,7 @@ process.exitCode = 0
 	})
 
 	describe("per-phase runner selection (issue #287 AC5)", () => {
-		test("live daemon with chain metadata claude/codex.binary spawns codex script for iter phase", async () => {
+		test("live daemon with chain metadata claude/codex.binary spawns claude script for iter phase", async () => {
 			const fixture = await startChainBasedRunnerFixture("ac5-iter", { phase: "iteration" })
 			try {
 				const result = expectOk(await request(fixture, "chain.create", {
@@ -4382,14 +4382,14 @@ process.exitCode = 0
 				const runId = iterationEnd.runId
 				const stdoutPath = resolveChainRuntimePaths(`ac5-iter-chain`, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(runId)
 				const stdout = await readFile(stdoutPath, "utf-8")
-				expect(stdout).toContain("BINARY:codex")
-				expect(stdout).not.toContain("BINARY:claude")
+				expect(stdout).toContain("BINARY:claude")
+				expect(stdout).not.toContain("BINARY:codex")
 			} finally {
 				await fixture.daemon.stop()
 			}
 		})
 
-		test("live daemon with chain metadata claude/codex.binary spawns codex script for review phase", async () => {
+		test("live daemon with chain metadata claude/codex.binary spawns claude script for review phase", async () => {
 			const fixture = await startChainBasedRunnerFixture("ac5-review", { phase: "review" })
 			try {
 				const result = expectOk(await request(fixture, "chain.create", {
@@ -4425,8 +4425,8 @@ process.exitCode = 0
 				)
 				const stdoutPath = resolveChainRuntimePaths(`ac5-review-chain`, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(reviewRunId!)
 				const stdout = await readFile(stdoutPath, "utf-8")
-				expect(stdout).toContain("BINARY:codex")
-				expect(stdout).not.toContain("BINARY:claude")
+				expect(stdout).toContain("BINARY:claude")
+				expect(stdout).not.toContain("BINARY:codex")
 			} finally {
 				await fixture.daemon.stop()
 			}
