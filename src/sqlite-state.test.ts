@@ -1226,6 +1226,146 @@ describe("sqlite state store", () => {
 		}
 	})
 
+	// #481 acceptance #8: items.runner CHECK constraint widens from `('claude','codex')` to
+	// `('claude','codex','opencode')`. The v12 items schema is otherwise identical to v13 — only
+	// the CHECK clause text differs — so rebuildItemsTableForV13 just re-creates the table from
+	// the widened ITEMS_TABLE_SCHEMA_SQL and copies rows over. The test seeds a v12 disk (with
+	// the narrow CHECK), confirms a pre-migration row with `runner='claude'` is preserved, then
+	// proves the post-migration CHECK admits `runner='opencode'` (the v12 CHECK would have
+	// rejected it).
+	test("items table allows opencode runner after v12 to v13 migration (acceptance row 8, #481)", async () => {
+		const loopDataRoot = resolve(TEST_ROOT, `items-opencode-v12-v13-${Date.now()}-${++nextRootId}`)
+		await mkdir(loopDataRoot, { recursive: true })
+		const dbFile = resolve(loopDataRoot, "db.sqlite")
+
+		const legacy = new Database(dbFile, { create: true, readwrite: true, strict: true })
+		try {
+			legacy.exec("PRAGMA foreign_keys = ON")
+			legacy.exec("PRAGMA journal_mode = WAL")
+			// v12 schema — note the narrow runner CHECK that this migration must widen. Mirrors
+			// the v12 shape carried at the point of #481 landing (items already on opaque item_id;
+			// no issue_number/branch/pr physical columns).
+			legacy.exec(`
+				CREATE TABLE chains (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					name TEXT NOT NULL UNIQUE,
+					preset TEXT,
+					repository TEXT NOT NULL,
+					base_branch TEXT NOT NULL,
+					status TEXT NOT NULL CHECK (status IN ('active', 'completed', 'deleted', 'stopped')),
+					metadata TEXT NOT NULL,
+					created_at REAL NOT NULL,
+					updated_at REAL NOT NULL
+				);
+				CREATE TABLE items (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+					item_id TEXT NOT NULL,
+					repo_cwd TEXT NOT NULL,
+					status TEXT NOT NULL,
+					attempts INTEGER NOT NULL,
+					position INTEGER NOT NULL DEFAULT 0,
+					title TEXT,
+					priority TEXT,
+					last_run_id TEXT,
+					session_ids TEXT NOT NULL DEFAULT '{}',
+					issue_file TEXT,
+					evidence_dir TEXT,
+					agent_cwd TEXT,
+					runner TEXT CHECK (runner IN ('claude', 'codex') OR runner IS NULL),
+					phase TEXT,
+					preset TEXT,
+					preset_path TEXT,
+					extra TEXT NOT NULL,
+					created_at REAL NOT NULL,
+					updated_at REAL NOT NULL,
+					status_updated_at REAL NOT NULL,
+					UNIQUE (chain_id, item_id)
+				);
+				CREATE TABLE runs (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					run_id TEXT NOT NULL UNIQUE,
+					chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+					item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+					phase TEXT NOT NULL,
+					status TEXT NOT NULL DEFAULT 'unknown',
+					started_at REAL NOT NULL,
+					ended_at REAL,
+					exit_code INTEGER,
+					extra TEXT NOT NULL
+				);
+				CREATE TABLE current_runs (
+					chain_id INTEGER PRIMARY KEY REFERENCES chains(id) ON DELETE CASCADE,
+					phase TEXT NOT NULL,
+					run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+					started_at REAL NOT NULL,
+					extra TEXT NOT NULL
+				);
+				PRAGMA user_version = 12;
+			`)
+			legacy.exec(`
+				INSERT INTO chains (name, preset, repository, base_branch, status, metadata, created_at, updated_at)
+				VALUES ('legacy-v12-runner', 'gh-issue-pr-iteration', 'mouriya-s-lab/coder-loop', 'main', 'active', '{}', 1.0, 1.0)
+			`)
+			// Pre-migration row uses runner='claude' — a value valid under both the old narrow
+			// CHECK and the new widened CHECK. After migration we re-read the row to confirm the
+			// data survived the table rebuild.
+			legacy.exec(`
+				INSERT INTO items (chain_id, item_id, repo_cwd, status, attempts, position, status_updated_at, runner, session_ids, extra, created_at, updated_at)
+				VALUES (1, '481-pre', '/repo/coder-loop', 'queued', 0, 0, 1.0, 'claude', '{}', '{}', 1.0, 1.0)
+			`)
+			// Sanity check that v12 narrow CHECK rejects 'opencode' — proves the seed disk is
+			// genuinely on v12 and not already on v13.
+			expect(() => legacy.exec(`
+				INSERT INTO items (chain_id, item_id, repo_cwd, status, attempts, position, status_updated_at, runner, session_ids, extra, created_at, updated_at)
+				VALUES (1, '481-pre-reject', '/repo/coder-loop', 'queued', 0, 0, 1.0, 'opencode', '{}', '{}', 1.0, 1.0)
+			`)).toThrow(/CHECK/i)
+		} finally {
+			legacy.close()
+		}
+
+		const migrated = openSqliteStateStore({ loopDataRoot })
+		try {
+			const chain = migrated.getChainByName("legacy-v12-runner")
+			expect(chain).not.toBeNull()
+			const chainId = chain!.id
+
+			// Pre-migration row survives the v12→v13 rebuild and keeps runner='claude'.
+			const preserved = migrated.getItemById(chainId, "481-pre")
+			expect(preserved).not.toBeNull()
+			expect(preserved!.runner).toBe("claude")
+
+			// The widened CHECK now admits runner='opencode' — the migration's deliverable. We
+			// insert through `createItem` (the engine's normal path) so the assertion exercises
+			// what production callers would.
+			const opencodeItem = migrated.createItem({
+				chainId,
+				itemId: "481-opencode",
+				repoCwd: "/repo/coder-loop",
+				status: runtimeStatus("queued"),
+				attempts: 0,
+				runner: "opencode",
+				extra: storedItemExtra({}),
+			})
+			expect(opencodeItem.runner).toBe("opencode")
+			const reread = migrated.getItemById(chainId, "481-opencode")
+			expect(reread?.runner).toBe("opencode")
+		} finally {
+			migrated.close()
+		}
+
+		// Idempotent: re-open at v13 should not re-rebuild and should keep both rows intact.
+		const reopened = openSqliteStateStore({ loopDataRoot })
+		try {
+			const chain = reopened.getChainByName("legacy-v12-runner")
+			expect(chain).not.toBeNull()
+			expect(reopened.getItemById(chain!.id, "481-pre")?.runner).toBe("claude")
+			expect(reopened.getItemById(chain!.id, "481-opencode")?.runner).toBe("opencode")
+		} finally {
+			reopened.close()
+		}
+	})
+
 	test("v5 to v6 migration maps legacy last_session_id by current phase and chain runner (issue #330 AC8)", async () => {
 		const loopDataRoot = resolve(TEST_ROOT, `session-ids-v5-v6-${Date.now()}-${++nextRootId}`)
 		await mkdir(loopDataRoot, { recursive: true })

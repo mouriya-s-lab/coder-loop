@@ -362,7 +362,12 @@ export type QueueUnblockCommandArgs = {
 // reaches it via chain metadata now (see chainResolvedFromChain). The composed-options struct
 // below holds the live shape that the loop builds from a `ChainRecord` alone.
 
-const AgentRunnerKindBoundary = arkType.or(arkType.unit("claude"), arkType.unit("codex"))
+// #481: opencode joins the union as the third runner kind. Boundary widens accordingly; the
+// `AgentRunnerKind` TS union below mirrors it (compile-time `Record<AgentRunnerKind, ...>`
+// admittance ensures we cannot leave a code path partial). ENGINE_BUILTIN_RUNNER stays `codex`
+// — opencode is an explicit opt-in via `runner = "opencode"` on a preset's phase, never a
+// fallback for missing claude/codex.
+const AgentRunnerKindBoundary = arkType.or(arkType.unit("claude"), arkType.unit("codex"), arkType.unit("opencode"))
 
 const TerminatedBoundary = arkType.or(
 	{ kind: arkType.unit("clean") },
@@ -657,7 +662,7 @@ export type PresetPhaseTrigger =
 	| { afterPhase: string; whenStatus: InternalStatus }
 	| { on: "chain-complete" }
 
-export type AgentRunnerKind = "claude" | "codex"
+export type AgentRunnerKind = "claude" | "codex" | "opencode"
 
 // #433: "config" source value is retired — there is no longer a target-side runtime preferences
 // file to override phase runner choice from. #456: role-named source values (`iteration-default` /
@@ -681,6 +686,7 @@ export type AgentRunnerSelection = AgentRunnerCommand & {
 export type AgentRunnerCommands = {
 	claude: AgentRunnerCommand
 	codex: AgentRunnerCommand
+	opencode: AgentRunnerCommand
 }
 
 export type RuntimeCheckError = {
@@ -1781,8 +1787,8 @@ function parsePresetPhaseChainActionFlag(value: string): PresetPhaseChainAction 
 
 function parseOptionalRunner(value: string | null, flagName: string): AgentRunnerKind | null {
 	if (value === null) return null
-	if (value === "claude" || value === "codex") return value
-	fail(`${flagName} must be claude or codex, got: ${value}`)
+	if (value === "claude" || value === "codex" || value === "opencode") return value
+	fail(`${flagName} must be claude, codex, or opencode, got: ${value}`)
 }
 
 // #412 CLI item-preset parser: exactly one of --preset or --preset-path is required for `coder-loop
@@ -2536,9 +2542,79 @@ async function runQueueCommand(args: string[]): Promise<void> {
 	await runQueueUnblockCommand(parsed.value.args)
 }
 
-// #433: the `runtime` CLI command group and all its helpers are retired. Inspect runner / model
-// resolution via the `target.runner` / `queue.selected.*Runner` view of `status --json`; change
-// phase models by editing the preset.toml per-phase `model` declaration in source.
+// #433: the broader `runtime` CLI command group was retired. #481 re-introduces a narrow
+// `runtime set` surface scoped to runner-binding model overrides (claude / codex / opencode).
+// Phase model still flows from preset.toml; this CLI is the operator's hand-tuning lever for
+// the per-runner `model` slot on the chain bound to a target (e.g. picking a specific GLM build
+// for the opencode runner without editing the preset). Idempotent: identical input is a no-op.
+async function runRuntimeCommand(args: string[]): Promise<void> {
+	const sub = args[0]
+	if (sub !== "set") {
+		fail("runtime: only `runtime set <target> [--claude-model M] [--codex-model M] [--opencode-model M] [--chain N] [--loop-data-root P] [--json]` is supported")
+	}
+	const rest = args.slice(1)
+	let target: string | null = null
+	let claudeModel: string | null = null
+	let codexModel: string | null = null
+	let opencodeModel: string | null = null
+	let loopDataRoot: string | null = null
+	let chainName: string | null = null
+	let json = false
+	for (let i = 0; i < rest.length; i++) {
+		const arg = rest[i]
+		if (arg === undefined) continue
+		if (!arg.startsWith("--")) {
+			if (target !== null) fail(`runtime set: unexpected positional argument "${arg}"`)
+			target = arg
+			continue
+		}
+		const eq = arg.indexOf("=")
+		const flagName = eq === -1 ? arg : arg.slice(0, eq)
+		const inlineValue = eq === -1 ? null : arg.slice(eq + 1)
+		const takeValue = (name: string): string => {
+			if (inlineValue !== null) return inlineValue
+			const next = rest[i + 1]
+			if (next === undefined || next.startsWith("--")) fail(`runtime set: ${name} requires a value`)
+			i += 1
+			return next
+		}
+		if (flagName === "--claude-model") { claudeModel = takeValue(flagName); continue }
+		if (flagName === "--codex-model") { codexModel = takeValue(flagName); continue }
+		if (flagName === "--opencode-model") { opencodeModel = takeValue(flagName); continue }
+		if (flagName === "--loop-data-root") { loopDataRoot = takeValue(flagName); continue }
+		if (flagName === "--chain") { chainName = takeValue(flagName); continue }
+		if (flagName === "--json") { json = true; continue }
+		fail(`runtime set: unknown flag "${arg}"`)
+	}
+	if (target === null) fail("runtime set: <target> is required")
+	const targetCwd = resolve(target)
+	const loaded = await loadTargetRuntime({
+		targetCwd,
+		loopDataRoot,
+		chainName,
+		repository: null,
+		baseBranch: null,
+		dryRun: false,
+		worktree: false,
+		chainStatusScope: "status-snapshot",
+	})
+	const patch: JsonObject = {}
+	if (claudeModel !== null) patch.claude = { model: claudeModel }
+	if (codexModel !== null) patch.codex = { model: codexModel }
+	if (opencodeModel !== null) patch.opencode = { model: opencodeModel }
+	const result = await requestDaemonResult(loopDataRoot, "chain.updateBindings", {
+		chainName: loaded.chain.name,
+		patch,
+	})
+	writeCommandResult(result, json, (obj) => {
+		const updatedKinds = Array.isArray(obj.updatedKinds) ? obj.updatedKinds.filter((entry): entry is string => typeof entry === "string") : []
+		const lines: string[] = []
+		lines.push(`chain: ${loaded.chain.name}`)
+		lines.push(`alreadyMatched: ${obj.alreadyMatched === true ? "yes" : "no"}`)
+		lines.push(`updatedKinds: ${updatedKinds.length === 0 ? "<none>" : updatedKinds.join(", ")}`)
+		return `${lines.join("\n")}\n`
+	})
+}
 
 async function main() {
 	const firstArg = process.argv[2]
@@ -2566,6 +2642,10 @@ async function main() {
 		await runQueueCommand(process.argv.slice(3))
 		return
 	}
+	if (firstArg === "runtime") {
+		await runRuntimeCommand(process.argv.slice(3))
+		return
+	}
 	if (firstArg === "doctor") {
 		const handled = await dispatchSubcommand(firstArg, process.argv.slice(3))
 		if (handled) return
@@ -2585,6 +2665,7 @@ function rootUsage(): string {
 		"  chain <create|list|status|stop|resume|delete>",
 		"  item <add|batch-add|list|update|reorder|exits|exit-action>",
 		"  queue unblock <target> --issue <issue>",
+		"  runtime set <target> [--claude-model M] [--codex-model M] [--opencode-model M]",
 		"  doctor <target>",
 		"",
 	].join("\n")
@@ -2797,13 +2878,16 @@ function buildStatusRunnerDefaultsSnapshot(options: LoopOptions | null): StatusR
 		}
 	}
 	const hostRunner = detectHostRunner(process.env)
-	const resolved: Pick<ChainResolved, "claudeBinary" | "claudeModel" | "claudeExtraArgs" | "codexBinary" | "codexModel" | "codexExtraArgs"> = {
+	const resolved: Pick<ChainResolved, "claudeBinary" | "claudeModel" | "claudeExtraArgs" | "codexBinary" | "codexModel" | "codexExtraArgs" | "opencodeBinary" | "opencodeModel" | "opencodeExtraArgs"> = {
 		claudeBinary: null,
 		claudeModel: null,
 		claudeExtraArgs: [],
 		codexBinary: null,
 		codexModel: null,
 		codexExtraArgs: [],
+		opencodeBinary: null,
+		opencodeModel: null,
+		opencodeExtraArgs: [],
 	}
 	return {
 		hostDefault: hostRunner,
@@ -3831,14 +3915,18 @@ export type ChainResolved = {
 	evidenceDir: string
 	logDir: string
 	loopDataRoot: string | null
-	// #433: per-runner overrides flow exclusively through chain.metadata.{claude,codex}.{binary,model,extraArgs}.
+	// #433: per-runner overrides flow exclusively through chain.metadata.{claude,codex,opencode}.{binary,model,extraArgs}.
 	// The retired target on-disk preferences file is no longer in the lookup chain.
+	// #481: opencode (the third runner kind) follows the same shape — chain.metadata.opencode.{binary,model,extraArgs}.
 	claudeBinary: string | null
 	claudeModel: string | null
 	claudeExtraArgs: readonly string[]
 	codexBinary: string | null
 	codexModel: string | null
 	codexExtraArgs: readonly string[]
+	opencodeBinary: string | null
+	opencodeModel: string | null
+	opencodeExtraArgs: readonly string[]
 	preset: string | null
 	presetPath: string | null
 }
@@ -3859,6 +3947,9 @@ function chainResolvedFromChain(chain: ChainRecord, loopDataRoot: string | null)
 		codexBinary: metadataNestedString(metadata, "codex", "binary") ?? null,
 		codexModel: metadataNestedString(metadata, "codex", "model") ?? null,
 		codexExtraArgs: metadataNestedStringArray(metadata, "codex", "extraArgs") ?? [],
+		opencodeBinary: metadataNestedString(metadata, "opencode", "binary") ?? null,
+		opencodeModel: metadataNestedString(metadata, "opencode", "model") ?? null,
+		opencodeExtraArgs: metadataNestedStringArray(metadata, "opencode", "extraArgs") ?? [],
 		preset: presetPath === null ? chain.preset : null,
 		presetPath,
 	}
@@ -4300,7 +4391,7 @@ function parseChainBindingDefaultValue(value: BoundaryValue, label: string): Cha
 
 function parsePhaseRunner(value: BoundaryValue, label: string): AgentRunnerKind | null {
 	if (value === null) return null
-	if (value !== "claude" && value !== "codex") presetError(`${label}: must be "claude" or "codex"`)
+	if (value !== "claude" && value !== "codex" && value !== "opencode") presetError(`${label}: must be "claude", "codex", or "opencode"`)
 	return value
 }
 
@@ -4512,8 +4603,13 @@ export function detectHostRunner(env: Record<string, string | undefined>): Agent
 
 // #433: runner binary / model / extraArgs come exclusively from chain.metadata.<kind> now —
 // the retired target on-disk preferences file no longer layers anything on top. Defaults are
-// the kind name on PATH (claude/codex) with no extra args.
-export function buildAgentRunnerCommands(resolved: Pick<ChainResolved, "claudeBinary" | "claudeModel" | "claudeExtraArgs" | "codexBinary" | "codexModel" | "codexExtraArgs">): AgentRunnerCommands {
+// the kind name on PATH (claude/codex/opencode) with no extra args.
+// #481: opencode joins the slot list with the same shape; when a phase declares runner=opencode
+// with no explicit `model`, applyPhaseDefaultModel falls back to DEFAULT_OPENCODE_MODEL — the
+// only model the operator's opencode provider is currently configured for, per the issue body
+// dependency footnote.
+export const DEFAULT_OPENCODE_MODEL = "opencode-go/glm-5.2"
+export function buildAgentRunnerCommands(resolved: Pick<ChainResolved, "claudeBinary" | "claudeModel" | "claudeExtraArgs" | "codexBinary" | "codexModel" | "codexExtraArgs" | "opencodeBinary" | "opencodeModel" | "opencodeExtraArgs">): AgentRunnerCommands {
 	return {
 		claude: {
 			kind: "claude",
@@ -4526,6 +4622,12 @@ export function buildAgentRunnerCommands(resolved: Pick<ChainResolved, "claudeBi
 			binary: resolved.codexBinary ?? "codex",
 			extraArgs: [...resolved.codexExtraArgs],
 			model: resolved.codexModel,
+		},
+		opencode: {
+			kind: "opencode",
+			binary: resolved.opencodeBinary ?? "opencode",
+			extraArgs: [...resolved.opencodeExtraArgs],
+			model: resolved.opencodeModel,
 		},
 	}
 }
@@ -4569,13 +4671,22 @@ function phaseDefaultRunnerKind(phase: PresetPhase): AgentRunnerKind {
 }
 
 // Preset-declared phase model is a default; an explicit config model (claude.model /
-// codex.model) overrides it. The phase model is bound to the phase's declared runner
-// kind, so an item override switching to a different runner does not inherit it.
+// codex.model / opencode.model) overrides it. The phase model is bound to the phase's
+// declared runner kind, so an item override switching to a different runner does not
+// inherit it.
+// #481: when the phase declares runner = "opencode" but no explicit `model`, fall back to the
+// engine default `opencode-go/glm-5.2`. Explicit phase model still wins; chain.metadata
+// opencode.model still wins; item override to claude/codex still ignores opencode defaults
+// entirely (same kind-binding rule as before).
 function applyPhaseDefaultModel(selection: AgentRunnerSelection, phase: PresetPhase): AgentRunnerSelection {
 	if (selection.model !== null) return selection
-	if (phase.defaultModel === null) return selection
-	if (selection.kind !== phaseDefaultRunnerKind(phase)) return selection
-	return { ...selection, model: phase.defaultModel }
+	if (phase.defaultModel !== null && selection.kind === phaseDefaultRunnerKind(phase)) {
+		return { ...selection, model: phase.defaultModel }
+	}
+	if (selection.kind === "opencode" && selection.kind === phaseDefaultRunnerKind(phase)) {
+		return { ...selection, model: DEFAULT_OPENCODE_MODEL }
+	}
+	return selection
 }
 
 export function selectPhaseDefaultRunner(phase: PresetPhase, _preset: Preset, commands: AgentRunnerCommands): AgentRunnerSelection {
@@ -6111,6 +6222,13 @@ export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: stri
 			args: agentClaudeArgs(runner.extraArgs, prompt, resume, additionalDirs, runner.model),
 		}
 	}
+	if (runner.kind === "opencode") {
+		return {
+			kind: "spawn",
+			binary: runner.binary,
+			args: agentOpencodeArgs(runner.extraArgs, prompt, resume, runner.model),
+		}
+	}
 	return {
 		kind: "spawn",
 		binary: runner.binary,
@@ -6128,6 +6246,30 @@ function distinctPaths(paths: readonly string[]): string[] {
 		if (!result.some((existing) => samePath(existing, path))) result.push(path)
 	}
 	return result
+}
+
+// #481 opencode invocation shape (matches operator's local `opencode 1.17.5`):
+//   opencode run --format json --dangerously-skip-permissions -m <model> [-s <sessionID>] <prompt>
+// Resume passes `-s <sessionID>`; fresh start omits it. JSON streaming is mandatory because the
+// engine reads the first line for the `sessionID` (value `ses_…`) — see parseOpencodeSessionIdFromStream.
+// Default model is `opencode-go/glm-5.2` (see DEFAULT_OPENCODE_MODEL); model resolution layered
+// upstream in applyPhaseDefaultModel — the model arg passed here is authoritative once set.
+export function agentOpencodeArgs(
+	extraArgs: readonly string[],
+	prompt: string,
+	resume: ResumeDecision,
+	model: string | null = null,
+): string[] {
+	const effectiveModel = model ?? DEFAULT_OPENCODE_MODEL
+	const runnerArgs = stripModelArgs(extraArgs, ["--model", "-m"])
+	const args: string[] = ["run"]
+	if (!runnerArgs.includes("--format") && !runnerArgs.some((arg) => arg.startsWith("--format="))) args.push("--format", "json")
+	if (!runnerArgs.includes("--dangerously-skip-permissions")) args.push("--dangerously-skip-permissions")
+	args.push(...runnerArgs)
+	args.push("-m", effectiveModel)
+	if (resume.kind === "resume") args.push("-s", resume.sessionId)
+	args.push(prompt)
+	return args
 }
 
 export function agentCodexArgs(
@@ -6214,8 +6356,28 @@ export function parseCodexThreadIdFromStream(text: string): string | null {
 	return null
 }
 
+// #481: opencode emits a JSONL stream whose first event carries `sessionID` (value form
+// `ses_<hex>`). The line shape (verified against `opencode 1.17.5` on the operator's machine) is
+// a single JSON object per line; the first line is enough to capture the session id. We do not
+// rely on a particular `type` field — only on the presence of a string `sessionID` on the first
+// JSON object.
+export function parseOpencodeSessionIdFromStream(text: string): string | null {
+	const newlineIdx = text.indexOf("\n")
+	const firstLine = (newlineIdx === -1 ? text : text.slice(0, newlineIdx)).trim()
+	if (firstLine === "") return null
+	try {
+		const event: BoundaryValue = JSON.parse(firstLine)
+		if (isObjectRecord(event) && typeof event.sessionID === "string" && event.sessionID !== "") return event.sessionID
+		return null
+	} catch {
+		return null
+	}
+}
+
 export function parseSessionIdFromRunnerStream(runner: AgentRunnerKind, text: string): string | null {
-	return runner === "codex" ? parseCodexThreadIdFromStream(text) : parseSessionIdFromStream(text)
+	if (runner === "codex") return parseCodexThreadIdFromStream(text)
+	if (runner === "opencode") return parseOpencodeSessionIdFromStream(text)
+	return parseSessionIdFromStream(text)
 }
 
 export function extractErrorCode(stdoutText: string, stderrText: string): string {

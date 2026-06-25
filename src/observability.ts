@@ -129,6 +129,7 @@ const PrivilegedOpAuditOpBoundary = arkType.or(
 	arkType.unit("chain.stop"),
 	arkType.unit("chain.resume"),
 	arkType.unit("chain.delete"),
+	arkType.unit("chain.updateBindings"),
 	arkType.unit("daemon.down"),
 	arkType.unit("logs.query"),
 	arkType.unit("queue.unblock"),
@@ -235,7 +236,11 @@ const ObservabilityEventBoundary = arkType.or(
 		...EventBaseBoundary,
 		kind: arkType.unit("audit"),
 		type: arkType.unit("chain.layout"),
-		payload: { chainId: "number", state: "string" },
+		// #481: `updatedKinds` is optional and identifies which runner-binding slots the
+		// chain.layout event reflects — empty/absent for the original create-time event, populated
+		// for the `chain.updateBindings` operator surface (which patches `claude.model` /
+		// `codex.model` / `opencode.model` on an existing chain without touching anything else).
+		payload: { chainId: "number", state: "string", "updatedKinds?": "string[]" },
 	},
 	{
 		...EventBaseBoundary,
@@ -447,7 +452,7 @@ const ObservabilityEventBoundary = arkType.or(
 		kind: arkType.unit("validation"),
 		type: arkType.unit("session_id.invalidated"),
 		payload: {
-			runner: arkType.or(arkType.unit("claude"), arkType.unit("codex")),
+			runner: arkType.or(arkType.unit("claude"), arkType.unit("codex"), arkType.unit("opencode")),
 			"previousSessionId": arkType.or("string", "null"),
 			reason: arkType.unit("runner_session_id_invalid"),
 		},
