@@ -74,8 +74,8 @@ Read the issue body from Step 2 and decide which deliverable this issue actually
 
 | Deliverable signal in the issue body | Step sequence (every entry = one dispatch) |
 |---|---|
-| An implementation PR is the deliverable (default — the issue describes a code/config/docs change with `## 验收标准` rows replayable against a diff). | [research if Step 2 left you unsure what the right change is] → implement → verify → e2e → submit |
-| Unblocking another issue is the deliverable (the body names a concrete blocker, usually carries an `Unblocks: owner/repo#N` back-link, and the acceptance rows include a real blocked-path replay). | resolve-blocker → implement → verify → e2e → submit |
+| An implementation PR is the deliverable (default — the issue describes a code/config/docs change with `## 验收标准` rows replayable against a diff). | [research if Step 2 left you unsure what the right change is] → implement → (verify ∥ e2e) → submit |
+| Unblocking another issue is the deliverable (the body names a concrete blocker, usually carries an `Unblocks: owner/repo#N` back-link, and the acceptance rows include a real blocked-path replay). | resolve-blocker → implement → (verify ∥ e2e) → submit |
 | A source-writing spike is the deliverable (the body explicitly demands PoC/source/runtime evidence with a no-merge constraint — never become a production PR). | [research?] → source-spike |
 | An issue comment is the deliverable (a spike / design dialogue whose `## 结果分支` pins what the comment must say — no code change). | [research?] → spike-comment |
 
@@ -98,7 +98,7 @@ Contention plan (mirrors the review chain's): verify (owns the `AGENT_CWD` check
 
 Planning-stage exception: if the Step 2 reads show the issue is already satisfied on base, invalid, duplicate, parent/wrapper-only, or needs splitting — do not force the sequence. Dispatch `research` to gather the live evidence if you don't have it, then the list collapses to wrap-up: record the classification and proposed child issue specs (titles, expected outcomes, acceptance, evidence requirements) in the handoff. You do not create child issues, close issues, or write final state — review owns those.
 
-### Step 4 — Execute the list, item by item
+### Step 4 — Execute the list, ready item(s) at a time
 
 Take every unchecked line whose dependencies are satisfied — per the Step 3 contention plan that is one line at a time, except verify and e2e, which become ready together and form one async dispatch round. Dispatch them per `common/dispatch-contract.md` (reports arrive via `<task-notification>` in a later turn — end the turn after the dispatch); never do the work yourself — you write no code, run no tests/builds, start no servers, capture no screenshots, execute no acceptance-row commands, and post no PRs/comments in this process, however small the item looks.
 
