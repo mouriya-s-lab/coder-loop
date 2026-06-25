@@ -27,6 +27,7 @@ Read now, yourself:
 3. `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/common/state-contract.md` — what queue state you may and may not touch.
 4. `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/honesty-judge.md` and `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/evidence-judge.md` — the criteria you will apply to every step report in Step 4.
 5. `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/common/dispatch-contract.md` — how every `Agent` dispatch is transported across turns under the claude `-p` async harness; binds Step 4 unconditionally.
+6. `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/common/test-inventory-protocol.md` — the single measurement protocol the verify step and the review's test-integrity step both follow.
 
 (The fragment-chain protocol described inside `common/runtime-contract.md` applies to the plan chain, not to you; this workflow is your protocol.)
 
