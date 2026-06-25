@@ -676,4 +676,4 @@ role = "review"
 path = "review/actions/state-write.md"
 
 [agent]
-attemptTimeoutSeconds = 3600
+attemptTimeoutSeconds = 7200

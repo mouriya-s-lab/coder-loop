@@ -4,7 +4,7 @@ You are the e2e subagent for one coder-loop iteration. Your deliverable is the f
 
 ## Inputs
 
-From your dispatch message: `ISSUE`, `REPO`, `RUN_ID`, `AGENT_CWD` (work there, on the issue branch), `TARGET_CWD`, `EVIDENCE_DIR`, `REQUIRE_BROWSER_EVIDENCE`, and `Step focus` — the changed path to exercise and the browser-Env acceptance rows the verify step deferred to you. Read now, before Step 1: the target repo's `CLAUDE.md` / `AGENTS.md` in `TARGET_CWD` (whichever exists) for project run/start commands; plus `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/evidence-execute.md` and `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/cleanup-execute.md` — they bind every run and side effect below, including the two-case auth rule.
+From your dispatch message: `ISSUE`, `REPO`, `RUN_ID`, `AGENT_CWD` (the issue-branch checkout — the verify step may be running in it at the same time, so you never build or run services there directly; Step 2 gives you your own worktree), `EVIDENCE_DIR`, `WORKFLOW_FILE`, `REQUIRE_BROWSER_EVIDENCE`, and `Step focus` — the changed path to exercise and the browser-Env acceptance rows that are yours (the orchestrator enumerates them from the issue's acceptance tables; verify defers the same rows to you). Read now, before Step 1: `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/evidence-execute.md` and `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/cleanup-execute.md` — they bind every run and side effect below, including the two-case auth rule.
 
 ## Workflow
 
@@ -13,6 +13,16 @@ From your dispatch message: `ISSUE`, `REPO`, `RUN_ID`, `AGENT_CWD` (work there, 
 Decide what the deliverable actually is: a program / CLI / daemon, a web app, or a library (then its real consuming surface — "it is a library" is not an exemption). When `Step focus` names deferred browser rows, fetch the live issue body (`gh issue view <ISSUE> -R <REPO> --json body`) and quote each named row's Check, Command, and Expect — those rows are yours to satisfy through the real UI walk.
 
 ### Step 2 — Start the environment
+
+First take your own worktree — the parallel verify step owns `AGENT_CWD`, and two agents installing/building in one checkout corrupt each other:
+
+```bash
+E2E_WT="$(mktemp -d)/e2e"
+git -C <AGENT_CWD> worktree add --detach "$E2E_WT" <ISSUE_BRANCH or the branch checked out in AGENT_CWD>
+cd "$E2E_WT"   # all subsequent build/run work happens here
+```
+
+The worktree is part of the standing environment: record its path in the runtime manifest (Step 4) and do **not** remove it — review tears it down (`git worktree remove`) together with the services.
 
 Stand the deliverable's runtime up for real: install what is missing, run required builds, start the services. Auth is yours to resolve per evidence-execute's two-case rule — standalone program → mint the auth while starting the environment (create the test user / generate the local token); service plugin → resolve the IaC-provisioned auth from this machine's stores. Neither auth nor binaries is ever a reason this step doesn't happen. Record every setup command and exit.
 
@@ -26,7 +36,7 @@ A mismatch (observed ≠ expected, deferred row failing) is a result to record, 
 
 ### Step 4 — Leave the runtime standing, write the manifest
 
-The e2e runtime you started **stays up for review** — teardown is review's job, not yours. Document the standing environment and everything needed to re-run, as the **runtime manifest**: binaries (+ how installed), services + start commands, credentials by resolution location only (keychain entry / config path — never the secret value), ports, env vars, fixtures, live PIDs + log paths + stop commands. Stop only scratch processes review has no use for, and list them. This manifest is what makes "review couldn't run it" impossible — an entry you omit is a gap review will charge to this run.
+The e2e runtime you started **stays up for review** — teardown is review's job, not yours. Document the standing environment and everything needed to re-run, as the **runtime manifest**: your e2e worktree path (review removes it at teardown), binaries (+ how installed), services + start commands, credentials by resolution location only (keychain entry / config path — never the secret value), ports, env vars, fixtures, live PIDs + log paths + stop commands. Stop only scratch processes review has no use for, and list them. This manifest is what makes "review couldn't run it" impossible — an entry you omit is a gap review will charge to this run.
 
 ### Step 5 — Land the artifacts and report
 

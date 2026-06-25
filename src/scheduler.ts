@@ -82,7 +82,7 @@ import { collectObservabilityExcerpt, type ObservabilityExcerpt } from "./observ
 // `SchedulerOptions.recycleAfterStateWriteMs`, but the recycle semantics
 // themselves (state-write → recycle zone → timeout kill) are mandatory and not
 // opt-out, per the operator's 2026-06-12 decree.
-const ATTEMPT_TIMEOUT_MS = 60 * 60 * 1000
+const ATTEMPT_TIMEOUT_MS = 2 * 60 * 60 * 1000
 const ATTEMPT_KILL_MS = 5 * 1000
 const RECYCLE_AFTER_STATE_WRITE_MS = 500 * 1000
 const RECYCLE_KILL_GRACE_MS = 5 * 1000
