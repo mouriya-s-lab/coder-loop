@@ -28,6 +28,22 @@ export const RateLimitResetBoundary = arkType({
 	"rateLimitType": "string|null",
 })
 
+// #478: persistent rate-limit cooldown JSON shape (written by `persistRateLimitState`,
+// read by `loadPersistedRateLimitState`). Boundary-parsed in one place so the daemon's
+// load path does not hand-walk typeof guards (which were the C1 review finding —
+// unchecked `as` casts on `unknown` fields). Sibling fields are all nullable because
+// they correspond to runtime metadata that may not have been observed when the file was
+// first written.
+export const PersistedRateLimitStateBoundary = arkType({
+	reset: RateLimitResetBoundary,
+	"observedAt": "string|null",
+	"sourceRunId": "string|null",
+	"sourceItemId": "number|null",
+	"sourceChainId": "number|null",
+})
+
+export type PersistedRateLimitState = typeof PersistedRateLimitStateBoundary.infer
+
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null
 }

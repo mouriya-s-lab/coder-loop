@@ -3,6 +3,7 @@ import { Buffer } from "node:buffer"
 import { createConnection, createServer, type Server, type Socket } from "node:net"
 import { mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises"
 import { dirname, isAbsolute, relative, resolve } from "node:path"
+import { type as arkType } from "arktype"
 
 import {
 	buildPhaseRunnerSelectionFromChain,
@@ -42,7 +43,7 @@ import {
 	type SchedulerSpawnContext,
 	type SchedulerState,
 } from "./scheduler"
-import { type RateLimitReset } from "./rate-limit"
+import { PersistedRateLimitStateBoundary, type RateLimitReset } from "./rate-limit"
 import {
 	type ChainRecord,
 	type CreateChainInput,
@@ -336,6 +337,29 @@ export function daemonRateLimitDecision(state: DaemonRateLimitState, nowMs: numb
 		return { kind: "stagger-wait", maxSpawns: 0 }
 	}
 	return { kind: "stagger-ready", maxSpawns: 1 }
+}
+
+// #478 I3 review: exported wire-shape projector so the `daemon.status.rateLimit`
+// JsonObject is testable in isolation. The class method `rateLimitStatus` delegates
+// here; the projector is pure (no `this`, no I/O) and pins the 10 fields tests assert.
+// `active` aggregates {paused, stagger-wait} so a CLI display can render
+// "rate-limited" without re-deriving from `mode`. Unix + ISO timestamps both surface
+// so consumers pick whichever fits.
+export function rateLimitStatusFromState(state: DaemonRateLimitState, nowMs: number): JsonObject {
+	const decision = daemonRateLimitDecision(state, nowMs)
+	return {
+		active: decision.kind === "paused" || decision.kind === "stagger-wait",
+		mode: decision.kind,
+		rateLimitedUntil: state.reset?.resetAtIso ?? null,
+		rateLimitedUntilUnix: state.reset?.resetsAt ?? null,
+		rateLimitType: state.reset?.rateLimitType ?? null,
+		observedAt: state.observedAt,
+		sourceRunId: state.sourceRunId,
+		sourceItemId: state.sourceItemId,
+		sourceChainId: state.sourceChainId,
+		nextResumeAt: state.nextResumeAtMs === null ? null : new Date(state.nextResumeAtMs).toISOString(),
+		staggerMs: DAEMON_RATE_LIMIT_STAGGER_MS,
+	}
 }
 
 type DaemonState = "starting" | "running" | "shutting_down" | "exited"
@@ -767,6 +791,15 @@ export class CoderLoopDaemon {
 	// survive daemon restarts. `applyRateLimitNotice` mutates both this state and
 	// `schedulerState.rateLimitedUntilMs` (the synchronous tick-boundary race gate).
 	private rateLimitState: DaemonRateLimitState = createDaemonRateLimitState()
+	// #478 I1 review: single-writer chain for `rate-limit.json` persistence. Two writers
+	// can fire in the same event-loop tick — `applyRateLimitNotice` runs in scheduler
+	// close handlers (NOT serialized against `runSchedulerTicks`) and
+	// `updateRateLimitAfterTick` runs from the tick loop. With bare `writeFile`/`rm`
+	// concurrent writers can leave the file half-written or race with `rm`. Each persist
+	// call enqueues onto this chain so file I/O is strictly sequential; the persisted
+	// content is always the latest `rateLimitState` value at write time (idempotent
+	// against duplicate queued entries from rapid-fire mutations).
+	private rateLimitPersistChain: Promise<void> = Promise.resolve()
 	private readonly sockets = new Set<Socket>()
 	private readonly shutdownGraceMs: number
 	private server: Server | null = null
@@ -866,25 +899,10 @@ export class CoderLoopDaemon {
 		}
 	}
 
-	// #478: format the daemon's current rate-limit state for the `daemon.status` wire
-	// shape. The `active` flag aggregates {paused, stagger-wait} so a CLI display can
-	// show "rate-limited" without re-deriving from `mode`. Unix + ISO timestamps both
-	// surface so consumers can pick whichever fits (CLI display vs. arithmetic).
+	// #478: thin wrapper over the pure `rateLimitStatusFromState` projector (exported so
+	// the wire shape is unit-testable in isolation; see #478 I3 review).
 	private rateLimitStatus(nowMs: number): JsonObject {
-		const decision = daemonRateLimitDecision(this.rateLimitState, nowMs)
-		return {
-			active: decision.kind === "paused" || decision.kind === "stagger-wait",
-			mode: decision.kind,
-			rateLimitedUntil: this.rateLimitState.reset?.resetAtIso ?? null,
-			rateLimitedUntilUnix: this.rateLimitState.reset?.resetsAt ?? null,
-			rateLimitType: this.rateLimitState.reset?.rateLimitType ?? null,
-			observedAt: this.rateLimitState.observedAt,
-			sourceRunId: this.rateLimitState.sourceRunId,
-			sourceItemId: this.rateLimitState.sourceItemId,
-			sourceChainId: this.rateLimitState.sourceChainId,
-			nextResumeAt: this.rateLimitState.nextResumeAtMs === null ? null : new Date(this.rateLimitState.nextResumeAtMs).toISOString(),
-			staggerMs: DAEMON_RATE_LIMIT_STAGGER_MS,
-		}
+		return rateLimitStatusFromState(this.rateLimitState, nowMs)
 	}
 
 	private rateLimitStatePath(): string {
@@ -903,59 +921,80 @@ export class CoderLoopDaemon {
 			if (isNodeError(error) && error.code === "ENOENT") return
 			throw error
 		}
+		// Boundary parse the persisted JSON in one place (#478 C1 review). Replaces the
+		// hand-walked typeof guards + four `as` casts; on shape mismatch arktype returns
+		// a typed error which we route into `rate_limit.persist_load_failed` so the
+		// operator sees the corruption instead of silently losing the cooldown.
+		let parsed: unknown
 		try {
-			const parsed: unknown = JSON.parse(raw)
-			if (typeof parsed !== "object" || parsed === null) return
-			const record = parsed as Record<string, unknown>
-			const reset = record["reset"]
-			if (typeof reset !== "object" || reset === null) return
-			const resetRecord = reset as Record<string, unknown>
-			const resetsAt = resetRecord["resetsAt"]
-			if (typeof resetsAt !== "number" || !Number.isFinite(resetsAt) || resetsAt <= 0) return
-			// If the persisted cooldown already elapsed before this daemon came up, drop it
-			// silently — there is no live cooldown to reapply, and starting in `stagger-ready`
-			// without observing a real run would be a phantom state.
-			if (resetsAt * 1000 <= Date.now()) {
-				await this.persistRateLimitState()
-				return
-			}
-			const observedAt = record["observedAt"]
-			const sourceRunId = record["sourceRunId"]
-			const sourceItemId = record["sourceItemId"]
-			const sourceChainId = record["sourceChainId"]
-			this.rateLimitState = {
-				reset: {
-					resetsAt,
-					resetAtIso: typeof resetRecord["resetAtIso"] === "string" ? resetRecord["resetAtIso"] as string : new Date(resetsAt * 1000).toISOString(),
-					rateLimitType: typeof resetRecord["rateLimitType"] === "string" ? resetRecord["rateLimitType"] as string : null,
-				},
-				observedAt: typeof observedAt === "string" ? observedAt : null,
-				sourceRunId: typeof sourceRunId === "string" ? sourceRunId : null,
-				sourceItemId: typeof sourceItemId === "number" ? sourceItemId : null,
-				sourceChainId: typeof sourceChainId === "number" ? sourceChainId : null,
-				nextResumeAtMs: null,
-			}
-			this.schedulerState.rateLimitedUntilMs = resetsAt * 1000
-		} catch {
-			// Corrupted persist file — drop it and start fresh. This is preferable to
-			// crashing the daemon at startup over a stale file.
+			parsed = JSON.parse(raw)
+		} catch (error) {
+			await this.recordRateLimitPersistLoadFailed(`json_parse_failed: ${errorMessage(error)}`)
+			return
 		}
+		const boundaryResult = PersistedRateLimitStateBoundary(parsed)
+		if (boundaryResult instanceof arkType.errors) {
+			await this.recordRateLimitPersistLoadFailed(`boundary_parse_failed: ${boundaryResult.summary}`)
+			return
+		}
+		const persisted = boundaryResult
+		// If the persisted cooldown already elapsed before this daemon came up, drop it
+		// silently — there is no live cooldown to reapply, and starting in `stagger-ready`
+		// without observing a real run would be a phantom state.
+		if (persisted.reset.resetsAt * 1000 <= Date.now()) {
+			await this.persistRateLimitState()
+			return
+		}
+		this.rateLimitState = {
+			reset: persisted.reset,
+			observedAt: persisted.observedAt,
+			sourceRunId: persisted.sourceRunId,
+			sourceItemId: persisted.sourceItemId,
+			sourceChainId: persisted.sourceChainId,
+			nextResumeAtMs: null,
+		}
+		this.schedulerState.rateLimitedUntilMs = persisted.reset.resetsAt * 1000
+	}
+
+	private async recordRateLimitPersistLoadFailed(reason: string): Promise<void> {
+		// #478 I1 review: don't silently drop a corrupted cooldown file. Surface through
+		// the daemon `daemon.warning` event so an operator (or supervisor agent reading
+		// events) sees the loss instead of discovering it via a later rate-limit incident.
+		await this.recordObservabilityEvent(makeObservabilityEvent({
+			kind: "diagnostic",
+			type: "daemon.warning",
+			subject: { kind: "engine" },
+			payload: { message: `rate-limit persist load failed at ${this.rateLimitStatePath()}: ${reason}` },
+		})).catch(() => undefined)
 	}
 
 	private async persistRateLimitState(): Promise<void> {
-		const path = this.rateLimitStatePath()
-		if (this.rateLimitState.reset === null) {
-			await rm(path, { force: true })
-			return
-		}
-		await mkdir(dirname(path), { recursive: true })
-		await writeFile(path, JSON.stringify({
-			reset: this.rateLimitState.reset,
-			observedAt: this.rateLimitState.observedAt,
-			sourceRunId: this.rateLimitState.sourceRunId,
-			sourceItemId: this.rateLimitState.sourceItemId,
-			sourceChainId: this.rateLimitState.sourceChainId,
-		}) + "\n")
+		// Enqueue onto the single-writer chain so two concurrent callers serialize their
+		// file I/O. Each entry reads the latest `rateLimitState` at write time, so
+		// duplicate queued entries collapse to the same final on-disk state (idempotent).
+		const next = this.rateLimitPersistChain.then(async () => {
+			const path = this.rateLimitStatePath()
+			if (this.rateLimitState.reset === null) {
+				await rm(path, { force: true })
+				return
+			}
+			await mkdir(dirname(path), { recursive: true })
+			// Atomic write: stage to a tmp sibling, then POSIX-rename onto the target so a
+			// reader (a future `loadPersistedRateLimitState` from a daemon restart) never
+			// observes a half-written file.
+			const payload = JSON.stringify({
+				reset: this.rateLimitState.reset,
+				observedAt: this.rateLimitState.observedAt,
+				sourceRunId: this.rateLimitState.sourceRunId,
+				sourceItemId: this.rateLimitState.sourceItemId,
+				sourceChainId: this.rateLimitState.sourceChainId,
+			}) + "\n"
+			const tmpPath = `${path}.tmp-${process.pid}-${randomUUID()}`
+			await writeFile(tmpPath, payload)
+			await rename(tmpPath, path)
+		})
+		this.rateLimitPersistChain = next.catch(() => undefined)
+		await next
 	}
 
 	private async applyRateLimitNotice(info: { runId: string; chainId: number; itemId: number; reset: RateLimitReset }): Promise<void> {

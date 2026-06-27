@@ -1180,6 +1180,90 @@ describe("scheduler", () => {
 			fixture.store.close()
 		}
 	})
+
+	// #478 acceptance row 6 + I4 review: a rate-limit exit must NOT lose the conversation —
+	// the next spawn for the same item must invoke the runner with `--resume <sessionId>`
+	// continuing from the sessionId the rate-limited run published. Pre-#478 the run
+	// classified as `unclassified` → decideResume returned `fresh`, throwing away the
+	// stored sessionId. The PR's rate-limit-exit branch goes through `clearItemSchedulerBackoff`
+	// instead of `extraAfterRunCompletion`, which (today) preserves sessionIds; this test
+	// pins the invariant so a future refactor cannot silently regress it.
+	test("rate-limit exit preserves the sessionId and the next spawn resumes from it", async () => {
+		const fixture = await createFixture("rate-limit-resume")
+		try {
+			const chain = createChain(fixture.store, "rate-limit-resume-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 4782, repoCwd: "/repo/a" })
+			const root = resolve(fixture.loopDataRoot, "..")
+			const sessionId = "sess-rl-resume-test"
+			const resetsAt = 1_900_000_500
+			const argvDump = resolve(root, "argv-dump.txt")
+			// Single runner script with two branches:
+			//   1st run (no --resume): emit session_id + W3 rate-limit lines + exit 1 →
+			//      scheduler stores sessionId AND arms the cooldown gate.
+			//   2nd run (--resume <sessionId> present): dump the full argv to disk + exit 0 →
+			//      the test reads back the dump to assert the resume sessionId reached the runner.
+			const runner = resolve(root, "rate-limit-resume-runner.sh")
+			await writeFile(runner, [
+				`#!/bin/sh`,
+				`# always overwrite the argv dump so the last invocation wins`,
+				`printf '%s\\n' "$*" > ${JSON.stringify(argvDump)}`,
+				`case "$*" in`,
+				`*--resume*)`,
+				`    exit 0`,
+				`    ;;`,
+				`*)`,
+				`    echo '{"type":"system","session_id":"${sessionId}"}'`,
+				`    echo '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":${resetsAt},"rateLimitType":"five_hour"}}'`,
+				`    echo '{"type":"result","is_error":true,"api_error_status":429,"result":"hit your session limit"}'`,
+				`    exit 1`,
+				`    ;;`,
+				`esac`,
+				``,
+			].join("\n"))
+			await chmod(runner, 0o755)
+
+			// Shared runIdFactory across both ticks — the fixture default constructs a
+			// fresh attempt-counter Map per `fixture.options()` call, which would collide
+			// on the second tick (UNIQUE runs.run_id) because rate-limit rolled attempts
+			// back to the pre-spawn value. A shared per-test factory mimics production
+			// runId monotonicity.
+			let runSequence = 0
+			const sharedRunIdFactory: SchedulerOptions["runIdFactory"] = ({ chain: c, item: it, phase }) => {
+				runSequence += 1
+				return `run-${c.id}-${it.id}-${phase}-${runSequence}`
+			}
+
+			const cooldownStart = 1_800_000_400
+			const tick1 = await schedulerTick(fixture.options({
+				runner: { kind: "claude", source: "iteration-default", binary: runner, extraArgs: [], model: null },
+				now: () => cooldownStart,
+				runIdFactory: sharedRunIdFactory,
+			}))
+			expect(tick1.spawnedRuns).toHaveLength(1)
+			await tick1.spawnedRuns[0]!.closed
+
+			// sessionId stored: scheduler parsed it from stdout and wrote it via setItemSessionId.
+			const itemAfterTick1 = fixture.store.getItem(item.id)
+			expect(itemAfterTick1?.sessionIds["iteration"]?.["claude"]).toBe(sessionId)
+			// In-state cooldown gate armed; attempts unchanged (PR acceptance row 7).
+			expect(fixture.state.rateLimitedUntilMs).toBe(resetsAt * 1000)
+			expect(itemAfterTick1?.attempts).toBe(0)
+
+			// Tick 2 with the now() clock advanced past the cooldown → scheduler resumes the
+			// rate-limited item; runner argv must include `--resume <sessionId>`.
+			const tick2 = await schedulerTick(fixture.options({
+				runner: { kind: "claude", source: "iteration-default", binary: runner, extraArgs: [], model: null },
+				now: () => resetsAt + 5,
+				runIdFactory: sharedRunIdFactory,
+			}))
+			expect(tick2.spawnedRuns).toHaveLength(1)
+			await tick2.spawnedRuns[0]!.closed
+			const argv = (await readFile(argvDump, "utf-8")).trim()
+			expect(argv).toMatch(/--resume +sess-rl-resume-test\b/)
+		} finally {
+			fixture.store.close()
+		}
+	})
 })
 
 describe("scheduler reads the agent-written item status (v1 status model)", () => {
