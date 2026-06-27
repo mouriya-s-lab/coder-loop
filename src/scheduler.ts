@@ -1014,6 +1014,19 @@ async function spawnSchedulerRun(
 		[LOOP_DATA_ROOT_ENV]: resolveLoopDataPaths(options.loopDataRootOptions).root,
 	}
 	if (credential !== null) spawnEnv[LOOP_RUN_CREDENTIAL_ENV] = credential.value
+	// #463: the codex CLI only writes its internal module diagnostics to stderr when
+	// `RUST_LOG` is set, and the engine persists per-run stderr to `stderr.log`. Inject
+	// `RUST_LOG=info` by default on codex-kind spawns so any future zero-output hang
+	// (cf. #462) leaves attributable traces on disk. Precedence (single source of truth):
+	//   1. `CODER_LOOP_CODEX_RUST_LOG` — operator-explicit override; empty string disables.
+	//   2. Inherited `RUST_LOG` from the daemon's environment.
+	//   3. Engine default `"info"`.
+	// claude/opencode kinds receive no injection — those runtimes don't consume RUST_LOG
+	// and the variable would only add noise.
+	if (runner.kind === "codex") {
+		const level = process.env["CODER_LOOP_CODEX_RUST_LOG"] ?? process.env["RUST_LOG"] ?? "info"
+		if (level !== "") spawnEnv["RUST_LOG"] = level
+	}
 	const child = spawn(runnerPlan.binary, runnerPlan.args, {
 		cwd: worktreePath,
 		stdio: ["ignore", "pipe", "pipe"],
