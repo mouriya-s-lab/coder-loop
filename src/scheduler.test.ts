@@ -1145,6 +1145,56 @@ describe("scheduler", () => {
 		}
 	})
 
+	// #478 acceptance rows 4/4b/7: a rate-limit exit arms the in-state cooldown gate
+	// synchronously, fires the `scheduler.rate_limited` event, calls the daemon-side
+	// `onRateLimitObserved` callback with the parsed reset, and (critically) does not
+	// consume an attempt slot — the spawn-time `attempts +1` is rolled back so the
+	// rate-limited item retries fresh after cooldown without burning its budget.
+	test("rate-limit exit arms cooldown, emits event, fires callback, and does not consume an attempt", async () => {
+		const fixture = await createFixture("rate-limit-exit")
+		try {
+			const chain = createChain(fixture.store, "rate-limit-exit-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 4780, repoCwd: "/repo/a" })
+			const root = resolve(fixture.loopDataRoot, "..")
+			const resetsAt = 1_900_000_000
+			const rateLimitRunner = resolve(root, "rate-limit-runner.sh")
+			// Real W3 fixture stdout shape (chain 35/37/38, 2026-06-17 22:56 JST).
+			const w3Lines = [
+				`{"type":"system","session_id":"sess-rl-1"}`,
+				`{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":${resetsAt},"rateLimitType":"five_hour"}}`,
+				`{"type":"result","is_error":true,"api_error_status":429,"result":"You've hit your session limit"}`,
+			]
+			await writeFile(rateLimitRunner, `#!/bin/sh\n${w3Lines.map((line) => `echo '${line}'`).join("\n")}\nexit 1\n`)
+			await chmod(rateLimitRunner, 0o755)
+
+			const observed: Array<{ runId: string; resetsAt: number }> = []
+			const tick = await schedulerTick(fixture.options({
+				runner: { kind: "claude", source: "iteration-default", binary: rateLimitRunner, extraArgs: [], model: null },
+				onRateLimitObserved: (info) => { observed.push({ runId: info.runId, resetsAt: info.reset.resetsAt }) },
+			}))
+			expect(tick.spawnedRuns).toHaveLength(1)
+			await tick.spawnedRuns[0]!.closed
+
+			// AC7: attempts unchanged after rate-limit exit (spawn-time +1 rolled back).
+			expect(fixture.store.getItem(item.id)?.attempts).toBe(0)
+			// AC4 prereq: in-state cooldown gate armed synchronously.
+			expect(fixture.state.rateLimitedUntilMs).toBe(resetsAt * 1000)
+			// AC4 wire shape: `scheduler.rate_limited` event emitted with the parsed reset.
+			const rateLimitEvents = fixture.schedulerEvents.filter((event) => event.type === "scheduler.rate_limited")
+			expect(rateLimitEvents).toHaveLength(1)
+			const event = rateLimitEvents[0]
+			if (event?.type !== "scheduler.rate_limited") throw new Error("expected scheduler.rate_limited")
+			expect(event.resetsAt).toBe(resetsAt)
+			expect(event.rateLimitType).toBe("five_hour")
+			expect(event.itemId).toBe(item.id)
+			// Daemon-side callback receives the same reset and the originating runId.
+			expect(observed).toHaveLength(1)
+			expect(observed[0]?.resetsAt).toBe(resetsAt)
+		} finally {
+			fixture.store.close()
+		}
+	})
+
 	// #462: once cumulative stdout crosses STARTUP_IDLE_PROGRESS_BYTES the watchdog must
 	// disarm permanently. Orchestrator wait_agent silences up to 1800s are legitimate, so
 	// re-arming would inevitably mis-fire on healthy long runs. A runner that emits 300 B
@@ -1174,6 +1224,38 @@ describe("scheduler", () => {
 			expect(elapsedMs).toBeGreaterThanOrEqual(1_000)
 			expect(closed.exitCode).toBe(0)
 			expect(fixture.schedulerEvents.filter((event) => event.type === "run.startup_idle_kill")).toHaveLength(0)
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	// #478 acceptance row 4b: while the in-state cooldown is armed (rateLimitedUntilMs >
+	// nowMs), the scheduler tick must not spawn anything — even a fresh sibling item
+	// queued in the same chain stays at `queued` with no attempt consumed. This proves
+	// the tick-boundary gate plugs the pre-#478 race where the next 1 s tick re-spawned
+	// the rate-limited item before the daemon-side persist landed.
+	test("cooldown-armed state pauses tick spawn until reset elapses", async () => {
+		const fixture = await createFixture("rate-limit-gate")
+		try {
+			const chain = createChain(fixture.store, "rate-limit-gate-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 4781, repoCwd: "/repo/a", writeStatus: "done" })
+			// Arm the gate manually to the future, simulating a prior run having just
+			// observed the rate-limit signal. Use the fixture's injected `now` clock so
+			// the in-tick comparison is deterministic.
+			const fixtureNowSeconds = 1_800_000_100
+			const futureCooldownMs = (fixtureNowSeconds + 600) * 1000
+			fixture.state.rateLimitedUntilMs = futureCooldownMs
+
+			const tick = await schedulerTick(fixture.options({ now: () => fixtureNowSeconds }))
+			expect(tick.spawnedRuns).toHaveLength(0)
+			// Item stays at queued with no attempts burned.
+			expect(fixture.store.getItem(item.id)?.attempts).toBe(0)
+			expect(fixture.store.getItem(item.id)?.status).toBe(runtimeStatus("queued"))
+
+			// Advance the clock past the cooldown and the same tick spawns normally.
+			const tickAfter = await schedulerTick(fixture.options({ now: () => fixtureNowSeconds + 700 }))
+			expect(tickAfter.spawnedRuns).toHaveLength(1)
+			await tickAfter.spawnedRuns[0]!.closed
 		} finally {
 			fixture.store.close()
 		}
@@ -1274,6 +1356,90 @@ describe("scheduler", () => {
 			else delete process.env["RUST_LOG"]
 			if (savedOverride !== undefined) process.env["CODER_LOOP_CODEX_RUST_LOG"] = savedOverride
 			else delete process.env["CODER_LOOP_CODEX_RUST_LOG"]
+			fixture.store.close()
+		}
+	})
+
+	// #478 acceptance row 6 + I4 review: a rate-limit exit must NOT lose the conversation —
+	// the next spawn for the same item must invoke the runner with `--resume <sessionId>`
+	// continuing from the sessionId the rate-limited run published. Pre-#478 the run
+	// classified as `unclassified` → decideResume returned `fresh`, throwing away the
+	// stored sessionId. The PR's rate-limit-exit branch goes through `clearItemSchedulerBackoff`
+	// instead of `extraAfterRunCompletion`, which (today) preserves sessionIds; this test
+	// pins the invariant so a future refactor cannot silently regress it.
+	test("rate-limit exit preserves the sessionId and the next spawn resumes from it", async () => {
+		const fixture = await createFixture("rate-limit-resume")
+		try {
+			const chain = createChain(fixture.store, "rate-limit-resume-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 4782, repoCwd: "/repo/a" })
+			const root = resolve(fixture.loopDataRoot, "..")
+			const sessionId = "sess-rl-resume-test"
+			const resetsAt = 1_900_000_500
+			const argvDump = resolve(root, "argv-dump.txt")
+			// Single runner script with two branches:
+			//   1st run (no --resume): emit session_id + W3 rate-limit lines + exit 1 →
+			//      scheduler stores sessionId AND arms the cooldown gate.
+			//   2nd run (--resume <sessionId> present): dump the full argv to disk + exit 0 →
+			//      the test reads back the dump to assert the resume sessionId reached the runner.
+			const runner = resolve(root, "rate-limit-resume-runner.sh")
+			await writeFile(runner, [
+				`#!/bin/sh`,
+				`# always overwrite the argv dump so the last invocation wins`,
+				`printf '%s\\n' "$*" > ${JSON.stringify(argvDump)}`,
+				`case "$*" in`,
+				`*--resume*)`,
+				`    exit 0`,
+				`    ;;`,
+				`*)`,
+				`    echo '{"type":"system","session_id":"${sessionId}"}'`,
+				`    echo '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":${resetsAt},"rateLimitType":"five_hour"}}'`,
+				`    echo '{"type":"result","is_error":true,"api_error_status":429,"result":"hit your session limit"}'`,
+				`    exit 1`,
+				`    ;;`,
+				`esac`,
+				``,
+			].join("\n"))
+			await chmod(runner, 0o755)
+
+			// Shared runIdFactory across both ticks — the fixture default constructs a
+			// fresh attempt-counter Map per `fixture.options()` call, which would collide
+			// on the second tick (UNIQUE runs.run_id) because rate-limit rolled attempts
+			// back to the pre-spawn value. A shared per-test factory mimics production
+			// runId monotonicity.
+			let runSequence = 0
+			const sharedRunIdFactory: SchedulerOptions["runIdFactory"] = ({ chain: c, item: it, phase }) => {
+				runSequence += 1
+				return `run-${c.id}-${it.id}-${phase}-${runSequence}`
+			}
+
+			const cooldownStart = 1_800_000_400
+			const tick1 = await schedulerTick(fixture.options({
+				runner: { kind: "claude", source: "iteration-default", binary: runner, extraArgs: [], model: null },
+				now: () => cooldownStart,
+				runIdFactory: sharedRunIdFactory,
+			}))
+			expect(tick1.spawnedRuns).toHaveLength(1)
+			await tick1.spawnedRuns[0]!.closed
+
+			// sessionId stored: scheduler parsed it from stdout and wrote it via setItemSessionId.
+			const itemAfterTick1 = fixture.store.getItem(item.id)
+			expect(itemAfterTick1?.sessionIds["iteration"]?.["claude"]).toBe(sessionId)
+			// In-state cooldown gate armed; attempts unchanged (PR acceptance row 7).
+			expect(fixture.state.rateLimitedUntilMs).toBe(resetsAt * 1000)
+			expect(itemAfterTick1?.attempts).toBe(0)
+
+			// Tick 2 with the now() clock advanced past the cooldown → scheduler resumes the
+			// rate-limited item; runner argv must include `--resume <sessionId>`.
+			const tick2 = await schedulerTick(fixture.options({
+				runner: { kind: "claude", source: "iteration-default", binary: runner, extraArgs: [], model: null },
+				now: () => resetsAt + 5,
+				runIdFactory: sharedRunIdFactory,
+			}))
+			expect(tick2.spawnedRuns).toHaveLength(1)
+			await tick2.spawnedRuns[0]!.closed
+			const argv = (await readFile(argvDump, "utf-8")).trim()
+			expect(argv).toMatch(/--resume +sess-rl-resume-test\b/)
+		} finally {
 			fixture.store.close()
 		}
 	})

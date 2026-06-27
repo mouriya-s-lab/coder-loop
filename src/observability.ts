@@ -51,6 +51,12 @@ const ObservabilityEventTypeBoundary = arkType.or(
 	// floor. Payload exposes the threshold (idleTimeoutMs) and observed bytes
 	// (stdoutBytes) at kill time for post-mortem.
 	arkType.unit("run.startup_idle_kill"),
+	// #478: account-level rate-limit observed on a run's stdout. Distinct lifecycle type so
+	// observers separate it from `attempt.timeout` (absolute floor) and from generic
+	// `agent.exit` failures. The payload exposes the reset Unix timestamp + ISO + the
+	// rate-limit category (`five_hour` / `seven_day` / null) so an auditor can identify
+	// which budget tripped without re-reading the run logs.
+	arkType.unit("scheduler.rate_limited"),
 	// #452: recycle-zone lifecycle. `pending_entered` arms on a successful agent state
 	// write; `timeout_kill` fires when the window elapsed without natural exit and the
 	// engine SIGKILLed the process group; `natural_exit` records that the child closed
@@ -425,6 +431,16 @@ const ObservabilityEventBoundary = arkType.or(
 		kind: arkType.unit("lifecycle"),
 		type: arkType.unit("run.startup_idle_kill"),
 		payload: { idleTimeoutMs: "number", stdoutBytes: "number" },
+	},
+	{
+		// #478 rate-limit: scheduler observed an account-level 429 / rejected
+		// `rate_limit_event` on this run's stdout. Payload mirrors the RateLimitReset shape
+		// so a consumer can pair (chainId, itemId, runId) with `daemon.status.rateLimit`
+		// and compute its own resume timing without re-deriving from logs.
+		...EventBaseBoundary,
+		kind: arkType.unit("lifecycle"),
+		type: arkType.unit("scheduler.rate_limited"),
+		payload: { resetsAt: "number", resetAtIso: "string", "rateLimitType": "string|null" },
 	},
 	{
 		// #452 recycle-zone lifecycle: armed exactly once when the daemon observes a
@@ -985,6 +1001,8 @@ function renderLifecycleEvent(event: Extract<ObservabilityEvent, { kind: "lifecy
 			return `${event.ts} lifecycle attempt.timeout chain=${event.chain ?? "-"} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} signal=${event.payload.signal}`
 		case "run.startup_idle_kill":
 			return `${event.ts} lifecycle run.startup_idle_kill chain=${event.chain ?? "-"} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} idleTimeoutMs=${event.payload.idleTimeoutMs} stdoutBytes=${event.payload.stdoutBytes}`
+		case "scheduler.rate_limited":
+			return `${event.ts} lifecycle scheduler.rate_limited chain=${event.chain ?? "-"} item=${event.item ?? "-"} run=${event.runId ?? "-"} resetsAt=${event.payload.resetsAt} rateLimitType=${event.payload.rateLimitType ?? "-"}`
 		case "recycle.pending_entered":
 			return `${event.ts} lifecycle recycle.pending_entered chain=${event.chain ?? "-"} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} recycleAfterMs=${event.payload.recycleAfterMs}`
 		case "recycle.timeout_kill":

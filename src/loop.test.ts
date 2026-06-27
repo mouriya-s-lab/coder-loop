@@ -13,6 +13,8 @@ import {
 	createSummaryWatchdog,
 	decideResume,
 	detectHostRunner,
+	extractErrorCode,
+	isTransient5xx,
 	extractPromptPlaceholders,
 	getItemId,
 	makeIssueRunContext,
@@ -786,6 +788,34 @@ describe("small parsers", () => {
 	test("runner stream parsers extract sessions (verdict parser retired per #405)", () => {
 		expect(parseSessionIdFromRunnerStream("claude", "{\"type\":\"system\",\"session_id\":\"sess-1\"}\n")).toBe("sess-1")
 		expect(parseSessionIdFromRunnerStream("codex", "{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}")).toBe("thread-1")
+	})
+
+	// #478 acceptance row 1: extractErrorCode must recognize account-level rate limit on
+	// stdout JSONL (api_error_status:429 / error:rate_limit / "hit your session limit"
+	// result text). Before #478 the W3 chain 35/37/38 incident saw extractErrorCode fall
+	// through to stderr (which is empty on rate-limit) → returned "unclassified" →
+	// decideResume went `fresh` → wasted the stored sessionId.
+	test("extractErrorCode detects 429 in stdout JSONL (W3 fixture shape)", () => {
+		const w3Stream = [
+			`{"type":"system","session_id":"sess-1"}`,
+			`{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1781713800,"rateLimitType":"five_hour"}}`,
+			`{"type":"result","is_error":true,"api_error_status":429,"result":"You've hit your session limit · resets 1:30am (Asia/Tokyo)"}`,
+		].join("\n")
+		expect(extractErrorCode(w3Stream, "")).toMatch(/rate_limit/)
+		// Synthetic assistant-shape (error:"rate_limit") also classified, not falling through to "unclassified".
+		expect(extractErrorCode(`{"is_error":true,"error":"rate_limit"}`, "")).toMatch(/rate_limit/)
+		// Non-rate-limit JSONL preserves the legacy path: extracts error.type from is_error events.
+		expect(extractErrorCode(`{"type":"result","is_error":true,"error":{"type":"timeout"}}`, "")).toBe("timeout")
+	})
+
+	// #478 acceptance row 2: the rate-limit code returned above must pass isTransient5xx,
+	// so decideResume routes the rejected run to `resume` with the stored sessionId
+	// (not `fresh`, which would have wasted the conversation continuity).
+	test("isTransient5xx accepts the rate-limit error code", () => {
+		expect(isTransient5xx("rate_limit_429")).toBe(true)
+		expect(isTransient5xx("RateLimited")).toBe(true)
+		expect(isTransient5xx("500_http")).toBe(true)
+		expect(isTransient5xx("unclassified")).toBe(false)
 	})
 
 	// #456: `summaryWatchdogConfigForPhase` is preserved as a typed hook for #452's pending
