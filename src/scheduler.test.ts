@@ -1099,6 +1099,86 @@ describe("scheduler", () => {
 		}
 	})
 
+	// #462: a runner that never writes to stdout (the run-1781258195574-6 zero-output hang
+	// shape) must be reclaimed at the startup idle threshold, well before the absolute
+	// attempt-timeout floor would burn the rest of the budget. The kill keeps the existing
+	// "attempt counted, item stays at entry status" retry semantics so the scheduler can
+	// respawn on the next tick without operator intervention.
+	test("zero-output runner is killed at the startup idle threshold and keeps retry semantics", async () => {
+		const fixture = await createFixture("startup-idle-kill")
+		try {
+			const chain = createChain(fixture.store, "startup-idle-kill-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 462, repoCwd: "/repo/a" })
+			const silentRunner = resolve(fixture.loopDataRoot, "..", "silent-runner.sh")
+			await writeFile(silentRunner, "#!/bin/sh\nsleep 30\n")
+			await chmod(silentRunner, 0o755)
+
+			const startedAt = Date.now()
+			const tick = await schedulerTick(fixture.options({
+				runner: { kind: "claude", source: "iteration-default", binary: silentRunner, extraArgs: [], model: null },
+				startupIdleTimeoutMs: 400,
+				startupIdleKillMs: 100,
+				attemptTimeoutMs: 60_000,
+			}))
+			expect(tick.spawnedRuns).toHaveLength(1)
+			const closed = await tick.spawnedRuns[0]!.closed
+			const elapsedMs = Date.now() - startedAt
+
+			// Reclaimed at the idle threshold, far before the 60s attempt timeout.
+			expect(elapsedMs).toBeLessThan(5_000)
+			expect(closed.exitCode).not.toBe(0)
+			// Killed before any status write: the item keeps its entry status and the attempt is
+			// counted — identical retry semantics to an attempt-timeout kill.
+			expect(closed.status).toBe(runtimeStatus("queued"))
+			expect(fixture.store.getItem(item.id)?.attempts).toBe(1)
+			const idleEvents = fixture.schedulerEvents.filter((event) => event.type === "run.startup_idle_kill")
+			expect(idleEvents).toHaveLength(1)
+			const idleEvent = idleEvents[0]
+			if (idleEvent?.type !== "run.startup_idle_kill") throw new Error("expected run.startup_idle_kill")
+			expect(idleEvent.itemId).toBe(item.id)
+			expect(idleEvent.idleTimeoutMs).toBe(400)
+			expect(idleEvent.stdoutBytes).toBe(0)
+			// `attempt.timeout` must not also fire — the watchdog beat the absolute floor.
+			expect(fixture.schedulerEvents.filter((event) => event.type === "attempt.timeout")).toHaveLength(0)
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	// #462: once cumulative stdout crosses STARTUP_IDLE_PROGRESS_BYTES the watchdog must
+	// disarm permanently. Orchestrator wait_agent silences up to 1800s are legitimate, so
+	// re-arming would inevitably mis-fire on healthy long runs. A runner that emits 300 B
+	// of stdout up front and then sleeps past the idle window must exit on its own terms.
+	test("runner that crosses the startup progress threshold outlives the idle window", async () => {
+		const fixture = await createFixture("startup-idle-progress")
+		try {
+			const chain = createChain(fixture.store, "startup-idle-progress-chain")
+			createItem(fixture.store, chain, { issueNumber: 463, repoCwd: "/repo/a" })
+			const noisyRunner = resolve(fixture.loopDataRoot, "..", "noisy-runner.sh")
+			await writeFile(noisyRunner, "#!/bin/sh\nprintf '%0300d\\n' 0\nsleep 1.2\nexit 0\n")
+			await chmod(noisyRunner, 0o755)
+
+			const startedAt = Date.now()
+			const tick = await schedulerTick(fixture.options({
+				runner: { kind: "claude", source: "iteration-default", binary: noisyRunner, extraArgs: [], model: null },
+				startupIdleTimeoutMs: 400,
+				startupIdleKillMs: 100,
+				attemptTimeoutMs: 60_000,
+			}))
+			expect(tick.spawnedRuns).toHaveLength(1)
+			const closed = await tick.spawnedRuns[0]!.closed
+			const elapsedMs = Date.now() - startedAt
+
+			// 300 bytes of stdout disarm the watchdog; the run lives ~3x past the idle window
+			// (1.2 s sleep vs. 400 ms threshold) and exits on its own terms.
+			expect(elapsedMs).toBeGreaterThanOrEqual(1_000)
+			expect(closed.exitCode).toBe(0)
+			expect(fixture.schedulerEvents.filter((event) => event.type === "run.startup_idle_kill")).toHaveLength(0)
+		} finally {
+			fixture.store.close()
+		}
+	})
+
 	// #463: codex spawns inherit a default `RUST_LOG=info` so the codex CLI's internal
 	// module diagnostics land on the per-run `stderr.log` artifact (codex only writes
 	// them when RUST_LOG is set). `CODER_LOOP_CODEX_RUST_LOG` overrides the default
