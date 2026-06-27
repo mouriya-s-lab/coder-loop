@@ -178,11 +178,11 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		// dispatch lifts the realistic single-attempt budget past the 1h fallback floor); this is
 		// the preset's own value, not the DEFAULT_ATTEMPT_TIMEOUT_SECONDS fallback.
 		expect(preset.agent.attemptTimeoutSeconds).toBe(7200)
-		// #404: the dead `in_progress` continuable member was retired alongside the
-		// md-status-cleanup. The engine never wrote `items.status = "in_progress"`;
-		// keeping it in continuable let the preset claim "actionable" semantics for
-		// a status the engine never produced.
-		expect([...preset.statuses.continuable]).toEqual(["queued", "changes_requested"])
+		// #508: `in_progress` rejoined `continuable` so the scheduler can re-pick an item
+		// that was mid-flight when the previous daemon process died. Daemon recovery (#508)
+		// no longer rewrites `items.status` / `phase` / `sessionIds`, so the post-crash
+		// `in_progress` rowid is what the scheduler now consumes on the next tick.
+		expect([...preset.statuses.continuable]).toEqual(["queued", "changes_requested", "in_progress"])
 		expect([...preset.statuses.terminal]).toEqual(["blocked", "moot", "done", "exhausted"])
 		expect([...preset.statuses.unblockable]).toEqual(["blocked"])
 		// #402: bundled preset declares the attempts-exhausted落点 explicitly; engine no longer
