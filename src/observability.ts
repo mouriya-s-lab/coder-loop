@@ -46,6 +46,11 @@ const ObservabilityEventTypeBoundary = arkType.or(
 	arkType.unit("phase.end"),
 	arkType.unit("chain.completed"),
 	arkType.unit("attempt.timeout"),
+	// #462: startup idle reclaim. Distinct type from `attempt.timeout` so observers
+	// classify early zero-output kills separately from the absolute attempt-timeout
+	// floor. Payload exposes the threshold (idleTimeoutMs) and observed bytes
+	// (stdoutBytes) at kill time for post-mortem.
+	arkType.unit("run.startup_idle_kill"),
 	// #452: recycle-zone lifecycle. `pending_entered` arms on a successful agent state
 	// write; `timeout_kill` fires when the window elapsed without natural exit and the
 	// engine SIGKILLed the process group; `natural_exit` records that the child closed
@@ -410,6 +415,16 @@ const ObservabilityEventBoundary = arkType.or(
 		kind: arkType.unit("lifecycle"),
 		type: arkType.unit("attempt.timeout"),
 		payload: { signal: arkType.or(arkType.unit("SIGTERM"), arkType.unit("SIGKILL")), attemptMs: "number", excerpt: ExcerptBoundary },
+	},
+	{
+		// #462 startup idle reclaim: zero-output runner killed at the threshold. Payload
+		// carries the configured idle window (idleTimeoutMs) and the observed cumulative
+		// stdout bytes at kill time (stdoutBytes; ~101 on the run-1781258195574-6 incident
+		// shape) so post-mortems do not need to re-read the run logs to classify the kill.
+		...EventBaseBoundary,
+		kind: arkType.unit("lifecycle"),
+		type: arkType.unit("run.startup_idle_kill"),
+		payload: { idleTimeoutMs: "number", stdoutBytes: "number" },
 	},
 	{
 		// #452 recycle-zone lifecycle: armed exactly once when the daemon observes a
@@ -968,6 +983,8 @@ function renderLifecycleEvent(event: Extract<ObservabilityEvent, { kind: "lifecy
 			return `${event.ts} lifecycle chain.completed chain=${event.chain ?? event.payload.chainId}`
 		case "attempt.timeout":
 			return `${event.ts} lifecycle attempt.timeout chain=${event.chain ?? "-"} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} signal=${event.payload.signal}`
+		case "run.startup_idle_kill":
+			return `${event.ts} lifecycle run.startup_idle_kill chain=${event.chain ?? "-"} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} idleTimeoutMs=${event.payload.idleTimeoutMs} stdoutBytes=${event.payload.stdoutBytes}`
 		case "recycle.pending_entered":
 			return `${event.ts} lifecycle recycle.pending_entered chain=${event.chain ?? "-"} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} recycleAfterMs=${event.payload.recycleAfterMs}`
 		case "recycle.timeout_kill":
