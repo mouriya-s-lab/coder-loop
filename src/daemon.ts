@@ -619,6 +619,20 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 				subject: { kind: "engine" },
 				payload: { signal: event.signal, attemptMs: event.attemptMs, excerpt: event.excerpt },
 			})
+		case "run.startup_idle_kill":
+			// #462 lifecycle: zero-output reclaim at the startup idle threshold. Type is
+			// kept distinct from `attempt.timeout` (absolute floor) so observers can
+			// classify early reclaim vs. terminal-budget exhaustion without parsing payloads.
+			return makeObservabilityEvent({
+				kind: "lifecycle",
+				type: "run.startup_idle_kill",
+				chain: chain.name,
+				item: event.itemId,
+				runId: event.runId,
+				phase: event.phase,
+				subject: { kind: "engine" },
+				payload: { idleTimeoutMs: event.idleTimeoutMs, stdoutBytes: event.stdoutBytes },
+			})
 		case "recycle.pending_entered":
 			// #452 lifecycle: agent wrote item status, recycle clock armed. Carries the
 			// window duration so an observer can pair this with the eventual
@@ -2746,6 +2760,12 @@ export class CoderLoopDaemon {
 		if (scheduler.spawnFailureBackoffForChain !== undefined) options.spawnFailureBackoffForChain = scheduler.spawnFailureBackoffForChain
 		if (scheduler.attemptTimeoutMs !== undefined) options.attemptTimeoutMs = scheduler.attemptTimeoutMs
 		if (scheduler.attemptKillMs !== undefined) options.attemptKillMs = scheduler.attemptKillMs
+		// #462: forward startup idle watchdog knobs so production / test wiring lands the same way
+		// the other scheduler-lifecycle knobs do. Env-level override paths (CODER_LOOP_STARTUP_IDLE_*)
+		// remain available even without an explicit forwarded value — see scheduler.ts.
+		if (scheduler.startupIdleTimeoutMs !== undefined) options.startupIdleTimeoutMs = scheduler.startupIdleTimeoutMs
+		if (scheduler.startupIdleProgressBytes !== undefined) options.startupIdleProgressBytes = scheduler.startupIdleProgressBytes
+		if (scheduler.startupIdleKillMs !== undefined) options.startupIdleKillMs = scheduler.startupIdleKillMs
 		// #452: the retired `watchdogGraceMs`/`watchdogKillMs` knobs configured the
 		// stdout-summary watchdog. Their replacement is the recycle-zone window that
 		// arms only after the daemon observes a successful agent state write.
