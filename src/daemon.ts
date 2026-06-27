@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto"
 import { Buffer } from "node:buffer"
 import { createConnection, createServer, type Server, type Socket } from "node:net"
 import { mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises"
-import { isAbsolute, relative, resolve } from "node:path"
+import { dirname, isAbsolute, relative, resolve } from "node:path"
+import { type as arkType } from "arktype"
 
 import {
 	buildPhaseRunnerSelectionFromChain,
@@ -42,6 +43,7 @@ import {
 	type SchedulerSpawnContext,
 	type SchedulerState,
 } from "./scheduler"
+import { PersistedRateLimitStateBoundary, type RateLimitReset } from "./rate-limit"
 import {
 	type ChainRecord,
 	type CreateChainInput,
@@ -283,6 +285,81 @@ export type CoderLoopDaemonSnapshot = {
 	shuttingDown: boolean
 	schedulerEnabled: boolean
 	activeRuns: JsonObject[]
+	// #478: daemon-wide account rate-limit cooldown snapshot. Fields are documented at
+	// `rateLimitStatus`; this is the wire shape exposed via `daemon.status`.
+	rateLimit: JsonObject
+}
+
+// #478 staggered resume: after the cooldown elapses, the daemon-level gate caps the
+// scheduler to 1 spawn per tick and arms a 30 s cooldown between those single-slot ticks
+// so a rate-limited account is not slammed simultaneously. The value matches the operator
+// 2026-06-18 decree and the historical PR #157 setting.
+export const DAEMON_RATE_LIMIT_STAGGER_MS = 30_000
+
+export type DaemonRateLimitState = {
+	reset: RateLimitReset | null
+	observedAt: string | null
+	sourceRunId: string | null
+	sourceItemId: number | null
+	sourceChainId: number | null
+	nextResumeAtMs: number | null
+}
+
+// `daemonRateLimitDecision` returns one of four decisions consumed by the scheduler
+// tick loop. `maxSpawns: undefined` means "no rate-limit cap at all"; the explicit
+// numeric values feed `schedulerTick(options, { maxSpawns })`.
+//   normal        — no cooldown active → no spawn cap from the rate-limit gate
+//   paused        — cooldown active, reset has not elapsed → 0 spawns this tick
+//   stagger-wait  — cooldown elapsed but the post-resume stagger is still cooling → 0
+//   stagger-ready — stagger elapsed (or never started) → 1 spawn this tick max
+export type DaemonRateLimitDecision =
+	| { kind: "normal"; maxSpawns: undefined }
+	| { kind: "paused"; maxSpawns: 0 }
+	| { kind: "stagger-wait"; maxSpawns: 0 }
+	| { kind: "stagger-ready"; maxSpawns: 1 }
+
+export function createDaemonRateLimitState(): DaemonRateLimitState {
+	return {
+		reset: null,
+		observedAt: null,
+		sourceRunId: null,
+		sourceItemId: null,
+		sourceChainId: null,
+		nextResumeAtMs: null,
+	}
+}
+
+export function daemonRateLimitDecision(state: DaemonRateLimitState, nowMs: number): DaemonRateLimitDecision {
+	if (state.reset === null) return { kind: "normal", maxSpawns: undefined }
+	const resetMs = state.reset.resetsAt * 1000
+	if (nowMs < resetMs) return { kind: "paused", maxSpawns: 0 }
+	if (state.nextResumeAtMs !== null && nowMs < state.nextResumeAtMs) {
+		return { kind: "stagger-wait", maxSpawns: 0 }
+	}
+	return { kind: "stagger-ready", maxSpawns: 1 }
+}
+
+// #478 I3 review: exported wire-shape projector so the `daemon.status.rateLimit`
+// JsonObject is testable in isolation. The class method `rateLimitStatus` delegates
+// here; the projector is pure (no `this`, no I/O) and pins the 10 fields tests assert.
+// `active` aggregates {paused, stagger-wait} so a CLI display can render
+// "rate-limited" without re-deriving from `mode`. Unix + ISO timestamps both surface
+// so consumers pick whichever fits.
+export function rateLimitStatusFromState(state: DaemonRateLimitState, nowMs: number): JsonObject {
+	const decision = daemonRateLimitDecision(state, nowMs)
+	return {
+		active: decision.kind === "paused" || decision.kind === "stagger-wait",
+		mode: decision.kind,
+		rateLimitedUntil: state.reset?.resetAtIso ?? null,
+		rateLimitedUntilUnix: state.reset?.resetsAt ?? null,
+		rateLimitType: state.reset?.rateLimitType ?? null,
+		observedAt: state.observedAt,
+		sourceRunId: state.sourceRunId,
+		sourceItemId: state.sourceItemId,
+		sourceChainId: state.sourceChainId,
+		nextResumeAt: state.nextResumeAtMs === null ? null : new Date(state.nextResumeAtMs).toISOString(),
+		staggerMs: DAEMON_RATE_LIMIT_STAGGER_MS,
+	}
 }
 
 type DaemonState = "starting" | "running" | "shutting_down" | "exited"
@@ -633,6 +710,19 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 				subject: { kind: "engine" },
 				payload: { idleTimeoutMs: event.idleTimeoutMs, stdoutBytes: event.stdoutBytes },
 			})
+		case "scheduler.rate_limited":
+			// #478: forward the scheduler-emitted rate-limit observation onto the global event
+			// stream so an observer can pair the per-run trigger (`event.runId`) with the
+			// daemon-wide `rateLimit` field on `daemon.status`.
+			return makeObservabilityEvent({
+				kind: "lifecycle",
+				type: "scheduler.rate_limited",
+				chain: chain.name,
+				item: event.itemId,
+				runId: event.runId,
+				subject: { kind: "engine" },
+				payload: { resetsAt: event.resetsAt, resetAtIso: event.resetAtIso, rateLimitType: event.rateLimitType },
+			})
 		case "recycle.pending_entered":
 			// #452 lifecycle: agent wrote item status, recycle clock armed. Carries the
 			// window duration so an observer can pair this with the eventual
@@ -710,6 +800,20 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 export class CoderLoopDaemon {
 	private readonly paths: ReturnType<typeof resolveLoopDataPaths>
 	private readonly schedulerState: SchedulerState = createSchedulerState()
+	// #478: daemon-wide account rate-limit cooldown. Owned here (not in schedulerState)
+	// because the persistence path lives next to the daemon socket and the gate must
+	// survive daemon restarts. `applyRateLimitNotice` mutates both this state and
+	// `schedulerState.rateLimitedUntilMs` (the synchronous tick-boundary race gate).
+	private rateLimitState: DaemonRateLimitState = createDaemonRateLimitState()
+	// #478 I1 review: single-writer chain for `rate-limit.json` persistence. Two writers
+	// can fire in the same event-loop tick — `applyRateLimitNotice` runs in scheduler
+	// close handlers (NOT serialized against `runSchedulerTicks`) and
+	// `updateRateLimitAfterTick` runs from the tick loop. With bare `writeFile`/`rm`
+	// concurrent writers can leave the file half-written or race with `rm`. Each persist
+	// call enqueues onto this chain so file I/O is strictly sequential; the persisted
+	// content is always the latest `rateLimitState` value at write time (idempotent
+	// against duplicate queued entries from rapid-fire mutations).
+	private rateLimitPersistChain: Promise<void> = Promise.resolve()
 	private readonly sockets = new Set<Socket>()
 	private readonly shutdownGraceMs: number
 	private server: Server | null = null
@@ -766,6 +870,10 @@ export class CoderLoopDaemon {
 			await this.quarantineOrphanChainDirectories()
 			await this.ensureRuntimeLayoutForExistingChains()
 			await this.recoverStaleSchedulerState()
+			// #478: restore any in-flight rate-limit cooldown persisted by the previous
+			// daemon instance so a daemon restart does not lose the cooldown floor. If the
+			// persisted reset already elapsed, this is a no-op (the file is rewritten clean).
+			await this.loadPersistedRateLimitState()
 			await writeFile(this.paths.daemonPid, `${process.pid}\n`)
 			this.ownsDaemonPid = true
 			this.state = "running"
@@ -801,7 +909,155 @@ export class CoderLoopDaemon {
 				worktreePath: run.worktreePath,
 				startedAt: run.startedAt,
 			})),
+			rateLimit: this.rateLimitStatus(this.schedulerNowMs()),
 		}
+	}
+
+	// #478: thin wrapper over the pure `rateLimitStatusFromState` projector (exported so
+	// the wire shape is unit-testable in isolation; see #478 I3 review).
+	private rateLimitStatus(nowMs: number): JsonObject {
+		return rateLimitStatusFromState(this.rateLimitState, nowMs)
+	}
+
+	private rateLimitStatePath(): string {
+		// Persist alongside the daemon socket so it travels with the loop-data root and a
+		// daemon restart picks the cooldown back up automatically. We deliberately keep
+		// this OUT of `db.sqlite` — schema changes there are expensive, this is one tiny
+		// JSON blob with no relations.
+		return resolve(this.paths.daemonLogDir, "rate-limit.json")
+	}
+
+	private async loadPersistedRateLimitState(): Promise<void> {
+		let raw: string
+		try {
+			raw = await readFile(this.rateLimitStatePath(), "utf-8")
+		} catch (error) {
+			if (isNodeError(error) && error.code === "ENOENT") return
+			throw error
+		}
+		// Boundary parse the persisted JSON in one place (#478 C1 review). Replaces the
+		// hand-walked typeof guards + four `as` casts; on shape mismatch arktype returns
+		// a typed error which we route into `rate_limit.persist_load_failed` so the
+		// operator sees the corruption instead of silently losing the cooldown.
+		let parsed: unknown
+		try {
+			parsed = JSON.parse(raw)
+		} catch (error) {
+			await this.recordRateLimitPersistLoadFailed(`json_parse_failed: ${errorMessage(error)}`)
+			return
+		}
+		const boundaryResult = PersistedRateLimitStateBoundary(parsed)
+		if (boundaryResult instanceof arkType.errors) {
+			await this.recordRateLimitPersistLoadFailed(`boundary_parse_failed: ${boundaryResult.summary}`)
+			return
+		}
+		const persisted = boundaryResult
+		// If the persisted cooldown already elapsed before this daemon came up, drop it
+		// silently — there is no live cooldown to reapply, and starting in `stagger-ready`
+		// without observing a real run would be a phantom state.
+		if (persisted.reset.resetsAt * 1000 <= Date.now()) {
+			await this.persistRateLimitState()
+			return
+		}
+		this.rateLimitState = {
+			reset: persisted.reset,
+			observedAt: persisted.observedAt,
+			sourceRunId: persisted.sourceRunId,
+			sourceItemId: persisted.sourceItemId,
+			sourceChainId: persisted.sourceChainId,
+			nextResumeAtMs: null,
+		}
+		this.schedulerState.rateLimitedUntilMs = persisted.reset.resetsAt * 1000
+	}
+
+	private async recordRateLimitPersistLoadFailed(reason: string): Promise<void> {
+		// #478 I1 review: don't silently drop a corrupted cooldown file. Surface through
+		// the daemon `daemon.warning` event so an operator (or supervisor agent reading
+		// events) sees the loss instead of discovering it via a later rate-limit incident.
+		await this.recordObservabilityEvent(makeObservabilityEvent({
+			kind: "diagnostic",
+			type: "daemon.warning",
+			subject: { kind: "engine" },
+			payload: { message: `rate-limit persist load failed at ${this.rateLimitStatePath()}: ${reason}` },
+		})).catch(() => undefined)
+	}
+
+	private async persistRateLimitState(): Promise<void> {
+		// Enqueue onto the single-writer chain so two concurrent callers serialize their
+		// file I/O. Each entry reads the latest `rateLimitState` at write time, so
+		// duplicate queued entries collapse to the same final on-disk state (idempotent).
+		const next = this.rateLimitPersistChain.then(async () => {
+			const path = this.rateLimitStatePath()
+			if (this.rateLimitState.reset === null) {
+				await rm(path, { force: true })
+				return
+			}
+			await mkdir(dirname(path), { recursive: true })
+			// Atomic write: stage to a tmp sibling, then POSIX-rename onto the target so a
+			// reader (a future `loadPersistedRateLimitState` from a daemon restart) never
+			// observes a half-written file.
+			const payload = JSON.stringify({
+				reset: this.rateLimitState.reset,
+				observedAt: this.rateLimitState.observedAt,
+				sourceRunId: this.rateLimitState.sourceRunId,
+				sourceItemId: this.rateLimitState.sourceItemId,
+				sourceChainId: this.rateLimitState.sourceChainId,
+			}) + "\n"
+			const tmpPath = `${path}.tmp-${process.pid}-${randomUUID()}`
+			await writeFile(tmpPath, payload)
+			await rename(tmpPath, path)
+		})
+		this.rateLimitPersistChain = next.catch(() => undefined)
+		await next
+	}
+
+	private async applyRateLimitNotice(info: { runId: string; chainId: number; itemId: number; reset: RateLimitReset }): Promise<void> {
+		// Monotonic: only adopt a later resetsAt. A run carrying an older cooldown (out-of-order
+		// callback or repeated observation) is ignored. This also pins behavior under multiple
+		// concurrent rate-limited runs — the latest reset wins.
+		const existingResetMs = this.rateLimitState.reset?.resetsAt === undefined ? 0 : this.rateLimitState.reset.resetsAt * 1000
+		if (existingResetMs > info.reset.resetsAt * 1000) return
+		this.rateLimitState = {
+			reset: info.reset,
+			observedAt: new Date().toISOString(),
+			sourceRunId: info.runId,
+			sourceItemId: info.itemId,
+			sourceChainId: info.chainId,
+			nextResumeAtMs: null,
+		}
+		this.schedulerState.rateLimitedUntilMs = info.reset.resetsAt * 1000
+		await this.persistRateLimitState()
+	}
+
+	private async updateRateLimitAfterTick(spawnedCount: number, nowMs: number): Promise<void> {
+		if (this.rateLimitState.reset === null) return
+		const resetMs = this.rateLimitState.reset.resetsAt * 1000
+		// Still in the absolute cooldown — wait for the reset before anything else.
+		if (nowMs < resetMs) return
+		// Cooldown elapsed and this tick spawned something → arm the 30 s stagger so the
+		// next tick is gated. We do NOT clear the cooldown yet; the run we spawned must
+		// have a chance to either succeed (recover via `clear` branch below) or re-trigger
+		// (clamp via `applyRateLimitNotice` above).
+		if (spawnedCount > 0) {
+			this.rateLimitState.nextResumeAtMs = nowMs + DAEMON_RATE_LIMIT_STAGGER_MS
+			await this.persistRateLimitState()
+			return
+		}
+		// Cooldown elapsed, this tick spawned nothing, and no runs are active → no agent is
+		// currently exercising the rate-limited account. Clear the cooldown so the next
+		// observed run flows through `normal` rather than `stagger-wait` forever.
+		if (listActiveRuns(this.schedulerState).length > 0) return
+		this.rateLimitState = createDaemonRateLimitState()
+		this.schedulerState.rateLimitedUntilMs = null
+		await this.persistRateLimitState()
+	}
+
+	// `schedulerNowMs` lets `now`-injected fixtures (tests) drive the rate-limit decision
+	// clock against the same clock the scheduler uses for `nowSeconds`. Production paths
+	// have no injection so this returns `Date.now()`.
+	private schedulerNowMs(): number {
+		const injected = this.options.scheduler?.now
+		return injected ? injected() * 1000 : Date.now()
 	}
 
 	async stop(): Promise<void> {
@@ -2683,7 +2939,16 @@ export class CoderLoopDaemon {
 	private async runSchedulerTicks(): Promise<void> {
 		do {
 			this.schedulerTickRequested = false
-			await schedulerTick(this.buildSchedulerOptions())
+			// #478: gate the tick on the daemon-wide rate-limit decision and update the
+			// stagger clock from the tick result. The schedulerState in-memory gate
+			// (synchronous, set in the close handler before this awaits) plus this
+			// per-tick limits arg together cover both the tick-boundary race and the
+			// long-lived cooldown until reset.
+			const nowMs = this.schedulerNowMs()
+			const decision = daemonRateLimitDecision(this.rateLimitState, nowMs)
+			const limits = decision.maxSpawns === undefined ? undefined : { maxSpawns: decision.maxSpawns }
+			const tick = await schedulerTick(this.buildSchedulerOptions(), limits)
+			await this.updateRateLimitAfterTick(tick.spawnedRuns.length, nowMs)
 		} while (this.schedulerTickRequested && this.state === "running")
 	}
 
@@ -2739,6 +3004,13 @@ export class CoderLoopDaemon {
 					await this.recordObservabilityEventForChainId(event.chainId, (chain) => schedulerEventToObservabilityEvent(chain, event))
 				}
 				await externalOnEvent?.(event)
+			},
+			// #478: persist + arm the cooldown via the daemon-owned state when the scheduler
+			// classifies a rate-limit exit. The scheduler already set the in-memory tick gate
+			// (`schedulerState.rateLimitedUntilMs`) synchronously before this callback fires,
+			// so the next tick is gated even if this async persist is still in flight.
+			onRateLimitObserved: async (info) => {
+				await this.applyRateLimitNotice({ runId: info.runId, chainId: info.chainId, itemId: info.itemId, reset: info.reset })
 			},
 		}
 		if (scheduler.phaseRunner !== undefined) options.phaseRunner = scheduler.phaseRunner
@@ -4526,6 +4798,7 @@ function daemonSnapshotToJson(snapshot: CoderLoopDaemonSnapshot): JsonObject {
 		shuttingDown: snapshot.shuttingDown,
 		schedulerEnabled: snapshot.schedulerEnabled,
 		activeRuns: snapshot.activeRuns,
+		rateLimit: snapshot.rateLimit,
 	}
 }
 

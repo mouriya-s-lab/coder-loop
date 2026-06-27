@@ -25,6 +25,7 @@ import {
 	type RunnerInvocationPaths,
 	type RuntimeBindings,
 } from "./loop"
+import { classifyRateLimitFromStdout, isRateLimitErrorCode, type RateLimitReset } from "./rate-limit"
 import {
 	chainCompleteTriggerState,
 	chainBindings as metadataBindings,
@@ -149,6 +150,13 @@ export type SchedulerState = {
 	finalizingChainIds: Set<number>
 	pendingCloseHandlers: Set<Promise<unknown>>
 	recycleTriggers: Map<string, SchedulerRecycleTrigger>
+	// #478: account-level rate-limit cooldown. The scheduler close handler arms this
+	// synchronously (before its first await) when a run exits with a rejected
+	// `rate_limit_event`; `schedulerTick` consults the value before spawning so the next
+	// tick does not re-spawn the rate-limited item and consume another attempt slot. The
+	// daemon's `applyRateLimitNotice` then persists the same value (UTC millis) into
+	// `DaemonRateLimitState`. Null when no cooldown is in effect.
+	rateLimitedUntilMs: number | null
 }
 
 export type SchedulerStore = Pick<
@@ -225,6 +233,11 @@ export type SchedulerEvent =
 	// audit-tier events so the wire-side `itemId` field uniformly means opaque string identity.
 	| { type: "queue.terminal"; ts: string; runId: string; chainId: number; rowId: number; terminalStatus: InternalStatus }
 	| { type: "item.dependency_unblocked"; chainId: number; rowId: number; fromStatus: InternalStatus; toStatus: InternalStatus; dependsOn: readonly number[] }
+	// #478: account-level rate limit observed on this run's stdout. The scheduler fires
+	// this immediately on detection in its close handler so observers can pair the per-run
+	// trigger with the daemon-wide cooldown decision exposed via `daemon.status`. Distinct
+	// from `attempt.timeout` because rate-limit exits do not consume an attempt slot.
+	| { type: "scheduler.rate_limited"; ts: string; chainId: number; itemId: number; runId: string; resetsAt: number; resetAtIso: string; rateLimitType: string | null }
 
 export type SchedulerChainCompleteTriggerContext = {
 	chain: ChainRecord
@@ -326,6 +339,12 @@ export type SchedulerOptions = {
 	// caller-admission gate), the scheduler still spawns the agent but the env var is absent,
 	// so any item.update from the agent flows the operator path through the daemon gate.
 	runCredentials?: SchedulerRunCredentialIssuer
+	// #478: invoked from the close handler when a rate-limit signal is found on stdout. The
+	// daemon wires this to `applyRateLimitNotice`, which persists the cooldown into the
+	// daemon's `DaemonRateLimitState` (independent of scheduler-tick state). The scheduler's
+	// in-state gate (`SchedulerState.rateLimitedUntilMs`) is set synchronously in the close
+	// handler before this callback fires, so the next tick is gated even before persist lands.
+	onRateLimitObserved?: (info: { runId: string; chainId: number; itemId: number; reset: RateLimitReset; stdoutText: string }) => void | Promise<void>
 }
 
 // #406: minted run credential. The string is the secret value the daemon's caller-admission
@@ -382,6 +401,7 @@ export function createSchedulerState(): SchedulerState {
 		finalizingChainIds: new Set(),
 		pendingCloseHandlers: new Set(),
 		recycleTriggers: new Map(),
+		rateLimitedUntilMs: null,
 	}
 }
 
@@ -402,7 +422,7 @@ export function maxItemAttemptsFromChainMetadata(metadata: ChainRecord["metadata
 	return DEFAULT_MAX_ITEM_ATTEMPTS
 }
 
-export async function schedulerTick(options: SchedulerOptions): Promise<SchedulerTickResult> {
+export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpawns?: number }): Promise<SchedulerTickResult> {
 	const activeChains = options.store
 		.listChains()
 		.filter((chain) => chain.status === "active" && hasValidChainName(chain.name))
@@ -412,7 +432,18 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 
 	removeIdleSlotsForInactiveChains(options.state, activeChainIds)
 
+	// #478: in-state paused gate — a rate-limit cooldown armed synchronously by a prior run's
+	// close handler takes effect immediately, before the daemon-level async persist can land.
+	// Without this gate the next tick (1 s cadence) re-spawns the rate-limited item and burns
+	// another attempt slot. The daemon-level gate (`limits.maxSpawns=0`) is the long-lived
+	// authority; this synchronous in-state gate plugs the tick-boundary race only.
+	const tickNowMs = nowSeconds(options) * 1000
+	const statePaused = options.state.rateLimitedUntilMs !== null && tickNowMs < options.state.rateLimitedUntilMs
+	const effectiveMaxSpawns = statePaused ? 0 : limits?.maxSpawns
+	const spawnCapped = (): boolean => effectiveMaxSpawns !== undefined && spawnedRuns.length >= effectiveMaxSpawns
+
 	for (const chain of activeChains) {
+		if (spawnCapped()) break
 		let items = options.store.listItems(chain.id)
 		// #412: an empty chain with no chain-level preset has nothing to drive — skip cleanly instead
 		// of crashing chain-wide preset resolution. The chain becomes actionable as soon as the first
@@ -424,6 +455,7 @@ export async function schedulerTick(options: SchedulerOptions): Promise<Schedule
 		const phasePlan = await resolvePhasePlanForChainWithItems(options, chain, items)
 
 		for (const repoCwd of repoCwds) {
+			if (spawnCapped()) break
 			const slot = getOrCreateSlot(options.state, chain, repoCwd)
 			if (slot.activeRun !== null) {
 				await emit(options, {
@@ -1148,6 +1180,16 @@ function attachRunCloseHandler(
 				const exitCode = code ?? 1
 				const stdoutText = Buffer.concat(stdout).toString("utf-8")
 				const stderrText = Buffer.concat(stderr).toString("utf-8")
+				// #478: detect account rate-limit BEFORE the first await so the in-state cooldown
+				// gate (`SchedulerState.rateLimitedUntilMs`) is armed synchronously. The next
+				// scheduler tick may fire while this close handler is still awaiting artifact
+				// writes / status resolution; without the synchronous arm that tick would re-spawn
+				// the rate-limited item and burn another attempt slot.
+				const rateLimit = classifyRateLimitFromStdout(stdoutText)
+				if (rateLimit.reset !== null) {
+					options.state.rateLimitedUntilMs = rateLimit.reset.resetsAt * 1000
+				}
+				const rateLimitExit = (rateLimit.code !== null && isRateLimitErrorCode(rateLimit.code)) || rateLimit.reset !== null
 				const terminalStatuses = new Set((await schedulerStatusesForChain(options, chain)).terminal)
 				const currentItem = options.store.getItem(item.id)
 				const status = (currentItem ?? item).status
@@ -1208,6 +1250,14 @@ function attachRunCloseHandler(
 					if (currentItem === null || !terminalStatuses.has(currentItem.status)) {
 						const itemForBackoff = currentItem ?? item
 						const statusWasWrittenDuringRun = currentItem !== null && currentItem.statusUpdatedAt !== item.statusUpdatedAt && currentItem.statusUpdatedAt >= startedAt
+						// #478: rate-limit exits do not consume an attempt slot (roll the spawn-time
+						// +1 back to the pre-spawn value via explicit `attempts: item.attempts`) and
+						// do not enter the blind exponential spawn-failure backoff — the account
+						// cooldown is owned by the daemon-level gate. Non-rate-limit exits flow
+						// through `extraAfterRunCompletion` exactly as before.
+						const extra = rateLimitExit
+							? clearItemSchedulerBackoff(itemForBackoff.extra)
+							: extraAfterRunCompletion(options, chain, itemForBackoff, exitCode, status, terminalStatuses, endedAt)
 						const update: Parameters<typeof options.store.updateItem>[1] = {
 							// #397: when the agent wrote a status via the gated `item.update` during the
 							// run, the scheduler forwards that same status back into store on the
@@ -1216,12 +1266,26 @@ function attachRunCloseHandler(
 							// branding here under `scheduler.run-status-forwarded` records that this
 							// is engine-internal carry, not a fresh caller-provided write.
 							...(statusWasWrittenDuringRun ? { status: engineLifecycleAdmittedItemStatus(status, "scheduler.run-status-forwarded") } : {}),
+							...(rateLimitExit ? { attempts: item.attempts } : {}),
 							lastRunId: runId,
 							agentCwd: worktreePath,
-							extra: extraAfterRunCompletion(options, chain, itemForBackoff, exitCode, status, terminalStatuses, endedAt),
+							extra,
 							updatedAt: endedAt,
 						}
 						options.store.updateItem(item.id, update)
+					}
+					if (rateLimitExit && rateLimit.reset !== null) {
+						await emit(options, {
+							type: "scheduler.rate_limited",
+							ts: nowIso(options),
+							chainId: chain.id,
+							itemId: item.id,
+							runId,
+							resetsAt: rateLimit.reset.resetsAt,
+							resetAtIso: rateLimit.reset.resetAtIso,
+							rateLimitType: rateLimit.reset.rateLimitType,
+						})
+						await options.onRateLimitObserved?.({ runId, chainId: chain.id, itemId: item.id, reset: rateLimit.reset, stdoutText })
 					}
 					if (sessionIdInvalid) {
 						options.store.setItemSessionId(item.id, { phase, runner: runner.kind, sessionId: null, updatedAt: endedAt })
