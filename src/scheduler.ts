@@ -87,6 +87,18 @@ const ATTEMPT_TIMEOUT_MS = 2 * 60 * 60 * 1000
 const ATTEMPT_KILL_MS = 5 * 1000
 const RECYCLE_AFTER_STATE_WRITE_MS = 500 * 1000
 const RECYCLE_KILL_GRACE_MS = 5 * 1000
+// #462 startup idle watchdog. A runner hung at turn submission emits only its stream banner
+// (codex --json: `thread.started` + `turn.started` ≈ 101 bytes) and then nothing — observed
+// on run-1781258195574-6 which burned the full attempt timeout with stdoutBytes=101. A healthy
+// run crosses the progress threshold within seconds (first item event). Mid-run silences are
+// legitimate and long (orchestrator wait_agent gaps up to 1800s measured on real sessions), so
+// the watchdog disarms permanently once cumulative stdout crosses the threshold and never
+// re-arms. stderr intentionally does not count as progress: the codex RUST_LOG diagnostics
+// (#463) stream there from spawn and would neutralize detection. Overridable per spawn via
+// SchedulerOptions, and globally via the env knobs documented inside installSchedulerRunLifecycleGc.
+const STARTUP_IDLE_TIMEOUT_MS = 10 * 60 * 1000
+const STARTUP_IDLE_PROGRESS_BYTES = 200
+const STARTUP_IDLE_KILL_MS = 5 * 1000
 
 export type SchedulerActiveRun = {
 	runId: string
@@ -205,6 +217,9 @@ export type SchedulerEvent =
 	| { type: "phase.start"; ts: string; runId: string; chainId: number; itemId: number; repoCwd: string; phase: string; pid: number | null }
 	| { type: "phase.end"; ts: string; runId: string; chainId: number; itemId: number; phase: string; exitCode: number; durationSeconds: number; status: InternalStatus }
 	| { type: "attempt.timeout"; ts: string; runId: string; chainId: number; itemId: number; phase: string; signal: "SIGTERM" | "SIGKILL"; attemptMs: number; excerpt: ObservabilityExcerpt }
+	// #462: startup idle reclaim. Distinct from `attempt.timeout` so the lifecycle stream
+	// distinguishes early zero-output kills from the absolute attempt-timeout floor.
+	| { type: "run.startup_idle_kill"; ts: string; runId: string; chainId: number; itemId: number; phase: string; idleTimeoutMs: number; stdoutBytes: number }
 	// #452 recycle-zone lifecycle. The three events are mutually exclusive per run after
 	// state has been written: `recycle.pending_entered` fires exactly once when the daemon
 	// signals the agent's status-write succeeded; from there the run goes to either
@@ -305,6 +320,12 @@ export type SchedulerOptions = {
 	onEvent?: (event: SchedulerEvent) => void | Promise<void>
 	attemptTimeoutMs?: number
 	attemptKillMs?: number
+	// #462: startup idle watchdog knobs (semantics documented at STARTUP_IDLE_TIMEOUT_MS).
+	// Daemon forwards the same names from `scheduler.startupIdle*` so tests can run with
+	// 100-400 ms thresholds while production keeps the 10 min / 200 B / 5 s defaults.
+	startupIdleTimeoutMs?: number
+	startupIdleProgressBytes?: number
+	startupIdleKillMs?: number
 	// #452: post-state-write recycle window. Once the daemon notifies the scheduler that this
 	// run wrote item status (via `markRunPendingRecycle`), the engine waits at most this long
 	// for the child to exit naturally before SIGKILLing the process group. The semantics are
@@ -1025,6 +1046,19 @@ async function spawnSchedulerRun(
 		[LOOP_DATA_ROOT_ENV]: resolveLoopDataPaths(options.loopDataRootOptions).root,
 	}
 	if (credential !== null) spawnEnv[LOOP_RUN_CREDENTIAL_ENV] = credential.value
+	// #463: the codex CLI only writes its internal module diagnostics to stderr when
+	// `RUST_LOG` is set, and the engine persists per-run stderr to `stderr.log`. Inject
+	// `RUST_LOG=info` by default on codex-kind spawns so any future zero-output hang
+	// (cf. #462) leaves attributable traces on disk. Precedence (single source of truth):
+	//   1. `CODER_LOOP_CODEX_RUST_LOG` — operator-explicit override; empty string disables.
+	//   2. Inherited `RUST_LOG` from the daemon's environment.
+	//   3. Engine default `"info"`.
+	// claude/opencode kinds receive no injection — those runtimes don't consume RUST_LOG
+	// and the variable would only add noise.
+	if (runner.kind === "codex") {
+		const level = process.env["CODER_LOOP_CODEX_RUST_LOG"] ?? process.env["RUST_LOG"] ?? "info"
+		if (level !== "") spawnEnv["RUST_LOG"] = level
+	}
 	const child = spawn(runnerPlan.binary, runnerPlan.args, {
 		cwd: worktreePath,
 		stdio: ["ignore", "pipe", "pipe"],
@@ -1367,6 +1401,17 @@ function combineCleanup(existing: (() => void) | null, next: () => void): () => 
 	}
 }
 
+// #462: helper for opt-in env override of startup idle watchdog knobs. Rejects everything
+// that is not a positive finite integer (negatives / zero / NaN / floats / empty string),
+// so a stray export (`STARTUP_IDLE_TIMEOUT_MS=abc`) never silently degrades the default.
+function envPositiveIntOrNull(name: string): number | null {
+	const raw = process.env[name]
+	if (raw === undefined || raw === "") return null
+	const value = Number(raw)
+	if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) return null
+	return value
+}
+
 type SchedulerRunLifecycleGc = {
 	cleanup: () => void
 	terminatorCleanup: (() => void) | null
@@ -1428,6 +1473,57 @@ function installSchedulerRunLifecycleGc(
 	}, attemptTimeoutMs)
 
 	addLifecycleCleanup(() => { if (attemptTimer !== null) { clearTimeout(attemptTimer); attemptTimer = null } })
+
+	// #462 startup idle watchdog. Semantics documented at STARTUP_IDLE_TIMEOUT_MS. Resolved
+	// in precedence order: SchedulerOptions override → env knob → engine default.
+	//   CODER_LOOP_STARTUP_IDLE_TIMEOUT_MS   — override the 10 min default
+	//   CODER_LOOP_STARTUP_IDLE_PROGRESS_BYTES — override the 200 B threshold
+	// The kill grace is options-only (test wiring); production keeps STARTUP_IDLE_KILL_MS.
+	// Listens to stdout only — stderr is intentionally excluded so #463's RUST_LOG output
+	// (which streams to stderr from spawn) does not neutralize the watchdog.
+	const startupIdleTimeoutMs = options.startupIdleTimeoutMs
+		?? envPositiveIntOrNull("CODER_LOOP_STARTUP_IDLE_TIMEOUT_MS")
+		?? STARTUP_IDLE_TIMEOUT_MS
+	const startupIdleProgressBytes = options.startupIdleProgressBytes
+		?? envPositiveIntOrNull("CODER_LOOP_STARTUP_IDLE_PROGRESS_BYTES")
+		?? STARTUP_IDLE_PROGRESS_BYTES
+	const startupIdleKillMs = options.startupIdleKillMs ?? STARTUP_IDLE_KILL_MS
+	let startupStdoutBytes = 0
+	let startupIdleTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+		startupIdleTimer = null
+		if (child.exitCode !== null || child.signalCode !== null) return
+		void emit(options, {
+			type: "run.startup_idle_kill",
+			ts: nowIso(options),
+			runId: context.runId,
+			chainId: context.chain.id,
+			itemId: context.item.id,
+			phase: context.phase,
+			idleTimeoutMs: startupIdleTimeoutMs,
+			stdoutBytes: startupStdoutBytes,
+		}).catch(() => undefined)
+		sendSignalToChildProcessGroup(child, "SIGTERM")
+		const killTimer = setTimeout(() => {
+			if (child.exitCode === null && child.signalCode === null) sendSignalToChildProcessGroup(child, "SIGKILL")
+		}, startupIdleKillMs)
+		addLifecycleCleanup(() => clearTimeout(killTimer))
+	}, startupIdleTimeoutMs)
+	child.stdout?.on("data", (chunk: Buffer) => {
+		if (startupIdleTimer === null) return
+		startupStdoutBytes += chunk.byteLength
+		if (startupStdoutBytes >= startupIdleProgressBytes) {
+			// Permanent disarm: orchestrator wait_agent gaps up to 1800s are legitimate,
+			// re-arming after progress would inevitably mis-fire on healthy long runs.
+			clearTimeout(startupIdleTimer)
+			startupIdleTimer = null
+		}
+	})
+	addLifecycleCleanup(() => {
+		if (startupIdleTimer !== null) {
+			clearTimeout(startupIdleTimer)
+			startupIdleTimer = null
+		}
+	})
 
 	// Recycle zone arm trigger — registered against runId so the daemon's `handleItemUpdate`
 	// can fire it after a successful agent-attributed status write. Idempotent against

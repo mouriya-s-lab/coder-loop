@@ -6692,7 +6692,7 @@ describe("rateLimitStatusFromState daemon.status wire shape (issue #478)", () =>
 		expect(wire["nextResumeAt"]).toBe(new Date(populatedState.nextResumeAtMs!).toISOString())
 		// JSON.stringify must not drop any field (undefined would be silently dropped) —
 		// the round-trip pins this because every value above is either a primitive or null.
-		const roundTrip = JSON.parse(JSON.stringify(wire)) as Record<string, unknown>
+		const roundTrip: Record<string, unknown> = JSON.parse(JSON.stringify(wire))
 		expect(Object.keys(roundTrip).sort()).toEqual([
 			"active", "mode", "nextResumeAt", "observedAt", "rateLimitType",
 			"rateLimitedUntil", "rateLimitedUntilUnix", "sourceChainId",
