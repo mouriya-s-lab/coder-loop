@@ -1471,6 +1471,12 @@ export class CoderLoopDaemon {
 	}
 
 	private async recoverStaleSchedulerState(): Promise<void> {
+		// #508: daemon recovery is a process-layer concern only. It kills any stale process group
+		// from the previous daemon instance and clears the `current_runs` orphan row so the
+		// scheduler is free to take a new run on this chain. It MUST NOT write `items.status`,
+		// `items.phase`, or `items.sessionIds` — those are business fields the agent owns. An
+		// interrupted in_progress item is left as-is and re-scheduled because the preset's
+		// `statuses.continuable` covers `in_progress` (see preset.toml).
 		const store = this.requireStore()
 		for (const chain of store.listChains()) {
 			if (chain.status === "deleted") continue
@@ -1479,16 +1485,7 @@ export class CoderLoopDaemon {
 				const stalePid = await this.readRunProcessGroupPid(chain, currentRun.runId, currentRun.extra)
 				if (stalePid !== null) await terminateStaleProcessGroup(stalePid, Math.min(this.shutdownGraceMs, STALE_RECOVERY_FORCE_AFTER_MS))
 
-				const midFlightItemId = optionalPositiveInteger(currentRun.extra.itemId)
-				const midFlightItem = midFlightItemId !== null ? store.getItem(midFlightItemId) : null
-				const itemsToRecover = midFlightItem === null ? [] : [midFlightItem]
-
 				store.clearCurrentRun(chain.id)
-				const recoveredAt = unixSeconds()
-				const recoveryStatus = await this.entryItemStatusForRecovery(chain)
-				for (const item of itemsToRecover) {
-					store.updateItem(item.id, { status: recoveryStatus, phase: null, updatedAt: recoveredAt })
-				}
 				await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
 					kind: "lifecycle",
 					type: "scheduler.recovery",
@@ -1498,32 +1495,9 @@ export class CoderLoopDaemon {
 					payload: {
 						reason: "stale_current_run",
 						pid: stalePid,
-						recoveredItems: itemsToRecover.map((item) => ({
-							rowId: item.id,
-							itemId: item.itemId,
-							fromStatus: item.status,
-							toStatus: recoveryStatus,
-						})),
 						reconciledRuns: [],
 					},
 				}))
-				for (const item of itemsToRecover) {
-					await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
-						kind: "audit",
-						type: "item.status",
-						chain: chain.name,
-						item: item.id,
-						runId: currentRun.runId,
-						subject: { kind: "engine" },
-						payload: {
-							rowId: item.id,
-							itemId: item.itemId,
-							fromStatus: item.status,
-							toStatus: recoveryStatus,
-							reason: "stale_current_run_recovery",
-						},
-					}))
-				}
 			}
 
 			await this.reconcileOrphanedRuns(chain)
@@ -1557,7 +1531,6 @@ export class CoderLoopDaemon {
 			payload: {
 				reason: "orphaned_run_reconciled",
 				pid: null,
-				recoveredItems: [],
 				reconciledRuns,
 			},
 		}))
@@ -3364,11 +3337,6 @@ export class CoderLoopDaemon {
 	private async unblockItemStatuses(chain: ChainRecord): Promise<{ success: readonly InternalStatus[]; entry: InternalStatus }> {
 		const { preset } = await this.loadedPresetForChain(chain, "chain.unblock-statuses")
 		return { success: preset.statuses.success, entry: preset.statuses.entry }
-	}
-
-	private async entryItemStatusForRecovery(chain: ChainRecord): Promise<AdmittedItemStatus> {
-		const { entry } = await this.unblockItemStatuses(chain)
-		return engineLifecycleAdmittedItemStatus(entry, "scheduler.recovery-entry-restore")
 	}
 
 	private async resolveLoadedPresetPhasePrompt(ctx: SchedulerSpawnContext): Promise<string> {

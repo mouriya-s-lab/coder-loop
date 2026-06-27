@@ -204,12 +204,10 @@ const ExcerptBoundary = arkType({
 
 // #419: split the integer rowid (`rowId`) from the opaque preset-declared id (`itemId` string).
 // Same shape change applied across every audit / lifecycle payload below.
-const RecoveredItemBoundary = arkType({
-	rowId: "number",
-	itemId: "string",
-	fromStatus: "string",
-	toStatus: "string",
-})
+//
+// #508: `RecoveredItemBoundary` retired alongside the `recoveredItems` field on
+// `scheduler.recovery` — daemon recovery no longer mutates item business state, so there is no
+// list of "items the engine reset" to surface to consumers.
 
 const ReconciledRunBoundary = arkType({
 	runId: "string",
@@ -371,7 +369,8 @@ const ObservabilityEventBoundary = arkType.or(
 		payload: {
 			reason: arkType.or(arkType.unit("stale_current_run"), arkType.unit("orphaned_run_reconciled")),
 			"pid": arkType.or("number", "null"),
-			recoveredItems: RecoveredItemBoundary.array(),
+			// #508: `recoveredItems` retired — daemon recovery is process-layer only and never
+			// rewrites item business fields, so there is no list to surface here.
 			reconciledRuns: ReconciledRunBoundary.array(),
 		},
 	},

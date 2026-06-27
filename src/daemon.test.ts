@@ -1683,19 +1683,12 @@ attemptTimeoutSeconds = 3600
 				store.close()
 			}
 
-			// #404: `in_progress` is no longer a member of the preset's status vocabulary, so it
-			// falls through the earlier vocabulary gate (`admitItemStatusVocabularyForRequest`)
-			// before the phase gate ever runs — the rejection details carry just the requested
-			// status (the vocabulary gate's shape) rather than the phase-gate's
-			// `{ phase, status, allowed }`. The remaining statuses are still vocab-valid and
-			// reach the phase gate, where iteration's empty `[[phases.exits]]` set denies them.
-			const vocabRejected = await request(fixture, "item.update", { itemId: iterationItemId, status: "in_progress" })
-			expectInvalid(vocabRejected)
-			if (!vocabRejected.ok) {
-				expect(vocabRejected.error.details).toEqual({ status: "in_progress" })
-				expect(vocabRejected.error.message).toContain("item status must be one of:")
-			}
-			for (const status of ["changes_requested", "blocked", "moot", "done", "exhausted"]) {
+			// #508: `in_progress` rejoined `[statuses].continuable` so daemon recovery can leave
+			// it untouched and the scheduler can re-pick interrupted items. Vocab gate now
+			// admits it, so the rejection comes from the phase-exits gate (iteration declares
+			// no `[[phases.exits]]`, so every status is denied here) — same shape as the other
+			// vocab-valid statuses below.
+			for (const status of ["in_progress", "changes_requested", "blocked", "moot", "done", "exhausted"]) {
 				const rejected = await request(fixture, "item.update", { itemId: iterationItemId, status })
 				expectInvalid(rejected)
 				if (!rejected.ok) expect(rejected.error.details).toMatchObject({ phase: "iteration", status, allowed: [] })
@@ -2833,7 +2826,11 @@ attemptTimeoutSeconds = 3600
 		}
 	})
 
-	test("daemon startup recovers stale in_progress item and process group", async () => {
+	// #508: daemon recovery is a process-layer concern only. It clears the orphan `current_runs`
+	// row and kills the stale process group, but it MUST NOT rewrite `items.status` /
+	// `items.phase` / `items.sessionIds`. The interrupted item is re-scheduled by the scheduler
+	// on the next tick because `gh-issue-pr-iteration` lists `in_progress` in `continuable`.
+	test("daemon startup kills stale process group and clears current_run without rewriting item business fields (#508)", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-startup-recovery`)
 		const loopDataRoot = resolve(root, "ld")
 		await mkdir(loopDataRoot, { recursive: true })
@@ -2844,6 +2841,8 @@ attemptTimeoutSeconds = 3600
 		stale.unref()
 		if (stale.pid === undefined) throw new Error("expected stale process pid")
 
+		const sessionIdsSnapshot = { iteration: { claude: "session-iter-217" } }
+		const agentCwdSnapshot = resolve(root, "worktree")
 		const store = openSqliteStateStore({ loopDataRoot })
 		try {
 			const chain = store.createChain({
@@ -2861,8 +2860,10 @@ attemptTimeoutSeconds = 3600
 				status: runtimeStatus("in_progress"),
 				attempts: 1,
 					lastRunId: "run-stale-217",
-					agentCwd: resolve(root, "worktree"),
+					phase: "iteration",
+					agentCwd: agentCwdSnapshot,
 					title: "stale item",
+					sessionIds: sessionIdsSnapshot,
 					extra: storedItemExtra({}),
 				})
 			store.recordRun({
@@ -2892,11 +2893,27 @@ attemptTimeoutSeconds = 3600
 		try {
 			expect(await waitForPidExit(stale.pid, 1_000)).toBe(true)
 			const recovered = await readItem(loopDataRoot, 1, 217)
-			expect(recovered?.status).toBe("queued")
+			// #508 predicted result #1: status / phase / sessionIds preserved (daemon recovery
+			// no longer rewrites business fields).
+			expect(recovered?.status).toBe("in_progress")
+			expect(recovered?.phase).toBe("iteration")
+			expect(recovered?.sessionIds).toEqual(sessionIdsSnapshot)
 			expect(recovered?.attempts).toBe(1)
+			// Process-layer cleanup still happens: the orphan `current_runs` row is gone.
 			expect(await readCurrentRun(loopDataRoot, 1)).toBeNull()
+			// #508 predicted result #3: chain summary surfaces the interrupted in_progress item
+			// as a stale candidate (current_runs cleared → no active run for this rowid) so the
+			// scheduler will re-spawn it on the next tick.
 			const status = record(expectOk(await sendDaemonRequest(daemon.snapshot().socketPath, daemonRequest("chain.status", { chainName: "startup-recovery-chain" }))))
-			expect(record(status.summary).recovery).toEqual({ needed: false, staleInProgressItems: [] })
+			const recoverySummary = record(record(status.summary).recovery)
+			expect(recoverySummary.needed).toBe(true)
+			expect(recoverySummary.staleInProgressItems).toEqual([{
+				rowId: recovered?.id ?? null,
+				itemId: "217",
+				runId: "run-stale-217",
+				repoCwd: REPO_ROOT,
+				agentCwd: agentCwdSnapshot,
+			}])
 		} finally {
 			try {
 				process.kill(-(stale.pid), "SIGKILL")
@@ -3224,7 +3241,9 @@ attemptTimeoutSeconds = 3600
 		try {
 			expect(await pathIsSocket(socketPath)).toBe(true)
 			expect(await waitForPidExit(stale.pid, 1_000)).toBe(true)
-			expect((await readItem(loopDataRoot, 1, 238))?.status).toBe("queued")
+			// #508: daemon recovery preserves the item's business status (in_progress) and only
+			// clears the orphan `current_runs` row + kills the stale process group.
+			expect((await readItem(loopDataRoot, 1, 238))?.status).toBe("in_progress")
 			expect(await readCurrentRun(loopDataRoot, 1)).toBeNull()
 		} finally {
 			try {

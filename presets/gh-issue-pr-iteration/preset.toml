@@ -44,7 +44,16 @@ lastRunId = "string"
 # member would let the preset claim "actionable" semantics for a status the
 # engine never produces; #408 will warn at load time on any further dead-word
 # regressions.
-continuable = ["queued", "changes_requested"]
+#
+# #508: `in_progress` is included in `continuable` so the scheduler can re-pick
+# an item that was mid-flight when the previous daemon process died. Daemon
+# recovery (`src/daemon.ts:recoverStaleSchedulerState`) only clears the
+# `current_runs` orphan row and kills the stale process group; it MUST NOT
+# rewrite `items.status` / `phase` / `sessionIds`. Re-scheduling the
+# interrupted item is the scheduler's job, and the scheduler already skips
+# any chain that still has a live `current_run` — so listing `in_progress`
+# here does not cause double-spawn while a healthy daemon is running.
+continuable = ["queued", "changes_requested", "in_progress"]
 terminal    = ["blocked", "moot", "done", "exhausted"]
 # success: subset of terminal that means the item succeeded. Used by the engine's
 # cross-chain dependsOn unblock: a terminal item is restored to `entry` only when ALL
