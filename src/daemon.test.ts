@@ -8,6 +8,9 @@ import { type as arkType } from "arktype"
 import {
 	DaemonError,
 	daemonRequest,
+	createDaemonRateLimitState,
+	DAEMON_RATE_LIMIT_STAGGER_MS,
+	daemonRateLimitDecision,
 	sendDaemonRequest,
 	startCoderLoopDaemon,
 	type CoderLoopDaemon,
@@ -6567,6 +6570,59 @@ prompt = "iter.md"
 		} finally {
 			await fixture.daemon.stop()
 		}
+	})
+})
+
+// #478 acceptance row 5: the daemon-wide rate-limit decision walks through four states
+// (normal → paused → stagger-wait → stagger-ready → normal). Each state's `maxSpawns`
+// value is the contract `schedulerTick(options, { maxSpawns })` consumes. The wider
+// integration is covered by real-e2e + the scheduler tests; this is the pure-function
+// state machine pinned to its acceptance shape.
+describe("daemonRateLimitDecision (issue #478)", () => {
+	const reset = { resetsAt: 2_000_000_000, resetAtIso: "2033-05-18T03:33:20.000Z", rateLimitType: "five_hour" as string | null }
+	const cooldownNowMs = (reset.resetsAt - 60) * 1000
+	const postResetNowMs = (reset.resetsAt + 5) * 1000
+
+	test("normal — no cooldown armed → no spawn cap", () => {
+		const state = createDaemonRateLimitState()
+		const decision = daemonRateLimitDecision(state, cooldownNowMs)
+		expect(decision.kind).toBe("normal")
+		expect(decision.maxSpawns).toBeUndefined()
+	})
+
+	test("paused — cooldown armed, reset not elapsed → 0 spawns", () => {
+		const state = { ...createDaemonRateLimitState(), reset }
+		const decision = daemonRateLimitDecision(state, cooldownNowMs)
+		expect(decision.kind).toBe("paused")
+		expect(decision.maxSpawns).toBe(0)
+	})
+
+	test("stagger-wait — reset elapsed, stagger window still cooling → 0 spawns", () => {
+		const state = {
+			...createDaemonRateLimitState(),
+			reset,
+			nextResumeAtMs: postResetNowMs + 10_000,
+		}
+		const decision = daemonRateLimitDecision(state, postResetNowMs)
+		expect(decision.kind).toBe("stagger-wait")
+		expect(decision.maxSpawns).toBe(0)
+	})
+
+	test("stagger-ready — reset elapsed, stagger window passed (or never armed) → cap = 1", () => {
+		const stateReady = { ...createDaemonRateLimitState(), reset, nextResumeAtMs: postResetNowMs - 1 }
+		const decisionReady = daemonRateLimitDecision(stateReady, postResetNowMs)
+		expect(decisionReady.kind).toBe("stagger-ready")
+		expect(decisionReady.maxSpawns).toBe(1)
+
+		// Right after reset elapses, no stagger has armed yet → decision still grants 1.
+		const stateFirstTick = { ...createDaemonRateLimitState(), reset }
+		const decisionFirstTick = daemonRateLimitDecision(stateFirstTick, postResetNowMs)
+		expect(decisionFirstTick.kind).toBe("stagger-ready")
+		expect(decisionFirstTick.maxSpawns).toBe(1)
+	})
+
+	test("DAEMON_RATE_LIMIT_STAGGER_MS pins the post-reset stagger window per #157 history", () => {
+		expect(DAEMON_RATE_LIMIT_STAGGER_MS).toBe(30_000)
 	})
 })
 

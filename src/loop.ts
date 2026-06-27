@@ -30,6 +30,7 @@ import {
 	type PresetPhasePrivilegedOp,
 } from "./daemon"
 import { dispatchSubcommand } from "./install-commands"
+import { classifyRateLimitFromStdout } from "./rate-limit"
 import { LOOP_RUN_CREDENTIAL_ENV, RuntimePathError, resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import {
 	parseObservabilityEventType,
@@ -6381,6 +6382,13 @@ export function parseSessionIdFromRunnerStream(runner: AgentRunnerKind, text: st
 }
 
 export function extractErrorCode(stdoutText: string, stderrText: string): string {
+	// #478: account-level rate limit shapes do not fit the generic `error`/`message` extraction
+	// below — claude/codex emit `{type:"result",is_error:true,api_error_status:429,result:"..."}`
+	// (no `error` field, no `message` string), so the pre-#478 path fell through to stderr,
+	// which is empty on rate-limit, and returned "unclassified". Delegate to the dedicated
+	// rate-limit classifier first so `isTransient5xx` then routes to resume instead of fresh.
+	const rateLimitCode = classifyRateLimitFromStdout(stdoutText).code
+	if (rateLimitCode !== null) return rateLimitCode
 	const lines = stdoutText.split("\n")
 	for (let i = lines.length - 1; i >= 0; i--) {
 		const line = lines[i]

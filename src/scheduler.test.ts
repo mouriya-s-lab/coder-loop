@@ -1098,6 +1098,88 @@ describe("scheduler", () => {
 			fixture.store.close()
 		}
 	})
+
+	// #478 acceptance rows 4/4b/7: a rate-limit exit arms the in-state cooldown gate
+	// synchronously, fires the `scheduler.rate_limited` event, calls the daemon-side
+	// `onRateLimitObserved` callback with the parsed reset, and (critically) does not
+	// consume an attempt slot — the spawn-time `attempts +1` is rolled back so the
+	// rate-limited item retries fresh after cooldown without burning its budget.
+	test("rate-limit exit arms cooldown, emits event, fires callback, and does not consume an attempt", async () => {
+		const fixture = await createFixture("rate-limit-exit")
+		try {
+			const chain = createChain(fixture.store, "rate-limit-exit-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 4780, repoCwd: "/repo/a" })
+			const root = resolve(fixture.loopDataRoot, "..")
+			const resetsAt = 1_900_000_000
+			const rateLimitRunner = resolve(root, "rate-limit-runner.sh")
+			// Real W3 fixture stdout shape (chain 35/37/38, 2026-06-17 22:56 JST).
+			const w3Lines = [
+				`{"type":"system","session_id":"sess-rl-1"}`,
+				`{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":${resetsAt},"rateLimitType":"five_hour"}}`,
+				`{"type":"result","is_error":true,"api_error_status":429,"result":"You've hit your session limit"}`,
+			]
+			await writeFile(rateLimitRunner, `#!/bin/sh\n${w3Lines.map((line) => `echo '${line}'`).join("\n")}\nexit 1\n`)
+			await chmod(rateLimitRunner, 0o755)
+
+			const observed: Array<{ runId: string; resetsAt: number }> = []
+			const tick = await schedulerTick(fixture.options({
+				runner: { kind: "claude", source: "iteration-default", binary: rateLimitRunner, extraArgs: [], model: null },
+				onRateLimitObserved: (info) => { observed.push({ runId: info.runId, resetsAt: info.reset.resetsAt }) },
+			}))
+			expect(tick.spawnedRuns).toHaveLength(1)
+			await tick.spawnedRuns[0]!.closed
+
+			// AC7: attempts unchanged after rate-limit exit (spawn-time +1 rolled back).
+			expect(fixture.store.getItem(item.id)?.attempts).toBe(0)
+			// AC4 prereq: in-state cooldown gate armed synchronously.
+			expect(fixture.state.rateLimitedUntilMs).toBe(resetsAt * 1000)
+			// AC4 wire shape: `scheduler.rate_limited` event emitted with the parsed reset.
+			const rateLimitEvents = fixture.schedulerEvents.filter((event) => event.type === "scheduler.rate_limited")
+			expect(rateLimitEvents).toHaveLength(1)
+			const event = rateLimitEvents[0]
+			if (event?.type !== "scheduler.rate_limited") throw new Error("expected scheduler.rate_limited")
+			expect(event.resetsAt).toBe(resetsAt)
+			expect(event.rateLimitType).toBe("five_hour")
+			expect(event.itemId).toBe(item.id)
+			// Daemon-side callback receives the same reset and the originating runId.
+			expect(observed).toHaveLength(1)
+			expect(observed[0]?.resetsAt).toBe(resetsAt)
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	// #478 acceptance row 4b: while the in-state cooldown is armed (rateLimitedUntilMs >
+	// nowMs), the scheduler tick must not spawn anything — even a fresh sibling item
+	// queued in the same chain stays at `queued` with no attempt consumed. This proves
+	// the tick-boundary gate plugs the pre-#478 race where the next 1 s tick re-spawned
+	// the rate-limited item before the daemon-side persist landed.
+	test("cooldown-armed state pauses tick spawn until reset elapses", async () => {
+		const fixture = await createFixture("rate-limit-gate")
+		try {
+			const chain = createChain(fixture.store, "rate-limit-gate-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 4781, repoCwd: "/repo/a", writeStatus: "done" })
+			// Arm the gate manually to the future, simulating a prior run having just
+			// observed the rate-limit signal. Use the fixture's injected `now` clock so
+			// the in-tick comparison is deterministic.
+			const fixtureNowSeconds = 1_800_000_100
+			const futureCooldownMs = (fixtureNowSeconds + 600) * 1000
+			fixture.state.rateLimitedUntilMs = futureCooldownMs
+
+			const tick = await schedulerTick(fixture.options({ now: () => fixtureNowSeconds }))
+			expect(tick.spawnedRuns).toHaveLength(0)
+			// Item stays at queued with no attempts burned.
+			expect(fixture.store.getItem(item.id)?.attempts).toBe(0)
+			expect(fixture.store.getItem(item.id)?.status).toBe(runtimeStatus("queued"))
+
+			// Advance the clock past the cooldown and the same tick spawns normally.
+			const tickAfter = await schedulerTick(fixture.options({ now: () => fixtureNowSeconds + 700 }))
+			expect(tickAfter.spawnedRuns).toHaveLength(1)
+			await tickAfter.spawnedRuns[0]!.closed
+		} finally {
+			fixture.store.close()
+		}
+	})
 })
 
 describe("scheduler reads the agent-written item status (v1 status model)", () => {
