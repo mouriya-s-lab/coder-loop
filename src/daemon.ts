@@ -137,10 +137,11 @@ export type DaemonCommandName =
 	| "chain.stop"
 	| "chain.resume"
 	| "chain.delete"
-	// #481: patch runner-slot bindings on a chain (claude / codex / opencode `.model`).
-	// Operator surface only; hard-deny for agents. Used by the `coder-loop runtime set` CLI
-	// to idempotently rewrite per-runner model overrides without round-tripping the full
-	// chain.metadata blob.
+	// #481/#526: patch runner-slot bindings on a chain (claude / codex / opencode `.model`).
+	// Operator surface only; hard-deny for agents. The `coder-loop chain set-runner-model`
+	// CLI is the entry point (replaced the retired runner-binding override surface from the
+	// pre-#526 `runtime` namespace); the op idempotently rewrites per-runner model overrides
+	// without round-tripping the full chain.metadata blob.
 	| "chain.updateBindings"
 	| "item.add"
 	| "item.batchAdd"
@@ -1950,9 +1951,11 @@ export class CoderLoopDaemon {
 		}
 	}
 
-	// #481 chain.updateBindings: patch a small set of runner-binding overrides on a chain
-	// (currently claude / codex / opencode `.model`) idempotently. Operator-only surface; the
-	// `coder-loop runtime set <target>` CLI is the entry point. Semantics:
+	// #481/#526 chain.updateBindings: patch a small set of runner-binding overrides on a
+	// chain (currently claude / codex / opencode `.model`) idempotently. Operator-only
+	// surface; the `coder-loop chain set-runner-model <chain>` CLI is the entry point
+	// (replaced the retired runner-binding override surface from the pre-#526 `runtime`
+	// namespace). Semantics:
 	//   - The `patch` JSON object has shape `{ "<kind>": { "model": "<string>" } }` where `<kind>`
 	//     is `"claude" | "codex" | "opencode"`. Other shapes (other keys, missing kind block) are
 	//     ignored — the operator can pass an empty patch as a read-back / no-op.
@@ -1979,8 +1982,14 @@ export class CoderLoopDaemon {
 			const blockObject = block as JsonObject
 			const newModel = blockObject.model
 			if (newModel === undefined) continue
-			if (typeof newModel !== "string" || newModel === "") {
-				throw new DaemonError("invalid_request", `chain.updateBindings: patch.${kind}.model must be a non-empty string when provided`, { chainName: chain.name, kind, modelType: typeof newModel })
+			// #526: also reject whitespace-only / whitespace-containing model strings here.
+			// The CLI parser (`parseRequiredNonEmptyString`) already enforces this on the
+			// operator surface; matching it daemon-side closes the second leak path (any
+			// non-CLI caller hand-rolling the wire op directly). Without this guard a
+			// `"   "` model lands in `chain.metadata.<kind>.model` and only fails at the
+			// next spawn far from the write site.
+			if (typeof newModel !== "string" || newModel === "" || /\s/.test(newModel)) {
+				throw new DaemonError("invalid_request", `chain.updateBindings: patch.${kind}.model must be a non-empty string without whitespace when provided`, { chainName: chain.name, kind, modelType: typeof newModel })
 			}
 			const existing = merged[kind]
 			const existingObject = existing !== null && typeof existing === "object" && !Array.isArray(existing) ? existing : {}
