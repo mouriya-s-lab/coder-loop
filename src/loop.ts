@@ -249,6 +249,21 @@ export type ChainCommandArgs =
 			loopDataRoot: string | null
 			json: boolean
 	  }
+	// #526: replaces the retired runner-binding override surface (#432 K2 末段 +
+	// close-verification row #4 — entire `runtime` CLI namespace gone). Operator-only
+	// entry point to patch one chain's `chain.metadata.<kind>.model` runner-binding
+	// override. Single kind per invocation makes the ADT precise, the error attribution
+	// sharp, and the idempotency check on the daemon side trivially observable. The
+	// storage path (`chain.metadata.<kind>.model`) and the daemon op
+	// (`chain.updateBindings`) are reused verbatim — only the CLI face changed.
+	| {
+			action: "set-runner-model"
+			name: string
+			kind: AgentRunnerKind
+			model: string
+			loopDataRoot: string | null
+			json: boolean
+	  }
 
 export type ItemCommandArgs =
 	| {
@@ -582,7 +597,7 @@ export type PresetPhaseChainAction = (typeof PRESET_PHASE_CHAIN_ACTIONS)[number]
 // `writableFields` is `ReadonlySet<string>` (open vocabulary — preset declares its own field
 // universe). `privilegedOps` is narrowed to the engine's closed `PresetPhasePrivilegedOp` union
 // at preset-load time (#409): unknown ops are rejected with the full vocabulary in the error
-// message, so the runtime set never carries a string the gate could not decide on.
+// message, so the in-memory privilegedOps Set never carries a string the gate could not decide on.
 export type PresetPhaseRights = {
 	createItems: boolean
 	writableFields: ReadonlySet<string>
@@ -1427,6 +1442,40 @@ const chainDeleteCliCommand = command({
 	}),
 })
 
+// #526: replaces the retired runner-binding override surface (the entire `runtime` CLI
+// namespace was struck out by #432 K2 末段 + close-verification row #4; #481 had
+// re-introduced a narrow slice for opencode-model overrides, which is the slice this
+// chain-side command now absorbs). Operator-only entry point that patches one chain's
+// runner-binding `model` override. Wraps the same `chain.updateBindings` daemon op the
+// retired command used — the storage path (`chain.metadata.<kind>.model`) and the wire
+// patch shape (`{<kind>: {model}}`) are preserved verbatim, only the CLI face changed.
+// Single kind per invocation: tighter ADT input, precise error attribution, daemon-side
+// idempotency check on re-run. Same flag set as `chain status/stop/resume/delete`
+// (positional chain name + optional --loop-data-root / --json) so it slots cleanly into
+// the existing `chain` subcommand group instead of resurrecting a top-level namespace.
+const chainSetRunnerModelCliCommand = command({
+	name: "set-runner-model",
+	description: "Patch one chain's `chain.metadata.<kind>.model` runner-binding override through the daemon socket.",
+	args: {
+		name: positional({ displayName: "chain", type: cmdString }),
+		kind: option({ long: "kind", type: cmdString }),
+		model: option({ long: "model", type: cmdString }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		json: flag({ long: "json" }),
+	},
+	handler: (args): CliCommand => ({
+		kind: "chain",
+		args: {
+			action: "set-runner-model",
+			name: args.name,
+			kind: parseRequiredRunnerKind(args.kind, "--kind"),
+			model: parseRequiredNonEmptyString(args.model, "--model"),
+			loopDataRoot: args.loopDataRoot ?? null,
+			json: args.json,
+		},
+	}),
+})
+
 const chainCliCommand = subcommands({
 	name: "chain",
 	description: "Operate centralized coder-loop chains through the daemon socket.",
@@ -1437,6 +1486,7 @@ const chainCliCommand = subcommands({
 		stop: chainStopCliCommand,
 		resume: chainResumeCliCommand,
 		delete: chainDeleteCliCommand,
+		"set-runner-model": chainSetRunnerModelCliCommand,
 	},
 })
 
@@ -1792,6 +1842,28 @@ function parseOptionalRunner(value: string | null, flagName: string): AgentRunne
 	fail(`${flagName} must be claude, codex, or opencode, got: ${value}`)
 }
 
+// #526 chain set-runner-model boundary parsers. Required variants of the runner-kind /
+// non-whitespace-string narrowings so the CLI fails before the daemon round-trip when an
+// operator omits `--kind` / `--model`, passes a typo, or passes whitespace-only.
+// `parseRequiredItemId` (`src/loop.ts:1808`) set the sibling-parser standard: any
+// whitespace in a required CLI string is a typo, not a value. `parseRequiredNonEmptyString`
+// follows the same rule below — `--model "   "` would otherwise silently land in
+// `chain.metadata.<kind>.model` and only fail at the next spawn far away from the write
+// site. `parseRequiredRunnerKind` is the direct three-string narrowing (no proxy through
+// `parseOptionalRunner`, whose null-return branch the type system requires here but the
+// narrowed input could never hit).
+function parseRequiredRunnerKind(value: string, flagName: string): AgentRunnerKind {
+	if (typeof value !== "string" || value.length === 0) fail(`${flagName} is required`)
+	if (value === "claude" || value === "codex" || value === "opencode") return value
+	fail(`${flagName} must be claude, codex, or opencode, got: ${value}`)
+}
+
+function parseRequiredNonEmptyString(value: string, flagName: string): string {
+	if (typeof value !== "string" || value.length === 0) fail(`${flagName} is required`)
+	if (/\s/.test(value)) fail(`${flagName} must not contain whitespace, got: ${JSON.stringify(value)}`)
+	return value
+}
+
 // #412 CLI item-preset parser: exactly one of --preset or --preset-path is required for `coder-loop
 // item add`. The CLI rejects locally so the operator gets an immediate, friendlier message before the
 // daemon's structured error fires.
@@ -1918,6 +1990,20 @@ async function runChainCommand(args: string[]): Promise<void> {
 	if (chainArgs.action === "resume") {
 		const result = await requestDaemonResult(chainArgs.loopDataRoot, "chain.resume", { chainName: chainArgs.name })
 		writeCommandResult(result, chainArgs.json, formatChainResumeResult)
+		return
+	}
+	if (chainArgs.action === "set-runner-model") {
+		// #526: assemble the wire patch on the CLI side so the chain-action dispatch reads
+		// like every other chain.* op (one branch, one daemon call, one formatter). The
+		// daemon op re-validates `{<kind>: {model}}` with hand-rolled per-kind typeof
+		// guards (`src/daemon.ts:1962-2005` — kind in {claude,codex,opencode} union with
+		// model:string-non-whitespace), so the CLI passes the minimal shape it accepts.
+		const patch: JsonObject = { [chainArgs.kind]: { model: chainArgs.model } }
+		const result = await requestDaemonResult(chainArgs.loopDataRoot, "chain.updateBindings", {
+			chainName: chainArgs.name,
+			patch,
+		})
+		writeCommandResult(result, chainArgs.json, (obj) => formatChainSetRunnerModelResult(obj, chainArgs.name, chainArgs.kind, chainArgs.model))
 		return
 	}
 	const result = await requestDaemonResult(chainArgs.loopDataRoot, "chain.delete", { chainName: chainArgs.name })
@@ -2377,6 +2463,24 @@ function formatChainDeleteResult(result: JsonObject): string {
 	return `deleted chain ${String(chain?.name ?? "")}\n`
 }
 
+// #526: text formatter for `chain set-runner-model`. Echoes which chain / runner /
+// model the operator targeted plus the daemon-reported idempotency outcome (so a
+// re-run that already matches the stored binding prints `alreadyMatched: yes`,
+// matching the no-op semantics of `chain.updateBindings`). `--json` still passes
+// the daemon reply through verbatim via `writeCommandResult`.
+function formatChainSetRunnerModelResult(result: JsonObject, name: string, kind: AgentRunnerKind, model: string): string {
+	const updatedKinds = Array.isArray(result.updatedKinds) ? result.updatedKinds.filter((entry): entry is string => typeof entry === "string") : []
+	const alreadyMatched = result.alreadyMatched === true
+	return [
+		`chain: ${name}`,
+		`kind: ${kind}`,
+		`model: ${model}`,
+		`alreadyMatched: ${alreadyMatched ? "yes" : "no"}`,
+		`updatedKinds: ${updatedKinds.length === 0 ? "<none>" : updatedKinds.join(", ")}`,
+		"",
+	].join("\n")
+}
+
 function formatItemMutationResult(result: JsonObject): string {
 	const item = jsonObjectEntry(result.item)
 	// #419: prefer `itemId` (the post-retirement opaque string id surfaced by `itemToJson`); fall
@@ -2543,80 +2647,6 @@ async function runQueueCommand(args: string[]): Promise<void> {
 	await runQueueUnblockCommand(parsed.value.args)
 }
 
-// #433: the broader `runtime` CLI command group was retired. #481 re-introduces a narrow
-// `runtime set` surface scoped to runner-binding model overrides (claude / codex / opencode).
-// Phase model still flows from preset.toml; this CLI is the operator's hand-tuning lever for
-// the per-runner `model` slot on the chain bound to a target (e.g. picking a specific GLM build
-// for the opencode runner without editing the preset). Idempotent: identical input is a no-op.
-async function runRuntimeCommand(args: string[]): Promise<void> {
-	const sub = args[0]
-	if (sub !== "set") {
-		fail("runtime: only `runtime set <target> [--claude-model M] [--codex-model M] [--opencode-model M] [--chain N] [--loop-data-root P] [--json]` is supported")
-	}
-	const rest = args.slice(1)
-	let target: string | null = null
-	let claudeModel: string | null = null
-	let codexModel: string | null = null
-	let opencodeModel: string | null = null
-	let loopDataRoot: string | null = null
-	let chainName: string | null = null
-	let json = false
-	for (let i = 0; i < rest.length; i++) {
-		const arg = rest[i]
-		if (arg === undefined) continue
-		if (!arg.startsWith("--")) {
-			if (target !== null) fail(`runtime set: unexpected positional argument "${arg}"`)
-			target = arg
-			continue
-		}
-		const eq = arg.indexOf("=")
-		const flagName = eq === -1 ? arg : arg.slice(0, eq)
-		const inlineValue = eq === -1 ? null : arg.slice(eq + 1)
-		const takeValue = (name: string): string => {
-			if (inlineValue !== null) return inlineValue
-			const next = rest[i + 1]
-			if (next === undefined || next.startsWith("--")) fail(`runtime set: ${name} requires a value`)
-			i += 1
-			return next
-		}
-		if (flagName === "--claude-model") { claudeModel = takeValue(flagName); continue }
-		if (flagName === "--codex-model") { codexModel = takeValue(flagName); continue }
-		if (flagName === "--opencode-model") { opencodeModel = takeValue(flagName); continue }
-		if (flagName === "--loop-data-root") { loopDataRoot = takeValue(flagName); continue }
-		if (flagName === "--chain") { chainName = takeValue(flagName); continue }
-		if (flagName === "--json") { json = true; continue }
-		fail(`runtime set: unknown flag "${arg}"`)
-	}
-	if (target === null) fail("runtime set: <target> is required")
-	const targetCwd = resolve(target)
-	const loaded = await loadTargetRuntime({
-		targetCwd,
-		loopDataRoot,
-		chainName,
-		repository: null,
-		baseBranch: null,
-		dryRun: false,
-		worktree: false,
-		chainStatusScope: "status-snapshot",
-	})
-	const patch: JsonObject = {}
-	if (claudeModel !== null) patch.claude = { model: claudeModel }
-	if (codexModel !== null) patch.codex = { model: codexModel }
-	if (opencodeModel !== null) patch.opencode = { model: opencodeModel }
-	const result = await requestDaemonResult(loopDataRoot, "chain.updateBindings", {
-		chainName: loaded.chain.name,
-		patch,
-	})
-	writeCommandResult(result, json, (obj) => {
-		const updatedKinds = Array.isArray(obj.updatedKinds) ? obj.updatedKinds.filter((entry): entry is string => typeof entry === "string") : []
-		const lines: string[] = []
-		lines.push(`chain: ${loaded.chain.name}`)
-		lines.push(`alreadyMatched: ${obj.alreadyMatched === true ? "yes" : "no"}`)
-		lines.push(`updatedKinds: ${updatedKinds.length === 0 ? "<none>" : updatedKinds.join(", ")}`)
-		return `${lines.join("\n")}\n`
-	})
-}
-
 async function main() {
 	const firstArg = process.argv[2]
 	if (firstArg === "status") {
@@ -2643,10 +2673,6 @@ async function main() {
 		await runQueueCommand(process.argv.slice(3))
 		return
 	}
-	if (firstArg === "runtime") {
-		await runRuntimeCommand(process.argv.slice(3))
-		return
-	}
 	if (firstArg === "doctor") {
 		const handled = await dispatchSubcommand(firstArg, process.argv.slice(3))
 		if (handled) return
@@ -2663,10 +2689,9 @@ function rootUsage(): string {
 		"  status <target> --json",
 		"  logs <target> --json [--kind K] [--type T] [--chain C] [--item ID] [--run RUN_ID] [--phase P] [--since TS] [--follow]",
 		"  daemon <up|down|status|start|stop|restart>",
-		"  chain <create|list|status|stop|resume|delete>",
+		"  chain <create|list|status|stop|resume|delete|set-runner-model>",
 		"  item <add|batch-add|list|update|reorder|exits|exit-action>",
 		"  queue unblock <target> --issue <issue>",
-		"  runtime set <target> [--claude-model M] [--codex-model M] [--opencode-model M]",
 		"  doctor <target>",
 		"",
 	].join("\n")
