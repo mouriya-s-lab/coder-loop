@@ -229,6 +229,104 @@ test("invalid review session id clears only review/claude and the next review sp
 	}
 })
 
+// #528: binary-independent lock for opencode's invalid-session path. The existing claude-side
+// test above covers the equivalent shape for claude/review; opencode has no equivalent until
+// now, so a regression in `OPENCODE_SESSION_ID_INVALID` or in scheduler's opencode-stderr
+// handling would only surface through real-binary e2e (issue #481 / #526 acceptance row 6).
+// The scheduler/runner integration here mirrors the claude case so that the detector → emit
+// `session_id.invalidated` → clear `session_ids` chain is verified entirely from source —
+// the stderr fixture uses the **exact byte shape** produced by `opencode 1.17.5` (ANSI CSI
+// SGR red/bold wrapping `Error: ` and a `\x1b[0m` reset before `Session not found`), which
+// the operator captured via a `opencode run -s <fake> noop` probe on 2026-06-28 (see
+// PR body Layer 1 of #528).
+test("invalid review session id on opencode clears only review/opencode and the next review spawn is fresh", async () => {
+	const staleReviewSessionId = "ses_FAKE_INVALID_REVIEW_OPENCODE_AAA"
+	const freshReviewSessionId = "ses_b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2"
+	// Exact ANSI byte shape captured from `opencode run -s ses_FAKE_INVALID_DOES_NOT_EXIST_XYZ "noop"`
+	// (opencode 1.17.5 on macOS, 2026-06-28). The detector strips CSI before matching so the regex
+	// must still succeed on this exact wrapping; if the binary later changes the prefix or the
+	// reset position, this test stays valid because the detector is stripping ANSI, not the test.
+	const opencodeInvalidStderr = "\x1b[91m\x1b[1mError: \x1b[0mSession not found\n"
+	const fixture = await createCrossRunnerFixture("review-session-invalid-opencode", [
+		{
+			runner: "codex",
+			phase: "iteration",
+			sessionId: "d400e2b2-04a4-44f8-8f13-3078f41a5594",
+			stdout: ["ITERATION SUMMARY: scope=cross-runner; reason=iteration-complete"],
+		},
+		{
+			runner: "opencode",
+			phase: "review",
+			exitCode: 1,
+			stderr: [opencodeInvalidStderr],
+		},
+		{
+			runner: "opencode",
+			phase: "review",
+			sessionId: freshReviewSessionId,
+			stdout: ["PHASE DONE: issue=#31604; reason=fresh-review-complete"],
+			writeStatus: "done",
+		},
+	])
+	try {
+		let now = 1_800_316_500
+		const chain = createChain(fixture.store, "cross-runner-invalid-session-chain-opencode")
+		const item = createItem(fixture.store, chain, 316_004)
+		const options = fixture.options({
+			now: () => now,
+			spawnFailureBackoff: { initialSeconds: 1, maxSeconds: 2 },
+			phaseRunner: ({ phase }) =>
+				phase === "review"
+					? { kind: "opencode", source: "preset", binary: fixture.wrappers.opencode, extraArgs: [], model: null }
+					: { kind: "codex", source: "iteration-default", binary: fixture.wrappers.codex, extraArgs: [], model: null },
+		})
+
+		await closeOnlySpawn(await schedulerTick(options))
+		fixture.store.setItemSessionId(item.id, {
+			phase: "review",
+			runner: "opencode",
+			sessionId: staleReviewSessionId,
+			updatedAt: now,
+		})
+
+		const invalidReviewTick = await schedulerTick(options)
+		expect(invalidReviewTick.spawnedRuns).toHaveLength(1)
+		const invalidReviewClosed = await invalidReviewTick.spawnedRuns[0]!.closed
+		expect(invalidReviewClosed.exitCode).toBe(1)
+		expect(invalidReviewClosed.status).toBe("queued")
+		expect(fixture.store.getItem(item.id)?.phase).toBe("review")
+		expect(fixture.store.getItem(item.id)?.status).toBe("queued")
+		// Only review/opencode was cleared; iteration/codex must remain.
+		expect(fixture.store.getItemSessionId(item.id, { phase: "review", runner: "opencode" })).toBeNull()
+		expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "codex" })).toBe("d400e2b2-04a4-44f8-8f13-3078f41a5594")
+		expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({
+			type: "session_id.invalidated",
+			itemId: item.id,
+			phase: "review",
+			runner: "opencode",
+			previousSessionId: staleReviewSessionId,
+			reason: "runner_session_id_invalid",
+		}))
+
+		now += 1
+		const freshReviewTick = await schedulerTick(options)
+		expect(freshReviewTick.spawnedRuns).toHaveLength(1)
+		const freshReviewClosed = await freshReviewTick.spawnedRuns[0]!.closed
+		expect(freshReviewClosed.status).toBe("done")
+		expect(fixture.store.getItemSessionId(item.id, { phase: "review", runner: "opencode" })).toBe(freshReviewSessionId)
+
+		const fakeEvents = await readFakeRunnerEvents(fixture.eventLog)
+		expect(fakeEvents.map((event) => `${event.runner}:${event.phase}:${event.resumedSessionId ?? "fresh"}`)).toEqual([
+			"codex:iteration:fresh",
+			`opencode:review:${staleReviewSessionId}`,
+			"opencode:review:fresh",
+		])
+		expect(phaseStarts(fixture.schedulerEvents, item.id)).toEqual(["iteration", "review", "review"])
+	} finally {
+		fixture.store.close()
+	}
+})
+
 test("continuous fake runner failures exhaust at maxItemAttempts without another spawn", async () => {
 	// Neither failing agent writes a status. A failed iteration run does not structurally advance to the
 	// next phase; it retries iteration after the persisted backoff and exhausts at the attempt cap.
@@ -281,7 +379,7 @@ test("continuous fake runner failures exhaust at maxItemAttempts without another
 	}
 })
 
-type RunnerKind = "claude" | "codex"
+type RunnerKind = "claude" | "codex" | "opencode"
 
 type FakeRunnerResponse = {
 	runner: RunnerKind
@@ -312,6 +410,10 @@ type CrossRunnerFixture = {
 	loopDataRoot: string
 	eventLog: string
 	schedulerEvents: SchedulerEvent[]
+	// #528: tests that need to swap a phase off the default claude/codex pairing reach into the
+	// wrappers directly (e.g., to put opencode on iteration). The fixture exposes them so each
+	// test can build its own `phaseRunner` override without re-deriving paths.
+	wrappers: { codex: string; claude: string; opencode: string }
 	options: (overrides?: Partial<SchedulerOptions>) => SchedulerOptions
 }
 
@@ -322,10 +424,12 @@ async function createCrossRunnerFixture(name: string, responses: FakeRunnerRespo
 	const planPath = resolve(root, "cross-runner-plan.json")
 	const codexWrapper = resolve(root, "fake-codex.sh")
 	const claudeWrapper = resolve(root, "fake-claude.sh")
+	const opencodeWrapper = resolve(root, "fake-opencode.sh")
 	await mkdir(loopDataRoot, { recursive: true })
 	await writeFile(planPath, JSON.stringify({ responses }, null, 2))
 	await writeRunnerWrapper(codexWrapper, planPath, eventLog, "codex", loopDataRoot)
 	await writeRunnerWrapper(claudeWrapper, planPath, eventLog, "claude", loopDataRoot)
+	await writeRunnerWrapper(opencodeWrapper, planPath, eventLog, "opencode", loopDataRoot)
 
 	const store = openSqliteStateStore({ loopDataRoot })
 	const state = createSchedulerState()
@@ -361,7 +465,15 @@ async function createCrossRunnerFixture(name: string, responses: FakeRunnerRespo
 		...overrides,
 	})
 
-	return { store, state, loopDataRoot, eventLog, schedulerEvents, options }
+	return {
+		store,
+		state,
+		loopDataRoot,
+		eventLog,
+		schedulerEvents,
+		wrappers: { codex: codexWrapper, claude: claudeWrapper, opencode: opencodeWrapper },
+		options,
+	}
 }
 
 async function writeRunnerWrapper(path: string, planPath: string, eventLog: string, runner: RunnerKind, loopDataRoot: string): Promise<void> {

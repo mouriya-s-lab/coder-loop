@@ -3,7 +3,7 @@ import { dirname, resolve } from "node:path"
 
 import { openSqliteStateStore } from "../../src/sqlite-state"
 
-type RunnerKind = "claude" | "codex"
+type RunnerKind = "claude" | "codex" | "opencode"
 
 type FakeRunnerResponse = {
 	runner?: RunnerKind
@@ -29,7 +29,7 @@ type FakeRunnerState = {
 const [planPath, eventLogPath, runnerKind, loopDataRoot, ...runnerArgs] = Bun.argv.slice(2)
 
 if (planPath === undefined || eventLogPath === undefined || !isRunnerKind(runnerKind) || loopDataRoot === undefined) {
-	console.error("usage: cross-runner-fake.ts <plan.json> <event-log.jsonl> <claude|codex> <loop-data-root> [...runner args]")
+	console.error("usage: cross-runner-fake.ts <plan.json> <event-log.jsonl> <claude|codex|opencode> <loop-data-root> [...runner args]")
 	process.exit(2)
 }
 
@@ -61,6 +61,11 @@ await appendJsonLine(eventLogPath, {
 if (response.sessionId !== undefined && response.sessionId !== null) {
 	if (runnerKind === "claude") {
 		console.log(JSON.stringify({ type: "system", subtype: "init", session_id: response.sessionId }))
+	} else if (runnerKind === "opencode") {
+		// #481/#528: opencode's first stdout line carries `sessionID` (value `ses_<hex>`); see
+		// parseOpencodeSessionIdFromStream in src/loop.ts. The fake mirrors that contract so the
+		// scheduler's session id capture path is exercised end-to-end.
+		console.log(JSON.stringify({ sessionID: response.sessionId }))
 	} else {
 		console.log(JSON.stringify({ type: "thread.started", thread_id: response.sessionId }))
 	}
@@ -92,7 +97,7 @@ if (typeof response.writeStatus === "string") {
 process.exit(response.exitCode ?? 0)
 
 function isRunnerKind(value: string | undefined): value is RunnerKind {
-	return value === "claude" || value === "codex"
+	return value === "claude" || value === "codex" || value === "opencode"
 }
 
 async function readState(path: string): Promise<FakeRunnerState> {
@@ -130,6 +135,11 @@ function extractResumeSessionId(runner: RunnerKind, args: string[]): string | nu
 		const index = args.indexOf("--resume")
 		return index >= 0 ? args[index + 1] ?? null : null
 	}
+	if (runner === "opencode") {
+		// #481/#528: opencode resume passes `-s <sessionId>` (see agentOpencodeArgs in src/loop.ts).
+		const index = args.indexOf("-s")
+		return index >= 0 ? args[index + 1] ?? null : null
+	}
 	const index = args.indexOf("resume")
 	return index >= 0 ? args[index + 1] ?? null : null
 }
@@ -137,6 +147,7 @@ function extractResumeSessionId(runner: RunnerKind, args: string[]): string | nu
 function serializeRunnerText(runner: RunnerKind, text: string): string {
 	if (text.trimStart().startsWith("{")) return text
 	if (runner === "codex") return JSON.stringify({ type: "agent_message", text })
+	if (runner === "opencode") return JSON.stringify({ type: "message", role: "assistant", content: text })
 	return JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text }] } })
 }
 

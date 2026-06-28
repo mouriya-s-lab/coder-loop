@@ -42,4 +42,27 @@ describe("runner session id invalid detection", () => {
 		expect(opencodeSessionIdInvalidDetector.detectsSessionIdInvalid(bareStderr)).toBe(true)
 		expect(detectsSessionIdInvalid("opencode", bareStderr)).toBe(true)
 	})
+
+	// #528 spike: the regex must reject partial / adjacent matches so that an unrelated stderr
+	// mentioning "Session" or "not found" doesn't get classified as an invalid-session signal.
+	// These cases lock the regex shape so refactors (e.g., loosening to `/session.*not found/`)
+	// can't silently expand the match set.
+	test("opencode rejects partial / adjacent stderr lines that mention session or not-found", () => {
+		const rejects = [
+			// "Session" appears, but the literal "not found" phrase does not.
+			"Session created successfully",
+			"Session expired, please re-authenticate",
+			// "not found" appears, but not paired with the "Session" word the regex requires.
+			"Error: file not found",
+			"Error: command not found",
+			// Right tokens but in wrong order (regex anchors on `Error: Session not found`, ordered).
+			"Session not found Error",
+			// Empty stderr — opencode is allowed to exit non-zero with no stderr; engine MUST
+			// treat that as transient, not as an invalidation signal.
+			"",
+		]
+		for (const stderr of rejects) {
+			expect(detectsSessionIdInvalid("opencode", stderr)).toBe(false)
+		}
+	})
 })
