@@ -1982,8 +1982,14 @@ export class CoderLoopDaemon {
 			const blockObject = block as JsonObject
 			const newModel = blockObject.model
 			if (newModel === undefined) continue
-			if (typeof newModel !== "string" || newModel === "") {
-				throw new DaemonError("invalid_request", `chain.updateBindings: patch.${kind}.model must be a non-empty string when provided`, { chainName: chain.name, kind, modelType: typeof newModel })
+			// #526: also reject whitespace-only / whitespace-containing model strings here.
+			// The CLI parser (`parseRequiredNonEmptyString`) already enforces this on the
+			// operator surface; matching it daemon-side closes the second leak path (any
+			// non-CLI caller hand-rolling the wire op directly). Without this guard a
+			// `"   "` model lands in `chain.metadata.<kind>.model` and only fails at the
+			// next spawn far from the write site.
+			if (typeof newModel !== "string" || newModel === "" || /\s/.test(newModel)) {
+				throw new DaemonError("invalid_request", `chain.updateBindings: patch.${kind}.model must be a non-empty string without whitespace when provided`, { chainName: chain.name, kind, modelType: typeof newModel })
 			}
 			const existing = merged[kind]
 			const existingObject = existing !== null && typeof existing === "object" && !Array.isArray(existing) ? existing : {}

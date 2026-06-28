@@ -597,7 +597,7 @@ export type PresetPhaseChainAction = (typeof PRESET_PHASE_CHAIN_ACTIONS)[number]
 // `writableFields` is `ReadonlySet<string>` (open vocabulary — preset declares its own field
 // universe). `privilegedOps` is narrowed to the engine's closed `PresetPhasePrivilegedOp` union
 // at preset-load time (#409): unknown ops are rejected with the full vocabulary in the error
-// message, so the in-memory rights record never carries a string the gate could not decide on.
+// message, so the in-memory privilegedOps Set never carries a string the gate could not decide on.
 export type PresetPhaseRights = {
 	createItems: boolean
 	writableFields: ReadonlySet<string>
@@ -1843,21 +1843,24 @@ function parseOptionalRunner(value: string | null, flagName: string): AgentRunne
 }
 
 // #526 chain set-runner-model boundary parsers. Required variants of the runner-kind /
-// non-empty-string narrowings so the CLI fails before the daemon round-trip when an
-// operator omits `--kind` / `--model` or passes a typo. Mirrors `parseRequiredItemId`
-// and `parseRequiredNonNegativeInteger` shape so error messages stay uniform across
-// the central CLI surface. AgentRunnerKind ADT is sourced verbatim from #481's runner
-// boundary — the parser narrows untrusted string input into a precise variant tag
-// before it reaches the daemon op.
+// non-whitespace-string narrowings so the CLI fails before the daemon round-trip when an
+// operator omits `--kind` / `--model`, passes a typo, or passes whitespace-only.
+// `parseRequiredItemId` (`src/loop.ts:1808`) set the sibling-parser standard: any
+// whitespace in a required CLI string is a typo, not a value. `parseRequiredNonEmptyString`
+// follows the same rule below — `--model "   "` would otherwise silently land in
+// `chain.metadata.<kind>.model` and only fail at the next spawn far away from the write
+// site. `parseRequiredRunnerKind` is the direct three-string narrowing (no proxy through
+// `parseOptionalRunner`, whose null-return branch the type system requires here but the
+// narrowed input could never hit).
 function parseRequiredRunnerKind(value: string, flagName: string): AgentRunnerKind {
 	if (typeof value !== "string" || value.length === 0) fail(`${flagName} is required`)
-	const parsed = parseOptionalRunner(value, flagName)
-	if (parsed === null) fail(`${flagName} is required`)
-	return parsed
+	if (value === "claude" || value === "codex" || value === "opencode") return value
+	fail(`${flagName} must be claude, codex, or opencode, got: ${value}`)
 }
 
 function parseRequiredNonEmptyString(value: string, flagName: string): string {
 	if (typeof value !== "string" || value.length === 0) fail(`${flagName} is required`)
+	if (/\s/.test(value)) fail(`${flagName} must not contain whitespace, got: ${JSON.stringify(value)}`)
 	return value
 }
 
@@ -1992,8 +1995,9 @@ async function runChainCommand(args: string[]): Promise<void> {
 	if (chainArgs.action === "set-runner-model") {
 		// #526: assemble the wire patch on the CLI side so the chain-action dispatch reads
 		// like every other chain.* op (one branch, one daemon call, one formatter). The
-		// daemon op re-validates `{<kind>: {model}}` against its own arktype boundary —
-		// passing through `[kind]: {model}` here is the minimum shape the op accepts.
+		// daemon op re-validates `{<kind>: {model}}` with hand-rolled per-kind typeof
+		// guards (`src/daemon.ts:1962-2005` — kind in {claude,codex,opencode} union with
+		// model:string-non-whitespace), so the CLI passes the minimal shape it accepts.
 		const patch: JsonObject = { [chainArgs.kind]: { model: chainArgs.model } }
 		const result = await requestDaemonResult(chainArgs.loopDataRoot, "chain.updateBindings", {
 			chainName: chainArgs.name,
@@ -2642,14 +2646,6 @@ async function runQueueCommand(args: string[]): Promise<void> {
 	if (parsed.value.kind !== "queue") return
 	await runQueueUnblockCommand(parsed.value.args)
 }
-
-// #526: the entire `runtime` CLI namespace is retired (closing #432 K2 末段 +
-// close-verification row #4). The narrow runner-binding model-override surface
-// previously bolted onto it now lives at `coder-loop chain set-runner-model`
-// (see chainSetRunnerModelCliCommand above), wrapping the same
-// `chain.updateBindings` daemon op without resurrecting a top-level command
-// group. There is no `runtime` dispatch — an operator typing it falls through
-// to the generic unknown-command branch in `main()` (usage + exit 1).
 
 async function main() {
 	const firstArg = process.argv[2]

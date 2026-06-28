@@ -65,6 +65,87 @@ describe("smoke: v2 central chain CLI", () => {
 		expect(showCombined).not.toContain("runtime set: <target> is required")
 	})
 
+	// #526: happy-path for the new `chain set-runner-model` CLI surface. Locks in the
+	// wire patch shape ({<kind>: {model}}), the idempotency short-circuit
+	// (`alreadyMatched=true` / `updatedKinds=[]` on second identical write), the
+	// daemon-reported metadata round-trip, and the SQLite read-back of
+	// `chain.metadata.<kind>.model`. Without this row the new surface is locked only
+	// by negative usage assertions, leaving the operational write path untested.
+	test("chain set-runner-model patches chain.metadata.<kind>.model idempotently (#526)", async () => {
+		const fixture = await createTarget("chain-set-runner-model-smoke")
+		const seedStore = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+		try {
+			seedStore.createChain({
+				name: fixture.chainName,
+				preset: "gh-issue-pr-iteration",
+				repository: "fixture/repo",
+				baseBranch: "main",
+				metadata: storedChainMetadata({}),
+			})
+		} finally {
+			seedStore.close()
+		}
+
+		const daemon = await startCoderLoopDaemon({ loopDataRoot: fixture.loopDataRoot, shutdownGraceMs: 100, scheduler: { enabled: false } })
+		try {
+			const argsBase = [
+				"chain",
+				"set-runner-model",
+				fixture.chainName,
+				"--kind",
+				"opencode",
+				"--model",
+				"opencode-go/glm-5.2",
+				"--loop-data-root",
+				fixture.loopDataRoot,
+				"--json",
+			]
+
+			const first = expectJsonOk(await runCliAsync(argsBase))
+			expect(first.alreadyMatched).toBe(false)
+			expect(first.updatedKinds).toEqual(["opencode"])
+			expect(first.chain.metadata.opencode.model).toBe("opencode-go/glm-5.2")
+
+			const second = expectJsonOk(await runCliAsync(argsBase))
+			expect(second.alreadyMatched).toBe(true)
+			expect(second.updatedKinds).toEqual([])
+			expect(second.chain.metadata.opencode.model).toBe("opencode-go/glm-5.2")
+
+			const verifyStore = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				const reread = verifyStore.getChainByName(fixture.chainName)
+				expect(reread).not.toBeNull()
+				const metadata = reread?.metadata as { opencode?: { model?: string } }
+				expect(metadata?.opencode?.model).toBe("opencode-go/glm-5.2")
+			} finally {
+				verifyStore.close()
+			}
+		} finally {
+			await daemon.stop()
+		}
+	}, 30_000)
+
+	// #526: CLI-side parser rejections for `chain set-runner-model`. These run without a
+	// daemon (the CLI parser fails before any socket round-trip), pinning the boundary
+	// guarantees `parseRequiredRunnerKind` / `parseRequiredNonEmptyString` make. The
+	// whitespace row is specifically a regression test for the silent-failure path
+	// surfaced in code review: pre-fix, `--model "   "` landed `model: "   "` in SQLite.
+	test("chain set-runner-model rejects bogus --kind / empty / whitespace --model at parse time (#526)", () => {
+		const bogusKind = runCli(["chain", "set-runner-model", "anychain", "--kind", "bogus", "--model", "claude-sonnet-4-6"])
+		expect(bogusKind.exitCode).toBe(1)
+		const bogusKindCombined = bogusKind.stderr + bogusKind.stdout
+		expect(bogusKindCombined).toContain("--kind must be claude, codex, or opencode")
+
+		const whitespaceModel = runCli(["chain", "set-runner-model", "anychain", "--kind", "opencode", "--model", "   "])
+		expect(whitespaceModel.exitCode).toBe(1)
+		const whitespaceCombined = whitespaceModel.stderr + whitespaceModel.stdout
+		expect(whitespaceCombined).toContain("--model must not contain whitespace")
+
+		const innerWhitespaceModel = runCli(["chain", "set-runner-model", "anychain", "--kind", "opencode", "--model", "has space"])
+		expect(innerWhitespaceModel.exitCode).toBe(1)
+		expect(innerWhitespaceModel.stderr + innerWhitespaceModel.stdout).toContain("--model must not contain whitespace")
+	})
+
 	test("status and queue unblock use SQLite state", async () => {
 		const fixture = await createTarget("chain-smoke")
 		seedChain(fixture, {
