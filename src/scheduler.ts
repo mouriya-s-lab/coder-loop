@@ -1228,6 +1228,10 @@ function attachRunCloseHandler(
 					if (currentRun?.runId === runId) options.store.clearCurrentRun(chain.id)
 
 					if (slot.activeRun?.runId === runId) slot.activeRun = null
+					// #530: revoke synchronously alongside activeRun=null so `listActiveRuns`
+					// empty and credential-absent are atomic from the event loop's perspective.
+					// The `finally` below still runs (Map.delete is idempotent) as safety net.
+					if (credential !== null) options.runCredentials?.revoke(credential, credentialContext)
 					const excerpt = await collectObservabilityExcerpt({
 						stdoutPath: outputPaths.stdoutPath,
 						stderrPath: outputPaths.stderrPath,
