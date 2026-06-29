@@ -30,11 +30,12 @@ const status: InternalStatus = parseInternalStatus("queued", "fixture.status")
 void status
 `)
 
-		const rejected = await runTypeScriptNoEmit(negativePath)
+		const [rejected, accepted] = await Promise.all([
+			runTypeScriptNoEmit(negativePath),
+			runTypeScriptNoEmit(positivePath),
+		])
 		expect(rejected.code).not.toBe(0)
 		expect(`${rejected.stdout}\n${rejected.stderr}`).toContain("is not assignable to type 'InternalStatus'")
-
-		const accepted = await runTypeScriptNoEmit(positivePath)
 		expect(accepted.code).toBe(0)
 	})
 })
@@ -50,6 +51,7 @@ async function runTypeScriptNoEmit(path: string): Promise<{ code: number | null;
 			"--moduleResolution",
 			"bundler",
 			"--allowImportingTsExtensions",
+			"--skipLibCheck",
 			"--noEmit",
 			path,
 		], { cwd: REPO_ROOT, stdio: ["ignore", "pipe", "pipe"] })
