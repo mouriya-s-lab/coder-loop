@@ -1,6 +1,6 @@
 # coder-loop
 
-N 角色字符串调度引擎。给定一个 preset（角色定义、状态集、phase 列表、prompt 与变量绑定），coder-loop 按 preset 描述的顺序 spawn 各 phase 的 agent，捕获输出，根据状态推进队列，直到队列里所有 item 落在 terminal 状态。
+N-phase 字符串调度引擎。给定一个 preset（phase 列表、状态词表、prompt 与变量绑定），中央 daemon 按 preset 描述的顺序在 chain × item 上 spawn agent，捕获 trace，按 agent 写回的 `item.status` 推进队列，直到所有 item 落 terminal 状态。
 
 **这不是一个 GitHub PR loop。** GitHub issue/PR 迭代是它内置的一个 preset（`gh-issue-pr-iteration`）。引擎本身不知道 GitHub 的存在、不知道 phase 数量、不知道 phase 名字、不知道 status 字面量。
 
@@ -10,13 +10,14 @@ N 角色字符串调度引擎。给定一个 preset（角色定义、状态集�
 
 | 你是 | 看哪 | 你要做什么 |
 |---|---|---|
-| **Operator**（想在一个 repo 上把 coder-loop 跑起来） | [docs/operator-quickstart.md](./docs/operator-quickstart.md) | bootstrap target 的 `.coder-loop/`、灌队列、起循环、看 trace |
-| **Preset 作者**（写新 preset 或改 bundled preset） | [docs/preset-authoring.md](./docs/preset-authoring.md) | `preset.toml` 字段、变量 DSL、`runtime.*` fact/business key 分层、minimal template |
-| **`gh-issue-pr-iteration` 维护者**（动 bundled preset 的 fragment） | [docs/gh-issue-pr-iteration-fragments.md](./docs/gh-issue-pr-iteration-fragments.md) | 48 fragments 的 verdict 跳转图 + review 15-step 顺序 |
-| **运维 / supervisor**（循环挂了、想 reset 状态、想看上一轮跑哪儿了） | [docs/operations.md](./docs/operations.md) | 稳定 API：`coder-loop doctor` / `coder-loop status <target> --json` / `coder-loop daemon ...`；runtime 文件只是 fallback reference |
-| **维护者**（想证明重构没有只停在单测） | [docs/real-e2e-fixture.md](./docs/real-e2e-fixture.md) | 私有 fixture repo、真实 issue→PR→review→merge→closure 路径、Codex runner e2e 证据 |
+| **Operator**（想在一个 repo 上把 coder-loop 跑起来） | [docs/operator-quickstart.md](./docs/operator-quickstart.md) | 中央 daemon 起 chain、灌队列、起循环、看 trace |
+| **Preset 作者**（写新 preset 或改 bundled preset） | [docs/preset-authoring.md](./docs/preset-authoring.md) | `preset.toml` 字段、变量 DSL、engine-owned `runtime.*` fact 与 preset business key 分层、minimal template |
+| **`gh-issue-pr-iteration` 维护者**（动 bundled preset 的 fragment） | [docs/gh-issue-pr-iteration-fragments.md](./docs/gh-issue-pr-iteration-fragments.md) | fragment 全集 + iter/review 调度者 workflow + plan 链跳转图 |
+| **运维 / supervisor**（循环挂了、想 reset 状态、想看上一轮跑哪儿了） | [docs/operations.md](./docs/operations.md) | 稳定 API：`coder-loop doctor` / `status` / `daemon`；runtime 文件只是 fallback reference |
+| **维护者**（想证明重构没停在单测） | [docs/real-e2e-fixture.md](./docs/real-e2e-fixture.md) | 私有 fixture repo、真实 issue→PR→review→merge→closure 路径 |
+| **引擎 archaeology** | [docs/architecture-v1.md](./docs/architecture-v1.md)、[docs/architecture-v2.md](./docs/architecture-v2.md) | v1 单进程 → v2 daemon 化的演变主线，以及"机制归引擎、参数归 preset"这条并行线 |
 
-不在以上四类的人——看完下面这一页（设计思想 + 安装 + References）就够。
+不在以上六类的人——看完下面这一页（设计思想 + 安装 + References）就够。
 
 ---
 
@@ -35,9 +36,9 @@ N 角色字符串调度引擎。给定一个 preset（角色定义、状态集�
 | 任务分解为什么导致失败？ | Agent Failure Taxonomy (2025) | planning phase defects 是 agent 任务失败的首要类别（约 50% 的失败源于此） |
 | 怎么防止无限低质量推进？ | VMAO (2025) | completeness threshold + diminishing returns 检测 |
 
-这些是**preset 设计原则**，不是引擎行为。引擎不知道「信号」是什么——它只调度 phase 顺序、传变量、捕获 trace。是 preset（默认 `gh-issue-pr-iteration`）按 plan/iter/review 三段切分把信号生成/产生/消费做成了 phase 流水线。
+这些是**preset 设计原则**，不是引擎行为。引擎不知道"信号"是什么——它只调度 phase 顺序、传变量、捕获 trace。是 preset（默认 `gh-issue-pr-iteration`）按 plan/iter/review 三段切分把信号生成/产生/消费做成了 phase 流水线。
 
-不同 preset 可以选择不同的切分：1 phase（如 `single-phase-example`，仅 run）、2 phase（如 `gh-issue-pr-iteration`，iter+review）、N phase（plan+iter+review+publish 等）都行。引擎对 N 没有上界。
+不同 preset 可以选择不同的切分：1 phase（如 `single-phase-example`，仅 run）、2 phase（如 `real-e2e-minimal`，iteration+review）、N phase（如 `gh-issue-pr-iteration` 的 iteration+review+blocked-responder+umbrella-finalizer）都行。引擎对 N 没有上界。
 
 ### 四个设计决策（gh-issue-pr-iteration preset）
 
@@ -49,15 +50,17 @@ N 角色字符串调度引擎。给定一个 preset（角色定义、状态集�
 
 **2. 维度覆盖强制**
 
-issue #69 事后分析：Phase 3 验收标准全是功能维度，但 7 个 bug 中 6 个属于环境/集成/假设维度。`gh-issue-pr-iteration` 的 plan 要求每个 issue 的 checkpoint 覆盖 function / environment / integration / assumption；review 检查每个维度是否有至少一个 PASS。
+`gh-issue-pr-iteration` 的 plan 要求每个 issue 的 checkpoint 覆盖 function / environment / integration / assumption；review 检查每个维度是否有至少一个 PASS。
 
 **3. Spike 前置于实现**
 
-如果 Phase 的架构假设依赖第三方组件未文档化行为，假设必须在实现前被验证。`gh-issue-pr-iteration` 的 plan 扫描风险信号、为高风险假设创建 spike issue。spike 失败触发设计调整，而非在错误假设上堆叠代码。
+如果 phase 的架构假设依赖第三方组件未文档化行为，假设必须在实现前被验证。`gh-issue-pr-iteration` 的 plan 扫描风险信号、为高风险假设创建 spike issue。spike 失败触发设计调整，而非在错误假设上堆叠代码。
 
 **4. 推迟验证不可遗忘**
 
 某 checkpoint 当前环境无法执行（如本机没 Docker daemon），plan 将其作为 inherited verification obligation 分配到下游 issue，不可二次推迟。
+
+设计思路完整版见 [`presets/gh-issue-pr-iteration/DESIGN.md`](./presets/gh-issue-pr-iteration/DESIGN.md)。
 
 ---
 
@@ -73,23 +76,24 @@ cp .claude/commands/dev-*.md ~/.claude/commands/     # 注册 slash commands 为
 
 之后 `coder-loop` 命令和 `/dev-plan` `/dev-loop` 在任意目录可用（slash command 是用户级——一份文件挂在 `~/.claude/commands/` 即可在任意 target repo 内调）。也可以不 `bun link`，调用改成 `bun /path/to/coder-loop/src/loop.ts`。
 
-在目标 repo 上启动前，只需在中央 daemon 起一个 chain；target 目录不需要任何 bootstrap 文件：
+在目标 repo 上启动前，先起中央 daemon，再用一条命令注册 chain：
 
 ```bash
 coder-loop daemon up
-coder-loop chain create <name> --repository <owner>/<repo> --preset gh-issue-pr-iteration
-coder-loop doctor /path/to/target --repo <owner>/<repo>     # operator 机器 + live runtime 体检
+coder-loop chain create <name> --config-json '{"repository":"<owner>/<repo>","baseBranch":"main"}' --preset gh-issue-pr-iteration
+coder-loop doctor /path/to/target --repo <owner>/<repo>
 coder-loop status /path/to/target --json
 ```
 
-`chain create` 是中央 daemon socket 上一条写入；preset 业务资产（如 GitHub labels）由 preset 的 planning agent 在运行中幂等确保。使用自定义 `--loop-data-root` 时，`daemon up` 与后续 `chain create` / `doctor` / `status` 要传同一个 root。（#436 起 `install` / `uninstall` 子命令退役——原五层 bootstrap 已逐层归位到 preset / chain / operator 机器。）
+`chain create` 只写一次 chain 元数据到中央 daemon socket；target 目录不需要任何 bootstrap 文件。`--preset` 可选：不写时每个 item 在 `item add` 时必须自带 `--preset` 或 `--preset-path`。preset 业务资产（如 GitHub labels）由 preset 的 planning agent 在运行中幂等确保。用自定义 `--loop-data-root` 时，`daemon up` 与后续所有命令要传同一个 root。
 
-每个 phase 的默认 runner 由 `preset.toml` 的 `[[phases]].runner = "claude"|"codex"` 声明；未声明时走 engine-builtin fallback（当前为 `codex`）。phase 还可用 `[[phases]].model` 声明默认模型（bundled preset 的 review phase 声明 `runner = "codex"`、`model = "gpt-5.5"`）。单个 queue item 的 `runner` 字段只覆盖允许 item override 的普通执行 phase。Runner binary 直接是 `claude` / `codex`（在 PATH 上）；模型来自 phase 的 `model` 声明，没有 target 级 override 通道。`doctor` / `status --json` 显示每个 phase 的 runner 与 source。
+每个 phase 的默认 runner 由 `preset.toml` 的 `[[phases]].runner = "claude"|"codex"|"opencode"` 声明；未声明时走 engine-builtin fallback。phase 还可用 `[[phases]].model` 声明默认模型。Runner binary 就是 PATH 上的 `claude` / `codex` / `opencode`；没有 target 级 override 通道。单个 queue item 的 `runner` 字段只覆盖允许 item override 的普通执行 phase。`doctor` / `status --json` 显示每个 phase 的 runner 与 source。
 
-后台循环由 daemon API 管理；`/dev-loop [N]` 也是这个 API 的人类快捷入口，不再手写 `nohup`：
+后台循环由 daemon API 管理；`/dev-loop [N]` 是同一 API 的人类快捷入口：
 
 ```bash
 coder-loop daemon start /path/to/target
+coder-loop daemon start /path/to/target --max-iterations 10
 coder-loop daemon status /path/to/target --json
 coder-loop daemon stop /path/to/target
 coder-loop queue unblock /path/to/source-target --issue 123 --start-daemon

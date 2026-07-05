@@ -10,7 +10,7 @@ coder-loop doctor "$TARGET"
 coder-loop status "$TARGET" --json
 ```
 
-If `coder-loop` is missing or does not recognize `daemon`, stop and run `coder-loop install "$TARGET"` after upgrading/linking the coder-loop repo. Do not recreate the old `nohup` launch path in this command.
+If `coder-loop` is missing or does not recognize `daemon`, stop and re-run `bun install && bun link` in the coder-loop repo. Do not recreate any hand-rolled `nohup` launch path in this command.
 
 Launch the orchestrator through the daemon API. No argument runs indefinitely; a numeric argument preserves `/dev-loop [N]` by passing `--max-iterations N` to `coder-loop daemon start`.
 
