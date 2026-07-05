@@ -18,7 +18,7 @@ import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMeta
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
 const LOADED_PRESET = loadPreset(PRESET_DIR).then((preset) => ({ presetDir: PRESET_DIR, preset }))
-const FAKE_RUNNER = resolve(REPO_ROOT, "tests/fixtures/cross-runner-fake.ts")
+const FAKE_RUNNER = resolve(import.meta.dir, "scheduler.cross-runner.integration.fake.ts")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-cross-runner-integration-tests", String(process.pid))
 
 let nextFixtureId = 0
