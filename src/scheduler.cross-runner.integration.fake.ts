@@ -1,7 +1,8 @@
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises"
 import { dirname, resolve } from "node:path"
 
-import { openSqliteStateStore } from "../../src/sqlite-state"
+import { engineLifecycleAdmittedItemStatus, parseInternalStatus } from "./runtime-data"
+import { openSqliteStateStore } from "./sqlite-state"
 
 type RunnerKind = "claude" | "codex" | "opencode"
 
@@ -87,7 +88,8 @@ if (typeof response.writeStatus === "string") {
 	if (itemId !== null) {
 		const store = openSqliteStateStore({ loopDataRoot })
 		try {
-			store.updateItem(itemId, { status: response.writeStatus, updatedAt: Math.floor(Date.now() / 1000) })
+			const status = engineLifecycleAdmittedItemStatus(parseInternalStatus(response.writeStatus, "cross-runner-fake.writeStatus"), "test")
+			store.updateItem(itemId, { status, updatedAt: Math.floor(Date.now() / 1000) })
 		} finally {
 			store.close()
 		}

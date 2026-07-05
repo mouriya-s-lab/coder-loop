@@ -1,3 +1,0 @@
-# shared
-
-No durable facts.
