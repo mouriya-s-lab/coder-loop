@@ -1,0 +1,1967 @@
+{
+  "version": "2.14",
+  "children": [
+    {
+      "type": "frame",
+      "id": "Jxykh",
+      "x": 0,
+      "y": 0,
+      "name": "StatusBadge",
+      "reusable": true,
+      "gap": "$sp-2",
+      "alignItems": "center",
+      "children": [
+        {
+          "type": "ellipse",
+          "id": "PSytu",
+          "name": "Dot",
+          "fill": "$success",
+          "width": 10,
+          "height": 10
+        },
+        {
+          "type": "text",
+          "id": "bAycv",
+          "name": "Label",
+          "fill": "$text-primary",
+          "content": "Alive",
+          "fontFamily": "$font-ui",
+          "fontSize": 14,
+          "fontWeight": "600"
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "h5G5V",
+      "x": 92,
+      "y": 0,
+      "name": "ThreeCertBadge",
+      "reusable": true,
+      "fill": "$bg-elevated",
+      "cornerRadius": "$r-md",
+      "stroke": "$border-subtle",
+      "strokeWidth": 1,
+      "gap": "$sp-3",
+      "padding": [
+        "$sp-2",
+        "$sp-3"
+      ],
+      "alignItems": "center",
+      "children": [
+        {
+          "type": "frame",
+          "id": "MSbMK",
+          "name": "Cert pid",
+          "gap": "$sp-2",
+          "alignItems": "center",
+          "children": [
+            {
+              "type": "ellipse",
+              "id": "zdveB",
+              "name": "Dot",
+              "fill": "$success",
+              "width": 6,
+              "height": 6
+            },
+            {
+              "type": "text",
+              "id": "g3Snu",
+              "name": "Label",
+              "fill": "$text-secondary",
+              "content": "pid",
+              "fontFamily": "$font-mono",
+              "fontSize": 11,
+              "fontWeight": "normal"
+            }
+          ]
+        },
+        {
+          "type": "rectangle",
+          "id": "qBW1W",
+          "name": "Divider",
+          "fill": "$border-subtle",
+          "width": 1,
+          "height": 12
+        },
+        {
+          "type": "frame",
+          "id": "URHgV",
+          "name": "Cert socket",
+          "gap": "$sp-2",
+          "alignItems": "center",
+          "children": [
+            {
+              "type": "ellipse",
+              "id": "o1s5Vk",
+              "name": "Dot",
+              "fill": "$success",
+              "width": 6,
+              "height": 6
+            },
+            {
+              "type": "text",
+              "id": "w4HKS",
+              "name": "Label",
+              "fill": "$text-secondary",
+              "content": "socket",
+              "fontFamily": "$font-mono",
+              "fontSize": 11,
+              "fontWeight": "normal"
+            }
+          ]
+        },
+        {
+          "type": "rectangle",
+          "id": "F2gOz9",
+          "name": "Divider",
+          "fill": "$border-subtle",
+          "width": 1,
+          "height": 12
+        },
+        {
+          "type": "frame",
+          "id": "vSU7N",
+          "name": "Cert status",
+          "gap": "$sp-2",
+          "alignItems": "center",
+          "children": [
+            {
+              "type": "ellipse",
+              "id": "L84AOt",
+              "name": "Dot",
+              "fill": "$success",
+              "width": 6,
+              "height": 6
+            },
+            {
+              "type": "text",
+              "id": "RL5AZ",
+              "name": "Label",
+              "fill": "$text-secondary",
+              "content": "status",
+              "fontFamily": "$font-mono",
+              "fontSize": 11,
+              "fontWeight": "normal"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "d6xhQ",
+      "x": 348,
+      "y": 0,
+      "name": "SidebarLink",
+      "reusable": true,
+      "width": 216,
+      "cornerRadius": "$r-md",
+      "gap": "$sp-3",
+      "padding": [
+        "$sp-2",
+        "$sp-3"
+      ],
+      "alignItems": "center",
+      "children": [
+        {
+          "type": "icon",
+          "id": "EMGqO",
+          "name": "Icon",
+          "width": 16,
+          "height": 16,
+          "icon": "circle",
+          "library": "lucide",
+          "fill": "$text-secondary"
+        },
+        {
+          "type": "text",
+          "id": "NkfkC",
+          "name": "Label",
+          "fill": "$text-secondary",
+          "content": "Overview",
+          "fontFamily": "$font-ui",
+          "fontSize": 14,
+          "fontWeight": "500"
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "eL45p",
+      "x": 604,
+      "y": 0,
+      "name": "SectionHeader",
+      "reusable": true,
+      "width": 400,
+      "gap": "$sp-4",
+      "padding": [
+        "$sp-2",
+        "$sp-4"
+      ],
+      "alignItems": "center",
+      "children": [
+        {
+          "type": "frame",
+          "id": "VOvx7",
+          "name": "Titles",
+          "width": "fill_container",
+          "layout": "vertical",
+          "gap": 2,
+          "children": [
+            {
+              "type": "text",
+              "id": "t9P1L",
+              "name": "Title",
+              "fill": "$text-primary",
+              "content": "Section title",
+              "fontFamily": "$font-ui",
+              "fontSize": 16,
+              "fontWeight": "700"
+            },
+            {
+              "type": "text",
+              "id": "sRSP4",
+              "name": "Subtitle",
+              "fill": "$text-muted",
+              "content": "Subtitle text",
+              "fontFamily": "$font-ui",
+              "fontSize": 12,
+              "fontWeight": "normal"
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "vfESS",
+          "name": "Action",
+          "slot": [],
+          "gap": "$sp-1",
+          "alignItems": "center",
+          "children": [
+            {
+              "type": "text",
+              "id": "ylwT6",
+              "name": "Label",
+              "fill": "$accent",
+              "content": "View all →",
+              "fontFamily": "$font-ui",
+              "fontSize": 13,
+              "fontWeight": "500"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "L9zNw",
+      "x": 604,
+      "y": 92,
+      "name": "ChainRow",
+      "reusable": true,
+      "width": 820,
+      "cornerRadius": "$r-md",
+      "gap": "$sp-4",
+      "padding": [
+        "$sp-2",
+        "$sp-4"
+      ],
+      "alignItems": "center",
+      "children": [
+        {
+          "type": "frame",
+          "id": "KIDyj",
+          "name": "NameGroup",
+          "width": "fill_container",
+          "gap": "$sp-3",
+          "alignItems": "center",
+          "children": [
+            {
+              "type": "text",
+              "id": "Dgzhy",
+              "name": "Name",
+              "fill": "$text-primary",
+              "content": "mouriya-s-lab/coder-loop",
+              "fontFamily": "$font-mono",
+              "fontSize": 13,
+              "fontWeight": "500"
+            },
+            {
+              "type": "text",
+              "id": "i52ywI",
+              "name": "Preset",
+              "fill": "$text-muted",
+              "content": "gh-issue-pr-iteration",
+              "fontFamily": "$font-ui",
+              "fontSize": 12,
+              "fontWeight": "normal"
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "v1PDYy",
+          "name": "ActiveGroup",
+          "gap": "$sp-2",
+          "alignItems": "center",
+          "children": [
+            {
+              "type": "ellipse",
+              "id": "NqBxm",
+              "name": "Dot",
+              "fill": "$success",
+              "width": 6,
+              "height": 6
+            },
+            {
+              "type": "text",
+              "id": "iPsPk",
+              "name": "Count",
+              "fill": "$text-secondary",
+              "content": "2 active",
+              "fontFamily": "$font-mono",
+              "fontSize": 12,
+              "fontWeight": "normal"
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "id": "NiYHX",
+          "name": "LastTime",
+          "fill": "$text-muted",
+          "content": "8s ago",
+          "fontFamily": "$font-mono",
+          "fontSize": 12,
+          "fontWeight": "normal"
+        },
+        {
+          "type": "text",
+          "id": "ltxjB",
+          "name": "Queue",
+          "fill": "$text-secondary",
+          "content": "queue 3",
+          "fontFamily": "$font-mono",
+          "fontSize": 12,
+          "fontWeight": "normal"
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "QEPce",
+      "x": 604,
+      "y": 173,
+      "name": "EventRow",
+      "reusable": true,
+      "width": 820,
+      "cornerRadius": "$r-md",
+      "gap": "$sp-3",
+      "padding": [
+        "$sp-2",
+        "$sp-4"
+      ],
+      "alignItems": "center",
+      "children": [
+        {
+          "type": "icon",
+          "id": "RT5C4",
+          "name": "Icon",
+          "width": 14,
+          "height": 14,
+          "icon": "circle-dot",
+          "library": "lucide",
+          "fill": "$info"
+        },
+        {
+          "type": "text",
+          "id": "FKSyu",
+          "name": "Main",
+          "fill": "$text-primary",
+          "textGrowth": "fixed-width",
+          "width": "fill_container",
+          "content": "agent.exit",
+          "fontFamily": "$font-ui",
+          "fontSize": 13,
+          "fontWeight": "normal"
+        },
+        {
+          "type": "text",
+          "id": "HIdco",
+          "name": "Ref",
+          "fill": "$accent",
+          "content": "coder-loop#546",
+          "fontFamily": "$font-mono",
+          "fontSize": 12,
+          "fontWeight": "normal"
+        },
+        {
+          "type": "text",
+          "id": "t8H8i",
+          "name": "Time",
+          "fill": "$text-muted",
+          "content": "2s ago",
+          "fontFamily": "$font-mono",
+          "fontSize": 12,
+          "fontWeight": "normal"
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "er5cR",
+      "x": 604,
+      "y": 253,
+      "name": "DaemonStatusCard",
+      "reusable": true,
+      "width": 360,
+      "fill": "$bg-surface",
+      "cornerRadius": "$r-lg",
+      "stroke": "$border-subtle",
+      "strokeWidth": 1,
+      "layout": "vertical",
+      "gap": "$sp-3",
+      "padding": "$sp-4",
+      "children": [
+        {
+          "type": "frame",
+          "id": "Uw9D7",
+          "name": "Header",
+          "width": "fill_container",
+          "gap": "$sp-3",
+          "alignItems": "center",
+          "children": [
+            {
+              "id": "BrT4f",
+              "type": "ref",
+              "ref": "Jxykh",
+              "name": "Status"
+            },
+            {
+              "type": "frame",
+              "id": "nXR7I",
+              "name": "Spacer",
+              "width": "fill_container",
+              "height": 1
+            },
+            {
+              "type": "text",
+              "id": "dnGuo",
+              "name": "Kind",
+              "fill": "$text-muted",
+              "content": "DAEMON",
+              "fontFamily": "$font-mono",
+              "fontSize": 11,
+              "fontWeight": "600"
+            }
+          ]
+        },
+        {
+          "id": "NWJZz",
+          "type": "ref",
+          "ref": "h5G5V",
+          "name": "Cert",
+          "width": "fill_container"
+        },
+        {
+          "type": "frame",
+          "id": "edZhW",
+          "name": "Meta",
+          "width": "fill_container",
+          "layout": "vertical",
+          "gap": "$sp-1",
+          "padding": [
+            "$sp-2",
+            0,
+            0,
+            0
+          ],
+          "children": [
+            {
+              "type": "frame",
+              "id": "xP8bJ",
+              "name": "Row last event",
+              "width": "fill_container",
+              "gap": "$sp-3",
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "text",
+                  "id": "h7PBq6",
+                  "name": "Label",
+                  "fill": "$text-muted",
+                  "textGrowth": "fixed-width",
+                  "width": 96,
+                  "content": "last event",
+                  "fontFamily": "$font-ui",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "SAI4x",
+                  "name": "Value",
+                  "fill": "$text-primary",
+                  "textGrowth": "fixed-width",
+                  "width": "fill_container",
+                  "content": "2s ago · agent.exit",
+                  "fontFamily": "$font-mono",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "yX41G",
+              "name": "Row uptime",
+              "width": "fill_container",
+              "gap": "$sp-3",
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "text",
+                  "id": "UpqND",
+                  "name": "Label",
+                  "fill": "$text-muted",
+                  "textGrowth": "fixed-width",
+                  "width": 96,
+                  "content": "uptime",
+                  "fontFamily": "$font-ui",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "pwC8p",
+                  "name": "Value",
+                  "fill": "$text-primary",
+                  "textGrowth": "fixed-width",
+                  "width": "fill_container",
+                  "content": "1h 24m",
+                  "fontFamily": "$font-mono",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "ALBpY",
+              "name": "Row spawns",
+              "width": "fill_container",
+              "gap": "$sp-3",
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "text",
+                  "id": "Dcg9d",
+                  "name": "Label",
+                  "fill": "$text-muted",
+                  "textGrowth": "fixed-width",
+                  "width": 96,
+                  "content": "spawns",
+                  "fontFamily": "$font-ui",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "X5t4U",
+                  "name": "Value",
+                  "fill": "$text-primary",
+                  "textGrowth": "fixed-width",
+                  "width": "fill_container",
+                  "content": "2 / 8",
+                  "fontFamily": "$font-mono",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "k6lCTr",
+          "name": "Footer",
+          "width": "fill_container",
+          "layout": "vertical",
+          "gap": "$sp-2",
+          "children": [
+            {
+              "type": "text",
+              "id": "n6MK7",
+              "name": "Note",
+              "fill": "$text-secondary",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "died 3m ago at agent.spawn",
+              "fontFamily": "$font-ui",
+              "fontSize": 12,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "frame",
+              "id": "P5uHeE",
+              "name": "CTA",
+              "width": "fill_container",
+              "fill": "$accent",
+              "cornerRadius": "$r-md",
+              "padding": [
+                "$sp-2",
+                "$sp-4"
+              ],
+              "justifyContent": "center",
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "text",
+                  "id": "sth5l",
+                  "name": "Label",
+                  "fill": "#FFFFFF",
+                  "content": "Start daemon",
+                  "fontFamily": "$font-ui",
+                  "fontSize": 13,
+                  "fontWeight": "600"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "w9b94r",
+      "x": 1544,
+      "y": 0,
+      "name": "Desktop / Overview",
+      "theme": {
+        "mode": "dark"
+      },
+      "clip": true,
+      "width": 1440,
+      "height": 900,
+      "fill": "$bg-canvas",
+      "layout": "vertical",
+      "children": [
+        {
+          "type": "frame",
+          "id": "DdlaY",
+          "name": "Header",
+          "width": "fill_container",
+          "height": 64,
+          "fill": "$bg-surface",
+          "stroke": "$border-subtle",
+          "strokeWidth": {
+            "bottom": 1
+          },
+          "strokeAlignment": "inner",
+          "gap": "$sp-5",
+          "padding": [
+            "$sp-3",
+            "$sp-5"
+          ],
+          "alignItems": "center",
+          "children": [
+            {
+              "type": "frame",
+              "id": "NyoGo",
+              "name": "Brand",
+              "gap": "$sp-3",
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "rectangle",
+                  "cornerRadius": "$r-sm",
+                  "id": "CVZr3",
+                  "name": "Mark",
+                  "fill": "$accent",
+                  "width": 24,
+                  "height": 24
+                },
+                {
+                  "type": "text",
+                  "id": "Hk8SX",
+                  "name": "Wordmark",
+                  "fill": "$text-primary",
+                  "content": "coder-loop",
+                  "fontFamily": "$font-mono",
+                  "fontSize": 15,
+                  "fontWeight": "700"
+                },
+                {
+                  "type": "text",
+                  "id": "CtjWM",
+                  "name": "Version",
+                  "fill": "$text-muted",
+                  "content": "v3",
+                  "fontFamily": "$font-mono",
+                  "fontSize": 11,
+                  "fontWeight": "500"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "qhrvt",
+              "name": "MidWrap",
+              "width": "fill_container",
+              "justifyContent": "center",
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "di5HJ",
+                  "name": "PathPill",
+                  "fill": "$bg-elevated",
+                  "cornerRadius": "$r-md",
+                  "stroke": "$border-subtle",
+                  "strokeWidth": 1,
+                  "gap": "$sp-2",
+                  "padding": [
+                    "$sp-2",
+                    "$sp-3"
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "icon",
+                      "id": "OlJGi",
+                      "name": "FolderIcon",
+                      "width": 12,
+                      "height": 12,
+                      "icon": "folder",
+                      "library": "lucide",
+                      "fill": "$text-muted"
+                    },
+                    {
+                      "type": "text",
+                      "id": "GV6Zg",
+                      "name": "PathText",
+                      "fill": "$text-secondary",
+                      "content": "~/.coder-loop/loop-data",
+                      "fontFamily": "$font-mono",
+                      "fontSize": 12,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "KT85j",
+              "name": "HeaderActions",
+              "gap": "$sp-3",
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "r4wKH",
+                  "name": "ThemeBtn",
+                  "width": 36,
+                  "height": 36,
+                  "fill": "$bg-elevated",
+                  "cornerRadius": "$r-md",
+                  "stroke": "$border-subtle",
+                  "strokeWidth": 1,
+                  "justifyContent": "center",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "icon",
+                      "id": "qZS9K",
+                      "name": "MoonIcon",
+                      "width": 16,
+                      "height": 16,
+                      "icon": "moon",
+                      "library": "lucide",
+                      "fill": "$text-secondary"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "doOAc",
+                  "name": "StartBtn",
+                  "fill": "$accent",
+                  "cornerRadius": "$r-md",
+                  "gap": "$sp-2",
+                  "padding": [
+                    "$sp-2",
+                    "$sp-4"
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "icon",
+                      "id": "p1hSZ",
+                      "name": "PowerIcon",
+                      "width": 14,
+                      "height": 14,
+                      "icon": "power",
+                      "library": "lucide",
+                      "fill": "#FFFFFF"
+                    },
+                    {
+                      "type": "text",
+                      "id": "d9zmsr",
+                      "name": "Label",
+                      "fill": "#FFFFFF",
+                      "content": "Restart daemon",
+                      "fontFamily": "$font-ui",
+                      "fontSize": 13,
+                      "fontWeight": "600"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "rc3Lq",
+          "name": "Body",
+          "width": "fill_container",
+          "height": "fill_container",
+          "children": [
+            {
+              "type": "frame",
+              "id": "xiTLl",
+              "name": "Sidebar",
+              "width": 240,
+              "height": "fill_container",
+              "fill": "$bg-surface",
+              "stroke": "$border-subtle",
+              "strokeWidth": {
+                "right": 1
+              },
+              "strokeAlignment": "inner",
+              "layout": "vertical",
+              "gap": "$sp-1",
+              "padding": [
+                "$sp-3",
+                "$sp-2"
+              ],
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "UToOR",
+                  "name": "NavHeader",
+                  "width": "fill_container",
+                  "padding": [
+                    "$sp-2",
+                    "$sp-3"
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "oGwxv",
+                      "name": "NavLabel",
+                      "fill": "$text-muted",
+                      "content": "NAVIGATE",
+                      "fontFamily": "$font-ui",
+                      "fontSize": 11,
+                      "fontWeight": "600",
+                      "letterSpacing": 1
+                    }
+                  ]
+                },
+                {
+                  "id": "KTs8B",
+                  "type": "ref",
+                  "ref": "d6xhQ",
+                  "name": "Overview",
+                  "width": "fill_container",
+                  "fill": "$accent-subtle",
+                  "descendants": {
+                    "EMGqO": {
+                      "icon": "layout-dashboard",
+                      "fill": "$accent"
+                    },
+                    "NkfkC": {
+                      "content": "Overview",
+                      "fill": "$accent",
+                      "fontWeight": "600"
+                    }
+                  }
+                },
+                {
+                  "id": "orWxD",
+                  "type": "ref",
+                  "ref": "d6xhQ",
+                  "name": "Chains",
+                  "width": "fill_container",
+                  "descendants": {
+                    "EMGqO": {
+                      "icon": "link",
+                      "fill": "$text-secondary"
+                    },
+                    "NkfkC": {
+                      "content": "Chains",
+                      "fill": "$text-secondary",
+                      "fontWeight": "500"
+                    }
+                  }
+                },
+                {
+                  "id": "hdGN8",
+                  "type": "ref",
+                  "ref": "d6xhQ",
+                  "name": "Events",
+                  "width": "fill_container",
+                  "descendants": {
+                    "EMGqO": {
+                      "icon": "activity",
+                      "fill": "$text-secondary"
+                    },
+                    "NkfkC": {
+                      "content": "Events",
+                      "fill": "$text-secondary",
+                      "fontWeight": "500"
+                    }
+                  }
+                },
+                {
+                  "id": "Q90QE2",
+                  "type": "ref",
+                  "ref": "d6xhQ",
+                  "name": "Presets",
+                  "width": "fill_container",
+                  "descendants": {
+                    "EMGqO": {
+                      "icon": "puzzle",
+                      "fill": "$text-secondary"
+                    },
+                    "NkfkC": {
+                      "content": "Presets",
+                      "fill": "$text-secondary",
+                      "fontWeight": "500"
+                    }
+                  }
+                },
+                {
+                  "id": "lq5Iv",
+                  "type": "ref",
+                  "ref": "d6xhQ",
+                  "name": "Settings",
+                  "width": "fill_container",
+                  "descendants": {
+                    "EMGqO": {
+                      "icon": "settings",
+                      "fill": "$text-secondary"
+                    },
+                    "NkfkC": {
+                      "content": "Settings",
+                      "fill": "$text-secondary",
+                      "fontWeight": "500"
+                    }
+                  }
+                },
+                {
+                  "type": "frame",
+                  "id": "gtssb",
+                  "name": "Spacer",
+                  "width": "fill_container",
+                  "height": "fill_container"
+                },
+                {
+                  "type": "frame",
+                  "id": "I3Mdp",
+                  "name": "CtrlHeader",
+                  "width": "fill_container",
+                  "padding": [
+                    "$sp-2",
+                    "$sp-3"
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "s26Md1",
+                      "name": "Label",
+                      "fill": "$text-muted",
+                      "content": "CONTROLS",
+                      "fontFamily": "$font-ui",
+                      "fontSize": 11,
+                      "fontWeight": "600",
+                      "letterSpacing": 1
+                    }
+                  ]
+                },
+                {
+                  "id": "WdIcz",
+                  "type": "ref",
+                  "ref": "d6xhQ",
+                  "name": "Controls",
+                  "width": "fill_container",
+                  "descendants": {
+                    "EMGqO": {
+                      "icon": "sliders-horizontal",
+                      "fill": "$text-secondary"
+                    },
+                    "NkfkC": {
+                      "content": "Controls",
+                      "fill": "$text-secondary"
+                    }
+                  }
+                },
+                {
+                  "type": "frame",
+                  "id": "rHFXc",
+                  "name": "SidebarFooter",
+                  "width": "fill_container",
+                  "gap": "$sp-2",
+                  "padding": [
+                    "$sp-2",
+                    "$sp-3"
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "ellipse",
+                      "id": "s1asv",
+                      "name": "Dot",
+                      "fill": "$success",
+                      "width": 6,
+                      "height": 6
+                    },
+                    {
+                      "type": "text",
+                      "id": "HOsi2",
+                      "name": "Meta",
+                      "fill": "$text-muted",
+                      "content": "mesh · rl-lan",
+                      "fontFamily": "$font-mono",
+                      "fontSize": 11,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "ELAgz",
+              "name": "Main",
+              "clip": true,
+              "width": "fill_container",
+              "height": "fill_container",
+              "fill": "$bg-canvas",
+              "layout": "vertical",
+              "gap": "$sp-3",
+              "padding": [
+                "$sp-3",
+                "$sp-6"
+              ],
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "M2tZhx",
+                  "name": "PageHeader",
+                  "width": "fill_container",
+                  "layout": "vertical",
+                  "gap": "$sp-1",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "D0SePE",
+                      "name": "Title",
+                      "fill": "$text-primary",
+                      "content": "Overview",
+                      "fontFamily": "$font-ui",
+                      "fontSize": 22,
+                      "fontWeight": "700"
+                    },
+                    {
+                      "type": "text",
+                      "id": "tsVi1",
+                      "name": "Sub",
+                      "fill": "$text-muted",
+                      "textGrowth": "fixed-width",
+                      "width": "fill_container",
+                      "content": "Is the daemon running? — three-cert liveness view",
+                      "fontFamily": "$font-ui",
+                      "fontSize": 13,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "s5kuW",
+                  "name": "DaemonStatusRow",
+                  "width": "fill_container",
+                  "gap": "$sp-4",
+                  "children": [
+                    {
+                      "id": "i2wn6",
+                      "type": "ref",
+                      "ref": "er5cR",
+                      "name": "Alive Card",
+                      "width": "fill_container",
+                      "descendants": {
+                        "BrT4f/PSytu": {
+                          "fill": "$success"
+                        },
+                        "BrT4f/bAycv": {
+                          "content": "Alive"
+                        },
+                        "dnGuo": {
+                          "content": "DAEMON · pid 84213"
+                        },
+                        "NWJZz/zdveB": {
+                          "fill": "$success"
+                        },
+                        "NWJZz/o1s5Vk": {
+                          "fill": "$success"
+                        },
+                        "NWJZz/L84AOt": {
+                          "fill": "$success"
+                        },
+                        "SAI4x": {
+                          "content": "2s ago · agent.exit"
+                        },
+                        "pwC8p": {
+                          "content": "1h 24m"
+                        },
+                        "X5t4U": {
+                          "content": "2 / 8"
+                        },
+                        "n6MK7": {
+                          "enabled": false,
+                          "content": "healthy — three checks agree",
+                          "fill": "$success"
+                        },
+                        "P5uHeE": {
+                          "enabled": false,
+                          "fill": "$bg-elevated",
+                          "stroke": "$border-subtle",
+                          "strokeWidth": 1
+                        },
+                        "sth5l": {
+                          "content": "View logs",
+                          "fill": "$text-secondary"
+                        }
+                      }
+                    },
+                    {
+                      "id": "OA8N0",
+                      "type": "ref",
+                      "ref": "er5cR",
+                      "name": "Down Card",
+                      "width": "fill_container",
+                      "fill": "$danger-subtle",
+                      "stroke": "$danger",
+                      "descendants": {
+                        "BrT4f/PSytu": {
+                          "fill": "$danger"
+                        },
+                        "BrT4f/bAycv": {
+                          "content": "Down",
+                          "fill": "$danger"
+                        },
+                        "dnGuo": {
+                          "content": "DAEMON · no process"
+                        },
+                        "NWJZz/zdveB": {
+                          "fill": "$text-muted"
+                        },
+                        "NWJZz/o1s5Vk": {
+                          "fill": "$danger"
+                        },
+                        "NWJZz/L84AOt": {
+                          "fill": "$danger"
+                        },
+                        "SAI4x": {
+                          "content": "3m ago · agent.spawn"
+                        },
+                        "pwC8p": {
+                          "content": "—"
+                        },
+                        "X5t4U": {
+                          "content": "—"
+                        },
+                        "n6MK7": {
+                          "content": "died 3m ago at agent.spawn · pid file stale"
+                        },
+                        "P5uHeE": {
+                          "fill": "$danger"
+                        },
+                        "sth5l": {
+                          "content": "Start daemon"
+                        }
+                      }
+                    },
+                    {
+                      "id": "f7LCk4",
+                      "type": "ref",
+                      "ref": "er5cR",
+                      "name": "Split Card",
+                      "width": "fill_container",
+                      "fill": "$warning-subtle",
+                      "stroke": "$warning",
+                      "descendants": {
+                        "BrT4f/PSytu": {
+                          "fill": "$warning"
+                        },
+                        "BrT4f/bAycv": {
+                          "content": "Split",
+                          "fill": "$warning"
+                        },
+                        "dnGuo": {
+                          "content": "DAEMON · disagreement"
+                        },
+                        "NWJZz/zdveB": {
+                          "fill": "$success"
+                        },
+                        "NWJZz/o1s5Vk": {
+                          "fill": "$danger"
+                        },
+                        "NWJZz/L84AOt": {
+                          "fill": "$success"
+                        },
+                        "SAI4x": {
+                          "content": "12s ago · daemon.status"
+                        },
+                        "pwC8p": {
+                          "content": "42m"
+                        },
+                        "X5t4U": {
+                          "content": "1 / 8"
+                        },
+                        "n6MK7": {
+                          "content": "socket file exists but not listening; process is alive"
+                        },
+                        "P5uHeE": {
+                          "fill": "$warning"
+                        },
+                        "sth5l": {
+                          "content": "Restart daemon"
+                        }
+                      }
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "XScLJ",
+                  "name": "ActiveChainsCard",
+                  "clip": true,
+                  "width": "fill_container",
+                  "fill": "$bg-surface",
+                  "cornerRadius": "$r-lg",
+                  "stroke": "$border-subtle",
+                  "strokeWidth": 1,
+                  "layout": "vertical",
+                  "children": [
+                    {
+                      "id": "aM8E8",
+                      "type": "ref",
+                      "ref": "eL45p",
+                      "name": "Chains Header",
+                      "width": "fill_container",
+                      "padding": "$sp-4",
+                      "stroke": "$border-subtle",
+                      "strokeWidth": {
+                        "bottom": 1
+                      },
+                      "descendants": {
+                        "t9P1L": {
+                          "content": "Active chains"
+                        },
+                        "sRSP4": {
+                          "content": "3 chains registered · 3 with recent activity"
+                        },
+                        "ylwT6": {
+                          "content": "View all →"
+                        }
+                      }
+                    },
+                    {
+                      "type": "frame",
+                      "id": "IT31n",
+                      "name": "ChainList",
+                      "width": "fill_container",
+                      "layout": "vertical",
+                      "children": [
+                        {
+                          "id": "AJlvM",
+                          "type": "ref",
+                          "ref": "L9zNw",
+                          "name": "Chain mouriya-s-lab/coder-loop",
+                          "width": "fill_container",
+                          "descendants": {
+                            "Dgzhy": {
+                              "content": "mouriya-s-lab/coder-loop"
+                            },
+                            "i52ywI": {
+                              "content": "gh-issue-pr-iteration"
+                            },
+                            "NqBxm": {
+                              "fill": "$success"
+                            },
+                            "iPsPk": {
+                              "content": "2 active",
+                              "fill": "$text-secondary"
+                            },
+                            "NiYHX": {
+                              "content": "8s ago"
+                            },
+                            "ltxjB": {
+                              "content": "queue 3"
+                            }
+                          }
+                        },
+                        {
+                          "id": "S4xmIG",
+                          "type": "ref",
+                          "ref": "L9zNw",
+                          "name": "Chain mouriya-s-lab/pve-vctcn",
+                          "width": "fill_container",
+                          "stroke": "$border-subtle",
+                          "strokeWidth": {
+                            "top": 1
+                          },
+                          "descendants": {
+                            "Dgzhy": {
+                              "content": "mouriya-s-lab/pve-vctcn"
+                            },
+                            "i52ywI": {
+                              "content": "real-e2e-minimal"
+                            },
+                            "NqBxm": {
+                              "fill": "$success"
+                            },
+                            "iPsPk": {
+                              "content": "1 active",
+                              "fill": "$text-secondary"
+                            },
+                            "NiYHX": {
+                              "content": "42s ago"
+                            },
+                            "ltxjB": {
+                              "content": "queue 0"
+                            }
+                          }
+                        },
+                        {
+                          "id": "YlsZ0",
+                          "type": "ref",
+                          "ref": "L9zNw",
+                          "name": "Chain mouriya-s-lab/homelab-tf",
+                          "width": "fill_container",
+                          "stroke": "$border-subtle",
+                          "strokeWidth": {
+                            "top": 1
+                          },
+                          "descendants": {
+                            "Dgzhy": {
+                              "content": "mouriya-s-lab/homelab-tf"
+                            },
+                            "i52ywI": {
+                              "content": "gh-issue-pr-iteration"
+                            },
+                            "NqBxm": {
+                              "fill": "$text-muted"
+                            },
+                            "iPsPk": {
+                              "content": "0 active",
+                              "fill": "$text-muted"
+                            },
+                            "NiYHX": {
+                              "content": "5m ago"
+                            },
+                            "ltxjB": {
+                              "content": "queue 12"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "F0elm",
+                  "name": "RecentEventsCard",
+                  "clip": true,
+                  "width": "fill_container",
+                  "fill": "$bg-surface",
+                  "cornerRadius": "$r-lg",
+                  "stroke": "$border-subtle",
+                  "strokeWidth": 1,
+                  "layout": "vertical",
+                  "children": [
+                    {
+                      "id": "KfdAG",
+                      "type": "ref",
+                      "ref": "eL45p",
+                      "name": "Events Header",
+                      "width": "fill_container",
+                      "padding": "$sp-4",
+                      "stroke": "$border-subtle",
+                      "strokeWidth": {
+                        "bottom": 1
+                      },
+                      "descendants": {
+                        "t9P1L": {
+                          "content": "Recent events"
+                        },
+                        "sRSP4": {
+                          "content": "last 6 · streaming from events.jsonl"
+                        },
+                        "ylwT6": {
+                          "content": "Open events →"
+                        }
+                      }
+                    },
+                    {
+                      "type": "frame",
+                      "id": "R3ox8h",
+                      "name": "EventList",
+                      "width": "fill_container",
+                      "layout": "vertical",
+                      "children": [
+                        {
+                          "id": "TNm8U",
+                          "type": "ref",
+                          "ref": "QEPce",
+                          "name": "Event agent.exit · iterati",
+                          "width": "fill_container",
+                          "descendants": {
+                            "RT5C4": {
+                              "icon": "log-out",
+                              "fill": "$warning"
+                            },
+                            "FKSyu": {
+                              "content": "agent.exit · iteration attempt 3 (exit 0)"
+                            },
+                            "HIdco": {
+                              "content": "coder-loop#546",
+                              "fill": "$accent"
+                            },
+                            "t8H8i": {
+                              "content": "2s ago"
+                            }
+                          }
+                        },
+                        {
+                          "id": "UhxiQ",
+                          "type": "ref",
+                          "ref": "QEPce",
+                          "name": "Event phase.advance · iter",
+                          "width": "fill_container",
+                          "stroke": "$border-subtle",
+                          "strokeWidth": {
+                            "top": 1
+                          },
+                          "descendants": {
+                            "RT5C4": {
+                              "icon": "arrow-right-circle",
+                              "fill": "$info"
+                            },
+                            "FKSyu": {
+                              "content": "phase.advance · iteration → review"
+                            },
+                            "HIdco": {
+                              "content": "coder-loop#546",
+                              "fill": "$accent"
+                            },
+                            "t8H8i": {
+                              "content": "3s ago"
+                            }
+                          }
+                        },
+                        {
+                          "id": "u0QXx",
+                          "type": "ref",
+                          "ref": "QEPce",
+                          "name": "Event agent.spawn · iterat",
+                          "width": "fill_container",
+                          "stroke": "$border-subtle",
+                          "strokeWidth": {
+                            "top": 1
+                          },
+                          "descendants": {
+                            "RT5C4": {
+                              "icon": "play-circle",
+                              "fill": "$success"
+                            },
+                            "FKSyu": {
+                              "content": "agent.spawn · iteration attempt 1"
+                            },
+                            "HIdco": {
+                              "content": "coder-loop#547",
+                              "fill": "$accent"
+                            },
+                            "t8H8i": {
+                              "content": "8s ago"
+                            }
+                          }
+                        },
+                        {
+                          "id": "GiD25",
+                          "type": "ref",
+                          "ref": "QEPce",
+                          "name": "Event queue.item.added · s",
+                          "width": "fill_container",
+                          "stroke": "$border-subtle",
+                          "strokeWidth": {
+                            "top": 1
+                          },
+                          "descendants": {
+                            "RT5C4": {
+                              "icon": "plus-circle",
+                              "fill": "$accent"
+                            },
+                            "FKSyu": {
+                              "content": "queue.item.added · seeded from planner"
+                            },
+                            "HIdco": {
+                              "content": "coder-loop#602",
+                              "fill": "$accent"
+                            },
+                            "t8H8i": {
+                              "content": "42s ago"
+                            }
+                          }
+                        },
+                        {
+                          "id": "hGhYq",
+                          "type": "ref",
+                          "ref": "QEPce",
+                          "name": "Event daemon.status · rate",
+                          "width": "fill_container",
+                          "stroke": "$border-subtle",
+                          "strokeWidth": {
+                            "top": 1
+                          },
+                          "descendants": {
+                            "RT5C4": {
+                              "icon": "activity",
+                              "fill": "$info"
+                            },
+                            "FKSyu": {
+                              "content": "daemon.status · rate-limit reset (18 spawns available)"
+                            },
+                            "HIdco": {
+                              "content": "—",
+                              "fill": "$text-muted"
+                            },
+                            "t8H8i": {
+                              "content": "1m ago"
+                            }
+                          }
+                        },
+                        {
+                          "id": "n6Kuw",
+                          "type": "ref",
+                          "ref": "QEPce",
+                          "name": "Event scheduler.tick_faile",
+                          "width": "fill_container",
+                          "stroke": "$border-subtle",
+                          "strokeWidth": {
+                            "top": 1
+                          },
+                          "descendants": {
+                            "RT5C4": {
+                              "icon": "alert-triangle",
+                              "fill": "$danger"
+                            },
+                            "FKSyu": {
+                              "content": "scheduler.tick_failed · dependsOn resolve error"
+                            },
+                            "HIdco": {
+                              "content": "pve-vctcn#89",
+                              "fill": "$accent"
+                            },
+                            "t8H8i": {
+                              "content": "3m ago"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "themes": {
+    "mode": [
+      "light",
+      "dark"
+    ]
+  },
+  "variables": {
+    "bg-canvas": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#F7F7F5",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#0E0F13",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "bg-surface": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#FFFFFF",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#16181E",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "bg-elevated": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#FFFFFF",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#1D2028",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "border-subtle": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#E4E4E1",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#22242D",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "border-strong": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#C7C7C1",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#313540",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "text-primary": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#16181E",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#E8E9EC",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "text-secondary": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#4A4E58",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#A8ACB6",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "text-muted": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#8B8F98",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#6B7080",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "accent": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#5B67D9",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#7B87F0",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "accent-subtle": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#E8EBFA",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#252A45",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "success": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#2F9E5B",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#47C77D",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "warning": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#C88A2B",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#E5A54B",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "danger": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#C93D3D",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#E56464",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "info": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#4880C8",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#6BA0E6",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "success-subtle": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#2F9E5B1A",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#47C77D24",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "warning-subtle": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#C88A2B1A",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#E5A54B24",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "danger-subtle": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#C93D3D1A",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#E5646424",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "info-subtle": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#4880C81A",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#6BA0E624",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "font-ui": {
+      "type": "string",
+      "value": "Inter"
+    },
+    "font-mono": {
+      "type": "string",
+      "value": "JetBrains Mono"
+    },
+    "sp-1": {
+      "type": "number",
+      "value": 4
+    },
+    "sp-2": {
+      "type": "number",
+      "value": 8
+    },
+    "sp-3": {
+      "type": "number",
+      "value": 12
+    },
+    "sp-4": {
+      "type": "number",
+      "value": 16
+    },
+    "sp-5": {
+      "type": "number",
+      "value": 24
+    },
+    "sp-6": {
+      "type": "number",
+      "value": 32
+    },
+    "sp-7": {
+      "type": "number",
+      "value": 48
+    },
+    "r-sm": {
+      "type": "number",
+      "value": 4
+    },
+    "r-md": {
+      "type": "number",
+      "value": 6
+    },
+    "r-lg": {
+      "type": "number",
+      "value": 8
+    },
+    "r-xl": {
+      "type": "number",
+      "value": 12
+    }
+  },
+  "fileToken": "425aace7-74a8-4d99-8eac-3119edaf4149"
+}
