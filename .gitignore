@@ -3,3 +3,5 @@ node_modules/
 .dev-trace.txt
 dist/
 .cache/
+.coder-loop/
+.DS_Store
