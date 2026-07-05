@@ -17,7 +17,7 @@ it does not replace runtime parsing.
 | `decision=complete` | Finalizer summary decision that permits the chain-complete trigger to finish the chain. | `src/loop.ts` `parseFinalizerSummaryDecisionFromText` |
 | `decision=keep-active` | Finalizer summary decision that keeps the chain active for remaining or uncertain umbrella scope. | `src/loop.ts` `parseFinalizerSummaryDecisionFromText` |
 
-The review-summary `verdict=<…>` five-word vocabulary is retired (#405). Review's terminal action flows through the typed phase-exits selection face (`coder-loop item exits` + `coder-loop item update --status` for item-status exits; `coder-loop item exit-action --action stop` for chain-action exits). No stdout-derived flow word survives in any code path; stdout occurrences of `verdict=` produce zero engine effect.
+Review's terminal action flows through the typed phase-exits selection face (`coder-loop item exits` + `coder-loop item update --status` for item-status exits; `coder-loop item exit-action --action stop` for chain-action exits). No stdout-derived flow word carries engine semantics; stdout occurrences of `verdict=` produce zero engine effect.
 
 ## Preset-Declared Strings
 

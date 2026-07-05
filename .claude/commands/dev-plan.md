@@ -12,14 +12,14 @@ Thin shell. Planning lives in the target preset's `plan/` fragment chain — rea
 
 ## Steps
 
-0. **Bootstrap check**. If `<target>/.coder-loop/runtime/config.json` does not exist, the target has never been initialized — run `coder-loop install <target>` (idempotent; creates runtime dirs and records the active preset/config). If `config.json` exists but you're unsure the bootstrap is healthy, run `coder-loop doctor <target>` (read-only; reports gh auth / runner CLI / runtime layout). Both are safe to re-run. GitHub label assets are preset-owned: when the active preset is `gh-issue-pr-iteration`, follow `contract.md` and `plan/create-issues.md` so the planning agent checks existing `kind:*` labels, creates missing declared labels, and updates declared labels whose color or description differs before posting issues.
+0. **Health check**. Run `coder-loop status "$PWD" --json` — if `state.kind == "ok"` and `queue.total >= 0`, the target's chain resolves through the central daemon and you can proceed. If it errors on chain lookup, the target has not been registered yet — run `coder-loop chain create <name> --config-json '{"repository":"<owner>/<repo>","baseBranch":"<base>"}' --preset gh-issue-pr-iteration` first (target directory needs no bootstrap files). For any other failure kind, run `coder-loop doctor "$PWD" --repo <owner>/<repo>` and address what it flags before planning. GitHub label assets are preset-owned: when the active preset is `gh-issue-pr-iteration`, follow `contract.md` and `plan/create-issues.md` so the planning agent checks existing `kind:*` labels, creates missing declared labels, and updates declared labels whose color or description differs before posting issues.
 
-1. Resolve target (`$PWD` or `--target-cwd`). Read `<target>/.coder-loop/runtime/config.json` → active preset name (default `gh-issue-pr-iteration`).
+1. Resolve target (`$PWD` or `--target-cwd`). Read the active chain via `coder-loop status "$PWD" --json | jq -r '.target.preset.name'` → active preset name.
 
 2. Read these mandatory inputs in order:
    - `<preset>/contract.md` — preset's self-contained issue/PR/review parsing and planning hygiene rules.
    - `<preset>/plan/index.md` — planning role overview + required common reads.
-   - `<target>/.coder-loop/workflow.md` — target project commands / conventions.
+   - `<target>/CLAUDE.md` and/or `<target>/AGENTS.md` — target project commands / conventions. When both are absent, `plan/intake` returns `intake_needs_clarification` demanding the operator commit one first.
 
    Optional: user-level writing/review skills if present. They are operator references only; absence must not block planning.
 

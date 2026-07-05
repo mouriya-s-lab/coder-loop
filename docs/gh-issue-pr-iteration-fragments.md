@@ -16,28 +16,29 @@
 | `statuses.continuable` | `queued / in_progress / changes_requested` |
 | `statuses.terminal` | `blocked / moot / done / exhausted` |
 | `statuses.unblockable` | `blocked`（`queue unblock` 恢复到 `statuses.entry = queued`） |
-| phases | `iteration` → `review`，以及 review 后按 `trigger` 条件运行的 side-effect phase（当前：`blocked-responder` on `blocked`）；planning 不在 phases 内，由 `/dev-plan` slash command 入口驱动 |
-| `agent.binary` | `claude` |
-| fragments | 71 个，分布在 `common/ / plan/ / quality/ / iter/steps/ / review/` 五块 |
+| phases | 4 个：`iteration` → `review`（普通执行流），加两个 trigger phase — `blocked-responder`（`trigger = { afterPhase = "review", whenStatus = "blocked" }`）和 `umbrella-finalizer`（`trigger = { on = "chain-complete" }`）；planning 不在 phases 内，由 `/dev-plan` slash command 入口驱动 |
+| phase runner/model | 四个 phase 全部 `runner = "claude"`、`model = "claude-opus-4-7[1m]"` |
+| `[agent].attemptTimeoutSeconds` | `7200` |
+| fragments | 73 个，分布在 `common/ / plan/ / quality/ / iter/steps/ / review/` 五块 |
 
-`item` 字段（除 `issue / status` 外）。`branch` / `pr` / `lastRunId` 由 bundled preset 的 `[item.fields]` 声明，是透明 item 字段；SQLite 仍保留旧列以兼容现有 chain，新增 CLI 写入走 `--field-json`。
+`item` 字段（除 `issue / status` 外）。bundled preset 的 `[item.fields]` 把 `issue` (number) / `branch` (string) / `pr` (number) / `lastRunId` (string) 声明为透明字段——engine items 表只保留 `item_id` opaque identity；这些字段落 `extra` JSON，wire 序列化时 flattenExtraReplacer 平铺到 `queue.selected.item.<field>`。CLI 写入统一走 `--field-json`。
 
 | 字段 | 类型 | 含义 |
 |---|---|---|
 | `attempts` | number / null | iteration 累计次数；review 判循环失败的硬上限 |
 | `title` | string / null | 人类可读标题 |
 | `priority` | `high \| medium \| low` / null | review 决定下一选哪个 |
-| `branch` | string / null | iteration 创建的 PR 分支名 |
-| `pr` | number / null | iteration 开的 PR 号 |
-| `lastRunId` | string / null | 上一次 iteration 的 runId |
+| `branch` | string / null | iteration 创建的 PR 分支名（透明字段，落 `extra.branch`） |
+| `pr` | number / null | iteration 开的 PR 号（透明字段，落 `extra.pr`） |
+| `lastRunId` | string / null | 上一次 iteration 的 runId（透明字段，落 `extra.lastRunId`） |
 | `issueFile` | string / null | 可选 per-issue handoff attachment 相对路径；主 handoff 是 chain-level `shared.md` |
 | `evidenceDir` | string / null | 该 issue 的证据目录相对路径 |
 | `agentCwd` | string / null | agent spawn 的绝对 cwd；跨仓或 post-review responder 可指向外部 checkout |
-| `runner` | `claude \| codex` / null | 该 item 对允许 item override 的普通执行 phase 的 runner override |
-| `blockerRepo` | string / undefined | `blocked` transition 写入的阻塞仓库，`owner/repo` |
-| `blockerRef` | string / undefined | `blocked` transition 写入的阻塞 issue ref 或环境条件 |
+| `runner` | `claude \| codex \| opencode` / null | 该 item 对允许 item override 的普通执行 phase 的 runner override |
+| `extra.blockerRepo` | string / undefined | `blocked` transition 通过 `--field-json '{"extraPatch":{"blockerRepo":"<owner>/<repo>"}}'` 写入的阻塞仓库；不是 first-class 列 |
+| `extra.blockerRef` | string / undefined | 同上通道写入的阻塞 issue ref 或环境条件 |
 
-status 字面量都是 preset 字符串，引擎只识别 `continuable / terminal` 二元集合。除常见转移外的转移（包括 `queued → done` 等）也合法，由 review 调度者通过 `coder-loop item update` 写入 centralized chain state（见 `review/actions/state-write.md`）。
+status 字面量都是 preset 字符串，引擎只识别 `continuable / terminal` 二元集合。合法状态转移由 review 调度者通过 `coder-loop item update` 或 `item exit-action` 写入 centralized chain state（见 `review/actions/state-write.md`）。
 
 ---
 
@@ -60,13 +61,15 @@ plan 链不变（仍为查表式 fragment 链）；trigger 角色（blocked-resp
 
 ---
 
-## 3. Fragment 全集（71）
+## 3. Fragment 全集（73）
 
-**common/**（4，含 contract）— 程序↔agent 边界、GitHub 路由、状态不变量、issue/PR 解析契约：
+**common/**（6，含 contract）— 程序↔agent 边界、GitHub 路由、状态不变量、dispatch/测试清点契约、issue/PR 解析契约：
 
 - `common/runtime-contract`（其 Fragment protocol 节只适用 plan 链）
 - `common/github-routing`
 - `common/state-contract`
+- `common/dispatch-contract` — 调度者派发 subagent 的三件套输入输出约定
+- `common/test-inventory-protocol` — iter/review 侧共用的测试清单枚举与两侧清点协议
 - `contract` — issue body / PR body / review 验收点解析规则
 
 **plan/**（12，仅 `/dev-plan` 进入）：`plan/index`、`plan/intake`、`plan/classify`、`plan/triage-existing`、`plan/business-frame`、`plan/decompose`、`plan/checkpoint-author`、`plan/adversarial-validate`、`plan/create-issues`、`plan/init-queue`、`plan/handoff`、`plan/final`
@@ -101,7 +104,7 @@ plan 链不变（仍为查表式 fragment 链）；trigger 角色（blocked-resp
 - `review/actions/{accept-pr,accept-no-pr,retry,expand-parent,skip,blocked,stop}` — 终局动作（调度者按 verdict 只读其一并亲自执行副作用）
 - `review/actions/state-write` — `coder-loop item update` 状态写出与 expand 队列规则
 
-fragment 总数 = 4 + 12 + 6 + 24 + 25 = 71，与 `preset.toml` 的 `[[fragments]]` 块数和 `src/preset.test.ts` 的 `EXPECTED_FRAGMENTS` 一致。
+fragment 总数 = 6 + 12 + 6 + 24 + 25 = 73，与 `preset.toml` 的 `[[fragments]]` 块数和 `src/preset.test.ts` 的 `EXPECTED_FRAGMENTS` 一致。
 
 ---
 
@@ -160,18 +163,18 @@ plan/init-queue
 
 ## 5. Iteration 调度者（`iter-entry.md`，workflow 形态）
 
-Step 0 读契约（common 三件 + 两个 `-judge` 判据）→ Step 1 spawn 分类（Resume/Retry/Fresh）→ Step 2 调查（**恰好五项亲自读取**，每项标注喂哪个决策；五项之外的任何阅读都派 research）→ Step 3 **建任务清单**（按 `ISSUE_KIND` 选步骤序列，落成显式 checklist；两态出口；每 verdict 后重印）→ Step 4 逐条执行（4a 派发模板 → 4b 按 accept.md 必填字段查结构 → 4c 判实质 → 4d verdict 路由）→ Step 5 handoff → Step 6 按派发账清场 → Step 7 `ITERATION SUMMARY:` 一行（含 `list=` 与 `dispatched=` 字段）。
+Step 0 读契约（六份 common：`runtime-contract` / `github-routing` / `state-contract` / `contract` / `dispatch-contract` / `test-inventory-protocol` + 两个 `-judge` 判据 `honesty-judge` / `evidence-judge`）→ Step 1 spawn 分类（Resume/Retry/Fresh）→ Step 2 调查（**恰好数项亲自读取**，每项标注喂哪个决策；表外任何阅读都派 research）→ Step 3 **建任务清单**（按 **deliverable signal** 从 issue body 判断——没有 label 帮你选路，路由决定由调度者按 issue body / acceptance rows 做出，落成显式 checklist；两态出口；每 verdict 后重印）→ Step 4 逐条执行（4a 派发模板 → 4b 按 accept.md 必填字段查结构 → 4c 判实质 → 4d verdict 路由；`verify ∥ e2e` 在同一 async dispatch round 并发派发，按 `common/dispatch-contract.md` 传输，报告在 `<task-notification>` 后续 turn 回归时判定）→ Step 5 Wrap up（handoff / summary 写盘）→ Step 6 Cleanup（scratch only，e2e standing environment 保留）→ Step 7 `ITERATION SUMMARY:` 一行（含 `list=` 与 `dispatched=` 字段；这是给 review 的接力信号，`summaryMarker` 未在 preset 声明，引擎不据此做 watchdog）。
 
-kind → 步骤序列：
+Deliverable signal → 步骤序列：
 
-| `ISSUE_KIND` | 序列（每项 = 一次派发） |
+| Deliverable signal | 序列（每项 = 一次派发；`∥` = async 并发派发） |
 |---|---|
-| `code` / 空（legacy） | [research?] → implement → verify → e2e → submit |
-| `blocked` | resolve-blocker → implement → verify → e2e → submit |
-| `code-spike` | [research?] → source-spike |
-| `comment` | [research?] → spike-comment |
+| Code change（默认路径：issue body 要求写 / 改代码） | `[research?] → implement → (verify ∥ e2e) → submit` |
+| Unblock 另一个 issue（body 命名具体 blocker，acceptance rows 包含真实 blocked-path replay） | `resolve-blocker → implement → (verify ∥ e2e) → submit` |
+| Source-writing spike（body 明确要求 PoC / source / runtime evidence 且带 no-merge 约束） | `[research?] → source-spike` |
+| Comment deliverable（spike / 设计对话，`## 结果分支` 钉住 comment 内容，无 code change） | `[research?] → spike-comment` |
 
-verify / e2e 发现产品性失败 → 在清单里 verify 行前插入 scoped implement 行，implement 过后 verify 与 e2e **两行都**重跑完整契约（不是只重跑失败行，修复可能回归任一侧）——「完整的迭代」在 iter 内闭环，不把半成品推给 review 轮转。verify 把 `Env=browser` 行记 `deferred: e2e step` 转交，e2e 步在真 UI walk 内关闭。iteration 不写 item status；scheduler 从 run ledger 推进到 review。
+Body 信号在两行之间模糊时，先派 `research` 钉死，不用同时跑两条路。verify / e2e 发现产品性失败 → 在清单里插入 scoped implement 行，implement 过后 `verify ∥ e2e` **两行都**重跑完整契约——「完整的迭代」在 iter 内闭环。iteration 不写 item status；scheduler 从 run ledger 推进到 review。
 
 边界不变：不选别的 issue、不批处理、不建 child issue、不 merge、不关 issue、不动队列与最终状态、不 stage runtime artifacts、不删/弱化 issue 字面要求之外的测试。
 
@@ -181,7 +184,7 @@ verify / e2e 发现产品性失败 → 在清单里 verify 行前插入 scoped i
 
 Step 0 读契约 → Step 1 调查（**恰好六项亲自读取**，含 issue body 编辑历史 `userContentEdits`；Intent/Result blocks、PR body 与最新 retry comment **verbatim 亲读**；大材料派 investigate）→ Step 2 建清单（**PR-backed kind 强制含 diff-audit、test-integrity、replay、e2e-replay 四个派发**——缺任一份已验收报告的 verdict（含 retry）无效；"packet 一眼就有问题" 不是豁免，先拿齐四份报告一次引全；争用安排：diff-audit 纯读 ∥ test-integrity 自有 scratch worktrees ∥ replay 占 AGENT_CWD，e2e-replay 在 replay 之后跑）→ Step 3 执行派发并消化报告（replay = 契约行真值，browser 行例外——记 `deferred: e2e-replay` 转交；test-integrity = 测试真值；e2e-replay = 交付物真值并关闭转交的 browser 契约行；diff-audit = scope/卫生/代码真值，code findings 须带锚才进 verdict；stale-baseline 例外在此适用）→ Step 4 亲自判断：判断 0 **契约完整性**（编辑历史比对，篡改 → 恢复最新未篡改快照 → 红线警告硬 retry）+ trace honesty / PR protocol / title-intent / caveat honesty / evidence form + 判断 6 **checks/mergeability 实测**（调度者亲自跑 `gh pr checks` / mergeable），每项输入与失败条件内联在步骤现场；先收集全部失败再 verdict，不见首败即停 → Step 5 closure 分类 → Step 6 终局动作（PR 回复是**全量 review 报告**固定结构：每个 check 一节且每节必填该检查的实测值——SHA / 计数 / 原句引用 / URL / 时间戳，填不出即检查未做，强迫先判断后输出 + `## 缺失汇总` 单一权威缺口区 + `## Skipped checks` 写明理由；retry 反馈质量线：契约发现领先措辞发现，每条具名到行号/文件/测试名/触发短语；四份报告全绿而仅剩措辞抱怨时必须对照 honesty-judge 复查再发）+ state write + 环境收尾（e2e standing environment 的 teardown 归 review）→ Step 7 global assessment、handoff、清场、`REVIEW SUMMARY:` 一行（`dispatched=` 字段四槽位，`no` 仅 no-PR 路由 / stop 合法）。
 
-**review 可独立复验但绝不替 iter 修**。kind 分流矩阵见 `review-entry.md` 的 Kind routing matrix（contract.md §4 有 issue 作者视角摘要）。
+**review 可独立复验但绝不替 iter 修**。Review 的 deliverable-signal 分流见 `review-entry.md`（contract.md §4 有 issue 作者视角摘要）。终局动作通过 `coder-loop item exits` + `item update --status` 或 `item exit-action --action stop` 落 phase-exit，不再依赖 stdout 里的 `verdict=` 词表。
 
 ---
 
@@ -191,7 +194,7 @@ phase 输出文件路径由 `coder-loop status <target> --json` 的 `current.pha
 
 - **调度者的派发账**（dispatch ledger）与各步 subagent 汇报会出现在 stdout 流里——按步骤名（research / implement / verify / submit / replay …）定位。
 - **handoff 注记**：iter 在 `loop-data/chains/<chain>/shared.md` 留 per-run 计划与各步 outcome；review 留 verdict + 失败判断点 + replay 摘要。
-- **终行**：`ITERATION SUMMARY:` / `REVIEW SUMMARY: verdict=…` 是两个 phase 的硬终点标记。
+- **终行**：iter 尾部的 `ITERATION SUMMARY:` 是给 review 的接力标记（preset 不声明 `summaryMarker`，引擎不据此做 watchdog）；review 的终局是通过 `coder-loop item exits` + `item update --status` 或 `item exit-action` 显式写 phase-exit，stdout 里没有权威 verdict 词。
 - plan 链仍按 §4 的 verdict 图反推。
 
 ---

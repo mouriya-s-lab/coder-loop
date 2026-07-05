@@ -1,144 +1,84 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+面向在本仓库工作的 agent。项目形态、机制、CLI 细节的详细说明分散在 `docs/`，本页只钉住"改代码前必须知道的东西"。
 
 ## Project
 
-coder-loop — 项目无关的 N 角色字符串调度引擎。给定一个 preset（角色定义、状态集、phase 列表、prompt 与变量绑定），引擎按 preset 描述的顺序 spawn 各 phase 的 agent，捕获输出，根据状态推进队列直到所有 item 落在 terminal 状态。
+coder-loop 是项目无关的 N-phase 字符串调度引擎。给定一个 preset（phase 列表、状态词表、prompt 与变量绑定），中央 daemon 按 preset 描述的顺序在 chain × item 上 spawn agent，捕获 trace，按 agent 写回的 item.status 推进队列，直到所有 item 落 terminal 状态。引擎不知道 phase 数量、phase 名字、status 字面量、item id 字段、GitHub。判断（issue 是否完成、PR 是否正确、证据是否充分）全部在 preset 的 agent prompt 里。
 
-bundled `gh-issue-pr-iteration` preset 编码 GitHub issue/PR 两角色（iteration + review）迭代工作流，是默认 preset；`single-phase-example` 是验证 1 phase / 字符串 id / 双状态可行的最小 preset。引擎本身不知道 GitHub、不知道 phase 数量、不知道 status 字面量。
+内置 preset：
 
-## Architecture / Layers
+- `gh-issue-pr-iteration` — 生产使用的 GitHub issue/PR 迭代 preset，四个 phase（`iteration` / `review` / `blocked-responder` / `umbrella-finalizer`）；planning 由 `/dev-plan` slash command 驱动 `plan/` fragment 链，不进 `preset.phases`。设计思路在 `presets/gh-issue-pr-iteration/DESIGN.md`，fragment 跳转在 `docs/gh-issue-pr-iteration-fragments.md`。
+- `real-e2e-minimal` — 两 phase 的最小 GitHub loop，`scripts/real-e2e.ts` 默认走这个。
+- `single-phase-example` — 一 phase / 字符串 id / 双状态的最小示例。
+- `business-key-example` — 演示 `[runtime].businessKeys` 声明位。
 
-三层架构：
+## Architecture
 
-```
-L1: 引擎（src/loop.ts）
-    - 加载 preset、加载 target runtime、按 phase 顺序 spawn agent、resume、status 快照
-    - 不知道 phase 数量 / status 字面量 / 已知 KEY / GitHub
-    - 不判断 item 是否完成、PR 是否正确、证据是否充分
+代码实然形态见 `docs/architecture-v2.md`（daemon + chain + scheduler + SQLite），历史演变主线（机制归引擎、参数归 preset）见 `docs/architecture-v1.md` 第四节。三层职责边界：
 
-L2: Preset（presets/<name>/）
-    - preset.toml: 形态契约 (item.idField / statuses / phases / fragments / agent)
-    - <phase>-entry.md + fragments: 角色 prompt 与状态机语义
-    - templates/: 目标侧 starter（仅当该 preset 需要 target-side policy 时）
-
-目标侧策略：target 自有的 agent 指令文件 + .coder-loop/
-    - <TARGET>/CLAUDE.md / <TARGET>/AGENTS.md: 项目命令 / 约定 / PR 形态（committed；preset prompt 显式读取）
-    - <TARGET>/.coder-loop/runtime/{shared,issues,evidence,logs}: ignored 本地运行态（chain 元数据归 centralized SQLite，无 target 侧 config）
-```
-
-每层职责互不重叠：
-
-| 层 | 知道什么 | 不知道什么 |
+| 层 | 知道 | 不知道 |
 |---|---|---|
-| L1 | 怎么 spawn / 怎么 resume / 怎么读 toml / 怎么校验 runtime | preset 名、phase 名、status 字面量、变量 KEY 含义 |
-| L2 (preset) | phase 顺序、status 语义、角色边界、什么时候 verdict、什么时候 stop | target 项目命令、CI 配置、PR 模板细节 |
-| target | 项目命令、CI-parity 规则、PR/evidence/review 具体形式 | 引擎调度细节、其他 preset 的事 |
+| L1 引擎 (`src/loop.ts`、`src/daemon.ts`、`src/scheduler.ts`、`src/sqlite-state.ts`) | 怎么加载 preset、按 phase 顺序 spawn / resume、写 SQLite、跨 chain 调度、孤儿回收 | phase 数量与名字、status 字面量、item id 字段、已知变量 KEY、GitHub |
+| L2 preset (`presets/<name>/`) | phase 顺序、状态词表与转移、角色 prompt、chain-action exits、post-review trigger DAG | target 项目命令、CI 配置、PR 模板细节 |
+| target | 项目命令、CI-parity 规则、PR/evidence/review 具体形式 | 引擎调度、其他 preset |
+
+engine-owned `runtime.*` fact 清单、preset-declared runtime business key、`[[phases]]` / `[[fragments]]` / `[item.fields]` 全部字段语义见 `docs/preset-authoring.md`。
 
 ## Commands
 
-- **Type check**: `bun run typecheck` (alias for `bun x tsc --noEmit`)
-- **Run unit + smoke tests**: `bun test` (覆盖 `src/loop.test.ts` + `src/smoke.test.ts`)
-- **Real e2e（引擎全链路验收）**: `bun scripts/real-e2e.ts [--preset gh-issue-pr-iteration] [flags]` — 单命令真实 e2e：隔离 daemon（`--loop-data-root`，绝不碰生产 `~/.coder-loop`）→ 在 fixture repo `mouriya-s-lab/coder-loop-e2e-fixture` seed 一个 trivial issue → 跑完整 loop（spawn → iteration → review → PR merged → issue closed）→ 断言 GitHub 终态 → tripwire/teardown。默认 `real-e2e-minimal` preset（最小，只验引擎调度链路，~3-5min）；`--preset gh-issue-pr-iteration` 跑全保真。详细 runbook 见 `docs/real-e2e-fixture.md`。这只在 code 仓跑，不在 app 跑。
-- **Status snapshot**: `coder-loop status <target> --json [--chain <name>]` — stable read-only JSON API for supervisor/scripts; do not scrape runtime files first.
-- **Daemon operations**: `coder-loop daemon status <target> --json`, `coder-loop daemon start|restart <target> [--max-iterations N]`, `coder-loop daemon stop <target>` — stable central-daemon / target-chain control API.
-- **新接入 target**: `coder-loop chain create <name> --repository <owner>/<repo> --preset <name> [--config-json '{"baseBranch":"..."}']` — 中央 daemon socket 一次写入 chain metadata（含 per-target `bindings`），target 目录不需要任何 bootstrap 文件。preset 业务资产（如 GitHub labels）由该 preset 的 planning agent 在运行中幂等确保。源：`src/loop.ts` chain command 入口。（#436 起 install/uninstall 子命令退役，原五层 bootstrap 已逐层归位到 preset / chain / operator 机器。）
-- **Doctor**: `coder-loop doctor <target> [--repo <owner/repo>]` — 只读体检：operator 机器先决条件（gh + auth、phase 声明的 runner CLI、`coder-loop` 在 PATH）+ live runtime health（state、queue、当前 run、events、live processes）。零 target 文件检查。
-- **Plan / Loop phase**: `/dev-plan` 和 `/dev-loop [N]` 是用户级 slash command（一份，参数化 target，安装到 `~/.claude/commands/` 即可在任意 target repo 内用）。本 repo `.claude/commands/dev-plan.md` 和 `dev-loop.md` 保留为 dogfood 实例。`/dev-plan` 灌队列；`/dev-loop [N]` 内部走 `coder-loop daemon start [--max-iterations N]`。
+Root usage（源：`src/loop.ts:2684 rootUsage`）：
 
-### 何时必须跑 real-e2e（引擎/调度改动的验收主线）
+```
+coder-loop status  <target> --json
+coder-loop logs    <target> --json [--kind K] [--type T] [--chain C] [--item ID] [--run RUN_ID] [--phase P] [--since TS] [--follow]
+coder-loop daemon  <up|down|status|start|stop|restart>
+coder-loop chain   <create|list|status|stop|resume|delete|set-runner-model>
+coder-loop item    <add|batch-add|list|update|reorder|exits|exit-action>
+coder-loop queue   unblock <target> --issue <issue>
+coder-loop doctor  <target>
+```
 
-改动 L1 引擎（`src/loop.ts`）、`src/scheduler.ts`、`src/daemon.ts` 里的调度 / worktree / 终止 / resume 语义、或 preset 加载路径后，`bun test`（unit + smoke，mock 掉真实调度）**不足以证明正确**——这类路径的 bug（如 #466 的 worktree wedge、#467 的 `daemon down` 留孤儿 codex）只在真实 daemon 调度真实 agent 时才暴露，type-check / unit test 全绿也照样带病。完成判定必须包含一次 `bun scripts/real-e2e.ts` 绿跑（观察到 PR MERGED / issue CLOSED）。它慢、真打 GitHub，不是 per-commit gate，但引擎 / 调度类改动的**验收主线是 real-e2e，不是 unit test**。
+`item exits` / `item exit-action` 是 agent 面（`--agent-run-id` / `--agent-phase` 必填），不是 operator 面。operator 常用运维流程见 `docs/operations.md`。
 
-## Runner Selection
+开发工作面：
 
-Runner 与 model 默认值跟随 `preset.toml`，而不是角色 entry md。每个 phase 可声明：
+- **Type check**: `bun run typecheck`
+- **Unit + smoke tests**: `bun test`
+- **Real e2e（引擎全链路验收）**: `bun scripts/real-e2e.ts [--preset <name>] [flags]` — 隔离 daemon（`--loop-data-root`，绝不碰生产 `~/.coder-loop`）→ 在 fixture repo `mouriya-s-lab/coder-loop-e2e-fixture` seed 一个 trivial issue → 跑完整 loop（spawn → iteration → review → PR merged → issue closed）→ 断言 GitHub 终态 → tripwire/teardown。默认 `real-e2e-minimal` preset（~3-5min）；`--preset gh-issue-pr-iteration` 跑全保真。runbook 见 `docs/real-e2e-fixture.md`。这只在 code 仓跑，不在 app 跑。
+- **Plan / Loop phase**: `/dev-plan` 与 `/dev-loop [N]` 是用户级 slash command（一份，参数化 target，安装到 `~/.claude/commands/` 即可在任意 target repo 内用）。本 repo `.claude/commands/dev-*.md` 保留为 dogfood 实例。`/dev-loop [N]` 内部走 `coder-loop daemon start [--max-iterations N]`。
+
+### 引擎/调度改动的验收主线是 real-e2e
+
+改 `src/loop.ts` / `src/scheduler.ts` / `src/daemon.ts` 里的调度 / worktree / 终止 / resume 语义、或 preset 加载路径后，`bun test`（unit + smoke，mock 掉真实调度）**不足以证明正确**——这类路径的 bug 只在真实 daemon 调度真实 agent 时才暴露，type-check / unit test 全绿也照样带病。完成判定必须包含一次 `bun scripts/real-e2e.ts` 绿跑（观察到 PR MERGED / issue CLOSED）。它慢、真打 GitHub，不是 per-commit gate，但引擎 / 调度类改动的**验收主线是 real-e2e，不是 unit test**。
+
+## Runner selection
+
+Runner 与 model 声明在 preset per-phase，item 可选择性覆盖。
 
 ```toml
 [[phases]]
-name = "review"
-runner = "codex"
-model  = "gpt-5.5"
+name  = "review"
+runner = "claude"       # "claude" | "codex" | "opencode"
+model  = "claude-opus-4-7"
 ```
 
-`runner` 只能是 `claude` 或 `codex`。phase 未声明时走单一 engine-builtin fallback（当前为 `codex`），并在 status 中显示 `source=engine-builtin`。`model` 是该 phase 的默认模型；item override 把 runner 切到与 phase 声明不同的 kind 时不继承它。`target.runner.hostDefault` 只保留宿主诊断信息，不决定 phase runner。
+- Phase runner 未声明时走 engine-builtin fallback（当前 `codex`）。
+- Item 上的 `--runner` 只覆盖允许 item override 的普通执行 phase（`gh-issue-pr-iteration` 中是 `iter`）。
+- Runner binary 是 PATH 上的 `claude` / `codex` / `opencode`；模型来自 phase 的 `model`。
+- Chain 级 model 覆盖走 `coder-loop chain set-runner-model <chain> --kind <k> --model <m>`（patch `chain.metadata.<kind>.model`）。
+- `coder-loop status <target> --json` 暴露 `target.runner.phases.<phase>`、`queue.selected.phaseRunners.<phase>`、`current.runner`、`current.phaseStatus.value.runner/model` — 这是 runner/model 的唯一稳定读面。agent 每个 phase 的 `status.json` 位于 `<logDir>/<runId>/<phase>/status.json`，只作 fallback debug。
 
-覆盖顺序：
+## Preset 与 target starter
 
-1. centralized queue item 上的 `"runner": "claude" | "codex"`，只影响允许 item override 的普通执行 phase（`gh-issue-pr-iteration` 中是 iteration）。
-2. `preset.toml` 中 phase 的 `runner`，status 中显示 `source=preset`。
-3. phase 未声明 runner 时的 engine-builtin fallback，status 中显示 `source=engine-builtin`。
+preset 层配套的 target-side starter 在 `presets/<name>/templates/`。跨 preset 通用的 supervisor starter（cron 驱动跨 patrol orchestration）在 `templates/supervisor/`。项目命令 / PR 约定由 target 自有的 `CLAUDE.md` / `AGENTS.md` 承载，preset prompt 显式读取这两份文件。写新 preset 的最小流程见 `docs/preset-authoring.md`。
 
-Runner binary 直接是 `claude` / `codex`（在 PATH 上），不再可被 target 覆盖；模型 / 额外参数来自 phase 的 `model` 声明。`coder-loop status <target> --json` 暴露 `target.runner.phases.<phase>`、`target.runner.default`、`queue.selected.phaseRunners.<phase>`、`queue.selected.runner`、`current.runner` 和 `current.phaseStatus.value.runner/model`（#456 起，per-phase 字段是唯一的 runner face；任何角色专属字段已退场，breaking change，PR body 须显式列出 shape diff）；`doctor` 按 phase runner 推导出的 runner binary 做 PATH 检查。不要从旧 flat log 或 agent `status.json` 反推 runner/model，除非 `status` 已经指出需要 fallback debug；新版 agent status 位于 `<logDir>/<runId>/<phase>/status.json`。
+## Tech stack
 
-### 写一个新 preset 的最小流程
-
-1. `mkdir presets/<name>/` 写 `preset.toml`（schema 见 README §「写一个新 preset」）。
-2. 给每个 phase 写一份 `<phase>-entry.md`，正文用 `{{KEY}}` 占位符引用 preset.toml `[phases.variables]` 表的 key；phase runner 写在 `preset.toml`。
-3. 创建 chain 时通过 `coder-loop chain create <name> --preset <name>`（或 `--config-json '{"presetPath":"..."}'`）把 preset 落到 chain.metadata.bindings；target 侧没有 config 文件。
-4. `coder-loop status <target> --json` 应输出 `.target.preset.name == "<name>"` 且 `.state.kind == "ok"`。
-5. 队列加入 item 后，同一命令的 `.queue.selected.id` 应指向期望的下一个 item。
-6. 真跑前用 `doctor` 确保各 entry md 声明的 runner CLI 在 PATH 上可运行。
-
-## gh-issue-pr-iteration preset 的设计前提
-
-下面四条**全部是 `gh-issue-pr-iteration` preset 的前提**，不是 L1 行为。修改 `presets/gh-issue-pr-iteration/iter-entry.md` / `review-entry.md` 之前必须理解；写其他 preset 时这些可以替换或删掉。
-
-### 这不是软件工程问题
-
-Agent 的判断失误不能用工程手段（状态机、验证层、verdict 文件）修补。把判断交给没有判断能力的程序没意义——正因为程序不可靠所以才交给 LLM 判断。任何试图用确定性逻辑替代 LLM 判断的方案都是在回避问题。
-
-### 问题是 prompt 没有教 agent 怎么工作
-
-Agent 不是「判断力差」——是没人教它怎么判断。当前 prompt 给了一个模糊目标（"verify no open issues → stop"），没有思维链、没有工作流程、没有待办事项管理。系统中最关键的决策得到了最少的认知支撑。Agent 当然走捷径，因为 prompt 给了它一个 Goal 而不是一个 Procedure。
-
-### Agent 需要的信息分散在无数来源
-
-做出正确的终止判断需要的证据不只在 issues 里——可能在 PR comments、SSH 日志、设计文档、git 历史中。不可能预取所有来源。所以不能用「注入 ground truth」的方式解决——需要教 agent 自己系统性地收集证据。
-
-### 每个 agent 运行都是无状态的
-
-每次 `claude -p` spawn 的 agent 是独立进程，没有跨轮次记忆。本地文件会丢失、损坏、跨机器不可用。如果要用本地状态，必须每次做完即丢弃。持久业务语义只能依赖 GitHub（issues / labels / comments）。
-
-## Supervisor pattern
-
-跨 preset 通用，包在 loop 外面。`templates/supervisor/` 提供 cron-driven cross-patrol orchestration starter，long multi-mission work 适用。短单 issue 跑不需要它。
-
-supervisor 的正常接口是 coder-loop 运维 API：
-
-- bootstrap: `coder-loop chain create <name> --repository <owner>/<repo> --preset <name>`（中央 socket，一条命令）
-- repair / verify: `coder-loop doctor <target>`（read-only：operator machine prereqs + live runtime health）
-- observe: `coder-loop status <target> --json` or `coder-loop daemon status <target> --json`
-- control: `coder-loop daemon start|stop|restart <target>`
-
-不要把 runtime 文件、events JSONL、agent `status.json`、旧 `.dev-loop` 当作第一层契约来 scrape。先用 `doctor/status/daemon`；只有这些 API 指向具体异常、或需要人工恢复 runtime 时，才按 `status` 返回的路径读取 centralized DB / events / `<logDir>/<runId>/<phase>/status.json` 作为 fallback/debug evidence。
-
-## Templates for target projects
-
-`coder-loop` 是 stateless program loop——它不内置 PR 形态、证据规则、queue 策略、跨 issue 记忆。这些规则的具体内容由 preset 决定：loop 政策（PR 证据层、verdict 约定、CI parity）内联在 preset fragments 内部；项目命令 / 项目级 PR 约定 / 项目专属注意事项由 target 自有的 `CLAUDE.md` / `AGENTS.md` 承载，preset prompt 显式读取这两份 agent 指令文件（不依赖 runner 原生注入行为）。
-
-starter 位置：
-
-- `presets/<preset-name>/templates/` — 该 preset 配套的目标侧 starter（如 `gh-issue-pr-iteration/templates/{shared,pr-body}.md`；`workflow.md` 已自 #434 + #436 全面退役）
-- `templates/supervisor/` — 跨 preset 通用的 supervisor starter
-
-详见 `templates/README.md`。
-
-## 当前实现 vs 分层契约的差距
-
-记录 `src/loop.ts` 仍接受 PR-shaped 概念的位置，作为 #370 登记的已知契约偏离；这些偏离由 #396（状态机参数收敛 umbrella）与 #412（preset 声明位收敛）承接：
-
-- **supervisor bootstrap 要手动改占位符**：项目级 bootstrap skill 应自动 dispatch 到 `<TARGET>/.coder-loop/runtime/supervisor/` 下最近活动 mission（#31）。
-- **runtime.\* binding 分层**：Engine runtime fact key count: 26. Engine-owned fact 清单与维护流程见 `docs/preset-authoring.md`；新增 engine fact 仍需同时改 `ENGINE_RUNTIME_BINDING_KEYS` 与 `buildRuntimeBindings`，并用测试守护文档计数 / 清单不漂移。Preset 业务 key 由对应 `preset.toml` 的 `[runtime].businessKeys` 声明，新增业务 key 不改 engine fact 清单；未声明引用在 preset load 阶段失败，声明但缺值在 render 阶段失败。
-- **SQLite item 物理列**：#419 已完成，items 表 `issue_number` 整数身份键 → `item_id TEXT NOT NULL` + `UNIQUE (chain_id, item_id)`，`branch` / `pr` 物理列退役（继续 import 它们的 preset 通过 `[item.fields]` 声明并经 `extra.branch` / `extra.pr` 透明字段读写，engine 只读 `extra`）。preset 声明位收敛归 #412 已落地；schema 版本 v12 起 items 物理形态不再 GitHub-shape。
-
-## Tech Stack
-
-Bun + TypeScript (strict, ESM). Runtime dependencies are external CLIs: `gh` plus the selected iteration/review runner CLIs (`claude` or `codex`) on PATH。
+Bun + TypeScript (strict, ESM)。runtime 依赖是 PATH 上的 CLI：`gh` + 每个 phase 声明的 runner CLI（`claude` / `codex` / `opencode`）。
 
 ## Conventions
 
-- Conventional commits: `feat:`, `fix:`, `refactor:`, `docs:`
-- Cross-repo refs in commit body: `Closes owner/repo#N`
-- 引擎层禁止任何 `gh-issue-pr-iteration` 字面量（status 字符串、phase 名、`{{REPO}}` 等已知 KEY、GitHub-specific 字段名）。新增引擎代码触碰这些时一律改成读 preset。
+- Conventional commits: `feat:`, `fix:`, `refactor:`, `docs:`。
+- 跨 repo commit body 引用：`Closes owner/repo#N`。
+- 引擎层禁止任何 preset 字面量（status 字符串、phase 名、`{{REPO}}` 等已知 KEY、GitHub-specific 字段名）。新增引擎代码触碰这些时一律改成读 preset。
