@@ -11,6 +11,7 @@ import {
 	phaseChainActions,
 	phaseWritableStatuses,
 	runPresetChainCompleteTriggerPhases,
+	substitutePresetRootToken,
 	PRESET_PHASE_CHAIN_ACTIONS,
 	type AgentRunnerKind,
 	type AgentRunnerSelection,
@@ -3646,7 +3647,13 @@ export class CoderLoopDaemon {
 		if (presetPhase === undefined) {
 			throw new Error(defaultDaemonPrompt({ reason: "phase_not_found_in_preset", preset: preset.name, phase: ctx.phase, presetDir }))
 		}
-		return await readFile(presetPhase.prompt, "utf-8")
+		// Substitute the engine-owned {{PRESET_ROOT}} token against
+		// preset.presetDir. Under the production materialize-on path, the
+		// materialized md file on disk was substituted at copy time, so this
+		// call is a no-op; kept unconditional so the daemon stays correct if
+		// materialization is disabled for a load path (e.g. test fixture).
+		const raw = await readFile(presetPhase.prompt, "utf-8")
+		return substitutePresetRootToken(raw, preset.presetDir)
 	}
 
 	private async loadedPresetForChain(chain: ChainRecord, operation: string): Promise<SchedulerLoadedPreset> {
@@ -3685,7 +3692,10 @@ export class CoderLoopDaemon {
 		// warn-verdict findings are real informational events the operator must still see).
 		const collectedDagFindings: PresetDagFinding[] = []
 		// Findings are emitted only when the cache is cold so we don't double-write per chain.
-		const loading = cached ?? loadSchedulerPresetFromDir(presetDir, {
+		// Materialize into the daemon's loop-data root so agents spawned in
+		// random worktrees read from `<loopDataRoot>/preset-materialized/<name>-<hash>/`
+		// with `{{PRESET_ROOT}}` in md files already substituted.
+		const loading = cached ?? loadSchedulerPresetFromDirMaterialized(presetDir, this.paths.root, {
 			onValidationFinding: (finding) => collectedFindings.push(finding),
 			onDagFinding: (finding) => collectedDagFindings.push(finding),
 		})
@@ -4647,6 +4657,21 @@ function bundledPresetDir(presetName: string): string {
 
 async function loadSchedulerPresetFromDir(presetDir: string, options: LoadPresetOptions = {}): Promise<SchedulerLoadedPreset> {
 	return { presetDir, preset: await loadPreset(presetDir, options) }
+}
+
+// #530: daemon-side entrypoint that always materializes the preset into
+// `<loopDataRoot>/preset-materialized/<name>-<hash>/` so agents spawned in
+// random worktrees read a stable absolute prompt root. Called by
+// `loadedPresetFromDirForChain`; the tracker of active materialized dir
+// names on the daemon instance drives `prunePresetMaterializedRoot` at
+// start-of-day.
+async function loadSchedulerPresetFromDirMaterialized(
+	presetDir: string,
+	loopDataRoot: string,
+	options: LoadPresetOptions = {},
+): Promise<SchedulerLoadedPreset> {
+	const merged: LoadPresetOptions = { ...options, materialize: { root: loopDataRoot } }
+	return { presetDir, preset: await loadPreset(presetDir, merged) }
 }
 
 function assertNeverSchedulerEvent(event: never): never {

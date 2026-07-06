@@ -132,15 +132,14 @@ rm -rf "$TARGET"
 | `[[phases]].prompt` | string | 是 | 相对 preset.toml 的 entry prompt 模板路径 |
 | `[[phases]].runner` | `"claude"|"codex"|"opencode"` | 否 | phase 默认 runner；未声明时使用 engine-builtin fallback |
 | `[[phases]].model` | string | 否 | phase 默认 model。只在解析出的 runner kind 与本 phase 声明的 runner 一致时生效（item override 切换 runner 后不继承） |
-| `[[phases]].summaryMarker` | string | 否 | 该 phase 在 stdout 中声明完成后的 marker；声明后 post-summary watchdog 观察该 marker，未声明则该 phase 不启用 post-summary watchdog |
 | `[[phases.exits]]` | array | 否 | 该 phase 允许 agent 写出的结构化出口。每项包含 `status` 与给 prompt 渲染用的 `when` 说明；不声明 exits 表示该 phase 不写 status |
 | `[[phases]].trigger` | table | 否 | 可把 phase 声明为 trigger phase。支持 `trigger = { afterPhase = "...", whenStatus = "..." }` 的 item phase trigger，或 `trigger = { on = "chain-complete" }` 的 chain lifecycle trigger |
 | `[[phases]].roles` | string[] | preset 声明 fragments 时必填，否则可省 | 该 phase 渲染 `{{PROMPT_FRAGMENT_INDEX}}` 时可见的 fragment role 集合。引擎从不通过 phase 名猜 role；只列在这里的 role 对应的 fragment 才会进该 phase 的索引切片。`[[fragments]]` 中未出现的 role 名会在加载期报错。 |
 | `[phases.variables]` | table | 是 | 模板中 `{{KEY}}` 的解析表。值可为 `"item|chain|runtime.<key>"` 字符串，或 `{ source = "...", label = "...", suffix = "...", style = "code|plain" }`，后者会参与 `{{RUNTIME_INPUTS_DOC}}` 渲染 |
-| `[[fragments]].id` | string | 是 | fragment 唯一标识（如 `iter/read-context`），entry prompt 通过该 id 引用 |
+| `[[fragments]].id` | string | 是 | fragment 唯一标识（如 `iter/steps/implement`），entry prompt 通过该 id 引用 |
 | `[[fragments]].role` | string | 是 | fragment 角色（如 `common` / `iter` / `review`）。该字段参与 `[[phases]].roles` 切片：当前 phase 渲染的 fragment 索引仅含 role 出现在该 phase `roles` 数组里的条目。fragment 文件完整性校验（`assertReadable`）仍覆盖全量。 |
 | `[[fragments]].path` | string | 是 | 相对 preset.toml 的 markdown 文件路径，文件必须可读 |
-| `[agent].attemptTimeoutSeconds` | number | 否 | 每次 agent attempt 的绝对超时秒数；默认 `3600`。到期且尚未观察到 phase summary marker 时，先对进程组发 `SIGTERM`，5 秒后仍未退出则发 `SIGKILL`。`[agent]` 目前只支持 `attemptTimeoutSeconds`；`binary` / `extraArgs` 在 preset.toml 中出现会在加载期报错——runner binary 由 phase runner kind 决定（PATH 上的 `claude` / `codex` / `opencode`）。 |
+| `[agent].attemptTimeoutSeconds` | number | 否 | 每次 agent attempt 的绝对超时秒数；默认 `3600`。到期无条件对进程组发 `SIGTERM`，5 秒后仍未退出则发 `SIGKILL`（事件流写 `attempt.timeout`）。与 attempt timeout 并行运行的机制：startup idle watchdog（#462，前 10 分钟 stdout < 200B 判挂死 → SIGKILL + `run.startup_idle_kill`）与 recycle zone（#452，agent 写完 admissible status 后给 500 秒自然退出，超时直接 SIGKILL + `recycle.timeout_kill`）——这两者不读 stdout marker，触发条件在引擎侧。`[agent]` 目前只支持 `attemptTimeoutSeconds`；`binary` / `extraArgs` 在 preset.toml 中出现会在加载期报错——runner binary 由 phase runner kind 决定（PATH 上的 `claude` / `codex` / `opencode`）。 |
 
 引擎在加载时强制：
 
@@ -257,7 +256,7 @@ auditDemo = { literal = "business-key-e2e-ok" }
 | `logDir` | 当前 chain runs/log 根目录绝对路径；agent 输出位于 `<logDir>/<runId>/<phase>/` |
 | `traceFile` | phase stdout trace 的显示路径模板：`<logDir>/<runId>/<phase>/stdout.jsonl`。 |
 | `loopFile` | central daemon scheduling state 的描述；默认 preset 用它强调调度状态不可提交。 |
-| `presetDir` | preset 目录绝对路径（让 agent prompt 能 `cat <presetDir>/iter/...md`） |
+| `presetDir` | 物化后的 prompt 根目录绝对路径（daemon 加载 preset 时把源目录复制到 `<loopDataRoot>/preset-materialized/<name>-<contentHash>/`，本 fact 指向该副本）。preset md 里的 `{{PRESET_ROOT}}` 引擎自有词表在物化阶段被字面替换为同一路径，因此 `presetDir` 与 md 文件里的绝对引用同源。让 agent prompt 能 `cat <presetDir>/iter/...md` 且在随机 worktree 也稳定读到。仅当调用方跳过 `LoadPresetOptions.materialize`（unit 测试）时才等于源目录。 |
 | `fragmentIndex` | 按当前 phase 的 `[[phases]].roles` 切片后的 fragments markdown 表格（id + role + 绝对路径）；entry prompt 嵌它给 agent 当索引。phase↔role 映射来自 preset 元数据，引擎不通过 phase 名猜；preset 声明 fragments 但 phase 缺 `roles` 时 loadPreset 报错。fragment 完整性校验（`assertReadable`）仍覆盖全量 fragments，与可见性切片相互独立。 |
 | `runtimeInputsDoc` | 按 phase 变量 metadata 生成的 bound runtime input 文档。 |
 | `phaseExitsDoc` | 按 phase `[[phases.exits]]` 生成的出口状态文档。 |
@@ -326,7 +325,7 @@ model  = "claude-opus-4-7"
 
 `runner` ∈ `{"claude", "codex", "opencode"}`。未声明的 phase 使用 `source=engine-builtin` fallback；已声明的 phase 在 `status --json` 中显示 `source=preset`。`model` 是该 phase 的默认模型，可省略（缺省即让 runner CLI 用自身默认）。Runner binary 直接是 PATH 上的 `claude` / `codex` / `opencode`，没有 target 级覆盖通道；chain 级覆盖走 `coder-loop chain set-runner-model <chain> --kind <k> --model <m>`。
 
-Queue item 可加 `"runner": "claude"|"codex"|"opencode"` 覆盖允许 item override 的普通执行 phase；review 和 trigger 这类 phase 使用自己的 phase runner 声明。Item override 把 runner 切到与 phase 声明不同的 kind 时，不继承该 phase 的 `model` 声明（phase model 绑定在它声明的 runner kind 上）。Preset 作者不要把某个 runner 的 CLI 细节写进 engine contract；若某个 preset 只支持特定 runner，把它写进该 preset 的 README 或 target 自有的 `CLAUDE.md` / `AGENTS.md`，并用 `doctor` / `status` 验证 preset runner 是否符合预期。
+Queue item 可加 `"runner": "claude"|"codex"|"opencode"` 覆盖所有非 trigger phase；trigger phase（声明了 `trigger = { afterPhase, whenStatus }` 或 `trigger = { on = "chain-complete" }` 的 phase）使用自己的 phase runner 声明，不受 item override 影响。Item override 把 runner 切到与 phase 声明不同的 kind 时，不继承该 phase 的 `model` 声明（phase model 绑定在它声明的 runner kind 上）。Preset 作者不要把某个 runner 的 CLI 细节写进 engine contract；若某个 preset 只支持特定 runner，把它写进该 preset 的 README 或 target 自有的 `CLAUDE.md` / `AGENTS.md`，并用 `doctor` / `status` 验证 preset runner 是否符合预期。
 
 ---
 
@@ -335,10 +334,10 @@ Queue item 可加 `"runner": "claude"|"codex"|"opencode"` 覆盖允许 item over
 跑一个新 preset 所需的最小 target（参见 `src/smoke.test.ts`）：
 
 ```
-<target>/CLAUDE.md 或 AGENTS.md      # 项目命令 / 约定 / PR 形态；plan/iter/review prompts 显式读取
+<target>/CLAUDE.md 或 AGENTS.md      # 项目命令 / 约定 / PR 形态；iteration / review 调度者显式读取
 ```
 
-Target 目录不需要任何 `.coder-loop/` 目录或状态文件——chain shared / issues / evidence / runs 目录由中央 daemon 在 `~/.coder-loop/loop-data/chains/<chain>/` 下创建维护（`--loop-data-root` 可改根路径）。项目命令 / PR 约定的真源是 target 自有的 `CLAUDE.md` / `AGENTS.md`（committed），plan/iter/review prompts 显式读取。
+Target 目录不需要任何 `.coder-loop/` 目录或状态文件——chain shared / issues / evidence / runs 目录由中央 daemon 在 `~/.coder-loop/loop-data/chains/<chain>/` 下创建维护（`--loop-data-root` 可改根路径）。项目命令 / PR 约定的真源是 target 自有的 `CLAUDE.md` / `AGENTS.md`（committed），iteration / review 调度者显式读取。
 
 Preset 选择通过 `coder-loop item add --preset <name>` 或 `--preset-path <abs>` 逐 item 声明；chain-level `--preset` 只是 legacy default seed，不驱动任何 item 的执行 preset。Chain identity（`repository`、`baseBranch`）与其余 per-target 偏差通过 `coder-loop chain create --config-json '{"repository":"...","baseBranch":"...","bindings":{...}}'` 写入 chain.metadata.bindings。队列 / current / runs 全部存在 centralized SQLite loop-data store 中；用 `coder-loop chain create` + `coder-loop item add` 建立 chain 与 item，不要手写状态文件。
 
@@ -348,12 +347,9 @@ Preset 选择通过 `coder-loop item add --preset <name>` 或 `--preset-path <ab
 
 ## 7. Agent prompt 写作约定
 
-引擎不要求 entry prompt 用任何特定结构。`gh-issue-pr-iteration` 当前用两套约定（其他 preset 可借鉴或自定义）：
+引擎不要求 entry prompt 用任何特定结构。`gh-issue-pr-iteration` 当前用**调度者 workflow** 约定：entry md（`iter-entry.md` / `review-entry.md`）是按序编号的 workflow（不是散文手册），调度者维护显式任务清单（两态出口 `[x] accepted` / `[-] skipped`，全勾完才能退出），每个 Step 在使用现场内联写明做什么、亲自命令闭集、派哪个 subagent、传什么、查什么、verdict 去哪。fragment 结构：每步单文件（`iter/steps/<name>.md`、`review/steps/<name>.md`），内含 `Task` / `Report` / `Acceptance` 三段，subagent 与调度者读同一份（判据对执行者可见是有意设计，前提是 Claude 家诚实 runner；见 `presets/gh-issue-pr-iteration/DESIGN.md`）。质量判据是单文件（`quality/evidence.md` / `quality/honesty.md` / `quality/cleanup.md`），执行侧约束与判断侧规则同源同文。调度者 dispatch 消息只传文件指针与运行时键值。注意：fragment 文件不经引擎 `{{KEY}}` 渲染，跨文件引用用引擎自有词表 `{{PRESET_ROOT}}/<rel>`——`loadPreset` 时物化层把整个 preset 目录复制到 `<loopDataRoot>/preset-materialized/<name>-<hash>/`，同一步把每个 `.md` 里的 `{{PRESET_ROOT}}` 按字面串替换为该副本的绝对路径；agent 拿到的是稳定可读的运行时绝对路径。语义登记在 `docs/reserved-strings.md`。
 
-- **plan 链：查表式 fragment 链**。每个 fragment 文件以 `# Fragment: <id>` 起手；入口 prompt 把 `{{PROMPT_FRAGMENT_INDEX}}` 嵌入做索引；每个 fragment 末尾有 `## Output verdict` 段（出口 + 下一跳 fragment id），agent 按 verdict 链跑。
-- **iteration / review：调度者 workflow**。entry md 是按序编号的 workflow（不是散文手册）：调度者维护显式任务清单（两态出口 `[x] accepted` / `[-] skipped`，全勾完才能退出），每个 Step 在使用现场内联写明做什么、亲自命令闭集、派哪个 subagent、传什么、查什么、verdict 去哪。fragment 改组为步骤三件套（`task.md` 给 subagent，含 Inputs 节 / `report.md` 必填字段汇报模板 / `accept.md` 验收判据，内嵌 Required report fields）与按受众拆分的 `quality/*-execute.md`（执行者）/ `quality/*-judge.md`（调度者）——单文件双受众会双向泄漏（执行者向判据表演 / 调度者吞执行细节）。调度者 dispatch 消息只传文件指针与运行时键值。注意：fragment 文件不经引擎渲染，跨文件引用要写运行时安装位置的绝对路径。
-
-形态详见 `docs/gh-issue-pr-iteration-fragments.md`。换 preset 时这两套都不强制——你也可以让 agent 跑单一 prompt 不分 fragment。
+形态详见 `docs/gh-issue-pr-iteration-fragments.md`。换 preset 时这套约定不强制——你也可以让 agent 跑单一 prompt 不分 fragment，或用查表式 fragment 链等其他形态。
 
 ---
 

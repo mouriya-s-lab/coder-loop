@@ -29,6 +29,7 @@ import {
 	loadPreset,
 	resolvePhaseRunnerFromChain,
 	runPresetChainCompleteTriggerPhases,
+	substitutePresetRootToken,
 	type AgentRunnerKind,
 	type AgentRunnerSelection,
 	type JsonObject,
@@ -2504,6 +2505,14 @@ describe("scheduler loaded preset prompt rendering", () => {
 			expect(rawTokens.size).toBeGreaterThan(0)
 			for (const token of rawTokens) {
 				const key = token.slice(2, -2)
+				// `{{PRESET_ROOT}}` is an engine-owned reserved token substituted by
+				// the materialization layer (or by `substitutePresetRootToken` on the
+				// direct-parse path). It's not declared in [phases.variables]; the
+				// materialization/read pipeline replaces it before render.
+				if (key === "PRESET_ROOT") {
+					expect(capturedStdout).not.toContain(token)
+					continue
+				}
 				expect(declaredKeys.has(key)).toBe(true)
 				expect(capturedStdout).not.toContain(token)
 			}
@@ -4229,7 +4238,8 @@ async function createPresetPromptIntegrationFixture(name: string): Promise<Fixtu
 			prompt: async (ctx) => {
 				const phase = ctx.loadedPreset.preset.phases.find((entry) => entry.name === ctx.phase)
 				if (phase === undefined) throw new Error(`fixture preset ${ctx.loadedPreset.preset.name} does not define phase ${ctx.phase}`)
-				return await readFile(phase.prompt, "utf-8")
+				const raw = await readFile(phase.prompt, "utf-8")
+				return substitutePresetRootToken(raw, ctx.loadedPreset.preset.presetDir)
 			},
 			onEvent: (event) => {
 				schedulerEvents.push(event)

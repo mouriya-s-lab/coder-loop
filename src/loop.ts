@@ -9,9 +9,9 @@
  */
 
 import { spawn } from "node:child_process"
-import { appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises"
+import { appendFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises"
 import { closeSync, createWriteStream, openSync, type WriteStream } from "node:fs"
-import { dirname, isAbsolute, relative, resolve } from "node:path"
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
 import { command, flag, option, optional, positional, run as runCmd, string as cmdString, subcommands } from "cmd-ts"
 import { type as arkType } from "arktype"
 import type { BoundaryError, BoundaryRecord, BoundaryValue } from "./boundary-types"
@@ -4050,6 +4050,186 @@ async function waitForPidExit(pid: number, timeoutMs: number): Promise<boolean> 
 	return !isPidAlive(pid)
 }
 
+// --- preset materialization ---
+//
+// `{{PRESET_ROOT}}` is an engine-owned template token that preset source md
+// files use for cross-file references. Fragments and phase entries live in
+// the same preset tree but reference each other via absolute paths (agents
+// run in random worktrees, so relative references cannot resolve). The
+// engine materializes the entire preset directory to
+// `<loopDataRoot>/preset-materialized/<name>-<hash>/`, replacing every
+// occurrence of the token with the target directory's absolute path in all
+// `.md` files. Non-md files (e.g. `preset.toml`, `templates/*`) are copied
+// verbatim. Hash is derived from the sorted (relpath, contents) tuple so
+// unchanged sources reuse the same target; a source change produces a new
+// target directory. Materialization is preset-agnostic: the engine only
+// knows the reserved token and the copy layout, not any preset-specific
+// file name or structure.
+//
+// Materialization is opt-in via `LoadPresetOptions.materialize`. Daemon
+// callers pass `{ root: this.paths.root }`; direct unit tests that only
+// exercise the parser can omit it (the token is substituted in-memory at
+// prompt-read time — `readPresetPhasePrompt` + daemon prompt read use
+// `substitutePresetRootToken` unconditionally so both modes yield prompts
+// that never contain the token when validation or rendering sees them).
+export const PRESET_ROOT_TOKEN = "{{PRESET_ROOT}}"
+export const PRESET_MATERIALIZED_DIRNAME = "preset-materialized"
+
+export type PresetMaterializeResult = {
+	promptRoot: string
+	contentHash: string
+	dirName: string
+}
+
+export async function materializePreset(sourceDir: string, materializeRoot: string): Promise<PresetMaterializeResult> {
+	const sourceAbs = resolve(sourceDir)
+	const name = basename(sourceAbs)
+	const files = await collectPresetSourceFiles(sourceAbs)
+	const hasher = new Bun.CryptoHasher("sha256")
+	for (const rel of files) {
+		hasher.update(rel)
+		hasher.update("\0")
+		hasher.update(await readFile(resolve(sourceAbs, rel)))
+		hasher.update("\0")
+	}
+	const contentHash = hasher.digest("hex").slice(0, 16)
+	const rootDir = resolve(materializeRoot, PRESET_MATERIALIZED_DIRNAME)
+	const dirName = `${name}-${contentHash}`
+	const target = resolve(rootDir, dirName)
+	const marker = resolve(target, PRESET_MATERIALIZED_MARKER_FILENAME)
+	try {
+		if ((await stat(marker)).isFile()) return { promptRoot: target, contentHash, dirName }
+	} catch (error) {
+		if (!(isNodeError(error) && error.code === "ENOENT")) throw error
+	}
+	// A previous partial materialization (marker missing) needs to be wiped
+	// before we recreate the target — the source may have changed in a way
+	// that removed files, and a leftover copy would leak into the fresh view.
+	await rm(target, { recursive: true, force: true })
+	const stagingDir = resolve(rootDir, `.staging-${name}-${contentHash}-${process.pid}-${Date.now().toString(36)}`)
+	await mkdir(stagingDir, { recursive: true })
+	try {
+		for (const rel of files) {
+			const src = resolve(sourceAbs, rel)
+			const dst = resolve(stagingDir, rel)
+			await mkdir(dirname(dst), { recursive: true })
+			if (rel.endsWith(".md")) {
+				const content = await readFile(src, "utf-8")
+				await writeFile(dst, substitutePresetRootToken(content, target))
+			} else {
+				const bytes = await readFile(src)
+				await writeFile(dst, bytes)
+			}
+		}
+		await writeFile(resolve(stagingDir, PRESET_MATERIALIZED_MARKER_FILENAME), "")
+		try {
+			await rename(stagingDir, target)
+		} catch (error) {
+			// Race: another process finalized the same content-hash target
+			// concurrently. Discard our staging copy and reuse theirs.
+			try {
+				if ((await stat(marker)).isFile()) {
+					await rm(stagingDir, { recursive: true, force: true })
+					return { promptRoot: target, contentHash, dirName }
+				}
+			} catch {
+				// fall through
+			}
+			throw error
+		}
+	} finally {
+		// Best-effort cleanup on failure — if rename succeeded, the staging
+		// dir is already gone, so rm on the missing path is a no-op.
+		await rm(stagingDir, { recursive: true, force: true }).catch(() => {})
+	}
+	// Prune older materialized copies of the same preset name so a series
+	// of source edits doesn't grow the loop-data footprint without bound.
+	// Only siblings that share the `<name>-` prefix (a different hash for
+	// the same preset) are removed; other presets in the shared root
+	// (`gh-issue-pr-iteration-*`, `real-e2e-minimal-*`, …) stay untouched.
+	// Runs from concurrent daemons on a shared root would race here, but
+	// the daemon is singleton per loop-data-root by design.
+	await prunePresetSiblingsForName(rootDir, name, dirName)
+	return { promptRoot: target, contentHash, dirName }
+}
+
+async function prunePresetSiblingsForName(rootDir: string, name: string, currentDirName: string): Promise<void> {
+	let entries: string[]
+	try {
+		entries = await readdir(rootDir)
+	} catch (error) {
+		if (isNodeError(error) && error.code === "ENOENT") return
+		throw error
+	}
+	const prefix = `${name}-`
+	for (const entry of entries) {
+		if (entry === currentDirName) continue
+		if (!entry.startsWith(prefix)) continue
+		await rm(resolve(rootDir, entry), { recursive: true, force: true }).catch(() => {})
+	}
+}
+
+const PRESET_MATERIALIZED_MARKER_FILENAME = ".materialized-complete"
+
+async function collectPresetSourceFiles(sourceDir: string): Promise<string[]> {
+	const out: string[] = []
+	const walk = async (dir: string): Promise<void> => {
+		const entries = await readdir(dir, { withFileTypes: true })
+		for (const entry of entries) {
+			// Skip nothing — `.md` files, `preset.toml`, `templates/*`, and any
+			// author-supplied auxiliary file should all appear in the materialized
+			// copy. The one carve-out is our own marker file, which cannot be
+			// present in a source tree by construction but we defensively drop it
+			// anyway to keep hash stable if an author ever creates a colliding
+			// filename.
+			if (entry.name === PRESET_MATERIALIZED_MARKER_FILENAME) continue
+			const full = resolve(dir, entry.name)
+			if (entry.isDirectory()) {
+				await walk(full)
+			} else if (entry.isFile()) {
+				out.push(relative(sourceDir, full))
+			}
+		}
+	}
+	await walk(sourceDir)
+	out.sort()
+	return out
+}
+
+// Substitute the engine-owned `{{PRESET_ROOT}}` token with the given absolute
+// directory. Called both physically at materialization time (writing the copied
+// md files) and in-memory at prompt-read time (so tests that skip materialize
+// still get post-substitution content). Idempotent: content without the token
+// short-circuits, and re-invoking on already-substituted content is a no-op
+// (materialized files contain no token).
+export function substitutePresetRootToken(text: string, presetDir: string): string {
+	return text.includes(PRESET_ROOT_TOKEN) ? text.replaceAll(PRESET_ROOT_TOKEN, presetDir) : text
+}
+
+// Prune stale materialized dirs. Called from daemon start so a series of
+// preset edits doesn't grow the loop-data footprint without bound. `keep` is
+// the set of dir basenames the daemon has just materialized (or wants to
+// preserve). Staging dirs from prior crashes are also removed unless
+// currently in flight — daemon start runs after any prior process died, so
+// none should be live.
+export async function prunePresetMaterializedRoot(
+	materializeRoot: string,
+	keep: ReadonlySet<string>,
+): Promise<void> {
+	const rootDir = resolve(materializeRoot, PRESET_MATERIALIZED_DIRNAME)
+	let entries: string[]
+	try {
+		entries = await readdir(rootDir)
+	} catch (error) {
+		if (isNodeError(error) && error.code === "ENOENT") return
+		throw error
+	}
+	for (const entry of entries) {
+		if (keep.has(entry)) continue
+		await rm(resolve(rootDir, entry), { recursive: true, force: true }).catch(() => {})
+	}
+}
+
 export type LoadPresetOptions = {
 	onValidationFinding?: (finding: PresetPlaceholderFinding) => void
 	// #408 cross-table DAG checker callback. Invoked once per finding before
@@ -4058,9 +4238,20 @@ export type LoadPresetOptions = {
 	// placeholder findings — both run in the same load attempt, both feed the
 	// same audit surface.
 	onDagFinding?: (finding: PresetDagFinding) => void
+	// Materialize the preset directory to `<root>/preset-materialized/<name>-<hash>/`
+	// before parsing. When set, `preset.presetDir` and every fragment/prompt path
+	// resolves to that materialized copy — `{{PRESET_ROOT}}` in md files has been
+	// physically substituted with the target absolute path. When omitted, the
+	// source directory is parsed directly and `{{PRESET_ROOT}}` is substituted
+	// only in-memory at prompt-read time. Daemon callers must set this so agents
+	// spawned in random worktrees read stable materialized paths.
+	materialize?: { root: string }
 }
 
-export async function loadPreset(presetDir: string, options: LoadPresetOptions = {}): Promise<Preset> {
+export async function loadPreset(sourceDir: string, options: LoadPresetOptions = {}): Promise<Preset> {
+	const presetDir = options.materialize
+		? (await materializePreset(sourceDir, options.materialize.root)).promptRoot
+		: sourceDir
 	const tomlPath = resolve(presetDir, "preset.toml")
 	const raw = await readFile(tomlPath, "utf-8")
 	const parsed: BoundaryValue = Bun.TOML.parse(raw)
@@ -4086,7 +4277,7 @@ export async function loadPreset(presetDir: string, options: LoadPresetOptions =
 	const phases: PresetPhase[] = []
 	const placeholderErrors: PresetPlaceholderFinding[] = []
 	for (const phase of preset.phases) {
-		const prompt = await readPresetPhasePrompt(phase)
+		const prompt = await readPresetPhasePrompt(phase, presetDir)
 		assertRoleEntryHasNoFrontmatter(prompt, `preset phase "${phase.name}" prompt`)
 		const findings = validatePresetPhaseTemplate(prompt, phase, phase.prompt)
 		for (const finding of findings) {
@@ -4294,9 +4485,10 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 	}
 }
 
-async function readPresetPhasePrompt(phase: PresetPhase): Promise<string> {
+async function readPresetPhasePrompt(phase: PresetPhase, presetDir: string): Promise<string> {
 	try {
-		return await readFile(phase.prompt, "utf-8")
+		const raw = await readFile(phase.prompt, "utf-8")
+		return substitutePresetRootToken(raw, presetDir)
 	} catch (error) {
 		if (isNodeError(error) && error.code === "ENOENT") fail(`Missing preset phase "${phase.name}" prompt file: ${phase.prompt}`)
 		throw error
