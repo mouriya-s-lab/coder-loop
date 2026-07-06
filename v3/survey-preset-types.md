@@ -16,7 +16,7 @@
 | `[item].idField` | string | 是 | queue item 的业务 id 字段名（`issue` / `id`） |
 | `[item.fields]` | table | 否 | preset 声明的透明 item 字段，值是 `"string"|"number"|"boolean"|"json"`（`src/loop.ts:428-429` `PRESET_ITEM_FIELD_TYPES`）；样本见 `presets/gh-issue-pr-iteration/preset.toml:24-35`（`issue/branch/pr/lastRunId`） |
 | `[statuses].continuable/terminal/entry/success/unblockable/exhausted/retry` | string[] / string | continuable+terminal+exhausted 必填 | 状态词表，见第 2 节 |
-| `[[phases]].name/prompt/runner/model/summaryMarker` | string | name+prompt 必填 | phase 元数据；`runner` 只能 `"claude"|"codex"` |
+| `[[phases]].name/prompt/runner/model` | string | name+prompt 必填 | phase 元数据；`runner` 三值 `"claude"|"codex"|"opencode"`（`summaryMarker` 已在 #456 从 `PresetPhase` 退役，本表已随之更新） |
 | `[[phases.exits]]` | array（ADT） | 否（不声明=该 phase 不能写任何状态） | phase 允许 agent 写回的出口 |
 | `[[phases]].trigger` | table | 否 | `{afterPhase, whenStatus}` 或 `{on="chain-complete"}` |
 | `[[phases]].roles` | string[] | preset 有 fragments 时必填 | 该 phase 能看到哪些 fragment role（#400 minimum-visibility） |
@@ -91,12 +91,13 @@ resumedFromPhase resumedStartedAt resumedSessionId chainName repoCwd
 
 ## 4. gh-issue-pr-iteration 角色循环
 
-**prompt 结构（两套约定，`docs/preset-authoring.md:355-362`）**：
+**prompt 结构（`docs/preset-authoring.md` §7）**：
 
-- **plan 链**（`plan/index.md`…`plan/final.md`）：查表式 fragment 链，每个 fragment 末尾 `## Output verdict` 指定下一跳 fragment id——**这是唯一一处状态机语义写在 prompt 文本里而非 preset.toml 里**的地方（fragment 间跳转是散文字符串引用，引擎不校验目标 fragment 存在性）。
-- **iteration/review**：`iter-entry.md`（169 行）/`review-entry.md`（189 行）是"调度者 workflow"——显式编号 Step，维护两态任务清单，fragment 拆成 `task.md`（给 subagent）/`report.md`（汇报模板）/`accept.md`（验收判据）三件套，`quality/*-execute.md` 与 `quality/*-judge.md` 按受众拆分。
+- **iteration/review**：`iter-entry.md` / `review-entry.md` 是"调度者 workflow"——显式编号 Step，维护两态任务清单，每步一个单文件 fragment（`iter/steps/<name>.md` / `review/steps/<name>.md`，内含 Task / Report / Acceptance 三段），quality 判据单文件（`quality/evidence.md` / `honesty.md` / `cleanup.md`，执行侧与判断侧同源同文）。
+- **trigger phase**（`blocked-responder-entry.md` / `umbrella-finalizer-entry.md`）：单一 entry prompt，agent 一次跑完，未调度者化。
+- 曾经存在过的"plan 链"（查表式 fragment 链）在 2026-07 已随 `presets/gh-issue-pr-iteration/plan/` 与 `/dev-plan` slash command 一并退役，issue 编写迁给 target 侧的 issue writer / operator。
 
-**verdict 约定**：iteration 从不写 item.status（`iter-entry.md:165`）；review 是唯一的状态写入者，Step 6 从 `{{PHASE_EXITS_DOC}}`（渲染自 `[[phases.exits]]`）选恰好一个出口，执行对应 CLI——`review-entry.md:138-150` 明确写"选择通过 CLI 发生，不是 stdout token"。
+**verdict 约定**：iteration 从不写 item.status；review 是唯一的状态写入者，从 `{{PHASE_EXITS_DOC}}`（渲染自 `[[phases.exits]]`）选恰好一个出口，执行对应 CLI（`coder-loop item update --status` / `item exit-action`）——选择通过 CLI 发生，不是 stdout token。
 
 **完整状态流转**（`preset.toml:80-320`）：
 
@@ -132,7 +133,7 @@ stateDiagram-v2
 
 `presets/gh-issue-pr-iteration/templates/`（`shared.md`/`pr-body.md`）是 preset 专属 target 侧 starter；`workflow.md` 已在 #434/#436 退役。
 
-**发现的文档漂移**：`.claude/commands/dev-plan.md:15,17,22` 仍引用已退役机制（`coder-loop install`、`config.json`、`workflow.md`）。且 **plan 角色（`plan/*` fragments）当前没有被任何 `[[phases]]` 声明消费**——plan 链是一条**游离在 engine phase 状态机之外、自身入口文档已过期**的路径。v3 若要把"计划生成 issue"纳入统一类型系统，需先决定它是否变成真正的 `[[phases]]`。
+**历史**：调查快照时期存在一批 `plan/*` fragments，游离在 engine phase 状态机之外（无 `[[phases]]` 声明消费）；本快照之后已随 `/dev-plan` slash command 一并退役，issue 编写迁给 target 侧 issue writer / operator。v3 若要把"计划生成 issue"重新纳入引擎，仍属 open design 议题。
 
 ---
 
@@ -145,11 +146,10 @@ stateDiagram-v2
 | **status 字面量** | preset.toml 内声明式词表；运行时品牌类型 + daemon 双重门；但状态字面量在类型系统里仍是 `string`，**"哪些状态合法"只在 preset.toml 内容 + 运行时校验中确定，非编译期可静态穷举** | `src/runtime-data.ts:10,26`；`src/daemon.ts:3039-3134` |
 | **phase.exits（出口 ADT）** | 已是 discriminated union：`{kind:"item-status",status,when} | {kind:"chain-action",action,when}`，有 `assertNeverPhaseExit` 穷尽检查 | `src/loop.ts:565-576`, `5188-5197` |
 | **变量绑定来源** | 来源端 tagged union；**目标端坍缩为纯字符串** | `src/loop.ts:539-548`, `5420-5426` |
-| **agent 输出解析** | 几乎全部退役为显式 CLI 调用；唯一残留 stdout 解析点是 `FINALIZER SUMMARY: decision=...` | `docs/reserved-strings.md:16-20` |
+| **agent 输出解析** | 几乎全部退役为显式 CLI 调用；唯一残留 stdout 解析点是 `FINALIZER SUMMARY: decision=...` | `docs/reserved-strings.md` |
 | **item 业务字段** | 声明式四态类型（string/number/boolean/json）；类型只约束存储/写入，json 类型渲染会 throw | `src/loop.ts:428-429` |
 | **rights / privilegedOps** | 运行时门 + 部分类型化（`privilegedOps` 收窄为引擎闭合 union） | `src/loop.ts:586-590` |
 | **businessKeyValues** | 只有一种 variant（`{kind:"literal"}`），为将来 `{kind:"computed"}` 预留 switch 结构 | `src/loop.ts:614-615`, `5408-5418` |
-| **plan 链 fragment 跳转** | 完全 stringly-typed：下一跳 fragment id 是散文文本，引擎不解析、不校验 | `docs/preset-authoring.md:359` |
 
 **总结判断**：v3 目标"状态机判定来源是可计算类型"目前只在**局部**做到——phase-exit ADT 化（#405）、status 写入路径品牌类型收紧（#397）、rights 收窄枚举（#407/#409/#410）是这个方向的先例（#396-#458 umbrella 系统性推进的结果）。但**状态字面量本身、phase 名、变量 KEY 名**这三个最核心的"任务定义原语"仍是**运行时字符串 + 加载期/请求期校验**，不是编译期可枚举类型——preset 作者写错一个状态名，要等 `loadPreset` 实际跑一次才报错。要走到"零原语纯 meta 定义"，需要把 `preset.toml` 本身变成某种可生成类型的 schema（如从 toml 生成每个 preset 专属的状态/phase 字面量联合类型），而不是现在"引擎侧永远只认 `string`，靠运行时集合成员校验模拟类型安全"的形态。
 
@@ -181,5 +181,4 @@ stateDiagram-v2
 - `src/runtime-data.ts:1-42` — 品牌类型，当前最接近"类型驱动状态机"的实现
 - `docs/reserved-strings.md` — "哪些字符串还是 stdout 控制信号"权威登记表
 - `presets/gh-issue-pr-iteration/iter-entry.md`、`review-entry.md` — 两大角色 workflow prompt
-- `docs/execution-plan-pre-v3.md` — pre-v3 类型收紧系列 issue（#396-#458）执行波次记录
-- `.claude/commands/dev-plan.md` — 文档漂移样本（plan 角色游离于 phase 状态机之外的证据）
+- （已退役）`docs/execution-plan-pre-v3.md` — 曾记录 pre-v3 类型收紧系列 issue（#396-#458）执行波次；该 doc 与 `presets/gh-issue-pr-iteration/plan/*` 已一并从仓库删除

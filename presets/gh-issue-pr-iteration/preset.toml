@@ -340,299 +340,79 @@ role = "common"
 path = "common/dispatch-contract.md"
 
 [[fragments]]
-id   = "common/test-inventory-protocol"
-role = "common"
-path = "common/test-inventory-protocol.md"
-
-[[fragments]]
 id   = "contract"
 role = "common"
 path = "contract.md"
 
 [[fragments]]
-id   = "plan/index"
-role = "plan"
-path = "plan/index.md"
-
-[[fragments]]
-id   = "plan/intake"
-role = "plan"
-path = "plan/intake.md"
-
-[[fragments]]
-id   = "plan/classify"
-role = "plan"
-path = "plan/classify.md"
-
-[[fragments]]
-id   = "plan/triage-existing"
-role = "plan"
-path = "plan/triage-existing.md"
-
-[[fragments]]
-id   = "plan/business-frame"
-role = "plan"
-path = "plan/business-frame.md"
-
-[[fragments]]
-id   = "plan/decompose"
-role = "plan"
-path = "plan/decompose.md"
-
-[[fragments]]
-id   = "plan/checkpoint-author"
-role = "plan"
-path = "plan/checkpoint-author.md"
-
-[[fragments]]
-id   = "plan/adversarial-validate"
-role = "plan"
-path = "plan/adversarial-validate.md"
-
-[[fragments]]
-id   = "plan/create-issues"
-role = "plan"
-path = "plan/create-issues.md"
-
-[[fragments]]
-id   = "plan/init-queue"
-role = "plan"
-path = "plan/init-queue.md"
-
-[[fragments]]
-id   = "plan/handoff"
-role = "plan"
-path = "plan/handoff.md"
-
-[[fragments]]
-id   = "plan/final"
-role = "plan"
-path = "plan/final.md"
-
-[[fragments]]
-id   = "quality/evidence-execute"
+id   = "quality/evidence"
 role = "quality"
-path = "quality/evidence-execute.md"
+path = "quality/evidence.md"
 
 [[fragments]]
-id   = "quality/evidence-judge"
+id   = "quality/honesty"
 role = "quality"
-path = "quality/evidence-judge.md"
+path = "quality/honesty.md"
 
 [[fragments]]
-id   = "quality/honesty-execute"
+id   = "quality/cleanup"
 role = "quality"
-path = "quality/honesty-execute.md"
+path = "quality/cleanup.md"
 
 [[fragments]]
-id   = "quality/honesty-judge"
-role = "quality"
-path = "quality/honesty-judge.md"
-
-[[fragments]]
-id   = "quality/cleanup-execute"
-role = "quality"
-path = "quality/cleanup-execute.md"
-
-[[fragments]]
-id   = "quality/cleanup-judge"
-role = "quality"
-path = "quality/cleanup-judge.md"
-
-[[fragments]]
-id   = "iter/steps/research/task"
+id   = "iter/steps/research"
 role = "iter"
-path = "iter/steps/research/task.md"
+path = "iter/steps/research.md"
 
 [[fragments]]
-id   = "iter/steps/research/report"
+id   = "iter/steps/resolve-blocker"
 role = "iter"
-path = "iter/steps/research/report.md"
+path = "iter/steps/resolve-blocker.md"
 
 [[fragments]]
-id   = "iter/steps/research/accept"
+id   = "iter/steps/implement"
 role = "iter"
-path = "iter/steps/research/accept.md"
+path = "iter/steps/implement.md"
 
 [[fragments]]
-id   = "iter/steps/resolve-blocker/task"
+id   = "iter/steps/verify"
 role = "iter"
-path = "iter/steps/resolve-blocker/task.md"
+path = "iter/steps/verify.md"
 
 [[fragments]]
-id   = "iter/steps/resolve-blocker/report"
+id   = "iter/steps/e2e"
 role = "iter"
-path = "iter/steps/resolve-blocker/report.md"
+path = "iter/steps/e2e.md"
 
 [[fragments]]
-id   = "iter/steps/resolve-blocker/accept"
+id   = "iter/steps/submit"
 role = "iter"
-path = "iter/steps/resolve-blocker/accept.md"
+path = "iter/steps/submit.md"
 
 [[fragments]]
-id   = "iter/steps/implement/task"
+id   = "iter/steps/source-spike"
 role = "iter"
-path = "iter/steps/implement/task.md"
+path = "iter/steps/source-spike.md"
 
 [[fragments]]
-id   = "iter/steps/implement/report"
+id   = "iter/steps/spike-comment"
 role = "iter"
-path = "iter/steps/implement/report.md"
+path = "iter/steps/spike-comment.md"
 
 [[fragments]]
-id   = "iter/steps/implement/accept"
-role = "iter"
-path = "iter/steps/implement/accept.md"
-
-[[fragments]]
-id   = "iter/steps/verify/task"
-role = "iter"
-path = "iter/steps/verify/task.md"
-
-[[fragments]]
-id   = "iter/steps/verify/report"
-role = "iter"
-path = "iter/steps/verify/report.md"
-
-[[fragments]]
-id   = "iter/steps/verify/accept"
-role = "iter"
-path = "iter/steps/verify/accept.md"
-
-[[fragments]]
-id   = "iter/steps/e2e/task"
-role = "iter"
-path = "iter/steps/e2e/task.md"
-
-[[fragments]]
-id   = "iter/steps/e2e/report"
-role = "iter"
-path = "iter/steps/e2e/report.md"
-
-[[fragments]]
-id   = "iter/steps/e2e/accept"
-role = "iter"
-path = "iter/steps/e2e/accept.md"
-
-[[fragments]]
-id   = "iter/steps/submit/task"
-role = "iter"
-path = "iter/steps/submit/task.md"
-
-[[fragments]]
-id   = "iter/steps/submit/report"
-role = "iter"
-path = "iter/steps/submit/report.md"
-
-[[fragments]]
-id   = "iter/steps/submit/accept"
-role = "iter"
-path = "iter/steps/submit/accept.md"
-
-[[fragments]]
-id   = "iter/steps/source-spike/task"
-role = "iter"
-path = "iter/steps/source-spike/task.md"
-
-[[fragments]]
-id   = "iter/steps/source-spike/report"
-role = "iter"
-path = "iter/steps/source-spike/report.md"
-
-[[fragments]]
-id   = "iter/steps/source-spike/accept"
-role = "iter"
-path = "iter/steps/source-spike/accept.md"
-
-[[fragments]]
-id   = "iter/steps/spike-comment/task"
-role = "iter"
-path = "iter/steps/spike-comment/task.md"
-
-[[fragments]]
-id   = "iter/steps/spike-comment/report"
-role = "iter"
-path = "iter/steps/spike-comment/report.md"
-
-[[fragments]]
-id   = "iter/steps/spike-comment/accept"
-role = "iter"
-path = "iter/steps/spike-comment/accept.md"
-
-[[fragments]]
-id   = "review/steps/investigate/task"
+id   = "review/steps/investigate"
 role = "review"
-path = "review/steps/investigate/task.md"
+path = "review/steps/investigate.md"
 
 [[fragments]]
-id   = "review/steps/investigate/report"
+id   = "review/steps/diff-audit"
 role = "review"
-path = "review/steps/investigate/report.md"
+path = "review/steps/diff-audit.md"
 
 [[fragments]]
-id   = "review/steps/investigate/accept"
+id   = "review/steps/replay"
 role = "review"
-path = "review/steps/investigate/accept.md"
-
-[[fragments]]
-id   = "review/steps/replay/task"
-role = "review"
-path = "review/steps/replay/task.md"
-
-[[fragments]]
-id   = "review/steps/replay/report"
-role = "review"
-path = "review/steps/replay/report.md"
-
-[[fragments]]
-id   = "review/steps/replay/accept"
-role = "review"
-path = "review/steps/replay/accept.md"
-
-[[fragments]]
-id   = "review/steps/diff-audit/task"
-role = "review"
-path = "review/steps/diff-audit/task.md"
-
-[[fragments]]
-id   = "review/steps/diff-audit/report"
-role = "review"
-path = "review/steps/diff-audit/report.md"
-
-[[fragments]]
-id   = "review/steps/diff-audit/accept"
-role = "review"
-path = "review/steps/diff-audit/accept.md"
-
-[[fragments]]
-id   = "review/steps/test-integrity/task"
-role = "review"
-path = "review/steps/test-integrity/task.md"
-
-[[fragments]]
-id   = "review/steps/test-integrity/report"
-role = "review"
-path = "review/steps/test-integrity/report.md"
-
-[[fragments]]
-id   = "review/steps/test-integrity/accept"
-role = "review"
-path = "review/steps/test-integrity/accept.md"
-
-[[fragments]]
-id   = "review/steps/e2e-replay/task"
-role = "review"
-path = "review/steps/e2e-replay/task.md"
-
-[[fragments]]
-id   = "review/steps/e2e-replay/report"
-role = "review"
-path = "review/steps/e2e-replay/report.md"
-
-[[fragments]]
-id   = "review/steps/e2e-replay/accept"
-role = "review"
-path = "review/steps/e2e-replay/accept.md"
+path = "review/steps/replay.md"
 
 [[fragments]]
 id   = "review/spike-followup"

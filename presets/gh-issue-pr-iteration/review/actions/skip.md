@@ -24,4 +24,4 @@ gh issue close <ISSUE> -R <REPO> --comment "Closed by coder-loop review <RUN_ID>
 
 ## After
 
-Close succeeded → write state per `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/state-write.md` with transition `skip`. Close failed or issue remains open → no local `moot`; take the retry action.
+Close succeeded → write state per `{{PRESET_ROOT}}/review/actions/state-write.md` with transition `skip`. Close failed or issue remains open → no local `moot`; take the retry action.

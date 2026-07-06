@@ -21,7 +21,6 @@ operator / supervisor 的默认入口是 `coder-loop` 自己暴露的只读或�
 | 管理 chain | `coder-loop chain create/list/status/stop/resume/delete/set-runner-model` | 直接操作 centralized coder-loop chain |
 | 管理 item | `coder-loop item add/batch-add/list/update/reorder` | 直接操作 centralized chain item |
 | 恢复 blocked item | `coder-loop queue unblock <target> --issue <id>` | 将 preset 声明的 unblockable terminal item 恢复到 `statuses.entry` |
-| 人类快捷入口 | `/dev-loop [N]` | target 内通过 slash command 调用 daemon API，`N` 会传给 `--max-iterations` |
 
 常规排障顺序：
 
@@ -137,7 +136,7 @@ coder-loop status /path/to/target --json \
 
 | 文件 | 路径模板 | 用途 | 何时写 |
 |---|---|---|---|
-| Per-run events JSONL | `<logDir>/<runId>/events.jsonl` | 行级 JSON 事件：`queue.select` / `phase.start` / `phase.end` / `attempt.start` / `attempt.timeout` / `attempt.close` / `watchdog.fire` / `queue.terminal` | run 期间 append |
+| Per-run events JSONL | `<logDir>/<runId>/events.jsonl` | 行级 JSON 事件，权威 union 见 `src/observability.ts` `ObservabilityEventTypeBoundary`；常见成员：`phase.start` / `phase.end` / `attempt.timeout` / `run.startup_idle_kill` / `recycle.pending_entered` / `recycle.timeout_kill` / `recycle.natural_exit` / `queue.terminal` / `chain.completed` / `agent.spawn` / `agent.exit`，另含 `item.*` / `chain.*` / `daemon.*` / `scheduler.*` audit / lifecycle 事件 | run 期间 append |
 | Agent stdout stream | `<logDir>/<runId>/<phase>/stdout.jsonl` | agent stdout stream / JSONL 输出 | spawn 时写入 |
 | Agent stderr | `<logDir>/<runId>/<phase>/stderr.txt` | agent stderr | spawn 时写入 |
 | Agent status | `<logDir>/<runId>/<phase>/status.json` | spawn 结束元数据（exitCode / signal / bytes / runner / model / sessionId / terminated） | spawn 退出时写 |
@@ -257,14 +256,15 @@ bun src/loop.ts status <target> --json
 bun src/loop.ts daemon start <target> --max-iterations 1
 ```
 
-源码入口仍然要求第一位置参数是子命令；不带子命令时只打印 usage 并 exit 1。循环推进走 `/dev-loop` 或 `coder-loop daemon start <target> [--max-iterations <N>]`，只读健康检查走 `coder-loop status <target> --json` 或 `coder-loop doctor <target>`。
+源码入口仍然要求第一位置参数是子命令；不带子命令时只打印 usage 并 exit 1。循环推进走 `coder-loop daemon start <target> [--max-iterations <N>]`，只读健康检查走 `coder-loop status <target> --json` 或 `coder-loop doctor <target>`。
 
 ### 6.3 Agent 进程与监控（fallback reference）
 
 - **Per-run events JSONL**：`<logDir>/<runId>/events.jsonl`，路径由 `coder-loop status <target> --json` 的 `events.path` 暴露。
-- **Absolute attempt timeout**：每个 agent attempt 的绝对上限由 preset.toml `[agent] attemptTimeoutSeconds` 声明（bundled `gh-issue-pr-iteration` 是 7200；`real-e2e-minimal` 是 900；`single-phase-example` 是 3600）。到期且尚未观察到当前 phase 的 `summaryMarker` 时，引擎对 agent 进程组发 SIGTERM，5 秒后仍未退出则 SIGKILL；attempt 记录 `terminated.kind = "timeout"`，事件流写 `attempt.timeout`。
-- **Post-summary watchdog**：当前 phase 声明 `summaryMarker` 且 agent stdout 出现该 marker 后，若 agent 未自然退出，引擎按 watchdog 配置发 SIGTERM，再发 SIGKILL。未声明 `summaryMarker` 的 phase 不启用 post-summary watchdog。事件流写 `watchdog.fire`。
-- **Agent --resume**：Claude CLI spawn 中断（5xx / 网络）时引擎自动 `--resume <sessionId>` 续跑，sessionId 索引在 `<logDir>/<runId>/<phase>/sessions.jsonl`。
+- **Absolute attempt timeout**：每个 agent attempt 的绝对上限由 preset.toml `[agent] attemptTimeoutSeconds` 声明（bundled `gh-issue-pr-iteration` 是 7200；`real-e2e-minimal` 是 900；`single-phase-example` 是 3600）。到期无条件对 agent 进程组发 SIGTERM，5 秒后仍未退出则 SIGKILL；attempt 记录 `terminated.kind = "timeout"`，事件流写 `attempt.timeout`。
+- **Startup idle watchdog**（#462）：spawn 后前 10 分钟内 stdout 字节数 < 200B 判"启动即挂死"，SIGKILL 该 attempt，事件流写 `run.startup_idle_kill`（阈值可用 `CODER_LOOP_STARTUP_IDLE_TIMEOUT_MS` / `CODER_LOOP_STARTUP_IDLE_PROGRESS_BYTES` 覆盖）。
+- **Recycle zone**（#452，替代已退役的 post-summary watchdog）：agent 通过 `coder-loop item update --status` 写入 admissible status 后，daemon 给它 500 秒自然退出。事件流写 `recycle.pending_entered` 起手；自然退出写 `recycle.natural_exit`；到期未退出直接 SIGKILL 进程组，事件流写 `recycle.timeout_kill`（因为 agent 已经宣告完成，SIGTERM 不再需要）。
+- **Agent --resume**：Claude CLI spawn 中断（5xx / 网络）时引擎自动 `--resume <sessionId>` 续跑，sessionId 索引在 `<logDir>/<runId>/<phase>/sessions.jsonl`；stderr 检测到 invalid-session pattern 时清 sessionIds 并 emit `session_id.invalidated`，下一 attempt 自动 fresh。
 
 ---
 
@@ -306,14 +306,14 @@ coder-loop status /path/to/target --json | jq '.queue'
 coder-loop item list <chain-name> --json
 ```
 
-确认是不是所有 item 已 terminal；如果需要追加 work，用 planning / chain handoff 或 `coder-loop item add`。
+确认是不是所有 item 已 terminal；需要追加 work 时用 `coder-loop item add` / `item batch-add`（issue 由 operator 或上游工具按 `presets/gh-issue-pr-iteration/contract.md` 提前写好）。
 
 ---
 
 ## 8. 常见坑
 
 - **`.coder-loop/` 入了 git** → runtime / logs / handoff 进了 PR diff；`.gitignore` 加 `.coder-loop/` 后 `git rm --cached -r .coder-loop/`。
-- **target 的 `CLAUDE.md` / `AGENTS.md` 缺失或没入仓** → plan/iter/review agent 读不到项目工作方式（项目命令 / PR 约定），行为退化为推测项目命令，往往写错命令 / 漏证据 layer；plan/intake 会直接 `intake_needs_clarification` 要求先补这两份。
-- **`gh` 未 auth** → `iter/read-context` 会以 `infrastructure_failure` 出局，agent 输出里能看到 `gh auth status` 失败回显。
+- **target 的 `CLAUDE.md` / `AGENTS.md` 缺失或没入仓** → iteration / review 调度者读不到项目工作方式（项目命令 / PR 约定），行为退化为推测项目命令，往往写错命令 / 漏证据 layer。
+- **`gh` 未 auth** → iteration 的 issue body 亲读 / review 的 `gh pr checks` 都会失败，agent 输出里能看到 `gh auth status` 失败回显。
 - **chain identity 与目标 repo 不一致** → `status` / `daemon start` 会在解析 chain 时报告 repository/baseBranch 不匹配；指定正确 `--chain`，或修正 centralized chain identity。
 - **只看日志文件、不看 status** → authoritative path 来自 central chain；先看 `status` 返回的路径，不要按老式 flat log layout 找文件。

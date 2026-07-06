@@ -1,17 +1,22 @@
 import { describe, expect, test } from "bun:test"
 import { resolve } from "node:path"
-import { mkdtemp, stat, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 
 import {
 	DEFAULT_ATTEMPT_TIMEOUT_SECONDS,
 	ENGINE_RUNTIME_BINDING_KEYS,
+	PRESET_MATERIALIZED_DIRNAME,
+	PRESET_ROOT_TOKEN,
 	chainCompleteTriggerPhases,
 	loadPreset,
+	materializePreset,
 	parsePreset,
+	prunePresetMaterializedRoot,
 	renderFragmentIndex,
 	resolveBinding,
 	sliceFragmentsForPhase,
+	substitutePresetRootToken,
 	triggeredPhasesAfter,
 	type Preset,
 	type PresetPhase,
@@ -47,65 +52,21 @@ const EXPECTED_FRAGMENTS = [
 	{ id: "common/github-routing", role: "common", relPath: "common/github-routing.md" },
 	{ id: "common/state-contract", role: "common", relPath: "common/state-contract.md" },
 	{ id: "common/dispatch-contract", role: "common", relPath: "common/dispatch-contract.md" },
-	{ id: "common/test-inventory-protocol", role: "common", relPath: "common/test-inventory-protocol.md" },
 	{ id: "contract", role: "common", relPath: "contract.md" },
-	{ id: "plan/index", role: "plan", relPath: "plan/index.md" },
-	{ id: "plan/intake", role: "plan", relPath: "plan/intake.md" },
-	{ id: "plan/classify", role: "plan", relPath: "plan/classify.md" },
-	{ id: "plan/triage-existing", role: "plan", relPath: "plan/triage-existing.md" },
-	{ id: "plan/business-frame", role: "plan", relPath: "plan/business-frame.md" },
-	{ id: "plan/decompose", role: "plan", relPath: "plan/decompose.md" },
-	{ id: "plan/checkpoint-author", role: "plan", relPath: "plan/checkpoint-author.md" },
-	{ id: "plan/adversarial-validate", role: "plan", relPath: "plan/adversarial-validate.md" },
-	{ id: "plan/create-issues", role: "plan", relPath: "plan/create-issues.md" },
-	{ id: "plan/init-queue", role: "plan", relPath: "plan/init-queue.md" },
-	{ id: "plan/handoff", role: "plan", relPath: "plan/handoff.md" },
-	{ id: "plan/final", role: "plan", relPath: "plan/final.md" },
-	{ id: "quality/evidence-execute", role: "quality", relPath: "quality/evidence-execute.md" },
-	{ id: "quality/evidence-judge", role: "quality", relPath: "quality/evidence-judge.md" },
-	{ id: "quality/honesty-execute", role: "quality", relPath: "quality/honesty-execute.md" },
-	{ id: "quality/honesty-judge", role: "quality", relPath: "quality/honesty-judge.md" },
-	{ id: "quality/cleanup-execute", role: "quality", relPath: "quality/cleanup-execute.md" },
-	{ id: "quality/cleanup-judge", role: "quality", relPath: "quality/cleanup-judge.md" },
-	{ id: "iter/steps/research/task", role: "iter", relPath: "iter/steps/research/task.md" },
-	{ id: "iter/steps/research/report", role: "iter", relPath: "iter/steps/research/report.md" },
-	{ id: "iter/steps/research/accept", role: "iter", relPath: "iter/steps/research/accept.md" },
-	{ id: "iter/steps/resolve-blocker/task", role: "iter", relPath: "iter/steps/resolve-blocker/task.md" },
-	{ id: "iter/steps/resolve-blocker/report", role: "iter", relPath: "iter/steps/resolve-blocker/report.md" },
-	{ id: "iter/steps/resolve-blocker/accept", role: "iter", relPath: "iter/steps/resolve-blocker/accept.md" },
-	{ id: "iter/steps/implement/task", role: "iter", relPath: "iter/steps/implement/task.md" },
-	{ id: "iter/steps/implement/report", role: "iter", relPath: "iter/steps/implement/report.md" },
-	{ id: "iter/steps/implement/accept", role: "iter", relPath: "iter/steps/implement/accept.md" },
-	{ id: "iter/steps/verify/task", role: "iter", relPath: "iter/steps/verify/task.md" },
-	{ id: "iter/steps/verify/report", role: "iter", relPath: "iter/steps/verify/report.md" },
-	{ id: "iter/steps/verify/accept", role: "iter", relPath: "iter/steps/verify/accept.md" },
-	{ id: "iter/steps/e2e/task", role: "iter", relPath: "iter/steps/e2e/task.md" },
-	{ id: "iter/steps/e2e/report", role: "iter", relPath: "iter/steps/e2e/report.md" },
-	{ id: "iter/steps/e2e/accept", role: "iter", relPath: "iter/steps/e2e/accept.md" },
-	{ id: "iter/steps/submit/task", role: "iter", relPath: "iter/steps/submit/task.md" },
-	{ id: "iter/steps/submit/report", role: "iter", relPath: "iter/steps/submit/report.md" },
-	{ id: "iter/steps/submit/accept", role: "iter", relPath: "iter/steps/submit/accept.md" },
-	{ id: "iter/steps/source-spike/task", role: "iter", relPath: "iter/steps/source-spike/task.md" },
-	{ id: "iter/steps/source-spike/report", role: "iter", relPath: "iter/steps/source-spike/report.md" },
-	{ id: "iter/steps/source-spike/accept", role: "iter", relPath: "iter/steps/source-spike/accept.md" },
-	{ id: "iter/steps/spike-comment/task", role: "iter", relPath: "iter/steps/spike-comment/task.md" },
-	{ id: "iter/steps/spike-comment/report", role: "iter", relPath: "iter/steps/spike-comment/report.md" },
-	{ id: "iter/steps/spike-comment/accept", role: "iter", relPath: "iter/steps/spike-comment/accept.md" },
-	{ id: "review/steps/investigate/task", role: "review", relPath: "review/steps/investigate/task.md" },
-	{ id: "review/steps/investigate/report", role: "review", relPath: "review/steps/investigate/report.md" },
-	{ id: "review/steps/investigate/accept", role: "review", relPath: "review/steps/investigate/accept.md" },
-	{ id: "review/steps/replay/task", role: "review", relPath: "review/steps/replay/task.md" },
-	{ id: "review/steps/replay/report", role: "review", relPath: "review/steps/replay/report.md" },
-	{ id: "review/steps/replay/accept", role: "review", relPath: "review/steps/replay/accept.md" },
-	{ id: "review/steps/diff-audit/task", role: "review", relPath: "review/steps/diff-audit/task.md" },
-	{ id: "review/steps/diff-audit/report", role: "review", relPath: "review/steps/diff-audit/report.md" },
-	{ id: "review/steps/diff-audit/accept", role: "review", relPath: "review/steps/diff-audit/accept.md" },
-	{ id: "review/steps/test-integrity/task", role: "review", relPath: "review/steps/test-integrity/task.md" },
-	{ id: "review/steps/test-integrity/report", role: "review", relPath: "review/steps/test-integrity/report.md" },
-	{ id: "review/steps/test-integrity/accept", role: "review", relPath: "review/steps/test-integrity/accept.md" },
-	{ id: "review/steps/e2e-replay/task", role: "review", relPath: "review/steps/e2e-replay/task.md" },
-	{ id: "review/steps/e2e-replay/report", role: "review", relPath: "review/steps/e2e-replay/report.md" },
-	{ id: "review/steps/e2e-replay/accept", role: "review", relPath: "review/steps/e2e-replay/accept.md" },
+	{ id: "quality/evidence", role: "quality", relPath: "quality/evidence.md" },
+	{ id: "quality/honesty", role: "quality", relPath: "quality/honesty.md" },
+	{ id: "quality/cleanup", role: "quality", relPath: "quality/cleanup.md" },
+	{ id: "iter/steps/research", role: "iter", relPath: "iter/steps/research.md" },
+	{ id: "iter/steps/resolve-blocker", role: "iter", relPath: "iter/steps/resolve-blocker.md" },
+	{ id: "iter/steps/implement", role: "iter", relPath: "iter/steps/implement.md" },
+	{ id: "iter/steps/verify", role: "iter", relPath: "iter/steps/verify.md" },
+	{ id: "iter/steps/e2e", role: "iter", relPath: "iter/steps/e2e.md" },
+	{ id: "iter/steps/submit", role: "iter", relPath: "iter/steps/submit.md" },
+	{ id: "iter/steps/source-spike", role: "iter", relPath: "iter/steps/source-spike.md" },
+	{ id: "iter/steps/spike-comment", role: "iter", relPath: "iter/steps/spike-comment.md" },
+	{ id: "review/steps/investigate", role: "review", relPath: "review/steps/investigate.md" },
+	{ id: "review/steps/diff-audit", role: "review", relPath: "review/steps/diff-audit.md" },
+	{ id: "review/steps/replay", role: "review", relPath: "review/steps/replay.md" },
 	{ id: "review/spike-followup", role: "review", relPath: "review/spike-followup.md" },
 	{ id: "review/source-spike-audit", role: "review", relPath: "review/source-spike-audit.md" },
 	{ id: "review/actions/accept-pr", role: "review", relPath: "review/actions/accept-pr.md" },
@@ -344,40 +305,9 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		}
 	})
 
-	test("planning prompts no longer carry the retired kind label taxonomy", async () => {
-		// #450 retired the entire kind label taxonomy: planning prompts must not declare,
-		// ensure, or route by `kind:*` labels. The deliverable shape lives in the issue
-		// body (per contract.md §1.2 / §1.6), not in any label, and create-issues now
-		// posts via title+body only.
-		const createIssues = await Bun.file(resolve(BUNDLED_PRESET_DIR, "plan/create-issues.md")).text()
+	test("contract.md describes four deliverable shapes without kind taxonomy", async () => {
 		const contract = await Bun.file(resolve(BUNDLED_PRESET_DIR, "contract.md")).text()
-
-		// No `kind` token leaks through any planning prompt or contract surface.
-		const planFiles = [
-			"plan/create-issues.md",
-			"plan/classify.md",
-			"plan/checkpoint-author.md",
-			"plan/decompose.md",
-			"plan/triage-existing.md",
-			"plan/init-queue.md",
-			"plan/index.md",
-			"plan/adversarial-validate.md",
-			"plan/handoff.md",
-			"contract.md",
-		]
-		for (const relPath of planFiles) {
-			const text = await Bun.file(resolve(BUNDLED_PRESET_DIR, relPath)).text()
-			expect({ relPath, hasKind: /kind/i.test(text) }).toEqual({ relPath, hasKind: false })
-		}
-
-		// create-issues posts with title+body only — no label flag in the documented command.
-		expect(createIssues).toContain("gh issue create --repo <owner>/<repo>")
-		expect(createIssues).not.toContain("--label")
-		// Deliverable shape routing is encoded in the body sections, not labels.
-		expect(createIssues).toContain("body must follow §1.2 implementation-PR-deliverable shape")
-		expect(createIssues).toContain("body must follow §1.2 unblock-deliverable shape")
-
-		// contract.md still describes the four deliverable shapes by content, with no kind taxonomy.
+		expect(/kind/i.test(contract)).toBe(false)
 		expect(contract).toContain("实现-PR-deliverable")
 		expect(contract).toContain("Unblock-deliverable")
 		expect(contract).toContain("Comment-spike-deliverable")
@@ -401,15 +331,14 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(entry).toContain("The list is the run.")
 		expect(entry).toContain("[x] accepted` or `[-] skipped:")
 		expect(entry).toContain("never do the work yourself")
-		expect(entry).toContain("you may open **only** `accept.md` files")
-		// All four deliverable step directories are still referenced so the routing
+		// All four deliverable step files are still referenced so the routing
 		// language above remains executable (the four-workflow capability survives).
-		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/iter/steps/implement/")
-		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/iter/steps/resolve-blocker/")
-		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/iter/steps/source-spike/")
-		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/iter/steps/spike-comment/")
-		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/iter/steps/e2e/")
-		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/honesty-judge.md")
+		expect(entry).toContain("{{PRESET_ROOT}}/iter/steps/implement.md")
+		expect(entry).toContain("{{PRESET_ROOT}}/iter/steps/resolve-blocker.md")
+		expect(entry).toContain("{{PRESET_ROOT}}/iter/steps/source-spike.md")
+		expect(entry).toContain("{{PRESET_ROOT}}/iter/steps/spike-comment.md")
+		expect(entry).toContain("{{PRESET_ROOT}}/iter/steps/e2e.md")
+		expect(entry).toContain("{{PRESET_ROOT}}/quality/honesty.md")
 		expect(entry).toContain("ITERATION SUMMARY:")
 	})
 
@@ -417,23 +346,23 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		const entry = await Bun.file(resolve(BUNDLED_PRESET_DIR, "review-entry.md")).text()
 
 		expect(entry).toContain("You never repair the work under review.")
-		expect(entry).toContain("a verdict — including retry — produced without all four accepted reports is an invalid review")
-		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/steps/replay/")
-		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/steps/diff-audit/")
-		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/steps/test-integrity/")
-		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/steps/e2e-replay/")
-		expect(entry).toContain("userContentEdits")
-		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/accept-pr.md")
-		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/state-write.md")
+		// Two mandatory dispatches (diff-audit + replay); anti-cheat verbatim scaffolds
+		// were removed for Claude-family runners, but the "no verdict without both reports"
+		// guarantee stays.
+		expect(entry).toContain("A verdict — including retry — produced without both accepted reports is an invalid review")
+		expect(entry).toContain("{{PRESET_ROOT}}/review/steps/replay.md")
+		expect(entry).toContain("{{PRESET_ROOT}}/review/steps/diff-audit.md")
+		expect(entry).toContain("{{PRESET_ROOT}}/review/actions/accept-pr.md")
+		expect(entry).toContain("{{PRESET_ROOT}}/review/actions/state-write.md")
 		// #405 retired the `REVIEW SUMMARY: verdict=...` template line and the five-word
 		// verdict format from review-entry.md (review terminal action routes through
 		// `coder-loop item exits` + the appropriate writer per ADT branch). #404's
 		// row #1 grep (`verdict=<|changes_requested|exhausted`) requires the same
 		// absence; this single assertion guards both contracts.
 		expect(/REVIEW SUMMARY:|verdict=/.test(entry)).toBe(false)
-		// judge-side quality criteria are the judgment ground truth
-		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/honesty-judge.md")
-		expect(entry).toContain("/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/quality/evidence-judge.md")
+		// merged quality files are the judgment ground truth
+		expect(entry).toContain("{{PRESET_ROOT}}/quality/honesty.md")
+		expect(entry).toContain("{{PRESET_ROOT}}/quality/evidence.md")
 	})
 
 	test("blocked responder prompt carries the required cross-repo side effects", async () => {
@@ -1456,13 +1385,13 @@ function countLineMatches(text: string, pattern: RegExp): number {
 }
 
 // Pull `<role>/<...>` style tails out of an entry markdown — everything after
-// `presets/gh-issue-pr-iteration/`. References inside the entry use the
-// install-time absolute prefix (`/Users/.../presets/gh-issue-pr-iteration/`)
-// independent of where the worktree happens to live, so we strip both prefixes
-// and the `.md` extension and compare tails.
+// the engine-owned `{{PRESET_ROOT}}` token. Source md files use that token so
+// the engine can substitute the current absolute prompt root at materialize
+// time (or at prompt-read time for the direct-parse path); we strip the token
+// prefix and the `.md` extension and compare tails.
 function extractFragmentTails(markdown: string): ReadonlySet<string> {
 	const found = new Set<string>()
-	const pattern = /presets\/gh-issue-pr-iteration\/([A-Za-z0-9_./-]+?)(?:\.md|\/)(?=[`)<\s.,;:!]|$)/g
+	const pattern = /\{\{PRESET_ROOT\}\}\/([A-Za-z0-9_./-]+?)(?:\.md|\/)(?=[`)<\s.,;:!]|$)/g
 	for (const match of markdown.matchAll(pattern)) {
 		const tail = match[1]
 		if (tail === undefined) continue
@@ -1487,3 +1416,204 @@ function sliceTails(preset: Preset, phase: Pick<PresetPhase, "roles">): readonly
 		return rel.replace(/\.md$/, "")
 	})
 }
+
+// --- preset materialization (`{{PRESET_ROOT}}` substitution + hash-keyed copy) ---
+//
+// Materialization is the substitution site for the engine-owned `{{PRESET_ROOT}}`
+// token used by cross-file references in preset md files. The tests below cover
+// (1) that token replacement is physical and produces an absolute path,
+// (2) that the target dir is content-hash-keyed so unchanged sources are
+// idempotent and source edits produce a new dir, (3) that loadPreset's
+// `materialize` option threads through so `preset.presetDir` and every
+// fragment/prompt path resolves to the materialized copy, (4) that
+// placeholder validation ignores `{{PRESET_ROOT}}` (it's engine-owned, not
+// declared in [phases.variables]), and (5) that `prunePresetMaterializedRoot`
+// removes stale dirs.
+
+async function writeMinimalMaterializeFixture(root: string, sentinel: string): Promise<{ presetDir: string }> {
+	const presetDir = resolve(root, "materialize-fixture")
+	await mkdir(resolve(presetDir, "quality"), { recursive: true })
+	await writeFile(
+		resolve(presetDir, "preset.toml"),
+		`name = "materialize-fixture"
+
+[item]
+idField = "issue"
+
+[item.fields]
+issue = "number"
+
+[statuses]
+continuable = ["queued"]
+terminal = ["done", "exhausted"]
+success = ["done"]
+entry = "queued"
+exhausted = "exhausted"
+
+[[phases]]
+name = "iteration"
+prompt = "iter-entry.md"
+
+  [[phases.exits]]
+  status = "done"
+  when   = "task finished"
+
+  [phases.variables]
+  PROMPT_ROOT = "runtime.presetDir"
+`,
+	)
+	// Entry references a fragment via {{PRESET_ROOT}}; body carries a sentinel
+	// so tests can spot content edits in the hash.
+	await writeFile(
+		resolve(presetDir, "iter-entry.md"),
+		`Prompt root: {{PROMPT_ROOT}}\n\nRead {{PRESET_ROOT}}/quality/evidence.md before you act.\n\nSentinel: ${sentinel}\n`,
+	)
+	await writeFile(resolve(presetDir, "quality/evidence.md"), "quality evidence body\n")
+	return { presetDir }
+}
+
+describe("materializePreset", () => {
+	test("replaces {{PRESET_ROOT}} in .md files with the target absolute path; non-md files pass through verbatim", async () => {
+		const tmp = await mkdtemp(resolve(tmpdir(), "coder-loop-materialize-"))
+		const materializeRoot = resolve(tmp, "loop-data")
+		const { presetDir } = await writeMinimalMaterializeFixture(tmp, "alpha")
+
+		const result = await materializePreset(presetDir, materializeRoot)
+
+		expect(result.promptRoot).toBe(resolve(materializeRoot, PRESET_MATERIALIZED_DIRNAME, result.dirName))
+		expect(result.dirName.startsWith("materialize-fixture-")).toBe(true)
+
+		// .md entry: token has been physically substituted with the target path.
+		const entry = await readFile(resolve(result.promptRoot, "iter-entry.md"), "utf-8")
+		expect(entry).not.toContain(PRESET_ROOT_TOKEN)
+		expect(entry).toContain(`Read ${result.promptRoot}/quality/evidence.md`)
+
+		// Non-md preset.toml: byte-for-byte copy (materialization does not touch
+		// it; parsing runs on the target so path resolution still lands inside
+		// the materialized dir).
+		const tomlSrc = await readFile(resolve(presetDir, "preset.toml"), "utf-8")
+		const tomlDst = await readFile(resolve(result.promptRoot, "preset.toml"), "utf-8")
+		expect(tomlDst).toBe(tomlSrc)
+
+		// Marker file signals a completed materialization for idempotent reuse.
+		const marker = await stat(resolve(result.promptRoot, ".materialized-complete"))
+		expect(marker.isFile()).toBe(true)
+	})
+
+	test("content hash is stable across repeated calls (idempotent) and changes when source changes", async () => {
+		const tmp = await mkdtemp(resolve(tmpdir(), "coder-loop-materialize-"))
+		const materializeRoot = resolve(tmp, "loop-data")
+		const { presetDir } = await writeMinimalMaterializeFixture(tmp, "alpha")
+
+		const first = await materializePreset(presetDir, materializeRoot)
+		const second = await materializePreset(presetDir, materializeRoot)
+		expect(second.contentHash).toBe(first.contentHash)
+		expect(second.promptRoot).toBe(first.promptRoot)
+
+		// Same-content re-run keeps the single dir; prune-siblings-on-materialize
+		// leaves the current one alone.
+		const rootEntries = await readdir(resolve(materializeRoot, PRESET_MATERIALIZED_DIRNAME))
+		expect(rootEntries.filter((entry) => entry.startsWith("materialize-fixture-"))).toEqual([first.dirName])
+
+		// Editing the source produces a new hash and a new materialized dir; the
+		// previous dir is pruned because it shares the `materialize-fixture-`
+		// name prefix.
+		await writeFile(
+			resolve(presetDir, "iter-entry.md"),
+			`Prompt root: {{PROMPT_ROOT}}\n\nRead {{PRESET_ROOT}}/quality/evidence.md before you act.\n\nSentinel: beta\n`,
+		)
+		const third = await materializePreset(presetDir, materializeRoot)
+		expect(third.contentHash).not.toBe(first.contentHash)
+		expect(third.promptRoot).not.toBe(first.promptRoot)
+		const afterEdit = await readdir(resolve(materializeRoot, PRESET_MATERIALIZED_DIRNAME))
+		expect(afterEdit.filter((entry) => entry.startsWith("materialize-fixture-"))).toEqual([third.dirName])
+	})
+
+	test("loadPreset({ materialize }) points preset.presetDir + fragment/prompt paths at the materialized copy", async () => {
+		const tmp = await mkdtemp(resolve(tmpdir(), "coder-loop-materialize-"))
+		const materializeRoot = resolve(tmp, "loop-data")
+		const { presetDir } = await writeMinimalMaterializeFixture(tmp, "alpha")
+
+		const preset = await loadPreset(presetDir, { materialize: { root: materializeRoot } })
+		expect(preset.presetDir.startsWith(resolve(materializeRoot, PRESET_MATERIALIZED_DIRNAME))).toBe(true)
+		expect(preset.presetDir).not.toBe(presetDir)
+
+		const iterPhase = preset.phases.find((phase) => phase.name === "iteration")
+		expect(iterPhase).not.toBeUndefined()
+		expect(iterPhase!.prompt.startsWith(preset.presetDir + "/")).toBe(true)
+
+		// The materialized phase entry has no {{PRESET_ROOT}} residue.
+		const entry = await readFile(iterPhase!.prompt, "utf-8")
+		expect(entry).not.toContain(PRESET_ROOT_TOKEN)
+	})
+
+	test("materialize threads through gh-issue-pr-iteration end-to-end (all 57 references substituted, no residue in md files)", async () => {
+		const tmp = await mkdtemp(resolve(tmpdir(), "coder-loop-materialize-"))
+		const materializeRoot = resolve(tmp, "loop-data")
+
+		const preset = await loadPreset(BUNDLED_PRESET_DIR, { materialize: { root: materializeRoot } })
+		expect(preset.presetDir).not.toBe(BUNDLED_PRESET_DIR)
+
+		// No md file in the materialized tree may still carry the token — the
+		// substitution guarantee is what makes the fragments' absolute paths
+		// resolve inside the sandbox at runtime.
+		const walk = async (dir: string): Promise<string[]> => {
+			const out: string[] = []
+			for (const entry of await readdir(dir, { withFileTypes: true })) {
+				const full = resolve(dir, entry.name)
+				if (entry.isDirectory()) out.push(...(await walk(full)))
+				else if (entry.isFile() && entry.name.endsWith(".md")) out.push(full)
+			}
+			return out
+		}
+		const mdFiles = await walk(preset.presetDir)
+		expect(mdFiles.length).toBeGreaterThan(0)
+		for (const file of mdFiles) {
+			const content = await readFile(file, "utf-8")
+			expect(content).not.toContain(PRESET_ROOT_TOKEN)
+		}
+	})
+})
+
+describe("{{PRESET_ROOT}} placeholder handling", () => {
+	test("loadPreset does not flag {{PRESET_ROOT}} as undeclared even when the phase entry uses it (in-memory substitution runs before validate)", async () => {
+		const tmp = await mkdtemp(resolve(tmpdir(), "coder-loop-materialize-"))
+		const { presetDir } = await writeMinimalMaterializeFixture(tmp, "alpha")
+
+		const findings: PresetPlaceholderFinding[] = []
+		// No materialize option — the source md still contains the raw token,
+		// but readPresetPhasePrompt substitutes with sourceDir before the
+		// placeholder validator runs; validation must not report PRESET_ROOT
+		// as an undeclared placeholder.
+		await loadPreset(presetDir, { onValidationFinding: (finding) => findings.push(finding) })
+		const errorFindings = findings.filter((finding) => finding.verdict === "error")
+		expect(errorFindings).toEqual([])
+	})
+
+	test("substitutePresetRootToken is idempotent (no-op on content that already has been substituted)", () => {
+		const substituted = substitutePresetRootToken("Read {{PRESET_ROOT}}/quality/evidence.md", "/materialized/preset-x")
+		expect(substituted).toBe("Read /materialized/preset-x/quality/evidence.md")
+		// Re-invoking has no effect (materialized files never round-trip through
+		// the substitute helper, but idempotence is a load-bearing invariant of
+		// the runtime read-and-substitute path).
+		expect(substitutePresetRootToken(substituted, "/materialized/preset-x")).toBe(substituted)
+	})
+})
+
+describe("prunePresetMaterializedRoot", () => {
+	test("removes materialized dirs not present in the keep set; leaves kept dirs and returns cleanly on a missing root", async () => {
+		const tmp = await mkdtemp(resolve(tmpdir(), "coder-loop-prune-"))
+		const materializeRoot = resolve(tmp, "loop-data")
+		// Missing root: prune is a no-op (no throw).
+		await prunePresetMaterializedRoot(materializeRoot, new Set())
+
+		const rootDir = resolve(materializeRoot, PRESET_MATERIALIZED_DIRNAME)
+		await mkdir(resolve(rootDir, "alpha-abcdef01"), { recursive: true })
+		await mkdir(resolve(rootDir, "alpha-11111111"), { recursive: true })
+		await mkdir(resolve(rootDir, "beta-99999999"), { recursive: true })
+
+		await prunePresetMaterializedRoot(materializeRoot, new Set(["alpha-abcdef01", "beta-99999999"]))
+		const remaining = await readdir(rootDir)
+		expect(remaining.sort()).toEqual(["alpha-abcdef01", "beta-99999999"].sort())
+	})
+})

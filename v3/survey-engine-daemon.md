@@ -23,7 +23,7 @@
 **存在并发，粒度是 `slot = (chainId, repoCwd)`**（`schedulerSlotKey`，`scheduler.ts:791`）：
 
 - **多 chain 并行**：每个 `(chain, repoCwd)` slot 空闲即异步 spawn，互不等待。
-- **同一 chain 内多 repoCwd 并行**：引擎层合法。`docs/execution-plan-pre-v3.md:9` 的"一条 chain 内严格串行"是**运维约定**，不是引擎限制——引擎真实约束是"同一 slot 内串行"。
+- **同一 chain 内多 repoCwd 并行**：引擎层合法。历史 pre-v3 执行波次表曾把"一条 chain 内严格串行"作为**运维约定**记录，非引擎限制——引擎真实约束是"同一 slot 内串行"。
 - **同一 slot 内严格串行**：`slot.activeRun !== null` 时本 tick 跳过（`scheduler.ts:460-469`），无 phase 内并行。
 - **无总并发上限**（除 #478 限流网关 `limits.maxSpawns` 与 staggered resume 每 tick 1 spawn + 30s 冷却）。
 
@@ -160,5 +160,5 @@ per-run 状态文件：`<logDir>/<runId>/<phase>/status.json`（fallback/debug �
 - `src/runtime-data.ts` — 品牌类型、`ChainMetadata`/`ItemExtra`
 - `src/observability.ts` — 事件类型枚举
 - `src/rate-limit.ts`、`src/runners/session-id.ts`、`src/install-commands.ts`
-- `docs/architecture-v2.md` — v2 历史叙述（schema 描述已过时，v7 时代快照）
-- `docs/execution-plan-pre-v3.md` — pre-v3 波次表（已全部完成）
+- `docs/architecture-v2.md` — v2 历史叙述（本次审查已同步至 schema v13）
+- （已退役）`docs/execution-plan-pre-v3.md` — pre-v3 波次表；波次全部完成后 doc 已从仓库删除

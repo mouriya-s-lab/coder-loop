@@ -17,4 +17,4 @@ blockerRef: #123
 
 ## After
 
-Blocker durably posted → write state per `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/state-write.md` with transition `blocked` (the `blocker` keys flow through `--field-json '{"extraPatch":{"blockerRepo":...,"blockerRef":...}}'` since #457). Publication failed → do not write local state as if the blocker were durable; take the stop action.
+Blocker durably posted → write state per `{{PRESET_ROOT}}/review/actions/state-write.md` with transition `blocked` (the `blocker` keys flow through `--field-json '{"extraPatch":{"blockerRepo":...,"blockerRef":...}}'` since #457). Publication failed → do not write local state as if the blocker were durable; take the stop action.

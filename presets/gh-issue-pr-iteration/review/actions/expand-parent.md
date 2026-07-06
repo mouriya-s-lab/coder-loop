@@ -72,4 +72,4 @@ Do not close the parent or mark it final.
 
 ## After
 
-Children created + linked + bookkeeping initialized → write state per `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/state-write.md` with transition `expanded incomplete parent` (it owns the batch-add/reorder commands). Creation/linking failed → take the retry action with the exact failure.
+Children created + linked + bookkeeping initialized → write state per `{{PRESET_ROOT}}/review/actions/state-write.md` with transition `expanded incomplete parent` (it owns the batch-add/reorder commands). Creation/linking failed → take the retry action with the exact failure.
