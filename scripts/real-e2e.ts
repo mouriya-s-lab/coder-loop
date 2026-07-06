@@ -19,7 +19,7 @@
 
 import { Database } from "bun:sqlite"
 import { spawn, spawnSync, type ChildProcess } from "node:child_process"
-import { existsSync, mkdirSync, openSync, closeSync, readFileSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, openSync, closeSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -272,6 +272,28 @@ type DaemonHandle = {
 	loopDataRoot: string
 	stdoutPath: string
 	stderrPath: string
+	shimDir: string
+}
+
+// real-e2e must exercise the CODE tree end-to-end. PATH's `coder-loop` wrapper
+// on the host machine forwards to `/Users/mouriya/Ext/app/coder-loop` — the
+// production install — so when a running agent runs `coder-loop item exits ...`
+// it silently talks to app-side CLI code instead of the code-side CLI under
+// test. The shim below is written into a per-run temp dir and prepended to
+// PATH before the daemon spawn; the daemon inherits PATH, and its
+// `spawn(..., { env: { ...process.env, ... }})` at scheduler.ts passes it
+// through to every agent — so every `coder-loop ...` invocation in the loop
+// resolves to `bun <REPO_ROOT>/src/loop.ts`.
+function writeCoderLoopCliShim(workDir: string): string {
+	const shimDir = resolve(workDir, "cli-shim")
+	mkdirSync(shimDir, { recursive: true })
+	const shimPath = resolve(shimDir, "coder-loop")
+	const script = `#!/bin/sh
+exec bun ${LOOP_ENTRY} "$@"
+`
+	writeFileSync(shimPath, script)
+	chmodSync(shimPath, 0o755)
+	return shimDir
 }
 
 function startDaemon(workDir: string): DaemonHandle {
@@ -279,16 +301,20 @@ function startDaemon(workDir: string): DaemonHandle {
 	mkdirSync(loopDataRoot, { recursive: true })
 	const stdoutPath = resolve(workDir, "daemon.stdout.log")
 	const stderrPath = resolve(workDir, "daemon.stderr.log")
+	const shimDir = writeCoderLoopCliShim(workDir)
+	const shimmedPath = `${shimDir}:${process.env.PATH ?? ""}`
 	log(`daemon: 隔离 loop-data-root 起中央 daemon: ${loopDataRoot}`)
+	log(`daemon: PATH 前置 coder-loop CLI shim: ${shimDir} → ${LOOP_ENTRY}`)
 	const stdoutFd = openSync(stdoutPath, "a")
 	const stderrFd = openSync(stderrPath, "a")
 	const child = spawn("bun", [LOOP_ENTRY, "daemon", "up", "--loop-data-root", loopDataRoot], {
 		cwd: REPO_ROOT,
 		stdio: ["ignore", stdoutFd, stderrFd],
+		env: { ...process.env, PATH: shimmedPath },
 	})
 	closeSync(stdoutFd)
 	closeSync(stderrFd)
-	return { child, loopDataRoot, stdoutPath, stderrPath }
+	return { child, loopDataRoot, stdoutPath, stderrPath, shimDir }
 }
 
 async function waitForDaemonSocket(daemon: DaemonHandle, timeoutSeconds: number): Promise<void> {
@@ -324,6 +350,14 @@ async function stopDaemon(daemon: DaemonHandle): Promise<void> {
 		if (daemon.child.exitCode === null) daemon.child.kill("SIGKILL")
 	}
 	killOrphanAgents(daemon.loopDataRoot)
+	// 清 CLI shim。work-dir 会被外层 teardown 一起清，这里显式 rm 让 shim
+	// 目录在 daemon 生命周期结束的同一瞬间就消失，即便外层 teardown 被中断
+	// 也不会残留一个 exec 到当前 checkout 的 fake binary。
+	try {
+		rmSync(daemon.shimDir, { recursive: true, force: true })
+	} catch {
+		// ignore — teardown 的 workDir rm 会兜底
+	}
 }
 
 // daemon down 在有 active run 时等待而非终止 agent（#467）；teardown 不能留孤儿
