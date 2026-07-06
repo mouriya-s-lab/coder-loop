@@ -5,7 +5,7 @@ Use only when closure judgment proves current scope and children are complete wi
 ## Procedure
 
 1. Comment on the issue with the already-satisfied/spike-complete evidence and the child closure table when applicable.
-2. When the issue is an unblock-deliverable issue (its body carries `Unblocks:` and `## 阻塞条件` per `contract.md` §1.2), perform the unblock side effect first — same sub-procedure and failure rules as in `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/accept-pr.md` step 3.
+2. When the issue is an unblock-deliverable issue (its body carries `Unblocks:` and `## 阻塞条件` per `contract.md` §1.2), perform the unblock side effect first — same sub-procedure and failure rules as in `{{PRESET_ROOT}}/review/actions/accept-pr.md` step 3.
 3. Close with an evidence-backed reason:
 
 ```bash
@@ -26,4 +26,4 @@ gh issue close <ISSUE> -R <REPO> --comment "Closed by coder-loop review <RUN_ID>
 
 Side effect blocked by an approval boundary / failed before durable publication → record exact command + output in handoff, do not write `done`, take the stop action. Comment published but close fails for an ordinary reason → do not write `done`; take the retry action with exact issue feedback. Issue still open = no `done`, ever.
 
-On full success, write state per `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/state-write.md` with transition `accepted_no_pr`, then continue the entry's wrap-up.
+On full success, write state per `{{PRESET_ROOT}}/review/actions/state-write.md` with transition `accepted_no_pr`, then continue the entry's wrap-up.

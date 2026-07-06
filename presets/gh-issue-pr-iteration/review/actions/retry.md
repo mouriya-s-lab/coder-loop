@@ -8,48 +8,34 @@ Publish precise feedback for work that remains actionable.
 - No PR → feedback as an issue comment.
 - Never post PR-related review results only to the issue.
 
-## Feedback body — a full review report, fixed structure
+## Feedback body — a full review report, fixed shape
 
-Every field below demands a measured value, a verbatim quote, or an identifier that only exists if the check was actually performed. A field you cannot fill is a check you have not done — go back and do it; never pad the field with prose.
+Every check that ran gets a section that references observed values (SHAs, counts, verbatim quotes from the retry comment / PR-body caveat sections, URLs, timestamps). The `## 缺失汇总` block is the single authoritative gap list — iteration fixes everything in it in one retry. Every check that did not run appears in `## Skipped checks` with its reason.
 
 ```markdown
 ## Review verdict: changes requested (<RUN_ID>)
-<if contract integrity failed, the red-line warning opens here, before anything else:
-the issue body is the contract; it was edited without authorization, the tampering has
-been detected and reversed to the snapshot of <editedAt>; editing the contract to pass
-review is the one inviolable line — recurrence routes this issue out of the loop.>
 
 ## Check reports
 ### diff-audit — <pass/fail>
 refs <base-sha>..<head-sha>; files changed <n>: in-scope <n> / support <n> / unmapped <n: list or none>;
-hygiene: <none / findings with paths>; code findings: <none / one line per finding:
-category @ file:line — anchor>
-### test-integrity — <pass/fail>
-base <count> (`<command>`) vs head <count> (`<command>`); enumerated: removed <n> /
-renamed <n> / skipped <n> / weakened <n>; correlation: <consistent / hidden weakening: what>;
-packet delta line: <agrees / mismatch: quote both>
+hygiene: <none / findings with paths>; test changes in diff: <enumeration or none>;
+code findings: <none / one line per finding: category @ file:line — anchor>
 ### replay — <pass/fail>
-head <sha>; rows <total>: matched <n> / failed <n: row #s> / deferred-browser <n: row #s> /
-artifact-verified <n>; blocked-path e2e: <command + exit / not applicable>
-### e2e-replay — <pass/fail>
-environment: <probe result; restarted: yes/no>; claims re-driven <n>: matched <n> /
-mismatched <n: which>; browser rows closed <n>/<n deferred>; form: <direct / script: name it>
+head <sha>; canonical suite: <count>; rows <total>: matched <n> / failed <n: row #s> /
+browser <n: row #s>; e2e re-drive: <n> matched / <n> mismatched (which);
+form: <direct / script: name it>; blocked-path e2e: <command + exit / not applicable>
 ### Judgments
-- contract integrity: <body edits since enqueue: n; per edit: editedAt + editor; verdict —
-  tampered cases add `restored to snapshot <editedAt>`>
-- trace honesty: <claims cross-checked: n; one named pair: "<claim>" ↔ <observation>; verdict>
-- PR protocol: <body first line quoted verbatim; this run's PR comment URL; verdict>
-- title-intent: <"<issue title>" vs "<PR title>" after prefix strip; verdict>
-- caveat honesty: <Intent/Result blocks read: run ids; trigger phrases: none / "<exact quote>">
-- evidence form: <required packet sections: present / missing by name; manifest
-  re-runnable: yes / no + the missing entry>
-- checks/mergeability: <head sha observed; each check: name=conclusion; mergeStateStatus;
-  observed at <timestamp>>
+- trace honesty: <one named pair or verdict>
+- PR protocol: <body first line quoted; PR comment URL; verdict>
+- title-intent: <"<issue title>" vs "<PR title>"; verdict>
+- caveat honesty: <Intent/Result verdict; trigger phrases: none / "<exact quote>">
+- evidence form: <sections present / missing by name; manifest re-runnable: yes / no + missing entry>
+- checks/mergeability: <head sha; each check: name=conclusion; mergeStateStatus>
 
 ## 缺失汇总
 - <every missing/failing item across all checks, one line each, in one place —
   every failed replay row (#, Check, Command, actual vs Expect), every code finding
-  with its anchor, every manifest gap, every judgment trigger — or `none`>
+  with its anchor, every manifest gap — or `none`>
 
 ## Skipped checks
 - <check → reason (deliverable-route routing / no-PR route / infra) — or `none`>
@@ -64,10 +50,8 @@ do not bypass coder-loop review; do not merge manually; do not close the issue m
 never edit the issue body without literal authorization on the issue thread
 ```
 
-Every check that ran appears in `Check reports` even when it passed — with its measured values, never a bare verdict; every check that did not run appears in `Skipped checks` with its reason. The 缺失汇总 block is the single authoritative gap list — iteration fixes everything in it in one retry.
-
 ## After publishing
 
-Feedback durably posted → write state per `/Users/mouriya/Ext/app/coder-loop/presets/gh-issue-pr-iteration/review/actions/state-write.md` with transition `retry`, then continue the entry's wrap-up.
+Feedback durably posted → write state per `{{PRESET_ROOT}}/review/actions/state-write.md` with transition `retry`, then continue the entry's wrap-up.
 
 Feedback publication itself failed → do not update local state as if feedback were durable; take the stop action with the exact failure.

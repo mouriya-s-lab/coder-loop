@@ -95,13 +95,15 @@ Use the JSON snapshots to derive:
   `processes.scanError`
 
 If `doctor` reports a missing chain for this target, create it with
-`coder-loop chain create <name> --repository "$TARGET_REPO" --preset <preset>`,
+`coder-loop chain create <name> --config-json '{"repository":"'"$TARGET_REPO"'","baseBranch":"main"}' --preset <preset>`,
 then rerun `doctor`. If `doctor` reports a missing operator-machine prereq
 (PATH / `gh auth` / runner CLI), repair it on the machine (no coder-loop
 subcommand does this) and rerun `doctor`. (The `install` / `uninstall`
-subcommands were retired in #436; bootstrap moved into `chain create` and the
-preset's planning agent.) If `status` reports an invalid runtime state, record
-the blocker in `log.md` before attempting manual file repair.
+subcommands were retired in #436; chain identity and per-target bindings live
+in `--config-json` only, and any preset business asset — labels, seed issues —
+is created out-of-band, not by coder-loop.) If `status` reports an invalid
+runtime state, record the blocker in `log.md` before attempting manual file
+repair.
 
 Runner note: do not assume Claude. coder-loop role entry md declares phase
 defaults, and queue items may override allowed execution phases. Trust `status`

@@ -14,7 +14,7 @@ The outer layer steers coder-loop through its stable operations API:
 
 - observe: `coder-loop doctor <TARGET_DIR> --repo <TARGET_REPO>`, `coder-loop status <TARGET_DIR> --json`, and `coder-loop daemon status <TARGET_DIR> --json`
 - control: `coder-loop daemon start|stop|restart <TARGET_DIR>` (target-aware wrappers over the central daemon / chain API)
-- onboarding / chain repair: `coder-loop chain create <name> --repository <TARGET_REPO> --preset <preset>` when `doctor` shows no chain for this target. (`install` / `uninstall` subcommands were retired in #436; bootstrap moved into `chain create` and the preset's planning agent.)
+- onboarding / chain repair: `coder-loop chain create <name> --config-json '{"repository":"<TARGET_REPO>","baseBranch":"main"}' --preset <preset>` when `doctor` shows no chain for this target. (`install` / `uninstall` subcommands were retired in #436; chain identity and per-target bindings live in `--config-json` only, and any preset business asset — labels, seed issues — is created out-of-band, not by coder-loop.)
 
 ## Read first (every patrol entry)
 
@@ -47,7 +47,7 @@ Current state is always **derived**, never read from a hand-written snapshot:
    - >90 minutes total for one issue attempt without clear progress → require explicit supervisor diagnosis before unattended continuation.
 
 3. **Recovery / advancement:**
-   - If `doctor` reports the chain is missing for this target, create it with `coder-loop chain create <name> --repository <TARGET_REPO> --preset <preset>`, then re-run `coder-loop doctor`.
+   - If `doctor` reports the chain is missing for this target, create it with `coder-loop chain create <name> --config-json '{"repository":"<TARGET_REPO>","baseBranch":"main"}' --preset <preset>`, then re-run `coder-loop doctor`.
    - If `doctor` reports an operator-machine prereq is missing (PATH / `gh auth` / runner CLI), repair it on the machine (no coder-loop subcommand does this), then re-run `coder-loop doctor`.
    - If runtime is invalid, record the blocker in `log.md`; only repair files manually when `status` / `doctor` has identified the exact broken layer.
    - If actionable items remain in queue and no loop is running, start with `coder-loop daemon start <TARGET_DIR>`.

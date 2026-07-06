@@ -29,14 +29,12 @@ The agent owns contextual judgments that require reading natural language, code,
 - whether a parent issue has complete children or remaining scope;
 - whether to retry, accept, skip, block, expand a parent, or stop.
 
-## Fragment protocol
+## Reading order
 
 - Read the role entry prompt first; it contains the rendered runtime inputs and the fragment index with absolute paths.
-- Read the common fragments required by the role entry prompt before role-specific fragments.
-- Each role-specific fragment names the allowed next fragment IDs. Use the entry prompt's fragment index to find the path for the next fragment.
-- Do not skip ahead to terminal action fragments unless the current fragment's verdict allows it.
-- Do not invent verdicts. If no listed verdict fits, choose the safest listed retry/block/stop path and state why.
+- Read the common fragments the entry prompt names before role-specific step files.
+- Step files (`iter/steps/<name>.md`, `review/steps/<name>.md`) are single markdown files with `Task` / `Report` / `Acceptance` sections; the entry prompt's workflow is the guide to when each is opened.
 
 ## Terminal summaries
 
-Only the role's final fragment prints the mandatory final summary line. Intermediate fragments may keep brief notes in the trace but must continue to the next fragment.
+Only the role's entry prompt prints the mandatory final summary line.

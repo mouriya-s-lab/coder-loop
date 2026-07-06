@@ -8,7 +8,7 @@ coder-loop 是项目无关的 N-phase 字符串调度引擎。给定一个 prese
 
 内置 preset：
 
-- `gh-issue-pr-iteration` — 生产使用的 GitHub issue/PR 迭代 preset，四个 phase（`iteration` / `review` / `blocked-responder` / `umbrella-finalizer`）；planning 由 `/dev-plan` slash command 驱动 `plan/` fragment 链，不进 `preset.phases`。设计思路在 `presets/gh-issue-pr-iteration/DESIGN.md`，fragment 跳转在 `docs/gh-issue-pr-iteration-fragments.md`。
+- `gh-issue-pr-iteration` — 生产使用的 GitHub issue/PR 迭代 preset，四个 phase（`iteration` / `review` / `blocked-responder` / `umbrella-finalizer`）。设计思路在 `presets/gh-issue-pr-iteration/DESIGN.md`，fragment 跳转在 `docs/gh-issue-pr-iteration-fragments.md`。
 - `real-e2e-minimal` — 两 phase 的最小 GitHub loop，`scripts/real-e2e.ts` 默认走这个。
 - `single-phase-example` — 一 phase / 字符串 id / 双状态的最小示例。
 - `business-key-example` — 演示 `[runtime].businessKeys` 声明位。
@@ -23,7 +23,7 @@ coder-loop 是项目无关的 N-phase 字符串调度引擎。给定一个 prese
 | L2 preset (`presets/<name>/`) | phase 顺序、状态词表与转移、角色 prompt、chain-action exits、post-review trigger DAG | target 项目命令、CI 配置、PR 模板细节 |
 | target | 项目命令、CI-parity 规则、PR/evidence/review 具体形式 | 引擎调度、其他 preset |
 
-engine-owned `runtime.*` fact 清单、preset-declared runtime business key、`[[phases]]` / `[[fragments]]` / `[item.fields]` 全部字段语义见 `docs/preset-authoring.md`。
+engine-owned `runtime.*` fact 清单、preset-declared runtime business key、`[[phases]]` / `[[fragments]]` / `[item.fields]` 全部字段语义见 `docs/preset-authoring.md`。Engine runtime fact key count: 26.（`src/loop.test.ts` 用此计数守护 CLAUDE.md / `docs/preset-authoring.md` 与 `ENGINE_RUNTIME_BINDING_KEYS` 三处对齐；新增 engine runtime fact 时同步改本计数与 `docs/preset-authoring.md` 内嵌列表。）
 
 ## Commands
 
@@ -46,7 +46,6 @@ coder-loop doctor  <target>
 - **Type check**: `bun run typecheck`
 - **Unit + smoke tests**: `bun test`
 - **Real e2e（引擎全链路验收）**: `bun scripts/real-e2e.ts [--preset <name>] [flags]` — 隔离 daemon（`--loop-data-root`，绝不碰生产 `~/.coder-loop`）→ 在 fixture repo `mouriya-s-lab/coder-loop-e2e-fixture` seed 一个 trivial issue → 跑完整 loop（spawn → iteration → review → PR merged → issue closed）→ 断言 GitHub 终态 → tripwire/teardown。默认 `real-e2e-minimal` preset（~3-5min）；`--preset gh-issue-pr-iteration` 跑全保真。runbook 见 `docs/real-e2e-fixture.md`。这只在 code 仓跑，不在 app 跑。
-- **Plan / Loop phase**: `/dev-plan` 与 `/dev-loop [N]` 是用户级 slash command（一份，参数化 target，安装到 `~/.claude/commands/` 即可在任意 target repo 内用）。本 repo `.claude/commands/dev-*.md` 保留为 dogfood 实例。`/dev-loop [N]` 内部走 `coder-loop daemon start [--max-iterations N]`。
 
 ### 引擎/调度改动的验收主线是 real-e2e
 
@@ -64,7 +63,7 @@ model  = "claude-opus-4-7"
 ```
 
 - Phase runner 未声明时走 engine-builtin fallback（当前 `codex`）。
-- Item 上的 `--runner` 只覆盖允许 item override 的普通执行 phase（`gh-issue-pr-iteration` 中是 `iter`）。
+- Item 上的 `--runner` 只覆盖非 trigger phase（`gh-issue-pr-iteration` 中是 `iteration` 与 `review`；`blocked-responder` / `umbrella-finalizer` 是 trigger phase，不受 item override 影响）。
 - Runner binary 是 PATH 上的 `claude` / `codex` / `opencode`；模型来自 phase 的 `model`。
 - Chain 级 model 覆盖走 `coder-loop chain set-runner-model <chain> --kind <k> --model <m>`（patch `chain.metadata.<kind>.model`）。
 - `coder-loop status <target> --json` 暴露 `target.runner.phases.<phase>`、`queue.selected.phaseRunners.<phase>`、`current.runner`、`current.phaseStatus.value.runner/model` — 这是 runner/model 的唯一稳定读面。agent 每个 phase 的 `status.json` 位于 `<logDir>/<runId>/<phase>/status.json`，只作 fallback debug。

@@ -36,29 +36,29 @@ N-phase 字符串调度引擎。给定一个 preset（phase 列表、状态词�
 | 任务分解为什么导致失败？ | Agent Failure Taxonomy (2025) | planning phase defects 是 agent 任务失败的首要类别（约 50% 的失败源于此） |
 | 怎么防止无限低质量推进？ | VMAO (2025) | completeness threshold + diminishing returns 检测 |
 
-这些是**preset 设计原则**，不是引擎行为。引擎不知道"信号"是什么——它只调度 phase 顺序、传变量、捕获 trace。是 preset（默认 `gh-issue-pr-iteration`）按 plan/iter/review 三段切分把信号生成/产生/消费做成了 phase 流水线。
+这些是**preset 设计原则**，不是引擎行为。引擎不知道"信号"是什么——它只调度 phase 顺序、传变量、捕获 trace。是 preset（默认 `gh-issue-pr-iteration`）按 iteration / review 两段调度者 workflow 把信号生成/产生/消费做成了 phase 流水线（issue 编写发生在 preset 之外——operator 或上游工具通过 `coder-loop item add` 把 GitHub issue 灌入 queue）。
 
 不同 preset 可以选择不同的切分：1 phase（如 `single-phase-example`，仅 run）、2 phase（如 `real-e2e-minimal`，iteration+review）、N phase（如 `gh-issue-pr-iteration` 的 iteration+review+blocked-responder+umbrella-finalizer）都行。引擎对 N 没有上界。
 
 ### 四个设计决策（gh-issue-pr-iteration preset）
 
-下面四条是 `gh-issue-pr-iteration` preset 的设计前提，不是引擎契约。换 preset 时这些可以改。
+下面四条是 `gh-issue-pr-iteration` preset 的设计前提，不是引擎契约。换 preset 时这些可以改。issue body 契约（`presets/gh-issue-pr-iteration/contract.md`）由 iteration/review 调度者阅读并强制；issue 由 operator 或上游工具按契约写入。
 
 **1. Checkpoint 取代 checkbox**
 
-传统 issue 写 `- [ ] docker build 成功`。这是自然语言，不是可执行验证。iteration agent 可以跳过、重新解释、或声称完成。`gh-issue-pr-iteration` 的 plan 把每条验收标准编译为 `{dimension, command, env, expect}` 四元组，agent 无法跳过。
+传统 issue 写 `- [ ] docker build 成功`。这是自然语言，不是可执行验证。iteration agent 可以跳过、重新解释、或声称完成。`gh-issue-pr-iteration` 的 contract 要求把每条验收标准编译为 `{dimension, command, env, expect}` 四元组，review 的 replay 步逐行真跑，agent 无法跳过。
 
 **2. 维度覆盖强制**
 
-`gh-issue-pr-iteration` 的 plan 要求每个 issue 的 checkpoint 覆盖 function / environment / integration / assumption；review 检查每个维度是否有至少一个 PASS。
+`gh-issue-pr-iteration` 的 contract 要求每个 issue 的 checkpoint 覆盖 function / environment / integration / assumption；review 检查每个维度是否有至少一个 PASS。
 
 **3. Spike 前置于实现**
 
-如果 phase 的架构假设依赖第三方组件未文档化行为，假设必须在实现前被验证。`gh-issue-pr-iteration` 的 plan 扫描风险信号、为高风险假设创建 spike issue。spike 失败触发设计调整，而非在错误假设上堆叠代码。
+如果 phase 的架构假设依赖第三方组件未文档化行为，假设必须在实现前被验证。`gh-issue-pr-iteration` 的 iteration 调度者按 issue body 分流出 spike 路径（comment-spike / source-writing-spike，见 contract §4）。spike 失败触发设计调整，而非在错误假设上堆叠代码。
 
 **4. 推迟验证不可遗忘**
 
-某 checkpoint 当前环境无法执行（如本机没 Docker daemon），plan 将其作为 inherited verification obligation 分配到下游 issue，不可二次推迟。
+某 checkpoint 当前环境无法执行（如本机没 Docker daemon），issue writer 用 `## 继承验证义务` 段（contract §1.4）把它分配到下游 issue，不可二次推迟。
 
 设计思路完整版见 [`presets/gh-issue-pr-iteration/DESIGN.md`](./presets/gh-issue-pr-iteration/DESIGN.md)。
 
@@ -71,10 +71,9 @@ N-phase 字符串调度引擎。给定一个 preset（phase 列表、状态词�
 ```bash
 bun install                                          # 安装 devDependencies
 bun link                                             # 注册 coder-loop bin 到全局
-cp .claude/commands/dev-*.md ~/.claude/commands/     # 注册 slash commands 为用户级（一份，参数化 target）
 ```
 
-之后 `coder-loop` 命令和 `/dev-plan` `/dev-loop` 在任意目录可用（slash command 是用户级——一份文件挂在 `~/.claude/commands/` 即可在任意 target repo 内调）。也可以不 `bun link`，调用改成 `bun /path/to/coder-loop/src/loop.ts`。
+之后 `coder-loop` 命令在任意目录可用。也可以不 `bun link`，调用改成 `bun /path/to/coder-loop/src/loop.ts`。
 
 在目标 repo 上启动前，先起中央 daemon，再用一条命令注册 chain：
 
@@ -85,11 +84,11 @@ coder-loop doctor /path/to/target --repo <owner>/<repo>
 coder-loop status /path/to/target --json
 ```
 
-`chain create` 只写一次 chain 元数据到中央 daemon socket；target 目录不需要任何 bootstrap 文件。`--preset` 可选：不写时每个 item 在 `item add` 时必须自带 `--preset` 或 `--preset-path`。preset 业务资产（如 GitHub labels）由 preset 的 planning agent 在运行中幂等确保。用自定义 `--loop-data-root` 时，`daemon up` 与后续所有命令要传同一个 root。
+`chain create` 只写一次 chain 元数据到中央 daemon socket；target 目录不需要任何 bootstrap 文件。`--preset` 可选：不写时 chain 会 seed 默认 `gh-issue-pr-iteration`（`item add` 仍需自带 `--preset` 或 `--preset-path`——preset 声明在 item 级）。preset 业务资产（如 GitHub labels）不由本 CLI 管理——由 issue writer / operator 自己按需创建。用自定义 `--loop-data-root` 时，`daemon up` 与后续所有命令要传同一个 root。
 
-每个 phase 的默认 runner 由 `preset.toml` 的 `[[phases]].runner = "claude"|"codex"|"opencode"` 声明；未声明时走 engine-builtin fallback。phase 还可用 `[[phases]].model` 声明默认模型。Runner binary 就是 PATH 上的 `claude` / `codex` / `opencode`；没有 target 级 override 通道。单个 queue item 的 `runner` 字段只覆盖允许 item override 的普通执行 phase。`doctor` / `status --json` 显示每个 phase 的 runner 与 source。
+每个 phase 的默认 runner 由 `preset.toml` 的 `[[phases]].runner = "claude"|"codex"|"opencode"` 声明；未声明时走 engine-builtin fallback。phase 还可用 `[[phases]].model` 声明默认模型。Runner binary 就是 PATH 上的 `claude` / `codex` / `opencode`；没有 target 级 override 通道。单个 queue item 的 `runner` 字段只覆盖非 trigger phase。`doctor` / `status --json` 显示每个 phase 的 runner 与 source。
 
-后台循环由 daemon API 管理；`/dev-loop [N]` 是同一 API 的人类快捷入口：
+后台循环由 daemon API 管理：
 
 ```bash
 coder-loop daemon start /path/to/target
@@ -98,13 +97,6 @@ coder-loop daemon status /path/to/target --json
 coder-loop daemon stop /path/to/target
 coder-loop queue unblock /path/to/source-target --issue 123 --start-daemon
 ```
-
-`/dev-plan` 可软引用以下用户级规则与 skill：
-
-- `~/.claude/rules/github-issue-pr-routing.rule.md`
-- skill `writing-issue / writing-pr / review-pr`
-
-不是 coder-loop 仓库内的资产，由用户自己维护。缺失时 `/dev-plan` 仍按 preset contract 运行；这些 skill 只提供 operator 个人写作习惯参考。`/dev-loop` 没有此类依赖。
 
 新 operator 完整 bootstrap 步骤见 [docs/operator-quickstart.md](./docs/operator-quickstart.md)。
 

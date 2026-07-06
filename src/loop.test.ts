@@ -536,14 +536,14 @@ describe("runtime binding helpers", () => {
 			],
 			fragments: [
 				{ id: "common/runtime-contract", role: "common", path: "common/runtime-contract.md" },
-				{ id: "iter/steps/implement/task", role: "iter", path: "iter/steps/implement/task.md" },
+				{ id: "iter/steps/implement", role: "iter", path: "iter/steps/implement.md" },
 				{ id: "review/actions/retry", role: "review", path: "review/actions/retry.md" },
 			],
 		})
 		const [iterPhase, reviewPhase] = preset.phases
 		const iter = renderFragmentIndex(preset, iterPhase!)
 		expect(iter).toContain("- common/runtime-contract (common):")
-		expect(iter).toContain("- iter/steps/implement/task (iter):")
+		expect(iter).toContain("- iter/steps/implement (iter):")
 		expect(iter).not.toContain("review/")
 		const review = renderFragmentIndex(preset, reviewPhase!)
 		expect(review).toContain("- common/runtime-contract (common):")

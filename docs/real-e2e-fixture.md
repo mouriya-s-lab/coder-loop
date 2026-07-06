@@ -83,11 +83,11 @@ exit 1。
 
 ## Runner 覆盖
 
-phase runner/model 默认值来自 `preset.toml`。bundled `gh-issue-pr-iteration` 四个 phase 目前都声明 `runner = "claude"`、`model = "claude-opus-4-7[1m]"`；`real-e2e-minimal` iteration/review 都用 `codex`。要针对某次 chain 覆盖 model：`coder-loop chain set-runner-model <chain> --kind <k> --model <m>`。要覆盖某个 item 的执行 runner（限允许 item override 的普通执行 phase）：`coder-loop item add --runner claude|codex|opencode`。要改 codex 的 CLI extraArgs（如 sandbox），改 chain metadata 的 `codex.extraArgs` binding；引擎在 spawn 时会补 `--sandbox danger-full-access` 若 extraArgs 没提供任何 `--sandbox`——read-only / workspace-write 会阻断 workspace 写入与 `gh` 网络访问，要覆盖显式在 `codex.extraArgs` 提供。
+phase runner/model 默认值来自 `preset.toml`。bundled `gh-issue-pr-iteration` 四个 phase 目前都声明 `runner = "claude"`、`model = "claude-opus-4-7[1m]"`；`real-e2e-minimal` iteration/review 都声明 `runner = "claude"` + `model = "claude-sonnet-4-6"`。要针对某次 chain 覆盖 model：`coder-loop chain set-runner-model <chain> --kind <k> --model <m>`。要覆盖某个 item 的执行 runner（限非 trigger phase）：`coder-loop item add --runner claude|codex|opencode`。要改 codex 的 CLI extraArgs（如 sandbox），改 chain metadata 的 `codex.extraArgs` binding；引擎在 spawn 时会补 `--sandbox danger-full-access` 若 extraArgs 没提供任何 `--sandbox`——read-only / workspace-write 会阻断 workspace 写入与 `gh` 网络访问，要覆盖显式在 `codex.extraArgs` 提供。
 
 ## Known pitfalls
 
-- target repo 必须有 `CLAUDE.md`：preset 的 read-context / review fragments 把它当项目参照。
+- target repo 必须有 `CLAUDE.md`：`gh-issue-pr-iteration` iteration / review 调度者的 Step 0 契约读取把它当项目参照。
 - `codex exec resume` 不接受 `--sandbox`，sandbox 默认值只作用于 fresh `codex exec`。
 - 中央 daemon 的活性判据是 socket 上有进程监听；`daemon.sock` / `daemon.pid`
   文件存在 ≠ daemon 在跑（陈尸文件），见 `.claude/rules/daemon-restart-after-app-update.rule.md`。
