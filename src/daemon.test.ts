@@ -31,6 +31,7 @@ import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
 import { queryObservabilityEvents } from "./observability"
 import { chainBindings, engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
+import { operatorFixtureEnvironment } from "./test-process-env"
 import type { BoundaryRecord } from "./boundary-types"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -3465,7 +3466,7 @@ attemptTimeoutSeconds = 3600
 				cwd: REPO_ROOT,
 				stdout: "pipe",
 				stderr: "pipe",
-				env: { ...process.env, CODER_LOOP_DATA_DIR: fixture.loopDataRoot },
+				env: operatorFixtureEnvironment({ CODER_LOOP_DATA_DIR: fixture.loopDataRoot }),
 			})
 			const [cliStdout, cliStderr, cliExit] = await Promise.all([
 				new Response(cli.stdout).text(),
@@ -3507,7 +3508,7 @@ attemptTimeoutSeconds = 3600
 				cwd: REPO_ROOT,
 				stdout: "pipe",
 				stderr: "pipe",
-				env: { ...process.env, CODER_LOOP_DATA_DIR: fixture.loopDataRoot },
+				env: operatorFixtureEnvironment({ CODER_LOOP_DATA_DIR: fixture.loopDataRoot }),
 			})
 			const [logsStdout, logsStderr, logsExit] = await Promise.all([
 				new Response(logsCli.stdout).text(),
