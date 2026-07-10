@@ -2095,24 +2095,104 @@ attemptTimeoutSeconds = 3600
 		await writeFile(
 			fakeRunner,
 			`import { appendFile, writeFile } from "node:fs/promises"
+import { type as arkType } from "arktype"
 const { openSqliteStateStore } = await import(${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))})
+const IterationRunnerPromptBoundary = arkType({
+	itemId: "number",
+	runId: "string",
+	phase: arkType.unit("iteration"),
+	eventLog: "string",
+})
+const ReviewRunnerPromptBoundary = arkType({
+	itemId: "number",
+	runId: "string",
+	phase: arkType.unit("review"),
+	eventLog: "string",
+})
+const RunnerPromptBoundary = arkType.or(IterationRunnerPromptBoundary, ReviewRunnerPromptBoundary)
+type IterationRunnerPrompt = typeof IterationRunnerPromptBoundary.infer
+type ReviewRunnerPrompt = typeof ReviewRunnerPromptBoundary.infer
+type RunnerPrompt = IterationRunnerPrompt | ReviewRunnerPrompt
+function assertNeverRunnerPrompt(input: never): never {
+	throw new Error(\`unexpected runner prompt phase: \${JSON.stringify(input)}\`)
+}
 const promptIndex = Bun.argv.indexOf("-p")
-const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
-const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+if (promptIndex === -1 || promptIndex + 1 >= Bun.argv.length) {
+	throw new Error("fake runner requires -p followed by a prompt value")
+}
+const prompt = Bun.argv[promptIndex + 1]
+if (prompt === undefined) throw new Error("fake runner requires -p followed by a prompt value")
+const promptPayloadEnd = prompt.indexOf("\\n")
+const promptPayload = prompt.slice(0, promptPayloadEnd === -1 ? prompt.length : promptPayloadEnd)
+const input: RunnerPrompt = RunnerPromptBoundary.assert(JSON.parse(promptPayload))
+const loopDataRoot = process.env.CODER_LOOP_DATA_DIR
+if (typeof loopDataRoot !== "string" || loopDataRoot.length === 0) {
+	throw new Error("fake runner requires CODER_LOOP_DATA_DIR")
+}
+const credential = process.env.CODER_LOOP_RUN_CRED
+if (typeof credential !== "string" || credential.length === 0) {
+	throw new Error("fake runner requires CODER_LOOP_RUN_CRED")
+}
 await appendFile(input.eventLog, JSON.stringify({ type: "running", itemId: input.itemId, runId: input.runId, phase: input.phase }) + "\\n")
-if (input.phase === "iteration") {
-	await writeFile(${JSON.stringify(iterationCapture)}, process.env.CODER_LOOP_RUN_CRED ?? "")
-	while (!(await Bun.file(${JSON.stringify(iterationRelease)}).exists())) await Bun.sleep(10)
-	const store = openSqliteStateStore({ loopDataRoot: process.env.CODER_LOOP_DATA_DIR })
-	store.updateItem(input.itemId, { status: "in_progress", updatedAt: Math.floor(Date.now() / 1000) })
-	store.close()
-} else if (input.phase === "review") {
-	await writeFile(${JSON.stringify(reviewCapture)}, process.env.CODER_LOOP_RUN_CRED ?? "")
-	await new Promise((resolveWait) => setTimeout(resolveWait, 8_000))
+switch (input.phase) {
+	case "iteration": {
+		await writeFile(${JSON.stringify(iterationCapture)}, credential)
+		while (!(await Bun.file(${JSON.stringify(iterationRelease)}).exists())) await Bun.sleep(10)
+		const store = openSqliteStateStore({ loopDataRoot })
+		store.updateItem(input.itemId, { status: "in_progress", updatedAt: Math.floor(Date.now() / 1000) })
+		store.close()
+		break
+	}
+	case "review":
+		await writeFile(${JSON.stringify(reviewCapture)}, credential)
+		await new Promise((resolveWait) => setTimeout(resolveWait, 8_000))
+		break
+	default:
+		assertNeverRunnerPrompt(input)
 }
 process.exitCode = 0
 `,
 		)
+		const runnerEnv = { ...process.env }
+		delete runnerEnv.CODER_LOOP_DATA_DIR
+		delete runnerEnv.CODER_LOOP_RUN_CRED
+		const validIterationPrompt = JSON.stringify({ itemId: 60001, runId: "boundary-run", phase: "iteration", eventLog })
+		const invalidPhasePrompt = JSON.stringify({ itemId: 60001, runId: "boundary-run", phase: "unknown", eventLog })
+		const boundaryCases = [
+			{
+				name: "missing -p",
+				proc: Bun.spawn({ cmd: ["bun", fakeRunner], cwd: REPO_ROOT, env: { ...runnerEnv, CODER_LOOP_DATA_DIR: loopDataRoot, CODER_LOOP_RUN_CRED: "boundary-credential" }, stdout: "pipe", stderr: "pipe" }),
+				expectedError: "requires -p followed by a prompt value",
+			},
+			{
+				name: "missing prompt value",
+				proc: Bun.spawn({ cmd: ["bun", fakeRunner, "-p"], cwd: REPO_ROOT, env: { ...runnerEnv, CODER_LOOP_DATA_DIR: loopDataRoot, CODER_LOOP_RUN_CRED: "boundary-credential" }, stdout: "pipe", stderr: "pipe" }),
+				expectedError: "requires -p followed by a prompt value",
+			},
+			{
+				name: "missing data dir",
+				proc: Bun.spawn({ cmd: ["bun", fakeRunner, "-p", validIterationPrompt], cwd: REPO_ROOT, env: { ...runnerEnv, CODER_LOOP_RUN_CRED: "boundary-credential" }, stdout: "pipe", stderr: "pipe" }),
+				expectedError: "requires CODER_LOOP_DATA_DIR",
+			},
+			{
+				name: "missing credential",
+				proc: Bun.spawn({ cmd: ["bun", fakeRunner, "-p", validIterationPrompt], cwd: REPO_ROOT, env: { ...runnerEnv, CODER_LOOP_DATA_DIR: loopDataRoot }, stdout: "pipe", stderr: "pipe" }),
+				expectedError: "requires CODER_LOOP_RUN_CRED",
+			},
+			{
+				name: "unknown phase",
+				proc: Bun.spawn({ cmd: ["bun", fakeRunner, "-p", invalidPhasePrompt], cwd: REPO_ROOT, env: { ...runnerEnv, CODER_LOOP_DATA_DIR: loopDataRoot, CODER_LOOP_RUN_CRED: "boundary-credential" }, stdout: "pipe", stderr: "pipe" }),
+				expectedError: "phase",
+			},
+		]
+		for (const boundaryCase of boundaryCases) {
+			const [exitCode, stderr] = await Promise.all([
+				boundaryCase.proc.exited,
+				new Response(boundaryCase.proc.stderr).text(),
+			])
+			expect(exitCode, boundaryCase.name).not.toBe(0)
+			expect(stderr, boundaryCase.name).toContain(boundaryCase.expectedError)
+		}
 		const daemon = await startCoderLoopDaemon({
 			loopDataRoot,
 			shutdownGraceMs: 100,
@@ -3601,6 +3681,8 @@ process.exitCode = 0
 			expect(eventTypes).toContain("phase.end")
 			expect(eventTypes).toContain("queue.terminal")
 
+			const operatorCliEnv = { ...process.env }
+			delete operatorCliEnv.CODER_LOOP_RUN_CRED
 			const cli = Bun.spawn({
 				cmd: [
 					"bun",
@@ -3616,7 +3698,7 @@ process.exitCode = 0
 				cwd: REPO_ROOT,
 				stdout: "pipe",
 				stderr: "pipe",
-				env: { ...process.env, CODER_LOOP_DATA_DIR: fixture.loopDataRoot },
+				env: { ...operatorCliEnv, CODER_LOOP_DATA_DIR: fixture.loopDataRoot },
 			})
 			const [cliStdout, cliStderr, cliExit] = await Promise.all([
 				new Response(cli.stdout).text(),
@@ -3658,7 +3740,7 @@ process.exitCode = 0
 				cwd: REPO_ROOT,
 				stdout: "pipe",
 				stderr: "pipe",
-				env: { ...process.env, CODER_LOOP_DATA_DIR: fixture.loopDataRoot },
+				env: { ...operatorCliEnv, CODER_LOOP_DATA_DIR: fixture.loopDataRoot },
 			})
 			const [logsStdout, logsStderr, logsExit] = await Promise.all([
 				new Response(logsCli.stdout).text(),

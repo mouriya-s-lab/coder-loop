@@ -513,17 +513,44 @@ type ItemMutationCaller =
 // contract and use the required request pair. Agent calls carry only registry-bound truth in the
 // admitted branch. A forged request pair is a distinct deny variant so downstream code cannot
 // accidentally authorize with the claim or emit it as event attribution.
+interface OperatorObservabilitySubjectSelector {
+	kind: "operator"
+}
+
+interface AgentObservabilitySubjectSelector {
+	kind: "agent"
+}
+
+type OperatorObservabilitySubject = Extract<ObservabilitySubject, OperatorObservabilitySubjectSelector>
+type AgentObservabilitySubject = Extract<ObservabilitySubject, AgentObservabilitySubjectSelector>
+
+interface OperatorItemExitActionAttribution {
+	kind: "operator"
+	runId: string
+	phase: string
+	subject: OperatorObservabilitySubject
+}
+
+interface AdmittedAgentItemExitActionAttribution {
+	kind: "agent-admitted"
+	runId: string
+	phase: string
+	subject: AgentObservabilitySubject
+}
+
+interface MismatchedAgentItemExitActionAttribution {
+	kind: "agent-mismatch"
+	runId: string
+	phase: string
+	claimedRunId: string
+	claimedPhase: string
+	subject: AgentObservabilitySubject
+}
+
 type ItemExitActionAttribution =
-	| { kind: "operator"; runId: string; phase: string; subject: Extract<ObservabilitySubject, { kind: "operator" }> }
-	| { kind: "agent-admitted"; runId: string; phase: string; subject: Extract<ObservabilitySubject, { kind: "agent" }> }
-	| {
-			kind: "agent-mismatch"
-			runId: string
-			phase: string
-			claimedRunId: string
-			claimedPhase: string
-			subject: Extract<ObservabilitySubject, { kind: "agent" }>
-	  }
+	| OperatorItemExitActionAttribution
+	| AdmittedAgentItemExitActionAttribution
+	| MismatchedAgentItemExitActionAttribution
 
 // #406 caller-admission deny reasons. Co-located with the observability event union (every
 // reason here appears in `item.mutation.caller_admission.payload.reason`). Mirrors the threat-

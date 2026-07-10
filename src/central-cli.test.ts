@@ -1082,12 +1082,14 @@ async function makeLoopDataRoot(name: string): Promise<string> {
 }
 
 async function runCli(args: string[], env: Record<string, string> = {}): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
+	const operatorEnv = { ...process.env }
+	delete operatorEnv.CODER_LOOP_RUN_CRED
 	const proc = Bun.spawn({
 		cmd: ["bun", LOOP_ENTRY, ...args],
 		cwd: REPO_ROOT,
 		stdout: "pipe",
 		stderr: "pipe",
-		env: { ...process.env, ...env },
+		env: { ...operatorEnv, ...env },
 	})
 	const [exitCode, stdout, stderr] = await Promise.all([
 		proc.exited,
