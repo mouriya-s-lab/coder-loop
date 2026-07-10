@@ -79,17 +79,18 @@ flowchart TD
 | Issue | 交付契约 | 后续消费者 |
 |---|---|---|
 | #549 | `CompiledTaskModel` + `preset compile --json` + schemaVersion | #552–#556、#567、#570、#582、#587 |
+| #605 | 运行实例绑定事前可计算的不可变执行定义 | daemon 重启恢复、status/events/hook/GUI 历史定义一致性 |
 | #550 | doc 渲染声明驱动化 | bundled/non-bundled preset 一致性 |
 | #551 | GitHub 记法与 repository 原语退役 | #569 的稳定 CLI 调用面 |
 | #558 | 任务树运行态持久化与 status tree shape | #559、#561–#566、#574、#596 |
-| #560 | per-run worktree 生命周期 | #559 并行调度 |
+| #560 | per-闭包 worktree 生命周期；suspend 零 GC；consumed 后回收 | #559 并行调度 |
 | #572 | `prompt.md` + `bindings.json` 落盘 | #581 |
 | #573 | events boundary 与滚动段消费规则 | #577 |
 | #586 | 四层 hook 声明合成与生效视图 | #588、#589、#591、#575 |
 | #594 | context envelope ADT、append-only 存储、写入面 | #595–#598 |
 | #602 | 外部执行终端缺席语义：`hapi` kind 词表准入 + 显式警告 + hold | #603、#559 调度面（协调边） |
 
-推荐合并顺序：#550 → #551 → #549 → #558 → #560 → #572 → #573 → #586 → #594 → #602。顺序是为了压低共享核心文件的 rebase 风险，不代表开发串行。
+推荐合并顺序：#550 → #551 → #549 → #558 → #605 → #560 → #572 → #573 → #586 → #594 → #602。顺序是为了压低共享核心文件的 rebase 风险，不代表开发串行。
 
 ### 并行任务组 P1-B：独立宿主/可行性
 
@@ -107,6 +108,7 @@ flowchart TD
 4. GUI 网关只读消费上述 status/events fixture；禁止 SQLite 写入，禁止 GUI 自己猜测缺失字段。
 5. 对 compile/status/events/context/prompt 的 boundary 做 schema round-trip；任何消费者需要私有补丁、字段猜测或 fallback 才能读取即 Gate 失败。
 6. `bun test` + `bun scripts/real-e2e.ts` 绿。
+7. 用定义 `H1` 创建运行实例后修改同路径 preset 为 `H2`，kill -9/restart daemon；旧实例仍绑定 `H1`，新实例才使用 `H2`，所有消费者报告各自相同的 definition identity。
 
 ## 5. P2 — 编译模型真实化与第一批消费者
 
@@ -211,6 +213,7 @@ P3 必须拆成两个并行组，中间有一次核心合流；不能把 #561–
 ### P4-D：后置 schema 迁移
 
 - #557：只在 #566 合并后实施 chain metadata 精确 parse、`DEFAULT_PRESET_NAME` 退役。它虽然属于 #547 tree，却是运行时顶层声明的消费者，放在这里而不是按编号放在 P2。
+- #564：运行中修改 join 等同于 future-function mutation，语义仍待操作员讨论；讨论完成前不得实施，也不得把普通字段原子写或 #599 evaluation epoch 当成裁决。
 
 ### G4 — 跨域连接性 Gate
 
@@ -262,7 +265,7 @@ P3 必须拆成两个并行组，中间有一次核心合流；不能把 #561–
 ### 并行任务组 P6-A：末端实现与文档
 
 - 完成 `hapi-remote-session#2` 与 #603 后，执行 #548 关闭验证行 7 双腿验收：① 真实 item 以 runner=hapi 在真实远端 session 完成 run；② 缺席场景显式警告 + hold + 恢复执行（#602）。不得以设计书替代真实远端 session。
-- #568：等待 #558–#567 全部完成。
+- #568：等待 #558–#567、#601、#604 全部完成。
 - #593：等待 #586–#592 全部完成。
 - #598：等待 #594–#597 全部完成。
 - #585：等待 #575、#581–#584 全部完成。
@@ -287,6 +290,7 @@ P3 必须拆成两个并行组，中间有一次核心合流；不能把 #561–
 6. 运行 HAPI runner 真实远端 session 路径；退出码、status、worktree 生命周期与其他 runner 同构。并验证缺席场景：终端不可达时 daemon 显式警告、item hold 不消耗 attempt、恢复后无人工干预继续执行。
 7. 删除 chain 后验证 context 生命周期收敛；检查 daemon/router/GUI 没有 GitHub 业务字面量反向渗入 L1。
 8. `bun run typecheck`、`bun test`、所有 boundary fixture 和 schema migration fixture 绿。
+9. 运行中修改 preset 后重启 daemon，旧实例的执行定义不得漂移；该证明只能依赖 #605 的事前可计算不可变定义绑定，不得引入运行态 MVCC/事务快照。
 
 **最终放行标准**：每项证据来自同一发布候选 SHA/版本；任何一项只能靠 README、mock、静态类型或某个实现 agent 的会话记忆解释，都不算 v3 已连接。
 
@@ -297,8 +301,8 @@ P3 必须拆成两个并行组，中间有一次核心合流；不能把 #561–
 - #543：#586–#593。
 - #544：#571（已关闭）、#572–#585。
 - #545：#594–#598。
-- #546：#558–#568。
-- #547：#549–#557。
+- #546：#558–#568、#601、#604。
+- #547：#549–#557、#605。
 - #548：#418、#569、#570、#602、#603、`mouriya-s-lab/hapi-remote-session#1`、`mouriya-s-lab/hapi-remote-session#2`；并显式纳入外部 Gate `github-hapi-agent-router#12`。
 
 任何新增 v3 issue 必须先确定它属于哪一任务组、有哪些硬依赖/协调边/验收边，以及修改哪个 Gate；只挂到 RFC tree 不构成可执行编排。

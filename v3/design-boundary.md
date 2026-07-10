@@ -61,6 +61,8 @@ type Decision =
 - `Hold`：保持当前因果位置，等待外部条件或后续判定；
 - `Reopen`：将纠正工作重新纳入当前任务结构，再次验证后方可推进。
 
+join 还必须回答“谁拥有推进判定权”，不能只描述节点如何汇总。引擎负责确定性收集并冻结当前 evaluation 的 child outcome vector；`Drain` 的主体是内建结构谓词，`Validator` 的主体是声明实例化出的 validator，未来 script variant 的主体是具名 script gate。收集事实与业务判定必须分层，普通 child、GUI、observer 与 scheduler 其他路径无权代判。
+
 返工因此不再是“把状态改回去”，而是正式控制流。correction 也不再是队列旁路，而是被当前 join 纳入、可追踪和可恢复的任务节点。
 
 ### 2.3 内核必须拥有的其他语义
@@ -69,7 +71,7 @@ type Decision =
 
 - 稳定的 task/container/run/attempt identity；
 - durable tree state 与 seq cursor；
-- 任务闭包隔离及 worktree 生命周期（执行单元 = 同一 (item, phase) 的 attempt 链；worktree/session 生命周期 ⊆ 闭包；resume 是闭包内动作——详见 `task-closure-decision.md`）；
+- 任务闭包隔离及 worktree 生命周期（执行单元 = 同一 (item, phase) 的 attempt 链；suspend 只改变调度状态且零 GC；worktree/session 保留到控制流证明闭包已完全消费；resume 是闭包内动作——详见 `task-closure-decision.md` 与 `closure-lifecycle-decision.md`）；
 - 取消向子树传播；
 - 动态追加任务时保持容器身份和 join 归属；
 - daemon 重启后的精确恢复与幂等推进；
@@ -93,6 +95,8 @@ type Decision =
 - scheduler、hook、status、GUI、ingress 将使用哪些稳定身份。
 
 完成编译后，消费者不应重新 parse TOML、不应按 phase 名特判，也不应通过私有 adapter 猜测缺失字段。
+
+长时间运行的实例还必须绑定到实例创建前已经完整计算、校验并内容寻址的不可变执行定义（#605）。这不是运行态 MVCC：只有事前可计算的定义字段能进入保护边界；cursor、evaluation、decision、动态 child 等运行事实仍是运行态。运行中修改 join 属于尚待操作员讨论的 future-function mutation，不得伪装成编译定义版本切换。绑定形态已裁决为源 bundle 内容寻址 pin + 唯一编译管线重编译 + 闭集语义 hash 验证钉，pin 时点 = 实例创建——详见 `definition-pin-decision.md`。
 
 ### 3.2 类型系统不能消灭什么
 
