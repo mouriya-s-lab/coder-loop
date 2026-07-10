@@ -30,6 +30,7 @@ import {
 import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
 import { queryObservabilityEvents } from "./observability"
+import { operatorSubprocessEnv } from "./operator-subprocess-env"
 import { chainBindings, engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 import type { BoundaryRecord } from "./boundary-types"
 
@@ -2782,6 +2783,7 @@ attemptTimeoutSeconds = 3600
 			stdin: "ignore",
 			stdout: "pipe",
 			stderr: "pipe",
+			env: operatorSubprocessEnv(),
 		})
 		try {
 			await waitFor(
@@ -2808,7 +2810,7 @@ attemptTimeoutSeconds = 3600
 		} finally {
 			await rm(socketPath, { recursive: true, force: true })
 			daemonProcess.kill()
-			await daemonProcess.exited.catch(() => undefined)
+			await daemonProcess.exited
 		}
 	})
 
@@ -3579,7 +3581,7 @@ attemptTimeoutSeconds = 3600
 				cwd: REPO_ROOT,
 				stdout: "pipe",
 				stderr: "pipe",
-				env: { ...process.env, CODER_LOOP_DATA_DIR: fixture.loopDataRoot },
+				env: operatorSubprocessEnv({ CODER_LOOP_DATA_DIR: fixture.loopDataRoot }),
 			})
 			const [cliStdout, cliStderr, cliExit] = await Promise.all([
 				new Response(cli.stdout).text(),
@@ -3621,7 +3623,7 @@ attemptTimeoutSeconds = 3600
 				cwd: REPO_ROOT,
 				stdout: "pipe",
 				stderr: "pipe",
-				env: { ...process.env, CODER_LOOP_DATA_DIR: fixture.loopDataRoot },
+				env: operatorSubprocessEnv({ CODER_LOOP_DATA_DIR: fixture.loopDataRoot }),
 			})
 			const [logsStdout, logsStderr, logsExit] = await Promise.all([
 				new Response(logsCli.stdout).text(),

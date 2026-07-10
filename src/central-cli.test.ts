@@ -3,6 +3,7 @@ import { mkdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
 import { startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
+import { operatorSubprocessEnv } from "./operator-subprocess-env"
 import { LOOP_DATA_ROOT_ENV, resolveLoopDataPaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
 import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedItemExtra } from "./runtime-data"
@@ -1095,7 +1096,7 @@ async function runCli(args: string[], env: Record<string, string> = {}): Promise
 		cwd: REPO_ROOT,
 		stdout: "pipe",
 		stderr: "pipe",
-		env: { ...process.env, ...env },
+		env: operatorSubprocessEnv(env),
 	})
 	const [exitCode, stdout, stderr] = await Promise.all([
 		proc.exited,
@@ -1116,6 +1117,7 @@ function spawnDaemonUp(loopDataRoot: string): Bun.Subprocess<"ignore", "pipe", "
 		stdin: "ignore",
 		stdout: "pipe",
 		stderr: "pipe",
+		env: operatorSubprocessEnv(),
 	})
 }
 
@@ -1161,7 +1163,7 @@ async function exerciseShutdownAfterSocketRepairFailure(
 	} finally {
 		await rm(socketPath, { recursive: true, force: true })
 		daemonProcess.kill()
-		await daemonProcess.exited.catch(() => undefined)
+		await daemonProcess.exited
 	}
 }
 
