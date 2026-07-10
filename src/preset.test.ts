@@ -512,6 +512,22 @@ describe("parsePreset schema validation", () => {
 		})
 	})
 
+	test("rejects unknown variable binding fields", () => {
+		const root: BoundaryRecord = {
+			...minimalRoot(),
+			phases: [{
+				name: "p",
+				prompt: "p.md",
+				variables: {
+					X: { source: "item.id", label: "Issue", prefx: "#", style: "code" },
+				},
+			}],
+		}
+		expect(() => parsePreset(root, "/tmp")).toThrow(
+			/preset\.phases\[0\]\.variables\.X\.prefx: unrecognized variable binding field/,
+		)
+	})
+
 	test("rejects bogus variable prefix", () => {
 		const root = minimalRoot()
 		root.phases[0]!.variables = { K: "bogus.x" }

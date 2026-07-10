@@ -4582,9 +4582,21 @@ function isKnownPresetItemField(field: string, idField: string, itemFields: Read
 	return field === idField || ENGINE_ITEM_BINDING_KEYS.has(field) || itemFields.has(field)
 }
 
+const PRESET_VARIABLE_BINDING_FIELDS = new Set([
+	"source",
+	"default",
+	"label",
+	"prefix",
+	"suffix",
+	"style",
+	"blankBefore",
+])
+
 function parseVariableBinding(value: BoundaryValue, label: string): ParsedVariableBinding {
 	if (typeof value === "string") return { source: value, doc: null, chainFallback: { kind: "none" } }
 	if (!isObjectRecord(value)) presetError(`${label}: must be a string or { source, label } object`)
+	const unknownField = Object.keys(value).find((field) => !PRESET_VARIABLE_BINDING_FIELDS.has(field))
+	if (unknownField !== undefined) presetError(`${label}.${unknownField}: unrecognized variable binding field`)
 	const source = value.source
 	if (typeof source !== "string") presetError(`${label}.source: must be a string`)
 	const chainFallback: ChainBindingFallback = Object.hasOwn(value, "default")
