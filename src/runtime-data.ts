@@ -139,9 +139,13 @@ export type SchedulerBackoffState = {
 	nextRunAt: number
 }
 
+export type SchedulerSpawnErrorAttribution =
+	| { kind: "chain-plan" }
+	| { kind: "phase"; phase: string }
+
 export type SchedulerSpawnError = {
 	at: number
-	phase: string
+	attribution: SchedulerSpawnErrorAttribution
 	message: string
 }
 
@@ -166,7 +170,12 @@ export class ItemExtra extends RuntimeDataRecord {
 		super(remainder)
 		if (input.dependsOn !== undefined) this.dependsOn = [...input.dependsOn]
 		if (input.schedulerBackoff !== undefined) this.schedulerBackoff = { ...input.schedulerBackoff }
-		if (input.schedulerSpawnError !== undefined) this.schedulerSpawnError = { ...input.schedulerSpawnError }
+		if (input.schedulerSpawnError !== undefined) {
+			this.schedulerSpawnError = {
+				...input.schedulerSpawnError,
+				attribution: { ...input.schedulerSpawnError.attribution },
+			}
+		}
 		if (input.slotKey !== undefined) this.slotKey = input.slotKey
 		if (input.itemId !== undefined) this.itemId = input.itemId
 		if (input.repoCwd !== undefined) this.repoCwd = input.repoCwd
@@ -398,7 +407,10 @@ export function itemExtraToJsonObject(extra: ItemExtra): JsonObject {
 	const result: JsonObject = { ...runtimeRemainder(extra) }
 	assignJson(result, "dependsOn", extra.dependsOn === undefined ? undefined : [...extra.dependsOn])
 	assignJson(result, "schedulerBackoff", extra.schedulerBackoff === undefined ? undefined : { ...extra.schedulerBackoff })
-	assignJson(result, "schedulerSpawnError", extra.schedulerSpawnError === undefined ? undefined : { ...extra.schedulerSpawnError })
+	assignJson(result, "schedulerSpawnError", extra.schedulerSpawnError === undefined ? undefined : {
+		...extra.schedulerSpawnError,
+		attribution: { ...extra.schedulerSpawnError.attribution },
+	})
 	assignJson(result, "slotKey", extra.slotKey)
 	assignJson(result, "itemId", extra.itemId)
 	assignJson(result, "repoCwd", extra.repoCwd)
@@ -441,7 +453,10 @@ export function clearSchedulerBackoff(extra: ItemExtra): ItemExtra {
 }
 
 export function withSchedulerSpawnError(extra: ItemExtra, error: SchedulerSpawnError): ItemExtra {
-	return storedItemExtra({ ...itemExtraToJsonObject(extra), schedulerSpawnError: { ...error } })
+	return storedItemExtra({
+		...itemExtraToJsonObject(extra),
+		schedulerSpawnError: { ...error, attribution: { ...error.attribution } },
+	})
 }
 
 export function clearSchedulerSpawnError(extra: ItemExtra): ItemExtra {
@@ -603,11 +618,25 @@ function optionalSchedulerSpawnErrorField(record: JsonObject, key: string, field
 	const value = record[key]
 	if (value === undefined) return undefined
 	const object = jsonObjectFieldValue(value, field)
+	const attributionValue = object.attribution
+	const attribution = attributionValue === undefined
+		// Persisted scheduler errors predate the explicit attribution discriminant. `phase` was
+		// their only legal attribution, so migrate that exact historical shape at the boundary.
+		? { kind: "phase" as const, phase: requiredStringField(object, "phase", `${field}.phase`) }
+		: schedulerSpawnErrorAttribution(attributionValue, `${field}.attribution`)
 	return {
 		at: requiredPositiveIntegerField(object, "at", `${field}.at`),
-		phase: requiredStringField(object, "phase", `${field}.phase`),
+		attribution,
 		message: requiredStringField(object, "message", `${field}.message`),
 	}
+}
+
+function schedulerSpawnErrorAttribution(value: JsonValue, field: string): SchedulerSpawnErrorAttribution {
+	const object = jsonObjectFieldValue(value, field)
+	const kind = requiredStringField(object, "kind", `${field}.kind`)
+	if (kind === "chain-plan") return { kind }
+	if (kind === "phase") return { kind, phase: requiredStringField(object, "phase", `${field}.phase`) }
+	throw runtimeDataError(field, value, `${field}.kind must be "chain-plan" or "phase"`)
 }
 
 function requestJsonObject(value: BoundaryValue, field: string): JsonObject {

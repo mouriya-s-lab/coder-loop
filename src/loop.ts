@@ -31,7 +31,7 @@ import {
 } from "./daemon"
 import { dispatchSubcommand } from "./install-commands"
 import { classifyRateLimitFromStdout } from "./rate-limit"
-import { LOOP_RUN_CREDENTIAL_ENV, RuntimePathError, resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
+import { LOOP_DATA_ROOT_ENV, LOOP_RUN_CREDENTIAL_ENV, RuntimePathError, resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import {
 	parseObservabilityEventType,
 	parseObservabilityKind,
@@ -2245,7 +2245,7 @@ async function requestDaemonResult(loopDataRoot: string | null, command: DaemonC
 	// operator invocations see no env var, so `agentCredential` is omitted and the daemon's
 	// caller-admission gate flows the operator branch. Zero hand-copy by design — the agent
 	// neither sees the value (it lives only in env) nor has to forward it (the CLI does).
-	const augmentedArgs = withInjectedRunCredential(command, args)
+	const augmentedArgs = withInjectedRunCredential(loopDataRoot, command, args)
 	let response: Awaited<ReturnType<typeof sendDaemonRequest>>
 	try {
 		response = await sendDaemonRequest(socketPath, daemonRequest(command, augmentedArgs))
@@ -2296,10 +2296,16 @@ function isAgentAttributedCommand(command: DaemonCommandName): command is AgentA
 	return (AGENT_ATTRIBUTED_COMMANDS as readonly DaemonCommandName[]).includes(command)
 }
 
-function withInjectedRunCredential(command: DaemonCommandName, args: JsonObject): JsonObject {
+function withInjectedRunCredential(loopDataRoot: string | null, command: DaemonCommandName, args: JsonObject): JsonObject {
 	if (!isAgentAttributedCommand(command)) return args
 	const value = process.env[LOOP_RUN_CREDENTIAL_ENV]
 	if (typeof value !== "string" || value === "") return args
+	const credentialLoopDataRoot = process.env[LOOP_DATA_ROOT_ENV]
+	if (credentialLoopDataRoot !== undefined) {
+		const credentialRoot = resolveLoopDataPaths({ loopDataRoot: credentialLoopDataRoot }).root
+		const requestRoot = resolveLoopDataPaths(loopDataRoot === null ? {} : { loopDataRoot }).root
+		if (credentialRoot !== requestRoot) return args
+	}
 	// Operator path explicitness: if the caller already supplied agentCredential (test fixtures
 	// that exercise the gate directly), respect it instead of overwriting from env.
 	if (Object.hasOwn(args, "agentCredential")) return args
@@ -2338,7 +2344,7 @@ async function sendDaemonRequestForDaemonCommand(loopDataRoot: string | null, co
 	// row 1 of #409 demands the opposite. The injector itself is a no-op when `command` is
 	// not in `AGENT_ATTRIBUTED_COMMANDS` (e.g. `daemon.status`, which the other caller of
 	// this helper uses), so the operator path is preserved on read commands too.
-	const augmentedArgs = withInjectedRunCredential(command, args)
+	const augmentedArgs = withInjectedRunCredential(loopDataRoot, command, args)
 	try {
 		return await sendDaemonRequest(socketPath, daemonRequest(command, augmentedArgs))
 	} catch (error) {
