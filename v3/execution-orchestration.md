@@ -2,7 +2,7 @@
 
 > 本文件不是 issue 完成清单，也不按 GitHub 子 issue 树或编号排序。它定义的是：哪些 issue 可以交给彼此不可见的无状态 agent 并行实施、这些产物何时合流，以及合流后必须怎样证明接口真的连接起来。
 >
-> 基线：2026-07-10 GitHub 实时 issue graph。v3 六个 RFC umbrella（#543–#548）下共 52 个直接子 issue；连同 umbrella 共 58 个 issue，当前 57 open、1 closed（#571）。
+> 基线：2026-07-10 GitHub 实时 issue graph（含同日 #548 设计修正后预建的 #602、#603、`hapi-remote-session#2`）。v3 六个 RFC umbrella（#543–#548）下共 55 个直接子 issue；连同 umbrella 共 61 个 issue，当前 60 open、1 closed（#571）。
 
 ## 1. 执行模型
 
@@ -87,13 +87,14 @@ flowchart TD
 | #573 | events boundary 与滚动段消费规则 | #577 |
 | #586 | 四层 hook 声明合成与生效视图 | #588、#589、#591、#575 |
 | #594 | context envelope ADT、append-only 存储、写入面 | #595–#598 |
+| #602 | 外部执行终端缺席语义：`hapi` kind 词表准入 + 显式警告 + hold | #603、#559 调度面（协调边） |
 
-推荐合并顺序：#550 → #551 → #549 → #558 → #560 → #572 → #573 → #586 → #594。顺序是为了压低共享核心文件的 rebase 风险，不代表开发串行。
+推荐合并顺序：#550 → #551 → #549 → #558 → #560 → #572 → #573 → #586 → #594 → #602。顺序是为了压低共享核心文件的 rebase 风险，不代表开发串行。
 
 ### 并行任务组 P1-B：独立宿主/可行性
 
 - #576：GUI 网关骨架（其硬上游 #571 已关闭）。
-- #418：HAPI headless runner spike；若通过才允许启动 `hapi-remote-session#1` 的实现。
+- #418：HAPI headless runner spike；结论是 `hapi-remote-session#1` 设计书与实现线的输入（实现 children #602/#603/`hapi-remote-session#2` 已按操作员 2026-07-10 裁决预建，不再由 spike gate 创建；If failed 走 #548 设计修正改写或关闭它们）。
 - `github-hapi-agent-router#12`：不是 coder-loop 子 issue，但它是 #569 端到端关闭证据的外部硬 Gate，应与 P1 同时推进。
 
 ### G1 — 契约可消费 Gate
@@ -128,7 +129,7 @@ flowchart TD
 - #587：等待 #549；定义 hook stdin payload = 编译产物投影 + 运行态快照。
 - #595：等待 #594；context 分页读取 boundary。
 - #569：等待 #551；可先做本地 1–4 行验收，关闭仍被 `github-hapi-agent-router#12` 端到端 Gate 阻塞。
-- `hapi-remote-session#1`：只在 #418 结论为 passed 且明确第四 runner kind 契约后启动。
+- `hapi-remote-session#1`：等待 #418 结论作为输入后启动设计书；其后 `hapi-remote-session#2`（CLI 实现）→ #603（hapi runner 接入，另等 #602）串行推进。
 
 ### G2 — 编译产物闭环 Gate
 
@@ -260,7 +261,7 @@ P3 必须拆成两个并行组，中间有一次核心合流；不能把 #561–
 
 ### 并行任务组 P6-A：末端实现与文档
 
-- 完成 `hapi-remote-session#1` 后，回到 #418/#548 的 runner 端到端验收；不得以设计书替代真实远端 session。
+- 完成 `hapi-remote-session#2` 与 #603 后，执行 #548 关闭验证行 7 双腿验收：① 真实 item 以 runner=hapi 在真实远端 session 完成 run；② 缺席场景显式警告 + hold + 恢复执行（#602）。不得以设计书替代真实远端 session。
 - #568：等待 #558–#567 全部完成。
 - #593：等待 #586–#592 全部完成。
 - #598：等待 #594–#597 全部完成。
@@ -283,7 +284,7 @@ P3 必须拆成两个并行组，中间有一次核心合流；不能把 #561–
 3. 真实 daemon 运行任务，证明并行重叠、独立 worktree、context 传递、hold/reopen/correction、重启恢复和顶层 join。
 4. GUI 在 PC/移动端完整观察并操作该运行，历史 prompt/bindings 可复核。
 5. 再跑 `gh-issue-pr-iteration` 全保真 real-e2e，观察 PR MERGED / issue CLOSED，证明 v2 生产 preset 在 v3 引擎上仍成立。
-6. 运行 HAPI runner 真实远端 session 路径；退出码、status、worktree 生命周期与其他 runner 同构。
+6. 运行 HAPI runner 真实远端 session 路径；退出码、status、worktree 生命周期与其他 runner 同构。并验证缺席场景：终端不可达时 daemon 显式警告、item hold 不消耗 attempt、恢复后无人工干预继续执行。
 7. 删除 chain 后验证 context 生命周期收敛；检查 daemon/router/GUI 没有 GitHub 业务字面量反向渗入 L1。
 8. `bun run typecheck`、`bun test`、所有 boundary fixture 和 schema migration fixture 绿。
 
@@ -298,6 +299,6 @@ P3 必须拆成两个并行组，中间有一次核心合流；不能把 #561–
 - #545：#594–#598。
 - #546：#558–#568。
 - #547：#549–#557。
-- #548：#418、#569、#570、`mouriya-s-lab/hapi-remote-session#1`；并显式纳入外部 Gate `github-hapi-agent-router#12`。
+- #548：#418、#569、#570、#602、#603、`mouriya-s-lab/hapi-remote-session#1`、`mouriya-s-lab/hapi-remote-session#2`；并显式纳入外部 Gate `github-hapi-agent-router#12`。
 
 任何新增 v3 issue 必须先确定它属于哪一任务组、有哪些硬依赖/协调边/验收边，以及修改哪个 Gate；只挂到 RFC tree 不构成可执行编排。
