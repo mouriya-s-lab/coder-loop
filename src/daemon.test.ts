@@ -6119,7 +6119,7 @@ process.exitCode = 0
 	}, 30_000)
 
 	test("queue unblock waits for in-flight scheduler tick", async () => {
-		const fixture = await startQueueUnblockGateFixture("538-in-flight", { targetStatus: "blocked" })
+		const fixture = await startQueueUnblockGateFixture("538-in-flight", { preset: "loaded", targetStatus: "blocked" })
 		try {
 			await fixture.tickEntered.promise
 
@@ -6190,31 +6190,39 @@ process.exitCode = 0
 
 	test("queue unblock always resumes scheduler", async () => {
 		const scenarios: readonly QueueUnblockOutcomeScenario[] = [
-			{ name: "success", targetStatus: "blocked", issue: "target" },
-			{ name: "dry-run", targetStatus: "blocked", issue: "target", dryRun: true },
-			{ name: "not-unblockable", targetStatus: "done", issue: "target" },
-			{ name: "not-found", targetStatus: "blocked", issue: "missing" },
-			{ name: "preset-load-error", targetStatus: "blocked", issue: "target", chainPreset: "missing-538-preset" },
+			{ kind: "success", preset: "loaded", targetStatus: "blocked", issue: "target", dryRun: false },
+			{ kind: "dry-run", preset: "loaded", targetStatus: "blocked", issue: "target", dryRun: true },
+			{ kind: "not-unblockable", preset: "loaded", targetStatus: "done", issue: "target", dryRun: false },
+			{ kind: "not-found", preset: "loaded", targetStatus: "blocked", issue: "missing", dryRun: false },
+			{ kind: "preset-load-error", preset: "missing", targetStatus: "blocked", issue: "target", dryRun: false },
 		]
 
 		for (const scenario of scenarios) {
-			const fixture = await startQueueUnblockGateFixture(`538-resume-${scenario.name}`, scenario)
+			const fixture = await startQueueUnblockGateFixture(`538-resume-${scenario.kind}`, scenario)
 			try {
 				await fixture.tickEntered.promise
 				const responsePromise = sendDaemonRequest(fixture.socketPath, daemonRequest("queue.unblock", {
 					chainName: fixture.chainName,
 					issue: scenario.issue === "target" ? fixture.targetItemId : scenario.issue,
-					...(scenario.dryRun === true ? { dryRun: true } : {}),
+					dryRun: scenario.dryRun,
 				}))
 
 				fixture.releaseTick.resolve()
 				const response = await responsePromise
-				if (scenario.name === "success" || scenario.name === "dry-run") {
-					expectOk(response)
-				} else if (scenario.name === "not-unblockable") {
-					expect(record(expectOk(response).mutation).reason).toBe("not_unblockable")
-				} else {
-					expect(response.ok).toBe(false)
+				switch (scenario.kind) {
+					case "success":
+					case "dry-run":
+						expectOk(response)
+						break
+					case "not-unblockable":
+						expect(record(expectOk(response).mutation).reason).toBe("not_unblockable")
+						break
+					case "not-found":
+					case "preset-load-error":
+						expect(response.ok).toBe(false)
+						break
+					default:
+						assertNeverQueueUnblockOutcomeScenario(scenario)
 				}
 
 				// The initial tick is now holding an active sentinel run. A post-outcome tick
@@ -6230,13 +6238,18 @@ process.exitCode = 0
 	}, 30_000)
 
 	test("queue unblock caller admission", async () => {
-		const fixture = await startQueueUnblockGateFixture("538-caller-admission", { targetStatus: "blocked" })
+		const fixture = await startQueueUnblockGateFixture("538-caller-admission", { preset: "loaded", targetStatus: "blocked" })
 		try {
 			await fixture.tickEntered.promise
 			fixture.releaseTick.resolve()
 			const credential = await waitFor(
 				async () => {
-					try { return (await readFile(fixture.credentialPath, "utf-8")).trim() } catch { return "" }
+					try {
+						return (await readFile(fixture.credentialPath, "utf-8")).trim()
+					} catch (error: unknown) {
+						if (error instanceof Error && "code" in error && error.code === "ENOENT") return ""
+						throw error
+					}
 				},
 				(value) => value.length > 0,
 			)
@@ -7051,15 +7064,19 @@ exit 0
 	}
 }
 
-type QueueUnblockGateOptions = {
-	targetStatus: string
-	chainPreset?: string
-}
+type QueueUnblockGateOptions =
+	| { preset: "loaded"; targetStatus: "blocked" | "done" }
+	| { preset: "missing"; targetStatus: "blocked" }
 
-type QueueUnblockOutcomeScenario = QueueUnblockGateOptions & {
-	name: string
-	issue: "target" | "missing"
-	dryRun?: true
+type QueueUnblockOutcomeScenario =
+	| { kind: "success"; preset: "loaded"; targetStatus: "blocked"; issue: "target"; dryRun: false }
+	| { kind: "dry-run"; preset: "loaded"; targetStatus: "blocked"; issue: "target"; dryRun: true }
+	| { kind: "not-unblockable"; preset: "loaded"; targetStatus: "done"; issue: "target"; dryRun: false }
+	| { kind: "not-found"; preset: "loaded"; targetStatus: "blocked"; issue: "missing"; dryRun: false }
+	| { kind: "preset-load-error"; preset: "missing"; targetStatus: "blocked"; issue: "target"; dryRun: false }
+
+function assertNeverQueueUnblockOutcomeScenario(scenario: never): never {
+	throw new Error(`Unhandled queue-unblock outcome scenario: ${JSON.stringify(scenario)}`)
 }
 
 async function startQueueUnblockGateFixture(name: string, options: QueueUnblockGateOptions) {
@@ -7087,7 +7104,7 @@ process.exitCode = 0
 	try {
 		const chain = store.createChain({
 			name: chainName,
-			preset: options.chainPreset ?? "gh-issue-pr-iteration",
+			preset: options.preset === "loaded" ? "gh-issue-pr-iteration" : "missing-538-preset",
 			repository: "mouriya-s-lab/coder-loop",
 			baseBranch: "main",
 			status: "stopped",
@@ -7148,7 +7165,7 @@ process.exitCode = 0
 		},
 	})
 	const socketPath = daemon.snapshot().socketPath
-	if (options.chainPreset === undefined) {
+	if (options.preset === "loaded") {
 		expectOk(await sendDaemonRequest(socketPath, daemonRequest("queue.unblock", {
 			chainName,
 			issue: targetItemId,
