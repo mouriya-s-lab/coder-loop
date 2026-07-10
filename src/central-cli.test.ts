@@ -1035,6 +1035,57 @@ attemptTimeoutSeconds = 3600
 		}
 	})
 
+	test("doctor repo access succeeds", async () => {
+		const fixture = await startFixture("doctor-repo-access-success")
+		try {
+			const fakeGh = await fakeDoctorCliEnv("doctor-repo-access-success", 0)
+			const target = await makeTarget("doctor-repo-access-success-target")
+			expectJsonOk(await runCli(["chain", "create", "doctor-repo-access-success", "--config-json", FIXTURE_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
+
+			const result = await runCli(["doctor", target, "--repo", "fixture/success", "--loop-data-root", fixture.loopDataRoot, "--chain", "doctor-repo-access-success"], fakeGh.env)
+
+			expect(result.exitCode, result.stderr).toBe(0)
+			expect(result.stderr).toContain("OK: repo access fixture/success")
+			expect(await readFile(fakeGh.callsPath, "utf-8")).toContain("repo view fixture/success")
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("doctor repo access failure is fatal", async () => {
+		const fixture = await startFixture("doctor-repo-access-failure")
+		try {
+			const fakeGh = await fakeDoctorCliEnv("doctor-repo-access-failure", 1)
+			const target = await makeTarget("doctor-repo-access-failure-target")
+			expectJsonOk(await runCli(["chain", "create", "doctor-repo-access-failure", "--config-json", FIXTURE_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
+
+			const result = await runCli(["doctor", target, "--repo", "fixture/failure", "--loop-data-root", fixture.loopDataRoot, "--chain", "doctor-repo-access-failure"], fakeGh.env)
+
+			expect(result.exitCode).toBe(1)
+			expect(result.stderr).toContain("FAIL: repo access fixture/failure")
+			expect(await readFile(fakeGh.callsPath, "utf-8")).toContain("repo view fixture/failure")
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("doctor omits repo access check without flag", async () => {
+		const fixture = await startFixture("doctor-repo-access-omitted")
+		try {
+			const fakeGh = await fakeDoctorCliEnv("doctor-repo-access-omitted", 1)
+			const target = await makeTarget("doctor-repo-access-omitted-target")
+			expectJsonOk(await runCli(["chain", "create", "doctor-repo-access-omitted", "--config-json", FIXTURE_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
+
+			const result = await runCli(["doctor", target, "--loop-data-root", fixture.loopDataRoot, "--chain", "doctor-repo-access-omitted"], fakeGh.env)
+
+			expect(result.exitCode, result.stderr).toBe(0)
+			expect(result.stderr).not.toContain("repo access")
+			expect(await readFile(fakeGh.callsPath, "utf-8")).not.toContain("repo view")
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("doctor passes regardless of target .coder-loop/runtime presence", async () => {
 		const fixture = await startFixture("doctor-runtime-dir")
 		try {
@@ -1170,6 +1221,34 @@ async function fakeCliEnv(name: string): Promise<Record<string, string>> {
 		await writeExecutable(resolve(bin, name), "#!/usr/bin/env bash\nexit 0\n")
 	}
 	return { HOME: home, PATH: `${bin}:${process.env.PATH ?? ""}` }
+}
+
+async function fakeDoctorCliEnv(name: string, repoExitCode: number): Promise<{ env: Record<string, string>; callsPath: string }> {
+	const bin = resolve(TEST_ROOT, `${++nextFixtureId}-${name}-bin`)
+	const home = resolve(TEST_ROOT, `${++nextFixtureId}-${name}-home`)
+	const callsPath = resolve(TEST_ROOT, `${++nextFixtureId}-${name}-gh-calls.log`)
+	await mkdir(bin, { recursive: true })
+	await mkdir(home, { recursive: true })
+	await writeExecutable(resolve(bin, "gh"), [
+		"#!/usr/bin/env bash",
+		'printf "%s\\n" "$*" >> "$FAKE_GH_CALLS"',
+		'if [ "$1" = "auth" ]; then exit 0; fi',
+		'if [ "$1" = "repo" ] && [ "$2" = "view" ]; then exit "$FAKE_GH_REPO_EXIT"; fi',
+		"exit 0",
+		"",
+	].join("\n"))
+	for (const executable of ["codex", "claude", "coder-loop"]) {
+		await writeExecutable(resolve(bin, executable), "#!/usr/bin/env bash\nexit 0\n")
+	}
+	return {
+		env: {
+			HOME: home,
+			PATH: `${bin}:${process.env.PATH ?? ""}`,
+			FAKE_GH_CALLS: callsPath,
+			FAKE_GH_REPO_EXIT: String(repoExitCode),
+		},
+		callsPath,
+	}
 }
 
 async function writeExecutable(path: string, content: string): Promise<void> {
