@@ -87,7 +87,6 @@ import {
 	appendObservabilityEventSync,
 	makeObservabilityEvent,
 	observabilityDecisionFingerprint,
-	observabilityDecisionKey,
 	observabilityEventToJsonValue,
 	parseObservabilityEventType,
 	parseObservabilityKind,
@@ -541,6 +540,136 @@ type Result<T, E> =
 	| { kind: "ok"; value: T }
 	| { kind: "err"; error: E }
 
+export type DecisionFingerprintScope =
+	| { kind: "slot"; chainId: number; slotKey: string }
+	| { kind: "item"; chainId: number; rowId: number }
+	| { kind: "chain"; chainId: number }
+
+type ItemDecisionFingerprintKind = "item.dependency_wait" | "item.backoff"
+
+type ChainDecisionFingerprintState = {
+	slotBusy: Map<string, string>
+	items: Map<number, Map<ItemDecisionFingerprintKind, string>>
+	chainCompleteTrigger: string | null
+}
+
+// Decision fingerprints belong to the scheduler entity that can emit them. A chain owns a
+// hierarchy of slot/item/chain decision state so lifecycle convergence can reclaim exactly one
+// leaf or the complete chain subtree without clearing unrelated active siblings.
+export class DecisionFingerprintState {
+	private readonly chains = new Map<number, ChainDecisionFingerprintState>()
+
+	get size(): number {
+		let count = 0
+		for (const state of this.chains.values()) {
+			count += state.slotBusy.size
+			for (const item of state.items.values()) count += item.size
+			if (state.chainCompleteTrigger !== null) count += 1
+		}
+		return count
+	}
+
+	observe(chainId: number, event: ObservabilityEvent): boolean {
+		if (event.kind !== "decision") {
+			throw new DaemonError("internal_error", `decision fingerprint state cannot observe ${event.kind} event ${event.type}`)
+		}
+		const fingerprint = observabilityDecisionFingerprint(event)
+		const state = this.chainState(chainId)
+		switch (event.type) {
+			case "slot.busy":
+				return replaceDecisionFingerprint(state.slotBusy.get(event.payload.slotKey), fingerprint, () => state.slotBusy.set(event.payload.slotKey, fingerprint))
+			case "item.dependency_wait":
+			case "item.backoff": {
+				const item = state.items.get(event.payload.rowId) ?? new Map<ItemDecisionFingerprintKind, string>()
+				state.items.set(event.payload.rowId, item)
+				return replaceDecisionFingerprint(item.get(event.type), fingerprint, () => item.set(event.type, fingerprint))
+			}
+			case "chain.complete_trigger":
+				return replaceDecisionFingerprint(state.chainCompleteTrigger, fingerprint, () => { state.chainCompleteTrigger = fingerprint })
+			default:
+				return assertNeverDecisionEvent(event)
+		}
+	}
+
+	release(scope: DecisionFingerprintScope): void {
+		const state = this.chains.get(scope.chainId)
+		if (state === undefined) return
+		switch (scope.kind) {
+			case "slot":
+				state.slotBusy.delete(scope.slotKey)
+				break
+			case "item":
+				state.items.delete(scope.rowId)
+				break
+			case "chain":
+				this.chains.delete(scope.chainId)
+				return
+			default:
+				assertNeverDecisionFingerprintScope(scope)
+		}
+		if (state.slotBusy.size === 0 && state.items.size === 0 && state.chainCompleteTrigger === null) this.chains.delete(scope.chainId)
+	}
+
+	releaseForSchedulerEvent(event: SchedulerEvent): void {
+		const scope = decisionFingerprintScopeReleasedBySchedulerEvent(event)
+		if (scope !== null) this.release(scope)
+	}
+
+	private chainState(chainId: number): ChainDecisionFingerprintState {
+		const current = this.chains.get(chainId)
+		if (current !== undefined) return current
+		const created: ChainDecisionFingerprintState = { slotBusy: new Map(), items: new Map(), chainCompleteTrigger: null }
+		this.chains.set(chainId, created)
+		return created
+	}
+}
+
+function replaceDecisionFingerprint(previous: string | null | undefined, next: string, replace: () => void): boolean {
+	if (previous === next) return true
+	replace()
+	return false
+}
+
+function decisionFingerprintScopeReleasedBySchedulerEvent(event: SchedulerEvent): DecisionFingerprintScope | null {
+	switch (event.type) {
+		case "agent.spawn":
+		case "spawn.aborted":
+			return { kind: "item", chainId: event.chainId, rowId: event.itemId }
+		case "agent.exit":
+			return { kind: "slot", chainId: event.chainId, slotKey: event.slotKey }
+		case "queue.terminal":
+		case "item.dependency_unblocked":
+			return { kind: "item", chainId: event.chainId, rowId: event.rowId }
+		case "chain.completed":
+			return { kind: "chain", chainId: event.chainId }
+		case "slot.busy":
+		case "item.dependency_wait":
+		case "item.backoff":
+		case "session_id.invalidated":
+		case "chain.complete_trigger":
+		case "chain.complete_trigger_failed":
+		case "phase.start":
+		case "phase.end":
+		case "attempt.timeout":
+		case "run.startup_idle_kill":
+		case "recycle.pending_entered":
+		case "recycle.timeout_kill":
+		case "recycle.natural_exit":
+		case "scheduler.rate_limited":
+			return null
+		default:
+			return assertNeverSchedulerEvent(event)
+	}
+}
+
+function assertNeverDecisionEvent(event: never): never {
+	throw new DaemonError("internal_error", `unhandled decision event: ${JSON.stringify(event)}`)
+}
+
+function assertNeverDecisionFingerprintScope(scope: never): never {
+	throw new DaemonError("internal_error", `unhandled decision fingerprint scope: ${JSON.stringify(scope)}`)
+}
+
 // #406: the daemon-owned credential issuer. Implements `SchedulerRunCredentialIssuer` so the
 // scheduler can mint/revoke without knowing it talks to a Map. Keyed by credential value because
 // the request boundary has only the value in hand — the binding is what the registry returns.
@@ -829,7 +958,7 @@ export class CoderLoopDaemon {
 	private socketPathRepairInFlight: Promise<void> | null = null
 	private ownsDaemonSocket = false
 	private ownsDaemonPid = false
-	private readonly lastDecisionFingerprints = new Map<string, string>()
+	private readonly decisionFingerprints = new DecisionFingerprintState()
 	private readonly loadedPresetCache = new Map<string, Promise<SchedulerLoadedPreset>>()
 	// #406 run credential registry. Map keyed on credential value → run binding. Lifetime is the
 	// daemon process: when daemon down kills all active runs (#467), the registry dies with it,
@@ -1673,8 +1802,8 @@ export class CoderLoopDaemon {
 		}
 	}
 
-	private async recordObservabilityEvent(event: ObservabilityEvent): Promise<void> {
-		if (this.shouldSuppressDecisionEvent(event)) return
+	private async recordObservabilityEvent(event: ObservabilityEvent, decisionChainId?: number): Promise<void> {
+		if (this.shouldSuppressDecisionEvent(event, decisionChainId)) return
 		await appendObservabilityEvent(this.paths.eventsFile, event)
 		this.writeRenderedObservabilityEvent(event)
 	}
@@ -1717,21 +1846,17 @@ export class CoderLoopDaemon {
 		if (chain.status === "deleted") return
 		try {
 			sanitizeChainName(chain.name)
-			await this.recordObservabilityEvent(event)
+			await this.recordObservabilityEvent(event, chain.id)
 		} catch (error) {
 			if (isInvalidChainNameError(error)) return
 			throw error
 		}
 	}
 
-	private shouldSuppressDecisionEvent(event: ObservabilityEvent): boolean {
+	private shouldSuppressDecisionEvent(event: ObservabilityEvent, chainId?: number): boolean {
 		if (event.kind !== "decision") return false
-		const key = observabilityDecisionKey(event)
-		const fingerprint = observabilityDecisionFingerprint(event)
-		const previous = this.lastDecisionFingerprints.get(key)
-		if (previous === fingerprint) return true
-		this.lastDecisionFingerprints.set(key, fingerprint)
-		return false
+		if (chainId === undefined) throw new DaemonError("internal_error", `decision event ${event.type} has no chain lifecycle owner`)
+		return this.decisionFingerprints.observe(chainId, event)
 	}
 
 	private writeRenderedObservabilityEvent(event: ObservabilityEvent): void {
@@ -1880,12 +2005,16 @@ export class CoderLoopDaemon {
 
 	private async handleChainDelete(args: JsonObject): Promise<JsonObject> {
 		const chain = this.resolveChain(args)
-		if (chain.status === "deleted") return { chain: chainToJson(chain), alreadyDeleted: true }
+		if (chain.status === "deleted") {
+			this.decisionFingerprints.release({ kind: "chain", chainId: chain.id })
+			return { chain: chainToJson(chain), alreadyDeleted: true }
+		}
 		const resumeScheduler = await this.pauseSchedulerForMutation()
 		try {
 			const terminatedRuns = await this.terminateActiveRunsForChain(chain.id)
 			const cleanup = await this.cleanupChainRuntime(chain)
 			const updated = this.requireStore().updateChain(chain.id, { status: "deleted" })
+			this.decisionFingerprints.release({ kind: "chain", chainId: chain.id })
 			return {
 				chain: chainToJson(updated),
 				alreadyDeleted: false,
@@ -1899,11 +2028,15 @@ export class CoderLoopDaemon {
 
 	private async handleChainStop(args: JsonObject): Promise<JsonObject> {
 		const chain = this.resolveChain(args)
-		if (chain.status === "stopped") return { chain: chainToJson(chain), alreadyStopped: true, terminatedRuns: [] }
+		if (chain.status === "stopped") {
+			this.decisionFingerprints.release({ kind: "chain", chainId: chain.id })
+			return { chain: chainToJson(chain), alreadyStopped: true, terminatedRuns: [] }
+		}
 		assertChainCanTransition(chain, "chain.stop", "active", "stopped")
 		const resumeScheduler = await this.pauseSchedulerForMutation()
 		try {
 			const stopped = this.requireStore().updateChain(chain.id, { status: "stopped" })
+			this.decisionFingerprints.release({ kind: "chain", chainId: chain.id })
 			const terminatedRuns = await this.terminateActiveRunsForChain(chain.id)
 			await this.recordObservabilityEventIfChainNameIsValid(stopped, makeObservabilityEvent({
 				kind: "audit",
@@ -2439,8 +2572,11 @@ export class CoderLoopDaemon {
 		const repoCwd = optionalString(fields, "repoCwd")
 		if (repoCwd !== null) assignOptional(input, "repoCwd", await validateRepoCwdForRequest(repoCwd))
 		const status = optionalString(fields, "status")
+		let terminalStatusesForUpdate: ReadonlySet<InternalStatus> | null = null
 		if (status !== null) {
 			assignOptional(input, "status", await this.admitItemStatusForRequest(chain, item, status, caller.subject))
+			const { preset } = await this.loadedPresetForItem(chain, item, "item.update.terminal-statuses")
+			terminalStatusesForUpdate = new Set(preset.statuses.terminal)
 		}
 		assignOptional(input, "title", validateItemTitleForRequest(optionalStringOrNull(fields, "title")))
 		assignOptional(input, "priority", validateItemPriorityForRequest(optionalStringOrNull(fields, "priority")))
@@ -2503,6 +2639,9 @@ export class CoderLoopDaemon {
 		const resumeScheduler = await this.pauseSchedulerForMutation()
 		try {
 			const updated = store.updateItem(item.id, input)
+			if (terminalStatusesForUpdate?.has(updated.status) === true) {
+				this.decisionFingerprints.release({ kind: "item", chainId: chain.id, rowId: item.id })
+			}
 			if (updated.status !== item.status) {
 				// #406: emit `item.status` with the caller's true subject. The exhaustive switch on
 				// `caller.kind` is how runId/phase enter the event base — they come from the
@@ -2723,11 +2862,13 @@ export class CoderLoopDaemon {
 			const store = this.requireStore()
 			// Mirror handleChainStop: idempotent if already stopped.
 			if (chain.status === "stopped") {
+				this.decisionFingerprints.release({ kind: "chain", chainId: chain.id })
 				await this.recordChainStopFromPhaseExitLifecycle(chain, { ...source, alreadyStopped: true, terminatedRunIds: [] })
 				return { chain, terminatedRuns: [] }
 			}
 			assertChainCanTransition(chain, "item.exitAction:stop", "active", "stopped")
 			const stopped = store.updateChain(chain.id, { status: "stopped" })
+			this.decisionFingerprints.release({ kind: "chain", chainId: chain.id })
 			const terminatedRuns = await this.terminateActiveRunsForChain(chain.id)
 			const terminatedRunIds = terminatedRuns.map((run) => run.runId)
 			await this.recordObservabilityEventIfChainNameIsValid(stopped, makeObservabilityEvent({
@@ -2983,6 +3124,7 @@ export class CoderLoopDaemon {
 			presetForItem,
 			prompt: scheduler.prompt ?? presetPromptResolver,
 			onEvent: async (event) => {
+				this.decisionFingerprints.releaseForSchedulerEvent(event)
 				if (this.store !== null) {
 					await this.recordObservabilityEventForChainId(event.chainId, (chain) => schedulerEventToObservabilityEvent(chain, event))
 				}
