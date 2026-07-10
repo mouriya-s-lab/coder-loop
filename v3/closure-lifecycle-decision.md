@@ -37,25 +37,25 @@
 stateDiagram-v2
   [*] --> active : create（首次打开：fetch base → 建 worktree 底座 → 建闭包分支/par 下从 pin 派生）
   active --> active : run-exit → run-spawn（attempt 链内；含中断 resume——同 worktree 同 session）
-  active --> suspended : suspend（phase 推进离开：现场程序化保存进闭包分支 → 回收物理目录）
-  suspended --> active : reopen（retry / reopen(target) 命中：同路径重建 worktree → checkout 闭包分支尖端 → resume session）
-  active --> finalized : finalize（item terminal / 预算耗尽 / 取消）
-  suspended --> finalized : finalize（同上）
-  finalized --> [*] : 删闭包分支 + 清 sessionIds + 发终态证据
+  active --> suspended : suspend（只改变调度状态；闭包环境原地保留）
+  suspended --> active : reopen（retry / reopen(target) 命中：原闭包原地恢复调度）
+  active --> consumed : consume（控制流证明闭包不会再被 resume/reopen）
+  suspended --> consumed : consume（同上）
+  consumed --> [*] : 回收 worktree/闭包分支 + 清 sessionIds + 发终态证据
 ```
 
-- **挂起是程序化操作**：闭包边界（worktree 路径、分支名、session id）全部是引擎自有元数据，「可保护的上下文是什么」可计算——引擎把现场固化进闭包分支（机制形态 stash vs 本地 suspend-commit 归 #560 决策项），回收目录，元数据保留。
-- **重开是确定性重建**：同一确定路径建 worktree、checkout 闭包分支尖端、resume session。零启发式还原。业务打回重入（changes_requested → 第二轮 iter）= 重开同一闭包，不是新任务。
-- **worktree 升格为「可重建环境」**：物理目录只是活跃形态；session ⊆ worktree 不变式按此解读（重开路径确定性同一，session 醒来 cwd 与文件状态一致）。挂起态只占一个分支的 git 对象。
+- **挂起只改变调度状态，不是资源生命周期事件**：worktree、工作分支、index、未提交文件、session 与 per-task scratch 全部原地保留；不得在 suspend 上 stash、commit、删除或重建任何闭包环境。挂起和闭包被完全消费是两件事。
+- **重开是原闭包原地恢复调度**：业务打回重入（changes_requested → 第二轮 iter）= 对同一闭包从 suspended 切回 active；cwd、文件系统、index、分支与 session 没有搬运或还原步骤。
+- **只有 consumed 才允许 GC**：`consumed` 不是 item terminal、预算耗尽或取消的同义词，而是控制流已经证明该闭包不会再被任何合法 resume/reopen 命中的事实。该可计算消费谓词由 #560 在实现前钉死；证明未成立时环境必须保留。
 - **单活性**：每闭包同一时刻至多一个活 run（执法键 = 闭包）；挂起态无活 run；par 只存在于闭包之间。
 
 ### 一个类型，四张视图
 
-闭包状态机同时是：**执行语义**（调度消费）、**GC 表**（回收 = 转移副作用）、**hook 挂点表**（转移边 = observer 事件）、**暴露谓词表**（证据采样点 = 挂起/终结）。四视图共同事实源，持久化归 #558 shape。零新增抽象。
+闭包状态机同时是：**执行语义**（调度消费）、**GC 表**（仅 consumed 允许回收）、**hook 挂点表**（转移边 = observer 事件）、**暴露谓词表**（证据采样点 = suspend/consume）。四视图共同事实源，持久化归 #558 shape。零新增抽象。
 
-**GC 语义**：挂起回收目录、终结删分支（git 对象随不可达自然过期，引擎不做显式 `git gc`）；daemon 启动扫尸 = **状态对账**——枚举磁盘 worktree 目录 + 引擎命名空间分支，对照 SQLite 闭包状态表（活跃→目录该在；挂起→分支该在目录不该在；终结→都不该在；异常→暴露不掩盖）。无独立 GC 策略参数。
+**GC 语义**：active 与 suspended 都必须保有完整 worktree 与闭包分支；只有 consumed 才回收 worktree、闭包分支与 sessionIds（git 对象随不可达自然过期，引擎不做显式 `git gc`）。daemon 启动扫尸 = **状态对账**——枚举磁盘 worktree 目录 + 引擎命名空间分支，对照 SQLite 闭包状态表（active/suspended→目录与分支都该在；consumed→都不该在；异常→暴露不掩盖）。无独立 GC 策略参数。
 
-**hook 挂点**：observer 挂事件词表（闭包转移边 create / run-spawn / run-exit / suspend / reopen / finalize 作为新事件类型入词表）；gate 决策点闭集不扩（仍为推进类：run pre-spawn/post-exit、状态转移、par join、seq 推进、reopen 派发、chain-complete）。**转移边不可 gate**——gate 挡推进决策，挂起/终结是推进已决定后的资源副作用，在副作用上放 gate 即让用户态扣住引擎资源管理、发明第二推进语义（design-boundary §4.2 红线）；要阻止挂起，在 run post-exit gate 上 hold 即可（推进被扣，闭包自然不挂起——单一视图）。
+**hook 挂点**：observer 挂事件词表（闭包转移边 create / run-spawn / run-exit / suspend / reopen / consume 作为新事件类型入词表）；gate 决策点闭集不扩（仍为推进类：run pre-spawn/post-exit、状态转移、par join、seq 推进、reopen 派发、chain-complete）。转移边不可 gate；要阻止推进，在对应推进决策点 hold。consume 只有在消费谓词已经成立后才发生，不能由资源回收反向决定控制流。
 
 ## 3. 供给条款（终版）
 
@@ -67,7 +67,7 @@ stateDiagram-v2
 | 2 | **闭包分支程序化**：引擎创建 per-闭包工作分支随闭包递出，贯穿闭包全生命周期至终结（PR headRef 即闭包分支）；agent 契约 = 在其上 commit、解决冲突、push、开 PR；preset 指示 agent 自建分支退役；push 到 origin 的 ref 属声明通道，未发布的自建 ref 是 escape 类 |
 | 3 | **seq 流转**：前驱需被构建于其上的工作已合入 base；引擎不执法——合并真相是 GitHub 面事实，经声明通道由 preset 判定器（validator/script 自查）按 `advance\|hold\|reopen` 消费；引擎零产物传递机制；引擎级 mergedness gate 出局 |
 | 4 | **par 同 commit 派生**：par 展开/物化时引擎 pin base 尖端 commit 并持久化；成员子树共同启动入口任务集的闭包首次打开从 pin 派生（凝固点语义：后续追加复用同 pin）；嵌套 par 内层重新 pin；rationale = 入口输入侧确定性（输出侧合并顺序归 join 策略与下游） |
-| 5 | **回收与终态采样**：GC = 生命周期转移副作用 + 启动状态对账；引擎只回收自己命名空间；证据谓词对象 = 闭包分支，挂起时发「现场已保存」、终结时发 `{无工作, 已发布, 未发布即弃, 无法求值}` + origin 新鲜度戳——运行时暴露的首个实例，只暴露不参与推进 |
+| 5 | **回收与消费采样**：suspend 零 GC；只有控制流证明闭包已完全消费后才进入 consumed 并回收引擎命名空间内的 worktree/分支/sessionIds。证据谓词对象 = 闭包分支，suspend 只发状态事件，consume 时发 `{无工作, 已发布, 未发布即弃, 无法求值}` + origin 新鲜度戳——只暴露不参与推进 |
 
 ## 4. mergedness 可计算性的检验记录
 
