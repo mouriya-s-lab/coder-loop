@@ -11,14 +11,15 @@ session resume、`gh` 交互、跨 phase 状态推进这类只在真实运行中
 ## Fixture
 
 - Repository: `mouriya-s-lab/coder-loop-e2e-fixture`（PRIVATE）
-- 本地 checkout: `/Users/mouriya/Ext/code/coder-loop-e2e-fixture`
+- 本地 source checkout: `/Users/mouriya/Ext/code/coder-loop-e2e-fixture`（只用于校验 origin；harness 不修改它）
 - 可达性检查:
 
 ```bash
 gh repo view mouriya-s-lab/coder-loop-e2e-fixture --json nameWithOwner,visibility
 ```
 
-fixture repo 只保留极小的提交资产：
+fixture repo 只保留极小的提交资产。各 run 在 default branch 上只拥有自己的
+`runs/<uuid>.txt`，不会共用或 reset 同一个目标文件：
 
 - `message.txt` — 单行任务目标文件（pristine 态为 `status: pending`）；
 - `scripts/check-message.mjs` — 真实 check（`bun run check`），PR 证据用它；
@@ -46,16 +47,16 @@ bun scripts/real-e2e.ts --preset gh-issue-pr-iteration
 
 它按序做完一轮完整真实 e2e：
 
-1. **preflight** — gh auth、preset 声明的 runner CLI（`claude` / `codex` / `opencode`）在 PATH、fixture repo 可达、本地 checkout origin 一致。
-2. **reset** — fixture checkout 硬回 `origin/main`；关掉所有残留 open PR（fixture 专用于 e2e，open PR 一律视为上轮残留）；关掉残留的 `e2e-seed` label open issue；`message.txt` 不是 `status: pending` 时翻回并直接 push main。
-3. **seed** — 脚本用 `gh issue create` 建一个契约合规的 trivial issue（`kind:code` + `e2e-seed` label）：把 `message.txt` 改为 `status: complete`。
-4. **run** — 在隔离 `--loop-data-root`（`.coder-loop/runtime/real-e2e/<stamp>/loop-data`）起中央 daemon（`daemon up`），`chain create` 在中央 socket 写入 chain（target 目录零 bootstrap），`item add` 入队。生产 daemon（`~/.coder-loop`）完全不被触碰。
+1. **preflight** — gh auth、preset 声明的 runner CLI（`claude` / `codex` / `opencode`）在 PATH、fixture repo 可达、本地 source checkout origin 一致。
+2. **allocate** — 每轮生成 UUID；同机进程只在 Contents API 创建/删除 default-branch 文件的瞬间使用 `shlock` PID mutex（持有者退出后可回收，无固定等待上限），避免 Git ref compare-and-swap 竞争，然后创建自己的 `runs/<uuid>.txt`（`status: pending`），再 clone 到自己的 `.coder-loop/runtime/real-e2e/<uuid>/fixture`。锁不覆盖 daemon/agent/PR/check 生命周期；不同 run 的有效工作窗口使用不同路径，不 reset checkout、不扫描或关闭别轮的 PR/issue/worktree。
+3. **seed** — 脚本用 `gh issue create` 建一个契约合规且带 run UUID 的 trivial issue（`kind:code` + `e2e-seed` label）：只要求把本轮 `runs/<uuid>.txt` 改为 `status: complete`。
+4. **run** — 在隔离 `--loop-data-root`（`.coder-loop/runtime/real-e2e/<uuid>/loop-data`）起中央 daemon（`daemon up`），以 UUID 唯一 chain name 对 default branch 执行 `chain create`，再 `item add` 入队。每个 PR 仍 merge 到 default branch，因此 GitHub closing keyword 会真实关闭对应 issue；生产 daemon（`~/.coder-loop`）和 source checkout完全不被触碰。
 5. **watch + tripwire** — 轮询 `status <target> --json`，越界即自动 `daemon down` + 落诊断 + 非零退出：
    - `--max-wall-seconds`（默认 2700）
    - `--max-attempts`（默认 5）
    - `--max-runs`（默认 20，短周期 spin 的信号）
-6. **assert** — item 到 `done` 后验证 GitHub 终态：seed issue CLOSED、closing PR MERGED、fixture `origin/main` 上 `message.txt == status: complete`、真实 `bun run check` 通过。
-7. **teardown + evidence** — `daemon down`，stdout 输出 evidence 摘要（issue URL、PR URL、merge commit、耗时、loop-data 路径）。
+6. **assert** — item 到 `done` 后验证 GitHub 终态：seed issue CLOSED、closing PR MERGED、default branch 上本轮 `runs/<uuid>.txt == status: complete`，并以真实 Bun 读取执行检查。
+7. **teardown + evidence** — `daemon down` 后通过 Contents API 只删除本轮 `runs/<uuid>.txt`；失败时只关闭 body 第一行精确 `Closes #<本轮 issue>` 的本轮 open PR 与本轮 seed，不碰其他 run。stdout 输出 evidence 摘要（issue URL、PR URL、merge commit、耗时、loop-data 路径）。
 
 失败路径（终态 `blocked` / `moot` / `exhausted`、tripwire、`chain create` 失败）都会打印
 loop-data root、daemon stdout/stderr log 路径和最后一次 status snapshot，然后
@@ -65,7 +66,7 @@ exit 1。
 
 | Flag | 默认 | 含义 |
 |---|---|---|
-| `--fixture-cwd` | `../coder-loop-e2e-fixture` | fixture 本地 checkout |
+| `--fixture-cwd` | `../coder-loop-e2e-fixture` | fixture source checkout（只读 origin 来源与身份校验） |
 | `--fixture-repo` | `mouriya-s-lab/coder-loop-e2e-fixture` | fixture GitHub repo |
 | `--preset` | `real-e2e-minimal` | 跑哪个 preset（全保真用 `gh-issue-pr-iteration`） |
 | `--max-wall-seconds` | 2700 | 全程 wall-time 上界 |
@@ -91,5 +92,5 @@ phase runner/model 默认值来自 `preset.toml`。bundled `gh-issue-pr-iteratio
 - `codex exec resume` 不接受 `--sandbox`，sandbox 默认值只作用于 fresh `codex exec`。
 - 中央 daemon 的活性判据是 socket 上有进程监听；`daemon.sock` / `daemon.pid`
   文件存在 ≠ daemon 在跑（陈尸文件），见 `.claude/rules/daemon-restart-after-app-update.rule.md`。
-- harness 的 reset 会关掉 fixture repo 里**所有** open PR；不要在 fixture repo 上
-  留任何想保住的 open PR。
+- 每轮拥有独立 fixture path、clone、chain、loop-data 与 seed issue。teardown 只能按本轮 issue 的
+  closing 契约清理本轮资源；如果看到 harness 关闭了别轮 PR/issue，这是隔离回归。
