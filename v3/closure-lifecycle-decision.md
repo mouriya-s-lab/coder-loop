@@ -95,4 +95,4 @@ stateDiagram-v2
 
 ## 7. 影响面
 
-全量 issue 修改清单（重写级 #546/#560/#558/#562；实质修改 #559/#561/#563/#565/#543/#544；局部登记 #566/#567/#545/#564/#586/#587/#589/#590/#592/#593/#601/#547/#554；无影响 #549/#574）随各 issue body 修订与登记 comment 落地，执行顺序：本报告 → #546 → #558 → 其余。bundled preset v3 化改写另立 issue 承接：`git switch -c` 退役、implement.md retry 契约改闭包重开形态、e2e standing worktree 与跨任务 standing environment 的 v3 兼容形态、spike 分支流、submit.md retry 路径分支语义。
+全量 issue 修改清单（重写级 #546/#560/#558/#562；实质修改 #559/#561/#563/#565/#543/#544；局部登记 #566/#567/#545/#564/#586/#587/#589/#590/#592/#593/#601/#547/#554；无影响 #549/#574）随各 issue body 修订与登记 comment 落地，执行顺序：本报告 → #546 → #558 → 其余。bundled preset v3 化改写由 #604（#546 sub-issue）承接：`git switch -c` 退役、implement.md retry 契约改闭包重开形态、e2e standing worktree 与跨任务 standing environment 的 v3 兼容形态、spike 分支流、submit.md retry 路径分支语义。
