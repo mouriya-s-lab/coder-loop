@@ -21,6 +21,7 @@ import { Database } from "bun:sqlite"
 import { spawn, spawnSync, type ChildProcess } from "node:child_process"
 import { chmodSync, existsSync, mkdirSync, openSync, closeSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
+import { randomUUID } from "node:crypto"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
@@ -37,6 +38,14 @@ type HarnessOptions = {
 	maxRuns: number
 	pollSeconds: number
 	keepStaleWorktrees: boolean
+}
+
+type FixtureRun = {
+	cwd: string
+	repository: string
+	baseBranch: string
+	runKey: string
+	fixturePath: string
 }
 
 type WatchVerdict =
@@ -106,8 +115,7 @@ function parsePositiveInt(flag: string, value: string): number {
 }
 
 function fail(message: string): never {
-	process.stderr.write(`real-e2e: ${message}\n`)
-	process.exit(1)
+	throw new Error(message)
 }
 
 function log(message: string): void {
@@ -138,7 +146,7 @@ function ghJson<T>(args: readonly string[]): T {
 // ---------------------------------------------------------------- preflight
 
 function preflight(options: HarnessOptions): void {
-	log("preflight: gh / runner CLI / fixture repo / fixture checkout")
+	log("preflight: gh / runner CLI / fixture repo / fixture source checkout")
 	sh(["gh", "auth", "status"])
 	for (const binary of ["codex", "claude"]) {
 		sh(["which", binary])
@@ -158,91 +166,71 @@ function preflight(options: HarnessOptions): void {
 	}
 }
 
-// ------------------------------------------------------------------- reset
+// --------------------------------------------------------- per-run fixture
 
-function resetFixture(options: HarnessOptions): void {
-	log("reset: fixture checkout 回 origin/main")
-	sh(["git", "fetch", "origin", "main"], { cwd: options.fixtureCwd })
-	sh(["git", "switch", "main"], { cwd: options.fixtureCwd })
-	sh(["git", "reset", "--hard", "origin/main"], { cwd: options.fixtureCwd })
-	sh(["git", "clean", "-fd"], { cwd: options.fixtureCwd })
+const FIXTURE_MUTATION_LOCK = resolve(REPO_ROOT, ".coder-loop/runtime/real-e2e-fixture-mutation.lock")
 
-	// 被杀的 daemon（tripwire / SIGKILL）会在 fixture 的 git 里留下已注册的
-	// scheduler worktree；引擎侧有自愈（#466），这里仍然清一遍保证 pristine。
-	if (options.keepStaleWorktrees) {
-		log("reset: --keep-stale-worktrees，保留残留 worktree（验证引擎自愈路径）")
-	} else {
-		log("reset: 清理残留 scheduler worktree 注册")
-		const worktrees = sh(["git", "worktree", "list", "--porcelain"], { cwd: options.fixtureCwd }).stdout
-		for (const line of worktrees.split("\n")) {
-			if (!line.startsWith("worktree ")) continue
-			const path = line.slice("worktree ".length).trim()
-			if (resolve(path) === resolve(options.fixtureCwd)) continue
-			log(`reset: git worktree remove --force ${path}`)
-			sh(["git", "worktree", "remove", "--force", path], { cwd: options.fixtureCwd, allowFail: true })
-		}
-		sh(["git", "worktree", "prune"], { cwd: options.fixtureCwd })
+async function withFixtureMutationLock<T>(operation: () => T): Promise<T> {
+	for (;;) {
+		const lock = sh(["shlock", "-f", FIXTURE_MUTATION_LOCK, "-p", String(process.pid)], { allowFail: true })
+		if (lock.exitCode === 0) break
+		await Bun.sleep(100)
 	}
-
-	log("reset: 关残留 open PR（fixture repo 专用于 e2e，open PR 一律视为上轮残留）")
-	const openPrs = ghJson<Array<{ number: number }>>([
-		"pr", "list", "-R", options.fixtureRepo, "--state", "open", "--json", "number",
-	])
-	for (const pr of openPrs) {
-		sh(["gh", "pr", "close", String(pr.number), "-R", options.fixtureRepo, "--delete-branch",
-			"--comment", "e2e harness reset: 上轮残留，自动关闭"], { allowFail: true })
+	try {
+		return operation()
+	} finally {
+		rmSync(FIXTURE_MUTATION_LOCK)
 	}
+}
 
-	log(`reset: 关残留 ${SEED_LABEL} open issue`)
+async function prepareFixture(options: HarnessOptions, workDir: string, runKey: string): Promise<FixtureRun> {
+	const cwd = resolve(workDir, "fixture")
+	const baseBranch = "main"
+	const fixturePath = `runs/${runKey}.txt`
+	const origin = sh(["git", "remote", "get-url", "origin"], { cwd: options.fixtureCwd }).stdout.trim()
+	log(`fixture: 在 default branch 创建本 run 独占文件 ${fixturePath}`)
+	await withFixtureMutationLock(() => sh([
+		"gh", "api", "--method", "PUT", `repos/${options.fixtureRepo}/contents/${fixturePath}`,
+		"-f", `message=chore(e2e): initialize ${runKey}`,
+		"-f", "content=c3RhdHVzOiBwZW5nCg==",
+		"-f", `branch=${baseBranch}`,
+	]))
+	log(`fixture: clone 独立 checkout ${cwd}`)
+	sh(["git", "clone", "--branch", "main", "--single-branch", origin, cwd])
+
 	sh(["gh", "label", "create", SEED_LABEL, "-R", options.fixtureRepo,
 		"--description", "real-e2e harness 生成的 seed issue", "--color", "ededed"], { allowFail: true })
-	const openSeeds = ghJson<Array<{ number: number }>>([
-		"issue", "list", "-R", options.fixtureRepo, "--state", "open", "--label", SEED_LABEL, "--json", "number",
-	])
-	for (const issue of openSeeds) {
-		sh(["gh", "issue", "close", String(issue.number), "-R", options.fixtureRepo,
-			"--reason", "not planned", "--comment", "e2e harness reset: 上轮残留 seed，自动关闭"], { allowFail: true })
-	}
-
-	const messagePath = resolve(options.fixtureCwd, "message.txt")
-	const current = readFileSync(messagePath, "utf-8").trim()
-	if (current !== "status: pending") {
-		log(`reset: message.txt 当前为 ${JSON.stringify(current)}，翻回 pending 并 push main`)
-		writeFileSync(messagePath, "status: pending\n")
-		sh(["git", "add", "message.txt"], { cwd: options.fixtureCwd })
-		sh(["git", "commit", "-m", "chore(e2e): reset message.txt to pending"], { cwd: options.fixtureCwd })
-		sh(["git", "push", "origin", "main"], { cwd: options.fixtureCwd })
-	} else {
-		log("reset: message.txt 已是 pending，无需翻转")
-	}
+	return { cwd, repository: options.fixtureRepo, baseBranch, runKey, fixturePath }
 }
 
 // -------------------------------------------------------------------- seed
 
-function seedIssueBody(): string {
+function seedIssueBody(fixture: FixtureRun): string {
 	return `## 目标
 
-把 \`message.txt\` 的内容从 \`status: pending\` 改为 \`status: complete\`，使 \`bun run check\` 通过。
+把本轮独占文件 \`${fixture.fixturePath}\` 的内容从 \`status: pending\` 改为 \`status: complete\`。
 
 ## 上下文
 
-- **Repo**: \`mouriya-s-lab/coder-loop-e2e-fixture\`
+- **Repo**: \`${fixture.repository}\`
+- **Base branch**: \`${fixture.baseBranch}\`
+- **Run-owned fixture**: \`${fixture.fixturePath}\`
 - **Design source**: coder-loop 真实 e2e harness（mouriya-s-lab/coder-loop#464）自动生成的 seed 任务。
 
 ## 问题
 
-\`message.txt\` 当前内容是 \`status: pending\`，\`bun run check\`（\`scripts/check-message.mjs\`）因此失败。
+\`${fixture.fixturePath}\` 是本 run 在 default branch 上预建的独占 fixture，当前内容是 \`status: pending\`。其他并发 run 使用不同路径。
 
 ## 预期结果
 
-\`message.txt\` 内容为 \`status: complete\`，\`bun run check\` 通过。
+\`${fixture.fixturePath}\` 内容为 \`status: complete\`；不改 \`message.txt\` 或其他 run 的 \`runs/*.txt\`。
 
 ## 验收标准
 
 | # | Dimension | Check | Command | Env | Expect |
 |---|-----------|-------|---------|-----|--------|
-| 1 | function | message.txt 内容为 complete | \`cat message.txt\` | local | 输出 \`status: complete\` |
-| 2 | function | fixture check 通过 | \`bun run check\` | local | exit 0，输出 \`message fixture check passed\` |
+| 1 | function | 本轮 fixture 内容为 complete | \`cat ${fixture.fixturePath}\` | local | 输出 \`status: complete\` |
+| 2 | scope | 只修改本轮 fixture | \`git diff --name-only ${fixture.baseBranch}...HEAD\` | local | 只输出 \`${fixture.fixturePath}\` |
 
 ## 依赖关系
 
@@ -251,12 +239,12 @@ function seedIssueBody(): string {
 `
 }
 
-function createSeedIssue(options: HarnessOptions): number {
+function createSeedIssue(fixture: FixtureRun): number {
 	log("seed: 创建 seed issue")
-	const result = sh(["gh", "issue", "create", "-R", options.fixtureRepo,
-		"--title", "把 message.txt 标记为 complete",
+	const result = sh(["gh", "issue", "create", "-R", fixture.repository,
+		"--title", `把本轮 fixture 标记为 complete (${fixture.runKey})`,
 		"--label", "kind:code", "--label", SEED_LABEL,
-		"--body", seedIssueBody()])
+		"--body", seedIssueBody(fixture)])
 	const url = result.stdout.trim()
 	const match = url.match(/\/issues\/(\d+)\s*$/)
 	if (match === null) fail(`无法从 gh issue create 输出解析 issue 号: ${url}`)
@@ -394,8 +382,8 @@ type StatusSnapshot = {
 	current?: { run?: unknown }
 }
 
-function readStatus(options: HarnessOptions, loopDataRoot: string, chainName: string): StatusSnapshot {
-	const result = sh(["bun", LOOP_ENTRY, "status", options.fixtureCwd,
+function readStatus(fixture: FixtureRun, loopDataRoot: string, chainName: string): StatusSnapshot {
+	const result = sh(["bun", LOOP_ENTRY, "status", fixture.cwd,
 		"--json", "--loop-data-root", loopDataRoot, "--chain", chainName], { allowFail: true })
 	if (result.exitCode !== 0) return {}
 	try {
@@ -423,6 +411,7 @@ function countRuns(loopDataRoot: string): number {
 
 async function watch(
 	options: HarnessOptions,
+	fixture: FixtureRun,
 	loopDataRoot: string,
 	chainName: string,
 ): Promise<WatchVerdict> {
@@ -437,7 +426,7 @@ async function watch(
 		if (runs > options.maxRuns) {
 			return { kind: "tripwire", reason: `runs 数 ${runs} 超过上界 ${options.maxRuns}（#309 式 spin 信号）` }
 		}
-		const snapshot = readStatus(options, loopDataRoot, chainName)
+		const snapshot = readStatus(fixture, loopDataRoot, chainName)
 		const byStatus = snapshot.queue?.byStatus ?? {}
 		const attempts = snapshot.queue?.selected?.attempts ?? null
 		if (attempts !== null && attempts > options.maxAttempts) {
@@ -467,28 +456,32 @@ type EvidenceSummary = {
 	durationSeconds: number
 }
 
-function assertGitHubOutcome(options: HarnessOptions, issueNumber: number, durationSeconds: number): EvidenceSummary {
+type ScenarioResult =
+	| { kind: "success"; issueNumber: number }
+	| { kind: "failure"; issueNumber?: number }
+
+function assertGitHubOutcome(fixture: FixtureRun, issueNumber: number, durationSeconds: number): EvidenceSummary {
 	log("assert: GitHub 终态")
 	const issue = ghJson<{
 		state: string
 		url: string
 		closedByPullRequestsReferences: Array<{ number: number; url: string }>
-	}>(["issue", "view", String(issueNumber), "-R", options.fixtureRepo,
+	}>(["issue", "view", String(issueNumber), "-R", fixture.repository,
 		"--json", "state,url,closedByPullRequestsReferences"])
 	if (issue.state !== "CLOSED") fail(`seed issue #${issueNumber} 未关闭 (state=${issue.state})`)
 	const closingPr = issue.closedByPullRequestsReferences[0]
 	if (closingPr === undefined) fail(`seed issue #${issueNumber} 已关闭但没有 closing PR reference`)
 	const pr = ghJson<{ state: string; url: string; mergeCommit: { oid: string } | null }>([
-		"pr", "view", String(closingPr.number), "-R", options.fixtureRepo,
+		"pr", "view", String(closingPr.number), "-R", fixture.repository,
 		"--json", "state,url,mergeCommit"])
 	if (pr.state !== "MERGED") fail(`PR #${closingPr.number} 未 merge (state=${pr.state})`)
 
-	log("assert: fixture main 实际内容 + 真实 check")
-	sh(["git", "fetch", "origin", "main"], { cwd: options.fixtureCwd })
-	sh(["git", "reset", "--hard", "origin/main"], { cwd: options.fixtureCwd })
-	const message = readFileSync(resolve(options.fixtureCwd, "message.txt"), "utf-8").trim()
-	if (message !== "status: complete") fail(`merge 后 message.txt 为 ${JSON.stringify(message)}，预期 status: complete`)
-	const check = sh(["bun", "run", "check"], { cwd: options.fixtureCwd, allowFail: true })
+	log(`assert: fixture ${fixture.fixturePath} 实际内容 + 真实 check`)
+	sh(["git", "fetch", "origin", fixture.baseBranch], { cwd: fixture.cwd })
+	sh(["git", "reset", "--hard", `origin/${fixture.baseBranch}`], { cwd: fixture.cwd })
+	const message = readFileSync(resolve(fixture.cwd, fixture.fixturePath), "utf-8").trim()
+	if (message !== "status: complete") fail(`merge后 ${fixture.fixturePath} 为 ${JSON.stringify(message)}，预期 status: complete`)
+	const check = sh(["bun", "-e", `const value = await Bun.file(${JSON.stringify(fixture.fixturePath)}).text(); if (value.trim() !== "status: complete") process.exit(1)`], { cwd: fixture.cwd, allowFail: true })
 	if (check.exitCode !== 0) fail(`merge 后 bun run check 失败:\n${check.stderr}`)
 
 	return {
@@ -503,13 +496,13 @@ function assertGitHubOutcome(options: HarnessOptions, issueNumber: number, durat
 
 // ----------------------------------------------------------------- diagnose
 
-function dumpDiagnosis(options: HarnessOptions, daemon: DaemonHandle, chainName: string, reason: string): void {
+function dumpDiagnosis(fixture: FixtureRun, daemon: DaemonHandle, chainName: string, reason: string): void {
 	process.stderr.write(`\nreal-e2e: 失败/止血: ${reason}\n`)
 	process.stderr.write(`诊断材料:\n`)
 	process.stderr.write(`  loop-data root: ${daemon.loopDataRoot}\n`)
 	process.stderr.write(`  daemon stdout : ${daemon.stdoutPath}\n`)
 	process.stderr.write(`  daemon stderr : ${daemon.stderrPath}\n`)
-	const snapshot = sh(["bun", LOOP_ENTRY, "status", options.fixtureCwd,
+	const snapshot = sh(["bun", LOOP_ENTRY, "status", fixture.cwd,
 		"--json", "--loop-data-root", daemon.loopDataRoot, "--chain", chainName], { allowFail: true })
 	process.stderr.write(`  status --json :\n${snapshot.stdout}\n`)
 }
@@ -519,77 +512,116 @@ function dumpDiagnosis(options: HarnessOptions, daemon: DaemonHandle, chainName:
 async function main(): Promise<void> {
 	const options = parseArgs(process.argv.slice(2))
 	const startedAt = Date.now()
-	const stamp = new Date().toISOString().replace(/[:.]/g, "-")
-	const workDir = resolve(REPO_ROOT, ".coder-loop/runtime/real-e2e", stamp)
+	const runKey = randomUUID()
+	const workDir = resolve(REPO_ROOT, ".coder-loop/runtime/real-e2e", runKey)
 	mkdirSync(workDir, { recursive: true })
-	const chainName = options.fixtureRepo.split("/")[1]!
 
 	preflight(options)
-	resetFixture(options)
+	const fixture = await prepareFixture(options, workDir, runKey)
+	const chainName = `${options.fixtureRepo.split("/")[1]!}-${runKey}`
 
 	const daemon = startDaemon(workDir)
 	let exitCode = 1
+	let issueNumber: number | undefined
 	try {
-		exitCode = await runScenario(options, daemon, chainName, startedAt)
+		const result = await runScenario(options, fixture, daemon, chainName, startedAt)
+		issueNumber = result.issueNumber
+		exitCode = result.kind === "success" ? 0 : 1
 	} finally {
 		await stopDaemon(daemon)
+		if (exitCode !== 0 && issueNumber !== undefined) cleanupOwnedGitHubResources(fixture, issueNumber)
+		await deleteRunFixture(fixture)
 	}
 	process.exit(exitCode)
 }
 
 async function runScenario(
 	options: HarnessOptions,
+	fixture: FixtureRun,
 	daemon: DaemonHandle,
 	chainName: string,
 	startedAt: number,
-): Promise<number> {
+): Promise<ScenarioResult> {
 	await waitForDaemonSocket(daemon, 15)
 
 	// #436: install/uninstall subcommands retired. The five-layer bootstrap reduced to a single
 	// `chain create` on the central daemon socket. Target directory needs no bootstrap files —
 	// CLAUDE.md / AGENTS.md ride in the fixture repo itself, preset's planning agent ensures
 	// GitHub label assets on first issue creation.
-	log(`chain create: ${chainName} → ${options.fixtureRepo} (preset=${options.preset})`)
+	log(`chain create: ${chainName} → ${fixture.repository}@${fixture.baseBranch} (preset=${options.preset})`)
 	const chainCreate = sh(["bun", LOOP_ENTRY, "chain", "create", chainName,
-		"--config-json", JSON.stringify({ repository: options.fixtureRepo, baseBranch: "main" }),
+		"--config-json", JSON.stringify({ repository: fixture.repository, baseBranch: fixture.baseBranch }),
 		"--preset", options.preset,
 		"--force",
 		"--loop-data-root", daemon.loopDataRoot], { allowFail: true })
 	if (chainCreate.exitCode !== 0) {
-		dumpDiagnosis(options, daemon, chainName, `chain create 失败:\n${chainCreate.stdout}\n${chainCreate.stderr}`)
-		return 1
+		dumpDiagnosis(fixture, daemon, chainName, `chain create 失败:\n${chainCreate.stdout}\n${chainCreate.stderr}`)
+		return { kind: "failure" }
 	}
 
-	const issueNumber = createSeedIssue(options)
+	const issueNumber = createSeedIssue(fixture)
 
 	log(`item: 入队 issue #${issueNumber} → chain ${chainName} (preset=${options.preset})`)
 	// #412: preset is required per-item; pass the same bundled preset the harness installed with so the
 	// engine renders against the same preset for spawn / iteration / review.
 	sh(["bun", LOOP_ENTRY, "item", "add", chainName,
 		"--issue", String(issueNumber),
-		"--repo-cwd", options.fixtureCwd,
+		"--repo-cwd", fixture.cwd,
 		"--preset", options.preset,
 		"--loop-data-root", daemon.loopDataRoot])
 
-	const verdict = await watch(options, daemon.loopDataRoot, chainName)
+	const verdict = await watch(options, fixture, daemon.loopDataRoot, chainName)
 	if (verdict.kind !== "success") {
 		const reason = verdict.kind === "tripwire"
 			? `tripwire: ${verdict.reason}`
 			: `item 落入失败终态 ${verdict.status}`
-		dumpDiagnosis(options, daemon, chainName, reason)
-		return 1
+		dumpDiagnosis(fixture, daemon, chainName, reason)
+		return { kind: "failure", issueNumber }
 	}
 
 	const durationSeconds = Math.floor((Date.now() - startedAt) / 1000)
-	const evidence = assertGitHubOutcome(options, issueNumber, durationSeconds)
+	const evidence = assertGitHubOutcome(fixture, issueNumber, durationSeconds)
 	log("")
 	log("===== real-e2e evidence =====")
 	log(`seed issue : ${evidence.issueUrl} (CLOSED)`)
 	log(`PR         : ${evidence.prUrl} (MERGED, ${evidence.mergeCommit})`)
 	log(`duration   : ${evidence.durationSeconds}s`)
 	log(`loop-data  : ${daemon.loopDataRoot}`)
+	log(`fixture    : ${fixture.fixturePath} (deleted after teardown)`)
 	log("=============================")
-	return 0
+	return { kind: "success", issueNumber }
 }
 
-await main()
+function cleanupOwnedGitHubResources(fixture: FixtureRun, issueNumber: number): void {
+	log(`teardown: 只清理本 run 的 GitHub 资源 (issue #${issueNumber})`)
+	const prs = ghJson<Array<{ number: number; body: string }>>([
+		"pr", "list", "-R", fixture.repository, "--state", "open", "--json", "number,body",
+	])
+	for (const pr of prs) {
+		if (pr.body.split("\n", 1)[0] !== `Closes #${issueNumber}`) continue
+		sh(["gh", "pr", "close", String(pr.number), "-R", fixture.repository, "--delete-branch",
+			"--comment", `real-e2e ${fixture.runKey}: 本 run 失败，清理自己的 PR`], { allowFail: true })
+	}
+	sh(["gh", "issue", "close", String(issueNumber), "-R", fixture.repository,
+		"--reason", "not planned", "--comment", `real-e2e ${fixture.runKey}: 本 run 失败，清理自己的 seed`], { allowFail: true })
+}
+
+async function deleteRunFixture(fixture: FixtureRun): Promise<void> {
+	log(`teardown: 删除本 run 独占 fixture ${fixture.fixturePath}`)
+	await withFixtureMutationLock(() => {
+		const sha = sh(["gh", "api", "--method", "GET", `repos/${fixture.repository}/contents/${fixture.fixturePath}`,
+			"-f", `ref=${fixture.baseBranch}`, "--jq", ".sha"], { allowFail: true }).stdout.trim()
+		if (sha === "") return
+		sh(["gh", "api", "--method", "DELETE", `repos/${fixture.repository}/contents/${fixture.fixturePath}`,
+			"-f", `message=chore(e2e): cleanup ${fixture.runKey}`,
+			"-f", `sha=${sha}`, "-f", `branch=${fixture.baseBranch}`], { allowFail: true })
+	})
+}
+
+try {
+	await main()
+} catch (error) {
+	const message = error instanceof Error ? error.message : String(error)
+	process.stderr.write(`real-e2e: ${message}\n`)
+	process.exit(1)
+}
