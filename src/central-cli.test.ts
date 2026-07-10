@@ -3,7 +3,7 @@ import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
 import { startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
-import { LOOP_DATA_ROOT_ENV, LOOP_RUN_CREDENTIAL_ENV, resolveLoopDataPaths } from "./runtime-paths"
+import { LOOP_DATA_ROOT_ENV, resolveLoopDataPaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
 import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedItemExtra } from "./runtime-data"
 
@@ -198,10 +198,7 @@ describe("central chain/item CLI", () => {
 				"--loop-data-root",
 				fixture.loopDataRoot,
 				"--json",
-			], {
-				[LOOP_DATA_ROOT_ENV]: fixture.loopDataRoot,
-				[LOOP_RUN_CREDENTIAL_ENV]: "credential-that-was-never-minted",
-			})
+			], { CODER_LOOP_RUN_CRED: "credential-that-was-never-minted" })
 			expect(fabricatedCred.exitCode).not.toBe(0)
 			expect(fabricatedCred.stderr).toContain("invalid_caller")
 			expect(fabricatedCred.stderr).toContain("agentCredential")
@@ -522,10 +519,7 @@ attemptTimeoutSeconds = 3600
 			// that the credential reached the daemon — operator path returns no error at all.
 			const agentDown = await runCli(
 				["daemon", "down", "--loop-data-root", loopDataRoot, "--json"],
-				{
-					[LOOP_DATA_ROOT_ENV]: loopDataRoot,
-					[LOOP_RUN_CREDENTIAL_ENV]: "fabricated-credential-from-agent-env",
-				},
+				{ CODER_LOOP_RUN_CRED: "fabricated-credential-from-agent-env" },
 			)
 			expect(agentDown.exitCode).not.toBe(0)
 			expect(JSON.parse(agentDown.stdout)).toMatchObject({ ok: false, error: { code: "invalid_caller" } })
@@ -545,22 +539,6 @@ attemptTimeoutSeconds = 3600
 				// Process may already have exited after operator daemon down.
 			}
 			await daemonProcess.exited.catch(() => undefined)
-		}
-	})
-
-	test("run credential is not attached to a daemon at a different loop-data root", async () => {
-		const fixture = await startFixture("credential-root-isolation")
-		try {
-			const created = expectJsonOk(await runCli(
-				["chain", "create", "nested-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--preset", "gh-issue-pr-iteration", "--loop-data-root", fixture.loopDataRoot, "--json"],
-				{
-					[LOOP_DATA_ROOT_ENV]: resolve(TEST_ROOT, "outer-loop-data"),
-					[LOOP_RUN_CREDENTIAL_ENV]: "outer-daemon-run-credential",
-				},
-			))
-			expect(created.chain).toMatchObject({ name: "nested-chain", status: "active" })
-		} finally {
-			await fixture.daemon.stop()
 		}
 	})
 

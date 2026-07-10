@@ -207,6 +207,63 @@ describe("scheduler", () => {
 		}
 	})
 
+	test("active-child final trigger preparation abort remains retryable", async () => {
+		const fixture = await createFixture("active-child-final-trigger-retry")
+		try {
+			const chain = createChain(fixture.store, "active-child-final-trigger-retry-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 535_401, repoCwd: "/repo/a" })
+			fixture.store.updateItem(item.id, {
+				status: runtimeStatus("blocked"),
+				phase: "review",
+				attempts: 2,
+				lastRunId: "run-pre-blocked-review",
+				updatedAt: 1_900_535_400,
+			})
+			const activeChildRunner = resolve(fixture.loopDataRoot, "final-trigger-active-child-runner.ts")
+			await writeFile(activeChildRunner, "process.exit(0)\n")
+			let now = 1_900_535_401
+			let spawnCount = 0
+			let runSequence = 0
+			const options = fixture.options({
+				now: () => now,
+				runIdFactory: () => `active-child-final-trigger-${++runSequence}`,
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [activeChildRunner], model: null },
+				onEvent: async (event: SchedulerEvent) => {
+					fixture.schedulerEvents.push(event)
+					if (event.type === "agent.spawn" && ++spawnCount === 1) {
+						await new Promise((resolve) => setTimeout(resolve, 20))
+						throw new Error("final trigger spawn observability failed")
+					}
+				},
+			})
+
+			const failedTick = await schedulerTick(options)
+			expect(failedTick.spawnedRuns).toHaveLength(0)
+			const failedRun = fixture.store.getRunByRunId("active-child-final-trigger-1")
+			expect(failedRun?.endedAt).toBe(now)
+			expect(failedRun?.exitCode).toBe(1)
+			expect(fixture.store.getCurrentRun(chain.id)).toBeNull()
+			expect(fixture.store.getChain(chain.id)?.status).toBe("active")
+			const failedItem = fixture.store.getItem(item.id)
+			expect(failedItem?.phase).toBe("review")
+			expect(failedItem?.extra.schedulerSpawnError).toMatchObject({
+				attribution: { kind: "phase", phase: "blocked-responder" },
+				message: "final trigger spawn observability failed",
+			})
+			expect(failedItem?.extra.schedulerBackoff).toMatchObject({ failureCount: 1, nextRunAt: now + 60 })
+			expect(fixture.schedulerEvents.filter((event) => event.type === "spawn.aborted")).toHaveLength(1)
+
+			now += 60
+			const retryTick = await schedulerTick(options)
+			expect(retryTick.spawnedRuns).toHaveLength(1)
+			expect(retryTick.spawnedRuns[0]?.runId).toBe("active-child-final-trigger-2")
+			expect(fixture.store.getItem(item.id)?.phase).toBe("blocked-responder")
+			await retryTick.spawnedRuns[0]!.closed
+		} finally {
+			fixture.store.close()
+		}
+	})
+
 	test("chain preparation failure does not starve sibling chain", async () => {
 		const fixture = await createFixture("chain-preparation-containment")
 		try {

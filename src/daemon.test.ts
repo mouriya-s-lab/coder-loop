@@ -3488,11 +3488,6 @@ attemptTimeoutSeconds = 3600
 			expect(cliTypes).toContain("queue.terminal")
 
 			const logsSince = new Date(Date.now() - 60_000).toISOString()
-			const logsCliEnv: NodeJS.ProcessEnv = { ...process.env, CODER_LOOP_DATA_DIR: fixture.loopDataRoot }
-			// This subprocess is the test operator querying the nested fixture daemon. The parent
-			// may itself be a scheduler agent, but its credential belongs to that outer daemon;
-			// carrying it after replacing CODER_LOOP_DATA_DIR fabricates an impossible same-root pair.
-			delete logsCliEnv.CODER_LOOP_RUN_CRED
 			const logsCli = Bun.spawn({
 				cmd: [
 					"bun",
@@ -3512,7 +3507,7 @@ attemptTimeoutSeconds = 3600
 				cwd: REPO_ROOT,
 				stdout: "pipe",
 				stderr: "pipe",
-				env: logsCliEnv,
+				env: { ...process.env, CODER_LOOP_DATA_DIR: fixture.loopDataRoot },
 			})
 			const [logsStdout, logsStderr, logsExit] = await Promise.all([
 				new Response(logsCli.stdout).text(),

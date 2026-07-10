@@ -113,6 +113,11 @@ export type SchedulerActiveRun = {
 	terminate: (options?: SchedulerRunTerminateOptions) => Promise<SchedulerCompletedRun>
 }
 
+type SchedulerPreparingRun = SchedulerActiveRun & {
+	markPrepared: () => void
+	abortPreparation: (options?: SchedulerRunTerminateOptions) => Promise<SchedulerCompletedRun>
+}
+
 export type SchedulerRunTerminateOptions = {
 	forceAfterMs?: number
 }
@@ -947,7 +952,7 @@ async function spawnSchedulerRun(
 	let startedAt: number | null = null
 	let credential: SchedulerRunCredential | null = null
 	let credentialContext: SchedulerRunCredentialContext | null = null
-	let activeRun: SchedulerActiveRun | null = null
+	let activeRun: SchedulerPreparingRun | null = null
 	try {
 		worktreePath = worktreePath ?? await worktreeManager({ chain, repoCwd: item.repoCwd, slotKey: slot.key })
 		slot.worktreePath = worktreePath
@@ -1064,6 +1069,7 @@ async function spawnSchedulerRun(
 		})
 		await emit(options, { type: "agent.spawn", slotKey: slot.key, chainId: chain.id, itemId: item.id, runId, phase, pid: activeRun.pid, worktreePath, presetDir })
 		await emit(options, { type: "phase.start", ts: nowIso(options), runId, chainId: chain.id, itemId: item.id, repoCwd: item.repoCwd, phase, pid: activeRun.pid })
+		activeRun.markPrepared()
 		return activeRun
 	} catch (error) {
 		const failure = await cleanupFailedRunPreparation(options, chain, item, slot, {
@@ -1094,7 +1100,7 @@ async function waitForChildSpawn(child: ReturnType<typeof spawn>): Promise<void>
 
 type FailedRunPreparationResources = {
 	runId: string | null
-	activeRun: SchedulerActiveRun | null
+	activeRun: SchedulerPreparingRun | null
 	credential: SchedulerRunCredential | null
 	credentialContext: SchedulerRunCredentialContext | null
 }
@@ -1110,7 +1116,7 @@ async function cleanupFailedRunPreparation(
 	const cleanupErrors: string[] = []
 	if (resources.activeRun !== null) {
 		try {
-			await resources.activeRun.terminate({ forceAfterMs: 1_000 })
+			await resources.activeRun.abortPreparation({ forceAfterMs: 1_000 })
 		} catch (error) {
 			cleanupErrors.push(`child cleanup failed: ${errorMessage(error)}`)
 		}
@@ -1183,6 +1189,7 @@ async function containSchedulerPreparationFailure(
 	if (backoff === null) throw new Error("scheduler preparation backoff construction failed")
 	const extraWithBackoff = withSchedulerBackoff(persistedItem.extra, backoff)
 	options.store.updateItem(item.id, {
+		phase: item.phase,
 		extra: withSchedulerSpawnError(extraWithBackoff, failedAt, attribution, message),
 		updatedAt: failedAt,
 	})
@@ -1216,13 +1223,23 @@ function attachRunCloseHandler(
 	// error branch — the run is no longer active either way.
 	credential: SchedulerRunCredential | null,
 	credentialContext: SchedulerRunCredentialContext,
-): SchedulerActiveRun {
+): SchedulerPreparingRun {
 	const stdout: Buffer[] = []
 	const stderr: Buffer[] = []
 	const outputPaths = schedulerPhaseOutputPaths(options, chain, runId, phase)
 	const outputWriters = createSchedulerPhaseOutputWriters(outputPaths)
 	let lifecycleGc: SchedulerRunLifecycleGc | null = null
 	let terminatorCleanup: (() => void) | null = null
+	let closeMode: "preparing" | "normal" | "preparation-abort" = "preparing"
+	let releaseCloseHandler: () => void = () => {}
+	const preparationDecided = new Promise<void>((resolve) => {
+		releaseCloseHandler = resolve
+	})
+	const decideCloseMode = (mode: "normal" | "preparation-abort"): void => {
+		if (closeMode !== "preparing") throw new Error(`scheduler run ${runId} preparation already decided as ${closeMode}`)
+		closeMode = mode
+		releaseCloseHandler()
+	}
 
 	const closed = new Promise<SchedulerCompletedRun>((resolveClosed, rejectClosed) => {
 		child.stdout?.on("data", (chunk: Buffer) => {
@@ -1258,6 +1275,24 @@ function attachRunCloseHandler(
 				const exitCode = code ?? 1
 				const stdoutText = Buffer.concat(stdout).toString("utf-8")
 				const stderrText = Buffer.concat(stderr).toString("utf-8")
+				if (closeMode === "preparing") await preparationDecided
+				if (closeMode === "preparation-abort") {
+					try {
+						await closeSchedulerPhaseOutputWriters(outputWriters)
+						return {
+							runId,
+							itemId: item.id,
+							chainId: chain.id,
+							repoCwd: item.repoCwd,
+							exitCode,
+							stdout: stdoutText,
+							stderr: stderrText,
+							status: (options.store.getItem(item.id) ?? item).status,
+						}
+					} finally {
+						if (credential !== null) options.runCredentials?.revoke(credential, credentialContext)
+					}
+				}
 				// #478: detect account rate-limit BEFORE the first await so the in-state cooldown
 				// gate (`SchedulerState.rateLimitedUntilMs`) is armed synchronously. The next
 				// scheduler tick may fire while this close handler is still awaiting artifact
@@ -1421,7 +1456,12 @@ function attachRunCloseHandler(
 		})
 	})
 	const terminate = createRunTerminator(child, closed, terminatorCleanup)
-	return { runId, pid: child.pid ?? null, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, worktreePath, startedAt, closed, terminate }
+	const abortPreparation = (options?: SchedulerRunTerminateOptions): Promise<SchedulerCompletedRun> => {
+		decideCloseMode("preparation-abort")
+		return terminate(options)
+	}
+	const markPrepared = (): void => decideCloseMode("normal")
+	return { runId, pid: child.pid ?? null, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, worktreePath, startedAt, closed, terminate, markPrepared, abortPreparation }
 }
 
 type SchedulerPhaseOutputPaths = {
