@@ -19,7 +19,7 @@ import {
 	type DaemonResponse,
 	type DaemonRateLimitState,
 } from "./daemon"
-import { buildCoderLoopStatusSnapshot, type JsonObject, type JsonValue } from "./loop"
+import { buildCoderLoopStatusSnapshot, loadPreset, type JsonObject, type JsonValue } from "./loop"
 import {
 	createGitWorktreeManager,
 	schedulerSlotWorktreePath,
@@ -6118,6 +6118,173 @@ process.exitCode = 0
 		}
 	}, 30_000)
 
+	test("queue unblock waits for in-flight scheduler tick", async () => {
+		const fixture = await startQueueUnblockGateFixture("538-in-flight", { targetStatus: "blocked" })
+		try {
+			await fixture.tickEntered.promise
+
+			// Model the snapshot that existed when the in-flight tick began. Once released, the
+			// real scheduler spawn replaces this row with the sentinel item's current run.
+			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				store.recordRun({
+					runId: "run-before-in-flight-tick",
+					chainId: fixture.chainId,
+					itemId: fixture.targetRowId,
+					phase: "iteration",
+					startedAt: 1_800_000_000,
+					extra: storedItemExtra({}),
+				})
+				store.setCurrentRun({
+					chainId: fixture.chainId,
+					phase: "iteration",
+					runId: "run-before-in-flight-tick",
+					startedAt: 1_800_000_000,
+					extra: storedItemExtra({ itemId: fixture.targetRowId }),
+				})
+			} finally {
+				store.close()
+			}
+
+			let unblockSettled = false
+			const unblockPromise = sendDaemonRequest(fixture.socketPath, daemonRequest("queue.unblock", {
+				chainName: fixture.chainName,
+				issue: fixture.targetItemId,
+			})).then((response) => {
+				unblockSettled = true
+				return response
+			})
+
+			// The operator-admission event is written before dispatch enters handleQueueUnblock.
+			// Seeing it while the worktree promise gate is still closed proves the request reached
+			// the handler; the item/current-run snapshot must remain untouched until the tick exits.
+			await waitFor(
+				async () => (await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile)).events,
+				(events) => events.filter((event) =>
+					event.kind === "audit"
+						&& event.type === "privileged_op.caller_admission"
+						&& event.payload.op === "queue.unblock"
+						&& event.payload.outcome === "allow",
+				).length >= 2,
+			)
+			expect(unblockSettled).toBe(false)
+			expect((await readItem(fixture.loopDataRoot, fixture.chainId, Number(fixture.targetItemId)))?.status).toBe("blocked")
+
+			fixture.releaseTick.resolve()
+			const unblock = record(expectOk(await unblockPromise))
+			expect(record(unblock.mutation)).toMatchObject({
+				changed: true,
+				beforeStatus: "blocked",
+				afterStatus: "queued",
+				clearedCurrent: false,
+			})
+
+			const current = await readCurrentRun(fixture.loopDataRoot, fixture.chainId)
+			expect(current?.extra.itemId).toBe(fixture.sentinelRowId)
+			expect(current?.runId).not.toBe("run-before-in-flight-tick")
+		} finally {
+			fixture.releaseTick.resolve()
+			await fixture.daemon.stop()
+		}
+	}, 30_000)
+
+	test("queue unblock always resumes scheduler", async () => {
+		const scenarios: readonly QueueUnblockOutcomeScenario[] = [
+			{ name: "success", targetStatus: "blocked", issue: "target" },
+			{ name: "dry-run", targetStatus: "blocked", issue: "target", dryRun: true },
+			{ name: "not-unblockable", targetStatus: "done", issue: "target" },
+			{ name: "not-found", targetStatus: "blocked", issue: "missing" },
+			{ name: "preset-load-error", targetStatus: "blocked", issue: "target", chainPreset: "missing-538-preset" },
+		]
+
+		for (const scenario of scenarios) {
+			const fixture = await startQueueUnblockGateFixture(`538-resume-${scenario.name}`, scenario)
+			try {
+				await fixture.tickEntered.promise
+				const responsePromise = sendDaemonRequest(fixture.socketPath, daemonRequest("queue.unblock", {
+					chainName: fixture.chainName,
+					issue: scenario.issue === "target" ? fixture.targetItemId : scenario.issue,
+					...(scenario.dryRun === true ? { dryRun: true } : {}),
+				}))
+
+				fixture.releaseTick.resolve()
+				const response = await responsePromise
+				if (scenario.name === "success" || scenario.name === "dry-run") {
+					expectOk(response)
+				} else if (scenario.name === "not-unblockable") {
+					expect(record(expectOk(response).mutation).reason).toBe("not_unblockable")
+				} else {
+					expect(response.ok).toBe(false)
+				}
+
+				// The initial tick is now holding an active sentinel run. A post-outcome tick
+				// therefore emits slot.busy; reaching this promise proves finally resumed the
+				// scheduler for returns and throws alike without inspecting private pause depth.
+				const busyEvent = await fixture.postOutcomeTick.promise
+				expect(busyEvent.type).toBe("slot.busy")
+			} finally {
+				fixture.releaseTick.resolve()
+				await fixture.daemon.stop()
+			}
+		}
+	}, 30_000)
+
+	test("queue unblock caller admission", async () => {
+		const fixture = await startQueueUnblockGateFixture("538-caller-admission", { targetStatus: "blocked" })
+		try {
+			await fixture.tickEntered.promise
+			fixture.releaseTick.resolve()
+			const credential = await waitFor(
+				async () => {
+					try { return (await readFile(fixture.credentialPath, "utf-8")).trim() } catch { return "" }
+				},
+				(value) => value.length > 0,
+			)
+
+			const denied = await sendDaemonRequest(fixture.socketPath, daemonRequest("queue.unblock", {
+				chainName: fixture.chainName,
+				issue: fixture.targetItemId,
+				agentCredential: credential,
+			}))
+			expect(denied.ok).toBe(false)
+			if (!denied.ok) {
+				expect(denied.error.code).toBe("invalid_caller")
+				expect(denied.error.message).toContain("operator credentials")
+			}
+			expect((await readItem(fixture.loopDataRoot, fixture.chainId, Number(fixture.targetItemId)))?.status).toBe("blocked")
+
+			const allowed = record(expectOk(await sendDaemonRequest(fixture.socketPath, daemonRequest("queue.unblock", {
+				chainName: fixture.chainName,
+				issue: fixture.targetItemId,
+			}))))
+			expect(record(allowed.mutation).changed).toBe(true)
+
+			const events = (await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile)).events
+			const queueAdmission = events.filter((event) =>
+				event.kind === "audit"
+					&& event.type === "privileged_op.caller_admission"
+					&& event.payload.op === "queue.unblock",
+			)
+			expect(queueAdmission.some((event) =>
+				event.kind === "audit"
+					&& event.type === "privileged_op.caller_admission"
+					&& event.payload.outcome === "deny"
+					&& event.payload.reason === "hard-deny-for-agent"
+					&& event.subject?.kind === "agent",
+			)).toBe(true)
+			expect(queueAdmission.some((event) => event.kind === "audit" && event.type === "privileged_op.caller_admission" && event.payload.outcome === "allow")).toBe(true)
+			expect(events.some((event) =>
+				event.kind === "audit"
+					&& event.type === "item.mutation.caller_admission"
+					&& event.item === fixture.targetRowId
+					&& event.payload.outcome === "allow"
+					&& event.payload.reason === "operator",
+			)).toBe(true)
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	// #410 acceptance row #2 — review writes its declared passthrough fields (top-level + inner
 	// blocker keys via extraPatch). Uses the same two-phase fake runner shape as #409 row 2:
 	// iteration captures its credential + writes in_progress; review captures its credential and
@@ -6881,6 +7048,128 @@ exit 0
 		schedulerEvents,
 		fakeCodexBinary: fakeCodex,
 		fakeClaudeBinary: fakeClaude,
+	}
+}
+
+type QueueUnblockGateOptions = {
+	targetStatus: string
+	chainPreset?: string
+}
+
+type QueueUnblockOutcomeScenario = QueueUnblockGateOptions & {
+	name: string
+	issue: "target" | "missing"
+	dryRun?: true
+}
+
+async function startQueueUnblockGateFixture(name: string, options: QueueUnblockGateOptions) {
+	const root = resolve(TEST_ROOT, `${++nextFixtureId}-${name}`)
+	const loopDataRoot = resolve(root, "ld")
+	const fakeRunner = resolve(root, "held-runner.ts")
+	const credentialPath = resolve(root, "runner-credential.txt")
+	await mkdir(loopDataRoot, { recursive: true })
+	await writeFile(
+		fakeRunner,
+		`import { writeFile } from "node:fs/promises"
+await writeFile(${JSON.stringify(credentialPath)}, process.env.CODER_LOOP_RUN_CRED ?? "")
+await new Promise((resolveSignal) => process.once("SIGTERM", resolveSignal))
+process.exitCode = 0
+`,
+	)
+
+	const chainName = `${name}-chain`
+	const targetItemId = "538101"
+	const sentinelItemId = "538102"
+	const store = openSqliteStateStore({ loopDataRoot })
+	let chainId: number
+	let targetRowId: number
+	let sentinelRowId: number
+	try {
+		const chain = store.createChain({
+			name: chainName,
+			preset: options.chainPreset ?? "gh-issue-pr-iteration",
+			repository: "mouriya-s-lab/coder-loop",
+			baseBranch: "main",
+			status: "stopped",
+			metadata: storedChainMetadata({}),
+		})
+		chainId = chain.id
+		const target = store.createItem({
+			chainId,
+			itemId: targetItemId,
+			repoCwd: REPO_ROOT,
+			status: runtimeStatus(options.targetStatus),
+			preset: "gh-issue-pr-iteration",
+			extra: storedItemExtra({ issue: targetItemId }),
+		})
+		targetRowId = target.id
+		const sentinel = store.createItem({
+			chainId,
+			itemId: sentinelItemId,
+			repoCwd: REPO_ROOT,
+			status: runtimeStatus("queued"),
+			preset: "gh-issue-pr-iteration",
+			extra: storedItemExtra({ issue: sentinelItemId }),
+		})
+		sentinelRowId = sentinel.id
+	} finally {
+		store.close()
+	}
+
+	const tickEntered = Promise.withResolvers<void>()
+	const releaseTick = Promise.withResolvers<void>()
+	const postOutcomeTick = Promise.withResolvers<Extract<SchedulerEvent, { type: "slot.busy" }>>()
+	let gateFirstWorktree = true
+	const loadedPreset = loadPreset(PRESET_DIR).then((preset) => ({ presetDir: PRESET_DIR, preset }))
+	const daemon = await startCoderLoopDaemon({
+		loopDataRoot,
+		shutdownGraceMs: 100,
+		scheduler: {
+			enabled: true,
+			intervalMs: 60_000,
+			runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
+			presetForChain: () => loadedPreset,
+			presetForItem: () => loadedPreset,
+			worktreeManager: async ({ chain, repoCwd }) => {
+				if (gateFirstWorktree) {
+					gateFirstWorktree = false
+					tickEntered.resolve()
+					await releaseTick.promise
+				}
+				const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+				await mkdir(worktreePath, { recursive: true })
+				return worktreePath
+			},
+			prompt: () => "queue-unblock scheduler serialization fixture",
+			chainCompleteTriggerForChain: () => null,
+			onEvent: (event) => {
+				if (event.type === "slot.busy") postOutcomeTick.resolve(event)
+			},
+		},
+	})
+	const socketPath = daemon.snapshot().socketPath
+	if (options.chainPreset === undefined) {
+		expectOk(await sendDaemonRequest(socketPath, daemonRequest("queue.unblock", {
+			chainName,
+			issue: targetItemId,
+			dryRun: true,
+		})))
+	}
+	expectOk(await sendDaemonRequest(socketPath, daemonRequest("chain.resume", { chainName })))
+
+	return {
+		daemon,
+		loopDataRoot,
+		socketPath,
+		chainName,
+		chainId,
+		targetItemId,
+		targetRowId,
+		sentinelRowId,
+		tickEntered,
+		releaseTick,
+		postOutcomeTick,
+		credentialPath,
 	}
 }
 
