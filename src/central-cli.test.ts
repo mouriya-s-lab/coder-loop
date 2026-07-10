@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { mkdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
 import { startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
@@ -580,6 +580,14 @@ attemptTimeoutSeconds = 3600
 		}
 	})
 
+	test("daemon shutdown cleans runtime after background rejection", async () => {
+		const down = await exerciseShutdownAfterSocketRepairFailure("daemon-down")
+		const sigterm = await exerciseShutdownAfterSocketRepairFailure("sigterm")
+
+		expect(down).toEqual({ exitCode: 0, pidExists: false, socketExists: false })
+		expect(sigterm).toEqual(down)
+	})
+
 	test("daemon down emits human text without json flag", async () => {
 		const loopDataRoot = await makeLoopDataRoot("daemon-down-text")
 		const daemonProcess = Bun.spawn({
@@ -1109,6 +1117,62 @@ function spawnDaemonUp(loopDataRoot: string): Bun.Subprocess<"ignore", "pipe", "
 		stdout: "pipe",
 		stderr: "pipe",
 	})
+}
+
+async function exerciseShutdownAfterSocketRepairFailure(
+	mode: "daemon-down" | "sigterm",
+): Promise<{ exitCode: number | null; pidExists: boolean; socketExists: boolean }> {
+	const loopDataRoot = await makeLoopDataRoot(`daemon-background-rejection-${mode}`)
+	const socketPath = resolve(loopDataRoot, "daemon.sock")
+	const pidFile = resolve(loopDataRoot, "daemon.pid")
+	const daemonProcess = spawnDaemonUp(loopDataRoot)
+	try {
+		await waitForDaemonFiles(loopDataRoot)
+		const daemonPid = Number((await readFile(pidFile, "utf-8")).trim())
+		await unlink(socketPath)
+		await mkdir(socketPath)
+		await new Promise((resolveWait) => setTimeout(resolveWait, 600))
+		expect(isPidAlive(daemonPid)).toBe(true)
+
+		await rm(socketPath, { recursive: true })
+		await waitFor(async () => {
+			try {
+				return (await stat(socketPath)).isSocket() ? true : null
+			} catch {
+				return null
+			}
+		}, 5_000)
+		if (mode === "daemon-down") {
+			const result = await runCli(["daemon", "down", "--loop-data-root", loopDataRoot, "--json"])
+			expect(result.exitCode).toBe(0)
+		} else {
+			process.kill(daemonPid, "SIGTERM")
+		}
+
+		const exitCode = await daemonProcess.exited
+		const stderr = await new Response(daemonProcess.stderr).text()
+		expect(stderr).toContain("coder-loop daemon socket repair failed:")
+		expect(stderr).toContain(socketPath)
+		return {
+			exitCode,
+			pidExists: await pathExistsForShutdownTest(pidFile),
+			socketExists: await pathExistsForShutdownTest(socketPath),
+		}
+	} finally {
+		await rm(socketPath, { recursive: true, force: true })
+		daemonProcess.kill()
+		await daemonProcess.exited.catch(() => undefined)
+	}
+}
+
+async function pathExistsForShutdownTest(path: string): Promise<boolean> {
+	try {
+		await stat(path)
+		return true
+	} catch (error) {
+		if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return false
+		throw error
+	}
 }
 
 async function waitForDaemonFiles(loopDataRoot: string): Promise<void> {

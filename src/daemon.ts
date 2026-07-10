@@ -1077,7 +1077,11 @@ export class CoderLoopDaemon {
 		// tick, and bumps schedulerPauseDepth so requestSchedulerTick is gated
 		// out for the remainder of shutdown. The resume callback would no-op
 		// because state is now "shutting_down", so we deliberately discard it.
-		await this.pauseSchedulerForMutation()
+		try {
+			await this.pauseSchedulerForMutation()
+		} catch (error) {
+			process.stderr.write(`coder-loop daemon scheduler tick failed during shutdown: ${errorMessage(error)}\n`)
+		}
 		await this.stopSocketPathMonitor()
 
 		// Bounded-grace terminate instead of waiting for natural agent completion (#467).
@@ -1145,7 +1149,6 @@ export class CoderLoopDaemon {
 			this.socketPathRepairInFlight = this.ensureSocketPathReachable()
 				.catch((error) => {
 					process.stderr.write(`coder-loop daemon socket repair failed: ${errorMessage(error)}\n`)
-					throw error
 				})
 				.finally(() => {
 					this.socketPathRepairInFlight = null

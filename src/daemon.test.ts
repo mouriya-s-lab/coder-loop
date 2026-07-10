@@ -34,6 +34,7 @@ import { chainBindings, engineLifecycleAdmittedItemStatus, itemExtraToJsonObject
 import type { BoundaryRecord } from "./boundary-types"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
+const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/dt", String(process.pid))
 const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
 
@@ -2695,6 +2696,119 @@ attemptTimeoutSeconds = 3600
 			expect((phaseEnd as { status?: string }).status).toBe("queued")
 		} finally {
 			await fixture.daemon.stop()
+		}
+	})
+
+	test("shutdown completes after scheduler tick rejection", async () => {
+		let rejectSchedulerEvent = false
+		let reportTickEntered: () => void = () => {}
+		const tickEntered = new Promise<void>((resolveEntered) => {
+			reportTickEntered = resolveEntered
+		})
+		let releaseTick: () => void = () => {}
+		const tickReleased = new Promise<void>((resolveReleased) => {
+			releaseTick = resolveReleased
+		})
+		const fixture = await startFixture("shutdown-tick-rejection", {
+			schedulerIntervalMs: 100,
+			schedulerConfig: {
+				onEvent: async (event) => {
+					if (!rejectSchedulerEvent || event.type !== "slot.busy") return
+					reportTickEntered()
+					await tickReleased
+					throw new Error("injected scheduler tick rejection")
+				},
+			},
+		})
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "shutdown-tick-rejection-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			await request(fixture, "item.add", {
+				chainId,
+				itemId: "536",
+				repoCwd: REPO_ROOT,
+				extra: { sleepMs: 30_000, exitCode: 0 },
+			})
+			const activeRuns = await waitFor(
+				async () => record(expectOk(await request(fixture, "daemon.status")).daemon).activeRuns,
+				(runs) => Array.isArray(runs) && runs.length === 1,
+			)
+			if (!Array.isArray(activeRuns)) throw new Error("expected one active run")
+			const activeRun = record(activeRuns[0])
+			const runId = stringValue(activeRun.runId)
+
+			rejectSchedulerEvent = true
+			await tickEntered
+			const stopping = fixture.daemon.stop()
+			rejectSchedulerEvent = false
+			await new Promise((resolveWait) => setTimeout(resolveWait, 50))
+			releaseTick()
+			await expect(stopping).resolves.toBeUndefined()
+
+			expect(await pathExists(fixture.socketPath)).toBe(false)
+			expect(await pathExists(fixture.pidFile)).toBe(false)
+			expect(isPidAlive(numberValue(activeRun.pid))).toBe(false)
+			const run = await readRun(fixture.loopDataRoot, runId)
+			expect(run?.exitCode).toBe(1)
+			expect(await readCurrentRun(fixture.loopDataRoot, chainId)).toBeNull()
+
+			const events = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, {
+				type: "scheduler.tick_failed",
+			})
+			expect(events.events.some((event) =>
+				event.type === "scheduler.tick_failed"
+				&& event.payload.error.includes("injected scheduler tick rejection"),
+			)).toBe(true)
+
+			const restarted = await startCoderLoopDaemon({ loopDataRoot: fixture.loopDataRoot, scheduler: { enabled: false } })
+			await restarted.stop()
+		} finally {
+			releaseTick()
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("socket repair failure does not kill daemon", async () => {
+		const loopDataRoot = resolve(TEST_ROOT, `${++nextFixtureId}-socket-repair-failure-process`)
+		const socketPath = resolve(loopDataRoot, "daemon.sock")
+		const pidFile = resolve(loopDataRoot, "daemon.pid")
+		await mkdir(loopDataRoot, { recursive: true })
+		const daemonProcess = Bun.spawn({
+			cmd: ["bun", LOOP_ENTRY, "daemon", "up", "--loop-data-root", loopDataRoot, "--scheduler-interval-ms", "100", "--json"],
+			cwd: REPO_ROOT,
+			stdin: "ignore",
+			stdout: "pipe",
+			stderr: "pipe",
+		})
+		try {
+			await waitFor(
+				async () => await pathExists(socketPath) && await pathIsSocket(socketPath) && await pathExists(pidFile),
+				Boolean,
+				5_000,
+			)
+			const daemonPid = Number((await readFile(pidFile, "utf-8")).trim())
+
+			await unlink(socketPath)
+			await mkdir(socketPath)
+			await new Promise((resolveWait) => setTimeout(resolveWait, 600))
+			expect(isPidAlive(daemonPid)).toBe(true)
+
+			await rm(socketPath, { recursive: true })
+			await waitFor(async () => await pathExists(socketPath) && await pathIsSocket(socketPath), Boolean, 5_000)
+			expect(expectOk(await sendDaemonRequest(socketPath, daemonRequest("daemon.down"))).shutdown).toBe(true)
+			expect(await daemonProcess.exited).toBe(0)
+			expect(await pathExists(socketPath)).toBe(false)
+			expect(await pathExists(pidFile)).toBe(false)
+			const stderr = await new Response(daemonProcess.stderr).text()
+			expect(stderr).toContain("coder-loop daemon socket repair failed:")
+			expect(stderr).toContain(socketPath)
+		} finally {
+			await rm(socketPath, { recursive: true, force: true })
+			daemonProcess.kill()
+			await daemonProcess.exited.catch(() => undefined)
 		}
 	})
 
@@ -6920,6 +7034,7 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 	await options.beforeStart?.({ root, loopDataRoot, eventLog, fakeRunner })
 
 	const schedulerEvents: SchedulerEvent[] = []
+	const configuredOnEvent = options.schedulerConfig?.onEvent
 	const worktreeManager: SchedulerWorktreeManager = options.worktreeManager ?? (options.realWorktreeManager ? createGitWorktreeManager({ loopDataRoot }) : async ({ chain, repoCwd }) => {
 		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
 		await mkdir(worktreePath, { recursive: true })
@@ -6964,9 +7079,14 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 				return JSON.stringify(payload)
 			},
 			chainCompleteTriggerForChain: options.chainCompleteTriggerForChain ?? (() => null),
-			onEvent: (event) => {
-				schedulerEvents.push(event)
-			},
+			onEvent: configuredOnEvent === undefined
+				? (event) => {
+					schedulerEvents.push(event)
+				}
+				: async (event) => {
+					schedulerEvents.push(event)
+					await configuredOnEvent(event)
+				},
 		},
 	})
 	const snapshot = daemon.snapshot()
