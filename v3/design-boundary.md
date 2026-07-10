@@ -96,7 +96,7 @@ join 还必须回答“谁拥有推进判定权”，不能只描述节点如何
 
 完成编译后，消费者不应重新 parse TOML、不应按 phase 名特判，也不应通过私有 adapter 猜测缺失字段。
 
-长时间运行的实例还必须绑定到实例创建前已经完整计算、校验并内容寻址的不可变执行定义（#605）。这不是运行态 MVCC：只有事前可计算的定义字段能进入保护边界；cursor、evaluation、decision、动态 child 等运行事实仍是运行态。运行中修改 join 属于尚待操作员讨论的 future-function mutation，不得伪装成编译定义版本切换。绑定形态已裁决为源 bundle 内容寻址 pin + 唯一编译管线重编译 + 闭集语义 hash 验证钉，pin 时点 = 实例创建——详见 `definition-pin-decision.md`。
+长时间运行的实例还必须绑定到实例创建前已经完整计算、校验并内容寻址的不可变执行定义（#605）。这不是运行态 MVCC：只有事前可计算的定义字段能进入保护边界；cursor、evaluation、decision、动态 child 等运行事实仍是运行态。绑定形态已裁决为源 bundle 内容寻址 pin + 唯一编译管线重编译 + 闭集语义 hash 验证钉，pin 时点 = 实例创建——详见 `definition-pin-decision.md`。运行中修改 join 已裁（`join-evolution-decision.md`）：它是 future-function mutation——定义态 join 实例内不可变；物化态 join 以绑定版本追加演化（epoch 创建时采样生效，值域限 pinned 定义内候选引用），永不表现为定义版本切换。
 
 ### 3.2 类型系统不能消灭什么
 
