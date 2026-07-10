@@ -233,9 +233,9 @@ coder-loop item --help
 | `daemon up` | 运行 centralized daemon process | `--json` `--loop-data-root <dir>` |
 | `daemon down` | 通过 Unix socket 要求 centralized daemon 退出 | `--json` `--loop-data-root <dir>` |
 | `daemon status <target> --json` | daemon 视角 JSON snapshot | `--loop-data-root <dir>` `--chain <name>` |
-| `daemon start <target>` | 解析 target chain 并让 daemon 开始调度；已运行/已存在时幂等返回 | `--loop-data-root <dir>` `--max-iterations <N>` `--dry-run` |
+| `daemon start <target>` | 解析 target chain 并让 daemon 开始调度；已运行/已存在时幂等返回 | `--loop-data-root <dir>` `--dry-run` |
 | `daemon stop <target>` | 解析 target chain 并调 `chain.stop`（可 resume） | `--loop-data-root <dir>` `--dry-run` |
-| `daemon restart <target>` | 确认 central daemon 可用，输出单个 JSON object | `--loop-data-root <dir>` `--max-iterations <N>` `--dry-run` |
+| `daemon restart <target>` | 确认 central daemon 可用，输出单个 JSON object | `--loop-data-root <dir>` `--dry-run` |
 | `chain create <name>` | 中央 daemon socket 上创建 chain metadata | `--config-json '{"repository":"...","baseBranch":"...","bindings":{...}}'` `--preset <name>` `--umbrella <ref>` `--force` |
 | `chain list` / `chain status <name>` | list / show one chain | `--json` `--loop-data-root <dir>` |
 | `chain stop <name>` / `chain resume <name>` | 暂停 / 恢复 chain scheduling | `--json` `--loop-data-root <dir>` |
@@ -253,10 +253,10 @@ coder-loop item --help
 
 ```bash
 bun src/loop.ts status <target> --json
-bun src/loop.ts daemon start <target> --max-iterations 1
+bun src/loop.ts daemon start <target>
 ```
 
-源码入口仍然要求第一位置参数是子命令；不带子命令时只打印 usage 并 exit 1。循环推进走 `coder-loop daemon start <target> [--max-iterations <N>]`，只读健康检查走 `coder-loop status <target> --json` 或 `coder-loop doctor <target>`。
+源码入口仍然要求第一位置参数是子命令；不带子命令时只打印 usage 并 exit 1。循环推进走 `coder-loop daemon start <target>`，只读健康检查走 `coder-loop status <target> --json` 或 `coder-loop doctor <target>`。
 
 ### 6.3 Agent 进程与监控（fallback reference）
 

@@ -683,7 +683,6 @@ describe("runner and daemon helpers", () => {
 			targetCwd: REPO_ROOT,
 			loopDataRoot: TEST_ROOT,
 			chainName: "fixture",
-			iterationLimit: null,
 			dryRun: true,
 			worktree: false,
 			json: false,
@@ -691,7 +690,6 @@ describe("runner and daemon helpers", () => {
 
 		expect(plan.command).toEqual([process.argv[0] ?? "bun", resolve(import.meta.dir, "loop.ts"), "daemon", "up", "--loop-data-root", TEST_ROOT])
 		expect(plan.commandLine).not.toContain("--target-cwd")
-		expect(plan.commandLine).not.toContain("--max-iterations")
 		expect(plan.commandLine).not.toContain("--require-browser-evidence")
 		// The central daemon is global: its stdout/stderr land under loop-data/daemon, never
 		// pinned to a chains/<chain> directory or the legacy target-local .coder-loop/runtime/logs.
@@ -700,6 +698,22 @@ describe("runner and daemon helpers", () => {
 		const daemonStdoutPath = relative(TEST_ROOT, plan.stdoutPath)
 		expect(daemonStdoutPath.split("/")).not.toContain("chains")
 		expect(daemonStdoutPath.includes("runtime/logs")).toBe(false)
+	})
+
+	test("daemon rejects retired max-iterations option", () => {
+		const retiredOption = ["--max", "iterations"].join("-")
+		for (const action of ["start", "restart"]) {
+			const proc = Bun.spawnSync({
+				cmd: ["bun", resolve(import.meta.dir, "loop.ts"), "daemon", action, REPO_ROOT, retiredOption, "1"],
+				cwd: REPO_ROOT,
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			const stderr = new TextDecoder().decode(proc.stderr)
+			expect(proc.exitCode).toBe(1)
+			expect(stderr).toContain("Unknown arguments")
+			expect(stderr).not.toContain("SQLite state DB")
+		}
 	})
 
 	test("agentCodexArgs and session path helpers keep runner plumbing stable", () => {
