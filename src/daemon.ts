@@ -550,7 +550,7 @@ type ItemDecisionFingerprintKind = "item.dependency_wait" | "item.backoff"
 type ChainDecisionFingerprintState = {
 	slotBusy: Map<string, string>
 	items: Map<number, Map<ItemDecisionFingerprintKind, string>>
-	chainCompleteTrigger: string | null
+	chainCompleteTriggers: Map<string, string>
 }
 
 // Decision fingerprints belong to the scheduler entity that can emit them. A chain owns a
@@ -564,7 +564,7 @@ export class DecisionFingerprintState {
 		for (const state of this.chains.values()) {
 			count += state.slotBusy.size
 			for (const item of state.items.values()) count += item.size
-			if (state.chainCompleteTrigger !== null) count += 1
+			count += state.chainCompleteTriggers.size
 		}
 		return count
 	}
@@ -585,7 +585,9 @@ export class DecisionFingerprintState {
 				return replaceDecisionFingerprint(item.get(event.type), fingerprint, () => item.set(event.type, fingerprint))
 			}
 			case "chain.complete_trigger":
-				return replaceDecisionFingerprint(state.chainCompleteTrigger, fingerprint, () => { state.chainCompleteTrigger = fingerprint })
+				return replaceDecisionFingerprint(state.chainCompleteTriggers.get(event.runId ?? ""), fingerprint, () => {
+					state.chainCompleteTriggers.set(event.runId ?? "", fingerprint)
+				})
 			default:
 				return assertNeverDecisionEvent(event)
 		}
@@ -607,7 +609,7 @@ export class DecisionFingerprintState {
 			default:
 				assertNeverDecisionFingerprintScope(scope)
 		}
-		if (state.slotBusy.size === 0 && state.items.size === 0 && state.chainCompleteTrigger === null) this.chains.delete(scope.chainId)
+		if (state.slotBusy.size === 0 && state.items.size === 0 && state.chainCompleteTriggers.size === 0) this.chains.delete(scope.chainId)
 	}
 
 	releaseForSchedulerEvent(event: SchedulerEvent): void {
@@ -618,7 +620,7 @@ export class DecisionFingerprintState {
 	private chainState(chainId: number): ChainDecisionFingerprintState {
 		const current = this.chains.get(chainId)
 		if (current !== undefined) return current
-		const created: ChainDecisionFingerprintState = { slotBusy: new Map(), items: new Map(), chainCompleteTrigger: null }
+		const created: ChainDecisionFingerprintState = { slotBusy: new Map(), items: new Map(), chainCompleteTriggers: new Map() }
 		this.chains.set(chainId, created)
 		return created
 	}

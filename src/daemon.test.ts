@@ -3479,7 +3479,7 @@ attemptTimeoutSeconds = 3600
 				cwd: REPO_ROOT,
 				stdout: "pipe",
 				stderr: "pipe",
-				env: { ...process.env, CODER_LOOP_DATA_DIR: fixture.loopDataRoot },
+				env: { ...process.env, CODER_LOOP_RUN_CRED: undefined, CODER_LOOP_DATA_DIR: fixture.loopDataRoot },
 			})
 			const [cliStdout, cliStderr, cliExit] = await Promise.all([
 				new Response(cli.stdout).text(),
@@ -3521,7 +3521,7 @@ attemptTimeoutSeconds = 3600
 				cwd: REPO_ROOT,
 				stdout: "pipe",
 				stderr: "pipe",
-				env: { ...process.env, CODER_LOOP_DATA_DIR: fixture.loopDataRoot },
+				env: { ...process.env, CODER_LOOP_RUN_CRED: undefined, CODER_LOOP_DATA_DIR: fixture.loopDataRoot },
 			})
 			const [logsStdout, logsStderr, logsExit] = await Promise.all([
 				new Response(logsCli.stdout).text(),
@@ -3808,9 +3808,10 @@ prompt = "review.md"
 				expect(state.observe(chainId, slot)).toBe(false)
 				expect(state.observe(chainId, item)).toBe(false)
 				expect(state.observe(chainId, keepActive("waiting", `${runId}-a`))).toBe(false)
+				expect(state.observe(chainId, keepActive("waiting", `${runId}-b`))).toBe(false)
 				expect(state.observe(chainId, keepActive("waiting", `${runId}-b`))).toBe(true)
 				expect(state.observe(chainId, keepActive("changed", `${runId}-c`))).toBe(false)
-				expect(state.size).toBe(4)
+				expect(state.size).toBe(6)
 
 				state.releaseForSchedulerEvent({
 					type: "agent.exit",

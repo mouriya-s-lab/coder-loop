@@ -86,6 +86,7 @@ describe("phase C cleanup guards", () => {
 			cwd: REPO_ROOT,
 			stdout: "pipe",
 			stderr: "pipe",
+			env: { ...process.env, CODER_LOOP_RUN_CRED: undefined },
 		})
 		expect(proc.exitCode, `${new TextDecoder().decode(proc.stdout)}\n${new TextDecoder().decode(proc.stderr)}`).toBe(0)
 	})
