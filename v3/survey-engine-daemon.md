@@ -114,7 +114,7 @@ erDiagram
 
 **worktree 管理**：`createGitWorktreeManager`（`scheduler.ts:802-824`）为每个 slot 建 worktree，分支名 `coder-loop/<chainName>-<sha256(repoCwd)[:12]>`，路径在 `<loopDataRoot>/chains/<name>/worktrees/`。
 
-**resume 语义**：`item.sessionIds[phase][runner.kind]` 有值走 resume（prompt 固定 `"继续"`，`loop.ts:979`），无值 fresh。session id 从 stdout 首个 JSON 事件解析。**invalid-session detector**（`src/runners/session-id.ts`，pr-529 新增）：三 runner 各自 stderr 正则，命中即清 sessionIds + emit `session_id.invalidated`，下次自动 fresh。
+**resume 语义**：`item.sessionIds[phase][runner.kind]` 有值走 resume（`resumeDecisionForItem`，`scheduler.ts:2129`），无值 fresh。scheduler 主路径 resume 时仍发送**重新渲染的完整 phase prompt**（`scheduler.ts:1029-1035`，`AGENT_CWD`/`RESUMED_*` 绑定随之更新）；固定 `"继续"`（`RESUME_CONTINUE_PROMPT`，`loop.ts:994`）仅用于 chain-complete finalizer 路径（`spawnOneAttempt`，`loop.ts:6048`），不是 scheduler 通用行为。session id 从 stdout 首个 JSON 事件解析。**invalid-session detector**（`src/runners/session-id.ts`，pr-529 新增）：三 runner 各自 stderr 正则，命中即清 sessionIds + emit `session_id.invalidated`，下次自动 fresh。
 
 **账号限流冷却**（#478）：stdout 扫 `rate_limit_event`，记录 `resetsAt` 全局暂停 spawn，冷却持久化到 `<loopDataRoot>/daemon/rate-limit.json`；限流 exit 不消耗 attempt。
 

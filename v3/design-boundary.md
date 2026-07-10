@@ -69,7 +69,7 @@ type Decision =
 
 - 稳定的 task/container/run/attempt identity；
 - durable tree state 与 seq cursor；
-- per-run 隔离及 worktree 生命周期；
+- 任务闭包隔离及 worktree 生命周期（执行单元 = 同一 (item, phase) 的 attempt 链；worktree/session 生命周期 ⊆ 闭包；resume 是闭包内动作——详见 `task-closure-decision.md`）；
 - 取消向子树传播；
 - 动态追加任务时保持容器身份和 join 归属；
 - daemon 重启后的精确恢复与幂等推进；
