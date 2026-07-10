@@ -612,7 +612,11 @@ const ObservabilityEventBoundary = arkType.or(
 			declaredItemStatuses: "string[]",
 			declaredChainActions: "string[]",
 			outcome: arkType.or(arkType.unit("allow"), arkType.unit("deny")),
-			reason: arkType.or(arkType.unit("admitted"), arkType.unit("phase-exits")),
+			reason: arkType.or(
+				arkType.unit("admitted"),
+				arkType.unit("phase-exits"),
+				arkType.unit("caller-attribution-mismatch"),
+			),
 		},
 	},
 	{

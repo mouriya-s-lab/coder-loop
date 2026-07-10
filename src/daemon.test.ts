@@ -2083,6 +2083,157 @@ attemptTimeoutSeconds = 3600
 		}
 	})
 
+	test("credential-bound item.exitAction denies forged attribution and preserves overlapping already-stopped review attempts (#600)", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-600-exit-action-credential-truth`)
+		const loopDataRoot = resolve(root, "ld")
+		const iterationCapture = resolve(root, "iteration-credential.txt")
+		const iterationRelease = resolve(root, "iteration-release")
+		const reviewCapture = resolve(root, "review-credential.txt")
+		const fakeRunner = resolve(root, "fake-runner.ts")
+		const eventLog = resolve(root, "events.jsonl")
+		await mkdir(loopDataRoot, { recursive: true })
+		await writeFile(
+			fakeRunner,
+			`import { appendFile, writeFile } from "node:fs/promises"
+const { openSqliteStateStore } = await import(${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))})
+const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+await appendFile(input.eventLog, JSON.stringify({ type: "running", itemId: input.itemId, runId: input.runId, phase: input.phase }) + "\\n")
+if (input.phase === "iteration") {
+	await writeFile(${JSON.stringify(iterationCapture)}, process.env.CODER_LOOP_RUN_CRED ?? "")
+	while (!(await Bun.file(${JSON.stringify(iterationRelease)}).exists())) await Bun.sleep(10)
+	const store = openSqliteStateStore({ loopDataRoot: process.env.CODER_LOOP_DATA_DIR })
+	store.updateItem(input.itemId, { status: "in_progress", updatedAt: Math.floor(Date.now() / 1000) })
+	store.close()
+} else if (input.phase === "review") {
+	await writeFile(${JSON.stringify(reviewCapture)}, process.env.CODER_LOOP_RUN_CRED ?? "")
+	await new Promise((resolveWait) => setTimeout(resolveWait, 8_000))
+}
+process.exitCode = 0
+`,
+		)
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			shutdownGraceMs: 100,
+			scheduler: {
+				enabled: true,
+				intervalMs: 20,
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
+				presetDir: PRESET_DIR,
+				worktreeManager: async ({ chain, repoCwd }) => {
+					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+					await mkdir(worktreePath, { recursive: true })
+					return worktreePath
+				},
+				prompt: ({ item, runId, phase }) => JSON.stringify({ itemId: item.id, runId, phase, eventLog }),
+				chainCompleteTriggerForChain: () => null,
+			},
+		})
+		try {
+			const snapshot = daemon.snapshot()
+			const chain = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("chain.create", {
+				name: "exit-action-credential-truth-chain",
+				preset: "gh-issue-pr-iteration",
+				repository: "mouriya-s-lab/coder-loop",
+			}))).chain)
+			const chainId = numberValue(chain.id)
+			const item = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
+				chainId,
+				itemId: "60001",
+				repoCwd: REPO_ROOT,
+				preset: "gh-issue-pr-iteration",
+			}))).item)
+			const itemId = numberValue(item.id)
+
+			await waitFor(async () => {
+				try { return (await readFile(iterationCapture, "utf-8")).trim() } catch { return "" }
+			}, (value) => value.length > 0, 8_000)
+			const iterationCredential = (await readFile(iterationCapture, "utf-8")).trim()
+			const iterationStatus = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("daemon.status"))).daemon)
+			const iterationRuns = Array.isArray(iterationStatus.activeRuns) ? iterationStatus.activeRuns : []
+			const iterationRun = iterationRuns.map(record).find((run) => typeof run.runId === "string" && run.runId.includes("-iteration-item-"))
+			if (iterationRun === undefined) throw new Error("expected active iteration run")
+			const iterationRunId = stringValue(iterationRun.runId)
+
+			const forged = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.exitAction", {
+				itemId,
+				agentRunId: iterationRunId,
+				agentPhase: "review",
+				action: "stop",
+				agentCredential: iterationCredential,
+			}))
+			expect(forged.ok).toBe(false)
+			if (!forged.ok) {
+				expect(forged.error.code).toBe("invalid_caller")
+				expect(forged.error.message).toContain("phase")
+				expect(forged.error.details).toMatchObject({
+					boundRunId: iterationRunId,
+					boundPhase: "iteration",
+					claimedRunId: iterationRunId,
+					claimedPhase: "review",
+				})
+			}
+			const stillActive = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("chain.status", { chainId }))).chain)
+			expect(stillActive.status).toBe("active")
+
+			const eventsFile = resolveLoopDataPaths({ loopDataRoot }).eventsFile
+			const forgedEvents = (await queryObservabilityEvents(eventsFile, { type: "item.exit.selected" })).events
+			const forgedDeny = forgedEvents.find((event) => event.type === "item.exit.selected" && event.payload.reason === "caller-attribution-mismatch")
+			if (forgedDeny?.type !== "item.exit.selected") throw new Error("expected caller-attribution-mismatch item.exit.selected audit")
+			expect(forgedDeny.phase).toBe("iteration")
+			expect(forgedDeny.runId).toBe(iterationRunId)
+			expect(forgedDeny.payload.phase).toBe("iteration")
+			expect(forgedDeny.payload.declaredChainActions).toEqual([])
+			expect(forgedDeny.subject).toEqual({ kind: "agent", runId: iterationRunId, phase: "iteration" })
+			await writeFile(iterationRelease, "release")
+
+			await waitFor(async () => {
+				try { return (await readFile(reviewCapture, "utf-8")).trim() } catch { return "" }
+			}, (value) => value.length > 0, 12_000)
+			const reviewCredential = (await readFile(reviewCapture, "utf-8")).trim()
+			const reviewStatus = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("daemon.status"))).daemon)
+			const reviewRuns = Array.isArray(reviewStatus.activeRuns) ? reviewStatus.activeRuns : []
+			const reviewRun = reviewRuns.map(record).find((run) => typeof run.runId === "string" && run.runId.includes("-review-item-"))
+			if (reviewRun === undefined) throw new Error("expected active review run")
+			const reviewRunId = stringValue(reviewRun.runId)
+
+			const stopArgs: JsonObject = {
+				itemId,
+				agentRunId: reviewRunId,
+				agentPhase: "review",
+				action: "stop",
+				agentCredential: reviewCredential,
+			}
+			const stopResponses = await Promise.all([
+				sendDaemonRequest(snapshot.socketPath, daemonRequest("item.exitAction", stopArgs)),
+				sendDaemonRequest(snapshot.socketPath, daemonRequest("item.exitAction", stopArgs)),
+			])
+			const acceptedStops = stopResponses.map(expectOk)
+			expect(acceptedStops.map((accepted) => record(accepted.chain).status)).toEqual(["stopped", "stopped"])
+			const finalEvents = (await queryObservabilityEvents(eventsFile)).events
+			const acceptedSelections = finalEvents.filter((event) => event.type === "item.exit.selected" && event.payload.outcome === "allow")
+			expect(acceptedSelections).toHaveLength(2)
+			for (const acceptedSelection of acceptedSelections) {
+				if (acceptedSelection.type !== "item.exit.selected") throw new Error("expected allowed item.exit.selected audit")
+				expect(acceptedSelection.phase).toBe("review")
+				expect(acceptedSelection.runId).toBe(reviewRunId)
+				expect(acceptedSelection.subject).toEqual({ kind: "agent", runId: reviewRunId, phase: "review" })
+			}
+			const stopLifecycleEvents = finalEvents.filter((event) => event.type === "chain.stop.from_phase_exit")
+			expect(stopLifecycleEvents).toHaveLength(2)
+			for (const stopLifecycle of stopLifecycleEvents) {
+				if (stopLifecycle.type !== "chain.stop.from_phase_exit") throw new Error("expected chain.stop.from_phase_exit lifecycle event")
+				expect(stopLifecycle.phase).toBe("review")
+				expect(stopLifecycle.runId).toBe(reviewRunId)
+				expect(stopLifecycle.subject).toEqual({ kind: "agent", runId: reviewRunId, phase: "review" })
+			}
+			expect(stopLifecycleEvents.map((event) => event.type === "chain.stop.from_phase_exit" && event.payload.alreadyStopped).sort()).toEqual([false, true])
+		} finally {
+			await daemon.stop()
+		}
+	}, 30_000)
+
 	test("socket item.update rejects immutable selectors and daemon-owned fields", async () => {
 		const fixture = await startFixture("item-update-strict-fields", { schedulerEnabled: false })
 		try {
