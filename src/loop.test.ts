@@ -295,7 +295,7 @@ describe("ItemRecord prompt bindings", () => {
 			variables: [
 				{ key: "RUNTIME_INPUTS_DOC", source: { kind: "runtime", key: "runtimeInputsDoc" }, doc: null },
 				{ key: "PHASE_EXITS_DOC", source: { kind: "runtime", key: "phaseExitsDoc" }, doc: null },
-				{ key: "TARGET_CWD", source: { kind: "runtime", key: "targetCwd" }, doc: { label: "Target working directory", suffix: "", style: "code", blankBefore: false } },
+				{ key: "TARGET_CWD", source: { kind: "runtime", key: "targetCwd" }, doc: { label: "Target working directory", prefix: "", suffix: "", style: "code", blankBefore: false } },
 			],
 			trigger: null,
 			defaultRunner: "claude",
