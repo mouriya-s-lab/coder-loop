@@ -480,6 +480,7 @@ const PresetPhaseBoundary = arkType({
 	"trigger?": PresetPhaseTriggerBoundary,
 	"roles?": "string[]",
 	"rights?": PresetPhaseRightsBoundary,
+	"hostExclusiveResource?": "string",
 })
 
 const PresetFragmentBoundary = arkType({
@@ -617,6 +618,7 @@ export type PresetPhase = {
 	roles: readonly string[]
 	// #407 per-phase rights, always present at runtime (parser fills default-deny).
 	rights: PresetPhaseRights
+	hostExclusiveResource?: string | null
 }
 
 export type PresetFragment = {
@@ -4414,7 +4416,11 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 		// Missing segment → every field false / empty set; the gate downstream never has to branch
 		// on "rights absent". Schema parsing is the only place that knows about the toml-side shape.
 		const rights = parsePresetPhaseRights(entry.rights ?? null, `preset.phases[${index}].rights`)
-		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), exits, variables, trigger, defaultRunner: runner, defaultModel: model, roles, rights })
+		const hostExclusiveResource = entry.hostExclusiveResource ?? null
+		if (hostExclusiveResource !== null && hostExclusiveResource.trim() === "") {
+			presetError(`preset.phases[${index}].hostExclusiveResource: must be a non-empty string`)
+		}
+		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), exits, variables, trigger, defaultRunner: runner, defaultModel: model, roles, rights, hostExclusiveResource })
 	}
 	if (!phases.some((phase) => phase.trigger === null)) presetError("preset.phases: must include at least one non-trigger phase")
 

@@ -163,6 +163,26 @@ export type SchedulerState = {
 	// daemon's `applyRateLimitNotice` then persists the same value (UTC millis) into
 	// `DaemonRateLimitState`. Null when no cooldown is in effect.
 	rateLimitedUntilMs: number | null
+	hostResourceOwners: Map<string, SchedulerHostResourceOwner>
+	hostResourceWaits: Map<number, SchedulerHostResourceWait>
+}
+
+export type SchedulerHostResourceOwner = {
+	resource: string
+	runId: string
+	chainId: number
+	itemId: number
+	phase: string
+}
+
+export type SchedulerHostResourceWait = {
+	resource: string
+	ownerRunId: string
+	ownerChainId: number
+	ownerItemId: number
+	chainId: number
+	itemId: number
+	phase: string
 }
 
 export type SchedulerStore = Pick<
@@ -204,6 +224,7 @@ export type SchedulerWorktreeManager = (context: SchedulerWorktreeContext) => Pr
 
 export type SchedulerEvent =
 	| { type: "slot.busy"; slotKey: string; chainId: number; repoCwd: string; activeRunId: string }
+	| { type: "host_resource.wait"; chainId: number; itemId: number; phase: string; resource: string; ownerRunId: string; ownerChainId: number; ownerItemId: number }
 	// #419 review I2: `itemId` (rowid integer) renamed to `rowId` for wire-shape consistency
 	// with other `item.*` audit events that use the split shape `{ rowId: number, itemId: string }`.
 	// `itemId` on the audit wire now uniformly means the opaque preset-declared string identity;
@@ -408,6 +429,8 @@ export function createSchedulerState(): SchedulerState {
 		pendingCloseHandlers: new Set(),
 		recycleTriggers: new Map(),
 		rateLimitedUntilMs: null,
+		hostResourceOwners: new Map(),
+		hostResourceWaits: new Map(),
 	}
 }
 
@@ -502,8 +525,27 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 				now,
 			})
 			if (next === null) continue
+			const hostResource = phasePlan.hostExclusiveResources.get(next.phase) ?? null
+			if (hostResource !== null) {
+				const owner = options.state.hostResourceOwners.get(hostResource)
+				if (owner !== undefined) {
+					const wait: SchedulerHostResourceWait = {
+						resource: hostResource,
+						ownerRunId: owner.runId,
+						ownerChainId: owner.chainId,
+						ownerItemId: owner.itemId,
+						chainId: chain.id,
+						itemId: next.item.id,
+						phase: next.phase,
+					}
+					options.state.hostResourceWaits.set(next.item.id, wait)
+					await emit(options, { type: "host_resource.wait", ...wait })
+					continue
+				}
+			}
+			options.state.hostResourceWaits.delete(next.item.id)
 
-			const activeRun = await spawnSchedulerRun(options, chain, next.item, slot, next.phase, phasePlan)
+			const activeRun = await spawnSchedulerRun(options, chain, next.item, slot, next.phase, phasePlan, hostResource)
 			if (activeRun !== null) spawnedRuns.push(activeRun)
 		}
 
@@ -532,6 +574,7 @@ type SchedulerPhasePlan = {
 	firstPhase: string
 	nonTriggerPhases: readonly string[]
 	itemTriggerPhases: readonly SchedulerItemTriggerPhase[]
+	hostExclusiveResources: ReadonlyMap<string, string>
 }
 
 // #412: phase plan resolution always flows from a representative item's preset. The earlier
@@ -543,8 +586,16 @@ async function resolvePhasePlanForChainWithItems(
 	chain: ChainRecord,
 	items: readonly ItemRecord[],
 ): Promise<SchedulerPhasePlan> {
-	if (options.phase !== undefined) return { firstPhase: options.phase, nonTriggerPhases: [options.phase], itemTriggerPhases: [] }
 	const { preset } = await schedulerLoadedPresetForChainItems(options, chain, items)
+	if (options.phase !== undefined) {
+		const resource = preset.phases.find((phase) => phase.name === options.phase)?.hostExclusiveResource ?? null
+		return {
+			firstPhase: options.phase,
+			nonTriggerPhases: [options.phase],
+			itemTriggerPhases: [],
+			hostExclusiveResources: resource === null ? new Map() : new Map([[options.phase, resource]]),
+		}
+	}
 	return buildPhasePlanFromPreset(preset)
 }
 
@@ -558,7 +609,10 @@ function buildPhasePlanFromPreset(preset: SchedulerLoadedPreset["preset"]): Sche
 		if (!("afterPhase" in trigger)) return []
 		return [{ name: phase.name, afterPhase: trigger.afterPhase, whenStatus: trigger.whenStatus }]
 	})
-	return { firstPhase, nonTriggerPhases, itemTriggerPhases }
+	const hostExclusiveResources = new Map(preset.phases.flatMap((phase): Array<[string, string]> =>
+		phase.hostExclusiveResource == null ? [] : [[phase.name, phase.hostExclusiveResource]],
+	))
+	return { firstPhase, nonTriggerPhases, itemTriggerPhases, hostExclusiveResources }
 }
 
 type SelectNextItemAndPhaseInput = {
@@ -928,6 +982,12 @@ export function listPendingCloseHandlers(state: SchedulerState): Promise<unknown
 	return [...state.pendingCloseHandlers]
 }
 
+function releaseHostResourceForRun(state: SchedulerState, runId: string): void {
+	for (const [resource, owner] of state.hostResourceOwners) {
+		if (owner.runId === runId) state.hostResourceOwners.delete(resource)
+	}
+}
+
 export class SchedulerError extends Error {
 	constructor(
 		readonly code: "max_ticks_exceeded" | "worktree_create_failed" | "spawn_failed",
@@ -945,6 +1005,7 @@ async function spawnSchedulerRun(
 	slot: SchedulerSlot,
 	phase: string,
 	phasePlan: SchedulerPhasePlan,
+	hostResource: string | null,
 ): Promise<SchedulerActiveRun | null> {
 	const worktreeManager = options.worktreeManager ?? createGitWorktreeManager(options.loopDataRootOptions)
 	const attribution: SchedulerSpawnErrorAttribution = { kind: "phase", phase }
@@ -963,6 +1024,9 @@ async function spawnSchedulerRun(
 		const startsAttempt = phase === phasePlan.firstPhase && resumeDecision.kind === "fresh"
 		runId = options.runIdFactory?.({ chain, item, phase }) ?? makeRunId(item.id, phase)
 		startedAt = nowSeconds(options)
+		if (hostResource !== null) {
+			options.state.hostResourceOwners.set(hostResource, { resource: hostResource, runId, chainId: chain.id, itemId: item.id, phase })
+		}
 		options.store.recordRun({
 			runId,
 			chainId: chain.id,
@@ -1074,6 +1138,7 @@ async function spawnSchedulerRun(
 		activeRun.markPrepared()
 		return activeRun
 	} catch (error) {
+		if (runId !== null) releaseHostResourceForRun(options.state, runId)
 		const failure = await cleanupFailedRunPreparation(options, chain, item, slot, {
 			runId,
 			activeRun,
@@ -1273,6 +1338,7 @@ function attachRunCloseHandler(
 		terminatorCleanup = installedGc.terminatorCleanup
 
 		child.on("close", (code) => {
+			releaseHostResourceForRun(options.state, runId)
 			lifecycleGc?.cleanup()
 
 			const pendingCloseHandler = (async (): Promise<SchedulerCompletedRun> => {
