@@ -80,6 +80,7 @@ const ObservabilityEventTypeBoundary = arkType.or(
 	arkType.unit("preset.dag_check"),
 	arkType.unit("daemon.warning"),
 	arkType.unit("scheduler.tick_failed"),
+	arkType.unit("scheduler.lifecycle_event_persistence_failed"),
 	arkType.unit("chain.complete_trigger_failed"),
 	// #397: per-phase admission gate audit. One event per item.status write request the daemon
 	// runs through `admitItemStatusForRequest` — both allow and deny outcomes — so a default-deny
@@ -545,6 +546,12 @@ const ObservabilityEventBoundary = arkType.or(
 	{
 		...EventBaseBoundary,
 		kind: arkType.unit("diagnostic"),
+		type: arkType.unit("scheduler.lifecycle_event_persistence_failed"),
+		payload: { eventKind: "string", error: "string", originalPersisted: arkType.unit(false) },
+	},
+	{
+		...EventBaseBoundary,
+		kind: arkType.unit("diagnostic"),
 		type: arkType.unit("chain.complete_trigger_failed"),
 		payload: { chainId: "number", error: "string" },
 	},
@@ -805,24 +812,32 @@ export function parseObservabilityEventType(input: string): ObservabilityEventTy
 
 export async function appendObservabilityEvent(eventsFile: string, event: ObservabilityEvent): Promise<void> {
 	try {
-		const line = `${JSON.stringify(event)}\n`
-		await mkdir(dirname(eventsFile), { recursive: true })
-		await rotateObservabilityEventStream(eventsFile, event.ts, Buffer.byteLength(line))
-		await appendFile(eventsFile, line)
+		await appendObservabilityEventOrThrow(eventsFile, event)
 	} catch (error) {
 		writeObservabilityStderr(`coder-loop observability write failed (${eventsFile}): ${errorMessage(error)}; event=${renderObservabilityEvent(event)}`)
 	}
 }
 
+export async function appendObservabilityEventOrThrow(eventsFile: string, event: ObservabilityEvent): Promise<void> {
+	const line = `${JSON.stringify(event)}\n`
+	await mkdir(dirname(eventsFile), { recursive: true })
+	await rotateObservabilityEventStream(eventsFile, event.ts, Buffer.byteLength(line))
+	await appendFile(eventsFile, line)
+}
+
 export function appendObservabilityEventSync(eventsFile: string, event: ObservabilityEvent): void {
 	try {
-		const line = `${JSON.stringify(event)}\n`
-		mkdirSync(dirname(eventsFile), { recursive: true })
-		rotateObservabilityEventStreamSync(eventsFile, event.ts, Buffer.byteLength(line))
-		appendFileSync(eventsFile, line)
+		appendObservabilityEventSyncOrThrow(eventsFile, event)
 	} catch (error) {
 		writeObservabilityStderr(`coder-loop observability write failed (${eventsFile}): ${errorMessage(error)}; event=${renderObservabilityEvent(event)}`)
 	}
+}
+
+export function appendObservabilityEventSyncOrThrow(eventsFile: string, event: ObservabilityEvent): void {
+	const line = `${JSON.stringify(event)}\n`
+	mkdirSync(dirname(eventsFile), { recursive: true })
+	rotateObservabilityEventStreamSync(eventsFile, event.ts, Buffer.byteLength(line))
+	appendFileSync(eventsFile, line)
 }
 
 export async function queryObservabilityEvents(eventsFile: string, query: ObservabilityEventQuery = {}): Promise<ObservabilityQueryResult> {
@@ -1066,6 +1081,8 @@ function renderDiagnosticEvent(event: Extract<ObservabilityEvent, { kind: "diagn
 			return `${event.ts} diagnostic daemon.warning ${event.payload.message}`
 		case "scheduler.tick_failed":
 			return `${event.ts} diagnostic scheduler.tick_failed pid=${event.payload.pid} error=${event.payload.error}`
+		case "scheduler.lifecycle_event_persistence_failed":
+			return `${event.ts} diagnostic scheduler.lifecycle_event_persistence_failed chain=${event.chain ?? "-"} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} eventKind=${event.payload.eventKind} originalPersisted=false error=${event.payload.error}`
 		case "chain.complete_trigger_failed":
 			return `${event.ts} diagnostic chain.complete_trigger_failed chain=${event.chain ?? event.payload.chainId} error=${event.payload.error}`
 		default:
