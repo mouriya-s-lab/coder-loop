@@ -2,11 +2,12 @@
 
 本文件是这个 preset 的设计思路记录，写给改 prompt 的人。它不注册进 preset.toml、不被引擎加载、不被任何文档引用——只解释这套 prompt 为什么长成这样。结构性的"什么文件在哪"看 `docs/gh-issue-pr-iteration-fragments.md`，本文只讲为什么。
 
-## 前提一：runner 诚实但会犯错
+## 前提一：runner 诚实但会犯错，transport 不是 workflow
 
-runner 全是 Claude 家（Opus 4.7 为默认）。它们不会故意钻空子——诚实是 baseline，指令没写清就问、判据看得见就照着做。但诚实不等于不出错：会误读 issue、会跳步骤、会把 "似乎没变化" 当成 "已完成"。设计要点由此推出：
+支持的 runner 是 Claude / Codex / OpenCode，具体默认值由 `preset.toml` 决定，item 还可覆盖非 trigger phase。它们不会故意钻空子——诚实是 baseline，指令没写清就问、判据看得见就照着做。但诚实不等于不出错：会误读 issue、会跳步骤、会把 "似乎没变化" 当成 "已完成"。设计要点由此推出：
 
-- 不堆双受众隔离与措辞警察式条款：步骤合同是单文件（Task / Report / Acceptance 三段同页），判据对执行者可见是有意设计；quality 判据也是单文件（执行侧约束与判断侧规则同源同文）；不做 issue body 篡改检测、不做每字段必填 SHA/URL/timestamp 的重模板、不写 "immutable / verbatim 亲读逐块比对" 的 Intent/Result 警察语——这些是给"爱作弊"runner 的对抗结构，Claude 家的 token 税与维护税盖不住其收益。
+- 不堆双受众隔离与措辞警察式条款：步骤合同是单文件（Task / Report / Acceptance 三段同页），判据对执行者可见是有意设计；quality 判据也是单文件（执行侧约束与判断侧规则同源同文）；不做 issue body 篡改检测、不做每字段必填 SHA/URL/timestamp 的重模板、不写 "immutable / verbatim 亲读逐块比对" 的 Intent/Result 警察语——这些对诚实 runner 的 token 税与维护税盖不住其收益。
+- task decomposition 属于 preset：引擎没有运行时任务拆分能力，iteration / review 必须按 live issue 语义动态建清单。spawn / wait / notification / follow-up / cancel 属于 runner transport：`common/dispatch-contract.md` 只描述 runner-neutral 的 transport 分支，entry 不写任何 runner 专用工具名或回包格式。
 - 保留独立复核（review 的强制派发、e2e 直跑证据、runtime manifest）——诚实 agent 也会漏看，review 不亲自验证就是盲判。
 - 过程纪律以 superpowers skills 为设计参考蒸馏进 step 文件：TDD 的 test-first 铁律、"根因先于修复、三次失败停手"、claim gate（先跑当轮命令读全量输出再落成功措辞）、"review 反馈是待核实的主张"——取纪律内核，按无人值守 loop 改编后内联（见前提八）。preset 自包含，不做运行时 skill 调用。
 
@@ -63,7 +64,7 @@ e2e 单独成步而不并入 verify：捆在重步骤里的麻烦环节会被整
 
 iter 仍在 handoff 写 `Intent (run <RUN_ID>)`（动工前，声明 scope 与理解）与 `Result (run <RUN_ID>)`（完成后，声明 delta）。review 对照 Intent 与 Result 判断 scope 是否缩水——这是 intent-action mismatch trigger 的输入。
 
-不配套"immutable / 禁止回填 / review 必须 verbatim 亲读逐块比对"这类警察语言。Claude 家没有系统性地伪造 Intent 的动机；写清楚就够，不用把每次读都变成侦查。
+不配套"immutable / 禁止回填 / review 必须 verbatim 亲读逐块比对"这类警察语言。诚实 runner 没有系统性地伪造 Intent 的动机；写清楚就够，不用把每次读都变成侦查。
 
 ## 前提八：superpowers 是设计参考，不是运行时依赖
 
@@ -78,7 +79,7 @@ step 文件里的过程纪律段以 superpowers 插件（参考版本 v6.1.1）�
 
 ## 前提九：一致性铁律（防 livelock）
 
-每处对 iter 执行侧的放松，必须同步放松 review 判据侧。步骤单文件（`iter/steps/<name>.md`、`review/steps/<name>.md`）是唯一事实源；执行者与调度者都读同一份，Task / Report / Acceptance 三段。跨文件交叉引用（如 evidence 要求、honesty 触发器、报告结构）在 iter-entry / review-entry / quality/*.md / review/actions/*.md 之间保持一致——改一处必须巡回核对四处。
+规则各有唯一事实源：entry 只拥有任务拆分、依赖和路由；step 文件只拥有 Task / Report / Acceptance；quality 文件只拥有跨步骤判据；action 文件只拥有外部副作用、回复格式和终态写出。其他文件只引用，不复述完整规则。修改时检查引用仍成立，不靠四处复制同一段文字维持一致。
 
 ## 写 prompt 的人最容易犯的错（本 preset 的事故记录）
 

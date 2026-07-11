@@ -26,7 +26,7 @@ Read now, yourself:
 2. `{{PRESET_ROOT}}/common/github-routing.md` — where PRs/comments are allowed to go.
 3. `{{PRESET_ROOT}}/common/state-contract.md` — what queue state you may and may not touch.
 4. `{{PRESET_ROOT}}/quality/honesty.md` and `{{PRESET_ROOT}}/quality/evidence.md` — the criteria you apply to every step report in Step 4.
-5. `{{PRESET_ROOT}}/common/dispatch-contract.md` — how every `Agent` dispatch is transported across turns under the claude `-p` async harness; binds Step 4.
+5. `{{PRESET_ROOT}}/common/dispatch-contract.md` — the runner-neutral dispatch ledger, completion, and follow-up contract; binds Step 4.
 
 ### Step 1 — Classify this spawn
 
@@ -86,17 +86,17 @@ Write the task list out explicitly, one line per step:
 List rules:
 
 - The list is the run. Exit only when every line is `[x] accepted` or `[-] skipped: <reason>` (written into the Step 5 handoff).
-- Re-print the list with checkboxes after every verdict in Step 4.
+- Keep the dispatch ledger current after every verdict; print the final checklist once in the handoff.
 - You may add lines mid-run (a failed verify inserts a scoped implement line; a surprise discovery inserts a research line).
 - Check a line only via an accepted subagent report; not by doing its work yourself.
 
-Contention plan: verify (owns `AGENT_CWD`) and e2e (works in its own worktree of the issue branch — its task file makes it create one) have no data dependency. Once implement is accepted, issue **both `Agent` calls in the same turn** as one async dispatch round per `common/dispatch-contract.md`, end the turn, and judge each report when its `<task-notification>` re-invokes you. submit waits for both. Every other pair is sequential.
+Contention plan: verify (owns `AGENT_CWD`) and e2e (works in its own worktree of the issue branch — its task file makes it create one) have no data dependency. Once implement is accepted, dispatch both in the same round per `common/dispatch-contract.md`; submit waits for both accepted reports. Every other pair is sequential.
 
 Planning-stage exception: if Step 2 shows the issue is already satisfied on base, invalid, duplicate, parent/wrapper-only, or needs splitting — do not force the sequence. Dispatch `research` to gather evidence if you don't have it, then collapse to wrap-up: record the classification and proposed child issue specs in the handoff. You do not create child issues, close issues, or write final state — review owns those.
 
 ### Step 4 — Execute the list, ready item(s) at a time
 
-Take every unchecked line whose dependencies are satisfied — per the Step 3 contention plan that is one line at a time, except verify and e2e, which form one async dispatch round. Dispatch per `common/dispatch-contract.md` (reports arrive via `<task-notification>` in a later turn — end the turn after the dispatch); never do the work yourself.
+Take every unchecked line whose dependencies are satisfied — per the Step 3 contention plan that is one line at a time, except verify and e2e, which form one concurrent dispatch round. Dispatch and receive reports per `common/dispatch-contract.md`; never do the work yourself.
 
 Step files (each is a single markdown with Task / Report / Acceptance sections):
 
@@ -111,7 +111,7 @@ Step files (each is a single markdown with Task / Report / Acceptance sections):
 | source-spike | `{{PRESET_ROOT}}/iter/steps/source-spike.md` |
 | spike-comment | `{{PRESET_ROOT}}/iter/steps/spike-comment.md` |
 
-**4a. Dispatch.** Spawn a fresh subagent with a clean context. The spawn message is pointers + runtime facts only — never restate the task file:
+**4a. Dispatch.** Dispatch a subagent with a clean task context. The message is pointers + runtime facts only — never restate the task file:
 
 ```
 Read and execute: {{PRESET_ROOT}}/iter/steps/<step>.md
@@ -128,23 +128,23 @@ Step focus: <your scheduling decision for this dispatch: the scope, the retry fe
 
 Fill in every field with the bound values. Subagents read the target repo's own `CLAUDE.md` / `AGENTS.md` (in `TARGET_CWD`) for project commands and PR conventions; the dispatch envelope must not duplicate that content.
 
-Each `Agent` call is async: the tool_result is the launch receipt (`agentId` only). After every dispatch round (single dispatch, or the verify ∥ e2e pair) end the turn; reports return via `<task-notification>` in a later turn. Record each dispatch in the ledger as `step | task-id | dispatched | <Step focus>`.
+Record and receive the dispatch using the current runner's transport exactly as specified by `common/dispatch-contract.md`.
 
-**4b. Check the report's structure.** When a `<task-notification>` reaches you in a new turn, the report is the `<result>` block inside the notification — read it from the turn's user message text directly; do not `Read` the `<output-file>` (it is the subagent's conversation transcript and overflows context). Open the step's file; its Acceptance section names the required report fields. Missing fields → `TaskStop(to=<task-id>)` and a fresh `Agent(...)` whose `Step focus` names exactly the missing fields; end the turn.
+**4b. Check the report's structure.** Open the step's file; its Acceptance section names the required report fields. Missing fields → reject the ledger row and follow up through the current runner with a `Step focus` naming exactly the missing fields.
 
 **4c. Judge substance.** Against two sources: the issue's own requirements bound to this line (which acceptance rows / sections this step had to satisfy), and the step file's Acceptance criteria with `quality/honesty.md` + `quality/evidence.md` applied to the report's claims. Verdict is one of: **accepted** / **gaps** (list them) / **wrong direction**.
 
 **4d. Route the verdict.**
-- gaps or wrong direction → `TaskStop(to=<task-id>)`, then a fresh `Agent(...)` whose `Step focus` folds in the gap list (for gaps) or corrected scope (for wrong direction); record both events in the ledger; end the turn. There is no continue-the-same-subagent path under this runner.
-- accepted → mark the line `[x]`, update the ledger line: `step | task-id | accepted | declared side effects`. Re-print the task list. Take the next ready line(s).
-- verify or e2e reported a product failure (a failing row, a mismatch against the issue contract) → not a step gap: insert `[ ] implement — fix: <failure>` before verify, mark the current attempt in the ledger, continue the loop. If the other half of the verify/e2e pair has no `<task-notification>` yet, end the turn and let its notification re-invoke you; its failures join the same fix scope. The inserted implement runs, then **both** verify and e2e re-dispatch in parallel for the **full** contract — uncheck both lines; a fix can regress either side.
+- gaps or wrong direction → reject the ledger row, then follow up per `common/dispatch-contract.md` with the gap list or corrected scope; do not advance the workflow line.
+- accepted → mark the line `[x]`, update the ledger row, and take the next ready line(s).
+- verify or e2e reported a product failure (a failing row, a mismatch against the issue contract) → not a step gap: insert `[ ] implement — fix: <failure>` before verify and mark the current attempt in the ledger. Wait for the other report in the concurrent pair before fixing so all failures join one scope. The inserted implement runs, then **both** verify and e2e re-dispatch in parallel for the **full** contract — uncheck both lines; a fix can regress either side.
 - the e2e line's `Step focus` carries the browser-Env acceptance rows **you enumerate yourself** from the issue's `## 验收标准` / `## 继承验证义务` tables (every row whose Env is `browser` — the same set verify reports as `deferred: e2e step`; e2e does not wait for verify's report) plus the changed path to exercise; a deferred row still open after e2e means the contract is unverified.
 
 When the last line is `[x]`/`[-]`, go to Step 5.
 
 ### Step 5 — Wrap up (yourself)
 
-Append one run note to `{{SHARED_CONTEXT_FILE}}`: run ID; spawn classification; the final task list with checkboxes; per-line outcome in one line each; files changed; CI-parity status; test-inventory delta; the runtime manifest and standing e2e environment from the e2e report (review re-runs and tears down from this); artifacts; PR number/URL or comment URL; blockers/unresolved risks; proposed child issue specs when scope was incomplete. If `{{CURRENT_ISSUE_FILE}}` exists, issue-local detail may go there.
+Append one run note to `{{SHARED_CONTEXT_FILE}}`: run ID; spawn classification; the final task list with each line's outcome; files changed; CI-parity status; test-inventory delta; the runtime manifest and standing e2e environment from the e2e report (review re-runs and tears down from this); artifacts; PR number/URL or comment URL; blockers/unresolved risks; proposed child issue specs when scope was incomplete. If `{{CURRENT_ISSUE_FILE}}` exists, issue-local detail may go there.
 
 ### Step 6 — Cleanup (scratch only — the e2e runtime stays up)
 
