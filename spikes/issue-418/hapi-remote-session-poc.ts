@@ -3,7 +3,7 @@
 import { resolve } from "node:path"
 import { type as arkType } from "arktype"
 
-const ArgsBoundary = arkType(["'run'", "string", "string", "string"])
+const ArgsBoundary = arkType(["'run'", "string", "string", "string"]).or(["'archive'", "string"])
 const EnvBoundary = arkType({ HOME: "string" })
 const SettingsBoundary = arkType({
 	apiUrl: "string",
@@ -50,6 +50,7 @@ const SessionBoundary = arkType({
 	},
 })
 const SendBoundary = arkType({ ok: "true" })
+const ArchiveBoundary = arkType({ ok: "true" })
 
 type FailureKind = "configuration" | "transport" | "protocol" | "timeout"
 
@@ -162,13 +163,25 @@ async function waitUntilTurnComplete(client: Client, sessionId: string, baseline
 
 async function run(): Promise<void> {
 	const [, , ...rawArgs] = process.argv
-	const [, cwdInput, prompt, resultFileInput] = ArgsBoundary.assert(rawArgs)
-	const cwd = resolve(cwdInput)
-	const resultFile = resolve(resultFileInput)
+	const args = ArgsBoundary.assert(rawArgs)
 	const env = EnvBoundary.assert(process.env)
 	const settingsText = await Bun.file(`${env.HOME}/.hapi/settings.json`).text()
 	const settings = SettingsBoundary.assert(parseJson(settingsText))
 	const client = await authenticate(settings.apiUrl.replace(/\/$/, ""), settings.cliApiToken)
+	if (args[0] === "archive") {
+		const archiveText = await request(client, {
+			kind: "post",
+			path: `/api/sessions/${encodeURIComponent(args[1])}/archive`,
+			body: "{}",
+		})
+		ArchiveBoundary.assert(parseJson(archiveText))
+		console.log(JSON.stringify({ type: "archived", sessionId: args[1] }))
+		return
+	}
+
+	const [, cwdInput, prompt, resultFileInput] = args
+	const cwd = resolve(cwdInput)
+	const resultFile = resolve(resultFileInput)
 	const machineId = await chooseMachine(client, cwd, settings.machineId)
 
 	const spawnText = await request(client, {
