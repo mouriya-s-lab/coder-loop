@@ -167,6 +167,7 @@ export type SchedulerState = {
 	rateLimitedUntilMs: number | null
 	hostResourceOwners: Map<string, SchedulerHostResourceOwner>
 	hostResourceWaits: Map<number, SchedulerHostResourceWait>
+	nextHostResourceWaitOrder: number
 }
 
 export type SchedulerHostResourceOwner = {
@@ -179,12 +180,29 @@ export type SchedulerHostResourceOwner = {
 
 export type SchedulerHostResourceWait = {
 	resource: string
-	ownerRunId: string
-	ownerChainId: number
-	ownerItemId: number
 	chainId: number
 	itemId: number
 	phase: string
+	order: number
+}
+
+export type SchedulerHostResourceRequest = {
+	resource: string
+	chainId: number
+	itemId: number
+	phase: string
+}
+
+export type SchedulerHostResourceAdmission =
+	| { kind: "available" }
+	| { kind: "waiting"; wait: SchedulerHostResourceWait; owner: SchedulerHostResourceOwner | null }
+
+export type SchedulerHostResourceEntry =
+	| { kind: "entered"; owner: SchedulerHostResourceOwner }
+	| { kind: "waiting"; wait: SchedulerHostResourceWait; owner: SchedulerHostResourceOwner | null }
+
+export type SchedulerHostResourceWaitSnapshot = SchedulerHostResourceWait & {
+	owner: SchedulerHostResourceOwner | null
 }
 
 export type SchedulerStore = Pick<
@@ -452,6 +470,76 @@ export function createSchedulerState(): SchedulerState {
 		rateLimitedUntilMs: null,
 		hostResourceOwners: new Map(),
 		hostResourceWaits: new Map(),
+		nextHostResourceWaitOrder: 0,
+	}
+}
+
+export function requestHostResource(state: SchedulerState, request: SchedulerHostResourceRequest): SchedulerHostResourceAdmission {
+	const existing = state.hostResourceWaits.get(request.itemId)
+	if (existing !== undefined && (existing.resource !== request.resource || existing.phase !== request.phase || existing.chainId !== request.chainId)) {
+		state.hostResourceWaits.delete(request.itemId)
+	}
+	const owner = state.hostResourceOwners.get(request.resource) ?? null
+	const firstWaiter = [...state.hostResourceWaits.values()]
+		.filter((wait) => wait.resource === request.resource)
+		.sort((left, right) => left.order - right.order)[0]
+	if (owner === null && (firstWaiter === undefined || firstWaiter.itemId === request.itemId)) {
+		return { kind: "available" }
+	}
+	const current = state.hostResourceWaits.get(request.itemId)
+	const wait: SchedulerHostResourceWait = current ?? { ...request, order: state.nextHostResourceWaitOrder++ }
+	state.hostResourceWaits.set(request.itemId, wait)
+	return { kind: "waiting", wait, owner }
+}
+
+export function enterHostResourceCriticalSection(
+	state: SchedulerState,
+	request: SchedulerHostResourceRequest,
+	runId: string,
+): SchedulerHostResourceEntry {
+	const admission = requestHostResource(state, request)
+	if (admission.kind === "waiting") return admission
+	state.hostResourceWaits.delete(request.itemId)
+	const owner: SchedulerHostResourceOwner = { ...request, runId }
+	state.hostResourceOwners.set(request.resource, owner)
+	return { kind: "entered", owner }
+}
+
+export function releaseHostResourcesForRun(state: SchedulerState, runId: string): void {
+	for (const [resource, owner] of state.hostResourceOwners) {
+		if (owner.runId === runId) state.hostResourceOwners.delete(resource)
+	}
+}
+
+export function removeHostResourceLifecycleForChain(state: SchedulerState, chainId: number): void {
+	for (const [itemId, wait] of state.hostResourceWaits) {
+		if (wait.chainId === chainId) state.hostResourceWaits.delete(itemId)
+	}
+	for (const [resource, owner] of state.hostResourceOwners) {
+		if (owner.chainId === chainId) state.hostResourceOwners.delete(resource)
+	}
+}
+
+export function removeHostResourceWaiterForItem(state: SchedulerState, itemId: number): void {
+	state.hostResourceWaits.delete(itemId)
+}
+
+export function hostResourceWaitSnapshots(state: SchedulerState): SchedulerHostResourceWaitSnapshot[] {
+	return [...state.hostResourceWaits.values()]
+		.sort((left, right) => left.order - right.order)
+		.map((wait) => ({ ...wait, owner: state.hostResourceOwners.get(wait.resource) ?? null }))
+}
+
+export function reconcileHostResourceLifecycle(
+	state: SchedulerState,
+	eligibleWaiterItemIds: ReadonlySet<number>,
+	activeRunIds: ReadonlySet<string>,
+): void {
+	for (const [itemId] of state.hostResourceWaits) {
+		if (!eligibleWaiterItemIds.has(itemId)) state.hostResourceWaits.delete(itemId)
+	}
+	for (const [resource, owner] of state.hostResourceOwners) {
+		if (!activeRunIds.has(owner.runId)) state.hostResourceOwners.delete(resource)
 	}
 }
 
@@ -479,8 +567,10 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 	const activeChainIds = new Set(activeChains.map((chain) => chain.id))
 	const spawnedRuns: SchedulerActiveRun[] = []
 	const completedChainIds: number[] = []
+	const eligibleHostResourceWaiterItemIds = new Set<number>()
 
 	removeIdleSlotsForInactiveChains(options.state, activeChainIds)
+	reconcileHostResourceLifecycle(options.state, new Set(options.state.hostResourceWaits.keys()), new Set(listActiveRuns(options.state).map((run) => run.runId)))
 
 	// #478: in-state paused gate — a rate-limit cooldown armed synchronously by a prior run's
 	// close handler takes effect immediately, before the daemon-level async persist can land.
@@ -493,7 +583,6 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 	const spawnCapped = (): boolean => effectiveMaxSpawns !== undefined && spawnedRuns.length >= effectiveMaxSpawns
 
 	for (const chain of activeChains) {
-		if (spawnCapped()) break
 		let items = options.store.listItems(chain.id)
 		// #412: an empty chain with no chain-level preset has nothing to drive — skip cleanly instead
 		// of crashing chain-wide preset resolution. The chain becomes actionable as soon as the first
@@ -519,7 +608,6 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 		const repoCwds = distinct(items.map((item) => item.repoCwd))
 
 		for (const repoCwd of repoCwds) {
-			if (spawnCapped()) break
 			const slot = getOrCreateSlot(options.state, chain, repoCwd)
 			if (slot.activeRun !== null) {
 				await emit(options, {
@@ -547,28 +635,28 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 			})
 			if (next === null) continue
 			const hostResource = phasePlan.hostExclusiveResources.get(next.phase) ?? null
-			if (hostResource !== null) {
-				const owner = options.state.hostResourceOwners.get(hostResource)
-				const firstWaiter = [...options.state.hostResourceWaits.values()].find((wait) => wait.resource === hostResource)
-				if (owner === undefined && firstWaiter !== undefined && firstWaiter.itemId !== next.item.id) {
-					continue
+			if (spawnCapped()) {
+				const wait = options.state.hostResourceWaits.get(next.item.id)
+				if (wait !== undefined && wait.chainId === chain.id && wait.phase === next.phase && wait.resource === hostResource) {
+					eligibleHostResourceWaiterItemIds.add(next.item.id)
 				}
-				if (owner !== undefined) {
-					const wait: SchedulerHostResourceWait = {
-						resource: hostResource,
-						ownerRunId: owner.runId,
-						ownerChainId: owner.chainId,
-						ownerItemId: owner.itemId,
-						chainId: chain.id,
-						itemId: next.item.id,
-						phase: next.phase,
-					}
-					options.state.hostResourceWaits.set(next.item.id, wait)
-					await emit(options, { type: "host_resource.wait", ...wait })
+				continue
+			}
+			if (hostResource !== null) {
+				eligibleHostResourceWaiterItemIds.add(next.item.id)
+				const admission = requestHostResource(options.state, { resource: hostResource, chainId: chain.id, itemId: next.item.id, phase: next.phase })
+				if (admission.kind === "waiting") {
+					if (admission.owner !== null) await emit(options, {
+						type: "host_resource.wait",
+						...admission.wait,
+						ownerRunId: admission.owner.runId,
+						ownerChainId: admission.owner.chainId,
+						ownerItemId: admission.owner.itemId,
+					})
 					continue
 				}
 			}
-			options.state.hostResourceWaits.delete(next.item.id)
+			if (hostResource === null) options.state.hostResourceWaits.delete(next.item.id)
 
 			const activeRun = await spawnSchedulerRun(options, chain, next.item, slot, next.phase, phasePlan, hostResource)
 			if (activeRun !== null) spawnedRuns.push(activeRun)
@@ -585,6 +673,7 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 
 		if (await completeChainIfReady(options, chain, undefined, chainStatuses.terminal)) completedChainIds.push(chain.id)
 	}
+	reconcileHostResourceLifecycle(options.state, eligibleHostResourceWaiterItemIds, new Set(listActiveRuns(options.state).map((run) => run.runId)))
 
 	return { spawnedRuns, completedChainIds }
 }
@@ -1007,12 +1096,6 @@ export function listPendingCloseHandlers(state: SchedulerState): Promise<unknown
 	return [...state.pendingCloseHandlers]
 }
 
-function releaseHostResourceForRun(state: SchedulerState, runId: string): void {
-	for (const [resource, owner] of state.hostResourceOwners) {
-		if (owner.runId === runId) state.hostResourceOwners.delete(resource)
-	}
-}
-
 export class SchedulerError extends Error {
 	constructor(
 		readonly code: "max_ticks_exceeded" | "worktree_create_failed" | "spawn_failed",
@@ -1050,7 +1133,8 @@ async function spawnSchedulerRun(
 		runId = options.runIdFactory?.({ chain, item, phase }) ?? makeRunId(item.id, phase)
 		startedAt = nowSeconds(options)
 		if (hostResource !== null) {
-			options.state.hostResourceOwners.set(hostResource, { resource: hostResource, runId, chainId: chain.id, itemId: item.id, phase })
+			const entry = enterHostResourceCriticalSection(options.state, { resource: hostResource, chainId: chain.id, itemId: item.id, phase }, runId)
+			if (entry.kind === "waiting") throw new Error(`host resource ${hostResource} admission changed during run preparation`)
 		}
 		options.store.recordRun({
 			runId,
@@ -1163,7 +1247,7 @@ async function spawnSchedulerRun(
 		activeRun.markPrepared()
 		return activeRun
 	} catch (error) {
-		if (runId !== null) releaseHostResourceForRun(options.state, runId)
+		if (runId !== null) releaseHostResourcesForRun(options.state, runId)
 		const failure = await cleanupFailedRunPreparation(options, chain, item, slot, {
 			runId,
 			activeRun,
@@ -1371,7 +1455,7 @@ function attachRunCloseHandler(
 		terminatorCleanup = installedGc.terminatorCleanup
 
 		child.on("close", (code) => {
-			releaseHostResourceForRun(options.state, runId)
+			releaseHostResourcesForRun(options.state, runId)
 			lifecycleGc?.cleanup()
 
 			const pendingCloseHandler = (async (): Promise<SchedulerCompletedRun> => {
