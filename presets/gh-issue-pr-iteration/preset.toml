@@ -84,6 +84,10 @@ runner = "codex"
 model  = "gpt-5.6-sol"
 roles  = ["common", "quality", "iter"]
 
+  [[phases.hostResourceBindings]]
+  name = "canonical-verification"
+  resource = "heavyweight-validation"
+
   [phases.variables]
   TARGET_CWD               = { source = "runtime.targetCwd", label = "Target working directory (where `loop-data runtime artifacts` lives)" }
   AGENT_CWD                = { source = "runtime.agentCwd", label = "Agent working directory (your `cwd`; may equal TARGET_CWD or point at a different repo checkout for cross-repo work)" }
@@ -127,11 +131,14 @@ roles  = ["common", "quality", "iter"]
 
 [[phases]]
 name   = "review"
-hostExclusiveResource = "heavyweight-validation"
 prompt = "review-entry.md"
 runner = "codex"
 model  = "gpt-5.6-sol"
 roles  = ["common", "quality", "review"]
+
+  [[phases.hostResourceBindings]]
+  name = "canonical-verification"
+  resource = "heavyweight-validation"
 
   # #407 / #409 / #410 per-phase rights segment. Review is the only phase that legitimately:
   #   - creates queue items (expanded-incomplete-parent flow inserts child items before flipping

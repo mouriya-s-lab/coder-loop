@@ -465,13 +465,23 @@ describe("scheduler", () => {
 	test("serializes host resource critical sections fairly", async () => {
 		const fixture = await createFixture("host-resource-backpressure")
 		try {
+			const bundled = await loadedPresetFromDir(resolve(REPO_ROOT, "presets/gh-issue-pr-iteration"))
+			const phaseExclusivePreset: SchedulerLoadedPreset = {
+				...bundled,
+				preset: {
+					...bundled.preset,
+					phases: bundled.preset.phases.map((phase) => phase.name === "review"
+						? { ...phase, hostExclusiveResource: "heavyweight-validation" }
+						: phase),
+				},
+			}
 			const chainA = createChain(fixture.store, "host-resource-chain-a")
 			const chainB = createChain(fixture.store, "host-resource-chain-b")
 			const chainC = createChain(fixture.store, "host-resource-chain-c")
 			const itemA = createItem(fixture.store, chainA, { issueNumber: 622_001, repoCwd: "/repo/a", sleepMs: 80 })
 			const itemB = createItem(fixture.store, chainB, { issueNumber: 622_002, repoCwd: "/repo/b", sleepMs: 80, writeStatus: "done" })
 			const itemC = createItem(fixture.store, chainC, { issueNumber: 622_003, repoCwd: "/repo/c", sleepMs: 80, writeStatus: "done" })
-			const options = fixture.options({ phase: "review" })
+			const options = fixture.options({ phase: "review", loadedPreset: phaseExclusivePreset })
 
 			const firstTick = await schedulerTick(options)
 			expect(firstTick.spawnedRuns.map((run) => run.itemId)).toEqual([itemA.id])

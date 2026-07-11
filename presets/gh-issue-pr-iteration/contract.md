@@ -214,6 +214,8 @@ PR protocol 验收检测"最新 retry response 是否在 issue 而非 PR" → re
 
 Review 是调度者（orchestrator）：PR-backed 路由必须先派 diff-audit 与 replay 两个 subagent 真跑、拿齐两份已验收报告后才允许做 body 判断与 verdict；诚实性/协议判断由调度者亲自做。每次 PR 回复（retry 反馈与 accept 总结）都是完整 review 报告：每个 check 一节引实测值 + `## 缺失汇总` 单一权威缺口区 + `## Skipped checks` 写明理由。按 `review-entry.md` 的 phase 顺序列出每个验收点（entry 与 quality/ 文件做 ground truth）：
 
+iteration verify 与 review replay 的 canonical full-suite 执行都必须用各自 phase 声明的同名 `canonical-verification` binding，通过 `coder-loop resource run canonical-verification -- <原命令>` 进入同一主机资源。临界区只包含原 canonical 命令本身；setup、GitHub metadata、diff-audit、acceptance-row planning、e2e replay 与报告写作不持有该资源。wait/acquire/release 由 run credential 关联到 owner/waiter，并进入结构化 status 与 observability trace；等待后仍只执行一次完整原命令。
+
 | 验收点 | 执行方 | 输入 | 规则 | 失败处置 |
 |---|---|---|---|---|
 | Diff audit | diff-audit subagent 真跑（纯读） | PR diff vs base + changed code 本体 + diff 中的测试变更 + issue body 点名的全仓收敛模式 | 每个 changed file 映射到 issue scope；runtime artifacts / scheduling state 不入仓；diff 中的测试删/改名/skip/弱化逐条枚举（含 test-collection config/glob/skip-marker/CI 变化）；代码审查锚定 issue 设计：逻辑错误（须可追溯失败路径）/ 偏离 issue 声明的设计（须引原句）/ 违反项目 conventions（须引来源）/ diff 内结构缺陷；并对 issue body 自己点名的全仓收敛模式（`## 不应残留` / `## 预期结果` "升一等类型 / 不再 …" / `## 验收标准` 数值红线）做一次性全仓 site 枚举——其余发散性发现不进 verdict | retry action（引用全部失败行 + 每个 pattern 的全部剩余 site） |

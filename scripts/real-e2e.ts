@@ -232,7 +232,7 @@ function seedIssueBody(fixture: FixtureRun): string {
 | # | Dimension | Check | Command | Env | Expect |
 |---|-----------|-------|---------|-----|--------|
 | 1 | function | 本轮 fixture 内容为 complete | \`cat ${fixture.fixturePath}\` | local | 输出 \`status: complete\` |
-| 2 | scope | 只修改本轮 fixture | \`git diff --name-only ${fixture.baseBranch}...HEAD\` | local | 只输出 \`${fixture.fixturePath}\` |
+| 2 | scope | 只修改本轮 fixture | \`git diff --name-only ${fixture.baseBranch}\` | local | 只输出 \`${fixture.fixturePath}\` |
 
 ## 依赖关系
 

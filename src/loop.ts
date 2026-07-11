@@ -471,6 +471,11 @@ const PresetPhaseRightsBoundary = arkType({
 	"privilegedOps?": "string[]",
 })
 
+const PresetHostResourceBindingBoundary = arkType({
+	name: "string",
+	resource: "string",
+})
+
 const PresetPhaseBoundary = arkType({
 	name: "string",
 	prompt: "string",
@@ -482,6 +487,7 @@ const PresetPhaseBoundary = arkType({
 	"roles?": "string[]",
 	"rights?": PresetPhaseRightsBoundary,
 	"hostExclusiveResource?": "string",
+	"hostResourceBindings?": PresetHostResourceBindingBoundary.array(),
 })
 
 const PresetFragmentBoundary = arkType({
@@ -620,6 +626,7 @@ export type PresetPhase = {
 	// #407 per-phase rights, always present at runtime (parser fills default-deny).
 	rights: PresetPhaseRights
 	hostExclusiveResource?: string | null
+	hostResourceBindings?: ReadonlyMap<string, string>
 }
 
 export type PresetFragment = {
@@ -2283,6 +2290,8 @@ const AGENT_ATTRIBUTED_COMMANDS = [
 	"daemon.down",
 	"logs.query",
 	"queue.unblock",
+	"hostResource.acquire",
+	"hostResource.release",
 ] as const
 type AgentAttributedCommand = typeof AGENT_ATTRIBUTED_COMMANDS[number]
 
@@ -2641,6 +2650,26 @@ async function runQueueCommand(args: string[]): Promise<void> {
 	await runQueueUnblockCommand(parsed.value.args)
 }
 
+async function runResourceCommand(args: string[]): Promise<void> {
+	if (args[0] !== "run") fail("Usage: coder-loop resource run <binding> -- <command> [args...]")
+	const binding = args[1]
+	if (binding === undefined || binding.trim() === "") fail("resource run requires a non-empty binding name")
+	if (args[2] !== "--" || args.length < 4) fail("resource run requires -- followed by the complete command")
+	const command = args.slice(3)
+	await requestDaemonResult(null, "hostResource.acquire", { binding })
+	let exitCode = 1
+	try {
+		exitCode = await new Promise<number>((resolveExit, rejectExit) => {
+			const child = spawn(command[0]!, command.slice(1), { stdio: "inherit", env: process.env })
+			child.once("error", rejectExit)
+			child.once("close", (code, signal) => resolveExit(code ?? (signal === null ? 1 : 128)))
+		})
+	} finally {
+		await requestDaemonResult(null, "hostResource.release", { binding })
+	}
+	process.exitCode = exitCode
+}
+
 async function main() {
 	const firstArg = process.argv[2]
 	if (firstArg === "status") {
@@ -2667,6 +2696,10 @@ async function main() {
 		await runQueueCommand(process.argv.slice(3))
 		return
 	}
+	if (firstArg === "resource") {
+		await runResourceCommand(process.argv.slice(3))
+		return
+	}
 	if (firstArg === "doctor") {
 		const handled = await dispatchSubcommand(firstArg, process.argv.slice(3))
 		if (handled) return
@@ -2686,6 +2719,7 @@ function rootUsage(): string {
 		"  chain <create|list|status|stop|resume|delete|set-runner-model>",
 		"  item <add|batch-add|list|update|reorder|exits|exit-action>",
 		"  queue unblock <target> --issue <issue>",
+		"  resource run <binding> -- <command> [args...]",
 		"  doctor <target>",
 		"",
 	].join("\n")
@@ -4421,7 +4455,14 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 		if (hostExclusiveResource !== null && hostExclusiveResource.trim() === "") {
 			presetError(`preset.phases[${index}].hostExclusiveResource: must be a non-empty string`)
 		}
-		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), exits, variables, trigger, defaultRunner: runner, defaultModel: model, roles, rights, hostExclusiveResource })
+		const hostResourceBindings = new Map<string, string>()
+		for (const [bindingIndex, binding] of (entry.hostResourceBindings ?? []).entries()) {
+			if (binding.name.trim() === "") presetError(`preset.phases[${index}].hostResourceBindings[${bindingIndex}].name: must be a non-empty string`)
+			if (binding.resource.trim() === "") presetError(`preset.phases[${index}].hostResourceBindings[${bindingIndex}].resource: must be a non-empty string`)
+			if (hostResourceBindings.has(binding.name)) presetError(`preset.phases[${index}].hostResourceBindings: duplicate binding name "${binding.name}"`)
+			hostResourceBindings.set(binding.name, binding.resource)
+		}
+		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), exits, variables, trigger, defaultRunner: runner, defaultModel: model, roles, rights, hostExclusiveResource, hostResourceBindings })
 	}
 	if (!phases.some((phase) => phase.trigger === null)) presetError("preset.phases: must include at least one non-trigger phase")
 

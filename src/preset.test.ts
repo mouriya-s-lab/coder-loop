@@ -39,6 +39,20 @@ function status(value: string) {
 	return parseInternalStatus(value, "test.status")
 }
 
+test("binds canonical verification steps to one host resource", async () => {
+	const preset = await loadPreset(BUNDLED_PRESET_DIR)
+	const iteration = preset.phases.find((phase) => phase.name === "iteration")
+	const review = preset.phases.find((phase) => phase.name === "review")
+	expect(iteration?.hostResourceBindings?.get("canonical-verification")).toBe("heavyweight-validation")
+	expect(review?.hostResourceBindings?.get("canonical-verification")).toBe("heavyweight-validation")
+	expect(iteration?.hostExclusiveResource ?? null).toBeNull()
+	expect(review?.hostExclusiveResource ?? null).toBeNull()
+	const verify = await readFile(resolve(BUNDLED_PRESET_DIR, "iter/steps/verify.md"), "utf8")
+	const replay = await readFile(resolve(BUNDLED_PRESET_DIR, "review/steps/replay.md"), "utf8")
+	expect(verify).toContain("coder-loop resource run canonical-verification --")
+	expect(replay).toContain("coder-loop resource run canonical-verification --")
+})
+
 // Minimum-shape `RuntimeBindings` for the #457 declared-binding driver test (acceptance row 2):
 // the runtime channel must satisfy the `Record<EngineRuntimeBindingKey, string>` requirement, but
 // the umbrella resolution path under test exercises only the `chain.<field>` channel, so every

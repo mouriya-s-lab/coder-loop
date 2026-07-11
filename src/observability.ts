@@ -45,6 +45,8 @@ const ObservabilityEventTypeBoundary = arkType.or(
 	arkType.unit("agent.exit"),
 	arkType.unit("phase.start"),
 	arkType.unit("phase.end"),
+	arkType.unit("host_resource.acquired"),
+	arkType.unit("host_resource.released"),
 	arkType.unit("chain.completed"),
 	arkType.unit("attempt.timeout"),
 	// #462: startup idle reclaim. Distinct type from `attempt.timeout` so observers
@@ -416,6 +418,18 @@ const ObservabilityEventBoundary = arkType.or(
 		kind: arkType.unit("lifecycle"),
 		type: arkType.unit("phase.end"),
 		payload: { exitCode: "number", durationSeconds: "number", status: "string" },
+	},
+	{
+		...EventBaseBoundary,
+		kind: arkType.unit("lifecycle"),
+		type: arkType.unit("host_resource.acquired"),
+		payload: { resource: "string", binding: "string" },
+	},
+	{
+		...EventBaseBoundary,
+		kind: arkType.unit("lifecycle"),
+		type: arkType.unit("host_resource.released"),
+		payload: { resource: "string", binding: "string" },
 	},
 	{
 		...EventBaseBoundary,
@@ -1026,6 +1040,10 @@ function renderLifecycleEvent(event: Extract<ObservabilityEvent, { kind: "lifecy
 			return `${event.ts} lifecycle phase.start chain=${event.chain ?? "-"} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} pid=${event.payload.pid ?? "null"}`
 		case "phase.end":
 			return `${event.ts} lifecycle phase.end chain=${event.chain ?? "-"} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} exit=${event.payload.exitCode} status=${event.payload.status}`
+		case "host_resource.acquired":
+			return `${event.ts} lifecycle host_resource.acquired chain=${event.chain ?? "-"} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} resource=${event.payload.resource} binding=${event.payload.binding}`
+		case "host_resource.released":
+			return `${event.ts} lifecycle host_resource.released chain=${event.chain ?? "-"} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} resource=${event.payload.resource} binding=${event.payload.binding}`
 		case "chain.completed":
 			return `${event.ts} lifecycle chain.completed chain=${event.chain ?? event.payload.chainId}`
 		case "attempt.timeout":

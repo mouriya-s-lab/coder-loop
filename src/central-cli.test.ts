@@ -44,6 +44,23 @@ test("reports host resource critical section state", () => {
 	expect(hostResourceWaitSnapshots(state)).toEqual([])
 })
 
+test("reports heavyweight validation critical sections", () => {
+	const state = createSchedulerState()
+	state.hostResourceOwners.set("heavyweight-validation", { resource: "heavyweight-validation", runId: "iteration-run", chainId: 7, itemId: 70, phase: "iteration" })
+	expect(requestHostResource(state, { resource: "heavyweight-validation", chainId: 8, itemId: 80, phase: "review" }).kind).toBe("waiting")
+	const snapshot = {
+		owners: [...state.hostResourceOwners.values()],
+		waits: hostResourceWaitSnapshots(state),
+		trace: [
+			{ type: "host_resource.acquired", runId: "iteration-run", phase: "iteration", resource: "heavyweight-validation" },
+			{ type: "host_resource.wait", runId: "review-run", phase: "review", resource: "heavyweight-validation", ownerRunId: "iteration-run" },
+			{ type: "host_resource.released", runId: "iteration-run", phase: "iteration", resource: "heavyweight-validation" },
+		],
+	}
+	expect(snapshot.waits[0]?.owner?.runId).toBe(snapshot.owners[0]?.runId)
+	expect(snapshot.trace.map((event) => event.type)).toEqual(["host_resource.acquired", "host_resource.wait", "host_resource.released"])
+})
+
 let nextFixtureId = 0
 
 function chainConfig(repository: string, baseBranch?: string): string {

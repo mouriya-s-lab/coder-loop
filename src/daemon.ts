@@ -26,6 +26,7 @@ import {
 import {
 	cleanupSchedulerChainWorktrees,
 	createSchedulerState,
+	enterHostResourceCriticalSection,
 	hostResourceWaitSnapshots,
 	listActiveRuns,
 	listPendingCloseHandlers,
@@ -33,7 +34,9 @@ import {
 	maxItemAttemptsFromChainMetadata,
 	removeHostResourceLifecycleForChain,
 	removeHostResourceWaiterForItem,
+	releaseHostResourcesForRun,
 	schedulerTick,
+	waitForHostResourceChange,
 	type SchedulerCompletedRun,
 	type SchedulerEvent,
 	type SchedulerChainWorktreeCleanup,
@@ -167,6 +170,8 @@ export type DaemonCommandName =
 	// rejected (#409); this is the only controlled channel for an agent to stop
 	// the chain it owns.
 	| "item.exitAction"
+	| "hostResource.acquire"
+	| "hostResource.release"
 	| "daemon.status"
 	| "daemon.down"
 	// #409: previously executed inline in the CLI process — moved behind the
@@ -1551,6 +1556,8 @@ export class CoderLoopDaemon {
 			"item.reorder": { authClass: "per-phase-authorized", handler: (args) => this.handleItemReorder(args) },
 			"item.exits": { authClass: "read-no-auth", handler: (args) => this.handleItemExits(args) },
 			"item.exitAction": { authClass: "mutation-credential-gated", handler: (args) => this.handleItemExitAction(args) },
+			"hostResource.acquire": { authClass: "mutation-credential-gated", handler: (args) => this.handleHostResourceAcquire(args) },
+			"hostResource.release": { authClass: "mutation-credential-gated", handler: (args) => this.handleHostResourceRelease(args) },
 			"daemon.status": { authClass: "read-no-auth", handler: () => Promise.resolve({ daemon: daemonSnapshotToJson(this.snapshot()) }) },
 			"daemon.down": {
 				authClass: "hard-deny-for-agent",
@@ -1567,6 +1574,75 @@ export class CoderLoopDaemon {
 			"logs.query": { authClass: "hard-deny-for-agent", handler: (args) => this.handleLogsQuery(args) },
 			"queue.unblock": { authClass: "hard-deny-for-agent", handler: (args) => this.handleQueueUnblock(args) },
 		}
+	}
+
+	private async resolveHostResourceBinding(args: JsonObject): Promise<{
+		caller: Extract<ItemMutationCaller, { kind: "agent" }>
+		chain: ChainRecord
+		item: ItemRecord
+		binding: string
+		resource: string
+	}> {
+		validateKnownKeys(args, "hostResource args", ["binding", "agentCredential"])
+		const binding = requiredString(args, "binding")
+		const resolved = this.resolveItemMutationCaller(args)
+		if (resolved.kind === "err") throw this.resolveCallerDenyError(resolved.error)
+		if (resolved.value.kind === "operator") throw new DaemonError("invalid_caller", "host resource critical sections require an active agent run", {})
+		const caller = resolved.value
+		const store = this.requireStore()
+		const run = store.getRunByRunId(caller.runId)
+		if (run === null) throw new DaemonError("invalid_caller", `active run ${caller.runId} has no run record`, { runId: caller.runId })
+		const item = store.getItem(run.itemId)
+		if (item === null) throw new DaemonError("not_found", `item ${run.itemId} was not found`, { itemId: run.itemId })
+		const chain = store.getChain(item.chainId)
+		if (chain === null) throw new DaemonError("not_found", `chain ${item.chainId} was not found`, { chainId: item.chainId })
+		const { preset } = await this.loadedPresetForItem(chain, item, "hostResource.binding")
+		const phase = preset.phases.find((entry) => entry.name === caller.phase)
+		if (phase === undefined) throw new DaemonError("invalid_request", `run phase ${caller.phase} is absent from preset ${preset.name}`, {})
+		const resource = phase.hostResourceBindings?.get(binding)
+		if (resource === undefined) throw new DaemonError("invalid_request", `phase ${caller.phase} does not declare host resource binding ${binding}`, { binding, phase: caller.phase })
+		return { caller, chain, item, binding, resource }
+	}
+
+	private async handleHostResourceAcquire(args: JsonObject): Promise<JsonObject> {
+		const resolved = await this.resolveHostResourceBinding(args)
+		const request = { resource: resolved.resource, chainId: resolved.chain.id, itemId: resolved.item.id, phase: resolved.caller.phase }
+		for (;;) {
+			const currentCaller = this.resolveItemMutationCaller(args)
+			if (currentCaller.kind === "err") throw this.resolveCallerDenyError(currentCaller.error)
+			if (currentCaller.value.kind !== "agent" || currentCaller.value.runId !== resolved.caller.runId) throw new DaemonError("invalid_caller", "host resource waiter lost its bound active run", {})
+			const entry = enterHostResourceCriticalSection(this.schedulerState, request, resolved.caller.runId)
+			if (entry.kind === "entered") {
+				await this.recordObservabilityEventIfChainNameIsValid(resolved.chain, makeObservabilityEvent({
+					kind: "lifecycle", type: "host_resource.acquired", chain: resolved.chain.name, item: resolved.item.id,
+					runId: resolved.caller.runId, phase: resolved.caller.phase, subject: resolved.caller.subject,
+					payload: { resource: resolved.resource, binding: resolved.binding },
+				}))
+				return { resource: resolved.resource, binding: resolved.binding, owner: entry.owner }
+			}
+			if (entry.owner !== null) await this.recordObservabilityEventIfChainNameIsValid(resolved.chain, makeObservabilityEvent({
+				kind: "decision", type: "host_resource.wait", chain: resolved.chain.name, item: resolved.item.id,
+				runId: resolved.caller.runId, phase: resolved.caller.phase, subject: resolved.caller.subject,
+				payload: { rowId: resolved.item.id, resource: resolved.resource, ownerRunId: entry.owner.runId, ownerChainId: entry.owner.chainId, ownerItemId: entry.owner.itemId },
+			}))
+			await waitForHostResourceChange(this.schedulerState)
+		}
+	}
+
+	private async handleHostResourceRelease(args: JsonObject): Promise<JsonObject> {
+		const resolved = await this.resolveHostResourceBinding(args)
+		const owner = this.schedulerState.hostResourceOwners.get(resolved.resource)
+		if (owner?.runId !== resolved.caller.runId) throw new DaemonError("invalid_request", `run ${resolved.caller.runId} does not own host resource ${resolved.resource}`, {})
+		try {
+			await this.recordObservabilityEventIfChainNameIsValid(resolved.chain, makeObservabilityEvent({
+				kind: "lifecycle", type: "host_resource.released", chain: resolved.chain.name, item: resolved.item.id,
+				runId: resolved.caller.runId, phase: resolved.caller.phase, subject: resolved.caller.subject,
+				payload: { resource: resolved.resource, binding: resolved.binding },
+			}))
+		} finally {
+			releaseHostResourcesForRun(this.schedulerState, resolved.caller.runId)
+		}
+		return { resource: resolved.resource, binding: resolved.binding }
 	}
 
 	private async handleRequest(request: DaemonRequest): Promise<JsonObject> {
@@ -5276,6 +5352,8 @@ const DAEMON_COMMAND_NAMES = [
 	"item.reorder",
 	"item.exits",
 	"item.exitAction",
+	"hostResource.acquire",
+	"hostResource.release",
 	"daemon.status",
 	"daemon.down",
 	"logs.query",
@@ -5329,6 +5407,8 @@ function narrowPrivilegedOpAuditOp(op: DaemonCommandName): PrivilegedOpAuditOp |
 		case "item.update":
 		case "item.exits":
 		case "item.exitAction":
+		case "hostResource.acquire":
+		case "hostResource.release":
 		case "daemon.status":
 			return null
 		default:

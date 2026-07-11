@@ -6,10 +6,12 @@ import { daemonRequest, sendDaemonRequest } from "./daemon"
 import {
 	createGitWorktreeManager,
 	createSchedulerState,
+	enterHostResourceCriticalSection,
 	releaseHostResourcesForRun,
 	requestHostResource,
 	schedulerSlotWorktreePath,
 	schedulerTick,
+	waitForHostResourceChange,
 	type SchedulerEvent,
 	type SchedulerOptions,
 	type SchedulerWorktreeManager,
@@ -37,6 +39,60 @@ test("drains host resource waiters after owner exit", () => {
 		expect(requestHostResource(state, { resource: "shared", chainId: 2, itemId: 2, phase: "validate" })).toEqual({ kind: "available" })
 		expect(state.hostResourceOwners.size).toBe(0)
 	}
+})
+
+test("backpressures canonical verification across iteration and review", async () => {
+	const state = createSchedulerState()
+	const intervals: Array<{ runId: string; start: number; end: number }> = []
+	const executed: string[] = []
+	const run = async (runId: string, chainId: number, itemId: number, phase: string, hold: Promise<void>) => {
+		const request = { resource: "heavyweight-validation", chainId, itemId, phase }
+		for (;;) {
+			const entry = enterHostResourceCriticalSection(state, request, runId)
+			if (entry.kind === "entered") break
+			await waitForHostResourceChange(state)
+		}
+		const interval = { runId, start: performance.now(), end: 0 }
+		intervals.push(interval)
+		executed.push(runId)
+		await hold
+		interval.end = performance.now()
+		releaseHostResourcesForRun(state, runId)
+	}
+	let releaseIteration!: () => void
+	const iterationHold = new Promise<void>((resolveHold) => { releaseIteration = resolveHold })
+	const iteration = run("iteration-command", 1, 1, "iteration", iterationHold)
+	await Promise.resolve()
+	const review = run("review-command", 2, 2, "review", Promise.resolve())
+	await Promise.resolve()
+	expect(executed).toEqual(["iteration-command"])
+	releaseIteration()
+	await Promise.all([iteration, review])
+	expect(executed).toEqual(["iteration-command", "review-command"])
+	expect(intervals[1]!.start).toBeGreaterThanOrEqual(intervals[0]!.end)
+})
+
+test("keeps lightweight orchestration running during heavyweight validation", async () => {
+	const state = createSchedulerState()
+	const events: string[] = []
+	const owner = enterHostResourceCriticalSection(state, { resource: "heavyweight-validation", chainId: 1, itemId: 1, phase: "iteration" }, "owner")
+	expect(owner.kind).toBe("entered")
+	const waiter = (async () => {
+		const request = { resource: "heavyweight-validation", chainId: 2, itemId: 2, phase: "review" }
+		for (;;) {
+			const entry = enterHostResourceCriticalSection(state, request, "waiter")
+			if (entry.kind === "entered") break
+			await waitForHostResourceChange(state)
+		}
+		events.push("validation-start")
+		releaseHostResourcesForRun(state, "waiter")
+	})()
+	await Promise.resolve()
+	events.push("metadata-and-diff-audit")
+	expect(events).toEqual(["metadata-and-diff-audit"])
+	releaseHostResourcesForRun(state, "owner")
+	await waiter
+	expect(events).toEqual(["metadata-and-diff-audit", "validation-start"])
 })
 
 // #397 test brand helper — see install-commands.test.ts for rationale.

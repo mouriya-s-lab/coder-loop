@@ -168,6 +168,7 @@ export type SchedulerState = {
 	hostResourceOwners: Map<string, SchedulerHostResourceOwner>
 	hostResourceWaits: Map<number, SchedulerHostResourceWait>
 	nextHostResourceWaitOrder: number
+	hostResourceChangeListeners: Set<() => void>
 }
 
 export type SchedulerHostResourceOwner = {
@@ -471,6 +472,7 @@ export function createSchedulerState(): SchedulerState {
 		hostResourceOwners: new Map(),
 		hostResourceWaits: new Map(),
 		nextHostResourceWaitOrder: 0,
+		hostResourceChangeListeners: new Set(),
 	}
 }
 
@@ -478,6 +480,7 @@ export function requestHostResource(state: SchedulerState, request: SchedulerHos
 	const existing = state.hostResourceWaits.get(request.itemId)
 	if (existing !== undefined && (existing.resource !== request.resource || existing.phase !== request.phase || existing.chainId !== request.chainId)) {
 		state.hostResourceWaits.delete(request.itemId)
+		notifyHostResourceChange(state)
 	}
 	const owner = state.hostResourceOwners.get(request.resource) ?? null
 	const firstWaiter = [...state.hostResourceWaits.values()]
@@ -502,26 +505,54 @@ export function enterHostResourceCriticalSection(
 	state.hostResourceWaits.delete(request.itemId)
 	const owner: SchedulerHostResourceOwner = { ...request, runId }
 	state.hostResourceOwners.set(request.resource, owner)
+	notifyHostResourceChange(state)
 	return { kind: "entered", owner }
 }
 
+export async function waitForHostResourceChange(state: SchedulerState): Promise<void> {
+	await new Promise<void>((resolveChange) => {
+		const listener = () => {
+			state.hostResourceChangeListeners.delete(listener)
+			resolveChange()
+		}
+		state.hostResourceChangeListeners.add(listener)
+	})
+}
+
+function notifyHostResourceChange(state: SchedulerState): void {
+	for (const listener of [...state.hostResourceChangeListeners]) listener()
+}
+
 export function releaseHostResourcesForRun(state: SchedulerState, runId: string): void {
+	let changed = false
 	for (const [resource, owner] of state.hostResourceOwners) {
-		if (owner.runId === runId) state.hostResourceOwners.delete(resource)
+		if (owner.runId === runId) {
+			state.hostResourceOwners.delete(resource)
+			changed = true
+		}
 	}
+	if (changed) notifyHostResourceChange(state)
 }
 
 export function removeHostResourceLifecycleForChain(state: SchedulerState, chainId: number): void {
+	let changed = false
 	for (const [itemId, wait] of state.hostResourceWaits) {
-		if (wait.chainId === chainId) state.hostResourceWaits.delete(itemId)
+		if (wait.chainId === chainId) {
+			state.hostResourceWaits.delete(itemId)
+			changed = true
+		}
 	}
 	for (const [resource, owner] of state.hostResourceOwners) {
-		if (owner.chainId === chainId) state.hostResourceOwners.delete(resource)
+		if (owner.chainId === chainId) {
+			state.hostResourceOwners.delete(resource)
+			changed = true
+		}
 	}
+	if (changed) notifyHostResourceChange(state)
 }
 
 export function removeHostResourceWaiterForItem(state: SchedulerState, itemId: number): void {
-	state.hostResourceWaits.delete(itemId)
+	if (state.hostResourceWaits.delete(itemId)) notifyHostResourceChange(state)
 }
 
 export function hostResourceWaitSnapshots(state: SchedulerState): SchedulerHostResourceWaitSnapshot[] {
@@ -535,12 +566,20 @@ export function reconcileHostResourceLifecycle(
 	eligibleWaiterItemIds: ReadonlySet<number>,
 	activeRunIds: ReadonlySet<string>,
 ): void {
+	let changed = false
 	for (const [itemId] of state.hostResourceWaits) {
-		if (!eligibleWaiterItemIds.has(itemId)) state.hostResourceWaits.delete(itemId)
+		if (!eligibleWaiterItemIds.has(itemId)) {
+			state.hostResourceWaits.delete(itemId)
+			changed = true
+		}
 	}
 	for (const [resource, owner] of state.hostResourceOwners) {
-		if (!activeRunIds.has(owner.runId)) state.hostResourceOwners.delete(resource)
+		if (!activeRunIds.has(owner.runId)) {
+			state.hostResourceOwners.delete(resource)
+			changed = true
+		}
 	}
+	if (changed) notifyHostResourceChange(state)
 }
 
 // #452: the daemon calls this once per agent-attributed `item.update` status write that
