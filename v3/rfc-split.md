@@ -22,8 +22,8 @@ RFC-2 是地基：任务结构（含并行）如何被 DSL 表达并静态计算
 
 ## 与既有 issue 线的关系（全体子会话须知）
 
-- **#413（RFC: v3 chain 节点泛化为 item|容器）**：操作员 2026-06-10 的 v3 定义，涵盖容器并发、drain/验证者判定、退回语义、GitHub App 外挂、hapi 执行通道。2026-07-02 的目标陈述是其演进与扩充：RFC-1 承接其核心模型（**授权重新思考，容器模型可被推翻**）；RFC-6 承接其组成部分 1/2（GitHub App + item 可选 hapi 端执行）。#413 最终是被改写还是被新 RFC 树替代，由 RFC-1 会话调查后向操作员提议。
-- **#418（hapi headless 适配 spike，未做）+ `mouriya-s-lab/hapi-remote-session`（空 repo，#1 设计书 open）**：归 RFC-6 线。
+- **#413（RFC: v3 chain 节点泛化为 item|容器）**：这是操作员 2026-06-10 的前史定义，现已被 #546 的统一 `leaf | seq | par` 任务代数 supersede 并关闭；现行 validator、join、reopen 与闭包契约只以 #546 及专项裁决报告为权威。#413 组成部分 1/2（GitHub App + item 可选 hapi 端执行）已重挂 #548。
+- **#418（hapi headless 适配 spike）+ `mouriya-s-lab/hapi-remote-session#1/#2`**：归 RFC-6 线；设计书与实现 child 均已建立，完整依赖链和实时状态见 `v3/execution-orchestration.md` P1-B/P2-B/P6-A。
 - **#453 / #396（类型权威 + 状态机收敛，children 全部落地，umbrella 待最终复核关闭）**：RFC-2 的直接前史。#453 里操作员 2026-06-12 裁决"context 流转能力暂缓"——RFC-3 就是重启这条线。
 - **#534 audit 修复树（#535-#542，open）**：v2 质量收尾，与 v3 设计并行不悖；各 RFC 不要把这些 bug 修复吸进自己范围。
 - **全仓代码红线**（操作员裁决 2026-06-12，v3 一体适用）：全链路 ADT，禁止 `any`/匿名形状；`unknown` 仅限 catch 与边界 parse；禁止真 `as`（`as const` 除外）；外部输入经 arktype 边界 parse。
@@ -104,7 +104,7 @@ RFC-2 是地基：任务结构（含并行）如何被 DSL 表达并静态计算
 
 **目标**（目标 6）：coder-loop 预留第三方调用接口适配任意外部系统。调用语义是结构化的：**选定某条 chain 或独立 workspace + 选择工作流程 + 提供元信息**——不是传 prompt。GitHub 耦合功能（webhook → 自动开工作，参照 iac 的 github-hapi-agent-router 形态）做成外挂，不是原生功能。
 
-**现状事实**（survey-engine §8）：外部触发入口只有 CLI→socket；无 webhook receiver、无对外 API。参考形态：`/Users/mouriya/Ext/code/github-hapi-agent-router`（GitHub webhook → 过滤 labeled-issue 触发 → NetBird mesh → Mac 本地 HAPI session daemon）。既有线：#413 组成部分 1/2（GitHub App 服务端 + 本地 daemon 消费；item 可选 hapi 端执行）、#418 spike（未做）、`hapi-remote-session`（空 repo）。
+**现状事实**（survey-engine §8）：外部触发入口只有 CLI→socket；无 webhook receiver、无对外 API。参考形态：`/Users/mouriya/Ext/code/github-hapi-agent-router`（GitHub webhook → 过滤 labeled-issue 触发 → NetBird mesh → Mac 本地 HAPI session daemon）。既有线：#413 组成部分 1/2 已重挂 #548；#418 spike、`hapi-remote-session#1` 设计书、`hapi-remote-session#2` CLI 实现与 #602/#603 外部执行终端样板均已进入实时 issue graph。
 
 **调查与设计议题**：
 1. 第三方调用面的形态：就是把 daemon socket API 正式化为对外契约（+网络可达层），还是独立 ingress 进程？与 RFC-5 API 层是否共用同一个对外协议面（登记接缝，避免两套 API）。

@@ -21,7 +21,7 @@
 4. **#547 的「[[tools]] 注册表 + toolRequirements 编译」child** Blocks #545 的「required|expected 执法」child。
 5. **统一判定契约 `advance | hold | reopen(target, corrections)`**（#546 核心模型 + #543 执行模型，已统一）：执行器机制（script spawn、stdout decision、fingerprint 幂等泛化）归 #543 children；join 评估与 seq 游标/reopen 调度归 #546 children。两边 children 各自引用同一契约文本，不复制不改写。
 6. **#544 的「prompt 落盘（prompt.md + bindings.json）」child 无上游依赖，可先行**；其 `bindings.json` 的类型化值形态引用 #547 typed bindings child。
-7. **#548 已有两个 children**（#418 spike、mouriya-s-lab/hapi-remote-session#1）；其余待立：消费 daemon repo 立项、router 演进需求登记（后者落 router repo，#548 只登记指针）。
+7. **#548 当前有七个 children**：#418、#569、#570、#602、#603、`mouriya-s-lab/hapi-remote-session#1`、`mouriya-s-lab/hapi-remote-session#2`。router 演进需求登记在 `github-hapi-agent-router#12`，#548 只保留外部 Gate 指针。实时覆盖清单以 `v3/execution-orchestration.md` §10 为准。
 
 ## 波次
 
