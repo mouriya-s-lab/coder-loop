@@ -180,11 +180,12 @@ GitHub webhook、外部 daemon、GUI 或其他业务系统负责把外部事件�
 3. phase 并行和 item 并行形成两套推进模型；
 4. hook、agent validator、script validator 各自定义 decision 协议；
 5. context 通过共享 worktree 文件形成旁路；
-6. GUI 重新 parse preset、读取私有表或推断缺失状态；
-7. ingress 复制一套与 compiler 不同的 validation；
-8. compile、SQLite、status/events、GUI 使用不同节点身份；
-9. 为兼容 v2 建立长期双轨，而不是让线性 preset 成为任务树的退化形式；
-10. 用 typecheck、单元测试或各模块 mock 成功替代真实跨边界证明。
+6. 把 per-closure worktree 误写成整仓 Git 状态隔离，遗漏对象库、remote-tracking refs、repo config/hooks 与 linked-worktree metadata 的 repo 级共享协调协议；
+7. GUI 重新 parse preset、读取私有表或推断缺失状态；
+8. ingress 复制一套与 compiler 不同的 validation；
+9. compile、SQLite、status/events、GUI 使用不同节点身份；
+10. 为兼容 v2 建立长期双轨，而不是让线性 preset 成为任务树的退化形式；
+11. 用 typecheck、单元测试或各模块 mock 成功替代真实跨边界证明。
 
 连接性 Gate 的意义正是防止这些局部实现把系统重新推回 stringly-typed orchestration。
 

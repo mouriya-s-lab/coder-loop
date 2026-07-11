@@ -1,184 +1,479 @@
 # coder-loop v3 GUI — UX 设计
 
-输入：`gui-business-flows.md`（9 场景业务流，全部带 issue 出处）+ `gui-old-prototype-inventory.md`（旧原型考古）。
-本文档回答三件事：为什么人要看每一屏、每一屏的页面逻辑（信息层级）、跨屏的交互逻辑。布局与视觉不在本文档，获确认后才进原型。
+> 输入：`v3/gui-business-flows.md`。本文把 v3 的定义、任务树、任务闭包、evaluation 与因果记录翻译为操作员可理解的交互模型。
+>
+> 本文不规定视觉风格，也不为现有 `gui-prototype.pen` 提供兼容迁移。原型只有在本文获确认后才能作为下一阶段产物。
 
----
+## 0. 产品判断
 
-## 0. 设计原则（从业务流直接推出）
+**GUI 是 v3 程序运行时的解释与控制面，不是 daemon dashboard，也不是数据库浏览器。**
 
-1. **GUI 是短停留运维面，不是常驻工作台。** 9 个场景的退出条件全部收敛到「status 反映预期变化后关掉」。因此每屏第一眼必须给**结论**（好/坏），坏消息才展开细节；不做需要人长时间盯着的 dashboard。
-2. **每屏为一个怀疑服务。** 屏的存在理由 = 某场景里操作员带着的问题；没有场景问题驱动的数据面一律不立屏（反面清单 13 项，见 business-flows 第四部分）。
-3. **动作在决策现场，不设集中控制台。** F 档闭集的每个动作都出现在它对应的决策证据旁边：unblock 在 blocked leaf 行上、restart 在三证卡上、stop/resume 在 chain header、reorder grip 在 pending leaf 上。人看到证据 → 当场决策 → 当场动手。
-4. **关联键是全局通货。** chain / item / run / phase 标识在任何屏出现都可点击跳转（#544 信息架构「事件→run→item 可关联跳转」、#580 双向跳转）。怀疑驱动的跳转靠它实现。
-5. **GUI 不做第二套判断。** 写动作原样转发 daemon，daemon 拒绝就原样呈现拒绝（#579「转发不加语义」）；状态词表来自 preset 编译产物，GUI 不复制词表。
+它必须让操作员在任何时刻回答：
 
----
+1. 系统现在还能否提供可信事实？
+2. 哪些程序实例需要我注意？
+3. 当前任务树为什么归约到这里？
+4. 哪个任务闭包在运行或保留现场？
+5. 哪个主体依据哪份定义、哪个 epoch/binding 作出了什么判定？
+6. 我拥有哪种明确的操作权限，执行后如何证明结果？
 
-## 1. 为什么人要看 —— 屏清单与存在理由
+## 1. 心智模型
 
-6 屏 + 2 个挂载子视图。每屏一句存在理由（= 场景里的怀疑）：
+### 1.1 双轴，而非单一实体层级
 
-| 屏 | 存在理由（人带着什么问题来） | 场景 | 树的角色 |
-|---|---|---|---|
-| **H · Home** | 「跑没跑？有没有事？」——每天多次、几秒钟的心跳确认 | S1, S2/S3/S5 的触发地 | 背景（每 chain 一行摘要） |
-| **C · Chain detail** | 「这条 chain 为什么不动 / par 分支跑到哪了 / 我要动它」 | S5, S8, S9 | **第一眼对象**（运行态树） |
-| **A · Item / Attempt detail** | 「这次 attempt 到底收到了什么、做错在哪？」 | S4 | 背景（面包屑） |
-| **E · Events** | 「刚才发生了什么？这个 run 前后发生了什么？」 | S4 反查、S1 异常钻取 | 无 |
-| **P · Preset preview** | 「我声明的 preset 编译出来到底是什么形状？」 | S7 | **第一眼对象**（定义态树） |
-| **M · Mobile home** | 「不在电脑前，瞥一眼 + 当场处置」 | S3 | 背景 |
-| 挂载 · Hooks 节 | 「哪个 hook 在 hold 这个决策点？」（挂在 C） | S5 | — |
-| 挂载 · Context entries | 「上一轮给这一轮留了什么？」（挂在 C 与 A） | S6 | — |
+GUI 同时呈现两个正交轴。
 
-**与旧原型 6 屏的对照**：Overview→H（继承三证卡，杀 slot 计数与 delta 虚荣指标）；Chain detail→C（杀 flat 队列表，换运行态树）；Item detail v2 tabbed→A（**裁决：v2 胜出**，杀 v1；理由见 §2.3）；Preset preview→P（补齐右列与 tab，状态图改用组件不再手绘）；**Chains list 整屏删除**（陈列陷阱：dogfood 规模下 H 的 per-chain 行已覆盖「我有哪些 chain」，没有场景需要过滤分页的资产清单）；**Settings 删除**（无场景）；Events 从「有导航无屏幕」补成真屏。
+**定义轴：**
 
-**删除的动作/组件及理由**（全部 F 档外或 v3 退役概念）：
-- ChainCreateModal / EnqueueItemModal / SetRunnerModelModal —— 创建类明确不进 v3 GUI（#544 F 裁决），侧边栏也不留入口。
-- Item 页的 Skip / Cancel run / Force retry —— 不在 F 档闭集，呈现它们即破坏范围收口承诺（#579）。
-- DaemonHealthCard 里的「ACTIVE RUNS 2 / 8 slots」—— slot 退役（#544 逐字「不再是展示对象」），改为活 run 计数。
-- ThirdPartyTriggerCard（RFC-6 inbox）—— #544 范围外。
-- ItemQueueRow 10 列表 —— flat 队列是 v2 投影，树=队列（#546）。
-- MetricStatCard 的「+1 since yesterday」delta —— 虚荣指标，不服务任何决策。
-
-**从旧原型继承的结构决策**（考古 §6，全部保留）：
-1. screen-as-PageShell-instance：屏幕 = PageShell 实例 + Crumbs/Actions/Content 三槽 override。
-2. 四层组件粒度：pill/chip 原子 → field 组合 → row → card/strip；屏只做布局与 override。
-3. 来源可追溯性做成一等公民：runner/preset/binding 值全部带 source 标注（engine/preset/chain/item 四层）。
-4. 三证卡：pid file / socket LISTEN / RPC 应答三张 cert + Alive/Split/Down 判活文案。
-5. Prompt viewer 钉 determinism：「same bytes the agent saw」+ sha256。
-6. 文案全用真实领域数据（真路径、真状态词、真 CLI 命令）。
-7. 一屏一问题，副标题写明数据来源。
-8. 领域状态全部 pill 化，无裸文本状态。
-9. 事件 kind 五分类（LIFECYCLE/DECISION/VALIDATION/AUDIT/DIAGNOSTIC）chip 体系。
-10. （修正旧原型未收敛点）token 单体系：只用文档自有 variables，零外部 lib import——headless 可渲染是硬约束。
-
----
-
-## 2. 页面逻辑 —— 每屏的信息层级
-
-层级铁律：**第一层 = 结论（好/坏一眼可判）；第二层 = 坏消息的证据；第三层 = 钻取入口**。好消息永远只占一行。
-
-### 2.1 H · Home
-
-1. **第一层：daemon 三证卡。** 三张 cert（pid / socket / RPC）独立显示，合成判词 Alive / Split / Down；**动作就地**：restart / stop（带二次确认）。旁挂 rate-limit 冷却条（有冷却才显示，`daemon.status.rateLimit`）。「网关不可达」是 GUI 自身的连接错误态，与「三证红」视觉上截然不同——这是「断网 vs daemon 死」的可区分性（#544）。
-2. **第二层：异常带。** 最近异常事件（`daemon.fatal` / `attempt.timeout` / gate hold / reopen 临近预算），每条带关联键可跳。**设计决策：par 容器级异常（hold、reopen 临近预算）直接进首屏异常带**——首屏职责就是异常感知，#575 也钉了「gate hold 状态在 chain 视图/首屏异常区呈现」。无异常时此带整体消失，不留空壳。
-3. **第三层：per-chain 摘要行。** 每 chain 一行：chain 名（repo 路径）· 活 run 数 · 最近转移时间（「8s ago」）· 健康标记（hold / blocked / reopen 计数，无异常则无标记）。**「长时间无转移」不硬编码阈值**——引擎无此 fact，GUI 发明阈值即发明词表；显示相对时间让人自己判断。行点击 → C。
-4. daemon 死时的降级形态：三证卡红 + 最后事件（死因线索，#578「死因事件即崩溃记录」）+ SQLite 只读快照仍显示队列终态（#544 三数据面里 SQLite 面独立于 daemon 存活）。
-
-### 2.2 C · Chain detail
-
-1. **第一层：chain header。** 身份（repo 路径 + chain id）+ 状态 pill + 最近转移时间；**动作就地**：stop / resume。其下一行紧凑 meta（preset / default runner / base branch，各带 source 标注）——回答 S9 的「要动的是哪条」，不占卡片区。
-2. **第二层：运行态任务树（主体，第一眼对象）。** 节点词表严格 #546/#558：
-   - leaf（item）：id + title + 状态 pill + 活 run 指示（spinner）；**blocked leaf 行内就地 Unblock 按钮**；pending leaf 有 reorder grip（par 容器内的 grip 同样提供，语义由 daemon 裁决——#579 GUI 不预判合法性）。
-   - seq 容器：cursor 位置（「@ 2/5」）。
-   - par 容器：join chip（`drain` / `validator → 指向 validator leaf`）+ 容器稳定 id（= group scope 键）+ reopen 计数/预算 + HOLD 标记（有 gate hold 时）。
-   - join ADT 用 discriminated union 穷尽渲染（#580），新增 variant 前端必须显式处理。
-   - v2 线性链渲染为退化树 seq(leaf…)，同一套 UI（#558）。
-   - leaf 点击 → A；活 run 的 leaf 直接显示 run id（点击 → A 的对应 attempt）。
-3. **第三层：侧栏两个挂载视图。**
-   - **Hooks 节**：四层合成后的生效 hook 清单（每条标来源层：global/chain/preset/item），当前 gate hold 现场（决策点标识 + hold 起始 + 重问节奏）。快照语义 =「现在」，与 `hook.*` 事件的「过程」区分（#575）。
-   - **Context entries**：按 scope（item/chain/group）过滤浏览，envelope 显示 id/ts/scope/author，body 原文透传**不做 markdown 二次渲染**（#545/#583：内容通道≠流转信号）。append-only，无写面。
-
-### 2.3 A · Item / Attempt detail
-
-**裁决旧原型 v1/v2 并存：v2 tabbed 胜出。** 理由：S4 的问题序列（哪次错→prompt 是什么→变量值对吗→前后事件→preset 定义对吗）天然是并列的调查维度而非纵向流，tab 化让每个问题一屏内可答；v1 纵向堆叠迫使滚动寻找。
-
-1. **第一层：item header。** item id + title + 状态 pill + phase pill + 面包屑（Home › chain › 所在容器路径——树在此屏是背景）。blocked 时 header 下就地 Unblock。
-2. **第二层：attempt 选择器 + tabs。** attempt 时间线（每 attempt 一行：run id · phase · runner/model · FRESH/RESUME 徽标 · 起止/时长 · 终态），选中 attempt 后 tabs 展开：
-   - **Prompt**（S4 主战场）：prompt.md 逐字渲染（「same value argv got」，#572 单一 effectivePrompt）+ sha256 + bindings 表（KEY / type / source / 实际值，BindingRow 继承）+ FRESH/RESUME 与 resumed session id。**#572 之前的旧 attempt 显示诚实的无快照态**（明示原因，不伪装成「没跑过」，#581）。
-   - **Events**：该 run/item 过滤的事件序列（与 E 同构件，预置过滤）。
-   - **Context**：该 item scope 的 entries（挂载视图复用）。
-   - **Metadata**：KV 全带 source 标注（继承 ItemMetadataCard）。
-3. trace/evidence/handoff 等 A 域文件：只给路径引用与原文透传，不解析不格式化（#544 范围外裁决）。run 目录 `status.json` 不作数据源（#580：快照与事件才是第一契约面）。
-
-### 2.4 E · Events
-
-1. **第一层：过滤条 + LIVE 指示。** 过滤维度 = kind / type / chain / item / run / phase / since（#577）；SSE tail 实时追加，LIVE 指示器显示流速；暂停/恢复 tail。
-2. **第二层：事件行。** TIME / KIND chip（五分类）/ TYPE / 关联键（全部可点跳 C 或 A）/ SUMMARY。继承 EventStreamRow。
-3. 永远带过滤地进入：从 H 异常带来时预置严重度过滤，从 A 来时预置 run 过滤。**无过滤的 raw JSONL 全量视图不存在**（陈列陷阱）。
-
-### 2.5 P · Preset preview
-
-数据源唯一：`preset compile --json`（与 daemon/scheduler 同一 CompiledTaskModel 计算路径，GUI 不二次 parse toml，#549）。schemaVersion 不支持时**显式报错显示版本号，不静默降级**（#582）。
-
-1. **第一层：编译结论条。** preset 名 + schemaVersion + findings 汇总（0 warn = 绿一行；有 warn = 展开 findings 列表，每条指向具体 fragment/status）。
-2. **第二层：三个并列视图（tab 或分区）**：
-   - **状态图**：节点=状态（词表来自产物），边=哪个 phase 的哪个 exit 写它 + 引擎自有转移（entry/exhausted/unblock）。用 StateNode/EdgeArrow 组件渲染，**不手绘画布**（修旧原型的未收敛点）。
-   - **Phase 任务树（定义态，第一眼对象之一）**：seq/par 结构 + 每 phase 的 runner/model + exits + toolRequirements（required 徽标仅 engine-kind 合法，#547 裁决 G）。与 C 的运行态树同一套树组件、不同数据面——「快照=运行态，编译产物=定义态」互补不重叠（#544）。
-   - **Variables**：KEY / type / source / required 表。
-3. tools 注册表、fragments、statuses 词表不独立成屏，作为上述视图的上下文出现（陷阱清单）。
-
-### 2.6 M · Mobile home
-
-与 PC 同构（无第二实现，#584）：同一组件树响应式。首屏三段**无滚动可见**（#584）：① 三证 + 每 chain 活 run 一行；② 异常清单；③ 控制面动作（F 档全集可达，#584 预期结果 3）。下钻进入同一 C/A/E 屏的窄布局。PWA 加主屏是常规入口（mesh-only 裸信任，无登录流）。
-
----
-
-## 3. 交互逻辑
-
-### 3.1 怀疑驱动的跳转图
-
-```mermaid
-flowchart LR
-  H["H Home<br/>跑没跑?"]
-  C["C Chain detail<br/>树为什么不动?"]
-  A["A Item/Attempt<br/>这次错在哪?"]
-  E["E Events<br/>发生了什么?"]
-  P["P Preset preview<br/>定义对吗?"]
-
-  H -->|"chain 行: 无转移/hold/blocked"| C
-  H -->|"异常带: 事件"| E
-  H -->|"三证红: 就地 restart"| H
-  C -->|"点 leaf / 活 run"| A
-  C -->|"看分支活动"| E
-  A -->|"变量取值意外"| P
-  A -->|"看前后事件"| E
-  E -->|"点关联键"| C
-  E -->|"点 run id"| A
+```text
+Definition bundle
+→ CompiledTaskModel
+→ definition node
 ```
 
-（Hooks 节、Context entries 是 C/A 内的挂载视图，不参与屏间跳转。）
+**执行轴：**
 
-### 3.2 写动作的统一交互模式
+```text
+Chain / workflow instance
+→ materialized task tree
+→ task closure
+→ attempt
+→ evaluation / decision / correction
+```
 
-F 档闭集 = daemon start/stop/restart + queue.unblock + chain.stop/resume + item.reorder，**不多不少**（#544）。每个动作同一生命周期：
+两轴通过 `(definitionHash, nodeId)` 连接。chain/item/run 等标识用于导航，但不取代定义—执行关联。
 
-1. **触点在决策现场**（见 §0 原则 3）。
-2. **破坏性动作二次确认**：daemon stop / restart（会终止活 run）、chain.stop。unblock / resume / reorder 无确认（低破坏、可逆或 daemon 会拒绝非法请求）。
-3. **发出后按钮进 pending 态**，GUI 不乐观更新——等 SSE 推的快照变化反映结果（退出条件的 UI 化：「status 反映预期变化」）。
-4. **daemon 拒绝原样呈现**（错误文本 verbatim），GUI 不预判也不翻译（#579「daemon 是唯一裁判」）。
-5. **F 档外诉求指路不代办**：改 preset / 改 hook / 运行时改 join / 创建 chain·item——在对应现场给一行「via CLI: …」指路文案（真实命令），不提供按钮。
+### 1.2 三种时间
 
-### 3.3 Live 与连接状态
+界面必须区分：
 
-- SSE 推送（#571 spike passed）：快照失效推送 + 事件 tail。断线自动重连，重连期间显示「gateway unreachable」——这是 GUI 自身状态，与 daemon 三证红严格区分（断网 vs daemon 死可区分，#544）。
-- 三数据面的呈现映射：socket RPC（快照/控制）→ H/C/A 的状态区；events JSONL（网关直读）→ E 与各处事件嵌入；SQLite 只读 → daemon 死时的队列终态兜底。
+- **定义时间**：实例创建时 pin 了什么；
+- **执行时间**：closure/attempt/frontier 当前在哪里；
+- **判定时间**：某个 evaluation epoch 采样了哪个 binding、产生了什么 decision。
 
-### 3.4 移动端
+把三者混成一个“当前状态”会让 definition drift、resume 和 join 演化不可解释。
 
-同构不裁剪语义：全部 F 档动作可达（#584），布局响应式收窄。深查类场景（S4 prompt 逐字读）在手机上可达但不优化——业务流确认操作员通常「回电脑再说」。
+### 1.3 结论必须带理由
 
----
+`running`、`blocked`、`hold`、`suspended` 不能只做颜色 pill。任何非平凡状态必须提供结构化 reason：
 
-## 4. 组件体系规划（获确认后才进原型）
+- `waiting_on_children`
+- `waiting_on_dependency`
+- `evaluation_hold`
+- `definition_unavailable`
+- `tool_requirement_failed`
+- `closure_suspended`
+- `budget_exhausted`
 
-继承旧原型四层粒度，v3 概念补进原子层与 row 层：
+reason 来自正式契约，不由 GUI 推断。
 
-- **原子（pill/chip）**：DaemonCertPill×3、StatusPill（词表来自 preset 产物）、PhaseChip、RunnerPill（带 source）、EventKindChip×5、RateLimitTag、LiveIndicator、**JoinChip（drain|validator，discriminated union）**、**ReopenBudgetChip（n/budget）**、**HoldBadge**、**Fresh/ResumeBadge**、SourceBadge（engine/preset/chain/item）。
-- **树组件**：TreeLeaf（grip + id + title + pill + run 指示 + 就地动作槽）、TreeSeq（cursor）、TreePar（join chip + 容器 id + reopen + hold）——**运行态（C）与定义态（P）共用**，数据面不同。
-- **row**：EventRow、AttemptRow、BindingRow、HookRow（带来源层）、EntryRow（envelope + body 透传）。
-- **card/strip**：DaemonHealthCard（三证 + 就地动作）、RateLimitBar、AlertBanner、PromptBlock（sha256 + 行号）、CompileFindingRow。
-- **shell**：PageShell（三槽）、Sidebar（H/Chains 无——直接 chain 行/E/P，无 Settings）、MobileTabBar、Crumb。
+## 2. 信息架构
 
----
+### 2.1 一级工作面
 
-## 5. 本设计中我做掉的裁决（列出供推翻）
+| 工作面 | 操作员问题 | 核心对象 |
+|---|---|---|
+| **Attention** | 现在什么需要我？ | 类型化 attention items |
+| **Executions** | 有哪些运行实例，它们在如何归约？ | chain/workflow instances + task trees |
+| **Definitions** | 这些实例承诺运行什么？ | pinned/current definitions |
+| **Timeline** | 一条因果链如何形成？ | typed events + causal links |
+| **System** | 网关/daemon/runner 是否可信？ | health evidence + rate limits |
 
-1. Chains list 整屏删除；「我有哪些 chain」由 H 的 per-chain 行回答。
-2. Item detail 采用 v2 tabbed 方案，v1 弃。
-3. par 容器级异常（hold / reopen 临近预算）直接进首屏异常带。
-4. 「长时间无转移」不设阈值，显示相对时间由人判断。
-5. par 容器内 reorder grip 照常提供，合法性交 daemon 裁决。
-6. 树组件运行态/定义态共用一套，靠数据面区分。
-7. token 单体系（零外部 lib import），headless 可渲染是硬约束。
-8. 推送通知不做（v3 无此机制），移动端感知靠主动瞥——与业务流 [推断] ②一致。
+默认入口是 **Attention**，不是 System。daemon 健康时只提供紧凑全局状态；证据分裂或死亡时，System 诊断自动提升为首要 attention。
+
+### 2.2 对象子视图
+
+以下不是独立资产清单，而是从一级工作面进入的对象视图：
+
+- Execution explorer
+- Decision dossier
+- Task closure detail
+- Definition detail / compare
+- Event detail
+
+### 2.3 导航纪律
+
+任何关联键都必须保留进入时的调查上下文。例如从某次 decision 进入 closure，再返回时仍回到原 epoch，而不是回到一棵已变化任务树的默认顶部。
+
+稳定 URL 至少编码：
+
+```text
+chain / instance
+task node
+closure
+attempt
+evaluation epoch
+definitionHash + nodeId
+event
+```
+
+## 3. Attention 工作面
+
+### 3.1 第一视口
+
+第一视口只回答三件事：
+
+1. **事实源是否可信**：gateway / daemon 总判词；健康时一行，异常时展开三证。
+2. **需要操作员的事项**：按责任与紧迫度排序的 attention feed。
+3. **正在推进的实例**：只显示 active/recent/attention-bearing instances 的紧凑摘要。
+
+不承诺显示所有 chain，也不承诺所有内容无滚动。完整发现由 Executions 工作面负责。
+
+### 3.2 Attention item 契约
+
+每条 attention item 必须包含：
+
+- 类型：daemon split、evaluation hold、definition failure、closure failure、requirement violation 等；
+- 对象：稳定 identity；
+- 结论：发生了什么；
+- reason：为什么需要人；
+- authority：操作员是否有直接动作；
+- next view：进入 Execution、Decision、Closure、Definition 或 System；
+- age 与 latest change：只作排序辅助。
+
+### 3.3 空状态
+
+无 attention 时只显示：
+
+```text
+No operator attention required
+N instances progressing · last causal event T ago
+```
+
+不填充虚荣指标和事件流来制造 dashboard 密度。
+
+## 4. Executions 工作面
+
+### 4.1 Executions browser
+
+这是完整实例发现面，支持搜索、过滤和分页/游标遍历。默认过滤不是数据库 status，而是操作员语义：
+
+- needs attention
+- progressing
+- held
+- suspended closures retained
+- completed/recent
+- definition unavailable
+
+每行显示：实例身份、pinned definition、当前 frontier 摘要、活跃 closure 数、当前 evaluation/hold、最近因果变化。不得用固定数量截断完整集合。
+
+### 4.2 Execution explorer
+
+主体是**定义对齐的运行态任务树**。
+
+每个节点至少表达：
+
+- 稳定 node identity；
+- definition-owned 还是 runtime-materialized；
+- 结构角色：leaf / seq / par；
+- 当前归约角色：frontier / running / waiting / evaluating / complete；
+- reason；
+- 与其关联的 closure、evaluation 或 correction。
+
+#### Leaf
+
+显示任务语义、closure lifecycle、当前 attempt 与 outcome。run 只在 closure 内出现。
+
+#### Seq
+
+显示 cursor，但 cursor 不是唯一信息；必须同时标出：
+
+- 已消费前缀；
+- 当前 frontier；
+- 尚不可达后缀；
+- reopen 导致的回退/新增结构。
+
+#### Par
+
+显示：
+
+- child outcome collection；
+- 当前 join binding；
+- evaluation epoch；
+- hold/reopen/advance；
+- correction lineage；
+- runtime-materialized 时的 binding version 历史入口。
+
+### 4.3 树的交互
+
+- 单击节点：在同页 inspector 打开结构化摘要；不失去树上下文。
+- 深入 closure/decision/definition：新路由保留 origin anchor。
+- 大树使用折叠、虚拟化和按子树加载；不得用固定深度/节点数截断。
+- 默认展开 frontier、attention 路径和最近 correction lineage，完成且无异常的子树折叠为摘要。
+- GUI 不根据颜色或目录痕迹计算父节点状态；父节点投影来自正式 status tree。
+
+## 5. Decision dossier
+
+Decision dossier 是 v3 的核心解释面，不是 Events tab 的一组日志。
+
+### 5.1 固定结构
+
+1. **Decision summary**：container、decision point、epoch、结果。
+2. **Authority**：join variant、判定主体、candidate identity、binding version、author/authority class。
+3. **Frozen inputs**：outcome vector，每个 outcome 可跳到对应 closure。
+4. **Reasoning output**：结构化 decision payload；script/validator 原始输出作为证据，不替代 typed result。
+5. **Consequences**：advance 的后继、hold 的重问条件、reopen 生成的 corrections。
+6. **History**：前后 epoch 与 binding evolution；明确哪些变化只影响下一 epoch。
+
+### 5.2 操作员权限
+
+界面根据 daemon 返回的 capability 渲染动作。当前 #544 F 档外的 per-epoch operator decision 只能展示为“authority request / unavailable in current GUI contract”，直到 RFC 明确扩展写闭集。
+
+禁止：
+
+- 用 Resume 代替 advance；
+- 用 Unblock 代替 operator decision；
+- 用编辑 join 代替一次性 override；
+- 对 definition-owned join 提供运行时编辑入口。
+
+## 6. Task closure detail
+
+### 6.1 Header
+
+明确显示：
+
+- closure identity = `(item, phase)` task；
+- lifecycle：active / suspended / consumed；
+- definition node；
+- worktree/session/scratch 的保留状态；
+- lifecycle reason 与消费证明。
+
+### 6.2 Attempt timeline
+
+attempt 是 closure 内部时间线。每次 attempt 显示：
+
+- fresh / resume；
+- runner/model；
+- session identity；
+- start/end/duration/outcome；
+- prompt snapshot availability；
+- tool/context contract result。
+
+默认选中导致当前 attention/outcome 的 attempt，而不是机械选最新一条。
+
+### 6.3 调查分面
+
+- **Prompt & bindings**：实际 argv 同源文本、sha256、typed binding 值与 definition source；
+- **Context**：该 closure 按合法 scope 实际可见/写入的 entries；body 原文透传；
+- **Requirements**：tool/context requirements、outcome、enforcement 与实际结果；
+- **Events**：仅该 closure/attempt 的因果事件；
+- **Resources**：worktree/session 生命周期事实，不提供文件管理面；
+- **Definition**：跳到 pinned definition node，而非当前磁盘 preset。
+
+## 7. Definitions 工作面
+
+### 7.1 Definitions browser
+
+区分两类入口：
+
+- **Current definitions**：当前源 bundle 编译结果，用于 authoring、新实例和 ingress 预校验；
+- **Pinned definitions**：已被运行实例引用的内容寻址 bundle。
+
+同一路径出现 H1/H2 时必须并列而不是覆盖。
+
+### 7.2 Definition detail
+
+统一消费 `preset compile --json`/同源 projection，展示：
+
+- task tree；
+- state graph；
+- typed bindings；
+- tools / requirements / outcomes；
+- gate/join candidates；
+- fragments；
+- findings；
+- schemaVersion、definitionHash、semantic hash。
+
+这些不是平级卡片陈列，而是围绕“这个定义能生成什么程序、允许什么状态转移、需要哪些输入和判定主体”组织。
+
+### 7.3 Instance ↔ Definition compare
+
+从 Execution 进入 Definition 时默认打开 pinned version。若当前路径已产生另一 hash，提供显式 compare：
+
+- 结构变化；
+- 语义保护闭集变化；
+- 仅观测/findings 的 additive 变化；
+- 哪些变化只会影响新实例。
+
+GUI 不建议或提供 rebind；definition identity 写一次。
+
+## 8. Timeline 工作面
+
+Timeline 不是原始 JSONL 浏览器，而是类型化、可连续遍历的因果记录。
+
+### 8.1 两种模式
+
+- **Live stream**：观察新事件，支持暂停但不改变系统；
+- **Causal trace**：以某个 decision、closure、correction 或最终 outcome 为根，沿关联边重建前因后果。
+
+### 8.2 过滤
+
+过滤字段来自正式 envelope：kind/type、chain/instance、task node、closure、attempt/run、phase、evaluation、definition、time cursor。若协议没有 severity，就不在 UI 发明 severity。
+
+完整历史使用 cursor/continuation 遍历，不设魔法数量上限。
+
+### 8.3 Event detail
+
+先展示 typed fields 和关联对象，再提供原始 envelope。raw JSON 是审计证据，不是主要阅读面。
+
+## 9. System 工作面
+
+### 9.1 健康态
+
+一行总结：gateway、daemon、active closures、rate-limit。三证折叠。
+
+### 9.2 Split / Down
+
+展开：
+
+- gateway reachability；
+- pid / socket / RPC 三证；
+- death time 与最后正式事件；
+- 中断的 closures/attempts；
+- 最后可用 SQLite/status snapshot；
+- start/restart/stop capability。
+
+“gateway unreachable”和“daemon down”必须是完全不同的错误态。
+
+## 10. 写动作交互契约
+
+### 10.1 能力驱动
+
+daemon 返回对象当前允许的 typed capabilities；GUI 只渲染这些能力。daemon 执行时仍是唯一裁判。这避免前端复制规则，也避免把必然失败的按钮展示给用户。
+
+### 10.2 Mutation 生命周期
+
+```text
+submitting
+→ accepted(operationId)
+→ applied(operationId, causalEvent)
+
+或
+
+submitting
+→ rejected(code, message)
+```
+
+RPC ack 与后续 event/status 通过 `operationId` 关联。SSE 重连后可重新查询，不允许按钮永久 pending，也不靠“某个字段似乎变化了”猜本次操作成功。
+
+错误同时展示稳定 code、操作员可执行说明和可展开的 daemon 原文。
+
+### 10.3 当前动作位置
+
+- daemon start/stop/restart：System 与对应 attention；
+- chain stop/resume：Execution header；
+- unblock：被 daemon capability 标记为 unblockable 的 task leaf/attention；
+- reorder：Execution tree 的合法 scope 内，提供明确落点、结果预览、键盘与移动替代交互。
+
+破坏性动作确认页必须说明影响的 active closures，而不是只问“Are you sure?”。
+
+## 11. 移动端
+
+移动端与桌面消费同一信息架构、路由和 typed contracts，但不要求像素级同构。
+
+首视口目标：
+
+1. 判断事实源是否可信；
+2. 看见最高优先级 attention；
+3. 进入相关 Decision/Closure；
+4. 执行当前 GUI 合同允许的动作。
+
+不承诺所有 chain、异常和动作无滚动显示。长树默认只展开 attention path；完整树可继续浏览。reorder 提供“移动到……之前/之后”的选择式替代，不能只依赖拖拽。
+
+## 12. 组件规划原则
+
+组件必须对应稳定领域语义，而不是视觉形状库存。
+
+### 领域组件
+
+- IdentityLink
+- DefinitionRef / DefinitionDiff
+- AttentionItem
+- TaskNode / Leaf / Seq / Par
+- FrontierMarker
+- ClosureLifecycle
+- AttemptTimeline
+- OutcomeVector
+- JoinBindingRef
+- DecisionSummary
+- CorrectionLineage
+- RequirementResult
+- CausalEvent
+- CapabilityAction
+- HealthEvidence
+
+### 壳层组件
+
+- AppShell
+- WorkSurfaceHeader
+- Inspector
+- FilterBar
+- VirtualizedTree/List
+- ConfirmationSheet
+
+状态颜色、pill、card、tab 只是这些领域组件的内部表现，不作为设计系统的第一层分类。
+
+## 13. 待裁决缺口
+
+1. per-epoch operator decision 是否加入 #544 GUI 写闭集；
+2. attention item 的权威生成者与 boundary shape；
+3. daemon capability/operation contract 是否已有实现 child，若无应补 issue；
+4. current definition 与 pinned definition 的语义 diff 是否由 compiler 输出，还是 GUI 消费公共 projection 后纯计算；
+5. closure `consumed` proof 的公开投影 shape；
+6. evaluation/outcome/correction 的 status 与 event identity 是否已由 #558/#561/#562 完整承诺。
+
+这些缺口未裁前可以做线框验证，但不得在前端私自补语义。
+
+## 14. 原型进入条件
+
+只有以下条件同时满足才开始 Pencil：
+
+1. 操作员确认本文的产品判断和一级工作面；
+2. 用三条真实业务链走通纸面 walkthrough：恢复连续性、hold→reopen→correction、suspend→resume→consumed；
+3. 待裁缺口被标成“已有 contract / 明确 deferred”，没有隐性猜测；
+4. 每个画面能指出自己服务哪个控制循环，而不是对应哪个 issue closing row；
+5. 原型从空白信息架构开始，不继承现有 `gui-prototype.pen` 的屏幕结构。
+
+## 15. 纸面 walkthrough
+
+以下 walkthrough 用当前 v3 权威裁决检查信息架构是否能闭合真实控制循环。它们验证的是“用户能否得到答案并采取合法动作”，不是页面是否都被访问。
+
+### W1 · 定义 H1 的实例在磁盘切到 H2 后恢复
+
+1. Attention 出现 `definition_unavailable` 或 daemon-down；对象指向旧实例与 H1。
+2. 操作员进入 System，看见 daemon 三证与最后快照，执行 Start/Restart。
+3. 恢复后回到原 attention；若成功，attention 自动解决，Execution 行仍显示 pinned H1。
+4. 操作员从 Execution 的 DefinitionRef 进入 pinned H1；界面检测同源路径当前为 H2，提供 compare。
+5. compare 明示：旧实例继续 H1，H2 只影响显式选择它的新实例；无 rebind 动作。
+
+**结果**：定义时间与执行时间没有混淆。若 semantic hash 不匹配，流程停在显式 hold 并点名 H1 identity，而不是展示 H2 伪装恢复成功。
+
+### W2 · par 首次 hold，随后 reopen corrections，第二次 advance
+
+1. Attention 出现 evaluation hold，直接进入对应 Decision dossier，而不是先浏览全量事件。
+2. dossier 显示 epoch E1、binding V1、判定主体、冻结 outcomes；每个 outcome 可下钻 closure。
+3. 后续 E2 返回 `reopen(target, corrections)`；Consequences 显示新增 correction identity。
+4. 返回 Execution，原 par 保持 place identity，correction lineage 自动展开，新 leaf 位于同一归约结构中。
+5. correction closure 完成后 E3 创建；dossier 显示新的 outcome vector 与采样 binding，advance 后 Execution frontier 移到后继。
+
+**结果**：hold、reopen 和 correction 是结构化控制流，不表现为状态字符串反复变化。若当前 GUI 无 operator decision 权限，只展示 authority 缺口，不用 Resume 冒充。
+
+### W3 · closure timeout 后 suspend/resume，最终 consumed
+
+1. Attention 的 closure failure 指向 closure C，而不是孤立 run。
+2. Closure detail 显示 attempt A1 timeout，但 C 为 suspended；worktree/session 明示 retained，未显示“已完成/已清理”。
+3. Prompt、bindings、requirements 与 context 解释 A1 实际输入；若动作合同允许 retry/resume，则 capability 指向 C。
+4. A2 作为 RESUME 加入同一 closure timeline，复用 worktree/session；Execution tree 中仍是同一 leaf/closure identity。
+5. 控制流最终证明 C consumed 后，Closure header 展示消费证明与资源回收结果。
+
+**结果**：attempt 进程生命周期没有冒充任务生命周期；resume 不被错误表达为新任务或跨 worktree 搬迁。
+
+### Walkthrough 暴露的合同缺口
+
+三条流程均可在信息架构层闭合，但实现前必须解决 §13 中三项直接阻塞：
+
+- attention item 的 typed source；
+- capability + operationId mutation contract；
+- closure consumed proof 与 evaluation/correction identities 的正式投影。
+
+这些是生产者契约缺口，不应由原型以假数据 shape 先行定案。

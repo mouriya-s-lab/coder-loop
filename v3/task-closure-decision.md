@@ -1,13 +1,13 @@
 # v3 裁决报告：任务闭包与系统自证完备（边界 2）
 
-> 裁决日期 2026-07-10，裁决主体操作员，产生于「边界 2：resume session × per-run 独立 worktree」受边界约束设计审查会话。
+> 裁决日期 2026-07-10，裁决主体操作员，产生于对旧命题「边界 2：resume session × per-run 独立 worktree」的受边界约束设计审查会话；该命题已被本文裁决替换为 per-task-closure worktree。
 > 本报告是该裁决的权威记录；#546 body 的对应条款以本报告为源同步修订。影响面：#546、#560、#558、#559、#545、#567 与 `design-boundary.md` §2.3。
 
 ## 1. 裁决内容
 
 三条，层层递进：
 
-1. **执行单元 = 任务闭包**。任务 = 同一 `(item, phase)` 的 attempt 链（正是 v2 resume 机制既有的键，`resumeDecisionForItem` 按 `sessionIds[phase][runner]` 判定，`src/scheduler.ts:2129-2133`）。闭包 = worktree + session + per-task scratch，生命周期同任务。worktree 独立性的粒度是**任务**，不是单次 run：同 item 的先后 phase 不共享、并行分支不共享；同任务的中断/重试续跑共享同一 worktree。#546 原「最强解读」（每次 agent run 一个 worktree）由本裁决替换——操作员 verbatim（"我认为无论并发不并发，永远都是独立worktree"）本身不含粒度信息，run 粒度是 RFC 会话代加的解释层，本次收回。
+1. **执行单元 = 任务闭包**。任务 = 同一 `(item, phase)` 的 attempt 链（正是 v2 resume 机制既有的键，`resumeDecisionForItem` 按 `sessionIds[phase][runner]` 判定，`src/scheduler.ts:2129-2133`）。闭包 = worktree + session + per-task scratch，其资源生命周期服从闭包可达性：suspend 原地保留，只有控制流证明闭包已完全消费后才回收。worktree 独立性的粒度是**任务**，不是单次 run：同 item 的先后 phase 不共享、并行分支不共享；同任务的中断/重试续跑共享同一 worktree。#546 原「最强解读」（每次 agent run 一个 worktree）由本裁决替换——操作员 verbatim（"我认为无论并发不并发，永远都是独立worktree"）本身不含粒度信息，run 粒度是 RFC 会话代加的解释层，本次收回。
 
 2. **「任务无状态」的准确含义是对外无状态**。闭包有私有内存（worktree 文件、session 记忆），resume 唤醒的正是这块私有内存；并发原语（par）的成立条件只有一条——任意两个活跃任务之间不存在未声明的共享可变状态，跨任务状态只经声明通道流动。因此 **resume 是闭包内动作**，对并发原语零影响；「跨 worktree resume」这个概念出局，此前为它设计的一切 relocation contract 不需要存在。
 
@@ -41,7 +41,7 @@ flowchart LR
 
 不变式：
 
-- **session 生命周期 ⊆ worktree 生命周期 ⊆ 任务生命周期**（session 不得跨 worktree 存活；执法点 = 任务终结回收 worktree 时同步清该 phase 的 `sessionIds`）。
+- **session 生命周期 ⊆ worktree 生命周期 ⊆ 闭包可达生命周期**（session 不得跨 worktree 存活；suspend 不缩短任何一层生命周期；只有控制流证明闭包已完全消费后，才同步回收 worktree 并清该 phase 的 `sessionIds`）。
 - **单活性**：每任务同一时刻至多一个活 run；par 只存在于任务之间，闭包内部串行。v2 由 slot 串行与 `current_runs` PK=chain_id 偶然保证，两者在 v3 均退役（#559/#558），须显式重立，归属 #558/#559。
 - worktree 粒度与并发**正确性**无关（run 粒度与任务粒度都给出"不同任务不同目录"，前者只是比需要的更细）；粒度只影响资源账。选任务粒度的收益：resume 醒在原环境，记忆与磁盘一致，claude session store 按 cwd 键控的事实（`~/.claude/projects/<cwd-slug>/`）不再构成任何问题。
 
@@ -49,9 +49,9 @@ flowchart LR
 
 系统侧唯一需要证明的命题：
 
-> **引擎递给任务的每个面，要么任务私有（生命周期 ⊆ 任务），要么是声明通道。**
+> **引擎递给任务的每个面，必须穷尽归入三类之一：任务私有面、声明通道、repo 级共享 Git 协调面。前两类承载业务状态；第三类只承载 Git 对象存储、远端视图分发、引擎 pin 与 linked-worktree 管理，不得成为未声明的业务状态通道。**
 
-成立时，任何越出声明通道的跨任务状态流都可把 blame 指派给 agent（escape），系统不背锅、不预防。这是 gradual typing blame 定理的形态：静态侧（引擎）自证健全，动态侧（agent）越界时 blame 永远落在动态侧。定理在设计期可证，因为量化域是引擎代码。暴露机制（runtime 监测 escape）可永远后补，谓词就是下表的面清单——证明用的枚举与监测用的谓词是同一张表；房式已有先例（`session_id.invalidated`、#397 准入审计事件）。
+三类面的边界不同：任务私有面给出闭包现场隔离；声明通道给出业务状态流合同；共享 Git 协调面只给出协议与 blame，不给出 hostile-agent capability isolation。只有引擎先穷尽递出面、禁止 preset 制度性要求越界操作、并保证自身 repo-wide Git 操作健全后，任务违反共享 Git 协议的操作才可归为 agent escape。引擎主动递出的未分类可写面、合法契约操作之间的互扰、或被共享 config/hooks 被动影响，blame 均在系统。这是 gradual typing blame 定理的形态：静态侧（引擎）自证健全，动态侧（agent）越界时 blame 才落在动态侧。定理在设计期可证，因为量化域是引擎代码。暴露机制（runtime 监测 escape）可永远后补，谓词就是下表的面清单——证明用的枚举与监测用的谓词是同一张表；房式已有先例（`session_id.invalidated`、#397 准入审计事件）。
 
 ### 递出面审计（2026-07-10，逐面核实）
 
@@ -64,13 +64,17 @@ flowchart LR
 | 引擎状态写 | #397 default-deny 准入门 + #406 run-scoped credential | 声明通道 |
 | context | #545 context CLI | 声明通道（v3） |
 | **`--add-dir` 集合** | `runnerAdditionalDirs = [presetDir, loopDataRoot, agentCwd]`（`src/loop.ts:6457-6459`）——整个 loop-data root 被授权，含他 chain 目录、全部 evidence、中央 SQLite DB | **系统侧缺口①（最重）**：prompt 侧刻意隐藏 DB 路径（`stateFile` 绑定为描述字符串，`src/scheduler.ts:2219`）、状态写走准入门，而权限授予侧把整根目录递出——引擎自己发的通行证旁路自己的准入门 |
-| **sharedContextPath** | chain 级共享文件绑进每个 phase prompt（`src/scheduler.ts:2218`） | **系统侧缺口②**：随 #545 context CLI 落地一并退役该 binding |
-| **evidenceDir / currentIssueFile** | per-item 路径绑进 prompt（`src/scheduler.ts:2205-2221`） | item 级 par 下私有；**phase 级 par 下同 item 两并行任务共享——系统侧缺口③**，归 #567 落地时作用域化 |
-| base repo `.git` | 所有 worktree 共享对象库/refs | git 自身调解；引擎义务 = 自身 git 操作健全 + per-task 唯一分支名（#560）；agent 滥用共享 refs = escape |
+| **sharedContextPath** | chain 级共享文件绑进每个 phase prompt（`src/scheduler.ts:2218`） | **边界②（操作员裁决 2026-07-11）**：保留现有 `shared.md` 创建与注入行为，显式分类为 chain 级自由 prompt 注入面（声明通道闭集成员，零行为定义）；#545 context CLI 只垄断结构化、受控、可审计的 context entry 通道，不替代此自由注入面 |
+| **evidenceDir / currentIssueFile** | per-item 路径绑进 prompt（`src/scheduler.ts:2205-2221`） | **系统侧缺口③（扩围）**：与 `SHARED_CONTEXT_FILE`（chain 级面）一样寿命长于任务——不止 phase 级 par 下共享，纯 seq 下已是「生命周期 ⊆ 任务」反例（同 item 先后 phase 两个任务共享同一 evidenceDir）；按定理口径逐面作用域化，归 #567 落地时处置 |
+| base repo `.git`：objects / packs | 所有 worktree 共享对象库 | **共享 Git 协调面**：正常 commit/fetch 只增对象；active/suspended 闭包存在时引擎不做显式 `git gc`，任务执行破坏性 `gc/repack/prune` = escape |
+| base repo `.git`：`refs/remotes/*` | 一次 repo fetch 向所有 worktree 分发当前远端视图；其后可随合法 fetch 漂移 | **共享 Git 协调面**：是时间相关观察，不是稳定计算输入；稳定输入只读持久化 base SHA / par pin；引擎 fetch per-repo 串行化/去重并显式记录新鲜度 |
+| base repo `.git`：闭包分支 / pin refs | refs 物理共享，闭包分支逻辑所有权 per-task，pin 归引擎 namespace | **共享 Git 协调面**：引擎只改自身 namespace；per-task 唯一命名；任务改写/删除他闭包 ref 或 pin = escape |
+| base repo `.git`：config / hooks | repo-scoped 修改可被其他 worktree 被动消费 | **系统高危面**：不得作为任务间通道；preset 不得指示任务修改；#560 创建/对账合同封闭并暴露漂移，不能仅靠 blame |
+| base repo `.git`：linked-worktree metadata | `worktree add/remove/prune/repair` 影响全 repo | **引擎独占协调面**：结构性 worktree 操作归 #560；任务操作他闭包或执行 repo-wide prune/repair = escape |
 
-缺口归属：① 独立 child（#546 sub-issue，收敛 `--add-dir`）；② #545 落地确认项；③ #567 决策项。
+缺口归属：① #601（收敛 `--add-dir`）；② 非缺口——已由操作员裁为保留（边界②，见上表）；③ #567 落地时处置（扩围口径）。
 
-**移出证明范围（escape，不设计应对，最多日后暴露）**：agent 绕路写 base repo、删他任务分支、动 `~/.claude.json`、用 ambient 凭据、猜路径读他人 worktree。
+**移出证明范围（escape，不设计应对，最多日后暴露）**：agent 绕路写 base repo 工作树、改写/删除他任务分支或引擎 pin、修改 repo config/hooks、执行破坏性 `git gc/repack/prune` 或 `git worktree remove/prune/repair`、动 `~/.claude.json`、滥用 ambient 凭据、猜路径读他人 worktree。这里是 blame boundary，不是 capability isolation；若 preset 制度性指示其中任何动作，或引擎自己的授权/并发使合法任务被动受影响，则不得归类为 escape。
 
 ## 4. 事实核查记录（修正被讹传的前提）
 
@@ -90,7 +94,7 @@ flowchart LR
 | `v3/design-boundary.md` §2.3 | 「per-run 隔离」→ 任务闭包隔离 | 已修 |
 | 新 child（#546 sub-issue） | 收敛 `--add-dir`：剥离 loopDataRoot 整根授权 | 本次创建 |
 | #558/#559 | 单活性不变式归属（经 #546 body 登记） | 本次登记 |
-| #545 / #567 | 缺口②③ 确认项/决策项（经 #546 body 登记） | 本次登记 |
+| #545 / #567 | 边界②（`shared.md` 保留，操作员 2026-07-11 裁决）与缺口③（扩围）的登记（经 #546 body） | 已登记 |
 
 ## 6. 方法论记录：初始审查方向为何错
 

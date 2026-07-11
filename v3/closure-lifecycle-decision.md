@@ -61,6 +61,8 @@ stateDiagram-v2
 
 递出面定理（`task-closure-decision.md` §3）的对偶小节：定理证「引擎递出了什么面」（隔离视角），供给条款证「引擎自身 git 行为的承诺是什么」（供给视角）——量化域同样只是引擎代码，设计期可证。
 
+worktree 的“独立”限于闭包现场：工作目录、index、per-worktree HEAD、session 与 scratch 不共享；对象库、remote-tracking refs、引擎 pin、闭包分支 refs 的物理存储与 linked-worktree metadata 仍是 repo 级共享 Git 协调面。该共享面不是业务 context/产物旁路，也不是 capability isolation：引擎负责协议、namespace 与自身操作串行化，agent 违反协议才进入 escape。稳定计算输入一律取持久化 base SHA / par pin；会漂移的 `origin/*` 只表达带新鲜度的当前远端观察。
+
 | # | 条款 |
 |---|---|
 | 1 | **起点公理**：worktree 底座 = 创建时刻 `chain.baseBranch` 最新快照；引擎创建前 fetch base（per-repo 串行化/去重，网络失败显式化，pin 成员免 fetch）；重开时 checkout 闭包分支尖端（底座无关）；声明面历史回退永久出局；无 origin 的 target 走 doctor 警告，不装载拒绝 |
@@ -68,6 +70,13 @@ stateDiagram-v2
 | 3 | **seq 流转**：前驱需被构建于其上的工作已合入 base；引擎不执法——合并真相是 GitHub 面事实，经声明通道由 preset 判定器（validator/script 自查）按 `advance\|hold\|reopen` 消费；引擎零产物传递机制；引擎级 mergedness gate 出局 |
 | 4 | **par 同 commit 派生**：par 展开/物化时引擎 pin base 尖端 commit 并持久化；成员子树共同启动入口任务集的闭包首次打开从 pin 派生（凝固点语义：后续追加复用同 pin）；嵌套 par 内层重新 pin；rationale = 入口输入侧确定性（输出侧合并顺序归 join 策略与下游） |
 | 5 | **回收与消费采样**：suspend 零 GC；只有控制流证明闭包已完全消费后才进入 consumed 并回收引擎命名空间内的 worktree/分支/sessionIds。证据谓词对象 = 闭包分支，suspend 只发状态事件，consume 时发 `{无工作, 已发布, 未发布即弃, 无法求值}` + origin 新鲜度戳——只暴露不参与推进 |
+
+### 共享 Git 协调协议
+
+- **fetch 是 repo 级时钟推进**：引擎的 base fetch per-repo 串行化/去重；它可以推进所有 worktree 看到的 `origin/*`，但不得改变任何闭包已保存的 base SHA、par pin、HEAD、index、WIP 或闭包分支尖端。依赖当前远端事实的判断必须携带新鲜度；依赖稳定输入的判断必须使用保存的 SHA/pin。
+- **引擎 namespace 独占**：闭包分支逻辑所有权属于对应任务，pin 与 worktree metadata 属于引擎；创建、终态采样、consume 回收、`worktree add/remove` 与启动对账由引擎执行。引擎不触碰非自身 namespace，也不在 active/suspended 闭包存在时做显式 `git gc`。
+- **config/hooks 封闭**：repo-scoped config 与 hooks 可让一个任务被动影响另一个任务，不满足“越界必为主动 escape”的前提。preset 不得指示任务修改；#560 必须在创建/启动对账中固定所需配置并暴露漂移，不能静默继承任意任务留下的修改。
+- **blame 不等于隔离**：worktree 模型不承诺 agent 技术上无法运行 `update-ref`、`git gc`、`git worktree prune` 或猜测其他路径；只承诺这些动作不在任务合同内、引擎不制度性授予其语义、命名与事件足以归责。若合法 preset 操作即可破坏他闭包 pin/分支/WIP/resume，则本协议被证伪，必须重开载体裁决。
 
 ## 4. mergedness 可计算性的检验记录
 

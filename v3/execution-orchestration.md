@@ -2,7 +2,7 @@
 
 > 本文件不是 issue 完成清单，也不按 GitHub 子 issue 树或编号排序。它定义的是：哪些 issue 可以交给彼此不可见的无状态 agent 并行实施、这些产物何时合流，以及合流后必须怎样证明接口真的连接起来。
 >
-> 基线：2026-07-10 GitHub 实时 issue graph（含同日 #548 设计修正后预建的 #602、#603、`hapi-remote-session#2`）。v3 六个 RFC umbrella（#543–#548）下共 55 个直接子 issue；连同 umbrella 共 61 个 issue，当前 60 open、1 closed（#571）。
+> 基线：2026-07-11 GitHub 实时 issue graph（含 #599、#601、#604、#605 以及 #548 设计修正后预建的 #602、#603、`hapi-remote-session#2`）。v3 六个 RFC umbrella（#543–#548）下共 59 个直接子 issue；连同 umbrella 共 65 个 issue，当前 64 open、1 closed（#571）。
 
 ## 1. 执行模型
 
@@ -70,11 +70,11 @@ flowchart TD
 
 **放行条件**：四项均来自同一 SHA；否则 P1 不进入合并阶段。
 
-## 4. P1 — 独立契约种子
+## 4. P1 — 契约种子与实例固定
 
-这些任务没有 v3 树内硬上游，适合由互不可见的无状态 agent 同时实施。
+本波包含独立种子与紧随其后的实例固定工作，不是所有任务都无硬上游。#549、#558 等种子可并行；#605 必须等待 #549 + #558，#560 必须等待 #558。无状态 agent 可以并行调查和准备，但合并必须服从这些硬依赖。
 
-### 并行任务组 P1-A：引擎契约种子
+### 分阶段任务组 P1-A：引擎契约种子
 
 | Issue | 交付契约 | 后续消费者 |
 |---|---|---|
@@ -84,13 +84,13 @@ flowchart TD
 | #551 | GitHub 记法与 repository 原语退役 | #569 的稳定 CLI 调用面 |
 | #558 | 任务树运行态持久化与 status tree shape | #559、#561–#566、#574、#596 |
 | #560 | per-闭包 worktree 生命周期；suspend 零 GC；consumed 后回收 | #559 并行调度 |
-| #572 | `prompt.md` + `bindings.json` 落盘 | #581 |
+| #601 | runner 授权面收敛：移除 loopDataRoot 整根 `--add-dir` | #546 递出面定理与 G2 capability 隔离证明 |
 | #573 | events boundary 与滚动段消费规则 | #577 |
 | #586 | 四层 hook 声明合成与生效视图 | #588、#589、#591、#575 |
 | #594 | context envelope ADT、append-only 存储、写入面 | #595–#598 |
 | #602 | 外部执行终端缺席语义：`hapi` kind 词表准入 + 显式警告 + hold | #603、#559 调度面（协调边） |
 
-推荐合并顺序：#550 → #551 → #549 → #558 → #605 → #560 → #572 → #573 → #586 → #594 → #602。顺序是为了压低共享核心文件的 rebase 风险，不代表开发串行。
+推荐合并顺序：#550 → #551 → #549 → #558 → #605 → #560 → #601 → #573 → #586 → #594 → #602。#605 与 #560 的顺序体现其硬依赖，不只是 rebase 偏好；#601 无硬上游，可并行实施，但必须在 G2 前与 #560 合流后重核任务闭包授权路径；其余独立种子可并行。
 
 ### 并行任务组 P1-B：独立宿主/可行性
 
@@ -128,7 +128,8 @@ flowchart TD
 
 - #559：等待 #558 + #560；实现 seq/par 调度和 slot 退役。
 - #574：等待 #558；收紧 status snapshot boundary。
-- #587：等待 #549；定义 hook stdin payload = 编译产物投影 + 运行态快照。
+- #572：等待 #552；落 `prompt.md` + 类型化 `bindings.json`，供 #581 消费。
+- #587：等待 #549 + #574；定义 hook stdin payload = 编译产物投影 + 精确运行态快照。
 - #595：等待 #594；context 分页读取 boundary。
 - #569：等待 #551；可先做本地 1–4 行验收，关闭仍被 `github-hapi-agent-router#12` 端到端 Gate 阻塞。
 - `hapi-remote-session#1`：等待 #418 结论作为输入后启动设计书；其后 `hapi-remote-session#2`（CLI 实现）→ #603（hapi runner 接入，另等 #602）串行推进。
@@ -144,13 +145,23 @@ flowchart TD
 5. required binding 缺失在创建期失败；dead fragment 只按已裁语义形成 finding；非法 join/gate/tool 引用在 load/compile 期失败，不能进入调度。
 6. 运行 `bun scripts/real-e2e.ts --preset real-e2e-minimal`，证明原有线性 preset 仍可执行。
 
+### 串行合流任务 P2-C：统一 gate 可靠性地基
+
+这条链必须在 #561 的 validator 判定通道前落地，否则 validator 与 script 会各自形成一套 evaluation/decision 恢复协议：
+
+1. #588：等待 #586 + #587；落 observer 异步执行层。
+2. #589：等待 #588；先以 run post-exit script gate 贯通首个真实 decision ingress。
+3. #599：等待 #589；以该真实 ingress 落共享 evaluation epoch、decision journal、mutation 幂等与原子 consumer。
+
+#561 随后只增加 validator CLI ingress 与宿主，并消费 #599 的同一 journal/consumer。P2-C 合流 SHA 是 P3 的额外硬输入。
+
 ## 6. P3 — 任务树运行时核心
 
 P3 必须拆成两个并行组，中间有一次核心合流；不能把 #561–#567 全扔给同一轮并行 agent。
 
 ### 并行任务组 P3-A：树调度后的正交能力
 
-共同硬上游：#559 / G2。
+共同硬上游：#559 / G2 / P2-C（#599）。
 
 - #561：par join 评估、validator、drain/hold。
 - #563：运行中 leaf → par 物化与 `createItems` 作用域。
@@ -178,7 +189,7 @@ P3 必须拆成两个并行组，中间有一次核心合流；不能把 #561–
 使用真实 daemon + 真实 agent，构造一个同时覆盖两个并行层次的 preset：
 
 1. chain 顶层为 `seq(A, par(B, C), D)`；B 的 phase tree 也是 `seq(prep, par(implementation, independent-review), integrate)`。
-2. B/C 必须各持有独立 per-run worktree 并真实同时在途；记录重叠时间窗口，不能用“最终都运行过”冒充并行。
+2. B/C 必须各持有独立 per-task-closure worktree 并真实同时在途；同一 `(item, phase)` attempt 链的 retry/resume 复用既有 cwd，闭包 consumed 后才回收；记录重叠时间窗口，不能用“最终都运行过”冒充并行。
 3. 运行中由 B 派生一个平行 correction leaf；取消 C 的子树；断言取消不污染 B，新 leaf 被同一 par join 纳入。
 4. validator 第一次返回 reopen，插入 correction 并使 seq 游标回退；第二次 advance 后才允许 D 开始。验证 D 在第一次 validator 后绝未 spawn。
 5. daemon 中途重启；从 SQLite 恢复 tree cursor、container identity、在途/终态，不重复 spawn 已完成 leaf。
@@ -189,7 +200,6 @@ P3 必须拆成两个并行组，中间有一次核心合流；不能把 #561–
 
 ### 并行任务组 P4-A：hook 执行骨架与 context 执法
 
-- #588：等待 #586 + #587；observer 异步执行层。
 - #596：等待 #594 + #558；group scope 对接真实 par container identity。
 - #597：等待 #594 + #595 + #553；required/expected tool 调用执法。
 - #570：等待 #549 + #552 + #569；第三方 daemon 用 compiled model 预校验请求。
@@ -198,22 +208,22 @@ P3 必须拆成两个并行组，中间有一次核心合流；不能把 #561–
 
 ### 串行骨干 P4-B：script gate
 
-- #589：等待 #586 + #587 + #588；先只贯通 run post-exit gate。
-- #590：等待 #589；物化决策点闭集、tick 节流、hold fingerprint 泛化。
+- #590：等待 #589；物化决策点闭集、tick 节流、hold fingerprint 泛化；与 #599 协调，fingerprint 与 epoch 保持正交。
 
-这两项是同一执行骨干，必须串行，不能因 issue tree 同级而并行。
+#590 消费 P2-C 已落地的 gate 执行与 evaluation 地基，不得复制 evaluation 状态机；fingerprint 与 epoch 必须保持正交。
 
 ### 并行任务组 P4-C：统一 gate 的两个消费者
 
 共同硬上游：#590 + G3。
 
 - #591：另等 #555 + #586；preset 具名 gate 绑定与未绑定语义。
-- #592：另等 #561 + #562；join script validator 与 reopen 派发。
+- #592：另等 #561 + #562 + #599；join script validator 与 reopen 派发。
 
 ### P4-D：后置 schema 迁移
 
 - #557：只在 #566 合并后实施 chain metadata 精确 parse、`DEFAULT_PRESET_NAME` 退役。它虽然属于 #547 tree，却是运行时顶层声明的消费者，放在这里而不是按编号放在 P2。
 - #564：join 判定权演化已裁（操作员 2026-07-11，权威记录 `v3/join-evolution-decision.md`）——定义态 join 实例内不可变；物化态 join 以绑定版本追加 + epoch 创建采样 + pinned 定义内候选引用演化；operator per-epoch decision 归 #561 契约。#564 按裁决重写后可实施，硬依赖不变（#558/#561），另增与 #554（候选声明位）的协调边。
+- #604：等待 #560 + #554 + #567；把 bundled preset 迁到闭包分支与 phase tree 契约，退役 agent 自建分支及结构性 worktree 操作。它是运行时与声明面真实接合后的 preset 消费者，不能只在 #568 收尾时才被动发现。
 
 ### G4 — 跨域连接性 Gate
 
@@ -298,7 +308,7 @@ P3 必须拆成两个并行组，中间有一次核心合流；不能把 #561–
 
 本编排覆盖的 v3 children：
 
-- #543：#586–#593。
+- #543：#586–#593、#599。
 - #544：#571（已关闭）、#572–#585。
 - #545：#594–#598。
 - #546：#558–#568、#601、#604。
