@@ -135,7 +135,7 @@ rm -rf "$TARGET"
 | `[[phases.exits]]` | array | 否 | 该 phase 允许 agent 写出的结构化出口。每项包含 `status` 与给 prompt 渲染用的 `when` 说明；不声明 exits 表示该 phase 不写 status |
 | `[[phases]].trigger` | table | 否 | 可把 phase 声明为 trigger phase。支持 `trigger = { afterPhase = "...", whenStatus = "..." }` 的 item phase trigger，或 `trigger = { on = "chain-complete" }` 的 chain lifecycle trigger |
 | `[[phases]].roles` | string[] | preset 声明 fragments 时必填，否则可省 | 该 phase 渲染 `{{PROMPT_FRAGMENT_INDEX}}` 时可见的 fragment role 集合。引擎从不通过 phase 名猜 role；只列在这里的 role 对应的 fragment 才会进该 phase 的索引切片。`[[fragments]]` 中未出现的 role 名会在加载期报错。 |
-| `[phases.variables]` | table | 是 | 模板中 `{{KEY}}` 的解析表。值可为 `"item|chain|runtime.<key>"` 字符串，或 `{ source = "...", label = "...", suffix = "...", style = "code|plain" }`，后者会参与 `{{RUNTIME_INPUTS_DOC}}` 渲染 |
+| `[phases.variables]` | table | 是 | 模板中 `{{KEY}}` 的解析表。值可为 `"item|chain|runtime.<key>"` 字符串，或 `{ source = "...", default = ..., label = "...", prefix = "...", suffix = "...", style = "code|plain", blankBefore = false }` 对象；doc 字段的完整契约见 §4 |
 | `[[fragments]].id` | string | 是 | fragment 唯一标识（如 `iter/steps/implement`），entry prompt 通过该 id 引用 |
 | `[[fragments]].role` | string | 是 | fragment 角色（如 `common` / `iter` / `review`）。该字段参与 `[[phases]].roles` 切片：当前 phase 渲染的 fragment 索引仅含 role 出现在该 phase `roles` 数组里的条目。fragment 文件完整性校验（`assertReadable`）仍覆盖全量。 |
 | `[[fragments]].path` | string | 是 | 相对 preset.toml 的 markdown 文件路径，文件必须可读 |
@@ -153,6 +153,7 @@ rm -rf "$TARGET"
 - item phase trigger 的 `afterPhase` 必须指向已声明 phase，`whenStatus` 必须属于 continuable 或 terminal status，且必须出现在 source phase 的 exits 里；
 - chain lifecycle trigger 目前只支持 `on = "chain-complete"`，且不能同时声明 `afterPhase` / `whenStatus`；
 - 每条 `[phases.variables]` source 必须 match `^(item|chain|runtime)\.[a-zA-Z][a-zA-Z0-9_]*$`；
+- `prefix` / `suffix` / `style` / `blankBefore` 任一 doc 装饰字段出现时必须同时声明 `label`；只有 `source` + `default` 的 object binding 合法且不参与 doc 渲染；
 - `item.<field>` 只能引用 `[item].idField`、引擎自有字段（`id/status/phase/runner/agentCwd`），或 `[item.fields]` 显式声明的透明字段。未声明字段在 preset 加载期报错。
 - `runtime.<key>` 只能引用 engine-owned fact，或 `[runtime].businessKeys` 显式声明的 preset 业务 key。未声明 key 在 preset 加载期报错；声明了但运行时没有提供值则渲染时报错。
 
@@ -201,6 +202,33 @@ bundled `gh-issue-pr-iteration` preset 用这个 hook 声明 `umbrella-finalizer
 | `runtime.<key>` | 引擎计算的运行期值，或 preset 声明的业务运行期值 | key 必须是 engine-owned fact 或 `[runtime].businessKeys` 声明项；否则 preset load throw。声明项运行时缺值则 render throw |
 
 模板里 `{{KEY}}` 替换为 `String(...)`；多次出现都替换。
+
+### Object binding 与 runtime-inputs doc 装饰
+
+Object binding 先在 preset load 边界归一化，renderer 只消费归一化后的 typed doc 结构，不读取变量 key 的字面量。完整声明面：
+
+术语锚点 `prefix|前缀` 同时给出 schema 字段名和本文使用的中文含义；下表及后续规则中的 `prefix` 都指这个值前缀字段。
+
+| 字段 | 类型 | 默认值 | 契约 |
+|---|---|---|---|
+| `source` | string | 无 | 必填；与字符串 binding 使用同一套 `item|chain|runtime` source 规则 |
+| `default` | null / string / number / boolean | 无 | 仅 `chain.*` binding 可用；source 缺值时的显式 fallback |
+| `label` | string | 无 | 声明后该 binding 进入 `{{RUNTIME_INPUTS_DOC}}`；未声明时 `doc = null` |
+| `prefix` | string | `""` | 值前缀；在 `style` 包裹范围内 |
+| `suffix` | string | `""` | 值后缀；在 `style` 包裹范围外 |
+| `style` | string enum: `code`, `plain` | `"code"` | `code` 给 `prefix + value` 加 Markdown 反引号，`plain` 不加 |
+| `blankBefore` | boolean | `false` | 为该条目前插入一个空行 |
+
+渲染顺序固定为：先求 `decoratedValue = prefix + String(value)`，再按 `style` 决定是否把 `decoratedValue` 放进反引号，最后在样式外追加 `suffix`。
+
+```toml
+[phases.variables]
+ISSUE = { source = "item.issue", label = "Current issue", prefix = "#", suffix = "", style = "code" }
+```
+
+上例渲染为 ``- Current issue: `#539` ``。相同 doc 声明放在任意变量 key 上都得到相同装饰语义；`ISSUE` 没有引擎特权。
+
+`label` 是 doc 声明的入口：若省略 `label` 却声明 `prefix`、`suffix`、`style` 或 `blankBefore`，preset load 立即失败，不会由 renderer 猜测或 fallback。`{ source = "chain.umbrellaIssue", default = "" }` 这种 default-only object binding 仍合法，归一化为 `doc = null`，不进入 `{{RUNTIME_INPUTS_DOC}}`。`prefix` / `suffix` / `label` 非 string、`blankBefore` 非 boolean、或 `style` 不是 `code|plain` 时同样在 load 边界失败。
 
 ### `runtime.*` fact 与 business key
 
