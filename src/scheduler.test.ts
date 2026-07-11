@@ -11,10 +11,7 @@ import {
 	listActiveRuns,
 	makeRunId,
 	markRunPendingRecycle,
-	reconcileHostResourceLifecycle,
-	removeHostResourceLifecycleForChain,
 	renderSchedulerSpawnPrompt,
-	requestHostResource,
 	resumeDecisionForItem,
 	runSchedulerUntilIdle,
 	schedulerSlotWorktreePath,
@@ -83,8 +80,6 @@ describe("scheduler", () => {
 			expect(listActiveRuns(fixture.state)).toHaveLength(0)
 			expect(activeCredentials.size).toBe(0)
 			expect(fixture.state.recycleTriggers.size).toBe(0)
-			expect(fixture.state.hostResourceOwners.size).toBe(0)
-			expect(fixture.state.hostResourceWaits.size).toBe(0)
 			expect(fixture.store.getRunByRunId(run.runId)?.endedAt).toBe(null)
 			expect(fixture.store.getCurrentRun(chain.id)?.runId).toBe(run.runId)
 			await chmod(paths.runStatusFile(run.runId), 0o600)
@@ -492,78 +487,6 @@ describe("scheduler", () => {
 		} finally {
 			fixture.store.close()
 		}
-	})
-
-	test("serializes host resource critical sections fairly", async () => {
-		const fixture = await createFixture("host-resource-backpressure")
-		try {
-			const chainA = createChain(fixture.store, "host-resource-chain-a")
-			const chainB = createChain(fixture.store, "host-resource-chain-b")
-			const chainC = createChain(fixture.store, "host-resource-chain-c")
-			const itemA = createItem(fixture.store, chainA, { issueNumber: 622_001, repoCwd: "/repo/a", sleepMs: 80 })
-			const itemB = createItem(fixture.store, chainB, { issueNumber: 622_002, repoCwd: "/repo/b", sleepMs: 80, writeStatus: "done" })
-			const itemC = createItem(fixture.store, chainC, { issueNumber: 622_003, repoCwd: "/repo/c", sleepMs: 80, writeStatus: "done" })
-			const options = fixture.options({ phase: "review" })
-
-			const firstTick = await schedulerTick(options)
-			expect(firstTick.spawnedRuns.map((run) => run.itemId)).toEqual([itemA.id])
-			expect([...fixture.state.hostResourceOwners.values()]).toEqual([
-				expect.objectContaining({ resource: "heavyweight-validation", itemId: itemA.id, phase: "review" }),
-			])
-			expect(fixture.state.hostResourceWaits.get(itemB.id)).toEqual(expect.objectContaining({
-				resource: "heavyweight-validation",
-				phase: "review",
-				order: 0,
-			}))
-			expect(fixture.state.hostResourceWaits.get(itemC.id)?.order).toBe(1)
-			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({
-				type: "host_resource.wait",
-				itemId: itemB.id,
-				ownerItemId: itemA.id,
-			}))
-
-			await firstTick.spawnedRuns[0]!.closed
-			expect(fixture.state.hostResourceOwners.size).toBe(0)
-
-			const secondTick = await schedulerTick(options)
-			expect(secondTick.spawnedRuns.map((run) => run.itemId)).toEqual([itemB.id])
-			await secondTick.spawnedRuns[0]!.closed
-			const thirdTick = await schedulerTick(options)
-			expect(thirdTick.spawnedRuns.map((run) => run.itemId)).toEqual([itemC.id])
-			await thirdTick.spawnedRuns[0]!.closed
-			expect(fixture.state.hostResourceOwners.size).toBe(0)
-			expect(fixture.state.hostResourceWaits.has(itemB.id)).toBe(false)
-		} finally {
-			fixture.store.close()
-		}
-	})
-
-	test("removes ineligible host resource waiters", () => {
-		const state = createSchedulerState()
-		state.hostResourceOwners.set("shared", { resource: "shared", runId: "owner", chainId: 1, itemId: 1, phase: "phase-a" })
-		for (const request of [
-			{ resource: "shared", chainId: 2, itemId: 2, phase: "phase-a" },
-			{ resource: "shared", chainId: 3, itemId: 3, phase: "phase-a" },
-			{ resource: "shared", chainId: 4, itemId: 4, phase: "phase-a" },
-			{ resource: "shared", chainId: 5, itemId: 5, phase: "phase-a" },
-		]) expect(requestHostResource(state, request).kind).toBe("waiting")
-
-		// terminal item and phase/resource changes disappear when they are no longer eligible.
-		reconcileHostResourceLifecycle(state, new Set([3, 4, 5]), new Set(["owner"]))
-		expect(state.hostResourceWaits.has(2)).toBe(false)
-		expect(requestHostResource(state, { resource: "other", chainId: 3, itemId: 3, phase: "phase-b" })).toMatchObject({
-			kind: "available",
-		})
-		expect(state.hostResourceWaits.has(3)).toBe(false)
-
-		// stop and delete use the same chain-lifecycle reclamation primitive.
-		removeHostResourceLifecycleForChain(state, 4)
-		removeHostResourceLifecycleForChain(state, 5)
-		expect([...state.hostResourceWaits.values()]).toEqual([])
-
-		// Once the stale owner run is lost, a later legal request can enter.
-		reconcileHostResourceLifecycle(state, new Set(), new Set())
-		expect(requestHostResource(state, { resource: "shared", chainId: 6, itemId: 6, phase: "phase-a" })).toEqual({ kind: "available" })
 	})
 
 	test("slot busy skip", async () => {
