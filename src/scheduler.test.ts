@@ -55,6 +55,16 @@ afterAll(async () => {
 })
 
 describe("scheduler", () => {
+	test("legacy scheduler spawn diagnostic shape is rejected", () => {
+		expect(() => storedItemExtra({
+			schedulerSpawnError: {
+				at: 1_900_535_000,
+				phase: "iteration",
+				message: "legacy diagnostic",
+			},
+		})).toThrow(/schedulerSpawnError\.attribution/)
+	})
+
 	test("single chain single repo serial", async () => {
 		const fixture = await createFixture("serial")
 		try {
@@ -220,10 +230,11 @@ describe("scheduler", () => {
 				updatedAt: 1_900_535_400,
 			})
 			const activeChildRunner = resolve(fixture.loopDataRoot, "final-trigger-active-child-runner.ts")
-			await writeFile(activeChildRunner, "process.exit(0)\n")
+			await writeFile(activeChildRunner, "await new Promise((resolve) => setTimeout(resolve, 60_000))\n")
 			let now = 1_900_535_401
 			let spawnCount = 0
 			let runSequence = 0
+			const preAttemptStatusUpdatedAt = fixture.store.getItem(item.id)?.statusUpdatedAt
 			const options = fixture.options({
 				now: () => now,
 				runIdFactory: () => `active-child-final-trigger-${++runSequence}`,
@@ -231,7 +242,12 @@ describe("scheduler", () => {
 				onEvent: async (event: SchedulerEvent) => {
 					fixture.schedulerEvents.push(event)
 					if (event.type === "agent.spawn" && ++spawnCount === 1) {
-						await new Promise((resolve) => setTimeout(resolve, 20))
+						// The child already has its run credential here. Model the daemon-authorized
+						// item.update that can race the still-awaited preparation observability hook.
+						fixture.store.updateItem(item.id, {
+							status: runtimeStatus("done"),
+							updatedAt: now,
+						})
 						throw new Error("final trigger spawn observability failed")
 					}
 				},
@@ -245,6 +261,8 @@ describe("scheduler", () => {
 			expect(fixture.store.getCurrentRun(chain.id)).toBeNull()
 			expect(fixture.store.getChain(chain.id)?.status).toBe("active")
 			const failedItem = fixture.store.getItem(item.id)
+			expect(failedItem?.status).toBe("blocked")
+			expect(failedItem?.statusUpdatedAt).toBe(preAttemptStatusUpdatedAt)
 			expect(failedItem?.phase).toBe("review")
 			expect(failedItem?.extra.schedulerSpawnError).toMatchObject({
 				attribution: { kind: "phase", phase: "blocked-responder" },
@@ -253,6 +271,7 @@ describe("scheduler", () => {
 			expect(failedItem?.extra.schedulerBackoff).toMatchObject({ failureCount: 1, nextRunAt: now + 60 })
 			expect(fixture.schedulerEvents.filter((event) => event.type === "spawn.aborted")).toHaveLength(1)
 
+			await writeFile(activeChildRunner, "process.exit(0)\n")
 			now += 60
 			const retryTick = await schedulerTick(options)
 			expect(retryTick.spawnedRuns).toHaveLength(1)

@@ -618,20 +618,14 @@ function optionalSchedulerSpawnErrorField(record: JsonObject, key: string, field
 	const value = record[key]
 	if (value === undefined) return undefined
 	const object = jsonObjectFieldValue(value, field)
-	const attributionValue = object.attribution
-	const attribution = attributionValue === undefined
-		// Persisted scheduler errors predate the explicit attribution discriminant. `phase` was
-		// their only legal attribution, so migrate that exact historical shape at the boundary.
-		? { kind: "phase" as const, phase: requiredStringField(object, "phase", `${field}.phase`) }
-		: schedulerSpawnErrorAttribution(attributionValue, `${field}.attribution`)
 	return {
 		at: requiredPositiveIntegerField(object, "at", `${field}.at`),
-		attribution,
+		attribution: schedulerSpawnErrorAttribution(object.attribution, `${field}.attribution`),
 		message: requiredStringField(object, "message", `${field}.message`),
 	}
 }
 
-function schedulerSpawnErrorAttribution(value: JsonValue, field: string): SchedulerSpawnErrorAttribution {
+function schedulerSpawnErrorAttribution(value: JsonValue | undefined, field: string): SchedulerSpawnErrorAttribution {
 	const object = jsonObjectFieldValue(value, field)
 	const kind = requiredStringField(object, "kind", `${field}.kind`)
 	if (kind === "chain-plan") return { kind }

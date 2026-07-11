@@ -1189,6 +1189,8 @@ async function containSchedulerPreparationFailure(
 	if (backoff === null) throw new Error("scheduler preparation backoff construction failed")
 	const extraWithBackoff = withSchedulerBackoff(persistedItem.extra, backoff)
 	options.store.updateItem(item.id, {
+		status: engineLifecycleAdmittedItemStatus(item.status, "scheduler.spawn-aborted-entry-restore"),
+		statusUpdatedAt: item.statusUpdatedAt,
 		phase: item.phase,
 		extra: withSchedulerSpawnError(extraWithBackoff, failedAt, attribution, message),
 		updatedAt: failedAt,
@@ -1202,7 +1204,7 @@ async function containSchedulerPreparationFailure(
 		itemId: item.id,
 		id: item.itemId,
 		reason: message,
-		toStatus: persistedItem.status,
+		toStatus: item.status,
 	})
 }
 
