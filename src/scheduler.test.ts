@@ -372,7 +372,7 @@ describe("scheduler", () => {
 		try {
 			const chainA = createChain(fixture.store, "host-resource-chain-a")
 			const chainB = createChain(fixture.store, "host-resource-chain-b")
-			const itemA = createItem(fixture.store, chainA, { issueNumber: 622_001, repoCwd: "/repo/a", sleepMs: 80, writeStatus: "done" })
+			const itemA = createItem(fixture.store, chainA, { issueNumber: 622_001, repoCwd: "/repo/a", sleepMs: 80 })
 			const itemB = createItem(fixture.store, chainB, { issueNumber: 622_002, repoCwd: "/repo/b", sleepMs: 80, writeStatus: "done" })
 			const options = fixture.options({ phase: "review" })
 

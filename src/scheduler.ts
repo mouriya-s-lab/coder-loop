@@ -528,6 +528,10 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 			const hostResource = phasePlan.hostExclusiveResources.get(next.phase) ?? null
 			if (hostResource !== null) {
 				const owner = options.state.hostResourceOwners.get(hostResource)
+				const firstWaiter = [...options.state.hostResourceWaits.values()].find((wait) => wait.resource === hostResource)
+				if (owner === undefined && firstWaiter !== undefined && firstWaiter.itemId !== next.item.id) {
+					continue
+				}
 				if (owner !== undefined) {
 					const wait: SchedulerHostResourceWait = {
 						resource: hostResource,
