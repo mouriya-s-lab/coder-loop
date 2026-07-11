@@ -549,6 +549,27 @@ export type LoopOptions = {
 	runnerCommands: AgentRunnerCommands
 	dryRun: boolean
 	preset: Preset
+	onStatusPersistenceFailure?: (failure: RunnerStatusPersistenceFailure) => void
+}
+
+type RunnerStatusPersistenceFailureFields = {
+	stage: "status-artifact" | "run-record" | "current-run"
+	runId: string
+	phase: string
+	persistencePath: string
+	error: string
+}
+
+export type RunnerStatusPersistenceFailure = RunnerStatusPersistenceFailureFields & (
+	| { path: "scheduler"; chainId: number; itemId: number }
+	| { path: "chain-complete" }
+)
+
+export class RunnerStatusPersistenceError extends Error {
+	constructor(readonly failure: RunnerStatusPersistenceFailure) {
+		super(`${failure.path} ${failure.stage} persistence failed for run=${failure.runId} phase=${failure.phase} path=${failure.persistencePath}: ${failure.error}`)
+		this.name = "RunnerStatusPersistenceError"
+	}
 }
 
 export type PresetVariableSource =
@@ -5004,6 +5025,7 @@ export type RunPresetChainCompleteTriggerPhasesInput = {
 	presetDir?: string
 	preset?: Preset
 	targetCwd?: string | null
+	onStatusPersistenceFailure?: (failure: RunnerStatusPersistenceFailure) => void
 }
 
 export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainCompleteTriggerPhasesInput): Promise<PresetChainCompleteDecision | null> {
@@ -5024,6 +5046,7 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 		worktree: false,
 		chain: input.chain,
 	}, resolved, preset)
+	if (input.onStatusPersistenceFailure !== undefined) options.onStatusPersistenceFailure = input.onStatusPersistenceFailure
 	const anchorRecord = selectFinalizerAnchorItem(input.items, input.runId)
 	const anchorId = getItemId(anchorRecord, preset)
 	const currentIssueFile = resolveOptionalChainIssueFile(options, input.chain, anchorRecord, "Chain-complete trigger issue file")
@@ -5837,6 +5860,7 @@ export type SpawnOneAttemptInput = {
 	watchdog: SummaryWatchdogConfig | null
 	attemptTimeout?: AttemptTimeoutConfig | null
 	eventContext?: LoopEventContext
+	statusWriter?: (path: string, payload: string) => Promise<void>
 }
 
 export type SummaryWatchdogConfig = {
@@ -6076,7 +6100,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 	const effectivePrompt = resume.kind === "resume" ? RESUME_CONTINUE_PROMPT : basePrompt
 	const selectedRunner = input.runner ?? options.defaultRunner
 	await mkdir(dirname(outputPath), { recursive: true })
-	return new Promise((resolveResult) => {
+	return new Promise((resolveResult, rejectResult) => {
 		let settled = false
 		let streamedSessionId: string | null = null
 		let streamedErrorCode: string | null = null
@@ -6129,10 +6153,26 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			terminated: null,
 		}
 		let statusWriteChain = Promise.resolve()
+		let statusPersistenceFailure: RunnerStatusPersistenceError | null = null
 		const writeStatus = (): Promise<void> => {
 			const payload = `${JSON.stringify(status, null, "\t")}\n`
-			statusWriteChain = statusWriteChain.then(() => writeFile(statusPath, payload)).catch((error: BoundaryError) => {
-				log(`Agent [${label}] status write failed: ${error instanceof Error ? error.message : String(error)}`)
+			statusWriteChain = statusWriteChain.then(async () => {
+				if (statusPersistenceFailure !== null) throw statusPersistenceFailure
+				try {
+					await (input.statusWriter ?? writeFile)(statusPath, payload)
+				} catch (error) {
+					const failure: RunnerStatusPersistenceFailure = {
+						path: "chain-complete",
+						stage: "status-artifact",
+						runId: basename(dirname(dirname(outputPath))),
+						phase: String(label),
+						persistencePath: statusPath,
+						error: error instanceof Error ? error.message : String(error),
+					}
+					statusPersistenceFailure = new RunnerStatusPersistenceError(failure)
+					options.onStatusPersistenceFailure?.(failure)
+					throw statusPersistenceFailure
+				}
 			})
 			return statusWriteChain
 		}
@@ -6288,11 +6328,11 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 					stderrOutFile.once("drain", () => child.stderr.resume())
 				}
 			}
-			void writeStatus()
+			void writeStatus().catch(() => undefined)
 		}
 
 		status.pid = child.pid ?? null
-		void writeStatus()
+		void writeStatus().catch(() => undefined)
 
 		log(`Agent [${label}] spawned: runner=${selectedRunner.kind}, model=${selectedRunner.model ?? "<default>"}, pid=${child.pid}, stream=${attemptStreamPath}, stderr=${attemptStderrPath}, status=${statusPath}, resume=${resume.kind === "resume" ? resume.sessionId : "none"}, attemptTimeout=${attemptTimeoutConfig.attemptSeconds}s`)
 
@@ -6372,7 +6412,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 				log(`Agent [${label}] spawn error: ${error.message}`)
 				await Promise.all([closeAgentOutputStream(streamOutFile), closeAgentOutputStream(stderrOutFile, `\nspawn error: ${error.message}\n`)])
 				await settle({ kind: "error", code: "spawn_error" }, `spawn error: ${error.message}`, 1, null)
-			})()
+			})().catch(rejectResult)
 		})
 
 		child.on("close", (code, signal) => {
@@ -6434,7 +6474,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 				log(`Agent [${label}] attempt closed: exit=${exitCode}, signal=${signalName ?? "none"}, terminated=${terminated.kind}${terminatedDetail}, sessionId=${status.sessionId ?? "<none>"}`)
 				const finalizerOutput = sawRunnerJson ? latestAgentText ?? "" : lastPlainStdoutLine ?? ""
 				await settle(terminated, finalizerOutput, exitCode, signalName)
-			})()
+			})().catch(rejectResult)
 		})
 	})
 }
