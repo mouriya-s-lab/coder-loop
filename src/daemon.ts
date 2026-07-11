@@ -507,6 +507,50 @@ type ItemMutationCaller =
 	| { kind: "operator"; subject: Extract<ObservabilitySubject, { kind: "operator" }> }
 	| { kind: "agent"; runId: string; phase: string; subject: Extract<ObservabilitySubject, { kind: "agent" }> }
 
+// #600: authorization and audit attribution for `item.exitAction` after caller admission.
+// Operator calls have no credential-bound identity, so they preserve the existing direct-socket
+// contract and use the required request pair. Agent calls carry only registry-bound truth in the
+// admitted branch. A forged request pair is a distinct deny variant so downstream code cannot
+// accidentally authorize with the claim or emit it as event attribution.
+interface OperatorObservabilitySubjectSelector {
+	kind: "operator"
+}
+
+interface AgentObservabilitySubjectSelector {
+	kind: "agent"
+}
+
+type OperatorObservabilitySubject = Extract<ObservabilitySubject, OperatorObservabilitySubjectSelector>
+type AgentObservabilitySubject = Extract<ObservabilitySubject, AgentObservabilitySubjectSelector>
+
+interface OperatorItemExitActionAttribution {
+	kind: "operator"
+	runId: string
+	phase: string
+	subject: OperatorObservabilitySubject
+}
+
+interface AdmittedAgentItemExitActionAttribution {
+	kind: "agent-admitted"
+	runId: string
+	phase: string
+	subject: AgentObservabilitySubject
+}
+
+interface MismatchedAgentItemExitActionAttribution {
+	kind: "agent-mismatch"
+	runId: string
+	phase: string
+	claimedRunId: string
+	claimedPhase: string
+	subject: AgentObservabilitySubject
+}
+
+type ItemExitActionAttribution =
+	| OperatorItemExitActionAttribution
+	| AdmittedAgentItemExitActionAttribution
+	| MismatchedAgentItemExitActionAttribution
+
 // #406 caller-admission deny reasons. Co-located with the observability event union (every
 // reason here appears in `item.mutation.caller_admission.payload.reason`). Mirrors the threat-
 // model branches from issue body:
@@ -2794,11 +2838,10 @@ export class CoderLoopDaemon {
 	//      credential-bound agent). The chain-action selection is a privileged
 	//      write — unauthenticated callers and stale credentials cannot fire it.
 	//   2. Per-phase action vocabulary — the action must be declared in the
-	//      requesting phase's `[[phases.exits]]` chain-action branch; default-deny
+	//      credential-bound phase's `[[phases.exits]]` chain-action branch; default-deny
 	//      otherwise (mirrors the #397 default-deny status admission).
-	//   3. The phase the agent claims must actually be the agent's currently
-	//      running phase (the caller-admission gate confirms the credential
-	//      binding includes the same phase).
+	//   3. The request attribution pair must equal the credential binding. A mismatch
+	//      is denied through a typed branch and is never used for authorization or audit.
 	// Two observability events:
 	//   - `item.exit.selected` (audit) — records the agent's selection regardless
 	//     of whether the engine proceeds; pairs with the existing `item.status.write_admission`
@@ -2821,23 +2864,49 @@ export class CoderLoopDaemon {
 		if (chain === null) throw new DaemonError("not_found", `chain ${item.chainId} was not found`, { chainId: item.chainId })
 		assertChainAllowsItemMutation(chain, "item.exitAction")
 		const caller = await this.admitItemMutationCaller(chain, item, args)
+		const attribution = resolveItemExitActionAttribution(caller, agentRunId, agentPhase)
 		const { preset } = await this.loadedPresetForItem(chain, item, "item.exitAction")
-		const presetPhase = preset.phases.find((entry) => entry.name === agentPhase)
+		const presetPhase = preset.phases.find((entry) => entry.name === attribution.phase)
 		if (presetPhase === undefined) {
 			const knownPhases = preset.phases.map((entry) => entry.name)
 			throw new DaemonError(
 				"invalid_request",
-				`item.exitAction: phase "${agentPhase}" is not declared in preset "${preset.name}" (known phases: ${knownPhases.join(", ") || "<none>"})`,
-				{ phase: agentPhase, knownPhases },
+				`item.exitAction: phase "${attribution.phase}" is not declared in preset "${preset.name}" (known phases: ${knownPhases.join(", ") || "<none>"})`,
+				{ phase: attribution.phase, knownPhases },
 			)
 		}
 		const declaredActions = phaseChainActions(presetPhase)
 		const declaredActionList = declaredActions.slice().sort()
+		if (attribution.kind === "agent-mismatch") {
+			await this.recordExitSelectionAuditEvent(chain, {
+				item,
+				phase: attribution.phase,
+				runId: attribution.runId,
+				selection: { kind: "chain-action", action },
+				declaredChainActions: declaredActionList,
+				declaredItemStatuses: phaseWritableStatuses(presetPhase).slice().sort(),
+				outcome: "deny",
+				reason: "caller-attribution-mismatch",
+				subject: attribution.subject,
+			})
+			throw new DaemonError(
+				"invalid_caller",
+				`item.exitAction request run/phase attribution does not match the credential-bound caller: ` +
+					`claimed (${attribution.claimedRunId}, ${attribution.claimedPhase}), ` +
+					`bound (${attribution.runId}, ${attribution.phase}).`,
+				{
+					boundRunId: attribution.runId,
+					boundPhase: attribution.phase,
+					claimedRunId: attribution.claimedRunId,
+					claimedPhase: attribution.claimedPhase,
+				},
+			)
+		}
 		const isDeclared = declaredActions.includes(action)
 		await this.recordExitSelectionAuditEvent(chain, {
 			item,
-			phase: agentPhase,
-			runId: agentRunId,
+			phase: attribution.phase,
+			runId: attribution.runId,
 			selection: { kind: "chain-action", action },
 			declaredChainActions: declaredActionList,
 			declaredItemStatuses: phaseWritableStatuses(presetPhase).slice().sort(),
@@ -2848,8 +2917,8 @@ export class CoderLoopDaemon {
 		if (!isDeclared) {
 			throw new DaemonError(
 				"invalid_request",
-				`item.exitAction: chain action "${action}" is not declared by phase "${agentPhase}" (declared chain actions: ${declaredActionList.join(", ") || "<none> (default-deny)"})`,
-				{ action, phase: agentPhase, declaredChainActions: declaredActionList },
+				`item.exitAction: chain action "${action}" is not declared by phase "${attribution.phase}" (declared chain actions: ${declaredActionList.join(", ") || "<none> (default-deny)"})`,
+				{ action, phase: attribution.phase, declaredChainActions: declaredActionList },
 			)
 		}
 		switch (action) {
@@ -2857,8 +2926,8 @@ export class CoderLoopDaemon {
 				const result = await this.performChainStopFromPhaseExit(chain, {
 					rowId: item.id,
 					itemId: item.itemId,
-					runId: agentRunId,
-					phase: agentPhase,
+					runId: attribution.runId,
+					phase: attribution.phase,
 					subject: caller.subject,
 				})
 				return { action, chain: chainToJson(result.chain), terminatedRuns: result.terminatedRuns.map(completedRunToJson) }
@@ -2875,16 +2944,22 @@ export class CoderLoopDaemon {
 		const resumeScheduler = await this.pauseSchedulerForMutation()
 		try {
 			const store = this.requireStore()
+			// Two selection attempts can both pass caller admission while the same review run is
+			// active. Re-read after entering the paused mutation section so the second dispatcher
+			// observes the first dispatcher's synchronous active -> stopped write instead of both
+			// acting on their pre-admission `chain` snapshots.
+			const currentChain = store.getChain(chain.id)
+			if (currentChain === null) throw new DaemonError("not_found", `chain ${chain.id} was not found`, { chainId: chain.id })
 			// Mirror handleChainStop: idempotent if already stopped.
-			if (chain.status === "stopped") {
-				this.decisionFingerprints.release({ kind: "chain", chainId: chain.id })
-				await this.recordChainStopFromPhaseExitLifecycle(chain, { ...source, alreadyStopped: true, terminatedRunIds: [] })
-				return { chain, terminatedRuns: [] }
+			if (currentChain.status === "stopped") {
+				this.decisionFingerprints.release({ kind: "chain", chainId: currentChain.id })
+				await this.recordChainStopFromPhaseExitLifecycle(currentChain, { ...source, alreadyStopped: true, terminatedRunIds: [] })
+				return { chain: currentChain, terminatedRuns: [] }
 			}
-			assertChainCanTransition(chain, "item.exitAction:stop", "active", "stopped")
-			const stopped = store.updateChain(chain.id, { status: "stopped" })
-			this.decisionFingerprints.release({ kind: "chain", chainId: chain.id })
-			const terminatedRuns = await this.terminateActiveRunsForChain(chain.id)
+			assertChainCanTransition(currentChain, "item.exitAction:stop", "active", "stopped")
+			const stopped = store.updateChain(currentChain.id, { status: "stopped" })
+			this.decisionFingerprints.release({ kind: "chain", chainId: currentChain.id })
+			const terminatedRuns = await this.terminateActiveRunsForChain(currentChain.id)
 			const terminatedRunIds = terminatedRuns.map((run) => run.runId)
 			await this.recordObservabilityEventIfChainNameIsValid(stopped, makeObservabilityEvent({
 				kind: "audit",
@@ -2897,7 +2972,7 @@ export class CoderLoopDaemon {
 				subject: source.subject,
 				payload: {
 					chainId: stopped.id,
-					fromStatus: chain.status,
+					fromStatus: currentChain.status,
 					toStatus: stopped.status,
 					terminatedRunIds,
 				},
@@ -2940,7 +3015,7 @@ export class CoderLoopDaemon {
 		declaredItemStatuses: readonly string[]
 		declaredChainActions: readonly string[]
 		outcome: "allow" | "deny"
-		reason: "admitted" | "phase-exits"
+		reason: "admitted" | "phase-exits" | "caller-attribution-mismatch"
 		subject: ObservabilitySubject
 	}): Promise<void> {
 		await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
@@ -5004,6 +5079,29 @@ function parseChainActionFromRequest(args: JsonObject): PresetPhaseChainAction {
 		throw new DaemonError("invalid_request", `item.exitAction: action must be one of: ${PRESET_PHASE_CHAIN_ACTIONS.join(", ")}; got: ${raw}`, { action: raw })
 	}
 	return found
+}
+
+function resolveItemExitActionAttribution(
+	caller: ItemMutationCaller,
+	claimedRunId: string,
+	claimedPhase: string,
+): ItemExitActionAttribution {
+	switch (caller.kind) {
+		case "operator":
+			return { kind: "operator", runId: claimedRunId, phase: claimedPhase, subject: caller.subject }
+		case "agent":
+			if (caller.runId === claimedRunId && caller.phase === claimedPhase) {
+				return { kind: "agent-admitted", runId: caller.runId, phase: caller.phase, subject: caller.subject }
+			}
+			return {
+				kind: "agent-mismatch",
+				runId: caller.runId,
+				phase: caller.phase,
+				claimedRunId,
+				claimedPhase,
+				subject: caller.subject,
+			}
+	}
 }
 
 // #405 exhaustiveness guards: forces consumers to update every site when the

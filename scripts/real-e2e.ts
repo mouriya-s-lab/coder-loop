@@ -22,6 +22,7 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process"
 import { chmodSync, existsSync, mkdirSync, openSync, closeSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { randomUUID } from "node:crypto"
+import { operatorSubprocessEnvironment } from "./real-e2e-environment"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
@@ -130,6 +131,7 @@ function sh(cmd: readonly string[], opts?: { cwd?: string; allowFail?: boolean }
 		cwd: opts?.cwd ?? REPO_ROOT,
 		encoding: "utf-8",
 		stdio: ["ignore", "pipe", "pipe"],
+		env: operatorSubprocessEnvironment(process.env),
 	})
 	const result = { stdout: proc.stdout ?? "", stderr: proc.stderr ?? "", exitCode: proc.status ?? 1 }
 	if (result.exitCode !== 0 && opts?.allowFail !== true) {
@@ -298,7 +300,7 @@ function startDaemon(workDir: string): DaemonHandle {
 	const child = spawn("bun", [LOOP_ENTRY, "daemon", "up", "--loop-data-root", loopDataRoot], {
 		cwd: REPO_ROOT,
 		stdio: ["ignore", stdoutFd, stderrFd],
-		env: { ...process.env, PATH: shimmedPath },
+		env: { ...operatorSubprocessEnvironment(process.env), PATH: shimmedPath },
 	})
 	closeSync(stdoutFd)
 	closeSync(stderrFd)
