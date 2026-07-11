@@ -31,6 +31,7 @@ import {
 } from "./daemon"
 import { dispatchSubcommand } from "./install-commands"
 import { classifyRateLimitFromStdout } from "./rate-limit"
+import { createStreamTextState } from "./runner-output"
 import { LOOP_RUN_CREDENTIAL_ENV, RuntimePathError, resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import {
 	parseObservabilityEventType,
@@ -5062,8 +5063,8 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 		const outputPath = agentOutputPath(options, finalizerRunId, phase.name)
 		const resolvedRunner = await resolvePhaseRunner(phase.name)
 		log(`Starting chain-complete trigger phase ${phase.name} for chain ${input.chain.name} (runner=${resolvedRunner.kind})...`)
-		const { output, code } = await runAgent(options, phase.name, prompt, outputPath, targetCwd, resolvedRunner, summaryWatchdogConfigForPhase(phase))
-		log(`Chain-complete trigger phase ${phase.name} finished: exit=${code}, output=${outputPath} (${output.length} bytes)`)
+		const { output, stdoutBytes, code } = await runAgent(options, phase.name, prompt, outputPath, targetCwd, resolvedRunner, summaryWatchdogConfigForPhase(phase))
+		log(`Chain-complete trigger phase ${phase.name} finished: exit=${code}, output=${outputPath} (${stdoutBytes} bytes)`)
 		if (code !== 0) throw new Error(`chain-complete trigger phase ${phase.name} exited ${code}`)
 		const decision = parseFinalizerSummaryDecision(output, resolvedRunner.kind)
 		if (decision === null) throw new Error(`chain-complete trigger phase ${phase.name} did not print a valid FINALIZER SUMMARY`)
@@ -5770,7 +5771,7 @@ async function runAgent(
 	runner: AgentRunnerSelection,
 	watchdog: SummaryWatchdogConfig | null,
 	eventContext?: LoopEventContext,
-): Promise<{ output: string; code: number }> {
+): Promise<{ output: string; stdoutBytes: number; code: number }> {
 	const sessionsPath = agentSessionsPath(outputPath)
 	const lastEntry = await readLastSessionEntry(sessionsPath)
 	const compatibleLastEntry = await selectResumeEntryForRunner(lastEntry, runner, outputPath, label)
@@ -5791,7 +5792,7 @@ async function runAgent(
 	})
 
 	log(`Agent [${label}] finished after ${result.attempts} attempt(s); code=${result.code}`)
-	return { output: result.output, code: result.code }
+	return { output: result.output, stdoutBytes: result.stdoutBytes, code: result.code }
 }
 
 async function selectResumeEntryForRunner(
@@ -6061,9 +6062,26 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 	const selectedRunner = input.runner ?? options.defaultRunner
 	await mkdir(dirname(outputPath), { recursive: true })
 	return new Promise((resolveResult) => {
-		const out: Buffer[] = []
-		const err: Buffer[] = []
 		let settled = false
+		let streamedSessionId: string | null = null
+		let streamedErrorCode: string | null = null
+		let streamedStderrErrorCode: string | null = null
+		let latestAgentText: string | null = null
+		let lastPlainStdoutLine: string | null = null
+		let sawRunnerJson = false
+		const stdoutState = createStreamTextState((line) => {
+			if (streamedSessionId === null) streamedSessionId = parseSessionIdFromRunnerStream(selectedRunner.kind, `${line}\n`)
+			const parsed = runnerAgentTextFromJsonLine(line, selectedRunner.kind)
+			sawRunnerJson = sawRunnerJson || parsed.parsedRunnerEvent
+			if (parsed.text !== null) latestAgentText = parsed.text
+			if (line.trim() !== "") lastPlainStdoutLine = line
+			const code = extractErrorCode(line, "")
+			if (code !== "unclassified") streamedErrorCode = code
+		})
+		const stderrState = createStreamTextState((line) => {
+			const code = extractErrorCode("", line)
+			if (code !== "unclassified") streamedStderrErrorCode = code
+		})
 
 		const startedAt = new Date().toISOString()
 		const attemptStreamPath = agentAttemptStreamPath(outputPath, startedAt)
@@ -6237,23 +6255,23 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			status.lastEventAt = new Date().toISOString()
 			status.bytesWritten += chunk.byteLength
 			if (stream === "stdout") {
-				out.push(chunk)
-				streamOutFile.write(chunk)
-				if (status.sessionId === null) {
-					const accumulated = Buffer.concat(out).toString("utf-8")
-					const detected = parseSessionIdFromRunnerStream(selectedRunner.kind, accumulated)
-					if (detected !== null) {
-						status.sessionId = detected
-					}
+				stdoutState.observe(chunk)
+				if (!streamOutFile.write(chunk)) {
+					child.stdout.pause()
+					streamOutFile.once("drain", () => child.stdout.resume())
 				}
+				status.sessionId = streamedSessionId
 				const watchdogStateBefore = watchdog.state().kind
 				watchdogStdout.observeStdout(chunk.toString("utf-8"))
 				if (watchdogStateBefore === "idle" && watchdog.state().kind !== "idle") {
 					cancelAttemptTimeout()
 				}
 			} else {
-				err.push(chunk)
-				stderrOutFile.write(chunk)
+				stderrState.observe(chunk)
+				if (!stderrOutFile.write(chunk)) {
+					child.stderr.pause()
+					stderrOutFile.once("drain", () => child.stderr.resume())
+				}
 			}
 			void writeStatus()
 		}
@@ -6317,6 +6335,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			}
 			resolveResult({
 				output,
+				stdoutBytes: stdoutState.bytes(),
 				exitCode,
 				signal,
 				sessionId: status.sessionId,
@@ -6336,8 +6355,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			void (async () => {
 				await writeStatus()
 				log(`Agent [${label}] spawn error: ${error.message}`)
-				streamOutFile.end()
-				stderrOutFile.end(`\nspawn error: ${error.message}\n`)
+				await Promise.all([closeAgentOutputStream(streamOutFile), closeAgentOutputStream(stderrOutFile, `\nspawn error: ${error.message}\n`)])
 				await settle({ kind: "error", code: "spawn_error" }, `spawn error: ${error.message}`, 1, null)
 			})()
 		})
@@ -6349,8 +6367,9 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			const attemptTimeoutStateAtClose = attemptTimeoutState
 			watchdog.cancel()
 			cancelAttemptTimeout()
-			const stdout = Buffer.concat(out).toString("utf-8")
-			const stderr = Buffer.concat(err).toString("utf-8")
+			stdoutState.finish()
+			stderrState.finish()
+			status.sessionId = streamedSessionId
 			const exitCode = code ?? 1
 			const signalName = signal ?? null
 			const terminated: Terminated =
@@ -6366,7 +6385,11 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 							phase: watchdogStateAtClose.kind === "kill-sent" ? "kill" : "term",
 							afterSummarySeconds: Math.round(watchdogConfig.termMs / 1000),
 						}
-					: classifyTermination({ exitCode, signal: signalName, stdoutText: stdout, stderrText: stderr })
+					: signalName !== null
+						? { kind: "signal", name: signalName }
+						: exitCode === 0
+							? { kind: "clean" }
+							: { kind: "error", code: streamedErrorCode ?? streamedStderrErrorCode ?? "unclassified" }
 			status.exitCode = exitCode
 			status.signal = signalName
 			status.terminated = terminated
@@ -6384,12 +6407,19 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			void (async () => {
 				await writeStatus()
 				if (signal) log(`Agent [${label}] killed by signal ${signal}`)
-				streamOutFile.end()
-				stderrOutFile.end()
+				await Promise.all([closeAgentOutputStream(streamOutFile), closeAgentOutputStream(stderrOutFile)])
 				log(`Agent [${label}] attempt closed: exit=${exitCode}, signal=${signalName ?? "none"}, terminated=${terminated.kind}${terminatedDetail}, sessionId=${status.sessionId ?? "<none>"}`)
-				await settle(terminated, stdout + "\n" + stderr, exitCode, signalName)
+				const finalizerOutput = sawRunnerJson ? latestAgentText ?? "" : lastPlainStdoutLine ?? ""
+				await settle(terminated, finalizerOutput, exitCode, signalName)
 			})()
 		})
+	})
+}
+
+async function closeAgentOutputStream(stream: WriteStream, finalChunk?: string): Promise<void> {
+	await new Promise<void>((resolveClosed, rejectClosed) => {
+		stream.once("error", rejectClosed)
+		stream.end(finalChunk, () => resolveClosed())
 	})
 }
 
@@ -6722,6 +6752,7 @@ export async function appendSessionEntry(sessionsPath: string, entry: SessionEnt
 
 export type AttemptOutcome = {
 	output: string
+	stdoutBytes: number
 	exitCode: number
 	signal: string | null
 	sessionId: string | null
@@ -6736,7 +6767,7 @@ export type RunWithBackoffDeps = {
 	initialResume: ResumeDecision
 }
 
-export async function runAgentWithBackoff(deps: RunWithBackoffDeps): Promise<{ output: string; code: number; attempts: number }> {
+export async function runAgentWithBackoff(deps: RunWithBackoffDeps): Promise<{ output: string; stdoutBytes: number; code: number; attempts: number }> {
 	let resume = deps.initialResume
 	let retryIndex = 0
 	let elapsedBackoffSeconds = 0
@@ -6746,17 +6777,17 @@ export async function runAgentWithBackoff(deps: RunWithBackoffDeps): Promise<{ o
 		const outcome = await deps.spawnAttempt({ resume })
 		if (outcome.terminated.kind === "watchdog") {
 			deps.log(`post-summary watchdog terminated attempt (phase=${outcome.terminated.phase}); treating as success because the phase printed its mandatory summary`)
-			return { output: outcome.output, code: 0, attempts }
+			return { output: outcome.output, stdoutBytes: outcome.stdoutBytes, code: 0, attempts }
 		}
 		if (outcome.terminated.kind === "error" && isTransient5xx(outcome.terminated.code)) {
 			if (outcome.sessionId === null) {
 				deps.log(`backoff abort: transient-5xx without sessionId; returning to outer loop`)
-				return { output: outcome.output, code: outcome.exitCode, attempts }
+				return { output: outcome.output, stdoutBytes: outcome.stdoutBytes, code: outcome.exitCode, attempts }
 			}
 			const sleepSeconds = nextBackoffSeconds(retryIndex)
 			if (elapsedBackoffSeconds + sleepSeconds > BACKOFF_BUDGET_SECONDS) {
 				deps.log(`backoff budget exhausted: elapsed=${elapsedBackoffSeconds}s, next=${sleepSeconds}s, budget=${BACKOFF_BUDGET_SECONDS}s; returning to outer loop`)
-				return { output: outcome.output, code: outcome.exitCode, attempts }
+				return { output: outcome.output, stdoutBytes: outcome.stdoutBytes, code: outcome.exitCode, attempts }
 			}
 			deps.log(`transient-5xx detected (code=${outcome.terminated.code}); sleeping ${sleepSeconds}s before resume #${retryIndex + 1}`)
 			await deps.sleep(sleepSeconds)
@@ -6765,7 +6796,7 @@ export async function runAgentWithBackoff(deps: RunWithBackoffDeps): Promise<{ o
 			resume = { kind: "resume", sessionId: outcome.sessionId }
 			continue
 		}
-		return { output: outcome.output, code: outcome.exitCode, attempts }
+		return { output: outcome.output, stdoutBytes: outcome.stdoutBytes, code: outcome.exitCode, attempts }
 	}
 }
 

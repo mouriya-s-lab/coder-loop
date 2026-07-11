@@ -1201,10 +1201,38 @@ describe("scheduler", () => {
 
 			expect(tick.spawnedRuns).toHaveLength(1)
 			expect(closed.exitCode).toBe(0)
-			expect(closed.stdout).toContain(`done:${item.id}`)
+			expect(await readFile(resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(closed.runId), "utf-8")).toContain(`done:${item.id}`)
 			expect(fixture.store.getRunByRunId(closed.runId)?.exitCode).toBe(0)
 			expect(fixture.store.getItem(item.id)?.status).toBe("done")
 			expect((await readRunnerEvents(fixture.eventLog)).map((event) => event.type)).toEqual(["start", "end"])
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("streams scheduler runner output without retaining full history", async () => {
+		const fixture = await createFixture("streamed-runner-output")
+		try {
+			const runnerPath = resolve(fixture.loopDataRoot, "..", "large-output-runner.ts")
+			await writeFile(runnerPath, [
+				'process.stdout.write(JSON.stringify({ type: "system", session_id: "session-large" }) + "\\n")',
+				'for (let i = 0; i < 200_000; i++) process.stdout.write(`stdout-${i}\\n`)',
+				'for (let i = 0; i < 100_000; i++) process.stderr.write(`stderr-${i}\\n`)',
+			].join("\n"))
+			const chain = createChain(fixture.store, "streamed-runner-output-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 630_001, repoCwd: "/repo/a" })
+			const tick = await schedulerTick(fixture.options({
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [runnerPath], model: null },
+			}))
+			const closed = await tick.spawnedRuns[0]!.closed
+			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
+			const stdout = await readFile(paths.runStdoutFile(closed.runId))
+			const stderr = await readFile(paths.runStderrFile(closed.runId))
+			expect(closed.stdoutBytes).toBe(stdout.byteLength)
+			expect(closed.stderrBytes).toBe(stderr.byteLength)
+			expect(stdout.toString()).toContain("stdout-199999")
+			expect(stderr.toString()).toContain("stderr-99999")
+			expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "claude" })).toBe("session-large")
 		} finally {
 			fixture.store.close()
 		}
@@ -2711,8 +2739,8 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			expect(tick.spawnedRuns).toHaveLength(1)
 			const closed = await tick.spawnedRuns[0]!.closed
 			expect(closed.exitCode).toBe(0)
-			expect(closed.stdout).toContain(`done:${item.id}`)
-			expect(closed.stdout).toContain("REVIEW SUMMARY: verdict=accepted")
+			expect(await readFile(resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(closed.runId), "utf-8")).toContain(`done:${item.id}`)
+			expect(await readFile(resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(closed.runId), "utf-8")).toContain("REVIEW SUMMARY: verdict=accepted")
 
 			const runs = (await readRunnerEvents(fixture.eventLog)).map((event) => event.type)
 			expect(runs).toEqual(["start", "end"])
@@ -2749,8 +2777,8 @@ describe("scheduler loaded preset prompt rendering", () => {
 			const closed = await tick.spawnedRuns[0]!.closed
 
 			expect(closed.exitCode).toBe(0)
-			expect(closed.stdout).toContain("## Workflow")
-			expect(closed.stdout).toContain("## Boundaries (apply to you and every subagent)")
+			expect(await readFile(resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(closed.runId), "utf-8")).toContain("## Workflow")
+			expect(await readFile(resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(closed.runId), "utf-8")).toContain("## Boundaries (apply to you and every subagent)")
 
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
 			const capturedStdout = await readFile(paths.runStdoutFile(closed.runId), "utf-8")
@@ -3287,6 +3315,37 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 describe("runPresetChainCompleteTriggerPhases per-phase runner selection (issue #287 retry)", () => {
 	const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
 
+	test("streams chain-complete runner output without retaining full history", async () => {
+		const fixture = await createFixture("trigger-large-output")
+		try {
+			const fakeClaude = resolve(fixture.loopDataRoot, "..", "fake-claude-large-finalizer.sh")
+			await writeFile(fakeClaude, `#!/bin/sh\ni=0\nwhile [ "$i" -lt 200000 ]; do echo "trigger-$i"; i=$((i + 1)); done\necho "FINALIZER SUMMARY: decision=complete; reason=large-output"\n`)
+			await chmod(fakeClaude, 0o755)
+			const targetCwd = resolve(fixture.loopDataRoot, "..", "target-trigger-large")
+			await mkdir(targetCwd, { recursive: true })
+			const chain = createChain(fixture.store, "trigger-large-output-chain")
+			createItem(fixture.store, chain, { issueNumber: 630_002, repoCwd: targetCwd })
+			const runId = `trigger-${chain.id}-large`
+			const decision = await runPresetChainCompleteTriggerPhases({
+				chain,
+				items: fixture.store.listItems(chain.id),
+				runId,
+				terminalStatusNames: [runtimeStatus("done")],
+				loopDataRoot: fixture.loopDataRoot,
+				presetDir: PRESET_DIR,
+				targetCwd,
+				phaseRunner: () => ({ kind: "claude", source: "iteration-default", binary: fakeClaude, extraArgs: [], model: null }),
+			})
+			expect(decision).toEqual({ decision: "complete" })
+			const path = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot }).runPhaseStdoutFile(runId, "umbrella-finalizer")
+			const output = await readFile(path, "utf-8")
+			expect(output).toContain("trigger-199999")
+			expect(output.endsWith("FINALIZER SUMMARY: decision=complete; reason=large-output\n")).toBe(true)
+		} finally {
+			fixture.store.close()
+		}
+	})
+
 	test("default chain metadata → triggered phase 'umbrella-finalizer' spawns preset codex via chain-derived selectRunnerForPhase", async () => {
 		const fixture = await createFixture("trigger-iter-default")
 		try {
@@ -3679,7 +3738,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			expect(firstTick.spawnedRuns).toHaveLength(1)
 			const firstClosed = await firstTick.spawnedRuns[0]!.closed
 			expect(firstClosed.exitCode).toBe(1)
-			expect(firstClosed.stderr).toContain("No conversation found with session ID: sess-stale-312")
+			expect(await readFile(resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot }).runStderrFile(firstClosed.runId), "utf-8")).toContain("No conversation found with session ID: sess-stale-312")
 			expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "claude" })).toBeNull()
 			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({
 				type: "session_id.invalidated",

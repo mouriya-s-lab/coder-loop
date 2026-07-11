@@ -60,6 +60,7 @@ import {
 	sanitizeChainName,
 } from "./runtime-paths"
 import { collectObservabilityExcerpt, type ObservabilityExcerpt } from "./observability"
+import { createStreamTextState } from "./runner-output"
 
 // #452: completion signal is the daemon-observed state write, not a stdout marker.
 // The previous "per-run nonce summary tag" prompt injection + stdout watchdog
@@ -128,8 +129,8 @@ export type SchedulerCompletedRun = {
 	chainId: number
 	repoCwd: string
 	exitCode: number
-	stdout: string
-	stderr: string
+	stdoutBytes: number
+	stderrBytes: number
 	status: InternalStatus
 }
 
@@ -371,7 +372,7 @@ export type SchedulerOptions = {
 	// daemon's `DaemonRateLimitState` (independent of scheduler-tick state). The scheduler's
 	// in-state gate (`SchedulerState.rateLimitedUntilMs`) is set synchronously in the close
 	// handler before this callback fires, so the next tick is gated even before persist lands.
-	onRateLimitObserved?: (info: { runId: string; chainId: number; itemId: number; reset: RateLimitReset; stdoutText: string }) => void | Promise<void>
+	onRateLimitObserved?: (info: { runId: string; chainId: number; itemId: number; reset: RateLimitReset }) => void | Promise<void>
 }
 
 // #406: minted run credential. The string is the secret value the daemon's caller-admission
@@ -1220,8 +1221,7 @@ async function cleanupFailedRunPreparation(
 						status: currentItem.status,
 						pid: resources.activeRun?.pid ?? null,
 						worktreePath,
-						stdoutText: "",
-						stderrText: errorMessage(failure),
+						output: { kind: "inline", stdoutText: "", stderrText: errorMessage(failure) },
 					})
 				} catch (error) {
 					cleanupErrors.push(`artifact cleanup failed: ${errorMessage(error)}`)
@@ -1297,8 +1297,17 @@ function attachRunCloseHandler(
 	credential: SchedulerRunCredential | null,
 	credentialContext: SchedulerRunCredentialContext,
 ): SchedulerPreparingRun {
-	const stdout: Buffer[] = []
-	const stderr: Buffer[] = []
+	let parsedSessionId: string | null = null
+	let sessionIdInvalid = false
+	let rateLimit = classifyRateLimitFromStdout("")
+	const stdoutState = createStreamTextState((line) => {
+		if (parsedSessionId === null) parsedSessionId = parseSessionIdFromRunnerStream(runner.kind, `${line}\n`)
+		const observed = classifyRateLimitFromStdout(line)
+		rateLimit = { code: rateLimit.code ?? observed.code, reset: observed.reset ?? rateLimit.reset }
+	})
+	const stderrState = createStreamTextState((line) => {
+		sessionIdInvalid = sessionIdInvalid || detectsSessionIdInvalid(runner.kind, line)
+	})
 	const outputPaths = schedulerPhaseOutputPaths(options, chain, runId, phase)
 	const outputWriters = createSchedulerPhaseOutputWriters(outputPaths)
 	let lifecycleGc: SchedulerRunLifecycleGc | null = null
@@ -1316,17 +1325,17 @@ function attachRunCloseHandler(
 
 	const closed = new Promise<SchedulerCompletedRun>((resolveClosed, rejectClosed) => {
 		child.stdout?.on("data", (chunk: Buffer) => {
-			stdout.push(chunk)
-			outputWriters.stdout.write(chunk)
+			stdoutState.observe(chunk)
+			writeChunkWithBackpressure(child.stdout!, outputWriters.stdout, chunk)
 		})
 		child.stderr?.on("data", (chunk: Buffer) => {
-			stderr.push(chunk)
-			outputWriters.stderr.write(chunk)
+			stderrState.observe(chunk)
+			writeChunkWithBackpressure(child.stderr!, outputWriters.stderr, chunk)
 		})
 		child.on("error", (error) => {
 			const chunk = Buffer.from(error.message)
-			stderr.push(chunk)
-			outputWriters.stderr.write(chunk)
+			stderrState.observe(chunk)
+			for (const writer of outputWriters.stderr) writer.write(chunk)
 		})
 
 		const installedGc = installSchedulerRunLifecycleGc(options, child, {
@@ -1347,8 +1356,10 @@ function attachRunCloseHandler(
 
 			const pendingCloseHandler = (async (): Promise<SchedulerCompletedRun> => {
 				const exitCode = code ?? 1
-				const stdoutText = Buffer.concat(stdout).toString("utf-8")
-				const stderrText = Buffer.concat(stderr).toString("utf-8")
+				stdoutState.finish()
+				stderrState.finish()
+				const stdoutBytes = stdoutState.bytes()
+				const stderrBytes = stderrState.bytes()
 				if (closeMode === "preparing") await preparationDecided
 				if (closeMode === "preparation-abort") {
 					try {
@@ -1359,8 +1370,8 @@ function attachRunCloseHandler(
 							chainId: chain.id,
 							repoCwd: item.repoCwd,
 							exitCode,
-							stdout: stdoutText,
-							stderr: stderrText,
+							stdoutBytes,
+							stderrBytes,
 							status: (options.store.getItem(item.id) ?? item).status,
 						}
 					} finally {
@@ -1372,7 +1383,6 @@ function attachRunCloseHandler(
 				// scheduler tick may fire while this close handler is still awaiting artifact
 				// writes / status resolution; without the synchronous arm that tick would re-spawn
 				// the rate-limited item and burn another attempt slot.
-				const rateLimit = classifyRateLimitFromStdout(stdoutText)
 				if (rateLimit.reset !== null) {
 					options.state.rateLimitedUntilMs = rateLimit.reset.resetsAt * 1000
 				}
@@ -1396,8 +1406,7 @@ function attachRunCloseHandler(
 						status,
 						pid: child.pid ?? null,
 						worktreePath,
-						stdoutText,
-						stderrText,
+						output: { kind: "streamed", stdoutBytes, stderrBytes },
 					})
 					const completedRun = options.store.getRunByRunId(runId)
 					options.store.completeRun(runId, {
@@ -1406,8 +1415,8 @@ function attachRunCloseHandler(
 						status,
 						extra: storedItemExtra({
 							...(completedRun === null ? {} : itemExtraToJsonObject(completedRun.extra)),
-							stdoutBytes: stdoutText.length,
-							stderrBytes: stderrText.length,
+							stdoutBytes,
+							stderrBytes,
 						}),
 					})
 
@@ -1435,8 +1444,6 @@ function attachRunCloseHandler(
 						durationSeconds: Math.max(0, endedAt - startedAt),
 						status,
 					})
-					const parsedSessionId = parseSessionIdFromRunnerStream(runner.kind, stdoutText)
-					const sessionIdInvalid = detectsSessionIdInvalid(runner.kind, stderrText)
 					const previousSessionId = (currentItem ?? item).sessionIds[phase]?.[runner.kind] ?? null
 					if (currentItem === null || !terminalStatuses.has(currentItem.status)) {
 						const itemForBackoff = currentItem ?? item
@@ -1476,7 +1483,7 @@ function attachRunCloseHandler(
 							resetAtIso: rateLimit.reset.resetAtIso,
 							rateLimitType: rateLimit.reset.rateLimitType,
 						})
-						await options.onRateLimitObserved?.({ runId, chainId: chain.id, itemId: item.id, reset: rateLimit.reset, stdoutText })
+						await options.onRateLimitObserved?.({ runId, chainId: chain.id, itemId: item.id, reset: rateLimit.reset })
 					}
 					if (sessionIdInvalid) {
 						options.store.setItemSessionId(item.id, { phase, runner: runner.kind, sessionId: null, updatedAt: endedAt })
@@ -1506,7 +1513,7 @@ function attachRunCloseHandler(
 						})
 					}
 					await completeChainIfReady(options, chain, runId, [...terminalStatuses])
-			return { runId, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, exitCode, stdout: stdoutText, stderr: stderrText, status }
+			return { runId, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, exitCode, stdoutBytes, stderrBytes, status }
 				} catch (error) {
 					if (slot.activeRun?.runId === runId) slot.activeRun = null
 					throw error
@@ -1541,11 +1548,13 @@ function attachRunCloseHandler(
 type SchedulerPhaseOutputPaths = {
 	stdoutPath: string
 	stderrPath: string
+	runStdoutPath: string
+	runStderrPath: string
 }
 
 type SchedulerPhaseOutputWriters = {
-	stdout: WriteStream
-	stderr: WriteStream
+	stdout: readonly WriteStream[]
+	stderr: readonly WriteStream[]
 }
 
 function schedulerPhaseOutputPaths(
@@ -1558,21 +1567,28 @@ function schedulerPhaseOutputPaths(
 	return {
 		stdoutPath: paths.runPhaseStdoutFile(runId, phase),
 		stderrPath: paths.runPhaseStderrFile(runId, phase),
+		runStdoutPath: paths.runStdoutFile(runId),
+		runStderrPath: paths.runStderrFile(runId),
 	}
 }
 
 function createSchedulerPhaseOutputWriters(paths: SchedulerPhaseOutputPaths): SchedulerPhaseOutputWriters {
 	return {
-		stdout: createWriteStream(paths.stdoutPath, { flags: "a" }),
-		stderr: createWriteStream(paths.stderrPath, { flags: "a" }),
+		stdout: [createWriteStream(paths.stdoutPath, { flags: "a" }), createWriteStream(paths.runStdoutPath, { flags: "a" })],
+		stderr: [createWriteStream(paths.stderrPath, { flags: "a" }), createWriteStream(paths.runStderrPath, { flags: "a" })],
 	}
 }
 
+function writeChunkWithBackpressure(source: NodeJS.ReadableStream, writers: readonly WriteStream[], chunk: Buffer): void {
+	const blocked = writers.filter((writer) => !writer.write(chunk))
+	if (blocked.length === 0) return
+	source.pause()
+	void Promise.all(blocked.map((writer) => new Promise<void>((resolveDrain) => writer.once("drain", resolveDrain))))
+		.then(() => source.resume())
+}
+
 async function closeSchedulerPhaseOutputWriters(writers: SchedulerPhaseOutputWriters): Promise<void> {
-	await Promise.all([
-		closeWriteStream(writers.stdout),
-		closeWriteStream(writers.stderr),
-	])
+	await Promise.all([...writers.stdout, ...writers.stderr].map(closeWriteStream))
 }
 
 async function closeWriteStream(stream: WriteStream): Promise<void> {
@@ -2548,18 +2564,24 @@ async function writeSchedulerRunCompletionArtifacts(
 		status: string
 		pid: number | null
 		worktreePath: string
-		stdoutText: string
-		stderrText: string
+		output:
+			| { kind: "streamed"; stdoutBytes: number; stderrBytes: number }
+			| { kind: "inline"; stdoutText: string; stderrText: string }
 	},
 ): Promise<void> {
 	const paths = resolveChainRuntimePaths(input.chain.name, options.loopDataRootOptions)
 	await mkdir(paths.runDir(input.runId), { recursive: true })
 	await mkdir(paths.runPhaseDir(input.runId, input.phase), { recursive: true })
+	const stdoutBytes = input.output.kind === "streamed" ? input.output.stdoutBytes : Buffer.byteLength(input.output.stdoutText)
+	const stderrBytes = input.output.kind === "streamed" ? input.output.stderrBytes : Buffer.byteLength(input.output.stderrText)
+	const inlineWrites = input.output.kind === "streamed" ? [] : [
+		writeFile(paths.runStdoutFile(input.runId), input.output.stdoutText),
+		writeFile(paths.runStderrFile(input.runId), input.output.stderrText),
+		writeFile(paths.runPhaseStdoutFile(input.runId, input.phase), input.output.stdoutText),
+		writeFile(paths.runPhaseStderrFile(input.runId, input.phase), input.output.stderrText),
+	]
 	await Promise.all([
-		writeFile(paths.runStdoutFile(input.runId), input.stdoutText),
-		writeFile(paths.runStderrFile(input.runId), input.stderrText),
-		writeFile(paths.runPhaseStdoutFile(input.runId, input.phase), input.stdoutText),
-		writeFile(paths.runPhaseStderrFile(input.runId, input.phase), input.stderrText),
+		...inlineWrites,
 		writeSchedulerRunStatus(options, {
 			runId: input.runId,
 			chain: input.chain,
@@ -2571,8 +2593,8 @@ async function writeSchedulerRunCompletionArtifacts(
 			status: input.status,
 			pid: input.pid,
 			worktreePath: input.worktreePath,
-			stdoutBytes: Buffer.byteLength(input.stdoutText),
-			stderrBytes: Buffer.byteLength(input.stderrText),
+			stdoutBytes,
+			stderrBytes,
 		}),
 	])
 }

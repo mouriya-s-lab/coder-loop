@@ -42,6 +42,7 @@ import {
 import { parseInternalStatus, storedItemExtra } from "./runtime-data"
 import type { ItemRecord } from "./sqlite-state"
 import type { BoundaryRecord } from "./boundary-types"
+import { createStreamTextState } from "./runner-output"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/loop-tests")
@@ -787,6 +788,31 @@ describe("runner and daemon helpers", () => {
 })
 
 describe("small parsers", () => {
+	test("detects session id across streamed chunk boundaries", () => {
+		const observed: { sessionId: string | null } = { sessionId: null }
+		const state = createStreamTextState((line) => {
+			observed.sessionId ??= parseSessionIdFromRunnerStream("codex", `${line}\n`)
+		})
+		for (const chunk of ["{\"type\":\"thread.star", "ted\",\"thread_", "id\":\"thread-streamed\"}\n"]) {
+			state.observe(Buffer.from(chunk))
+		}
+		state.finish()
+		expect(observed.sessionId).toBe("thread-streamed")
+	})
+
+	test("streams chain-complete runner output without retaining full history", () => {
+		const observed: { finalizerSummary: string | null } = { finalizerSummary: null }
+		const state = createStreamTextState((line) => {
+			if (line.startsWith("FINALIZER SUMMARY:")) observed.finalizerSummary = line
+		})
+		const payload = Buffer.from(`${"runner output\n".repeat(200_000)}FINALIZER SUMMARY: decision=complete; reason=streamed\n`)
+		for (let offset = 0; offset < payload.byteLength; offset += 8191) state.observe(payload.subarray(offset, offset + 8191))
+		state.finish()
+		expect(state.bytes()).toBe(payload.byteLength)
+		expect(observed.finalizerSummary).toBe("FINALIZER SUMMARY: decision=complete; reason=streamed")
+		expect(Object.keys(state).sort()).toEqual(["bytes", "finish", "observe", "pendingChars"])
+	})
+
 	test("detectHostRunner defaults to Codex inside Codex env and Claude otherwise", () => {
 		expect(detectHostRunner({ CODEX_SHELL: "1" })).toBe("codex")
 		expect(detectHostRunner({ CODEX_THREAD_ID: "thread" })).toBe("codex")
