@@ -70,12 +70,12 @@ Route by the deliverable shape the issue's own body declares (read from Step 1) 
 
 ```
 [ ] diff-audit — produce: scope/hygiene/test-integrity/code audit of PR #<n> vs base (pure reading)
-[ ] replay — produce: canonical suite head count + every acceptance+inherited row re-executed + e2e re-drive against the standing environment + deferred browser rows + form check; when the issue's deliverable is unblocking another issue, the named blocked-path replay is mandatory in this dispatch
+[ ] replay — produce: canonical suite head count + every acceptance+inherited row re-executed + e2e re-drive through the declared durable/recreatable handoff + deferred browser rows + form check; when the issue's deliverable is unblocking another issue, the named blocked-path replay is mandatory in this dispatch
 [ ] judgments (Step 4) — self-judgments with both reports in hand
 [ ] closure (Step 5) → terminal action (Step 6) → assessment/handoff/cleanup/summary (Step 7)
 ```
 
-Contention plan: diff-audit is pure reading, replay owns `AGENT_CWD` and drives the standing environment — dispatch both in one concurrent round per `common/dispatch-contract.md`, then judge each completed report.
+Contention plan: diff-audit is pure reading, replay owns `AGENT_CWD` and drives the typed runtime handoff — dispatch both in one concurrent round per `common/dispatch-contract.md`, then judge each completed report.
 
 List rules: exit only when every line is `[x]` or `[-] skipped: <reason recorded in handoff>`; keep the authoritative dispatch ledger current and print the final checklist once in the handoff; no line is checked by you doing its work.
 
@@ -153,7 +153,7 @@ Then write item state per `{{PRESET_ROOT}}/review/actions/state-write.md`. Exter
 {{STATUS_VOCABULARY_DOC}}
 
 2. **Handoff**: append to `{{SHARED_CONTEXT_FILE}}`: the outcome and exit chosen in Step 6, reasons, the final task list with each line's outcome, judgments failed/passed, actions performed, state transition, child closure table when applicable, next action. The dispatch ledger already owns task ids and report transport history; do not duplicate it.
-3. **Cleanup — review owns all teardown**: sweep per `{{PRESET_ROOT}}/quality/cleanup.md` — your own dispatches' declared side effects **and** the standing e2e environment iteration left up (kill via the runtime manifest's stop commands), verify each kill took, remove declared temp files, keep evidence in place. After this sweep nothing this issue's runs started may still be running.
+3. **Cleanup — review owns all teardown**: sweep per `{{PRESET_ROOT}}/quality/cleanup.md`; stop any recreated runtime and, for durable handoff, invoke its declared stop command, verify each kill took, remove declared temp files, keep evidence in place. After this sweep nothing this issue's runs started may still be running.
 4. **Final exit selection**: the exit the action file chose for you (Step 6 table — item-status or chain-action) is the only signal the engine consumes. Issue the corresponding CLI call (`coder-loop item update --status <S>` for an item-status exit, `coder-loop item exit-action --action stop` for the chain-action exit). Do not print any stdout summary token in place of the CLI call — an unwritten exit leaves the run reported as inactive without status.
 
 ## Deliverable routing matrix

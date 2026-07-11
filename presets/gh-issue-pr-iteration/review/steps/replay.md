@@ -1,6 +1,6 @@
 # Step: replay (review)
 
-A replay subagent for one coder-loop review. The review orchestrator trusts what you independently re-execute, not what the iteration claimed. One subagent does all of: canonical test command real run, acceptance-row execution, e2e re-drive against the iteration's standing environment, and the deferred browser rows the row-plan defers to you. You verify; you never repair — at no step below do you modify product code, tests, or the PR; if something fails, the failure **is** the result.
+A replay subagent for one coder-loop review. The review orchestrator trusts what you independently re-execute, not what the iteration claimed. One subagent does all of: canonical test command real run, acceptance-row execution, e2e re-drive through the declared runtime handoff, and the deferred browser rows the row-plan defers to you. You verify; you never repair — at no step below do you modify product code, tests, or the PR; if something fails, the failure **is** the result.
 
 ## Task
 
@@ -9,14 +9,18 @@ From your dispatch message: `ISSUE`, `REPO`, `ISSUE_PR`, `RUN_ID`, `AGENT_CWD` (
 1. **Parse the contract tables.** Fetch the live issue body (`gh issue view <ISSUE> -R <REPO> --json body`). Parse the `## 验收标准` table (columns `#`, `Dimension`, `Check`, `Command`, `Env`, `Expect`) and the `## 继承验证义务` table when present; concatenate the rows. A malformed table (wrong columns/headers) is itself a finding — record and stop parsing that table. Enumerate **every** row; a silently absent row invalidates your whole report.
 2. **Make the checkout runnable, read the manifest.** Check out / use the PR-bound branch state in your working directory (record the head SHA). A fresh checkout has nothing installed — making it runnable is your job, not a reason to skip rows: run dependency install per the project's manifest/lockfile and the target repo's `CLAUDE.md` / `AGENTS.md`, any required build, and a cheap toolchain probe. Record the setup commands and exits.
 
-   Then read the iteration's **runtime manifest** (in the PR packet and the chain handoff): binaries, services + start commands, auth resolution locations, ports, and the **standing e2e environment** (PIDs/ports/logs) iteration left up for you. Use it — the standing environment plus the manifest is how every row and claim is reachable. A needed entry the manifest does not provide is an **iteration packet failure**: record it as a finding with what was missing; it feeds retry, it never becomes your skip.
+   Then read the iteration's **runtime manifest** and require exactly one lifetime kind:
+   - `durable`: verify `sourceSha`, stable `ownerRef`, and `livenessCommand` before re-driving `behaviorCommand`; lost ownership/liveness is a runtime failure.
+   - `recreatable`: the old PID may be absent. Verify the pinned clean `sourceSha`, run `setupCommands`, `startCommand`, and `readinessCommand`, then re-drive `behaviorCommand`. Old PID absence alone is not a claim mismatch.
+
+   Missing, mixed, or unknown kind is an iteration packet failure. Never infer lifetime from prose or PID presence.
 3. **Canonical test suite (head count).** Run the canonical full-suite command named in the target repo's `CLAUDE.md` / `AGENTS.md` on the PR head, captured with `2>&1 | tee <log under EVIDENCE_DIR>`, and parse the head-side integer from the runner's own aggregated summary line (rule per `quality/evidence.md` — never a static `rg` / `grep` count of `test(` / `it(` declarations). Record command, integer, and log path. This is the review's head-side inventory measurement; a mismatch with the packet's published integer routes to investigation (evolving HEAD, dependency drift) per `quality/evidence.md`, not automatic credibility failure.
 4. **Execute every acceptance row.** Per row, by Env:
 
    - `local` — execute the Command exactly as written; capture exit + output; compare to Expect. No auth/binary excuse: binaries you install, credentials you resolve from the manifest's location. A row you still cannot run means one of two things and you report which: your setup is unfinished (finish it), or the manifest lacks the needed entry (iteration packet failure — finding, not skip). Never mark an unrun row passed, never reinterpret the Command.
    - `browser` — execute inside the e2e re-drive walk in Step 5. When `Step focus` names deferred browser rows, quote each named row's Check, Command, and Expect here; the actual observation lives in the Browser acceptance rows table.
    - `VM` / `container` / `CI` / `downstream` / `integration` — locate the matching artifact in the PR evidence packet proving the row ran in its environment with the expected result; where this machine reaches the environment (per the manifest), also re-execute for the stronger signal. No matching artifact and no feasible re-execution = the row failed; cite the missing artifact.
-5. **E2E re-drive (direct).** Reach the standing environment (probe the port / PID / health path from the manifest). Down but restartable → restart per the manifest's start commands and record that you did. Not restartable → manifest gap finding.
+5. **E2E re-drive (direct).** Route exhaustively by the declared handoff kind. Durable reaches the declared owner and liveness surface; recreatable starts a new runtime from the pinned committed source. Any other shape is rejected before replay.
 
    Re-drive each e2e claim the same direct way it should have been produced:
 
@@ -34,7 +38,7 @@ From your dispatch message: `ISSUE`, `REPO`, `ISSUE_PR`, `RUN_ID`, `AGENT_CWD` (
 ```markdown
 ## Replay strategy
 <branch/state replayed against; how the runtime manifest was used (which entries, what
-the standing environment provided); which rows ran locally vs were artifact-verified vs
+the declared handoff provided); which rows ran locally vs were artifact-verified vs
 re-executed in their environment; what could not be attempted and why>
 
 ## Canonical suite (head)
@@ -49,7 +53,7 @@ Setup performed: <install/build commands + exits>
 could-not-execute rows carry their exact cause>
 
 ## E2E re-drive
-Environment reached: <standing-environment probe result; restarted via manifest: yes/no + commands — or the manifest gap that made it unreachable>
+Handoff replayed: <durable owner/liveness result OR recreatable source/setup/start/readiness result>
 
 | Claim (packet) | How I re-drove it | Observed | Match |
 |---|---|---|---|
@@ -70,7 +74,7 @@ when none were deferred>
 ## Problems
 <manifest gaps (exact missing entries); unrun rows / claims with their two-shape cause
 (unfinished setup with attempts shown / manifest gap); everything left running —
-own processes and the standing environment — with stop commands, for the orchestrator's sweep>
+own processes and any durable/recreated runtime — with stop commands, for the orchestrator's sweep>
 ```
 
 ## Acceptance
@@ -86,6 +90,6 @@ Report structurally missing any section → send back before judging substance.
 - **Manifest gaps** — iteration packet failures feeding retry; they never excuse the review.
 - **Script e2e** — a form-check finding of script-produced e2e is a packet failure → retry, even when the re-drive itself passed.
 - **No verdict smuggling** — mismatches reported raw; "minor"/"cosmetic" labels are a report defect (`quality/honesty.md` treats cosmetic-handwave as hard fail).
-- **Side effects declared** for the cleanup ledger, including the standing environment's state.
+- **Side effects declared** for the cleanup ledger, including the durable/recreated runtime state.
 
 Verdict formation: all non-deferred rows matched + all e2e claims matched + no manifest gap + no form finding + blocked-path e2e passed (when applicable) → those contract rows hold. Any mismatch/missing artifact/broken Command/manifest gap/script-e2e/failing blocked-path → retry citing every failing item at once.

@@ -38,7 +38,7 @@ trigger 角色任务简单，单一 entry prompt，agent 一次跑完。iter/rev
 Review 不读 iteration 说了什么来决定信任什么——派发独立 subagent 独立复核。两份报告（diff-audit + replay）各覆盖一个真值面，缺任一份 verdict（含 retry）无效：
 
 - **diff-audit**（纯读）= scope / 卫生 / 代码真值 / 测试完整性。锚定 issue 声明的设计：每条发现必须带锚（可追溯失败路径 / issue 原句 / convention 来源），不发散。diff 中的测试删/改名/skip/弱化逐条枚举，含 test-collection 层（配置/glob/skip-marker/CI）变化，与 issue body 字面要求对照——测试变化在 diff 层已经完全可见，双侧装依赖跑全套只为了拿总数的仪式收益不抵成本，"计数以 runner 汇总行为准、禁止 rg/grep 静态计数" 作为一行口径分别写入 diff-audit（对 packet 侧）与 replay（对 head 侧）。同时对 issue-named 全仓收敛模式（`## 不应残留` / `## 预期结果` "升一等类型" / `## 验收标准` 数值红线）做一次性全 site 枚举——issue 自声明的全仓 pattern 是契约，不算发散。
-- **replay**（占 AGENT_CWD + 驱动 iter 留下的 standing environment）= 契约行 / e2e / suite-count 真值。canonical 全套测试命令按 runner 自身汇总行取头端计数；验收表逐行真跑（`Env=browser` 行在 e2e re-drive 的真 UI walk 内执行）；按 iter 交接的 runtime manifest 复跑 packet e2e 主张（程序真实入口 / agent-browser 真 UI）；packet e2e 若为脚本产物即 form 失败；unblock-deliverable 路由必含 blocked-path e2e。同一个 subagent 覆盖 canonical 测试 + 契约行 + e2e 复驱 + 转交的 browser 行 + form check + standing environment 收尾——把跨环境的执行序列压在一个上下文里，减少 orchestrator 侧的多份报告拼图与 environment 争用。
+- **replay**（占 AGENT_CWD + 驱动 iter 留下的 typed runtime handoff）= 契约行 / e2e / suite-count 真值。canonical 全套测试命令按 runner 自身汇总行取头端计数；验收表逐行真跑（`Env=browser` 行在 e2e re-drive 的真 UI walk 内执行）；按 iter 交接的 runtime manifest 复跑 packet e2e 主张（程序真实入口 / agent-browser 真 UI）；packet e2e 若为脚本产物即 form 失败；unblock-deliverable 路由必含 blocked-path e2e。同一个 subagent 覆盖 canonical 测试 + 契约行 + e2e 复驱 + 转交的 browser 行 + form check + typed runtime handoff 收尾——把跨环境的执行序列压在一个上下文里，减少 orchestrator 侧的多份报告拼图与 environment 争用。
 
 另一个对称原则：**review 绝不替 iter 修**。code / evidence / PR body 都不动，只发 retry 反馈。
 
@@ -48,7 +48,7 @@ unit/integration 测试必须有，但永远是辅助层。唯一的正规产物
 
 auth 和 binary 永远是执行者自己解决的：交付物要么是能自己起环境的单体程序（起环境时自铸 auth），要么是 IaC 基建里服务的插件（机器上必有可解析的 auth）。"no auth" / "no binary" 就是未完成的 setup，不是可报告的 blocker。
 
-环境交接闭环：iter 跑完 e2e 把运行环境**留着**，交 runtime manifest（binaries、服务与启动命令、auth 解析位置——绝不写 secret 值、端口、在跑 PID 与停法）。review 凭 manifest 必然复跑得动——manifest 缺项是 packet 失败计入 retry，"review 跑不起来"被设计成不可能。全部 teardown 归 review 调度者收尾。
+环境交接闭环：iter 跑完 e2e 后声明 `durable` 或 `recreatable`。前者交稳定 owner/liveness，后者交 clean source SHA 与 setup/start/readiness/behavior/stop；review 按 kind 穷尽复跑。manifest 缺项是 packet 失败，全部最终 teardown 归 review 调度者。
 
 e2e 单独成步而不并入 verify：捆在重步骤里的麻烦环节会被整体跳过——单独一行清单 + 独立验收，跳过就关不掉清单。verify 与 e2e 并发跑（各自 worktree，避免 checkout 争用）。
 
