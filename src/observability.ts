@@ -1,6 +1,5 @@
-import { randomUUID } from "node:crypto"
 import { appendFile, mkdir, readFile, readdir, rename, stat } from "node:fs/promises"
-import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs"
+import { appendFileSync, mkdirSync, readdirSync, renameSync, statSync } from "node:fs"
 import { basename, dirname, resolve } from "node:path"
 
 import { type as arkType } from "arktype"
@@ -242,7 +241,7 @@ const EventBaseBoundary = {
 	"subject?": SubjectBoundary,
 } as const
 
-const ObservabilityEventBoundary = arkType.or(
+export const ObservabilityEventBoundary = arkType.or(
 	{
 		...EventBaseBoundary,
 		kind: arkType.unit("audit"),
@@ -785,6 +784,53 @@ export type ObservabilityQueryResult = {
 	events: ObservabilityEvent[]
 }
 
+export type ObservabilityEventSegment =
+	| {
+		kind: "history"
+		order: { kind: "legacy"; value: string }
+		path: string
+	}
+	| {
+		kind: "history"
+		order: { kind: "sequence"; value: bigint }
+		path: string
+	}
+	| {
+		kind: "active"
+		path: string
+	}
+
+export type ObservabilityEventRotation = {
+	from: Date
+	to: string
+}
+
+export function makeHistoricalObservabilityEventSegment(
+	eventsFile: string,
+	sequence: bigint,
+	rotation: ObservabilityEventRotation,
+): Extract<ObservabilityEventSegment, { kind: "history"; order: { kind: "sequence" } }> {
+	const sequenceToken = `s${sequence.toString()}`
+	const timestamp = sanitizeSegmentTimestamp(`${rotation.from.toISOString()}-${rotation.to}`)
+	return {
+		kind: "history",
+		order: { kind: "sequence", value: sequence },
+		path: resolve(dirname(eventsFile), `${activeObservabilityEventBasename(eventsFile)}-${sequenceToken}-${timestamp}.jsonl`),
+	}
+}
+
+export function discoverObservabilityEventSegments(
+	eventsFile: string,
+	entries: readonly string[],
+): ObservabilityEventSegment[] {
+	const segments: ObservabilityEventSegment[] = []
+	for (const entry of entries) {
+		const segment = parseObservabilityEventSegment(eventsFile, entry)
+		if (segment !== null) segments.push(segment)
+	}
+	return segments.sort(compareObservabilityEventSegments)
+}
+
 export function makeObservabilityEvent(input: Omit<ObservabilityEvent, "ts">, now = new Date()): ObservabilityEvent {
 	return ObservabilityEventBoundary.assert({ ...input, ts: now.toISOString() })
 }
@@ -1131,7 +1177,13 @@ async function rotateObservabilityEventStream(eventsFile: string, eventTs: strin
 	}
 	if (current.size === 0) return
 	if (!shouldRotateObservabilityEventStream(current.size, current.mtime, eventTs, pendingBytes)) return
-	await rename(eventsFile, rotatedObservabilityEventSegment(eventsFile, current.mtime, eventTs))
+	const entries = await readdir(dirname(eventsFile))
+	const history = makeHistoricalObservabilityEventSegment(
+		eventsFile,
+		nextObservabilityEventSegmentSequence(discoverObservabilityEventSegments(eventsFile, entries)),
+		{ from: current.mtime, to: eventTs },
+	)
+	await rename(eventsFile, history.path)
 }
 
 function rotateObservabilityEventStreamSync(eventsFile: string, eventTs: string, pendingBytes: number): void {
@@ -1144,17 +1196,18 @@ function rotateObservabilityEventStreamSync(eventsFile: string, eventTs: string,
 	}
 	if (current.size === 0) return
 	if (!shouldRotateObservabilityEventStream(current.size, current.mtime, eventTs, pendingBytes)) return
-	renameSync(eventsFile, rotatedObservabilityEventSegment(eventsFile, current.mtime, eventTs))
+	const entries = readdirSync(dirname(eventsFile))
+	const history = makeHistoricalObservabilityEventSegment(
+		eventsFile,
+		nextObservabilityEventSegmentSequence(discoverObservabilityEventSegments(eventsFile, entries)),
+		{ from: current.mtime, to: eventTs },
+	)
+	renameSync(eventsFile, history.path)
 }
 
 function shouldRotateObservabilityEventStream(size: number, mtime: Date, eventTs: string, pendingBytes: number): boolean {
 	return mtime.toISOString().slice(0, 10) !== eventTs.slice(0, 10)
 		|| size + pendingBytes > OBSERVABILITY_EVENT_SEGMENT_BYTES
-}
-
-function rotatedObservabilityEventSegment(eventsFile: string, mtime: Date, eventTs: string): string {
-	const timestamp = sanitizeSegmentTimestamp(`${mtime.toISOString()}-${eventTs}`)
-	return resolve(dirname(eventsFile), `${activeObservabilityEventBasename(eventsFile)}-${timestamp}-${randomUUID()}.jsonl`)
 }
 
 async function listObservabilityEventSegments(eventsFile: string): Promise<string[]> {
@@ -1166,13 +1219,54 @@ async function listObservabilityEventSegments(eventsFile: string): Promise<strin
 		if (isNodeError(error) && error.code === "ENOENT") return []
 		throw error
 	}
-	const activeName = basename(eventsFile)
-	const rotatedPrefix = `${activeObservabilityEventBasename(eventsFile)}-`
-	const files = entries
-		.filter((entry) => entry === activeName || (entry.startsWith(rotatedPrefix) && entry.endsWith(".jsonl")))
-		.sort()
-		.map((entry) => resolve(eventsDir, entry))
-	return files
+	return discoverObservabilityEventSegments(eventsFile, entries).map((segment) => segment.path)
+}
+
+function parseObservabilityEventSegment(eventsFile: string, entry: string): ObservabilityEventSegment | null {
+	if (entry === basename(eventsFile)) return { kind: "active", path: eventsFile }
+	const prefix = `${activeObservabilityEventBasename(eventsFile)}-`
+	if (!entry.startsWith(prefix) || !entry.endsWith(".jsonl")) return null
+	const orderAndTimestamp = entry.slice(prefix.length, -".jsonl".length)
+	const separator = orderAndTimestamp.indexOf("-")
+	if (separator === -1) return {
+		kind: "history",
+		order: { kind: "legacy", value: entry },
+		path: resolve(dirname(eventsFile), entry),
+	}
+	const sequenceToken = orderAndTimestamp.slice(0, separator)
+	if (!/^s\d+$/.test(sequenceToken)) return {
+		kind: "history",
+		order: { kind: "legacy", value: entry },
+		path: resolve(dirname(eventsFile), entry),
+	}
+	return {
+		kind: "history",
+		order: { kind: "sequence", value: BigInt(sequenceToken.slice(1)) },
+		path: resolve(dirname(eventsFile), entry),
+	}
+}
+
+function compareObservabilityEventSegments(left: ObservabilityEventSegment, right: ObservabilityEventSegment): number {
+	if (left.kind === "active") return right.kind === "active" ? 0 : 1
+	if (right.kind === "active") return -1
+	if (left.order.kind === "legacy") {
+		if (right.order.kind === "sequence") return -1
+		return left.order.value.localeCompare(right.order.value)
+	}
+	if (right.order.kind === "legacy") return 1
+	if (left.order.value < right.order.value) return -1
+	if (left.order.value > right.order.value) return 1
+	return left.path.localeCompare(right.path)
+}
+
+function nextObservabilityEventSegmentSequence(segments: readonly ObservabilityEventSegment[]): bigint {
+	let next = 0n
+	for (const segment of segments) {
+		if (segment.kind === "history" && segment.order.kind === "sequence" && segment.order.value >= next) {
+			next = segment.order.value + 1n
+		}
+	}
+	return next
 }
 
 function activeObservabilityEventBasename(eventsFile: string): string {
