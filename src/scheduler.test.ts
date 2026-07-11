@@ -1797,7 +1797,7 @@ describe("scheduler reads the agent-written item status (v1 status model)", () =
 			const secondTick = await schedulerTick(options)
 			expect(secondTick.spawnedRuns).toHaveLength(1)
 			await secondTick.spawnedRuns[0]!.closed
-			expect(fixture.store.getItem(item.id)?.attempts).toBe(2)
+			expect(fixture.store.getItem(item.id)?.attempts).toBe(1)
 			expect(fixture.store.getItem(item.id)?.status).toBe("changes_requested")
 		} finally {
 			fixture.store.close()
@@ -1904,7 +1904,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 			const updatedAfterReviewSpawn = fixture.store.getItem(item.id)
 			expect(updatedAfterReviewSpawn?.phase).toBe("review")
 			expect(updatedAfterReviewSpawn?.status).toBe("queued")
-			expect(updatedAfterReviewSpawn?.attempts).toBe(2)
+			expect(updatedAfterReviewSpawn?.attempts).toBe(1)
 			await reviewTick.spawnedRuns[0]!.closed
 
 			const spawnEvents = fixture.schedulerEvents.filter((event) => event.type === "agent.spawn" && event.itemId === item.id)
@@ -1950,12 +1950,12 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 			const betaTick = await schedulerTick(baseOptions)
 			expect(betaTick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-beta`)
 			await betaTick.spawnedRuns[0]!.closed
-			expect(fixture.store.getItem(item.id)).toMatchObject({ status: runtimeStatus("queued"), phase: "beta", attempts: 2 })
+			expect(fixture.store.getItem(item.id)).toMatchObject({ status: runtimeStatus("queued"), phase: "beta", attempts: 1 })
 
 			const gammaTick = await schedulerTick(baseOptions)
 			expect(gammaTick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-gamma`)
 			await gammaTick.spawnedRuns[0]!.closed
-			expect(fixture.store.getItem(item.id)).toMatchObject({ status: runtimeStatus("done"), phase: "gamma", attempts: 3 })
+			expect(fixture.store.getItem(item.id)).toMatchObject({ status: runtimeStatus("done"), phase: "gamma", attempts: 1 })
 
 			const phaseStarts = fixture.schedulerEvents
 				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
@@ -2009,7 +2009,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 			const updated = fixture.store.getItem(item.id)
 			expect(updated?.phase).toBe("review")
 			expect(updated?.status).toBe("queued")
-			expect(updated?.attempts).toBe(2)
+			expect(updated?.attempts).toBe(1)
 			await tick.spawnedRuns[0]!.closed
 
 			const spawnEvents = fixture.schedulerEvents.filter((event) => event.type === "agent.spawn" && event.itemId === item.id)
@@ -2059,7 +2059,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 			const spawned = fixture.store.getItem(item.id)
 			expect(spawned?.phase).toBe("review")
 			expect(spawned?.status).toBe("queued")
-			expect(spawned?.attempts).toBe(3)
+			expect(spawned?.attempts).toBe(2)
 
 			await tick.spawnedRuns[0]!.closed
 
@@ -2254,7 +2254,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			// A trigger phase running on an already-terminal item keeps that terminal status
 			// persisted across spawn; it is not flipped to a continuable in_progress.
 			expect(duringSpawn?.status).toBe("blocked")
-			expect(duringSpawn?.attempts).toBe(3)
+			expect(duringSpawn?.attempts).toBe(2)
 
 			await triggerTick.spawnedRuns[0]!.closed
 

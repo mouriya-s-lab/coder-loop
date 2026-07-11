@@ -361,7 +361,7 @@ console.log("done:" + input.itemId)
 	}
 })
 
-test("single item review retry verdict routes back through iteration before review", async () => {
+test("counts one retry cycle in the declared attempt unit", async () => {
 	const root = resolve(TEST_ROOT, "review-retry-to-iteration")
 	const loopDataRoot = resolve(root, "loop-data")
 	const fakeRunner = resolve(root, "review-retry-runner.ts")
@@ -440,18 +440,21 @@ console.log(input.phase + ":" + status)
 		await iterTick.spawnedRuns[0]!.closed
 		expect(store.getItem(item.id)?.phase).toBe("iteration")
 		expect(store.getItem(item.id)?.status).toBe("queued")
+		expect(store.getItem(item.id)?.attempts).toBe(1)
 
 		const reviewTick = await schedulerTick(options)
 		expect(reviewTick.spawnedRuns).toHaveLength(1)
 		await reviewTick.spawnedRuns[0]!.closed
 		expect(store.getItem(item.id)?.phase).toBe("review")
 		expect(store.getItem(item.id)?.status).toBe("changes_requested")
+		expect(store.getItem(item.id)?.attempts).toBe(1)
 
 		const retryIterTick = await schedulerTick(options)
 		expect(retryIterTick.spawnedRuns).toHaveLength(1)
 		await retryIterTick.spawnedRuns[0]!.closed
 		expect(store.getItem(item.id)?.phase).toBe("iteration")
 		expect(store.getItem(item.id)?.status).toBe("changes_requested")
+		expect(store.getItem(item.id)?.attempts).toBe(2)
 
 		expect(schedulerEvents
 			.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
