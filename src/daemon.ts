@@ -22,6 +22,7 @@ import {
 	type PresetPhaseChainAction,
 	type PresetPhaseRights,
 	type PresetPlaceholderFinding,
+	type RunnerStatusPersistenceFailure,
 } from "./loop"
 import {
 	cleanupSchedulerChainWorktrees,
@@ -297,6 +298,7 @@ export type CoderLoopDaemonSnapshot = {
 	rateLimit: JsonObject
 	hostResources: JsonObject
 	lifecycleEventPersistenceFailure: JsonObject | null
+	runnerStatusPersistenceFailure: JsonObject | null
 }
 
 // #478 staggered resume: after the cooldown elapses, the daemon-level gate caps the
@@ -1050,6 +1052,7 @@ export class CoderLoopDaemon {
 	private readonly decisionFingerprints = new DecisionFingerprintState()
 	private readonly loadedPresetCache = new Map<string, Promise<SchedulerLoadedPreset>>()
 	private latestLifecycleEventPersistenceFailure: ObservabilityEvent | null = null
+	private latestRunnerStatusPersistenceFailure: ObservabilityEvent | null = null
 	// #406 run credential registry. Map keyed on credential value → run binding. Lifetime is the
 	// daemon process: when daemon down kills all active runs (#467), the registry dies with it,
 	// matching the "credentials die with the process" invariant. Not persisted to SQLite — credentials
@@ -1091,6 +1094,7 @@ export class CoderLoopDaemon {
 			await this.quarantineOrphanChainDirectories()
 			await this.ensureRuntimeLayoutForExistingChains()
 			await this.loadLifecycleEventPersistenceFailure()
+			await this.loadRunnerStatusPersistenceFailure()
 			await this.recoverStaleSchedulerState()
 			// #478: restore any in-flight rate-limit cooldown persisted by the previous
 			// daemon instance so a daemon restart does not lose the cooldown floor. If the
@@ -1139,6 +1143,35 @@ export class CoderLoopDaemon {
 			lifecycleEventPersistenceFailure: this.latestLifecycleEventPersistenceFailure === null
 				? null
 				: lifecycleEventPersistenceFailureToJson(this.latestLifecycleEventPersistenceFailure),
+			runnerStatusPersistenceFailure: this.latestRunnerStatusPersistenceFailure === null
+				? null
+				: runnerStatusPersistenceFailureToJson(this.latestRunnerStatusPersistenceFailure),
+		}
+	}
+
+	private async loadRunnerStatusPersistenceFailure(): Promise<void> {
+		const result = await queryObservabilityEvents(this.paths.runnerPersistenceFailuresFile)
+		this.latestRunnerStatusPersistenceFailure = result.events.at(-1) ?? null
+	}
+
+	private recordRunnerStatusPersistenceFailure(failure: RunnerStatusPersistenceFailure, chainId: number, itemId?: number): void {
+		const chain = this.store?.getChain(chainId)
+		const event = makeObservabilityEvent({
+			kind: "diagnostic",
+			type: "runner.status_persistence_failed",
+			...(chain === null || chain === undefined ? {} : { chain: chain.name }),
+			...(itemId === undefined ? {} : { item: itemId }),
+			runId: failure.runId,
+			phase: failure.phase,
+			subject: { kind: "engine" },
+			payload: { path: failure.path, stage: failure.stage, persistencePath: failure.persistencePath, error: failure.error },
+		})
+		this.latestRunnerStatusPersistenceFailure = event
+		try {
+			appendObservabilityEventSyncOrThrow(this.paths.runnerPersistenceFailuresFile, event)
+			this.writeRenderedObservabilityEvent(event)
+		} catch (fallbackError) {
+			process.stderr.write(`${renderObservabilityEvent(event)} fallbackError=${errorMessage(fallbackError)}\n`)
 		}
 	}
 
@@ -2327,19 +2360,20 @@ export class CoderLoopDaemon {
 		}
 		const result = await queryObservabilityEvents(this.paths.eventsFile, query)
 		const failureResult = await queryObservabilityEvents(this.paths.lifecycleEventFailuresFile, query)
+		const runnerFailureResult = await queryObservabilityEvents(this.paths.runnerPersistenceFailuresFile, query)
 		// `events` is `ObservabilityEvent[]` (typed sum union built from arktype atoms — every
 		// field is already JsonValue-compatible). Route each entry through the structural
 		// JSON.stringify+parse helper in observability.ts, then run it past `isJsonValue` so the
 		// wire reply only carries values the boundary type system can speak. An entry that fails
 		// the guard is dropped with a daemon-warning event rather than crashing the whole query.
 		const events: JsonValue[] = []
-		for (const event of [...result.events, ...failureResult.events].sort((left, right) => left.ts.localeCompare(right.ts))) {
+		for (const event of [...result.events, ...failureResult.events, ...runnerFailureResult.events].sort((left, right) => left.ts.localeCompare(right.ts))) {
 			const candidate: unknown = observabilityEventToJsonValue(event)
 			if (isJsonValue(candidate)) {
 				events.push(candidate)
 			}
 		}
-		return { path: result.path, failurePath: failureResult.path, events }
+		return { path: result.path, failurePath: failureResult.path, runnerFailurePath: runnerFailureResult.path, events }
 	}
 
 	// #409 queue.unblock, daemonized. Previously executed SQLite mutations in the
@@ -3320,6 +3354,10 @@ export class CoderLoopDaemon {
 				await externalOnEvent?.(event)
 			},
 			onLifecycleEventPersistenceFailure: (failure) => this.recordLifecycleEventPersistenceFailure(failure),
+			onRunnerStatusPersistenceFailure: (failure) => {
+				if (failure.path !== "scheduler") throw new DaemonError("internal_error", `scheduler emitted ${failure.path} persistence failure`)
+				this.recordRunnerStatusPersistenceFailure(failure, failure.chainId, failure.itemId)
+			},
 			// #478: persist + arm the cooldown via the daemon-owned state when the scheduler
 			// classifies a rate-limit exit. The scheduler already set the in-memory tick gate
 			// (`schedulerState.rateLimitedUntilMs`) synchronously before this callback fires,
@@ -3369,6 +3407,7 @@ export class CoderLoopDaemon {
 					terminalStatusNames: context.terminalStatusNames,
 					...(await presetForChain(context.chain)),
 					...(explicitRunnerOverride === null ? {} : { phaseRunner: () => explicitRunnerOverride }),
+					onStatusPersistenceFailure: (failure) => this.recordRunnerStatusPersistenceFailure(failure, context.chain.id),
 				})
 		}
 		return options
@@ -4192,6 +4231,25 @@ function lifecycleEventPersistenceFailureToJson(event: ObservabilityEvent): Json
 		eventKind: event.payload.eventKind,
 		error: event.payload.error,
 		originalPersisted: event.payload.originalPersisted,
+	}
+}
+
+function runnerStatusPersistenceFailureToJson(event: ObservabilityEvent): JsonObject {
+	if (event.type !== "runner.status_persistence_failed") {
+		throw new DaemonError("internal_error", `expected runner status persistence failure, got ${event.type}`)
+	}
+	return {
+		ts: event.ts,
+		kind: event.kind,
+		type: event.type,
+		chain: event.chain ?? null,
+		item: event.item ?? null,
+		runId: event.runId ?? null,
+		phase: event.phase ?? null,
+		path: event.payload.path,
+		stage: event.payload.stage,
+		persistencePath: event.payload.persistencePath,
+		error: event.payload.error,
 	}
 }
 
@@ -5153,6 +5211,7 @@ function daemonSnapshotToJson(snapshot: CoderLoopDaemonSnapshot): JsonObject {
 		rateLimit: snapshot.rateLimit,
 		hostResources: snapshot.hostResources,
 		lifecycleEventPersistenceFailure: snapshot.lifecycleEventPersistenceFailure,
+		runnerStatusPersistenceFailure: snapshot.runnerStatusPersistenceFailure,
 	}
 }
 

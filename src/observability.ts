@@ -81,6 +81,7 @@ const ObservabilityEventTypeBoundary = arkType.or(
 	arkType.unit("daemon.warning"),
 	arkType.unit("scheduler.tick_failed"),
 	arkType.unit("scheduler.lifecycle_event_persistence_failed"),
+	arkType.unit("runner.status_persistence_failed"),
 	arkType.unit("chain.complete_trigger_failed"),
 	// #397: per-phase admission gate audit. One event per item.status write request the daemon
 	// runs through `admitItemStatusForRequest` — both allow and deny outcomes — so a default-deny
@@ -548,6 +549,12 @@ const ObservabilityEventBoundary = arkType.or(
 		kind: arkType.unit("diagnostic"),
 		type: arkType.unit("scheduler.lifecycle_event_persistence_failed"),
 		payload: { eventKind: "string", error: "string", originalPersisted: arkType.unit(false) },
+	},
+	{
+		...EventBaseBoundary,
+		kind: arkType.unit("diagnostic"),
+		type: arkType.unit("runner.status_persistence_failed"),
+		payload: { path: arkType.or(arkType.unit("scheduler"), arkType.unit("chain-complete")), stage: "string", persistencePath: "string", error: "string" },
 	},
 	{
 		...EventBaseBoundary,
@@ -1083,6 +1090,8 @@ function renderDiagnosticEvent(event: Extract<ObservabilityEvent, { kind: "diagn
 			return `${event.ts} diagnostic scheduler.tick_failed pid=${event.payload.pid} error=${event.payload.error}`
 		case "scheduler.lifecycle_event_persistence_failed":
 			return `${event.ts} diagnostic scheduler.lifecycle_event_persistence_failed chain=${event.chain ?? "-"} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} eventKind=${event.payload.eventKind} originalPersisted=false error=${event.payload.error}`
+		case "runner.status_persistence_failed":
+			return `${event.ts} diagnostic runner.status_persistence_failed chain=${event.chain ?? "-"} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} path=${event.payload.path} stage=${event.payload.stage} persistencePath=${event.payload.persistencePath} error=${event.payload.error}`
 		case "chain.complete_trigger_failed":
 			return `${event.ts} diagnostic chain.complete_trigger_failed chain=${event.chain ?? event.payload.chainId} error=${event.payload.error}`
 		default:

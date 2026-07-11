@@ -55,6 +55,37 @@ afterAll(async () => {
 })
 
 describe("central chain/item CLI", () => {
+	test("status reports runner persistence failures", async () => {
+		const loopDataRoot = await makeLoopDataRoot("runner-persistence-status")
+		const paths = resolveLoopDataPaths({ loopDataRoot })
+		for (const [path, runId, phase, statusPath, error] of [
+			["scheduler", "run-635-scheduler", "iteration", "/runs/scheduler/status.json", "EIO scheduler status"],
+			["chain-complete", "run-635-trigger", "umbrella-finalizer", "/runs/trigger/status.json", "EACCES trigger status"],
+		] as const) {
+			await appendObservabilityEvent(paths.runnerPersistenceFailuresFile, makeObservabilityEvent({
+				kind: "diagnostic",
+				type: "runner.status_persistence_failed",
+				chain: "failure-chain",
+				runId,
+				phase,
+				subject: { kind: "engine" },
+				payload: { path, stage: "status-artifact", persistencePath: statusPath, error },
+			}))
+		}
+		const daemon = await startCoderLoopDaemon({ loopDataRoot, scheduler: { enabled: false } })
+		try {
+			const status = expectJsonOk(await runCli(["daemon", "status", "--loop-data-root", loopDataRoot, "--json"]))
+			expect(status.daemon).toMatchObject({ runnerStatusPersistenceFailure: { path: "chain-complete", runId: "run-635-trigger", phase: "umbrella-finalizer", persistencePath: "/runs/trigger/status.json", error: "EACCES trigger status" } })
+			const logs = expectJsonOk(await runCli(["logs", loopDataRoot, "--loop-data-root", loopDataRoot, "--json", "--type", "runner.status_persistence_failed"]))
+			expect(logs.events).toHaveLength(2)
+			expect(logs.events.map((event: BoundaryRecord) => event.payload)).toEqual([
+				{ path: "scheduler", stage: "status-artifact", persistencePath: "/runs/scheduler/status.json", error: "EIO scheduler status" },
+				{ path: "chain-complete", stage: "status-artifact", persistencePath: "/runs/trigger/status.json", error: "EACCES trigger status" },
+			])
+		} finally {
+			await daemon.stop()
+		}
+	})
 	test("status exposes scheduler lifecycle event failure", async () => {
 		const loopDataRoot = await makeLoopDataRoot("lifecycle-persistence-status")
 		const paths = resolveLoopDataPaths({ loopDataRoot })

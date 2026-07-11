@@ -24,6 +24,8 @@ import {
 	type ResumeDecision,
 	type RunnerInvocationPaths,
 	type RuntimeBindings,
+	RunnerStatusPersistenceError,
+	type RunnerStatusPersistenceFailure,
 } from "./loop"
 import { classifyRateLimitFromStdout, isRateLimitErrorCode, type RateLimitReset } from "./rate-limit"
 import {
@@ -383,6 +385,7 @@ export type SchedulerOptions = {
 	// This synchronous failure channel records the rejected event separately while termination,
 	// recycle arming, and close cleanup continue independently.
 	onLifecycleEventPersistenceFailure?: (failure: SchedulerLifecycleEventPersistenceFailure) => void
+	onRunnerStatusPersistenceFailure?: (failure: RunnerStatusPersistenceFailure) => void
 	attemptTimeoutMs?: number
 	attemptKillMs?: number
 	// #462: startup idle watchdog knobs (semantics documented at STARTUP_IDLE_TIMEOUT_MS).
@@ -1497,6 +1500,7 @@ function attachRunCloseHandler(
 				const endedAt = nowSeconds(options)
 				const itemTransitionedToTerminal = !terminalStatuses.has(item.status) && terminalStatuses.has(status)
 				options.state.finalizingItemStatuses.set(item.id, status)
+				let persistenceStage: RunnerStatusPersistenceFailure["stage"] | null = "status-artifact"
 				try {
 					await closeSchedulerPhaseOutputWriters(outputWriters)
 					await writeSchedulerRunCompletionArtifacts(options, {
@@ -1512,6 +1516,7 @@ function attachRunCloseHandler(
 						worktreePath,
 						output: { kind: "streamed", stdoutBytes, stderrBytes },
 					})
+					persistenceStage = "run-record"
 					const completedRun = options.store.getRunByRunId(runId)
 					options.store.completeRun(runId, {
 						endedAt,
@@ -1524,8 +1529,10 @@ function attachRunCloseHandler(
 						}),
 					})
 
+					persistenceStage = "current-run"
 					const currentRun = options.store.getCurrentRun(chain.id)
 					if (currentRun?.runId === runId) options.store.clearCurrentRun(chain.id)
+					persistenceStage = null
 
 					if (slot.activeRun?.runId === runId) slot.activeRun = null
 					// #530: revoke synchronously alongside activeRun=null so `listActiveRuns`
@@ -1620,7 +1627,21 @@ function attachRunCloseHandler(
 			return { runId, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, exitCode, stdoutBytes, stderrBytes, status }
 				} catch (error) {
 					if (slot.activeRun?.runId === runId) slot.activeRun = null
-					throw error
+					if (persistenceStage === null) throw error
+					const failure: RunnerStatusPersistenceFailure = {
+						path: "scheduler",
+						stage: persistenceStage,
+						runId,
+						phase,
+						persistencePath: persistenceStage === "status-artifact"
+							? resolveChainRuntimePaths(chain.name, options.loopDataRootOptions).runStatusFile(runId)
+							: resolveLoopDataPaths(options.loopDataRootOptions).dbFile,
+						error: error instanceof Error ? error.message : String(error),
+						chainId: chain.id,
+						itemId: item.id,
+					}
+					options.onRunnerStatusPersistenceFailure?.(failure)
+					throw new RunnerStatusPersistenceError(failure)
 				} finally {
 					options.state.finalizingItemStatuses.delete(item.id)
 					// #406: revoke the run credential exactly once per run close. Composing with

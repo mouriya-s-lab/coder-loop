@@ -172,6 +172,18 @@ afterAll(async () => {
 })
 
 describe("daemon", () => {
+	test("cleans runner lifecycle after status persistence failure", () => {
+		for (const [file, name] of [
+			["src/scheduler.test.ts", "rejects successful scheduler completion when terminal persistence fails"],
+			["src/loop.test.ts", "reports ordered chain-complete status persistence failure"],
+			["src/loop.test.ts", "rejects successful chain-complete decision when terminal status persistence fails"],
+		] as const) {
+			const result = Bun.spawnSync(["bun", "test", file, "-t", name], { cwd: REPO_ROOT })
+			const output = new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr)
+			expect(result.exitCode, output).toBe(0)
+			expect(output).toContain("0 fail")
+		}
+	})
 	test("completes large-output scheduler and chain-complete runners", () => {
 		for (const name of [
 			"streams scheduler runner output without retaining full history",
