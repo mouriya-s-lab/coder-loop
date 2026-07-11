@@ -5892,7 +5892,16 @@ export type SummaryWatchdog = {
 }
 
 type SummaryWatchdogStdoutObserver = {
-	observeStdout: (chunk: string) => void
+	observeStdout: (chunk: Buffer) => void
+	finish: () => void
+	error: () => SummaryWatchdogFrameError | null
+}
+
+export type SummaryWatchdogFrameError = {
+	kind: "invalid-runner-event"
+	runner: "codex"
+	frameChars: number
+	message: string
 }
 
 function createDisabledSummaryWatchdog(): SummaryWatchdog {
@@ -5978,27 +5987,33 @@ function runnerAgentTextFromJsonLine(line: string, runner: AgentRunnerKind): { p
 export function createSummaryWatchdogStdoutObserver(runner: AgentRunnerKind, marker: string, watchdog: SummaryWatchdog): SummaryWatchdogStdoutObserver {
 	if (runner !== "codex") {
 		return {
-			observeStdout: (chunk) => watchdog.observeStdout(chunk),
+			observeStdout: (chunk) => watchdog.observeStdout(chunk.toString("utf8")),
+			finish: () => {},
+			error: () => null,
 		}
 	}
 
-	let bufferedLine = ""
-	const maxBufferedLineChars = 1_000_000
+	let frameError: SummaryWatchdogFrameError | null = null
+	const stream = createStreamTextState((line) => {
+		if (frameError !== null) return
+		const trimmed = line.trim()
+		if (trimmed === "" || !trimmed.startsWith("{")) return
+		try {
+			const text = codexAgentMessageText(JSON.parse(trimmed))
+			if (text !== null && containsSummaryMarkerLine(text, marker)) watchdog.observeStdout(text)
+		} catch (error) {
+			frameError = {
+				kind: "invalid-runner-event",
+				runner: "codex",
+				frameChars: line.length,
+				message: `invalid codex JSONL runner event (${line.length} chars): ${error instanceof Error ? error.message : String(error)}`,
+			}
+		}
+	})
 	return {
-		observeStdout: (chunk) => {
-			bufferedLine += chunk
-			let newlineIndex = bufferedLine.indexOf("\n")
-			while (newlineIndex >= 0) {
-				const line = bufferedLine.slice(0, newlineIndex)
-				bufferedLine = bufferedLine.slice(newlineIndex + 1)
-				const summaryText = codexSummaryTextFromJsonLine(line, marker)
-				if (summaryText !== null) watchdog.observeStdout(summaryText)
-				newlineIndex = bufferedLine.indexOf("\n")
-			}
-			if (bufferedLine.length > maxBufferedLineChars) {
-				bufferedLine = bufferedLine.slice(-maxBufferedLineChars)
-			}
-		},
+		observeStdout: stream.observe,
+		finish: stream.finish,
+		error: () => frameError,
 	}
 }
 
@@ -6246,7 +6261,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 					log,
 				})
 		const watchdogStdout = watchdogConfig === null
-			? { observeStdout: () => {} }
+			? { observeStdout: (_chunk: Buffer) => {}, finish: () => {}, error: () => null }
 			: createSummaryWatchdogStdoutObserver(selectedRunner.kind, watchdogConfig.marker, watchdog)
 		armAttemptTimeout()
 
@@ -6262,7 +6277,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 				}
 				status.sessionId = streamedSessionId
 				const watchdogStateBefore = watchdog.state().kind
-				watchdogStdout.observeStdout(chunk.toString("utf-8"))
+				watchdogStdout.observeStdout(chunk)
 				if (watchdogStateBefore === "idle" && watchdog.state().kind !== "idle") {
 					cancelAttemptTimeout()
 				}
@@ -6369,8 +6384,14 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			cancelAttemptTimeout()
 			stdoutState.finish()
 			stderrState.finish()
+			watchdogStdout.finish()
 			status.sessionId = streamedSessionId
-			const exitCode = code ?? 1
+			const summaryFrameError = watchdogStdout.error()
+			if (summaryFrameError !== null) {
+				status.error = summaryFrameError.message
+				log(`Agent [${label}] summary frame error: ${summaryFrameError.message}`)
+			}
+			const exitCode = summaryFrameError === null ? code ?? 1 : 1
 			const signalName = signal ?? null
 			const terminated: Terminated =
 				attemptTimeoutStateAtClose === "term-sent" || attemptTimeoutStateAtClose === "kill-sent"
@@ -6385,6 +6406,8 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 							phase: watchdogStateAtClose.kind === "kill-sent" ? "kill" : "term",
 							afterSummarySeconds: Math.round(watchdogConfig.termMs / 1000),
 						}
+					: summaryFrameError !== null
+						? { kind: "error", code: "invalid_summary_runner_event" }
 					: signalName !== null
 						? { kind: "signal", name: signalName }
 						: exitCode === 0
