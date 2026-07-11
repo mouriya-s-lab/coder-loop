@@ -3762,6 +3762,28 @@ prompt = "review.md"
 	})
 
 	test("decision fingerprint churn returns to active-set baseline", () => {
+		const survivingChainChurn = (generations: number): number => {
+			const state = new DecisionFingerprintState()
+			const keepActive = (runId: string, reason: string) => makeObservabilityEvent({
+				kind: "decision",
+				type: "chain.complete_trigger",
+				chain: "surviving-chain",
+				runId,
+				subject: { kind: "engine" },
+				payload: { chainId: 1, decision: "keep-active", reason },
+			})
+
+			for (let generation = 0; generation < generations; generation += 1) {
+				const runId = `surviving-run-${generation}`
+				expect(state.observe(1, keepActive(runId, "waiting"))).toBe(false)
+				expect(state.observe(1, keepActive(runId, "waiting"))).toBe(true)
+				expect(state.observe(1, keepActive(runId, "changed"))).toBe(false)
+				expect(state.observe(1, keepActive(runId, "changed"))).toBe(true)
+			}
+
+			return state.size
+		}
+
 		const churn = (rounds: number): number => {
 			const state = new DecisionFingerprintState()
 			const active = makeObservabilityEvent({
@@ -3811,7 +3833,7 @@ prompt = "review.md"
 				expect(state.observe(chainId, keepActive("waiting", `${runId}-b`))).toBe(false)
 				expect(state.observe(chainId, keepActive("waiting", `${runId}-b`))).toBe(true)
 				expect(state.observe(chainId, keepActive("changed", `${runId}-c`))).toBe(false)
-				expect(state.size).toBe(6)
+				expect(state.size).toBe(4)
 
 				state.releaseForSchedulerEvent({
 					type: "agent.exit",
@@ -3842,6 +3864,8 @@ prompt = "review.md"
 
 		expect(churn(3)).toBe(1)
 		expect(churn(30)).toBe(1)
+		expect(survivingChainChurn(3)).toBe(1)
+		expect(survivingChainChurn(30)).toBe(1)
 	})
 
 	test("daemon scheduler uses bundled preset directory declared on the item (post-#412)", async () => {
