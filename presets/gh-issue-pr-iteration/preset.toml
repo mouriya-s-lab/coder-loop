@@ -80,8 +80,8 @@ retry       = "changes_requested"
 [[phases]]
 name   = "iteration"
 prompt = "iter-entry.md"
-runner = "claude"
-model  = "claude-opus-4-7[1m]"
+runner = "codex"
+model  = "gpt-5.6-sol"
 roles  = ["common", "quality", "iter"]
 
   [phases.variables]
@@ -128,8 +128,8 @@ roles  = ["common", "quality", "iter"]
 [[phases]]
 name   = "review"
 prompt = "review-entry.md"
-runner = "claude"
-model  = "claude-opus-4-7[1m]"
+runner = "codex"
+model  = "gpt-5.6-sol"
 roles  = ["common", "quality", "review"]
 
   # #407 / #409 / #410 per-phase rights segment. Review is the only phase that legitimately:
@@ -232,8 +232,8 @@ roles  = ["common", "quality", "review"]
 name    = "blocked-responder"
 prompt  = "blocked-responder-entry.md"
 trigger = { afterPhase = "review", whenStatus = "blocked" }
-runner  = "claude"
-model   = "claude-opus-4-7[1m]"
+runner  = "codex"
+model   = "gpt-5.6-sol"
 roles   = ["common"]
 
   [phases.variables]
@@ -281,8 +281,8 @@ roles   = ["common"]
 name    = "umbrella-finalizer"
 prompt  = "umbrella-finalizer-entry.md"
 trigger = { on = "chain-complete" }
-runner  = "claude"
-model   = "claude-opus-4-7[1m]"
+runner  = "codex"
+model   = "gpt-5.6-sol"
 roles   = ["common"]
 
   [phases.variables]
