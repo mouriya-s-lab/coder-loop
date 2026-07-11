@@ -60,6 +60,7 @@ export type LoopDataPaths = {
 	chainsDir: string
 	eventsDir: string
 	eventsFile: string
+	lifecycleEventFailuresFile: string
 	daemonLogDir: string
 	daemonBatchDir: (timestamp: string) => string
 	daemonLogFile: (timestamp: string) => string
@@ -123,6 +124,7 @@ export function resolveLoopDataPaths(options: LoopDataRootOptions = {}): LoopDat
 		chainsDir: resolve(root, LOOP_DATA_CHAINS_DIRNAME),
 		eventsDir,
 		eventsFile: resolve(eventsDir, LOOP_DATA_EVENTS_FILENAME),
+		lifecycleEventFailuresFile: resolve(eventsDir, "lifecycle-event-persistence-failures.jsonl"),
 		daemonLogDir,
 		daemonBatchDir,
 		daemonLogFile: (timestamp) => resolve(daemonBatchDir(timestamp), DAEMON_LOG_FILENAME),

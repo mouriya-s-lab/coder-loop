@@ -5371,6 +5371,59 @@ process.exitCode = 0
 		}
 	})
 
+	test("recovers after scheduler lifecycle event failure", async () => {
+		const unhandled: unknown[] = []
+		const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
+		process.on("unhandledRejection", onUnhandled)
+		const fixture = await startFixture("lifecycle-event-persistence-recovery", {
+			schedulerConfig: {
+				attemptTimeoutMs: 300,
+				attemptKillMs: 20,
+				startupIdleTimeoutMs: 10_000,
+			},
+		})
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "lifecycle-event-persistence-recovery-chain",
+				repository: "test/repo",
+			})).chain)
+			expectOk(await request(fixture, "item.add", {
+				chainId: numberValue(chain.id),
+				itemId: "6324",
+				repoCwd: REPO_ROOT,
+				extra: { sleepMs: 2_000, writeStatus: null },
+			}))
+			await waitFor(
+				async () => fixture.schedulerEvents.some((event) => event.type === "agent.spawn"),
+				(spawned) => spawned,
+			)
+			const eventsFile = resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile
+			await rm(eventsFile, { force: true })
+			await mkdir(eventsFile)
+			await waitFor(
+				async () => fixture.daemon.snapshot().lifecycleEventPersistenceFailure,
+				(failure) => failure !== null,
+			)
+			const first = fixture.daemon.snapshot().lifecycleEventPersistenceFailure
+			expect(first).toMatchObject({ eventKind: "attempt.timeout", originalPersisted: false })
+			expect(String(first?.error)).toMatch(/EISDIR|illegal operation on a directory/)
+			expect(unhandled).toEqual([])
+			await rm(eventsFile, { recursive: true, force: true })
+			await fixture.daemon.stop()
+
+			const recovered = await startCoderLoopDaemon({ loopDataRoot: fixture.loopDataRoot, scheduler: { enabled: false } })
+			try {
+				expect(recovered.snapshot().lifecycleEventPersistenceFailure).toEqual(first)
+				expect(unhandled).toEqual([])
+			} finally {
+				await recovered.stop()
+			}
+		} finally {
+			process.off("unhandledRejection", onUnhandled)
+			await fixture.daemon.stop()
+		}
+	})
+
 	// #452 acceptance row 3: an agent that writes status and exits cleanly within the
 	// recycle window is NOT killed. The lifecycle stream classifies the close as
 	// `recycle.natural_exit`. The previous summary-extraction test that asserted

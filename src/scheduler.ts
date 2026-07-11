@@ -156,6 +156,7 @@ export type SchedulerState = {
 	finalizingChainIds: Set<number>
 	pendingCloseHandlers: Set<Promise<unknown>>
 	recycleTriggers: Map<string, SchedulerRecycleTrigger>
+	lifecycleEventPersistenceFailures: SchedulerLifecycleEventPersistenceFailure[]
 	// #478: account-level rate-limit cooldown. The scheduler close handler arms this
 	// synchronously (before its first await) when a run exits with a rejected
 	// `rate_limit_event`; `schedulerTick` consults the value before spawning so the next
@@ -266,6 +267,20 @@ export type SchedulerEvent =
 	// from `attempt.timeout` because rate-limit exits do not consume an attempt slot.
 	| { type: "scheduler.rate_limited"; ts: string; chainId: number; itemId: number; runId: string; resetsAt: number; resetAtIso: string; rateLimitType: string | null }
 
+export type SchedulerTimerLifecycleEvent = Extract<SchedulerEvent, {
+	type:
+		| "attempt.timeout"
+		| "run.startup_idle_kill"
+		| "recycle.pending_entered"
+		| "recycle.timeout_kill"
+		| "recycle.natural_exit"
+}>
+
+export type SchedulerLifecycleEventPersistenceFailure = {
+	event: SchedulerTimerLifecycleEvent
+	error: string
+}
+
 export type SchedulerChainCompleteTriggerContext = {
 	chain: ChainRecord
 	items: readonly ItemRecord[]
@@ -345,6 +360,10 @@ export type SchedulerOptions = {
 	chainCompleteTrigger?: SchedulerChainCompleteTrigger
 	chainCompleteTriggerForChain?: SchedulerChainCompleteTriggerForChain
 	onEvent?: (event: SchedulerEvent) => void | Promise<void>
+	// Timer callbacks cannot await the observability sink without delaying process lifecycle.
+	// This synchronous failure channel records the rejected event separately while termination,
+	// recycle arming, and close cleanup continue independently.
+	onLifecycleEventPersistenceFailure?: (failure: SchedulerLifecycleEventPersistenceFailure) => void
 	attemptTimeoutMs?: number
 	attemptKillMs?: number
 	// #462: startup idle watchdog knobs (semantics documented at STARTUP_IDLE_TIMEOUT_MS).
@@ -428,6 +447,7 @@ export function createSchedulerState(): SchedulerState {
 		finalizingChainIds: new Set(),
 		pendingCloseHandlers: new Set(),
 		recycleTriggers: new Map(),
+		lifecycleEventPersistenceFailures: [],
 		rateLimitedUntilMs: null,
 		hostResourceOwners: new Map(),
 		hostResourceWaits: new Map(),
@@ -1657,12 +1677,12 @@ function installSchedulerRunLifecycleGc(
 	let attemptTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
 		attemptTimer = null
 		if (child.exitCode !== null || child.signalCode !== null) return
-		void emitSchedulerTimeoutEvent(options, context, "SIGTERM", attemptTimeoutMs).catch(() => undefined)
 		sendSignalToChildProcessGroup(child, "SIGTERM")
+		emitTimerOwnedLifecycleEvent(options, emitSchedulerTimeoutEvent(options, context, "SIGTERM", attemptTimeoutMs))
 		const killTimer = setTimeout(() => {
 			if (child.exitCode === null && child.signalCode === null) {
-				void emitSchedulerTimeoutEvent(options, context, "SIGKILL", attemptTimeoutMs).catch(() => undefined)
 				sendSignalToChildProcessGroup(child, "SIGKILL")
+				emitTimerOwnedLifecycleEvent(options, emitSchedulerTimeoutEvent(options, context, "SIGKILL", attemptTimeoutMs))
 			}
 		}, attemptKillMs)
 		addLifecycleCleanup(() => clearTimeout(killTimer))
@@ -1688,7 +1708,7 @@ function installSchedulerRunLifecycleGc(
 	let startupIdleTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
 		startupIdleTimer = null
 		if (child.exitCode !== null || child.signalCode !== null) return
-		void emit(options, {
+		const event: SchedulerTimerLifecycleEvent = {
 			type: "run.startup_idle_kill",
 			ts: nowIso(options),
 			runId: context.runId,
@@ -1697,8 +1717,9 @@ function installSchedulerRunLifecycleGc(
 			phase: context.phase,
 			idleTimeoutMs: startupIdleTimeoutMs,
 			stdoutBytes: startupStdoutBytes,
-		}).catch(() => undefined)
+		}
 		sendSignalToChildProcessGroup(child, "SIGTERM")
+		emitTimerOwnedLifecycleEvent(options, emit(options, event), event)
 		const killTimer = setTimeout(() => {
 			if (child.exitCode === null && child.signalCode === null) sendSignalToChildProcessGroup(child, "SIGKILL")
 		}, startupIdleKillMs)
@@ -1734,7 +1755,7 @@ function installSchedulerRunLifecycleGc(
 		// The attempt-timeout fallback no longer applies once the agent has signalled
 		// completion via the state write — recycle owns the timeline from here.
 		if (attemptTimer !== null) { clearTimeout(attemptTimer); attemptTimer = null }
-		void emit(options, {
+		const pendingEvent: SchedulerTimerLifecycleEvent = {
 			type: "recycle.pending_entered",
 			ts: nowIso(options),
 			runId: context.runId,
@@ -1742,13 +1763,13 @@ function installSchedulerRunLifecycleGc(
 			itemId: context.item.id,
 			phase: context.phase,
 			recycleAfterMs,
-		}).catch(() => undefined)
+		}
 		recycleTimer = setTimeout(() => {
 			recycleTimer = null
 			if (child.exitCode !== null || child.signalCode !== null) return
 			lifecyclePhase = "killing"
-			void emitSchedulerRecycleTimeoutKillEvent(options, context, recycleAfterMs).catch(() => undefined)
 			sendSignalToChildProcessGroup(child, "SIGKILL")
+			emitTimerOwnedLifecycleEvent(options, emitSchedulerRecycleTimeoutKillEvent(options, context, recycleAfterMs))
 			recycleKillTimer = setTimeout(() => {
 				recycleKillTimer = null
 				if (child.exitCode === null && child.signalCode === null) {
@@ -1756,6 +1777,7 @@ function installSchedulerRunLifecycleGc(
 				}
 			}, recycleKillGraceMs)
 		}, recycleAfterMs)
+		emitTimerOwnedLifecycleEvent(options, emit(options, pendingEvent), pendingEvent)
 	}
 	options.state.recycleTriggers.set(context.runId, armRecycle)
 
@@ -1769,7 +1791,7 @@ function installSchedulerRunLifecycleGc(
 		// timeout-kill event emitted above; do not double-emit.
 		if (lifecyclePhase === "recycling" && recycleEnteredAtMs !== null) {
 			const elapsedMs = Math.max(0, Date.now() - recycleEnteredAtMs)
-			void emit(options, {
+			const naturalExitEvent: SchedulerTimerLifecycleEvent = {
 				type: "recycle.natural_exit",
 				ts: nowIso(options),
 				runId: context.runId,
@@ -1777,7 +1799,8 @@ function installSchedulerRunLifecycleGc(
 				itemId: context.item.id,
 				phase: context.phase,
 				elapsedMs,
-			}).catch(() => undefined)
+			}
+			emitTimerOwnedLifecycleEvent(options, emit(options, naturalExitEvent), naturalExitEvent)
 		}
 		lifecyclePhase = "settled"
 	})
@@ -1801,7 +1824,7 @@ async function emitSchedulerTimeoutEvent(
 	signal: "SIGTERM" | "SIGKILL",
 	attemptMs: number,
 ): Promise<void> {
-	await emit(options, {
+	const event: SchedulerTimerLifecycleEvent = {
 		type: "attempt.timeout",
 		ts: nowIso(options),
 		runId: context.runId,
@@ -1814,7 +1837,37 @@ async function emitSchedulerTimeoutEvent(
 			stdoutPath: context.stdoutPath,
 			stderrPath: context.stderrPath,
 		}),
+	}
+	try {
+		await emit(options, event)
+	} catch (error) {
+		throw new SchedulerLifecycleEventPersistenceError(event, error)
+	}
+}
+
+function emitTimerOwnedLifecycleEvent(
+	options: SchedulerOptions,
+	persistence: Promise<void>,
+	knownEvent?: SchedulerTimerLifecycleEvent,
+): void {
+	void persistence.catch((error: unknown) => {
+		const event = knownEvent ?? timerLifecycleEventFromPersistenceError(error)
+		const failure = { event, error: errorMessage(error) }
+		options.state.lifecycleEventPersistenceFailures.push(failure)
+		options.onLifecycleEventPersistenceFailure?.(failure)
 	})
+}
+
+class SchedulerLifecycleEventPersistenceError extends Error {
+	constructor(readonly event: SchedulerTimerLifecycleEvent, cause: unknown) {
+		super(errorMessage(cause), { cause })
+		this.name = "SchedulerLifecycleEventPersistenceError"
+	}
+}
+
+function timerLifecycleEventFromPersistenceError(error: unknown): SchedulerTimerLifecycleEvent {
+	if (error instanceof SchedulerLifecycleEventPersistenceError) return error.event
+	throw error
 }
 
 // #452 recycle-zone fire event. SIGKILL-only because the agent has already declared
@@ -1832,7 +1885,7 @@ async function emitSchedulerRecycleTimeoutKillEvent(
 	},
 	recycleAfterMs: number,
 ): Promise<void> {
-	await emit(options, {
+	const event: SchedulerTimerLifecycleEvent = {
 		type: "recycle.timeout_kill",
 		ts: nowIso(options),
 		runId: context.runId,
@@ -1845,7 +1898,12 @@ async function emitSchedulerRecycleTimeoutKillEvent(
 			stdoutPath: context.stdoutPath,
 			stderrPath: context.stderrPath,
 		}),
-	})
+	}
+	try {
+		await emit(options, event)
+	} catch (error) {
+		throw new SchedulerLifecycleEventPersistenceError(event, error)
+	}
 }
 
 function createRunTerminator(

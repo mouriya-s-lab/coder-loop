@@ -35,6 +35,7 @@ import {
 	type SchedulerEvent,
 	type SchedulerChainWorktreeCleanup,
 	type SchedulerLoadedPreset,
+	type SchedulerLifecycleEventPersistenceFailure,
 	type SchedulerOptions,
 	type SchedulerPresetResolver,
 	type SchedulerPresetItemResolver,
@@ -84,7 +85,9 @@ import {
 } from "./runtime-paths"
 import {
 	appendObservabilityEvent,
+	appendObservabilityEventOrThrow,
 	appendObservabilityEventSync,
+	appendObservabilityEventSyncOrThrow,
 	makeObservabilityEvent,
 	observabilityDecisionFingerprint,
 	observabilityEventToJsonValue,
@@ -290,6 +293,7 @@ export type CoderLoopDaemonSnapshot = {
 	// `rateLimitStatus`; this is the wire shape exposed via `daemon.status`.
 	rateLimit: JsonObject
 	hostResources: JsonObject
+	lifecycleEventPersistenceFailure: JsonObject | null
 }
 
 // #478 staggered resume: after the cooldown elapses, the daemon-level gate caps the
@@ -727,6 +731,14 @@ function assertNeverDecisionFingerprintScope(scope: never): never {
 	throw new DaemonError("internal_error", `unhandled decision fingerprint scope: ${JSON.stringify(scope)}`)
 }
 
+function isTimerOwnedSchedulerLifecycleEvent(event: SchedulerEvent): boolean {
+	return event.type === "attempt.timeout"
+		|| event.type === "run.startup_idle_kill"
+		|| event.type === "recycle.pending_entered"
+		|| event.type === "recycle.timeout_kill"
+		|| event.type === "recycle.natural_exit"
+}
+
 // #406: the daemon-owned credential issuer. Implements `SchedulerRunCredentialIssuer` so the
 // scheduler can mint/revoke without knowing it talks to a Map. Keyed by credential value because
 // the request boundary has only the value in hand — the binding is what the registry returns.
@@ -1034,6 +1046,7 @@ export class CoderLoopDaemon {
 	private ownsDaemonPid = false
 	private readonly decisionFingerprints = new DecisionFingerprintState()
 	private readonly loadedPresetCache = new Map<string, Promise<SchedulerLoadedPreset>>()
+	private latestLifecycleEventPersistenceFailure: ObservabilityEvent | null = null
 	// #406 run credential registry. Map keyed on credential value → run binding. Lifetime is the
 	// daemon process: when daemon down kills all active runs (#467), the registry dies with it,
 	// matching the "credentials die with the process" invariant. Not persisted to SQLite — credentials
@@ -1074,6 +1087,7 @@ export class CoderLoopDaemon {
 			this.startSocketPathMonitor()
 			await this.quarantineOrphanChainDirectories()
 			await this.ensureRuntimeLayoutForExistingChains()
+			await this.loadLifecycleEventPersistenceFailure()
 			await this.recoverStaleSchedulerState()
 			// #478: restore any in-flight rate-limit cooldown persisted by the previous
 			// daemon instance so a daemon restart does not lose the cooldown floor. If the
@@ -1119,6 +1133,35 @@ export class CoderLoopDaemon {
 				waits: [...this.schedulerState.hostResourceWaits.values()],
 			},
 			rateLimit: this.rateLimitStatus(this.schedulerNowMs()),
+			lifecycleEventPersistenceFailure: this.latestLifecycleEventPersistenceFailure === null
+				? null
+				: lifecycleEventPersistenceFailureToJson(this.latestLifecycleEventPersistenceFailure),
+		}
+	}
+
+	private async loadLifecycleEventPersistenceFailure(): Promise<void> {
+		const result = await queryObservabilityEvents(this.paths.lifecycleEventFailuresFile)
+		this.latestLifecycleEventPersistenceFailure = result.events.at(-1) ?? null
+	}
+
+	private recordLifecycleEventPersistenceFailure(failure: SchedulerLifecycleEventPersistenceFailure): void {
+		const chain = this.store?.getChain(failure.event.chainId)
+		const event = makeObservabilityEvent({
+			kind: "diagnostic",
+			type: "scheduler.lifecycle_event_persistence_failed",
+			...(chain === null || chain === undefined ? {} : { chain: chain.name }),
+			item: failure.event.itemId,
+			runId: failure.event.runId,
+			phase: failure.event.phase,
+			subject: { kind: "engine" },
+			payload: { eventKind: failure.event.type, error: failure.error, originalPersisted: false },
+		})
+		this.latestLifecycleEventPersistenceFailure = event
+		try {
+			appendObservabilityEventSyncOrThrow(this.paths.lifecycleEventFailuresFile, event)
+			this.writeRenderedObservabilityEvent(event)
+		} catch (fallbackError) {
+			process.stderr.write(`${renderObservabilityEvent(event)} fallbackError=${errorMessage(fallbackError)}\n`)
 		}
 	}
 
@@ -1889,6 +1932,12 @@ export class CoderLoopDaemon {
 		this.writeRenderedObservabilityEvent(event)
 	}
 
+	private async recordObservabilityEventOrThrow(event: ObservabilityEvent, decisionChainId?: number): Promise<void> {
+		if (this.shouldSuppressDecisionEvent(event, decisionChainId)) return
+		await appendObservabilityEventOrThrow(this.paths.eventsFile, event)
+		this.writeRenderedObservabilityEvent(event)
+	}
+
 	/**
 	 * Synchronously record a fatal/uncaught error to the unified event stream before the
 	 * process exits. An async appendFile would not flush from inside an
@@ -2267,19 +2316,20 @@ export class CoderLoopDaemon {
 			query.since = since
 		}
 		const result = await queryObservabilityEvents(this.paths.eventsFile, query)
+		const failureResult = await queryObservabilityEvents(this.paths.lifecycleEventFailuresFile, query)
 		// `events` is `ObservabilityEvent[]` (typed sum union built from arktype atoms — every
 		// field is already JsonValue-compatible). Route each entry through the structural
 		// JSON.stringify+parse helper in observability.ts, then run it past `isJsonValue` so the
 		// wire reply only carries values the boundary type system can speak. An entry that fails
 		// the guard is dropped with a daemon-warning event rather than crashing the whole query.
 		const events: JsonValue[] = []
-		for (const event of result.events) {
+		for (const event of [...result.events, ...failureResult.events].sort((left, right) => left.ts.localeCompare(right.ts))) {
 			const candidate: unknown = observabilityEventToJsonValue(event)
 			if (isJsonValue(candidate)) {
 				events.push(candidate)
 			}
 		}
-		return { path: result.path, events }
+		return { path: result.path, failurePath: failureResult.path, events }
 	}
 
 	// #409 queue.unblock, daemonized. Previously executed SQLite mutations in the
@@ -3244,10 +3294,18 @@ export class CoderLoopDaemon {
 			onEvent: async (event) => {
 				this.decisionFingerprints.releaseForSchedulerEvent(event)
 				if (this.store !== null) {
-					await this.recordObservabilityEventForChainId(event.chainId, (chain) => schedulerEventToObservabilityEvent(chain, event))
+					const chain = this.store.getChain(event.chainId)
+					if (chain === null) throw new DaemonError("not_found", `chain not found: ${event.chainId}`)
+					const observabilityEvent = schedulerEventToObservabilityEvent(chain, event)
+					if (isTimerOwnedSchedulerLifecycleEvent(event)) {
+						await this.recordObservabilityEventOrThrow(observabilityEvent, event.chainId)
+					} else {
+						await this.recordObservabilityEvent(observabilityEvent, event.chainId)
+					}
 				}
 				await externalOnEvent?.(event)
 			},
+			onLifecycleEventPersistenceFailure: (failure) => this.recordLifecycleEventPersistenceFailure(failure),
 			// #478: persist + arm the cooldown via the daemon-owned state when the scheduler
 			// classifies a rate-limit exit. The scheduler already set the in-memory tick gate
 			// (`schedulerState.rateLimitedUntilMs`) synchronously before this callback fires,
@@ -4102,6 +4160,24 @@ export class CoderLoopDaemon {
 
 	private loadedPresetCacheKey(presetDir: string): string {
 		return isAbsolute(presetDir) ? presetDir : resolve(presetDir)
+	}
+}
+
+function lifecycleEventPersistenceFailureToJson(event: ObservabilityEvent): JsonObject {
+	if (event.type !== "scheduler.lifecycle_event_persistence_failed") {
+		throw new DaemonError("internal_error", `expected scheduler lifecycle persistence failure, got ${event.type}`)
+	}
+	return {
+		ts: event.ts,
+		kind: event.kind,
+		type: event.type,
+		chain: event.chain ?? null,
+		item: event.item ?? null,
+		runId: event.runId ?? null,
+		phase: event.phase ?? null,
+		eventKind: event.payload.eventKind,
+		error: event.payload.error,
+		originalPersisted: event.payload.originalPersisted,
 	}
 }
 
@@ -5062,6 +5138,7 @@ function daemonSnapshotToJson(snapshot: CoderLoopDaemonSnapshot): JsonObject {
 		activeRuns: snapshot.activeRuns,
 		rateLimit: snapshot.rateLimit,
 		hostResources: snapshot.hostResources,
+		lifecycleEventPersistenceFailure: snapshot.lifecycleEventPersistenceFailure,
 	}
 }
 

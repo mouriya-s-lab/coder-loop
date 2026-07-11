@@ -10,6 +10,7 @@ import {
 	DEFAULT_MAX_ITEM_ATTEMPTS,
 	listActiveRuns,
 	makeRunId,
+	markRunPendingRecycle,
 	renderSchedulerSpawnPrompt,
 	resumeDecisionForItem,
 	runSchedulerUntilIdle,
@@ -17,6 +18,7 @@ import {
 	schedulerTick,
 	selectNextPendingItemFromSnapshot,
 	type SchedulerEvent,
+	type SchedulerLifecycleEventPersistenceFailure,
 	type SchedulerLoadedPreset,
 	type SchedulerOptions,
 	type SchedulerPhaseRunner,
@@ -55,6 +57,96 @@ afterAll(async () => {
 })
 
 describe("scheduler", () => {
+	test("reports timeout event persistence failure without skipping termination", async () => {
+		const fixture = await createFixture("timeout-persistence-failure")
+		const failures: SchedulerLifecycleEventPersistenceFailure[] = []
+		try {
+			const chain = createChain(fixture.store, "timeout-persistence-failure-chain")
+			createItem(fixture.store, chain, { issueNumber: 6321, repoCwd: "/repo/a", sleepMs: 2_000, writeStatus: null })
+			const tick = await schedulerTick(fixture.options({
+				attemptTimeoutMs: 80,
+				attemptKillMs: 20,
+				startupIdleTimeoutMs: 10_000,
+				onEvent: (event) => {
+					if (event.type === "attempt.timeout") throw new Error("timeout sink unavailable")
+					fixture.schedulerEvents.push(event)
+				},
+				onLifecycleEventPersistenceFailure: (failure) => failures.push(failure),
+			}))
+			const closed = await tick.spawnedRuns[0]!.closed
+			expect(closed.exitCode).not.toBe(0)
+			expect(failures.map(({ event }) => event.type)).toContain("attempt.timeout")
+			expect(failures[0]?.error).toContain("timeout sink unavailable")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("reports lifecycle event persistence failures exhaustively", async () => {
+		const failures: SchedulerLifecycleEventPersistenceFailure[] = []
+		const startupFixture = await createFixture("startup-persistence-failure")
+		try {
+			const chain = createChain(startupFixture.store, "startup-persistence-failure-chain")
+			createItem(startupFixture.store, chain, { issueNumber: 6322, repoCwd: "/repo/a", sleepMs: 2_000, writeStatus: null })
+			const tick = await schedulerTick(startupFixture.options({
+				startupIdleTimeoutMs: 60,
+				startupIdleKillMs: 20,
+				attemptTimeoutMs: 10_000,
+				onEvent: (event) => {
+					if (event.type === "run.startup_idle_kill") throw new Error("startup sink unavailable")
+				},
+				onLifecycleEventPersistenceFailure: (failure) => failures.push(failure),
+			}))
+			expect((await tick.spawnedRuns[0]!.closed).exitCode).not.toBe(0)
+		} finally {
+			startupFixture.store.close()
+		}
+
+		const recycleFixture = await createFixture("recycle-persistence-failure")
+		try {
+			const chain = createChain(recycleFixture.store, "recycle-persistence-failure-chain")
+			createItem(recycleFixture.store, chain, { issueNumber: 6323, repoCwd: "/repo/a", sleepMs: 2_000, writeStatus: null })
+			const tick = await schedulerTick(recycleFixture.options({
+				recycleAfterStateWriteMs: 60,
+				recycleKillGraceMs: 20,
+				attemptTimeoutMs: 10_000,
+				onEvent: (event) => {
+					if (event.type.startsWith("recycle.")) throw new Error(`${event.type} sink unavailable`)
+				},
+				onLifecycleEventPersistenceFailure: (failure) => failures.push(failure),
+			}))
+			markRunPendingRecycle(recycleFixture.state, tick.spawnedRuns[0]!.runId)
+			expect((await tick.spawnedRuns[0]!.closed).exitCode).not.toBe(0)
+		} finally {
+			recycleFixture.store.close()
+		}
+
+		const naturalExitFixture = await createFixture("recycle-natural-exit-persistence-failure")
+		try {
+			const chain = createChain(naturalExitFixture.store, "recycle-natural-exit-persistence-failure-chain")
+			createItem(naturalExitFixture.store, chain, { issueNumber: 6324, repoCwd: "/repo/a", sleepMs: 80, writeStatus: null })
+			const tick = await schedulerTick(naturalExitFixture.options({
+				recycleAfterStateWriteMs: 10_000,
+				attemptTimeoutMs: 20_000,
+				onEvent: (event) => {
+					if (event.type.startsWith("recycle.")) throw new Error(`${event.type} sink unavailable`)
+				},
+				onLifecycleEventPersistenceFailure: (failure) => failures.push(failure),
+			}))
+			markRunPendingRecycle(naturalExitFixture.state, tick.spawnedRuns[0]!.runId)
+			expect((await tick.spawnedRuns[0]!.closed).exitCode).toBe(0)
+		} finally {
+			naturalExitFixture.store.close()
+		}
+
+		expect(failures.map(({ event }) => event.type)).toEqual([
+			"run.startup_idle_kill",
+			"recycle.pending_entered",
+			"recycle.timeout_kill",
+			"recycle.pending_entered",
+			"recycle.natural_exit",
+		])
+	})
 	test("legacy scheduler spawn diagnostic shape is rejected", () => {
 		expect(() => storedItemExtra({
 			schedulerSpawnError: {
