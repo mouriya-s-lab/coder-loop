@@ -231,6 +231,7 @@ function runCli(args: string[]): { exitCode: number | null; stdout: string; stde
 		cwd: REPO_ROOT,
 		stdout: "pipe",
 		stderr: "pipe",
+		env: { ...process.env, CODER_LOOP_RUN_CRED: undefined },
 	})
 	return {
 		exitCode: proc.exitCode,
@@ -248,6 +249,7 @@ async function runCliAsync(args: string[]): Promise<{ exitCode: number | null; s
 		cwd: REPO_ROOT,
 		stdout: "pipe",
 		stderr: "pipe",
+		env: { ...process.env, CODER_LOOP_RUN_CRED: undefined },
 	})
 	const [stdout, stderr, exitCode] = await Promise.all([
 		new Response(proc.stdout).text(),
