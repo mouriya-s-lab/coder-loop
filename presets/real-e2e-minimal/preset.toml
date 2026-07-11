@@ -38,7 +38,7 @@ model  = "claude-sonnet-4-6"
   [phases.variables]
   REPO        = { source = "chain.repository", label = "GitHub repository" }
   BASE_BRANCH = { source = "chain.baseBranch", label = "Base branch" }
-  ISSUE       = { source = "item.issue", label = "Issue number", style = "plain" }
+  ISSUE       = { source = "item.issue", label = "Issue number", prefix = "#", suffix = "", style = "code" }
   RUN_ID      = { source = "runtime.runId", label = "Run ID" }
   ISSUE_STATUS = { source = "item.status", label = "Queue status" }
 
@@ -59,7 +59,7 @@ model  = "claude-sonnet-4-6"
   [phases.variables]
   REPO       = { source = "chain.repository", label = "GitHub repository" }
   BASE_BRANCH = { source = "chain.baseBranch", label = "Base branch" }
-  ISSUE      = { source = "item.issue", label = "Issue number", style = "plain" }
+  ISSUE      = { source = "item.issue", label = "Issue number", prefix = "#", suffix = "", style = "code" }
   RUN_ID     = { source = "runtime.runId", label = "Run ID" }
   CHAIN_NAME = { source = "runtime.chainName", label = "Chain name" }
 

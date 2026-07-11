@@ -208,7 +208,7 @@
 | `queue.unblock` | item 状态在 unblockable 集内 | #544 F 档；#579 |
 | `chain.stop` / `chain.resume` | 停链人工介入后恢复 | #544 F 档；#579 |
 | （不在 GUI）改 hook 脚本 | 判定 hook 逻辑错 | GUI 外，#543 约束 |
-| （不在 GUI）改 join 策略 | 想在运行时改 drain↔validator | #546 声明这是 control-plane，可 socket 改；但 #544 F 档未收编，v3 GUI 外 |
+| （不在 GUI）join 判定权演化 | 想给物化容器装/拆验证者 | 已裁 `join-evolution-decision.md`：绑定版本追加经 socket；定义态不可变；#544 F 档未收编，v3 GUI 外 |
 
 ### 退出条件
 - hold 已解除或 item 已 unblock；chain 恢复推进（在 S1 首屏可见）→ 关闭。
@@ -303,14 +303,14 @@
 ### 可执行动作
 - `chain.stop` / `chain.resume`（#544 F 档）
 - `item.reorder`（分支容器内 [推断，未明说 par 内 reorder 语义]）
-- **不在 v3 GUI**：运行时改 join 策略（`drain ↔ validator`；#546 声明为 control-plane 但 #544 F 档未收编）；追加平行 item（`item.add`，创建类，明确不进 v3）。
+- **不在 v3 GUI**：join 判定权演化（物化容器绑定版本追加，已裁 `join-evolution-decision.md`；#544 F 档未收编）；追加平行 item（`item.add`，创建类，明确不进 v3）。
 
 ### 退出条件
 - par 已汇合（drain 全 terminal 或 validator advance） + 外层 seq 继续推进 → 关闭。
 
 ### 涉及的 v3 概念
 - **树 = 队列**（#546 body"chain 树的叶子是 item，item 展开为其 preset 声明的 phase 任务树"）：v3 里"队列"实际是"树"，slot 语义已退役（#544 接口假设"slot 语义退役，不再是展示对象"）。
-- **join ADT 的 variant 展示**（#546 body`join ::= drain | validator（预留 best-of-n | script）`）：错误 stringly 展示会让新增 variant 时前端不报错静默漏渲染（#580 预期结果 2"discriminated union 穷尽渲染"）。
+- **join ADT 的 variant 展示**（#546 body `join ::= drain | validator`，封闭 ADT，`best-of-n`/`script` 是已登记未来方向、按 variant 准入纪律落地时进入 union）：错误 stringly 展示会让新增 variant 时前端不报错静默漏渲染（#580 预期结果 2"discriminated union 穷尽渲染"）。
 - **reopen 语义 ≠ rollback**（#546 body"reopen 零状态重置：已 terminal 的 item 保持 terminal；纠正 item 追加进 target"）：呈现为"回滚"会误导操作员以为副作用被撤销。
 - **单 chain 多活 run 成立**（#558 body 预期结果"每 chain 至多一个活 run"的物理约束消解）：错误呈现"一个 chain 一个活 run"会把 par 分支挤成串行画面。
 - **退化树 = v2 线性链**（#558 body 预期结果"v2 既有线性链呈现为退化树 seq(leaf…)"）：错误呈现两套 UI 会造成 v2/v3 心智负担。
