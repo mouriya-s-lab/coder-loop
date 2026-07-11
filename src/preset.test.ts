@@ -336,7 +336,9 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 			loadPreset(REAL_E2E_MINIMAL_PRESET_DIR),
 		])
 		const decoratedIssueBindings = presets.flatMap((preset) => preset.phases.flatMap((phase) => {
-			const variable = phase.variables.find((candidate) => candidate.key === "ISSUE" && candidate.doc !== null)
+			const variable = phase.variables.find((candidate) =>
+				candidate.source.kind === "item" && candidate.source.field === preset.item.idField && candidate.doc !== null,
+			)
 			return variable === undefined ? [] : [{ preset, phase, variable }]
 		}))
 		expect(decoratedIssueBindings).toHaveLength(5)
@@ -545,6 +547,35 @@ describe("parsePreset schema validation", () => {
 		const ctx: ResolveContext = { item: makeItemRecord(), chain: {}, runtime, preset }
 
 		expect(renderRuntimeInputsDoc(phase, ctx)).toBe("- Named issue: ref:539!\n- Ticket: `#539` after")
+	})
+
+	test("runtime input doc rendering is invariant under variable key renaming", () => {
+		const renderForKey = (key: string): string => {
+			const root: BoundaryRecord = {
+				...minimalRoot(),
+				phases: [{
+					name: "p",
+					prompt: "p.md",
+					variables: {
+						[key]: { source: "runtime.runId", label: "Run", prefix: "run:", suffix: "!", style: "code", blankBefore: true },
+					},
+				}],
+			}
+			const preset = parsePreset(root, "/tmp")
+			const runtime = makeMinimalRuntimeBindings()
+			runtime.runId = "539"
+			return renderRuntimeInputsDoc(preset.phases[0]!, {
+				item: makeItemRecord(),
+				chain: {},
+				runtime,
+				preset,
+			})
+		}
+
+		const first = renderForKey("ALPHA")
+		const renamed = renderForKey("BETA")
+		expect(first).toBe("\n- Run: `run:539`!")
+		expect(new TextEncoder().encode(renamed)).toEqual(new TextEncoder().encode(first))
 	})
 
 	test("rejects doc decoration without a label but retains default-only object bindings", () => {
