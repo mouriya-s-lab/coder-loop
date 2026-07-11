@@ -11,6 +11,7 @@ import {
 	buildDaemonStartPlan,
 	buildRuntimeBindings,
 	createSummaryWatchdog,
+	createSummaryWatchdogStdoutObserver,
 	decideResume,
 	detectHostRunner,
 	extractErrorCode,
@@ -900,6 +901,78 @@ describe("small parsers", () => {
 		timers[1]!()
 		expect(watchdog.state()).toEqual({ kind: "kill-sent" })
 		expect(killCalls).toBe(1)
+	})
+
+	test("detects chain-complete summary in a large valid runner event", () => {
+		const watchdog = createSummaryWatchdog({
+			config: { marker: "FINALIZER SUMMARY:", termMs: 1, killMs: 1 },
+			setTimer: () => null,
+			clearTimer: () => {},
+			onTerm: () => {},
+			onKill: () => {},
+			log: () => {},
+		})
+		const observer = createSummaryWatchdogStdoutObserver("codex", "FINALIZER SUMMARY:", watchdog)
+		const event = `${JSON.stringify({
+			type: "item.completed",
+			item: { type: "agent_message", text: `${"x".repeat(1_000_001)}\nFINALIZER SUMMARY: decision=complete; reason=large-event` },
+		})}\n`
+		observer.observeStdout(Buffer.from(event))
+		observer.finish()
+
+		expect(observer.error()).toBeNull()
+		expect(watchdog.state()).toEqual({ kind: "armed" })
+	})
+
+	test("preserves chain-complete summary verdict across event chunking", () => {
+		const event = Buffer.from(`${JSON.stringify({
+			type: "item.completed",
+			item: { type: "agent_message", text: `${"界".repeat(400_000)}\nFINALIZER SUMMARY: decision=keep-active; reason=chunk-invariant` },
+		})}\n`)
+		const observe = (chunkSizes: readonly number[]) => {
+			const watchdog = createSummaryWatchdog({
+				config: { marker: "FINALIZER SUMMARY:", termMs: 1, killMs: 1 },
+				setTimer: () => null,
+				clearTimer: () => {},
+				onTerm: () => {},
+				onKill: () => {},
+				log: () => {},
+			})
+			const observer = createSummaryWatchdogStdoutObserver("codex", "FINALIZER SUMMARY:", watchdog)
+			let offset = 0
+			for (const size of chunkSizes) {
+				observer.observeStdout(event.subarray(offset, offset + size))
+				offset += size
+			}
+			if (offset < event.byteLength) observer.observeStdout(event.subarray(offset))
+			observer.finish()
+			return { state: watchdog.state(), error: observer.error() }
+		}
+
+		expect(observe([event.byteLength])).toEqual(observe([1, 2, 3, 8191, 65_537]))
+		expect(observe([1, 1, 1, 1, 1, 1, 1])).toEqual({ state: { kind: "armed" }, error: null })
+	})
+
+	test("rejects invalid oversized chain-complete runner event explicitly", () => {
+		const watchdog = createSummaryWatchdog({
+			config: { marker: "FINALIZER SUMMARY:", termMs: 1, killMs: 1 },
+			setTimer: () => null,
+			clearTimer: () => {},
+			onTerm: () => {},
+			onKill: () => {},
+			log: () => {},
+		})
+		const observer = createSummaryWatchdogStdoutObserver("codex", "FINALIZER SUMMARY:", watchdog)
+		observer.observeStdout(Buffer.from(`{"type":"item.completed","padding":"${"x".repeat(1_000_001)}"\n`))
+		observer.finish()
+
+		expect(observer.error()).toMatchObject({
+			kind: "invalid-runner-event",
+			runner: "codex",
+		})
+		expect(observer.error()?.frameChars).toBeGreaterThan(1_000_000)
+		expect(observer.error()?.message).toContain("invalid codex JSONL runner event")
+		expect(watchdog.state()).toEqual({ kind: "idle" })
 	})
 
 	test("decideResume resumes interrupted or transient prior sessions only", () => {
