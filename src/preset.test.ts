@@ -162,6 +162,35 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(replay).toContain("Any other shape is rejected before replay")
 		expect(replay).toContain("Old PID absence alone is not a claim mismatch")
 	})
+
+	test("limits changed-scope issue patterns to branch delta", async () => {
+		const audit = await readFile(resolve(BUNDLED_PRESET_DIR, "review/steps/diff-audit.md"), "utf8")
+		expect(audit).toContain("For `changed`")
+		expect(audit).toContain("base→head added or modified lines")
+		expect(audit).toContain("Pre-existing untouched matches are excluded from verdict")
+	})
+
+	test("requires whole-tree issue pattern convergence", async () => {
+		const audit = await readFile(resolve(BUNDLED_PRESET_DIR, "review/steps/diff-audit.md"), "utf8")
+		expect(audit).toContain("For `whole-tree`")
+		expect(audit).toContain("complete declared tree")
+		expect(audit).toContain("enumerate every remaining site")
+	})
+
+	test("rejects ambiguous issue pattern scope", async () => {
+		const audit = await readFile(resolve(BUNDLED_PRESET_DIR, "review/steps/diff-audit.md"), "utf8")
+		expect(audit).toContain("closed union `changed | whole-tree`")
+		expect(audit).toContain("unknown scope, duplicate rows, or conflicting scopes")
+		expect(audit).toContain("contract error")
+		expect(audit).toContain("do not guess from prose or language")
+	})
+
+	test("routes diff audit by declared issue pattern scope", async () => {
+		const audit = await readFile(resolve(BUNDLED_PRESET_DIR, "review/steps/diff-audit.md"), "utf8")
+		expect(audit).toMatch(/For `changed`[\s\S]*For `whole-tree`/)
+		expect(audit).toContain("the difference is the candidate set, not the severity")
+		expect(audit).toContain("Base→head")
+	})
 	test("loads name, item.idField, agent.attemptTimeoutSeconds, statuses sets", async () => {
 		const preset: Preset = await loadPreset(BUNDLED_PRESET_DIR)
 		expect(preset.name).toBe("gh-issue-pr-iteration")
