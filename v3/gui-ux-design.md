@@ -217,7 +217,7 @@ Decision dossier 是 v3 的核心解释面，不是 Events tab 的一组日志�
 
 ### 5.2 操作员权限
 
-界面根据 daemon 返回的 capability 渲染动作。当前 #544 F 档外的 per-epoch operator decision 只能展示为“authority request / unavailable in current GUI contract”，直到 RFC 明确扩展写闭集。
+界面根据 daemon 返回的 capability 渲染动作。per-epoch operator decision 已进入 #544 F 档：仅当 daemon 返回当前 operator 对该 evaluation epoch 的 decision capability 时，GUI 才渲染 `advance | hold | reopen`，并按原样转发带 evaluation scope 的 operator RPC；GUI 不自行推导判定。
 
 禁止：
 
@@ -415,7 +415,7 @@ RPC ack 与后续 event/status 通过 `operationId` 关联。SSE 重连后可重
 
 ## 13. 待裁决缺口
 
-1. per-epoch operator decision 是否加入 #544 GUI 写闭集；
+1. per-epoch operator decision 的 capability/审计呈现是否与 #561 最终 wire contract 一致；
 2. attention item 的权威生成者与 boundary shape；
 3. daemon capability/operation contract 是否已有实现 child，若无应补 issue；
 4. current definition 与 pinned definition 的语义 diff 是否由 compiler 输出，还是 GUI 消费公共 projection 后纯计算；
@@ -456,7 +456,7 @@ RPC ack 与后续 event/status 通过 `operationId` 关联。SSE 重连后可重
 4. 返回 Execution，原 par 保持 place identity，correction lineage 自动展开，新 leaf 位于同一归约结构中。
 5. correction closure 完成后 E3 创建；dossier 显示新的 outcome vector 与采样 binding，advance 后 Execution frontier 移到后继。
 
-**结果**：hold、reopen 和 correction 是结构化控制流，不表现为状态字符串反复变化。若当前 GUI 无 operator decision 权限，只展示 authority 缺口，不用 Resume 冒充。
+**结果**：hold、reopen 和 correction 是结构化控制流，不表现为状态字符串反复变化。若当前 operator 对该 epoch 无 decision capability，只展示 authority 缺口，不用 Resume 冒充。
 
 ### W3 · closure timeout 后 suspend/resume，最终 consumed
 

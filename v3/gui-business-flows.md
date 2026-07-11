@@ -215,20 +215,21 @@ GUI 的核心不是页面浏览，而是以下六个控制循环。
 
 ## 4. 操作权限边界
 
-RFC #544 当前 GUI 写动作闭集仍是：
+RFC #544 的 GUI 写动作闭集是：
 
 ```text
 daemon start / stop / restart
 queue.unblock
 chain.stop / chain.resume
 item.reorder
+operator decision(advance | hold | reopen, evaluation scope)
 ```
 
-但较新的 join 裁决已引入 per-epoch operator decision。它是否进入 GUI 尚未由 #544 的 F 档重新裁决。因此 GUI 设计必须：
+per-epoch operator decision 是较新的 join 裁决定义的解卡能力，现已纳入 F 档。GUI 必须：
 
-1. 展示 operator authority 请求及其语义；
-2. 不擅自增加写入口；
-3. 把“是否扩展 F 档”登记为显式设计缺口；
+1. 展示 decision dossier、evaluation identity 与 operator authority；
+2. 仅在 daemon 返回当前 operator 对该 epoch 的 decision capability 时渲染 `advance | hold | reopen`；
+3. 把 decision 作为带 evaluation scope 的 operator RPC 原样转发，不由 GUI 自己推导判定；
 4. 不用 `chain.resume`、`unblock` 或“改 join”冒充 operator decision。
 
 动作可见性应由 daemon 返回的 capability/command contract 驱动；GUI 不复制合法性规则，也不靠提交后报错教育用户。
@@ -242,7 +243,7 @@ GUI 的最终验收不按“每张页面打开成功”组织，而按完整控�
 3. **hold → reopen → correction → advance**：从 hold 进入 decision dossier，看见主体/binding/epoch/outcomes；reopen 后 correction 进入原结构，第二次 evaluation advance。
 4. **suspend/resume**：进程退出但 closure suspended、现场不回收；resume 复用同 worktree/session；最终 consumed 后才回收。
 5. **daemon-down**：网关仍可解释死亡、历史与最后快照，并恢复 daemon；恢复不改变实例定义身份。
-6. **移动处置**：手机完成“识别 attention → 定位 decision/closure → 执行当前 F 档允许动作”，不是只证明响应式页面能打开。
+6. **移动处置**：手机完成“识别 attention → 定位 decision/closure → 执行当前 F 档允许动作（含有 capability 时的 per-epoch operator decision）”，不是只证明响应式页面能打开。
 
 ## 6. 明确排除的错误起点
 

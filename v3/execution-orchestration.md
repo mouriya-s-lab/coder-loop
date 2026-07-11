@@ -128,7 +128,7 @@ flowchart TD
 
 - #559：等待 #558 + #560；实现 seq/par 调度和 slot 退役。
 - #574：等待 #558；收紧 status snapshot boundary。
-- #572：等待 #552；落 `prompt.md` + 类型化 `bindings.json`，供 #581 消费。
+- #572：等待 #552 + #605；从实例 pinned definition 渲染并落 `prompt.md` + 类型化 `bindings.json`，供 #581 消费。
 - #587：等待 #549 + #574 + #605；定义 hook stdin payload = 实例 pinned definition 的编译产物投影 + 精确运行态快照。
 - #595：等待 #594；context 分页读取 boundary。
 - #569：等待 #551；可先做本地 1–4 行验收，关闭仍被 `github-hapi-agent-router#12` 端到端 Gate 阻塞。
@@ -182,7 +182,7 @@ P3 必须拆成两个并行组，中间有一次核心合流；不能把 #561–
 
 ### 串行合流任务 P3-C
 
-- #566：等待 #558 + #561 + #562；chain 顶层任务树、顶层 join、chain-complete 迁移。
+- #566：等待 #558 + #561 + #562 + #605；chain 顶层任务树、顶层 join、chain-complete 迁移，chain create 冻结结构声明。
 
 ### G3 — 任务树真实运行 Gate
 
@@ -221,8 +221,8 @@ P3 必须拆成两个并行组，中间有一次核心合流；不能把 #561–
 
 ### P4-D：后置 schema 迁移
 
-- #557：只在 #566 合并后实施 chain metadata 精确 parse、`DEFAULT_PRESET_NAME` 退役。它虽然属于 #547 tree，却是运行时顶层声明的消费者，放在这里而不是按编号放在 P2。
-- #564：join 判定权演化已裁（操作员 2026-07-11，权威记录 `v3/join-evolution-decision.md`）——定义态 join 实例内不可变；物化态 join 以绑定版本追加 + epoch 创建采样 + pinned 定义内候选引用演化；operator per-epoch decision 归 #561 契约。#564 按裁决重写后可实施，硬依赖不变（#558/#561），另增与 #554（候选声明位）的协调边。
+- #557：等待 #566 + #605 后实施 chain metadata 精确 parse、`DEFAULT_PRESET_NAME` 退役。它虽然属于 #547 tree，却是运行时顶层声明的消费者，放在这里而不是按编号放在 P2。
+- #564：join 判定权演化已裁（操作员 2026-07-11，权威记录 `v3/join-evolution-decision.md`）——定义态 join 实例内不可变；物化态 join 以绑定版本追加 + epoch 创建采样 + pinned 定义内候选引用演化；operator per-epoch decision 归 #561 契约。#564 按裁决重写后可实施，硬依赖为 #558 + #561 + #554 + #605；#554 提供候选表，#605 提供 pinned definition 解析域。
 - #604：等待 #560 + #554 + #567；把 bundled preset 迁到闭包分支与 phase tree 契约，退役 agent 自建分支及结构性 worktree 操作。它是运行时与声明面真实接合后的 preset 消费者，不能只在 #568 收尾时才被动发现。
 
 ### G4 — 跨域连接性 Gate
