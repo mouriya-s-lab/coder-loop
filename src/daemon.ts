@@ -289,6 +289,7 @@ export type CoderLoopDaemonSnapshot = {
 	// #478: daemon-wide account rate-limit cooldown snapshot. Fields are documented at
 	// `rateLimitStatus`; this is the wire shape exposed via `daemon.status`.
 	rateLimit: JsonObject
+	hostResources: JsonObject
 }
 
 // #478 staggered resume: after the cooldown elapses, the daemon-level gate caps the
@@ -589,7 +590,7 @@ export type DecisionFingerprintScope =
 	| { kind: "item"; chainId: number; rowId: number }
 	| { kind: "chain"; chainId: number }
 
-type ItemDecisionFingerprintKind = "item.dependency_wait" | "item.backoff"
+type ItemDecisionFingerprintKind = "item.dependency_wait" | "item.backoff" | "host_resource.wait"
 
 type ChainCompleteTriggerFingerprintState =
 	| { kind: "empty" }
@@ -627,7 +628,8 @@ export class DecisionFingerprintState {
 			case "slot.busy":
 				return replaceDecisionFingerprint(state.slotBusy.get(event.payload.slotKey), fingerprint, () => state.slotBusy.set(event.payload.slotKey, fingerprint))
 			case "item.dependency_wait":
-			case "item.backoff": {
+			case "item.backoff":
+			case "host_resource.wait": {
 				const item = state.items.get(event.payload.rowId) ?? new Map<ItemDecisionFingerprintKind, string>()
 				state.items.set(event.payload.rowId, item)
 				return replaceDecisionFingerprint(item.get(event.type), fingerprint, () => item.set(event.type, fingerprint))
@@ -699,6 +701,7 @@ function decisionFingerprintScopeReleasedBySchedulerEvent(event: SchedulerEvent)
 		case "slot.busy":
 		case "item.dependency_wait":
 		case "item.backoff":
+		case "host_resource.wait":
 		case "session_id.invalidated":
 		case "chain.complete_trigger":
 		case "chain.complete_trigger_failed":
@@ -753,6 +756,23 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 				runId: event.activeRunId,
 				subject: { kind: "engine" },
 				payload: { slotKey: event.slotKey, chainId: event.chainId, repoCwd: event.repoCwd, activeRunId: event.activeRunId },
+			})
+		case "host_resource.wait":
+			return makeObservabilityEvent({
+				kind: "decision",
+				type: "host_resource.wait",
+				chain: chain.name,
+				item: event.itemId,
+				phase: event.phase,
+				runId: event.ownerRunId,
+				subject: { kind: "engine" },
+				payload: {
+					rowId: event.itemId,
+					resource: event.resource,
+					ownerRunId: event.ownerRunId,
+					ownerChainId: event.ownerChainId,
+					ownerItemId: event.ownerItemId,
+				},
 			})
 		case "item.dependency_wait":
 			return makeObservabilityEvent({
@@ -1094,6 +1114,10 @@ export class CoderLoopDaemon {
 				worktreePath: run.worktreePath,
 				startedAt: run.startedAt,
 			})),
+			hostResources: {
+				owners: [...this.schedulerState.hostResourceOwners.values()],
+				waits: [...this.schedulerState.hostResourceWaits.values()],
+			},
 			rateLimit: this.rateLimitStatus(this.schedulerNowMs()),
 		}
 	}
@@ -2034,7 +2058,8 @@ export class CoderLoopDaemon {
 		const dependencyWaitsByRowId = new Map(dependencyWaits.map((wait) => [wait.rowId, wait]))
 		return {
 			chain: chainToJson(chain),
-			summary: chainStatusSummary(chain, items, activeRuns, dependencyWaits),
+			summary: chainStatusSummary(chain, items, activeRuns, dependencyWaits,
+				[...this.schedulerState.hostResourceWaits.values()].filter((wait) => wait.chainId === chain.id)),
 			items: items.map((item) => itemToJson(item, dependencyWaitsByRowId.get(item.id) ?? null)),
 			activeRuns: activeRuns.map(activeRunToJson),
 		}
@@ -5036,6 +5061,7 @@ function daemonSnapshotToJson(snapshot: CoderLoopDaemonSnapshot): JsonObject {
 		schedulerEnabled: snapshot.schedulerEnabled,
 		activeRuns: snapshot.activeRuns,
 		rateLimit: snapshot.rateLimit,
+		hostResources: snapshot.hostResources,
 	}
 }
 
@@ -5313,6 +5339,7 @@ function chainStatusSummary(
 	items: ItemRecord[],
 	activeRuns: ReturnType<typeof listActiveRuns>,
 	dependencyWaits: readonly DependencyWaitReason[],
+	hostResourceWaits: readonly import("./scheduler").SchedulerHostResourceWait[],
 ): JsonObject {
 	const byStatus: Record<string, number> = {}
 	for (const item of items) byStatus[item.status] = (byStatus[item.status] ?? 0) + 1
@@ -5352,6 +5379,15 @@ function chainStatusSummary(
 		},
 		waiting: {
 			dependency: dependencyWaits.map(dependencyWaitToJson),
+			hostResource: hostResourceWaits.map((wait) => ({
+				reason: "host-exclusive-resource",
+				rowId: wait.itemId,
+				phase: wait.phase,
+				resource: wait.resource,
+				ownerRunId: wait.ownerRunId,
+				ownerChainId: wait.ownerChainId,
+				ownerItemId: wait.ownerItemId,
+			})),
 		},
 	}
 }
