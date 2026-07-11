@@ -154,6 +154,17 @@ afterAll(async () => {
 })
 
 describe("daemon", () => {
+	test("completes large-output scheduler and chain-complete runners", () => {
+		for (const name of [
+			"streams scheduler runner output without retaining full history",
+			"streams chain-complete runner output without retaining full history",
+		]) {
+			const result = Bun.spawnSync(["bun", "test", "src/scheduler.test.ts", "-t", name], { cwd: REPO_ROOT })
+			expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0)
+			expect(new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr)).toContain("0 fail")
+		}
+	})
+
 	test("daemon up creates socket and pid", async () => {
 		const fixture = await startFixture("up", { schedulerEnabled: false })
 		try {

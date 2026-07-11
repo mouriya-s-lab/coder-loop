@@ -5426,8 +5426,8 @@ function completedRunToJson(run: SchedulerCompletedRun): JsonObject {
 		repoCwd: run.repoCwd,
 		exitCode: run.exitCode,
 		status: run.status,
-		stdoutBytes: run.stdout.length,
-		stderrBytes: run.stderr.length,
+		stdoutBytes: run.stdoutBytes,
+		stderrBytes: run.stderrBytes,
 	}
 }
 
