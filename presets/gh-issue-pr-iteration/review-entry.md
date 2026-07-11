@@ -31,7 +31,7 @@ Read now, yourself:
 3. `{{PRESET_ROOT}}/common/state-contract.md` — which state writes are yours.
 4. `{{PRESET_ROOT}}/quality/honesty.md` — your core judgment tool for Step 4, including the stale-baseline exception.
 5. `{{PRESET_ROOT}}/quality/evidence.md` — packet-form criteria for Step 4.
-6. `{{PRESET_ROOT}}/common/dispatch-contract.md` — how every `Agent` dispatch is transported across turns under the claude `-p` async harness; binds Step 3.
+6. `{{PRESET_ROOT}}/common/dispatch-contract.md` — the runner-neutral dispatch ledger, completion, and follow-up contract; binds Step 3.
 
 ### Step 1 — Investigate (read the core objects yourself, dispatch bulk material)
 
@@ -75,9 +75,9 @@ Route by the deliverable shape the issue's own body declares (read from Step 1) 
 [ ] closure (Step 5) → terminal action (Step 6) → assessment/handoff/cleanup/summary (Step 7)
 ```
 
-Contention plan: diff-audit is pure reading, replay owns `AGENT_CWD` and drives the standing environment — dispatch both in one async round (two `Agent` calls in the same turn per `common/dispatch-contract.md`), end the turn, judge each report when its `<task-notification>` arrives.
+Contention plan: diff-audit is pure reading, replay owns `AGENT_CWD` and drives the standing environment — dispatch both in one concurrent round per `common/dispatch-contract.md`, then judge each completed report.
 
-List rules: exit only when every line is `[x]` or `[-] skipped: <reason recorded in handoff>`; re-print the list with checkboxes after each completed line; no line is checked by you doing its work.
+List rules: exit only when every line is `[x]` or `[-] skipped: <reason recorded in handoff>`; keep the authoritative dispatch ledger current and print the final checklist once in the handoff; no line is checked by you doing its work.
 
 ### Step 3 — Execute the dispatches
 
@@ -89,7 +89,7 @@ Step files:
 | diff-audit | `{{PRESET_ROOT}}/review/steps/diff-audit.md` |
 | replay | `{{PRESET_ROOT}}/review/steps/replay.md` |
 
-Every dispatch follows `common/dispatch-contract.md`: each `Agent` call is async — its tool_result is the launch receipt only, the report lands in a later turn as the `<result>` block inside a `<task-notification>` (do not `Read` the `<output-file>`; that path is the subagent's conversation transcript JSONL and will overflow context). After every dispatch round end the turn; the replay round can take up to ~11 min for e2e-heavy tasks — use the optional `ScheduleWakeup` long-timeout safety net (delay ≥ 2400s) only if you want a stuck-subagent backstop. Message = pointers + runtime facts only:
+Every dispatch follows `common/dispatch-contract.md`. Use the current runner's subagent controls and completion-delivery shape; do not name or emulate another runner's tools. Message = pointers + runtime facts only:
 
 ```
 Read and execute: {{PRESET_ROOT}}/review/steps/<step>.md
@@ -102,7 +102,7 @@ Step focus: <diff-audit: scope facts worth flagging plus any test-collection cha
   plus the deferred browser acceptance rows enumerated from the issue's tables>
 ```
 
-When the harness re-invokes you with one or more `<task-notification>` blocks: for each, read the report directly from the `<result>` block (do not `Read` the `<output-file>`). Check structure against the step file's Acceptance section "Required report fields". Then judge substance. Routing under `common/dispatch-contract.md` — no continue-the-same-subagent path exists on this runner, so every non-accepted outcome is: `TaskStop(to=<task-id>)` then a fresh `Agent(...)` whose `Step focus` folds in the missing fields, the gap list, or the corrected scope. Ledger records both `abandoned: <reason>` + `dispatched: <new task-id>`. Accepted → `[x]`, ledger line, re-print list. If the round has subagents still outstanding (no notification yet), do **not** advance past their workflow lines — end the turn.
+For each completed report, check structure against the step file's Acceptance section "Required report fields", then judge substance. Accepted → `[x]` plus an accepted ledger row. Non-accepted → reject the row and follow up per `common/dispatch-contract.md` with the missing fields, gap list, or corrected scope. Do not advance while either mandatory report remains outstanding or rejected.
 
 What the accepted reports mean for your verdict:
 
@@ -140,7 +140,7 @@ Pick exactly one outcome below and read **only** its action file; execute its si
 | blocked | `{{PRESET_ROOT}}/review/actions/blocked.md` |
 | stop chain | `{{PRESET_ROOT}}/review/actions/stop.md` |
 
-**Every PR reply you post — retry feedback and acceptance summary alike — is a full review report** with a fixed shape: a digest of every check that ran (each dispatched report and each Step 4 judgment, pass or fail — reference measured values, not just verdicts), a `## 缺失汇总` block listing every missing/failing item in one place (`none` when clean), and a `## Skipped checks` block naming each check not run with its reason. Reference implementations of the shape live in the action files. Reference the observed values (SHAs, counts, verbatim quotes from the retry-comment / PR-body caveats, URLs) rather than repeating iteration's own wording — the point is to show your judgment stood on observation.
+The selected action file is the single source of truth for the PR reply shape. Populate it from observed values (SHAs, counts, verbatim retry/caveat quotes, URLs), not iteration's wording; do not restate or invent a second report schema here.
 
 Retry feedback quality bar (applies inside the retry action): contract and code findings — failing replay rows, test-integrity findings from diff-audit, e2e mismatches, diff-audit scope/hygiene/code findings — before protocol/wording findings; name the exact object per item (row #, file, test name, trigger phrase) and the concrete fix; cite all failures at once. If your only findings are body-wording complaints while both dispatched reports came back clean, re-check against `quality/honesty.md` whether you are blocking on something it actually requires before issuing the retry.
 
@@ -152,7 +152,7 @@ Then write item state per `{{PRESET_ROOT}}/review/actions/state-write.md`. Exter
 
 {{STATUS_VOCABULARY_DOC}}
 
-2. **Handoff**: append to `{{SHARED_CONTEXT_FILE}}`: the outcome you chose (and the exit it maps to per Step 6), reasons, the final task list with checkboxes, dispatched-report outcomes, judgments failed/passed, actions performed, state transition, child closure table when applicable, next action.
+2. **Handoff**: append to `{{SHARED_CONTEXT_FILE}}`: the outcome and exit chosen in Step 6, reasons, the final task list with each line's outcome, judgments failed/passed, actions performed, state transition, child closure table when applicable, next action. The dispatch ledger already owns task ids and report transport history; do not duplicate it.
 3. **Cleanup — review owns all teardown**: sweep per `{{PRESET_ROOT}}/quality/cleanup.md` — your own dispatches' declared side effects **and** the standing e2e environment iteration left up (kill via the runtime manifest's stop commands), verify each kill took, remove declared temp files, keep evidence in place. After this sweep nothing this issue's runs started may still be running.
 4. **Final exit selection**: the exit the action file chose for you (Step 6 table — item-status or chain-action) is the only signal the engine consumes. Issue the corresponding CLI call (`coder-loop item update --status <S>` for an item-status exit, `coder-loop item exit-action --action stop` for the chain-action exit). Do not print any stdout summary token in place of the CLI call — an unwritten exit leaves the run reported as inactive without status.
 

@@ -198,16 +198,16 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		const preset = await loadPreset(BUNDLED_PRESET_DIR)
 		expect(preset.phases.map((p) => p.name)).toEqual(["iteration", "review", "blocked-responder", "umbrella-finalizer"])
 		expect(Object.fromEntries(preset.phases.map((phase) => [phase.name, phase.defaultRunner]))).toEqual({
-			iteration: "claude",
-			review: "claude",
-			"blocked-responder": "claude",
-			"umbrella-finalizer": "claude",
+			iteration: "codex",
+			review: "codex",
+			"blocked-responder": "codex",
+			"umbrella-finalizer": "codex",
 		})
 		expect(Object.fromEntries(preset.phases.map((phase) => [phase.name, phase.defaultModel]))).toEqual({
-			iteration: "claude-opus-4-7[1m]",
-			review: "claude-opus-4-7[1m]",
-			"blocked-responder": "claude-opus-4-7[1m]",
-			"umbrella-finalizer": "claude-opus-4-7[1m]",
+			iteration: "gpt-5.6-sol",
+			review: "gpt-5.6-sol",
+			"blocked-responder": "gpt-5.6-sol",
+			"umbrella-finalizer": "gpt-5.6-sol",
 		})
 		// #456: previously this also asserted the "last non-trigger phase" position via an engine
 		// helper. That helper enforced an engine assumption the DSL never declared; with the
@@ -396,12 +396,26 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(entry).toContain("ITERATION SUMMARY:")
 	})
 
+	test("dispatch contract is runner-neutral while entry prompts retain semantic task decomposition", async () => {
+		const dispatch = await Bun.file(resolve(BUNDLED_PRESET_DIR, "common/dispatch-contract.md")).text()
+		const iteration = await Bun.file(resolve(BUNDLED_PRESET_DIR, "iter-entry.md")).text()
+		const review = await Bun.file(resolve(BUNDLED_PRESET_DIR, "review-entry.md")).text()
+
+		expect(dispatch).toContain("Runner transports have two explicit shapes")
+		expect(dispatch).toContain("Immediate completion")
+		expect(dispatch).toContain("Deferred completion")
+		expect(dispatch).not.toMatch(/claude `-p`|<task-notification>|TaskStop|ScheduleWakeup|Agent\(\.\.\.\)/)
+		expect(iteration).toContain("Build the task list")
+		expect(review).toContain("Build the review task list")
+		expect(`${iteration}\n${review}`).not.toMatch(/claude `-p`|<task-notification>|TaskStop|ScheduleWakeup/)
+	})
+
 	test("review entry owns the mandatory dispatches, judgments, and action files", async () => {
 		const entry = await Bun.file(resolve(BUNDLED_PRESET_DIR, "review-entry.md")).text()
 
 		expect(entry).toContain("You never repair the work under review.")
 		// Two mandatory dispatches (diff-audit + replay); anti-cheat verbatim scaffolds
-		// were removed for Claude-family runners, but the "no verdict without both reports"
+		// are unnecessary for honest runners, but the "no verdict without both reports"
 		// guarantee stays.
 		expect(entry).toContain("A verdict — including retry — produced without both accepted reports is an invalid review")
 		expect(entry).toContain("{{PRESET_ROOT}}/review/steps/replay.md")

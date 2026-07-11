@@ -3,7 +3,6 @@ import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
 import { startCoderLoopDaemon } from "./daemon"
-import { operatorSubprocessEnv } from "./operator-subprocess-env"
 import { openSqliteStateStore } from "./sqlite-state"
 import { engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 
@@ -232,7 +231,7 @@ function runCli(args: string[]): { exitCode: number | null; stdout: string; stde
 		cwd: REPO_ROOT,
 		stdout: "pipe",
 		stderr: "pipe",
-		env: operatorSubprocessEnv(),
+		env: { ...process.env, CODER_LOOP_RUN_CRED: undefined },
 	})
 	return {
 		exitCode: proc.exitCode,
@@ -250,7 +249,7 @@ async function runCliAsync(args: string[]): Promise<{ exitCode: number | null; s
 		cwd: REPO_ROOT,
 		stdout: "pipe",
 		stderr: "pipe",
-		env: operatorSubprocessEnv(),
+		env: { ...process.env, CODER_LOOP_RUN_CRED: undefined },
 	})
 	const [stdout, stderr, exitCode] = await Promise.all([
 		new Response(proc.stdout).text(),

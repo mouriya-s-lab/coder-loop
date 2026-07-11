@@ -282,6 +282,14 @@ export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
 		if (!r.ok) hasFailure = true
 	}
 
+	if (args.repo !== null) {
+		info("\n[GitHub repository] per-repo access")
+		const repoResult = await spawnCapture("gh", ["repo", "view", args.repo, "--json", "nameWithOwner"])
+		const repoAccessible = repoResult.code === 0
+		info(`  ${repoAccessible ? "OK" : "FAIL"}: repo access ${args.repo}`)
+		if (!repoAccessible) hasFailure = true
+	}
+
 	info("\n[Live Runtime] coder-loop runtime health")
 	for (const line of buildLiveRuntimeHealthLines(statusSnapshot)) {
 		info(`  ${line}`)

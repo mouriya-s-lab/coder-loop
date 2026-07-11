@@ -166,7 +166,6 @@ export type DaemonCommandArgs =
 			targetCwd: string
 			loopDataRoot?: string | null
 			chainName?: string | null
-			iterationLimit: number | null
 			dryRun: boolean
 			worktree: boolean
 			json: boolean
@@ -184,7 +183,6 @@ export type DaemonCommandArgs =
 			targetCwd: string
 			loopDataRoot?: string | null
 			chainName?: string | null
-			iterationLimit: number | null
 			dryRun: boolean
 			worktree: boolean
 			json: boolean
@@ -1223,7 +1221,6 @@ const daemonStartCliCommand = command({
 		target: positional({ displayName: "target", type: cmdString }),
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
 		chain: option({ long: "chain", type: optional(cmdString) }),
-		iterationLimit: option({ long: "max-iterations", type: optional(cmdString) }),
 		dryRun: flag({ long: "dry-run" }),
 		worktree: flag({ long: "worktree" }),
 		json: flag({ long: "json" }),
@@ -1235,7 +1232,6 @@ const daemonStartCliCommand = command({
 			targetCwd: args.target,
 			loopDataRoot: args.loopDataRoot ?? null,
 			chainName: args.chain ?? null,
-			iterationLimit: parseDaemonIterationLimit(args.iterationLimit ?? null),
 			dryRun: args.dryRun,
 			worktree: args.worktree,
 			json: args.json,
@@ -1273,7 +1269,6 @@ const daemonRestartCliCommand = command({
 		target: positional({ displayName: "target", type: cmdString }),
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
 		chain: option({ long: "chain", type: optional(cmdString) }),
-		iterationLimit: option({ long: "max-iterations", type: optional(cmdString) }),
 		dryRun: flag({ long: "dry-run" }),
 		worktree: flag({ long: "worktree" }),
 		json: flag({ long: "json" }),
@@ -1285,7 +1280,6 @@ const daemonRestartCliCommand = command({
 			targetCwd: args.target,
 			loopDataRoot: args.loopDataRoot ?? null,
 			chainName: args.chain ?? null,
-			iterationLimit: parseDaemonIterationLimit(args.iterationLimit ?? null),
 			dryRun: args.dryRun,
 			worktree: args.worktree,
 			json: args.json,
@@ -1782,10 +1776,6 @@ function readFlagValue(args: string[], index: number, inlineValue: string | null
 
 function rejectInlineValue(value: string | null, name: string): void {
 	if (value !== null) fail(`${name} does not accept a value`)
-}
-
-function parseDaemonIterationLimit(value: string | null): number | null {
-	return parseOptionalPositiveInteger(value, "--max-iterations")
 }
 
 function parseOptionalPositiveInteger(value: string | null, flagName: string): number | null {
@@ -3696,7 +3686,6 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 				targetCwd: options.targetCwd,
 				loopDataRoot: options.loopDataRoot,
 				chainName: options.chainName ?? null,
-				iterationLimit: null,
 				dryRun: true,
 				worktree: options.worktree,
 				json: false,
@@ -3711,7 +3700,6 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 				targetCwd: options.targetCwd,
 				loopDataRoot: options.loopDataRoot,
 				chainName: options.chainName ?? null,
-				iterationLimit: null,
 				dryRun: false,
 				worktree: options.worktree,
 				json: false,

@@ -87,7 +87,6 @@ import {
 	appendObservabilityEventSync,
 	makeObservabilityEvent,
 	observabilityDecisionFingerprint,
-	observabilityDecisionKey,
 	observabilityEventToJsonValue,
 	parseObservabilityEventType,
 	parseObservabilityKind,
@@ -508,6 +507,50 @@ type ItemMutationCaller =
 	| { kind: "operator"; subject: Extract<ObservabilitySubject, { kind: "operator" }> }
 	| { kind: "agent"; runId: string; phase: string; subject: Extract<ObservabilitySubject, { kind: "agent" }> }
 
+// #600: authorization and audit attribution for `item.exitAction` after caller admission.
+// Operator calls have no credential-bound identity, so they preserve the existing direct-socket
+// contract and use the required request pair. Agent calls carry only registry-bound truth in the
+// admitted branch. A forged request pair is a distinct deny variant so downstream code cannot
+// accidentally authorize with the claim or emit it as event attribution.
+interface OperatorObservabilitySubjectSelector {
+	kind: "operator"
+}
+
+interface AgentObservabilitySubjectSelector {
+	kind: "agent"
+}
+
+type OperatorObservabilitySubject = Extract<ObservabilitySubject, OperatorObservabilitySubjectSelector>
+type AgentObservabilitySubject = Extract<ObservabilitySubject, AgentObservabilitySubjectSelector>
+
+interface OperatorItemExitActionAttribution {
+	kind: "operator"
+	runId: string
+	phase: string
+	subject: OperatorObservabilitySubject
+}
+
+interface AdmittedAgentItemExitActionAttribution {
+	kind: "agent-admitted"
+	runId: string
+	phase: string
+	subject: AgentObservabilitySubject
+}
+
+interface MismatchedAgentItemExitActionAttribution {
+	kind: "agent-mismatch"
+	runId: string
+	phase: string
+	claimedRunId: string
+	claimedPhase: string
+	subject: AgentObservabilitySubject
+}
+
+type ItemExitActionAttribution =
+	| OperatorItemExitActionAttribution
+	| AdmittedAgentItemExitActionAttribution
+	| MismatchedAgentItemExitActionAttribution
+
 // #406 caller-admission deny reasons. Co-located with the observability event union (every
 // reason here appears in `item.mutation.caller_admission.payload.reason`). Mirrors the threat-
 // model branches from issue body:
@@ -540,6 +583,146 @@ type ResolveCallerDenyReason =
 type Result<T, E> =
 	| { kind: "ok"; value: T }
 	| { kind: "err"; error: E }
+
+export type DecisionFingerprintScope =
+	| { kind: "slot"; chainId: number; slotKey: string }
+	| { kind: "item"; chainId: number; rowId: number }
+	| { kind: "chain"; chainId: number }
+
+type ItemDecisionFingerprintKind = "item.dependency_wait" | "item.backoff"
+
+type ChainCompleteTriggerFingerprintState =
+	| { kind: "empty" }
+	| { kind: "observed"; runId: string; fingerprint: string }
+
+type ChainDecisionFingerprintState = {
+	slotBusy: Map<string, string>
+	items: Map<number, Map<ItemDecisionFingerprintKind, string>>
+	chainCompleteTrigger: ChainCompleteTriggerFingerprintState
+}
+
+// Decision fingerprints belong to the scheduler entity that can emit them. A chain owns a
+// hierarchy of slot/item/chain decision state so lifecycle convergence can reclaim exactly one
+// leaf or the complete chain subtree without clearing unrelated active siblings.
+export class DecisionFingerprintState {
+	private readonly chains = new Map<number, ChainDecisionFingerprintState>()
+
+	get size(): number {
+		let count = 0
+		for (const state of this.chains.values()) {
+			count += state.slotBusy.size
+			for (const item of state.items.values()) count += item.size
+			if (state.chainCompleteTrigger.kind === "observed") count += 1
+		}
+		return count
+	}
+
+	observe(chainId: number, event: ObservabilityEvent): boolean {
+		if (event.kind !== "decision") {
+			throw new DaemonError("internal_error", `decision fingerprint state cannot observe ${event.kind} event ${event.type}`)
+		}
+		const fingerprint = observabilityDecisionFingerprint(event)
+		const state = this.chainState(chainId)
+		switch (event.type) {
+			case "slot.busy":
+				return replaceDecisionFingerprint(state.slotBusy.get(event.payload.slotKey), fingerprint, () => state.slotBusy.set(event.payload.slotKey, fingerprint))
+			case "item.dependency_wait":
+			case "item.backoff": {
+				const item = state.items.get(event.payload.rowId) ?? new Map<ItemDecisionFingerprintKind, string>()
+				state.items.set(event.payload.rowId, item)
+				return replaceDecisionFingerprint(item.get(event.type), fingerprint, () => item.set(event.type, fingerprint))
+			}
+			case "chain.complete_trigger": {
+				const runId = event.runId ?? ""
+				if (state.chainCompleteTrigger.kind === "observed"
+					&& state.chainCompleteTrigger.runId === runId
+					&& state.chainCompleteTrigger.fingerprint === fingerprint) return true
+				state.chainCompleteTrigger = { kind: "observed", runId, fingerprint }
+				return false
+			}
+			default:
+				return assertNeverDecisionEvent(event)
+		}
+	}
+
+	release(scope: DecisionFingerprintScope): void {
+		const state = this.chains.get(scope.chainId)
+		if (state === undefined) return
+		switch (scope.kind) {
+			case "slot":
+				state.slotBusy.delete(scope.slotKey)
+				break
+			case "item":
+				state.items.delete(scope.rowId)
+				break
+			case "chain":
+				this.chains.delete(scope.chainId)
+				return
+			default:
+				assertNeverDecisionFingerprintScope(scope)
+		}
+		if (state.slotBusy.size === 0 && state.items.size === 0 && state.chainCompleteTrigger.kind === "empty") this.chains.delete(scope.chainId)
+	}
+
+	releaseForSchedulerEvent(event: SchedulerEvent): void {
+		const scope = decisionFingerprintScopeReleasedBySchedulerEvent(event)
+		if (scope !== null) this.release(scope)
+	}
+
+	private chainState(chainId: number): ChainDecisionFingerprintState {
+		const current = this.chains.get(chainId)
+		if (current !== undefined) return current
+		const created: ChainDecisionFingerprintState = { slotBusy: new Map(), items: new Map(), chainCompleteTrigger: { kind: "empty" } }
+		this.chains.set(chainId, created)
+		return created
+	}
+}
+
+function replaceDecisionFingerprint(previous: string | null | undefined, next: string, replace: () => void): boolean {
+	if (previous === next) return true
+	replace()
+	return false
+}
+
+function decisionFingerprintScopeReleasedBySchedulerEvent(event: SchedulerEvent): DecisionFingerprintScope | null {
+	switch (event.type) {
+		case "agent.spawn":
+		case "spawn.aborted":
+			return { kind: "item", chainId: event.chainId, rowId: event.itemId }
+		case "agent.exit":
+			return { kind: "slot", chainId: event.chainId, slotKey: event.slotKey }
+		case "queue.terminal":
+		case "item.dependency_unblocked":
+			return { kind: "item", chainId: event.chainId, rowId: event.rowId }
+		case "chain.completed":
+			return { kind: "chain", chainId: event.chainId }
+		case "slot.busy":
+		case "item.dependency_wait":
+		case "item.backoff":
+		case "session_id.invalidated":
+		case "chain.complete_trigger":
+		case "chain.complete_trigger_failed":
+		case "phase.start":
+		case "phase.end":
+		case "attempt.timeout":
+		case "run.startup_idle_kill":
+		case "recycle.pending_entered":
+		case "recycle.timeout_kill":
+		case "recycle.natural_exit":
+		case "scheduler.rate_limited":
+			return null
+		default:
+			return assertNeverSchedulerEvent(event)
+	}
+}
+
+function assertNeverDecisionEvent(event: never): never {
+	throw new DaemonError("internal_error", `unhandled decision event: ${JSON.stringify(event)}`)
+}
+
+function assertNeverDecisionFingerprintScope(scope: never): never {
+	throw new DaemonError("internal_error", `unhandled decision fingerprint scope: ${JSON.stringify(scope)}`)
+}
 
 // #406: the daemon-owned credential issuer. Implements `SchedulerRunCredentialIssuer` so the
 // scheduler can mint/revoke without knowing it talks to a Map. Keyed by credential value because
@@ -829,7 +1012,7 @@ export class CoderLoopDaemon {
 	private socketPathRepairInFlight: Promise<void> | null = null
 	private ownsDaemonSocket = false
 	private ownsDaemonPid = false
-	private readonly lastDecisionFingerprints = new Map<string, string>()
+	private readonly decisionFingerprints = new DecisionFingerprintState()
 	private readonly loadedPresetCache = new Map<string, Promise<SchedulerLoadedPreset>>()
 	// #406 run credential registry. Map keyed on credential value → run binding. Lifetime is the
 	// daemon process: when daemon down kills all active runs (#467), the registry dies with it,
@@ -1676,8 +1859,8 @@ export class CoderLoopDaemon {
 		}
 	}
 
-	private async recordObservabilityEvent(event: ObservabilityEvent): Promise<void> {
-		if (this.shouldSuppressDecisionEvent(event)) return
+	private async recordObservabilityEvent(event: ObservabilityEvent, decisionChainId?: number): Promise<void> {
+		if (this.shouldSuppressDecisionEvent(event, decisionChainId)) return
 		await appendObservabilityEvent(this.paths.eventsFile, event)
 		this.writeRenderedObservabilityEvent(event)
 	}
@@ -1720,21 +1903,17 @@ export class CoderLoopDaemon {
 		if (chain.status === "deleted") return
 		try {
 			sanitizeChainName(chain.name)
-			await this.recordObservabilityEvent(event)
+			await this.recordObservabilityEvent(event, chain.id)
 		} catch (error) {
 			if (isInvalidChainNameError(error)) return
 			throw error
 		}
 	}
 
-	private shouldSuppressDecisionEvent(event: ObservabilityEvent): boolean {
+	private shouldSuppressDecisionEvent(event: ObservabilityEvent, chainId?: number): boolean {
 		if (event.kind !== "decision") return false
-		const key = observabilityDecisionKey(event)
-		const fingerprint = observabilityDecisionFingerprint(event)
-		const previous = this.lastDecisionFingerprints.get(key)
-		if (previous === fingerprint) return true
-		this.lastDecisionFingerprints.set(key, fingerprint)
-		return false
+		if (chainId === undefined) throw new DaemonError("internal_error", `decision event ${event.type} has no chain lifecycle owner`)
+		return this.decisionFingerprints.observe(chainId, event)
 	}
 
 	private writeRenderedObservabilityEvent(event: ObservabilityEvent): void {
@@ -1883,12 +2062,16 @@ export class CoderLoopDaemon {
 
 	private async handleChainDelete(args: JsonObject): Promise<JsonObject> {
 		const chain = this.resolveChain(args)
-		if (chain.status === "deleted") return { chain: chainToJson(chain), alreadyDeleted: true }
+		if (chain.status === "deleted") {
+			this.decisionFingerprints.release({ kind: "chain", chainId: chain.id })
+			return { chain: chainToJson(chain), alreadyDeleted: true }
+		}
 		const resumeScheduler = await this.pauseSchedulerForMutation()
 		try {
 			const terminatedRuns = await this.terminateActiveRunsForChain(chain.id)
 			const cleanup = await this.cleanupChainRuntime(chain)
 			const updated = this.requireStore().updateChain(chain.id, { status: "deleted" })
+			this.decisionFingerprints.release({ kind: "chain", chainId: chain.id })
 			return {
 				chain: chainToJson(updated),
 				alreadyDeleted: false,
@@ -1902,11 +2085,15 @@ export class CoderLoopDaemon {
 
 	private async handleChainStop(args: JsonObject): Promise<JsonObject> {
 		const chain = this.resolveChain(args)
-		if (chain.status === "stopped") return { chain: chainToJson(chain), alreadyStopped: true, terminatedRuns: [] }
+		if (chain.status === "stopped") {
+			this.decisionFingerprints.release({ kind: "chain", chainId: chain.id })
+			return { chain: chainToJson(chain), alreadyStopped: true, terminatedRuns: [] }
+		}
 		assertChainCanTransition(chain, "chain.stop", "active", "stopped")
 		const resumeScheduler = await this.pauseSchedulerForMutation()
 		try {
 			const stopped = this.requireStore().updateChain(chain.id, { status: "stopped" })
+			this.decisionFingerprints.release({ kind: "chain", chainId: chain.id })
 			const terminatedRuns = await this.terminateActiveRunsForChain(chain.id)
 			await this.recordObservabilityEventIfChainNameIsValid(stopped, makeObservabilityEvent({
 				kind: "audit",
@@ -2092,66 +2279,71 @@ export class CoderLoopDaemon {
 		const itemId = issue.startsWith("#") ? issue.slice(1) : issue
 		if (itemId === "") throw new DaemonError("invalid_request", `queue.unblock: issue must contain an id after #`, { issue: issueRaw })
 		const dryRun = optionalBoolean(args, "dryRun") ?? false
-		const { preset } = await this.loadedPresetForChain(chain, "queue.unblock")
-		const store = this.requireStore()
-		const item = store.getItemById(chain.id, itemId)
-		if (item === null) {
-			throw new DaemonError("not_found", `queue.unblock: item ${issue} not found in chain ${chain.name}`, { chainName: chain.name, itemId })
-		}
-		if (!preset.statuses.unblockable.includes(item.status)) {
+		const resumeScheduler = await this.pauseSchedulerForMutation()
+		try {
+			const { preset } = await this.loadedPresetForChain(chain, "queue.unblock")
+			const store = this.requireStore()
+			const item = store.getItemById(chain.id, itemId)
+			if (item === null) {
+				throw new DaemonError("not_found", `queue.unblock: item ${issue} not found in chain ${chain.name}`, { chainName: chain.name, itemId })
+			}
+			if (!preset.statuses.unblockable.includes(item.status)) {
+				return {
+					mutation: {
+						changed: false,
+						issue,
+						reason: "not_unblockable",
+						status: item.status,
+					},
+				}
+			}
+			const entryStatus = preset.statuses.entry
+			const current = store.getCurrentRun(chain.id)
+			// CurrentRunRecord stores the active item identifier inside `extra.itemId` (the same shape
+			// the scheduler writes when it spawns); resolve it as JsonValue and only match when it's
+			// the numeric rowid the store inserted.
+			const currentExtraItemId = current === null ? null : current.extra.itemId
+			const clearedCurrent = typeof currentExtraItemId === "number"
+				&& Number.isInteger(currentExtraItemId)
+				&& currentExtraItemId === item.id
+			if (!dryRun) {
+				store.updateItem(item.id, {
+					// #397: queue.unblock is operator-issued — restore the item to the preset's entry
+					// status. The value comes from preset.statuses.entry (engine-derived), so we brand
+					// through the narrow engine-lifecycle constructor.
+					status: engineLifecycleAdmittedItemStatus(entryStatus, "queue.unblock-entry-restore"),
+					updatedAt: unixSeconds(),
+				})
+				if (clearedCurrent) store.clearCurrentRun(chain.id)
+				// Mirror the #406 operator-attribution audit shape the old CLI emitted so external
+				// tooling that watches `item.mutation.caller_admission` keeps seeing the unblock.
+				await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
+					kind: "audit",
+					type: "item.mutation.caller_admission",
+					chain: chain.name,
+					item: item.id,
+					subject: { kind: "operator" },
+					payload: {
+						rowId: item.id,
+						itemId,
+						claimedRunId: null,
+						claimedPhase: null,
+						outcome: "allow",
+						reason: "operator",
+					},
+				}))
+			}
 			return {
 				mutation: {
-					changed: false,
+					changed: true,
 					issue,
-					reason: "not_unblockable",
-					status: item.status,
+					beforeStatus: item.status,
+					afterStatus: entryStatus,
+					clearedCurrent,
 				},
 			}
-		}
-		const entryStatus = preset.statuses.entry
-		const current = store.getCurrentRun(chain.id)
-		// CurrentRunRecord stores the active item identifier inside `extra.itemId` (the same shape
-		// the scheduler writes when it spawns); resolve it as JsonValue and only match when it's
-		// the numeric rowid the store inserted.
-		const currentExtraItemId = current === null ? null : current.extra.itemId
-		const clearedCurrent = typeof currentExtraItemId === "number"
-			&& Number.isInteger(currentExtraItemId)
-			&& currentExtraItemId === item.id
-		if (!dryRun) {
-			store.updateItem(item.id, {
-				// #397: queue.unblock is operator-issued — restore the item to the preset's entry
-				// status. The value comes from preset.statuses.entry (engine-derived), so we brand
-				// through the narrow engine-lifecycle constructor.
-				status: engineLifecycleAdmittedItemStatus(entryStatus, "queue.unblock-entry-restore"),
-				updatedAt: unixSeconds(),
-			})
-			if (clearedCurrent) store.clearCurrentRun(chain.id)
-			// Mirror the #406 operator-attribution audit shape the old CLI emitted so external
-			// tooling that watches `item.mutation.caller_admission` keeps seeing the unblock.
-			await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
-				kind: "audit",
-				type: "item.mutation.caller_admission",
-				chain: chain.name,
-				item: item.id,
-				subject: { kind: "operator" },
-				payload: {
-					rowId: item.id,
-					itemId,
-					claimedRunId: null,
-					claimedPhase: null,
-					outcome: "allow",
-					reason: "operator",
-				},
-			}))
-		}
-		return {
-			mutation: {
-				changed: true,
-				issue,
-				beforeStatus: item.status,
-				afterStatus: entryStatus,
-				clearedCurrent,
-			},
+		} finally {
+			resumeScheduler()
 		}
 	}
 
@@ -2442,8 +2634,11 @@ export class CoderLoopDaemon {
 		const repoCwd = optionalString(fields, "repoCwd")
 		if (repoCwd !== null) assignOptional(input, "repoCwd", await validateRepoCwdForRequest(repoCwd))
 		const status = optionalString(fields, "status")
+		let terminalStatusesForUpdate: ReadonlySet<InternalStatus> | null = null
 		if (status !== null) {
 			assignOptional(input, "status", await this.admitItemStatusForRequest(chain, item, status, caller.subject))
+			const { preset } = await this.loadedPresetForItem(chain, item, "item.update.terminal-statuses")
+			terminalStatusesForUpdate = new Set(preset.statuses.terminal)
 		}
 		assignOptional(input, "title", validateItemTitleForRequest(optionalStringOrNull(fields, "title")))
 		assignOptional(input, "priority", validateItemPriorityForRequest(optionalStringOrNull(fields, "priority")))
@@ -2506,6 +2701,9 @@ export class CoderLoopDaemon {
 		const resumeScheduler = await this.pauseSchedulerForMutation()
 		try {
 			const updated = store.updateItem(item.id, input)
+			if (terminalStatusesForUpdate?.has(updated.status) === true) {
+				this.decisionFingerprints.release({ kind: "item", chainId: chain.id, rowId: item.id })
+			}
 			if (updated.status !== item.status) {
 				// #406: emit `item.status` with the caller's true subject. The exhaustive switch on
 				// `caller.kind` is how runId/phase enter the event base — they come from the
@@ -2643,11 +2841,10 @@ export class CoderLoopDaemon {
 	//      credential-bound agent). The chain-action selection is a privileged
 	//      write — unauthenticated callers and stale credentials cannot fire it.
 	//   2. Per-phase action vocabulary — the action must be declared in the
-	//      requesting phase's `[[phases.exits]]` chain-action branch; default-deny
+	//      credential-bound phase's `[[phases.exits]]` chain-action branch; default-deny
 	//      otherwise (mirrors the #397 default-deny status admission).
-	//   3. The phase the agent claims must actually be the agent's currently
-	//      running phase (the caller-admission gate confirms the credential
-	//      binding includes the same phase).
+	//   3. The request attribution pair must equal the credential binding. A mismatch
+	//      is denied through a typed branch and is never used for authorization or audit.
 	// Two observability events:
 	//   - `item.exit.selected` (audit) — records the agent's selection regardless
 	//     of whether the engine proceeds; pairs with the existing `item.status.write_admission`
@@ -2670,23 +2867,49 @@ export class CoderLoopDaemon {
 		if (chain === null) throw new DaemonError("not_found", `chain ${item.chainId} was not found`, { chainId: item.chainId })
 		assertChainAllowsItemMutation(chain, "item.exitAction")
 		const caller = await this.admitItemMutationCaller(chain, item, args)
+		const attribution = resolveItemExitActionAttribution(caller, agentRunId, agentPhase)
 		const { preset } = await this.loadedPresetForItem(chain, item, "item.exitAction")
-		const presetPhase = preset.phases.find((entry) => entry.name === agentPhase)
+		const presetPhase = preset.phases.find((entry) => entry.name === attribution.phase)
 		if (presetPhase === undefined) {
 			const knownPhases = preset.phases.map((entry) => entry.name)
 			throw new DaemonError(
 				"invalid_request",
-				`item.exitAction: phase "${agentPhase}" is not declared in preset "${preset.name}" (known phases: ${knownPhases.join(", ") || "<none>"})`,
-				{ phase: agentPhase, knownPhases },
+				`item.exitAction: phase "${attribution.phase}" is not declared in preset "${preset.name}" (known phases: ${knownPhases.join(", ") || "<none>"})`,
+				{ phase: attribution.phase, knownPhases },
 			)
 		}
 		const declaredActions = phaseChainActions(presetPhase)
 		const declaredActionList = declaredActions.slice().sort()
+		if (attribution.kind === "agent-mismatch") {
+			await this.recordExitSelectionAuditEvent(chain, {
+				item,
+				phase: attribution.phase,
+				runId: attribution.runId,
+				selection: { kind: "chain-action", action },
+				declaredChainActions: declaredActionList,
+				declaredItemStatuses: phaseWritableStatuses(presetPhase).slice().sort(),
+				outcome: "deny",
+				reason: "caller-attribution-mismatch",
+				subject: attribution.subject,
+			})
+			throw new DaemonError(
+				"invalid_caller",
+				`item.exitAction request run/phase attribution does not match the credential-bound caller: ` +
+					`claimed (${attribution.claimedRunId}, ${attribution.claimedPhase}), ` +
+					`bound (${attribution.runId}, ${attribution.phase}).`,
+				{
+					boundRunId: attribution.runId,
+					boundPhase: attribution.phase,
+					claimedRunId: attribution.claimedRunId,
+					claimedPhase: attribution.claimedPhase,
+				},
+			)
+		}
 		const isDeclared = declaredActions.includes(action)
 		await this.recordExitSelectionAuditEvent(chain, {
 			item,
-			phase: agentPhase,
-			runId: agentRunId,
+			phase: attribution.phase,
+			runId: attribution.runId,
 			selection: { kind: "chain-action", action },
 			declaredChainActions: declaredActionList,
 			declaredItemStatuses: phaseWritableStatuses(presetPhase).slice().sort(),
@@ -2697,8 +2920,8 @@ export class CoderLoopDaemon {
 		if (!isDeclared) {
 			throw new DaemonError(
 				"invalid_request",
-				`item.exitAction: chain action "${action}" is not declared by phase "${agentPhase}" (declared chain actions: ${declaredActionList.join(", ") || "<none> (default-deny)"})`,
-				{ action, phase: agentPhase, declaredChainActions: declaredActionList },
+				`item.exitAction: chain action "${action}" is not declared by phase "${attribution.phase}" (declared chain actions: ${declaredActionList.join(", ") || "<none> (default-deny)"})`,
+				{ action, phase: attribution.phase, declaredChainActions: declaredActionList },
 			)
 		}
 		switch (action) {
@@ -2706,8 +2929,8 @@ export class CoderLoopDaemon {
 				const result = await this.performChainStopFromPhaseExit(chain, {
 					rowId: item.id,
 					itemId: item.itemId,
-					runId: agentRunId,
-					phase: agentPhase,
+					runId: attribution.runId,
+					phase: attribution.phase,
 					subject: caller.subject,
 				})
 				return { action, chain: chainToJson(result.chain), terminatedRuns: result.terminatedRuns.map(completedRunToJson) }
@@ -2724,14 +2947,22 @@ export class CoderLoopDaemon {
 		const resumeScheduler = await this.pauseSchedulerForMutation()
 		try {
 			const store = this.requireStore()
+			// Two selection attempts can both pass caller admission while the same review run is
+			// active. Re-read after entering the paused mutation section so the second dispatcher
+			// observes the first dispatcher's synchronous active -> stopped write instead of both
+			// acting on their pre-admission `chain` snapshots.
+			const currentChain = store.getChain(chain.id)
+			if (currentChain === null) throw new DaemonError("not_found", `chain ${chain.id} was not found`, { chainId: chain.id })
 			// Mirror handleChainStop: idempotent if already stopped.
-			if (chain.status === "stopped") {
-				await this.recordChainStopFromPhaseExitLifecycle(chain, { ...source, alreadyStopped: true, terminatedRunIds: [] })
-				return { chain, terminatedRuns: [] }
+			if (currentChain.status === "stopped") {
+				this.decisionFingerprints.release({ kind: "chain", chainId: currentChain.id })
+				await this.recordChainStopFromPhaseExitLifecycle(currentChain, { ...source, alreadyStopped: true, terminatedRunIds: [] })
+				return { chain: currentChain, terminatedRuns: [] }
 			}
-			assertChainCanTransition(chain, "item.exitAction:stop", "active", "stopped")
-			const stopped = store.updateChain(chain.id, { status: "stopped" })
-			const terminatedRuns = await this.terminateActiveRunsForChain(chain.id)
+			assertChainCanTransition(currentChain, "item.exitAction:stop", "active", "stopped")
+			const stopped = store.updateChain(currentChain.id, { status: "stopped" })
+			this.decisionFingerprints.release({ kind: "chain", chainId: currentChain.id })
+			const terminatedRuns = await this.terminateActiveRunsForChain(currentChain.id)
 			const terminatedRunIds = terminatedRuns.map((run) => run.runId)
 			await this.recordObservabilityEventIfChainNameIsValid(stopped, makeObservabilityEvent({
 				kind: "audit",
@@ -2744,7 +2975,7 @@ export class CoderLoopDaemon {
 				subject: source.subject,
 				payload: {
 					chainId: stopped.id,
-					fromStatus: chain.status,
+					fromStatus: currentChain.status,
 					toStatus: stopped.status,
 					terminatedRunIds,
 				},
@@ -2787,7 +3018,7 @@ export class CoderLoopDaemon {
 		declaredItemStatuses: readonly string[]
 		declaredChainActions: readonly string[]
 		outcome: "allow" | "deny"
-		reason: "admitted" | "phase-exits"
+		reason: "admitted" | "phase-exits" | "caller-attribution-mismatch"
 		subject: ObservabilitySubject
 	}): Promise<void> {
 		await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
@@ -2986,6 +3217,7 @@ export class CoderLoopDaemon {
 			presetForItem,
 			prompt: scheduler.prompt ?? presetPromptResolver,
 			onEvent: async (event) => {
+				this.decisionFingerprints.releaseForSchedulerEvent(event)
 				if (this.store !== null) {
 					await this.recordObservabilityEventForChainId(event.chainId, (chain) => schedulerEventToObservabilityEvent(chain, event))
 				}
@@ -4850,6 +5082,29 @@ function parseChainActionFromRequest(args: JsonObject): PresetPhaseChainAction {
 		throw new DaemonError("invalid_request", `item.exitAction: action must be one of: ${PRESET_PHASE_CHAIN_ACTIONS.join(", ")}; got: ${raw}`, { action: raw })
 	}
 	return found
+}
+
+function resolveItemExitActionAttribution(
+	caller: ItemMutationCaller,
+	claimedRunId: string,
+	claimedPhase: string,
+): ItemExitActionAttribution {
+	switch (caller.kind) {
+		case "operator":
+			return { kind: "operator", runId: claimedRunId, phase: claimedPhase, subject: caller.subject }
+		case "agent":
+			if (caller.runId === claimedRunId && caller.phase === claimedPhase) {
+				return { kind: "agent-admitted", runId: caller.runId, phase: caller.phase, subject: caller.subject }
+			}
+			return {
+				kind: "agent-mismatch",
+				runId: caller.runId,
+				phase: caller.phase,
+				claimedRunId,
+				claimedPhase,
+				subject: caller.subject,
+			}
+	}
 }
 
 // #405 exhaustiveness guards: forces consumers to update every site when the
