@@ -2097,6 +2097,237 @@ attemptTimeoutSeconds = 3600
 		}
 	})
 
+	test("credential-bound item.exitAction denies forged attribution and preserves overlapping already-stopped review attempts (#600)", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-600-exit-action-credential-truth`)
+		const loopDataRoot = resolve(root, "ld")
+		const iterationCapture = resolve(root, "iteration-credential.txt")
+		const iterationRelease = resolve(root, "iteration-release")
+		const reviewCapture = resolve(root, "review-credential.txt")
+		const fakeRunner = resolve(root, "fake-runner.ts")
+		const eventLog = resolve(root, "events.jsonl")
+		await mkdir(loopDataRoot, { recursive: true })
+		await writeFile(
+			fakeRunner,
+			`import { appendFile, writeFile } from "node:fs/promises"
+import { type as arkType } from "arktype"
+const { openSqliteStateStore } = await import(${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))})
+const IterationRunnerPromptBoundary = arkType({
+	itemId: "number",
+	runId: "string",
+	phase: arkType.unit("iteration"),
+	eventLog: "string",
+})
+const ReviewRunnerPromptBoundary = arkType({
+	itemId: "number",
+	runId: "string",
+	phase: arkType.unit("review"),
+	eventLog: "string",
+})
+const RunnerPromptBoundary = arkType.or(IterationRunnerPromptBoundary, ReviewRunnerPromptBoundary)
+type IterationRunnerPrompt = typeof IterationRunnerPromptBoundary.infer
+type ReviewRunnerPrompt = typeof ReviewRunnerPromptBoundary.infer
+type RunnerPrompt = IterationRunnerPrompt | ReviewRunnerPrompt
+function assertNeverRunnerPrompt(input: never): never {
+	throw new Error(\`unexpected runner prompt phase: \${JSON.stringify(input)}\`)
+}
+const promptIndex = Bun.argv.indexOf("-p")
+if (promptIndex === -1 || promptIndex + 1 >= Bun.argv.length) {
+	throw new Error("fake runner requires -p followed by a prompt value")
+}
+const prompt = Bun.argv[promptIndex + 1]
+if (prompt === undefined) throw new Error("fake runner requires -p followed by a prompt value")
+const promptPayloadEnd = prompt.indexOf("\\n")
+const promptPayload = prompt.slice(0, promptPayloadEnd === -1 ? prompt.length : promptPayloadEnd)
+const input: RunnerPrompt = RunnerPromptBoundary.assert(JSON.parse(promptPayload))
+const loopDataRoot = process.env.CODER_LOOP_DATA_DIR
+if (typeof loopDataRoot !== "string" || loopDataRoot.length === 0) {
+	throw new Error("fake runner requires CODER_LOOP_DATA_DIR")
+}
+const credential = process.env.CODER_LOOP_RUN_CRED
+if (typeof credential !== "string" || credential.length === 0) {
+	throw new Error("fake runner requires CODER_LOOP_RUN_CRED")
+}
+await appendFile(input.eventLog, JSON.stringify({ type: "running", itemId: input.itemId, runId: input.runId, phase: input.phase }) + "\\n")
+switch (input.phase) {
+	case "iteration": {
+		await writeFile(${JSON.stringify(iterationCapture)}, credential)
+		while (!(await Bun.file(${JSON.stringify(iterationRelease)}).exists())) await Bun.sleep(10)
+		const store = openSqliteStateStore({ loopDataRoot })
+		store.updateItem(input.itemId, { status: "in_progress", updatedAt: Math.floor(Date.now() / 1000) })
+		store.close()
+		break
+	}
+	case "review":
+		await writeFile(${JSON.stringify(reviewCapture)}, credential)
+		await new Promise((resolveWait) => setTimeout(resolveWait, 8_000))
+		break
+	default:
+		assertNeverRunnerPrompt(input)
+}
+process.exitCode = 0
+`,
+		)
+		const runnerEnv = { ...process.env }
+		delete runnerEnv.CODER_LOOP_DATA_DIR
+		delete runnerEnv.CODER_LOOP_RUN_CRED
+		const validIterationPrompt = JSON.stringify({ itemId: 60001, runId: "boundary-run", phase: "iteration", eventLog })
+		const invalidPhasePrompt = JSON.stringify({ itemId: 60001, runId: "boundary-run", phase: "unknown", eventLog })
+		const boundaryCases = [
+			{
+				name: "missing -p",
+				proc: Bun.spawn({ cmd: ["bun", fakeRunner], cwd: REPO_ROOT, env: { ...runnerEnv, CODER_LOOP_DATA_DIR: loopDataRoot, CODER_LOOP_RUN_CRED: "boundary-credential" }, stdout: "pipe", stderr: "pipe" }),
+				expectedError: "requires -p followed by a prompt value",
+			},
+			{
+				name: "missing prompt value",
+				proc: Bun.spawn({ cmd: ["bun", fakeRunner, "-p"], cwd: REPO_ROOT, env: { ...runnerEnv, CODER_LOOP_DATA_DIR: loopDataRoot, CODER_LOOP_RUN_CRED: "boundary-credential" }, stdout: "pipe", stderr: "pipe" }),
+				expectedError: "requires -p followed by a prompt value",
+			},
+			{
+				name: "missing data dir",
+				proc: Bun.spawn({ cmd: ["bun", fakeRunner, "-p", validIterationPrompt], cwd: REPO_ROOT, env: { ...runnerEnv, CODER_LOOP_RUN_CRED: "boundary-credential" }, stdout: "pipe", stderr: "pipe" }),
+				expectedError: "requires CODER_LOOP_DATA_DIR",
+			},
+			{
+				name: "missing credential",
+				proc: Bun.spawn({ cmd: ["bun", fakeRunner, "-p", validIterationPrompt], cwd: REPO_ROOT, env: { ...runnerEnv, CODER_LOOP_DATA_DIR: loopDataRoot }, stdout: "pipe", stderr: "pipe" }),
+				expectedError: "requires CODER_LOOP_RUN_CRED",
+			},
+			{
+				name: "unknown phase",
+				proc: Bun.spawn({ cmd: ["bun", fakeRunner, "-p", invalidPhasePrompt], cwd: REPO_ROOT, env: { ...runnerEnv, CODER_LOOP_DATA_DIR: loopDataRoot, CODER_LOOP_RUN_CRED: "boundary-credential" }, stdout: "pipe", stderr: "pipe" }),
+				expectedError: "phase",
+			},
+		]
+		for (const boundaryCase of boundaryCases) {
+			const [exitCode, stderr] = await Promise.all([
+				boundaryCase.proc.exited,
+				new Response(boundaryCase.proc.stderr).text(),
+			])
+			expect(exitCode, boundaryCase.name).not.toBe(0)
+			expect(stderr, boundaryCase.name).toContain(boundaryCase.expectedError)
+		}
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			shutdownGraceMs: 100,
+			scheduler: {
+				enabled: true,
+				intervalMs: 20,
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
+				presetDir: PRESET_DIR,
+				worktreeManager: async ({ chain, repoCwd }) => {
+					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+					await mkdir(worktreePath, { recursive: true })
+					return worktreePath
+				},
+				prompt: ({ item, runId, phase }) => JSON.stringify({ itemId: item.id, runId, phase, eventLog }),
+				chainCompleteTriggerForChain: () => null,
+			},
+		})
+		try {
+			const snapshot = daemon.snapshot()
+			const chain = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("chain.create", {
+				name: "exit-action-credential-truth-chain",
+				preset: "gh-issue-pr-iteration",
+				repository: "mouriya-s-lab/coder-loop",
+			}))).chain)
+			const chainId = numberValue(chain.id)
+			const item = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
+				chainId,
+				itemId: "60001",
+				repoCwd: REPO_ROOT,
+				preset: "gh-issue-pr-iteration",
+			}))).item)
+			const itemId = numberValue(item.id)
+
+			await waitFor(async () => {
+				try { return (await readFile(iterationCapture, "utf-8")).trim() } catch { return "" }
+			}, (value) => value.length > 0, 8_000)
+			const iterationCredential = (await readFile(iterationCapture, "utf-8")).trim()
+			const iterationStatus = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("daemon.status"))).daemon)
+			const iterationRuns = Array.isArray(iterationStatus.activeRuns) ? iterationStatus.activeRuns : []
+			const iterationRun = iterationRuns.map(record).find((run) => typeof run.runId === "string" && run.runId.includes("-iteration-item-"))
+			if (iterationRun === undefined) throw new Error("expected active iteration run")
+			const iterationRunId = stringValue(iterationRun.runId)
+
+			const forged = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.exitAction", {
+				itemId,
+				agentRunId: iterationRunId,
+				agentPhase: "review",
+				action: "stop",
+				agentCredential: iterationCredential,
+			}))
+			expect(forged.ok).toBe(false)
+			if (!forged.ok) {
+				expect(forged.error.code).toBe("invalid_caller")
+				expect(forged.error.message).toContain("phase")
+				expect(forged.error.details).toMatchObject({
+					boundRunId: iterationRunId,
+					boundPhase: "iteration",
+					claimedRunId: iterationRunId,
+					claimedPhase: "review",
+				})
+			}
+			const stillActive = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("chain.status", { chainId }))).chain)
+			expect(stillActive.status).toBe("active")
+
+			const eventsFile = resolveLoopDataPaths({ loopDataRoot }).eventsFile
+			const forgedEvents = (await queryObservabilityEvents(eventsFile, { type: "item.exit.selected" })).events
+			const forgedDeny = forgedEvents.find((event) => event.type === "item.exit.selected" && event.payload.reason === "caller-attribution-mismatch")
+			if (forgedDeny?.type !== "item.exit.selected") throw new Error("expected caller-attribution-mismatch item.exit.selected audit")
+			expect(forgedDeny.phase).toBe("iteration")
+			expect(forgedDeny.runId).toBe(iterationRunId)
+			expect(forgedDeny.payload.phase).toBe("iteration")
+			expect(forgedDeny.payload.declaredChainActions).toEqual([])
+			expect(forgedDeny.subject).toEqual({ kind: "agent", runId: iterationRunId, phase: "iteration" })
+			await writeFile(iterationRelease, "release")
+
+			await waitFor(async () => {
+				try { return (await readFile(reviewCapture, "utf-8")).trim() } catch { return "" }
+			}, (value) => value.length > 0, 12_000)
+			const reviewCredential = (await readFile(reviewCapture, "utf-8")).trim()
+			const reviewStatus = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("daemon.status"))).daemon)
+			const reviewRuns = Array.isArray(reviewStatus.activeRuns) ? reviewStatus.activeRuns : []
+			const reviewRun = reviewRuns.map(record).find((run) => typeof run.runId === "string" && run.runId.includes("-review-item-"))
+			if (reviewRun === undefined) throw new Error("expected active review run")
+			const reviewRunId = stringValue(reviewRun.runId)
+
+			const stopArgs: JsonObject = {
+				itemId,
+				agentRunId: reviewRunId,
+				agentPhase: "review",
+				action: "stop",
+				agentCredential: reviewCredential,
+			}
+			const stopResponses = await Promise.all([
+				sendDaemonRequest(snapshot.socketPath, daemonRequest("item.exitAction", stopArgs)),
+				sendDaemonRequest(snapshot.socketPath, daemonRequest("item.exitAction", stopArgs)),
+			])
+			const acceptedStops = stopResponses.map(expectOk)
+			expect(acceptedStops.map((accepted) => record(accepted.chain).status)).toEqual(["stopped", "stopped"])
+			const finalEvents = (await queryObservabilityEvents(eventsFile)).events
+			const acceptedSelections = finalEvents.filter((event) => event.type === "item.exit.selected" && event.payload.outcome === "allow")
+			expect(acceptedSelections).toHaveLength(2)
+			for (const acceptedSelection of acceptedSelections) {
+				if (acceptedSelection.type !== "item.exit.selected") throw new Error("expected allowed item.exit.selected audit")
+				expect(acceptedSelection.phase).toBe("review")
+				expect(acceptedSelection.runId).toBe(reviewRunId)
+				expect(acceptedSelection.subject).toEqual({ kind: "agent", runId: reviewRunId, phase: "review" })
+			}
+			const stopLifecycleEvents = finalEvents.filter((event) => event.type === "chain.stop.from_phase_exit")
+			expect(stopLifecycleEvents).toHaveLength(2)
+			for (const stopLifecycle of stopLifecycleEvents) {
+				if (stopLifecycle.type !== "chain.stop.from_phase_exit") throw new Error("expected chain.stop.from_phase_exit lifecycle event")
+				expect(stopLifecycle.phase).toBe("review")
+				expect(stopLifecycle.runId).toBe(reviewRunId)
+				expect(stopLifecycle.subject).toEqual({ kind: "agent", runId: reviewRunId, phase: "review" })
+			}
+			expect(stopLifecycleEvents.map((event) => event.type === "chain.stop.from_phase_exit" && event.payload.alreadyStopped).sort()).toEqual([false, true])
+		} finally {
+			await daemon.stop()
+		}
+	}, 30_000)
+
 	test("socket item.update rejects immutable selectors and daemon-owned fields", async () => {
 		const fixture = await startFixture("item-update-strict-fields", { schedulerEnabled: false })
 		try {
