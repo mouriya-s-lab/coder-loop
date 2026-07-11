@@ -1,6 +1,6 @@
 # Step: e2e
 
-The e2e subagent for one coder-loop iteration. The deliverable is the formal deliverable evidence: the real thing run directly, the runtime left standing for review, and the runtime manifest that makes it re-runnable. Unit/integration results and acceptance-row outputs from verify are supporting layers only.
+The e2e subagent for one coder-loop iteration. The deliverable is the formal deliverable evidence: the real thing run directly and one explicitly typed runtime handoff. Unit/integration results and acceptance-row outputs from verify are supporting layers only.
 
 ## Task
 
@@ -17,7 +17,7 @@ From your dispatch message: `ISSUE`, `REPO`, `RUN_ID`, `AGENT_CWD` (the issue-br
    cd "$E2E_WT"   # all subsequent build/run work happens here
    ```
 
-   The worktree is part of the standing environment: record its path in the runtime manifest and do **not** remove it — review tears it down (`git worktree remove`) together with the services.
+   Record the detached worktree and its exact clean source SHA. It may remain owned by a durable runtime, or serve as the immutable reconstruction source for a recreatable handoff.
 
    Stand the deliverable's runtime up for real: install what is missing, run required builds, start the services. Auth is yours to resolve per the two-case rule in `quality/evidence.md` — standalone program → mint the auth while starting the environment; service plugin → resolve the IaC-provisioned auth from this machine's stores. Neither auth nor binaries is ever a reason this step doesn't happen. Record every setup command and exit.
 3. **Run the real thing, directly.**
@@ -26,7 +26,11 @@ From your dispatch message: `ISSUE`, `REPO`, `RUN_ID`, `AGENT_CWD` (the issue-br
    - **Script e2e is forbidden**: a test script/harness wrapping the calls is integration testing whatever its filename.
 
    A mismatch (observed ≠ expected, deferred row failing) is a result to record, not a thing to fix — you never patch product code. Mismatches reported raw, no softening.
-4. **Leave the runtime standing, write the manifest.** The e2e runtime you started **stays up for review** — teardown is review's job, not yours. Document the standing environment and everything needed to re-run, as the **runtime manifest**: your e2e worktree path (review removes it at teardown), binaries (+ how installed), services + start commands, credentials by resolution location only (keychain entry / config path — never the secret value), ports, env vars, fixtures, live PIDs + log paths + stop commands. Stop only scratch processes review has no use for, and list them. This manifest is what makes "review couldn't run it" impossible — an omitted entry is a gap review will charge to this run.
+4. **Choose exactly one runtime handoff kind and write the manifest.** This is a closed union; mixed or unstated lifetime is invalid.
+   - `durable`: legal only when a supervisor/service manager owns the runtime beyond this phase. Record clean `sourceSha`, `worktree`, a stable `ownerRef` (systemd unit, container/stack id, daemon-owned resource), `livenessCommand`, `behaviorCommand`, `logPath`, and `stopCommand`. A bare child PID owned by this agent is **not durable**.
+   - `recreatable`: use when the phase owns an ordinary child process or no process must remain. Stop phase-owned processes, then record clean `sourceSha`, `worktree`, and complete `setupCommands`, `startCommand`, `readinessCommand`, `behaviorCommand`, `logPath`, and `stopCommand`. The old PID is historical evidence only and MUST NOT be described as live or standing.
+
+   Both kinds retain real auth resolution locations, real entry point, readiness, behavior, and teardown facts. The source SHA must equal the checked-out committed tree; dirty/uncommitted source is an invalid handoff.
 5. **Land the artifacts and report.** Everything lands under `EVIDENCE_DIR`. You had no reason to commit, push, open PRs, or write GitHub/queue state — confirm you did not.
 
 ## Report
@@ -46,11 +50,16 @@ Observed: <the end-to-end behavior seen, with transcript/log/screenshot artifact
 when none were deferred>
 
 ## Runtime manifest
+Handoff kind: durable / recreatable
+Source SHA: <full committed SHA>
+Worktree: <absolute path>
 Binaries: <name + how installed — or `none beyond toolchain`>
 Services: <start command per service — or `none`>
 Auth: <resolution location only (keychain entry / config path) — never the secret value — or `none`>
 Ports/env/fixtures: <list or `none`>
-Standing environment: <PID + port + log path + stop command per process left up — or `none`>
+Durable ownership: <ownerRef + livenessCommand, only for durable; otherwise `not applicable`>
+Recreation: <setupCommands + startCommand + readinessCommand, only for recreatable; otherwise `not applicable`>
+Behavior/log/stop: <behaviorCommand + logPath + stopCommand>
 
 ## Artifacts
 <path → what it proves, one line each>
@@ -66,6 +75,7 @@ Report structurally missing any section → send back before judging substance.
 
 - **Direct or absent** — the `E2E run` section must show the real entry point driven (operator-style program invocation, or an agent-browser walk of the real UI) with this run's own artifacts. A script/harness presented as e2e is integration testing — treat the e2e as missing and send it back. Unit/integration results never substitute; "no auth"/"no binary" never excuses (evidence.md's two-case rule guarantees auth exists — a report claiming otherwise has skipped setup; send it back with the setup it owes).
 - **Deferred rows closed** — every browser-Env row from the dispatch's `Step focus` appears here with an observed-vs-Expect verdict from the real UI walk (and once the verify report arrives, its deferred set must be covered too — same rows by construction). A failing row is a product failure: route back to implementation, then re-dispatch verify and e2e in parallel for the full contract.
-- **Manifest re-runnable** — judge it by one question: could the review side re-run this e2e from the manifest alone? Vague entries ("auth: configured") or secret values pasted inline are both gaps — secret values are a hard gap per `quality/evidence.md`.
+- **Lifetime ADT is valid** — exactly one kind is declared. `durable` requires stable ownership plus liveness; `recreatable` requires setup/start/readiness and no live claim about the old PID. Missing, mixed, or extra-kind shapes are gaps.
+- **Manifest re-runnable** — judge it by one question: could the review side either verify durable ownership or recreate from the pinned clean SHA using the manifest alone? Vague entries ("auth: configured") or secret values pasted inline are both gaps.
 - **Mismatch honesty** — mismatches reported raw; cosmetic-handwave is a hard fail per `quality/honesty.md`.
-- **Standing environment documented, not torn down** — the runtime stays up for review; a report that killed it (or omits its PIDs/stop commands) recreates the "review couldn't run it" failure — send it back to restart and document.
+- **Ownership matches cleanup** — durable runtime remains under its declared supervisor owner; recreatable phase-owned runtime is stopped and carries no standing claim. There is no third "happened to survive" state.
