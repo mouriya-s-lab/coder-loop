@@ -2089,66 +2089,71 @@ export class CoderLoopDaemon {
 		const itemId = issue.startsWith("#") ? issue.slice(1) : issue
 		if (itemId === "") throw new DaemonError("invalid_request", `queue.unblock: issue must contain an id after #`, { issue: issueRaw })
 		const dryRun = optionalBoolean(args, "dryRun") ?? false
-		const { preset } = await this.loadedPresetForChain(chain, "queue.unblock")
-		const store = this.requireStore()
-		const item = store.getItemById(chain.id, itemId)
-		if (item === null) {
-			throw new DaemonError("not_found", `queue.unblock: item ${issue} not found in chain ${chain.name}`, { chainName: chain.name, itemId })
-		}
-		if (!preset.statuses.unblockable.includes(item.status)) {
+		const resumeScheduler = await this.pauseSchedulerForMutation()
+		try {
+			const { preset } = await this.loadedPresetForChain(chain, "queue.unblock")
+			const store = this.requireStore()
+			const item = store.getItemById(chain.id, itemId)
+			if (item === null) {
+				throw new DaemonError("not_found", `queue.unblock: item ${issue} not found in chain ${chain.name}`, { chainName: chain.name, itemId })
+			}
+			if (!preset.statuses.unblockable.includes(item.status)) {
+				return {
+					mutation: {
+						changed: false,
+						issue,
+						reason: "not_unblockable",
+						status: item.status,
+					},
+				}
+			}
+			const entryStatus = preset.statuses.entry
+			const current = store.getCurrentRun(chain.id)
+			// CurrentRunRecord stores the active item identifier inside `extra.itemId` (the same shape
+			// the scheduler writes when it spawns); resolve it as JsonValue and only match when it's
+			// the numeric rowid the store inserted.
+			const currentExtraItemId = current === null ? null : current.extra.itemId
+			const clearedCurrent = typeof currentExtraItemId === "number"
+				&& Number.isInteger(currentExtraItemId)
+				&& currentExtraItemId === item.id
+			if (!dryRun) {
+				store.updateItem(item.id, {
+					// #397: queue.unblock is operator-issued — restore the item to the preset's entry
+					// status. The value comes from preset.statuses.entry (engine-derived), so we brand
+					// through the narrow engine-lifecycle constructor.
+					status: engineLifecycleAdmittedItemStatus(entryStatus, "queue.unblock-entry-restore"),
+					updatedAt: unixSeconds(),
+				})
+				if (clearedCurrent) store.clearCurrentRun(chain.id)
+				// Mirror the #406 operator-attribution audit shape the old CLI emitted so external
+				// tooling that watches `item.mutation.caller_admission` keeps seeing the unblock.
+				await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
+					kind: "audit",
+					type: "item.mutation.caller_admission",
+					chain: chain.name,
+					item: item.id,
+					subject: { kind: "operator" },
+					payload: {
+						rowId: item.id,
+						itemId,
+						claimedRunId: null,
+						claimedPhase: null,
+						outcome: "allow",
+						reason: "operator",
+					},
+				}))
+			}
 			return {
 				mutation: {
-					changed: false,
+					changed: true,
 					issue,
-					reason: "not_unblockable",
-					status: item.status,
+					beforeStatus: item.status,
+					afterStatus: entryStatus,
+					clearedCurrent,
 				},
 			}
-		}
-		const entryStatus = preset.statuses.entry
-		const current = store.getCurrentRun(chain.id)
-		// CurrentRunRecord stores the active item identifier inside `extra.itemId` (the same shape
-		// the scheduler writes when it spawns); resolve it as JsonValue and only match when it's
-		// the numeric rowid the store inserted.
-		const currentExtraItemId = current === null ? null : current.extra.itemId
-		const clearedCurrent = typeof currentExtraItemId === "number"
-			&& Number.isInteger(currentExtraItemId)
-			&& currentExtraItemId === item.id
-		if (!dryRun) {
-			store.updateItem(item.id, {
-				// #397: queue.unblock is operator-issued — restore the item to the preset's entry
-				// status. The value comes from preset.statuses.entry (engine-derived), so we brand
-				// through the narrow engine-lifecycle constructor.
-				status: engineLifecycleAdmittedItemStatus(entryStatus, "queue.unblock-entry-restore"),
-				updatedAt: unixSeconds(),
-			})
-			if (clearedCurrent) store.clearCurrentRun(chain.id)
-			// Mirror the #406 operator-attribution audit shape the old CLI emitted so external
-			// tooling that watches `item.mutation.caller_admission` keeps seeing the unblock.
-			await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
-				kind: "audit",
-				type: "item.mutation.caller_admission",
-				chain: chain.name,
-				item: item.id,
-				subject: { kind: "operator" },
-				payload: {
-					rowId: item.id,
-					itemId,
-					claimedRunId: null,
-					claimedPhase: null,
-					outcome: "allow",
-					reason: "operator",
-				},
-			}))
-		}
-		return {
-			mutation: {
-				changed: true,
-				issue,
-				beforeStatus: item.status,
-				afterStatus: entryStatus,
-				clearedCurrent,
-			},
+		} finally {
+			resumeScheduler()
 		}
 	}
 
