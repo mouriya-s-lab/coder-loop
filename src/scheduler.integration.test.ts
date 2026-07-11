@@ -95,6 +95,24 @@ test("keeps lightweight orchestration running during heavyweight validation", as
 	expect(events).toEqual(["metadata-and-diff-audit", "validation-start"])
 })
 
+test("does not miss a host resource release while persisting the wait event", async () => {
+	const state = createSchedulerState()
+	expect(enterHostResourceCriticalSection(state, {
+		resource: "heavyweight-validation", chainId: 1, itemId: 1, phase: "iteration",
+	}, "owner").kind).toBe("entered")
+	expect(enterHostResourceCriticalSection(state, {
+		resource: "heavyweight-validation", chainId: 2, itemId: 2, phase: "review",
+	}, "waiter").kind).toBe("waiting")
+	const observedVersion = state.hostResourceVersion
+	// The owner release represents the filesystem-await window between wait classification
+	// and listener registration in the daemon handler.
+	releaseHostResourcesForRun(state, "owner")
+	await waitForHostResourceChange(state, observedVersion)
+	expect(enterHostResourceCriticalSection(state, {
+		resource: "heavyweight-validation", chainId: 2, itemId: 2, phase: "review",
+	}, "waiter").kind).toBe("entered")
+})
+
 // #397 test brand helper — see install-commands.test.ts for rationale.
 function runtimeStatus(value: string) {
 	return engineLifecycleAdmittedItemStatus(parseInternalStatus(value, "test.status"), "test")

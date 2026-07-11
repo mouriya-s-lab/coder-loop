@@ -168,6 +168,7 @@ export type SchedulerState = {
 	hostResourceOwners: Map<string, SchedulerHostResourceOwner>
 	hostResourceWaits: Map<number, SchedulerHostResourceWait>
 	nextHostResourceWaitOrder: number
+	hostResourceVersion: number
 	hostResourceChangeListeners: Set<() => void>
 }
 
@@ -472,6 +473,7 @@ export function createSchedulerState(): SchedulerState {
 		hostResourceOwners: new Map(),
 		hostResourceWaits: new Map(),
 		nextHostResourceWaitOrder: 0,
+		hostResourceVersion: 0,
 		hostResourceChangeListeners: new Set(),
 	}
 }
@@ -509,8 +511,13 @@ export function enterHostResourceCriticalSection(
 	return { kind: "entered", owner }
 }
 
-export async function waitForHostResourceChange(state: SchedulerState): Promise<void> {
+export async function waitForHostResourceChange(state: SchedulerState, observedVersion: number = state.hostResourceVersion): Promise<void> {
+	if (state.hostResourceVersion !== observedVersion) return
 	await new Promise<void>((resolveChange) => {
+		if (state.hostResourceVersion !== observedVersion) {
+			resolveChange()
+			return
+		}
 		const listener = () => {
 			state.hostResourceChangeListeners.delete(listener)
 			resolveChange()
@@ -520,6 +527,7 @@ export async function waitForHostResourceChange(state: SchedulerState): Promise<
 }
 
 function notifyHostResourceChange(state: SchedulerState): void {
+	state.hostResourceVersion++
 	for (const listener of [...state.hostResourceChangeListeners]) listener()
 }
 
@@ -1286,6 +1294,7 @@ async function spawnSchedulerRun(
 		activeRun.markPrepared()
 		return activeRun
 	} catch (error) {
+		removeHostResourceWaiterForItem(options.state, item.id)
 		if (runId !== null) releaseHostResourcesForRun(options.state, runId)
 		const failure = await cleanupFailedRunPreparation(options, chain, item, slot, {
 			runId,
@@ -1494,6 +1503,7 @@ function attachRunCloseHandler(
 		terminatorCleanup = installedGc.terminatorCleanup
 
 		child.on("close", (code) => {
+			removeHostResourceWaiterForItem(options.state, item.id)
 			releaseHostResourcesForRun(options.state, runId)
 			lifecycleGc?.cleanup()
 

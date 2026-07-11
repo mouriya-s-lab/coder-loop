@@ -1620,12 +1620,13 @@ export class CoderLoopDaemon {
 				}))
 				return { resource: resolved.resource, binding: resolved.binding, owner: entry.owner }
 			}
+			const observedVersion = this.schedulerState.hostResourceVersion
 			if (entry.owner !== null) await this.recordObservabilityEventIfChainNameIsValid(resolved.chain, makeObservabilityEvent({
 				kind: "decision", type: "host_resource.wait", chain: resolved.chain.name, item: resolved.item.id,
 				runId: resolved.caller.runId, phase: resolved.caller.phase, subject: resolved.caller.subject,
 				payload: { rowId: resolved.item.id, resource: resolved.resource, ownerRunId: entry.owner.runId, ownerChainId: entry.owner.chainId, ownerItemId: entry.owner.itemId },
 			}))
-			await waitForHostResourceChange(this.schedulerState)
+			await waitForHostResourceChange(this.schedulerState, observedVersion)
 		}
 	}
 

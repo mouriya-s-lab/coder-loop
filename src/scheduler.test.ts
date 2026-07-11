@@ -544,6 +544,27 @@ describe("scheduler", () => {
 		expect(requestHostResource(state, { resource: "shared", chainId: 6, itemId: 6, phase: "phase-a" })).toEqual({ kind: "available" })
 	})
 
+	test("removes a blocked critical-section waiter when its run closes", async () => {
+		const fixture = await createFixture("host-resource-run-close-waiter")
+		try {
+			const chain = createChain(fixture.store, "host-resource-run-close-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 640_101, repoCwd: "/repo/close", sleepMs: 40 })
+			const tick = await schedulerTick(fixture.options())
+			expect(tick.spawnedRuns).toHaveLength(1)
+			fixture.state.hostResourceOwners.set("heavyweight-validation", {
+				resource: "heavyweight-validation", runId: "other-owner", chainId: 99, itemId: 99, phase: "validate",
+			})
+			expect(requestHostResource(fixture.state, {
+				resource: "heavyweight-validation", chainId: chain.id, itemId: item.id, phase: "iteration",
+			}).kind).toBe("waiting")
+			expect(fixture.state.hostResourceWaits.has(item.id)).toBe(true)
+			await tick.spawnedRuns[0]!.closed
+			expect(fixture.state.hostResourceWaits.has(item.id)).toBe(false)
+		} finally {
+			fixture.store.close()
+		}
+	})
+
 	test("slot busy skip", async () => {
 		const fixture = await createFixture("busy")
 		try {
