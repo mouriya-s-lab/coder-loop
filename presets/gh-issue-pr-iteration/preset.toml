@@ -127,6 +127,7 @@ roles  = ["common", "quality", "iter"]
 
 [[phases]]
 name   = "review"
+hostExclusiveResource = "heavyweight-validation"
 prompt = "review-entry.md"
 runner = "codex"
 model  = "gpt-5.6-sol"

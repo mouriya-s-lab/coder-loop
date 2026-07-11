@@ -30,6 +30,7 @@ const ObservabilityEventTypeBoundary = arkType.or(
 	arkType.unit("queue.terminal"),
 	arkType.unit("item.dependency_unblocked"),
 	arkType.unit("slot.busy"),
+	arkType.unit("host_resource.wait"),
 	arkType.unit("item.dependency_wait"),
 	arkType.unit("item.backoff"),
 	arkType.unit("chain.complete_trigger"),
@@ -297,6 +298,12 @@ const ObservabilityEventBoundary = arkType.or(
 		kind: arkType.unit("decision"),
 		type: arkType.unit("slot.busy"),
 		payload: { slotKey: "string", chainId: "number", repoCwd: "string", activeRunId: "string" },
+	},
+	{
+		...EventBaseBoundary,
+		kind: arkType.unit("decision"),
+		type: arkType.unit("host_resource.wait"),
+		payload: { rowId: "number", resource: "string", ownerRunId: "string", ownerChainId: "number", ownerItemId: "number" },
 	},
 	{
 		...EventBaseBoundary,
@@ -847,6 +854,8 @@ export function observabilityDecisionKey(event: Extract<ObservabilityEvent, { ki
 	switch (event.type) {
 		case "slot.busy":
 			return `${event.type}:${event.chain ?? String(event.payload.chainId)}:${event.payload.slotKey}`
+		case "host_resource.wait":
+			return `${event.type}:${event.chain ?? ""}:${event.item ?? event.payload.rowId}:${event.payload.resource}`
 		case "item.dependency_wait":
 			// #419 review I2: rowid moved from `payload.itemId` to `payload.rowId`.
 			return `${event.type}:${event.chain ?? ""}:${event.item ?? event.payload.rowId}`
@@ -863,6 +872,8 @@ export function observabilityDecisionFingerprint(event: Extract<ObservabilityEve
 	switch (event.type) {
 		case "slot.busy":
 			return JSON.stringify({ activeRunId: event.payload.activeRunId, repoCwd: event.payload.repoCwd })
+		case "host_resource.wait":
+			return JSON.stringify({ resource: event.payload.resource, ownerRunId: event.payload.ownerRunId })
 		case "item.dependency_wait":
 			return JSON.stringify({ dependsOn: event.payload.dependsOn, unsatisfied: event.payload.unsatisfied })
 		case "item.backoff":
@@ -964,6 +975,8 @@ function renderDecisionEvent(event: Extract<ObservabilityEvent, { kind: "decisio
 	switch (event.type) {
 		case "slot.busy":
 			return `${event.ts} decision slot.busy chain=${event.chain ?? event.payload.chainId} run=${event.payload.activeRunId} slot=${JSON.stringify(event.payload.slotKey)}`
+		case "host_resource.wait":
+			return `${event.ts} decision host_resource.wait chain=${event.chain ?? "-"} item=${event.item ?? event.payload.rowId} phase=${event.phase ?? "-"} resource=${event.payload.resource} owner=${event.payload.ownerRunId}`
 		case "item.dependency_wait":
 			// #419 review I2: rowid moved from `payload.itemId` to `payload.rowId`.
 			return `${event.ts} decision item.dependency_wait chain=${event.chain ?? "-"} item=${event.item ?? event.payload.rowId} unsatisfied=${event.payload.unsatisfied.join(",")}`

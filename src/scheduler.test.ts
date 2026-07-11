@@ -367,6 +367,44 @@ describe("scheduler", () => {
 		}
 	})
 
+	test("backpressures heavyweight validation across chains", async () => {
+		const fixture = await createFixture("host-resource-backpressure")
+		try {
+			const chainA = createChain(fixture.store, "host-resource-chain-a")
+			const chainB = createChain(fixture.store, "host-resource-chain-b")
+			const itemA = createItem(fixture.store, chainA, { issueNumber: 622_001, repoCwd: "/repo/a", sleepMs: 80 })
+			const itemB = createItem(fixture.store, chainB, { issueNumber: 622_002, repoCwd: "/repo/b", sleepMs: 80, writeStatus: "done" })
+			const options = fixture.options({ phase: "review" })
+
+			const firstTick = await schedulerTick(options)
+			expect(firstTick.spawnedRuns.map((run) => run.itemId)).toEqual([itemA.id])
+			expect([...fixture.state.hostResourceOwners.values()]).toEqual([
+				expect.objectContaining({ resource: "heavyweight-validation", itemId: itemA.id, phase: "review" }),
+			])
+			expect(fixture.state.hostResourceWaits.get(itemB.id)).toEqual(expect.objectContaining({
+				resource: "heavyweight-validation",
+				ownerItemId: itemA.id,
+				phase: "review",
+			}))
+			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({
+				type: "host_resource.wait",
+				itemId: itemB.id,
+				ownerItemId: itemA.id,
+			}))
+
+			await firstTick.spawnedRuns[0]!.closed
+			expect(fixture.state.hostResourceOwners.size).toBe(0)
+
+			const secondTick = await schedulerTick(options)
+			expect(secondTick.spawnedRuns.map((run) => run.itemId)).toEqual([itemB.id])
+			await secondTick.spawnedRuns[0]!.closed
+			expect(fixture.state.hostResourceOwners.size).toBe(0)
+			expect(fixture.state.hostResourceWaits.has(itemB.id)).toBe(false)
+		} finally {
+			fixture.store.close()
+		}
+	})
+
 	test("slot busy skip", async () => {
 		const fixture = await createFixture("busy")
 		try {
