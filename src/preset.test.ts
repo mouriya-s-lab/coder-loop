@@ -14,6 +14,7 @@ import {
 	parsePreset,
 	prunePresetMaterializedRoot,
 	renderFragmentIndex,
+	renderRuntimeInputsDoc,
 	resolveBinding,
 	sliceFragmentsForPhase,
 	substitutePresetRootToken,
@@ -26,12 +27,13 @@ import {
 	type ResolveContext,
 	type RuntimeBindings,
 } from "./loop"
-import { parseInternalStatus } from "./runtime-data"
+import { parseInternalStatus, storedItemExtra } from "./runtime-data"
 import type { ItemRecord } from "./sqlite-state"
 import type { BoundaryRecord } from "./boundary-types"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const BUNDLED_PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
+const REAL_E2E_MINIMAL_PRESET_DIR = resolve(REPO_ROOT, "presets/real-e2e-minimal")
 
 function status(value: string) {
 	return parseInternalStatus(value, "test.status")
@@ -45,6 +47,33 @@ function status(value: string) {
 function makeMinimalRuntimeBindings(): RuntimeBindings {
 	const placeholder = Object.fromEntries(ENGINE_RUNTIME_BINDING_KEYS.map((key) => [key, ""])) as Record<string, string>
 	return placeholder as RuntimeBindings
+}
+
+function makeItemRecord(extra: ItemRecord["extra"] = storedItemExtra({})): ItemRecord {
+	return {
+		id: 1,
+		chainId: 1,
+		itemId: "539",
+		repoCwd: REPO_ROOT,
+		status: status("queued"),
+		attempts: 0,
+		position: 0,
+		title: null,
+		priority: null,
+		lastRunId: null,
+		sessionIds: {},
+		issueFile: null,
+		evidenceDir: null,
+		agentCwd: null,
+		runner: null,
+		phase: null,
+		preset: null,
+		presetPath: null,
+		extra,
+		createdAt: 0,
+		updatedAt: 0,
+		statusUpdatedAt: 0,
+	}
 }
 
 const EXPECTED_FRAGMENTS = [
@@ -254,6 +283,31 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		// covers the absence of the retired bindings positively.
 	})
 
+	test("bundled preset declares issue doc prefix", async () => {
+		const presets = await Promise.all([
+			loadPreset(BUNDLED_PRESET_DIR),
+			loadPreset(REAL_E2E_MINIMAL_PRESET_DIR),
+		])
+		const decoratedIssueBindings = presets.flatMap((preset) => preset.phases.flatMap((phase) => {
+			const variable = phase.variables.find((candidate) => candidate.key === "ISSUE" && candidate.doc !== null)
+			return variable === undefined ? [] : [{ preset, phase, variable }]
+		}))
+		expect(decoratedIssueBindings).toHaveLength(5)
+
+		for (const { preset, phase, variable } of decoratedIssueBindings) {
+			const doc = variable.doc
+			if (doc === null) throw new Error(`decorated ISSUE binding in ${preset.name}/${phase.name} has no doc declaration`)
+			expect(doc).toMatchObject({ prefix: "#", suffix: "", style: "code" })
+			const ctx: ResolveContext = {
+				item: makeItemRecord(storedItemExtra({ issue: 539 })),
+				chain: { repository: "mouriya-s-lab/coder-loop", baseBranch: "main", requireBrowserEvidence: false },
+				runtime: makeMinimalRuntimeBindings(),
+				preset,
+			}
+			expect(renderRuntimeInputsDoc(phase, ctx)).toContain(`- ${doc.label}: \`#539\``)
+		}
+	})
+
 	// #457 acceptance row 2: bundled preset's umbrella binding resolves through the declared
 	// chain-binding mechanism (metadata.bindings.umbrellaRepo / umbrellaIssue) rather than the
 	// retired engine-runtime facts (runtime.chainUmbrellaRepo / chainUmbrellaIssue). Rendering
@@ -405,6 +459,73 @@ describe("parsePreset schema validation", () => {
 			{ name: "p", prompt: "p.md", variables: { K: "item.id" } },
 		],
 		agent: { binary: "echo" },
+	})
+
+	test("runtime input doc decoration is schema driven", () => {
+		const root: BoundaryRecord = {
+			...minimalRoot(),
+			phases: [{
+				name: "p",
+				prompt: "p.md",
+				variables: {
+					ISSUE: { source: "runtime.runId", label: "Named issue", prefix: "ref:", suffix: "!", style: "plain" },
+					TICKET: { source: "runtime.runId", label: "Ticket", prefix: "#", suffix: " after", style: "code" },
+				},
+			}],
+		}
+		const preset = parsePreset(root, "/tmp")
+		const phase = preset.phases[0]!
+		expect(phase.variables.map((variable) => variable.doc)).toEqual([
+			{ label: "Named issue", prefix: "ref:", suffix: "!", style: "plain", blankBefore: false },
+			{ label: "Ticket", prefix: "#", suffix: " after", style: "code", blankBefore: false },
+		])
+		const runtime = makeMinimalRuntimeBindings()
+		runtime.runId = "539"
+		const ctx: ResolveContext = { item: makeItemRecord(), chain: {}, runtime, preset }
+
+		expect(renderRuntimeInputsDoc(phase, ctx)).toBe("- Named issue: ref:539!\n- Ticket: `#539` after")
+	})
+
+	test("rejects doc decoration without a label but retains default-only object bindings", () => {
+		const decorationFields: ReadonlyArray<readonly [string, string | boolean]> = [
+			["prefix", "#"],
+			["suffix", "!"],
+			["style", "plain"],
+			["blankBefore", true],
+		]
+		for (const [field, value] of decorationFields) {
+			const root: BoundaryRecord = {
+				...minimalRoot(),
+				phases: [{ name: "p", prompt: "p.md", variables: { X: { source: "chain.optional", default: "", [field]: value } } }],
+			}
+			expect(() => parsePreset(root, "/tmp"), field).toThrow(/\.label: required when doc decoration fields are declared/)
+		}
+
+		const defaultOnly: BoundaryRecord = {
+			...minimalRoot(),
+			phases: [{ name: "p", prompt: "p.md", variables: { X: { source: "chain.optional", default: "" } } }],
+		}
+		expect(parsePreset(defaultOnly, "/tmp").phases[0]!.variables[0]).toEqual({
+			key: "X",
+			source: { kind: "chain", field: "optional", fallback: { kind: "value", value: "" } },
+			doc: null,
+		})
+	})
+
+	test("rejects unknown variable binding fields", () => {
+		const root: BoundaryRecord = {
+			...minimalRoot(),
+			phases: [{
+				name: "p",
+				prompt: "p.md",
+				variables: {
+					X: { source: "item.id", label: "Issue", prefx: "#", style: "code" },
+				},
+			}],
+		}
+		expect(() => parsePreset(root, "/tmp")).toThrow(
+			/preset\.phases\[0\]\.variables\.X\.prefx: unrecognized variable binding field/,
+		)
 	})
 
 	test("rejects bogus variable prefix", () => {
