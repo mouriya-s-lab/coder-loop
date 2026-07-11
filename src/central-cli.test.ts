@@ -6,6 +6,7 @@ import { startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
 import { LOOP_DATA_ROOT_ENV, resolveLoopDataPaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
 import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedItemExtra } from "./runtime-data"
+import { appendObservabilityEvent, makeObservabilityEvent } from "./observability"
 
 // #397 test brand helper — see install-commands.test.ts for rationale.
 function admittedTestStatus(value: string) {
@@ -33,6 +34,38 @@ afterAll(async () => {
 })
 
 describe("central chain/item CLI", () => {
+	test("status exposes scheduler lifecycle event failure", async () => {
+		const loopDataRoot = await makeLoopDataRoot("lifecycle-persistence-status")
+		const paths = resolveLoopDataPaths({ loopDataRoot })
+		await appendObservabilityEvent(paths.lifecycleEventFailuresFile, makeObservabilityEvent({
+			kind: "diagnostic",
+			type: "scheduler.lifecycle_event_persistence_failed",
+			chain: "failure-chain",
+			item: 632,
+			runId: "run-632-timeout",
+			phase: "review",
+			subject: { kind: "engine" },
+			payload: { eventKind: "attempt.timeout", error: "EIO primary event sink", originalPersisted: false },
+		}))
+		const daemon = await startCoderLoopDaemon({ loopDataRoot, scheduler: { enabled: false } })
+		try {
+			const status = expectJsonOk(await runCli(["daemon", "status", "--loop-data-root", loopDataRoot, "--json"]))
+			expect(status.daemon).toMatchObject({
+				lifecycleEventPersistenceFailure: {
+					runId: "run-632-timeout",
+					phase: "review",
+					eventKind: "attempt.timeout",
+					error: "EIO primary event sink",
+					originalPersisted: false,
+				},
+			})
+			const logs = expectJsonOk(await runCli(["logs", loopDataRoot, "--loop-data-root", loopDataRoot, "--json", "--run", "run-632-timeout", "--type", "scheduler.lifecycle_event_persistence_failed"]))
+			expect(logs.events).toHaveLength(1)
+			expect(logs.events[0]).toMatchObject({ runId: "run-632-timeout", phase: "review", payload: { eventKind: "attempt.timeout", originalPersisted: false } })
+		} finally {
+			await daemon.stop()
+		}
+	})
 	test("chain CRUD CLI", async () => {
 		const fixture = await startFixture("chain-crud")
 		try {
