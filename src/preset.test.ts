@@ -144,6 +144,24 @@ const EXPECTED_VARIABLE_KEYS = [
 ] as const
 
 describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
+	test("validates runtime handoff lifetime contract", async () => {
+		const e2e = await readFile(resolve(BUNDLED_PRESET_DIR, "iter/steps/e2e.md"), "utf8")
+		expect(e2e).toContain("closed union")
+		expect(e2e).toContain("`durable` requires stable ownership plus liveness")
+		expect(e2e).toContain("`recreatable` requires setup/start/readiness")
+		expect(e2e).toContain("Missing, mixed, or extra-kind shapes are gaps")
+		expect(e2e).toMatch(/sourceSha.*worktree.*ownerRef.*livenessCommand.*behaviorCommand.*logPath.*stopCommand/s)
+		expect(e2e).toMatch(/sourceSha.*worktree.*setupCommands.*startCommand.*readinessCommand.*behaviorCommand.*logPath.*stopCommand/s)
+	})
+
+	test("review exhaustively routes runtime handoff kinds", async () => {
+		const replay = await readFile(resolve(BUNDLED_PRESET_DIR, "review/steps/replay.md"), "utf8")
+		expect(replay).toContain("require exactly one lifetime kind")
+		expect(replay).toContain("`durable`")
+		expect(replay).toContain("`recreatable`")
+		expect(replay).toContain("Any other shape is rejected before replay")
+		expect(replay).toContain("Old PID absence alone is not a claim mismatch")
+	})
 	test("loads name, item.idField, agent.attemptTimeoutSeconds, statuses sets", async () => {
 		const preset: Preset = await loadPreset(BUNDLED_PRESET_DIR)
 		expect(preset.name).toBe("gh-issue-pr-iteration")
