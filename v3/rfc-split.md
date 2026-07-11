@@ -24,8 +24,8 @@ RFC-2 是地基：任务结构（含并行）如何被 DSL 表达并静态计算
 
 - **#413（RFC: v3 chain 节点泛化为 item|容器）**：这是操作员 2026-06-10 的前史定义，现已被 #546 的统一 `leaf | seq | par` 任务代数 supersede 并关闭；现行 validator、join、reopen 与闭包契约只以 #546 及专项裁决报告为权威。#413 组成部分 1/2（GitHub App + item 可选 hapi 端执行）已重挂 #548。
 - **#418（hapi headless 适配 spike）+ `mouriya-s-lab/hapi-remote-session#1/#2`**：归 RFC-6 线；设计书与实现 child 均已建立，完整依赖链和实时状态见 `v3/execution-orchestration.md` P1-B/P2-B/P6-A。
-- **#453 / #396（类型权威 + 状态机收敛，children 全部落地，umbrella 待最终复核关闭）**：RFC-2 的直接前史。#453 里操作员 2026-06-12 裁决"context 流转能力暂缓"——RFC-3 就是重启这条线。
-- **#534 audit 修复树（#535-#542，open）**：v2 质量收尾，与 v3 设计并行不悖；各 RFC 不要把这些 bug 修复吸进自己范围。
+- **#453 / #396（类型权威 + 状态机收敛，children 与 umbrella 均已关闭）**：RFC-2 的直接前史。#453 里操作员 2026-06-12 裁决"context 流转能力暂缓"——RFC-3 就是重启这条线。
+- **#534 audit 修复树**：9 个 children（#535-#542、#600）均已关闭，umbrella #534 尚待关闭；该树是 v2 质量收尾，各 RFC 不要把这些 bug 修复吸进自己范围。
 - **全仓代码红线**（操作员裁决 2026-06-12，v3 一体适用）：全链路 ADT，禁止 `any`/匿名形状；`unknown` 仅限 catch 与边界 parse；禁止真 `as`（`as const` 除外）；外部输入经 arktype 边界 parse。
 
 ---
