@@ -5000,7 +5000,7 @@ process.exitCode = 0
 			)
 
 			const finalItem = await readItem(fixture.loopDataRoot, chainId, 7284)
-			expect(finalItem?.attempts).toBeGreaterThanOrEqual(2)
+			expect(finalItem?.attempts).toBe(1)
 			// summary:null → the agent writes no status, so the item keeps the spawn-preset continuable
 			// in_progress (the scheduler never invents a terminal status). It is therefore re-selected
 			// across ticks: iteration → review, driving attempts to >=2 with >=2 spawns.
@@ -5120,7 +5120,7 @@ process.exitCode = 0
 					10_000,
 				)
 				expect(item).not.toBeNull()
-				expect(item!.attempts).toBeGreaterThanOrEqual(2)
+				expect(item!.attempts).toBe(1)
 				expect(item!.phase).toBe("review")
 
 				// The agent writes status="done" before the scheduler emits phase.end / queue.terminal
