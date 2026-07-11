@@ -327,7 +327,7 @@ test("invalid review session id on opencode clears only review/opencode and the 
 	}
 })
 
-test("continuous fake runner failures exhaust at maxItemAttempts without another spawn", async () => {
+test("exhausts on the declared attempt budget", async () => {
 	// Neither failing agent writes a status. A failed iteration run does not structurally advance to the
 	// next phase; it retries iteration after the persisted backoff and exhausts at the attempt cap.
 	const fixture = await createCrossRunnerFixture("max-attempts", [

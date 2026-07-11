@@ -25,7 +25,7 @@
 
 | 字段 | 类型 | 含义 |
 |---|---|---|
-| `attempts` | number / null | iteration 累计次数；review 判循环失败的硬上限 |
+| `attempts` | number / null | iteration→review 业务周期累计次数；仅 fresh iteration 启动时递增，review、trigger、resume 与 rate-limit rollback 不递增；scheduler exhausted 预算单位 |
 | `title` | string / null | 人类可读标题 |
 | `priority` | `high \| medium \| low` / null | review 决定下一选哪个 |
 | `branch` | string / null | iteration 创建的 PR 分支名（透明字段，落 `extra.branch`） |
