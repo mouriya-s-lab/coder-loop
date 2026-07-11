@@ -244,6 +244,19 @@ Review 是调度者（orchestrator）：PR-backed 路由必须先派 diff-audit 
 
 ## 5. Issue-writing 不变量（写给灌 queue 的 issue writer）
 
+### 5.1 Pattern 验收作用域
+
+Issue 只要点名需要机器枚举的禁止/收敛模式，就必须提供：
+
+```markdown
+## Pattern 验收
+| Pattern | Scope | Criterion |
+|---|---|---|
+| 不使用空 catch 静默丢错。 | changed | rg -n 'catch\\s*\\{\\s*\\}' <changed-files> |
+```
+
+`Scope` 只能是 `changed` 或 `whole-tree`。`changed` 只约束 base→head 新增或修改行；`whole-tree` 约束 head 的完整声明树。缺少表、未知 scope、同一 Pattern 重复或冲突均为 contract error；review 不得根据标题、中文措辞或 reviewer 自由裁量猜作用域。
+
 issue writer 必须：
 
 - 每个新 issue 走 §1 形态校验后再 `gh issue create`；
