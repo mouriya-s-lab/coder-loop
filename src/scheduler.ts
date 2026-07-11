@@ -46,6 +46,7 @@ import {
 	type InternalStatus,
 	type SchedulerBackoffState,
 	type SchedulerSpawnError,
+	type SchedulerSpawnErrorAttribution,
 } from "./runtime-data"
 import { detectsSessionIdInvalid } from "./runners/session-id"
 import { type ChainRecord, dependsOnItemIds, type ItemRecord, listDependencyWaitReasons, type RunRecord, type SqliteStateStore } from "./sqlite-state"
@@ -110,6 +111,11 @@ export type SchedulerActiveRun = {
 	startedAt: number
 	closed: Promise<SchedulerCompletedRun>
 	terminate: (options?: SchedulerRunTerminateOptions) => Promise<SchedulerCompletedRun>
+}
+
+type SchedulerPreparingRun = SchedulerActiveRun & {
+	markPrepared: () => void
+	abortPreparation: (options?: SchedulerRunTerminateOptions) => Promise<SchedulerCompletedRun>
 }
 
 export type SchedulerRunTerminateOptions = {
@@ -449,10 +455,24 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 		// of crashing chain-wide preset resolution. The chain becomes actionable as soon as the first
 		// item (with its own preset) is added.
 		if (items.length === 0 && chain.preset === null) continue
-		const chainStatuses = await schedulerStatusesForChainWithItems(options, chain, items)
+		const chainPreparationItem = [...items].sort(comparePendingItems)[0]
+		if (
+			chainPreparationItem?.extra.schedulerSpawnError?.attribution.kind === "chain-plan"
+			&& !itemBackoffReady(chainPreparationItem, nowSeconds(options))
+		) continue
+		let chainStatuses: SchedulerChainStatuses
+		let phasePlan: SchedulerPhasePlan
+		try {
+			chainStatuses = await schedulerStatusesForChainWithItems(options, chain, items)
+			phasePlan = await resolvePhasePlanForChainWithItems(options, chain, items)
+		} catch (error) {
+			if (chainPreparationItem === undefined) throw error
+			const slot = getOrCreateSlot(options.state, chain, chainPreparationItem.repoCwd)
+			await containSchedulerPreparationFailure(options, chain, chainPreparationItem, slot, { kind: "chain-plan" }, error)
+			continue
+		}
 		const runs = options.store.listRuns(chain.id)
 		const repoCwds = distinct(items.map((item) => item.repoCwd))
-		const phasePlan = await resolvePhasePlanForChainWithItems(options, chain, items)
 
 		for (const repoCwd of repoCwds) {
 			if (spawnCapped()) break
@@ -926,50 +946,27 @@ async function spawnSchedulerRun(
 	phase: string,
 ): Promise<SchedulerActiveRun | null> {
 	const worktreeManager = options.worktreeManager ?? createGitWorktreeManager(options.loopDataRootOptions)
-	let worktreePath: string
+	const attribution: SchedulerSpawnErrorAttribution = { kind: "phase", phase }
+	let worktreePath = slot.worktreePath
+	let runId: string | null = null
+	let startedAt: number | null = null
+	let credential: SchedulerRunCredential | null = null
+	let credentialContext: SchedulerRunCredentialContext | null = null
+	let activeRun: SchedulerPreparingRun | null = null
 	try {
-		worktreePath = slot.worktreePath ?? await worktreeManager({ chain, repoCwd: item.repoCwd, slotKey: slot.key })
-	} catch (error) {
-		// A worktree failure used to escape the tick entirely: no backoff, no item trace, only
-		// a daemon stderr warning — the item sat actionable while the scheduler retried at tick
-		// cadence forever. Contain it with a persisted backoff plus an extra record so
-		// `status --json` shows why nothing spawns.
-		const failedAt = nowSeconds(options)
-		const message = errorMessage(error)
-		options.store.updateItem(item.id, {
-			extra: withSchedulerSpawnError(
-					withNextSchedulerBackoff(item.extra, failedAt, spawnFailureBackoffForChain(options, chain)),
-				failedAt,
-				phase,
-				message,
-			),
-			updatedAt: failedAt,
-		})
-		console.warn(`coder-loop scheduler: worktree create failed for chain=${chain.name} item=${item.id} id=${item.itemId}: ${message}`)
-		await emit(options, {
-			type: "spawn.aborted",
-			slotKey: slot.key,
-			chainId: chain.id,
-			chainName: chain.name,
-			itemId: item.id,
-			id: item.itemId,
-			reason: message,
-			toStatus: item.status,
-		})
-		return null
-	}
-	slot.worktreePath = worktreePath
+		worktreePath = worktreePath ?? await worktreeManager({ chain, repoCwd: item.repoCwd, slotKey: slot.key })
+		slot.worktreePath = worktreePath
 
-	const runner = await resolvePhaseRunner(options, { chain, item, phase })
-	const runId = options.runIdFactory?.({ chain, item, phase }) ?? makeRunId(item.id, phase)
-	const startedAt = nowSeconds(options)
+		const runner = await resolvePhaseRunner(options, { chain, item, phase })
+		runId = options.runIdFactory?.({ chain, item, phase }) ?? makeRunId(item.id, phase)
+		startedAt = nowSeconds(options)
 		options.store.recordRun({
-		runId,
-		chainId: chain.id,
-		itemId: item.id,
-		phase,
-		status: RUNNING_RUN_STATUS,
-		startedAt,
+			runId,
+			chainId: chain.id,
+			itemId: item.id,
+			phase,
+			status: RUNNING_RUN_STATUS,
+			startedAt,
 			extra: storedItemExtra({
 				slotKey: slot.key,
 				repoCwd: item.repoCwd,
@@ -979,101 +976,74 @@ async function spawnSchedulerRun(
 				...(item.phase === null ? {} : { startPhase: item.phase }),
 			}),
 		})
-	options.store.setCurrentRun({
-		chainId: chain.id,
-		phase,
-		runId,
-		startedAt,
-		extra: storedItemExtra({ slotKey: slot.key, itemId: item.id, repoCwd: item.repoCwd }),
-	})
-	const spawnUpdate: Parameters<typeof options.store.updateItem>[1] = {
-		attempts: item.attempts + 1,
-		lastRunId: runId,
-		agentCwd: worktreePath,
-		phase,
-		updatedAt: startedAt,
-	}
+		options.store.setCurrentRun({
+			chainId: chain.id,
+			phase,
+			runId,
+			startedAt,
+			extra: storedItemExtra({ slotKey: slot.key, itemId: item.id, repoCwd: item.repoCwd }),
+		})
+		const spawnUpdate: Parameters<typeof options.store.updateItem>[1] = {
+			attempts: item.attempts + 1,
+			lastRunId: runId,
+			agentCwd: worktreePath,
+			phase,
+			updatedAt: startedAt,
+		}
 		const extraWithoutSpawnError = clearItemSchedulerSpawnError(item.extra)
-	if (extraWithoutSpawnError !== item.extra) spawnUpdate.extra = extraWithoutSpawnError
-	// Spawn records only run/phase metadata. The agent owns status writes; trigger phases on terminal
-	// items therefore keep their terminal status, and normal phases keep their entry status until the
-	// agent writes a new one.
-	options.store.updateItem(item.id, spawnUpdate)
+		if (extraWithoutSpawnError !== item.extra) spawnUpdate.extra = extraWithoutSpawnError
+		options.store.updateItem(item.id, spawnUpdate)
 
-	// #412: spawn resolves the item's own preset rather than the chain's default seed so multi-preset
-	// chains render the right phase prompts. `schedulerLoadedPresetForItem` falls back to chain-level
-	// resolution when the caller hasn't wired `presetForItem` (preserves single-preset behavior).
-	const loadedPreset = await schedulerLoadedPresetForItem(options, chain, item)
-	const presetDir = loadedPreset.presetDir
-	const context: SchedulerSpawnContext = { chain, item, slot, runId, worktreePath, presetDir, loadedPreset, phase }
-	const rawPrompt = typeof options.prompt === "string" ? options.prompt : await options.prompt(context)
-	const resumeDecision = resumeDecisionForItem(item, phase, runner.kind)
-	const renderedPrompt = await renderSchedulerSpawnPrompt({
-		rawPrompt,
-		preset: loadedPreset.preset,
-		phase,
-		chain,
-		item,
-		runId,
-		worktreePath,
-		loopDataRootOptions: options.loopDataRootOptions,
-		resume: resumeDecision,
-		runner: runner.kind,
-	})
-	// #451 unified completion-protocol epilogue. Engine-injected, zero business
-	// literals: every daemon-spawned phase prompt ends with the same "query then
-	// write" protocol. #452 retired the prior summary-tag injection above this
-	// line — the engine no longer asks the agent to wrap a summary in nonce tags
-	// because completion now flows entirely through the daemon-observed state
-	// write, not stdout content.
-	const finalPrompt = renderedPrompt + phaseExitsEpilogue()
-	const runnerPlan = buildRunnerInvocation(
-		runner,
-		finalPrompt,
-		resumeDecision,
-		invocationPaths(item.repoCwd, worktreePath, presetDir, resolveLoopDataPaths(options.loopDataRootOptions).root),
-	)
-	await initializeSchedulerRunArtifacts(options, chain, item, runId, phase, startedAt, worktreePath)
-	// #406: mint the run-scoped credential before spawn. The supplier registers the binding
-	// (chain, item, run, phase) on its side; the scheduler hands the value to the runner process
-	// purely through env (never into prompt/trace — see `LOOP_RUN_CREDENTIAL_ENV` rationale).
-	// `null` when no issuer is wired (test fixtures that don't exercise the caller-admission gate):
-	// the env var is omitted entirely so the CLI flows the operator path.
-	const credentialContext: SchedulerRunCredentialContext = { chainId: chain.id, itemId: item.id, runId, phase }
-	const credential = options.runCredentials?.mint(credentialContext) ?? null
-	const spawnEnv: NodeJS.ProcessEnv = {
-		...process.env,
-		[LOOP_DATA_ROOT_ENV]: resolveLoopDataPaths(options.loopDataRootOptions).root,
-	}
-	if (credential !== null) spawnEnv[LOOP_RUN_CREDENTIAL_ENV] = credential.value
-	// #463: the codex CLI only writes its internal module diagnostics to stderr when
-	// `RUST_LOG` is set, and the engine persists per-run stderr to `stderr.log`. Inject
-	// `RUST_LOG=info` by default on codex-kind spawns so any future zero-output hang
-	// (cf. #462) leaves attributable traces on disk. Precedence (single source of truth):
-	//   1. `CODER_LOOP_CODEX_RUST_LOG` — operator-explicit override; empty string disables.
-	//   2. Inherited `RUST_LOG` from the daemon's environment.
-	//   3. Engine default `"info"`.
-	// claude/opencode kinds receive no injection — those runtimes don't consume RUST_LOG
-	// and the variable would only add noise.
-	if (runner.kind === "codex") {
-		const level = process.env["CODER_LOOP_CODEX_RUST_LOG"] ?? process.env["RUST_LOG"] ?? "info"
-		if (level !== "") spawnEnv["RUST_LOG"] = level
-	}
-	const child = spawn(runnerPlan.binary, runnerPlan.args, {
-		cwd: worktreePath,
-		stdio: ["ignore", "pipe", "pipe"],
-		detached: true,
-		// The agent writes its own item status via `coder-loop item update`, which must reach
-		// the daemon that owns this loop-data-root. Pass it through so the CLI resolves the same store.
-		env: spawnEnv,
-	})
-	const activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, phase, child, runner, credential, credentialContext)
-	slot.activeRun = activeRun
-	options.store.setCurrentRun({
-		chainId: chain.id,
-		phase,
-		runId,
-		startedAt,
+		const loadedPreset = await schedulerLoadedPresetForItem(options, chain, item)
+		const presetDir = loadedPreset.presetDir
+		const context: SchedulerSpawnContext = { chain, item, slot, runId, worktreePath, presetDir, loadedPreset, phase }
+		const rawPrompt = typeof options.prompt === "string" ? options.prompt : await options.prompt(context)
+		const resumeDecision = resumeDecisionForItem(item, phase, runner.kind)
+		const renderedPrompt = await renderSchedulerSpawnPrompt({
+			rawPrompt,
+			preset: loadedPreset.preset,
+			phase,
+			chain,
+			item,
+			runId,
+			worktreePath,
+			loopDataRootOptions: options.loopDataRootOptions,
+			resume: resumeDecision,
+			runner: runner.kind,
+		})
+		const finalPrompt = renderedPrompt + phaseExitsEpilogue()
+		const runnerPlan = buildRunnerInvocation(
+			runner,
+			finalPrompt,
+			resumeDecision,
+			invocationPaths(item.repoCwd, worktreePath, presetDir, resolveLoopDataPaths(options.loopDataRootOptions).root),
+		)
+		await initializeSchedulerRunArtifacts(options, chain, item, runId, phase, startedAt, worktreePath)
+		credentialContext = { chainId: chain.id, itemId: item.id, runId, phase }
+		credential = options.runCredentials?.mint(credentialContext) ?? null
+		const spawnEnv: NodeJS.ProcessEnv = {
+			...process.env,
+			[LOOP_DATA_ROOT_ENV]: resolveLoopDataPaths(options.loopDataRootOptions).root,
+		}
+		if (credential !== null) spawnEnv[LOOP_RUN_CREDENTIAL_ENV] = credential.value
+		if (runner.kind === "codex") {
+			const level = process.env["CODER_LOOP_CODEX_RUST_LOG"] ?? process.env["RUST_LOG"] ?? "info"
+			if (level !== "") spawnEnv["RUST_LOG"] = level
+		}
+		const child = spawn(runnerPlan.binary, runnerPlan.args, {
+			cwd: worktreePath,
+			stdio: ["ignore", "pipe", "pipe"],
+			detached: true,
+			env: spawnEnv,
+		})
+		await waitForChildSpawn(child)
+		activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, phase, child, runner, credential, credentialContext)
+		slot.activeRun = activeRun
+		options.store.setCurrentRun({
+			chainId: chain.id,
+			phase,
+			runId,
+			startedAt,
 			extra: storedItemExtra({
 				slotKey: slot.key,
 				itemId: item.id,
@@ -1082,43 +1052,160 @@ async function spawnSchedulerRun(
 				...(activeRun.pid === null ? {} : { pid: activeRun.pid }),
 				processGroupLeader: true,
 			}),
+		})
+		await writeSchedulerRunStatus(options, {
+			runId,
+			chain,
+			item,
+			phase,
+			startedAt,
+			endedAt: null,
+			exitCode: null,
+			status: RUNNING_RUN_STATUS,
+			pid: activeRun.pid,
+			worktreePath,
+			stdoutBytes: 0,
+			stderrBytes: 0,
+		})
+		await emit(options, { type: "agent.spawn", slotKey: slot.key, chainId: chain.id, itemId: item.id, runId, phase, pid: activeRun.pid, worktreePath, presetDir })
+		await emit(options, { type: "phase.start", ts: nowIso(options), runId, chainId: chain.id, itemId: item.id, repoCwd: item.repoCwd, phase, pid: activeRun.pid })
+		activeRun.markPrepared()
+		return activeRun
+	} catch (error) {
+		const failure = await cleanupFailedRunPreparation(options, chain, item, slot, {
+			runId,
+			activeRun,
+			credential,
+			credentialContext,
+		}, error)
+		await containSchedulerPreparationFailure(options, chain, item, slot, attribution, failure)
+		return null
+	}
+}
+
+async function waitForChildSpawn(child: ReturnType<typeof spawn>): Promise<void> {
+	await new Promise<void>((resolveSpawned, rejectSpawned) => {
+		const onSpawn = (): void => {
+			child.off("error", onError)
+			resolveSpawned()
+		}
+		const onError = (error: Error): void => {
+			child.off("spawn", onSpawn)
+			rejectSpawned(error)
+		}
+		child.once("spawn", onSpawn)
+		child.once("error", onError)
 	})
-	await writeSchedulerRunStatus(options, {
-		runId,
-		chain,
-		item,
-		phase,
-		startedAt,
-		endedAt: null,
-		exitCode: null,
-		status: RUNNING_RUN_STATUS,
-		pid: activeRun.pid,
-		worktreePath,
-		stdoutBytes: 0,
-		stderrBytes: 0,
+}
+
+type FailedRunPreparationResources = {
+	runId: string | null
+	activeRun: SchedulerPreparingRun | null
+	credential: SchedulerRunCredential | null
+	credentialContext: SchedulerRunCredentialContext | null
+}
+
+async function cleanupFailedRunPreparation(
+	options: SchedulerOptions,
+	chain: ChainRecord,
+	item: ItemRecord,
+	slot: SchedulerSlot,
+	resources: FailedRunPreparationResources,
+	failure: unknown,
+): Promise<Error> {
+	const cleanupErrors: string[] = []
+	if (resources.activeRun !== null) {
+		try {
+			await resources.activeRun.abortPreparation({ forceAfterMs: 1_000 })
+		} catch (error) {
+			cleanupErrors.push(`child cleanup failed: ${errorMessage(error)}`)
+		}
+	} else if (resources.credential !== null && resources.credentialContext !== null) {
+		try {
+			options.runCredentials?.revoke(resources.credential, resources.credentialContext)
+		} catch (error) {
+			cleanupErrors.push(`credential cleanup failed: ${errorMessage(error)}`)
+		}
+	}
+
+	if (resources.runId !== null) {
+		const failedAt = nowSeconds(options)
+		const run = options.store.getRunByRunId(resources.runId)
+		if (run !== null && run.endedAt === null) {
+			const currentItem = options.store.getItem(item.id) ?? item
+			const worktreePath = run.extra.worktreePath
+			if (worktreePath === undefined) {
+				cleanupErrors.push("artifact cleanup failed: recorded run has no worktreePath")
+			} else {
+				try {
+					await writeSchedulerRunCompletionArtifacts(options, {
+						runId: resources.runId,
+						chain,
+						item,
+						phase: run.phase,
+						startedAt: run.startedAt,
+						endedAt: failedAt,
+						exitCode: 1,
+						status: currentItem.status,
+						pid: resources.activeRun?.pid ?? null,
+						worktreePath,
+						stdoutText: "",
+						stderrText: errorMessage(failure),
+					})
+				} catch (error) {
+					cleanupErrors.push(`artifact cleanup failed: ${errorMessage(error)}`)
+				}
+			}
+			options.store.completeRun(resources.runId, {
+				endedAt: failedAt,
+				exitCode: 1,
+				status: currentItem.status,
+				extra: run.extra,
+			})
+		}
+		const currentRun = options.store.getCurrentRun(chain.id)
+		if (currentRun?.runId === resources.runId) options.store.clearCurrentRun(chain.id)
+		options.state.recycleTriggers.delete(resources.runId)
+	}
+	if (resources.runId === null || slot.activeRun?.runId === resources.runId) slot.activeRun = null
+
+	const message = errorMessage(failure)
+	return new Error(cleanupErrors.length === 0 ? message : `${message}; ${cleanupErrors.join("; ")}`)
+}
+
+async function containSchedulerPreparationFailure(
+	options: SchedulerOptions,
+	chain: ChainRecord,
+	item: ItemRecord,
+	slot: SchedulerSlot,
+	attribution: SchedulerSpawnErrorAttribution,
+	failure: unknown,
+): Promise<void> {
+	const failedAt = nowSeconds(options)
+	const message = errorMessage(failure)
+	const persistedItem = options.store.getItem(item.id) ?? item
+	const nextFromAttemptStart = withNextSchedulerBackoff(item.extra, failedAt, spawnFailureBackoffForChain(options, chain))
+	const backoff = itemSchedulerBackoff(nextFromAttemptStart)
+	if (backoff === null) throw new Error("scheduler preparation backoff construction failed")
+	const extraWithBackoff = withSchedulerBackoff(persistedItem.extra, backoff)
+	options.store.updateItem(item.id, {
+		status: engineLifecycleAdmittedItemStatus(item.status, "scheduler.spawn-aborted-entry-restore"),
+		statusUpdatedAt: item.statusUpdatedAt,
+		phase: item.phase,
+		extra: withSchedulerSpawnError(extraWithBackoff, failedAt, attribution, message),
+		updatedAt: failedAt,
 	})
+	console.warn(`coder-loop scheduler: preparation failed for chain=${chain.name} item=${item.id} id=${item.itemId}: ${message}`)
 	await emit(options, {
-		type: "agent.spawn",
+		type: "spawn.aborted",
 		slotKey: slot.key,
 		chainId: chain.id,
+		chainName: chain.name,
 		itemId: item.id,
-		runId,
-		phase,
-		pid: activeRun.pid,
-		worktreePath,
-		presetDir,
+		id: item.itemId,
+		reason: message,
+		toStatus: item.status,
 	})
-	await emit(options, {
-		type: "phase.start",
-		ts: nowIso(options),
-		runId,
-		chainId: chain.id,
-		itemId: item.id,
-		repoCwd: item.repoCwd,
-		phase,
-		pid: activeRun.pid,
-	})
-	return activeRun
 }
 
 function attachRunCloseHandler(
@@ -1138,13 +1225,23 @@ function attachRunCloseHandler(
 	// error branch — the run is no longer active either way.
 	credential: SchedulerRunCredential | null,
 	credentialContext: SchedulerRunCredentialContext,
-): SchedulerActiveRun {
+): SchedulerPreparingRun {
 	const stdout: Buffer[] = []
 	const stderr: Buffer[] = []
 	const outputPaths = schedulerPhaseOutputPaths(options, chain, runId, phase)
 	const outputWriters = createSchedulerPhaseOutputWriters(outputPaths)
 	let lifecycleGc: SchedulerRunLifecycleGc | null = null
 	let terminatorCleanup: (() => void) | null = null
+	let closeMode: "preparing" | "normal" | "preparation-abort" = "preparing"
+	let releaseCloseHandler: () => void = () => {}
+	const preparationDecided = new Promise<void>((resolve) => {
+		releaseCloseHandler = resolve
+	})
+	const decideCloseMode = (mode: "normal" | "preparation-abort"): void => {
+		if (closeMode !== "preparing") throw new Error(`scheduler run ${runId} preparation already decided as ${closeMode}`)
+		closeMode = mode
+		releaseCloseHandler()
+	}
 
 	const closed = new Promise<SchedulerCompletedRun>((resolveClosed, rejectClosed) => {
 		child.stdout?.on("data", (chunk: Buffer) => {
@@ -1180,6 +1277,24 @@ function attachRunCloseHandler(
 				const exitCode = code ?? 1
 				const stdoutText = Buffer.concat(stdout).toString("utf-8")
 				const stderrText = Buffer.concat(stderr).toString("utf-8")
+				if (closeMode === "preparing") await preparationDecided
+				if (closeMode === "preparation-abort") {
+					try {
+						await closeSchedulerPhaseOutputWriters(outputWriters)
+						return {
+							runId,
+							itemId: item.id,
+							chainId: chain.id,
+							repoCwd: item.repoCwd,
+							exitCode,
+							stdout: stdoutText,
+							stderr: stderrText,
+							status: (options.store.getItem(item.id) ?? item).status,
+						}
+					} finally {
+						if (credential !== null) options.runCredentials?.revoke(credential, credentialContext)
+					}
+				}
 				// #478: detect account rate-limit BEFORE the first await so the in-state cooldown
 				// gate (`SchedulerState.rateLimitedUntilMs`) is armed synchronously. The next
 				// scheduler tick may fire while this close handler is still awaiting artifact
@@ -1343,7 +1458,12 @@ function attachRunCloseHandler(
 		})
 	})
 	const terminate = createRunTerminator(child, closed, terminatorCleanup)
-	return { runId, pid: child.pid ?? null, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, worktreePath, startedAt, closed, terminate }
+	const abortPreparation = (options?: SchedulerRunTerminateOptions): Promise<SchedulerCompletedRun> => {
+		decideCloseMode("preparation-abort")
+		return terminate(options)
+	}
+	const markPrepared = (): void => decideCloseMode("normal")
+	return { runId, pid: child.pid ?? null, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, worktreePath, startedAt, closed, terminate, markPrepared, abortPreparation }
 }
 
 type SchedulerPhaseOutputPaths = {
@@ -2017,8 +2137,13 @@ function withNextSchedulerBackoff(
 	return withSchedulerBackoff(extra, state)
 }
 
-function withSchedulerSpawnError(extra: ItemRecord["extra"], failedAt: number, phase: string, message: string): ItemRecord["extra"] {
-	const error: SchedulerSpawnError = { at: failedAt, phase, message }
+function withSchedulerSpawnError(
+	extra: ItemRecord["extra"],
+	failedAt: number,
+	attribution: SchedulerSpawnErrorAttribution,
+	message: string,
+): ItemRecord["extra"] {
+	const error: SchedulerSpawnError = { at: failedAt, attribution, message }
 	return withItemSchedulerSpawnError(extra, error)
 }
 

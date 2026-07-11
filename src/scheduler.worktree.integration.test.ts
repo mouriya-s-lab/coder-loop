@@ -173,7 +173,7 @@ test("worktree create failure is contained: backoff + schedulerSpawnError in ext
 		expect(afterFailure?.attempts).toBe(0)
 		expect(afterFailure?.extra.schedulerSpawnError).toMatchObject({
 			at: now,
-			phase: "iteration",
+			attribution: { kind: "phase", phase: "iteration" },
 			message: "synthetic worktree create failure",
 		})
 		expect(afterFailure?.extra.schedulerBackoff).toMatchObject({ failureCount: 1 })

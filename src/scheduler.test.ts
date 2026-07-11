@@ -55,6 +55,16 @@ afterAll(async () => {
 })
 
 describe("scheduler", () => {
+	test("legacy scheduler spawn diagnostic shape is rejected", () => {
+		expect(() => storedItemExtra({
+			schedulerSpawnError: {
+				at: 1_900_535_000,
+				phase: "iteration",
+				message: "legacy diagnostic",
+			},
+		})).toThrow(/schedulerSpawnError\.attribution/)
+	})
+
 	test("single chain single repo serial", async () => {
 		const fixture = await createFixture("serial")
 		try {
@@ -123,6 +133,217 @@ describe("scheduler", () => {
 			expect(fixture.store.getItemById(valid.id, "179")?.status).toBe("done")
 			expect(fixture.worktreeCalls).toHaveLength(1)
 			expect(fixture.worktreeCalls[0]).toContain("valid-chain")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("run preparation failure is contained", async () => {
+		const stages = ["prompt", "artifact", "credential", "process-spawn", "active-child"] as const
+		for (const stage of stages) {
+			const fixture = await createFixture(`run-preparation-${stage}`)
+			try {
+				const chain = createChain(fixture.store, `run-preparation-${stage}-chain`)
+				const item = createItem(fixture.store, chain, { issueNumber: 535_100 + stages.indexOf(stage), repoCwd: "/repo/a" })
+				const now = 1_900_535_100 + stages.indexOf(stage)
+				const runId = `run-preparation-${stage}`
+				let revoked = 0
+				let spawnedPid: number | null = null
+				if (stage === "artifact") {
+					const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
+					await mkdir(paths.runsDir, { recursive: true })
+					await writeFile(paths.runDir(runId), "blocks run directory creation")
+				}
+
+				const activeChildRunner = resolve(fixture.loopDataRoot, "active-child-runner.ts")
+				if (stage === "active-child") await writeFile(activeChildRunner, "await new Promise((resolve) => setTimeout(resolve, 60_000))\n")
+				const tick = await schedulerTick(fixture.options({
+					now: () => now,
+					runIdFactory: () => runId,
+					...(stage === "prompt" ? { prompt: async () => { throw new Error("prompt preparation failed") } } : {}),
+					...(stage === "credential" || stage === "process-spawn" || stage === "active-child" ? {
+						runCredentials: {
+							mint: () => {
+								if (stage === "credential") throw new Error("credential preparation failed")
+								return { value: "run-preparation-credential" }
+							},
+							revoke: () => { revoked += 1 },
+						},
+					} : {}),
+					...(stage === "process-spawn" ? {
+						runner: { kind: "claude", source: "iteration-default", binary: resolve(fixture.loopDataRoot, "missing-runner"), extraArgs: [], model: null } as AgentRunnerSelection,
+					} : {}),
+					...(stage === "active-child" ? {
+						runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [activeChildRunner], model: null } as AgentRunnerSelection,
+						onEvent: (event: SchedulerEvent) => {
+							fixture.schedulerEvents.push(event)
+							if (event.type === "agent.spawn") {
+								spawnedPid = event.pid
+								throw new Error("spawn observability failed")
+							}
+						},
+					} : {}),
+				}))
+
+				expect(tick.spawnedRuns, stage).toHaveLength(0)
+				const run = fixture.store.getRunByRunId(runId)
+				expect(run?.endedAt, stage).toBe(now)
+				expect(run?.exitCode, stage).toBe(1)
+				if (stage !== "artifact") {
+					const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
+					const status = JSON.parse(await readFile(paths.runStatusFile(runId), "utf-8")) as BoundaryRecord
+					expect(status.endedAt, stage).toBe(now)
+					expect(status.exitCode, stage).toBe(1)
+					expect(status.status, stage).toBe("queued")
+				}
+				expect(fixture.store.getCurrentRun(chain.id), stage).toBeNull()
+				expect(fixture.state.slots.get(`${chain.id}\u0000/repo/a`)?.activeRun, stage).toBeNull()
+				const failedItem = fixture.store.getItem(item.id)
+				expect(failedItem?.extra.schedulerSpawnError, stage).toMatchObject({
+					at: now,
+					attribution: { kind: "phase", phase: "iteration" },
+				})
+				expect(failedItem?.extra.schedulerBackoff, stage).toMatchObject({ failureCount: 1, nextRunAt: now + 60 })
+				expect(fixture.schedulerEvents.filter((event) => event.type === "spawn.aborted"), stage).toHaveLength(1)
+				if (stage === "process-spawn") expect(revoked).toBe(1)
+				if (stage === "active-child") {
+					expect(revoked).toBeGreaterThan(0)
+					expect(spawnedPid).not.toBeNull()
+					if (spawnedPid !== null) expect(() => process.kill(spawnedPid!, 0)).toThrow()
+				}
+			} finally {
+				fixture.store.close()
+			}
+		}
+	})
+
+	test("active-child final trigger preparation abort remains retryable", async () => {
+		const fixture = await createFixture("active-child-final-trigger-retry")
+		try {
+			const chain = createChain(fixture.store, "active-child-final-trigger-retry-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 535_401, repoCwd: "/repo/a" })
+			fixture.store.updateItem(item.id, {
+				status: runtimeStatus("blocked"),
+				phase: "review",
+				attempts: 2,
+				lastRunId: "run-pre-blocked-review",
+				updatedAt: 1_900_535_400,
+			})
+			const activeChildRunner = resolve(fixture.loopDataRoot, "final-trigger-active-child-runner.ts")
+			await writeFile(activeChildRunner, "await new Promise((resolve) => setTimeout(resolve, 60_000))\n")
+			let now = 1_900_535_401
+			let spawnCount = 0
+			let runSequence = 0
+			const preAttemptStatusUpdatedAt = fixture.store.getItem(item.id)?.statusUpdatedAt
+			const options = fixture.options({
+				now: () => now,
+				runIdFactory: () => `active-child-final-trigger-${++runSequence}`,
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [activeChildRunner], model: null },
+				onEvent: async (event: SchedulerEvent) => {
+					fixture.schedulerEvents.push(event)
+					if (event.type === "agent.spawn" && ++spawnCount === 1) {
+						// The child already has its run credential here. Model the daemon-authorized
+						// item.update that can race the still-awaited preparation observability hook.
+						fixture.store.updateItem(item.id, {
+							status: runtimeStatus("done"),
+							updatedAt: now,
+						})
+						throw new Error("final trigger spawn observability failed")
+					}
+				},
+			})
+
+			const failedTick = await schedulerTick(options)
+			expect(failedTick.spawnedRuns).toHaveLength(0)
+			const failedRun = fixture.store.getRunByRunId("active-child-final-trigger-1")
+			expect(failedRun?.endedAt).toBe(now)
+			expect(failedRun?.exitCode).toBe(1)
+			expect(fixture.store.getCurrentRun(chain.id)).toBeNull()
+			expect(fixture.store.getChain(chain.id)?.status).toBe("active")
+			const failedItem = fixture.store.getItem(item.id)
+			expect(failedItem?.status).toBe("blocked")
+			expect(failedItem?.statusUpdatedAt).toBe(preAttemptStatusUpdatedAt)
+			expect(failedItem?.phase).toBe("review")
+			expect(failedItem?.extra.schedulerSpawnError).toMatchObject({
+				attribution: { kind: "phase", phase: "blocked-responder" },
+				message: "final trigger spawn observability failed",
+			})
+			expect(failedItem?.extra.schedulerBackoff).toMatchObject({ failureCount: 1, nextRunAt: now + 60 })
+			expect(fixture.schedulerEvents.filter((event) => event.type === "spawn.aborted")).toHaveLength(1)
+
+			await writeFile(activeChildRunner, "process.exit(0)\n")
+			now += 60
+			const retryTick = await schedulerTick(options)
+			expect(retryTick.spawnedRuns).toHaveLength(1)
+			expect(retryTick.spawnedRuns[0]?.runId).toBe("active-child-final-trigger-2")
+			expect(fixture.store.getItem(item.id)?.phase).toBe("blocked-responder")
+			await retryTick.spawnedRuns[0]!.closed
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("chain preparation failure does not starve sibling chain", async () => {
+		const fixture = await createFixture("chain-preparation-containment")
+		try {
+			const presetFailureChain = createChain(fixture.store, "chain-plan-failure")
+			const runnerFailureChain = createChain(fixture.store, "chain-runner-failure")
+			const healthyChain = createChain(fixture.store, "chain-healthy")
+			const presetFailureItem = createItem(fixture.store, presetFailureChain, { issueNumber: 535_201, repoCwd: "/repo/a" })
+			const runnerFailureItem = createItem(fixture.store, runnerFailureChain, { issueNumber: 535_202, repoCwd: "/repo/b" })
+			const healthyItem = createItem(fixture.store, healthyChain, { issueNumber: 535_203, repoCwd: "/repo/c", writeStatus: "done" })
+			const base = fixture.options({ now: () => 1_900_535_200 })
+			const tick = await schedulerTick({
+				...base,
+				presetForChain: (chain) => {
+					if (chain.id === presetFailureChain.id) throw new Error("chain preset parse failed")
+					return base.presetForChain(chain)
+				},
+				phaseRunner: ({ chain }) => {
+					if (chain.id === runnerFailureChain.id) throw new Error("chain runner parse failed")
+					if (base.runner === undefined) throw new Error("fixture runner missing")
+					return base.runner
+				},
+			})
+
+			expect(tick.spawnedRuns.map((run) => run.itemId)).toEqual([healthyItem.id])
+			await tick.spawnedRuns[0]!.closed
+			expect(fixture.store.getItem(presetFailureItem.id)?.extra.schedulerSpawnError).toMatchObject({
+				attribution: { kind: "chain-plan" },
+				message: "chain preset parse failed",
+			})
+			expect(fixture.store.getItem(runnerFailureItem.id)?.extra.schedulerSpawnError).toMatchObject({
+				attribution: { kind: "phase", phase: "iteration" },
+				message: "chain runner parse failed",
+			})
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("contained spawn failure releases repo scheduling", async () => {
+		const fixture = await createFixture("contained-spawn-releases-repo")
+		try {
+			const chain = createChain(fixture.store, "contained-spawn-releases-repo-chain")
+			const failed = createItem(fixture.store, chain, { issueNumber: 535_301, repoCwd: "/repo/a" })
+			const sibling = createItem(fixture.store, chain, { issueNumber: 535_302, repoCwd: "/repo/a", writeStatus: "done" })
+			const base = fixture.options({
+				now: () => 1_900_535_300,
+				prompt: (context) => {
+					if (context.item.id === failed.id) throw new Error("first sibling prompt failed")
+					return "{}"
+				},
+			})
+
+			const failedTick = await schedulerTick(base)
+			expect(failedTick.spawnedRuns).toHaveLength(0)
+			expect(fixture.store.getCurrentRun(chain.id)).toBeNull()
+			expect(fixture.state.slots.get(`${chain.id}\u0000/repo/a`)?.activeRun).toBeNull()
+			expect(fixture.schedulerEvents.filter((event) => event.type === "spawn.aborted" && event.itemId === failed.id)).toHaveLength(1)
+
+			const siblingTick = await schedulerTick(base)
+			expect(siblingTick.spawnedRuns.map((run) => run.itemId)).toEqual([sibling.id])
+			await siblingTick.spawnedRuns[0]!.closed
 		} finally {
 			fixture.store.close()
 		}
@@ -2803,7 +3024,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 		}
 	})
 
-	test("throws SchedulerError when neither phaseRunner nor runner is configured", async () => {
+	test("contains missing runner failure with diagnostic, backoff, and spawn.aborted", async () => {
 		const fixture = await createFixture("phase-runner-missing")
 		try {
 			const chain = createChain(fixture.store, "phase-runner-missing-chain")
@@ -2812,8 +3033,16 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			const baseOptions = fixture.options()
 			delete (baseOptions as { runner?: AgentRunnerSelection }).runner
 
-			await expect(schedulerTick(baseOptions)).rejects.toThrow(/no runner configured/)
+			const tick = await schedulerTick(baseOptions)
+			expect(tick.spawnedRuns).toHaveLength(0)
 			expect(fixture.store.getCurrentRun(chain.id)).toBeNull()
+			const failedItem = fixture.store.listItems(chain.id)[0]
+			expect(failedItem?.extra.schedulerSpawnError).toMatchObject({
+				attribution: { kind: "phase", phase: "iteration" },
+				message: expect.stringContaining("no runner configured"),
+			})
+			expect(failedItem?.extra.schedulerBackoff).toMatchObject({ failureCount: 1 })
+			expect(fixture.schedulerEvents.filter((event) => event.type === "spawn.aborted")).toHaveLength(1)
 		} finally {
 			fixture.store.close()
 		}
