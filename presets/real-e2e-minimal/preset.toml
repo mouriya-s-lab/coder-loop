@@ -32,8 +32,8 @@ exhausted   = "exhausted"
 [[phases]]
 name   = "iteration"
 prompt = "iteration-entry.md"
-runner = "claude"
-model  = "claude-sonnet-4-6"
+runner = "codex"
+model  = "gpt-5.6-terra"
 
   [phases.variables]
   REPO        = { source = "chain.repository", label = "GitHub repository" }
@@ -45,8 +45,8 @@ model  = "claude-sonnet-4-6"
 [[phases]]
 name   = "review"
 prompt = "review-entry.md"
-runner = "claude"
-model  = "claude-sonnet-4-6"
+runner = "codex"
+model  = "gpt-5.6-terra"
 
   [[phases.exits]]
   status = "changes_requested"
