@@ -142,6 +142,8 @@ rm -rf "$TARGET"
 | `[[fragments]].path` | string | 是 | 相对 preset.toml 的 markdown 文件路径，文件必须可读 |
 | `[agent].attemptTimeoutSeconds` | number | 否 | 每次 agent attempt 的绝对超时秒数；默认 `3600`。到期无条件对进程组发 `SIGTERM`，5 秒后仍未退出则发 `SIGKILL`（事件流写 `attempt.timeout`）。与 attempt timeout 并行运行的机制：startup idle watchdog（#462，前 10 分钟 stdout < 200B 判挂死 → SIGKILL + `run.startup_idle_kill`）与 recycle zone（#452，agent 写完 admissible status 后给 500 秒自然退出，超时直接 SIGKILL + `recycle.timeout_kill`）——这两者不读 stdout marker，触发条件在引擎侧。`[agent]` 目前只支持 `attemptTimeoutSeconds`；`binary` / `extraArgs` 在 preset.toml 中出现会在加载期报错——runner binary 由 phase runner kind 决定（PATH 上的 `claude` / `codex` / `opencode`）。 |
 
+主机资源生命周期由 scheduler 的 `requestHostResource`、`enterHostResourceCriticalSection`、`releaseHostResourcesForRun`、`reconcileHostResourceLifecycle` 与 `removeHostResourceLifecycleForChain` 原语维护。`enterHostResourceCriticalSection` 返回 `entered | waiting` 判别联合，调用方只在 `entered` 分支进入真实临界区，并在 run 退出边界调用 release。waiter 以单调 `order` 排序；terminal item、stopped/deleted chain、phase/resource 改变与 run loss 会在调度或 chain mutation 边界回收。`daemon.status.hostResources.waits[]` 和 `chain status.summary.waiting.hostResource[]` 的稳定读面包含 `{ resource, chainId, itemId, phase, order, owner }`；`owner` 是当前 owner object 或 `null`，不会复制入 waiter 成为 stale owner snapshot。
+
 引擎在加载时强制：
 
 - `name` 与目录名一致或与 `presetPath` 一致；

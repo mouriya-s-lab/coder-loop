@@ -23,6 +23,9 @@ import {
 import { buildCoderLoopStatusSnapshot, loadPreset, type JsonObject, type JsonValue } from "./loop"
 import {
 	createGitWorktreeManager,
+	createSchedulerState,
+	reconcileHostResourceLifecycle,
+	requestHostResource,
 	schedulerSlotWorktreePath,
 	type SchedulerEvent,
 	type SchedulerOptions,
@@ -38,6 +41,20 @@ const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/dt", String(process.pid))
 const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
+
+test("recovers host resource lifecycle after daemon restart", () => {
+	const beforeRestart = createSchedulerState()
+	beforeRestart.hostResourceOwners.set("shared", { resource: "shared", runId: "lost-run", chainId: 1, itemId: 1, phase: "validate" })
+	expect(requestHostResource(beforeRestart, { resource: "shared", chainId: 2, itemId: 2, phase: "validate" }).kind).toBe("waiting")
+	reconcileHostResourceLifecycle(beforeRestart, new Set([2]), new Set())
+	expect(beforeRestart.hostResourceOwners.size).toBe(0)
+	expect(requestHostResource(beforeRestart, { resource: "shared", chainId: 2, itemId: 2, phase: "validate" })).toEqual({ kind: "available" })
+
+	const afterRestart = createSchedulerState()
+	expect(afterRestart.hostResourceOwners.size).toBe(0)
+	expect(afterRestart.hostResourceWaits.size).toBe(0)
+	expect(requestHostResource(afterRestart, { resource: "shared", chainId: 3, itemId: 3, phase: "validate" })).toEqual({ kind: "available" })
+})
 
 let nextFixtureId = 0
 
