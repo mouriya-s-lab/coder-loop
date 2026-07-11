@@ -5,7 +5,6 @@ import { resolve } from "node:path"
 import { startCoderLoopDaemon } from "./daemon"
 import { openSqliteStateStore } from "./sqlite-state"
 import { engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
-import { operatorFixtureEnvironment } from "./test-process-env"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
@@ -232,7 +231,6 @@ function runCli(args: string[]): { exitCode: number | null; stdout: string; stde
 		cwd: REPO_ROOT,
 		stdout: "pipe",
 		stderr: "pipe",
-		env: operatorFixtureEnvironment(),
 	})
 	return {
 		exitCode: proc.exitCode,
@@ -250,7 +248,6 @@ async function runCliAsync(args: string[]): Promise<{ exitCode: number | null; s
 		cwd: REPO_ROOT,
 		stdout: "pipe",
 		stderr: "pipe",
-		env: operatorFixtureEnvironment(),
 	})
 	const [stdout, stderr, exitCode] = await Promise.all([
 		new Response(proc.stdout).text(),

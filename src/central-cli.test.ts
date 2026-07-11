@@ -6,7 +6,6 @@ import { startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
 import { LOOP_DATA_ROOT_ENV, resolveLoopDataPaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
 import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedItemExtra } from "./runtime-data"
-import { operatorFixtureEnvironment } from "./test-process-env"
 
 // #397 test brand helper — see install-commands.test.ts for rationale.
 function admittedTestStatus(value: string) {
@@ -1139,7 +1138,7 @@ async function runCli(args: string[], env: Record<string, string> = {}): Promise
 		cwd: REPO_ROOT,
 		stdout: "pipe",
 		stderr: "pipe",
-		env: operatorFixtureEnvironment(env),
+		env: { ...process.env, ...env },
 	})
 	const [exitCode, stdout, stderr] = await Promise.all([
 		proc.exited,
