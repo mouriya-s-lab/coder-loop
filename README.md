@@ -92,7 +92,6 @@ coder-loop status /path/to/target --json
 
 ```bash
 coder-loop daemon start /path/to/target
-coder-loop daemon start /path/to/target --max-iterations 10
 coder-loop daemon status /path/to/target --json
 coder-loop daemon stop /path/to/target
 coder-loop queue unblock /path/to/source-target --issue 123 --start-daemon
