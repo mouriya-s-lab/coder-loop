@@ -1,11 +1,13 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
+import { createWriteStream } from "node:fs"
 
 import { startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
 import { openSqliteStateStore } from "./sqlite-state"
 import { parseObservabilityEvent, type ObservabilityEvent } from "./observability"
 import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
+import { createStreamTextState } from "./runner-output"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
@@ -21,6 +23,27 @@ afterAll(async () => {
 })
 
 describe("smoke: v2 central chain CLI", () => {
+	test("bounds runner memory while preserving large output artifacts", async () => {
+		const artifactDir = resolve(TEST_ROOT, "large-output-artifacts")
+		await mkdir(artifactDir, { recursive: true })
+		for (const path of [resolve(artifactDir, "scheduler.log"), resolve(artifactDir, "chain-complete.log")]) {
+			let maxPendingChars = 0
+			const state = createStreamTextState(() => {})
+			const artifactWriter = createWriteStream(path)
+			for (let index = 0; index < 100_000; index++) {
+				const chunk = Buffer.from(`large-output-${index}\n`)
+				state.observe(chunk)
+				if (!artifactWriter.write(chunk)) await new Promise<void>((resolveDrain) => artifactWriter.once("drain", resolveDrain))
+				maxPendingChars = Math.max(maxPendingChars, state.pendingChars())
+			}
+			state.finish()
+			await new Promise<void>((resolveClosed) => artifactWriter.end(resolveClosed))
+			const artifact = await stat(path)
+			expect(artifact.size).toBe(state.bytes())
+			expect(maxPendingChars).toBe(0)
+		}
+	})
+
 	test("no-subcommand invocation is usage-only and does not enter a loop", () => {
 		const result = runCli([])
 		expect(result.exitCode).toBe(1)
