@@ -26,10 +26,13 @@ import {
 import {
 	cleanupSchedulerChainWorktrees,
 	createSchedulerState,
+	hostResourceWaitSnapshots,
 	listActiveRuns,
 	listPendingCloseHandlers,
 	markRunPendingRecycle,
 	maxItemAttemptsFromChainMetadata,
+	removeHostResourceLifecycleForChain,
+	removeHostResourceWaiterForItem,
 	schedulerTick,
 	type SchedulerCompletedRun,
 	type SchedulerEvent,
@@ -1130,7 +1133,7 @@ export class CoderLoopDaemon {
 			})),
 			hostResources: {
 				owners: [...this.schedulerState.hostResourceOwners.values()],
-				waits: [...this.schedulerState.hostResourceWaits.values()],
+				waits: hostResourceWaitSnapshots(this.schedulerState),
 			},
 			rateLimit: this.rateLimitStatus(this.schedulerNowMs()),
 			lifecycleEventPersistenceFailure: this.latestLifecycleEventPersistenceFailure === null
@@ -2113,7 +2116,7 @@ export class CoderLoopDaemon {
 		return {
 			chain: chainToJson(chain),
 			summary: chainStatusSummary(chain, items, activeRuns, dependencyWaits,
-				[...this.schedulerState.hostResourceWaits.values()].filter((wait) => wait.chainId === chain.id)),
+				hostResourceWaitSnapshots(this.schedulerState).filter((wait) => wait.chainId === chain.id)),
 			items: items.map((item) => itemToJson(item, dependencyWaitsByRowId.get(item.id) ?? null)),
 			activeRuns: activeRuns.map(activeRunToJson),
 		}
@@ -2150,6 +2153,7 @@ export class CoderLoopDaemon {
 			const terminatedRuns = await this.terminateActiveRunsForChain(chain.id)
 			const cleanup = await this.cleanupChainRuntime(chain)
 			const updated = this.requireStore().updateChain(chain.id, { status: "deleted" })
+			removeHostResourceLifecycleForChain(this.schedulerState, chain.id)
 			this.decisionFingerprints.release({ kind: "chain", chainId: chain.id })
 			return {
 				chain: chainToJson(updated),
@@ -2172,6 +2176,7 @@ export class CoderLoopDaemon {
 		const resumeScheduler = await this.pauseSchedulerForMutation()
 		try {
 			const stopped = this.requireStore().updateChain(chain.id, { status: "stopped" })
+			removeHostResourceLifecycleForChain(this.schedulerState, chain.id)
 			this.decisionFingerprints.release({ kind: "chain", chainId: chain.id })
 			const terminatedRuns = await this.terminateActiveRunsForChain(chain.id)
 			await this.recordObservabilityEventIfChainNameIsValid(stopped, makeObservabilityEvent({
@@ -2783,7 +2788,10 @@ export class CoderLoopDaemon {
 			const updated = store.updateItem(item.id, input)
 			if (terminalStatusesForUpdate?.has(updated.status) === true) {
 				this.decisionFingerprints.release({ kind: "item", chainId: chain.id, rowId: item.id })
+				removeHostResourceWaiterForItem(this.schedulerState, item.id)
 			}
+			const resourceWait = this.schedulerState.hostResourceWaits.get(item.id)
+			if (resourceWait !== undefined && updated.phase !== resourceWait.phase) removeHostResourceWaiterForItem(this.schedulerState, item.id)
 			if (updated.status !== item.status) {
 				// #406: emit `item.status` with the caller's true subject. The exhaustive switch on
 				// `caller.kind` is how runId/phase enter the event base — they come from the
@@ -3041,6 +3049,7 @@ export class CoderLoopDaemon {
 			}
 			assertChainCanTransition(currentChain, "item.exitAction:stop", "active", "stopped")
 			const stopped = store.updateChain(currentChain.id, { status: "stopped" })
+			removeHostResourceLifecycleForChain(this.schedulerState, currentChain.id)
 			this.decisionFingerprints.release({ kind: "chain", chainId: currentChain.id })
 			const terminatedRuns = await this.terminateActiveRunsForChain(currentChain.id)
 			const terminatedRunIds = terminatedRuns.map((run) => run.runId)
@@ -5421,7 +5430,7 @@ function chainStatusSummary(
 	items: ItemRecord[],
 	activeRuns: ReturnType<typeof listActiveRuns>,
 	dependencyWaits: readonly DependencyWaitReason[],
-	hostResourceWaits: readonly import("./scheduler").SchedulerHostResourceWait[],
+	hostResourceWaits: readonly import("./scheduler").SchedulerHostResourceWaitSnapshot[],
 ): JsonObject {
 	const byStatus: Record<string, number> = {}
 	for (const item of items) byStatus[item.status] = (byStatus[item.status] ?? 0) + 1
@@ -5466,9 +5475,8 @@ function chainStatusSummary(
 				rowId: wait.itemId,
 				phase: wait.phase,
 				resource: wait.resource,
-				ownerRunId: wait.ownerRunId,
-				ownerChainId: wait.ownerChainId,
-				ownerItemId: wait.ownerItemId,
+				order: wait.order,
+				owner: wait.owner,
 			})),
 		},
 	}
