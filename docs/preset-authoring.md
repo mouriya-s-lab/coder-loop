@@ -132,7 +132,6 @@ rm -rf "$TARGET"
 | `[[phases]].prompt` | string | 是 | 相对 preset.toml 的 entry prompt 模板路径 |
 | `[[phases]].runner` | `"claude"|"codex"|"opencode"` | 否 | phase 默认 runner；未声明时使用 engine-builtin fallback |
 | `[[phases]].model` | string | 否 | phase 默认 model。只在解析出的 runner kind 与本 phase 声明的 runner 一致时生效（item override 切换 runner 后不继承） |
-| `[[phases]].hostExclusiveResource` | string | 否 | 声明该 phase 在当前 daemon 主机上独占的资源键。相同非空键跨 chain 串行；等待方进入 `host_resource.wait` 事件与 status waiting 读面，owner 结束或异常退出后释放。未声明的 phase 不参与该资源背压。 |
 | `[[phases.exits]]` | array | 否 | 该 phase 允许 agent 写出的结构化出口。每项包含 `status` 与给 prompt 渲染用的 `when` 说明；不声明 exits 表示该 phase 不写 status |
 | `[[phases]].trigger` | table | 否 | 可把 phase 声明为 trigger phase。支持 `trigger = { afterPhase = "...", whenStatus = "..." }` 的 item phase trigger，或 `trigger = { on = "chain-complete" }` 的 chain lifecycle trigger |
 | `[[phases]].roles` | string[] | preset 声明 fragments 时必填，否则可省 | 该 phase 渲染 `{{PROMPT_FRAGMENT_INDEX}}` 时可见的 fragment role 集合。引擎从不通过 phase 名猜 role；只列在这里的 role 对应的 fragment 才会进该 phase 的索引切片。`[[fragments]]` 中未出现的 role 名会在加载期报错。 |
@@ -141,8 +140,6 @@ rm -rf "$TARGET"
 | `[[fragments]].role` | string | 是 | fragment 角色（如 `common` / `iter` / `review`）。该字段参与 `[[phases]].roles` 切片：当前 phase 渲染的 fragment 索引仅含 role 出现在该 phase `roles` 数组里的条目。fragment 文件完整性校验（`assertReadable`）仍覆盖全量。 |
 | `[[fragments]].path` | string | 是 | 相对 preset.toml 的 markdown 文件路径，文件必须可读 |
 | `[agent].attemptTimeoutSeconds` | number | 否 | 每次 agent attempt 的绝对超时秒数；默认 `3600`。到期无条件对进程组发 `SIGTERM`，5 秒后仍未退出则发 `SIGKILL`（事件流写 `attempt.timeout`）。与 attempt timeout 并行运行的机制：startup idle watchdog（#462，前 10 分钟 stdout < 200B 判挂死 → SIGKILL + `run.startup_idle_kill`）与 recycle zone（#452，agent 写完 admissible status 后给 500 秒自然退出，超时直接 SIGKILL + `recycle.timeout_kill`）——这两者不读 stdout marker，触发条件在引擎侧。`[agent]` 目前只支持 `attemptTimeoutSeconds`；`binary` / `extraArgs` 在 preset.toml 中出现会在加载期报错——runner binary 由 phase runner kind 决定（PATH 上的 `claude` / `codex` / `opencode`）。 |
-
-主机资源生命周期由 scheduler 的 `requestHostResource`、`enterHostResourceCriticalSection`、`releaseHostResourcesForRun`、`reconcileHostResourceLifecycle` 与 `removeHostResourceLifecycleForChain` 原语维护。`enterHostResourceCriticalSection` 返回 `entered | waiting` 判别联合，调用方只在 `entered` 分支进入真实临界区，并在 run 退出边界调用 release。waiter 以单调 `order` 排序；terminal item、stopped/deleted chain、phase/resource 改变与 run loss 会在调度或 chain mutation 边界回收。`daemon.status.hostResources.waits[]` 和 `chain status.summary.waiting.hostResource[]` 的稳定读面包含 `{ resource, chainId, itemId, phase, order, owner }`；`owner` 是当前 owner object 或 `null`，不会复制入 waiter 成为 stale owner snapshot。
 
 引擎在加载时强制：
 

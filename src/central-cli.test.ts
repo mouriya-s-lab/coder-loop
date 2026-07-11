@@ -4,7 +4,6 @@ import { createConnection } from "node:net"
 import { resolve } from "node:path"
 
 import { startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
-import { createSchedulerState, hostResourceWaitSnapshots, requestHostResource } from "./scheduler"
 import { LOOP_DATA_ROOT_ENV, resolveLoopDataPaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
 import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedItemExtra } from "./runtime-data"
@@ -24,25 +23,6 @@ const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/central-cli-tests", String(process.pid))
 const DEFAULT_CHAIN_CONFIG = chainConfig("mouriya-s-lab/coder-loop")
 const FIXTURE_CHAIN_CONFIG = chainConfig("fixture/repo")
-
-test("reports host resource critical section state", () => {
-	const state = createSchedulerState()
-	state.hostResourceOwners.set("shared", { resource: "shared", runId: "owner", chainId: 1, itemId: 1, phase: "validate" })
-	expect(requestHostResource(state, { resource: "shared", chainId: 2, itemId: 2, phase: "validate" }).kind).toBe("waiting")
-	expect(JSON.parse(JSON.stringify({
-		owners: [...state.hostResourceOwners.values()],
-		waits: hostResourceWaitSnapshots(state),
-	}))).toEqual({
-		owners: [{ resource: "shared", runId: "owner", chainId: 1, itemId: 1, phase: "validate" }],
-		waits: [{ resource: "shared", chainId: 2, itemId: 2, phase: "validate", order: 0, owner: {
-			resource: "shared", runId: "owner", chainId: 1, itemId: 1, phase: "validate",
-		} }],
-	})
-
-	state.hostResourceOwners.clear()
-	state.hostResourceWaits.clear()
-	expect(hostResourceWaitSnapshots(state)).toEqual([])
-})
 
 let nextFixtureId = 0
 

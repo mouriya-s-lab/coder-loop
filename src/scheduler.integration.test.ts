@@ -6,8 +6,6 @@ import { daemonRequest, sendDaemonRequest } from "./daemon"
 import {
 	createGitWorktreeManager,
 	createSchedulerState,
-	releaseHostResourcesForRun,
-	requestHostResource,
 	schedulerSlotWorktreePath,
 	schedulerTick,
 	type SchedulerEvent,
@@ -25,19 +23,6 @@ const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
 const LOADED_PRESET = loadPreset(PRESET_DIR).then((preset) => ({ presetDir: PRESET_DIR, preset }))
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-integration-tests", String(process.pid))
-
-test("drains host resource waiters after owner exit", () => {
-	for (const ownerExit of ["natural", "failure"] as const) {
-		const state = createSchedulerState()
-		state.hostResourceOwners.set("shared", { resource: "shared", runId: `owner-${ownerExit}`, chainId: 1, itemId: 1, phase: "validate" })
-		expect(requestHostResource(state, { resource: "shared", chainId: 2, itemId: 2, phase: "validate" }).kind).toBe("waiting")
-
-		// Both child close modes converge on the same synchronous release primitive.
-		releaseHostResourcesForRun(state, `owner-${ownerExit}`)
-		expect(requestHostResource(state, { resource: "shared", chainId: 2, itemId: 2, phase: "validate" })).toEqual({ kind: "available" })
-		expect(state.hostResourceOwners.size).toBe(0)
-	}
-})
 
 // #397 test brand helper — see install-commands.test.ts for rationale.
 function runtimeStatus(value: string) {
