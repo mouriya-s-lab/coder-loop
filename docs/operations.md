@@ -191,9 +191,11 @@ coder-loop status <path> --json | jq '.state, .target, .queue.selected'
 
 | `state.current` | 与选中 item id 关系 | `current.phase` | 结果 |
 |---|---|---|---|
-| `null` | n/a | n/a | 新 run；`runIdGeneration = "new"`；attempts++ 后从 `phases[0]` 跑 |
+| `null` | n/a | n/a | 新 run；`runIdGeneration = "new"`；从 `phases[0]` 开始新的业务周期并令 attempts++ |
 | 非 null | id 不匹配选中 item | n/a | 视为 stale，丢弃 current；按新 run 处理 |
 | 非 null | id 匹配选中 item | 任一 continuable phase | resume 该 phase；`runIdGeneration = "resumed"`；从该 phase 入口重跑（attempts 不重新自增） |
+
+`items.attempts` 的单位是完整业务周期：只在 preset 的第一个 non-trigger phase 以 fresh session 启动时递增。后续 non-trigger phase、trigger phase、同 phase resume 和 rate-limit rollback 都不消耗新的周期预算。
 
 Resume 时引擎注入：
 

@@ -503,7 +503,7 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 			})
 			if (next === null) continue
 
-			const activeRun = await spawnSchedulerRun(options, chain, next.item, slot, next.phase)
+			const activeRun = await spawnSchedulerRun(options, chain, next.item, slot, next.phase, phasePlan)
 			if (activeRun !== null) spawnedRuns.push(activeRun)
 		}
 
@@ -944,6 +944,7 @@ async function spawnSchedulerRun(
 	item: ItemRecord,
 	slot: SchedulerSlot,
 	phase: string,
+	phasePlan: SchedulerPhasePlan,
 ): Promise<SchedulerActiveRun | null> {
 	const worktreeManager = options.worktreeManager ?? createGitWorktreeManager(options.loopDataRootOptions)
 	const attribution: SchedulerSpawnErrorAttribution = { kind: "phase", phase }
@@ -958,6 +959,8 @@ async function spawnSchedulerRun(
 		slot.worktreePath = worktreePath
 
 		const runner = await resolvePhaseRunner(options, { chain, item, phase })
+		const resumeDecision = resumeDecisionForItem(item, phase, runner.kind)
+		const startsAttempt = phase === phasePlan.firstPhase && resumeDecision.kind === "fresh"
 		runId = options.runIdFactory?.({ chain, item, phase }) ?? makeRunId(item.id, phase)
 		startedAt = nowSeconds(options)
 		options.store.recordRun({
@@ -984,7 +987,7 @@ async function spawnSchedulerRun(
 			extra: storedItemExtra({ slotKey: slot.key, itemId: item.id, repoCwd: item.repoCwd }),
 		})
 		const spawnUpdate: Parameters<typeof options.store.updateItem>[1] = {
-			attempts: item.attempts + 1,
+			attempts: item.attempts + (startsAttempt ? 1 : 0),
 			lastRunId: runId,
 			agentCwd: worktreePath,
 			phase,
@@ -998,7 +1001,6 @@ async function spawnSchedulerRun(
 		const presetDir = loadedPreset.presetDir
 		const context: SchedulerSpawnContext = { chain, item, slot, runId, worktreePath, presetDir, loadedPreset, phase }
 		const rawPrompt = typeof options.prompt === "string" ? options.prompt : await options.prompt(context)
-		const resumeDecision = resumeDecisionForItem(item, phase, runner.kind)
 		const renderedPrompt = await renderSchedulerSpawnPrompt({
 			rawPrompt,
 			preset: loadedPreset.preset,
