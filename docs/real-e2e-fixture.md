@@ -48,7 +48,7 @@ bun scripts/real-e2e.ts --preset gh-issue-pr-iteration
 它按序做完一轮完整真实 e2e：
 
 1. **preflight** — gh auth、preset 声明的 runner CLI（`claude` / `codex` / `opencode`）在 PATH、fixture repo 可达、本地 source checkout origin 一致。
-2. **allocate** — 每轮生成 UUID；同机进程只在 Contents API 创建/删除 default-branch 文件的瞬间使用 `shlock` PID mutex（持有者退出后可回收，无固定等待上限），避免 Git ref compare-and-swap 竞争，然后创建自己的 `runs/<uuid>.txt`（`status: pending`），再 clone 到自己的 `.coder-loop/runtime/real-e2e/<uuid>/fixture`。锁不覆盖 daemon/agent/PR/check 生命周期；不同 run 的有效工作窗口使用不同路径，不 reset checkout、不扫描或关闭别轮的 PR/issue/worktree。
+2. **allocate** — 每轮生成 UUID；入口先按 `<fixture-repo>@main` 资源域取得位于 `~/.coder-loop/real-e2e-locks/` 的 `shlock` PID mutex，再创建自己的 `runs/<uuid>.txt`（`status: pending`）并 clone 到 `.coder-loop/runtime/real-e2e/<uuid>/fixture`。锁覆盖 allocate/run/assert/teardown 完整生命周期；并发调用明确打印等待的资源域与 owner PID，持有进程异常退出后由 `shlock` 按进程生命周期回收，等待没有固定次数或超时上限。
 3. **seed** — 脚本用 `gh issue create` 建一个契约合规且带 run UUID 的 trivial issue（`kind:code` + `e2e-seed` label）：只要求把本轮 `runs/<uuid>.txt` 改为 `status: complete`。
 4. **run** — 在隔离 `--loop-data-root`（`.coder-loop/runtime/real-e2e/<uuid>/loop-data`）起中央 daemon（`daemon up`），以 UUID 唯一 chain name 对 default branch 执行 `chain create`，再 `item add` 入队。每个 PR 仍 merge 到 default branch，因此 GitHub closing keyword 会真实关闭对应 issue；生产 daemon（`~/.coder-loop`）和 source checkout完全不被触碰。
 5. **watch + tripwire** — 轮询 `status <target> --json`，越界即自动 `daemon down` + 落诊断 + 非零退出：
