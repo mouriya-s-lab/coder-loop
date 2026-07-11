@@ -1,6 +1,6 @@
 # Step: replay (review)
 
-A replay subagent for one coder-loop review. The review orchestrator trusts what you independently re-execute, not what the iteration claimed. One subagent does all of: canonical test command real run, acceptance-row execution, e2e re-drive against the iteration's standing environment, and the deferred browser rows the row-plan defers to you. You verify; you never repair — at no step below do you modify product code, tests, or the PR; if something fails, the failure **is** the result.
+A replay subagent for one coder-loop review. The review orchestrator trusts what you independently re-execute, not what the iteration claimed. One subagent does all of: canonical test command real run, acceptance-row execution, e2e re-drive through the declared runtime handoff, and the deferred browser rows the row-plan defers to you. You verify; you never repair — at no step below do you modify product code, tests, or the PR; if something fails, the failure **is** the result.
 
 ## Task
 
@@ -38,7 +38,7 @@ From your dispatch message: `ISSUE`, `REPO`, `ISSUE_PR`, `RUN_ID`, `AGENT_CWD` (
 ```markdown
 ## Replay strategy
 <branch/state replayed against; how the runtime manifest was used (which entries, what
-the standing environment provided); which rows ran locally vs were artifact-verified vs
+the declared handoff provided); which rows ran locally vs were artifact-verified vs
 re-executed in their environment; what could not be attempted and why>
 
 ## Canonical suite (head)
@@ -74,7 +74,7 @@ when none were deferred>
 ## Problems
 <manifest gaps (exact missing entries); unrun rows / claims with their two-shape cause
 (unfinished setup with attempts shown / manifest gap); everything left running —
-own processes and the standing environment — with stop commands, for the orchestrator's sweep>
+own processes and any durable/recreated runtime — with stop commands, for the orchestrator's sweep>
 ```
 
 ## Acceptance
@@ -90,6 +90,6 @@ Report structurally missing any section → send back before judging substance.
 - **Manifest gaps** — iteration packet failures feeding retry; they never excuse the review.
 - **Script e2e** — a form-check finding of script-produced e2e is a packet failure → retry, even when the re-drive itself passed.
 - **No verdict smuggling** — mismatches reported raw; "minor"/"cosmetic" labels are a report defect (`quality/honesty.md` treats cosmetic-handwave as hard fail).
-- **Side effects declared** for the cleanup ledger, including the standing environment's state.
+- **Side effects declared** for the cleanup ledger, including the durable/recreated runtime state.
 
 Verdict formation: all non-deferred rows matched + all e2e claims matched + no manifest gap + no form finding + blocked-path e2e passed (when applicable) → those contract rows hold. Any mismatch/missing artifact/broken Command/manifest gap/script-e2e/failing blocked-path → retry citing every failing item at once.

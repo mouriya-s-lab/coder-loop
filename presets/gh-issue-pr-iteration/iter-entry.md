@@ -144,11 +144,11 @@ When the last line is `[x]`/`[-]`, go to Step 5.
 
 ### Step 5 — Wrap up (yourself)
 
-Append one run note to `{{SHARED_CONTEXT_FILE}}`: run ID; spawn classification; the final task list with each line's outcome; files changed; CI-parity status; test-inventory delta; the runtime manifest and standing e2e environment from the e2e report (review re-runs and tears down from this); artifacts; PR number/URL or comment URL; blockers/unresolved risks; proposed child issue specs when scope was incomplete. If `{{CURRENT_ISSUE_FILE}}` exists, issue-local detail may go there.
+Append one run note to `{{SHARED_CONTEXT_FILE}}`: run ID; spawn classification; the final task list with each line's outcome; files changed; CI-parity status; test-inventory delta; the typed runtime manifest (`durable` or `recreatable`) from the e2e report; artifacts; PR number/URL or comment URL; blockers/unresolved risks; proposed child issue specs when scope was incomplete. If `{{CURRENT_ISSUE_FILE}}` exists, issue-local detail may go there.
 
-### Step 6 — Cleanup (scratch only — the e2e runtime stays up)
+### Step 6 — Cleanup (by declared runtime ownership)
 
-Sweep the dispatch ledger per `{{PRESET_ROOT}}/quality/cleanup.md`, with the iteration-side scope: kill scratch PIDs the reports declared as no longer needed and verify the kill took (`ps -p <pid>` empty), remove declared temp files, leave evidence artifacts and pre-existing dirty state in place. The standing e2e environment documented in the runtime manifest is **not yours to tear down** — review replays against it and owns the teardown.
+Sweep the dispatch ledger per `{{PRESET_ROOT}}/quality/cleanup.md`. For `durable`, leave the supervisor-owned runtime intact for review. For `recreatable`, verify all phase-owned processes were stopped and retain only the pinned worktree plus reconstruction manifest. Remove scratch files and keep evidence artifacts.
 
 ### Step 7 — Summary
 
