@@ -226,14 +226,12 @@ function seedDb(loopDataRoot: string, target: string, options: FixtureOptions, p
 }
 
 function runCli(args: string[]): { exitCode: number | null; stdout: string; stderr: string } {
-	const operatorEnv = { ...process.env }
-	delete operatorEnv.CODER_LOOP_RUN_CRED
 	const proc = Bun.spawnSync({
 		cmd: ["bun", LOOP_ENTRY, ...args],
 		cwd: REPO_ROOT,
 		stdout: "pipe",
 		stderr: "pipe",
-		env: operatorEnv,
+		env: { ...process.env, CODER_LOOP_RUN_CRED: undefined },
 	})
 	return {
 		exitCode: proc.exitCode,
@@ -246,14 +244,12 @@ function runCli(args: string[]): { exitCode: number | null; stdout: string; stde
 // runtime. `Bun.spawnSync` blocks the event loop, which deadlocks the daemon (it cannot accept
 // connections while spawnSync waits on the subprocess that is trying to connect).
 async function runCliAsync(args: string[]): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
-	const operatorEnv = { ...process.env }
-	delete operatorEnv.CODER_LOOP_RUN_CRED
 	const proc = Bun.spawn({
 		cmd: ["bun", LOOP_ENTRY, ...args],
 		cwd: REPO_ROOT,
 		stdout: "pipe",
 		stderr: "pipe",
-		env: operatorEnv,
+		env: { ...process.env, CODER_LOOP_RUN_CRED: undefined },
 	})
 	const [stdout, stderr, exitCode] = await Promise.all([
 		new Response(proc.stdout).text(),

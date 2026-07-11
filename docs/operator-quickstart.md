@@ -133,7 +133,6 @@ coder-loop status /path/to/your-target-repo --json | jq '.state.kind, .queue.tot
 
 ```bash
 coder-loop daemon start /path/to/your-target-repo
-coder-loop daemon start /path/to/your-target-repo --max-iterations 10
 coder-loop daemon status /path/to/your-target-repo --json
 ```
 

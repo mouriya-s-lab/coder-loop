@@ -17,7 +17,7 @@
 | `statuses.terminal` | `blocked / moot / done / exhausted` |
 | `statuses.unblockable` | `blocked`（`queue unblock` 恢复到 `statuses.entry = queued`） |
 | phases | 4 个：`iteration` → `review`（普通执行流），加两个 trigger phase — `blocked-responder`（`trigger = { afterPhase = "review", whenStatus = "blocked" }`）和 `umbrella-finalizer`（`trigger = { on = "chain-complete" }`） |
-| phase runner/model | 四个 phase 全部 `runner = "claude"`、`model = "claude-opus-4-7[1m]"` |
+| phase runner/model | 四个 phase 当前全部 `runner = "codex"`、`model = "gpt-5.6-sol"`；非 trigger phase 仍可被 item 覆盖 |
 | `[agent].attemptTimeoutSeconds` | `7200` |
 | fragments | 29 个，分布在 `common/ / quality/ / iter/steps/ / review/` 四块 |
 
@@ -48,12 +48,12 @@ iteration / review 两个复杂角色是**调度者**，entry md 是按序执行
 
 核心约定：
 
-- **每步一个 md 文件，三段结构**：`Task`（subagent 的任务）、`Report`（必填字段结构化汇报模板，空集写 `none`）、`Acceptance`（调度者的验收判据）。执行者与调度者读同一份文件——runner 是 Claude 家（诚实但会犯错），判据对执行者可见是有意设计（设计前提见 `presets/gh-issue-pr-iteration/DESIGN.md`）。
+- **每步一个 md 文件，三段结构**：`Task`（subagent 的任务）、`Report`（必填字段结构化汇报模板，空集写 `none`）、`Acceptance`（调度者的验收判据）。执行者与调度者读同一份文件；支持的 runner 都按“诚实但会犯错”设计，判据对执行者可见是有意选择（设计前提见 `presets/gh-issue-pr-iteration/DESIGN.md`）。
 - **quality 文件三个单文件**：`quality/evidence.md`、`quality/honesty.md`、`quality/cleanup.md`。每份内含执行侧约束 + 判断侧规则，同源同文。
 - **过程纪律以 superpowers 为设计参考蒸馏内联**：`implement` 的 Process discipline 段（test-first 铁律 / 根因先于修复 / retry 反馈逐条核实）与 `verify` / `e2e` / `submit` 的 Claim gate 段（先跑当轮命令读全量输出再落成功措辞）改编自 superpowers 对应 skill 的纪律内核，按无人值守 loop 调整（无 human-partner 分支、无交互 gate）。preset 自包含，不做运行时 skill 调用；蒸馏来源与改编原则见 `presets/gh-issue-pr-iteration/DESIGN.md` 前提八。
 - **硬性条件两源**：issue 的任务要求（live issue body）+ preset 的品质判据（`quality/*.md`）。验收是 LLM 判断，不是程序检查；先查结构（必填字段）再判实质。
 - **dispatch 消息只含指针 + 运行时键值**，不转述任何规则文本；prompt 内跨文件引用全部写 `{{PRESET_ROOT}}/<rel>` 形式（引擎自有词表，见 `docs/reserved-strings.md`）。`{{PRESET_ROOT}}` 在 preset 加载时被物化层替换为 `<loopDataRoot>/preset-materialized/<name>-<hash>/` 目录的绝对路径——agent 跑在随机 worktree 也读得到；fragment 不经引擎 `{{KEY}}` 渲染，物化时按字面串替换。
-- **补缺走同一 subagent 的 follow-up 派发**（无 continue path，机制见 `common/dispatch-contract.md`）。
+- **补缺使用当前 runner 支持的 follow-up；无 continuation 能力时才关闭旧任务并 fresh dispatch**（机制见 `common/dispatch-contract.md`）。
 - **e2e 直跑是唯一正规产物**：unit/integration 必须有但只是辅助层；e2e 直接运行真实物；auth/binary 永远是执行者自己解决。
 - **运行环境是交付物、清理归 review**：iter 跑完 e2e 留环境 + 交 runtime manifest；review 凭它必然复跑得动，manifest 缺项 = packet 失败；全部 teardown 由 review 执行。
 - **代码审查在 loop 内、锚定 issue 设计、不发散**：diff-audit 步审 changed code 的逻辑正确性 / 设计偏离 / conventions / diff 内结构 / diff 内测试变更 / 全仓 issue-named pattern 覆盖，每条发现必须带锚。
@@ -69,7 +69,7 @@ trigger 角色（blocked-responder / umbrella-finalizer）任务简单，未调�
 - `common/runtime-contract`
 - `common/github-routing`
 - `common/state-contract`
-- `common/dispatch-contract` — 调度者派发 subagent 的输入输出约定（异步 harness / TaskStop 语义 / 二强制派发的口径）
+- `common/dispatch-contract` — runner-neutral 的 subagent transport 与权威 dispatch ledger；业务拆分和强制步骤仍由 entry 拥有
 - `contract` — issue body / PR body / review 验收点解析规则
 
 **quality/**（3）— iter 与 review 共用的品质判据，每份内含执行/判断双侧规则：
@@ -106,7 +106,7 @@ fragment 总数 = 5 + 3 + 8 + 13 = 29，与 `preset.toml` 的 `[[fragments]]` �
 
 ## 4. Iteration 调度者（`iter-entry.md`，workflow 形态）
 
-Step 0 读契约（4 份 common：`runtime-contract` / `github-routing` / `state-contract` / `dispatch-contract` + 两份 quality `honesty` / `evidence`）→ Step 1 spawn 分类（Resume/Retry/Fresh）→ Step 2 调查（**核心项亲自读取**：issue、linked PR 全量拉取并 verbatim 引用最新 retry comment 与 PR body caveat 段、sub-issues、shared context、state 文件、current-issue 文件、一跳图引用；bulk 材料派 `research`）→ Step 3 **建任务清单**（按 **deliverable signal** 从 issue body 判断，落成显式 checklist；两态出口；每 verdict 后重印）→ Step 4 逐条执行（4a 派发模板 → 4b 按单文件 Acceptance 节查结构 → 4c 判实质 → 4d verdict 路由；`verify ∥ e2e` 在同一 async dispatch round 并发派发）→ Step 5 Wrap up（handoff / summary 写盘）→ Step 6 Cleanup（scratch only，e2e standing environment 保留）→ Step 7 `ITERATION SUMMARY:` 一行。此 summary 是给 review 的接力人类信号，不承担引擎控制语义。
+Step 0 读契约（4 份 common：`runtime-contract` / `github-routing` / `state-contract` / `dispatch-contract` + 两份 quality `honesty` / `evidence`）→ Step 1 spawn 分类（Resume/Retry/Fresh）→ Step 2 调查（**核心项亲自读取**：issue、linked PR 全量拉取并 verbatim 引用最新 retry comment 与 PR body caveat 段、sub-issues、shared context、state 文件、current-issue 文件、一跳图引用；bulk 材料派 `research`）→ Step 3 **建任务清单**（按 **deliverable signal** 从 issue body 判断，落成显式 checklist；两态出口）→ Step 4 逐条执行（4a 派发模板 → 4b 按单文件 Acceptance 节查结构 → 4c 判实质 → 4d verdict 路由；`verify ∥ e2e` 同轮并发派发；ledger 是权威子任务状态）→ Step 5 Wrap up（最终 checklist / handoff / summary 写盘）→ Step 6 Cleanup（scratch only，e2e standing environment 保留）→ Step 7 `ITERATION SUMMARY:` 一行。此 summary 是给 review 的接力人类信号，不承担引擎控制语义。
 
 Deliverable signal → 步骤序列：
 

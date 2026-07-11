@@ -7,6 +7,7 @@ import { type as arkType } from "arktype"
 
 import {
 	DaemonError,
+	DecisionFingerprintState,
 	daemonRequest,
 	createDaemonRateLimitState,
 	DAEMON_RATE_LIMIT_STAGGER_MS,
@@ -19,7 +20,7 @@ import {
 	type DaemonResponse,
 	type DaemonRateLimitState,
 } from "./daemon"
-import { buildCoderLoopStatusSnapshot, type JsonObject, type JsonValue } from "./loop"
+import { buildCoderLoopStatusSnapshot, loadPreset, type JsonObject, type JsonValue } from "./loop"
 import {
 	createGitWorktreeManager,
 	schedulerSlotWorktreePath,
@@ -29,7 +30,7 @@ import {
 } from "./scheduler"
 import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
-import { queryObservabilityEvents } from "./observability"
+import { makeObservabilityEvent, queryObservabilityEvents } from "./observability"
 import { chainBindings, engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 import type { BoundaryRecord } from "./boundary-types"
 
@@ -42,6 +43,19 @@ let nextFixtureId = 0
 // #397 test brand helper — see install-commands.test.ts for rationale.
 function runtimeStatus(value: string) {
 	return engineLifecycleAdmittedItemStatus(parseInternalStatus(value, "test.status"), "test")
+}
+
+function emptyObservabilityExcerpt() {
+	return {
+		stdout: { path: "/dev/null", missing: true, truncated: false, records: [] },
+		stderr: { path: "/dev/null", missing: true, truncated: false, records: [] },
+	}
+}
+
+function daemonDecisionFingerprintState(daemon: CoderLoopDaemon): DecisionFingerprintState {
+	const state = Reflect.get(daemon, "decisionFingerprints")
+	if (!(state instanceof DecisionFingerprintState)) throw new Error("daemon decision fingerprint state is unavailable")
+	return state
 }
 
 // #406 fake-runner event-log line shape. The fake runners inline-render lines like
@@ -3681,8 +3695,6 @@ process.exitCode = 0
 			expect(eventTypes).toContain("phase.end")
 			expect(eventTypes).toContain("queue.terminal")
 
-			const operatorCliEnv = { ...process.env }
-			delete operatorCliEnv.CODER_LOOP_RUN_CRED
 			const cli = Bun.spawn({
 				cmd: [
 					"bun",
@@ -3698,7 +3710,7 @@ process.exitCode = 0
 				cwd: REPO_ROOT,
 				stdout: "pipe",
 				stderr: "pipe",
-				env: { ...operatorCliEnv, CODER_LOOP_DATA_DIR: fixture.loopDataRoot },
+				env: { ...process.env, CODER_LOOP_RUN_CRED: undefined, CODER_LOOP_DATA_DIR: fixture.loopDataRoot },
 			})
 			const [cliStdout, cliStderr, cliExit] = await Promise.all([
 				new Response(cli.stdout).text(),
@@ -3740,7 +3752,7 @@ process.exitCode = 0
 				cwd: REPO_ROOT,
 				stdout: "pipe",
 				stderr: "pipe",
-				env: { ...operatorCliEnv, CODER_LOOP_DATA_DIR: fixture.loopDataRoot },
+				env: { ...process.env, CODER_LOOP_RUN_CRED: undefined, CODER_LOOP_DATA_DIR: fixture.loopDataRoot },
 			})
 			const [logsStdout, logsStderr, logsExit] = await Promise.all([
 				new Response(logsCli.stdout).text(),
@@ -3806,6 +3818,286 @@ process.exitCode = 0
 			await fixture.daemon.stop()
 		}
 	}, 10_000)
+
+	test("decision fingerprint suppresses only consecutive duplicates", () => {
+		const state = new DecisionFingerprintState()
+		const first = makeObservabilityEvent({
+			kind: "decision",
+			type: "slot.busy",
+			chain: "fingerprint-chain",
+			runId: "run-1",
+			subject: { kind: "engine" },
+			payload: { slotKey: "slot-a", chainId: 1, repoCwd: "/repo/a", activeRunId: "run-1" },
+		})
+		const changed = makeObservabilityEvent({
+			kind: "decision",
+			type: "slot.busy",
+			chain: "fingerprint-chain",
+			runId: "run-2",
+			subject: { kind: "engine" },
+			payload: { slotKey: "slot-a", chainId: 1, repoCwd: "/repo/a", activeRunId: "run-2" },
+		})
+
+		expect(state.observe(1, first)).toBe(false)
+		expect(state.observe(1, first)).toBe(true)
+		expect(state.observe(1, changed)).toBe(false)
+		expect(state.observe(1, changed)).toBe(true)
+		state.release({ kind: "slot", chainId: 1, slotKey: "slot-a" })
+		expect(state.observe(1, changed)).toBe(false)
+	})
+
+	test("decision fingerprint state follows active lifecycle", async () => {
+		let stopPresetDir = ""
+		const fixture = await startFixture("decision-fingerprint-lifecycle", {
+			schedulerEnabled: false,
+			beforeStart: async ({ root }) => {
+				stopPresetDir = resolve(root, "stop-preset")
+				await mkdir(stopPresetDir, { recursive: true })
+				await writeFile(resolve(stopPresetDir, "review.md"), "Review the item.\n")
+				await writeFile(resolve(stopPresetDir, "preset.toml"), `name = "decision-fingerprint-lifecycle"
+
+[item]
+idField = "issue"
+
+[statuses]
+continuable = ["queued"]
+terminal = ["done", "exhausted"]
+success = ["done"]
+entry = "queued"
+exhausted = "exhausted"
+
+[[phases]]
+name = "review"
+prompt = "review.md"
+
+  [[phases.exits]]
+  status = "done"
+  when = "The review completed successfully."
+
+  [[phases.exits]]
+  chainAction = "stop"
+  when = "The chain must leave the active scheduling lifecycle."
+`)
+			},
+		})
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "fingerprint-stop-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			const item = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				itemId: "54101",
+				repoCwd: REPO_ROOT,
+				presetPath: stopPresetDir,
+			})).item)
+			const itemId = numberValue(item.id)
+			const sibling = record(expectOk(await request(fixture, "chain.create", {
+				name: "fingerprint-active-sibling",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const siblingChainId = numberValue(sibling.id)
+			const state = daemonDecisionFingerprintState(fixture.daemon)
+			const slot = makeObservabilityEvent({
+				kind: "decision",
+				type: "slot.busy",
+				chain: "fingerprint-stop-chain",
+				runId: "run-slot",
+				subject: { kind: "engine" },
+				payload: { slotKey: "slot-a", chainId, repoCwd: "/repo/a", activeRunId: "run-slot" },
+			})
+			const terminalItem = makeObservabilityEvent({
+				kind: "decision",
+				type: "item.backoff",
+				chain: "fingerprint-stop-chain",
+				item: itemId,
+				subject: { kind: "engine" },
+				payload: { rowId: itemId, failureCount: 1, nextRunAt: 1_800_000_000 },
+			})
+			const completedChain = makeObservabilityEvent({
+				kind: "decision",
+				type: "chain.complete_trigger",
+				chain: "fingerprint-stop-chain",
+				runId: "run-complete",
+				subject: { kind: "engine" },
+				payload: { chainId, decision: "keep-active", reason: "waiting" },
+			})
+			const activeSibling = makeObservabilityEvent({
+				kind: "decision",
+				type: "item.dependency_wait",
+				chain: "fingerprint-active-sibling",
+				item: 21,
+				subject: { kind: "engine" },
+				payload: { rowId: 21, dependsOn: [11], unsatisfied: [11] },
+			})
+			const seedStoppedChainScopes = (): void => {
+				expect(state.observe(chainId, slot)).toBe(false)
+				expect(state.observe(chainId, terminalItem)).toBe(false)
+				expect(state.observe(chainId, completedChain)).toBe(false)
+			}
+
+			expect(state.observe(siblingChainId, activeSibling)).toBe(false)
+			seedStoppedChainScopes()
+			expect(state.size).toBe(4)
+
+			const operatorStopped = record(expectOk(await request(fixture, "chain.stop", { chainId })).chain)
+			expect(operatorStopped.status).toBe("stopped")
+			expect(state.size).toBe(1)
+			expect(state.observe(siblingChainId, activeSibling)).toBe(true)
+			expect(record(expectOk(await request(fixture, "chain.resume", { chainId })).chain).status).toBe("active")
+			seedStoppedChainScopes()
+			expect(state.size).toBe(4)
+
+			const phaseExitStopped = expectOk(await request(fixture, "item.exitAction", {
+				itemId,
+				agentRunId: "run-phase-exit-stop",
+				agentPhase: "review",
+				action: "stop",
+			}))
+			expect(record(phaseExitStopped.chain).status).toBe("stopped")
+			expect(state.size).toBe(1)
+			expect(state.observe(siblingChainId, activeSibling)).toBe(true)
+			expect(record(expectOk(await request(fixture, "chain.resume", { chainId })).chain).status).toBe("active")
+			seedStoppedChainScopes()
+			expect(state.size).toBe(4)
+
+			state.releaseForSchedulerEvent({
+				type: "agent.exit",
+				slotKey: "slot-a",
+				chainId,
+				itemId,
+				runId: "run-slot",
+				phase: "iteration",
+				exitCode: 0,
+				status: runtimeStatus("done"),
+				excerpt: emptyObservabilityExcerpt(),
+			})
+			expect(state.size).toBe(3)
+			state.releaseForSchedulerEvent({
+				type: "queue.terminal",
+				ts: "2026-07-10T00:00:00.000Z",
+				runId: "run-slot",
+				chainId,
+				rowId: itemId,
+				terminalStatus: runtimeStatus("done"),
+			})
+			expect(state.size).toBe(2)
+			expect(state.observe(siblingChainId, activeSibling)).toBe(true)
+			state.releaseForSchedulerEvent({ type: "chain.completed", chainId, chainName: "fingerprint-stop-chain", runId: "run-complete" })
+			expect(state.size).toBe(1)
+			expect(state.observe(siblingChainId, activeSibling)).toBe(true)
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("decision fingerprint churn returns to active-set baseline", () => {
+		const survivingChainChurn = (generations: number): number => {
+			const state = new DecisionFingerprintState()
+			const keepActive = (runId: string, reason: string) => makeObservabilityEvent({
+				kind: "decision",
+				type: "chain.complete_trigger",
+				chain: "surviving-chain",
+				runId,
+				subject: { kind: "engine" },
+				payload: { chainId: 1, decision: "keep-active", reason },
+			})
+
+			for (let generation = 0; generation < generations; generation += 1) {
+				const runId = `surviving-run-${generation}`
+				expect(state.observe(1, keepActive(runId, "waiting"))).toBe(false)
+				expect(state.observe(1, keepActive(runId, "waiting"))).toBe(true)
+				expect(state.observe(1, keepActive(runId, "changed"))).toBe(false)
+				expect(state.observe(1, keepActive(runId, "changed"))).toBe(true)
+			}
+
+			return state.size
+		}
+
+		const churn = (rounds: number): number => {
+			const state = new DecisionFingerprintState()
+			const active = makeObservabilityEvent({
+				kind: "decision",
+				type: "item.dependency_wait",
+				chain: "active-baseline",
+				item: 1,
+				subject: { kind: "engine" },
+				payload: { rowId: 1, dependsOn: [99], unsatisfied: [99] },
+			})
+			expect(state.observe(1, active)).toBe(false)
+
+			for (let index = 0; index < rounds; index += 1) {
+				const chainId = index + 2
+				const slotKey = `slot-${chainId}`
+				const rowId = chainId * 10
+				const chainName = `churn-${chainId}`
+				const runId = `run-${chainId}`
+				const slot = makeObservabilityEvent({
+					kind: "decision",
+					type: "slot.busy",
+					chain: chainName,
+					runId,
+					subject: { kind: "engine" },
+					payload: { slotKey, chainId, repoCwd: `/repo/${chainId}`, activeRunId: runId },
+				})
+				const item = makeObservabilityEvent({
+					kind: "decision",
+					type: "item.backoff",
+					chain: chainName,
+					item: rowId,
+					subject: { kind: "engine" },
+					payload: { rowId, failureCount: 1, nextRunAt: 1_800_000_000 + index },
+				})
+				const keepActive = (reason: string, triggerRunId: string) => makeObservabilityEvent({
+					kind: "decision",
+					type: "chain.complete_trigger",
+					chain: chainName,
+					runId: triggerRunId,
+					subject: { kind: "engine" },
+					payload: { chainId, decision: "keep-active", reason },
+				})
+
+				expect(state.observe(chainId, slot)).toBe(false)
+				expect(state.observe(chainId, item)).toBe(false)
+				expect(state.observe(chainId, keepActive("waiting", `${runId}-a`))).toBe(false)
+				expect(state.observe(chainId, keepActive("waiting", `${runId}-b`))).toBe(false)
+				expect(state.observe(chainId, keepActive("waiting", `${runId}-b`))).toBe(true)
+				expect(state.observe(chainId, keepActive("changed", `${runId}-c`))).toBe(false)
+				expect(state.size).toBe(4)
+
+				state.releaseForSchedulerEvent({
+					type: "agent.exit",
+					slotKey,
+					chainId,
+					itemId: rowId,
+					runId,
+					phase: "iteration",
+					exitCode: 0,
+					status: runtimeStatus("done"),
+					excerpt: emptyObservabilityExcerpt(),
+				})
+				state.releaseForSchedulerEvent({
+					type: "queue.terminal",
+					ts: "2026-07-10T00:00:00.000Z",
+					runId,
+					chainId,
+					rowId,
+					terminalStatus: runtimeStatus("done"),
+				})
+				state.releaseForSchedulerEvent({ type: "chain.completed", chainId, chainName, runId })
+				expect(state.size).toBe(1)
+			}
+
+			expect(state.observe(1, active)).toBe(true)
+			return state.size
+		}
+
+		expect(churn(3)).toBe(1)
+		expect(churn(30)).toBe(1)
+		expect(survivingChainChurn(3)).toBe(1)
+		expect(survivingChainChurn(30)).toBe(1)
+	})
 
 	test("daemon scheduler uses bundled preset directory declared on the item (post-#412)", async () => {
 		const fixture = await startFixture("scheduler-chain-preset", { schedulerIntervalMs: 1_000, schedulerPresetDir: null })
@@ -4606,7 +4898,7 @@ process.exitCode = 0
 	})
 
 	describe("per-phase runner selection (issue #287 AC5)", () => {
-		test("live daemon with chain metadata claude/codex.binary spawns claude script for iter phase", async () => {
+		test("live daemon with chain metadata claude/codex.binary spawns codex script for iter phase", async () => {
 			const fixture = await startChainBasedRunnerFixture("ac5-iter", { phase: "iteration" })
 			try {
 				const result = expectOk(await request(fixture, "chain.create", {
@@ -4639,14 +4931,14 @@ process.exitCode = 0
 				const runId = iterationEnd.runId
 				const stdoutPath = resolveChainRuntimePaths(`ac5-iter-chain`, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(runId)
 				const stdout = await readFile(stdoutPath, "utf-8")
-				expect(stdout).toContain("BINARY:claude")
-				expect(stdout).not.toContain("BINARY:codex")
+				expect(stdout).toContain("BINARY:codex")
+				expect(stdout).not.toContain("BINARY:claude")
 			} finally {
 				await fixture.daemon.stop()
 			}
 		})
 
-		test("live daemon with chain metadata claude/codex.binary spawns claude script for review phase", async () => {
+		test("live daemon with chain metadata claude/codex.binary spawns codex script for review phase", async () => {
 			const fixture = await startChainBasedRunnerFixture("ac5-review", { phase: "review" })
 			try {
 				const result = expectOk(await request(fixture, "chain.create", {
@@ -4682,8 +4974,8 @@ process.exitCode = 0
 				)
 				const stdoutPath = resolveChainRuntimePaths(`ac5-review-chain`, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(reviewRunId!)
 				const stdout = await readFile(stdoutPath, "utf-8")
-				expect(stdout).toContain("BINARY:claude")
-				expect(stdout).not.toContain("BINARY:codex")
+				expect(stdout).toContain("BINARY:codex")
+				expect(stdout).not.toContain("BINARY:claude")
 			} finally {
 				await fixture.daemon.stop()
 			}
@@ -6351,6 +6643,186 @@ process.exitCode = 0
 		}
 	}, 30_000)
 
+	test("queue unblock waits for in-flight scheduler tick", async () => {
+		const fixture = await startQueueUnblockGateFixture("538-in-flight", { preset: "loaded", targetStatus: "blocked" })
+		try {
+			await fixture.tickEntered.promise
+
+			// Model the snapshot that existed when the in-flight tick began. Once released, the
+			// real scheduler spawn replaces this row with the sentinel item's current run.
+			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				store.recordRun({
+					runId: "run-before-in-flight-tick",
+					chainId: fixture.chainId,
+					itemId: fixture.targetRowId,
+					phase: "iteration",
+					startedAt: 1_800_000_000,
+					extra: storedItemExtra({}),
+				})
+				store.setCurrentRun({
+					chainId: fixture.chainId,
+					phase: "iteration",
+					runId: "run-before-in-flight-tick",
+					startedAt: 1_800_000_000,
+					extra: storedItemExtra({ itemId: fixture.targetRowId }),
+				})
+			} finally {
+				store.close()
+			}
+
+			let unblockSettled = false
+			const unblockPromise = sendDaemonRequest(fixture.socketPath, daemonRequest("queue.unblock", {
+				chainName: fixture.chainName,
+				issue: fixture.targetItemId,
+			})).then((response) => {
+				unblockSettled = true
+				return response
+			})
+
+			// The operator-admission event is written before dispatch enters handleQueueUnblock.
+			// Seeing it while the worktree promise gate is still closed proves the request reached
+			// the handler; the item/current-run snapshot must remain untouched until the tick exits.
+			await waitFor(
+				async () => (await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile)).events,
+				(events) => events.filter((event) =>
+					event.kind === "audit"
+						&& event.type === "privileged_op.caller_admission"
+						&& event.payload.op === "queue.unblock"
+						&& event.payload.outcome === "allow",
+				).length >= 2,
+			)
+			expect(unblockSettled).toBe(false)
+			expect((await readItem(fixture.loopDataRoot, fixture.chainId, Number(fixture.targetItemId)))?.status).toBe("blocked")
+
+			fixture.releaseTick.resolve()
+			const unblock = record(expectOk(await unblockPromise))
+			expect(record(unblock.mutation)).toMatchObject({
+				changed: true,
+				beforeStatus: "blocked",
+				afterStatus: "queued",
+				clearedCurrent: false,
+			})
+
+			const current = await readCurrentRun(fixture.loopDataRoot, fixture.chainId)
+			expect(current?.extra.itemId).toBe(fixture.sentinelRowId)
+			expect(current?.runId).not.toBe("run-before-in-flight-tick")
+		} finally {
+			fixture.releaseTick.resolve()
+			await fixture.daemon.stop()
+		}
+	}, 30_000)
+
+	test("queue unblock always resumes scheduler", async () => {
+		const scenarios: readonly QueueUnblockOutcomeScenario[] = [
+			{ kind: "success", preset: "loaded", targetStatus: "blocked", issue: "target", dryRun: false },
+			{ kind: "dry-run", preset: "loaded", targetStatus: "blocked", issue: "target", dryRun: true },
+			{ kind: "not-unblockable", preset: "loaded", targetStatus: "done", issue: "target", dryRun: false },
+			{ kind: "not-found", preset: "loaded", targetStatus: "blocked", issue: "missing", dryRun: false },
+			{ kind: "preset-load-error", preset: "missing", targetStatus: "blocked", issue: "target", dryRun: false },
+		]
+
+		for (const scenario of scenarios) {
+			const fixture = await startQueueUnblockGateFixture(`538-resume-${scenario.kind}`, scenario)
+			try {
+				await fixture.tickEntered.promise
+				const responsePromise = sendDaemonRequest(fixture.socketPath, daemonRequest("queue.unblock", {
+					chainName: fixture.chainName,
+					issue: scenario.issue === "target" ? fixture.targetItemId : scenario.issue,
+					dryRun: scenario.dryRun,
+				}))
+
+				fixture.releaseTick.resolve()
+				const response = await responsePromise
+				switch (scenario.kind) {
+					case "success":
+					case "dry-run":
+						expectOk(response)
+						break
+					case "not-unblockable":
+						expect(record(expectOk(response).mutation).reason).toBe("not_unblockable")
+						break
+					case "not-found":
+					case "preset-load-error":
+						expect(response.ok).toBe(false)
+						break
+					default:
+						assertNeverQueueUnblockOutcomeScenario(scenario)
+				}
+
+				// The initial tick is now holding an active sentinel run. A post-outcome tick
+				// therefore emits slot.busy; reaching this promise proves finally resumed the
+				// scheduler for returns and throws alike without inspecting private pause depth.
+				const busyEvent = await fixture.postOutcomeTick.promise
+				expect(busyEvent.type).toBe("slot.busy")
+			} finally {
+				fixture.releaseTick.resolve()
+				await fixture.daemon.stop()
+			}
+		}
+	}, 30_000)
+
+	test("queue unblock caller admission", async () => {
+		const fixture = await startQueueUnblockGateFixture("538-caller-admission", { preset: "loaded", targetStatus: "blocked" })
+		try {
+			await fixture.tickEntered.promise
+			fixture.releaseTick.resolve()
+			const credential = await waitFor(
+				async () => {
+					try {
+						return (await readFile(fixture.credentialPath, "utf-8")).trim()
+					} catch (error: unknown) {
+						if (error instanceof Error && "code" in error && error.code === "ENOENT") return ""
+						throw error
+					}
+				},
+				(value) => value.length > 0,
+			)
+
+			const denied = await sendDaemonRequest(fixture.socketPath, daemonRequest("queue.unblock", {
+				chainName: fixture.chainName,
+				issue: fixture.targetItemId,
+				agentCredential: credential,
+			}))
+			expect(denied.ok).toBe(false)
+			if (!denied.ok) {
+				expect(denied.error.code).toBe("invalid_caller")
+				expect(denied.error.message).toContain("operator credentials")
+			}
+			expect((await readItem(fixture.loopDataRoot, fixture.chainId, Number(fixture.targetItemId)))?.status).toBe("blocked")
+
+			const allowed = record(expectOk(await sendDaemonRequest(fixture.socketPath, daemonRequest("queue.unblock", {
+				chainName: fixture.chainName,
+				issue: fixture.targetItemId,
+			}))))
+			expect(record(allowed.mutation).changed).toBe(true)
+
+			const events = (await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile)).events
+			const queueAdmission = events.filter((event) =>
+				event.kind === "audit"
+					&& event.type === "privileged_op.caller_admission"
+					&& event.payload.op === "queue.unblock",
+			)
+			expect(queueAdmission.some((event) =>
+				event.kind === "audit"
+					&& event.type === "privileged_op.caller_admission"
+					&& event.payload.outcome === "deny"
+					&& event.payload.reason === "hard-deny-for-agent"
+					&& event.subject?.kind === "agent",
+			)).toBe(true)
+			expect(queueAdmission.some((event) => event.kind === "audit" && event.type === "privileged_op.caller_admission" && event.payload.outcome === "allow")).toBe(true)
+			expect(events.some((event) =>
+				event.kind === "audit"
+					&& event.type === "item.mutation.caller_admission"
+					&& event.item === fixture.targetRowId
+					&& event.payload.outcome === "allow"
+					&& event.payload.reason === "operator",
+			)).toBe(true)
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	// #410 acceptance row #2 — review writes its declared passthrough fields (top-level + inner
 	// blocker keys via extraPatch). Uses the same two-phase fake runner shape as #409 row 2:
 	// iteration captures its credential + writes in_progress; review captures its credential and
@@ -7114,6 +7586,132 @@ exit 0
 		schedulerEvents,
 		fakeCodexBinary: fakeCodex,
 		fakeClaudeBinary: fakeClaude,
+	}
+}
+
+type QueueUnblockGateOptions =
+	| { preset: "loaded"; targetStatus: "blocked" | "done" }
+	| { preset: "missing"; targetStatus: "blocked" }
+
+type QueueUnblockOutcomeScenario =
+	| { kind: "success"; preset: "loaded"; targetStatus: "blocked"; issue: "target"; dryRun: false }
+	| { kind: "dry-run"; preset: "loaded"; targetStatus: "blocked"; issue: "target"; dryRun: true }
+	| { kind: "not-unblockable"; preset: "loaded"; targetStatus: "done"; issue: "target"; dryRun: false }
+	| { kind: "not-found"; preset: "loaded"; targetStatus: "blocked"; issue: "missing"; dryRun: false }
+	| { kind: "preset-load-error"; preset: "missing"; targetStatus: "blocked"; issue: "target"; dryRun: false }
+
+function assertNeverQueueUnblockOutcomeScenario(scenario: never): never {
+	throw new Error(`Unhandled queue-unblock outcome scenario: ${JSON.stringify(scenario)}`)
+}
+
+async function startQueueUnblockGateFixture(name: string, options: QueueUnblockGateOptions) {
+	const root = resolve(TEST_ROOT, `${++nextFixtureId}-${name}`)
+	const loopDataRoot = resolve(root, "ld")
+	const fakeRunner = resolve(root, "held-runner.ts")
+	const credentialPath = resolve(root, "runner-credential.txt")
+	await mkdir(loopDataRoot, { recursive: true })
+	await writeFile(
+		fakeRunner,
+		`import { writeFile } from "node:fs/promises"
+await writeFile(${JSON.stringify(credentialPath)}, process.env.CODER_LOOP_RUN_CRED ?? "")
+await new Promise((resolveSignal) => process.once("SIGTERM", resolveSignal))
+process.exitCode = 0
+`,
+	)
+
+	const chainName = `${name}-chain`
+	const targetItemId = "538101"
+	const sentinelItemId = "538102"
+	const store = openSqliteStateStore({ loopDataRoot })
+	let chainId: number
+	let targetRowId: number
+	let sentinelRowId: number
+	try {
+		const chain = store.createChain({
+			name: chainName,
+			preset: options.preset === "loaded" ? "gh-issue-pr-iteration" : "missing-538-preset",
+			repository: "mouriya-s-lab/coder-loop",
+			baseBranch: "main",
+			status: "stopped",
+			metadata: storedChainMetadata({}),
+		})
+		chainId = chain.id
+		const target = store.createItem({
+			chainId,
+			itemId: targetItemId,
+			repoCwd: REPO_ROOT,
+			status: runtimeStatus(options.targetStatus),
+			preset: "gh-issue-pr-iteration",
+			extra: storedItemExtra({ issue: targetItemId }),
+		})
+		targetRowId = target.id
+		const sentinel = store.createItem({
+			chainId,
+			itemId: sentinelItemId,
+			repoCwd: REPO_ROOT,
+			status: runtimeStatus("queued"),
+			preset: "gh-issue-pr-iteration",
+			extra: storedItemExtra({ issue: sentinelItemId }),
+		})
+		sentinelRowId = sentinel.id
+	} finally {
+		store.close()
+	}
+
+	const tickEntered = Promise.withResolvers<void>()
+	const releaseTick = Promise.withResolvers<void>()
+	const postOutcomeTick = Promise.withResolvers<Extract<SchedulerEvent, { type: "slot.busy" }>>()
+	let gateFirstWorktree = true
+	const loadedPreset = loadPreset(PRESET_DIR).then((preset) => ({ presetDir: PRESET_DIR, preset }))
+	const daemon = await startCoderLoopDaemon({
+		loopDataRoot,
+		shutdownGraceMs: 100,
+		scheduler: {
+			enabled: true,
+			intervalMs: 60_000,
+			runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
+			presetForChain: () => loadedPreset,
+			presetForItem: () => loadedPreset,
+			worktreeManager: async ({ chain, repoCwd }) => {
+				if (gateFirstWorktree) {
+					gateFirstWorktree = false
+					tickEntered.resolve()
+					await releaseTick.promise
+				}
+				const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+				await mkdir(worktreePath, { recursive: true })
+				return worktreePath
+			},
+			prompt: () => "queue-unblock scheduler serialization fixture",
+			chainCompleteTriggerForChain: () => null,
+			onEvent: (event) => {
+				if (event.type === "slot.busy") postOutcomeTick.resolve(event)
+			},
+		},
+	})
+	const socketPath = daemon.snapshot().socketPath
+	if (options.preset === "loaded") {
+		expectOk(await sendDaemonRequest(socketPath, daemonRequest("queue.unblock", {
+			chainName,
+			issue: targetItemId,
+			dryRun: true,
+		})))
+	}
+	expectOk(await sendDaemonRequest(socketPath, daemonRequest("chain.resume", { chainName })))
+
+	return {
+		daemon,
+		loopDataRoot,
+		socketPath,
+		chainName,
+		chainId,
+		targetItemId,
+		targetRowId,
+		sentinelRowId,
+		tickEntered,
+		releaseTick,
+		postOutcomeTick,
+		credentialPath,
 	}
 }
 
