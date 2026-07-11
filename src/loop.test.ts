@@ -6,6 +6,7 @@ import {
 	agentCodexArgs,
 	agentOpencodeArgs,
 	agentSessionsPath,
+	buildRunnerInvocation,
 	buildCentralRuntimeBindingPaths,
 	buildRenderBindings,
 	buildDaemonStartPlan,
@@ -24,6 +25,7 @@ import {
 	parseSessionIdFromRunnerStream,
 	renderFragmentIndex,
 	renderPrompt,
+	runnerFilesystemGrants,
 	ENGINE_RUNTIME_BINDING_KEYS,
 	stripRoleEntryFrontmatter,
 	resolveBinding,
@@ -727,6 +729,16 @@ describe("runner and daemon helpers", () => {
 			"resume",
 			"thread-1",
 			"--json",
+			"--config",
+			'sandbox_mode="workspace-write"',
+			"--config",
+			"sandbox_workspace_write.writable_roots=[]",
+			"--config",
+			"sandbox_workspace_write.network_access=true",
+			"--config",
+			"sandbox_workspace_write.exclude_tmpdir_env_var=true",
+			"--config",
+			"sandbox_workspace_write.exclude_slash_tmp=true",
 			"--ignore-rules",
 			"prompt",
 		])
@@ -735,7 +747,7 @@ describe("runner and daemon helpers", () => {
 
 	test("agentOpencodeArgs renders run subcommand with json format model dir and optional resume", () => {
 		// #481 acceptance #4: opencode invocation must match what the operator's local
-		// `opencode 1.17.5` accepts — `opencode run --format json --dangerously-skip-permissions
+		// `opencode 1.17.5` accepts — `opencode run --format json
 		// -m <model> [-s <sessionID>] <prompt>` — and must preserve user-supplied extra args
 		// while stripping any user-supplied `-m`/`--model` so the engine's resolved model wins.
 
@@ -745,7 +757,6 @@ describe("runner and daemon helpers", () => {
 			"run",
 			"--format",
 			"json",
-			"--dangerously-skip-permissions",
 			"-m",
 			"opencode-go/glm-5.2",
 			"do thing",
@@ -756,7 +767,6 @@ describe("runner and daemon helpers", () => {
 			"run",
 			"--format",
 			"json",
-			"--dangerously-skip-permissions",
 			"-m",
 			"opencode-go/glm-5.2",
 			"-s",
@@ -770,12 +780,104 @@ describe("runner and daemon helpers", () => {
 			"run",
 			"--format",
 			"json",
-			"--dangerously-skip-permissions",
 			"--quiet",
 			"-m",
 			"opencode-go/glm-5.2",
 			"hi",
 		])
+	})
+
+	test("runner filesystem grants enumerate only declared surfaces and omit an absent current-issue channel", () => {
+		const paths = {
+			agentCwd: "/work/agent",
+			presetDir: "/runtime/preset",
+			evidenceDir: "/runtime/chains/one/evidence/601",
+			sharedContextFile: "/runtime/chains/one/shared.md",
+			currentIssueFile: "/runtime/chains/one/issues/601.md",
+			daemonSocket: "/runtime/daemon.sock",
+		}
+		expect(runnerFilesystemGrants(paths)).toEqual([
+			{ kind: "agent-cwd", path: paths.agentCwd },
+			{ kind: "preset", path: paths.presetDir },
+			{ kind: "evidence", path: paths.evidenceDir },
+			{ kind: "shared-context", path: paths.sharedContextFile },
+			{ kind: "current-issue", path: paths.currentIssueFile },
+			{ kind: "daemon-cli", path: paths.daemonSocket },
+		])
+		expect(runnerFilesystemGrants({ ...paths, currentIssueFile: "" })).toEqual([
+			{ kind: "agent-cwd", path: paths.agentCwd },
+			{ kind: "preset", path: paths.presetDir },
+			{ kind: "evidence", path: paths.evidenceDir },
+			{ kind: "shared-context", path: paths.sharedContextFile },
+			{ kind: "daemon-cli", path: paths.daemonSocket },
+		])
+	})
+
+	test("runner projections preserve exact grants without a loop-data-root escape hatch", () => {
+		const grants = runnerFilesystemGrants({
+			agentCwd: "/work/agent",
+			presetDir: "/runtime/preset",
+			evidenceDir: "/runtime/chains/one/evidence/601",
+			sharedContextFile: "/runtime/chains/one/shared.md",
+			currentIssueFile: "/runtime/chains/one/issues/601.md",
+			daemonSocket: "/runtime/daemon.sock",
+		})
+		const paths = { agentCwd: "/work/agent", grants }
+		const claude = buildRunnerInvocation(
+			{ kind: "claude", source: "preset", binary: "claude", extraArgs: ["--dangerously-skip-permissions", "--add-dir", "/runtime"], model: null },
+			"prompt",
+			{ kind: "fresh" },
+			paths,
+		)
+		expect(claude.args.slice(claude.args.indexOf("--add-dir") + 1, claude.args.indexOf("-p"))).toEqual([
+			"/runtime/preset",
+			"/runtime/chains/one/evidence/601",
+			"/runtime/chains/one/shared.md",
+			"/runtime/chains/one/issues/601.md",
+			"/runtime/daemon.sock",
+		])
+		expect(claude.args).not.toContain("--dangerously-skip-permissions")
+		expect(claude.args).not.toContain("/runtime")
+
+		const codexFresh = buildRunnerInvocation(
+			{
+				kind: "codex",
+				source: "preset",
+				binary: "codex",
+				extraArgs: ["--sandbox", "danger-full-access", "--add-dir", "/runtime", "--dangerously-bypass-approvals-and-sandbox", "-c", 'sandbox_mode="danger-full-access"'],
+				model: null,
+			},
+			"prompt",
+			{ kind: "fresh" },
+			paths,
+		)
+		const codexResume = buildRunnerInvocation(
+			{ kind: "codex", source: "preset", binary: "codex", extraArgs: [], model: null },
+			"prompt",
+			{ kind: "resume", sessionId: "thread-601" },
+			paths,
+		)
+		const policyArgs = (args: readonly string[]): string[] => args.filter((arg) => arg.startsWith("sandbox_"))
+		expect(policyArgs(codexFresh.args)).toEqual(policyArgs(codexResume.args))
+		expect(codexFresh.args).not.toContain("danger-full-access")
+		expect(codexResume.args).not.toContain("danger-full-access")
+		expect(codexFresh.args).not.toContain("--add-dir")
+		expect(codexFresh.args).not.toContain("/runtime")
+		expect(codexFresh.args.join(" ")).toContain("/runtime/chains/one/shared.md")
+		expect(codexFresh.args.join(" ")).not.toContain("/runtime\"")
+
+		const opencode = buildRunnerInvocation(
+			{ kind: "opencode", source: "preset", binary: "opencode", extraArgs: ["--dangerously-skip-permissions", "--dir", "/runtime"], model: null },
+			"prompt",
+			{ kind: "fresh" },
+			paths,
+		)
+		expect(opencode.args).not.toContain("--dangerously-skip-permissions")
+		expect(opencode.args).not.toContain("--dir")
+		expect(opencode.args).not.toContain("/runtime")
+		expect(opencode.env.OPENCODE_CONFIG_CONTENT).toContain('"/runtime/preset/**":"allow"')
+		expect(opencode.env.OPENCODE_CONFIG_CONTENT).toContain('"/runtime/preset/**":"deny"')
+		expect(opencode.env.OPENCODE_CONFIG_CONTENT).toContain('"/runtime/chains/one/shared.md":"allow"')
 	})
 
 	test("parseSessionIdFromRunnerStream extracts opencode sessionID from JSONL first line", () => {
@@ -810,6 +912,14 @@ describe("small parsers", () => {
 			sessionsPath: resolve(root, "run-635", "umbrella-finalizer", "sessions.jsonl"),
 			resume: { kind: "fresh" },
 			agentCwd: root,
+			grantPaths: {
+				agentCwd: root,
+				presetDir: options.preset.presetDir,
+				evidenceDir: options.evidenceRootDir,
+				sharedContextFile: options.sharedContextPath,
+				currentIssueFile: "",
+				daemonSocket: resolve(TEST_ROOT, "daemon.sock"),
+			},
 			runner: { kind: "claude", source: "preset", binary: runner, extraArgs: [], model: null },
 			watchdog: null,
 			statusWriter: async (path, payload) => {
@@ -844,6 +954,14 @@ describe("small parsers", () => {
 			sessionsPath: resolve(root, "run-635-terminal", "umbrella-finalizer", "sessions.jsonl"),
 			resume: { kind: "fresh" },
 			agentCwd: root,
+			grantPaths: {
+				agentCwd: root,
+				presetDir: options.preset.presetDir,
+				evidenceDir: options.evidenceRootDir,
+				sharedContextFile: options.sharedContextPath,
+				currentIssueFile: "",
+				daemonSocket: resolve(TEST_ROOT, "daemon.sock"),
+			},
 			runner: { kind: "claude", source: "preset", binary: runner, extraArgs: [], model: null },
 			watchdog: null,
 			statusWriter: async (path, payload) => {

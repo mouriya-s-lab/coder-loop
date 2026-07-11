@@ -30,11 +30,13 @@ import {
 	buildRunnerInvocation,
 	loadPreset,
 	resolvePhaseRunnerFromChain,
+	runnerFilesystemGrants,
 	runPresetChainCompleteTriggerPhases,
 	substitutePresetRootToken,
 	type AgentRunnerKind,
 	type AgentRunnerSelection,
 	type JsonObject,
+	type RunnerInvocationPaths,
 } from "./loop"
 import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import { type ChainRecord, type ItemRecord, openSqliteStateStore } from "./sqlite-state"
@@ -46,6 +48,20 @@ const REPO_ROOT = resolve(import.meta.dir, "..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-tests", String(process.pid))
 
 let nextFixtureId = 0
+
+function invocationFixturePaths(agentCwd: string, presetDir: string): RunnerInvocationPaths {
+	return {
+		agentCwd,
+		grants: runnerFilesystemGrants({
+			agentCwd,
+			presetDir,
+			evidenceDir: "/runtime/chains/fixture/evidence/item",
+			sharedContextFile: "/runtime/chains/fixture/shared.md",
+			currentIssueFile: "",
+			daemonSocket: "/runtime/daemon.sock",
+		}),
+	}
+}
 
 // #397 test brand helper — see install-commands.test.ts for rationale.
 function runtimeStatus(value: string) {
@@ -3303,12 +3319,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			})
 			expect(runner.kind).toBe("codex")
 			expect(runner.model).toBe("gpt-5.6-sol")
-			const invocation = buildRunnerInvocation(runner, "p", { kind: "fresh" }, {
-				targetCwd: "/repo/a",
-				agentCwd: "/repo/a",
-				presetDir: PRESET_DIR,
-				loopDataRoot: "/lr",
-			})
+			const invocation = buildRunnerInvocation(runner, "p", { kind: "fresh" }, invocationFixturePaths("/repo/a", PRESET_DIR))
 			const modelFlagIndex = invocation.args.indexOf("--model")
 			expect(modelFlagIndex).toBeGreaterThanOrEqual(0)
 			expect(invocation.args[modelFlagIndex + 1]).toBe("gpt-5.6-sol")
@@ -3563,7 +3574,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			{ kind: "claude", source: "iteration-default", binary: "claude", extraArgs: [], model: null },
 			"prompt",
 			decision,
-			{ targetCwd: REPO_ROOT, agentCwd: REPO_ROOT, presetDir: PRESET_DIR, loopDataRoot: resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-tests/render-only") },
+			invocationFixturePaths(REPO_ROOT, PRESET_DIR),
 		)
 		expect(invocation.kind).toBe("spawn")
 		if (invocation.kind === "spawn") {
@@ -3599,7 +3610,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			{ kind: "claude", source: "iteration-default", binary: "claude", extraArgs: [], model: null },
 			"prompt",
 			decision,
-			{ targetCwd: REPO_ROOT, agentCwd: REPO_ROOT, presetDir: PRESET_DIR, loopDataRoot: resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-tests/render-only") },
+			invocationFixturePaths(REPO_ROOT, PRESET_DIR),
 		)
 		expect(invocation.kind).toBe("spawn")
 		if (invocation.kind === "spawn") {
@@ -3632,7 +3643,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			{ kind: "codex", source: "iteration-default", binary: "codex", extraArgs: [], model: null },
 			"prompt",
 			decision,
-			{ targetCwd: REPO_ROOT, agentCwd: REPO_ROOT, presetDir: PRESET_DIR, loopDataRoot: resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-tests/render-only") },
+			invocationFixturePaths(REPO_ROOT, PRESET_DIR),
 		)
 		expect(invocation.kind).toBe("spawn")
 		if (invocation.kind === "spawn") {

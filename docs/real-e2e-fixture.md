@@ -84,7 +84,7 @@ exit 1。
 
 ## Runner 覆盖
 
-phase runner/model 默认值来自 `preset.toml`。bundled `gh-issue-pr-iteration` 四个 phase 目前都声明 `runner = "codex"`、`model = "gpt-5.6-sol"`；`real-e2e-minimal` iteration/review 都声明 `runner = "codex"` + `model = "gpt-5.6-terra"`。要针对某次 chain 覆盖 model：`coder-loop chain set-runner-model <chain> --kind <k> --model <m>`。要覆盖某个 item 的执行 runner（限非 trigger phase）：`coder-loop item add --runner claude|codex|opencode`。要改 codex 的 CLI extraArgs（如 sandbox），改 chain metadata 的 `codex.extraArgs` binding；引擎在 spawn 时会补 `--sandbox danger-full-access` 若 extraArgs 没提供任何 `--sandbox`——read-only / workspace-write 会阻断 workspace 写入与 `gh` 网络访问，要覆盖显式在 `codex.extraArgs` 提供。
+phase runner/model 默认值来自 `preset.toml`。bundled `gh-issue-pr-iteration` 四个 phase 目前都声明 `runner = "codex"`、`model = "gpt-5.6-sol"`；`real-e2e-minimal` iteration/review 都声明 `runner = "codex"` + `model = "gpt-5.6-terra"`。要针对某次 chain 覆盖 model：`coder-loop chain set-runner-model <chain> --kind <k> --model <m>`。要覆盖某个 item 的执行 runner（限非 trigger phase）：`coder-loop item add --runner claude|codex|opencode`。runner 的文件系统授权由引擎从声明面构造，`extraArgs` 中的 sandbox / add-dir / cwd bypass 会被剥离；Codex fresh 与 resume 都由同一 `workspace-write` config 投影获得 agent worktree、精确声明通道与网络能力，不能再用 chain metadata 放宽为 `danger-full-access`。
 
 ## Known pitfalls
 

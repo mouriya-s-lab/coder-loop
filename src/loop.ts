@@ -5054,6 +5054,13 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 	}
 
 	for (const phase of phases) {
+		const runtimePaths = buildCentralRuntimeBindingPaths({
+			options,
+			chain: input.chain,
+			runId: finalizerRunId,
+			currentIssueFile,
+			evidenceDir,
+		})
 		const ctx: ResolveContext = {
 			item: anchorRecord,
 			chain: buildRenderBindings(options),
@@ -5065,13 +5072,7 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 				evidenceDir,
 				agentCwd: targetCwd,
 				issueRun: { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null, resumedSessionId: null },
-				paths: buildCentralRuntimeBindingPaths({
-					options,
-					chain: input.chain,
-					runId: finalizerRunId,
-					currentIssueFile,
-					evidenceDir,
-				}),
+				paths: runtimePaths,
 			}),
 			preset,
 		}
@@ -5080,7 +5081,23 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 		const outputPath = agentOutputPath(options, finalizerRunId, phase.name)
 		const resolvedRunner = await resolvePhaseRunner(phase.name)
 		log(`Starting chain-complete trigger phase ${phase.name} for chain ${input.chain.name} (runner=${resolvedRunner.kind})...`)
-		const { output, stdoutBytes, code } = await runAgent(options, phase.name, prompt, outputPath, targetCwd, resolvedRunner, summaryWatchdogConfigForPhase(phase))
+		const { output, stdoutBytes, code } = await runAgent(
+			options,
+			phase.name,
+			prompt,
+			outputPath,
+			targetCwd,
+			{
+				agentCwd: targetCwd,
+				presetDir: preset.presetDir,
+				evidenceDir: runtimePaths.evidenceDir,
+				sharedContextFile: runtimePaths.sharedContextPath,
+				currentIssueFile: runtimePaths.currentIssueFile,
+				daemonSocket: resolveLoopDataPaths(loopDataRootOption(options.loopDataRoot)).daemonSocket,
+			},
+			resolvedRunner,
+			summaryWatchdogConfigForPhase(phase),
+		)
 		log(`Chain-complete trigger phase ${phase.name} finished: exit=${code}, output=${outputPath} (${stdoutBytes} bytes)`)
 		if (code !== 0) throw new Error(`chain-complete trigger phase ${phase.name} exited ${code}`)
 		const decision = parseFinalizerSummaryDecision(output, resolvedRunner.kind)
@@ -5785,6 +5802,7 @@ async function runAgent(
 	prompt: string,
 	outputPath: string,
 	agentCwd: string,
+	grantPaths: RunnerFilesystemGrantPaths,
 	runner: AgentRunnerSelection,
 	watchdog: SummaryWatchdogConfig | null,
 	eventContext?: LoopEventContext,
@@ -5799,7 +5817,7 @@ async function runAgent(
 
 	const result = await runAgentWithBackoff({
 		spawnAttempt: ({ resume }) => {
-			const baseInput: SpawnOneAttemptInput = { options, label, prompt, outputPath, sessionsPath, resume, agentCwd, runner, watchdog }
+			const baseInput: SpawnOneAttemptInput = { options, label, prompt, outputPath, sessionsPath, resume, agentCwd, grantPaths, runner, watchdog }
 			return spawnOneAttempt(eventContext ? { ...baseInput, eventContext } : baseInput)
 		},
 		sleep: (seconds: number) => new Promise((resolve) => setTimeout(resolve, seconds * 1000)),
@@ -5850,6 +5868,7 @@ export type SpawnOneAttemptInput = {
 	sessionsPath: string
 	resume: ResumeDecision
 	agentCwd: string
+	grantPaths: RunnerFilesystemGrantPaths
 	runner?: AgentRunnerSelection
 	watchdog: SummaryWatchdogConfig | null
 	attemptTimeout?: AttemptTimeoutConfig | null
@@ -6124,9 +6143,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 		const stderrOutFile = createWriteStream(attemptStderrPath, { flags: "w" })
 		const runnerPlan = buildRunnerInvocation(selectedRunner, effectivePrompt, resume, {
 			agentCwd: input.agentCwd,
-			targetCwd: options.targetCwd,
-			presetDir: options.preset.presetDir,
-			loopDataRoot: resolveLoopDataPaths(loopDataRootOption(options.loopDataRoot)).root,
+			grants: runnerFilesystemGrants(input.grantPaths),
 		})
 		const status: AgentRunStatus = {
 			label,
@@ -6176,6 +6193,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			cwd: input.agentCwd,
 			stdio: ["ignore", "pipe", "pipe"],
 			detached: true,
+			env: { ...process.env, ...runnerPlan.env },
 		})
 		const sendSignalToGroup = (sig: NodeJS.Signals): void => {
 			const pid = child.pid
@@ -6495,7 +6513,8 @@ function stripModelArgs(extraArgs: readonly string[], flags: readonly string[]):
 }
 
 export function agentClaudeArgs(extraArgs: readonly string[], prompt: string, resume: ResumeDecision, additionalDirs: readonly string[], model: string | null = null): string[] {
-	const args = model === null ? [...extraArgs] : stripModelArgs(extraArgs, ["--model"])
+	const authorizedArgs = stripClaudeAuthorizationArgs(extraArgs)
+	const args = model === null ? authorizedArgs : stripModelArgs(authorizedArgs, ["--model"])
 	if (model !== null) args.push("--model", model)
 	if (!args.includes("--output-format")) args.push("--output-format", "stream-json")
 	if (!args.includes("--verbose")) args.push("--verbose")
@@ -6507,8 +6526,29 @@ export function agentClaudeArgs(extraArgs: readonly string[], prompt: string, re
 	return args
 }
 
+function stripClaudeAuthorizationArgs(extraArgs: readonly string[]): string[] {
+	const stripped: string[] = []
+	for (let index = 0; index < extraArgs.length; index++) {
+		const arg = extraArgs[index]!
+		if (arg === "--dangerously-skip-permissions" || arg === "--allow-dangerously-skip-permissions") continue
+		if (arg === "--permission-mode") {
+			index++
+			continue
+		}
+		if (arg.startsWith("--permission-mode=")) continue
+		if (arg === "--add-dir") {
+			while (extraArgs[index + 1] !== undefined && !extraArgs[index + 1]!.startsWith("-")) index++
+			continue
+		}
+		stripped.push(arg)
+	}
+	return stripped
+}
+
+export type RunnerInvocationEnvironment = Readonly<Record<string, string>>
+
 export type RunnerInvocation =
-	| { kind: "spawn"; binary: string; args: string[] }
+	| { kind: "spawn"; binary: string; args: string[]; env: RunnerInvocationEnvironment }
 
 // #505: the loop-process-side git worktree helpers (worktreeBasePath /
 // worktreePathForItem / ensureWorktreeForItem / removeWorktreeForItem /
@@ -6525,18 +6565,45 @@ export type RunnerInvocation =
 
 export type RunnerInvocationPaths = {
 	agentCwd: string
-	targetCwd: string
+	grants: readonly RunnerFilesystemGrant[]
+}
+
+export type RunnerFilesystemGrantPaths = {
+	agentCwd: string
 	presetDir: string
-	loopDataRoot: string
+	evidenceDir: string
+	sharedContextFile: string
+	currentIssueFile: string
+	daemonSocket: string
+}
+
+export type RunnerFilesystemGrant =
+	| { kind: "agent-cwd"; path: string }
+	| { kind: "preset"; path: string }
+	| { kind: "evidence"; path: string }
+	| { kind: "shared-context"; path: string }
+	| { kind: "current-issue"; path: string }
+	| { kind: "daemon-cli"; path: string }
+
+export function runnerFilesystemGrants(paths: RunnerFilesystemGrantPaths): RunnerFilesystemGrant[] {
+	const grants: RunnerFilesystemGrant[] = [
+		{ kind: "agent-cwd", path: paths.agentCwd },
+		{ kind: "preset", path: paths.presetDir },
+		{ kind: "evidence", path: paths.evidenceDir },
+		{ kind: "shared-context", path: paths.sharedContextFile },
+	]
+	if (paths.currentIssueFile !== "") grants.push({ kind: "current-issue", path: paths.currentIssueFile })
+	grants.push({ kind: "daemon-cli", path: paths.daemonSocket })
+	return grants
 }
 
 export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: string, resume: ResumeDecision, paths: RunnerInvocationPaths): RunnerInvocation {
-	const additionalDirs = runnerAdditionalDirs(paths)
 	if (runner.kind === "claude") {
 		return {
 			kind: "spawn",
 			binary: runner.binary,
-			args: agentClaudeArgs(runner.extraArgs, prompt, resume, additionalDirs, runner.model),
+			args: agentClaudeArgs(runner.extraArgs, prompt, resume, runnerAdditionalDirs(paths.grants), runner.model),
+			env: {},
 		}
 	}
 	if (runner.kind === "opencode") {
@@ -6544,17 +6611,43 @@ export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: stri
 			kind: "spawn",
 			binary: runner.binary,
 			args: agentOpencodeArgs(runner.extraArgs, prompt, resume, runner.model),
+			env: { OPENCODE_CONFIG_CONTENT: opencodeGrantConfig(paths.grants) },
 		}
 	}
 	return {
 		kind: "spawn",
 		binary: runner.binary,
-		args: agentCodexArgs(runner.extraArgs, prompt, resume, paths.agentCwd, runner.model, additionalDirs),
+		args: agentCodexArgs(runner.extraArgs, prompt, resume, paths.agentCwd, runner.model, codexWritableGrantPaths(paths.grants)),
+		env: {},
 	}
 }
 
-export function runnerAdditionalDirs(paths: RunnerInvocationPaths): string[] {
-	return distinctPaths([paths.presetDir, paths.loopDataRoot, paths.agentCwd])
+export function runnerAdditionalDirs(grants: readonly RunnerFilesystemGrant[]): string[] {
+	return distinctPaths(grants.flatMap((grant) => grant.kind === "agent-cwd" ? [] : [grant.path]))
+}
+
+function codexWritableGrantPaths(grants: readonly RunnerFilesystemGrant[]): string[] {
+	return distinctPaths(grants.flatMap((grant) => grant.kind === "agent-cwd" || grant.kind === "preset" ? [] : [grant.path]))
+}
+
+function opencodeGrantPattern(grant: RunnerFilesystemGrant): string {
+	if (grant.kind === "agent-cwd") return ""
+	if (grant.kind === "preset" || grant.kind === "evidence") return `${grant.path}/**`
+	return grant.path
+}
+
+function opencodeGrantConfig(grants: readonly RunnerFilesystemGrant[]): string {
+	const externalDirectory: JsonObject = { "*": "deny" }
+	const edit: JsonObject = { "*": "allow" }
+	for (const grant of grants) {
+		const pattern = opencodeGrantPattern(grant)
+		if (pattern === "") continue
+		externalDirectory[pattern] = "allow"
+		if (grant.kind === "preset") edit[pattern] = "deny"
+	}
+	const permission: JsonObject = { "*": "allow", external_directory: externalDirectory, edit }
+	const config: JsonObject = { permission }
+	return JSON.stringify(config)
 }
 
 function distinctPaths(paths: readonly string[]): string[] {
@@ -6566,7 +6659,7 @@ function distinctPaths(paths: readonly string[]): string[] {
 }
 
 // #481 opencode invocation shape (matches operator's local `opencode 1.17.5`):
-//   opencode run --format json --dangerously-skip-permissions -m <model> [-s <sessionID>] <prompt>
+//   opencode run --format json -m <model> [-s <sessionID>] <prompt>
 // Resume passes `-s <sessionID>`; fresh start omits it. JSON streaming is mandatory because the
 // engine reads the first line for the `sessionID` (value `ses_…`) — see parseOpencodeSessionIdFromStream.
 // Default model is `opencode-go/glm-5.2` (see DEFAULT_OPENCODE_MODEL); model resolution layered
@@ -6578,15 +6671,29 @@ export function agentOpencodeArgs(
 	model: string | null = null,
 ): string[] {
 	const effectiveModel = model ?? DEFAULT_OPENCODE_MODEL
-	const runnerArgs = stripModelArgs(extraArgs, ["--model", "-m"])
+	const runnerArgs = stripModelArgs(stripOpencodeAuthorizationArgs(extraArgs), ["--model", "-m"])
 	const args: string[] = ["run"]
 	if (!runnerArgs.includes("--format") && !runnerArgs.some((arg) => arg.startsWith("--format="))) args.push("--format", "json")
-	if (!runnerArgs.includes("--dangerously-skip-permissions")) args.push("--dangerously-skip-permissions")
 	args.push(...runnerArgs)
 	args.push("-m", effectiveModel)
 	if (resume.kind === "resume") args.push("-s", resume.sessionId)
 	args.push(prompt)
 	return args
+}
+
+function stripOpencodeAuthorizationArgs(extraArgs: readonly string[]): string[] {
+	const stripped: string[] = []
+	for (let index = 0; index < extraArgs.length; index++) {
+		const arg = extraArgs[index]!
+		if (arg === "--dangerously-skip-permissions") continue
+		if (arg === "--dir") {
+			index++
+			continue
+		}
+		if (arg.startsWith("--dir=")) continue
+		stripped.push(arg)
+	}
+	return stripped
 }
 
 export function agentCodexArgs(
@@ -6598,25 +6705,72 @@ export function agentCodexArgs(
 	additionalDirs: readonly string[] = [],
 ): string[] {
 	const topLevelArgs = ["--ask-for-approval", "never", "exec"]
-	const runnerArgs = model === null ? [...extraArgs] : stripModelArgs(extraArgs, ["--model", "-m"])
+	const modelArgs = model === null ? [...extraArgs] : stripModelArgs(extraArgs, ["--model", "-m"])
+	const runnerArgs = stripCodexAuthorizationArgs(modelArgs)
+	const sandboxArgs = [
+		"--config",
+		'sandbox_mode="workspace-write"',
+		"--config",
+		`sandbox_workspace_write.writable_roots=${JSON.stringify(additionalDirs)}`,
+		"--config",
+		"sandbox_workspace_write.network_access=true",
+		"--config",
+		"sandbox_workspace_write.exclude_tmpdir_env_var=true",
+		"--config",
+		"sandbox_workspace_write.exclude_slash_tmp=true",
+	]
 	if (resume.kind === "resume") {
-		const args = [...topLevelArgs, "resume", resume.sessionId, ...runnerArgs]
+		const args = [...topLevelArgs, "resume", resume.sessionId, ...runnerArgs, ...sandboxArgs]
 		if (model !== null) args.push("--model", model)
 		if (!args.includes("--json")) args.push("--json")
 		if (!args.includes("--ignore-rules")) args.push("--ignore-rules")
 		args.push(prompt)
 		return args
 	}
-	const args = [...topLevelArgs, ...runnerArgs]
+	const args = [...topLevelArgs, ...runnerArgs, ...sandboxArgs]
 	if (model !== null) args.push("--model", model)
 	if (!args.includes("--json")) args.push("--json")
 	if (!args.includes("--cd")) args.push("--cd", agentCwd)
-	if (additionalDirs.length > 0 && !args.includes("--add-dir")) {
-		for (const dir of additionalDirs) args.push("--add-dir", dir)
-	}
-	if (!args.includes("--sandbox")) args.push("--sandbox", "danger-full-access")
 	args.push(prompt)
 	return args
+}
+
+function stripCodexAuthorizationArgs(extraArgs: readonly string[]): string[] {
+	const stripped: string[] = []
+	for (let index = 0; index < extraArgs.length; index++) {
+		const arg = extraArgs[index]!
+		if (arg === "--dangerously-bypass-approvals-and-sandbox") continue
+		if (arg === "--sandbox") {
+			index++
+			continue
+		}
+		if (arg.startsWith("--sandbox=")) continue
+		if (arg === "--add-dir" || arg === "--cd" || arg === "-C") {
+			index++
+			continue
+		}
+		if (arg.startsWith("--add-dir=") || arg.startsWith("--cd=")) continue
+		if (arg === "--config" || arg === "-c") {
+			const value = extraArgs[index + 1]
+			if (value !== undefined && (
+				value.startsWith("sandbox_mode=")
+				|| value.startsWith("sandbox_workspace_write.")
+				|| value.startsWith("sandbox_permissions=")
+				|| value.startsWith("permissions.")
+			)) {
+				index++
+				continue
+			}
+		}
+		if (
+			arg.startsWith("--config=sandbox_mode=")
+			|| arg.startsWith("--config=sandbox_workspace_write.")
+			|| arg.startsWith("--config=sandbox_permissions=")
+			|| arg.startsWith("--config=permissions.")
+		) continue
+		stripped.push(arg)
+	}
+	return stripped
 }
 
 function shellQuote(value: string): string {

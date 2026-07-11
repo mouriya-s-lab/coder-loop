@@ -12,6 +12,7 @@ import {
 	renderFragmentIndex,
 	renderPrompt,
 	resolvePresetBusinessKeyValues,
+	runnerFilesystemGrants,
 	selectRunnerForPhase,
 	type AgentRunnerKind,
 	type AgentRunnerSelection,
@@ -1042,13 +1043,14 @@ async function spawnSchedulerRun(
 			runner,
 			finalPrompt,
 			resumeDecision,
-			invocationPaths(item.repoCwd, worktreePath, presetDir, resolveLoopDataPaths(options.loopDataRootOptions).root),
+			invocationPaths(chain, item, worktreePath, presetDir, options.loopDataRootOptions),
 		)
 		await initializeSchedulerRunArtifacts(options, chain, item, runId, phase, startedAt, worktreePath)
 		credentialContext = { chainId: chain.id, itemId: item.id, runId, phase }
 		credential = options.runCredentials?.mint(credentialContext) ?? null
 		const spawnEnv: NodeJS.ProcessEnv = {
 			...process.env,
+			...runnerPlan.env,
 			[LOOP_DATA_ROOT_ENV]: resolveLoopDataPaths(options.loopDataRootOptions).root,
 		}
 		if (credential !== null) spawnEnv[LOOP_RUN_CREDENTIAL_ENV] = credential.value
@@ -2378,8 +2380,28 @@ async function resolvePhaseRunner(
 	)
 }
 
-function invocationPaths(targetCwd: string, agentCwd: string, presetDir: string, loopDataRoot: string): RunnerInvocationPaths {
-	return { targetCwd, agentCwd, presetDir, loopDataRoot }
+function invocationPaths(
+	chain: ChainRecord,
+	item: ItemRecord,
+	agentCwd: string,
+	presetDir: string,
+	loopDataRootOptions: LoopDataRootOptions | undefined,
+): RunnerInvocationPaths {
+	const loopPaths = resolveLoopDataPaths(loopDataRootOptions)
+	const chainPaths = resolveChainRuntimePaths(chain.name, loopDataRootOptions)
+	const evidenceDir = resolveItemEvidenceDir(item, chainPaths.chainRoot, chainPaths.issueEvidenceDir(item.itemId))
+	const currentIssueFile = resolveOptionalItemIssueFile(item, chainPaths.chainRoot)
+	return {
+		agentCwd,
+		grants: runnerFilesystemGrants({
+			agentCwd,
+			presetDir,
+			evidenceDir,
+			sharedContextFile: chainPaths.sharedFile,
+			currentIssueFile,
+			daemonSocket: loopPaths.daemonSocket,
+		}),
+	}
 }
 
 export type SchedulerPromptRenderInput = {
