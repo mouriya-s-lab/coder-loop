@@ -60,6 +60,38 @@ afterAll(async () => {
 })
 
 describe("scheduler", () => {
+	test("rejects successful scheduler completion when terminal persistence fails", async () => {
+		const fixture = await createFixture("terminal-persistence-failure")
+		try {
+			const chain = createChain(fixture.store, "terminal-persistence-failure-chain")
+			createItem(fixture.store, chain, { issueNumber: 6352, repoCwd: "/repo/a", sleepMs: 200, writeStatus: "done" })
+			const failures: import("./loop").RunnerStatusPersistenceFailure[] = []
+			const activeCredentials = new Set<string>()
+			const tick = await schedulerTick(fixture.options({
+				onRunnerStatusPersistenceFailure: (failure) => failures.push(failure),
+				runCredentials: {
+					mint: (context) => { const value = `credential-${context.runId}`; activeCredentials.add(value); return { value } },
+					revoke: (credential) => { activeCredentials.delete(credential.value) },
+				},
+			}))
+			const run = tick.spawnedRuns[0]!
+			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
+			await chmod(paths.runStatusFile(run.runId), 0)
+			await expect(run.closed).rejects.toThrow(/scheduler status-artifact persistence failed/)
+			expect(failures).toHaveLength(1)
+			expect(failures[0]).toMatchObject({ path: "scheduler", stage: "status-artifact", runId: run.runId, phase: "iteration" })
+			expect(listActiveRuns(fixture.state)).toHaveLength(0)
+			expect(activeCredentials.size).toBe(0)
+			expect(fixture.state.recycleTriggers.size).toBe(0)
+			expect(fixture.state.hostResourceOwners.size).toBe(0)
+			expect(fixture.state.hostResourceWaits.size).toBe(0)
+			expect(fixture.store.getRunByRunId(run.runId)?.endedAt).toBe(null)
+			expect(fixture.store.getCurrentRun(chain.id)?.runId).toBe(run.runId)
+			await chmod(paths.runStatusFile(run.runId), 0o600)
+		} finally {
+			fixture.store.close()
+		}
+	})
 	test("reports timeout event persistence failure without skipping termination", async () => {
 		const fixture = await createFixture("timeout-persistence-failure")
 		const failures: SchedulerLifecycleEventPersistenceFailure[] = []
