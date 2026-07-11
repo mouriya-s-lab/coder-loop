@@ -563,6 +563,7 @@ type ParsedVariableSource =
 
 export type PresetVariableDoc = {
 	label: string
+	prefix: string
 	suffix: string
 	style: "code" | "plain"
 	blankBefore: boolean
@@ -4581,24 +4582,44 @@ function isKnownPresetItemField(field: string, idField: string, itemFields: Read
 	return field === idField || ENGINE_ITEM_BINDING_KEYS.has(field) || itemFields.has(field)
 }
 
+const PRESET_VARIABLE_BINDING_FIELDS = new Set([
+	"source",
+	"default",
+	"label",
+	"prefix",
+	"suffix",
+	"style",
+	"blankBefore",
+])
+
 function parseVariableBinding(value: BoundaryValue, label: string): ParsedVariableBinding {
 	if (typeof value === "string") return { source: value, doc: null, chainFallback: { kind: "none" } }
 	if (!isObjectRecord(value)) presetError(`${label}: must be a string or { source, label } object`)
+	const unknownField = Object.keys(value).find((field) => !PRESET_VARIABLE_BINDING_FIELDS.has(field))
+	if (unknownField !== undefined) presetError(`${label}.${unknownField}: unrecognized variable binding field`)
 	const source = value.source
 	if (typeof source !== "string") presetError(`${label}.source: must be a string`)
 	const chainFallback: ChainBindingFallback = Object.hasOwn(value, "default")
 		? { kind: "value", value: parseChainBindingDefaultValue(value.default, `${label}.default`) }
 		: { kind: "none" }
 	const labelValue = value.label
-	if (labelValue === undefined) return { source, doc: null, chainFallback }
+	if (labelValue === undefined) {
+		const declaredDocFields = ["prefix", "suffix", "style", "blankBefore"].filter((field) => Object.hasOwn(value, field))
+		if (declaredDocFields.length > 0) {
+			presetError(`${label}.label: required when doc decoration fields are declared (${declaredDocFields.join(", ")})`)
+		}
+		return { source, doc: null, chainFallback }
+	}
 	if (typeof labelValue !== "string") presetError(`${label}.label: must be a string`)
+	const prefixValue = value.prefix
+	if (prefixValue !== undefined && typeof prefixValue !== "string") presetError(`${label}.prefix: must be a string`)
 	const suffixValue = value.suffix
 	if (suffixValue !== undefined && typeof suffixValue !== "string") presetError(`${label}.suffix: must be a string`)
 	const styleValue = value.style ?? "code"
 	if (styleValue !== "code" && styleValue !== "plain") presetError(`${label}.style: must be "code" or "plain"`)
 	const blankBeforeValue = value.blankBefore ?? false
 	if (typeof blankBeforeValue !== "boolean") presetError(`${label}.blankBefore: must be a boolean`)
-	return { source, doc: { label: labelValue, suffix: suffixValue ?? "", style: styleValue, blankBefore: blankBeforeValue }, chainFallback }
+	return { source, doc: { label: labelValue, prefix: prefixValue ?? "", suffix: suffixValue ?? "", style: styleValue, blankBefore: blankBeforeValue }, chainFallback }
 }
 
 function parseChainBindingDefaultValue(value: BoundaryValue, label: string): ChainBindingScalar {
@@ -5387,11 +5408,8 @@ export function renderRuntimeInputsDoc(phase: PresetPhase, ctx: ResolveContext):
 		if (doc === null) continue
 		const value = resolveBinding(variable.source, ctx)
 		if (doc.blankBefore) lines.push("")
-		if (variable.key === "ISSUE") {
-			lines.push(`- ${doc.label}: \`#${value}\`${doc.suffix}`)
-			continue
-		}
-		const renderedValue = doc.style === "plain" ? value : `\`${value}\``
+		const decoratedValue = `${doc.prefix}${value}`
+		const renderedValue = doc.style === "plain" ? decoratedValue : `\`${decoratedValue}\``
 		lines.push(`- ${doc.label}: ${renderedValue}${doc.suffix}`)
 	}
 	return lines.join("\n")
