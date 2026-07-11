@@ -129,7 +129,7 @@ flowchart TD
 - #559：等待 #558 + #560；实现 seq/par 调度和 slot 退役。
 - #574：等待 #558；收紧 status snapshot boundary。
 - #572：等待 #552；落 `prompt.md` + 类型化 `bindings.json`，供 #581 消费。
-- #587：等待 #549 + #574；定义 hook stdin payload = 编译产物投影 + 精确运行态快照。
+- #587：等待 #549 + #574 + #605；定义 hook stdin payload = 实例 pinned definition 的编译产物投影 + 精确运行态快照。
 - #595：等待 #594；context 分页读取 boundary。
 - #569：等待 #551；可先做本地 1–4 行验收，关闭仍被 `github-hapi-agent-router#12` 端到端 Gate 阻塞。
 - `hapi-remote-session#1`：等待 #418 结论作为输入后启动设计书；其后 `hapi-remote-session#2`（CLI 实现）→ #603（hapi runner 接入，另等 #602）串行推进。
@@ -164,7 +164,7 @@ P3 必须拆成两个并行组，中间有一次核心合流；不能把 #561–
 共同硬上游：#559 / G2 / P2-C（#599）。
 
 - #561：par join 评估、validator、drain/hold。
-- #563：运行中 leaf → par 物化与 `createItems` 作用域。
+- #563：另等 #558 + #560 + #554 + #605；运行中 leaf → par 物化、pinned definition 内 join candidate 解析与 `createItems` 作用域。
 - #565：子树取消传播。
 - #567 暂不进入本组：它还依赖 #561 与 #554，是合流消费者。
 
@@ -216,7 +216,7 @@ P3 必须拆成两个并行组，中间有一次核心合流；不能把 #561–
 
 共同硬上游：#590 + G3。
 
-- #591：另等 #555 + #586；preset 具名 gate 绑定与未绑定语义。
+- #591：另等 #555 + #586 + #605；preset 具名 gate 绑定、未绑定语义与 pinned 实例恢复。
 - #592：另等 #561 + #562 + #599；join script validator 与 reopen 派发。
 
 ### P4-D：后置 schema 迁移
