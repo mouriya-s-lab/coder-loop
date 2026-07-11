@@ -7,6 +7,7 @@ import { type as arkType } from "arktype"
 
 import {
 	DaemonError,
+	DecisionFingerprintState,
 	daemonRequest,
 	createDaemonRateLimitState,
 	DAEMON_RATE_LIMIT_STAGGER_MS,
@@ -29,7 +30,7 @@ import {
 } from "./scheduler"
 import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
-import { queryObservabilityEvents } from "./observability"
+import { makeObservabilityEvent, queryObservabilityEvents } from "./observability"
 import { chainBindings, engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 import type { BoundaryRecord } from "./boundary-types"
 
@@ -42,6 +43,19 @@ let nextFixtureId = 0
 // #397 test brand helper — see install-commands.test.ts for rationale.
 function runtimeStatus(value: string) {
 	return engineLifecycleAdmittedItemStatus(parseInternalStatus(value, "test.status"), "test")
+}
+
+function emptyObservabilityExcerpt() {
+	return {
+		stdout: { path: "/dev/null", missing: true, truncated: false, records: [] },
+		stderr: { path: "/dev/null", missing: true, truncated: false, records: [] },
+	}
+}
+
+function daemonDecisionFingerprintState(daemon: CoderLoopDaemon): DecisionFingerprintState {
+	const state = Reflect.get(daemon, "decisionFingerprints")
+	if (!(state instanceof DecisionFingerprintState)) throw new Error("daemon decision fingerprint state is unavailable")
+	return state
 }
 
 // #406 fake-runner event-log line shape. The fake runners inline-render lines like
@@ -3465,7 +3479,7 @@ attemptTimeoutSeconds = 3600
 				cwd: REPO_ROOT,
 				stdout: "pipe",
 				stderr: "pipe",
-				env: { ...process.env, CODER_LOOP_DATA_DIR: fixture.loopDataRoot },
+				env: { ...process.env, CODER_LOOP_RUN_CRED: undefined, CODER_LOOP_DATA_DIR: fixture.loopDataRoot },
 			})
 			const [cliStdout, cliStderr, cliExit] = await Promise.all([
 				new Response(cli.stdout).text(),
@@ -3507,7 +3521,7 @@ attemptTimeoutSeconds = 3600
 				cwd: REPO_ROOT,
 				stdout: "pipe",
 				stderr: "pipe",
-				env: { ...process.env, CODER_LOOP_DATA_DIR: fixture.loopDataRoot },
+				env: { ...process.env, CODER_LOOP_RUN_CRED: undefined, CODER_LOOP_DATA_DIR: fixture.loopDataRoot },
 			})
 			const [logsStdout, logsStderr, logsExit] = await Promise.all([
 				new Response(logsCli.stdout).text(),
@@ -3573,6 +3587,286 @@ attemptTimeoutSeconds = 3600
 			await fixture.daemon.stop()
 		}
 	}, 10_000)
+
+	test("decision fingerprint suppresses only consecutive duplicates", () => {
+		const state = new DecisionFingerprintState()
+		const first = makeObservabilityEvent({
+			kind: "decision",
+			type: "slot.busy",
+			chain: "fingerprint-chain",
+			runId: "run-1",
+			subject: { kind: "engine" },
+			payload: { slotKey: "slot-a", chainId: 1, repoCwd: "/repo/a", activeRunId: "run-1" },
+		})
+		const changed = makeObservabilityEvent({
+			kind: "decision",
+			type: "slot.busy",
+			chain: "fingerprint-chain",
+			runId: "run-2",
+			subject: { kind: "engine" },
+			payload: { slotKey: "slot-a", chainId: 1, repoCwd: "/repo/a", activeRunId: "run-2" },
+		})
+
+		expect(state.observe(1, first)).toBe(false)
+		expect(state.observe(1, first)).toBe(true)
+		expect(state.observe(1, changed)).toBe(false)
+		expect(state.observe(1, changed)).toBe(true)
+		state.release({ kind: "slot", chainId: 1, slotKey: "slot-a" })
+		expect(state.observe(1, changed)).toBe(false)
+	})
+
+	test("decision fingerprint state follows active lifecycle", async () => {
+		let stopPresetDir = ""
+		const fixture = await startFixture("decision-fingerprint-lifecycle", {
+			schedulerEnabled: false,
+			beforeStart: async ({ root }) => {
+				stopPresetDir = resolve(root, "stop-preset")
+				await mkdir(stopPresetDir, { recursive: true })
+				await writeFile(resolve(stopPresetDir, "review.md"), "Review the item.\n")
+				await writeFile(resolve(stopPresetDir, "preset.toml"), `name = "decision-fingerprint-lifecycle"
+
+[item]
+idField = "issue"
+
+[statuses]
+continuable = ["queued"]
+terminal = ["done", "exhausted"]
+success = ["done"]
+entry = "queued"
+exhausted = "exhausted"
+
+[[phases]]
+name = "review"
+prompt = "review.md"
+
+  [[phases.exits]]
+  status = "done"
+  when = "The review completed successfully."
+
+  [[phases.exits]]
+  chainAction = "stop"
+  when = "The chain must leave the active scheduling lifecycle."
+`)
+			},
+		})
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "fingerprint-stop-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			const item = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				itemId: "54101",
+				repoCwd: REPO_ROOT,
+				presetPath: stopPresetDir,
+			})).item)
+			const itemId = numberValue(item.id)
+			const sibling = record(expectOk(await request(fixture, "chain.create", {
+				name: "fingerprint-active-sibling",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const siblingChainId = numberValue(sibling.id)
+			const state = daemonDecisionFingerprintState(fixture.daemon)
+			const slot = makeObservabilityEvent({
+				kind: "decision",
+				type: "slot.busy",
+				chain: "fingerprint-stop-chain",
+				runId: "run-slot",
+				subject: { kind: "engine" },
+				payload: { slotKey: "slot-a", chainId, repoCwd: "/repo/a", activeRunId: "run-slot" },
+			})
+			const terminalItem = makeObservabilityEvent({
+				kind: "decision",
+				type: "item.backoff",
+				chain: "fingerprint-stop-chain",
+				item: itemId,
+				subject: { kind: "engine" },
+				payload: { rowId: itemId, failureCount: 1, nextRunAt: 1_800_000_000 },
+			})
+			const completedChain = makeObservabilityEvent({
+				kind: "decision",
+				type: "chain.complete_trigger",
+				chain: "fingerprint-stop-chain",
+				runId: "run-complete",
+				subject: { kind: "engine" },
+				payload: { chainId, decision: "keep-active", reason: "waiting" },
+			})
+			const activeSibling = makeObservabilityEvent({
+				kind: "decision",
+				type: "item.dependency_wait",
+				chain: "fingerprint-active-sibling",
+				item: 21,
+				subject: { kind: "engine" },
+				payload: { rowId: 21, dependsOn: [11], unsatisfied: [11] },
+			})
+			const seedStoppedChainScopes = (): void => {
+				expect(state.observe(chainId, slot)).toBe(false)
+				expect(state.observe(chainId, terminalItem)).toBe(false)
+				expect(state.observe(chainId, completedChain)).toBe(false)
+			}
+
+			expect(state.observe(siblingChainId, activeSibling)).toBe(false)
+			seedStoppedChainScopes()
+			expect(state.size).toBe(4)
+
+			const operatorStopped = record(expectOk(await request(fixture, "chain.stop", { chainId })).chain)
+			expect(operatorStopped.status).toBe("stopped")
+			expect(state.size).toBe(1)
+			expect(state.observe(siblingChainId, activeSibling)).toBe(true)
+			expect(record(expectOk(await request(fixture, "chain.resume", { chainId })).chain).status).toBe("active")
+			seedStoppedChainScopes()
+			expect(state.size).toBe(4)
+
+			const phaseExitStopped = expectOk(await request(fixture, "item.exitAction", {
+				itemId,
+				agentRunId: "run-phase-exit-stop",
+				agentPhase: "review",
+				action: "stop",
+			}))
+			expect(record(phaseExitStopped.chain).status).toBe("stopped")
+			expect(state.size).toBe(1)
+			expect(state.observe(siblingChainId, activeSibling)).toBe(true)
+			expect(record(expectOk(await request(fixture, "chain.resume", { chainId })).chain).status).toBe("active")
+			seedStoppedChainScopes()
+			expect(state.size).toBe(4)
+
+			state.releaseForSchedulerEvent({
+				type: "agent.exit",
+				slotKey: "slot-a",
+				chainId,
+				itemId,
+				runId: "run-slot",
+				phase: "iteration",
+				exitCode: 0,
+				status: runtimeStatus("done"),
+				excerpt: emptyObservabilityExcerpt(),
+			})
+			expect(state.size).toBe(3)
+			state.releaseForSchedulerEvent({
+				type: "queue.terminal",
+				ts: "2026-07-10T00:00:00.000Z",
+				runId: "run-slot",
+				chainId,
+				rowId: itemId,
+				terminalStatus: runtimeStatus("done"),
+			})
+			expect(state.size).toBe(2)
+			expect(state.observe(siblingChainId, activeSibling)).toBe(true)
+			state.releaseForSchedulerEvent({ type: "chain.completed", chainId, chainName: "fingerprint-stop-chain", runId: "run-complete" })
+			expect(state.size).toBe(1)
+			expect(state.observe(siblingChainId, activeSibling)).toBe(true)
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("decision fingerprint churn returns to active-set baseline", () => {
+		const survivingChainChurn = (generations: number): number => {
+			const state = new DecisionFingerprintState()
+			const keepActive = (runId: string, reason: string) => makeObservabilityEvent({
+				kind: "decision",
+				type: "chain.complete_trigger",
+				chain: "surviving-chain",
+				runId,
+				subject: { kind: "engine" },
+				payload: { chainId: 1, decision: "keep-active", reason },
+			})
+
+			for (let generation = 0; generation < generations; generation += 1) {
+				const runId = `surviving-run-${generation}`
+				expect(state.observe(1, keepActive(runId, "waiting"))).toBe(false)
+				expect(state.observe(1, keepActive(runId, "waiting"))).toBe(true)
+				expect(state.observe(1, keepActive(runId, "changed"))).toBe(false)
+				expect(state.observe(1, keepActive(runId, "changed"))).toBe(true)
+			}
+
+			return state.size
+		}
+
+		const churn = (rounds: number): number => {
+			const state = new DecisionFingerprintState()
+			const active = makeObservabilityEvent({
+				kind: "decision",
+				type: "item.dependency_wait",
+				chain: "active-baseline",
+				item: 1,
+				subject: { kind: "engine" },
+				payload: { rowId: 1, dependsOn: [99], unsatisfied: [99] },
+			})
+			expect(state.observe(1, active)).toBe(false)
+
+			for (let index = 0; index < rounds; index += 1) {
+				const chainId = index + 2
+				const slotKey = `slot-${chainId}`
+				const rowId = chainId * 10
+				const chainName = `churn-${chainId}`
+				const runId = `run-${chainId}`
+				const slot = makeObservabilityEvent({
+					kind: "decision",
+					type: "slot.busy",
+					chain: chainName,
+					runId,
+					subject: { kind: "engine" },
+					payload: { slotKey, chainId, repoCwd: `/repo/${chainId}`, activeRunId: runId },
+				})
+				const item = makeObservabilityEvent({
+					kind: "decision",
+					type: "item.backoff",
+					chain: chainName,
+					item: rowId,
+					subject: { kind: "engine" },
+					payload: { rowId, failureCount: 1, nextRunAt: 1_800_000_000 + index },
+				})
+				const keepActive = (reason: string, triggerRunId: string) => makeObservabilityEvent({
+					kind: "decision",
+					type: "chain.complete_trigger",
+					chain: chainName,
+					runId: triggerRunId,
+					subject: { kind: "engine" },
+					payload: { chainId, decision: "keep-active", reason },
+				})
+
+				expect(state.observe(chainId, slot)).toBe(false)
+				expect(state.observe(chainId, item)).toBe(false)
+				expect(state.observe(chainId, keepActive("waiting", `${runId}-a`))).toBe(false)
+				expect(state.observe(chainId, keepActive("waiting", `${runId}-b`))).toBe(false)
+				expect(state.observe(chainId, keepActive("waiting", `${runId}-b`))).toBe(true)
+				expect(state.observe(chainId, keepActive("changed", `${runId}-c`))).toBe(false)
+				expect(state.size).toBe(4)
+
+				state.releaseForSchedulerEvent({
+					type: "agent.exit",
+					slotKey,
+					chainId,
+					itemId: rowId,
+					runId,
+					phase: "iteration",
+					exitCode: 0,
+					status: runtimeStatus("done"),
+					excerpt: emptyObservabilityExcerpt(),
+				})
+				state.releaseForSchedulerEvent({
+					type: "queue.terminal",
+					ts: "2026-07-10T00:00:00.000Z",
+					runId,
+					chainId,
+					rowId,
+					terminalStatus: runtimeStatus("done"),
+				})
+				state.releaseForSchedulerEvent({ type: "chain.completed", chainId, chainName, runId })
+				expect(state.size).toBe(1)
+			}
+
+			expect(state.observe(1, active)).toBe(true)
+			return state.size
+		}
+
+		expect(churn(3)).toBe(1)
+		expect(churn(30)).toBe(1)
+		expect(survivingChainChurn(3)).toBe(1)
+		expect(survivingChainChurn(30)).toBe(1)
+	})
 
 	test("daemon scheduler uses bundled preset directory declared on the item (post-#412)", async () => {
 		const fixture = await startFixture("scheduler-chain-preset", { schedulerIntervalMs: 1_000, schedulerPresetDir: null })
