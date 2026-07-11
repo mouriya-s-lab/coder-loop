@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { mkdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises"
+import { createConnection } from "node:net"
 import { resolve } from "node:path"
 
 import { startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
@@ -64,6 +65,25 @@ describe("central chain/item CLI", () => {
 			expect(logs.events[0]).toMatchObject({ runId: "run-632-timeout", phase: "review", payload: { eventKind: "attempt.timeout", originalPersisted: false } })
 		} finally {
 			await daemon.stop()
+		}
+	})
+
+	test("observes ordered mutation and read on one socket", async () => {
+		const fixture = await startFixture("ordered-mutation-read")
+		try {
+			const responses = await sendLinesOnDaemonConnection(resolve(fixture.loopDataRoot, "daemon.sock"), [
+				JSON.stringify({ id: "mutation", command: "chain.create", args: { name: "ordered-chain", repository: "mouriya-s-lab/coder-loop" } }),
+				JSON.stringify({ id: "read", command: "chain.list", args: {} }),
+			])
+			expect(responses.map((response) => response.id)).toEqual(["mutation", "read"])
+			if (!responses[0]?.ok) throw new Error("mutation request failed")
+			if (!responses[1]?.ok) throw new Error("read request failed")
+			const chains = responses[1].result.chains
+			if (!Array.isArray(chains)) throw new Error("chain.list result must contain chains")
+			expect(chains).toHaveLength(1)
+			expect(chains[0]).toMatchObject({ name: "ordered-chain" })
+		} finally {
+			await fixture.daemon.stop()
 		}
 	})
 	test("chain CRUD CLI", async () => {
@@ -1191,6 +1211,67 @@ async function runCli(args: string[], env: Record<string, string> = {}): Promise
 		stdout,
 		stderr,
 	}
+}
+
+type TestDaemonResponse =
+	| { id: string; ok: true; result: BoundaryRecord }
+	| { id: string; ok: false; error: { code: string; message: string } }
+
+async function sendLinesOnDaemonConnection(socketPath: string, lines: readonly string[]): Promise<TestDaemonResponse[]> {
+	return await new Promise((resolveResponses, reject) => {
+		const socket = createConnection(socketPath)
+		const responses: TestDaemonResponse[] = []
+		let buffer = ""
+		const cleanup = () => {
+			socket.removeAllListeners()
+			socket.destroy()
+		}
+		socket.setEncoding("utf-8")
+		socket.on("connect", () => socket.write(`${lines.join("\n")}\n`))
+		socket.on("data", (chunk: string) => {
+			buffer += chunk
+			let newlineIndex = buffer.indexOf("\n")
+			while (newlineIndex !== -1) {
+				const line = buffer.slice(0, newlineIndex)
+				buffer = buffer.slice(newlineIndex + 1)
+				responses.push(parseTestDaemonResponse(line))
+				if (responses.length === lines.length) {
+					cleanup()
+					resolveResponses(responses)
+					return
+				}
+				newlineIndex = buffer.indexOf("\n")
+			}
+		})
+		socket.on("error", (error) => {
+			cleanup()
+			reject(error)
+		})
+	})
+}
+
+function parseTestDaemonResponse(line: string): TestDaemonResponse {
+	const parsed: unknown = JSON.parse(line)
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("expected daemon response object")
+	const response = boundaryRecord(parsed)
+	const id = response.id
+	if (typeof id !== "string") throw new Error("expected daemon response id")
+	if (response.ok === true) {
+		const result = response.result
+		if (typeof result !== "object" || result === null || Array.isArray(result)) throw new Error("expected daemon response result")
+		return { id, ok: true, result: boundaryRecord(result) }
+	}
+	if (response.ok !== false) throw new Error("expected daemon response ok")
+	const error = response.error
+	if (typeof error !== "object" || error === null || Array.isArray(error)) throw new Error("expected daemon response error")
+	const errorRecord = boundaryRecord(error)
+	if (typeof errorRecord.code !== "string" || typeof errorRecord.message !== "string") throw new Error("expected daemon response error fields")
+	return { id, ok: false, error: { code: errorRecord.code, message: errorRecord.message } }
+}
+
+function boundaryRecord(value: unknown): BoundaryRecord {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("expected object")
+	return value as BoundaryRecord
 }
 
 function spawnDaemonUp(loopDataRoot: string): Bun.Subprocess<"ignore", "pipe", "pipe"> {

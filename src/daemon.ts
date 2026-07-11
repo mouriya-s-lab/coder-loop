@@ -1465,6 +1465,7 @@ export class CoderLoopDaemon {
 		socket.setEncoding("utf-8")
 		let buffer = ""
 		let oversizedRequestRejected = false
+		let requestSequence = Promise.resolve()
 		socket.on("data", (chunk: string) => {
 			if (oversizedRequestRejected) return
 			buffer += chunk
@@ -1472,7 +1473,11 @@ export class CoderLoopDaemon {
 			while (newlineIndex !== -1) {
 				const line = buffer.slice(0, newlineIndex)
 				buffer = buffer.slice(newlineIndex + 1)
-				if (line.trim() !== "") void this.handleLine(socket, line)
+				if (line.trim() !== "") {
+					requestSequence = requestSequence.then(async () => {
+						await this.handleLine(socket, line)
+					})
+				}
 				newlineIndex = buffer.indexOf("\n")
 			}
 			if (byteLength(buffer) > MAX_DAEMON_REQUEST_BYTES) {

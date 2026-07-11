@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { spawn } from "node:child_process"
 import { mkdir, readdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises"
+import { createConnection } from "node:net"
 import { resolve } from "node:path"
 
 import { type as arkType } from "arktype"
@@ -165,6 +166,85 @@ describe("daemon", () => {
 		}
 	})
 
+	test("orders requests within one daemon connection", async () => {
+		const fixture = await startFixture("ordered-connection", { schedulerEnabled: false })
+		const slowStarted = deferred<void>()
+		const releaseSlow = deferred<void>()
+		const startedRequestIds: string[] = []
+		const originalResponseForLine = Reflect.get(fixture.daemon, "responseForLine")
+		if (typeof originalResponseForLine !== "function") throw new Error("daemon responseForLine is unavailable")
+		Reflect.set(fixture.daemon, "responseForLine", async (line: string) => {
+			const request = record(JSON.parse(line))
+			const requestId = stringValue(request.id)
+			startedRequestIds.push(requestId)
+			if (requestId === "slow") {
+				slowStarted.resolve(undefined)
+				await releaseSlow.promise
+			}
+			return await Reflect.apply(originalResponseForLine, fixture.daemon, [line])
+		})
+		try {
+			const responsesPromise = sendLinesOnDaemonConnection(fixture.socketPath, [
+				JSON.stringify({ id: "slow", command: "daemon.status", args: {} }),
+				JSON.stringify({ id: "next", command: "daemon.status", args: {} }),
+			])
+			await slowStarted.promise
+			expect(startedRequestIds).toEqual(["slow"])
+			releaseSlow.resolve(undefined)
+			const responses = await responsesPromise
+			expect(responses.map((response) => response.id)).toEqual(["slow", "next"])
+			expect(startedRequestIds).toEqual(["slow", "next"])
+		} finally {
+			releaseSlow.resolve(undefined)
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("keeps independent daemon connections concurrent", async () => {
+		const fixture = await startFixture("concurrent-connections", { schedulerEnabled: false })
+		const slowStarted = deferred<void>()
+		const releaseSlow = deferred<void>()
+		const originalResponseForLine = Reflect.get(fixture.daemon, "responseForLine")
+		if (typeof originalResponseForLine !== "function") throw new Error("daemon responseForLine is unavailable")
+		Reflect.set(fixture.daemon, "responseForLine", async (line: string) => {
+			const request = record(JSON.parse(line))
+			if (stringValue(request.id) === "slow-connection") {
+				slowStarted.resolve(undefined)
+				await releaseSlow.promise
+			}
+			return await Reflect.apply(originalResponseForLine, fixture.daemon, [line])
+		})
+		try {
+			const slowResponsePromise = sendLinesOnDaemonConnection(fixture.socketPath, [
+				JSON.stringify({ id: "slow-connection", command: "daemon.status", args: {} }),
+			])
+			await slowStarted.promise
+			const independentResponses = await sendLinesOnDaemonConnection(fixture.socketPath, [
+				JSON.stringify({ id: "independent-connection", command: "daemon.status", args: {} }),
+			])
+			expect(independentResponses).toMatchObject([{ id: "independent-connection", ok: true }])
+			releaseSlow.resolve(undefined)
+			expect(await slowResponsePromise).toMatchObject([{ id: "slow-connection", ok: true }])
+		} finally {
+			releaseSlow.resolve(undefined)
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("continues ordered connection after request failure", async () => {
+		const fixture = await startFixture("failure-continues", { schedulerEnabled: false })
+		try {
+			const responses = await sendLinesOnDaemonConnection(fixture.socketPath, [
+				"not-json",
+				JSON.stringify({ id: "after-failure", command: "daemon.status", args: {} }),
+			])
+			expect(responses).toHaveLength(2)
+			expect(responses[0]).toMatchObject({ id: "unknown", ok: false })
+			expect(responses[1]).toMatchObject({ id: "after-failure", ok: true })
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
 	test("daemon up creates socket and pid", async () => {
 		const fixture = await startFixture("up", { schedulerEnabled: false })
 		try {
@@ -8072,6 +8152,60 @@ function expectTooLarge(response: DaemonResponse): void {
 function record(value: unknown): BoundaryRecord {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("expected object")
 	return value as BoundaryRecord
+}
+
+function deferred<T>() {
+	let resolvePromise: (value: T | PromiseLike<T>) => void = () => {
+		throw new Error("deferred resolve initialized incorrectly")
+	}
+	const promise = new Promise<T>((resolve) => {
+		resolvePromise = resolve
+	})
+	return { promise, resolve: resolvePromise }
+}
+
+type TestDaemonResponse = { id: string; ok: boolean }
+
+async function sendLinesOnDaemonConnection(socketPath: string, lines: readonly string[]): Promise<TestDaemonResponse[]> {
+	return await new Promise((resolveResponses, reject) => {
+		const socket = createConnection(socketPath)
+		const responses: TestDaemonResponse[] = []
+		let buffer = ""
+		const cleanup = () => {
+			socket.removeAllListeners()
+			socket.destroy()
+		}
+		socket.setEncoding("utf-8")
+		socket.on("connect", () => {
+			socket.write(`${lines.join("\n")}\n`)
+		})
+		socket.on("data", (chunk: string) => {
+			buffer += chunk
+			let newlineIndex = buffer.indexOf("\n")
+			while (newlineIndex !== -1) {
+				const line = buffer.slice(0, newlineIndex)
+				buffer = buffer.slice(newlineIndex + 1)
+				responses.push(testDaemonResponse(line))
+				if (responses.length === lines.length) {
+					cleanup()
+					resolveResponses(responses)
+					return
+				}
+				newlineIndex = buffer.indexOf("\n")
+			}
+		})
+		socket.on("error", (error) => {
+			cleanup()
+			reject(error)
+		})
+	})
+}
+
+function testDaemonResponse(line: string): TestDaemonResponse {
+	const response = record(JSON.parse(line))
+	const id = stringValue(response.id)
+	if (typeof response.ok !== "boolean") throw new Error("daemon response ok must be boolean")
+	return { id, ok: response.ok }
 }
 
 function nestedMetadata(depth: number): JsonObject {
