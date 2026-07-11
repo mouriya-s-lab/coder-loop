@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { spawn } from "node:child_process"
-import { mkdir, readdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises"
+import { chmod, mkdir, readdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises"
 import { createConnection } from "node:net"
 import { resolve } from "node:path"
 
@@ -21,7 +21,7 @@ import {
 	type DaemonResponse,
 	type DaemonRateLimitState,
 } from "./daemon"
-import { buildCoderLoopStatusSnapshot, loadPreset, type JsonObject, type JsonValue } from "./loop"
+import { buildCoderLoopStatusSnapshot, loadPreset, type AgentRunnerKind, type JsonObject, type JsonValue } from "./loop"
 import {
 	createGitWorktreeManager,
 	schedulerSlotWorktreePath,
@@ -245,6 +245,54 @@ describe("daemon", () => {
 			await fixture.daemon.stop()
 		}
 	})
+
+	test("drives chain-complete decision through a large runner event", async () => {
+		const fixture = await startFixture("large-chain-complete-decision", {
+			schedulerIntervalMs: 1_000,
+			useDefaultChainCompleteTrigger: true,
+			beforeStart: async ({ fakeRunner }) => {
+				await writeFile(fakeRunner, `#!/usr/bin/env bun
+const prompt = Bun.argv.at(-1) ?? ""
+if (prompt.includes("FINALIZER SUMMARY")) {
+	const event = { type: "item.completed", item: { type: "agent_message", text: "x".repeat(1_000_001) + "\\nFINALIZER SUMMARY: decision=complete; reason=large-event" } }
+	await Bun.write(Bun.stdout, JSON.stringify(event) + "\\n")
+} else {
+	const input = JSON.parse(prompt)
+	${FAKE_RUNNER_STATUS_WRITE_SNIPPET}
+}
+process.exitCode = 0
+`)
+				await chmod(fakeRunner, 0o755)
+			},
+			schedulerRunnerKind: "codex",
+			schedulerBinaryIsFakeRunner: true,
+		})
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "large-chain-complete-decision-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			const added = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				itemId: "633",
+				repoCwd: REPO_ROOT,
+			})).item)
+			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				store.updateItem(numberValue(added.id), { status: runtimeStatus("done"), updatedAt: Math.floor(Date.now() / 1_000) })
+			} finally {
+				store.close()
+			}
+
+			await waitFor(async () => readChainStatus(fixture.loopDataRoot, chainId), (status) => status === "completed", 10_000)
+			const triggerEvent = fixture.schedulerEvents.find((event) => event.type === "chain.complete_trigger" && event.chainId === chainId)
+			expect(triggerEvent).toMatchObject({ decision: "complete" })
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("daemon up creates socket and pid", async () => {
 		const fixture = await startFixture("up", { schedulerEnabled: false })
 		try {
@@ -7990,6 +8038,9 @@ type FixtureOptions = {
 	realWorktreeManager?: boolean
 	worktreeManager?: SchedulerWorktreeManager
 	chainCompleteTriggerForChain?: SchedulerOptions["chainCompleteTriggerForChain"]
+	useDefaultChainCompleteTrigger?: boolean
+	schedulerRunnerKind?: AgentRunnerKind
+	schedulerBinaryIsFakeRunner?: boolean
 	schedulerConfig?: Partial<CoderLoopDaemonSchedulerConfig>
 	beforeStart?: (input: { root: string; loopDataRoot: string; eventLog: string; fakeRunner: string }) => Promise<void> | void
 }
@@ -8018,10 +8069,10 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 	})
 
 	const scheduler: SchedulerOptions["runner"] = {
-		kind: "claude",
+		kind: options.schedulerRunnerKind ?? "claude",
 		source: "iteration-default",
-		binary: "bun",
-		extraArgs: [fakeRunner],
+		binary: options.schedulerBinaryIsFakeRunner ? fakeRunner : "bun",
+		extraArgs: options.schedulerBinaryIsFakeRunner ? [] : [fakeRunner],
 		model: null,
 	}
 	const daemon = await startCoderLoopDaemon({
@@ -8054,7 +8105,9 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 				if (Object.prototype.hasOwnProperty.call(extra, "extraSleepAfterStatusWriteMs")) payload.extraSleepAfterStatusWriteMs = extra.extraSleepAfterStatusWriteMs
 				return JSON.stringify(payload)
 			},
-			chainCompleteTriggerForChain: options.chainCompleteTriggerForChain ?? (() => null),
+			...(options.useDefaultChainCompleteTrigger
+				? {}
+				: { chainCompleteTriggerForChain: options.chainCompleteTriggerForChain ?? (() => null) }),
 			onEvent: configuredOnEvent === undefined
 				? (event) => {
 					schedulerEvents.push(event)
