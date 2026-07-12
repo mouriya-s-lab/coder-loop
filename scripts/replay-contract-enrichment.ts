@@ -191,7 +191,7 @@ export function classifyReplay(issue: IssueSnapshot, pullRequests: readonly Pull
 		for (const review of reviewInputs) {
 			if (review.body.trim() === "") continue
 			const defectPatterns = [/issue contract error/i, /contract.*malformed/i, /验收标准.*malformed/i, /缺.*Pattern 验收/i, /literal command.*fail/i]
-			const discretionPatterns = [/code finding/i, /design-deviation/i, /logic @/i, /failure path/i, /evidence truth/i, /project convention/i, /证据真实性/i, /失败路径/i, /项目约定/i]
+			const discretionPatterns = [/design-deviation/i, /logic @/i, /failure path/i, /evidence truth/i, /project convention/i, /证据真实性/i, /失败路径/i, /项目约定/i]
 			const environmentPatterns = [/timeout/i, /unreachable/i, /credential/i, /environment/i, /rate limit/i, /network/i, /环境/i, /凭据/i, /超时/i]
 			if (hasAny(review.body, defectPatterns)) findings.push({ kind: "contract-defect", sourceUrl: review.sourceUrl, excerpt: matchingExcerpt(review.body, defectPatterns), rationale: "该 review 命题明确指向 executable contract 的表格、命令或 Pattern scope 本身不可执行；应走 re-enrichment，而不是 implementation retry。" })
 			if (hasAny(review.body, discretionPatterns)) findings.push({ kind: "reviewer-discretion", sourceUrl: review.sourceUrl, excerpt: matchingExcerpt(review.body, discretionPatterns), rationale: "该 review 命题可追溯到代码正确性、失败路径、证据真实性或项目约定，属于 reviewer 保留裁量。" })

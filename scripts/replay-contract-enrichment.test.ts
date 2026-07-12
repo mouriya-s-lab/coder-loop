@@ -59,11 +59,13 @@ describe("contract enrichment historical replay classification", () => {
 		const padding = "intro ".repeat(100)
 		const result = classifyReplay({ number: 551, url: "https://github.com/mouriya-s-lab/coder-loop/issues/551", body: "intent", comments: [], labels: [] }, [{
 			number: 659, url: "https://github.com/mouriya-s-lab/coder-loop/pull/659", body: "Closes #551", closingIssueNumbers: [551], reviews: [],
-			comments: [{ url: "https://github.com/mouriya-s-lab/coder-loop/pull/659#issuecomment-2", body: `${padding}code finding: failure path is wrong. Later, issue contract error: Pattern 验收 is missing.` }],
+			comments: [{ url: "https://github.com/mouriya-s-lab/coder-loop/pull/659#issuecomment-2", body: `${padding}code findings:\n- issue contract error: Pattern 验收 is missing.\n${"contract detail ".repeat(30)}\n- design-deviation @ src/loop.ts: failure path is wrong.` }],
 		}])
 		const discretion = result.findings.find((finding) => finding.kind === "reviewer-discretion")
 		const defect = result.findings.find((finding) => finding.kind === "contract-defect")
-		expect(discretion?.excerpt).toContain("code finding")
+		expect(discretion?.excerpt).toContain("design-deviation")
+		expect(discretion?.excerpt).toContain("failure path is wrong")
+		expect(discretion?.excerpt).not.toContain("Pattern 验收 is missing")
 		expect(defect?.excerpt).toContain("issue contract error")
 	})
 })
