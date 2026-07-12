@@ -71,6 +71,7 @@ import {
 	parseItemExtraForRequest,
 	runtimeDataJsonValue,
 	storedItemExtra,
+	storedChainMetadata,
 	RuntimeDataError,
 	type AdmittedItemStatus,
 	type InternalStatus,
@@ -104,6 +105,14 @@ import {
 	type PrivilegedOpAuditOp,
 	type PrivilegedOpAuditReason,
 } from "./observability"
+import {
+	hookDeclarationsToJsonValue,
+	parseHookDeclarations,
+	parseHookMutationTarget,
+	writeGlobalHookDeclarations,
+	HookDeclarationError,
+	type HookMutationTarget,
+} from "./hooks"
 
 // #409: every daemon command an agent process can reach belongs to exactly one
 // authorization class. The classification is the engine's compile-time gate —
@@ -176,6 +185,7 @@ export type DaemonCommandName =
 	// preset's entry status).
 	| "logs.query"
 	| "queue.unblock"
+	| "hooks.set"
 
 // #409: the privileged-op vocabulary the preset's `[phases.rights]
 // privilegedOps` segment may grant a phase. Closed engine-internal union — the
@@ -252,6 +262,7 @@ function assertNeverItemUpdateField(field: never): never {
 // from the `as const` tuple so the parser and the classifier consume the same source of truth.
 export const PRESET_PHASE_RIGHTS_CONTROL_PLANE_FIELD_SET: ReadonlySet<string> =
 	new Set(PRESET_PHASE_RIGHTS_CONTROL_PLANE_FIELDS)
+const ITEM_EXTRA_OPERATOR_ONLY_FIELDS: ReadonlySet<string> = new Set(["dependsOn", "hooks"])
 
 export type DaemonRequest = {
 	id: string
@@ -1572,7 +1583,45 @@ export class CoderLoopDaemon {
 			},
 			"logs.query": { authClass: "hard-deny-for-agent", handler: (args) => this.handleLogsQuery(args) },
 			"queue.unblock": { authClass: "hard-deny-for-agent", handler: (args) => this.handleQueueUnblock(args) },
+			"hooks.set": { authClass: "hard-deny-for-agent", handler: (args) => this.handleHooksSet(args) },
 		}
+	}
+
+	private async handleHooksSet(args: JsonObject): Promise<JsonObject> {
+		validateKnownKeys(args, "hooks.set args", ["target", "hooks", "agentCredential"])
+		const target = parseHookRequest(() => parseHookMutationTarget(args.target, "hooks.set.target"))
+		const declarations = parseHookRequest(() => parseHookDeclarations(args.hooks, "hooks.set.hooks"))
+		const store = this.requireStore()
+		switch (target.kind) {
+			case "global":
+				await writeGlobalHookDeclarations(declarations, { loopDataRoot: this.paths.root })
+				break
+			case "chain": {
+				const chain = store.getChain(target.chainId)
+				if (chain === null) throw new DaemonError("not_found", `chain ${target.chainId} was not found`, { chainId: target.chainId })
+				store.updateChain(chain.id, {
+					metadata: storedChainMetadata({
+						...chainMetadataToJsonObject(chain.metadata),
+						hooks: hookDeclarationsToJsonValue(declarations),
+					}),
+				})
+				break
+			}
+			case "item": {
+				const item = store.getItem(target.itemId)
+				if (item === null) throw new DaemonError("not_found", `item ${target.itemId} was not found`, { itemId: target.itemId })
+				store.updateItem(item.id, {
+					extra: storedItemExtra({
+						...itemExtraToJsonObject(item.extra),
+						hooks: hookDeclarationsToJsonValue(declarations),
+					}),
+				})
+				break
+			}
+			default:
+				return assertNeverHookMutationTarget(target)
+		}
+		return { target: hookMutationTargetToJson(target), hooks: hookDeclarationsToJsonValue(declarations) }
 	}
 
 	private async handleRequest(request: DaemonRequest): Promise<JsonObject> {
@@ -2501,7 +2550,7 @@ export class CoderLoopDaemon {
 		const resolvedCaller = this.resolveItemMutationCaller(args)
 		if (resolvedCaller.kind === "err") throw this.resolveCallerDenyError(resolvedCaller.error)
 		const caller = resolvedCaller.value
-		await this.assertItemAddRightsForCaller(chain, caller, presetSpec, "item.add")
+		await this.assertItemAddRightsForCaller(chain, caller, presetSpec, "item.add", itemCarrierDeclaresHooks(args))
 		const store = this.requireStore()
 		const existingItems = store.listItems(chain.id)
 		const input = await this.buildCreateItemInput(chain, args, existingItems, "item.add")
@@ -2557,7 +2606,7 @@ export class CoderLoopDaemon {
 		for (const [index, rawItem] of rawItems.entries()) {
 			validateKnownKeys(rawItem, `item.batchAdd items[${index}]`, ITEM_BATCH_ADD_ITEM_KEYS)
 			const presetSpec = await this.requireItemPresetForRequest(rawItem, `items[${index}]`)
-			await this.assertItemAddRightsForCaller(chain, caller, presetSpec, `items[${index}]`)
+			await this.assertItemAddRightsForCaller(chain, caller, presetSpec, `items[${index}]`, itemCarrierDeclaresHooks(rawItem))
 			const input = await this.buildCreateItemInput(chain, rawItem, existingItems, `items[${index}]`)
 			if (requestedIds.has(input.itemId)) {
 				throw new DaemonError("conflict", `batch contains duplicate itemId ${input.itemId}`, { chainId: chain.id, chainName: chain.name, itemId: input.itemId })
@@ -3720,6 +3769,7 @@ export class CoderLoopDaemon {
 		caller: ItemMutationCaller,
 		presetSpec: { preset: string | null; presetPath: string | null },
 		label: string,
+		declaresHooks: boolean,
 	): Promise<void> {
 		const presetName = presetSpec.preset ?? presetSpec.presetPath ?? "<unknown>"
 		if (caller.kind === "operator") {
@@ -3730,6 +3780,19 @@ export class CoderLoopDaemon {
 				presetName,
 			})
 			return
+		}
+		if (declaresHooks) {
+			await this.recordItemAddRightsAdmissionEvent(chain, {
+				caller,
+				outcome: "deny",
+				reason: "hook-declaration-denied",
+				presetName,
+			})
+			throw new DaemonError(
+				"invalid_caller",
+				`${label}: hook declarations are operator-only and cannot be written through item extra`,
+				{ field: `${label}.extra.hooks` },
+			)
 		}
 		// Load the new item's preset to look up the caller-phase rights. Failures route through
 		// the standard preset_load_failed path so a malformed preset surfaces in the event stream
@@ -3794,7 +3857,7 @@ export class CoderLoopDaemon {
 	private async recordItemAddRightsAdmissionEvent(chain: ChainRecord, input: {
 		caller: ItemMutationCaller
 		outcome: "allow" | "deny"
-		reason: "operator" | "agent-allowed" | "no-create-grant" | "no-rights-segment"
+		reason: "operator" | "agent-allowed" | "no-create-grant" | "no-rights-segment" | "hook-declaration-denied"
 		presetName: string
 	}): Promise<void> {
 		const claimedPhase = input.caller.kind === "agent" ? input.caller.phase : null
@@ -4768,6 +4831,11 @@ function validateItemUpdateRequest(args: JsonObject): void {
 	if (Object.keys(fields).length === 0) throw new DaemonError("invalid_request", "item.update requires at least one field to update")
 }
 
+function itemCarrierDeclaresHooks(args: JsonObject): boolean {
+	const extra = sizedJsonObject(args, "extra", MAX_ITEM_EXTRA_BYTES)
+	return extra !== undefined && Object.hasOwn(extra, "hooks")
+}
+
 function validateItemUpdateSelector(args: JsonObject): void {
 	// #419: `itemId` accepts either a numeric rowid (legacy / engine internal) or the opaque
 	// preset-declared string id. When the caller passes a rowid we still reject duplicate chain
@@ -4895,7 +4963,7 @@ function judgeItemUpdateFieldWrites(
 	// `extra.dependsOn` to the top-level dependsOn field for graph validation.
 	for (const innerKey of requested.innerKeys) {
 		gatedFields.add(innerKey)
-		if (PRESET_PHASE_RIGHTS_CONTROL_PLANE_FIELD_SET.has(innerKey)) {
+		if (PRESET_PHASE_RIGHTS_CONTROL_PLANE_FIELD_SET.has(innerKey) || ITEM_EXTRA_OPERATOR_ONLY_FIELDS.has(innerKey)) {
 			deniedControlPlane.add(innerKey)
 			continue
 		}
@@ -5097,6 +5165,17 @@ function parseRuntimeData<T>(parse: () => T): T {
 				field: error.issue.field,
 				value: error.issue.value,
 			})
+		}
+		throw error
+	}
+}
+
+function parseHookRequest<T>(parse: () => T): T {
+	try {
+		return parse()
+	} catch (error) {
+		if (error instanceof HookDeclarationError) {
+			throw new DaemonError("invalid_request", error.message, { field: error.field })
 		}
 		throw error
 	}
@@ -5304,6 +5383,7 @@ const DAEMON_COMMAND_NAMES = [
 	"daemon.down",
 	"logs.query",
 	"queue.unblock",
+	"hooks.set",
 ] as const
 
 // Compile-time bidirectional subset check: `DAEMON_COMMAND_NAMES` must enumerate exactly the
@@ -5343,6 +5423,7 @@ function narrowPrivilegedOpAuditOp(op: DaemonCommandName): PrivilegedOpAuditOp |
 		case "daemon.down":
 		case "logs.query":
 		case "queue.unblock":
+		case "hooks.set":
 		case "item.reorder":
 			return op
 		case "chain.list":
@@ -5358,6 +5439,21 @@ function narrowPrivilegedOpAuditOp(op: DaemonCommandName): PrivilegedOpAuditOp |
 		default:
 			return assertNeverDaemonCommand(op)
 	}
+}
+
+function hookMutationTargetToJson(target: HookMutationTarget): JsonObject {
+	switch (target.kind) {
+		case "global":
+			return { kind: "global" }
+		case "chain":
+			return { kind: "chain", chainId: target.chainId }
+		case "item":
+			return { kind: "item", itemId: target.itemId }
+	}
+}
+
+function assertNeverHookMutationTarget(value: never): never {
+	throw new DaemonError("internal_error", `unhandled hook mutation target: ${JSON.stringify(value)}`, {})
 }
 
 function assertNeverDaemonCommand(value: never): never {

@@ -21,7 +21,7 @@ const ObservabilityKindBoundary = arkType.or(
 	arkType.unit("diagnostic"),
 )
 
-const ObservabilityEventTypeBoundary = arkType.or(
+export const ObservabilityEventTypeBoundary = arkType.or(
 	arkType.unit("chain.layout"),
 	arkType.unit("chain.status"),
 	arkType.unit("item.created"),
@@ -131,6 +131,12 @@ const ObservabilityEventTypeBoundary = arkType.or(
 	// `item.mutation.caller_admission` (caller gate) and `item.status.write_admission` (status
 	// transition gate) to give the auditor a full per-field replay of every item-mutation surface.
 	arkType.unit("item.update.field_write_admission"),
+	arkType.unit("closure.create"),
+	arkType.unit("closure.run-spawn"),
+	arkType.unit("closure.run-exit"),
+	arkType.unit("closure.suspend"),
+	arkType.unit("closure.reopen"),
+	arkType.unit("closure.consume"),
 )
 
 // #409: vocabulary of daemon ops that flow through the privileged-op caller-admission gate.
@@ -147,6 +153,7 @@ const PrivilegedOpAuditOpBoundary = arkType.or(
 	arkType.unit("logs.query"),
 	arkType.unit("queue.unblock"),
 	arkType.unit("item.reorder"),
+	arkType.unit("hooks.set"),
 )
 
 const PrivilegedOpAuditReasonBoundary = arkType.or(
@@ -668,6 +675,7 @@ const ObservabilityEventBoundary = arkType.or(
 				arkType.unit("agent-allowed"),
 				arkType.unit("no-create-grant"),
 				arkType.unit("no-rights-segment"),
+				arkType.unit("hook-declaration-denied"),
 			),
 		},
 	},

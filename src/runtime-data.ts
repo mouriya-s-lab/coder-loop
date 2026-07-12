@@ -2,6 +2,11 @@ import { type as arkType } from "arktype"
 
 import type { BoundaryValue } from "./boundary-types"
 import type { JsonObject, JsonValue } from "./loop"
+import {
+	hookDeclarationsToJsonValue,
+	parseHookDeclarations,
+	type HookDeclaration,
+} from "./hooks"
 
 declare const internalStatusBrand: unique symbol
 declare const admittedItemStatusBrand: unique symbol
@@ -116,6 +121,7 @@ export class ChainMetadata extends RuntimeDataRecord {
 	opencode?: RunnerMetadata
 	maxItemAttempts?: number
 	coderLoopChainCompleteTrigger?: ChainCompleteTriggerState
+	hooks?: HookDeclaration[]
 
 	constructor(input: ChainMetadataInput, remainder: JsonObject) {
 		super(remainder)
@@ -131,6 +137,7 @@ export class ChainMetadata extends RuntimeDataRecord {
 		if (input.opencode !== undefined) this.opencode = input.opencode
 		if (input.maxItemAttempts !== undefined) this.maxItemAttempts = input.maxItemAttempts
 		if (input.coderLoopChainCompleteTrigger !== undefined) this.coderLoopChainCompleteTrigger = input.coderLoopChainCompleteTrigger
+		if (input.hooks !== undefined) this.hooks = hookDeclarationsToJsonValue(input.hooks)
 	}
 }
 
@@ -165,6 +172,7 @@ export class ItemExtra extends RuntimeDataRecord {
 	startPhase?: string
 	pid?: number
 	processGroupLeader?: boolean
+	hooks?: HookDeclaration[]
 
 	constructor(input: ItemExtraInput, remainder: JsonObject) {
 		super(remainder)
@@ -185,6 +193,7 @@ export class ItemExtra extends RuntimeDataRecord {
 		if (input.startPhase !== undefined) this.startPhase = input.startPhase
 		if (input.pid !== undefined) this.pid = input.pid
 		if (input.processGroupLeader !== undefined) this.processGroupLeader = input.processGroupLeader
+		if (input.hooks !== undefined) this.hooks = hookDeclarationsToJsonValue(input.hooks)
 	}
 }
 
@@ -215,6 +224,7 @@ type ChainMetadataInput = {
 	opencode?: RunnerMetadata
 	maxItemAttempts?: number
 	coderLoopChainCompleteTrigger?: ChainCompleteTriggerState
+	hooks?: HookDeclaration[]
 }
 
 type ChainBindingsInput = {
@@ -234,6 +244,7 @@ type ItemExtraInput = {
 	startPhase?: string
 	pid?: number
 	processGroupLeader?: boolean
+	hooks?: HookDeclaration[]
 }
 
 type ArkAssertable<T> = {
@@ -265,6 +276,7 @@ const CHAIN_METADATA_KEYS = new Set([
 	"opencode",
 	"maxItemAttempts",
 	"coderLoopChainCompleteTrigger",
+	"hooks",
 ])
 // Retired keys (#433): the chain-metadata DSL no longer accepts these. We reject explicitly so a
 // stale row carrying `metadata.config` or a stray top-level role-named runner key cannot be
@@ -286,6 +298,7 @@ const ITEM_EXTRA_KEYS = new Set([
 	"startPhase",
 	"pid",
 	"processGroupLeader",
+	"hooks",
 ])
 
 export function parseInternalStatus(value: string, field: string): InternalStatus {
@@ -354,6 +367,7 @@ export function chainMetadataToJsonObject(metadata: ChainMetadata): JsonObject {
 		"coderLoopChainCompleteTrigger",
 		metadata.coderLoopChainCompleteTrigger === undefined ? undefined : chainCompleteTriggerStateToJsonObject(metadata.coderLoopChainCompleteTrigger),
 	)
+	assignJson(result, "hooks", metadata.hooks === undefined ? undefined : hookDeclarationsToJsonValue(metadata.hooks))
 	return result
 }
 
@@ -420,6 +434,7 @@ export function itemExtraToJsonObject(extra: ItemExtra): JsonObject {
 	assignJson(result, "startPhase", extra.startPhase)
 	assignJson(result, "pid", extra.pid)
 	assignJson(result, "processGroupLeader", extra.processGroupLeader)
+	assignJson(result, "hooks", extra.hooks === undefined ? undefined : hookDeclarationsToJsonValue(extra.hooks))
 	return result
 }
 
@@ -530,6 +545,8 @@ function parseChainMetadata(value: JsonObject, field: string): ChainMetadata {
 	if (maxItemAttempts !== undefined) input.maxItemAttempts = maxItemAttempts
 	const trigger = optionalChainCompleteTriggerStateField(value, "coderLoopChainCompleteTrigger", `${field}.coderLoopChainCompleteTrigger`)
 	if (trigger !== undefined) input.coderLoopChainCompleteTrigger = trigger
+	const hooks = optionalHookDeclarationsField(value, "hooks", `${field}.hooks`)
+	if (hooks !== undefined) input.hooks = hooks
 	return new ChainMetadata(input, remainderExcept(value, CHAIN_METADATA_KEYS))
 }
 
@@ -559,7 +576,19 @@ function parseItemExtra(value: JsonObject, field: string): ItemExtra {
 	if (pid !== undefined) input.pid = pid
 	const processGroupLeader = optionalBooleanField(value, "processGroupLeader", `${field}.processGroupLeader`)
 	if (processGroupLeader !== undefined) input.processGroupLeader = processGroupLeader
+	const hooks = optionalHookDeclarationsField(value, "hooks", `${field}.hooks`)
+	if (hooks !== undefined) input.hooks = hooks
 	return new ItemExtra(input, remainderExcept(value, ITEM_EXTRA_KEYS))
+}
+
+function optionalHookDeclarationsField(record: JsonObject, key: string, field: string): HookDeclaration[] | undefined {
+	const value = record[key]
+	if (value === undefined) return undefined
+	try {
+		return parseHookDeclarations(value, field)
+	} catch (error) {
+		throw runtimeDataError(field, value, error instanceof Error ? error.message : `${field} must be a hook declaration array`)
+	}
 }
 
 function optionalChainBindingsField(record: JsonObject, key: string, field: string): ChainBindings | undefined {
