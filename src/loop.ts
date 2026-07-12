@@ -475,17 +475,19 @@ const PresetPhaseRightsBoundary = arkType({
 // surrounding preset structure. The variable-name index stays open because keys belong to
 // each preset; every binding value is nevertheless parsed into this precise wire shape before
 // `parseVariableBinding` normalizes it to the engine's `PresetPhaseVariable` ADT.
+const PresetVariableBindingProductBoundary = arkType({
+	source: "string",
+	"default?": arkType.or("null", "boolean", "number", "string"),
+	"label?": "string",
+	"prefix?": "string",
+	"suffix?": "string",
+	"style?": arkType.or(arkType.unit("code"), arkType.unit("plain")),
+	"blankBefore?": "boolean",
+})
+
 const PresetVariableBindingBoundary = arkType.or(
 	"string",
-	{
-		source: "string",
-		"default?": arkType.or("null", "boolean", "number", "string"),
-		"label?": "string",
-		"prefix?": "string",
-		"suffix?": "string",
-		"style?": arkType.or(arkType.unit("code"), arkType.unit("plain")),
-		"blankBefore?": "boolean",
-	},
+	PresetVariableBindingProductBoundary,
 )
 
 const PresetVariablesBoundary = arkType({
