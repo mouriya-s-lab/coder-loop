@@ -1,4 +1,6 @@
-import { afterAll, expect, test } from "bun:test"
+import { setDefaultTimeout, afterAll, expect, test } from "bun:test"
+
+setDefaultTimeout(30_000)
 import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 

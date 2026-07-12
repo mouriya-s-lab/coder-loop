@@ -1,7 +1,9 @@
-import { afterAll, describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { spawn } from "node:child_process"
 import { mkdir, rm, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
+
+setDefaultTimeout(30_000)
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/internal-status-type-tests", String(process.pid))

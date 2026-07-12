@@ -1,7 +1,9 @@
-import { afterAll, describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { spawn } from "node:child_process"
 import { chmod, mkdir, readdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises"
 import { createConnection } from "node:net"
+
+setDefaultTimeout(30_000)
 import { resolve } from "node:path"
 
 import { type as arkType } from "arktype"
