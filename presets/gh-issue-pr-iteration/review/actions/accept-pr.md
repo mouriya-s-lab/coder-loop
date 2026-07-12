@@ -47,7 +47,7 @@ gh pr merge <PR_NUMBER> -R <REPO> --squash --delete-branch
    - Re-queue and restart the source target:
 
 ```bash
-coder-loop queue unblock <SOURCE_TARGET_CWD> --issue <SOURCE_ISSUE> --start-daemon
+coder-loop queue unblock <SOURCE_TARGET_CWD> --item <SOURCE_ISSUE> --start-daemon
 coder-loop status <SOURCE_TARGET_CWD> --json   # verify: item no longer blocked, daemon running
 ```
 

@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto"
 import { homedir } from "node:os"
-import { isAbsolute, resolve } from "node:path"
+import { isAbsolute, join, resolve } from "node:path"
 
 export const LOOP_DATA_ROOT_ENV = "CODER_LOOP_DATA_DIR"
 // #406: run-scoped credential the engine mints at spawn time and injects into the runner process
@@ -32,6 +33,7 @@ export const PHASE_STATUS_FILENAME = "status.json"
 export const PHASE_SESSIONS_FILENAME = "sessions.jsonl"
 export const DAEMON_LOG_FILENAME = "daemon.log"
 const MAX_PATH_COMPONENT_LENGTH = 255
+const OPAQUE_ITEM_PATH_NAMESPACE = ".opaque-item-ids"
 
 export type RuntimePathErrorCode = "invalid_loop_data_root" | "invalid_chain_name" | "invalid_path_component"
 
@@ -77,8 +79,8 @@ export type ChainRuntimePaths = {
 	evidenceDir: string
 	runsDir: string
 	daemonDir: string
-	issueFile: (issueNumber: number | string) => string
-	issueEvidenceDir: (issueNumber: number | string) => string
+	issueFile: (itemId: number | string) => string
+	issueEvidenceDir: (itemId: number | string) => string
 	runDir: (runId: string) => string
 	runEventsFile: (runId: string) => string
 	runStdoutFile: (runId: string) => string
@@ -178,8 +180,8 @@ export function resolveChainRuntimePaths(chainName: string, options: LoopDataRoo
 		evidenceDir,
 		runsDir,
 		daemonDir,
-		issueFile: (issueNumber) => resolve(issuesDir, `${sanitizePathComponent(String(issueNumber), "issue number")}.md`),
-		issueEvidenceDir: (issueNumber) => resolve(evidenceDir, sanitizePathComponent(String(issueNumber), "issue number")),
+		issueFile: (itemId) => resolve(issuesDir, `${itemRuntimeRelativePath(String(itemId))}.md`),
+		issueEvidenceDir: (itemId) => resolve(evidenceDir, itemRuntimeRelativePath(String(itemId))),
 		runDir,
 		runEventsFile: (runId) => resolve(runDir(runId), RUN_EVENTS_FILENAME),
 		runStdoutFile: (runId) => resolve(runDir(runId), RUN_STDOUT_FILENAME),
@@ -193,6 +195,13 @@ export function resolveChainRuntimePaths(chainName: string, options: LoopDataRoo
 		daemonBatchDir: (timestamp) => resolve(daemonDir, sanitizePathComponent(timestamp, "daemon timestamp")),
 		daemonLogFile: (timestamp) => resolve(daemonDir, sanitizePathComponent(timestamp, "daemon timestamp"), DAEMON_LOG_FILENAME),
 	}
+}
+
+function itemRuntimeRelativePath(itemId: string): string {
+	if (/^[A-Za-z0-9._-]+$/.test(itemId) && itemId !== "." && !itemId.includes("..") && itemId !== OPAQUE_ITEM_PATH_NAMESPACE && itemId.length <= MAX_PATH_COMPONENT_LENGTH) {
+		return itemId
+	}
+	return join(OPAQUE_ITEM_PATH_NAMESPACE, createHash("sha256").update(itemId).digest("hex"))
 }
 
 function sanitizePathComponent(input: string, label: string): string {

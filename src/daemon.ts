@@ -387,7 +387,6 @@ const MAX_ITEM_EXTRA_BYTES = 16_384
 const MAX_ITEM_EXTRA_DEPTH = 8
 const MAX_ITEM_TITLE_LENGTH = 1024
 const MAX_REPO_CWD_LENGTH = 4096
-const MAX_REPOSITORY_REF_LENGTH = 200
 const STALE_RECOVERY_FORCE_AFTER_MS = 1_000
 const ORPHANED_RUN_STATUS = parseInternalStatus("orphaned", "daemon.orphanedRunStatus")
 const ORPHANED_RUN_EXIT_CODE = -1
@@ -399,7 +398,6 @@ const PRESET_NAME_PATTERN = /^[a-z][a-z0-9-]*$/
 // Shared by repoCwd and item-level presetPath validation — defining as a constant avoids escaping
 // the raw control characters inline at every call site.
 const PRESET_PATH_CONTROL_CHAR_REGEX: RegExp = new RegExp("[\\u0000-\\u001f\\u007f]", "u")
-const REPOSITORY_REF_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}[A-Za-z0-9])?\/[A-Za-z0-9._-]{1,100}$/
 const CHAIN_CREATE_ARG_KEYS = [
 	"name",
 	"preset",
@@ -412,7 +410,7 @@ const ITEM_ADD_ARG_KEYS = [
 	"chainId",
 	"chainName",
 	"name",
-	// #419: opaque string item id (replaces `issueNumber` integer wire field).
+	// #419: opaque string item id (replaces `fixtureItemNumber` integer wire field).
 	"itemId",
 	"repoCwd",
 	"title",
@@ -441,7 +439,7 @@ const ITEM_BATCH_ADD_ITEM_KEYS = ITEM_ADD_ARG_KEYS.filter((key) => key !== "chai
 // #419: itemId here is the opaque string preset-id identifier (string), distinct from the rowid
 // integer selector that the daemon also accepts. Both are routed in `resolveItem`: a numeric
 // `itemId` is the rowid; a string `itemId` is the preset-declared opaque identity. The legacy
-// `issueNumber` wire selector is retired (no compatibility alias — wire is breaking-renamed per
+// `fixtureItemNumber` wire selector is retired (no compatibility alias — wire is breaking-renamed per
 // #456 precedent).
 const ITEM_UPDATE_SELECTOR_KEYS = ["itemId", "chainId", "chainName", "name"] as const
 // #410 exported: the engine's compile-time vocabulary of writable item-update fields. The
@@ -500,9 +498,9 @@ const ITEM_EXIT_ACTION_ARG_KEYS = [...ITEM_UPDATE_SELECTOR_KEYS, "agentRunId", "
 const LOGS_QUERY_ARG_KEYS = ["kind", "type", "chain", "item", "run", "phase", "since", "agentCredential"] as const
 // #409 queue.unblock request envelope. Same chain-selector vocabulary the rest
 // of the daemon uses, plus the issue id (the original CLI accepted only
-// `--issue`, which is the issue number). `agentCredential` lets the daemon
+// `--item`, which is the issue number). `agentCredential` lets the daemon
 // hard-deny agents.
-const QUEUE_UNBLOCK_ARG_KEYS = ["chainId", "chainName", "name", "issue", "dryRun", "agentCredential"] as const
+const QUEUE_UNBLOCK_ARG_KEYS = ["chainId", "chainName", "name", "itemId", "dryRun", "agentCredential"] as const
 
 // #406: parsed item-mutation caller — the typed result of the daemon's boundary parse of the
 // `agentCredential` request field. `operator` carries no run binding (the operator path takes
@@ -1836,13 +1834,27 @@ export class CoderLoopDaemon {
 		const chainPreset = rawChainPreset === null || rawChainPreset === undefined
 			? null
 			: await validateBundledPresetForRequest(rawChainPreset)
+		const rawMetadata = validateChainMetadata(sizedJsonObject(args, "metadata", MAX_CHAIN_METADATA_BYTES) ?? {})
+		const repository = optionalString(args, "repository")
+		const metadataObject = chainMetadataToJsonObject(rawMetadata)
+		const bindingsValue = metadataObject.bindings
+		const bindings: JsonObject = isJsonObjectValue(bindingsValue) ? { ...bindingsValue } : {}
+		if (repository !== null) {
+			const boundRepository = bindings.repository
+			if (boundRepository !== undefined && boundRepository !== repository) {
+				throw new DaemonError("conflict", "chain.create repository sugar conflicts with metadata.bindings.repository", {
+					repository,
+					bindingRepository: boundRepository,
+				})
+			}
+			bindings.repository = repository
+		}
 		const input: CreateChainInput = {
 			name: validateChainNameForRequest(requiredString(args, "name")),
 			preset: chainPreset,
-			repository: validateRepositoryForRequest(requiredString(args, "repository")),
 			baseBranch: validateBaseBranchForRequest(optionalString(args, "baseBranch") ?? "main"),
 			status: "active",
-			metadata: validateChainMetadata(sizedJsonObject(args, "metadata", MAX_CHAIN_METADATA_BYTES) ?? {}),
+			metadata: validateChainMetadata(repository === null ? metadataObject : { ...metadataObject, bindings }),
 		}
 		// #457: umbrella-shaped values now live inside metadata.bindings (declared-field path).
 		// Preset's own arktype boundary for the bindings shape rejects malformed entries; the
@@ -2358,15 +2370,9 @@ export class CoderLoopDaemon {
 	private async handleQueueUnblock(args: JsonObject): Promise<JsonObject> {
 		validateKnownKeys(args, "queue.unblock args", QUEUE_UNBLOCK_ARG_KEYS)
 		const chain = this.resolveChain(args)
-		const issueRaw = requiredString(args, "issue")
-		const issue = issueRaw.trim()
-		if (issue === "") throw new DaemonError("invalid_request", "queue.unblock: issue must not be empty")
-		if (/\s/.test(issue)) throw new DaemonError("invalid_request", "queue.unblock: issue must not contain whitespace", { issue: issueRaw })
-		// #419: opaque item id (string). Historical `#123` shorthand still maps to the literal id
-		// without the `#` prefix so operators don't have to think about whether their preset uses
-		// numeric ids; the preset-declared idField decides what's valid downstream.
-		const itemId = issue.startsWith("#") ? issue.slice(1) : issue
-		if (itemId === "") throw new DaemonError("invalid_request", `queue.unblock: issue must contain an id after #`, { issue: issueRaw })
+		const itemId = requiredString(args, "itemId")
+		if (itemId === "") throw new DaemonError("invalid_request", "queue.unblock: itemId must not be empty")
+		if (/\s/.test(itemId)) throw new DaemonError("invalid_request", "queue.unblock: itemId must not contain whitespace", { itemId })
 		const dryRun = optionalBoolean(args, "dryRun") ?? false
 		const resumeScheduler = await this.pauseSchedulerForMutation()
 		try {
@@ -2374,13 +2380,13 @@ export class CoderLoopDaemon {
 			const store = this.requireStore()
 			const item = store.getItemById(chain.id, itemId)
 			if (item === null) {
-				throw new DaemonError("not_found", `queue.unblock: item ${issue} not found in chain ${chain.name}`, { chainName: chain.name, itemId })
+				throw new DaemonError("not_found", `queue.unblock: item ${itemId} not found in chain ${chain.name}`, { chainName: chain.name, itemId })
 			}
 			if (!preset.statuses.unblockable.includes(item.status)) {
 				return {
 					mutation: {
 						changed: false,
-						issue,
+						itemId,
 						reason: "not_unblockable",
 						status: item.status,
 					},
@@ -2425,7 +2431,7 @@ export class CoderLoopDaemon {
 			return {
 				mutation: {
 					changed: true,
-					issue,
+					itemId,
 					beforeStatus: item.status,
 					afterStatus: entryStatus,
 					clearedCurrent,
@@ -3088,7 +3094,7 @@ export class CoderLoopDaemon {
 			subject: source.subject,
 			payload: {
 				chainId: chain.id,
-				// `id` here is the opaque preset-declared string id (formerly `issueNumber`).
+				// `id` here is the opaque preset-declared string id (formerly `fixtureItemNumber`).
 				id: source.itemId,
 				alreadyStopped: source.alreadyStopped,
 				terminatedRunIds: source.terminatedRunIds,
@@ -3166,7 +3172,7 @@ export class CoderLoopDaemon {
 		// preset-declared opaque string id (the only identity surface for agents / operators after
 		// the items table de-GitHub-shaping). Numbers route to `getItem(rowid)`; strings route via
 		// `getItemById(chain.id, itemId)` against the new `items.item_id` column. The legacy
-		// `issueNumber` integer selector is retired (breaking wire change, #456 precedent).
+		// `fixtureItemNumber` integer selector is retired (breaking wire change, #456 precedent).
 		const rawItemId = args["itemId"]
 		if (typeof rawItemId === "number" && Number.isInteger(rawItemId) && rawItemId > 0) {
 			const item = this.requireStore().getItem(rawItemId)
@@ -4299,32 +4305,6 @@ function isInvalidChainNameError(error: unknown): error is RuntimePathError {
 	return error instanceof RuntimePathError && error.code === "invalid_chain_name"
 }
 
-// #457: only `repository` remains as an engine-side `owner/repo` field — the engine column survives
-// because chain-identity check (resolveDbChainForTarget at src/loop.ts:3433-3438) and worktree-create
-// mechanism (validateWorktreePrerequisites) consume it. Other GitHub-shaped owner/repo fields
-// retired as engine first-class fields; a preset needing an `owner/repo` style chain binding or
-// item field declares it through the generic chain `metadata.bindings` / `[item.fields]` /
-// `extraPatch` paths and parses the string itself. The function used to take a field-name union
-// parameter — collapsed since no other field shares the validator.
-function validateRepositoryForRequest(input: string): string {
-	const field = "repository" as const
-	const details: JsonObject = { [field]: input }
-	if (input.length > MAX_REPOSITORY_REF_LENGTH) {
-		throw new DaemonError("invalid_request", `${field} must be ${MAX_REPOSITORY_REF_LENGTH} characters or fewer`, details)
-	}
-	if (/[\u0000-\u001f\u007f]/u.test(input)) {
-		throw new DaemonError("invalid_request", `${field} must not contain control characters`, details)
-	}
-	if (!REPOSITORY_REF_PATTERN.test(input)) {
-		throw new DaemonError("invalid_request", `${field} must use owner/repo format`, details)
-	}
-	const repoName = input.slice(input.indexOf("/") + 1)
-	if (repoName === "." || repoName === "..") {
-		throw new DaemonError("invalid_request", `${field} name must not be a reserved path segment`, details)
-	}
-	return input
-}
-
 function validateBaseBranchForRequest(input: string): string {
 	if (/[\u0000-\u001f\u007f]/u.test(input)) {
 		throw new DaemonError("invalid_request", "baseBranch must not contain control characters", { baseBranch: input })
@@ -5116,7 +5096,6 @@ function chainCreateConflicts(existing: ChainRecord, requested: CreateChainInput
 	// `requested.preset` may be undefined since #412 made the chain-level preset optional; treat absent
 	// as explicit-null so the conflict comparison is well-defined.
 	addConflict("preset", existing.preset, requested.preset ?? null)
-	addConflict("repository", existing.repository, requested.repository)
 	addConflict("baseBranch", existing.baseBranch, requested.baseBranch)
 	addConflict("status", existing.status, requested.status ?? "active")
 
@@ -5137,7 +5116,7 @@ function chainCreateConflicts(existing: ChainRecord, requested: CreateChainInput
 	return conflicts
 }
 
-// #419: now keys on the opaque preset-declared `itemId` string (formerly `issueNumber`
+// #419: now keys on the opaque preset-declared `itemId` string (formerly `fixtureItemNumber`
 // integer). `existingItemId` continues to surface the existing row's rowid so callers can
 // route by it; the new `itemId` payload field holds the conflicting opaque id.
 function duplicateItemAddError(chain: ChainRecord, itemId: string, existing: ItemRecord): DaemonError {
@@ -5373,7 +5352,6 @@ function chainToJson(chain: ChainRecord): JsonObject {
 		id: chain.id,
 		name: chain.name,
 		preset: chain.preset,
-		repository: chain.repository,
 		baseBranch: chain.baseBranch,
 		status: chain.status,
 		metadata: chainMetadataToJsonObject(chain.metadata),
@@ -5383,7 +5361,7 @@ function chainToJson(chain: ChainRecord): JsonObject {
 }
 
 function itemToJson(item: ItemRecord, dependencyWait?: DependencyWaitReason | null): JsonObject {
-	// #419: wire schema retires top-level `issueNumber` (int), `branch`, `pr`. The opaque
+	// #419: wire schema retires top-level `fixtureItemNumber` (int), `branch`, `pr`. The opaque
 	// preset-declared identity surfaces as `itemId` (string); the rowid stays on `id` (int).
 	// Supervisors that wanted branch/pr previously read them as first-class fields now read
 	// them off `extra` (gh-issue-pr-iteration declares both in `[item.fields]`, so they

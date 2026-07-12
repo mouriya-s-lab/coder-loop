@@ -96,7 +96,7 @@ process.exit(1)
 			loopDataRootOptions: { loopDataRoot },
 			now: () => now,
 			runIdFactory: ({ item: selected }) => `run-forced-failure-${selected.id}-${now}`,
-			prompt: ({ item, runId }) => JSON.stringify({ itemId: item.id, issueNumber: Number(item.itemId), runId }),
+			prompt: ({ item, runId }) => JSON.stringify({ itemId: item.id, fixtureItemNumber: Number(item.itemId), runId }),
 			onEvent: (event) => {
 				schedulerEvents.push(event)
 			},
@@ -123,7 +123,7 @@ process.exit(1)
 	}
 })
 
-test("item without per-issue handoff binds shared handoff and empty current issue file", async () => {
+test("scheduler prepares an opaque item id with default evidence and no issue handoff", async () => {
 	const root = resolve(TEST_ROOT, "optional-issue-handoff")
 	const loopDataRoot = resolve(root, "loop-data")
 	const fakeRunner = resolve(root, "prompt-capture-runner.ts")
@@ -152,7 +152,7 @@ await Bun.write(${JSON.stringify(promptCapture)}, prompt)
 		await writeFile(paths.sharedFile, "# Shared durable context\n\n")
 		const item = store.createItem({
 			chainId: chain.id,
-			itemId: "357001",
+			itemId: "owner/repo#12",
 			repoCwd: REPO_ROOT,
 			status: runtimeStatus("queued"),
 			attempts: 0,
@@ -188,6 +188,7 @@ await Bun.write(${JSON.stringify(promptCapture)}, prompt)
 		expect(tick.spawnedRuns).toHaveLength(1)
 		await tick.spawnedRuns[0]!.closed
 		expect(store.getItem(item.id)?.lastRunId).toBe(`run-optional-handoff-${item.id}`)
+		expect(store.getItem(item.id)?.itemId).toBe("owner/repo#12")
 		const rendered = await readFile(promptCapture, "utf-8")
 		expect(rendered).toContain(`shared=${paths.sharedFile}`)
 		expect(rendered).toContain("current=\n")
@@ -338,7 +339,7 @@ console.log("done:" + input.itemId)
 			worktreeManager: createGitWorktreeManager({ loopDataRoot }),
 			loopDataRootOptions: { loopDataRoot },
 			runIdFactory: ({ item: selected }) => `run-complete-cleanup-${selected.id}`,
-			prompt: ({ item: selected }) => JSON.stringify({ itemId: selected.id, issueNumber: Number(selected.itemId) }),
+			prompt: ({ item: selected }) => JSON.stringify({ itemId: selected.id, fixtureItemNumber: Number(selected.itemId) }),
 			onEvent: (event) => {
 				schedulerEvents.push(event)
 			},
@@ -426,7 +427,7 @@ console.log(input.phase + ":" + status)
 			runIdFactory: ({ phase }) => `run-review-retry-${++runSequence}-${phase}`,
 			prompt: ({ item: selected, runId, phase }) => JSON.stringify({
 				itemId: selected.id,
-				issueNumber: Number(selected.itemId),
+				fixtureItemNumber: Number(selected.itemId),
 				runId,
 				phase,
 			}),

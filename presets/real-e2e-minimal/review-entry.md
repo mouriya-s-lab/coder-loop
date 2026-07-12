@@ -21,7 +21,7 @@ Your cwd is a git worktree of the target repository.
 5. Write the terminal status — the scheduler does not infer it from your output; without this write the item stays actionable:
 
    ```bash
-   coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --status done --json
+   coder-loop item update {{CHAIN_NAME}} --item {{ISSUE}} --status done --json
    ```
 
    Verify the JSON response shows status `done`. Non-zero exit or wrong status = the write did not land; say so in your summary and exit non-zero.
@@ -31,7 +31,7 @@ Your cwd is a git worktree of the target repository.
 If the PR is missing, the diff is wrong, the check fails, or the merge fails: leave one concise PR comment (or issue comment when there is no PR) stating exactly what is wrong, then:
 
 ```bash
-coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --status changes_requested --json
+coder-loop item update {{CHAIN_NAME}} --item {{ISSUE}} --status changes_requested --json
 ```
 
 Do not merge anything that fails verification. Never write `done` unless the merge succeeded AND the issue is CLOSED.

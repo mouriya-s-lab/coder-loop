@@ -20,7 +20,7 @@ operator / supervisor 的默认入口是 `coder-loop` 自己暴露的只读或�
 | 管理 central daemon | `coder-loop daemon up/down/status/start/stop/restart <target>` | 管理全局 daemon socket 与 target chain；避免手写 `nohup` / PID 归属逻辑 |
 | 管理 chain | `coder-loop chain create/list/status/stop/resume/delete/set-runner-model` | 直接操作 centralized coder-loop chain |
 | 管理 item | `coder-loop item add/batch-add/list/update/reorder` | 直接操作 centralized chain item |
-| 恢复 blocked item | `coder-loop queue unblock <target> --issue <id>` | 将 preset 声明的 unblockable terminal item 恢复到 `statuses.entry` |
+| 恢复 blocked item | `coder-loop queue unblock <target> --item <id>` | 将 preset 声明的 unblockable terminal item 恢复到 `statuses.entry` |
 
 常规排障顺序：
 
@@ -66,7 +66,7 @@ coder-loop daemon down --json                    # 关闭 central daemon socket 
 | `queue.selected.item.branch: string \| null` | `[item.fields].branch = "string"`，同上，wire 层平铺 |
 | `queue.selected.item.pr: number \| null` | `[item.fields].pr = "number"`，同上，wire 层平铺 |
 | `queue.selected.item.extra` | wire 上恒为 `null` — `flattenExtraReplacer` 把 `extra.*` 平铺到 `queue.selected.item.<field>`；消费者不要走 `.extra.<field>` 嵌套路径 |
-| daemon wire `item.add` / `item.update` 的 identity 字段 | `itemId: string`；CLI flag 仍是 `--issue`（接受 opaque string） |
+| daemon wire `item.add` / `item.update` 的 identity 字段 | `itemId: string`；CLI 使用 `--item`（接受 opaque string，不保留旧 flag alias） |
 | audit/decision event payload `rowId: number` | `queue.terminal` / `item.dependency_unblocked` / `item.dependency_wait` / `item.backoff` 携带 SQLite rowid；`itemId` 恒是 opaque string identity |
 
 `coder-loop item update` / `item add` 的 `--field-json` 接受 `{"branch": "...", "pr": N}`——它们走 preset 声明的 `[item.fields]` 透明字段路径，与 schema 物理层无关。
@@ -95,7 +95,7 @@ Runtime 文件是必要的 debug reference，但不是外层长期依赖的首�
 ~/.coder-loop/loop-data/db.sqlite
 ```
 
-可通过 `--loop-data-root <dir>` 改变 loop-data 根。`coder-loop status <target> --json` 会在 `.state.path`、`.state.repository`、`.state.baseBranch` 与 `.target.*` 路径字段里暴露实际 runtime 与 chain 解析结果。
+可通过 `--loop-data-root <dir>` 改变 loop-data 根。`coder-loop status <target> --json` 会在 `.state.path`、`.state.baseBranch` 与 `.target.*` 路径字段里暴露实际 runtime 与 chain 解析结果；repository 若由 preset 使用，从 chain bindings 读取。
 
 Operator 不应直接写 DB 表作为常规操作。优先使用：
 
@@ -104,14 +104,14 @@ coder-loop status <target> --json
 coder-loop chain status <chain-name> --json
 coder-loop item list <chain-name> --json
 coder-loop item update ...
-coder-loop queue unblock <target> --issue <id> --start-daemon
+coder-loop queue unblock <target> --item <id> --start-daemon
 ```
 
 如果必须做人工恢复，先备份 DB，再用 `status` / `doctor` 定位到具体 chain 与 item；只修被诊断出的字段。
 
 `coder-loop status <target> --json` 与 `coder-loop doctor <target>` 会检查并暴露这些 runtime 不变量：
 
-- centralized chain 的 `repository` / `baseBranch` 是功能性 chain identity；prompt 专用值通过 preset 的透明 `chain.*` binding 读取；
+- centralized chain 的 `baseBranch` 是功能性 worktree 字段；repository 是可选 opaque `chain.*` binding，不参与 engine identity；
 - `queue` 内 id 不可重复；
 - 每个 queue item 的 `status` 必须落在 preset 的 status 集合内；
 - 若 `current` 存在，其 id 必须能在 `queue` 找到匹配项，且该项必须是 continuable；
@@ -123,7 +123,7 @@ coder-loop queue unblock <target> --issue <id> --start-daemon
 
 ```bash
 coder-loop status /path/to/target --json \
-  | jq '.state.kind, .state.path, .state.repository, .state.baseBranch, .target.preset.name, .queue.total, .queue.selected'
+  | jq '.state.kind, .state.path, .state.baseBranch, .target.preset.name, .queue.total, .queue.selected'
 ```
 
 `.state.kind == "ok"` 表示 preset、central chain layout、queue/current 都能解析；其他 kind 说明 status 仍可读，但需要按 `.state` 里的 discriminant 继续排错。
@@ -169,7 +169,6 @@ coder-loop status <path> --json | jq '.state, .target, .queue.selected'
 
 | 类别 | 示例 | 修法 |
 |---|---|---|
-| chain 选择不匹配 | `SQLite chain "x" repository is owner/a, expected owner/b` | 指定正确 `--chain`，或修正 centralized chain identity |
 | 必需文件 / 目录缺失 | `targetCwd: directory does not exist` / `sharedContextPath: missing file: .../shared.md` | 先跑 `coder-loop doctor`；缺 chain 时 `coder-loop chain create <name> --config-json '{"repository":"<owner>/<repo>"}'` |
 | queue item id 缺失 / 重复 | `state.queue[N].issue: must be a non-empty string or finite number` / `duplicate id "42"` | 修 chain item |
 | queue item status 非法 | `state.queue[N].status: status "foo" is not in preset.statuses` | 用 preset 声明的 status 字面量 |
@@ -238,16 +237,16 @@ coder-loop item --help
 | `daemon start <target>` | 解析 target chain 并让 daemon 开始调度；已运行/已存在时幂等返回 | `--loop-data-root <dir>` `--dry-run` |
 | `daemon stop <target>` | 解析 target chain 并调 `chain.stop`（可 resume） | `--loop-data-root <dir>` `--dry-run` |
 | `daemon restart <target>` | 确认 central daemon 可用，输出单个 JSON object | `--loop-data-root <dir>` `--dry-run` |
-| `chain create <name>` | 中央 daemon socket 上创建 chain metadata | `--config-json '{"repository":"...","baseBranch":"...","bindings":{...}}'` `--preset <name>` `--umbrella <ref>` `--force` |
+| `chain create <name>` | 中央 daemon socket 上创建 chain metadata | `--config-json '{"repository":"...","baseBranch":"...","<binding>":"..."}'` `--preset <name>` `--force`；repository 可选并写入 bindings |
 | `chain list` / `chain status <name>` | list / show one chain | `--json` `--loop-data-root <dir>` |
 | `chain stop <name>` / `chain resume <name>` | 暂停 / 恢复 chain scheduling | `--json` `--loop-data-root <dir>` |
 | `chain delete <name>` | 标记 chain 删除 | `--json` `--loop-data-root <dir>` |
 | `chain set-runner-model <chain>` | patch `chain.metadata.<kind>.model` runner-binding override | `--kind <claude\|codex\|opencode>` `--model <name>` |
-| `item add <chain>` | 加一个 item；`--preset` / `--preset-path` 二选一必填 | `--issue <id>` `--repo-cwd <dir>` `--preset <name>` / `--preset-path <abs>` `--status` `--attempts` `--title` `--priority` `--field-json '{...}'` `--last-run-id` `--issue-file` `--evidence-dir` `--agent-cwd` `--runner` |
+| `item add <chain>` | 加一个 item；`--preset` / `--preset-path` 二选一必填 | `--item <id>` `--repo-cwd <dir>` `--preset <name>` / `--preset-path <abs>` `--status` `--attempts` `--title` `--priority` `--field-json '{...}'` `--last-run-id` `--item-file` `--evidence-dir` `--agent-cwd` `--runner` |
 | `item batch-add <chain> --items-json '[...]'` | 原子批量加 item | `--items-json` `--loop-data-root <dir>` |
 | `item list <chain>` / `item update <chain>` / `item reorder <chain>` | item 常规 CRUD | 看 `coder-loop item --help` |
-| `item exits <chain>` / `item exit-action <chain>` | **agent 面**：查该 item 当前 run phase 的 typed phase-exits / 选择 chain-action exit | `--issue` `--agent-run-id` `--agent-phase` `--action`（exit-action） |
-| `queue unblock <target>` | 将 preset 声明的 unblockable terminal item 恢复到 `statuses.entry` 并清除 blocker metadata | `--issue <id>` `--start-daemon` `--dry-run` |
+| `item exits <chain>` / `item exit-action <chain>` | **agent 面**：查该 item 当前 run phase 的 typed phase-exits / 选择 chain-action exit | `--item` `--agent-run-id` `--agent-phase` `--action`（exit-action） |
+| `queue unblock <target>` | 将 preset 声明的 unblockable terminal item 恢复到 `statuses.entry` 并清除 blocker metadata | `--item <id>` `--start-daemon` `--dry-run` |
 
 ### 6.2 Source entry
 
@@ -317,5 +316,5 @@ coder-loop item list <chain-name> --json
 - **`.coder-loop/` 入了 git** → runtime / logs / handoff 进了 PR diff；`.gitignore` 加 `.coder-loop/` 后 `git rm --cached -r .coder-loop/`。
 - **target 的 `CLAUDE.md` / `AGENTS.md` 缺失或没入仓** → iteration / review 调度者读不到项目工作方式（项目命令 / PR 约定），行为退化为推测项目命令，往往写错命令 / 漏证据 layer。
 - **`gh` 未 auth** → iteration 的 issue body 亲读 / review 的 `gh pr checks` 都会失败，agent 输出里能看到 `gh auth status` 失败回显。
-- **chain identity 与目标 repo 不一致** → `status` / `daemon start` 会在解析 chain 时报告 repository/baseBranch 不匹配；指定正确 `--chain`，或修正 centralized chain identity。
+- **chain 选择歧义** → `status` / `daemon start` 会按显式 `--chain`、item `repo_cwd` 或唯一候选解析；多候选时指定 `--chain`。
 - **只看日志文件、不看 status** → authoritative path 来自 central chain；先看 `status` 返回的路径，不要按老式 flat log layout 找文件。

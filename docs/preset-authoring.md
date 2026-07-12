@@ -92,14 +92,14 @@ coder-loop chain create "$CHAIN" \
   --loop-data-root "$LOOP_DATA_ROOT" \
   --json
 coder-loop item add "$CHAIN" \
-  --issue 1 \
+  --item 1 \
   --repo-cwd "$TARGET" \
   --preset single-phase-example \
   --field-json '{"id":"demo-item"}' \
   --loop-data-root "$LOOP_DATA_ROOT" \
   --json
 coder-loop item update "$CHAIN" \
-  --issue 1 \
+  --item 1 \
   --status pending \
   --loop-data-root "$LOOP_DATA_ROOT" \
   --json
@@ -367,7 +367,7 @@ Queue item 可加 `"runner": "claude"|"codex"|"opencode"` 覆盖所有非 trigge
 
 Target 目录不需要任何 `.coder-loop/` 目录或状态文件——chain shared / issues / evidence / runs 目录由中央 daemon 在 `~/.coder-loop/loop-data/chains/<chain>/` 下创建维护（`--loop-data-root` 可改根路径）。项目命令 / PR 约定的真源是 target 自有的 `CLAUDE.md` / `AGENTS.md`（committed），iteration / review 调度者显式读取。
 
-Preset 选择通过 `coder-loop item add --preset <name>` 或 `--preset-path <abs>` 逐 item 声明；chain-level `--preset` 只是 legacy default seed，不驱动任何 item 的执行 preset。Chain identity（`repository`、`baseBranch`）与其余 per-target 偏差通过 `coder-loop chain create --config-json '{"repository":"...","baseBranch":"...","bindings":{...}}'` 写入 chain.metadata.bindings。队列 / current / runs 全部存在 centralized SQLite loop-data store 中；用 `coder-loop chain create` + `coder-loop item add` 建立 chain 与 item，不要手写状态文件。
+Preset 选择通过 `coder-loop item add --preset <name>` 或 `--preset-path <abs>` 逐 item 声明；chain-level `--preset` 只是 legacy default seed。`baseBranch` 是 chain 的 worktree 机制字段；repository 与其余业务值通过 `coder-loop chain create --config-json` 写入 `chain.metadata.bindings`，engine 不解释 repository 格式。
 
 `coder-loop status <target> --json --chain <chain>` 应当 exit 0，且输出里 `.target.preset.name` 是目标 preset、`.state.kind == "ok"`；有可推进 item 时 `.queue.selected.id` 应指向该 preset 的 `item.idField` 值。没有 queue 时先用 `coder-loop chain create` / `coder-loop item add` 建立 centralized chain 与 item，再读取 status。
 

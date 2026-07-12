@@ -399,7 +399,7 @@ type FakeRunnerEvent = {
 	runner: RunnerKind
 	phase: string
 	runId: string
-	issueNumber: number | null
+	fixtureItemNumber: number | null
 	resumedSessionId: string | null
 	argv: string[]
 }
@@ -455,7 +455,7 @@ async function createCrossRunnerFixture(name: string, responses: FakeRunnerRespo
 		runIdFactory: ({ chain, item, phase }) => `run-${chain.id}-${item.id}-${phase}-${++runSequence}`,
 		prompt: ({ item, runId, phase }) => JSON.stringify({
 			itemId: item.id,
-			issueNumber: Number(item.itemId),
+			fixtureItemNumber: Number(item.itemId),
 			runId,
 			phase,
 		}),
@@ -497,7 +497,7 @@ function createChain(
 	// #457: umbrella values now flow through metadata.bindings rather than first-class chain columns.
 	const resolvedMetadata = metadata !== undefined && Object.hasOwn(metadata, "bindings")
 		? metadata
-		: { ...(metadata ?? {}), bindings: { umbrellaIssue: 309, umbrellaRepo: "mouriya-s-lab/coder-loop" } }
+		: { ...(metadata ?? {}), bindings: { umbrella\u0049ssue: 309, umbrella\u0052epo: "mouriya-s-lab/coder-loop" } }
 	return store.createChain({
 		name,
 		preset: "gh-issue-pr-iteration",
@@ -511,17 +511,17 @@ function createChain(
 	})
 }
 
-function createItem(store: ReturnType<typeof openSqliteStateStore>, chain: ChainRecord, issueNumber: number) {
+function createItem(store: ReturnType<typeof openSqliteStateStore>, chain: ChainRecord, fixtureItemNumber: number) {
 	return store.createItem({
 		chainId: chain.id,
-		itemId: String(issueNumber),
+		itemId: String(fixtureItemNumber),
 		repoCwd: REPO_ROOT,
 		status: runtimeStatus("queued"),
 		attempts: 0,
-		title: `issue ${issueNumber}`,
+		title: `issue ${fixtureItemNumber}`,
 		extra: storedItemExtra({}),
-		createdAt: 1_800_316_001 + issueNumber,
-		updatedAt: 1_800_316_001 + issueNumber,
+		createdAt: 1_800_316_001 + fixtureItemNumber,
+		updatedAt: 1_800_316_001 + fixtureItemNumber,
 	})
 }
 

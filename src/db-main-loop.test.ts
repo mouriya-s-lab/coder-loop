@@ -50,7 +50,7 @@ describe("db-backed v2 loop hard cut", () => {
 		// item moves blocked→queued holds without per-test mutation.
 		const daemon = await startCoderLoopDaemon({ loopDataRoot: fixture.loopDataRoot, shutdownGraceMs: 100, scheduler: { enabled: false } })
 		try {
-			const result = await runCliAsync(["queue", "unblock", fixture.target, "--issue", "1", "--loop-data-root", fixture.loopDataRoot, "--chain", CHAIN_NAME])
+			const result = await runCliAsync(["queue", "unblock", fixture.target, "--item", "1", "--loop-data-root", fixture.loopDataRoot, "--chain", CHAIN_NAME])
 			expect(result.exitCode, `${result.stdout}\n${result.stderr}`).toBe(0)
 			expect(readItem(fixture.loopDataRoot).status).toBe("queued")
 			// #457: queue unblock no longer clears preset-owned blocker keys — the engine has no
@@ -72,7 +72,7 @@ describe("db-backed v2 loop hard cut", () => {
 
 		const daemon = await startCoderLoopDaemon({ loopDataRoot: fixture.loopDataRoot, shutdownGraceMs: 100, scheduler: { enabled: false } })
 		try {
-			const result = await runCliAsync(["queue", "unblock", fixture.target, "--issue", "1", "--loop-data-root", fixture.loopDataRoot, "--chain", CHAIN_NAME])
+			const result = await runCliAsync(["queue", "unblock", fixture.target, "--item", "1", "--loop-data-root", fixture.loopDataRoot, "--chain", CHAIN_NAME])
 
 			expect(result.exitCode, `${result.stdout}\n${result.stderr}`).toBe(0)
 			// #409 retry: drop the `as { … }` anonymous-shape cast — assert structurally via

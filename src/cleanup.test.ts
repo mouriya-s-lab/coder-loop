@@ -134,7 +134,6 @@ function makeLoopOptions(): LoopOptions {
 		logDir: "/loop-data/chains/main/runs",
 		loopDataRoot: "/loop-data",
 		logFile: "/loop-data/chains/main/daemon/daemon.log",
-		repository: "fixture/repo",
 		baseBranch: "main",
 		bindings: {
 			repository: "fixture/repo",

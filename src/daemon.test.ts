@@ -381,21 +381,20 @@ process.exitCode = 0
 			// a particular runner kind set it via the per-runner channel (`metadata.codex.binary`)
 			// instead; the bare runner alias is gone.
 			// #457: umbrella values now flow through metadata.bindings rather than a first-class
-			// chain.create field; the daemon no longer validates `umbrellaIssue` / `umbrellaRepo`
+			// chain.create field; the daemon no longer validates `umbrella\u0049ssue` / `umbrella\u0052epo`
 			// as engine-typed fields, so the test exercises the declared-binding path instead.
 			const result = expectOk(await request(fixture, "chain.create", {
 				name: "central-state",
 				repository: "mouriya-s-lab/coder-loop",
 				baseBranch: "main",
-				metadata: { codex: { binary: "codex" }, bindings: { umbrellaIssue: 176 } },
+				metadata: { codex: { binary: "codex" }, bindings: { umbrella\u0049ssue: 176 } },
 			}))
 
 			expect(result.chain).toMatchObject({
 				name: "central-state",
-				repository: "mouriya-s-lab/coder-loop",
 				baseBranch: "main",
 				status: "active",
-				metadata: { codex: { binary: "codex" }, bindings: { umbrellaIssue: 176 } },
+				metadata: { codex: { binary: "codex" }, bindings: { repository: "mouriya-s-lab/coder-loop", umbrella\u0049ssue: 176 } },
 			})
 			const paths = resolveChainRuntimePaths("central-state", { loopDataRoot: fixture.loopDataRoot })
 			await expect(Bun.file(paths.sharedFile).exists()).resolves.toBe(true)
@@ -423,9 +422,8 @@ process.exitCode = 0
 			})).chain)
 			expect(repeated.id).toBe(first.id)
 			expect(repeated).toMatchObject({
-				repository: "mouriya-s-lab/coder-loop",
 				baseBranch: "main",
-				metadata: { codex: { binary: "codex" } },
+				metadata: { codex: { binary: "codex" }, bindings: { repository: "mouriya-s-lab/coder-loop" } },
 			})
 
 			expectConflict(await request(fixture, "chain.create", {
@@ -452,7 +450,13 @@ process.exitCode = 0
 			if (!Array.isArray(listed)) throw new Error("expected chain list array")
 			expect(listed).toHaveLength(1)
 			const [listedChain] = listed
-			expect(record(listedChain)).toMatchObject({ repository: "mouriya-s-lab/coder-loop", baseBranch: "main", metadata: { codex: { binary: "codex" } } })
+			expect(record(listedChain)).toMatchObject({
+				baseBranch: "main",
+				metadata: {
+					codex: { binary: "codex" },
+					bindings: { repository: "mouriya-s-lab/coder-loop" },
+				},
+			})
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -480,33 +484,19 @@ process.exitCode = 0
 		}
 	})
 
-	test("socket chain.create validates repository format", async () => {
-		const fixture = await startFixture("chain-create-invalid-repository", { schedulerEnabled: false })
+	test("socket chain.create treats repository as optional opaque binding sugar", async () => {
+		const fixture = await startFixture("chain-create-repository-binding", { schedulerEnabled: false })
 		try {
-			const invalidRepositories = [
-				"x/y\nbad",
-				"x",
-				"x/",
-				"/y",
-				"x/y/z",
-				"bad owner/repo",
-				"owner/.",
-				"owner/..",
-				"owner/repo\u007f",
-				"owner-/repo",
-			]
+			const opaque = record(expectOk(await request(fixture, "chain.create", {
+				name: "opaque-repository",
+				repository: "local target with no forge shape",
+			})).chain)
+			expect(record(record(opaque.metadata).bindings).repository).toBe("local target with no forge shape")
 
-			for (const [index, repository] of invalidRepositories.entries()) {
-				const response = await request(fixture, "chain.create", {
-					name: `repo-check-${index}`,
-					repository,
-				})
-
-				expectInvalid(response)
-				const listed = expectOk(await request(fixture, "chain.list")).chains
-				expect(Array.isArray(listed)).toBe(true)
-				expect(listed).toHaveLength(0)
-			}
+			const absent = record(expectOk(await request(fixture, "chain.create", {
+				name: "no-repository",
+			})).chain)
+			expect(record(absent.metadata).bindings).toBeUndefined()
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -558,31 +548,31 @@ process.exitCode = 0
 		}
 	})
 
-	// #457: `umbrellaIssue` / `umbrellaRepo` are no longer first-class chain.create fields. They flow
-	// through `metadata.bindings`, where the operator (or the `--umbrella owner/repo#123` CLI
-	// shorthand) writes them as preset-declared chain bindings. The daemon rejects the legacy keys
+	// #457: `umbrella\u0049ssue` / `umbrella\u0052epo` are no longer first-class chain.create fields. They flow
+	// through `metadata.bindings`, where the operator writes them as preset-declared chain bindings.
+	// The daemon rejects the legacy keys
 	// at the strict-args gate so stale callers fail loudly instead of silently dropping their value.
-	test("socket chain.create rejects legacy first-class umbrellaIssue / umbrellaRepo args (#457)", async () => {
+	test("socket chain.create rejects legacy first-class umbrella\u0049ssue / umbrella\u0052epo args (#457)", async () => {
 		const fixture = await startFixture("chain-create-rejects-legacy-umbrella", { schedulerEnabled: false })
 		try {
 			expectInvalid(await request(fixture, "chain.create", {
 				name: "legacy-umbrella-issue",
 				repository: "mouriya-s-lab/coder-loop",
-				umbrellaIssue: 176,
+				umbrella\u0049ssue: 176,
 			}))
 			expectInvalid(await request(fixture, "chain.create", {
 				name: "legacy-umbrella-repo",
 				repository: "mouriya-s-lab/coder-loop",
-				umbrellaRepo: "mouriya-s-lab/coder-loop",
+				umbrella\u0052epo: "mouriya-s-lab/coder-loop",
 			}))
 
 			const created = record(expectOk(await request(fixture, "chain.create", {
 				name: "umbrella-via-bindings",
 				repository: "mouriya-s-lab/coder-loop",
-				metadata: { bindings: { umbrellaIssue: 176, umbrellaRepo: "mouriya-s-lab/coder-loop" } },
+				metadata: { bindings: { umbrella\u0049ssue: 176, umbrella\u0052epo: "mouriya-s-lab/coder-loop" } },
 			})).chain)
 			expect(created).toMatchObject({
-				metadata: { bindings: { umbrellaIssue: 176, umbrellaRepo: "mouriya-s-lab/coder-loop" } },
+				metadata: { bindings: { umbrella\u0049ssue: 176, umbrella\u0052epo: "mouriya-s-lab/coder-loop" } },
 			})
 		} finally {
 			await fixture.daemon.stop()
@@ -686,7 +676,7 @@ process.exitCode = 0
 				repository: "mouriya-s-lab/coder-loop",
 				metadata: validMetadata,
 			})).chain)
-			expect(created.metadata).toEqual(validMetadata)
+			expect(created.metadata).toEqual({ ...validMetadata, bindings: { ...validMetadata.bindings, repository: "mouriya-s-lab/coder-loop" } })
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -1743,7 +1733,7 @@ attemptTimeoutSeconds = 3600
 			try {
 				const chain = store.getChainByName("legacy-runtime-data-chain")
 				if (chain === null) throw new Error("expected seeded chain")
-				expect(chainBindings(chain.metadata)).toEqual({ workflowFile: "legacy-workflow.md" })
+				expect(chainBindings(chain.metadata)).toEqual({ workflowFile: "legacy-workflow.md", repository: "mouriya-s-lab/coder-loop" })
 				expect(chain.metadata.maxItemAttempts).toBe(3)
 				const item = store.getItem(seededItemId)
 				if (item === null) throw new Error("expected seeded item")
@@ -2510,7 +2500,7 @@ process.exitCode = 0
 				{ itemId, lastRunId: "run-forged" },
 				{ itemId, agentCwd: "/etc/passwd" },
 				{ itemId, fields: { chainId: otherChainId } },
-				{ itemId, fields: { issueNumber: 999 } },
+				{ itemId, fields: { fixtureItemNumber: 999 } },
 				{ itemId, fields: { attempts: 5 } },
 				{ itemId, fields: { lastRunId: "run-forged" } },
 				{ itemId, fields: { agentCwd: "/etc/passwd" } },
@@ -3656,7 +3646,7 @@ process.exitCode = 0
 				worktreeManager,
 				prompt: ({ item, runId }) => JSON.stringify({
 					itemId: item.id,
-					issueNumber: Number(item.itemId),
+					fixtureItemNumber: Number(item.itemId),
 					runId,
 					eventLog,
 					sleepMs: 5,
@@ -4565,7 +4555,7 @@ process.exitCode = 0
 				},
 				prompt: ({ item, runId }) => JSON.stringify({
 					itemId: item.id,
-					issueNumber: Number(item.itemId),
+					fixtureItemNumber: Number(item.itemId),
 					runId,
 					eventLog,
 					sleepMs: 2_500,
@@ -4726,7 +4716,7 @@ process.exitCode = 0
 				},
 				prompt: ({ item, runId }) => JSON.stringify({
 					itemId: item.id,
-					issueNumber: Number(item.itemId),
+					fixtureItemNumber: Number(item.itemId),
 					runId,
 					eventLog,
 					sleepMs: 3_000,
@@ -4879,7 +4869,7 @@ process.exitCode = 1
 					await mkdir(worktreePath, { recursive: true })
 					return worktreePath
 				},
-				prompt: ({ item, runId }) => JSON.stringify({ itemId: item.id, issueNumber: Number(item.itemId), runId, eventLog }),
+				prompt: ({ item, runId }) => JSON.stringify({ itemId: item.id, fixtureItemNumber: Number(item.itemId), runId, eventLog }),
 				chainCompleteTriggerForChain: () => null,
 			},
 		})
@@ -5058,7 +5048,7 @@ process.exitCode = 0
 				worktreeManager,
 				prompt: ({ item, runId, phase }) => JSON.stringify({
 					itemId: item.id,
-					issueNumber: Number(item.itemId),
+					fixtureItemNumber: Number(item.itemId),
 					runId,
 					phase,
 					eventLog,
@@ -5783,7 +5773,7 @@ process.exitCode = 0
 				},
 				prompt: ({ item, runId }) => JSON.stringify({
 					itemId: item.id,
-					issueNumber: Number(item.itemId),
+					fixtureItemNumber: Number(item.itemId),
 					runId,
 					eventLog,
 					sleepMs: 3_500,
@@ -5925,7 +5915,7 @@ process.exitCode = 0
 				},
 				prompt: ({ item, runId, phase }) => JSON.stringify({
 					itemId: item.id,
-					issueNumber: Number(item.itemId),
+					fixtureItemNumber: Number(item.itemId),
 					runId,
 					phase,
 					eventLog,
@@ -6089,7 +6079,7 @@ process.exitCode = 0
 				},
 				prompt: ({ item, runId, phase }) => JSON.stringify({
 					itemId: item.id,
-					issueNumber: Number(item.itemId),
+					fixtureItemNumber: Number(item.itemId),
 					runId,
 					phase,
 					eventLog,
@@ -6224,7 +6214,7 @@ process.exitCode = 0
 				},
 				prompt: ({ item, runId, phase }) => JSON.stringify({
 					itemId: item.id,
-					issueNumber: Number(item.itemId),
+					fixtureItemNumber: Number(item.itemId),
 					runId,
 					phase,
 					eventLog,
@@ -6339,7 +6329,7 @@ process.exitCode = 0
 					await mkdir(worktreePath, { recursive: true })
 					return worktreePath
 				},
-				prompt: ({ item, runId }) => JSON.stringify({ itemId: item.id, issueNumber: Number(item.itemId), runId, eventLog, sleepMs: 5_500 }),
+				prompt: ({ item, runId }) => JSON.stringify({ itemId: item.id, fixtureItemNumber: Number(item.itemId), runId, eventLog, sleepMs: 5_500 }),
 				chainCompleteTriggerForChain: () => null,
 			},
 		})
@@ -6373,7 +6363,7 @@ process.exitCode = 0
 				{ command: "chain.create", args: { name: "409-row1-second", preset: "gh-issue-pr-iteration", repository: "mouriya-s-lab/coder-loop", agentCredential: credential } },
 				{ command: "daemon.down", args: { agentCredential: credential } },
 				{ command: "logs.query", args: { agentCredential: credential } },
-				{ command: "queue.unblock", args: { chainName: "409-row1-hard-deny-chain", issue: "409100", agentCredential: credential } },
+				{ command: "queue.unblock", args: { chainName: "409-row1-hard-deny-chain", itemId: "409100", agentCredential: credential } },
 			]
 			for (const attempt of hardDenyAttempts) {
 				const reply = await sendDaemonRequest(snapshot.socketPath, daemonRequest(attempt.command, attempt.args))
@@ -6485,7 +6475,7 @@ process.exitCode = 0
 				},
 				prompt: ({ item, runId, phase }) => JSON.stringify({
 					itemId: item.id,
-					issueNumber: Number(item.itemId),
+					fixtureItemNumber: Number(item.itemId),
 					runId,
 					phase,
 					eventLog,
@@ -6669,7 +6659,7 @@ process.exitCode = 0
 				},
 				prompt: ({ item, runId, phase }) => JSON.stringify({
 					itemId: item.id,
-					issueNumber: Number(item.itemId),
+					fixtureItemNumber: Number(item.itemId),
 					runId,
 					phase,
 					eventLog,
@@ -6782,7 +6772,7 @@ process.exitCode = 0
 					await mkdir(worktreePath, { recursive: true })
 					return worktreePath
 				},
-				prompt: ({ item, runId }) => JSON.stringify({ itemId: item.id, issueNumber: Number(item.itemId), runId, eventLog, sleepMs: 3_500 }),
+				prompt: ({ item, runId }) => JSON.stringify({ itemId: item.id, fixtureItemNumber: Number(item.itemId), runId, eventLog, sleepMs: 3_500 }),
 				chainCompleteTriggerForChain: () => null,
 			},
 		})
@@ -6908,7 +6898,7 @@ process.exitCode = 0
 			}))
 			const unblock = record(expectOk(await request(fixture, "queue.unblock", {
 				chainName: "409-row4-operator-chain",
-				issue: "409400",
+				itemId: "409400",
 			})))
 			const mutation = record(unblock.mutation)
 			expect(mutation.changed).toBe(true)
@@ -6993,7 +6983,7 @@ process.exitCode = 0
 			let unblockSettled = false
 			const unblockPromise = sendDaemonRequest(fixture.socketPath, daemonRequest("queue.unblock", {
 				chainName: fixture.chainName,
-				issue: fixture.targetItemId,
+				itemId: fixture.targetItemId,
 			})).then((response) => {
 				unblockSettled = true
 				return response
@@ -7034,11 +7024,11 @@ process.exitCode = 0
 
 	test("queue unblock always resumes scheduler", async () => {
 		const scenarios: readonly QueueUnblockOutcomeScenario[] = [
-			{ kind: "success", preset: "loaded", targetStatus: "blocked", issue: "target", dryRun: false },
-			{ kind: "dry-run", preset: "loaded", targetStatus: "blocked", issue: "target", dryRun: true },
-			{ kind: "not-unblockable", preset: "loaded", targetStatus: "done", issue: "target", dryRun: false },
-			{ kind: "not-found", preset: "loaded", targetStatus: "blocked", issue: "missing", dryRun: false },
-			{ kind: "preset-load-error", preset: "missing", targetStatus: "blocked", issue: "target", dryRun: false },
+			{ kind: "success", preset: "loaded", targetStatus: "blocked", item: "target", dryRun: false },
+			{ kind: "dry-run", preset: "loaded", targetStatus: "blocked", item: "target", dryRun: true },
+			{ kind: "not-unblockable", preset: "loaded", targetStatus: "done", item: "target", dryRun: false },
+			{ kind: "not-found", preset: "loaded", targetStatus: "blocked", item: "missing", dryRun: false },
+			{ kind: "preset-load-error", preset: "missing", targetStatus: "blocked", item: "target", dryRun: false },
 		]
 
 		for (const scenario of scenarios) {
@@ -7047,7 +7037,7 @@ process.exitCode = 0
 				await fixture.tickEntered.promise
 				const responsePromise = sendDaemonRequest(fixture.socketPath, daemonRequest("queue.unblock", {
 					chainName: fixture.chainName,
-					issue: scenario.issue === "target" ? fixture.targetItemId : scenario.issue,
+					itemId: scenario.item === "target" ? fixture.targetItemId : scenario.item,
 					dryRun: scenario.dryRun,
 				}))
 
@@ -7100,7 +7090,7 @@ process.exitCode = 0
 
 			const denied = await sendDaemonRequest(fixture.socketPath, daemonRequest("queue.unblock", {
 				chainName: fixture.chainName,
-				issue: fixture.targetItemId,
+				itemId: fixture.targetItemId,
 				agentCredential: credential,
 			}))
 			expect(denied.ok).toBe(false)
@@ -7112,7 +7102,7 @@ process.exitCode = 0
 
 			const allowed = record(expectOk(await sendDaemonRequest(fixture.socketPath, daemonRequest("queue.unblock", {
 				chainName: fixture.chainName,
-				issue: fixture.targetItemId,
+				itemId: fixture.targetItemId,
 			}))))
 			expect(record(allowed.mutation).changed).toBe(true)
 
@@ -7196,7 +7186,7 @@ process.exitCode = 0
 				},
 				prompt: ({ item, runId, phase }) => JSON.stringify({
 					itemId: item.id,
-					issueNumber: Number(item.itemId),
+					fixtureItemNumber: Number(item.itemId),
 					runId,
 					phase,
 					eventLog,
@@ -7342,7 +7332,7 @@ process.exitCode = 0
 				},
 				prompt: ({ item, runId, phase }) => JSON.stringify({
 					itemId: item.id,
-					issueNumber: Number(item.itemId),
+					fixtureItemNumber: Number(item.itemId),
 					runId,
 					phase,
 					eventLog,
@@ -7774,12 +7764,12 @@ const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
 const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
 const writeLine = (line) => Bun.write(Bun.stdout, line + "\\n")
-await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, phase: input.phase, cwd: process.cwd() }) + "\\n")
+await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, fixtureItemNumber: input.fixtureItemNumber, runId: input.runId, phase: input.phase, cwd: process.cwd() }) + "\\n")
 await new Promise((resolve) => setTimeout(resolve, input.sleepMs))
-await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, phase: input.phase, cwd: process.cwd() }) + "\\n")
+await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.itemId, fixtureItemNumber: input.fixtureItemNumber, runId: input.runId, phase: input.phase, cwd: process.cwd() }) + "\\n")
 await writeLine("done:" + input.itemId + ":" + input.phase)
 if (input.phase === "review") {
-	await writeLine("PHASE DONE: issue=#" + input.issueNumber + "; reason=phase-aware-runner review")
+	await writeLine("PHASE DONE: issue=#" + input.fixtureItemNumber + "; reason=phase-aware-runner review")
 } else {
 	await writeLine("ITERATION SUMMARY: scope=phase-aware-runner; reason=iter-marker")
 }
@@ -7814,7 +7804,7 @@ process.exitCode = 0
 			worktreeManager,
 			prompt: ({ item, runId, phase }) => JSON.stringify({
 				itemId: item.id,
-				issueNumber: Number(item.itemId),
+				fixtureItemNumber: Number(item.itemId),
 				runId,
 				phase,
 				eventLog,
@@ -7913,11 +7903,11 @@ type QueueUnblockGateOptions =
 	| { preset: "missing"; targetStatus: "blocked" }
 
 type QueueUnblockOutcomeScenario =
-	| { kind: "success"; preset: "loaded"; targetStatus: "blocked"; issue: "target"; dryRun: false }
-	| { kind: "dry-run"; preset: "loaded"; targetStatus: "blocked"; issue: "target"; dryRun: true }
-	| { kind: "not-unblockable"; preset: "loaded"; targetStatus: "done"; issue: "target"; dryRun: false }
-	| { kind: "not-found"; preset: "loaded"; targetStatus: "blocked"; issue: "missing"; dryRun: false }
-	| { kind: "preset-load-error"; preset: "missing"; targetStatus: "blocked"; issue: "target"; dryRun: false }
+	| { kind: "success"; preset: "loaded"; targetStatus: "blocked"; item: "target"; dryRun: false }
+	| { kind: "dry-run"; preset: "loaded"; targetStatus: "blocked"; item: "target"; dryRun: true }
+	| { kind: "not-unblockable"; preset: "loaded"; targetStatus: "done"; item: "target"; dryRun: false }
+	| { kind: "not-found"; preset: "loaded"; targetStatus: "blocked"; item: "missing"; dryRun: false }
+	| { kind: "preset-load-error"; preset: "missing"; targetStatus: "blocked"; item: "target"; dryRun: false }
 
 function assertNeverQueueUnblockOutcomeScenario(scenario: never): never {
 	throw new Error(`Unhandled queue-unblock outcome scenario: ${JSON.stringify(scenario)}`)
@@ -8012,7 +8002,7 @@ process.exitCode = 0
 	if (options.preset === "loaded") {
 		expectOk(await sendDaemonRequest(socketPath, daemonRequest("queue.unblock", {
 			chainName,
-			issue: targetItemId,
+			itemId: targetItemId,
 			dryRun: true,
 		})))
 	}
@@ -8101,7 +8091,7 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 				const extra = itemExtraToJsonObject(item.extra)
 				const payload: BoundaryRecord = {
 					itemId: item.id,
-					issueNumber: Number(item.itemId),
+					fixtureItemNumber: Number(item.itemId),
 					runId,
 					eventLog,
 					sleepMs: typeof extra.sleepMs === "number" ? extra.sleepMs : 5,
@@ -8308,10 +8298,10 @@ async function readChain(loopDataRoot: string, chainId: number) {
 	}
 }
 
-async function readItem(loopDataRoot: string, chainId: number, issueNumber: number) {
+async function readItem(loopDataRoot: string, chainId: number, fixtureItemNumber: number) {
 	const store = openSqliteStateStore({ loopDataRoot })
 	try {
-		return store.getItemById(chainId, String(issueNumber))
+		return store.getItemById(chainId, String(fixtureItemNumber))
 	} finally {
 		store.close()
 	}
@@ -8465,9 +8455,9 @@ const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
 const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
 const writeLine = (line) => Bun.write(Bun.stdout, line + "\\n")
-await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
+await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, fixtureItemNumber: input.fixtureItemNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
 await new Promise((resolve) => setTimeout(resolve, input.sleepMs))
-await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
+await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.itemId, fixtureItemNumber: input.fixtureItemNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
 await writeLine("done:" + input.itemId)
 if (Array.isArray(input.stdoutLines)) {
 	for (const line of input.stdoutLines) await writeLine(line)
@@ -8493,9 +8483,9 @@ const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
 const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
 const writeLine = (line) => Bun.write(Bun.stdout, line + "\\n")
-await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
+await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, fixtureItemNumber: input.fixtureItemNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
 await new Promise((resolve) => setTimeout(resolve, input.sleepMs))
-await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
+await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.itemId, fixtureItemNumber: input.fixtureItemNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
 await writeLine("done:" + input.itemId)
 if (Array.isArray(input.stdoutLines)) {
 	for (const line of input.stdoutLines) await writeLine(line)

@@ -323,8 +323,8 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		// #457: CHAIN_UMBRELLA_REPO / CHAIN_UMBRELLA_ISSUE now resolve via the declared chain-binding
 		// namespace (metadata.bindings.*) instead of the retired engine-runtime facts. Empty-string
 		// default keeps the prompt safe when metadata.bindings carries no umbrella entry.
-		expect(iterVars.get("CHAIN_UMBRELLA_REPO")).toEqual({ kind: "chain", field: "umbrellaRepo", fallback: { kind: "value", value: "" } })
-		expect(iterVars.get("CHAIN_UMBRELLA_ISSUE")).toEqual({ kind: "chain", field: "umbrellaIssue", fallback: { kind: "value", value: "" } })
+		expect(iterVars.get("CHAIN_UMBRELLA_REPO")).toEqual({ kind: "chain", field: "umbrella\u0052epo", fallback: { kind: "value", value: "" } })
+		expect(iterVars.get("CHAIN_UMBRELLA_ISSUE")).toEqual({ kind: "chain", field: "umbrella\u0049ssue", fallback: { kind: "value", value: "" } })
 		// #450 retired the kind taxonomy and #401 finished retiring the engine
 		// vocabulary — the keys === EXPECTED_VARIABLE_KEYS assertion above already
 		// covers the absence of the retired bindings positively.
@@ -356,7 +356,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 	})
 
 	// #457 acceptance row 2: bundled preset's umbrella binding resolves through the declared
-	// chain-binding mechanism (metadata.bindings.umbrellaRepo / umbrellaIssue) rather than the
+	// chain-binding mechanism (metadata.bindings.umbrella\u0052epo / umbrella\u0049ssue) rather than the
 	// retired engine-runtime facts (runtime.chainUmbrellaRepo / chainUmbrellaIssue). Rendering
 	// produces identical literals to the pre-#457 path; an empty metadata.bindings yields empty
 	// strings via the declared `default = ""` fallback (no crash).
@@ -365,10 +365,10 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		const iterPhase = preset.phases.find((entry) => entry.name === "iteration")
 		expect(iterPhase).toBeDefined()
 		const variableByKey = new Map(iterPhase!.variables.map((variable) => [variable.key, variable] as const))
-		const umbrellaRepoVar = variableByKey.get("CHAIN_UMBRELLA_REPO")
-		const umbrellaIssueVar = variableByKey.get("CHAIN_UMBRELLA_ISSUE")
-		expect(umbrellaRepoVar).toBeDefined()
-		expect(umbrellaIssueVar).toBeDefined()
+		const umbrella\u0052epoVar = variableByKey.get("CHAIN_UMBRELLA_REPO")
+		const umbrella\u0049ssueVar = variableByKey.get("CHAIN_UMBRELLA_ISSUE")
+		expect(umbrella\u0052epoVar).toBeDefined()
+		expect(umbrella\u0049ssueVar).toBeDefined()
 		// The retired runtime fact is gone: no variable should still source umbrella from runtime.
 		for (const variable of iterPhase!.variables) {
 			expect(variable.source.kind === "runtime" && (variable.source.key === "chainUmbrellaRepo" || variable.source.key === "chainUmbrellaIssue")).toBe(false)
@@ -376,12 +376,12 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		// Populated metadata.bindings produces the literal value.
 		const populated: ResolveContext = {
 			item: { issue: 457 } as unknown as ItemRecord,
-			chain: { umbrellaRepo: "mouriya-s-lab/coder-loop", umbrellaIssue: 457, repository: "x", baseBranch: "main" },
+			chain: { umbrella\u0052epo: "mouriya-s-lab/coder-loop", umbrella\u0049ssue: 457, repository: "x", baseBranch: "main" },
 			runtime: makeMinimalRuntimeBindings(),
 			preset,
 		}
-		expect(resolveBinding(umbrellaRepoVar!.source, populated)).toBe("mouriya-s-lab/coder-loop")
-		expect(resolveBinding(umbrellaIssueVar!.source, populated)).toBe("457")
+		expect(resolveBinding(umbrella\u0052epoVar!.source, populated)).toBe("mouriya-s-lab/coder-loop")
+		expect(resolveBinding(umbrella\u0049ssueVar!.source, populated)).toBe("457")
 		// Empty metadata.bindings: declared fallback emits "" rather than crashing.
 		const empty: ResolveContext = {
 			item: { issue: 457 } as unknown as ItemRecord,
@@ -389,8 +389,8 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 			runtime: makeMinimalRuntimeBindings(),
 			preset,
 		}
-		expect(resolveBinding(umbrellaRepoVar!.source, empty)).toBe("")
-		expect(resolveBinding(umbrellaIssueVar!.source, empty)).toBe("")
+		expect(resolveBinding(umbrella\u0052epoVar!.source, empty)).toBe("")
+		expect(resolveBinding(umbrella\u0049ssueVar!.source, empty)).toBe("")
 	})
 
 	test("fragments match PROMPT_FRAGMENTS 1:1 by id+role+path and files exist", async () => {

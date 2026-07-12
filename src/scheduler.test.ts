@@ -61,7 +61,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("terminal-persistence-failure")
 		try {
 			const chain = createChain(fixture.store, "terminal-persistence-failure-chain")
-			createItem(fixture.store, chain, { issueNumber: 6352, repoCwd: "/repo/a", sleepMs: 200, writeStatus: "done" })
+			createItem(fixture.store, chain, { fixtureItemNumber: 6352, repoCwd: "/repo/a", sleepMs: 200, writeStatus: "done" })
 			const failures: import("./loop").RunnerStatusPersistenceFailure[] = []
 			const activeCredentials = new Set<string>()
 			const tick = await schedulerTick(fixture.options({
@@ -92,7 +92,7 @@ describe("scheduler", () => {
 		const failures: SchedulerLifecycleEventPersistenceFailure[] = []
 		try {
 			const chain = createChain(fixture.store, "timeout-persistence-failure-chain")
-			createItem(fixture.store, chain, { issueNumber: 6321, repoCwd: "/repo/a", sleepMs: 2_000, writeStatus: null })
+			createItem(fixture.store, chain, { fixtureItemNumber: 6321, repoCwd: "/repo/a", sleepMs: 2_000, writeStatus: null })
 			const tick = await schedulerTick(fixture.options({
 				attemptTimeoutMs: 80,
 				attemptKillMs: 20,
@@ -117,7 +117,7 @@ describe("scheduler", () => {
 		const startupFixture = await createFixture("startup-persistence-failure")
 		try {
 			const chain = createChain(startupFixture.store, "startup-persistence-failure-chain")
-			createItem(startupFixture.store, chain, { issueNumber: 6322, repoCwd: "/repo/a", sleepMs: 2_000, writeStatus: null })
+			createItem(startupFixture.store, chain, { fixtureItemNumber: 6322, repoCwd: "/repo/a", sleepMs: 2_000, writeStatus: null })
 			const tick = await schedulerTick(startupFixture.options({
 				startupIdleTimeoutMs: 60,
 				startupIdleKillMs: 20,
@@ -135,7 +135,7 @@ describe("scheduler", () => {
 		const recycleFixture = await createFixture("recycle-persistence-failure")
 		try {
 			const chain = createChain(recycleFixture.store, "recycle-persistence-failure-chain")
-			createItem(recycleFixture.store, chain, { issueNumber: 6323, repoCwd: "/repo/a", sleepMs: 2_000, writeStatus: null })
+			createItem(recycleFixture.store, chain, { fixtureItemNumber: 6323, repoCwd: "/repo/a", sleepMs: 2_000, writeStatus: null })
 			const tick = await schedulerTick(recycleFixture.options({
 				recycleAfterStateWriteMs: 60,
 				recycleKillGraceMs: 20,
@@ -154,7 +154,7 @@ describe("scheduler", () => {
 		const naturalExitFixture = await createFixture("recycle-natural-exit-persistence-failure")
 		try {
 			const chain = createChain(naturalExitFixture.store, "recycle-natural-exit-persistence-failure-chain")
-			createItem(naturalExitFixture.store, chain, { issueNumber: 6324, repoCwd: "/repo/a", sleepMs: 80, writeStatus: null })
+			createItem(naturalExitFixture.store, chain, { fixtureItemNumber: 6324, repoCwd: "/repo/a", sleepMs: 80, writeStatus: null })
 			const tick = await schedulerTick(naturalExitFixture.options({
 				recycleAfterStateWriteMs: 10_000,
 				attemptTimeoutMs: 20_000,
@@ -195,14 +195,14 @@ describe("scheduler", () => {
 			// iteration run, mirroring the historical test cadence. Without the override the new
 			// (post-verdict-retirement) flow would legitimately advance iteration → review per
 			// item and double the spawn count — captured in dedicated multi-phase tests.
-			createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", writeStatus: "done" })
-			createItem(fixture.store, chain, { issueNumber: 180, repoCwd: "/repo/a", writeStatus: "done" })
-			createItem(fixture.store, chain, { issueNumber: 181, repoCwd: "/repo/a", writeStatus: "done" })
+			createItem(fixture.store, chain, { fixtureItemNumber: 179, repoCwd: "/repo/a", writeStatus: "done" })
+			createItem(fixture.store, chain, { fixtureItemNumber: 180, repoCwd: "/repo/a", writeStatus: "done" })
+			createItem(fixture.store, chain, { fixtureItemNumber: 181, repoCwd: "/repo/a", writeStatus: "done" })
 
 			await runSchedulerUntilIdle(persistedObservabilityOptions(fixture))
 
 			const events = await readRunnerEvents(fixture.eventLog)
-			expect(events.map((event) => `${event.type}:${event.issueNumber}`)).toEqual([
+			expect(events.map((event) => `${event.type}:${event.fixtureItemNumber}`)).toEqual([
 				"start:179",
 				"end:179",
 				"start:180",
@@ -223,8 +223,8 @@ describe("scheduler", () => {
 		const fixture = await createFixture("multi-repo")
 		try {
 			const chain = createChain(fixture.store, "multi-repo-chain")
-			createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", sleepMs: 80, writeStatus: "done" })
-			createItem(fixture.store, chain, { issueNumber: 180, repoCwd: "/repo/b", sleepMs: 80, writeStatus: "done" })
+			createItem(fixture.store, chain, { fixtureItemNumber: 179, repoCwd: "/repo/a", sleepMs: 80, writeStatus: "done" })
+			createItem(fixture.store, chain, { fixtureItemNumber: 180, repoCwd: "/repo/b", sleepMs: 80, writeStatus: "done" })
 
 			const tick = await schedulerTick(fixture.options())
 			expect(tick.spawnedRuns).toHaveLength(2)
@@ -244,8 +244,8 @@ describe("scheduler", () => {
 		try {
 			const invalid = createChain(fixture.store, "..")
 			const valid = createChain(fixture.store, "valid-chain")
-			createItem(fixture.store, invalid, { issueNumber: 178, repoCwd: "/repo/a" })
-			createItem(fixture.store, valid, { issueNumber: 179, repoCwd: "/repo/a", writeStatus: "done" })
+			createItem(fixture.store, invalid, { fixtureItemNumber: 178, repoCwd: "/repo/a" })
+			createItem(fixture.store, valid, { fixtureItemNumber: 179, repoCwd: "/repo/a", writeStatus: "done" })
 
 			const tick = await schedulerTick(fixture.options())
 			expect(tick.spawnedRuns).toHaveLength(1)
@@ -266,7 +266,7 @@ describe("scheduler", () => {
 			const fixture = await createFixture(`run-preparation-${stage}`)
 			try {
 				const chain = createChain(fixture.store, `run-preparation-${stage}-chain`)
-				const item = createItem(fixture.store, chain, { issueNumber: 535_100 + stages.indexOf(stage), repoCwd: "/repo/a" })
+				const item = createItem(fixture.store, chain, { fixtureItemNumber: 535_100 + stages.indexOf(stage), repoCwd: "/repo/a" })
 				const now = 1_900_535_100 + stages.indexOf(stage)
 				const runId = `run-preparation-${stage}`
 				let revoked = 0
@@ -343,7 +343,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("active-child-final-trigger-retry")
 		try {
 			const chain = createChain(fixture.store, "active-child-final-trigger-retry-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 535_401, repoCwd: "/repo/a" })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 535_401, repoCwd: "/repo/a" })
 			fixture.store.updateItem(item.id, {
 				status: runtimeStatus("blocked"),
 				phase: "review",
@@ -411,9 +411,9 @@ describe("scheduler", () => {
 			const presetFailureChain = createChain(fixture.store, "chain-plan-failure")
 			const runnerFailureChain = createChain(fixture.store, "chain-runner-failure")
 			const healthyChain = createChain(fixture.store, "chain-healthy")
-			const presetFailureItem = createItem(fixture.store, presetFailureChain, { issueNumber: 535_201, repoCwd: "/repo/a" })
-			const runnerFailureItem = createItem(fixture.store, runnerFailureChain, { issueNumber: 535_202, repoCwd: "/repo/b" })
-			const healthyItem = createItem(fixture.store, healthyChain, { issueNumber: 535_203, repoCwd: "/repo/c", writeStatus: "done" })
+			const presetFailureItem = createItem(fixture.store, presetFailureChain, { fixtureItemNumber: 535_201, repoCwd: "/repo/a" })
+			const runnerFailureItem = createItem(fixture.store, runnerFailureChain, { fixtureItemNumber: 535_202, repoCwd: "/repo/b" })
+			const healthyItem = createItem(fixture.store, healthyChain, { fixtureItemNumber: 535_203, repoCwd: "/repo/c", writeStatus: "done" })
 			const base = fixture.options({ now: () => 1_900_535_200 })
 			const tick = await schedulerTick({
 				...base,
@@ -447,8 +447,8 @@ describe("scheduler", () => {
 		const fixture = await createFixture("contained-spawn-releases-repo")
 		try {
 			const chain = createChain(fixture.store, "contained-spawn-releases-repo-chain")
-			const failed = createItem(fixture.store, chain, { issueNumber: 535_301, repoCwd: "/repo/a" })
-			const sibling = createItem(fixture.store, chain, { issueNumber: 535_302, repoCwd: "/repo/a", writeStatus: "done" })
+			const failed = createItem(fixture.store, chain, { fixtureItemNumber: 535_301, repoCwd: "/repo/a" })
+			const sibling = createItem(fixture.store, chain, { fixtureItemNumber: 535_302, repoCwd: "/repo/a", writeStatus: "done" })
 			const base = fixture.options({
 				now: () => 1_900_535_300,
 				prompt: (context) => {
@@ -476,8 +476,8 @@ describe("scheduler", () => {
 		try {
 			const chainA = createChain(fixture.store, "chain-a")
 			const chainB = createChain(fixture.store, "chain-b")
-			createItem(fixture.store, chainA, { issueNumber: 179, repoCwd: "/repo/a", sleepMs: 80 })
-			createItem(fixture.store, chainB, { issueNumber: 180, repoCwd: "/repo/a", sleepMs: 80 })
+			createItem(fixture.store, chainA, { fixtureItemNumber: 179, repoCwd: "/repo/a", sleepMs: 80 })
+			createItem(fixture.store, chainB, { fixtureItemNumber: 180, repoCwd: "/repo/a", sleepMs: 80 })
 
 			const tick = await schedulerTick(fixture.options())
 			expect(tick.spawnedRuns).toHaveLength(2)
@@ -493,8 +493,8 @@ describe("scheduler", () => {
 		const fixture = await createFixture("busy")
 		try {
 			const chain = createChain(fixture.store, "busy-chain")
-			createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", sleepMs: 80 })
-			createItem(fixture.store, chain, { issueNumber: 180, repoCwd: "/repo/a", sleepMs: 80 })
+			createItem(fixture.store, chain, { fixtureItemNumber: 179, repoCwd: "/repo/a", sleepMs: 80 })
+			createItem(fixture.store, chain, { fixtureItemNumber: 180, repoCwd: "/repo/a", sleepMs: 80 })
 
 			const firstTick = await schedulerTick(fixture.options())
 			const secondTick = await schedulerTick(fixture.options())
@@ -513,8 +513,8 @@ describe("scheduler", () => {
 		const fixture = await createFixture("advance")
 		try {
 			const chain = createChain(fixture.store, "advance-chain")
-			const first = createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", sleepMs: 10, writeStatus: "done" })
-			const second = createItem(fixture.store, chain, { issueNumber: 180, repoCwd: "/repo/a", sleepMs: 10, writeStatus: "done" })
+			const first = createItem(fixture.store, chain, { fixtureItemNumber: 179, repoCwd: "/repo/a", sleepMs: 10, writeStatus: "done" })
+			const second = createItem(fixture.store, chain, { fixtureItemNumber: 180, repoCwd: "/repo/a", sleepMs: 10, writeStatus: "done" })
 
 			const firstTick = await schedulerTick(fixture.options())
 			await firstTick.spawnedRuns[0]!.closed
@@ -533,7 +533,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("completion")
 		try {
 			const chain = createChain(fixture.store, "completion-chain")
-			createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", writeStatus: "done" })
+			createItem(fixture.store, chain, { fixtureItemNumber: 179, repoCwd: "/repo/a", writeStatus: "done" })
 
 			await runSchedulerUntilIdle(persistedObservabilityOptions(fixture))
 
@@ -550,7 +550,7 @@ describe("scheduler", () => {
 		await initGitTarget(target)
 		try {
 			const chain = createChain(fixture.store, "completion-cleanup-idempotent-chain")
-			createItem(fixture.store, chain, { issueNumber: 351_001, repoCwd: target, writeStatus: "done" })
+			createItem(fixture.store, chain, { fixtureItemNumber: 351_001, repoCwd: target, writeStatus: "done" })
 
 			await runSchedulerUntilIdle(fixture.options({
 				worktreeManager: createGitWorktreeManager({ loopDataRoot: fixture.loopDataRoot }),
@@ -584,7 +584,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("completion-trigger")
 		try {
 			const chain = createChain(fixture.store, "completion-trigger-chain")
-			createItem(fixture.store, chain, { issueNumber: 2691, repoCwd: "/repo/a", writeStatus: "done" })
+			createItem(fixture.store, chain, { fixtureItemNumber: 2691, repoCwd: "/repo/a", writeStatus: "done" })
 			const observedChainStatuses: string[] = []
 
 			await runSchedulerUntilIdle(fixture.options({
@@ -614,7 +614,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("completion-trigger-overlap")
 		try {
 			const chain = createChain(fixture.store, "completion-trigger-overlap-chain")
-			createItem(fixture.store, chain, { issueNumber: 2696, repoCwd: "/repo/a", writeStatus: "done" })
+			createItem(fixture.store, chain, { fixtureItemNumber: 2696, repoCwd: "/repo/a", writeStatus: "done" })
 			const triggerStarted = createDeferred()
 			const releaseTrigger = createDeferred()
 			let triggerCalls = 0
@@ -657,7 +657,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("completion-trigger-active")
 		try {
 			const chain = createChain(fixture.store, "completion-trigger-active-chain")
-			createItem(fixture.store, chain, { issueNumber: 2692, repoCwd: "/repo/a", writeStatus: "done" })
+			createItem(fixture.store, chain, { fixtureItemNumber: 2692, repoCwd: "/repo/a", writeStatus: "done" })
 			let triggerCalls = 0
 			const options = fixture.options({
 				chainCompleteTrigger: () => {
@@ -688,7 +688,7 @@ describe("scheduler", () => {
 			expect(triggerCalls).toBe(1)
 			expect(fixture.schedulerEvents.filter((event) => event.type === "chain.complete_trigger")).toHaveLength(1)
 
-			const followUp = createItem(fixture.store, chain, { issueNumber: 2696, repoCwd: "/repo/a" })
+			const followUp = createItem(fixture.store, chain, { fixtureItemNumber: 2696, repoCwd: "/repo/a" })
 			fixture.store.updateItem(followUp.id, { status: runtimeStatus("done"), updatedAt: 1_800_000_999 })
 			const thirdTick = await schedulerTick(options)
 			expect(thirdTick.spawnedRuns).toHaveLength(0)
@@ -702,11 +702,11 @@ describe("scheduler", () => {
 		const followUpFixture = await createFixture("completion-trigger-follow-up")
 		try {
 			const chain = createChain(followUpFixture.store, "completion-trigger-follow-up-chain")
-			createItem(followUpFixture.store, chain, { issueNumber: 2693, repoCwd: "/repo/a", writeStatus: "done" })
+			createItem(followUpFixture.store, chain, { fixtureItemNumber: 2693, repoCwd: "/repo/a", writeStatus: "done" })
 
 			const tick = await schedulerTick(followUpFixture.options({
 				chainCompleteTrigger: ({ chain: triggerChain }) => {
-					createItem(followUpFixture.store, triggerChain, { issueNumber: 2694, repoCwd: "/repo/a" })
+					createItem(followUpFixture.store, triggerChain, { fixtureItemNumber: 2694, repoCwd: "/repo/a" })
 					return { decision: "complete", reason: "fixture follow-up inserted" }
 				},
 			}))
@@ -722,7 +722,7 @@ describe("scheduler", () => {
 		const failingFixture = await createFixture("completion-trigger-failing")
 		try {
 			const chain = createChain(failingFixture.store, "completion-trigger-failing-chain")
-			createItem(failingFixture.store, chain, { issueNumber: 2695, repoCwd: "/repo/a", writeStatus: "done" })
+			createItem(failingFixture.store, chain, { fixtureItemNumber: 2695, repoCwd: "/repo/a", writeStatus: "done" })
 
 			const tick = await schedulerTick(failingFixture.options({
 				chainCompleteTrigger: () => {
@@ -748,7 +748,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("manual-terminal-completion")
 		try {
 			const chain = createChain(fixture.store, "manual-terminal-completion-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 249, repoCwd: "/repo/a" })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 249, repoCwd: "/repo/a" })
 			fixture.store.updateItem(item.id, { status: runtimeStatus("done"), updatedAt: 1_800_000_500 })
 
 			const tick = await schedulerTick(fixture.options())
@@ -766,7 +766,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("terminal-preserve")
 		try {
 			const chain = createChain(fixture.store, "terminal-preserve-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", sleepMs: 5_000 })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 179, repoCwd: "/repo/a", sleepMs: 5_000 })
 
 			const tick = await schedulerTick(fixture.options())
 			expect(tick.spawnedRuns).toHaveLength(1)
@@ -791,8 +791,8 @@ describe("scheduler", () => {
 		const fixture = await createFixture("retry-fairness")
 		try {
 			const chain = createChain(fixture.store, "retry-fairness-chain")
-			const first = createItem(fixture.store, chain, { issueNumber: 7001, repoCwd: "/repo/a", sleepMs: 5_000 })
-			const second = createItem(fixture.store, chain, { issueNumber: 7002, repoCwd: "/repo/a" })
+			const first = createItem(fixture.store, chain, { fixtureItemNumber: 7001, repoCwd: "/repo/a", sleepMs: 5_000 })
+			const second = createItem(fixture.store, chain, { fixtureItemNumber: 7002, repoCwd: "/repo/a" })
 
 			const firstTick = await schedulerTick(fixture.options())
 			expect(firstTick.spawnedRuns).toHaveLength(1)
@@ -826,7 +826,7 @@ describe("scheduler", () => {
 		try {
 			expect(DEFAULT_MAX_ITEM_ATTEMPTS).toBe(20)
 			const chain = createChain(fixture.store, "default-max-item-attempts-exhaust-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 7008, repoCwd: "/repo/a" })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 7008, repoCwd: "/repo/a" })
 			fixture.store.updateItem(item.id, {
 				status: runtimeStatus("changes_requested"),
 				attempts: DEFAULT_MAX_ITEM_ATTEMPTS,
@@ -860,7 +860,7 @@ describe("scheduler", () => {
 				const chain = createChain(fixture.store, "max-item-attempts-exhaust-chain", {
 					metadata: { maxItemAttempts: 2 },
 				})
-			const item = createItem(fixture.store, chain, { issueNumber: 7003, repoCwd: "/repo/a" })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 7003, repoCwd: "/repo/a" })
 			fixture.store.updateItem(item.id, {
 				status: runtimeStatus("changes_requested"),
 				attempts: 2,
@@ -903,7 +903,7 @@ describe("scheduler", () => {
 				preset: "custom-exhausted",
 				metadata: { maxItemAttempts: 1 },
 			})
-			const item = createItem(fixture.store, chain, { issueNumber: 710_004, repoCwd: "/repo/a" })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 710_004, repoCwd: "/repo/a" })
 			fixture.store.updateItem(item.id, {
 				status: runtimeStatus("queued"),
 				attempts: 1,
@@ -956,12 +956,12 @@ describe("scheduler", () => {
 					metadata: { maxItemAttempts: 10 },
 				})
 			const failing = createItem(fixture.store, chain, {
-				issueNumber: 7004,
+				fixtureItemNumber: 7004,
 				repoCwd: "/repo/a",
 				exitCode: 1,
 				summary: null,
 			})
-			const sibling = createItem(fixture.store, chain, { issueNumber: 7005, repoCwd: "/repo/a", writeStatus: "done" })
+			const sibling = createItem(fixture.store, chain, { fixtureItemNumber: 7005, repoCwd: "/repo/a", writeStatus: "done" })
 			const options = fixture.options({
 				now: () => now,
 				runIdFactory: ({ item }) => `run-backoff-${item.id}-${now}`,
@@ -992,7 +992,7 @@ describe("scheduler", () => {
 			let now = 1_800_020_000
 			const chain = createChain(fixture.store, "failure-backoff-restart-chain")
 			const item = createItem(fixture.store, chain, {
-				issueNumber: 7006,
+				fixtureItemNumber: 7006,
 				repoCwd: "/repo/a",
 				exitCode: 1,
 				summary: null,
@@ -1037,7 +1037,7 @@ describe("scheduler", () => {
 			let now = 1_800_025_000
 			const chain = createChain(fixture.store, "failure-backoff-default-sequence-chain")
 			const item = createItem(fixture.store, chain, {
-				issueNumber: 7009,
+				fixtureItemNumber: 7009,
 				repoCwd: "/repo/a",
 				exitCode: 1,
 				summary: null,
@@ -1070,7 +1070,7 @@ describe("scheduler", () => {
 			let now = 1_800_026_000
 			const chain = createChain(fixture.store, "failure-backoff-option-override-chain")
 			const item = createItem(fixture.store, chain, {
-				issueNumber: 7010,
+				fixtureItemNumber: 7010,
 				repoCwd: "/repo/a",
 				exitCode: 1,
 				summary: null,
@@ -1108,7 +1108,7 @@ describe("scheduler", () => {
 					metadata: { maxItemAttempts: 50 },
 				})
 			const item = createItem(fixture.store, chain, {
-				issueNumber: 7007,
+				fixtureItemNumber: 7007,
 				repoCwd: "/repo/a",
 				exitCode: 1,
 				summary: null,
@@ -1158,8 +1158,8 @@ describe("scheduler", () => {
 		await writeEmptySuccessPreset(presetDir)
 		try {
 			const chain = createChain(fixture.store, "empty-success-statuses-chain", { preset: "empty-success" })
-			const target = createItem(fixture.store, chain, { issueNumber: 710_001, repoCwd: "/repo/a" })
-			const dependent = createItem(fixture.store, chain, { issueNumber: 710_002, repoCwd: "/repo/a" })
+			const target = createItem(fixture.store, chain, { fixtureItemNumber: 710_001, repoCwd: "/repo/a" })
+			const dependent = createItem(fixture.store, chain, { fixtureItemNumber: 710_002, repoCwd: "/repo/a" })
 			fixture.store.updateItem(target.id, { status: runtimeStatus("done"), updatedAt: 1_800_710_001 })
 			fixture.store.updateItem(dependent.id, {
 				status: runtimeStatus("blocked"),
@@ -1207,7 +1207,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("completed-skip")
 		try {
 			const chain = createChain(fixture.store, "completed-chain", { status: "completed" })
-			const item = createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a" })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 179, repoCwd: "/repo/a" })
 
 			const tick = await schedulerTick(fixture.options())
 
@@ -1223,7 +1223,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("stopped-skip")
 		try {
 			const chain = createChain(fixture.store, "stopped-chain", { status: "stopped" })
-			const item = createItem(fixture.store, chain, { issueNumber: 349_001, repoCwd: "/repo/a" })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 349_001, repoCwd: "/repo/a" })
 
 			const tick = await schedulerTick(fixture.options())
 
@@ -1241,7 +1241,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("stopped-resume")
 		try {
 			const chain = createChain(fixture.store, "stopped-resume-chain", { status: "stopped" })
-			const item = createItem(fixture.store, chain, { issueNumber: 349_002, repoCwd: "/repo/a" })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 349_002, repoCwd: "/repo/a" })
 
 			const stoppedTick = await schedulerTick(fixture.options())
 			expect(stoppedTick.spawnedRuns).toHaveLength(0)
@@ -1262,7 +1262,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("deleted-skip")
 		try {
 			const chain = createChain(fixture.store, "deleted-chain", { status: "deleted" })
-			const item = createItem(fixture.store, chain, { issueNumber: 226, repoCwd: "/repo/a" })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 226, repoCwd: "/repo/a" })
 
 			const tick = await schedulerTick(fixture.options())
 
@@ -1278,7 +1278,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("subprocess")
 		try {
 			const chain = createChain(fixture.store, "subprocess-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", writeStatus: "done" })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 179, repoCwd: "/repo/a", writeStatus: "done" })
 
 			const tick = await schedulerTick(fixture.options())
 			const closed = await tick.spawnedRuns[0]!.closed
@@ -1304,7 +1304,7 @@ describe("scheduler", () => {
 				'for (let i = 0; i < 100_000; i++) process.stderr.write(`stderr-${i}\\n`)',
 			].join("\n"))
 			const chain = createChain(fixture.store, "streamed-runner-output-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 630_001, repoCwd: "/repo/a" })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 630_001, repoCwd: "/repo/a" })
 			const tick = await schedulerTick(fixture.options({
 				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [runnerPath], model: null },
 			}))
@@ -1326,7 +1326,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("run-artifacts")
 		try {
 			const chain = createChain(fixture.store, "run-artifacts-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 203, repoCwd: "/repo/a", writeStatus: "done" })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 203, repoCwd: "/repo/a", writeStatus: "done" })
 
 			await runSchedulerUntilIdle(persistedObservabilityOptions(fixture))
 
@@ -1346,7 +1346,7 @@ describe("scheduler", () => {
 				chainId: chain.id,
 				chainName: chain.name,
 				// #419: split rowid (`rowId`) and opaque preset id (`itemId`). Was `itemId: rowid`
-				// and `issueNumber: int` pre-#419.
+				// and `fixtureItemNumber: int` pre-#419.
 				rowId: item.id,
 				itemId: "203",
 				phase: "iteration",
@@ -1380,7 +1380,7 @@ describe("scheduler", () => {
 			// assertion stays single. Previously the retired verdict mapper coincidentally
 			// landed iteration at done via the default REVIEW SUMMARY token; explicitly
 			// requesting it via `writeStatus` is the principled mirror under the new model.
-			const item = createItem(fixture.store, chain, { issueNumber: 286, repoCwd: "/repo/a", writeStatus: "done" })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 286, repoCwd: "/repo/a", writeStatus: "done" })
 
 			await runSchedulerUntilIdle(persistedObservabilityOptions(fixture))
 
@@ -1454,7 +1454,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("phase-events-non-terminal")
 		try {
 			const chain = createChain(fixture.store, "phase-events-non-terminal-chain")
-			createItem(fixture.store, chain, { issueNumber: 286, repoCwd: "/repo/a", exitCode: 1, summary: null })
+			createItem(fixture.store, chain, { fixtureItemNumber: 286, repoCwd: "/repo/a", exitCode: 1, summary: null })
 
 			const tick = await schedulerTick(fixture.options())
 			await tick.spawnedRuns[0]!.closed
@@ -1480,7 +1480,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("startup-idle-kill")
 		try {
 			const chain = createChain(fixture.store, "startup-idle-kill-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 462, repoCwd: "/repo/a" })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 462, repoCwd: "/repo/a" })
 			const silentRunner = resolve(fixture.loopDataRoot, "..", "silent-runner.sh")
 			await writeFile(silentRunner, "#!/bin/sh\nsleep 30\n")
 			await chmod(silentRunner, 0o755)
@@ -1526,7 +1526,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("rate-limit-exit")
 		try {
 			const chain = createChain(fixture.store, "rate-limit-exit-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 4780, repoCwd: "/repo/a" })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 4780, repoCwd: "/repo/a" })
 			const root = resolve(fixture.loopDataRoot, "..")
 			const resetsAt = 1_900_000_000
 			const rateLimitRunner = resolve(root, "rate-limit-runner.sh")
@@ -1575,7 +1575,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("startup-idle-progress")
 		try {
 			const chain = createChain(fixture.store, "startup-idle-progress-chain")
-			createItem(fixture.store, chain, { issueNumber: 463, repoCwd: "/repo/a" })
+			createItem(fixture.store, chain, { fixtureItemNumber: 463, repoCwd: "/repo/a" })
 			const noisyRunner = resolve(fixture.loopDataRoot, "..", "noisy-runner.sh")
 			await writeFile(noisyRunner, "#!/bin/sh\nprintf '%0300d\\n' 0\nsleep 1.2\nexit 0\n")
 			await chmod(noisyRunner, 0o755)
@@ -1610,7 +1610,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("rate-limit-gate")
 		try {
 			const chain = createChain(fixture.store, "rate-limit-gate-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 4781, repoCwd: "/repo/a", writeStatus: "done" })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 4781, repoCwd: "/repo/a", writeStatus: "done" })
 			// Arm the gate manually to the future, simulating a prior run having just
 			// observed the rate-limit signal. Use the fixture's injected `now` clock so
 			// the in-tick comparison is deterministic.
@@ -1646,7 +1646,7 @@ describe("scheduler", () => {
 		delete process.env["CODER_LOOP_CODEX_RUST_LOG"]
 		try {
 			const chain = createChain(fixture.store, "rust-log-injection-chain")
-			const codexItem = createItem(fixture.store, chain, { issueNumber: 4631, repoCwd: "/repo/a", writeStatus: "done" })
+			const codexItem = createItem(fixture.store, chain, { fixtureItemNumber: 4631, repoCwd: "/repo/a", writeStatus: "done" })
 			const root = resolve(fixture.loopDataRoot, "..")
 			const codexDump = resolve(root, "codex-env.txt")
 			const claudeDump = resolve(root, "claude-env.txt")
@@ -1666,7 +1666,7 @@ describe("scheduler", () => {
 
 			// Same chain, second item through a claude-kind runner: no injection.
 			fixture.store.updateItem(codexItem.id, { status: runtimeStatus("done"), updatedAt: 1_800_000_900 })
-			createItem(fixture.store, chain, { issueNumber: 4632, repoCwd: "/repo/b", writeStatus: "done" })
+			createItem(fixture.store, chain, { fixtureItemNumber: 4632, repoCwd: "/repo/b", writeStatus: "done" })
 			const claudeRunner = resolve(root, "claude-env-runner.sh")
 			await makeEnvDumpRunner(claudeRunner, claudeDump)
 			const claudeTick = await schedulerTick(fixture.options({
@@ -1694,7 +1694,7 @@ describe("scheduler", () => {
 		delete process.env["RUST_LOG"]
 		try {
 			const chain = createChain(fixture.store, "rust-log-override-chain")
-			const firstItem = createItem(fixture.store, chain, { issueNumber: 4633, repoCwd: "/repo/a", writeStatus: "done" })
+			const firstItem = createItem(fixture.store, chain, { fixtureItemNumber: 4633, repoCwd: "/repo/a", writeStatus: "done" })
 			const root = resolve(fixture.loopDataRoot, "..")
 			const traceDump = resolve(root, "trace-env.txt")
 			const disabledDump = resolve(root, "disabled-env.txt")
@@ -1713,7 +1713,7 @@ describe("scheduler", () => {
 			expect((await readFile(traceDump, "utf-8")).trim()).toBe("rust_log=trace")
 
 			fixture.store.updateItem(firstItem.id, { status: runtimeStatus("done"), updatedAt: 1_800_000_910 })
-			createItem(fixture.store, chain, { issueNumber: 4634, repoCwd: "/repo/b", writeStatus: "done" })
+			createItem(fixture.store, chain, { fixtureItemNumber: 4634, repoCwd: "/repo/b", writeStatus: "done" })
 			const disabledRunner = resolve(root, "disabled-runner.sh")
 			await makeEnvDumpRunner(disabledRunner, disabledDump)
 
@@ -1743,7 +1743,7 @@ describe("scheduler", () => {
 		const fixture = await createFixture("rate-limit-resume")
 		try {
 			const chain = createChain(fixture.store, "rate-limit-resume-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 4782, repoCwd: "/repo/a" })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 4782, repoCwd: "/repo/a" })
 			const root = resolve(fixture.loopDataRoot, "..")
 			const sessionId = "sess-rl-resume-test"
 			const resetsAt = 1_900_000_500
@@ -1823,7 +1823,7 @@ describe("scheduler reads the agent-written item status (v1 status model)", () =
 		try {
 			const chain = createChain(fixture.store, "status-agent-terminal-chain")
 			const item = createItem(fixture.store, chain, {
-				issueNumber: 5002,
+				fixtureItemNumber: 5002,
 				repoCwd: "/repo/a",
 				// #405: previously the test drove the agent's status decision via a
 				// `REVIEW SUMMARY: verdict=skip` stdout token parsed by the retired
@@ -1849,7 +1849,7 @@ describe("scheduler reads the agent-written item status (v1 status model)", () =
 		try {
 			const chain = createChain(fixture.store, "status-agent-in-progress-chain")
 			const item = createItem(fixture.store, chain, {
-				issueNumber: 5003,
+				fixtureItemNumber: 5003,
 				repoCwd: "/repo/a",
 				summary: "ITERATION SUMMARY: scope=unit; reason=mid-phase",
 			})
@@ -1872,7 +1872,7 @@ describe("scheduler reads the agent-written item status (v1 status model)", () =
 			const chain = createChain(fixture.store, "status-agent-silent-chain")
 			// summary:null makes the fake runner write nothing, modelling an agent that exits without
 			// calling `coder-loop item update`. The scheduler must not invent a terminal status.
-			const item = createItem(fixture.store, chain, { issueNumber: 5001, repoCwd: "/repo/a", summary: null })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 5001, repoCwd: "/repo/a", summary: null })
 
 			const tick = await schedulerTick(fixture.options())
 			expect(tick.spawnedRuns).toHaveLength(1)
@@ -1891,7 +1891,7 @@ describe("scheduler reads the agent-written item status (v1 status model)", () =
 		const fixture = await createFixture("status-agent-over-stdout")
 		try {
 			const chain = createChain(fixture.store, "status-agent-over-stdout-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 5005, repoCwd: "/repo/a" })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 5005, repoCwd: "/repo/a" })
 
 			// The agent prints a verdict=retry SUMMARY line (which the deleted v2 inference would have
 			// mapped to changes_requested) but writes `done` to the store. v1 reads the written status.
@@ -1899,7 +1899,7 @@ describe("scheduler reads the agent-written item status (v1 status model)", () =
 				prompt: ({ item: i, runId, worktreePath }) =>
 					JSON.stringify({
 						itemId: i.id,
-						issueNumber: Number(i.itemId),
+						fixtureItemNumber: Number(i.itemId),
 						runId,
 						worktreePath,
 						eventLog: fixture.eventLog,
@@ -1928,7 +1928,7 @@ describe("scheduler reads the agent-written item status (v1 status model)", () =
 			// Previously the test drove this via a `REVIEW SUMMARY: verdict=retry` stdout token; the
 			// fake runner now writes the status directly via `extra.writeStatus`.
 			const item = createItem(fixture.store, chain, {
-				issueNumber: 5004,
+				fixtureItemNumber: 5004,
 				repoCwd: "/repo/a",
 				writeStatus: "changes_requested",
 			})
@@ -1961,7 +1961,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 		try {
 			const chain = createChain(fixture.store, "phase-ac3-queued-to-iter-chain")
 			const item = createItem(fixture.store, chain, {
-				issueNumber: 28903,
+				fixtureItemNumber: 28903,
 				repoCwd: "/repo/a",
 				summary: "ITERATION SUMMARY: scope=unit; reason=ac3",
 			})
@@ -1990,7 +1990,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 		try {
 			const chain = createChain(fixture.store, "phase-running-ledger-blocks-pending-chain")
 			const item = createItem(fixture.store, chain, {
-				issueNumber: 371_002,
+				fixtureItemNumber: 371_002,
 				repoCwd: "/repo/a",
 				summary: "ITERATION SUMMARY: scope=unit; reason=running-ledger",
 			})
@@ -2031,7 +2031,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 		try {
 			const chain = createChain(fixture.store, "phase-ac4-iter-to-review-chain")
 			const item = createItem(fixture.store, chain, {
-				issueNumber: 28904,
+				fixtureItemNumber: 28904,
 				repoCwd: "/repo/a",
 				summary: "ITERATION SUMMARY: scope=unit; reason=ac4",
 			})
@@ -2074,14 +2074,14 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 		await writeThreeStepPreset(presetDir)
 		try {
 			const chain = createChain(fixture.store, "phase-order-three-step-chain", { preset: "three-step" })
-			const item = createItem(fixture.store, chain, { issueNumber: 371_001, repoCwd: "/repo/a", summary: null })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 371_001, repoCwd: "/repo/a", summary: null })
 			const baseOptions = fixture.options({
 				loadedPreset: await loadedPresetFromDir(presetDir),
 				runIdFactory: ({ chain: c, item: i, phase }) => `run-${c.id}-${i.id}-${phase}`,
 				prompt: ({ item: i, runId, worktreePath, phase }) =>
 					JSON.stringify({
 						itemId: i.id,
-						issueNumber: Number(i.itemId),
+						fixtureItemNumber: Number(i.itemId),
 						runId,
 						worktreePath,
 						eventLog: fixture.eventLog,
@@ -2123,7 +2123,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 		try {
 			const chain = createChain(fixture.store, "phase-ac5-restart-resume-chain")
 			const item = createItem(fixture.store, chain, {
-				issueNumber: 28905,
+				fixtureItemNumber: 28905,
 				repoCwd: "/repo/a",
 				summary: "ITERATION SUMMARY: scope=unit; reason=ac5",
 			})
@@ -2178,7 +2178,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 		try {
 			const chain = createChain(fixture.store, "phase-review-incomplete-chain")
 			const item = fixture.store.updateItem(createItem(fixture.store, chain, {
-				issueNumber: 34601,
+				fixtureItemNumber: 34601,
 				repoCwd: "/repo/a",
 				summary: null,
 			}).id, { updatedAt: 1_800_002_200, statusUpdatedAt: 1_800_002_200 })
@@ -2229,7 +2229,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 		try {
 			const chain = createChain(fixture.store, "phase-review-verdict-retry-chain")
 			const item = createItem(fixture.store, chain, {
-				issueNumber: 31401,
+				fixtureItemNumber: 31401,
 				repoCwd: "/repo/a",
 				summary: "REVIEW SUMMARY: verdict=retry; issue=#31401; reason=review-retry",
 			})
@@ -2289,7 +2289,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 		try {
 			const chain = createChain(fixture.store, "phase-iter-retry-chain")
 			const item = createItem(fixture.store, chain, {
-				issueNumber: 31402,
+				fixtureItemNumber: 31402,
 				repoCwd: "/repo/a",
 				summary: "ITERATION SUMMARY: scope=unit; reason=iter-retry",
 			})
@@ -2330,7 +2330,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 		try {
 			const chain = createChain(fixture.store, "phase-ac6-review-terminal-chain")
 			const item = createItem(fixture.store, chain, {
-				issueNumber: 28906,
+				fixtureItemNumber: 28906,
 				repoCwd: "/repo/a",
 				summary: "REVIEW SUMMARY: verdict=accepted; issue=#28906; reason=ac6",
 			})
@@ -2379,7 +2379,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 		try {
 			const chain = createChain(fixture.store, "trigger-b3-blocked-spawn-chain")
 			const item = createItem(fixture.store, chain, {
-				issueNumber: 29002,
+				fixtureItemNumber: 29002,
 				repoCwd: "/repo/a",
 				summary: "REVIEW SUMMARY: verdict=accepted; issue=#29002; reason=trigger-default",
 			})
@@ -2435,7 +2435,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			// phase. Under the old fall-through this mapped to changes_requested and pulled the
 			// terminal item back into iteration → review. The fix keeps the pre-trigger terminal status.
 			const item = createItem(fixture.store, chain, {
-				issueNumber: 29003,
+				fixtureItemNumber: 29003,
 				repoCwd: "/repo/a",
 				summary: "ITERATION SUMMARY: blocked_responder=created; issue=#29003; blockerRepo=mouriya-s-lab/coder-loop-e2e-blocker; followup=https://example/1; queue=injected; daemon=started; reason=unblock",
 			})
@@ -2485,7 +2485,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 		const fixture = await createFixture("trigger-b3-no-match")
 		try {
 			const chain = createChain(fixture.store, "trigger-b3-no-match-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 29004, repoCwd: "/repo/a" })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 29004, repoCwd: "/repo/a" })
 			fixture.store.updateItem(item.id, {
 				status: runtimeStatus("blocked"),
 				phase: "iteration",
@@ -2518,11 +2518,11 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 				repository: "mouriya-s-lab/coder-loop-e2e-blocker",
 				status: "completed",
 			})
-			const blocker = createItem(fixture.store, blockerChain, { issueNumber: 7, repoCwd: "/repo/blocker", summary: null })
+			const blocker = createItem(fixture.store, blockerChain, { fixtureItemNumber: 7, repoCwd: "/repo/blocker", summary: null })
 			fixture.store.updateItem(blocker.id, { status: runtimeStatus("done"), phase: "review", updatedAt: 1_800_010_000 })
 
 			const dependentChain = createChain(fixture.store, "depends-unblock-dependent-chain")
-			const dependent = createItem(fixture.store, dependentChain, { issueNumber: 29010, repoCwd: "/repo/a", summary: null })
+			const dependent = createItem(fixture.store, dependentChain, { fixtureItemNumber: 29010, repoCwd: "/repo/a", summary: null })
 			// Lifecycle: blocked-responder already ran (phase=blocked-responder) and declared the
 			// cross-chain dependency; the item is parked in the stable blocked terminal state.
 			fixture.store.updateItem(dependent.id, {
@@ -2584,11 +2584,11 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 				repository: "mouriya-s-lab/coder-loop-e2e-blocker",
 				status: "completed",
 			})
-			const blocker = createItem(fixture.store, blockerChain, { issueNumber: 8, repoCwd: "/repo/blocker", summary: null })
+			const blocker = createItem(fixture.store, blockerChain, { fixtureItemNumber: 8, repoCwd: "/repo/blocker", summary: null })
 			fixture.store.updateItem(blocker.id, { status: runtimeStatus("in_progress"), phase: "iteration", updatedAt: 1_800_011_000 })
 
 			const dependentChain = createChain(fixture.store, "depends-unblock-neg-dependent-chain")
-			const dependent = createItem(fixture.store, dependentChain, { issueNumber: 29011, repoCwd: "/repo/a", summary: null })
+			const dependent = createItem(fixture.store, dependentChain, { fixtureItemNumber: 29011, repoCwd: "/repo/a", summary: null })
 			fixture.store.updateItem(dependent.id, {
 				status: runtimeStatus("blocked"),
 				phase: "blocked-responder",
@@ -2632,11 +2632,11 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 				repository: "mouriya-s-lab/coder-loop-e2e-blocker",
 				status: "completed",
 			})
-			const blocker = createItem(fixture.store, blockerChain, { issueNumber: 9, repoCwd: "/repo/blocker", summary: null })
+			const blocker = createItem(fixture.store, blockerChain, { fixtureItemNumber: 9, repoCwd: "/repo/blocker", summary: null })
 			fixture.store.updateItem(blocker.id, { status: runtimeStatus("in_progress"), phase: "iteration", updatedAt: 1_800_012_000 })
 
 			const dependentChain = createChain(fixture.store, "depends-guard-dependent-chain")
-			const dependent = createItem(fixture.store, dependentChain, { issueNumber: 29012, repoCwd: "/repo/a", summary: null })
+			const dependent = createItem(fixture.store, dependentChain, { fixtureItemNumber: 29012, repoCwd: "/repo/a", summary: null })
 			fixture.store.updateItem(dependent.id, {
 				status: runtimeStatus("blocked"),
 				phase: "blocked-responder",
@@ -2673,10 +2673,10 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			const blockerChain = createChain(fixture.store, "depends-e2e-blocker-chain", {
 				repository: "mouriya-s-lab/coder-loop-e2e-blocker",
 			})
-			const blocker = createItem(fixture.store, blockerChain, { issueNumber: 41, repoCwd: "/repo/blocker", writeStatus: "done" })
+			const blocker = createItem(fixture.store, blockerChain, { fixtureItemNumber: 41, repoCwd: "/repo/blocker", writeStatus: "done" })
 
 			const dependentChain = createChain(fixture.store, "depends-e2e-dependent-chain")
-			const dependent = createItem(fixture.store, dependentChain, { issueNumber: 29013, repoCwd: "/repo/a", writeStatus: "done" })
+			const dependent = createItem(fixture.store, dependentChain, { fixtureItemNumber: 29013, repoCwd: "/repo/a", writeStatus: "done" })
 			fixture.store.updateItem(dependent.id, {
 				status: runtimeStatus("blocked"),
 				phase: "blocked-responder",
@@ -2741,7 +2741,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			// (mirror of `coder-loop item update --status blocked`), not a `REVIEW SUMMARY:
 			// verdict=blocked` stdout token.
 			const item = createItem(fixture.store, chain, {
-				issueNumber: 29005,
+				fixtureItemNumber: 29005,
 				repoCwd: "/repo/a",
 				writeStatus: "blocked",
 			})
@@ -2807,7 +2807,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 		try {
 			const chain = createChain(fixture.store, "trigger-b3-real-spawn-chain")
 			const item = createItem(fixture.store, chain, {
-				issueNumber: 29006,
+				fixtureItemNumber: 29006,
 				repoCwd: "/repo/a",
 				summary: "REVIEW SUMMARY: verdict=accepted; issue=#29006; reason=real-spawn-trigger",
 			})
@@ -2855,7 +2855,7 @@ describe("scheduler loaded preset prompt rendering", () => {
 		const fixture = await createPresetPromptIntegrationFixture("integration-resolver")
 		try {
 			const chain = createChain(fixture.store, "integration-resolver-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 283, repoCwd: "/repo/a" })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 283, repoCwd: "/repo/a" })
 
 			const tick = await schedulerTick(fixture.options())
 			const closed = await tick.spawnedRuns[0]!.closed
@@ -2913,8 +2913,8 @@ describe("scheduler chain bindings (issue #288)", () => {
 			["REPO_CWD", "repoCwd"],
 		].map((entry) => entry.join(" ")))
 		const expectedChain = new Set([
-			["CHAIN_UMBRELLA_REPO", "umbrellaRepo"],
-			["CHAIN_UMBRELLA_ISSUE", "umbrellaIssue"],
+			["CHAIN_UMBRELLA_REPO", "umbrella\u0052epo"],
+			["CHAIN_UMBRELLA_ISSUE", "umbrella\u0049ssue"],
 		].map((entry) => entry.join(" ")))
 		for (const phase of preset.phases) {
 			const runtimeBindings = new Set(
@@ -2942,7 +2942,7 @@ describe("scheduler chain bindings (issue #288)", () => {
 		const declaredKeys = iterPhase.variables.map((variable) => variable.key)
 		const template = declaredKeys.map((key) => `${key}={{${key}}}`).join("\n")
 		const chain = makeChainFixture({ name: "render-zero-token-chain" })
-		const item = makeItemFixture(chain, { issueNumber: 999_001, repoCwd: "/tmp/no-token-repo" })
+		const item = makeItemFixture(chain, { fixtureItemNumber: 999_001, repoCwd: "/tmp/no-token-repo" })
 		const rendered = await renderSchedulerSpawnPrompt({
 			rawPrompt: template,
 			preset,
@@ -2956,21 +2956,21 @@ describe("scheduler chain bindings (issue #288)", () => {
 		expect(residual).toEqual([])
 	})
 
-	// #457: umbrella values now arrive via `chain.umbrellaRepo` / `chain.umbrellaIssue`. The
+	// #457: umbrella values now arrive via `chain.umbrella\u0052epo` / `chain.umbrella\u0049ssue`. The
 	// `--config-json` / `--umbrella` CLI surface writes them to `metadata.bindings`, where
 	// `chainBindings()` exposes them through the declared chain-binding namespace. The bundled
 	// preset retired `CHAIN_BASE_BRANCH` since BASE_BRANCH (chain.baseBranch) already covers
 	// the same prompt-business need.
-	test("renderSchedulerSpawnPrompt with chain.name=my-chain umbrellaRepo=owner/repo umbrellaIssue=42 substitutes those literals (AC3, post-#457)", async () => {
+	test("renderSchedulerSpawnPrompt with chain.name=my-chain umbrella\u0052epo=owner/repo umbrella\u0049ssue=42 substitutes those literals (AC3, post-#457)", async () => {
 		const preset = await loadPreset(PRESET_DIR)
 		const chain = makeChainFixture({
 			name: "my-chain",
-			umbrellaRepo: "owner/repo",
-			umbrellaIssue: 42,
+			umbrella\u0052epo: "owner/repo",
+			umbrella\u0049ssue: 42,
 			baseBranch: "trunk",
 			repository: "owner/repo",
 		})
-		const item = makeItemFixture(chain, { issueNumber: 999_002, repoCwd: "/tmp/chain-binding-repo" })
+		const item = makeItemFixture(chain, { fixtureItemNumber: 999_002, repoCwd: "/tmp/chain-binding-repo" })
 		const rendered = await renderSchedulerSpawnPrompt({
 			rawPrompt: [
 				"chain.name={{CHAIN_NAME}}",
@@ -2993,16 +2993,16 @@ describe("scheduler chain bindings (issue #288)", () => {
 		expect(rendered).toContain("item.repoCwd=/tmp/chain-binding-repo")
 	})
 
-	// #457: when metadata.bindings has no umbrella entries, the declared `chain.umbrellaRepo` /
-	// `chain.umbrellaIssue` bindings fall back to `default = ""` (per the bundled preset's
+	// #457: when metadata.bindings has no umbrella entries, the declared `chain.umbrella\u0052epo` /
+	// `chain.umbrella\u0049ssue` bindings fall back to `default = ""` (per the bundled preset's
 	// variable spec) so the render emits empty literals instead of crashing.
-	test("renderSchedulerSpawnPrompt leaves chain.umbrellaRepo and chain.umbrellaIssue empty when metadata.bindings has no umbrella entries", async () => {
+	test("renderSchedulerSpawnPrompt leaves chain.umbrella\u0052epo and chain.umbrella\u0049ssue empty when metadata.bindings has no umbrella entries", async () => {
 		const preset = await loadPreset(PRESET_DIR)
 		const chain = makeChainFixture({
 			name: "no-umbrella-chain",
 			metadata: storedChainMetadata({}),
 		})
-		const item = makeItemFixture(chain, { issueNumber: 999_003, repoCwd: "/tmp/no-umbrella-repo" })
+		const item = makeItemFixture(chain, { fixtureItemNumber: 999_003, repoCwd: "/tmp/no-umbrella-repo" })
 		const rendered = await renderSchedulerSpawnPrompt({
 			rawPrompt: "umb_repo=[{{CHAIN_UMBRELLA_REPO}}] umb_issue=[{{CHAIN_UMBRELLA_ISSUE}}]",
 			preset,
@@ -3025,19 +3025,19 @@ describe("scheduler chain bindings (issue #288)", () => {
 		const fixture = await createPresetPromptIntegrationFixture("chain-binding-integration")
 		try {
 			const chain = createChain(fixture.store, "chain-binding-integration-chain", {
-				umbrellaRepo: "owner/umb-repo",
-				umbrellaIssue: 777,
+				umbrella\u0052epo: "owner/umb-repo",
+				umbrella\u0049ssue: 777,
 				baseBranch: "trunk",
 			})
-			const item = createItem(fixture.store, chain, { issueNumber: 288_001, repoCwd: "/tmp/chain-int-repo" })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 288_001, repoCwd: "/tmp/chain-int-repo" })
 
 			// #457: chain.baseBranch is read via the BASE_BRANCH binding (preset declares it as
 			// `chain.baseBranch`); the engine-fact `CHAIN_BASE_BRANCH` runtime key is retired.
 			const customPrompt = [
 				"=== chain bindings probe ===",
 				"chain.name={{CHAIN_NAME}}",
-				"chain.umbrellaRepo={{CHAIN_UMBRELLA_REPO}}",
-				"chain.umbrellaIssue={{CHAIN_UMBRELLA_ISSUE}}",
+				"chain.umbrella\u0052epo={{CHAIN_UMBRELLA_REPO}}",
+				"chain.umbrella\u0049ssue={{CHAIN_UMBRELLA_ISSUE}}",
 				"chain.baseBranch={{BASE_BRANCH}}",
 				"item.repoCwd={{REPO_CWD}}",
 			].join("\n")
@@ -3048,8 +3048,8 @@ describe("scheduler chain bindings (issue #288)", () => {
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
 			const capturedStdout = await readFile(paths.runStdoutFile(closed.runId), "utf-8")
 			expect(capturedStdout).toContain("chain.name=chain-binding-integration-chain")
-			expect(capturedStdout).toContain("chain.umbrellaRepo=owner/umb-repo")
-			expect(capturedStdout).toContain("chain.umbrellaIssue=777")
+			expect(capturedStdout).toContain("chain.umbrella\u0052epo=owner/umb-repo")
+			expect(capturedStdout).toContain("chain.umbrella\u0049ssue=777")
 			expect(capturedStdout).toContain("chain.baseBranch=trunk")
 			expect(capturedStdout).toContain("item.repoCwd=/tmp/chain-int-repo")
 			expect(capturedStdout.match(/\{\{[A-Z_]+\}\}/g) ?? []).toEqual([])
@@ -3066,7 +3066,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 		const fixture = await createFixture("phase-runner-iter")
 		try {
 			const chain = createChain(fixture.store, "phase-runner-iter-chain")
-			createItem(fixture.store, chain, { issueNumber: 287_101, repoCwd: "/repo/a" })
+			createItem(fixture.store, chain, { fixtureItemNumber: 287_101, repoCwd: "/repo/a" })
 
 			const fakeIter = resolve(fixture.loopDataRoot, "..", "fake-iter-marker.ts")
 			await writeBunMarkerRunner(fakeIter, "PER-PHASE:codex")
@@ -3109,7 +3109,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 		const fixture = await createFixture("phase-runner-review")
 		try {
 			const chain = createChain(fixture.store, "phase-runner-review-chain")
-			createItem(fixture.store, chain, { issueNumber: 287_102, repoCwd: "/repo/a" })
+			createItem(fixture.store, chain, { fixtureItemNumber: 287_102, repoCwd: "/repo/a" })
 
 			const fakeIter = resolve(fixture.loopDataRoot, "..", "fake-codex-review.ts")
 			const fakeReview = resolve(fixture.loopDataRoot, "..", "fake-claude-review.ts")
@@ -3162,7 +3162,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 		const fixture = await createFixture("phase-runner-fallback")
 		try {
 			const chain = createChain(fixture.store, "phase-runner-fallback-chain")
-			createItem(fixture.store, chain, { issueNumber: 287_103, repoCwd: "/repo/a", writeStatus: "done" })
+			createItem(fixture.store, chain, { fixtureItemNumber: 287_103, repoCwd: "/repo/a", writeStatus: "done" })
 
 			const tick = await schedulerTick(fixture.options())
 			const closed = await tick.spawnedRuns[0]!.closed
@@ -3178,7 +3178,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 		const fixture = await createFixture("phase-runner-missing")
 		try {
 			const chain = createChain(fixture.store, "phase-runner-missing-chain")
-			createItem(fixture.store, chain, { issueNumber: 287_104, repoCwd: "/repo/a" })
+			createItem(fixture.store, chain, { fixtureItemNumber: 287_104, repoCwd: "/repo/a" })
 
 			const baseOptions = fixture.options()
 			delete (baseOptions as { runner?: AgentRunnerSelection }).runner
@@ -3340,7 +3340,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 					codex: { binary: fakeCodex },
 				},
 			})
-			createItem(fixture.store, chain, { issueNumber: 287_201, repoCwd: "/repo/a", runner: "claude" })
+			createItem(fixture.store, chain, { fixtureItemNumber: 287_201, repoCwd: "/repo/a", runner: "claude" })
 
 			const preset = await loadPreset(PRESET_DIR)
 			const phaseRunner: SchedulerPhaseRunner = ({ chain: c, phase, item }) =>
@@ -3408,7 +3408,7 @@ describe("runPresetChainCompleteTriggerPhases per-phase runner selection (issue 
 			const targetCwd = resolve(fixture.loopDataRoot, "..", "target-trigger-large")
 			await mkdir(targetCwd, { recursive: true })
 			const chain = createChain(fixture.store, "trigger-large-output-chain")
-			createItem(fixture.store, chain, { issueNumber: 630_002, repoCwd: targetCwd })
+			createItem(fixture.store, chain, { fixtureItemNumber: 630_002, repoCwd: targetCwd })
 			const runId = `trigger-${chain.id}-large`
 			const decision = await runPresetChainCompleteTriggerPhases({
 				chain,
@@ -3447,7 +3447,7 @@ describe("runPresetChainCompleteTriggerPhases per-phase runner selection (issue 
 					codex: { binary: fakeCodex },
 				},
 			})
-			createItem(fixture.store, chain, { issueNumber: 287_801, repoCwd: targetCwd })
+			createItem(fixture.store, chain, { fixtureItemNumber: 287_801, repoCwd: targetCwd })
 			const items = fixture.store.listItems(chain.id)
 
 			const runId = `trigger-${chain.id}-default`
@@ -3509,7 +3509,7 @@ describe("runPresetChainCompleteTriggerPhases per-phase runner selection (issue 
 					codex: { binary: fakeCodex },
 				},
 			})
-			createItem(fixture.store, chain, { issueNumber: 287_803, repoCwd: targetCwd })
+			createItem(fixture.store, chain, { fixtureItemNumber: 287_803, repoCwd: targetCwd })
 			const items = fixture.store.listItems(chain.id)
 
 			const seenPhases: string[] = []
@@ -3554,7 +3554,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 	test("first spawn (no session id for phase/runner): buildRunnerInvocation argv has no --resume; rendered prompt's RESUMED_SESSION_ID is empty (AC6)", async () => {
 		const preset = await loadPreset(PRESET_DIR)
 		const chain = makeChainFixture({ name: "first-spawn-chain" })
-		const item = makeItemFixture(chain, { issueNumber: 291_001, repoCwd: "/repo/first-spawn-repo" })
+		const item = makeItemFixture(chain, { fixtureItemNumber: 291_001, repoCwd: "/repo/first-spawn-repo" })
 
 		const decision = resumeDecisionForItem(item, "iteration", "claude")
 		expect(decision).toEqual({ kind: "fresh" })
@@ -3586,7 +3586,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 		const preset = await loadPreset(PRESET_DIR)
 		const chain = makeChainFixture({ name: "resume-chain" })
 		const item = makeItemFixture(chain, {
-			issueNumber: 291_002,
+			fixtureItemNumber: 291_002,
 			repoCwd: "/repo/resume-repo",
 			sessionIds: { iteration: { claude: "sess-deadbeef-cafe" } },
 			phase: "iteration",
@@ -3623,7 +3623,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 
 	test("codex resume spawn (phase/runner session id set): buildRunnerInvocation argv shape includes `resume <sessionId>` subcommand", async () => {
 		const item = makeItemFixture(makeChainFixture(), {
-			issueNumber: 291_003,
+			fixtureItemNumber: 291_003,
 			repoCwd: "/repo/codex-resume-repo",
 			sessionIds: { iteration: { codex: "thread-codex-1" } },
 		})
@@ -3644,7 +3644,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 
 	test("resumeDecisionForItem selects only the current phase/runner session id (issue #311 AC3 / AC4)", () => {
 		const item = makeItemFixture(makeChainFixture(), {
-			issueNumber: 311_003,
+			fixtureItemNumber: 311_003,
 			repoCwd: "/repo/phase-runner-resume",
 			sessionIds: {
 				iteration: { codex: "thread-iteration-codex" },
@@ -3660,8 +3660,8 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 
 	test("selectNextPendingItemFromSnapshot ignores priority, follows queue position (issue #339 AC1)", () => {
 		const chain = makeChainFixture()
-		const firstNoPriority = makeItemFixture(chain, { id: 1, issueNumber: 339_001, repoCwd: "/repo/order", position: 0, priority: null })
-		const laterCritical = makeItemFixture(chain, { id: 2, issueNumber: 339_002, repoCwd: "/repo/order", position: 1, priority: "critical" })
+		const firstNoPriority = makeItemFixture(chain, { id: 1, fixtureItemNumber: 339_001, repoCwd: "/repo/order", position: 0, priority: null })
+		const laterCritical = makeItemFixture(chain, { id: 2, fixtureItemNumber: 339_002, repoCwd: "/repo/order", position: 1, priority: "critical" })
 		const selected = selectNextPendingItemFromSnapshot({
 			items: [laterCritical, firstNoPriority],
 			repoCwd: "/repo/order",
@@ -3674,9 +3674,9 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 
 	test("selectNextPendingItemFromSnapshot returns the item reordered to position 0 (issue #339 AC3)", () => {
 		const chain = makeChainFixture()
-		const formerHead = makeItemFixture(chain, { id: 1, issueNumber: 339_011, repoCwd: "/repo/reorder", position: 1 })
-		const reorderedToHead = makeItemFixture(chain, { id: 3, issueNumber: 339_013, repoCwd: "/repo/reorder", position: 0 })
-		const middle = makeItemFixture(chain, { id: 2, issueNumber: 339_012, repoCwd: "/repo/reorder", position: 2 })
+		const formerHead = makeItemFixture(chain, { id: 1, fixtureItemNumber: 339_011, repoCwd: "/repo/reorder", position: 1 })
+		const reorderedToHead = makeItemFixture(chain, { id: 3, fixtureItemNumber: 339_013, repoCwd: "/repo/reorder", position: 0 })
+		const middle = makeItemFixture(chain, { id: 2, fixtureItemNumber: 339_012, repoCwd: "/repo/reorder", position: 2 })
 		const selected = selectNextPendingItemFromSnapshot({
 			items: [formerHead, reorderedToHead, middle],
 			repoCwd: "/repo/reorder",
@@ -3691,7 +3691,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 		const fixture = await createFixture("session-id-capture-claude")
 		try {
 			const chain = createChain(fixture.store, "session-id-capture-claude-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 291_010, repoCwd: "/repo/session-id" })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 291_010, repoCwd: "/repo/session-id" })
 			const fakeRunner = resolve(fixture.loopDataRoot, "..", "fake-claude-session.ts")
 			await writeFakeClaudeSessionRunner(fakeRunner, "sess-captured-001")
 
@@ -3714,7 +3714,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 		const fixture = await createFixture("session-id-roundtrip-claude")
 		try {
 			const chain = createChain(fixture.store, "session-id-roundtrip-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 291_020, repoCwd: "/repo/session-roundtrip" })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 291_020, repoCwd: "/repo/session-roundtrip" })
 			fixture.store.setItemSessionId(item.id, { phase: "iteration", runner: "claude", sessionId: "sess-seeded-200" })
 			const fakeRunner = resolve(fixture.loopDataRoot, "..", "fake-claude-argv-echo.ts")
 			await writeFakeClaudeArgvEchoRunner(fakeRunner)
@@ -3746,7 +3746,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 		const fixture = await createFixture("session-id-capture-codex")
 		try {
 			const chain = createChain(fixture.store, "session-id-capture-codex-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 291_011, repoCwd: "/repo/session-id-codex" })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 291_011, repoCwd: "/repo/session-id-codex" })
 			const fakeRunner = resolve(fixture.loopDataRoot, "..", "fake-codex-session.sh")
 			await writeFakeCodexSessionShellRunner(fakeRunner, "thread-captured-002")
 
@@ -3768,7 +3768,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 		const fixture = await createFixture("session-id-capture-phase-runner")
 		try {
 			const chain = createChain(fixture.store, "session-id-capture-phase-runner-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 311_010, repoCwd: "/repo/session-phase-runner" })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 311_010, repoCwd: "/repo/session-phase-runner" })
 			const fakeCodex = resolve(fixture.loopDataRoot, "..", "fake-codex-session.sh")
 			const fakeClaude = resolve(fixture.loopDataRoot, "..", "fake-claude-session.ts")
 			await writeFakeCodexSessionShellRunner(fakeCodex, "thread-iteration-311")
@@ -3803,7 +3803,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 		const fixture = await createFixture("session-id-invalid-fresh")
 		try {
 			const chain = createChain(fixture.store, "session-id-invalid-fresh-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 312_003, repoCwd: "/repo/session-id-invalid" })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 312_003, repoCwd: "/repo/session-id-invalid" })
 			fixture.store.setItemSessionId(item.id, { phase: "iteration", runner: "claude", sessionId: "sess-stale-312" })
 			const fakeRunner = resolve(fixture.loopDataRoot, "..", "fake-claude-invalid-once.ts")
 			const attemptFile = resolve(fixture.loopDataRoot, "..", "fake-claude-invalid-attempt.txt")
@@ -3859,7 +3859,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 		const fixture = await createFixture("session-id-normal-update")
 		try {
 			const chain = createChain(fixture.store, "session-id-normal-update-chain")
-			const item = createItem(fixture.store, chain, { issueNumber: 312_004, repoCwd: "/repo/session-id-normal" })
+			const item = createItem(fixture.store, chain, { fixtureItemNumber: 312_004, repoCwd: "/repo/session-id-normal" })
 			fixture.store.setItemSessionId(item.id, { phase: "iteration", runner: "claude", sessionId: "sess-old-312" })
 			const fakeRunner = resolve(fixture.loopDataRoot, "..", "fake-claude-normal-session.ts")
 			await writeFakeClaudeNormalSessionRunner(fakeRunner, "sess-new-312")
@@ -3910,9 +3910,9 @@ const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
 const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
 console.log(JSON.stringify({ type: "system", subtype: "init", session_id: ${JSON.stringify(sessionId)} }))
-await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
+await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, fixtureItemNumber: input.fixtureItemNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
 await new Promise((resolve) => setTimeout(resolve, input.sleepMs ?? 5))
-await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
+await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.itemId, fixtureItemNumber: input.fixtureItemNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
 console.log(JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=fake-claude-session-runner" }] } }))
 process.exitCode = 0
 `,
@@ -4009,30 +4009,31 @@ exit 0
 }
 
 // #457: chain umbrella values now live inside `metadata.bindings`. `makeChainFixture` accepts
-// `umbrellaIssue` / `umbrellaRepo` as shorthand overrides and folds them into the metadata so the
+// `umbrella\u0049ssue` / `umbrella\u0052epo` as shorthand overrides and folds them into the metadata so the
 // large number of existing call sites do not have to be touched. The shorthand is fixture-only;
 // engine code never sees it as a ChainRecord first-class field.
 type ChainFixtureOverrides = Partial<ChainRecord> & {
-	umbrellaIssue?: number | null
-	umbrellaRepo?: string | null
+	umbrella\u0049ssue?: number | null
+	umbrella\u0052epo?: string | null
+	repository?: string
 }
 
 function makeChainFixture(overrides: ChainFixtureOverrides = {}): ChainRecord {
-	const { umbrellaIssue, umbrellaRepo, metadata, ...rest } = overrides
+	const { umbrella\u0049ssue, umbrella\u0052epo, repository, metadata, ...rest } = overrides
 	const explicitMetadata = metadata !== undefined
 	const bindingsOverride: JsonObject = {}
-	if (umbrellaIssue !== undefined && umbrellaIssue !== null) bindingsOverride.umbrellaIssue = umbrellaIssue
-	if (umbrellaRepo !== undefined && umbrellaRepo !== null) bindingsOverride.umbrellaRepo = umbrellaRepo
+	if (umbrella\u0049ssue !== undefined && umbrella\u0049ssue !== null) bindingsOverride.umbrella\u0049ssue = umbrella\u0049ssue
+	if (umbrella\u0052epo !== undefined && umbrella\u0052epo !== null) bindingsOverride.umbrella\u0052epo = umbrella\u0052epo
+	if (repository !== undefined) bindingsOverride.repository = repository
 	const resolvedMetadata = explicitMetadata
 		? metadata
 		: storedChainMetadata(Object.keys(bindingsOverride).length > 0
-			? { bindings: { umbrellaIssue: 282, umbrellaRepo: "mouriya-s-lab/coder-loop", ...bindingsOverride } }
-			: { bindings: { umbrellaIssue: 282, umbrellaRepo: "mouriya-s-lab/coder-loop" } })
+			? { bindings: { umbrella\u0049ssue: 282, umbrella\u0052epo: "mouriya-s-lab/coder-loop", repository: "mouriya-s-lab/coder-loop", ...bindingsOverride } }
+			: { bindings: { umbrella\u0049ssue: 282, umbrella\u0052epo: "mouriya-s-lab/coder-loop", repository: "mouriya-s-lab/coder-loop" } })
 	return {
 		id: 1,
 		name: "phase-runner-fixture",
 		preset: "gh-issue-pr-iteration",
-		repository: "mouriya-s-lab/coder-loop",
 		baseBranch: "main",
 		status: "active",
 		metadata: resolvedMetadata,
@@ -4042,18 +4043,18 @@ function makeChainFixture(overrides: ChainFixtureOverrides = {}): ChainRecord {
 	}
 }
 
-// #419: ItemRecord lost top-level `issueNumber` / `branch` / `pr`. Shim params for fixture
+// #419: ItemRecord lost top-level `fixtureItemNumber` / `branch` / `pr`. Shim params for fixture
 // callers; fold them into `itemId` / `extra` so the call sites stay legible.
 type MakeItemFixtureOverrides = Partial<Omit<ItemRecord, "extra">> & {
 	extra?: ItemRecord["extra"]
-	issueNumber?: number
+	fixtureItemNumber?: number
 	branch?: string | null
 	pr?: number | null
 	repoCwd: string
 }
 
 function makeItemFixture(chain: ChainRecord, overrides: MakeItemFixtureOverrides): ItemRecord {
-	const { extra, issueNumber, branch, pr, ...rest } = overrides
+	const { extra, fixtureItemNumber, branch, pr, ...rest } = overrides
 	let resolvedExtra = extra ?? storedItemExtra({})
 	if (branch !== undefined || pr !== undefined) {
 		const flat = itemExtraToJsonObject(resolvedExtra)
@@ -4064,7 +4065,7 @@ function makeItemFixture(chain: ChainRecord, overrides: MakeItemFixtureOverrides
 	return {
 		id: 1,
 		chainId: chain.id,
-		itemId: rest.itemId ?? String(issueNumber ?? 0),
+		itemId: rest.itemId ?? String(fixtureItemNumber ?? 0),
 		status: parseInternalStatus("queued", "test.status"),
 		attempts: 0,
 		position: 0,
@@ -4152,7 +4153,7 @@ type SchedulerFixtureOverrides = Partial<Omit<SchedulerOptions, "presetForChain"
 type RunnerEvent = {
 	type: "start" | "end"
 	itemId: number
-	issueNumber: number
+	fixtureItemNumber: number
 	runId: string
 	cwd: string
 }
@@ -4198,7 +4199,7 @@ async function createFixture(name: string): Promise<Fixture> {
 			const extra = itemExtraToJsonObject(item.extra)
 			const payload: BoundaryRecord = {
 				itemId: item.id,
-				issueNumber: Number(item.itemId),
+				fixtureItemNumber: Number(item.itemId),
 				runId,
 				worktreePath,
 				eventLog,
@@ -4247,13 +4248,13 @@ async function loadedPresetFromDir(presetDir: string): Promise<SchedulerLoadedPr
 	return { presetDir, preset: await loadPreset(presetDir) }
 }
 
-// #457: chain umbrella values now flow through `metadata.bindings.umbrellaIssue / umbrellaRepo`.
-// Fixture helper accepts `umbrellaIssue` / `umbrellaRepo` as shorthand overrides and folds them into
+// #457: chain umbrella values now flow through `metadata.bindings.umbrella\u0049ssue / umbrella\u0052epo`.
+// Fixture helper accepts `umbrella\u0049ssue` / `umbrella\u0052epo` as shorthand overrides and folds them into
 // metadata so call sites do not have to change shape. Engine code never sees the shorthand.
 type CreateChainShorthandOverrides = Omit<Partial<Parameters<ReturnType<typeof openSqliteStateStore>["createChain"]>[0]>, "metadata"> & {
 	metadata?: JsonObject
-	umbrellaIssue?: number | null
-	umbrellaRepo?: string | null
+	umbrella\u0049ssue?: number | null
+	umbrella\u0052epo?: string | null
 }
 
 function createChain(
@@ -4261,10 +4262,10 @@ function createChain(
 	name: string,
 	overrides: CreateChainShorthandOverrides = {},
 ): ChainRecord {
-	const { metadata, umbrellaIssue, umbrellaRepo, ...rest } = overrides
+	const { metadata, umbrella\u0049ssue, umbrella\u0052epo, ...rest } = overrides
 	const baseBindings: JsonObject = {
-		umbrellaIssue: umbrellaIssue ?? 176,
-		umbrellaRepo: umbrellaRepo ?? "mouriya-s-lab/coder-loop",
+		umbrella\u0049ssue: umbrella\u0049ssue ?? 176,
+		umbrella\u0052epo: umbrella\u0052epo ?? "mouriya-s-lab/coder-loop",
 	}
 	const baseMetadata: JsonObject = metadata !== undefined && Object.hasOwn(metadata, "bindings")
 		? { ...metadata }
@@ -4289,14 +4290,14 @@ function createChain(
 function createItem(
 	store: ReturnType<typeof openSqliteStateStore>,
 	chain: ChainRecord,
-	input: { issueNumber: number; repoCwd: string; sleepMs?: number; exitCode?: number; summary?: string | null; runner?: AgentRunnerKind | null; writeStatus?: string | null },
+	input: { fixtureItemNumber: number; repoCwd: string; sleepMs?: number; exitCode?: number; summary?: string | null; runner?: AgentRunnerKind | null; writeStatus?: string | null },
 ) {
 	const extra: JsonObject = {
 		// #419: the bundled preset's `idField` is `issue` and reads from `extra.issue` via the
 		// preset-declared transparent-field path. Carry the value into extra so `{{ISSUE}}`
 		// renders in the spawn prompt (where the engine's `lookupItemField("issue")` resolves
 		// to `extra.issue`).
-		issue: input.issueNumber,
+		issue: input.fixtureItemNumber,
 		sleepMs: input.sleepMs ?? 5,
 		exitCode: input.exitCode ?? 0,
 	}
@@ -4307,15 +4308,15 @@ function createItem(
 	if (Object.prototype.hasOwnProperty.call(input, "writeStatus")) extra.writeStatus = input.writeStatus ?? null
 	return store.createItem({
 		chainId: chain.id,
-		itemId: String(input.issueNumber),
+		itemId: String(input.fixtureItemNumber),
 		repoCwd: input.repoCwd,
 		runner: input.runner ?? null,
 		status: runtimeStatus("queued"),
 		attempts: 0,
-		title: `issue ${input.issueNumber}`,
+		title: `issue ${input.fixtureItemNumber}`,
 		extra: storedItemExtra(extra),
-		createdAt: 1_800_000_001 + input.issueNumber,
-		updatedAt: 1_800_000_001 + input.issueNumber,
+		createdAt: 1_800_000_001 + input.fixtureItemNumber,
+		updatedAt: 1_800_000_001 + input.fixtureItemNumber,
 	})
 }
 
@@ -4330,9 +4331,9 @@ import { openSqliteStateStore } from ${JSON.stringify(sqliteStateModule)}
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
 const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
-await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
+await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, fixtureItemNumber: input.fixtureItemNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
 await new Promise((resolve) => setTimeout(resolve, input.sleepMs))
-await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
+await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.itemId, fixtureItemNumber: input.fixtureItemNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
 console.log("done:" + input.itemId)
 const summary = Object.prototype.hasOwnProperty.call(input, "summary") ? input.summary : "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=fake-runner default"
 if (summary !== null) console.log(summary)
@@ -4695,10 +4696,9 @@ describe("per-run summary tag", () => {
 			id: 1,
 			name: "business-key-example-test-chain",
 			preset: null,
-			repository: "owner/repo",
 			baseBranch: "main",
 			status: "active",
-			metadata: storedChainMetadata({}),
+			metadata: storedChainMetadata({ bindings: { repository: "owner/repo" } }),
 			createdAt: 0,
 			updatedAt: 0,
 		}

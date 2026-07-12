@@ -77,6 +77,14 @@ describe("runtime path model", () => {
 		expect(paths.daemonLogFile("2026-05-22-16-28-22")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/daemon/2026-05-22-16-28-22/daemon.log")
 	})
 
+	test("opaque item ids use a collision-free reserved runtime namespace", () => {
+		const paths = resolveChainRuntimePaths("coder-loop", { loopDataRoot: "/var/lib/coder-loop/loop-data" })
+		expect(paths.issueEvidenceDir("owner/repo#12")).toMatch(/^\/var\/lib\/coder-loop\/loop-data\/chains\/coder-loop\/evidence\/\.opaque-item-ids\/[a-f0-9]{64}$/)
+		expect(paths.issueFile("owner/repo#12")).toMatch(/^\/var\/lib\/coder-loop\/loop-data\/chains\/coder-loop\/issues\/\.opaque-item-ids\/[a-f0-9]{64}\.md$/)
+		expect(paths.issueEvidenceDir(".opaque-item-ids")).toMatch(/^\/var\/lib\/coder-loop\/loop-data\/chains\/coder-loop\/evidence\/\.opaque-item-ids\/[a-f0-9]{64}$/)
+		expect(paths.issueEvidenceDir("178")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/evidence/178")
+	})
+
 	test("sanitization rejects empty traversal absolute control and separator input", () => {
 		for (const invalid of ["", "   ", ".", "../escape", "foo..bar", "/absolute", "has/slash", "has\\slash", "control\u0000"]) {
 			try {

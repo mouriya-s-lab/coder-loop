@@ -16,7 +16,7 @@ Never use stop for bad code, weak evidence, failed tests, PR conflicts, pending 
 Stop the chain through the typed phase-exits selection face — the only controlled channel for an agent to stop the chain it owns. Direct `coder-loop chain stop` calls from an agent are rejected (#409); the engine accepts the stop only when it arrives through this exit:
 
 ```
-coder-loop item exit-action <CHAIN> --issue <ISSUE> --agent-run-id <RUN_ID> --agent-phase review --action stop
+coder-loop item exit-action <CHAIN> --item <ISSUE> --agent-run-id <RUN_ID> --agent-phase review --action stop
 ```
 
 The engine maps this selection to the same code path operator `chain stop` runs: scheduler stops selecting new items from this chain, chain status is set to `stopped`, in-flight runs naturally complete, `chain resume` reversibly restores active status. No item terminal status is written by this action — chain stop is a chain-level side effect, not an item verdict.

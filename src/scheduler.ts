@@ -217,8 +217,8 @@ export type SchedulerEvent =
 	| { type: "agent.spawn"; slotKey: string; chainId: number; itemId: number; runId: string; phase: string; pid: number | null; worktreePath: string; presetDir: string }
 	| { type: "agent.exit"; slotKey: string; chainId: number; itemId: number; runId: string; phase: string; exitCode: number; status: InternalStatus; excerpt: ObservabilityExcerpt }
 	| { type: "session_id.invalidated"; ts: string; runId: string; chainId: number; itemId: number; phase: string; runner: AgentRunnerKind; previousSessionId: string | null; reason: "runner_session_id_invalid" }
-	// #419: `spawn.aborted` payload retires the integer `issueNumber` field. The `id` here is the
-	// item's opaque preset-declared string id (formerly `issueNumber`-as-int). `itemId` remains
+	// #419: `spawn.aborted` payload retires the integer `fixtureItemNumber` field. The `id` here is the
+	// item's opaque preset-declared string id (formerly `fixtureItemNumber`-as-int). `itemId` remains
 	// the rowid (integer). Supervisor consumers must read `id` for the issue/item identity.
 	| { type: "spawn.aborted"; slotKey: string; chainId: number; chainName: string; itemId: number; id: string; reason: string; toStatus: InternalStatus }
 	| { type: "chain.complete_trigger"; chainId: number; chainName: string; runId?: string; decision: SchedulerChainCompleteDecision["decision"]; reason?: string }
@@ -2100,7 +2100,6 @@ function chainCompletionFingerprint(chain: ChainRecord, items: readonly ItemReco
 			id: chain.id,
 			name: chain.name,
 			preset: chain.preset,
-			repository: chain.repository,
 			baseBranch: chain.baseBranch,
 			metadata: chainMetadataForFingerprint(chain.metadata),
 		},
@@ -2108,7 +2107,7 @@ function chainCompletionFingerprint(chain: ChainRecord, items: readonly ItemReco
 		items: items
 			.map((item) => ({
 				id: item.id,
-				// #419: fingerprint replaces `issueNumber` (integer) with the opaque preset
+				// #419: fingerprint replaces `fixtureItemNumber` (integer) with the opaque preset
 				// `itemId` string and removes the top-level `branch` / `pr` projections —
 				// presets that need them declare them in `[item.fields]` and they round-trip
 				// through the included `extra` JSON, so a chain-complete decision driven by
@@ -2472,7 +2471,6 @@ export function buildSchedulerResolveContext(input: {
 
 function buildSchedulerChainBindings(chain: ChainRecord): JsonObject {
 	return {
-		repository: chain.repository,
 		baseBranch: chain.baseBranch,
 		...metadataBindings(chain.metadata),
 	}

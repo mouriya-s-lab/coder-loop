@@ -35,7 +35,7 @@ coder-loop logs    <target> --json [--kind K] [--type T] [--chain C] [--item ID]
 coder-loop daemon  <up|down|status|start|stop|restart>
 coder-loop chain   <create|list|status|stop|resume|delete|set-runner-model>
 coder-loop item    <add|batch-add|list|update|reorder|exits|exit-action>
-coder-loop queue   unblock <target> --issue <issue>
+coder-loop queue   unblock <target> --item <item>
 coder-loop doctor  <target>
 ```
 

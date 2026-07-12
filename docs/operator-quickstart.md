@@ -41,7 +41,7 @@ coder-loop chain create <name> \
   --preset gh-issue-pr-iteration
 ```
 
-`chain create` 的 chain identity 与 per-target 偏差都写在 `--config-json` 里：`{"repository":"...","baseBranch":"...","bindings":{"<key>":"<value>"}}`。`--preset` 可选：chain 级 preset 是 legacy default seed（不传则 seed 为 bundled `gh-issue-pr-iteration`），驱动 item 的仍是 `coder-loop item add` 的 `--preset <name>` / `--preset-path <abs>`（必填，每 item 挂一个 preset）。`gh-issue-pr-iteration` 需要的 GitHub label 资产由 issue writer / operator 在 target 侧自己按需管理，不由本 CLI 负责。
+`chain create` 的 `baseBranch` 与业务 bindings 都写在 `--config-json` 里：repository 可选、保持 opaque，并写入 `metadata.bindings.repository`；`baseBranch` 仍是 worktree 机制字段。`--preset` 可选：chain 级 preset 是 legacy default seed（不传则 seed 为 bundled `gh-issue-pr-iteration`），驱动 item 的仍是 `coder-loop item add` 的 `--preset <name>` / `--preset-path <abs>`（必填，每 item 挂一个 preset）。
 
 用自定义 `--loop-data-root` 时，`daemon up` 与后续 `chain create` / `doctor` / `status` 要传同一个 root。
 
@@ -106,7 +106,7 @@ coder-loop status /path/to/your-target-repo --json \
 
 ### items 在 wire 上的 shape
 
-`items` 表按 preset `[item.fields]` 声明的透明字段落盘，engine 只保留 `item_id`（opaque string）作 identity。`gh-issue-pr-iteration` 声明 `issue`（number）/ `branch`（string）/ `pr`（number）/ `lastRunId`（string）四个透明字段。`status --json` 的 `queue.selected.item.<field>` 通过 `flattenExtraReplacer` 把这些字段平铺到父级；**消费者按字段名直接读 `queue.selected.item.branch` / `.pr`**（不要走 `.extra.branch` / `.extra.pr` 嵌套路径，`queue.selected.item.extra` 在 wire 上为 `null`）。daemon wire 上 `item.add` / `item.update` 的 identity 字段是 `itemId: string`；CLI flag 仍是 `--issue`（接受 opaque 字符串 id）。完整映射见 [operations wire-shape 段](./operations.md#items-wire-shape)。
+`items` 表按 preset `[item.fields]` 声明的透明字段落盘，engine 只保留 `item_id`（opaque string）作 identity。`gh-issue-pr-iteration` 声明 `issue`（number）/ `branch`（string）/ `pr`（number）/ `lastRunId`（string）四个透明字段。`status --json` 的 `queue.selected.item.<field>` 通过 `flattenExtraReplacer` 把这些字段平铺到父级；**消费者按字段名直接读 `queue.selected.item.branch` / `.pr`**（不要走 `.extra.branch` / `.extra.pr` 嵌套路径，`queue.selected.item.extra` 在 wire 上为 `null`）。daemon wire 上 `item.add` / `item.update` 的 identity 字段是 `itemId: string`；CLI 使用 `--item`（接受 opaque 字符串 id，不保留旧 flag alias）。完整映射见 [operations wire-shape 段](./operations.md#items-wire-shape)。
 
 ---
 
@@ -115,8 +115,8 @@ coder-loop status /path/to/your-target-repo --json \
 Operator 自行开好 GitHub issue，用 `coder-loop item add` 或 `item batch-add` 把它们加进中央 chain：
 
 ```bash
-coder-loop item add <chain> --issue 123 --repo-cwd /path/to/target --json
-coder-loop item batch-add <chain> --items-json '[{"issue":124,"repoCwd":"..."},{"issue":125,"repoCwd":"..."}]' --json
+coder-loop item add <chain> --item 123 --repo-cwd /path/to/target --json
+coder-loop item batch-add <chain> --items-json '[{"itemId":"task-124","repoCwd":"...","preset":"single-phase-example"}]' --json
 ```
 
 加完后做一次 schema 自检：
@@ -213,5 +213,5 @@ run 级事件在 `<logDir>/<runId>/events.jsonl`，也由 `status.events.path` �
 - **`.coder-loop/` 入了 git** → runtime handoff / logs 进了 PR diff；把整个目录加 `.gitignore` 后 `git rm --cached -r .coder-loop/`。
 - **target 的 `CLAUDE.md` / `AGENTS.md` 缺失或没入仓** → iteration / review 调度者读不到项目工作方式（项目命令 / PR 约定），行为退化为推测项目命令，往往写错命令 / 漏证据 layer。
 - **`gh` 未 auth** → iteration 的 Step 0 / Step 2 亲读 issue body 就会失败，trace 里能看到 `gh auth status` 失败回显。
-- **chain identity 与目标 repo 不一致** → `status` / `daemon start` 会在解析 chain 时报告 repository/baseBranch 不匹配；指定正确 `--chain`，或修正 centralized chain identity。
+- **chain 选择歧义** → 显式传 `--chain`；engine 不再从 git remote 推断 repository 或按 forge identity 过滤 chain。
 - **找不到 target 的状态** → 权威路径是 central daemon + chain runtime；先看 `coder-loop status <target> --json` 返回的 `target.logDir`、`events.path`、`processes.live`，不要按老式的 target-local flat log layout 找。
