@@ -54,4 +54,16 @@ describe("contract enrichment historical replay classification", () => {
 		expect(drift?.sourceUrl).toBe(reviewUrl)
 		expect(drift?.excerpt).toContain("script/harness")
 	})
+
+	test("extracts each matched proposition from a long multi-topic review", () => {
+		const padding = "intro ".repeat(100)
+		const result = classifyReplay({ number: 551, url: "https://github.com/mouriya-s-lab/coder-loop/issues/551", body: "intent", comments: [], labels: [] }, [{
+			number: 659, url: "https://github.com/mouriya-s-lab/coder-loop/pull/659", body: "Closes #551", closingIssueNumbers: [551], reviews: [],
+			comments: [{ url: "https://github.com/mouriya-s-lab/coder-loop/pull/659#issuecomment-2", body: `${padding}code finding: failure path is wrong. Later, issue contract error: Pattern 验收 is missing.` }],
+		}])
+		const discretion = result.findings.find((finding) => finding.kind === "reviewer-discretion")
+		const defect = result.findings.find((finding) => finding.kind === "contract-defect")
+		expect(discretion?.excerpt).toContain("code finding")
+		expect(defect?.excerpt).toContain("issue contract error")
+	})
 })

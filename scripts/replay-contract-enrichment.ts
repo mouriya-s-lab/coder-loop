@@ -14,23 +14,7 @@ export type ReplayFinding =
 	| ({ kind: "environment-failure" } & FindingEvidence)
 	| ({ kind: "contract-defect" } & FindingEvidence)
 
-type ReplayCheck = { id: string; dimension: string; kind: "shell" | "browser"; instruction: string }
-
-type ReplayContractPacket = {
-	schemaVersion: 1
-	intentSource: { issueUrl: string; commentUrls: readonly string[] }
-	deliverable: "implementation-pr" | "blocker-removal" | "spike-comment" | "source-writing-spike"
-	checks: readonly ReplayCheck[]
-	patternScope: { kind: "changed" | "whole-tree"; criterion: string }
-	canonicalRuntime: string
-	testDelta: "forbidden" | "allowed"
-	dependencies: readonly string[]
-	supersedes: "none"
-}
-
-export type ReplayContract =
-	| { kind: "generated"; packet: ReplayContractPacket }
-	| { kind: "cannot-generate"; reasons: readonly string[] }
+export type ReplayContract = { kind: "cannot-generate"; reasons: readonly string[] }
 
 export type ReplayResult = {
 	kind: "issue-replay"
@@ -166,8 +150,14 @@ function hasAny(text: string, patterns: readonly RegExp[]): boolean {
 	return patterns.some((pattern) => pattern.test(text))
 }
 
-function excerpt(text: string): string {
-	return text.replace(/\s+/g, " ").trim().slice(0, 280)
+function matchingExcerpt(text: string, patterns: readonly RegExp[]): string {
+	const normalized = text.replace(/\s+/g, " ").trim()
+	for (const pattern of patterns) {
+		const match = pattern.exec(normalized)
+		if (match === null || match.index === undefined) continue
+		return normalized.slice(Math.max(0, match.index - 80), match.index + match[0].length + 180)
+	}
+	return normalized.slice(0, 280)
 }
 
 export function classifyReplay(issue: IssueSnapshot, pullRequests: readonly PullRequestSnapshot[]): Omit<ReplayResult, "evidenceDir"> {
@@ -178,7 +168,7 @@ export function classifyReplay(issue: IssueSnapshot, pullRequests: readonly Pull
 	const hasRuntime = /e2e|end[- ]to[- ]end|真实运行|runtime|browser/i.test(intentText)
 	const hasTestDelta = /test[- ]delta|测试变更|测试.*允许|forbidden/i.test(intentText)
 	if (!hasChecks || !hasPattern || !hasRuntime || !hasTestDelta) {
-		findings.push({ kind: "intent-gap", sourceUrl: issue.url, excerpt: excerpt(issue.body), rationale: "通用 issue 没有预先给出完整 Checks / Pattern / canonical runtime / Test delta；该缺项需要 enrichment 调查，不是 implementation failure。" })
+		findings.push({ kind: "intent-gap", sourceUrl: issue.url, excerpt: matchingExcerpt(issue.body, [/验收标准/i, /acceptance/i]), rationale: "通用 issue 没有预先给出完整 Checks / Pattern / canonical runtime / Test delta；该缺项需要 enrichment 调查，不是 implementation failure。" })
 	}
 	const sourceEntries = [
 		{ sourceUrl: issue.url, body: issue.body },
@@ -189,8 +179,9 @@ export function classifyReplay(issue: IssueSnapshot, pullRequests: readonly Pull
 		]),
 	]
 	for (const source of sourceEntries) {
-		if (!/Pattern 验收|script-produced e2e|script e2e|script\/harness|live issue body executable/i.test(source.body)) continue
-		findings.push({ kind: "preset-drift", sourceUrl: source.sourceUrl, excerpt: excerpt(source.body), rationale: "该来源携带旧 preset vocabulary；回放必须按 current marker schema 归一，不能把旧 wording 当当前 executable authority。" })
+		const driftPatterns = [/Pattern 验收/i, /script-produced e2e/i, /script e2e/i, /script\/harness/i, /live issue body executable/i]
+		if (!hasAny(source.body, driftPatterns)) continue
+		findings.push({ kind: "preset-drift", sourceUrl: source.sourceUrl, excerpt: matchingExcerpt(source.body, driftPatterns), rationale: "该来源携带旧 preset vocabulary；回放必须按 current marker schema 归一，不能把旧 wording 当当前 executable authority。" })
 	}
 	for (const pr of pullRequests) {
 		const reviewInputs = [
@@ -199,32 +190,18 @@ export function classifyReplay(issue: IssueSnapshot, pullRequests: readonly Pull
 		]
 		for (const review of reviewInputs) {
 			if (review.body.trim() === "") continue
-			const isContractDefect = hasAny(review.body, [/issue contract error/i, /contract.*malformed/i, /验收标准.*malformed/i, /缺.*Pattern 验收/i, /literal command.*fail/i])
-			if (isContractDefect) findings.push({ kind: "contract-defect", sourceUrl: review.sourceUrl, excerpt: excerpt(review.body), rationale: "该 review 命题明确指向 executable contract 的表格、命令或 Pattern scope 本身不可执行；应走 re-enrichment，而不是 implementation retry。" })
-			else if (hasAny(review.body, [/code finding/i, /design-deviation/i, /logic @/i, /failure path/i, /evidence truth/i, /project convention/i, /证据真实性/i, /失败路径/i, /项目约定/i])) {
-				findings.push({ kind: "reviewer-discretion", sourceUrl: review.sourceUrl, excerpt: excerpt(review.body), rationale: "该 review 命题可追溯到代码正确性、失败路径、证据真实性或项目约定，属于 reviewer 保留裁量。" })
-			}
-			if (hasAny(review.body, [/timeout/i, /unreachable/i, /credential/i, /environment/i, /rate limit/i, /network/i, /环境/i, /凭据/i, /超时/i])) {
-				findings.push({ kind: "environment-failure", sourceUrl: review.sourceUrl, excerpt: excerpt(review.body), rationale: "review 记录了运行环境/外部依赖失败；该来源必须与 intent gap、preset drift 和实现缺陷分开保存。" })
+			const defectPatterns = [/issue contract error/i, /contract.*malformed/i, /验收标准.*malformed/i, /缺.*Pattern 验收/i, /literal command.*fail/i]
+			const discretionPatterns = [/code finding/i, /design-deviation/i, /logic @/i, /failure path/i, /evidence truth/i, /project convention/i, /证据真实性/i, /失败路径/i, /项目约定/i]
+			const environmentPatterns = [/timeout/i, /unreachable/i, /credential/i, /environment/i, /rate limit/i, /network/i, /环境/i, /凭据/i, /超时/i]
+			if (hasAny(review.body, defectPatterns)) findings.push({ kind: "contract-defect", sourceUrl: review.sourceUrl, excerpt: matchingExcerpt(review.body, defectPatterns), rationale: "该 review 命题明确指向 executable contract 的表格、命令或 Pattern scope 本身不可执行；应走 re-enrichment，而不是 implementation retry。" })
+			if (hasAny(review.body, discretionPatterns)) findings.push({ kind: "reviewer-discretion", sourceUrl: review.sourceUrl, excerpt: matchingExcerpt(review.body, discretionPatterns), rationale: "该 review 命题可追溯到代码正确性、失败路径、证据真实性或项目约定，属于 reviewer 保留裁量。" })
+			if (hasAny(review.body, environmentPatterns)) {
+				findings.push({ kind: "environment-failure", sourceUrl: review.sourceUrl, excerpt: matchingExcerpt(review.body, environmentPatterns), rationale: "review 记录了运行环境/外部依赖失败；该来源必须与 intent gap、preset drift 和实现缺陷分开保存。" })
 			}
 		}
 	}
-	const labelNames = issue.labels.map((label) => label.name.toLowerCase())
-	const deliverable: ReplayContractPacket["deliverable"] = labelNames.some((label) => label.includes("spike"))
-		? "spike-comment"
-		: /unblock|解除阻塞|blocker/i.test(intentText)
-			? "blocker-removal"
-			: /source[- ]writing|源码写作/i.test(intentText)
-				? "source-writing-spike"
-				: "implementation-pr"
-	const checks = intentText.split("\n").flatMap((line, index): ReplayCheck[] => {
-		if (!line.trim().startsWith("|") || !line.includes("`")) return []
-		const command = line.match(/`([^`]+)`/)?.[1]
-		if (command === undefined) return []
-		return [{ id: `issue-row-${index + 1}`, dimension: /browser/i.test(line) ? "environment" : "function", kind: /browser/i.test(line) ? "browser" : "shell", instruction: command }]
-	})
 	const missing: string[] = []
-	if (checks.length === 0) missing.push("no executable Check rows could be parsed")
+	if (!hasChecks) missing.push("no executable Check intent could be identified")
 	if (!hasPattern) missing.push("Pattern scope requires source investigation")
 	if (!hasRuntime) missing.push("canonical runtime requires target investigation")
 	if (!hasTestDelta) missing.push("Test delta authorization is absent")
