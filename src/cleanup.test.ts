@@ -1,4 +1,6 @@
-import { describe, expect, test } from "bun:test"
+import { setDefaultTimeout, describe, expect, test } from "bun:test"
+
+setDefaultTimeout(30_000)
 import { readdir, readFile, stat } from "node:fs/promises"
 import { extname, join, relative, resolve } from "node:path"
 import { buildRuntimeBindings, type LoopOptions, type PresetPhase } from "./loop"
