@@ -674,6 +674,37 @@ describe("parsePreset schema validation", () => {
 		expect(() => parsePreset(ambiguous, "/tmp")).toThrow(/ambiguous completed candidates/)
 	})
 
+	test("rejects unreachable non-trigger phases and illegal trigger lifecycle declarations", () => {
+		const unreachable: BoundaryRecord = minimalRoot()
+		unreachable.phases = [
+			{ name: "entry", prompt: "entry.md", entry: true, variables: { K: "item.id" } },
+			{ name: "orphan", prompt: "orphan.md", startsAttempt: true, variables: { K: "item.id" } },
+		]
+		expect(() => parsePreset(unreachable, "/tmp")).toThrow(/non-trigger phase\(s\) unreachable from entry "entry": orphan/)
+
+		const triggerStartsAttempt: BoundaryRecord = minimalRoot()
+		triggerStartsAttempt.statuses = { continuable: ["queued"], terminal: ["blocked", "done"], exhausted: "done" }
+		triggerStartsAttempt.phases = [
+			{ name: "entry", prompt: "entry.md", entry: true, startsAttempt: true, exits: [{ status: "blocked", when: "blocked" }], variables: { K: "item.id" } },
+			{ name: "trigger", prompt: "trigger.md", startsAttempt: true, trigger: { afterPhase: "entry", whenStatus: "blocked" }, variables: { K: "item.id" } },
+		]
+		expect(() => parsePreset(triggerStartsAttempt, "/tmp")).toThrow(/trigger phase "trigger" cannot start an attempt/)
+	})
+
+	test("rejects trigger frontier targets", () => {
+		const triggerTarget: BoundaryRecord = minimalRoot()
+		triggerTarget.statuses = { continuable: ["queued"], terminal: ["blocked", "done"], exhausted: "done" }
+		triggerTarget.phases = [
+			{
+				name: "entry", prompt: "entry.md", entry: true, startsAttempt: true,
+				exits: [{ status: "blocked", when: "blocked" }],
+				next: [{ phase: "trigger", on: "completed" }], variables: { K: "item.id" },
+			},
+			{ name: "trigger", prompt: "trigger.md", trigger: { afterPhase: "entry", whenStatus: "blocked" }, variables: { K: "item.id" } },
+		]
+		expect(() => parsePreset(triggerTarget, "/tmp")).toThrow(/trigger phase "trigger" cannot be a frontier successor/)
+	})
+
 	// #456: previously asserted the "last non-trigger phase" position via an engine helper. That
 	// helper enforced an engine assumption the DSL never declared; with the taxonomy retired the
 	// test pins the trigger declaration itself.
@@ -681,7 +712,7 @@ describe("parsePreset schema validation", () => {
 		const root: BoundaryRecord = minimalRoot()
 		root.statuses = {continuable: ["queued"], terminal: ["blocked", "done"], exhausted: "done" }
 		root.phases = [
-			{ name: "iteration", entry: true, startsAttempt: true, prompt: "iter.md", variables: { K: "item.id" } },
+			{ name: "iteration", entry: true, startsAttempt: true, prompt: "iter.md", next: [{ phase: "review", on: "completed" }], variables: { K: "item.id" } },
 			{ name: "review", prompt: "review.md", exits: [{ status: "blocked", when: "blocked" }], variables: { K: "item.id" } },
 			{ name: "responder", prompt: "responder.md", trigger: { afterPhase: "review", whenStatus: "blocked" }, variables: { K: "item.id" } },
 		]
@@ -701,7 +732,7 @@ describe("parsePreset schema validation", () => {
 		const root: BoundaryRecord = minimalRoot()
 		root.statuses = {continuable: ["queued", "in_progress"], terminal: ["done"], exhausted: "done" }
 		root.phases = [
-			{ name: "iteration", entry: true, startsAttempt: true, prompt: "iter.md", exits: [{ status: "in_progress", when: "handoff" }], variables: { K: "item.id" } },
+			{ name: "iteration", entry: true, startsAttempt: true, prompt: "iter.md", exits: [{ status: "in_progress", when: "handoff" }], next: [{ phase: "review", status: "in_progress" }], variables: { K: "item.id" } },
 			{ name: "review", prompt: "review.md", runner: "claude", exits: [{ status: "done", when: "accepted" }], variables: { K: "item.id" } },
 		]
 
@@ -722,7 +753,7 @@ describe("parsePreset schema validation", () => {
 		const root: BoundaryRecord = minimalRoot()
 		root.statuses = { continuable: ["queued", "in_progress"], terminal: ["done"], exhausted: "done" }
 		root.phases = [
-			{ name: "iteration", entry: true, startsAttempt: true, prompt: "iter.md", runner: "opencode", exits: [{ status: "in_progress", when: "handoff" }], variables: { K: "item.id" } },
+			{ name: "iteration", entry: true, startsAttempt: true, prompt: "iter.md", runner: "opencode", exits: [{ status: "in_progress", when: "handoff" }], next: [{ phase: "review", status: "in_progress" }], variables: { K: "item.id" } },
 			{ name: "review", prompt: "review.md", exits: [{ status: "done", when: "accepted" }], variables: { K: "item.id" } },
 		]
 
@@ -791,7 +822,7 @@ describe("parsePreset schema validation", () => {
 		const root: BoundaryRecord = minimalRoot()
 		root.statuses = {continuable: ["queued"], terminal: ["blocked", "done"], exhausted: "done" }
 		root.phases = [
-			{ name: "iteration", entry: true, startsAttempt: true, prompt: "iter.md", variables: { K: "item.id" } },
+			{ name: "iteration", entry: true, startsAttempt: true, prompt: "iter.md", next: [{ phase: "review", on: "completed" }], variables: { K: "item.id" } },
 			{ name: "review", prompt: "review.md", exits: [{ status: "blocked", when: "blocked" }], variables: { K: "item.id" } },
 			{ name: "responder", prompt: "responder.md", trigger: { afterPhase: "review", whenStatus: "blocked" }, variables: { K: "item.id" } },
 			{ name: "finalizer", prompt: "finalizer.md", trigger: { on: "chain-complete" }, variables: { K: "runtime.runId" } },
@@ -1502,7 +1533,7 @@ describe("issue #400 — fragment index slicing per phase", () => {
 			item: { idField: "id" },
 			statuses: { continuable: ["a"], terminal: ["b"], exhausted: "b" },
 			phases: [
-				{ name: "alpha", entry: true, startsAttempt: true, prompt: "alpha.md", variables: { K: "item.id" }, roles: ["roleA", "shared"] },
+				{ name: "alpha", entry: true, startsAttempt: true, prompt: "alpha.md", next: [{ phase: "beta", on: "completed" }], variables: { K: "item.id" }, roles: ["roleA", "shared"] },
 				{ name: "beta", prompt: "beta.md", variables: { K: "item.id" }, roles: ["roleB", "shared"] },
 			],
 			fragments: [
