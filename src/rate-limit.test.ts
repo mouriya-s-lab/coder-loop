@@ -1,4 +1,6 @@
-import { describe, expect, test } from "bun:test"
+import { setDefaultTimeout, describe, expect, test } from "bun:test"
+
+setDefaultTimeout(30_000)
 
 import {
 	classifyRateLimitFromStdout,

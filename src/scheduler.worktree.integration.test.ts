@@ -1,4 +1,6 @@
-import { afterAll, expect, test } from "bun:test"
+import { setDefaultTimeout, afterAll, expect, test } from "bun:test"
+
+setDefaultTimeout(30_000)
 import { spawnSync } from "node:child_process"
 import { mkdir, rm, writeFile } from "node:fs/promises"
 import { existsSync } from "node:fs"

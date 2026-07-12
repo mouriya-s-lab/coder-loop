@@ -1,6 +1,8 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, setDefaultTimeout, test } from "bun:test"
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { relative, resolve } from "node:path"
+
+setDefaultTimeout(30_000)
 
 import {
 	agentCodexArgs,

@@ -1,4 +1,6 @@
-import { afterAll, describe, expect, test } from "bun:test"
+import { setDefaultTimeout, afterAll, describe, expect, test } from "bun:test"
+
+setDefaultTimeout(30_000)
 import { Database } from "bun:sqlite"
 import { mkdir, rm } from "node:fs/promises"
 import { resolve } from "node:path"

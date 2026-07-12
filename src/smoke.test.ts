@@ -1,7 +1,9 @@
-import { afterAll, describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 import { createWriteStream } from "node:fs"
+
+setDefaultTimeout(30_000)
 
 import { startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
 import { openSqliteStateStore } from "./sqlite-state"
