@@ -4499,6 +4499,8 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 				}
 			}
 			if (phase.trigger === null) continue
+			if (phase.startsAttempt) presetError(`preset.phases[${index}].startsAttempt: trigger phase "${phase.name}" cannot start an attempt`)
+			if (phase.next.length > 0) presetError(`preset.phases[${index}].next: trigger phase "${phase.name}" cannot declare frontier successors`)
 			if (isChainCompleteTrigger(phase.trigger)) continue
 			const trigger = phase.trigger
 			if (!phaseNames.has(trigger.afterPhase)) {
@@ -4515,6 +4517,33 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 				presetError(`preset.phases[${index}].trigger.whenStatus: status "${trigger.whenStatus}" is not declared by phase "${trigger.afterPhase}" item-status exits`)
 			}
 		}
+
+	const nonTriggerPhases = phases.filter((phase) => phase.trigger === null)
+	for (const [index, phase] of phases.entries()) {
+		if (phase.trigger !== null) continue
+		for (const candidate of phase.next) {
+			const target = phases.find((entry) => entry.name === candidate.phase)
+			if (target?.trigger !== null) {
+				presetError(`preset.phases[${index}].next.phase: trigger phase "${candidate.phase}" cannot be a frontier successor`)
+			}
+		}
+	}
+	const entryPhase = entryPhases[0]!
+	const reachable = new Set<string>([entryPhase.name])
+	const pending = [entryPhase.name]
+	while (pending.length > 0) {
+		const currentName = pending.pop()!
+		const current = phases.find((phase) => phase.name === currentName)!
+		for (const candidate of current.next) {
+			if (reachable.has(candidate.phase)) continue
+			reachable.add(candidate.phase)
+			pending.push(candidate.phase)
+		}
+	}
+	const unreachable = nonTriggerPhases.filter((phase) => !reachable.has(phase.name)).map((phase) => phase.name)
+	if (unreachable.length > 0) {
+		presetError(`preset.phases: non-trigger phase(s) unreachable from entry "${entryPhase.name}": ${unreachable.join(", ")}`)
+	}
 
 	return {
 		name: root.name,

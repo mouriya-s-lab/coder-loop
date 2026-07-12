@@ -2189,6 +2189,52 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 		}
 	})
 
+	test("nonzero run ledger resumes the same declarative phase after store and scheduler restart", async () => {
+		for (const [ordinal, failedPhase] of ["alpha", "beta", "gamma"].entries()) {
+			const fixture = await createFixture(`phase-frontier-nonzero-restart-${failedPhase}`)
+			const presetDir = resolve(fixture.loopDataRoot, "..", "three-step-restart-preset")
+			await writeThreeStepPreset(presetDir)
+			const chain = createChain(fixture.store, `phase-frontier-nonzero-restart-${failedPhase}-chain`, { preset: "three-step" })
+			const item = createItem(fixture.store, chain, { issueNumber: 662_100 + ordinal, repoCwd: "/repo/a", summary: null })
+			const failedRunId = `run-failed-${failedPhase}`
+			fixture.store.recordRun({
+				runId: failedRunId,
+				chainId: chain.id,
+				itemId: item.id,
+				phase: failedPhase,
+				status: runtimeStatus("queued"),
+				startedAt: 1_800_100_000 + ordinal,
+				endedAt: 1_800_100_100 + ordinal,
+				exitCode: 1,
+				extra: storedItemExtra({ startStatus: "queued" }),
+			})
+			fixture.store.updateItem(item.id, {
+				status: runtimeStatus("queued"),
+				phase: failedPhase,
+				attempts: failedPhase === "alpha" ? 0 : 1,
+				lastRunId: failedRunId,
+				updatedAt: 1_800_100_200 + ordinal,
+			})
+			fixture.store.close()
+
+			const reopened = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot, createIfMissing: false })
+			try {
+				const tick = await schedulerTick(fixture.options({
+					store: reopened,
+					state: createSchedulerState(),
+					loadedPreset: await loadedPresetFromDir(presetDir),
+					runIdFactory: ({ phase }) => `run-resumed-${phase}`,
+				}))
+				expect(tick.spawnedRuns).toHaveLength(1)
+				expect(tick.spawnedRuns[0]?.runId).toBe(`run-resumed-${failedPhase}`)
+				expect(reopened.getItem(item.id)?.phase).toBe(failedPhase)
+				await tick.spawnedRuns[0]!.closed
+			} finally {
+				reopened.close()
+			}
+		}
+	})
+
 	test("AC5: daemon restart (no current run) at phase boundary — next tick spawns review only, does NOT re-spawn iter", async () => {
 		const fixture = await createFixture("phase-ac5-restart-resume")
 		try {
