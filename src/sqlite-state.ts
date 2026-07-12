@@ -15,6 +15,14 @@ import {
 	type ItemExtra,
 } from "./runtime-data"
 import { type LoopDataRootOptions, resolveLoopDataPaths } from "./runtime-paths"
+import {
+	assertNeverContextAuthor,
+	assertNeverContextScope,
+	type ContextAuthor,
+	type ContextEntry,
+	type ContextScope,
+} from "./context-entry"
+import { isDaemonAdmittedContextEntry, type AdmittedContextEntryInput } from "./daemon"
 
 export type SqliteStateErrorCode =
 	| "db_unavailable"
@@ -250,7 +258,7 @@ export type SetItemSessionIdInput = ItemSessionIdInput & {
 	updatedAt?: number
 }
 
-export type StateTableName = "chains" | "items" | "runs" | "current_runs"
+export type StateTableName = "chains" | "items" | "runs" | "current_runs" | "context_entries"
 
 export type SqliteStateStoreOptions = LoopDataRootOptions & {
 	createIfMissing?: boolean
@@ -287,6 +295,9 @@ export type SqliteStateStore = {
 	setCurrentRun: (input: SetCurrentRunInput) => CurrentRunRecord
 	getCurrentRun: (chainId: number) => CurrentRunRecord | null
 	clearCurrentRun: (chainId: number) => boolean
+	appendAdmittedContextEntry: (input: AdmittedContextEntryInput) => ContextEntry
+	listContextEntriesForTesting: (chainId: number) => ContextEntry[]
+	markChainDeletedWithContextCleanup: (chainId: number) => { chain: ChainRecord; removedEntries: number }
 }
 
 type SqlParamValue = string | number | bigint | boolean | Uint8Array | null
@@ -352,6 +363,20 @@ type CurrentRunRow = {
 	run_id: string
 	started_at: number
 	extra: string
+}
+
+type ContextEntryRow = {
+	id: number
+	chain_id: number
+	created_at: number
+	scope_kind: string
+	scope_key: string | null
+	author_kind: string
+	author_chain_id: number | null
+	author_item_id: string | null
+	author_run_id: string | null
+	author_phase: string | null
+	body: string
 }
 
 type JournalModeRow = {
@@ -463,6 +488,23 @@ CREATE TABLE IF NOT EXISTS current_runs (
 	extra TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS context_entries (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+	created_at REAL NOT NULL,
+	scope_kind TEXT NOT NULL CHECK (scope_kind IN ('chain', 'item', 'group')),
+	scope_key TEXT,
+	author_kind TEXT NOT NULL CHECK (author_kind IN ('operator', 'agent')),
+	author_chain_id INTEGER,
+	author_item_id TEXT,
+	author_run_id TEXT,
+	author_phase TEXT,
+	body TEXT NOT NULL,
+	CHECK ((scope_kind = 'chain' AND scope_key IS NULL) OR (scope_kind IN ('item', 'group') AND scope_key IS NOT NULL)),
+	CHECK ((author_kind = 'operator' AND author_chain_id IS NULL AND author_item_id IS NULL AND author_run_id IS NULL AND author_phase IS NULL)
+		OR (author_kind = 'agent' AND author_chain_id IS NOT NULL AND author_item_id IS NOT NULL AND author_run_id IS NOT NULL AND author_phase IS NOT NULL))
+);
+
 ${STATE_INDEXES_SQL}
 `
 
@@ -485,7 +527,7 @@ ${STATE_INDEXES_SQL}
 // now carries the widened CHECK). Idempotent: rows already on v13 cause `user_version` to skip
 // the rebuild, and rows being copied through the new schema satisfy the new constraint (existing
 // runner values are all `claude` / `codex` / NULL — strict subset of the new accepted set).
-const STATE_SCHEMA_VERSION = 13
+const STATE_SCHEMA_VERSION = 14
 const V5_ITEM_SESSION_COLUMN = ["last", "session", "id"].join("_")
 // v9 moves preset declaration from chains.preset to items.preset / items.preset_path (#412).
 // Existing rows are back-filled from chains.preset so the engine resolves the legacy preset
@@ -541,6 +583,15 @@ function stateSchemaExists(db: Database): boolean {
 			AND name IN ('chains', 'items', 'runs', 'current_runs')
 	`).get()
 	return row?.table_count === 4
+}
+
+function contextEntriesTableExists(db: Database): boolean {
+	const row = db.query<TableCountRow, []>(`
+		SELECT COUNT(*) AS table_count
+		FROM sqlite_master
+		WHERE type = 'table' AND name = 'context_entries'
+	`).get()
+	return row?.table_count === 1
 }
 
 function readUserVersion(db: Database): number {
@@ -616,6 +667,7 @@ function migrateStateSchema(db: Database): void {
 	if (
 		beforeVersion >= STATE_SCHEMA_VERSION
 		&& stateSchemaExists(db)
+		&& contextEntriesTableExists(db)
 		&& !needsChainTableRebuild
 		&& !needsItemTableRebuildForGitHubShapeRetire
 		&& !needsItemTableRebuildForOpencodeCheck
@@ -1395,7 +1447,128 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 
 		clearCurrentRun: (chainId) =>
 			write("clear current run", () => db.query<unknown, SqlParams>("DELETE FROM current_runs WHERE chain_id = $chainId").run({ chainId: chainId }).changes > 0),
+
+		appendAdmittedContextEntry: (input) =>
+			write("append context entry", () => {
+				if (!isDaemonAdmittedContextEntry(input)) {
+					throw new SqliteStateError("invalid_input", "context entry was not admitted by the daemon")
+				}
+				const scope = contextScopeColumns(input.scope)
+				const author = contextAuthorColumns(input.author)
+				const result = db.query<unknown, SqlParams>(`
+					INSERT INTO context_entries (
+						chain_id, created_at, scope_kind, scope_key, author_kind,
+						author_chain_id, author_item_id, author_run_id, author_phase, body
+					) VALUES (
+						$chainId, $createdAt, $scopeKind, $scopeKey, $authorKind,
+						$authorChainId, $authorItemId, $authorRunId, $authorPhase, $body
+					)
+				`).run({
+					chainId: input.chainId,
+					createdAt: input.ts,
+					scopeKind: scope.scopeKind,
+					scopeKey: scope.scopeKey,
+					authorKind: author.authorKind,
+					authorChainId: author.authorChainId,
+					authorItemId: author.authorItemId,
+					authorRunId: author.authorRunId,
+					authorPhase: author.authorPhase,
+					body: input.body,
+				})
+				const row = db.query<ContextEntryRow, SqlParams>("SELECT * FROM context_entries WHERE id = $id").get({ id: Number(result.lastInsertRowid) })
+				if (row === null) throw new SqliteStateError("not_found", "appended context entry was not found")
+				return rowToContextEntry(row)
+			}),
+
+		listContextEntriesForTesting: (chainId) =>
+			read("list context entries", () => db.query<ContextEntryRow, SqlParams>(
+				"SELECT * FROM context_entries WHERE chain_id = $chainId ORDER BY id ASC",
+			).all({ chainId }).map(rowToContextEntry)),
+
+		markChainDeletedWithContextCleanup: (chainId) =>
+			write("mark chain deleted with context cleanup", () => {
+				const current = requireChain(getChainRow(chainId), chainId)
+				db.query<unknown, SqlParams>(
+					"UPDATE chains SET status = 'deleted', updated_at = $updatedAt WHERE id = $chainId",
+				).run({ chainId, updatedAt: unixSeconds() })
+				const removedEntries = db.query<unknown, SqlParams>(
+					"DELETE FROM context_entries WHERE chain_id = $chainId",
+				).run({ chainId }).changes
+				const chain = requireChain(getChainRow(chainId), chainId)
+				if (current.id !== chain.id) throw new SqliteStateError("sqlite_error", `chain identity changed during delete: ${chainId}`)
+				return { chain, removedEntries }
+			}),
 	}
+}
+
+function contextScopeColumns(scope: ContextScope): { scopeKind: string; scopeKey: string | null } {
+	switch (scope.kind) {
+		case "chain": return { scopeKind: scope.kind, scopeKey: null }
+		case "item": return { scopeKind: scope.kind, scopeKey: scope.itemId }
+		case "group": return { scopeKind: scope.kind, scopeKey: scope.groupId }
+		default: return assertNeverContextScope(scope)
+	}
+}
+
+function contextAuthorColumns(author: ContextAuthor): {
+	authorKind: string
+	authorChainId: number | null
+	authorItemId: string | null
+	authorRunId: string | null
+	authorPhase: string | null
+} {
+	switch (author.kind) {
+		case "operator":
+			return { authorKind: author.kind, authorChainId: null, authorItemId: null, authorRunId: null, authorPhase: null }
+		case "agent":
+			return {
+				authorKind: author.kind,
+				authorChainId: author.chainId,
+				authorItemId: author.itemId,
+				authorRunId: author.runId,
+				authorPhase: author.phase,
+			}
+		default: return assertNeverContextAuthor(author)
+	}
+}
+
+function rowToContextEntry(row: ContextEntryRow): ContextEntry {
+	let scope: ContextScope
+	switch (row.scope_kind) {
+		case "chain":
+			if (row.scope_key !== null) throw new SqliteStateError("invalid_json", `chain context scope ${row.id} has a key`)
+			scope = { kind: "chain" }
+			break
+		case "item":
+			if (row.scope_key === null) throw new SqliteStateError("invalid_json", `item context scope ${row.id} lacks a key`)
+			scope = { kind: "item", itemId: row.scope_key }
+			break
+		case "group":
+			if (row.scope_key === null) throw new SqliteStateError("invalid_json", `group context scope ${row.id} lacks a key`)
+			scope = { kind: "group", groupId: row.scope_key }
+			break
+		default: throw new SqliteStateError("invalid_json", `invalid context scope kind: ${row.scope_kind}`, { id: row.id })
+	}
+	let author: ContextAuthor
+	switch (row.author_kind) {
+		case "operator":
+			author = { kind: "operator" }
+			break
+		case "agent":
+			if (row.author_chain_id === null || row.author_item_id === null || row.author_run_id === null || row.author_phase === null) {
+				throw new SqliteStateError("invalid_json", `agent context author ${row.id} is incomplete`)
+			}
+			author = {
+				kind: "agent",
+				chainId: row.author_chain_id,
+				itemId: row.author_item_id,
+				runId: row.author_run_id,
+				phase: row.author_phase,
+			}
+			break
+		default: throw new SqliteStateError("invalid_json", `invalid context author kind: ${row.author_kind}`, { id: row.id })
+	}
+	return { id: row.id, chainId: row.chain_id, ts: row.created_at, scope, author, body: row.body }
 }
 
 function rowToChain(row: ChainRow | null): ChainRecord | null {

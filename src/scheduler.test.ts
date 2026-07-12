@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
+import { Database } from "bun:sqlite"
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
@@ -57,6 +58,56 @@ afterAll(async () => {
 })
 
 describe("scheduler", () => {
+	test("context bodies containing status literals and finalizer markers are opaque to scheduling, status, and trigger decisions (#594)", async () => {
+		async function runScenario(name: string, withContextEntries: boolean) {
+			const fixture = await createFixture(name)
+			try {
+				const chain = createChain(fixture.store, `${name}-chain`)
+				const item = createItem(fixture.store, chain, { issueNumber: 594, repoCwd: "/repo/a", summary: null })
+				fixture.store.updateItem(item.id, {
+					status: runtimeStatus("blocked"),
+					phase: "review",
+					lastRunId: "run-before-context-opacity",
+					updatedAt: 1_800_594_000,
+				})
+				if (withContextEntries) {
+					const db = new Database(resolve(fixture.loopDataRoot, "db.sqlite"))
+					try {
+						const insert = db.query<unknown, [number, number, string, string, string, string]>(`
+							INSERT INTO context_entries (chain_id, created_at, scope_kind, scope_key, author_kind, body)
+							VALUES (?, ?, ?, ?, ?, ?)
+						`)
+						for (const body of ["queued", "done", "FINALIZER SUMMARY: decision=complete"]) {
+							insert.run(chain.id, 1_800_594_001, "item", item.itemId, "operator", body)
+						}
+					} finally {
+						db.close()
+					}
+				}
+				const tick = await schedulerTick(fixture.options({
+					runIdFactory: ({ phase }) => `run-context-opacity-${phase}`,
+				}))
+				const beforeClose = fixture.store.getItem(item.id)
+				const run = tick.spawnedRuns[0]
+				if (run === undefined) throw new Error("expected blocked-responder trigger run")
+				await run.closed
+				const afterClose = fixture.store.getItem(item.id)
+				return {
+					spawnedCount: tick.spawnedRuns.length,
+					beforeClose: { status: beforeClose?.status, phase: beforeClose?.phase },
+					afterClose: { status: afterClose?.status, phase: afterClose?.phase },
+					decisions: fixture.schedulerEvents.map((event) => event.type),
+				}
+			} finally {
+				fixture.store.close()
+			}
+		}
+
+		const baseline = await runScenario("context-opacity-baseline", false)
+		const withEntries = await runScenario("context-opacity-entries", true)
+		expect(withEntries).toEqual(baseline)
+	})
+
 	test("rejects successful scheduler completion when terminal persistence fails", async () => {
 		const fixture = await createFixture("terminal-persistence-failure")
 		try {

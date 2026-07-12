@@ -9,6 +9,8 @@
  */
 
 import { spawn } from "node:child_process"
+import { Buffer } from "node:buffer"
+import { randomUUID } from "node:crypto"
 import { appendFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises"
 import { closeSync, createWriteStream, openSync, type WriteStream } from "node:fs"
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
@@ -25,6 +27,7 @@ import {
 	daemonSocketPathIssueError,
 	detectDaemonSocketPathIssue,
 	sendDaemonRequest,
+	sendDaemonRequestSequence,
 	type DaemonCommandName,
 	type DaemonResponse,
 	type PresetPhasePrivilegedOp,
@@ -292,6 +295,7 @@ export type ItemCommandArgs =
 			loopDataRoot: string | null
 			json: boolean
 	  }
+
 	| {
 			action: "batch-add"
 			chainName: string
@@ -363,6 +367,19 @@ export type ItemCommandArgs =
 			loopDataRoot: string | null
 			json: boolean
 	  }
+
+type ContextBodySource =
+	| { kind: "inline"; body: string }
+	| { kind: "file"; path: string }
+
+type ContextCommandArgs = {
+	action: "append"
+	chainName: string
+	scope: import("./context-entry").ContextScope
+	bodySource: ContextBodySource
+	loopDataRoot: string | null
+	json: boolean
+}
 
 export type QueueUnblockCommandArgs = {
 	targetCwd: string
@@ -1123,6 +1140,7 @@ type CliCommand =
 	| { kind: "daemon"; args: DaemonCommandArgs }
 	| { kind: "chain"; args: ChainCommandArgs }
 	| { kind: "item"; args: ItemCommandArgs }
+	| { kind: "context"; args: ContextCommandArgs }
 	| { kind: "queue"; args: QueueUnblockCommandArgs }
 
 // #433: the per-target runner / model CLI is retired; runner / model resolution is read from
@@ -1746,6 +1764,37 @@ const itemCliCommand = subcommands({
 	},
 })
 
+const contextAppendCliCommand = command({
+	name: "append",
+	description: "Append one immutable context entry through the daemon socket.",
+	args: {
+		chain: positional({ displayName: "chain", type: cmdString }),
+		scope: option({ long: "scope", type: cmdString }),
+		scopeKey: option({ long: "scope-key", type: optional(cmdString) }),
+		body: option({ long: "body", type: optional(cmdString) }),
+		bodyFile: option({ long: "body-file", type: optional(cmdString) }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		json: flag({ long: "json" }),
+	},
+	handler: (args): CliCommand => ({
+		kind: "context",
+		args: {
+			action: "append",
+			chainName: args.chain,
+			scope: parseContextScopeFlag(args.scope, args.scopeKey ?? null),
+			bodySource: parseContextBodySource(args.body ?? null, args.bodyFile ?? null),
+			loopDataRoot: args.loopDataRoot ?? null,
+			json: args.json,
+		},
+	}),
+})
+
+const contextCliCommand = subcommands({
+	name: "context",
+	description: "Append immutable chain context through the daemon socket.",
+	cmds: { append: contextAppendCliCommand },
+})
+
 const queueUnblockCliCommand = command({
 	name: "unblock",
 	description: "Restore one preset-unblockable item to the preset entry status and clear blocker metadata.",
@@ -2121,6 +2170,114 @@ async function runItemCommand(args: string[]): Promise<void> {
 	writeCommandResult(result, itemArgs.json, formatItemMutationResult)
 }
 
+function parseContextScopeFlag(raw: string, scopeKey: string | null): import("./context-entry").ContextScope {
+	switch (raw) {
+		case "chain":
+			if (scopeKey !== null) fail("context append: --scope-key is not valid for chain scope")
+			return { kind: "chain" }
+		case "item":
+			if (scopeKey === null || scopeKey === "") fail("context append: item scope requires --scope-key")
+			return { kind: "item", itemId: scopeKey }
+		case "group":
+			if (scopeKey === null || scopeKey === "") fail("context append: group scope requires --scope-key")
+			return { kind: "group", groupId: scopeKey }
+		default:
+			fail(`context append: --scope must be chain, item, or group; got ${raw}`)
+	}
+}
+
+function parseContextBodySource(body: string | null, bodyFile: string | null): ContextBodySource {
+	if (body !== null && bodyFile !== null) fail("context append: use exactly one of --body or --body-file")
+	if (body !== null) return { kind: "inline", body }
+	if (bodyFile !== null) return { kind: "file", path: bodyFile }
+	fail("context append: use exactly one of --body or --body-file")
+}
+
+function contextScopeToJson(scope: import("./context-entry").ContextScope): JsonObject {
+	switch (scope.kind) {
+		case "chain": return { kind: "chain" }
+		case "item": return { kind: "item", itemId: scope.itemId }
+		case "group": return { kind: "group", groupId: scope.groupId }
+		default: return assertNeverContextScope(scope)
+	}
+}
+
+function assertNeverContextScope(value: never): never {
+	throw new CoderLoopError(`unhandled context scope: ${JSON.stringify(value)}`)
+}
+
+async function readContextBody(source: ContextBodySource): Promise<string> {
+	switch (source.kind) {
+		case "inline": return source.body
+		case "file": return source.path === "-" ? await Bun.stdin.text() : await readFile(resolve(source.path), "utf-8")
+		default: return assertNeverContextBodySource(source)
+	}
+}
+
+function assertNeverContextBodySource(value: never): never {
+	throw new CoderLoopError(`unhandled context body source: ${JSON.stringify(value)}`)
+}
+
+const CONTEXT_APPEND_WINDOW_BYTES = 64 * 1024
+
+function contextBodyWindows(body: string): string[] {
+	const windows: string[] = []
+	let current = ""
+	let currentBytes = 0
+	for (const character of body) {
+		const characterBytes = Buffer.byteLength(character, "utf-8")
+		if (currentBytes > 0 && currentBytes + characterBytes > CONTEXT_APPEND_WINDOW_BYTES) {
+			windows.push(current)
+			current = ""
+			currentBytes = 0
+		}
+		current += character
+		currentBytes += characterBytes
+	}
+	if (current !== "" || body === "") windows.push(current)
+	return windows
+}
+
+async function runContextCommand(args: string[]): Promise<void> {
+	const parsed = await runCmd(contextCliCommand, args)
+	if (parsed.value.kind !== "context") return
+	const contextArgs = parsed.value.args
+	const body = await readContextBody(contextArgs.bodySource)
+	const uploadId = randomUUID()
+	const windows = contextBodyWindows(body)
+	const requests = [
+		daemonRequest("context.appendBegin", withInjectedRunCredential("context.appendBegin", {
+			uploadId,
+			chainName: contextArgs.chainName,
+			scope: contextScopeToJson(contextArgs.scope),
+		})),
+		...windows.map((window, index) => daemonRequest("context.appendChunk", withInjectedRunCredential("context.appendChunk", {
+			uploadId,
+			index,
+			body: window,
+		}))),
+		daemonRequest("context.appendCommit", withInjectedRunCredential("context.appendCommit", {
+			uploadId,
+			chunkCount: windows.length,
+		})),
+	]
+	const socketPath = resolveLoopDataPaths(contextArgs.loopDataRoot === null ? {} : { loopDataRoot: contextArgs.loopDataRoot }).daemonSocket
+	let responses: Awaited<ReturnType<typeof sendDaemonRequestSequence>>
+	try {
+		responses = await sendDaemonRequestSequence(socketPath, requests)
+	} catch (error) {
+		const failure = await daemonConnectionFailure(contextArgs.loopDataRoot, error)
+		fail(failure.message)
+	}
+	for (const response of responses) {
+		if (!response.ok) fail(`${response.error.code}: ${response.error.message}`)
+	}
+	const finalResponse = responses[responses.length - 1]
+	if (finalResponse === undefined || !finalResponse.ok) fail("context append: daemon returned no commit response")
+	const result = finalResponse.result
+	writeCommandResult(result, contextArgs.json, formatContextAppendResult)
+}
+
 function assignCliOptional(target: JsonObject, key: string, value: JsonValue | undefined): void {
 	if (value !== undefined && value !== null) target[key] = value
 }
@@ -2295,6 +2452,9 @@ const AGENT_ATTRIBUTED_COMMANDS = [
 	"item.batchAdd",
 	"item.exitAction",
 	"item.reorder",
+	"context.appendBegin",
+	"context.appendChunk",
+	"context.appendCommit",
 	"chain.create",
 	"chain.stop",
 	"chain.resume",
@@ -2502,6 +2662,12 @@ function formatItemMutationResult(result: JsonObject): string {
 	return `item ${String(item?.itemId ?? item?.id ?? "")}: ${String(item?.status ?? "")}\n`
 }
 
+function formatContextAppendResult(result: JsonObject): string {
+	const entry = jsonObjectEntry(result.entry)
+	if (entry === null || entry === undefined || typeof entry.id !== "number") fail("context append: daemon returned no entry")
+	return `context entry ${entry.id} appended\n`
+}
+
 function formatItemBatchAddResult(result: JsonObject): string {
 	const items = Array.isArray(result.items) ? result.items : []
 	return `added ${items.length} item(s)\n`
@@ -2682,6 +2848,10 @@ async function main() {
 		await runItemCommand(process.argv.slice(3))
 		return
 	}
+	if (firstArg === "context") {
+		await runContextCommand(process.argv.slice(3))
+		return
+	}
 	if (firstArg === "queue") {
 		await runQueueCommand(process.argv.slice(3))
 		return
@@ -2704,6 +2874,7 @@ function rootUsage(): string {
 		"  daemon <up|down|status|start|stop|restart>",
 		"  chain <create|list|status|stop|resume|delete|set-runner-model>",
 		"  item <add|batch-add|list|update|reorder|exits|exit-action>",
+		"  context append <chain> --scope <chain|item|group> [--scope-key ID] (--body TEXT | --body-file PATH|-)",
 		"  queue unblock <target> --issue <issue>",
 		"  doctor <target>",
 		"",

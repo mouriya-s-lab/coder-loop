@@ -48,6 +48,15 @@ import {
 } from "./scheduler"
 import { PersistedRateLimitStateBoundary, type RateLimitReset } from "./rate-limit"
 import {
+	ContextAppendAccumulator,
+	parseContextAppendBeginRequest,
+	parseContextAppendChunkRequest,
+	parseContextAppendCommitRequest,
+	type ContextAuthor,
+	type ContextEntry,
+	type ContextScope,
+} from "./context-entry"
+import {
 	type ChainRecord,
 	type CreateChainInput,
 	type CreateItemInput,
@@ -101,6 +110,7 @@ import {
 	type ObservabilityEventQuery,
 	type ObservabilitySubject,
 	type ItemUpdateFieldWriteReason,
+	type ContextWriteAdmissionReason,
 	type PrivilegedOpAuditOp,
 	type PrivilegedOpAuditReason,
 } from "./observability"
@@ -165,6 +175,9 @@ export type DaemonCommandName =
 	// rejected (#409); this is the only controlled channel for an agent to stop
 	// the chain it owns.
 	| "item.exitAction"
+	| "context.appendBegin"
+	| "context.appendChunk"
+	| "context.appendCommit"
 	| "daemon.status"
 	| "daemon.down"
 	// #409: previously executed inline in the CLI process — moved behind the
@@ -511,7 +524,37 @@ const QUEUE_UNBLOCK_ARG_KEYS = ["chainId", "chainName", "name", "issue", "dryRun
 // Downstream handlers switch exhaustively on `kind` so "anonymous mutation" is unrepresentable.
 type ItemMutationCaller =
 	| { kind: "operator"; subject: Extract<ObservabilitySubject, { kind: "operator" }> }
-	| { kind: "agent"; runId: string; phase: string; subject: Extract<ObservabilitySubject, { kind: "agent" }> }
+	| { kind: "agent"; chainId: number; rowId: number; itemId: string; runId: string; phase: string; subject: Extract<ObservabilitySubject, { kind: "agent" }> }
+
+const contextEntryAdmissionBrand: unique symbol = Symbol("context-entry-admission")
+
+export type AdmittedContextEntryInput = Omit<ContextEntry, "id"> & {
+	readonly [contextEntryAdmissionBrand]: true
+}
+
+const daemonAdmittedContextEntries = new WeakSet<AdmittedContextEntryInput>()
+
+export function isDaemonAdmittedContextEntry(input: AdmittedContextEntryInput): boolean {
+	return daemonAdmittedContextEntries.has(input)
+}
+
+class AdmittedContextUpload extends ContextAppendAccumulator {
+	constructor(
+		uploadId: string,
+		connectionId: string,
+		chainId: number,
+		scope: ContextScope,
+		readonly author: ContextAuthor,
+	) {
+		super(uploadId, connectionId, chainId, scope)
+	}
+}
+
+function admittedContextEntry(input: Omit<ContextEntry, "id">): AdmittedContextEntryInput {
+	const admitted = { ...input, [contextEntryAdmissionBrand]: true as const }
+	daemonAdmittedContextEntries.add(admitted)
+	return admitted
+}
 
 // #600: authorization and audit attribution for `item.exitAction` after caller admission.
 // Operator calls have no credential-bound identity, so they preserve the existing direct-socket
@@ -1035,6 +1078,7 @@ export class CoderLoopDaemon {
 	// matching the "credentials die with the process" invariant. Not persisted to SQLite — credentials
 	// are process-instance-scoped, not durable state.
 	private readonly runCredentialRegistry = new Map<string, RunCredentialRegistration>()
+	private readonly contextUploads = new Map<string, AdmittedContextUpload>()
 	private resolveClosed: (() => void) | null = null
 	private readonly daemonBatchTimestamp = formatDaemonBatchTimestamp(new Date())
 	// #409: classified dispatch table; built once at construction. Each entry binds a
@@ -1471,6 +1515,7 @@ export class CoderLoopDaemon {
 
 	private acceptConnection(socket: Socket): void {
 		this.sockets.add(socket)
+		const connectionId = randomUUID()
 		socket.setEncoding("utf-8")
 		let buffer = ""
 		let oversizedRequestRejected = false
@@ -1484,7 +1529,7 @@ export class CoderLoopDaemon {
 				buffer = buffer.slice(newlineIndex + 1)
 				if (line.trim() !== "") {
 					requestSequence = requestSequence.then(async () => {
-						await this.handleLine(socket, line)
+						await this.handleLine(socket, line, connectionId)
 					})
 				}
 				newlineIndex = buffer.indexOf("\n")
@@ -1498,14 +1543,22 @@ export class CoderLoopDaemon {
 		})
 		socket.on("close", () => {
 			this.sockets.delete(socket)
+			this.discardContextUploadsForConnection(connectionId)
 		})
 		socket.on("error", () => {
 			this.sockets.delete(socket)
+			this.discardContextUploadsForConnection(connectionId)
 		})
 	}
 
-	private async handleLine(socket: Socket, line: string): Promise<void> {
-		const response = await this.responseForLine(line)
+	private discardContextUploadsForConnection(connectionId: string): void {
+		for (const [uploadId, upload] of this.contextUploads) {
+			if (upload.connectionId === connectionId) this.contextUploads.delete(uploadId)
+		}
+	}
+
+	private async handleLine(socket: Socket, line: string, connectionId: string): Promise<void> {
+		const response = await this.responseForLine(line, connectionId)
 		socket.write(`${JSON.stringify(response)}\n`)
 		if (response.ok && response.result.shutdown === true) {
 			socket.end()
@@ -1515,7 +1568,7 @@ export class CoderLoopDaemon {
 		}
 	}
 
-	private async responseForLine(line: string): Promise<DaemonResponse> {
+	private async responseForLine(line: string, connectionId: string): Promise<DaemonResponse> {
 		let requestId = "unknown"
 		try {
 			validateRequestLineSize(line)
@@ -1527,7 +1580,7 @@ export class CoderLoopDaemon {
 					command: request.command,
 				})
 			}
-			const result = await this.handleRequest(request)
+			const result = await this.handleRequest(request, connectionId)
 			return { id: request.id, ok: true, result }
 		} catch (error) {
 			return { id: requestId, ok: false, error: responseError(error) }
@@ -1557,6 +1610,9 @@ export class CoderLoopDaemon {
 			"item.reorder": { authClass: "per-phase-authorized", handler: (args) => this.handleItemReorder(args) },
 			"item.exits": { authClass: "read-no-auth", handler: (args) => this.handleItemExits(args) },
 			"item.exitAction": { authClass: "mutation-credential-gated", handler: (args) => this.handleItemExitAction(args) },
+			"context.appendBegin": { authClass: "mutation-credential-gated", handler: (args, connectionId) => this.handleContextAppendBegin(args, connectionId) },
+			"context.appendChunk": { authClass: "mutation-credential-gated", handler: (args, connectionId) => this.handleContextAppendChunk(args, connectionId) },
+			"context.appendCommit": { authClass: "mutation-credential-gated", handler: (args, connectionId) => this.handleContextAppendCommit(args, connectionId) },
 			"daemon.status": { authClass: "read-no-auth", handler: () => Promise.resolve({ daemon: daemonSnapshotToJson(this.snapshot()) }) },
 			"daemon.down": {
 				authClass: "hard-deny-for-agent",
@@ -1575,7 +1631,7 @@ export class CoderLoopDaemon {
 		}
 	}
 
-	private async handleRequest(request: DaemonRequest): Promise<JsonObject> {
+	private async handleRequest(request: DaemonRequest, connectionId: string): Promise<JsonObject> {
 		const narrowed = narrowDaemonCommandName(request.command)
 		if (narrowed === null) {
 			throw new DaemonError("unknown_command", `unknown daemon command: ${request.command}`, { command: request.command })
@@ -1586,7 +1642,7 @@ export class CoderLoopDaemon {
 		// read-no-auth bypass — the former runs its own bespoke per-item gate inside the
 		// handler, the latter is unauthenticated by design.
 		await this.runAuthorizationGate(narrowed, spec.authClass, request.args)
-		return await spec.handler(request.args)
+		return await spec.handler(request.args, connectionId)
 	}
 
 	// #409 caller stratification gate. Returns void on allow; throws DaemonError on deny.
@@ -2157,11 +2213,15 @@ export class CoderLoopDaemon {
 		try {
 			const terminatedRuns = await this.terminateActiveRunsForChain(chain.id)
 			const cleanup = await this.cleanupChainRuntime(chain)
-			const updated = this.requireStore().updateChain(chain.id, { status: "deleted" })
+			const deleted = this.requireStore().markChainDeletedWithContextCleanup(chain.id)
+			for (const [uploadId, upload] of this.contextUploads) {
+				if (upload.chainId === chain.id) this.contextUploads.delete(uploadId)
+			}
 			this.decisionFingerprints.release({ kind: "chain", chainId: chain.id })
 			return {
-				chain: chainToJson(updated),
+				chain: chainToJson(deleted.chain),
 				alreadyDeleted: false,
+				removedContextEntries: deleted.removedEntries,
 				terminatedRuns: terminatedRuns.map(completedRunToJson),
 				cleanup,
 			}
@@ -2478,6 +2538,201 @@ export class CoderLoopDaemon {
 			}
 			throw error
 		}
+	}
+
+	private async handleContextAppendBegin(args: JsonObject, connectionId: string): Promise<JsonObject> {
+		let request: ReturnType<typeof parseContextAppendBeginRequest>
+		try {
+			request = parseContextAppendBeginRequest(args)
+		} catch (error) {
+			await this.recordRejectedContextRequest(args, "invalid-request")
+			throw new DaemonError("invalid_request", `invalid context append request: ${errorMessage(error)}`)
+		}
+		const chain = this.requireStore().getChainByName(request.chainName)
+		if (chain === null) {
+			await this.recordContextWriteAdmission(null, request.scope, { kind: "engine" }, "deny", "chain-not-found")
+			throw new DaemonError("not_found", `chain ${request.chainName} was not found`, { chainName: request.chainName })
+		}
+		if (chain.status === "deleted") {
+			await this.recordContextWriteAdmission(chain, request.scope, { kind: "engine" }, "deny", "chain-deleted")
+			throw new DaemonError("chain_deleted", `chain ${chain.name} is deleted`)
+		}
+		const resolved = this.resolveItemMutationCaller(args)
+		if (resolved.kind === "err") {
+			await this.recordContextWriteAdmission(chain, request.scope, { kind: "engine" }, "deny", resolved.error.kind)
+			throw this.resolveCallerDenyError(resolved.error)
+		}
+		const caller = resolved.value
+		let author: ContextAuthor
+		if (caller.kind === "operator") {
+			author = { kind: "operator" }
+		} else {
+			if (caller.chainId !== chain.id) {
+				await this.recordContextWriteAdmission(chain, request.scope, caller.subject, "deny", "cross-chain")
+				throw new DaemonError("invalid_caller", `agent credential belongs to chain ${caller.chainId}, not ${chain.id}`)
+			}
+			author = {
+				kind: "agent",
+				chainId: caller.chainId,
+				itemId: caller.itemId,
+				runId: caller.runId,
+				phase: caller.phase,
+			}
+		}
+		switch (request.scope.kind) {
+			case "chain":
+				break
+			case "item":
+				if (this.requireStore().getItemById(chain.id, request.scope.itemId) === null) {
+					await this.recordContextWriteAdmission(chain, request.scope, caller.subject, "deny", "item-not-found")
+					throw new DaemonError("invalid_request", `context item scope target ${request.scope.itemId} does not exist in chain ${chain.name}`)
+				}
+				break
+			case "group":
+				await this.recordContextWriteAdmission(chain, request.scope, caller.subject, "deny", "group-unavailable-v2")
+				throw new DaemonError("invalid_request", "group scope is unavailable in v2 because no addressable par container exists")
+			default:
+				return assertNeverContextScopeRequest(request.scope)
+		}
+		if (this.contextUploads.has(request.uploadId)) {
+			await this.recordContextWriteAdmission(chain, request.scope, caller.subject, "deny", "protocol-rejected")
+			throw new DaemonError("conflict", `context upload ${request.uploadId} already exists`)
+		}
+		this.contextUploads.set(request.uploadId, new AdmittedContextUpload(request.uploadId, connectionId, chain.id, request.scope, author))
+		return { uploadId: request.uploadId }
+	}
+
+	private async handleContextAppendChunk(args: JsonObject, connectionId: string): Promise<JsonObject> {
+		let request: ReturnType<typeof parseContextAppendChunkRequest>
+		try {
+			request = parseContextAppendChunkRequest(args)
+		} catch (error) {
+			await this.recordRejectedContextRequest(args, "invalid-request")
+			throw new DaemonError("invalid_request", `invalid context append chunk: ${errorMessage(error)}`)
+		}
+		const upload = this.contextUploads.get(request.uploadId)
+		if (upload === undefined) {
+			await this.recordContextWriteAdmission(null, null, { kind: "engine" }, "deny", "upload-not-found")
+			throw new DaemonError("not_found", `context upload ${request.uploadId} was not found`)
+		}
+		const chain = this.requireStore().getChain(upload.chainId)
+		if (upload.connectionId !== connectionId) {
+			await this.recordContextWriteAdmission(chain, upload.scope, { kind: "engine" }, "deny", "connection-mismatch")
+			throw new DaemonError("invalid_caller", `context upload ${request.uploadId} belongs to another socket connection`)
+		}
+		const caller = await this.assertContextUploadCaller(upload, args, chain)
+		try {
+			upload.append(request)
+		} catch (error) {
+			await this.recordContextWriteAdmission(chain, upload.scope, caller.subject, "deny", "protocol-rejected")
+			throw new DaemonError("invalid_request", errorMessage(error))
+		}
+		return { uploadId: request.uploadId, nextIndex: upload.chunks.length }
+	}
+
+	private async handleContextAppendCommit(args: JsonObject, connectionId: string): Promise<JsonObject> {
+		let request: ReturnType<typeof parseContextAppendCommitRequest>
+		try {
+			request = parseContextAppendCommitRequest(args)
+		} catch (error) {
+			await this.recordRejectedContextRequest(args, "invalid-request")
+			throw new DaemonError("invalid_request", `invalid context append commit: ${errorMessage(error)}`)
+		}
+		const upload = this.contextUploads.get(request.uploadId)
+		if (upload === undefined) {
+			await this.recordContextWriteAdmission(null, null, { kind: "engine" }, "deny", "upload-not-found")
+			throw new DaemonError("not_found", `context upload ${request.uploadId} was not found`)
+		}
+		const chain = this.requireStore().getChain(upload.chainId)
+		if (upload.connectionId !== connectionId) {
+			await this.recordContextWriteAdmission(chain, upload.scope, { kind: "engine" }, "deny", "connection-mismatch")
+			throw new DaemonError("invalid_caller", `context upload ${request.uploadId} belongs to another socket connection`)
+		}
+		const caller = await this.assertContextUploadCaller(upload, args, chain)
+		let body: string
+		try {
+			body = upload.commit(request)
+		} catch (error) {
+			await this.recordContextWriteAdmission(chain, upload.scope, caller.subject, "deny", "protocol-rejected")
+			throw new DaemonError("invalid_request", errorMessage(error))
+		}
+		if (chain === null || chain.status === "deleted") {
+			await this.recordContextWriteAdmission(chain, upload.scope, caller.subject, "deny", "chain-deleted")
+			throw new DaemonError("chain_deleted", `context upload chain ${upload.chainId} is deleted`)
+		}
+		let entry: ContextEntry
+		try {
+			entry = this.requireStore().appendAdmittedContextEntry(admittedContextEntry({
+				chainId: upload.chainId,
+				ts: unixSeconds(),
+				scope: upload.scope,
+				author: upload.author,
+				body,
+			}))
+		} catch (error) {
+			await this.recordContextWriteAdmission(chain, upload.scope, caller.subject, "deny", "storage-rejected")
+			throw error
+		}
+		this.contextUploads.delete(request.uploadId)
+		await this.recordContextWriteAdmission(
+			chain,
+			upload.scope,
+			caller.subject,
+			"allow",
+			caller.kind === "operator" ? "operator" : "agent-credential-admitted",
+		)
+		return { entry: contextEntryToJson(entry) }
+	}
+
+	private async assertContextUploadCaller(upload: AdmittedContextUpload, args: JsonObject, chain: ChainRecord | null): Promise<ItemMutationCaller> {
+		const resolved = this.resolveItemMutationCaller(args)
+		if (resolved.kind === "err") {
+			await this.recordContextWriteAdmission(chain, upload.scope, { kind: "engine" }, "deny", resolved.error.kind)
+			throw this.resolveCallerDenyError(resolved.error)
+		}
+		const caller = resolved.value
+		const matches = caller.kind === "operator"
+			? upload.author.kind === "operator"
+			: upload.author.kind === "agent"
+				&& upload.author.chainId === caller.chainId
+				&& upload.author.itemId === caller.itemId
+				&& upload.author.runId === caller.runId
+				&& upload.author.phase === caller.phase
+		if (!matches) {
+			await this.recordContextWriteAdmission(chain, upload.scope, caller.subject, "deny", "connection-mismatch")
+			throw new DaemonError("invalid_caller", `caller does not own context upload ${upload.uploadId}`)
+		}
+		return caller
+	}
+
+	private async recordRejectedContextRequest(args: JsonObject, reason: ContextWriteAdmissionReason): Promise<void> {
+		const chainName = typeof args.chainName === "string" ? args.chainName : null
+		const chain = chainName === null ? null : this.requireStore().getChainByName(chainName)
+		await this.recordContextWriteAdmission(chain, contextScopeFromRequestArgs(args), { kind: "engine" }, "deny", reason)
+	}
+
+	private async recordContextWriteAdmission(
+		chain: ChainRecord | null,
+		scope: ContextScope | null,
+		subject: ObservabilitySubject,
+		outcome: "allow" | "deny",
+		reason: ContextWriteAdmissionReason,
+	): Promise<void> {
+		const event = makeObservabilityEvent({
+			kind: "audit",
+			type: "context.write_admission",
+			...(chain === null ? {} : { chain: chain.name }),
+			subject,
+			payload: {
+				chainId: chain?.id ?? null,
+				scopeKind: scope?.kind ?? "invalid",
+				scopeKey: scope === null ? null : contextScopeKey(scope),
+				outcome,
+				reason,
+			},
+		})
+		if (chain === null) await this.recordObservabilityEvent(event)
+		else await this.recordObservabilityEventIfChainNameIsValid(chain, event)
 	}
 
 	private async handleItemAdd(args: JsonObject): Promise<JsonObject> {
@@ -3563,9 +3818,25 @@ export class CoderLoopDaemon {
 			runId: registration.context.runId,
 			phase: registration.context.phase,
 		}
+		const boundItem = this.requireStore().getItem(registration.context.itemId)
+		if (boundItem === null || boundItem.chainId !== registration.context.chainId) {
+			throw new DaemonError("internal_error", `active run ${registration.context.runId} has no bound item`, {
+				runId: registration.context.runId,
+				chainId: registration.context.chainId,
+				rowId: registration.context.itemId,
+			})
+		}
 		return {
 			kind: "ok",
-			value: { kind: "agent", runId: registration.context.runId, phase: registration.context.phase, subject },
+			value: {
+				kind: "agent",
+				chainId: registration.context.chainId,
+				rowId: registration.context.itemId,
+				itemId: boundItem.itemId,
+				runId: registration.context.runId,
+				phase: registration.context.phase,
+				subject,
+			},
 		}
 	}
 
@@ -4247,6 +4518,63 @@ export async function sendDaemonRequest(socketPath: string, request: Omit<Daemon
 			} catch (error) {
 				cleanup()
 				reject(error)
+			}
+		})
+		socket.on("error", (error) => {
+			cleanup()
+			reject(error)
+		})
+	})
+}
+
+export async function sendDaemonRequestSequence(
+	socketPath: string,
+	requests: readonly (Omit<DaemonRequest, "args"> & { args?: JsonObject })[],
+): Promise<DaemonResponse[]> {
+	if (requests.length === 0) return []
+	return await new Promise((resolveResponses, reject) => {
+		const socket = createConnection(socketPath)
+		const responses: DaemonResponse[] = []
+		let buffer = ""
+		let nextRequestIndex = 0
+		const cleanup = () => {
+			socket.removeAllListeners()
+			socket.destroy()
+		}
+		const writeNext = () => {
+			const request = requests[nextRequestIndex]
+			if (request === undefined) return
+			nextRequestIndex += 1
+			socket.write(`${JSON.stringify({ ...request, args: request.args ?? {} })}\n`)
+		}
+		socket.setEncoding("utf-8")
+		socket.on("connect", writeNext)
+		socket.on("data", (chunk: string) => {
+			buffer += chunk
+			let newlineIndex = buffer.indexOf("\n")
+			while (newlineIndex !== -1) {
+				const line = buffer.slice(0, newlineIndex)
+				buffer = buffer.slice(newlineIndex + 1)
+				try {
+					responses.push(parseDaemonResponse(line))
+				} catch (error) {
+					cleanup()
+					reject(error)
+					return
+				}
+				const latest = responses[responses.length - 1]
+				if (latest !== undefined && !latest.ok) {
+					cleanup()
+					resolveResponses(responses)
+					return
+				}
+				if (responses.length === requests.length) {
+					cleanup()
+					resolveResponses(responses)
+					return
+				}
+				writeNext()
+				newlineIndex = buffer.indexOf("\n")
 			}
 		})
 		socket.on("error", (error) => {
@@ -5282,7 +5610,7 @@ function assertNeverChainAction(value: never): never {
 // without classifying it.
 type DaemonCommandSpec = {
 	readonly authClass: DaemonCommandAuthClass
-	readonly handler: (args: JsonObject) => Promise<JsonObject>
+	readonly handler: (args: JsonObject, connectionId: string) => Promise<JsonObject>
 }
 
 const DAEMON_COMMAND_NAMES = [
@@ -5300,6 +5628,9 @@ const DAEMON_COMMAND_NAMES = [
 	"item.reorder",
 	"item.exits",
 	"item.exitAction",
+	"context.appendBegin",
+	"context.appendChunk",
+	"context.appendCommit",
 	"daemon.status",
 	"daemon.down",
 	"logs.query",
@@ -5353,6 +5684,9 @@ function narrowPrivilegedOpAuditOp(op: DaemonCommandName): PrivilegedOpAuditOp |
 		case "item.update":
 		case "item.exits":
 		case "item.exitAction":
+		case "context.appendBegin":
+		case "context.appendChunk":
+		case "context.appendCommit":
 		case "daemon.status":
 			return null
 		default:
@@ -5366,6 +5700,59 @@ function assertNeverDaemonCommand(value: never): never {
 
 function assertNeverDaemonCommandAuthClass(value: never): never {
 	throw new DaemonError("internal_error", `unhandled daemon command auth class: ${JSON.stringify(value)}`)
+}
+
+function contextScopeKey(scope: ContextScope): string | null {
+	switch (scope.kind) {
+		case "chain": return null
+		case "item": return scope.itemId
+		case "group": return scope.groupId
+		default: return assertNeverContextScopeRequest(scope)
+	}
+}
+
+function contextScopeFromRequestArgs(args: JsonObject): ContextScope | null {
+	const scope = args.scope
+	if (!isJsonObjectValue(scope) || typeof scope.kind !== "string") return null
+	switch (scope.kind) {
+		case "chain": return { kind: "chain" }
+		case "item": return typeof scope.itemId === "string" && scope.itemId !== "" ? { kind: "item", itemId: scope.itemId } : null
+		case "group": return typeof scope.groupId === "string" && scope.groupId !== "" ? { kind: "group", groupId: scope.groupId } : null
+		default: return null
+	}
+}
+
+function assertNeverContextScopeRequest(value: never): never {
+	throw new DaemonError("internal_error", `unhandled context scope: ${JSON.stringify(value)}`)
+}
+
+function contextEntryToJson(entry: ContextEntry): JsonObject {
+	let scope: JsonObject
+	switch (entry.scope.kind) {
+		case "chain": scope = { kind: "chain" }; break
+		case "item": scope = { kind: "item", itemId: entry.scope.itemId }; break
+		case "group": scope = { kind: "group", groupId: entry.scope.groupId }; break
+		default: return assertNeverContextScopeRequest(entry.scope)
+	}
+	let author: JsonObject
+	switch (entry.author.kind) {
+		case "operator": author = { kind: "operator" }; break
+		case "agent":
+			author = {
+				kind: "agent",
+				chainId: entry.author.chainId,
+				itemId: entry.author.itemId,
+				runId: entry.author.runId,
+				phase: entry.author.phase,
+			}
+			break
+		default: return assertNeverContextAuthorRequest(entry.author)
+	}
+	return { id: entry.id, chainId: entry.chainId, ts: entry.ts, scope, author, body: entry.body }
+}
+
+function assertNeverContextAuthorRequest(value: never): never {
+	throw new DaemonError("internal_error", `unhandled context author: ${JSON.stringify(value)}`)
 }
 
 function chainToJson(chain: ChainRecord): JsonObject {

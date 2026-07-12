@@ -86,6 +86,7 @@ const ObservabilityEventTypeBoundary = arkType.or(
 	// runs through `admitItemStatusForRequest` — both allow and deny outcomes — so a default-deny
 	// rejection is replayable from the event stream alongside the lifecycle context.
 	arkType.unit("item.status.write_admission"),
+	arkType.unit("context.write_admission"),
 	// #406: caller-admission audit. One event per item.update request the daemon runs through
 	// the credential gate (allow or deny). The pair (`item.mutation.caller_admission` +
 	// `item.status.write_admission`) gives an auditor two-leg replay: who wrote ("谁能写") and
@@ -147,6 +148,24 @@ const PrivilegedOpAuditOpBoundary = arkType.or(
 	arkType.unit("logs.query"),
 	arkType.unit("queue.unblock"),
 	arkType.unit("item.reorder"),
+)
+
+const ContextWriteAdmissionReasonBoundary = arkType.or(
+	arkType.unit("operator"),
+	arkType.unit("agent-credential-admitted"),
+	arkType.unit("cross-chain"),
+	arkType.unit("item-not-found"),
+	arkType.unit("group-unavailable-v2"),
+	arkType.unit("invalid-request"),
+	arkType.unit("missing-credential"),
+	arkType.unit("unknown-credential"),
+	arkType.unit("inactive-run"),
+	arkType.unit("connection-mismatch"),
+	arkType.unit("upload-not-found"),
+	arkType.unit("protocol-rejected"),
+	arkType.unit("chain-deleted"),
+	arkType.unit("storage-rejected"),
+	arkType.unit("chain-not-found"),
 )
 
 const PrivilegedOpAuditReasonBoundary = arkType.or(
@@ -264,6 +283,18 @@ const ObservabilityEventBoundary = arkType.or(
 		kind: arkType.unit("audit"),
 		type: arkType.unit("item.created"),
 		payload: { rowId: "number", itemId: "string", status: "string" },
+	},
+	{
+		...EventBaseBoundary,
+		kind: arkType.unit("audit"),
+		type: arkType.unit("context.write_admission"),
+		payload: {
+			chainId: arkType.or("number", "null"),
+			scopeKind: arkType.or(arkType.unit("chain"), arkType.unit("item"), arkType.unit("group"), arkType.unit("invalid")),
+			"scopeKey": arkType.or("string", "null"),
+			outcome: arkType.or(arkType.unit("allow"), arkType.unit("deny")),
+			reason: ContextWriteAdmissionReasonBoundary,
+		},
 	},
 	{
 		...EventBaseBoundary,
@@ -734,6 +765,7 @@ export type PrivilegedOpAuditReason = typeof PrivilegedOpAuditReasonBoundary.inf
 // #410: re-export the field-write reason vocabulary so daemon.ts (the only emitter) can
 // type-assert every `reason` it writes belongs to the closed boundary union.
 export type ItemUpdateFieldWriteReason = typeof ItemUpdateFieldWriteReasonBoundary.infer
+export type ContextWriteAdmissionReason = typeof ContextWriteAdmissionReasonBoundary.infer
 
 // #397 in-memory companion to the `item.status.write_admission` audit-event schema above.
 // Co-located with that schema so the wire shape (arktype, payload of ObservabilityEvent) and the
@@ -935,6 +967,8 @@ function renderAuditEvent(event: Extract<ObservabilityEvent, { kind: "audit" }>)
 			return `${event.ts} audit chain.status chain=${event.chain ?? event.payload.chainId} ${event.payload.fromStatus}->${event.payload.toStatus}`
 		case "item.created":
 			return `${event.ts} audit item.created chain=${event.chain ?? "-"} item=${event.item ?? event.payload.itemId} status=${event.payload.status}`
+		case "context.write_admission":
+			return `${event.ts} audit context.write_admission chain=${event.chain ?? event.payload.chainId} scope=${event.payload.scopeKind}:${event.payload.scopeKey ?? "-"} outcome=${event.payload.outcome} reason=${event.payload.reason}`
 		case "item.status":
 			return `${event.ts} audit item.status chain=${event.chain ?? "-"} item=${event.item ?? event.payload.itemId} ${event.payload.fromStatus}->${event.payload.toStatus} reason=${event.payload.reason}`
 		case "item.reordered":

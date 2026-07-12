@@ -122,6 +122,57 @@ describe("sqlite state store", () => {
 		}
 	})
 
+	test("context entries are append-only records and chain GC removes them", async () => {
+		const { store, dbFile } = await openTestStore("context-entries")
+		try {
+			const chain = createFullChain(store)
+			const item = createFullItem(store, chain)
+			const db = new Database(dbFile)
+			try {
+				const insert = db.query<unknown, [number, number, string, string | null, string, number | null, string | null, string | null, string | null, string]>(`
+					INSERT INTO context_entries (
+						chain_id, created_at, scope_kind, scope_key, author_kind,
+						author_chain_id, author_item_id, author_run_id, author_phase, body
+					) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				`)
+				insert.run(chain.id, 1_800_000_050, "item", item.itemId, "operator", null, null, null, null, "queued\nFINALIZER SUMMARY: decision=complete\n原样")
+				insert.run(chain.id, 1_800_000_051, "chain", null, "agent", chain.id, item.itemId, "run-context", "iteration", "second")
+			} finally {
+				db.close()
+			}
+			const entries = store.listContextEntriesForTesting(chain.id)
+			expect(entries).toHaveLength(2)
+			expect(entries[0]?.body).toBe("queued\nFINALIZER SUMMARY: decision=complete\n原样")
+			expect(entries[1]?.author).toEqual({ kind: "agent", chainId: chain.id, itemId: item.itemId, runId: "run-context", phase: "iteration" })
+			expect(store.markChainDeletedWithContextCleanup(chain.id).removedEntries).toBe(2)
+			expect(store.listContextEntriesForTesting(chain.id)).toEqual([])
+		} finally {
+			store.close()
+		}
+	})
+
+	test("v13 to v14 migration adds context storage without disturbing existing chain and item rows", async () => {
+		const { store, dbFile } = await openTestStore("context-v14-migration")
+		const chain = createFullChain(store)
+		const item = createFullItem(store, chain)
+		store.close()
+		const v13 = new Database(dbFile)
+		v13.exec("DROP TABLE context_entries; PRAGMA user_version = 13;")
+		v13.close()
+
+		const migrated = openSqliteStateStore({ loopDataRoot: resolve(dbFile, "..") })
+		try {
+			expect(migrated.getChain(chain.id)).toEqual(chain)
+			expect(migrated.getItem(item.id)).toEqual(item)
+			expect(migrated.listTableColumns("context_entries")).toEqual([
+				"id", "chain_id", "created_at", "scope_kind", "scope_key", "author_kind",
+				"author_chain_id", "author_item_id", "author_run_id", "author_phase", "body",
+			])
+		} finally {
+			migrated.close()
+		}
+	})
+
 	test("items round-trip", async () => {
 		const { store } = await openTestStore("item")
 		try {

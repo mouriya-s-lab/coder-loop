@@ -15,6 +15,7 @@ import {
 	daemonRateLimitDecision,
 	rateLimitStatusFromState,
 	sendDaemonRequest,
+	sendDaemonRequestSequence,
 	startCoderLoopDaemon,
 	type CoderLoopDaemon,
 	type CoderLoopDaemonSchedulerConfig,
@@ -29,7 +30,7 @@ import {
 	type SchedulerOptions,
 	type SchedulerWorktreeManager,
 } from "./scheduler"
-import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
+import { LOOP_RUN_CREDENTIAL_ENV, resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
 import { makeObservabilityEvent, queryObservabilityEvents } from "./observability"
 import { chainBindings, engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
@@ -7612,6 +7613,302 @@ prompt = "iter.md"
 				expect(reply.error.message).toContain("runner")
 				expect(reply.error.message).toContain("control-plane")
 			}
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("context append protocol preserves large opaque bodies, audits admission, rejects invalid scopes, and chain delete GCs entries (#594)", async () => {
+		const fixture = await startFixture("context-append-594", { schedulerEnabled: false })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "context-594-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			expectOk(await request(fixture, "item.add", { chainId, itemId: "594", repoCwd: REPO_ROOT }))
+			const missingChain = await request(fixture, "context.appendBegin", {
+				uploadId: "missing-chain-upload",
+				chainName: "context-missing-chain",
+				scope: { kind: "chain" },
+			})
+			expect(missingChain.ok).toBe(false)
+			if (!missingChain.ok) {
+				expect(missingChain.error.code).toBe("not_found")
+				expect(missingChain.error.message).toContain("context-missing-chain")
+			}
+
+			const forged = await request(fixture, "context.appendBegin", {
+				uploadId: "forged-upload",
+				chainName: "context-594-chain",
+				scope: { kind: "chain" },
+				author: { kind: "operator" },
+			})
+			expect(forged.ok).toBe(false)
+			const invalidCredential = await request(fixture, "context.appendBegin", {
+				uploadId: "invalid-credential-upload",
+				chainName: "context-594-chain",
+				scope: { kind: "chain" },
+				agentCredential: "unknown-context-credential",
+			})
+			expect(invalidCredential.ok).toBe(false)
+
+			const missingItem = await request(fixture, "context.appendBegin", {
+				uploadId: "missing-item-upload",
+				chainName: "context-594-chain",
+				scope: { kind: "item", itemId: "missing" },
+			})
+			expect(missingItem.ok).toBe(false)
+			if (!missingItem.ok) expect(missingItem.error.message).toContain("does not exist")
+
+			const group = await request(fixture, "context.appendBegin", {
+				uploadId: "group-upload",
+				chainName: "context-594-chain",
+				scope: { kind: "group", groupId: "par-1" },
+			})
+			expect(group.ok).toBe(false)
+			if (!group.ok) expect(group.error.message).toContain("no addressable par container")
+			const protocolResponses = await sendDaemonRequestSequence(fixture.socketPath, [
+				daemonRequest("context.appendBegin", {
+					uploadId: "protocol-reject-upload",
+					chainName: "context-594-chain",
+					scope: { kind: "chain" },
+				}),
+				daemonRequest("context.appendChunk", {
+					uploadId: "protocol-reject-upload",
+					index: 1,
+					body: "gap",
+				}),
+			])
+			expect(protocolResponses[0]?.ok).toBe(true)
+			expect(protocolResponses[1]?.ok).toBe(false)
+
+			const body = `${"🙂queued FINALIZER SUMMARY: decision=complete\n".repeat(30_000)}tail\n`
+			const chunks = body.match(/[\s\S]{1,60000}/gu) ?? []
+			const uploadId = "context-large-upload"
+			const requests = [
+				daemonRequest("context.appendBegin", { uploadId, chainName: "context-594-chain", scope: { kind: "item", itemId: "594" } }),
+				...chunks.map((chunk, index) => daemonRequest("context.appendChunk", { uploadId, index, body: chunk })),
+				daemonRequest("context.appendCommit", { uploadId, chunkCount: chunks.length }),
+			]
+			const responses = await sendDaemonRequestSequence(fixture.socketPath, requests)
+			for (const response of responses) expect(response.ok).toBe(true)
+			const committed = record(expectOk(responses[responses.length - 1]!))
+			const entry = record(committed.entry)
+			expect(entry.body).toBe(body)
+			expect(entry.author).toEqual({ kind: "operator" })
+
+			const cliBodyPath = resolve(fixture.loopDataRoot, "context-body.txt")
+			await writeFile(cliBodyPath, body)
+			const cli = Bun.spawn([
+				"bun", LOOP_ENTRY, "context", "append", "context-594-chain",
+				"--scope", "chain", "--body-file", cliBodyPath,
+				"--loop-data-root", fixture.loopDataRoot, "--json",
+			], { cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" })
+			const cliExit = await cli.exited
+			const cliOutput = await new Response(cli.stdout).text()
+			const cliError = await new Response(cli.stderr).text()
+			expect(cliExit, cliError).toBe(0)
+			expect(cliOutput).toContain('"entry"')
+
+			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				const rows = store.listContextEntriesForTesting(chainId)
+				expect(rows).toHaveLength(2)
+				expect(rows[0]?.body).toBe(body)
+				expect(rows[1]?.body).toBe(body)
+			} finally {
+				store.close()
+			}
+
+			const eventsPath = resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile
+			const contextEvents = (await queryObservabilityEvents(eventsPath)).events.filter((event) => event.type === "context.write_admission")
+			expect(contextEvents.filter((event) => event.kind === "audit" && event.payload.outcome === "allow")).toHaveLength(2)
+			expect(contextEvents.filter((event) => event.kind === "audit" && event.payload.outcome === "deny")).toHaveLength(6)
+			const missingChainAudit = contextEvents.find((event) =>
+				event.kind === "audit"
+				&& event.payload.reason === "chain-not-found"
+			)
+			expect(missingChainAudit).toBeDefined()
+			if (missingChainAudit !== undefined && missingChainAudit.kind === "audit" && missingChainAudit.type === "context.write_admission") {
+				expect(missingChainAudit.payload).toMatchObject({
+					chainId: null,
+					scopeKind: "chain",
+					scopeKey: null,
+					outcome: "deny",
+					reason: "chain-not-found",
+				})
+			}
+
+			const deleted = record(expectOk(await request(fixture, "chain.delete", { chainId })))
+			expect(deleted.removedContextEntries).toBe(2)
+			const afterDelete = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				expect(afterDelete.listContextEntriesForTesting(chainId)).toEqual([])
+			} finally {
+				afterDelete.close()
+			}
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("context upload is discarded on disconnect and no context update/delete command exists (#594)", async () => {
+		const fixture = await startFixture("context-disconnect-594", { schedulerEnabled: false })
+		try {
+			expectOk(await request(fixture, "chain.create", { name: "context-disconnect-chain", repository: "mouriya-s-lab/coder-loop" }))
+			const begin = record(expectOk(await request(fixture, "context.appendBegin", {
+				uploadId: "abandoned-upload",
+				chainName: "context-disconnect-chain",
+				scope: { kind: "chain" },
+			})))
+			const afterDisconnect = await request(fixture, "context.appendChunk", {
+				uploadId: stringValue(begin.uploadId),
+				index: 0,
+				body: "must not survive disconnect",
+			})
+			expect(afterDisconnect.ok).toBe(false)
+			if (!afterDisconnect.ok) expect(afterDisconnect.error.code).toBe("not_found")
+
+			for (const command of ["context.update", "context.delete"]) {
+				const response = await sendDaemonRequest(fixture.socketPath, { id: command, command, args: {} })
+				expect(response.ok).toBe(false)
+				if (!response.ok) expect(response.error.code).toBe("unknown_command")
+			}
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("public SQLite store rejects a runtime-forged context admission (#594)", async () => {
+		const fixture = await startFixture("context-runtime-admission-594", { schedulerEnabled: false })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "context-runtime-admission-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			const forged = Bun.spawn([
+				"bun", "-e", `
+const { openSqliteStateStore } = await import(${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))})
+const store = openSqliteStateStore({ loopDataRoot: process.env.CODER_LOOP_DATA_DIR })
+try {
+	store.appendAdmittedContextEntry({
+		chainId: ${chainId},
+		ts: 1,
+		scope: { kind: "chain" },
+		author: { kind: "agent", chainId: ${chainId}, itemId: "fabricated-item", runId: "fabricated-run", phase: "fabricated-phase" },
+		body: "runtime-forged-body",
+	})
+} finally {
+	store.close()
+}
+`,
+			], {
+				cwd: REPO_ROOT,
+				env: { ...process.env, CODER_LOOP_DATA_DIR: fixture.loopDataRoot },
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			const exitCode = await forged.exited
+			const stderr = await new Response(forged.stderr).text()
+			expect(exitCode).not.toBe(0)
+			expect(stderr).toContain("context entry was not admitted by the daemon")
+
+			const stored = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				expect(stored.listContextEntriesForTesting(chainId)).toEqual([])
+			} finally {
+				stored.close()
+			}
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("context append derives agent author from a live credential and limits it to the credential chain (#594)", async () => {
+		let credentialPath = ""
+		const fixture = await startFixture("context-agent-594", {
+			schedulerEnabled: true,
+			beforeStart: async ({ root, fakeRunner }) => {
+				credentialPath = resolve(root, "credential.txt")
+				await writeFile(fakeRunner, `import { writeFile } from "node:fs/promises"
+await writeFile(${JSON.stringify("__CREDENTIAL_PATH__")}, process.env.CODER_LOOP_RUN_CRED ?? "")
+await new Promise((resolveSleep) => setTimeout(resolveSleep, 5000))
+`.replace("__CREDENTIAL_PATH__", credentialPath))
+			},
+		})
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", { name: "context-agent-chain", repository: "mouriya-s-lab/coder-loop" })).chain)
+			const chainId = numberValue(chain.id)
+			expectOk(await request(fixture, "item.add", { chainId, itemId: "agent-source", repoCwd: REPO_ROOT }))
+			expectOk(await request(fixture, "item.add", { chainId, itemId: "agent-target", repoCwd: REPO_ROOT }))
+			await waitFor(async () => {
+				try { return (await readFile(credentialPath, "utf-8")).trim() } catch { return "" }
+			}, (credential) => credential.length > 0, 8_000)
+			const credential = (await readFile(credentialPath, "utf-8")).trim()
+			const uploadId = "agent-owned-upload"
+			const agentResponses = await sendDaemonRequestSequence(fixture.socketPath, [
+				daemonRequest("context.appendBegin", {
+					uploadId,
+					chainName: "context-agent-chain",
+					scope: { kind: "item", itemId: "agent-target" },
+					agentCredential: credential,
+				}),
+				daemonRequest("context.appendChunk", { uploadId, index: 0, body: "agent body", agentCredential: credential }),
+				daemonRequest("context.appendCommit", { uploadId, chunkCount: 1, agentCredential: credential }),
+			])
+			for (const response of agentResponses) expect(response.ok).toBe(true)
+			const committed = record(expectOk(agentResponses[2]!))
+			const entry = record(committed.entry)
+			const author = record(entry.author)
+			expect(author.kind).toBe("agent")
+			expect(author.chainId).toBe(chainId)
+			expect(author.itemId).toBe("agent-source")
+			expect(typeof author.runId).toBe("string")
+			expect(author.phase).toBe("iteration")
+
+			const cli = Bun.spawn([
+				"bun", LOOP_ENTRY, "context", "append", "context-agent-chain",
+				"--scope", "chain", "--body", "credential-env-cli-body",
+				"--loop-data-root", fixture.loopDataRoot, "--json",
+			], {
+				cwd: REPO_ROOT,
+				env: { ...process.env, [LOOP_RUN_CREDENTIAL_ENV]: credential },
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			const cliExit = await cli.exited
+			const cliStdout = await new Response(cli.stdout).text()
+			const cliStderr = await new Response(cli.stderr).text()
+			expect(cliExit, cliStderr).toBe(0)
+			expect(cliStdout).toContain('"entry"')
+			const contextModule = await import("./context-entry")
+			expect("contextAgentAuthor" in contextModule).toBe(false)
+			const stored = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				expect("appendContextEntry" in stored).toBe(false)
+				const cliEntry = stored.listContextEntriesForTesting(chainId).find((candidate) => candidate.body === "credential-env-cli-body")
+				expect(cliEntry?.author).toEqual({
+					kind: "agent",
+					chainId,
+					itemId: "agent-source",
+					runId: stringValue(author.runId),
+					phase: "iteration",
+				})
+			} finally {
+				stored.close()
+			}
+
+			expectOk(await request(fixture, "chain.create", { name: "context-other-chain", repository: "mouriya-s-lab/coder-loop" }))
+			const crossChain = await request(fixture, "context.appendBegin", {
+				uploadId: "cross-chain-upload",
+				chainName: "context-other-chain",
+				scope: { kind: "chain" },
+				agentCredential: credential,
+			})
+			expect(crossChain.ok).toBe(false)
+			if (!crossChain.ok) expect(crossChain.error.message).toContain("belongs to chain")
 		} finally {
 			await fixture.daemon.stop()
 		}
