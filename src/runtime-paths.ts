@@ -8,6 +8,10 @@ export const LOOP_DATA_ROOT_ENV = "CODER_LOOP_DATA_DIR"
 // from prompt placeholders ({{RUN_ID}} et al.) so a prompt/trace grep for the credential value
 // returns zero hits — agents see only their own env, never the secret rendered into text.
 export const LOOP_RUN_CREDENTIAL_ENV = "CODER_LOOP_RUN_CRED"
+// Generic headless runner contract: the scheduler owns the phase artifact location and exposes
+// it to every spawned runner. External-terminal binaries can publish the same AgentRunStatus
+// document as local runners without receiving runner-specific argv or learning chain layout.
+export const LOOP_RUN_STATUS_PATH_ENV = "CODER_LOOP_RUN_STATUS_PATH"
 export const LOOP_DATA_DIRNAME = "loop-data"
 export const LOOP_DATA_DB_FILENAME = "db.sqlite"
 export const LOOP_DATA_DAEMON_SOCKET_FILENAME = "daemon.sock"

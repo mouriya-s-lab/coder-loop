@@ -2,6 +2,8 @@ import { type as arkType } from "arktype"
 
 import type { BoundaryValue } from "./boundary-types"
 import type { JsonObject, JsonValue } from "./loop"
+import type { AgentRunnerKind } from "./loop"
+import type { ExternalTerminalAvailability } from "./runner-execution"
 
 declare const internalStatusBrand: unique symbol
 declare const admittedItemStatusBrand: unique symbol
@@ -37,6 +39,8 @@ export type EngineLifecycleAdmissionReason =
 	| "scheduler.dependency-unblock-restore"
 	| "scheduler.recovery-entry-restore"
 	| "queue.unblock-entry-restore"
+	| "scheduler.external-terminal-loss-restore"
+	| "scheduler.external-terminal-loss-recovery"
 	| "item.created-default-from-preset"
 	| "test"
 
@@ -114,6 +118,7 @@ export class ChainMetadata extends RuntimeDataRecord {
 	codex?: RunnerMetadata
 	// #481: opencode joins the typed slot list with the same shape as claude/codex.
 	opencode?: RunnerMetadata
+	hapi?: RunnerMetadata
 	maxItemAttempts?: number
 	coderLoopChainCompleteTrigger?: ChainCompleteTriggerState
 
@@ -129,6 +134,7 @@ export class ChainMetadata extends RuntimeDataRecord {
 		if (input.claude !== undefined) this.claude = input.claude
 		if (input.codex !== undefined) this.codex = input.codex
 		if (input.opencode !== undefined) this.opencode = input.opencode
+		if (input.hapi !== undefined) this.hapi = input.hapi
 		if (input.maxItemAttempts !== undefined) this.maxItemAttempts = input.maxItemAttempts
 		if (input.coderLoopChainCompleteTrigger !== undefined) this.coderLoopChainCompleteTrigger = input.coderLoopChainCompleteTrigger
 	}
@@ -149,6 +155,26 @@ export type SchedulerSpawnError = {
 	message: string
 }
 
+export type ExternalTerminalHoldAvailability = Exclude<ExternalTerminalAvailability, { kind: "available" }> & {
+	since: string
+}
+
+export type ExternalTerminalHold = {
+	kind: "external-terminal-unavailable"
+	runner: AgentRunnerKind
+	binary: string
+	probeArgv: string[]
+	phase: string
+	availability: ExternalTerminalHoldAvailability
+}
+
+export type ExternalTerminalLoss = {
+	kind: "lost"
+	detectedAt: string
+	reason: "binary-missing" | "endpoint-unavailable" | "probe-failed"
+	terminationPhase: "term" | "kill" | "closed"
+}
+
 // #457: `blockerRepo` / `blockerRef` are no longer engine-typed ItemExtra fields. Presets that store
 // blocker info on an item write the keys as preset-owned strings inside the same JSON blob; they round
 // trip through `runtimeRemainder` exactly like any other preset-owned extra key.
@@ -163,8 +189,14 @@ export class ItemExtra extends RuntimeDataRecord {
 	startStatus?: InternalStatus
 	startStatusUpdatedAt?: number
 	startPhase?: string
+	startAttempts?: number
+	attemptStarted?: boolean
 	pid?: number
 	processGroupLeader?: boolean
+	externalTerminalHold?: ExternalTerminalHold
+	externalTerminalAvailability?: ExternalTerminalAvailability
+	externalTerminalLoss?: ExternalTerminalLoss
+	externalTerminalRunner?: AgentRunnerKind
 
 	constructor(input: ItemExtraInput, remainder: JsonObject) {
 		super(remainder)
@@ -183,8 +215,14 @@ export class ItemExtra extends RuntimeDataRecord {
 		if (input.startStatus !== undefined) this.startStatus = input.startStatus
 		if (input.startStatusUpdatedAt !== undefined) this.startStatusUpdatedAt = input.startStatusUpdatedAt
 		if (input.startPhase !== undefined) this.startPhase = input.startPhase
+		if (input.startAttempts !== undefined) this.startAttempts = input.startAttempts
+		if (input.attemptStarted !== undefined) this.attemptStarted = input.attemptStarted
 		if (input.pid !== undefined) this.pid = input.pid
 		if (input.processGroupLeader !== undefined) this.processGroupLeader = input.processGroupLeader
+		if (input.externalTerminalHold !== undefined) this.externalTerminalHold = input.externalTerminalHold
+		if (input.externalTerminalAvailability !== undefined) this.externalTerminalAvailability = input.externalTerminalAvailability
+		if (input.externalTerminalLoss !== undefined) this.externalTerminalLoss = input.externalTerminalLoss
+		if (input.externalTerminalRunner !== undefined) this.externalTerminalRunner = input.externalTerminalRunner
 	}
 }
 
@@ -213,6 +251,7 @@ type ChainMetadataInput = {
 	claude?: RunnerMetadata
 	codex?: RunnerMetadata
 	opencode?: RunnerMetadata
+	hapi?: RunnerMetadata
 	maxItemAttempts?: number
 	coderLoopChainCompleteTrigger?: ChainCompleteTriggerState
 }
@@ -232,8 +271,14 @@ type ItemExtraInput = {
 	startStatus?: InternalStatus
 	startStatusUpdatedAt?: number
 	startPhase?: string
+	startAttempts?: number
+	attemptStarted?: boolean
 	pid?: number
 	processGroupLeader?: boolean
+	externalTerminalHold?: ExternalTerminalHold
+	externalTerminalAvailability?: ExternalTerminalAvailability
+	externalTerminalLoss?: ExternalTerminalLoss
+	externalTerminalRunner?: AgentRunnerKind
 }
 
 type ArkAssertable<T> = {
@@ -243,10 +288,60 @@ type ArkAssertable<T> = {
 const OptionalStringBoundary = arkType("string|undefined")
 const OptionalBooleanBoundary = arkType("boolean|undefined")
 const OptionalPositiveIntegerBoundary = arkType("number.integer > 0 | undefined")
+const OptionalNonNegativeIntegerBoundary = arkType("number.integer >= 0 | undefined")
 const RequiredPositiveIntegerBoundary = arkType("number.integer > 0")
 const OptionalStringArrayBoundary = arkType("string[]|undefined")
 const OptionalPositiveIntegerArrayBoundary = arkType("(number.integer > 0)[]|undefined")
 const ChainCompleteTriggerDecisionBoundary = arkType("'keep-active'|undefined")
+const ExternalTerminalHoldBoundary: ArkAssertable<ExternalTerminalHold | undefined> = arkType.or(
+	"undefined",
+	{
+		kind: arkType.unit("external-terminal-unavailable"),
+		runner: arkType.or(arkType.unit("claude"), arkType.unit("codex"), arkType.unit("opencode"), arkType.unit("hapi")),
+		binary: "string",
+		probeArgv: arkType.unit("probe").array(),
+		phase: "string",
+		availability: arkType.or(
+			{
+				kind: arkType.unit("unavailable"),
+				checkedAt: "string",
+				reason: arkType.or(arkType.unit("binary-missing"), arkType.unit("endpoint-unavailable")),
+				exitCode: "number|null",
+				signal: "string|null",
+				since: "string",
+			},
+			{
+				kind: arkType.unit("probe-failed"),
+				checkedAt: "string",
+				exitCode: "number|null",
+				signal: "string|null",
+				since: "string",
+			},
+		),
+	},
+)
+const ExternalTerminalAvailabilityBoundary: ArkAssertable<ExternalTerminalAvailability | undefined> = arkType.or(
+	"undefined",
+	{ kind: arkType.unit("available"), checkedAt: "string" },
+	{
+		kind: arkType.unit("unavailable"),
+		checkedAt: "string",
+		reason: arkType.or(arkType.unit("binary-missing"), arkType.unit("endpoint-unavailable")),
+		exitCode: "number|null",
+		signal: "string|null",
+	},
+	{ kind: arkType.unit("probe-failed"), checkedAt: "string", exitCode: "number|null", signal: "string|null" },
+)
+const ExternalTerminalLossBoundary: ArkAssertable<ExternalTerminalLoss | undefined> = arkType.or(
+	"undefined",
+	{
+		kind: arkType.unit("lost"),
+		detectedAt: "string",
+		reason: arkType.or(arkType.unit("binary-missing"), arkType.unit("endpoint-unavailable"), arkType.unit("probe-failed")),
+		terminationPhase: arkType.or(arkType.unit("term"), arkType.unit("kill"), arkType.unit("closed")),
+	},
+)
+const OptionalAgentRunnerKindBoundary = arkType("'claude'|'codex'|'opencode'|'hapi'|undefined")
 const JsonObjectBoundary: ArkAssertable<JsonObject> = arkType("unknown", ":", isJsonObject)
 
 const RUNNER_METADATA_KEYS = new Set(["binary", "model", "extraArgs"])
@@ -263,6 +358,7 @@ const CHAIN_METADATA_KEYS = new Set([
 	"claude",
 	"codex",
 	"opencode",
+	"hapi",
 	"maxItemAttempts",
 	"coderLoopChainCompleteTrigger",
 ])
@@ -284,8 +380,14 @@ const ITEM_EXTRA_KEYS = new Set([
 	"startStatus",
 	"startStatusUpdatedAt",
 	"startPhase",
+	"startAttempts",
+	"attemptStarted",
 	"pid",
 	"processGroupLeader",
+	"externalTerminalHold",
+	"externalTerminalAvailability",
+	"externalTerminalLoss",
+	"externalTerminalRunner",
 ])
 
 export function parseInternalStatus(value: string, field: string): InternalStatus {
@@ -348,6 +450,7 @@ export function chainMetadataToJsonObject(metadata: ChainMetadata): JsonObject {
 	assignJson(result, "claude", metadata.claude === undefined ? undefined : runnerMetadataToJsonObject(metadata.claude))
 	assignJson(result, "codex", metadata.codex === undefined ? undefined : runnerMetadataToJsonObject(metadata.codex))
 	assignJson(result, "opencode", metadata.opencode === undefined ? undefined : runnerMetadataToJsonObject(metadata.opencode))
+	assignJson(result, "hapi", metadata.hapi === undefined ? undefined : runnerMetadataToJsonObject(metadata.hapi))
 	assignJson(result, "maxItemAttempts", metadata.maxItemAttempts)
 	assignJson(
 		result,
@@ -381,14 +484,14 @@ export function metadataBoolean(metadata: ChainMetadata, key: keyof ChainMetadat
 	return typeof value === "boolean" ? value : null
 }
 
-export function metadataNestedString(metadata: ChainMetadata, objectKey: "claude" | "codex" | "opencode", key: keyof RunnerMetadata & string): string | null {
+export function metadataNestedString(metadata: ChainMetadata, objectKey: "claude" | "codex" | "opencode" | "hapi", key: keyof RunnerMetadata & string): string | null {
 	const object = metadata[objectKey]
 	if (object === undefined) return null
 	const value = object[key]
 	return typeof value === "string" && value.trim() !== "" ? value : null
 }
 
-export function metadataNestedStringArray(metadata: ChainMetadata, objectKey: "claude" | "codex" | "opencode", key: keyof RunnerMetadata & string): string[] | null {
+export function metadataNestedStringArray(metadata: ChainMetadata, objectKey: "claude" | "codex" | "opencode" | "hapi", key: keyof RunnerMetadata & string): string[] | null {
 	const object = metadata[objectKey]
 	if (object === undefined) return null
 	const value = object[key]
@@ -418,8 +521,18 @@ export function itemExtraToJsonObject(extra: ItemExtra): JsonObject {
 	assignJson(result, "startStatus", extra.startStatus)
 	assignJson(result, "startStatusUpdatedAt", extra.startStatusUpdatedAt)
 	assignJson(result, "startPhase", extra.startPhase)
+	assignJson(result, "startAttempts", extra.startAttempts)
+	assignJson(result, "attemptStarted", extra.attemptStarted)
 	assignJson(result, "pid", extra.pid)
 	assignJson(result, "processGroupLeader", extra.processGroupLeader)
+	assignJson(result, "externalTerminalHold", extra.externalTerminalHold === undefined ? undefined : {
+		...extra.externalTerminalHold,
+		probeArgv: [...extra.externalTerminalHold.probeArgv],
+		availability: { ...extra.externalTerminalHold.availability },
+	})
+	assignJson(result, "externalTerminalAvailability", extra.externalTerminalAvailability === undefined ? undefined : { ...extra.externalTerminalAvailability })
+	assignJson(result, "externalTerminalLoss", extra.externalTerminalLoss === undefined ? undefined : { ...extra.externalTerminalLoss })
+	assignJson(result, "externalTerminalRunner", extra.externalTerminalRunner)
 	return result
 }
 
@@ -463,6 +576,20 @@ export function clearSchedulerSpawnError(extra: ItemExtra): ItemExtra {
 	if (extra.schedulerSpawnError === undefined) return extra
 	const next = itemExtraToJsonObject(extra)
 	delete next.schedulerSpawnError
+	return storedItemExtra(next)
+}
+
+export function withExternalTerminalHold(extra: ItemExtra, hold: ExternalTerminalHold): ItemExtra {
+	return storedItemExtra({
+		...itemExtraToJsonObject(extra),
+		externalTerminalHold: { ...hold, probeArgv: [...hold.probeArgv], availability: { ...hold.availability } },
+	})
+}
+
+export function clearExternalTerminalHold(extra: ItemExtra): ItemExtra {
+	if (extra.externalTerminalHold === undefined) return extra
+	const next = itemExtraToJsonObject(extra)
+	delete next.externalTerminalHold
 	return storedItemExtra(next)
 }
 
@@ -526,6 +653,8 @@ function parseChainMetadata(value: JsonObject, field: string): ChainMetadata {
 	if (codex !== undefined) input.codex = codex
 	const opencode = optionalRunnerMetadataField(value, "opencode", `${field}.opencode`)
 	if (opencode !== undefined) input.opencode = opencode
+	const hapi = optionalRunnerMetadataField(value, "hapi", `${field}.hapi`)
+	if (hapi !== undefined) input.hapi = hapi
 	const maxItemAttempts = optionalPositiveIntegerField(value, "maxItemAttempts", `${field}.maxItemAttempts`)
 	if (maxItemAttempts !== undefined) input.maxItemAttempts = maxItemAttempts
 	const trigger = optionalChainCompleteTriggerStateField(value, "coderLoopChainCompleteTrigger", `${field}.coderLoopChainCompleteTrigger`)
@@ -555,10 +684,22 @@ function parseItemExtra(value: JsonObject, field: string): ItemExtra {
 	if (startStatusUpdatedAt !== undefined) input.startStatusUpdatedAt = startStatusUpdatedAt
 	const startPhase = optionalStringField(value, "startPhase", `${field}.startPhase`)
 	if (startPhase !== undefined) input.startPhase = startPhase
+	const startAttempts = arkField(OptionalNonNegativeIntegerBoundary, value.startAttempts, `${field}.startAttempts`, `${field}.startAttempts must be a non-negative integer when provided`)
+	if (startAttempts !== undefined) input.startAttempts = startAttempts
+	const attemptStarted = optionalBooleanField(value, "attemptStarted", `${field}.attemptStarted`)
+	if (attemptStarted !== undefined) input.attemptStarted = attemptStarted
 	const pid = optionalPositiveIntegerField(value, "pid", `${field}.pid`)
 	if (pid !== undefined) input.pid = pid
 	const processGroupLeader = optionalBooleanField(value, "processGroupLeader", `${field}.processGroupLeader`)
 	if (processGroupLeader !== undefined) input.processGroupLeader = processGroupLeader
+	const externalTerminalHold = arkField(ExternalTerminalHoldBoundary, value.externalTerminalHold, `${field}.externalTerminalHold`, `${field}.externalTerminalHold must be a typed external-terminal hold`)
+	if (externalTerminalHold !== undefined) input.externalTerminalHold = externalTerminalHold
+	const externalTerminalAvailability = arkField(ExternalTerminalAvailabilityBoundary, value.externalTerminalAvailability, `${field}.externalTerminalAvailability`, `${field}.externalTerminalAvailability must be a typed external-terminal availability`)
+	if (externalTerminalAvailability !== undefined) input.externalTerminalAvailability = externalTerminalAvailability
+	const externalTerminalLoss = arkField(ExternalTerminalLossBoundary, value.externalTerminalLoss, `${field}.externalTerminalLoss`, `${field}.externalTerminalLoss must be a typed external-terminal loss`)
+	if (externalTerminalLoss !== undefined) input.externalTerminalLoss = externalTerminalLoss
+	const externalTerminalRunner = arkField(OptionalAgentRunnerKindBoundary, value.externalTerminalRunner, `${field}.externalTerminalRunner`, `${field}.externalTerminalRunner must be a runner kind when provided`)
+	if (externalTerminalRunner !== undefined) input.externalTerminalRunner = externalTerminalRunner
 	return new ItemExtra(input, remainderExcept(value, ITEM_EXTRA_KEYS))
 }
 

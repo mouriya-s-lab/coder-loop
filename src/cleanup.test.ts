@@ -156,6 +156,7 @@ function makeLoopOptions(): LoopOptions {
 			// #481: AgentRunnerCommands now carries the third opencode runner slot — fixtures pin
 			// the same default-shape as claude/codex so the type satisfies the widened record.
 			opencode: { kind: "opencode", binary: "opencode", extraArgs: [], model: null },
+			hapi: { kind: "hapi", binary: "hapi", extraArgs: [], model: null },
 		},
 		dryRun: false,
 		preset: {

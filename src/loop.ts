@@ -62,7 +62,9 @@ import {
 	type AdmittedItemStatus,
 	type InternalStatus,
 	type ItemExtra,
+	type ExternalTerminalLoss,
 } from "./runtime-data"
+import type { ExternalTerminalAvailability } from "./runner-execution"
 import { checkPresetDag, type PresetDagFinding } from "./preset-dag-check"
 export { checkPresetDag } from "./preset-dag-check"
 export type { PresetDagFinding, PresetDagFindingKind, PresetDagFindingVerdict, PresetDagFindingTable, PresetDagFindingDeadlockContinuable, PresetDagFindingDeadVocabulary } from "./preset-dag-check"
@@ -382,7 +384,7 @@ export type QueueUnblockCommandArgs = {
 // admittance ensures we cannot leave a code path partial). ENGINE_BUILTIN_RUNNER stays `codex`
 // — opencode is an explicit opt-in via `runner = "opencode"` on a preset's phase, never a
 // fallback for missing claude/codex.
-const AgentRunnerKindBoundary = arkType.or(arkType.unit("claude"), arkType.unit("codex"), arkType.unit("opencode"))
+const AgentRunnerKindBoundary = arkType.or(arkType.unit("claude"), arkType.unit("codex"), arkType.unit("opencode"), arkType.unit("hapi"))
 
 const TerminatedBoundary = arkType.or(
 	{ kind: arkType.unit("clean") },
@@ -699,7 +701,7 @@ export type PresetPhaseTrigger =
 	| { afterPhase: string; whenStatus: InternalStatus }
 	| { on: "chain-complete" }
 
-export type AgentRunnerKind = "claude" | "codex" | "opencode"
+export type AgentRunnerKind = "claude" | "codex" | "opencode" | "hapi"
 
 // #433: "config" source value is retired — there is no longer a target-side runtime preferences
 // file to override phase runner choice from. #456: role-named source values (`iteration-default` /
@@ -724,6 +726,7 @@ export type AgentRunnerCommands = {
 	claude: AgentRunnerCommand
 	codex: AgentRunnerCommand
 	opencode: AgentRunnerCommand
+	hapi: AgentRunnerCommand
 }
 
 export type RuntimeCheckError = {
@@ -839,6 +842,32 @@ export type StatusQueueSnapshot = {
 	continuable: number
 	terminal: number
 	selected: StatusSelectedIssue | null
+	holds: StatusQueueHoldSnapshot[]
+}
+
+export type StatusQueueHoldSnapshot = {
+	kind: "external-terminal-unavailable"
+	chainId: number
+	rowId: number
+	itemId: string
+	phase: string
+	runner: AgentRunnerKind
+	availability:
+		| {
+			kind: "unavailable"
+			reason: "binary-missing" | "endpoint-unavailable"
+			exitCode: number | null
+			signal: string | null
+			checkedAt: string
+			since: string
+		}
+		| {
+			kind: "probe-failed"
+			exitCode: number | null
+			signal: string | null
+			checkedAt: string
+			since: string
+		}
 }
 
 export type StatusRunCountSnapshot = {
@@ -866,6 +895,10 @@ export type StatusCurrentSnapshot = {
 	item: StatusItemSnapshot | null
 	runner: StatusRunnerSelectionSnapshot | null
 	phaseStatus: StatusPhaseStatusSnapshot | null
+	externalTerminal: {
+		availability: ExternalTerminalAvailability
+		loss: ExternalTerminalLoss | null
+	} | null
 }
 
 export type StatusEventsSnapshot = {
@@ -1851,8 +1884,8 @@ function parsePresetPhaseChainActionFlag(value: string): PresetPhaseChainAction 
 
 function parseOptionalRunner(value: string | null, flagName: string): AgentRunnerKind | null {
 	if (value === null) return null
-	if (value === "claude" || value === "codex" || value === "opencode") return value
-	fail(`${flagName} must be claude, codex, or opencode, got: ${value}`)
+	if (value === "claude" || value === "codex" || value === "opencode" || value === "hapi") return value
+	fail(`${flagName} must be claude, codex, opencode, or hapi, got: ${value}`)
 }
 
 // #526 chain set-runner-model boundary parsers. Required variants of the runner-kind /
@@ -1867,8 +1900,8 @@ function parseOptionalRunner(value: string | null, flagName: string): AgentRunne
 // narrowed input could never hit).
 function parseRequiredRunnerKind(value: string, flagName: string): AgentRunnerKind {
 	if (typeof value !== "string" || value.length === 0) fail(`${flagName} is required`)
-	if (value === "claude" || value === "codex" || value === "opencode") return value
-	fail(`${flagName} must be claude, codex, or opencode, got: ${value}`)
+	if (value === "claude" || value === "codex" || value === "opencode" || value === "hapi") return value
+	fail(`${flagName} must be claude, codex, opencode, or hapi, got: ${value}`)
 }
 
 function parseRequiredNonEmptyString(value: string, flagName: string): string {
@@ -2917,7 +2950,7 @@ function buildStatusRunnerDefaultsSnapshot(options: LoopOptions | null): StatusR
 		}
 	}
 	const hostRunner = detectHostRunner(process.env)
-	const resolved: Pick<ChainResolved, "claudeBinary" | "claudeModel" | "claudeExtraArgs" | "codexBinary" | "codexModel" | "codexExtraArgs" | "opencodeBinary" | "opencodeModel" | "opencodeExtraArgs"> = {
+	const resolved: Pick<ChainResolved, "claudeBinary" | "claudeModel" | "claudeExtraArgs" | "codexBinary" | "codexModel" | "codexExtraArgs" | "opencodeBinary" | "opencodeModel" | "opencodeExtraArgs" | "hapiBinary" | "hapiModel" | "hapiExtraArgs"> = {
 		claudeBinary: null,
 		claudeModel: null,
 		claudeExtraArgs: [],
@@ -2927,6 +2960,9 @@ function buildStatusRunnerDefaultsSnapshot(options: LoopOptions | null): StatusR
 		opencodeBinary: null,
 		opencodeModel: null,
 		opencodeExtraArgs: [],
+		hapiBinary: null,
+		hapiModel: null,
+		hapiExtraArgs: [],
 	}
 	return {
 		hostDefault: hostRunner,
@@ -2956,9 +2992,9 @@ function makeUnavailableStatusSnapshot(input: {
 			errors: [{ path: input.errorPath, message: input.errorMessage }],
 			error: input.errorMessage,
 		},
-		queue: { total: 0, byStatus: {}, continuable: 0, terminal: 0, selected: null },
+		queue: { total: 0, byStatus: {}, continuable: 0, terminal: 0, selected: null, holds: [] },
 		runs: { total: 0, byPhaseStatus: {}, counts: [] },
-		current: { run: null, id: null, item: null, runner: null, phaseStatus: null },
+		current: { run: null, id: null, item: null, runner: null, phaseStatus: null, externalTerminal: null },
 		events: { runId: null, path: null, exists: false, recent: [], latest: null, error: null },
 		processes: input.processes ?? { live: [], scanError: null },
 	}
@@ -3052,6 +3088,7 @@ function buildStatusQueueSnapshotFromRecords(
 		byStatus,
 		continuable: items.filter(isContinuable).length,
 		terminal: items.filter(isTerminal).length,
+		holds: items.flatMap(statusQueueHoldSnapshots),
 		selected: selected === null || selectedPreset === null ? null : {
 			id: getItemId(selected.item, selectedPreset),
 			item: statusItemSnapshot(selected.item, selectedPreset),
@@ -3063,6 +3100,20 @@ function buildStatusQueueSnapshotFromRecords(
 			preset: resolveStatusItemPresetSnapshot(selected.item, options.preset),
 		},
 	}
+}
+
+function statusQueueHoldSnapshots(item: ItemRecord): StatusQueueHoldSnapshot[] {
+	const hold = item.extra.externalTerminalHold
+	if (hold === undefined) return []
+	return [{
+		kind: hold.kind,
+		chainId: item.chainId,
+		rowId: item.id,
+		itemId: item.itemId,
+		phase: hold.phase,
+		runner: hold.runner,
+		availability: { ...hold.availability },
+	}]
 }
 
 // #412: report the source + resolved directory of an item's preset for supervisor consumers.
@@ -3140,7 +3191,7 @@ async function buildStatusCurrentSnapshotFromRecords(
 	current: CurrentRunRecord | null,
 	itemPresets: StatusItemPresetResolver,
 ): Promise<StatusCurrentSnapshot> {
-	if (current === null) return { run: null, id: null, item: null, runner: null, phaseStatus: null }
+	if (current === null) return { run: null, id: null, item: null, runner: null, phaseStatus: null, externalTerminal: null }
 	let id: string | null = null
 	let item: ItemRecord | null = null
 	try {
@@ -3162,6 +3213,10 @@ async function buildStatusCurrentSnapshotFromRecords(
 		item: item === null || itemPreset === null ? null : statusItemSnapshot(item, itemPreset),
 		runner: item === null || selectionInput === null ? null : statusRunnerSelection(selectRunnerForPhase(current.phase, item, selectionInput)),
 		phaseStatus: await readAgentPhaseStatus(agentStatusPath(outputPath)),
+		externalTerminal: current.extra.externalTerminalAvailability === undefined ? null : {
+			availability: { ...current.extra.externalTerminalAvailability },
+			loss: current.extra.externalTerminalLoss === undefined ? null : { ...current.extra.externalTerminalLoss },
+		},
 	}
 }
 
@@ -3964,6 +4019,9 @@ export type ChainResolved = {
 	opencodeBinary: string | null
 	opencodeModel: string | null
 	opencodeExtraArgs: readonly string[]
+	hapiBinary: string | null
+	hapiModel: string | null
+	hapiExtraArgs: readonly string[]
 	preset: string | null
 	presetPath: string | null
 }
@@ -3987,6 +4045,9 @@ function chainResolvedFromChain(chain: ChainRecord, loopDataRoot: string | null)
 		opencodeBinary: metadataNestedString(metadata, "opencode", "binary") ?? null,
 		opencodeModel: metadataNestedString(metadata, "opencode", "model") ?? null,
 		opencodeExtraArgs: metadataNestedStringArray(metadata, "opencode", "extraArgs") ?? [],
+		hapiBinary: metadataNestedString(metadata, "hapi", "binary") ?? null,
+		hapiModel: metadataNestedString(metadata, "hapi", "model") ?? null,
+		hapiExtraArgs: metadataNestedStringArray(metadata, "hapi", "extraArgs") ?? [],
 		preset: presetPath === null ? chain.preset : null,
 		presetPath,
 	}
@@ -4640,7 +4701,7 @@ function parseChainBindingDefaultValue(value: BoundaryValue, label: string): Cha
 
 function parsePhaseRunner(value: BoundaryValue, label: string): AgentRunnerKind | null {
 	if (value === null) return null
-	if (value !== "claude" && value !== "codex" && value !== "opencode") presetError(`${label}: must be "claude", "codex", or "opencode"`)
+	if (value !== "claude" && value !== "codex" && value !== "opencode" && value !== "hapi") presetError(`${label}: must be "claude", "codex", "opencode", or "hapi"`)
 	return value
 }
 
@@ -4858,7 +4919,7 @@ export function detectHostRunner(env: Record<string, string | undefined>): Agent
 // only model the operator's opencode provider is currently configured for, per the issue body
 // dependency footnote.
 export const DEFAULT_OPENCODE_MODEL = "opencode-go/glm-5.2"
-export function buildAgentRunnerCommands(resolved: Pick<ChainResolved, "claudeBinary" | "claudeModel" | "claudeExtraArgs" | "codexBinary" | "codexModel" | "codexExtraArgs" | "opencodeBinary" | "opencodeModel" | "opencodeExtraArgs">): AgentRunnerCommands {
+export function buildAgentRunnerCommands(resolved: Pick<ChainResolved, "claudeBinary" | "claudeModel" | "claudeExtraArgs" | "codexBinary" | "codexModel" | "codexExtraArgs" | "opencodeBinary" | "opencodeModel" | "opencodeExtraArgs" | "hapiBinary" | "hapiModel" | "hapiExtraArgs">): AgentRunnerCommands {
 	return {
 		claude: {
 			kind: "claude",
@@ -4877,6 +4938,12 @@ export function buildAgentRunnerCommands(resolved: Pick<ChainResolved, "claudeBi
 			binary: resolved.opencodeBinary ?? "opencode",
 			extraArgs: [...resolved.opencodeExtraArgs],
 			model: resolved.opencodeModel,
+		},
+		hapi: {
+			kind: "hapi",
+			binary: resolved.hapiBinary ?? "hapi",
+			extraArgs: [...resolved.hapiExtraArgs],
+			model: resolved.hapiModel,
 		},
 	}
 }
@@ -6532,25 +6599,34 @@ export type RunnerInvocationPaths = {
 
 export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: string, resume: ResumeDecision, paths: RunnerInvocationPaths): RunnerInvocation {
 	const additionalDirs = runnerAdditionalDirs(paths)
-	if (runner.kind === "claude") {
-		return {
-			kind: "spawn",
-			binary: runner.binary,
-			args: agentClaudeArgs(runner.extraArgs, prompt, resume, additionalDirs, runner.model),
-		}
+	switch (runner.kind) {
+		case "claude":
+			return {
+				kind: "spawn",
+				binary: runner.binary,
+				args: agentClaudeArgs(runner.extraArgs, prompt, resume, additionalDirs, runner.model),
+			}
+		case "codex":
+			return {
+				kind: "spawn",
+				binary: runner.binary,
+				args: agentCodexArgs(runner.extraArgs, prompt, resume, paths.agentCwd, runner.model, additionalDirs),
+			}
+		case "opencode":
+			return {
+				kind: "spawn",
+				binary: runner.binary,
+				args: agentOpencodeArgs(runner.extraArgs, prompt, resume, runner.model),
+			}
+		case "hapi":
+			throw new Error("hapi runner invocation belongs to issue #603; inject the generic external-terminal invocation seam for #602 tests")
+		default:
+			return assertNeverRunnerKind(runner.kind)
 	}
-	if (runner.kind === "opencode") {
-		return {
-			kind: "spawn",
-			binary: runner.binary,
-			args: agentOpencodeArgs(runner.extraArgs, prompt, resume, runner.model),
-		}
-	}
-	return {
-		kind: "spawn",
-		binary: runner.binary,
-		args: agentCodexArgs(runner.extraArgs, prompt, resume, paths.agentCwd, runner.model, additionalDirs),
-	}
+}
+
+function assertNeverRunnerKind(value: never): never {
+	throw new Error(`unhandled runner kind: ${JSON.stringify(value)}`)
 }
 
 export function runnerAdditionalDirs(paths: RunnerInvocationPaths): string[] {
@@ -6692,9 +6768,18 @@ export function parseOpencodeSessionIdFromStream(text: string): string | null {
 }
 
 export function parseSessionIdFromRunnerStream(runner: AgentRunnerKind, text: string): string | null {
-	if (runner === "codex") return parseCodexThreadIdFromStream(text)
-	if (runner === "opencode") return parseOpencodeSessionIdFromStream(text)
-	return parseSessionIdFromStream(text)
+	switch (runner) {
+		case "claude":
+			return parseSessionIdFromStream(text)
+		case "codex":
+			return parseCodexThreadIdFromStream(text)
+		case "opencode":
+			return parseOpencodeSessionIdFromStream(text)
+		case "hapi":
+			return null
+		default:
+			return assertNeverRunnerKind(runner)
+	}
 }
 
 export function extractErrorCode(stdoutText: string, stderrText: string): string {

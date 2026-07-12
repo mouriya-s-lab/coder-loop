@@ -23,6 +23,7 @@ import {
 	type ResolveContext,
 	type ResumeDecision,
 	type RunnerInvocationPaths,
+	type RunnerInvocation,
 	type RuntimeBindings,
 	RunnerStatusPersistenceError,
 	type RunnerStatusPersistenceFailure,
@@ -44,6 +45,10 @@ import {
 	withoutChainCompleteTriggerState,
 	withSchedulerBackoff,
 	withSchedulerSpawnError as withItemSchedulerSpawnError,
+	clearExternalTerminalHold,
+	withExternalTerminalHold,
+	type ExternalTerminalHold,
+	type ExternalTerminalLoss,
 	type AdmittedItemStatus,
 	type InternalStatus,
 	type SchedulerBackoffState,
@@ -55,6 +60,7 @@ import { type ChainRecord, dependsOnItemIds, type ItemRecord, listDependencyWait
 import {
 	LOOP_DATA_ROOT_ENV,
 	LOOP_RUN_CREDENTIAL_ENV,
+	LOOP_RUN_STATUS_PATH_ENV,
 	type LoopDataRootOptions,
 	RuntimePathError,
 	resolveChainRuntimePaths,
@@ -63,6 +69,14 @@ import {
 } from "./runtime-paths"
 import { collectObservabilityExcerpt, type ObservabilityExcerpt } from "./observability"
 import { createStreamTextState } from "./runner-output"
+import {
+	probeExternalTerminal,
+	runnerExecutionDomain,
+	externalTerminalEndpointKey,
+	type ExternalTerminalAvailability,
+	type ExternalTerminalProbe,
+	type RunnerExecutionDomain,
+} from "./runner-execution"
 
 // #452: completion signal is the daemon-observed state write, not a stdout marker.
 // The previous "per-run nonce summary tag" prompt injection + stdout watchdog
@@ -103,6 +117,8 @@ const RECYCLE_KILL_GRACE_MS = 5 * 1000
 const STARTUP_IDLE_TIMEOUT_MS = 10 * 60 * 1000
 const STARTUP_IDLE_PROGRESS_BYTES = 200
 const STARTUP_IDLE_KILL_MS = 5 * 1000
+const EXTERNAL_TERMINAL_INFLIGHT_PROBE_INTERVAL_MS = 30 * 1000
+const EXTERNAL_TERMINAL_LOSS_KILL_MS = 5 * 1000
 
 export type SchedulerActiveRun = {
 	runId: string
@@ -134,6 +150,7 @@ export type SchedulerCompletedRun = {
 	stdoutBytes: number
 	stderrBytes: number
 	status: InternalStatus
+	result: { kind: "completed" } | ({ kind: "external-terminal-lost" } & Omit<ExternalTerminalLoss, "kind">)
 }
 
 export type SchedulerSlot = {
@@ -167,6 +184,8 @@ export type SchedulerState = {
 	// daemon's `applyRateLimitNotice` then persists the same value (UTC millis) into
 	// `DaemonRateLimitState`. Null when no cooldown is in effect.
 	rateLimitedUntilMs: number | null
+	externalTerminalLosses: Map<string, ExternalTerminalLoss>
+	externalTerminalAvailabilityByEndpoint: Map<string, ExternalTerminalAvailability>
 }
 
 export type SchedulerStore = Pick<
@@ -248,6 +267,24 @@ export type SchedulerEvent =
 	// trigger with the daemon-wide cooldown decision exposed via `daemon.status`. Distinct
 	// from `attempt.timeout` because rate-limit exits do not consume an attempt slot.
 	| { type: "scheduler.rate_limited"; ts: string; chainId: number; itemId: number; runId: string; resetsAt: number; resetAtIso: string; rateLimitType: string | null }
+	| {
+		type: "external_terminal.unavailable"
+		chainId: number
+		runner: AgentRunnerKind
+		binary: string
+		probeArgv: readonly ["probe"]
+		availability: Exclude<ExternalTerminalAvailability, { kind: "available" }>
+		affected: readonly { chainId: number; rowId: number; itemId: string; phase: string }[]
+	}
+	| {
+		type: "runner.availability_restored"
+		chainId: number
+		runner: AgentRunnerKind
+		binary: string
+		probeArgv: readonly ["probe"]
+		availability: Extract<ExternalTerminalAvailability, { kind: "available" }>
+	}
+	| { type: "external_terminal.lost"; chainId: number; itemId: number; runId: string; phase: string; runner: AgentRunnerKind; loss: ExternalTerminalLoss }
 
 export type SchedulerTimerLifecycleEvent = Extract<SchedulerEvent, {
 	type:
@@ -374,6 +411,9 @@ export type SchedulerOptions = {
 	// in-state gate (`SchedulerState.rateLimitedUntilMs`) is set synchronously in the close
 	// handler before this callback fires, so the next tick is gated even before persist lands.
 	onRateLimitObserved?: (info: { runId: string; chainId: number; itemId: number; reset: RateLimitReset }) => void | Promise<void>
+	externalTerminalProbe?: (probe: ExternalTerminalProbe) => Promise<ExternalTerminalAvailability>
+	externalTerminalProbeIntervalMs?: number
+	externalTerminalLossKillMs?: number
 }
 
 // #406: minted run credential. The string is the secret value the daemon's caller-admission
@@ -432,6 +472,8 @@ export function createSchedulerState(): SchedulerState {
 		recycleTriggers: new Map(),
 		lifecycleEventPersistenceFailures: [],
 		rateLimitedUntilMs: null,
+		externalTerminalLosses: new Map(),
+		externalTerminalAvailabilityByEndpoint: new Map(),
 	}
 }
 
@@ -979,10 +1021,24 @@ async function spawnSchedulerRun(
 	let credentialContext: SchedulerRunCredentialContext | null = null
 	let activeRun: SchedulerPreparingRun | null = null
 	try {
+		const runner = await resolvePhaseRunner(options, { chain, item, phase })
+		const domain = runnerExecutionDomain(runner)
+		let externalAvailability: Extract<ExternalTerminalAvailability, { kind: "available" }> | null = null
+		switch (domain.kind) {
+			case "local-process":
+				break
+			case "external-terminal": {
+				externalAvailability = await gateExternalTerminalCandidate(options, chain, item, phase, runner, domain.probe)
+				if (externalAvailability === null) return null
+				break
+			}
+			default:
+				return assertNeverExecutionDomain(domain)
+		}
+
 		worktreePath = worktreePath ?? await worktreeManager({ chain, repoCwd: item.repoCwd, slotKey: slot.key })
 		slot.worktreePath = worktreePath
 
-		const runner = await resolvePhaseRunner(options, { chain, item, phase })
 		const resumeDecision = resumeDecisionForItem(item, phase, runner.kind)
 		const startsAttempt = phase === phasePlan.firstPhase && resumeDecision.kind === "fresh"
 		runId = options.runIdFactory?.({ chain, item, phase }) ?? makeRunId(item.id, phase)
@@ -1000,6 +1056,8 @@ async function spawnSchedulerRun(
 				worktreePath,
 				startStatus: item.status,
 				startStatusUpdatedAt: item.statusUpdatedAt,
+				startAttempts: item.attempts,
+				attemptStarted: startsAttempt,
 				...(item.phase === null ? {} : { startPhase: item.phase }),
 			}),
 		})
@@ -1038,7 +1096,8 @@ async function spawnSchedulerRun(
 			runner: runner.kind,
 		})
 		const finalPrompt = renderedPrompt + phaseExitsEpilogue()
-		const runnerPlan = buildRunnerInvocation(
+		const runnerPlan = schedulerRunnerInvocation(
+			domain,
 			runner,
 			finalPrompt,
 			resumeDecision,
@@ -1050,6 +1109,7 @@ async function spawnSchedulerRun(
 		const spawnEnv: NodeJS.ProcessEnv = {
 			...process.env,
 			[LOOP_DATA_ROOT_ENV]: resolveLoopDataPaths(options.loopDataRootOptions).root,
+			[LOOP_RUN_STATUS_PATH_ENV]: resolveChainRuntimePaths(chain.name, options.loopDataRootOptions).runPhaseStatusFile(runId, phase),
 		}
 		if (credential !== null) spawnEnv[LOOP_RUN_CREDENTIAL_ENV] = credential.value
 		if (runner.kind === "codex") {
@@ -1063,7 +1123,7 @@ async function spawnSchedulerRun(
 			env: spawnEnv,
 		})
 		await waitForChildSpawn(child)
-		activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, phase, child, runner, credential, credentialContext)
+		activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, phase, child, runner, credential, credentialContext, domain, externalAvailability)
 		slot.activeRun = activeRun
 		options.store.setCurrentRun({
 			chainId: chain.id,
@@ -1077,6 +1137,8 @@ async function spawnSchedulerRun(
 				worktreePath,
 				...(activeRun.pid === null ? {} : { pid: activeRun.pid }),
 				processGroupLeader: true,
+				...(externalAvailability === null ? {} : { externalTerminalAvailability: externalAvailability }),
+				...(externalAvailability === null ? {} : { externalTerminalRunner: runner.kind }),
 			}),
 		})
 		await writeSchedulerRunStatus(options, {
@@ -1107,6 +1169,325 @@ async function spawnSchedulerRun(
 		await containSchedulerPreparationFailure(options, chain, item, slot, attribution, failure)
 		return null
 	}
+}
+
+async function gateExternalTerminalCandidate(
+	options: SchedulerOptions,
+	chain: ChainRecord,
+	item: ItemRecord,
+	phase: string,
+	runner: AgentRunnerSelection,
+	probe: ExternalTerminalProbe,
+): Promise<Extract<ExternalTerminalAvailability, { kind: "available" }> | null> {
+	const availability = await probeExternalTerminalForScheduler(options, probe)
+	const endpointKey = externalTerminalEndpointKey(runner.kind, probe)
+	const previous = priorEndpointAvailability(options, runner.kind, probe)
+	switch (availability.kind) {
+		case "available":
+			if (item.extra.externalTerminalHold !== undefined) {
+				options.store.updateItem(item.id, {
+					extra: clearExternalTerminalHold(item.extra),
+					updatedAt: nowSeconds(options),
+				})
+			}
+			options.state.externalTerminalAvailabilityByEndpoint.set(endpointKey, availability)
+			if (previous !== null && previous.kind !== "available") {
+				await emit(options, {
+					type: "runner.availability_restored",
+					chainId: chain.id,
+					runner: runner.kind,
+					binary: probe.binary,
+					probeArgv: probe.argv,
+					availability,
+				})
+			}
+			return availability
+		case "unavailable":
+		case "probe-failed": {
+			await recordExternalTerminalUnavailable(options, chain, item, phase, runner, probe, availability)
+			return null
+		}
+		default:
+			return assertNeverAvailability(availability)
+	}
+}
+
+export async function reconcileExternalTerminalControlPlaneAvailability(
+	options: SchedulerOptions,
+	chain: ChainRecord,
+	item: ItemRecord,
+): Promise<ItemRecord> {
+	const loadedPreset = await schedulerLoadedPresetForItem(options, chain, item)
+	const phasePlan = options.phase === undefined
+		? buildPhasePlanFromPreset(loadedPreset.preset)
+		: { firstPhase: options.phase, nonTriggerPhases: [options.phase], itemTriggerPhases: [] }
+	const phase = controlPlanePhaseForItem(options, item, phasePlan, statusesFromPreset(loadedPreset.preset))
+	const runner = await resolvePhaseRunner(options, { chain, item, phase })
+	const domain = runnerExecutionDomain(runner)
+	switch (domain.kind) {
+		case "local-process": {
+			if (item.extra.externalTerminalHold === undefined) return item
+			return options.store.updateItem(item.id, {
+				extra: clearExternalTerminalHold(item.extra),
+				updatedAt: nowSeconds(options),
+			})
+		}
+		case "external-terminal":
+			await gateExternalTerminalCandidate(options, chain, item, phase, runner, domain.probe)
+			return options.store.getItem(item.id) ?? item
+		default:
+			return assertNeverExecutionDomain(domain)
+	}
+}
+
+function controlPlanePhaseForItem(
+	options: SchedulerOptions,
+	item: ItemRecord,
+	phasePlan: SchedulerPhasePlan,
+	statuses: SchedulerChainStatuses,
+): string {
+	for (const triggerPhase of phasePlan.itemTriggerPhases) {
+		if (item.phase === triggerPhase.afterPhase && item.status === triggerPhase.whenStatus) return triggerPhase.name
+	}
+	const runsById = new Map(options.store.listRuns(item.chainId).map((run) => [run.runId, run]))
+	const continuation = nextNonTriggerPhaseForItem({
+		item,
+		runsById,
+		phasePlan,
+		pendingStatuses: statuses.pending,
+		terminalStatuses: statuses.terminal,
+		now: nowSeconds(options),
+	})
+	if (continuation !== null) return continuation
+	if (item.phase !== null && hasUnfinishedCurrentPhaseRun(item, runsById)) return item.phase
+	return phasePlan.firstPhase
+}
+
+async function recordExternalTerminalUnavailable(
+	options: SchedulerOptions,
+	chain: ChainRecord,
+	item: ItemRecord,
+	phase: string,
+	runner: AgentRunnerSelection,
+	probe: ExternalTerminalProbe,
+	availability: Exclude<ExternalTerminalAvailability, { kind: "available" }>,
+): Promise<void> {
+	const currentItem = options.store.getItem(item.id) ?? item
+	const endpointKey = externalTerminalEndpointKey(runner.kind, probe)
+	const previous = priorEndpointAvailability(options, runner.kind, probe)
+	const transition = availabilityTransitioned(previous, availability)
+	const previousHold = currentItem.extra.externalTerminalHold
+	const since = transition || previousHold === undefined ? availability.checkedAt : previousHold.availability.since
+	const hold: ExternalTerminalHold = {
+		kind: "external-terminal-unavailable",
+		runner: runner.kind,
+		binary: probe.binary,
+		probeArgv: [...probe.argv],
+		phase,
+		availability: { ...availability, since },
+	}
+	options.store.updateItem(item.id, {
+		extra: withExternalTerminalHold(currentItem.extra, hold),
+		updatedAt: nowSeconds(options),
+	})
+	options.state.externalTerminalAvailabilityByEndpoint.set(endpointKey, availability)
+	if (transition) {
+		await emit(options, {
+			type: "external_terminal.unavailable",
+			chainId: chain.id,
+			runner: runner.kind,
+			binary: probe.binary,
+			probeArgv: [...probe.argv],
+			availability,
+			affected: [{ chainId: chain.id, rowId: item.id, itemId: item.itemId, phase }],
+		})
+	}
+}
+
+function installExternalTerminalMonitor(
+	options: SchedulerOptions,
+	child: ReturnType<typeof spawn>,
+	context: {
+		chain: ChainRecord
+		item: ItemRecord
+		runId: string
+		phase: string
+		runner: AgentRunnerSelection
+		probe: ExternalTerminalProbe
+		credential: SchedulerRunCredential | null
+		credentialContext: SchedulerRunCredentialContext
+	},
+): () => void {
+	const intervalMs = options.externalTerminalProbeIntervalMs ?? EXTERNAL_TERMINAL_INFLIGHT_PROBE_INTERVAL_MS
+	const killMs = options.externalTerminalLossKillMs ?? EXTERNAL_TERMINAL_LOSS_KILL_MS
+	let stopped = false
+	let checking = false
+	let killTimer: ReturnType<typeof setTimeout> | null = null
+	const check = async (): Promise<void> => {
+		if (stopped || checking || child.exitCode !== null || child.signalCode !== null) return
+		checking = true
+		try {
+			const availability = await probeExternalTerminalForScheduler(options, context.probe)
+			if (stopped || child.exitCode !== null || child.signalCode !== null || availability.kind === "available") return
+			const terminalStatuses = new Set((await schedulerStatusesForChain(options, context.chain)).terminal)
+			const currentItem = options.store.getItem(context.item.id) ?? context.item
+			if (terminalStatuses.has(currentItem.status) || options.state.externalTerminalLosses.has(context.runId)) return
+
+			await recordExternalTerminalUnavailable(
+				options,
+				context.chain,
+				currentItem,
+				context.phase,
+				context.runner,
+				context.probe,
+				availability,
+			)
+			const reason = availability.kind === "unavailable" ? availability.reason : "probe-failed"
+			const loss: ExternalTerminalLoss = {
+				kind: "lost",
+				detectedAt: availability.checkedAt,
+				reason,
+				terminationPhase: child.exitCode === null && child.signalCode === null ? "term" : "closed",
+			}
+			options.state.externalTerminalLosses.set(context.runId, loss)
+			persistExternalTerminalCurrentRun(options, context.chain.id, context.runId, availability, loss)
+			if (context.credential !== null) options.runCredentials?.revoke(context.credential, context.credentialContext)
+			await emit(options, {
+				type: "external_terminal.lost",
+				chainId: context.chain.id,
+				itemId: context.item.id,
+				runId: context.runId,
+				phase: context.phase,
+				runner: context.runner.kind,
+				loss,
+			})
+			if (loss.terminationPhase === "term") {
+				sendSignalToChildProcessGroup(child, "SIGTERM")
+				killTimer = setTimeout(() => {
+					killTimer = null
+					if (child.exitCode !== null || child.signalCode !== null) return
+					const killed: ExternalTerminalLoss = { ...loss, terminationPhase: "kill" }
+					options.state.externalTerminalLosses.set(context.runId, killed)
+					persistExternalTerminalCurrentRun(options, context.chain.id, context.runId, availability, killed)
+					sendSignalToChildProcessGroup(child, "SIGKILL")
+				}, killMs)
+			}
+		} finally {
+			checking = false
+		}
+	}
+	const timer = setInterval(() => {
+		const pending = check()
+		options.state.pendingCloseHandlers.add(pending)
+		void pending.finally(() => options.state.pendingCloseHandlers.delete(pending))
+	}, intervalMs)
+	return () => {
+		stopped = true
+		clearInterval(timer)
+		if (killTimer !== null) clearTimeout(killTimer)
+	}
+}
+
+async function probeExternalTerminalForScheduler(
+	options: SchedulerOptions,
+	probe: ExternalTerminalProbe,
+): Promise<ExternalTerminalAvailability> {
+	try {
+		return await (options.externalTerminalProbe?.(probe) ?? probeExternalTerminal(probe))
+	} catch {
+		return { kind: "probe-failed", checkedAt: nowIso(options), exitCode: null, signal: null }
+	}
+}
+
+function persistExternalTerminalCurrentRun(
+	options: SchedulerOptions,
+	chainId: number,
+	runId: string,
+	availability: ExternalTerminalAvailability,
+	loss: ExternalTerminalLoss,
+): void {
+	const current = options.store.getCurrentRun(chainId)
+	if (current?.runId !== runId) return
+	options.store.setCurrentRun({
+		chainId,
+		phase: current.phase,
+		runId,
+		startedAt: current.startedAt,
+		extra: storedItemExtra({
+			...itemExtraToJsonObject(current.extra),
+			externalTerminalAvailability: availability,
+			externalTerminalLoss: loss,
+		}),
+	})
+}
+
+function availabilityTransitioned(
+	previous: ExternalTerminalAvailability | null,
+	next: Exclude<ExternalTerminalAvailability, { kind: "available" }>,
+): boolean {
+	if (previous === null || previous.kind === "available") return true
+	if (previous.kind !== next.kind) return true
+	if (previous.kind === "unavailable" && next.kind === "unavailable") return previous.reason !== next.reason
+	return false
+}
+
+function priorEndpointAvailability(
+	options: SchedulerOptions,
+	runner: AgentRunnerKind,
+	probe: ExternalTerminalProbe,
+): ExternalTerminalAvailability | null {
+	const endpointKey = externalTerminalEndpointKey(runner, probe)
+	const inMemory = options.state.externalTerminalAvailabilityByEndpoint.get(endpointKey)
+	if (inMemory !== undefined) return inMemory
+	for (const chain of options.store.listChains()) {
+		for (const item of options.store.listItems(chain.id)) {
+			const hold = item.extra.externalTerminalHold
+			if (hold === undefined || hold.runner !== runner || hold.binary !== probe.binary) continue
+			if (JSON.stringify(hold.probeArgv) !== JSON.stringify(probe.argv)) continue
+			const availability = hold.availability.kind === "unavailable"
+				? {
+					kind: "unavailable" as const,
+					checkedAt: hold.availability.checkedAt,
+					reason: hold.availability.reason,
+					exitCode: hold.availability.exitCode,
+					signal: hold.availability.signal,
+				}
+				: {
+					kind: "probe-failed" as const,
+					checkedAt: hold.availability.checkedAt,
+					exitCode: hold.availability.exitCode,
+					signal: hold.availability.signal,
+				}
+			options.state.externalTerminalAvailabilityByEndpoint.set(endpointKey, availability)
+			return availability
+		}
+	}
+	return null
+}
+
+function schedulerRunnerInvocation(
+	domain: RunnerExecutionDomain,
+	runner: AgentRunnerSelection,
+	prompt: string,
+	resume: ResumeDecision,
+	paths: RunnerInvocationPaths,
+): RunnerInvocation {
+	switch (domain.kind) {
+		case "local-process":
+			return buildRunnerInvocation(runner, prompt, resume, paths)
+		case "external-terminal":
+			return { kind: "spawn", binary: runner.binary, args: [...runner.extraArgs] }
+		default:
+			return assertNeverExecutionDomain(domain)
+	}
+}
+
+function assertNeverExecutionDomain(value: never): never {
+	throw new Error(`unhandled runner execution domain: ${JSON.stringify(value)}`)
+}
+
+function assertNeverAvailability(value: never): never {
+	throw new Error(`unhandled external-terminal availability: ${JSON.stringify(value)}`)
 }
 
 async function waitForChildSpawn(child: ReturnType<typeof spawn>): Promise<void> {
@@ -1250,21 +1631,26 @@ function attachRunCloseHandler(
 	// error branch — the run is no longer active either way.
 	credential: SchedulerRunCredential | null,
 	credentialContext: SchedulerRunCredentialContext,
+	domain: RunnerExecutionDomain,
+	externalAvailability: Extract<ExternalTerminalAvailability, { kind: "available" }> | null,
 ): SchedulerPreparingRun {
 	let parsedSessionId: string | null = null
 	let sessionIdInvalid = false
 	let rateLimit = classifyRateLimitFromStdout("")
 	const stdoutState = createStreamTextState((line) => {
-		if (parsedSessionId === null) parsedSessionId = parseSessionIdFromRunnerStream(runner.kind, `${line}\n`)
-		const observed = classifyRateLimitFromStdout(line)
-		rateLimit = { code: rateLimit.code ?? observed.code, reset: observed.reset ?? rateLimit.reset }
+		if (domain.kind === "local-process") {
+			if (parsedSessionId === null) parsedSessionId = parseSessionIdFromRunnerStream(runner.kind, `${line}\n`)
+			const observed = classifyRateLimitFromStdout(line)
+			rateLimit = { code: rateLimit.code ?? observed.code, reset: observed.reset ?? rateLimit.reset }
+		}
 	})
 	const stderrState = createStreamTextState((line) => {
-		sessionIdInvalid = sessionIdInvalid || detectsSessionIdInvalid(runner.kind, line)
+		if (domain.kind === "local-process") sessionIdInvalid = sessionIdInvalid || detectsSessionIdInvalid(runner.kind, line)
 	})
 	const outputPaths = schedulerPhaseOutputPaths(options, chain, runId, phase)
 	const outputWriters = createSchedulerPhaseOutputWriters(outputPaths)
 	let lifecycleGc: SchedulerRunLifecycleGc | null = null
+	let externalTerminalMonitorCleanup: (() => void) | null = null
 	let terminatorCleanup: (() => void) | null = null
 	let closeMode: "preparing" | "normal" | "preparation-abort" = "preparing"
 	let releaseCloseHandler: () => void = () => {}
@@ -1303,8 +1689,21 @@ function attachRunCloseHandler(
 		})
 		lifecycleGc = installedGc
 		terminatorCleanup = installedGc.terminatorCleanup
+		if (domain.kind === "external-terminal" && externalAvailability !== null) {
+			externalTerminalMonitorCleanup = installExternalTerminalMonitor(options, child, {
+				chain,
+				item,
+				runId,
+				phase,
+				runner,
+				probe: domain.probe,
+				credential,
+				credentialContext,
+			})
+		}
 
 		child.on("close", (code) => {
+			externalTerminalMonitorCleanup?.()
 			lifecycleGc?.cleanup()
 
 			const pendingCloseHandler = (async (): Promise<SchedulerCompletedRun> => {
@@ -1326,6 +1725,7 @@ function attachRunCloseHandler(
 							stdoutBytes,
 							stderrBytes,
 							status: (options.store.getItem(item.id) ?? item).status,
+							result: { kind: "completed" },
 						}
 					} finally {
 						if (credential !== null) options.runCredentials?.revoke(credential, credentialContext)
@@ -1343,9 +1743,11 @@ function attachRunCloseHandler(
 				const terminalStatuses = new Set((await schedulerStatusesForChain(options, chain)).terminal)
 				const currentItem = options.store.getItem(item.id)
 				const status = (currentItem ?? item).status
+				const externalTerminalLoss = options.state.externalTerminalLosses.get(runId) ?? null
+				const runStatus = externalTerminalLoss === null ? status : parseInternalStatus("external-terminal-lost", "scheduler.externalTerminalLostRunStatus")
 				const endedAt = nowSeconds(options)
-				const itemTransitionedToTerminal = !terminalStatuses.has(item.status) && terminalStatuses.has(status)
-				options.state.finalizingItemStatuses.set(item.id, status)
+				const itemTransitionedToTerminal = externalTerminalLoss === null && !terminalStatuses.has(item.status) && terminalStatuses.has(status)
+				options.state.finalizingItemStatuses.set(item.id, externalTerminalLoss === null ? status : item.status)
 				let persistenceStage: RunnerStatusPersistenceFailure["stage"] | null = "status-artifact"
 				try {
 					await closeSchedulerPhaseOutputWriters(outputWriters)
@@ -1357,7 +1759,7 @@ function attachRunCloseHandler(
 						startedAt,
 						endedAt,
 						exitCode,
-						status,
+						status: runStatus,
 						pid: child.pid ?? null,
 						worktreePath,
 						output: { kind: "streamed", stdoutBytes, stderrBytes },
@@ -1367,11 +1769,12 @@ function attachRunCloseHandler(
 					options.store.completeRun(runId, {
 						endedAt,
 						exitCode,
-						status,
+						status: runStatus,
 						extra: storedItemExtra({
 							...(completedRun === null ? {} : itemExtraToJsonObject(completedRun.extra)),
 							stdoutBytes,
 							stderrBytes,
+							...(externalTerminalLoss === null ? {} : { externalTerminalLoss }),
 						}),
 					})
 
@@ -1389,7 +1792,7 @@ function attachRunCloseHandler(
 						stdoutPath: outputPaths.stdoutPath,
 						stderrPath: outputPaths.stderrPath,
 					})
-					await emit(options, { type: "agent.exit", slotKey: slot.key, chainId: chain.id, itemId: item.id, runId, phase, exitCode, status, excerpt })
+					await emit(options, { type: "agent.exit", slotKey: slot.key, chainId: chain.id, itemId: item.id, runId, phase, exitCode, status: runStatus, excerpt })
 					await emit(options, {
 						type: "phase.end",
 						ts: nowIso(options),
@@ -1399,10 +1802,23 @@ function attachRunCloseHandler(
 						phase,
 						exitCode,
 						durationSeconds: Math.max(0, endedAt - startedAt),
-						status,
+						status: runStatus,
 					})
 					const previousSessionId = (currentItem ?? item).sessionIds[phase]?.[runner.kind] ?? null
-					if (currentItem === null || !terminalStatuses.has(currentItem.status)) {
+					if (externalTerminalLoss !== null) {
+						const heldItem = options.store.getItem(item.id) ?? item
+						options.store.updateItem(item.id, {
+							status: engineLifecycleAdmittedItemStatus(item.status, "scheduler.external-terminal-loss-restore"),
+							statusUpdatedAt: item.statusUpdatedAt,
+							attempts: item.attempts,
+							phase: item.phase,
+							lastRunId: runId,
+							agentCwd: worktreePath,
+							extra: clearItemSchedulerBackoff(heldItem.extra),
+							updatedAt: endedAt,
+						})
+						options.store.setItemSessionId(item.id, { phase, runner: runner.kind, sessionId: null, updatedAt: endedAt })
+					} else if (currentItem === null || !terminalStatuses.has(currentItem.status)) {
 						const itemForBackoff = currentItem ?? item
 						const statusWasWrittenDuringRun = currentItem !== null && currentItem.statusUpdatedAt !== item.statusUpdatedAt && currentItem.statusUpdatedAt >= startedAt
 						// #478: rate-limit exits do not consume an attempt slot (roll the spawn-time
@@ -1442,7 +1858,7 @@ function attachRunCloseHandler(
 						})
 						await options.onRateLimitObserved?.({ runId, chainId: chain.id, itemId: item.id, reset: rateLimit.reset })
 					}
-					if (sessionIdInvalid) {
+					if (externalTerminalLoss === null && sessionIdInvalid) {
 						options.store.setItemSessionId(item.id, { phase, runner: runner.kind, sessionId: null, updatedAt: endedAt })
 						await emit(options, {
 							type: "session_id.invalidated",
@@ -1455,7 +1871,7 @@ function attachRunCloseHandler(
 							previousSessionId,
 							reason: "runner_session_id_invalid",
 						})
-					} else if (parsedSessionId !== null) {
+					} else if (externalTerminalLoss === null && parsedSessionId !== null) {
 						options.store.setItemSessionId(item.id, { phase, runner: runner.kind, sessionId: parsedSessionId, updatedAt: endedAt })
 					}
 					if (itemTransitionedToTerminal) {
@@ -1469,8 +1885,11 @@ function attachRunCloseHandler(
 							terminalStatus: status,
 						})
 					}
-					await completeChainIfReady(options, chain, runId, [...terminalStatuses])
-			return { runId, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, exitCode, stdoutBytes, stderrBytes, status }
+					if (externalTerminalLoss === null) await completeChainIfReady(options, chain, runId, [...terminalStatuses])
+					const result: SchedulerCompletedRun["result"] = externalTerminalLoss === null
+						? { kind: "completed" }
+						: { kind: "external-terminal-lost", detectedAt: externalTerminalLoss.detectedAt, reason: externalTerminalLoss.reason, terminationPhase: externalTerminalLoss.terminationPhase }
+					return { runId, itemId: item.id, chainId: chain.id, repoCwd: item.repoCwd, exitCode, stdoutBytes, stderrBytes, status: externalTerminalLoss === null ? status : item.status, result }
 				} catch (error) {
 					if (slot.activeRun?.runId === runId) slot.activeRun = null
 					if (persistenceStage === null) throw error
@@ -1490,6 +1909,7 @@ function attachRunCloseHandler(
 					throw new RunnerStatusPersistenceError(failure)
 				} finally {
 					options.state.finalizingItemStatuses.delete(item.id)
+					options.state.externalTerminalLosses.delete(runId)
 					// #406: revoke the run credential exactly once per run close. Composing with
 					// #417's double GC: this path runs after the natural close; explicit
 					// `terminateAllActiveRuns` (e.g. daemon shutdown) drives child exit through the

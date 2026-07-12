@@ -216,7 +216,7 @@ function makeOptions(preset = makePreset()): LoopOptions {
 		worktree: false,
 		hostRunner: "codex",
 		defaultRunner: { ...codexRunner, source: "engine-builtin" },
-		runnerCommands: { claude: claudeRunner, codex: codexRunner, opencode: opencodeRunner },
+		runnerCommands: { claude: claudeRunner, codex: codexRunner, opencode: opencodeRunner, hapi: { kind: "hapi", binary: "hapi", extraArgs: [], model: null } },
 		dryRun: false,
 		preset,
 	}
@@ -786,6 +786,11 @@ describe("runner and daemon helpers", () => {
 		expect(parseSessionIdFromRunnerStream("opencode", stdout)).toBe("ses_12156f631ffekbejfp2hbSJNs5")
 		expect(parseSessionIdFromRunnerStream("opencode", "")).toBe(null)
 		expect(parseSessionIdFromRunnerStream("opencode", "not json\n")).toBe(null)
+	})
+
+	test("hapi vocabulary admission does not parse runner output before issue #603", () => {
+		expect(parseSessionIdFromRunnerStream("hapi", '{"type":"thread.started","thread_id":"must-not-be-consumed"}\n')).toBeNull()
+		expect(parseSessionIdFromRunnerStream("hapi", '{"type":"step_start","sessionID":"must-not-be-consumed"}\n')).toBeNull()
 	})
 })
 

@@ -392,7 +392,7 @@ const ITEMS_TABLE_SCHEMA_SQL = `
 	issue_file TEXT,
 	evidence_dir TEXT,
 	agent_cwd TEXT,
-	runner TEXT CHECK (runner IN ('claude', 'codex', 'opencode') OR runner IS NULL),
+	runner TEXT CHECK (runner IN ('claude', 'codex', 'opencode', 'hapi') OR runner IS NULL),
 	phase TEXT,
 	preset TEXT,
 	preset_path TEXT,
@@ -485,7 +485,7 @@ ${STATE_INDEXES_SQL}
 // now carries the widened CHECK). Idempotent: rows already on v13 cause `user_version` to skip
 // the rebuild, and rows being copied through the new schema satisfy the new constraint (existing
 // runner values are all `claude` / `codex` / NULL — strict subset of the new accepted set).
-const STATE_SCHEMA_VERSION = 13
+const STATE_SCHEMA_VERSION = 14
 const V5_ITEM_SESSION_COLUMN = ["last", "session", "id"].join("_")
 // v9 moves preset declaration from chains.preset to items.preset / items.preset_path (#412).
 // Existing rows are back-filled from chains.preset so the engine resolves the legacy preset
@@ -580,6 +580,12 @@ function itemsTableRunnerCheckAllowsOpencode(db: Database): boolean {
 	return /runner\s+TEXT\s+CHECK[^)]*['"]opencode['"]/i.test(sql)
 }
 
+function itemsTableRunnerCheckAllowsHapi(db: Database): boolean {
+	const sql = db.query<TableSqlRow, []>("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'items'").get()?.sql ?? ""
+	if (sql === "") return false
+	return /runner\s+TEXT\s+CHECK[^)]*['"]hapi['"]/i.test(sql)
+}
+
 function itemsTableHasColumn(db: Database, columnName: string): boolean {
 	return tableHasColumn(db, "items", columnName)
 }
@@ -613,12 +619,15 @@ function migrateStateSchema(db: Database): void {
 	// check; the rebuild simply CREATEs `items_new` from that SQL and copies rows over.
 	const needsItemTableRebuildForOpencodeCheck = stateSchemaExists(db)
 		&& !itemsTableRunnerCheckAllowsOpencode(db)
+	const needsItemTableRebuildForHapiCheck = stateSchemaExists(db)
+		&& !itemsTableRunnerCheckAllowsHapi(db)
 	if (
 		beforeVersion >= STATE_SCHEMA_VERSION
 		&& stateSchemaExists(db)
 		&& !needsChainTableRebuild
 		&& !needsItemTableRebuildForGitHubShapeRetire
 		&& !needsItemTableRebuildForOpencodeCheck
+		&& !needsItemTableRebuildForHapiCheck
 		&& itemsTableHasColumn(db, "phase")
 		&& itemsTableHasColumn(db, "session_ids")
 		&& itemsTableHasColumn(db, "position")
@@ -628,7 +637,7 @@ function migrateStateSchema(db: Database): void {
 		&& !itemsTableHasColumn(db, V5_ITEM_SESSION_COLUMN)
 		&& runsTableHasColumn(db, "status")
 	) return
-	if (needsItemTableRebuild || needsChainTableRebuild || needsItemTableRebuildForGitHubShapeRetire || needsItemTableRebuildForOpencodeCheck) db.exec("PRAGMA foreign_keys = OFF")
+	if (needsItemTableRebuild || needsChainTableRebuild || needsItemTableRebuildForGitHubShapeRetire || needsItemTableRebuildForOpencodeCheck || needsItemTableRebuildForHapiCheck) db.exec("PRAGMA foreign_keys = OFF")
 	try {
 		db.transaction(() => {
 			db.exec(STATE_SCHEMA_SQL)
@@ -696,6 +705,9 @@ function migrateStateSchema(db: Database): void {
 			if (!itemsTableRunnerCheckAllowsOpencode(db)) {
 				rebuildItemsTableForV13(db)
 			}
+			if (!itemsTableRunnerCheckAllowsHapi(db)) {
+				rebuildItemsTableForV13(db)
+			}
 			// #433 v9→v10: drop the retired top-level runner keys (`runner` and the role-named
 			// runner key, named at runtime via string concatenation per #456 to keep `src/` free of
 			// the role taxonomy literal) and rename the `config` wrapper to `bindings` on the
@@ -711,7 +723,7 @@ function migrateStateSchema(db: Database): void {
 			db.exec(`PRAGMA user_version = ${STATE_SCHEMA_VERSION}`)
 		}).immediate()
 	} finally {
-		if (needsItemTableRebuild || needsChainTableRebuild || needsItemTableRebuildForGitHubShapeRetire) db.exec("PRAGMA foreign_keys = ON")
+		if (needsItemTableRebuild || needsChainTableRebuild || needsItemTableRebuildForGitHubShapeRetire || needsItemTableRebuildForOpencodeCheck || needsItemTableRebuildForHapiCheck) db.exec("PRAGMA foreign_keys = ON")
 	}
 }
 
@@ -1067,7 +1079,7 @@ function rebuildItemsTableForV6(db: Database): void {
 		issue_file TEXT,
 		evidence_dir TEXT,
 		agent_cwd TEXT,
-		runner TEXT CHECK (runner IN ('claude', 'codex', 'opencode') OR runner IS NULL),
+		runner TEXT CHECK (runner IN ('claude', 'codex', 'opencode', 'hapi') OR runner IS NULL),
 		phase TEXT,
 		preset TEXT,
 		preset_path TEXT,
@@ -1470,7 +1482,7 @@ function insertItem(db: Database, getItemRow: (id: number) => ItemRow | null, in
 
 function rowToItem(row: ItemRow | null): ItemRecord | null {
 	if (row === null) return null
-	if (row.runner !== null && row.runner !== "claude" && row.runner !== "codex" && row.runner !== "opencode") {
+	if (row.runner !== null && row.runner !== "claude" && row.runner !== "codex" && row.runner !== "opencode" && row.runner !== "hapi") {
 		throw new SqliteStateError("invalid_json", `invalid item runner in DB row: ${row.runner}`, { id: row.id })
 	}
 	return {
@@ -1746,7 +1758,7 @@ function normalizeSessionPhase(phase: string, code: SqliteStateErrorCode): strin
 }
 
 function isAgentRunnerKind(value: unknown): value is AgentRunnerKind {
-	return value === "claude" || value === "codex" || value === "opencode"
+	return value === "claude" || value === "codex" || value === "opencode" || value === "hapi"
 }
 
 function stringifyJsonObject(value: JsonObject): string {

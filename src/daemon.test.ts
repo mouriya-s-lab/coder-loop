@@ -1082,6 +1082,129 @@ process.exitCode = 0
 		}
 	})
 
+	test("item.add accepts an unavailable external-terminal item and returns its durable creation hold", async () => {
+		let probes = 0
+		const fixture = await startFixture("external-terminal-item-add-probe", {
+			schedulerEnabled: false,
+			schedulerRunnerKind: "hapi",
+			schedulerConfig: {
+				externalTerminalProbe: async () => {
+					probes += 1
+					return { kind: "unavailable", checkedAt: "2026-07-12T01:00:00.000Z", reason: "endpoint-unavailable", exitCode: 69, signal: null }
+				},
+			},
+		})
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "external-terminal-item-add-probe-chain",
+				repository: "mouriya-s-lab/coder-loop",
+				baseBranch: "main",
+			})).chain)
+			const item = record(expectOk(await request(fixture, "item.add", {
+				chainId: numberValue(chain.id),
+				itemId: "602-add",
+				repoCwd: REPO_ROOT,
+				runner: "hapi",
+			})).item)
+			expect(probes).toBe(1)
+			expect(record(item.extra).externalTerminalHold).toMatchObject({
+				kind: "external-terminal-unavailable",
+				runner: "hapi",
+				phase: "iteration",
+				availability: { kind: "unavailable", reason: "endpoint-unavailable", since: "2026-07-12T01:00:00.000Z" },
+			})
+			expect(fixture.schedulerEvents.filter((event) => event.type === "external_terminal.unavailable")).toHaveLength(1)
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("item.batchAdd probes and durably holds every unavailable external-terminal item", async () => {
+		let probes = 0
+		const fixture = await startFixture("external-terminal-item-batch-add-probe", {
+			schedulerEnabled: false,
+			schedulerRunnerKind: "hapi",
+			schedulerConfig: {
+				externalTerminalProbe: async () => {
+					probes += 1
+					return { kind: "probe-failed", checkedAt: `2026-07-12T01:00:0${probes}.000Z`, exitCode: 2, signal: null }
+				},
+			},
+		})
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "external-terminal-item-batch-add-probe-chain",
+				repository: "mouriya-s-lab/coder-loop",
+				baseBranch: "main",
+			})).chain)
+			const batchResult = expectOk(await request(fixture, "item.batchAdd", {
+				chainId: numberValue(chain.id),
+				items: [
+					{ itemId: "602-batch-a", repoCwd: REPO_ROOT, runner: "hapi" },
+					{ itemId: "602-batch-b", repoCwd: REPO_ROOT, runner: "hapi" },
+				],
+			}))
+			if (!Array.isArray(batchResult.items)) throw new Error("item.batchAdd did not return items")
+			const items = batchResult.items.map(record)
+			expect(probes).toBe(2)
+			expect(items).toHaveLength(2)
+			for (const item of items) {
+				expect(record(item.extra).externalTerminalHold).toMatchObject({
+					kind: "external-terminal-unavailable",
+					runner: "hapi",
+					phase: "iteration",
+					availability: { kind: "probe-failed" },
+				})
+			}
+			expect(fixture.schedulerEvents.filter((event) => event.type === "external_terminal.unavailable")).toHaveLength(1)
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("item.update probes when the effective runner changes to an unavailable external terminal", async () => {
+		let probes = 0
+		const fixture = await startFixture("external-terminal-item-update-probe", {
+			schedulerEnabled: false,
+			schedulerConfig: {
+				phaseRunner: ({ item }) => item.runner === "hapi"
+					? { kind: "hapi", source: "queue", binary: "hapi", extraArgs: [], model: null }
+					: { kind: "claude", source: "queue", binary: "claude", extraArgs: [], model: null },
+				externalTerminalProbe: async () => {
+					probes += 1
+					return { kind: "unavailable", checkedAt: "2026-07-12T01:01:00.000Z", reason: "binary-missing", exitCode: null, signal: null }
+				},
+			},
+		})
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "external-terminal-item-update-probe-chain",
+				repository: "mouriya-s-lab/coder-loop",
+				baseBranch: "main",
+			})).chain)
+			const created = record(expectOk(await request(fixture, "item.add", {
+				chainId: numberValue(chain.id),
+				itemId: "602-update",
+				repoCwd: REPO_ROOT,
+				runner: "claude",
+			})).item)
+			expect(probes).toBe(0)
+			const updated = record(expectOk(await request(fixture, "item.update", {
+				itemId: numberValue(created.id),
+				runner: "hapi",
+			})).item)
+			expect(probes).toBe(1)
+			expect(record(updated.extra).externalTerminalHold).toMatchObject({
+				kind: "external-terminal-unavailable",
+				runner: "hapi",
+				phase: "iteration",
+				availability: { kind: "unavailable", reason: "binary-missing" },
+			})
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("socket item.add rejects invalid issue and repo fields before db insert", async () => {
 		const fixture = await startFixture("item-add-validation", { schedulerEnabled: false })
 		try {
@@ -3440,6 +3563,74 @@ process.exitCode = 0
 					// Already reaped by daemon startup recovery.
 				}
 			}
+			await daemon.stop()
+		}
+	})
+
+	test("daemon startup completes a durable external-terminal loss latch and restores the pre-run item facts (#602)", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-startup-external-terminal-loss`)
+		const loopDataRoot = resolve(root, "ld")
+		await mkdir(loopDataRoot, { recursive: true })
+		const store = openSqliteStateStore({ loopDataRoot })
+		try {
+			const chain = store.createChain({ name: "startup-external-terminal-loss-chain", preset: "gh-issue-pr-iteration", repository: "mouriya-s-lab/coder-loop", baseBranch: "main", status: "active", metadata: storedChainMetadata({}) })
+			const item = store.createItem({
+				chainId: chain.id,
+				itemId: "602",
+				repoCwd: REPO_ROOT,
+				status: runtimeStatus("queued"),
+				attempts: 1,
+				lastRunId: "run-lost-602",
+				phase: "iteration",
+				runner: "hapi",
+				sessionIds: { iteration: { hapi: "lost-session" } },
+				extra: storedItemExtra({
+					externalTerminalHold: {
+						kind: "external-terminal-unavailable",
+						runner: "hapi",
+						binary: "hapi",
+						probeArgv: ["probe"],
+						phase: "iteration",
+						availability: { kind: "unavailable", checkedAt: "2026-07-12T00:00:00.000Z", since: "2026-07-12T00:00:00.000Z", reason: "endpoint-unavailable", exitCode: 69, signal: null },
+					},
+				}),
+			})
+			store.recordRun({
+				runId: "run-lost-602",
+				chainId: chain.id,
+				itemId: item.id,
+				phase: "iteration",
+				status: parseInternalStatus("running", "test.runStatus"),
+				startedAt: 1_800_000_000,
+				extra: storedItemExtra({ startStatus: runtimeStatus("queued"), startStatusUpdatedAt: 1_799_999_999, startAttempts: 0, attemptStarted: true }),
+			})
+			store.setCurrentRun({
+				chainId: chain.id,
+				phase: "iteration",
+				runId: "run-lost-602",
+				startedAt: 1_800_000_000,
+				extra: storedItemExtra({
+					itemId: item.id,
+					externalTerminalRunner: "hapi",
+					externalTerminalAvailability: { kind: "unavailable", checkedAt: "2026-07-12T00:00:00.000Z", reason: "endpoint-unavailable", exitCode: 69, signal: null },
+					externalTerminalLoss: { kind: "lost", detectedAt: "2026-07-12T00:00:00.000Z", reason: "endpoint-unavailable", terminationPhase: "term" },
+				}),
+			})
+		} finally {
+			store.close()
+		}
+
+		const daemon = await startCoderLoopDaemon({ loopDataRoot, scheduler: { enabled: false } })
+		try {
+			const recovered = await readItem(loopDataRoot, 1, 602)
+			expect(recovered?.status).toBe("queued")
+			expect(recovered?.phase).toBeNull()
+			expect(recovered?.attempts).toBe(0)
+			expect(recovered?.sessionIds.iteration?.hapi).toBeUndefined()
+			expect(recovered?.extra.externalTerminalHold?.availability.kind).toBe("unavailable")
+			expect((await readRun(loopDataRoot, "run-lost-602"))?.status).toBe("external-terminal-lost")
+			expect(await readCurrentRun(loopDataRoot, 1)).toBeNull()
+		} finally {
 			await daemon.stop()
 		}
 	})

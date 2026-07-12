@@ -1320,6 +1320,10 @@ describe("sqlite state store", () => {
 				INSERT INTO items (chain_id, item_id, repo_cwd, status, attempts, position, status_updated_at, runner, session_ids, extra, created_at, updated_at)
 				VALUES (1, '481-pre-reject', '/repo/coder-loop', 'queued', 0, 0, 1.0, 'opencode', '{}', '{}', 1.0, 1.0)
 			`)).toThrow(/CHECK/i)
+			expect(() => legacy.exec(`
+				INSERT INTO items (chain_id, item_id, repo_cwd, status, attempts, position, status_updated_at, runner, session_ids, extra, created_at, updated_at)
+				VALUES (1, '602-pre-reject', '/repo/coder-loop', 'queued', 0, 0, 1.0, 'hapi', '{}', '{}', 1.0, 1.0)
+			`)).toThrow(/CHECK/i)
 		} finally {
 			legacy.close()
 		}
@@ -1350,6 +1354,17 @@ describe("sqlite state store", () => {
 			expect(opencodeItem.runner).toBe("opencode")
 			const reread = migrated.getItemById(chainId, "481-opencode")
 			expect(reread?.runner).toBe("opencode")
+			const hapiItem = migrated.createItem({
+				chainId,
+				itemId: "602-hapi",
+				repoCwd: "/repo/coder-loop",
+				status: runtimeStatus("queued"),
+				attempts: 0,
+				runner: "hapi",
+				extra: storedItemExtra({}),
+			})
+			expect(hapiItem.runner).toBe("hapi")
+			expect(migrated.getItemById(chainId, "602-hapi")?.runner).toBe("hapi")
 		} finally {
 			migrated.close()
 		}
@@ -1361,8 +1376,71 @@ describe("sqlite state store", () => {
 			expect(chain).not.toBeNull()
 			expect(reopened.getItemById(chain!.id, "481-pre")?.runner).toBe("claude")
 			expect(reopened.getItemById(chain!.id, "481-opencode")?.runner).toBe("opencode")
+			expect(reopened.getItemById(chain!.id, "602-hapi")?.runner).toBe("hapi")
 		} finally {
 			reopened.close()
+		}
+	})
+
+	test("v13 to v14 migration widens the runner CHECK for hapi (#602)", async () => {
+		const loopDataRoot = resolve(TEST_ROOT, `items-hapi-v13-v14-${Date.now()}-${++nextRootId}`)
+		await mkdir(loopDataRoot, { recursive: true })
+		const initialized = openSqliteStateStore({ loopDataRoot })
+		initialized.close()
+		const dbFile = resolve(loopDataRoot, "db.sqlite")
+		const legacy = new Database(dbFile, { readwrite: true, strict: true })
+		try {
+			legacy.exec(`
+				PRAGMA foreign_keys = OFF;
+				DROP TABLE items;
+				CREATE TABLE items (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+					item_id TEXT NOT NULL,
+					repo_cwd TEXT NOT NULL,
+					status TEXT NOT NULL,
+					attempts INTEGER NOT NULL,
+					position INTEGER NOT NULL DEFAULT 0,
+					title TEXT,
+					priority TEXT,
+					last_run_id TEXT,
+					session_ids TEXT NOT NULL DEFAULT '{}',
+					issue_file TEXT,
+					evidence_dir TEXT,
+					agent_cwd TEXT,
+					runner TEXT CHECK (runner IN ('claude', 'codex', 'opencode') OR runner IS NULL),
+					phase TEXT,
+					preset TEXT,
+					preset_path TEXT,
+					extra TEXT NOT NULL,
+					created_at REAL NOT NULL,
+					updated_at REAL NOT NULL,
+					status_updated_at REAL NOT NULL,
+					UNIQUE (chain_id, item_id)
+				);
+				PRAGMA user_version = 13;
+			`)
+			expect(() => legacy.exec(`
+				INSERT INTO items (chain_id, item_id, repo_cwd, status, attempts, runner, extra, created_at, updated_at, status_updated_at)
+				VALUES (1, '602-pre-reject', '/repo/coder-loop', 'queued', 0, 'hapi', '{}', 1.0, 1.0, 1.0)
+			`)).toThrow(/CHECK/i)
+		} finally {
+			legacy.close()
+		}
+
+		const migrated = openSqliteStateStore({ loopDataRoot })
+		try {
+			const chain = migrated.createChain({ name: "v14-hapi", preset: "gh-issue-pr-iteration", repository: "fixture/repo", baseBranch: "main", status: "active", metadata: storedChainMetadata({}) })
+			const item = migrated.createItem({ chainId: chain.id, itemId: "602-hapi", repoCwd: "/repo/coder-loop", status: runtimeStatus("queued"), runner: "hapi", extra: storedItemExtra({}) })
+			expect(item.runner).toBe("hapi")
+		} finally {
+			migrated.close()
+		}
+		const version = new Database(dbFile, { readwrite: true, strict: true })
+		try {
+			expect(version.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(14)
+		} finally {
+			version.close()
 		}
 	})
 

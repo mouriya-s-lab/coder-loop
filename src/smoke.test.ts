@@ -157,7 +157,7 @@ describe("smoke: v2 central chain CLI", () => {
 		const bogusKind = runCli(["chain", "set-runner-model", "anychain", "--kind", "bogus", "--model", "claude-sonnet-4-6"])
 		expect(bogusKind.exitCode).toBe(1)
 		const bogusKindCombined = bogusKind.stderr + bogusKind.stdout
-		expect(bogusKindCombined).toContain("--kind must be claude, codex, or opencode")
+		expect(bogusKindCombined).toContain("--kind must be claude, codex, opencode, or hapi")
 
 		const whitespaceModel = runCli(["chain", "set-runner-model", "anychain", "--kind", "opencode", "--model", "   "])
 		expect(whitespaceModel.exitCode).toBe(1)

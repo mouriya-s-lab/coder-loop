@@ -78,6 +78,8 @@ const ObservabilityEventTypeBoundary = arkType.or(
 	// load-failure event.
 	arkType.unit("preset.dag_check"),
 	arkType.unit("daemon.warning"),
+	arkType.unit("runner.availability_restored"),
+	arkType.unit("external_terminal.lost"),
 	arkType.unit("scheduler.tick_failed"),
 	arkType.unit("scheduler.lifecycle_event_persistence_failed"),
 	arkType.unit("runner.status_persistence_failed"),
@@ -484,7 +486,7 @@ const ObservabilityEventBoundary = arkType.or(
 		kind: arkType.unit("validation"),
 		type: arkType.unit("session_id.invalidated"),
 		payload: {
-			runner: arkType.or(arkType.unit("claude"), arkType.unit("codex"), arkType.unit("opencode")),
+			runner: arkType.or(arkType.unit("claude"), arkType.unit("codex"), arkType.unit("opencode"), arkType.unit("hapi")),
 			"previousSessionId": arkType.or("string", "null"),
 			reason: arkType.unit("runner_session_id_invalid"),
 		},
@@ -529,7 +531,42 @@ const ObservabilityEventBoundary = arkType.or(
 		...EventBaseBoundary,
 		kind: arkType.unit("diagnostic"),
 		type: arkType.unit("daemon.warning"),
-		payload: { message: "string" },
+		payload: arkType.or(
+			{ message: "string" },
+			{
+				code: arkType.unit("external_terminal_unavailable"),
+				runner: arkType.or(arkType.unit("claude"), arkType.unit("codex"), arkType.unit("opencode"), arkType.unit("hapi")),
+				binary: "string",
+				probeArgv: "string[]",
+				reason: arkType.or(arkType.unit("binary-missing"), arkType.unit("endpoint-unavailable"), arkType.unit("probe-failed")),
+				exitCode: "number|null",
+				signal: "string|null",
+				checkedAt: "string",
+				affected: arkType({ chainId: "number", rowId: "number", itemId: "string", phase: "string" }).array(),
+			},
+		),
+	},
+	{
+		...EventBaseBoundary,
+		kind: arkType.unit("diagnostic"),
+		type: arkType.unit("runner.availability_restored"),
+		payload: {
+			runner: arkType.or(arkType.unit("claude"), arkType.unit("codex"), arkType.unit("opencode"), arkType.unit("hapi")),
+			binary: "string",
+			probeArgv: "string[]",
+			checkedAt: "string",
+		},
+	},
+	{
+		...EventBaseBoundary,
+		kind: arkType.unit("lifecycle"),
+		type: arkType.unit("external_terminal.lost"),
+		payload: {
+			runner: arkType.or(arkType.unit("claude"), arkType.unit("codex"), arkType.unit("opencode"), arkType.unit("hapi")),
+			detectedAt: "string",
+			reason: arkType.or(arkType.unit("binary-missing"), arkType.unit("endpoint-unavailable"), arkType.unit("probe-failed")),
+			terminationPhase: arkType.or(arkType.unit("term"), arkType.unit("kill"), arkType.unit("closed")),
+		},
 	},
 	{
 		...EventBaseBoundary,
@@ -1034,6 +1071,8 @@ function renderLifecycleEvent(event: Extract<ObservabilityEvent, { kind: "lifecy
 			return `${event.ts} lifecycle recycle.timeout_kill chain=${event.chain ?? "-"} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} signal=${event.payload.signal} recycleAfterMs=${event.payload.recycleAfterMs}`
 		case "recycle.natural_exit":
 			return `${event.ts} lifecycle recycle.natural_exit chain=${event.chain ?? "-"} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} elapsedMs=${event.payload.elapsedMs}`
+		case "external_terminal.lost":
+			return `${event.ts} lifecycle external_terminal.lost chain=${event.chain ?? "-"} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} runner=${event.payload.runner} reason=${event.payload.reason} termination=${event.payload.terminationPhase}`
 		case "chain.stop.from_phase_exit":
 			return `${event.ts} lifecycle chain.stop.from_phase_exit chain=${event.chain ?? event.payload.chainId} item=${event.item ?? "-"} run=${event.runId ?? "-"} phase=${event.phase ?? "-"} alreadyStopped=${event.payload.alreadyStopped} terminatedRuns=${event.payload.terminatedRunIds.join(",") || "-"}`
 		default:
@@ -1072,7 +1111,11 @@ function renderValidationEvent(event: Extract<ObservabilityEvent, { kind: "valid
 function renderDiagnosticEvent(event: Extract<ObservabilityEvent, { kind: "diagnostic" }>): string {
 	switch (event.type) {
 		case "daemon.warning":
-			return `${event.ts} diagnostic daemon.warning ${event.payload.message}`
+			return "message" in event.payload
+				? `${event.ts} diagnostic daemon.warning ${event.payload.message}`
+				: `${event.ts} diagnostic daemon.warning code=${event.payload.code} runner=${event.payload.runner} reason=${event.payload.reason}`
+		case "runner.availability_restored":
+			return `${event.ts} diagnostic runner.availability_restored runner=${event.payload.runner} checkedAt=${event.payload.checkedAt}`
 		case "scheduler.tick_failed":
 			return `${event.ts} diagnostic scheduler.tick_failed pid=${event.payload.pid} error=${event.payload.error}`
 		case "scheduler.lifecycle_event_persistence_failed":
