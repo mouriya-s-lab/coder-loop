@@ -11,14 +11,25 @@ export type ReplayFinding =
 	| { kind: "preset-drift"; sourceUrl: string; rationale: string }
 	| { kind: "reviewer-discretion"; sourceUrl: string; rationale: string }
 	| { kind: "environment-failure"; sourceUrl: string; rationale: string }
+	| { kind: "contract-defect"; sourceUrl: string; rationale: string }
 
-export type ReplayContract = {
+type ReplayCheck = { id: string; dimension: string; kind: "shell" | "browser"; instruction: string }
+
+type ReplayContractPacket = {
+	schemaVersion: 1
+	intentSource: { issueUrl: string; commentUrls: readonly string[] }
 	deliverable: "implementation-pr" | "blocker-removal" | "spike-comment" | "source-writing-spike"
-	checkHints: readonly string[]
-	patternHint: "missing" | "changed" | "whole-tree"
-	canonicalRuntimeHint: "missing" | "present"
-	testDeltaHint: "missing" | "present"
+	checks: readonly ReplayCheck[]
+	patternScope: { kind: "changed" | "whole-tree"; criterion: string }
+	canonicalRuntime: string
+	testDelta: "forbidden" | "allowed"
+	dependencies: readonly string[]
+	supersedes: "none"
 }
+
+export type ReplayContract =
+	| { kind: "generated"; packet: ReplayContractPacket }
+	| { kind: "cannot-generate"; reasons: readonly string[] }
 
 export type ReplayResult = {
 	kind: "issue-replay"
@@ -86,6 +97,28 @@ function ghPages(endpoint: string): unknown {
 	return ghJson(["api", "--paginate", "--slurp", endpoint])
 }
 
+export function flattenPages(value: unknown, context: string): readonly unknown[] {
+	return arrayValue(value, context).flatMap((page, index) => arrayValue(page, `${context}[${index}]`))
+}
+
+function restComments(value: unknown, context: string): { url: string; body: string }[] {
+	return flattenPages(value, context).map((entry, index) => {
+		const comment = record(entry, `${context}.entry[${index}]`)
+		return { url: stringValue(comment.html_url, `${context}.entry[${index}].html_url`), body: typeof comment.body === "string" ? comment.body : "" }
+	})
+}
+
+function restReviews(value: unknown, context: string): { url?: string; body: string; state: string }[] {
+	return flattenPages(value, context).map((entry, index) => {
+		const review = record(entry, `${context}.entry[${index}]`)
+		return {
+			...(typeof review.html_url === "string" ? { url: review.html_url } : {}),
+			body: typeof review.body === "string" ? review.body : "",
+			state: typeof review.state === "string" ? review.state : "COMMENTED",
+		}
+	})
+}
+
 function parseIssueSnapshot(value: unknown): IssueSnapshot {
 	const input = record(value, "issue")
 	return {
@@ -142,7 +175,8 @@ export function classifyReplay(issue: IssueSnapshot, pullRequests: readonly Pull
 	if (!hasChecks || !hasPattern || !hasRuntime || !hasTestDelta) {
 		findings.push({ kind: "intent-gap", sourceUrl: issue.url, rationale: "通用 issue 没有预先给出完整 Checks / Pattern / canonical runtime / Test delta；该缺项需要 enrichment 调查，不是 implementation failure。" })
 	}
-	if (/Pattern 验收|script-produced e2e|script e2e|live issue body executable/i.test(intentText)) {
+	const reviewCorpus = pullRequests.flatMap((pr) => [...pr.reviews.map((review) => review.body), ...pr.comments.map((comment) => comment.body)]).join("\n")
+	if (/Pattern 验收|script-produced e2e|script e2e|script\/harness|live issue body executable/i.test(`${intentText}\n${reviewCorpus}`)) {
 		findings.push({ kind: "preset-drift", sourceUrl: issue.url, rationale: "输入携带旧 preset vocabulary；回放必须按 current marker schema 归一，不能把旧 wording 当当前 executable authority。" })
 	}
 	for (const pr of pullRequests) {
@@ -152,8 +186,11 @@ export function classifyReplay(issue: IssueSnapshot, pullRequests: readonly Pull
 		]
 		for (const review of reviewInputs) {
 			if (review.body.trim() === "") continue
-			if (hasAny(review.body, [/scope/i, /failure path/i, /evidence/i, /project convention/i, /pattern/i, /test/i, /证据/i, /失败路径/i, /项目约定/i])) {
+			if (hasAny(review.body, [/code finding/i, /design-deviation/i, /logic @/i, /failure path/i, /evidence truth/i, /project convention/i, /证据真实性/i, /失败路径/i, /项目约定/i])) {
 				findings.push({ kind: "reviewer-discretion", sourceUrl: review.sourceUrl, rationale: "review 加码涉及 scope mapping、失败路径、证据真实性、Pattern 或项目约定，属于 reviewer 保留裁量；是否要求 re-enrichment 取决于它是否证明 marker executable fact 错误。" })
+			}
+			if (hasAny(review.body, [/issue contract error/i, /contract.*malformed/i, /验收标准.*malformed/i, /缺.*Pattern 验收/i, /literal command.*fail/i])) {
+				findings.push({ kind: "contract-defect", sourceUrl: review.sourceUrl, rationale: "review 明确认定 executable contract 的表格、命令或 Pattern scope 本身不可执行；该来源应走 re-enrichment，而不是 implementation retry。" })
 			}
 			if (hasAny(review.body, [/timeout/i, /unreachable/i, /credential/i, /environment/i, /rate limit/i, /network/i, /环境/i, /凭据/i, /超时/i])) {
 				findings.push({ kind: "environment-failure", sourceUrl: review.sourceUrl, rationale: "review 记录了运行环境/外部依赖失败；该来源必须与 intent gap、preset drift 和实现缺陷分开保存。" })
@@ -161,24 +198,43 @@ export function classifyReplay(issue: IssueSnapshot, pullRequests: readonly Pull
 		}
 	}
 	const labelNames = issue.labels.map((label) => label.name.toLowerCase())
-	const deliverable: ReplayContract["deliverable"] = labelNames.some((label) => label.includes("spike"))
+	const deliverable: ReplayContractPacket["deliverable"] = labelNames.some((label) => label.includes("spike"))
 		? "spike-comment"
 		: /unblock|解除阻塞|blocker/i.test(intentText)
 			? "blocker-removal"
 			: /source[- ]writing|源码写作/i.test(intentText)
 				? "source-writing-spike"
 				: "implementation-pr"
+	const checks = intentText.split("\n").flatMap((line, index): ReplayCheck[] => {
+		if (!line.trim().startsWith("|") || !line.includes("`")) return []
+		const command = line.match(/`([^`]+)`/)?.[1]
+		if (command === undefined) return []
+		return [{ id: `issue-row-${index + 1}`, dimension: /browser/i.test(line) ? "environment" : "function", kind: /browser/i.test(line) ? "browser" : "shell", instruction: command }]
+	})
+	const missing: string[] = []
+	if (checks.length === 0) missing.push("no executable Check rows could be parsed")
+	if (!hasPattern) missing.push("Pattern scope requires source investigation")
+	if (!hasRuntime) missing.push("canonical runtime requires target investigation")
+	if (!hasTestDelta) missing.push("Test delta authorization is absent")
+	const contract: ReplayContract = missing.length > 0 ? { kind: "cannot-generate", reasons: missing } : {
+		kind: "generated",
+		packet: {
+			schemaVersion: 1,
+			intentSource: { issueUrl: issue.url, commentUrls: issue.comments.map((comment) => comment.url) },
+			deliverable,
+			checks,
+			patternScope: { kind: /whole[- ]tree|全仓/i.test(intentText) ? "whole-tree" : "changed", criterion: "replay-derived intent; enrichment must verify against source" },
+			canonicalRuntime: "present in issue intent; enrichment must normalize setup/start/readiness/behavior/log/stop",
+			testDelta: /forbidden|禁止.*测试/i.test(intentText) ? "forbidden" : "allowed",
+			dependencies: [...intentText.matchAll(/#(\d+)/g)].map((match) => `#${match[1]}`),
+			supersedes: "none",
+		},
+	}
 	return {
 		kind: "issue-replay",
 		number: issue.number,
 		url: issue.url,
-		contract: {
-			deliverable,
-			checkHints: hasChecks ? ["issue-provided-check-intent"] : [],
-			patternHint: hasPattern ? (/whole[- ]tree|全仓/i.test(intentText) ? "whole-tree" : "changed") : "missing",
-			canonicalRuntimeHint: hasRuntime ? "present" : "missing",
-			testDeltaHint: hasTestDelta ? "present" : "missing",
-		},
+		contract,
 		findings,
 	}
 }
@@ -218,12 +274,20 @@ async function main(argv: readonly string[]): Promise<void> {
 	for (const number of prNumbers) {
 		const dir = resolve(outputRoot, `pr-${number}`)
 		const view = ghJson(["pr", "view", String(number), "-R", REPOSITORY, "--json", "number,url,body,state,title,comments,reviews,reviewDecision,statusCheckRollup,labels,assignees,files,commits,closingIssuesReferences"])
+		const issueCommentPages = ghPages(`repos/${REPOSITORY}/issues/${number}/comments`)
+		const inlineCommentPages = ghPages(`repos/${REPOSITORY}/pulls/${number}/comments`)
+		const reviewPages = ghPages(`repos/${REPOSITORY}/pulls/${number}/reviews`)
 		writeEvidence(dir, "view.json", view)
-		writeEvidence(dir, "issue-comments-pages.json", ghPages(`repos/${REPOSITORY}/issues/${number}/comments`))
-		writeEvidence(dir, "review-comments-pages.json", ghPages(`repos/${REPOSITORY}/pulls/${number}/comments`))
-		writeEvidence(dir, "reviews-pages.json", ghPages(`repos/${REPOSITORY}/pulls/${number}/reviews`))
+		writeEvidence(dir, "issue-comments-pages.json", issueCommentPages)
+		writeEvidence(dir, "review-comments-pages.json", inlineCommentPages)
+		writeEvidence(dir, "reviews-pages.json", reviewPages)
 		writeEvidence(dir, "timeline-pages.json", ghPages(`repos/${REPOSITORY}/issues/${number}/timeline`))
-		const snapshot = parsePullRequestSnapshot(view)
+		const viewRecord = record(view, "pullRequest view")
+		const snapshot = parsePullRequestSnapshot({
+			...viewRecord,
+			comments: [...restComments(issueCommentPages, "issue comments"), ...restComments(inlineCommentPages, "inline review comments")],
+			reviews: restReviews(reviewPages, "reviews"),
+		})
 		prSnapshots.set(number, snapshot)
 		const reviewTexts = [...snapshot.reviews.map((review) => review.body), ...snapshot.comments.map((comment) => comment.body)]
 		pullRequestResults.push({
@@ -240,14 +304,17 @@ async function main(argv: readonly string[]): Promise<void> {
 	for (const number of issueNumbers) {
 		const dir = resolve(outputRoot, `issue-${number}`)
 		const view = ghJson(["issue", "view", String(number), "-R", REPOSITORY, "--json", "number,url,body,state,title,comments,labels,assignees,projectItems,closedByPullRequestsReferences"])
+		const commentPages = ghPages(`repos/${REPOSITORY}/issues/${number}/comments`)
 		writeEvidence(dir, "view.json", view)
-		writeEvidence(dir, "comments-pages.json", ghPages(`repos/${REPOSITORY}/issues/${number}/comments`))
+		writeEvidence(dir, "comments-pages.json", commentPages)
 		writeEvidence(dir, "events-pages.json", ghPages(`repos/${REPOSITORY}/issues/${number}/events`))
 		writeEvidence(dir, "timeline-pages.json", ghPages(`repos/${REPOSITORY}/issues/${number}/timeline`))
+		const issueView = record(view, "issue view")
+		const issueSnapshot = parseIssueSnapshot({ ...issueView, comments: restComments(commentPages, "issue comments") })
 		const relatedPullRequests = [...prSnapshots.values()].filter((pr) =>
 			pr.closingIssueNumbers.includes(number) || new RegExp(`(?:Closes|Fixes|Resolves)\\s+#${number}\\b`, "i").test(pr.body),
 		)
-		results.push({ ...classifyReplay(parseIssueSnapshot(view), relatedPullRequests), evidenceDir: dir })
+		results.push({ ...classifyReplay(issueSnapshot, relatedPullRequests), evidenceDir: dir })
 	}
 	writeEvidence(outputRoot, "report.json", { repository: REPOSITORY, generatedAt: new Date().toISOString(), issues: results, pullRequests: pullRequestResults })
 	process.stdout.write(`${resolve(outputRoot, "report.json")}\n`)
