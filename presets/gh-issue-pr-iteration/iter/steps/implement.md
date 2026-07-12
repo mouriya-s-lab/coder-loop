@@ -37,7 +37,7 @@ From your dispatch message: `ISSUE`, `REPO`, `BASE_BRANCH`, `RUN_ID`, `AGENT_CWD
 
 ```markdown
 ## Why I did it this way
-<your reading of the issue contract; change classification and why; footprint decision
+<your reading of the current executable contract and source intent; change classification and why; footprint decision
 (sites touched vs left, with owners); path chosen over which alternatives>
 
 ## What I actually did
@@ -64,7 +64,7 @@ Report structurally missing branch+head, files-changed list, intent pointer, Che
 
 - **Contract coverage** — every applicable executable-contract entry and intent constraint is either addressed or flagged with a concrete deviation reason in the Check-coverage table. Silent drops are gaps. (Cross-check against the current marker and source issue revision; re-fetch if stale.)
 - **Classification sanity** — the declared change classification matches what the issue demands; for substitutive/removal work the footprint list exists and each site has an owner. "Added the new thing" with the old thing unaccounted for is the classic trap — a gap.
-- **Test integrity** — a non-empty test-changes enumeration must be justified by the issue contract; removal/skip/loosening the marker Test delta does not explicitly authorize is a gap to send back now (cheaper than at review's diff-audit).
+- **Test integrity** — a non-empty test-changes enumeration must be authorized by the marker's Test delta; removal/skip/loosening outside that authorization is a gap to send back now (cheaper than at review's diff-audit).
 - **Intent landed** — the handoff file contains an `Intent (run …)` block for this run. Missing intent on a substantive change is a gap.
 - **Boundary compliance** — no batching, no commits/PRs/GitHub writes.
 - Apply `{{PRESET_ROOT}}/quality/honesty.md` — especially intent-action mismatch, cross-issue deferral, and test weakening triggers in the report itself.

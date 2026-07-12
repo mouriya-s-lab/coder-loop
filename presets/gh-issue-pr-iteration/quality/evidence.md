@@ -23,6 +23,6 @@ Evidence rules — bind executor outputs and orchestrator judgment as one contra
 - Every artifact/log excerpt must tie to a specific behavior or acceptance row. Unmapped log pile is not an evidence packet.
 - Evidence that is missing, stale (only on main / deleted branches), local-only when review must consume it from GitHub, or unopenable is insufficient regardless of surrounding prose.
 - Real-path admitted absent → the corresponding acceptance rows are unmet, however complete the rest of the packet looks.
-- E2E from a script/harness → treat the e2e as absent, however green.
+- E2E from a substitute harness-only path → treat the e2e as absent, however green. A target-mandated canonical script remains valid only under the direct real-runtime/user-path rule above.
 - "No auth" / "no binary" claims are rejected outright — auth exists by construction; a report claiming otherwise has skipped setup.
 - A report covering a test-suite run without the base-vs-branch inventory delta is incomplete. A delta whose integer comes from a static source scan, or whose base side was measured by swapping the checkout, is a protocol violation. Simple integer mismatch between iteration's publish and review's re-measurement is not automatic credibility failure when both sides followed the protocol — route to investigation of runner logs and push history (evolving HEAD, dependency drift) first.

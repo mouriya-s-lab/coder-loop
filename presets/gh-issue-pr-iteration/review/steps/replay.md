@@ -4,7 +4,7 @@ A replay subagent for one coder-loop review. The review orchestrator trusts what
 
 ## Task
 
-From your dispatch message: `ISSUE`, `REPO`, `ISSUE_PR`, `RUN_ID`, `AGENT_CWD` (work there), `TARGET_CWD`, `EVIDENCE_DIR`, and `Step focus` — which acceptance rows, which packet claims, which browser rows to observe; when the issue's deliverable is unblocking another issue, the `Step focus` names the blocked-path e2e command. Read now, before Step 1: the target repo's `CLAUDE.md` / `AGENTS.md` in `TARGET_CWD` for project install / build / test commands and PR conventions; plus `{{PRESET_ROOT}}/quality/evidence.md` — it binds your own executions (real paths, text logs, PID discipline, artifacts under `EVIDENCE_DIR`; the runner-summary parse rule for the canonical suite count).
+From your dispatch message: `ISSUE`, `REPO`, `ISSUE_PR`, `RUN_ID`, `AGENT_CWD` (work there), `TARGET_CWD`, `EVIDENCE_DIR`, and `Step focus` — which marker Check IDs, which packet claims, and which browser Checks to observe; when the marker's Deliverable is `blocker-removal`, the `Step focus` names the blocked-path e2e command. Read now, before Step 1: the target repo's `CLAUDE.md` / `AGENTS.md` in `TARGET_CWD` for project install / build / test commands and PR conventions; plus `{{PRESET_ROOT}}/quality/evidence.md` — it binds your own executions (real paths, text logs, PID discipline, artifacts under `EVIDENCE_DIR`; the runner-summary parse rule for the canonical suite count).
 
 1. **Parse the contract tables.** Fetch all issue comments and parse the unique current executable-contract marker. Parse every typed shell/browser `Checks` row. A malformed, stale, duplicate, or missing marker is a contract-invalid finding — stop replay and route to re-enrichment. Enumerate **every** row; a silently absent row invalidates your whole report.
 2. **Make the checkout runnable, read the manifest.** Check out / use the PR-bound branch state in your working directory (record the head SHA). A fresh checkout has nothing installed — making it runnable is your job, not a reason to skip rows: run dependency install per the project's manifest/lockfile and the target repo's `CLAUDE.md` / `AGENTS.md`, any required build, and a cheap toolchain probe. Record the setup commands and exits.
@@ -26,7 +26,7 @@ From your dispatch message: `ISSUE`, `REPO`, `ISSUE_PR`, `RUN_ID`, `AGENT_CWD` (
    - Program / CLI / daemon claim → invoke the **real entry point the way an operator would**, exercising the claimed path; capture transcript + logs.
    - Web claim → walk the **real UI with agent-browser** end-to-end (enter, perform the flow, observe the persisted result); capture screenshots. The packet's screenshots corroborate but never substitute for your own walk.
 
-   Deferred browser acceptance rows are executed inside this walk: drive the row's flow, compare your observation to its Expect, record the verdict per row.
+   Deferred browser Checks are executed inside this walk: drive each stable Check ID's action, compare your observation to its expected observation, and record the verdict per ID.
 
    Record, per claim: the packet's claim next to your observation. Differences are recorded as differences — no severity labels, no "minor"/"cosmetic" wording; softening language violates this task.
 6. **Form check.** A target-mandated canonical E2E driver is valid only when it exercises the real runtime/user path. Evidence from a substitute mock or harness-only path is a finding regardless of whether your own re-drive passed.
