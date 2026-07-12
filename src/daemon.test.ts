@@ -5329,6 +5329,79 @@ process.exitCode = 0
 				await fixture.daemon.stop()
 			}
 		})
+
+		test("live daemon keeps one-time enrichment outside implementation retry attempts", async () => {
+			const fixture = await startPhaseAdvancementFixture("contract-enrichment-review-retry", { firstReviewStatus: "changes_requested" })
+			try {
+				const result = expectOk(await request(fixture, "chain.create", {
+					name: "contract-enrichment-review-retry-chain",
+					preset: "gh-issue-pr-iteration",
+					repository: "mouriya-s-lab/coder-loop",
+				})).chain
+				const chainId = numberValue(record(result).id)
+				await request(fixture, "item.add", {
+					chainId,
+					itemId: "664001",
+					repoCwd: REPO_ROOT,
+					extra: {},
+				})
+
+				const item = await waitFor(
+					async () => readItem(fixture.loopDataRoot, chainId, 664_001),
+					(candidate) => candidate !== null && candidate.status === "done",
+					10_000,
+				)
+				expect(item).not.toBeNull()
+				expect(item!.attempts).toBe(2)
+				await waitForItemQueueTerminal(fixture, item!.id)
+
+				const phases = fixture.schedulerEvents
+					.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
+						event.type === "phase.start" && event.itemId === item!.id,
+					)
+					.map((event) => event.phase)
+				expect(phases).toEqual(["contract-enrichment", "iteration", "review", "iteration", "review"])
+				expect(phases.filter((phase) => phase === "contract-enrichment")).toHaveLength(1)
+			} finally {
+				await fixture.daemon.stop()
+			}
+		})
+
+		test("live daemon re-enriches a contract defect on its distinct frontier edge", async () => {
+			const fixture = await startPhaseAdvancementFixture("contract-invalid-reenrichment", { firstReviewStatus: "contract_invalid" })
+			try {
+				const result = expectOk(await request(fixture, "chain.create", {
+					name: "contract-invalid-reenrichment-chain",
+					preset: "gh-issue-pr-iteration",
+					repository: "mouriya-s-lab/coder-loop",
+				})).chain
+				const chainId = numberValue(record(result).id)
+				await request(fixture, "item.add", {
+					chainId,
+					itemId: "664002",
+					repoCwd: REPO_ROOT,
+					extra: {},
+				})
+
+				const item = await waitFor(
+					async () => readItem(fixture.loopDataRoot, chainId, 664_002),
+					(candidate) => candidate !== null && candidate.status === "done",
+					10_000,
+				)
+				expect(item).not.toBeNull()
+				expect(item!.attempts).toBe(2)
+				await waitForItemQueueTerminal(fixture, item!.id)
+
+				const phases = fixture.schedulerEvents
+					.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
+						event.type === "phase.start" && event.itemId === item!.id,
+					)
+					.map((event) => event.phase)
+				expect(phases).toEqual(["contract-enrichment", "iteration", "review", "contract-enrichment", "iteration", "review"])
+			} finally {
+				await fixture.daemon.stop()
+			}
+		})
 	})
 
 	describe("per-(item, phase) runId + artifact directory (issue #294)", () => {
@@ -7786,7 +7859,10 @@ type PhaseAdvancementFixture = Fixture & {
 	fakePhaseAwareRunner: string
 }
 
-async function startPhaseAdvancementFixture(name: string): Promise<PhaseAdvancementFixture> {
+async function startPhaseAdvancementFixture(
+	name: string,
+	options: { firstReviewStatus?: "changes_requested" | "contract_invalid" } = {},
+): Promise<PhaseAdvancementFixture> {
 	const root = resolve(TEST_ROOT, `${++nextFixtureId}-${name}`)
 	const loopDataRoot = resolve(root, "ld")
 	const eventLog = resolve(root, "events.jsonl")
@@ -7829,6 +7905,7 @@ process.exitCode = 0
 		model: null,
 	}
 
+	let reviewPromptCount = 0
 	const daemon = await startCoderLoopDaemon({
 		loopDataRoot,
 		shutdownGraceMs: 100,
@@ -7838,15 +7915,20 @@ process.exitCode = 0
 			runner: fakeRunnerSelection,
 			presetDir: PRESET_DIR,
 			worktreeManager,
-			prompt: ({ item, runId, phase }) => JSON.stringify({
+			prompt: ({ item, runId, phase }) => {
+				const reviewOrdinal = phase === "review" ? ++reviewPromptCount : 0
+				return JSON.stringify({
 				itemId: item.id,
 				issueNumber: Number(item.itemId),
 				runId,
 				phase,
 				eventLog,
 				sleepMs: 5,
-				writeStatus: phase === "review" ? "done" : null,
-			}),
+				writeStatus: phase === "review"
+					? reviewOrdinal === 1 && options.firstReviewStatus !== undefined ? options.firstReviewStatus : "done"
+					: null,
+				})
+			},
 			chainCompleteTriggerForChain: () => null,
 			onEvent: (event) => {
 				schedulerEvents.push(event)
