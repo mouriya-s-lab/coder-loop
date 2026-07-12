@@ -24,11 +24,11 @@ For the retry-comment and PR-body caveat sections (the sections where these phra
 - **Cross-issue deferral** — part of this task's scope moved mid-run to a sibling/future issue that is not a declared dependency: "deferred to wave-N / issue #N", "out of scope for this issue, see #N".
 - **Precondition admission** — a required precondition was absent: "[required service] was not running", "could not reach [target]; used [substitute]", "skipped [precondition] because…".
 - **Intent-action mismatch** — the declared intent and the actual change footprint do not correspond and the delta is undisclosed: intent named scope X but action touched meaningfully different Y; "research-only" intent but substantive code change (or vice versa); intent absent entirely on a substantive change. This is a substance judgment ("would a reasonable engineer say these correspond?"), not string matching. Honestly disclosed trivial drift is not a trigger.
-- **Test weakening** — tests removed, skipped, loosened, or rewritten to pass without the issue contract demanding it. A non-empty test-inventory delta not literally required by the issue body is this trigger, regardless of how the surrounding prose justifies it.
+- **Test weakening** — tests removed, skipped, loosened, or rewritten to pass without the marker packet Test delta authorizing it. A non-empty test-inventory delta not literally required by the issue body is this trigger, regardless of how the surrounding prose justifies it.
 
 ## Authorization rule
 
-A trigger is excused only when the live issue body contains a literal sentence authorizing that specific substitution. Do not promote a trigger to "authorized" from your own reading of what the issue probably meant. Body silent → the trigger stands.
+A trigger is excused only when the current marker packet explicitly authorizes that specific substitution in Test delta. Do not promote a trigger to "authorized" from your own reading of what the issue probably meant. Marker silent → the trigger stands.
 
 **Stale-baseline exception.** A literal numeric or version expectation inside an acceptance row (test pass counts, dependency versions, line numbers) that no longer matches reality **because the base branch moved after the issue was written** is contract drift, not scope reduction. Condition: an independent measurement of the same command on the current base branch shows the same new value, and the branch introduces no regression relative to that fresh baseline. When the condition holds, accept on fresh-baseline parity and note the stale literal in the closure comment — do not demand issue-body authorization and do not bounce retries over the literal. When provenance cannot be shown (no fresh base measurement), the trigger stands.
 

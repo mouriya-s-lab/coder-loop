@@ -53,7 +53,7 @@ lastRunId = "string"
 # interrupted item is the scheduler's job, and the scheduler already skips
 # any chain that still has a live `current_run` — so listing `in_progress`
 # here does not cause double-spawn while a healthy daemon is running.
-continuable = ["queued", "changes_requested", "in_progress"]
+continuable = ["queued", "changes_requested", "contract_invalid", "in_progress"]
 terminal    = ["blocked", "moot", "done", "exhausted"]
 # success: subset of terminal that means the item succeeded. Used by the engine's
 # cross-chain dependsOn unblock: a terminal item is restored to `entry` only when ALL
@@ -78,9 +78,61 @@ exhausted   = "exhausted"
 retry       = "changes_requested"
 
 [[phases]]
+name   = "contract-enrichment"
+prompt = "contract-enrichment-entry.md"
+entry  = true
+runner = "codex"
+model  = "gpt-5.6-sol"
+roles  = ["common", "enrichment"]
+
+  [[phases.next]]
+  phase = "iteration"
+  on    = "completed"
+
+  [phases.variables]
+  TARGET_CWD               = { source = "runtime.targetCwd", label = "Target working directory (where `loop-data runtime artifacts` lives)" }
+  AGENT_CWD                = { source = "runtime.agentCwd", label = "Agent working directory (your `cwd`; may equal TARGET_CWD or point at a different repo checkout for cross-repo work)" }
+  REPO                     = { source = "chain.repository", label = "GitHub repository" }
+  BASE_BRANCH              = { source = "chain.baseBranch", label = "Base branch" }
+  ISSUE                    = { source = "item.issue", label = "Current issue", prefix = "#", suffix = "", style = "code" }
+  RUN_ID                   = { source = "runtime.runId", label = "Run ID" }
+  SHARED_CONTEXT_FILE      = { source = "runtime.sharedContextPath", label = "Chain handoff/shared file" }
+  STATE_FILE               = { source = "runtime.stateFile", label = "State file", style = "plain" }
+  CURRENT_ISSUE_FILE       = { source = "runtime.currentIssueFile", label = "Optional per-issue handoff file" }
+  ISSUE_DIR                = "runtime.issueDir"
+  EVIDENCE_DIR             = { source = "runtime.evidenceDir", label = "Evidence directory" }
+  EVIDENCE_ROOT_DIR        = { source = "runtime.evidenceRootDir", label = "Evidence root directory" }
+  LOG_DIR                  = { source = "runtime.logDir", label = "Log directory" }
+  TRACE_FILE               = "runtime.traceFile"
+  LOOP_FILE                = "runtime.loopFile"
+  PROMPT_ROOT              = "runtime.presetDir"
+  PROMPT_FRAGMENT_INDEX    = "runtime.fragmentIndex"
+  RUNTIME_INPUTS_DOC       = "runtime.runtimeInputsDoc"
+  PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
+  # #404: iteration needs (a) the retry status name (Step 1 "Retry" branch)
+  # and (b) the terminal vocabulary as a boundary statement for the MUST-NOT
+  # list — iteration is forbidden from writing any terminal status. It does
+  # not classify the queue and does not own transitions, so
+  # STATUS_VOCABULARY_DOC is not declared here (contract-5 minimum visibility).
+  RETRY_STATUS_DOC         = "runtime.retryStatusDoc"
+  TERMINAL_STATUSES_DOC    = "runtime.terminalStatusesDoc"
+  REQUIRE_BROWSER_EVIDENCE = { source = "chain.requireBrowserEvidence", default = false, label = "Browser evidence required", suffix = " — when `true`, Layer 4 must contain the strongest feasible E2E evidence for the project type. For projects with UI: real browser screenshots of the running dev server or deployed page. For projects without UI (pure CLI / library / backend / config): CLI smoke run transcripts with command, exit status, and output are the Layer 4 evidence; do not fabricate screenshots by creating HTML files and screenshotting them." }
+  ISSUE_BRANCH             = { source = "item.branch", label = "Existing issue branch", blankBefore = true }
+  ISSUE_PR                 = { source = "item.pr", label = "Existing issue PR" }
+  ISSUE_STATUS             = { source = "item.status", label = "Queue status" }
+  ISSUE_LAST_RUN_ID        = { source = "item.lastRunId", label = "Previous run ID" }
+  RUN_ID_GENERATION        = { source = "runtime.runIdGeneration", label = "Run-ID generation", blankBefore = true }
+  RESUMED_FROM_PHASE       = { source = "runtime.resumedFromPhase", label = "Resumed-from phase" }
+  RESUMED_STARTED_AT       = { source = "runtime.resumedStartedAt", label = "Resumed run started at" }
+  RESUMED_SESSION_ID       = "runtime.resumedSessionId"
+  CHAIN_NAME               = "runtime.chainName"
+  CHAIN_UMBRELLA_REPO      = { source = "chain.umbrellaRepo", default = "" }
+  CHAIN_UMBRELLA_ISSUE     = { source = "chain.umbrellaIssue", default = "" }
+  REPO_CWD                 = "runtime.repoCwd"
+
+[[phases]]
 name   = "iteration"
 prompt = "iter-entry.md"
-entry  = true
 startsAttempt = true
 runner = "codex"
 model  = "gpt-5.6-sol"
@@ -89,6 +141,14 @@ roles  = ["common", "quality", "iter"]
   [[phases.next]]
   phase = "review"
   on    = "completed"
+
+  [[phases.next]]
+  phase  = "contract-enrichment"
+  status = "contract_invalid"
+
+  [[phases.exits]]
+  status = "contract_invalid"
+  when   = "The current executable-contract marker is missing, malformed, stale after an operator correction, or contradictory before implementation begins."
 
   [phases.variables]
   TARGET_CWD               = { source = "runtime.targetCwd", label = "Target working directory (where `loop-data runtime artifacts` lives)" }
@@ -142,6 +202,10 @@ roles  = ["common", "quality", "review"]
   phase  = "iteration"
   status = "changes_requested"
 
+  [[phases.next]]
+  phase  = "contract-enrichment"
+  status = "contract_invalid"
+
   # #407 / #409 / #410 per-phase rights segment. Review is the only phase that legitimately:
   #   - creates queue items (expanded-incomplete-parent flow inserts child items before flipping
   #     the parent back to changes_requested — see review/actions/state-write.md);
@@ -168,6 +232,10 @@ roles  = ["common", "quality", "review"]
   [[phases.exits]]
   status = "changes_requested"
   when   = "Evidence or code failed review, or the PR protocol is incomplete, and another iteration is required."
+
+  [[phases.exits]]
+  status = "contract_invalid"
+  when   = "The durable executable contract is malformed, stale, contradictory, or missing investigated facts and must be regenerated before implementation continues."
 
   [[phases.exits]]
   status = "blocked"
@@ -350,9 +418,24 @@ role = "common"
 path = "common/dispatch-contract.md"
 
 [[fragments]]
+id   = "common/executable-contract"
+role = "common"
+path = "common/executable-contract.md"
+
+[[fragments]]
 id   = "contract"
 role = "common"
 path = "contract.md"
+
+[[fragments]]
+id   = "enrichment/task"
+role = "enrichment"
+path = "enrichment/task.md"
+
+[[fragments]]
+id   = "enrichment/contract-schema"
+role = "enrichment"
+path = "enrichment/contract-schema.md"
 
 [[fragments]]
 id   = "quality/evidence"
@@ -443,6 +526,11 @@ path = "review/actions/accept-pr.md"
 id   = "review/actions/accept-no-pr"
 role = "review"
 path = "review/actions/accept-no-pr.md"
+
+[[fragments]]
+id   = "review/actions/reenrich"
+role = "review"
+path = "review/actions/reenrich.md"
 
 [[fragments]]
 id   = "review/actions/retry"

@@ -6,7 +6,7 @@ A replay subagent for one coder-loop review. The review orchestrator trusts what
 
 From your dispatch message: `ISSUE`, `REPO`, `ISSUE_PR`, `RUN_ID`, `AGENT_CWD` (work there), `TARGET_CWD`, `EVIDENCE_DIR`, and `Step focus` — which acceptance rows, which packet claims, which browser rows to observe; when the issue's deliverable is unblocking another issue, the `Step focus` names the blocked-path e2e command. Read now, before Step 1: the target repo's `CLAUDE.md` / `AGENTS.md` in `TARGET_CWD` for project install / build / test commands and PR conventions; plus `{{PRESET_ROOT}}/quality/evidence.md` — it binds your own executions (real paths, text logs, PID discipline, artifacts under `EVIDENCE_DIR`; the runner-summary parse rule for the canonical suite count).
 
-1. **Parse the contract tables.** Fetch the live issue body (`gh issue view <ISSUE> -R <REPO> --json body`). Parse the `## 验收标准` table (columns `#`, `Dimension`, `Check`, `Command`, `Env`, `Expect`) and the `## 继承验证义务` table when present; concatenate the rows. A malformed table (wrong columns/headers) is itself a finding — record and stop parsing that table. Enumerate **every** row; a silently absent row invalidates your whole report.
+1. **Parse the contract tables.** Fetch all issue comments and parse the unique current executable-contract marker. Parse every typed shell/browser `Checks` row. A malformed, stale, duplicate, or missing marker is a contract-invalid finding — stop replay and route to re-enrichment. Enumerate **every** row; a silently absent row invalidates your whole report.
 2. **Make the checkout runnable, read the manifest.** Check out / use the PR-bound branch state in your working directory (record the head SHA). A fresh checkout has nothing installed — making it runnable is your job, not a reason to skip rows: run dependency install per the project's manifest/lockfile and the target repo's `CLAUDE.md` / `AGENTS.md`, any required build, and a cheap toolchain probe. Record the setup commands and exits.
 
    Then read the iteration's **runtime manifest** and require exactly one lifetime kind:
@@ -88,7 +88,7 @@ Report structurally missing any section → send back before judging substance.
 - **Deferred rows closed** — every deferred browser row appears in `Browser acceptance rows` with an observed-vs-Expect verdict from the real UI walk. Any absent row → send back.
 - **No auth/binary excuse** — an unre-driven claim is legal only as unfinished-setup or named manifest gap. Anything else → send back.
 - **Manifest gaps** — iteration packet failures feeding retry; they never excuse the review.
-- **Script e2e** — a form-check finding of script-produced e2e is a packet failure → retry, even when the re-drive itself passed.
+- **Script e2e** — a form-check finding of substitute harness-only e2e is a packet failure → retry, even when the re-drive itself passed.
 - **No verdict smuggling** — mismatches reported raw; "minor"/"cosmetic" labels are a report defect (`quality/honesty.md` treats cosmetic-handwave as hard fail).
 - **Side effects declared** for the cleanup ledger, including the durable/recreated runtime state.
 

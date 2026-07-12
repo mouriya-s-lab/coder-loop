@@ -8,7 +8,7 @@ From your dispatch message: `ISSUE`, `REPO`, `BASE_BRANCH`, `RUN_ID`, `AGENT_CWD
 
 **Claim gate.** No verdict without fresh evidence: before writing any pass wording, identify the command that proves the claim, run it in full this run, and read the complete output and exit code — a previous run, a partial check, or "should pass" is not a verdict. Before reporting, confirm the executed set as a whole still covers the contract rows.
 
-1. **Enumerate the rows and plan each one.** Fetch the live issue body (`gh issue view <ISSUE> -R <REPO> --json body`); collect **every** row of `## 验收标准` and `## 继承验证义务`. Plan each row from its Env column:
+1. **Enumerate the rows and plan each one.** Fetch the complete issue comments and parse the unique current executable-contract marker; collect **every** typed `Checks` row. Plan each row from its Env column:
    - `browser` → not yours: browser rows are e2e territory, executed by the e2e step's real-UI walk. Plan the row as `deferred: e2e step` — it still appears in your results table with that verdict, never silently dropped.
    - `local` → executable here.
    - `VM` / `container` / `CI` / `downstream` / `integration` → executable only if this machine actually reaches that environment — when unsure, run the cheapest probe (version check, ping-equivalent) and record the probe as the basis.

@@ -11,10 +11,11 @@
 - 保留独立复核（review 的强制派发、e2e 直跑证据、runtime manifest）——诚实 agent 也会漏看，review 不亲自验证就是盲判。
 - 过程纪律以 superpowers skills 为设计参考蒸馏进 step 文件：TDD 的 test-first 铁律、"根因先于修复、三次失败停手"、claim gate（先跑当轮命令读全量输出再落成功措辞）、"review 反馈是待核实的主张"——取纪律内核，按无人值守 loop 改编后内联（见前提八）。preset 自包含，不做运行时 skill 调用。
 
-## 前提二：四 phase 的分工
+## 前提二：五 phase 的分工
 
-引擎侧四个 phase 不变——`iteration` / `review` 是普通执行流，`blocked-responder` / `umbrella-finalizer` 是 trigger phase。preset 的复杂度全在前两个 phase 的 workflow 里。
+preset 声明五个 phase：`contract-enrichment` / `iteration` / `review` 是普通执行流，`blocked-responder` / `umbrella-finalizer` 是 trigger phase。enrichment 先把 intent 调查为 durable executable contract；iteration/review 只消费 current marker packet。
 
+- **contract-enrichment**：只运行一次，调查源码、target rules 与 runtime，在 GitHub comment 发布 typed executable contract；不修改 issue body。
 - **iteration 调度者**：读 issue、按 deliverable signal 从四种路径中选一条（implementation-PR / unblock / source-writing-spike / comment-spike），派 subagent 逐步完成，产 PR 或 comment。iter 不写 item status；scheduler 由 run ledger 推进到 review。
 - **review 调度者**：读 iter 交接的 handoff / trace / PR，派两个 subagent（diff-audit + replay）并行执行独立复核，然后亲自做诚实/协议判断，写 verdict、执行终局动作（accept / retry / expand / skip / blocked / stop）。
 - **blocked-responder**：跨仓 unblock 副作用的最小化 responder。

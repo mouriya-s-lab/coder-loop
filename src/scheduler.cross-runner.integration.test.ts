@@ -17,7 +17,15 @@ import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMeta
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
-const LOADED_PRESET = loadPreset(PRESET_DIR).then((preset) => ({ presetDir: PRESET_DIR, preset }))
+const LOADED_PRESET = loadPreset(PRESET_DIR).then((preset) => ({
+	presetDir: PRESET_DIR,
+	preset: {
+		...preset,
+		phases: preset.phases
+			.filter((phase) => phase.name !== "contract-enrichment")
+			.map((phase) => phase.name === "iteration" ? { ...phase, entry: true } : phase),
+	},
+}))
 const FAKE_RUNNER = resolve(import.meta.dir, "scheduler.cross-runner.integration.fake.ts")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-cross-runner-integration-tests", String(process.pid))
 

@@ -25,10 +25,13 @@ Read now, yourself:
 1. `{{PRESET_ROOT}}/common/runtime-contract.md` — which state transitions belong to the program vs to you.
 2. `{{PRESET_ROOT}}/common/github-routing.md` — where PRs/comments are allowed to go.
 3. `{{PRESET_ROOT}}/common/state-contract.md` — what queue state you may and may not touch.
-4. `{{PRESET_ROOT}}/quality/honesty.md` and `{{PRESET_ROOT}}/quality/evidence.md` — the criteria you apply to every step report in Step 4.
-5. `{{PRESET_ROOT}}/common/dispatch-contract.md` — the runner-neutral dispatch ledger, completion, and follow-up contract; binds Step 4.
+4. `{{PRESET_ROOT}}/common/executable-contract.md` — executable checks and investigated contract authority.
+5. `{{PRESET_ROOT}}/quality/honesty.md` and `{{PRESET_ROOT}}/quality/evidence.md` — the criteria you apply to every step report in Step 4.
+6. `{{PRESET_ROOT}}/common/dispatch-contract.md` — the runner-neutral dispatch ledger, completion, and follow-up contract; binds Step 4.
 
 ### Step 1 — Classify this spawn
+
+First validate the unique current executable-contract marker. If it is missing, malformed, contradictory, or stale after a later operator correction, do not dispatch implementation: select the declared `contract_invalid` exit so the frontier returns to contract-enrichment.
 
 Decide exactly one, from the bound inputs:
 
@@ -40,7 +43,7 @@ Decide exactly one, from the bound inputs:
 
 Read these yourself; each feeds a specific Step 3 decision:
 
-1. `gh issue view {{ISSUE}} -R {{REPO}} --json title,body,labels,comments,state,url` → the task contract: acceptance rows, custom requirement sections, constraints, the deliverable signal that tells you which Step 3 sequence to pick, and any operator instructions in late comments.
+1. `gh issue view {{ISSUE}} -R {{REPO}} --json title,body,labels,comments,state,url` → the task contract: marker Checks, custom requirement sections, constraints, the deliverable signal that tells you which Step 3 sequence to pick, and any operator instructions in late comments.
 2. The issue's linked PR → the retry instruction source and the branch-continuity input. Resolution order: the bound `ISSUE_PR` when set; otherwise the structural closing-keyword linkage — split `{{REPO}}` into owner/name and run:
 
    ```bash
@@ -66,12 +69,12 @@ That is the core read surface. Anything else — repository source files, long c
 
 ### Step 3 — Build the task list
 
-Read the issue body from Step 2 and decide which deliverable this issue demands, then pick the matching step sequence. There is no label that picks the route for you; the routing decision is yours, anchored in what the issue body asks for and what the acceptance rows require.
+Read the current executable-contract marker from Step 2 and use its `Deliverable` variant, then pick the matching step sequence. There is no label that picks the route for you; the routing decision is yours, anchored in what the issue body asks for and what the marker Checks require.
 
-| Deliverable signal in the issue body | Step sequence (every entry = one dispatch) |
+| Marker `Deliverable` variant | Step sequence (every entry = one dispatch) |
 |---|---|
 | An implementation PR is the deliverable (default — the issue describes a code/config/docs change with `## 验收标准` rows replayable against a diff). | [research if Step 2 left you unsure what the right change is] → implement → (verify ∥ e2e) → submit |
-| Unblocking another issue is the deliverable (the body names a concrete blocker, usually carries an `Unblocks: owner/repo#N` back-link, and the acceptance rows include a real blocked-path replay). | resolve-blocker → implement → (verify ∥ e2e) → submit |
+| Unblocking another issue is the deliverable (the body names a concrete blocker, usually carries an `Unblocks: owner/repo#N` back-link, and the marker Checks include a real blocked-path replay). | resolve-blocker → implement → (verify ∥ e2e) → submit |
 | A source-writing spike is the deliverable (the body explicitly demands PoC/source/runtime evidence with a no-merge constraint). | [research?] → source-spike |
 | An issue comment is the deliverable (a spike / design dialogue whose `## 结果分支` pins what the comment must say — no code change). | [research?] → spike-comment |
 
@@ -80,7 +83,7 @@ When the body's signal is ambiguous between two rows, dispatch `research` to pin
 Write the task list out explicitly, one line per step:
 
 ```
-[ ] <step> — produce: <what this dispatch must deliver for THIS issue> — accepted when: <which acceptance rows / issue sections / accept criteria>
+[ ] <step> — produce: <what this dispatch must deliver for THIS issue> — accepted when: <which marker Checks / issue sections / accept criteria>
 ```
 
 List rules:
@@ -132,13 +135,13 @@ Record and receive the dispatch using the current runner's transport exactly as 
 
 **4b. Check the report's structure.** Open the step's file; its Acceptance section names the required report fields. Missing fields → reject the ledger row and follow up through the current runner with a `Step focus` naming exactly the missing fields.
 
-**4c. Judge substance.** Against two sources: the issue's own requirements bound to this line (which acceptance rows / sections this step had to satisfy), and the step file's Acceptance criteria with `quality/honesty.md` + `quality/evidence.md` applied to the report's claims. Verdict is one of: **accepted** / **gaps** (list them) / **wrong direction**.
+**4c. Judge substance.** Against two sources: the issue's own requirements bound to this line (which marker Checks / sections this step had to satisfy), and the step file's Acceptance criteria with `quality/honesty.md` + `quality/evidence.md` applied to the report's claims. Verdict is one of: **accepted** / **gaps** (list them) / **wrong direction**.
 
 **4d. Route the verdict.**
 - gaps or wrong direction → reject the ledger row, then follow up per `common/dispatch-contract.md` with the gap list or corrected scope; do not advance the workflow line.
 - accepted → mark the line `[x]`, update the ledger row, and take the next ready line(s).
-- verify or e2e reported a product failure (a failing row, a mismatch against the issue contract) → not a step gap: insert `[ ] implement — fix: <failure>` before verify and mark the current attempt in the ledger. Wait for the other report in the concurrent pair before fixing so all failures join one scope. The inserted implement runs, then **both** verify and e2e re-dispatch in parallel for the **full** contract — uncheck both lines; a fix can regress either side.
-- the e2e line's `Step focus` carries the browser-Env acceptance rows **you enumerate yourself** from the issue's `## 验收标准` / `## 继承验证义务` tables (every row whose Env is `browser` — the same set verify reports as `deferred: e2e step`; e2e does not wait for verify's report) plus the changed path to exercise; a deferred row still open after e2e means the contract is unverified.
+- verify or e2e reported a product failure (a failing row, a mismatch against the executable contract) → not a step gap: insert `[ ] implement — fix: <failure>` before verify and mark the current attempt in the ledger. Wait for the other report in the concurrent pair before fixing so all failures join one scope. The inserted implement runs, then **both** verify and e2e re-dispatch in parallel for the **full** contract — uncheck both lines; a fix can regress either side.
+- the e2e line's `Step focus` carries the browser-Env marker Checks **you enumerate yourself** from the issue's `## 验收标准` / `## 继承验证义务` tables (every row whose Env is `browser` — the same set verify reports as `deferred: e2e step`; e2e does not wait for verify's report) plus the changed path to exercise; a deferred row still open after e2e means the contract is unverified.
 
 When the last line is `[x]`/`[-]`, go to Step 5.
 
@@ -162,4 +165,4 @@ An empty `dispatched=` is legal only when the run ended at the Step 3 planning-s
 
 ## Boundaries (apply to you and every subagent)
 
-MUST NOT: choose a different issue; batch multiple issues; create child issues or link sub-issues; merge PRs; close issues; delete central daemon scheduling state; reorder, prepend, or finalize queue items in the central state DB; mark work with any terminal status ({{TERMINAL_STATUSES_DOC}}); treat human review as the loop review stage; stage loop-data runtime artifacts, scheduling state, or run stdout logs into feature commits; remove, skip, or weaken tests beyond what the issue body literally demands. The changed code must be correct and follow the project's conventions within the issue's stated design — review audits exactly that; what stays out of scope is divergence: refactors and improvements beyond the issue's design belong to new issues, not this run.
+MUST NOT: choose a different issue; batch multiple issues; create child issues or link sub-issues; merge PRs; close issues; delete central daemon scheduling state; reorder, prepend, or finalize queue items in the central state DB; mark work with any terminal status ({{TERMINAL_STATUSES_DOC}}); treat human review as the loop review stage; stage loop-data runtime artifacts, scheduling state, or run stdout logs into feature commits; remove, skip, or weaken tests beyond what the marker `Test delta` explicitly authorizes. The changed code must be correct and follow the project's conventions within the issue's stated design — review audits exactly that; what stays out of scope is divergence: refactors and improvements beyond the issue's design belong to new issues, not this run.

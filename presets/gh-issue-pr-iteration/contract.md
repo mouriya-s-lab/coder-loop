@@ -1,10 +1,10 @@
 # `gh-issue-pr-iteration` Preset Contract
 
-读者：给本 preset queue 灌 issue 的 **issue writer**（operator、上游 slash command、或任何按本 preset 契约往目标 repo 写 GitHub issue 的角色）。同时也是 iter / review 调度者期待 issue / PR 形态的**单一来源**——iter/review agent 在运行时读本文档判定 issue/PR 是否合契约。
+读者：contract-enrichment、iteration 与 review agent。
 
-读完后你能：照本文档写出一个 issue body，保证它能通过 review 调度者的 contract replay / spike follow-up / title-intent 验收；写出一个 PR body，保证它能通过 PR protocol / evidence form 验收。
+原 issue body 与后续 operator comments 是任务 intent，不要求预先包含实现前无法知道的 Pattern、canonical runtime/E2E、精确 Command 或 test-delta authorization。`contract-enrichment` 调查当前源码、target rules 与运行现场后，在 GitHub issue comment 发布 `schema=1` executable-contract marker；iteration/review 按 `common/executable-contract.md` 读取唯一 current packet。
 
-本文档是本 preset 写 issue / PR / review 形态的自包含契约。用户级 `writing-issue / writing-pr / review-pr` skill 若存在可作 operator 个人参考；缺失不得阻塞 issue 编写，冲突时本文档胜。软引用边界见 §7。
+本文档余下的 issue 结构是 enrichment 判断 intent 与 deliverable 的输入指南，不再是要求存量 issue writer 未卜先知的 executable authority。literal checks、Pattern scope、runtime/E2E、test delta 与 dependencies 以当前 marker packet 为准；缺失或 malformed marker 必须回 contract 路径，禁止静默解释 live issue body。PR protocol 仍由本文档与 marker packet共同约束。
 
 ---
 

@@ -47,7 +47,7 @@ reinterpreting the row>
 
 ## Constraints
 do not bypass coder-loop review; do not merge manually; do not close the issue manually;
-never edit the issue body without literal authorization on the issue thread
+never edit the issue body; contract corrections are superseding marker comments produced by contract-enrichment
 ```
 
 ## After publishing

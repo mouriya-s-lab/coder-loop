@@ -16,8 +16,8 @@
 | `statuses.continuable` | `queued / in_progress / changes_requested` |
 | `statuses.terminal` | `blocked / moot / done / exhausted` |
 | `statuses.unblockable` | `blocked`（`queue unblock` 恢复到 `statuses.entry = queued`） |
-| phases | 4 个：`iteration` → `review`（普通执行流），加两个 trigger phase — `blocked-responder`（`trigger = { afterPhase = "review", whenStatus = "blocked" }`）和 `umbrella-finalizer`（`trigger = { on = "chain-complete" }`） |
-| phase runner/model | 四个 phase 当前全部 `runner = "codex"`、`model = "gpt-5.6-sol"`；非 trigger phase 仍可被 item 覆盖 |
+| phases | 5 个：`contract-enrichment` → `iteration` → `review`（普通执行流），加两个 trigger phase — `blocked-responder`（`trigger = { afterPhase = "review", whenStatus = "blocked" }`）和 `umbrella-finalizer`（`trigger = { on = "chain-complete" }`） |
+| phase runner/model | 五个 phase 当前全部 `runner = "codex"`、`model = "gpt-5.6-sol"`；非 trigger phase 仍可被 item 覆盖 |
 | `[agent].attemptTimeoutSeconds` | `7200` |
 | fragments | 29 个，分布在 `common/ / quality/ / iter/steps/ / review/` 四块 |
 
@@ -44,7 +44,7 @@ status 字面量都是 preset 字符串，引擎只识别 `continuable / termina
 
 ## 2. 调度者架构总览
 
-iteration / review 两个复杂角色是**调度者**，entry md 是按序执行的 **workflow**：每个 Step 在使用现场写明做什么、谁做（亲自的命令是闭集，清单外即派发）、派哪个 subagent、传什么输入、回报查什么、各 verdict 去哪。调度者的本职是**维护任务清单**：计划落成显式 checklist，每条只有 `[x] accepted` 或 `[-] skipped: <reason>` 两种出口。
+`contract-enrichment` 是一次性调查节点；iteration / review 两个复杂角色是**调度者**，entry md 是按序执行的 **workflow**：每个 Step 在使用现场写明做什么、谁做（亲自的命令是闭集，清单外即派发）、派哪个 subagent、传什么输入、回报查什么、各 verdict 去哪。调度者的本职是**维护任务清单**：计划落成显式 checklist，每条只有 `[x] accepted` 或 `[-] skipped: <reason>` 两种出口。
 
 核心约定：
 

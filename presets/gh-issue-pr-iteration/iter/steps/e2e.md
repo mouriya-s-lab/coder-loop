@@ -8,7 +8,7 @@ From your dispatch message: `ISSUE`, `REPO`, `RUN_ID`, `AGENT_CWD` (the issue-br
 
 **Claim gate.** No e2e claim without observing the end-to-end effect itself, fresh, this run: "started successfully" or a healthy port probe is startup evidence, not behavior evidence — every claim must point to the observed result (transcript, persisted state, screenshot) that backs it.
 
-1. **Identify the surface and collect the deferred rows.** Decide what the deliverable actually is: a program / CLI / daemon, a web app, or a library (then its real consuming surface — "it is a library" is not an exemption). When `Step focus` names deferred browser rows, fetch the live issue body (`gh issue view <ISSUE> -R <REPO> --json body`) and quote each named row's Check, Command, and Expect — those rows are yours to satisfy through the real UI walk.
+1. **Identify the surface and collect the deferred rows.** Decide what the deliverable actually is: a program / CLI / daemon, a web app, or a library (then its real consuming surface — "it is a library" is not an exemption). When `Step focus` names deferred browser rows, read the current executable-contract marker and quote each named browser check's action, observation, and expected result — those rows are yours to satisfy through the real UI walk.
 2. **Start the environment.** First take your own worktree — the parallel verify step owns `AGENT_CWD`, and two agents installing/building in one checkout corrupt each other:
 
    ```bash
@@ -23,7 +23,7 @@ From your dispatch message: `ISSUE`, `REPO`, `RUN_ID`, `AGENT_CWD` (the issue-br
 3. **Run the real thing, directly.**
    - Program / CLI / daemon → invoke its **real entry point the way an operator would** (real arguments, real config), exercise the path this issue changes, capture the command transcript and service logs.
    - Web app → drive the **real UI** end-to-end with agent-browser: enter, perform the changed flow, observe the persisted result; capture real screenshots. Each deferred browser row is executed inside this walk: drive the row's flow, compare what you observe to its Expect, record the verdict per row. `REQUIRE_BROWSER_EVIDENCE=true` forces browser evidence whenever the change has any browser-observable behavior.
-   - **Script e2e is forbidden**: a test script/harness wrapping the calls is integration testing whatever its filename.
+   - **A script is valid only when target rules name it as the canonical driver and it exercises the real runtime/user path; substitute harness-only e2e is forbidden**: a test script/harness wrapping the calls is integration testing whatever its filename.
 
    A mismatch (observed ≠ expected, deferred row failing) is a result to record, not a thing to fix — you never patch product code. Mismatches reported raw, no softening.
 4. **Choose exactly one runtime handoff kind and write the manifest.** This is a closed union; mixed or unstated lifetime is invalid.
