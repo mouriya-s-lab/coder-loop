@@ -284,45 +284,22 @@ type DaemonHandle = {
 // `spawn(..., { env: { ...process.env, ... }})` at scheduler.ts passes it
 // through to every agent — so every `coder-loop ...` invocation in the loop
 // resolves to `bun <REPO_ROOT>/src/loop.ts`.
-function writeCoderLoopCliShim(workDir: string, scenario: HarnessOptions["scenario"]): string {
+function writeCoderLoopCliShim(workDir: string): string {
 	const shimDir = resolve(workDir, "cli-shim")
 	mkdirSync(shimDir, { recursive: true })
 	const shimPath = resolve(shimDir, "coder-loop")
-	const retryMarker = resolve(workDir, "scenario-review-retry-consumed")
-	const script = scenario === "happy"
-		? `#!/bin/sh\nexec bun ${LOOP_ENTRY} "$@"\n`
-		: `#!/usr/bin/env bun
-import { existsSync, writeFileSync } from "node:fs"
-import { spawnSync } from "node:child_process"
-
-const args = process.argv.slice(2)
-const phaseIndex = args.indexOf("--agent-phase")
-const statusIndex = args.indexOf("--status")
-const isFirstReviewCompletion = args[0] === "item"
-  && args[1] === "update"
-  && phaseIndex >= 0
-  && args[phaseIndex + 1] === "review"
-  && statusIndex >= 0
-  && args[statusIndex + 1] === "done"
-  && !existsSync(${JSON.stringify(retryMarker)})
-if (isFirstReviewCompletion) {
-  writeFileSync(${JSON.stringify(retryMarker)}, "changes_requested\\n", { flag: "wx" })
-  args[statusIndex + 1] = "changes_requested"
-}
-const result = spawnSync("bun", [${JSON.stringify(LOOP_ENTRY)}, ...args], { stdio: "inherit", env: process.env })
-process.exit(result.status ?? 1)
-`
+	const script = `#!/bin/sh\nexec bun ${LOOP_ENTRY} "$@"\n`
 	writeFileSync(shimPath, script)
 	chmodSync(shimPath, 0o755)
 	return shimDir
 }
 
-function startDaemon(workDir: string, scenario: HarnessOptions["scenario"]): DaemonHandle {
+function startDaemon(workDir: string): DaemonHandle {
 	const loopDataRoot = resolve(workDir, "loop-data")
 	mkdirSync(loopDataRoot, { recursive: true })
 	const stdoutPath = resolve(workDir, "daemon.stdout.log")
 	const stderrPath = resolve(workDir, "daemon.stderr.log")
-	const shimDir = writeCoderLoopCliShim(workDir, scenario)
+	const shimDir = writeCoderLoopCliShim(workDir)
 	const shimmedPath = `${shimDir}:${process.env.PATH ?? ""}`
 	log(`daemon: 隔离 loop-data-root 起中央 daemon: ${loopDataRoot}`)
 	log(`daemon: PATH 前置 coder-loop CLI shim: ${shimDir} → ${LOOP_ENTRY}`)
@@ -481,9 +458,11 @@ async function watch(
 	fixture: FixtureRun,
 	loopDataRoot: string,
 	chainName: string,
+	issueNumber: number,
 ): Promise<WatchVerdict> {
 	const startedAt = Date.now()
 	let lastSummary = ""
+	let reviewRetryForced = false
 	for (;;) {
 		const elapsedSeconds = Math.floor((Date.now() - startedAt) / 1000)
 		if (elapsedSeconds > options.maxWallSeconds) {
@@ -494,6 +473,25 @@ async function watch(
 			return { kind: "tripwire", reason: `runs 数 ${runs} 超过上界 ${options.maxRuns}（#309 式 spin 信号）` }
 		}
 		const snapshot = readStatus(fixture, loopDataRoot, chainName)
+		if (options.scenario === "review-retry" && !reviewRetryForced) {
+			const db = new Database(resolve(loopDataRoot, "db.sqlite"), { readonly: true })
+			let reviewRun: { runId: string } | null
+			try {
+				reviewRun = db.query("SELECT run_id AS runId FROM runs WHERE phase = 'review' AND ended_at IS NULL ORDER BY id LIMIT 1").get() as { runId: string } | null
+			} finally {
+				db.close()
+			}
+			if (reviewRun !== null) {
+				const statusPath = resolve(loopDataRoot, "chains", chainName, "runs", reviewRun.runId, "status.json")
+				const runStatus = JSON.parse(readFileSync(statusPath, "utf-8")) as { pid: number }
+				reviewRetryForced = true
+				sh(["bun", LOOP_ENTRY, "item", "update", chainName,
+					"--issue", String(issueNumber), "--status", "changes_requested",
+					"--loop-data-root", loopDataRoot])
+				process.kill(-runStatus.pid, "SIGKILL")
+				log(`scenario: forced first review to changes_requested and killed pid=${runStatus.pid} before review side effects`)
+			}
+		}
 		const byStatus = snapshot.queue?.byStatus ?? {}
 		const attempts = snapshot.queue?.selected?.attempts ?? null
 		if (attempts !== null && attempts > options.maxAttempts) {
@@ -592,7 +590,7 @@ async function main(): Promise<number> {
 		mkdirSync(workDir, { recursive: true })
 		const fixture = await prepareFixture(options, workDir, runKey)
 		const chainName = `${options.fixtureRepo.split("/")[1]!}-${runKey}`
-		const daemon = startDaemon(workDir, options.scenario)
+		const daemon = startDaemon(workDir)
 		let exitCode = 1
 		let issueNumber: number | undefined
 		try {
@@ -646,7 +644,7 @@ async function runScenario(
 		"--preset", options.preset,
 		"--loop-data-root", daemon.loopDataRoot])
 
-	const verdict = await watch(options, fixture, daemon.loopDataRoot, chainName)
+	const verdict = await watch(options, fixture, daemon.loopDataRoot, chainName, issueNumber)
 	if (verdict.kind !== "success") {
 		const reason = verdict.kind === "tripwire"
 			? `tripwire: ${verdict.reason}`
