@@ -312,6 +312,8 @@ exhausted = "custom_done"
 
 [[phases]]
 name = "run"
+entry = true
+startsAttempt = true
 prompt = "run.md"
 
   # #408 cross-table DAG check requires every continuable status to have a

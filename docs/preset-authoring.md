@@ -130,6 +130,9 @@ rm -rf "$TARGET"
 | `[statuses].retry` | string | 否 | continuable status，表示"上一轮被打回需重跑"。声明后 `retryStatusDoc` doc builder 把它注入到 md 中需要引用 retry 概念的位置，preset prose 不再硬编码 status 字面量 |
 | `[[phases]].name` | string | 是 | phase 名字，写入 `state.current.phase` |
 | `[[phases]].prompt` | string | 是 | 相对 preset.toml 的 entry prompt 模板路径 |
+| `[[phases]].entry` | boolean | 恰好一个普通 phase 必须为 `true` | 新 item 或清空 phase 的 item 进入的节点。不得由声明顺序推断 |
+| `[[phases]].startsAttempt` | boolean | 至少一个 phase 必须为 `true` | fresh spawn 该节点时增加 item attempt；resume 同一 session 不增加。前置调查节点可为 `false`，implementation cycle 节点为 `true` |
+| `[[phases.next]]` | array | 否 | 当前普通 phase 正常结束后的声明式候选边。`{ phase = "...", on = "completed" }` 表示未写新 status 的成功后继；`{ phase = "...", status = "..." }` 表示 agent 选择该 item-status exit 后的后继 |
 | `[[phases]].runner` | `"claude"|"codex"|"opencode"` | 否 | phase 默认 runner；未声明时使用 engine-builtin fallback |
 | `[[phases]].model` | string | 否 | phase 默认 model。只在解析出的 runner kind 与本 phase 声明的 runner 一致时生效（item override 切换 runner 后不继承） |
 | `[[phases.exits]]` | array | 否 | 该 phase 允许 agent 写出的结构化出口。每项包含 `status` 与给 prompt 渲染用的 `when` 说明；不声明 exits 表示该 phase 不写 status |
@@ -145,6 +148,8 @@ rm -rf "$TARGET"
 
 - `name` 与目录名一致或与 `presetPath` 一致；
 - 同 `name` 的 phase 不可重名；
+- 恰好一个非 trigger phase 必须声明 `entry = true`，且至少一个 phase 声明 `startsAttempt = true`；
+- 每条 `[[phases.next]]` 必须指向已声明 phase；同一 source phase 只能有一条 `on = "completed"`，同一个 status 也只能有一个目标；status 边必须同时是 source phase 声明的 item-status exit；
 - 同 `id` 的 fragment 不可重复；
 - `[statuses]` 的 continuable / terminal 集合不可有交集；
 - `[statuses].entry` 必须属于 continuable；`success` 与 `unblockable` 必须属于 terminal；`[statuses].retry` 声明后必须属于 continuable；
