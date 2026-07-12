@@ -36,7 +36,7 @@
 // observability callback per finding, and throws on error verdicts.
 
 import type { InternalStatus } from "./runtime-data"
-import type { Preset, PresetPhase, PresetPhaseExit, PresetPhaseTrigger } from "./loop"
+import type { PresetDefinition, PresetPhase, PresetPhaseExit, PresetPhaseTrigger } from "./loop"
 
 // #408 finding ADT. Two named variants, discriminated on `kind` + `verdict`.
 // Both surface the same `table` literal (`"statuses.continuable"`) because the
@@ -80,7 +80,7 @@ export type PresetDagFindingVerdict = PresetDagFinding["verdict"]
 // Pure cross-table consistency check. Returns one finding per violation, in
 // declaration order of `preset.statuses.continuable` so output is deterministic
 // and stable for tests / event ordering.
-export function checkPresetDag(preset: Preset): readonly PresetDagFinding[] {
+export function checkPresetDag(preset: PresetDefinition): readonly PresetDagFinding[] {
 	const findings: PresetDagFinding[] = []
 	const itemStatusExits = collectItemStatusExits(preset.phases)
 	const producers = collectProducerStatuses(preset, itemStatusExits)
@@ -128,7 +128,7 @@ function collectItemStatusExits(phases: readonly PresetPhase[]): readonly PhaseI
 // dependency unblock, queue unblock, item creation) and `statuses.exhausted`
 // (retry-budget sink). Preset-owned sources are every `item-status` exit's
 // status, regardless of whether the owning phase is trigger or non-trigger.
-function collectProducerStatuses(preset: Preset, itemStatusExits: readonly PhaseItemStatusExit[]): ReadonlySet<InternalStatus> {
+function collectProducerStatuses(preset: PresetDefinition, itemStatusExits: readonly PhaseItemStatusExit[]): ReadonlySet<InternalStatus> {
 	const producers = new Set<InternalStatus>()
 	producers.add(preset.statuses.entry)
 	producers.add(preset.statuses.exhausted)

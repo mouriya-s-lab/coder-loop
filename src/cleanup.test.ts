@@ -161,6 +161,7 @@ function makeLoopOptions(): LoopOptions {
 		preset: {
 			name: "cleanup-test",
 			presetDir: PRESET_DIR,
+			sourceHash: "sha256:cleanup-test",
 			item: { idField: "issue", fields: new Map() },
 			runtime: { businessKeys: [], businessKeyValues: new Map() },
 				statuses: {

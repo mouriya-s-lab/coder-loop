@@ -149,7 +149,13 @@ function minimalPresetRoot(overrides: BoundaryRecord = {}): BoundaryRecord {
 }
 
 function makePreset(overrides: BoundaryRecord = {}): Preset {
-	return parsePreset(minimalPresetRoot(overrides), resolve(REPO_ROOT, "presets/fixture"))
+	const parsed = parsePreset(minimalPresetRoot(overrides), resolve(REPO_ROOT, "presets/fixture"))
+	return {
+		...parsed,
+		sourceHash: "sha256:loop-test",
+		phases: parsed.phases.map((phase) => ({ ...phase, promptRelativePath: phase.prompt, promptSourceContent: "", promptContent: "" })),
+		fragments: parsed.fragments.map((fragment) => ({ ...fragment, relativePath: fragment.path, sourceContent: "", content: "" })),
+	}
 }
 
 function makeChainBindings(overrides: Partial<RenderBindings> = {}): RenderBindings {

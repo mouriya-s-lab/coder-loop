@@ -11,7 +11,6 @@ import {
 	phaseChainActions,
 	phaseWritableStatuses,
 	runPresetChainCompleteTriggerPhases,
-	substitutePresetRootToken,
 	PRESET_PHASE_CHAIN_ACTIONS,
 	type AgentRunnerKind,
 	type AgentRunnerSelection,
@@ -3984,13 +3983,7 @@ export class CoderLoopDaemon {
 		if (presetPhase === undefined) {
 			throw new Error(defaultDaemonPrompt({ reason: "phase_not_found_in_preset", preset: preset.name, phase: ctx.phase, presetDir }))
 		}
-		// Substitute the engine-owned {{PRESET_ROOT}} token against
-		// preset.presetDir. Under the production materialize-on path, the
-		// materialized md file on disk was substituted at copy time, so this
-		// call is a no-op; kept unconditional so the daemon stays correct if
-		// materialization is disabled for a load path (e.g. test fixture).
-		const raw = await readFile(presetPhase.prompt, "utf-8")
-		return substitutePresetRootToken(raw, preset.presetDir)
+		return presetPhase.promptContent
 	}
 
 	private async loadedPresetForChain(chain: ChainRecord, operation: string): Promise<SchedulerLoadedPreset> {

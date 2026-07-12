@@ -68,6 +68,7 @@ export { checkPresetDag } from "./preset-dag-check"
 export type { PresetDagFinding, PresetDagFindingKind, PresetDagFindingVerdict, PresetDagFindingTable, PresetDagFindingDeadlockContinuable, PresetDagFindingDeadVocabulary } from "./preset-dag-check"
 
 const PKG_ROOT = resolve(import.meta.dir, "..")
+const BUNDLED_PRESETS_DIR = resolve(PKG_ROOT, "presets")
 const DEFAULT_PRESET_NAME = "gh-issue-pr-iteration"
 const PRESET_NAME_PATTERN = /^[a-z][a-z0-9-]*$/
 
@@ -501,6 +502,109 @@ const PresetTomlBoundary = arkType({
 	"agent?": { "attemptTimeoutSeconds?": "number" },
 })
 
+// The root module is also the executable for every short-lived CLI command.
+// Construct this comparatively large public schema only when compile output is
+// actually projected or parsed; eager construction taxes unrelated chain/item
+// commands once per process and violates their established startup contract.
+// Types remain schema-derived through ReturnType<...>["infer"] below.
+function createCompileFindingBoundary() {
+	return arkType.or(
+		{ verdict: arkType.unit("error"), rule: arkType.unit("preset-source"), path: "string", message: "string" },
+		{ verdict: arkType.unit("error"), rule: arkType.unit("preset-structure"), path: "string", message: "string" },
+		{ verdict: arkType.unit("error"), rule: arkType.unit("deadlock-continuable"), table: arkType.unit("statuses.continuable"), status: "string", contributingPhases: "string[]", message: "string" },
+		{ verdict: arkType.unit("warn"), rule: arkType.unit("dead-vocabulary"), table: arkType.unit("statuses.continuable"), status: "string", knownProducers: "string[]", message: "string" },
+		{ verdict: arkType.unit("error"), rule: arkType.unit("template-undeclared"), path: "string", key: "string", message: "string" },
+		{ verdict: arkType.unit("warn"), rule: arkType.unit("declared-unused"), path: "string", key: "string", message: "string" },
+	)
+}
+
+function createCompileProjectionBoundary() {
+	const finding = createCompileFindingBoundary()
+	const stateGraphEdge = arkType.or(
+		{ id: "string", kind: arkType.unit("phase-exit"), phaseId: "string", exitIndex: "number", "from": arkType.or("string", "null"), to: "string" },
+		{ id: "string", kind: arkType.unit("engine-entry"), "from": arkType.unit(null), to: "string" },
+		{ id: "string", kind: arkType.unit("engine-exhausted"), "from": arkType.unit(null), to: "string" },
+		{ id: "string", kind: arkType.unit("engine-unblock"), "from": "string", to: "string" },
+	)
+	const phaseExit = arkType.or(
+		{ kind: arkType.unit("item-status"), status: "string", when: "string" },
+		{ kind: arkType.unit("chain-action"), action: arkType.unit("stop"), when: "string" },
+	)
+	const variable = arkType({
+		key: "string",
+		type: arkType.unit("string"),
+		source: "string",
+		"doc": arkType.or({ label: "string", prefix: "string", suffix: "string", style: arkType.or(arkType.unit("code"), arkType.unit("plain")), blankBefore: "boolean" }, "null"),
+	})
+	const phase = arkType({
+		id: "string",
+		name: "string",
+		exits: phaseExit.array(),
+		"trigger": arkType.or({ afterPhase: "string", whenStatus: "string" }, { on: arkType.unit("chain-complete") }, "null"),
+		"runner": arkType.or(arkType.unit("claude"), arkType.unit("codex"), arkType.unit("opencode"), "null"),
+		"model": arkType.or("string", "null"),
+		variables: variable.array(),
+		toolRequirements: "string[]",
+		rights: { createItems: "boolean", writableFields: "string[]", privilegedOps: "string[]" },
+		taskTree: {
+			kind: arkType.unit("seq"),
+			id: "string",
+			children: arkType({
+				kind: arkType.unit("leaf"),
+				id: "string",
+				prompt: { path: "string", content: "string", contentHash: "string" },
+			}).array(),
+		},
+	})
+	return arkType({
+		schemaVersion: arkType.unit(1),
+		preset: { name: "string", dir: arkType.unit("."), sourceHash: "string" },
+		statuses: {
+			continuable: "string[]", terminal: "string[]", success: "string[]", entry: "string",
+			unblockable: "string[]", exhausted: "string", "retry": arkType.or("string", "null"),
+		},
+		stateGraph: {
+			nodes: arkType({ id: "string", status: "string", classification: arkType.or(arkType.unit("continuable"), arkType.unit("terminal")), successful: "boolean" }).array(),
+			edges: stateGraphEdge.array(),
+		},
+		phases: phase.array(),
+		tools: arkType([]),
+		fragments: arkType({ id: "string", role: "string", path: "string", content: "string", contentHash: "string" }).array(),
+		findings: finding.array(),
+	})
+}
+
+function createCompileRejectedProjectionBoundary() {
+	return arkType({
+		kind: arkType.unit("rejected"),
+		diagnostics: createCompileFindingBoundary().array().atLeastLength(1),
+	})
+}
+
+type CompileProjectionArkBoundary = ReturnType<typeof createCompileProjectionBoundary>
+type CompileRejectedProjectionArkBoundary = ReturnType<typeof createCompileRejectedProjectionBoundary>
+let compileProjectionArkBoundary: CompileProjectionArkBoundary | null = null
+let compileRejectedProjectionArkBoundary: CompileRejectedProjectionArkBoundary | null = null
+
+export type CompileFinding = ReturnType<typeof createCompileFindingBoundary>["infer"]
+export type CompileWarning = Extract<CompileFinding, { verdict: "warn" }>
+export type CompileErrorDiagnostic = Extract<CompileFinding, { verdict: "error" }>
+export type CompileProjection = CompileProjectionArkBoundary["infer"]
+
+export const CompileProjectionBoundary = {
+	assert(value: unknown): CompileProjection {
+		compileProjectionArkBoundary ??= createCompileProjectionBoundary()
+		return compileProjectionArkBoundary.assert(value)
+	},
+}
+
+export const CompileRejectedProjectionBoundary = {
+	assert(value: unknown): CompileRejectedProjectionArkBoundary["infer"] {
+		compileRejectedProjectionArkBoundary ??= createCompileRejectedProjectionBoundary()
+		return compileRejectedProjectionArkBoundary.assert(value)
+	},
+}
+
 const StatusSnapshotBoundary = arkType({
 	target: "object",
 	state: "object",
@@ -641,16 +745,28 @@ export type PresetPhase = {
 	rights: PresetPhaseRights
 }
 
+export type CompiledPresetPhase = PresetPhase & {
+	promptRelativePath: string
+	promptSourceContent: string
+	promptContent: string
+}
+
 export type PresetFragment = {
 	id: string
 	role: string
 	path: string
 }
 
+export type CompiledPresetFragment = PresetFragment & {
+	relativePath: string
+	sourceContent: string
+	content: string
+}
+
 export type PresetBusinessKeyValue =
 	| { kind: "literal"; value: string }
 
-export type Preset = {
+export type PresetDefinition = {
 	name: string
 	presetDir: string
 	item: {
@@ -690,6 +806,21 @@ export type Preset = {
 		attemptTimeoutSeconds: number
 	}
 }
+
+export type CompiledTaskModel = Omit<PresetDefinition, "phases" | "fragments"> & {
+	sourceHash: string
+	phases: readonly CompiledPresetPhase[]
+	fragments: readonly CompiledPresetFragment[]
+}
+
+// Compatibility name for existing runtime consumers. `CompiledTaskModel` is
+// the canonical endpoint; this alias prevents an issue-549 rename from
+// obscuring the behavioral diff across the scheduler and daemon.
+export type Preset = CompiledTaskModel
+
+export type CompileResult =
+	| { kind: "compiled"; model: CompiledTaskModel; warnings: readonly CompileWarning[] }
+	| { kind: "rejected"; diagnostics: readonly [CompileErrorDiagnostic, ...CompileErrorDiagnostic[]] }
 
 export type PresetItemField = {
 	type: PresetItemFieldType
@@ -1114,7 +1245,7 @@ export type ResolveContext = {
 	// (status/transition/verdict vocabulary) can read declared status names,
 	// trigger metadata, and other phase definitions without the prose layer
 	// carrying hand-written copies of preset.toml.
-	preset: Preset
+	preset: PresetDefinition
 }
 
 type CliCommand =
@@ -2660,6 +2791,34 @@ async function runQueueCommand(args: string[]): Promise<void> {
 	await runQueueUnblockCommand(parsed.value.args)
 }
 
+async function runPresetCommand(args: string[]): Promise<void> {
+	const [action, input, ...flags] = args
+	if (action !== "compile" || input === undefined || flags.length !== 1 || flags[0] !== "--json") {
+		process.stderr.write("Usage: coder-loop preset compile <name|path> --json\n")
+		process.exitCode = 1
+		return
+	}
+	const presetDir = await resolveCompilePresetInput(input)
+	const result = await compilePreset(presetDir)
+	if (result.kind === "rejected") {
+		CompileRejectedProjectionBoundary.assert(result)
+		process.stderr.write(`${JSON.stringify(result, null, 2)}\n`)
+		process.exitCode = 1
+		return
+	}
+	process.stdout.write(`${stringifyCompileProjection(projectCompiledTaskModel(result.model, result.warnings))}\n`)
+}
+
+async function resolveCompilePresetInput(input: string): Promise<string> {
+	const candidate = resolve(input)
+	try {
+		if ((await stat(resolve(candidate, "preset.toml"))).isFile()) return candidate
+	} catch (error) {
+		if (!(isNodeError(error) && error.code === "ENOENT")) throw error
+	}
+	return resolve(BUNDLED_PRESETS_DIR, input)
+}
+
 async function main() {
 	const firstArg = process.argv[2]
 	if (firstArg === "status") {
@@ -2686,6 +2845,10 @@ async function main() {
 		await runQueueCommand(process.argv.slice(3))
 		return
 	}
+	if (firstArg === "preset") {
+		await runPresetCommand(process.argv.slice(3))
+		return
+	}
 	if (firstArg === "doctor") {
 		const handled = await dispatchSubcommand(firstArg, process.argv.slice(3))
 		if (handled) return
@@ -2705,6 +2868,7 @@ function rootUsage(): string {
 		"  chain <create|list|status|stop|resume|delete|set-runner-model>",
 		"  item <add|batch-add|list|update|reorder|exits|exit-action>",
 		"  queue unblock <target> --issue <issue>",
+		"  preset compile <name|path> --json",
 		"  doctor <target>",
 		"",
 	].join("\n")
@@ -4079,10 +4243,9 @@ async function waitForPidExit(pid: number, timeoutMs: number): Promise<boolean> 
 //
 // Materialization is opt-in via `LoadPresetOptions.materialize`. Daemon
 // callers pass `{ root: this.paths.root }`; direct unit tests that only
-// exercise the parser can omit it (the token is substituted in-memory at
-// prompt-read time — `readPresetPhasePrompt` + daemon prompt read use
-// `substitutePresetRootToken` unconditionally so both modes yield prompts
-// that never contain the token when validation or rendering sees them).
+// exercise the parser can omit it. Compilation retains both normalized source
+// bytes and runtime-substituted bytes, so validation and rendering consume the
+// same canonical model in either mode.
 export const PRESET_ROOT_TOKEN = "{{PRESET_ROOT}}"
 export const PRESET_MATERIALIZED_DIRNAME = "preset-materialized"
 
@@ -4209,8 +4372,8 @@ async function collectPresetSourceFiles(sourceDir: string): Promise<string[]> {
 
 // Substitute the engine-owned `{{PRESET_ROOT}}` token with the given absolute
 // directory. Called both physically at materialization time (writing the copied
-// md files) and in-memory at prompt-read time (so tests that skip materialize
-// still get post-substitution content). Idempotent: content without the token
+// md files) and in-memory during compilation (so loads that skip materialize
+// still get post-substitution runtime content). Idempotent: content without the token
 // short-circuits, and re-invoking on already-substituted content is a no-op
 // (materialized files contain no token).
 export function substitutePresetRootToken(text: string, presetDir: string): string {
@@ -4244,7 +4407,7 @@ export async function prunePresetMaterializedRoot(
 export type LoadPresetOptions = {
 	onValidationFinding?: (finding: PresetPlaceholderFinding) => void
 	// #408 cross-table DAG checker callback. Invoked once per finding before
-	// loadPreset throws (for error verdicts) so daemons can record warn AND
+	// compilePreset returns rejected (and before loadPreset wraps it) so daemons can record warn AND
 	// error findings on the unified observability stream alongside the
 	// placeholder findings — both run in the same load attempt, both feed the
 	// same audit surface.
@@ -4254,62 +4417,291 @@ export type LoadPresetOptions = {
 	// resolves to that materialized copy — `{{PRESET_ROOT}}` in md files has been
 	// physically substituted with the target absolute path. When omitted, the
 	// source directory is parsed directly and `{{PRESET_ROOT}}` is substituted
-	// only in-memory at prompt-read time. Daemon callers must set this so agents
+	// into retained runtime bytes during compilation. Daemon callers must set this so agents
 	// spawned in random worktrees read stable materialized paths.
 	materialize?: { root: string }
 }
 
-export async function loadPreset(sourceDir: string, options: LoadPresetOptions = {}): Promise<Preset> {
-	const presetDir = options.materialize
-		? (await materializePreset(sourceDir, options.materialize.root)).promptRoot
-		: sourceDir
-	const tomlPath = resolve(presetDir, "preset.toml")
-	const raw = await readFile(tomlPath, "utf-8")
-	const parsed: BoundaryValue = Bun.TOML.parse(raw)
-	const preset = parsePreset(parsed, presetDir)
-	// #408 cross-table DAG check runs immediately after `parsePreset` returns
-	// the parsed shape and BEFORE per-phase prompt template validation. Order
-	// matters for the operator-facing error: a deadlock or dead-vocabulary
-	// finding is structural metadata drift (a phase-exit table missing an
-	// edge) and is more actionable than a placeholder typo in a prompt the
-	// drift would have made unreachable anyway.
-	const dagFindings = checkPresetDag(preset)
-	const dagErrors: PresetDagFinding[] = []
-	for (const finding of dagFindings) {
-		options.onDagFinding?.(finding)
-		if (finding.verdict === "error") dagErrors.push(finding)
+export type CompilePresetOptions = LoadPresetOptions
+
+export class PresetCompileRejectedError extends Error {
+	constructor(readonly diagnostics: readonly [CompileErrorDiagnostic, ...CompileErrorDiagnostic[]]) {
+		super(compileRejectionMessage(diagnostics))
+		this.name = "PresetCompileRejectedError"
 	}
-	if (dagErrors.length > 0) {
-		const lines = dagErrors.map((f) => `  ${f.message}`)
-		presetError(
-			`preset ${preset.name}: cross-table DAG check found ${dagErrors.length} error finding(s).\n${lines.join("\n")}`,
-		)
-	}
-	const phases: PresetPhase[] = []
-	const placeholderErrors: PresetPlaceholderFinding[] = []
-	for (const phase of preset.phases) {
-		const prompt = await readPresetPhasePrompt(phase, presetDir)
-		assertRoleEntryHasNoFrontmatter(prompt, `preset phase "${phase.name}" prompt`)
-		const findings = validatePresetPhaseTemplate(prompt, phase, phase.prompt)
-		for (const finding of findings) {
-			options.onValidationFinding?.(finding)
-			if (finding.verdict === "error") placeholderErrors.push(finding)
-		}
-		phases.push(phase)
-	}
-	if (placeholderErrors.length > 0) {
-		const lines = placeholderErrors.map((f) => `  ${f.file}: {{${f.key}}} (${f.direction})`)
-		presetError(
-			`preset ${preset.name}: template contains undeclared placeholders — every {{KEY}} must be declared in the phase's [phases.variables] block.\n${lines.join("\n")}`,
-		)
-	}
-	for (const fragment of preset.fragments) {
-		await assertReadable(fragment.path, `preset fragment "${fragment.id}"`)
-	}
-	return { ...preset, phases }
 }
 
-export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
+function compileRejectionMessage(diagnostics: readonly [CompileErrorDiagnostic, ...CompileErrorDiagnostic[]]): string {
+	if (diagnostics.every((diagnostic) => diagnostic.rule === "deadlock-continuable")) {
+		return `cross-table DAG check found ${diagnostics.length} error finding(s).\n${diagnostics.map((diagnostic) => `  ${diagnostic.message}`).join("\n")}`
+	}
+	return diagnostics.map((diagnostic) => diagnostic.message).join("\n")
+}
+
+export async function compilePreset(sourceDir: string, options: CompilePresetOptions = {}): Promise<CompileResult> {
+	let presetDir: string
+	try {
+		presetDir = options.materialize
+			? (await materializePreset(sourceDir, options.materialize.root)).promptRoot
+			: resolve(sourceDir)
+	} catch (error) {
+		return rejectedCompile({ verdict: "error", rule: "preset-source", path: ".", message: errorMessage(error) })
+	}
+	const tomlPath = resolve(presetDir, "preset.toml")
+	let raw: string
+	try {
+		raw = await readFile(tomlPath, "utf-8")
+	} catch (error) {
+		return rejectedCompile({ verdict: "error", rule: "preset-source", path: "preset.toml", message: errorMessage(error) })
+	}
+	let parsed: BoundaryValue
+	try {
+		parsed = Bun.TOML.parse(raw)
+	} catch (error) {
+		return rejectedCompile({ verdict: "error", rule: "preset-structure", path: "preset.toml", message: errorMessage(error) })
+	}
+	let preset: PresetDefinition
+	try {
+		preset = parsePreset(parsed, presetDir)
+	} catch (error) {
+		return rejectedCompile({ verdict: "error", rule: "preset-structure", path: "preset.toml", message: errorMessage(error) })
+	}
+
+	const warnings: CompileWarning[] = []
+	const dagErrors: CompileErrorDiagnostic[] = []
+	for (const finding of checkPresetDag(preset)) {
+		options.onDagFinding?.(finding)
+		const diagnostic = compileDagFinding(finding)
+		if (diagnostic.verdict === "warn") warnings.push(diagnostic)
+		else dagErrors.push(diagnostic)
+	}
+	if (dagErrors.length > 0) return rejectedCompileMany(dagErrors)
+
+	const phases: CompiledPresetPhase[] = []
+	const templateErrors: CompileErrorDiagnostic[] = []
+	for (const phase of preset.phases) {
+		const promptRelativePath = relative(presetDir, phase.prompt)
+		let promptSourceContent: string
+		try {
+			promptSourceContent = normalizeCompiledSourceContent(await readFile(phase.prompt, "utf-8"), presetDir)
+		} catch (error) {
+			return rejectedCompile({ verdict: "error", rule: "preset-source", path: promptRelativePath, message: errorMessage(error) })
+		}
+		const promptContent = substitutePresetRootToken(promptSourceContent, presetDir)
+		try {
+			assertRoleEntryHasNoFrontmatter(promptContent, `preset phase "${phase.name}" prompt`)
+		} catch (error) {
+			return rejectedCompile({ verdict: "error", rule: "preset-structure", path: promptRelativePath, message: errorMessage(error) })
+		}
+		for (const finding of validatePresetPhaseTemplate(promptContent, phase, phase.prompt)) {
+			options.onValidationFinding?.(finding)
+			const diagnostic = compileTemplateFinding(finding, promptRelativePath)
+			if (diagnostic.verdict === "warn") warnings.push(diagnostic)
+			else templateErrors.push(diagnostic)
+		}
+		phases.push({ ...phase, promptRelativePath, promptSourceContent, promptContent })
+	}
+	if (templateErrors.length > 0) return rejectedCompileMany(templateErrors)
+
+	const fragments: CompiledPresetFragment[] = []
+	for (const fragment of preset.fragments) {
+		const relativePath = relative(presetDir, fragment.path)
+		let sourceContent: string
+		try {
+			sourceContent = normalizeCompiledSourceContent(await readFile(fragment.path, "utf-8"), presetDir)
+		} catch (error) {
+			return rejectedCompile({ verdict: "error", rule: "preset-source", path: relativePath, message: errorMessage(error) })
+		}
+		fragments.push({ ...fragment, relativePath, sourceContent, content: substitutePresetRootToken(sourceContent, presetDir) })
+	}
+
+	const sourceHash = hashCompiledPresetSources(raw, phases, fragments)
+	return { kind: "compiled", model: { ...preset, sourceHash, phases, fragments }, warnings }
+}
+
+export async function loadPreset(sourceDir: string, options: LoadPresetOptions = {}): Promise<CompiledTaskModel> {
+	const result = await compilePreset(sourceDir, options)
+	if (result.kind === "rejected") throw new PresetCompileRejectedError(result.diagnostics)
+	return result.model
+}
+
+function rejectedCompile(diagnostic: CompileErrorDiagnostic): CompileResult {
+	return { kind: "rejected", diagnostics: [diagnostic] }
+}
+
+function rejectedCompileMany(diagnostics: readonly CompileErrorDiagnostic[]): CompileResult {
+	const first = diagnostics[0]
+	if (first === undefined) throw new Error("rejectedCompileMany requires at least one diagnostic")
+	return { kind: "rejected", diagnostics: [first, ...diagnostics.slice(1)] }
+}
+
+function compileDagFinding(finding: PresetDagFinding): CompileFinding {
+	if (finding.kind === "dead-vocabulary") {
+		return { verdict: "warn", rule: "dead-vocabulary", table: finding.table, status: finding.status, knownProducers: [...finding.knownProducers], message: finding.message }
+	}
+	return { verdict: "error", rule: "deadlock-continuable", table: finding.table, status: finding.status, contributingPhases: [...finding.contributingPhases], message: finding.message }
+}
+
+function compileTemplateFinding(finding: PresetPlaceholderFinding, path: string): CompileFinding {
+	if (finding.direction === "declared-unused") {
+		return { verdict: "warn", rule: "declared-unused", path, key: finding.key, message: `${path}: declared variable {{${finding.key}}} is unused` }
+	}
+	return { verdict: "error", rule: "template-undeclared", path, key: finding.key, message: `${path}: template contains undeclared placeholders: {{${finding.key}}}` }
+}
+
+function normalizeCompiledSourceContent(content: string, presetDir: string): string {
+	return content.includes(presetDir) ? content.replaceAll(presetDir, PRESET_ROOT_TOKEN) : content
+}
+
+function hashCompiledPresetSources(
+	toml: string,
+	phases: readonly CompiledPresetPhase[],
+	fragments: readonly CompiledPresetFragment[],
+): string {
+	const sources = [
+		{ path: "preset.toml", content: toml },
+		...phases.map((phase) => ({ path: phase.promptRelativePath, content: phase.promptSourceContent })),
+		...fragments.map((fragment) => ({ path: fragment.relativePath, content: fragment.sourceContent })),
+	].sort((left, right) => left.path.localeCompare(right.path))
+	const hasher = new Bun.CryptoHasher("sha256")
+	for (const source of sources) {
+		hasher.update(source.path)
+		hasher.update("\0")
+		hasher.update(source.content)
+		hasher.update("\0")
+	}
+	return `sha256:${hasher.digest("hex")}`
+}
+
+export function projectCompiledTaskModel(
+	model: CompiledTaskModel,
+	findings: readonly CompileWarning[],
+): CompileProjection {
+	const success = new Set(model.statuses.success)
+	const nodes: CompileProjection["stateGraph"]["nodes"] = [
+		...model.statuses.continuable.map((status) => ({ id: statusNodeId(status), status, classification: "continuable" as const, successful: false })),
+		...model.statuses.terminal.map((status) => ({ id: statusNodeId(status), status, classification: "terminal" as const, successful: success.has(status) })),
+	]
+	const edges: CompileProjection["stateGraph"]["edges"] = [
+		{ id: "engine/entry", kind: "engine-entry", from: null, to: statusNodeId(model.statuses.entry) },
+		{ id: "engine/exhausted", kind: "engine-exhausted", from: null, to: statusNodeId(model.statuses.exhausted) },
+		...model.statuses.unblockable.map((status) => ({ id: `engine/unblock/${identitySegment(status)}`, kind: "engine-unblock" as const, from: statusNodeId(status), to: statusNodeId(model.statuses.entry) })),
+	]
+	for (const phase of model.phases) {
+		const phaseId = phaseIdentity(phase.name)
+		for (const [exitIndex, exit] of phase.exits.entries()) {
+			if (exit.kind !== "item-status") continue
+			edges.push({
+				id: `${phaseId}/exit/${exitIndex}`,
+				kind: "phase-exit",
+				phaseId,
+				exitIndex,
+				from: phase.trigger !== null && !isChainCompleteTrigger(phase.trigger) ? statusNodeId(phase.trigger.whenStatus) : null,
+				to: statusNodeId(exit.status),
+			})
+		}
+	}
+	const projection: CompileProjection = {
+		schemaVersion: 1,
+		preset: { name: model.name, dir: ".", sourceHash: model.sourceHash },
+		statuses: {
+			continuable: [...model.statuses.continuable],
+			terminal: [...model.statuses.terminal],
+			success: [...model.statuses.success],
+			entry: model.statuses.entry,
+			unblockable: [...model.statuses.unblockable],
+			exhausted: model.statuses.exhausted,
+			retry: model.statuses.retry,
+		},
+		stateGraph: { nodes, edges },
+		phases: model.phases.map((phase) => {
+			const phaseId = phaseIdentity(phase.name)
+			return {
+				id: phaseId,
+				name: phase.name,
+				exits: phase.exits.map((exit) => exit.kind === "item-status"
+					? { kind: "item-status", status: exit.status, when: exit.when }
+					: { kind: "chain-action", action: exit.action, when: exit.when }),
+				trigger: phase.trigger,
+				runner: phase.defaultRunner,
+				model: phase.defaultModel,
+				variables: phase.variables.map((variable) => ({
+					key: variable.key,
+					type: "string",
+					source: projectVariableSource(variable.source),
+					doc: variable.doc,
+				})),
+				toolRequirements: [],
+				rights: {
+					createItems: phase.rights.createItems,
+					writableFields: [...phase.rights.writableFields].sort(),
+					privilegedOps: [...phase.rights.privilegedOps].sort(),
+				},
+				taskTree: {
+					kind: "seq",
+					id: `${phaseId}/tasks`,
+					children: [{
+						kind: "leaf",
+						id: `${phaseId}/task/0`,
+						prompt: { path: phase.promptRelativePath, content: phase.promptSourceContent, contentHash: hashText(phase.promptSourceContent) },
+					}],
+				},
+			}
+		}),
+		tools: [],
+		fragments: model.fragments.map((fragment) => ({
+			id: fragment.id,
+			role: fragment.role,
+			path: fragment.relativePath,
+			content: fragment.sourceContent,
+			contentHash: hashText(fragment.sourceContent),
+		})),
+		findings: [...findings],
+	}
+	CompileProjectionBoundary.assert(projection)
+	return projection
+}
+
+export function stringifyCompileProjection(projection: CompileProjection): string {
+	CompileProjectionBoundary.assert(projection)
+	return JSON.stringify(projection, null, 2)
+}
+
+function projectVariableSource(source: PresetVariableSource): string {
+	switch (source.kind) {
+		case "item": return `item.${source.field}`
+		case "runtime": return `runtime.${source.key}`
+		case "chain": {
+			if (source.fallback.kind === "none") return `chain.${source.field}`
+			return `chain.${source.field}??${JSON.stringify(source.fallback.value)}`
+		}
+		default: return assertNeverVariableSource(source)
+	}
+}
+
+function assertNeverVariableSource(source: never): never {
+	throw new Error(`unhandled preset variable source: ${JSON.stringify(source)}`)
+}
+
+function phaseIdentity(name: string): string {
+	return `phase/${identitySegment(name)}`
+}
+
+function statusNodeId(status: string): string {
+	return `status/${identitySegment(status)}`
+}
+
+function identitySegment(value: string): string {
+	return value.replaceAll("~", "~0").replaceAll("/", "~1")
+}
+
+function hashText(content: string): string {
+	const hasher = new Bun.CryptoHasher("sha256")
+	hasher.update(content)
+	return `sha256:${hasher.digest("hex")}`
+}
+
+export function parsePreset(value: BoundaryValue, presetDir: string): PresetDefinition {
 	const root = assertArk(PresetTomlBoundary, value, "preset")
 
 	for (const status of root.statuses.continuable) {
@@ -4493,16 +4885,6 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 		phases,
 		fragments,
 		agent: { attemptTimeoutSeconds },
-	}
-}
-
-async function readPresetPhasePrompt(phase: PresetPhase, presetDir: string): Promise<string> {
-	try {
-		const raw = await readFile(phase.prompt, "utf-8")
-		return substitutePresetRootToken(raw, presetDir)
-	} catch (error) {
-		if (isNodeError(error) && error.code === "ENOENT") fail(`Missing preset phase "${phase.name}" prompt file: ${phase.prompt}`)
-		throw error
 	}
 }
 
@@ -4835,15 +5217,6 @@ function presetError(message: string): never {
 // #433: per-target on-disk runtime readers are retired. The only on-disk reader the engine keeps
 // is the preset.toml itself; chain metadata covers everything else.
 
-async function assertReadable(path: string, label: string): Promise<void> {
-	try {
-		await readFile(path, "utf-8")
-	} catch (error) {
-		if (isNodeError(error) && error.code === "ENOENT") fail(`Missing ${label} file: ${path}`)
-		throw error
-	}
-}
-
 export function detectHostRunner(env: Record<string, string | undefined>): AgentRunnerKind {
 	if (env.CODEX_SHELL === "1" || env.CODEX_THREAD_ID !== undefined || env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE?.toLowerCase().includes("codex") === true) return "codex"
 	if (env.CLAUDECODE !== undefined || env.CLAUDE_CODE !== undefined || env.CLAUDE_SESSION_ID !== undefined || env.CLAUDE_PROJECT_DIR !== undefined) return "claude"
@@ -4995,11 +5368,11 @@ export function firstNonTriggerPhaseForPreset(preset: Preset): PresetPhase {
 	return phase
 }
 
-export function triggeredPhasesAfter(preset: Preset, afterPhase: string, status: InternalStatus): readonly PresetPhase[] {
+export function triggeredPhasesAfter<TPhase extends PresetPhase>(preset: { phases: readonly TPhase[] }, afterPhase: string, status: InternalStatus): readonly TPhase[] {
 	return preset.phases.filter((phase) => phase.trigger !== null && !isChainCompleteTrigger(phase.trigger) && phase.trigger.afterPhase === afterPhase && phase.trigger.whenStatus === status)
 }
 
-export function chainCompleteTriggerPhases(preset: Preset): readonly PresetPhase[] {
+export function chainCompleteTriggerPhases<TPhase extends PresetPhase>(preset: { phases: readonly TPhase[] }): readonly TPhase[] {
 	return preset.phases.filter((phase) => phase.trigger !== null && isChainCompleteTrigger(phase.trigger))
 }
 
@@ -5075,8 +5448,7 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 			}),
 			preset,
 		}
-		const promptRaw = await readFile(phase.prompt, "utf-8")
-		const prompt = renderPrompt(promptRaw, phase, ctx)
+		const prompt = renderPrompt(phase.promptContent, phase, ctx)
 		const outputPath = agentOutputPath(options, finalizerRunId, phase.name)
 		const resolvedRunner = await resolvePhaseRunner(phase.name)
 		log(`Starting chain-complete trigger phase ${phase.name} for chain ${input.chain.name} (runner=${resolvedRunner.kind})...`)
@@ -5461,7 +5833,7 @@ export function renderPhaseExitsDoc(phase: PresetPhase): string {
 // Output is two markdown bullet groups (`actionable` / `non-actionable`) when
 // the slice spans both halves; a single bullet when it's one status. Render
 // the empty string only when no status falls in the slice.
-export function renderStatusVocabularyDoc(phase: PresetPhase, preset: Preset): string {
+export function renderStatusVocabularyDoc(phase: PresetPhase, preset: PresetDefinition): string {
 	const continuable = new Set<string>(preset.statuses.continuable)
 	const terminal = new Set<string>(preset.statuses.terminal)
 	const slice = statusVocabularySlice(phase, preset)
@@ -5474,7 +5846,7 @@ export function renderStatusVocabularyDoc(phase: PresetPhase, preset: Preset): s
 	return lines.join("\n")
 }
 
-function statusVocabularySlice(phase: PresetPhase, preset: Preset): ReadonlySet<string> {
+function statusVocabularySlice(phase: PresetPhase, preset: PresetDefinition): ReadonlySet<string> {
 	if (phase.trigger !== null && !isChainCompleteTrigger(phase.trigger)) {
 		return new Set<string>([phase.trigger.whenStatus])
 	}
@@ -5505,7 +5877,7 @@ export function renderTriggerStatusDoc(phase: PresetPhase): string {
 // meaningful narrower slice (a phase's "you must not write these" set is the
 // whole terminal set, by definition of terminal). Empty when the preset
 // declares no terminal statuses.
-export function renderTerminalStatusesDoc(phase: PresetPhase, preset: Preset): string {
+export function renderTerminalStatusesDoc(phase: PresetPhase, preset: PresetDefinition): string {
 	// `phase` is part of the signature for symmetry with the other builders and to
 	// keep call-sites uniform; the slice policy is preset-wide today.
 	if (preset.statuses.terminal.length === 0) return ""
@@ -5518,7 +5890,7 @@ export function renderTerminalStatusesDoc(phase: PresetPhase, preset: Preset): s
 // iteration" status without copying the string. A preset that did not declare
 // `[statuses].retry` renders the empty string — fragments that bind this key
 // require the preset to declare the field.
-export function renderRetryStatusDoc(preset: Preset): string {
+export function renderRetryStatusDoc(preset: PresetDefinition): string {
 	const retry = preset.statuses.retry
 	if (retry === null) return ""
 	return `\`${retry}\``
@@ -5674,10 +6046,10 @@ function stringifyBindingValue(value: JsonValue | undefined, label: string): str
 
 // Render the fragment index for a specific phase (issue #400: minimum-
 // visibility slicing). Only fragments whose role appears in `phase.roles`
-// reach the agent prompt; cross-role fragments are filtered out. `assertReadable`
-// in `loadPreset` still covers the full set — visibility and existence are
+// reach the agent prompt; cross-role fragments are filtered out. Compilation
+// still reads and retains the full set — visibility and existence are
 // separate concerns.
-export function renderFragmentIndex(preset: Preset, phase: Pick<PresetPhase, "roles">): string {
+export function renderFragmentIndex(preset: Pick<PresetDefinition, "fragments">, phase: Pick<PresetPhase, "roles">): string {
 	return sliceFragmentsForPhase(preset.fragments, phase.roles)
 		.map((fragment) => `- ${fragment.id} (${fragment.role}): ${fragment.path}`)
 		.join("\n")

@@ -14,10 +14,10 @@
 
 | 引擎职责 | 说明 |
 |---|---|
-| **加载 preset** | 从 `<pkg>/presets/<name>/` 或 target 的 `presetPath` 读 `preset.toml`，解析 `name / item.idField / statuses / phases / fragments / agent`。每个 fragment 路径必须可读。 |
+| **编译 preset** | 从 `<pkg>/presets/<name>/` 或 target 的 `presetPath` 读定义，经过同一条 parse / 局部校验 / 跨表校验管线产出 canonical `CompiledTaskModel`。模型保留已经校验的 phase prompt 与 fragment bytes；runtime 不再二次读取 prompt。 |
 | **加载 target runtime** | 从 centralized SQLite loop-data store 解析 active chain / queue / current；每个 item 自带 preset（`item.add --preset <name>` 或 `--preset-path <abs>`），chain-level `preset` 只是 legacy default seed。target 目录不需要任何 config / workflow 文件——项目命令 / PR 约定的真源是 target 自有的 `CLAUDE.md` / `AGENTS.md`。 |
 | **选 actionable item** | 若 `state.current` 存在且其 status 在 preset 的 `statuses.continuable` 内，继续它；否则在队列里找首个 `continuable` item。`continuable` 外的所有 item 视为 terminal，引擎不动。 |
-| **按 phase 顺序 spawn agent** | 遍历 `preset.phases`：每个 phase 读 entry prompt 模板，按 `[phases.variables]` 表绑定变量替换 `{{KEY}}`，把渲染后的 prompt 传给当前 runner（`claude` / `codex` / `opencode`）。捕获 stdout/stderr 写入 `<logDir>/<runId>/<phase>/`，每个 phase spawn 完写 `status.json`。 |
+| **按 phase 顺序 spawn agent** | 遍历 `preset.phases`：每个 phase 使用 `CompiledTaskModel` 中已校验的 entry prompt bytes，按 `[phases.variables]` 表绑定变量替换 `{{KEY}}`，把渲染后的 prompt 传给当前 runner（`claude` / `codex` / `opencode`）。捕获 stdout/stderr 写入 `<logDir>/<runId>/<phase>/`，每个 phase spawn 完写 `status.json`。 |
 | **resume / 不丢工作** | spawn 中途崩溃，重启时根据 `state.current.phase` 跳到当前 phase 而非从头。 |
 | **daemon / chain 控制** | 新版运行期由 centralized daemon socket + chain/item state 控制；target start/stop/restart 通过 daemon API 解析 chain，而不是依赖 target-local sentinel 文件。 |
 | **runtime 状态快照** | `coder-loop status <target> --json` 不 spawn agent，读取 preset、target 文件、central chain layout、queue、current、runner 与 process snapshot，供 operator / supervisor 做结构化判断。 |
@@ -26,6 +26,18 @@
 引擎**不知道**：phase 数量、phase 名字、status 字面量（`queued / done / pending` 之类）、item id 字段名、已知变量 KEY（`{{REPO}}` / `{{ISSUE}}` 之类）、preset 之间的差异、GitHub。
 
 引擎**不判断**：item 是否完成、PR 是否正确、证据是否充分、parent 是否可关闭、queue 优先级。这些由 preset 的 agent prompt 判断（默认 preset 让 agent 改 GitHub state；其他 preset 可以让 agent 改任何东西）。
+
+### 编译产物
+
+`coder-loop preset compile <name|path> --json` 在不启动 daemon 的情况下调用与 runtime 相同的 `compilePreset` 构造函数，再通过唯一的 `projectCompiledTaskModel` 投影输出公共 JSON。成功退出码为 0；结构或源文件无效时 stderr 输出 `rejected` + 非空结构化 diagnostics，并以非 0 退出。warn 留在成功产物的 `findings` 中且不会改变退出码。
+
+公共投影当前为 `schemaVersion: 1`，固定顶层顺序与八个键：`schemaVersion` 加上六块契约中的 `preset`、`statuses` + `stateGraph`、`phases`、`tools`、`fragments`、`findings`。`phases[].taskTree` 是基线退化树：每个 phase 一个 `seq` 根和一个 prompt `leaf`；ID 使用相对语义路径 `phase/<escaped-name>/tasks`、`phase/<escaped-name>/task/0`，JSON Pointer 规则转义 `~` 和 `/`，不使用绝对文件路径或数组位置作为节点 identity。后续 #554 可在这一位置增加真实 seq/par 声明语义。
+
+`preset.sourceHash` 使用 `sha256:` 前缀，输入是 `preset.toml`、所有已声明 phase prompt、所有已声明 fragment 的 `(相对路径, NUL, 原始内容, NUL)`，按相对路径排序。`{{PRESET_ROOT}}` 保持为源 token 后参与 hash，因此直接加载与 materialized runtime 对同一源产生相同 hash，且投影不泄露机器绝对路径。phase/fragment 自身的 `contentHash` 只覆盖该条目的原始内容。相同源 + 相同 `schemaVersion` 的 stringify bytes 必须稳定；shape 的不兼容变化必须 bump `schemaVersion`。
+
+`tools` 与 `toolRequirements` 在当前基线为空，variable `type` 为 `"string"`；它们只预留 #552/#553 的 additive 填充位置。本 issue 不实现 task-tree TOML、具名 gate、dead-fragment/plan 或运行实例 definition pin（分别由 #554/#555/#556/#605 负责）。
+
+compile findings 不并入 `doctor`。理由是 `preset compile` 是任意 name/path 的定义期检查面，而 doctor 是已选 target/chain 的运行健康面；把前者吸收进后者会制造第二个 findings 投影与不明确的 preset 选择。doctor 仍会呈现其既有 runtime 加载失败，但不新增 compile-findings 健康节。
 
 ---
 
@@ -137,7 +149,7 @@ rm -rf "$TARGET"
 | `[[phases]].roles` | string[] | preset 声明 fragments 时必填，否则可省 | 该 phase 渲染 `{{PROMPT_FRAGMENT_INDEX}}` 时可见的 fragment role 集合。引擎从不通过 phase 名猜 role；只列在这里的 role 对应的 fragment 才会进该 phase 的索引切片。`[[fragments]]` 中未出现的 role 名会在加载期报错。 |
 | `[phases.variables]` | table | 是 | 模板中 `{{KEY}}` 的解析表。值可为 `"item|chain|runtime.<key>"` 字符串，或 `{ source = "...", default = ..., label = "...", prefix = "...", suffix = "...", style = "code|plain", blankBefore = false }` 对象；doc 字段的完整契约见 §4 |
 | `[[fragments]].id` | string | 是 | fragment 唯一标识（如 `iter/steps/implement`），entry prompt 通过该 id 引用 |
-| `[[fragments]].role` | string | 是 | fragment 角色（如 `common` / `iter` / `review`）。该字段参与 `[[phases]].roles` 切片：当前 phase 渲染的 fragment 索引仅含 role 出现在该 phase `roles` 数组里的条目。fragment 文件完整性校验（`assertReadable`）仍覆盖全量。 |
+| `[[fragments]].role` | string | 是 | fragment 角色（如 `common` / `iter` / `review`）。该字段参与 `[[phases]].roles` 切片：当前 phase 渲染的 fragment 索引仅含 role 出现在该 phase `roles` 数组里的条目。编译管线仍读取并保留全量 fragment 内容。 |
 | `[[fragments]].path` | string | 是 | 相对 preset.toml 的 markdown 文件路径，文件必须可读 |
 | `[agent].attemptTimeoutSeconds` | number | 否 | 每次 agent attempt 的绝对超时秒数；默认 `3600`。到期无条件对进程组发 `SIGTERM`，5 秒后仍未退出则发 `SIGKILL`（事件流写 `attempt.timeout`）。与 attempt timeout 并行运行的机制：startup idle watchdog（#462，前 10 分钟 stdout < 200B 判挂死 → SIGKILL + `run.startup_idle_kill`）与 recycle zone（#452，agent 写完 admissible status 后给 500 秒自然退出，超时直接 SIGKILL + `recycle.timeout_kill`）——这两者不读 stdout marker，触发条件在引擎侧。`[agent]` 目前只支持 `attemptTimeoutSeconds`；`binary` / `extraArgs` 在 preset.toml 中出现会在加载期报错——runner binary 由 phase runner kind 决定（PATH 上的 `claude` / `codex` / `opencode`）。 |
 
@@ -157,7 +169,7 @@ rm -rf "$TARGET"
 - `item.<field>` 只能引用 `[item].idField`、引擎自有字段（`id/status/phase/runner/agentCwd`），或 `[item.fields]` 显式声明的透明字段。未声明字段在 preset 加载期报错。
 - `runtime.<key>` 只能引用 engine-owned fact，或 `[runtime].businessKeys` 显式声明的 preset 业务 key。未声明 key 在 preset 加载期报错；声明了但运行时没有提供值则渲染时报错。
 
-任何一条失败 → preset load throws；`coder-loop status <target> --json` 会把 state 标成 `invalid-preset` 或相邻的 invalid runtime 状态，`doctor` 会在人类可读输出中呈现同一类问题。
+任何一条失败 → `compilePreset` 返回 `rejected(non-empty diagnostics)`；兼容 runtime 入口 `loadPreset` 只负责把该 typed rejection 包装成携带 diagnostics 的 `PresetCompileRejectedError`。`coder-loop status <target> --json` 继续把已选 runtime preset 的加载失败标成相邻 invalid 状态；doctor 不新增 compile-findings 节。
 
 ### Trigger phases
 
