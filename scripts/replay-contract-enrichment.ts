@@ -6,12 +6,13 @@ import { spawnSync } from "node:child_process"
 
 const REPOSITORY = "mouriya-s-lab/coder-loop"
 
+type FindingEvidence = { sourceUrl: string; excerpt: string; rationale: string }
 export type ReplayFinding =
-	| { kind: "intent-gap"; sourceUrl: string; rationale: string }
-	| { kind: "preset-drift"; sourceUrl: string; rationale: string }
-	| { kind: "reviewer-discretion"; sourceUrl: string; rationale: string }
-	| { kind: "environment-failure"; sourceUrl: string; rationale: string }
-	| { kind: "contract-defect"; sourceUrl: string; rationale: string }
+	| ({ kind: "intent-gap" } & FindingEvidence)
+	| ({ kind: "preset-drift" } & FindingEvidence)
+	| ({ kind: "reviewer-discretion" } & FindingEvidence)
+	| ({ kind: "environment-failure" } & FindingEvidence)
+	| ({ kind: "contract-defect" } & FindingEvidence)
 
 type ReplayCheck = { id: string; dimension: string; kind: "shell" | "browser"; instruction: string }
 
@@ -165,6 +166,10 @@ function hasAny(text: string, patterns: readonly RegExp[]): boolean {
 	return patterns.some((pattern) => pattern.test(text))
 }
 
+function excerpt(text: string): string {
+	return text.replace(/\s+/g, " ").trim().slice(0, 280)
+}
+
 export function classifyReplay(issue: IssueSnapshot, pullRequests: readonly PullRequestSnapshot[]): Omit<ReplayResult, "evidenceDir"> {
 	const intentText = [issue.body, ...issue.comments.map((comment) => comment.body)].join("\n")
 	const findings: ReplayFinding[] = []
@@ -173,11 +178,19 @@ export function classifyReplay(issue: IssueSnapshot, pullRequests: readonly Pull
 	const hasRuntime = /e2e|end[- ]to[- ]end|真实运行|runtime|browser/i.test(intentText)
 	const hasTestDelta = /test[- ]delta|测试变更|测试.*允许|forbidden/i.test(intentText)
 	if (!hasChecks || !hasPattern || !hasRuntime || !hasTestDelta) {
-		findings.push({ kind: "intent-gap", sourceUrl: issue.url, rationale: "通用 issue 没有预先给出完整 Checks / Pattern / canonical runtime / Test delta；该缺项需要 enrichment 调查，不是 implementation failure。" })
+		findings.push({ kind: "intent-gap", sourceUrl: issue.url, excerpt: excerpt(issue.body), rationale: "通用 issue 没有预先给出完整 Checks / Pattern / canonical runtime / Test delta；该缺项需要 enrichment 调查，不是 implementation failure。" })
 	}
-	const reviewCorpus = pullRequests.flatMap((pr) => [...pr.reviews.map((review) => review.body), ...pr.comments.map((comment) => comment.body)]).join("\n")
-	if (/Pattern 验收|script-produced e2e|script e2e|script\/harness|live issue body executable/i.test(`${intentText}\n${reviewCorpus}`)) {
-		findings.push({ kind: "preset-drift", sourceUrl: issue.url, rationale: "输入携带旧 preset vocabulary；回放必须按 current marker schema 归一，不能把旧 wording 当当前 executable authority。" })
+	const sourceEntries = [
+		{ sourceUrl: issue.url, body: issue.body },
+		...issue.comments.map((comment) => ({ sourceUrl: comment.url, body: comment.body })),
+		...pullRequests.flatMap((pr) => [
+			...pr.reviews.map((review) => ({ sourceUrl: review.url ?? pr.url, body: review.body })),
+			...pr.comments.map((comment) => ({ sourceUrl: comment.url, body: comment.body })),
+		]),
+	]
+	for (const source of sourceEntries) {
+		if (!/Pattern 验收|script-produced e2e|script e2e|script\/harness|live issue body executable/i.test(source.body)) continue
+		findings.push({ kind: "preset-drift", sourceUrl: source.sourceUrl, excerpt: excerpt(source.body), rationale: "该来源携带旧 preset vocabulary；回放必须按 current marker schema 归一，不能把旧 wording 当当前 executable authority。" })
 	}
 	for (const pr of pullRequests) {
 		const reviewInputs = [
@@ -186,14 +199,13 @@ export function classifyReplay(issue: IssueSnapshot, pullRequests: readonly Pull
 		]
 		for (const review of reviewInputs) {
 			if (review.body.trim() === "") continue
-			if (hasAny(review.body, [/code finding/i, /design-deviation/i, /logic @/i, /failure path/i, /evidence truth/i, /project convention/i, /证据真实性/i, /失败路径/i, /项目约定/i])) {
-				findings.push({ kind: "reviewer-discretion", sourceUrl: review.sourceUrl, rationale: "review 加码涉及 scope mapping、失败路径、证据真实性、Pattern 或项目约定，属于 reviewer 保留裁量；是否要求 re-enrichment 取决于它是否证明 marker executable fact 错误。" })
-			}
-			if (hasAny(review.body, [/issue contract error/i, /contract.*malformed/i, /验收标准.*malformed/i, /缺.*Pattern 验收/i, /literal command.*fail/i])) {
-				findings.push({ kind: "contract-defect", sourceUrl: review.sourceUrl, rationale: "review 明确认定 executable contract 的表格、命令或 Pattern scope 本身不可执行；该来源应走 re-enrichment，而不是 implementation retry。" })
+			const isContractDefect = hasAny(review.body, [/issue contract error/i, /contract.*malformed/i, /验收标准.*malformed/i, /缺.*Pattern 验收/i, /literal command.*fail/i])
+			if (isContractDefect) findings.push({ kind: "contract-defect", sourceUrl: review.sourceUrl, excerpt: excerpt(review.body), rationale: "该 review 命题明确指向 executable contract 的表格、命令或 Pattern scope 本身不可执行；应走 re-enrichment，而不是 implementation retry。" })
+			else if (hasAny(review.body, [/code finding/i, /design-deviation/i, /logic @/i, /failure path/i, /evidence truth/i, /project convention/i, /证据真实性/i, /失败路径/i, /项目约定/i])) {
+				findings.push({ kind: "reviewer-discretion", sourceUrl: review.sourceUrl, excerpt: excerpt(review.body), rationale: "该 review 命题可追溯到代码正确性、失败路径、证据真实性或项目约定，属于 reviewer 保留裁量。" })
 			}
 			if (hasAny(review.body, [/timeout/i, /unreachable/i, /credential/i, /environment/i, /rate limit/i, /network/i, /环境/i, /凭据/i, /超时/i])) {
-				findings.push({ kind: "environment-failure", sourceUrl: review.sourceUrl, rationale: "review 记录了运行环境/外部依赖失败；该来源必须与 intent gap、preset drift 和实现缺陷分开保存。" })
+				findings.push({ kind: "environment-failure", sourceUrl: review.sourceUrl, excerpt: excerpt(review.body), rationale: "review 记录了运行环境/外部依赖失败；该来源必须与 intent gap、preset drift 和实现缺陷分开保存。" })
 			}
 		}
 	}
@@ -216,20 +228,8 @@ export function classifyReplay(issue: IssueSnapshot, pullRequests: readonly Pull
 	if (!hasPattern) missing.push("Pattern scope requires source investigation")
 	if (!hasRuntime) missing.push("canonical runtime requires target investigation")
 	if (!hasTestDelta) missing.push("Test delta authorization is absent")
-	const contract: ReplayContract = missing.length > 0 ? { kind: "cannot-generate", reasons: missing } : {
-		kind: "generated",
-		packet: {
-			schemaVersion: 1,
-			intentSource: { issueUrl: issue.url, commentUrls: issue.comments.map((comment) => comment.url) },
-			deliverable,
-			checks,
-			patternScope: { kind: /whole[- ]tree|全仓/i.test(intentText) ? "whole-tree" : "changed", criterion: "replay-derived intent; enrichment must verify against source" },
-			canonicalRuntime: "present in issue intent; enrichment must normalize setup/start/readiness/behavior/log/stop",
-			testDelta: /forbidden|禁止.*测试/i.test(intentText) ? "forbidden" : "allowed",
-			dependencies: [...intentText.matchAll(/#(\d+)/g)].map((match) => `#${match[1]}`),
-			supersedes: "none",
-		},
-	}
+	if (missing.length === 0) missing.push("historical replay cannot verify source-derived Pattern criterion, canonical runtime fields, dependency edges, and explicit Test delta authorization")
+	const contract: ReplayContract = { kind: "cannot-generate", reasons: missing }
 	return {
 		kind: "issue-replay",
 		number: issue.number,

@@ -31,7 +31,7 @@ describe("contract enrichment historical replay classification", () => {
 		expect(result.findings.every((finding) => finding.sourceUrl.startsWith("https://github.com/"))).toBe(true)
 	})
 
-	test("derives explicit deliverable and contract hints without treating missing author detail as implementation failure", () => {
+	test("refuses to fabricate source-derived executable facts even when issue hints look complete", () => {
 		const result = classifyReplay({
 			number: 550,
 			url: "https://github.com/mouriya-s-lab/coder-loop/issues/550",
@@ -39,12 +39,19 @@ describe("contract enrichment historical replay classification", () => {
 			comments: [],
 			labels: [{ name: "kind:spike" }],
 		}, [])
-		expect(result.contract.kind).toBe("generated")
-		if (result.contract.kind === "generated") {
-			expect(result.contract.packet.deliverable).toBe("spike-comment")
-			expect(result.contract.packet.patternScope.kind).toBe("whole-tree")
-			expect(result.contract.packet.checks[0]?.kind).toBe("browser")
-		}
+		expect(result.contract.kind).toBe("cannot-generate")
+		if (result.contract.kind === "cannot-generate") expect(result.contract.reasons.join(" ")).toContain("cannot verify source-derived")
 		expect(result.findings.some((finding) => finding.kind === "intent-gap")).toBe(false)
+	})
+
+	test("attributes preset drift to the review comment that contains the obsolete rule", () => {
+		const reviewUrl = "https://github.com/mouriya-s-lab/coder-loop/pull/652#issuecomment-1"
+		const result = classifyReplay({ number: 550, url: "https://github.com/mouriya-s-lab/coder-loop/issues/550", body: "plain intent", comments: [], labels: [] }, [{
+			number: 652, url: "https://github.com/mouriya-s-lab/coder-loop/pull/652", body: "Closes #550", closingIssueNumbers: [550], reviews: [],
+			comments: [{ url: reviewUrl, body: "script/harness E2E is always absent" }],
+		}])
+		const drift = result.findings.find((finding) => finding.kind === "preset-drift")
+		expect(drift?.sourceUrl).toBe(reviewUrl)
+		expect(drift?.excerpt).toContain("script/harness")
 	})
 })
