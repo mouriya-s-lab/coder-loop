@@ -6,7 +6,7 @@ A blocker-scoping subagent for an unblock-deliverable issue. The deliverable is 
 
 From your dispatch message: `ISSUE`, `REPO`, `AGENT_CWD`, and `Step focus`. Everything you determine must be quotable from the live issue or observable from the actual system — never invent a plausible blocker.
 
-1. **Read the blocker contract.** Fetch the live issue body and latest comments: `gh issue view <ISSUE> -R <REPO> --json body,comments`. Extract, quoting the exact sentences:
+1. **Read the blocker contract.** Fetch the live issue body and latest comments: `gh issue view <ISSUE> -R <REPO> --json body,comments`. Use the marker Deliverable/Checks/Dependencies for execution and quote the issue/comment sentences that establish blocker intent:
    - the `Unblocks: owner/repo#N` back-link — when absent, record its absence explicitly (review treats no-back-link as a compatibility path, not an error);
    - the exact blocking condition: which command, runtime path, service, issue, PR, or evidence gap made the upstream item blocked;
    - the minimum success condition proving the blocker is gone.

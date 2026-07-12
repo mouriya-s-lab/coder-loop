@@ -28,6 +28,7 @@ import { acquireRealE2eGlobalMutex } from "./real-e2e-global-mutex"
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
 const SEED_LABEL = "e2e-seed"
+const FIXTURE_INITIAL_CONTENT = "status: pending\n"
 const TERMINAL_SUCCESS = "done"
 const TERMINAL_FAILURE = ["blocked", "moot", "exhausted"] as const
 
@@ -195,7 +196,7 @@ async function prepareFixture(options: HarnessOptions, workDir: string, runKey: 
 	await withFixtureMutationLock(() => sh([
 		"gh", "api", "--method", "PUT", `repos/${options.fixtureRepo}/contents/${fixturePath}`,
 		"-f", `message=chore(e2e): initialize ${runKey}`,
-		"-f", "content=c3RhdHVzOiBwZW5nCg==",
+		"-f", `content=${Buffer.from(FIXTURE_INITIAL_CONTENT).toString("base64")}`,
 		"-f", `branch=${baseBranch}`,
 	]))
 	log(`fixture: clone 独立 checkout ${cwd}`)
@@ -279,9 +280,7 @@ function writeCoderLoopCliShim(workDir: string): string {
 	const shimDir = resolve(workDir, "cli-shim")
 	mkdirSync(shimDir, { recursive: true })
 	const shimPath = resolve(shimDir, "coder-loop")
-	const script = `#!/bin/sh
-exec bun ${LOOP_ENTRY} "$@"
-`
+	const script = `#!/bin/sh\nexec bun ${LOOP_ENTRY} "$@"\n`
 	writeFileSync(shimPath, script)
 	chmodSync(shimPath, 0o755)
 	return shimDir

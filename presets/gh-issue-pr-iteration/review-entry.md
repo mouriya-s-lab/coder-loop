@@ -29,9 +29,10 @@ Read now, yourself:
 1. `{{PRESET_ROOT}}/common/runtime-contract.md` — program/agent state boundary.
 2. `{{PRESET_ROOT}}/common/github-routing.md` — where feedback/comments must go.
 3. `{{PRESET_ROOT}}/common/state-contract.md` — which state writes are yours.
-4. `{{PRESET_ROOT}}/quality/honesty.md` — your core judgment tool for Step 4, including the stale-baseline exception.
-5. `{{PRESET_ROOT}}/quality/evidence.md` — packet-form criteria for Step 4.
-6. `{{PRESET_ROOT}}/common/dispatch-contract.md` — the runner-neutral dispatch ledger, completion, and follow-up contract; binds Step 3.
+4. `{{PRESET_ROOT}}/common/executable-contract.md` — executable checks and investigated contract authority.
+5. `{{PRESET_ROOT}}/quality/honesty.md` — your core judgment tool for Step 4, including the stale-baseline exception.
+6. `{{PRESET_ROOT}}/quality/evidence.md` — packet-form criteria for Step 4.
+7. `{{PRESET_ROOT}}/common/dispatch-contract.md` — the runner-neutral dispatch ledger, completion, and follow-up contract; binds Step 3.
 
 ### Step 1 — Investigate (read the core objects yourself, dispatch bulk material)
 
@@ -55,7 +56,7 @@ gh pr view <PR_NUMBER> -R <REPO> --json number,title,state,mergedAt,mergeCommit,
 gh api "repos/<REPO>/pulls/<PR_NUMBER>/comments" --paginate   # inline review-thread comments
 ```
 
-   → issue contract (acceptance rows, sections), PR body and the latest run's PR comment (**quote verbatim** the latest retry comment and any caveat sentences in the PR body — scope-reduction phrases do not survive paraphrase per `quality/honesty.md`), checks state, children and their PRs when sub-issues exist. Sub-issue API failure semantics: only a successful response listing children counts as parent evidence; a failed call is recorded as `sub-issue graph unavailable` and the issue is treated as ordinary.
+   → issue intent plus current executable-contract marker, PR body and the latest run's PR comment (**quote verbatim** the latest retry comment and any caveat sentences in the PR body — scope-reduction phrases do not survive paraphrase per `quality/honesty.md`), checks state, children and their PRs when sub-issues exist. Sub-issue API failure semantics: only a successful response listing children counts as parent evidence; a failed call is recorded as `sub-issue graph unavailable` and the issue is treated as ordinary.
 
 Plus one-hop graph references the issue body explicitly points at (`Unblocks: #N`, the From column of `## 继承验证义务`, a cited issue/PR) — same metadata commands, one hop only.
 
@@ -63,7 +64,7 @@ That is the core read surface. Bulk material — very long threads, large eviden
 
 ### Step 2 — Build the review task list
 
-Route by the deliverable shape the issue's own body declares (read from Step 1) — the call is yours from what the issue asks for:
+Route by the current marker's `Deliverable` variant. Use the issue body and operator comments only to verify intent fidelity; a mismatch is contract-invalid, not permission to infer another route:
 
 - Comment-deliverable spike and source-writing spike issues (no-PR routes): no mandatory dispatches. A PR existing on a source-writing spike route is itself a retry finding (the spike must not merge into production). List = optional `investigate` + the Step 4 judgments that the routing matrix (bottom of this file) marks `run`, plus the matching deliverable guide: comment-spike → read `{{PRESET_ROOT}}/review/spike-followup.md`; source-writing spike → read `{{PRESET_ROOT}}/review/source-spike-audit.md`. Then continue at Step 4.
 - Implementation-PR routes (the default route, plus unblock-deliverable issues that produce a PR): the list **must** contain both dispatches below. A verdict — including retry — produced without both accepted reports is an invalid review. Claude is honest, but review's job is independent verification: reading iteration's claims does not substitute for re-executing.
@@ -98,16 +99,16 @@ Runtime inputs:
   ISSUE=<...> REPO=<...> ISSUE_PR=<...> RUN_ID=<...>
   AGENT_CWD=<...> TARGET_CWD=<...> EVIDENCE_DIR=<...>
 Step focus: <diff-audit: scope facts worth flagging plus any test-collection changes to check;
-  replay: which rows (when the issue is unblocking another issue: the named blocked-path e2e command)
-  plus the deferred browser acceptance rows enumerated from the issue's tables>
+  replay: which marker Check IDs (when marker Deliverable is blocker-removal: the named blocked-path e2e command)
+  plus the deferred browser Checks enumerated by stable ID from the marker packet>
 ```
 
 For each completed report, check structure against the step file's Acceptance section "Required report fields", then judge substance. Accepted → `[x]` plus an accepted ledger row. Non-accepted → reject the row and follow up per `common/dispatch-contract.md` with the missing fields, gap list, or corrected scope. Do not advance while either mandatory report remains outstanding or rejected.
 
 What the accepted reports mean for your verdict:
 
-- **Replay is contract-row + e2e + suite-count truth.** Any row whose replayed actual mismatches its Expect → verdict retry, citing **every** failing row at once (iteration cannot fix piecemeal). A row failing because its Command itself is broken → retry feedback says fix the issue body first, not reinterpret the row. A row unreachable because the manifest lacks the needed entry → packet failure → retry naming the gap. When the issue's deliverable is unblocking another issue, the named blocked-path replay must succeed. A re-driven e2e claim whose observation mismatches the packet → retry. A deferred browser row failing against its Expect → retry exactly like a failing replay row. Script-produced e2e in the packet (form check) → packet failure → retry even when the re-drive passed. Head-side canonical suite integer that disagrees with the packet: investigate runner logs and push history first (evolving HEAD, dependency drift) — mismatch is not automatic credibility failure when both sides followed the runner-summary rule. Literal expectation values that drifted because base moved: apply the stale-baseline exception of `quality/honesty.md`.
-- **Diff-audit is scope/code/test-integrity truth.** Unmapped files the live issue body does not cover → retry finding. Staged runtime artifacts / scheduling state / run logs → hard retry finding. Enumerated test removal/skip/weakening in the diff not literally demanded by the issue body → test-weakening trigger (`quality/honesty.md`) → retry. Test-collection changes (config/glob/skip-marker/CI) that widen or narrow the runnable set without being literally demanded are the same trigger. Anchored code findings (logic error with failure path / deviation from the issue's stated design / convention violation with cited source / structural defect within the diff) → retry citing the anchors. The diff-audit's issue-named pattern coverage table is contract truth alongside the diff window: any pattern row with remaining sites is a retry finding citing **every** remaining site in one shot, never split across rounds. The report omitting a whole-repo pattern the issue body literally names is a step defect; send it back. Unanchored or divergent "findings" (alternative-design taste; code the diff does not touch *and* the issue body does not name as a whole-repo target) are not verdict inputs.
+- **Replay is marker-Check + e2e + suite-count truth.** Any Check whose replayed actual mismatches its expected result → verdict retry, citing **every** failing stable ID at once (iteration cannot fix piecemeal). A marker Check that is malformed or intrinsically broken → select executable-contract-invalid and re-enrich; do not reinterpret it or send implementation retry. A Check unreachable because the manifest lacks the needed entry → packet failure → retry naming the gap. For marker Deliverable `blocker-removal`, the named blocked-path replay must succeed. A re-driven e2e claim whose observation mismatches the packet → retry. A deferred browser Check failing against its expected observation → retry exactly like a failing shell Check. A target-mandated canonical E2E driver is valid when it drives the real runtime path; only substitute harness/mock paths are packet failures. Head-side canonical suite integer that disagrees with the packet: investigate runner logs and push history first (evolving HEAD, dependency drift) — mismatch is not automatic credibility failure when both sides followed the runner-summary rule. Literal expectation values that drifted because base moved: apply the stale-baseline exception of `quality/honesty.md`.
+- **Diff-audit is scope/code/test-integrity truth.** Unmapped files the intent and marker Deliverable do not cover → retry finding. Staged runtime artifacts / scheduling state / run logs → hard retry finding. Enumerated test removal/skip/weakening in the diff not authorized by marker Test delta → test-weakening trigger (`quality/honesty.md`) → retry. Test-collection changes (config/glob/skip-marker/CI) that widen or narrow the runnable set without marker Test delta authorization are the same trigger. Anchored code findings (logic error with failure path / deviation from the issue's stated design / convention violation with cited source / structural defect within the diff) → retry citing the anchors. The diff-audit's marker-declared pattern coverage table is contract truth alongside the diff window: any pattern row with remaining sites is a retry finding citing **every** remaining site in one shot, never split across rounds. A pattern demanded by task intent but absent from the marker makes the marker contract-invalid; it is not an implicit diff-audit row. Unanchored or divergent "findings" (alternative-design taste; code the diff does not touch *and* the marker does not declare as a whole-tree target) are not verdict inputs.
 
 ### Step 4 — Judgments (yourself, with both reports in hand)
 
@@ -116,7 +117,7 @@ Run each judgment the routing matrix at the bottom of this file marks `run` for 
 1. **Trace honesty** — input: iteration's handoff claims + trace + live GitHub state. Check claim-vs-observation (`quality/honesty.md`): claimed reads/commands with no trace, claimed tests with no output, claimed PR/comment that does not exist live, claimed-blocked without the obvious next command attempted, a retry that left no new PR-thread comment (body edits do not count).
 2. **PR protocol** — input: PR body + thread + issue comments. Check: exactly one implementation PR closing exactly this issue; body first line exactly `Closes #<ISSUE>`; the title / body / required-section / language rules — the four required evidence layers (Layer 1 Change preview / Layer 2 Landing checks / Layer 3 Startup / Layer 4 End-to-end) plus an `Analysis` section, with any project-specific additions documented in the target repo's `CLAUDE.md` / `AGENTS.md`; each retry has a new PR-thread comment carrying the full current packet; CI detection + local parity status stated; implementation discussion on the PR thread, not the issue. No-PR continuation is legal only for: already-satisfied-on-base, invalid/duplicate/no-code/moot, parent/wrapper, incomplete parent expansion, blocked, implementation failure pending retry, and the source-writing-spike and comment-spike routes.
 3. **Title-intent** — input: issue title + PR title. Strip conventional/RFC prefixes; the two subjects must align (exact / synonym / strict narrowing with matching `Closes`). Different concrete artifacts = drift → retry with rename+rescope or close-PR+new-issue instruction. Never retitle the issue to fit the PR.
-4. **Caveat honesty** — input: the `Intent`/`Result` blocks and PR body/comment from Step 1, plus the diff-audit's change footprint. Check every scope-reduction trigger of `quality/honesty.md` (path bypass, invariant downgrade, cosmetic handwave — uniformly a hard fail, cross-issue deferral, precondition admission, intent-action mismatch against the footprint, test weakening). A trigger stands unless the live issue body contains a literal authorizing sentence; stale-baseline exception applies as written. Compare Intent to Result to judge scope reduction.
+4. **Caveat honesty** — input: the `Intent`/`Result` blocks and PR body/comment from Step 1, plus the diff-audit's change footprint. Check every scope-reduction trigger of `quality/honesty.md` (path bypass, invariant downgrade, cosmetic handwave — uniformly a hard fail, cross-issue deferral, precondition admission, intent-action mismatch against the footprint, test weakening). A trigger stands unless the relevant source authorizes it: marker Test delta for test changes, operator intent for scope substitution; stale-baseline exception applies as written. Compare Intent to Result to judge scope reduction.
 5. **Evidence form** — input: the packet (PR body for the opening packet; the latest run's PR comment for retries — evidence that only exists via PR-body rewrite is rejected). Check against `quality/evidence.md`: layered sections present, every claim mapped to an observation, artifacts inspectable, screenshots real and resolvable, CI parity stated or its exact blocker recorded, test-inventory delta line present, e2e direct-run evidence and runtime manifest present.
 6. **Checks and mergeability (yourself, light gh reads)** — `gh pr view <PR> -R <REPO> --json statusCheckRollup,mergeStateStatus,headRefName`: record check names, statuses, conclusions, timestamps, head SHA. Pending or hung checks are never mergeable evidence; legitimately running CI → retry with an observe-again instruction. This feeds Step 5 closure.
 
@@ -134,7 +135,8 @@ Pick exactly one outcome below and read **only** its action file; execute its si
 |---|---|
 | accept (PR-backed) | `{{PRESET_ROOT}}/review/actions/accept-pr.md` |
 | accept (no PR / spike done) | `{{PRESET_ROOT}}/review/actions/accept-no-pr.md` |
-| retry (changes requested) | `{{PRESET_ROOT}}/review/actions/retry.md` |
+| executable contract invalid | `{{PRESET_ROOT}}/review/actions/reenrich.md` |
+| retry (implementation changes requested) | `{{PRESET_ROOT}}/review/actions/retry.md` |
 | expand incomplete parent | `{{PRESET_ROOT}}/review/actions/expand-parent.md` |
 | skip (moot) | `{{PRESET_ROOT}}/review/actions/skip.md` |
 | blocked | `{{PRESET_ROOT}}/review/actions/blocked.md` |
@@ -158,7 +160,7 @@ Then write item state per `{{PRESET_ROOT}}/review/actions/state-write.md`. Exter
 
 ## Deliverable routing matrix
 
-Pick the column whose deliverable signal matches the issue body you read in Step 1. Defaults: when the issue describes an implementation change with `## 验收标准` rows replayable against a diff, take the implementation-PR column. Take the unblock column only when the body explicitly carries `Unblocks:` (or a literal "解除阻塞" / "unblock" framing) and the acceptance rows include a blocked-path replay.
+Pick the column whose variant exactly matches the current marker `Deliverable`; use the issue body only to verify intent fidelity. Map `implementation-pr` to Implementation PR, `blocker-removal` to Unblock another issue, `spike-comment` to Comment-spike, and `source-writing-spike` to Source-writing spike. Unknown variants or intent/marker route conflicts are contract-invalid.
 
 | Judgment / step | Implementation PR (default) | Unblock another issue (PR-backed unblock) | Comment-spike deliverable | Source-writing spike deliverable |
 |---|---|---|---|---|

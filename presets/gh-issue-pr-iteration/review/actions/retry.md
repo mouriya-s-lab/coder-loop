@@ -41,13 +41,13 @@ form: <direct / script: name it>; blocked-path e2e: <command + exit / not applic
 - <check → reason (deliverable-route routing / no-PR route / infra) — or `none`>
 
 ## Required changes
-<concrete fixes, one per 缺失 item; a row failing because the issue body's Command
-itself is broken instructs fixing the issue contract first, then re-running — not
-reinterpreting the row>
+<concrete implementation fixes, one per 缺失 item. A malformed, stale, or
+intrinsically broken marker Check is not an implementation retry: use the
+contract-invalid action so contract-enrichment publishes a superseding marker>
 
 ## Constraints
 do not bypass coder-loop review; do not merge manually; do not close the issue manually;
-never edit the issue body without literal authorization on the issue thread
+never edit the issue body; contract corrections are superseding marker comments produced by contract-enrichment
 ```
 
 ## After publishing

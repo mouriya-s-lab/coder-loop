@@ -81,7 +81,10 @@ const EXPECTED_FRAGMENTS = [
 	{ id: "common/github-routing", role: "common", relPath: "common/github-routing.md" },
 	{ id: "common/state-contract", role: "common", relPath: "common/state-contract.md" },
 	{ id: "common/dispatch-contract", role: "common", relPath: "common/dispatch-contract.md" },
+	{ id: "common/executable-contract", role: "common", relPath: "common/executable-contract.md" },
 	{ id: "contract", role: "common", relPath: "contract.md" },
+	{ id: "enrichment/task", role: "enrichment", relPath: "enrichment/task.md" },
+	{ id: "enrichment/contract-schema", role: "enrichment", relPath: "enrichment/contract-schema.md" },
 	{ id: "quality/evidence", role: "quality", relPath: "quality/evidence.md" },
 	{ id: "quality/honesty", role: "quality", relPath: "quality/honesty.md" },
 	{ id: "quality/cleanup", role: "quality", relPath: "quality/cleanup.md" },
@@ -100,6 +103,7 @@ const EXPECTED_FRAGMENTS = [
 	{ id: "review/source-spike-audit", role: "review", relPath: "review/source-spike-audit.md" },
 	{ id: "review/actions/accept-pr", role: "review", relPath: "review/actions/accept-pr.md" },
 	{ id: "review/actions/accept-no-pr", role: "review", relPath: "review/actions/accept-no-pr.md" },
+	{ id: "review/actions/reenrich", role: "review", relPath: "review/actions/reenrich.md" },
 	{ id: "review/actions/retry", role: "review", relPath: "review/actions/retry.md" },
 	{ id: "review/actions/expand-parent", role: "review", relPath: "review/actions/expand-parent.md" },
 	{ id: "review/actions/skip", role: "review", relPath: "review/actions/skip.md" },
@@ -177,7 +181,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(audit).toContain("enumerate every remaining site")
 	})
 
-	test("rejects ambiguous issue pattern scope", async () => {
+	test("classifies ambiguous marker Pattern scope as a contract error", async () => {
 		const audit = await readFile(resolve(BUNDLED_PRESET_DIR, "review/steps/diff-audit.md"), "utf8")
 		expect(audit).toContain("closed union `changed | whole-tree`")
 		expect(audit).toContain("unknown scope, duplicate rows, or conflicting scopes")
@@ -185,11 +189,19 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(audit).toContain("do not guess from prose or language")
 	})
 
-	test("routes diff audit by declared issue pattern scope", async () => {
+	test("routes diff audit by the executable-contract marker's typed Pattern scope", async () => {
 		const audit = await readFile(resolve(BUNDLED_PRESET_DIR, "review/steps/diff-audit.md"), "utf8")
 		expect(audit).toMatch(/For `changed`[\s\S]*For `whole-tree`/)
 		expect(audit).toContain("the difference is the candidate set, not the severity")
 		expect(audit).toContain("Base→head")
+	})
+
+	test("routes malformed contract packets to re-enrichment instead of implementation retry", async () => {
+		const entry = await readFile(resolve(BUNDLED_PRESET_DIR, "review-entry.md"), "utf8")
+		const action = await readFile(resolve(BUNDLED_PRESET_DIR, "review/actions/reenrich.md"), "utf8")
+		expect(entry).toContain("select executable-contract-invalid and re-enrich")
+		expect(action).toContain("missing, malformed, stale after an operator correction, internally contradictory")
+		expect(action).toContain("Do not use this for implementation defects")
 	})
 	test("loads name, item.idField, agent.attemptTimeoutSeconds, statuses sets", async () => {
 		const preset: Preset = await loadPreset(BUNDLED_PRESET_DIR)
@@ -219,7 +231,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		// that was mid-flight when the previous daemon process died. Daemon recovery (#508)
 		// no longer rewrites `items.status` / `phase` / `sessionIds`, so the post-crash
 		// `in_progress` rowid is what the scheduler now consumes on the next tick.
-		expect([...preset.statuses.continuable]).toEqual(["queued", "changes_requested", "in_progress"])
+		expect([...preset.statuses.continuable]).toEqual(["queued", "changes_requested", "contract_invalid", "in_progress"])
 		expect([...preset.statuses.terminal]).toEqual(["blocked", "moot", "done", "exhausted"])
 		expect([...preset.statuses.unblockable]).toEqual(["blocked"])
 		// #402: bundled preset declares the attempts-exhausted落点 explicitly; engine no longer
@@ -232,25 +244,29 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		// previous "marker is null for every phase" assertion is now unrepresentable (no field) and
 		// has been dropped.
 		expect(preset.statuses.retry).toBe("changes_requested")
-		expect(preset.phases.find((phase) => phase.name === "iteration")?.exits).toEqual([])
+		expect(preset.phases.find((phase) => phase.name === "iteration")?.exits).toEqual([
+			{ kind: "item-status", status: status("contract_invalid"), when: expect.any(String) },
+		])
 		// #405: review's exits now include a chain-action branch (`stop`) alongside the
 		// item-status branches. The projection below narrows on the ADT discriminator so a future
 		// extra chain-action exit will land in the chain-action assertion automatically.
 		const reviewExits = preset.phases.find((phase) => phase.name === "review")?.exits ?? []
-		expect(reviewExits.flatMap((exit) => exit.kind === "item-status" ? [exit.status] : [])).toEqual(["changes_requested", "blocked", "moot", "done", "exhausted"])
+		expect(reviewExits.flatMap((exit) => exit.kind === "item-status" ? [exit.status] : [])).toEqual(["changes_requested", "contract_invalid", "blocked", "moot", "done", "exhausted"])
 		expect(reviewExits.flatMap((exit) => exit.kind === "chain-action" ? [exit.action] : [])).toEqual(["stop"])
 	})
 
-	test("phases include iteration, review, blocked responder, and umbrella finalizer triggers", async () => {
+	test("phases include contract enrichment, iteration, review, blocked responder, and umbrella finalizer triggers", async () => {
 		const preset = await loadPreset(BUNDLED_PRESET_DIR)
-		expect(preset.phases.map((p) => p.name)).toEqual(["iteration", "review", "blocked-responder", "umbrella-finalizer"])
+		expect(preset.phases.map((p) => p.name)).toEqual(["contract-enrichment", "iteration", "review", "blocked-responder", "umbrella-finalizer"])
 		expect(Object.fromEntries(preset.phases.map((phase) => [phase.name, phase.defaultRunner]))).toEqual({
+			"contract-enrichment": "codex",
 			iteration: "codex",
 			review: "codex",
 			"blocked-responder": "codex",
 			"umbrella-finalizer": "codex",
 		})
 		expect(Object.fromEntries(preset.phases.map((phase) => [phase.name, phase.defaultModel]))).toEqual({
+			"contract-enrichment": "gpt-5.6-sol",
 			iteration: "gpt-5.6-sol",
 			review: "gpt-5.6-sol",
 			"blocked-responder": "gpt-5.6-sol",
@@ -263,6 +279,22 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		// — no engine helper needed.
 		expect(triggeredPhasesAfter(preset, "review", status("blocked")).map((phase) => phase.name)).toEqual(["blocked-responder"])
 		expect(chainCompleteTriggerPhases(preset).map((phase) => phase.name)).toEqual(["umbrella-finalizer"])
+		const enrichment = preset.phases.find((phase) => phase.name === "contract-enrichment")!
+		const iteration = preset.phases.find((phase) => phase.name === "iteration")!
+		const review = preset.phases.find((phase) => phase.name === "review")!
+		expect(enrichment.entry).toBe(true)
+		expect(enrichment.startsAttempt).toBe(false)
+		expect(enrichment.next).toEqual([{ kind: "completed", phase: "iteration" }])
+		expect(iteration.entry).toBe(false)
+		expect(iteration.startsAttempt).toBe(true)
+		expect(iteration.next).toEqual([
+			{ kind: "completed", phase: "review" },
+			{ kind: "item-status", phase: "contract-enrichment", status: status("contract_invalid") },
+		])
+		expect(review.next).toEqual([
+			{ kind: "item-status", phase: "iteration", status: status("changes_requested") },
+			{ kind: "item-status", phase: "contract-enrichment", status: status("contract_invalid") },
+		])
 		for (const phase of preset.phases) {
 			expect(phase.prompt.startsWith(BUNDLED_PRESET_DIR)).toBe(true)
 			const info = await stat(phase.prompt)
@@ -286,6 +318,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		// SUMMARY-line consumer and the engine-owned `REVIEW_SUMMARY_VERDICTS`
 		// data source were both retired by #497.)
 		const PHASE_EXTRA_KEYS: Record<string, readonly string[]> = {
+			"contract-enrichment": ["RETRY_STATUS_DOC", "TERMINAL_STATUSES_DOC"],
 			iteration: ["RETRY_STATUS_DOC", "TERMINAL_STATUSES_DOC"],
 			review: ["STATUS_VOCABULARY_DOC"],
 			"blocked-responder": ["TRIGGER_STATUS_DOC"],
@@ -305,7 +338,9 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 
 	test("specific variable bindings reflect renderPrompt source mapping", async () => {
 		const preset = await loadPreset(BUNDLED_PRESET_DIR)
-		const iterVars = new Map(preset.phases[0]!.variables.map((variable) => [variable.key, variable.source] as const))
+		const iteration = preset.phases.find((phase) => phase.name === "iteration")
+		expect(iteration).toBeDefined()
+		const iterVars = new Map(iteration!.variables.map((variable) => [variable.key, variable.source] as const))
 		const expectedItem = (field: string): PresetVariableSource => ({ kind: "item", field })
 		const expectedChain = (field: string): PresetVariableSource => ({ kind: "chain", field, fallback: { kind: "none" } })
 		const expectedChainDefault = (field: string, value: boolean): PresetVariableSource => ({ kind: "chain", field, fallback: { kind: "value", value } })
@@ -339,7 +374,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 			const variable = phase.variables.find((candidate) => candidate.key === "ISSUE" && candidate.doc !== null)
 			return variable === undefined ? [] : [{ preset, phase, variable }]
 		}))
-		expect(decoratedIssueBindings).toHaveLength(5)
+		expect(decoratedIssueBindings).toHaveLength(6)
 
 		for (const { preset, phase, variable } of decoratedIssueBindings) {
 			const doc = variable.doc
@@ -415,13 +450,48 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(contract).toContain("Source-writing-spike-deliverable")
 	})
 
+	test("contract enrichment entry and schema define one durable current marker with typed checks", async () => {
+		const entry = await Bun.file(resolve(BUNDLED_PRESET_DIR, "contract-enrichment-entry.md")).text()
+		const schema = await Bun.file(resolve(BUNDLED_PRESET_DIR, "enrichment/contract-schema.md")).text()
+		const authority = await Bun.file(resolve(BUNDLED_PRESET_DIR, "common/executable-contract.md")).text()
+
+		expect(entry).toContain("one-time pre-implementation contract-enrichment agent")
+		expect(entry).toContain("Do not edit or replace")
+		expect(entry).toContain("Publish exactly one current marker comment")
+		expect(entry).toContain("Exit successfully without writing an item status")
+		expect(schema).toContain("<!-- coder-loop:executable-contract schema=1 source-issue={{ISSUE}} -->")
+		expect(schema).toContain("`Kind` is exactly `shell` or `browser`")
+		expect(schema).toContain("typed scope `changed` or `whole-tree`")
+		expect(schema).toContain("`Supersedes`: prior marker URL or `none`")
+		expect(authority).toContain("Exactly one marker may be current")
+		expect(authority).toContain("only by linking it in `Supersedes`")
+		expect(authority).toContain("Do not silently fall back")
+	})
+
+	test("bundled PR template is the required evidence shape and maps contract checks into the packet", async () => {
+		const template = await Bun.file(resolve(BUNDLED_PRESET_DIR, "templates/pr-body.md")).text()
+		const submit = await Bun.file(resolve(BUNDLED_PRESET_DIR, "iter/steps/submit.md")).text()
+		const review = await Bun.file(resolve(BUNDLED_PRESET_DIR, "review-entry.md")).text()
+
+		expect(template).toContain("bundled preset's required packet shape")
+		expect(template).toContain("Executable contract: {CONTRACT_URL}")
+		expect(template).toContain("Map claims to executable-contract Check IDs")
+		expect(template).toContain("## Layer 1 — Change preview")
+		expect(template).toContain("## Layer 4 — End-to-end behavior")
+		expect(template).toContain("browser Checks map actions/observations to their Check IDs")
+		expect(submit).toContain("four-layer evidence packet")
+		expect(submit).toContain("Everything in the packet traces to the verify and e2e steps' output")
+		expect(review).toContain("every claim mapped to an observation")
+		expect(review).toContain("the packet (PR body for the opening packet; the latest run's PR comment for retries")
+	})
+
 	test("iteration entry owns the task-list workflow, deliverable-shape routing, and dispatch protocol", async () => {
 		const entry = await Bun.file(resolve(BUNDLED_PRESET_DIR, "iter-entry.md")).text()
 
 		// #450: deliverable-shape routing — agent reads issue body to decide the step
 		// sequence; there is no `kind:*` label table. The four step sequences must all
 		// still be visible so step selection guidance is observable in the rendered prompt.
-		expect(/kind/i.test(entry)).toBe(false)
+		expect(entry).not.toMatch(/kind:[A-Za-z0-9_-]+/i)
 		expect(entry).toContain("[research if Step 2 left you unsure what the right change is] → implement → (verify ∥ e2e) → submit")
 		expect(entry).toContain("resolve-blocker → implement → (verify ∥ e2e) → submit")
 		expect(entry).toContain("[research?] → source-spike")
@@ -1497,6 +1567,7 @@ describe("issue #400 — fragment index slicing per phase", () => {
 	test("bundled preset declares roles on every phase and the engine slices accordingly", async () => {
 		const preset = await loadPreset(BUNDLED_PRESET_DIR)
 		expect(Object.fromEntries(preset.phases.map((phase) => [phase.name, [...phase.roles]]))).toEqual({
+			"contract-enrichment": ["common", "enrichment"],
 			iteration: ["common", "quality", "iter"],
 			review: ["common", "quality", "review"],
 			"blocked-responder": ["common"],
@@ -1605,6 +1676,7 @@ describe("issue #400 — fragment index slicing per phase", () => {
 
 	test("Row #5: entry-prompt fragment references remain a subset of the per-phase sliced index", async () => {
 		const preset = await loadPreset(BUNDLED_PRESET_DIR)
+		const enrichmentEntry = await Bun.file(resolve(BUNDLED_PRESET_DIR, "contract-enrichment-entry.md")).text()
 		const iterEntry = await Bun.file(resolve(BUNDLED_PRESET_DIR, "iter-entry.md")).text()
 		const reviewEntry = await Bun.file(resolve(BUNDLED_PRESET_DIR, "review-entry.md")).text()
 
@@ -1612,11 +1684,14 @@ describe("issue #400 — fragment index slicing per phase", () => {
 		// `/Users/.../presets/gh-issue-pr-iteration/<tail>`; we compare against
 		// fragment path tails relative to `BUNDLED_PRESET_DIR` so the test is
 		// invariant to where the preset lives on disk.
+		const enrichmentTails = extractFragmentTails(enrichmentEntry)
 		const iterTails = extractFragmentTails(iterEntry)
 		const reviewTails = extractFragmentTails(reviewEntry)
+		expect(enrichmentTails.size).toBeGreaterThan(0)
 		expect(iterTails.size).toBeGreaterThan(0)
 		expect(reviewTails.size).toBeGreaterThan(0)
 
+		const enrichmentSliceTails = sliceTails(preset, preset.phases.find((phase) => phase.name === "contract-enrichment")!)
 		const iterSliceTails = sliceTails(preset, preset.phases.find((phase) => phase.name === "iteration")!)
 		const reviewSliceTails = sliceTails(preset, preset.phases.find((phase) => phase.name === "review")!)
 
@@ -1625,8 +1700,10 @@ describe("issue #400 — fragment index slicing per phase", () => {
 		// `<step>/` directory and the slice covers files inside), or the entry
 		// names a specific fragment under a sliced folder.
 		const covers = (tail: string, sliceTails: readonly string[]): boolean => sliceTails.some((sliceTail) => sliceTail === tail || sliceTail.startsWith(tail + "/") || tail.startsWith(sliceTail + "/"))
+		const enrichmentMissing = [...enrichmentTails].filter((tail) => !covers(tail, enrichmentSliceTails))
 		const iterMissing = [...iterTails].filter((tail) => !covers(tail, iterSliceTails))
 		const reviewMissing = [...reviewTails].filter((tail) => !covers(tail, reviewSliceTails))
+		expect(enrichmentMissing, `contract-enrichment-entry references that fell outside enrichment slice: ${enrichmentMissing.join(", ")}`).toEqual([])
 		expect(iterMissing, `iter-entry references that fell outside iteration slice: ${iterMissing.join(", ")}`).toEqual([])
 		expect(reviewMissing, `review-entry references that fell outside review slice: ${reviewMissing.join(", ")}`).toEqual([])
 	})

@@ -1866,7 +1866,7 @@ attemptTimeoutSeconds = 3600
 			for (const status of ["in_progress", "changes_requested", "blocked", "moot", "done", "exhausted"]) {
 				const rejected = await request(fixture, "item.update", { itemId: iterationItemId, status })
 				expectInvalid(rejected)
-				if (!rejected.ok) expect(rejected.error.details).toMatchObject({ phase: "iteration", status, allowed: [] })
+				if (!rejected.ok) expect(rejected.error.details).toMatchObject({ phase: "iteration", status, allowed: ["contract_invalid"] })
 			}
 			expect((await readItem(fixture.loopDataRoot, chainId, 34701))?.phase).toBe("iteration")
 
@@ -1874,7 +1874,7 @@ attemptTimeoutSeconds = 3600
 			// not in review's [[phases.exits]]) is rejected under default-deny.
 			const reviewExitOutsideItem = record(expectOk(await request(fixture, "item.add", {
 				chainId,
-				itemId: "34715",
+				itemId: "34719",
 				repoCwd: REPO_ROOT,
 			})).item)
 			const reviewExitOutsideItemId = numberValue(reviewExitOutsideItem.id)
@@ -1890,7 +1890,7 @@ attemptTimeoutSeconds = 3600
 				expect(reviewExitOutsideRejected.error.details).toMatchObject({
 					phase: "review",
 					status: "queued",
-					allowed: ["blocked", "changes_requested", "done", "exhausted", "moot"],
+					allowed: ["blocked", "changes_requested", "contract_invalid", "done", "exhausted", "moot"],
 				})
 			}
 
@@ -1920,7 +1920,7 @@ attemptTimeoutSeconds = 3600
 				expect(unknownPhaseRejected.error.message).toContain("not declared in the preset")
 			}
 
-			const reviewStatuses = ["changes_requested", "blocked", "moot", "done", "exhausted"]
+			const reviewStatuses = ["changes_requested", "contract_invalid", "blocked", "moot", "done", "exhausted"]
 			for (const [index, status] of reviewStatuses.entries()) {
 				const reviewItem = record(expectOk(await request(fixture, "item.add", {
 					chainId,
@@ -1955,7 +1955,7 @@ attemptTimeoutSeconds = 3600
 			const iterationDeny = denyEvents.find((event) => event.kind === "audit" && event.type === "item.status.write_admission" && event.payload.phase === "iteration" && event.payload.requestedStatus === "done")
 			expect(iterationDeny).toBeDefined()
 			if (iterationDeny !== undefined && iterationDeny.kind === "audit" && iterationDeny.type === "item.status.write_admission") {
-				expect(iterationDeny.payload.declaredExits).toEqual([])
+				expect(iterationDeny.payload.declaredExits).toEqual(["contract_invalid"])
 				expect(iterationDeny.payload.reason).toBe("phase-exits")
 			}
 			const unknownDeny = denyEvents.find((event) => event.kind === "audit" && event.type === "item.status.write_admission" && event.payload.phase === "some-undeclared-phase")
@@ -1967,7 +1967,7 @@ attemptTimeoutSeconds = 3600
 			const reviewAllow = allowEvents.find((event) => event.kind === "audit" && event.type === "item.status.write_admission" && event.payload.phase === "review" && event.payload.requestedStatus === "done")
 			expect(reviewAllow).toBeDefined()
 			if (reviewAllow !== undefined && reviewAllow.kind === "audit" && reviewAllow.type === "item.status.write_admission") {
-				expect([...reviewAllow.payload.declaredExits].sort()).toEqual(["blocked", "changes_requested", "done", "exhausted", "moot"])
+				expect([...reviewAllow.payload.declaredExits].sort()).toEqual(["blocked", "changes_requested", "contract_invalid", "done", "exhausted", "moot"])
 				expect(reviewAllow.payload.reason).toBe("admitted")
 				// The subject envelope must carry "operator" since the request flowed without
 				// `agentRunId`/`agentPhase` attribution (operator mid-run path).
@@ -2053,10 +2053,10 @@ attemptTimeoutSeconds = 3600
 			// branch). Review declares its five item-status exits plus the chain-action `stop`
 			// exit (the controlled stop-chain channel — agent direct `chain stop` rejected
 			// per #409).
-			expect(reviewExits.allowedStatuses).toEqual(["blocked", "changes_requested", "done", "exhausted", "moot"])
+			expect(reviewExits.allowedStatuses).toEqual(["blocked", "changes_requested", "contract_invalid", "done", "exhausted", "moot"])
 			expect(reviewExits.allowedChainActions).toEqual(["stop"])
 			const reviewExitsArray = Array.isArray(reviewExits.exits) ? reviewExits.exits : []
-			expect(reviewExitsArray.length).toBe(6)
+			expect(reviewExitsArray.length).toBe(7)
 			for (const raw of reviewExitsArray) {
 				const exit = record(raw)
 				expect(typeof exit.when).toBe("string")
@@ -2279,10 +2279,17 @@ const ReviewRunnerPromptBoundary = arkType({
 	phase: arkType.unit("review"),
 	eventLog: "string",
 })
-const RunnerPromptBoundary = arkType.or(IterationRunnerPromptBoundary, ReviewRunnerPromptBoundary)
+const EnrichmentRunnerPromptBoundary = arkType({
+	itemId: "number",
+	runId: "string",
+	phase: arkType.unit("contract-enrichment"),
+	eventLog: "string",
+})
+const RunnerPromptBoundary = arkType.or(EnrichmentRunnerPromptBoundary, IterationRunnerPromptBoundary, ReviewRunnerPromptBoundary)
+type EnrichmentRunnerPrompt = typeof EnrichmentRunnerPromptBoundary.infer
 type IterationRunnerPrompt = typeof IterationRunnerPromptBoundary.infer
 type ReviewRunnerPrompt = typeof ReviewRunnerPromptBoundary.infer
-type RunnerPrompt = IterationRunnerPrompt | ReviewRunnerPrompt
+type RunnerPrompt = EnrichmentRunnerPrompt | IterationRunnerPrompt | ReviewRunnerPrompt
 function assertNeverRunnerPrompt(input: never): never {
 	throw new Error(\`unexpected runner prompt phase: \${JSON.stringify(input)}\`)
 }
@@ -2305,6 +2312,8 @@ if (typeof credential !== "string" || credential.length === 0) {
 }
 await appendFile(input.eventLog, JSON.stringify({ type: "running", itemId: input.itemId, runId: input.runId, phase: input.phase }) + "\\n")
 switch (input.phase) {
+	case "contract-enrichment":
+		break
 	case "iteration": {
 		await writeFile(${JSON.stringify(iterationCapture)}, credential)
 		while (!(await Bun.file(${JSON.stringify(iterationRelease)}).exists())) await Bun.sleep(10)
@@ -3678,7 +3687,7 @@ process.exitCode = 0
 				async () =>
 					schedulerEvents.find(
 						(event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
-							event.type === "phase.start" && event.itemId === queuedItemId && event.phase === "iteration",
+							event.type === "phase.start" && event.itemId === queuedItemId && event.phase === "contract-enrichment",
 					) ?? null,
 				(event) => event !== null,
 				10_000,
@@ -3885,7 +3894,7 @@ process.exitCode = 0
 			const stderr = await readFile(paths.runStderrFile(runId), "utf-8")
 			const events = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, { run: runId })
 
-			expect(status).toMatchObject({ runId, chainId, itemId: "203", phase: "iteration", exitCode: 0, status: runtimeStatus("done") })
+			expect(status).toMatchObject({ runId, chainId, itemId: "203", phase: "contract-enrichment", exitCode: 0, status: runtimeStatus("done") })
 			expect(stdout).toContain("done:")
 			expect(stderr).toBe("")
 			expect(status.eventsPath).toBe(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile)
@@ -3900,14 +3909,14 @@ process.exitCode = 0
 			])
 			const exitEvent = events.events.find((event) => event.type === "agent.exit")
 			if (exitEvent?.type !== "agent.exit") throw new Error("expected agent.exit event")
-			expect(exitEvent.payload.excerpt.stdout.path).toBe(paths.runPhaseStdoutFile(runId, "iteration"))
+			expect(exitEvent.payload.excerpt.stdout.path).toBe(paths.runPhaseStdoutFile(runId, "contract-enrichment"))
 			// #452: the fake runner's only stdout line (other than test-provided
 			// `stdoutLines`) is now `done:<itemId>`. The retired "PHASE DONE:" line was
 			// part of the stdout-summary contract that #452 removed wholesale — the engine
 			// stopped reading stdout for completion classification, so the fake runner
 			// stopped emitting completion-marker lines too.
 			expect(exitEvent.payload.excerpt.stdout.records.at(-1)).toContain("done:")
-			expect(exitEvent.payload.excerpt.stderr.path).toBe(paths.runPhaseStderrFile(runId, "iteration"))
+			expect(exitEvent.payload.excerpt.stderr.path).toBe(paths.runPhaseStderrFile(runId, "contract-enrichment"))
 			expect(exitEvent.payload.excerpt.stderr.records).toEqual([])
 		} finally {
 			await fixture.daemon.stop()
@@ -4548,6 +4557,7 @@ prompt = "review.md"
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
 const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+if (input.phase === "contract-enrichment") process.exit(0)
 await writeFile(${JSON.stringify(capturePath)}, process.env.CODER_LOOP_RUN_CRED ?? "")
 await writeFile(${JSON.stringify(promptCapturePath)}, prompt)
 await appendFile(input.eventLog, JSON.stringify({ type: "running", itemId: input.itemId, runId: input.runId }) + "\\n")
@@ -4569,10 +4579,11 @@ process.exitCode = 0
 					await mkdir(worktreePath, { recursive: true })
 					return worktreePath
 				},
-				prompt: ({ item, runId }) => JSON.stringify({
+				prompt: ({ item, runId, phase }) => JSON.stringify({
 					itemId: item.id,
 					issueNumber: Number(item.itemId),
 					runId,
+					phase,
 					eventLog,
 					sleepMs: 2_500,
 				}),
@@ -4710,6 +4721,7 @@ process.exitCode = 0
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
 const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+if (input.phase === "contract-enrichment") process.exit(0)
 await writeFile(${JSON.stringify(capturePath)}, process.env.CODER_LOOP_RUN_CRED ?? "")
 await appendFile(input.eventLog, JSON.stringify({ type: "running", itemId: input.itemId, runId: input.runId }) + "\\n")
 await new Promise((r) => setTimeout(r, input.sleepMs ?? 3500))
@@ -4730,10 +4742,11 @@ process.exitCode = 0
 					await mkdir(worktreePath, { recursive: true })
 					return worktreePath
 				},
-				prompt: ({ item, runId }) => JSON.stringify({
+				prompt: ({ item, runId, phase }) => JSON.stringify({
 					itemId: item.id,
 					issueNumber: Number(item.itemId),
 					runId,
+					phase,
 					eventLog,
 					sleepMs: 3_000,
 				}),
@@ -4823,7 +4836,7 @@ process.exitCode = 0
 			)
 			expect(admissionAllow).toBeDefined()
 			if (admissionAllow !== undefined && admissionAllow.kind === "audit" && admissionAllow.type === "item.mutation.caller_admission") {
-				expect(admissionAllow.subject).toEqual({ kind: "agent", runId: runIdRecord.runId, phase: "iteration" })
+						expect(admissionAllow.subject).toEqual({ kind: "agent", runId: runIdRecord.runId, phase: "iteration" })
 				expect(admissionAllow.payload.claimedRunId).toBe(runIdRecord.runId)
 			}
 			// And the downstream `item.status` audit must inherit the agent subject + runId; this is
@@ -5110,7 +5123,7 @@ process.exitCode = 0
 					event.type === "phase.start" && event.itemId === finalItem!.id,
 				)
 				.map((event) => event.phase)
-			expect(phaseStarts).toEqual(["iteration", "review", "blocked-responder"])
+			expect(phaseStarts).toEqual(["contract-enrichment", "iteration", "review", "blocked-responder"])
 
 			const events = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot }).eventsFile, {
 				kind: "lifecycle",
@@ -5311,7 +5324,80 @@ process.exitCode = 0
 					chain: "ac7-iter-then-review-chain",
 					item: item!.id,
 				})
-				expect(persistedSpawnEvents.events).toHaveLength(2)
+				expect(persistedSpawnEvents.events).toHaveLength(3)
+			} finally {
+				await fixture.daemon.stop()
+			}
+		})
+
+		test("live daemon keeps one-time enrichment outside implementation retry attempts", async () => {
+			const fixture = await startPhaseAdvancementFixture("contract-enrichment-review-retry", { firstReviewStatus: "changes_requested" })
+			try {
+				const result = expectOk(await request(fixture, "chain.create", {
+					name: "contract-enrichment-review-retry-chain",
+					preset: "gh-issue-pr-iteration",
+					repository: "mouriya-s-lab/coder-loop",
+				})).chain
+				const chainId = numberValue(record(result).id)
+				await request(fixture, "item.add", {
+					chainId,
+					itemId: "664001",
+					repoCwd: REPO_ROOT,
+					extra: {},
+				})
+
+				const item = await waitFor(
+					async () => readItem(fixture.loopDataRoot, chainId, 664_001),
+					(candidate) => candidate !== null && candidate.status === "done",
+					10_000,
+				)
+				expect(item).not.toBeNull()
+				expect(item!.attempts).toBe(2)
+				await waitForItemQueueTerminal(fixture, item!.id)
+
+				const phases = fixture.schedulerEvents
+					.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
+						event.type === "phase.start" && event.itemId === item!.id,
+					)
+					.map((event) => event.phase)
+				expect(phases).toEqual(["contract-enrichment", "iteration", "review", "iteration", "review"])
+				expect(phases.filter((phase) => phase === "contract-enrichment")).toHaveLength(1)
+			} finally {
+				await fixture.daemon.stop()
+			}
+		})
+
+		test("live daemon re-enriches a contract defect on its distinct frontier edge", async () => {
+			const fixture = await startPhaseAdvancementFixture("contract-invalid-reenrichment", { firstReviewStatus: "contract_invalid" })
+			try {
+				const result = expectOk(await request(fixture, "chain.create", {
+					name: "contract-invalid-reenrichment-chain",
+					preset: "gh-issue-pr-iteration",
+					repository: "mouriya-s-lab/coder-loop",
+				})).chain
+				const chainId = numberValue(record(result).id)
+				await request(fixture, "item.add", {
+					chainId,
+					itemId: "664002",
+					repoCwd: REPO_ROOT,
+					extra: {},
+				})
+
+				const item = await waitFor(
+					async () => readItem(fixture.loopDataRoot, chainId, 664_002),
+					(candidate) => candidate !== null && candidate.status === "done",
+					10_000,
+				)
+				expect(item).not.toBeNull()
+				expect(item!.attempts).toBe(2)
+				await waitForItemQueueTerminal(fixture, item!.id)
+
+				const phases = fixture.schedulerEvents
+					.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
+						event.type === "phase.start" && event.itemId === item!.id,
+					)
+					.map((event) => event.phase)
+				expect(phases).toEqual(["contract-enrichment", "iteration", "review", "contract-enrichment", "iteration", "review"])
 			} finally {
 				await fixture.daemon.stop()
 			}
@@ -5352,7 +5438,7 @@ process.exitCode = 0
 					(event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
 						event.type === "phase.start" && event.itemId === item!.id,
 				)
-				expect(phaseStartEvents.map((event) => event.phase)).toEqual(["iteration", "review"])
+				expect(phaseStartEvents.map((event) => event.phase)).toEqual(["contract-enrichment", "iteration", "review"])
 				const runIdByPhase = new Map<string, string>(phaseStartEvents.map((event) => [event.phase, event.runId]))
 				const iterRunId = runIdByPhase.get("iteration")!
 				const reviewRunId = runIdByPhase.get("review")!
@@ -5767,6 +5853,7 @@ process.exitCode = 0
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
 const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+if (input.phase === "contract-enrichment") process.exit(0)
 await writeFile(${JSON.stringify(capturePath)}, process.env.CODER_LOOP_RUN_CRED ?? "")
 await appendFile(input.eventLog, JSON.stringify({ type: "running", itemId: input.itemId, runId: input.runId }) + "\\n")
 await new Promise((r) => setTimeout(r, input.sleepMs ?? 4000))
@@ -5787,10 +5874,11 @@ process.exitCode = 0
 					await mkdir(worktreePath, { recursive: true })
 					return worktreePath
 				},
-				prompt: ({ item, runId }) => JSON.stringify({
+				prompt: ({ item, runId, phase }) => JSON.stringify({
 					itemId: item.id,
 					issueNumber: Number(item.itemId),
 					runId,
+					phase,
 					eventLog,
 					sleepMs: 3_500,
 				}),
@@ -5900,6 +5988,7 @@ const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
 const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
 await appendFile(input.eventLog, JSON.stringify({ type: "running", itemId: input.itemId, runId: input.runId, phase: input.phase }) + "\\n")
+if (input.phase === "contract-enrichment") process.exit(0)
 if (input.phase === "review") {
 	await writeFile(${JSON.stringify(capturePath)}, process.env.CODER_LOOP_RUN_CRED ?? "")
 	await new Promise((r) => setTimeout(r, input.sleepMs ?? 4000))
@@ -6326,6 +6415,7 @@ process.exitCode = 0
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
 const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+if (input.phase === "contract-enrichment") process.exit(0)
 await writeFile(${JSON.stringify(capturePath)}, process.env.CODER_LOOP_RUN_CRED ?? "")
 await appendFile(input.eventLog, JSON.stringify({ type: "running", itemId: input.itemId, runId: input.runId }) + "\\n")
 await new Promise((r) => setTimeout(r, input.sleepMs ?? 6_000))
@@ -6345,7 +6435,7 @@ process.exitCode = 0
 					await mkdir(worktreePath, { recursive: true })
 					return worktreePath
 				},
-				prompt: ({ item, runId }) => JSON.stringify({ itemId: item.id, issueNumber: Number(item.itemId), runId, eventLog, sleepMs: 5_500 }),
+				prompt: ({ item, runId, phase }) => JSON.stringify({ itemId: item.id, issueNumber: Number(item.itemId), runId, phase, eventLog, sleepMs: 5_500 }),
 				chainCompleteTriggerForChain: () => null,
 			},
 		})
@@ -6461,6 +6551,7 @@ const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
 const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
 await appendFile(input.eventLog, JSON.stringify({ type: "running", itemId: input.itemId, runId: input.runId, phase: input.phase }) + "\\n")
+if (input.phase === "contract-enrichment") process.exit(0)
 if (input.phase === "review") {
 	await writeFile(${JSON.stringify(reviewCapture)}, process.env.CODER_LOOP_RUN_CRED ?? "")
 	await new Promise((r) => setTimeout(r, input.sleepMs ?? 5_500))
@@ -6499,7 +6590,7 @@ process.exitCode = 0
 					// #419 review M2: keep iteration alive ~3s so the deny-path reorder request below
 					// hits the active-credential gate instead of the inactive-run branch when the test
 					// suite runs concurrently.
-					iterationSleepMs: 3_000,
+					iterationSleepMs: 8_000,
 					writeStatus: null,
 				}),
 				chainCompleteTriggerForChain: () => null,
@@ -7768,7 +7859,10 @@ type PhaseAdvancementFixture = Fixture & {
 	fakePhaseAwareRunner: string
 }
 
-async function startPhaseAdvancementFixture(name: string): Promise<PhaseAdvancementFixture> {
+async function startPhaseAdvancementFixture(
+	name: string,
+	options: { firstReviewStatus?: "changes_requested" | "contract_invalid" } = {},
+): Promise<PhaseAdvancementFixture> {
 	const root = resolve(TEST_ROOT, `${++nextFixtureId}-${name}`)
 	const loopDataRoot = resolve(root, "ld")
 	const eventLog = resolve(root, "events.jsonl")
@@ -7811,6 +7905,7 @@ process.exitCode = 0
 		model: null,
 	}
 
+	let reviewPromptCount = 0
 	const daemon = await startCoderLoopDaemon({
 		loopDataRoot,
 		shutdownGraceMs: 100,
@@ -7820,15 +7915,20 @@ process.exitCode = 0
 			runner: fakeRunnerSelection,
 			presetDir: PRESET_DIR,
 			worktreeManager,
-			prompt: ({ item, runId, phase }) => JSON.stringify({
+			prompt: ({ item, runId, phase }) => {
+				const reviewOrdinal = phase === "review" ? ++reviewPromptCount : 0
+				return JSON.stringify({
 				itemId: item.id,
 				issueNumber: Number(item.itemId),
 				runId,
 				phase,
 				eventLog,
 				sleepMs: 5,
-				writeStatus: phase === "review" ? "done" : null,
-			}),
+				writeStatus: phase === "review"
+					? reviewOrdinal === 1 && options.firstReviewStatus !== undefined ? options.firstReviewStatus : "done"
+					: null,
+				})
+			},
 			chainCompleteTriggerForChain: () => null,
 			onEvent: (event) => {
 				schedulerEvents.push(event)

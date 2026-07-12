@@ -19,7 +19,7 @@ The orchestrator selects an actionable `state.current` item before the front of 
 
 - central daemon scheduling state is the loop on-switch. Review removes it only when no actionable work remains or review infrastructure is broken.
 - run stdout log is per-run trace output for review. It is not durable task history.
-- `loop-data/chains/<chain>/shared.md` is the daemon-owned chain handoff/shared file and primary append-only local handoff for every phase.
+- `loop-data/chains/<chain>/shared.md` is the daemon-owned append-only local handoff. It is not durable executable-contract authority; that authority is the unique current GitHub marker comment selected by `common/executable-contract.md`.
 - `loop-data/chains/<chain>/issues/<issue>.md` is an optional issue-local attachment. Its absence must not block iteration or review startup.
 - Per-target policy / project commands / PR conventions live in the repo's own `CLAUDE.md` / `AGENTS.md`, not in `.coder-loop/`. Loop-internal policy (PR evidence layers, verdict semantics, CI parity rules) lives inside the preset fragments.
 - `loop-data runtime artifacts`, central daemon scheduling state, and run stdout log must not be staged into feature commits.
@@ -31,6 +31,7 @@ The orchestrator selects an actionable `state.current` item before the front of 
 - No local item may become `blocked` unless the blocker was published to the PR or issue thread, or GitHub posting itself failed and review stops as infrastructure-broken.
 - A parent/wrapper issue with remaining coherent deliverables is not put in any final / terminal status; review must create/link child issues, initialize their handoff/evidence paths, prepend them to the queue, set the parent back to the preset-declared retry status (the same status `retry` transitions write — query it for your phase via the completion protocol described in your entry prompt), and clear `current`.
 - Iteration may append evidence and recommendations to the chain handoff but must not write final state transitions.
+- A missing, malformed, ambiguous, or stale executable contract transitions through the preset-declared `contract_invalid` exit to `contract-enrichment`; it is not an implementation retry and must not be repaired by rewriting the issue body.
 
 ## Fixed review transitions
 
@@ -41,6 +42,7 @@ For each review verdict the required external effect must succeed before the loc
 | Review result | Required external effect first | Local state only after (preset terminology) |
 |---|---|---|
 | `retry` | feedback posted to PR/issue, or GitHub feedback failure recorded as infrastructure failure | selected item set to the preset's retry continuable status, `current: null` |
+| `reenrich` | contract defect and source evidence posted to the issue/PR thread | selected item set to the preset's contract-invalid continuable status; the declared next-node edge returns to `contract-enrichment` |
 | `expanded incomplete parent` | child issues created, linked as sub-issues, child handoff/evidence paths initialized | child items prepended, parent set to the preset's retry continuable status, `current: null` |
 | `accepted_pr` | acceptance posted, PR merged, issue comment posted, issue confirmed closed | selected item set to a success-terminal status (preset's `[statuses].success`), PR number set, `current: null` |
 | `accepted_no_pr` | issue comment posted and issue confirmed closed | selected item set to a success-terminal status, `current: null` |

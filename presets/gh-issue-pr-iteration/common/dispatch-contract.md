@@ -33,7 +33,7 @@ Match the completed report to its ledger row, then apply the owning step file's 
 
 1. Required report fields are present.
 2. The report addresses the issue-specific `Step focus`.
-3. Its claims satisfy the issue contract plus `quality/honesty.md` and `quality/evidence.md`.
+3. Its claims satisfy the issue intent plus current executable-contract marker and `quality/honesty.md` and `quality/evidence.md`.
 
 Record exactly one result:
 

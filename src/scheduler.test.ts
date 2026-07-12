@@ -2068,6 +2068,40 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 		}
 	})
 
+	test("bundled contract enrichment runs once and review retry reopens iteration", async () => {
+		const fixture = await createFixture("bundled-contract-enrichment-once")
+		try {
+			const chain = createChain(fixture.store, "bundled-contract-enrichment-once-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 664_001, repoCwd: "/repo/a", summary: null })
+			const options = fixture.options({
+				loadedPreset: await loadedPresetFromDir(resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")),
+				prompt: ({ item: selected, runId, worktreePath, phase }) => JSON.stringify({
+					itemId: selected.id,
+					issueNumber: Number(selected.itemId),
+					runId,
+					worktreePath,
+					eventLog: fixture.eventLog,
+					sleepMs: 5,
+					exitCode: 0,
+					writeStatus: phase === "review" ? "changes_requested" : null,
+				}),
+			})
+			for (let index = 0; index < 4; index += 1) {
+				const tick = await schedulerTick(options)
+				expect(tick.spawnedRuns).toHaveLength(1)
+				await tick.spawnedRuns[0]!.closed
+			}
+			const phases = fixture.schedulerEvents
+				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> => event.type === "phase.start" && event.itemId === item.id)
+				.map((event) => event.phase)
+			expect(phases).toEqual(["contract-enrichment", "iteration", "review", "iteration"])
+			expect(phases.filter((phase) => phase === "contract-enrichment")).toHaveLength(1)
+			expect(fixture.store.getItem(item.id)?.attempts).toBe(2)
+		} finally {
+			fixture.store.close()
+		}
+	})
+
 	test("custom three-step preset advances through the middle non-trigger phase", async () => {
 		const fixture = await createFixture("phase-order-three-step")
 		const presetDir = resolve(fixture.loopDataRoot, "..", "three-step-preset")
@@ -2944,12 +2978,12 @@ describe("scheduler loaded preset prompt rendering", () => {
 			const closed = await tick.spawnedRuns[0]!.closed
 
 			expect(closed.exitCode).toBe(0)
-			expect(await readFile(resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(closed.runId), "utf-8")).toContain("## Workflow")
-			expect(await readFile(resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(closed.runId), "utf-8")).toContain("## Boundaries (apply to you and every subagent)")
+			expect(await readFile(resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(closed.runId), "utf-8")).toContain("# Contract enrichment")
+			expect(await readFile(resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(closed.runId), "utf-8")).toContain("## Authority")
 
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
 			const capturedStdout = await readFile(paths.runStdoutFile(closed.runId), "utf-8")
-			expect(capturedStdout).toContain("## Workflow")
+			expect(capturedStdout).toContain("# Contract enrichment")
 
 			const preset = await loadPreset(PRESET_DIR)
 			const iterPhase = preset.phases.find((entry) => entry.name === "iteration")!
@@ -4253,7 +4287,20 @@ async function createFixture(name: string): Promise<Fixture> {
 	const schedulerEvents: SchedulerEvent[] = []
 	const worktreeCalls: string[] = []
 	const defaultPresetDir = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
-	const defaultLoadedPreset = await loadedPresetFromDir(defaultPresetDir)
+	const bundledLoadedPreset = await loadedPresetFromDir(defaultPresetDir)
+	// Most scheduler unit tests exercise the historical two-node work/review fixture. Keep that
+	// fixture explicit instead of making every unrelated lifecycle assertion run the bundled
+	// preset's GitHub contract-enrichment agent. Dedicated frontier tests load the full bundled
+	// preset and assert the one-time entry node separately.
+	const defaultLoadedPreset: SchedulerLoadedPreset = {
+		presetDir: bundledLoadedPreset.presetDir,
+		preset: {
+			...bundledLoadedPreset.preset,
+			phases: bundledLoadedPreset.preset.phases
+				.filter((phase) => phase.name !== "contract-enrichment")
+				.map((phase) => phase.name === "iteration" ? { ...phase, entry: true } : phase),
+		},
+	}
 	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
 		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
 		await mkdir(worktreePath, { recursive: true })

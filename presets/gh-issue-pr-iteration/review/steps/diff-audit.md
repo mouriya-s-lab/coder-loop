@@ -6,7 +6,7 @@ A diff-audit subagent for one coder-loop review. You audit what the PR **actuall
 
 From your dispatch message: `ISSUE`, `REPO`, `ISSUE_PR`, `AGENT_CWD` (work there), `EVIDENCE_DIR`, and `Step focus`. Read now, before Step 1: `{{PRESET_ROOT}}/quality/evidence.md` and `{{PRESET_ROOT}}/quality/cleanup.md` — they bind your own command logs and side effects.
 
-1. **Read the authorization source.** Fetch the live issue body (`gh issue view <ISSUE> -R <REPO> --json title,body`), including `## 验收标准`, `## 约束`, and every custom section. This is the contract you map every changed file against — read it before looking at the diff, so the diff cannot anchor your reading of the scope.
+1. **Read the authorization source.** Fetch the issue intent plus the unique current executable-contract marker. Map changed files against intent, marker Deliverable, Pattern scope, Test delta, and constraints — read it before looking at the diff, so the diff cannot anchor your reading of the scope.
 2. **Materialize the diff.** In `AGENT_CWD`: `gh pr view <ISSUE_PR> -R <REPO> --json headRefName,baseRefName,headRefOid`, then `git fetch origin <base> <head>`. Work from `git diff <base>...<head>` (three-dot, merge-base) plus `--name-status`; record both SHAs. Throughout you modify nothing: no commits, no checkouts that disturb worktree state, no GitHub writes.
 3. **Map the scope, file by file.** For **every** changed file, classify: `in-scope` (name the issue requirement/acceptance row that demands it), `support` (test/doc/config change directly entailed by an in-scope change — name the entailing change), or `unmapped` (you cannot tie it to the issue). Do not stretch — a file justifiable only as "related cleanup" or "while at it" is `unmapped`, and every `unmapped` file is a finding.
 4. **Hygiene scan.** Flag staged runtime artifacts anywhere in the diff: loop-data files, scheduling state, run stdout logs, evidence files, target-side runtime config/state directories, editor/OS droppings, lockfile churn with no dependency change.
@@ -15,7 +15,7 @@ From your dispatch message: `ISSUE`, `REPO`, `ISSUE_PR`, `AGENT_CWD` (work there
 
    ### 6a. Issue-named pattern coverage (explicit scope, single pass)
 
-   Every issue-named pattern MUST be declared in a `## Pattern 验收` table with exact columns `Pattern | Scope | Criterion`. `Scope` is the closed union `changed | whole-tree`. A pattern sentence elsewhere without exactly one matching table row, an unknown scope, duplicate rows, or conflicting scopes is a **contract error**; do not guess from prose or language.
+   Every executable pattern MUST be declared in the marker packet `Pattern scope` section. `Scope` is the closed union `changed | whole-tree`. A pattern sentence elsewhere without exactly one matching table row, an unknown scope, duplicate rows, or conflicting scopes is a **contract error**; do not guess from prose or language.
 
    For each named pattern:
 
@@ -29,7 +29,7 @@ From your dispatch message: `ISSUE`, `REPO`, `ISSUE_PR`, `AGENT_CWD` (work there
    Read the changed code (and the unchanged code its correctness directly depends on — callers/callees of changed symbols). Report findings in four categories, each anchored:
 
    1. **Logic errors** — a concrete defect in the changed code: name the failure scenario (input/state → wrong behavior) with `file:line`. "Looks suspicious" without a traceable failure path is not a finding.
-   2. **Design deviation** — the implementation diverges from the design the issue body states (mechanism, placement, data flow it named). Quote the issue sentence it deviates from.
+   2. **Design deviation** — the implementation diverges from the design intent and marker packet state (mechanism, placement, data flow it named). Quote the issue sentence it deviates from.
    3. **Convention violations** — the changed code breaks the target project's written conventions (target `CLAUDE.md`, workflow file) or is inconsistent with the immediately surrounding code (naming, error handling, typing idiom). Cite the convention source or the neighboring counter-example.
    4. **Structural defects in the change** — dead code the change introduces, duplicated logic within the diff, an abstraction the diff adds but uses once. Within the diff only.
 
@@ -66,7 +66,7 @@ Test-collection changes (config/glob/skip-marker/CI): <list or `none`>
 |---|---|---|---|---|---|
 | <quote> | changed / whole-tree | <base sha>→<head sha> | <verbatim Criterion> | <count or `0`> | converged / <n> remaining: <one file:line per remaining site> |
 
-(or a single row `none | - | - | - | - | -` only after confirming the issue body declares no pattern target)
+(or a single row `none | - | - | - | - | -` only after confirming the marker declares no pattern target)
 
 ## Code findings (anchored to the issue's design)
 | # | Category | Location | Finding | Anchor |
@@ -87,9 +87,9 @@ processes started / files written (for the cleanup ledger)>
 
 Reject the report (send back the gap list) unless it contains all of: `Refs audited` with both SHAs; `Scope mapping` table covering **every** changed file; `Hygiene findings`; `Test changes in the diff`; `Issue-named pattern coverage` table with one row per declared pattern carrying verbatim pattern, explicit scope, base/head, criterion, complete in-scope site count and sites; `Code findings`; `Change footprint`; `Problems`. A report that paraphrases the PR description instead of auditing the diff is not a diff audit — send it back.
 
-- **Unmapped files** → scope violation finding. An unmapped file is excusable only when the live issue body literally covers it.
+- **Unmapped files** → scope violation finding. An unmapped file is excusable only when the task intent or marker deliverable explicitly covers it.
 - **Hygiene findings** → any staged runtime artifact / scheduling state / run log is a hard retry finding.
-- **Test changes** → non-empty enumeration not literally demanded by the issue body → test-weakening trigger of `{{PRESET_ROOT}}/quality/honesty.md`. Test-collection changes that widen or narrow the runnable set without being literally demanded are the same trigger — flag them in the retry. Apply the same file's stale-baseline exception to pure count drift explained by base movement.
+- **Test changes** → non-empty enumeration not authorized by the marker Test delta → test-weakening trigger of `{{PRESET_ROOT}}/quality/honesty.md`. Test-collection changes that widen or narrow the runnable set without marker Test delta authorization are the same trigger — flag them in the retry. Apply the same file's stale-baseline exception to pure count drift explained by base movement.
 - **Issue-named pattern coverage** → missing/unknown/conflicting scope is a contract error. For `changed`, only complete base→head changed-line sites participate; for `whole-tree`, every head-tree site participates. Every in-scope row whose Sites > 0 is a retry finding and must cite all sites in one shot.
 - **Code findings** → verdict inputs only when properly anchored: a logic finding must carry a traceable failure path; a design-deviation finding must quote the issue sentence; a convention finding must cite the source. Anchored findings route to retry with the anchor quoted. Discard alternative-design taste, improvement ideas beyond issue design, or code the diff does not touch and no 6a pattern covers.
 - **Change footprint** feeds your caveat-honesty judgment: compare it against the iteration's declared `Intent (run …)` blocks for intent-action mismatch.

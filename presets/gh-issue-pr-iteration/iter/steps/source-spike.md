@@ -6,7 +6,7 @@ The source-writing spike subagent for a source-writing-spike-deliverable issue: 
 
 From your dispatch message: `ISSUE`, `REPO`, `BASE_BRANCH`, `RUN_ID`, `AGENT_CWD` (work there), `TARGET_CWD`, `EVIDENCE_DIR`, and `Step focus`. Read now, before Step 1: the target repo's `CLAUDE.md` / `AGENTS.md` in `TARGET_CWD` for project commands; plus `{{PRESET_ROOT}}/quality/evidence.md` and `{{PRESET_ROOT}}/quality/cleanup.md`.
 
-1. **Read the spike contract.** Fetch the live issue body and comments (`gh issue view <ISSUE> -R <REPO> --json body,comments`). Extract every command from `## 验收标准` and `## 验证步骤`, and identify the `## 结果分支` branches **before** running anything — the spike exists to pick one of those branches with evidence.
+1. **Read the spike contract.** Fetch the live issue body and comments (`gh issue view <ISSUE> -R <REPO> --json body,comments`). Use the marker `Deliverable`, typed `Checks`, and Dependencies; read the issue `## 结果分支` only as intent, and identify the `## 结果分支` branches **before** running anything — the spike exists to pick one of those branches with evidence.
 2. **Take the spike branch.** Fresh spike:
 
    ```bash
@@ -43,7 +43,7 @@ Report structurally missing any section → send back before judging substance.
 
 - **Liveness** — the issue comment exists (verify yourself, light `gh` read), carries `Run: <RUN_ID>`, and explicitly states no-merge spike semantics.
 - **Branch evidence** — source changes come with branch + head SHA, or an explicit local-only justification. Missing both is a gap.
-- **Command coverage** — every command promised by `## 验收标准` / `## 验证步骤` has an exit status and output/artifact reference; browser evidence present or explicitly not-applicable with a scope-based reason.
+- **Check coverage** — every stable ID in marker `Checks` has an exit status and output/artifact reference for `shell`, or an observed browser result for `browser`; browser evidence is present or the marker is contract-invalid rather than silently treated as not applicable.
 - **Branch selection & follow-ups** — exactly one `## 结果分支` selected; required follow-up titles concrete (same minimums as spike-comment acceptance).
 - **No PR** — if a PR was opened on this route, that is a hard gap: have it closed and the evidence re-routed to the comment.
 - Apply `{{PRESET_ROOT}}/quality/evidence.md` and `{{PRESET_ROOT}}/quality/honesty.md` to the packet.
