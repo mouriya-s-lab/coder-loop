@@ -194,6 +194,14 @@ describe("smoke: v2 central chain CLI", () => {
 			expect(snapshot.state.kind).toBe("ok")
 			expect(snapshot.queue.total).toBe(1)
 			expect(snapshot.queue.selected.id).toBe("333")
+			expect(snapshot.taskTree.root.kind).toBe("seq")
+			expect(snapshot.taskTree.root.children.length).toBeGreaterThan(0)
+			const firstNode = snapshot.taskTree.root.children[0]
+			expect(firstNode?.kind).toBe("leaf")
+			if (firstNode?.kind !== "leaf") throw new Error("expected v13 backfill to produce a leaf")
+			expect(firstNode.identity.definitionRef.kind).toBe("preset")
+			expect(firstNode.closure.itemId).toBe("333")
+			expect(firstNode.closure.lifecycle).toBe("active")
 			expect(await readFile(fixture.legacyStatePath, "utf-8")).toBe(beforeState)
 			expect((await stat(fixture.legacyStatePath)).mtimeMs).toBe(beforeMtime)
 		} finally {

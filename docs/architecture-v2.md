@@ -13,7 +13,7 @@ v2 跑的业务和 v1 完全一样：一个 issue 队列，每个 issue 经 **it
 ```mermaid
 flowchart TD
   cli["CLI: chain / item / status"] -- "JSON over socket" --> daemon["中央 daemon (daemon.ts)<br/>常驻进程 / 状态权威 / 孤儿回收"]
-  daemon <--> db[("SQLite (sqlite-state.ts)<br/>chains / items / runs / current_runs, schema v13")]
+  daemon <--> db[("SQLite (sqlite-state.ts)<br/>schema v14: chains/items/runs + task tree/closure state")]
   daemon --> sched["调度器 tick (scheduler.ts)<br/>跨 chain 选 item+phase, 并发 spawn"]
   sched --> sA["slot (chainA, repo1)"]
   sched --> sB["slot (chainA, repo2)"]
@@ -26,7 +26,7 @@ flowchart TD
 - **chain**（`ChainRecord`，`src/sqlite-state.ts`）：v2 新概念，一组 item 的容器，创建时绑定单一 preset + repository。
 - **调度器 tick**（`schedulerTick`，`src/scheduler.ts`）：常驻进程按 interval ticking，跨 chain 选下一个 item+phase 并发 spawn。引入于 `#189`（`96093f1`）。
 - **slot = `(chain, repo_cwd)`**：并发单元，每 slot 至多一个活跃 agent，于是不同 chain、不同 repo 可并行；选下一个待办 item 走索引 `idx_items_next_pending(chain_id, repo_cwd, status, position, id)`。
-- **SQLite** 取代 per-target JSON，引入于 `#192`（`f3613b5`，schema v7），旧 JSON state 面在 `#196`（`179a817`）移除；schema 后续演进到 v13（当前值 `STATE_SCHEMA_VERSION = 13`；v11 退役 chain umbrella 列 #457、v12 退役 items 表 `issue_number`/`branch`/`pr` 物理列 #419、v13 加 runner CHECK 约束 #481）。
+- **SQLite** 取代 per-target JSON，引入于 `#192`（`f3613b5`，schema v7），旧 JSON state 面在 `#196`（`179a817`）移除；schema 当前为 v14：v11 退役 chain umbrella 列 #457、v12 退役 items 的 GitHub 物理形态 #419、v13 加 runner CHECK #481、v14 加 task tree/closure 关系并退役 `items.session_ids` 与 `current_runs`。
 - **孤儿回收**：daemon 启动时回收上次遗留的 run（`recoverStaleSchedulerState`）——v1 sentinel + reconcile 兜底在中央 daemon 形态下的等价物。
 
 业务生命周期（第一节那张状态机）完全不变——只是推进它的从单 while-loop 变成调度器跨 tick、跨 chain。
@@ -43,12 +43,14 @@ flowchart TD
 
 ## 四、SQLite 状态与 GitHub-PR 耦合（遗留债的收敛记录）
 
-schema v13 的四张核心表（`sqlite-state.ts`）：
+schema v14 的关系形态（`sqlite-state.ts`）：
 
 - `chains`：`name`(unique) / `preset`(nullable since v9 `#412`) / `repository` / `base_branch` / `status` / `metadata`。
-- `items`：`chain_id` / `item_id`(opaque string, `#419` v12 起) / `repo_cwd` / `status` / `attempts` / `position` / `title` / `priority` / `last_run_id` / `session_ids` / `issue_file` / `evidence_dir` / `agent_cwd` / `runner`(CHECK claude/codex/opencode, v13 `#481`) / `phase` / `preset` / `preset_path` / `extra`，约束 `UNIQUE (chain_id, item_id)`。
+- `items`：保留 v2 队列业务字段；v14 起 session 不再存 JSON，`closure_sessions` 是唯一 session 关系。
 - `runs`：`run_id`(unique) / `chain_id` / `item_id` / `phase` / `status` / `started_at` / `ended_at` / `exit_code` / `extra`。
-- `current_runs`：`chain_id`(PK) / `phase` / `run_id` / `started_at` / `extra`。
+- `execution_definitions` / `task_trees` / `task_nodes` 与 leaf/seq/par 分型表：持久化 tagged definition ref、opaque definition node id、任意深度树、seq cursor、par pin/reopen/join binding/evaluation。
+- `task_closures` / `closure_sessions`：每 `(item, phase)` 闭包一行，生命周期为 `active | suspended | consumed`；session 归闭包且不与 item 双写。
+- `active_runs`：以 `closure_id` 为主键显式执法单闭包至多一个活 run；同 chain 的不同闭包可并存。
 
 历史上此处写死过大量 GitHub-PR 形状（item 身份键焊死 `issue_number`、`branch` / `pr` 是物理列、preset 焊在 chain 级 `chains.preset NOT NULL`），登记在 `#370` 与 `#396` umbrella。收敛已落地：`#412` 把 preset 声明位从 chain 迁到 item（chains.preset 可空，只作 legacy default seed）；`#419` v11→v12 把 `issue_number` 整数列换成 opaque `item_id` 字符串、`branch` / `pr` 物理列退役（还需要它们的 preset 用 `[item.fields]` 声明，落 `extra` JSON）；`#457` 退役 `chains.umbrella_issue` / `umbrella_repo`（迁到 `chain.metadata.bindings`）；`#481` v13 加 runner CHECK。曾把这部分定为 v3 主体的 `#369`（item 自带 preset + prompt、chain 退为纯容器）定义错误，已作废。
 

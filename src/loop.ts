@@ -13,7 +13,7 @@ import { appendFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } fro
 import { closeSync, createWriteStream, openSync, type WriteStream } from "node:fs"
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
 import { command, flag, option, optional, positional, run as runCmd, string as cmdString, subcommands } from "cmd-ts"
-import { type as arkType } from "arktype"
+import { scope as arkScope, type as arkType } from "arktype"
 import type { BoundaryError, BoundaryRecord, BoundaryValue } from "./boundary-types"
 import {
 	CoderLoopDaemon,
@@ -64,6 +64,7 @@ import {
 	type ItemExtra,
 } from "./runtime-data"
 import { checkPresetDag, type PresetDagFinding } from "./preset-dag-check"
+import type { ExecutionDefinitionRef, TaskNodeSnapshot, TaskTreeSnapshot } from "./execution-state"
 export { checkPresetDag } from "./preset-dag-check"
 export type { PresetDagFinding, PresetDagFindingKind, PresetDagFindingVerdict, PresetDagFindingTable, PresetDagFindingDeadlockContinuable, PresetDagFindingDeadVocabulary } from "./preset-dag-check"
 
@@ -501,6 +502,88 @@ const PresetTomlBoundary = arkType({
 	"agent?": { "attemptTimeoutSeconds?": "number" },
 })
 
+const TaskTreeBoundaryModule = arkScope({
+	executionDefinitionRef: [
+		{ kind: "'preset'", contentIdentity: "string" },
+		"|",
+		{ kind: "'chain'", contentIdentity: "string" },
+	],
+	taskNodeIdentity: {
+		runtimeNodeId: "string",
+		definitionRef: "executionDefinitionRef",
+		definitionNodeId: "string",
+	},
+	closureSession: [
+		{ runner: "'claude'", sessionId: "string" },
+		"|",
+		[
+			{ runner: "'codex'", sessionId: "string" },
+			"|",
+			{ runner: "'opencode'", sessionId: "string" },
+		],
+	],
+	closure: {
+		closureId: "string",
+		itemRowId: "number",
+		itemId: "string",
+		phase: "string",
+		lifecycle: "'active'|'suspended'|'consumed'",
+		worktreePath: "string|null",
+		branchName: "string|null",
+		baseCommit: "string",
+		sourceParNodeId: "string|null",
+		sessions: "closureSession[]",
+	},
+	joinValue: [
+		{ kind: "'drain'" },
+		"|",
+		{ kind: "'validator'", candidate: { definitionRef: "executionDefinitionRef", candidateId: "string" } },
+	],
+	joinEvaluation: [
+		{ kind: "'not-evaluating'" },
+		"|",
+		[
+			{ kind: "'evaluating'", epoch: "number", bindingVersion: "number" },
+			"|",
+			[
+				{ kind: "'decided'", epoch: "number", bindingVersion: "number" },
+				"|",
+				{ kind: "'consumed'", epoch: "number", bindingVersion: "number" },
+			],
+		],
+	],
+	taskNode: [
+		{ kind: "'leaf'", identity: "taskNodeIdentity", closure: "closure" },
+		"|",
+		[
+			{
+				kind: "'seq'",
+				identity: "taskNodeIdentity",
+				cursor: [{ kind: "'next'", nodeId: "string" }, "|", { kind: "'complete'" }],
+				children: "taskNode[]",
+			},
+			"|",
+			{
+				kind: "'par'",
+				identity: "taskNodeIdentity",
+				groupId: "string",
+				pinCommit: "string",
+				state: "'open'|'completed'|'exhausted'",
+				reopen: { count: "number", budgetRef: "string" },
+				join: { currentVersion: "number", value: "joinValue", evaluation: "joinEvaluation" },
+				children: "taskNode[]",
+			},
+		],
+	],
+	activeRun: { closureId: "string", runId: "string", phase: "string", startedAt: "number" },
+	taskTree: {
+		root: "taskNode",
+		activeRuns: "activeRun[]",
+	},
+}).export()
+
+export const TaskTreeStatusBoundary = TaskTreeBoundaryModule.taskTree
+
 const StatusSnapshotBoundary = arkType({
 	target: "object",
 	state: "object",
@@ -509,6 +592,7 @@ const StatusSnapshotBoundary = arkType({
 	current: "object",
 	events: "object",
 	processes: "object",
+	taskTree: arkType.or(TaskTreeStatusBoundary, "null"),
 })
 
 // #451 + #405: boundary parser for the `item.exits` wire-verb response. The CLI
@@ -758,6 +842,7 @@ export type CoderLoopStatusSnapshot = {
 	current: StatusCurrentSnapshot
 	events: StatusEventsSnapshot
 	processes: StatusProcessSnapshot
+	taskTree: TaskTreeSnapshot | null
 }
 
 export type StatusTargetSnapshot = {
@@ -2797,6 +2882,7 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 	// loaded presets by directory so we read each preset.toml at most once per snapshot, and falls
 	// back to the chain seed `options.preset` for legacy items that declare no preset.
 	const itemPresets = await loadStatusItemPresets(options, items)
+	const taskTree = ensureStatusTaskTree(options.loopDataRoot, loaded.chain, items, itemPresets)
 	const selected = pickFirstSelectableStatusItem(options, loaded.chain, items, current, itemPresets)
 	const runtimeErrors = await collectStatusRuntimeErrors(options, loaded.chain, items, current, itemPresets)
 	const currentSnapshot = await buildStatusCurrentSnapshotFromRecords(options, items, current, itemPresets)
@@ -2820,6 +2906,7 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 		current: currentSnapshot,
 		events,
 		processes,
+		taskTree,
 	}
 	StatusSnapshotBoundary.assert(snapshot)
 	return snapshot
@@ -2961,6 +3048,93 @@ function makeUnavailableStatusSnapshot(input: {
 		current: { run: null, id: null, item: null, runner: null, phaseStatus: null },
 		events: { runId: null, path: null, exists: false, recent: [], latest: null, error: null },
 		processes: input.processes ?? { live: [], scanError: null },
+		taskTree: null,
+	}
+}
+
+function statusDefinitionContentIdentity(preset: Preset): string {
+	const hasher = new Bun.CryptoHasher("sha256")
+	hasher.update(preset.name)
+	hasher.update("\0")
+	hasher.update(preset.item.idField)
+	for (const phase of preset.phases) {
+		hasher.update("\0")
+		hasher.update(phase.name)
+		hasher.update("\0")
+		hasher.update(phase.prompt)
+	}
+	return `sha256:${hasher.digest("hex")}`
+}
+
+function legacyClosureEnvironment(item: ItemRecord, chain: ChainRecord): { worktreePath: string; branchName: string; baseCommit: string } {
+	const branch = itemExtraJsonValue(item.extra, "branch")
+	return {
+		worktreePath: item.agentCwd ?? item.repoCwd,
+		branchName: typeof branch === "string" ? branch : chain.baseBranch,
+		baseCommit: chain.baseBranch,
+	}
+}
+
+function ensureStatusTaskTree(
+	loopDataRoot: string | null,
+	chain: ChainRecord,
+	items: readonly ItemRecord[],
+	itemPresets: StatusItemPresetResolver,
+): TaskTreeSnapshot {
+	const store = openSqliteStateStore({ createIfMissing: false, ...loopDataRootOption(loopDataRoot) })
+	try {
+		const existing = store.getTaskTree(chain.id)
+		if (existing !== null) return existing
+		const activeRuns = store.listActiveRuns(chain.id)
+		const rootDefinitionRef: ExecutionDefinitionRef = { kind: "chain", contentIdentity: `legacy-v13-chain:${chain.id}` }
+		const children: TaskNodeSnapshot[] = []
+		for (const item of items) {
+			const preset = itemPresets.presetForItem(item)
+			const definitionRef: ExecutionDefinitionRef = { kind: "preset", contentIdentity: statusDefinitionContentIdentity(preset) }
+			for (const phase of preset.phases) {
+				const closureId = `closure:${item.id}:${phase.name}`
+				const environment = legacyClosureEnvironment(item, chain)
+				const sessions = (["claude", "codex", "opencode"] as const).flatMap((runner) => {
+					const sessionId = item.sessionIds[phase.name]?.[runner]
+					return sessionId === undefined ? [] : [{ runner, sessionId }]
+				})
+				children.push({
+					kind: "leaf",
+					identity: {
+						runtimeNodeId: `v13:${chain.id}:item:${item.id}:phase:${phase.name}`,
+						definitionRef,
+						definitionNodeId: `legacy-v13:phase:${phase.name}`,
+					},
+					closure: {
+						closureId,
+						itemRowId: item.id,
+						itemId: item.itemId,
+						phase: phase.name,
+						lifecycle: "active",
+						worktreePath: environment.worktreePath,
+						branchName: environment.branchName,
+						baseCommit: environment.baseCommit,
+						sourceParNodeId: null,
+						sessions,
+					},
+				})
+			}
+		}
+		const rootNodeId = `v13:${chain.id}:root`
+		const firstChild = children[0]
+		const tree: TaskTreeSnapshot = {
+			root: {
+				kind: "seq",
+				identity: { runtimeNodeId: rootNodeId, definitionRef: rootDefinitionRef, definitionNodeId: "legacy-v13:root" },
+				cursor: firstChild === undefined ? { kind: "complete" } : { kind: "next", nodeId: firstChild.identity.runtimeNodeId },
+				children,
+			},
+			activeRuns,
+		}
+		store.replaceTaskTree(chain.id, tree)
+		return tree
+	} finally {
+		store.close()
 	}
 }
 

@@ -10,7 +10,8 @@ import {
 	type ItemRecord,
 	openSqliteStateStore,
 } from "./sqlite-state"
-import type { JsonObject } from "./loop"
+import { TaskTreeStatusBoundary, type JsonObject } from "./loop"
+import type { TaskTreeSnapshot } from "./execution-state"
 import { chainBindings, engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -28,9 +29,167 @@ afterAll(async () => {
 })
 
 describe("sqlite state store", () => {
-	test("schema covers chain core columns (umbrella retired #457)", async () => {
-		const { store } = await openTestStore("schema")
+	test("v14 stores a normalized nested task tree with closure state and join binding identity", async () => {
+		const { store } = await openTestStore("task-tree-v14")
 		try {
+			const chain = createFullChain(store)
+			const first = createFullItem(store, chain, { issueNumber: 177 })
+			const second = createFullItem(store, chain, { issueNumber: 178 })
+			const third = createFullItem(store, chain, { issueNumber: 179 })
+			const definitionRef = { kind: "preset", contentIdentity: "sha256:preset-fixture" } as const
+			const closure = (closureId: string, item: ItemRecord, phase: string, lifecycle: "active" | "suspended" | "consumed") => ({
+				closureId,
+				itemRowId: item.id,
+				itemId: item.itemId,
+				phase,
+				lifecycle,
+				worktreePath: lifecycle === "consumed" ? null : `/worktrees/${closureId}`,
+				branchName: lifecycle === "consumed" ? null : `closure/${closureId}`,
+				baseCommit: "0123456789abcdef",
+				sourceParNodeId: closureId === "closure-177" ? null : "node-par",
+				sessions: lifecycle === "consumed" ? [] : [{ runner: "codex", sessionId: `session-${closureId}` }] as const,
+			})
+			const tree: TaskTreeSnapshot = {
+				root: {
+					kind: "seq",
+					identity: { runtimeNodeId: "node-root", definitionRef, definitionNodeId: "definition-root" },
+					cursor: { kind: "next", nodeId: "node-par" },
+					children: [
+						{ kind: "leaf", identity: { runtimeNodeId: "node-177", definitionRef, definitionNodeId: "definition-177" }, closure: closure("closure-177", first, "iteration", "active") },
+						{
+							kind: "par",
+							identity: { runtimeNodeId: "node-par", definitionRef, definitionNodeId: "definition-par" },
+							groupId: "node-par",
+							pinCommit: "0123456789abcdef",
+							state: "open",
+							reopen: { count: 1, budgetRef: "budget:chain-default" },
+							join: { currentVersion: 1, value: { kind: "drain" }, evaluation: { kind: "evaluating", epoch: 4, bindingVersion: 1 } },
+							children: [
+								{ kind: "leaf", identity: { runtimeNodeId: "node-178", definitionRef, definitionNodeId: "definition-178" }, closure: closure("closure-178", second, "review", "suspended") },
+								{ kind: "leaf", identity: { runtimeNodeId: "node-179", definitionRef, definitionNodeId: "definition-179" }, closure: closure("closure-179", third, "review", "consumed") },
+							],
+						},
+					],
+				},
+				activeRuns: [],
+			}
+
+			TaskTreeStatusBoundary.assert(tree)
+			store.replaceTaskTree(chain.id, tree)
+			expect(store.getTaskTree(chain.id)).toEqual(tree)
+			expect(store.listTableColumns("task_nodes")).toContain("definition_content_identity")
+			expect(store.listTableColumns("task_join_bindings")).toContain("effective_from_epoch")
+			expect(store.listTableColumns("task_join_evaluations")).toContain("binding_version")
+		} finally {
+			store.close()
+		}
+	})
+
+	test("active runs allow chain concurrency but reject a second run for one closure", async () => {
+		const { store } = await openTestStore("closure-active-run")
+		try {
+			const chain = createFullChain(store)
+			const first = createFullItem(store, chain, { issueNumber: 177 })
+			const second = createFullItem(store, chain, { issueNumber: 178 })
+			store.ensureClosure({ closureId: "closure-177", itemRowId: first.id, phase: "iteration", lifecycle: "active", worktreePath: "/w/177", branchName: "c/177", baseCommit: "abc", sourceParNodeId: null })
+			store.ensureClosure({ closureId: "closure-178", itemRowId: second.id, phase: "iteration", lifecycle: "active", worktreePath: "/w/178", branchName: "c/178", baseCommit: "abc", sourceParNodeId: null })
+			for (const [runId, item] of [["run-177", first], ["run-178", second]] as const) {
+				store.recordRun({ runId, chainId: chain.id, itemId: item.id, phase: "iteration", startedAt: 1_800_000_100 })
+			}
+			store.setActiveRun({ closureId: "closure-177", runId: "run-177", phase: "iteration", startedAt: 1_800_000_100 })
+			store.setActiveRun({ closureId: "closure-178", runId: "run-178", phase: "iteration", startedAt: 1_800_000_101 })
+			expect(store.listActiveRuns(chain.id).map((run) => run.runId)).toEqual(["run-177", "run-178"])
+			try {
+				store.setActiveRun({ closureId: "closure-177", runId: "run-178", phase: "iteration", startedAt: 1_800_000_102 })
+				throw new Error("expected a closure-keyed single-activity rejection")
+			} catch (error) {
+				expect(error).toBeInstanceOf(SqliteStateError)
+				if (!(error instanceof SqliteStateError)) throw error
+				expect(error.code).toBe("closure_active_run_conflict")
+				expect(error.details).toEqual({ closureId: "closure-177", runId: "run-177" })
+			}
+		} finally {
+			store.close()
+		}
+	})
+
+	test("v13 migration preserves chain item run current and session data in canonical v14 relations", async () => {
+		const loopDataRoot = resolve(TEST_ROOT, `v13-v14-${Date.now()}-${++nextRootId}`)
+		await mkdir(loopDataRoot, { recursive: true })
+		const dbFile = resolve(loopDataRoot, "db.sqlite")
+		const legacy = new Database(dbFile, { create: true })
+		try {
+			legacy.exec(`
+				PRAGMA foreign_keys = ON;
+				CREATE TABLE chains (
+					id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, preset TEXT,
+					repository TEXT NOT NULL, base_branch TEXT NOT NULL,
+					status TEXT NOT NULL CHECK (status IN ('active','completed','deleted','stopped')),
+					metadata TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL
+				);
+				CREATE TABLE items (
+					id INTEGER PRIMARY KEY AUTOINCREMENT, chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+					item_id TEXT NOT NULL, repo_cwd TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL,
+					position INTEGER NOT NULL DEFAULT 0, title TEXT, priority TEXT, last_run_id TEXT,
+					session_ids TEXT NOT NULL DEFAULT '{}', issue_file TEXT, evidence_dir TEXT, agent_cwd TEXT,
+					runner TEXT CHECK (runner IN ('claude','codex','opencode') OR runner IS NULL), phase TEXT,
+					preset TEXT, preset_path TEXT, extra TEXT NOT NULL, created_at REAL NOT NULL,
+					updated_at REAL NOT NULL, status_updated_at REAL NOT NULL, UNIQUE(chain_id,item_id)
+				);
+				CREATE TABLE runs (
+					id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL UNIQUE,
+					chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+					item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+					phase TEXT NOT NULL, status TEXT NOT NULL, started_at REAL NOT NULL,
+					ended_at REAL, exit_code INTEGER, extra TEXT NOT NULL
+				);
+				CREATE TABLE current_runs (
+					chain_id INTEGER PRIMARY KEY REFERENCES chains(id) ON DELETE CASCADE,
+					phase TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+					started_at REAL NOT NULL, extra TEXT NOT NULL
+				);
+				INSERT INTO chains VALUES (1, 'v13-chain', 'single-phase-example', 'owner/repo', 'main', 'active', '{}', 10, 11);
+				INSERT INTO items VALUES (1, 1, 'opaque-1', '/repo', 'queued', 2, 0, 'title', NULL, 'run-v13',
+					'{"iteration":{"codex":"session-v13"}}', 'issue.md', 'evidence', '/worktree', 'codex', 'iteration',
+					'single-phase-example', NULL, '{}', 12, 13, 13);
+				INSERT INTO runs VALUES (1, 'run-v13', 1, 1, 'iteration', 'in_progress', 14, NULL, NULL, '{}');
+				INSERT INTO current_runs VALUES (1, 'iteration', 'run-v13', 14, '{"itemId":1}');
+				PRAGMA user_version = 13;
+			`)
+		} finally {
+			legacy.close()
+		}
+
+		const migrated = openSqliteStateStore({ loopDataRoot })
+		try {
+			expect(migrated.getChain(1)?.name).toBe("v13-chain")
+			expect(migrated.getItem(1)?.itemId).toBe("opaque-1")
+			expect(migrated.getItemSessionId(1, { phase: "iteration", runner: "codex" })).toBe("session-v13")
+			expect(migrated.getRunByRunId("run-v13")?.status).toBe("in_progress")
+			expect(migrated.getCurrentRun(1)?.runId).toBe("run-v13")
+			expect(migrated.listTableColumns("items")).not.toContain("session_ids")
+			expect(migrated.listTableColumns("active_runs")).toEqual(["closure_id", "run_id", "phase", "started_at", "extra"])
+		} finally {
+			migrated.close()
+		}
+		const reopened = openSqliteStateStore({ loopDataRoot })
+		try {
+			expect(reopened.getCurrentRun(1)?.runId).toBe("run-v13")
+			expect(reopened.getItemSessionId(1, { phase: "iteration", runner: "codex" })).toBe("session-v13")
+		} finally {
+			reopened.close()
+		}
+	})
+	test("schema covers chain core columns (umbrella retired #457)", async () => {
+		const { store, dbFile } = await openTestStore("schema")
+		try {
+			const schema = new Database(dbFile, { readonly: true })
+			try {
+				expect(schema.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(14)
+				expect(schema.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'current_runs'").get()?.count).toBe(0)
+			} finally {
+				schema.close()
+			}
 			// #457: chains.umbrella_issue / umbrella_repo columns retired. Existing data is moved
 			// into chain.metadata.bindings by the v10→v11 migration; new chains write umbrella
 			// values straight into metadata.bindings via the declared-field path.
@@ -59,7 +218,6 @@ describe("sqlite state store", () => {
 				"title",
 				"priority",
 				"last_run_id",
-				"session_ids",
 				"issue_file",
 				"evidence_dir",
 				"agent_cwd",
@@ -79,6 +237,7 @@ describe("sqlite state store", () => {
 				"run_id",
 				"chain_id",
 				"item_id",
+				"closure_id",
 				"phase",
 				"status",
 				"started_at",
@@ -86,13 +245,13 @@ describe("sqlite state store", () => {
 				"exit_code",
 				"extra",
 			])
-			expect(store.listTableColumns("current_runs")).toEqual(["chain_id", "phase", "run_id", "started_at", "extra"])
+			expect(store.listTableColumns("active_runs")).toEqual(["closure_id", "run_id", "phase", "started_at", "extra"])
 		} finally {
 			store.close()
 		}
 	})
 
-	test("current_runs round-trip", async () => {
+	test("legacy current-run API projects the closure-keyed active run", async () => {
 		const { store } = await openTestStore("current")
 		try {
 			const chain = createFullChain(store)
@@ -832,7 +991,8 @@ describe("sqlite state store", () => {
 		const first = openSqliteStateStore({ loopDataRoot })
 		try {
 			expect(first.listTableColumns("items")).not.toContain("last_session_id")
-			expect(first.listTableColumns("items")).toContain("session_ids")
+			expect(first.listTableColumns("items")).not.toContain("session_ids")
+			expect(first.listTableColumns("closure_sessions")).toEqual(["closure_id", "runner_kind", "session_id"])
 		} finally {
 			first.close()
 		}
@@ -840,7 +1000,7 @@ describe("sqlite state store", () => {
 		const second = openSqliteStateStore({ loopDataRoot })
 		try {
 			expect(second.listTableColumns("items")).not.toContain("last_session_id")
-			expect(second.listTableColumns("items")).toContain("session_ids")
+			expect(second.listTableColumns("items")).not.toContain("session_ids")
 			const chain = createFullChain(second)
 			const item = createFullItem(second, chain)
 			expect(item.sessionIds).toEqual({})
@@ -855,7 +1015,7 @@ describe("sqlite state store", () => {
 		const third = openSqliteStateStore({ loopDataRoot })
 		try {
 			expect(third.listTableColumns("items")).not.toContain("last_session_id")
-			expect(third.listTableColumns("items")).toContain("session_ids")
+			expect(third.listTableColumns("items")).not.toContain("session_ids")
 		} finally {
 			third.close()
 		}
@@ -1460,7 +1620,8 @@ describe("sqlite state store", () => {
 		const migrated = openSqliteStateStore({ loopDataRoot })
 		try {
 			expect(migrated.listTableColumns("items")).not.toContain("last_session_id")
-			expect(migrated.listTableColumns("items")).toContain("session_ids")
+			expect(migrated.listTableColumns("items")).not.toContain("session_ids")
+			expect(migrated.listTableColumns("closure_sessions")).toEqual(["closure_id", "runner_kind", "session_id"])
 			const item = migrated.getItemById(1, "330")
 			expect(item?.sessionIds).toEqual({
 				iteration: { codex: "d400e2b2-04a4-44f8-8f13-3078f41a5593" },
@@ -1554,7 +1715,8 @@ describe("sqlite state store", () => {
 		const migrated = openSqliteStateStore({ loopDataRoot })
 		try {
 			expect(migrated.listTableColumns("items")).not.toContain("last_session_id")
-			expect(migrated.listTableColumns("items")).toContain("session_ids")
+			expect(migrated.listTableColumns("items")).not.toContain("session_ids")
+			expect(migrated.listTableColumns("closure_sessions")).toEqual(["closure_id", "runner_kind", "session_id"])
 			const items = migrated.listItems(1)
 			expect(items).toHaveLength(1)
 			const item = items[0]!
