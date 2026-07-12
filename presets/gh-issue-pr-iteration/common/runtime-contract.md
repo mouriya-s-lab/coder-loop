@@ -10,7 +10,7 @@ The orchestrator may decide only facts that are fully programmable:
 
 - which state/config files exist and are readable;
 - whether `state.current` exists;
-- whether `state.current.phase` is `iteration` or `review`;
+- which declared phase owns `state.current`, including `contract-enrichment`, `iteration`, or `review`;
 - whether a queue item status is actionable (membership in the preset's `[statuses].continuable` set);
 - which issue/run/prompt path to bind into an agent invocation;
 - whether an agent process exited with code `0`;
@@ -28,12 +28,13 @@ The agent owns contextual judgments that require reading natural language, code,
 - whether a PR is reviewable and mergeable;
 - whether a parent issue has complete children or remaining scope;
 - whether to retry, accept, skip, block, expand a parent, or stop.
+- whether a GitHub executable-contract marker is current and well formed; malformed or stale contracts select the declared re-enrichment exit rather than an implementation retry.
 
 ## Reading order
 
 - Read the role entry prompt first; it contains the rendered runtime inputs and the fragment index with absolute paths.
 - Read the common fragments the entry prompt names before role-specific step files.
-- Step files (`iter/steps/<name>.md`, `review/steps/<name>.md`) are single markdown files with `Task` / `Report` / `Acceptance` sections; the entry prompt's workflow is the guide to when each is opened.
+- Enrichment reads `enrichment/*.md`; implementation and review step files live under `iter/steps/` and `review/steps/`. The role entry prompt is the guide to when each is opened.
 
 ## Terminal summaries
 

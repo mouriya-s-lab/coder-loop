@@ -8,11 +8,11 @@ From your dispatch message: `ISSUE`, `REPO`, `BASE_BRANCH`, `RUN_ID`, `AGENT_CWD
 
 **Process discipline** (binds the implementing in Step 5; the delivery-form rules in this file — row coverage, intent block, test integrity — bind on top):
 
-- **Test-first for feature/bugfix code.** Write the failing test before the production code, run it, and watch it fail for the expected reason — a test that passes immediately tests nothing; fix the test, not the code. Then write the minimal code to green and watch it pass alongside the rest of the suite. Rows that are pure config/docs carry no test-first obligation — the issue contract decides, and a borderline call goes in Problems.
+- **Test-first for feature/bugfix code.** Write the failing test before the production code, run it, and watch it fail for the expected reason — a test that passes immediately tests nothing; fix the test, not the code. Then write the minimal code to green and watch it pass alongside the rest of the suite. Checks that are pure config/docs carry no test-first obligation — the executable contract decides, and a borderline call goes in Problems.
 - **Root cause before any fix.** When a test or build fails unexpectedly: read the full error, reproduce it, check what changed, form one hypothesis, and test it with the smallest possible change — never stack speculative fixes. Three failed fixes mean the approach is wrong, not that a fourth is due: stop and record the situation in Problems for the orchestrator's call.
 - **Retry feedback is claims to verify, not orders.** When `Step focus` folds in review feedback, check each finding against the actual code before changing anything; implement confirmed items one at a time, testing each. A finding that is technically wrong for this codebase is answered with reasoning in your report, never silently obeyed — and never with performative agreement either way.
 
-1. **Read the contract.** Fetch the complete issue intent and the unique current executable-contract marker. Read every typed `Checks`, `Pattern scope`, `Canonical runtime`, `Test delta`, `Deliverable`, and `Dependencies` entry; implement so each applicable entry can pass. A row whose Command cannot pass in this environment (needs VM/browser/external service): implement the row's intent and note the deviation for your report — never silently drop a row.
+1. **Read the contract.** Fetch the complete issue intent and the unique current executable-contract marker. Read every typed `Checks`, `Pattern scope`, `Canonical runtime`, `Test delta`, `Deliverable`, and `Dependencies` entry; implement so each applicable entry can pass. Never silently drop a stable Check ID. An intrinsically broken Check makes the marker contract-invalid; do not reinterpret it as implementation intent.
 2. **Take the branch.**
    - Retry / resumed run (`ISSUE_STATUS` is the preset's retry continuable status, or `RUN_ID_GENERATION` = `resumed`): continue the existing branch (`ISSUE_BRANCH`). Before changing anything, inspect and record: `git log --oneline <BASE_BRANCH>..HEAD` (what previous runs already committed), `git status --short` (which dirty files are previous-run work in progress vs unrelated — unrelated dirty files are preserved untouched), and the latest PR review/comments (the demands your `Step focus` answers). Restart from base only when the branch's commits are unrelated to this issue — record why.
    - Fresh run:
@@ -45,10 +45,10 @@ Branch: <name> @ <head sha (uncommitted: say so)>
 Files changed: <bulleted list, every file, with one clause each on what changed>
 Intent appended: <handoff path + heading written>
 
-Row coverage:
-| Row | Addressed by | Status |
+Check coverage:
+| Check ID / intent constraint | Addressed by | Status |
 |---|---|---|
-| <row # or custom-section name> | <which change> | addressed / deviated: <how> / deferred: <why> |
+| <stable Check ID or intent constraint> | <which change> | addressed / deviated: <how> / deferred: <why> |
 
 Test changes: <every test added/modified/removed/renamed/skipped with old→new — or `none`>
 
@@ -60,9 +60,9 @@ unclassifiable footprint sites; processes started / files scattered (for the cle
 
 ## Acceptance
 
-Report structurally missing branch+head, files-changed list, intent pointer, row-coverage table, test-changes enumeration, or Problems → send back before judging substance.
+Report structurally missing branch+head, files-changed list, intent pointer, Check-coverage table, test-changes enumeration, or Problems → send back before judging substance.
 
-- **Contract coverage** — every applicable executable-contract entry and intent constraint is either addressed or flagged with a concrete deviation reason in the row-coverage table. Silent drops are gaps. (Cross-check against the current marker and source issue revision; re-fetch if stale.)
+- **Contract coverage** — every applicable executable-contract entry and intent constraint is either addressed or flagged with a concrete deviation reason in the Check-coverage table. Silent drops are gaps. (Cross-check against the current marker and source issue revision; re-fetch if stale.)
 - **Classification sanity** — the declared change classification matches what the issue demands; for substitutive/removal work the footprint list exists and each site has an owner. "Added the new thing" with the old thing unaccounted for is the classic trap — a gap.
 - **Test integrity** — a non-empty test-changes enumeration must be justified by the issue contract; removal/skip/loosening the marker Test delta does not explicitly authorize is a gap to send back now (cheaper than at review's diff-audit).
 - **Intent landed** — the handoff file contains an `Intent (run …)` block for this run. Missing intent on a substantive change is a gap.

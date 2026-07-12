@@ -43,7 +43,7 @@ Decide exactly one, from the bound inputs:
 
 Read these yourself; each feeds a specific Step 3 decision:
 
-1. `gh issue view {{ISSUE}} -R {{REPO}} --json title,body,labels,comments,state,url` → the task contract: marker Checks, custom requirement sections, constraints, the deliverable signal that tells you which Step 3 sequence to pick, and any operator instructions in late comments.
+1. `gh issue view {{ISSUE}} -R {{REPO}} --json title,body,labels,comments,state,url` → the task intent plus the current marker packet: marker Checks, custom intent sections, constraints, the marker Deliverable that tells you which Step 3 sequence to pick, and any operator instructions in late comments.
 2. The issue's linked PR → the retry instruction source and the branch-continuity input. Resolution order: the bound `ISSUE_PR` when set; otherwise the structural closing-keyword linkage — split `{{REPO}}` into owner/name and run:
 
    ```bash
@@ -73,12 +73,12 @@ Read the current executable-contract marker from Step 2 and use its `Deliverable
 
 | Marker `Deliverable` variant | Step sequence (every entry = one dispatch) |
 |---|---|
-| An implementation PR is the deliverable (default — the issue describes a code/config/docs change with `## 验收标准` rows replayable against a diff). | [research if Step 2 left you unsure what the right change is] → implement → (verify ∥ e2e) → submit |
-| Unblocking another issue is the deliverable (the body names a concrete blocker, usually carries an `Unblocks: owner/repo#N` back-link, and the marker Checks include a real blocked-path replay). | resolve-blocker → implement → (verify ∥ e2e) → submit |
-| A source-writing spike is the deliverable (the body explicitly demands PoC/source/runtime evidence with a no-merge constraint). | [research?] → source-spike |
-| An issue comment is the deliverable (a spike / design dialogue whose `## 结果分支` pins what the comment must say — no code change). | [research?] → spike-comment |
+| `implementation-pr` | [research if Step 2 left you unsure what the right change is] → implement → (verify ∥ e2e) → submit |
+| `blocker-removal` | resolve-blocker → implement → (verify ∥ e2e) → submit |
+| `source-writing-spike` | [research?] → source-spike |
+| `spike-comment` | [research?] → spike-comment |
 
-When the body's signal is ambiguous between two rows, dispatch `research` to pin it down; do not split the difference by running both.
+When marker Deliverable conflicts with current task intent, take the `contract_invalid` exit; do not reinterpret the route or split the difference by running both.
 
 Write the task list out explicitly, one line per step:
 
@@ -141,7 +141,7 @@ Record and receive the dispatch using the current runner's transport exactly as 
 - gaps or wrong direction → reject the ledger row, then follow up per `common/dispatch-contract.md` with the gap list or corrected scope; do not advance the workflow line.
 - accepted → mark the line `[x]`, update the ledger row, and take the next ready line(s).
 - verify or e2e reported a product failure (a failing row, a mismatch against the executable contract) → not a step gap: insert `[ ] implement — fix: <failure>` before verify and mark the current attempt in the ledger. Wait for the other report in the concurrent pair before fixing so all failures join one scope. The inserted implement runs, then **both** verify and e2e re-dispatch in parallel for the **full** contract — uncheck both lines; a fix can regress either side.
-- the e2e line's `Step focus` carries the browser-Env marker Checks **you enumerate yourself** from the issue's `## 验收标准` / `## 继承验证义务` tables (every row whose Env is `browser` — the same set verify reports as `deferred: e2e step`; e2e does not wait for verify's report) plus the changed path to exercise; a deferred row still open after e2e means the contract is unverified.
+- the e2e line's `Step focus` carries every marker Check whose `Kind` is `browser`, identified by its stable ID (the same set verify reports as `deferred: e2e step`; e2e does not wait for verify's report), plus the changed path to exercise; a deferred row still open after e2e means the contract is unverified.
 
 When the last line is `[x]`/`[-]`, go to Step 5.
 

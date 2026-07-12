@@ -2,11 +2,11 @@
 
 > **Note on what this file is.** `coder-loop` is a stateless loop — every
 > iteration and review agent spawn starts fresh with no in-process memory.
-> This file is the project's only durable cross-issue scratchpad. Keep it
+> This file is a local cross-issue scratchpad and run handoff. Keep it
 > short, source-cited, and policy-bounded so it doesn't drift into a
 > dumping ground.
 
-Canonical task state remains in GitHub issues/PRs and `central SQLite state DB`. This file is for *cross-issue* facts that don't belong to any single issue.
+Canonical task state remains in GitHub issues/PRs and `central SQLite state DB`. The durable executable contract is the unique current GitHub issue comment selected by `common/executable-contract.md`; a copy in this file is never authoritative. This file is for *cross-issue* facts that don't belong to any single issue.
 
 ## Memory policy
 
@@ -23,6 +23,7 @@ Forbidden:
 - raw logs
 - full traces
 - full issue bodies
+- executable-contract marker packets or local rewrites of them
 - full PR diffs
 - secrets/tokens
 - screenshot blobs

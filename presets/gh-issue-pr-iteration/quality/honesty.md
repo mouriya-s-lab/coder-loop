@@ -24,7 +24,7 @@ For the retry-comment and PR-body caveat sections (the sections where these phra
 - **Cross-issue deferral** — part of this task's scope moved mid-run to a sibling/future issue that is not a declared dependency: "deferred to wave-N / issue #N", "out of scope for this issue, see #N".
 - **Precondition admission** — a required precondition was absent: "[required service] was not running", "could not reach [target]; used [substitute]", "skipped [precondition] because…".
 - **Intent-action mismatch** — the declared intent and the actual change footprint do not correspond and the delta is undisclosed: intent named scope X but action touched meaningfully different Y; "research-only" intent but substantive code change (or vice versa); intent absent entirely on a substantive change. This is a substance judgment ("would a reasonable engineer say these correspond?"), not string matching. Honestly disclosed trivial drift is not a trigger.
-- **Test weakening** — tests removed, skipped, loosened, or rewritten to pass without the marker packet Test delta authorizing it. A non-empty test-inventory delta not literally required by the issue body is this trigger, regardless of how the surrounding prose justifies it.
+- **Test weakening** — tests removed, skipped, loosened, or rewritten to pass without the marker packet Test delta authorizing that specific change. A non-empty test-inventory delta outside that authorization is this trigger, regardless of how the surrounding prose justifies it.
 
 ## Authorization rule
 

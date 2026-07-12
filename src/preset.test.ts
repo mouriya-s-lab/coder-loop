@@ -181,7 +181,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(audit).toContain("enumerate every remaining site")
 	})
 
-	test("rejects ambiguous issue pattern scope", async () => {
+	test("classifies ambiguous marker Pattern scope as a contract error", async () => {
 		const audit = await readFile(resolve(BUNDLED_PRESET_DIR, "review/steps/diff-audit.md"), "utf8")
 		expect(audit).toContain("closed union `changed | whole-tree`")
 		expect(audit).toContain("unknown scope, duplicate rows, or conflicting scopes")
@@ -189,11 +189,19 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(audit).toContain("do not guess from prose or language")
 	})
 
-	test("routes diff audit by declared issue pattern scope", async () => {
+	test("routes diff audit by the executable-contract marker's typed Pattern scope", async () => {
 		const audit = await readFile(resolve(BUNDLED_PRESET_DIR, "review/steps/diff-audit.md"), "utf8")
 		expect(audit).toMatch(/For `changed`[\s\S]*For `whole-tree`/)
 		expect(audit).toContain("the difference is the candidate set, not the severity")
 		expect(audit).toContain("Base→head")
+	})
+
+	test("routes malformed contract packets to re-enrichment instead of implementation retry", async () => {
+		const entry = await readFile(resolve(BUNDLED_PRESET_DIR, "review-entry.md"), "utf8")
+		const action = await readFile(resolve(BUNDLED_PRESET_DIR, "review/actions/reenrich.md"), "utf8")
+		expect(entry).toContain("select executable-contract-invalid and re-enrich")
+		expect(action).toContain("missing, malformed, stale after an operator correction, internally contradictory")
+		expect(action).toContain("Do not use this for implementation defects")
 	})
 	test("loads name, item.idField, agent.attemptTimeoutSeconds, statuses sets", async () => {
 		const preset: Preset = await loadPreset(BUNDLED_PRESET_DIR)
@@ -330,7 +338,9 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 
 	test("specific variable bindings reflect renderPrompt source mapping", async () => {
 		const preset = await loadPreset(BUNDLED_PRESET_DIR)
-		const iterVars = new Map(preset.phases[0]!.variables.map((variable) => [variable.key, variable.source] as const))
+		const iteration = preset.phases.find((phase) => phase.name === "iteration")
+		expect(iteration).toBeDefined()
+		const iterVars = new Map(iteration!.variables.map((variable) => [variable.key, variable.source] as const))
 		const expectedItem = (field: string): PresetVariableSource => ({ kind: "item", field })
 		const expectedChain = (field: string): PresetVariableSource => ({ kind: "chain", field, fallback: { kind: "none" } })
 		const expectedChainDefault = (field: string, value: boolean): PresetVariableSource => ({ kind: "chain", field, fallback: { kind: "value", value } })
@@ -440,13 +450,48 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(contract).toContain("Source-writing-spike-deliverable")
 	})
 
+	test("contract enrichment entry and schema define one durable current marker with typed checks", async () => {
+		const entry = await Bun.file(resolve(BUNDLED_PRESET_DIR, "contract-enrichment-entry.md")).text()
+		const schema = await Bun.file(resolve(BUNDLED_PRESET_DIR, "enrichment/contract-schema.md")).text()
+		const authority = await Bun.file(resolve(BUNDLED_PRESET_DIR, "common/executable-contract.md")).text()
+
+		expect(entry).toContain("one-time pre-implementation contract-enrichment agent")
+		expect(entry).toContain("Do not edit or replace")
+		expect(entry).toContain("Publish exactly one current marker comment")
+		expect(entry).toContain("Exit successfully without writing an item status")
+		expect(schema).toContain("<!-- coder-loop:executable-contract schema=1 source-issue={{ISSUE}} -->")
+		expect(schema).toContain("`Kind` is exactly `shell` or `browser`")
+		expect(schema).toContain("typed scope `changed` or `whole-tree`")
+		expect(schema).toContain("`Supersedes`: prior marker URL or `none`")
+		expect(authority).toContain("Exactly one marker may be current")
+		expect(authority).toContain("only by linking it in `Supersedes`")
+		expect(authority).toContain("Do not silently fall back")
+	})
+
+	test("bundled PR template is the required evidence shape and maps contract checks into the packet", async () => {
+		const template = await Bun.file(resolve(BUNDLED_PRESET_DIR, "templates/pr-body.md")).text()
+		const submit = await Bun.file(resolve(BUNDLED_PRESET_DIR, "iter/steps/submit.md")).text()
+		const review = await Bun.file(resolve(BUNDLED_PRESET_DIR, "review-entry.md")).text()
+
+		expect(template).toContain("bundled preset's required packet shape")
+		expect(template).toContain("Executable contract: {CONTRACT_URL}")
+		expect(template).toContain("Map claims to executable-contract Check IDs")
+		expect(template).toContain("## Layer 1 — Change preview")
+		expect(template).toContain("## Layer 4 — End-to-end behavior")
+		expect(template).toContain("browser Checks map actions/observations to their Check IDs")
+		expect(submit).toContain("four-layer evidence packet")
+		expect(submit).toContain("Everything in the packet traces to the verify and e2e steps' output")
+		expect(review).toContain("every claim mapped to an observation")
+		expect(review).toContain("the packet (PR body for the opening packet; the latest run's PR comment for retries")
+	})
+
 	test("iteration entry owns the task-list workflow, deliverable-shape routing, and dispatch protocol", async () => {
 		const entry = await Bun.file(resolve(BUNDLED_PRESET_DIR, "iter-entry.md")).text()
 
 		// #450: deliverable-shape routing — agent reads issue body to decide the step
 		// sequence; there is no `kind:*` label table. The four step sequences must all
 		// still be visible so step selection guidance is observable in the rendered prompt.
-		expect(/kind/i.test(entry)).toBe(false)
+		expect(entry).not.toMatch(/kind:[A-Za-z0-9_-]+/i)
 		expect(entry).toContain("[research if Step 2 left you unsure what the right change is] → implement → (verify ∥ e2e) → submit")
 		expect(entry).toContain("resolve-blocker → implement → (verify ∥ e2e) → submit")
 		expect(entry).toContain("[research?] → source-spike")
@@ -1600,6 +1645,7 @@ describe("issue #400 — fragment index slicing per phase", () => {
 
 	test("Row #5: entry-prompt fragment references remain a subset of the per-phase sliced index", async () => {
 		const preset = await loadPreset(BUNDLED_PRESET_DIR)
+		const enrichmentEntry = await Bun.file(resolve(BUNDLED_PRESET_DIR, "contract-enrichment-entry.md")).text()
 		const iterEntry = await Bun.file(resolve(BUNDLED_PRESET_DIR, "iter-entry.md")).text()
 		const reviewEntry = await Bun.file(resolve(BUNDLED_PRESET_DIR, "review-entry.md")).text()
 
@@ -1607,11 +1653,14 @@ describe("issue #400 — fragment index slicing per phase", () => {
 		// `/Users/.../presets/gh-issue-pr-iteration/<tail>`; we compare against
 		// fragment path tails relative to `BUNDLED_PRESET_DIR` so the test is
 		// invariant to where the preset lives on disk.
+		const enrichmentTails = extractFragmentTails(enrichmentEntry)
 		const iterTails = extractFragmentTails(iterEntry)
 		const reviewTails = extractFragmentTails(reviewEntry)
+		expect(enrichmentTails.size).toBeGreaterThan(0)
 		expect(iterTails.size).toBeGreaterThan(0)
 		expect(reviewTails.size).toBeGreaterThan(0)
 
+		const enrichmentSliceTails = sliceTails(preset, preset.phases.find((phase) => phase.name === "contract-enrichment")!)
 		const iterSliceTails = sliceTails(preset, preset.phases.find((phase) => phase.name === "iteration")!)
 		const reviewSliceTails = sliceTails(preset, preset.phases.find((phase) => phase.name === "review")!)
 
@@ -1620,8 +1669,10 @@ describe("issue #400 — fragment index slicing per phase", () => {
 		// `<step>/` directory and the slice covers files inside), or the entry
 		// names a specific fragment under a sliced folder.
 		const covers = (tail: string, sliceTails: readonly string[]): boolean => sliceTails.some((sliceTail) => sliceTail === tail || sliceTail.startsWith(tail + "/") || tail.startsWith(sliceTail + "/"))
+		const enrichmentMissing = [...enrichmentTails].filter((tail) => !covers(tail, enrichmentSliceTails))
 		const iterMissing = [...iterTails].filter((tail) => !covers(tail, iterSliceTails))
 		const reviewMissing = [...reviewTails].filter((tail) => !covers(tail, reviewSliceTails))
+		expect(enrichmentMissing, `contract-enrichment-entry references that fell outside enrichment slice: ${enrichmentMissing.join(", ")}`).toEqual([])
 		expect(iterMissing, `iter-entry references that fell outside iteration slice: ${iterMissing.join(", ")}`).toEqual([])
 		expect(reviewMissing, `review-entry references that fell outside review slice: ${reviewMissing.join(", ")}`).toEqual([])
 	})

@@ -13,6 +13,7 @@
  * 用法：
  *   bun scripts/real-e2e.ts [--fixture-cwd <path>] [--fixture-repo <owner/repo>]
  *     [--max-wall-seconds N] [--max-attempts N] [--max-runs N] [--poll-seconds N]
+ *     [--force-review-retry]
  *
  * 退出码：0 = 全流程成功且断言通过；1 = 终态失败 / tripwire 触发 / 断言失败。
  */
@@ -40,6 +41,7 @@ type HarnessOptions = {
 	maxRuns: number
 	pollSeconds: number
 	keepStaleWorktrees: boolean
+	scenario: "happy" | "review-retry"
 }
 
 type FixtureRun = {
@@ -68,6 +70,7 @@ function parseArgs(argv: readonly string[]): HarnessOptions {
 		maxRuns: 20,
 		pollSeconds: 15,
 		keepStaleWorktrees: false,
+		scenario: "happy",
 	}
 	for (let i = 0; i < argv.length; i += 2) {
 		const flag = argv[i]
@@ -76,6 +79,11 @@ function parseArgs(argv: readonly string[]): HarnessOptions {
 			// 布尔 flag：保留陈尸 scheduler worktree，让引擎的自愈路径（#466）被真实
 			// 触发——仅用于该路径的 e2e 验证。
 			options.keepStaleWorktrees = true
+			i -= 1
+			continue
+		}
+		if (flag === "--force-review-retry") {
+			options.scenario = "review-retry"
 			i -= 1
 			continue
 		}
@@ -275,24 +283,45 @@ type DaemonHandle = {
 // `spawn(..., { env: { ...process.env, ... }})` at scheduler.ts passes it
 // through to every agent — so every `coder-loop ...` invocation in the loop
 // resolves to `bun <REPO_ROOT>/src/loop.ts`.
-function writeCoderLoopCliShim(workDir: string): string {
+function writeCoderLoopCliShim(workDir: string, scenario: HarnessOptions["scenario"]): string {
 	const shimDir = resolve(workDir, "cli-shim")
 	mkdirSync(shimDir, { recursive: true })
 	const shimPath = resolve(shimDir, "coder-loop")
-	const script = `#!/bin/sh
-exec bun ${LOOP_ENTRY} "$@"
+	const retryMarker = resolve(workDir, "scenario-review-retry-consumed")
+	const script = scenario === "happy"
+		? `#!/bin/sh\nexec bun ${LOOP_ENTRY} "$@"\n`
+		: `#!/usr/bin/env bun
+import { existsSync, writeFileSync } from "node:fs"
+import { spawnSync } from "node:child_process"
+
+const args = process.argv.slice(2)
+const phaseIndex = args.indexOf("--agent-phase")
+const statusIndex = args.indexOf("--status")
+const isFirstReviewCompletion = args[0] === "item"
+  && args[1] === "update"
+  && phaseIndex >= 0
+  && args[phaseIndex + 1] === "review"
+  && statusIndex >= 0
+  && args[statusIndex + 1] === "done"
+  && !existsSync(${JSON.stringify(retryMarker)})
+if (isFirstReviewCompletion) {
+  writeFileSync(${JSON.stringify(retryMarker)}, "changes_requested\\n", { flag: "wx" })
+  args[statusIndex + 1] = "changes_requested"
+}
+const result = spawnSync("bun", [${JSON.stringify(LOOP_ENTRY)}, ...args], { stdio: "inherit", env: process.env })
+process.exit(result.status ?? 1)
 `
 	writeFileSync(shimPath, script)
 	chmodSync(shimPath, 0o755)
 	return shimDir
 }
 
-function startDaemon(workDir: string): DaemonHandle {
+function startDaemon(workDir: string, scenario: HarnessOptions["scenario"]): DaemonHandle {
 	const loopDataRoot = resolve(workDir, "loop-data")
 	mkdirSync(loopDataRoot, { recursive: true })
 	const stdoutPath = resolve(workDir, "daemon.stdout.log")
 	const stderrPath = resolve(workDir, "daemon.stderr.log")
-	const shimDir = writeCoderLoopCliShim(workDir)
+	const shimDir = writeCoderLoopCliShim(workDir, scenario)
 	const shimmedPath = `${shimDir}:${process.env.PATH ?? ""}`
 	log(`daemon: 隔离 loop-data-root 起中央 daemon: ${loopDataRoot}`)
 	log(`daemon: PATH 前置 coder-loop CLI shim: ${shimDir} → ${LOOP_ENTRY}`)
@@ -412,6 +441,40 @@ function countRuns(loopDataRoot: string): number {
 	}
 }
 
+type RunEvidence = { phase: string; status: string; exitCode: number | null }
+
+function readRunEvidence(loopDataRoot: string): RunEvidence[] {
+	const db = new Database(resolve(loopDataRoot, "db.sqlite"), { readonly: true })
+	try {
+		return db.query("SELECT phase, status, exit_code AS exitCode FROM runs ORDER BY started_at, id").all() as RunEvidence[]
+	} finally {
+		db.close()
+	}
+}
+
+function assertScenarioEvidence(options: HarnessOptions, loopDataRoot: string): void {
+	const runs = readRunEvidence(loopDataRoot)
+	const phases = runs.map((run) => run.phase)
+	const expected = options.scenario === "review-retry"
+		? ["contract-enrichment", "iteration", "review", "iteration", "review"]
+		: options.preset === "gh-issue-pr-iteration"
+			? ["contract-enrichment", "iteration", "review"]
+			: undefined
+	if (expected !== undefined && JSON.stringify(phases) !== JSON.stringify(expected)) {
+		fail(`scenario ${options.scenario} phase sequence=${JSON.stringify(phases)}，预期 ${JSON.stringify(expected)}`)
+	}
+	if (options.scenario === "review-retry") {
+		const db = new Database(resolve(loopDataRoot, "db.sqlite"), { readonly: true })
+		try {
+			const item = db.query("SELECT attempts FROM items").get() as { attempts: number }
+			if (item.attempts !== 2) fail(`review-retry attempts=${item.attempts}，预期 2`)
+		} finally {
+			db.close()
+		}
+	}
+	log(`assert: scenario=${options.scenario} phases=${phases.join("→")}`)
+}
+
 async function watch(
 	options: HarnessOptions,
 	fixture: FixtureRun,
@@ -528,7 +591,7 @@ async function main(): Promise<number> {
 		mkdirSync(workDir, { recursive: true })
 		const fixture = await prepareFixture(options, workDir, runKey)
 		const chainName = `${options.fixtureRepo.split("/")[1]!}-${runKey}`
-		const daemon = startDaemon(workDir)
+		const daemon = startDaemon(workDir, options.scenario)
 		let exitCode = 1
 		let issueNumber: number | undefined
 		try {
@@ -593,6 +656,7 @@ async function runScenario(
 
 	const durationSeconds = Math.floor((Date.now() - startedAt) / 1000)
 	const evidence = assertGitHubOutcome(fixture, issueNumber, durationSeconds)
+	assertScenarioEvidence(options, daemon.loopDataRoot)
 	log("")
 	log("===== real-e2e evidence =====")
 	log(`seed issue : ${evidence.issueUrl} (CLOSED)`)
