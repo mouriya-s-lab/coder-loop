@@ -135,7 +135,10 @@ function minimalPresetRoot(overrides: BoundaryRecord = {}): BoundaryRecord {
 		phases: [
 			{
 				name: "iteration",
+				entry: true,
+				startsAttempt: true,
 				prompt: "iteration.md",
+				next: [{ phase: "review", on: "completed" }],
 				variables: { ISSUE: "item.issue" },
 			},
 			{
@@ -257,7 +260,7 @@ describe("ItemRecord prompt bindings", () => {
 		const preset = makePreset({
 			item: { idField: "slug" },
 			phases: [
-				{ name: "iteration", prompt: "iteration.md", variables: { ISSUE: "item.slug" } },
+				{ name: "iteration", entry: true, startsAttempt: true, prompt: "iteration.md", next: [{ phase: "review", on: "completed" }], variables: { ISSUE: "item.slug" } },
 				{ name: "review", prompt: "review.md", variables: { ISSUE: "item.slug" } },
 			],
 		})
@@ -268,6 +271,9 @@ describe("ItemRecord prompt bindings", () => {
 		const phase: PresetPhase = {
 			name: "iteration",
 			prompt: "iteration.md",
+			entry: true,
+			startsAttempt: true,
+			next: [],
 			exits: [],
 			variables: [
 				{ key: "ISSUE", source: { kind: "item", field: "issue" }, doc: null },
@@ -294,6 +300,9 @@ describe("ItemRecord prompt bindings", () => {
 		const phase: PresetPhase = {
 			name: "review",
 			prompt: "review.md",
+			entry: false,
+			startsAttempt: false,
+			next: [],
 			exits: [{ kind: "item-status", status: parseInternalStatus("done", "test.status"), when: "review accepted the result" }],
 			variables: [
 				{ key: "RUNTIME_INPUTS_DOC", source: { kind: "runtime", key: "runtimeInputsDoc" }, doc: null },
@@ -337,7 +346,7 @@ describe("ItemRecord prompt bindings", () => {
 		const preset = makePreset({
 			item: { idField: "issue", fields: { sessionIds: "json" } },
 			phases: [
-				{ name: "iteration", prompt: "iteration.md", variables: { SESSION: "item.sessionIds.iteration.codex" } },
+				{ name: "iteration", entry: true, startsAttempt: true, prompt: "iteration.md", next: [{ phase: "review", on: "completed" }], variables: { SESSION: "item.sessionIds.iteration.codex" } },
 				{ name: "review", prompt: "review.md", variables: { PHASE: "item.phase" } },
 			],
 		})
@@ -345,7 +354,7 @@ describe("ItemRecord prompt bindings", () => {
 
 		expect(() =>
 			makePreset({
-				phases: [{ name: "iteration", prompt: "iteration.md", variables: { BAD: "item.notARecordField.value" } }],
+				phases: [{ name: "iteration", entry: true, startsAttempt: true, prompt: "iteration.md", variables: { BAD: "item.notARecordField.value" } }],
 			}),
 		).toThrow(/unrecognized item field/)
 	})
@@ -398,7 +407,7 @@ describe("runtime binding helpers", () => {
 		const preset = makePreset({
 			runtime: { businessKeys: ["customBusiness"] },
 			phases: [
-				{ name: "iteration", prompt: "iteration.md", variables: { CUSTOM: "runtime.customBusiness" } },
+				{ name: "iteration", entry: true, startsAttempt: true, prompt: "iteration.md", next: [{ phase: "review", on: "completed" }], variables: { CUSTOM: "runtime.customBusiness" } },
 				{ name: "review", prompt: "review.md", variables: { RUN_ID: "runtime.runId" } },
 			],
 		})
@@ -419,7 +428,7 @@ describe("runtime binding helpers", () => {
 		expect(() =>
 			makePreset({
 				phases: [
-					{ name: "iteration", prompt: "iteration.md", variables: { CUSTOM: "runtime.customBusiness" } },
+					{ name: "iteration", entry: true, startsAttempt: true, prompt: "iteration.md", variables: { CUSTOM: "runtime.customBusiness" } },
 				],
 			}),
 		).toThrow(/unknown runtime key "customBusiness"/)
@@ -435,7 +444,7 @@ describe("runtime binding helpers", () => {
 				businessKeyValues: { auditDemo: { literal: "preset-literal-ok" } },
 			},
 			phases: [
-				{ name: "iteration", prompt: "iteration.md", variables: { AUDIT_DEMO: "runtime.auditDemo" } },
+				{ name: "iteration", entry: true, startsAttempt: true, prompt: "iteration.md", variables: { AUDIT_DEMO: "runtime.auditDemo" } },
 			],
 		})
 		const phase = preset.phases[0]!
@@ -534,7 +543,7 @@ describe("runtime binding helpers", () => {
 	test("renderFragmentIndex slices fragments to roles declared by the phase (issue #400)", () => {
 		const preset = makePreset({
 			phases: [
-				{ name: "iteration", prompt: "iteration.md", roles: ["common", "iter"], variables: { ISSUE: "item.issue" } },
+				{ name: "iteration", entry: true, startsAttempt: true, prompt: "iteration.md", next: [{ phase: "review", on: "completed" }], roles: ["common", "iter"], variables: { ISSUE: "item.issue" } },
 				{ name: "review", prompt: "review.md", roles: ["common", "review"], variables: { ISSUE: "item.issue" } },
 			],
 			fragments: [
@@ -557,7 +566,7 @@ describe("runtime binding helpers", () => {
 	test("renderFragmentIndex returns empty string when the phase declares no roles", () => {
 		const preset = makePreset({
 			phases: [
-				{ name: "iteration", prompt: "iteration.md", variables: { ISSUE: "item.issue" } },
+				{ name: "iteration", entry: true, startsAttempt: true, prompt: "iteration.md", next: [{ phase: "review", on: "completed" }], variables: { ISSUE: "item.issue" } },
 				{ name: "review", prompt: "review.md", variables: { ISSUE: "item.issue" } },
 			],
 		})
@@ -604,7 +613,7 @@ describe("runner and daemon helpers", () => {
 	test("parsePreset reads phase model and rejects blank values", () => {
 		const preset = makePreset({
 			phases: [
-				{ name: "iteration", prompt: "iteration.md", variables: { ISSUE: "item.issue" } },
+				{ name: "iteration", entry: true, startsAttempt: true, prompt: "iteration.md", next: [{ phase: "review", on: "completed" }], variables: { ISSUE: "item.issue" } },
 				{ name: "review", prompt: "review.md", runner: "codex", model: "gpt-5.5", variables: { ISSUE: "item.issue" } },
 			],
 		})
@@ -614,7 +623,7 @@ describe("runner and daemon helpers", () => {
 		expect(() =>
 			makePreset({
 				phases: [
-					{ name: "iteration", prompt: "iteration.md", model: "  ", variables: { ISSUE: "item.issue" } },
+					{ name: "iteration", entry: true, startsAttempt: true, prompt: "iteration.md", model: "  ", variables: { ISSUE: "item.issue" } },
 					{ name: "review", prompt: "review.md", variables: { ISSUE: "item.issue" } },
 				],
 			}),
@@ -624,7 +633,7 @@ describe("runner and daemon helpers", () => {
 	test("selectRunnerForPhase resolves the preset phase model when config declares none", () => {
 		const preset = makePreset({
 			phases: [
-				{ name: "iteration", prompt: "iteration.md", variables: { ISSUE: "item.issue" } },
+				{ name: "iteration", entry: true, startsAttempt: true, prompt: "iteration.md", next: [{ phase: "review", on: "completed" }], variables: { ISSUE: "item.issue" } },
 				{ name: "review", prompt: "review.md", runner: "codex", model: "gpt-5.5", variables: { ISSUE: "item.issue" } },
 			],
 		})
@@ -639,7 +648,7 @@ describe("runner and daemon helpers", () => {
 	test("explicit config model overrides the preset phase model", () => {
 		const preset = makePreset({
 			phases: [
-				{ name: "iteration", prompt: "iteration.md", variables: { ISSUE: "item.issue" } },
+				{ name: "iteration", entry: true, startsAttempt: true, prompt: "iteration.md", next: [{ phase: "review", on: "completed" }], variables: { ISSUE: "item.issue" } },
 				{ name: "review", prompt: "review.md", runner: "codex", model: "gpt-5.5", variables: { ISSUE: "item.issue" } },
 			],
 		})
@@ -652,7 +661,7 @@ describe("runner and daemon helpers", () => {
 	test("item runner override to a different kind does not inherit the preset phase model", () => {
 		const preset = makePreset({
 			phases: [
-				{ name: "iteration", prompt: "iteration.md", runner: "codex", model: "gpt-5.5", variables: { ISSUE: "item.issue" } },
+				{ name: "iteration", entry: true, startsAttempt: true, prompt: "iteration.md", runner: "codex", model: "gpt-5.5", next: [{ phase: "review", on: "completed" }], variables: { ISSUE: "item.issue" } },
 				{ name: "review", prompt: "review.md", variables: { ISSUE: "item.issue" } },
 			],
 		})
@@ -1073,6 +1082,9 @@ describe("renderPrompt placeholder validation (issue #399)", () => {
 		return {
 			name: "iteration",
 			prompt: "iteration.md",
+			entry: true,
+			startsAttempt: true,
+			next: [],
 			exits: [],
 			variables: variables.map(([key, source]) => ({ key, source, doc: null })),
 			trigger: null,

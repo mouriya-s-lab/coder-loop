@@ -517,7 +517,7 @@ describe("parsePreset schema validation", () => {
 		// a member of `terminal`. Tests that pin the rejection path override this directly.
 		statuses: { continuable: ["a"], terminal: ["b"], exhausted: "b" },
 		phases: [
-			{ name: "p", prompt: "p.md", variables: { K: "item.id" } },
+			{ name: "p", entry: true, startsAttempt: true, prompt: "p.md", variables: { K: "item.id" } },
 		],
 		agent: { binary: "echo" },
 	})
@@ -527,6 +527,8 @@ describe("parsePreset schema validation", () => {
 			...minimalRoot(),
 			phases: [{
 				name: "p",
+				entry: true,
+				startsAttempt: true,
 				prompt: "p.md",
 				variables: {
 					ISSUE: { source: "runtime.runId", label: "Named issue", prefix: "ref:", suffix: "!", style: "plain" },
@@ -557,14 +559,14 @@ describe("parsePreset schema validation", () => {
 		for (const [field, value] of decorationFields) {
 			const root: BoundaryRecord = {
 				...minimalRoot(),
-				phases: [{ name: "p", prompt: "p.md", variables: { X: { source: "chain.optional", default: "", [field]: value } } }],
+				phases: [{ name: "p", entry: true, startsAttempt: true, prompt: "p.md", variables: { X: { source: "chain.optional", default: "", [field]: value } } }],
 			}
 			expect(() => parsePreset(root, "/tmp"), field).toThrow(/\.label: required when doc decoration fields are declared/)
 		}
 
 		const defaultOnly: BoundaryRecord = {
 			...minimalRoot(),
-			phases: [{ name: "p", prompt: "p.md", variables: { X: { source: "chain.optional", default: "" } } }],
+			phases: [{ name: "p", entry: true, startsAttempt: true, prompt: "p.md", variables: { X: { source: "chain.optional", default: "" } } }],
 		}
 		expect(parsePreset(defaultOnly, "/tmp").phases[0]!.variables[0]).toEqual({
 			key: "X",
@@ -578,6 +580,8 @@ describe("parsePreset schema validation", () => {
 			...minimalRoot(),
 			phases: [{
 				name: "p",
+				entry: true,
+				startsAttempt: true,
 				prompt: "p.md",
 				variables: {
 					X: { source: "item.id", label: "Issue", prefx: "#", style: "code" },
@@ -631,10 +635,74 @@ describe("parsePreset schema validation", () => {
 	test("rejects duplicate phase name", () => {
 		const root = minimalRoot()
 		root.phases = [
-			{ name: "p", prompt: "p1.md", variables: { K: "item.id" } },
-			{ name: "p", prompt: "p2.md", variables: { K: "item.id" } },
+			{ name: "p", entry: true, startsAttempt: true, prompt: "p1.md", variables: { K: "item.id" } },
+			{ name: "p", entry: true, startsAttempt: true, prompt: "p2.md", variables: { K: "item.id" } },
 		]
 		expect(() => parsePreset(root, "/tmp")).toThrow(/duplicate name "p"/)
+	})
+
+	test("requires exactly one declarative entry phase", () => {
+		const missing: BoundaryRecord = minimalRoot()
+		missing.phases = [{ name: "p", prompt: "p.md", startsAttempt: true, variables: { K: "item.id" } }]
+		expect(() => parsePreset(missing, "/tmp")).toThrow(/exactly one phase must declare entry = true/)
+
+		const duplicate: BoundaryRecord = minimalRoot()
+		duplicate.phases = [
+			{ name: "a", prompt: "a.md", entry: true, startsAttempt: true, variables: { K: "item.id" } },
+			{ name: "b", prompt: "b.md", entry: true, variables: { K: "item.id" } },
+		]
+		expect(() => parsePreset(duplicate, "/tmp")).toThrow(/exactly one phase must declare entry = true \(found 2\)/)
+	})
+
+	test("rejects missing and ambiguous declarative next candidates", () => {
+		const missingTarget: BoundaryRecord = minimalRoot()
+		missingTarget.phases = [{
+			name: "p", prompt: "p.md", entry: true, startsAttempt: true,
+			next: [{ phase: "missing", on: "completed" }], variables: { K: "item.id" },
+		}]
+		expect(() => parsePreset(missingTarget, "/tmp")).toThrow(/next\.phase: unrecognized phase "missing"/)
+
+		const ambiguous: BoundaryRecord = minimalRoot()
+		ambiguous.phases = [
+			{
+				name: "p", prompt: "p.md", entry: true, startsAttempt: true,
+				next: [{ phase: "q", on: "completed" }, { phase: "r", on: "completed" }], variables: { K: "item.id" },
+			},
+			{ name: "q", prompt: "q.md", variables: { K: "item.id" } },
+			{ name: "r", prompt: "r.md", variables: { K: "item.id" } },
+		]
+		expect(() => parsePreset(ambiguous, "/tmp")).toThrow(/ambiguous completed candidates/)
+	})
+
+	test("rejects unreachable non-trigger phases and illegal trigger lifecycle declarations", () => {
+		const unreachable: BoundaryRecord = minimalRoot()
+		unreachable.phases = [
+			{ name: "entry", prompt: "entry.md", entry: true, variables: { K: "item.id" } },
+			{ name: "orphan", prompt: "orphan.md", startsAttempt: true, variables: { K: "item.id" } },
+		]
+		expect(() => parsePreset(unreachable, "/tmp")).toThrow(/non-trigger phase\(s\) unreachable from entry "entry": orphan/)
+
+		const triggerStartsAttempt: BoundaryRecord = minimalRoot()
+		triggerStartsAttempt.statuses = { continuable: ["queued"], terminal: ["blocked", "done"], exhausted: "done" }
+		triggerStartsAttempt.phases = [
+			{ name: "entry", prompt: "entry.md", entry: true, startsAttempt: true, exits: [{ status: "blocked", when: "blocked" }], variables: { K: "item.id" } },
+			{ name: "trigger", prompt: "trigger.md", startsAttempt: true, trigger: { afterPhase: "entry", whenStatus: "blocked" }, variables: { K: "item.id" } },
+		]
+		expect(() => parsePreset(triggerStartsAttempt, "/tmp")).toThrow(/trigger phase "trigger" cannot start an attempt/)
+	})
+
+	test("rejects trigger frontier targets", () => {
+		const triggerTarget: BoundaryRecord = minimalRoot()
+		triggerTarget.statuses = { continuable: ["queued"], terminal: ["blocked", "done"], exhausted: "done" }
+		triggerTarget.phases = [
+			{
+				name: "entry", prompt: "entry.md", entry: true, startsAttempt: true,
+				exits: [{ status: "blocked", when: "blocked" }],
+				next: [{ phase: "trigger", on: "completed" }], variables: { K: "item.id" },
+			},
+			{ name: "trigger", prompt: "trigger.md", trigger: { afterPhase: "entry", whenStatus: "blocked" }, variables: { K: "item.id" } },
+		]
+		expect(() => parsePreset(triggerTarget, "/tmp")).toThrow(/trigger phase "trigger" cannot be a frontier successor/)
 	})
 
 	// #456: previously asserted the "last non-trigger phase" position via an engine helper. That
@@ -644,7 +712,7 @@ describe("parsePreset schema validation", () => {
 		const root: BoundaryRecord = minimalRoot()
 		root.statuses = {continuable: ["queued"], terminal: ["blocked", "done"], exhausted: "done" }
 		root.phases = [
-			{ name: "iteration", prompt: "iter.md", variables: { K: "item.id" } },
+			{ name: "iteration", entry: true, startsAttempt: true, prompt: "iter.md", next: [{ phase: "review", on: "completed" }], variables: { K: "item.id" } },
 			{ name: "review", prompt: "review.md", exits: [{ status: "blocked", when: "blocked" }], variables: { K: "item.id" } },
 			{ name: "responder", prompt: "responder.md", trigger: { afterPhase: "review", whenStatus: "blocked" }, variables: { K: "item.id" } },
 		]
@@ -664,7 +732,7 @@ describe("parsePreset schema validation", () => {
 		const root: BoundaryRecord = minimalRoot()
 		root.statuses = {continuable: ["queued", "in_progress"], terminal: ["done"], exhausted: "done" }
 		root.phases = [
-			{ name: "iteration", prompt: "iter.md", exits: [{ status: "in_progress", when: "handoff" }], variables: { K: "item.id" } },
+			{ name: "iteration", entry: true, startsAttempt: true, prompt: "iter.md", exits: [{ status: "in_progress", when: "handoff" }], next: [{ phase: "review", status: "in_progress" }], variables: { K: "item.id" } },
 			{ name: "review", prompt: "review.md", runner: "claude", exits: [{ status: "done", when: "accepted" }], variables: { K: "item.id" } },
 		]
 
@@ -685,7 +753,7 @@ describe("parsePreset schema validation", () => {
 		const root: BoundaryRecord = minimalRoot()
 		root.statuses = { continuable: ["queued", "in_progress"], terminal: ["done"], exhausted: "done" }
 		root.phases = [
-			{ name: "iteration", prompt: "iter.md", runner: "opencode", exits: [{ status: "in_progress", when: "handoff" }], variables: { K: "item.id" } },
+			{ name: "iteration", entry: true, startsAttempt: true, prompt: "iter.md", runner: "opencode", exits: [{ status: "in_progress", when: "handoff" }], next: [{ phase: "review", status: "in_progress" }], variables: { K: "item.id" } },
 			{ name: "review", prompt: "review.md", exits: [{ status: "done", when: "accepted" }], variables: { K: "item.id" } },
 		]
 
@@ -726,7 +794,7 @@ describe("parsePreset schema validation", () => {
 	test("rejects per-phase exit declarations outside preset statuses", () => {
 		const root: BoundaryRecord = minimalRoot()
 		root.phases = [
-			{ name: "iteration", prompt: "iter.md", exits: [{ status: "missing", when: "bad" }], variables: { K: "item.id" } },
+			{ name: "iteration", entry: true, startsAttempt: true, prompt: "iter.md", exits: [{ status: "missing", when: "bad" }], variables: { K: "item.id" } },
 		]
 
 		expect(() => parsePreset(root, "/tmp")).toThrow(/exits\.status: unrecognized status "missing"/)
@@ -735,7 +803,7 @@ describe("parsePreset schema validation", () => {
 	test("rejects duplicate per-phase exit declarations", () => {
 		const root: BoundaryRecord = minimalRoot()
 		root.phases = [
-			{ name: "iteration", prompt: "iter.md", exits: [{ status: "a", when: "one" }, { status: "a", when: "two" }], variables: { K: "item.id" } },
+			{ name: "iteration", entry: true, startsAttempt: true, prompt: "iter.md", exits: [{ status: "a", when: "one" }, { status: "a", when: "two" }], variables: { K: "item.id" } },
 		]
 
 		expect(() => parsePreset(root, "/tmp")).toThrow(/exits\.status: duplicate status "a"/)
@@ -744,7 +812,7 @@ describe("parsePreset schema validation", () => {
 	test("rejects legacy statusWrites declarations", () => {
 		const root: BoundaryRecord = minimalRoot()
 		root.phases = [
-			{ name: "iteration", prompt: "iter.md", statusWrites: ["a"], variables: { K: "item.id" } },
+			{ name: "iteration", entry: true, startsAttempt: true, prompt: "iter.md", statusWrites: ["a"], variables: { K: "item.id" } },
 		]
 
 		expect(() => parsePreset(root, "/tmp")).toThrow(/statusWrites: use \[\[phases\.exits\]\]/)
@@ -754,7 +822,7 @@ describe("parsePreset schema validation", () => {
 		const root: BoundaryRecord = minimalRoot()
 		root.statuses = {continuable: ["queued"], terminal: ["blocked", "done"], exhausted: "done" }
 		root.phases = [
-			{ name: "iteration", prompt: "iter.md", variables: { K: "item.id" } },
+			{ name: "iteration", entry: true, startsAttempt: true, prompt: "iter.md", next: [{ phase: "review", on: "completed" }], variables: { K: "item.id" } },
 			{ name: "review", prompt: "review.md", exits: [{ status: "blocked", when: "blocked" }], variables: { K: "item.id" } },
 			{ name: "responder", prompt: "responder.md", trigger: { afterPhase: "review", whenStatus: "blocked" }, variables: { K: "item.id" } },
 			{ name: "finalizer", prompt: "finalizer.md", trigger: { on: "chain-complete" }, variables: { K: "runtime.runId" } },
@@ -777,7 +845,7 @@ describe("parsePreset schema validation", () => {
 		const root: BoundaryRecord = minimalRoot()
 		root.statuses = {continuable: ["queued"], terminal: ["blocked"], exhausted: "blocked" }
 		root.phases = [
-			{ name: "iteration", prompt: "iter.md", variables: { K: "item.id" } },
+			{ name: "iteration", entry: true, startsAttempt: true, prompt: "iter.md", variables: { K: "item.id" } },
 			{ name: "responder", prompt: "responder.md", trigger: { afterPhase: "review", whenStatus: "blocked" }, variables: { K: "item.id" } },
 		]
 
@@ -787,7 +855,7 @@ describe("parsePreset schema validation", () => {
 	test("rejects trigger whenStatus outside preset statuses", () => {
 		const root: BoundaryRecord = minimalRoot()
 		root.phases = [
-			{ name: "iteration", prompt: "iter.md", variables: { K: "item.id" } },
+			{ name: "iteration", entry: true, startsAttempt: true, prompt: "iter.md", variables: { K: "item.id" } },
 			{ name: "responder", prompt: "responder.md", trigger: { afterPhase: "iteration", whenStatus: "blocked" }, variables: { K: "item.id" } },
 		]
 
@@ -806,7 +874,7 @@ describe("parsePreset schema validation", () => {
 	})
 
 	test("rejects misspelled item field reference (e.g. item.stauts instead of item.status)", () => {
-		const root: BoundaryRecord = { ...minimalRoot(), phases: [{ name: "p", prompt: "p.md", variables: { X: "item.stauts" } }] }
+		const root: BoundaryRecord = { ...minimalRoot(), phases: [{ name: "p", entry: true, startsAttempt: true, prompt: "p.md", variables: { X: "item.stauts" } }] }
 		expect(() => parsePreset(root, "/tmp")).toThrow(/unrecognized item field "stauts"/)
 	})
 
@@ -814,7 +882,7 @@ describe("parsePreset schema validation", () => {
 		const root: BoundaryRecord = {
 			...minimalRoot(),
 			runtime: { businessKeys: ["customBusiness"] },
-			phases: [{ name: "p", prompt: "p.md", variables: { X: "runtime.customBusiness" } }],
+			phases: [{ name: "p", entry: true, startsAttempt: true, prompt: "p.md", variables: { X: "runtime.customBusiness" } }],
 		}
 		const preset = parsePreset(root, "/tmp")
 		expect([...preset.runtime.businessKeys]).toEqual(["customBusiness"])
@@ -822,7 +890,7 @@ describe("parsePreset schema validation", () => {
 	})
 
 	test("rejects undeclared runtime business keys", () => {
-		const root: BoundaryRecord = { ...minimalRoot(), phases: [{ name: "p", prompt: "p.md", variables: { X: "runtime.customBusiness" } }] }
+		const root: BoundaryRecord = { ...minimalRoot(), phases: [{ name: "p", entry: true, startsAttempt: true, prompt: "p.md", variables: { X: "runtime.customBusiness" } }] }
 		expect(() => parsePreset(root, "/tmp")).toThrow(/unknown runtime key "customBusiness"/)
 	})
 
@@ -840,7 +908,7 @@ describe("parsePreset schema validation", () => {
 				businessKeys: ["auditDemo"],
 				businessKeyValues: { auditDemo: { literal: "demo-value" } },
 			},
-			phases: [{ name: "p", prompt: "p.md", variables: { X: "runtime.auditDemo" } }],
+			phases: [{ name: "p", entry: true, startsAttempt: true, prompt: "p.md", variables: { X: "runtime.auditDemo" } }],
 		}
 		const preset = parsePreset(root, "/tmp")
 		expect(preset.runtime.businessKeyValues.get("auditDemo")).toEqual({ kind: "literal", value: "demo-value" })
@@ -891,13 +959,13 @@ describe("parsePreset schema validation", () => {
 	})
 
 	test("accepts item.idField reference in variables", () => {
-		const root: BoundaryRecord = { ...minimalRoot(), phases: [{ name: "p", prompt: "p.md", variables: { X: "item.id" } }] }
+		const root: BoundaryRecord = { ...minimalRoot(), phases: [{ name: "p", entry: true, startsAttempt: true, prompt: "p.md", variables: { X: "item.id" } }] }
 		const preset = parsePreset(root, "/tmp")
 		expect(preset.phases[0]!.variables[0]).toEqual({ key: "X", source: { kind: "item", field: "id" }, doc: null })
 	})
 
 	test("accepts known base item field reference in variables", () => {
-		const root: BoundaryRecord = { ...minimalRoot(), phases: [{ name: "p", prompt: "p.md", variables: { X: "item.status" } }] }
+		const root: BoundaryRecord = { ...minimalRoot(), phases: [{ name: "p", entry: true, startsAttempt: true, prompt: "p.md", variables: { X: "item.status" } }] }
 		const preset = parsePreset(root, "/tmp")
 		expect(preset.phases[0]!.variables[0]).toEqual({ key: "X", source: { kind: "item", field: "status" }, doc: null })
 	})
@@ -906,7 +974,7 @@ describe("parsePreset schema validation", () => {
 		const root: BoundaryRecord = {
 			...minimalRoot(),
 			item: { idField: "id", fields: { branch: "string", pr: { type: "number" } } },
-			phases: [{ name: "p", prompt: "p.md", variables: { BRANCH: "item.branch", PR: "item.pr" } }],
+			phases: [{ name: "p", entry: true, startsAttempt: true, prompt: "p.md", variables: { BRANCH: "item.branch", PR: "item.pr" } }],
 		}
 		const preset = parsePreset(root, "/tmp")
 		expect(Object.fromEntries(preset.item.fields)).toEqual({ branch: { type: "string" }, pr: { type: "number" } })
@@ -919,7 +987,7 @@ describe("parsePreset schema validation", () => {
 	test("accepts minimal valid preset and produces normalized shape", () => {
 		const root: BoundaryRecord = {
 			...minimalRoot(),
-			phases: [{ name: "p", prompt: "p.md", variables: { K: "item.id" }, roles: ["x"] }],
+			phases: [{ name: "p", entry: true, startsAttempt: true, prompt: "p.md", variables: { K: "item.id" }, roles: ["x"] }],
 			fragments: [{ id: "f", role: "x", path: "f.md" }],
 		}
 		const preset = parsePreset(root, "/tmp")
@@ -970,6 +1038,8 @@ exhausted   = "done"
 
 [[phases]]
 name   = "run"
+entry  = true
+startsAttempt = true
 prompt = "${entryRef}"
 
   # #408: minimal leaving edge so R2 passes for "pending" — without this the
@@ -1087,6 +1157,8 @@ exhausted   = "exhausted"
 
 [[phases]]
 name   = "run"
+entry = true
+startsAttempt = true
 prompt = "run-entry.md"
 
   [[phases.exits]]
@@ -1130,6 +1202,8 @@ exhausted   = "exhausted"
 
 [[phases]]
 name   = "run"
+entry = true
+startsAttempt = true
 prompt = "run-entry.md"
 
   [[phases.exits]]
@@ -1171,6 +1245,8 @@ exhausted   = "exhausted"
 
 [[phases]]
 name   = "run"
+entry = true
+startsAttempt = true
 prompt = "run-entry.md"
 
   [[phases.exits]]
@@ -1232,6 +1308,8 @@ exhausted   = "exhausted"
 
 [[phases]]
 name   = "run"
+entry = true
+startsAttempt = true
 prompt = "run-entry.md"
 
   [[phases.exits]]
@@ -1272,6 +1350,8 @@ exhausted   = "exhausted"
 
 [[phases]]
 name   = "run"
+entry = true
+startsAttempt = true
 prompt = "run-entry.md"
 
   [[phases.exits]]
@@ -1303,6 +1383,8 @@ exhausted   = "exhausted"
 
 [[phases]]
 name   = "run"
+entry = true
+startsAttempt = true
 prompt = "run-entry.md"
 
   [[phases.exits]]
@@ -1333,6 +1415,8 @@ exhausted   = "exhausted"
 
 [[phases]]
 name   = "run"
+entry = true
+startsAttempt = true
 prompt = "run-entry.md"
 
   [[phases.exits]]
@@ -1367,6 +1451,8 @@ exhausted   = "exhausted"
 
 [[phases]]
 name   = "run"
+entry = true
+startsAttempt = true
 prompt = "run-entry.md"
 
   [[phases.exits]]
@@ -1447,7 +1533,7 @@ describe("issue #400 — fragment index slicing per phase", () => {
 			item: { idField: "id" },
 			statuses: { continuable: ["a"], terminal: ["b"], exhausted: "b" },
 			phases: [
-				{ name: "alpha", prompt: "alpha.md", variables: { K: "item.id" }, roles: ["roleA", "shared"] },
+				{ name: "alpha", entry: true, startsAttempt: true, prompt: "alpha.md", next: [{ phase: "beta", on: "completed" }], variables: { K: "item.id" }, roles: ["roleA", "shared"] },
 				{ name: "beta", prompt: "beta.md", variables: { K: "item.id" }, roles: ["roleB", "shared"] },
 			],
 			fragments: [
@@ -1491,7 +1577,7 @@ describe("issue #400 — fragment index slicing per phase", () => {
 			item: { idField: "id" },
 			statuses: { continuable: ["a"], terminal: ["b"], exhausted: "b" },
 			phases: [
-				{ name: "p", prompt: "p.md", variables: { K: "item.id" }, roles: ["roleA", "ghost"] },
+				{ name: "p", entry: true, startsAttempt: true, prompt: "p.md", variables: { K: "item.id" }, roles: ["roleA", "ghost"] },
 			],
 			fragments: [
 				{ id: "a", role: "roleA", path: "a.md" },
@@ -1507,7 +1593,7 @@ describe("issue #400 — fragment index slicing per phase", () => {
 			item: { idField: "id" },
 			statuses: { continuable: ["a"], terminal: ["b"], exhausted: "b" },
 			phases: [
-				{ name: "p", prompt: "p.md", variables: { K: "item.id" }, roles: ["roleA", "roleA"] },
+				{ name: "p", entry: true, startsAttempt: true, prompt: "p.md", variables: { K: "item.id" }, roles: ["roleA", "roleA"] },
 			],
 			fragments: [
 				{ id: "a", role: "roleA", path: "a.md" },
@@ -1634,6 +1720,8 @@ exhausted = "exhausted"
 
 [[phases]]
 name = "iteration"
+entry = true
+startsAttempt = true
 prompt = "iter-entry.md"
 
   [[phases.exits]]

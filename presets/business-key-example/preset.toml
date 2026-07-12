@@ -35,6 +35,8 @@ exhausted   = "exhausted"
 [[phases]]
 name   = "audit"
 prompt = "audit-entry.md"
+entry  = true
+startsAttempt = true
 
   # #408 cross-table DAG check requires every continuable status to have at
   # least one leaving phase-exit edge. The fixture's `audit` phase had no

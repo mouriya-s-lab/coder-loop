@@ -1257,6 +1257,8 @@ exhausted = "custom_done"
 
 [[phases]]
 name = "run"
+entry = true
+startsAttempt = true
 prompt = "run.md"
 
   # #408: minimal leaving edge so R2 (deadlock-continuable) passes for the
@@ -1472,6 +1474,8 @@ exhausted   = "exhausted"
 
 [[phases]]
 name   = "run"
+entry = true
+startsAttempt = true
 prompt = "run.md"
 
   # \`pending\` has no leaving edge (the only exit writes pending itself), so
@@ -4134,6 +4138,8 @@ exhausted = "exhausted"
 
 [[phases]]
 name = "review"
+entry = true
+startsAttempt = true
 prompt = "review.md"
 
   [[phases.exits]]
@@ -5064,7 +5070,7 @@ process.exitCode = 0
 					eventLog,
 					sleepMs: 5,
 					// blocked-responder writes nothing so the terminal blocked status is preserved (#338).
-					writeStatus: phase === "iteration" ? "in_progress" : phase === "review" ? "blocked" : null,
+					writeStatus: phase === "review" ? "blocked" : null,
 				}),
 				chainCompleteTriggerForChain: () => null,
 				onEvent: (event) => {
@@ -5373,7 +5379,7 @@ process.exitCode = 0
 					const reviewRow = store.getRunByRunId(reviewRunId)
 					expect(iterRow?.phase).toBe("iteration")
 					expect(reviewRow?.phase).toBe("review")
-					expect(iterRow?.status).toBe("in_progress")
+					expect(iterRow?.status).toBe("queued")
 					expect(reviewRow?.status).toBe("done")
 					expect(iterRow?.itemId).toBe(item!.id)
 					expect(reviewRow?.itemId).toBe(item!.id)
@@ -6436,8 +6442,8 @@ process.exitCode = 0
 		const fakeRunner = resolve(root, "fake-runner.ts")
 		const eventLog = resolve(root, "events.jsonl")
 		await mkdir(loopDataRoot, { recursive: true })
-		// Two-phase fake runner: iteration writes its credential to iterationCapture + writes
-		// in_progress status (scheduler advances to review on the next tick); review writes its
+		// Two-phase fake runner: iteration writes its credential to iterationCapture and exits
+		// cleanly (the declared completed edge advances to review); review writes its
 		// credential to reviewCapture and sleeps long enough for the test to drive reorder.
 		// #419 review M2: iteration's sleep extended from 5ms to `iterationSleepMs` (default 3_000ms)
 		// so the iteration agent's run stays in the daemon's active-runs map while the test sends
@@ -6494,7 +6500,7 @@ process.exitCode = 0
 					// hits the active-credential gate instead of the inactive-run branch when the test
 					// suite runs concurrently.
 					iterationSleepMs: 3_000,
-					writeStatus: phase === "iteration" ? "in_progress" : null,
+					writeStatus: null,
 				}),
 				chainCompleteTriggerForChain: () => null,
 			},
@@ -7586,6 +7592,8 @@ exhausted   = "done"
 
 [[phases]]
 name   = "iteration"
+entry = true
+startsAttempt = true
 prompt = "iter.md"
 
   [phases.rights]
@@ -7819,7 +7827,7 @@ process.exitCode = 0
 				phase,
 				eventLog,
 				sleepMs: 5,
-				writeStatus: phase === "iteration" ? "in_progress" : "done",
+				writeStatus: phase === "review" ? "done" : null,
 			}),
 			chainCompleteTriggerForChain: () => null,
 			onEvent: (event) => {
@@ -8543,6 +8551,8 @@ binary = "codex"
 
 [[phases]]
 name = "run"
+entry = true
+startsAttempt = true
 prompt = "run.md"
 
   # #408: minimal leaving edge so R2 passes for "queued". The scheduler-prompt
