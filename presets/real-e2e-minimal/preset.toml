@@ -32,8 +32,14 @@ exhausted   = "exhausted"
 [[phases]]
 name   = "iteration"
 prompt = "iteration-entry.md"
+entry  = true
+startsAttempt = true
 runner = "codex"
 model  = "gpt-5.6-terra"
+
+  [[phases.next]]
+  phase = "review"
+  on    = "completed"
 
   [phases.variables]
   REPO        = { source = "chain.repository", label = "GitHub repository" }
@@ -47,6 +53,10 @@ name   = "review"
 prompt = "review-entry.md"
 runner = "codex"
 model  = "gpt-5.6-terra"
+
+  [[phases.next]]
+  phase  = "iteration"
+  status = "changes_requested"
 
   [[phases.exits]]
   status = "changes_requested"

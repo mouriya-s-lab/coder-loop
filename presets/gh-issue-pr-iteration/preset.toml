@@ -80,9 +80,15 @@ retry       = "changes_requested"
 [[phases]]
 name   = "iteration"
 prompt = "iter-entry.md"
+entry  = true
+startsAttempt = true
 runner = "codex"
 model  = "gpt-5.6-sol"
 roles  = ["common", "quality", "iter"]
+
+  [[phases.next]]
+  phase = "review"
+  on    = "completed"
 
   [phases.variables]
   TARGET_CWD               = { source = "runtime.targetCwd", label = "Target working directory (where `loop-data runtime artifacts` lives)" }
@@ -131,6 +137,10 @@ prompt = "review-entry.md"
 runner = "codex"
 model  = "gpt-5.6-sol"
 roles  = ["common", "quality", "review"]
+
+  [[phases.next]]
+  phase  = "iteration"
+  status = "changes_requested"
 
   # #407 / #409 / #410 per-phase rights segment. Review is the only phase that legitimately:
   #   - creates queue items (expanded-incomplete-parent flow inserts child items before flipping

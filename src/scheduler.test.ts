@@ -1947,7 +1947,7 @@ describe("scheduler reads the agent-written item status (v1 status model)", () =
 			const secondTick = await schedulerTick(options)
 			expect(secondTick.spawnedRuns).toHaveLength(1)
 			await secondTick.spawnedRuns[0]!.closed
-			expect(fixture.store.getItem(item.id)?.attempts).toBe(1)
+			expect(fixture.store.getItem(item.id)?.attempts).toBe(2)
 			expect(fixture.store.getItem(item.id)?.status).toBe("changes_requested")
 		} finally {
 			fixture.store.close()
@@ -2095,7 +2095,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 			const alphaTick = await schedulerTick(baseOptions)
 			expect(alphaTick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-alpha`)
 			await alphaTick.spawnedRuns[0]!.closed
-			expect(fixture.store.getItem(item.id)).toMatchObject({ status: runtimeStatus("queued"), phase: "alpha", attempts: 1 })
+			expect(fixture.store.getItem(item.id)).toMatchObject({ status: runtimeStatus("queued"), phase: "alpha", attempts: 0 })
 
 			const betaTick = await schedulerTick(baseOptions)
 			expect(betaTick.spawnedRuns[0]?.runId).toBe(`run-${chain.id}-${item.id}-beta`)
@@ -2113,6 +2113,43 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				)
 				.map((event) => event.phase)
 			expect(phaseStarts).toEqual(["alpha", "beta", "gamma"])
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("declarative retry edge reopens work without rerunning the one-time entry node", async () => {
+		const fixture = await createFixture("phase-frontier-retry-skips-entry")
+		const presetDir = resolve(fixture.loopDataRoot, "..", "three-step-retry-preset")
+		await writeThreeStepPreset(presetDir)
+		try {
+			const chain = createChain(fixture.store, "phase-frontier-retry-skips-entry-chain", { preset: "three-step" })
+			const item = createItem(fixture.store, chain, { issueNumber: 662_001, repoCwd: "/repo/a", summary: null })
+			let gammaRuns = 0
+			const options = fixture.options({
+				loadedPreset: await loadedPresetFromDir(presetDir),
+				runIdFactory: ({ phase }) => `run-frontier-${phase}-${Date.now()}-${gammaRuns}`,
+				prompt: ({ item: selected, runId, worktreePath, phase }) => JSON.stringify({
+					itemId: selected.id,
+					issueNumber: Number(selected.itemId),
+					runId,
+					worktreePath,
+					eventLog: fixture.eventLog,
+					sleepMs: 5,
+					exitCode: 0,
+					writeStatus: phase === "gamma" && gammaRuns++ === 0 ? "changes_requested" : null,
+				}),
+			})
+			for (let index = 0; index < 4; index += 1) {
+				const tick = await schedulerTick(options)
+				expect(tick.spawnedRuns).toHaveLength(1)
+				await tick.spawnedRuns[0]!.closed
+			}
+			const phases = fixture.schedulerEvents
+				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> => event.type === "phase.start" && event.itemId === item.id)
+				.map((event) => event.phase)
+			expect(phases).toEqual(["alpha", "beta", "gamma", "beta"])
+			expect(phases.filter((phase) => phase === "alpha")).toHaveLength(1)
 		} finally {
 			fixture.store.close()
 		}
@@ -4380,6 +4417,11 @@ binary = "codex"
 	[[phases]]
 	name = "alpha"
 	prompt = "alpha.md"
+	entry = true
+
+	  [[phases.next]]
+	  phase = "beta"
+	  on = "completed"
 
 	  [phases.variables]
 	  ISSUE = "item.issue"
@@ -4387,6 +4429,11 @@ binary = "codex"
 	[[phases]]
 	name = "beta"
 	prompt = "beta.md"
+	startsAttempt = true
+
+	  [[phases.next]]
+	  phase = "gamma"
+	  on = "completed"
 
 	  [phases.variables]
 	  ISSUE = "item.issue"
@@ -4395,9 +4442,17 @@ binary = "codex"
 	name = "gamma"
 	prompt = "gamma.md"
 
+	  [[phases.next]]
+	  phase = "beta"
+	  status = "changes_requested"
+
 	  [[phases.exits]]
 	  status = "done"
 	  when = "gamma accepted"
+
+	  [[phases.exits]]
+	  status = "changes_requested"
+	  when = "gamma requests another work cycle"
 
 	  [phases.variables]
 	  ISSUE = "item.issue"
@@ -4430,6 +4485,8 @@ binary = "codex"
 [[phases]]
 name = "run"
 prompt = "run.md"
+entry = true
+startsAttempt = true
 
   # #408: minimal leaving edge so R2 passes for "queued". The empty-success
   # test asserts dependency-unblock semantics; the exit set is inert from the
@@ -4469,6 +4526,8 @@ binary = "codex"
 [[phases]]
 name = "run"
 prompt = "run.md"
+entry = true
+startsAttempt = true
 
   # #408: minimal leaving edge so R2 passes for "queued". The scheduler
   # attempts-exhausted test only cares about the engine writing
@@ -4508,6 +4567,8 @@ binary = "codex"
 
 [[phases]]
 name = "run"
+entry = true
+startsAttempt = true
 prompt = "run.md"
 `,
 	)

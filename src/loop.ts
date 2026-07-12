@@ -471,9 +471,17 @@ const PresetPhaseRightsBoundary = arkType({
 	"privilegedOps?": "string[]",
 })
 
+const PresetPhaseNextBoundary = arkType.or(
+	{ phase: "string", on: arkType.unit("completed") },
+	{ phase: "string", status: "string" },
+)
+
 const PresetPhaseBoundary = arkType({
 	name: "string",
 	prompt: "string",
+	"entry?": "boolean",
+	"startsAttempt?": "boolean",
+	"next?": PresetPhaseNextBoundary.array(),
 	"runner?": "string",
 	"model?": "string",
 	"exits?": PresetPhaseExitBoundary.array(),
@@ -628,6 +636,9 @@ export type PresetPhaseRights = {
 export type PresetPhase = {
 	name: string
 	prompt: string
+	entry: boolean
+	startsAttempt: boolean
+	next: readonly PresetPhaseNext[]
 	exits: readonly PresetPhaseExit[]
 	variables: readonly PresetPhaseVariable[]
 	trigger: PresetPhaseTrigger | null
@@ -640,6 +651,10 @@ export type PresetPhase = {
 	// #407 per-phase rights, always present at runtime (parser fills default-deny).
 	rights: PresetPhaseRights
 }
+
+export type PresetPhaseNext =
+	| { kind: "completed"; phase: string }
+	| { kind: "item-status"; phase: string; status: InternalStatus }
 
 export type PresetFragment = {
 	id: string
@@ -4436,9 +4451,16 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 		// Missing segment → every field false / empty set; the gate downstream never has to branch
 		// on "rights absent". Schema parsing is the only place that knows about the toml-side shape.
 		const rights = parsePresetPhaseRights(entry.rights ?? null, `preset.phases[${index}].rights`)
-		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), exits, variables, trigger, defaultRunner: runner, defaultModel: model, roles, rights })
+		const next: PresetPhaseNext[] = (entry.next ?? []).map((candidate) => "on" in candidate
+			? { kind: "completed", phase: candidate.phase }
+			: { kind: "item-status", phase: candidate.phase, status: parseInternalStatus(candidate.status, `preset.phases[${index}].next.status`) })
+		phases.push({ name: entry.name, prompt: resolve(presetDir, entry.prompt), entry: entry.entry ?? false, startsAttempt: entry.startsAttempt ?? false, next, exits, variables, trigger, defaultRunner: runner, defaultModel: model, roles, rights })
 	}
 	if (!phases.some((phase) => phase.trigger === null)) presetError("preset.phases: must include at least one non-trigger phase")
+	const entryPhases = phases.filter((phase) => phase.entry)
+	if (entryPhases.length !== 1) presetError(`preset.phases: exactly one phase must declare entry = true (found ${entryPhases.length})`)
+	if (entryPhases[0]?.trigger !== null) presetError(`preset phase "${entryPhases[0]?.name}" cannot be both entry and trigger`)
+	if (!phases.some((phase) => phase.startsAttempt)) presetError("preset.phases: at least one phase must declare startsAttempt = true")
 
 		for (const [index, phase] of phases.entries()) {
 			const phaseExitStatuses = new Set<string>()
@@ -4464,6 +4486,16 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 					}
 					default:
 						assertNeverPhaseExit(exit)
+				}
+			}
+			const nextKeys = new Set<string>()
+			for (const candidate of phase.next) {
+				if (!phaseNames.has(candidate.phase)) presetError(`preset.phases[${index}].next.phase: unrecognized phase "${candidate.phase}"`)
+				const key = candidate.kind === "completed" ? "completed" : `status:${candidate.status}`
+				if (nextKeys.has(key)) presetError(`preset.phases[${index}].next: ambiguous ${key} candidates`)
+				nextKeys.add(key)
+				if (candidate.kind === "item-status" && !phaseExitStatuses.has(candidate.status)) {
+					presetError(`preset.phases[${index}].next.status: status "${candidate.status}" is not declared by this phase's item-status exits`)
 				}
 			}
 			if (phase.trigger === null) continue

@@ -553,10 +553,16 @@ type SchedulerItemTriggerPhase = {
 }
 
 type SchedulerPhasePlan = {
-	firstPhase: string
+	entryPhase: string
+	startsAttemptPhases: ReadonlySet<string>
 	nonTriggerPhases: readonly string[]
+	nextByPhase: ReadonlyMap<string, readonly SchedulerPhaseNext[]>
 	itemTriggerPhases: readonly SchedulerItemTriggerPhase[]
 }
+
+type SchedulerPhaseNext =
+	| { kind: "completed"; phase: string }
+	| { kind: "item-status"; phase: string; status: InternalStatus }
 
 // #412: phase plan resolution always flows from a representative item's preset. The earlier
 // chain-only variant (`resolvePhasePlanForChain`) was removed once mixed-preset chains became
@@ -567,22 +573,24 @@ async function resolvePhasePlanForChainWithItems(
 	chain: ChainRecord,
 	items: readonly ItemRecord[],
 ): Promise<SchedulerPhasePlan> {
-	if (options.phase !== undefined) return { firstPhase: options.phase, nonTriggerPhases: [options.phase], itemTriggerPhases: [] }
+	if (options.phase !== undefined) return { entryPhase: options.phase, startsAttemptPhases: new Set([options.phase]), nonTriggerPhases: [options.phase], nextByPhase: new Map(), itemTriggerPhases: [] }
 	const { preset } = await schedulerLoadedPresetForChainItems(options, chain, items)
 	return buildPhasePlanFromPreset(preset)
 }
 
 function buildPhasePlanFromPreset(preset: SchedulerLoadedPreset["preset"]): SchedulerPhasePlan {
 	const nonTriggerPhases = preset.phases.flatMap((phase) => phase.trigger === null ? [phase.name] : [])
-	const firstPhase = nonTriggerPhases[0]
-	if (firstPhase === undefined) throw new Error(`preset ${preset.name} has no non-trigger phases`)
+	const entryPhase = preset.phases.find((phase) => phase.entry)?.name
+	if (entryPhase === undefined) throw new Error(`preset ${preset.name} has no entry phase`)
+	const startsAttemptPhases = new Set(preset.phases.filter((phase) => phase.startsAttempt).map((phase) => phase.name))
+	const nextByPhase = new Map(preset.phases.map((phase) => [phase.name, phase.next]))
 	const itemTriggerPhases = preset.phases.flatMap((phase): SchedulerItemTriggerPhase[] => {
 		const trigger = phase.trigger
 		if (trigger === null) return []
 		if (!("afterPhase" in trigger)) return []
 		return [{ name: phase.name, afterPhase: trigger.afterPhase, whenStatus: trigger.whenStatus }]
 	})
-	return { firstPhase, nonTriggerPhases, itemTriggerPhases }
+	return { entryPhase, startsAttemptPhases, nonTriggerPhases, nextByPhase, itemTriggerPhases }
 }
 
 type SelectNextItemAndPhaseInput = {
@@ -636,13 +644,13 @@ function selectNextItemAndPhase(input: SelectNextItemAndPhaseInput): { item: Ite
 	if (phaseContinuation !== undefined) return phaseContinuation
 
 	const pending = selectNextPendingItemFromSnapshot({
-		items: input.items,
+		items: input.items.filter((item) => item.phase === null),
 		repoCwd: input.repoCwd,
 		statuses: input.chainStatuses.pending,
 		terminalStatuses: input.chainStatuses.terminal,
 		now: input.now,
 	})
-	return pending === null ? null : { item: pending, phase: input.phasePlan.firstPhase }
+	return pending === null ? null : { item: pending, phase: input.phasePlan.entryPhase }
 }
 
 function nextNonTriggerPhaseForItem(input: {
@@ -654,25 +662,30 @@ function nextNonTriggerPhaseForItem(input: {
 		now: number
 	}): string | null {
 	if (!itemBackoffReady(input.item, input.now)) return null
-	if (input.item.phase === null || input.item.lastRunId === null) return null
+	if (input.item.phase === null) return null
 	if (input.terminalStatuses.includes(input.item.status)) return null
+	if (!input.phasePlan.nonTriggerPhases.includes(input.item.phase)) return null
+	if (input.item.lastRunId === null) return input.item.phase
 	const latestRun = input.runsById.get(input.item.lastRunId)
-	if (latestRun === undefined) return null
-	if (latestRun.itemId !== input.item.id) return null
-	if (latestRun.phase !== input.item.phase) return null
+	if (latestRun === undefined) return input.item.phase
+	if (latestRun.itemId !== input.item.id) return input.item.phase
+	if (latestRun.phase !== input.item.phase) return input.item.phase
 	if (latestRun.endedAt === null) return null
-	const currentPhaseIndex = input.phasePlan.nonTriggerPhases.indexOf(input.item.phase)
-	if (currentPhaseIndex < 0) return null
-	if (currentPhaseIndex === input.phasePlan.nonTriggerPhases.length - 1) {
-		const startStatus = latestRun.extra.startStatus ?? null
-		const startStatusUpdatedAt = typeof latestRun.extra.startStatusUpdatedAt === "number" ? latestRun.extra.startStatusUpdatedAt : null
-		const statusWrittenAfterRunStart = startStatusUpdatedAt !== null
-			&& input.item.statusUpdatedAt !== startStatusUpdatedAt
-			&& input.item.statusUpdatedAt >= latestRun.startedAt
-		if (startStatus === input.item.status && !statusWrittenAfterRunStart && input.pendingStatuses.includes(input.item.status)) return input.item.phase
+	if (latestRun.exitCode !== 0) return input.item.phase
+	const startStatus = latestRun.extra.startStatus ?? null
+	const startStatusUpdatedAt = typeof latestRun.extra.startStatusUpdatedAt === "number" ? latestRun.extra.startStatusUpdatedAt : null
+	const statusWrittenAfterRunStart = startStatusUpdatedAt !== null
+		&& input.item.statusUpdatedAt !== startStatusUpdatedAt
+		&& input.item.statusUpdatedAt >= latestRun.startedAt
+	const candidates = input.phasePlan.nextByPhase.get(input.item.phase) ?? []
+	if (statusWrittenAfterRunStart || startStatus !== input.item.status) {
+		const routed = candidates.find((candidate) => candidate.kind === "item-status" && candidate.status === input.item.status)
+		if (routed !== undefined) return routed.phase
+		return input.pendingStatuses.includes(input.item.status) ? input.item.phase : null
 	}
-	if (latestRun.exitCode !== 0) return null
-	return input.phasePlan.nonTriggerPhases[currentPhaseIndex + 1] ?? null
+	const completed = candidates.find((candidate) => candidate.kind === "completed")
+	if (completed !== undefined) return completed.phase
+	return input.pendingStatuses.includes(input.item.status) ? input.item.phase : null
 }
 
 function hasUnfinishedCurrentPhaseRun(item: ItemRecord, runsById: ReadonlyMap<string, RunRecord>): boolean {
@@ -984,7 +997,7 @@ async function spawnSchedulerRun(
 
 		const runner = await resolvePhaseRunner(options, { chain, item, phase })
 		const resumeDecision = resumeDecisionForItem(item, phase, runner.kind)
-		const startsAttempt = phase === phasePlan.firstPhase && resumeDecision.kind === "fresh"
+		const startsAttempt = phasePlan.startsAttemptPhases.has(phase) && resumeDecision.kind === "fresh"
 		runId = options.runIdFactory?.({ chain, item, phase }) ?? makeRunId(item.id, phase)
 		startedAt = nowSeconds(options)
 		options.store.recordRun({
@@ -1954,6 +1967,7 @@ async function unblockDependencySatisfiedItems(
 		const nextExtra = itemExtraWithoutKeys(item.extra, ["dependsOn"])
 		options.store.updateItem(item.id, {
 			status: engineLifecycleAdmittedItemStatus(chainStatuses.entry, "scheduler.dependency-unblock-restore"),
+			phase: null,
 			extra: nextExtra,
 			updatedAt: nowSeconds(options),
 		})

@@ -177,6 +177,8 @@ exhausted = "parked"
 
 [[phases]]
 name = "run"
+entry = true
+startsAttempt = true
 prompt = "run.md"
 
   # #408: minimal leaving edges so R2 passes for both continuable statuses.
