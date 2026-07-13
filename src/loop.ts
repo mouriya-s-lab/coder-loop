@@ -30,7 +30,15 @@ import {
 	type PresetPhasePrivilegedOp,
 } from "./daemon"
 import { dispatchSubcommand } from "./install-commands"
-import { parseContextAppendBeginResult, parseContextAppendChunkResult, parseContextAppendCommitResult } from "./context-entry"
+import {
+	contextScopeFromCliArgs,
+	parseContextAppendBeginResult,
+	parseContextAppendChunkResult,
+	parseContextAppendCliScopeArgs,
+	parseContextAppendCommitResult,
+	type ContextAppendBeginRequest,
+	type ContextScope,
+} from "./context-entry"
 import { classifyRateLimitFromStdout } from "./rate-limit"
 import { createStreamTextState } from "./runner-output"
 import { LOOP_RUN_CREDENTIAL_ENV, RuntimePathError, resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
@@ -374,7 +382,14 @@ export type QueueUnblockCommandArgs = {
 	dryRun: boolean
 }
 
-type ContextAppendCommandArgs = { chainName: string; scope: string; itemId: string | null; groupId: string | null; body: string | null; bodyFile: string | null; loopDataRoot: string | null; json: boolean }
+type ContextAppendCommandArgs = {
+	chainName: string
+	scope: ContextScope
+	body: string | null
+	bodyFile: string | null
+	loopDataRoot: string | null
+	json: boolean
+}
 
 // #433: per-target on-disk runtime preferences are retired. Every fact the engine spawns against
 // reaches it via chain metadata now (see chainResolvedFromChain). The composed-options struct
@@ -1762,7 +1777,17 @@ const contextAppendCliCommand = command({
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
 		json: flag({ long: "json" }),
 	},
-	handler: (args): ContextAppendCommandArgs => ({ chainName: args.chainName, scope: args.scope, itemId: args.itemId ?? null, groupId: args.groupId ?? null, body: args.body ?? null, bodyFile: args.bodyFile ?? null, loopDataRoot: args.loopDataRoot ?? null, json: args.json }),
+	handler: (args): ContextAppendCommandArgs => {
+		const scopeArgs = parseContextAppendCliScopeArgs({ scope: args.scope, itemId: args.itemId ?? null, groupId: args.groupId ?? null })
+		return {
+			chainName: args.chainName,
+			scope: contextScopeFromCliArgs(scopeArgs),
+			body: args.body ?? null,
+			bodyFile: args.bodyFile ?? null,
+			loopDataRoot: args.loopDataRoot ?? null,
+			json: args.json,
+		}
+	},
 })
 
 const contextCliCommand = subcommands({ name: "context", description: "Append daemon-owned context entries.", cmds: { append: contextAppendCliCommand } })
@@ -1770,14 +1795,10 @@ const contextCliCommand = subcommands({ name: "context", description: "Append da
 async function runContextCommand(args: string[]): Promise<void> {
 	const parsed = await runCmd(contextCliCommand, args)
 	const value = parsed.value
-	let scope: JsonObject
-	if (value.scope === "chain") scope = { kind: "chain" }
-	else if (value.scope === "item" && value.itemId !== null) scope = { kind: "item", itemId: value.itemId }
-	else if (value.scope === "group" && value.groupId !== null) scope = { kind: "group", groupId: value.groupId }
-	else fail("--scope must be chain, item with --item, or group with --group")
 	if ((value.body === null) === (value.bodyFile === null)) fail("exactly one of --body or --body-file is required")
 	const body = value.body ?? await readFile(value.bodyFile ?? fail("body file missing"), "utf-8")
-	const begun = parseContextAppendBeginResult(await requestDaemonResult(value.loopDataRoot, "context.append.begin", { chainName: value.chainName, scope }))
+	const beginRequest: ContextAppendBeginRequest = { scope: value.scope }
+	const begun = parseContextAppendBeginResult(await requestDaemonResult(value.loopDataRoot, "context.append.begin", { chainName: value.chainName, ...beginRequest }))
 	const sessionId = begun.sessionId
 	const chunkChars = 256 * 1024
 	let sequence = 0

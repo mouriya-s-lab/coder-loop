@@ -3,7 +3,14 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { createServer } from "node:net"
 import { Database } from "bun:sqlite"
-import { parseContextAuthor, parseContextScope } from "./context-entry"
+import {
+	contextScopeFromCliArgs,
+	parseContextAppendCliScopeArgs,
+	parseContextAuthor,
+	parseContextScope,
+	parsePersistedContextEntryRow,
+	persistedContextScope,
+} from "./context-entry"
 import { openSqliteStateStore } from "./sqlite-state"
 import { daemonRequest, sendDaemonRequest } from "./daemon"
 import { resolveLoopDataPaths } from "./runtime-paths"
@@ -15,6 +22,25 @@ describe("context entry foundation", () => {
 		expect(() => parseContextScope({ kind: "run", runId: "r" })).toThrow()
 		expect(parseContextAuthor({ kind: "operator" })).toEqual({ kind: "operator" })
 		expect(() => parseContextAuthor({ kind: "agent", runId: "r" })).toThrow()
+	})
+
+	test("CLI and persisted-row scope boundaries yield exhaustive discriminated products", () => {
+		for (const input of [
+			{ scope: "chain", itemId: null, groupId: null },
+			{ scope: "item", itemId: "594", groupId: null },
+			{ scope: "group", itemId: null, groupId: "par-1" },
+		] as const) {
+			const parsed = parseContextAppendCliScopeArgs(input)
+			expect(contextScopeFromCliArgs(parsed).kind).toBe(input.scope)
+		}
+		expect(() => parseContextAppendCliScopeArgs({ scope: "item", itemId: null, groupId: null })).toThrow()
+		expect(() => parseContextAppendCliScopeArgs({ scope: "chain", itemId: "594", groupId: null })).toThrow()
+
+		const common = { id: "entry", chain_id: 1, created_at: 1, author: '{"kind":"operator"}', body: "body" }
+		expect(persistedContextScope(parsePersistedContextEntryRow({ ...common, scope_kind: "chain", scope_key: null }))).toEqual({ kind: "chain" })
+		expect(persistedContextScope(parsePersistedContextEntryRow({ ...common, scope_kind: "item", scope_key: "594" }))).toEqual({ kind: "item", itemId: "594" })
+		expect(persistedContextScope(parsePersistedContextEntryRow({ ...common, scope_kind: "group", scope_key: "par-1" }))).toEqual({ kind: "group", groupId: "par-1" })
+		expect(() => parsePersistedContextEntryRow({ ...common, scope_kind: "chain", scope_key: "unexpected" })).toThrow()
 	})
 
 	test("context entries are append-only and removed by chain delete", async () => {

@@ -7717,6 +7717,73 @@ describe("daemonRateLimitDecision (issue #478)", () => {
 		} finally { await fixture.daemon.stop() }
 	}, 30_000)
 
+	test("context denial audit preserves active agent attribution before request and chain rejection", async () => {
+		const fixture = await startQueueUnblockGateFixture("context-agent-deny-attribution", { preset: "loaded", targetStatus: "blocked" })
+		try {
+			fixture.releaseTick.resolve()
+			const credential = await waitFor(async () => { try { return (await readFile(fixture.credentialPath, "utf-8")).trim() } catch { return "" } }, (value) => value.length > 0, 8_000)
+			expect((await sendDaemonRequest(fixture.socketPath, daemonRequest("context.append.chunk", { sequence: 0, chunk: "body", agentCredential: credential }))).ok).toBe(false)
+			expect((await sendDaemonRequest(fixture.socketPath, daemonRequest("context.append.commit", { sessionId: "unknown-agent-session", agentCredential: credential }))).ok).toBe(false)
+			expect((await sendDaemonRequest(fixture.socketPath, daemonRequest("context.append.begin", { chainName: "missing-context-chain", scope: { kind: "chain" }, agentCredential: credential }))).ok).toBe(false)
+
+			const deletedSessionId = stringValue(expectOk(await sendDaemonRequest(fixture.socketPath, daemonRequest("context.append.begin", {
+				chainName: fixture.chainName,
+				scope: { kind: "chain" },
+				agentCredential: credential,
+			}))).sessionId)
+			const missingSessionId = stringValue(expectOk(await sendDaemonRequest(fixture.socketPath, daemonRequest("context.append.begin", {
+				chainName: fixture.chainName,
+				scope: { kind: "chain" },
+				agentCredential: credential,
+			}))).sessionId)
+			const deletingStore = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			deletingStore.updateChain(fixture.chainId, { status: "deleted" })
+			deletingStore.close()
+			expect((await sendDaemonRequest(fixture.socketPath, daemonRequest("context.append.begin", { chainName: fixture.chainName, scope: { kind: "chain" }, agentCredential: credential }))).ok).toBe(false)
+			expect((await sendDaemonRequest(fixture.socketPath, daemonRequest("context.append.commit", { sessionId: deletedSessionId, agentCredential: credential }))).ok).toBe(false)
+			const restoringStore = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			restoringStore.updateChain(fixture.chainId, { status: "active" })
+			restoringStore.close()
+			const sessions = Reflect.get(fixture.daemon, "contextAppendSessions")
+			if (!(sessions instanceof Map)) throw new Error("context sessions unavailable")
+			record(sessions.get(missingSessionId)).chainId = 2_147_483_647
+			expect((await sendDaemonRequest(fixture.socketPath, daemonRequest("context.append.commit", { sessionId: missingSessionId, agentCredential: credential }))).ok).toBe(false)
+
+			const denialEvents = (await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile)).events
+			for (const reason of ["invalid-request", "unknown-session", "chain-deleted", "chain-not-found"] as const) {
+				expect(denialEvents.some((event) => event.type === "context.write_admission"
+					&& event.payload.outcome === "deny"
+					&& event.payload.reason === reason
+					&& event.subject?.kind === "agent")).toBe(true)
+			}
+		} finally { await fixture.daemon.stop() }
+	}, 30_000)
+
+	test("context append sessions cannot outlive soft chain deletion", async () => {
+		const fixture = await startFixture("context-deleted-chain-lifecycle", { schedulerEnabled: false })
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", { name: "context-deleted-chain", repository: "o/r" })).chain)
+			const chainId = numberValue(chain.id)
+			const sessionId = stringValue(expectOk(await request(fixture, "context.append.begin", { chainId, scope: { kind: "chain" } })).sessionId)
+			expectOk(await request(fixture, "context.append.chunk", { sessionId, sequence: 0, chunk: "must-not-survive" }))
+			const deleted = expectOk(await request(fixture, "chain.delete", { chainId }))
+			expect(deleted.deletedContextEntries).toBe(0)
+			expect((await request(fixture, "context.append.commit", { sessionId })).ok).toBe(false)
+			const beginAfterDelete = await request(fixture, "context.append.begin", { chainId, scope: { kind: "chain" } })
+			expect(beginAfterDelete.ok).toBe(false)
+			if (!beginAfterDelete.ok) expect(beginAfterDelete.error.code).toBe("chain_deleted")
+
+			const residueStore = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			residueStore.appendContextEntry({ chainId, scope: { kind: "chain" }, author: { kind: "operator" }, body: "late residue" })
+			residueStore.close()
+			const deletedAgain = expectOk(await request(fixture, "chain.delete", { chainId }))
+			expect(deletedAgain).toMatchObject({ alreadyDeleted: true, deletedContextEntries: 1 })
+			const checkStore = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			expect(checkStore.listContextEntries(chainId)).toEqual([])
+			checkStore.close()
+		} finally { await fixture.daemon.stop() }
+	})
+
 	test("context write admission audit", async () => {
 		const fixture = await startFixture("context-write-audit", { schedulerEnabled: false })
 		try {

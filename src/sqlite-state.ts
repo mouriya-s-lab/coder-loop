@@ -1430,7 +1430,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 		listContextEntries: (chainId) => read("list context entries", () => db.query<PersistedContextEntryRow, SqlParams>(
 			"SELECT * FROM context_entries WHERE chain_id=$chainId ORDER BY created_at,id").all({chainId}).map((rawRow) => {
 				const row = parsePersistedContextEntryRow(rawRow)
-				const scope = persistedContextScope(row.scope_kind, row.scope_key)
+				const scope = persistedContextScope(row)
 				return {id:row.id,chainId:row.chain_id,createdAt:row.created_at,scope,author:parseContextAuthor(JSON.parse(row.author)),body:row.body}
 			})),
 

@@ -1629,60 +1629,64 @@ export class CoderLoopDaemon {
 
 	private contextCaller(args: JsonObject): Result<ItemMutationCaller, ResolveCallerDenyReason> { return this.resolveItemMutationCaller(args) }
 
-	private contextAuthorSubject(author: ContextAuthor): ItemMutationCaller["subject"] {
-		switch (author.kind) {
-			case "operator": return { kind: "operator" }
-			case "agent": return { kind: "agent", runId: author.runId, phase: author.phase }
-		}
-	}
-
 	private async admitContextSessionRequest(args: JsonObject, command: Exclude<ContextAppendCommand, "begin">): Promise<ContextSessionRequestAdmission> {
+		const resolved = this.contextCaller(args)
+		if (resolved.kind === "err") {
+			await this.recordContextAdmission(null, { command, outcome: "deny", reason: resolved.error.kind, sessionId: null, subject: { kind: "operator" } })
+			throw this.resolveCallerDenyError(resolved.error)
+		}
+		const caller = resolved.value
 		let sessionId: string
 		try {
 			sessionId = parseContextAppendSessionRequest(args).sessionId
 		} catch (error) {
-			await this.recordContextAdmission(null, { command, outcome: "deny", reason: "invalid-request", sessionId: null, subject: { kind: "operator" } })
+			await this.recordContextAdmission(null, { command, outcome: "deny", reason: "invalid-request", sessionId: null, subject: caller.subject })
 			throw new DaemonError("invalid_request", errorMessage(error))
 		}
 		const session = this.contextAppendSessions.get(sessionId)
 		if (session === undefined) {
-			await this.recordContextAdmission(null, { command, outcome: "deny", reason: "unknown-session", sessionId, subject: { kind: "operator" } })
+			await this.recordContextAdmission(null, { command, outcome: "deny", reason: "unknown-session", sessionId, subject: caller.subject })
 			throw new DaemonError("invalid_request", "unknown context append session")
 		}
 		const chain = this.requireStore().getChain(session.chainId)
 		if (chain === null) {
-			await this.recordContextAdmission(null, { command, outcome: "deny", reason: "chain-not-found", sessionId, subject: this.contextAuthorSubject(session.author) })
+			this.contextAppendSessions.delete(sessionId)
+			await this.recordContextAdmission(null, { command, outcome: "deny", reason: "chain-not-found", sessionId, subject: caller.subject })
 			throw new DaemonError("not_found", "context append session chain no longer exists")
 		}
-		const resolved = this.contextCaller(args)
-		if (resolved.kind === "err") {
-			await this.recordContextAdmission(chain, { command, outcome: "deny", reason: resolved.error.kind, sessionId, subject: { kind: "operator" } })
-			throw this.resolveCallerDenyError(resolved.error)
+		if (chain.status === "deleted") {
+			this.contextAppendSessions.delete(sessionId)
+			await this.recordContextAdmission(chain, { command, outcome: "deny", reason: "chain-deleted", sessionId, subject: caller.subject })
+			throw new DaemonError("chain_deleted", `context append cannot mutate deleted chain ${chain.name}`, { chainId: chain.id, chainName: chain.name })
 		}
 		const expected = session.author
 		const matches = expected.kind === "operator"
-			? resolved.value.kind === "operator"
-			: resolved.value.kind === "agent" && resolved.value.runId === expected.runId && resolved.value.phase === expected.phase
+			? caller.kind === "operator"
+			: caller.kind === "agent" && caller.runId === expected.runId && caller.phase === expected.phase
 		if (!matches) {
-			await this.recordContextAdmission(chain, { command, outcome: "deny", reason: "session-owner-mismatch", sessionId, subject: resolved.value.subject })
+			await this.recordContextAdmission(chain, { command, outcome: "deny", reason: "session-owner-mismatch", sessionId, subject: caller.subject })
 			throw new DaemonError("invalid_caller", "context append session belongs to a different admitted caller")
 		}
-		return { sessionId, session, chain, caller: resolved.value }
+		return { sessionId, session, chain, caller }
 	}
 
 	private async handleContextAppendBegin(args: JsonObject): Promise<JsonObject> {
+		const callerResult = this.contextCaller(args)
+		if (callerResult.kind === "err") {
+			await this.recordContextAdmission(null, { command: "begin", outcome: "deny", reason: callerResult.error.kind, sessionId: null, subject: { kind: "operator" } })
+			throw this.resolveCallerDenyError(callerResult.error)
+		}
 		let chain: ChainRecord
 		try {
 			chain = this.resolveChain(args)
 		} catch (error) {
 			const reason: ContextWriteAdmissionDenyReason = error instanceof DaemonError && error.code === "not_found" ? "chain-not-found" : "invalid-request"
-			await this.recordContextAdmission(null, { command: "begin", outcome: "deny", reason, sessionId: null, subject: { kind: "operator" } })
+			await this.recordContextAdmission(null, { command: "begin", outcome: "deny", reason, sessionId: null, subject: callerResult.value.subject })
 			throw error
 		}
-		const callerResult = this.contextCaller(args)
-		if (callerResult.kind === "err") {
-			await this.recordContextAdmission(chain, { command: "begin", outcome: "deny", reason: callerResult.error.kind, sessionId: null, subject: { kind: "operator" } })
-			throw this.resolveCallerDenyError(callerResult.error)
+		if (chain.status === "deleted") {
+			await this.recordContextAdmission(chain, { command: "begin", outcome: "deny", reason: "chain-deleted", sessionId: null, subject: callerResult.value.subject })
+			throw new DaemonError("chain_deleted", `context append cannot mutate deleted chain ${chain.name}`, { chainId: chain.id, chainName: chain.name })
 		}
 		if (Object.hasOwn(args, "author")) {
 			await this.recordContextAdmission(chain, { command: "begin", outcome: "deny", reason: "invalid-request", sessionId: null, subject: callerResult.value.subject })
@@ -2331,14 +2335,17 @@ export class CoderLoopDaemon {
 	private async handleChainDelete(args: JsonObject): Promise<JsonObject> {
 		const chain = this.resolveChain(args)
 		if (chain.status === "deleted") {
+			const invalidatedContextAppendSessions = this.invalidateContextAppendSessionsForChain(chain.id)
+			const deletedContextEntries = this.requireStore().deleteContextEntriesForChain(chain.id)
 			this.decisionFingerprints.release({ kind: "chain", chainId: chain.id })
-			return { chain: chainToJson(chain), alreadyDeleted: true }
+			return { chain: chainToJson(chain), alreadyDeleted: true, invalidatedContextAppendSessions, deletedContextEntries }
 		}
 		const resumeScheduler = await this.pauseSchedulerForMutation()
 		try {
 			const terminatedRuns = await this.terminateActiveRunsForChain(chain.id)
 			const cleanup = await this.cleanupChainRuntime(chain)
 			const updated = this.requireStore().updateChain(chain.id, { status: "deleted" })
+			const invalidatedContextAppendSessions = this.invalidateContextAppendSessionsForChain(chain.id)
 			const deletedContextEntries = this.requireStore().deleteContextEntriesForChain(chain.id)
 			this.decisionFingerprints.release({ kind: "chain", chainId: chain.id })
 			return {
@@ -2346,11 +2353,22 @@ export class CoderLoopDaemon {
 				alreadyDeleted: false,
 				terminatedRuns: terminatedRuns.map(completedRunToJson),
 				cleanup,
+				invalidatedContextAppendSessions,
 				deletedContextEntries,
 			}
 		} finally {
 			resumeScheduler()
 		}
+	}
+
+	private invalidateContextAppendSessionsForChain(chainId: number): number {
+		let invalidated = 0
+		for (const [sessionId, session] of this.contextAppendSessions) {
+			if (session.chainId !== chainId) continue
+			this.contextAppendSessions.delete(sessionId)
+			invalidated += 1
+		}
+		return invalidated
 	}
 
 	private async handleChainStop(args: JsonObject): Promise<JsonObject> {

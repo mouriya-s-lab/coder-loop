@@ -4,6 +4,11 @@ import type { BoundaryValue } from "./boundary-types"
 export const ContextScopeBoundary = arkType({ kind: "'chain'" }).or({ kind: "'item'", itemId: "string" }).or({ kind: "'group'", groupId: "string" })
 export type ContextScope = typeof ContextScopeBoundary.infer
 
+export const ContextAppendCliScopeArgsBoundary = arkType({ scope: "'chain'", itemId: "null", groupId: "null" })
+	.or({ scope: "'item'", itemId: "string > 0", groupId: "null" })
+	.or({ scope: "'group'", itemId: "null", groupId: "string > 0" })
+export type ContextAppendCliScopeArgs = typeof ContextAppendCliScopeArgsBoundary.infer
+
 export const ContextAuthorBoundary = arkType({ kind: "'operator'" }).or({
 	kind: "'agent'", chainId: "number.integer", itemId: "string", runId: "string", phase: "string",
 })
@@ -46,7 +51,7 @@ export const ContextWriteAdmissionPayloadBoundary = arkType({
 		arkType.unit("invalid-request"), arkType.unit("missing-credential"), arkType.unit("unknown-credential"),
 		arkType.unit("inactive-run"), arkType.unit("cross-chain"), arkType.unit("session-owner-mismatch"),
 		arkType.unit("item-not-found"), arkType.unit("group-unavailable-v2"), arkType.unit("unknown-session"),
-		arkType.unit("sequence-mismatch"), arkType.unit("chain-not-found"),
+		arkType.unit("sequence-mismatch"), arkType.unit("chain-not-found"), arkType.unit("chain-deleted"),
 	),
 	"sessionId": arkType.or("string", "null"),
 })
@@ -79,8 +84,19 @@ export type ContextEntry = {
 	body: string
 }
 
+const PersistedContextEntryCommonBoundaryFields = {
+	id: "string", chain_id: "number.integer", created_at: "number", author: "string", body: "string",
+} as const
+export const PersistedContextScopeBoundary = arkType({ scope_kind: "'chain'", scope_key: "null" })
+	.or({ scope_kind: "'item'", scope_key: "string > 0" })
+	.or({ scope_kind: "'group'", scope_key: "string > 0" })
+export type PersistedContextScope = typeof PersistedContextScopeBoundary.infer
 export const PersistedContextEntryRowBoundary = arkType({
-	id: "string", chain_id: "number.integer", created_at: "number", scope_kind: "string", "scope_key": arkType.or("string", "null"), author: "string", body: "string",
+	...PersistedContextEntryCommonBoundaryFields, scope_kind: "'chain'", scope_key: "null",
+}).or({
+	...PersistedContextEntryCommonBoundaryFields, scope_kind: "'item'", scope_key: "string > 0",
+}).or({
+	...PersistedContextEntryCommonBoundaryFields, scope_kind: "'group'", scope_key: "string > 0",
 })
 export type PersistedContextEntryRow = typeof PersistedContextEntryRowBoundary.infer
 
@@ -90,6 +106,7 @@ function parse<T>(schema: ArkAssertable<T>, value: BoundaryValue, label: string)
 }
 
 export function parseContextScope(value: BoundaryValue): ContextScope { return parse(ContextScopeBoundary, value, "context scope") }
+export function parseContextAppendCliScopeArgs(value: BoundaryValue): ContextAppendCliScopeArgs { return parse(ContextAppendCliScopeArgsBoundary, value, "context append CLI scope") }
 export function parseContextAuthor(value: BoundaryValue): ContextAuthor { return parse(ContextAuthorBoundary, value, "context author") }
 export function parsePersistedContextEntryRow(value: BoundaryValue): PersistedContextEntryRow { return parse(PersistedContextEntryRowBoundary, value, "persisted context entry row") }
 export function parseContextAppendBeginRequest(value: BoundaryValue): ContextAppendBeginRequest { return parse(ContextAppendBeginRequestBoundary, value, "context append begin request") }
@@ -110,17 +127,20 @@ export function contextScopeKey(scope: ContextScope): string | null {
 	}
 }
 
-export function persistedContextScope(kind: string, key: string | null): ContextScope {
-	switch (kind) {
-		case "chain":
-			if (key !== null) throw new Error("persisted chain context scope must not have scope_key")
-			return { kind: "chain" }
-		case "item":
-			if (key === null || key === "") throw new Error("persisted item context scope requires non-empty scope_key")
-			return { kind: "item", itemId: key }
-		case "group":
-			if (key === null || key === "") throw new Error("persisted group context scope requires non-empty scope_key")
-			return { kind: "group", groupId: key }
-		default: throw new Error(`unknown persisted context scope_kind: ${kind}`)
+export function contextScopeFromCliArgs(input: ContextAppendCliScopeArgs): ContextScope {
+	switch (input.scope) {
+		case "chain": return { kind: "chain" }
+		case "item": return { kind: "item", itemId: input.itemId }
+		case "group": return { kind: "group", groupId: input.groupId }
+		default: return assertNeverContextScope(input)
+	}
+}
+
+export function persistedContextScope(scope: PersistedContextScope): ContextScope {
+	switch (scope.scope_kind) {
+		case "chain": return { kind: "chain" }
+		case "item": return { kind: "item", itemId: scope.scope_key }
+		case "group": return { kind: "group", groupId: scope.scope_key }
+		default: return assertNeverContextScope(scope)
 	}
 }
