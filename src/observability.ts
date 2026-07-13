@@ -1222,13 +1222,11 @@ function discoverObservabilityEventSegmentsSync(eventsFile: string): Observabili
 
 export function orderObservabilityEventSegments(segments: readonly ObservabilityEventSegment[]): ObservabilityEventSegment[] {
 	const legacy = segments.filter((segment): segment is Extract<ObservabilityEventSegment, { kind: "legacy-history" }> => segment.kind === "legacy-history")
-	const legacyOrders = new Set<string>()
-	for (const segment of legacy) {
-		const order = `${segment.startedAt}/${segment.endedAt}`
-		if (legacyOrders.has(order)) throw new Error(`ambiguous legacy observability segment order ${order}`)
-		legacyOrders.add(order)
-	}
-	legacy.sort((left, right) => `${left.startedAt}/${left.endedAt}`.localeCompare(`${right.startedAt}/${right.endedAt}`))
+	legacy.sort((left, right) => {
+		const leftOrder = `${left.startedAt}/${left.endedAt}/${left.name}`
+		const rightOrder = `${right.startedAt}/${right.endedAt}/${right.name}`
+		return leftOrder < rightOrder ? -1 : leftOrder > rightOrder ? 1 : 0
+	})
 	const history = segments.filter((segment): segment is Extract<ObservabilityEventSegment, { kind: "history" }> => segment.kind === "history")
 	const sequences = new Set<number>()
 	for (const segment of history) {

@@ -128,14 +128,18 @@ describe("observability", () => {
 		)).not.toThrow()
 	})
 
-	test("segment discovery rejects an ambiguous causal-order tie instead of sorting by UUID", async () => {
+	test("segment discovery deterministically orders valid equal-timestamp legacy segments", async () => {
 		const root = resolve(TEST_ROOT, "segment-tie")
 		const eventsFile = resolve(root, "events.jsonl")
 		await mkdir(root, { recursive: true })
-		for (const id of ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"]) {
+		for (const id of ["bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]) {
 			await writeFile(resolve(root, `events-2026-06-12T00-00-00.000Z-2026-06-12T00-01-00.000Z-${id}.jsonl`), "")
 		}
-		await expect(discoverObservabilityEventSegments(eventsFile)).rejects.toThrow("ambiguous legacy observability segment order")
+		const segments = await discoverObservabilityEventSegments(eventsFile)
+		expect(segments.map((segment) => segment.kind === "legacy-history" ? segment.id : segment.kind)).toEqual([
+			"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+			"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+		])
 	})
 
 	test("async and sync writers produce contract-recognized names and preserve exact sequence across day and size rotations", async () => {
