@@ -336,7 +336,11 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 			loadPreset(REAL_E2E_MINIMAL_PRESET_DIR),
 		])
 		const decoratedIssueBindings = presets.flatMap((preset) => preset.phases.flatMap((phase) => {
-			const variable = phase.variables.find((candidate) => candidate.key === "ISSUE" && candidate.doc !== null)
+			const variable = phase.variables.find((candidate) =>
+				candidate.source.kind === "item"
+				&& candidate.source.field === preset.item.idField
+				&& candidate.doc?.prefix === "#"
+			)
 			return variable === undefined ? [] : [{ preset, phase, variable }]
 		}))
 		expect(decoratedIssueBindings).toHaveLength(5)
@@ -547,6 +551,37 @@ describe("parsePreset schema validation", () => {
 		expect(renderRuntimeInputsDoc(phase, ctx)).toBe("- Named issue: ref:539!\n- Ticket: `#539` after")
 	})
 
+	test("runtime input doc variable products are rejected at the precise ArkType boundary", () => {
+		const root: BoundaryRecord = {
+			...minimalRoot(),
+			phases: [{
+				name: "p",
+				prompt: "p.md",
+				variables: { K: { source: "runtime.runId", label: 42 } },
+			}],
+		}
+		expect(() => parsePreset(root, "/tmp")).toThrow(/preset: phases\[0\]\.variables\.K\.label.*must be a string/)
+	})
+
+	test("runtime input doc rendering is invariant under variable key renaming", () => {
+		const renderForKey = (key: string): string => {
+			const root: BoundaryRecord = {
+				...minimalRoot(),
+				phases: [{
+					name: "p",
+					prompt: "p.md",
+					variables: { [key]: { source: "runtime.runId", label: "Run", prefix: "#" } },
+				}],
+			}
+			const preset = parsePreset(root, "/tmp")
+			const runtime = makeMinimalRuntimeBindings()
+			runtime.runId = "539"
+			return renderRuntimeInputsDoc(preset.phases[0]!, { item: makeItemRecord(), chain: {}, runtime, preset })
+		}
+
+		expect(renderForKey("ALPHA")).toBe(renderForKey("BETA"))
+	})
+
 	test("rejects doc decoration without a label but retains default-only object bindings", () => {
 		const decorationFields: ReadonlyArray<readonly [string, string | boolean]> = [
 			["prefix", "#"],
@@ -585,7 +620,7 @@ describe("parsePreset schema validation", () => {
 			}],
 		}
 		expect(() => parsePreset(root, "/tmp")).toThrow(
-			/preset\.phases\[0\]\.variables\.X\.prefx: unrecognized variable binding field/,
+			/preset: phases\[0\]\.variables\.X\.prefx must be removed/,
 		)
 	})
 
