@@ -2013,20 +2013,19 @@ export class CoderLoopDaemon {
 
 	private async recoverStaleSchedulerState(): Promise<void> {
 		// #508: daemon recovery is a process-layer concern only. It kills any stale process group
-		// from the previous daemon instance and clears the `current_runs` orphan row so the
+		// from the previous daemon instance and clears each exact `active_runs` orphan row so the
 		// scheduler is free to take a new run on this chain. It MUST NOT write `items.status`,
-		// `items.phase`, or `items.sessionIds` — those are business fields the agent owns. An
+		// `items.phase`, or closure sessions — those are business fields the agent owns. An
 		// interrupted in_progress item is left as-is and re-scheduled because the preset's
 		// `statuses.continuable` covers `in_progress` (see preset.toml).
 		const store = this.requireStore()
 		for (const chain of store.listChains()) {
 			if (chain.status === "deleted") continue
-			const currentRun = store.getCurrentRun(chain.id)
-			if (currentRun !== null) {
+			for (const currentRun of store.listCurrentRuns(chain.id)) {
 				const stalePid = await this.readRunProcessGroupPid(chain, currentRun.runId, currentRun.extra)
 				if (stalePid !== null) await terminateStaleProcessGroup(stalePid, Math.min(this.shutdownGraceMs, STALE_RECOVERY_FORCE_AFTER_MS))
 
-				store.clearCurrentRun(chain.id)
+				store.clearCurrentRun(currentRun.runId)
 				await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
 					kind: "lifecycle",
 					type: "scheduler.recovery",
@@ -2387,7 +2386,7 @@ export class CoderLoopDaemon {
 				}
 			}
 			const entryStatus = preset.statuses.entry
-			const current = store.getCurrentRun(chain.id)
+			const current = store.listCurrentRuns(chain.id).find((run) => run.extra.itemId === item.id) ?? null
 			// CurrentRunRecord stores the active item identifier inside `extra.itemId` (the same shape
 			// the scheduler writes when it spawns); resolve it as JsonValue and only match when it's
 			// the numeric rowid the store inserted.
@@ -2403,7 +2402,7 @@ export class CoderLoopDaemon {
 					status: engineLifecycleAdmittedItemStatus(entryStatus, "queue.unblock-entry-restore"),
 					updatedAt: unixSeconds(),
 				})
-				if (clearedCurrent) store.clearCurrentRun(chain.id)
+				if (clearedCurrent && current !== null) store.clearCurrentRun(current.runId)
 				// Mirror the #406 operator-attribution audit shape the old CLI emitted so external
 				// tooling that watches `item.mutation.caller_admission` keeps seeing the unblock.
 				await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({

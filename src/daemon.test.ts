@@ -6991,7 +6991,7 @@ process.exitCode = 0
 			await fixture.tickEntered.promise
 
 			// Model the snapshot that existed when the in-flight tick began. Once released, the
-			// real scheduler spawn replaces this row with the sentinel item's current run.
+			// real scheduler spawn adds the sentinel item's current run alongside this one.
 			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
 			try {
 				store.recordRun({
@@ -7043,12 +7043,18 @@ process.exitCode = 0
 				changed: true,
 				beforeStatus: "blocked",
 				afterStatus: "queued",
-				clearedCurrent: false,
+				clearedCurrent: true,
 			})
 
-			const current = await readCurrentRun(fixture.loopDataRoot, fixture.chainId)
-			expect(current?.extra.itemId).toBe(fixture.sentinelRowId)
-			expect(current?.runId).not.toBe("run-before-in-flight-tick")
+			const remainingCurrentRunsStore = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				const currentRuns = remainingCurrentRunsStore.listCurrentRuns(fixture.chainId)
+				expect(currentRuns).toHaveLength(1)
+				expect(currentRuns[0]?.extra.itemId).toBe(fixture.sentinelRowId)
+				expect(currentRuns[0]?.runId).not.toBe("run-before-in-flight-tick")
+			} finally {
+				remainingCurrentRunsStore.close()
+			}
 		} finally {
 			fixture.releaseTick.resolve()
 			await fixture.daemon.stop()

@@ -80,7 +80,6 @@ describe("sqlite state store", () => {
 				"title",
 				"priority",
 				"last_run_id",
-				"session_ids",
 				"issue_file",
 				"evidence_dir",
 				"agent_cwd",
@@ -137,7 +136,7 @@ describe("sqlite state store", () => {
 			}
 			expect(store.setCurrentRun(expected)).toEqual(expected)
 			expect(store.getCurrentRun(chain.id)).toEqual(expected)
-			expect(store.clearCurrentRun(chain.id)).toBe(true)
+			expect(store.clearCurrentRun(expected.runId)).toBe(true)
 			expect(store.getCurrentRun(chain.id)).toBeNull()
 		} finally {
 			store.close()
@@ -156,6 +155,18 @@ describe("sqlite state store", () => {
 			const tree: TaskTreeSnapshot = { root: { kind: "seq", identity: { runtimeNodeId: "root", definitionRef, definitionNodeId: "definition-root" }, cursor: { kind: "next", nodeId: "leaf-one" }, children: [leaf(first, "leaf-one"), { kind: "par", identity: { runtimeNodeId: "par-one", definitionRef, definitionNodeId: "definition-par" }, groupId: "par-one", pinCommit: "0123456789abcdef", state: "open", reopen: { count: 0, budgetRef: "chain.maxReopens" }, join: { currentVersion: 1, value: { kind: "drain" }, evaluation: { kind: "not-evaluating" } }, children: [leaf(second, "leaf-two"), leaf(third, "leaf-three")] }] }, activeRuns: [] }
 			expect(store.createTaskTree(chain.id, tree)).toEqual(tree)
 			expect(store.getTaskTree(chain.id)).toEqual(tree)
+		} finally { store.close() }
+	})
+
+	test("nested task tree enforces each closure source par against its actual parent", async () => {
+		const { store } = await openTestStore("nested-task-tree-par-parent")
+		try {
+			const chain = createFullChain(store)
+			const item = createFullItem(store, chain)
+			const definitionRef = { kind: "chain", contentIdentity: "sha256:par-parent" } as const
+			const leaf = { kind: "leaf", identity: { runtimeNodeId: "par-child", definitionRef, definitionNodeId: "leaf" }, closure: { closureId: "closure-par-child", itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: "/worktrees/par-child", branchName: "issue-par-child", baseCommit: "0123456789abcdef", sourceParNodeId: null, sessions: [] } } as const
+			const tree: TaskTreeSnapshot = { root: { kind: "par", identity: { runtimeNodeId: "actual-par", definitionRef, definitionNodeId: "par" }, groupId: "actual-par", pinCommit: "0123456789abcdef", state: "open", reopen: { count: 0, budgetRef: "chain.maxReopens" }, join: { currentVersion: 1, value: { kind: "drain" }, evaluation: { kind: "not-evaluating" } }, children: [leaf] }, activeRuns: [] }
+			expectSqliteCode(() => store.createTaskTree(chain.id, tree), "run_closure_mismatch")
 		} finally { store.close() }
 	})
 
@@ -187,9 +198,29 @@ describe("sqlite state store", () => {
 			store.setCurrentRun({ chainId: chain.id, phase: "iteration", runId: "active-one", startedAt: 1_800_000_200, extra: storedItemExtra({}) })
 			expectSqliteCode(() => store.setCurrentRun({ chainId: chain.id, phase: "iteration", runId: "active-two", startedAt: 1_800_000_201, extra: storedItemExtra({}) }), "active_run_conflict")
 			expectSqliteCode(() => store.setCurrentRun({ chainId: chain.id, phase: "iteration", runId: "wrong-phase", startedAt: 1_800_000_202, extra: storedItemExtra({}) }), "run_closure_mismatch")
-			store.clearCurrentRun(chain.id)
+			store.clearCurrentRun("active-one")
 			store.setClosureLifecycle(`closure-${item.id}`, { kind: "suspend", updatedAt: 1_800_000_203 })
 			expectSqliteCode(() => store.setCurrentRun({ chainId: chain.id, phase: "iteration", runId: "active-two", startedAt: 1_800_000_204, extra: storedItemExtra({}) }), "closure_lifecycle_conflict")
+		} finally { store.close() }
+	})
+
+	test("closure active run permits sibling closures and clears only the selected run", async () => {
+		const { store } = await openTestStore("closure-active-run-siblings")
+		try {
+			const chain = createFullChain(store)
+			const first = createFullItem(store, chain)
+			const second = createFullItem(store, chain, { issueNumber: 178, itemId: "178" })
+			const definitionRef = { kind: "chain", contentIdentity: "sha256:active-siblings" } as const
+			const leaf = (item: ItemRecord) => ({ kind: "leaf", identity: { runtimeNodeId: `leaf-${item.id}`, definitionRef, definitionNodeId: `item-${item.id}` }, closure: { closureId: `closure-${item.id}`, itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: `/worktrees/${item.id}`, branchName: `issue-${item.itemId}`, baseCommit: "0123456789abcdef", sourceParNodeId: null, sessions: [] } } as const)
+			store.createTaskTree(chain.id, { root: { kind: "seq", identity: { runtimeNodeId: "root-active-siblings", definitionRef, definitionNodeId: "root" }, cursor: { kind: "next", nodeId: `leaf-${first.id}` }, children: [leaf(first), leaf(second)] }, activeRuns: [] })
+			store.recordRun({ runId: "active-first", chainId: chain.id, itemId: first.id, phase: "iteration", startedAt: 1_800_000_210 })
+			store.recordRun({ runId: "active-second", chainId: chain.id, itemId: second.id, phase: "iteration", startedAt: 1_800_000_211 })
+			store.setCurrentRun({ chainId: chain.id, phase: "iteration", runId: "active-first", startedAt: 1_800_000_210, extra: storedItemExtra({}) })
+			store.setCurrentRun({ chainId: chain.id, phase: "iteration", runId: "active-second", startedAt: 1_800_000_211, extra: storedItemExtra({}) })
+
+			expect(store.listCurrentRuns(chain.id).map((run) => run.runId)).toEqual(["active-first", "active-second"])
+			expect(store.clearCurrentRun("active-first")).toBe(true)
+			expect(store.listCurrentRuns(chain.id).map((run) => run.runId)).toEqual(["active-second"])
 		} finally { store.close() }
 	})
 
@@ -215,14 +246,19 @@ describe("sqlite state store", () => {
 	test("v13 to v14 migrates normalized runtime before reads", async () => {
 		const fixture = await openTestStore("v13-to-v14")
 		const chain = createFullChain(fixture.store)
-		createFullItem(fixture.store, chain, { phase: "iteration", agentCwd: REPO_ROOT, sessionIds: { iteration: { codex: "session-v13" } } })
+		const activeItem = createFullItem(fixture.store, chain, { phase: "iteration", agentCwd: REPO_ROOT, preset: "gh-issue-pr-iteration", sessionIds: { iteration: { codex: "session-v13" }, review: { claude: "review-session-v13" } } })
+		const untouchedItem = createFullItem(fixture.store, chain, { issueNumber: 178, itemId: "178", phase: null, agentCwd: REPO_ROOT, preset: "gh-issue-pr-iteration", sessionIds: {} })
+		fixture.store.recordRun({ runId: "legacy-active", chainId: chain.id, itemId: activeItem.id, phase: "iteration", startedAt: 1_800_000_220 })
 		fixture.store.close()
 		const legacy = new Database(fixture.dbFile)
 		try {
 			legacy.exec("PRAGMA foreign_keys=OFF")
-			legacy.exec(`UPDATE items SET session_ids = '{"iteration":{"codex":"session-v13"}}'`)
+			legacy.exec("ALTER TABLE items ADD COLUMN session_ids TEXT NOT NULL DEFAULT '{}'")
+			legacy.exec(`UPDATE items SET session_ids = '{"iteration":{"codex":"session-v13"},"review":{"claude":"review-session-v13"}}' WHERE id = ${activeItem.id}`)
+			legacy.exec(`UPDATE items SET session_ids = '{}' WHERE id = ${untouchedItem.id}`)
 			for (const table of ["active_runs", "closure_sessions", "task_join_evaluation_bindings", "task_join_bindings", "task_leaf_nodes", "task_seq_nodes", "task_par_nodes", "task_closures", "task_trees", "task_nodes", "execution_definitions"]) legacy.exec(`DROP TABLE ${table}`)
 			legacy.exec("CREATE TABLE current_runs (chain_id INTEGER PRIMARY KEY REFERENCES chains(id), phase TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES runs(run_id), started_at REAL NOT NULL, extra TEXT NOT NULL)")
+			legacy.query("INSERT INTO current_runs (chain_id, phase, run_id, started_at, extra) VALUES ($chainId, 'iteration', 'legacy-active', 1800000220, '{}')").run({ chainId: chain.id })
 			legacy.exec("PRAGMA user_version=13")
 		} finally { legacy.close() }
 		const migrated = openSqliteStateStore({ loopDataRoot: dbFileRoot(fixture.dbFile) })
@@ -232,10 +268,20 @@ describe("sqlite state store", () => {
 			const tree = migrated.getTaskTree(chain.id)
 			expect(tree?.root.kind).toBe("seq")
 			if (tree?.root.kind !== "seq") throw new Error("expected migrated seq")
-			const leaf = tree.root.children[0]
-			if (leaf?.kind !== "leaf") throw new Error("expected migrated leaf")
-			expect(leaf.closure.sessions).toEqual([{ runner: "codex", sessionId: "session-v13" }])
-			expect(migrated.getItem(leaf.closure.itemRowId)?.sessionIds).toEqual({})
+			const leaves = tree.root.children
+			if (!leaves.every((leaf) => leaf.kind === "leaf")) throw new Error("expected only migrated leaves")
+			expect(new Set(leaves.map((leaf) => `${leaf.closure.itemId}:${leaf.closure.phase}`))).toEqual(new Set([
+				"177:iteration", "177:review", "177:blocked-responder", "177:umbrella-finalizer",
+				"178:iteration", "178:review", "178:blocked-responder", "178:umbrella-finalizer",
+			]))
+			expect(leaves.map((leaf) => leaf.closure.sessions).filter((sessions) => sessions.length > 0)).toEqual([
+				[{ runner: "codex", sessionId: "session-v13" }],
+				[{ runner: "claude", sessionId: "review-session-v13" }],
+			])
+			expect(migrated.listTableColumns("items")).not.toContain("session_ids")
+			const migratedDb = new Database(fixture.dbFile)
+			try { expect(migratedDb.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'current_runs'").get()?.count).toBe(0) } finally { migratedDb.close() }
+			expect(migrated.listCurrentRuns(chain.id).map((run) => run.runId)).toEqual(["legacy-active"])
 		} finally { migrated.close() }
 	})
 
@@ -941,7 +987,7 @@ describe("sqlite state store", () => {
 		const first = openSqliteStateStore({ loopDataRoot })
 		try {
 			expect(first.listTableColumns("items")).not.toContain("last_session_id")
-			expect(first.listTableColumns("items")).toContain("session_ids")
+			expect(first.listTableColumns("items")).not.toContain("session_ids")
 		} finally {
 			first.close()
 		}
@@ -949,7 +995,7 @@ describe("sqlite state store", () => {
 		const second = openSqliteStateStore({ loopDataRoot })
 		try {
 			expect(second.listTableColumns("items")).not.toContain("last_session_id")
-			expect(second.listTableColumns("items")).toContain("session_ids")
+			expect(second.listTableColumns("items")).not.toContain("session_ids")
 			const chain = createFullChain(second)
 			const item = createFullItem(second, chain)
 			second.createTaskTree(chain.id, singleLeafTree(item))
@@ -965,7 +1011,7 @@ describe("sqlite state store", () => {
 		const third = openSqliteStateStore({ loopDataRoot })
 		try {
 			expect(third.listTableColumns("items")).not.toContain("last_session_id")
-			expect(third.listTableColumns("items")).toContain("session_ids")
+			expect(third.listTableColumns("items")).not.toContain("session_ids")
 		} finally {
 			third.close()
 		}
@@ -1570,7 +1616,7 @@ describe("sqlite state store", () => {
 		const migrated = openSqliteStateStore({ loopDataRoot })
 		try {
 			expect(migrated.listTableColumns("items")).not.toContain("last_session_id")
-			expect(migrated.listTableColumns("items")).toContain("session_ids")
+			expect(migrated.listTableColumns("items")).not.toContain("session_ids")
 			const item = migrated.getItemById(1, "330")
 			expect(item?.sessionIds).toEqual({})
 			const tree = migrated.getTaskTree(1)
@@ -1668,7 +1714,7 @@ describe("sqlite state store", () => {
 		const migrated = openSqliteStateStore({ loopDataRoot })
 		try {
 			expect(migrated.listTableColumns("items")).not.toContain("last_session_id")
-			expect(migrated.listTableColumns("items")).toContain("session_ids")
+			expect(migrated.listTableColumns("items")).not.toContain("session_ids")
 			const items = migrated.listItems(1)
 			expect(items).toHaveLength(1)
 			const item = items[0]
@@ -1676,7 +1722,7 @@ describe("sqlite state store", () => {
 			expect(item.sessionIds).toEqual({})
 			migrated.recordRun({ runId: "pre-v3-iteration", chainId: 1, itemId: item.id, phase: "iteration", startedAt: 1.5, extra: storedItemExtra({ worktreePath: REPO_ROOT, branchName: "main", baseCommit: "0123456789abcdef" }) })
 			migrated.setCurrentRun({ chainId: 1, phase: "iteration", runId: "pre-v3-iteration", startedAt: 1.5, extra: storedItemExtra({}) })
-			migrated.clearCurrentRun(1)
+			migrated.clearCurrentRun("pre-v3-iteration")
 			const updated = migrated.setItemSessionId(item.id, {
 				phase: "iteration",
 				runner: "codex",

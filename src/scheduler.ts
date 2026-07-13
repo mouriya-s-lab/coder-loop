@@ -1198,8 +1198,7 @@ async function cleanupFailedRunPreparation(
 				extra: run.extra,
 			})
 		}
-		const currentRun = options.store.getCurrentRun(chain.id)
-		if (currentRun?.runId === resources.runId) options.store.clearCurrentRun(chain.id)
+			options.store.clearCurrentRun(resources.runId)
 		options.state.recycleTriggers.delete(resources.runId)
 	}
 	if (resources.runId === null || slot.activeRun?.runId === resources.runId) slot.activeRun = null
@@ -1386,8 +1385,7 @@ function attachRunCloseHandler(
 					})
 
 					persistenceStage = "current-run"
-					const currentRun = options.store.getCurrentRun(chain.id)
-					if (currentRun?.runId === runId) options.store.clearCurrentRun(chain.id)
+						options.store.clearCurrentRun(runId)
 					persistenceStage = null
 
 					if (slot.activeRun?.runId === runId) slot.activeRun = null
