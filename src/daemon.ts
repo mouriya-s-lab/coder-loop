@@ -30,6 +30,7 @@ import {
 	listActiveRuns,
 	listPendingCloseHandlers,
 	markRunPendingRecycle,
+	refreshExternalTerminalAvailabilityForItem,
 	maxItemAttemptsFromChainMetadata,
 	schedulerTick,
 	type SchedulerCompletedRun,
@@ -807,7 +808,7 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 					binary: event.binary,
 					probeArgv: [...event.probeArgv],
 					availability: { ...event.availability, checkedAt, since: checkedAt },
-					affected: [{ chainId: event.chainId, rowId: event.rowId, itemId: event.itemId, phase: event.phase }],
+					affected: event.affected.map((affected) => ({ ...affected })),
 				},
 			})
 		}
@@ -2769,8 +2770,8 @@ export class CoderLoopDaemon {
 			subject: caller.subject,
 			payload: { rowId: item.id, itemId: item.itemId, status: item.status },
 		}))
-		if (await this.itemMayUseExternalTerminal(chain, item)) await this.requestSchedulerTick()
-		else this.queueSchedulerTick()
+		await this.refreshPostPersistenceExternalTerminal(chain, [item])
+		this.queueSchedulerTick()
 		return { item: itemToJson(item) }
 	}
 
@@ -2831,8 +2832,8 @@ export class CoderLoopDaemon {
 				payload: { rowId: item.id, itemId: item.itemId, status: item.status },
 			}))
 		}
-		if ((await Promise.all(items.map(async (item) => await this.itemMayUseExternalTerminal(chain, item)))).some(Boolean)) await this.requestSchedulerTick()
-		else this.queueSchedulerTick()
+		await this.refreshPostPersistenceExternalTerminal(chain, items)
+		this.queueSchedulerTick()
 		return { items: items.map((item) => itemToJson(item)) }
 	}
 
@@ -3075,15 +3076,38 @@ export class CoderLoopDaemon {
 		} finally {
 			resumeScheduler()
 			const currentItem = store.getItem(item.id)
-			if (currentItem !== null && await this.itemMayUseExternalTerminal(chain, currentItem)) await this.requestSchedulerTick()
-			else this.queueSchedulerTick()
+			if (currentItem !== null) await this.refreshPostPersistenceExternalTerminal(chain, [currentItem])
+			this.queueSchedulerTick()
 		}
 	}
 
-	private async itemMayUseExternalTerminal(chain: ChainRecord, item: ItemRecord): Promise<boolean> {
-		if (item.runner !== null) return runnerExecutionDomain(item.runner).kind === "external-terminal"
+	private async externalTerminalPhaseForItem(chain: ChainRecord, item: ItemRecord): Promise<string | null> {
+		// `loadedPresetForItem` is backed by the daemon's shared promise cache keyed by canonical
+		// preset directory. Add, batch-add, update, and the scheduler therefore share one
+		// materialization/validation result; a batch does not reload the same preset per row and the
+		// subsequent synchronous scheduler tick consumes the same cached value. This preserves the
+		// creation-time probe for preset-selected external terminals without multiplying filesystem
+		// work across ordinary local-runner mutations.
 		const { preset } = await this.loadedPresetForItem(chain, item, "external-terminal.create-update-probe")
-		return preset.phases.some((phase) => phase.defaultRunner !== null && runnerExecutionDomain(phase.defaultRunner).kind === "external-terminal")
+		const phase = item.phase === null
+			? preset.phases.find((candidate) => candidate.trigger === null)
+			: preset.phases.find((candidate) => candidate.name === item.phase)
+		if (phase === undefined) return null
+		if (item.runner !== null) return runnerExecutionDomain(item.runner).kind === "external-terminal" ? phase.name : null
+		return phase.defaultRunner !== null && runnerExecutionDomain(phase.defaultRunner).kind === "external-terminal" ? phase.name : null
+	}
+
+	private async refreshPostPersistenceExternalTerminal(chain: ChainRecord, items: readonly ItemRecord[]): Promise<void> {
+		const options = this.buildSchedulerOptions()
+		const externalItems: { item: ItemRecord; phase: string }[] = []
+		for (const item of items) {
+			const phase = await this.externalTerminalPhaseForItem(chain, item)
+			if (phase !== null) externalItems.push({ item, phase })
+		}
+		const affected = externalItems.map(({ item, phase }) => ({ chainId: chain.id, rowId: item.id, itemId: item.itemId, phase }))
+		for (const { item, phase } of externalItems) {
+			await refreshExternalTerminalAvailabilityForItem(options, chain, item, phase, undefined, affected)
+		}
 	}
 
 	private async handleItemReorder(args: JsonObject): Promise<JsonObject> {

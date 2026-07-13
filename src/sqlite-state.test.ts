@@ -1234,7 +1234,7 @@ describe("sqlite state store", () => {
 	// the narrow CHECK), confirms a pre-migration row with `runner='claude'` is preserved, then
 	// proves the post-migration CHECK admits `runner='opencode'` (the v12 CHECK would have
 	// rejected it).
-	test("items table rebuild admits the current opencode and hapi runner vocabulary", async () => {
+	test("items table allows opencode runner after v12 to v13 migration (acceptance row 8, #481)", async () => {
 		const loopDataRoot = resolve(TEST_ROOT, `items-opencode-v12-v13-${Date.now()}-${++nextRootId}`)
 		await mkdir(loopDataRoot, { recursive: true })
 		const dbFile = resolve(loopDataRoot, "db.sqlite")
@@ -1351,16 +1351,6 @@ describe("sqlite state store", () => {
 			expect(opencodeItem.runner).toBe("opencode")
 			const reread = migrated.getItemById(chainId, "481-opencode")
 			expect(reread?.runner).toBe("opencode")
-			const hapiItem = migrated.createItem({
-				chainId,
-				itemId: "602-hapi",
-				repoCwd: "/repo/coder-loop",
-				status: runtimeStatus("queued"),
-				attempts: 0,
-				runner: "hapi",
-				extra: storedItemExtra({}),
-			})
-			expect(hapiItem.runner).toBe("hapi")
 		} finally {
 			migrated.close()
 		}
@@ -1372,7 +1362,65 @@ describe("sqlite state store", () => {
 			expect(chain).not.toBeNull()
 			expect(reopened.getItemById(chain!.id, "481-pre")?.runner).toBe("claude")
 			expect(reopened.getItemById(chain!.id, "481-opencode")?.runner).toBe("opencode")
-			expect(reopened.getItemById(chain!.id, "602-hapi")?.runner).toBe("hapi")
+		} finally {
+			reopened.close()
+		}
+	})
+
+	test("items table allows hapi runner after v13 to v14 migration (#602)", async () => {
+		const { store, dbFile } = await openTestStore("items-hapi-v13-v14")
+		const chain = createFullChain(store)
+		const preserved = createFullItem(store, chain, {
+			itemId: "602-v13-opencode",
+			runner: "opencode",
+		})
+		store.close()
+
+		const legacy = new Database(dbFile, { create: false, readwrite: true, strict: true })
+		try {
+			legacy.exec("PRAGMA foreign_keys = OFF")
+			const schema = legacy.query<{ sql: string }, []>(
+				"SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'items'",
+			).get()
+			if (schema === null) throw new Error("current items schema is missing")
+			const v13Schema = schema.sql
+				.replace("CREATE TABLE items", "CREATE TABLE items_v13")
+				.replace(", 'hapi'", "")
+			legacy.exec(v13Schema)
+			legacy.exec("INSERT INTO items_v13 SELECT * FROM items")
+			legacy.exec("DROP TABLE items")
+			legacy.exec("ALTER TABLE items_v13 RENAME TO items")
+			legacy.exec("PRAGMA user_version = 13")
+			legacy.exec("PRAGMA foreign_keys = ON")
+
+			expect(() => legacy.exec(`
+				INSERT INTO items (chain_id, item_id, repo_cwd, status, attempts, position, status_updated_at, runner, session_ids, extra, created_at, updated_at)
+				VALUES (${chain.id}, '602-v13-reject', '/repo/coder-loop', 'queued', 0, 0, 1.0, 'hapi', '{}', '{}', 1.0, 1.0)
+			`)).toThrow(/CHECK/i)
+		} finally {
+			legacy.close()
+		}
+
+		const migrated = openSqliteStateStore({ loopDataRoot: resolve(dbFile, "..") })
+		try {
+			expect(migrated.getItemById(chain.id, preserved.itemId)?.runner).toBe("opencode")
+			const hapiItem = migrated.createItem({
+				chainId: chain.id,
+				itemId: "602-v14-hapi",
+				repoCwd: "/repo/coder-loop",
+				status: runtimeStatus("queued"),
+				attempts: 0,
+				runner: "hapi",
+				extra: storedItemExtra({}),
+			})
+			expect(hapiItem.runner).toBe("hapi")
+		} finally {
+			migrated.close()
+		}
+
+		const reopened = openSqliteStateStore({ loopDataRoot: resolve(dbFile, "..") })
+		try {
+			expect(reopened.getItemById(chain.id, "602-v14-hapi")?.runner).toBe("hapi")
 		} finally {
 			reopened.close()
 		}

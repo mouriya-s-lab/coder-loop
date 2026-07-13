@@ -34,6 +34,7 @@ export type EngineLifecycleAdmissionReason =
 	| "scheduler.exhausted-on-max-attempts"
 	| "scheduler.spawn-aborted-entry-restore"
 	| "scheduler.run-status-forwarded"
+	| "scheduler.external-terminal-loss-entry-restore"
 	| "scheduler.dependency-unblock-restore"
 	| "scheduler.recovery-entry-restore"
 	| "queue.unblock-entry-restore"

@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { spawn } from "node:child_process"
-import { chmod, mkdir, readdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises"
+import { chmod, cp, mkdir, readdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises"
 import { createConnection } from "node:net"
 import { resolve } from "node:path"
 
@@ -155,6 +155,56 @@ afterAll(async () => {
 })
 
 describe("daemon", () => {
+	test("preset-selected external terminal is held before add and batch-add return", async () => {
+		const presetDir = resolve(TEST_ROOT, "preset-selected-external-terminal")
+		await cp(PRESET_DIR, presetDir, { recursive: true })
+		const presetToml = resolve(presetDir, "preset.toml")
+		await writeFile(presetToml, (await readFile(presetToml, "utf-8")).replaceAll('runner = "codex"', 'runner = "hapi"').replaceAll('runner  = "codex"', 'runner  = "hapi"'))
+		let probeCalls = 0
+		const fixture = await startFixture("preset-selected-external-terminal", {
+			schedulerEnabled: false,
+			schedulerPresetDir: presetDir,
+			schedulerUsePresetRunner: true,
+			schedulerConfig: { externalTerminalProbe: async () => { probeCalls += 1; return { kind: "unavailable", reason: "endpoint-unavailable", exitCode: 69, signal: null } } },
+		})
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", { name: "preset-hapi", repository: "fixture/repo", baseBranch: "main", preset: "gh-issue-pr-iteration" })))
+			const chainId = numberValue(record(chain.chain).id)
+			expectOk(await request(fixture, "item.batchAdd", { chainId, items: [
+				{ itemId: "602-batch-a", repoCwd: REPO_ROOT, presetPath: presetDir },
+				{ itemId: "602-batch-b", repoCwd: REPO_ROOT, presetPath: presetDir },
+			] }))
+			let listed = record(expectOk(await request(fixture, "item.list", { chainId })))
+			if (!Array.isArray(listed.items)) throw new Error("item list missing")
+			expect(listed.items).toHaveLength(2)
+			for (const item of listed.items) expect(record(record(item).extra).externalTerminalHold).toBeDefined()
+			const batchWarnings = fixture.schedulerEvents.filter((event) => event.type === "runner.external_terminal_unavailable")
+			expect(batchWarnings).toHaveLength(1)
+			expect(batchWarnings[0]).toMatchObject({
+				type: "runner.external_terminal_unavailable",
+				affected: [
+					{ itemId: "602-batch-a", phase: "iteration" },
+					{ itemId: "602-batch-b", phase: "iteration" },
+				],
+			})
+			expectOk(await request(fixture, "item.add", { chainId, itemId: "602-add", repoCwd: REPO_ROOT, presetPath: presetDir }))
+			listed = record(expectOk(await request(fixture, "item.list", { chainId })))
+			if (!Array.isArray(listed.items)) throw new Error("item list missing")
+			expect(listed.items).toHaveLength(3)
+			expect(fixture.schedulerEvents.filter((event) => event.type === "runner.external_terminal_unavailable")).toHaveLength(1)
+			const callsBeforeUpdate = probeCalls
+			expectOk(await request(fixture, "item.update", { chainId, itemId: "602-add", fields: { runner: "codex" } }))
+			expectOk(await request(fixture, "item.update", { chainId, itemId: "602-add", fields: { runner: null } }))
+			expect(probeCalls).toBe(callsBeforeUpdate + 1)
+			listed = record(expectOk(await request(fixture, "item.list", { chainId })))
+			if (!Array.isArray(listed.items)) throw new Error("item list missing")
+			const updated = listed.items.map(record).find((item) => item.itemId === "602-add")
+			if (updated === undefined) throw new Error("updated item missing")
+			expect(record(record(updated.extra).externalTerminalHold).runner).toBe("hapi")
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
 	test("cleans runner lifecycle after status persistence failure", () => {
 		for (const [file, name] of [
 			["src/scheduler.test.ts", "rejects successful scheduler completion when terminal persistence fails"],
@@ -8227,6 +8277,7 @@ type FixtureOptions = {
 	useDefaultChainCompleteTrigger?: boolean
 	schedulerRunnerKind?: AgentRunnerKind
 	schedulerBinaryIsFakeRunner?: boolean
+	schedulerUsePresetRunner?: boolean
 	schedulerConfig?: Partial<CoderLoopDaemonSchedulerConfig>
 	beforeStart?: (input: { root: string; loopDataRoot: string; eventLog: string; fakeRunner: string }) => Promise<void> | void
 }
@@ -8268,7 +8319,7 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 			...(options.schedulerConfig ?? {}),
 			enabled: options.schedulerEnabled ?? true,
 			intervalMs: options.schedulerIntervalMs ?? 20,
-			runner: scheduler,
+			...(options.schedulerUsePresetRunner ? {} : { runner: scheduler }),
 			...(options.schedulerPresetDir === null ? {} : { presetDir: options.schedulerPresetDir ?? PRESET_DIR }),
 			worktreeManager,
 			prompt: ({ item, runId, phase }) => {
