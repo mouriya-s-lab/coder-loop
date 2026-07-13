@@ -33,7 +33,7 @@ import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
 import { makeObservabilityEvent, queryObservabilityEvents } from "./observability"
 import { chainBindings, engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
-import type { BoundaryRecord } from "./boundary-types"
+import type { BoundaryRecord, BoundaryValue } from "./boundary-types"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
@@ -45,6 +45,17 @@ let nextFixtureId = 0
 // #397 test brand helper — see install-commands.test.ts for rationale.
 function runtimeStatus(value: string) {
 	return engineLifecycleAdmittedItemStatus(parseInternalStatus(value, "test.status"), "test")
+}
+
+function staleRecoveryRunExtra(worktreePath: string) {
+	return storedItemExtra({
+		worktreePath,
+		branchName: "main",
+		baseCommit: "0123456789abcdef",
+		definitionKind: "preset",
+		definitionContentIdentity: "sha256:daemon-recovery-fixture",
+		definitionPhaseNames: ["iteration", "review", "blocked-responder", "umbrella-finalizer"],
+	})
 }
 
 function emptyObservabilityExcerpt() {
@@ -69,6 +80,10 @@ const FakeRunnerRunningEventBoundary = arkType({
 	itemId: "number",
 	runId: "string",
 })
+const BoundaryRecordBoundary = arkType({ "[string]": "unknown" })
+const BoundaryRecordArrayBoundary = BoundaryRecordBoundary.array()
+const StatusArtifactBoundary = arkType({ phase: "string" })
+const StatusSnapshotBoundary = arkType({ events: { recent: BoundaryRecordBoundary.array() } })
 
 // v1 status model: the spawned agent is the only writer of item.status. These daemon
 // integration tests use fake runners, so the fake runner reproduces the real agent's
@@ -1020,7 +1035,7 @@ process.exitCode = 0
 			})).chain)
 			const chainId = numberValue(chain.id)
 			expectOk(await request(fixture, "item.add", { chainId, itemId: "25901", repoCwd: REPO_ROOT, title: "occupant" }))
-			const baseline = expectOk(await request(fixture, "item.list", { chainId })).items as BoundaryRecord[]
+			const baseline = records(expectOk(await request(fixture, "item.list", { chainId })).items)
 			expect(baseline).toHaveLength(1)
 
 			const failed = await request(fixture, "item.batchAdd", {
@@ -1033,7 +1048,7 @@ process.exitCode = 0
 			})
 			expectConflict(failed)
 
-			const after = expectOk(await request(fixture, "item.list", { chainId })).items as BoundaryRecord[]
+			const after = records(expectOk(await request(fixture, "item.list", { chainId })).items)
 			expect(after.map((item) => Number(item.itemId))).toEqual([25901])
 			expect(after.map((item) => item.id)).toEqual(baseline.map((item) => item.id))
 		} finally {
@@ -1775,15 +1790,15 @@ attemptTimeoutSeconds = 3600
 			const b = record(expectOk(await request(fixture, "item.add", { chainId, itemId: "302", repoCwd: REPO_ROOT })).item)
 			const c = record(expectOk(await request(fixture, "item.add", { chainId, itemId: "303", repoCwd: REPO_ROOT })).item)
 
-			const baseline = expectOk(await request(fixture, "item.list", { chainId })).items as BoundaryRecord[]
+			const baseline = records(expectOk(await request(fixture, "item.list", { chainId })).items)
 			expect(baseline.map((item) => Number(item.itemId))).toEqual([301, 302, 303])
 			expect(baseline.map((item) => Number(item.position))).toEqual([0, 1, 2])
 
-			const moved = expectOk(await request(fixture, "item.reorder", { itemId: numberValue(c.id), position: 0 })).items as BoundaryRecord[]
+			const moved = records(expectOk(await request(fixture, "item.reorder", { itemId: numberValue(c.id), position: 0 })).items)
 			expect(moved.map((item) => Number(item.itemId))).toEqual([303, 301, 302])
 			expect(moved.map((item) => Number(item.position))).toEqual([0, 1, 2])
 
-			const after = expectOk(await request(fixture, "item.list", { chainId })).items as BoundaryRecord[]
+			const after = records(expectOk(await request(fixture, "item.list", { chainId })).items)
 			expect(after.map((item) => Number(item.itemId))).toEqual([303, 301, 302])
 			expect(after.map((item) => Number(item.position))).toEqual([0, 1, 2])
 
@@ -2056,7 +2071,8 @@ attemptTimeoutSeconds = 3600
 			for (const raw of reviewExitsArray) {
 				const exit = record(raw)
 				expect(typeof exit.when).toBe("string")
-				expect((exit.when as string).length).toBeGreaterThan(0)
+					if (typeof exit.when !== "string") throw new Error("expected exit condition")
+					expect(exit.when.length).toBeGreaterThan(0)
 				if (exit.kind === "item-status") {
 					expect(typeof exit.status).toBe("string")
 				} else if (exit.kind === "chain-action") {
@@ -2541,7 +2557,7 @@ process.exitCode = 0
 				fields: { status: runtimeStatus("done"), title: "strict item update" },
 			})).item)
 			expect(updated).toMatchObject({ id: itemId, chainId, status: runtimeStatus("done"), title: "strict item update" })
-			expect((updated as { itemId: string }).itemId).toBe("221")
+			expect(stringValue(updated.itemId)).toBe("221")
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -3089,7 +3105,8 @@ process.exitCode = 0
 
 			const phaseEnd = fixture.schedulerEvents.find((event) => event.type === "phase.end")
 			expect(phaseEnd).toBeDefined()
-			expect((phaseEnd as { status?: string }).status).toBe("queued")
+			if (phaseEnd?.type !== "phase.end") throw new Error("expected phase.end event")
+			expect(phaseEnd.status).toBe("queued")
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -3227,7 +3244,7 @@ process.exitCode = 0
 			})).item)
 			const itemId = numberValue(added.id)
 			const activeRuns = await waitFor(async () => record(expectOk(await request(fixture, "daemon.status")).daemon).activeRuns, (runs) => Array.isArray(runs) && runs.length === 1)
-			const agentPid = (activeRuns as unknown as Array<{ pid?: number }>)[0]?.pid
+			const agentPid = numberValue(records(activeRuns)[0]?.pid)
 
 			const downStartedAt = Date.now()
 			const down = expectOk(await request(fixture, "daemon.down"))
@@ -3388,7 +3405,7 @@ process.exitCode = 0
 					itemId: item.id,
 					phase: "iteration",
 					startedAt: 1_800_000_000,
-					extra: storedItemExtra({}),
+					extra: staleRecoveryRunExtra(agentCwdSnapshot),
 				})
 			store.setCurrentRun({
 				chainId: chain.id,
@@ -3397,6 +3414,7 @@ process.exitCode = 0
 					startedAt: 1_800_000_000,
 					extra: storedItemExtra({ itemId: item.id, pid: stale.pid, processGroupLeader: true }),
 				})
+			store.setItemSessionId(item.id, { phase: "iteration", runner: "claude", sessionId: "session-iter-217" })
 		} finally {
 			store.close()
 		}
@@ -3413,7 +3431,13 @@ process.exitCode = 0
 			// no longer rewrites business fields).
 			expect(recovered?.status).toBe("in_progress")
 			expect(recovered?.phase).toBe("iteration")
-			expect(recovered?.sessionIds).toEqual(sessionIdsSnapshot)
+			expect(recovered?.sessionIds).toEqual({})
+			const recoveredStore = openSqliteStateStore({ loopDataRoot })
+			try {
+				expect(recoveredStore.getItemSessionId(recovered?.id ?? 0, { phase: "iteration", runner: "claude" })).toBe(sessionIdsSnapshot.iteration.claude)
+			} finally {
+				recoveredStore.close()
+			}
 			expect(recovered?.attempts).toBe(1)
 			// Process-layer cleanup still happens: the orphan `current_runs` row is gone.
 			expect(await readCurrentRun(loopDataRoot, 1)).toBeNull()
@@ -3729,7 +3753,7 @@ process.exitCode = 0
 					itemId: item.id,
 					phase: "iteration",
 					startedAt: 1_800_000_000,
-					extra: storedItemExtra({}),
+					extra: staleRecoveryRunExtra(REPO_ROOT),
 				})
 			store.setCurrentRun({
 				chainId: chain.id,
@@ -3876,7 +3900,7 @@ process.exitCode = 0
 			const item = await readItem(fixture.loopDataRoot, chainId, 203)
 			const runId = item?.lastRunId ?? ""
 			const paths = resolveChainRuntimePaths("scheduler-artifacts-chain", { loopDataRoot: fixture.loopDataRoot })
-			const status = JSON.parse(await readFile(paths.runStatusFile(runId), "utf-8")) as BoundaryRecord
+			const status = record(JSON.parse(await readFile(paths.runStatusFile(runId), "utf-8")))
 			const stdout = await readFile(paths.runStdoutFile(runId), "utf-8")
 			const stderr = await readFile(paths.runStderrFile(runId), "utf-8")
 			const events = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, { run: runId })
@@ -3988,11 +4012,9 @@ process.exitCode = 0
 				console.error("CLI_STDOUT", cliStdout)
 			}
 			expect(cliExit).toBe(0)
-			const cliPayload = JSON.parse(cliStdout) as { events: { recent: unknown[] } }
+			const cliPayload = StatusSnapshotBoundary.assert(JSON.parse(cliStdout))
 			const cliTypes = cliPayload.events.recent.map((event) =>
-				typeof event === "object" && event !== null && !Array.isArray(event) && typeof (event as BoundaryRecord).type === "string"
-					? ((event as BoundaryRecord).type as string)
-					: null,
+				typeof event.type === "string" ? event.type : null,
 			)
 			expect(cliTypes).toContain("phase.start")
 			expect(cliTypes).toContain("phase.end")
@@ -4994,7 +5016,8 @@ process.exitCode = 1
 			throw new Error("expected daemon start to fail")
 		} catch (error) {
 			expect(error).toBeInstanceOf(DaemonError)
-			expect((error as DaemonError).code).toBe("db_unavailable")
+			if (!(error instanceof DaemonError)) throw error
+			expect(error.code).toBe("db_unavailable")
 		}
 	})
 
@@ -5121,7 +5144,7 @@ process.exitCode = 0
 	test("daemon re-spawns item after agent exits 0 without SUMMARY marker (live integration)", async () => {
 		const warnings: string[] = []
 		const originalWarn = console.warn
-		console.warn = (...args: unknown[]) => {
+		console.warn = (...args: BoundaryValue[]) => {
 			warnings.push(args.map((value) => typeof value === "string" ? value : JSON.stringify(value)).join(" "))
 		}
 		const fixture = await startFixture("scheduler-respawn-no-summary", { schedulerIntervalMs: 30 })
@@ -5187,13 +5210,13 @@ process.exitCode = 0
 
 				// The fake shell runner writes no terminal status, so the item can be respawned immediately.
 				// Read the run id from the completed phase.end event instead of racing item.lastRunId.
-				const iterationEnd = (await waitFor(
+				const iterationEnd = present(await waitFor(
 					async () =>
 						fixture.schedulerEvents
 							.find((event): event is Extract<SchedulerEvent, { type: "phase.end" }> => event.type === "phase.end" && event.itemId === itemId && event.phase === "iteration") ?? null,
 					(event) => event !== null,
 					5_000,
-				)) as Extract<SchedulerEvent, { type: "phase.end" }>
+				))
 				const runId = iterationEnd.runId
 				const stdoutPath = resolveChainRuntimePaths(`ac5-iter-chain`, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(runId)
 				const stdout = await readFile(stdoutPath, "utf-8")
@@ -5362,8 +5385,8 @@ process.exitCode = 0
 					const expectedPhaseDir = runId === iterRunId ? "iteration" : "review"
 					expect(runDirEntries.sort()).toEqual([expectedPhaseDir, "status.json", "stderr.log", "stdout.log"])
 				}
-				const iterStatus = JSON.parse(await readFile(paths.runStatusFile(iterRunId), "utf-8")) as { phase: string }
-				const reviewStatus = JSON.parse(await readFile(paths.runStatusFile(reviewRunId), "utf-8")) as { phase: string }
+				const iterStatus = StatusArtifactBoundary.assert(JSON.parse(await readFile(paths.runStatusFile(iterRunId), "utf-8")))
+				const reviewStatus = StatusArtifactBoundary.assert(JSON.parse(await readFile(paths.runStatusFile(reviewRunId), "utf-8")))
 				expect(iterStatus.phase).toBe("iteration")
 				expect(reviewStatus.phase).toBe("review")
 
@@ -5490,13 +5513,13 @@ process.exitCode = 0
 			})).item)
 			const itemId = numberValue(added.id)
 
-			const agentExit = await waitFor(
+			const agentExit = present(await waitFor(
 				async () => fixture.schedulerEvents.find(
 					(e): e is Extract<SchedulerEvent, { type: "agent.exit" }> =>
 						e.type === "agent.exit" && e.itemId === itemId,
 				) ?? null,
 				(e) => e !== null,
-			) as Extract<SchedulerEvent, { type: "agent.exit" }>
+			))
 			expect(agentExit.exitCode).not.toBe(0)
 
 			// Lifecycle stream carries pending_entered → timeout_kill for this run.
@@ -5523,8 +5546,8 @@ process.exitCode = 0
 	})
 
 	test("recovers after scheduler lifecycle event failure", async () => {
-		const unhandled: unknown[] = []
-		const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
+		const unhandled: BoundaryValue[] = []
+		const onUnhandled = (reason: BoundaryValue): void => { unhandled.push(reason) }
 		process.on("unhandledRejection", onUnhandled)
 		const fixture = await startFixture("lifecycle-event-persistence-recovery", {
 			schedulerConfig: {
@@ -5605,13 +5628,13 @@ process.exitCode = 0
 			})).item)
 			const itemId = numberValue(added.id)
 
-			const agentExit = await waitFor(
+			const agentExit = present(await waitFor(
 				async () => fixture.schedulerEvents.find(
 					(e): e is Extract<SchedulerEvent, { type: "agent.exit" }> =>
 						e.type === "agent.exit" && e.itemId === itemId,
 				) ?? null,
 				(e) => e !== null,
-			) as Extract<SchedulerEvent, { type: "agent.exit" }>
+			))
 			expect(agentExit.exitCode).toBe(0)
 
 			const pendingEntered = fixture.schedulerEvents.find(
@@ -5679,13 +5702,13 @@ process.exitCode = 0
 			})).item)
 			const itemId = numberValue(added.id)
 
-			const agentExit = await waitFor(
+			const agentExit = present(await waitFor(
 				async () => fixture.schedulerEvents.find(
 					(e): e is Extract<SchedulerEvent, { type: "agent.exit" }> =>
 						e.type === "agent.exit" && e.itemId === itemId,
 				) ?? null,
 				(e) => e !== null,
-			) as Extract<SchedulerEvent, { type: "agent.exit" }>
+			))
 			expect(agentExit.exitCode).not.toBe(0)
 
 			// No recycle events at all for this run — stdout content had zero effect.
@@ -5723,13 +5746,13 @@ process.exitCode = 0
 			})).item)
 			const itemId = numberValue(added.id)
 
-			const agentExit = await waitFor(
+			const agentExit = present(await waitFor(
 				async () => fixture.schedulerEvents.find(
 					(e): e is Extract<SchedulerEvent, { type: "agent.exit" }> =>
 						e.type === "agent.exit" && e.itemId === itemId
 				) ?? null,
 				(e) => e !== null,
-			) as Extract<SchedulerEvent, { type: "agent.exit" }>
+			))
 			expect(agentExit.exitCode).toBe(1)
 		} finally {
 			await fixture.daemon.stop()
@@ -6977,7 +7000,7 @@ process.exitCode = 0
 					itemId: fixture.targetRowId,
 					phase: "iteration",
 					startedAt: 1_800_000_000,
-					extra: storedItemExtra({}),
+					extra: staleRecoveryRunExtra(REPO_ROOT),
 				})
 				store.setCurrentRun({
 					chainId: fixture.chainId,
@@ -7090,7 +7113,7 @@ process.exitCode = 0
 				async () => {
 					try {
 						return (await readFile(fixture.credentialPath, "utf-8")).trim()
-					} catch (error: unknown) {
+					} catch (error) {
 						if (error instanceof Error && "code" in error && error.code === "ENOENT") return ""
 						throw error
 					}
@@ -7735,7 +7758,7 @@ describe("rateLimitStatusFromState daemon.status wire shape (issue #478)", () =>
 		expect(wire["nextResumeAt"]).toBe(new Date(populatedState.nextResumeAtMs!).toISOString())
 		// JSON.stringify must not drop any field (undefined would be silently dropped) —
 		// the round-trip pins this because every value above is either a primitive or null.
-		const roundTrip: Record<string, unknown> = JSON.parse(JSON.stringify(wire))
+		const roundTrip = record(JSON.parse(JSON.stringify(wire)))
 		expect(Object.keys(roundTrip).sort()).toEqual([
 			"active", "mode", "nextResumeAt", "observedAt", "rateLimitType",
 			"rateLimitedUntil", "rateLimitedUntilUnix", "sourceChainId",
@@ -8175,7 +8198,7 @@ function expectInvalid(response: DaemonResponse): void {
 	if (!response.ok) expect(response.error.code).toBe("invalid_request")
 }
 
-function expectInvalidDetails(response: DaemonResponse, field: string, value: unknown): void {
+function expectInvalidDetails(response: DaemonResponse, field: string, value: BoundaryValue): void {
 	expectInvalid(response)
 	if (!response.ok) {
 		const details = record(response.error.details)
@@ -8214,9 +8237,12 @@ function expectTooLarge(response: DaemonResponse): void {
 	if (!response.ok) expect(response.error.code).toBe("request_too_large")
 }
 
-function record(value: unknown): BoundaryRecord {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("expected object")
-	return value as BoundaryRecord
+function record(value: BoundaryValue): BoundaryRecord {
+	return BoundaryRecordBoundary.assert(value)
+}
+
+function records(value: BoundaryValue): BoundaryRecord[] {
+	return BoundaryRecordArrayBoundary.assert(value)
 }
 
 function deferred<T>() {
@@ -8280,13 +8306,18 @@ function nestedMetadata(depth: number): JsonObject {
 	return value
 }
 
-function numberValue(value: unknown): number {
+function numberValue(value: BoundaryValue): number {
 	if (typeof value !== "number") throw new Error("expected number")
 	return value
 }
 
-function stringValue(value: unknown): string {
+function stringValue(value: BoundaryValue): string {
 	if (typeof value !== "string") throw new Error("expected string")
+	return value
+}
+
+function present<T>(value: T | null | undefined): T {
+	if (value === null || value === undefined) throw new Error("expected value")
 	return value
 }
 
@@ -8364,7 +8395,7 @@ async function waitForItemQueueTerminal(
 	itemId: number,
 	timeoutMs = 10_000,
 ): Promise<Extract<SchedulerEvent, { type: "queue.terminal" }>> {
-	return (await waitFor(
+	return present(await waitFor(
 		async () =>
 			fixture.schedulerEvents.find(
 				// #419 review I2: scheduler event field renamed `itemId` (rowid) → `rowId`. The
@@ -8374,7 +8405,7 @@ async function waitForItemQueueTerminal(
 			) ?? null,
 		(event) => event !== null,
 		timeoutMs,
-	)) as Extract<SchedulerEvent, { type: "queue.terminal" }>
+	))
 }
 
 async function waitForItemPhaseEnd(
@@ -8382,14 +8413,14 @@ async function waitForItemPhaseEnd(
 	itemId: number,
 	timeoutMs = 10_000,
 ): Promise<Extract<SchedulerEvent, { type: "phase.end" }>> {
-	return (await waitFor(
+	return present(await waitFor(
 		async () =>
 			fixture.schedulerEvents.find(
 				(event): event is Extract<SchedulerEvent, { type: "phase.end" }> => event.type === "phase.end" && event.itemId === itemId,
 			) ?? null,
 		(event) => event !== null,
 		timeoutMs,
-	)) as Extract<SchedulerEvent, { type: "phase.end" }>
+	))
 }
 
 async function waitForPidExit(pid: number, timeoutMs: number): Promise<boolean> {

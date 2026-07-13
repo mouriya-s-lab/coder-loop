@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
-import { mkdir, writeFile } from "node:fs/promises"
+import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { createWriteStream, existsSync, realpathSync, rmSync, type WriteStream } from "node:fs"
 import { basename, dirname, isAbsolute, resolve } from "node:path"
 
@@ -157,7 +157,7 @@ export type SchedulerState = {
 	slots: Map<string, SchedulerSlot>
 	finalizingItemStatuses: Map<number, InternalStatus>
 	finalizingChainIds: Set<number>
-	pendingCloseHandlers: Set<Promise<unknown>>
+	pendingCloseHandlers: Set<Promise<SchedulerCompletedRun>>
 	recycleTriggers: Map<string, SchedulerRecycleTrigger>
 	lifecycleEventPersistenceFailures: SchedulerLifecycleEventPersistenceFailure[]
 	// #478: account-level rate-limit cooldown. The scheduler close handler arms this
@@ -179,6 +179,7 @@ export type SchedulerStore = Pick<
 	| "getItem"
 	| "updateItem"
 	| "setItemSessionId"
+	| "getItemSessionId"
 	| "recordRun"
 	| "getRunByRunId"
 	| "completeRun"
@@ -948,7 +949,7 @@ export function listActiveRuns(state: SchedulerState): SchedulerActiveRun[] {
 	return [...state.slots.values()].flatMap((slot) => (slot.activeRun === null ? [] : [slot.activeRun]))
 }
 
-export function listPendingCloseHandlers(state: SchedulerState): Promise<unknown>[] {
+export function listPendingCloseHandlers(state: SchedulerState): Promise<SchedulerCompletedRun>[] {
 	return [...state.pendingCloseHandlers]
 }
 
@@ -981,9 +982,14 @@ async function spawnSchedulerRun(
 	try {
 		worktreePath = worktreePath ?? await worktreeManager({ chain, repoCwd: item.repoCwd, slotKey: slot.key })
 		slot.worktreePath = worktreePath
+		const baseCommitResult = git(worktreePath, ["rev-parse", "HEAD"])
+		const branchResult = git(worktreePath, ["branch", "--show-current"])
 
 		const runner = await resolvePhaseRunner(options, { chain, item, phase })
-		const resumeDecision = resumeDecisionForItem(item, phase, runner.kind)
+		const loadedPreset = await schedulerLoadedPresetForItem(options, chain, item)
+		const definitionContentIdentity = await presetExecutionContentIdentity(loadedPreset)
+		const persistedSessionId = options.store.getItemSessionId(item.id, { phase, runner: runner.kind })
+		const resumeDecision: ResumeDecision = persistedSessionId === null ? freshResume() : { kind: "resume", sessionId: persistedSessionId }
 		const startsAttempt = phase === phasePlan.firstPhase && resumeDecision.kind === "fresh"
 		runId = options.runIdFactory?.({ chain, item, phase }) ?? makeRunId(item.id, phase)
 		startedAt = nowSeconds(options)
@@ -998,6 +1004,11 @@ async function spawnSchedulerRun(
 				slotKey: slot.key,
 				repoCwd: item.repoCwd,
 				worktreePath,
+				...(baseCommitResult.exitCode === 0 && baseCommitResult.stdout !== "" ? { baseCommit: baseCommitResult.stdout } : {}),
+				...(branchResult.exitCode === 0 && branchResult.stdout !== "" ? { branchName: branchResult.stdout } : {}),
+				definitionKind: "preset",
+				definitionContentIdentity,
+				definitionPhaseNames: loadedPreset.preset.phases.map((entry) => entry.name),
 				startStatus: item.status,
 				startStatusUpdatedAt: item.statusUpdatedAt,
 				...(item.phase === null ? {} : { startPhase: item.phase }),
@@ -1021,7 +1032,6 @@ async function spawnSchedulerRun(
 		if (extraWithoutSpawnError !== item.extra) spawnUpdate.extra = extraWithoutSpawnError
 		options.store.updateItem(item.id, spawnUpdate)
 
-		const loadedPreset = await schedulerLoadedPresetForItem(options, chain, item)
 		const presetDir = loadedPreset.presetDir
 		const context: SchedulerSpawnContext = { chain, item, slot, runId, worktreePath, presetDir, loadedPreset, phase }
 		const rawPrompt = typeof options.prompt === "string" ? options.prompt : await options.prompt(context)
@@ -1401,7 +1411,7 @@ function attachRunCloseHandler(
 						durationSeconds: Math.max(0, endedAt - startedAt),
 						status,
 					})
-					const previousSessionId = (currentItem ?? item).sessionIds[phase]?.[runner.kind] ?? null
+					const previousSessionId = options.store.getItemSessionId(item.id, { phase, runner: runner.kind })
 					if (currentItem === null || !terminalStatuses.has(currentItem.status)) {
 						const itemForBackoff = currentItem ?? item
 						const statusWasWrittenDuringRun = currentItem !== null && currentItem.statusUpdatedAt !== item.statusUpdatedAt && currentItem.statusUpdatedAt >= startedAt
@@ -2713,6 +2723,13 @@ function git(cwd: string, args: readonly string[]): { stdout: string; stderr: st
 	} catch (error) {
 		return { stdout: "", stderr: errorMessage(error), exitCode: 1 }
 	}
+}
+
+async function presetExecutionContentIdentity(loaded: SchedulerLoadedPreset): Promise<string> {
+	const hasher = createHash("sha256")
+	hasher.update(await readFile(resolve(loaded.presetDir, "preset.toml")))
+	for (const phase of loaded.preset.phases) hasher.update(await readFile(phase.prompt))
+	return `sha256:${hasher.digest("hex")}`
 }
 
 function errorMessage(error: unknown): string {

@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test"
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
+import { type as arkType } from "arktype"
 
 import {
 	cleanupSchedulerChainWorktrees,
@@ -40,16 +41,45 @@ import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import { type ChainRecord, type ItemRecord, openSqliteStateStore } from "./sqlite-state"
 import { appendObservabilityEvent, queryObservabilityEvents } from "./observability"
 import { engineLifecycleAdmittedItemStatus, itemExtraJsonValue, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
-import type { BoundaryRecord } from "./boundary-types"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-tests", String(process.pid))
+const RunStatusFixtureBoundary = arkType({
+	"runId?": "string",
+	"chainId?": "number",
+	"chainName?": "string",
+	"rowId?": "number",
+	"itemId?": "string",
+	"phase?": "string",
+	status: "string",
+	exitCode: "number",
+	endedAt: "number",
+	"eventsPath?": "string",
+})
+const ArgvEventBoundary = arkType({ argv: "string[]" })
+
+function optionsWithoutRunner(options: SchedulerOptions): SchedulerOptions {
+	const { runner: _runner, ...withoutRunner } = options
+	return withoutRunner
+}
 
 let nextFixtureId = 0
 
 // #397 test brand helper — see install-commands.test.ts for rationale.
 function runtimeStatus(value: string) {
 	return engineLifecycleAdmittedItemStatus(parseInternalStatus(value, "test.status"), "test")
+}
+
+function seedSessionClosure(store: ReturnType<typeof openSqliteStateStore>, chain: ChainRecord, item: ItemRecord, phase: string): void {
+	const definitionRef = { kind: "chain", contentIdentity: "sha256:session-fixture" } as const
+	store.createTaskTree(chain.id, {
+		root: {
+			kind: "leaf",
+			identity: { runtimeNodeId: `session-leaf-${item.id}`, definitionRef, definitionNodeId: phase },
+			closure: { closureId: `session-closure-${item.id}`, itemRowId: item.id, itemId: item.itemId, phase, lifecycle: "active", worktreePath: REPO_ROOT, branchName: "main", baseCommit: "0123456789abcdef", sourceParNodeId: null, sessions: [] },
+		},
+		activeRuns: [],
+	})
 }
 
 afterAll(async () => {
@@ -293,10 +323,10 @@ describe("scheduler", () => {
 						},
 					} : {}),
 					...(stage === "process-spawn" ? {
-						runner: { kind: "claude", source: "iteration-default", binary: resolve(fixture.loopDataRoot, "missing-runner"), extraArgs: [], model: null } as AgentRunnerSelection,
+						runner: { kind: "claude", source: "iteration-default", binary: resolve(fixture.loopDataRoot, "missing-runner"), extraArgs: [], model: null } satisfies AgentRunnerSelection,
 					} : {}),
 					...(stage === "active-child" ? {
-						runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [activeChildRunner], model: null } as AgentRunnerSelection,
+						runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [activeChildRunner], model: null } satisfies AgentRunnerSelection,
 						onEvent: (event: SchedulerEvent) => {
 							fixture.schedulerEvents.push(event)
 							if (event.type === "agent.spawn") {
@@ -313,7 +343,7 @@ describe("scheduler", () => {
 				expect(run?.exitCode, stage).toBe(1)
 				if (stage !== "artifact") {
 					const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
-					const status = JSON.parse(await readFile(paths.runStatusFile(runId), "utf-8")) as BoundaryRecord
+					const status = RunStatusFixtureBoundary.assert(JSON.parse(await readFile(paths.runStatusFile(runId), "utf-8")))
 					expect(status.endedAt, stage).toBe(now)
 					expect(status.exitCode, stage).toBe(1)
 					expect(status.status, stage).toBe("queued")
@@ -1334,7 +1364,7 @@ describe("scheduler", () => {
 			// so a single iteration run on a fresh item yields attempt 1 of the iteration phase.
 			const runId = `run-${chain.id}-${item.id}-iteration-1`
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
-			const status = JSON.parse(await readFile(paths.runStatusFile(runId), "utf-8")) as BoundaryRecord
+			const status = RunStatusFixtureBoundary.assert(JSON.parse(await readFile(paths.runStatusFile(runId), "utf-8")))
 			const stdout = await readFile(paths.runStdoutFile(runId), "utf-8")
 			const stderr = await readFile(paths.runStderrFile(runId), "utf-8")
 			const phaseStdout = await readFile(paths.runPhaseStdoutFile(runId, "iteration"), "utf-8")
@@ -1795,7 +1825,7 @@ describe("scheduler", () => {
 
 			// sessionId stored: scheduler parsed it from stdout and wrote it via setItemSessionId.
 			const itemAfterTick1 = fixture.store.getItem(item.id)
-			expect(itemAfterTick1?.sessionIds["iteration"]?.["claude"]).toBe(sessionId)
+			expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "claude" })).toBe(sessionId)
 			// In-state cooldown gate armed; attempts unchanged (PR acceptance row 7).
 			expect(fixture.state.rateLimitedUntilMs).toBe(resetsAt * 1000)
 			expect(itemAfterTick1?.attempts).toBe(0)
@@ -3085,8 +3115,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 				}
 			}
 
-			const baseOptions = fixture.options()
-			delete (baseOptions as { runner?: AgentRunnerSelection }).runner
+			const baseOptions = optionsWithoutRunner(fixture.options())
 			const tick = await schedulerTick({
 				...baseOptions,
 				phaseRunner,
@@ -3138,8 +3167,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 				}
 			}
 
-			const baseOptions = fixture.options()
-			delete (baseOptions as { runner?: AgentRunnerSelection }).runner
+			const baseOptions = optionsWithoutRunner(fixture.options())
 			const tick = await schedulerTick({
 				...baseOptions,
 				phaseRunner,
@@ -3180,8 +3208,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			const chain = createChain(fixture.store, "phase-runner-missing-chain")
 			createItem(fixture.store, chain, { issueNumber: 287_104, repoCwd: "/repo/a" })
 
-			const baseOptions = fixture.options()
-			delete (baseOptions as { runner?: AgentRunnerSelection }).runner
+			const baseOptions = optionsWithoutRunner(fixture.options())
 
 			const tick = await schedulerTick(baseOptions)
 			expect(tick.spawnedRuns).toHaveLength(0)
@@ -3353,11 +3380,10 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 				})
 
 			let runSeq = 0
-			const baseOptions = fixture.options({
+			const baseOptions = optionsWithoutRunner(fixture.options({
 				loadedPreset: { presetDir: PRESET_DIR, preset },
 				runIdFactory: ({ chain: c, item, phase }) => `run-${c.id}-${item.id}-${phase}-${++runSeq}`,
-			})
-			delete (baseOptions as { runner?: AgentRunnerSelection }).runner
+			}))
 
 			const iterTick = await schedulerTick({
 				...baseOptions,
@@ -3715,6 +3741,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 		try {
 			const chain = createChain(fixture.store, "session-id-roundtrip-chain")
 			const item = createItem(fixture.store, chain, { issueNumber: 291_020, repoCwd: "/repo/session-roundtrip" })
+			seedSessionClosure(fixture.store, chain, item, "iteration")
 			fixture.store.setItemSessionId(item.id, { phase: "iteration", runner: "claude", sessionId: "sess-seeded-200" })
 			const fakeRunner = resolve(fixture.loopDataRoot, "..", "fake-claude-argv-echo.ts")
 			await writeFakeClaudeArgvEchoRunner(fakeRunner)
@@ -3733,7 +3760,8 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			const stdout = await readFile(paths.runStdoutFile(runId), "utf-8")
 			const argvLine = stdout.split("\n").find((line) => line.startsWith("{") && line.includes("\"argv\""))
 			expect(argvLine).toBeDefined()
-			const argv = JSON.parse(argvLine!) as { argv: string[] }
+			if (argvLine === undefined) throw new Error("argv event missing")
+			const argv = ArgvEventBoundary.assert(JSON.parse(argvLine))
 			const idx = argv.argv.indexOf("--resume")
 			expect(idx).toBeGreaterThanOrEqual(0)
 			expect(argv.argv[idx + 1]).toBe("sess-seeded-200")
@@ -3804,6 +3832,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 		try {
 			const chain = createChain(fixture.store, "session-id-invalid-fresh-chain")
 			const item = createItem(fixture.store, chain, { issueNumber: 312_003, repoCwd: "/repo/session-id-invalid" })
+			seedSessionClosure(fixture.store, chain, item, "iteration")
 			fixture.store.setItemSessionId(item.id, { phase: "iteration", runner: "claude", sessionId: "sess-stale-312" })
 			const fakeRunner = resolve(fixture.loopDataRoot, "..", "fake-claude-invalid-once.ts")
 			const attemptFile = resolve(fixture.loopDataRoot, "..", "fake-claude-invalid-attempt.txt")
@@ -3860,6 +3889,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 		try {
 			const chain = createChain(fixture.store, "session-id-normal-update-chain")
 			const item = createItem(fixture.store, chain, { issueNumber: 312_004, repoCwd: "/repo/session-id-normal" })
+			seedSessionClosure(fixture.store, chain, item, "iteration")
 			fixture.store.setItemSessionId(item.id, { phase: "iteration", runner: "claude", sessionId: "sess-old-312" })
 			const fakeRunner = resolve(fixture.loopDataRoot, "..", "fake-claude-normal-session.ts")
 			await writeFakeClaudeNormalSessionRunner(fakeRunner, "sess-new-312")
@@ -3987,10 +4017,7 @@ async function readArgvEvents(path: string): Promise<Array<{ argv: string[] }>> 
 	return text
 		.split("\n")
 		.filter((line) => line.trim() !== "")
-		.map((line) => JSON.parse(line) as BoundaryRecord)
-		.filter((event): event is { argv: string[] } =>
-			Array.isArray(event.argv) && event.argv.every((arg) => typeof arg === "string"),
-		)
+		.map((line) => ArgvEventBoundary.assert(JSON.parse(line)))
 }
 
 async function writeShellFinalizerMarkerScript(path: string, marker: string): Promise<void> {
@@ -4156,6 +4183,13 @@ type RunnerEvent = {
 	runId: string
 	cwd: string
 }
+const RunnerEventBoundary = arkType({
+	type: "'start'|'end'",
+	itemId: "number",
+	issueNumber: "number",
+	runId: "string",
+	cwd: "string",
+})
 
 async function createFixture(name: string): Promise<Fixture> {
 	const root = resolve(TEST_ROOT, `${name}-${++nextFixtureId}`)
@@ -4174,6 +4208,7 @@ async function createFixture(name: string): Promise<Fixture> {
 	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
 		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
 		await mkdir(worktreePath, { recursive: true })
+		initializeFixtureGitWorktree(worktreePath)
 		worktreeCalls.push(worktreePath)
 		return worktreePath
 	}
@@ -4196,7 +4231,8 @@ async function createFixture(name: string): Promise<Fixture> {
 			runIdFactory: makeAttemptTrackingRunIdFactory(),
 			prompt: ({ item, runId, worktreePath, phase }) => {
 			const extra = itemExtraToJsonObject(item.extra)
-			const payload: BoundaryRecord = {
+			const writeStatus = fakeRunnerWriteStatus(phase, extra)
+			const payload: JsonObject = {
 				itemId: item.id,
 				issueNumber: Number(item.itemId),
 				runId,
@@ -4207,9 +4243,9 @@ async function createFixture(name: string): Promise<Fixture> {
 				// v1 status model: the fake runner writes this status to the store itself, simulating the
 				// real agent's `coder-loop item update --status`. The scheduler only reads item.status; it
 				// never derives status from the runner's stdout or exit code.
-				writeStatus: fakeRunnerWriteStatus(phase, extra),
+				...(writeStatus === undefined ? {} : { writeStatus }),
 			}
-			if (Object.prototype.hasOwnProperty.call(extra, "summary")) payload.summary = extra.summary
+			if (extra.summary !== undefined) payload.summary = extra.summary
 			return JSON.stringify(payload)
 		},
 			onEvent: (event) => {
@@ -4556,7 +4592,7 @@ function makeAttemptTrackingRunIdFactory(): (context: { chain: { id: number }; i
 
 async function readRunnerEvents(path: string): Promise<RunnerEvent[]> {
 	const text = await readFile(path, "utf-8")
-	return text.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as RunnerEvent)
+	return text.trim().split("\n").filter(Boolean).map((line) => RunnerEventBoundary.assert(JSON.parse(line)))
 }
 
 function maxConcurrentRunnerEvents(events: RunnerEvent[]): number {
@@ -4623,6 +4659,7 @@ async function createPresetPromptIntegrationFixture(name: string): Promise<Fixtu
 	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
 		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
 		await mkdir(worktreePath, { recursive: true })
+		initializeFixtureGitWorktree(worktreePath)
 		worktreeCalls.push(worktreePath)
 		return worktreePath
 	}
@@ -4659,6 +4696,19 @@ async function createPresetPromptIntegrationFixture(name: string): Promise<Fixtu
 	}
 
 	return { store, state, loopDataRoot, eventLog, schedulerEvents, worktreeCalls, fakeRunner, options }
+}
+
+function initializeFixtureGitWorktree(worktreePath: string): void {
+	if (Bun.spawnSync({ cmd: ["git", "rev-parse", "--git-dir"], cwd: worktreePath, stdout: "ignore", stderr: "ignore" }).exitCode === 0) return
+	for (const command of [
+		["git", "init", "-b", "main"],
+		["git", "config", "user.email", "fixture@example.invalid"],
+		["git", "config", "user.name", "coder-loop fixture"],
+		["git", "commit", "--allow-empty", "-m", "fixture base"],
+	]) {
+		const result = Bun.spawnSync({ cmd: command, cwd: worktreePath, stdout: "ignore", stderr: "pipe" })
+		if (result.exitCode !== 0) throw new Error(new TextDecoder().decode(result.stderr))
+	}
 }
 
 async function writeEchoPromptRunner(path: string): Promise<void> {

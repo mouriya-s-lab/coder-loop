@@ -1,15 +1,20 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
+import { type as arkType } from "arktype"
 
 import { startCoderLoopDaemon } from "./daemon"
 import { openSqliteStateStore } from "./sqlite-state"
+import { TaskTreeSnapshotBoundary } from "./task-runtime"
 import { engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/db-main-loop-tests", String(process.pid))
 const CHAIN_NAME = "db-main-loop"
+const StatusQueueReadBoundary = arkType({ queue: { selected: arkType.or({ id: "string" }, "null") } })
+const StatusTaskTreeReadBoundary = arkType({ taskTree: TaskTreeSnapshotBoundary })
+const StatusStateReadBoundary = arkType({ state: { kind: "string", ok: "boolean" }, current: { "id?": "string|null" } })
 
 // #397 test brand helper — see install-commands.test.ts for rationale.
 function runtimeStatus(value: string) {
@@ -35,10 +40,38 @@ describe("db-backed v2 loop hard cut", () => {
 		const beforeMtime = (await stat(fixture.statePath)).mtimeMs
 		const result = runCli(["status", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--chain", CHAIN_NAME, "--json"])
 		expect(result.exitCode).toBe(0)
-		const snapshot = JSON.parse(result.stdout) as { queue: { selected: { id: string } | null } }
+		const snapshot = StatusQueueReadBoundary.assert(JSON.parse(result.stdout))
 		expect(snapshot.queue.selected?.id).toBe("1")
 		expect(await readFile(fixture.statePath, "utf-8")).toBe(beforeText)
 		expect((await stat(fixture.statePath)).mtimeMs).toBe(beforeMtime)
+	})
+
+	test("status task tree projects persisted recursive identity without flat item synthesis", async () => {
+		const fixture = await createFixture()
+		const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+		try {
+			const chain = store.getChainByName(CHAIN_NAME)
+			if (chain === null) throw new Error("fixture chain missing")
+			const item = store.getItemById(chain.id, "1")
+			if (item === null) throw new Error("fixture item missing")
+			const second = store.createItem({ chainId: chain.id, itemId: "2", repoCwd: fixture.target, status: runtimeStatus("queued"), preset: "gh-issue-pr-iteration", extra: storedItemExtra({ issue: "2" }) })
+			store.recordRun({ runId: "persisted-run-one", chainId: chain.id, itemId: item.id, phase: "iteration", startedAt: 1_800_000_200 })
+			store.recordRun({ runId: "persisted-run-two", chainId: chain.id, itemId: second.id, phase: "iteration", startedAt: 1_800_000_201 })
+			const definitionRef = { kind: "chain", contentIdentity: "sha256:persisted-status-tree" } as const
+			store.createTaskTree(chain.id, { root: { kind: "seq", identity: { runtimeNodeId: "persisted-root", definitionRef, definitionNodeId: "root-definition" }, cursor: { kind: "next", nodeId: "persisted-leaf" }, children: [{ kind: "leaf", identity: { runtimeNodeId: "persisted-leaf", definitionRef, definitionNodeId: "leaf-definition" }, closure: { closureId: "persisted-closure", itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: fixture.target, branchName: "persisted-branch", baseCommit: "0123456789abcdef", sourceParNodeId: null, sessions: [] } }, { kind: "leaf", identity: { runtimeNodeId: "persisted-leaf-two", definitionRef, definitionNodeId: "leaf-definition-two" }, closure: { closureId: "persisted-closure-two", itemRowId: second.id, itemId: second.itemId, phase: "iteration", lifecycle: "active", worktreePath: fixture.target, branchName: "persisted-branch-two", baseCommit: "0123456789abcdef", sourceParNodeId: null, sessions: [] } }] }, activeRuns: [{ closureId: "persisted-closure", runId: "persisted-run-one", phase: "iteration", startedAt: 1_800_000_200 }, { closureId: "persisted-closure-two", runId: "persisted-run-two", phase: "iteration", startedAt: 1_800_000_201 }] })
+			store.updateItem(item.id, { phase: "flat-mutated-phase" })
+		} finally { store.close() }
+		const result = runCli(["status", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--chain", CHAIN_NAME, "--json"])
+		expect(result.exitCode).toBe(0)
+		const tree = StatusTaskTreeReadBoundary.assert(JSON.parse(result.stdout)).taskTree
+		const status = StatusStateReadBoundary.assert(JSON.parse(result.stdout))
+		expect(status.state.kind).toBe("ok")
+		expect(status.state.ok).toBe(true)
+		expect(tree.root.identity.runtimeNodeId).toBe("persisted-root")
+		if (tree.root.kind !== "seq") throw new Error("persisted root is not seq")
+		const leaf = tree.root.children[0]
+		if (leaf?.kind !== "leaf") throw new Error("persisted child is not leaf")
+		expect(leaf.closure.phase).toBe("iteration")
 	})
 
 	test("queue unblock mutates SQLite only", async () => {
