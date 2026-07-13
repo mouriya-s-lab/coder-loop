@@ -2,7 +2,7 @@ import { scope } from "arktype"
 import { readFile } from "node:fs/promises"
 
 import type { BoundaryValue } from "./boundary-types"
-import { parseObservabilityEventType, type ObservabilityEventType } from "./observability-event-types"
+import { parseObservabilityEventType, type ObservabilityEventType } from "./observability"
 import type { JsonValue } from "./loop"
 
 export type ObserverHookPoint = Exclude<ObservabilityEventType, `hook.${string}`>
@@ -50,10 +50,12 @@ type HookLayers = {
 }
 
 const HookBoundaries = scope({
-	HookInput: { kind: "string", point: "string", script: "string", timeoutMs: "number.integer", "onFailure?": "string" },
+	ObserverHookInput: { kind: "'observer'", point: "string", script: "string", timeoutMs: "number.integer" },
+	GateHookInput: { kind: "'gate'", point: "string", script: "string", timeoutMs: "number.integer", onFailure: "'hold' | 'advance'" },
+	HookInput: "ObserverHookInput | GateHookInput",
 	GlobalHookDocument: { version: "1", hooks: "unknown[]" },
 }).export()
-const HookInputBoundary = HookBoundaries.HookInput
+const HookInputBoundary = HookBoundaries.HookInput.onUndeclaredKey("reject")
 const GlobalHookDocumentBoundary = HookBoundaries.GlobalHookDocument
 
 const GATE_DECISION_POINT_SET: ReadonlySet<string> = new Set(GATE_DECISION_POINTS)
@@ -93,7 +95,6 @@ function parseHookDeclaration(input: BoundaryValue, field: string): HookDeclarat
 	}
 	if (value.kind === "gate") {
 		if (!GATE_DECISION_POINT_SET.has(value.point)) throw new Error(`${field}.point is not a known gate decision point: ${value.point}`)
-		if (value.onFailure !== "hold" && value.onFailure !== "advance") throw new Error(`${field}.onFailure must be hold or advance`)
 		assertGateDecisionPoint(value.point)
 		return { kind: "gate", point: value.point, script: value.script, timeoutMs: value.timeoutMs, onFailure: value.onFailure }
 	}
@@ -114,15 +115,17 @@ export function buildEffectiveHookView(layers: HookLayers): EffectiveHook[] {
 }
 
 export function hookDeclarationsToJsonValue(declarations: readonly HookDeclaration[]): JsonValue {
-	const result: JsonValue[] = []
-	for (const declaration of declarations) {
-		switch (declaration.kind) {
-			case "observer": result.push({ kind: declaration.kind, point: declaration.point, script: declaration.script, timeoutMs: declaration.timeoutMs }); break
-			case "gate": result.push({ kind: declaration.kind, point: declaration.point, script: declaration.script, timeoutMs: declaration.timeoutMs, onFailure: declaration.onFailure }); break
-			default: return assertNeverHookDeclaration(declaration)
-		}
+	return declarations.map(hookDeclarationToJsonValue)
+}
+
+function hookDeclarationToJsonValue(declaration: HookDeclaration): JsonValue {
+	if (declaration.kind === "observer") {
+		return { kind: declaration.kind, point: declaration.point, script: declaration.script, timeoutMs: declaration.timeoutMs }
 	}
-	return result
+	if (declaration.kind === "gate") {
+		return { kind: declaration.kind, point: declaration.point, script: declaration.script, timeoutMs: declaration.timeoutMs, onFailure: declaration.onFailure }
+	}
+	return assertNeverHookDeclaration(declaration)
 }
 
 function assertNeverHookDeclaration(declaration: never): never {

@@ -7448,6 +7448,11 @@ process.exitCode = 0
 				preset: "gh-issue-pr-iteration",
 			}))).item)
 			const itemId = numberValue(added.id)
+			const protectedHook = { kind: "observer", point: "agent.spawn", script: "/bin/true", timeoutMs: 1_000 }
+			expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.update", {
+				itemId,
+				fields: { extraPatch: { hooks: [protectedHook] } },
+			})))
 
 			await waitFor(async () => {
 				try { return (await readFile(reviewCapture, "utf-8")).trim() } catch { return "" }
@@ -7542,6 +7547,7 @@ process.exitCode = 0
 				{ extra: { hooks: [] } },
 				{ extraPatch: { hooks: [] } },
 				{ extraPatch: { hooks: null } },
+				{ extra: { branch: "allowed/without-protected-hooks" } },
 			]) {
 				const deniedHooks = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.update", { itemId, fields, agentCredential: reviewCredential }))
 				expect(deniedHooks.ok).toBe(false)
@@ -7560,8 +7566,8 @@ process.exitCode = 0
 				&& event.item === itemId
 				&& event.payload.outcome === "deny",
 			)
-			expect(denies.length).toBeGreaterThanOrEqual(10)
-			expect(denies.filter((event) => event.kind === "audit" && event.type === "item.update.field_write_admission" && event.payload.deniedFields.includes("hooks"))).toHaveLength(3)
+			expect(denies.length).toBeGreaterThanOrEqual(11)
+			expect(denies.filter((event) => event.kind === "audit" && event.type === "item.update.field_write_admission" && event.payload.deniedFields.includes("hooks"))).toHaveLength(5)
 			const controlPlaneRunner = denies.find((event) =>
 				event.kind === "audit"
 				&& event.type === "item.update.field_write_admission"
@@ -7590,6 +7596,7 @@ process.exitCode = 0
 			// #419: `branch` / `pr` are no longer top-level wire fields. After denial they must
 			// still be absent from the `extra` carrier where presets declare them.
 			const stillExtra = record(stillRecord.extra)
+			expect(stillExtra.hooks).toEqual([protectedHook])
 			expect(stillExtra.branch).toBeUndefined()
 			expect(stillExtra.pr).toBeUndefined()
 		} finally {

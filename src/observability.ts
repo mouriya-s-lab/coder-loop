@@ -132,7 +132,6 @@ export const ObservabilityEventTypeBoundary = arkType.or(
 	// transition gate) to give the auditor a full per-field replay of every item-mutation surface.
 	arkType.unit("item.update.field_write_admission"),
 )
-
 // #409: vocabulary of daemon ops that flow through the privileged-op caller-admission gate.
 // Closed boundary so a corrupted / forged event file can't smuggle an unknown op past the
 // reader. The daemon's `DaemonCommandName` is the source of truth; a compile-time check inside
@@ -722,8 +721,8 @@ export const ObservabilityEventBoundary = arkType.or(
 )
 
 export type ObservabilityEvent = typeof ObservabilityEventBoundary.infer
+export type ObservabilityEventType = typeof ObservabilityEventTypeBoundary.infer
 export type ObservabilityKind = typeof ObservabilityKindBoundary.infer
-export type { ObservabilityEventType } from "./observability-event-types"
 export type ObservabilityExcerpt = Extract<ObservabilityEvent, { type: "agent.exit" }>["payload"]["excerpt"]
 export type ObservabilitySubject = NonNullable<ObservabilityEvent["subject"]>
 export type PresetPlaceholderDirection = typeof PresetPlaceholderDirectionBoundary.infer
@@ -815,7 +814,9 @@ export function parseObservabilityKind(input: string): ObservabilityKind {
 	return ObservabilityKindBoundary.assert(input)
 }
 
-export { parseObservabilityEventType } from "./observability-event-types"
+export function parseObservabilityEventType(input: string): ObservabilityEventType {
+	return ObservabilityEventTypeBoundary.assert(input)
+}
 
 export async function appendObservabilityEvent(eventsFile: string, event: ObservabilityEvent): Promise<void> {
 	try {

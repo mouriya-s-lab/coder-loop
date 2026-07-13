@@ -3873,7 +3873,11 @@ export class CoderLoopDaemon {
 		caller: ItemMutationCaller,
 		fields: JsonObject,
 	): Promise<void> {
-		const requested = collectItemUpdateFieldKeys(fields)
+		const requested = collectProtectedItemUpdateFieldKeys(
+			collectItemUpdateFieldKeys(fields),
+			fields,
+			itemExtraToJsonObject(item.extra),
+		)
 		if (caller.kind === "operator") {
 			// Operator path: always allow. Emit one allow event with reason=operator so the
 			// audit trail records every item.update through this gate uniformly (mirrors
@@ -4877,6 +4881,26 @@ function collectItemUpdateFieldKeys(fields: JsonObject): ItemUpdateRequestedFiel
 		}
 	}
 	return { topLevel, innerKeys, all }
+}
+
+function collectProtectedItemUpdateFieldKeys(
+	requested: ItemUpdateRequestedFields,
+	fields: JsonObject,
+	currentExtra: JsonObject,
+): ItemUpdateRequestedFields {
+	const replacement = fields.extra
+	if (
+		replacement === null
+		|| typeof replacement !== "object"
+		|| Array.isArray(replacement)
+		|| !Object.hasOwn(currentExtra, "hooks")
+		|| Object.hasOwn(replacement, "hooks")
+	) return requested
+	return {
+		topLevel: requested.topLevel,
+		innerKeys: new Set([...requested.innerKeys, "hooks"]),
+		all: new Set([...requested.all, "hooks"]),
+	}
 }
 
 function mergeItemExtraPatch(existing: JsonObject, patch: JsonObject): JsonObject {

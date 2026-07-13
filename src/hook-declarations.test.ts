@@ -30,6 +30,7 @@ describe("hook declarations", () => {
 		[[{ ...observer, point: "unknown.event" }], "point"],
 		[[{ ...gate, point: "unknown-gate" }], "point"],
 		[[{ kind: "gate", point: "tick", script: "/bin/gate", timeoutMs: 1 }], "onFailure"],
+		[[{ ...observer, onFailure: "garbage" }], "onFailure"],
 		[[{ ...observer, script: "" }], "script"],
 		[[{ ...observer, timeoutMs: 0 }], "timeoutMs"],
 		[[{ ...observer, point: "hook.start" }], "point"],
