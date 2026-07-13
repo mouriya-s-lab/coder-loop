@@ -5,6 +5,7 @@ import { basename, dirname, resolve } from "node:path"
 
 import { type as arkType } from "arktype"
 
+import { ContextWriteAdmissionPayloadBoundary } from "./context-entry"
 import type { ItemRecord } from "./sqlite-state"
 
 const SubjectBoundary = arkType.or(
@@ -131,6 +132,7 @@ export const ObservabilityEventTypeBoundary = arkType.or(
 	// `item.mutation.caller_admission` (caller gate) and `item.status.write_admission` (status
 	// transition gate) to give the auditor a full per-field replay of every item-mutation surface.
 	arkType.unit("item.update.field_write_admission"),
+	arkType.unit("context.write_admission"),
 )
 
 // #409: vocabulary of daemon ops that flow through the privileged-op caller-admission gate.
@@ -243,6 +245,12 @@ const EventBaseBoundary = {
 } as const
 
 export const ObservabilityEventBoundary = arkType.or(
+	{
+		...EventBaseBoundary,
+		kind: arkType.unit("audit"),
+		type: arkType.unit("context.write_admission"),
+		payload: ContextWriteAdmissionPayloadBoundary,
+	},
 	{
 		...EventBaseBoundary,
 		kind: arkType.unit("audit"),
@@ -985,6 +993,8 @@ function renderAuditEvent(event: Extract<ObservabilityEvent, { kind: "audit" }>)
 			// audit row — surface `denied=<csv>` first so an operator scanning for "what was
 			// blocked" sees it without parsing the rest.
 			return `${event.ts} audit item.update.field_write_admission chain=${event.chain ?? "-"} item=${event.item ?? event.payload.itemId} preset=${event.payload.presetName ?? "-"} claimedPhase=${event.payload.claimedPhase ?? "-"} outcome=${event.payload.outcome} reason=${event.payload.reason} denied=${event.payload.deniedFields.join(",") || "-"} requested=${event.payload.requestedFields.join(",") || "-"} granted=${event.payload.grantedFields.join(",") || "-"}`
+		case "context.write_admission":
+			return `${event.ts} audit context.write_admission chain=${event.chain ?? "-"} command=${event.payload.command} outcome=${event.payload.outcome} reason=${event.payload.reason} session=${event.payload.sessionId ?? "-"}`
 		default:
 			return assertNever(event)
 	}
