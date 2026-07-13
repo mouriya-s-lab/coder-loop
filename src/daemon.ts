@@ -48,7 +48,7 @@ import {
 	type SchedulerState,
 } from "./scheduler"
 import { PersistedRateLimitStateBoundary, type RateLimitReset } from "./rate-limit"
-import { probeExternalTerminal, runnerExecutionDomain } from "./runner-execution"
+import { runnerExecutionDomain } from "./runner-execution"
 import {
 	type ChainRecord,
 	type CreateChainInput,
@@ -3081,7 +3081,7 @@ export class CoderLoopDaemon {
 		}
 	}
 
-	private async externalTerminalPhaseForItem(chain: ChainRecord, item: ItemRecord): Promise<string | null> {
+	private async resolvedPhaseForExternalTerminalRefresh(chain: ChainRecord, item: ItemRecord): Promise<{ phase: string; external: boolean } | null> {
 		// `loadedPresetForItem` is backed by the daemon's shared promise cache keyed by canonical
 		// preset directory. Add, batch-add, update, and the scheduler therefore share one
 		// materialization/validation result; a batch does not reload the same preset per row and the
@@ -3093,19 +3093,19 @@ export class CoderLoopDaemon {
 			? preset.phases.find((candidate) => candidate.trigger === null)
 			: preset.phases.find((candidate) => candidate.name === item.phase)
 		if (phase === undefined) return null
-		if (item.runner !== null) return runnerExecutionDomain(item.runner).kind === "external-terminal" ? phase.name : null
-		return phase.defaultRunner !== null && runnerExecutionDomain(phase.defaultRunner).kind === "external-terminal" ? phase.name : null
+		if (item.runner !== null) return { phase: phase.name, external: runnerExecutionDomain(item.runner).kind === "external-terminal" }
+		return { phase: phase.name, external: phase.defaultRunner !== null && runnerExecutionDomain(phase.defaultRunner).kind === "external-terminal" }
 	}
 
 	private async refreshPostPersistenceExternalTerminal(chain: ChainRecord, items: readonly ItemRecord[]): Promise<void> {
 		const options = this.buildSchedulerOptions()
-		const externalItems: { item: ItemRecord; phase: string }[] = []
+		const resolvedItems: { item: ItemRecord; phase: string; external: boolean }[] = []
 		for (const item of items) {
-			const phase = await this.externalTerminalPhaseForItem(chain, item)
-			if (phase !== null) externalItems.push({ item, phase })
+			const resolved = await this.resolvedPhaseForExternalTerminalRefresh(chain, item)
+			if (resolved !== null) resolvedItems.push({ item, ...resolved })
 		}
-		const affected = externalItems.map(({ item, phase }) => ({ chainId: chain.id, rowId: item.id, itemId: item.itemId, phase }))
-		for (const { item, phase } of externalItems) {
+		const affected = resolvedItems.filter(({ external }) => external).map(({ item, phase }) => ({ chainId: chain.id, rowId: item.id, itemId: item.itemId, phase }))
+		for (const { item, phase } of resolvedItems) {
 			await refreshExternalTerminalAvailabilityForItem(options, chain, item, phase, undefined, affected)
 		}
 	}
@@ -3607,11 +3607,6 @@ export class CoderLoopDaemon {
 				await this.applyRateLimitNotice({ runId: info.runId, chainId: info.chainId, itemId: info.itemId, reset: info.reset })
 			},
 		}
-		options.externalTerminalProbe = scheduler.externalTerminalProbe ?? (async ({ runner }) => {
-			const domain = runnerExecutionDomain(runner.kind)
-			if (domain.kind !== "external-terminal") throw new DaemonError("internal_error", `local runner ${runner.kind} reached external-terminal probe`)
-			return await probeExternalTerminal(runner.binary, domain.probeArgv)
-		})
 		if (scheduler.phaseRunner !== undefined) options.phaseRunner = scheduler.phaseRunner
 		if (phaseRunnerSelectionForChain !== undefined) options.phaseRunnerSelectionForChain = phaseRunnerSelectionForChain
 		if (phaseRunnerSelectionForItem !== undefined) options.phaseRunnerSelectionForItem = phaseRunnerSelectionForItem

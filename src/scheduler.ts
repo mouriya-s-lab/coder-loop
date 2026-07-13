@@ -69,7 +69,7 @@ import {
 } from "./runtime-paths"
 import { collectObservabilityExcerpt, type ObservabilityExcerpt } from "./observability"
 import { createStreamTextState } from "./runner-output"
-import { runnerExecutionDomain, type ExternalTerminalAvailability } from "./runner-execution"
+import { probeExternalTerminal, runnerExecutionDomain, type ExternalTerminalAvailability } from "./runner-execution"
 
 // #452: completion signal is the daemon-observed state write, not a stdout marker.
 // The previous "per-run nonce summary tag" prompt injection + stdout watchdog
@@ -220,15 +220,6 @@ export type SchedulerWorktreeContext = {
 
 export type SchedulerWorktreeManager = (context: SchedulerWorktreeContext) => Promise<string>
 
-export type SchedulerExternalTerminalProbeInput = {
-	runner: AgentRunnerSelection
-	chain: ChainRecord
-	item: ItemRecord
-	phase: string
-}
-
-export type SchedulerExternalTerminalProbe = (input: SchedulerExternalTerminalProbeInput) => Promise<ExternalTerminalAvailability>
-
 export type SchedulerEvent =
 	| { type: "slot.busy"; slotKey: string; chainId: number; repoCwd: string; activeRunId: string }
 	// #419 review I2: `itemId` (rowid integer) renamed to `rowId` for wire-shape consistency
@@ -357,8 +348,6 @@ export type SchedulerOptions = {
 		| string
 		| ((context: SchedulerSpawnContext) => string | Promise<string>)
 	worktreeManager?: SchedulerWorktreeManager
-	externalTerminalProbe?: SchedulerExternalTerminalProbe
-	runnerInvocationBuilder?: typeof buildRunnerInvocation
 	loopDataRootOptions?: LoopDataRootOptions
 	now?: () => number
 	runIdFactory?: (context: { chain: ChainRecord; item: ItemRecord; phase: string }) => string
@@ -532,10 +521,9 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 			if (slot.activeRun !== null) {
 				const activeDomain = runnerExecutionDomain(slot.activeRun.runner.kind)
 				if (activeDomain.kind === "external-terminal" && !chainStatuses.terminal.includes(activeItemStatus(options.store, slot.activeRun.itemId)) && !options.state.externalTerminalLossRunIds.has(slot.activeRun.runId)) {
-					if (options.externalTerminalProbe === undefined) throw new Error(`external-terminal runner ${slot.activeRun.runner.kind} requires an availability probe`)
 					const activeItem = options.store.getItem(slot.activeRun.itemId)
 					if (activeItem === null) throw new Error(`active external-terminal run ${slot.activeRun.runId} references missing item ${slot.activeRun.itemId}`)
-					const availability = await options.externalTerminalProbe({ runner: slot.activeRun.runner, chain, item: activeItem, phase: slot.activeRun.phase })
+					const availability = await probeResolvedExternalTerminal(slot.activeRun.runner, activeDomain)
 					if (availability.kind !== "available") {
 						const itemAfterProbe = options.store.getItem(activeItem.id)
 						if (itemAfterProbe === null) throw new Error(`active external-terminal run ${slot.activeRun.runId} references missing item ${activeItem.id}`)
@@ -545,18 +533,24 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 						}
 						const checkedAt = nowIso(options)
 						const previousHold = externalTerminalHold(itemAfterProbe.extra)
-						const since = previousHold?.availability.since ?? checkedAt
+						const sameHold = previousHold !== null && previousHold.runner === slot.activeRun.runner.kind
+							&& previousHold.binary === slot.activeRun.runner.binary && previousHold.availability.kind === availability.kind
+							&& previousHold.availability.reason === availability.reason
+						const endpointAlreadyUnavailable = hasMatchingExternalTerminalHold(options.store, itemAfterProbe.id, slot.activeRun.runner.kind, slot.activeRun.runner.binary, availability.kind, availability.reason)
+						const since = sameHold ? previousHold.availability.since : checkedAt
 						options.store.updateItem(itemAfterProbe.id, { extra: withExternalTerminalHold(itemAfterProbe.extra, {
 							kind: "external-terminal-unavailable", runner: slot.activeRun.runner.kind, phase: slot.activeRun.phase,
-							binary: slot.activeRun.runner.binary, probeArgv: activeDomain.probeArgv,
+							binary: slot.activeRun.runner.binary, probeArgv: activeDomain.probe.argv,
 							availability: availability.kind === "unavailable"
 								? { kind: "unavailable", reason: availability.reason, exitCode: availability.exitCode, signal: null, checkedAt, since }
 								: { kind: "probe-failed", reason: availability.reason, exitCode: availability.exitCode, signal: availability.signal, checkedAt, since },
 						}), updatedAt: nowSeconds(options) })
-						await emit(options, { type: "runner.external_terminal_unavailable", chainId: chain.id, rowId: activeItem.id, itemId: activeItem.itemId,
+						if (!sameHold && !endpointAlreadyUnavailable) await emit(options, {
+							type: "runner.external_terminal_unavailable", chainId: chain.id, rowId: activeItem.id, itemId: activeItem.itemId,
 							phase: slot.activeRun.phase, runner: slot.activeRun.runner.kind, binary: slot.activeRun.runner.binary,
-							probeArgv: activeDomain.probeArgv, availability,
-							affected: [{ chainId: chain.id, rowId: activeItem.id, itemId: activeItem.itemId, phase: slot.activeRun.phase }] })
+							probeArgv: activeDomain.probe.argv, availability,
+							affected: activeExternalTerminalEndpointAffected(options, slot.activeRun.runner),
+						})
 						options.state.externalTerminalLossRunIds.add(slot.activeRun.runId)
 						const terminating = slot.activeRun
 						const currentRun = options.store.getCurrentRun(chain.id)
@@ -584,19 +578,29 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 			items = await exhaustItemsOverAttemptLimitForRepo(options, chain, repoCwd, items, chainStatuses)
 			const now = nowSeconds(options)
 			await emitRepoWaitingDecisions(options, chain, repoCwd, items, chainStatuses, now)
-			const next = selectNextItemAndPhase({
-				repoCwd,
-				items,
-				runs,
-				chainStatuses,
-				phasePlan,
-				explicitPhase: options.phase,
-				now,
-			})
-			if (next === null) continue
+			let remainingCandidates = items
+			while (!spawnCapped()) {
+				const next = selectNextItemAndPhase({
+					repoCwd,
+					items: remainingCandidates,
+					runs,
+					chainStatuses,
+					phasePlan,
+					explicitPhase: options.phase,
+					now,
+				})
+				if (next === null) break
 
-			const activeRun = await spawnSchedulerRun(options, chain, next.item, slot, next.phase, phasePlan)
-			if (activeRun !== null) spawnedRuns.push(activeRun)
+				const activeRun = await spawnSchedulerRun(options, chain, next.item, slot, next.phase, phasePlan)
+				if (activeRun !== null) {
+					spawnedRuns.push(activeRun)
+					break
+				}
+				const candidateAfterSpawn = options.store.getItem(next.item.id)
+				if (candidateAfterSpawn === null) throw new Error(`spawn candidate ${next.item.id} disappeared`)
+				if (externalTerminalHold(candidateAfterSpawn.extra) === null) break
+				remainingCandidates = remainingCandidates.filter((candidate) => candidate.id !== next.item.id)
+			}
 		}
 
 		// Restore dependency-unblocked terminal items AFTER selection so a freshly-unblocked item is
@@ -1049,6 +1053,7 @@ async function spawnSchedulerRun(
 	try {
 		const runner = await resolvePhaseRunner(options, { chain, item, phase })
 		if (!await refreshExternalTerminalAvailabilityForItem(options, chain, item, phase, runner)) return null
+		const runnerDomain = runnerExecutionDomain(runner.kind)
 		worktreePath = worktreePath ?? await worktreeManager({ chain, repoCwd: item.repoCwd, slotKey: slot.key })
 		slot.worktreePath = worktreePath
 		const resumeDecision = resumeDecisionForItem(item, phase, runner.kind)
@@ -1076,7 +1081,18 @@ async function spawnSchedulerRun(
 			phase,
 			runId,
 			startedAt,
-			extra: storedItemExtra({ slotKey: slot.key, itemId: item.id, repoCwd: item.repoCwd }),
+			extra: storedItemExtra({
+				slotKey: slot.key,
+				itemId: item.id,
+				repoCwd: item.repoCwd,
+				...(runnerDomain.kind === "external-terminal" ? {
+					externalTerminalCurrent: {
+						runner: runner.kind,
+						binary: runner.binary,
+						availability: { kind: "available", checkedAt: new Date(startedAt * 1000).toISOString() },
+					},
+				} : {}),
+			}),
 		})
 		const spawnUpdate: Parameters<typeof options.store.updateItem>[1] = {
 			attempts: item.attempts + (startsAttempt ? 1 : 0),
@@ -1106,7 +1122,7 @@ async function spawnSchedulerRun(
 			runner: runner.kind,
 		})
 		const finalPrompt = renderedPrompt + phaseExitsEpilogue()
-		const runnerPlan = (options.runnerInvocationBuilder ?? buildRunnerInvocation)(
+		const runnerPlan = buildRunnerInvocation(
 			runner,
 			finalPrompt,
 			resumeDecision,
@@ -1133,15 +1149,12 @@ async function spawnSchedulerRun(
 		await waitForChildSpawn(child)
 		activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, phase, child, runner, credential, credentialContext)
 		slot.activeRun = activeRun
+		const currentRun = options.store.getCurrentRun(chain.id)
+		if (currentRun === null || currentRun.runId !== runId) throw new Error(`current run ${runId} missing after spawn`)
 		options.store.setCurrentRun({
-			chainId: chain.id,
-			phase,
-			runId,
-			startedAt,
+			...currentRun,
 			extra: storedItemExtra({
-				slotKey: slot.key,
-				itemId: item.id,
-				repoCwd: item.repoCwd,
+				...itemExtraToJsonObject(currentRun.extra),
 				worktreePath,
 				...(activeRun.pid === null ? {} : { pid: activeRun.pid }),
 				processGroupLeader: true,
@@ -1183,7 +1196,7 @@ function hasMatchingExternalTerminalHold(
 	runner: AgentRunnerKind,
 	binary: string,
 	kind: "unavailable" | "probe-failed",
-	reason: "binary-missing" | "endpoint-unavailable" | "unexpected-exit" | "signal",
+	reason: "binary-missing" | "endpoint-unavailable" | "unexpected-exit" | "signal" | "deadline-exceeded",
 ): boolean {
 	return store.listChains().some((chain) => store.listItems(chain.id).some((candidate) => {
 		if (candidate.id === excludeItemId) return false
@@ -1191,6 +1204,18 @@ function hasMatchingExternalTerminalHold(
 		return hold !== null && hold.runner === runner && hold.binary === binary
 			&& hold.availability.kind === kind && hold.availability.reason === reason
 	}))
+}
+
+function activeExternalTerminalEndpointAffected(
+	options: SchedulerOptions,
+	runner: AgentRunnerSelection,
+): { chainId: number; rowId: number; itemId: string; phase: string }[] {
+	return [...options.state.slots.values()].flatMap((slot) => {
+		const active = slot.activeRun
+		if (active === null || active.runner.kind !== runner.kind || active.runner.binary !== runner.binary) return []
+		const item = options.store.getItem(active.itemId)
+		return item === null ? [] : [{ chainId: active.chainId, rowId: item.id, itemId: item.itemId, phase: active.phase }]
+	})
 }
 
 export async function refreshExternalTerminalAvailabilityForItem(
@@ -1203,9 +1228,13 @@ export async function refreshExternalTerminalAvailabilityForItem(
 ): Promise<boolean> {
 	const runner = resolvedRunner ?? await resolvePhaseRunner(options, { chain, item, phase })
 	const executionDomain = runnerExecutionDomain(runner.kind)
-	if (executionDomain.kind === "local-process") return true
-	if (options.externalTerminalProbe === undefined) throw new Error(`external-terminal runner ${runner.kind} requires an availability probe`)
-	const availability = await options.externalTerminalProbe({ runner, chain, item, phase })
+	if (executionDomain.kind === "local-process") {
+		if (externalTerminalHold(item.extra) !== null) {
+			options.store.updateItem(item.id, { extra: clearExternalTerminalHold(item.extra), updatedAt: nowSeconds(options) })
+		}
+		return true
+	}
+	const availability = await probeResolvedExternalTerminal(runner, executionDomain)
 	if (availability.kind !== "available") {
 		const checkedAt = new Date(nowSeconds(options) * 1000).toISOString()
 		const previousHold = externalTerminalHold(item.extra)
@@ -1215,7 +1244,7 @@ export async function refreshExternalTerminalAvailabilityForItem(
 		const since = sameHold ? previousHold.availability.since : checkedAt
 		options.store.updateItem(item.id, { extra: withExternalTerminalHold(item.extra, {
 			kind: "external-terminal-unavailable", runner: runner.kind, phase, binary: runner.binary,
-			probeArgv: executionDomain.probeArgv,
+			probeArgv: executionDomain.probe.argv,
 			availability: availability.kind === "unavailable"
 				? { kind: "unavailable", reason: availability.reason, exitCode: availability.exitCode, signal: null, checkedAt, since }
 				: { kind: "probe-failed", reason: availability.reason, exitCode: availability.exitCode, signal: availability.signal, checkedAt, since },
@@ -1223,7 +1252,7 @@ export async function refreshExternalTerminalAvailabilityForItem(
 		const endpointAlreadyUnavailable = hasMatchingExternalTerminalHold(options.store, item.id, runner.kind, runner.binary, availability.kind, availability.reason)
 		if (!sameHold && !endpointAlreadyUnavailable) await emit(options, { type: "runner.external_terminal_unavailable",
 			chainId: chain.id, rowId: item.id, itemId: item.itemId, phase, runner: runner.kind, binary: runner.binary,
-			probeArgv: executionDomain.probeArgv, availability, affected: warningAffected })
+			probeArgv: executionDomain.probe.argv, availability, affected: warningAffected })
 		return false
 	}
 	const previousHold = externalTerminalHold(item.extra)
@@ -1232,10 +1261,20 @@ export async function refreshExternalTerminalAvailabilityForItem(
 		options.store.updateItem(item.id, { extra: clearExternalTerminalHold(item.extra), updatedAt: nowSeconds(options) })
 		if (!hasAnyExternalTerminalHoldForEndpoint(options.store, item.id, runner.kind, runner.binary)) await emit(options, {
 			type: "runner.availability_restored", chainId: chain.id, rowId: item.id, itemId: item.itemId, phase,
-			runner: runner.kind, binary: runner.binary, probeArgv: executionDomain.probeArgv, checkedAt,
+			runner: runner.kind, binary: runner.binary, probeArgv: executionDomain.probe.argv, checkedAt,
 		})
 	}
 	return true
+}
+
+async function probeResolvedExternalTerminal(
+	runner: AgentRunnerSelection,
+	domain: Extract<ReturnType<typeof runnerExecutionDomain>, { kind: "external-terminal" }>,
+): Promise<ExternalTerminalAvailability> {
+	return await probeExternalTerminal(runner.binary, domain.probe.argv, {
+		deadlineMs: domain.probe.deadlineMs,
+		killGraceMs: domain.probe.killGraceMs,
+	})
 }
 
 function hasAnyExternalTerminalHoldForEndpoint(store: SchedulerStore, excludeItemId: number, runner: AgentRunnerKind, binary: string): boolean {
@@ -2223,26 +2262,7 @@ async function chainCompletionTriggerAllowsCompletion(options: SchedulerOptions,
 		const loadedPreset = await schedulerLoadedPresetForItem(options, chain, representativeItem)
 		for (const triggerPhase of loadedPreset.preset.phases.filter((phase) => phase.trigger !== null && "on" in phase.trigger)) {
 			const runner = await resolvePhaseRunner(options, { chain, item: representativeItem, phase: triggerPhase.name })
-			const domain = runnerExecutionDomain(runner.kind)
-			if (domain.kind !== "external-terminal") continue
-			if (options.externalTerminalProbe === undefined) throw new Error(`external-terminal runner ${runner.kind} requires an availability probe`)
-			const availability = await options.externalTerminalProbe({ runner, chain, item: representativeItem, phase: triggerPhase.name })
-			if (availability.kind !== "available") {
-				const checkedAt = nowIso(options)
-				const previousHold = externalTerminalHold(representativeItem.extra)
-				const since = previousHold?.availability.since ?? checkedAt
-				options.store.updateItem(representativeItem.id, { extra: withExternalTerminalHold(representativeItem.extra, {
-					kind: "external-terminal-unavailable", runner: runner.kind, phase: triggerPhase.name, binary: runner.binary, probeArgv: domain.probeArgv,
-					availability: availability.kind === "unavailable"
-						? { kind: "unavailable", reason: availability.reason, exitCode: availability.exitCode, signal: null, checkedAt, since }
-						: { kind: "probe-failed", reason: availability.reason, exitCode: availability.exitCode, signal: availability.signal, checkedAt, since },
-				}), updatedAt: nowSeconds(options) })
-				await emit(options, { type: "runner.external_terminal_unavailable", chainId: chain.id, rowId: representativeItem.id,
-					itemId: representativeItem.itemId, phase: triggerPhase.name, runner: runner.kind, binary: runner.binary,
-					probeArgv: domain.probeArgv, availability,
-					affected: [{ chainId: chain.id, rowId: representativeItem.id, itemId: representativeItem.itemId, phase: triggerPhase.name }] })
-				return false
-			}
+			if (!await refreshExternalTerminalAvailabilityForItem(options, chain, representativeItem, triggerPhase.name, runner)) return false
 		}
 		const decision = options.chainCompleteTrigger !== undefined
 			? await options.chainCompleteTrigger(context)

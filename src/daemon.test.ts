@@ -157,18 +157,20 @@ afterAll(async () => {
 describe("daemon", () => {
 	test("preset-selected external terminal is held before add and batch-add return", async () => {
 		const presetDir = resolve(TEST_ROOT, "preset-selected-external-terminal")
+		const fakeBinary = resolve(TEST_ROOT, "preset-selected-external-terminal-binary")
+		const probeLog = resolve(TEST_ROOT, "preset-selected-external-terminal-probes")
 		await cp(PRESET_DIR, presetDir, { recursive: true })
 		const presetToml = resolve(presetDir, "preset.toml")
 		await writeFile(presetToml, (await readFile(presetToml, "utf-8")).replaceAll('runner = "codex"', 'runner = "hapi"').replaceAll('runner  = "codex"', 'runner  = "hapi"'))
-		let probeCalls = 0
+		await writeFile(fakeBinary, `#!/bin/sh\nif [ "$1" = probe ]; then echo probe >> ${JSON.stringify(probeLog)}; exit 69; fi\nexit 0\n`)
+		await chmod(fakeBinary, 0o755)
 		const fixture = await startFixture("preset-selected-external-terminal", {
 			schedulerEnabled: false,
 			schedulerPresetDir: presetDir,
 			schedulerUsePresetRunner: true,
-			schedulerConfig: { externalTerminalProbe: async () => { probeCalls += 1; return { kind: "unavailable", reason: "endpoint-unavailable", exitCode: 69, signal: null } } },
 		})
 		try {
-			const chain = record(expectOk(await request(fixture, "chain.create", { name: "preset-hapi", repository: "fixture/repo", baseBranch: "main", preset: "gh-issue-pr-iteration" })))
+			const chain = record(expectOk(await request(fixture, "chain.create", { name: "preset-hapi", repository: "fixture/repo", baseBranch: "main", preset: "gh-issue-pr-iteration", metadata: { hapi: { binary: fakeBinary } } })))
 			const chainId = numberValue(record(chain.chain).id)
 			expectOk(await request(fixture, "item.batchAdd", { chainId, items: [
 				{ itemId: "602-batch-a", repoCwd: REPO_ROOT, presetPath: presetDir },
@@ -192,15 +194,69 @@ describe("daemon", () => {
 			if (!Array.isArray(listed.items)) throw new Error("item list missing")
 			expect(listed.items).toHaveLength(3)
 			expect(fixture.schedulerEvents.filter((event) => event.type === "runner.external_terminal_unavailable")).toHaveLength(1)
-			const callsBeforeUpdate = probeCalls
+			const callsBeforeUpdate = (await readFile(probeLog, "utf-8")).trim().split("\n").length
 			expectOk(await request(fixture, "item.update", { chainId, itemId: "602-add", fields: { runner: "codex" } }))
+			listed = record(expectOk(await request(fixture, "item.list", { chainId })))
+			if (!Array.isArray(listed.items)) throw new Error("item list missing")
+			const localUpdated = listed.items.map(record).find((item) => item.itemId === "602-add")
+			if (localUpdated === undefined) throw new Error("local updated item missing")
+			expect(record(localUpdated.extra).externalTerminalHold).toBeUndefined()
 			expectOk(await request(fixture, "item.update", { chainId, itemId: "602-add", fields: { runner: null } }))
-			expect(probeCalls).toBe(callsBeforeUpdate + 1)
+			const callsAfterUpdate = (await readFile(probeLog, "utf-8")).trim().split("\n").length
+			expect(callsAfterUpdate).toBe(callsBeforeUpdate + 1)
 			listed = record(expectOk(await request(fixture, "item.list", { chainId })))
 			if (!Array.isArray(listed.items)) throw new Error("item list missing")
 			const updated = listed.items.map(record).find((item) => item.itemId === "602-add")
 			if (updated === undefined) throw new Error("updated item missing")
 			expect(record(record(updated.extra).externalTerminalHold).runner).toBe("hapi")
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("healthy active external terminal projects available current state", async () => {
+		const presetDir = resolve(TEST_ROOT, "healthy-active-external-terminal")
+		const fakeBinary = resolve(TEST_ROOT, "healthy-active-external-terminal-binary")
+		await cp(PRESET_DIR, presetDir, { recursive: true })
+		const presetToml = resolve(presetDir, "preset.toml")
+		await writeFile(presetToml, (await readFile(presetToml, "utf-8")).replaceAll('runner = "codex"', 'runner = "hapi"').replaceAll('runner  = "codex"', 'runner  = "hapi"'))
+		await writeFile(fakeBinary, "#!/bin/sh\nif [ \"$1\" = probe ]; then exit 0; fi\ntrap 'exit 0' TERM\nsleep 10\n")
+		await chmod(fakeBinary, 0o755)
+		const fixture = await startFixture("healthy-active-external-terminal", {
+			schedulerPresetDir: presetDir,
+			schedulerUsePresetRunner: true,
+			schedulerIntervalMs: 60_000,
+		})
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "healthy-hapi",
+				repository: "mouriya-s-lab/coder-loop",
+				baseBranch: "main",
+				preset: "gh-issue-pr-iteration",
+				metadata: { hapi: { binary: fakeBinary } },
+			})).chain)
+			const chainId = numberValue(chain.id)
+			expectOk(await request(fixture, "item.add", { chainId, itemId: "602-current", repoCwd: REPO_ROOT, presetPath: presetDir }))
+			const current = await waitFor(
+				() => readCurrentRun(fixture.loopDataRoot, chainId),
+				(candidate) => candidate?.extra.externalTerminalCurrent !== undefined,
+			)
+			expect(current?.extra.externalTerminalCurrent).toMatchObject({
+				runner: "hapi",
+				binary: fakeBinary,
+				availability: { kind: "available", checkedAt: expect.any(String) },
+			})
+			const snapshot = await buildCoderLoopStatusSnapshot({
+				targetCwd: REPO_ROOT,
+				loopDataRoot: fixture.loopDataRoot,
+				chainName: "healthy-hapi",
+				output: "json",
+			})
+			expect(snapshot.current.run?.extra.externalTerminalCurrent).toMatchObject({ runner: "hapi" })
+			expect(snapshot.current.externalTerminal).toEqual({
+				availability: { kind: "available", checkedAt: expect.any(String) },
+				loss: null,
+			})
 		} finally {
 			await fixture.daemon.stop()
 		}

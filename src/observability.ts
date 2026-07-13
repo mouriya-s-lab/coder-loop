@@ -551,7 +551,7 @@ export const ObservabilityEventBoundary = arkType.or(
 			probeArgv: arkType.or([arkType.unit("probe")]),
 			availability: arkType.or(
 				{ kind: arkType.unit("unavailable"), reason: arkType.or(arkType.unit("binary-missing"), arkType.unit("endpoint-unavailable")), "exitCode": "number|null", "signal": "string|null", checkedAt: "string", since: "string" },
-				{ kind: arkType.unit("probe-failed"), reason: arkType.or(arkType.unit("unexpected-exit"), arkType.unit("signal")), "exitCode": "number|null", "signal": "string|null", checkedAt: "string", since: "string" },
+				{ kind: arkType.unit("probe-failed"), reason: arkType.or(arkType.unit("unexpected-exit"), arkType.unit("signal"), arkType.unit("deadline-exceeded")), "exitCode": "number|null", "signal": "string|null", checkedAt: "string", since: "string" },
 			),
 			affected: arkType({ chainId: "number", rowId: "number", itemId: "string", phase: "string" }).array(),
 		},

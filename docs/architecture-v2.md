@@ -46,7 +46,7 @@ flowchart TD
 schema v13 的四张核心表（`sqlite-state.ts`）：
 
 - `chains`：`name`(unique) / `preset`(nullable since v9 `#412`) / `repository` / `base_branch` / `status` / `metadata`。
-- `items`：`chain_id` / `item_id`(opaque string, `#419` v12 起) / `repo_cwd` / `status` / `attempts` / `position` / `title` / `priority` / `last_run_id` / `session_ids` / `issue_file` / `evidence_dir` / `agent_cwd` / `runner`(CHECK claude/codex/opencode, v13 `#481`) / `phase` / `preset` / `preset_path` / `extra`，约束 `UNIQUE (chain_id, item_id)`。
+- `items`：`chain_id` / `item_id`(opaque string, `#419` v12 起) / `repo_cwd` / `status` / `attempts` / `position` / `title` / `priority` / `last_run_id` / `session_ids` / `issue_file` / `evidence_dir` / `agent_cwd` / `runner`(CHECK claude/codex/opencode/hapi, v14 `#602`) / `phase` / `preset` / `preset_path` / `extra`，约束 `UNIQUE (chain_id, item_id)`。
 - `runs`：`run_id`(unique) / `chain_id` / `item_id` / `phase` / `status` / `started_at` / `ended_at` / `exit_code` / `extra`。
 - `current_runs`：`chain_id`(PK) / `phase` / `run_id` / `started_at` / `extra`。
 

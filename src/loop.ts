@@ -62,6 +62,7 @@ import {
 	chainBindings as metadataBindings,
 	chainBindingsPresetPath,
 	externalTerminalHold,
+	externalTerminalCurrent,
 	externalTerminalLoss,
 	itemExtraJsonValue,
 	itemExtraToJsonObject,
@@ -77,6 +78,7 @@ import {
 	type ExternalTerminalLossFact,
 } from "./runtime-data"
 import { checkPresetDag, type PresetDagFinding } from "./preset-dag-check"
+import { runnerExecutionDomain } from "./runner-execution"
 export { checkPresetDag } from "./preset-dag-check"
 export type { PresetDagFinding, PresetDagFindingKind, PresetDagFindingVerdict, PresetDagFindingTable, PresetDagFindingDeadlockContinuable, PresetDagFindingDeadVocabulary } from "./preset-dag-check"
 
@@ -399,7 +401,7 @@ type ContextAppendCommandArgs = {
 // reaches it via chain metadata now (see chainResolvedFromChain). The composed-options struct
 // below holds the live shape that the loop builds from a `ChainRecord` alone.
 
-// #481: opencode joins the union as the third runner kind. Boundary widens accordingly; the
+// #481/#602: opencode and hapi widen the authoritative runner vocabulary. The
 // `AgentRunnerKind` TS union below mirrors it (compile-time `Record<AgentRunnerKind, ...>`
 // admittance ensures we cannot leave a code path partial). ENGINE_BUILTIN_RUNNER stays `codex`
 // — opencode is an explicit opt-in via `runner = "opencode"` on a preset's phase, never a
@@ -900,7 +902,7 @@ export type StatusCurrentSnapshot = {
 	item: StatusItemSnapshot | null
 	runner: StatusRunnerSelectionSnapshot | null
 	phaseStatus: StatusPhaseStatusSnapshot | null
-	externalTerminal: { availability: ExternalTerminalHoldAvailability | null; loss: ExternalTerminalLossFact | null } | null
+	externalTerminal: { availability: ExternalTerminalHoldAvailability | { kind: "available"; checkedAt: string }; loss: ExternalTerminalLossFact | null } | null
 }
 
 export type StatusEventsSnapshot = {
@@ -2090,7 +2092,7 @@ async function runChainCommand(args: string[]): Promise<void> {
 		// #526: assemble the wire patch on the CLI side so the chain-action dispatch reads
 		// like every other chain.* op (one branch, one daemon call, one formatter). The
 		// daemon op re-validates `{<kind>: {model}}` with hand-rolled per-kind typeof
-		// guards (`src/daemon.ts:1962-2005` — kind in {claude,codex,opencode} union with
+		// guards (`src/daemon.ts:1962-2005` — kind in {claude,codex,opencode,hapi} union with
 		// model:string-non-whitespace), so the CLI passes the minimal shape it accepts.
 		const patch: JsonObject = { [chainArgs.kind]: { model: chainArgs.model } }
 		const result = await requestDaemonResult(chainArgs.loopDataRoot, "chain.updateBindings", {
@@ -3006,7 +3008,7 @@ function buildStatusRunnerDefaultsSnapshot(options: LoopOptions | null): StatusR
 		}
 	}
 	const hostRunner = detectHostRunner(process.env)
-	const resolved: Pick<ChainResolved, "claudeBinary" | "claudeModel" | "claudeExtraArgs" | "codexBinary" | "codexModel" | "codexExtraArgs" | "opencodeBinary" | "opencodeModel" | "opencodeExtraArgs"> = {
+	const resolved: Pick<ChainResolved, "claudeBinary" | "claudeModel" | "claudeExtraArgs" | "codexBinary" | "codexModel" | "codexExtraArgs" | "opencodeBinary" | "opencodeModel" | "opencodeExtraArgs" | "hapiBinary" | "hapiModel" | "hapiExtraArgs"> = {
 		claudeBinary: null,
 		claudeModel: null,
 		claudeExtraArgs: [],
@@ -3016,6 +3018,9 @@ function buildStatusRunnerDefaultsSnapshot(options: LoopOptions | null): StatusR
 		opencodeBinary: null,
 		opencodeModel: null,
 		opencodeExtraArgs: [],
+		hapiBinary: null,
+		hapiModel: null,
+		hapiExtraArgs: [],
 	}
 	return {
 		hostDefault: hostRunner,
@@ -3257,16 +3262,21 @@ async function buildStatusCurrentSnapshotFromRecords(
 	// the chain seed and throw "preset X does not define phase Y" on a foreign-preset item.
 	const itemPreset = item === null ? null : itemPresets.presetForItem(item)
 	const selectionInput = itemPreset === null ? null : phaseRunnerSelectionInputForPreset(options, itemPreset)
+	const currentRunner = item === null || selectionInput === null ? null : selectRunnerForPhase(current.phase, item, selectionInput)
 	const hold = item === null ? null : externalTerminalHold(item.extra)
+	const currentExternalTerminal = externalTerminalCurrent(current.extra)
 	const loss = externalTerminalLoss(current.extra)
+	const currentDomain = currentRunner === null ? null : runnerExecutionDomain(currentRunner.kind)
 	return {
 		run: statusCurrentRunSnapshot(current),
 		id,
 		item: item === null || itemPreset === null ? null : statusItemSnapshot(item, itemPreset),
-		runner: item === null || selectionInput === null ? null : statusRunnerSelection(selectRunnerForPhase(current.phase, item, selectionInput)),
+		runner: currentRunner === null ? null : statusRunnerSelection(currentRunner),
 		phaseStatus: await readAgentPhaseStatus(agentStatusPath(outputPath)),
-		externalTerminal: hold === null && loss === null ? null : {
-			availability: hold === null ? null : { ...hold.availability },
+		externalTerminal: currentExternalTerminal === null && currentDomain?.kind !== "external-terminal" ? null : {
+			availability: hold === null
+				? currentExternalTerminal?.availability ?? { kind: "available", checkedAt: new Date(current.startedAt * 1000).toISOString() }
+				: { ...hold.availability },
 			loss: loss === null ? null : { ...loss },
 		},
 	}
@@ -4059,9 +4069,9 @@ export type ChainResolved = {
 	evidenceDir: string
 	logDir: string
 	loopDataRoot: string | null
-	// #433: per-runner overrides flow exclusively through chain.metadata.{claude,codex,opencode}.{binary,model,extraArgs}.
+	// #433/#602: per-runner overrides flow exclusively through chain.metadata.{claude,codex,opencode,hapi}.{binary,model,extraArgs}.
 	// The retired target on-disk preferences file is no longer in the lookup chain.
-	// #481: opencode (the third runner kind) follows the same shape — chain.metadata.opencode.{binary,model,extraArgs}.
+	// All four runner kinds follow the same command-resolution shape.
 	claudeBinary: string | null
 	claudeModel: string | null
 	claudeExtraArgs: readonly string[]
@@ -4071,6 +4081,9 @@ export type ChainResolved = {
 	opencodeBinary: string | null
 	opencodeModel: string | null
 	opencodeExtraArgs: readonly string[]
+	hapiBinary: string | null
+	hapiModel: string | null
+	hapiExtraArgs: readonly string[]
 	preset: string | null
 	presetPath: string | null
 }
@@ -4094,6 +4107,9 @@ function chainResolvedFromChain(chain: ChainRecord, loopDataRoot: string | null)
 		opencodeBinary: metadataNestedString(metadata, "opencode", "binary") ?? null,
 		opencodeModel: metadataNestedString(metadata, "opencode", "model") ?? null,
 		opencodeExtraArgs: metadataNestedStringArray(metadata, "opencode", "extraArgs") ?? [],
+		hapiBinary: metadataNestedString(metadata, "hapi", "binary") ?? null,
+		hapiModel: metadataNestedString(metadata, "hapi", "model") ?? null,
+		hapiExtraArgs: metadataNestedStringArray(metadata, "hapi", "extraArgs") ?? [],
 		preset: presetPath === null ? chain.preset : null,
 		presetPath,
 	}
@@ -4959,13 +4975,13 @@ export function detectHostRunner(env: Record<string, string | undefined>): Agent
 
 // #433: runner binary / model / extraArgs come exclusively from chain.metadata.<kind> now —
 // the retired target on-disk preferences file no longer layers anything on top. Defaults are
-// the kind name on PATH (claude/codex/opencode) with no extra args.
+// the resolved kind command on PATH (claude/codex/opencode/hapi) with no extra args.
 // #481: opencode joins the slot list with the same shape; when a phase declares runner=opencode
 // with no explicit `model`, applyPhaseDefaultModel falls back to DEFAULT_OPENCODE_MODEL — the
 // only model the operator's opencode provider is currently configured for, per the issue body
 // dependency footnote.
 export const DEFAULT_OPENCODE_MODEL = "opencode-go/glm-5.2"
-export function buildAgentRunnerCommands(resolved: Pick<ChainResolved, "claudeBinary" | "claudeModel" | "claudeExtraArgs" | "codexBinary" | "codexModel" | "codexExtraArgs" | "opencodeBinary" | "opencodeModel" | "opencodeExtraArgs">): AgentRunnerCommands {
+export function buildAgentRunnerCommands(resolved: Pick<ChainResolved, "claudeBinary" | "claudeModel" | "claudeExtraArgs" | "codexBinary" | "codexModel" | "codexExtraArgs" | "opencodeBinary" | "opencodeModel" | "opencodeExtraArgs" | "hapiBinary" | "hapiModel" | "hapiExtraArgs">): AgentRunnerCommands {
 	return {
 		claude: {
 			kind: "claude",
@@ -4985,7 +5001,12 @@ export function buildAgentRunnerCommands(resolved: Pick<ChainResolved, "claudeBi
 			extraArgs: [...resolved.opencodeExtraArgs],
 			model: resolved.opencodeModel,
 		},
-		hapi: { kind: "hapi", binary: "hapi-remote-session", extraArgs: [], model: null },
+		hapi: {
+			kind: "hapi",
+			binary: resolved.hapiBinary ?? "hapi-remote-session",
+			extraArgs: [...resolved.hapiExtraArgs],
+			model: resolved.hapiModel,
+		},
 	}
 }
 
@@ -5033,7 +5054,7 @@ function phaseDefaultRunnerKind(phase: PresetPhase): AgentRunnerKind {
 // inherit it.
 // #481: when the phase declares runner = "opencode" but no explicit `model`, fall back to the
 // engine default `opencode-go/glm-5.2`. Explicit phase model still wins; chain.metadata
-// opencode.model still wins; item override to claude/codex still ignores opencode defaults
+// opencode.model still wins; item override to claude/codex/hapi still ignores opencode defaults
 // entirely (same kind-binding rule as before).
 function applyPhaseDefaultModel(selection: AgentRunnerSelection, phase: PresetPhase): AgentRunnerSelection {
 	if (selection.model !== null) return selection
@@ -6640,25 +6661,30 @@ export type RunnerInvocationPaths = {
 
 export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: string, resume: ResumeDecision, paths: RunnerInvocationPaths): RunnerInvocation {
 	const additionalDirs = runnerAdditionalDirs(paths)
-	if (runner.kind === "claude") {
-		return {
+	switch (runner.kind) {
+		case "claude": return {
 			kind: "spawn",
 			binary: runner.binary,
 			args: agentClaudeArgs(runner.extraArgs, prompt, resume, additionalDirs, runner.model),
 		}
-	}
-	if (runner.kind === "opencode") {
-		return {
+		case "codex": return {
+			kind: "spawn",
+			binary: runner.binary,
+			args: agentCodexArgs(runner.extraArgs, prompt, resume, paths.agentCwd, runner.model, additionalDirs),
+		}
+		case "opencode": return {
 			kind: "spawn",
 			binary: runner.binary,
 			args: agentOpencodeArgs(runner.extraArgs, prompt, resume, runner.model),
 		}
-	}
-	if (runner.kind === "hapi") throw new Error("hapi invocation is owned by issue #603 and must be availability-gated")
-	return {
-		kind: "spawn",
-		binary: runner.binary,
-		args: agentCodexArgs(runner.extraArgs, prompt, resume, paths.agentCwd, runner.model, additionalDirs),
+		case "hapi": return {
+			kind: "spawn",
+			binary: runner.binary,
+			// #602 owns only the execution-domain seam: a configured external-terminal
+			// binary can cross the availability gate and be spawned generically. #603 owns
+			// the HAPI-specific prompt/worktree/status/session argv protocol.
+			args: [...runner.extraArgs],
+		}
 	}
 }
 

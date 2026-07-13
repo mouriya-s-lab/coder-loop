@@ -34,7 +34,7 @@
 | `issueFile` | string / null | 可选 per-issue handoff attachment 相对路径；主 handoff 是 chain-level `shared.md` |
 | `evidenceDir` | string / null | 该 issue 的证据目录相对路径 |
 | `agentCwd` | string / null | agent spawn 的绝对 cwd；跨仓或 post-review responder 可指向外部 checkout |
-| `runner` | `claude \| codex \| opencode` / null | 该 item 对非 trigger phase（`iteration` / `review`）的 runner override |
+| `runner` | `claude \| codex \| opencode \| hapi` / null | 该 item 对非 trigger phase（`iteration` / `review`）的 runner override |
 | `extra.blockerRepo` | string / undefined | `blocked` transition 通过 `--field-json '{"extraPatch":{"blockerRepo":"<owner>/<repo>"}}'` 写入的阻塞仓库；不是 first-class 列 |
 | `extra.blockerRef` | string / undefined | 同上通道写入的阻塞 issue ref 或环境条件 |
 

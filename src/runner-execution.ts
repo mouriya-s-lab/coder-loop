@@ -3,12 +3,20 @@ import { spawn } from "node:child_process"
 
 export type RunnerExecutionDomain =
 	| { kind: "local-process" }
-	| { kind: "external-terminal"; probeArgv: readonly ["probe"] }
+	| {
+		kind: "external-terminal"
+		probe: { argv: readonly ["probe"]; deadlineMs: number; killGraceMs: number }
+		invocation: { kind: "generic-binary" }
+	}
 
 export function runnerExecutionDomain(runner: AgentRunnerKind): RunnerExecutionDomain {
 	switch (runner) {
 		case "claude": case "codex": case "opencode": return { kind: "local-process" }
-		case "hapi": return { kind: "external-terminal", probeArgv: ["probe"] }
+		case "hapi": return {
+			kind: "external-terminal",
+			probe: { argv: ["probe"], deadlineMs: 30_000, killGraceMs: 1_000 },
+			invocation: { kind: "generic-binary" },
+		}
 	}
 }
 
@@ -16,15 +24,17 @@ export type ExternalTerminalProbeWire =
 	| { kind: "exited"; exitCode: number }
 	| { kind: "signaled"; signal: string }
 	| { kind: "executable-missing" }
+	| { kind: "deadline-exceeded" }
 
 export type ExternalTerminalAvailability =
 	| { kind: "available" }
 	| { kind: "unavailable"; reason: "binary-missing" | "endpoint-unavailable"; exitCode: number | null; signal: string | null }
-	| { kind: "probe-failed"; reason: "unexpected-exit" | "signal"; exitCode: number | null; signal: string | null }
+	| { kind: "probe-failed"; reason: "unexpected-exit" | "signal" | "deadline-exceeded"; exitCode: number | null; signal: string | null }
 
 export function decodeExternalTerminalProbeResult(result: ExternalTerminalProbeWire): ExternalTerminalAvailability {
 	switch (result.kind) {
 		case "executable-missing": return { kind: "unavailable", reason: "binary-missing", exitCode: null, signal: null }
+		case "deadline-exceeded": return { kind: "probe-failed", reason: "deadline-exceeded", exitCode: null, signal: "SIGTERM" }
 		case "signaled": return { kind: "probe-failed", reason: "signal", exitCode: null, signal: result.signal }
 		case "exited":
 			if (result.exitCode === 0) return { kind: "available" }
@@ -33,23 +43,45 @@ export function decodeExternalTerminalProbeResult(result: ExternalTerminalProbeW
 	}
 }
 
-function executableMissing(error: unknown): boolean {
-	if (typeof error !== "object" || error === null || !("code" in error)) return false
-	return error.code === "ENOENT"
+export type ExternalTerminalProbeTermination = {
+	deadlineMs: number
+	killGraceMs: number
+}
+
+function terminateProbeProcessGroup(child: ReturnType<typeof spawn>, signal: "SIGTERM" | "SIGKILL"): void {
+	if (child.pid === undefined) return
+	try {
+		process.kill(-child.pid, signal)
+	} catch (error) {
+		if (typeof error === "object" && error !== null && "code" in error && error.code === "ESRCH") return
+		throw error
+	}
 }
 
 export async function probeExternalTerminal(
 	binary: string,
 	probeArgv: readonly ["probe"],
+	termination: ExternalTerminalProbeTermination = { deadlineMs: 30_000, killGraceMs: 1_000 },
 ): Promise<ExternalTerminalAvailability> {
-	const wire = await new Promise<ExternalTerminalProbeWire>((resolve, reject) => {
-		const child = spawn(binary, [...probeArgv], { stdio: "ignore" })
-		child.once("error", (error) => {
-			if (executableMissing(error)) resolve({ kind: "executable-missing" })
-			else reject(error)
+	const wire = await new Promise<ExternalTerminalProbeWire>((resolve) => {
+		const child = spawn(binary, [...probeArgv], { stdio: "ignore", detached: true })
+		let deadlineExceeded = false
+		let killTimer: ReturnType<typeof setTimeout> | null = null
+		const deadlineTimer = setTimeout(() => {
+			deadlineExceeded = true
+			terminateProbeProcessGroup(child, "SIGTERM")
+			killTimer = setTimeout(() => terminateProbeProcessGroup(child, "SIGKILL"), termination.killGraceMs)
+		}, termination.deadlineMs)
+		child.once("error", () => {
+			clearTimeout(deadlineTimer)
+			if (killTimer !== null) clearTimeout(killTimer)
+			resolve({ kind: "executable-missing" })
 		})
 		child.once("close", (exitCode, signal) => {
-			if (signal !== null) resolve({ kind: "signaled", signal })
+			clearTimeout(deadlineTimer)
+			if (killTimer !== null) clearTimeout(killTimer)
+			if (deadlineExceeded) resolve({ kind: "deadline-exceeded" })
+			else if (signal !== null) resolve({ kind: "signaled", signal })
 			else resolve({ kind: "exited", exitCode: exitCode ?? 1 })
 		})
 	})

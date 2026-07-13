@@ -154,7 +154,7 @@ export type SchedulerSpawnError = {
 
 export type ExternalTerminalHoldAvailability =
 	| { kind: "unavailable"; reason: "binary-missing" | "endpoint-unavailable"; exitCode: number | null; signal: string | null; checkedAt: string; since: string }
-	| { kind: "probe-failed"; reason: "unexpected-exit" | "signal"; exitCode: number | null; signal: string | null; checkedAt: string; since: string }
+	| { kind: "probe-failed"; reason: "unexpected-exit" | "signal" | "deadline-exceeded"; exitCode: number | null; signal: string | null; checkedAt: string; since: string }
 
 export type ExternalTerminalHoldFact = {
 	kind: "external-terminal-unavailable"
@@ -168,8 +168,14 @@ export type ExternalTerminalHoldFact = {
 export type ExternalTerminalLossFact = {
 	kind: "lost"
 	detectedAt: string
-	reason: "binary-missing" | "endpoint-unavailable" | "unexpected-exit" | "signal"
+	reason: "binary-missing" | "endpoint-unavailable" | "unexpected-exit" | "signal" | "deadline-exceeded"
 	terminationPhase: "term" | "kill" | "closed"
+}
+
+export type ExternalTerminalCurrentFact = {
+	runner: AgentRunnerKind
+	binary: string
+	availability: { kind: "available"; checkedAt: string }
 }
 
 // #457: `blockerRepo` / `blockerRef` are no longer engine-typed ItemExtra fields. Presets that store
@@ -181,6 +187,7 @@ export class ItemExtra extends RuntimeDataRecord {
 	schedulerSpawnError?: SchedulerSpawnError
 	externalTerminalHold?: ExternalTerminalHoldFact
 	externalTerminalLoss?: ExternalTerminalLossFact
+	externalTerminalCurrent?: ExternalTerminalCurrentFact
 	slotKey?: string
 	itemId?: number
 	repoCwd?: string
@@ -203,6 +210,7 @@ export class ItemExtra extends RuntimeDataRecord {
 		}
 		if (input.externalTerminalHold !== undefined) this.externalTerminalHold = copyExternalTerminalHold(input.externalTerminalHold)
 		if (input.externalTerminalLoss !== undefined) this.externalTerminalLoss = { ...input.externalTerminalLoss }
+		if (input.externalTerminalCurrent !== undefined) this.externalTerminalCurrent = { ...input.externalTerminalCurrent, availability: { ...input.externalTerminalCurrent.availability } }
 		if (input.slotKey !== undefined) this.slotKey = input.slotKey
 		if (input.itemId !== undefined) this.itemId = input.itemId
 		if (input.repoCwd !== undefined) this.repoCwd = input.repoCwd
@@ -255,6 +263,7 @@ type ItemExtraInput = {
 	schedulerSpawnError?: SchedulerSpawnError
 	externalTerminalHold?: ExternalTerminalHoldFact
 	externalTerminalLoss?: ExternalTerminalLossFact
+	externalTerminalCurrent?: ExternalTerminalCurrentFact
 	slotKey?: string
 	itemId?: number
 	repoCwd?: string
@@ -310,6 +319,7 @@ const ITEM_EXTRA_KEYS = new Set([
 	"schedulerSpawnError",
 	"externalTerminalHold",
 	"externalTerminalLoss",
+	"externalTerminalCurrent",
 	"slotKey",
 	"itemId",
 	"repoCwd",
@@ -447,6 +457,7 @@ export function itemExtraToJsonObject(extra: ItemExtra): JsonObject {
 	})
 	assignJson(result, "externalTerminalHold", extra.externalTerminalHold === undefined ? undefined : externalTerminalHoldToJsonObject(extra.externalTerminalHold))
 	assignJson(result, "externalTerminalLoss", extra.externalTerminalLoss === undefined ? undefined : { ...extra.externalTerminalLoss })
+	assignJson(result, "externalTerminalCurrent", extra.externalTerminalCurrent === undefined ? undefined : { ...extra.externalTerminalCurrent, availability: { ...extra.externalTerminalCurrent.availability } })
 	assignJson(result, "slotKey", extra.slotKey)
 	assignJson(result, "itemId", extra.itemId)
 	assignJson(result, "repoCwd", extra.repoCwd)
@@ -519,6 +530,10 @@ export function clearExternalTerminalHold(extra: ItemExtra): ItemExtra {
 
 export function externalTerminalLoss(extra: ItemExtra): ExternalTerminalLossFact | null {
 	return extra.externalTerminalLoss === undefined ? null : { ...extra.externalTerminalLoss }
+}
+
+export function externalTerminalCurrent(extra: ItemExtra): ExternalTerminalCurrentFact | null {
+	return extra.externalTerminalCurrent === undefined ? null : { ...extra.externalTerminalCurrent, availability: { ...extra.externalTerminalCurrent.availability } }
 }
 
 export function withExternalTerminalLoss(extra: ItemExtra, fact: ExternalTerminalLossFact): ItemExtra {
@@ -613,6 +628,8 @@ function parseItemExtra(value: JsonObject, field: string): ItemExtra {
 	if (externalTerminalHold !== undefined) input.externalTerminalHold = externalTerminalHold
 	const externalTerminalLoss = optionalExternalTerminalLossField(value, "externalTerminalLoss", `${field}.externalTerminalLoss`)
 	if (externalTerminalLoss !== undefined) input.externalTerminalLoss = externalTerminalLoss
+	const externalTerminalCurrent = optionalExternalTerminalCurrentField(value, "externalTerminalCurrent", `${field}.externalTerminalCurrent`)
+	if (externalTerminalCurrent !== undefined) input.externalTerminalCurrent = externalTerminalCurrent
 	const slotKey = optionalStringField(value, "slotKey", `${field}.slotKey`)
 	if (slotKey !== undefined) input.slotKey = slotKey
 	const itemId = optionalPositiveIntegerField(value, "itemId", `${field}.itemId`)
@@ -722,13 +739,29 @@ function optionalExternalTerminalLossField(record: JsonObject, key: string, fiel
 	const reason = requiredStringField(object, "reason", `${field}.reason`)
 	const terminationPhase = requiredStringField(object, "terminationPhase", `${field}.terminationPhase`)
 	if (kind !== "lost") throw runtimeDataError(`${field}.kind`, kind, `${field}.kind must be lost`)
-	if (reason !== "binary-missing" && reason !== "endpoint-unavailable" && reason !== "unexpected-exit" && reason !== "signal") {
+	if (reason !== "binary-missing" && reason !== "endpoint-unavailable" && reason !== "unexpected-exit" && reason !== "signal" && reason !== "deadline-exceeded") {
 		throw runtimeDataError(`${field}.reason`, reason, `${field}.reason is invalid`)
 	}
 	if (terminationPhase !== "term" && terminationPhase !== "kill" && terminationPhase !== "closed") {
 		throw runtimeDataError(`${field}.terminationPhase`, terminationPhase, `${field}.terminationPhase is invalid`)
 	}
 	return { kind, detectedAt, reason, terminationPhase }
+}
+
+function optionalExternalTerminalCurrentField(record: JsonObject, key: string, field: string): ExternalTerminalCurrentFact | undefined {
+	const value = record[key]
+	if (value === undefined) return undefined
+	const object = jsonObjectFieldValue(value, field)
+	const runner = agentRunnerKindField(object, "runner", `${field}.runner`)
+	const binary = requiredStringField(object, "binary", `${field}.binary`)
+	const availability = jsonObjectFieldValue(object.availability, `${field}.availability`)
+	const kind = requiredStringField(availability, "kind", `${field}.availability.kind`)
+	if (kind !== "available") throw runtimeDataError(`${field}.availability.kind`, kind, `${field}.availability.kind must be available`)
+	return {
+		runner,
+		binary,
+		availability: { kind, checkedAt: requiredStringField(availability, "checkedAt", `${field}.availability.checkedAt`) },
+	}
 }
 
 function externalTerminalHoldAvailability(value: JsonValue | undefined, field: string): ExternalTerminalHoldAvailability {
@@ -742,7 +775,7 @@ function externalTerminalHoldAvailability(value: JsonValue | undefined, field: s
 	if (kind === "unavailable" && (reason === "binary-missing" || reason === "endpoint-unavailable")) {
 		return { kind, reason, exitCode, signal, checkedAt, since }
 	}
-	if (kind === "probe-failed" && (reason === "unexpected-exit" || reason === "signal")) {
+	if (kind === "probe-failed" && (reason === "unexpected-exit" || reason === "signal" || reason === "deadline-exceeded")) {
 		return { kind, reason, exitCode, signal, checkedAt, since }
 	}
 	throw runtimeDataError(field, value, `${field} must be a typed unavailable or probe-failed availability`)

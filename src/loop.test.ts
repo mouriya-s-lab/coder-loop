@@ -7,6 +7,7 @@ import {
 	agentOpencodeArgs,
 	agentSessionsPath,
 	buildCentralRuntimeBindingPaths,
+	buildAgentRunnerCommands,
 	buildRenderBindings,
 	buildDaemonStartPlan,
 	buildRuntimeBindings,
@@ -568,6 +569,20 @@ describe("runtime binding helpers", () => {
 })
 
 describe("runner and daemon helpers", () => {
+	test("configured hapi command participates in the same resolved runner map", () => {
+		const commands = buildAgentRunnerCommands({
+			claudeBinary: null, claudeModel: null, claudeExtraArgs: [],
+			codexBinary: null, codexModel: null, codexExtraArgs: [],
+			opencodeBinary: null, opencodeModel: null, opencodeExtraArgs: [],
+			hapiBinary: "/opt/bin/fake-external-terminal", hapiModel: null, hapiExtraArgs: ["--fixture"],
+		})
+		expect(commands.hapi).toEqual({
+			kind: "hapi",
+			binary: "/opt/bin/fake-external-terminal",
+			extraArgs: ["--fixture"],
+			model: null,
+		})
+	})
 	// #456: item.runner override now applies uniformly to every non-trigger phase — the engine no
 	// longer special-cases "the last non-trigger phase" (review under the bundled preset). Both
 	// phases pick up the item override; phase-name-based gating belongs to preset declaration only.
