@@ -676,6 +676,98 @@ describe("scheduler", () => {
 		}
 	})
 
+	test("mixed presets gate an external-terminal chain-complete runner even when the representative item preset is local", async () => {
+		const fixture = await createFixture("mixed-preset-chain-complete-chain-external")
+		try {
+			const missingBinary = resolve(fixture.loopDataRoot, "..", "missing-external-terminal")
+			const chain = createChain(fixture.store, "mixed-preset-chain-complete-chain-external-chain", {
+				metadata: { hapi: { binary: missingBinary } },
+			})
+			const item = createItem(fixture.store, chain, { issueNumber: 602_004, repoCwd: "/repo/a" })
+			fixture.store.updateItem(item.id, { status: runtimeStatus("done"), updatedAt: 1_800_000_500 })
+			const base = fixture.options()
+			const { runner: _fixtureRunner, ...baseWithoutRunner } = base
+			const loadedPreset = await base.presetForChain(chain)
+			const chainPreset: SchedulerLoadedPreset = {
+				...loadedPreset,
+				preset: {
+					...loadedPreset.preset,
+					name: "chain-external-terminal",
+					phases: loadedPreset.preset.phases.map((phase) => phase.trigger !== null && "on" in phase.trigger
+						? { ...phase, defaultRunner: "hapi" }
+						: phase),
+				},
+			}
+			const itemPreset: SchedulerLoadedPreset = {
+				...loadedPreset,
+				preset: { ...loadedPreset.preset, name: "item-local-process" },
+			}
+			let triggerCalls = 0
+			await schedulerTick({
+				...baseWithoutRunner,
+				presetForChain: () => chainPreset,
+				presetForItem: () => itemPreset,
+				phaseRunnerSelectionForChain: () => buildPhaseRunnerSelectionFromChain({ chain, loopDataRoot: fixture.loopDataRoot, preset: chainPreset.preset }),
+				phaseRunnerSelectionForItem: () => buildPhaseRunnerSelectionFromChain({ chain, loopDataRoot: fixture.loopDataRoot, preset: itemPreset.preset }),
+				chainCompleteTrigger: () => { triggerCalls += 1; return { decision: "complete" } },
+			})
+
+			expect(triggerCalls).toBe(0)
+			expect(fixture.store.getChain(chain.id)?.status).toBe("active")
+			expect(fixture.store.getItem(item.id)?.extra.externalTerminalHold).toMatchObject({ runner: "hapi", phase: "umbrella-finalizer" })
+			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({
+				type: "runner.external_terminal_unavailable", runner: "hapi", rowId: item.id,
+			}))
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("mixed presets do not hold a local chain-complete runner for the representative item's external terminal", async () => {
+		const fixture = await createFixture("mixed-preset-chain-complete-chain-local")
+		try {
+			const missingBinary = resolve(fixture.loopDataRoot, "..", "missing-external-terminal")
+			const chain = createChain(fixture.store, "mixed-preset-chain-complete-chain-local-chain", {
+				metadata: { hapi: { binary: missingBinary } },
+			})
+			const item = createItem(fixture.store, chain, { issueNumber: 602_005, repoCwd: "/repo/a" })
+			fixture.store.updateItem(item.id, { status: runtimeStatus("done"), updatedAt: 1_800_000_500 })
+			const base = fixture.options()
+			const { runner: _fixtureRunner, ...baseWithoutRunner } = base
+			const loadedPreset = await base.presetForChain(chain)
+			const chainPreset: SchedulerLoadedPreset = {
+				...loadedPreset,
+				preset: { ...loadedPreset.preset, name: "chain-local-process" },
+			}
+			const itemPreset: SchedulerLoadedPreset = {
+				...loadedPreset,
+				preset: {
+					...loadedPreset.preset,
+					name: "item-external-terminal",
+					phases: loadedPreset.preset.phases.map((phase) => phase.trigger !== null && "on" in phase.trigger
+						? { ...phase, defaultRunner: "hapi" }
+						: phase),
+				},
+			}
+			let triggerCalls = 0
+			await schedulerTick({
+				...baseWithoutRunner,
+				presetForChain: () => chainPreset,
+				presetForItem: () => itemPreset,
+				phaseRunnerSelectionForChain: () => buildPhaseRunnerSelectionFromChain({ chain, loopDataRoot: fixture.loopDataRoot, preset: chainPreset.preset }),
+				phaseRunnerSelectionForItem: () => buildPhaseRunnerSelectionFromChain({ chain, loopDataRoot: fixture.loopDataRoot, preset: itemPreset.preset }),
+				chainCompleteTrigger: () => { triggerCalls += 1; return { decision: "complete" } },
+			})
+
+			expect(triggerCalls).toBe(1)
+			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
+			expect(fixture.store.getItem(item.id)?.extra.externalTerminalHold).toBeUndefined()
+			expect(fixture.schedulerEvents.some((event) => event.type === "runner.external_terminal_unavailable")).toBe(false)
+		} finally {
+			fixture.store.close()
+		}
+	})
+
 	test("chain-complete trigger does not run twice during overlapping completion ticks", async () => {
 		const fixture = await createFixture("completion-trigger-overlap")
 		try {

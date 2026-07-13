@@ -2259,9 +2259,12 @@ async function chainCompletionTriggerAllowsCompletion(options: SchedulerOptions,
 			terminalStatusNames: terminalStatuses,
 		}
 		const representativeItem = items[0]!
-		const loadedPreset = await schedulerLoadedPresetForItem(options, chain, representativeItem)
+		// Chain-complete execution is chain-owned: the daemon passes this same chain preset to
+		// `runPresetChainCompleteTriggerPhases`. Keep the availability gate on that exact preset and
+		// its chain-level runner resolver; the representative item is only the durable hold anchor.
+		const loadedPreset = await schedulerLoadedPreset(options, chain)
 		for (const triggerPhase of loadedPreset.preset.phases.filter((phase) => phase.trigger !== null && "on" in phase.trigger)) {
-			const runner = await resolvePhaseRunner(options, { chain, item: representativeItem, phase: triggerPhase.name })
+			const runner = await resolveChainCompletePhaseRunner(options, { chain, item: representativeItem, phase: triggerPhase.name })
 			if (!await refreshExternalTerminalAvailabilityForItem(options, chain, representativeItem, triggerPhase.name, runner)) return false
 		}
 		const decision = options.chainCompleteTrigger !== undefined
@@ -2600,6 +2603,22 @@ async function resolvePhaseRunner(
 	throw new SchedulerError(
 		"spawn_failed",
 		`scheduler: no runner configured for chain=${input.chain.name} item=${input.item.id} phase=${input.phase}; set SchedulerOptions.phaseRunner, .phaseRunnerSelectionForItem, .phaseRunnerSelectionForChain, or .runner`,
+	)
+}
+
+async function resolveChainCompletePhaseRunner(
+	options: SchedulerOptions,
+	input: SchedulerPhaseRunnerInput,
+): Promise<AgentRunnerSelection> {
+	if (options.phaseRunner !== undefined) return await options.phaseRunner(input)
+	if (options.phaseRunnerSelectionForChain !== undefined) {
+		const selection = await options.phaseRunnerSelectionForChain(input.chain)
+		return selectRunnerForPhase(input.phase, input.item, selection)
+	}
+	if (options.runner !== undefined) return options.runner
+	throw new SchedulerError(
+		"spawn_failed",
+		`scheduler: no chain-complete runner configured for chain=${input.chain.name} phase=${input.phase}; set SchedulerOptions.phaseRunner, .phaseRunnerSelectionForChain, or .runner`,
 	)
 }
 

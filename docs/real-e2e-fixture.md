@@ -1,8 +1,10 @@
 # Real e2e fixture & harness
 
-真实 e2e 用一个真实的私有 GitHub repo 验证 coder-loop 的完整路径：真实 runner
-（`claude` / `codex` / `opencode` / `hapi` CLI）跑 iteration → review，产出真实 branch / PR /
-review / merge / issue closure。它故意不是单元测试：要抓的是 runner sandbox 行为、
+真实 e2e 用一个真实的私有 GitHub repo 验证 coder-loop 的完整路径：已完整接线的真实
+runner（`claude` / `codex` / `opencode` CLI）跑 iteration → review，产出真实 branch / PR /
+review / merge / issue closure。`hapi` 当前只进入通用 runner 词表、availability probe 与 generic
+spawn seam；真实 prompt / worktree / status / session 接线归 #603，在其落地前不属于本 harness
+声明的完整 runner 路径。它故意不是单元测试：要抓的是 runner sandbox 行为、
 session resume、`gh` 交互、跨 phase 状态推进这类只在真实运行中暴露的集成失败。
 
 mock / stub / fake 不能证明真实 GitHub issue/PR 路径；但 real E2E 是阶段性收尾门，

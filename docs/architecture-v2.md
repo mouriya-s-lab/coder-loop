@@ -13,7 +13,7 @@ v2 跑的业务和 v1 完全一样：一个 issue 队列，每个 issue 经 **it
 ```mermaid
 flowchart TD
   cli["CLI: chain / item / status"] -- "JSON over socket" --> daemon["中央 daemon (daemon.ts)<br/>常驻进程 / 状态权威 / 孤儿回收"]
-  daemon <--> db[("SQLite (sqlite-state.ts)<br/>chains / items / runs / current_runs, schema v13")]
+  daemon <--> db[("SQLite (sqlite-state.ts)<br/>chains / items / runs / current_runs, schema v14")]
   daemon --> sched["调度器 tick (scheduler.ts)<br/>跨 chain 选 item+phase, 并发 spawn"]
   sched --> sA["slot (chainA, repo1)"]
   sched --> sB["slot (chainA, repo2)"]
@@ -26,7 +26,7 @@ flowchart TD
 - **chain**（`ChainRecord`，`src/sqlite-state.ts`）：v2 新概念，一组 item 的容器，创建时绑定单一 preset + repository。
 - **调度器 tick**（`schedulerTick`，`src/scheduler.ts`）：常驻进程按 interval ticking，跨 chain 选下一个 item+phase 并发 spawn。引入于 `#189`（`96093f1`）。
 - **slot = `(chain, repo_cwd)`**：并发单元，每 slot 至多一个活跃 agent，于是不同 chain、不同 repo 可并行；选下一个待办 item 走索引 `idx_items_next_pending(chain_id, repo_cwd, status, position, id)`。
-- **SQLite** 取代 per-target JSON，引入于 `#192`（`f3613b5`，schema v7），旧 JSON state 面在 `#196`（`179a817`）移除；schema 后续演进到 v13（当前值 `STATE_SCHEMA_VERSION = 13`；v11 退役 chain umbrella 列 #457、v12 退役 items 表 `issue_number`/`branch`/`pr` 物理列 #419、v13 加 runner CHECK 约束 #481）。
+- **SQLite** 取代 per-target JSON，引入于 `#192`（`f3613b5`，schema v7），旧 JSON state 面在 `#196`（`179a817`）移除；schema 后续演进到 v14（当前值 `STATE_SCHEMA_VERSION = 14`；v11 退役 chain umbrella 列 #457、v12 退役 items 表 `issue_number`/`branch`/`pr` 物理列 #419、v13 加 runner CHECK 约束 #481、v14 将该 CHECK 扩展为接纳 `hapi` #602）。
 - **孤儿回收**：daemon 启动时回收上次遗留的 run（`recoverStaleSchedulerState`）——v1 sentinel + reconcile 兜底在中央 daemon 形态下的等价物。
 
 业务生命周期（第一节那张状态机）完全不变——只是推进它的从单 while-loop 变成调度器跨 tick、跨 chain。
@@ -43,7 +43,7 @@ flowchart TD
 
 ## 四、SQLite 状态与 GitHub-PR 耦合（遗留债的收敛记录）
 
-schema v13 的四张核心表（`sqlite-state.ts`）：
+schema v14 的四张核心表（`sqlite-state.ts`）：
 
 - `chains`：`name`(unique) / `preset`(nullable since v9 `#412`) / `repository` / `base_branch` / `status` / `metadata`。
 - `items`：`chain_id` / `item_id`(opaque string, `#419` v12 起) / `repo_cwd` / `status` / `attempts` / `position` / `title` / `priority` / `last_run_id` / `session_ids` / `issue_file` / `evidence_dir` / `agent_cwd` / `runner`(CHECK claude/codex/opencode/hapi, v14 `#602`) / `phase` / `preset` / `preset_path` / `extra`，约束 `UNIQUE (chain_id, item_id)`。

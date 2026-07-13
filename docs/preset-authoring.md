@@ -17,7 +17,7 @@
 | **加载 preset** | 从 `<pkg>/presets/<name>/` 或 target 的 `presetPath` 读 `preset.toml`，解析 `name / item.idField / statuses / phases / fragments / agent`。每个 fragment 路径必须可读。 |
 | **加载 target runtime** | 从 centralized SQLite loop-data store 解析 active chain / queue / current；每个 item 自带 preset（`item.add --preset <name>` 或 `--preset-path <abs>`），chain-level `preset` 只是 legacy default seed。target 目录不需要任何 config / workflow 文件——项目命令 / PR 约定的真源是 target 自有的 `CLAUDE.md` / `AGENTS.md`。 |
 | **选 actionable item** | 若 `state.current` 存在且其 status 在 preset 的 `statuses.continuable` 内，继续它；否则在队列里找首个 `continuable` item。`continuable` 外的所有 item 视为 terminal，引擎不动。 |
-| **按 phase 顺序 spawn agent** | 遍历 `preset.phases`：每个 phase 读 entry prompt 模板，按 `[phases.variables]` 表绑定变量替换 `{{KEY}}`，把渲染后的 prompt 传给当前 runner（`claude` / `codex` / `opencode` / `hapi`）。捕获 stdout/stderr 写入 `<logDir>/<runId>/<phase>/`，每个 phase spawn 完写 `status.json`。 |
+| **按 phase 顺序 spawn agent** | 遍历 `preset.phases`：每个 phase 读 entry prompt 模板，按 `[phases.variables]` 表绑定变量替换 `{{KEY}}`。`claude` / `codex` / `opencode` 接收渲染后的 prompt 并走完整 stdout/stderr 与 `status.json` 接线；`hapi` 当前只具备通用 runner 词表、availability probe 与 generic spawn seam，真实 prompt / worktree / status / session 接线归 #603。 |
 | **resume / 不丢工作** | spawn 中途崩溃，重启时根据 `state.current.phase` 跳到当前 phase 而非从头。 |
 | **daemon / chain 控制** | 新版运行期由 centralized daemon socket + chain/item state 控制；target start/stop/restart 通过 daemon API 解析 chain，而不是依赖 target-local sentinel 文件。 |
 | **runtime 状态快照** | `coder-loop status <target> --json` 不 spawn agent，读取 preset、target 文件、central chain layout、queue、current、runner 与 process snapshot，供 operator / supervisor 做结构化判断。 |
