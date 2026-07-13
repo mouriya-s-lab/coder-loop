@@ -7741,6 +7741,13 @@ process.exitCode = 0
 			const extra = record(finalUpdate.extra)
 			expect(extra.blockerRepo).toBe("owner/dep")
 			expect(extra.arbitrary).toBe("key")
+			const explicitNull = record(expectOk(await request(fixture, "item.update", {
+				itemId,
+				extraPatch: { arbitrary: null },
+			})).item)
+			const explicitNullExtra = record(explicitNull.extra)
+			expect(Object.hasOwn(explicitNullExtra, "arbitrary")).toBe(true)
+			expect(explicitNullExtra.arbitrary).toBeNull()
 			const hook = { kind: "observer", point: "agent.spawn", script: "/bin/true", timeoutMs: 1000 }
 			const replaced = record(expectOk(await request(fixture, "item.update", { itemId, extra: { hooks: [hook] } })).item)
 			expect(record(replaced.extra).hooks).toEqual([hook])
