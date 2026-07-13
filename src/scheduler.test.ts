@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises"
+import { chmod, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
 
@@ -24,9 +24,10 @@ import {
 	type SchedulerPhaseRunner,
 	type SchedulerWorktreeManager,
 } from "./scheduler"
-import { schedulerEventToObservabilityEvent } from "./daemon"
+import { schedulerEventToObservabilityEvent, startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
 import {
 	buildPhaseRunnerSelectionFromChain,
+	buildRunnerFilesystemAuthorization,
 	buildRunnerInvocation,
 	loadPreset,
 	resolvePhaseRunnerFromChain,
@@ -39,13 +40,26 @@ import {
 import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import { type ChainRecord, type ItemRecord, openSqliteStateStore } from "./sqlite-state"
 import { appendObservabilityEvent, queryObservabilityEvents } from "./observability"
-import { engineLifecycleAdmittedItemStatus, itemExtraJsonValue, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
+import { chainMetadataToJsonObject, engineLifecycleAdmittedItemStatus, itemExtraJsonValue, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 import type { BoundaryRecord } from "./boundary-types"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
+
+function runnerAuthorizationForTest(agentCwd: string, presetDir: string, loopDataRoot: string) {
+	return buildRunnerFilesystemAuthorization({
+		agentCwd, presetDir, loopDataRoot,
+		sharedContextPath: resolve(loopDataRoot, "chains/c/shared.md"), currentIssueFile: "",
+		issueDir: resolve(loopDataRoot, "chains/c/issues"), evidenceDir: resolve(loopDataRoot, "chains/c/evidence/1"),
+		evidenceRootDir: resolve(loopDataRoot, "chains/c/evidence"), logDir: resolve(loopDataRoot, "chains/c/runs"),
+		daemonSocketPath: resolve(loopDataRoot, "daemon.sock"),
+	})
+}
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-tests", String(process.pid))
 
 let nextFixtureId = 0
+const fixtureDaemons = new Set<CoderLoopDaemon>()
+const fixturePresetDirs = new WeakMap<ReturnType<typeof openSqliteStateStore>, string>()
+const fixtureCaptureRoots = new WeakMap<ReturnType<typeof openSqliteStateStore>, string>()
 
 // #397 test brand helper — see install-commands.test.ts for rationale.
 function runtimeStatus(value: string) {
@@ -53,10 +67,52 @@ function runtimeStatus(value: string) {
 }
 
 afterAll(async () => {
+	await Promise.all([...fixtureDaemons].map((daemon) => daemon.stop()))
 	await rm(TEST_ROOT, { recursive: true, force: true })
 })
 
 describe("scheduler", () => {
+	test("runner projections reach scheduler fresh and resume paths for every runner", async () => {
+		for (const kind of ["claude", "codex", "opencode"] as const) {
+			for (const resume of [false, true]) {
+				const fixture = await createFixture(`runner-projection-${kind}-${resume ? "resume" : "fresh"}`)
+				try {
+					const chain = createChain(fixture.store, `runner-projection-${kind}-${resume ? "resume" : "fresh"}-chain`)
+					const chainPaths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
+					await mkdir(chainPaths.evidenceDir, { recursive: true })
+					const captureArgv = resolve(chainPaths.evidenceDir, `${kind}-${resume ? "resume" : "fresh"}.argv.json`)
+					const item = createItem(fixture.store, chain, { issueNumber: 601_000 + (resume ? 1 : 0), repoCwd: "/repo/a", runner: kind, captureArgv, probeNullDevice: true })
+					if (resume) fixture.store.updateItem(item.id, { sessionIds: { iteration: { [kind]: `scheduler-resume-${kind}` } } })
+					const tick = await schedulerTick(fixture.options({
+						runner: { kind, source: "queue", binary: fixture.fakeRunner, extraArgs: [], model: null },
+					}))
+					expect(tick.spawnedRuns).toHaveLength(1)
+					expect((await tick.spawnedRuns[0]!.closed).exitCode).toBe(0)
+					const argv = await readFile(captureArgv, "utf8")
+					expect(argv).toContain(resume ? `scheduler-resume-${kind}` : "601000")
+					const projected: unknown = JSON.parse(argv)
+					if (!Array.isArray(projected) || !projected.every((value) => typeof value === "string")) throw new Error("captured scheduler argv must be a string array")
+					const fixturePresetDir = fixturePresetDirs.get(fixture.store)
+					if (fixturePresetDir === undefined) throw new Error("scheduler fixture must retain its preset directory")
+					expect(projected).not.toContain(fixture.loopDataRoot)
+					expect(projected).not.toContain("/dev/null")
+					if (kind === "claude") {
+						expect(projected).toContain(fixturePresetDir)
+						expect(projected).toContain(chainPaths.evidenceDir)
+					}
+					if (kind === "codex" && !resume) {
+						expect(projected).toContain(chainPaths.evidenceDir)
+						expect(projected).toContain(chainPaths.issuesDir)
+						expect(projected).toContain(chainPaths.runsDir)
+						expect(projected).not.toContain(fixturePresetDir)
+					}
+				} finally {
+					await stopFixture(fixture)
+				}
+			}
+		}
+	})
+
 	test("rejects successful scheduler completion when terminal persistence fails", async () => {
 		const fixture = await createFixture("terminal-persistence-failure")
 		try {
@@ -84,7 +140,7 @@ describe("scheduler", () => {
 			expect(fixture.store.getCurrentRun(chain.id)?.runId).toBe(run.runId)
 			await chmod(paths.runStatusFile(run.runId), 0o600)
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 	test("reports timeout event persistence failure without skipping termination", async () => {
@@ -108,7 +164,7 @@ describe("scheduler", () => {
 			expect(failures.map(({ event }) => event.type)).toContain("attempt.timeout")
 			expect(failures[0]?.error).toContain("timeout sink unavailable")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -129,7 +185,7 @@ describe("scheduler", () => {
 			}))
 			expect((await tick.spawnedRuns[0]!.closed).exitCode).not.toBe(0)
 		} finally {
-			startupFixture.store.close()
+			await stopFixture(startupFixture)
 		}
 
 		const recycleFixture = await createFixture("recycle-persistence-failure")
@@ -148,7 +204,7 @@ describe("scheduler", () => {
 			markRunPendingRecycle(recycleFixture.state, tick.spawnedRuns[0]!.runId)
 			expect((await tick.spawnedRuns[0]!.closed).exitCode).not.toBe(0)
 		} finally {
-			recycleFixture.store.close()
+			await stopFixture(recycleFixture)
 		}
 
 		const naturalExitFixture = await createFixture("recycle-natural-exit-persistence-failure")
@@ -166,7 +222,7 @@ describe("scheduler", () => {
 			markRunPendingRecycle(naturalExitFixture.state, tick.spawnedRuns[0]!.runId)
 			expect((await tick.spawnedRuns[0]!.closed).exitCode).toBe(0)
 		} finally {
-			naturalExitFixture.store.close()
+			await stopFixture(naturalExitFixture)
 		}
 
 		expect(failures.map(({ event }) => event.type)).toEqual([
@@ -201,7 +257,7 @@ describe("scheduler", () => {
 
 			await runSchedulerUntilIdle(persistedObservabilityOptions(fixture))
 
-			const events = await readRunnerEvents(fixture.eventLog)
+			const events = await readRunnerEvents(fixture.eventLogForChain(chain.name))
 			expect(events.map((event) => `${event.type}:${event.issueNumber}`)).toEqual([
 				"start:179",
 				"end:179",
@@ -215,7 +271,7 @@ describe("scheduler", () => {
 			expect(fixture.worktreeCalls).toHaveLength(1)
 			expect(fixture.store.listItems(chain.id).map((item) => item.status)).toEqual(["done", "done", "done"])
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -231,11 +287,11 @@ describe("scheduler", () => {
 			expect(listActiveRuns(fixture.state)).toHaveLength(2)
 			await Promise.all(tick.spawnedRuns.map((run) => run.closed))
 
-			const events = await readRunnerEvents(fixture.eventLog)
+			const events = await readRunnerEvents(fixture.eventLogForChain(chain.name))
 			expect(maxConcurrentRunnerEvents(events)).toBe(2)
 			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -256,7 +312,7 @@ describe("scheduler", () => {
 			expect(fixture.worktreeCalls).toHaveLength(1)
 			expect(fixture.worktreeCalls[0]).toContain("valid-chain")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -334,7 +390,7 @@ describe("scheduler", () => {
 					if (spawnedPid !== null) expect(() => process.kill(spawnedPid!, 0)).toThrow()
 				}
 			} finally {
-				fixture.store.close()
+				await stopFixture(fixture)
 			}
 		}
 	})
@@ -401,7 +457,7 @@ describe("scheduler", () => {
 			expect(fixture.store.getItem(item.id)?.phase).toBe("blocked-responder")
 			await retryTick.spawnedRuns[0]!.closed
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -439,7 +495,7 @@ describe("scheduler", () => {
 				message: "chain runner parse failed",
 			})
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -467,7 +523,7 @@ describe("scheduler", () => {
 			expect(siblingTick.spawnedRuns.map((run) => run.itemId)).toEqual([sibling.id])
 			await siblingTick.spawnedRuns[0]!.closed
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -485,7 +541,7 @@ describe("scheduler", () => {
 			expect(tick.spawnedRuns[0]?.worktreePath).not.toBe(tick.spawnedRuns[1]?.worktreePath)
 			await Promise.all(tick.spawnedRuns.map((run) => run.closed))
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -505,7 +561,7 @@ describe("scheduler", () => {
 			expect(fixture.store.listItems(chain.id).map((item) => item.status)).toEqual(["queued", "queued"])
 			await firstTick.spawnedRuns[0]!.closed
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -525,7 +581,7 @@ describe("scheduler", () => {
 			expect(secondTick.spawnedRuns[0]?.itemId).toBe(second.id)
 			await secondTick.spawnedRuns[0]!.closed
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -540,7 +596,7 @@ describe("scheduler", () => {
 			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
 			expect(fixture.schedulerEvents.some((event) => event.type === "chain.completed" && event.chainId === chain.id)).toBe(true)
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -576,7 +632,7 @@ describe("scheduler", () => {
 			expect(existsSync(worktreePath)).toBe(false)
 			expect(gitOutput(target, ["worktree", "list", "--porcelain"])).not.toContain(worktreePath)
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -599,6 +655,8 @@ describe("scheduler", () => {
 			expect(fixture.schedulerEvents.map((event) => event.type)).toEqual([
 				"agent.spawn",
 				"phase.start",
+				"recycle.pending_entered",
+				"recycle.natural_exit",
 				"agent.exit",
 				"phase.end",
 				"queue.terminal",
@@ -606,7 +664,7 @@ describe("scheduler", () => {
 				"chain.completed",
 			])
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -649,7 +707,7 @@ describe("scheduler", () => {
 			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
 			expect(fixture.schedulerEvents.filter((event) => event.type === "chain.complete_trigger")).toHaveLength(1)
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -696,7 +754,7 @@ describe("scheduler", () => {
 			expect(triggerCalls).toBe(2)
 			expect(fixture.schedulerEvents.filter((event) => event.type === "chain.complete_trigger")).toHaveLength(2)
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 
 		const followUpFixture = await createFixture("completion-trigger-follow-up")
@@ -716,7 +774,7 @@ describe("scheduler", () => {
 			expect(followUpFixture.store.listItems(chain.id).map((item) => item.status)).toEqual(["done", "queued"])
 			expect(followUpFixture.schedulerEvents.some((event) => event.type === "chain.completed" && event.chainId === chain.id)).toBe(false)
 		} finally {
-			followUpFixture.store.close()
+			await stopFixture(followUpFixture)
 		}
 
 		const failingFixture = await createFixture("completion-trigger-failing")
@@ -740,7 +798,7 @@ describe("scheduler", () => {
 			}))
 			expect(failingFixture.schedulerEvents.some((event) => event.type === "chain.completed" && event.chainId === chain.id)).toBe(false)
 		} finally {
-			failingFixture.store.close()
+			await stopFixture(failingFixture)
 		}
 	})
 
@@ -758,7 +816,7 @@ describe("scheduler", () => {
 			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
 			expect(fixture.schedulerEvents).toContainEqual({ type: "chain.completed", chainId: chain.id, chainName: chain.name })
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -783,7 +841,7 @@ describe("scheduler", () => {
 			const secondTick = await schedulerTick(fixture.options())
 			expect(secondTick.spawnedRuns).toHaveLength(0)
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -817,7 +875,7 @@ describe("scheduler", () => {
 			expect(fixture.store.getItem(second.id)?.attempts).toBe(1)
 			expect(fixture.schedulerEvents.filter((event) => event.type === "agent.spawn").map((event) => event.itemId)).toEqual([first.id, second.id])
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -850,7 +908,7 @@ describe("scheduler", () => {
 				terminalStatus: "exhausted",
 			}))
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -884,7 +942,7 @@ describe("scheduler", () => {
 				terminalStatus: "exhausted",
 			}))
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -944,7 +1002,7 @@ describe("scheduler", () => {
 				expect(observabilityEvent.payload.terminalStatus).toBe("custom_exhausted")
 			}
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -982,7 +1040,7 @@ describe("scheduler", () => {
 			await secondTick.spawnedRuns[0]!.closed
 			expect(fixture.store.getItem(sibling.id)?.status).toBe("done")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -1027,7 +1085,7 @@ describe("scheduler", () => {
 				nextRunAt: now + 120,
 			})
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -1060,7 +1118,7 @@ describe("scheduler", () => {
 				now += expectedDelay
 			}
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -1096,7 +1154,7 @@ describe("scheduler", () => {
 				nextRunAt: now + 8,
 			})
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -1133,7 +1191,7 @@ describe("scheduler", () => {
 				nextRunAt: 1_800_030_060,
 			})
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -1148,7 +1206,7 @@ describe("scheduler", () => {
 			expect(tick.completedChainIds).toEqual([])
 			expect(fixture.store.getChain(chain.id)?.status).toBe("active")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -1175,7 +1233,7 @@ describe("scheduler", () => {
 			expect(unchanged?.extra.dependsOn).toEqual([target.id])
 			expect(fixture.schedulerEvents.find((event) => event.type === "item.dependency_unblocked")).toBeUndefined()
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -1199,7 +1257,7 @@ describe("scheduler", () => {
 			// The arktype boundary surfaces the missing field path; the engine wraps it in a presetError.
 			expect(message).toContain("exhausted")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -1215,7 +1273,7 @@ describe("scheduler", () => {
 			expect(fixture.state.slots.size).toBe(0)
 			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -1233,7 +1291,7 @@ describe("scheduler", () => {
 			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
 			expect(fixture.store.getChain(chain.id)?.status).toBe("stopped")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -1254,7 +1312,7 @@ describe("scheduler", () => {
 			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
 			await resumedTick.spawnedRuns[0]!.closed
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -1270,7 +1328,7 @@ describe("scheduler", () => {
 			expect(fixture.state.slots.size).toBe(0)
 			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -1288,9 +1346,9 @@ describe("scheduler", () => {
 			expect(await readFile(resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(closed.runId), "utf-8")).toContain(`done:${item.id}`)
 			expect(fixture.store.getRunByRunId(closed.runId)?.exitCode).toBe(0)
 			expect(fixture.store.getItem(item.id)?.status).toBe("done")
-			expect((await readRunnerEvents(fixture.eventLog)).map((event) => event.type)).toEqual(["start", "end"])
+			expect((await readRunnerEvents(fixture.eventLogForChain(chain.name))).map((event) => event.type)).toEqual(["start", "end"])
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -1318,7 +1376,7 @@ describe("scheduler", () => {
 			expect(stderr.toString()).toContain("stderr-99999")
 			expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "claude" })).toBe("session-large")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -1362,13 +1420,18 @@ describe("scheduler", () => {
 			expect(events.events.map((event) => event.type)).toEqual([
 				"agent.spawn",
 				"phase.start",
+				"item.mutation.caller_admission",
+				"item.update.field_write_admission",
+				"item.status",
+				"recycle.pending_entered",
+				"recycle.natural_exit",
 				"agent.exit",
 				"phase.end",
 				"queue.terminal",
 				"chain.completed",
 			])
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -1446,7 +1509,7 @@ describe("scheduler", () => {
 			expect(persistedTypes.indexOf("phase.end")).toBeGreaterThan(persistedTypes.indexOf("agent.exit"))
 			expect(persistedTypes.indexOf("queue.terminal")).toBeGreaterThan(persistedTypes.indexOf("phase.end"))
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -1467,7 +1530,7 @@ describe("scheduler", () => {
 			expect(phaseEnd[0].status).toBe("changes_requested")
 			expect(queueTerminal).toHaveLength(0)
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -1513,7 +1576,7 @@ describe("scheduler", () => {
 			// `attempt.timeout` must not also fire — the watchdog beat the absolute floor.
 			expect(fixture.schedulerEvents.filter((event) => event.type === "attempt.timeout")).toHaveLength(0)
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -1563,7 +1626,7 @@ describe("scheduler", () => {
 			expect(observed).toHaveLength(1)
 			expect(observed[0]?.resetsAt).toBe(resetsAt)
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -1597,7 +1660,7 @@ describe("scheduler", () => {
 			expect(closed.exitCode).toBe(0)
 			expect(fixture.schedulerEvents.filter((event) => event.type === "run.startup_idle_kill")).toHaveLength(0)
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -1629,7 +1692,7 @@ describe("scheduler", () => {
 			expect(tickAfter.spawnedRuns).toHaveLength(1)
 			await tickAfter.spawnedRuns[0]!.closed
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -1678,7 +1741,7 @@ describe("scheduler", () => {
 		} finally {
 			if (savedRustLog !== undefined) process.env["RUST_LOG"] = savedRustLog
 			if (savedOverride !== undefined) process.env["CODER_LOOP_CODEX_RUST_LOG"] = savedOverride
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -1728,7 +1791,7 @@ describe("scheduler", () => {
 			else delete process.env["RUST_LOG"]
 			if (savedOverride !== undefined) process.env["CODER_LOOP_CODEX_RUST_LOG"] = savedOverride
 			else delete process.env["CODER_LOOP_CODEX_RUST_LOG"]
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -1812,7 +1875,7 @@ describe("scheduler", () => {
 			const argv = (await readFile(argvDump, "utf-8")).trim()
 			expect(argv).toMatch(/--resume +sess-rl-resume-test\b/)
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 })
@@ -1840,7 +1903,7 @@ describe("scheduler reads the agent-written item status (v1 status model)", () =
 			expect(closed.status).toBe("moot")
 			expect(fixture.store.getItem(item.id)?.status).toBe("moot")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -1862,7 +1925,7 @@ describe("scheduler reads the agent-written item status (v1 status model)", () =
 			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
 			expect(fixture.store.getChain(chain.id)?.status).toBe("active")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -1883,7 +1946,7 @@ describe("scheduler reads the agent-written item status (v1 status model)", () =
 			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
 			expect(fixture.store.getChain(chain.id)?.status).toBe("active")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -1896,13 +1959,14 @@ describe("scheduler reads the agent-written item status (v1 status model)", () =
 			// The agent prints a verdict=retry SUMMARY line (which the deleted v2 inference would have
 			// mapped to changes_requested) but writes `done` to the store. v1 reads the written status.
 			const tick = await schedulerTick(fixture.options({
-				prompt: ({ item: i, runId, worktreePath }) =>
+				prompt: ({ chain: c, item: i, runId, worktreePath }) =>
 					JSON.stringify({
 						itemId: i.id,
 						issueNumber: Number(i.itemId),
+						chainName: c.name,
 						runId,
 						worktreePath,
-						eventLog: fixture.eventLog,
+						eventLog: fixture.eventLogForChain(c.name),
 						sleepMs: 5,
 						exitCode: 0,
 						summary: "REVIEW SUMMARY: verdict=retry; issue=#5005; reason=stdout-would-retry",
@@ -1915,7 +1979,7 @@ describe("scheduler reads the agent-written item status (v1 status model)", () =
 			expect(closed.status).toBe("done")
 			expect(fixture.store.getItem(item.id)?.status).toBe("done")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -1950,7 +2014,7 @@ describe("scheduler reads the agent-written item status (v1 status model)", () =
 			expect(fixture.store.getItem(item.id)?.attempts).toBe(1)
 			expect(fixture.store.getItem(item.id)?.status).toBe("changes_requested")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 })
@@ -1981,7 +2045,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 			expect(fixture.schedulerEvents.find((event) => event.type === "agent.spawn" && event.itemId === item.id)).toBeDefined()
 			expect(fixture.schedulerEvents.find((event) => event.type === "phase.start" && event.itemId === item.id && event.phase === "iteration")).toBeDefined()
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -2022,7 +2086,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				lastRunId: "run-active-iteration-ledger",
 			})
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -2064,7 +2128,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				.map((event) => event.phase)
 			expect(phases).toEqual(["iteration", "review"])
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -2078,13 +2142,14 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 			const baseOptions = fixture.options({
 				loadedPreset: await loadedPresetFromDir(presetDir),
 				runIdFactory: ({ chain: c, item: i, phase }) => `run-${c.id}-${i.id}-${phase}`,
-				prompt: ({ item: i, runId, worktreePath, phase }) =>
+				prompt: ({ chain: c, item: i, runId, worktreePath, phase }) =>
 					JSON.stringify({
 						itemId: i.id,
 						issueNumber: Number(i.itemId),
+						chainName: c.name,
 						runId,
 						worktreePath,
-						eventLog: fixture.eventLog,
+						eventLog: fixture.eventLogForChain(c.name),
 						sleepMs: 5,
 						exitCode: 0,
 						summary: `PHASE SUMMARY: ${phase}`,
@@ -2114,7 +2179,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				.map((event) => event.phase)
 			expect(phaseStarts).toEqual(["alpha", "beta", "gamma"])
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -2169,7 +2234,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				.map((event) => event.phase)
 			expect(startedPhases).toEqual(["review"])
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -2220,7 +2285,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				.map((event) => event.phase)
 			expect(phaseStarts).toEqual(["review"])
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -2280,7 +2345,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				.map((event) => event.phase)
 			expect(phaseStarts).toEqual(["iteration"])
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -2321,7 +2386,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				.map((event) => event.phase)
 			expect(phaseStarts).toEqual(["iteration"])
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -2368,7 +2433,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 			const followUpTick = await schedulerTick(baseOptions)
 			expect(followUpTick.spawnedRuns).toHaveLength(0)
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 })
@@ -2423,7 +2488,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 				.map((event) => event.phase)
 			expect(phaseStarts).toEqual(["blocked-responder"])
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -2477,7 +2542,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 				.map((event) => event.phase)
 			expect(phaseStarts).toEqual(["blocked-responder"])
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -2503,7 +2568,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			expect(tick.completedChainIds).toEqual([chain.id])
 			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -2571,7 +2636,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 				.map((event) => event.phase)
 			expect(phaseStarts).toEqual(["iteration"])
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -2619,7 +2684,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			)
 			expect(unblockedEvents).toHaveLength(0)
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -2660,7 +2725,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			expect(fixture.store.getItem(dependent.id)?.status).toBe("queued")
 			expect(fixture.store.getChain(dependentChain.id)?.status).toBe("active")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -2729,7 +2794,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 				.map((event) => event.phase)
 			expect(phaseStarts).toEqual(["iteration"])
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -2798,7 +2863,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			expect(fixture.store.getItem(item.id)?.status).toBe("blocked")
 			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -2826,7 +2891,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			expect(await readFile(resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(closed.runId), "utf-8")).toContain(`done:${item.id}`)
 			expect(await readFile(resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(closed.runId), "utf-8")).toContain("REVIEW SUMMARY: verdict=accepted")
 
-			const runs = (await readRunnerEvents(fixture.eventLog)).map((event) => event.type)
+			const runs = (await readRunnerEvents(fixture.eventLogForChain(chain.name))).map((event) => event.type)
 			expect(runs).toEqual(["start", "end"])
 
 			const spawnEvents = fixture.schedulerEvents.filter(
@@ -2843,7 +2908,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 				.map((event) => event.phase)
 			expect(phaseStarts).toEqual(["blocked-responder"])
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 })
@@ -2894,7 +2959,7 @@ describe("scheduler loaded preset prompt rendering", () => {
 			// item keeps its entry status. The scheduler does not infer a terminal status from stdout.
 			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 })
@@ -3056,7 +3121,7 @@ describe("scheduler chain bindings (issue #288)", () => {
 			// Render probe (echo-prompt runner) writes no status, so the item keeps its entry status.
 			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 })
@@ -3101,7 +3166,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			expect(capturedStdout).toContain("PER-PHASE:codex")
 			expect(capturedStdout).not.toContain("PER-PHASE:claude")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -3154,7 +3219,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			expect(capturedStdout).toContain("PER-PHASE:claude")
 			expect(capturedStdout).not.toContain("PER-PHASE:codex")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -3170,7 +3235,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			expect(closed.exitCode).toBe(0)
 			expect(fixture.store.getItem(fixture.store.listItems(chain.id)[0]!.id)?.status).toBe("done")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -3194,7 +3259,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			expect(failedItem?.extra.schedulerBackoff).toMatchObject({ failureCount: 1 })
 			expect(fixture.schedulerEvents.filter((event) => event.type === "spawn.aborted")).toHaveLength(1)
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -3303,12 +3368,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			})
 			expect(runner.kind).toBe("codex")
 			expect(runner.model).toBe("gpt-5.6-sol")
-			const invocation = buildRunnerInvocation(runner, "p", { kind: "fresh" }, {
-				targetCwd: "/repo/a",
-				agentCwd: "/repo/a",
-				presetDir: PRESET_DIR,
-				loopDataRoot: "/lr",
-			})
+			const invocation = buildRunnerInvocation(runner, "p", { kind: "fresh" }, runnerAuthorizationForTest("/repo/a", PRESET_DIR, "/lr"))
 			const modelFlagIndex = invocation.args.indexOf("--model")
 			expect(modelFlagIndex).toBeGreaterThanOrEqual(0)
 			expect(invocation.args[modelFlagIndex + 1]).toBe("gpt-5.6-sol")
@@ -3391,7 +3451,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			expect(reviewStdout).toContain("BINARY:claude")
 			expect(reviewStdout).not.toContain("BINARY:codex")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 })
@@ -3408,7 +3468,8 @@ describe("runPresetChainCompleteTriggerPhases per-phase runner selection (issue 
 			const targetCwd = resolve(fixture.loopDataRoot, "..", "target-trigger-large")
 			await mkdir(targetCwd, { recursive: true })
 			const chain = createChain(fixture.store, "trigger-large-output-chain")
-			createItem(fixture.store, chain, { issueNumber: 630_002, repoCwd: targetCwd })
+			const item = createItem(fixture.store, chain, { issueNumber: 630_002, repoCwd: targetCwd })
+			fixture.store.updateItem(item.id, { evidenceDir: null })
 			const runId = `trigger-${chain.id}-large`
 			const decision = await runPresetChainCompleteTriggerPhases({
 				chain,
@@ -3426,7 +3487,7 @@ describe("runPresetChainCompleteTriggerPhases per-phase runner selection (issue 
 			expect(output).toContain("trigger-199999")
 			expect(output.endsWith("FINALIZER SUMMARY: decision=complete; reason=large-output\n")).toBe(true)
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -3447,7 +3508,8 @@ describe("runPresetChainCompleteTriggerPhases per-phase runner selection (issue 
 					codex: { binary: fakeCodex },
 				},
 			})
-			createItem(fixture.store, chain, { issueNumber: 287_801, repoCwd: targetCwd })
+			const item = createItem(fixture.store, chain, { issueNumber: 287_801, repoCwd: targetCwd })
+			fixture.store.updateItem(item.id, { evidenceDir: null })
 			const items = fixture.store.listItems(chain.id)
 
 			const runId = `trigger-${chain.id}-default`
@@ -3467,7 +3529,7 @@ describe("runPresetChainCompleteTriggerPhases per-phase runner selection (issue 
 			expect(stdout).toContain("BINARY:codex")
 			expect(stdout).not.toContain("BINARY:claude")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -3488,7 +3550,7 @@ describe("runPresetChainCompleteTriggerPhases per-phase runner selection (issue 
 				}),
 			).toThrow(/runner is retired \(#433\)/)
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -3509,7 +3571,8 @@ describe("runPresetChainCompleteTriggerPhases per-phase runner selection (issue 
 					codex: { binary: fakeCodex },
 				},
 			})
-			createItem(fixture.store, chain, { issueNumber: 287_803, repoCwd: targetCwd })
+			const item = createItem(fixture.store, chain, { issueNumber: 287_803, repoCwd: targetCwd })
+			fixture.store.updateItem(item.id, { evidenceDir: null })
 			const items = fixture.store.listItems(chain.id)
 
 			const seenPhases: string[] = []
@@ -3543,7 +3606,7 @@ describe("runPresetChainCompleteTriggerPhases per-phase runner selection (issue 
 			expect(stdout).toContain("BINARY:claude")
 			expect(stdout).not.toContain("BINARY:codex")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 })
@@ -3563,7 +3626,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			{ kind: "claude", source: "iteration-default", binary: "claude", extraArgs: [], model: null },
 			"prompt",
 			decision,
-			{ targetCwd: REPO_ROOT, agentCwd: REPO_ROOT, presetDir: PRESET_DIR, loopDataRoot: resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-tests/render-only") },
+			runnerAuthorizationForTest("/repo/worktree", PRESET_DIR, resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-tests/render-only")),
 		)
 		expect(invocation.kind).toBe("spawn")
 		if (invocation.kind === "spawn") {
@@ -3599,7 +3662,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			{ kind: "claude", source: "iteration-default", binary: "claude", extraArgs: [], model: null },
 			"prompt",
 			decision,
-			{ targetCwd: REPO_ROOT, agentCwd: REPO_ROOT, presetDir: PRESET_DIR, loopDataRoot: resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-tests/render-only") },
+			runnerAuthorizationForTest("/repo/worktree", PRESET_DIR, resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-tests/render-only")),
 		)
 		expect(invocation.kind).toBe("spawn")
 		if (invocation.kind === "spawn") {
@@ -3632,7 +3695,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			{ kind: "codex", source: "iteration-default", binary: "codex", extraArgs: [], model: null },
 			"prompt",
 			decision,
-			{ targetCwd: REPO_ROOT, agentCwd: REPO_ROOT, presetDir: PRESET_DIR, loopDataRoot: resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-tests/render-only") },
+			runnerAuthorizationForTest("/repo/worktree", PRESET_DIR, resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-tests/render-only")),
 		)
 		expect(invocation.kind).toBe("spawn")
 		if (invocation.kind === "spawn") {
@@ -3706,7 +3769,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			const refreshed = fixture.store.getItem(item.id)
 			expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "claude" })).toBe("sess-captured-001")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -3738,7 +3801,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			expect(idx).toBeGreaterThanOrEqual(0)
 			expect(argv.argv[idx + 1]).toBe("sess-seeded-200")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -3760,7 +3823,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			const refreshed = fixture.store.getItem(item.id)
 			expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "codex" })).toBe("thread-captured-002")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -3795,7 +3858,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "claude" })).toBeNull()
 			expect(fixture.store.getItemSessionId(item.id, { phase: "review", runner: "codex" })).toBeNull()
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -3806,7 +3869,9 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			const item = createItem(fixture.store, chain, { issueNumber: 312_003, repoCwd: "/repo/session-id-invalid" })
 			fixture.store.setItemSessionId(item.id, { phase: "iteration", runner: "claude", sessionId: "sess-stale-312" })
 			const fakeRunner = resolve(fixture.loopDataRoot, "..", "fake-claude-invalid-once.ts")
-			const attemptFile = resolve(fixture.loopDataRoot, "..", "fake-claude-invalid-attempt.txt")
+			const chainPaths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
+			await mkdir(chainPaths.evidenceDir, { recursive: true })
+			const attemptFile = resolve(chainPaths.evidenceDir, "fake-claude-invalid-attempt.txt")
 			await writeFakeClaudeInvalidOnceRunner(fakeRunner, attemptFile, "sess-fresh-312")
 			let now = 1_800_312_000
 			let runSequence = 0
@@ -3844,14 +3909,14 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			expect(secondClosed.exitCode).toBe(0)
 			expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "claude" })).toBe("sess-fresh-312")
 
-			const argvEvents = await readArgvEvents(fixture.eventLog)
+			const argvEvents = await readArgvEvents(fixture.eventLogForChain(chain.name))
 			expect(argvEvents).toHaveLength(2)
 			expect(argvEvents[0]?.argv).toContain("--resume")
 			expect(argvEvents[0]?.argv).toContain("sess-stale-312")
 			expect(argvEvents[1]?.argv).not.toContain("--resume")
 			expect(argvEvents[1]?.argv).not.toContain("sess-stale-312")
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -3872,7 +3937,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "claude" })).toBe("sess-new-312")
 			expect(fixture.schedulerEvents.some((event) => event.type === "session_id.invalidated")).toBe(false)
 		} finally {
-			fixture.store.close()
+			await stopFixture(fixture)
 		}
 	})
 
@@ -4136,13 +4201,22 @@ function gitOutput(cwd: string, args: readonly string[]): string {
 
 type Fixture = {
 	store: ReturnType<typeof openSqliteStateStore>
+	daemon?: CoderLoopDaemon
 	state: ReturnType<typeof createSchedulerState>
 	loopDataRoot: string
-	eventLog: string
+	eventLogForChain: (chainName: string) => string
 	schedulerEvents: SchedulerEvent[]
 	worktreeCalls: string[]
 	fakeRunner: string
 	options: (overrides?: SchedulerFixtureOverrides) => SchedulerOptions
+}
+
+async function stopFixture(fixture: Fixture): Promise<void> {
+	if (fixture.daemon !== undefined) {
+		await fixture.daemon.stop()
+		fixtureDaemons.delete(fixture.daemon)
+	}
+	fixture.store.close()
 }
 
 type SchedulerFixtureOverrides = Partial<Omit<SchedulerOptions, "presetForChain">> & {
@@ -4161,16 +4235,30 @@ async function createFixture(name: string): Promise<Fixture> {
 	const root = resolve(TEST_ROOT, `${name}-${++nextFixtureId}`)
 	const loopDataRoot = resolve(root, "loop-data")
 	const fakeRunner = resolve(root, "fake-runner.ts")
-	const eventLog = resolve(root, "runner-events.jsonl")
+	const eventLogForChain = (chainName: string): string => resolve(resolveChainRuntimePaths(chainName, { loopDataRoot }).runsDir, "runner-events.jsonl")
+	const fixturePresetDir = resolve(root, "preset")
 	await mkdir(loopDataRoot, { recursive: true })
 	await writeFakeRunner(fakeRunner)
+	await cp(resolve(REPO_ROOT, "presets/gh-issue-pr-iteration"), fixturePresetDir, { recursive: true })
+	const presetTomlPath = resolve(fixturePresetDir, "preset.toml")
+	const presetToml = await readFile(presetTomlPath, "utf-8")
+	const iterationHeader = 'roles  = ["common", "quality", "iter"]'
+	const fixtureExits = ["changes_requested", "blocked", "moot", "done", "exhausted"]
+		.map((status) => `\n  [[phases.exits]]\n  status = "${status}"\n  when = "scheduler fixture status"\n`)
+		.join("")
+	await writeFile(presetTomlPath, presetToml.replace(iterationHeader, iterationHeader + fixtureExits))
 
 	const store = openSqliteStateStore({ loopDataRoot })
-	const state = createSchedulerState()
+	fixturePresetDirs.set(store, fixturePresetDir)
+	fixtureCaptureRoots.set(store, root)
+	const daemon = await startCoderLoopDaemon({ loopDataRoot, scheduler: { enabled: false } })
+	fixtureDaemons.add(daemon)
+	const state = daemon.schedulerExecutionState()
 	const schedulerEvents: SchedulerEvent[] = []
 	const worktreeCalls: string[] = []
-	const defaultPresetDir = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
+	const defaultPresetDir = fixturePresetDir
 	const defaultLoadedPreset = await loadedPresetFromDir(defaultPresetDir)
+	if (defaultLoadedPreset.preset.phases.find((phase) => phase.name === "iteration")?.exits.length === 0) throw new Error("scheduler fixture preset did not declare iteration exits")
 	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
 		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
 		await mkdir(worktreePath, { recursive: true })
@@ -4180,6 +4268,14 @@ async function createFixture(name: string): Promise<Fixture> {
 
 	const options = (overrides: SchedulerFixtureOverrides = {}): SchedulerOptions => {
 		const { loadedPreset = defaultLoadedPreset, ...schedulerOverrides } = overrides
+		if (overrides.loadedPreset !== undefined) {
+			for (const chain of store.listChains()) {
+				const metadata = chainMetadataToJsonObject(chain.metadata)
+				metadata.presetPath = loadedPreset.presetDir
+				store.updateChain(chain.id, { metadata: storedChainMetadata(metadata) })
+				for (const item of store.listItems(chain.id)) store.updateItem(item.id, { presetPath: loadedPreset.presetDir })
+			}
+		}
 		return {
 			store,
 			state,
@@ -4193,15 +4289,17 @@ async function createFixture(name: string): Promise<Fixture> {
 			},
 			worktreeManager,
 			loopDataRootOptions: { loopDataRoot },
+			runCredentials: daemon.buildSchedulerRunCredentialIssuer(),
 			runIdFactory: makeAttemptTrackingRunIdFactory(),
-			prompt: ({ item, runId, worktreePath, phase }) => {
+			prompt: ({ chain, item, runId, worktreePath, phase }) => {
 			const extra = itemExtraToJsonObject(item.extra)
 			const payload: BoundaryRecord = {
 				itemId: item.id,
 				issueNumber: Number(item.itemId),
+				chainName: chain.name,
 				runId,
 				worktreePath,
-				eventLog,
+				eventLog: eventLogForChain(chain.name),
 				sleepMs: typeof extra.sleepMs === "number" ? extra.sleepMs : 5,
 				exitCode: typeof extra.exitCode === "number" ? extra.exitCode : 0,
 				// v1 status model: the fake runner writes this status to the store itself, simulating the
@@ -4210,6 +4308,8 @@ async function createFixture(name: string): Promise<Fixture> {
 				writeStatus: fakeRunnerWriteStatus(phase, extra),
 			}
 			if (Object.prototype.hasOwnProperty.call(extra, "summary")) payload.summary = extra.summary
+			if (typeof extra.captureArgv === "string") payload.captureArgv = extra.captureArgv
+			if (typeof extra.probeNullDevice === "boolean") payload.probeNullDevice = extra.probeNullDevice
 			return JSON.stringify(payload)
 		},
 			onEvent: (event) => {
@@ -4219,7 +4319,7 @@ async function createFixture(name: string): Promise<Fixture> {
 		}
 	}
 
-	return { store, state, loopDataRoot, eventLog, schedulerEvents, worktreeCalls, fakeRunner, options }
+	return { store, daemon, state, loopDataRoot, eventLogForChain, schedulerEvents, worktreeCalls, fakeRunner, options }
 }
 
 function persistedObservabilityOptions(fixture: Fixture, overrides: SchedulerFixtureOverrides = {}): SchedulerOptions {
@@ -4269,6 +4369,8 @@ function createChain(
 	const baseMetadata: JsonObject = metadata !== undefined && Object.hasOwn(metadata, "bindings")
 		? { ...metadata }
 		: { ...(metadata ?? {}), bindings: baseBindings }
+	const fixturePresetDir = fixturePresetDirs.get(store)
+	if (fixturePresetDir !== undefined) baseMetadata.presetPath = fixturePresetDir
 	return store.createChain({
 		name,
 		preset: "gh-issue-pr-iteration",
@@ -4289,7 +4391,7 @@ function createChain(
 function createItem(
 	store: ReturnType<typeof openSqliteStateStore>,
 	chain: ChainRecord,
-	input: { issueNumber: number; repoCwd: string; sleepMs?: number; exitCode?: number; summary?: string | null; runner?: AgentRunnerKind | null; writeStatus?: string | null },
+	input: { issueNumber: number; repoCwd: string; sleepMs?: number; exitCode?: number; summary?: string | null; runner?: AgentRunnerKind | null; writeStatus?: string | null; captureArgv?: string; probeNullDevice?: boolean },
 ) {
 	const extra: JsonObject = {
 		// #419: the bundled preset's `idField` is `issue` and reads from `extra.issue` via the
@@ -4305,31 +4407,39 @@ function createItem(
 	// mirroring the real agent's `coder-loop item update --status` call. When omitted the
 	// fake runner falls back to the phase-aware default (see fakeRunnerWriteStatus).
 	if (Object.prototype.hasOwnProperty.call(input, "writeStatus")) extra.writeStatus = input.writeStatus ?? null
-	return store.createItem({
+	if (input.captureArgv !== undefined) extra.captureArgv = input.captureArgv
+	if (input.probeNullDevice !== undefined) extra.probeNullDevice = input.probeNullDevice
+	const item = store.createItem({
 		chainId: chain.id,
 		itemId: String(input.issueNumber),
 		repoCwd: input.repoCwd,
 		runner: input.runner ?? null,
 		status: runtimeStatus("queued"),
+		presetPath: fixturePresetDirs.get(store) ?? null,
+		evidenceDir: fixtureCaptureRoots.get(store) ?? null,
 		attempts: 0,
 		title: `issue ${input.issueNumber}`,
 		extra: storedItemExtra(extra),
 		createdAt: 1_800_000_001 + input.issueNumber,
 		updatedAt: 1_800_000_001 + input.issueNumber,
 	})
+	if (item.presetPath !== (fixturePresetDirs.get(store) ?? null)) throw new Error("scheduler fixture item lost its declared preset path")
+	return item
 }
 
 async function writeFakeRunner(path: string): Promise<void> {
 	await mkdir(resolve(path, ".."), { recursive: true })
-	const sqliteStateModule = resolve(REPO_ROOT, "src/sqlite-state.ts")
+	const loopEntry = resolve(REPO_ROOT, "src/loop.ts")
 	await writeFile(
 		path,
-		`import { appendFile } from "node:fs/promises"
-import { openSqliteStateStore } from ${JSON.stringify(sqliteStateModule)}
+		`#!/usr/bin/env bun
+import { appendFile, writeFile } from "node:fs/promises"
 
 const promptIndex = Bun.argv.indexOf("-p")
-const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
+const prompt = promptIndex === -1 ? Bun.argv.at(-1) ?? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
 const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+if (typeof input.captureArgv === "string") await writeFile(input.captureArgv, JSON.stringify(Bun.argv.slice(2)))
+if (input.probeNullDevice === true) await writeFile("/dev/null", "probe")
 await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
 await new Promise((resolve) => setTimeout(resolve, input.sleepMs))
 await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
@@ -4341,16 +4451,16 @@ if (summary !== null) console.log(summary)
 // agent's \`coder-loop item update --status\`. A null writeStatus means the agent wrote nothing, so the
 // item keeps the entry status it had at spawn (continuable).
 if (typeof input.writeStatus === "string" && input.itemId > 0) {
-	const loopDataRoot = process.env.CODER_LOOP_DATA_DIR
-	if (loopDataRoot) {
-		const store = openSqliteStateStore({ loopDataRoot })
-		store.updateItem(input.itemId, { status: input.writeStatus, updatedAt: Math.floor(Date.now() / 1000) })
-		store.close()
+	const update = Bun.spawnSync({ cmd: ["bun", ${JSON.stringify(loopEntry)}, "item", "update", input.chainName, "--issue", String(input.issueNumber), "--status", input.writeStatus], stdout: "pipe", stderr: "pipe" })
+	if (update.exitCode !== 0) {
+		process.stderr.write(new TextDecoder().decode(update.stderr))
+		process.exit(update.exitCode)
 	}
 }
 process.exit(input.exitCode)
 `,
 		)
+	await chmod(path, 0o755)
 	}
 
 async function writeThreeStepPreset(presetDir: string): Promise<void> {
@@ -4612,7 +4722,7 @@ async function createPresetPromptIntegrationFixture(name: string): Promise<Fixtu
 	const root = resolve(TEST_ROOT, `${name}-${++nextFixtureId}`)
 	const loopDataRoot = resolve(root, "loop-data")
 	const fakeRunner = resolve(root, "echo-prompt-runner.ts")
-	const eventLog = resolve(root, "runner-events.jsonl")
+	const eventLogForChain = (chainName: string): string => resolve(resolveChainRuntimePaths(chainName, { loopDataRoot }).runsDir, "runner-events.jsonl")
 	await mkdir(loopDataRoot, { recursive: true })
 	await writeEchoPromptRunner(fakeRunner)
 
@@ -4658,7 +4768,7 @@ async function createPresetPromptIntegrationFixture(name: string): Promise<Fixtu
 		}
 	}
 
-	return { store, state, loopDataRoot, eventLog, schedulerEvents, worktreeCalls, fakeRunner, options }
+	return { store, state, loopDataRoot, eventLogForChain, schedulerEvents, worktreeCalls, fakeRunner, options }
 }
 
 async function writeEchoPromptRunner(path: string): Promise<void> {

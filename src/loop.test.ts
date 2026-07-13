@@ -1,10 +1,13 @@
 import { describe, expect, test } from "bun:test"
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises"
+import { homedir } from "node:os"
 import { relative, resolve } from "node:path"
 
 import {
 	agentCodexArgs,
 	agentOpencodeArgs,
+	buildRunnerFilesystemAuthorization,
+	buildRunnerInvocation,
 	agentSessionsPath,
 	buildCentralRuntimeBindingPaths,
 	buildRenderBindings,
@@ -723,6 +726,8 @@ describe("runner and daemon helpers", () => {
 		expect(agentCodexArgs(["--json"], "prompt", { kind: "resume", sessionId: "thread-1" }, REPO_ROOT)).toEqual([
 			"--ask-for-approval",
 			"never",
+			"-c",
+			"shell_environment_policy.inherit=all",
 			"exec",
 			"resume",
 			"thread-1",
@@ -735,7 +740,7 @@ describe("runner and daemon helpers", () => {
 
 	test("agentOpencodeArgs renders run subcommand with json format model dir and optional resume", () => {
 		// #481 acceptance #4: opencode invocation must match what the operator's local
-		// `opencode 1.17.5` accepts — `opencode run --format json --dangerously-skip-permissions
+		// `opencode 1.17.5` accepts — `opencode run --pure --format json --dangerously-skip-permissions
 		// -m <model> [-s <sessionID>] <prompt>` — and must preserve user-supplied extra args
 		// while stripping any user-supplied `-m`/`--model` so the engine's resolved model wins.
 
@@ -743,6 +748,7 @@ describe("runner and daemon helpers", () => {
 		// DEFAULT_OPENCODE_MODEL when caller passes null).
 		expect(agentOpencodeArgs([], "do thing", { kind: "fresh" }, null)).toEqual([
 			"run",
+			"--pure",
 			"--format",
 			"json",
 			"--dangerously-skip-permissions",
@@ -754,6 +760,7 @@ describe("runner and daemon helpers", () => {
 		// Resume: `-s <sessionId>` appended after model and before prompt.
 		expect(agentOpencodeArgs([], "continue", { kind: "resume", sessionId: "ses_abc" }, "opencode-go/glm-5.2")).toEqual([
 			"run",
+			"--pure",
 			"--format",
 			"json",
 			"--dangerously-skip-permissions",
@@ -768,6 +775,7 @@ describe("runner and daemon helpers", () => {
 		// verbatim. We feed `--quiet` so the test exercises both behaviors at once.
 		expect(agentOpencodeArgs(["-m", "other/model", "--quiet"], "hi", { kind: "fresh" }, "opencode-go/glm-5.2")).toEqual([
 			"run",
+			"--pure",
 			"--format",
 			"json",
 			"--dangerously-skip-permissions",
@@ -790,6 +798,161 @@ describe("runner and daemon helpers", () => {
 })
 
 describe("small parsers", () => {
+	test("runner filesystem grants project one declared surface model across runners", () => {
+		const authorization = buildRunnerFilesystemAuthorization({
+			loopDataRoot: "/runtime/loop-data",
+			agentCwd: "/runtime/loop-data/chains/c/worktrees/i",
+			presetDir: "/runtime/loop-data/preset-materialized/p",
+			sharedContextPath: "/runtime/loop-data/chains/c/shared.md",
+			currentIssueFile: "/runtime/loop-data/chains/c/issues/1.md",
+			evidenceDir: "/runtime/loop-data/chains/c/evidence/1",
+			evidenceRootDir: "/runtime/loop-data/chains/c/evidence",
+			issueDir: "/runtime/loop-data/chains/c/issues",
+			logDir: "/runtime/loop-data/chains/c/runs",
+			daemonSocketPath: "/runtime/loop-data/daemon.sock",
+		})
+		expect(authorization.surfaces).toContainEqual({ kind: "read-only-directory", channel: "preset", path: "/runtime/loop-data/preset-materialized/p" })
+		expect(authorization.surfaces).toContainEqual({ kind: "system-device", channel: "null", path: "/dev/null" })
+		expect(authorization.surfaces).not.toContainEqual(expect.objectContaining({ path: "/runtime/loop-data" }))
+		expect(authorization.surfaces).not.toContainEqual(expect.objectContaining({ path: "/dev" }))
+		for (const kind of ["claude", "codex", "opencode"] as const) {
+			for (const resume of [{ kind: "fresh" }, { kind: "resume", sessionId: `session-${kind}` }] as const) {
+				const plan = buildRunnerInvocation({ kind, binary: kind, extraArgs: [], model: null, source: "engine-builtin" }, "prompt", resume, authorization)
+				const runnerScratch = resolve("/runtime/loop-data/chains/c/worktrees/i", ".coder-loop-runner", "tmp")
+				expect(plan.binary).toBe("/usr/bin/sandbox-exec")
+				expect(plan.args[2]).toBe(kind)
+				expect(plan.args.slice(2)).not.toContain("/runtime/loop-data")
+				expect(plan.args).not.toContain("danger-full-access")
+				expect(plan.args[1]).toContain("/runtime/loop-data/chains/c/evidence/1")
+				expect(plan.args[1]).toContain(runnerScratch)
+				expect(plan.args[1]).toContain('(literal "/dev/null")')
+				expect(plan.args[1]).not.toContain('(subpath "/dev")')
+				expect(plan.args.slice(2)).not.toContain("/dev/null")
+				expect(plan.args[1]).not.toContain("/private/tmp/claude-")
+				expect(plan.environment.TMPDIR).toBe(runnerScratch)
+				expect(plan.environment.TMP).toBe(runnerScratch)
+				expect(plan.environment.TEMP).toBe(runnerScratch)
+				expect(plan.environment.CLAUDE_CODE_TMPDIR).toBe(kind === "claude" ? runnerScratch : undefined)
+				expect(plan.runtimeDirectories).toEqual([runnerScratch])
+				if (resume.kind === "resume") expect(plan.args).toContain(`session-${kind}`)
+				if (kind === "codex") {
+					expect(plan.args).not.toContain("--sandbox")
+					expect(plan.args).toContain("shell_environment_policy.inherit=all")
+					for (const filename of [
+						"installation_id",
+						"logs_2.sqlite", "logs_2.sqlite-shm", "logs_2.sqlite-wal",
+						"goals_1.sqlite", "goals_1.sqlite-shm", "goals_1.sqlite-wal",
+						"memories_1.sqlite", "memories_1.sqlite-shm", "memories_1.sqlite-wal",
+					]) {
+						expect(plan.args[1]).toContain(resolve(process.env.CODEX_HOME ?? resolve(homedir(), ".codex"), filename))
+					}
+					expect(plan.args[1]).toContain("(allow system-socket)")
+				}
+				if (kind === "opencode") {
+					expect(plan.args).toContain("--pure")
+					expect(plan.args[1]).toContain(resolve(homedir(), ".local/share/opencode"))
+					expect(plan.args[1]).toContain(resolve(homedir(), ".local/state/opencode"))
+				}
+			}
+		}
+	})
+
+	test("runner filesystem grants deny undeclared writes and preserve every declared writable channel", async () => {
+		const root = resolve(TEST_ROOT, "runner-filesystem-explicit-writes")
+		const loopDataRoot = resolve(root, "loop-data")
+		const agentCwd = resolve(root, "agent")
+		const presetDir = resolve(root, "preset")
+		const evidenceDir = resolve(loopDataRoot, "chains/c/evidence/1")
+		const evidenceRootDir = resolve(loopDataRoot, "chains/c/evidence")
+		const issueDir = resolve(loopDataRoot, "chains/c/issues")
+		const logDir = resolve(loopDataRoot, "chains/c/runs")
+		const sharedContextPath = resolve(loopDataRoot, "chains/c/shared.md")
+		const currentIssueFile = resolve(issueDir, "1.md")
+		const daemonSocketPath = resolve(loopDataRoot, "daemon.sock")
+		const undeclared = resolve(root, "undeclared.txt")
+		await rm(root, { recursive: true, force: true })
+		await Promise.all([agentCwd, presetDir, evidenceDir, evidenceRootDir, issueDir, logDir].map((path) => mkdir(path, { recursive: true })))
+		await Promise.all([sharedContextPath, currentIssueFile, daemonSocketPath, undeclared].map((path) => writeFile(path, "initial\n")))
+		const authorization = buildRunnerFilesystemAuthorization({
+			loopDataRoot, agentCwd, presetDir, sharedContextPath, currentIssueFile,
+			evidenceDir, evidenceRootDir, issueDir, logDir, daemonSocketPath,
+		})
+		for (const kind of ["claude", "codex", "opencode"] as const) {
+			for (const resume of [{ kind: "fresh" }, { kind: "resume", sessionId: `resume-${kind}` }] as const) {
+				const plan = buildRunnerInvocation({ kind, binary: "/usr/bin/true", extraArgs: [], model: null, source: "engine-builtin" }, "prompt", resume, authorization)
+				const profile = plan.args[1]!
+				const writeProbe = (path: string) => Bun.spawnSync({ cmd: ["/usr/bin/sandbox-exec", "-p", profile, "/bin/sh", "-c", `printf allowed >> ${JSON.stringify(path)}`], stdout: "pipe", stderr: "pipe" })
+				for (const path of [
+					resolve(agentCwd, `${kind}-${resume.kind}-agent.txt`), resolve(evidenceDir, `${kind}-${resume.kind}-evidence.txt`), resolve(evidenceRootDir, `${kind}-${resume.kind}-root.txt`),
+					resolve(issueDir, `${kind}-${resume.kind}-issue.txt`), resolve(logDir, `${kind}-${resume.kind}-log.txt`), sharedContextPath, currentIssueFile, daemonSocketPath,
+				]) expect(writeProbe(path).exitCode, `${kind}/${resume.kind}: ${path}`).toBe(0)
+				expect(writeProbe("/dev/null").exitCode, `${kind}/${resume.kind}: /dev/null`).toBe(0)
+				expect(writeProbe("/dev/zero").exitCode, `${kind}/${resume.kind}: /dev sibling`).not.toBe(0)
+				expect(writeProbe(resolve(presetDir, `${kind}-${resume.kind}-forbidden.txt`)).exitCode, `${kind}/${resume.kind}: preset`).not.toBe(0)
+				expect(writeProbe(undeclared).exitCode, `${kind}/${resume.kind}: undeclared`).not.toBe(0)
+			}
+		}
+	})
+
+	test("runner authorization metadata cannot widen projections", () => {
+		const authorization = buildRunnerFilesystemAuthorization({
+			loopDataRoot: "/runtime/root", agentCwd: "/repo", presetDir: "/preset", sharedContextPath: "/runtime/root/chains/c/shared.md",
+			currentIssueFile: "", evidenceDir: "/runtime/root/chains/c/evidence/1", evidenceRootDir: "/runtime/root/chains/c/evidence",
+			issueDir: "/runtime/root/chains/c/issues", logDir: "/runtime/root/chains/c/runs", daemonSocketPath: "/runtime/root/daemon.sock",
+		})
+		const bypasses = [
+			["--add-dir", "/runtime/root"], ["--add-dir=/runtime/root"], ["--sandbox", "danger-full-access"], ["--sandbox=danger-full-access"],
+			["-s", "danger-full-access"], ["-sdanger-full-access"], ["--cd", "/runtime/root"], ["--cd=/runtime/root"], ["-C", "/runtime/root"], ["-C/runtime/root"],
+			["--dir", "/runtime/root"], ["--dir=/runtime/root"], ["--permission-mode", "bypassPermissions"], ["--permission-mode=bypassPermissions"],
+			["--dangerously-skip-permissions"], ["--dangerously-bypass-approvals-and-sandbox"],
+		]
+		for (const kind of ["claude", "codex", "opencode"] as const) {
+			for (const resume of [{ kind: "fresh" }, { kind: "resume", sessionId: `resume-${kind}` }] as const) {
+				for (const extraArgs of bypasses) {
+					expect(() => buildRunnerInvocation({ kind, binary: kind, extraArgs, model: null, source: "engine-builtin" }, "prompt", resume, authorization), `${kind}/${resume.kind}: ${extraArgs.join(" ")}`).toThrow("runner authorization metadata")
+				}
+			}
+		}
+	})
+
+	test("runner projections reach the chain-complete spawn path for every runner and resume mode", async () => {
+		const root = resolve(TEST_ROOT, "runner-chain-complete-projections")
+		await rm(root, { recursive: true, force: true })
+		await mkdir(root, { recursive: true })
+		for (const kind of ["claude", "codex", "opencode"] as const) {
+			for (const resume of [{ kind: "fresh" }, { kind: "resume", sessionId: `resume-${kind}` }] as const) {
+				const capture = resolve(root, `${kind}-${resume.kind}.argv`)
+				const runner = resolve(root, `${kind}-${resume.kind}.sh`)
+				await writeFile(runner, `#!/bin/sh\nset -e\nprintf probe > /dev/null\nprintf '%s\\n' "$@" > ${JSON.stringify(capture)}\n`)
+				await chmod(runner, 0o755)
+				const outputPath = resolve(root, `${kind}-${resume.kind}`, "phase", "stdout.jsonl")
+				const outcome = await spawnOneAttempt({
+					options: makeOptions(), label: "phase", prompt: "projection-prompt", outputPath,
+					sessionsPath: agentSessionsPath(outputPath), resume, agentCwd: root,
+					runner: { kind, source: "preset", binary: runner, extraArgs: [], model: null }, watchdog: null,
+				})
+				expect(outcome.exitCode).toBe(0)
+				const argv = await readFile(capture, "utf8")
+				expect(argv).toContain(resume.kind === "resume" ? `resume-${kind}` : "projection-prompt")
+				expect(argv.split("\n")).not.toContain(TEST_ROOT)
+				if (kind === "claude") {
+					expect(argv).toContain(root)
+					expect(argv).toContain(makeOptions().preset.presetDir)
+					expect(argv).toContain(makeOptions().evidenceRootDir)
+					expect(argv).toContain(makeOptions().issueDir)
+					expect(argv).toContain(makeOptions().logDir)
+				}
+				if (kind === "codex" && resume.kind === "fresh") {
+					expect(argv).toContain(root)
+					expect(argv).toContain(makeOptions().evidenceRootDir)
+					expect(argv).toContain(makeOptions().issueDir)
+					expect(argv).toContain(makeOptions().logDir)
+					expect(argv).not.toContain(makeOptions().preset.presetDir)
+				}
+			}
+		}
+	})
+
 	test("reports ordered chain-complete status persistence failure", async () => {
 		const root = resolve(TEST_ROOT, "status-persistence-intermediate")
 		await rm(root, { recursive: true, force: true })

@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { spawn } from "node:child_process"
-import { chmod, mkdir, readdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises"
+import { chmod, cp, mkdir, readdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises"
 import { createConnection } from "node:net"
 import { resolve } from "node:path"
 
@@ -47,6 +47,19 @@ function runtimeStatus(value: string) {
 	return engineLifecycleAdmittedItemStatus(parseInternalStatus(value, "test.status"), "test")
 }
 
+async function writeCredentialedFixturePreset(root: string): Promise<string> {
+	const presetDir = resolve(root, "credentialed-fixture-preset")
+	await cp(PRESET_DIR, presetDir, { recursive: true })
+	const presetTomlPath = resolve(presetDir, "preset.toml")
+	const presetToml = await readFile(presetTomlPath, "utf-8")
+	const iterationHeader = 'roles  = ["common", "quality", "iter"]'
+	const exits = ["changes_requested", "blocked", "moot", "done", "exhausted", "in_progress"]
+		.map((status) => `\n  [[phases.exits]]\n  status = "${status}"\n  when = "daemon credentialed fixture status"\n`)
+		.join("")
+	await writeFile(presetTomlPath, presetToml.replace(iterationHeader, iterationHeader + exits))
+	return presetDir
+}
+
 function emptyObservabilityExcerpt() {
 	return {
 		stdout: { path: "/dev/null", missing: true, truncated: false, records: [] },
@@ -70,18 +83,31 @@ const FakeRunnerRunningEventBoundary = arkType({
 	runId: "string",
 })
 
-// v1 status model: the spawned agent is the only writer of item.status. These daemon
-// integration tests use fake runners, so the fake runner reproduces the real agent's
-// `coder-loop item update --status` by writing the test-computed `writeStatus` straight
-// into the shared SQLite store (the scheduler then reads it back as the source of truth).
-// This is the legacy bypass — it sidesteps the daemon's #397 admission gate and is the
-// right shape for tests that exercise the iteration phase (which has no `[[phases.exits]]`
-// declared and would otherwise default-deny every status write).
+// The spawned agent is the only writer of item.status. Fake runners use the same
+// run-scoped credential and daemon admission path as a real `coder-loop item update`.
 const FAKE_RUNNER_STATUS_WRITE_SNIPPET = `if (typeof input.writeStatus === "string" && input.itemId > 0 && process.env.CODER_LOOP_DATA_DIR) {
-	const { openSqliteStateStore } = await import(${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))})
-	const store = openSqliteStateStore({ loopDataRoot: process.env.CODER_LOOP_DATA_DIR })
-	store.updateItem(input.itemId, { status: input.writeStatus, updatedAt: Math.floor(Date.now() / 1000) })
-	store.close()
+	const credential = process.env.CODER_LOOP_RUN_CRED
+	if (typeof credential !== "string" || credential.length === 0) throw new Error("fake runner requires CODER_LOOP_RUN_CRED")
+	const { createConnection } = await import("node:net")
+	const { randomUUID } = await import("node:crypto")
+	const socketPath = process.env.CODER_LOOP_DATA_DIR + "/daemon.sock"
+	const response = await new Promise((resolveSend, rejectSend) => {
+		const socket = createConnection(socketPath)
+		let buffer = ""
+		socket.setEncoding("utf-8")
+		socket.on("connect", () => {
+			socket.write(JSON.stringify({ id: randomUUID(), command: "item.update", args: { itemId: input.itemId, status: input.writeStatus, agentCredential: credential } }) + "\\n")
+		})
+		socket.on("data", (chunk) => {
+			buffer += chunk
+			const newline = buffer.indexOf("\\n")
+			if (newline === -1) return
+			socket.destroy()
+			resolveSend(JSON.parse(buffer.slice(0, newline)))
+		})
+		socket.on("error", rejectSend)
+	})
+	if (response.ok !== true) throw new Error("credentialed fake-runner status write failed: " + JSON.stringify(response))
 }`
 
 // #452 credentialed write path. Used by recycle-zone tests that need the write to flow
@@ -92,38 +118,7 @@ const FAKE_RUNNER_STATUS_WRITE_SNIPPET = `if (typeof input.writeStatus === "stri
 // gated by the test fixture installing a presetDir whose target phase declares
 // `[[phases.exits]]` for the requested status (otherwise the #397 default-deny gate
 // rejects the write before the recycle hook can fire).
-const FAKE_RUNNER_CREDENTIALED_STATUS_WRITE_SNIPPET = `if (typeof input.writeStatus === "string" && input.itemId > 0 && process.env.CODER_LOOP_DATA_DIR) {
-	const credential = process.env.CODER_LOOP_RUN_CRED
-	if (typeof credential === "string" && credential.length > 0) {
-		const { createConnection } = await import("node:net")
-		const { randomUUID } = await import("node:crypto")
-		const socketPath = process.env.CODER_LOOP_DATA_DIR + "/daemon.sock"
-		await new Promise((resolveSend, rejectSend) => {
-			const socket = createConnection(socketPath)
-			let buffer = ""
-			socket.setEncoding("utf-8")
-			socket.on("connect", () => {
-				socket.write(JSON.stringify({
-					id: randomUUID(),
-					command: "item.update",
-					args: { itemId: input.itemId, status: input.writeStatus, agentCredential: credential },
-				}) + "\\n")
-			})
-			socket.on("data", (chunk) => {
-				buffer += chunk
-				if (buffer.indexOf("\\n") === -1) return
-				socket.destroy()
-				resolveSend(undefined)
-			})
-			socket.on("error", rejectSend)
-		})
-	} else {
-		const { openSqliteStateStore } = await import(${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))})
-		const store = openSqliteStateStore({ loopDataRoot: process.env.CODER_LOOP_DATA_DIR })
-		store.updateItem(input.itemId, { status: input.writeStatus, updatedAt: Math.floor(Date.now() / 1000) })
-		store.close()
-	}
-}`
+const FAKE_RUNNER_CREDENTIALED_STATUS_WRITE_SNIPPET = FAKE_RUNNER_STATUS_WRITE_SNIPPET
 
 // #405: with the stdout verdict parser retired, the fake runner no longer derives
 // status from a `summary` string token. Test fixtures pass `extra.writeStatus`
@@ -1570,10 +1565,8 @@ attemptTimeoutSeconds = 3600
 		await writePromptCaptureRunner(runner, promptCapture)
 		await writeSinglePhasePromptPreset(presetDir, "CUSTOM_SCHEDULER_PRESET_PROMPT")
 
-		const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd: itemRepoCwd }) => {
-			const worktreePath = schedulerSlotWorktreePath(chain, itemRepoCwd, { loopDataRoot })
-			await mkdir(worktreePath, { recursive: true })
-			return worktreePath
+		const worktreeManager: SchedulerWorktreeManager = async () => {
+			return root
 		}
 		const daemon = await startCoderLoopDaemon({
 			loopDataRoot,
@@ -1698,7 +1691,8 @@ attemptTimeoutSeconds = 3600
 		let seededItemId = 0
 		const fixture = await startFixture("legacy-db-typed-runtime-data", {
 			schedulerIntervalMs: 20,
-			beforeStart: ({ loopDataRoot }) => {
+			beforeStart: ({ loopDataRoot, defaultItemPresetPath }) => {
+				if (defaultItemPresetPath === null) throw new Error("legacy scheduler fixture requires a credentialed preset")
 				const store = openSqliteStateStore({ loopDataRoot, createIfMissing: true })
 				try {
 					const chain = store.createChain({
@@ -1707,6 +1701,7 @@ attemptTimeoutSeconds = 3600
 						repository: "mouriya-s-lab/coder-loop",
 						baseBranch: "main",
 						metadata: storedChainMetadata({
+							presetPath: defaultItemPresetPath,
 							// #433: legacy `metadata.config` is retired; chain bindings now live at
 							// `metadata.bindings`. parseChainMetadata raises an explicit error on the
 							// retired key — that rejection is exercised in the metadata boundary tests
@@ -1721,6 +1716,8 @@ attemptTimeoutSeconds = 3600
 						itemId: "455",
 						repoCwd: REPO_ROOT,
 						status: runtimeStatus("queued"),
+						preset: null,
+						presetPath: defaultItemPresetPath,
 						extra: storedItemExtra({
 							slotKey: "legacy-slot",
 							blockerRepo: "mouriya-s-lab/coder-loop",
@@ -2252,6 +2249,7 @@ attemptTimeoutSeconds = 3600
 	test("credential-bound item.exitAction denies forged attribution and preserves overlapping already-stopped review attempts (#600)", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-600-exit-action-credential-truth`)
 		const loopDataRoot = resolve(root, "ld")
+		const credentialedPresetDir = await writeCredentialedFixturePreset(root)
 		const iterationCapture = resolve(root, "iteration-credential.txt")
 		const iterationRelease = resolve(root, "iteration-release")
 		const reviewCapture = resolve(root, "review-credential.txt")
@@ -2262,7 +2260,6 @@ attemptTimeoutSeconds = 3600
 			fakeRunner,
 			`import { appendFile, writeFile } from "node:fs/promises"
 import { type as arkType } from "arktype"
-const { openSqliteStateStore } = await import(${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))})
 const IterationRunnerPromptBoundary = arkType({
 	itemId: "number",
 	runId: "string",
@@ -2304,9 +2301,7 @@ switch (input.phase) {
 	case "iteration": {
 		await writeFile(${JSON.stringify(iterationCapture)}, credential)
 		while (!(await Bun.file(${JSON.stringify(iterationRelease)}).exists())) await Bun.sleep(10)
-		const store = openSqliteStateStore({ loopDataRoot })
-		store.updateItem(input.itemId, { status: "in_progress", updatedAt: Math.floor(Date.now() / 1000) })
-		store.close()
+		${FAKE_RUNNER_STATUS_WRITE_SNIPPET.replaceAll("input.writeStatus", '"in_progress"')}
 		break
 	}
 	case "review":
@@ -2366,12 +2361,8 @@ process.exitCode = 0
 				enabled: true,
 				intervalMs: 20,
 				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
-				presetDir: PRESET_DIR,
-				worktreeManager: async ({ chain, repoCwd }) => {
-					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
-					await mkdir(worktreePath, { recursive: true })
-					return worktreePath
-				},
+				presetDir: credentialedPresetDir,
+				worktreeManager: async () => root,
 				prompt: ({ item, runId, phase }) => JSON.stringify({ itemId: item.id, runId, phase, eventLog }),
 				chainCompleteTriggerForChain: () => null,
 			},
@@ -2382,13 +2373,14 @@ process.exitCode = 0
 				name: "exit-action-credential-truth-chain",
 				preset: "gh-issue-pr-iteration",
 				repository: "mouriya-s-lab/coder-loop",
+				metadata: { presetPath: credentialedPresetDir },
 			}))).chain)
 			const chainId = numberValue(chain.id)
 			const item = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
 				itemId: "60001",
 				repoCwd: REPO_ROOT,
-				preset: "gh-issue-pr-iteration",
+				presetPath: credentialedPresetDir,
 			}))).item)
 			const itemId = numberValue(item.id)
 
@@ -3634,11 +3626,7 @@ process.exitCode = 0
 			store.close()
 		}
 
-		const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
-			const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
-			await mkdir(worktreePath, { recursive: true })
-			return worktreePath
-		}
+		const worktreeManager: SchedulerWorktreeManager = async () => root
 		const daemon = await startCoderLoopDaemon({
 			loopDataRoot,
 			shutdownGraceMs: 50,
@@ -3886,14 +3874,32 @@ process.exitCode = 0
 			expect(stderr).toBe("")
 			expect(status.eventsPath).toBe(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile)
 			expect(await pathExists(paths.runEventsFile(runId))).toBe(false)
-			expect(events.events.map((event) => event.type)).toEqual([
+			const eventTypes = events.events.map((event) => event.type)
+			const expectedEventTypes: typeof eventTypes = [
 				"agent.spawn",
 				"phase.start",
+				"item.mutation.caller_admission",
+				"item.update.field_write_admission",
+				"item.status",
+				"recycle.pending_entered",
+				"slot.busy",
+				"recycle.natural_exit",
 				"agent.exit",
 				"phase.end",
 				"queue.terminal",
 				"chain.completed",
+			]
+			expect([...eventTypes].sort()).toEqual([...expectedEventTypes].sort())
+			// `slot.busy` is emitted by the daemon's independent periodic tick while the
+			// credentialed child performs its status write. Their mutual order is intentionally
+			// unsynchronized; retain the complete inventory above and pin both causal sequences.
+			expect(eventTypes.filter((type) => type !== "slot.busy")).toEqual([
+				"agent.spawn", "phase.start", "item.mutation.caller_admission", "item.update.field_write_admission",
+				"item.status", "recycle.pending_entered", "recycle.natural_exit", "agent.exit", "phase.end",
+				"queue.terminal", "chain.completed",
 			])
+			expect(eventTypes.indexOf("slot.busy")).toBeGreaterThan(eventTypes.indexOf("phase.start"))
+			expect(eventTypes.indexOf("slot.busy")).toBeLessThan(eventTypes.indexOf("agent.exit"))
 			const exitEvent = events.events.find((event) => event.type === "agent.exit")
 			if (exitEvent?.type !== "agent.exit") throw new Error("expected agent.exit event")
 			expect(exitEvent.payload.excerpt.stdout.path).toBe(paths.runPhaseStdoutFile(runId, "iteration"))
@@ -4389,11 +4395,10 @@ prompt = "review.md"
 
 			await waitFor(async () => readItem(fixture.loopDataRoot, chainId, 215), (candidate) => candidate?.status === "done")
 			const spawnEvent = fixture.schedulerEvents.find((event) => event.type === "agent.spawn")
-			expect(spawnEvent).toMatchObject({
-				type: "agent.spawn",
-				chainId,
-				presetDir: resolve(REPO_ROOT, "presets/single-phase-example"),
-			})
+			if (spawnEvent?.type !== "agent.spawn") throw new Error("expected agent.spawn event")
+			expect(spawnEvent.chainId).toBe(chainId)
+			expect(spawnEvent.presetDir.startsWith(resolve(fixture.loopDataRoot, "preset-materialized") + "/")).toBe(true)
+			expect(spawnEvent.presetDir.split("/").at(-1)?.startsWith("single-phase-example-")).toBe(true)
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -4558,11 +4563,7 @@ process.exitCode = 0
 				intervalMs: 20,
 				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
 				presetDir: PRESET_DIR,
-				worktreeManager: async ({ chain, repoCwd }) => {
-					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
-					await mkdir(worktreePath, { recursive: true })
-					return worktreePath
-				},
+				worktreeManager: async () => root,
 				prompt: ({ item, runId }) => JSON.stringify({
 					itemId: item.id,
 					issueNumber: Number(item.itemId),
@@ -4719,11 +4720,7 @@ process.exitCode = 0
 				intervalMs: 20,
 				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
 				presetDir: PRESET_DIR,
-				worktreeManager: async ({ chain, repoCwd }) => {
-					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
-					await mkdir(worktreePath, { recursive: true })
-					return worktreePath
-				},
+				worktreeManager: async () => root,
 				prompt: ({ item, runId }) => JSON.stringify({
 					itemId: item.id,
 					issueNumber: Number(item.itemId),
@@ -4874,11 +4871,7 @@ process.exitCode = 1
 				intervalMs: 20,
 				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
 				presetDir: PRESET_DIR,
-				worktreeManager: async ({ chain, repoCwd }) => {
-					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
-					await mkdir(worktreePath, { recursive: true })
-					return worktreePath
-				},
+				worktreeManager: async () => root,
 				prompt: ({ item, runId }) => JSON.stringify({ itemId: item.id, issueNumber: Number(item.itemId), runId, eventLog }),
 				chainCompleteTriggerForChain: () => null,
 			},
@@ -5012,6 +5005,7 @@ process.exitCode = 1
 	test("daemon scheduler spawns blocked-responder trigger phase after review exits blocked (live integration, issue #290)", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-b3-blocked-responder-live`)
 		const loopDataRoot = resolve(root, "ld")
+		const credentialedPresetDir = await writeCredentialedFixturePreset(root)
 		const fakeRunner = resolve(root, "fake-phase-runner.ts")
 		const eventLog = resolve(root, "events.jsonl")
 		await mkdir(loopDataRoot, { recursive: true })
@@ -5035,11 +5029,7 @@ process.exitCode = 0
 		)
 
 		const schedulerEvents: SchedulerEvent[] = []
-		const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
-			const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
-			await mkdir(worktreePath, { recursive: true })
-			return worktreePath
-		}
+		const worktreeManager: SchedulerWorktreeManager = async () => root
 		const runnerSelection: SchedulerOptions["runner"] = {
 			kind: "claude",
 			source: "iteration-default",
@@ -5054,7 +5044,7 @@ process.exitCode = 0
 				enabled: true,
 				intervalMs: 30,
 				runner: runnerSelection,
-				presetDir: PRESET_DIR,
+				presetDir: credentialedPresetDir,
 				worktreeManager,
 				prompt: ({ item, runId, phase }) => JSON.stringify({
 					itemId: item.id,
@@ -5077,9 +5067,10 @@ process.exitCode = 0
 			const chain = record(expectOk(await sendDaemonRequest(socketPath, daemonRequest("chain.create", {
 				name: "b3-blocked-responder-live-chain",
 				repository: "mouriya-s-lab/coder-loop",
+				metadata: { presetPath: credentialedPresetDir },
 			}))).chain)
 			const chainId = numberValue(chain.id)
-			expectOk(await sendDaemonRequest(socketPath, daemonRequest("item.add", { chainId, itemId: "29011", repoCwd: REPO_ROOT, preset: "gh-issue-pr-iteration" })))
+			expectOk(await sendDaemonRequest(socketPath, daemonRequest("item.add", { chainId, itemId: "29011", repoCwd: REPO_ROOT, presetPath: credentialedPresetDir })))
 
 			// A trigger phase running on an already-terminal (blocked) item must not change that
 			// terminal status. The blocked-responder fake runner writes no status, and the engine
@@ -5776,11 +5767,7 @@ process.exitCode = 0
 				intervalMs: 20,
 				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
 				presetDir: PRESET_DIR,
-				worktreeManager: async ({ chain, repoCwd }) => {
-					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
-					await mkdir(worktreePath, { recursive: true })
-					return worktreePath
-				},
+				worktreeManager: async () => root,
 				prompt: ({ item, runId }) => JSON.stringify({
 					itemId: item.id,
 					issueNumber: Number(item.itemId),
@@ -5875,6 +5862,7 @@ process.exitCode = 0
 	test("socket item.add admits a review-phase agentCredential and inserts the child (#407 row 2)", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-407-row2-review-allow`)
 		const loopDataRoot = resolve(root, "ld")
+		const credentialedPresetDir = await writeCredentialedFixturePreset(root)
 		const capturePath = resolve(root, "captured-credential.txt")
 		const fakeRunner = resolve(root, "fake-runner.ts")
 		const eventLog = resolve(root, "events.jsonl")
@@ -5899,11 +5887,7 @@ if (input.phase === "review") {
 	await new Promise((r) => setTimeout(r, input.sleepMs ?? 4000))
 } else {
 	// Iteration: write in_progress status and exit 0 so the scheduler advances to review.
-	if (typeof input.writeStatus === "string" && input.itemId > 0 && process.env.CODER_LOOP_DATA_DIR) {
-		const store = openSqliteStateStore({ loopDataRoot: process.env.CODER_LOOP_DATA_DIR })
-		store.updateItem(input.itemId, { status: input.writeStatus, updatedAt: Math.floor(Date.now() / 1000) })
-		store.close()
-	}
+	${FAKE_RUNNER_STATUS_WRITE_SNIPPET}
 	await new Promise((r) => setTimeout(r, 5))
 }
 process.exitCode = 0
@@ -5917,12 +5901,8 @@ process.exitCode = 0
 				enabled: true,
 				intervalMs: 20,
 				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
-				presetDir: PRESET_DIR,
-				worktreeManager: async ({ chain, repoCwd }) => {
-					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
-					await mkdir(worktreePath, { recursive: true })
-					return worktreePath
-				},
+				presetDir: credentialedPresetDir,
+				worktreeManager: async () => root,
 				prompt: ({ item, runId, phase }) => JSON.stringify({
 					itemId: item.id,
 					issueNumber: Number(item.itemId),
@@ -5941,13 +5921,14 @@ process.exitCode = 0
 				name: "407-row2-review-allow-chain",
 				preset: "gh-issue-pr-iteration",
 				repository: "mouriya-s-lab/coder-loop",
+				metadata: { presetPath: credentialedPresetDir },
 			}))).chain)
 			const chainId = numberValue(chain.id)
 			const parent = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
 				itemId: "407200",
 				repoCwd: REPO_ROOT,
-				preset: "gh-issue-pr-iteration",
+				presetPath: credentialedPresetDir,
 			}))).item)
 			const parentId = numberValue(parent.id)
 
@@ -5970,7 +5951,7 @@ process.exitCode = 0
 				chainId,
 				itemId: "407201",
 				repoCwd: REPO_ROOT,
-				preset: "gh-issue-pr-iteration",
+				presetPath: credentialedPresetDir,
 				agentCredential: credential,
 			}))
 			expect(created.ok).toBe(true)
@@ -5998,7 +5979,7 @@ process.exitCode = 0
 			if (allow !== undefined && allow.kind === "audit" && allow.type === "item.add.rights_admission") {
 				expect(allow.payload.claimedPhase).toBe("review")
 				expect(allow.subject).toMatchObject({ kind: "agent" })
-				expect(allow.payload.presetName).toBe("gh-issue-pr-iteration")
+				expect(allow.payload.presetName).toBe(credentialedPresetDir)
 			}
 		} finally {
 			await daemon.stop()
@@ -6082,11 +6063,7 @@ process.exitCode = 0
 				intervalMs: 20,
 				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
 				presetDir: smokePresetDir,
-				worktreeManager: async ({ chain, repoCwd }) => {
-					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
-					await mkdir(worktreePath, { recursive: true })
-					return worktreePath
-				},
+				worktreeManager: async () => root,
 				prompt: ({ item, runId, phase }) => JSON.stringify({
 					itemId: item.id,
 					issueNumber: Number(item.itemId),
@@ -6181,6 +6158,7 @@ process.exitCode = 0
 	test("socket item.add review credential rejects illegal priority with the same invalid_request shape as item.update (#407 row 5)", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-407-row5-priority-validation`)
 		const loopDataRoot = resolve(root, "ld")
+		const credentialedPresetDir = await writeCredentialedFixturePreset(root)
 		const capturePath = resolve(root, "captured-credential.txt")
 		const fakeRunner = resolve(root, "fake-runner.ts")
 		const eventLog = resolve(root, "events.jsonl")
@@ -6188,7 +6166,6 @@ process.exitCode = 0
 		await writeFile(
 			fakeRunner,
 			`import { writeFile, appendFile } from "node:fs/promises"
-const { openSqliteStateStore } = await import(${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))})
 
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
@@ -6198,11 +6175,7 @@ if (input.phase === "review") {
 	await writeFile(${JSON.stringify(capturePath)}, process.env.CODER_LOOP_RUN_CRED ?? "")
 	await new Promise((r) => setTimeout(r, input.sleepMs ?? 4000))
 } else {
-	if (typeof input.writeStatus === "string" && input.itemId > 0 && process.env.CODER_LOOP_DATA_DIR) {
-		const store = openSqliteStateStore({ loopDataRoot: process.env.CODER_LOOP_DATA_DIR })
-		store.updateItem(input.itemId, { status: input.writeStatus, updatedAt: Math.floor(Date.now() / 1000) })
-		store.close()
-	}
+	${FAKE_RUNNER_STATUS_WRITE_SNIPPET}
 	await new Promise((r) => setTimeout(r, 5))
 }
 process.exitCode = 0
@@ -6216,12 +6189,8 @@ process.exitCode = 0
 				enabled: true,
 				intervalMs: 20,
 				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
-				presetDir: PRESET_DIR,
-				worktreeManager: async ({ chain, repoCwd }) => {
-					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
-					await mkdir(worktreePath, { recursive: true })
-					return worktreePath
-				},
+				presetDir: credentialedPresetDir,
+				worktreeManager: async () => root,
 				prompt: ({ item, runId, phase }) => JSON.stringify({
 					itemId: item.id,
 					issueNumber: Number(item.itemId),
@@ -6240,13 +6209,14 @@ process.exitCode = 0
 				name: "407-row5-priority-validation-chain",
 				preset: "gh-issue-pr-iteration",
 				repository: "mouriya-s-lab/coder-loop",
+				metadata: { presetPath: credentialedPresetDir },
 			}))).chain)
 			const chainId = numberValue(chain.id)
 			expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
 				itemId: "407500",
 				repoCwd: REPO_ROOT,
-				preset: "gh-issue-pr-iteration",
+				presetPath: credentialedPresetDir,
 			})))
 
 			// Wait for the review phase credential to be captured.
@@ -6267,7 +6237,7 @@ process.exitCode = 0
 				chainId,
 				itemId: "407501",
 				repoCwd: REPO_ROOT,
-				preset: "gh-issue-pr-iteration",
+				presetPath: credentialedPresetDir,
 				agentCredential: credential,
 				priority: "super-critical",
 			}))
@@ -6334,11 +6304,7 @@ process.exitCode = 0
 				intervalMs: 20,
 				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
 				presetDir: PRESET_DIR,
-				worktreeManager: async ({ chain, repoCwd }) => {
-					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
-					await mkdir(worktreePath, { recursive: true })
-					return worktreePath
-				},
+				worktreeManager: async () => root,
 				prompt: ({ item, runId }) => JSON.stringify({ itemId: item.id, issueNumber: Number(item.itemId), runId, eventLog, sleepMs: 5_500 }),
 				chainCompleteTriggerForChain: () => null,
 			},
@@ -6431,6 +6397,7 @@ process.exitCode = 0
 	test("daemon allows item.reorder for review agent and denies it for iteration agent (#409 row 2)", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-409-row2-per-phase`)
 		const loopDataRoot = resolve(root, "ld")
+		const credentialedPresetDir = await writeCredentialedFixturePreset(root)
 		const iterationCapture = resolve(root, "iteration-credential.txt")
 		const reviewCapture = resolve(root, "review-credential.txt")
 		const fakeRunner = resolve(root, "fake-runner.ts")
@@ -6450,7 +6417,6 @@ process.exitCode = 0
 		await writeFile(
 			fakeRunner,
 			`import { writeFile, appendFile } from "node:fs/promises"
-const { openSqliteStateStore } = await import(${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))})
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
 const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
@@ -6460,11 +6426,7 @@ if (input.phase === "review") {
 	await new Promise((r) => setTimeout(r, input.sleepMs ?? 5_500))
 } else {
 	await writeFile(${JSON.stringify(iterationCapture)}, process.env.CODER_LOOP_RUN_CRED ?? "")
-	if (typeof input.writeStatus === "string" && input.itemId > 0 && process.env.CODER_LOOP_DATA_DIR) {
-		const store = openSqliteStateStore({ loopDataRoot: process.env.CODER_LOOP_DATA_DIR })
-		store.updateItem(input.itemId, { status: input.writeStatus, updatedAt: Math.floor(Date.now() / 1000) })
-		store.close()
-	}
+	${FAKE_RUNNER_STATUS_WRITE_SNIPPET}
 	await new Promise((r) => setTimeout(r, input.iterationSleepMs ?? 3_000))
 }
 process.exitCode = 0
@@ -6477,12 +6439,8 @@ process.exitCode = 0
 				enabled: true,
 				intervalMs: 20,
 				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
-				presetDir: PRESET_DIR,
-				worktreeManager: async ({ chain, repoCwd }) => {
-					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
-					await mkdir(worktreePath, { recursive: true })
-					return worktreePath
-				},
+				presetDir: credentialedPresetDir,
+				worktreeManager: async () => root,
 				prompt: ({ item, runId, phase }) => JSON.stringify({
 					itemId: item.id,
 					issueNumber: Number(item.itemId),
@@ -6505,20 +6463,21 @@ process.exitCode = 0
 				name: "409-row2-per-phase-chain",
 				preset: "gh-issue-pr-iteration",
 				repository: "mouriya-s-lab/coder-loop",
+				metadata: { presetPath: credentialedPresetDir },
 			}))).chain)
 			const chainId = numberValue(chain.id)
 			expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
 				itemId: "409200",
 				repoCwd: REPO_ROOT,
-				preset: "gh-issue-pr-iteration",
+				presetPath: credentialedPresetDir,
 			})))
 			// Add a second item so reorder is meaningful (position 1 vs 0).
 			expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
 				itemId: "409201",
 				repoCwd: REPO_ROOT,
-				preset: "gh-issue-pr-iteration",
+				presetPath: credentialedPresetDir,
 			})))
 
 			// Capture the iteration credential first.
@@ -6623,6 +6582,7 @@ process.exitCode = 0
 	test("per-phase agent path emits deny event when item is not found (#409 retry audit edge)", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-409-per-phase-audit-edge`)
 		const loopDataRoot = resolve(root, "ld")
+		const credentialedPresetDir = await writeCredentialedFixturePreset(root)
 		const reviewCapture = resolve(root, "review-credential.txt")
 		const iterationCapture = resolve(root, "iteration-credential.txt")
 		const fakeRunner = resolve(root, "fake-runner.ts")
@@ -6634,7 +6594,6 @@ process.exitCode = 0
 		await writeFile(
 			fakeRunner,
 			`import { writeFile, appendFile } from "node:fs/promises"
-const { openSqliteStateStore } = await import(${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))})
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
 const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
@@ -6644,11 +6603,7 @@ if (input.phase === "review") {
 	await new Promise((r) => setTimeout(r, input.sleepMs ?? 5_500))
 } else {
 	await writeFile(${JSON.stringify(iterationCapture)}, process.env.CODER_LOOP_RUN_CRED ?? "")
-	if (typeof input.writeStatus === "string" && input.itemId > 0 && process.env.CODER_LOOP_DATA_DIR) {
-		const store = openSqliteStateStore({ loopDataRoot: process.env.CODER_LOOP_DATA_DIR })
-		store.updateItem(input.itemId, { status: input.writeStatus, updatedAt: Math.floor(Date.now() / 1000) })
-		store.close()
-	}
+	${FAKE_RUNNER_STATUS_WRITE_SNIPPET}
 	await new Promise((r) => setTimeout(r, 5))
 }
 process.exitCode = 0
@@ -6661,12 +6616,8 @@ process.exitCode = 0
 				enabled: true,
 				intervalMs: 20,
 				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
-				presetDir: PRESET_DIR,
-				worktreeManager: async ({ chain, repoCwd }) => {
-					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
-					await mkdir(worktreePath, { recursive: true })
-					return worktreePath
-				},
+				presetDir: credentialedPresetDir,
+				worktreeManager: async () => root,
 				prompt: ({ item, runId, phase }) => JSON.stringify({
 					itemId: item.id,
 					issueNumber: Number(item.itemId),
@@ -6685,13 +6636,14 @@ process.exitCode = 0
 				name: "409-audit-edge-chain",
 				preset: "gh-issue-pr-iteration",
 				repository: "mouriya-s-lab/coder-loop",
+				metadata: { presetPath: credentialedPresetDir },
 			}))).chain)
 			const chainId = numberValue(chain.id)
 			expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
 				itemId: "409300",
 				repoCwd: REPO_ROOT,
-				preset: "gh-issue-pr-iteration",
+				presetPath: credentialedPresetDir,
 			})))
 
 			// Wait until the review credential is captured — only review-phase has `item.reorder`
@@ -6777,11 +6729,7 @@ process.exitCode = 0
 				intervalMs: 20,
 				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
 				presetDir: PRESET_DIR,
-				worktreeManager: async ({ chain, repoCwd }) => {
-					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
-					await mkdir(worktreePath, { recursive: true })
-					return worktreePath
-				},
+				worktreeManager: async () => root,
 				prompt: ({ item, runId }) => JSON.stringify({ itemId: item.id, issueNumber: Number(item.itemId), runId, eventLog, sleepMs: 3_500 }),
 				chainCompleteTriggerForChain: () => null,
 			},
@@ -7153,6 +7101,7 @@ process.exitCode = 0
 	test("daemon allows review-phase agent to write declared passthrough fields branch + pr + extra blocker keys (#410 row 2)", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-410-row2-allow`)
 		const loopDataRoot = resolve(root, "ld")
+		const credentialedPresetDir = await writeCredentialedFixturePreset(root)
 		const iterationCapture = resolve(root, "iteration-credential.txt")
 		const reviewCapture = resolve(root, "review-credential.txt")
 		const fakeRunner = resolve(root, "fake-runner.ts")
@@ -7161,7 +7110,6 @@ process.exitCode = 0
 		await writeFile(
 			fakeRunner,
 			`import { writeFile, appendFile } from "node:fs/promises"
-const { openSqliteStateStore } = await import(${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))})
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
 const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
@@ -7171,11 +7119,7 @@ if (input.phase === "review") {
 	await new Promise((r) => setTimeout(r, input.sleepMs ?? 5_500))
 } else {
 	await writeFile(${JSON.stringify(iterationCapture)}, process.env.CODER_LOOP_RUN_CRED ?? "")
-	if (typeof input.writeStatus === "string" && input.itemId > 0 && process.env.CODER_LOOP_DATA_DIR) {
-		const store = openSqliteStateStore({ loopDataRoot: process.env.CODER_LOOP_DATA_DIR })
-		store.updateItem(input.itemId, { status: input.writeStatus, updatedAt: Math.floor(Date.now() / 1000) })
-		store.close()
-	}
+	${FAKE_RUNNER_STATUS_WRITE_SNIPPET}
 	await new Promise((r) => setTimeout(r, 5))
 }
 process.exitCode = 0
@@ -7188,12 +7132,8 @@ process.exitCode = 0
 				enabled: true,
 				intervalMs: 20,
 				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
-				presetDir: PRESET_DIR,
-				worktreeManager: async ({ chain, repoCwd }) => {
-					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
-					await mkdir(worktreePath, { recursive: true })
-					return worktreePath
-				},
+				presetDir: credentialedPresetDir,
+				worktreeManager: async () => root,
 				prompt: ({ item, runId, phase }) => JSON.stringify({
 					itemId: item.id,
 					issueNumber: Number(item.itemId),
@@ -7212,13 +7152,14 @@ process.exitCode = 0
 				name: "410-row2-allow-chain",
 				preset: "gh-issue-pr-iteration",
 				repository: "mouriya-s-lab/coder-loop",
+				metadata: { presetPath: credentialedPresetDir },
 			}))).chain)
 			const chainId = numberValue(chain.id)
 			const added = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
 				itemId: "410200",
 				repoCwd: REPO_ROOT,
-				preset: "gh-issue-pr-iteration",
+				presetPath: credentialedPresetDir,
 			}))).item)
 			const itemId = numberValue(added.id)
 			expect(itemId).toBeGreaterThan(0)
@@ -7299,6 +7240,7 @@ process.exitCode = 0
 	test("daemon denies review-phase agent on control-plane fields and undeclared passthrough (#410 row 1)", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-410-row1-deny`)
 		const loopDataRoot = resolve(root, "ld")
+		const credentialedPresetDir = await writeCredentialedFixturePreset(root)
 		const iterationCapture = resolve(root, "iteration-credential.txt")
 		const reviewCapture = resolve(root, "review-credential.txt")
 		const fakeRunner = resolve(root, "fake-runner.ts")
@@ -7307,7 +7249,6 @@ process.exitCode = 0
 		await writeFile(
 			fakeRunner,
 			`import { writeFile, appendFile } from "node:fs/promises"
-const { openSqliteStateStore } = await import(${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))})
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
 const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
@@ -7317,11 +7258,7 @@ if (input.phase === "review") {
 	await new Promise((r) => setTimeout(r, input.sleepMs ?? 6_000))
 } else {
 	await writeFile(${JSON.stringify(iterationCapture)}, process.env.CODER_LOOP_RUN_CRED ?? "")
-	if (typeof input.writeStatus === "string" && input.itemId > 0 && process.env.CODER_LOOP_DATA_DIR) {
-		const store = openSqliteStateStore({ loopDataRoot: process.env.CODER_LOOP_DATA_DIR })
-		store.updateItem(input.itemId, { status: input.writeStatus, updatedAt: Math.floor(Date.now() / 1000) })
-		store.close()
-	}
+	${FAKE_RUNNER_STATUS_WRITE_SNIPPET}
 	await new Promise((r) => setTimeout(r, 5))
 }
 process.exitCode = 0
@@ -7334,12 +7271,8 @@ process.exitCode = 0
 				enabled: true,
 				intervalMs: 20,
 				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
-				presetDir: PRESET_DIR,
-				worktreeManager: async ({ chain, repoCwd }) => {
-					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
-					await mkdir(worktreePath, { recursive: true })
-					return worktreePath
-				},
+				presetDir: credentialedPresetDir,
+				worktreeManager: async () => root,
 				prompt: ({ item, runId, phase }) => JSON.stringify({
 					itemId: item.id,
 					issueNumber: Number(item.itemId),
@@ -7358,13 +7291,14 @@ process.exitCode = 0
 				name: "410-row1-deny-chain",
 				preset: "gh-issue-pr-iteration",
 				repository: "mouriya-s-lab/coder-loop",
+				metadata: { presetPath: credentialedPresetDir },
 			}))).chain)
 			const chainId = numberValue(chain.id)
 			const added = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
 				itemId: "410100",
 				repoCwd: REPO_ROOT,
-				preset: "gh-issue-pr-iteration",
+				presetPath: credentialedPresetDir,
 			}))).item)
 			const itemId = numberValue(added.id)
 
@@ -7763,6 +7697,7 @@ type PhaseAdvancementFixture = Fixture & {
 async function startPhaseAdvancementFixture(name: string): Promise<PhaseAdvancementFixture> {
 	const root = resolve(TEST_ROOT, `${++nextFixtureId}-${name}`)
 	const loopDataRoot = resolve(root, "ld")
+	const credentialedPresetDir = await writeCredentialedFixturePreset(root)
 	const eventLog = resolve(root, "events.jsonl")
 	const fakeRunner = resolve(root, "phase-aware-runner.ts")
 	await mkdir(root, { recursive: true })
@@ -7789,11 +7724,7 @@ process.exitCode = 0
 	)
 
 	const schedulerEvents: SchedulerEvent[] = []
-	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
-		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
-		await mkdir(worktreePath, { recursive: true })
-		return worktreePath
-	}
+	const worktreeManager: SchedulerWorktreeManager = async () => root
 
 	const fakeRunnerSelection: SchedulerOptions["runner"] = {
 		kind: "claude",
@@ -7810,7 +7741,7 @@ process.exitCode = 0
 			enabled: true,
 			intervalMs: 20,
 			runner: fakeRunnerSelection,
-			presetDir: PRESET_DIR,
+			presetDir: credentialedPresetDir,
 			worktreeManager,
 			prompt: ({ item, runId, phase }) => JSON.stringify({
 				itemId: item.id,
@@ -7835,6 +7766,7 @@ process.exitCode = 0
 		pidFile: snapshot.pidFile,
 		eventLog,
 		schedulerEvents,
+		defaultItemPresetPath: credentialedPresetDir,
 		fakePhaseAwareRunner: fakeRunner,
 	}
 }
@@ -7991,15 +7923,13 @@ process.exitCode = 0
 			runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
 			presetForChain: () => loadedPreset,
 			presetForItem: () => loadedPreset,
-			worktreeManager: async ({ chain, repoCwd }) => {
+			worktreeManager: async () => {
 				if (gateFirstWorktree) {
 					gateFirstWorktree = false
 					tickEntered.resolve()
 					await releaseTick.promise
 				}
-				const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
-				await mkdir(worktreePath, { recursive: true })
-				return worktreePath
+				return root
 			},
 			prompt: () => "queue-unblock scheduler serialization fixture",
 			chainCompleteTriggerForChain: () => null,
@@ -8041,6 +7971,7 @@ type Fixture = {
 	pidFile: string
 	eventLog: string
 	schedulerEvents: SchedulerEvent[]
+	defaultItemPresetPath?: string | null
 }
 
 type FixtureOptions = {
@@ -8054,7 +7985,7 @@ type FixtureOptions = {
 	schedulerRunnerKind?: AgentRunnerKind
 	schedulerBinaryIsFakeRunner?: boolean
 	schedulerConfig?: Partial<CoderLoopDaemonSchedulerConfig>
-	beforeStart?: (input: { root: string; loopDataRoot: string; eventLog: string; fakeRunner: string }) => Promise<void> | void
+	beforeStart?: (input: { root: string; loopDataRoot: string; eventLog: string; fakeRunner: string; defaultItemPresetPath: string | null }) => Promise<void> | void
 }
 
 // #456: the legacy chain-drain auto-fire suppressor helper retired with the path itself. The
@@ -8070,14 +8001,17 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 	await mkdir(root, { recursive: true })
 	await mkdir(loopDataRoot, { recursive: true })
 	await writeFakeRunner(fakeRunner)
-	await options.beforeStart?.({ root, loopDataRoot, eventLog, fakeRunner })
+	const schedulerEnabled = options.schedulerEnabled ?? true
+	const defaultItemPresetPath = schedulerEnabled && options.schedulerPresetDir !== null
+		? options.schedulerPresetDir ?? await writeCredentialedFixturePreset(root)
+		: null
+	await options.beforeStart?.({ root, loopDataRoot, eventLog, fakeRunner, defaultItemPresetPath })
 
 	const schedulerEvents: SchedulerEvent[] = []
 	const configuredOnEvent = options.schedulerConfig?.onEvent
 	const worktreeManager: SchedulerWorktreeManager = options.worktreeManager ?? (options.realWorktreeManager ? createGitWorktreeManager({ loopDataRoot }) : async ({ chain, repoCwd }) => {
-		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
-		await mkdir(worktreePath, { recursive: true })
-		return worktreePath
+		await mkdir(schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot }), { recursive: true })
+		return root
 	})
 
 	const scheduler: SchedulerOptions["runner"] = {
@@ -8092,18 +8026,18 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 		shutdownGraceMs: 100,
 		scheduler: {
 			...(options.schedulerConfig ?? {}),
-			enabled: options.schedulerEnabled ?? true,
+			enabled: schedulerEnabled,
 			intervalMs: options.schedulerIntervalMs ?? 20,
 			runner: scheduler,
-			...(options.schedulerPresetDir === null ? {} : { presetDir: options.schedulerPresetDir ?? PRESET_DIR }),
+			...(options.schedulerPresetDir === null ? {} : { presetDir: defaultItemPresetPath ?? PRESET_DIR }),
 			worktreeManager,
-			prompt: ({ item, runId, phase }) => {
+			prompt: ({ chain, item, runId, phase }) => {
 				const extra = itemExtraToJsonObject(item.extra)
 				const payload: BoundaryRecord = {
 					itemId: item.id,
 					issueNumber: Number(item.itemId),
 					runId,
-					eventLog,
+					eventLog: resolve(resolveChainRuntimePaths(chain.name, { loopDataRoot }).runsDir, "events.jsonl"),
 					sleepMs: typeof extra.sleepMs === "number" ? extra.sleepMs : 5,
 					exitCode: typeof extra.exitCode === "number" ? extra.exitCode : 0,
 					writeStatus: daemonFakeRunnerWriteStatus(phase, extra),
@@ -8131,7 +8065,7 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 		},
 	})
 	const snapshot = daemon.snapshot()
-	return { daemon, loopDataRoot, socketPath: snapshot.socketPath, pidFile: snapshot.pidFile, eventLog, schedulerEvents }
+	return { daemon, loopDataRoot, socketPath: snapshot.socketPath, pidFile: snapshot.pidFile, eventLog, schedulerEvents, defaultItemPresetPath }
 }
 
 async function request(fixture: Fixture, command: string, args: JsonObject = {}): Promise<DaemonResponse> {
@@ -8140,14 +8074,20 @@ async function request(fixture: Fixture, command: string, args: JsonObject = {})
 	// preset-validation path (the vast majority — they exercise scheduling / state / observability,
 	// not preset wiring) would need a noisy boilerplate change. The shim only fires when the caller
 	// has not passed preset/presetPath, so preset-validation tests still get their explicit input.
-	const augmented = injectTestPresetDefault(command, args)
+	const augmented = injectTestPresetDefault(command, args, fixture.defaultItemPresetPath ?? null)
 	return await sendDaemonRequest(fixture.socketPath, { id: `${command}-${Date.now()}`, command, args: augmented })
 }
 
-function injectTestPresetDefault(command: string, args: JsonObject): JsonObject {
+function injectTestPresetDefault(command: string, args: JsonObject, defaultItemPresetPath: string | null): JsonObject {
+	if (command === "chain.create" && defaultItemPresetPath !== null) {
+		const metadata = typeof args.metadata === "object" && args.metadata !== null && !Array.isArray(args.metadata)
+			? args.metadata
+			: {}
+		return { ...args, metadata: { ...metadata, presetPath: defaultItemPresetPath } }
+	}
 	if (command === "item.add") {
 		if (args.preset === undefined && args.presetPath === undefined) {
-			return { ...args, preset: "gh-issue-pr-iteration" }
+			return defaultItemPresetPath === null ? { ...args, preset: "gh-issue-pr-iteration" } : { ...args, presetPath: defaultItemPresetPath }
 		}
 		return args
 	}
@@ -8156,7 +8096,7 @@ function injectTestPresetDefault(command: string, args: JsonObject): JsonObject 
 			if (typeof rawItem !== "object" || rawItem === null || Array.isArray(rawItem)) return rawItem
 			const itemObj: JsonObject = rawItem
 			if (itemObj.preset === undefined && itemObj.presetPath === undefined) {
-				return { ...itemObj, preset: "gh-issue-pr-iteration" }
+				return defaultItemPresetPath === null ? { ...itemObj, preset: "gh-issue-pr-iteration" } : { ...itemObj, presetPath: defaultItemPresetPath }
 			}
 			return itemObj
 		})

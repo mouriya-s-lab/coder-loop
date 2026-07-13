@@ -1,8 +1,8 @@
 import { afterAll, expect, test } from "bun:test"
-import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { chmod, cp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
-import { daemonRequest, sendDaemonRequest } from "./daemon"
+import { daemonRequest, sendDaemonRequest, startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
 import {
 	createGitWorktreeManager,
 	createSchedulerState,
@@ -28,6 +28,49 @@ const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-int
 function runtimeStatus(value: string) {
 	return engineLifecycleAdmittedItemStatus(parseInternalStatus(value, "test.status"), "test")
 }
+
+async function startCredentialedSchedulerRuntime(root: string, loopDataRoot: string): Promise<{
+	daemon: CoderLoopDaemon
+	loadedPreset: Awaited<typeof LOADED_PRESET>
+	presetDir: string
+}> {
+	const presetDir = resolve(root, "preset")
+	await cp(PRESET_DIR, presetDir, { recursive: true })
+	const presetTomlPath = resolve(presetDir, "preset.toml")
+	const presetToml = await readFile(presetTomlPath, "utf-8")
+	const iterationHeader = 'roles  = ["common", "quality", "iter"]'
+	const exits = ["changes_requested", "blocked", "moot", "done", "exhausted"]
+		.map((status) => `\n  [[phases.exits]]\n  status = "${status}"\n  when = "scheduler integration fixture status"\n`)
+		.join("")
+	await writeFile(presetTomlPath, presetToml.replace(iterationHeader, iterationHeader + exits))
+	const loadedPreset = await loadPreset(presetDir).then((preset) => ({ presetDir, preset }))
+	const daemon = await startCoderLoopDaemon({ loopDataRoot, scheduler: { enabled: false } })
+	return { daemon, loadedPreset, presetDir }
+}
+
+const CREDENTIALED_STATUS_WRITE_SNIPPET = `if (typeof status === "string" && typeof input.itemId === "number") {
+	const credential = process.env.CODER_LOOP_RUN_CRED
+	const loopDataRoot = process.env.CODER_LOOP_DATA_DIR
+	if (typeof credential !== "string" || credential.length === 0) throw new Error("scheduler integration runner requires CODER_LOOP_RUN_CRED")
+	if (typeof loopDataRoot !== "string" || loopDataRoot.length === 0) throw new Error("scheduler integration runner requires CODER_LOOP_DATA_DIR")
+	const { createConnection } = await import("node:net")
+	const { randomUUID } = await import("node:crypto")
+	const response = await new Promise((resolveSend, rejectSend) => {
+		const socket = createConnection(loopDataRoot + "/daemon.sock")
+		let buffer = ""
+		socket.setEncoding("utf-8")
+		socket.on("connect", () => socket.write(JSON.stringify({ id: randomUUID(), command: "item.update", args: { itemId: input.itemId, status, agentCredential: credential } }) + "\\n"))
+		socket.on("data", (chunk) => {
+			buffer += chunk
+			const newline = buffer.indexOf("\\n")
+			if (newline === -1) return
+			socket.destroy()
+			resolveSend(JSON.parse(buffer.slice(0, newline)))
+		})
+		socket.on("error", rejectSend)
+	})
+	if (response.ok !== true) throw new Error("credentialed scheduler integration status write failed: " + JSON.stringify(response))
+}`
 
 afterAll(async () => {
 	await rm(TEST_ROOT, { recursive: true, force: true })
@@ -161,11 +204,7 @@ await Bun.write(${JSON.stringify(promptCapture)}, prompt)
 			extra: storedItemExtra({}),
 		})
 		const state = createSchedulerState()
-		const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
-			const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
-			await mkdir(worktreePath, { recursive: true })
-			return worktreePath
-		}
+		const worktreeManager: SchedulerWorktreeManager = async () => root
 		const options: SchedulerOptions = {
 			store,
 			state,
@@ -284,22 +323,17 @@ test("completed chain removes its real git worktree registration and local direc
 	await initGitTarget(target)
 	await writeFile(
 		fakeRunner,
-		`import { openSqliteStateStore } from ${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))}
-import { parseInternalStatus } from ${JSON.stringify(resolve(REPO_ROOT, "src/runtime-data.ts"))}
-
+		`
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
 const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
-const loopDataRoot = process.env.CODER_LOOP_DATA_DIR
-if (typeof loopDataRoot === "string" && typeof input.itemId === "number") {
-	const store = openSqliteStateStore({ loopDataRoot })
-	store.updateItem(input.itemId, { status: parseInternalStatus("done", "fixture.status"), updatedAt: Math.floor(Date.now() / 1000) })
-	store.close()
-}
+const status = "done"
+${CREDENTIALED_STATUS_WRITE_SNIPPET}
 console.log("done:" + input.itemId)
 `,
 	)
 
+	const runtime = await startCredentialedSchedulerRuntime(root, loopDataRoot)
 	const store = openSqliteStateStore({ loopDataRoot })
 	try {
 		const chain = store.createChain({
@@ -308,13 +342,14 @@ console.log("done:" + input.itemId)
 			repository: "mouriya-s-lab/coder-loop",
 			baseBranch: "main",
 			status: "active",
-			metadata: storedChainMetadata({}),
+			metadata: storedChainMetadata({ presetPath: runtime.presetDir }),
 		})
 		const item = store.createItem({
 			chainId: chain.id,
 			itemId: "351002",
 			repoCwd: target,
 			status: runtimeStatus("queued"),
+			presetPath: runtime.presetDir,
 			attempts: 0,
 			extra: storedItemExtra({}),
 		})
@@ -322,12 +357,12 @@ console.log("done:" + input.itemId)
 		// `reviewOnEmptyLockPathForChainName` to suppress the legacy auto-fired phase. The
 		// review-on-empty path is retired, so the suppressor is no longer needed.
 
-		const state = createSchedulerState()
+		const state = runtime.daemon.schedulerExecutionState()
 		const schedulerEvents: SchedulerEvent[] = []
 		const options: SchedulerOptions = {
 			store,
 			state,
-			presetForChain: () => LOADED_PRESET,
+			presetForChain: () => runtime.loadedPreset,
 			runner: {
 				kind: "claude",
 				source: "iteration-default",
@@ -337,6 +372,7 @@ console.log("done:" + input.itemId)
 			},
 			worktreeManager: createGitWorktreeManager({ loopDataRoot }),
 			loopDataRootOptions: { loopDataRoot },
+			runCredentials: runtime.daemon.buildSchedulerRunCredentialIssuer(),
 			runIdFactory: ({ item: selected }) => `run-complete-cleanup-${selected.id}`,
 			prompt: ({ item: selected }) => JSON.stringify({ itemId: selected.id, issueNumber: Number(selected.itemId) }),
 			onEvent: (event) => {
@@ -357,6 +393,7 @@ console.log("done:" + input.itemId)
 		expect(await pathExists(worktreePath)).toBe(false)
 		expect(gitOutput(target, ["worktree", "list", "--porcelain"])).not.toContain(worktreePath)
 	} finally {
+		await runtime.daemon.stop()
 		store.close()
 	}
 })
@@ -368,22 +405,17 @@ test("counts one retry cycle in the declared attempt unit", async () => {
 	await mkdir(loopDataRoot, { recursive: true })
 	await writeFile(
 		fakeRunner,
-		`import { openSqliteStateStore } from ${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))}
-
+		`
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
 const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
 const status = input.phase === "review" ? "changes_requested" : null
-const loopDataRoot = process.env.CODER_LOOP_DATA_DIR
-if (typeof status === "string" && typeof loopDataRoot === "string" && typeof input.itemId === "number") {
-	const store = openSqliteStateStore({ loopDataRoot })
-	store.updateItem(input.itemId, { status, updatedAt: Math.floor(Date.now() / 1000) })
-	store.close()
-}
+${CREDENTIALED_STATUS_WRITE_SNIPPET}
 console.log(input.phase + ":" + status)
 `,
 	)
 
+	const runtime = await startCredentialedSchedulerRuntime(root, loopDataRoot)
 	const store = openSqliteStateStore({ loopDataRoot })
 	try {
 		const chain = store.createChain({
@@ -392,17 +424,18 @@ console.log(input.phase + ":" + status)
 			repository: "mouriya-s-lab/coder-loop",
 			baseBranch: "main",
 			status: "active",
-			metadata: storedChainMetadata({}),
+			metadata: storedChainMetadata({ presetPath: runtime.presetDir }),
 		})
 		const item = store.createItem({
 			chainId: chain.id,
 			itemId: "346001",
 			repoCwd: REPO_ROOT,
 			status: runtimeStatus("queued"),
+			presetPath: runtime.presetDir,
 			attempts: 0,
 			extra: storedItemExtra({}),
 		})
-		const state = createSchedulerState()
+		const state = runtime.daemon.schedulerExecutionState()
 		const schedulerEvents: SchedulerEvent[] = []
 		const worktreeManager: SchedulerWorktreeManager = async ({ chain: selectedChain, repoCwd }) => {
 			const worktreePath = schedulerSlotWorktreePath(selectedChain, repoCwd, { loopDataRoot })
@@ -413,7 +446,7 @@ console.log(input.phase + ":" + status)
 		const options: SchedulerOptions = {
 			store,
 			state,
-			presetForChain: () => LOADED_PRESET,
+			presetForChain: () => runtime.loadedPreset,
 			runner: {
 				kind: "claude",
 				source: "iteration-default",
@@ -423,6 +456,7 @@ console.log(input.phase + ":" + status)
 			},
 			worktreeManager,
 			loopDataRootOptions: { loopDataRoot },
+			runCredentials: runtime.daemon.buildSchedulerRunCredentialIssuer(),
 			runIdFactory: ({ phase }) => `run-review-retry-${++runSequence}-${phase}`,
 			prompt: ({ item: selected, runId, phase }) => JSON.stringify({
 				itemId: selected.id,
@@ -462,6 +496,7 @@ console.log(input.phase + ":" + status)
 			)
 			.map((event) => event.phase)).toEqual(["iteration", "review", "iteration"])
 	} finally {
+		await runtime.daemon.stop()
 		store.close()
 	}
 })
