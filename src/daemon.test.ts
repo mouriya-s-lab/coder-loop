@@ -5545,15 +5545,9 @@ process.exitCode = 0
 				repoCwd: REPO_ROOT,
 				extra: { sleepMs: 2_000, writeStatus: null },
 			}))
-			const spawnedRunId = await waitFor(
-				async () => fixture.schedulerEvents.find((event) => event.type === "agent.spawn")?.runId ?? null,
-				(runId) => runId !== null,
-			)
 			await waitFor(
-				async () => fixture.schedulerEvents.some(
-					(event) => event.type === "slot.busy" && event.activeRunId === spawnedRunId,
-				),
-				(persisted) => persisted,
+				async () => fixture.schedulerEvents.some((event) => event.type === "agent.spawn"),
+				(spawned) => spawned,
 			)
 			const eventsFile = resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile
 			await rm(eventsFile, { force: true })

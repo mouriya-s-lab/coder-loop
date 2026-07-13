@@ -520,7 +520,11 @@ export const PresetCompileProjectionBoundary = arkType({
 		unblockable: "string[]", exhausted: "string", retry: "string|null",
 	},
 	stateGraph: {
-		nodes: arkType({ identity: "string", status: "string", classification: "string" }).array(),
+		nodes: arkType({
+			identity: "string",
+			status: "string",
+			classification: arkType.or(arkType.unit("continuable"), arkType.unit("terminal")),
+		}).array(),
 		edges: arkType.or(
 			{ kind: arkType.unit("engine-entry"), to: "string" },
 			{ kind: arkType.unit("engine-exhausted"), to: "string" },
@@ -540,7 +544,11 @@ export const PresetCompileProjectionBoundary = arkType({
 			"null",
 		),
 		runner: arkType.or(AgentRunnerKindBoundary, "null"), model: "string|null",
-		variables: arkType({ key: "string", type: arkType.unit("string"), sourceKind: "string" }).array(),
+		variables: arkType({
+			key: "string",
+			type: arkType.unit("string"),
+			sourceKind: arkType.or(arkType.unit("item"), arkType.unit("chain"), arkType.unit("runtime")),
+		}).array(),
 		toolRequirements: "string[]",
 		rights: { createItems: "boolean", writableFields: "string[]", privilegedOps: "string[]" },
 		taskTree: {
@@ -759,6 +767,10 @@ class PresetCompileFailure extends Error {
 		super(diagnostics.map((diagnostic) => diagnostic.message).join("\n"))
 		this.name = "PresetCompileFailure"
 	}
+}
+
+function missingPresetSource(message: string): PresetCompileFailure {
+	return new PresetCompileFailure([{ verdict: "error", rule: "preset-source", message }])
 }
 
 class PresetStructureError extends Error {
@@ -2754,7 +2766,7 @@ export function projectCompiledPreset(model: CompiledTaskModel, findings: readon
 	const statusNodes = [...model.statuses.continuable, ...model.statuses.terminal].map((status) => ({
 		identity: `status:${status}`,
 		status,
-		classification: model.statuses.continuable.includes(status) ? "continuable" : "terminal",
+		classification: model.statuses.continuable.includes(status) ? "continuable" as const : "terminal" as const,
 	}))
 	const phaseEdges = model.phases.flatMap((phase) => phase.exits
 		.filter((exit): exit is PresetPhaseExitItemStatus => exit.kind === "item-status")
@@ -4728,7 +4740,9 @@ async function readPresetPhasePrompt(phase: PresetPhase, presetDir: string): Pro
 		const raw = await readFile(phase.prompt, "utf-8")
 		return substitutePresetRootToken(raw, presetDir)
 	} catch (error) {
-		if (isNodeError(error) && error.code === "ENOENT") fail(`Missing preset phase "${phase.name}" prompt file: ${phase.prompt}`)
+		if (isNodeError(error) && error.code === "ENOENT") {
+			throw missingPresetSource(`Missing preset phase "${phase.name}" prompt file: ${phase.prompt}`)
+		}
 		throw error
 	}
 }
@@ -5066,7 +5080,9 @@ async function assertReadable(path: string, label: string): Promise<void> {
 	try {
 		await readFile(path, "utf-8")
 	} catch (error) {
-		if (isNodeError(error) && error.code === "ENOENT") fail(`Missing ${label} file: ${path}`)
+		if (isNodeError(error) && error.code === "ENOENT") {
+			throw missingPresetSource(`Missing ${label} file: ${path}`)
+		}
 		throw error
 	}
 }

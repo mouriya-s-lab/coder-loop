@@ -22,6 +22,12 @@ describe("preset compiler", () => {
 		if (compiled.kind === "compiled") {
 			const publicResult = PresetCompilePublicResultBoundary.assert(projectPresetCompileResult(compiled))
 			expect(publicResult.kind).toBe("compiled")
+			if (publicResult.kind === "compiled") {
+				const classification: "continuable" | "terminal" = publicResult.projection.stateGraph.nodes[0]!.classification
+				const sourceKind: "item" | "chain" | "runtime" = publicResult.projection.phases[0]!.variables[0]!.sourceKind
+				expect(classification).toBe("continuable")
+				expect(sourceKind).toBe("item")
+			}
 		}
 		if (rejected.kind === "rejected") {
 			expect(rejected.diagnostics.length).toBeGreaterThan(0)
@@ -78,6 +84,36 @@ describe("preset compiler", () => {
 		const result = await compilePreset(resolve(ROOT, "package.json"))
 		expect(result.kind).toBe("rejected")
 		if (result.kind === "rejected") expect(result.diagnostics[0].message).toContain("ENOTDIR")
+	})
+
+	test("missing declared prompt and fragment sources return typed rejections", async () => {
+		const source = await mkdtemp(resolve(tmpdir(), "coder-loop-compile-missing-source-"))
+		const preset = `name = "missing-source"\n[item]\nidField = "id"\n[item.fields]\nid = "string"\n[statuses]\ncontinuable = ["queued"]\nterminal = ["done", "exhausted"]\nentry = "queued"\nexhausted = "exhausted"\n[[phases]]\nname = "run"\nprompt = "missing-prompt.md"\nroles = ["common"]\n[[phases.exits]]\nstatus = "done"\nwhen = "complete"\n[phases.variables]\nID = "item.id"\n[[fragments]]\nid = "missing"\nrole = "common"\npath = "missing-fragment.md"\n`
+		try {
+			await writeFile(resolve(source, "preset.toml"), preset)
+			const missingPrompt = await compilePreset(source)
+			expect(missingPrompt.kind).toBe("rejected")
+			if (missingPrompt.kind === "rejected") {
+				expect(missingPrompt.diagnostics).toEqual([{
+					verdict: "error",
+					rule: "preset-source",
+					message: `Missing preset phase "run" prompt file: ${resolve(source, "missing-prompt.md")}`,
+				}])
+			}
+
+			await writeFile(resolve(source, "missing-prompt.md"), "id={{ID}}\n")
+			const missingFragment = await compilePreset(source)
+			expect(missingFragment.kind).toBe("rejected")
+			if (missingFragment.kind === "rejected") {
+				expect(missingFragment.diagnostics).toEqual([{
+					verdict: "error",
+					rule: "preset-source",
+					message: `Missing preset fragment "missing" file: ${resolve(source, "missing-fragment.md")}`,
+				}])
+			}
+		} finally {
+			await rm(source, { recursive: true, force: true })
+		}
 	})
 
 	test("malformed compile CLI shape is rejected", () => {
