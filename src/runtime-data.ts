@@ -7,6 +7,8 @@ declare const internalStatusBrand: unique symbol
 declare const admittedItemStatusBrand: unique symbol
 const runtimeDataRemainderKey: unique symbol = Symbol("runtimeDataRemainder")
 
+import { hookDeclarationsToJsonValue, parseHookDeclarations, type HookDeclaration } from "./hook-declarations"
+
 export type InternalStatus = string & { readonly [internalStatusBrand]: "InternalStatus" }
 
 // #397: `AdmittedItemStatus` is the sub-brand the store's `CreateItemInput.status` and
@@ -103,6 +105,7 @@ export class ChainBindings extends RuntimeDataRecord {
 }
 
 export class ChainMetadata extends RuntimeDataRecord {
+	hooks?: HookDeclaration[]
 	bindings?: ChainBindings
 	presetPath?: string
 	sharedContextFile?: string
@@ -119,6 +122,7 @@ export class ChainMetadata extends RuntimeDataRecord {
 
 	constructor(input: ChainMetadataInput, remainder: JsonObject) {
 		super(remainder)
+		if (input.hooks !== undefined) this.hooks = [...input.hooks]
 		if (input.bindings !== undefined) this.bindings = input.bindings
 		if (input.presetPath !== undefined) this.presetPath = input.presetPath
 		if (input.sharedContextFile !== undefined) this.sharedContextFile = input.sharedContextFile
@@ -157,6 +161,7 @@ export class ItemExtra extends RuntimeDataRecord {
 	schedulerBackoff?: SchedulerBackoffState
 	schedulerSpawnError?: SchedulerSpawnError
 	slotKey?: string
+	hooks?: HookDeclaration[]
 	itemId?: number
 	repoCwd?: string
 	worktreePath?: string
@@ -168,6 +173,7 @@ export class ItemExtra extends RuntimeDataRecord {
 
 	constructor(input: ItemExtraInput, remainder: JsonObject) {
 		super(remainder)
+		if (input.hooks !== undefined) this.hooks = [...input.hooks]
 		if (input.dependsOn !== undefined) this.dependsOn = [...input.dependsOn]
 		if (input.schedulerBackoff !== undefined) this.schedulerBackoff = { ...input.schedulerBackoff }
 		if (input.schedulerSpawnError !== undefined) {
@@ -203,6 +209,7 @@ export type ChainCompleteTriggerStateInput = {
 }
 
 type ChainMetadataInput = {
+	hooks?: HookDeclaration[]
 	bindings?: ChainBindings
 	presetPath?: string
 	sharedContextFile?: string
@@ -222,6 +229,7 @@ type ChainBindingsInput = {
 }
 
 type ItemExtraInput = {
+	hooks?: HookDeclaration[]
 	dependsOn?: number[]
 	schedulerBackoff?: SchedulerBackoffState
 	schedulerSpawnError?: SchedulerSpawnError
@@ -253,6 +261,7 @@ const RUNNER_METADATA_KEYS = new Set(["binary", "model", "extraArgs"])
 const CHAIN_COMPLETE_TRIGGER_KEYS = new Set(["decision", "fingerprint", "recordedAt", "reason", "runId"])
 const CHAIN_BINDING_KEYS = new Set(["presetPath"])
 const CHAIN_METADATA_KEYS = new Set([
+	"hooks",
 	"bindings",
 	"presetPath",
 	"sharedContextFile",
@@ -274,6 +283,7 @@ const CHAIN_METADATA_KEYS = new Set([
 // not the literal — there is no taxonomy code left, only the runtime guard for legacy disks.
 const RETIRED_CHAIN_METADATA_KEYS = new Set(["config", "runner", "review" + "Runner"])
 const ITEM_EXTRA_KEYS = new Set([
+	"hooks",
 	"dependsOn",
 	"schedulerBackoff",
 	"schedulerSpawnError",
@@ -338,6 +348,7 @@ export function parseChainMetadataForRequest(value: BoundaryValue, field = "meta
 
 export function chainMetadataToJsonObject(metadata: ChainMetadata): JsonObject {
 	const result: JsonObject = { ...runtimeRemainder(metadata) }
+	assignJson(result, "hooks", metadata.hooks === undefined ? undefined : hookDeclarationsToJsonValue(metadata.hooks))
 	assignJson(result, "bindings", metadata.bindings === undefined ? undefined : chainBindingsToJsonObject(metadata.bindings))
 	assignJson(result, "presetPath", metadata.presetPath)
 	assignJson(result, "sharedContextFile", metadata.sharedContextFile)
@@ -405,6 +416,7 @@ export function parseItemExtraForRequest(value: BoundaryValue, field = "extra"):
 
 export function itemExtraToJsonObject(extra: ItemExtra): JsonObject {
 	const result: JsonObject = { ...runtimeRemainder(extra) }
+	assignJson(result, "hooks", extra.hooks === undefined ? undefined : hookDeclarationsToJsonValue(extra.hooks))
 	assignJson(result, "dependsOn", extra.dependsOn === undefined ? undefined : [...extra.dependsOn])
 	assignJson(result, "schedulerBackoff", extra.schedulerBackoff === undefined ? undefined : { ...extra.schedulerBackoff })
 	assignJson(result, "schedulerSpawnError", extra.schedulerSpawnError === undefined ? undefined : {
@@ -506,6 +518,7 @@ function parseChainMetadata(value: JsonObject, field: string): ChainMetadata {
 		}
 	}
 	const input: ChainMetadataInput = {}
+	if (value.hooks !== undefined) input.hooks = parseHookDeclarations(value.hooks, `${field}.hooks`)
 	const bindings = optionalChainBindingsField(value, "bindings", `${field}.bindings`)
 	if (bindings !== undefined) input.bindings = bindings
 	const presetPath = optionalStringField(value, "presetPath", `${field}.presetPath`)
@@ -535,6 +548,7 @@ function parseChainMetadata(value: JsonObject, field: string): ChainMetadata {
 
 function parseItemExtra(value: JsonObject, field: string): ItemExtra {
 	const input: ItemExtraInput = {}
+	if (value.hooks !== undefined) input.hooks = parseHookDeclarations(value.hooks, `${field}.hooks`)
 	const dependsOn = optionalPositiveIntegerArrayField(value, "dependsOn", `${field}.dependsOn`, `${field}.dependsOn must be an array of positive item ids when provided`)
 	if (dependsOn !== undefined) input.dependsOn = dependsOn
 	const schedulerBackoff = optionalSchedulerBackoffField(value, "schedulerBackoff", `${field}.schedulerBackoff`)

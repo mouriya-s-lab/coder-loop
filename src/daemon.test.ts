@@ -34,6 +34,7 @@ import { openSqliteStateStore } from "./sqlite-state"
 import { makeObservabilityEvent, queryObservabilityEvents } from "./observability"
 import { chainBindings, engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 import type { BoundaryRecord } from "./boundary-types"
+import { parseHookDeclarations, type GateHookDeclaration, type ObserverHookDeclaration } from "./hook-declarations"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
@@ -155,6 +156,58 @@ afterAll(async () => {
 })
 
 describe("daemon", () => {
+	test("hook declarations persist across all layers, reload on restart, and never execute during scheduling", async () => {
+		let sentinelPath = ""
+		const globalHook: ObserverHookDeclaration = { kind: "observer", point: "agent.spawn", script: "", timeoutMs: 1000 }
+		const fixture = await startFixture("hook-declaration-foundation", {
+			beforeStart: async ({ root, loopDataRoot }) => {
+				sentinelPath = resolve(root, "hook-spawned")
+				const sentinel = resolve(root, "sentinel-hook")
+				await writeFile(sentinel, `#!/bin/sh\ntouch ${JSON.stringify(sentinelPath)}\n`)
+				await chmod(sentinel, 0o755)
+				globalHook.script = sentinel
+				await writeFile(resolve(loopDataRoot, "hooks.json"), JSON.stringify({ version: 1, hooks: [globalHook] }))
+			},
+		})
+		const gateHook: GateHookDeclaration = { kind: "gate", point: "run.pre-spawn", script: "/bin/false", timeoutMs: 1000, onFailure: "hold" }
+		try {
+			const loadedGlobal = parseHookDeclarations(Reflect.get(fixture.daemon, "globalHookDeclarations"), "daemon.globalHooks")
+			expect(loadedGlobal).toEqual([globalHook])
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "hook-declaration-foundation-chain",
+				repository: "mouriya-s-lab/coder-loop",
+				metadata: { hooks: [gateHook] },
+			})).chain)
+			const chainId = numberValue(chain.id)
+			expect(record(chain.metadata).hooks).toEqual([gateHook])
+			const item = record(expectOk(await request(fixture, "item.add", {
+				chainId, itemId: "58601", repoCwd: REPO_ROOT, extra: { hooks: [globalHook], writeStatus: "done" },
+			})).item)
+			const batch = record(expectOk(await request(fixture, "item.batchAdd", {
+				chainId,
+				items: [{ itemId: "58602", repoCwd: REPO_ROOT, preset: "gh-issue-pr-iteration", extra: { hooks: [globalHook] } }],
+			})))
+			expect(Array.isArray(batch.items) ? record(batch.items[0]).extra : null).toMatchObject({ hooks: [globalHook] })
+			const rowId = numberValue(item.id)
+			await waitFor(async () => readItem(fixture.loopDataRoot, chainId, 58601), (candidate) => candidate?.status === "done")
+			const terminal = await readItem(fixture.loopDataRoot, chainId, 58601)
+			expect(terminal?.extra.hooks).toEqual([globalHook])
+			expect(await pathExists(sentinelPath)).toBe(false)
+			expect(rowId).toBeGreaterThan(0)
+			await fixture.daemon.stop()
+			const restarted = await startCoderLoopDaemon({ loopDataRoot: fixture.loopDataRoot, scheduler: { enabled: false } })
+			try {
+				expect(parseHookDeclarations(Reflect.get(restarted, "globalHookDeclarations"), "daemon.globalHooks")).toEqual([globalHook])
+				const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+				try {
+					expect(store.getChain(chainId)?.metadata.hooks).toEqual([gateHook])
+					expect(store.getItem(rowId)?.extra.hooks).toEqual([globalHook])
+				} finally { store.close() }
+			} finally { await restarted.stop() }
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
 	test("cleans runner lifecycle after status persistence failure", () => {
 		for (const [file, name] of [
 			["src/scheduler.test.ts", "rejects successful scheduler completion when terminal persistence fails"],
@@ -5978,6 +6031,25 @@ process.exitCode = 0
 			const newItem = record(created.result.item)
 			expect(stringValue(newItem.itemId)).toBe("407201")
 
+			const deniedHookAdd = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
+				chainId,
+				itemId: "407202",
+				repoCwd: REPO_ROOT,
+				preset: "gh-issue-pr-iteration",
+				extra: { hooks: [] },
+				agentCredential: credential,
+			}))
+			expect(deniedHookAdd.ok).toBe(false)
+			if (!deniedHookAdd.ok) expect(deniedHookAdd.error.message).toContain("hooks")
+
+			const deniedHookBatch = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.batchAdd", {
+				chainId,
+				items: [{ itemId: "407203", repoCwd: REPO_ROOT, preset: "gh-issue-pr-iteration", extra: { hooks: [] } }],
+				agentCredential: credential,
+			}))
+			expect(deniedHookBatch.ok).toBe(false)
+			if (!deniedHookBatch.ok) expect(deniedHookBatch.error.message).toContain("hooks")
+
 			// item.list cross-check: parent + child both present (2 items).
 			const listed = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.list", { chainId }))))
 			const items = Array.isArray(listed.items) ? listed.items : []
@@ -6000,6 +6072,8 @@ process.exitCode = 0
 				expect(allow.subject).toMatchObject({ kind: "agent" })
 				expect(allow.payload.presetName).toBe("gh-issue-pr-iteration")
 			}
+			const hookDenials = events.filter((event) => event.kind === "audit" && event.type === "item.add.rights_admission" && event.payload.reason === "control-plane-denied")
+			expect(hookDenials).toHaveLength(2)
 		} finally {
 			await daemon.stop()
 		}
@@ -7457,6 +7531,19 @@ process.exitCode = 0
 				expect(denyExtraKey.error.message).toContain("field-not-granted")
 			}
 
+			for (const fields of [
+				{ extra: { hooks: [] } },
+				{ extraPatch: { hooks: [] } },
+				{ extraPatch: { hooks: null } },
+			]) {
+				const deniedHooks = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.update", { itemId, fields, agentCredential: reviewCredential }))
+				expect(deniedHooks.ok).toBe(false)
+				if (!deniedHooks.ok) {
+					expect(deniedHooks.error.message).toContain("hooks")
+					expect(deniedHooks.error.message).toContain("control-plane-denied")
+				}
+			}
+
 			// Audit replay: one deny event per attempt. Spot-check control-plane and undeclared.
 			const eventsPath = resolveLoopDataPaths({ loopDataRoot }).eventsFile
 			const events = (await queryObservabilityEvents(eventsPath)).events
@@ -7466,7 +7553,8 @@ process.exitCode = 0
 				&& event.item === itemId
 				&& event.payload.outcome === "deny",
 			)
-			expect(denies.length).toBeGreaterThanOrEqual(7)
+			expect(denies.length).toBeGreaterThanOrEqual(10)
+			expect(denies.filter((event) => event.kind === "audit" && event.type === "item.update.field_write_admission" && event.payload.deniedFields.includes("hooks"))).toHaveLength(3)
 			const controlPlaneRunner = denies.find((event) =>
 				event.kind === "audit"
 				&& event.type === "item.update.field_write_admission"
@@ -7536,6 +7624,13 @@ process.exitCode = 0
 			const extra = record(finalUpdate.extra)
 			expect(extra.blockerRepo).toBe("owner/dep")
 			expect(extra.arbitrary).toBe("key")
+			const hook = { kind: "observer", point: "agent.spawn", script: "/bin/true", timeoutMs: 1000 }
+			const replaced = record(expectOk(await request(fixture, "item.update", { itemId, extra: { hooks: [hook] } })).item)
+			expect(record(replaced.extra).hooks).toEqual([hook])
+			const patched = record(expectOk(await request(fixture, "item.update", { itemId, extraPatch: { hooks: [hook] } })).item)
+			expect(record(patched.extra).hooks).toEqual([hook])
+			const cleared = record(expectOk(await request(fixture, "item.update", { itemId, extraPatch: { hooks: null } })).item)
+			expect(record(cleared.extra).hooks).toBeUndefined()
 
 			// Audit replay: every item.update emitted one field_write_admission allow with
 			// reason=operator. The subject is operator on every event.
@@ -7548,7 +7643,7 @@ process.exitCode = 0
 				&& event.payload.outcome === "allow"
 				&& event.payload.reason === "operator",
 			)
-			expect(operatorAllows.length).toBeGreaterThanOrEqual(7)
+			expect(operatorAllows.length).toBeGreaterThanOrEqual(10)
 			for (const event of operatorAllows) {
 				if (event.kind === "audit" && event.type === "item.update.field_write_admission") {
 					expect(event.subject).toEqual({ kind: "operator" })

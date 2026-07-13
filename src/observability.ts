@@ -668,6 +668,7 @@ export const ObservabilityEventBoundary = arkType.or(
 				arkType.unit("agent-allowed"),
 				arkType.unit("no-create-grant"),
 				arkType.unit("no-rights-segment"),
+				arkType.unit("control-plane-denied"),
 			),
 		},
 	},
@@ -722,7 +723,7 @@ export const ObservabilityEventBoundary = arkType.or(
 
 export type ObservabilityEvent = typeof ObservabilityEventBoundary.infer
 export type ObservabilityKind = typeof ObservabilityKindBoundary.infer
-export type ObservabilityEventType = typeof ObservabilityEventTypeBoundary.infer
+export type { ObservabilityEventType } from "./observability-event-types"
 export type ObservabilityExcerpt = Extract<ObservabilityEvent, { type: "agent.exit" }>["payload"]["excerpt"]
 export type ObservabilitySubject = NonNullable<ObservabilityEvent["subject"]>
 export type PresetPlaceholderDirection = typeof PresetPlaceholderDirectionBoundary.infer
@@ -814,9 +815,7 @@ export function parseObservabilityKind(input: string): ObservabilityKind {
 	return ObservabilityKindBoundary.assert(input)
 }
 
-export function parseObservabilityEventType(input: string): ObservabilityEventType {
-	return ObservabilityEventTypeBoundary.assert(input)
-}
+export { parseObservabilityEventType } from "./observability-event-types"
 
 export async function appendObservabilityEvent(eventsFile: string, event: ObservabilityEvent): Promise<void> {
 	try {
