@@ -14,7 +14,7 @@ import {
 	type InternalStatus,
 	type ItemExtra,
 } from "./runtime-data"
-import { type LoopDataRootOptions, resolveLoopDataPaths } from "./runtime-paths"
+import { itemArtifactPathComponent, type LoopDataRootOptions, resolveLoopDataPaths } from "./runtime-paths"
 
 export type SqliteStateErrorCode =
 	| "db_unavailable"
@@ -52,14 +52,9 @@ export type ChainRecord = {
 	// from chain to item. This column is retained as a legacy default seed (preserved across
 	// migrations so v8 items keep resolving). Physical retirement is tracked in #419.
 	preset: string | null
-	// repository / baseBranch are engine-mechanism fields — repository is consumed by
-	// `resolveDbChainForTarget` chain-identity matching (src/loop.ts:3433-3438) and baseBranch by
-	// worktree creation (`validateWorktreePrerequisites`). They remain first-class chain columns
-	// for the engine path; the bundled preset's prompt-business view onto them flows through the
-	// generic chain-binding namespace via `buildSchedulerChainBindings`. Issue #457 retired the
-	// umbrella column counterparts because their only consumer was prompt-business — umbrella data
-	// now lives inside `metadata.bindings.umbrella\u0052epo / umbrella\u0049ssue` as preset-declared chain
-	// bindings (no engine-side first-class typing).
+	// baseBranch remains first-class engine state because worktree creation consumes it.
+	// Repository is optional business data stored only in metadata.bindings and is not part of
+	// the physical row model or chain identity.
 	baseBranch: string
 	status: ChainStatus
 	metadata: ChainMetadata
@@ -469,13 +464,9 @@ ${STATE_INDEXES_SQL}
 // 迁移把每行的 `issue_number` 整数复制为 `extra.issue` 字符串（兼容 `gh-issue-pr-iteration` 的 idField="issue"
 // 在 [item.fields] 声明 issue 透明字段后的读路径），同时把非 NULL 的 `branch`/`pr` 落到 `extra.branch`/`extra.pr`
 // 保留 gh-issue-pr-iteration 经透明字段使用它们的生产路径。Idempotent: 已经在新形状下的盘原样跳过。
-// #457: bumping to 11 — chains.umbrella_issue / umbrella_repo columns retired. The v10→v11
-// migration copies any non-null column values into the chain's metadata.bindings (as
-// umbrella\u0049ssue / umbrella\u0052epo entries; column values win on conflict because they were the
-// engine's source of truth before the column was retired), then rebuilds the chains table
-// without those columns. Idempotent: rows already migrated (column values were NULL when the
-// migration runs) are left alone. The engine no longer reads these columns; bundled preset
-// resolves them via the declared-binding namespace (chain.umbrella\u0052epo / chain.umbrella\u0049ssue).
+// #457: v10→v11 retired preset-owned chain business columns. Migration treats every physical
+// column outside the current chain schema as generic binding data: snake_case names become
+// lowerCamelCase binding keys and non-null values are preserved before the table rebuild.
 // #481 v12→v13: items.runner CHECK constraint widens from `('claude','codex')` to
 // `('claude','codex','opencode')` so the third runner kind round-trips through SQLite. A CHECK
 // constraint cannot be modified in place on SQLite — `rebuildItemsTableForV13` copies rows into
@@ -523,6 +514,7 @@ export function openSqliteStateStore(options: SqliteStateStoreOptions = {}): Sql
 			}
 		}
 		migrateStateSchema(db)
+		validateStoredItemArtifactAddresses(db)
 	} catch (error) {
 		db.close()
 		throw translateSqliteError(error, "initialize state schema", { dbFile })
@@ -543,6 +535,25 @@ function stateSchemaExists(db: Database): boolean {
 
 function readUserVersion(db: Database): number {
 	return db.query<UserVersionRow, []>("PRAGMA user_version").get()?.user_version ?? 0
+}
+
+function validateStoredItemArtifactAddresses(db: Database): void {
+	type StoredItemIdentityRow = { chain_id: number; item_id: string }
+	const owners = new Map<string, string>()
+	for (const row of db.query<StoredItemIdentityRow, []>("SELECT chain_id, item_id FROM items").all()) {
+		const component = itemArtifactPathComponent(row.item_id)
+		const address = `${row.chain_id}\u0000${component}`
+		const owner = owners.get(address)
+		if (owner !== undefined && owner !== row.item_id) {
+			throw new SqliteStateError("invalid_input", "stored distinct item IDs resolve to the same artifact path component", {
+				chainId: row.chain_id,
+				itemId: row.item_id,
+				conflictingItemId: owner,
+				artifactComponent: component,
+			})
+		}
+		owners.set(address, row.item_id)
+	}
 }
 
 function tableHasColumn(db: Database, tableName: StateTableName, columnName: string): boolean {
@@ -592,16 +603,13 @@ function migrateStateSchema(db: Database): void {
 	const needsChainTableRebuildForStopped = stateSchemaExists(db) && !chainsTableAllowsStopped(db)
 	// v9 (#412): chains.preset moves from NOT NULL to NULL — SQLite has no ALTER COLUMN, so rebuild.
 	const needsChainTableRebuildForNullablePreset = stateSchemaExists(db) && chainsTableHasNotNullPreset(db)
-	// v11 (#457): chains.umbrella_issue / umbrella_repo columns retired — rebuild any chain table that
-	// still carries them. The migration logic below copies their values into metadata.bindings before
-	// the rebuild so no data is lost.
-	const needsChainTableRebuildForUmbrellaColumnDrop = stateSchemaExists(db)
-		&& (tableHasColumn(db, "chains", "umbrella_issue") || tableHasColumn(db, "chains", "umbrella_repo"))
-	const needsChainTableRebuildForRepositoryDrop = stateSchemaExists(db) && tableHasColumn(db, "chains", "repository")
+	// Physical chain columns outside the current schema are legacy business bindings. Discover
+	// them from SQLite metadata so L1 preserves them without knowing preset-owned vocabulary.
+	const legacyChainBindingColumns = stateSchemaExists(db) ? findLegacyChainBindingColumns(db) : []
+	const needsChainTableRebuildForLegacyBindings = legacyChainBindingColumns.length > 0
 	const needsChainTableRebuild = needsChainTableRebuildForStopped
 		|| needsChainTableRebuildForNullablePreset
-		|| needsChainTableRebuildForUmbrellaColumnDrop
-		|| needsChainTableRebuildForRepositoryDrop
+		|| needsChainTableRebuildForLegacyBindings
 	// #419 v11→v12: items.`issue_number` integer 列、`branch` / `pr` 物理列退役。任何还带这三列之一
 	// 的盘需要走 v12 rebuild —— 先把 `issue_number` 拷为 `extra.issue` 字符串、把非 NULL `branch`/`pr` 拷为
 	// `extra.branch` / `extra.pr`,再 swap 到只有 `item_id TEXT NOT NULL` + `UNIQUE (chain_id, item_id)` 的新表。
@@ -633,14 +641,7 @@ function migrateStateSchema(db: Database): void {
 		db.transaction(() => {
 			db.exec(STATE_SCHEMA_SQL)
 			if (needsChainTableRebuild) {
-				if (needsChainTableRebuildForRepositoryDrop) migrateChainsRepositoryToBindings(db)
-				// v10 → v11 (#457): copy any non-null `chains.umbrella_issue` / `umbrella_repo` values
-				// into the chain's metadata.bindings (umbrella\u0049ssue / umbrella\u0052epo) before the rebuild
-				// drops the columns. Idempotent: a row with NULL columns and a metadata.bindings entry
-				// already in the new shape is left alone.
-				if (needsChainTableRebuildForUmbrellaColumnDrop) {
-					migrateChainsUmbrellaToBindings(db)
-				}
+				for (const column of legacyChainBindingColumns) migrateLegacyChainBindingColumn(db, column)
 				rebuildChainsTable(db)
 			}
 			if (!itemsTableHasColumn(db, "phase")) {
@@ -856,12 +857,8 @@ function rebuildItemsTableForV12(db: Database): void {
 	db.exec(ITEM_NEXT_PENDING_INDEX_SQL)
 }
 
-// Renamed from `rebuildChainsTableForV9` — #457's v10→v11 retires `umbrella_issue` / `umbrella_repo`
-// columns too, so the rebuild copy-list no longer matches v9's. The current SELECT list mirrors the
-// current `CHAINS_TABLE_SCHEMA_SQL`. The pre-rebuild `migrateChainsUmbrellaToBindings` (invoked
-// above when `needsChainTableRebuildForUmbrellaColumnDrop` triggered the rebuild) has already
-// salvaged the umbrella values into `metadata.bindings`, so we simply omit those columns from the
-// SELECT — SQLite tolerates the source row having unselected legacy columns.
+// The rebuild copy-list mirrors the current `CHAINS_TABLE_SCHEMA_SQL`; legacy business columns
+// have already been preserved generically in metadata.bindings and are intentionally omitted.
 function rebuildChainsTable(db: Database): void {
 	const columns = [
 		"id",
@@ -879,66 +876,46 @@ function rebuildChainsTable(db: Database): void {
 	db.exec("ALTER TABLE chains_new RENAME TO chains")
 }
 
-function migrateChainsRepositoryToBindings(db: Database): void {
-	type LegacyChainRow = { id: number; repository: string; metadata: string }
-	const rows = db.query<LegacyChainRow, []>("SELECT id, repository, metadata FROM chains").all()
+const CURRENT_CHAIN_COLUMNS = new Set([
+	"id",
+	"name",
+	"preset",
+	"base_branch",
+	"status",
+	"metadata",
+	"created_at",
+	"updated_at",
+])
+
+function findLegacyChainBindingColumns(db: Database): readonly string[] {
+	return db.query<TableColumnRow, []>("PRAGMA table_info(chains)").all()
+		.map((row) => row.name)
+		.filter((name) => !CURRENT_CHAIN_COLUMNS.has(name))
+}
+
+function legacyColumnBindingKey(column: string): string {
+	if (!/^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(column)) {
+		throw new SqliteStateError("invalid_input", `legacy chains column cannot map to a binding key: ${column}`)
+	}
+	return column.replace(/_([a-z0-9])/g, (_, character: string) => character.toUpperCase())
+}
+
+function migrateLegacyChainBindingColumn(db: Database, column: string): void {
+	type LegacyBindingRow = { id: number; metadata: string; value: string | number | null }
+	const bindingKey = legacyColumnBindingKey(column)
+	const rows = db.query<LegacyBindingRow, []>(`SELECT id, metadata, "${column}" AS value FROM chains`).all()
 	for (const row of rows) {
+		if (row.value === null) continue
 		const metadata = parseJsonObject(row.metadata, `chains.${row.id}.metadata`)
 		const current = metadata.bindings
 		const bindings: JsonObject = isJsonObject(current) ? { ...current } : {}
-		if (bindings.repository !== undefined && bindings.repository !== row.repository) {
-			throw new SqliteStateError("invalid_input", `chains.${row.id} repository conflicts with metadata.bindings.repository`)
+		if (bindings[bindingKey] !== undefined && bindings[bindingKey] !== row.value) {
+			throw new SqliteStateError("invalid_input", `chains.${row.id} legacy column ${column} conflicts with metadata.bindings.${bindingKey}`)
 		}
-		bindings.repository = row.repository
+		bindings[bindingKey] = row.value
 		db.query<unknown, SqlParams>("UPDATE chains SET metadata = $metadata WHERE id = $id").run({
 			id: row.id,
 			metadata: JSON.stringify({ ...metadata, bindings }),
-		})
-	}
-}
-
-// #457 v10→v11 migration: copy any non-null `chains.umbrella_issue` / `umbrella_repo` values into
-// the corresponding chain's `metadata.bindings.umbrella\u0049ssue` / `umbrella\u0052epo` so existing umbrella
-// metadata stays readable through the declared-binding namespace once the columns are dropped.
-// Operates via raw JSON.parse / stringify so it never trips parseChainMetadata's strict shape
-// (which already enforces the bindings object's flat-string-or-number-or-boolean shape). Idempotent:
-// a row whose columns are NULL or whose bindings already carry the same value is left alone.
-function migrateChainsUmbrellaToBindings(db: Database): void {
-	type ChainUmbrellaRow = {
-		id: number
-		umbrella_issue: number | null
-		umbrella_repo: string | null
-		metadata: string
-	}
-	const rows = db.query<ChainUmbrellaRow, []>(
-		"SELECT id, umbrella_issue, umbrella_repo, metadata FROM chains",
-	).all()
-	for (const row of rows) {
-		if (row.umbrella_issue === null && row.umbrella_repo === null) continue
-		let parsed: unknown
-		try {
-			parsed = JSON.parse(row.metadata)
-		} catch {
-			// Leave malformed rows alone; the next read will surface the error with row context.
-			continue
-		}
-		if (!isJsonObject(parsed)) continue
-		const existingBindingsValue = parsed.bindings
-		const existingBindings: JsonObject = isJsonObject(existingBindingsValue) ? { ...existingBindingsValue } : {}
-		let mutated = false
-		if (row.umbrella_issue !== null && existingBindings.umbrella\u0049ssue === undefined) {
-			existingBindings.umbrella\u0049ssue = row.umbrella_issue
-			mutated = true
-		}
-		if (row.umbrella_repo !== null && existingBindings.umbrella\u0052epo === undefined) {
-			existingBindings.umbrella\u0052epo = row.umbrella_repo
-			mutated = true
-		}
-		if (!mutated) continue
-		const rewritten: JsonObject = { ...parsed, bindings: existingBindings }
-		db.query<unknown, SqlParams>("UPDATE chains SET metadata = $metadata WHERE id = $id").run({
-			id: row.id,
-			metadata: JSON.stringify(rewritten),
 		})
 	}
 }
@@ -1449,6 +1426,18 @@ function insertItem(db: Database, getItemRow: (id: number) => ItemRow | null, in
 	const status = parseInternalStatus(input.status, "items.status")
 	if (input.itemId === "") {
 		throw new SqliteStateError("invalid_input", "items.itemId must be a non-empty string", { chainId: input.chainId })
+	}
+	const artifactComponent = itemArtifactPathComponent(input.itemId)
+	const collidingItem = db.query<{ item_id: string }, SqlParams>("SELECT item_id FROM items WHERE chain_id = $chainId").all({
+		chainId: input.chainId,
+	}).find((row) => row.item_id !== input.itemId && itemArtifactPathComponent(row.item_id) === artifactComponent)
+	if (collidingItem !== undefined) {
+		throw new SqliteStateError("invalid_input", "distinct item IDs resolve to the same artifact path component", {
+			chainId: input.chainId,
+			itemId: input.itemId,
+			conflictingItemId: collidingItem.item_id,
+			artifactComponent,
+		})
 	}
 	const result = db.query<unknown, SqlParams>(`
 		INSERT INTO items (

@@ -39,9 +39,9 @@ function status(value: string) {
 	return parseInternalStatus(value, "test.status")
 }
 
-// Minimum-shape `RuntimeBindings` for the #457 declared-binding driver test (acceptance row 2):
-// the runtime channel must satisfy the `Record<EngineRuntimeBindingKey, string>` requirement, but
-// the umbrella resolution path under test exercises only the `chain.<field>` channel, so every
+// Minimum-shape `RuntimeBindings` for the generic declared-binding driver test: the runtime
+// channel must satisfy the `Record<EngineRuntimeBindingKey, string>` requirement, but the
+// chain-binding path under test exercises only the `chain.<field>` channel, so every
 // engine fact is filled with a placeholder. ENGINE_RUNTIME_BINDING_KEYS is the source of truth for
 // the key set — using it keeps this helper aligned with the post-#457 count automatically.
 function makeMinimalRuntimeBindings(): RuntimeBindings {
@@ -320,11 +320,6 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(iterVars.get("AGENT_CWD")).toEqual(expectedRuntime("agentCwd"))
 		expect(iterVars.get("PROMPT_ROOT")).toEqual(expectedRuntime("presetDir"))
 		expect(iterVars.get("PROMPT_FRAGMENT_INDEX")).toEqual(expectedRuntime("fragmentIndex"))
-		// #457: CHAIN_UMBRELLA_REPO / CHAIN_UMBRELLA_ISSUE now resolve via the declared chain-binding
-		// namespace (metadata.bindings.*) instead of the retired engine-runtime facts. Empty-string
-		// default keeps the prompt safe when metadata.bindings carries no umbrella entry.
-		expect(iterVars.get("CHAIN_UMBRELLA_REPO")).toEqual({ kind: "chain", field: "umbrella\u0052epo", fallback: { kind: "value", value: "" } })
-		expect(iterVars.get("CHAIN_UMBRELLA_ISSUE")).toEqual({ kind: "chain", field: "umbrella\u0049ssue", fallback: { kind: "value", value: "" } })
 		// #450 retired the kind taxonomy and #401 finished retiring the engine
 		// vocabulary — the keys === EXPECTED_VARIABLE_KEYS assertion above already
 		// covers the absence of the retired bindings positively.
@@ -355,42 +350,26 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		}
 	})
 
-	// #457 acceptance row 2: bundled preset's umbrella binding resolves through the declared
-	// chain-binding mechanism (metadata.bindings.umbrella\u0052epo / umbrella\u0049ssue) rather than the
-	// retired engine-runtime facts (runtime.chainUmbrellaRepo / chainUmbrellaIssue). Rendering
-	// produces identical literals to the pre-#457 path; an empty metadata.bindings yields empty
-	// strings via the declared `default = ""` fallback (no crash).
-	test("bundled umbrella binding flows through declared chain-binding mechanism (acceptance row 2)", async () => {
-		const preset = await loadPreset(BUNDLED_PRESET_DIR)
-		const iterPhase = preset.phases.find((entry) => entry.name === "iteration")
-		expect(iterPhase).toBeDefined()
-		const variableByKey = new Map(iterPhase!.variables.map((variable) => [variable.key, variable] as const))
-		const umbrella\u0052epoVar = variableByKey.get("CHAIN_UMBRELLA_REPO")
-		const umbrella\u0049ssueVar = variableByKey.get("CHAIN_UMBRELLA_ISSUE")
-		expect(umbrella\u0052epoVar).toBeDefined()
-		expect(umbrella\u0049ssueVar).toBeDefined()
-		// The retired runtime fact is gone: no variable should still source umbrella from runtime.
-		for (const variable of iterPhase!.variables) {
-			expect(variable.source.kind === "runtime" && (variable.source.key === "chainUmbrellaRepo" || variable.source.key === "chainUmbrellaIssue")).toBe(false)
-		}
-		// Populated metadata.bindings produces the literal value.
+	test("generic chain bindings resolve populated values and declared fallbacks", async () => {
+		const preset = await loadPreset(REAL_E2E_MINIMAL_PRESET_DIR)
+		const projectRepoSource: PresetVariableSource = { kind: "chain", field: "projectRepo", fallback: { kind: "value", value: "" } }
+		const projectIdSource: PresetVariableSource = { kind: "chain", field: "projectId", fallback: { kind: "value", value: "" } }
 		const populated: ResolveContext = {
 			item: { issue: 457 } as unknown as ItemRecord,
-			chain: { umbrella\u0052epo: "mouriya-s-lab/coder-loop", umbrella\u0049ssue: 457, repository: "x", baseBranch: "main" },
+			chain: { projectRepo: "mouriya-s-lab/coder-loop", projectId: 457, repository: "x", baseBranch: "main" },
 			runtime: makeMinimalRuntimeBindings(),
 			preset,
 		}
-		expect(resolveBinding(umbrella\u0052epoVar!.source, populated)).toBe("mouriya-s-lab/coder-loop")
-		expect(resolveBinding(umbrella\u0049ssueVar!.source, populated)).toBe("457")
-		// Empty metadata.bindings: declared fallback emits "" rather than crashing.
+		expect(resolveBinding(projectRepoSource, populated)).toBe("mouriya-s-lab/coder-loop")
+		expect(resolveBinding(projectIdSource, populated)).toBe("457")
 		const empty: ResolveContext = {
 			item: { issue: 457 } as unknown as ItemRecord,
 			chain: { repository: "x", baseBranch: "main" },
 			runtime: makeMinimalRuntimeBindings(),
 			preset,
 		}
-		expect(resolveBinding(umbrella\u0052epoVar!.source, empty)).toBe("")
-		expect(resolveBinding(umbrella\u0049ssueVar!.source, empty)).toBe("")
+		expect(resolveBinding(projectRepoSource, empty)).toBe("")
+		expect(resolveBinding(projectIdSource, empty)).toBe("")
 	})
 
 	test("fragments match PROMPT_FRAGMENTS 1:1 by id+role+path and files exist", async () => {

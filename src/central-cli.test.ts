@@ -841,8 +841,7 @@ attemptTimeoutSeconds = 3600
 			const status = expectJsonOk(await runCli(["chain", "status", "schema-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 
 			expect(Object.keys(status).sort()).toEqual(["activeRuns", "chain", "items", "summary"])
-			// #457: `summary.umbrella` retired — supervisors should read umbrella values from
-			// `chain.metadata.bindings.umbrella\u0052epo / umbrella\u0049ssue` directly.
+			// Preset-owned summary fields are read directly from generic chain metadata bindings.
 			expect(Object.keys(status.summary).sort()).toEqual(["activeSlots", "completion", "items", "recovery", "waiting"])
 			expect(status.summary.recovery).toEqual({ needed: false, staleInProgressItems: [] })
 			expect(status.chain).toMatchObject({

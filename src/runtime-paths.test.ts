@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
 import { resolve } from "node:path"
 
 import {
@@ -98,10 +100,33 @@ describe("runtime path model", () => {
 	test("opaque item ids map to collision-free default artifact paths without changing the business id", () => {
 		const paths = resolveChainRuntimePaths("coder-loop", { loopDataRoot: "/var/lib/coder-loop/loop-data" })
 		const opaque = paths.issueEvidenceDir("owner/repo#12")
-		expect(opaque).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/evidence/opaque-6f776e65722f7265706f233132")
-		expect(paths.issueFile("owner/repo#12")).toEndWith("/issues/opaque-6f776e65722f7265706f233132.md")
+		expect(opaque).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/evidence/opaque-sha256-d6c5c2fea15ac813d0a878c08a87c4693cf4e485d50873d5009410ff79838cc7")
+		expect(paths.issueFile("owner/repo#12")).toEndWith("/issues/opaque-sha256-d6c5c2fea15ac813d0a878c08a87c4693cf4e485d50873d5009410ff79838cc7.md")
 		expect(opaque).not.toBe(paths.issueEvidenceDir("owner-repo-12"))
 		expect(paths.issueEvidenceDir("owner/repo#12")).toBe(opaque)
+	})
+
+	test("admitted long opaque item ids produce writable filesystem artifact paths", async () => {
+		const root = await mkdtemp(resolve(tmpdir(), "coder-loop-long-item-id-"))
+		try {
+			const paths = resolveChainRuntimePaths("coder-loop", { loopDataRoot: root })
+			const itemId = "/".repeat(125)
+			const siblingItemId = `${itemId}x`
+			const evidenceDir = paths.issueEvidenceDir(itemId)
+			const issueFile = paths.issueFile(itemId)
+
+			await mkdir(evidenceDir, { recursive: true })
+			await mkdir(resolve(issueFile, ".."), { recursive: true })
+			await writeFile(issueFile, `${itemId}\n`)
+
+			expect(await Bun.file(issueFile).text()).toBe(`${itemId}\n`)
+			expect(paths.issueEvidenceDir(siblingItemId)).not.toBe(evidenceDir)
+			expect(paths.issueEvidenceDir(itemId)).toBe(evidenceDir)
+			expect(evidenceDir.split("/").at(-1)!.length).toBeLessThanOrEqual(255)
+			expect(issueFile.split("/").at(-1)!.length).toBeLessThanOrEqual(255)
+		} finally {
+			await rm(root, { recursive: true, force: true })
+		}
 	})
 
 	test("pure path module no side effect", async () => {

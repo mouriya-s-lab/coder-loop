@@ -12,6 +12,7 @@ import {
 } from "./sqlite-state"
 import type { JsonObject } from "./loop"
 import { chainBindings, engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
+import { itemArtifactPathComponent } from "./runtime-paths"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/sqlite-state-tests", String(process.pid))
@@ -28,12 +29,11 @@ afterAll(async () => {
 })
 
 describe("sqlite state store", () => {
-	test("schema covers chain core columns (umbrella retired #457)", async () => {
+	test("schema covers chain core columns after business-column retirement", async () => {
 		const { store } = await openTestStore("schema")
 		try {
-			// #457: chains.umbrella_issue / umbrella_repo columns retired. Existing data is moved
-			// into chain.metadata.bindings by the v10→v11 migration; new chains write umbrella
-			// values straight into metadata.bindings via the declared-field path.
+			// Legacy business columns are moved into chain.metadata.bindings by migration; new
+			// chains write preset-owned values through the declared-field path.
 			expect(store.listTableColumns("chains")).toEqual([
 				"id",
 				"name",
@@ -116,6 +116,22 @@ describe("sqlite state store", () => {
 			expect(store.getCurrentRun(chain.id)).toEqual(expected)
 			expect(store.clearCurrentRun(chain.id)).toBe(true)
 			expect(store.getCurrentRun(chain.id)).toBeNull()
+		} finally {
+			store.close()
+		}
+	})
+
+	test("item admission rejects distinct IDs that resolve to one artifact component", async () => {
+		const { store } = await openTestStore("artifact-address-collision")
+		try {
+			const chain = createFullChain(store)
+			const opaqueItemId = "owner/repo#12"
+			createFullItem(store, chain, { itemId: opaqueItemId })
+			const collidingDirectItemId = itemArtifactPathComponent(opaqueItemId)
+
+			expect(() => createFullItem(store, chain, { itemId: collidingDirectItemId })).toThrow(
+				"distinct item IDs resolve to the same artifact path component",
+			)
 		} finally {
 			store.close()
 		}
@@ -634,8 +650,8 @@ describe("sqlite state store", () => {
 					preset TEXT NOT NULL,
 					repository TEXT NOT NULL,
 					base_branch TEXT NOT NULL,
-					umbrella_issue INTEGER,
-					umbrella_repo TEXT,
+					project_id INTEGER,
+					project_repo TEXT,
 					status TEXT NOT NULL CHECK (status IN ('active', 'completed', 'deleted')),
 					metadata TEXT NOT NULL,
 					created_at REAL NOT NULL,
@@ -739,8 +755,8 @@ describe("sqlite state store", () => {
 					preset TEXT NOT NULL,
 					repository TEXT NOT NULL,
 					base_branch TEXT NOT NULL,
-					umbrella_issue INTEGER,
-					umbrella_repo TEXT,
+					project_id INTEGER,
+					project_repo TEXT,
 					status TEXT NOT NULL CHECK (status IN ('active', 'completed', 'deleted')),
 					metadata TEXT NOT NULL,
 					created_at REAL NOT NULL,
@@ -876,8 +892,8 @@ describe("sqlite state store", () => {
 					preset TEXT NOT NULL,
 					repository TEXT NOT NULL,
 					base_branch TEXT NOT NULL,
-					umbrella_issue INTEGER,
-					umbrella_repo TEXT,
+					project_id INTEGER,
+					project_repo TEXT,
 					status TEXT NOT NULL CHECK (status IN ('active', 'completed', 'deleted')),
 					metadata TEXT NOT NULL,
 					created_at REAL NOT NULL,
@@ -948,13 +964,9 @@ describe("sqlite state store", () => {
 		}
 	})
 
-	// #457 acceptance row 4: pre-migration loop-data carrying values inside the retired
-	// chains.umbrella_issue / umbrella_repo first-class columns must remain readable after the
-	// v10→v11 migration runs. Existing column values move into chain.metadata.bindings.umbrella\u0049ssue
-	// / umbrella\u0052epo so the bundled preset reads them through the declared-binding namespace
-	// (chain.umbrella\u0052epo / chain.umbrella\u0049ssue). After migration the columns no longer exist.
-	test("v10 to v11 migration moves chains.umbrella_issue / umbrella_repo into metadata.bindings (acceptance row 4, #457)", async () => {
-		const loopDataRoot = resolve(TEST_ROOT, `chain-umbrella-v10-v11-${Date.now()}-${++nextRootId}`)
+	// Generic legacy business columns are preserved as bindings before a chain-table rebuild.
+	test("legacy chain business columns migrate generically into metadata.bindings", async () => {
+		const loopDataRoot = resolve(TEST_ROOT, `chain-bindings-migration-${Date.now()}-${++nextRootId}`)
 		await mkdir(loopDataRoot, { recursive: true })
 		const dbFile = resolve(loopDataRoot, "db.sqlite")
 
@@ -969,8 +981,8 @@ describe("sqlite state store", () => {
 					preset TEXT,
 					repository TEXT NOT NULL,
 					base_branch TEXT NOT NULL,
-					umbrella_issue INTEGER,
-					umbrella_repo TEXT,
+					project_id INTEGER,
+					project_repo TEXT,
 					status TEXT NOT NULL CHECK (status IN ('active', 'completed', 'deleted', 'stopped')),
 					metadata TEXT NOT NULL,
 					created_at REAL NOT NULL,
@@ -1025,11 +1037,11 @@ describe("sqlite state store", () => {
 				PRAGMA user_version = 10;
 			`)
 			legacy.exec(`
-				INSERT INTO chains (name, preset, repository, base_branch, umbrella_issue, umbrella_repo, status, metadata, created_at, updated_at)
+				INSERT INTO chains (name, preset, repository, base_branch, project_id, project_repo, status, metadata, created_at, updated_at)
 				VALUES
-					('legacy-umbrella', 'gh-issue-pr-iteration', 'mouriya-s-lab/coder-loop', 'main', 176, 'mouriya-s-lab/coder-loop', 'active', '{}', 1.0, 1.0),
-					('null-umbrella', 'gh-issue-pr-iteration', 'mouriya-s-lab/coder-loop', 'main', NULL, NULL, 'active', '{}', 1.0, 1.0),
-					('partial-umbrella', 'gh-issue-pr-iteration', 'mouriya-s-lab/coder-loop', 'main', 309, NULL, 'active', '{}', 1.0, 1.0)
+					('legacy-bindings', 'gh-issue-pr-iteration', 'mouriya-s-lab/coder-loop', 'main', 176, 'mouriya-s-lab/coder-loop', 'active', '{}', 1.0, 1.0),
+					('null-bindings', 'gh-issue-pr-iteration', 'mouriya-s-lab/coder-loop', 'main', NULL, NULL, 'active', '{}', 1.0, 1.0),
+					('partial-bindings', 'gh-issue-pr-iteration', 'mouriya-s-lab/coder-loop', 'main', 309, NULL, 'active', '{}', 1.0, 1.0)
 			`)
 		} finally {
 			legacy.close()
@@ -1038,27 +1050,27 @@ describe("sqlite state store", () => {
 		const migrated = openSqliteStateStore({ loopDataRoot })
 		try {
 			// Columns are gone post-migration.
-			expect(migrated.listTableColumns("chains")).not.toContain("umbrella_issue")
-			expect(migrated.listTableColumns("chains")).not.toContain("umbrella_repo")
+			expect(migrated.listTableColumns("chains")).not.toContain("project_id")
+			expect(migrated.listTableColumns("chains")).not.toContain("project_repo")
 
 			// Values landed inside metadata.bindings under the same names.
-			const legacyChain = migrated.getChainByName("legacy-umbrella")
+			const legacyChain = migrated.getChainByName("legacy-bindings")
 			expect(legacyChain).not.toBeNull()
 			expect(chainBindings(legacyChain!.metadata)).toEqual({
 				repository: "mouriya-s-lab/coder-loop",
-				umbrella\u0049ssue: 176,
-				umbrella\u0052epo: "mouriya-s-lab/coder-loop",
+				projectId: 176,
+				projectRepo: "mouriya-s-lab/coder-loop",
 			})
 
 			// Null-only rows leave the bindings untouched.
-			const nullChain = migrated.getChainByName("null-umbrella")
+			const nullChain = migrated.getChainByName("null-bindings")
 			expect(nullChain).not.toBeNull()
 			expect(chainBindings(nullChain!.metadata)).toEqual({ repository: "mouriya-s-lab/coder-loop" })
 
 			// Partial values only move the non-null entry.
-			const partialChain = migrated.getChainByName("partial-umbrella")
+			const partialChain = migrated.getChainByName("partial-bindings")
 			expect(partialChain).not.toBeNull()
-			expect(chainBindings(partialChain!.metadata)).toEqual({ umbrella\u0049ssue: 309, repository: "mouriya-s-lab/coder-loop" })
+			expect(chainBindings(partialChain!.metadata)).toEqual({ projectId: 309, repository: "mouriya-s-lab/coder-loop" })
 		} finally {
 			migrated.close()
 		}
@@ -1067,13 +1079,13 @@ describe("sqlite state store", () => {
 		// second open without re-running the column-drop logic.
 		const reopened = openSqliteStateStore({ loopDataRoot })
 		try {
-			expect(reopened.listTableColumns("chains")).not.toContain("umbrella_issue")
-			const legacyChain = reopened.getChainByName("legacy-umbrella")
+			expect(reopened.listTableColumns("chains")).not.toContain("project_id")
+			const legacyChain = reopened.getChainByName("legacy-bindings")
 			expect(legacyChain).not.toBeNull()
 			expect(chainBindings(legacyChain!.metadata)).toEqual({
 				repository: "mouriya-s-lab/coder-loop",
-				umbrella\u0049ssue: 176,
-				umbrella\u0052epo: "mouriya-s-lab/coder-loop",
+				projectId: 176,
+				projectRepo: "mouriya-s-lab/coder-loop",
 			})
 		} finally {
 			reopened.close()
@@ -1418,8 +1430,8 @@ describe("sqlite state store", () => {
 					preset TEXT NOT NULL,
 					repository TEXT NOT NULL,
 					base_branch TEXT NOT NULL,
-					umbrella_issue INTEGER,
-					umbrella_repo TEXT,
+					project_id INTEGER,
+					project_repo TEXT,
 					status TEXT NOT NULL CHECK (status IN ('active', 'completed', 'deleted')),
 					metadata TEXT NOT NULL,
 					created_at REAL NOT NULL,
@@ -1523,8 +1535,8 @@ describe("sqlite state store", () => {
 					preset TEXT NOT NULL,
 					repository TEXT NOT NULL,
 					base_branch TEXT NOT NULL,
-					umbrella_issue INTEGER,
-					umbrella_repo TEXT,
+					project_id INTEGER,
+					project_repo TEXT,
 					status TEXT NOT NULL CHECK (status IN ('active', 'completed', 'deleted')),
 					metadata TEXT NOT NULL,
 					created_at REAL NOT NULL,
@@ -1623,14 +1635,12 @@ function createFullChain(store: ReturnType<typeof openSqliteStateStore>): ChainR
 		repository: "mouriya-s-lab/coder-loop",
 		baseBranch: "main",
 		status: "active",
-		// #457: umbrella values previously stored in chains.umbrella_issue / umbrella_repo first-class
-		// columns. The columns are retired; bundled preset reads umbrella through metadata.bindings
-		// (chain.umbrella\u0052epo / chain.umbrella\u0049ssue declared-binding namespace).
+		// Preset-owned values live only in generic metadata bindings.
 		metadata: storedChainMetadata({
 			flavor: "codex",
 			tier: "claude",
 			nested: { enabled: true },
-			bindings: { umbrella\u0049ssue: 176, umbrella\u0052epo: "mouriya-s-lab/coder-loop" },
+			bindings: { projectId: 176, projectRepo: "mouriya-s-lab/coder-loop" },
 		}),
 		createdAt: 1_800_000_000,
 		updatedAt: 1_800_000_010,

@@ -380,21 +380,20 @@ process.exitCode = 0
 			// #433: top-level `metadata.runner` is retired. Operators who want the chain to expose
 			// a particular runner kind set it via the per-runner channel (`metadata.codex.binary`)
 			// instead; the bare runner alias is gone.
-			// #457: umbrella values now flow through metadata.bindings rather than a first-class
-			// chain.create field; the daemon no longer validates `umbrella\u0049ssue` / `umbrella\u0052epo`
-			// as engine-typed fields, so the test exercises the declared-binding path instead.
+			// Preset-owned values flow generically through metadata.bindings rather than first-class
+			// chain.create fields, so this exercises the declared-binding path.
 			const result = expectOk(await request(fixture, "chain.create", {
 				name: "central-state",
 				repository: "mouriya-s-lab/coder-loop",
 				baseBranch: "main",
-				metadata: { codex: { binary: "codex" }, bindings: { umbrella\u0049ssue: 176 } },
+				metadata: { codex: { binary: "codex" }, bindings: { projectId: 176 } },
 			}))
 
 			expect(result.chain).toMatchObject({
 				name: "central-state",
 				baseBranch: "main",
 				status: "active",
-				metadata: { codex: { binary: "codex" }, bindings: { umbrella\u0049ssue: 176, repository: "mouriya-s-lab/coder-loop" } },
+				metadata: { codex: { binary: "codex" }, bindings: { projectId: 176, repository: "mouriya-s-lab/coder-loop" } },
 			})
 			const paths = resolveChainRuntimePaths("central-state", { loopDataRoot: fixture.loopDataRoot })
 			await expect(Bun.file(paths.sharedFile).exists()).resolves.toBe(true)
@@ -532,31 +531,27 @@ process.exitCode = 0
 		}
 	})
 
-	// #457: `umbrella\u0049ssue` / `umbrella\u0052epo` are no longer first-class chain.create fields. They flow
-	// through `metadata.bindings`, where the operator (or the `--umbrella owner/repo#123` CLI
-	// shorthand) writes them as preset-declared chain bindings. The daemon rejects the legacy keys
-	// at the strict-args gate so stale callers fail loudly instead of silently dropping their value.
-	test("socket chain.create rejects legacy first-class umbrella\u0049ssue / umbrella\u0052epo args (#457)", async () => {
-		const fixture = await startFixture("chain-create-rejects-legacy-umbrella", { schedulerEnabled: false })
+	test("socket chain.create rejects preset-owned first-class args while accepting them as generic bindings", async () => {
+		const fixture = await startFixture("chain-create-rejects-business-fields", { schedulerEnabled: false })
 		try {
 			expectInvalid(await request(fixture, "chain.create", {
-				name: "legacy-umbrella-issue",
+				name: "legacy-project-id",
 				repository: "mouriya-s-lab/coder-loop",
-				umbrella\u0049ssue: 176,
+				projectId: 176,
 			}))
 			expectInvalid(await request(fixture, "chain.create", {
-				name: "legacy-umbrella-repo",
+				name: "legacy-project-repo",
 				repository: "mouriya-s-lab/coder-loop",
-				umbrella\u0052epo: "mouriya-s-lab/coder-loop",
+				projectRepo: "mouriya-s-lab/coder-loop",
 			}))
 
 			const created = record(expectOk(await request(fixture, "chain.create", {
-				name: "umbrella-via-bindings",
+				name: "project-via-bindings",
 				repository: "mouriya-s-lab/coder-loop",
-				metadata: { bindings: { umbrella\u0049ssue: 176, umbrella\u0052epo: "mouriya-s-lab/coder-loop" } },
+				metadata: { bindings: { projectId: 176, projectRepo: "mouriya-s-lab/coder-loop" } },
 			})).chain)
 			expect(created).toMatchObject({
-				metadata: { bindings: { umbrella\u0049ssue: 176, umbrella\u0052epo: "mouriya-s-lab/coder-loop" } },
+				metadata: { bindings: { projectId: 176, projectRepo: "mouriya-s-lab/coder-loop" } },
 			})
 		} finally {
 			await fixture.daemon.stop()

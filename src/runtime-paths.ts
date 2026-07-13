@@ -1,5 +1,6 @@
 import { homedir } from "node:os"
 import { isAbsolute, resolve } from "node:path"
+import { createHash } from "node:crypto"
 
 export const LOOP_DATA_ROOT_ENV = "CODER_LOOP_DATA_DIR"
 // #406: run-scoped credential the engine mints at spawn time and injects into the runner process
@@ -195,12 +196,22 @@ export function resolveChainRuntimePaths(chainName: string, options: LoopDataRoo
 	}
 }
 
-function itemArtifactPathComponent(itemId: string): string {
+export function itemArtifactPathComponent(itemId: string): string {
 	if (itemId === "" || /\s/u.test(itemId)) {
 		throw new RuntimePathError("invalid_path_component", "item id must be non-empty and contain no whitespace", itemId)
 	}
-	if (/^[A-Za-z0-9._-]+$/u.test(itemId) && itemId !== "." && itemId !== ".." && !itemId.includes("..")) return itemId
-	return `opaque-${Array.from(new TextEncoder().encode(itemId), (byte) => byte.toString(16).padStart(2, "0")).join("")}`
+	if (
+		itemId.length <= MAX_PATH_COMPONENT_LENGTH - ".md".length
+		&& /^[A-Za-z0-9._-]+$/u.test(itemId)
+		&& itemId !== "."
+		&& itemId !== ".."
+		&& !itemId.includes("..")
+	) return itemId
+	const digest = createHash("sha256").update(itemId, "utf8").digest("hex")
+	// The component is a bounded content address, not the item identity. SQLite retains the full
+	// typed itemId as the authority; item admission rejects the (cryptographically improbable)
+	// case where two distinct IDs resolve to the same address rather than allowing artifact aliasing.
+	return `opaque-sha256-${digest}`
 }
 
 function sanitizePathComponent(input: string, label: string): string {
