@@ -1,13 +1,13 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { mkdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises"
-import { createConnection } from "node:net"
+import { createConnection, createServer } from "node:net"
 import { resolve } from "node:path"
 
-import { startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
+import { daemonRequest, sendDaemonRequest, startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
 import { LOOP_DATA_ROOT_ENV, resolveLoopDataPaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
 import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedItemExtra } from "./runtime-data"
-import { appendObservabilityEvent, makeObservabilityEvent } from "./observability"
+import { appendObservabilityEvent, makeObservabilityEvent, queryObservabilityEvents } from "./observability"
 
 // #397 test brand helper — see install-commands.test.ts for rationale.
 function admittedTestStatus(value: string) {
@@ -1194,6 +1194,80 @@ attemptTimeoutSeconds = 3600
 			await fixture.daemon.stop()
 		}
 	})
+
+	test("context append real daemon runtime", async () => {
+		const loopDataRoot = await makeLoopDataRoot("context-append-runtime")
+		await mkdir(loopDataRoot, { recursive: true })
+		const bodyPath = resolve(TEST_ROOT, `${++nextFixtureId}-context-body.txt`)
+		const credentialPath = resolve(TEST_ROOT, `${++nextFixtureId}-context-live-credential.txt`)
+		const body = "多字节-context\n".repeat(150_000)
+		await writeFile(bodyPath, body)
+		const runtimeEnv = await contextRuntimeEnv(credentialPath)
+		const store = openSqliteStateStore({ loopDataRoot })
+		const chain = store.createChain({ name: "context-chain", repository: "mouriya-s-lab/coder-loop", baseBranch: "main" })
+		const liveChain = store.createChain({ name: "context-live-chain", preset: "gh-issue-pr-iteration", repository: "mouriya-s-lab/coder-loop", baseBranch: "main" })
+		store.createItem({ chainId: liveChain.id, itemId: "live-item", repoCwd: REPO_ROOT, status: admittedTestStatus("queued"), preset: "gh-issue-pr-iteration", extra: storedItemExtra({ issue: "live-item" }) })
+		store.close()
+		const daemonProcess = spawnDaemonUp(loopDataRoot, runtimeEnv)
+		const daemonStdout = new Response(daemonProcess.stdout).text()
+		const daemonStderr = new Response(daemonProcess.stderr).text()
+		let daemonStopped = false
+		try {
+			const readyPid = await waitForDaemonReady(loopDataRoot, runtimeEnv)
+			const daemonPid = Number((await readFile(resolve(loopDataRoot, "daemon.pid"), "utf-8")).trim())
+			expect(readyPid).toBe(daemonPid)
+			expect(isPidAlive(daemonPid)).toBe(true)
+			const appended = expectJsonOk(await runCli(["context", "append", "context-chain", "--scope", "chain", "--body-file", bodyPath, "--loop-data-root", loopDataRoot, "--json"]))
+			expect(typeof appended.entryId).toBe("string")
+			const check = openSqliteStateStore({ loopDataRoot })
+			expect(check.listContextEntries(chain.id)[0]?.body).toBe(body)
+			check.close()
+			const socketPath = resolve(loopDataRoot, "daemon.sock")
+			const denied = await sendDaemonRequest(socketPath, daemonRequest("context.append.begin", { chainName: "context-chain", scope: {kind:"group",groupId:"missing"} }))
+			expect(denied.ok).toBe(false)
+			const missingItem = await sendDaemonRequest(socketPath, daemonRequest("context.append.begin", { chainName: "context-chain", scope: {kind:"item",itemId:"missing"} }))
+			expect(missingItem.ok).toBe(false)
+			if (!missingItem.ok) expect(missingItem.error.code).toBe("item-not-found")
+			const forged = await sendDaemonRequest(socketPath, daemonRequest("context.append.begin", { chainName: "context-chain", scope: { kind: "chain" }, author: { kind: "operator" } }))
+			expect(forged.ok).toBe(false)
+			const eventJson = JSON.stringify((await queryObservabilityEvents(resolveLoopDataPaths({loopDataRoot}).eventsFile,{type:"context.write_admission"})).events)
+			expect(eventJson).toContain('"outcome":"allow"')
+			expect(eventJson).toContain('"outcome":"deny"')
+			const deleted = await sendDaemonRequest(socketPath, daemonRequest("chain.delete",{chainName:"context-chain"}))
+			expect(deleted.ok).toBe(true)
+			if (deleted.ok) expect(deleted.result.deletedContextEntries).toBe(1)
+			const afterDelete = openSqliteStateStore({ loopDataRoot })
+			expect(afterDelete.listContextEntries(chain.id)).toEqual([])
+			afterDelete.close()
+			const closeSocket = resolve(TEST_ROOT, `${++nextFixtureId}-partial-response.sock`)
+			const peer = createServer((socket) => socket.end('{"id":"partial"'))
+			await new Promise<void>((resolveListen, reject) => { peer.once("error", reject); peer.listen(closeSocket, resolveListen) })
+			try { await expect(sendDaemonRequest(closeSocket, daemonRequest("daemon.status"))).rejects.toThrow("closed before a complete") }
+			finally { await new Promise<void>((resolveClose) => peer.close(() => resolveClose())) }
+
+			const credential = await waitFor(async () => { try { const value = (await readFile(credentialPath,"utf-8")).trim(); return value === "" ? null : value } catch { return null } }, 8_000)
+			const agentAppend = await runCli(["context","append","context-live-chain","--scope","chain","--body","live-agent","--loop-data-root",loopDataRoot,"--json"], { CODER_LOOP_RUN_CRED: credential })
+			expect(agentAppend.exitCode, agentAppend.stderr).toBe(0)
+			const liveStore = openSqliteStateStore({loopDataRoot})
+			expect(liveStore.listContextEntries(liveChain.id)[0]?.author).toMatchObject({kind:"agent",itemId:"live-item"})
+			liveStore.close()
+
+			const down = await runCli(["daemon", "down", "--loop-data-root", loopDataRoot, "--json"])
+			expect(down.exitCode, down.stderr).toBe(0)
+			expect(JSON.parse(down.stdout)).toMatchObject({ ok: true, result: { shutdown: true } })
+			expect(await daemonProcess.exited).toBe(0)
+			daemonStopped = true
+			expect(isPidAlive(daemonPid)).toBe(false)
+			expect(await daemonStdout).toContain("daemon up: pid=")
+			expect(await daemonStderr).not.toContain("internal_error")
+			await waitForDaemonSocketRemoval(loopDataRoot)
+			expect(await pathExistsForShutdownTest(resolve(loopDataRoot, "daemon.pid"))).toBe(false)
+		} finally {
+			if (!daemonStopped) await runCli(["daemon", "down", "--loop-data-root", loopDataRoot, "--json"])
+			daemonProcess.kill()
+			await daemonProcess.exited.catch(() => undefined)
+		}
+	})
 })
 
 type Fixture = {
@@ -1305,15 +1379,47 @@ function boundaryRecord(value: unknown): BoundaryRecord {
 	return value as BoundaryRecord
 }
 
-function spawnDaemonUp(loopDataRoot: string): Bun.Subprocess<"ignore", "pipe", "pipe"> {
+function spawnDaemonUp(loopDataRoot: string, env: Record<string, string> = {}): Bun.Subprocess<"ignore", "pipe", "pipe"> {
 	return Bun.spawn({
 		cmd: ["bun", LOOP_ENTRY, "daemon", "up", "--loop-data-root", loopDataRoot, "--scheduler-interval-ms", "100"],
 		cwd: REPO_ROOT,
 		stdin: "ignore",
 		stdout: "pipe",
 		stderr: "pipe",
-		env: { ...process.env, CODER_LOOP_RUN_CRED: undefined },
+		env: { ...process.env, CODER_LOOP_RUN_CRED: undefined, ...env },
 	})
+}
+
+async function contextRuntimeEnv(credentialPath: string): Promise<Record<string, string>> {
+	const bin = resolve(TEST_ROOT, `${++nextFixtureId}-context-runtime-bin`)
+	await mkdir(bin, { recursive: true })
+	const runner = [
+		"#!/usr/bin/env bash",
+		'printf "%s" "$CODER_LOOP_RUN_CRED" > "$CONTEXT_CREDENTIAL_PATH"',
+		"trap 'exit 0' TERM INT",
+		"while true; do sleep 1; done",
+		"",
+	].join("\n")
+	for (const name of ["codex", "claude", "opencode"]) await writeExecutable(resolve(bin, name), runner)
+	return {
+		PATH: `${bin}:${process.env.PATH ?? ""}`,
+		CONTEXT_CREDENTIAL_PATH: credentialPath,
+	}
+}
+
+async function waitForDaemonReady(loopDataRoot: string, env: Record<string, string>): Promise<number> {
+	return await waitFor(async () => {
+		const result = await runCli(["daemon", "status", REPO_ROOT, "--loop-data-root", loopDataRoot, "--json"], env)
+		if (result.exitCode !== 0) return null
+		const status = boundaryRecord(JSON.parse(result.stdout))
+		const processes = boundaryRecord(status.processes)
+		if (!Array.isArray(processes.live)) throw new Error("daemon status processes.live must be an array")
+		for (const value of processes.live) {
+			const live = boundaryRecord(value)
+			if (live.source === "daemon-socket" && typeof live.pid === "number") return live.pid
+		}
+		return null
+	}, 5_000)
 }
 
 async function exerciseShutdownAfterSocketRepairFailure(

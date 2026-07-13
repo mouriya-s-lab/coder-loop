@@ -60,6 +60,22 @@ import {
 	type UpdateItemInput,
 } from "./sqlite-state"
 import {
+	parseContextAppendBeginRequest,
+	parseContextAppendChunkRequest,
+	parseContextAppendSessionRequest,
+	type ContextAppendBeginRequest,
+	type ContextAppendBeginResult,
+	type ContextAppendChunkRequest,
+	type ContextAppendChunkResult,
+	type ContextAppendCommand,
+	type ContextAppendCommitResult,
+	type ContextAppendSession,
+	type ContextAuthor,
+	type ContextWriteAdmissionDenyReason,
+	type ContextWriteAdmissionPayload,
+	type ContextWriteAdmissionRecord,
+} from "./context-entry"
+import {
 	assertRequestAdmittedItemStatus,
 	chainMetadataToJsonObject,
 	chainPresetPath,
@@ -176,6 +192,9 @@ export type DaemonCommandName =
 	// preset's entry status).
 	| "logs.query"
 	| "queue.unblock"
+	| "context.append.begin"
+	| "context.append.chunk"
+	| "context.append.commit"
 
 // #409: the privileged-op vocabulary the preset's `[phases.rights]
 // privilegedOps` segment may grant a phase. Closed engine-internal union — the
@@ -511,7 +530,18 @@ const QUEUE_UNBLOCK_ARG_KEYS = ["chainId", "chainName", "name", "issue", "dryRun
 // Downstream handlers switch exhaustively on `kind` so "anonymous mutation" is unrepresentable.
 type ItemMutationCaller =
 	| { kind: "operator"; subject: Extract<ObservabilitySubject, { kind: "operator" }> }
-	| { kind: "agent"; runId: string; phase: string; subject: Extract<ObservabilitySubject, { kind: "agent" }> }
+	| { kind: "agent"; chainId: number; rowId: number; runId: string; phase: string; subject: Extract<ObservabilitySubject, { kind: "agent" }> }
+
+type ContextSessionRequestAdmission = {
+	sessionId: string
+	session: ContextAppendSession
+	chain: ChainRecord
+	caller: ItemMutationCaller
+}
+
+type ContextAuthorResolution =
+	| { kind: "ok"; author: ContextAuthor }
+	| { kind: "err"; reason: Extract<ContextWriteAdmissionDenyReason, "cross-chain" | "item-not-found"> }
 
 // #600: authorization and audit attribution for `item.exitAction` after caller admission.
 // Operator calls have no credential-bound identity, so they preserve the existing direct-socket
@@ -1035,6 +1065,7 @@ export class CoderLoopDaemon {
 	// matching the "credentials die with the process" invariant. Not persisted to SQLite — credentials
 	// are process-instance-scoped, not durable state.
 	private readonly runCredentialRegistry = new Map<string, RunCredentialRegistration>()
+	private readonly contextAppendSessions = new Map<string, ContextAppendSession>()
 	private resolveClosed: (() => void) | null = null
 	private readonly daemonBatchTimestamp = formatDaemonBatchTimestamp(new Date())
 	// #409: classified dispatch table; built once at construction. Each entry binds a
@@ -1572,7 +1603,157 @@ export class CoderLoopDaemon {
 			},
 			"logs.query": { authClass: "hard-deny-for-agent", handler: (args) => this.handleLogsQuery(args) },
 			"queue.unblock": { authClass: "hard-deny-for-agent", handler: (args) => this.handleQueueUnblock(args) },
+			"context.append.begin": { authClass: "mutation-credential-gated", handler: (args) => this.handleContextAppendBegin(args) },
+			"context.append.chunk": { authClass: "mutation-credential-gated", handler: (args) => this.handleContextAppendChunk(args) },
+			"context.append.commit": { authClass: "mutation-credential-gated", handler: (args) => this.handleContextAppendCommit(args) },
 		}
+	}
+
+	private resolveContextAuthor(chain: ChainRecord, caller: ItemMutationCaller): ContextAuthorResolution {
+		if (caller.kind === "operator") return { kind: "ok", author: { kind: "operator" } }
+		if (caller.chainId !== chain.id) return { kind: "err", reason: "cross-chain" }
+		const item = this.requireStore().getItem(caller.rowId)
+		if (item === null) return { kind: "err", reason: "item-not-found" }
+		return { kind: "ok", author: { kind: "agent", chainId: chain.id, itemId: item.itemId, runId: caller.runId, phase: caller.phase } }
+	}
+
+	private async recordContextAdmission(chain: ChainRecord | null, input: ContextWriteAdmissionRecord<ItemMutationCaller["subject"]>): Promise<void> {
+		const payload: ContextWriteAdmissionPayload = input.outcome === "allow"
+			? { command: input.command, outcome: input.outcome, reason: input.reason, sessionId: input.sessionId }
+			: { command: input.command, outcome: input.outcome, reason: input.reason, sessionId: input.sessionId }
+		const event = chain === null
+			? makeObservabilityEvent({ kind: "audit", type: "context.write_admission", subject: input.subject, payload })
+			: makeObservabilityEvent({ kind: "audit", type: "context.write_admission", chain: chain.name, subject: input.subject, payload })
+		await this.recordObservabilityEvent(event)
+	}
+
+	private contextCaller(args: JsonObject): Result<ItemMutationCaller, ResolveCallerDenyReason> { return this.resolveItemMutationCaller(args) }
+
+	private contextAuthorSubject(author: ContextAuthor): ItemMutationCaller["subject"] {
+		switch (author.kind) {
+			case "operator": return { kind: "operator" }
+			case "agent": return { kind: "agent", runId: author.runId, phase: author.phase }
+		}
+	}
+
+	private async admitContextSessionRequest(args: JsonObject, command: Exclude<ContextAppendCommand, "begin">): Promise<ContextSessionRequestAdmission> {
+		let sessionId: string
+		try {
+			sessionId = parseContextAppendSessionRequest(args).sessionId
+		} catch (error) {
+			await this.recordContextAdmission(null, { command, outcome: "deny", reason: "invalid-request", sessionId: null, subject: { kind: "operator" } })
+			throw new DaemonError("invalid_request", errorMessage(error))
+		}
+		const session = this.contextAppendSessions.get(sessionId)
+		if (session === undefined) {
+			await this.recordContextAdmission(null, { command, outcome: "deny", reason: "unknown-session", sessionId, subject: { kind: "operator" } })
+			throw new DaemonError("invalid_request", "unknown context append session")
+		}
+		const chain = this.requireStore().getChain(session.chainId)
+		if (chain === null) {
+			await this.recordContextAdmission(null, { command, outcome: "deny", reason: "chain-not-found", sessionId, subject: this.contextAuthorSubject(session.author) })
+			throw new DaemonError("not_found", "context append session chain no longer exists")
+		}
+		const resolved = this.contextCaller(args)
+		if (resolved.kind === "err") {
+			await this.recordContextAdmission(chain, { command, outcome: "deny", reason: resolved.error.kind, sessionId, subject: { kind: "operator" } })
+			throw this.resolveCallerDenyError(resolved.error)
+		}
+		const expected = session.author
+		const matches = expected.kind === "operator"
+			? resolved.value.kind === "operator"
+			: resolved.value.kind === "agent" && resolved.value.runId === expected.runId && resolved.value.phase === expected.phase
+		if (!matches) {
+			await this.recordContextAdmission(chain, { command, outcome: "deny", reason: "session-owner-mismatch", sessionId, subject: resolved.value.subject })
+			throw new DaemonError("invalid_caller", "context append session belongs to a different admitted caller")
+		}
+		return { sessionId, session, chain, caller: resolved.value }
+	}
+
+	private async handleContextAppendBegin(args: JsonObject): Promise<JsonObject> {
+		let chain: ChainRecord
+		try {
+			chain = this.resolveChain(args)
+		} catch (error) {
+			const reason: ContextWriteAdmissionDenyReason = error instanceof DaemonError && error.code === "not_found" ? "chain-not-found" : "invalid-request"
+			await this.recordContextAdmission(null, { command: "begin", outcome: "deny", reason, sessionId: null, subject: { kind: "operator" } })
+			throw error
+		}
+		const callerResult = this.contextCaller(args)
+		if (callerResult.kind === "err") {
+			await this.recordContextAdmission(chain, { command: "begin", outcome: "deny", reason: callerResult.error.kind, sessionId: null, subject: { kind: "operator" } })
+			throw this.resolveCallerDenyError(callerResult.error)
+		}
+		if (Object.hasOwn(args, "author")) {
+			await this.recordContextAdmission(chain, { command: "begin", outcome: "deny", reason: "invalid-request", sessionId: null, subject: callerResult.value.subject })
+			throw new DaemonError("invalid_request", "context author is daemon-derived and must not be supplied")
+		}
+		let request: ContextAppendBeginRequest
+		try {
+			request = parseContextAppendBeginRequest(args)
+		} catch (error) {
+			await this.recordContextAdmission(chain, {
+				command: "begin",
+				outcome: "deny",
+				reason: "invalid-request",
+				sessionId: null,
+				subject: callerResult.value.subject,
+			})
+			throw new DaemonError("invalid_request", errorMessage(error))
+		}
+		const scope = request.scope
+		if (scope.kind === "item" && this.requireStore().getItemById(chain.id, scope.itemId) === null) {
+			await this.recordContextAdmission(chain, { command: "begin", outcome: "deny", reason: "item-not-found", sessionId: null, subject: callerResult.value.subject })
+			throw new DaemonError("item-not-found", `context item scope target does not exist: ${scope.itemId}`)
+		}
+		if (scope.kind === "group") {
+			await this.recordContextAdmission(chain, { command: "begin", outcome: "deny", reason: "group-unavailable-v2", sessionId: null, subject: callerResult.value.subject })
+			throw new DaemonError("group-unavailable-v2", "v2 has no addressable par container for context group scope")
+		}
+		const sessionId = randomUUID()
+		const authorResolution = this.resolveContextAuthor(chain, callerResult.value)
+		if (authorResolution.kind === "err") {
+			await this.recordContextAdmission(chain, { command: "begin", outcome: "deny", reason: authorResolution.reason, sessionId: null, subject: callerResult.value.subject })
+			throw new DaemonError("invalid_caller", authorResolution.reason === "cross-chain" ? "agent credential belongs to another chain" : "credential item no longer exists")
+		}
+		this.contextAppendSessions.set(sessionId, { chainId: chain.id, scope, author: authorResolution.author, chunks: [], nextSequence: 0 })
+		await this.recordContextAdmission(chain, { command: "begin", outcome: "allow", reason: callerResult.value.kind === "operator" ? "operator" : "admitted", sessionId, subject: callerResult.value.subject })
+		const result: ContextAppendBeginResult = { sessionId }
+		return result
+	}
+
+	private async handleContextAppendChunk(args: JsonObject): Promise<JsonObject> {
+		const admitted = await this.admitContextSessionRequest(args, "chunk")
+		const sessionId = admitted.sessionId
+		let request: ContextAppendChunkRequest
+		try {
+			request = parseContextAppendChunkRequest(args)
+		} catch (error) {
+			await this.recordContextAdmission(admitted.chain, { command: "chunk", outcome: "deny", reason: "invalid-request", sessionId, subject: admitted.caller.subject })
+			throw new DaemonError("invalid_request", errorMessage(error))
+		}
+		const { sequence, chunk } = request
+		const session = admitted.session
+		if (sequence !== session.nextSequence) {
+			await this.recordContextAdmission(admitted.chain, { command: "chunk", outcome: "deny", reason: "sequence-mismatch", sessionId, subject: admitted.caller.subject })
+			throw new DaemonError("invalid_request", `context chunk sequence expected ${session.nextSequence}, got ${sequence}`)
+		}
+		session.chunks.push(chunk)
+		session.nextSequence += 1
+		await this.recordContextAdmission(admitted.chain, { command: "chunk", outcome: "allow", reason: admitted.caller.kind === "operator" ? "operator" : "admitted", sessionId, subject: admitted.caller.subject })
+		const result: ContextAppendChunkResult = { sessionId, nextSequence: session.nextSequence }
+		return result
+	}
+
+	private async handleContextAppendCommit(args: JsonObject): Promise<JsonObject> {
+		const admitted = await this.admitContextSessionRequest(args, "commit")
+		const sessionId = admitted.sessionId
+		const session = admitted.session
+		this.contextAppendSessions.delete(sessionId)
+		const entry = this.requireStore().appendContextEntry({ chainId: session.chainId, scope: session.scope, author: session.author, body: session.chunks.join("") })
+		await this.recordContextAdmission(admitted.chain, { command: "commit", outcome: "allow", reason: admitted.caller.kind === "operator" ? "operator" : "admitted", sessionId, subject: admitted.caller.subject })
+		const result: ContextAppendCommitResult = { entryId: entry.id, createdAt: entry.createdAt }
+		return result
 	}
 
 	private async handleRequest(request: DaemonRequest): Promise<JsonObject> {
@@ -2158,12 +2339,14 @@ export class CoderLoopDaemon {
 			const terminatedRuns = await this.terminateActiveRunsForChain(chain.id)
 			const cleanup = await this.cleanupChainRuntime(chain)
 			const updated = this.requireStore().updateChain(chain.id, { status: "deleted" })
+			const deletedContextEntries = this.requireStore().deleteContextEntriesForChain(chain.id)
 			this.decisionFingerprints.release({ kind: "chain", chainId: chain.id })
 			return {
 				chain: chainToJson(updated),
 				alreadyDeleted: false,
 				terminatedRuns: terminatedRuns.map(completedRunToJson),
 				cleanup,
+				deletedContextEntries,
 			}
 		} finally {
 			resumeScheduler()
@@ -3565,7 +3748,14 @@ export class CoderLoopDaemon {
 		}
 		return {
 			kind: "ok",
-			value: { kind: "agent", runId: registration.context.runId, phase: registration.context.phase, subject },
+			value: {
+				kind: "agent",
+				chainId: registration.context.chainId,
+				rowId: registration.context.itemId,
+				runId: registration.context.runId,
+				phase: registration.context.phase,
+				subject,
+			},
 		}
 	}
 
@@ -4227,7 +4417,9 @@ export async function sendDaemonRequest(socketPath: string, request: Omit<Daemon
 	return await new Promise((resolveResponse, reject) => {
 		const socket = createConnection(socketPath)
 		let buffer = ""
+		let settled = false
 		const cleanup = () => {
+			settled = true
 			socket.removeAllListeners()
 			socket.destroy()
 		}
@@ -4252,6 +4444,11 @@ export async function sendDaemonRequest(socketPath: string, request: Omit<Daemon
 		socket.on("error", (error) => {
 			cleanup()
 			reject(error)
+		})
+		socket.on("close", () => {
+			if (settled) return
+			cleanup()
+			reject(new DaemonError("incomplete_response", "daemon socket closed before a complete newline-delimited response"))
 		})
 	})
 }
@@ -5304,6 +5501,9 @@ const DAEMON_COMMAND_NAMES = [
 	"daemon.down",
 	"logs.query",
 	"queue.unblock",
+	"context.append.begin",
+	"context.append.chunk",
+	"context.append.commit",
 ] as const
 
 // Compile-time bidirectional subset check: `DAEMON_COMMAND_NAMES` must enumerate exactly the
@@ -5353,6 +5553,9 @@ function narrowPrivilegedOpAuditOp(op: DaemonCommandName): PrivilegedOpAuditOp |
 		case "item.update":
 		case "item.exits":
 		case "item.exitAction":
+		case "context.append.begin":
+		case "context.append.chunk":
+		case "context.append.commit":
 		case "daemon.status":
 			return null
 		default:
