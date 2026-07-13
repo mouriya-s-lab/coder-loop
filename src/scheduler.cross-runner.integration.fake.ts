@@ -45,7 +45,7 @@ const prompt = extractPrompt(runnerArgs)
 const promptInput = parsePrompt(prompt)
 const phase = stringValue(promptInput.phase, response.phase ?? "unknown")
 const runId = stringValue(promptInput.runId, "unknown-run")
-const issueNumber = numberValue(promptInput.issueNumber)
+const legacyItemNumber = numberValue(promptInput.legacyItemNumber)
 const resumedSessionId = extractResumeSessionId(runnerKind, runnerArgs)
 
 await appendJsonLine(eventLogPath, {
@@ -54,7 +54,7 @@ await appendJsonLine(eventLogPath, {
 	runner: runnerKind,
 	phase,
 	runId,
-	issueNumber,
+	legacyItemNumber,
 	resumedSessionId,
 	argv: runnerArgs,
 })

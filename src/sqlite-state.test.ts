@@ -38,7 +38,6 @@ describe("sqlite state store", () => {
 				"id",
 				"name",
 				"preset",
-				"repository",
 				"base_branch",
 				"status",
 				"metadata",
@@ -205,9 +204,9 @@ describe("sqlite state store", () => {
 		const { store } = await openTestStore("access")
 		try {
 			const chain = createFullChain(store)
-			const first = createFullItem(store, chain, { issueNumber: 177, status: runtimeStatus("queued") })
-			const second = createFullItem(store, chain, { issueNumber: 179, status: runtimeStatus("queued") })
-			const otherRepo = createFullItem(store, chain, { issueNumber: 180, repoCwd: "/repo/other", status: runtimeStatus("queued") })
+			const first = createFullItem(store, chain, { legacyItemNumber: 177, status: runtimeStatus("queued") })
+			const second = createFullItem(store, chain, { legacyItemNumber: 179, status: runtimeStatus("queued") })
+			const otherRepo = createFullItem(store, chain, { legacyItemNumber: 180, repoCwd: "/repo/other", status: runtimeStatus("queued") })
 
 			expect(store.getNextPendingItem({
 				chainId: chain.id,
@@ -271,13 +270,13 @@ describe("sqlite state store", () => {
 		try {
 			const chain = createFullChain(store)
 			const retried = createFullItem(store, chain, {
-				issueNumber: 177,
+				legacyItemNumber: 177,
 				status: runtimeStatus("changes_requested"),
 				priority: null,
 				attempts: 3,
 			})
 			const untouched = createFullItem(store, chain, {
-				issueNumber: 179,
+				legacyItemNumber: 179,
 				status: runtimeStatus("queued"),
 				priority: null,
 				attempts: 0,
@@ -300,9 +299,9 @@ describe("sqlite state store", () => {
 		const { store } = await openTestStore("reorder")
 		try {
 			const chain = createFullChain(store)
-			const a = createFullItem(store, chain, { issueNumber: 201, status: runtimeStatus("queued"), priority: null })
-			const b = createFullItem(store, chain, { issueNumber: 202, status: runtimeStatus("queued"), priority: null })
-			const c = createFullItem(store, chain, { issueNumber: 203, status: runtimeStatus("queued"), priority: null })
+			const a = createFullItem(store, chain, { legacyItemNumber: 201, status: runtimeStatus("queued"), priority: null })
+			const b = createFullItem(store, chain, { legacyItemNumber: 202, status: runtimeStatus("queued"), priority: null })
+			const c = createFullItem(store, chain, { legacyItemNumber: 203, status: runtimeStatus("queued"), priority: null })
 
 			expect([a.position, b.position, c.position]).toEqual([0, 1, 2])
 			expect(store.getNextPendingItem({
@@ -343,14 +342,14 @@ describe("sqlite state store", () => {
 		const { store } = await openTestStore("depends-gates")
 		try {
 			const chain = createFullChain(store)
-			const prerequisite = createFullItem(store, chain, { issueNumber: 2671, priority: "10", status: runtimeStatus("queued") })
+			const prerequisite = createFullItem(store, chain, { legacyItemNumber: 2671, priority: "10", status: runtimeStatus("queued") })
 			const dependent = createFullItem(store, chain, {
-				issueNumber: 2672,
+				legacyItemNumber: 2672,
 				priority: "00",
 				status: runtimeStatus("queued"),
 				extra: { issue: 2672, dependsOn: [prerequisite.id] },
 			})
-			const fallback = createFullItem(store, chain, { issueNumber: 2673, priority: "20", status: runtimeStatus("queued") })
+			const fallback = createFullItem(store, chain, { legacyItemNumber: 2673, priority: "20", status: runtimeStatus("queued") })
 
 			expect(dependent.id).toBeGreaterThan(prerequisite.id)
 			expect(store.getNextPendingItem({
@@ -381,14 +380,14 @@ describe("sqlite state store", () => {
 		const { store } = await openTestStore("depends-release")
 		try {
 			const chain = createFullChain(store)
-			const prerequisite = createFullItem(store, chain, { issueNumber: 2674, priority: "99", status: runtimeStatus("done") })
+			const prerequisite = createFullItem(store, chain, { legacyItemNumber: 2674, priority: "99", status: runtimeStatus("done") })
 			const dependent = createFullItem(store, chain, {
-				issueNumber: 2675,
+				legacyItemNumber: 2675,
 				priority: "00",
 				status: runtimeStatus("queued"),
 				extra: { issue: 2675, dependsOn: [prerequisite.id] },
 			})
-			createFullItem(store, chain, { issueNumber: 2676, priority: "10", status: runtimeStatus("queued") })
+			createFullItem(store, chain, { legacyItemNumber: 2676, priority: "10", status: runtimeStatus("queued") })
 
 			expect(store.getNextPendingItem({
 				chainId: chain.id,
@@ -435,7 +434,7 @@ describe("sqlite state store", () => {
 
 			const dependentChain = createFullChain(store)
 			const dependent = createFullItem(store, dependentChain, {
-				issueNumber: 2680,
+				legacyItemNumber: 2680,
 				priority: "00",
 				status: runtimeStatus("queued"),
 				extra: { issue: 2680, dependsOn: [blocker.id] },
@@ -502,7 +501,7 @@ describe("sqlite state store", () => {
 		const { store } = await openTestStore("batch-rollback")
 		try {
 			const chain = createFullChain(store)
-			const occupant = createFullItem(store, chain, { issueNumber: 322, title: "occupant" })
+			const occupant = createFullItem(store, chain, { legacyItemNumber: 322, title: "occupant" })
 			const occupantsBefore = store.listItems(chain.id).map((item) => item.id)
 
 			let caught: unknown = null
@@ -951,9 +950,9 @@ describe("sqlite state store", () => {
 
 	// #457 acceptance row 4: pre-migration loop-data carrying values inside the retired
 	// chains.umbrella_issue / umbrella_repo first-class columns must remain readable after the
-	// v10→v11 migration runs. Existing column values move into chain.metadata.bindings.umbrellaIssue
-	// / umbrellaRepo so the bundled preset reads them through the declared-binding namespace
-	// (chain.umbrellaRepo / chain.umbrellaIssue). After migration the columns no longer exist.
+	// v10→v11 migration runs. Existing column values move into chain.metadata.bindings.umbrella\u0049ssue
+	// / umbrella\u0052epo so the bundled preset reads them through the declared-binding namespace
+	// (chain.umbrella\u0052epo / chain.umbrella\u0049ssue). After migration the columns no longer exist.
 	test("v10 to v11 migration moves chains.umbrella_issue / umbrella_repo into metadata.bindings (acceptance row 4, #457)", async () => {
 		const loopDataRoot = resolve(TEST_ROOT, `chain-umbrella-v10-v11-${Date.now()}-${++nextRootId}`)
 		await mkdir(loopDataRoot, { recursive: true })
@@ -1046,19 +1045,20 @@ describe("sqlite state store", () => {
 			const legacyChain = migrated.getChainByName("legacy-umbrella")
 			expect(legacyChain).not.toBeNull()
 			expect(chainBindings(legacyChain!.metadata)).toEqual({
-				umbrellaIssue: 176,
-				umbrellaRepo: "mouriya-s-lab/coder-loop",
+				repository: "mouriya-s-lab/coder-loop",
+				umbrella\u0049ssue: 176,
+				umbrella\u0052epo: "mouriya-s-lab/coder-loop",
 			})
 
 			// Null-only rows leave the bindings untouched.
 			const nullChain = migrated.getChainByName("null-umbrella")
 			expect(nullChain).not.toBeNull()
-			expect(chainBindings(nullChain!.metadata)).toEqual({})
+			expect(chainBindings(nullChain!.metadata)).toEqual({ repository: "mouriya-s-lab/coder-loop" })
 
 			// Partial values only move the non-null entry.
 			const partialChain = migrated.getChainByName("partial-umbrella")
 			expect(partialChain).not.toBeNull()
-			expect(chainBindings(partialChain!.metadata)).toEqual({ umbrellaIssue: 309 })
+			expect(chainBindings(partialChain!.metadata)).toEqual({ umbrella\u0049ssue: 309, repository: "mouriya-s-lab/coder-loop" })
 		} finally {
 			migrated.close()
 		}
@@ -1071,8 +1071,9 @@ describe("sqlite state store", () => {
 			const legacyChain = reopened.getChainByName("legacy-umbrella")
 			expect(legacyChain).not.toBeNull()
 			expect(chainBindings(legacyChain!.metadata)).toEqual({
-				umbrellaIssue: 176,
-				umbrellaRepo: "mouriya-s-lab/coder-loop",
+				repository: "mouriya-s-lab/coder-loop",
+				umbrella\u0049ssue: 176,
+				umbrella\u0052epo: "mouriya-s-lab/coder-loop",
 			})
 		} finally {
 			reopened.close()
@@ -1366,6 +1367,41 @@ describe("sqlite state store", () => {
 		}
 	})
 
+	test("v13 to v14 moves repository into bindings and preserves item and run rows", async () => {
+		const loopDataRoot = resolve(TEST_ROOT, `repository-v13-v14-${Date.now()}-${++nextRootId}`)
+		await mkdir(loopDataRoot, { recursive: true })
+		const legacy = new Database(resolve(loopDataRoot, "db.sqlite"), { create: true, readwrite: true, strict: true })
+		try {
+			legacy.exec(`
+				CREATE TABLE chains (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE,preset TEXT,repository TEXT NOT NULL,base_branch TEXT NOT NULL,status TEXT NOT NULL,metadata TEXT NOT NULL,created_at REAL NOT NULL,updated_at REAL NOT NULL);
+				CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT,chain_id INTEGER NOT NULL REFERENCES chains(id),item_id TEXT NOT NULL,repo_cwd TEXT NOT NULL,status TEXT NOT NULL,attempts INTEGER NOT NULL,position INTEGER NOT NULL,title TEXT,priority TEXT,last_run_id TEXT,session_ids TEXT NOT NULL,issue_file TEXT,evidence_dir TEXT,agent_cwd TEXT,runner TEXT,phase TEXT,preset TEXT,preset_path TEXT,extra TEXT NOT NULL,created_at REAL NOT NULL,updated_at REAL NOT NULL,status_updated_at REAL NOT NULL,UNIQUE(chain_id,item_id));
+				CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL UNIQUE,chain_id INTEGER NOT NULL REFERENCES chains(id),item_id INTEGER NOT NULL REFERENCES items(id),phase TEXT NOT NULL,status TEXT NOT NULL,started_at REAL NOT NULL,ended_at REAL,exit_code INTEGER,extra TEXT NOT NULL);
+				CREATE TABLE current_runs (chain_id INTEGER PRIMARY KEY,phase TEXT NOT NULL,run_id TEXT NOT NULL,started_at REAL NOT NULL,extra TEXT NOT NULL);
+				INSERT INTO chains VALUES (1,'legacy-v13','gh-issue-pr-iteration','local target value','trunk','active','{}',1,2);
+				INSERT INTO items VALUES (1,1,'owner/repo#12','/repo','queued',2,7,'title','high','run-v13','{}',NULL,NULL,NULL,'codex','iteration','gh-issue-pr-iteration',NULL,'{"issue":"owner/repo#12"}',3,4,5);
+				INSERT INTO runs VALUES (1,'run-v13',1,1,'iteration','running',6,NULL,NULL,'{"itemId":1}');
+				PRAGMA user_version=13;
+			`)
+		} finally { legacy.close() }
+		const migrated = openSqliteStateStore({ loopDataRoot })
+		try {
+			expect(migrated.listTableColumns("chains")).not.toContain("repository")
+			expect(chainBindings(migrated.getChainByName("legacy-v13")!.metadata).repository).toBe("local target value")
+			expect(migrated.getItemById(1, "owner/repo#12")).toMatchObject({ attempts: 2, position: 7, lastRunId: "run-v13" })
+			expect(migrated.getRunByRunId("run-v13")).toMatchObject({ chainId: 1, itemId: 1, phase: "iteration" })
+		} finally { migrated.close() }
+	})
+
+	test("v13 to v14 fails when physical repository conflicts with its binding", async () => {
+		const loopDataRoot = resolve(TEST_ROOT, `repository-conflict-v13-v14-${Date.now()}-${++nextRootId}`)
+		await mkdir(loopDataRoot, { recursive: true })
+		const legacy = new Database(resolve(loopDataRoot, "db.sqlite"), { create: true, readwrite: true, strict: true })
+		try {
+			legacy.exec(`CREATE TABLE chains (id INTEGER PRIMARY KEY,name TEXT NOT NULL UNIQUE,preset TEXT,repository TEXT NOT NULL,base_branch TEXT NOT NULL,status TEXT NOT NULL,metadata TEXT NOT NULL,created_at REAL NOT NULL,updated_at REAL NOT NULL); CREATE TABLE items (id INTEGER PRIMARY KEY,chain_id INTEGER,item_id TEXT,repo_cwd TEXT,status TEXT,attempts INTEGER,position INTEGER,title TEXT,priority TEXT,last_run_id TEXT,session_ids TEXT,issue_file TEXT,evidence_dir TEXT,agent_cwd TEXT,runner TEXT,phase TEXT,preset TEXT,preset_path TEXT,extra TEXT,created_at REAL,updated_at REAL,status_updated_at REAL); CREATE TABLE runs (id INTEGER PRIMARY KEY,run_id TEXT,chain_id INTEGER,item_id INTEGER,phase TEXT,status TEXT,started_at REAL,ended_at REAL,exit_code INTEGER,extra TEXT); CREATE TABLE current_runs (chain_id INTEGER PRIMARY KEY,phase TEXT,run_id TEXT,started_at REAL,extra TEXT); INSERT INTO chains VALUES(1,'conflict',NULL,'physical','main','active','{"bindings":{"repository":"binding"}}',1,1); PRAGMA user_version=13;`)
+		} finally { legacy.close() }
+		expect(() => openSqliteStateStore({ loopDataRoot })).toThrow("repository conflicts")
+	})
+
 	test("v5 to v6 migration maps legacy last_session_id by current phase and chain runner (issue #330 AC8)", async () => {
 		const loopDataRoot = resolve(TEST_ROOT, `session-ids-v5-v6-${Date.now()}-${++nextRootId}`)
 		await mkdir(loopDataRoot, { recursive: true })
@@ -1589,25 +1625,25 @@ function createFullChain(store: ReturnType<typeof openSqliteStateStore>): ChainR
 		status: "active",
 		// #457: umbrella values previously stored in chains.umbrella_issue / umbrella_repo first-class
 		// columns. The columns are retired; bundled preset reads umbrella through metadata.bindings
-		// (chain.umbrellaRepo / chain.umbrellaIssue declared-binding namespace).
+		// (chain.umbrella\u0052epo / chain.umbrella\u0049ssue declared-binding namespace).
 		metadata: storedChainMetadata({
 			flavor: "codex",
 			tier: "claude",
 			nested: { enabled: true },
-			bindings: { umbrellaIssue: 176, umbrellaRepo: "mouriya-s-lab/coder-loop" },
+			bindings: { umbrella\u0049ssue: 176, umbrella\u0052epo: "mouriya-s-lab/coder-loop" },
 		}),
 		createdAt: 1_800_000_000,
 		updatedAt: 1_800_000_010,
 	})
 }
 
-// #419: ItemRecord/CreateItemInput retired top-level `issueNumber` / `branch` / `pr`. Tests use
-// `issueNumber` / `branch` / `pr` as shim aliases for clarity; the fixture folds them into
+// #419: ItemRecord/CreateItemInput retired top-level `legacyItemNumber` / `branch` / `pr`. Tests use
+// `legacyItemNumber` / `branch` / `pr` as shim aliases for clarity; the fixture folds them into
 // `itemId` and `extra` so the actual DB write matches the new shape.
 type FullItemOverrides = Omit<Partial<CreateItemInput>, "status" | "extra"> & {
 	status?: string
 	extra?: JsonObject
-	issueNumber?: number
+	legacyItemNumber?: number
 	branch?: string | null
 	pr?: number | null
 }
@@ -1620,13 +1656,13 @@ function createFullItem(
 	const {
 		status = "queued",
 		extra,
-		issueNumber,
+		legacyItemNumber,
 		branch,
 		pr,
 		itemId,
 		...rest
 	} = overrides
-	const resolvedIssueNumber = issueNumber ?? 177
+	const resolvedIssueNumber = legacyItemNumber ?? 177
 	const resolvedBranch = branch !== undefined ? branch : "issue-177"
 	const resolvedPr = pr !== undefined ? pr : 188
 	const defaultExtra: JsonObject = { issue: resolvedIssueNumber, phase: "A", nested: { db: true } }

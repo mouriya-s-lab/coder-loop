@@ -172,7 +172,7 @@ describe("smoke: v2 central chain CLI", () => {
 	test("status and queue unblock use SQLite state", async () => {
 		const fixture = await createTarget("chain-smoke")
 		seedChain(fixture, {
-			issueNumber: 333,
+			legacyItemNumber: 333,
 			status: "blocked",
 			extra: { blockerRepo: "owner/dependency", blockerRef: "#267" },
 		})
@@ -186,7 +186,7 @@ describe("smoke: v2 central chain CLI", () => {
 		// → daemon caller-resolution treats it as `kind: "operator"`.
 		const daemon = await startCoderLoopDaemon({ loopDataRoot: fixture.loopDataRoot, shutdownGraceMs: 100, scheduler: { enabled: false } })
 		try {
-			const unblocked = expectJsonOk(await runCliAsync(["queue", "unblock", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--issue", "333", "--chain", fixture.chainName]))
+			const unblocked = expectJsonOk(await runCliAsync(["queue", "unblock", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--item", "333", "--chain", fixture.chainName]))
 			expect(unblocked.mutation.changed).toBe(true)
 			expect(unblocked.verification.itemStatus).toBe("queued")
 
@@ -214,13 +214,13 @@ describe("smoke: v2 central chain CLI", () => {
 	test("queue unblock emits operator-subject caller-admission audit (#406 row 4)", async () => {
 		const fixture = await createTarget("queue-unblock-audit")
 		seedChain(fixture, {
-			issueNumber: 406_400,
+			legacyItemNumber: 406_400,
 			status: "blocked",
 			extra: { blockerRepo: "owner/dependency", blockerRef: "#406" },
 		})
 		const daemon = await startCoderLoopDaemon({ loopDataRoot: fixture.loopDataRoot, shutdownGraceMs: 100, scheduler: { enabled: false } })
 		try {
-			const unblocked = expectJsonOk(await runCliAsync(["queue", "unblock", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--issue", "406400", "--chain", fixture.chainName]))
+			const unblocked = expectJsonOk(await runCliAsync(["queue", "unblock", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--item", "406400", "--chain", fixture.chainName]))
 			expect(unblocked.mutation.changed).toBe(true)
 			expect(unblocked.verification.itemStatus).toBe("queued")
 
@@ -244,7 +244,7 @@ describe("smoke: v2 central chain CLI", () => {
 				type: "item.mutation.caller_admission",
 				subject: { kind: "operator" },
 				payload: {
-					// #419: payload retired `issueNumber: int` in favor of `rowId` (items.id rowid)
+					// #419: payload retired `legacyItemNumber: int` in favor of `rowId` (items.id rowid)
 					// + `itemId` (preset-declared opaque string).
 					itemId: "406400",
 					claimedRunId: null,
@@ -286,7 +286,7 @@ describe("smoke: v2 central chain CLI", () => {
 	// same chain.metadata and reports the same runner view. Acceptance row 3.
 	test("status --json runner view does not change when a stale target config file is dropped in", async () => {
 		const fixture = await createTarget("status-runner-flag")
-		seedChain(fixture, { issueNumber: 191, status: "queued" })
+		seedChain(fixture, { legacyItemNumber: 191, status: "queued" })
 
 		const baseline = expectJsonOk(runCli(["status", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--chain", fixture.chainName, "--json"]))
 
@@ -307,7 +307,7 @@ describe("smoke: v2 central chain CLI", () => {
 	// #433: the supervisor-visible status schema no longer carries config/configPath/configFormat.
 	test("status --json target keys do not include any retired config fields", async () => {
 		const fixture = await createTarget("status-no-config")
-		seedChain(fixture, { issueNumber: 192, status: "queued" })
+		seedChain(fixture, { legacyItemNumber: 192, status: "queued" })
 		const snapshot = expectJsonOk(runCli(["status", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--chain", fixture.chainName, "--json"]))
 		const keys = Object.keys(snapshot.target)
 		for (const retired of ["config", "configPath", "configFormat"]) {
@@ -317,7 +317,7 @@ describe("smoke: v2 central chain CLI", () => {
 
 	test("daemon start dry-run resolves a chain and emits central-daemon plan", async () => {
 		const fixture = await createTarget("daemon-smoke")
-		seedChain(fixture, { issueNumber: 184, status: "queued" })
+		seedChain(fixture, { legacyItemNumber: 184, status: "queued" })
 
 		const result = runCli(["daemon", "start", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--chain", fixture.chainName, "--dry-run"])
 		expect(result.exitCode).toBe(0)
@@ -334,7 +334,7 @@ type Fixture = {
 }
 
 type SeedOptions = {
-	issueNumber: number
+	legacyItemNumber: number
 	status: string
 	extra?: Record<string, string>
 }
@@ -373,7 +373,7 @@ function seedChain(fixture: Fixture, options: SeedOptions): void {
 		})
 		store.createItem({
 			chainId: chain.id,
-			itemId: String(options.issueNumber),
+			itemId: String(options.legacyItemNumber),
 			repoCwd: fixture.target,
 			status: runtimeStatus(options.status),
 			issueFile: null,

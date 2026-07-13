@@ -96,7 +96,7 @@ process.exit(1)
 			loopDataRootOptions: { loopDataRoot },
 			now: () => now,
 			runIdFactory: ({ item: selected }) => `run-forced-failure-${selected.id}-${now}`,
-			prompt: ({ item, runId }) => JSON.stringify({ itemId: item.id, issueNumber: Number(item.itemId), runId }),
+			prompt: ({ item, runId }) => JSON.stringify({ itemId: item.id, legacyItemNumber: Number(item.itemId), runId }),
 			onEvent: (event) => {
 				schedulerEvents.push(event)
 			},
@@ -338,7 +338,7 @@ console.log("done:" + input.itemId)
 			worktreeManager: createGitWorktreeManager({ loopDataRoot }),
 			loopDataRootOptions: { loopDataRoot },
 			runIdFactory: ({ item: selected }) => `run-complete-cleanup-${selected.id}`,
-			prompt: ({ item: selected }) => JSON.stringify({ itemId: selected.id, issueNumber: Number(selected.itemId) }),
+			prompt: ({ item: selected }) => JSON.stringify({ itemId: selected.id, legacyItemNumber: Number(selected.itemId) }),
 			onEvent: (event) => {
 				schedulerEvents.push(event)
 			},
@@ -426,7 +426,7 @@ console.log(input.phase + ":" + status)
 			runIdFactory: ({ phase }) => `run-review-retry-${++runSequence}-${phase}`,
 			prompt: ({ item: selected, runId, phase }) => JSON.stringify({
 				itemId: selected.id,
-				issueNumber: Number(selected.itemId),
+				legacyItemNumber: Number(selected.itemId),
 				runId,
 				phase,
 			}),

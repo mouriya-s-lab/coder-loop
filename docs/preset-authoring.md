@@ -92,14 +92,14 @@ coder-loop chain create "$CHAIN" \
   --loop-data-root "$LOOP_DATA_ROOT" \
   --json
 coder-loop item add "$CHAIN" \
-  --issue 1 \
+  --item 1 \
   --repo-cwd "$TARGET" \
   --preset single-phase-example \
   --field-json '{"id":"demo-item"}' \
   --loop-data-root "$LOOP_DATA_ROOT" \
   --json
 coder-loop item update "$CHAIN" \
-  --issue 1 \
+  --item 1 \
   --status pending \
   --loop-data-root "$LOOP_DATA_ROOT" \
   --json

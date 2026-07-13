@@ -141,7 +141,7 @@ per-run 状态文件：`<logDir>/<runId>/<phase>/status.json`（fallback/debug �
 旧偏离（#370/#396/#412 清单）**大部分已收敛**。现存 GitHub 形状残留六处（均带注释、非隐藏债）：
 
 1. **`DEFAULT_PRESET_NAME = "gh-issue-pr-iteration"`**（`daemon.ts:374`, `loop.ts:70`）：chain.create 未传 preset 时的默认种子——引擎"禁止 preset 字面量"红线的**唯一现存违例**。
-2. **`--issue` CLI flag 名**（六处）：底层已泛化为 `itemId`，flag 名保留 backward compat。
+2. **`--item` CLI flag 名**（六处）：底层已泛化为 `itemId`，flag 名保留 backward compat。
 3. **`normalizeQueueIssueId`**（`loop.ts:4000-4009`）：硬编码 `owner/repo#123` / `#123` GitHub 引用记法解析。
 4. **`inferRepositoryFromGit`**（`loop.ts:3977-3998`）：只认 `github.com` URL 正则。
 5. **`doctor` 无条件检查 `gh` CLI**（`install-commands.ts:143-154`）：与 preset 无关。

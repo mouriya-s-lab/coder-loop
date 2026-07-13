@@ -19,7 +19,6 @@ import {
 	extractPromptPlaceholders,
 	getItemId,
 	makeIssueRunContext,
-	normalizeQueueIssueId,
 	parsePreset,
 	parseSessionIdFromRunnerStream,
 	renderFragmentIndex,
@@ -49,12 +48,12 @@ import { createStreamTextState } from "./runner-output"
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/loop-tests")
 
-// #419: ItemRecord retired top-level `issueNumber` / `branch` / `pr`. Tests still want the
+// #419: ItemRecord retired top-level `legacyItemNumber` / `branch` / `pr`. Tests still want the
 // legibility of passing those names — accept them as shim aliases and fold into `itemId` /
 // `extra` for the actual record shape.
 type MakeItemOverrides = Omit<Partial<ItemRecord>, "extra"> & {
 	extra?: JsonObject
-	issueNumber?: number
+	legacyItemNumber?: number
 	branch?: string | null
 	pr?: number | null
 }
@@ -76,13 +75,13 @@ function itemSessionIdsToJsonObject(value: ItemRecord["sessionIds"]): JsonObject
 }
 
 function makeItem(overrides: MakeItemOverrides = {}): ItemRecord {
-	const { extra, issueNumber, branch, pr, ...rest } = overrides
+	const { extra, legacyItemNumber, branch, pr, ...rest } = overrides
 	const extraWithLegacy: JsonObject = { ...(extra ?? {}) }
 	// #419: bundled preset's idField is `issue` and reads from `extra.issue` via the
-	// preset-declared transparent-field path. Tests that pass `issueNumber:` as a shim alias
+	// preset-declared transparent-field path. Tests that pass `legacyItemNumber:` as a shim alias
 	// also want the value visible there (resolveBinding({kind:"item", field:"issue"}) reads
 	// `extra.issue`). Don't overwrite when the caller already supplied a custom value.
-	if (issueNumber !== undefined && extraWithLegacy.issue === undefined) extraWithLegacy.issue = issueNumber
+	if (legacyItemNumber !== undefined && extraWithLegacy.issue === undefined) extraWithLegacy.issue = legacyItemNumber
 	// Caller-supplied `extra.branch` / `extra.pr` win over the shim alias — mirrors the
 	// engine semantics where a preset-declared transparent field already in extra is
 	// authoritative against any legacy top-level passthrough.
@@ -102,7 +101,7 @@ function makeItem(overrides: MakeItemOverrides = {}): ItemRecord {
 	return {
 		id: rest.id ?? 1,
 		chainId: rest.chainId ?? 10,
-		itemId: rest.itemId ?? (issueNumber !== undefined ? String(issueNumber) : ""),
+		itemId: rest.itemId ?? (legacyItemNumber !== undefined ? String(legacyItemNumber) : ""),
 		repoCwd: rest.repoCwd ?? REPO_ROOT,
 		status: rest.status ?? parseInternalStatus("queued", "test.status"),
 		attempts: rest.attempts ?? 0,
@@ -248,9 +247,9 @@ function documentedEngineRuntimeBindingKeys(markdown: string): string[] {
 }
 
 describe("ItemRecord prompt bindings", () => {
-	test("getItemId reads issueNumber when the preset idField is issue", () => {
+	test("getItemId reads legacyItemNumber when the preset idField is issue", () => {
 		const preset = makePreset()
-		expect(getItemId(makeItem({ issueNumber: 333 }), preset)).toBe("333")
+		expect(getItemId(makeItem({ legacyItemNumber: 333 }), preset)).toBe("333")
 	})
 
 	test("getItemId still honors explicit extra id fields", () => {
@@ -281,7 +280,7 @@ describe("ItemRecord prompt bindings", () => {
 			rights: { createItems: false, writableFields: new Set(), privilegedOps: new Set() },
 		}
 		const item = makeItem({
-			issueNumber: 333,
+			legacyItemNumber: 333,
 			phase: "iteration",
 			sessionIds: { iteration: { codex: "thread-123" } },
 		})
@@ -319,7 +318,7 @@ describe("ItemRecord prompt bindings", () => {
 
 	test("resolveBinding keeps old item.issue and chain.requireBrowserEvidence compatibility", () => {
 		const ctx: ResolveContext = {
-			item: makeItem({ issueNumber: 184, branch: "issue-184", pr: 191 }),
+			item: makeItem({ legacyItemNumber: 184, branch: "issue-184", pr: 191 }),
 			chain: makeChainBindings({ requireBrowserEvidence: true }),
 			runtime: makeRuntime(),
 			preset: makePreset(),
@@ -889,11 +888,6 @@ describe("small parsers", () => {
 		expect(detectHostRunner({})).toBe("claude")
 	})
 
-	test("normalizeQueueIssueId accepts local and cross-repo forms", () => {
-		expect(normalizeQueueIssueId("#333")).toBe("333")
-		expect(normalizeQueueIssueId("mouriya-s-lab/coder-loop#333")).toBe("333")
-	})
-
 	test("runner stream parsers extract sessions (verdict parser retired per #405)", () => {
 		expect(parseSessionIdFromRunnerStream("claude", "{\"type\":\"system\",\"session_id\":\"sess-1\"}\n")).toBe("sess-1")
 		expect(parseSessionIdFromRunnerStream("codex", "{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}")).toBe("thread-1")
@@ -1127,7 +1121,7 @@ describe("renderPrompt placeholder validation (issue #399)", () => {
 		const phase = makePhase([
 			["KEY", { kind: "item", field: "issue" }],
 		])
-		const item = makeItem({ issueNumber: 42 })
+		const item = makeItem({ legacyItemNumber: 42 })
 		const ctx: ResolveContext = { item, chain: makeChainBindings(), runtime: makeRuntime(), preset: makePreset() }
 		const out = renderPrompt("doc: \\{{KEY}} live: {{KEY}}", phase, ctx)
 		expect(out).toBe("doc: {{KEY}} live: 42")

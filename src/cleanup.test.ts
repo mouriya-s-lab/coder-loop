@@ -80,6 +80,22 @@ describe("phase C cleanup guards", () => {
 		}
 	})
 
+	test("executable caller surfaces use the clean item selector", async () => {
+		const roots = ["scripts", "templates", "docs", "presets", "src", "v3"]
+		const files = [resolve(REPO_ROOT, "README.md"), resolve(REPO_ROOT, "CLAUDE.md")]
+		for (const root of roots) {
+			const absoluteRoot = resolve(REPO_ROOT, root)
+			for (const entry of await readdir(absoluteRoot, { recursive: true })) {
+				const path = join(absoluteRoot, entry)
+				if ((await stat(path)).isFile()) files.push(path)
+			}
+		}
+		for (const file of files) {
+			const content = await readFile(file, "utf-8")
+			expect(content, `${relative(REPO_ROOT, file)} contains the retired item selector`).not.toContain(`--${"issue"}`)
+		}
+	})
+
 	test("smoke after cleanup", async () => {
 		const proc = Bun.spawnSync({
 			cmd: ["bun", "test", "src/smoke.test.ts", "--test-name-pattern", "status and queue unblock use SQLite state"],

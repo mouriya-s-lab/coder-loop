@@ -77,8 +77,8 @@ export type ChainRuntimePaths = {
 	evidenceDir: string
 	runsDir: string
 	daemonDir: string
-	issueFile: (issueNumber: number | string) => string
-	issueEvidenceDir: (issueNumber: number | string) => string
+	issueFile: (itemId: number | string) => string
+	issueEvidenceDir: (itemId: number | string) => string
 	runDir: (runId: string) => string
 	runEventsFile: (runId: string) => string
 	runStdoutFile: (runId: string) => string
@@ -178,8 +178,8 @@ export function resolveChainRuntimePaths(chainName: string, options: LoopDataRoo
 		evidenceDir,
 		runsDir,
 		daemonDir,
-		issueFile: (issueNumber) => resolve(issuesDir, `${sanitizePathComponent(String(issueNumber), "issue number")}.md`),
-		issueEvidenceDir: (issueNumber) => resolve(evidenceDir, sanitizePathComponent(String(issueNumber), "issue number")),
+		issueFile: (itemId) => resolve(issuesDir, `${itemArtifactPathComponent(String(itemId))}.md`),
+		issueEvidenceDir: (itemId) => resolve(evidenceDir, itemArtifactPathComponent(String(itemId))),
 		runDir,
 		runEventsFile: (runId) => resolve(runDir(runId), RUN_EVENTS_FILENAME),
 		runStdoutFile: (runId) => resolve(runDir(runId), RUN_STDOUT_FILENAME),
@@ -193,6 +193,14 @@ export function resolveChainRuntimePaths(chainName: string, options: LoopDataRoo
 		daemonBatchDir: (timestamp) => resolve(daemonDir, sanitizePathComponent(timestamp, "daemon timestamp")),
 		daemonLogFile: (timestamp) => resolve(daemonDir, sanitizePathComponent(timestamp, "daemon timestamp"), DAEMON_LOG_FILENAME),
 	}
+}
+
+function itemArtifactPathComponent(itemId: string): string {
+	if (itemId === "" || /\s/u.test(itemId)) {
+		throw new RuntimePathError("invalid_path_component", "item id must be non-empty and contain no whitespace", itemId)
+	}
+	if (/^[A-Za-z0-9._-]+$/u.test(itemId) && itemId !== "." && itemId !== ".." && !itemId.includes("..")) return itemId
+	return `opaque-${Array.from(new TextEncoder().encode(itemId), (byte) => byte.toString(16).padStart(2, "0")).join("")}`
 }
 
 function sanitizePathComponent(input: string, label: string): string {

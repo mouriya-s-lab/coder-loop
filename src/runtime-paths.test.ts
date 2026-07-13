@@ -95,6 +95,15 @@ describe("runtime path model", () => {
 		}
 	})
 
+	test("opaque item ids map to collision-free default artifact paths without changing the business id", () => {
+		const paths = resolveChainRuntimePaths("coder-loop", { loopDataRoot: "/var/lib/coder-loop/loop-data" })
+		const opaque = paths.issueEvidenceDir("owner/repo#12")
+		expect(opaque).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/evidence/opaque-6f776e65722f7265706f233132")
+		expect(paths.issueFile("owner/repo#12")).toEndWith("/issues/opaque-6f776e65722f7265706f233132.md")
+		expect(opaque).not.toBe(paths.issueEvidenceDir("owner-repo-12"))
+		expect(paths.issueEvidenceDir("owner/repo#12")).toBe(opaque)
+	})
+
 	test("pure path module no side effect", async () => {
 		const root = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/issue-178/no-side-effect-root-" + Date.now())
 		const paths = resolveChainRuntimePaths("coder-loop", { loopDataRoot: root })

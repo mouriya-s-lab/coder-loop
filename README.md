@@ -94,7 +94,7 @@ coder-loop status /path/to/target --json
 coder-loop daemon start /path/to/target
 coder-loop daemon status /path/to/target --json
 coder-loop daemon stop /path/to/target
-coder-loop queue unblock /path/to/source-target --issue 123 --start-daemon
+coder-loop queue unblock /path/to/source-target --item 123 --start-daemon
 ```
 
 新 operator 完整 bootstrap 步骤见 [docs/operator-quickstart.md](./docs/operator-quickstart.md)。

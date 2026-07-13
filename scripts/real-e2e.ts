@@ -577,7 +577,7 @@ async function runScenario(
 	// #412: preset is required per-item; pass the same bundled preset the harness installed with so the
 	// engine renders against the same preset for spawn / iteration / review.
 	sh(["bun", LOOP_ENTRY, "item", "add", chainName,
-		"--issue", String(issueNumber),
+		"--item", String(issueNumber),
 		"--repo-cwd", fixture.cwd,
 		"--preset", options.preset,
 		"--loop-data-root", daemon.loopDataRoot])

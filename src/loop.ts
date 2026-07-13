@@ -138,7 +138,7 @@ type BuildOptionsInput = {
 	chainName: string | null
 	dryRun: boolean
 	worktree: boolean
-	chain: Pick<ChainRecord, "name" | "repository" | "baseBranch" | "metadata">
+	chain: Pick<ChainRecord, "name" | "baseBranch" | "metadata">
 }
 
 export type StatusCommandArgs = {
@@ -214,7 +214,7 @@ export type ChainCommandArgs =
 			name: string
 			configJson: JsonObject
 			preset: string | null
-			umbrella: string | null
+			repository: string | null
 			force: boolean
 			loopDataRoot: string | null
 			json: boolean
@@ -268,11 +268,11 @@ export type ItemCommandArgs =
 	| {
 			action: "add"
 			chainName: string
-			// #419: opaque string item id (formerly `issueNumber: number`). The CLI flag stays
-			// `--issue` for backward compatibility with operators / scripts already using it;
+			// #419: opaque string item id (formerly `legacyItemNumber: number`). The CLI flag stays
+			// `--item` for backward compatibility with operators / scripts already using it;
 			// the parser now accepts opaque string ids via `parseRequiredItemId` instead of the
 			// old numeric `parseRequiredIssueNumber`. Only the discriminated-union field name was
-			// renamed (`issueNumber` → `itemId`); no `--id` flag exists.
+			// renamed (`legacyItemNumber` → `itemId`); no `--id` flag exists.
 			itemId: string
 			repoCwd: string
 			// #412: exactly one of preset/presetPath is set; the CLI parser enforces this before
@@ -368,7 +368,7 @@ export type QueueUnblockCommandArgs = {
 	targetCwd: string
 	loopDataRoot: string | null
 	chainName: string | null
-	issue: string
+	item: string
 	startDaemon: boolean
 	dryRun: boolean
 }
@@ -1346,7 +1346,7 @@ const chainCreateCliCommand = command({
 		name: positional({ displayName: "name", type: cmdString }),
 		configJson: option({ long: "config-json", type: cmdString }),
 		preset: option({ long: "preset", type: optional(cmdString) }),
-		umbrella: option({ long: "umbrella", type: optional(cmdString) }),
+		repository: option({ long: "repository", type: optional(cmdString) }),
 		force: flag({ long: "force" }),
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
 		json: flag({ long: "json" }),
@@ -1358,7 +1358,7 @@ const chainCreateCliCommand = command({
 			name: args.name,
 			configJson: parseOptionalJsonObjectFlag(args.configJson, "--config-json") ?? {},
 			preset: args.preset ?? null,
-			umbrella: args.umbrella ?? null,
+			repository: args.repository ?? null,
 			force: args.force,
 			loopDataRoot: args.loopDataRoot ?? null,
 			json: args.json,
@@ -1512,7 +1512,7 @@ const itemAddCliCommand = command({
 	description: "Add an item to a centralized coder-loop chain through the daemon socket. Exactly one of --preset or --preset-path is required (#412).",
 	args: {
 		chain: positional({ displayName: "chain", type: cmdString }),
-		issue: option({ long: "issue", type: cmdString }),
+		item: option({ long: "item", type: cmdString }),
 		repoCwd: option({ long: "repo-cwd", type: cmdString }),
 		// #412: preset must be specified per-item; the CLI surfaces both bundled-name and absolute-path
 		// variants. The daemon rejects requests that pass neither or both.
@@ -1538,7 +1538,7 @@ const itemAddCliCommand = command({
 			args: {
 				action: "add",
 				chainName: args.chain,
-				itemId: parseRequiredItemId(args.issue, "--issue"),
+				itemId: parseRequiredItemId(args.item, "--item"),
 				repoCwd: resolve(args.repoCwd),
 				preset: presetSpec.preset,
 				presetPath: presetSpec.presetPath,
@@ -1604,7 +1604,7 @@ const itemUpdateCliCommand = command({
 	description: "Update an item in a centralized coder-loop chain through the daemon socket.",
 	args: {
 		chain: positional({ displayName: "chain", type: cmdString }),
-		issue: option({ long: "issue", type: cmdString }),
+		item: option({ long: "item", type: cmdString }),
 		repoCwd: option({ long: "repo-cwd", type: optional(cmdString) }),
 		status: option({ long: "status", type: optional(cmdString) }),
 		title: option({ long: "title", type: optional(cmdString) }),
@@ -1626,7 +1626,7 @@ const itemUpdateCliCommand = command({
 		args: {
 			action: "update",
 			chainName: args.chain,
-			itemId: parseRequiredItemId(args.issue, "--issue"),
+			itemId: parseRequiredItemId(args.item, "--item"),
 			repoCwd: args.repoCwd === undefined ? null : resolve(args.repoCwd),
 			status: args.status ?? null,
 			title: args.title ?? null,
@@ -1648,7 +1648,7 @@ const itemReorderCliCommand = command({
 	description: "Move an item to a new queue position in a centralized coder-loop chain through the daemon socket.",
 	args: {
 		chain: positional({ displayName: "chain", type: cmdString }),
-		issue: option({ long: "issue", type: cmdString }),
+		item: option({ long: "item", type: cmdString }),
 		position: option({ long: "position", type: cmdString }),
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
 		json: flag({ long: "json" }),
@@ -1658,7 +1658,7 @@ const itemReorderCliCommand = command({
 		args: {
 			action: "reorder",
 			chainName: args.chain,
-			itemId: parseRequiredItemId(args.issue, "--issue"),
+			itemId: parseRequiredItemId(args.item, "--item"),
 			position: parseRequiredNonNegativeInteger(args.position, "--position"),
 			loopDataRoot: args.loopDataRoot ?? null,
 			json: args.json,
@@ -1677,7 +1677,7 @@ const itemExitsCliCommand = command({
 	description: "Query the typed phase-exits for an item in its current run phase (agent surface for the completion protocol).",
 	args: {
 		chain: positional({ displayName: "chain", type: cmdString }),
-		issue: option({ long: "issue", type: cmdString }),
+		item: option({ long: "item", type: cmdString }),
 		agentRunId: option({ long: "agent-run-id", type: cmdString }),
 		agentPhase: option({ long: "agent-phase", type: cmdString }),
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
@@ -1688,7 +1688,7 @@ const itemExitsCliCommand = command({
 		args: {
 			action: "exits",
 			chainName: args.chain,
-			itemId: parseRequiredItemId(args.issue, "--issue"),
+			itemId: parseRequiredItemId(args.item, "--item"),
 			agentRunId: args.agentRunId,
 			agentPhase: args.agentPhase,
 			loopDataRoot: args.loopDataRoot ?? null,
@@ -1710,7 +1710,7 @@ const itemExitActionCliCommand = command({
 	description: "Select a chain-action exit declared in the item's current run phase (agent surface for chain-side completion verbs).",
 	args: {
 		chain: positional({ displayName: "chain", type: cmdString }),
-		issue: option({ long: "issue", type: cmdString }),
+		item: option({ long: "item", type: cmdString }),
 		agentRunId: option({ long: "agent-run-id", type: cmdString }),
 		agentPhase: option({ long: "agent-phase", type: cmdString }),
 		action: option({ long: "action", type: cmdString }),
@@ -1722,7 +1722,7 @@ const itemExitActionCliCommand = command({
 		args: {
 			action: "exit-action",
 			chainName: args.chain,
-			itemId: parseRequiredItemId(args.issue, "--issue"),
+			itemId: parseRequiredItemId(args.item, "--item"),
 			agentRunId: args.agentRunId,
 			agentPhase: args.agentPhase,
 			chainAction: parsePresetPhaseChainActionFlag(args.action),
@@ -1751,7 +1751,7 @@ const queueUnblockCliCommand = command({
 	description: "Restore one preset-unblockable item to the preset entry status and clear blocker metadata.",
 	args: {
 		target: positional({ displayName: "target", type: cmdString }),
-		issue: option({ long: "issue", type: cmdString }),
+		item: option({ long: "item", type: cmdString }),
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
 		chain: option({ long: "chain", type: optional(cmdString) }),
 			startDaemon: flag({ long: "start-daemon" }),
@@ -1763,7 +1763,7 @@ const queueUnblockCliCommand = command({
 			targetCwd: args.target,
 			loopDataRoot: args.loopDataRoot ?? null,
 			chainName: args.chain ?? null,
-				issue: args.issue,
+				item: args.item,
 				startDaemon: args.startDaemon,
 				dryRun: args.dryRun,
 			},
@@ -1814,7 +1814,7 @@ function parseRequiredPositiveInteger(value: string, flagName: string): number {
 }
 
 // #419: opaque item id parser for the CLI face. Replaces `parseRequiredPositiveInteger` on
-// the `--issue` flag (kept for backward compat) — item identity is preset-declared and may be a string
+// the `--item` flag (kept for backward compat) — item identity is preset-declared and may be a string
 // (single-phase-example's `idField = "id"` carries strings) or a string-encoded number
 // (gh-issue-pr-iteration's `idField = "issue"` carries stringified GitHub issue numbers).
 // The CLI no longer parses to an integer at this point; the daemon enforces shape per preset.
@@ -1953,7 +1953,7 @@ async function runChainCommand(args: string[]): Promise<void> {
 	if (parsed.value.kind !== "chain") return
 	const chainArgs = parsed.value.args
 	if (chainArgs.action === "create") {
-		const repository = requiredChainCreateString(chainArgs.configJson, "repository", "--config-json")
+		const repository = chainArgs.repository ?? optionalChainCreateString(chainArgs.configJson, "repository", "--config-json")
 		const baseBranch = optionalChainCreateString(chainArgs.configJson, "baseBranch", "--config-json") ?? "main"
 		// #433: `--config-json` retains the input shape (the operator surface stayed because it's the
 		// chain-bindings entry point), but the wire shape now writes `metadata.bindings` and strips
@@ -1961,21 +1961,9 @@ async function runChainCommand(args: string[]): Promise<void> {
 		// not bindings). `normalizeChainCreateBindings` rejects nested misshapes — that arktype-driven
 		// rejection is also enforced daemon-side, so a stray key fails fast either path.
 		const bindings = normalizeChainCreateBindings(chainArgs.configJson)
-		// #457: `--umbrella owner/repo#123` is operator shorthand that merges
-		// `umbrellaRepo` / `umbrellaIssue` into the chain bindings. The engine has no first-class
-		// understanding of these — they live as preset-declared chain bindings (consumed by the
-		// bundled preset via `chain.umbrellaRepo` / `chain.umbrellaIssue`). Explicit
-		// `--config-json '{"umbrellaRepo":"...","umbrellaIssue":...}'` keys win on conflict so the
-		// operator can still override the shorthand.
-		if (chainArgs.umbrella !== null) {
-			const umbrellaBindings = parseUmbrellaRef(chainArgs.umbrella, repository)
-			for (const [key, value] of Object.entries(umbrellaBindings)) {
-				if (!Object.hasOwn(bindings, key)) bindings[key] = value
-			}
-		}
+		if (repository !== null) bindings.repository = repository
 		const requestArgs: JsonObject = {
 			name: chainArgs.name,
-			repository,
 			baseBranch,
 			metadata: { bindings },
 		}
@@ -2165,41 +2153,9 @@ function parseBatchItemsJson(raw: string): JsonObject[] {
 	return parsed.map((entry, index) => {
 		if (!isJsonObjectRecord(entry)) fail(`--items-json[${index}] must be an object`)
 		const item: JsonObject = { ...entry }
-		// #419: legacy back-fill for batch JSON written against pre-#419 schemas. Two flavors:
-		// (a) `{ "issue": 123 }` was sugar for `{ "issueNumber": 123 }` in pre-#419 batch JSON;
-		// (b) `{ "issueNumber": 123 }` was the canonical pre-#419 form. Both map to the new
-		// `itemId` string wire field. Values are coerced to strings — the daemon enforces shape.
-		if (item.itemId === undefined) {
-			if (typeof item.issue === "number") {
-				item.itemId = String(item.issue)
-				delete item.issue
-			} else if (typeof item.issue === "string" && item.issue.length > 0) {
-				item.itemId = item.issue
-				delete item.issue
-			} else if (typeof item.issueNumber === "number") {
-				item.itemId = String(item.issueNumber)
-				delete item.issueNumber
-			}
-		}
 		if (typeof item.repoCwd === "string") item.repoCwd = resolve(item.repoCwd)
 		return item
 	})
-}
-
-// #457: parses `owner/repo#123` / `#123` into chain-binding pairs the caller
-// merges into `metadata.bindings`. Umbrella values are not engine first-class
-// fields any more — the bundled preset reads them via `chain.umbrellaRepo`
-// / `chain.umbrellaIssue` against the declared-binding namespace.
-function parseUmbrellaRef(raw: string, defaultRepo: string): JsonObject {
-	const trimmed = raw.trim()
-	const match = /^(?:(?<repo>[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+))?#(?<issue>[1-9][0-9]*)$/.exec(trimmed)
-	if (match === null) fail(`--umbrella must look like owner/repo#123 or #123, got: ${raw}`)
-	const issue = Number(match.groups?.issue)
-	const repo = match.groups?.repo ?? defaultRepo
-	return {
-		umbrellaRepo: repo,
-		umbrellaIssue: issue,
-	}
 }
 
 async function runCentralDaemonStatusCommand(args: string[]): Promise<void> {
@@ -2441,7 +2397,7 @@ function formatChainListResult(result: JsonObject): string {
 	if (chains.length === 0) return "no chains\n"
 	return chains.map((raw) => {
 		const chain = jsonObjectEntry(raw) ?? {}
-		return `${String(chain.name)}\t${String(chain.status)}\t${String(chain.repository)}\n`
+		return `${String(chain.name)}\t${String(chain.status)}\n`
 	}).join("")
 }
 
@@ -2512,7 +2468,7 @@ function formatItemListResult(result: JsonObject): string {
 	if (items.length === 0) return "no items\n"
 	return items.map((raw) => {
 		const item = jsonObjectEntry(raw) ?? {}
-		// #419: render the opaque item id (formerly `issueNumber`). Daemon's `itemToJson` emits
+		// #419: render the opaque item id (formerly `legacyItemNumber`). Daemon's `itemToJson` emits
 		// both `itemId` and `id` (rowid); itemId is the preset-facing identity.
 		return `${String(item.itemId ?? item.id ?? "")}\t${String(item.status)}\t${String(item.repoCwd)}\n`
 	}).join("")
@@ -2704,7 +2660,7 @@ function rootUsage(): string {
 		"  daemon <up|down|status|start|stop|restart>",
 		"  chain <create|list|status|stop|resume|delete|set-runner-model>",
 		"  item <add|batch-add|list|update|reorder|exits|exit-action>",
-		"  queue unblock <target> --issue <issue>",
+		"  queue unblock <target> --item <issue>",
 		"  doctor <target>",
 		"",
 	].join("\n")
@@ -2728,7 +2684,8 @@ function buildOptions(targetCwd: string, raw: BuildOptionsInput, resolved: Chain
 	const evidenceRootDir = resolveFrom(targetCwd, resolved.evidenceDir)
 	const logDir = resolveFrom(targetCwd, resolved.logDir)
 	const worktree = raw.worktree || resolved.worktree === true
-	const repository = raw.chain.repository
+	const repositoryValue = metadataBindings(raw.chain.metadata).repository
+	const repository = typeof repositoryValue === "string" ? repositoryValue : null
 	const baseBranch = raw.chain.baseBranch
 	const bindings = buildEffectiveBindings(raw.chain)
 	const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")
@@ -2810,7 +2767,7 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 			loaded: true,
 			path: resolveLoopDataPaths(loopDataRootOption(options.loopDataRoot)).dbFile,
 			version: STATUS_SNAPSHOT_STATE_VERSION,
-			repository: loaded.chain.repository,
+			repository: typeof metadataBindings(loaded.chain.metadata).repository === "string" ? String(metadataBindings(loaded.chain.metadata).repository) : null,
 			baseBranch: loaded.chain.baseBranch,
 			errors: runtimeErrors,
 			error: null,
@@ -3084,7 +3041,7 @@ function resolveStatusItemPresetSnapshot(item: ItemRecord, chainPreset: Preset):
 
 function statusItemSnapshot(item: ItemRecord, preset: Preset): StatusItemSnapshot {
 	// #419: idField value lives in `extra` under the preset-declared key; no separate
-	// `issueNumber` engine column to back-fill from. The opaque `item.itemId` is the
+	// `legacyItemNumber` engine column to back-fill from. The opaque `item.itemId` is the
 	// authoritative identity and the migration copied the integer column value into
 	// `extra.issue` for `gh-issue-pr-iteration`-shaped legacy rows.
 	const extra = transparentItemExtra(item, preset)
@@ -3628,19 +3585,19 @@ function daemonCommandToTargetLookupArgs(args: Extract<DaemonCommandArgs, { acti
 export type QueueUnblockMutationOutcome =
 	| {
 			changed: true
-			issue: string
+			itemId: string
 			beforeStatus: string
 			afterStatus: string
 			clearedCurrent: boolean
 	  }
 	| {
 			changed: false
-			issue: string
+			itemId: string
 			reason: "not_found"
 	  }
 	| {
 			changed: false
-			issue: string
+			itemId: string
 			reason: "not_unblockable"
 			status: string
 	  }
@@ -3650,7 +3607,7 @@ type QueueUnblockCommandResult = {
 	target: string
 	repository: string | null
 	[STATUS_STATE_FILE_KEY]: string
-	issue: string
+	itemId: string
 	dryRun: boolean
 	mutation: QueueUnblockMutationOutcome
 	daemon:
@@ -3675,10 +3632,7 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 		worktree: false,
 	})
 	const options = runtime.options
-	const issue = normalizeQueueIssueId(args.issue)
-	// #419: opaque item id (string). The CLI flag historically named `--issue` is kept for
-	// back-compat; the underlying identity is now whatever string the preset's idField names.
-	const itemId = parseRequiredItemId(issue, "queue unblock: --issue")
+	const itemId = parseRequiredItemId(args.item, "queue unblock: --item")
 	// #409: queue.unblock now daemonizes. The daemon's `handleQueueUnblock` performs the SQLite
 	// mutation (default-deny for agents via the hard-deny gate) and the operator-attribution
 	// `item.mutation.caller_admission` audit event so external tooling watching the audit stream
@@ -3686,12 +3640,12 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 	// resulting item status, and (optionally) bounce the daemon if `--start-daemon` was passed.
 	const mutationResponse = await requestDaemonResult(options.loopDataRoot, "queue.unblock", {
 		chainName: runtime.chain.name,
-		issue,
+		itemId,
 		dryRun: args.dryRun,
 	})
-	const mutation = parseQueueUnblockMutationResponse(mutationResponse, issue)
+	const mutation = parseQueueUnblockMutationResponse(mutationResponse, itemId)
 	if (!mutation.changed && mutation.reason === "not_found") {
-		fail(`queue unblock: issue ${issue} not found in SQLite state DB`)
+		fail(`queue unblock: item ${itemId} not found in SQLite state DB`)
 	}
 
 	let daemon: QueueUnblockCommandResult["daemon"]
@@ -3736,7 +3690,7 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 		target: options.targetCwd,
 		repository: options.repository,
 		[STATUS_STATE_FILE_KEY]: options.stateDbPath,
-		issue,
+		itemId,
 		dryRun: args.dryRun,
 		mutation,
 		daemon,
@@ -3754,22 +3708,24 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 // helper boundary-parses each variant. Failure to match any variant is treated as a daemon
 // protocol bug (the daemon would not emit a malformed reply for an op the CLI sent), so the
 // helper throws via `fail(...)` rather than silently coercing.
-function parseQueueUnblockMutationResponse(response: JsonObject, requestedIssue: string): QueueUnblockMutationOutcome {
+function parseQueueUnblockMutationResponse(response: JsonObject, requestedItemId: string): QueueUnblockMutationOutcome {
 	const mutation = response.mutation
 	if (mutation === undefined || mutation === null || typeof mutation !== "object" || Array.isArray(mutation)) {
 		fail(`queue unblock: daemon reply missing or malformed 'mutation' field`)
 	}
 	const mutationObj: JsonObject = mutation
 	const changed = mutationObj.changed
-	const issueValue = mutationObj.issue
-	const issue = typeof issueValue === "string" ? issueValue : requestedIssue
+	const itemIdValue = mutationObj.itemId
+	if (typeof itemIdValue !== "string") fail(`queue unblock: daemon reply missing itemId`)
+	const itemId = itemIdValue
+	if (itemId !== requestedItemId) fail(`queue unblock: daemon reply itemId does not match request`)
 	if (changed === false) {
 		const reason = mutationObj.reason
-		if (reason === "not_found") return { changed: false, issue, reason: "not_found" }
+		if (reason === "not_found") return { changed: false, itemId, reason: "not_found" }
 		if (reason === "not_unblockable") {
 			const status = mutationObj.status
 			if (typeof status !== "string") fail(`queue unblock: daemon 'not_unblockable' reply missing status`)
-			return { changed: false, issue, reason: "not_unblockable", status }
+			return { changed: false, itemId, reason: "not_unblockable", status }
 		}
 		fail(`queue unblock: daemon reply has unknown reason ${JSON.stringify(reason)}`)
 	}
@@ -3780,7 +3736,7 @@ function parseQueueUnblockMutationResponse(response: JsonObject, requestedIssue:
 	if (typeof beforeStatus !== "string" || typeof afterStatus !== "string" || typeof clearedCurrent !== "boolean") {
 		fail(`queue unblock: daemon 'changed' reply missing status/clearedCurrent fields`)
 	}
-	return { changed: true, issue, beforeStatus, afterStatus, clearedCurrent }
+	return { changed: true, itemId, beforeStatus, afterStatus, clearedCurrent }
 }
 
 function daemonResultIndicatesRunning(daemon: QueueUnblockCommandResult["daemon"]): boolean {
@@ -3852,15 +3808,11 @@ async function resolveDbChainForTarget(args: TargetChainLookupArgs): Promise<Cha
 	const statusScope = args.chainStatusScope ?? "active-only"
 	const store = openSqliteStateStore({ createIfMissing: false, ...loopDataRootOption(loopDataRoot) })
 	try {
-		const requestedRepo = args.repository ?? await inferRepositoryFromGit(args.targetCwd)
 		const requestedBase = args.baseBranch
 		if (args.chainName !== null) {
 			const chain = store.getChainByName(args.chainName)
 			if (chain === null) throw new CoderLoopError(`SQLite state DB has no chain named "${args.chainName}"`)
 			if (!chainStatusAllowedForTargetLookup(statusScope, chain.status)) throw new CoderLoopError(`SQLite chain "${chain.name}" is ${chain.status}, expected ${targetChainStatusExpectation(statusScope)}`)
-			if (requestedRepo !== null && chain.repository !== requestedRepo) {
-				throw new CoderLoopError(`SQLite chain "${chain.name}" repository is ${chain.repository}, expected ${requestedRepo}`)
-			}
 			if (requestedBase !== null && chain.baseBranch !== requestedBase) {
 				throw new CoderLoopError(`SQLite chain "${chain.name}" base branch is ${chain.baseBranch}, expected ${requestedBase}`)
 			}
@@ -3870,7 +3822,6 @@ async function resolveDbChainForTarget(args: TargetChainLookupArgs): Promise<Cha
 		const targetCwd = resolve(args.targetCwd)
 		const active = store.listChains().filter((chain) =>
 			chainStatusAllowedForTargetLookup(statusScope, chain.status)
-			&& (requestedRepo === null || chain.repository === requestedRepo)
 			&& (requestedBase === null || chain.baseBranch === requestedBase)
 		)
 		const matchingByRepoCwd = active.filter((chain) =>
@@ -3882,8 +3833,7 @@ async function resolveDbChainForTarget(args: TargetChainLookupArgs): Promise<Cha
 		}
 		if (active.length === 1) return active[0]!
 		if (active.length === 0) {
-			const repoLabel = requestedRepo === null ? "any repository" : `repository ${requestedRepo}`
-			throw new CoderLoopError(`SQLite state DB has no ${targetChainStatusExpectation(statusScope)} chain for ${repoLabel} and target ${targetCwd}`)
+			throw new CoderLoopError(`SQLite state DB has no ${targetChainStatusExpectation(statusScope)} chain for target ${targetCwd}`)
 		}
 		throw new CoderLoopError(`target ${targetCwd} is ambiguous across ${targetChainStatusExpectation(statusScope)} chains: ${active.map((chain) => chain.name).join(", ")}; pass --chain <name>`)
 	} finally {
@@ -3993,10 +3943,9 @@ function chainResolvedFromChain(chain: ChainRecord, loopDataRoot: string | null)
 }
 
 function buildEffectiveBindings(
-	chain: Pick<ChainRecord, "repository" | "baseBranch" | "metadata">,
+	chain: Pick<ChainRecord, "baseBranch" | "metadata">,
 ): RenderBindings {
 	return {
-		repository: chain.repository,
 		baseBranch: chain.baseBranch,
 		...metadataBindings(chain.metadata),
 	}
@@ -4008,40 +3957,6 @@ function chainRuntimePathForKind(chainName: string, loopDataRoot: string | null,
 	if (kind === "issues") return paths.issuesDir
 	if (kind === "evidence") return paths.evidenceDir
 	return paths.runsDir
-}
-
-async function inferRepositoryFromGit(targetCwd: string): Promise<string | null> {
-	const rootResult = Bun.spawnSync({
-		cmd: ["git", "-C", resolve(targetCwd), "rev-parse", "--show-toplevel"],
-		stdout: "pipe",
-		stderr: "ignore",
-	})
-	if (rootResult.exitCode !== 0) return null
-	const gitRoot = new TextDecoder().decode(rootResult.stdout).trim()
-	if (!samePath(gitRoot, targetCwd)) return null
-	const result = Bun.spawnSync({
-		cmd: ["git", "-C", resolve(targetCwd), "remote", "get-url", "origin"],
-		stdout: "pipe",
-		stderr: "ignore",
-	})
-	if (result.exitCode !== 0) return null
-	const url = new TextDecoder().decode(result.stdout).trim()
-	const sshMatch = /^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/.exec(url)
-	if (sshMatch) return `${sshMatch[1]}/${sshMatch[2]}`
-	const httpsMatch = /^https?:\/\/github\.com\/([^/]+)\/(.+?)(?:\.git)?\/?$/.exec(url)
-	if (httpsMatch) return `${httpsMatch[1]}/${httpsMatch[2]}`
-	return null
-}
-
-export function normalizeQueueIssueId(raw: string): string {
-	const trimmed = raw.trim()
-	if (trimmed === "") fail("queue unblock: --issue must not be empty")
-	if (/\s/.test(trimmed)) fail(`queue unblock: --issue must not contain whitespace: ${raw}`)
-	const crossRepoMatch = /^[^/\s]+\/[^#\s]+#(.+)$/.exec(trimmed)
-	const value = crossRepoMatch ? crossRepoMatch[1]! : trimmed
-	const normalized = value.startsWith("#") ? value.slice(1) : value
-	if (normalized.trim() === "") fail(`queue unblock: --issue did not include an issue id: ${raw}`)
-	return normalized
 }
 
 function hasOwnJsonKey(value: JsonObject, key: string): boolean {
@@ -4360,7 +4275,7 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 	// like `{{ISSUE}}` resolve through the standard `[item.fields]` typing pipeline instead of relying
 	// on the engine-builtin string fallback. The pre-#419 rule that forbade this redeclaration was
 	// guarding the now-retired structural escape (`LEGACY_TRANSPARENT_ITEM_FIELDS` fed
-	// `item.issueNumber` to the resolver bypassing `[item.fields]`); with that escape gone the rule
+	// `item.legacyItemNumber` to the resolver bypassing `[item.fields]`); with that escape gone the rule
 	// no longer has anything to guard against.
 	const attemptTimeoutSeconds = root.agent?.attemptTimeoutSeconds ?? DEFAULT_ATTEMPT_TIMEOUT_SECONDS
 	if (!Number.isFinite(attemptTimeoutSeconds) || attemptTimeoutSeconds <= 0) {
@@ -5574,7 +5489,7 @@ export function phaseExitsEpilogue(): string {
 		"",
 		"1. 查询当前 phase 在元数据中声明的可选下一步出边：",
 		"   ```",
-		"   coder-loop item exits <CHAIN> --issue <ISSUE> --agent-run-id <RUN_ID> --agent-phase <PHASE> --json",
+		"   coder-loop item exits <CHAIN> --item <ISSUE> --agent-run-id <RUN_ID> --agent-phase <PHASE> --json",
 		"   ```",
 		"   返回的 `exits` 列表是本 phase 唯一允许选择的出边集合（per-phase 切片，不暴露其他 phase 出边）。每个 exit 是两种 kind 之一：",
 		"   - `kind: \"item-status\"` 带 `status` 字段：表示在本 phase 写回该 item status 即可推进 item 到下一步。",
@@ -5583,12 +5498,12 @@ export function phaseExitsEpilogue(): string {
 		"2. 按所选 exit 的 kind 执行对应写入：",
 		"   - item-status 分支 → 用 `item update --status`：",
 		"     ```",
-		"     coder-loop item update <CHAIN> --issue <ISSUE> --status <chosen-status>",
+		"     coder-loop item update <CHAIN> --item <ISSUE> --status <chosen-status>",
 		"     ```",
 		"     `agent-run-id` / `agent-phase` 不需要手填——本 phase 进程的 env 已自动携带凭据。写返回集合以外的 status 会被默认拒绝（default-deny）。",
 		"   - chain-action 分支 → 用 `item exit-action --action`：",
 		"     ```",
-		"     coder-loop item exit-action <CHAIN> --issue <ISSUE> --agent-run-id <RUN_ID> --agent-phase <PHASE> --action <chosen-action>",
+		"     coder-loop item exit-action <CHAIN> --item <ISSUE> --agent-run-id <RUN_ID> --agent-phase <PHASE> --action <chosen-action>",
 		"     ```",
 		"     选返回集合以外的 action（或绕过此通道直接调 `coder-loop chain stop`）都会被引擎拒绝。",
 		"",

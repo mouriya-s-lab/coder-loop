@@ -106,7 +106,7 @@ coder-loop status /path/to/your-target-repo --json \
 
 ### items 在 wire 上的 shape
 
-`items` 表按 preset `[item.fields]` 声明的透明字段落盘，engine 只保留 `item_id`（opaque string）作 identity。`gh-issue-pr-iteration` 声明 `issue`（number）/ `branch`（string）/ `pr`（number）/ `lastRunId`（string）四个透明字段。`status --json` 的 `queue.selected.item.<field>` 通过 `flattenExtraReplacer` 把这些字段平铺到父级；**消费者按字段名直接读 `queue.selected.item.branch` / `.pr`**（不要走 `.extra.branch` / `.extra.pr` 嵌套路径，`queue.selected.item.extra` 在 wire 上为 `null`）。daemon wire 上 `item.add` / `item.update` 的 identity 字段是 `itemId: string`；CLI flag 仍是 `--issue`（接受 opaque 字符串 id）。完整映射见 [operations wire-shape 段](./operations.md#items-wire-shape)。
+`items` 表按 preset `[item.fields]` 声明的透明字段落盘，engine 只保留 `item_id`（opaque string）作 identity。`gh-issue-pr-iteration` 声明 `issue`（number）/ `branch`（string）/ `pr`（number）/ `lastRunId`（string）四个透明字段。`status --json` 的 `queue.selected.item.<field>` 通过 `flattenExtraReplacer` 把这些字段平铺到父级；**消费者按字段名直接读 `queue.selected.item.branch` / `.pr`**（不要走 `.extra.branch` / `.extra.pr` 嵌套路径，`queue.selected.item.extra` 在 wire 上为 `null`）。daemon wire 上 `item.add` / `item.update` 的 identity 字段是 `itemId: string`；CLI flag 仍是 `--item`（接受 opaque 字符串 id）。完整映射见 [operations wire-shape 段](./operations.md#items-wire-shape)。
 
 ---
 
@@ -115,7 +115,7 @@ coder-loop status /path/to/your-target-repo --json \
 Operator 自行开好 GitHub issue，用 `coder-loop item add` 或 `item batch-add` 把它们加进中央 chain：
 
 ```bash
-coder-loop item add <chain> --issue 123 --repo-cwd /path/to/target --json
+coder-loop item add <chain> --item 123 --repo-cwd /path/to/target --json
 coder-loop item batch-add <chain> --items-json '[{"issue":124,"repoCwd":"..."},{"issue":125,"repoCwd":"..."}]' --json
 ```
 

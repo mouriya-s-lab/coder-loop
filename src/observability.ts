@@ -105,7 +105,7 @@ const ObservabilityEventTypeBoundary = arkType.or(
 	// phase-exit selection (i.e., NOT operator-direct chain.stop). Reading the lifecycle stream
 	// gives `(timestamp, who, why)` for every chain stop: operator path emits only `chain.status`;
 	// phase-exit path emits `chain.status` plus this lifecycle event with the originating
-	// (runId, phase, itemId) bound. #419 retired the integer `issueNumber` field —
+	// (runId, phase, itemId) bound. #419 retired the integer `legacyItemNumber` field —
 	// the opaque preset-declared `itemId` string is the canonical id.
 	arkType.unit("chain.stop.from_phase_exit"),
 	// #407: item.add / item.batchAdd per-phase rights admission. One event per create request

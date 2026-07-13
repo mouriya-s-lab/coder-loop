@@ -20,7 +20,7 @@ operator / supervisor 的默认入口是 `coder-loop` 自己暴露的只读或�
 | 管理 central daemon | `coder-loop daemon up/down/status/start/stop/restart <target>` | 管理全局 daemon socket 与 target chain；避免手写 `nohup` / PID 归属逻辑 |
 | 管理 chain | `coder-loop chain create/list/status/stop/resume/delete/set-runner-model` | 直接操作 centralized coder-loop chain |
 | 管理 item | `coder-loop item add/batch-add/list/update/reorder` | 直接操作 centralized chain item |
-| 恢复 blocked item | `coder-loop queue unblock <target> --issue <id>` | 将 preset 声明的 unblockable terminal item 恢复到 `statuses.entry` |
+| 恢复 blocked item | `coder-loop queue unblock <target> --item <id>` | 将 preset 声明的 unblockable terminal item 恢复到 `statuses.entry` |
 
 常规排障顺序：
 
@@ -66,7 +66,7 @@ coder-loop daemon down --json                    # 关闭 central daemon socket 
 | `queue.selected.item.branch: string \| null` | `[item.fields].branch = "string"`，同上，wire 层平铺 |
 | `queue.selected.item.pr: number \| null` | `[item.fields].pr = "number"`，同上，wire 层平铺 |
 | `queue.selected.item.extra` | wire 上恒为 `null` — `flattenExtraReplacer` 把 `extra.*` 平铺到 `queue.selected.item.<field>`；消费者不要走 `.extra.<field>` 嵌套路径 |
-| daemon wire `item.add` / `item.update` 的 identity 字段 | `itemId: string`；CLI flag 仍是 `--issue`（接受 opaque string） |
+| daemon wire `item.add` / `item.update` 的 identity 字段 | `itemId: string`；CLI flag 仍是 `--item`（接受 opaque string） |
 | audit/decision event payload `rowId: number` | `queue.terminal` / `item.dependency_unblocked` / `item.dependency_wait` / `item.backoff` 携带 SQLite rowid；`itemId` 恒是 opaque string identity |
 
 `coder-loop item update` / `item add` 的 `--field-json` 接受 `{"branch": "...", "pr": N}`——它们走 preset 声明的 `[item.fields]` 透明字段路径，与 schema 物理层无关。
@@ -104,7 +104,7 @@ coder-loop status <target> --json
 coder-loop chain status <chain-name> --json
 coder-loop item list <chain-name> --json
 coder-loop item update ...
-coder-loop queue unblock <target> --issue <id> --start-daemon
+coder-loop queue unblock <target> --item <id> --start-daemon
 ```
 
 如果必须做人工恢复，先备份 DB，再用 `status` / `doctor` 定位到具体 chain 与 item；只修被诊断出的字段。
@@ -243,11 +243,11 @@ coder-loop item --help
 | `chain stop <name>` / `chain resume <name>` | 暂停 / 恢复 chain scheduling | `--json` `--loop-data-root <dir>` |
 | `chain delete <name>` | 标记 chain 删除 | `--json` `--loop-data-root <dir>` |
 | `chain set-runner-model <chain>` | patch `chain.metadata.<kind>.model` runner-binding override | `--kind <claude\|codex\|opencode>` `--model <name>` |
-| `item add <chain>` | 加一个 item；`--preset` / `--preset-path` 二选一必填 | `--issue <id>` `--repo-cwd <dir>` `--preset <name>` / `--preset-path <abs>` `--status` `--attempts` `--title` `--priority` `--field-json '{...}'` `--last-run-id` `--issue-file` `--evidence-dir` `--agent-cwd` `--runner` |
+| `item add <chain>` | 加一个 item；`--preset` / `--preset-path` 二选一必填 | `--item <id>` `--repo-cwd <dir>` `--preset <name>` / `--preset-path <abs>` `--status` `--attempts` `--title` `--priority` `--field-json '{...}'` `--last-run-id` `--item-file` `--evidence-dir` `--agent-cwd` `--runner` |
 | `item batch-add <chain> --items-json '[...]'` | 原子批量加 item | `--items-json` `--loop-data-root <dir>` |
 | `item list <chain>` / `item update <chain>` / `item reorder <chain>` | item 常规 CRUD | 看 `coder-loop item --help` |
-| `item exits <chain>` / `item exit-action <chain>` | **agent 面**：查该 item 当前 run phase 的 typed phase-exits / 选择 chain-action exit | `--issue` `--agent-run-id` `--agent-phase` `--action`（exit-action） |
-| `queue unblock <target>` | 将 preset 声明的 unblockable terminal item 恢复到 `statuses.entry` 并清除 blocker metadata | `--issue <id>` `--start-daemon` `--dry-run` |
+| `item exits <chain>` / `item exit-action <chain>` | **agent 面**：查该 item 当前 run phase 的 typed phase-exits / 选择 chain-action exit | `--item` `--agent-run-id` `--agent-phase` `--action`（exit-action） |
+| `queue unblock <target>` | 将 preset 声明的 unblockable terminal item 恢复到 `statuses.entry` 并清除 blocker metadata | `--item <id>` `--start-daemon` `--dry-run` |
 
 ### 6.2 Source entry
 
