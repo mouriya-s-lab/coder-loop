@@ -1502,7 +1502,8 @@ attemptTimeoutSeconds = 3600
 			if (!statusResponse.ok) {
 				expect(statusResponse.error.code).toBe("invalid_request")
 				expect(statusResponse.error.message).toContain(`failed to load preset for chain ${chain.name}`)
-				expect(statusResponse.error.message).toContain("cross-table DAG check")
+				expect(statusResponse.error.message).toContain("preset.statuses.continuable")
+				expect(statusResponse.error.message).toContain("has no leaving phase-exit edge")
 				expect(statusResponse.error.message).toContain("pending")
 			}
 
@@ -5544,9 +5545,15 @@ process.exitCode = 0
 				repoCwd: REPO_ROOT,
 				extra: { sleepMs: 2_000, writeStatus: null },
 			}))
+			const spawnedRunId = await waitFor(
+				async () => fixture.schedulerEvents.find((event) => event.type === "agent.spawn")?.runId ?? null,
+				(runId) => runId !== null,
+			)
 			await waitFor(
-				async () => fixture.schedulerEvents.some((event) => event.type === "agent.spawn"),
-				(spawned) => spawned,
+				async () => fixture.schedulerEvents.some(
+					(event) => event.type === "slot.busy" && event.activeRunId === spawnedRunId,
+				),
+				(persisted) => persisted,
 			)
 			const eventsFile = resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile
 			await rm(eventsFile, { force: true })

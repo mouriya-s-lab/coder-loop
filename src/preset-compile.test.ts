@@ -1,8 +1,15 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { resolve } from "node:path"
-import { compilePreset, loadPreset, projectCompiledPreset } from "./loop"
+import {
+	PresetCompilePublicResultBoundary,
+	buildCompiledTaskTree,
+	compilePreset,
+	loadPreset,
+	projectCompiledPreset,
+	projectPresetCompileResult,
+} from "./loop"
 
 const ROOT = resolve(import.meta.dir, "..")
 
@@ -12,7 +19,15 @@ describe("preset compiler", () => {
 		expect(compiled.kind).toBe("compiled")
 		const rejected = await compilePreset(resolve(ROOT, "test-fixtures/preset-compile/invalid"))
 		expect(rejected.kind).toBe("rejected")
-		if (rejected.kind === "rejected") expect(rejected.diagnostics.length).toBeGreaterThan(0)
+		if (compiled.kind === "compiled") {
+			const publicResult = PresetCompilePublicResultBoundary.assert(projectPresetCompileResult(compiled))
+			expect(publicResult.kind).toBe("compiled")
+		}
+		if (rejected.kind === "rejected") {
+			expect(rejected.diagnostics.length).toBeGreaterThan(0)
+			const publicResult = PresetCompilePublicResultBoundary.assert(projectPresetCompileResult(rejected))
+			expect(publicResult.kind).toBe("rejected")
+		}
 	})
 
 	test("projection is deterministic and copies canonical semantic identities", async () => {
@@ -20,8 +35,18 @@ describe("preset compiler", () => {
 		const first = projectCompiledPreset(model, [])
 		const second = projectCompiledPreset(model, [])
 		expect(JSON.stringify(first)).toBe(JSON.stringify(second))
-		for (const task of model.tasks) expect(JSON.stringify(first)).toContain(`\"identity\":\"${task.identity}\"`)
-		expect(new Set(model.tasks.map((task) => task.identity)).size).toBe(model.tasks.length)
+		expect(first.phases.map((phase) => phase.identity)).toEqual(model.tasks.children.map((tree) => tree.identity))
+		expect(first.phases.map((phase) => phase.taskTree.identity)).toEqual(model.tasks.children.map((tree) => tree.identity))
+		expect(first.phases.flatMap((phase) => phase.taskTree.children.map((task) => task.identity)))
+			.toEqual(model.tasks.children.flatMap((tree) => tree.children.map((task) => task.identity)))
+		expect(new Set(model.tasks.children.flatMap((tree) => [tree.identity, ...tree.children.map((task) => task.identity)])).size)
+			.toBe(model.tasks.children.length * 2)
+
+		const inserted = { ...model.phases[0]!, name: "inserted" }
+		const reordered = [model.phases[1]!, inserted, model.phases[0]!].filter(Boolean)
+		const tree = buildCompiledTaskTree(reordered)
+		expect(tree.children.map((task) => task.identity)).toEqual(["phase:inserted", `phase:${model.phases[0]!.name}`])
+		expect(tree.children.find((task) => task.phase === model.phases[0]!.name)?.identity).toBe(model.tasks.children[0]!.identity)
 	})
 
 	test("preserves all warnings", async () => {
@@ -31,9 +56,11 @@ describe("preset compiler", () => {
 	})
 
 	test("direct and materialized compilation project identical source semantics", async () => {
-		const source = resolve(ROOT, "presets/single-phase-example")
+		const source = await mkdtemp(resolve(tmpdir(), "coder-loop-compile-literal-"))
 		const root = await mkdtemp(resolve(tmpdir(), "coder-loop-compile-"))
 		try {
+			await writeFile(resolve(source, "preset.toml"), `name = "literal-path"\n[item]\nidField = "id"\n[item.fields]\nid = "string"\n[statuses]\ncontinuable = ["queued"]\nterminal = ["done", "exhausted"]\nentry = "queued"\nexhausted = "exhausted"\n[[phases]]\nname = "run"\nprompt = "run.md"\n[[phases.exits]]\nstatus = "done"\nwhen = "complete"\n[phases.variables]\nID = "item.id"\n`)
+			await writeFile(resolve(source, "run.md"), `literal path: ${source}\nid={{ID}}\n`)
 			const direct = await compilePreset(source)
 			const materialized = await compilePreset(source, { materialize: { root } })
 			expect(direct.kind).toBe("compiled")
@@ -43,6 +70,7 @@ describe("preset compiler", () => {
 			}
 		} finally {
 			await rm(root, { recursive: true, force: true })
+			await rm(source, { recursive: true, force: true })
 		}
 	})
 

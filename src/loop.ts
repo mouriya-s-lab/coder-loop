@@ -543,7 +543,10 @@ export const PresetCompileProjectionBoundary = arkType({
 		variables: arkType({ key: "string", type: arkType.unit("string"), sourceKind: "string" }).array(),
 		toolRequirements: "string[]",
 		rights: { createItems: "boolean", writableFields: "string[]", privilegedOps: "string[]" },
-		task: { kind: arkType.unit("phase"), identity: "string" },
+		taskTree: {
+			kind: arkType.unit("seq"), identity: "string",
+			children: arkType({ kind: arkType.unit("phase"), identity: "string", phase: "string" }).array(),
+		},
 	}).array(),
 	tools: arkType({ id: "string" }).array(),
 	fragments: arkType({ id: "string", role: "string", path: "string" }).array(),
@@ -552,6 +555,11 @@ export const PresetCompileProjectionBoundary = arkType({
 
 export type CompileFinding = typeof CompileFindingBoundary.infer
 export type PresetCompileProjection = typeof PresetCompileProjectionBoundary.infer
+export const PresetCompilePublicResultBoundary = arkType.or(
+	{ kind: arkType.unit("compiled"), schemaVersion: arkType.unit(1), projection: PresetCompileProjectionBoundary },
+	{ kind: arkType.unit("rejected"), schemaVersion: arkType.unit(1), diagnostics: arkType([CompileFindingBoundary, "...", CompileFindingBoundary.array()]) },
+)
+export type PresetCompilePublicResult = typeof PresetCompilePublicResultBoundary.infer
 
 // #451 + #405: boundary parser for the `item.exits` wire-verb response. The CLI
 // uses it to validate the daemon's reply before rendering — keeps the protocol
@@ -734,15 +742,44 @@ export type Preset = {
 }
 
 export type CompiledTaskNode = { identity: string; kind: "phase"; phase: string }
+export type CompiledPhaseTaskTree = { identity: string; kind: "seq"; phase: string; children: readonly [CompiledTaskNode] }
+export type CompiledTaskTree = { identity: string; kind: "seq"; children: readonly CompiledPhaseTaskTree[] }
 export type CompiledTaskModel = Preset & {
 	sourceDir: string
 	sourceHash: string
-	tasks: readonly CompiledTaskNode[]
+	tasks: CompiledTaskTree
 }
 
 export type CompileResult =
 	| { kind: "compiled"; model: CompiledTaskModel; warnings: readonly CompileFinding[] }
 	| { kind: "rejected"; diagnostics: readonly [CompileFinding, ...CompileFinding[]] }
+
+class PresetCompileFailure extends Error {
+	constructor(readonly diagnostics: readonly [CompileFinding, ...CompileFinding[]]) {
+		super(diagnostics.map((diagnostic) => diagnostic.message).join("\n"))
+		this.name = "PresetCompileFailure"
+	}
+}
+
+class PresetStructureError extends Error {
+	constructor(message: string) {
+		super(message)
+		this.name = "PresetStructureError"
+	}
+}
+
+export function buildCompiledTaskTree(phases: readonly PresetPhase[]): CompiledTaskTree {
+	return {
+		kind: "seq",
+		identity: "tasks:root",
+		children: phases.map((phase) => ({
+			kind: "seq",
+			identity: `phase:${phase.name}`,
+			phase: phase.name,
+			children: [{ kind: "phase", identity: `phase:${phase.name}:task`, phase: phase.name }],
+		})),
+	}
+}
 
 export type PresetItemField = {
 	type: PresetItemFieldType
@@ -2743,8 +2780,11 @@ export function projectCompiledPreset(model: CompiledTaskModel, findings: readon
 				...phaseEdges,
 			],
 		},
-		phases: model.phases.map((phase) => ({
-			identity: `phase:${phase.name}`,
+		phases: model.phases.map((phase) => {
+			const taskTree = model.tasks.children.find((candidate) => candidate.phase === phase.name)
+			if (taskTree === undefined) throw new CoderLoopError(`compiled task tree missing phase ${phase.name}`)
+			return ({
+			identity: taskTree.identity,
 			name: phase.name,
 			exits: [...phase.exits],
 			trigger: phase.trigger,
@@ -2753,14 +2793,25 @@ export function projectCompiledPreset(model: CompiledTaskModel, findings: readon
 			variables: phase.variables.map((variable) => ({ key: variable.key, type: "string" as const, sourceKind: variable.source.kind })),
 			toolRequirements: [],
 			rights: { createItems: phase.rights.createItems, writableFields: [...phase.rights.writableFields], privilegedOps: [...phase.rights.privilegedOps] },
-			task: { kind: "phase" as const, identity: `phase:${phase.name}` },
-		})),
+			taskTree: {
+				kind: taskTree.kind,
+				identity: taskTree.identity,
+				children: taskTree.children.map((child) => ({ ...child })),
+			},
+		})}),
 		tools: [],
 		fragments: model.fragments.map((fragment) => ({ id: fragment.id, role: fragment.role, path: relative(model.presetDir, fragment.path) })),
 		findings: [...findings],
 	}
 	PresetCompileProjectionBoundary.assert(projection)
 	return projection
+}
+
+export function projectPresetCompileResult(result: CompileResult): PresetCompilePublicResult {
+	const projected = result.kind === "compiled"
+		? { kind: "compiled" as const, schemaVersion: 1 as const, projection: projectCompiledPreset(result.model, result.warnings) }
+		: { kind: "rejected" as const, schemaVersion: 1 as const, diagnostics: result.diagnostics }
+	return PresetCompilePublicResultBoundary.assert(projected)
 }
 
 async function runPresetCommand(args: string[]): Promise<void> {
@@ -2771,11 +2822,13 @@ async function runPresetCommand(args: string[]): Promise<void> {
 	const presetDir = PRESET_NAME_PATTERN.test(source) ? resolve(PKG_ROOT, "presets", source) : resolve(process.cwd(), source)
 	const result = await compilePreset(presetDir)
 	if (result.kind === "rejected") {
-		process.stderr.write(`${JSON.stringify(result)}\n`)
+		process.stderr.write(`${JSON.stringify(projectPresetCompileResult(result))}\n`)
 		process.exitCode = 1
 		return
 	}
-	process.stdout.write(`${JSON.stringify(projectCompiledPreset(result.model, result.warnings))}\n`)
+	const publicResult = projectPresetCompileResult(result)
+	if (publicResult.kind !== "compiled") throw new CoderLoopError("compiled result projection changed variant")
+	process.stdout.write(`${JSON.stringify(publicResult.projection)}\n`)
 }
 
 async function main() {
@@ -4386,8 +4439,17 @@ export async function compilePreset(sourceDir: string, options: LoadPresetOption
 	try {
 		return { kind: "compiled", ...(await compilePresetOrThrow(sourceDir, options)) }
 	} catch (error) {
-		const diagnostic: CompileFinding = { verdict: "error", rule: "preset-compile", message: errorMessage(error) }
-		return { kind: "rejected", diagnostics: [diagnostic] }
+		if (error instanceof PresetCompileFailure) return { kind: "rejected", diagnostics: error.diagnostics }
+		if (error instanceof PresetStructureError) {
+			return { kind: "rejected", diagnostics: [{ verdict: "error", rule: "preset-structure", message: error.message }] }
+		}
+		if (error instanceof SyntaxError) {
+			return { kind: "rejected", diagnostics: [{ verdict: "error", rule: "preset-toml", message: error.message }] }
+		}
+		if (isNodeError(error) && typeof error.code === "string") {
+			return { kind: "rejected", diagnostics: [{ verdict: "error", rule: "preset-source", message: `${error.code}: ${error.message}` }] }
+		}
+		throw error
 	}
 }
 
@@ -4421,10 +4483,10 @@ async function compilePresetOrThrow(sourceDir: string, options: LoadPresetOption
 		else warnings.push({ verdict: "warn", rule: finding.kind, message: finding.message })
 	}
 	if (dagErrors.length > 0) {
-		const lines = dagErrors.map((f) => `  ${f.message}`)
-		presetError(
-			`preset ${preset.name}: cross-table DAG check found ${dagErrors.length} error finding(s).\n${lines.join("\n")}`,
-		)
+		const diagnostics = dagErrors.map((finding): CompileFinding => ({ verdict: "error", rule: finding.kind, message: finding.message }))
+		const first = diagnostics[0]
+		if (first === undefined) throw new CoderLoopError("non-empty DAG errors lost during conversion")
+		throw new PresetCompileFailure([first, ...diagnostics.slice(1)])
 	}
 	const phases: PresetPhase[] = []
 	const placeholderErrors: PresetPlaceholderFinding[] = []
@@ -4439,10 +4501,13 @@ async function compilePresetOrThrow(sourceDir: string, options: LoadPresetOption
 		phases.push(phase)
 	}
 	if (placeholderErrors.length > 0) {
-		const lines = placeholderErrors.map((f) => `  ${f.file}: {{${f.key}}} (${f.direction})`)
-		presetError(
-			`preset ${preset.name}: template contains undeclared placeholders — every {{KEY}} must be declared in the phase's [phases.variables] block.\n${lines.join("\n")}`,
-		)
+		const diagnostics = placeholderErrors.map((finding): CompileFinding => ({
+			verdict: "error", rule: "template-undeclared",
+			message: `${finding.file}: {{${finding.key}}} (${finding.direction})`,
+		}))
+		const first = diagnostics[0]
+		if (first === undefined) throw new CoderLoopError("non-empty placeholder errors lost during conversion")
+		throw new PresetCompileFailure([first, ...diagnostics.slice(1)])
 	}
 	for (const fragment of preset.fragments) {
 		await assertReadable(fragment.path, `preset fragment "${fragment.id}"`)
@@ -4454,7 +4519,7 @@ async function compilePresetOrThrow(sourceDir: string, options: LoadPresetOption
 			phases,
 			sourceDir: sourceAbs,
 			sourceHash,
-			tasks: phases.map((phase) => ({ identity: `phase:${phase.name}`, kind: "phase", phase: phase.name })),
+			tasks: buildCompiledTaskTree(phases),
 		},
 		warnings,
 	}
@@ -4990,7 +5055,7 @@ function isChainCompleteTrigger(trigger: PresetPhaseTrigger): trigger is { on: "
 }
 
 function presetError(message: string): never {
-	throw new Error(message)
+	throw new PresetStructureError(message)
 }
 
 
@@ -7138,7 +7203,9 @@ function assertArk<T>(schema: ArkAssertable<T>, data: BoundaryValue, label: stri
 	try {
 		return schema.assert(data)
 	} catch (error) {
-		throw new Error(`${label}: ${errorMessage(error)}`)
+		const message = `${label}: ${errorMessage(error)}`
+		if (label === "preset") throw new PresetStructureError(message)
+		throw new Error(message)
 	}
 }
 

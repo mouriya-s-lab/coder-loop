@@ -994,7 +994,9 @@ extraArgs = []
 			{ name: "run-entry.md", body: "id={{KEY}} title={{TITLE}} typo={{NOT_DECLARED}}\n" },
 		])
 		const findings: PresetPlaceholderFinding[] = []
-		await expect(loadPreset(dir, { onValidationFinding: (f) => findings.push(f) })).rejects.toThrow(/undeclared placeholders/)
+		await expect(loadPreset(dir, { onValidationFinding: (f) => findings.push(f) })).rejects.toThrow(
+			/run-entry\.md: \{\{NOT_DECLARED\}\} \(template-undeclared\)$/,
+		)
 		const error = findings.find((f) => f.direction === "template-undeclared")
 		expect(error).toBeDefined()
 		expect(error?.key).toBe("NOT_DECLARED")
