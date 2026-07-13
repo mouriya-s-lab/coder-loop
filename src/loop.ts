@@ -61,6 +61,8 @@ import {
 import {
 	chainBindings as metadataBindings,
 	chainBindingsPresetPath,
+	externalTerminalHold,
+	externalTerminalLoss,
 	itemExtraJsonValue,
 	itemExtraToJsonObject,
 	metadataBoolean,
@@ -71,6 +73,8 @@ import {
 	type AdmittedItemStatus,
 	type InternalStatus,
 	type ItemExtra,
+	type ExternalTerminalHoldAvailability,
+	type ExternalTerminalLossFact,
 } from "./runtime-data"
 import { checkPresetDag, type PresetDagFinding } from "./preset-dag-check"
 export { checkPresetDag } from "./preset-dag-check"
@@ -400,7 +404,7 @@ type ContextAppendCommandArgs = {
 // admittance ensures we cannot leave a code path partial). ENGINE_BUILTIN_RUNNER stays `codex`
 // — opencode is an explicit opt-in via `runner = "opencode"` on a preset's phase, never a
 // fallback for missing claude/codex.
-const AgentRunnerKindBoundary = arkType.or(arkType.unit("claude"), arkType.unit("codex"), arkType.unit("opencode"))
+const AgentRunnerKindBoundary = arkType.or(arkType.unit("claude"), arkType.unit("codex"), arkType.unit("opencode"), arkType.unit("hapi"))
 
 const TerminatedBoundary = arkType.or(
 	{ kind: arkType.unit("clean") },
@@ -717,7 +721,7 @@ export type PresetPhaseTrigger =
 	| { afterPhase: string; whenStatus: InternalStatus }
 	| { on: "chain-complete" }
 
-export type AgentRunnerKind = "claude" | "codex" | "opencode"
+export type AgentRunnerKind = "claude" | "codex" | "opencode" | "hapi"
 
 // #433: "config" source value is retired — there is no longer a target-side runtime preferences
 // file to override phase runner choice from. #456: role-named source values (`iteration-default` /
@@ -742,6 +746,7 @@ export type AgentRunnerCommands = {
 	claude: AgentRunnerCommand
 	codex: AgentRunnerCommand
 	opencode: AgentRunnerCommand
+	hapi: AgentRunnerCommand
 }
 
 export type RuntimeCheckError = {
@@ -857,6 +862,17 @@ export type StatusQueueSnapshot = {
 	continuable: number
 	terminal: number
 	selected: StatusSelectedIssue | null
+	holds: StatusExternalTerminalHoldSnapshot[]
+}
+
+export type StatusExternalTerminalHoldSnapshot = {
+	kind: "external-terminal-unavailable"
+	chainId: number
+	rowId: number
+	itemId: string
+	phase: string
+	runner: AgentRunnerKind
+	availability: ExternalTerminalHoldAvailability
 }
 
 export type StatusRunCountSnapshot = {
@@ -884,6 +900,7 @@ export type StatusCurrentSnapshot = {
 	item: StatusItemSnapshot | null
 	runner: StatusRunnerSelectionSnapshot | null
 	phaseStatus: StatusPhaseStatusSnapshot | null
+	externalTerminal: { availability: ExternalTerminalHoldAvailability | null; loss: ExternalTerminalLossFact | null } | null
 }
 
 export type StatusEventsSnapshot = {
@@ -1915,8 +1932,8 @@ function parsePresetPhaseChainActionFlag(value: string): PresetPhaseChainAction 
 
 function parseOptionalRunner(value: string | null, flagName: string): AgentRunnerKind | null {
 	if (value === null) return null
-	if (value === "claude" || value === "codex" || value === "opencode") return value
-	fail(`${flagName} must be claude, codex, or opencode, got: ${value}`)
+	if (value === "claude" || value === "codex" || value === "opencode" || value === "hapi") return value
+	fail(`${flagName} must be claude, codex, opencode, or hapi, got: ${value}`)
 }
 
 // #526 chain set-runner-model boundary parsers. Required variants of the runner-kind /
@@ -1931,8 +1948,8 @@ function parseOptionalRunner(value: string | null, flagName: string): AgentRunne
 // narrowed input could never hit).
 function parseRequiredRunnerKind(value: string, flagName: string): AgentRunnerKind {
 	if (typeof value !== "string" || value.length === 0) fail(`${flagName} is required`)
-	if (value === "claude" || value === "codex" || value === "opencode") return value
-	fail(`${flagName} must be claude, codex, or opencode, got: ${value}`)
+	if (value === "claude" || value === "codex" || value === "opencode" || value === "hapi") return value
+	fail(`${flagName} must be claude, codex, opencode, or hapi, got: ${value}`)
 }
 
 function parseRequiredNonEmptyString(value: string, flagName: string): string {
@@ -3028,9 +3045,9 @@ function makeUnavailableStatusSnapshot(input: {
 			errors: [{ path: input.errorPath, message: input.errorMessage }],
 			error: input.errorMessage,
 		},
-		queue: { total: 0, byStatus: {}, continuable: 0, terminal: 0, selected: null },
+		queue: { total: 0, byStatus: {}, continuable: 0, terminal: 0, selected: null, holds: [] },
 		runs: { total: 0, byPhaseStatus: {}, counts: [] },
-		current: { run: null, id: null, item: null, runner: null, phaseStatus: null },
+		current: { run: null, id: null, item: null, runner: null, phaseStatus: null, externalTerminal: null },
 		events: { runId: null, path: null, exists: false, recent: [], latest: null, error: null },
 		processes: input.processes ?? { live: [], scanError: null },
 	}
@@ -3124,6 +3141,18 @@ function buildStatusQueueSnapshotFromRecords(
 		byStatus,
 		continuable: items.filter(isContinuable).length,
 		terminal: items.filter(isTerminal).length,
+		holds: items.flatMap((item) => {
+			const hold = externalTerminalHold(item.extra)
+			return hold === null ? [] : [{
+				kind: hold.kind,
+				chainId: item.chainId,
+				rowId: item.id,
+				itemId: item.itemId,
+				phase: hold.phase,
+				runner: hold.runner,
+				availability: { ...hold.availability },
+			}]
+		}),
 		selected: selected === null || selectedPreset === null ? null : {
 			id: getItemId(selected.item, selectedPreset),
 			item: statusItemSnapshot(selected.item, selectedPreset),
@@ -3212,7 +3241,7 @@ async function buildStatusCurrentSnapshotFromRecords(
 	current: CurrentRunRecord | null,
 	itemPresets: StatusItemPresetResolver,
 ): Promise<StatusCurrentSnapshot> {
-	if (current === null) return { run: null, id: null, item: null, runner: null, phaseStatus: null }
+	if (current === null) return { run: null, id: null, item: null, runner: null, phaseStatus: null, externalTerminal: null }
 	let id: string | null = null
 	let item: ItemRecord | null = null
 	try {
@@ -3228,12 +3257,18 @@ async function buildStatusCurrentSnapshotFromRecords(
 	// the chain seed and throw "preset X does not define phase Y" on a foreign-preset item.
 	const itemPreset = item === null ? null : itemPresets.presetForItem(item)
 	const selectionInput = itemPreset === null ? null : phaseRunnerSelectionInputForPreset(options, itemPreset)
+	const hold = item === null ? null : externalTerminalHold(item.extra)
+	const loss = externalTerminalLoss(current.extra)
 	return {
 		run: statusCurrentRunSnapshot(current),
 		id,
 		item: item === null || itemPreset === null ? null : statusItemSnapshot(item, itemPreset),
 		runner: item === null || selectionInput === null ? null : statusRunnerSelection(selectRunnerForPhase(current.phase, item, selectionInput)),
 		phaseStatus: await readAgentPhaseStatus(agentStatusPath(outputPath)),
+		externalTerminal: hold === null && loss === null ? null : {
+			availability: hold === null ? null : { ...hold.availability },
+			loss: loss === null ? null : { ...loss },
+		},
 	}
 }
 
@@ -4712,7 +4747,7 @@ function parseChainBindingDefaultValue(value: BoundaryValue, label: string): Cha
 
 function parsePhaseRunner(value: BoundaryValue, label: string): AgentRunnerKind | null {
 	if (value === null) return null
-	if (value !== "claude" && value !== "codex" && value !== "opencode") presetError(`${label}: must be "claude", "codex", or "opencode"`)
+	if (value !== "claude" && value !== "codex" && value !== "opencode" && value !== "hapi") presetError(`${label}: must be "claude", "codex", "opencode", or "hapi"`)
 	return value
 }
 
@@ -4950,6 +4985,7 @@ export function buildAgentRunnerCommands(resolved: Pick<ChainResolved, "claudeBi
 			extraArgs: [...resolved.opencodeExtraArgs],
 			model: resolved.opencodeModel,
 		},
+		hapi: { kind: "hapi", binary: "hapi-remote-session", extraArgs: [], model: null },
 	}
 }
 
@@ -6618,6 +6654,7 @@ export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: stri
 			args: agentOpencodeArgs(runner.extraArgs, prompt, resume, runner.model),
 		}
 	}
+	if (runner.kind === "hapi") throw new Error("hapi invocation is owned by issue #603 and must be availability-gated")
 	return {
 		kind: "spawn",
 		binary: runner.binary,

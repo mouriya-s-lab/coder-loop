@@ -47,6 +47,7 @@ import {
 	type SchedulerState,
 } from "./scheduler"
 import { PersistedRateLimitStateBoundary, type RateLimitReset } from "./rate-limit"
+import { probeExternalTerminal, runnerExecutionDomain } from "./runner-execution"
 import {
 	type ChainRecord,
 	type CreateChainInput,
@@ -746,6 +747,8 @@ function decisionFingerprintScopeReleasedBySchedulerEvent(event: SchedulerEvent)
 		case "recycle.timeout_kill":
 		case "recycle.natural_exit":
 		case "scheduler.rate_limited":
+		case "runner.external_terminal_unavailable":
+		case "runner.availability_restored":
 			return null
 		default:
 			return assertNeverSchedulerEvent(event)
@@ -789,6 +792,42 @@ export class DaemonError extends Error {
 
 export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: SchedulerEvent): ObservabilityEvent {
 	switch (event.type) {
+		case "runner.external_terminal_unavailable": {
+			const checkedAt = new Date().toISOString()
+			return makeObservabilityEvent({
+				kind: "diagnostic",
+				type: "daemon.warning",
+				chain: chain.name,
+				item: event.rowId,
+				phase: event.phase,
+				subject: { kind: "engine" },
+				payload: {
+					code: "external_terminal_unavailable",
+					runner: event.runner,
+					binary: event.binary,
+					probeArgv: [...event.probeArgv],
+					availability: { ...event.availability, checkedAt, since: checkedAt },
+					affected: [{ chainId: event.chainId, rowId: event.rowId, itemId: event.itemId, phase: event.phase }],
+				},
+			})
+		}
+		case "runner.availability_restored":
+			return makeObservabilityEvent({
+				kind: "diagnostic",
+				type: "runner.availability_restored",
+				chain: chain.name,
+				item: event.rowId,
+				phase: event.phase,
+				subject: { kind: "engine" },
+				payload: {
+					runner: event.runner,
+					binary: event.binary,
+					probeArgv: [...event.probeArgv],
+					checkedAt: event.checkedAt,
+					affected: [{ chainId: event.chainId, rowId: event.rowId, itemId: event.itemId, phase: event.phase }],
+				},
+			})
+
 		case "slot.busy":
 			return makeObservabilityEvent({
 				kind: "decision",
@@ -2452,7 +2491,7 @@ export class CoderLoopDaemon {
 		const merged = chainMetadataToJsonObject(chain.metadata)
 		const beforeJson = JSON.stringify(merged)
 		const updatedKinds: string[] = []
-		for (const kind of ["claude", "codex", "opencode"] as const) {
+		for (const kind of ["claude", "codex", "opencode", "hapi"] as const) {
 			const block = patch[kind]
 			if (block === undefined || block === null) continue
 			if (typeof block !== "object" || Array.isArray(block)) {
@@ -2730,7 +2769,8 @@ export class CoderLoopDaemon {
 			subject: caller.subject,
 			payload: { rowId: item.id, itemId: item.itemId, status: item.status },
 		}))
-		this.queueSchedulerTick()
+		if (await this.itemMayUseExternalTerminal(chain, item)) await this.requestSchedulerTick()
+		else this.queueSchedulerTick()
 		return { item: itemToJson(item) }
 	}
 
@@ -2791,7 +2831,8 @@ export class CoderLoopDaemon {
 				payload: { rowId: item.id, itemId: item.itemId, status: item.status },
 			}))
 		}
-		this.queueSchedulerTick()
+		if ((await Promise.all(items.map(async (item) => await this.itemMayUseExternalTerminal(chain, item)))).some(Boolean)) await this.requestSchedulerTick()
+		else this.queueSchedulerTick()
 		return { items: items.map((item) => itemToJson(item)) }
 	}
 
@@ -3033,7 +3074,16 @@ export class CoderLoopDaemon {
 			return { item: itemToJson(updated) }
 		} finally {
 			resumeScheduler()
+			const currentItem = store.getItem(item.id)
+			if (currentItem !== null && await this.itemMayUseExternalTerminal(chain, currentItem)) await this.requestSchedulerTick()
+			else this.queueSchedulerTick()
 		}
+	}
+
+	private async itemMayUseExternalTerminal(chain: ChainRecord, item: ItemRecord): Promise<boolean> {
+		if (item.runner !== null) return runnerExecutionDomain(item.runner).kind === "external-terminal"
+		const { preset } = await this.loadedPresetForItem(chain, item, "external-terminal.create-update-probe")
+		return preset.phases.some((phase) => phase.defaultRunner !== null && runnerExecutionDomain(phase.defaultRunner).kind === "external-terminal")
 	}
 
 	private async handleItemReorder(args: JsonObject): Promise<JsonObject> {
@@ -3533,6 +3583,11 @@ export class CoderLoopDaemon {
 				await this.applyRateLimitNotice({ runId: info.runId, chainId: info.chainId, itemId: info.itemId, reset: info.reset })
 			},
 		}
+		options.externalTerminalProbe = scheduler.externalTerminalProbe ?? (async ({ runner }) => {
+			const domain = runnerExecutionDomain(runner.kind)
+			if (domain.kind !== "external-terminal") throw new DaemonError("internal_error", `local runner ${runner.kind} reached external-terminal probe`)
+			return await probeExternalTerminal(runner.binary, domain.probeArgv)
+		})
 		if (scheduler.phaseRunner !== undefined) options.phaseRunner = scheduler.phaseRunner
 		if (phaseRunnerSelectionForChain !== undefined) options.phaseRunnerSelectionForChain = phaseRunnerSelectionForChain
 		if (phaseRunnerSelectionForItem !== undefined) options.phaseRunnerSelectionForItem = phaseRunnerSelectionForItem
@@ -5182,7 +5237,7 @@ function optionalRunner(record: UnknownRecord, key: string): AgentRunnerKind | n
 	const value = record[key]
 	if (value === undefined) return undefined
 	if (value === null) return null
-	if (value !== "claude" && value !== "codex" && value !== "opencode") throw new DaemonError("invalid_request", `${key} must be claude, codex, opencode, or null`)
+	if (value !== "claude" && value !== "codex" && value !== "opencode" && value !== "hapi") throw new DaemonError("invalid_request", `${key} must be claude, codex, opencode, hapi, or null`)
 	return value
 }
 

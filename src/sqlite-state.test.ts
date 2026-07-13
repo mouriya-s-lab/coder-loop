@@ -1234,7 +1234,7 @@ describe("sqlite state store", () => {
 	// the narrow CHECK), confirms a pre-migration row with `runner='claude'` is preserved, then
 	// proves the post-migration CHECK admits `runner='opencode'` (the v12 CHECK would have
 	// rejected it).
-	test("items table allows opencode runner after v12 to v13 migration (acceptance row 8, #481)", async () => {
+	test("items table rebuild admits the current opencode and hapi runner vocabulary", async () => {
 		const loopDataRoot = resolve(TEST_ROOT, `items-opencode-v12-v13-${Date.now()}-${++nextRootId}`)
 		await mkdir(loopDataRoot, { recursive: true })
 		const dbFile = resolve(loopDataRoot, "db.sqlite")
@@ -1351,6 +1351,16 @@ describe("sqlite state store", () => {
 			expect(opencodeItem.runner).toBe("opencode")
 			const reread = migrated.getItemById(chainId, "481-opencode")
 			expect(reread?.runner).toBe("opencode")
+			const hapiItem = migrated.createItem({
+				chainId,
+				itemId: "602-hapi",
+				repoCwd: "/repo/coder-loop",
+				status: runtimeStatus("queued"),
+				attempts: 0,
+				runner: "hapi",
+				extra: storedItemExtra({}),
+			})
+			expect(hapiItem.runner).toBe("hapi")
 		} finally {
 			migrated.close()
 		}
@@ -1362,6 +1372,7 @@ describe("sqlite state store", () => {
 			expect(chain).not.toBeNull()
 			expect(reopened.getItemById(chain!.id, "481-pre")?.runner).toBe("claude")
 			expect(reopened.getItemById(chain!.id, "481-opencode")?.runner).toBe("opencode")
+			expect(reopened.getItemById(chain!.id, "602-hapi")?.runner).toBe("hapi")
 		} finally {
 			reopened.close()
 		}

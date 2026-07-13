@@ -634,6 +634,30 @@ describe("scheduler", () => {
 		}
 	})
 
+	test("external-terminal chain-complete trigger is probed before trigger side effects", async () => {
+		const fixture = await createFixture("external-terminal-chain-complete-gate")
+		try {
+			const chain = createChain(fixture.store, "external-terminal-chain-complete-gate-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 602_003, repoCwd: "/repo/a" })
+			fixture.store.updateItem(item.id, { status: runtimeStatus("done"), updatedAt: 1_800_000_500 })
+			let triggerCalls = 0
+			const tick = await schedulerTick(fixture.options({
+				phaseRunner: ({ phase }) => ({ kind: "hapi", source: "preset", binary: "hapi", extraArgs: [], model: null }),
+				externalTerminalProbe: async () => ({ kind: "unavailable", reason: "endpoint-unavailable", exitCode: 69, signal: null }),
+				chainCompleteTrigger: () => { triggerCalls += 1; return { decision: "complete" } },
+			}))
+			expect(tick.spawnedRuns).toHaveLength(0)
+			expect(triggerCalls).toBe(0)
+			expect(fixture.store.getChain(chain.id)?.status).toBe("active")
+			expect(fixture.worktreeCalls).toHaveLength(0)
+			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({
+				type: "runner.external_terminal_unavailable", phase: "umbrella-finalizer", runner: "hapi", rowId: item.id,
+			}))
+		} finally {
+			fixture.store.close()
+		}
+	})
+
 	test("chain-complete trigger does not run twice during overlapping completion ticks", async () => {
 		const fixture = await createFixture("completion-trigger-overlap")
 		try {
@@ -3086,6 +3110,128 @@ describe("scheduler chain bindings (issue #288)", () => {
 })
 
 describe("scheduler per-phase runner selection (issue #287)", () => {
+	test("external-terminal unavailability gates before worktree and attempt side effects", async () => {
+		const fixture = await createFixture("external-terminal-pre-worktree-gate")
+		try {
+			const chain = createChain(fixture.store, "external-terminal-pre-worktree-gate-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 602_001, repoCwd: "/repo/a" })
+			const observed: string[] = []
+			const tick = await schedulerTick(fixture.options({
+				runner: { kind: "hapi", source: "iteration-default", binary: "hapi", extraArgs: [], model: null },
+				externalTerminalProbe: async ({ runner, phase }) => {
+					observed.push(`${runner.kind}:${phase}`)
+					return { kind: "unavailable", reason: "endpoint-unavailable", exitCode: 69, signal: null }
+				},
+			}))
+
+			expect(tick.spawnedRuns).toHaveLength(0)
+			expect(observed).toEqual(["hapi:iteration"])
+			expect(fixture.worktreeCalls).toHaveLength(0)
+			expect(fixture.store.listRuns(chain.id)).toHaveLength(0)
+			expect(fixture.store.getCurrentRun(chain.id)).toBeNull()
+			expect(fixture.store.getItem(item.id)?.attempts).toBe(0)
+			expect(itemExtraToJsonObject(fixture.store.getItem(item.id)!.extra).externalTerminalHold).toMatchObject({
+				kind: "external-terminal-unavailable",
+				runner: "hapi",
+				phase: "iteration",
+				binary: "hapi",
+				probeArgv: ["probe"],
+				availability: { kind: "unavailable", reason: "endpoint-unavailable", exitCode: 69 },
+			})
+			expect(fixture.schedulerEvents).toContainEqual({
+				type: "runner.external_terminal_unavailable",
+				chainId: chain.id,
+				rowId: item.id,
+				itemId: item.itemId,
+				phase: "iteration",
+				runner: "hapi",
+				binary: "hapi",
+				probeArgv: ["probe"],
+				availability: { kind: "unavailable", reason: "endpoint-unavailable", exitCode: 69, signal: null },
+			})
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("local-process runners do not consult the external-terminal probe", async () => {
+		const fixture = await createFixture("local-runner-skips-external-probe")
+		try {
+			const chain = createChain(fixture.store, "local-runner-skips-external-probe-chain")
+			createItem(fixture.store, chain, { issueNumber: 602_002, repoCwd: "/repo/a" })
+			let probes = 0
+			const tick = await schedulerTick(fixture.options({
+				externalTerminalProbe: async () => {
+					probes += 1
+					return { kind: "available" }
+				},
+			}))
+			expect(tick.spawnedRuns).toHaveLength(1)
+			expect(probes).toBe(0)
+			await tick.spawnedRuns[0]!.closed
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("held external-terminal item automatically spawns after availability restoration", async () => {
+		const fixture = await createFixture("external-terminal-restoration")
+		try {
+			const chain = createChain(fixture.store, "external-terminal-restoration-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 602_005, repoCwd: "/repo/a" })
+			let available = false
+			const options = fixture.options({
+				runner: { kind: "hapi", source: "iteration-default", binary: "fake-hapi", extraArgs: [], model: null },
+				externalTerminalProbe: async () => available
+					? { kind: "available" }
+					: { kind: "unavailable", reason: "endpoint-unavailable", exitCode: 69, signal: null },
+				runnerInvocationBuilder: (_runner, prompt) => ({ kind: "spawn", binary: "bun", args: [fixture.fakeRunner, "-p", prompt] }),
+			})
+			expect((await schedulerTick(options)).spawnedRuns).toHaveLength(0)
+			available = true
+			const restored = await schedulerTick(options)
+			expect(restored.spawnedRuns).toHaveLength(1)
+			expect(fixture.store.getItem(item.id)?.extra.externalTerminalHold).toBeUndefined()
+			expect(fixture.schedulerEvents.filter((event) => event.type === "runner.availability_restored")).toHaveLength(1)
+			await restored.spawnedRuns[0]!.closed
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("in-flight external-terminal loss revokes, terminates, and restores the pre-run attempt", async () => {
+		const fixture = await createFixture("external-terminal-in-flight-loss")
+		try {
+			const chain = createChain(fixture.store, "external-terminal-in-flight-loss-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 602_004, repoCwd: "/repo/a", sleepMs: 10_000 })
+			let probeCount = 0
+			let revocations = 0
+			const options = fixture.options({
+				runner: { kind: "hapi", source: "iteration-default", binary: "fake-hapi", extraArgs: [], model: null },
+				externalTerminalProbe: async () => ++probeCount === 1
+					? { kind: "available" }
+					: { kind: "unavailable", reason: "endpoint-unavailable", exitCode: 69, signal: null },
+				runnerInvocationBuilder: (_runner, prompt) => ({ kind: "spawn", binary: "bun", args: [fixture.fakeRunner, "-p", prompt] }),
+				runCredentials: {
+					mint: () => ({ value: "external-loss-credential" }),
+					revoke: () => { revocations += 1 },
+				},
+			})
+			const spawned = await schedulerTick(options)
+			expect(spawned.spawnedRuns).toHaveLength(1)
+			expect(fixture.store.getItem(item.id)?.attempts).toBe(1)
+			await schedulerTick(options)
+			await spawned.spawnedRuns[0]!.closed
+			expect(revocations).toBe(1)
+			expect(fixture.store.getCurrentRun(chain.id)).toBeNull()
+			expect(fixture.store.getItem(item.id)?.attempts).toBe(0)
+			expect(fixture.store.getItem(item.id)?.extra.schedulerBackoff).toBeUndefined()
+			expect(itemExtraToJsonObject(fixture.store.getItem(item.id)!.extra).externalTerminalHold).toMatchObject({ availability: { reason: "endpoint-unavailable" } })
+		} finally {
+			fixture.store.close()
+		}
+	})
+
 	test("spawnSchedulerRun routes phase=iteration through phaseRunner and uses returned binary for spawn (AC2 iter)", async () => {
 		const fixture = await createFixture("phase-runner-iter")
 		try {

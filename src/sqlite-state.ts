@@ -396,7 +396,7 @@ const ITEMS_TABLE_SCHEMA_SQL = `
 	issue_file TEXT,
 	evidence_dir TEXT,
 	agent_cwd TEXT,
-	runner TEXT CHECK (runner IN ('claude', 'codex', 'opencode') OR runner IS NULL),
+	runner TEXT CHECK (runner IN ('claude', 'codex', 'opencode', 'hapi') OR runner IS NULL),
 	phase TEXT,
 	preset TEXT,
 	preset_path TEXT,
@@ -596,7 +596,7 @@ function chainsTableHasNotNullPreset(db: Database): boolean {
 function itemsTableRunnerCheckAllowsOpencode(db: Database): boolean {
 	const sql = db.query<TableSqlRow, []>("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'items'").get()?.sql ?? ""
 	if (sql === "") return false
-	return /runner\s+TEXT\s+CHECK[^)]*['"]opencode['"]/i.test(sql)
+	return /runner\s+TEXT\s+CHECK[^)]*['"]opencode['"][^)]*['"]hapi['"]/i.test(sql)
 }
 
 function itemsTableHasColumn(db: Database, columnName: string): boolean {
@@ -1087,7 +1087,7 @@ function rebuildItemsTableForV6(db: Database): void {
 		issue_file TEXT,
 		evidence_dir TEXT,
 		agent_cwd TEXT,
-		runner TEXT CHECK (runner IN ('claude', 'codex', 'opencode') OR runner IS NULL),
+		runner TEXT CHECK (runner IN ('claude', 'codex', 'opencode', 'hapi') OR runner IS NULL),
 		phase TEXT,
 		preset TEXT,
 		preset_path TEXT,
@@ -1510,7 +1510,7 @@ function insertItem(db: Database, getItemRow: (id: number) => ItemRow | null, in
 
 function rowToItem(row: ItemRow | null): ItemRecord | null {
 	if (row === null) return null
-	if (row.runner !== null && row.runner !== "claude" && row.runner !== "codex" && row.runner !== "opencode") {
+	if (row.runner !== null && row.runner !== "claude" && row.runner !== "codex" && row.runner !== "opencode" && row.runner !== "hapi") {
 		throw new SqliteStateError("invalid_json", `invalid item runner in DB row: ${row.runner}`, { id: row.id })
 	}
 	return {
@@ -1786,7 +1786,7 @@ function normalizeSessionPhase(phase: string, code: SqliteStateErrorCode): strin
 }
 
 function isAgentRunnerKind(value: unknown): value is AgentRunnerKind {
-	return value === "claude" || value === "codex" || value === "opencode"
+	return value === "claude" || value === "codex" || value === "opencode" || value === "hapi"
 }
 
 function stringifyJsonObject(value: JsonObject): string {
