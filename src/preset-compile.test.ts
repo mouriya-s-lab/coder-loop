@@ -55,6 +55,25 @@ describe("preset compiler", () => {
 		expect(tree.children.find((task) => task.phase === model.phases[0]!.name)?.identity).toBe(model.tasks.children[0]!.identity)
 	})
 
+	test("canonical identities remain unique for delimiter-bearing legal phase names", async () => {
+		const model = await loadPreset(resolve(ROOT, "presets/single-phase-example"))
+		const template = model.phases[0]!
+		const phases = [{ ...template, name: "x" }, { ...template, name: "x:task" }]
+		const tasks = buildCompiledTaskTree(phases)
+		const collisionModel = { ...model, phases, tasks }
+		const projection = projectCompiledPreset(collisionModel, [])
+		const canonicalIdentities = [
+			tasks.identity,
+			...tasks.children.flatMap((phase) => [phase.identity, ...phase.children.map((task) => task.identity)]),
+		]
+		const projectedIdentities = [
+			...projection.phases.flatMap((phase) => [phase.taskTree.identity, ...phase.taskTree.children.map((task) => task.identity)]),
+		]
+
+		expect(new Set(canonicalIdentities).size).toBe(canonicalIdentities.length)
+		expect(projectedIdentities).toEqual(canonicalIdentities.slice(1))
+	})
+
 	test("preserves all warnings", async () => {
 		const result = await compilePreset(resolve(ROOT, "test-fixtures/preset-compile/warning"))
 		expect(result.kind).toBe("compiled")
@@ -111,6 +130,43 @@ describe("preset compiler", () => {
 					message: `Missing preset fragment "missing" file: ${resolve(source, "missing-fragment.md")}`,
 				}])
 			}
+		} finally {
+			await rm(source, { recursive: true, force: true })
+		}
+	})
+
+	test("validation and DAG callback failures escape the compile-result channel", async () => {
+		const dagCallbackFailure = new SyntaxError("DAG callback infrastructure failed")
+		await expect(compilePreset(resolve(ROOT, "test-fixtures/preset-compile/warning"), {
+			onDagFinding: () => { throw dagCallbackFailure },
+		})).rejects.toBe(dagCallbackFailure)
+
+		const source = await mkdtemp(resolve(tmpdir(), "coder-loop-compile-callback-"))
+		const validationCallbackFailure = Object.assign(new Error("validation callback infrastructure failed"), { code: "EIO" })
+		try {
+			await writeFile(resolve(source, "preset.toml"), `name = "callback"
+[item]
+idField = "id"
+[item.fields]
+id = "string"
+[statuses]
+continuable = ["queued"]
+terminal = ["done", "exhausted"]
+entry = "queued"
+exhausted = "exhausted"
+[[phases]]
+name = "run"
+prompt = "run.md"
+[[phases.exits]]
+status = "done"
+when = "complete"
+[phases.variables]
+ID = "item.id"
+`)
+			await writeFile(resolve(source, "run.md"), "id={{ID}} typo={{TYPO}}\n")
+			await expect(compilePreset(source, {
+				onValidationFinding: () => { throw validationCallbackFailure },
+			})).rejects.toBe(validationCallbackFailure)
 		} finally {
 			await rm(source, { recursive: true, force: true })
 		}

@@ -10,7 +10,7 @@
 
 import { spawn } from "node:child_process"
 import { appendFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises"
-import { closeSync, createWriteStream, openSync, type WriteStream } from "node:fs"
+import { closeSync, createWriteStream, openSync, type Dirent, type WriteStream } from "node:fs"
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
 import { command, flag, option, optional, positional, run as runCmd, string as cmdString, subcommands } from "cmd-ts"
 import { type as arkType } from "arktype"
@@ -30,6 +30,15 @@ import {
 	type PresetPhasePrivilegedOp,
 } from "./daemon"
 import { dispatchSubcommand } from "./install-commands"
+import {
+	contextScopeFromCliArgs,
+	parseContextAppendBeginResult,
+	parseContextAppendChunkResult,
+	parseContextAppendCliScopeArgs,
+	parseContextAppendCommitResult,
+	type ContextAppendBeginRequest,
+	type ContextScope,
+} from "./context-entry"
 import { classifyRateLimitFromStdout } from "./rate-limit"
 import { createStreamTextState } from "./runner-output"
 import { LOOP_RUN_CREDENTIAL_ENV, RuntimePathError, resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
@@ -371,6 +380,15 @@ export type QueueUnblockCommandArgs = {
 	issue: string
 	startDaemon: boolean
 	dryRun: boolean
+}
+
+type ContextAppendCommandArgs = {
+	chainName: string
+	scope: ContextScope
+	body: string | null
+	bodyFile: string | null
+	loopDataRoot: string | null
+	json: boolean
 }
 
 // #433: per-target on-disk runtime preferences are retired. Every fact the engine spawns against
@@ -773,6 +791,32 @@ function missingPresetSource(message: string): PresetCompileFailure {
 	return new PresetCompileFailure([{ verdict: "error", rule: "preset-source", message }])
 }
 
+function presetSourceFailure(error: Error, code: string): PresetCompileFailure {
+	return new PresetCompileFailure([{
+		verdict: "error",
+		rule: "preset-source",
+		message: `${code}: ${error.message}`,
+	}])
+}
+
+async function readPresetSourceBytes(path: string): Promise<Buffer> {
+	try {
+		return await readFile(path)
+	} catch (error) {
+		if (isNodeError(error) && typeof error.code === "string") throw presetSourceFailure(error, error.code)
+		throw error
+	}
+}
+
+async function readPresetSourceText(path: string): Promise<string> {
+	try {
+		return await readFile(path, "utf-8")
+	} catch (error) {
+		if (isNodeError(error) && typeof error.code === "string") throw presetSourceFailure(error, error.code)
+		throw error
+	}
+}
+
 class PresetStructureError extends Error {
 	constructor(message: string) {
 		super(message)
@@ -788,7 +832,7 @@ export function buildCompiledTaskTree(phases: readonly PresetPhase[]): CompiledT
 			kind: "seq",
 			identity: `phase:${phase.name}`,
 			phase: phase.name,
-			children: [{ kind: "phase", identity: `phase:${phase.name}:task`, phase: phase.name }],
+			children: [{ kind: "phase", identity: `task:${phase.name}`, phase: phase.name }],
 		})),
 	}
 }
@@ -1848,6 +1892,52 @@ const itemCliCommand = subcommands({
 	},
 })
 
+const contextAppendCliCommand = command({
+	name: "append",
+	description: "Append an opaque context entry through the daemon socket.",
+	args: {
+		chainName: positional({ displayName: "chain", type: cmdString }),
+		scope: option({ long: "scope", type: cmdString }),
+		itemId: option({ long: "item", type: optional(cmdString) }),
+		groupId: option({ long: "group", type: optional(cmdString) }),
+		body: option({ long: "body", type: optional(cmdString) }),
+		bodyFile: option({ long: "body-file", type: optional(cmdString) }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		json: flag({ long: "json" }),
+	},
+	handler: (args): ContextAppendCommandArgs => {
+		const scopeArgs = parseContextAppendCliScopeArgs({ scope: args.scope, itemId: args.itemId ?? null, groupId: args.groupId ?? null })
+		return {
+			chainName: args.chainName,
+			scope: contextScopeFromCliArgs(scopeArgs),
+			body: args.body ?? null,
+			bodyFile: args.bodyFile ?? null,
+			loopDataRoot: args.loopDataRoot ?? null,
+			json: args.json,
+		}
+	},
+})
+
+const contextCliCommand = subcommands({ name: "context", description: "Append daemon-owned context entries.", cmds: { append: contextAppendCliCommand } })
+
+async function runContextCommand(args: string[]): Promise<void> {
+	const parsed = await runCmd(contextCliCommand, args)
+	const value = parsed.value
+	if ((value.body === null) === (value.bodyFile === null)) fail("exactly one of --body or --body-file is required")
+	const body = value.body ?? await readFile(value.bodyFile ?? fail("body file missing"), "utf-8")
+	const beginRequest: ContextAppendBeginRequest = { scope: value.scope }
+	const begun = parseContextAppendBeginResult(await requestDaemonResult(value.loopDataRoot, "context.append.begin", { chainName: value.chainName, ...beginRequest }))
+	const sessionId = begun.sessionId
+	const chunkChars = 256 * 1024
+	let sequence = 0
+	for (let offset = 0; offset < body.length; offset += chunkChars) {
+		parseContextAppendChunkResult(await requestDaemonResult(value.loopDataRoot, "context.append.chunk", { sessionId, sequence, chunk: body.slice(offset, offset + chunkChars) }))
+		sequence += 1
+	}
+	const result = parseContextAppendCommitResult(await requestDaemonResult(value.loopDataRoot, "context.append.commit", { sessionId }))
+	writeCommandResult(result, value.json, (entry) => `context entry appended: ${String(entry.entryId ?? "")}\n`)
+}
+
 const queueUnblockCliCommand = command({
 	name: "unblock",
 	description: "Restore one preset-unblockable item to the preset entry status and clear blocker metadata.",
@@ -2404,6 +2494,9 @@ const AGENT_ATTRIBUTED_COMMANDS = [
 	"daemon.down",
 	"logs.query",
 	"queue.unblock",
+	"context.append.begin",
+	"context.append.chunk",
+	"context.append.commit",
 ] as const
 type AgentAttributedCommand = typeof AGENT_ATTRIBUTED_COMMANDS[number]
 
@@ -2873,6 +2966,10 @@ async function main() {
 		await runPresetCommand(process.argv.slice(3))
 		return
 	}
+	if (firstArg === "context") {
+		await runContextCommand(process.argv.slice(3))
+		return
+	}
 	if (firstArg === "doctor") {
 		const handled = await dispatchSubcommand(firstArg, process.argv.slice(3))
 		if (handled) return
@@ -2892,6 +2989,7 @@ function rootUsage(): string {
 		"  chain <create|list|status|stop|resume|delete|set-runner-model>",
 		"  item <add|batch-add|list|update|reorder|exits|exit-action>",
 		"  queue unblock <target> --issue <issue>",
+		"  context append <chain> --scope <chain|item|group> --body <text>",
 		"  doctor <target>",
 		"  preset compile <name|path> --json",
 		"",
@@ -4288,7 +4386,7 @@ export async function materializePreset(sourceDir: string, materializeRoot: stri
 	for (const rel of files) {
 		hasher.update(rel)
 		hasher.update("\0")
-		hasher.update(await readFile(resolve(sourceAbs, rel)))
+		hasher.update(await readPresetSourceBytes(resolve(sourceAbs, rel)))
 		hasher.update("\0")
 	}
 	const contentHash = hasher.digest("hex").slice(0, 16)
@@ -4313,10 +4411,10 @@ export async function materializePreset(sourceDir: string, materializeRoot: stri
 			const dst = resolve(stagingDir, rel)
 			await mkdir(dirname(dst), { recursive: true })
 			if (rel.endsWith(".md")) {
-				const content = await readFile(src, "utf-8")
+				const content = await readPresetSourceText(src)
 				await writeFile(dst, substitutePresetRootToken(content, target))
 			} else {
-				const bytes = await readFile(src)
+				const bytes = await readPresetSourceBytes(src)
 				await writeFile(dst, bytes)
 			}
 		}
@@ -4373,7 +4471,13 @@ const PRESET_MATERIALIZED_MARKER_FILENAME = ".materialized-complete"
 async function collectPresetSourceFiles(sourceDir: string): Promise<string[]> {
 	const out: string[] = []
 	const walk = async (dir: string): Promise<void> => {
-		const entries = await readdir(dir, { withFileTypes: true })
+		let entries: Dirent[]
+		try {
+			entries = await readdir(dir, { withFileTypes: true })
+		} catch (error) {
+			if (isNodeError(error) && typeof error.code === "string") throw presetSourceFailure(error, error.code)
+			throw error
+		}
 		for (const entry of entries) {
 			// Skip nothing — `.md` files, `preset.toml`, `templates/*`, and any
 			// author-supplied auxiliary file should all appear in the materialized
@@ -4455,12 +4559,6 @@ export async function compilePreset(sourceDir: string, options: LoadPresetOption
 		if (error instanceof PresetStructureError) {
 			return { kind: "rejected", diagnostics: [{ verdict: "error", rule: "preset-structure", message: error.message }] }
 		}
-		if (error instanceof SyntaxError) {
-			return { kind: "rejected", diagnostics: [{ verdict: "error", rule: "preset-toml", message: error.message }] }
-		}
-		if (isNodeError(error) && typeof error.code === "string") {
-			return { kind: "rejected", diagnostics: [{ verdict: "error", rule: "preset-source", message: `${error.code}: ${error.message}` }] }
-		}
 		throw error
 	}
 }
@@ -4477,8 +4575,16 @@ async function compilePresetOrThrow(sourceDir: string, options: LoadPresetOption
 		? (await materializePreset(sourceDir, options.materialize.root)).promptRoot
 		: sourceAbs
 	const tomlPath = resolve(presetDir, "preset.toml")
-	const raw = await readFile(tomlPath, "utf-8")
-	const parsed: BoundaryValue = Bun.TOML.parse(raw)
+	const raw = await readPresetSourceText(tomlPath)
+	let parsed: BoundaryValue
+	try {
+		parsed = Bun.TOML.parse(raw)
+	} catch (error) {
+		if (error instanceof SyntaxError) {
+			throw new PresetCompileFailure([{ verdict: "error", rule: "preset-toml", message: error.message }])
+		}
+		throw error
+	}
 	const preset = parsePreset(parsed, presetDir)
 	// #408 cross-table DAG check runs immediately after `parsePreset` returns
 	// the parsed shape and BEFORE per-phase prompt template validation. Order
@@ -4542,7 +4648,7 @@ async function hashPresetSource(sourceDir: string): Promise<string> {
 	for (const rel of await collectPresetSourceFiles(sourceDir)) {
 		hasher.update(rel)
 		hasher.update("\0")
-		hasher.update(await readFile(resolve(sourceDir, rel)))
+		hasher.update(await readPresetSourceBytes(resolve(sourceDir, rel)))
 		hasher.update("\0")
 	}
 	return hasher.digest("hex")
@@ -4743,6 +4849,7 @@ async function readPresetPhasePrompt(phase: PresetPhase, presetDir: string): Pro
 		if (isNodeError(error) && error.code === "ENOENT") {
 			throw missingPresetSource(`Missing preset phase "${phase.name}" prompt file: ${phase.prompt}`)
 		}
+		if (isNodeError(error) && typeof error.code === "string") throw presetSourceFailure(error, error.code)
 		throw error
 	}
 }
@@ -5083,6 +5190,7 @@ async function assertReadable(path: string, label: string): Promise<void> {
 		if (isNodeError(error) && error.code === "ENOENT") {
 			throw missingPresetSource(`Missing ${label} file: ${path}`)
 		}
+		if (isNodeError(error) && typeof error.code === "string") throw presetSourceFailure(error, error.code)
 		throw error
 	}
 }
