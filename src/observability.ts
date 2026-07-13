@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { appendFile, mkdir, readFile, readdir, rename, stat } from "node:fs/promises"
-import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs"
+import { appendFileSync, mkdirSync, readdirSync, renameSync, statSync } from "node:fs"
 import { basename, dirname, resolve } from "node:path"
 
 import { type as arkType } from "arktype"
@@ -13,7 +13,7 @@ const SubjectBoundary = arkType.or(
 	{ kind: arkType.unit("agent"), runId: "string", phase: "string" },
 )
 
-const ObservabilityKindBoundary = arkType.or(
+export const ObservabilityKindBoundary = arkType.or(
 	arkType.unit("audit"),
 	arkType.unit("decision"),
 	arkType.unit("lifecycle"),
@@ -21,7 +21,7 @@ const ObservabilityKindBoundary = arkType.or(
 	arkType.unit("diagnostic"),
 )
 
-const ObservabilityEventTypeBoundary = arkType.or(
+export const ObservabilityEventTypeBoundary = arkType.or(
 	arkType.unit("chain.layout"),
 	arkType.unit("chain.status"),
 	arkType.unit("item.created"),
@@ -242,7 +242,7 @@ const EventBaseBoundary = {
 	"subject?": SubjectBoundary,
 } as const
 
-const ObservabilityEventBoundary = arkType.or(
+export const ObservabilityEventBoundary = arkType.or(
 	{
 		...EventBaseBoundary,
 		kind: arkType.unit("audit"),
@@ -770,6 +770,14 @@ export const OBSERVABILITY_EXCERPT_RECORD_BYTES = 64 * 1024
 // Event stream segments are rotated, never truncated; this bounds one active JSONL segment.
 export const OBSERVABILITY_EVENT_SEGMENT_BYTES = 32 * 1024 * 1024
 
+export const ObservabilityEventSegmentBoundary = arkType.or(
+	{ kind: arkType.unit("history"), path: "string", name: "string", sequence: "number.integer >= 1", startedAt: "string", endedAt: "string", id: "string" },
+	{ kind: arkType.unit("legacy-history"), path: "string", name: "string", startedAt: "string", endedAt: "string", id: "string" },
+	{ kind: arkType.unit("active"), path: "string", name: "string" },
+)
+
+export type ObservabilityEventSegment = typeof ObservabilityEventSegmentBoundary.infer
+
 export type ObservabilityEventQuery = {
 	kind?: ObservabilityKind
 	type?: ObservabilityEventType
@@ -842,8 +850,8 @@ export function appendObservabilityEventSyncOrThrow(eventsFile: string, event: O
 
 export async function queryObservabilityEvents(eventsFile: string, query: ObservabilityEventQuery = {}): Promise<ObservabilityQueryResult> {
 	const events: ObservabilityEvent[] = []
-	for (const segmentFile of await listObservabilityEventSegments(eventsFile)) {
-		const raw = await readFile(segmentFile, "utf-8")
+	for (const segment of await discoverObservabilityEventSegments(eventsFile)) {
+		const raw = await readFile(segment.path, "utf-8")
 		for (const line of raw.split("\n")) {
 			if (line.trim() === "") continue
 			const parsed: unknown = JSON.parse(line)
@@ -1131,7 +1139,8 @@ async function rotateObservabilityEventStream(eventsFile: string, eventTs: strin
 	}
 	if (current.size === 0) return
 	if (!shouldRotateObservabilityEventStream(current.size, current.mtime, eventTs, pendingBytes)) return
-	await rename(eventsFile, rotatedObservabilityEventSegment(eventsFile, current.mtime, eventTs))
+	const sequence = nextObservabilityEventSegmentSequence(await discoverObservabilityEventSegments(eventsFile))
+	await rename(eventsFile, rotatedObservabilityEventSegment(eventsFile, current.mtime, eventTs, sequence))
 }
 
 function rotateObservabilityEventStreamSync(eventsFile: string, eventTs: string, pendingBytes: number): void {
@@ -1144,20 +1153,45 @@ function rotateObservabilityEventStreamSync(eventsFile: string, eventTs: string,
 	}
 	if (current.size === 0) return
 	if (!shouldRotateObservabilityEventStream(current.size, current.mtime, eventTs, pendingBytes)) return
-	renameSync(eventsFile, rotatedObservabilityEventSegment(eventsFile, current.mtime, eventTs))
+	const sequence = nextObservabilityEventSegmentSequence(discoverObservabilityEventSegmentsSync(eventsFile))
+	renameSync(eventsFile, rotatedObservabilityEventSegment(eventsFile, current.mtime, eventTs, sequence))
 }
 
-function shouldRotateObservabilityEventStream(size: number, mtime: Date, eventTs: string, pendingBytes: number): boolean {
+export function shouldRotateObservabilityEventStream(size: number, mtime: Date, eventTs: string, pendingBytes: number): boolean {
 	return mtime.toISOString().slice(0, 10) !== eventTs.slice(0, 10)
 		|| size + pendingBytes > OBSERVABILITY_EVENT_SEGMENT_BYTES
 }
 
-function rotatedObservabilityEventSegment(eventsFile: string, mtime: Date, eventTs: string): string {
-	const timestamp = sanitizeSegmentTimestamp(`${mtime.toISOString()}-${eventTs}`)
-	return resolve(dirname(eventsFile), `${activeObservabilityEventBasename(eventsFile)}-${timestamp}-${randomUUID()}.jsonl`)
+export function rotatedObservabilityEventSegment(eventsFile: string, mtime: Date, eventTs: string, sequence: number): string {
+	const startedAt = sanitizeSegmentTimestamp(mtime.toISOString())
+	const endedAt = sanitizeSegmentTimestamp(eventTs)
+	const order = String(sequence).padStart(16, "0")
+	return resolve(dirname(eventsFile), `${activeObservabilityEventBasename(eventsFile)}-${order}-${startedAt}-${endedAt}-${randomUUID()}.jsonl`)
 }
 
-async function listObservabilityEventSegments(eventsFile: string): Promise<string[]> {
+export function parseObservabilityEventSegmentName(eventsFile: string, name: string): ObservabilityEventSegment | null {
+	const activeName = basename(eventsFile)
+	if (name === activeName) return ObservabilityEventSegmentBoundary.assert({ kind: "active", path: eventsFile, name })
+	const stem = activeObservabilityEventBasename(eventsFile)
+	const match = new RegExp(`^${escapeRegExp(stem)}-(\\d{16})-(\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}\\.\\d{3}Z)-(\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}\\.\\d{3}Z)-([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\\.jsonl$`, "i").exec(name)
+	if (match !== null) {
+		const sequenceText = match[1]
+		const startedAt = match[2]
+		const endedAt = match[3]
+		const id = match[4]
+		if (sequenceText === undefined || startedAt === undefined || endedAt === undefined || id === undefined) throw new Error(`invalid observability segment match: ${name}`)
+		return ObservabilityEventSegmentBoundary.assert({ kind: "history", path: resolve(dirname(eventsFile), name), name, sequence: Number(sequenceText), startedAt, endedAt, id })
+	}
+	const legacy = new RegExp(`^${escapeRegExp(stem)}-(\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}\\.\\d{3}Z)-(\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}\\.\\d{3}Z)-([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\\.jsonl$`, "i").exec(name)
+	if (legacy === null) return null
+	const startedAt = legacy[1]
+	const endedAt = legacy[2]
+	const id = legacy[3]
+	if (startedAt === undefined || endedAt === undefined || id === undefined) throw new Error(`invalid legacy observability segment match: ${name}`)
+	return ObservabilityEventSegmentBoundary.assert({ kind: "legacy-history", path: resolve(dirname(eventsFile), name), name, startedAt, endedAt, id })
+}
+
+export async function discoverObservabilityEventSegments(eventsFile: string): Promise<ObservabilityEventSegment[]> {
 	const eventsDir = dirname(eventsFile)
 	let entries: string[]
 	try {
@@ -1166,22 +1200,63 @@ async function listObservabilityEventSegments(eventsFile: string): Promise<strin
 		if (isNodeError(error) && error.code === "ENOENT") return []
 		throw error
 	}
-	const activeName = basename(eventsFile)
-	const rotatedPrefix = `${activeObservabilityEventBasename(eventsFile)}-`
-	const files = entries
-		.filter((entry) => entry === activeName || (entry.startsWith(rotatedPrefix) && entry.endsWith(".jsonl")))
-		.sort()
-		.map((entry) => resolve(eventsDir, entry))
-	return files
+	return orderObservabilityEventSegments(entries.flatMap((entry) => {
+		const segment = parseObservabilityEventSegmentName(eventsFile, entry)
+		return segment === null ? [] : [segment]
+	}))
 }
 
-function activeObservabilityEventBasename(eventsFile: string): string {
+function discoverObservabilityEventSegmentsSync(eventsFile: string): ObservabilityEventSegment[] {
+	let entries: string[]
+	try {
+		entries = readdirSync(dirname(eventsFile))
+	} catch (error) {
+		if (isNodeError(error) && error.code === "ENOENT") return []
+		throw error
+	}
+	return orderObservabilityEventSegments(entries.flatMap((entry) => {
+		const segment = parseObservabilityEventSegmentName(eventsFile, entry)
+		return segment === null ? [] : [segment]
+	}))
+}
+
+export function orderObservabilityEventSegments(segments: readonly ObservabilityEventSegment[]): ObservabilityEventSegment[] {
+	const legacy = segments.filter((segment): segment is Extract<ObservabilityEventSegment, { kind: "legacy-history" }> => segment.kind === "legacy-history")
+	const legacyOrders = new Set<string>()
+	for (const segment of legacy) {
+		const order = `${segment.startedAt}/${segment.endedAt}`
+		if (legacyOrders.has(order)) throw new Error(`ambiguous legacy observability segment order ${order}`)
+		legacyOrders.add(order)
+	}
+	legacy.sort((left, right) => `${left.startedAt}/${left.endedAt}`.localeCompare(`${right.startedAt}/${right.endedAt}`))
+	const history = segments.filter((segment): segment is Extract<ObservabilityEventSegment, { kind: "history" }> => segment.kind === "history")
+	const sequences = new Set<number>()
+	for (const segment of history) {
+		if (sequences.has(segment.sequence)) throw new Error(`duplicate observability segment sequence ${segment.sequence}`)
+		sequences.add(segment.sequence)
+	}
+	history.sort((left, right) => left.sequence - right.sequence)
+	const active = segments.filter((segment): segment is Extract<ObservabilityEventSegment, { kind: "active" }> => segment.kind === "active")
+	if (active.length > 1) throw new Error("multiple active observability event segments")
+	return [...legacy, ...history, ...active]
+}
+
+function nextObservabilityEventSegmentSequence(segments: readonly ObservabilityEventSegment[]): number {
+	const last = segments.filter((segment): segment is Extract<ObservabilityEventSegment, { kind: "history" }> => segment.kind === "history").at(-1)
+	return (last?.sequence ?? 0) + 1
+}
+
+export function activeObservabilityEventBasename(eventsFile: string): string {
 	const name = basename(eventsFile)
 	return name.endsWith(".jsonl") ? name.slice(0, -".jsonl".length) : name
 }
 
 function sanitizeSegmentTimestamp(input: string): string {
 	return input.replace(/[^A-Za-z0-9._-]/g, "-")
+}
+
+function escapeRegExp(input: string): string {
+	return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
 
 function writeObservabilityStderr(message: string): void {
