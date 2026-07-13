@@ -511,6 +511,48 @@ const StatusSnapshotBoundary = arkType({
 	processes: "object",
 })
 
+const CompileFindingBoundary = arkType({ verdict: arkType.or(arkType.unit("warn"), arkType.unit("error")), rule: "string", message: "string" })
+export const PresetCompileProjectionBoundary = arkType({
+	schemaVersion: arkType.unit(1),
+	preset: { name: "string", dir: "string", sourceHash: "string" },
+	statuses: {
+		continuable: "string[]", terminal: "string[]", success: "string[]", entry: "string",
+		unblockable: "string[]", exhausted: "string", retry: "string|null",
+	},
+	stateGraph: {
+		nodes: arkType({ identity: "string", status: "string", classification: "string" }).array(),
+		edges: arkType.or(
+			{ kind: arkType.unit("engine-entry"), to: "string" },
+			{ kind: arkType.unit("engine-exhausted"), to: "string" },
+			{ kind: arkType.unit("engine-unblock"), from: "string", to: "string" },
+			{ kind: arkType.unit("phase-exit"), phase: "string", to: "string", when: "string" },
+		).array(),
+	},
+	phases: arkType({
+		identity: "string", name: "string",
+		exits: arkType.or(
+			{ kind: arkType.unit("item-status"), status: "string", when: "string" },
+			{ kind: arkType.unit("chain-action"), action: arkType.unit("stop"), when: "string" },
+		).array(),
+		trigger: arkType.or(
+			{ afterPhase: "string", whenStatus: "string" },
+			{ on: arkType.unit("chain-complete") },
+			"null",
+		),
+		runner: arkType.or(AgentRunnerKindBoundary, "null"), model: "string|null",
+		variables: arkType({ key: "string", type: arkType.unit("string"), sourceKind: "string" }).array(),
+		toolRequirements: "string[]",
+		rights: { createItems: "boolean", writableFields: "string[]", privilegedOps: "string[]" },
+		task: { kind: arkType.unit("phase"), identity: "string" },
+	}).array(),
+	tools: arkType({ id: "string" }).array(),
+	fragments: arkType({ id: "string", role: "string", path: "string" }).array(),
+	findings: CompileFindingBoundary.array(),
+})
+
+export type CompileFinding = typeof CompileFindingBoundary.infer
+export type PresetCompileProjection = typeof PresetCompileProjectionBoundary.infer
+
 // #451 + #405: boundary parser for the `item.exits` wire-verb response. The CLI
 // uses it to validate the daemon's reply before rendering — keeps the protocol
 // shape pinned and forces both ends to stay in sync. After #405 the entry shape
@@ -690,6 +732,17 @@ export type Preset = {
 		attemptTimeoutSeconds: number
 	}
 }
+
+export type CompiledTaskNode = { identity: string; kind: "phase"; phase: string }
+export type CompiledTaskModel = Preset & {
+	sourceDir: string
+	sourceHash: string
+	tasks: readonly CompiledTaskNode[]
+}
+
+export type CompileResult =
+	| { kind: "compiled"; model: CompiledTaskModel; warnings: readonly CompileFinding[] }
+	| { kind: "rejected"; diagnostics: readonly [CompileFinding, ...CompileFinding[]] }
 
 export type PresetItemField = {
 	type: PresetItemFieldType
@@ -2660,6 +2713,71 @@ async function runQueueCommand(args: string[]): Promise<void> {
 	await runQueueUnblockCommand(parsed.value.args)
 }
 
+export function projectCompiledPreset(model: CompiledTaskModel, findings: readonly CompileFinding[]): PresetCompileProjection {
+	const statusNodes = [...model.statuses.continuable, ...model.statuses.terminal].map((status) => ({
+		identity: `status:${status}`,
+		status,
+		classification: model.statuses.continuable.includes(status) ? "continuable" : "terminal",
+	}))
+	const phaseEdges = model.phases.flatMap((phase) => phase.exits
+		.filter((exit): exit is PresetPhaseExitItemStatus => exit.kind === "item-status")
+		.map((exit) => ({ kind: "phase-exit" as const, phase: phase.name, to: exit.status, when: exit.when })))
+	const projection = {
+		schemaVersion: 1 as const,
+		preset: { name: model.name, dir: model.sourceDir, sourceHash: model.sourceHash },
+		statuses: {
+			continuable: [...model.statuses.continuable],
+			terminal: [...model.statuses.terminal],
+			success: [...model.statuses.success],
+			entry: model.statuses.entry,
+			unblockable: [...model.statuses.unblockable],
+			exhausted: model.statuses.exhausted,
+			retry: model.statuses.retry,
+		},
+		stateGraph: {
+			nodes: statusNodes,
+			edges: [
+				{ kind: "engine-entry" as const, to: model.statuses.entry },
+				{ kind: "engine-exhausted" as const, to: model.statuses.exhausted },
+				...model.statuses.unblockable.map((from) => ({ kind: "engine-unblock" as const, from, to: model.statuses.entry })),
+				...phaseEdges,
+			],
+		},
+		phases: model.phases.map((phase) => ({
+			identity: `phase:${phase.name}`,
+			name: phase.name,
+			exits: [...phase.exits],
+			trigger: phase.trigger,
+			runner: phase.defaultRunner,
+			model: phase.defaultModel,
+			variables: phase.variables.map((variable) => ({ key: variable.key, type: "string" as const, sourceKind: variable.source.kind })),
+			toolRequirements: [],
+			rights: { createItems: phase.rights.createItems, writableFields: [...phase.rights.writableFields], privilegedOps: [...phase.rights.privilegedOps] },
+			task: { kind: "phase" as const, identity: `phase:${phase.name}` },
+		})),
+		tools: [],
+		fragments: model.fragments.map((fragment) => ({ id: fragment.id, role: fragment.role, path: relative(model.presetDir, fragment.path) })),
+		findings: [...findings],
+	}
+	PresetCompileProjectionBoundary.assert(projection)
+	return projection
+}
+
+async function runPresetCommand(args: string[]): Promise<void> {
+	if (args.length !== 3 || args[0] !== "compile" || args[2] !== "--json") {
+		fail("Usage: coder-loop preset compile <name|path> --json")
+	}
+	const source = args[1]!
+	const presetDir = PRESET_NAME_PATTERN.test(source) ? resolve(PKG_ROOT, "presets", source) : resolve(process.cwd(), source)
+	const result = await compilePreset(presetDir)
+	if (result.kind === "rejected") {
+		process.stderr.write(`${JSON.stringify(result)}\n`)
+		process.exitCode = 1
+		return
+	}
+	process.stdout.write(`${JSON.stringify(projectCompiledPreset(result.model, result.warnings))}\n`)
+}
+
 async function main() {
 	const firstArg = process.argv[2]
 	if (firstArg === "status") {
@@ -2686,6 +2804,10 @@ async function main() {
 		await runQueueCommand(process.argv.slice(3))
 		return
 	}
+	if (firstArg === "preset") {
+		await runPresetCommand(process.argv.slice(3))
+		return
+	}
 	if (firstArg === "doctor") {
 		const handled = await dispatchSubcommand(firstArg, process.argv.slice(3))
 		if (handled) return
@@ -2706,6 +2828,7 @@ function rootUsage(): string {
 		"  item <add|batch-add|list|update|reorder|exits|exit-action>",
 		"  queue unblock <target> --issue <issue>",
 		"  doctor <target>",
+		"  preset compile <name|path> --json",
 		"",
 	].join("\n")
 }
@@ -4259,10 +4382,26 @@ export type LoadPresetOptions = {
 	materialize?: { root: string }
 }
 
-export async function loadPreset(sourceDir: string, options: LoadPresetOptions = {}): Promise<Preset> {
+export async function compilePreset(sourceDir: string, options: LoadPresetOptions = {}): Promise<CompileResult> {
+	try {
+		return { kind: "compiled", ...(await compilePresetOrThrow(sourceDir, options)) }
+	} catch (error) {
+		const diagnostic: CompileFinding = { verdict: "error", rule: "preset-compile", message: errorMessage(error) }
+		return { kind: "rejected", diagnostics: [diagnostic] }
+	}
+}
+
+export async function loadPreset(sourceDir: string, options: LoadPresetOptions = {}): Promise<CompiledTaskModel> {
+	const result = await compilePreset(sourceDir, options)
+	if (result.kind === "rejected") presetError(result.diagnostics.map((diagnostic) => diagnostic.message).join("\n"))
+	return result.model
+}
+
+async function compilePresetOrThrow(sourceDir: string, options: LoadPresetOptions): Promise<{ model: CompiledTaskModel; warnings: readonly CompileFinding[] }> {
+	const sourceAbs = resolve(sourceDir)
 	const presetDir = options.materialize
 		? (await materializePreset(sourceDir, options.materialize.root)).promptRoot
-		: sourceDir
+		: sourceAbs
 	const tomlPath = resolve(presetDir, "preset.toml")
 	const raw = await readFile(tomlPath, "utf-8")
 	const parsed: BoundaryValue = Bun.TOML.parse(raw)
@@ -4274,10 +4413,12 @@ export async function loadPreset(sourceDir: string, options: LoadPresetOptions =
 	// edge) and is more actionable than a placeholder typo in a prompt the
 	// drift would have made unreachable anyway.
 	const dagFindings = checkPresetDag(preset)
+	const warnings: CompileFinding[] = []
 	const dagErrors: PresetDagFinding[] = []
 	for (const finding of dagFindings) {
 		options.onDagFinding?.(finding)
 		if (finding.verdict === "error") dagErrors.push(finding)
+		else warnings.push({ verdict: "warn", rule: finding.kind, message: finding.message })
 	}
 	if (dagErrors.length > 0) {
 		const lines = dagErrors.map((f) => `  ${f.message}`)
@@ -4306,7 +4447,28 @@ export async function loadPreset(sourceDir: string, options: LoadPresetOptions =
 	for (const fragment of preset.fragments) {
 		await assertReadable(fragment.path, `preset fragment "${fragment.id}"`)
 	}
-	return { ...preset, phases }
+	const sourceHash = await hashPresetSource(sourceAbs)
+	return {
+		model: {
+			...preset,
+			phases,
+			sourceDir: sourceAbs,
+			sourceHash,
+			tasks: phases.map((phase) => ({ identity: `phase:${phase.name}`, kind: "phase", phase: phase.name })),
+		},
+		warnings,
+	}
+}
+
+async function hashPresetSource(sourceDir: string): Promise<string> {
+	const hasher = new Bun.CryptoHasher("sha256")
+	for (const rel of await collectPresetSourceFiles(sourceDir)) {
+		hasher.update(rel)
+		hasher.update("\0")
+		hasher.update(await readFile(resolve(sourceDir, rel)))
+		hasher.update("\0")
+	}
+	return hasher.digest("hex")
 }
 
 export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
