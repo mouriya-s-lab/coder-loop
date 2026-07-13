@@ -435,6 +435,14 @@ export function itemExtraToJsonObject(extra: ItemExtra): JsonObject {
 	return result
 }
 
+// Status flattens transparent item/run extras into its public item objects. Control-plane hooks
+// remain persisted on ItemExtra for effective-view consumption, but #586 does not project them.
+export function itemExtraToTransparentJsonObject(extra: ItemExtra): JsonObject {
+	const result = itemExtraToJsonObject(extra)
+	delete result.hooks
+	return result
+}
+
 export function itemExtraJsonValue(extra: ItemExtra, key: string): JsonValue | undefined {
 	return itemExtraToJsonObject(extra)[key]
 }
