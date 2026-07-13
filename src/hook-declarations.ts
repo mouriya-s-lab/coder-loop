@@ -1,4 +1,4 @@
-import { scope } from "arktype"
+import { type } from "arktype"
 import { readFile } from "node:fs/promises"
 
 import type { BoundaryValue } from "./boundary-types"
@@ -7,7 +7,7 @@ import type { JsonValue } from "./loop"
 
 export type ObserverHookPoint = Exclude<ObservabilityEventType, `hook.${string}`>
 
-export const GATE_DECISION_POINTS = [
+export const NON_TICK_GATE_DECISION_POINTS = [
 	"run.pre-spawn",
 	"run.post-exit",
 	"item.status-transition",
@@ -15,10 +15,11 @@ export const GATE_DECISION_POINTS = [
 	"chain.complete",
 	"daemon.startup",
 	"daemon.shutdown",
-	"tick",
 ] as const
+export const GATE_DECISION_POINTS = [...NON_TICK_GATE_DECISION_POINTS, "tick"] as const
 
 export type GateDecisionPoint = (typeof GATE_DECISION_POINTS)[number]
+export type NonTickGateDecisionPoint = (typeof NON_TICK_GATE_DECISION_POINTS)[number]
 
 export type ObserverHookDeclaration = {
 	kind: "observer"
@@ -27,13 +28,16 @@ export type ObserverHookDeclaration = {
 	timeoutMs: number
 }
 
-export type GateHookDeclaration = {
+type GateHookDeclarationBase = {
 	kind: "gate"
-	point: GateDecisionPoint
 	script: string
 	timeoutMs: number
 	onFailure: "hold" | "advance"
 }
+
+export type GateHookDeclaration =
+	| (GateHookDeclarationBase & { point: NonTickGateDecisionPoint })
+	| (GateHookDeclarationBase & { point: "tick"; minIntervalMs: number })
 
 export type HookDeclaration = ObserverHookDeclaration | GateHookDeclaration
 export type PresetHookPlaceholder = { kind: "named-gate-placeholder"; name: string; point: GateDecisionPoint }
@@ -49,16 +53,30 @@ type HookLayers = {
 	item: readonly HookDeclaration[]
 }
 
-const HookBoundaries = scope({
-	ObserverHookInput: { kind: "'observer'", point: "string", script: "string", timeoutMs: "number.integer" },
-	GateHookInput: { kind: "'gate'", point: "string", script: "string", timeoutMs: "number.integer", onFailure: "'hold' | 'advance'" },
-	HookInput: "ObserverHookInput | GateHookInput",
-	GlobalHookDocument: { version: "1", hooks: "unknown[]" },
-}).export()
-const HookInputBoundary = HookBoundaries.HookInput.onUndeclaredKey("reject")
-const GlobalHookDocumentBoundary = HookBoundaries.GlobalHookDocument
-
-const GATE_DECISION_POINT_SET: ReadonlySet<string> = new Set(GATE_DECISION_POINTS)
+const ObserverHookInputBoundary = type({
+	kind: type.unit("observer"),
+	point: "string",
+	script: "string",
+	timeoutMs: "number.integer",
+}).onUndeclaredKey("reject")
+const NonTickGateHookInputBoundary = type({
+	kind: type.unit("gate"),
+	point: type.enumerated(...NON_TICK_GATE_DECISION_POINTS),
+	script: "string",
+	timeoutMs: "number.integer",
+	onFailure: type.enumerated("hold", "advance"),
+}).onUndeclaredKey("reject")
+const TickGateHookInputBoundary = type({
+	kind: type.unit("gate"),
+	point: type.unit("tick"),
+	script: "string",
+	timeoutMs: "number.integer",
+	onFailure: type.enumerated("hold", "advance"),
+	minIntervalMs: "number.integer > 0",
+}).onUndeclaredKey("reject")
+const HookInputBoundary = type.or(ObserverHookInputBoundary, NonTickGateHookInputBoundary, TickGateHookInputBoundary)
+const GlobalHookDocumentBoundary = type({ version: type.unit(1), hooks: "unknown[]" }).onUndeclaredKey("reject")
+export type HookInput = typeof HookInputBoundary.infer
 
 export function parseHookDeclarations(input: BoundaryValue, field = "hooks"): HookDeclaration[] {
 	if (!Array.isArray(input)) throw new Error(`${field} must be an array`)
@@ -94,15 +112,23 @@ function parseHookDeclaration(input: BoundaryValue, field: string): HookDeclarat
 		return { kind: "observer", point, script: value.script, timeoutMs: value.timeoutMs }
 	}
 	if (value.kind === "gate") {
-		if (!GATE_DECISION_POINT_SET.has(value.point)) throw new Error(`${field}.point is not a known gate decision point: ${value.point}`)
-		assertGateDecisionPoint(value.point)
+		if (value.point === "tick") {
+			return {
+				kind: "gate",
+				point: value.point,
+				script: value.script,
+				timeoutMs: value.timeoutMs,
+				onFailure: value.onFailure,
+				minIntervalMs: value.minIntervalMs,
+			}
+		}
 		return { kind: "gate", point: value.point, script: value.script, timeoutMs: value.timeoutMs, onFailure: value.onFailure }
 	}
-	throw new Error(`${field}.kind must be observer or gate`)
+	return assertNeverHookInput(value)
 }
 
-function assertGateDecisionPoint(value: string): asserts value is GateDecisionPoint {
-	if (!GATE_DECISION_POINT_SET.has(value)) throw new Error(`unknown gate decision point: ${value}`)
+function assertNeverHookInput(input: never): never {
+	throw new Error(`unhandled hook input: ${JSON.stringify(input)}`)
 }
 
 export function buildEffectiveHookView(layers: HookLayers): EffectiveHook[] {
@@ -123,6 +149,16 @@ function hookDeclarationToJsonValue(declaration: HookDeclaration): JsonValue {
 		return { kind: declaration.kind, point: declaration.point, script: declaration.script, timeoutMs: declaration.timeoutMs }
 	}
 	if (declaration.kind === "gate") {
+		if (declaration.point === "tick") {
+			return {
+				kind: declaration.kind,
+				point: declaration.point,
+				script: declaration.script,
+				timeoutMs: declaration.timeoutMs,
+				onFailure: declaration.onFailure,
+				minIntervalMs: declaration.minIntervalMs,
+			}
+		}
 		return { kind: declaration.kind, point: declaration.point, script: declaration.script, timeoutMs: declaration.timeoutMs, onFailure: declaration.onFailure }
 	}
 	return assertNeverHookDeclaration(declaration)
