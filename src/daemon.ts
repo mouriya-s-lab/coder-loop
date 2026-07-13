@@ -47,7 +47,13 @@ import {
 	type SchedulerState,
 } from "./scheduler"
 import { PersistedRateLimitStateBoundary, type RateLimitReset } from "./rate-limit"
-import { loadGlobalHookDeclarations, type HookDeclaration } from "./hook-declarations"
+import {
+	buildEffectiveHookView,
+	loadGlobalHookDeclarations,
+	type EffectiveHook,
+	type HookDeclaration,
+	type PresetHookPlaceholder,
+} from "./hook-declarations"
 import {
 	type ChainRecord,
 	type CreateChainInput,
@@ -1053,6 +1059,26 @@ export class CoderLoopDaemon {
 			this.resolveClosed = resolveClosed
 		})
 		this.commandSpecs = this.buildDaemonCommandSpecs()
+	}
+
+	effectiveHookViewForItem(
+		chainId: number,
+		itemRowId: number,
+		presetPlaceholders: readonly PresetHookPlaceholder[],
+	): EffectiveHook[] {
+		const store = this.requireStore()
+		const chain = store.getChain(chainId)
+		if (chain === null) throw new DaemonError("not_found", `chain ${chainId} was not found`, { chainId })
+		const item = store.getItem(itemRowId)
+		if (item === null || item.chainId !== chainId) {
+			throw new DaemonError("not_found", `item ${itemRowId} was not found in chain ${chainId}`, { chainId, itemRowId })
+		}
+		return buildEffectiveHookView({
+			global: this.globalHookDeclarations,
+			chain: chain.metadata.hooks ?? [],
+			preset: presetPlaceholders,
+			item: item.extra.hooks ?? [],
+		})
 	}
 
 	async start(): Promise<this> {

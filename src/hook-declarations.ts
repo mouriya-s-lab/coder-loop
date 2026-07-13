@@ -7,15 +7,18 @@ import type { JsonValue } from "./loop"
 
 export type ObserverHookPoint = Exclude<ObservabilityEventType, `hook.${string}`>
 
-export type GateDecisionPoint =
-	| "run.pre-spawn"
-	| "run.post-exit"
-	| "item.status-transition"
-	| "container.advance"
-	| "chain.complete"
-	| "daemon.startup"
-	| "daemon.shutdown"
-	| "tick"
+export const GATE_DECISION_POINTS = [
+	"run.pre-spawn",
+	"run.post-exit",
+	"item.status-transition",
+	"container.advance",
+	"chain.complete",
+	"daemon.startup",
+	"daemon.shutdown",
+	"tick",
+] as const
+
+export type GateDecisionPoint = (typeof GATE_DECISION_POINTS)[number]
 
 export type ObserverHookDeclaration = {
 	kind: "observer"
@@ -53,10 +56,7 @@ const HookBoundaries = scope({
 const HookInputBoundary = HookBoundaries.HookInput
 const GlobalHookDocumentBoundary = HookBoundaries.GlobalHookDocument
 
-const GATE_DECISION_POINTS: ReadonlySet<string> = new Set([
-	"run.pre-spawn", "run.post-exit", "item.status-transition", "container.advance",
-	"chain.complete", "daemon.startup", "daemon.shutdown", "tick",
-])
+const GATE_DECISION_POINT_SET: ReadonlySet<string> = new Set(GATE_DECISION_POINTS)
 
 export function parseHookDeclarations(input: BoundaryValue, field = "hooks"): HookDeclaration[] {
 	if (!Array.isArray(input)) throw new Error(`${field} must be an array`)
@@ -92,7 +92,7 @@ function parseHookDeclaration(input: BoundaryValue, field: string): HookDeclarat
 		return { kind: "observer", point, script: value.script, timeoutMs: value.timeoutMs }
 	}
 	if (value.kind === "gate") {
-		if (!GATE_DECISION_POINTS.has(value.point)) throw new Error(`${field}.point is not a known gate decision point: ${value.point}`)
+		if (!GATE_DECISION_POINT_SET.has(value.point)) throw new Error(`${field}.point is not a known gate decision point: ${value.point}`)
 		if (value.onFailure !== "hold" && value.onFailure !== "advance") throw new Error(`${field}.onFailure must be hold or advance`)
 		assertGateDecisionPoint(value.point)
 		return { kind: "gate", point: value.point, script: value.script, timeoutMs: value.timeoutMs, onFailure: value.onFailure }
@@ -101,7 +101,7 @@ function parseHookDeclaration(input: BoundaryValue, field: string): HookDeclarat
 }
 
 function assertGateDecisionPoint(value: string): asserts value is GateDecisionPoint {
-	if (!GATE_DECISION_POINTS.has(value)) throw new Error(`unknown gate decision point: ${value}`)
+	if (!GATE_DECISION_POINT_SET.has(value)) throw new Error(`unknown gate decision point: ${value}`)
 }
 
 export function buildEffectiveHookView(layers: HookLayers): EffectiveHook[] {
@@ -119,7 +119,12 @@ export function hookDeclarationsToJsonValue(declarations: readonly HookDeclarati
 		switch (declaration.kind) {
 			case "observer": result.push({ kind: declaration.kind, point: declaration.point, script: declaration.script, timeoutMs: declaration.timeoutMs }); break
 			case "gate": result.push({ kind: declaration.kind, point: declaration.point, script: declaration.script, timeoutMs: declaration.timeoutMs, onFailure: declaration.onFailure }); break
+			default: return assertNeverHookDeclaration(declaration)
 		}
 	}
 	return result
+}
+
+function assertNeverHookDeclaration(declaration: never): never {
+	throw new Error(`unhandled hook declaration: ${JSON.stringify(declaration)}`)
 }

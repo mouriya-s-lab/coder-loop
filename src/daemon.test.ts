@@ -34,7 +34,7 @@ import { openSqliteStateStore } from "./sqlite-state"
 import { makeObservabilityEvent, queryObservabilityEvents } from "./observability"
 import { chainBindings, engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 import type { BoundaryRecord } from "./boundary-types"
-import { parseHookDeclarations, type GateHookDeclaration, type ObserverHookDeclaration } from "./hook-declarations"
+import { parseHookDeclarations, type GateHookDeclaration, type ObserverHookDeclaration, type PresetHookPlaceholder } from "./hook-declarations"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
@@ -170,6 +170,7 @@ describe("daemon", () => {
 			},
 		})
 		const gateHook: GateHookDeclaration = { kind: "gate", point: "run.pre-spawn", script: "/bin/false", timeoutMs: 1000, onFailure: "hold" }
+		const presetPlaceholder: PresetHookPlaceholder = { kind: "named-gate-placeholder", name: "approval", point: "item.status-transition" }
 		try {
 			const loadedGlobal = parseHookDeclarations(Reflect.get(fixture.daemon, "globalHookDeclarations"), "daemon.globalHooks")
 			expect(loadedGlobal).toEqual([globalHook])
@@ -189,6 +190,12 @@ describe("daemon", () => {
 			})))
 			expect(Array.isArray(batch.items) ? record(batch.items[0]).extra : null).toMatchObject({ hooks: [globalHook] })
 			const rowId = numberValue(item.id)
+			expect(fixture.daemon.effectiveHookViewForItem(chainId, rowId, [presetPlaceholder])).toEqual([
+				{ source: "global", declaration: globalHook },
+				{ source: "chain", declaration: gateHook },
+				{ source: "preset", declaration: presetPlaceholder },
+				{ source: "item", declaration: globalHook },
+			])
 			await waitFor(async () => readItem(fixture.loopDataRoot, chainId, 58601), (candidate) => candidate?.status === "done")
 			const terminal = await readItem(fixture.loopDataRoot, chainId, 58601)
 			expect(terminal?.extra.hooks).toEqual([globalHook])
