@@ -4229,7 +4229,7 @@ export async function materializePreset(sourceDir: string, materializeRoot: stri
 	// of source edits doesn't grow the loop-data footprint without bound.
 	// Only siblings that share the `<name>-` prefix (a different hash for
 	// the same preset) are removed; other presets in the shared root
-	// (`gh-issue-pr-iteration-*`, `engine-e2e-*`, …) stay untouched.
+	// (`gh-issue-pr-iteration-*`, `engine-integration-*`, …) stay untouched.
 	// Runs from concurrent daemons on a shared root would race here, but
 	// the daemon is singleton per loop-data-root by design.
 	await prunePresetSiblingsForName(rootDir, name, dirName)

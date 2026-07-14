@@ -9,7 +9,7 @@ coder-loop 是项目无关的 N-phase 字符串调度引擎。给定一个 prese
 内置 preset：
 
 - `gh-issue-pr-iteration` — 生产使用的 GitHub issue/PR 迭代 preset，四个 phase（`iteration` / `review` / `blocked-responder` / `umbrella-finalizer`）。设计思路在 `presets/gh-issue-pr-iteration/DESIGN.md`，fragment 跳转在 `docs/gh-issue-pr-iteration-fragments.md`。
-- `engine-e2e` — 两 phase 的本地引擎验收 preset，`scripts/engine-e2e.ts` 专用（确定性 stub runner，无 GitHub / LLM）。
+- `engine-integration` — 两 phase 的本地引擎集成验收 preset，`scripts/engine-integration.ts` 专用（确定性 stub runner，无 GitHub / LLM）。
 - `single-phase-example` — 一 phase / 字符串 id / 双状态的最小示例。
 - `business-key-example` — 演示 `[runtime].businessKeys` 声明位。
 
@@ -45,11 +45,15 @@ coder-loop doctor  <target>
 
 - **Type check**: `bun run typecheck`
 - **Unit + smoke tests**: `bun test`
-- **Engine e2e（引擎全链路验收）**: `bun scripts/engine-e2e.ts [flags]` — 本地 git fixture + 隔离 daemon（`--loop-data-root`，绝不碰生产 `~/.coder-loop`）→ chain create + item add → 引擎按 preset phase 顺序真实 spawn 确定性 stub runner（PATH shim 把 `claude` 解析到 `scripts/engine-e2e-stub-runner.ts`）→ iteration 在 slot worktree 真实 commit → review 经 daemon socket 凭据准入写终态 → 断言 SQLite runs / `item.status.write_admission` 审计 / worktree 回收 / 无孤儿 → teardown。无 GitHub、无 LLM、无网络，单次 60 秒内，多实例可并发（issue #681）。runbook 见 `docs/engine-e2e.md`。
+- **Engine integration（进程级引擎集成验收）**: `bun scripts/engine-integration.ts [flags]` — 本地 git fixture + 隔离 daemon（`--loop-data-root`，绝不碰生产 `~/.coder-loop`）→ chain create + item add → 引擎按 preset phase 顺序真实 spawn 确定性 stub runner（PATH shim 把 `claude` 解析到 `scripts/engine-integration-stub-runner.ts`）→ iteration 在 slot worktree 真实 commit → review 经 daemon socket 凭据准入写终态 → 断言 SQLite runs / `item.status.write_admission` 审计 / worktree 回收 / 无孤儿 → teardown。无 GitHub、无 LLM、无网络，单次 60 秒内，多实例可并发（issue #681）。**这不是 e2e**：runner 被确定性 stub 替换、业务负载是合成的，它只证明引擎的真实进程面（daemon/socket/spawn/准入/worktree/SQLite），不证明真实 agent 在真实 target 上的业务结果。runbook 见 `docs/engine-integration.md`。
 
-### 引擎/调度改动的验收主线是 engine-e2e
+### 引擎/调度改动的验证阶梯
 
-改 `src/loop.ts` / `src/scheduler.ts` / `src/daemon.ts` 里的调度 / worktree / 终止 / resume 语义、或 preset 加载路径后，`bun test`（unit + smoke，mock 掉真实调度）**不足以证明正确**——这类路径的 bug 只在真实 daemon 经真实 CLI/socket 调度真实子进程时才暴露，type-check / unit test 全绿也照样带病。完成判定必须包含一次 `bun scripts/engine-e2e.ts` 绿跑（观察到 item 落 `done`、admission 审计事件、worktree 回收）。它快（秒级）且完全本地，可以当 per-change gate；引擎 / 调度类改动的**验收主线是 engine-e2e，不是 unit test**。preset 编排质量不是 e2e 的职责——`gh-issue-pr-iteration` 的行为由其生产 dogfood loop 持续检验。
+改 `src/loop.ts` / `src/scheduler.ts` / `src/daemon.ts` 里的调度 / worktree / 终止 / resume 语义、或 preset 加载路径后，按强度从低到高：
+
+1. `bun run typecheck` + `bun test`（unit + 进程内集成，mock 掉真实调度）——必要但**不足以证明正确**：真实 daemon 经真实 CLI/socket 调度真实子进程这条缝上的 bug，type-check / unit test 全绿也照样带病。
+2. `bun scripts/engine-integration.ts` 绿跑（观察到 item 落 `done`、admission 审计事件、worktree 回收）——秒级、完全本地、可并发，是引擎 / 调度类改动的 **per-change gate**。
+3. 真实 e2e（真实 runner + 真实 preset + 真实 GitHub 业务终态）由 `gh-issue-pr-iteration` 的**生产 dogfood loop** 持续承担；仓库内没有独立的 e2e harness（原 GitHub 全保真 harness 因成本 / 串行 / 职责混淆在 #681 退役）。engine-integration 的绿不可声称为 e2e 通过。
 
 ## Runner selection
 

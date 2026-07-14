@@ -1203,7 +1203,7 @@ attemptTimeoutSeconds = 3600
 			BUNDLED_PRESET_DIR,
 			resolve(REPO_ROOT, "presets/single-phase-example"),
 			resolve(REPO_ROOT, "presets/business-key-example"),
-			resolve(REPO_ROOT, "presets/engine-e2e"),
+			resolve(REPO_ROOT, "presets/engine-integration"),
 		]) {
 			const findings: PresetDagFinding[] = []
 			await loadPreset(presetDir, { onDagFinding: (f) => findings.push(f) })

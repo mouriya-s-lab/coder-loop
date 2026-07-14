@@ -1,15 +1,15 @@
 import { describe, expect, test } from "bun:test"
-import { extractPromptArg, parseStubPrompt } from "./engine-e2e-stub-runner"
-import { sanitizedSubprocessEnvironment } from "./engine-e2e"
+import { extractPromptArg, parseStubPrompt } from "./engine-integration-stub-runner"
+import { sanitizedSubprocessEnvironment } from "./engine-integration"
 
-describe("engine-e2e stub runner prompt contract", () => {
+describe("engine-integration stub runner prompt contract", () => {
 	test("parses PHASE/CHAIN/ITEM/RUN lines from a rendered entry prompt", () => {
 		const prompt = [
-			"engine-e2e deterministic stub protocol.",
+			"engine-integration deterministic stub protocol.",
 			"",
 			"PHASE=iteration",
-			"CHAIN=engine-e2e-abc",
-			"ITEM=e2e-item-1",
+			"CHAIN=engine-integration-abc",
+			"ITEM=itg-item-1",
 			"RUN=run-123",
 			"",
 			"Task: commit the marker.",
@@ -18,8 +18,8 @@ describe("engine-e2e stub runner prompt contract", () => {
 		].join("\n")
 		expect(parseStubPrompt(prompt)).toEqual({
 			phase: "iteration",
-			chain: "engine-e2e-abc",
-			item: "e2e-item-1",
+			chain: "engine-integration-abc",
+			item: "itg-item-1",
 			run: "run-123",
 		})
 	})
@@ -38,7 +38,7 @@ describe("engine-e2e stub runner prompt contract", () => {
 	})
 })
 
-describe("engine-e2e subprocess environment", () => {
+describe("engine-integration subprocess environment", () => {
 	test("strips outer run credential and loop-data pointer (dogfood isolation)", () => {
 		const env = sanitizedSubprocessEnvironment({
 			PATH: "/usr/bin",

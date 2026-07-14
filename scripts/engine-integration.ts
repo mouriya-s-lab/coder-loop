@@ -1,11 +1,12 @@
 #!/usr/bin/env bun
 /**
- * 引擎 e2e harness（issue #681）。
+ * 进程级引擎集成验收 harness（issue #681）。不是 e2e——runner 是确定性 stub、
+ * 业务负载是合成的；它证明引擎的真实进程面，真实 e2e 由生产 dogfood loop 承担。
  *
- * 单命令驱动一轮完整、本地、确定性的引擎全链路验收：
+ * 单命令驱动一轮完整、本地、确定性的引擎进程级验收：
  *   本地 git fixture → 隔离 loop-data 起真实中央 daemon → chain create + item add →
  *   引擎按 preset phase 顺序真实 spawn 子进程 stub runner（PATH shim 把 `claude`
- *   解析到 scripts/engine-e2e-stub-runner.ts）→ iteration 在 slot worktree 真实
+ *   解析到 scripts/engine-integration-stub-runner.ts）→ iteration 在 slot worktree 真实
  *   commit → review 经 daemon socket 凭据准入（#397 gate）写终态 → 断言 SQLite
  *   runs / 审计事件 / worktree 回收 / 无孤儿 → teardown。
  *
@@ -13,7 +14,7 @@
  * （#681 并发前提）。预算：单次 60 秒内。
  *
  * 用法：
- *   bun scripts/engine-e2e.ts [--max-wall-seconds N] [--max-runs N]
+ *   bun scripts/engine-integration.ts [--max-wall-seconds N] [--max-runs N]
  *     [--poll-seconds N] [--keep-work-dir]
  *
  * 退出码：0 = 全链路成功且断言通过；1 = 失败 / tripwire / 断言失败。
@@ -28,9 +29,9 @@ import { randomUUID } from "node:crypto"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
-const STUB_RUNNER = resolve(REPO_ROOT, "scripts/engine-e2e-stub-runner.ts")
-const PRESET_NAME = "engine-e2e"
-const ITEM_KEY = "e2e-item-1"
+const STUB_RUNNER = resolve(REPO_ROOT, "scripts/engine-integration-stub-runner.ts")
+const PRESET_NAME = "engine-integration"
+const ITEM_KEY = "itg-item-1"
 const TERMINAL_SUCCESS = "done"
 const TERMINAL_FAILURE = ["exhausted"] as const
 
@@ -91,7 +92,7 @@ function log(message: string): void {
 }
 
 // dogfood 场景下 harness 可能由 coder-loop agent 启动：外层 run 的凭据与 loop-data
-// 指针不得泄漏进本轮 e2e 的 daemon / agent 环境（#615 同源约束）。
+// 指针不得泄漏进本轮验收的 daemon / agent 环境（#615 同源约束）。
 export function sanitizedSubprocessEnvironment(parentEnvironment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 	const environment = { ...parentEnvironment }
 	delete environment.CODER_LOOP_RUN_CRED
@@ -122,10 +123,10 @@ function prepareLocalFixture(workDir: string): string {
 	mkdirSync(fixtureCwd, { recursive: true })
 	log(`fixture: 本地 git repo ${fixtureCwd}`)
 	sh(["git", "init", "-b", "main"], { cwd: fixtureCwd })
-	writeFileSync(resolve(fixtureCwd, "README.md"), "engine-e2e local fixture\n")
+	writeFileSync(resolve(fixtureCwd, "README.md"), "engine-integration local fixture\n")
 	sh(["git", "add", "README.md"], { cwd: fixtureCwd })
-	sh(["git", "-c", "user.name=engine-e2e", "-c", "user.email=harness@engine-e2e.local",
-		"commit", "-m", "chore: seed engine-e2e fixture"], { cwd: fixtureCwd })
+	sh(["git", "-c", "user.name=engine-integration", "-c", "user.email=harness@engine-integration.local",
+		"commit", "-m", "chore: seed engine-integration fixture"], { cwd: fixtureCwd })
 	return fixtureCwd
 }
 
@@ -143,7 +144,7 @@ type DaemonHandle = {
 // 引擎解析 runner binary 的唯一面是 PATH 上的 kind 名（docs/preset-authoring.md
 // `[agent]`）。shim 目录同时提供：
 //   coder-loop → 当前 checkout 的 src/loop.ts（agent 面 CLI 回到被测代码）
-//   claude     → 确定性 stub runner（engine-e2e preset 两个 phase 都声明 runner="claude"）
+//   claude     → 确定性 stub runner（engine-integration preset 两个 phase 都声明 runner="claude"）
 function writeShims(workDir: string): string {
 	const shimDir = resolve(workDir, "cli-shim")
 	mkdirSync(shimDir, { recursive: true })
@@ -351,7 +352,7 @@ async function assertEngineOutcome(
 	if (admissionEvents < 1) fail(`未观察到 item.status.write_admission 审计事件`)
 
 	log("assert: stub runner 的 marker commit 真实落在 fixture 的 git 对象库")
-	const markerLog = sh(["git", "log", "--all", "--oneline", "--grep", "engine-e2e: marker"], { cwd: fixtureCwd })
+	const markerLog = sh(["git", "log", "--all", "--oneline", "--grep", "engine-integration: marker"], { cwd: fixtureCwd })
 	const markerCommit = markerLog.stdout.trim().split("\n")[0] ?? ""
 	if (markerCommit === "") fail("fixture git log 中找不到 stub runner 的 marker commit")
 
@@ -389,7 +390,7 @@ function assertNoOrphans(loopDataRoot: string): void {
 // ----------------------------------------------------------------- diagnose
 
 function dumpDiagnosis(fixtureCwd: string, daemon: DaemonHandle, chainName: string, reason: string): void {
-	process.stderr.write(`\nengine-e2e: 失败/止血: ${reason}\n`)
+	process.stderr.write(`\nengine-integration: 失败/止血: ${reason}\n`)
 	process.stderr.write(`诊断材料:\n`)
 	process.stderr.write(`  loop-data root: ${daemon.loopDataRoot}\n`)
 	process.stderr.write(`  daemon stdout : ${daemon.stdoutPath}\n`)
@@ -405,11 +406,11 @@ async function main(): Promise<number> {
 	const options = parseArgs(process.argv.slice(2))
 	const startedAt = Date.now()
 	const runKey = randomUUID()
-	const workDir = resolve(REPO_ROOT, ".coder-loop/runtime/engine-e2e", runKey)
+	const workDir = resolve(REPO_ROOT, ".coder-loop/runtime/engine-integration", runKey)
 	mkdirSync(workDir, { recursive: true })
-	log(`engine-e2e: run ${runKey} 开始（并发安全：无跨运行共享资源）`)
+	log(`engine-integration: run ${runKey} 开始（并发安全：无跨运行共享资源）`)
 	const fixtureCwd = prepareLocalFixture(workDir)
-	const chainName = `engine-e2e-${runKey}`
+	const chainName = `engine-integration-${runKey}`
 	const daemon = startDaemon(workDir)
 	let exitCode = 1
 	try {
@@ -417,7 +418,7 @@ async function main(): Promise<number> {
 
 		log(`chain create: ${chainName} (preset=${PRESET_NAME})`)
 		sh(["bun", LOOP_ENTRY, "chain", "create", chainName,
-			"--config-json", JSON.stringify({ repository: "engine-e2e/local-fixture", baseBranch: "main" }),
+			"--config-json", JSON.stringify({ repository: "engine-integration/local-fixture", baseBranch: "main" }),
 			"--preset", PRESET_NAME,
 			"--force",
 			"--loop-data-root", daemon.loopDataRoot])
@@ -442,7 +443,7 @@ async function main(): Promise<number> {
 		assertNoOrphans(daemon.loopDataRoot)
 
 		log("")
-		log("===== engine-e2e evidence =====")
+		log("===== engine-integration evidence =====")
 		log(`terminal   : item ${ITEM_KEY} → done`)
 		log(`phases     : ${evidence.runRows.map((row) => `${row.phase}(${row.status})`).join(" → ")}`)
 		log(`admission  : ${evidence.admissionEvents} item.status.write_admission event(s) via daemon socket`)
@@ -467,7 +468,7 @@ if (import.meta.main) {
 		process.exit(await main())
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error)
-		process.stderr.write(`engine-e2e: ${message}\n`)
+		process.stderr.write(`engine-integration: ${message}\n`)
 		process.exit(1)
 	}
 }

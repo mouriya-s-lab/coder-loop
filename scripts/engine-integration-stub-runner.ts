@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 /**
- * engine-e2e 的确定性 stub runner（issue #681）。
+ * engine-integration 的确定性 stub runner（issue #681）。
  *
- * 由引擎当作 `claude` runner 真实 spawn（scripts/engine-e2e.ts 把 shim 目录前置到
+ * 由引擎当作 `claude` runner 真实 spawn（scripts/engine-integration.ts 把 shim 目录前置到
  * PATH，`claude` 解析到本脚本）。它走真实 agent 的全部引擎面：
  *   - 进程从 scheduler spawn，cwd 是引擎创建的 slot worktree；
  *   - stdout 首行输出 stream-json 形状的 session_id，供 parseSessionIdFromStream 捕获；
@@ -49,7 +49,7 @@ export function extractPromptArg(argv: readonly string[]): string {
 	return prompt
 }
 
-const MARKER_FILENAME = "engine-e2e-marker.txt"
+const MARKER_FILENAME = "engine-integration-marker.txt"
 
 function sh(cmd: readonly string[]): { stdout: string; stderr: string; exitCode: number } {
 	const proc = spawnSync(cmd[0]!, cmd.slice(1), { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] })
@@ -65,8 +65,8 @@ function mustSh(cmd: readonly string[]): string {
 function runIteration(facts: StubPromptFacts): void {
 	writeFileSync(MARKER_FILENAME, `run: ${facts.run}\nitem: ${facts.item}\n`)
 	mustSh(["git", "add", MARKER_FILENAME])
-	mustSh(["git", "-c", "user.name=engine-e2e-stub", "-c", "user.email=stub@engine-e2e.local",
-		"commit", "-m", `engine-e2e: marker for run ${facts.run}`])
+	mustSh(["git", "-c", "user.name=engine-integration-stub", "-c", "user.email=stub@engine-integration.local",
+		"commit", "-m", `engine-integration: marker for run ${facts.run}`])
 	process.stdout.write(`${JSON.stringify({ type: "stub", phase: "iteration", committed: MARKER_FILENAME })}\n`)
 }
 
@@ -82,7 +82,7 @@ function runReview(facts: StubPromptFacts): void {
 
 function main(): void {
 	// 首行：claude stream-json 会话形状，引擎 parseSessionIdFromStream 只读首行的 session_id。
-	process.stdout.write(`${JSON.stringify({ type: "system", session_id: `engine-e2e-${randomUUID()}` })}\n`)
+	process.stdout.write(`${JSON.stringify({ type: "system", session_id: `engine-integration-${randomUUID()}` })}\n`)
 	const facts = parseStubPrompt(extractPromptArg(process.argv.slice(2)))
 	if (facts.phase === "iteration") {
 		runIteration(facts)
@@ -99,7 +99,7 @@ if (import.meta.main) {
 	try {
 		main()
 	} catch (error) {
-		process.stderr.write(`engine-e2e-stub-runner: ${error instanceof Error ? error.message : String(error)}\n`)
+		process.stderr.write(`engine-integration-stub-runner: ${error instanceof Error ? error.message : String(error)}\n`)
 		process.exit(1)
 	}
 }
