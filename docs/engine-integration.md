@@ -2,7 +2,7 @@
 
 进程级引擎集成验收 harness（issue #681）。单命令、完全本地、确定性、秒级完成、可并发。
 
-**这不是 e2e。** runner 被确定性 stub 替换（无真实 agent），业务负载是合成 marker 文件。它证明的是引擎的真实进程面——daemon / socket / spawn / 准入 / worktree / SQLite——不证明真实 agent 在真实 target 上的业务结果。真实 e2e 由 `gh-issue-pr-iteration` 的生产 dogfood loop 持续承担。与 `src/*.integration.test.ts`（进程内集成）的区别：这里每一环都是独立真实进程，经真实 CLI 与 daemon socket 通信。
+**这不是 e2e。** runner 被确定性 stub 替换（无真实 agent），业务负载是合成 marker 文件。它证明的是引擎的真实进程面——daemon / socket / spawn / 准入 / worktree / SQLite——不证明真实 agent 在真实 target 上的业务结果。它是普通 bug 修复与迭代中途的日常 gate；真实 E2E 由 `scripts/real-e2e.ts` 在大型改动收尾、preset 修正、引擎机制变动和发版前阶段性执行。与 `src/*.integration.test.ts`（进程内集成）的区别：这里每一环都是独立真实进程，经真实 CLI 与 daemon socket 通信。
 
 ```
 bun scripts/engine-integration.ts [--max-wall-seconds N] [--max-runs N] [--poll-seconds N] [--keep-work-dir]

@@ -49,13 +49,18 @@ coder-loop doctor  <target>
 - **Engine integration（进程级引擎集成验收）**: `bun scripts/engine-integration.ts [flags]` — 本地 git fixture + 隔离 daemon（`--loop-data-root`，绝不碰生产 `~/.coder-loop`）→ chain create + item add → 引擎按 preset phase 顺序真实 spawn 确定性 stub runner（PATH shim 把 `claude` 解析到 `scripts/engine-integration-stub-runner.ts`）→ iteration 在 slot worktree 真实 commit → review 经 daemon socket 凭据准入写终态 → 断言 SQLite runs / `item.status.write_admission` 审计 / worktree 回收 / 无孤儿 → teardown。无 GitHub、无 LLM、无网络，单次 60 秒内，多实例可并发（issue #681）。**这不是 e2e**：runner 被确定性 stub 替换、业务负载是合成的，它只证明引擎的真实进程面（daemon/socket/spawn/准入/worktree/SQLite），不证明真实 agent 在真实 target 上的业务结果。runbook 见 `docs/engine-integration.md`。
 - **Real e2e（真实 runner + GitHub 终态）**: `bun scripts/real-e2e.ts [--preset <name>] [flags]` — 在私有 fixture repo seed 真实 issue，跑真实 runner 完成 branch / PR / review / merge / issue closure，再断言 GitHub 与 default branch 终态。默认 `real-e2e-minimal`；`--preset gh-issue-pr-iteration` 跑全保真。每轮以 UUID 隔离 fixture / checkout / chain / loop-data，不持有完整生命周期并发锁。runbook 见 `docs/real-e2e-fixture.md`。
 
-### 引擎/调度改动的验证阶梯
+### 验证阶梯与 real E2E 运行时机
 
-改 `src/loop.ts` / `src/scheduler.ts` / `src/daemon.ts` 里的调度 / worktree / 终止 / resume 语义、或 preset 加载路径后，按强度从低到高：
+默认验证门是：`bun run typecheck` + `bun test` + `bun scripts/engine-integration.ts`。普通 bug 修复、迭代中途的 commit / retry、以及没有改变调度或 preset 语义的局部修改，走完这三项即可；不要求每次运行 real E2E。
 
-1. `bun run typecheck` + `bun test`（unit + 进程内集成，mock 掉真实调度）——必要但**不足以证明正确**：真实 daemon 经真实 CLI/socket 调度真实子进程这条缝上的 bug，type-check / unit test 全绿也照样带病。
-2. `bun scripts/engine-integration.ts` 绿跑（观察到 item 落 `done`、admission 审计事件、worktree 回收）——秒级、完全本地、可并发，是引擎 / 调度类改动的 **per-change gate**。
-3. `bun scripts/real-e2e.ts` 绿跑（观察到 PR `MERGED`、issue `CLOSED`、default branch fixture 为 `status: complete`）——真实 runner + 真实 preset + 真实 GitHub 业务终态；默认最小 preset，必要时用 `--preset gh-issue-pr-iteration` 做全保真验证。engine-integration 的绿不可替代或声称为 real e2e 通过。
+`bun scripts/real-e2e.ts` 是阶段性收尾门，只在以下时机运行：
+
+- 大型改动完成、准备收尾或合并时；
+- 修改 bundled preset 的 phase、prompt、status、transition、runner/model 或加载语义时；
+- 修改引擎机制时，包括 scheduler / daemon / runner spawn、worktree、status/phase 推进、终止、resume、admission 或 terminal semantics；
+- 发版或同步到 app 前。
+
+默认 real E2E 使用 `real-e2e-minimal`，验证真实 runner + GitHub PR / merge / issue closure；只有改动 `gh-issue-pr-iteration` 本身或大型编排行为时，才用 `--preset gh-issue-pr-iteration` 跑全保真。迭代过程中无需为了每个中间修正重复 real E2E；先用 integration gate 收敛，在满足上述收尾条件时跑一次。engine-integration 的绿不能表述为 real E2E 通过，但在非收尾、非 preset、非机制改动场景中就是充分的日常 gate。
 
 ## Runner selection
 

@@ -5,8 +5,9 @@
 review / merge / issue closure。它故意不是单元测试：要抓的是 runner sandbox 行为、
 session resume、`gh` 交互、跨 phase 状态推进这类只在真实运行中暴露的集成失败。
 
-任何 mock / stub / fake 都不足以替代真实 GitHub issue/PR 路径——完成判定必须包含
-一次 real-e2e 绿跑。
+mock / stub / fake 不能证明真实 GitHub issue/PR 路径；但 real E2E 是阶段性收尾门，
+不是每次修改的日常 gate。普通 bug 修复与迭代中途先走完整 integration gate，只有下文
+“何时跑”列出的时机才要求 real E2E。
 
 ## Fixture
 
@@ -76,11 +77,21 @@ exit 1。
 
 ## 何时跑
 
-真实 e2e 不进每 commit 的 gate（`bun test` 是日常 gate）。在这些时机跑：
+real E2E 不进每 commit 的 gate。日常默认门是 `bun run typecheck` + `bun test` +
+`bun scripts/engine-integration.ts`；普通 bug 修复、迭代中途的 commit / retry、没有改变
+调度或 preset 语义的局部修改，integration gate 通过即可。
 
-- 动 scheduler / daemon / runner spawn / preset prompt 的 PR 验收（真 chain + 真 item 的 e2e fixture 跑通才构成 acceptance）；
-- 发版 / 同步到 app 之前；
-- 排查只在真实运行中复现的问题。
+只在这些时机跑 real E2E：
+
+- 大型改动完成、准备收尾或合并；
+- 修正 bundled preset 的 phase、prompt、status、transition、runner/model 或加载语义；
+- 改动 scheduler / daemon / runner spawn、worktree、status/phase 推进、终止、resume、admission、terminal semantics 等引擎机制；
+- 发版 / 同步到 app 前；
+- 排查或复验只在真实 runner / GitHub 路径中出现的问题。
+
+默认跑 `real-e2e-minimal`。只有修改 `gh-issue-pr-iteration` 本身或大型编排行为时才显式
+使用 `--preset gh-issue-pr-iteration`；迭代中途不为每个修正重复运行，先用 integration
+gate 收敛，满足上述收尾条件时跑一次。
 
 ## Runner 覆盖
 
