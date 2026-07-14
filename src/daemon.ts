@@ -66,6 +66,7 @@ import {
 	engineLifecycleAdmittedItemStatus,
 	itemDependsOnIds,
 	itemExtraToJsonObject,
+	ORPHAN_RECONCILED_BY,
 	parseInternalStatus,
 	parseChainMetadataForRequest,
 	parseItemExtraForRequest,
@@ -2059,7 +2060,7 @@ export class CoderLoopDaemon {
 				endedAt: reconciledAt,
 				exitCode: ORPHANED_RUN_EXIT_CODE,
 				status: ORPHANED_RUN_STATUS,
-				extra: storedItemExtra({ ...itemExtraToJsonObject(run.extra), reconciledBy: "daemon_startup", reconciledAt }),
+				extra: storedItemExtra({ ...itemExtraToJsonObject(run.extra), reconciledBy: ORPHAN_RECONCILED_BY, reconciledAt }),
 			})
 			reconciledRuns.push({ runId: run.runId, itemId: run.itemId, phase: run.phase, pid: stalePid })
 		}

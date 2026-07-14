@@ -192,6 +192,10 @@ export type CompleteRunInput = {
 	extra?: ItemExtra
 }
 
+export type SetRunSessionIdInput = {
+	sessionId: string | null
+}
+
 export type CurrentRunRecord = {
 	chainId: number
 	phase: string
@@ -284,6 +288,10 @@ export type SqliteStateStore = {
 	getRunByRunId: (runId: string) => RunRecord | null
 	listRuns: (chainId: number) => RunRecord[]
 	completeRun: (runId: string, input: CompleteRunInput) => RunRecord
+	// Run-scoped session provenance (DESIGN-six-phase-split §8.2): persists the runner
+	// session id into `runs.extra.runnerSessionId` the moment the stream yields it.
+	// `sessionId: null` clears the field (resume-invalid handling).
+	setRunSessionId: (runId: string, input: SetRunSessionIdInput) => RunRecord
 	setCurrentRun: (input: SetCurrentRunInput) => CurrentRunRecord
 	getCurrentRun: (chainId: number) => CurrentRunRecord | null
 	clearCurrentRun: (chainId: number) => boolean
@@ -1373,6 +1381,23 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 					exitCode: input.exitCode,
 					status,
 					extra: stringifyJsonObject(itemExtraToJsonObject(nextExtra)),
+				})
+				return requireRun(getRunRowByRunId(runId), runId)
+			}),
+
+		setRunSessionId: (runId, input) =>
+			write("set run session id", () => {
+				const current = requireRun(getRunRowByRunId(runId), runId)
+				const flat = itemExtraToJsonObject(current.extra)
+				if (input.sessionId === null) delete flat.runnerSessionId
+				else flat.runnerSessionId = input.sessionId
+				db.query<unknown, SqlParams>(`
+					UPDATE runs
+					SET extra = $extra
+					WHERE run_id = $runId
+				`).run({
+					runId: runId,
+					extra: stringifyJsonObject(flat),
 				})
 				return requireRun(getRunRowByRunId(runId), runId)
 			}),

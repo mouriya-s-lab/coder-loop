@@ -149,6 +149,12 @@ export type SchedulerSpawnError = {
 	message: string
 }
 
+// Daemon-startup orphan reconcile marker value (`runs.extra.reconciledBy`). Written by
+// `reconcileOrphanedRuns` in daemon.ts; read by the scheduler's recover-run entry-kind
+// judgement (DESIGN-six-phase-split §5.2). Shared here so neither module hard-codes the
+// other's literal.
+export const ORPHAN_RECONCILED_BY = "daemon_startup"
+
 // #457: `blockerRepo` / `blockerRef` are no longer engine-typed ItemExtra fields. Presets that store
 // blocker info on an item write the keys as preset-owned strings inside the same JSON blob; they round
 // trip through `runtimeRemainder` exactly like any other preset-owned extra key.
@@ -165,6 +171,20 @@ export class ItemExtra extends RuntimeDataRecord {
 	startPhase?: string
 	pid?: number
 	processGroupLeader?: boolean
+	// Run-scoped session provenance (DESIGN-six-phase-split §8.2). All four live on
+	// `runs.extra` only; item extra never carries them.
+	// runnerSessionId: the session id parsed from this run's runner stream, persisted the
+	// moment it appears so a daemon crash cannot lose it.
+	runnerSessionId?: string
+	// recoveryOf: set at spawn on a recover-run — the predecessor runId this run recovers.
+	recoveryOf?: string
+	// sessionInvalid: set at close when the runner reported the resumed session as invalid;
+	// the next selection re-enters the same recover-run with the predecessor session cleared.
+	sessionInvalid?: boolean
+	// reconciledBy / reconciledAt: daemon-startup orphan reconcile marker (see
+	// ORPHAN_RECONCILED_BY). reconciledBy === ORPHAN_RECONCILED_BY is the recover-run signal.
+	reconciledBy?: string
+	reconciledAt?: number
 
 	constructor(input: ItemExtraInput, remainder: JsonObject) {
 		super(remainder)
@@ -185,6 +205,11 @@ export class ItemExtra extends RuntimeDataRecord {
 		if (input.startPhase !== undefined) this.startPhase = input.startPhase
 		if (input.pid !== undefined) this.pid = input.pid
 		if (input.processGroupLeader !== undefined) this.processGroupLeader = input.processGroupLeader
+		if (input.runnerSessionId !== undefined) this.runnerSessionId = input.runnerSessionId
+		if (input.recoveryOf !== undefined) this.recoveryOf = input.recoveryOf
+		if (input.sessionInvalid !== undefined) this.sessionInvalid = input.sessionInvalid
+		if (input.reconciledBy !== undefined) this.reconciledBy = input.reconciledBy
+		if (input.reconciledAt !== undefined) this.reconciledAt = input.reconciledAt
 	}
 }
 
@@ -234,6 +259,11 @@ type ItemExtraInput = {
 	startPhase?: string
 	pid?: number
 	processGroupLeader?: boolean
+	runnerSessionId?: string
+	recoveryOf?: string
+	sessionInvalid?: boolean
+	reconciledBy?: string
+	reconciledAt?: number
 }
 
 type ArkAssertable<T> = {
@@ -286,6 +316,11 @@ const ITEM_EXTRA_KEYS = new Set([
 	"startPhase",
 	"pid",
 	"processGroupLeader",
+	"runnerSessionId",
+	"recoveryOf",
+	"sessionInvalid",
+	"reconciledBy",
+	"reconciledAt",
 ])
 
 export function parseInternalStatus(value: string, field: string): InternalStatus {
@@ -420,6 +455,11 @@ export function itemExtraToJsonObject(extra: ItemExtra): JsonObject {
 	assignJson(result, "startPhase", extra.startPhase)
 	assignJson(result, "pid", extra.pid)
 	assignJson(result, "processGroupLeader", extra.processGroupLeader)
+	assignJson(result, "runnerSessionId", extra.runnerSessionId)
+	assignJson(result, "recoveryOf", extra.recoveryOf)
+	assignJson(result, "sessionInvalid", extra.sessionInvalid)
+	assignJson(result, "reconciledBy", extra.reconciledBy)
+	assignJson(result, "reconciledAt", extra.reconciledAt)
 	return result
 }
 
@@ -559,6 +599,16 @@ function parseItemExtra(value: JsonObject, field: string): ItemExtra {
 	if (pid !== undefined) input.pid = pid
 	const processGroupLeader = optionalBooleanField(value, "processGroupLeader", `${field}.processGroupLeader`)
 	if (processGroupLeader !== undefined) input.processGroupLeader = processGroupLeader
+	const runnerSessionId = optionalStringField(value, "runnerSessionId", `${field}.runnerSessionId`)
+	if (runnerSessionId !== undefined) input.runnerSessionId = runnerSessionId
+	const recoveryOf = optionalStringField(value, "recoveryOf", `${field}.recoveryOf`)
+	if (recoveryOf !== undefined) input.recoveryOf = recoveryOf
+	const sessionInvalid = optionalBooleanField(value, "sessionInvalid", `${field}.sessionInvalid`)
+	if (sessionInvalid !== undefined) input.sessionInvalid = sessionInvalid
+	const reconciledBy = optionalStringField(value, "reconciledBy", `${field}.reconciledBy`)
+	if (reconciledBy !== undefined) input.reconciledBy = reconciledBy
+	const reconciledAt = optionalPositiveIntegerField(value, "reconciledAt", `${field}.reconciledAt`)
+	if (reconciledAt !== undefined) input.reconciledAt = reconciledAt
 	return new ItemExtra(input, remainderExcept(value, ITEM_EXTRA_KEYS))
 }
 

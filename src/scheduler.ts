@@ -38,6 +38,7 @@ import {
 	itemSchedulerBackoff,
 	itemExtraToJsonObject,
 	itemExtraWithoutKeys,
+	ORPHAN_RECONCILED_BY,
 	parseInternalStatus,
 	storedItemExtra,
 	withChainCompleteTriggerState,
@@ -182,6 +183,7 @@ export type SchedulerStore = Pick<
 	| "recordRun"
 	| "getRunByRunId"
 	| "completeRun"
+	| "setRunSessionId"
 	| "setCurrentRun"
 	| "getCurrentRun"
 	| "clearCurrentRun"
@@ -527,7 +529,7 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 			})
 			if (next === null) continue
 
-			const activeRun = await spawnSchedulerRun(options, chain, next.item, slot, next.phase, phasePlan)
+			const activeRun = await spawnSchedulerRun(options, chain, next.item, slot, next.phase, phasePlan, next.entryKind)
 			if (activeRun !== null) spawnedRuns.push(activeRun)
 		}
 
@@ -603,7 +605,25 @@ type SelectNextItemAndPhaseInput = {
 	now: number
 }
 
-function selectNextItemAndPhase(input: SelectNextItemAndPhaseInput): { item: ItemRecord; phase: string } | null {
+// DESIGN-six-phase-split §5.2 / §8.1: why this run enters the phase. Normal completed/status
+// edges and first entries are graph entries and always spawn a fresh runner; only a
+// predecessor run left behind by a daemon crash (orphan-reconciled at startup) produces a
+// recover-run, which may resume that run's session. The two dimensions (entryKind here,
+// runnerStart derived at spawn) are orthogonal: a recover-run whose predecessor never
+// yielded a session id still starts fresh but remains the same recovery (no attempt cost).
+export type SchedulerEntryKind =
+	| { kind: "graph-entry" }
+	| { kind: "recover-run"; predecessorRunId: string }
+
+export type SchedulerSelection = {
+	item: ItemRecord
+	phase: string
+	entryKind: SchedulerEntryKind
+}
+
+const GRAPH_ENTRY: SchedulerEntryKind = { kind: "graph-entry" }
+
+function selectNextItemAndPhase(input: SelectNextItemAndPhaseInput): SchedulerSelection | null {
 	if (input.explicitPhase !== undefined) {
 		const pending = selectNextPendingItemFromSnapshot({
 			items: input.items,
@@ -612,7 +632,7 @@ function selectNextItemAndPhase(input: SelectNextItemAndPhaseInput): { item: Ite
 			terminalStatuses: input.chainStatuses.terminal,
 			now: input.now,
 		})
-		return pending === null ? null : { item: pending, phase: input.explicitPhase }
+		return pending === null ? null : { item: pending, phase: input.explicitPhase, entryKind: GRAPH_ENTRY }
 	}
 
 	const repoItems = input.items.filter((item) => item.repoCwd === input.repoCwd)
@@ -623,7 +643,7 @@ function selectNextItemAndPhase(input: SelectNextItemAndPhaseInput): { item: Ite
 			item.status === triggerPhase.whenStatus &&
 			item.phase !== triggerPhase.name,
 		)
-		if (triggered !== undefined) return { item: triggered, phase: triggerPhase.name }
+		if (triggered !== undefined) return { item: triggered, phase: triggerPhase.name, entryKind: GRAPH_ENTRY }
 	}
 
 	if (repoItems.some((item) => hasUnfinishedCurrentPhaseRun(item, runsById))) return null
@@ -641,7 +661,12 @@ function selectNextItemAndPhase(input: SelectNextItemAndPhaseInput): { item: Ite
 			return nextPhase === null ? [] : [{ item, phase: nextPhase }]
 		})
 		.sort((left, right) => comparePendingItems(left.item, right.item))[0]
-	if (phaseContinuation !== undefined) return phaseContinuation
+	if (phaseContinuation !== undefined) {
+		return {
+			...phaseContinuation,
+			entryKind: entryKindForContinuation(phaseContinuation.item, phaseContinuation.phase, runsById),
+		}
+	}
 
 	const pending = selectNextPendingItemFromSnapshot({
 		items: input.items.filter((item) => item.phase === null),
@@ -650,7 +675,26 @@ function selectNextItemAndPhase(input: SelectNextItemAndPhaseInput): { item: Ite
 		terminalStatuses: input.chainStatuses.terminal,
 		now: input.now,
 	})
-	return pending === null ? null : { item: pending, phase: input.phasePlan.entryPhase }
+	return pending === null ? null : { item: pending, phase: input.phasePlan.entryPhase, entryKind: GRAPH_ENTRY }
+}
+
+// recover-run holds iff the item re-enters its current phase and the latest run for that
+// phase is crash debris: either the daemon-startup orphan reconcile marked it, or it was a
+// recovery attempt whose resume failed because the predecessor session was invalid (in
+// which case the recovery is re-entered fresh against the same predecessor, whose session
+// has been cleared). Every other shape — normal edges, clean shutdown, timeouts, ordinary
+// non-zero exits — is a graph entry (§5.2 rules 1 and 6). `endedAt === null` is never
+// consulted: live runs are fenced off earlier by the slot.activeRun and
+// hasUnfinishedCurrentPhaseRun gates.
+function entryKindForContinuation(item: ItemRecord, phase: string, runsById: ReadonlyMap<string, RunRecord>): SchedulerEntryKind {
+	if (item.phase !== phase || item.lastRunId === null) return GRAPH_ENTRY
+	const latestRun = runsById.get(item.lastRunId)
+	if (latestRun === undefined || latestRun.itemId !== item.id || latestRun.phase !== phase) return GRAPH_ENTRY
+	if (latestRun.extra.reconciledBy === ORPHAN_RECONCILED_BY) return { kind: "recover-run", predecessorRunId: latestRun.runId }
+	if (latestRun.extra.recoveryOf !== undefined && latestRun.extra.sessionInvalid === true) {
+		return { kind: "recover-run", predecessorRunId: latestRun.extra.recoveryOf }
+	}
+	return GRAPH_ENTRY
 }
 
 function nextNonTriggerPhaseForItem(input: {
@@ -982,6 +1026,7 @@ async function spawnSchedulerRun(
 	slot: SchedulerSlot,
 	phase: string,
 	phasePlan: SchedulerPhasePlan,
+	entryKind: SchedulerEntryKind,
 ): Promise<SchedulerActiveRun | null> {
 	const worktreeManager = options.worktreeManager ?? createGitWorktreeManager(options.loopDataRootOptions)
 	const attribution: SchedulerSpawnErrorAttribution = { kind: "phase", phase }
@@ -996,8 +1041,8 @@ async function spawnSchedulerRun(
 		slot.worktreePath = worktreePath
 
 		const runner = await resolvePhaseRunner(options, { chain, item, phase })
-		const resumeDecision = resumeDecisionForItem(item, phase, runner.kind)
-		const startsAttempt = phasePlan.startsAttemptPhases.has(phase) && resumeDecision.kind === "fresh"
+		const resumeDecision = resumeDecisionForEntryKind(options, entryKind)
+		const startsAttempt = phasePlan.startsAttemptPhases.has(phase) && entryKind.kind === "graph-entry"
 		runId = options.runIdFactory?.({ chain, item, phase }) ?? makeRunId(item.id, phase)
 		startedAt = nowSeconds(options)
 		options.store.recordRun({
@@ -1014,6 +1059,7 @@ async function spawnSchedulerRun(
 				startStatus: item.status,
 				startStatusUpdatedAt: item.statusUpdatedAt,
 				...(item.phase === null ? {} : { startPhase: item.phase }),
+				...(entryKind.kind === "recover-run" ? { recoveryOf: entryKind.predecessorRunId } : {}),
 			}),
 		})
 		options.store.setCurrentRun({
@@ -1268,7 +1314,20 @@ function attachRunCloseHandler(
 	let sessionIdInvalid = false
 	let rateLimit = classifyRateLimitFromStdout("")
 	const stdoutState = createStreamTextState((line) => {
-		if (parsedSessionId === null) parsedSessionId = parseSessionIdFromRunnerStream(runner.kind, `${line}\n`)
+		if (parsedSessionId === null) {
+			parsedSessionId = parseSessionIdFromRunnerStream(runner.kind, `${line}\n`)
+			// §5.2 rule 3: persist the session id run-scoped the moment it appears so a daemon
+			// crash between here and close cannot lose the resume handle. A write failure here
+			// must not crash the stream handler; the close handler's completeRun extra carries
+			// the same id as fallback persistence.
+			if (parsedSessionId !== null) {
+				try {
+					options.store.setRunSessionId(runId, { sessionId: parsedSessionId })
+				} catch (error) {
+					console.warn(`coder-loop scheduler: run-scoped session persist failed for run=${runId}: ${errorMessage(error)}`)
+				}
+			}
+		}
 		const observed = classifyRateLimitFromStdout(line)
 		rateLimit = { code: rateLimit.code ?? observed.code, reset: observed.reset ?? rateLimit.reset }
 	})
@@ -1385,6 +1444,11 @@ function attachRunCloseHandler(
 							...(completedRun === null ? {} : itemExtraToJsonObject(completedRun.extra)),
 							stdoutBytes,
 							stderrBytes,
+							// Fallback persistence for the streaming write above, plus the
+							// resume-invalid marker the next selection reads to re-enter the same
+							// recover-run fresh (DESIGN-six-phase-split §8.2).
+							...(parsedSessionId === null ? {} : { runnerSessionId: parsedSessionId }),
+							...(sessionIdInvalid ? { sessionInvalid: true } : {}),
 						}),
 					})
 
@@ -1456,6 +1520,14 @@ function attachRunCloseHandler(
 						await options.onRateLimitObserved?.({ runId, chainId: chain.id, itemId: item.id, reset: rateLimit.reset })
 					}
 					if (sessionIdInvalid) {
+						// Run-scoped invalidation (§8.2): the invalid session belongs to the
+						// predecessor run this recovery tried to resume — clear it there so the
+						// re-entered recover-run derives a fresh runnerStart. The item-level slot
+						// is a mirror and is cleared alongside.
+						const invalidPredecessorRunId = completedRun?.extra.recoveryOf
+						if (invalidPredecessorRunId !== undefined) {
+							options.store.setRunSessionId(invalidPredecessorRunId, { sessionId: null })
+						}
 						options.store.setItemSessionId(item.id, { phase, runner: runner.kind, sessionId: null, updatedAt: endedAt })
 						await emit(options, {
 							type: "session_id.invalidated",
@@ -2362,6 +2434,20 @@ function freshResume(): ResumeDecision {
 	return { kind: "fresh" }
 }
 
+// DESIGN-six-phase-split §8.2: the spawn path derives runnerStart from the selection's
+// entryKind, not from item-level session history. Item-level `sessionIds[phase][runner]`
+// remains a diagnostic mirror only (see resumeDecisionForItem below).
+function resumeDecisionForEntryKind(options: SchedulerOptions, entryKind: SchedulerEntryKind): ResumeDecision {
+	if (entryKind.kind === "graph-entry") return freshResume()
+	const predecessor = options.store.getRunByRunId(entryKind.predecessorRunId)
+	const sessionId = predecessor?.extra.runnerSessionId
+	if (sessionId === undefined || sessionId === "") return freshResume()
+	return { kind: "resume", sessionId }
+}
+
+// Pre-split resume authority, retired from the spawn path by resumeDecisionForEntryKind.
+// Still exported for prompt-render fallbacks and direct unit coverage of the item-level
+// session mirror.
 export function resumeDecisionForItem(item: ItemRecord, phase: string, runner: AgentRunnerKind): ResumeDecision {
 	const sessionId = item.sessionIds[phase]?.[runner] ?? null
 	if (sessionId === null || sessionId === "") return freshResume()
