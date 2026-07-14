@@ -10,6 +10,7 @@ coder-loop 是项目无关的 N-phase 字符串调度引擎。给定一个 prese
 
 - `gh-issue-pr-iteration` — 生产使用的 GitHub issue/PR 迭代 preset，四个 phase（`iteration` / `review` / `blocked-responder` / `umbrella-finalizer`）。设计思路在 `presets/gh-issue-pr-iteration/DESIGN.md`，fragment 跳转在 `docs/gh-issue-pr-iteration-fragments.md`。
 - `engine-integration` — 两 phase 的本地引擎集成验收 preset，`scripts/engine-integration.ts` 专用（确定性 stub runner，无 GitHub / LLM）。
+- `real-e2e-minimal` — 两 phase 的最小真实 GitHub loop，`scripts/real-e2e.ts` 默认走这个。
 - `single-phase-example` — 一 phase / 字符串 id / 双状态的最小示例。
 - `business-key-example` — 演示 `[runtime].businessKeys` 声明位。
 
@@ -46,6 +47,7 @@ coder-loop doctor  <target>
 - **Type check**: `bun run typecheck`
 - **Unit + smoke tests**: `bun test`
 - **Engine integration（进程级引擎集成验收）**: `bun scripts/engine-integration.ts [flags]` — 本地 git fixture + 隔离 daemon（`--loop-data-root`，绝不碰生产 `~/.coder-loop`）→ chain create + item add → 引擎按 preset phase 顺序真实 spawn 确定性 stub runner（PATH shim 把 `claude` 解析到 `scripts/engine-integration-stub-runner.ts`）→ iteration 在 slot worktree 真实 commit → review 经 daemon socket 凭据准入写终态 → 断言 SQLite runs / `item.status.write_admission` 审计 / worktree 回收 / 无孤儿 → teardown。无 GitHub、无 LLM、无网络，单次 60 秒内，多实例可并发（issue #681）。**这不是 e2e**：runner 被确定性 stub 替换、业务负载是合成的，它只证明引擎的真实进程面（daemon/socket/spawn/准入/worktree/SQLite），不证明真实 agent 在真实 target 上的业务结果。runbook 见 `docs/engine-integration.md`。
+- **Real e2e（真实 runner + GitHub 终态）**: `bun scripts/real-e2e.ts [--preset <name>] [flags]` — 在私有 fixture repo seed 真实 issue，跑真实 runner 完成 branch / PR / review / merge / issue closure，再断言 GitHub 与 default branch 终态。默认 `real-e2e-minimal`；`--preset gh-issue-pr-iteration` 跑全保真。每轮以 UUID 隔离 fixture / checkout / chain / loop-data，不持有完整生命周期并发锁。runbook 见 `docs/real-e2e-fixture.md`。
 
 ### 引擎/调度改动的验证阶梯
 
@@ -53,7 +55,7 @@ coder-loop doctor  <target>
 
 1. `bun run typecheck` + `bun test`（unit + 进程内集成，mock 掉真实调度）——必要但**不足以证明正确**：真实 daemon 经真实 CLI/socket 调度真实子进程这条缝上的 bug，type-check / unit test 全绿也照样带病。
 2. `bun scripts/engine-integration.ts` 绿跑（观察到 item 落 `done`、admission 审计事件、worktree 回收）——秒级、完全本地、可并发，是引擎 / 调度类改动的 **per-change gate**。
-3. 真实 e2e（真实 runner + 真实 preset + 真实 GitHub 业务终态）由 `gh-issue-pr-iteration` 的**生产 dogfood loop** 持续承担；仓库内没有独立的 e2e harness（原 GitHub 全保真 harness 因成本 / 串行 / 职责混淆在 #681 退役）。engine-integration 的绿不可声称为 e2e 通过。
+3. `bun scripts/real-e2e.ts` 绿跑（观察到 PR `MERGED`、issue `CLOSED`、default branch fixture 为 `status: complete`）——真实 runner + 真实 preset + 真实 GitHub 业务终态；默认最小 preset，必要时用 `--preset gh-issue-pr-iteration` 做全保真验证。engine-integration 的绿不可替代或声称为 real e2e 通过。
 
 ## Runner selection
 
