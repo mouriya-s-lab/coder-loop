@@ -20,7 +20,7 @@ operator / supervisor 的默认入口是 `coder-loop` 自己暴露的只读或�
 | 管理 central daemon | `coder-loop daemon up/down/status/start/stop/restart <target>` | 管理全局 daemon socket 与 target chain；避免手写 `nohup` / PID 归属逻辑 |
 | 管理 chain | `coder-loop chain create/list/status/stop/resume/delete/set-runner-model` | 直接操作 centralized coder-loop chain |
 | 管理 item | `coder-loop item add/batch-add/list/update/reorder` | 直接操作 centralized chain item |
-| 恢复 blocked item | `coder-loop queue unblock <target> --issue <id>` | 将 preset 声明的 unblockable terminal item 恢复到 `statuses.entry` |
+| 恢复 blocked item | `coder-loop queue unblock <target> --issue <id>` | 将 preset 声明的 unblockable terminal item 恢复到 `statuses.entry`，清空其 phase 使 scheduler 从 entry phase 重捡；chain 已 completed 时一并恢复为 active（#679） |
 
 常规排障顺序：
 
@@ -247,7 +247,7 @@ coder-loop item --help
 | `item batch-add <chain> --items-json '[...]'` | 原子批量加 item | `--items-json` `--loop-data-root <dir>` |
 | `item list <chain>` / `item update <chain>` / `item reorder <chain>` | item 常规 CRUD | 看 `coder-loop item --help` |
 | `item exits <chain>` / `item exit-action <chain>` | **agent 面**：查该 item 当前 run phase 的 typed phase-exits / 选择 chain-action exit | `--issue` `--agent-run-id` `--agent-phase` `--action`（exit-action） |
-| `queue unblock <target>` | 将 preset 声明的 unblockable terminal item 恢复到 `statuses.entry` 并清除 blocker metadata | `--issue <id>` `--start-daemon` `--dry-run` |
+| `queue unblock <target>` | 将 preset 声明的 unblockable terminal item 恢复到 `statuses.entry`，清空其 phase 使 scheduler 从 entry phase 重捡；chain 已 completed 时一并恢复为 active（#679） | `--issue <id>` `--start-daemon` `--dry-run` |
 
 ### 6.2 Source entry
 

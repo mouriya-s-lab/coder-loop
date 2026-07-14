@@ -44,7 +44,9 @@ describe("db-backed v2 loop hard cut", () => {
 	})
 
 	test("queue unblock mutates SQLite only", async () => {
-		const fixture = await createFixture({ initialStatus: "blocked", extra: { blockerRepo: "owner/dependency", blockerRef: "#267" } })
+		// #679: seed the residual trigger phase a real blocked item carries so the phase-clear
+		// behavior is exercised, not just the status restore.
+		const fixture = await createFixture({ initialStatus: "blocked", initialPhase: "blocked-responder", extra: { blockerRepo: "owner/dependency", blockerRef: "#267" } })
 		const beforeText = await readFile(fixture.statePath, "utf-8")
 		// #409: queue.unblock daemonizes. Start an in-process daemon so the CLI subprocess can
 		// reach it via Unix socket; operator-path call (no env credential) flows through the
@@ -55,11 +57,51 @@ describe("db-backed v2 loop hard cut", () => {
 			const result = await runCliAsync(["queue", "unblock", fixture.target, "--issue", "1", "--loop-data-root", fixture.loopDataRoot, "--chain", CHAIN_NAME])
 			expect(result.exitCode, `${result.stdout}\n${result.stderr}`).toBe(0)
 			expect(readItem(fixture.loopDataRoot).status).toBe("queued")
+			// #679: the residual phase is cleared so the scheduler re-picks the item from the
+			// preset's entry phase (a lingering trigger-phase name strands the item forever).
+			expect(readItem(fixture.loopDataRoot).phase).toBeNull()
 			// #457: queue unblock no longer clears preset-owned blocker keys — the engine has no
 			// concept of "blocker" any more, so any keys the preset wrote into extra remain in place.
 			// The keys live in `runtimeRemainder` because they are no longer engine-typed ItemExtra fields.
 			expect(itemExtraToJsonObject(readItem(fixture.loopDataRoot).extra).blockerRepo).toBe("owner/dependency")
 			expect(await readFile(fixture.statePath, "utf-8")).toBe(beforeText)
+		} finally {
+			await daemon.stop()
+		}
+	}, 30_000)
+
+	test("queue unblock reactivates a completed chain (issue #679)", async () => {
+		// Last non-terminal item went blocked → scheduler marked the chain completed. Unblock is
+		// the operator's declared intent to run the chain again; without reactivation the restored
+		// item never ticks (schedulerTick only visits active chains).
+		const fixture = await createFixture({ initialStatus: "blocked", initialPhase: "blocked-responder", chainStatus: "completed" })
+		const daemon = await startCoderLoopDaemon({ loopDataRoot: fixture.loopDataRoot, shutdownGraceMs: 100, scheduler: { enabled: false } })
+		try {
+			const result = await runCliAsync(["queue", "unblock", fixture.target, "--issue", "1", "--loop-data-root", fixture.loopDataRoot, "--chain", CHAIN_NAME])
+			expect(result.exitCode, `${result.stdout}\n${result.stderr}`).toBe(0)
+			expect(JSON.parse(result.stdout)).toMatchObject({
+				mutation: { changed: true, clearedPhase: true, reactivatedChain: true },
+			})
+			expect(readItem(fixture.loopDataRoot).status).toBe("queued")
+			expect(readItem(fixture.loopDataRoot).phase).toBeNull()
+			expect(readChainStatus(fixture.loopDataRoot)).toBe("active")
+		} finally {
+			await daemon.stop()
+		}
+	}, 30_000)
+
+	test("queue unblock dry-run reports the plan without mutating item or chain (issue #679)", async () => {
+		const fixture = await createFixture({ initialStatus: "blocked", initialPhase: "blocked-responder", chainStatus: "completed" })
+		const daemon = await startCoderLoopDaemon({ loopDataRoot: fixture.loopDataRoot, shutdownGraceMs: 100, scheduler: { enabled: false } })
+		try {
+			const result = await runCliAsync(["queue", "unblock", fixture.target, "--issue", "1", "--loop-data-root", fixture.loopDataRoot, "--chain", CHAIN_NAME, "--dry-run"])
+			expect(result.exitCode, `${result.stdout}\n${result.stderr}`).toBe(0)
+			expect(JSON.parse(result.stdout)).toMatchObject({
+				mutation: { changed: true, clearedPhase: true, reactivatedChain: true },
+			})
+			expect(readItem(fixture.loopDataRoot).status).toBe("blocked")
+			expect(readItem(fixture.loopDataRoot).phase).toBe("blocked-responder")
+			expect(readChainStatus(fixture.loopDataRoot)).toBe("completed")
 		} finally {
 			await daemon.stop()
 		}
@@ -132,6 +174,11 @@ describe("db-backed v2 loop hard cut", () => {
 
 type FixtureOptions = {
 	initialStatus?: string
+	// #679: seed the residual phase a real blocked item carries (after a blocked-responder
+	// trigger run this is the trigger phase's own name).
+	initialPhase?: string
+	// #679: seed the chain status; "completed" reproduces the last-item-blocked strand.
+	chainStatus?: "active" | "completed"
 	extra?: Record<string, string>
 	customManualUnblockPreset?: boolean
 }
@@ -215,7 +262,7 @@ function seedDb(loopDataRoot: string, target: string, options: FixtureOptions, p
 			baseBranch: "main",
 			metadata: storedChainMetadata(presetPath === null ? {} : { presetPath }),
 		})
-		store.createItem({
+		const item = store.createItem({
 			chainId: chain.id,
 			itemId: "1",
 			repoCwd: target,
@@ -224,6 +271,10 @@ function seedDb(loopDataRoot: string, target: string, options: FixtureOptions, p
 			evidenceDir: null,
 			extra: storedItemExtra(options.extra ?? {}),
 		})
+		if (options.initialPhase !== undefined) store.updateItem(item.id, { phase: options.initialPhase })
+		if (options.chainStatus !== undefined && options.chainStatus !== chain.status) {
+			store.updateChain(chain.id, { status: options.chainStatus })
+		}
 	} finally {
 		store.close()
 	}
@@ -271,6 +322,17 @@ function readItem(loopDataRoot: string) {
 		const item = store.getItemById(chain.id, "1")
 		if (item === null) throw new Error("missing item")
 		return item
+	} finally {
+		store.close()
+	}
+}
+
+function readChainStatus(loopDataRoot: string) {
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = store.getChainByName(CHAIN_NAME)
+		if (chain === null) throw new Error("missing chain")
+		return chain.status
 	} finally {
 		store.close()
 	}
