@@ -155,8 +155,11 @@ test("review writing changes_requested returns to iteration before review runs a
 			"codex:iteration",
 			"claude:review",
 		])
-		expect(fakeEvents[2]?.resumedSessionId).toBe("d400e2b2-04a4-44f8-8f13-3078f41a5593")
-		expect(fakeEvents[3]?.resumedSessionId).toBe("019e6cf2-5b39-7b83-9bc5-8c8b96122682")
+		// DESIGN-six-phase-split §5.2 rule 1: a normal status-edge re-entry into a
+		// previously-visited phase is a graph entry and always spawns fresh; the earlier
+		// runs' sessions stay run-scoped and are never replayed onto a retry.
+		expect(fakeEvents[2]?.resumedSessionId).toBeNull()
+		expect(fakeEvents[3]?.resumedSessionId).toBeNull()
 	} finally {
 		fixture.store.close()
 	}
@@ -228,9 +231,12 @@ test("invalid review session id clears only review/claude and the next review sp
 		expect(fixture.store.getItemSessionId(item.id, { phase: "review", runner: "claude" })).toBe(freshReviewSessionId)
 
 		const fakeEvents = await readFakeRunnerEvents(fixture.eventLog)
+		// Run-scoped protocol: the seeded item mirror never drives resume, so every review
+		// spawn here is fresh. The invalid-session stderr detector fires independently of
+		// how the runner was started, and it must clear only the review/claude mirror slot.
 		expect(fakeEvents.map((event) => `${event.runner}:${event.phase}:${event.resumedSessionId ?? "fresh"}`)).toEqual([
 			"codex:iteration:fresh",
-			`claude:review:${staleReviewSessionId}`,
+			"claude:review:fresh",
 			"claude:review:fresh",
 		])
 		expect(phaseStarts(fixture.schedulerEvents, item.id)).toEqual(["iteration", "review", "review"])
@@ -326,9 +332,11 @@ test("invalid review session id on opencode clears only review/opencode and the 
 		expect(fixture.store.getItemSessionId(item.id, { phase: "review", runner: "opencode" })).toBe(freshReviewSessionId)
 
 		const fakeEvents = await readFakeRunnerEvents(fixture.eventLog)
+		// Same run-scoped-protocol shape as the claude case above: fresh spawns throughout;
+		// the ANSI-wrapped opencode detector still fires and clears only review/opencode.
 		expect(fakeEvents.map((event) => `${event.runner}:${event.phase}:${event.resumedSessionId ?? "fresh"}`)).toEqual([
 			"codex:iteration:fresh",
-			`opencode:review:${staleReviewSessionId}`,
+			"opencode:review:fresh",
 			"opencode:review:fresh",
 		])
 		expect(phaseStarts(fixture.schedulerEvents, item.id)).toEqual(["iteration", "review", "review"])

@@ -679,18 +679,20 @@ function selectNextItemAndPhase(input: SelectNextItemAndPhaseInput): SchedulerSe
 }
 
 // recover-run holds iff the item re-enters its current phase and the latest run for that
-// phase is crash debris: either the daemon-startup orphan reconcile marked it, or it was a
-// recovery attempt whose resume failed because the predecessor session was invalid (in
-// which case the recovery is re-entered fresh against the same predecessor, whose session
-// has been cleared). Every other shape — normal edges, clean shutdown, timeouts, ordinary
-// non-zero exits — is a graph entry (§5.2 rules 1 and 6). `endedAt === null` is never
-// consulted: live runs are fenced off earlier by the slot.activeRun and
-// hasUnfinishedCurrentPhaseRun gates.
+// phase was interrupted from outside the work itself: daemon crash (orphan-reconciled at
+// startup), an account rate-limit exit (#478 — the post-cooldown re-entry continues the
+// same interrupted run), or a recovery attempt whose resume failed because the predecessor
+// session was invalid (in which case the recovery is re-entered fresh against the same
+// predecessor, whose session has been cleared). Every other shape — normal edges, clean
+// shutdown, timeouts, ordinary non-zero exits — is a graph entry (§5.2 rules 1 and 6).
+// `endedAt === null` is never consulted: live runs are fenced off earlier by the
+// slot.activeRun and hasUnfinishedCurrentPhaseRun gates.
 function entryKindForContinuation(item: ItemRecord, phase: string, runsById: ReadonlyMap<string, RunRecord>): SchedulerEntryKind {
 	if (item.phase !== phase || item.lastRunId === null) return GRAPH_ENTRY
 	const latestRun = runsById.get(item.lastRunId)
 	if (latestRun === undefined || latestRun.itemId !== item.id || latestRun.phase !== phase) return GRAPH_ENTRY
 	if (latestRun.extra.reconciledBy === ORPHAN_RECONCILED_BY) return { kind: "recover-run", predecessorRunId: latestRun.runId }
+	if (latestRun.extra.rateLimited === true) return { kind: "recover-run", predecessorRunId: latestRun.runId }
 	if (latestRun.extra.recoveryOf !== undefined && latestRun.extra.sessionInvalid === true) {
 		return { kind: "recover-run", predecessorRunId: latestRun.extra.recoveryOf }
 	}
@@ -1449,6 +1451,10 @@ function attachRunCloseHandler(
 							// recover-run fresh (DESIGN-six-phase-split §8.2).
 							...(parsedSessionId === null ? {} : { runnerSessionId: parsedSessionId }),
 							...(sessionIdInvalid ? { sessionInvalid: true } : {}),
+							// #478: an account rate-limit interrupts the run externally — mark it so
+							// the post-cooldown selection re-enters it as a recover-run and resumes
+							// this run's session instead of paying a fresh graph entry.
+							...(rateLimitExit ? { rateLimited: true } : {}),
 						}),
 					})
 

@@ -185,6 +185,9 @@ export class ItemExtra extends RuntimeDataRecord {
 	// ORPHAN_RECONCILED_BY). reconciledBy === ORPHAN_RECONCILED_BY is the recover-run signal.
 	reconciledBy?: string
 	reconciledAt?: number
+	// rateLimited: set at close when the run exited on an account rate-limit (#478); the
+	// post-cooldown selection re-enters it as a recover-run and resumes its session.
+	rateLimited?: boolean
 
 	constructor(input: ItemExtraInput, remainder: JsonObject) {
 		super(remainder)
@@ -210,6 +213,7 @@ export class ItemExtra extends RuntimeDataRecord {
 		if (input.sessionInvalid !== undefined) this.sessionInvalid = input.sessionInvalid
 		if (input.reconciledBy !== undefined) this.reconciledBy = input.reconciledBy
 		if (input.reconciledAt !== undefined) this.reconciledAt = input.reconciledAt
+		if (input.rateLimited !== undefined) this.rateLimited = input.rateLimited
 	}
 }
 
@@ -264,6 +268,7 @@ type ItemExtraInput = {
 	sessionInvalid?: boolean
 	reconciledBy?: string
 	reconciledAt?: number
+	rateLimited?: boolean
 }
 
 type ArkAssertable<T> = {
@@ -321,6 +326,7 @@ const ITEM_EXTRA_KEYS = new Set([
 	"sessionInvalid",
 	"reconciledBy",
 	"reconciledAt",
+	"rateLimited",
 ])
 
 export function parseInternalStatus(value: string, field: string): InternalStatus {
@@ -460,6 +466,7 @@ export function itemExtraToJsonObject(extra: ItemExtra): JsonObject {
 	assignJson(result, "sessionInvalid", extra.sessionInvalid)
 	assignJson(result, "reconciledBy", extra.reconciledBy)
 	assignJson(result, "reconciledAt", extra.reconciledAt)
+	assignJson(result, "rateLimited", extra.rateLimited)
 	return result
 }
 
@@ -609,6 +616,8 @@ function parseItemExtra(value: JsonObject, field: string): ItemExtra {
 	if (reconciledBy !== undefined) input.reconciledBy = reconciledBy
 	const reconciledAt = optionalPositiveIntegerField(value, "reconciledAt", `${field}.reconciledAt`)
 	if (reconciledAt !== undefined) input.reconciledAt = reconciledAt
+	const rateLimited = optionalBooleanField(value, "rateLimited", `${field}.rateLimited`)
+	if (rateLimited !== undefined) input.rateLimited = rateLimited
 	return new ItemExtra(input, remainderExcept(value, ITEM_EXTRA_KEYS))
 }
 

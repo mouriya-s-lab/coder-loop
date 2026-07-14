@@ -3853,11 +3853,15 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 		}
 	})
 
-	test("end-to-end composition: seeded phase/runner session id reaches subprocess argv as --resume <id> (AC7 wire-level proxy)", async () => {
+	test("item-level session mirror never reaches subprocess argv: a graph entry spawns fresh (DESIGN-six-phase-split \u00a78.2 wire-level proxy)", async () => {
 		const fixture = await createFixture("session-id-roundtrip-claude")
 		try {
 			const chain = createChain(fixture.store, "session-id-roundtrip-chain")
 			const item = createItem(fixture.store, chain, { issueNumber: 291_020, repoCwd: "/repo/session-roundtrip" })
+			// Pre-split protocol seeded `item.sessionIds[phase][runner]` and expected `--resume`
+			// on argv. The mirror is diagnostic-only now: resume authority is the predecessor
+			// run's `extra.runnerSessionId`, consulted only on a recover-run selection (covered
+			// by the six-phase entry-kind provenance describe below).
 			fixture.store.setItemSessionId(item.id, { phase: "iteration", runner: "claude", sessionId: "sess-seeded-200" })
 			const fakeRunner = resolve(fixture.loopDataRoot, "..", "fake-claude-argv-echo.ts")
 			await writeFakeClaudeArgvEchoRunner(fakeRunner)
@@ -3865,7 +3869,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			const options = fixture.options({
 				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
 			})
-			// Single iteration spawn (see note above): one tick captures the seeded session id on argv.
+			// Single iteration spawn (see note above): one tick, then read argv from the run log.
 			const tick = await schedulerTick({ ...options, phase: "iteration" })
 			await tick.spawnedRuns[0]!.closed
 
@@ -3877,9 +3881,8 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			const argvLine = stdout.split("\n").find((line) => line.startsWith("{") && line.includes("\"argv\""))
 			expect(argvLine).toBeDefined()
 			const argv = JSON.parse(argvLine!) as { argv: string[] }
-			const idx = argv.argv.indexOf("--resume")
-			expect(idx).toBeGreaterThanOrEqual(0)
-			expect(argv.argv[idx + 1]).toBe("sess-seeded-200")
+			expect(argv.argv).not.toContain("--resume")
+			expect(argv.argv).not.toContain("sess-seeded-200")
 		} finally {
 			fixture.store.close()
 		}
@@ -3942,11 +3945,35 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 		}
 	})
 
-	test("session-id-invalid stderr clears the phase/runner slot and the next spawn is fresh (issue #312 AC3)", async () => {
+	test("session-id-invalid stderr on a recover-run clears the predecessor run session and the re-entered recovery spawns fresh (issue #312 AC3 / \u00a75.2 rule 4)", async () => {
 		const fixture = await createFixture("session-id-invalid-fresh")
 		try {
 			const chain = createChain(fixture.store, "session-id-invalid-fresh-chain")
 			const item = createItem(fixture.store, chain, { issueNumber: 312_003, repoCwd: "/repo/session-id-invalid" })
+			// Seed a daemon-crash predecessor: orphan-reconciled run whose run-scoped session
+			// is stale on the runner side. The item mirror carries the same id (diagnostic).
+			fixture.store.recordRun({
+				runId: "run-orphan-312003",
+				chainId: chain.id,
+				itemId: item.id,
+				phase: "iteration",
+				status: runtimeStatus("running"),
+				startedAt: 1_800_311_900,
+				extra: storedItemExtra({ startStatus: "in_progress", runnerSessionId: "sess-stale-312" }),
+			})
+			fixture.store.completeRun("run-orphan-312003", {
+				endedAt: 1_800_311_920,
+				exitCode: -1,
+				status: runtimeStatus("orphaned"),
+				extra: storedItemExtra({ startStatus: "in_progress", runnerSessionId: "sess-stale-312", reconciledBy: "daemon_startup", reconciledAt: 1_800_311_920 }),
+			})
+			fixture.store.updateItem(item.id, {
+				status: runtimeStatus("in_progress"),
+				phase: "iteration",
+				lastRunId: "run-orphan-312003",
+				attempts: 1,
+				updatedAt: 1_800_311_920,
+			})
 			fixture.store.setItemSessionId(item.id, { phase: "iteration", runner: "claude", sessionId: "sess-stale-312" })
 			const fakeRunner = resolve(fixture.loopDataRoot, "..", "fake-claude-invalid-once.ts")
 			const attemptFile = resolve(fixture.loopDataRoot, "..", "fake-claude-invalid-attempt.txt")
@@ -3961,11 +3988,18 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 				spawnFailureBackoff: { initialSeconds: 1, maxSeconds: 2 },
 			})
 
+			// First tick: recover-run resumes the predecessor's stale session and fails.
 			const firstTick = await schedulerTick(options)
 			expect(firstTick.spawnedRuns).toHaveLength(1)
 			const firstClosed = await firstTick.spawnedRuns[0]!.closed
 			expect(firstClosed.exitCode).toBe(1)
 			expect(await readFile(resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot }).runStderrFile(firstClosed.runId), "utf-8")).toContain("No conversation found with session ID: sess-stale-312")
+			// Run-scoped invalidation: the predecessor run's session is cleared…
+			expect(fixture.store.getRunByRunId("run-orphan-312003")?.extra.runnerSessionId).toBeUndefined()
+			// …the failed recovery is marked so selection re-enters the same recover-run…
+			expect(fixture.store.getRunByRunId(firstClosed.runId)?.extra.recoveryOf).toBe("run-orphan-312003")
+			expect(fixture.store.getRunByRunId(firstClosed.runId)?.extra.sessionInvalid).toBe(true)
+			// …and the item-level mirror slot is cleared alongside.
 			expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "claude" })).toBeNull()
 			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({
 				type: "session_id.invalidated",
@@ -3975,17 +4009,17 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 				previousSessionId: "sess-stale-312",
 			}))
 
-			// The agent exited non-zero without writing a status, so the spawn-set in_progress
-			// remains; model the daemon recovery back to a continuable status so the next tick
-			// re-selects a fresh iteration spawn rather than advancing to review.
-			fixture.store.updateItem(item.id, { status: runtimeStatus("changes_requested"), phase: null, updatedAt: now })
-
+			// Second tick after backoff: the same recovery is re-entered, but the predecessor
+			// session is gone, so the runner starts fresh (\u00a75.2 rule 4) and no attempt is
+			// consumed on the way.
 			now += 2
 			const secondTick = await schedulerTick(options)
 			expect(secondTick.spawnedRuns).toHaveLength(1)
 			const secondClosed = await secondTick.spawnedRuns[0]!.closed
 			expect(secondClosed.exitCode).toBe(0)
 			expect(fixture.store.getItemSessionId(item.id, { phase: "iteration", runner: "claude" })).toBe("sess-fresh-312")
+			expect(fixture.store.getRunByRunId(secondClosed.runId)?.extra.runnerSessionId).toBe("sess-fresh-312")
+			expect(fixture.store.getItem(item.id)?.attempts).toBe(1)
 
 			const argvEvents = await readArgvEvents(fixture.eventLog)
 			expect(argvEvents).toHaveLength(2)
