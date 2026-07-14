@@ -857,7 +857,7 @@ describe("scheduler", () => {
 				status: runtimeStatus("changes_requested"),
 				attempts: DEFAULT_MAX_ITEM_ATTEMPTS,
 				lastRunId: "run-prior-default-failure",
-				extra: storedItemExtra({ ...itemExtraToJsonObject(item.extra), schedulerBackoff: { failureCount: DEFAULT_MAX_ITEM_ATTEMPTS, nextRunAt: 1_800_000_000 } }),
+				extra: storedItemExtra({ ...itemExtraToJsonObject(item.extra), schedulerBackoff: { failureCount: DEFAULT_MAX_ITEM_ATTEMPTS, nextRunAt: 1_700_000_000 } }),
 				updatedAt: 1_800_000_500,
 			})
 
@@ -891,7 +891,7 @@ describe("scheduler", () => {
 				status: runtimeStatus("changes_requested"),
 				attempts: 2,
 				lastRunId: "run-prior-failure",
-				extra: storedItemExtra({ ...itemExtraToJsonObject(item.extra), schedulerBackoff: { failureCount: 2, nextRunAt: 1_800_000_000 } }),
+				extra: storedItemExtra({ ...itemExtraToJsonObject(item.extra), schedulerBackoff: { failureCount: 2, nextRunAt: 1_700_000_000 } }),
 				updatedAt: 1_800_000_500,
 			})
 
@@ -934,7 +934,7 @@ describe("scheduler", () => {
 				status: runtimeStatus("queued"),
 				attempts: 1,
 				lastRunId: "run-prior-custom-failure",
-				extra: storedItemExtra({ ...itemExtraToJsonObject(item.extra), schedulerBackoff: { failureCount: 1, nextRunAt: 1_800_900_000 } }),
+				extra: storedItemExtra({ ...itemExtraToJsonObject(item.extra), schedulerBackoff: { failureCount: 1, nextRunAt: 1_700_000_000 } }),
 				updatedAt: 1_800_900_500,
 			})
 

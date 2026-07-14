@@ -515,10 +515,13 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 			}
 			if (hasFinalizingItemForRepo(options.state, items, repoCwd)) continue
 
-			items = await exhaustItemsOverAttemptLimitForRepo(options, chain, repoCwd, items, chainStatuses)
 			const now = nowSeconds(options)
 			await emitRepoWaitingDecisions(options, chain, repoCwd, items, chainStatuses, now)
-			const next = selectNextItemAndPhase({
+			// DESIGN-six-phase-split §8.3: the attempt budget is checked AFTER selection and only
+			// gates a graph entry into a startsAttempt phase. A successor phase (review after the
+			// budget-spending iteration) and a recover-run are never truncated — exhaustion happens
+			// exactly when the workflow asks for the next budget-consuming entry.
+			let next = selectNextItemAndPhase({
 				repoCwd,
 				items,
 				runs,
@@ -527,6 +530,24 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 				explicitPhase: options.phase,
 				now,
 			})
+			const maxItemAttempts = maxItemAttemptsForChain(options, chain)
+			while (
+				next !== null
+				&& next.entryKind.kind === "graph-entry"
+				&& phasePlan.startsAttemptPhases.has(next.phase)
+				&& next.item.attempts >= maxItemAttempts
+			) {
+				items = await exhaustItemOnAttemptBudget(options, chain, next.item, chainStatuses)
+				next = selectNextItemAndPhase({
+					repoCwd,
+					items,
+					runs,
+					chainStatuses,
+					phasePlan,
+					explicitPhase: options.phase,
+					now,
+				})
+			}
 			if (next === null) continue
 
 			const activeRun = await spawnSchedulerRun(options, chain, next.item, slot, next.phase, phasePlan, next.entryKind)
@@ -817,56 +838,46 @@ function comparePendingItems(left: ItemRecord, right: ItemRecord): number {
 	return left.id - right.id
 }
 
-async function exhaustItemsOverAttemptLimitForRepo(
+// §8.3: exhaust exactly the item whose selection asked for a budget-consuming graph entry.
+// The pre-selection queue sweep (`exhaustItemsOverAttemptLimitForRepo`) is retired — it
+// truncated successor phases (a review following the budget-spending iteration never ran).
+async function exhaustItemOnAttemptBudget(
 	options: SchedulerOptions,
 	chain: ChainRecord,
-	repoCwd: string,
-	items: readonly ItemRecord[],
+	item: ItemRecord,
 	chainStatuses: SchedulerChainStatuses,
 ): Promise<ItemRecord[]> {
-	const maxItemAttempts = maxItemAttemptsForChain(options, chain)
-	const terminalStatuses = new Set(chainStatuses.terminal)
-	const pendingStatuses = new Set(chainStatuses.pending)
 	// #402: exhausted落点 status now comes from the preset; loadPreset has already validated it
 	// is a member of `statuses.terminal`, so the engine no longer guards against the preset
 	// vocabulary missing it. No more engine-side terminal-set injection.
 	const exhaustedStatus = chainStatuses.exhausted
-	let changed = false
-	for (const item of items) {
-		if (item.repoCwd !== repoCwd) continue
-		if (terminalStatuses.has(item.status)) continue
-		if (!pendingStatuses.has(item.status)) continue
-		if (item.attempts < maxItemAttempts) continue
-
-		const exhaustedAt = nowSeconds(options)
-			const extra = clearItemSchedulerBackoff(item.extra)
-		options.store.updateItem(item.id, {
-			// #397: brand the preset-derived exhausted status at the call site. Exhausting on
-			// max attempts is an engine-lifecycle write (no caller-provided status), so it
-			// bypasses the per-phase request gate and brands through the narrow engine-lifecycle
-			// constructor. #402 made the underlying string value preset-declared; the brand only
-			// uplifts the static type at the store-write boundary.
-			status: engineLifecycleAdmittedItemStatus(exhaustedStatus, "scheduler.exhausted-on-max-attempts"),
-			extra,
-			updatedAt: exhaustedAt,
-		})
-		changed = true
-		// #402 / #411: engine-driven transitions emit an audit-classified event under the unified
-		// observability stream (daemon mapping in schedulerEventToObservabilityEvent: queue.terminal
-		// → kind=audit, subject={kind:"engine"}). The transition source is implied by the run-id
-		// shape returned by makeAttemptLimitRunId when no prior run was recorded.
-		await emit(options, {
-			type: "queue.terminal",
-			ts: nowIso(options),
-			runId: item.lastRunId ?? makeAttemptLimitRunId(chain, item, exhaustedAt),
-			chainId: chain.id,
-			// #419 review I2: items.id rowid is `rowId` (audit `itemId` is reserved for the
-			// opaque preset-declared string identity used by split-shape `item.*` events).
-			rowId: item.id,
-			terminalStatus: exhaustedStatus,
-		})
-	}
-	return changed ? options.store.listItems(chain.id) : [...items]
+	const exhaustedAt = nowSeconds(options)
+	const extra = clearItemSchedulerBackoff(item.extra)
+	options.store.updateItem(item.id, {
+		// #397: brand the preset-derived exhausted status at the call site. Exhausting on
+		// max attempts is an engine-lifecycle write (no caller-provided status), so it
+		// bypasses the per-phase request gate and brands through the narrow engine-lifecycle
+		// constructor. #402 made the underlying string value preset-declared; the brand only
+		// uplifts the static type at the store-write boundary.
+		status: engineLifecycleAdmittedItemStatus(exhaustedStatus, "scheduler.exhausted-on-max-attempts"),
+		extra,
+		updatedAt: exhaustedAt,
+	})
+	// #402 / #411: engine-driven transitions emit an audit-classified event under the unified
+	// observability stream (daemon mapping in schedulerEventToObservabilityEvent: queue.terminal
+	// → kind=audit, subject={kind:"engine"}). The transition source is implied by the run-id
+	// shape returned by makeAttemptLimitRunId when no prior run was recorded.
+	await emit(options, {
+		type: "queue.terminal",
+		ts: nowIso(options),
+		runId: item.lastRunId ?? makeAttemptLimitRunId(chain, item, exhaustedAt),
+		chainId: chain.id,
+		// #419 review I2: items.id rowid is `rowId` (audit `itemId` is reserved for the
+		// opaque preset-declared string identity used by split-shape `item.*` events).
+		rowId: item.id,
+		terminalStatus: exhaustedStatus,
+	})
+	return options.store.listItems(chain.id)
 }
 
 function makeAttemptLimitRunId(chain: ChainRecord, item: ItemRecord, exhaustedAt: number): string {
