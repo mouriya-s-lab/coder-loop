@@ -53,7 +53,7 @@ describe("observability", () => {
 			runId: "run-1",
 			phase: "iteration",
 			subject: { kind: "engine" },
-			payload: { repoCwd: "/repo/a", pid: 123 },
+			payload: { repoCwd: "/repo/a", pid: 123, entryKind: "graph-entry", runnerStart: "fresh", predecessorRunId: null },
 		}, new Date("2026-06-12T00:01:00.000Z")))
 		await appendObservabilityEvent(eventsFile, makeObservabilityEvent({
 			kind: "lifecycle",
@@ -63,7 +63,7 @@ describe("observability", () => {
 			runId: "run-2",
 			phase: "review",
 			subject: { kind: "engine" },
-			payload: { repoCwd: "/repo/b", pid: null },
+			payload: { repoCwd: "/repo/b", pid: null, entryKind: "recover-run", runnerStart: "resume", predecessorRunId: "run-1" },
 		}, new Date("2026-06-12T00:02:00.000Z")))
 
 		const result = await queryObservabilityEvents(eventsFile, {

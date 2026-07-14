@@ -4134,6 +4134,16 @@ describe("six-phase entry-kind provenance (DESIGN-six-phase-split §5.2 / §8)",
 
 			// The fresh graph entry into the startsAttempt phase consumes an attempt.
 			expect(fixture.store.getItem(item.id)?.attempts).toBe(1)
+
+			// §8.4: phase.start carries the selection provenance.
+			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({
+				type: "phase.start",
+				itemId: item.id,
+				phase: "iteration",
+				entryKind: "graph-entry",
+				runnerStart: "fresh",
+				predecessorRunId: null,
+			}))
 		} finally {
 			fixture.store.close()
 		}
@@ -4191,6 +4201,16 @@ describe("six-phase entry-kind provenance (DESIGN-six-phase-split §5.2 / §8)",
 
 			// …and does not consume an attempt (§5.2 rule 5).
 			expect(fixture.store.getItem(item.id)?.attempts).toBe(1)
+
+			// §8.4: phase.start names the recovered predecessor run.
+			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({
+				type: "phase.start",
+				itemId: item.id,
+				phase: "iteration",
+				entryKind: "recover-run",
+				runnerStart: "resume",
+				predecessorRunId: "run-orphan-700102",
+			}))
 		} finally {
 			fixture.store.close()
 		}

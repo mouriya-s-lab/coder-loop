@@ -902,7 +902,13 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 				runId: event.runId,
 				phase: event.phase,
 				subject: { kind: "engine" },
-				payload: { repoCwd: event.repoCwd, pid: event.pid },
+				payload: {
+					repoCwd: event.repoCwd,
+					pid: event.pid,
+					entryKind: event.entryKind,
+					runnerStart: event.runnerStart,
+					predecessorRunId: event.predecessorRunId,
+				},
 			})
 		case "phase.end":
 			return makeObservabilityEvent({

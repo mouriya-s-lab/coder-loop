@@ -411,7 +411,16 @@ export const ObservabilityEventBoundary = arkType.or(
 		...EventBaseBoundary,
 		kind: arkType.unit("lifecycle"),
 		type: arkType.unit("phase.start"),
-		payload: { repoCwd: "string", pid: arkType.or("number", "null") },
+		// DESIGN-six-phase-split §8.4: selection provenance — entryKind (why the phase was
+		// entered), runnerStart (fresh vs resume, orthogonal), predecessorRunId (the recovered
+		// run on recover-run entries, null on graph entries).
+		payload: {
+			repoCwd: "string",
+			pid: arkType.or("number", "null"),
+			entryKind: arkType.or(arkType.unit("graph-entry"), arkType.unit("recover-run")),
+			runnerStart: arkType.or(arkType.unit("fresh"), arkType.unit("resume")),
+			predecessorRunId: arkType.or("string", "null"),
+		},
 	},
 	{
 		...EventBaseBoundary,

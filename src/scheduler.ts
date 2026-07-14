@@ -226,7 +226,10 @@ export type SchedulerEvent =
 	| { type: "chain.complete_trigger"; chainId: number; chainName: string; runId?: string; decision: SchedulerChainCompleteDecision["decision"]; reason?: string }
 	| { type: "chain.complete_trigger_failed"; chainId: number; chainName: string; runId?: string; error: string }
 	| { type: "chain.completed"; chainId: number; chainName: string; runId?: string }
-	| { type: "phase.start"; ts: string; runId: string; chainId: number; itemId: number; repoCwd: string; phase: string; pid: number | null }
+	// DESIGN-six-phase-split §8.4: phase.start carries the selection provenance — why the run
+	// entered the phase (entryKind), how the runner was started (runnerStart, the orthogonal
+	// dimension), and which run a recover-run recovers (predecessorRunId, null on graph entries).
+	| { type: "phase.start"; ts: string; runId: string; chainId: number; itemId: number; repoCwd: string; phase: string; pid: number | null; entryKind: SchedulerEntryKind["kind"]; runnerStart: "fresh" | "resume"; predecessorRunId: string | null }
 	| { type: "phase.end"; ts: string; runId: string; chainId: number; itemId: number; phase: string; exitCode: number; durationSeconds: number; status: InternalStatus }
 	| { type: "attempt.timeout"; ts: string; runId: string; chainId: number; itemId: number; phase: string; signal: "SIGTERM" | "SIGKILL"; attemptMs: number; excerpt: ObservabilityExcerpt }
 	// #462: startup idle reclaim. Distinct from `attempt.timeout` so the lifecycle stream
@@ -1166,7 +1169,19 @@ async function spawnSchedulerRun(
 			stderrBytes: 0,
 		})
 		await emit(options, { type: "agent.spawn", slotKey: slot.key, chainId: chain.id, itemId: item.id, runId, phase, pid: activeRun.pid, worktreePath, presetDir })
-		await emit(options, { type: "phase.start", ts: nowIso(options), runId, chainId: chain.id, itemId: item.id, repoCwd: item.repoCwd, phase, pid: activeRun.pid })
+		await emit(options, {
+			type: "phase.start",
+			ts: nowIso(options),
+			runId,
+			chainId: chain.id,
+			itemId: item.id,
+			repoCwd: item.repoCwd,
+			phase,
+			pid: activeRun.pid,
+			entryKind: entryKind.kind,
+			runnerStart: resumeDecision.kind,
+			predecessorRunId: entryKind.kind === "recover-run" ? entryKind.predecessorRunId : null,
+		})
 		activeRun.markPrepared()
 		return activeRun
 	} catch (error) {
