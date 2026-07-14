@@ -1763,7 +1763,7 @@ const itemCliCommand = subcommands({
 
 const queueUnblockCliCommand = command({
 	name: "unblock",
-	description: "Restore one preset-unblockable item to the preset entry status and clear blocker metadata.",
+	description: "Restore one preset-unblockable item to the preset entry status, clear its phase so the scheduler re-picks it from the entry phase, and reactivate the chain if it had completed.",
 	args: {
 		target: positional({ displayName: "target", type: cmdString }),
 		issue: option({ long: "issue", type: cmdString }),
@@ -2785,7 +2785,7 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 			baseBranch: null,
 			dryRun: false,
 			worktree: false,
-			chainStatusScope: "status-snapshot",
+			chainStatusScope: "active-or-completed",
 		})
 	} catch (error) {
 		const targetCwd = resolve(args.targetCwd)
@@ -3647,6 +3647,10 @@ export type QueueUnblockMutationOutcome =
 			beforeStatus: string
 			afterStatus: string
 			clearedCurrent: boolean
+			// #679: unblock clears the item's phase so the scheduler re-picks it from the preset's
+			// entry phase, and reactivates a completed chain so the restored item can tick at all.
+			clearedPhase: boolean
+			reactivatedChain: boolean
 	  }
 	| {
 			changed: false
@@ -3688,6 +3692,9 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 		baseBranch: null,
 		dryRun: args.dryRun,
 		worktree: false,
+		// #679: unblock must resolve a completed chain too — the last-item-blocked strand marks
+		// the chain completed, and unblock is the recovery path that reactivates it.
+		chainStatusScope: "active-or-completed",
 	})
 	const options = runtime.options
 	const issue = normalizeQueueIssueId(args.issue)
@@ -3792,10 +3799,15 @@ function parseQueueUnblockMutationResponse(response: JsonObject, requestedIssue:
 	const beforeStatus = mutationObj.beforeStatus
 	const afterStatus = mutationObj.afterStatus
 	const clearedCurrent = mutationObj.clearedCurrent
+	const clearedPhase = mutationObj.clearedPhase
+	const reactivatedChain = mutationObj.reactivatedChain
 	if (typeof beforeStatus !== "string" || typeof afterStatus !== "string" || typeof clearedCurrent !== "boolean") {
 		fail(`queue unblock: daemon 'changed' reply missing status/clearedCurrent fields`)
 	}
-	return { changed: true, issue, beforeStatus, afterStatus, clearedCurrent }
+	if (typeof clearedPhase !== "boolean" || typeof reactivatedChain !== "boolean") {
+		fail(`queue unblock: daemon 'changed' reply missing clearedPhase/reactivatedChain fields`)
+	}
+	return { changed: true, issue, beforeStatus, afterStatus, clearedCurrent, clearedPhase, reactivatedChain }
 }
 
 function daemonResultIndicatesRunning(daemon: QueueUnblockCommandResult["daemon"]): boolean {
@@ -3816,7 +3828,10 @@ type TargetChainLookupArgs = {
 	chainStatusScope?: TargetChainStatusScope
 }
 
-type TargetChainStatusScope = "active-only" | "status-snapshot"
+// #679: the scope names describe which chain statuses the lookup accepts, not which command
+// uses it — `active-or-completed` serves both the read-only status snapshot and operator
+// recovery paths (queue.unblock must resolve a completed chain to revive it).
+type TargetChainStatusScope = "active-only" | "active-or-completed"
 
 type LoadedTargetRuntime = {
 	options: LoopOptions

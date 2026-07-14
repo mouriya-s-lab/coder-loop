@@ -126,7 +126,7 @@ rm -rf "$TARGET"
 | `[statuses].terminal` | string[] | 是 | 引擎跳过的 status 集合（与 continuable 合并去重） |
 | `[statuses].entry` | string | 否 | 依赖解除或手动 `queue unblock` 后恢复到的 continuable status；默认取 `continuable[0]` |
 | `[statuses].success` | string[] | 否 | terminal 子集；dependsOn 依赖全部进入 success 后，下游 terminal item 会恢复到 `entry` |
-| `[statuses].unblockable` | string[] | 否 | terminal 子集；`queue unblock` 只会把这些 terminal status 恢复到 `entry` |
+| `[statuses].unblockable` | string[] | 否 | terminal 子集；`queue unblock` 只会把这些 terminal status 恢复到 `entry`，同时清空 item.phase（item 从 entry phase 重新入场）并在 chain 已 completed 时恢复 chain 为 active |
 | `[statuses].retry` | string | 否 | continuable status，表示"上一轮被打回需重跑"。声明后 `retryStatusDoc` doc builder 把它注入到 md 中需要引用 retry 概念的位置，preset prose 不再硬编码 status 字面量 |
 | `[[phases]].name` | string | 是 | phase 名字，写入 `state.current.phase` |
 | `[[phases]].prompt` | string | 是 | 相对 preset.toml 的 entry prompt 模板路径 |

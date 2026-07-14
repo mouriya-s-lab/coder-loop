@@ -5139,6 +5139,117 @@ process.exitCode = 0
 		}
 	})
 
+	test("queue.unblock after blocked-responder re-picks the item from the entry phase and reactivates the completed chain (live integration, issue #679)", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-unblock-reschedule-live`)
+		const loopDataRoot = resolve(root, "ld")
+		const fakeRunner = resolve(root, "fake-phase-runner.ts")
+		const eventLog = resolve(root, "events.jsonl")
+		await mkdir(loopDataRoot, { recursive: true })
+		await writeFile(
+			fakeRunner,
+			`import { appendFile } from "node:fs/promises"
+
+const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+const writeLine = (line) => Bun.write(Bun.stdout, line + "\\n")
+await appendFile(input.eventLog, JSON.stringify({ type: "start", phase: input.phase, runId: input.runId }) + "\\n")
+await new Promise((resolve) => setTimeout(resolve, input.sleepMs))
+if (input.phase === "iteration") await writeLine("ITERATION SUMMARY: scope=unblock-live; reason=iter-marker")
+else if (input.phase === "review") await writeLine("PHASE DONE: phase=review reason=unblock-live-blocked")
+else await writeLine("PHASE DONE: phase=" + input.phase + " reason=unblock-live")
+${FAKE_RUNNER_STATUS_WRITE_SNIPPET}
+process.exitCode = 0
+`,
+		)
+
+		const schedulerEvents: SchedulerEvent[] = []
+		const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
+			const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+			await mkdir(worktreePath, { recursive: true })
+			return worktreePath
+		}
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			shutdownGraceMs: 100,
+			scheduler: {
+				enabled: true,
+				intervalMs: 30,
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
+				presetDir: PRESET_DIR,
+				worktreeManager,
+				prompt: ({ item, runId, phase }) => JSON.stringify({
+					itemId: item.id,
+					issueNumber: Number(item.itemId),
+					runId,
+					phase,
+					eventLog,
+					sleepMs: 5,
+					writeStatus: phase === "review" ? "blocked" : null,
+				}),
+				chainCompleteTriggerForChain: () => null,
+				onEvent: (event) => {
+					schedulerEvents.push(event)
+				},
+			},
+		})
+		const socketPath = daemon.snapshot().socketPath
+		const readChainStatus = () => {
+			const store = openSqliteStateStore({ loopDataRoot })
+			try {
+				return store.listChains()[0]?.status ?? null
+			} finally {
+				store.close()
+			}
+		}
+		try {
+			const chain = record(expectOk(await sendDaemonRequest(socketPath, daemonRequest("chain.create", {
+				name: "unblock-reschedule-live-chain",
+				repository: "mouriya-s-lab/coder-loop",
+			}))).chain)
+			const chainId = numberValue(chain.id)
+			expectOk(await sendDaemonRequest(socketPath, daemonRequest("item.add", { chainId, itemId: "29012", repoCwd: REPO_ROOT, preset: "gh-issue-pr-iteration" })))
+
+			// Drive to the stranded pre-#679 terminal shape: review wrote blocked, the
+			// blocked-responder trigger ran (rewriting item.phase to its own name), and the
+			// all-terminal chain auto-completed.
+			await waitFor(async () => readChainStatus(), (status) => status === "completed", 15_000)
+			const strandedItem = await readItem(loopDataRoot, chainId, 29012)
+			expect(strandedItem?.status).toBe("blocked")
+			expect(strandedItem?.phase).toBe("blocked-responder")
+
+			const phaseStartsOf = (events: readonly SchedulerEvent[]) => events
+				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> => event.type === "phase.start")
+				.map((event) => event.phase)
+			const spawnsBeforeUnblock = phaseStartsOf(schedulerEvents).length
+			const unblockReply = expectOk(await sendDaemonRequest(socketPath, daemonRequest("queue.unblock", { chainId, issue: "29012" })))
+			expect(unblockReply).toMatchObject({
+				mutation: {
+					changed: true,
+					beforeStatus: "blocked",
+					afterStatus: "queued",
+					clearedPhase: true,
+					reactivatedChain: true,
+				},
+			})
+			const restoredItem = await readItem(loopDataRoot, chainId, 29012)
+			expect(restoredItem?.status).toBe("queued")
+			expect(restoredItem?.phase).toBeNull()
+			expect(readChainStatus()).toBe("active")
+
+			// The scheduler must actually re-pick the restored item, from the preset's entry phase.
+			await waitFor(
+				async () => phaseStartsOf(schedulerEvents).slice(spawnsBeforeUnblock),
+				(phases) => (phases?.length ?? 0) > 0,
+				10_000,
+			)
+			const respawnPhases = phaseStartsOf(schedulerEvents).slice(spawnsBeforeUnblock)
+			expect(respawnPhases[0]).toBe("contract-enrichment")
+		} finally {
+			await daemon.stop()
+		}
+	})
+
 	test("daemon re-spawns item after agent exits 0 without SUMMARY marker (live integration)", async () => {
 		const warnings: string[] = []
 		const originalWarn = console.warn

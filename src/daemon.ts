@@ -2395,15 +2395,45 @@ export class CoderLoopDaemon {
 			const clearedCurrent = typeof currentExtraItemId === "number"
 				&& Number.isInteger(currentExtraItemId)
 				&& currentExtraItemId === item.id
+			// #679: an unblockable item usually carries the phase of the last phase that ran on it —
+			// after a blocked-responder trigger that is the trigger phase's own name, which the
+			// scheduler's selection paths exclude forever (trigger phases are not continuable phases,
+			// and entry-pending selection requires phase === null). Restoring the entry status without
+			// clearing the phase therefore strands the item. Mirror the cross-chain dependsOn unblock
+			// restore (scheduler.ts `unblockDependencySatisfiedItems`): entry status + phase reset, so
+			// the item re-enters from the preset's entry phase.
+			const clearedPhase = item.phase !== null
+			// #679: when the blocked item was the chain's last non-terminal item the scheduler has
+			// already marked the chain `completed`, and completed chains never tick again (there is
+			// no completed→active transition anywhere else: chain.resume only accepts stopped chains
+			// and item.add rejects non-active chains). Unblock is the operator's declared intent to
+			// run this chain again, so it reactivates the chain it just made schedulable work for.
+			const reactivatedChain = chain.status === "completed"
 			if (!dryRun) {
 				store.updateItem(item.id, {
 					// #397: queue.unblock is operator-issued — restore the item to the preset's entry
 					// status. The value comes from preset.statuses.entry (engine-derived), so we brand
 					// through the narrow engine-lifecycle constructor.
 					status: engineLifecycleAdmittedItemStatus(entryStatus, "queue.unblock-entry-restore"),
+					phase: null,
 					updatedAt: unixSeconds(),
 				})
 				if (clearedCurrent) store.clearCurrentRun(chain.id)
+				if (reactivatedChain) {
+					const reactivated = store.updateChain(chain.id, { status: "active" })
+					await this.recordObservabilityEventIfChainNameIsValid(reactivated, makeObservabilityEvent({
+						kind: "audit",
+						type: "chain.status",
+						chain: reactivated.name,
+						subject: { kind: "operator" },
+						payload: {
+							chainId: reactivated.id,
+							fromStatus: chain.status,
+							toStatus: reactivated.status,
+							terminatedRunIds: [],
+						},
+					}))
+				}
 				// Mirror the #406 operator-attribution audit shape the old CLI emitted so external
 				// tooling that watches `item.mutation.caller_admission` keeps seeing the unblock.
 				await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
@@ -2429,6 +2459,8 @@ export class CoderLoopDaemon {
 					beforeStatus: item.status,
 					afterStatus: entryStatus,
 					clearedCurrent,
+					clearedPhase,
+					reactivatedChain,
 				},
 			}
 		} finally {
