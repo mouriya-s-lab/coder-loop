@@ -1,0 +1,66 @@
+# coder-loop preset: engine-e2e
+#
+# Two-phase preset for the engine e2e harness (scripts/engine-e2e.ts, issue #681).
+# Purpose: exercise the full engine path — real daemon over the CLI socket, chain/item
+# bootstrap, phase-ordered spawn of a real child-process runner, worktree lifecycle,
+# credentialed status admission (#397 gate), SQLite persistence, terminal verdict,
+# teardown — with a deterministic local stub runner and a local git fixture. No LLM,
+# no GitHub, no network. Preset orchestration quality is explicitly out of scope for
+# e2e; that responsibility lives with the presets' own consumers.
+#
+# The harness resolves the `claude` runner kind to a stub binary by prepending a shim
+# dir to PATH before the daemon spawn (the engine's own PATH-resolution face; see
+# docs/preset-authoring.md `[agent]` — runner binary is the kind name on PATH).
+
+name = "engine-e2e"
+
+[item]
+idField = "key"
+
+[item.fields]
+# The idField is declared as a typed transparent field so `{{ITEM_KEY}}` resolves via
+# the standard `[item.fields]` pipeline (mirrors the #419 idField convention).
+key = "string"
+
+[statuses]
+continuable = ["queued", "changes_requested"]
+terminal    = ["done", "exhausted"]
+success     = ["done"]
+entry       = "queued"
+# exhausted (#402): required preset declaration for the attempts-exhausted落点.
+exhausted   = "exhausted"
+
+[[phases]]
+name   = "iteration"
+prompt = "iteration-entry.md"
+runner = "claude"
+# No [[phases.exits]]: iteration writes no status; the scheduler advances to `review`
+# by phase array order once the runner exits 0.
+
+  [phases.variables]
+  CHAIN_NAME = { source = "runtime.chainName", label = "Chain name" }
+  ITEM_KEY   = { source = "item.key", label = "Item key" }
+  RUN_ID     = { source = "runtime.runId", label = "Run ID" }
+
+[[phases]]
+name   = "review"
+prompt = "review-entry.md"
+runner = "claude"
+
+  [[phases.exits]]
+  status = "done"
+  when   = "The iteration phase committed the run marker in the shared slot worktree."
+
+  [[phases.exits]]
+  status = "changes_requested"
+  when   = "The run marker commit is missing from the worktree; iteration must retry."
+
+  [phases.variables]
+  CHAIN_NAME = { source = "runtime.chainName", label = "Chain name" }
+  ITEM_KEY   = { source = "item.key", label = "Item key" }
+  RUN_ID     = { source = "runtime.runId", label = "Run ID" }
+
+[agent]
+# The stub runner completes in well under a second; 120s is a generous ceiling that
+# still fails fast relative to the harness's own 60s wall-time tripwire.
+attemptTimeoutSeconds = 120

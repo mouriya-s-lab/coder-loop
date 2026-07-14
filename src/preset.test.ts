@@ -33,7 +33,6 @@ import type { BoundaryRecord } from "./boundary-types"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const BUNDLED_PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
-const REAL_E2E_MINIMAL_PRESET_DIR = resolve(REPO_ROOT, "presets/real-e2e-minimal")
 
 function status(value: string) {
 	return parseInternalStatus(value, "test.status")
@@ -333,13 +332,12 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 	test("bundled preset declares issue doc prefix", async () => {
 		const presets = await Promise.all([
 			loadPreset(BUNDLED_PRESET_DIR),
-			loadPreset(REAL_E2E_MINIMAL_PRESET_DIR),
 		])
 		const decoratedIssueBindings = presets.flatMap((preset) => preset.phases.flatMap((phase) => {
 			const variable = phase.variables.find((candidate) => candidate.key === "ISSUE" && candidate.doc !== null)
 			return variable === undefined ? [] : [{ preset, phase, variable }]
 		}))
-		expect(decoratedIssueBindings).toHaveLength(5)
+		expect(decoratedIssueBindings).toHaveLength(3)
 
 		for (const { preset, phase, variable } of decoratedIssueBindings) {
 			const doc = variable.doc
@@ -1158,8 +1156,8 @@ attemptTimeoutSeconds = 3600
 
 	test("row #3: dead-vocabulary surfaces as a warn finding and does NOT block the load", async () => {
 		// `in_progress` is declared continuable but no producer (entry, exhausted,
-		// or any item-status exit) can write it. This is the real-e2e-minimal
-		// drift acknowledged in the issue body.
+		// or any item-status exit) can write it — the dead-vocabulary drift shape
+		// acknowledged in the issue body.
 		const dir = await writeDagFixture(`name = "dead-vocabulary"
 version = 1
 ${baseStatusesBlock}
@@ -1205,7 +1203,7 @@ attemptTimeoutSeconds = 3600
 			BUNDLED_PRESET_DIR,
 			resolve(REPO_ROOT, "presets/single-phase-example"),
 			resolve(REPO_ROOT, "presets/business-key-example"),
-			resolve(REPO_ROOT, "presets/real-e2e-minimal"),
+			resolve(REPO_ROOT, "presets/engine-e2e"),
 		]) {
 			const findings: PresetDagFinding[] = []
 			await loadPreset(presetDir, { onDagFinding: (f) => findings.push(f) })

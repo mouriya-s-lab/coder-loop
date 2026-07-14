@@ -263,7 +263,7 @@ bun src/loop.ts daemon start <target>
 ### 6.3 Agent 进程与监控（fallback reference）
 
 - **Per-run events JSONL**：`<logDir>/<runId>/events.jsonl`，路径由 `coder-loop status <target> --json` 的 `events.path` 暴露。
-- **Absolute attempt timeout**：每个 agent attempt 的绝对上限由 preset.toml `[agent] attemptTimeoutSeconds` 声明（bundled `gh-issue-pr-iteration` 是 7200；`real-e2e-minimal` 是 900；`single-phase-example` 是 3600）。到期无条件对 agent 进程组发 SIGTERM，5 秒后仍未退出则 SIGKILL；attempt 记录 `terminated.kind = "timeout"`，事件流写 `attempt.timeout`。
+- **Absolute attempt timeout**：每个 agent attempt 的绝对上限由 preset.toml `[agent] attemptTimeoutSeconds` 声明（bundled `gh-issue-pr-iteration` 是 7200；`engine-e2e` 是 120；`single-phase-example` 是 3600）。到期无条件对 agent 进程组发 SIGTERM，5 秒后仍未退出则 SIGKILL；attempt 记录 `terminated.kind = "timeout"`，事件流写 `attempt.timeout`。
 - **Startup idle watchdog**（#462）：spawn 后前 10 分钟内 stdout 字节数 < 200B 判"启动即挂死"，SIGKILL 该 attempt，事件流写 `run.startup_idle_kill`（阈值可用 `CODER_LOOP_STARTUP_IDLE_TIMEOUT_MS` / `CODER_LOOP_STARTUP_IDLE_PROGRESS_BYTES` 覆盖）。
 - **Recycle zone**（#452，替代已退役的 post-summary watchdog）：agent 通过 `coder-loop item update --status` 写入 admissible status 后，daemon 给它 500 秒自然退出。事件流写 `recycle.pending_entered` 起手；自然退出写 `recycle.natural_exit`；到期未退出直接 SIGKILL 进程组，事件流写 `recycle.timeout_kill`（因为 agent 已经宣告完成，SIGTERM 不再需要）。
 - **Agent --resume**：Claude CLI spawn 中断（5xx / 网络）时引擎自动 `--resume <sessionId>` 续跑，sessionId 索引在 `<logDir>/<runId>/<phase>/sessions.jsonl`；stderr 检测到 invalid-session pattern 时清 sessionIds 并 emit `session_id.invalidated`，下一 attempt 自动 fresh。

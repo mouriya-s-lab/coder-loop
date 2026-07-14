@@ -14,7 +14,7 @@
 
 - `bun` 已安装（`bun --version` 能跑）。
 - `gh` CLI 已 auth（`gh auth status` 不报错），有目标 repo 的 issue / PR 写权限。
-- runner CLI 在 PATH：每个 phase 的 runner 由 preset 声明；bundled `gh-issue-pr-iteration` 与 `real-e2e-minimal` 目前都把 phase 声明为 `codex`。目标是覆盖 preset 里出现过的所有 runner kind（`claude` / `codex` / `opencode`）。
+- runner CLI 在 PATH：每个 phase 的 runner 由 preset 声明；bundled `gh-issue-pr-iteration` 目前把 phase 声明为 `codex`。目标是覆盖 preset 里出现过的所有 runner kind（`claude` / `codex` / `opencode`）。
 - 目标 repo 在本地，有可用的 base branch（通常 `main`）。
 
 第一次安装本 repo：
