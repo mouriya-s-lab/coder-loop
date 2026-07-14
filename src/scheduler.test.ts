@@ -4019,6 +4019,180 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 	})
 })
 
+// DESIGN-six-phase-split §5.2 / §8: entry-kind provenance. Normal graph edges always
+// produce a fresh runner (rule 1); only daemon-crash orphan reconcile produces a
+// recover-run that may resume the predecessor run's session (rules 2-4); attempts are
+// consumed only by graph-entry into a startsAttempt phase (rule 5 / §8.3).
+describe("six-phase entry-kind provenance (DESIGN-six-phase-split §5.2 / §8)", () => {
+	test("normal status-edge re-entry into a previously-visited phase spawns fresh and consumes an attempt", async () => {
+		const fixture = await createFixture("reentry-fresh-attempt")
+		try {
+			const chain = createChain(fixture.store, "reentry-fresh-attempt-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 700_101, repoCwd: "/repo/reentry" })
+			// A prior iteration run left a session id in the item-level slot (the pre-split
+			// resume authority). A review run then completed and wrote changes_requested,
+			// routing the item back to iteration over the normal status edge.
+			fixture.store.setItemSessionId(item.id, { phase: "iteration", runner: "claude", sessionId: "sess-stale-reentry" })
+			fixture.store.recordRun({
+				runId: "run-review-700101",
+				chainId: chain.id,
+				itemId: item.id,
+				phase: "review",
+				status: runtimeStatus("running"),
+				startedAt: 1_800_000_700,
+				extra: storedItemExtra({ startStatus: "in_progress", startStatusUpdatedAt: 1_800_000_690 }),
+			})
+			fixture.store.completeRun("run-review-700101", {
+				endedAt: 1_800_000_710,
+				exitCode: 0,
+				status: runtimeStatus("changes_requested"),
+			})
+			fixture.store.updateItem(item.id, {
+				status: runtimeStatus("changes_requested"),
+				phase: "review",
+				lastRunId: "run-review-700101",
+				statusUpdatedAt: 1_800_000_705,
+				updatedAt: 1_800_000_710,
+			})
+
+			const fakeRunner = resolve(fixture.loopDataRoot, "..", "fake-claude-argv-echo.ts")
+			await writeFakeClaudeArgvEchoRunner(fakeRunner)
+			const tick = await schedulerTick(fixture.options({
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
+				runIdFactory: ({ chain: c, item: i, phase }) => `run-${c.id}-${i.id}-${phase}-reentry`,
+			}))
+			expect(tick.spawnedRuns).toHaveLength(1)
+			await tick.spawnedRuns[0]!.closed
+
+			// Re-entry over a normal edge is a fresh graph entry: no --resume on argv even
+			// though the item-level session slot still holds the stale iteration session.
+			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
+			const stdout = await readFile(paths.runStdoutFile(`run-${chain.id}-${item.id}-iteration-reentry`), "utf-8")
+			const argvLine = stdout.split("\n").find((line) => line.startsWith("{") && line.includes("\"argv\""))
+			expect(argvLine).toBeDefined()
+			const argv = JSON.parse(argvLine!) as { argv: string[] }
+			expect(argv.argv).not.toContain("--resume")
+			expect(argv.argv).not.toContain("sess-stale-reentry")
+
+			// The fresh graph entry into the startsAttempt phase consumes an attempt.
+			expect(fixture.store.getItem(item.id)?.attempts).toBe(1)
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("daemon-orphan reconciled predecessor run produces recover-run: resumes the run-scoped session without consuming an attempt", async () => {
+		const fixture = await createFixture("recover-run-resume")
+		try {
+			const chain = createChain(fixture.store, "recover-run-resume-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 700_102, repoCwd: "/repo/recover" })
+			// Simulate daemon crash + startup reconcile: the iteration run was closed by
+			// reconcileOrphanedRuns (exitCode -1, reconciledBy marker) after the runner
+			// stream had already yielded a session id persisted run-scoped.
+			fixture.store.recordRun({
+				runId: "run-orphan-700102",
+				chainId: chain.id,
+				itemId: item.id,
+				phase: "iteration",
+				status: runtimeStatus("running"),
+				startedAt: 1_800_000_800,
+				extra: storedItemExtra({ startStatus: "in_progress", runnerSessionId: "sess-orphan-recover" }),
+			})
+			fixture.store.completeRun("run-orphan-700102", {
+				endedAt: 1_800_000_820,
+				exitCode: -1,
+				status: runtimeStatus("orphaned"),
+				extra: storedItemExtra({ startStatus: "in_progress", runnerSessionId: "sess-orphan-recover", reconciledBy: "daemon_startup", reconciledAt: 1_800_000_820 }),
+			})
+			fixture.store.updateItem(item.id, {
+				status: runtimeStatus("in_progress"),
+				phase: "iteration",
+				lastRunId: "run-orphan-700102",
+				attempts: 1,
+				updatedAt: 1_800_000_820,
+			})
+
+			const fakeRunner = resolve(fixture.loopDataRoot, "..", "fake-claude-argv-echo.ts")
+			await writeFakeClaudeArgvEchoRunner(fakeRunner)
+			const tick = await schedulerTick(fixture.options({
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
+				runIdFactory: ({ chain: c, item: i, phase }) => `run-${c.id}-${i.id}-${phase}-recovery`,
+			}))
+			expect(tick.spawnedRuns).toHaveLength(1)
+			await tick.spawnedRuns[0]!.closed
+
+			// recover-run resumes the predecessor run's session…
+			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
+			const stdout = await readFile(paths.runStdoutFile(`run-${chain.id}-${item.id}-iteration-recovery`), "utf-8")
+			const argvLine = stdout.split("\n").find((line) => line.startsWith("{") && line.includes("\"argv\""))
+			expect(argvLine).toBeDefined()
+			const argv = JSON.parse(argvLine!) as { argv: string[] }
+			const resumeIdx = argv.argv.indexOf("--resume")
+			expect(resumeIdx).toBeGreaterThanOrEqual(0)
+			expect(argv.argv[resumeIdx + 1]).toBe("sess-orphan-recover")
+
+			// …and does not consume an attempt (§5.2 rule 5).
+			expect(fixture.store.getItem(item.id)?.attempts).toBe(1)
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("attempt budget does not truncate a successor phase; exhaustion happens only at the next graph entry into the startsAttempt phase", async () => {
+		const fixture = await createFixture("attempt-gate-successor")
+		try {
+			const chain = createChain(fixture.store, "attempt-gate-successor-chain", {
+				metadata: { maxItemAttempts: 2 },
+			})
+			// The Nth iteration just spent the last attempt and clean-exited into review.
+			// Review must still run; only the next re-entry into iteration exhausts.
+			const item = createItem(fixture.store, chain, { issueNumber: 700_103, repoCwd: "/repo/attempt-gate", writeStatus: "changes_requested" })
+			fixture.store.recordRun({
+				runId: "run-iter-700103",
+				chainId: chain.id,
+				itemId: item.id,
+				phase: "iteration",
+				status: runtimeStatus("running"),
+				startedAt: 1_800_000_900,
+				extra: storedItemExtra({ startStatus: "in_progress" }),
+			})
+			fixture.store.completeRun("run-iter-700103", {
+				endedAt: 1_800_000_920,
+				exitCode: 0,
+				status: runtimeStatus("in_progress"),
+			})
+			fixture.store.updateItem(item.id, {
+				status: runtimeStatus("in_progress"),
+				phase: "iteration",
+				lastRunId: "run-iter-700103",
+				attempts: 2,
+				updatedAt: 1_800_000_920,
+			})
+
+			// Tick 1: the completed iteration run advances to review despite attempts == max.
+			const reviewTick = await schedulerTick(fixture.options())
+			expect(reviewTick.spawnedRuns).toHaveLength(1)
+			expect(fixture.store.getItem(item.id)?.phase).toBe("review")
+			expect(fixture.store.getItem(item.id)?.status).not.toBe("exhausted")
+			await reviewTick.spawnedRuns[0]!.closed
+
+			// The fake review runner wrote changes_requested → the next graph entry would be
+			// iteration (startsAttempt) with the budget spent: now the engine exhausts.
+			expect(fixture.store.getItem(item.id)?.status).toBe("changes_requested")
+			const exhaustTick = await schedulerTick(fixture.options())
+			expect(exhaustTick.spawnedRuns).toHaveLength(0)
+			expect(fixture.store.getItem(item.id)?.status).toBe("exhausted")
+			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({
+				type: "queue.terminal",
+				rowId: item.id,
+				terminalStatus: "exhausted",
+			}))
+		} finally {
+			fixture.store.close()
+		}
+	})
+})
+
 async function writeFakeClaudeSessionRunner(path: string, sessionId: string): Promise<void> {
 	await mkdir(resolve(path, ".."), { recursive: true })
 	await writeFile(
