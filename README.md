@@ -36,21 +36,21 @@ N-phase 字符串调度引擎。给定一个 preset（phase 列表、状态词�
 | 任务分解为什么导致失败？ | Agent Failure Taxonomy (2025) | planning phase defects 是 agent 任务失败的首要类别（约 50% 的失败源于此） |
 | 怎么防止无限低质量推进？ | VMAO (2025) | completeness threshold + diminishing returns 检测 |
 
-这些是**preset 设计原则**，不是引擎行为。引擎不知道"信号"是什么——它只调度 phase 顺序、传变量、捕获 trace。是 preset（默认 `gh-issue-pr-iteration`）按 iteration / review 两段调度者 workflow 把信号生成/产生/消费做成了 phase 流水线（issue 编写发生在 preset 之外——operator 或上游工具通过 `coder-loop item add` 把 GitHub issue 灌入 queue）。
+这些是**preset 设计原则**，不是引擎行为。引擎不知道"信号"是什么——它只调度 phase 顺序、传变量、捕获 trace。是 preset（默认 `gh-issue-pr-iteration`）按 contract-enrichment → iteration → verification → publish → review → closure 的 phase 流水线把信号生成/验证/裁决/终局分账（issue 编写发生在 preset 之外——operator 或上游工具通过 `coder-loop item add` 把 GitHub issue 灌入 queue）。
 
-不同 preset 可以选择不同的切分：1 phase（如 `single-phase-example`，仅 run）、2 phase（如 `real-e2e-minimal`，iteration+review）、N phase（如 `gh-issue-pr-iteration` 的 iteration+review+blocked-responder+umbrella-finalizer）都行。引擎对 N 没有上界。
+不同 preset 可以选择不同的切分：1 phase（如 `single-phase-example`，仅 run）、2 phase（如 `real-e2e-minimal`，iteration+review）、N phase（如 `gh-issue-pr-iteration` 的六个普通 phase 加 blocked-responder / umbrella-finalizer 两个 trigger）都行。引擎对 N 没有上界。
 
 ### 四个设计决策（gh-issue-pr-iteration preset）
 
-下面四条是 `gh-issue-pr-iteration` preset 的设计前提，不是引擎契约。换 preset 时这些可以改。issue body 契约（`presets/gh-issue-pr-iteration/contract.md`）由 iteration/review 调度者阅读并强制；issue 由 operator 或上游工具按契约写入。
+下面四条是 `gh-issue-pr-iteration` preset 的设计前提，不是引擎契约。换 preset 时这些可以改。issue body 契约（`presets/gh-issue-pr-iteration/contract.md`）由各执行 phase 阅读并强制；issue 由 operator 或上游工具按契约写入。
 
 **1. Checkpoint 取代 checkbox**
 
-传统 issue 写 `- [ ] docker build 成功`。这是自然语言，不是可执行验证。iteration agent 可以跳过、重新解释、或声称完成。`gh-issue-pr-iteration` 的 contract 要求把每条验收标准编译为 `{dimension, command, env, expect}` 四元组，review 的 replay 步逐行真跑，agent 无法跳过。
+传统 issue 写 `- [ ] docker build 成功`。这是自然语言，不是可执行验证。iteration agent 可以跳过、重新解释、或声称完成。`gh-issue-pr-iteration` 的 contract 要求把每条验收标准编译为 `{dimension, command, env, expect}` 四元组，verification phase 在 fresh session 逐行真跑（review 的 verification-audit 复核覆盖与 identity），agent 无法跳过。
 
 **2. 维度覆盖强制**
 
-`gh-issue-pr-iteration` 的 contract 要求每个 issue 的 checkpoint 覆盖 function / environment / integration / assumption；review 检查每个维度是否有至少一个 PASS。
+`gh-issue-pr-iteration` 的 contract 要求每个 issue 的 checkpoint 覆盖 function / environment / integration / assumption；verification 执行、review 检查每个维度是否有至少一个 PASS。
 
 **3. Spike 前置于实现**
 

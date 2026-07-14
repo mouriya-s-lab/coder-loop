@@ -14,7 +14,7 @@ Chain-complete finalization is chain-level work. Item-scoped bindings such as `{
 
 Read the umbrella issue, sub-issues, closing PRs, local handoffs, and evidence for the chain. Post an umbrella-level assessment comment, then decide whether chain completion is allowed.
 
-This finalizer does not replace per-issue PR review gates. A child issue is complete only when its issue history shows a valid no-code closure or its implementation PR was already accepted and merged by ordinary review.
+This finalizer does not replace per-issue PR review gates. A child issue is complete only when its issue history shows a valid no-code closure or its implementation PR was already accepted by ordinary review and merged by closure.
 
 ## Required reads
 

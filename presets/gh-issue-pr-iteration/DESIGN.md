@@ -8,20 +8,23 @@
 
 - 不堆双受众隔离与措辞警察式条款：步骤合同是单文件（Task / Report / Acceptance 三段同页），判据对执行者可见是有意设计；quality 判据也是单文件（执行侧约束与判断侧规则同源同文）；不做 issue body 篡改检测、不做每字段必填 SHA/URL/timestamp 的重模板、不写 "immutable / verbatim 亲读逐块比对" 的 Intent/Result 警察语——这些对诚实 runner 的 token 税与维护税盖不住其收益。
 - task decomposition 属于 preset：引擎没有运行时任务拆分能力，iteration / review 以当前 executable-contract marker 的 Deliverable / Checks 动态建清单，issue body 只供 intent 对照。spawn / wait / notification / follow-up / cancel 属于 runner transport：`common/dispatch-contract.md` 只描述 runner-neutral 的 transport 分支，entry 不写任何 runner 专用工具名或回包格式。
-- 保留独立复核（review 的强制派发、e2e 直跑证据、runtime manifest）——诚实 agent 也会漏看，review 不亲自验证就是盲判。
+- 保留独立复核（verification phase 的 fresh-session 独立执行、review 的强制派发、e2e 直跑证据、runtime manifest）——诚实 agent 也会漏看，产出者的验证不作数，review 不独立复核就是盲判。
 - 过程纪律以 superpowers skills 为设计参考蒸馏进 step 文件：TDD 的 test-first 铁律、"根因先于修复、三次失败停手"、claim gate（先跑当轮命令读全量输出再落成功措辞）、"review 反馈是待核实的主张"——取纪律内核，按无人值守 loop 改编后内联（见前提八）。preset 自包含，不做运行时 skill 调用。
 
-## 前提二：五 phase 的分工
+## 前提二：八 phase 的分工——产出、验证、发布、裁决、终局互为信任边界
 
-preset 声明五个 phase：`contract-enrichment` / `iteration` / `review` 是普通执行流，`blocked-responder` / `umbrella-finalizer` 是 trigger phase。enrichment 先把 intent 调查为 durable executable contract；iteration/review 只消费 current marker packet。
+preset 声明八个 phase：`contract-enrichment` → `iteration` → `verification` → `publish` → `review` → `closure` 是普通执行流，`blocked-responder` / `umbrella-finalizer` 是 trigger phase。enrichment 先把 intent 调查为 durable executable contract；后继 phase 只消费 current marker packet，phase 之间以 GitHub 上的 durable packet（`common/packets.md`：CandidateRef / VerificationPacket / ReviewVerdict）交接，谁都不信谁的自述。
 
 - **contract-enrichment**：只运行一次，调查源码、target rules 与 runtime，在 GitHub comment 发布 typed executable contract；不修改 issue body。
-- **iteration 调度者**：读 issue intent 与唯一 current marker，按 marker Deliverable 从四种路径中选一条（implementation-PR / blocker-removal / source-writing-spike / spike-comment），派 subagent 逐步完成，产 PR 或 comment。iter 不写 item status；scheduler 由声明的 next-node edge 推进到 review。
-- **review 调度者**：读 iter 交接的 handoff / trace / PR，派两个 subagent（diff-audit + replay）并行执行独立复核，然后亲自做诚实/协议判断，写 verdict、执行终局动作（accept / retry / expand / skip / blocked / stop）。
+- **iteration 调度者**：读 issue intent 与唯一 current marker，按 marker Deliverable 从四种路径中选一条（implementation-PR / blocker-removal / source-writing-spike / spike-comment），派 subagent 逐步完成，产 **draft** PR 或 comment + 绑定 exact pushed head SHA 的 CandidateRef。唯一声明 `startsAttempt` 的 phase：一次 attempt 覆盖整条后继链。
+- **verification 执行者**（单 session）：在 fresh session materialize CandidateRef 指向的 revision，独立执行全部 contract checks、target-required suites 与一次真实 E2E——不修改产品源码——发布 VerificationPacket。产出者的验证不作数，这里才是执行真值。
+- **publish 执行者**（单 session）：revision join 后按 VerificationPacket 组装 ready deliverable（PR title / body / Closes / 四层 evidence），把 draft 翻 ready，同步 branch/pr 镜像字段。只发布已验证的 SHA。
+- **review 调度者**：读 packet 链与 PR，派两个 subagent（diff-audit + verification-audit）并行独立复核，亲自做诚实/协议判断，落 verdict：accepted / moot 写 durable ReviewVerdict 后干净收尾进 closure；retry / reenrich / blocked 写 status；stop 走 exit-action。不 merge、不 close、不写 done/moot。
+- **closure 执行者**（单 session）：重读 live state 做 drift 检查（sameness 路由回产出该 artifact 的 phase），按序执行 merge / unblock / close effect，确认 live terminal state 后最后写 `done` / `moot`。终局状态只由它写。
 - **blocked-responder**：跨仓 unblock 副作用的最小化 responder。
 - **umbrella-finalizer**：chain-complete 时的 umbrella 收官。
 
-trigger 角色任务简单，单一 entry prompt，agent 一次跑完。iter/review 是调度者形态。
+trigger 角色任务简单，单一 entry prompt，agent 一次跑完。iter/review 是调度者形态；verification/publish/closure 任务线性，是单 session 执行者形态。
 
 ## 前提三：调度者的本职是维护任务清单
 
@@ -36,12 +39,12 @@ trigger 角色任务简单，单一 entry prompt，agent 一次跑完。iter/rev
 
 ## 前提四：review 的信任来自独立复核，不来自阅读
 
-Review 不读 iteration 说了什么来决定信任什么——派发独立 subagent 独立复核。两份报告（diff-audit + replay）各覆盖一个真值面，缺任一份 verdict（含 retry）无效：
+完整的独立执行（contract checks 逐项、canonical suite、真实 E2E）由 verification phase 在 fresh session 承担；review 不重复它，但也不读 iteration 或 verification 说了什么来决定信任什么——派发独立 subagent 复核。两份报告（diff-audit + verification-audit）各覆盖一个真值面，缺任一份 verdict（含 retry）无效：
 
 - **diff-audit**（纯读）= scope / 卫生 / 代码真值 / 测试完整性。锚定 issue intent 与 marker 明确化的设计、Pattern scope 和 Test delta；每条发现必须带可追溯锚点，不自行扩大范围。
-- **replay**（占 AGENT_CWD + 驱动 iter 留下的 typed runtime handoff）= marker Checks / canonical runtime / suite-count 真值。`shell` 与 `browser` 按各自的 ADT 形态复驱；E2E 使用 marker 命名的 target-mandated real driver，不按“是否脚本文件”判形态。
+- **verification-audit**（纯读 + 有界抽查）= packet 链 / identity / 覆盖真值。解析 CandidateRef → VerificationPacket，三方 SHA identity binding，check 覆盖表核对 marker Checks 是否逐项执行且绑定同一 SHA，runtime 记录与 conclusion 一致性，有界 spot 复跑抽查个别 check——不复跑 canonical suite、完整 check 表或 E2E。
 
-另一个对称原则：**review 绝不替 iter 修**。code / evidence / PR body 都不动，只发 retry 反馈。
+另一个对称原则：**review 绝不替被审工作修**。code / evidence / PR body 都不动，只发 retry 反馈。
 
 ## 前提五：交付物必须以真实形态跑过，环境是交付物的一部分
 
@@ -49,7 +52,7 @@ unit/integration 测试是辅助层。正规 E2E 产物必须驱动真实消费�
 
 auth 和 binary 永远是执行者自己解决的：交付物要么是能自己起环境的单体程序（起环境时自铸 auth），要么是 IaC 基建里服务的插件（机器上必有可解析的 auth）。"no auth" / "no binary" 就是未完成的 setup，不是可报告的 blocker。
 
-环境交接闭环：iter 跑完 e2e 后声明 `durable` 或 `recreatable`。前者交稳定 owner/liveness，后者交 clean source SHA 与 setup/start/readiness/behavior/stop；review 按 kind 穷尽复跑。manifest 缺项是 packet 失败，全部最终 teardown 归 review 调度者。
+环境交接闭环：iter 跑完 e2e 后声明 `durable` 或 `recreatable`。前者交稳定 owner/liveness，后者交 clean source SHA 与 setup/start/readiness/behavior/stop；verification 执行者按 kind 穷尽复驱，并在接手环境时负责其 teardown（packet 的 `runtime.cleanup` 记录结果）。manifest 缺项是 packet 失败；review 只收自己派发启动的东西，不复驱 e2e runtime。
 
 e2e 单独成步而不并入 verify：捆在重步骤里的麻烦环节会被整体跳过——单独一行清单 + 独立验收，跳过就关不掉清单。verify 与 e2e 并发跑（各自 worktree，避免 checkout 争用）。
 

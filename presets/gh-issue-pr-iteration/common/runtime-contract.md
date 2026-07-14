@@ -10,7 +10,7 @@ The orchestrator may decide only facts that are fully programmable:
 
 - which state/config files exist and are readable;
 - whether `state.current` exists;
-- which declared phase owns `state.current`, including `contract-enrichment`, `iteration`, or `review`;
+- which declared phase owns `state.current` (any of the preset's declared phases, from `contract-enrichment` through `closure`);
 - whether a queue item status is actionable (membership in the preset's `[statuses].continuable` set);
 - which issue/run/prompt path to bind into an agent invocation;
 - whether an agent process exited with code `0`;
@@ -27,14 +27,15 @@ The agent owns contextual judgments that require reading natural language, code,
 - whether evidence proves the changed behavior;
 - whether a PR is reviewable and mergeable;
 - whether a parent issue has complete children or remaining scope;
-- whether to retry, accept, skip, block, expand a parent, or stop.
-- whether a GitHub executable-contract marker is current and well formed; malformed or stale contracts select the declared re-enrichment exit rather than an implementation retry.
+- whether to retry, accept, moot, block, expand a parent, or stop;
+- whether a GitHub executable-contract marker is current and well formed; malformed or stale contracts select the declared re-enrichment exit rather than an implementation retry;
+- whether live GitHub state still matches the packet chain at the moment of an irreversible effect (closure's drift routing).
 
 ## Reading order
 
 - Read the role entry prompt first; it contains the rendered runtime inputs and the fragment index with absolute paths.
 - Read the common fragments the entry prompt names before role-specific step files.
-- Enrichment reads `enrichment/*.md`; implementation and review step files live under `iter/steps/` and `review/steps/`. The role entry prompt is the guide to when each is opened.
+- Enrichment reads `enrichment/*.md`; implementation and review step files live under `iter/steps/` and `review/steps/`; verification, publish, and closure are single-session executors guided by their entry prompts plus `common/packets.md`. The role entry prompt is the guide to when each is opened.
 
 ## Terminal summaries
 

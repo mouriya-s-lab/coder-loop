@@ -19,13 +19,29 @@ import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMeta
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
+// Cross-runner tests exercise per-phase runner/session isolation on the historical
+// two-node iteration → review fixture; the bundled preset's six-phase frontier is
+// collapsed the same way scheduler.test.ts does (dedicated frontier tests own the
+// full graph).
 const LOADED_PRESET = loadPreset(PRESET_DIR).then((preset) => ({
 	presetDir: PRESET_DIR,
 	preset: {
 		...preset,
 		phases: preset.phases
-			.filter((phase) => phase.name !== "contract-enrichment")
-			.map((phase) => phase.name === "iteration" ? { ...phase, entry: true } : phase),
+			.filter((phase) => phase.name === "iteration" || phase.name === "review" || phase.trigger !== null)
+			.map((phase) => {
+				if (phase.name === "iteration") {
+					return {
+						...phase,
+						entry: true,
+						next: phase.next.map((edge) => edge.kind === "completed" ? { ...edge, phase: "review" } : edge),
+					}
+				}
+				if (phase.name === "review") {
+					return { ...phase, next: phase.next.filter((edge) => edge.kind !== "completed") }
+				}
+				return phase
+			}),
 	},
 }))
 const FAKE_RUNNER = resolve(import.meta.dir, "scheduler.cross-runner.integration.fake.ts")

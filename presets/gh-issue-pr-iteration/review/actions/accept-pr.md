@@ -1,6 +1,6 @@
 # Action: accept PR-backed work
 
-Use only when both dispatched reports (diff-audit, replay), all judgments, and the closure judgment passed.
+Use only when both dispatched reports (diff-audit, verification-audit), all judgments, and the completeness judgment passed. This action publishes the durable ReviewVerdict and ends in a clean exit — you do not merge or close anything; closure re-reads live state and performs the irreversible effects after you.
 
 ## Procedure
 
@@ -13,13 +13,13 @@ Use only when both dispatched reports (diff-audit, replay), all judgments, and t
 ### diff-audit — pass
 refs <base-sha>..<head-sha>; files changed <n>: in-scope <n> / support <n> / unmapped none;
 hygiene: none; test changes in diff: <enumeration or none>; code findings: none
-### replay — pass
-head <sha>; canonical suite: <count>; rows <total>: matched <n> / browser <n: row #s>;
-e2e re-drive: <n> claims re-driven, all matched; form: direct;
-blocked-path e2e: <command + exit / not applicable>
+### verification-audit — pass
+identity binding: CandidateRef <sha> == packet.candidate == live head; coverage: <n>/<n> marker
+rows in packet, all consistent; artifacts: resolved and matching; live checks: <each name=conclusion>;
+runtime record: <kind>, conclusion verified
 ### Judgments
 - trace honesty: <one named pair: "<claim>" ↔ <observation>>
-- PR protocol: <body first line quoted; this run's PR comment URL>
+- PR protocol: <body first line quoted; ready (not draft); this run's PR comment URL>
 - title-intent: <"<issue title>" vs "<PR title>" after prefix strip>
 - caveat honesty: Intent/Result verdict; trigger phrases: none
 - evidence form: required packet sections all present; manifest re-runnable: yes
@@ -34,47 +34,22 @@ none
 
 An acceptance whose 缺失汇总 is not `none` is not an acceptance — go back to the retry action.
 
-2. Merge:
+2. In the same comment, publish the machine-readable verdict per `{{PRESET_ROOT}}/common/packets.md` — a fenced json block labeled `coder-loop:review-verdict`:
 
-```bash
-gh pr merge <PR_NUMBER> -R <REPO> --squash --delete-branch
+```json
+{
+  "kind": "accepted-pr",
+  "candidate": { "kind": "implementation-pr", "pr": 123, "branch": "…", "headSha": "<the audited head sha>" },
+  "verificationPacketUrl": "<the audited packet comment URL>"
+}
 ```
 
-3. If merge succeeds and the issue is an unblock-deliverable issue (its body carries `Unblocks:` and `## 阻塞条件` per `contract.md` §1.2), perform the unblock side effect before closing:
-   - Re-fetch the issue body; parse the `Unblocks: owner/repo#N` back-link. Multiple `Unblocks:` lines → do not guess; retry or stop with the ambiguity recorded.
-   - No back-link at all → log `skip-no-cross-repo-back-link` in the handoff and proceed to close (compatibility path).
-   - Resolve the source repository's target checkout/runtime from local state, handoff, supervisor state, or paths in the issue history. Do not ask for credentials or paths in chat.
-   - Re-queue and restart the source target:
+Populate `candidate` verbatim from the CandidateRef the verification-audit bound, and `verificationPacketUrl` from the packet comment it audited. Closure consumes exactly this block; a verdict naming an unaudited SHA sends closure after the wrong object.
 
-```bash
-coder-loop queue unblock <SOURCE_TARGET_CWD> --issue <SOURCE_ISSUE> --start-daemon
-coder-loop status <SOURCE_TARGET_CWD> --json   # verify: item no longer blocked, daemon running
-```
-
-   - If any of back-link/source-target/re-queue/daemon-start/verification cannot complete: do not close the issue, do not write local `done`; record the exact failed command and take the stop action (infrastructure). A merged unblock PR without the downstream side effect is not complete.
-
-4. Comment on and close the issue:
-
-```bash
-gh issue comment <ISSUE> -R <REPO> --body "$(cat <<'EOF'
-## Coder-loop closure review (<RUN_ID>)
-
-Review verified this issue is fully handled.
-
-- Acceptance criteria: independently replayed, all rows matched.
-- Child/subtask issues: all closed with merged PRs or justified no-code closure.
-- Final transition made by coder-loop review.
-
-Reason:
-<evidence-backed reason>
-EOF
-)"
-
-gh issue close <ISSUE> -R <REPO> --comment "Closed by coder-loop review <RUN_ID> after verifying completion of scope, children, and PRs."
-```
+3. Verify the verdict comment resolves live (fetch the comment URL back). Record the URL in the handoff — closure and the unblock relation (when the issue body carries `Unblocks:`) both key off live GitHub state, so nothing else needs pre-staging here.
 
 ## Failure routing
 
-Every command above is a required side effect. Side effect blocked by a noninteractive approval boundary or failing before durable feedback/closure/unblock published → record exact command + output in handoff, do **not** write local `done`, take the stop action so the daemon cannot replay the same accepted PR. Acceptance posted but merge/close fails for an ordinary reason (conflict, failing checks, stale mergeability) → do not write `done`; take the retry action with exact PR feedback.
+The verdict comment is the required side effect. Publication blocked by a noninteractive approval boundary or failing before the comment is durable → record exact command + output in handoff and take the stop action; do not exit clean without a durable verdict — closure would find nothing to execute and route the item back as review-drift.
 
-On full success, write state per `{{PRESET_ROOT}}/review/actions/state-write.md` with transition `accepted_pr`, then continue the entry's wrap-up.
+On full success: no status write. Continue the entry's wrap-up and exit 0 — the scheduler advances to closure, which merges the PR, performs any unblock side effect, closes the issue, and writes the terminal status.

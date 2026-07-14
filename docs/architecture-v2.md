@@ -18,7 +18,7 @@ flowchart TD
   sched --> sA["slot (chainA, repo1)"]
   sched --> sB["slot (chainA, repo2)"]
   sched --> sC["slot (chainB, repo1)"]
-  sA --> agent["phase agent (detached)<br/>iteration / review"]
+  sA --> agent["phase agent (detached)<br/>preset 声明的各 phase"]
   agent -- "item update --status" --> daemon
 ```
 

@@ -68,7 +68,7 @@ Runner 与 model 默认值写在 `preset.toml` 的 `[[phases]].runner` 与 `[[ph
 echo '.coder-loop/' >> .gitignore
 ```
 
-项目命令 / PR 约定 / 项目专属注意事项要落在 target 自有的 `CLAUDE.md` / `AGENTS.md`（committed）——`gh-issue-pr-iteration` preset 的 iteration / review 调度者 workflow 显式读取这两份。
+项目命令 / PR 约定 / 项目专属注意事项要落在 target 自有的 `CLAUDE.md` / `AGENTS.md`（committed）——`gh-issue-pr-iteration` preset 的各执行 phase workflow 显式读取这两份。
 
 要从某 target 撤出 coder-loop：直接 `coder-loop chain delete <name>` 删除 chain。
 
@@ -202,7 +202,7 @@ run 级事件在 `<logDir>/<runId>/events.jsonl`，也由 `status.events.path` �
 
 - phase `status.json` 的 `exitCode != 0` → spawn 失败（不是 agent 内部逻辑失败），看 `stderr.txt`。
 - iteration `stdout.jsonl` 尾部的调度者派发账（dispatch ledger）反映本次走的步骤 checklist（`implement` / `verify` / `e2e` / `submit` 等）与各步 verdict。
-- review 的终局动作通过 `coder-loop item exits` + `item update --status` / `item exit-action` 落地：`status.json` 里能看到 phase 结束时 agent 选择的 exit；重要事件（PR merge、issue close）在事件流的 `queue.terminal`。
+- 各 phase 的状态转移通过 `coder-loop item exits` + `item update --status` / `item exit-action` 落地：`status.json` 里能看到 phase 结束时 agent 选择的 exit；`gh-issue-pr-iteration` 的终局动作（PR merge、issue close、写 `done` / `moot`）归 closure phase，事件流里看 `queue.terminal`。
 
 当前 / resume 状态先看 `coder-loop status` 的 `.current`。`current.phase` 指向当前/上次崩在哪个 phase；重启 `coder-loop daemon start` 或 `coder-loop daemon restart` 时引擎会按 `current.phase` 续跑，不重头来。详见 [operations#resume](./operations.md#5-resume-行为)。
 
@@ -211,7 +211,7 @@ run 级事件在 `<logDir>/<runId>/events.jsonl`，也由 `status.events.path` �
 ## 6. 常见坑
 
 - **`.coder-loop/` 入了 git** → runtime handoff / logs 进了 PR diff；把整个目录加 `.gitignore` 后 `git rm --cached -r .coder-loop/`。
-- **target 的 `CLAUDE.md` / `AGENTS.md` 缺失或没入仓** → iteration / review 调度者读不到项目工作方式（项目命令 / PR 约定），行为退化为推测项目命令，往往写错命令 / 漏证据 layer。
+- **target 的 `CLAUDE.md` / `AGENTS.md` 缺失或没入仓** → 各执行 phase 读不到项目工作方式（项目命令 / PR 约定），行为退化为推测项目命令，往往写错命令 / 漏证据 layer。
 - **`gh` 未 auth** → iteration 的 Step 0 / Step 2 亲读 issue body 就会失败，trace 里能看到 `gh auth status` 失败回显。
 - **chain identity 与目标 repo 不一致** → `status` / `daemon start` 会在解析 chain 时报告 repository/baseBranch 不匹配；指定正确 `--chain`，或修正 centralized chain identity。
 - **找不到 target 的状态** → 权威路径是 central daemon + chain runtime；先看 `coder-loop status <target> --json` 返回的 `target.logDir`、`events.path`、`processes.live`，不要按老式的 target-local flat log layout 找。

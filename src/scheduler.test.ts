@@ -2112,7 +2112,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 					writeStatus: phase === "review" ? "changes_requested" : null,
 				}),
 			})
-			for (let index = 0; index < 4; index += 1) {
+			for (let index = 0; index < 6; index += 1) {
 				const tick = await schedulerTick(options)
 				expect(tick.spawnedRuns).toHaveLength(1)
 				await tick.spawnedRuns[0]!.closed
@@ -2120,7 +2120,9 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 			const phases = fixture.schedulerEvents
 				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> => event.type === "phase.start" && event.itemId === item.id)
 				.map((event) => event.phase)
-			expect(phases).toEqual(["contract-enrichment", "iteration", "review", "iteration"])
+			// Six-phase frontier: iteration's candidate flows through verification and
+			// publish before review; review's changes_requested reopens a fresh iteration.
+			expect(phases).toEqual(["contract-enrichment", "iteration", "verification", "publish", "review", "iteration"])
 			expect(phases.filter((phase) => phase === "contract-enrichment")).toHaveLength(1)
 			expect(fixture.store.getItem(item.id)?.attempts).toBe(2)
 		} finally {
@@ -4544,15 +4546,30 @@ async function createFixture(name: string): Promise<Fixture> {
 	const bundledLoadedPreset = await loadedPresetFromDir(defaultPresetDir)
 	// Most scheduler unit tests exercise the historical two-node work/review fixture. Keep that
 	// fixture explicit instead of making every unrelated lifecycle assertion run the bundled
-	// preset's GitHub contract-enrichment agent. Dedicated frontier tests load the full bundled
-	// preset and assert the one-time entry node separately.
+	// preset's six-phase GitHub frontier (contract-enrichment / verification / publish / closure
+	// agents). Dedicated frontier tests load the full bundled preset and assert the six-phase
+	// graph separately. The fixture collapses the frontier to iteration(entry) → review by
+	// dropping the intermediate phases and rewiring iteration's completed edge; review keeps
+	// no completed successor so a clean no-status review exit re-picks review (issue #289).
 	const defaultLoadedPreset: SchedulerLoadedPreset = {
 		presetDir: bundledLoadedPreset.presetDir,
 		preset: {
 			...bundledLoadedPreset.preset,
 			phases: bundledLoadedPreset.preset.phases
-				.filter((phase) => phase.name !== "contract-enrichment")
-				.map((phase) => phase.name === "iteration" ? { ...phase, entry: true } : phase),
+				.filter((phase) => phase.name === "iteration" || phase.name === "review" || phase.trigger !== null)
+				.map((phase) => {
+					if (phase.name === "iteration") {
+						return {
+							...phase,
+							entry: true,
+							next: phase.next.map((edge) => edge.kind === "completed" ? { ...edge, phase: "review" } : edge),
+						}
+					}
+					if (phase.name === "review") {
+						return { ...phase, next: phase.next.filter((edge) => edge.kind !== "completed") }
+					}
+					return phase
+				}),
 		},
 	}
 	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {

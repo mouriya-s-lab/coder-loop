@@ -10,7 +10,7 @@ Publish precise feedback for work that remains actionable.
 
 ## Feedback body — a full review report, fixed shape
 
-Every check that ran gets a section that references observed values (SHAs, counts, verbatim quotes from the retry comment / PR-body caveat sections, URLs, timestamps). The `## 缺失汇总` block is the single authoritative gap list — iteration fixes everything in it in one retry. Every check that did not run appears in `## Skipped checks` with its reason.
+Every check that ran gets a section that references observed values (SHAs, counts, verbatim quotes from the retry comment / PR-body caveat sections, URLs, timestamps). The `## 缺失汇总` block is the single authoritative gap list — the next iteration fixes everything in it in one retry. Every check that did not run appears in `## Skipped checks` with its reason.
 
 ```markdown
 ## Review verdict: changes requested (<RUN_ID>)
@@ -20,13 +20,13 @@ Every check that ran gets a section that references observed values (SHAs, count
 refs <base-sha>..<head-sha>; files changed <n>: in-scope <n> / support <n> / unmapped <n: list or none>;
 hygiene: <none / findings with paths>; test changes in diff: <enumeration or none>;
 code findings: <none / one line per finding: category @ file:line — anchor>
-### replay — <pass/fail>
-head <sha>; canonical suite: <count>; rows <total>: matched <n> / failed <n: row #s> /
-browser <n: row #s>; e2e re-drive: <n> matched / <n> mismatched (which);
-form: <direct / script: name it>; blocked-path e2e: <command + exit / not applicable>
+### verification-audit — <pass/fail>
+identity binding: <bound / MISMATCH sha-pair>; coverage: <n>/<n> marker rows, gaps: <IDs or none>;
+artifacts: <resolved / contradictions with anchors>; live checks: <each name=conclusion>;
+runtime record: <kind, complete/missing fields>; conclusion consistency: <consistent / contradiction>
 ### Judgments
 - trace honesty: <one named pair or verdict>
-- PR protocol: <body first line quoted; PR comment URL; verdict>
+- PR protocol: <body first line quoted; ready/draft; PR comment URL; verdict>
 - title-intent: <"<issue title>" vs "<PR title>"; verdict>
 - caveat honesty: <Intent/Result verdict; trigger phrases: none / "<exact quote>">
 - evidence form: <sections present / missing by name; manifest re-runnable: yes / no + missing entry>
@@ -34,8 +34,8 @@ form: <direct / script: name it>; blocked-path e2e: <command + exit / not applic
 
 ## 缺失汇总
 - <every missing/failing item across all checks, one line each, in one place —
-  every failed replay row (#, Check, Command, actual vs Expect), every code finding
-  with its anchor, every manifest gap — or `none`>
+  every identity mismatch (both SHAs), every uncovered/contradicted marker row (ID),
+  every code finding with its anchor, every packet gap — or `none`>
 
 ## Skipped checks
 - <check → reason (deliverable-route routing / no-PR route / infra) — or `none`>
@@ -52,6 +52,6 @@ never edit the issue body; contract corrections are superseding marker comments 
 
 ## After publishing
 
-Feedback durably posted → write state per `{{PRESET_ROOT}}/review/actions/state-write.md` with transition `retry`, then continue the entry's wrap-up.
+Feedback durably posted → write state per `{{PRESET_ROOT}}/review/actions/state-write.md` with transition `retry`, then continue the entry's wrap-up. The next fresh iteration consumes the 缺失汇总; verification and publish then re-run on its new candidate before you see the issue again.
 
 Feedback publication itself failed → do not update local state as if feedback were durable; take the stop action with the exact failure.

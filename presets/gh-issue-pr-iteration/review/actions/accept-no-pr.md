@@ -1,29 +1,26 @@
 # Action: accept without a PR
 
-Use only when closure judgment proves current scope and children are complete without a new implementation PR: already satisfied on base, complete no-code closure, or a complete source-writing-spike-deliverable spike (which becomes `done`, not `moot`).
+Use only when the completeness judgment proves current scope and children are complete without a new implementation PR: already satisfied on base, complete no-code closure, or a complete source-writing-spike-deliverable spike (which becomes the success terminal, not moot). This action publishes the durable ReviewVerdict and ends in a clean exit — closure posts the closing comment and closes the issue after you.
 
 ## Procedure
 
-1. Comment on the issue with the already-satisfied/spike-complete evidence and the child closure table when applicable.
-2. When the issue is an unblock-deliverable issue (its body carries `Unblocks:` and `## 阻塞条件` per `contract.md` §1.2), perform the unblock side effect first — same sub-procedure and failure rules as in `{{PRESET_ROOT}}/review/actions/accept-pr.md` step 3.
-3. Close with an evidence-backed reason:
+1. Comment on the issue with the already-satisfied/spike-complete evidence and the child closure table when applicable — the same fixed report shape as `{{PRESET_ROOT}}/review/actions/accept-pr.md`, with the no-PR route's skipped checks named.
+2. In the same comment, publish the machine-readable verdict per `{{PRESET_ROOT}}/common/packets.md` — a fenced json block labeled `coder-loop:review-verdict`:
 
-```bash
-gh issue comment <ISSUE> -R <REPO> --body "$(cat <<'EOF'
-## Coder-loop closure review (<RUN_ID>)
-
-Review verified this issue is fully handled without an implementation PR.
-
-Reason:
-<evidence-backed reason>
-EOF
-)"
-
-gh issue close <ISSUE> -R <REPO> --comment "Closed by coder-loop review <RUN_ID> after verifying completion."
+```json
+{
+  "kind": "accepted-no-pr",
+  "candidate": { "kind": "no-change", "baseSha": "…", "proofCommentUrl": "…" },
+  "verificationPacketUrl": "<the audited packet comment URL, when the route produced one>"
+}
 ```
+
+Populate `candidate` verbatim from the latest CandidateRef (`no-change` / `source-writing` / `comment-delivery` variant as the route produced). A no-PR route that never produced a CandidateRef (e.g. pre-split history) → cite the proof evidence URLs directly in the verdict's `candidate.proofCommentUrl`.
+
+3. Verify the verdict comment resolves live. Record the URL in the handoff.
 
 ## Failure routing
 
-Side effect blocked by an approval boundary / failed before durable publication → record exact command + output in handoff, do not write `done`, take the stop action. Comment published but close fails for an ordinary reason → do not write `done`; take the retry action with exact issue feedback. Issue still open = no `done`, ever.
+Publication blocked by an approval boundary / failed before the verdict is durable → record exact command + output in handoff and take the stop action; do not exit clean without a durable verdict.
 
-On full success, write state per `{{PRESET_ROOT}}/review/actions/state-write.md` with transition `accepted_no_pr`, then continue the entry's wrap-up.
+On full success: no status write. Continue the entry's wrap-up and exit 0 — the scheduler advances to closure, which performs any unblock side effect, closes the issue, and writes the terminal status.

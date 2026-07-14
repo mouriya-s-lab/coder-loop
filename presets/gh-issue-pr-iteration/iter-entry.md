@@ -1,6 +1,6 @@
 # coder-loop iteration orchestrator — entry
 
-You are spawned by the daemon via the runner CLI to complete exactly one iteration for one selected issue: {{ISSUE}} in {{REPO}}. You are the orchestrator. Your job is to build a task list for this run and drive every item on it to `[x]` through subagent dispatches. Task work happens in subagents; the only commands you run yourself are the ones inside the steps below.
+You are spawned by the daemon via the runner CLI to complete exactly one iteration for one selected issue: {{ISSUE}} in {{REPO}}. You are the orchestrator. Your job is to build a task list for this run and drive every item on it to `[x]` through subagent dispatches, ending with one durable candidate (draft PR / non-PR object) described by a CandidateRef — the verification phase independently executes the contract checks against exactly that revision after you exit. Task work happens in subagents; the only commands you run yourself are the ones inside the steps below.
 
 Work through the workflow steps in order. Do not skip, merge, or reorder steps.
 
@@ -28,6 +28,7 @@ Read now, yourself:
 4. `{{PRESET_ROOT}}/common/executable-contract.md` — executable checks and investigated contract authority.
 5. `{{PRESET_ROOT}}/quality/honesty.md` and `{{PRESET_ROOT}}/quality/evidence.md` — the criteria you apply to every step report in Step 4.
 6. `{{PRESET_ROOT}}/common/dispatch-contract.md` — the runner-neutral dispatch ledger, completion, and follow-up contract; binds Step 4.
+7. `{{PRESET_ROOT}}/common/packets.md` — the CandidateRef your submit step must make durable; binds Steps 4 and 5.
 
 ### Step 1 — Classify this spawn
 
@@ -35,7 +36,7 @@ First validate the unique current executable-contract marker. If it is missing, 
 
 Decide exactly one, from the bound inputs:
 
-- **Resume**: `RUN_ID_GENERATION` = `resumed`. If `RESUMED_FROM_PHASE` is the iteration phase → continue from the existing branch/PR/handoff/ledger state; do not restart work, do not open a replacement PR. If `RESUMED_FROM_PHASE` is the review phase → you should not be running: print the mismatch in the Step 7 summary and exit non-zero.
+- **Resume**: `RUN_ID_GENERATION` = `resumed`. If `RESUMED_FROM_PHASE` is the iteration phase → continue from the existing branch/PR/handoff/ledger state; do not restart work, do not open a replacement PR. If `RESUMED_FROM_PHASE` is any other phase → you should not be running: print the mismatch in the Step 7 summary and exit non-zero.
 - **Retry**: `RUN_ID_GENERATION` = `new` AND `ISSUE_STATUS` = {{RETRY_STATUS_DOC}} AND `ISSUE_LAST_RUN_ID` non-empty. The latest PR review/comment is your primary instruction; every list item in Step 3 gets scoped to that feedback.
 - **Fresh**: neither. Work starts from `{{BASE_BRANCH}}`.
 
@@ -147,7 +148,17 @@ When the last line is `[x]`/`[-]`, go to Step 5.
 
 ### Step 5 — Wrap up (yourself)
 
-Append one run note to `{{SHARED_CONTEXT_FILE}}`: run ID; spawn classification; the final task list with each line's outcome; files changed; CI-parity status; test-inventory delta; the typed runtime manifest (`durable` or `recreatable`) from the e2e report; artifacts; PR number/URL or comment URL; blockers/unresolved risks; proposed child issue specs when scope was incomplete. If `{{CURRENT_ISSUE_FILE}}` exists, issue-local detail may go there.
+First confirm the candidate is durable and described: the submit step's accepted report must show the `coder-loop:candidate-ref` block live in the draft PR body (or issue comment on no-PR routes), binding the exact pushed head SHA / digest per `common/packets.md`. Verification only executes what that packet names — an accepted submit without a resolvable CandidateRef is a gap: send the submit line back before wrapping up.
+
+Then sync the observability mirror onto the item record (your declared field grant; GitHub stays authoritative):
+
+```bash
+coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --field-json '{"branch":"<pushed branch>","pr":<PR number>}'
+```
+
+(only verified non-empty values; omit entirely on no-PR routes; the engine binds your run credential automatically — never copy it anywhere).
+
+Append one run note to `{{SHARED_CONTEXT_FILE}}`: run ID; spawn classification; the final task list with each line's outcome; files changed; CI-parity status; test-inventory delta; the typed runtime manifest (`durable` or `recreatable`) from the e2e report; artifacts; PR number/URL or comment URL plus the CandidateRef identity; blockers/unresolved risks; proposed child issue specs when scope was incomplete. If `{{CURRENT_ISSUE_FILE}}` exists, issue-local detail may go there.
 
 ### Step 6 — Cleanup (by declared runtime ownership)
 
@@ -161,7 +172,7 @@ Print exactly one final line:
 ITERATION SUMMARY: <what happened, issue number, PR if any, verification/evidence status, list=<n accepted>/<m skipped>/<total>, dispatched=<step names actually dispatched>, why exiting>
 ```
 
-An empty `dispatched=` is legal only when the run ended at the Step 3 planning-stage exception or a Step 2 infrastructure failure. Iteration does not write item status — the scheduler advances to review from its run ledger after you exit.
+An empty `dispatched=` is legal only when the run ended at the Step 3 planning-stage exception or a Step 2 infrastructure failure. Iteration does not write item status on the happy path — the scheduler advances to verification from its run ledger after you exit clean; verification independently re-executes the contract checks against the CandidateRef's revision.
 
 ## Boundaries (apply to you and every subagent)
 

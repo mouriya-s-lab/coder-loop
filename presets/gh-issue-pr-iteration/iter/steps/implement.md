@@ -1,6 +1,6 @@
 # Step: implement
 
-An implementation subagent for one coder-loop iteration. The deliverable is working code on the issue branch — not a commit, not a PR; later steps own those.
+An implementation subagent for one coder-loop iteration. The deliverable is working code **committed locally** on the issue branch — not pushed, not a PR; the submit step owns those. The local commit is what the verify and e2e steps execute against: e2e pins its detached worktree to the committed HEAD, so an uncommitted implementation is invisible to it.
 
 ## Task
 
@@ -31,7 +31,7 @@ From your dispatch message: `ISSUE`, `REPO`, `BASE_BRANCH`, `RUN_ID`, `AGENT_CWD
    Touching a test file: never remove, skip, rename-away, or loosen an existing test unless the marker packet Test delta explicitly authorizes that exact change. A test that must change because it pins the very behavior this issue changes: record old test name → new assertion for your report. Review independently diffs the test inventory against base — an undeclared delta is treated as hidden weakening.
 
    Every process you start and every file you create outside the deliverable: write it down as you go — the Problems section is the orchestrator's cleanup ledger input.
-6. **Stop and report.** Do not commit, push, open a PR, comment on GitHub, close issues, or write queue state — later steps own those. Confirm the uncommitted state on the branch matches what you are about to claim, then report per the Report section below.
+6. **Commit locally, then report.** Run `git status --short` and read it before staging. Stage only the feature/test files of this change — never `-A` or `.`; check `git diff --cached --name-only` for loop-data runtime artifacts, scheduling state, run logs, secrets, or unrelated dirty files before committing. Commit following the target project's commit conventions (default `fix(issue-<ISSUE>): <concise description>` with a `Refs: <REPO>#<ISSUE>` trailer when the target repo's `CLAUDE.md` / `AGENTS.md` says nothing else). Do not push, open a PR, comment on GitHub, close issues, or write queue state — later steps own those. Confirm the committed HEAD matches what you are about to claim (no intended change left unstaged), then report per the Report section below.
 
 ## Report
 
@@ -41,7 +41,7 @@ From your dispatch message: `ISSUE`, `REPO`, `BASE_BRANCH`, `RUN_ID`, `AGENT_CWD
 (sites touched vs left, with owners); path chosen over which alternatives>
 
 ## What I actually did
-Branch: <name> @ <head sha (uncommitted: say so)>
+Branch: <name> @ <committed head sha>
 Files changed: <bulleted list, every file, with one clause each on what changed>
 Intent appended: <handoff path + heading written>
 
@@ -66,7 +66,7 @@ Report structurally missing branch+head, files-changed list, intent pointer, Che
 - **Classification sanity** — the declared change classification matches what the issue demands; for substitutive/removal work the footprint list exists and each site has an owner. "Added the new thing" with the old thing unaccounted for is the classic trap — a gap.
 - **Test integrity** — a non-empty test-changes enumeration must be authorized by the marker's Test delta; removal/skip/loosening outside that authorization is a gap to send back now (cheaper than at review's diff-audit).
 - **Intent landed** — the handoff file contains an `Intent (run …)` block for this run. Missing intent on a substantive change is a gap.
-- **Boundary compliance** — no batching, no commits/PRs/GitHub writes.
+- **Boundary compliance** — no batching, no push/PR/GitHub writes; the change is committed locally (an intended change left uncommitted is a gap — verify/e2e cannot observe it), and the staged file list respects the runtime-artifact ban.
 - Apply `{{PRESET_ROOT}}/quality/honesty.md` — especially intent-action mismatch, cross-issue deferral, and test weakening triggers in the report itself.
 
 The gate is the contract and the report's coherence — review's diff-audit independently reads code against issue design, so do not duplicate a line-by-line code review here; but a report that itself reveals a design deviation is a gap to send back now. Send back precise gap lists; do not fix code yourself.

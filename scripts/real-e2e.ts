@@ -150,7 +150,9 @@ function ghJson<T>(args: readonly string[]): T {
 
 function preflight(options: HarnessOptions): void {
 	log("preflight: gh / runner CLI / fixture repo / fixture source checkout")
-	sh(["gh", "auth", "status"])
+	// --active：只检查活跃账号。无参形式在任一已登录账号 token 失效时整体 exit 1，
+	// 而 harness 的 gh 调用只走活跃账号，非活跃账号的 keyring 状态不该挡 e2e。
+	sh(["gh", "auth", "status", "--active"])
 	for (const binary of ["codex", "claude"]) {
 		sh(["which", binary])
 	}

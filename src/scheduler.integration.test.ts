@@ -452,6 +452,17 @@ console.log(input.phase + ":" + status)
 		expect(store.getItem(item.id)?.status).toBe("queued")
 		expect(store.getItem(item.id)?.attempts).toBe(1)
 
+		// The producing phases between iteration and review clean-exit and advance via the
+		// completed edge without touching status or the attempt counter.
+		for (const passthroughPhase of ["verification", "publish"] as const) {
+			const passthroughTick = await schedulerTick(options)
+			expect(passthroughTick.spawnedRuns).toHaveLength(1)
+			await passthroughTick.spawnedRuns[0]!.closed
+			expect(store.getItem(item.id)?.phase).toBe(passthroughPhase)
+			expect(store.getItem(item.id)?.status).toBe("queued")
+			expect(store.getItem(item.id)?.attempts).toBe(1)
+		}
+
 		const reviewTick = await schedulerTick(options)
 		expect(reviewTick.spawnedRuns).toHaveLength(1)
 		await reviewTick.spawnedRuns[0]!.closed
@@ -470,7 +481,139 @@ console.log(input.phase + ":" + status)
 			.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
 				event.type === "phase.start" && event.itemId === item.id,
 			)
-			.map((event) => event.phase)).toEqual(["iteration", "review", "iteration"])
+			.map((event) => event.phase)).toEqual(["iteration", "verification", "publish", "review", "iteration"])
+	} finally {
+		store.close()
+	}
+})
+
+// Six-phase split: closure's drift statuses are sameness routing, not retry feedback. Each
+// drift re-enters the phase that owns the mismatched artifact, and only the iteration
+// re-entry (candidate_drift) consumes an attempt — verification/publish/review re-entries
+// run under the attempt already opened by their producing iteration.
+test("closure drift statuses route to their producing phases and only candidate drift consumes an attempt", async () => {
+	const root = resolve(TEST_ROOT, "closure-drift-routing")
+	const loopDataRoot = resolve(root, "loop-data")
+	const fakeRunner = resolve(root, "closure-drift-runner.ts")
+	const closureScript = resolve(root, "closure-statuses.json")
+	await mkdir(loopDataRoot, { recursive: true })
+	// The closure runner pops the next status from the script file so a single item can walk
+	// every drift edge in one chain: candidate_drift → iteration, verification_drift →
+	// verification, publication_drift → publish, review_drift → review, then done.
+	await writeFile(closureScript, JSON.stringify(["candidate_drift", "verification_drift", "publication_drift", "review_drift", "done"]))
+	await writeFile(
+		fakeRunner,
+		`import { readFile, writeFile } from "node:fs/promises"
+import { openSqliteStateStore } from ${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))}
+
+const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+if (input.phase === "closure") {
+	const script = JSON.parse(await readFile(${JSON.stringify(closureScript)}, "utf-8"))
+	const status = script.shift()
+	await writeFile(${JSON.stringify(closureScript)}, JSON.stringify(script))
+	const loopDataRoot = process.env.CODER_LOOP_DATA_DIR
+	if (typeof status === "string" && typeof loopDataRoot === "string" && typeof input.itemId === "number") {
+		const store = openSqliteStateStore({ loopDataRoot })
+		store.updateItem(input.itemId, { status, updatedAt: Math.floor(Date.now() / 1000) })
+		store.close()
+	}
+}
+console.log(input.phase)
+`,
+	)
+
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = store.createChain({
+			name: "closure-drift-routing-chain",
+			preset: "gh-issue-pr-iteration",
+			repository: "mouriya-s-lab/coder-loop",
+			baseBranch: "main",
+			status: "active",
+			metadata: storedChainMetadata({}),
+		})
+		const item = store.createItem({
+			chainId: chain.id,
+			itemId: "652001",
+			repoCwd: REPO_ROOT,
+			status: runtimeStatus("queued"),
+			attempts: 0,
+			extra: storedItemExtra({}),
+		})
+		const state = createSchedulerState()
+		const schedulerEvents: SchedulerEvent[] = []
+		const worktreeManager: SchedulerWorktreeManager = async ({ chain: selectedChain, repoCwd }) => {
+			const worktreePath = schedulerSlotWorktreePath(selectedChain, repoCwd, { loopDataRoot })
+			await mkdir(worktreePath, { recursive: true })
+			return worktreePath
+		}
+		let runSequence = 0
+		const options: SchedulerOptions = {
+			store,
+			state,
+			presetForChain: () => LOADED_PRESET,
+			runner: {
+				kind: "claude",
+				source: "iteration-default",
+				binary: "bun",
+				extraArgs: [fakeRunner],
+				model: null,
+			},
+			worktreeManager,
+			loopDataRootOptions: { loopDataRoot },
+			runIdFactory: ({ phase }) => `run-closure-drift-${++runSequence}-${phase}`,
+			prompt: ({ item: selected, runId, phase }) => JSON.stringify({
+				itemId: selected.id,
+				issueNumber: Number(selected.itemId),
+				runId,
+				phase,
+			}),
+			onEvent: (event) => {
+				schedulerEvents.push(event)
+			},
+		}
+
+		const expectedRuns: readonly { phase: string; attemptsAfter: number }[] = [
+			// Attempt 1: full chain, closure detects candidate drift → back to iteration.
+			{ phase: "iteration", attemptsAfter: 1 },
+			{ phase: "verification", attemptsAfter: 1 },
+			{ phase: "publish", attemptsAfter: 1 },
+			{ phase: "review", attemptsAfter: 1 },
+			{ phase: "closure", attemptsAfter: 1 },
+			// Attempt 2 (the only drift that consumes one): verification/publication/review
+			// drifts re-enter mid-chain without touching the counter.
+			{ phase: "iteration", attemptsAfter: 2 },
+			{ phase: "verification", attemptsAfter: 2 },
+			{ phase: "publish", attemptsAfter: 2 },
+			{ phase: "review", attemptsAfter: 2 },
+			{ phase: "closure", attemptsAfter: 2 }, // → verification_drift
+			{ phase: "verification", attemptsAfter: 2 },
+			{ phase: "publish", attemptsAfter: 2 },
+			{ phase: "review", attemptsAfter: 2 },
+			{ phase: "closure", attemptsAfter: 2 }, // → publication_drift
+			{ phase: "publish", attemptsAfter: 2 },
+			{ phase: "review", attemptsAfter: 2 },
+			{ phase: "closure", attemptsAfter: 2 }, // → review_drift
+			{ phase: "review", attemptsAfter: 2 },
+			{ phase: "closure", attemptsAfter: 2 }, // → done
+		]
+		for (const [index, expected] of expectedRuns.entries()) {
+			const tick = await schedulerTick(options)
+			expect(tick.spawnedRuns, `run ${index} (${expected.phase})`).toHaveLength(1)
+			await tick.spawnedRuns[0]!.closed
+			const current = store.getItem(item.id)
+			expect(current?.phase, `run ${index}`).toBe(expected.phase)
+			expect(current?.attempts, `run ${index}`).toBe(expected.attemptsAfter)
+		}
+		expect(store.getItem(item.id)?.status).toBe("done")
+
+		expect(schedulerEvents
+			.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
+				event.type === "phase.start" && event.itemId === item.id,
+			)
+			.map((event) => event.phase)).toEqual(expectedRuns.map((run) => run.phase))
 	} finally {
 		store.close()
 	}

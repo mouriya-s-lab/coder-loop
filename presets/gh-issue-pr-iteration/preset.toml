@@ -1,13 +1,22 @@
 # coder-loop preset: gh-issue-pr-iteration
 #
 # This is the default preset bundled with coder-loop. It encodes the
-# GitHub issue/PR loop that has historically been hardcoded in src/loop.ts:
-# iteration + review, plus post-review trigger phases for side effects that
-# belong outside ordinary PR review.
+# GitHub issue/PR loop as six normal phases plus two post-review trigger
+# phases:
 #
-# Stage 1 PR 1 introduces this file alongside the existing hardcoded loop;
-# the engine begins consuming it in Stage 1 PR 2 (loadPreset). Variable
-# binding right-hand sides use the three-prefix DSL described in RFC #5:
+#   contract-enrichment → iteration → verification → publish → review → closure
+#
+# Each phase owns one trust boundary: enrichment publishes the executable
+# contract, iteration produces the candidate, verification independently
+# executes the contract checks, publish assembles the ready deliverable,
+# review adjudicates, closure re-reads live state and performs the
+# irreversible external effects. Phases hand off through durable GitHub
+# packets (ExecutableContract marker / CandidateRef / VerificationPacket /
+# ReviewVerdict — see common/packets.md), never through local worktree or
+# stdout alone.
+#
+# Variable binding right-hand sides use the three-prefix DSL described in
+# RFC #5:
 #
 #   item.<field>     - field of the queue item
 #   chain.<field>    - field of the chain.metadata.bindings object
@@ -30,21 +39,14 @@ idField = "issue"
 issue = "number"
 # `branch` / `pr` — historically engine-typed first-class columns on the items table — are now
 # preset-declared transparent fields. They round-trip through `extra.branch` / `extra.pr`.
+# They are an observability mirror for the operator; GitHub structural identity stays
+# authoritative (verification/publish/review/closure rebuild identity from CandidateRef and
+# live GitHub state, never from these fields).
 branch = "string"
 pr = "number"
 lastRunId = "string"
 
 [statuses]
-# #404: removed the dead "in-flight" status sentinel from continuable — the
-# engine never writes that value into `items.status`. (Verification recorded
-# in PR body: the only readers of the sentinel string under `src/` are a
-# stale-detection filter in `daemon.ts:chainStatusSummary` and the
-# `runs.status` default in `sqlite-state.ts:recordRun`, both of which target
-# vocabularies separate from `items.status`.) Keeping a dead vocabulary
-# member would let the preset claim "actionable" semantics for a status the
-# engine never produces; #408 will warn at load time on any further dead-word
-# regressions.
-#
 # #508: `in_progress` is included in `continuable` so the scheduler can re-pick
 # an item that was mid-flight when the previous daemon process died. Daemon
 # recovery (`src/daemon.ts:recoverStaleSchedulerState`) only clears the
@@ -53,7 +55,13 @@ lastRunId = "string"
 # interrupted item is the scheduler's job, and the scheduler already skips
 # any chain that still has a live `current_run` — so listing `in_progress`
 # here does not cause double-spawn while a healthy daemon is running.
-continuable = ["queued", "changes_requested", "contract_invalid", "in_progress"]
+#
+# Six-phase vocabulary: `changes_requested` routes back to a fresh iteration
+# (writable by verification, publish, review), `contract_invalid` routes back
+# to a fresh contract-enrichment (writable by every downstream phase), and the
+# four drift statuses are closure's re-entry routing when live GitHub state no
+# longer matches the packet chain at the moment of the irreversible effect.
+continuable = ["queued", "in_progress", "changes_requested", "contract_invalid", "candidate_drift", "verification_drift", "publication_drift", "review_drift"]
 terminal    = ["blocked", "moot", "done", "exhausted"]
 # success: subset of terminal that means the item succeeded. Used by the engine's
 # cross-chain dependsOn unblock: a terminal item is restored to `entry` only when ALL
@@ -67,13 +75,16 @@ unblockable = ["blocked"]
 # is spent without a terminal verdict from any phase. Required by the preset schema
 # (D2 verdict — "未声明则禁用" silently disables the runaway-retry safety; an
 # undeclared sentinel produces a status outside the preset vocabulary). Must be one
-# of `terminal`. The review phase also lists this as a possible verdict so an agent
-# can pre-emptively yield to the same terminal落点.
+# of `terminal`. Only the engine writes it, at the graph-entry budget check before
+# a fresh attempt-starting iteration; no phase declares it as an exit (the former
+# review pre-emptive `exhausted` exit is retired — the budget is the engine's
+# mechanical fact, and review's verdict vocabulary already covers every business
+# conclusion).
 exhausted   = "exhausted"
-# retry (#404): the continuable status review writes when an iteration needs
-# another attempt. Declared at the preset metadata layer so the `retryStatusDoc`
-# doc builder can inject the value into md fragments that need to reference
-# the retry status by name — md prose no longer hand-writes the literal.
+# retry (#404): the continuable status verification/publish/review write when an
+# iteration needs another attempt. Declared at the preset metadata layer so the
+# `retryStatusDoc` doc builder can inject the value into md fragments that need to
+# reference the retry status by name — md prose no longer hand-writes the literal.
 # Must be a member of `continuable`.
 retry       = "changes_requested"
 
@@ -109,11 +120,6 @@ roles  = ["common", "enrichment"]
   PROMPT_FRAGMENT_INDEX    = "runtime.fragmentIndex"
   RUNTIME_INPUTS_DOC       = "runtime.runtimeInputsDoc"
   PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
-  # #404: iteration needs (a) the retry status name (Step 1 "Retry" branch)
-  # and (b) the terminal vocabulary as a boundary statement for the MUST-NOT
-  # list — iteration is forbidden from writing any terminal status. It does
-  # not classify the queue and does not own transitions, so
-  # STATUS_VOCABULARY_DOC is not declared here (contract-5 minimum visibility).
   RETRY_STATUS_DOC         = "runtime.retryStatusDoc"
   TERMINAL_STATUSES_DOC    = "runtime.terminalStatusesDoc"
   REQUIRE_BROWSER_EVIDENCE = { source = "chain.requireBrowserEvidence", default = false, label = "Browser evidence required", suffix = " — when `true`, Layer 4 must contain the strongest feasible E2E evidence for the project type. For projects with UI: real browser screenshots of the running dev server or deployed page. For projects without UI (pure CLI / library / backend / config): CLI smoke run transcripts with command, exit status, and output are the Layer 4 evidence; do not fabricate screenshots by creating HTML files and screenshotting them." }
@@ -133,18 +139,28 @@ roles  = ["common", "enrichment"]
 [[phases]]
 name   = "iteration"
 prompt = "iter-entry.md"
+# §4.4: the only attempt-starting phase. One attempt covers the whole successor
+# chain (verification → publish → review → closure); every fresh graph-entry
+# into iteration consumes one attempt, and the engine's budget gate writes
+# `exhausted` only when the workflow asks for a new iteration entry.
 startsAttempt = true
 runner = "codex"
 model  = "gpt-5.6-sol"
 roles  = ["common", "quality", "iter"]
 
   [[phases.next]]
-  phase = "review"
+  phase = "verification"
   on    = "completed"
 
   [[phases.next]]
   phase  = "contract-enrichment"
   status = "contract_invalid"
+
+  # #410 field-write grant: iteration syncs the observability mirror (`branch`,
+  # `pr`) onto the item record once the candidate is durable (draft PR pushed /
+  # CandidateRef written). GitHub stays authoritative for candidate identity.
+  [phases.rights]
+  writableFields = ["branch", "pr"]
 
   [[phases.exits]]
   status = "contract_invalid"
@@ -192,11 +208,151 @@ roles  = ["common", "quality", "iter"]
   REPO_CWD                 = "runtime.repoCwd"
 
 [[phases]]
+name   = "verification"
+prompt = "verification-entry.md"
+runner = "codex"
+model  = "gpt-5.6-sol"
+roles  = ["common", "quality"]
+
+  [[phases.next]]
+  phase = "publish"
+  on    = "completed"
+
+  [[phases.next]]
+  phase  = "iteration"
+  status = "changes_requested"
+
+  [[phases.next]]
+  phase  = "contract-enrichment"
+  status = "contract_invalid"
+
+  # No [phases.rights] segment: verification writes the VerificationPacket to
+  # GitHub and its declared status exits only — it never mutates the queue,
+  # item fields, or the candidate (#407 default-deny on all three axes).
+
+  [[phases.exits]]
+  status = "changes_requested"
+  when   = "The candidate's behavior or a contract check failed under independent execution, and another iteration is required — the executable failure packet has been published."
+
+  [[phases.exits]]
+  status = "contract_invalid"
+  when   = "A contract check is unexecutable, missing, or contradicts target rules — the contract defect evidence has been published and the contract must be regenerated."
+
+  [phases.variables]
+  TARGET_CWD               = { source = "runtime.targetCwd", label = "Target working directory (where `loop-data runtime artifacts` lives)" }
+  AGENT_CWD                = { source = "runtime.agentCwd", label = "Agent working directory (your `cwd`; may equal TARGET_CWD or point at a different repo checkout for cross-repo work)" }
+  REPO                     = { source = "chain.repository", label = "GitHub repository" }
+  BASE_BRANCH              = { source = "chain.baseBranch", label = "Base branch" }
+  ISSUE                    = { source = "item.issue", label = "Current issue", prefix = "#", suffix = "", style = "code" }
+  RUN_ID                   = { source = "runtime.runId", label = "Run ID" }
+  SHARED_CONTEXT_FILE      = { source = "runtime.sharedContextPath", label = "Chain handoff/shared file" }
+  STATE_FILE               = { source = "runtime.stateFile", label = "State file", style = "plain" }
+  CURRENT_ISSUE_FILE       = { source = "runtime.currentIssueFile", label = "Optional per-issue handoff file" }
+  ISSUE_DIR                = "runtime.issueDir"
+  EVIDENCE_DIR             = { source = "runtime.evidenceDir", label = "Evidence directory" }
+  EVIDENCE_ROOT_DIR        = { source = "runtime.evidenceRootDir", label = "Evidence root directory" }
+  LOG_DIR                  = { source = "runtime.logDir", label = "Log directory" }
+  TRACE_FILE               = "runtime.traceFile"
+  LOOP_FILE                = "runtime.loopFile"
+  PROMPT_ROOT              = "runtime.presetDir"
+  PROMPT_FRAGMENT_INDEX    = "runtime.fragmentIndex"
+  RUNTIME_INPUTS_DOC       = "runtime.runtimeInputsDoc"
+  PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
+  RETRY_STATUS_DOC         = "runtime.retryStatusDoc"
+  TERMINAL_STATUSES_DOC    = "runtime.terminalStatusesDoc"
+  REQUIRE_BROWSER_EVIDENCE = { source = "chain.requireBrowserEvidence", default = false, label = "Browser evidence required", suffix = " — when `true`, Layer 4 must contain the strongest feasible E2E evidence for the project type. For projects with UI: real browser screenshots of the running dev server or deployed page. For projects without UI (pure CLI / library / backend / config): CLI smoke run transcripts with command, exit status, and output are the Layer 4 evidence; do not fabricate screenshots by creating HTML files and screenshotting them." }
+  ISSUE_BRANCH             = { source = "item.branch", label = "Existing issue branch", blankBefore = true }
+  ISSUE_PR                 = { source = "item.pr", label = "Existing issue PR" }
+  ISSUE_STATUS             = { source = "item.status", label = "Queue status" }
+  ISSUE_LAST_RUN_ID        = { source = "item.lastRunId", label = "Previous run ID" }
+  RUN_ID_GENERATION        = { source = "runtime.runIdGeneration", label = "Run-ID generation", blankBefore = true }
+  RESUMED_FROM_PHASE       = { source = "runtime.resumedFromPhase", label = "Resumed-from phase" }
+  RESUMED_STARTED_AT       = { source = "runtime.resumedStartedAt", label = "Resumed run started at" }
+  RESUMED_SESSION_ID       = "runtime.resumedSessionId"
+  CHAIN_NAME               = "runtime.chainName"
+  CHAIN_UMBRELLA_REPO      = { source = "chain.umbrellaRepo", default = "" }
+  CHAIN_UMBRELLA_ISSUE     = { source = "chain.umbrellaIssue", default = "" }
+  REPO_CWD                 = "runtime.repoCwd"
+
+[[phases]]
+name   = "publish"
+prompt = "publish-entry.md"
+runner = "codex"
+model  = "gpt-5.6-sol"
+roles  = ["common", "quality"]
+
+  [[phases.next]]
+  phase = "review"
+  on    = "completed"
+
+  [[phases.next]]
+  phase  = "iteration"
+  status = "changes_requested"
+
+  [[phases.next]]
+  phase  = "contract-enrichment"
+  status = "contract_invalid"
+
+  # #410 field-write grant: publish re-verifies the candidate identity against
+  # the verified VerificationPacket and syncs the final publication identity
+  # (`branch`, `pr`) onto the item record. GitHub stays authoritative.
+  [phases.rights]
+  writableFields = ["branch", "pr"]
+
+  [[phases.exits]]
+  status = "changes_requested"
+  when   = "The candidate changed since verification, or making the deliverable ready requires code changes — the specific gap has been published to the PR/issue thread."
+
+  [[phases.exits]]
+  status = "contract_invalid"
+  when   = "The contract's delivery route or requirements are invalid for the verified candidate — the contract defect evidence has been published."
+
+  [phases.variables]
+  TARGET_CWD               = { source = "runtime.targetCwd", label = "Target working directory (where `loop-data runtime artifacts` lives)" }
+  AGENT_CWD                = { source = "runtime.agentCwd", label = "Agent working directory (your `cwd`; may equal TARGET_CWD or point at a different repo checkout for cross-repo work)" }
+  REPO                     = { source = "chain.repository", label = "GitHub repository" }
+  BASE_BRANCH              = { source = "chain.baseBranch", label = "Base branch" }
+  ISSUE                    = { source = "item.issue", label = "Current issue", prefix = "#", suffix = "", style = "code" }
+  RUN_ID                   = { source = "runtime.runId", label = "Run ID" }
+  SHARED_CONTEXT_FILE      = { source = "runtime.sharedContextPath", label = "Chain handoff/shared file" }
+  STATE_FILE               = { source = "runtime.stateFile", label = "State file", style = "plain" }
+  CURRENT_ISSUE_FILE       = { source = "runtime.currentIssueFile", label = "Optional per-issue handoff file" }
+  ISSUE_DIR                = "runtime.issueDir"
+  EVIDENCE_DIR             = { source = "runtime.evidenceDir", label = "Evidence directory" }
+  EVIDENCE_ROOT_DIR        = { source = "runtime.evidenceRootDir", label = "Evidence root directory" }
+  LOG_DIR                  = { source = "runtime.logDir", label = "Log directory" }
+  TRACE_FILE               = "runtime.traceFile"
+  LOOP_FILE                = "runtime.loopFile"
+  PROMPT_ROOT              = "runtime.presetDir"
+  PROMPT_FRAGMENT_INDEX    = "runtime.fragmentIndex"
+  RUNTIME_INPUTS_DOC       = "runtime.runtimeInputsDoc"
+  PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
+  RETRY_STATUS_DOC         = "runtime.retryStatusDoc"
+  TERMINAL_STATUSES_DOC    = "runtime.terminalStatusesDoc"
+  REQUIRE_BROWSER_EVIDENCE = { source = "chain.requireBrowserEvidence", default = false, label = "Browser evidence required", suffix = " — when `true`, Layer 4 must contain the strongest feasible E2E evidence for the project type. For projects with UI: real browser screenshots of the running dev server or deployed page. For projects without UI (pure CLI / library / backend / config): CLI smoke run transcripts with command, exit status, and output are the Layer 4 evidence; do not fabricate screenshots by creating HTML files and screenshotting them." }
+  ISSUE_BRANCH             = { source = "item.branch", label = "Existing issue branch", blankBefore = true }
+  ISSUE_PR                 = { source = "item.pr", label = "Existing issue PR" }
+  ISSUE_STATUS             = { source = "item.status", label = "Queue status" }
+  ISSUE_LAST_RUN_ID        = { source = "item.lastRunId", label = "Previous run ID" }
+  RUN_ID_GENERATION        = { source = "runtime.runIdGeneration", label = "Run-ID generation", blankBefore = true }
+  RESUMED_FROM_PHASE       = { source = "runtime.resumedFromPhase", label = "Resumed-from phase" }
+  RESUMED_STARTED_AT       = { source = "runtime.resumedStartedAt", label = "Resumed run started at" }
+  RESUMED_SESSION_ID       = "runtime.resumedSessionId"
+  CHAIN_NAME               = "runtime.chainName"
+  CHAIN_UMBRELLA_REPO      = { source = "chain.umbrellaRepo", default = "" }
+  CHAIN_UMBRELLA_ISSUE     = { source = "chain.umbrellaIssue", default = "" }
+  REPO_CWD                 = "runtime.repoCwd"
+
+[[phases]]
 name   = "review"
 prompt = "review-entry.md"
 runner = "codex"
 model  = "gpt-5.6-sol"
 roles  = ["common", "quality", "review"]
+
+  [[phases.next]]
+  phase = "closure"
+  on    = "completed"
 
   [[phases.next]]
   phase  = "iteration"
@@ -210,15 +366,13 @@ roles  = ["common", "quality", "review"]
   #   - creates queue items (expanded-incomplete-parent flow inserts child items before flipping
   #     the parent back to changes_requested — see review/actions/state-write.md);
   #   - holds a privileged-op grant: after inserting expanded children, review reorders them to
-  #     the front of the queue via `coder-loop item reorder` (see review/update-state.md);
-  #   - writes non-status item fields: `branch` and `pr` carry the verified PR identifiers
-  #     onto the item record on `done`/`changes_requested`/`accepted_pr` transitions, and
-  #     `blockerRepo` / `blockerRef` (inside the `extra` carrier via `--field-json
-  #     '{"extraPatch":{"blockerRepo":...,"blockerRef":...}}'`) capture the blocker pointer on the
-  #     `blocked` transition (review/actions/state-write.md — "Blocker metadata" section).
-  # Iteration / blocked-responder / umbrella-finalizer omit the segment intentionally so they
-  # inherit default-deny on all three axes (#407 row #1 / #409 hard-deny + per-phase grant
-  # absence / #410 no field-write grant).
+  #     the front of the queue via `coder-loop item reorder` (see review/actions/state-write.md);
+  #   - writes the blocker pointer fields: `blockerRepo` / `blockerRef` (inside the `extra`
+  #     carrier via `--field-json '{"extraPatch":{"blockerRepo":...,"blockerRef":...}}'`)
+  #     on the `blocked` transition (review/actions/state-write.md — "Blocker metadata").
+  # The former `branch`/`pr` grant moved to iteration and publish with the six-phase split:
+  # review no longer executes the identity-sync transitions (`done` moved to closure,
+  # `changes_requested` identity sync moved to iteration/publish).
   #
   # #410 control-plane fields (`runner` / `repoCwd` / `dependsOn` / `priority`) cannot be granted
   # on any phase — the preset parser rejects them in `writableFields` with the engine's
@@ -227,7 +381,7 @@ roles  = ["common", "quality", "review"]
   [phases.rights]
   createItems    = true
   privilegedOps  = ["item.reorder"]
-  writableFields = ["branch", "pr", "blockerRepo", "blockerRef"]
+  writableFields = ["blockerRepo", "blockerRef"]
 
   [[phases.exits]]
   status = "changes_requested"
@@ -240,18 +394,6 @@ roles  = ["common", "quality", "review"]
   [[phases.exits]]
   status = "blocked"
   when   = "A missing external dependency prevents this issue from advancing in the current repository."
-
-  [[phases.exits]]
-  status = "moot"
-  when   = "The issue is invalid, duplicate, already satisfied, or otherwise no longer requires work."
-
-  [[phases.exits]]
-  status = "done"
-  when   = "The required PR or no-PR resolution was accepted, merged or posted as appropriate, and the GitHub issue closure condition passed."
-
-  [[phases.exits]]
-  status = "exhausted"
-  when   = "The retry budget is exhausted without reaching an acceptable result."
 
   # #405 chain-action exit. Review is the only role with a controlled stop-chain
   # channel — agent direct `coder-loop chain stop` calls are rejected (#409);
@@ -293,6 +435,99 @@ roles  = ["common", "quality", "review"]
   # the engine-owned `REVIEW_SUMMARY_VERDICTS` constant the builder read.)
   STATUS_VOCABULARY_DOC    = "runtime.statusVocabularyDoc"
   REQUIRE_BROWSER_EVIDENCE = { source = "chain.requireBrowserEvidence", default = false, label = "Browser evidence required", suffix = " — when `true`, Layer 4 must contain the strongest feasible E2E evidence for the project type. For projects with UI: real browser screenshots of the running dev server or deployed page. For projects without UI (pure CLI / library / backend / config): CLI smoke run transcripts with command, exit status, and output are the Layer 4 evidence; synthetic screenshots (HTML files rendered and screenshotted) are rejected." }
+  ISSUE_BRANCH             = { source = "item.branch", label = "Existing issue branch", blankBefore = true }
+  ISSUE_PR                 = { source = "item.pr", label = "Existing issue PR" }
+  ISSUE_STATUS             = { source = "item.status", label = "Queue status" }
+  ISSUE_LAST_RUN_ID        = { source = "item.lastRunId", label = "Previous run ID" }
+  RUN_ID_GENERATION        = { source = "runtime.runIdGeneration", label = "Run-ID generation", blankBefore = true }
+  RESUMED_FROM_PHASE       = { source = "runtime.resumedFromPhase", label = "Resumed-from phase" }
+  RESUMED_STARTED_AT       = { source = "runtime.resumedStartedAt", label = "Resumed run started at" }
+  RESUMED_SESSION_ID       = "runtime.resumedSessionId"
+  CHAIN_NAME               = "runtime.chainName"
+  CHAIN_UMBRELLA_REPO      = { source = "chain.umbrellaRepo", default = "" }
+  CHAIN_UMBRELLA_ISSUE     = { source = "chain.umbrellaIssue", default = "" }
+  REPO_CWD                 = "runtime.repoCwd"
+
+[[phases]]
+name   = "closure"
+prompt = "closure-entry.md"
+runner = "codex"
+model  = "gpt-5.6-sol"
+roles  = ["common"]
+
+  [[phases.next]]
+  phase  = "iteration"
+  status = "candidate_drift"
+
+  [[phases.next]]
+  phase  = "verification"
+  status = "verification_drift"
+
+  [[phases.next]]
+  phase  = "publish"
+  status = "publication_drift"
+
+  [[phases.next]]
+  phase  = "review"
+  status = "review_drift"
+
+  [[phases.next]]
+  phase  = "contract-enrichment"
+  status = "contract_invalid"
+
+  # No [phases.rights] segment: closure performs the irreversible external
+  # effects (merge/close) and moves the item only through its declared
+  # terminal/drift exits — it never mutates the queue or item fields.
+
+  [[phases.exits]]
+  status = "done"
+  when   = "The accepted PR is merged (or the accepted no-PR delivery is live) and the GitHub issue is confirmed closed."
+
+  [[phases.exits]]
+  status = "moot"
+  when   = "The verified moot reason is published and the GitHub issue is confirmed closed without implementation."
+
+  [[phases.exits]]
+  status = "candidate_drift"
+  when   = "The candidate revision no longer matches the ReviewVerdict's CandidateRef — a new iteration must produce a fresh candidate."
+
+  [[phases.exits]]
+  status = "verification_drift"
+  when   = "The VerificationPacket or its live checks no longer hold for the candidate — verification must re-execute."
+
+  [[phases.exits]]
+  status = "publication_drift"
+  when   = "The publication object (PR body/ready state or no-PR artifact) no longer matches what review adjudicated — publish must re-assemble."
+
+  [[phases.exits]]
+  status = "review_drift"
+  when   = "The ReviewVerdict or live review state changed, or a new blocker surfaced — review must re-adjudicate."
+
+  [[phases.exits]]
+  status = "contract_invalid"
+  when   = "An operator correction superseded the contract after the verdict — the contract must be regenerated before any irreversible effect."
+
+  [phases.variables]
+  TARGET_CWD               = { source = "runtime.targetCwd", label = "Target working directory (where `loop-data runtime artifacts` lives)" }
+  AGENT_CWD                = { source = "runtime.agentCwd", label = "Agent working directory (your `cwd`; may equal TARGET_CWD or point at a different repo checkout for cross-repo work)" }
+  REPO                     = { source = "chain.repository", label = "GitHub repository" }
+  BASE_BRANCH              = { source = "chain.baseBranch", label = "Base branch" }
+  ISSUE                    = { source = "item.issue", label = "Current issue", prefix = "#", suffix = "", style = "code" }
+  RUN_ID                   = { source = "runtime.runId", label = "Run ID" }
+  SHARED_CONTEXT_FILE      = { source = "runtime.sharedContextPath", label = "Chain handoff/shared file" }
+  STATE_FILE               = { source = "runtime.stateFile", label = "State file", style = "plain" }
+  CURRENT_ISSUE_FILE       = { source = "runtime.currentIssueFile", label = "Optional per-issue handoff file" }
+  ISSUE_DIR                = "runtime.issueDir"
+  EVIDENCE_DIR             = { source = "runtime.evidenceDir", label = "Evidence directory" }
+  EVIDENCE_ROOT_DIR        = { source = "runtime.evidenceRootDir", label = "Evidence root directory" }
+  LOG_DIR                  = { source = "runtime.logDir", label = "Log directory" }
+  TRACE_FILE               = "runtime.traceFile"
+  LOOP_FILE                = "runtime.loopFile"
+  PROMPT_ROOT              = "runtime.presetDir"
+  PROMPT_FRAGMENT_INDEX    = "runtime.fragmentIndex"
+  RUNTIME_INPUTS_DOC       = "runtime.runtimeInputsDoc"
+  PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
+  REQUIRE_BROWSER_EVIDENCE = { source = "chain.requireBrowserEvidence", default = false }
   ISSUE_BRANCH             = { source = "item.branch", label = "Existing issue branch", blankBefore = true }
   ISSUE_PR                 = { source = "item.pr", label = "Existing issue PR" }
   ISSUE_STATUS             = { source = "item.status", label = "Queue status" }
@@ -423,6 +658,11 @@ role = "common"
 path = "common/executable-contract.md"
 
 [[fragments]]
+id   = "common/packets"
+role = "common"
+path = "common/packets.md"
+
+[[fragments]]
 id   = "contract"
 role = "common"
 path = "contract.md"
@@ -503,9 +743,9 @@ role = "review"
 path = "review/steps/diff-audit.md"
 
 [[fragments]]
-id   = "review/steps/replay"
+id   = "review/steps/verification-audit"
 role = "review"
-path = "review/steps/replay.md"
+path = "review/steps/verification-audit.md"
 
 [[fragments]]
 id   = "review/spike-followup"

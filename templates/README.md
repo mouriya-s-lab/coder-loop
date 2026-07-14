@@ -27,7 +27,7 @@ Preset-specific starter 不在此处：
 
 新接入 target 三步（详见 [docs/operator-quickstart.md §1](../docs/operator-quickstart.md#1-把新-target-接入中央-daemon)）：
 
-1. Committed `<TARGET>/CLAUDE.md` 或 `<TARGET>/AGENTS.md`（项目命令、约定、PR 形态；`gh-issue-pr-iteration` preset 的 iteration / review 调度者 workflow 显式读取这两份）。
+1. Committed `<TARGET>/CLAUDE.md` 或 `<TARGET>/AGENTS.md`（项目命令、约定、PR 形态；`gh-issue-pr-iteration` preset 的各执行 phase workflow 显式读取这两份）。
 2. `coder-loop chain create <chain> --config-json '{"repository":"<owner>/<repo>","baseBranch":"main"}' --preset gh-issue-pr-iteration` 把 chain identity 写进中央 DB；GitHub label 资产由 operator / issue writer 在 target 侧自己按需管理，不由本 CLI 负责。
 3. 本机 `gh` 授权对应 repository（仅当 preset 用 GitHub 时）。
 

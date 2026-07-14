@@ -130,10 +130,12 @@ const FAKE_RUNNER_CREDENTIALED_STATUS_WRITE_SNIPPET = `if (typeof input.writeSta
 // #405: with the stdout verdict parser retired, the fake runner no longer derives
 // status from a `summary` string token. Test fixtures pass `extra.writeStatus`
 // directly when the test wants the fake runner to write a specific status; the
-// helper below applies the default review status (`done`) when no fixture
-// override is set. Iteration / trigger phases inherit the historical behavior:
-// trigger phases never mutate the triggering item, iteration leaves status to
-// review (`null` here = "let the scheduler advance via phase trigger").
+// helper below applies the default closure status (`done`) when no fixture
+// override is set. Producing / trigger phases inherit the historical behavior:
+// trigger phases never mutate the triggering item; contract-enrichment, iteration,
+// verification, publish, and review leave status to the frontier (`null` here =
+// "let the scheduler advance via the completed edge"); the six-phase split moved
+// the terminal `done` write from review to closure.
 const TRIGGER_PHASES = new Set(["blocked-responder", "umbrella-finalizer", "review-on-empty"])
 
 function daemonFakeRunnerWriteStatus(phase: string, extra: BoundaryRecord): string | null {
@@ -144,11 +146,9 @@ function daemonFakeRunnerWriteStatus(phase: string, extra: BoundaryRecord): stri
 	const writeStatusOverride = extra.writeStatus
 	if (typeof writeStatusOverride === "string") return writeStatusOverride
 	if (writeStatusOverride === null) return null
-	// Iteration handoff is structural; the scheduler advances via phase trigger.
-	if (phase === "iteration") return null
-	// Default review behavior pre-#405 was to land at `done`; preserve that for fixtures
-	// that did not set an explicit writeStatus override.
-	if (phase === "review") return "done"
+	// Closure owns the terminal transition; every earlier phase clean-exits and the
+	// scheduler advances via the completed edge.
+	if (phase === "closure") return "done"
 	return null
 }
 
@@ -1889,10 +1889,12 @@ attemptTimeoutSeconds = 3600
 			const reviewExitOutsideRejected = await request(fixture, "item.update", { itemId: reviewExitOutsideItemId, status: "queued" })
 			expectInvalid(reviewExitOutsideRejected)
 			if (!reviewExitOutsideRejected.ok) {
+				// Six-phase split: review's declared item-status exits shrank to the three
+				// routing statuses — done/moot moved to closure, exhausted is engine-only.
 				expect(reviewExitOutsideRejected.error.details).toMatchObject({
 					phase: "review",
 					status: "queued",
-					allowed: ["blocked", "changes_requested", "contract_invalid", "done", "exhausted", "moot"],
+					allowed: ["blocked", "changes_requested", "contract_invalid"],
 				})
 			}
 
@@ -1922,7 +1924,7 @@ attemptTimeoutSeconds = 3600
 				expect(unknownPhaseRejected.error.message).toContain("not declared in the preset")
 			}
 
-			const reviewStatuses = ["changes_requested", "contract_invalid", "blocked", "moot", "done", "exhausted"]
+			const reviewStatuses = ["changes_requested", "contract_invalid", "blocked"]
 			for (const [index, status] of reviewStatuses.entries()) {
 				const reviewItem = record(expectOk(await request(fixture, "item.add", {
 					chainId,
@@ -1941,6 +1943,26 @@ attemptTimeoutSeconds = 3600
 				expect((await readItem(fixture.loopDataRoot, chainId, 34710 + index))?.phase).toBe("review")
 			}
 
+			// Six-phase split: closure owns the terminal transitions (done/moot) plus the
+			// drift re-entry statuses; assert its declared exits are writable from phase closure.
+			const closureStatuses = ["done", "moot", "candidate_drift", "verification_drift", "publication_drift", "review_drift", "contract_invalid"]
+			for (const [index, status] of closureStatuses.entries()) {
+				const closureItem = record(expectOk(await request(fixture, "item.add", {
+					chainId,
+					itemId: String(34730 + index),
+					repoCwd: REPO_ROOT,
+				})).item)
+				const closureItemId = numberValue(closureItem.id)
+				const closureStore = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+				try {
+					closureStore.updateItem(closureItemId, { phase: "closure", updatedAt: 1_800_020_200 + index })
+				} finally {
+					closureStore.close()
+				}
+				const updated = record(expectOk(await request(fixture, "item.update", { itemId: closureItemId, status })).item)
+				expect(updated).toMatchObject({ id: closureItemId, status })
+			}
+
 			// #397 log obligation (issue comment "log 义务"): every allow and deny outcome of the
 			// per-phase admission gate emits an `item.status.write_admission` audit event carrying
 			// the subject, item, phase, requested status, declared exits, outcome, and reason. Pull
@@ -1953,7 +1975,7 @@ attemptTimeoutSeconds = 3600
 			const denyEvents = admissionEvents.filter((event) => event.kind === "audit" && event.type === "item.status.write_admission" && event.payload.outcome === "deny")
 			const allowEvents = admissionEvents.filter((event) => event.kind === "audit" && event.type === "item.status.write_admission" && event.payload.outcome === "allow")
 			expect(denyEvents.length).toBeGreaterThanOrEqual(8) // 6 iteration + 1 review-queued + 1 unknown-phase
-			expect(allowEvents.length).toBe(reviewStatuses.length) // every review write was allowed
+			expect(allowEvents.length).toBe(reviewStatuses.length + closureStatuses.length) // every review + closure write was allowed
 			const iterationDeny = denyEvents.find((event) => event.kind === "audit" && event.type === "item.status.write_admission" && event.payload.phase === "iteration" && event.payload.requestedStatus === "done")
 			expect(iterationDeny).toBeDefined()
 			if (iterationDeny !== undefined && iterationDeny.kind === "audit" && iterationDeny.type === "item.status.write_admission") {
@@ -1966,14 +1988,14 @@ attemptTimeoutSeconds = 3600
 				expect(unknownDeny.payload.declaredExits).toEqual([])
 				expect(unknownDeny.payload.reason).toBe("phase-exits")
 			}
-			const reviewAllow = allowEvents.find((event) => event.kind === "audit" && event.type === "item.status.write_admission" && event.payload.phase === "review" && event.payload.requestedStatus === "done")
-			expect(reviewAllow).toBeDefined()
-			if (reviewAllow !== undefined && reviewAllow.kind === "audit" && reviewAllow.type === "item.status.write_admission") {
-				expect([...reviewAllow.payload.declaredExits].sort()).toEqual(["blocked", "changes_requested", "contract_invalid", "done", "exhausted", "moot"])
-				expect(reviewAllow.payload.reason).toBe("admitted")
+			const closureAllow = allowEvents.find((event) => event.kind === "audit" && event.type === "item.status.write_admission" && event.payload.phase === "closure" && event.payload.requestedStatus === "done")
+			expect(closureAllow).toBeDefined()
+			if (closureAllow !== undefined && closureAllow.kind === "audit" && closureAllow.type === "item.status.write_admission") {
+				expect([...closureAllow.payload.declaredExits].sort()).toEqual(["candidate_drift", "contract_invalid", "done", "moot", "publication_drift", "review_drift", "verification_drift"])
+				expect(closureAllow.payload.reason).toBe("admitted")
 				// The subject envelope must carry "operator" since the request flowed without
 				// `agentRunId`/`agentPhase` attribution (operator mid-run path).
-				expect(reviewAllow.subject).toEqual({ kind: "operator" })
+				expect(closureAllow.subject).toEqual({ kind: "operator" })
 			}
 		} finally {
 			await fixture.daemon.stop()
@@ -2052,13 +2074,14 @@ attemptTimeoutSeconds = 3600
 			expect(reviewExits.phase).toBe("review")
 			// #405 ADT: the typed phase-exits face now splits the allowed payload into
 			// `allowedStatuses` (item-status branch) and `allowedChainActions` (chain-action
-			// branch). Review declares its five item-status exits plus the chain-action `stop`
-			// exit (the controlled stop-chain channel — agent direct `chain stop` rejected
-			// per #409).
-			expect(reviewExits.allowedStatuses).toEqual(["blocked", "changes_requested", "contract_invalid", "done", "exhausted", "moot"])
+			// branch). Six-phase split: review declares its three routing item-status exits
+			// (accepted/moot verdicts clean-exit to closure, which owns done/moot; the
+			// pre-emptive exhausted exit is retired) plus the chain-action `stop` exit
+			// (the controlled stop-chain channel — agent direct `chain stop` rejected per #409).
+			expect(reviewExits.allowedStatuses).toEqual(["blocked", "changes_requested", "contract_invalid"])
 			expect(reviewExits.allowedChainActions).toEqual(["stop"])
 			const reviewExitsArray = Array.isArray(reviewExits.exits) ? reviewExits.exits : []
-			expect(reviewExitsArray.length).toBe(7)
+			expect(reviewExitsArray.length).toBe(4)
 			for (const raw of reviewExitsArray) {
 				const exit = record(raw)
 				expect(typeof exit.when).toBe("string")
@@ -2281,17 +2304,17 @@ const ReviewRunnerPromptBoundary = arkType({
 	phase: arkType.unit("review"),
 	eventLog: "string",
 })
-const EnrichmentRunnerPromptBoundary = arkType({
+const PassthroughRunnerPromptBoundary = arkType({
 	itemId: "number",
 	runId: "string",
-	phase: arkType.unit("contract-enrichment"),
+	phase: "'contract-enrichment' | 'verification' | 'publish' | 'closure'",
 	eventLog: "string",
 })
-const RunnerPromptBoundary = arkType.or(EnrichmentRunnerPromptBoundary, IterationRunnerPromptBoundary, ReviewRunnerPromptBoundary)
-type EnrichmentRunnerPrompt = typeof EnrichmentRunnerPromptBoundary.infer
+const RunnerPromptBoundary = arkType.or(PassthroughRunnerPromptBoundary, IterationRunnerPromptBoundary, ReviewRunnerPromptBoundary)
+type PassthroughRunnerPrompt = typeof PassthroughRunnerPromptBoundary.infer
 type IterationRunnerPrompt = typeof IterationRunnerPromptBoundary.infer
 type ReviewRunnerPrompt = typeof ReviewRunnerPromptBoundary.infer
-type RunnerPrompt = EnrichmentRunnerPrompt | IterationRunnerPrompt | ReviewRunnerPrompt
+type RunnerPrompt = PassthroughRunnerPrompt | IterationRunnerPrompt | ReviewRunnerPrompt
 function assertNeverRunnerPrompt(input: never): never {
 	throw new Error(\`unexpected runner prompt phase: \${JSON.stringify(input)}\`)
 }
@@ -2315,6 +2338,9 @@ if (typeof credential !== "string" || credential.length === 0) {
 await appendFile(input.eventLog, JSON.stringify({ type: "running", itemId: input.itemId, runId: input.runId, phase: input.phase }) + "\\n")
 switch (input.phase) {
 	case "contract-enrichment":
+	case "verification":
+	case "publish":
+	case "closure":
 		break
 	case "iteration": {
 		await writeFile(${JSON.stringify(iterationCapture)}, credential)
@@ -2930,7 +2956,7 @@ process.exitCode = 0
 			await waitFor(async () => record(expectOk(await request(fixture, "daemon.status")).daemon).activeRuns, (runs) => Array.isArray(runs) && runs.length === 1)
 			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
 			try {
-				store.updateItem(itemId, { phase: "review", updatedAt: 1_800_020_200 })
+				store.updateItem(itemId, { phase: "closure", updatedAt: 1_800_020_200 })
 			} finally {
 				store.close()
 			}
@@ -3331,7 +3357,7 @@ process.exitCode = 0
 			await waitFor(async () => record(expectOk(await request(fixture, "daemon.status")).daemon).activeRuns, (runs) => Array.isArray(runs) && runs.length === 1)
 			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
 			try {
-				store.updateItem(numberValue(added.id), { phase: "review", updatedAt: 1_800_020_300 })
+				store.updateItem(numberValue(added.id), { phase: "closure", updatedAt: 1_800_020_300 })
 			} finally {
 				store.close()
 			}
@@ -5125,7 +5151,7 @@ process.exitCode = 0
 					event.type === "phase.start" && event.itemId === finalItem!.id,
 				)
 				.map((event) => event.phase)
-			expect(phaseStarts).toEqual(["contract-enrichment", "iteration", "review", "blocked-responder"])
+			expect(phaseStarts).toEqual(["contract-enrichment", "iteration", "verification", "publish", "review", "blocked-responder"])
 
 			const events = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot }).eventsFile, {
 				kind: "lifecycle",
@@ -5404,7 +5430,7 @@ process.exitCode = 0
 				)
 				expect(item).not.toBeNull()
 				expect(item!.attempts).toBe(1)
-				expect(item!.phase).toBe("review")
+				expect(item!.phase).toBe("closure")
 
 				// The agent writes status="done" before the scheduler emits phase.end / queue.terminal
 				// for the review run. queue.terminal is the last per-item scheduler event, so observing
@@ -5437,7 +5463,7 @@ process.exitCode = 0
 					chain: "ac7-iter-then-review-chain",
 					item: item!.id,
 				})
-				expect(persistedSpawnEvents.events).toHaveLength(3)
+				expect(persistedSpawnEvents.events).toHaveLength(6)
 			} finally {
 				await fixture.daemon.stop()
 			}
@@ -5473,7 +5499,10 @@ process.exitCode = 0
 						event.type === "phase.start" && event.itemId === item!.id,
 					)
 					.map((event) => event.phase)
-				expect(phases).toEqual(["contract-enrichment", "iteration", "review", "iteration", "review"])
+				expect(phases).toEqual([
+					"contract-enrichment", "iteration", "verification", "publish", "review",
+					"iteration", "verification", "publish", "review", "closure",
+				])
 				expect(phases.filter((phase) => phase === "contract-enrichment")).toHaveLength(1)
 			} finally {
 				await fixture.daemon.stop()
@@ -5510,7 +5539,10 @@ process.exitCode = 0
 						event.type === "phase.start" && event.itemId === item!.id,
 					)
 					.map((event) => event.phase)
-				expect(phases).toEqual(["contract-enrichment", "iteration", "review", "contract-enrichment", "iteration", "review"])
+				expect(phases).toEqual([
+					"contract-enrichment", "iteration", "verification", "publish", "review",
+					"contract-enrichment", "iteration", "verification", "publish", "review", "closure",
+				])
 			} finally {
 				await fixture.daemon.stop()
 			}
@@ -5551,7 +5583,7 @@ process.exitCode = 0
 					(event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
 						event.type === "phase.start" && event.itemId === item!.id,
 				)
-				expect(phaseStartEvents.map((event) => event.phase)).toEqual(["contract-enrichment", "iteration", "review"])
+				expect(phaseStartEvents.map((event) => event.phase)).toEqual(["contract-enrichment", "iteration", "verification", "publish", "review", "closure"])
 				const runIdByPhase = new Map<string, string>(phaseStartEvents.map((event) => [event.phase, event.runId]))
 				const iterRunId = runIdByPhase.get("iteration")!
 				const reviewRunId = runIdByPhase.get("review")!
@@ -5576,10 +5608,14 @@ process.exitCode = 0
 				try {
 					const iterRow = store.getRunByRunId(iterRunId)
 					const reviewRow = store.getRunByRunId(reviewRunId)
+					const closureRow = store.getRunByRunId(runIdByPhase.get("closure")!)
 					expect(iterRow?.phase).toBe("iteration")
 					expect(reviewRow?.phase).toBe("review")
 					expect(iterRow?.status).toBe("queued")
-					expect(reviewRow?.status).toBe("done")
+					// Review clean-exits without a status write in the six-phase split; the
+					// terminal `done` lands on the closure run.
+					expect(reviewRow?.status).toBe("queued")
+					expect(closureRow?.status).toBe("done")
 					expect(iterRow?.itemId).toBe(item!.id)
 					expect(reviewRow?.itemId).toBe(item!.id)
 				} finally {
@@ -5670,7 +5706,9 @@ process.exitCode = 0
 				maxItemAttempts: 1,
 				recycleAfterStateWriteMs: 60,
 				recycleKillGraceMs: 10,
-				phase: "review",
+				// Single-phase plan pinned to closure — the one phase whose exits admit the
+				// credentialed `done` write (review lost that exit in the six-phase split).
+				phase: "closure",
 			},
 			beforeStart: async ({ fakeRunner }) => {
 				await writeCredentialedFakeRunner(fakeRunner)
@@ -5689,7 +5727,7 @@ process.exitCode = 0
 				extra: {
 					sleepMs: 5,
 					exitCode: 0,
-					// review-phase default writeStatus is "done"; keep that and ride the post-write sleep.
+					// closure-phase default writeStatus is "done"; keep that and ride the post-write sleep.
 					extraSleepAfterStatusWriteMs: 800,
 				},
 			})).item)
@@ -5790,7 +5828,7 @@ process.exitCode = 0
 			schedulerConfig: {
 				maxItemAttempts: 1,
 				recycleAfterStateWriteMs: 5_000,
-				phase: "review",
+				phase: "closure",
 			},
 			beforeStart: async ({ fakeRunner }) => {
 				await writeCredentialedFakeRunner(fakeRunner)
@@ -5948,17 +5986,19 @@ process.exitCode = 0
 	// declared → classifyNoCreateGrantReason returns no-rights-segment, NOT no-create-grant
 	// which is the segment-present-without-grant case). Item-list cross-check confirms the
 	// child was NOT inserted, i.e. the gate ran BEFORE buildCreateItemInput / store.createItem.
-	test("socket item.add denies an iteration-phase agentCredential with no-rights-segment (#407 row 1)", async () => {
-		const root = resolve(TEST_ROOT, `${++nextFixtureId}-407-row1-iter-deny`)
+	test("socket item.add denies a contract-enrichment-phase agentCredential with no-rights-segment (#407 row 1)", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-407-row1-enrich-deny`)
 		const loopDataRoot = resolve(root, "ld")
 		const capturePath = resolve(root, "captured-credential.txt")
 		const fakeRunner = resolve(root, "fake-runner.ts")
 		const eventLog = resolve(root, "events.jsonl")
 		await mkdir(loopDataRoot, { recursive: true })
-		// Fake iteration runner: capture CODER_LOOP_RUN_CRED, then sleep long enough for the
-		// test to drive an item.add against the daemon before the run closes (closing the run
-		// would revoke the credential from the registry and the gate would short-circuit on
-		// `unknown-credential` before ever reaching the rights check).
+		// Fake contract-enrichment runner (entry phase, and the phase with NO `[phases.rights]`
+		// segment — iteration now grants writableFields branch/pr, so its deny reason would be
+		// `no-create-grant`, not `no-rights-segment`): capture CODER_LOOP_RUN_CRED, then sleep
+		// long enough for the test to drive an item.add against the daemon before the run closes
+		// (closing the run would revoke the credential from the registry and the gate would
+		// short-circuit on `unknown-credential` before ever reaching the rights check).
 		await writeFile(
 			fakeRunner,
 			`import { writeFile, appendFile } from "node:fs/promises"
@@ -5966,7 +6006,6 @@ process.exitCode = 0
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
 const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
-if (input.phase === "contract-enrichment") process.exit(0)
 await writeFile(${JSON.stringify(capturePath)}, process.env.CODER_LOOP_RUN_CRED ?? "")
 await appendFile(input.eventLog, JSON.stringify({ type: "running", itemId: input.itemId, runId: input.runId }) + "\\n")
 await new Promise((r) => setTimeout(r, input.sleepMs ?? 4000))
@@ -6001,12 +6040,12 @@ process.exitCode = 0
 		try {
 			const snapshot = daemon.snapshot()
 			const chain = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("chain.create", {
-				name: "407-row1-iter-deny-chain",
+				name: "407-row1-enrich-deny-chain",
 				preset: "gh-issue-pr-iteration",
 				repository: "mouriya-s-lab/coder-loop",
 			}))).chain)
 			const chainId = numberValue(chain.id)
-			// Parent item the scheduler will spawn against (iteration phase, no rights).
+			// Parent item the scheduler will spawn against (contract-enrichment phase, no rights).
 			const parent = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
 				chainId,
 				itemId: "407100",
@@ -6015,7 +6054,7 @@ process.exitCode = 0
 			}))).item)
 			const parentId = numberValue(parent.id)
 
-			// Wait for the scheduler to spawn the iteration runner and capture the credential.
+			// Wait for the scheduler to spawn the contract-enrichment runner and capture the credential.
 			await waitFor(async () => {
 				try {
 					return (await readFile(capturePath, "utf-8")).trim()
@@ -6026,7 +6065,7 @@ process.exitCode = 0
 			const credential = (await readFile(capturePath, "utf-8")).trim()
 			expect(credential.length).toBeGreaterThan(0)
 
-			// Issue the item.add with the iteration agent's credential. Iteration phase has NO
+			// Issue the item.add with the contract-enrichment agent's credential. That phase has NO
 			// `[phases.rights]` segment in preset.toml → classifyNoCreateGrantReason yields
 			// `no-rights-segment` (createItems=false AND writableFields empty AND privilegedOps empty).
 			const denied = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
@@ -6039,11 +6078,11 @@ process.exitCode = 0
 			expect(denied.ok).toBe(false)
 			if (!denied.ok) {
 				expect(denied.error.code).toBe("invalid_caller")
-				expect(denied.error.message).toContain("iteration")
+				expect(denied.error.message).toContain("contract-enrichment")
 				expect(denied.error.message).toContain("createItems")
 			}
 
-			// Audit replay: exactly one `item.add.rights_admission` event for the iteration phase,
+			// Audit replay: exactly one `item.add.rights_admission` event for the contract-enrichment phase,
 			// outcome=deny, reason=no-rights-segment. The subject must be `agent` (not operator —
 			// the credential resolved successfully). The deny event MUST exist before the agent's
 			// run-close handler revokes the credential, so we read the events file immediately.
@@ -6057,7 +6096,7 @@ process.exitCode = 0
 			expect(denyEvent).toBeDefined()
 			if (denyEvent !== undefined && denyEvent.kind === "audit" && denyEvent.type === "item.add.rights_admission") {
 				expect(denyEvent.payload.reason).toBe("no-rights-segment")
-				expect(denyEvent.payload.claimedPhase).toBe("iteration")
+				expect(denyEvent.payload.claimedPhase).toBe("contract-enrichment")
 				expect(denyEvent.subject).toMatchObject({ kind: "agent" })
 				expect(denyEvent.payload.presetName).toBe("gh-issue-pr-iteration")
 			}
@@ -6664,7 +6703,7 @@ const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
 const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
 await appendFile(input.eventLog, JSON.stringify({ type: "running", itemId: input.itemId, runId: input.runId, phase: input.phase }) + "\\n")
-if (input.phase === "contract-enrichment") process.exit(0)
+if (input.phase !== "iteration" && input.phase !== "review") process.exit(0)
 if (input.phase === "review") {
 	await writeFile(${JSON.stringify(reviewCapture)}, process.env.CODER_LOOP_RUN_CRED ?? "")
 	await new Promise((r) => setTimeout(r, input.sleepMs ?? 5_500))
@@ -6755,7 +6794,7 @@ process.exitCode = 0
 				return typeof runId === "string" && runId.includes("-iteration-item-")
 			}), 8_000)
 
-			// Iteration phase has NO privilegedOps in its rights segment → deny.
+			// Iteration's rights segment grants writableFields (branch/pr) but NO privilegedOps → deny.
 			const iterationReorder = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.reorder", {
 				chainName: "409-row2-per-phase-chain",
 				itemId: "409201",
@@ -6770,8 +6809,8 @@ process.exitCode = 0
 				expect(iterationReorder.error.message).toContain("gh-issue-pr-iteration")
 			}
 
-			// Now wait for the review phase credential (the iteration's in_progress write makes
-			// the scheduler advance to review on the next tick).
+			// Now wait for the review phase credential (iteration's clean exit advances through
+			// verification and publish — both exit(0) immediately — to review).
 			await waitFor(async () => {
 				try { return (await readFile(reviewCapture, "utf-8")).trim() } catch { return "" }
 			}, (value) => value.length > 0, 12_000)
@@ -6815,7 +6854,9 @@ process.exitCode = 0
 				expect(allow.payload.presetName).toBe("gh-issue-pr-iteration")
 			}
 			if (deny !== undefined && deny.kind === "audit" && deny.type === "privileged_op.caller_admission") {
-				expect(deny.payload.reason).toBe("no-rights-segment")
+				// Iteration declares a rights segment (writableFields branch/pr) without
+				// privilegedOps, so the deny reason is the segment-present variant.
+				expect(deny.payload.reason).toBe("no-privileged-ops-grant")
 				expect(deny.payload.claimedPhase).toBe("iteration")
 				expect(deny.payload.presetName).toBe("gh-issue-pr-iteration")
 			}
@@ -7352,15 +7393,14 @@ process.exitCode = 0
 		}
 	})
 
-	// #410 acceptance row #2 — review writes its declared passthrough fields (top-level + inner
-	// blocker keys via extraPatch). Uses the same two-phase fake runner shape as #409 row 2:
-	// iteration captures its credential + writes in_progress; review captures its credential and
-	// sleeps while the test drives the live `item.update` calls. The fixture preset has
-	// `writableFields = ["branch", "pr", "blockerRepo", "blockerRef"]` on the review phase, so a
-	// review-CRED update of `branch` + `pr` succeeds and a review-CRED `extraPatch` write of
-	// `blockerRepo` + `blockerRef` succeeds. The deny half (control-plane denial + undeclared
-	// field) is covered in the row #1 test below.
-	test("daemon allows review-phase agent to write declared passthrough fields branch + pr + extra blocker keys (#410 row 2)", async () => {
+	// #410 acceptance row #2 — phases write their declared passthrough fields (inner keys via
+	// extraPatch). Uses the same fake runner shape as #409 row 2: iteration captures its
+	// credential + writes in_progress and sleeps while the test drives the branch/pr write
+	// (iteration's rights segment grants `writableFields = ["branch", "pr"]`); review captures
+	// its credential and sleeps while the test drives the blocker write (review's rights
+	// segment grants `writableFields = ["blockerRepo", "blockerRef"]`). The deny half
+	// (control-plane denial + undeclared field) is covered in the row #1 test below.
+	test("daemon allows iteration agent to write branch + pr and review agent to write blocker keys (#410 row 2)", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-410-row2-allow`)
 		const loopDataRoot = resolve(root, "ld")
 		const iterationCapture = resolve(root, "iteration-credential.txt")
@@ -7376,6 +7416,7 @@ const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
 const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
 await appendFile(input.eventLog, JSON.stringify({ type: "running", itemId: input.itemId, runId: input.runId, phase: input.phase }) + "\\n")
+if (input.phase !== "iteration" && input.phase !== "review") process.exit(0)
 if (input.phase === "review") {
 	await writeFile(${JSON.stringify(reviewCapture)}, process.env.CODER_LOOP_RUN_CRED ?? "")
 	await new Promise((r) => setTimeout(r, input.sleepMs ?? 5_500))
@@ -7386,7 +7427,7 @@ if (input.phase === "review") {
 		store.updateItem(input.itemId, { status: input.writeStatus, updatedAt: Math.floor(Date.now() / 1000) })
 		store.close()
 	}
-	await new Promise((r) => setTimeout(r, 5))
+	await new Promise((r) => setTimeout(r, input.iterationSleepMs ?? 5))
 }
 process.exitCode = 0
 `,
@@ -7411,7 +7452,13 @@ process.exitCode = 0
 					phase,
 					eventLog,
 					sleepMs: 6_000,
-					writeStatus: phase === "iteration" ? "in_progress" : null,
+					// Keep iteration alive long enough for the test to drive the branch/pr write
+					// against its live credential (same #419 M2 rationale as #409 row 2).
+					// No status write: `in_progress` has no leaving edge at iteration in the
+					// six-phase graph, so writing it would re-pick iteration instead of
+					// advancing via the completed edge.
+					iterationSleepMs: 8_000,
+					writeStatus: null,
 				}),
 				chainCompleteTriggerForChain: () => null,
 			},
@@ -7433,27 +7480,35 @@ process.exitCode = 0
 			const itemId = numberValue(added.id)
 			expect(itemId).toBeGreaterThan(0)
 
-			// Wait for the review credential — the scheduler advances iteration → review on the
-			// next tick after iteration writes in_progress.
+			// Wait for the iteration credential (iteration stays alive ~8s while we drive the
+			// branch/pr write against it).
 			await waitFor(async () => {
-				try { return (await readFile(reviewCapture, "utf-8")).trim() } catch { return "" }
-			}, (value) => value.length > 0, 12_000)
-			const reviewCredential = (await readFile(reviewCapture, "utf-8")).trim()
-			expect(reviewCredential.length).toBeGreaterThan(0)
+				try { return (await readFile(iterationCapture, "utf-8")).trim() } catch { return "" }
+			}, (value) => value.length > 0, 8_000)
+			const iterationCredential = (await readFile(iterationCapture, "utf-8")).trim()
+			expect(iterationCredential.length).toBeGreaterThan(0)
 
-			// Allow #1: branch + pr declared in preset.review.writableFields → admit, write lands.
+			// Allow #1: branch + pr declared in preset.iteration.writableFields → admit, write lands.
 			const allowed = expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.update", {
 				itemId,
 				fields: { extraPatch: { branch: "feat/issue-410", pr: 1042 } },
-				agentCredential: reviewCredential,
+				agentCredential: iterationCredential,
 			})))
 			const updatedA = record(allowed.item)
 			const updatedAExtra = record(updatedA.extra)
 			expect(updatedAExtra.branch).toBe("feat/issue-410")
 			expect(numberValue(updatedAExtra.pr)).toBe(1042)
 
+			// Wait for the review credential — iteration's clean exit advances through
+			// verification and publish (both exit(0) immediately) to review.
+			await waitFor(async () => {
+				try { return (await readFile(reviewCapture, "utf-8")).trim() } catch { return "" }
+			}, (value) => value.length > 0, 16_000)
+			const reviewCredential = (await readFile(reviewCapture, "utf-8")).trim()
+			expect(reviewCredential.length).toBeGreaterThan(0)
+
 			// Allow #2: extraPatch with blockerRepo + blockerRef inner keys — both declared in
-			// writableFields → admit. The merge preserves any prior extra contents.
+			// preset.review.writableFields → admit. The merge preserves any prior extra contents.
 			const allowedExtra = expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.update", {
 				itemId,
 				fields: { extraPatch: { blockerRepo: "mouriya-s-lab/other", blockerRef: "#999" } },
@@ -7465,19 +7520,19 @@ process.exitCode = 0
 			expect(extra.blockerRef).toBe("#999")
 
 			// Audit replay: both calls emitted item.update.field_write_admission allow events with
-			// reason=agent-allowed, claimedPhase=review, presetName=gh-issue-pr-iteration, the
-			// declared field set in `grantedFields`, and an empty deniedFields list.
+			// reason=agent-allowed, presetName=gh-issue-pr-iteration, the declared field set in
+			// `grantedFields`, and an empty deniedFields list — branch/pr under the iteration
+			// credential, blocker keys under the review credential.
 			const eventsPath = resolveLoopDataPaths({ loopDataRoot }).eventsFile
 			const events = (await queryObservabilityEvents(eventsPath)).events
-			const reviewAllows = events.filter((event) =>
+			const fieldAllows = events.filter((event) =>
 				event.kind === "audit"
 				&& event.type === "item.update.field_write_admission"
 				&& event.item === itemId
-				&& event.payload.outcome === "allow"
-				&& event.payload.claimedPhase === "review",
+				&& event.payload.outcome === "allow",
 			)
-			expect(reviewAllows.length).toBeGreaterThanOrEqual(2)
-			const allowBranchPr = reviewAllows.find((event) =>
+			expect(fieldAllows.length).toBeGreaterThanOrEqual(2)
+			const allowBranchPr = fieldAllows.find((event) =>
 				event.kind === "audit"
 				&& event.type === "item.update.field_write_admission"
 				&& event.payload.grantedFields.includes("branch")
@@ -7486,16 +7541,20 @@ process.exitCode = 0
 			expect(allowBranchPr).toBeDefined()
 			if (allowBranchPr !== undefined && allowBranchPr.kind === "audit" && allowBranchPr.type === "item.update.field_write_admission") {
 				expect(allowBranchPr.payload.reason).toBe("agent-allowed")
+				expect(allowBranchPr.payload.claimedPhase).toBe("iteration")
 				expect(allowBranchPr.payload.deniedFields).toEqual([])
 				expect(allowBranchPr.payload.presetName).toBe("gh-issue-pr-iteration")
 			}
-			const allowBlocker = reviewAllows.find((event) =>
+			const allowBlocker = fieldAllows.find((event) =>
 				event.kind === "audit"
 				&& event.type === "item.update.field_write_admission"
 				&& event.payload.grantedFields.includes("blockerRepo")
 				&& event.payload.grantedFields.includes("blockerRef"),
 			)
 			expect(allowBlocker).toBeDefined()
+			if (allowBlocker !== undefined && allowBlocker.kind === "audit" && allowBlocker.type === "item.update.field_write_admission") {
+				expect(allowBlocker.payload.claimedPhase).toBe("review")
+			}
 		} finally {
 			await daemon.stop()
 		}
@@ -8211,9 +8270,12 @@ process.exitCode = 0
 				phase,
 				eventLog,
 				sleepMs: 5,
+				// Review only writes the fixture's retry/reenrich status on its first pass;
+				// otherwise it clean-exits and the scheduler advances to closure, which owns
+				// the terminal `done` write (six-phase split).
 				writeStatus: phase === "review"
-					? reviewOrdinal === 1 && options.firstReviewStatus !== undefined ? options.firstReviewStatus : "done"
-					: null,
+					? reviewOrdinal === 1 && options.firstReviewStatus !== undefined ? options.firstReviewStatus : null
+					: phase === "closure" ? "done" : null,
 				})
 			},
 			chainCompleteTriggerForChain: () => null,

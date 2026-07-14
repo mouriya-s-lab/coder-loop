@@ -367,10 +367,10 @@ Queue item 可加 `"runner": "claude"|"codex"|"opencode"` 覆盖所有非 trigge
 跑一个新 preset 所需的最小 target（参见 `src/smoke.test.ts`）：
 
 ```
-<target>/CLAUDE.md 或 AGENTS.md      # 项目命令 / 约定 / PR 形态；iteration / review 调度者显式读取
+<target>/CLAUDE.md 或 AGENTS.md      # 项目命令 / 约定 / PR 形态；各执行 phase 的 workflow 显式读取
 ```
 
-Target 目录不需要任何 `.coder-loop/` 目录或状态文件——chain shared / issues / evidence / runs 目录由中央 daemon 在 `~/.coder-loop/loop-data/chains/<chain>/` 下创建维护（`--loop-data-root` 可改根路径）。项目命令 / PR 约定的真源是 target 自有的 `CLAUDE.md` / `AGENTS.md`（committed），iteration / review 调度者显式读取。
+Target 目录不需要任何 `.coder-loop/` 目录或状态文件——chain shared / issues / evidence / runs 目录由中央 daemon 在 `~/.coder-loop/loop-data/chains/<chain>/` 下创建维护（`--loop-data-root` 可改根路径）。项目命令 / PR 约定的真源是 target 自有的 `CLAUDE.md` / `AGENTS.md`（committed），各执行 phase 的 workflow 显式读取。
 
 Preset 选择通过 `coder-loop item add --preset <name>` 或 `--preset-path <abs>` 逐 item 声明；chain-level `--preset` 只是 legacy default seed，不驱动任何 item 的执行 preset。Chain identity（`repository`、`baseBranch`）与其余 per-target 偏差通过 `coder-loop chain create --config-json '{"repository":"...","baseBranch":"...","bindings":{...}}'` 写入 chain.metadata.bindings。队列 / current / runs 全部存在 centralized SQLite loop-data store 中；用 `coder-loop chain create` + `coder-loop item add` 建立 chain 与 item，不要手写状态文件。
 

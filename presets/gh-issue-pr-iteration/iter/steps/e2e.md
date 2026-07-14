@@ -19,6 +19,8 @@ From your dispatch message: `ISSUE`, `REPO`, `RUN_ID`, `AGENT_CWD` (the issue-br
 
    Record the detached worktree and its exact clean source SHA. It may remain owned by a durable runtime, or serve as the immutable reconstruction source for a recreatable handoff.
 
+   That SHA must already contain the implement step's local commit(s) for this run — confirm with `git log --oneline <BASE_BRANCH>..HEAD` before building. Driving a tree that predates the change proves nothing about it; if the commit is missing, stop and report the gap instead of executing.
+
    Stand the deliverable's runtime up for real: install what is missing, run required builds, start the services. Auth is yours to resolve per the two-case rule in `quality/evidence.md` — standalone program → mint the auth while starting the environment; service plugin → resolve the IaC-provisioned auth from this machine's stores. Neither auth nor binaries is ever a reason this step doesn't happen. Record every setup command and exit.
 3. **Run the real thing, directly.**
    - Program / CLI / daemon → invoke its **real entry point the way an operator would** (real arguments, real config), exercise the path this issue changes, capture the command transcript and service logs.

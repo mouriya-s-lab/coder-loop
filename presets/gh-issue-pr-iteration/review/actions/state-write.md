@@ -1,13 +1,13 @@
 # State write
 
-Apply the transition chosen by the terminal action by writing the item status yourself. The scheduler does not infer status from your output — the status written through `coder-loop item update` is the single source of truth; without a terminal status the item stays actionable and is re-selected.
+Apply the transition chosen by the verdict action by writing the item status yourself. The scheduler does not infer status from your output — the status written through `coder-loop item update` is the single source of truth; without it the item stays on its current status and is re-selected. Accepted/moot verdicts do **not** come here: they publish the ReviewVerdict and clean-exit; closure writes the terminal statuses after performing the external effects.
 
 ## How to write
 
 The daemon-serialized CLI validates against the preset vocabulary and writes atomically:
 
 ```bash
-coder-loop item update <CHAIN_NAME> --issue <ISSUE> --status <status> [--field-json '{"pr":123,"branch":"<name>"}']
+coder-loop item update <CHAIN_NAME> --issue <ISSUE> --status <status> [--field-json '{"extraPatch":{...}}']
 ```
 
 Blocker metadata for the `blocked` transition lives inside `--field-json` as an `extraPatch` block — see the Blocker metadata section below.
@@ -26,14 +26,12 @@ Non-zero exit or verification not showing the intended status = the write did no
 
 Resolve the status name for each verdict from the preset metadata, not from this fragment: run `coder-loop item exits <CHAIN_NAME> --issue <ISSUE> --agent-run-id <RUN_ID> --agent-phase review --json` to list the allowed status set for the review phase, then pick the status whose `when` text matches the verdict you reached. The `--status <chosen>` value below is described in semantic terms — the literal name comes from your `exits` query.
 
-- `retry` → write the preset's retry continuable status (the status the engine restores `current: null` items to for re-iteration). Add `--field-json '{"branch":"<verified>","pr":123}'` only for verified non-empty values.
+- `retry` → write the preset's retry continuable status (the status that routes the item into a fresh iteration). PR identity mirrors (`branch`/`pr`) are not yours to write — iteration and publish own that sync on their next pass.
+- `reenrich` → write the preset's contract-invalid continuable status; the declared next-node edge returns to `contract-enrichment`.
 - `expanded incomplete parent` → first insert the child batch, then set the parent to the same retry continuable status `retry` writes; leave the parent GitHub issue open. Batch insertion: read latest items with `coder-loop item list <CHAIN_NAME> --json`; skip child numbers already queued; add via `coder-loop item batch-add <CHAIN_NAME> --items-json '<json-array>'`. Since #412, every child item JSON must declare `preset` (or `presetPath`); inherit the parent item's preset by setting `"preset": "<the parent's preset name>"` so the child renders against the same preset family the parent assumed. If the parent sits before the new children, move children forward with `coder-loop item reorder <CHAIN_NAME> --issue <child> --position <n>` so they are selected before the parent retry and before older queued siblings.
-- `accepted_pr` → only after PR merge AND issue close both succeeded: write the preset's success-terminal status (member of `[statuses].success`) and `--field-json '{"pr":123}'`.
-- `accepted_no_pr` → only after issue close succeeded: write the preset's success-terminal status.
-- `skip` → only after issue close succeeded: write the preset's "no-longer-applicable" terminal status (the one the `moot` verdict's `when` text marks).
 - `blocked` → write the preset's blocked terminal status with `--field-json '{"extraPatch":{"blockerRepo":"<owner/repo>","blockerRef":"<ref>"}}'`.
 
-If merge fails, close fails, the issue remains open, checks are not green, or expansion fails: do not write a terminal status — keep the item actionable with exact feedback.
+If feedback publication, expansion, or blocker publication failed: do not write the corresponding status — keep the item on its current status with exact failure recorded, per the action file's failure routing.
 
 ## Blocker metadata
 
