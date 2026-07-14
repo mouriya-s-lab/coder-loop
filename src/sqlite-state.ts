@@ -15,6 +15,7 @@ import {
 	type ItemExtra,
 } from "./runtime-data"
 import { type LoopDataRootOptions, resolveLoopDataPaths } from "./runtime-paths"
+import { contextScopeKey, parseContextAuthor, parsePersistedContextEntryRow, persistedContextScope, type AppendContextEntryInput, type ContextEntry, type PersistedContextEntryRow } from "./context-entry"
 
 export type SqliteStateErrorCode =
 	| "db_unavailable"
@@ -254,7 +255,7 @@ export type SetItemSessionIdInput = ItemSessionIdInput & {
 	updatedAt?: number
 }
 
-export type StateTableName = "chains" | "items" | "runs" | "current_runs"
+export type StateTableName = "chains" | "items" | "runs" | "current_runs" | "context_entries"
 
 export type SqliteStateStoreOptions = LoopDataRootOptions & {
 	createIfMissing?: boolean
@@ -295,6 +296,9 @@ export type SqliteStateStore = {
 	setCurrentRun: (input: SetCurrentRunInput) => CurrentRunRecord
 	getCurrentRun: (chainId: number) => CurrentRunRecord | null
 	clearCurrentRun: (chainId: number) => boolean
+	appendContextEntry: (input: AppendContextEntryInput) => ContextEntry
+	listContextEntries: (chainId: number) => ContextEntry[]
+	deleteContextEntriesForChain: (chainId: number) => number
 }
 
 type SqlParamValue = string | number | bigint | boolean | Uint8Array | null
@@ -471,6 +475,17 @@ CREATE TABLE IF NOT EXISTS current_runs (
 	extra TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS context_entries (
+	id TEXT PRIMARY KEY,
+	chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+	created_at REAL NOT NULL,
+	scope_kind TEXT NOT NULL CHECK (scope_kind IN ('chain','item','group')),
+	scope_key TEXT,
+	author TEXT NOT NULL,
+	body TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_context_entries_chain_cursor ON context_entries(chain_id, created_at, id);
+
 ${STATE_INDEXES_SQL}
 `
 
@@ -493,7 +508,7 @@ ${STATE_INDEXES_SQL}
 // now carries the widened CHECK). Idempotent: rows already on v13 cause `user_version` to skip
 // the rebuild, and rows being copied through the new schema satisfy the new constraint (existing
 // runner values are all `claude` / `codex` / NULL — strict subset of the new accepted set).
-const STATE_SCHEMA_VERSION = 13
+const STATE_SCHEMA_VERSION = 14
 const V5_ITEM_SESSION_COLUMN = ["last", "session", "id"].join("_")
 // v9 moves preset declaration from chains.preset to items.preset / items.preset_path (#412).
 // Existing rows are back-filled from chains.preset so the engine resolves the legacy preset
@@ -549,6 +564,10 @@ function stateSchemaExists(db: Database): boolean {
 			AND name IN ('chains', 'items', 'runs', 'current_runs')
 	`).get()
 	return row?.table_count === 4
+}
+
+function contextEntriesTableExists(db: Database): boolean {
+	return (db.query<TableCountRow, []>("SELECT COUNT(*) AS table_count FROM sqlite_master WHERE type='table' AND name='context_entries'").get()?.table_count ?? 0) === 1
 }
 
 function readUserVersion(db: Database): number {
@@ -624,6 +643,7 @@ function migrateStateSchema(db: Database): void {
 	if (
 		beforeVersion >= STATE_SCHEMA_VERSION
 		&& stateSchemaExists(db)
+		&& contextEntriesTableExists(db)
 		&& !needsChainTableRebuild
 		&& !needsItemTableRebuildForGitHubShapeRetire
 		&& !needsItemTableRebuildForOpencodeCheck
@@ -1420,6 +1440,26 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 
 		clearCurrentRun: (chainId) =>
 			write("clear current run", () => db.query<unknown, SqlParams>("DELETE FROM current_runs WHERE chain_id = $chainId").run({ chainId: chainId }).changes > 0),
+
+		appendContextEntry: (input) => write("append context entry", () => {
+			const id = crypto.randomUUID()
+			const createdAt = input.createdAt ?? unixSeconds()
+			db.query<unknown, SqlParams>(`INSERT INTO context_entries (id, chain_id, created_at, scope_kind, scope_key, author, body)
+				VALUES ($id,$chainId,$createdAt,$scopeKind,$scopeKey,$author,$body)`).run({
+				id, chainId: input.chainId, createdAt, scopeKind: input.scope.kind, scopeKey: contextScopeKey(input.scope),
+				author: JSON.stringify(input.author), body: input.body,
+			})
+			return { id, chainId: input.chainId, createdAt, scope: input.scope, author: input.author, body: input.body }
+		}),
+
+		listContextEntries: (chainId) => read("list context entries", () => db.query<PersistedContextEntryRow, SqlParams>(
+			"SELECT * FROM context_entries WHERE chain_id=$chainId ORDER BY created_at,id").all({chainId}).map((rawRow) => {
+				const row = parsePersistedContextEntryRow(rawRow)
+				const scope = persistedContextScope(row)
+				return {id:row.id,chainId:row.chain_id,createdAt:row.created_at,scope,author:parseContextAuthor(JSON.parse(row.author)),body:row.body}
+			})),
+
+		deleteContextEntriesForChain: (chainId) => write("delete chain context entries", () => db.query<unknown, SqlParams>("DELETE FROM context_entries WHERE chain_id=$chainId").run({chainId}).changes),
 	}
 }
 

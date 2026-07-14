@@ -5,8 +5,9 @@
 review / merge / issue closure。它故意不是单元测试：要抓的是 runner sandbox 行为、
 session resume、`gh` 交互、跨 phase 状态推进这类只在真实运行中暴露的集成失败。
 
-任何 mock / stub / fake 都不足以替代真实 GitHub issue/PR 路径——完成判定必须包含
-一次 real-e2e 绿跑。
+mock / stub / fake 不能证明真实 GitHub issue/PR 路径；但 real E2E 是阶段性收尾门，
+不是每次修改的日常 gate。普通 bug 修复与迭代中途先走完整 integration gate，只有下文
+“何时跑”列出的时机才要求 real E2E。
 
 ## Fixture
 
@@ -48,7 +49,7 @@ bun scripts/real-e2e.ts --preset gh-issue-pr-iteration
 它按序做完一轮完整真实 e2e：
 
 1. **preflight** — gh auth、preset 声明的 runner CLI（`claude` / `codex` / `opencode`）在 PATH、fixture repo 可达、本地 source checkout origin 一致。
-2. **allocate** — 每轮生成 UUID；入口先按 `<fixture-repo>@main` 资源域取得位于 `~/.coder-loop/real-e2e-locks/` 的 `shlock` PID mutex，再创建自己的 `runs/<uuid>.txt`（`status: pending`）并 clone 到 `.coder-loop/runtime/real-e2e/<uuid>/fixture`。锁覆盖 allocate/run/assert/teardown 完整生命周期；并发调用明确打印等待的资源域与 owner PID，持有进程异常退出后由 `shlock` 按进程生命周期回收，等待没有固定次数或超时上限。
+2. **allocate** — 每轮生成 UUID，创建自己的 `runs/<uuid>.txt`（`status: pending`）并 clone 到 `.coder-loop/runtime/real-e2e/<uuid>/fixture`。每轮的 fixture path、checkout、chain 与 loop-data 都由 UUID 隔离；harness 不持有跨完整生命周期的并发锁。
 3. **seed** — 脚本用 `gh issue create` 建一个契约合规且带 run UUID 的 trivial issue（`kind:code` + `e2e-seed` label）：只要求把本轮 `runs/<uuid>.txt` 改为 `status: complete`。
 4. **run** — 在隔离 `--loop-data-root`（`.coder-loop/runtime/real-e2e/<uuid>/loop-data`）起中央 daemon（`daemon up`），以 UUID 唯一 chain name 对 default branch 执行 `chain create`，再 `item add` 入队。每个 PR 仍 merge 到 default branch，因此 GitHub closing keyword 会真实关闭对应 issue；生产 daemon（`~/.coder-loop`）和 source checkout完全不被触碰。
 5. **watch + tripwire** — 轮询 `status <target> --json`，越界即自动 `daemon down` + 落诊断 + 非零退出：
@@ -76,11 +77,21 @@ exit 1。
 
 ## 何时跑
 
-真实 e2e 不进每 commit 的 gate（`bun test` 是日常 gate）。在这些时机跑：
+real E2E 不进每 commit 的 gate。日常默认门是 `bun run typecheck` + `bun test` +
+`bun scripts/engine-integration.ts`；普通 bug 修复、迭代中途的 commit / retry、没有改变
+调度或 preset 语义的局部修改，integration gate 通过即可。
 
-- 动 scheduler / daemon / runner spawn / preset prompt 的 PR 验收（真 chain + 真 item 的 e2e fixture 跑通才构成 acceptance）；
-- 发版 / 同步到 app 之前；
-- 排查只在真实运行中复现的问题。
+只在这些时机跑 real E2E：
+
+- 大型改动完成、准备收尾或合并；
+- 修正 bundled preset 的 phase、prompt、status、transition、runner/model 或加载语义；
+- 改动 scheduler / daemon / runner spawn、worktree、status/phase 推进、终止、resume、admission、terminal semantics 等引擎机制；
+- 发版 / 同步到 app 前；
+- 排查或复验只在真实 runner / GitHub 路径中出现的问题。
+
+默认跑 `real-e2e-minimal`。只有修改 `gh-issue-pr-iteration` 本身或大型编排行为时才显式
+使用 `--preset gh-issue-pr-iteration`；迭代中途不为每个修正重复运行，先用 integration
+gate 收敛，满足上述收尾条件时跑一次。
 
 ## Runner 覆盖
 

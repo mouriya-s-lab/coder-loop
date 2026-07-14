@@ -30,6 +30,15 @@ import {
 	type PresetPhasePrivilegedOp,
 } from "./daemon"
 import { dispatchSubcommand } from "./install-commands"
+import {
+	contextScopeFromCliArgs,
+	parseContextAppendBeginResult,
+	parseContextAppendChunkResult,
+	parseContextAppendCliScopeArgs,
+	parseContextAppendCommitResult,
+	type ContextAppendBeginRequest,
+	type ContextScope,
+} from "./context-entry"
 import { classifyRateLimitFromStdout } from "./rate-limit"
 import { createStreamTextState } from "./runner-output"
 import { LOOP_RUN_CREDENTIAL_ENV, RuntimePathError, resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
@@ -371,6 +380,15 @@ export type QueueUnblockCommandArgs = {
 	issue: string
 	startDaemon: boolean
 	dryRun: boolean
+}
+
+type ContextAppendCommandArgs = {
+	chainName: string
+	scope: ContextScope
+	body: string | null
+	bodyFile: string | null
+	loopDataRoot: string | null
+	json: boolean
 }
 
 // #433: per-target on-disk runtime preferences are retired. Every fact the engine spawns against
@@ -1761,6 +1779,52 @@ const itemCliCommand = subcommands({
 	},
 })
 
+const contextAppendCliCommand = command({
+	name: "append",
+	description: "Append an opaque context entry through the daemon socket.",
+	args: {
+		chainName: positional({ displayName: "chain", type: cmdString }),
+		scope: option({ long: "scope", type: cmdString }),
+		itemId: option({ long: "item", type: optional(cmdString) }),
+		groupId: option({ long: "group", type: optional(cmdString) }),
+		body: option({ long: "body", type: optional(cmdString) }),
+		bodyFile: option({ long: "body-file", type: optional(cmdString) }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		json: flag({ long: "json" }),
+	},
+	handler: (args): ContextAppendCommandArgs => {
+		const scopeArgs = parseContextAppendCliScopeArgs({ scope: args.scope, itemId: args.itemId ?? null, groupId: args.groupId ?? null })
+		return {
+			chainName: args.chainName,
+			scope: contextScopeFromCliArgs(scopeArgs),
+			body: args.body ?? null,
+			bodyFile: args.bodyFile ?? null,
+			loopDataRoot: args.loopDataRoot ?? null,
+			json: args.json,
+		}
+	},
+})
+
+const contextCliCommand = subcommands({ name: "context", description: "Append daemon-owned context entries.", cmds: { append: contextAppendCliCommand } })
+
+async function runContextCommand(args: string[]): Promise<void> {
+	const parsed = await runCmd(contextCliCommand, args)
+	const value = parsed.value
+	if ((value.body === null) === (value.bodyFile === null)) fail("exactly one of --body or --body-file is required")
+	const body = value.body ?? await readFile(value.bodyFile ?? fail("body file missing"), "utf-8")
+	const beginRequest: ContextAppendBeginRequest = { scope: value.scope }
+	const begun = parseContextAppendBeginResult(await requestDaemonResult(value.loopDataRoot, "context.append.begin", { chainName: value.chainName, ...beginRequest }))
+	const sessionId = begun.sessionId
+	const chunkChars = 256 * 1024
+	let sequence = 0
+	for (let offset = 0; offset < body.length; offset += chunkChars) {
+		parseContextAppendChunkResult(await requestDaemonResult(value.loopDataRoot, "context.append.chunk", { sessionId, sequence, chunk: body.slice(offset, offset + chunkChars) }))
+		sequence += 1
+	}
+	const result = parseContextAppendCommitResult(await requestDaemonResult(value.loopDataRoot, "context.append.commit", { sessionId }))
+	writeCommandResult(result, value.json, (entry) => `context entry appended: ${String(entry.entryId ?? "")}\n`)
+}
+
 const queueUnblockCliCommand = command({
 	name: "unblock",
 	description: "Restore one preset-unblockable item to the preset entry status, clear its phase so the scheduler re-picks it from the entry phase, and reactivate the chain if it had completed.",
@@ -2317,6 +2381,9 @@ const AGENT_ATTRIBUTED_COMMANDS = [
 	"daemon.down",
 	"logs.query",
 	"queue.unblock",
+	"context.append.begin",
+	"context.append.chunk",
+	"context.append.commit",
 ] as const
 type AgentAttributedCommand = typeof AGENT_ATTRIBUTED_COMMANDS[number]
 
@@ -2701,6 +2768,10 @@ async function main() {
 		await runQueueCommand(process.argv.slice(3))
 		return
 	}
+	if (firstArg === "context") {
+		await runContextCommand(process.argv.slice(3))
+		return
+	}
 	if (firstArg === "doctor") {
 		const handled = await dispatchSubcommand(firstArg, process.argv.slice(3))
 		if (handled) return
@@ -2720,6 +2791,7 @@ function rootUsage(): string {
 		"  chain <create|list|status|stop|resume|delete|set-runner-model>",
 		"  item <add|batch-add|list|update|reorder|exits|exit-action>",
 		"  queue unblock <target> --issue <issue>",
+		"  context append <chain> --scope <chain|item|group> --body <text>",
 		"  doctor <target>",
 		"",
 	].join("\n")
@@ -4187,7 +4259,7 @@ export async function materializePreset(sourceDir: string, materializeRoot: stri
 	// of source edits doesn't grow the loop-data footprint without bound.
 	// Only siblings that share the `<name>-` prefix (a different hash for
 	// the same preset) are removed; other presets in the shared root
-	// (`gh-issue-pr-iteration-*`, `real-e2e-minimal-*`, …) stay untouched.
+	// (`gh-issue-pr-iteration-*`, `engine-integration-*`, `real-e2e-minimal-*`, …) stay untouched.
 	// Runs from concurrent daemons on a shared root would race here, but
 	// the daemon is singleton per loop-data-root by design.
 	await prunePresetSiblingsForName(rootDir, name, dirName)

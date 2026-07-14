@@ -1353,6 +1353,7 @@ attemptTimeoutSeconds = 3600
 			BUNDLED_PRESET_DIR,
 			resolve(REPO_ROOT, "presets/single-phase-example"),
 			resolve(REPO_ROOT, "presets/business-key-example"),
+			resolve(REPO_ROOT, "presets/engine-integration"),
 			resolve(REPO_ROOT, "presets/real-e2e-minimal"),
 		]) {
 			const findings: PresetDagFinding[] = []

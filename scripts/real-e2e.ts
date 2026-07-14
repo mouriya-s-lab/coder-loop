@@ -23,7 +23,6 @@ import { chmodSync, existsSync, mkdirSync, openSync, closeSync, readFileSync, rm
 import { resolve } from "node:path"
 import { randomUUID } from "node:crypto"
 import { operatorSubprocessEnvironment } from "./real-e2e-environment"
-import { acquireRealE2eGlobalMutex } from "./real-e2e-global-mutex"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
@@ -280,7 +279,9 @@ function writeCoderLoopCliShim(workDir: string): string {
 	const shimDir = resolve(workDir, "cli-shim")
 	mkdirSync(shimDir, { recursive: true })
 	const shimPath = resolve(shimDir, "coder-loop")
-	const script = `#!/bin/sh\nexec bun ${LOOP_ENTRY} "$@"\n`
+	const script = `#!/bin/sh
+exec bun ${LOOP_ENTRY} "$@"
+`
 	writeFileSync(shimPath, script)
 	chmodSync(shimPath, 0o755)
 	return shimDir
@@ -516,34 +517,23 @@ async function main(): Promise<number> {
 	const startedAt = Date.now()
 	const runKey = randomUUID()
 	preflight(options)
-	const mutexDomain = `${options.fixtureRepo.toLowerCase()}@main`
-	const mutex = await acquireRealE2eGlobalMutex({
-		domain: mutexDomain,
-		onWait: (ownerPid) => log(`mutex: 等待资源域 ${mutexDomain}，当前 owner pid=${ownerPid ?? "unknown"}`),
-	})
-	log(`mutex: 已获得资源域 ${mutex.domain}，owner pid=${mutex.ownerPid}，lock=${mutex.lockPath}`)
+	const workDir = resolve(REPO_ROOT, ".coder-loop/runtime/real-e2e", runKey)
+	mkdirSync(workDir, { recursive: true })
+	const fixture = await prepareFixture(options, workDir, runKey)
+	const chainName = `${options.fixtureRepo.split("/")[1]!}-${runKey}`
+	const daemon = startDaemon(workDir)
+	let exitCode = 1
+	let issueNumber: number | undefined
 	try {
-		const workDir = resolve(REPO_ROOT, ".coder-loop/runtime/real-e2e", runKey)
-		mkdirSync(workDir, { recursive: true })
-		const fixture = await prepareFixture(options, workDir, runKey)
-		const chainName = `${options.fixtureRepo.split("/")[1]!}-${runKey}`
-		const daemon = startDaemon(workDir)
-		let exitCode = 1
-		let issueNumber: number | undefined
-		try {
-			const result = await runScenario(options, fixture, daemon, chainName, startedAt)
-			issueNumber = result.issueNumber
-			exitCode = result.kind === "success" ? 0 : 1
-		} finally {
-			await stopDaemon(daemon)
-			if (exitCode !== 0 && issueNumber !== undefined) cleanupOwnedGitHubResources(fixture, issueNumber)
-			await deleteRunFixture(fixture)
-		}
-		return exitCode
+		const result = await runScenario(options, fixture, daemon, chainName, startedAt)
+		issueNumber = result.issueNumber
+		exitCode = result.kind === "success" ? 0 : 1
 	} finally {
-		mutex.release()
-		log(`mutex: 已释放资源域 ${mutex.domain}，owner pid=${mutex.ownerPid}`)
+		await stopDaemon(daemon)
+		if (exitCode !== 0 && issueNumber !== undefined) cleanupOwnedGitHubResources(fixture, issueNumber)
+		await deleteRunFixture(fixture)
 	}
+	return exitCode
 }
 
 async function runScenario(
