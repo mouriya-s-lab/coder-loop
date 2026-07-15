@@ -32,6 +32,7 @@ Root usage（源：`src/loop.ts:2684 rootUsage`）：
 
 ```
 coder-loop status  <target> --json
+coder-loop activity <item|all|log>
 coder-loop logs    <target> --json [--kind K] [--type T] [--chain C] [--item ID] [--run RUN_ID] [--phase P] [--since TS] [--follow]
 coder-loop daemon  <up|down|status|start|stop|restart>
 coder-loop chain   <create|list|status|stop|resume|delete|set-runner-model>

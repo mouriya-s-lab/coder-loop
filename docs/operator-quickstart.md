@@ -172,7 +172,13 @@ coder-loop activity item <chain> --issue <item-id>
 coder-loop activity all
 ```
 
-两种命令都可加 `--json` / `--loop-data-root <dir>`，直接读取本地 SQLite 与
+取得指定存活任务当前 session stdout log 的完整路径（输出可直接交给 `tail -F`）：
+
+```bash
+coder-loop activity log <chain> --issue <item-id>
+```
+
+三种命令都可加 `--json` / `--loop-data-root <dir>`，直接读取本地 SQLite 与
 `activity.json`，不连接 daemon socket，也不要求 daemon 正在运行。输出固定包含最近
 10 秒、30 秒、60 秒、300 秒的 stdout 完整行数；窗口按引擎观察输出的秒级时间桶近似计算。
 
