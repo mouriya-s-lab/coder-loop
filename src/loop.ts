@@ -530,6 +530,7 @@ const StatusSnapshotBoundary = arkType({
 })
 
 const CompileFindingBoundary = arkType({ verdict: arkType.or(arkType.unit("warn"), arkType.unit("error")), rule: "string", message: "string" })
+export const PresetCompileErrorDiagnosticBoundary = arkType({ verdict: arkType.unit("error"), rule: "string", message: "string" })
 export const PresetCompileProjectionBoundary = arkType({
 	schemaVersion: arkType.unit(1),
 	preset: { name: "string", dir: "string", sourceHash: "string" },
@@ -580,10 +581,11 @@ export const PresetCompileProjectionBoundary = arkType({
 })
 
 export type CompileFinding = typeof CompileFindingBoundary.infer
+export type PresetCompileErrorDiagnostic = typeof PresetCompileErrorDiagnosticBoundary.infer
 export type PresetCompileProjection = typeof PresetCompileProjectionBoundary.infer
 export const PresetCompilePublicResultBoundary = arkType.or(
 	{ kind: arkType.unit("compiled"), schemaVersion: arkType.unit(1), projection: PresetCompileProjectionBoundary },
-	{ kind: arkType.unit("rejected"), schemaVersion: arkType.unit(1), diagnostics: arkType([CompileFindingBoundary, "...", CompileFindingBoundary.array()]) },
+	{ kind: arkType.unit("rejected"), schemaVersion: arkType.unit(1), diagnostics: arkType([PresetCompileErrorDiagnosticBoundary, "...", PresetCompileErrorDiagnosticBoundary.array()]) },
 )
 export type PresetCompilePublicResult = typeof PresetCompilePublicResultBoundary.infer
 
@@ -778,10 +780,10 @@ export type CompiledTaskModel = Preset & {
 
 export type CompileResult =
 	| { kind: "compiled"; model: CompiledTaskModel; warnings: readonly CompileFinding[] }
-	| { kind: "rejected"; diagnostics: readonly [CompileFinding, ...CompileFinding[]] }
+	| { kind: "rejected"; diagnostics: readonly [PresetCompileErrorDiagnostic, ...PresetCompileErrorDiagnostic[]] }
 
 class PresetCompileFailure extends Error {
-	constructor(readonly diagnostics: readonly [CompileFinding, ...CompileFinding[]]) {
+	constructor(readonly diagnostics: readonly [PresetCompileErrorDiagnostic, ...PresetCompileErrorDiagnostic[]]) {
 		super(diagnostics.map((diagnostic) => diagnostic.message).join("\n"))
 		this.name = "PresetCompileFailure"
 	}
@@ -4601,7 +4603,7 @@ async function compilePresetOrThrow(sourceDir: string, options: LoadPresetOption
 		else warnings.push({ verdict: "warn", rule: finding.kind, message: finding.message })
 	}
 	if (dagErrors.length > 0) {
-		const diagnostics = dagErrors.map((finding): CompileFinding => ({ verdict: "error", rule: finding.kind, message: finding.message }))
+		const diagnostics = dagErrors.map((finding): PresetCompileErrorDiagnostic => ({ verdict: "error", rule: finding.kind, message: finding.message }))
 		const first = diagnostics[0]
 		if (first === undefined) throw new CoderLoopError("non-empty DAG errors lost during conversion")
 		throw new PresetCompileFailure([first, ...diagnostics.slice(1)])
@@ -4615,11 +4617,16 @@ async function compilePresetOrThrow(sourceDir: string, options: LoadPresetOption
 		for (const finding of findings) {
 			options.onValidationFinding?.(finding)
 			if (finding.verdict === "error") placeholderErrors.push(finding)
+			else warnings.push({
+				verdict: "warn",
+				rule: finding.direction,
+				message: `${finding.file}: {{${finding.key}}} (${finding.direction})`,
+			})
 		}
 		phases.push(phase)
 	}
 	if (placeholderErrors.length > 0) {
-		const diagnostics = placeholderErrors.map((finding): CompileFinding => ({
+		const diagnostics = placeholderErrors.map((finding): PresetCompileErrorDiagnostic => ({
 			verdict: "error", rule: "template-undeclared",
 			message: `${finding.file}: {{${finding.key}}} (${finding.direction})`,
 		}))

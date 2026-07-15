@@ -10,6 +10,7 @@ import {
 	projectCompiledPreset,
 	projectPresetCompileResult,
 } from "./loop"
+import type { CompileResult } from "./loop"
 
 const ROOT = resolve(import.meta.dir, "..")
 
@@ -78,6 +79,65 @@ describe("preset compiler", () => {
 		const result = await compilePreset(resolve(ROOT, "test-fixtures/preset-compile/warning"))
 		expect(result.kind).toBe("compiled")
 		if (result.kind === "compiled") expect(result.warnings).toContainEqual(expect.objectContaining({ verdict: "warn", rule: "dead-vocabulary" }))
+	})
+
+	test("preserves declared-unused placeholder warnings in compiled and public findings", async () => {
+		const source = await mkdtemp(resolve(tmpdir(), "coder-loop-compile-unused-variable-"))
+		try {
+			await writeFile(resolve(source, "preset.toml"), `name = "unused-variable"
+[item]
+idField = "id"
+[item.fields]
+id = "string"
+[statuses]
+continuable = ["queued"]
+terminal = ["done", "exhausted"]
+entry = "queued"
+exhausted = "exhausted"
+[[phases]]
+name = "run"
+prompt = "run.md"
+[[phases.exits]]
+status = "done"
+when = "complete"
+[phases.variables]
+UNUSED = "item.id"
+`)
+			await writeFile(resolve(source, "run.md"), "No placeholders here.\n")
+			const result = await compilePreset(source)
+			expect(result.kind).toBe("compiled")
+			if (result.kind === "compiled") {
+				const warning = {
+					verdict: "warn",
+					rule: "declared-unused",
+					message: `${resolve(source, "run.md")}: {{UNUSED}} (declared-unused)`,
+				} as const
+				expect(result.warnings).toContainEqual(warning)
+				expect(projectCompiledPreset(result.model, result.warnings).findings).toContainEqual(warning)
+			}
+		} finally {
+			await rm(source, { recursive: true, force: true })
+		}
+	})
+
+	test("rejected diagnostics are non-empty and error-only at type and public boundaries", () => {
+		const errorDiagnostic = { verdict: "error", rule: "preset-source", message: "missing source" } as const
+		const rejected: CompileResult = { kind: "rejected", diagnostics: [errorDiagnostic] }
+		expect(PresetCompilePublicResultBoundary.assert(projectPresetCompileResult(rejected))).toEqual({
+			kind: "rejected",
+			schemaVersion: 1,
+			diagnostics: [errorDiagnostic],
+		})
+
+		const warnDiagnostic = { verdict: "warn", rule: "declared-unused", message: "unused" } as const
+		// @ts-expect-error rejected compile results cannot contain warning diagnostics
+		const impossibleRejected: CompileResult = { kind: "rejected", diagnostics: [warnDiagnostic] }
+		expect(impossibleRejected.kind).toBe("rejected")
+		expect(() => PresetCompilePublicResultBoundary.assert({
+			kind: "rejected",
+			schemaVersion: 1,
+			diagnostics: [warnDiagnostic],
+		})).toThrow()
 	})
 
 	test("direct and materialized compilation project identical source semantics", async () => {
