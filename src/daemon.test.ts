@@ -5506,6 +5506,63 @@ process.exitCode = 0
 		}
 	})
 
+	test("(#452) idempotent admitted status exit still enters the recycle zone", async () => {
+		const fixture = await startFixture("recycle-idempotent-status-write", {
+			schedulerConfig: {
+				maxItemAttempts: 1,
+				recycleAfterStateWriteMs: 60,
+				recycleKillGraceMs: 10,
+				phase: "iteration",
+			},
+			beforeStart: async ({ defaultItemPresetPath, fakeRunner }) => {
+				if (defaultItemPresetPath === null) throw new Error("expected credentialed fixture preset")
+				const presetTomlPath = resolve(defaultItemPresetPath, "preset.toml")
+				const presetToml = await readFile(presetTomlPath, "utf-8")
+				const iterationHeader = 'roles  = ["common", "quality", "iter"]'
+				await writeFile(presetTomlPath, presetToml.replace(
+					iterationHeader,
+					`${iterationHeader}\n\n  [[phases.exits]]\n  status = "queued"\n  when = "request a native resume"`,
+				))
+				await writeCredentialedFakeRunner(fakeRunner)
+			},
+		})
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "recycle-idempotent-status-write-chain",
+				repository: "test/repo",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			const added = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				itemId: "4525",
+				repoCwd: REPO_ROOT,
+				extra: {
+					sleepMs: 5,
+					exitCode: 0,
+					writeStatus: "queued",
+					extraSleepAfterStatusWriteMs: 800,
+				},
+			})).item)
+			const itemId = numberValue(added.id)
+
+			const timeoutKill = await waitFor(
+				async () => fixture.schedulerEvents.find(
+					(event): event is Extract<SchedulerEvent, { type: "recycle.timeout_kill" }> =>
+						event.type === "recycle.timeout_kill" && event.itemId === itemId,
+				) ?? null,
+				(event) => event !== null,
+			)
+			if (timeoutKill === null) throw new Error("expected idempotent status write recycle timeout")
+			expect(timeoutKill.recycleAfterMs).toBe(60)
+			expect(fixture.schedulerEvents.some((event) =>
+				event.type === "recycle.pending_entered" && event.itemId === itemId,
+			)).toBe(true)
+			expect((await readItem(fixture.loopDataRoot, chainId, 4525))?.status).toBe("queued")
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("recovers after scheduler lifecycle event failure", async () => {
 		const unhandled: unknown[] = []
 		const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
