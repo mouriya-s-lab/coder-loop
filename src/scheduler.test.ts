@@ -254,7 +254,7 @@ describe("scheduler", () => {
 			const leaf = tree.root.children[0]
 			expect(leaf?.kind).toBe("leaf")
 			if (leaf?.kind !== "leaf") throw new Error("expected fixture task tree leaf")
-			expect(leaf.closure.branchName).toBe("main")
+			expect(leaf.closure.branchName).toBe("coder-loop/closure-branch-identity-chain-6e04712f89fa")
 			await Promise.all(tick.spawnedRuns.map((run) => run.closed))
 		} finally { fixture.store.close() }
 	})

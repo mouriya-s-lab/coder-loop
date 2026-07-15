@@ -844,6 +844,10 @@ export function schedulerSlotWorktreePath(chain: ChainRecord, repoCwd: string, o
 	return resolve(chainPaths.chainRoot, "worktrees", `${repoLabel}-${repoHash}`)
 }
 
+function schedulerSlotBranchName(chain: ChainRecord, repoCwd: string): string {
+	return `coder-loop/${safeGitRefComponent(chain.name)}-${createHash("sha256").update(repoCwd).digest("hex").slice(0, 12)}`
+}
+
 export function createGitWorktreeManager(options: LoopDataRootOptions = {}): SchedulerWorktreeManager {
 	return async ({ chain, repoCwd }) => {
 		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, options)
@@ -855,7 +859,7 @@ export function createGitWorktreeManager(options: LoopDataRootOptions = {}): Sch
 			git(repoCwd, ["worktree", "prune"])
 		}
 
-		const branchName = `coder-loop/${safeGitRefComponent(chain.name)}-${createHash("sha256").update(repoCwd).digest("hex").slice(0, 12)}`
+		const branchName = schedulerSlotBranchName(chain, repoCwd)
 		const startRef = chooseWorktreeStartRef(repoCwd, chain.baseBranch)
 		let result = git(repoCwd, ["worktree", "add", "-B", branchName, worktreePath, startRef])
 		if (result.exitCode !== 0 && removeStaleSlotBranchWorktree(repoCwd, result.stderr)) {
@@ -983,7 +987,7 @@ async function spawnSchedulerRun(
 		worktreePath = worktreePath ?? await worktreeManager({ chain, repoCwd: item.repoCwd, slotKey: slot.key })
 		slot.worktreePath = worktreePath
 		const baseCommitResult = git(worktreePath, ["rev-parse", "HEAD"])
-		const branchResult = git(worktreePath, ["branch", "--show-current"])
+		const branchName = schedulerSlotBranchName(chain, item.repoCwd)
 
 		const runner = await resolvePhaseRunner(options, { chain, item, phase })
 		const loadedPreset = await schedulerLoadedPresetForItem(options, chain, item)
@@ -1005,7 +1009,7 @@ async function spawnSchedulerRun(
 				repoCwd: item.repoCwd,
 				worktreePath,
 				...(baseCommitResult.exitCode === 0 && baseCommitResult.stdout !== "" ? { baseCommit: baseCommitResult.stdout } : {}),
-				...(branchResult.exitCode === 0 && branchResult.stdout !== "" ? { branchName: branchResult.stdout } : {}),
+				branchName,
 				definitionKind: "preset",
 				definitionContentIdentity,
 				definitionPhaseNames: loadedPreset.preset.phases.map((entry) => entry.name),
