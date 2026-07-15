@@ -169,8 +169,10 @@ process.exit(1)
 test("item without per-issue handoff binds shared handoff and empty current issue file", async () => {
 	const root = resolve(TEST_ROOT, "optional-issue-handoff")
 	const loopDataRoot = resolve(root, "loop-data")
+	const agentCwd = root + "-agent"
 	const fakeRunner = resolve(root, "prompt-capture-runner.ts")
-	const promptCapture = resolve(root, "prompt.txt")
+	const promptCapture = resolve(agentCwd, "prompt.txt")
+	await mkdir(agentCwd, { recursive: true })
 	await mkdir(loopDataRoot, { recursive: true })
 	await writeFile(
 		fakeRunner,
@@ -204,7 +206,7 @@ await Bun.write(${JSON.stringify(promptCapture)}, prompt)
 			extra: storedItemExtra({}),
 		})
 		const state = createSchedulerState()
-		const worktreeManager: SchedulerWorktreeManager = async () => root
+		const worktreeManager: SchedulerWorktreeManager = async () => agentCwd
 		const options: SchedulerOptions = {
 			store,
 			state,

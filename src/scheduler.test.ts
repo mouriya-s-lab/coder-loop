@@ -1742,8 +1742,10 @@ describe("scheduler", () => {
 			const chain = createChain(fixture.store, "rust-log-injection-chain")
 			const codexItem = createItem(fixture.store, chain, { issueNumber: 4631, repoCwd: "/repo/a", writeStatus: "done" })
 			const root = resolve(fixture.loopDataRoot, "..")
-			const codexDump = resolve(root, "codex-env.txt")
-			const claudeDump = resolve(root, "claude-env.txt")
+			const evidenceDir = fixtureCaptureRoots.get(fixture.store)
+			if (evidenceDir === undefined) throw new Error("scheduler fixture lost its declared evidence directory")
+			const codexDump = resolve(evidenceDir, "codex-env.txt")
+			const claudeDump = resolve(evidenceDir, "claude-env.txt")
 			const makeEnvDumpRunner = async (path: string, dump: string): Promise<void> => {
 				await writeFile(path, `#!/bin/sh\necho "rust_log=\${RUST_LOG-unset}" > ${dump}\nexit 0\n`)
 				await chmod(path, 0o755)
@@ -1790,8 +1792,10 @@ describe("scheduler", () => {
 			const chain = createChain(fixture.store, "rust-log-override-chain")
 			const firstItem = createItem(fixture.store, chain, { issueNumber: 4633, repoCwd: "/repo/a", writeStatus: "done" })
 			const root = resolve(fixture.loopDataRoot, "..")
-			const traceDump = resolve(root, "trace-env.txt")
-			const disabledDump = resolve(root, "disabled-env.txt")
+			const evidenceDir = fixtureCaptureRoots.get(fixture.store)
+			if (evidenceDir === undefined) throw new Error("scheduler fixture lost its declared evidence directory")
+			const traceDump = resolve(evidenceDir, "trace-env.txt")
+			const disabledDump = resolve(evidenceDir, "disabled-env.txt")
 			const makeEnvDumpRunner = async (path: string, dump: string): Promise<void> => {
 				await writeFile(path, `#!/bin/sh\necho "rust_log=\${RUST_LOG-unset}" > ${dump}\nexit 0\n`)
 				await chmod(path, 0o755)
@@ -1841,7 +1845,9 @@ describe("scheduler", () => {
 			const root = resolve(fixture.loopDataRoot, "..")
 			const sessionId = "sess-rl-resume-test"
 			const resetsAt = 1_900_000_500
-			const argvDump = resolve(root, "argv-dump.txt")
+			const evidenceDir = fixtureCaptureRoots.get(fixture.store)
+			if (evidenceDir === undefined) throw new Error("scheduler fixture lost its declared evidence directory")
+			const argvDump = resolve(evidenceDir, "argv-dump.txt")
 			// Single runner script with two branches:
 			//   1st run (no --resume): emit session_id + W3 rate-limit lines + exit 1 →
 			//      scheduler stores sessionId AND arms the cooldown gate.

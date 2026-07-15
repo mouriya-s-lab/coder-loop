@@ -275,6 +275,10 @@ process.exitCode = 0
 			schedulerBinaryIsFakeRunner: true,
 		})
 		try {
+			if (fixture.defaultItemPresetPath === undefined || fixture.defaultItemPresetPath === null) {
+				throw new Error("large chain-complete fixture requires its task root")
+			}
+			const agentCwd = resolve(fixture.defaultItemPresetPath, "..")
 			const chain = record(expectOk(await request(fixture, "chain.create", {
 				name: "large-chain-complete-decision-chain",
 				repository: "mouriya-s-lab/coder-loop",
@@ -283,7 +287,7 @@ process.exitCode = 0
 			const added = record(expectOk(await request(fixture, "item.add", {
 				chainId,
 				itemId: "633",
-				repoCwd: REPO_ROOT,
+				repoCwd: agentCwd,
 			})).item)
 			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
 			try {
@@ -2736,7 +2740,7 @@ process.exitCode = 0
 
 	test("socket chain.delete removes scheduler worktree registration and chain runtime layout", async () => {
 		const fixture = await startFixture("chain-delete-cleanup", { realWorktreeManager: true })
-		const target = resolve(fixture.loopDataRoot, "..", "target")
+		const target = fixture.loopDataRoot + "-target"
 		await initGitTarget(target)
 		try {
 			const chain = record(expectOk(await request(fixture, "chain.create", {
@@ -2778,7 +2782,7 @@ process.exitCode = 0
 
 	test("socket completed chain removes scheduler worktree registration and preserves audit runtime", async () => {
 		const fixture = await startFixture("chain-complete-cleanup", { realWorktreeManager: true })
-		const target = resolve(fixture.loopDataRoot, "..", "target")
+		const target = fixture.loopDataRoot + "-target"
 		await initGitTarget(target)
 		try {
 			const chain = record(expectOk(await request(fixture, "chain.create", {
