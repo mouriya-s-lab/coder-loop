@@ -1066,8 +1066,6 @@ describe("small parsers", () => {
 		const unrelatedEvidenceDir = resolve(options.evidenceRootDir, "999")
 		await rm(root, { recursive: true, force: true })
 		await mkdir(root, { recursive: true })
-		await Promise.all([mkdir(evidenceDir, { recursive: true }), mkdir(dirname(currentIssueFile), { recursive: true })])
-		await writeFile(currentIssueFile, "issue 333\n")
 		for (const kind of ["claude", "codex", "opencode"] as const) {
 			for (const resume of [{ kind: "fresh" }, { kind: "resume", sessionId: `resume-${kind}` }] as const) {
 				const capture = resolve(root, `${kind}-${resume.kind}.argv`)
@@ -1116,6 +1114,7 @@ describe("small parsers", () => {
 				}
 			}
 		}
+		await rm(root, { recursive: true, force: true })
 	})
 
 	test("reports ordered chain-complete status persistence failure", async () => {
