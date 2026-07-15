@@ -7748,6 +7748,15 @@ process.exitCode = 0
 			const explicitNullExtra = record(explicitNull.extra)
 			expect(Object.hasOwn(explicitNullExtra, "arbitrary")).toBe(true)
 			expect(explicitNullExtra.arbitrary).toBeNull()
+			const reservedKeyPatch = await request(fixture, "item.update", {
+				itemId,
+				extraPatch: JSON.parse(`{"__proto__":null}`),
+			})
+			expectInvalid(reservedKeyPatch)
+			if (!reservedKeyPatch.ok) {
+				expect(reservedKeyPatch.error.message).toBe("extra key not allowed: __proto__")
+				expect(record(reservedKeyPatch.error.details).field).toBe("extra.__proto__")
+			}
 			const hook = { kind: "observer", point: "agent.spawn", script: "/bin/true", timeoutMs: 1000 }
 			const replaced = record(expectOk(await request(fixture, "item.update", { itemId, extra: { hooks: [hook] } })).item)
 			expect(record(replaced.extra).hooks).toEqual([hook])

@@ -5119,11 +5119,8 @@ function collectProtectedItemUpdateFieldKeys(
 }
 
 function mergeItemExtraPatch(existing: JsonObject, patch: JsonObject): JsonObject {
-	const merged: JsonObject = { ...existing }
-	for (const [key, value] of Object.entries(patch)) {
-		if (key === "hooks" && value === null) delete merged[key]
-		else merged[key] = value
-	}
+	const merged: JsonObject = { ...existing, ...patch }
+	if (Object.hasOwn(patch, "hooks") && patch.hooks === null) delete merged.hooks
 	return merged
 }
 
