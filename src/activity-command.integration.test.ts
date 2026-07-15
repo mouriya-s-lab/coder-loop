@@ -46,6 +46,26 @@ describe("activity CLI without daemon", () => {
 			expect(human.stdout).toContain("CHAIN\tITEM\tPHASE\tPID\t10s\t30s\t1m\t5m\tRUN")
 			expect(human.stdout).toContain("activity-live\ttask-a\trun")
 			expect(human.stdout).not.toContain("activity-dead")
+
+			const expectedLogPath = resolveChainRuntimePaths("activity-live", { loopDataRoot }).runPhaseStdoutFile("run-live", "run")
+			const log = runCli(["activity", "log", "activity-live", "--issue", "task-a", "--loop-data-root", loopDataRoot])
+			expect(log).toMatchObject({ exitCode: 0, stdout: `${expectedLogPath}\n`, stderr: "" })
+
+			const logJson = runCli(["activity", "log", "activity-live", "--issue", "task-a", "--loop-data-root", loopDataRoot, "--json"])
+			expect(logJson.exitCode).toBe(0)
+			expect(JSON.parse(logJson.stdout)).toMatchObject({
+				chain: "activity-live",
+				item: "task-a",
+				runId: "run-live",
+				phase: "run",
+				pid: live.pid,
+				logPath: expectedLogPath,
+			})
+
+			const deadLog = runCli(["activity", "log", "activity-dead", "--issue", "task-b", "--loop-data-root", loopDataRoot])
+			expect(deadLog.exitCode).not.toBe(0)
+			expect(deadLog.stdout).toBe("")
+			expect(deadLog.stderr).toContain("No live task: chain=activity-dead item=task-b")
 		} finally {
 			live.kill()
 			await live.exited
@@ -82,6 +102,7 @@ async function seedCurrentRun(
 	const now = Math.floor(Date.now() / 1000)
 	const paths = resolveChainRuntimePaths(chainName, { loopDataRoot })
 	await mkdir(paths.runPhaseDir(runId, "run"), { recursive: true })
+	await writeFile(paths.runPhaseStdoutFile(runId, "run"), "fixture session output\n")
 	await writeFile(paths.runPhaseActivityFile(runId, "run"), JSON.stringify({
 		updatedAt: new Date(now * 1000).toISOString(),
 		buckets: [

@@ -236,6 +236,7 @@ coder-loop item --help
 | `logs <target> --json` | 结构化 events / audit 查询 | `--kind K` `--type T` `--chain C` `--item ID` `--run RUN_ID` `--phase P` `--since TS` `--follow` |
 | `activity item <chain> --issue <id>` | 直接读取本地 SQLite/artifact，显示指定存活任务的 10s / 30s / 1m / 5m 输出行数 | `--json` `--loop-data-root <dir>` |
 | `activity all` | 直接读取本地 SQLite/artifact，显示全部 PID 仍存活的 current task | `--json` `--loop-data-root <dir>` |
+| `activity log <chain> --issue <id>` | 输出指定存活任务当前 phase 的 `stdout.jsonl` 完整绝对路径 | `--json` `--loop-data-root <dir>` |
 | `daemon up` | 运行 centralized daemon process | `--json` `--loop-data-root <dir>` |
 | `daemon down` | 通过 Unix socket 要求 centralized daemon 退出 | `--json` `--loop-data-root <dir>` |
 | `daemon status <target> --json` | daemon 视角 JSON snapshot | `--loop-data-root <dir>` `--chain <name>` |

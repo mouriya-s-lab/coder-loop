@@ -918,6 +918,7 @@ export type AgentActivityTaskSnapshot = {
 	phase: string
 	pid: number
 	startedAt: string
+	logPath: string
 	activity: StatusAgentActivitySnapshot
 }
 
@@ -928,6 +929,7 @@ export type AgentActivityCommandResult = {
 
 export type AgentActivityCommandArgs =
 	| { action: "item"; chainName: string; itemId: string; loopDataRoot: string | null; json: boolean }
+	| { action: "log"; chainName: string; itemId: string; loopDataRoot: string | null; json: boolean }
 	| { action: "all"; loopDataRoot: string | null; json: boolean }
 
 export type StatusEventsSnapshot = {
@@ -1253,10 +1255,31 @@ const activityAllCliCommand = command({
 	}),
 })
 
+const activityLogCliCommand = command({
+	name: "log",
+	description: "Print the absolute stdout log path for one live task without contacting the daemon.",
+	args: {
+		chain: positional({ displayName: "chain", type: cmdString }),
+		issue: option({ long: "issue", type: cmdString }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		json: flag({ long: "json" }),
+	},
+	handler: (args): CliCommand => ({
+		kind: "activity",
+		args: {
+			action: "log",
+			chainName: parseRequiredNonEmptyString(args.chain, "chain"),
+			itemId: parseRequiredItemId(args.issue, "--issue"),
+			loopDataRoot: args.loopDataRoot ?? null,
+			json: args.json,
+		},
+	}),
+})
+
 const activityCliCommand = subcommands({
 	name: "activity",
 	description: "Inspect live task output rates directly from local runtime state.",
-	cmds: { item: activityItemCliCommand, all: activityAllCliCommand },
+	cmds: { item: activityItemCliCommand, all: activityAllCliCommand, log: activityLogCliCommand },
 })
 
 const logsCliCommand = command({
@@ -2055,6 +2078,12 @@ async function runActivityCommand(args: string[]): Promise<void> {
 	if (parsed.value.kind !== "activity") return
 	const activityArgs = parsed.value.args
 	const result = await buildAgentActivityCommandResult(activityArgs)
+	if (activityArgs.action === "log") {
+		const task = result.tasks[0]
+		if (task === undefined) fail(`No live task: chain=${activityArgs.chainName} item=${activityArgs.itemId}`)
+		process.stdout.write(activityArgs.json ? `${JSON.stringify(task, null, "\t")}\n` : `${task.logPath}\n`)
+		return
+	}
 	if (activityArgs.json) {
 		process.stdout.write(`${JSON.stringify(result, null, "\t")}\n`)
 		return
@@ -2065,7 +2094,7 @@ async function runActivityCommand(args: string[]): Promise<void> {
 export async function buildAgentActivityCommandResult(args: AgentActivityCommandArgs): Promise<AgentActivityCommandResult> {
 	const store = openSqliteStateStore({ createIfMissing: false, ...loopDataRootOption(args.loopDataRoot) })
 	try {
-		const chains = args.action === "item"
+		const chains = args.action === "item" || args.action === "log"
 			? [store.getChainByName(args.chainName)].filter((chain): chain is ChainRecord => chain !== null)
 			: store.listChains()
 		const tasks: AgentActivityTaskSnapshot[] = []
@@ -2076,10 +2105,11 @@ export async function buildAgentActivityCommandResult(args: AgentActivityCommand
 			if (run === null) continue
 			const item = store.getItem(run.itemId)
 			if (item === null) continue
-			if (args.action === "item" && item.itemId !== args.itemId) continue
+			if ((args.action === "item" || args.action === "log") && item.itemId !== args.itemId) continue
 			const pidValue = itemExtraJsonValue(current.extra, "pid")
 			if (typeof pidValue !== "number" || !Number.isInteger(pidValue) || pidValue <= 0 || !isPidAlive(pidValue)) continue
-			const activityPath = resolveChainRuntimePaths(chain.name, loopDataRootOption(args.loopDataRoot)).runPhaseActivityFile(current.runId, current.phase)
+			const paths = resolveChainRuntimePaths(chain.name, loopDataRootOption(args.loopDataRoot))
+			const activityPath = paths.runPhaseActivityFile(current.runId, current.phase)
 			tasks.push({
 				chain: chain.name,
 				item: item.itemId,
@@ -2087,6 +2117,7 @@ export async function buildAgentActivityCommandResult(args: AgentActivityCommand
 				phase: current.phase,
 				pid: pidValue,
 				startedAt: new Date(current.startedAt * 1000).toISOString(),
+				logPath: paths.runPhaseStdoutFile(current.runId, current.phase),
 				activity: await readAgentActivity(activityPath),
 			})
 		}
@@ -2099,7 +2130,7 @@ export async function buildAgentActivityCommandResult(args: AgentActivityCommand
 
 function formatAgentActivityCommandResult(result: AgentActivityCommandResult, args: AgentActivityCommandArgs): string {
 	if (result.tasks.length === 0) {
-		return args.action === "item"
+		return args.action === "item" || args.action === "log"
 			? `No live task: chain=${args.chainName} item=${args.itemId}\n`
 			: "No live tasks.\n"
 	}
@@ -2932,6 +2963,7 @@ function rootUsage(): string {
 		"Commands:",
 		"  status <target> --json",
 		"  activity item <chain> --issue <item-id> [--json] [--loop-data-root DIR]",
+		"  activity log <chain> --issue <item-id> [--json] [--loop-data-root DIR]",
 		"  activity all [--json] [--loop-data-root DIR]",
 		"  logs <target> --json [--kind K] [--type T] [--chain C] [--item ID] [--run RUN_ID] [--phase P] [--since TS] [--follow]",
 		"  daemon <up|down|status|start|stop|restart>",
