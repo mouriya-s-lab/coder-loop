@@ -178,6 +178,8 @@ export type ExternalTerminalCurrentFact = {
 	availability: { kind: "available"; checkedAt: string }
 }
 
+export type SchedulerRunOriginKind = "item" | "chain-complete"
+
 // #457: `blockerRepo` / `blockerRef` are no longer engine-typed ItemExtra fields. Presets that store
 // blocker info on an item write the keys as preset-owned strings inside the same JSON blob; they round
 // trip through `runtimeRemainder` exactly like any other preset-owned extra key.
@@ -188,6 +190,7 @@ export class ItemExtra extends RuntimeDataRecord {
 	externalTerminalHold?: ExternalTerminalHoldFact
 	externalTerminalLoss?: ExternalTerminalLossFact
 	externalTerminalCurrent?: ExternalTerminalCurrentFact
+	schedulerRunOrigin?: SchedulerRunOriginKind
 	slotKey?: string
 	itemId?: number
 	repoCwd?: string
@@ -212,6 +215,7 @@ export class ItemExtra extends RuntimeDataRecord {
 		if (input.externalTerminalHold !== undefined) this.externalTerminalHold = copyExternalTerminalHold(input.externalTerminalHold)
 		if (input.externalTerminalLoss !== undefined) this.externalTerminalLoss = { ...input.externalTerminalLoss }
 		if (input.externalTerminalCurrent !== undefined) this.externalTerminalCurrent = { ...input.externalTerminalCurrent, availability: { ...input.externalTerminalCurrent.availability } }
+		if (input.schedulerRunOrigin !== undefined) this.schedulerRunOrigin = input.schedulerRunOrigin
 		if (input.slotKey !== undefined) this.slotKey = input.slotKey
 		if (input.itemId !== undefined) this.itemId = input.itemId
 		if (input.repoCwd !== undefined) this.repoCwd = input.repoCwd
@@ -266,6 +270,7 @@ type ItemExtraInput = {
 	externalTerminalHold?: ExternalTerminalHoldFact
 	externalTerminalLoss?: ExternalTerminalLossFact
 	externalTerminalCurrent?: ExternalTerminalCurrentFact
+	schedulerRunOrigin?: SchedulerRunOriginKind
 	slotKey?: string
 	itemId?: number
 	repoCwd?: string
@@ -286,6 +291,7 @@ const OptionalStringBoundary = arkType("string|undefined")
 const OptionalBooleanBoundary = arkType("boolean|undefined")
 const OptionalPositiveIntegerBoundary = arkType("number.integer > 0 | undefined")
 const OptionalNonNegativeIntegerBoundary = arkType("number.integer >= 0 | undefined")
+const OptionalSchedulerRunOriginBoundary = arkType("'item'|'chain-complete'|undefined")
 const RequiredPositiveIntegerBoundary = arkType("number.integer > 0")
 const OptionalStringArrayBoundary = arkType("string[]|undefined")
 const OptionalPositiveIntegerArrayBoundary = arkType("(number.integer > 0)[]|undefined")
@@ -324,6 +330,7 @@ const ITEM_EXTRA_KEYS = new Set([
 	"externalTerminalHold",
 	"externalTerminalLoss",
 	"externalTerminalCurrent",
+	"schedulerRunOrigin",
 	"slotKey",
 	"itemId",
 	"repoCwd",
@@ -463,6 +470,7 @@ export function itemExtraToJsonObject(extra: ItemExtra): JsonObject {
 	assignJson(result, "externalTerminalHold", extra.externalTerminalHold === undefined ? undefined : externalTerminalHoldToJsonObject(extra.externalTerminalHold))
 	assignJson(result, "externalTerminalLoss", extra.externalTerminalLoss === undefined ? undefined : { ...extra.externalTerminalLoss })
 	assignJson(result, "externalTerminalCurrent", extra.externalTerminalCurrent === undefined ? undefined : { ...extra.externalTerminalCurrent, availability: { ...extra.externalTerminalCurrent.availability } })
+	assignJson(result, "schedulerRunOrigin", extra.schedulerRunOrigin)
 	assignJson(result, "slotKey", extra.slotKey)
 	assignJson(result, "itemId", extra.itemId)
 	assignJson(result, "repoCwd", extra.repoCwd)
@@ -629,6 +637,8 @@ function parseItemExtra(value: JsonObject, field: string): ItemExtra {
 	if (externalTerminalLoss !== undefined) input.externalTerminalLoss = externalTerminalLoss
 	const externalTerminalCurrent = optionalExternalTerminalCurrentField(value, "externalTerminalCurrent", `${field}.externalTerminalCurrent`)
 	if (externalTerminalCurrent !== undefined) input.externalTerminalCurrent = externalTerminalCurrent
+	const schedulerRunOrigin = arkField(OptionalSchedulerRunOriginBoundary, value.schedulerRunOrigin, `${field}.schedulerRunOrigin`, `${field}.schedulerRunOrigin must be item or chain-complete when provided`)
+	if (schedulerRunOrigin !== undefined) input.schedulerRunOrigin = schedulerRunOrigin
 	const slotKey = optionalStringField(value, "slotKey", `${field}.slotKey`)
 	if (slotKey !== undefined) input.slotKey = slotKey
 	const itemId = optionalPositiveIntegerField(value, "itemId", `${field}.itemId`)

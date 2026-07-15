@@ -1099,6 +1099,7 @@ async function spawnSchedulerRun(
 				worktreePath,
 				startStatus: item.status,
 				startStatusUpdatedAt: item.statusUpdatedAt,
+				schedulerRunOrigin: origin.kind,
 				...(item.phase === null ? {} : { startPhase: item.phase }),
 				startAttempts: item.attempts,
 				...(runnerDomain.kind === "external-terminal" ? {
@@ -1121,6 +1122,7 @@ async function spawnSchedulerRun(
 				repoCwd: item.repoCwd,
 				startStatus: item.status,
 				startStatusUpdatedAt: item.statusUpdatedAt,
+				schedulerRunOrigin: origin.kind,
 				...(item.phase === null ? {} : { startPhase: item.phase }),
 				startAttempts: item.attempts,
 				...(runnerDomain.kind === "external-terminal" ? {

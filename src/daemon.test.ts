@@ -381,6 +381,103 @@ describe("daemon", () => {
 		}
 	})
 
+	test("mixed-preset status projects an active and lost chain-complete external terminal", async () => {
+		let chainPresetDir = ""
+		let externalBinary = ""
+		let ordinaryRunner = ""
+		const fixture = await startFixture("mixed-preset-chain-complete-status-projection", {
+			useDefaultChainCompleteTrigger: true,
+			schedulerPresetDir: null,
+			schedulerIntervalMs: 20,
+			beforeStart: async ({ root, fakeRunner }) => {
+				chainPresetDir = resolve(root, "chain-preset")
+				externalBinary = resolve(root, "external-terminal-finalizer")
+				ordinaryRunner = fakeRunner
+				await cp(PRESET_DIR, chainPresetDir, { recursive: true })
+				const presetToml = resolve(chainPresetDir, "preset.toml")
+				await writeFile(presetToml, (await readFile(presetToml, "utf-8")).replace(
+					'name    = "umbrella-finalizer"\nprompt  = "umbrella-finalizer-entry.md"\ntrigger = { on = "chain-complete" }\nrunner  = "codex"',
+					'name    = "umbrella-finalizer"\nprompt  = "umbrella-finalizer-entry.md"\ntrigger = { on = "chain-complete" }\nrunner  = "hapi"',
+				))
+				await writeFile(externalBinary, "#!/bin/sh\nif [ \"$1\" = probe ]; then exit 0; fi\ntrap 'exit 0' TERM\nwhile :; do sleep 1; done\n")
+				await chmod(externalBinary, 0o755)
+			},
+			schedulerConfig: {
+				phaseRunner: ({ phase }) => phase === "umbrella-finalizer"
+					? { kind: "hapi", source: "preset", binary: externalBinary, extraArgs: [], model: null }
+					: { kind: "claude", source: "preset", binary: "bun", extraArgs: [ordinaryRunner], model: null },
+			},
+		})
+		try {
+			const chainName = "mixed-preset-chain-complete-status-projection-chain"
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: chainName,
+				repository: "mouriya-s-lab/coder-loop",
+				baseBranch: "main",
+				preset: "gh-issue-pr-iteration",
+				metadata: {
+					presetPath: chainPresetDir,
+					hapi: { binary: externalBinary },
+				},
+			})).chain)
+			const chainId = numberValue(chain.id)
+			expectOk(await request(fixture, "item.add", {
+				chainId,
+				itemId: "602-mixed-chain-complete-status",
+				repoCwd: REPO_ROOT,
+				preset: "single-phase-example",
+				extra: { writeStatus: "done" },
+			}))
+			const current = await waitFor(
+				() => readCurrentRun(fixture.loopDataRoot, chainId),
+				(candidate) => candidate?.phase === "umbrella-finalizer" && candidate.extra.externalTerminalCurrent !== undefined,
+				10_000,
+			)
+			if (current === null) throw new Error("expected active chain-complete external-terminal run")
+
+			const activeSnapshot = await buildCoderLoopStatusSnapshot({
+				targetCwd: REPO_ROOT,
+				loopDataRoot: fixture.loopDataRoot,
+				chainName,
+				output: "json",
+			})
+			expect(activeSnapshot.current.runner).toMatchObject({ kind: "hapi", binary: externalBinary })
+			expect(activeSnapshot.current.externalTerminal).toEqual({
+				availability: { kind: "available", checkedAt: expect.any(String) },
+				loss: null,
+			})
+
+			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				const run = store.getRunByRunId(current.runId)
+				if (run === null) throw new Error("expected durable chain-complete run")
+				store.updateRunExtra(current.runId, withExternalTerminalLoss(run.extra, {
+					kind: "lost",
+					detectedAt: "2026-07-16T00:00:02.000Z",
+					reason: "endpoint-unavailable",
+					terminationPhase: "term",
+				}))
+			} finally {
+				store.close()
+			}
+
+			const lostSnapshot = await buildCoderLoopStatusSnapshot({
+				targetCwd: REPO_ROOT,
+				loopDataRoot: fixture.loopDataRoot,
+				chainName,
+				output: "json",
+			})
+			expect(lostSnapshot.current.externalTerminal?.loss).toEqual({
+				kind: "lost",
+				detectedAt: "2026-07-16T00:00:02.000Z",
+				reason: "endpoint-unavailable",
+				terminationPhase: "term",
+			})
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("daemon keeps ticking while a scheduler-managed chain-complete external terminal is lost and revokes its credential", async () => {
 		let externalBinary = ""
 		let probeState = ""

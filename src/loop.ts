@@ -3259,11 +3259,12 @@ async function buildStatusCurrentSnapshotFromRecords(
 		id = null
 	}
 	const outputPath = agentOutputPath(options, current.runId, current.phase)
-	// #412: current-run runner resolution must use the running item's preset (the scheduler spawned
-	// against that preset's phase plan). selectRunnerForPhase would otherwise look up the phase in
-	// the chain seed and throw "preset X does not define phase Y" on a foreign-preset item.
+	// #412: ordinary current-run resolution uses the running item's preset. Scheduler-managed
+	// chain-complete runs are chain-owned, however, so their durable origin selects the chain preset
+	// before phase lookup; otherwise a representative foreign-preset item can hide the active run.
 	const itemPreset = item === null ? null : itemPresets.presetForItem(item)
-	const selectionInput = itemPreset === null ? null : phaseRunnerSelectionInputForPreset(options, itemPreset)
+	const runnerPreset = current.extra.schedulerRunOrigin === "chain-complete" ? options.preset : itemPreset
+	const selectionInput = runnerPreset === null ? null : phaseRunnerSelectionInputForPreset(options, runnerPreset)
 	const currentRunner = item === null || selectionInput === null ? null : selectRunnerForPhase(current.phase, item, selectionInput)
 	const hold = item === null ? null : externalTerminalHold(item.extra)
 	const currentExternalTerminal = externalTerminalCurrent(current.extra)
