@@ -3018,16 +3018,17 @@ export class CoderLoopDaemon {
 						reason: "item.update",
 					},
 				}))
-			}
-			// #452: completion signal switched from stdout marker to the admitted state
-			// write. An idempotent status selection (for example a continuable `queued`
-			// exit while the item is already `queued`) is still this run declaring itself
-			// done; requiring a value transition strands the current runner and prevents
-			// the scheduler from starting its native resume. Field-only agent updates and
-			// operator writes do not arm recycle. `markRunPendingRecycle` is idempotent
-			// against unknown / already-armed runIds.
-			if (status !== null && caller.kind === "agent") {
-				markRunPendingRecycle(this.schedulerState, caller.runId)
+				// #452: completion signal switched from stdout marker to state write. An
+				// agent-attributed status write that mutated `item.status` (i.e. survived
+				// the #397 admission gate above and actually transitioned) is "this run is
+				// done" — hand the scheduler the runId so its lifecycle GC can enter the
+				// recycle zone. Operator-path writes do not arm recycle (no per-run window
+				// is meaningful: there is no in-flight run binding the operator's hand).
+				// `markRunPendingRecycle` is idempotent against unknown / already-armed
+				// runIds, so a credential pointing at a run that already closed is harmless.
+				if (caller.kind === "agent") {
+					markRunPendingRecycle(this.schedulerState, caller.runId)
+				}
 			}
 			return { item: itemToJson(updated) }
 		} finally {
