@@ -12,7 +12,7 @@ import { spawn } from "node:child_process"
 import { appendFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises"
 import { closeSync, createWriteStream, openSync, readFileSync, statSync, type WriteStream } from "node:fs"
 import { homedir } from "node:os"
-import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
+import { basename, dirname, isAbsolute, relative, resolve, sep as pathSeparator } from "node:path"
 import { command, flag, option, optional, positional, run as runCmd, string as cmdString, subcommands } from "cmd-ts"
 import { type as arkType } from "arktype"
 import type { BoundaryError, BoundaryRecord, BoundaryValue } from "./boundary-types"
@@ -6638,7 +6638,7 @@ export type RunnerFilesystemSurface =
 	| { kind: "writable-directory"; channel: "evidence" | "evidence-root" | "issues" | "logs" | "git-worktree-metadata" | "git-common-dir"; path: string }
 	| { kind: "writable-file"; channel: "shared-context" | "current-issue" | "daemon-socket"; path: string }
 	| { kind: "system-device"; channel: "null"; path: "/dev/null" }
-	| { kind: "runner-runtime-directory"; runner: "claude"; channel: "session-env"; path: string }
+	| { kind: "runner-runtime-directory"; runner: "claude"; channel: "projects" | "session-env"; path: string }
 	| { kind: "runner-runtime-directory"; runner: "codex"; channel: "sessions" | "shell-snapshots" | "tmp" | "log"; path: string }
 	| { kind: "runner-runtime-directory"; runner: "opencode"; channel: "data" | "state"; path: string }
 	| { kind: "runner-runtime-file"; runner: "codex"; channel: "installation-id" | "state-db" | "state-db-shm" | "state-db-wal" | "logs-db" | "logs-db-shm" | "logs-db-wal" | "goals-db" | "goals-db-shm" | "goals-db-wal" | "memories-db" | "memories-db-shm" | "memories-db-wal"; path: string }
@@ -6729,7 +6729,7 @@ export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: stri
 	const nativeArgs = runner.kind === "claude"
 		? agentClaudeArgs(runner.extraArgs, prompt, resume, claudeDirs, runner.model)
 		: runner.kind === "opencode"
-			? agentOpencodeArgs(runner.extraArgs, prompt, resume, runner.model)
+			? agentOpencodeArgs(runner.extraArgs, prompt, resume, runner.model, authorization.agentCwd)
 			: agentCodexArgs(runner.extraArgs, prompt, resume, authorization.agentCwd, runner.model, writableDirs)
 	const environment = runnerEnvironment(runner.kind, runnerScratch.path)
 	const outerSandboxProfile = runnerSandboxProfile(effectiveAuthorization, runner.kind)
@@ -6771,6 +6771,8 @@ function sandboxLiteral(value: string): string {
 
 function runnerSandboxProfile(authorization: RunnerFilesystemAuthorization, runner: AgentRunnerKind): string {
 	const surfaces = [...authorization.surfaces, ...runnerRuntimeSurfaces(runner)]
+	const cwdAncestorMetadata = runnerCwdAncestorMetadataPaths(authorization).flatMap((path) => sandboxPathSpellings(path).map((spelling) => `(literal ${sandboxLiteral(spelling)})`))
+	const cwdAncestorMetadataRule = cwdAncestorMetadata.length === 0 ? "" : `(allow file-read-metadata ${cwdAncestorMetadata.join(" ")}) `
 	const readable = distinctPaths(surfaces.flatMap((surface) => {
 		const exactSocket = surface.kind === "writable-file" && surface.channel === "daemon-socket"
 		if (exactSocket) return sandboxPathSpellings(surface.path).flatMap((path) => [`(literal ${sandboxLiteral(dirname(path))})`, `(subpath ${sandboxLiteral(path)})`])
@@ -6792,12 +6794,22 @@ function runnerSandboxProfile(authorization: RunnerFilesystemAuthorization, runn
 	const deviceWriteRules = writableDevices.map((path) => `(literal ${sandboxLiteral(path)})`).join(" ")
 	const runnerRuntimeCapabilities = runner === "codex" ? "(allow system-socket) " : ""
 	const outsideLoopData = sandboxPathSpellings(authorization.loopDataRoot).map((path) => `(require-not (subpath ${sandboxLiteral(path)}))`).join(" ")
-	return `(version 1) (deny default) (allow process*) (allow signal) (allow network*) (allow sysctl-read) (allow mach-lookup) (allow ipc-posix*) ${runnerRuntimeCapabilities}(allow file-read* (require-all ${outsideLoopData})) (allow file-read* ${readable.join(" ")}) (allow file-write* ${writeRules} ${deviceWriteRules})`
+	return `(version 1) (deny default) (allow process*) (allow signal) (allow network*) (allow sysctl-read) (allow mach-lookup) (allow ipc-posix*) ${runnerRuntimeCapabilities}${cwdAncestorMetadataRule}(allow file-read* (require-all ${outsideLoopData})) (allow file-read* ${readable.join(" ")}) (allow file-write* ${writeRules} ${deviceWriteRules})`
+}
+
+function runnerCwdAncestorMetadataPaths(authorization: RunnerFilesystemAuthorization): string[] {
+	const root = resolve(authorization.loopDataRoot)
+	const cwd = resolve(authorization.agentCwd)
+	const relativeCwd = relative(root, cwd)
+	if (relativeCwd === "" || relativeCwd === ".." || relativeCwd.startsWith(`..${pathSeparator}`) || isAbsolute(relativeCwd)) return []
+	const segments = relativeCwd.split(pathSeparator)
+	return segments.slice(0, -1).map((_, index) => resolve(root, ...segments.slice(0, index + 1)))
 }
 
 function runnerRuntimeSurfaces(runner: AgentRunnerKind): RunnerFilesystemSurface[] {
 	if (runner === "claude") {
 		return [
+			{ kind: "runner-runtime-directory", runner: "claude", channel: "projects", path: resolve(homedir(), ".claude/projects") },
 			{ kind: "runner-runtime-directory", runner: "claude", channel: "session-env", path: resolve(homedir(), ".claude/session-env") },
 		]
 	}
@@ -6842,8 +6854,8 @@ function distinctPaths(paths: readonly string[]): string[] {
 	return result
 }
 
-// #481 opencode invocation shape (matches operator's local `opencode 1.17.5`):
-//   opencode run --format json --dangerously-skip-permissions -m <model> [-s <sessionID>] <prompt>
+// #481 opencode invocation shape (matches operator's local `opencode 1.17.10`):
+//   opencode run --format json --dangerously-skip-permissions --dir <cwd> -m <model> [-s <sessionID>] <prompt>
 // Resume passes `-s <sessionID>`; fresh start omits it. JSON streaming is mandatory because the
 // engine reads the first line for the `sessionID` (value `ses_…`) — see parseOpencodeSessionIdFromStream.
 // Default model is `opencode-go/glm-5.2` (see DEFAULT_OPENCODE_MODEL); model resolution layered
@@ -6852,7 +6864,8 @@ export function agentOpencodeArgs(
 	extraArgs: readonly string[],
 	prompt: string,
 	resume: ResumeDecision,
-	model: string | null = null,
+	model: string | null,
+	agentCwd: string,
 ): string[] {
 	const effectiveModel = model ?? DEFAULT_OPENCODE_MODEL
 	const runnerArgs = stripModelArgs(extraArgs, ["--model", "-m"])
@@ -6860,6 +6873,7 @@ export function agentOpencodeArgs(
 	if (!runnerArgs.includes("--pure")) args.push("--pure")
 	if (!runnerArgs.includes("--format") && !runnerArgs.some((arg) => arg.startsWith("--format="))) args.push("--format", "json")
 	if (!runnerArgs.includes("--dangerously-skip-permissions")) args.push("--dangerously-skip-permissions")
+	args.push("--dir", agentCwd)
 	args.push(...runnerArgs)
 	args.push("-m", effectiveModel)
 	if (resume.kind === "resume") args.push("-s", resume.sessionId)

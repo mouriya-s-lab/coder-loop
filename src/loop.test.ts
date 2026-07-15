@@ -741,30 +741,34 @@ describe("runner and daemon helpers", () => {
 
 	test("agentOpencodeArgs renders run subcommand with json format model dir and optional resume", () => {
 		// #481 acceptance #4: opencode invocation must match what the operator's local
-		// `opencode 1.17.5` accepts — `opencode run --pure --format json --dangerously-skip-permissions
-		// -m <model> [-s <sessionID>] <prompt>` — and must preserve user-supplied extra args
+		// `opencode 1.17.10` accepts — `opencode run --pure --format json --dangerously-skip-permissions
+		// --dir <cwd> -m <model> [-s <sessionID>] <prompt>` — and must preserve user-supplied extra args
 		// while stripping any user-supplied `-m`/`--model` so the engine's resolved model wins.
 
 		// Fresh start: no resume, default model fallback (`opencode-go/glm-5.2` from
 		// DEFAULT_OPENCODE_MODEL when caller passes null).
-		expect(agentOpencodeArgs([], "do thing", { kind: "fresh" }, null)).toEqual([
+		expect(agentOpencodeArgs([], "do thing", { kind: "fresh" }, null, "/repo")).toEqual([
 			"run",
 			"--pure",
 			"--format",
 			"json",
 			"--dangerously-skip-permissions",
+			"--dir",
+			"/repo",
 			"-m",
 			"opencode-go/glm-5.2",
 			"do thing",
 		])
 
 		// Resume: `-s <sessionId>` appended after model and before prompt.
-		expect(agentOpencodeArgs([], "continue", { kind: "resume", sessionId: "ses_abc" }, "opencode-go/glm-5.2")).toEqual([
+		expect(agentOpencodeArgs([], "continue", { kind: "resume", sessionId: "ses_abc" }, "opencode-go/glm-5.2", "/repo")).toEqual([
 			"run",
 			"--pure",
 			"--format",
 			"json",
 			"--dangerously-skip-permissions",
+			"--dir",
+			"/repo",
 			"-m",
 			"opencode-go/glm-5.2",
 			"-s",
@@ -774,12 +778,14 @@ describe("runner and daemon helpers", () => {
 
 		// User-supplied `-m` is stripped (engine model wins); other extra args are preserved
 		// verbatim. We feed `--quiet` so the test exercises both behaviors at once.
-		expect(agentOpencodeArgs(["-m", "other/model", "--quiet"], "hi", { kind: "fresh" }, "opencode-go/glm-5.2")).toEqual([
+		expect(agentOpencodeArgs(["-m", "other/model", "--quiet"], "hi", { kind: "fresh" }, "opencode-go/glm-5.2", "/repo")).toEqual([
 			"run",
 			"--pure",
 			"--format",
 			"json",
 			"--dangerously-skip-permissions",
+			"--dir",
+			"/repo",
 			"--quiet",
 			"-m",
 			"opencode-go/glm-5.2",
@@ -833,6 +839,7 @@ describe("small parsers", () => {
 				expect(plan.args[1]).toContain(runnerScratch)
 				expect(plan.args[1]).toContain('(literal "/dev/null")')
 				expect(plan.args[1]).toContain('(subpath "/runtime/loop-data/daemon.sock")')
+				expect(plan.args[1]).toContain('(allow file-read-metadata (literal "/runtime/loop-data/chains") (literal "/runtime/loop-data/chains/c") (literal "/runtime/loop-data/chains/c/worktrees"))')
 				expect(plan.args[1]).not.toContain('(subpath "/dev")')
 				expect(plan.args.slice(2)).not.toContain("/dev/null")
 				expect(plan.args[1]).not.toContain("/private/tmp/claude-")
@@ -842,6 +849,9 @@ describe("small parsers", () => {
 				expect(plan.environment.CLAUDE_CODE_TMPDIR).toBe(kind === "claude" ? runnerScratch : undefined)
 				expect(plan.runtimeDirectories).toEqual([runnerScratch])
 				if (resume.kind === "resume") expect(plan.args).toContain(`session-${kind}`)
+				if (kind === "claude") {
+					expect(plan.args[1]).toContain(resolve(homedir(), ".claude/projects"))
+				}
 				if (kind === "codex") {
 					expect(plan.args).not.toContain("--sandbox")
 					expect(plan.args).toContain("shell_environment_policy.inherit=all")
@@ -857,6 +867,9 @@ describe("small parsers", () => {
 				}
 				if (kind === "opencode") {
 					expect(plan.args).toContain("--pure")
+					const dirIndex = plan.args.indexOf("--dir")
+					expect(dirIndex).toBeGreaterThan(-1)
+					expect(plan.args[dirIndex + 1]).toBe("/runtime/loop-data/chains/c/worktrees/i")
 					expect(plan.args[1]).toContain(resolve(homedir(), ".local/share/opencode"))
 					expect(plan.args[1]).toContain(resolve(homedir(), ".local/state/opencode"))
 				}

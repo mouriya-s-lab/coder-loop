@@ -4,6 +4,7 @@ import { spawn, spawnSync } from "node:child_process"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { resolve } from "node:path"
+import { parseSessionIdFromRunnerStream } from "../src/loop"
 
 const repoRoot = resolve(import.meta.dir, "..")
 const loopEntry = resolve(repoRoot, "src/loop.ts")
@@ -67,10 +68,6 @@ function assertCapturedInvocation(runner: string, argv: readonly string[]): void
 	if (skipPermissionsCount !== (runner === "opencode" ? 1 : 0)) throw new Error(`${runner}: unexpected --dangerously-skip-permissions count ${skipPermissionsCount}`)
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value)
-}
-
 function runDirectories(chain: string): string[] {
 	const runsDir = resolve(loopDataRoot, "chains", chain, "runs")
 	return readdirSync(runsDir, { withFileTypes: true })
@@ -79,11 +76,12 @@ function runDirectories(chain: string): string[] {
 		.sort((left, right) => left.localeCompare(right))
 }
 
-function runSessionId(chain: string, runId: string): string {
-	const statusPath = resolve(loopDataRoot, "chains", chain, "runs", runId, "phase", "status.json")
-	const parsed: unknown = JSON.parse(readFileSync(statusPath, "utf8"))
-	if (!isRecord(parsed) || typeof parsed.sessionId !== "string" || parsed.sessionId === "") throw new Error(`${chain}/${runId}: missing retained runner session id`)
-	return parsed.sessionId
+function runSessionId(runner: string, chain: string, runId: string): string {
+	if (!(["claude", "codex", "opencode"] as const).some((kind) => kind === runner)) throw new Error(`${runner}: unknown runner kind`)
+	const streamPath = resolve(loopDataRoot, "chains", chain, "runs", runId, "phase", "stdout.jsonl")
+	const sessionId = parseSessionIdFromRunnerStream(runner, readFileSync(streamPath, "utf8"))
+	if (sessionId === null) throw new Error(`${chain}/${runId}: missing retained runner session id`)
+	return sessionId
 }
 
 function assertOuterAuthorizationEvidence(runner: string, chain: string, runId: string): string {
@@ -121,13 +119,57 @@ function assertResumeInvocation(runner: string, freshArgv: readonly string[], re
 function writeFixture(): void {
 	mkdirSync(target, { recursive: true })
 	writeFileSync(resolve(target, "README.md"), "fixture\n")
+	writeFileSync(resolve(target, "runner-filesystem-probe.sh"), `#!/bin/sh
+set -eu
+
+run_id="$1"
+chain="$2"
+preset_dir="$3"
+shared_context="$4"
+current_issue="$5"
+evidence_dir="$6"
+undeclared_same="$7"
+undeclared_other="$8"
+undeclared_root="$9"
+
+grep -q DECLARED_PRESET_READ_OK "$preset_dir/fragment.md"
+cat "$shared_context" "$current_issue" >/dev/null
+if { printf mutation > "$preset_dir/mutation-forbidden"; } 2>/dev/null; then
+	echo "preset mutation unexpectedly succeeded" >&2
+	exit 1
+fi
+for path in "$undeclared_same" "$undeclared_other" "$undeclared_root"; do
+	if cat "$path" >/dev/null 2>&1; then
+		echo "undeclared read unexpectedly succeeded: $path" >&2
+		exit 1
+	fi
+	if { printf append >> "$path"; } 2>/dev/null; then
+		echo "undeclared append unexpectedly succeeded: $path" >&2
+		exit 1
+	fi
+done
+
+printf 'evidence-ok\n' > "$evidence_dir/runner-$run_id.txt"
+printf 'runner-boundary\n' > "runner-boundary-$run_id.txt"
+git add "runner-boundary-$run_id.txt"
+git -c user.name=coder-loop-e2e -c user.email=e2e@example.invalid commit -m "runner-boundary-$run_id"
+coder-loop item exits "$chain" --issue 1 --agent-run-id "$run_id" --agent-phase phase --json >/dev/null
+if [ ! -e "$evidence_dir/resume-ready" ]; then
+	printf 'ready\n' > "$evidence_dir/resume-ready"
+	coder-loop item update "$chain" --issue 1 --status queued
+	printf 'COMPLETION_PROTOCOL_ALREADY_EXECUTED status=queued; do not query exits or write status again\n'
+else
+	coder-loop item update "$chain" --issue 1 --status done
+	printf 'COMPLETION_PROTOCOL_ALREADY_EXECUTED status=done; do not query exits or write status again\n'
+fi
+`, { mode: 0o755 })
 	command(["git", "init", "-b", "main"], target)
-	command(["git", "add", "README.md"], target)
+	command(["git", "add", "README.md", "runner-filesystem-probe.sh"], target)
 	command(["git", "-c", "user.name=coder-loop-e2e", "-c", "user.email=e2e@example.invalid", "commit", "-m", "fixture"], target)
 	mkdirSync(preset, { recursive: true })
 	writeFileSync(resolve(preset, "fragment.md"), "DECLARED_PRESET_READ_OK\n")
-	writeFileSync(resolve(preset, "phase.md"), `Complete exactly two invocations of this phase: this fresh invocation and one resumed invocation of the same runner session. On every invocation, determine CURRENT_RUN_ID: use {{RUN_ID}} now; after resume obtain the new active run id from coder-loop status . --chain {{CHAIN_NAME}} --json. Read {{FRAGMENT_INDEX}} and require it contains DECLARED_PRESET_READ_OK. Run a shell command that attempts to write {{PRESET_DIR}}/mutation-forbidden and require that write to fail. Read {{SHARED_CONTEXT_FILE}} and {{CURRENT_ISSUE_FILE}}. Require both reading and appending to each of these undeclared files to fail: ${loopDataRoot}/chains/{{CHAIN_NAME}}/undeclared.txt ; ${loopDataRoot}/chains/undeclared-other/private.txt ; ${loopDataRoot}/central.sqlite. Write the text evidence-ok to {{EVIDENCE_DIR}}/runner-CURRENT_RUN_ID.txt, substituting the actual current run id. In the current linked Git worktree, create runner-boundary-CURRENT_RUN_ID.txt, git add it, and commit it with the exact subject runner-boundary-CURRENT_RUN_ID using user.name=coder-loop-e2e and user.email=e2e@example.invalid, again substituting the actual current run id; require the commit to succeed. Run coder-loop item exits {{CHAIN_NAME}} --issue {{ISSUE}} --agent-run-id CURRENT_RUN_ID --agent-phase phase --json with the actual current run id. If {{EVIDENCE_DIR}}/resume-ready does not exist, create it, run coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --status queued, and exit successfully so the scheduler resumes this same session. If resume-ready already exists, repeat every check and artifact above, run coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --status done, and exit successfully. Exit nonzero if any requirement fails.\n`)
-	writeFileSync(resolve(preset, "preset.toml"), `name = "runner-filesystem-grants-e2e"\n[item]\nidField = "issue"\n[item.fields]\nissue = "number"\n[statuses]\nentry = "queued"\ncontinuable = ["queued"]\nterminal = ["done"]\nsuccess = ["done"]\nexhausted = "done"\n[[fragments]]\nid = "fixture"\nrole = "common"\npath = "fragment.md"\n[[phases]]\nname = "phase"\nprompt = "phase.md"\nroles = ["common"]\n[phases.variables]\nISSUE = "item.issue"\nCHAIN_NAME = "runtime.chainName"\nRUN_ID = "runtime.runId"\nPRESET_DIR = "runtime.presetDir"\nFRAGMENT_INDEX = "runtime.fragmentIndex"\nSHARED_CONTEXT_FILE = "runtime.sharedContextPath"\nCURRENT_ISSUE_FILE = "runtime.currentIssueFile"\nEVIDENCE_DIR = "runtime.evidenceDir"\n[[phases.exits]]\nstatus = "done"\nwhen = "fixture complete"\n`)
+	writeFileSync(resolve(preset, "phase.md"), `Execute exactly this command once, without inspecting files or constructing a replacement command:\n\n/bin/sh ./runner-filesystem-probe.sh "{{RUN_ID}}" "{{CHAIN_NAME}}" "{{PRESET_DIR}}" "{{SHARED_CONTEXT_FILE}}" "{{CURRENT_ISSUE_FILE}}" "{{EVIDENCE_DIR}}" "${loopDataRoot}/chains/{{CHAIN_NAME}}/undeclared.txt" "${loopDataRoot}/chains/undeclared-other/private.txt" "${loopDataRoot}/central.sqlite"\n\nThe script itself executes the required completion protocol and prints the selected status. After it returns, do not query exits, do not write item status again, and do not run any other command; end the response immediately.\n`)
+	writeFileSync(resolve(preset, "preset.toml"), `name = "runner-filesystem-grants-e2e"\n[item]\nidField = "issue"\n[item.fields]\nissue = "number"\n[statuses]\nentry = "queued"\ncontinuable = ["queued"]\nterminal = ["done"]\nsuccess = ["done"]\nexhausted = "done"\n[[fragments]]\nid = "fixture"\nrole = "common"\npath = "fragment.md"\n[[phases]]\nname = "phase"\nprompt = "phase.md"\nroles = ["common"]\n[phases.variables]\nISSUE = "item.issue"\nCHAIN_NAME = "runtime.chainName"\nRUN_ID = "runtime.runId"\nPRESET_DIR = "runtime.presetDir"\nFRAGMENT_INDEX = "runtime.fragmentIndex"\nSHARED_CONTEXT_FILE = "runtime.sharedContextPath"\nCURRENT_ISSUE_FILE = "runtime.currentIssueFile"\nEVIDENCE_DIR = "runtime.evidenceDir"\n[[phases.exits]]\nstatus = "queued"\nwhen = "fresh invocation requests native resume"\n[[phases.exits]]\nstatus = "done"\nwhen = "resumed invocation completes fixture"\n`)
 }
 
 async function waitForSocket(): Promise<void> {
@@ -148,8 +190,6 @@ async function waitForRunner(chain: string): Promise<void> {
 
 writeFixture()
 mkdirSync(loopDataRoot, { recursive: true })
-mkdirSync(resolve(loopDataRoot, "chains", "undeclared-other"), { recursive: true })
-writeFileSync(resolve(loopDataRoot, "chains", "undeclared-other", "private.txt"), "other-chain-secret\n")
 writeFileSync(resolve(loopDataRoot, "central.sqlite"), "root-secret\n")
 const runners = ["claude", "codex", "opencode"].filter((candidate) => requestedRunner === null || candidate === requestedRunner)
 const captureBin = resolve(workRoot, "capture-bin")
@@ -165,6 +205,8 @@ const daemon = spawn("bun", [loopEntry, "daemon", "up", "--loop-data-root", loop
 let completed = false
 try {
 	await waitForSocket()
+	mkdirSync(resolve(loopDataRoot, "chains", "undeclared-other"), { recursive: true })
+	writeFileSync(resolve(loopDataRoot, "chains", "undeclared-other", "private.txt"), "other-chain-secret\n")
 	for (const runner of runners) {
 		const chain = `filesystem-${runner}`
 		const invocationCapture = resolve(loopDataRoot, "chains", chain, "evidence", "1", "runner.argv")
@@ -186,14 +228,15 @@ try {
 		const invocations = capturedInvocations(invocationCapture)
 		if (invocations.length !== 2) throw new Error(`${runner}: expected two captured invocations, observed ${invocations.length}`)
 		for (const argv of invocations) assertCapturedInvocation(runner, argv)
-		const retainedSessionId = runSessionId(chain, runIds[0]!)
+		const retainedSessionId = runSessionId(runner, chain, runIds[0]!)
 		assertResumeInvocation(runner, invocations[0]!, invocations[1]!, retainedSessionId)
 		const outerEvidencePaths = runIds.map((runId) => assertOuterAuthorizationEvidence(runner, chain, runId))
 		assertCredentialedTransitions(chain, runIds)
 		for (const runId of runIds) {
-			const phaseDir = resolve(loopDataRoot, "chains", chain, "runs", runId, "phase")
-			for (const artifact of ["status.json", "stdout.jsonl", "runner-authorization.json"]) {
-				if (!existsSync(resolve(phaseDir, artifact))) throw new Error(`${runner}/${runId}: missing retained ${artifact}`)
+			const runDir = resolve(loopDataRoot, "chains", chain, "runs", runId)
+			if (!existsSync(resolve(runDir, "status.json"))) throw new Error(`${runner}/${runId}: missing retained status.json`)
+			for (const artifact of ["stdout.jsonl", "runner-authorization.json"]) {
+				if (!existsSync(resolve(runDir, "phase", artifact))) throw new Error(`${runner}/${runId}: missing retained ${artifact}`)
 			}
 			const evidence = resolve(loopDataRoot, "chains", chain, "evidence", "1", `runner-${runId}.txt`)
 			if (readFileSync(evidence, "utf8").trim() !== "evidence-ok") throw new Error(`${runner}/${runId}: missing declared evidence write`)
