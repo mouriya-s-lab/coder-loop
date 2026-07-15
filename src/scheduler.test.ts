@@ -295,8 +295,8 @@ describe("scheduler", () => {
 		const fixture = await createFixture("multi-repo")
 		try {
 			const chain = createChain(fixture.store, "multi-repo-chain")
-			createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", sleepMs: 80, writeStatus: "done" })
-			createItem(fixture.store, chain, { issueNumber: 180, repoCwd: "/repo/b", sleepMs: 80, writeStatus: "done" })
+			createItem(fixture.store, chain, { issueNumber: 179, repoCwd: "/repo/a", sleepMs: 0, waitForConcurrentStarts: 2, writeStatus: "done" })
+			createItem(fixture.store, chain, { issueNumber: 180, repoCwd: "/repo/b", sleepMs: 0, waitForConcurrentStarts: 2, writeStatus: "done" })
 
 			const tick = await schedulerTick(fixture.options())
 			expect(tick.spawnedRuns).toHaveLength(2)
@@ -4281,6 +4281,7 @@ async function createFixture(name: string): Promise<Fixture> {
 				worktreePath,
 				eventLog,
 				sleepMs: typeof extra.sleepMs === "number" ? extra.sleepMs : 5,
+				...(typeof extra.waitForConcurrentStarts === "number" ? { waitForConcurrentStarts: extra.waitForConcurrentStarts } : {}),
 				exitCode: typeof extra.exitCode === "number" ? extra.exitCode : 0,
 				// v1 status model: the fake runner writes this status to the store itself, simulating the
 				// real agent's `coder-loop item update --status`. The scheduler only reads item.status; it
@@ -4367,7 +4368,7 @@ function createChain(
 function createItem(
 	store: ReturnType<typeof openSqliteStateStore>,
 	chain: ChainRecord,
-	input: { issueNumber: number; repoCwd: string; sleepMs?: number; exitCode?: number; summary?: string | null; runner?: AgentRunnerKind | null; writeStatus?: string | null },
+	input: { issueNumber: number; repoCwd: string; sleepMs?: number; waitForConcurrentStarts?: number; exitCode?: number; summary?: string | null; runner?: AgentRunnerKind | null; writeStatus?: string | null },
 ) {
 	const extra: JsonObject = {
 		// #419: the bundled preset's `idField` is `issue` and reads from `extra.issue` via the
@@ -4378,6 +4379,7 @@ function createItem(
 		sleepMs: input.sleepMs ?? 5,
 		exitCode: input.exitCode ?? 0,
 	}
+	if (input.waitForConcurrentStarts !== undefined) extra.waitForConcurrentStarts = input.waitForConcurrentStarts
 	if (Object.prototype.hasOwnProperty.call(input, "summary")) extra.summary = input.summary ?? null
 	// #405: tests can pin the fake-runner's status-write decision directly via `extra.writeStatus`,
 	// mirroring the real agent's `coder-loop item update --status` call. When omitted the
@@ -4402,13 +4404,22 @@ async function writeFakeRunner(path: string): Promise<void> {
 	const sqliteStateModule = resolve(REPO_ROOT, "src/sqlite-state.ts")
 	await writeFile(
 		path,
-		`import { appendFile } from "node:fs/promises"
+		`import { appendFile, readFile } from "node:fs/promises"
 import { openSqliteStateStore } from ${JSON.stringify(sqliteStateModule)}
 
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
 const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
 await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
+if (typeof input.waitForConcurrentStarts === "number") {
+	const deadline = Date.now() + 5_000
+	while (true) {
+		const events = (await readFile(input.eventLog, "utf-8")).trim().split("\\n").filter(Boolean).map((line) => JSON.parse(line))
+		if (events.filter((event) => event.type === "start").length >= input.waitForConcurrentStarts) break
+		if (Date.now() >= deadline) throw new Error("timed out waiting for concurrent runner starts")
+		await Bun.sleep(5)
+	}
+}
 await new Promise((resolve) => setTimeout(resolve, input.sleepMs))
 await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
 console.log("done:" + input.itemId)
