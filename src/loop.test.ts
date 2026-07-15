@@ -907,6 +907,37 @@ describe("small parsers", () => {
 		expect(git(worktree, ["rev-parse", "--verify", "HEAD"]).exitCode).toBe(0)
 	})
 
+	test("runner filesystem grants let Bun discover a nested task cwd without broad parent authority", async () => {
+		const root = resolve(TEST_ROOT, "runner-bun-cwd-discovery")
+		const loopDataRoot = resolve(root, "loop-data")
+		const agentCwd = resolve(loopDataRoot, "chains", "c", "worktrees", "i")
+		const presetDir = resolve(loopDataRoot, "preset-materialized", "p")
+		const undeclared = resolve(loopDataRoot, "chains", "c", "undeclared.txt")
+		await rm(root, { recursive: true, force: true })
+		await Promise.all([agentCwd, presetDir].map((path) => mkdir(path, { recursive: true })))
+		await writeFile(resolve(agentCwd, "package.json"), `${JSON.stringify({ scripts: { check: "node -e \"process.stdout.write('cwd-ok')\"" } })}\n`)
+		await writeFile(undeclared, "private\n")
+		const authorization = buildRunnerFilesystemAuthorization({
+			loopDataRoot, agentCwd, presetDir, sharedContextPath: resolve(loopDataRoot, "chains/c/shared.md"),
+			currentIssueFile: "", evidenceDir: resolve(loopDataRoot, "chains/c/evidence/1"), evidenceRootDir: resolve(loopDataRoot, "chains/c/evidence"),
+			issueDir: resolve(loopDataRoot, "chains/c/issues"), logDir: resolve(loopDataRoot, "chains/c/runs"), daemonSocketPath: resolve(loopDataRoot, "daemon.sock"),
+			declaredRuntimeBindingPaths: [],
+		})
+		const plan = buildRunnerInvocation({ kind: "codex", binary: "/usr/bin/true", extraArgs: [], model: null, source: "engine-builtin" }, "prompt", { kind: "fresh" }, authorization)
+		const profile = plan.authorizationEvidence.outerSandboxProfile
+		expect(authorization.surfaces).toContainEqual({ kind: "cwd-ancestor-directory", channel: "agent-cwd-discovery", access: "entries", path: resolve(loopDataRoot, "chains") })
+		expect(authorization.surfaces).toContainEqual({ kind: "cwd-ancestor-directory", channel: "agent-cwd-discovery", access: "entries", path: resolve(loopDataRoot, "chains", "c") })
+		expect(authorization.surfaces).toContainEqual({ kind: "cwd-ancestor-directory", channel: "agent-cwd-discovery", access: "metadata", path: resolve(loopDataRoot, "chains", "c", "worktrees") })
+		const bun = Bun.spawnSync({ cmd: ["/usr/bin/sandbox-exec", "-p", profile, process.execPath, "run", "check"], cwd: agentCwd, stdout: "pipe", stderr: "pipe" })
+		expect(bun.exitCode, new TextDecoder().decode(bun.stderr)).toBe(0)
+		expect(new TextDecoder().decode(bun.stdout)).toContain("cwd-ok")
+		expect(profile).toContain(`(allow file-read-data (literal "${resolve(loopDataRoot, "chains")}") (literal "${resolve(loopDataRoot, "chains", "c")}"))`)
+		expect(profile).not.toContain(`(subpath "${resolve(loopDataRoot, "chains")}")`)
+		expect(profile).not.toContain(`(subpath "${resolve(loopDataRoot, "chains", "c")}")`)
+		const denied = Bun.spawnSync({ cmd: ["/usr/bin/sandbox-exec", "-p", profile, "/bin/cat", undeclared], stdout: "pipe", stderr: "pipe" })
+		expect(denied.exitCode).not.toBe(0)
+	})
+
 	test("runner filesystem grants deny undeclared writes and preserve every declared writable channel", async () => {
 		const root = resolve(TEST_ROOT, "runner-filesystem-explicit-writes")
 		const loopDataRoot = resolve(root, "loop-data")

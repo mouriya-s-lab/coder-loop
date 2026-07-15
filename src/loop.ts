@@ -6633,6 +6633,7 @@ export type RunnerInvocation =
 
 export type RunnerFilesystemSurface =
 	| { kind: "task-private-directory"; channel: "agent-cwd" | "runner-scratch"; path: string }
+	| { kind: "cwd-ancestor-directory"; channel: "agent-cwd-discovery"; access: "entries" | "metadata"; path: string }
 	| { kind: "read-only-directory"; channel: "preset"; path: string }
 	| { kind: "read-only-file"; channel: "runner-executable"; runner: AgentRunnerKind; path: string }
 	| { kind: "writable-directory"; channel: "evidence" | "evidence-root" | "issues" | "logs" | "git-worktree-metadata" | "git-common-dir"; path: string }
@@ -6671,6 +6672,7 @@ export function buildRunnerFilesystemAuthorization(input: BuildRunnerFilesystemA
 	const surfaces: RunnerFilesystemSurface[] = [
 		{ kind: "task-private-directory", channel: "agent-cwd", path: input.agentCwd },
 		{ kind: "task-private-directory", channel: "runner-scratch", path: runnerScratch },
+		...runnerCwdDiscoverySurfaces(input.loopDataRoot, input.agentCwd),
 		...runnerGitMetadataSurfaces(input.agentCwd),
 		{ kind: "read-only-directory", channel: "preset", path: input.presetDir },
 		{ kind: "writable-file", channel: "daemon-socket", path: input.daemonSocketPath },
@@ -6688,6 +6690,21 @@ export function buildRunnerFilesystemAuthorization(input: BuildRunnerFilesystemA
 	const presetSurface = surfaces.find((surface) => surface.kind === "read-only-directory")
 	if (presetSurface === undefined) throw new Error("declared runner surfaces require a read-only preset")
 	return { agentCwd: input.agentCwd, loopDataRoot: input.loopDataRoot, surfaces }
+}
+
+function runnerCwdDiscoverySurfaces(loopDataRoot: string, agentCwd: string): RunnerFilesystemSurface[] {
+	const root = resolve(loopDataRoot)
+	const cwd = resolve(agentCwd)
+	const relativeCwd = relative(root, cwd)
+	if (relativeCwd === "" || relativeCwd === ".." || relativeCwd.startsWith(`..${pathSeparator}`) || isAbsolute(relativeCwd)) return []
+	const segments = relativeCwd.split(pathSeparator)
+	const ancestors = segments.slice(0, -1).map((_, index) => resolve(root, ...segments.slice(0, index + 1)))
+	return ancestors.map((path, index) => ({
+		kind: "cwd-ancestor-directory",
+		channel: "agent-cwd-discovery",
+		access: index < ancestors.length - 1 ? "entries" : "metadata",
+		path,
+	}))
 }
 
 function runnerGitMetadataSurfaces(agentCwd: string): RunnerFilesystemSurface[] {
@@ -6771,9 +6788,16 @@ function sandboxLiteral(value: string): string {
 
 function runnerSandboxProfile(authorization: RunnerFilesystemAuthorization, runner: AgentRunnerKind): string {
 	const surfaces = [...authorization.surfaces, ...runnerRuntimeSurfaces(runner)]
-	const cwdAncestorMetadata = runnerCwdAncestorMetadataPaths(authorization).flatMap((path) => sandboxPathSpellings(path).map((spelling) => `(literal ${sandboxLiteral(spelling)})`))
+	const cwdAncestorMetadata = surfaces.flatMap((surface) => surface.kind === "cwd-ancestor-directory"
+		? sandboxPathSpellings(surface.path).map((spelling) => `(literal ${sandboxLiteral(spelling)})`)
+		: [])
 	const cwdAncestorMetadataRule = cwdAncestorMetadata.length === 0 ? "" : `(allow file-read-metadata ${cwdAncestorMetadata.join(" ")}) `
+	const cwdAncestorEntries = surfaces.flatMap((surface) => surface.kind === "cwd-ancestor-directory" && surface.access === "entries"
+		? sandboxPathSpellings(surface.path).map((spelling) => `(literal ${sandboxLiteral(spelling)})`)
+		: [])
+	const cwdAncestorEntriesRule = cwdAncestorEntries.length === 0 ? "" : `(allow file-read-data ${cwdAncestorEntries.join(" ")}) `
 	const readable = distinctPaths(surfaces.flatMap((surface) => {
+		if (surface.kind === "cwd-ancestor-directory") return []
 		const exactSocket = surface.kind === "writable-file" && surface.channel === "daemon-socket"
 		if (exactSocket) return sandboxPathSpellings(surface.path).flatMap((path) => [`(literal ${sandboxLiteral(dirname(path))})`, `(subpath ${sandboxLiteral(path)})`])
 		const predicate = exactSocket || (surface.kind !== "writable-file" && surface.kind !== "runner-runtime-file" && surface.kind !== "read-only-file" && surface.kind !== "system-device") ? "subpath" : "literal"
@@ -6785,7 +6809,7 @@ function runnerSandboxProfile(authorization: RunnerFilesystemAuthorization, runn
 	const presetTrees = distinctPaths(sandboxPathSpellings(preset.path))
 	const denyPreset = presetTrees.map((path) => `(require-not (subpath ${sandboxLiteral(path)}))`).join(" ")
 	const writableRules = distinctPaths(surfaces.flatMap((surface) => {
-		if (surface.kind === "read-only-directory" || surface.kind === "read-only-file" || surface.kind === "system-device") return []
+		if (surface.kind === "cwd-ancestor-directory" || surface.kind === "read-only-directory" || surface.kind === "read-only-file" || surface.kind === "system-device") return []
 		const exactSocket = surface.kind === "writable-file" && surface.channel === "daemon-socket"
 		const predicate = (surface.kind === "writable-file" && !exactSocket) || surface.kind === "runner-runtime-file" ? "literal" : "subpath"
 		return sandboxPathSpellings(surface.path).map((path) => `(${predicate} ${sandboxLiteral(path)})`)
@@ -6794,16 +6818,7 @@ function runnerSandboxProfile(authorization: RunnerFilesystemAuthorization, runn
 	const deviceWriteRules = writableDevices.map((path) => `(literal ${sandboxLiteral(path)})`).join(" ")
 	const runnerRuntimeCapabilities = runner === "codex" ? "(allow system-socket) " : ""
 	const outsideLoopData = sandboxPathSpellings(authorization.loopDataRoot).map((path) => `(require-not (subpath ${sandboxLiteral(path)}))`).join(" ")
-	return `(version 1) (deny default) (allow process*) (allow signal) (allow network*) (allow sysctl-read) (allow mach-lookup) (allow ipc-posix*) ${runnerRuntimeCapabilities}${cwdAncestorMetadataRule}(allow file-read* (require-all ${outsideLoopData})) (allow file-read* ${readable.join(" ")}) (allow file-write* ${writeRules} ${deviceWriteRules})`
-}
-
-function runnerCwdAncestorMetadataPaths(authorization: RunnerFilesystemAuthorization): string[] {
-	const root = resolve(authorization.loopDataRoot)
-	const cwd = resolve(authorization.agentCwd)
-	const relativeCwd = relative(root, cwd)
-	if (relativeCwd === "" || relativeCwd === ".." || relativeCwd.startsWith(`..${pathSeparator}`) || isAbsolute(relativeCwd)) return []
-	const segments = relativeCwd.split(pathSeparator)
-	return segments.slice(0, -1).map((_, index) => resolve(root, ...segments.slice(0, index + 1)))
+	return `(version 1) (deny default) (allow process*) (allow signal) (allow network*) (allow sysctl-read) (allow mach-lookup) (allow ipc-posix*) ${runnerRuntimeCapabilities}${cwdAncestorMetadataRule}${cwdAncestorEntriesRule}(allow file-read* (require-all ${outsideLoopData})) (allow file-read* ${readable.join(" ")}) (allow file-write* ${writeRules} ${deviceWriteRules})`
 }
 
 function runnerRuntimeSurfaces(runner: AgentRunnerKind): RunnerFilesystemSurface[] {
