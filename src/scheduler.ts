@@ -1013,7 +1013,10 @@ async function spawnSchedulerRun(
 				branchName,
 				definitionKind: "preset",
 				definitionContentIdentity,
-				definitionPhaseNames: loadedPreset.preset.phases.map((entry) => entry.name),
+				definitionPhases: loadedPreset.preset.tasks.children.map((phaseTree) => ({
+					phase: phaseTree.phase,
+					definitionNodeId: phaseTree.children[0].identity,
+				})),
 				startStatus: item.status,
 				startStatusUpdatedAt: item.statusUpdatedAt,
 				...(item.phase === null ? {} : { startPhase: item.phase }),

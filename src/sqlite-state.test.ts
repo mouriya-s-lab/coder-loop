@@ -176,14 +176,20 @@ describe("sqlite state store", () => {
 		const second = createFullItem(store, chain, { itemId: "second", issueNumber: 178, phase: "review" })
 		const firstRun = store.recordRun({ runId: "first-definition-run", chainId: chain.id, itemId: first.id, phase: "iteration", startedAt: 1_800_000_205, extra: definitionRunExtra({ worktreePath: "/worktrees/first", branchName: "issue-first" }) })
 		store.setCurrentRun({ chainId: chain.id, phase: "iteration", runId: firstRun.runId, startedAt: firstRun.startedAt, extra: storedItemExtra({}) })
-		const secondDefinition = { definitionContentIdentity: "sha256:second-definition", definitionPhaseNames: ["review", "finalize"] }
+		const secondDefinition = {
+			definitionContentIdentity: "sha256:second-definition",
+			definitionPhases: [
+				{ phase: "review", definitionNodeId: "task:review" },
+				{ phase: "finalize", definitionNodeId: "task:finalize" },
+			],
+		}
 		const secondRun = store.recordRun({ runId: "second-definition-run", chainId: chain.id, itemId: second.id, phase: "review", startedAt: 1_800_000_206, extra: definitionRunExtra({ ...secondDefinition, worktreePath: "/worktrees/second", branchName: "issue-second" }) })
 		store.setCurrentRun({ chainId: chain.id, phase: "review", runId: secondRun.runId, startedAt: secondRun.startedAt, extra: storedItemExtra({}) })
 		const definitionRef = { kind: "preset", contentIdentity: "sha256:second-definition" } as const
 		const expectedSecondIdentities = ["review", "finalize"].map((phase) => ({
 			runtimeNodeId: `closure-node:${second.id}:${phase}`,
 			definitionRef,
-			definitionNodeId: `item:second:phase:${phase}`,
+			definitionNodeId: `task:${phase}`,
 		}))
 		try {
 			const tree = store.getTaskTree(chain.id)
@@ -1921,7 +1927,7 @@ describe("sqlite state store", () => {
 			const item = items[0]
 			if (item === undefined) throw new Error("migrated item missing")
 			expect(item.sessionIds).toEqual({})
-			migrated.recordRun({ runId: "pre-v3-iteration", chainId: 1, itemId: item.id, phase: "iteration", startedAt: 1.5, extra: definitionRunExtra({ definitionPhaseNames: ["iteration"], worktreePath: REPO_ROOT, branchName: "main" }) })
+			migrated.recordRun({ runId: "pre-v3-iteration", chainId: 1, itemId: item.id, phase: "iteration", startedAt: 1.5, extra: definitionRunExtra({ definitionPhases: [{ phase: "iteration", definitionNodeId: "task:iteration" }], worktreePath: REPO_ROOT, branchName: "main" }) })
 			migrated.setCurrentRun({ chainId: 1, phase: "iteration", runId: "pre-v3-iteration", startedAt: 1.5, extra: storedItemExtra({}) })
 			migrated.clearCurrentRun("pre-v3-iteration")
 			const updated = migrated.setItemSessionId(item.id, {
@@ -1970,7 +1976,7 @@ describe("sqlite state store", () => {
 		const { store, dbFile } = await openTestStore("context-migration")
 		const chain = store.createChain({ name: "context-preserved", repository: "o/r", baseBranch: "main" })
 		const item = createFullItem(store, chain, { itemId: "migration-item" })
-		const runExtra = storedItemExtra({ preserved: true, definitionKind: "chain", definitionContentIdentity: "sha256:context-migration", definitionPhaseNames: ["iteration"], worktreePath: "/repo/context-migration", branchName: "context-migration", baseCommit: "0123456789abcdef" })
+		const runExtra = storedItemExtra({ preserved: true, definitionKind: "chain", definitionContentIdentity: "sha256:context-migration", definitionPhases: [{ phase: "iteration", definitionNodeId: "task:iteration" }], worktreePath: "/repo/context-migration", branchName: "context-migration", baseCommit: "0123456789abcdef" })
 		const run = store.recordRun({ runId: "context-migration-run", chainId: chain.id, itemId: item.id, phase: "iteration", status: runtimeStatus("running"), startedAt: 10, extra: runExtra })
 		const current = store.setCurrentRun({ chainId: chain.id, phase: "iteration", runId: run.runId, startedAt: 10, extra: storedItemExtra({ preserved: true }) })
 		store.close()
@@ -2114,7 +2120,12 @@ function definitionRunExtra(overrides: JsonObject = {}) {
 	return storedItemExtra({
 		definitionKind: "preset",
 		definitionContentIdentity: "sha256:persisted-definition",
-		definitionPhaseNames: ["iteration", "review", "blocked-responder", "umbrella-finalizer"],
+		definitionPhases: [
+			{ phase: "iteration", definitionNodeId: "task:iteration" },
+			{ phase: "review", definitionNodeId: "task:review" },
+			{ phase: "blocked-responder", definitionNodeId: "task:blocked-responder" },
+			{ phase: "umbrella-finalizer", definitionNodeId: "task:umbrella-finalizer" },
+		],
 		worktreePath: "/repo/coder-loop",
 		branchName: "issue-177",
 		baseCommit: "0123456789abcdef",

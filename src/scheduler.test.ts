@@ -26,7 +26,7 @@ import {
 	type SchedulerPhaseRunner,
 	type SchedulerWorktreeManager,
 } from "./scheduler"
-import { attachTaskIdentityToObservabilityEvent, schedulerEventToObservabilityEvent } from "./daemon"
+import { schedulerEventToObservabilityEvent } from "./daemon"
 import {
 	buildPhaseRunnerSelectionFromChain,
 	buildRunnerInvocation,
@@ -42,7 +42,6 @@ import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import { type ChainRecord, type ItemRecord, openSqliteStateStore } from "./sqlite-state"
 import { appendObservabilityEvent, queryObservabilityEvents } from "./observability"
 import { engineLifecycleAdmittedItemStatus, itemExtraJsonValue, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
-import type { TaskNodeIdentity } from "./task-runtime"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-tests", String(process.pid))
@@ -76,7 +75,10 @@ function historicalRunExtra(extra: JsonObject = {}) {
 	return storedItemExtra({
 		definitionKind: "chain",
 		definitionContentIdentity: "sha256:scheduler-history-fixture",
-		definitionPhaseNames: ["iteration", "review"],
+		definitionPhases: [
+			{ phase: "iteration", definitionNodeId: "task:iteration" },
+			{ phase: "review", definitionNodeId: "task:review" },
+		],
 		worktreePath: REPO_ROOT,
 		branchName: "scheduler-history-fixture",
 		baseCommit: "0123456789abcdef",
@@ -107,14 +109,26 @@ describe("scheduler", () => {
 		expect(await presetExecutionContentIdentity({ presetDir, preset })).toBe(preset.sourceHash)
 	})
 
-	test("runtime identity event chain preserves the persisted task-node identity", async () => {
+	test("runtime identity event chain starts from the canonical scheduler-persisted task-node identity", async () => {
 		const fixture = await createFixture("runtime-identity-event-chain")
 		try {
 			const chain = createChain(fixture.store, "runtime-identity-event-chain")
-			const identity: TaskNodeIdentity = { runtimeNodeId: "runtime-leaf", definitionRef: { kind: "chain", contentIdentity: "sha256:event-chain" }, definitionNodeId: "definition-leaf" }
-			const event = schedulerEventToObservabilityEvent(chain, { type: "phase.start", ts: new Date(0).toISOString(), runId: "identity-run", chainId: chain.id, itemId: 1, repoCwd: REPO_ROOT, phase: "iteration", pid: 123 })
-			const persisted = attachTaskIdentityToObservabilityEvent(event, identity)
-			expect({ runtimeNodeId: persisted.runtimeNodeId, definitionRef: persisted.definitionRef, definitionNodeId: persisted.definitionNodeId }).toEqual(identity)
+			const item = createItem(fixture.store, chain, { issueNumber: 558_001, repoCwd: "/repo/a" })
+			const tick = await schedulerTick(fixture.options())
+			const activeRun = tick.spawnedRuns[0]
+			if (activeRun === undefined) throw new Error("scheduler did not spawn identity fixture")
+			const run = fixture.store.getRunByRunId(activeRun.runId)
+			const tree = fixture.store.getTaskTree(chain.id)
+			if (run === null || tree?.root.kind !== "seq") throw new Error("scheduler did not persist runtime tree identity")
+			const leaf = tree.root.children.find((node) => node.kind === "leaf" && node.closure.itemRowId === item.id && node.closure.phase === "iteration")
+			if (leaf?.kind !== "leaf") throw new Error("scheduler did not persist iteration leaf")
+			const compiled = await loadPreset(resolve(REPO_ROOT, "presets/gh-issue-pr-iteration"))
+			const compiledLeaf = compiled.tasks.children.find((phaseTree) => phaseTree.phase === "iteration")?.children[0]
+			if (compiledLeaf === undefined) throw new Error("compiled preset omitted iteration leaf")
+			expect(leaf.identity.definitionNodeId).toBe(compiledLeaf.identity)
+			expect(run.runtimeNodeId).toBe(leaf.identity.runtimeNodeId)
+			expect(fixture.schedulerEvents.some((event) => event.type === "phase.start" && event.runId === run.runId)).toBe(true)
+			await activeRun.closed
 		} finally { fixture.store.close() }
 	})
 

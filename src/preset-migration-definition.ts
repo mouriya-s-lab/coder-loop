@@ -24,7 +24,10 @@ async function main(): Promise<void> {
 	process.stdout.write(JSON.stringify({
 		definitionKind: "preset",
 		definitionContentIdentity,
-		definitionPhaseNames: preset.phases.map((phase) => phase.name),
+		definitionPhases: preset.tasks.children.map((phaseTree) => ({
+			phase: phaseTree.phase,
+			definitionNodeId: phaseTree.children[0].identity,
+		})),
 	}))
 }
 

@@ -3,12 +3,11 @@
 import { Database } from "bun:sqlite"
 import { randomUUID } from "node:crypto"
 import { spawn, spawnSync, type ChildProcess } from "node:child_process"
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { type as arkType } from "arktype"
 
-import { attachTaskIdentityToObservabilityEvent, schedulerEventToObservabilityEvent } from "../src/daemon"
-import { appendObservabilityEvent, queryObservabilityEvents } from "../src/observability"
+import { queryObservabilityEvents } from "../src/observability"
 import { openSqliteStateStore, SqliteStateError } from "../src/sqlite-state"
 import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedItemExtra } from "../src/runtime-data"
 import { TaskTreeSnapshotBoundary, type TaskNodeIdentity, type TaskTreeSnapshot } from "../src/task-runtime"
@@ -30,9 +29,10 @@ function command(args: readonly string[], options: { cwd?: string; env?: NodeJS.
 
 function writeShims(root: string): { dir: string; env: NodeJS.ProcessEnv } {
 	const dir = resolve(root, "shim")
+	const runnerPidFile = resolve(root, "runner.pid")
 	mkdirSync(dir, { recursive: true })
 	writeFileSync(resolve(dir, "coder-loop"), `#!/bin/sh\nexec bun ${LOOP_ENTRY} "$@"\n`)
-	writeFileSync(resolve(dir, "codex"), "#!/bin/sh\nprintf 'deterministic issue-558 runner\\n'\n")
+	writeFileSync(resolve(dir, "codex"), `#!/bin/sh\nprintf '%s\\n' "$$" > ${JSON.stringify(runnerPidFile)}\nprintf 'deterministic issue-558 runner\\n'\ntrap 'exit 0' TERM INT\nsleep 30 & wait $!\n`)
 	chmodSync(resolve(dir, "coder-loop"), 0o755)
 	chmodSync(resolve(dir, "codex"), 0o755)
 	const env = { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}` }
@@ -62,7 +62,7 @@ function seedHistoricalRuntime(loopDataRoot: string, repo: string, schemaVersion
 	let chainId: number
 	let itemId: number
 	try {
-		const chain = store.createChain({ name: chainName, repository: repo, baseBranch: "main", status: "active" })
+		const chain = store.createChain({ name: chainName, preset: "single-phase-example", repository: repo, baseBranch: "main", status: "active" })
 		const item = store.createItem({ chainId: chain.id, itemId: `historical-v${schemaVersion}`, repoCwd: repo, status: runtimeStatus("done"), phase: "iteration", preset: "gh-issue-pr-iteration", agentCwd: REPO_ROOT, extra: storedItemExtra({ id: `historical-v${schemaVersion}` }) })
 		if (schemaVersion === 14) store.appendContextEntry({ chainId: chain.id, scope: { kind: "chain" }, author: { kind: "operator" }, body: "current-main-v14-context" })
 		chainId = chain.id
@@ -90,11 +90,11 @@ function seedHistoricalRuntime(loopDataRoot: string, repo: string, schemaVersion
 	return { chainName, runId, sessionId }
 }
 
-function seedFinalRuntime(loopDataRoot: string, repo: string): { chainName: string; identity: TaskNodeIdentity; completedRunId: string } {
+function seedFinalRuntime(loopDataRoot: string, repo: string): { chainName: string; auditItemRowId: number } {
 	const store = openSqliteStateStore({ loopDataRoot })
 	try {
 		const chainName = `issue-558-${randomUUID()}`
-		const chain = store.createChain({ name: chainName, repository: repo, baseBranch: "main", status: "active" })
+		const chain = store.createChain({ name: chainName, preset: "single-phase-example", repository: repo, baseBranch: "main", status: "active" })
 		const items = ["active", "suspended", "consumed"].map((id) => store.createItem({ chainId: chain.id, itemId: id, repoCwd: repo, status: runtimeStatus("done"), preset: "single-phase-example", extra: storedItemExtra({ id }) }))
 		const definitionRef = { kind: "chain", contentIdentity: "sha256:issue-558-integration" } as const
 		const leaf = (index: number, sourceParNodeId: string | null) => {
@@ -127,9 +127,16 @@ function seedFinalRuntime(loopDataRoot: string, repo: string): { chainName: stri
 		store.clearCurrentRun("run-0")
 		const completed = store.getRunByRunId("run-0")
 		if (completed?.closureId !== "closure-0" || completed.runtimeNodeId !== "leaf-0") fail("completed run lost durable task identity")
-		const firstNode = tree.root.children[0]
-		if (firstNode === undefined) fail("missing first fixture node")
-		return { chainName, identity: firstNode.identity, completedRunId: completed.runId }
+		const auditItem = store.createItem({
+			chainId: chain.id,
+			itemId: "audit-item",
+			repoCwd: repo,
+			status: runtimeStatus("pending"),
+			preset: "single-phase-example",
+			agentCwd: REPO_ROOT,
+			extra: storedItemExtra({ id: "audit-item" }),
+		})
+		return { chainName, auditItemRowId: auditItem.id }
 	} finally { store.close() }
 }
 
@@ -144,6 +151,17 @@ async function stopDaemon(child: ChildProcess, loopDataRoot: string, env: NodeJS
 	while (child.exitCode === null && Date.now() < deadline) await Bun.sleep(50)
 	if (child.exitCode === null) child.kill("SIGKILL")
 	if (existsSync(resolve(loopDataRoot, "daemon.sock"))) fail(`daemon socket remained after teardown: ${loopDataRoot}`)
+}
+
+function removeOwnedWorktrees(repo: string, loopDataRoot: string): void {
+	const ownedRoot = resolve(loopDataRoot, "chains")
+	const worktrees = command(["git", "worktree", "list", "--porcelain"], { cwd: repo })
+	for (const line of worktrees.split("\n")) {
+		if (!line.startsWith("worktree ")) continue
+		const path = line.slice("worktree ".length)
+		if (path.startsWith(`${ownedRoot}/`)) command(["git", "worktree", "remove", "--force", path], { cwd: repo })
+	}
+	command(["git", "worktree", "prune"], { cwd: repo })
 }
 
 async function migrateHistoricalRuntime(root: string, loopDataRoot: string, repo: string, schemaVersion: 13 | 14, env: NodeJS.ProcessEnv): Promise<void> {
@@ -195,6 +213,34 @@ async function waitForMigration(child: ChildProcess, loopDataRoot: string): Prom
 	fail("daemon did not finish schema migration")
 }
 
+async function waitForDaemonOwnedIdentityEvent(loopDataRoot: string, chainName: string, itemRowId: number): Promise<{ runId: string; identity: TaskNodeIdentity; runnerPid: number }> {
+	const deadline = Date.now() + 15_000
+	const eventsFile = resolve(loopDataRoot, "events", "events.jsonl")
+	while (Date.now() < deadline) {
+		const store = openSqliteStateStore({ loopDataRoot })
+		try {
+			const chain = store.getChainByName(chainName)
+			if (chain === null) fail("fixture chain disappeared")
+			const run = store.listRuns(chain.id).find((candidate) => candidate.itemId === itemRowId)
+			if (run !== undefined) {
+				const events = await queryObservabilityEvents(eventsFile, { run: run.runId })
+				const event = events.events.find((candidate) => candidate.type === "phase.start")
+				if (event !== undefined && event.runtimeNodeId !== undefined && event.definitionRef !== undefined && event.definitionNodeId !== undefined) {
+					const pid = event.payload.pid
+					if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) fail("daemon phase.start event omitted runner pid")
+					return {
+						runId: run.runId,
+						identity: { runtimeNodeId: event.runtimeNodeId, definitionRef: event.definitionRef, definitionNodeId: event.definitionNodeId },
+						runnerPid: pid,
+					}
+				}
+			}
+		} finally { store.close() }
+		await Bun.sleep(50)
+	}
+	fail("daemon did not emit an identity-bearing phase.start event")
+}
+
 async function main(): Promise<void> {
 	const candidateSha = command(["git", "rev-parse", "HEAD"]).trim()
 	const root = resolve(REPO_ROOT, ".coder-loop/runtime/issue-558-integration", randomUUID())
@@ -215,26 +261,30 @@ async function main(): Promise<void> {
 	try {
 		await waitForSocket(daemon, socket)
 		log(`daemonPid=${daemon.pid ?? "missing"} socket=${socket}`)
-		const runner = spawn("codex", ["--deterministic"], { cwd: REPO_ROOT, env: shims.env, stdio: "ignore" })
-		await new Promise<void>((resolveExit, reject) => { runner.once("exit", () => resolveExit()); runner.once("error", reject) })
+		const emitted = await waitForDaemonOwnedIdentityEvent(loopDataRoot, seeded.chainName, seeded.auditItemRowId)
+		if (emitted.identity.definitionNodeId !== "task:run") fail(`daemon event used non-canonical definition node ${emitted.identity.definitionNodeId}`)
 		const statusText = command(["bun", LOOP_ENTRY, "status", repo, "--json", "--loop-data-root", loopDataRoot, "--chain", seeded.chainName], { env: shims.env })
 		const status = StatusBoundary.assert(JSON.parse(statusText))
 		const rootNode = status.taskTree.root
 		if (rootNode.kind !== "seq" || rootNode.children[1]?.kind !== "par") fail("status did not preserve seq(leaf, par(leaf, leaf))")
 		const lifecycles = JSON.stringify(status.taskTree).match(/active|suspended|consumed/g) ?? []
 		if (!lifecycles.includes("active") || !lifecycles.includes("suspended") || !lifecycles.includes("consumed")) fail("status omitted a closure lifecycle")
-		const eventStore = openSqliteStateStore({ loopDataRoot })
-		const chain = eventStore.getChainByName(seeded.chainName)
-		eventStore.close()
-		if (chain === null) fail("fixture chain disappeared")
-		const baseEvent = schedulerEventToObservabilityEvent(chain, { type: "phase.end", ts: new Date(0).toISOString(), runId: seeded.completedRunId, chainId: chain.id, itemId: 1, phase: "iteration", exitCode: 0, durationSeconds: 1, status: runtimeStatus("done") })
-		await appendObservabilityEvent(resolve(loopDataRoot, "events", "events.jsonl"), attachTaskIdentityToObservabilityEvent(baseEvent, seeded.identity))
-		const events = await queryObservabilityEvents(resolve(loopDataRoot, "events", "events.jsonl"), { run: seeded.completedRunId })
-		const identityEvent = events.events.find((event) => event.runtimeNodeId === seeded.identity.runtimeNodeId)
-		if (identityEvent?.definitionNodeId !== seeded.identity.definitionNodeId || identityEvent.definitionRef?.contentIdentity !== seeded.identity.definitionRef.contentIdentity) fail("emitted event identity does not match persisted/status identity")
+		const auditLeaf = rootNode.children.find((node) => node.kind === "leaf" && node.closure.itemRowId === seeded.auditItemRowId)
+		if (auditLeaf?.kind !== "leaf") fail("status omitted daemon-spawned audit closure")
+		if (JSON.stringify(auditLeaf.identity) !== JSON.stringify(emitted.identity)) fail("daemon event identity does not match persisted/status identity")
+		if (!existsSync(resolve(root, "runner.pid"))) fail("daemon-owned runner did not execute PATH shim")
+		if (emitted.runnerPid === process.pid || emitted.runnerPid === daemon.pid) fail("runner pid was not a daemon child")
 		log("observed=recursive-status,sibling-active-runs,conflict-rejection,consumed-rejection,durable-run-identity,event-identity")
 	} finally {
 		await stopDaemon(daemon, loopDataRoot, shims.env)
+		removeOwnedWorktrees(repo, loopDataRoot)
+		const runnerPidText = existsSync(resolve(root, "runner.pid")) ? readFileSync(resolve(root, "runner.pid"), "utf8").trim() : ""
+		const runnerPid = Number.parseInt(runnerPidText, 10)
+		if (Number.isInteger(runnerPid)) {
+			try { process.kill(runnerPid, 0); fail(`runner process remained after teardown: ${runnerPid}`) } catch (error) {
+				if (!(error instanceof Error) || !("code" in error) || error.code !== "ESRCH") throw error
+			}
+		}
 		const worktrees = command(["git", "worktree", "list", "--porcelain"], { cwd: repo })
 		if (worktrees.includes(resolve(loopDataRoot, "chains"))) fail("temporary worktree registration remained")
 		rmSync(root, { recursive: true, force: true })

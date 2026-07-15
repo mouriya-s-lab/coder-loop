@@ -440,7 +440,8 @@ const LegacyItemRowBoundary = arkType({
 })
 const LegacyCurrentRunRowBoundary = arkType({ chain_id: "number.integer>0", phase: "string>0", run_id: "string>0", started_at: "number", extra: "string", "+": "reject" })
 const PersistedRunExtraRowBoundary = arkType({ extra: "string", "+": "reject" })
-const MigrationDefinitionOutputBoundary = arkType({ definitionKind: "'preset'", definitionContentIdentity: "string>0", definitionPhaseNames: "string[]", "+": "reject" })
+const DefinitionPhaseBoundary = arkType({ phase: "string>0", definitionNodeId: "string>0", "+": "reject" })
+const MigrationDefinitionOutputBoundary = arkType({ definitionKind: "'preset'", definitionContentIdentity: "string>0", definitionPhases: DefinitionPhaseBoundary.array(), "+": "reject" })
 const ClosureIdRowBoundary = arkType({ closure_id: "string>0", "+": "reject" })
 const TableCountRowBoundary = arkType({ table_count: "number.integer>=0", "+": "reject" })
 const SessionIdRowBoundary = arkType({ session_id: "string>0", "+": "reject" })
@@ -1042,10 +1043,11 @@ function migrateLegacyRuntimeToV3(db: Database, loopDataRoot: string): void {
 			const sessions = parseItemSessionIds(item.session_ids, `items.${item.id}.session_ids`)
 			for (const phase of Object.keys(sessions)) requireDeclaredDefinitionPhase(itemPacket, phase, `items.${item.id}.session_ids`)
 			if (item.phase !== null && item.phase !== "") requireDeclaredDefinitionPhase(itemPacket, item.phase, `items.${item.id}.phase`)
-			for (const phase of itemPacket.definitionPhaseNames) {
+			for (const definitionPhase of itemPacket.definitionPhases) {
+				const { phase, definitionNodeId } = definitionPhase
 				const leafId = `legacy-v13:item:${item.id}:phase:${phase}`
 				const closureId = `legacy-v13:closure:${item.id}:${phase}`
-				db.query<never, SqlParams>("INSERT INTO task_nodes (runtime_node_id, chain_id, parent_node_id, child_index, kind, definition_kind, definition_content_identity, definition_node_id) VALUES ($leaf, $chainId, $root, $childIndex, 'leaf', $definitionKind, $identity, $definitionNodeId)").run({ leaf: leafId, chainId: chain.id, root: rootId, childIndex, definitionKind: itemPacket.definitionRef.kind, identity: itemPacket.definitionRef.contentIdentity, definitionNodeId: `item:${item.item_id}:phase:${phase}` })
+				db.query<never, SqlParams>("INSERT INTO task_nodes (runtime_node_id, chain_id, parent_node_id, child_index, kind, definition_kind, definition_content_identity, definition_node_id) VALUES ($leaf, $chainId, $root, $childIndex, 'leaf', $definitionKind, $identity, $definitionNodeId)").run({ leaf: leafId, chainId: chain.id, root: rootId, childIndex, definitionKind: itemPacket.definitionRef.kind, identity: itemPacket.definitionRef.contentIdentity, definitionNodeId })
 				const worktree = item.agent_cwd ?? item.repo_cwd
 				const { branch, baseCommit } = legacyClosureSourceFacts(db, item, phase)
 				db.query<never, SqlParams>("INSERT OR IGNORE INTO task_closures (closure_id, leaf_node_id, item_row_id, phase, lifecycle, worktree_path, branch_name, base_commit, source_par_node_id, created_at, updated_at) VALUES ($closure, $leaf, $itemId, $phase, 'active', $worktree, $branch, $baseCommit, NULL, $now, $now)").run({ closure: closureId, leaf: leafId, itemId: item.id, phase, worktree, branch, baseCommit, now })
@@ -1076,7 +1078,7 @@ function migrateLegacyRuntimeToV3(db: Database, loopDataRoot: string): void {
 
 type PersistedExecutionDefinitionPacket = {
 	definitionRef: ExecutionDefinitionRef
-	definitionPhaseNames: readonly string[]
+	definitionPhases: readonly { phase: string; definitionNodeId: string }[]
 }
 
 function resolveLegacyItemDefinition(item: { id: number; repo_cwd: string; preset: string | null; preset_path: string | null }, loopDataRoot: string): PersistedExecutionDefinitionPacket {
@@ -1104,12 +1106,12 @@ function resolveLegacyItemDefinition(item: { id: number; repo_cwd: string; prese
 	} catch (error) {
 		throw new SqliteStateError("invalid_json", `legacy item ${item.id} preset resolver returned an invalid definition: ${errorMessage(error)}`, { itemId: item.id })
 	}
-	if (output.definitionPhaseNames.length === 0) throw new SqliteStateError("invalid_json", `legacy item ${item.id} persisted preset declares no phases`, { itemId: item.id })
-	return { definitionRef: { kind: output.definitionKind, contentIdentity: output.definitionContentIdentity }, definitionPhaseNames: output.definitionPhaseNames }
+	if (output.definitionPhases.length === 0) throw new SqliteStateError("invalid_json", `legacy item ${item.id} persisted preset declares no phases`, { itemId: item.id })
+	return { definitionRef: { kind: output.definitionKind, contentIdentity: output.definitionContentIdentity }, definitionPhases: output.definitionPhases }
 }
 
 function requireDeclaredDefinitionPhase(packet: PersistedExecutionDefinitionPacket, phase: string, label: string): void {
-	if (!packet.definitionPhaseNames.includes(phase)) throw new SqliteStateError("invalid_json", `${label}: phase ${phase} conflicts with persisted execution definition`, { label, phase })
+	if (!packet.definitionPhases.some((entry) => entry.phase === phase)) throw new SqliteStateError("invalid_json", `${label}: phase ${phase} conflicts with persisted execution definition`, { label, phase })
 }
 
 function legacyClosureSourceFacts(db: Database, item: { id: number; item_id: string; extra: string }, phase: string): { branch: string; baseCommit: string } {
@@ -2055,14 +2057,15 @@ function ensureRuntimeClosure(db: Database, run: RuntimeClosureSeed): void {
 	const now = unixSeconds()
 	requireRuntimeDefinitionPhase(definitionPacket, run.phase, run.runId)
 	let firstLeafId: string | null = null
-	for (const phase of definitionPacket.definitionPhaseNames) {
+	for (const definitionPhase of definitionPacket.definitionPhases) {
+		const { phase, definitionNodeId } = definitionPhase
 		if (queryPersistedOne(db, "SELECT closure_id FROM task_closures WHERE item_row_id = $itemId AND phase = $phase", { itemId: run.itemId, phase }, ClosureIdRowBoundary, `runtime closure for item ${run.itemId} phase ${phase}`) !== null) continue
 		const indexRow = queryPersistedOne(db, "SELECT COALESCE(MAX(child_index) + 1, 0) AS next_index FROM task_nodes WHERE parent_node_id = $root", { root: root.root_node_id }, NextChildIndexRowBoundary, `next runtime closure child index for ${root.root_node_id}`)
 		if (indexRow === null) throw new SqliteStateError("invalid_json", `runtime closure root ${root.root_node_id} has no child index projection`, { rootNodeId: root.root_node_id })
 		const index = indexRow.next_index
 		const leafId = `closure-node:${run.itemId}:${phase}`
 		const closureId = `closure:${run.itemId}:${phase}`
-		db.query<never, SqlParams>("INSERT INTO task_nodes (runtime_node_id, chain_id, parent_node_id, child_index, kind, definition_kind, definition_content_identity, definition_node_id) VALUES ($leaf, $chainId, $root, $index, 'leaf', $definitionKind, $definition, $definitionNode)").run({ leaf: leafId, chainId: run.chainId, root: root.root_node_id, index, definitionKind: definitionRef.kind, definition: definitionRef.contentIdentity, definitionNode: `item:${item.item_id}:phase:${phase}` })
+		db.query<never, SqlParams>("INSERT INTO task_nodes (runtime_node_id, chain_id, parent_node_id, child_index, kind, definition_kind, definition_content_identity, definition_node_id) VALUES ($leaf, $chainId, $root, $index, 'leaf', $definitionKind, $definition, $definitionNode)").run({ leaf: leafId, chainId: run.chainId, root: root.root_node_id, index, definitionKind: definitionRef.kind, definition: definitionRef.contentIdentity, definitionNode: definitionNodeId })
 		db.query<never, SqlParams>("INSERT INTO task_closures (closure_id, leaf_node_id, item_row_id, phase, lifecycle, worktree_path, branch_name, base_commit, source_par_node_id, created_at, updated_at) VALUES ($closure, $leaf, $itemId, $phase, 'active', $worktree, $branch, $baseCommit, NULL, $now, $now)").run({ closure: closureId, leaf: leafId, itemId: run.itemId, phase, worktree, branch, baseCommit, now })
 		db.query<never, SqlParams>("INSERT INTO task_leaf_nodes (runtime_node_id, closure_id) VALUES ($leaf, $closure)").run({ leaf: leafId, closure: closureId })
 		firstLeafId ??= leafId
@@ -2074,20 +2077,22 @@ function ensureRuntimeClosure(db: Database, run: RuntimeClosureSeed): void {
 function parseExecutionDefinitionPacket(extra: JsonObject, runId: string, errorCode: "invalid_input" | "invalid_json"): PersistedExecutionDefinitionPacket {
 	const kind = extra.definitionKind
 	const contentIdentity = extra.definitionContentIdentity
-	const value = extra.definitionPhaseNames
+	const value = extra.definitionPhases
 	if ((kind !== "preset" && kind !== "chain") || typeof contentIdentity !== "string" || contentIdentity === "") throw new SqliteStateError(errorCode, `run ${runId} has no exact execution definition identity`, { runId })
-	if (!Array.isArray(value) || value.length === 0 || !value.every((entry) => typeof entry === "string" && entry !== "")) throw new SqliteStateError(errorCode, `run ${runId} has invalid definition phase names`, { runId })
-	const phases: string[] = []
+	if (!Array.isArray(value) || value.length === 0) throw new SqliteStateError(errorCode, `run ${runId} has invalid definition phases`, { runId })
+	const phases: { phase: string; definitionNodeId: string }[] = []
 	for (const entry of value) {
-		if (typeof entry !== "string") throw new SqliteStateError(errorCode, `run ${runId} has a non-string definition phase`, { runId })
-		if (phases.includes(entry)) throw new SqliteStateError(errorCode, `run ${runId} has duplicate definition phase ${entry}`, { runId, phase: entry })
-		phases.push(entry)
+		let parsed: typeof DefinitionPhaseBoundary.infer
+		try { parsed = DefinitionPhaseBoundary.assert(entry) } catch (error) { throw new SqliteStateError(errorCode, `run ${runId} has an invalid definition phase: ${errorMessage(error)}`, { runId }) }
+		if (phases.some((existing) => existing.phase === parsed.phase)) throw new SqliteStateError(errorCode, `run ${runId} has duplicate definition phase ${parsed.phase}`, { runId, phase: parsed.phase })
+		if (phases.some((existing) => existing.definitionNodeId === parsed.definitionNodeId)) throw new SqliteStateError(errorCode, `run ${runId} has duplicate definition node ${parsed.definitionNodeId}`, { runId, definitionNodeId: parsed.definitionNodeId })
+		phases.push(parsed)
 	}
-	return { definitionRef: { kind, contentIdentity }, definitionPhaseNames: phases }
+	return { definitionRef: { kind, contentIdentity }, definitionPhases: phases }
 }
 
 function requireRuntimeDefinitionPhase(packet: PersistedExecutionDefinitionPacket, phase: string, runId: string): void {
-	if (!packet.definitionPhaseNames.includes(phase)) throw new SqliteStateError("invalid_input", `run ${runId} phase ${phase} conflicts with persisted execution definition`, { runId, phase })
+	if (!packet.definitionPhases.some((entry) => entry.phase === phase)) throw new SqliteStateError("invalid_input", `run ${runId} phase ${phase} conflicts with persisted execution definition`, { runId, phase })
 }
 
 type TaskNodeRow = {

@@ -54,7 +54,12 @@ function staleRecoveryRunExtra(worktreePath: string, overrides: JsonObject = {})
 		baseCommit: "0123456789abcdef",
 		definitionKind: "preset",
 		definitionContentIdentity: "sha256:daemon-recovery-fixture",
-		definitionPhaseNames: ["iteration", "review", "blocked-responder", "umbrella-finalizer"],
+		definitionPhases: [
+			{ phase: "iteration", definitionNodeId: "task:iteration" },
+			{ phase: "review", definitionNodeId: "task:review" },
+			{ phase: "blocked-responder", definitionNodeId: "task:blocked-responder" },
+			{ phase: "umbrella-finalizer", definitionNodeId: "task:umbrella-finalizer" },
+		],
 		...overrides,
 	})
 }
