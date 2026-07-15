@@ -7760,6 +7760,16 @@ process.exitCode = 0
 			const hook = { kind: "observer", point: "agent.spawn", script: "/bin/true", timeoutMs: 1000 }
 			const replaced = record(expectOk(await request(fixture, "item.update", { itemId, extra: { hooks: [hook] } })).item)
 			expect(record(replaced.extra).hooks).toEqual([hook])
+			const replacementWithOmittedHooks = record(expectOk(await request(fixture, "item.update", {
+				itemId,
+				extra: { branch: "operator/replacement" },
+			})).item)
+			expect(record(replacementWithOmittedHooks.extra)).toMatchObject({ branch: "operator/replacement", hooks: [hook] })
+			const replacementWithExplicitHookClear = record(expectOk(await request(fixture, "item.update", {
+				itemId,
+				extra: { branch: "operator/cleared", hooks: null },
+			})).item)
+			expect(record(replacementWithExplicitHookClear.extra)).toEqual({ branch: "operator/cleared" })
 			const patched = record(expectOk(await request(fixture, "item.update", { itemId, extraPatch: { hooks: [hook] } })).item)
 			expect(record(patched.extra).hooks).toEqual([hook])
 			const cleared = record(expectOk(await request(fixture, "item.update", { itemId, extraPatch: { hooks: null } })).item)
@@ -7776,7 +7786,7 @@ process.exitCode = 0
 				&& event.payload.outcome === "allow"
 				&& event.payload.reason === "operator",
 			)
-			expect(operatorAllows.length).toBeGreaterThanOrEqual(10)
+			expect(operatorAllows.length).toBeGreaterThanOrEqual(12)
 			for (const event of operatorAllows) {
 				if (event.kind === "audit" && event.type === "item.update.field_write_admission") {
 					expect(event.subject).toEqual({ kind: "operator" })

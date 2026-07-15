@@ -2979,7 +2979,7 @@ export class CoderLoopDaemon {
 			throw new DaemonError("invalid_request", "item.update fields must not combine extra and extraPatch", {})
 		}
 		const requestedExtra = rawExtra !== undefined
-			? rawExtra
+			? replaceItemExtra(itemExtraToJsonObject(item.extra), rawExtra)
 			: rawExtraPatch === undefined
 				? undefined
 				: mergeItemExtraPatch(itemExtraToJsonObject(item.extra), rawExtraPatch)
@@ -5116,6 +5116,17 @@ function collectProtectedItemUpdateFieldKeys(
 		innerKeys: new Set([...requested.innerKeys, "hooks"]),
 		all: new Set([...requested.all, "hooks"]),
 	}
+}
+
+function replaceItemExtra(existing: JsonObject, replacement: JsonObject): JsonObject {
+	const normalized: JsonObject = { ...replacement }
+	if (Object.hasOwn(replacement, "hooks")) {
+		if (replacement.hooks === null) delete normalized.hooks
+	} else if (Object.hasOwn(existing, "hooks")) {
+		const hooks = existing.hooks
+		if (hooks !== undefined) normalized.hooks = hooks
+	}
+	return normalized
 }
 
 function mergeItemExtraPatch(existing: JsonObject, patch: JsonObject): JsonObject {

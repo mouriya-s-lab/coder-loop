@@ -46,17 +46,16 @@ export type GateHookDeclaration =
 
 export type HookDeclaration = ObserverHookDeclaration | GateHookDeclaration
 export type PresetHookPlaceholder = { kind: "named-gate-placeholder"; name: string; point: GateDecisionPoint }
-export type HookSourceLayer = "global" | "chain" | "preset" | "item"
-export type EffectiveHook =
-	| { source: "global" | "chain" | "item"; declaration: HookDeclaration }
-	| { source: "preset"; declaration: PresetHookPlaceholder }
-
 type HookLayers = {
 	global: readonly HookDeclaration[]
 	chain: readonly HookDeclaration[]
 	preset: readonly PresetHookPlaceholder[]
 	item: readonly HookDeclaration[]
 }
+export type HookSourceLayer = keyof HookLayers
+export type EffectiveHook = {
+	[Source in HookSourceLayer]: { source: Source; declaration: HookLayers[Source][number] }
+}[HookSourceLayer]
 
 const ObserverHookInputBoundary = type({
 	kind: type.unit("observer"),
