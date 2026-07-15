@@ -3584,6 +3584,7 @@ process.exitCode = 0
 		const loopDataRoot = root + "-loop-data"
 		const fakeRunner = resolve(root, "fake-runner.ts")
 		const eventLog = resolve(root, "events.jsonl")
+		await mkdir(root, { recursive: true })
 		await mkdir(loopDataRoot, { recursive: true })
 		await writeFakeRunner(fakeRunner)
 
@@ -4387,7 +4388,7 @@ prompt = "review.md"
 				repoCwd: REPO_ROOT,
 				// #405: single-phase-example's `run` phase isn't review, so the
 				// fakeRunner default returns null (no write). Pin the write explicitly.
-				extra: { sleepMs: 5, exitCode: 0, writeStatus: "done" },
+				extra: { sleepMs: 5, exitCode: 0, writeStatus: "done", eventLog: fixture.eventLog },
 				preset: "single-phase-example",
 			})
 
@@ -4534,6 +4535,7 @@ prompt = "review.md"
 		const promptCapturePath = resolve(root, "captured-prompt.txt")
 		const fakeRunner = resolve(root, "fake-runner.ts")
 		const eventLog = resolve(root, "events.jsonl")
+		await mkdir(root, { recursive: true })
 		await mkdir(loopDataRoot, { recursive: true })
 		// #406 dedicated runner: captures `CODER_LOOP_RUN_CRED` env + the rendered prompt to side
 		// files, sleeps long enough for the test to drive an item.update against another item, then
@@ -4693,6 +4695,7 @@ process.exitCode = 0
 		const capturePath = resolve(root, "captured-credential.txt")
 		const fakeRunner = resolve(root, "fake-runner.ts")
 		const eventLog = resolve(root, "events.jsonl")
+		await mkdir(root, { recursive: true })
 		await mkdir(loopDataRoot, { recursive: true })
 		// Capture credential to a side file, then sleep long enough for the test to drive an
 		// affirmative item.update against the bound item before exiting.
@@ -4844,6 +4847,7 @@ process.exitCode = 0
 		const capturePath = resolve(root, "captured-credential.txt")
 		const fakeRunner = resolve(root, "fake-runner.ts")
 		const eventLog = resolve(root, "events.jsonl")
+		await mkdir(root, { recursive: true })
 		await mkdir(loopDataRoot, { recursive: true })
 		await writeFile(
 			fakeRunner,
@@ -5738,6 +5742,7 @@ process.exitCode = 0
 		const capturePath = resolve(root, "captured-credential.txt")
 		const fakeRunner = resolve(root, "fake-runner.ts")
 		const eventLog = resolve(root, "events.jsonl")
+		await mkdir(root, { recursive: true })
 		await mkdir(loopDataRoot, { recursive: true })
 		// Fake iteration runner: capture CODER_LOOP_RUN_CRED, then sleep long enough for the
 		// test to drive an item.add against the daemon before the run closes (closing the run
@@ -6037,6 +6042,7 @@ process.exitCode = 0
 		const fakeRunner = resolve(root, "fake-runner.ts")
 		const eventLog = resolve(root, "events.jsonl")
 		const smokePresetDir = resolve(REPO_ROOT, "presets/single-phase-example")
+		await mkdir(root, { recursive: true })
 		await mkdir(loopDataRoot, { recursive: true })
 		// Capture-credential fake runner; sleeps long enough for the test to drive item.add.
 		await writeFile(
@@ -6281,6 +6287,7 @@ process.exitCode = 0
 		const capturePath = resolve(root, "captured-credential.txt")
 		const fakeRunner = resolve(root, "fake-runner.ts")
 		const eventLog = resolve(root, "events.jsonl")
+		await mkdir(root, { recursive: true })
 		await mkdir(loopDataRoot, { recursive: true })
 		await writeFile(
 			fakeRunner,
@@ -6706,6 +6713,7 @@ process.exitCode = 0
 		const capturePath = resolve(root, "credential.txt")
 		const fakeRunner = resolve(root, "fake-runner.ts")
 		const eventLog = resolve(root, "events.jsonl")
+		await mkdir(root, { recursive: true })
 		await mkdir(loopDataRoot, { recursive: true })
 		await writeFile(
 			fakeRunner,
@@ -8032,6 +8040,7 @@ async function startQueueUnblockGateFixture(name: string, options: QueueUnblockG
 	const loopDataRoot = root + "-loop-data"
 	const fakeRunner = resolve(root, "held-runner.ts")
 	const credentialPath = resolve(root, "runner-credential.txt")
+	await mkdir(root, { recursive: true })
 	await mkdir(loopDataRoot, { recursive: true })
 	await writeFile(
 		fakeRunner,
@@ -8209,7 +8218,9 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 					itemId: item.id,
 					issueNumber: Number(item.itemId),
 					runId,
-					eventLog: resolve(resolveChainRuntimePaths(chain.name, { loopDataRoot }).runsDir, "events.jsonl"),
+					eventLog: typeof extra.eventLog === "string"
+						? extra.eventLog
+						: resolve(resolveChainRuntimePaths(chain.name, { loopDataRoot }).runsDir, "events.jsonl"),
 					sleepMs: typeof extra.sleepMs === "number" ? extra.sleepMs : 5,
 					exitCode: typeof extra.exitCode === "number" ? extra.exitCode : 0,
 					writeStatus: daemonFakeRunnerWriteStatus(phase, extra),
