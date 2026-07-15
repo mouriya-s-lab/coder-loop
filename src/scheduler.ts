@@ -9,6 +9,7 @@ import {
 	buildRunnerFilesystemAuthorization,
 	buildRunnerInvocation,
 	parseSessionIdFromRunnerStream,
+	phaseDeclaredRuntimeBindingPaths,
 	phaseExitsEpilogue,
 	renderFragmentIndex,
 	renderPrompt,
@@ -1039,14 +1040,18 @@ async function spawnSchedulerRun(
 			runner: runner.kind,
 		})
 		const finalPrompt = renderedPrompt + phaseExitsEpilogue()
+		const authorizationPhase = loadedPreset.preset.phases.find((entry) => entry.name === phase)
+		if (authorizationPhase === undefined) throw new SchedulerError("spawn_failed", `scheduler: preset ${loadedPreset.preset.name} does not define phase ${phase}`)
 		const runnerPlan = buildRunnerInvocation(
 			runner,
 			finalPrompt,
 			resumeDecision,
-			invocationAuthorization(chain, item, worktreePath, presetDir, resolveLoopDataPaths(options.loopDataRootOptions).root),
+			invocationAuthorization(chain, item, worktreePath, presetDir, resolveLoopDataPaths(options.loopDataRootOptions).root, authorizationPhase),
 		)
 		for (const directory of runnerPlan.runtimeDirectories) await mkdir(directory, { recursive: true })
 		await initializeSchedulerRunArtifacts(options, chain, item, runId, phase, startedAt, worktreePath)
+		const runPaths = resolveChainRuntimePaths(chain.name, options.loopDataRootOptions)
+		await writeFile(resolve(runPaths.runPhaseDir(runId, phase), "runner-authorization.json"), `${JSON.stringify(runnerPlan.authorizationEvidence)}\n`)
 		credentialContext = { chainId: chain.id, itemId: item.id, runId, phase }
 		credential = options.runCredentials?.mint(credentialContext) ?? null
 		if (isAbsolute(runner.binary) && !existsSync(runner.binary)) throw new Error(`runner binary does not exist: ${runner.binary}`)
@@ -2382,7 +2387,7 @@ async function resolvePhaseRunner(
 	)
 }
 
-function invocationAuthorization(chain: ChainRecord, item: ItemRecord, agentCwd: string, presetDir: string, loopDataRoot: string): RunnerFilesystemAuthorization {
+function invocationAuthorization(chain: ChainRecord, item: ItemRecord, agentCwd: string, presetDir: string, loopDataRoot: string, phase: Pick<PresetPhase, "variables">): RunnerFilesystemAuthorization {
 	const chainPaths = resolveChainRuntimePaths(chain.name, { loopDataRoot })
 	return buildRunnerFilesystemAuthorization({
 		agentCwd,
@@ -2395,6 +2400,7 @@ function invocationAuthorization(chain: ChainRecord, item: ItemRecord, agentCwd:
 		evidenceRootDir: chainPaths.evidenceDir,
 		logDir: chainPaths.runsDir,
 		daemonSocketPath: resolve(loopDataRoot, "daemon.sock"),
+		declaredRuntimeBindingPaths: phaseDeclaredRuntimeBindingPaths(phase),
 	})
 }
 

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
-import { relative, resolve } from "node:path"
+import { dirname, relative, resolve } from "node:path"
 
 import {
 	agentCodexArgs,
@@ -13,6 +13,7 @@ import {
 	buildRenderBindings,
 	buildDaemonStartPlan,
 	buildRuntimeBindings,
+	phaseDeclaredRuntimeBindingPaths,
 	createSummaryWatchdog,
 	createSummaryWatchdogStdoutObserver,
 	decideResume,
@@ -810,6 +811,7 @@ describe("small parsers", () => {
 			issueDir: "/runtime/loop-data/chains/c/issues",
 			logDir: "/runtime/loop-data/chains/c/runs",
 			daemonSocketPath: "/runtime/loop-data/daemon.sock",
+			declaredRuntimeBindingPaths: ["sharedContextPath", "currentIssueFile", "issueDir", "evidenceDir", "evidenceRootDir", "logDir"],
 		})
 		expect(authorization.surfaces).toContainEqual({ kind: "read-only-directory", channel: "preset", path: "/runtime/loop-data/preset-materialized/p" })
 		expect(authorization.surfaces).toContainEqual({ kind: "system-device", channel: "null", path: "/dev/null" })
@@ -819,13 +821,18 @@ describe("small parsers", () => {
 			for (const resume of [{ kind: "fresh" }, { kind: "resume", sessionId: `session-${kind}` }] as const) {
 				const plan = buildRunnerInvocation({ kind, binary: kind, extraArgs: [], model: null, source: "engine-builtin" }, "prompt", resume, authorization)
 				const runnerScratch = resolve("/runtime/loop-data/chains/c/worktrees/i", ".coder-loop-runner", "tmp")
+				const outerSandboxProfile = plan.args[1]
+				if (outerSandboxProfile === undefined) throw new Error("runner invocation must include an outer sandbox profile")
 				expect(plan.binary).toBe("/usr/bin/sandbox-exec")
+				expect(plan.authorizationEvidence.outerSandboxProfile).toBe(outerSandboxProfile)
+				expect(plan.authorizationEvidence.runner).toBe(kind)
 				expect(plan.args[2]).toBe(kind)
 				expect(plan.args.slice(2)).not.toContain("/runtime/loop-data")
 				expect(plan.args).not.toContain("danger-full-access")
 				expect(plan.args[1]).toContain("/runtime/loop-data/chains/c/evidence/1")
 				expect(plan.args[1]).toContain(runnerScratch)
 				expect(plan.args[1]).toContain('(literal "/dev/null")')
+				expect(plan.args[1]).toContain('(subpath "/runtime/loop-data/daemon.sock")')
 				expect(plan.args[1]).not.toContain('(subpath "/dev")')
 				expect(plan.args.slice(2)).not.toContain("/dev/null")
 				expect(plan.args[1]).not.toContain("/private/tmp/claude-")
@@ -857,6 +864,36 @@ describe("small parsers", () => {
 		}
 	})
 
+	test("runner git metadata authorizes a real commit from a linked worktree", async () => {
+		const root = resolve(TEST_ROOT, "runner-linked-worktree-git")
+		const repository = resolve(root, "repository")
+		const worktree = resolve(root, "worktree")
+		const loopDataRoot = resolve(root, "loop-data")
+		await rm(root, { recursive: true, force: true })
+		await mkdir(repository, { recursive: true })
+		const git = (cwd: string, args: readonly string[]) => Bun.spawnSync({ cmd: ["git", ...args], cwd, stdout: "pipe", stderr: "pipe" })
+		expect(git(repository, ["init", "-b", "main"]).exitCode).toBe(0)
+		await writeFile(resolve(repository, "README.md"), "base\n")
+		expect(git(repository, ["add", "README.md"]).exitCode).toBe(0)
+		expect(git(repository, ["-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "base"]).exitCode).toBe(0)
+		expect(git(repository, ["worktree", "add", "-b", "linked", worktree]).exitCode).toBe(0)
+		const authorization = buildRunnerFilesystemAuthorization({
+			loopDataRoot, agentCwd: worktree, presetDir: resolve(root, "preset"), sharedContextPath: resolve(loopDataRoot, "chains/c/shared.md"),
+			currentIssueFile: "", evidenceDir: resolve(loopDataRoot, "chains/c/evidence/1"), evidenceRootDir: resolve(loopDataRoot, "chains/c/evidence"),
+			issueDir: resolve(loopDataRoot, "chains/c/issues"), logDir: resolve(loopDataRoot, "chains/c/runs"), daemonSocketPath: resolve(loopDataRoot, "daemon.sock"),
+			declaredRuntimeBindingPaths: [],
+		})
+		expect(authorization.surfaces).toContainEqual(expect.objectContaining({ kind: "writable-directory", channel: "git-worktree-metadata" }))
+		expect(authorization.surfaces).toContainEqual(expect.objectContaining({ kind: "writable-directory", channel: "git-common-dir" }))
+		const plan = buildRunnerInvocation({ kind: "claude", binary: "/usr/bin/true", extraArgs: [], model: null, source: "engine-builtin" }, "prompt", { kind: "fresh" }, authorization)
+		const commit = Bun.spawnSync({
+			cmd: ["/usr/bin/sandbox-exec", "-p", plan.authorizationEvidence.outerSandboxProfile, "/bin/sh", "-c", "printf linked > linked.txt && git add linked.txt && git -c user.name=fixture -c user.email=fixture@example.invalid commit -m linked"],
+			cwd: worktree, stdout: "pipe", stderr: "pipe",
+		})
+		expect(commit.exitCode, new TextDecoder().decode(commit.stderr)).toBe(0)
+		expect(git(worktree, ["rev-parse", "--verify", "HEAD"]).exitCode).toBe(0)
+	})
+
 	test("runner filesystem grants deny undeclared writes and preserve every declared writable channel", async () => {
 		const root = resolve(TEST_ROOT, "runner-filesystem-explicit-writes")
 		const loopDataRoot = resolve(root, "loop-data")
@@ -870,18 +907,24 @@ describe("small parsers", () => {
 		const currentIssueFile = resolve(issueDir, "1.md")
 		const daemonSocketPath = resolve(loopDataRoot, "daemon.sock")
 		const undeclared = resolve(root, "undeclared.txt")
+		const undeclaredSameChain = resolve(loopDataRoot, "chains/c/undeclared.txt")
+		const undeclaredOtherChain = resolve(loopDataRoot, "chains/other/private.txt")
+		const undeclaredRoot = resolve(loopDataRoot, "central.sqlite")
 		await rm(root, { recursive: true, force: true })
 		await Promise.all([agentCwd, presetDir, evidenceDir, evidenceRootDir, issueDir, logDir].map((path) => mkdir(path, { recursive: true })))
-		await Promise.all([sharedContextPath, currentIssueFile, daemonSocketPath, undeclared].map((path) => writeFile(path, "initial\n")))
+		await mkdir(dirname(undeclaredOtherChain), { recursive: true })
+		await Promise.all([sharedContextPath, currentIssueFile, daemonSocketPath, undeclared, undeclaredSameChain, undeclaredOtherChain, undeclaredRoot].map((path) => writeFile(path, "initial\n")))
 		const authorization = buildRunnerFilesystemAuthorization({
 			loopDataRoot, agentCwd, presetDir, sharedContextPath, currentIssueFile,
 			evidenceDir, evidenceRootDir, issueDir, logDir, daemonSocketPath,
+			declaredRuntimeBindingPaths: ["sharedContextPath", "currentIssueFile", "issueDir", "evidenceDir", "evidenceRootDir", "logDir"],
 		})
 		for (const kind of ["claude", "codex", "opencode"] as const) {
 			for (const resume of [{ kind: "fresh" }, { kind: "resume", sessionId: `resume-${kind}` }] as const) {
 				const plan = buildRunnerInvocation({ kind, binary: "/usr/bin/true", extraArgs: [], model: null, source: "engine-builtin" }, "prompt", resume, authorization)
 				const profile = plan.args[1]!
 				const writeProbe = (path: string) => Bun.spawnSync({ cmd: ["/usr/bin/sandbox-exec", "-p", profile, "/bin/sh", "-c", `printf allowed >> ${JSON.stringify(path)}`], stdout: "pipe", stderr: "pipe" })
+				const readProbe = (path: string) => Bun.spawnSync({ cmd: ["/usr/bin/sandbox-exec", "-p", profile, "/bin/sh", "-c", `cat ${JSON.stringify(path)}`], stdout: "pipe", stderr: "pipe" })
 				for (const path of [
 					resolve(agentCwd, `${kind}-${resume.kind}-agent.txt`), resolve(evidenceDir, `${kind}-${resume.kind}-evidence.txt`), resolve(evidenceRootDir, `${kind}-${resume.kind}-root.txt`),
 					resolve(issueDir, `${kind}-${resume.kind}-issue.txt`), resolve(logDir, `${kind}-${resume.kind}-log.txt`), sharedContextPath, currentIssueFile, daemonSocketPath,
@@ -890,8 +933,37 @@ describe("small parsers", () => {
 				expect(writeProbe("/dev/zero").exitCode, `${kind}/${resume.kind}: /dev sibling`).not.toBe(0)
 				expect(writeProbe(resolve(presetDir, `${kind}-${resume.kind}-forbidden.txt`)).exitCode, `${kind}/${resume.kind}: preset`).not.toBe(0)
 				expect(writeProbe(undeclared).exitCode, `${kind}/${resume.kind}: undeclared`).not.toBe(0)
+				for (const path of [undeclaredSameChain, undeclaredOtherChain, undeclaredRoot]) {
+					expect(readProbe(path).exitCode, `${kind}/${resume.kind}: undeclared read ${path}`).not.toBe(0)
+					expect(writeProbe(path).exitCode, `${kind}/${resume.kind}: undeclared write ${path}`).not.toBe(0)
+				}
 			}
 		}
+	})
+
+	test("phase-scoped runner surfaces include only actually declared runtime binding paths", () => {
+		const phase = makeOptions().preset.phases[0]!
+		const declared = phaseDeclaredRuntimeBindingPaths({
+			...phase,
+			variables: [
+				{ key: "EVIDENCE", source: { kind: "runtime", key: "evidenceDir" }, doc: null },
+				{ key: "TRACE", source: { kind: "runtime", key: "traceFile" }, doc: null },
+				{ key: "STATUS", source: { kind: "runtime", key: "statusVocabularyDoc" }, doc: null },
+			],
+		})
+		expect(declared).toEqual(["evidenceDir", "logDir"])
+		const authorization = buildRunnerFilesystemAuthorization({
+			loopDataRoot: "/runtime/root", agentCwd: "/repo", presetDir: "/preset", sharedContextPath: "/runtime/root/chains/c/shared.md",
+			currentIssueFile: "/runtime/root/chains/c/issues/1.md", evidenceDir: "/runtime/root/chains/c/evidence/1", evidenceRootDir: "/runtime/root/chains/c/evidence",
+			issueDir: "/runtime/root/chains/c/issues", logDir: "/runtime/root/chains/c/runs", daemonSocketPath: "/runtime/root/daemon.sock",
+			declaredRuntimeBindingPaths: declared,
+		})
+		expect(authorization.surfaces).toContainEqual({ kind: "writable-directory", channel: "evidence", path: "/runtime/root/chains/c/evidence/1" })
+		expect(authorization.surfaces).toContainEqual({ kind: "writable-directory", channel: "logs", path: "/runtime/root/chains/c/runs" })
+		expect(authorization.surfaces).not.toContainEqual(expect.objectContaining({ channel: "shared-context" }))
+		expect(authorization.surfaces).not.toContainEqual(expect.objectContaining({ channel: "current-issue" }))
+		expect(authorization.surfaces).not.toContainEqual(expect.objectContaining({ channel: "issues" }))
+		expect(authorization.surfaces).not.toContainEqual(expect.objectContaining({ channel: "evidence-root" }))
 	})
 
 	test("runner authorization metadata cannot widen projections", () => {
@@ -899,6 +971,7 @@ describe("small parsers", () => {
 			loopDataRoot: "/runtime/root", agentCwd: "/repo", presetDir: "/preset", sharedContextPath: "/runtime/root/chains/c/shared.md",
 			currentIssueFile: "", evidenceDir: "/runtime/root/chains/c/evidence/1", evidenceRootDir: "/runtime/root/chains/c/evidence",
 			issueDir: "/runtime/root/chains/c/issues", logDir: "/runtime/root/chains/c/runs", daemonSocketPath: "/runtime/root/daemon.sock",
+			declaredRuntimeBindingPaths: ["evidenceDir"],
 		})
 		const bypasses = [
 			["--add-dir", "/runtime/root"], ["--add-dir=/runtime/root"], ["--sandbox", "danger-full-access"], ["--sandbox=danger-full-access"],
@@ -930,6 +1003,9 @@ describe("small parsers", () => {
 					options: makeOptions(), label: "phase", prompt: "projection-prompt", outputPath,
 					sessionsPath: agentSessionsPath(outputPath), resume, agentCwd: root,
 					runner: { kind, source: "preset", binary: runner, extraArgs: [], model: null }, watchdog: null,
+					authorizationPhase: {
+						variables: [{ key: "EVIDENCE", source: { kind: "runtime", key: "evidenceDir" }, doc: null }],
+					},
 				})
 				expect(outcome.exitCode).toBe(0)
 				const argv = await readFile(capture, "utf8")
@@ -939,14 +1015,14 @@ describe("small parsers", () => {
 					expect(argv).toContain(root)
 					expect(argv).toContain(makeOptions().preset.presetDir)
 					expect(argv).toContain(makeOptions().evidenceRootDir)
-					expect(argv).toContain(makeOptions().issueDir)
-					expect(argv).toContain(makeOptions().logDir)
+					expect(argv).not.toContain(makeOptions().issueDir)
+					expect(argv).not.toContain(makeOptions().logDir)
 				}
 				if (kind === "codex" && resume.kind === "fresh") {
 					expect(argv).toContain(root)
 					expect(argv).toContain(makeOptions().evidenceRootDir)
-					expect(argv).toContain(makeOptions().issueDir)
-					expect(argv).toContain(makeOptions().logDir)
+					expect(argv).not.toContain(makeOptions().issueDir)
+					expect(argv).not.toContain(makeOptions().logDir)
 					expect(argv).not.toContain(makeOptions().preset.presetDir)
 				}
 			}

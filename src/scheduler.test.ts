@@ -52,6 +52,7 @@ function runnerAuthorizationForTest(agentCwd: string, presetDir: string, loopDat
 		issueDir: resolve(loopDataRoot, "chains/c/issues"), evidenceDir: resolve(loopDataRoot, "chains/c/evidence/1"),
 		evidenceRootDir: resolve(loopDataRoot, "chains/c/evidence"), logDir: resolve(loopDataRoot, "chains/c/runs"),
 		daemonSocketPath: resolve(loopDataRoot, "daemon.sock"),
+		declaredRuntimeBindingPaths: ["sharedContextPath", "currentIssueFile", "issueDir", "evidenceDir", "evidenceRootDir", "logDir"],
 	})
 }
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-tests", String(process.pid))
@@ -96,6 +97,12 @@ describe("scheduler", () => {
 					if (fixturePresetDir === undefined) throw new Error("scheduler fixture must retain its preset directory")
 					expect(projected).not.toContain(fixture.loopDataRoot)
 					expect(projected).not.toContain("/dev/null")
+					const authorizationEvidencePath = resolve(chainPaths.runPhaseDir(tick.spawnedRuns[0]!.runId, "iteration"), "runner-authorization.json")
+					const authorizationEvidence = await readFile(authorizationEvidencePath, "utf8")
+					expect(authorizationEvidence).toContain('"outerSandboxProfile"')
+					expect(authorizationEvidence).toContain(`"runner":"${kind}"`)
+					expect(authorizationEvidence).toContain(`(require-not (subpath \\"${fixture.loopDataRoot}\\"))`)
+					expect(authorizationEvidence).not.toContain(`"path":"${fixture.loopDataRoot}"`)
 					if (kind === "claude") {
 						expect(projected).toContain(fixturePresetDir)
 						expect(projected).toContain(chainPaths.evidenceDir)
@@ -4517,6 +4524,7 @@ binary = "codex"
 
 	  [phases.variables]
 	  ISSUE = "item.issue"
+	  LOG_DIR = "runtime.logDir"
 
 	[[phases]]
 	name = "beta"
@@ -4524,6 +4532,7 @@ binary = "codex"
 
 	  [phases.variables]
 	  ISSUE = "item.issue"
+	  LOG_DIR = "runtime.logDir"
 
 	[[phases]]
 	name = "gamma"
@@ -4535,6 +4544,7 @@ binary = "codex"
 
 	  [phases.variables]
 	  ISSUE = "item.issue"
+	  LOG_DIR = "runtime.logDir"
 `,
 	)
 }

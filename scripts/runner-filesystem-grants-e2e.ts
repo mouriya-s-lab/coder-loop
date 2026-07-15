@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import { spawn, spawnSync } from "node:child_process"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { resolve } from "node:path"
 
@@ -65,6 +65,20 @@ function assertCapturedInvocation(runner: string, argv: readonly string[]): void
 	if (skipPermissionsCount !== (runner === "opencode" ? 1 : 0)) throw new Error(`${runner}: unexpected --dangerously-skip-permissions count ${skipPermissionsCount}`)
 }
 
+function assertOuterAuthorizationEvidence(runner: string, chain: string): string {
+	const runsDir = resolve(loopDataRoot, "chains", chain, "runs")
+	const runDirs = readdirSync(runsDir, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name.startsWith("run-"))
+	if (runDirs.length !== 1) throw new Error(`${runner}: expected one run directory, observed ${runDirs.map((entry) => entry.name).join(", ")}`)
+	const evidencePath = resolve(runsDir, runDirs[0]!.name, "phase", "runner-authorization.json")
+	const evidence = readFileSync(evidencePath, "utf8")
+	if (!evidence.includes(`"runner":"${runner}"`)) throw new Error(`${runner}: outer authorization evidence has the wrong runner`)
+	if (!evidence.includes('"outerSandboxBinary":"/usr/bin/sandbox-exec"')) throw new Error(`${runner}: outer sandbox binary missing from authorization evidence`)
+	if (!evidence.includes('"outerSandboxProfile":"(version 1)')) throw new Error(`${runner}: complete outer sandbox profile missing from authorization evidence`)
+	if (!evidence.includes(`(require-not (subpath \\"${loopDataRoot}\\"))`)) throw new Error(`${runner}: outer profile does not exclude the loop-data root from ambient reads`)
+	if (evidence.includes(`"path":"${loopDataRoot}"`)) throw new Error(`${runner}: outer profile surfaces contain the whole loop-data root`)
+	return evidencePath
+}
+
 function assertCredentialedTransition(chain: string): void {
 	const eventsPath = resolve(loopDataRoot, "events", "events.jsonl")
 	const admitted = readFileSync(eventsPath, "utf8").split("\n").some((line) =>
@@ -82,7 +96,7 @@ function writeFixture(): void {
 	command(["git", "-c", "user.name=coder-loop-e2e", "-c", "user.email=e2e@example.invalid", "commit", "-m", "fixture"], target)
 	mkdirSync(preset, { recursive: true })
 	writeFileSync(resolve(preset, "fragment.md"), "DECLARED_PRESET_READ_OK\n")
-	writeFileSync(resolve(preset, "phase.md"), `Read {{FRAGMENT_INDEX}} and require it contains DECLARED_PRESET_READ_OK. Run a shell command that attempts to write {{PRESET_DIR}}/mutation-forbidden and require that write to fail. Read {{SHARED_CONTEXT_FILE}} and {{CURRENT_ISSUE_FILE}}. Write the text evidence-ok to {{EVIDENCE_DIR}}/runner.txt. Then run exactly: coder-loop item exits {{CHAIN_NAME}} --issue {{ISSUE}} --agent-run-id {{RUN_ID}} --agent-phase phase --json ; and coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --status done . Exit nonzero if any requirement fails.\n`)
+	writeFileSync(resolve(preset, "phase.md"), `Read {{FRAGMENT_INDEX}} and require it contains DECLARED_PRESET_READ_OK. Run a shell command that attempts to write {{PRESET_DIR}}/mutation-forbidden and require that write to fail. Read {{SHARED_CONTEXT_FILE}} and {{CURRENT_ISSUE_FILE}}. Require both reading and appending to each of these undeclared files to fail: ${loopDataRoot}/chains/{{CHAIN_NAME}}/undeclared.txt ; ${loopDataRoot}/chains/undeclared-other/private.txt ; ${loopDataRoot}/central.sqlite. Write the text evidence-ok to {{EVIDENCE_DIR}}/runner.txt. In the current linked Git worktree, create runner-boundary-{{RUN_ID}}.txt, git add it, and commit it with the exact subject runner-boundary-{{RUN_ID}} using user.name=coder-loop-e2e and user.email=e2e@example.invalid; require the commit to succeed. Then run exactly: coder-loop item exits {{CHAIN_NAME}} --issue {{ISSUE}} --agent-run-id {{RUN_ID}} --agent-phase phase --json ; and coder-loop item update {{CHAIN_NAME}} --issue {{ISSUE}} --status done . Exit nonzero if any requirement fails.\n`)
 	writeFileSync(resolve(preset, "preset.toml"), `name = "runner-filesystem-grants-e2e"\n[item]\nidField = "issue"\n[item.fields]\nissue = "number"\n[statuses]\nentry = "queued"\ncontinuable = ["queued"]\nterminal = ["done"]\nsuccess = ["done"]\nexhausted = "done"\n[[fragments]]\nid = "fixture"\nrole = "common"\npath = "fragment.md"\n[[phases]]\nname = "phase"\nprompt = "phase.md"\nroles = ["common"]\n[phases.variables]\nISSUE = "item.issue"\nCHAIN_NAME = "runtime.chainName"\nRUN_ID = "runtime.runId"\nPRESET_DIR = "runtime.presetDir"\nFRAGMENT_INDEX = "runtime.fragmentIndex"\nSHARED_CONTEXT_FILE = "runtime.sharedContextPath"\nCURRENT_ISSUE_FILE = "runtime.currentIssueFile"\nEVIDENCE_DIR = "runtime.evidenceDir"\n[[phases.exits]]\nstatus = "done"\nwhen = "fixture complete"\n`)
 }
 
@@ -104,6 +118,9 @@ async function waitForRunner(chain: string): Promise<void> {
 
 writeFixture()
 mkdirSync(loopDataRoot, { recursive: true })
+mkdirSync(resolve(loopDataRoot, "chains", "undeclared-other"), { recursive: true })
+writeFileSync(resolve(loopDataRoot, "chains", "undeclared-other", "private.txt"), "other-chain-secret\n")
+writeFileSync(resolve(loopDataRoot, "central.sqlite"), "root-secret\n")
 const runners = ["claude", "codex", "opencode"].filter((candidate) => requestedRunner === null || candidate === requestedRunner)
 const captureBin = resolve(workRoot, "capture-bin")
 mkdirSync(captureBin, { recursive: true })
@@ -121,6 +138,7 @@ try {
 		const chain = `filesystem-${runner}`
 		const invocationCapture = resolve(loopDataRoot, "chains", chain, "evidence", "1", "runner.argv")
 		command(["bun", loopEntry, "chain", "create", chain, "--config-json", JSON.stringify({ repository: "local/fixture", baseBranch: "main", presetPath: preset }), "--loop-data-root", loopDataRoot])
+		writeFileSync(resolve(loopDataRoot, "chains", chain, "undeclared.txt"), "same-chain-secret\n")
 		// The installed model inventory contains gpt-5.4-mini. Pin this boundary probe to that
 		// low-latency model so C5 tests filesystem authorization rather than waiting on the
 		// operator's potentially heavyweight interactive Codex default.
@@ -136,8 +154,14 @@ try {
 		if (!existsSync(invocationCapture)) throw new Error(`${runner}: actual runner argv was not captured`)
 		const argv = capturedArgv(invocationCapture)
 		assertCapturedInvocation(runner, argv)
+		const outerEvidencePath = assertOuterAuthorizationEvidence(runner, chain)
 		assertCredentialedTransition(chain)
-		process.stdout.write(`${runner}: captured argv verified (${argv.length} args)\n`)
+		if (readFileSync(resolve(loopDataRoot, "chains", chain, "undeclared.txt"), "utf8") !== "same-chain-secret\n") throw new Error(`${runner}: undeclared same-chain sentinel was modified`)
+		if (readFileSync(resolve(loopDataRoot, "chains", "undeclared-other", "private.txt"), "utf8") !== "other-chain-secret\n") throw new Error(`${runner}: undeclared other-chain sentinel was modified`)
+		if (readFileSync(resolve(loopDataRoot, "central.sqlite"), "utf8") !== "root-secret\n") throw new Error(`${runner}: undeclared root sentinel was modified`)
+		const commit = command(["git", "log", "--all", "--format=%s", "--grep", "^runner-boundary-"] , target)
+		if (commit.trim() === "") throw new Error(`${runner}: linked-worktree commit was not retained in the shared Git repository`)
+		process.stdout.write(`${runner}: captured argv and outer profile verified (${argv.length} args; ${outerEvidencePath})\n`)
 	}
 	process.stdout.write(`runner filesystem grants e2e passed: ${runners.join(" ")}\n`)
 } finally {
