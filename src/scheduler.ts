@@ -535,39 +535,41 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 		for (const repoCwd of repoCwds) {
 			if (spawnCapped()) break
 			const slot = getOrCreateSlot(options.state, chain, repoCwd)
-			if (slot.activeRun !== null) {
-				const activeDomain = runnerExecutionDomain(slot.activeRun.runner.kind)
+			const activeRun = slot.activeRun
+			if (activeRun !== null) {
+				const activeDomain = runnerExecutionDomain(activeRun.runner.kind)
 				if (activeDomain.kind === "external-terminal"
-					&& (slot.activeRun.origin.kind === "chain-complete" || !chainStatuses.terminal.includes(activeItemStatus(options.store, slot.activeRun.itemId)))
-					&& !options.state.externalTerminalLossRunIds.has(slot.activeRun.runId)) {
-					const activeItem = options.store.getItem(slot.activeRun.itemId)
-					if (activeItem === null) throw new Error(`active external-terminal run ${slot.activeRun.runId} references missing item ${slot.activeRun.itemId}`)
-					const availability = await probeResolvedExternalTerminal(slot.activeRun.runner, activeDomain)
+					&& (activeRun.origin.kind === "chain-complete" || !chainStatuses.terminal.includes(activeItemStatus(options.store, activeRun.itemId)))
+					&& !options.state.externalTerminalLossRunIds.has(activeRun.runId)) {
+					const activeItem = options.store.getItem(activeRun.itemId)
+					if (activeItem === null) throw new Error(`active external-terminal run ${activeRun.runId} references missing item ${activeRun.itemId}`)
+					const availability = await probeResolvedExternalTerminal(activeRun.runner, activeDomain)
+					if (slot.activeRun?.runId !== activeRun.runId) continue
 					if (availability.kind !== "available") {
 						const itemAfterProbe = options.store.getItem(activeItem.id)
-						if (itemAfterProbe === null) throw new Error(`active external-terminal run ${slot.activeRun.runId} references missing item ${activeItem.id}`)
-						if (slot.activeRun.origin.kind === "item" && chainStatuses.terminal.includes(itemAfterProbe.status)) {
+						if (itemAfterProbe === null) throw new Error(`active external-terminal run ${activeRun.runId} references missing item ${activeItem.id}`)
+						if (activeRun.origin.kind === "item" && chainStatuses.terminal.includes(itemAfterProbe.status)) {
 							if (externalTerminalHold(itemAfterProbe.extra) !== null) {
 								options.store.updateItem(itemAfterProbe.id, { extra: clearExternalTerminalHold(itemAfterProbe.extra), updatedAt: nowSeconds(options) })
 							}
-							await emit(options, { type: "slot.busy", slotKey: slot.key, chainId: chain.id, repoCwd, activeRunId: slot.activeRun.runId })
+							await emit(options, { type: "slot.busy", slotKey: slot.key, chainId: chain.id, repoCwd, activeRunId: activeRun.runId })
 							continue
 						}
 						const checkedAt = nowIso(options)
 						const previousHold = externalTerminalHold(itemAfterProbe.extra)
-						const sameHold = previousHold !== null && previousHold.runner === slot.activeRun.runner.kind
-							&& previousHold.binary === slot.activeRun.runner.binary && previousHold.availability.kind === availability.kind
+						const sameHold = previousHold !== null && previousHold.runner === activeRun.runner.kind
+							&& previousHold.binary === activeRun.runner.binary && previousHold.availability.kind === availability.kind
 							&& previousHold.availability.reason === availability.reason
-						const endpointAlreadyUnavailable = hasMatchingExternalTerminalHold(options.store, itemAfterProbe.id, slot.activeRun.runner.kind, slot.activeRun.runner.binary, availability.kind, availability.reason)
+						const endpointAlreadyUnavailable = hasMatchingExternalTerminalHold(options.store, itemAfterProbe.id, activeRun.runner.kind, activeRun.runner.binary, availability.kind, availability.reason)
 						const since = sameHold ? previousHold.availability.since : checkedAt
 						options.store.updateItem(itemAfterProbe.id, { extra: withExternalTerminalHold(itemAfterProbe.extra, {
-							kind: "external-terminal-unavailable", runner: slot.activeRun.runner.kind, phase: slot.activeRun.phase,
-							binary: slot.activeRun.runner.binary, probeArgv: activeDomain.probe.argv,
+							kind: "external-terminal-unavailable", runner: activeRun.runner.kind, phase: activeRun.phase,
+							binary: activeRun.runner.binary, probeArgv: activeDomain.probe.argv,
 							availability: availability.kind === "unavailable"
 								? { kind: "unavailable", reason: availability.reason, exitCode: availability.exitCode, signal: null, checkedAt, since }
 								: { kind: "probe-failed", reason: availability.reason, exitCode: availability.exitCode, signal: availability.signal, checkedAt, since },
 						}), updatedAt: nowSeconds(options) })
-						const terminating = slot.activeRun
+						const terminating = activeRun
 						const currentRun = options.store.getCurrentRun(chain.id)
 						if (currentRun?.runId === terminating.runId) {
 							options.store.setCurrentRun({ ...currentRun, extra: withExternalTerminalLoss(currentRun.extra, {
@@ -592,7 +594,7 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 					slotKey: slot.key,
 					chainId: chain.id,
 					repoCwd,
-					activeRunId: slot.activeRun.runId,
+					activeRunId: activeRun.runId,
 				})
 				continue
 			}

@@ -408,6 +408,82 @@ while :; do sleep 1; done
 			await fixture.daemon.stop()
 		}
 	})
+
+	test("terminal-first chain-complete close does not leave a stale active-run read in the probing tick", async () => {
+		let externalBinary = ""
+		let probeState = ""
+		let probeWaiting = ""
+		let probeRelease = ""
+		let finalizerStarted = ""
+		let finalizerRelease = ""
+		let ordinaryRunner = ""
+		const fixture = await startFixture("chain-complete-terminal-first-probe-race", {
+			useDefaultChainCompleteTrigger: true,
+			schedulerIntervalMs: 20,
+			beforeStart: async ({ root, fakeRunner }) => {
+				externalBinary = resolve(root, "external-terminal-finalizer")
+				probeState = resolve(root, "probe-state")
+				probeWaiting = resolve(root, "probe-waiting")
+				probeRelease = resolve(root, "probe-release")
+				finalizerStarted = resolve(root, "finalizer-started")
+				finalizerRelease = resolve(root, "finalizer-release")
+				ordinaryRunner = fakeRunner
+				await writeFile(probeState, "0")
+				await writeFile(externalBinary, `#!/bin/sh
+if [ "$1" = probe ]; then
+	if [ "$(cat ${JSON.stringify(probeState)})" = wait-69 ]; then
+		touch ${JSON.stringify(probeWaiting)}
+		while [ ! -f ${JSON.stringify(probeRelease)} ]; do sleep 0.01; done
+		exit 69
+	fi
+	exit 0
+fi
+touch ${JSON.stringify(finalizerStarted)}
+while [ ! -f ${JSON.stringify(finalizerRelease)} ]; do sleep 0.01; done
+echo "FINALIZER SUMMARY: decision=complete; reason=terminal-first"
+exit 0
+`)
+				await chmod(externalBinary, 0o755)
+			},
+			schedulerConfig: {
+				phaseRunner: ({ phase }) => phase === "umbrella-finalizer"
+					? { kind: "hapi", source: "iteration-default", binary: externalBinary, extraArgs: [], model: null }
+					: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [ordinaryRunner], model: null },
+			},
+		})
+		try {
+			const chainName = "chain-complete-terminal-first-probe-race-chain"
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: chainName,
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			const added = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				itemId: "602-chain-complete-terminal-first",
+				repoCwd: REPO_ROOT,
+				extra: { writeStatus: "done" },
+			})).item)
+			const itemId = numberValue(added.id)
+			await waitFor(() => Bun.file(finalizerStarted).exists(), (exists) => exists, 10_000)
+
+			await writeFile(probeState, "wait-69")
+			await waitFor(() => Bun.file(probeWaiting).exists(), (exists) => exists, 5_000)
+			await writeFile(finalizerRelease, "release")
+			await waitFor(() => readCurrentRun(fixture.loopDataRoot, chainId), (current) => current === null, 5_000)
+			await writeFile(probeRelease, "release")
+
+			await waitFor(() => readChainStatus(fixture.loopDataRoot, chainId), (status) => status === "completed", 10_000)
+			const events = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, {
+				type: "scheduler.tick_failed",
+			})
+			expect(events.events).toHaveLength(0)
+			const terminalItem = await readItem(fixture.loopDataRoot, chainId, "602-chain-complete-terminal-first")
+			expect(terminalItem).toMatchObject({ id: itemId, status: "done" })
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
 	test("cleans runner lifecycle after status persistence failure", () => {
 		for (const [file, name] of [
 			["src/scheduler.test.ts", "rejects successful scheduler completion when terminal persistence fails"],
