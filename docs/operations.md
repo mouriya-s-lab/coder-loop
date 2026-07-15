@@ -82,6 +82,7 @@ Runner 选择也在 `status` 中显式暴露：
 | `queue.selected.runner` | 当前 selected item 的默认执行 phase runner |
 | `current.runner` | 当前 phase 的实际 runner；没有 current 时为 `null` |
 | `current.phaseStatus.value.runner` / `.model` | 已落盘 phase status 里记录的 runner kind 与 model；旧 status 文件可能为 `null` |
+| `current.activity.windows` | 当前 agent stdout 的近似滑动窗口行数；固定返回 `10` / `30` / `60` / `300` 秒四档，不读取或回传 session 正文 |
 
 Runtime 文件是必要的 debug reference，但不是外层长期依赖的首选 API。只有在 `doctor/status/daemon` 输出指出某个局部异常，或需要人工恢复状态时，才直接编辑/读取下面的文件。
 
@@ -141,6 +142,7 @@ coder-loop status /path/to/target --json \
 | Agent stderr | `<logDir>/<runId>/<phase>/stderr.txt` | agent stderr | spawn 时写入 |
 | Agent status | `<logDir>/<runId>/<phase>/status.json` | spawn 结束元数据（exitCode / signal / bytes / runner / model / sessionId / terminated） | spawn 退出时写 |
 | Agent sessions | `<logDir>/<runId>/<phase>/sessions.jsonl` | 可 resume 的 session id 索引 | 观察到 session 时 append |
+| Agent activity | `<logDir>/<runId>/<phase>/activity.json` | 最近 5 分钟的逐秒 stdout 完整行计数桶；`status.current.activity` 的有界数据源 | run 期间原子更新 |
 
 `status.json` 字段由 `AgentRunStatus` 定义，包含：`label`、`runner`、`model`、`pid`、`startedAt`、`lastEventAt`、`outputPath`、`statusPath`、`bytesWritten`、`promptChars`、`lastStream`、`exitCode`、`signal`、`error`、`sessionId`、`terminated`。
 

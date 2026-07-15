@@ -244,6 +244,11 @@ type StatusSnapshot = {
 	queue?: {
 		byStatus?: Record<string, number>
 	}
+	current?: {
+		activity?: {
+			windows?: Array<{ seconds?: number; lines?: number }>
+		} | null
+	}
 }
 
 function readStatus(fixtureCwd: string, loopDataRoot: string, chainName: string): StatusSnapshot {
@@ -281,6 +286,8 @@ type WatchVerdict =
 async function watch(options: HarnessOptions, fixtureCwd: string, loopDataRoot: string, chainName: string): Promise<WatchVerdict> {
 	const startedAt = Date.now()
 	let lastSummary = ""
+	let sawNonzeroActivity = false
+	let sawExpiredShortWindow = false
 	for (;;) {
 		const elapsedSeconds = (Date.now() - startedAt) / 1000
 		if (elapsedSeconds > options.maxWallSeconds) {
@@ -291,13 +298,22 @@ async function watch(options: HarnessOptions, fixtureCwd: string, loopDataRoot: 
 			return { kind: "tripwire", reason: `runs 数 ${runs} 超过上界 ${options.maxRuns}（spin 信号）` }
 		}
 		const snapshot = readStatus(fixtureCwd, loopDataRoot, chainName)
+		const tenSecondWindow = snapshot.current?.activity?.windows?.find((window) => window.seconds === 10)
+		if ((tenSecondWindow?.lines ?? 0) > 0) sawNonzeroActivity = true
+		if (sawNonzeroActivity && tenSecondWindow?.lines === 0) sawExpiredShortWindow = true
 		const byStatus = snapshot.queue?.byStatus ?? {}
 		const summary = `byStatus=${JSON.stringify(byStatus)} runs=${runs}`
 		if (summary !== lastSummary) {
 			log(`watch: ${summary} elapsed=${elapsedSeconds.toFixed(1)}s`)
 			lastSummary = summary
 		}
-		if ((byStatus[TERMINAL_SUCCESS] ?? 0) >= 1) return { kind: "success" }
+		if ((byStatus[TERMINAL_SUCCESS] ?? 0) >= 1) {
+			if (!sawNonzeroActivity || !sawExpiredShortWindow) {
+				return { kind: "tripwire", reason: `activity window proof incomplete: nonzero=${sawNonzeroActivity}, expired10s=${sawExpiredShortWindow}` }
+			}
+			log("watch: current.activity 10s window observed non-zero output and later expired to zero")
+			return { kind: "success" }
+		}
 		for (const status of TERMINAL_FAILURE) {
 			if ((byStatus[status] ?? 0) >= 1) return { kind: "terminal-failure", status }
 		}

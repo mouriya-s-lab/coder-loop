@@ -2,6 +2,7 @@ import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
 import { mkdir, writeFile } from "node:fs/promises"
 import { createWriteStream, existsSync, realpathSync, rmSync, type WriteStream } from "node:fs"
+import { AgentActivityRecorder } from "./agent-activity"
 import { basename, dirname, isAbsolute, resolve } from "node:path"
 
 import {
@@ -1364,6 +1365,7 @@ function attachRunCloseHandler(
 	})
 	const outputPaths = schedulerPhaseOutputPaths(options, chain, runId, phase)
 	const outputWriters = createSchedulerPhaseOutputWriters(outputPaths)
+	const activityRecorder = new AgentActivityRecorder(outputPaths.activityPath)
 	let lifecycleGc: SchedulerRunLifecycleGc | null = null
 	let terminatorCleanup: (() => void) | null = null
 	let closeMode: "preparing" | "normal" | "preparation-abort" = "preparing"
@@ -1380,6 +1382,7 @@ function attachRunCloseHandler(
 	const closed = new Promise<SchedulerCompletedRun>((resolveClosed, rejectClosed) => {
 		child.stdout?.on("data", (chunk: Buffer) => {
 			stdoutState.observe(chunk)
+			activityRecorder.observe(chunk)
 			writeChunkWithBackpressure(child.stdout!, outputWriters.stdout, chunk)
 		})
 		child.stderr?.on("data", (chunk: Buffer) => {
@@ -1416,7 +1419,7 @@ function attachRunCloseHandler(
 				if (closeMode === "preparing") await preparationDecided
 				if (closeMode === "preparation-abort") {
 					try {
-						await closeSchedulerPhaseOutputWriters(outputWriters)
+						await Promise.all([closeSchedulerPhaseOutputWriters(outputWriters), activityRecorder.flush()])
 						return {
 							runId,
 							itemId: item.id,
@@ -1448,7 +1451,7 @@ function attachRunCloseHandler(
 				options.state.finalizingItemStatuses.set(item.id, status)
 				let persistenceStage: RunnerStatusPersistenceFailure["stage"] | null = "status-artifact"
 				try {
-					await closeSchedulerPhaseOutputWriters(outputWriters)
+					await Promise.all([closeSchedulerPhaseOutputWriters(outputWriters), activityRecorder.flush()])
 					await writeSchedulerRunCompletionArtifacts(options, {
 						runId,
 						chain,
@@ -1636,6 +1639,7 @@ function attachRunCloseHandler(
 type SchedulerPhaseOutputPaths = {
 	stdoutPath: string
 	stderrPath: string
+	activityPath: string
 	runStdoutPath: string
 	runStderrPath: string
 }
@@ -1655,6 +1659,7 @@ function schedulerPhaseOutputPaths(
 	return {
 		stdoutPath: paths.runPhaseStdoutFile(runId, phase),
 		stderrPath: paths.runPhaseStderrFile(runId, phase),
+		activityPath: paths.runPhaseActivityFile(runId, phase),
 		runStdoutPath: paths.runStdoutFile(runId),
 		runStderrPath: paths.runStderrFile(runId),
 	}

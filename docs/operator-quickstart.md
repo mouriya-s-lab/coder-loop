@@ -160,6 +160,10 @@ echo "$STATUS" | jq -r '.target.logDir'
 
 Agent 输出 layout 是 `<logDir>/<runId>/<phase>/stdout.jsonl`、`stderr.txt`、`status.json`、`sessions.jsonl`。
 
+无需读取 `stdout.jsonl` 判断当前 agent 是否仍在输出；`coder-loop status <target> --json` 的
+`.current.activity.windows` 固定给出最近 10 秒、30 秒、60 秒、300 秒的 stdout 完整行数。
+这些窗口按引擎观察输出的秒级时间桶近似计算，适合判断输出速度，不承诺逐毫秒边界精度。
+
 **事件流 fallback**（结构化 JSONL，适合需要非轮询的 watcher）：
 
 ```bash
@@ -195,6 +199,7 @@ coder-loop status /path/to/your-target-repo --json | jq '.current, .events, .que
 | `stderr.txt` | 该 phase agent stderr |
 | `status.json` | exit code / signal / bytes / runner / model / sessionId / termination metadata |
 | `sessions.jsonl` | 可 resume session id 索引 |
+| `activity.json` | 最近 5 分钟的有界逐秒行计数；不含 session 正文 |
 
 run 级事件在 `<logDir>/<runId>/events.jsonl`，也由 `status.events.path` 暴露。
 

@@ -15,6 +15,7 @@ import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
 import { command, flag, option, optional, positional, run as runCmd, string as cmdString, subcommands } from "cmd-ts"
 import { type as arkType } from "arktype"
 import type { BoundaryError, BoundaryRecord, BoundaryValue } from "./boundary-types"
+import { AGENT_ACTIVITY_WINDOWS_SECONDS, activityWindows, type AgentActivityArtifact, type AgentActivityWindow } from "./agent-activity"
 import {
 	CoderLoopDaemon,
 	DaemonError,
@@ -899,6 +900,15 @@ export type StatusCurrentSnapshot = {
 	item: StatusItemSnapshot | null
 	runner: StatusRunnerSelectionSnapshot | null
 	phaseStatus: StatusPhaseStatusSnapshot | null
+	activity: StatusAgentActivitySnapshot | null
+}
+
+export type StatusAgentActivitySnapshot = {
+	path: string
+	exists: boolean
+	updatedAt: string | null
+	windows: AgentActivityWindow[]
+	error: string | null
 }
 
 export type StatusEventsSnapshot = {
@@ -3045,7 +3055,7 @@ function makeUnavailableStatusSnapshot(input: {
 		},
 		queue: { total: 0, byStatus: {}, continuable: 0, terminal: 0, selected: null },
 		runs: { total: 0, byPhaseStatus: {}, counts: [] },
-		current: { run: null, id: null, item: null, runner: null, phaseStatus: null },
+		current: { run: null, id: null, item: null, runner: null, phaseStatus: null, activity: null },
 		events: { runId: null, path: null, exists: false, recent: [], latest: null, error: null },
 		processes: input.processes ?? { live: [], scanError: null },
 	}
@@ -3227,7 +3237,7 @@ async function buildStatusCurrentSnapshotFromRecords(
 	current: CurrentRunRecord | null,
 	itemPresets: StatusItemPresetResolver,
 ): Promise<StatusCurrentSnapshot> {
-	if (current === null) return { run: null, id: null, item: null, runner: null, phaseStatus: null }
+	if (current === null) return { run: null, id: null, item: null, runner: null, phaseStatus: null, activity: null }
 	let id: string | null = null
 	let item: ItemRecord | null = null
 	try {
@@ -3249,6 +3259,32 @@ async function buildStatusCurrentSnapshotFromRecords(
 		item: item === null || itemPreset === null ? null : statusItemSnapshot(item, itemPreset),
 		runner: item === null || selectionInput === null ? null : statusRunnerSelection(selectRunnerForPhase(current.phase, item, selectionInput)),
 		phaseStatus: await readAgentPhaseStatus(agentStatusPath(outputPath)),
+		activity: await readAgentActivity(resolve(dirname(outputPath), "activity.json")),
+	}
+}
+
+async function readAgentActivity(path: string, nowMs = Date.now()): Promise<StatusAgentActivitySnapshot> {
+	const emptyWindows = AGENT_ACTIVITY_WINDOWS_SECONDS.map((seconds) => ({ seconds, lines: 0 }))
+	try {
+		const raw = await readFile(path, "utf-8")
+		const parsed: BoundaryValue = JSON.parse(raw)
+		if (!isObjectRecord(parsed) || typeof parsed.updatedAt !== "string" || !Array.isArray(parsed.buckets)) {
+			throw new Error("agent activity artifact must contain updatedAt and buckets")
+		}
+		const buckets = parsed.buckets.map((bucket, index) => {
+			if (!isObjectRecord(bucket) || typeof bucket.second !== "number" || !Number.isInteger(bucket.second)
+				|| typeof bucket.lines !== "number" || !Number.isInteger(bucket.lines) || bucket.lines < 0) {
+				throw new Error(`agent activity bucket ${index} is invalid`)
+			}
+			return { second: bucket.second, lines: bucket.lines }
+		})
+		const artifact: AgentActivityArtifact = { updatedAt: parsed.updatedAt, buckets }
+		return { path, exists: true, updatedAt: artifact.updatedAt, windows: activityWindows(artifact, nowMs), error: null }
+	} catch (error) {
+		if (isNodeError(error) && error.code === "ENOENT") {
+			return { path, exists: false, updatedAt: null, windows: emptyWindows, error: null }
+		}
+		return { path, exists: true, updatedAt: null, windows: emptyWindows, error: errorMessage(error) }
 	}
 }
 

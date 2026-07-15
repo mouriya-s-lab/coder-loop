@@ -30,6 +30,7 @@ export const PHASE_STDOUT_FILENAME = "stdout.jsonl"
 export const PHASE_STDERR_FILENAME = "stderr.txt"
 export const PHASE_STATUS_FILENAME = "status.json"
 export const PHASE_SESSIONS_FILENAME = "sessions.jsonl"
+export const PHASE_ACTIVITY_FILENAME = "activity.json"
 export const DAEMON_LOG_FILENAME = "daemon.log"
 const MAX_PATH_COMPONENT_LENGTH = 255
 
@@ -89,6 +90,7 @@ export type ChainRuntimePaths = {
 	runPhaseStderrFile: (runId: string, phase: string) => string
 	runPhaseStatusFile: (runId: string, phase: string) => string
 	runPhaseSessionsFile: (runId: string, phase: string) => string
+	runPhaseActivityFile: (runId: string, phase: string) => string
 	daemonBatchDir: (timestamp: string) => string
 	daemonLogFile: (timestamp: string) => string
 }
@@ -190,6 +192,7 @@ export function resolveChainRuntimePaths(chainName: string, options: LoopDataRoo
 		runPhaseStderrFile: (runId, phase) => resolve(runPhaseDir(runId, phase), PHASE_STDERR_FILENAME),
 		runPhaseStatusFile: (runId, phase) => resolve(runPhaseDir(runId, phase), PHASE_STATUS_FILENAME),
 		runPhaseSessionsFile: (runId, phase) => resolve(runPhaseDir(runId, phase), PHASE_SESSIONS_FILENAME),
+		runPhaseActivityFile: (runId, phase) => resolve(runPhaseDir(runId, phase), PHASE_ACTIVITY_FILENAME),
 		daemonBatchDir: (timestamp) => resolve(daemonDir, sanitizePathComponent(timestamp, "daemon timestamp")),
 		daemonLogFile: (timestamp) => resolve(daemonDir, sanitizePathComponent(timestamp, "daemon timestamp"), DAEMON_LOG_FILENAME),
 	}
