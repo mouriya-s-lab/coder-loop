@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { spawn } from "node:child_process"
-import { chmod, mkdir, readdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises"
+import { chmod, mkdir, readdir, readFile, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises"
 import { createConnection } from "node:net"
 import { resolve } from "node:path"
 
@@ -5712,8 +5712,12 @@ process.exitCode = 0
 				(spawned) => spawned,
 			)
 			const eventsFile = resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile
-			await rm(eventsFile, { force: true })
-			await mkdir(eventsFile)
+			const eventsFailureDir = resolve(eventsFile, "..", "events-write-failure")
+			const stagedEventsLink = resolve(eventsFile, "..", "events-write-failure-link")
+			// Stage the failure target before atomically replacing the live file so daemon append cannot race setup.
+			await mkdir(eventsFailureDir)
+			await symlink(eventsFailureDir, stagedEventsLink)
+			await rename(stagedEventsLink, eventsFile)
 			await waitFor(
 				async () => fixture.daemon.snapshot().lifecycleEventPersistenceFailure,
 				(failure) => failure !== null,
