@@ -6,8 +6,10 @@ import { basename, dirname, isAbsolute, resolve } from "node:path"
 
 import {
 	buildRenderBindings,
+	buildRunnerFilesystemAuthorization,
 	buildRunnerInvocation,
 	parseSessionIdFromRunnerStream,
+	phaseDeclaredRuntimeBindingPaths,
 	phaseExitsEpilogue,
 	renderFragmentIndex,
 	renderPrompt,
@@ -22,7 +24,7 @@ import {
 	type PhaseRunnerSelectionInput,
 	type ResolveContext,
 	type ResumeDecision,
-	type RunnerInvocationPaths,
+	type RunnerFilesystemAuthorization,
 	type RuntimeBindings,
 	RunnerStatusPersistenceError,
 	type RunnerStatusPersistenceFailure,
@@ -1022,7 +1024,7 @@ async function spawnSchedulerRun(
 		options.store.updateItem(item.id, spawnUpdate)
 
 		const loadedPreset = await schedulerLoadedPresetForItem(options, chain, item)
-		const presetDir = loadedPreset.presetDir
+		const presetDir = loadedPreset.preset.presetDir
 		const context: SchedulerSpawnContext = { chain, item, slot, runId, worktreePath, presetDir, loadedPreset, phase }
 		const rawPrompt = typeof options.prompt === "string" ? options.prompt : await options.prompt(context)
 		const renderedPrompt = await renderSchedulerSpawnPrompt({
@@ -1038,17 +1040,24 @@ async function spawnSchedulerRun(
 			runner: runner.kind,
 		})
 		const finalPrompt = renderedPrompt + phaseExitsEpilogue()
+		const authorizationPhase = loadedPreset.preset.phases.find((entry) => entry.name === phase)
+		if (authorizationPhase === undefined) throw new SchedulerError("spawn_failed", `scheduler: preset ${loadedPreset.preset.name} does not define phase ${phase}`)
 		const runnerPlan = buildRunnerInvocation(
 			runner,
 			finalPrompt,
 			resumeDecision,
-			invocationPaths(item.repoCwd, worktreePath, presetDir, resolveLoopDataPaths(options.loopDataRootOptions).root),
+			invocationAuthorization(chain, item, worktreePath, presetDir, resolveLoopDataPaths(options.loopDataRootOptions).root, authorizationPhase),
 		)
+		for (const directory of runnerPlan.runtimeDirectories) await mkdir(directory, { recursive: true })
 		await initializeSchedulerRunArtifacts(options, chain, item, runId, phase, startedAt, worktreePath)
+		const runPaths = resolveChainRuntimePaths(chain.name, options.loopDataRootOptions)
+		await writeFile(resolve(runPaths.runPhaseDir(runId, phase), "runner-authorization.json"), `${JSON.stringify(runnerPlan.authorizationEvidence)}\n`)
 		credentialContext = { chainId: chain.id, itemId: item.id, runId, phase }
 		credential = options.runCredentials?.mint(credentialContext) ?? null
+		if (isAbsolute(runner.binary) && !existsSync(runner.binary)) throw new Error(`runner binary does not exist: ${runner.binary}`)
 		const spawnEnv: NodeJS.ProcessEnv = {
 			...process.env,
+			...runnerPlan.environment,
 			[LOOP_DATA_ROOT_ENV]: resolveLoopDataPaths(options.loopDataRootOptions).root,
 		}
 		if (credential !== null) spawnEnv[LOOP_RUN_CREDENTIAL_ENV] = credential.value
@@ -2378,8 +2387,21 @@ async function resolvePhaseRunner(
 	)
 }
 
-function invocationPaths(targetCwd: string, agentCwd: string, presetDir: string, loopDataRoot: string): RunnerInvocationPaths {
-	return { targetCwd, agentCwd, presetDir, loopDataRoot }
+function invocationAuthorization(chain: ChainRecord, item: ItemRecord, agentCwd: string, presetDir: string, loopDataRoot: string, phase: Pick<PresetPhase, "variables">): RunnerFilesystemAuthorization {
+	const chainPaths = resolveChainRuntimePaths(chain.name, { loopDataRoot })
+	return buildRunnerFilesystemAuthorization({
+		agentCwd,
+		presetDir,
+		loopDataRoot,
+		sharedContextPath: chainPaths.sharedFile,
+		currentIssueFile: resolveOptionalItemIssueFile(item, chainPaths.chainRoot) ?? "",
+		issueDir: chainPaths.issuesDir,
+		evidenceDir: resolveItemEvidenceDir(item, chainPaths.chainRoot, chainPaths.issueEvidenceDir(item.itemId)),
+		evidenceRootDir: chainPaths.evidenceDir,
+		logDir: chainPaths.runsDir,
+		daemonSocketPath: resolve(loopDataRoot, "daemon.sock"),
+		declaredRuntimeBindingPaths: phaseDeclaredRuntimeBindingPaths(phase),
+	})
 }
 
 export type SchedulerPromptRenderInput = {
