@@ -10,7 +10,7 @@
 
 import { spawn } from "node:child_process"
 import { appendFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises"
-import { closeSync, createWriteStream, openSync, type WriteStream } from "node:fs"
+import { closeSync, createWriteStream, openSync, readFileSync, statSync, type WriteStream } from "node:fs"
 import { homedir } from "node:os"
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
 import { command, flag, option, optional, positional, run as runCmd, string as cmdString, subcommands } from "cmd-ts"
@@ -6608,7 +6608,7 @@ export type RunnerInvocation =
 export type RunnerFilesystemSurface =
 	| { kind: "task-private-directory"; channel: "agent-cwd" | "runner-scratch"; path: string }
 	| { kind: "read-only-directory"; channel: "preset"; path: string }
-	| { kind: "writable-directory"; channel: "evidence" | "evidence-root" | "issues" | "logs"; path: string }
+	| { kind: "writable-directory"; channel: "evidence" | "evidence-root" | "issues" | "logs" | "git-worktree-metadata" | "git-common-dir"; path: string }
 	| { kind: "writable-file"; channel: "shared-context" | "current-issue" | "daemon-socket"; path: string }
 	| { kind: "system-device"; channel: "null"; path: "/dev/null" }
 	| { kind: "runner-runtime-directory"; runner: "claude"; channel: "session-env"; path: string }
@@ -6634,6 +6634,7 @@ export function buildRunnerFilesystemAuthorization(input: BuildRunnerFilesystemA
 	const surfaces: RunnerFilesystemSurface[] = [
 		{ kind: "task-private-directory", channel: "agent-cwd", path: input.agentCwd },
 		{ kind: "task-private-directory", channel: "runner-scratch", path: runnerScratch },
+		...runnerGitMetadataSurfaces(input.agentCwd),
 		{ kind: "read-only-directory", channel: "preset", path: input.presetDir },
 		{ kind: "writable-directory", channel: "evidence", path: input.evidenceDir },
 		{ kind: "writable-directory", channel: "evidence-root", path: input.evidenceRootDir },
@@ -6650,6 +6651,31 @@ export function buildRunnerFilesystemAuthorization(input: BuildRunnerFilesystemA
 	const presetSurface = surfaces.find((surface) => surface.kind === "read-only-directory")
 	if (presetSurface === undefined) throw new Error("declared runner surfaces require a read-only preset")
 	return { agentCwd: input.agentCwd, loopDataRoot: input.loopDataRoot, surfaces }
+}
+
+function runnerGitMetadataSurfaces(agentCwd: string): RunnerFilesystemSurface[] {
+	const dotGit = resolve(agentCwd, ".git")
+	try {
+		if (statSync(dotGit).isDirectory()) {
+			return [{ kind: "writable-directory", channel: "git-common-dir", path: dotGit }]
+		}
+		const marker = readFileSync(dotGit, "utf-8").trim()
+		if (!marker.startsWith("gitdir:")) return []
+		const rawGitDir = marker.slice("gitdir:".length).trim()
+		const gitDir = isAbsolute(rawGitDir) ? resolve(rawGitDir) : resolve(agentCwd, rawGitDir)
+		let commonDir = gitDir
+		try {
+			const rawCommonDir = readFileSync(resolve(gitDir, "commondir"), "utf-8").trim()
+			if (rawCommonDir !== "") commonDir = isAbsolute(rawCommonDir) ? resolve(rawCommonDir) : resolve(gitDir, rawCommonDir)
+		} catch {
+			// A standalone .git file has no separate common directory.
+		}
+		const result: RunnerFilesystemSurface[] = [{ kind: "writable-directory", channel: "git-worktree-metadata", path: gitDir }]
+		if (!samePath(commonDir, gitDir)) result.push({ kind: "writable-directory", channel: "git-common-dir", path: commonDir })
+		return result
+	} catch {
+		return []
+	}
 }
 
 export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: string, resume: ResumeDecision, authorization: RunnerFilesystemAuthorization): RunnerInvocation {
