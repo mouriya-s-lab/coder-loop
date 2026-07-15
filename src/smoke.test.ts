@@ -11,6 +11,7 @@ import { createStreamTextState } from "./runner-output"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
+const EXTERNAL_TERMINAL_INTEGRATION = resolve(REPO_ROOT, "scripts/external-terminal-integration.ts")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/smoke-tests", String(process.pid))
 
 // #397 test brand helper — see install-commands.test.ts for rationale.
@@ -23,6 +24,20 @@ afterAll(async () => {
 })
 
 describe("smoke: v2 central chain CLI", () => {
+	test("ships the literal C3 external-terminal lifecycle driver", () => {
+		const result = Bun.spawnSync({
+			cmd: ["bun", EXTERNAL_TERMINAL_INTEGRATION, "--help"],
+			cwd: REPO_ROOT,
+			stdout: "pipe",
+			stderr: "pipe",
+		})
+		const output = new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr)
+		expect(result.exitCode, output).toBe(0)
+		for (const scenario of ["missing-binary", "restoration", "loss-first", "probe-failed", "terminal-first"]) {
+			expect(output).toContain(scenario)
+		}
+	})
+
 	test("bounds runner memory while preserving large output artifacts", async () => {
 		const artifactDir = resolve(TEST_ROOT, "large-output-artifacts")
 		await mkdir(artifactDir, { recursive: true })

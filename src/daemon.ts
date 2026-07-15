@@ -50,6 +50,13 @@ import {
 import { PersistedRateLimitStateBoundary, type RateLimitReset } from "./rate-limit"
 import { runnerExecutionDomain, type RunnerExecutionDomain } from "./runner-execution"
 import {
+	buildEffectiveHookView,
+	loadGlobalHookDeclarations,
+	type EffectiveHook,
+	type HookDeclaration,
+	type PresetHookPlaceholder,
+} from "./hook-declarations"
+import {
 	type ChainRecord,
 	type CreateChainInput,
 	type CreateItemInput,
@@ -230,7 +237,7 @@ export type PresetPhasePrivilegedOp = (typeof PRESET_PHASE_PRIVILEGED_OPS)[numbe
 // and uses `assertNever` to force a new field added to `ITEM_UPDATE_FIELD_KEYS` to receive a
 // verdict before the project builds. The control-plane set below is the single source of truth
 // the preset parser cross-checks against, so the two sides of the contract cannot drift.
-export const PRESET_PHASE_RIGHTS_CONTROL_PLANE_FIELDS = ["repoCwd", "runner", "dependsOn", "priority"] as const
+export const PRESET_PHASE_RIGHTS_CONTROL_PLANE_FIELDS = ["repoCwd", "runner", "dependsOn", "priority", "hooks"] as const
 export type ItemUpdateControlPlaneField = (typeof PRESET_PHASE_RIGHTS_CONTROL_PLANE_FIELDS)[number]
 // Passthrough = the agent-grantable subset. `extra` / `extraPatch` are aggregates and are NOT in
 // either set — their grant happens via the inner-key expansion against `writableFields`. #419:
@@ -1105,6 +1112,7 @@ export class CoderLoopDaemon {
 	private readonly loadedPresetCache = new Map<string, Promise<SchedulerLoadedPreset>>()
 	private latestLifecycleEventPersistenceFailure: ObservabilityEvent | null = null
 	private latestRunnerStatusPersistenceFailure: ObservabilityEvent | null = null
+	private globalHookDeclarations: readonly HookDeclaration[] = []
 	// #406 run credential registry. Map keyed on credential value → run binding. Lifetime is the
 	// daemon process: when daemon down kills all active runs (#467), the registry dies with it,
 	// matching the "credentials die with the process" invariant. Not persisted to SQLite — credentials
@@ -1129,11 +1137,36 @@ export class CoderLoopDaemon {
 		this.commandSpecs = this.buildDaemonCommandSpecs()
 	}
 
+	effectiveHookViewForItem(
+		chainId: number,
+		itemRowId: number,
+		presetPlaceholders: readonly PresetHookPlaceholder[],
+	): EffectiveHook[] {
+		const store = this.requireStore()
+		const chain = store.getChain(chainId)
+		if (chain === null) throw new DaemonError("not_found", `chain ${chainId} was not found`, { chainId })
+		const item = store.getItem(itemRowId)
+		if (item === null || item.chainId !== chainId) {
+			throw new DaemonError("not_found", `item ${itemRowId} was not found in chain ${chainId}`, { chainId, itemRowId })
+		}
+		return buildEffectiveHookView({
+			global: this.globalHookDeclarations,
+			chain: chain.metadata.hooks ?? [],
+			preset: presetPlaceholders,
+			item: item.extra.hooks ?? [],
+		})
+	}
+
 	async start(): Promise<this> {
 		if (this.state !== "starting") throw new DaemonError("invalid_state", `daemon cannot start from state ${this.state}`)
 		await this.prepareRuntimeDirectory()
 
 		try {
+			try {
+				this.globalHookDeclarations = await loadGlobalHookDeclarations(this.paths.hooksFile)
+			} catch (error) {
+				if (!isNodeError(error) || error.code !== "ENOENT") throw error
+			}
 			const pathIssue = await detectDaemonSocketPathIssue(this.paths.daemonSocket, this.paths.daemonPid)
 			if (pathIssue !== null) throw daemonSocketPathIssueError(pathIssue)
 			await removeStaleSocket(this.paths.daemonSocket)
@@ -2786,7 +2819,7 @@ export class CoderLoopDaemon {
 		const resolvedCaller = this.resolveItemMutationCaller(args)
 		if (resolvedCaller.kind === "err") throw this.resolveCallerDenyError(resolvedCaller.error)
 		const caller = resolvedCaller.value
-		await this.assertItemAddRightsForCaller(chain, caller, presetSpec, "item.add")
+		await this.assertItemAddRightsForCaller(chain, caller, presetSpec, "item.add", args)
 		const store = this.requireStore()
 		const existingItems = store.listItems(chain.id)
 		const input = await this.buildCreateItemInput(chain, args, existingItems, "item.add")
@@ -2843,7 +2876,7 @@ export class CoderLoopDaemon {
 		for (const [index, rawItem] of rawItems.entries()) {
 			validateKnownKeys(rawItem, `item.batchAdd items[${index}]`, ITEM_BATCH_ADD_ITEM_KEYS)
 			const presetSpec = await this.requireItemPresetForRequest(rawItem, `items[${index}]`)
-			await this.assertItemAddRightsForCaller(chain, caller, presetSpec, `items[${index}]`)
+			await this.assertItemAddRightsForCaller(chain, caller, presetSpec, `items[${index}]`, rawItem)
 			const input = await this.buildCreateItemInput(chain, rawItem, existingItems, `items[${index}]`)
 			if (requestedIds.has(input.itemId)) {
 				throw new DaemonError("conflict", `batch contains duplicate itemId ${input.itemId}`, { chainId: chain.id, chainName: chain.name, itemId: input.itemId })
@@ -3032,10 +3065,10 @@ export class CoderLoopDaemon {
 			throw new DaemonError("invalid_request", "item.update fields must not combine extra and extraPatch", {})
 		}
 		const requestedExtra = rawExtra !== undefined
-			? rawExtra
+			? replaceItemExtra(itemExtraToJsonObject(item.extra), rawExtra)
 			: rawExtraPatch === undefined
 				? undefined
-				: { ...itemExtraToJsonObject(item.extra), ...rawExtraPatch }
+				: mergeItemExtraPatch(itemExtraToJsonObject(item.extra), rawExtraPatch)
 		// #419: when a write touches the extra-inner `branch` / `pr` keys (typical
 		// gh-issue-pr-iteration review-phase write), run the same shape validation the legacy
 		// top-level validators ran (git-branch grammar via `validateGitBranchNameForRequest`;
@@ -4057,6 +4090,7 @@ export class CoderLoopDaemon {
 		caller: ItemMutationCaller,
 		presetSpec: { preset: string | null; presetPath: string | null },
 		label: string,
+		request: JsonObject,
 	): Promise<void> {
 		const presetName = presetSpec.preset ?? presetSpec.presetPath ?? "<unknown>"
 		if (caller.kind === "operator") {
@@ -4067,6 +4101,11 @@ export class CoderLoopDaemon {
 				presetName,
 			})
 			return
+		}
+		const requestExtra = request.extra
+		if (requestExtra !== null && typeof requestExtra === "object" && !Array.isArray(requestExtra) && Object.hasOwn(requestExtra, "hooks")) {
+			await this.recordItemAddRightsAdmissionEvent(chain, { caller, outcome: "deny", reason: "control-plane-denied", presetName })
+			throw new DaemonError("invalid_caller", `${label}: hooks is an operator-only control-plane field`, { phase: caller.phase, presetName, field: "hooks" })
 		}
 		// Load the new item's preset to look up the caller-phase rights. Failures route through
 		// the standard preset_load_failed path so a malformed preset surfaces in the event stream
@@ -4131,7 +4170,7 @@ export class CoderLoopDaemon {
 	private async recordItemAddRightsAdmissionEvent(chain: ChainRecord, input: {
 		caller: ItemMutationCaller
 		outcome: "allow" | "deny"
-		reason: "operator" | "agent-allowed" | "no-create-grant" | "no-rights-segment"
+		reason: "operator" | "agent-allowed" | "no-create-grant" | "no-rights-segment" | "control-plane-denied"
 		presetName: string
 	}): Promise<void> {
 		const claimedPhase = input.caller.kind === "agent" ? input.caller.phase : null
@@ -4171,7 +4210,11 @@ export class CoderLoopDaemon {
 		caller: ItemMutationCaller,
 		fields: JsonObject,
 	): Promise<void> {
-		const requested = collectItemUpdateFieldKeys(fields)
+		const requested = collectProtectedItemUpdateFieldKeys(
+			collectItemUpdateFieldKeys(fields),
+			fields,
+			itemExtraToJsonObject(item.extra),
+		)
 		if (caller.kind === "operator") {
 			// Operator path: always allow. Emit one allow event with reason=operator so the
 			// audit trail records every item.update through this gate uniformly (mirrors
@@ -5182,6 +5225,43 @@ function collectItemUpdateFieldKeys(fields: JsonObject): ItemUpdateRequestedFiel
 		}
 	}
 	return { topLevel, innerKeys, all }
+}
+
+function collectProtectedItemUpdateFieldKeys(
+	requested: ItemUpdateRequestedFields,
+	fields: JsonObject,
+	currentExtra: JsonObject,
+): ItemUpdateRequestedFields {
+	const replacement = fields.extra
+	if (
+		replacement === null
+		|| typeof replacement !== "object"
+		|| Array.isArray(replacement)
+		|| !Object.hasOwn(currentExtra, "hooks")
+		|| Object.hasOwn(replacement, "hooks")
+	) return requested
+	return {
+		topLevel: requested.topLevel,
+		innerKeys: new Set([...requested.innerKeys, "hooks"]),
+		all: new Set([...requested.all, "hooks"]),
+	}
+}
+
+function replaceItemExtra(existing: JsonObject, replacement: JsonObject): JsonObject {
+	const normalized: JsonObject = { ...replacement }
+	if (Object.hasOwn(replacement, "hooks")) {
+		if (replacement.hooks === null) delete normalized.hooks
+	} else if (Object.hasOwn(existing, "hooks")) {
+		const hooks = existing.hooks
+		if (hooks !== undefined) normalized.hooks = hooks
+	}
+	return normalized
+}
+
+function mergeItemExtraPatch(existing: JsonObject, patch: JsonObject): JsonObject {
+	const merged: JsonObject = { ...existing, ...patch }
+	if (Object.hasOwn(patch, "hooks") && patch.hooks === null) delete merged.hooks
+	return merged
 }
 
 // #410 the matrix verdict — exhaustive on the requested field set against the phase rights.

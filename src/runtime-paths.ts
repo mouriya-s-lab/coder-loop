@@ -10,6 +10,7 @@ export const LOOP_DATA_ROOT_ENV = "CODER_LOOP_DATA_DIR"
 export const LOOP_RUN_CREDENTIAL_ENV = "CODER_LOOP_RUN_CRED"
 export const LOOP_DATA_DIRNAME = "loop-data"
 export const LOOP_DATA_DB_FILENAME = "db.sqlite"
+export const LOOP_DATA_HOOKS_FILENAME = "hooks.json"
 export const LOOP_DATA_DAEMON_SOCKET_FILENAME = "daemon.sock"
 export const LOOP_DATA_DAEMON_PID_FILENAME = "daemon.pid"
 export const LOOP_DATA_CHAINS_DIRNAME = "chains"
@@ -55,6 +56,7 @@ export type LoopDataRootOptions = {
 export type LoopDataPaths = {
 	root: string
 	dbFile: string
+	hooksFile: string
 	daemonSocket: string
 	daemonPid: string
 	chainsDir: string
@@ -120,6 +122,7 @@ export function resolveLoopDataPaths(options: LoopDataRootOptions = {}): LoopDat
 	return {
 		root,
 		dbFile: resolve(root, LOOP_DATA_DB_FILENAME),
+		hooksFile: resolve(root, LOOP_DATA_HOOKS_FILENAME),
 		daemonSocket: resolve(root, LOOP_DATA_DAEMON_SOCKET_FILENAME),
 		daemonPid: resolve(root, LOOP_DATA_DAEMON_PID_FILENAME),
 		chainsDir: resolve(root, LOOP_DATA_CHAINS_DIRNAME),
