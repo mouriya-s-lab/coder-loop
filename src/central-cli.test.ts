@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { mkdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises"
 import { createConnection, createServer } from "node:net"
 import { resolve } from "node:path"
@@ -20,11 +20,69 @@ import type { BoundaryRecord } from "./boundary-types"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
+const CLI_TEST_ENTRY = resolve(REPO_ROOT, `src/.central-cli-test-${process.pid}.js`)
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/central-cli-tests", String(process.pid))
+const CLI_SESSION_WORKER = resolve(TEST_ROOT, "cli-session-worker.ts")
 const DEFAULT_CHAIN_CONFIG = chainConfig("mouriya-s-lab/coder-loop")
 const FIXTURE_CHAIN_CONFIG = chainConfig("fixture/repo")
 
 let nextFixtureId = 0
+
+beforeAll(async () => {
+	await mkdir(TEST_ROOT, { recursive: true })
+	const build = await Bun.build({
+		entrypoints: [LOOP_ENTRY],
+		target: "bun",
+		minify: true,
+		outdir: resolve(REPO_ROOT, "src"),
+		naming: `.central-cli-test-${process.pid}.[ext]`,
+		plugins: [{
+			name: "export-central-cli-test-main",
+			setup(builder) {
+				builder.onLoad({ filter: /src\/loop\.ts$/ }, async ({ path }) => ({
+					contents: (await Bun.file(path).text()).replace("async function main()", "export async function main()"),
+					loader: "ts",
+				}))
+			},
+		}],
+	})
+	if (!build.success) throw new Error(`central CLI test entry build failed: ${build.logs.join("\n")}`)
+	await writeFile(CLI_SESSION_WORKER, `import { createInterface } from "node:readline"
+import { main as runCentralCliTestMain } from ${JSON.stringify(CLI_TEST_ENTRY)}
+
+const originalStdoutWrite = process.stdout.write.bind(process.stdout)
+const originalStderrWrite = process.stderr.write.bind(process.stderr)
+const lines = createInterface({ input: process.stdin })
+for await (const line of lines) {
+	const request = JSON.parse(line)
+	const stdout = []
+	const stderr = []
+	Object.defineProperty(process.stdout, "write", { configurable: true, value: (chunk) => { stdout.push(String(chunk)); return true } })
+	Object.defineProperty(process.stderr, "write", { configurable: true, value: (chunk) => { stderr.push(String(chunk)); return true } })
+	const previousArgv = [...process.argv]
+	const previousEnv = {}
+	for (const [key, value] of Object.entries(request.env)) {
+		previousEnv[key] = process.env[key]
+		if (value === null) delete process.env[key]
+		else process.env[key] = value
+	}
+	process.argv.splice(2, process.argv.length - 2, ...request.args)
+	process.exitCode = 0
+	try { await runCentralCliTestMain() }
+	catch (error) { stderr.push(error instanceof Error ? error.message : String(error)); process.exitCode = 1 }
+	finally {
+		process.argv.splice(0, process.argv.length, ...previousArgv)
+		for (const [key, value] of Object.entries(previousEnv)) {
+			if (value === undefined) delete process.env[key]
+			else process.env[key] = value
+		}
+		Object.defineProperty(process.stdout, "write", { configurable: true, value: originalStdoutWrite })
+		Object.defineProperty(process.stderr, "write", { configurable: true, value: originalStderrWrite })
+	}
+	originalStdoutWrite(JSON.stringify({ exitCode: process.exitCode ?? 0, stdout: stdout.join(""), stderr: stderr.join("") }) + "\\n")
+}
+`)
+})
 
 function chainConfig(repository: string, baseBranch?: string): string {
 	return JSON.stringify(baseBranch === undefined ? { repository } : { repository, baseBranch })
@@ -32,6 +90,7 @@ function chainConfig(repository: string, baseBranch?: string): string {
 
 afterAll(async () => {
 	await rm(TEST_ROOT, { recursive: true, force: true })
+	await rm(CLI_TEST_ENTRY, { force: true })
 })
 
 describe("central chain/item CLI", () => {
@@ -119,8 +178,9 @@ describe("central chain/item CLI", () => {
 	})
 	test("chain CRUD CLI", async () => {
 		const fixture = await startFixture("chain-crud")
+		const cli = startCliSession()
 		try {
-			const created = expectJsonOk(await runCli(["chain", "create", "crud-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--preset", "gh-issue-pr-iteration", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const created = expectJsonOk(await cli.run(["chain", "create", "crud-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--preset", "gh-issue-pr-iteration", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(created.chain).toMatchObject({
 				name: "crud-chain",
 				repository: "mouriya-s-lab/coder-loop",
@@ -128,41 +188,42 @@ describe("central chain/item CLI", () => {
 				status: "active",
 			})
 
-			const listed = expectJsonOk(await runCli(["chain", "list", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const listed = expectJsonOk(await cli.run(["chain", "list", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(listed.chains).toHaveLength(1)
 			expect(listed.chains[0]).toMatchObject({ name: "crud-chain", status: "active" })
 
-			const status = expectJsonOk(await runCli(["chain", "status", "crud-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const status = expectJsonOk(await cli.run(["chain", "status", "crud-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(status.chain).toMatchObject({ name: "crud-chain", status: "active" })
 			expect(status.summary).toMatchObject({ completion: { state: "active", completedAt: null }, items: { total: 0, byStatus: {} } })
 
-			const stopped = expectJsonOk(await runCli(["chain", "stop", "crud-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const stopped = expectJsonOk(await cli.run(["chain", "stop", "crud-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(stopped.chain).toMatchObject({ name: "crud-chain", status: "stopped" })
 			expect(stopped.alreadyStopped).toBe(false)
 
-			const stoppedStatus = expectJsonOk(await runCli(["chain", "status", "crud-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const stoppedStatus = expectJsonOk(await cli.run(["chain", "status", "crud-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(stoppedStatus.chain).toMatchObject({ name: "crud-chain", status: "stopped" })
 			expect(stoppedStatus.summary).toMatchObject({ completion: { state: "stopped", completedAt: null } })
 
-			const resumed = expectJsonOk(await runCli(["chain", "resume", "crud-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const resumed = expectJsonOk(await cli.run(["chain", "resume", "crud-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(resumed.chain).toMatchObject({ name: "crud-chain", status: "active" })
 			expect(resumed.alreadyActive).toBe(false)
 
-			const deleted = expectJsonOk(await runCli(["chain", "delete", "crud-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const deleted = expectJsonOk(await cli.run(["chain", "delete", "crud-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(deleted.chain).toMatchObject({ name: "crud-chain", status: "deleted" })
 
-			const unforcedRecreate = await runCli(["chain", "create", "crud-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"])
+			const unforcedRecreate = await cli.run(["chain", "create", "crud-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"])
 			expect(unforcedRecreate.exitCode).toBe(1)
 			expect(unforcedRecreate.stderr).toContain("chain_deleted")
 			expect(unforcedRecreate.stderr).toContain("force=true")
 
-			const recreated = expectJsonOk(await runCli(["chain", "create", "crud-chain", "--config-json", chainConfig("mouriya-s-lab/coder-loop", "recreated"), "--force", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const recreated = expectJsonOk(await cli.run(["chain", "create", "crud-chain", "--config-json", chainConfig("mouriya-s-lab/coder-loop", "recreated"), "--force", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(recreated.chain).toMatchObject({
 				name: "crud-chain",
 				status: "active",
 				baseBranch: "recreated",
 			})
 		} finally {
+			await cli.stop()
 			await fixture.daemon.stop()
 		}
 	})
@@ -195,9 +256,10 @@ describe("central chain/item CLI", () => {
 
 	test("item CRUD CLI", async () => {
 		const fixture = await startFixture("item-crud")
+		const cli = startCliSession()
 		try {
-			expectJsonOk(await runCli(["chain", "create", "items-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			const added = expectJsonOk(await runCli([
+			expectJsonOk(await cli.run(["chain", "create", "items-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const added = expectJsonOk(await cli.run([
 				"item",
 				"add",
 				"items-chain",
@@ -221,11 +283,11 @@ describe("central chain/item CLI", () => {
 				title: "feat: 引入 chain-item-daemon CLI 命令族",
 			})
 
-			const listed = expectJsonOk(await runCli(["item", "list", "items-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const listed = expectJsonOk(await cli.run(["item", "list", "items-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(listed.items).toHaveLength(1)
 			expect(listed.items[0]).toMatchObject({ itemId: "181", status: "queued" })
 
-			const updated = expectJsonOk(await runCli(["item", "update", "items-chain", "--issue", "181", "--status", "done", "--field-json", "{\"pr\":191}", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const updated = expectJsonOk(await cli.run(["item", "update", "items-chain", "--issue", "181", "--status", "done", "--field-json", "{\"pr\":191}", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(updated.item).toMatchObject({ itemId: "181", status: "done", extra: { pr: 191 } })
 
 			// #406 row 4 — operator path: no env credential, no claim flags → audit subject is
@@ -235,7 +297,7 @@ describe("central chain/item CLI", () => {
 			// caller claims). The agent path is exercised end-to-end in the daemon integration
 			// fixture (`daemon.test.ts > caller-admission gate`), where the scheduler spawns a real
 			// run and the CLI auto-attaches the engine-minted credential from env.
-			const operatorAuditLogs = expectJsonOk(await runCli(["logs", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--json", "--chain", "items-chain", "--kind", "audit", "--type", "item.status"]))
+			const operatorAuditLogs = expectJsonOk(await cli.run(["logs", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--json", "--chain", "items-chain", "--kind", "audit", "--type", "item.status"]))
 			expect(operatorAuditLogs.events).toHaveLength(1)
 			expect(operatorAuditLogs.events[0]).toMatchObject({
 				kind: "audit",
@@ -271,7 +333,7 @@ describe("central chain/item CLI", () => {
 			// invocations only see this if the env is mis-set; agents would never hit it during a
 			// normal run (the scheduler mints the value, registers it, then injects). Asserting
 			// here keeps the deny branch test-covered without spinning up a real spawn.
-			const fabricatedCred = await runCli([
+			const fabricatedCred = await cli.run([
 				"item",
 				"update",
 				"items-chain",
@@ -287,6 +349,7 @@ describe("central chain/item CLI", () => {
 			expect(fabricatedCred.stderr).toContain("invalid_caller")
 			expect(fabricatedCred.stderr).toContain("agentCredential")
 		} finally {
+			await cli.stop()
 			await fixture.daemon.stop()
 		}
 	})
@@ -1298,9 +1361,61 @@ async function makeLoopDataRoot(name: string): Promise<string> {
 	return resolve(root, "loop-data")
 }
 
+type CliResult = { exitCode: number | null; stdout: string; stderr: string }
+
+type CliSession = {
+	run: (args: string[], env?: Record<string, string>) => Promise<CliResult>
+	stop: () => Promise<void>
+}
+
+function startCliSession(): CliSession {
+	const proc = Bun.spawn({
+		cmd: ["bun", CLI_SESSION_WORKER],
+		cwd: REPO_ROOT,
+		stdin: "pipe",
+		stdout: "pipe",
+		stderr: "pipe",
+		env: { ...process.env, CODER_LOOP_RUN_CRED: undefined },
+	})
+	const reader = proc.stdout.getReader()
+	const decoder = new TextDecoder()
+	let buffered = ""
+
+	const readResponse = async (): Promise<CliResult> => {
+		while (true) {
+			const newline = buffered.indexOf("\n")
+			if (newline !== -1) {
+				const line = buffered.slice(0, newline)
+				buffered = buffered.slice(newline + 1)
+				const response = boundaryRecord(JSON.parse(line))
+				if (typeof response.exitCode !== "number" || typeof response.stdout !== "string" || typeof response.stderr !== "string") throw new Error("invalid central CLI session response")
+				return { exitCode: response.exitCode, stdout: response.stdout, stderr: response.stderr }
+			}
+			const chunk = await reader.read()
+			if (chunk.done) {
+				const stderr = await new Response(proc.stderr).text()
+				throw new Error(`central CLI session exited before a response: ${stderr}`)
+			}
+			buffered += decoder.decode(chunk.value, { stream: true })
+		}
+	}
+
+	return {
+		run: async (args, env = {}) => {
+			proc.stdin.write(`${JSON.stringify({ args, env: { CODER_LOOP_RUN_CRED: null, ...env } })}\n`)
+			proc.stdin.flush()
+			return await readResponse()
+		},
+		stop: async () => {
+			proc.stdin.end()
+			await proc.exited
+		},
+	}
+}
+
 async function runCli(args: string[], env: Record<string, string> = {}): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
 	const proc = Bun.spawn({
-		cmd: ["bun", LOOP_ENTRY, ...args],
+		cmd: ["bun", CLI_TEST_ENTRY, ...args],
 		cwd: REPO_ROOT,
 		stdout: "pipe",
 		stderr: "pipe",
