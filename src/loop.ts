@@ -5500,6 +5500,13 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 	const currentIssueFile = resolveOptionalChainIssueFile(options, input.chain, anchorRecord, "Chain-complete trigger issue file")
 	const evidenceDir = resolveChainEvidenceDir(options, input.chain, anchorRecord, anchorId, "Chain-complete trigger evidence directory")
 	const finalizerRunId = input.runId ?? makeRunId(`chain-${input.chain.id}`)
+	const runtimeBindingPaths = buildCentralRuntimeBindingPaths({
+		options,
+		chain: input.chain,
+		runId: finalizerRunId,
+		currentIssueFile,
+		evidenceDir,
+	})
 
 	const phaseSelection = buildPhaseRunnerSelectionFromChain({ chain: input.chain, loopDataRoot: input.loopDataRoot, preset })
 	const resolvePhaseRunner = async (phase: string): Promise<AgentRunnerSelection> => {
@@ -5519,13 +5526,7 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 				evidenceDir,
 				agentCwd: targetCwd,
 				issueRun: { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null, resumedSessionId: null },
-				paths: buildCentralRuntimeBindingPaths({
-					options,
-					chain: input.chain,
-					runId: finalizerRunId,
-					currentIssueFile,
-					evidenceDir,
-				}),
+				paths: runtimeBindingPaths,
 			}),
 			preset,
 		}
@@ -5534,7 +5535,16 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 		const outputPath = agentOutputPath(options, finalizerRunId, phase.name)
 		const resolvedRunner = await resolvePhaseRunner(phase.name)
 		log(`Starting chain-complete trigger phase ${phase.name} for chain ${input.chain.name} (runner=${resolvedRunner.kind})...`)
-		const { output, stdoutBytes, code } = await runAgent(options, phase, prompt, outputPath, targetCwd, resolvedRunner, summaryWatchdogConfigForPhase(phase))
+		const { output, stdoutBytes, code } = await runAgent(
+			options,
+			phase,
+			prompt,
+			outputPath,
+			targetCwd,
+			resolvedRunner,
+			summaryWatchdogConfigForPhase(phase),
+			{ currentIssueFile: runtimeBindingPaths.currentIssueFile, evidenceDir: runtimeBindingPaths.evidenceDir },
+		)
 		log(`Chain-complete trigger phase ${phase.name} finished: exit=${code}, output=${outputPath} (${stdoutBytes} bytes)`)
 		if (code !== 0) throw new Error(`chain-complete trigger phase ${phase.name} exited ${code}`)
 		const decision = parseFinalizerSummaryDecision(output, resolvedRunner.kind)
@@ -6241,6 +6251,7 @@ async function runAgent(
 	agentCwd: string,
 	runner: AgentRunnerSelection,
 	watchdog: SummaryWatchdogConfig | null,
+	authorizationPaths: RunnerAuthorizationRuntimePaths,
 	eventContext?: LoopEventContext,
 ): Promise<{ output: string; stdoutBytes: number; code: number }> {
 	const label = phase.name
@@ -6254,7 +6265,7 @@ async function runAgent(
 
 	const result = await runAgentWithBackoff({
 		spawnAttempt: ({ resume }) => {
-			const baseInput: SpawnOneAttemptInput = { options, label, prompt, outputPath, sessionsPath, resume, agentCwd, runner, watchdog, authorizationPhase: phase }
+			const baseInput: SpawnOneAttemptInput = { options, label, prompt, outputPath, sessionsPath, resume, agentCwd, runner, watchdog, authorizationPaths, authorizationPhase: phase }
 			return spawnOneAttempt(eventContext ? { ...baseInput, eventContext } : baseInput)
 		},
 		sleep: (seconds: number) => new Promise((resolve) => setTimeout(resolve, seconds * 1000)),
@@ -6310,8 +6321,11 @@ export type SpawnOneAttemptInput = {
 	attemptTimeout?: AttemptTimeoutConfig | null
 	eventContext?: LoopEventContext
 	statusWriter?: (path: string, payload: string) => Promise<void>
+	authorizationPaths?: RunnerAuthorizationRuntimePaths
 	authorizationPhase?: Pick<PresetPhase, "variables">
 }
+
+export type RunnerAuthorizationRuntimePaths = Pick<RuntimeBindingPaths, "currentIssueFile" | "evidenceDir">
 
 export type SummaryWatchdogConfig = {
 	marker: string
@@ -6549,6 +6563,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 	const { options, label, prompt: basePrompt, outputPath, sessionsPath, resume } = input
 	const effectivePrompt = resume.kind === "resume" ? RESUME_CONTINUE_PROMPT : basePrompt
 	const selectedRunner = input.runner ?? options.defaultRunner
+	const authorizationPaths = input.authorizationPaths ?? { currentIssueFile: "", evidenceDir: options.evidenceRootDir }
 	await mkdir(dirname(outputPath), { recursive: true })
 	const loopDataRoot = resolveLoopDataPaths(loopDataRootOption(options.loopDataRoot)).root
 	const runnerPlan = buildRunnerInvocation(selectedRunner, effectivePrompt, resume, buildRunnerFilesystemAuthorization({
@@ -6556,9 +6571,9 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 		presetDir: options.preset.presetDir,
 		loopDataRoot,
 		sharedContextPath: options.sharedContextPath,
-		currentIssueFile: "",
+		currentIssueFile: authorizationPaths.currentIssueFile,
 		issueDir: options.issueDir,
-		evidenceDir: options.evidenceRootDir,
+		evidenceDir: authorizationPaths.evidenceDir,
 		evidenceRootDir: options.evidenceRootDir,
 		logDir: options.logDir,
 		daemonSocketPath: resolve(loopDataRoot, "daemon.sock"),

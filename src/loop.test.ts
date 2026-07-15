@@ -1059,8 +1059,15 @@ describe("small parsers", () => {
 
 	test("runner projections reach the chain-complete spawn path for every runner and resume mode", async () => {
 		const root = resolve(TEST_ROOT, "runner-chain-complete-projections")
+		const options = makeOptions()
+		const currentIssueFile = resolve(options.issueDir, "333.md")
+		const unrelatedIssueFile = resolve(options.issueDir, "999.md")
+		const evidenceDir = resolve(options.evidenceRootDir, "333")
+		const unrelatedEvidenceDir = resolve(options.evidenceRootDir, "999")
 		await rm(root, { recursive: true, force: true })
 		await mkdir(root, { recursive: true })
+		await Promise.all([mkdir(evidenceDir, { recursive: true }), mkdir(dirname(currentIssueFile), { recursive: true })])
+		await writeFile(currentIssueFile, "issue 333\n")
 		for (const kind of ["claude", "codex", "opencode"] as const) {
 			for (const resume of [{ kind: "fresh" }, { kind: "resume", sessionId: `resume-${kind}` }] as const) {
 				const capture = resolve(root, `${kind}-${resume.kind}.argv`)
@@ -1069,30 +1076,43 @@ describe("small parsers", () => {
 				await chmod(runner, 0o755)
 				const outputPath = resolve(root, `${kind}-${resume.kind}`, "phase", "stdout.jsonl")
 				const outcome = await spawnOneAttempt({
-					options: makeOptions(), label: "phase", prompt: "projection-prompt", outputPath,
+					options, label: "phase", prompt: "projection-prompt", outputPath,
 					sessionsPath: agentSessionsPath(outputPath), resume, agentCwd: root,
 					runner: { kind, source: "preset", binary: runner, extraArgs: [], model: null }, watchdog: null,
+					authorizationPaths: { currentIssueFile, evidenceDir },
 					authorizationPhase: {
-						variables: [{ key: "EVIDENCE", source: { kind: "runtime", key: "evidenceDir" }, doc: null }],
+						variables: [
+							{ key: "CURRENT_ISSUE", source: { kind: "runtime", key: "currentIssueFile" }, doc: null },
+							{ key: "EVIDENCE", source: { kind: "runtime", key: "evidenceDir" }, doc: null },
+						],
 					},
 				})
 				expect(outcome.exitCode).toBe(0)
 				const argv = await readFile(capture, "utf8")
+				const authorization = await readFile(resolve(dirname(outputPath), "runner-authorization.json"), "utf8")
 				expect(argv).toContain(resume.kind === "resume" ? `resume-${kind}` : "projection-prompt")
 				expect(argv.split("\n")).not.toContain(TEST_ROOT)
+				expect(authorization).toContain(`"channel":"current-issue","path":"${currentIssueFile}"`)
+				expect(authorization).toContain(`"channel":"evidence","path":"${evidenceDir}"`)
+				expect(authorization).not.toContain('"channel":"evidence-root"')
+				expect(authorization).not.toContain('"path":"' + options.evidenceRootDir + '"')
+				expect(authorization).not.toContain(unrelatedIssueFile)
+				expect(authorization).not.toContain(unrelatedEvidenceDir)
 				if (kind === "claude") {
 					expect(argv).toContain(root)
-					expect(argv).toContain(makeOptions().preset.presetDir)
-					expect(argv).toContain(makeOptions().evidenceRootDir)
-					expect(argv).not.toContain(makeOptions().issueDir)
-					expect(argv).not.toContain(makeOptions().logDir)
+					expect(argv).toContain(options.preset.presetDir)
+					expect(argv).toContain(evidenceDir)
+					expect(argv.split("\n")).not.toContain(options.evidenceRootDir)
+					expect(argv).not.toContain(options.issueDir)
+					expect(argv).not.toContain(options.logDir)
 				}
 				if (kind === "codex" && resume.kind === "fresh") {
 					expect(argv).toContain(root)
-					expect(argv).toContain(makeOptions().evidenceRootDir)
-					expect(argv).not.toContain(makeOptions().issueDir)
-					expect(argv).not.toContain(makeOptions().logDir)
-					expect(argv).not.toContain(makeOptions().preset.presetDir)
+					expect(argv).toContain(evidenceDir)
+					expect(argv.split("\n")).not.toContain(options.evidenceRootDir)
+					expect(argv).not.toContain(options.issueDir)
+					expect(argv).not.toContain(options.logDir)
+					expect(argv).not.toContain(options.preset.presetDir)
 				}
 			}
 		}
