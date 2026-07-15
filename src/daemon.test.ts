@@ -4061,7 +4061,17 @@ process.exitCode = 0
 				"queue.terminal",
 				"chain.completed",
 			]
-			expect(eventTypes).toEqual(expectedEventTypes)
+			expect([...eventTypes].sort()).toEqual([...expectedEventTypes].sort())
+			// The credentialed status mutation arms recycle and resumes the scheduler in
+			// parallel. Preserve both causal chains without inventing an order between the
+			// timer-owned pending-event persist and the resumed tick's slot observation.
+			expect(eventTypes.filter((type) => type !== "slot.busy")).toEqual([
+				"agent.spawn", "phase.start", "item.mutation.caller_admission", "item.update.field_write_admission",
+				"item.status", "recycle.pending_entered", "recycle.natural_exit", "agent.exit", "phase.end",
+				"queue.terminal", "chain.completed",
+			])
+			expect(eventTypes.indexOf("slot.busy")).toBeGreaterThan(eventTypes.indexOf("item.status"))
+			expect(eventTypes.indexOf("slot.busy")).toBeLessThan(eventTypes.indexOf("agent.exit"))
 			const exitEvent = events.events.find((event) => event.type === "agent.exit")
 			if (exitEvent?.type !== "agent.exit") throw new Error("expected agent.exit event")
 			expect(exitEvent.payload.excerpt.stdout.path).toBe(paths.runPhaseStdoutFile(runId, "iteration"))
