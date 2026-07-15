@@ -160,9 +160,21 @@ echo "$STATUS" | jq -r '.target.logDir'
 
 Agent 输出 layout 是 `<logDir>/<runId>/<phase>/stdout.jsonl`、`stderr.txt`、`status.json`、`sessions.jsonl`。
 
-无需读取 `stdout.jsonl` 判断当前 agent 是否仍在输出；`coder-loop status <target> --json` 的
-`.current.activity.windows` 固定给出最近 10 秒、30 秒、60 秒、300 秒的 stdout 完整行数。
-这些窗口按引擎观察输出的秒级时间桶近似计算，适合判断输出速度，不承诺逐毫秒边界精度。
+无需读取 `stdout.jsonl` 判断 agent 是否仍在输出。查询指定任务：
+
+```bash
+coder-loop activity item <chain> --issue <item-id>
+```
+
+一次查看全部仍存活任务：
+
+```bash
+coder-loop activity all
+```
+
+两种命令都可加 `--json` / `--loop-data-root <dir>`，直接读取本地 SQLite 与
+`activity.json`，不连接 daemon socket，也不要求 daemon 正在运行。输出固定包含最近
+10 秒、30 秒、60 秒、300 秒的 stdout 完整行数；窗口按引擎观察输出的秒级时间桶近似计算。
 
 **事件流 fallback**（结构化 JSONL，适合需要非轮询的 watcher）：
 

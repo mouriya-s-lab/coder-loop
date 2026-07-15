@@ -911,6 +911,25 @@ export type StatusAgentActivitySnapshot = {
 	error: string | null
 }
 
+export type AgentActivityTaskSnapshot = {
+	chain: string
+	item: string
+	runId: string
+	phase: string
+	pid: number
+	startedAt: string
+	activity: StatusAgentActivitySnapshot
+}
+
+export type AgentActivityCommandResult = {
+	generatedAt: string
+	tasks: AgentActivityTaskSnapshot[]
+}
+
+export type AgentActivityCommandArgs =
+	| { action: "item"; chainName: string; itemId: string; loopDataRoot: string | null; json: boolean }
+	| { action: "all"; loopDataRoot: string | null; json: boolean }
+
 export type StatusEventsSnapshot = {
 	runId: string | null
 	path: string | null
@@ -1162,6 +1181,7 @@ export type ResolveContext = {
 
 type CliCommand =
 	| { kind: "status"; args: StatusCommandArgs }
+	| { kind: "activity"; args: AgentActivityCommandArgs }
 	| { kind: "logs"; args: LogsCommandArgs }
 	| { kind: "daemon"; args: DaemonCommandArgs }
 	| { kind: "chain"; args: ChainCommandArgs }
@@ -1197,6 +1217,46 @@ const statusCliCommand = command({
 			},
 		}
 	},
+})
+
+const activityItemCliCommand = command({
+	name: "item",
+	description: "Show recent output activity for one live task without contacting the daemon.",
+	args: {
+		chain: positional({ displayName: "chain", type: cmdString }),
+		issue: option({ long: "issue", type: cmdString }),
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		json: flag({ long: "json" }),
+	},
+	handler: (args): CliCommand => ({
+		kind: "activity",
+		args: {
+			action: "item",
+			chainName: parseRequiredNonEmptyString(args.chain, "chain"),
+			itemId: parseRequiredItemId(args.issue, "--issue"),
+			loopDataRoot: args.loopDataRoot ?? null,
+			json: args.json,
+		},
+	}),
+})
+
+const activityAllCliCommand = command({
+	name: "all",
+	description: "Show recent output activity for every live task without contacting the daemon.",
+	args: {
+		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
+		json: flag({ long: "json" }),
+	},
+	handler: (args): CliCommand => ({
+		kind: "activity",
+		args: { action: "all", loopDataRoot: args.loopDataRoot ?? null, json: args.json },
+	}),
+})
+
+const activityCliCommand = subcommands({
+	name: "activity",
+	description: "Inspect live task output rates directly from local runtime state.",
+	cmds: { item: activityItemCliCommand, all: activityAllCliCommand },
 })
 
 const logsCliCommand = command({
@@ -1990,6 +2050,77 @@ async function runStatusCommand(args: string[]): Promise<void> {
 	process.stdout.write(`${stringifyStatusSnapshot(snapshot)}\n`)
 }
 
+async function runActivityCommand(args: string[]): Promise<void> {
+	const parsed = await runCmd(activityCliCommand, args)
+	if (parsed.value.kind !== "activity") return
+	const activityArgs = parsed.value.args
+	const result = await buildAgentActivityCommandResult(activityArgs)
+	if (activityArgs.json) {
+		process.stdout.write(`${JSON.stringify(result, null, "\t")}\n`)
+		return
+	}
+	process.stdout.write(formatAgentActivityCommandResult(result, activityArgs))
+}
+
+export async function buildAgentActivityCommandResult(args: AgentActivityCommandArgs): Promise<AgentActivityCommandResult> {
+	const store = openSqliteStateStore({ createIfMissing: false, ...loopDataRootOption(args.loopDataRoot) })
+	try {
+		const chains = args.action === "item"
+			? [store.getChainByName(args.chainName)].filter((chain): chain is ChainRecord => chain !== null)
+			: store.listChains()
+		const tasks: AgentActivityTaskSnapshot[] = []
+		for (const chain of chains) {
+			const current = store.getCurrentRun(chain.id)
+			if (current === null) continue
+			const run = store.getRunByRunId(current.runId)
+			if (run === null) continue
+			const item = store.getItem(run.itemId)
+			if (item === null) continue
+			if (args.action === "item" && item.itemId !== args.itemId) continue
+			const pidValue = itemExtraJsonValue(current.extra, "pid")
+			if (typeof pidValue !== "number" || !Number.isInteger(pidValue) || pidValue <= 0 || !isPidAlive(pidValue)) continue
+			const activityPath = resolveChainRuntimePaths(chain.name, loopDataRootOption(args.loopDataRoot)).runPhaseActivityFile(current.runId, current.phase)
+			tasks.push({
+				chain: chain.name,
+				item: item.itemId,
+				runId: current.runId,
+				phase: current.phase,
+				pid: pidValue,
+				startedAt: new Date(current.startedAt * 1000).toISOString(),
+				activity: await readAgentActivity(activityPath),
+			})
+		}
+		tasks.sort((left, right) => left.chain.localeCompare(right.chain) || left.item.localeCompare(right.item))
+		return { generatedAt: new Date().toISOString(), tasks }
+	} finally {
+		store.close()
+	}
+}
+
+function formatAgentActivityCommandResult(result: AgentActivityCommandResult, args: AgentActivityCommandArgs): string {
+	if (result.tasks.length === 0) {
+		return args.action === "item"
+			? `No live task: chain=${args.chainName} item=${args.itemId}\n`
+			: "No live tasks.\n"
+	}
+	const lines = ["CHAIN\tITEM\tPHASE\tPID\t10s\t30s\t1m\t5m\tRUN"]
+	for (const task of result.tasks) {
+		const counts = new Map(task.activity.windows.map((window) => [window.seconds, window.lines]))
+		lines.push([
+			task.chain,
+			task.item,
+			task.phase,
+			String(task.pid),
+			String(counts.get(10) ?? 0),
+			String(counts.get(30) ?? 0),
+			String(counts.get(60) ?? 0),
+			String(counts.get(300) ?? 0),
+			task.runId,
+		].join("\t"))
+	}
+	return `${lines.join("\n")}\n`
+}
+
 // #409: `coder-loop logs` is daemonized. The CLI no longer reads the events file from disk —
 // every read goes through the daemon's `logs.query` op, which is on the hard-deny-for-agent
 // list. This closes the gap where an agent process that imports the codebase or runs the CLI
@@ -2758,6 +2889,10 @@ async function main() {
 		await runStatusCommand(process.argv.slice(3))
 		return
 	}
+	if (firstArg === "activity") {
+		await runActivityCommand(process.argv.slice(3))
+		return
+	}
 	if (firstArg === "logs") {
 		await runLogsCommand(process.argv.slice(3))
 		return
@@ -2796,6 +2931,8 @@ function rootUsage(): string {
 		"",
 		"Commands:",
 		"  status <target> --json",
+		"  activity item <chain> --issue <item-id> [--json] [--loop-data-root DIR]",
+		"  activity all [--json] [--loop-data-root DIR]",
 		"  logs <target> --json [--kind K] [--type T] [--chain C] [--item ID] [--run RUN_ID] [--phase P] [--since TS] [--follow]",
 		"  daemon <up|down|status|start|stop|restart>",
 		"  chain <create|list|status|stop|resume|delete|set-runner-model>",
