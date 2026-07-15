@@ -383,29 +383,35 @@ describe("daemon", () => {
 
 	test("mixed-preset status projects an active and lost chain-complete external terminal", async () => {
 		let chainPresetDir = ""
+		let itemPresetDir = ""
 		let externalBinary = ""
-		let ordinaryRunner = ""
+		let ordinaryBinary = ""
 		const fixture = await startFixture("mixed-preset-chain-complete-status-projection", {
 			useDefaultChainCompleteTrigger: true,
 			schedulerPresetDir: null,
+			schedulerUsePresetRunner: true,
 			schedulerIntervalMs: 20,
 			beforeStart: async ({ root, fakeRunner }) => {
 				chainPresetDir = resolve(root, "chain-preset")
+				itemPresetDir = resolve(root, "item-preset")
 				externalBinary = resolve(root, "external-terminal-finalizer")
-				ordinaryRunner = fakeRunner
+				ordinaryBinary = resolve(root, "ordinary-runner")
 				await cp(PRESET_DIR, chainPresetDir, { recursive: true })
+				await cp(resolve(REPO_ROOT, "presets/single-phase-example"), itemPresetDir, { recursive: true })
 				const presetToml = resolve(chainPresetDir, "preset.toml")
 				await writeFile(presetToml, (await readFile(presetToml, "utf-8")).replace(
 					'name    = "umbrella-finalizer"\nprompt  = "umbrella-finalizer-entry.md"\ntrigger = { on = "chain-complete" }\nrunner  = "codex"',
 					'name    = "umbrella-finalizer"\nprompt  = "umbrella-finalizer-entry.md"\ntrigger = { on = "chain-complete" }\nrunner  = "hapi"',
 				))
+				const itemPresetToml = resolve(itemPresetDir, "preset.toml")
+				await writeFile(itemPresetToml, (await readFile(itemPresetToml, "utf-8")).replace(
+					'name   = "run"\nprompt = "run-entry.md"',
+					'name   = "run"\nprompt = "run-entry.md"\nrunner = "claude"',
+				))
+				await writeFile(ordinaryBinary, `#!/bin/sh\nexec bun ${JSON.stringify(fakeRunner)} "$@"\n`)
 				await writeFile(externalBinary, "#!/bin/sh\nif [ \"$1\" = probe ]; then exit 0; fi\ntrap 'exit 0' TERM\nwhile :; do sleep 1; done\n")
+				await chmod(ordinaryBinary, 0o755)
 				await chmod(externalBinary, 0o755)
-			},
-			schedulerConfig: {
-				phaseRunner: ({ phase }) => phase === "umbrella-finalizer"
-					? { kind: "hapi", source: "preset", binary: externalBinary, extraArgs: [], model: null }
-					: { kind: "claude", source: "preset", binary: "bun", extraArgs: [ordinaryRunner], model: null },
 			},
 		})
 		try {
@@ -417,6 +423,7 @@ describe("daemon", () => {
 				preset: "gh-issue-pr-iteration",
 				metadata: {
 					presetPath: chainPresetDir,
+					claude: { binary: ordinaryBinary },
 					hapi: { binary: externalBinary },
 				},
 			})).chain)
@@ -425,7 +432,7 @@ describe("daemon", () => {
 				chainId,
 				itemId: "602-mixed-chain-complete-status",
 				repoCwd: REPO_ROOT,
-				preset: "single-phase-example",
+				presetPath: itemPresetDir,
 				extra: { writeStatus: "done" },
 			}))
 			const current = await waitFor(
@@ -434,6 +441,14 @@ describe("daemon", () => {
 				10_000,
 			)
 			if (current === null) throw new Error("expected active chain-complete external-terminal run")
+			const finalizerSpawn = await waitFor(
+				async () => fixture.schedulerEvents.find((event) => event.type === "agent.spawn" && event.phase === "umbrella-finalizer") ?? null,
+				(candidate) => candidate !== null,
+			)
+			expect(finalizerSpawn).toMatchObject({ type: "agent.spawn", phase: "umbrella-finalizer" })
+			if (finalizerSpawn?.type !== "agent.spawn") throw new Error("expected chain-complete spawn event")
+			expect(finalizerSpawn.presetDir).toBe(chainPresetDir)
+			expect(finalizerSpawn.presetDir).not.toBe(itemPresetDir)
 
 			const activeSnapshot = await buildCoderLoopStatusSnapshot({
 				targetCwd: REPO_ROOT,
@@ -476,7 +491,7 @@ describe("daemon", () => {
 		} finally {
 			await fixture.daemon.stop()
 		}
-	})
+	}, 15_000)
 
 	test("daemon keeps ticking while a scheduler-managed chain-complete external terminal is lost and revokes its credential", async () => {
 		let externalBinary = ""

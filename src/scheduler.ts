@@ -1077,7 +1077,12 @@ async function spawnSchedulerRun(
 	let credentialContext: SchedulerRunCredentialContext | null = null
 	let activeRun: SchedulerPreparingRun | null = null
 	try {
-		const runner = await resolvePhaseRunner(options, { chain, item, phase })
+		// Item runs take their phase plan, runner, and prompt from the item's preset. Chain-complete
+		// runs merely borrow an item as their durable anchor; resolving any execution fact through
+		// that item's preset breaks mixed-preset chains before the chain-owned trigger can start.
+		const runner = origin.kind === "chain-complete"
+			? await resolveChainCompletePhaseRunner(options, { chain, item, phase })
+			: await resolvePhaseRunner(options, { chain, item, phase })
 		if (!await refreshExternalTerminalAvailabilityForItem(options, chain, item, phase, runner)) return null
 		const runnerDomain = runnerExecutionDomain(runner.kind)
 		worktreePath = worktreePath ?? await worktreeManager({ chain, repoCwd: item.repoCwd, slotKey: slot.key })
@@ -1147,7 +1152,9 @@ async function spawnSchedulerRun(
 			options.store.updateItem(item.id, spawnUpdate)
 		}
 
-		const loadedPreset = await schedulerLoadedPresetForItem(options, chain, item)
+		const loadedPreset = origin.kind === "chain-complete"
+			? await schedulerLoadedPreset(options, chain)
+			: await schedulerLoadedPresetForItem(options, chain, item)
 		const presetDir = loadedPreset.presetDir
 		const context: SchedulerSpawnContext = { chain, item, slot, runId, worktreePath, presetDir, loadedPreset, phase }
 		const rawPrompt = typeof options.prompt === "string" ? options.prompt : await options.prompt(context)
