@@ -73,11 +73,14 @@ describe("preset compiler", () => {
 			...tasks.children.flatMap((phase) => [phase.identity, ...phase.children.map((task) => task.identity)]),
 		]
 		const projectedIdentities = [
+			projection.preset.taskTree.identity,
 			...projection.phases.flatMap((phase) => [phase.taskTree.identity, ...phase.taskTree.children.map((task) => task.identity)]),
 		]
 
 		expect(new Set(canonicalIdentities).size).toBe(canonicalIdentities.length)
-		expect(projectedIdentities).toEqual(canonicalIdentities.slice(1))
+		expect(projectedIdentities).toEqual(canonicalIdentities)
+		expect(PresetCompileProjectionBoundary.assert(JSON.parse(JSON.stringify(projection))).preset.taskTree.identity)
+			.toBe(tasks.identity)
 	})
 
 	test("preserves all warnings", async () => {

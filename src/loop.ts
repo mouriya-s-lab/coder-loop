@@ -534,7 +534,10 @@ const CompileWarningBoundary = arkType({ verdict: arkType.unit("warn"), rule: "s
 export const PresetCompileErrorDiagnosticBoundary = arkType({ verdict: arkType.unit("error"), rule: "string", message: "string" })
 export const PresetCompileProjectionBoundary = arkType({
 	schemaVersion: arkType.unit(1),
-	preset: { name: "string", dir: "string", sourceHash: "string" },
+	preset: {
+		name: "string", dir: "string", sourceHash: "string",
+		taskTree: { kind: arkType.unit("seq"), identity: "string" },
+	},
 	statuses: {
 		continuable: "string[]", terminal: "string[]", success: "string[]", entry: "string",
 		unblockable: "string[]", exhausted: "string", retry: "string|null",
@@ -2902,7 +2905,12 @@ export function projectCompiledPreset(model: CompiledTaskModel, findings: readon
 		.map((exit) => ({ kind: "phase-exit" as const, phase: phase.name, to: exit.status, when: exit.when })))
 	const projection = {
 		schemaVersion: 1 as const,
-		preset: { name: model.name, dir: model.sourceDir, sourceHash: model.sourceHash },
+		preset: {
+			name: model.name,
+			dir: model.sourceDir,
+			sourceHash: model.sourceHash,
+			taskTree: { kind: model.tasks.kind, identity: model.tasks.identity },
+		},
 		statuses: {
 			continuable: [...model.statuses.continuable],
 			terminal: [...model.statuses.terminal],
