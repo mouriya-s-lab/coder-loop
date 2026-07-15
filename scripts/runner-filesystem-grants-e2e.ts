@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import { spawn, spawnSync } from "node:child_process"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { resolve } from "node:path"
 import { parseSessionIdFromRunnerStream } from "../src/loop"
@@ -16,6 +16,9 @@ const { CODER_LOOP_RUN_CRED: _parentRunCredential, ...operatorEnv } = process.en
 const runnerFlagIndex = Bun.argv.indexOf("--runner")
 const requestedRunner = runnerFlagIndex === -1 ? null : Bun.argv[runnerFlagIndex + 1]
 if (requestedRunner !== null && !["claude", "codex", "opencode"].includes(requestedRunner)) throw new Error(`invalid --runner ${requestedRunner}`)
+const SOCKET_WAIT_TIMEOUT_MS = 30_000
+const RUNNER_WAIT_TIMEOUT_MS = 300_000
+const DIAGNOSTIC_TAIL_CHARACTERS = 16_000
 
 function command(args: readonly string[], cwd = repoRoot): string {
 	const result = spawnSync(args[0]!, args.slice(1), { cwd, encoding: "utf8", env: operatorEnv })
@@ -198,20 +201,70 @@ fi
 	writeFileSync(resolve(preset, "preset.toml"), `name = "runner-filesystem-grants-e2e"\n[item]\nidField = "issue"\n[item.fields]\nissue = "number"\n[statuses]\nentry = "queued"\ncontinuable = ["queued"]\nterminal = ["done"]\nsuccess = ["done"]\nexhausted = "done"\n[[fragments]]\nid = "fixture"\nrole = "common"\npath = "fragment.md"\n[[phases]]\nname = "phase"\nprompt = "phase.md"\nroles = ["common"]\n[phases.variables]\nISSUE = "item.issue"\nCHAIN_NAME = "runtime.chainName"\nRUN_ID = "runtime.runId"\nAGENT_CWD = "runtime.agentCwd"\nPRESET_DIR = "runtime.presetDir"\nFRAGMENT_INDEX = "runtime.fragmentIndex"\nSHARED_CONTEXT_FILE = "runtime.sharedContextPath"\nCURRENT_ISSUE_FILE = "runtime.currentIssueFile"\nEVIDENCE_DIR = "runtime.evidenceDir"\n[[phases.exits]]\nstatus = "queued"\nwhen = "fresh invocation requests native resume"\n[[phases.exits]]\nstatus = "done"\nwhen = "resumed invocation completes fixture"\n`)
 }
 
-async function waitForSocket(): Promise<void> {
-	while (true) {
-		const result = spawnSync("bun", [loopEntry, "daemon", "status", "--loop-data-root", loopDataRoot, "--json"], { encoding: "utf8" })
-		if (result.status === 0) return
-		await Bun.sleep(100)
+function retainedDiagnosticFiles(root: string): string[] {
+	if (!existsSync(root)) return []
+	const retainedNames = new Set(["daemon.log", "runner.argv", "status.json", "stdout.jsonl", "stderr.txt", "runner-authorization.json"])
+	const pending = [root]
+	const retained: string[] = []
+	while (pending.length > 0) {
+		const directory = pending.pop()
+		if (directory === undefined) break
+		for (const entry of readdirSync(directory, { withFileTypes: true })) {
+			const path = resolve(directory, entry.name)
+			if (entry.isDirectory()) pending.push(path)
+			else if (entry.isFile() && retainedNames.has(entry.name)) retained.push(path)
+		}
 	}
+	return retained.sort((left, right) => left.localeCompare(right))
 }
 
-async function waitForRunner(chain: string): Promise<void> {
-	while (true) {
-		const status = JSON.parse(command(["bun", loopEntry, "chain", "status", chain, "--loop-data-root", loopDataRoot, "--json"]))
-		if (status.chain?.status === "completed" && status.summary?.items?.byStatus?.done === 1) return
+function runnerTimeoutDiagnostics(chain: string | null, lastStatus: string): string {
+	const chainRoot = chain === null ? loopDataRoot : resolve(loopDataRoot, "chains", chain)
+	const sections = [`runner filesystem grants e2e timeout diagnostics`, `workRoot=${workRoot}`, `chain=${chain ?? "<daemon-readiness>"}`, `lastChainStatus=${lastStatus}`]
+	for (const path of retainedDiagnosticFiles(chainRoot)) {
+		const size = statSync(path).size
+		const content = readFileSync(path, "utf8")
+		sections.push(`--- ${path} (${size} bytes) ---\n${content.slice(-DIAGNOSTIC_TAIL_CHARACTERS)}`)
+	}
+	return sections.join("\n")
+}
+
+async function waitForSocket(timeoutMs = SOCKET_WAIT_TIMEOUT_MS): Promise<void> {
+	const deadline = Date.now() + timeoutMs
+	let lastStatus = "daemon status not yet attempted"
+	while (Date.now() < deadline) {
+		const result = spawnSync("bun", [loopEntry, "daemon", "status", "--loop-data-root", loopDataRoot, "--json"], { encoding: "utf8" })
+		if (result.status === 0) return
+		lastStatus = `exit=${result.status}\nstdout=${result.stdout}\nstderr=${result.stderr}`
+		await Bun.sleep(100)
+	}
+	throw new Error(runnerTimeoutDiagnostics(null, lastStatus))
+}
+
+async function waitForRunner(chain: string, timeoutMs = RUNNER_WAIT_TIMEOUT_MS): Promise<void> {
+	const deadline = Date.now() + timeoutMs
+	let lastStatus = "chain status not yet attempted"
+	while (Date.now() < deadline) {
+		const result = spawnSync("bun", [loopEntry, "chain", "status", chain, "--loop-data-root", loopDataRoot, "--json"], { cwd: repoRoot, encoding: "utf8", env: operatorEnv })
+		lastStatus = `exit=${result.status}\nstdout=${result.stdout}\nstderr=${result.stderr}`
+		if (result.status === 0) {
+			const status: unknown = JSON.parse(result.stdout)
+			if (typeof status === "object" && status !== null) {
+				const chainStatus = Reflect.get(status, "chain")
+				const summary = Reflect.get(status, "summary")
+				if (typeof chainStatus === "object" && chainStatus !== null && Reflect.get(chainStatus, "status") === "completed"
+					&& typeof summary === "object" && summary !== null) {
+					const items = Reflect.get(summary, "items")
+					if (typeof items === "object" && items !== null) {
+						const byStatus = Reflect.get(items, "byStatus")
+						if (typeof byStatus === "object" && byStatus !== null && Reflect.get(byStatus, "done") === 1) return
+					}
+				}
+			}
+		}
 		await Bun.sleep(250)
 	}
+	throw new Error(runnerTimeoutDiagnostics(chain, lastStatus))
 }
 
 writeFixture()

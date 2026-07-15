@@ -3836,7 +3836,10 @@ process.exitCode = 0
 	})
 
 	test("daemon scheduler writes run artifacts and unified observability events", async () => {
-		const fixture = await startFixture("scheduler-artifacts", { schedulerIntervalMs: 1_000 })
+		// Item/status requests explicitly request scheduler ticks. Keep the periodic timer
+		// outside this short fixture so it cannot race the credentialed status-write tick and
+		// reorder the exact unified event sequence under load.
+		const fixture = await startFixture("scheduler-artifacts", { schedulerIntervalMs: 60_000 })
 		try {
 			const chain = record(expectOk(await request(fixture, "chain.create", {
 				name: "scheduler-artifacts-chain",
@@ -3889,17 +3892,7 @@ process.exitCode = 0
 				"queue.terminal",
 				"chain.completed",
 			]
-			expect([...eventTypes].sort()).toEqual([...expectedEventTypes].sort())
-			// `slot.busy` is emitted by the daemon's independent periodic tick while the
-			// credentialed child performs its status write. Their mutual order is intentionally
-			// unsynchronized; retain the complete inventory above and pin both causal sequences.
-			expect(eventTypes.filter((type) => type !== "slot.busy")).toEqual([
-				"agent.spawn", "phase.start", "item.mutation.caller_admission", "item.update.field_write_admission",
-				"item.status", "recycle.pending_entered", "recycle.natural_exit", "agent.exit", "phase.end",
-				"queue.terminal", "chain.completed",
-			])
-			expect(eventTypes.indexOf("slot.busy")).toBeGreaterThan(eventTypes.indexOf("phase.start"))
-			expect(eventTypes.indexOf("slot.busy")).toBeLessThan(eventTypes.indexOf("agent.exit"))
+			expect(eventTypes).toEqual(expectedEventTypes)
 			const exitEvent = events.events.find((event) => event.type === "agent.exit")
 			if (exitEvent?.type !== "agent.exit") throw new Error("expected agent.exit event")
 			expect(exitEvent.payload.excerpt.stdout.path).toBe(paths.runPhaseStdoutFile(runId, "iteration"))

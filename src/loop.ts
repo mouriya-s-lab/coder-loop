@@ -6640,9 +6640,9 @@ export type RunnerFilesystemSurface =
 	| { kind: "writable-file"; channel: "shared-context" | "current-issue" | "daemon-socket"; path: string }
 	| { kind: "system-device"; channel: "null"; path: "/dev/null" }
 	| { kind: "runner-runtime-directory"; runner: "claude"; channel: "projects" | "session-env"; path: string }
-	| { kind: "runner-runtime-directory"; runner: "codex"; channel: "sessions" | "shell-snapshots" | "tmp" | "log"; path: string }
+	| { kind: "runner-runtime-directory"; runner: "codex"; channel: "sessions" | "shell-snapshots" | "tmp" | "log" | "cache"; path: string }
 	| { kind: "runner-runtime-directory"; runner: "opencode"; channel: "data" | "state"; path: string }
-	| { kind: "runner-runtime-file"; runner: "codex"; channel: "installation-id" | "state-db" | "state-db-shm" | "state-db-wal" | "logs-db" | "logs-db-shm" | "logs-db-wal" | "goals-db" | "goals-db-shm" | "goals-db-wal" | "memories-db" | "memories-db-shm" | "memories-db-wal"; path: string }
+	| { kind: "runner-runtime-file"; runner: "codex"; channel: "installation-id" | "models-cache" | "state-db" | "state-db-shm" | "state-db-wal" | "logs-db" | "logs-db-shm" | "logs-db-wal" | "goals-db" | "goals-db-shm" | "goals-db-wal" | "memories-db" | "memories-db-shm" | "memories-db-wal"; path: string }
 
 export type RunnerFilesystemAuthorization = {
 	agentCwd: string
@@ -6832,6 +6832,8 @@ function runnerRuntimeSurfaces(runner: AgentRunnerKind): RunnerFilesystemSurface
 		const codexHome = process.env.CODEX_HOME ?? resolve(homedir(), ".codex")
 		return [
 			{ kind: "runner-runtime-file", runner: "codex", channel: "installation-id", path: resolve(codexHome, "installation_id") },
+			{ kind: "runner-runtime-file", runner: "codex", channel: "models-cache", path: resolve(codexHome, "models_cache.json") },
+			{ kind: "runner-runtime-directory", runner: "codex", channel: "cache", path: resolve(codexHome, "cache") },
 			{ kind: "runner-runtime-directory", runner: "codex", channel: "sessions", path: resolve(codexHome, "sessions") },
 			{ kind: "runner-runtime-directory", runner: "codex", channel: "shell-snapshots", path: resolve(codexHome, "shell_snapshots") },
 			{ kind: "runner-runtime-directory", runner: "codex", channel: "tmp", path: resolve(codexHome, "tmp") },

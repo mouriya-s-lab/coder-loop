@@ -857,12 +857,15 @@ describe("small parsers", () => {
 					expect(plan.args).toContain("shell_environment_policy.inherit=all")
 					for (const filename of [
 						"installation_id",
+						"models_cache.json",
 						"logs_2.sqlite", "logs_2.sqlite-shm", "logs_2.sqlite-wal",
 						"goals_1.sqlite", "goals_1.sqlite-shm", "goals_1.sqlite-wal",
 						"memories_1.sqlite", "memories_1.sqlite-shm", "memories_1.sqlite-wal",
 					]) {
 						expect(plan.args[1]).toContain(resolve(process.env.CODEX_HOME ?? resolve(homedir(), ".codex"), filename))
 					}
+					expect(plan.args[1]).toContain(resolve(process.env.CODEX_HOME ?? resolve(homedir(), ".codex"), "cache"))
+					expect(plan.args[1]).not.toContain(resolve(process.env.CODEX_HOME ?? resolve(homedir(), ".codex"), "plugins"))
 					expect(plan.args[1]).toContain("(allow system-socket)")
 				}
 				if (kind === "opencode") {

@@ -26,4 +26,15 @@ describe("runner filesystem grants e2e driver", () => {
 		expect(source).toContain('const probeArguments = runnerPromptProbeArguments(args)')
 		expect(source).toContain('await writeFile(resolve(process.cwd(), "runner-filesystem-probe.args"), probeArguments.join("\\\\n") + "\\\\n")')
 	})
+
+	test("bounds readiness waits and reports retained runtime diagnostics", () => {
+		const source = readFileSync(resolve(import.meta.dir, "runner-filesystem-grants-e2e.ts"), "utf8")
+		expect(source).toContain("const SOCKET_WAIT_TIMEOUT_MS")
+		expect(source).toContain("const RUNNER_WAIT_TIMEOUT_MS")
+		expect(source).toContain("deadline = Date.now() + timeoutMs")
+		expect(source).toContain("runner filesystem grants e2e timeout diagnostics")
+		for (const artifact of ["daemon.log", "runner.argv", "status.json", "stdout.jsonl", "stderr.txt", "runner-authorization.json"]) {
+			expect(source).toContain(artifact)
+		}
+	})
 })
