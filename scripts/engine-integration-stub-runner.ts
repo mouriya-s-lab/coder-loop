@@ -80,11 +80,14 @@ function runReview(facts: StubPromptFacts): void {
 	process.stdout.write(`${JSON.stringify({ type: "stub", phase: "review", committed, wroteStatus: status })}\n`)
 }
 
-function main(): void {
+async function main(): Promise<void> {
 	// 首行：claude stream-json 会话形状，引擎 parseSessionIdFromStream 只读首行的 session_id。
 	process.stdout.write(`${JSON.stringify({ type: "system", session_id: `engine-integration-${randomUUID()}` })}\n`)
 	const facts = parseStubPrompt(extractPromptArg(process.argv.slice(2)))
 	if (facts.phase === "iteration") {
+		// Keep the real child process alive long enough for the harness to prove both sides of
+		// the 10-second activity window through `status --json`: first non-zero, then expired.
+		await Bun.sleep(12_000)
 		runIteration(facts)
 		return
 	}
@@ -97,7 +100,7 @@ function main(): void {
 
 if (import.meta.main) {
 	try {
-		main()
+		await main()
 	} catch (error) {
 		process.stderr.write(`engine-integration-stub-runner: ${error instanceof Error ? error.message : String(error)}\n`)
 		process.exit(1)

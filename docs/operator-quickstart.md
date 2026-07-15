@@ -160,6 +160,22 @@ echo "$STATUS" | jq -r '.target.logDir'
 
 Agent 输出 layout 是 `<logDir>/<runId>/<phase>/stdout.jsonl`、`stderr.txt`、`status.json`、`sessions.jsonl`。
 
+无需读取 `stdout.jsonl` 判断 agent 是否仍在输出。查询指定任务：
+
+```bash
+coder-loop activity item <chain> --issue <item-id>
+```
+
+一次查看全部仍存活任务：
+
+```bash
+coder-loop activity all
+```
+
+两种命令都可加 `--json` / `--loop-data-root <dir>`，直接读取本地 SQLite 与
+`activity.json`，不连接 daemon socket，也不要求 daemon 正在运行。输出固定包含最近
+10 秒、30 秒、60 秒、300 秒的 stdout 完整行数；窗口按引擎观察输出的秒级时间桶近似计算。
+
 **事件流 fallback**（结构化 JSONL，适合需要非轮询的 watcher）：
 
 ```bash
@@ -195,6 +211,7 @@ coder-loop status /path/to/your-target-repo --json | jq '.current, .events, .que
 | `stderr.txt` | 该 phase agent stderr |
 | `status.json` | exit code / signal / bytes / runner / model / sessionId / termination metadata |
 | `sessions.jsonl` | 可 resume session id 索引 |
+| `activity.json` | 最近 5 分钟的有界逐秒行计数；不含 session 正文 |
 
 run 级事件在 `<logDir>/<runId>/events.jsonl`，也由 `status.events.path` 暴露。
 

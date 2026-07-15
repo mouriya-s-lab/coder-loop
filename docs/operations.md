@@ -82,6 +82,7 @@ Runner 选择也在 `status` 中显式暴露：
 | `queue.selected.runner` | 当前 selected item 的默认执行 phase runner |
 | `current.runner` | 当前 phase 的实际 runner；没有 current 时为 `null` |
 | `current.phaseStatus.value.runner` / `.model` | 已落盘 phase status 里记录的 runner kind 与 model；旧 status 文件可能为 `null` |
+| `current.activity.windows` | 当前 chain agent stdout 的兼容读面；独立 operator 命令优先使用 `activity item/all` |
 
 Runtime 文件是必要的 debug reference，但不是外层长期依赖的首选 API。只有在 `doctor/status/daemon` 输出指出某个局部异常，或需要人工恢复状态时，才直接编辑/读取下面的文件。
 
@@ -141,6 +142,7 @@ coder-loop status /path/to/target --json \
 | Agent stderr | `<logDir>/<runId>/<phase>/stderr.txt` | agent stderr | spawn 时写入 |
 | Agent status | `<logDir>/<runId>/<phase>/status.json` | spawn 结束元数据（exitCode / signal / bytes / runner / model / sessionId / terminated） | spawn 退出时写 |
 | Agent sessions | `<logDir>/<runId>/<phase>/sessions.jsonl` | 可 resume 的 session id 索引 | 观察到 session 时 append |
+| Agent activity | `<logDir>/<runId>/<phase>/activity.json` | 最近 5 分钟的逐秒 stdout 完整行计数桶；`status.current.activity` 的有界数据源 | run 期间原子更新 |
 
 `status.json` 字段由 `AgentRunStatus` 定义，包含：`label`、`runner`、`model`、`pid`、`startedAt`、`lastEventAt`、`outputPath`、`statusPath`、`bytesWritten`、`promptChars`、`lastStream`、`exitCode`、`signal`、`error`、`sessionId`、`terminated`。
 
@@ -232,6 +234,8 @@ coder-loop item --help
 | `doctor <target>` | 只读体检：operator 机器先决条件 + live runtime health（零 target 文件检查） | `--repo <slug>` `--loop-data-root <dir>` `--chain <name>` |
 | `status <target> --json` | 只读 JSON runtime/process snapshot | `--loop-data-root <dir>` `--chain <name>` |
 | `logs <target> --json` | 结构化 events / audit 查询 | `--kind K` `--type T` `--chain C` `--item ID` `--run RUN_ID` `--phase P` `--since TS` `--follow` |
+| `activity item <chain> --issue <id>` | 直接读取本地 SQLite/artifact，显示指定存活任务的 10s / 30s / 1m / 5m 输出行数 | `--json` `--loop-data-root <dir>` |
+| `activity all` | 直接读取本地 SQLite/artifact，显示全部 PID 仍存活的 current task | `--json` `--loop-data-root <dir>` |
 | `daemon up` | 运行 centralized daemon process | `--json` `--loop-data-root <dir>` |
 | `daemon down` | 通过 Unix socket 要求 centralized daemon 退出 | `--json` `--loop-data-root <dir>` |
 | `daemon status <target> --json` | daemon 视角 JSON snapshot | `--loop-data-root <dir>` `--chain <name>` |

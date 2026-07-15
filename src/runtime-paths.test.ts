@@ -74,6 +74,7 @@ describe("runtime path model", () => {
 		expect(paths.runPhaseStderrFile("run-2026-05-22", "iteration")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs/run-2026-05-22/iteration/stderr.txt")
 		expect(paths.runPhaseStatusFile("run-2026-05-22", "iteration")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs/run-2026-05-22/iteration/status.json")
 		expect(paths.runPhaseSessionsFile("run-2026-05-22", "iteration")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs/run-2026-05-22/iteration/sessions.jsonl")
+		expect(paths.runPhaseActivityFile("run-2026-05-22", "iteration")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/runs/run-2026-05-22/iteration/activity.json")
 		expect(paths.daemonDir).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/daemon")
 		expect(paths.daemonBatchDir("2026-05-22-16-28-22")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/daemon/2026-05-22-16-28-22")
 		expect(paths.daemonLogFile("2026-05-22-16-28-22")).toBe("/var/lib/coder-loop/loop-data/chains/coder-loop/daemon/2026-05-22-16-28-22/daemon.log")
