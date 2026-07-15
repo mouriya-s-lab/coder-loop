@@ -1078,6 +1078,7 @@ async function spawnSchedulerRun(
 				startStatus: item.status,
 				startStatusUpdatedAt: item.statusUpdatedAt,
 				...(item.phase === null ? {} : { startPhase: item.phase }),
+				startAttempts: item.attempts,
 			}),
 		})
 		options.store.setCurrentRun({
@@ -1089,6 +1090,10 @@ async function spawnSchedulerRun(
 				slotKey: slot.key,
 				itemId: item.id,
 				repoCwd: item.repoCwd,
+				startStatus: item.status,
+				startStatusUpdatedAt: item.statusUpdatedAt,
+				...(item.phase === null ? {} : { startPhase: item.phase }),
+				startAttempts: item.attempts,
 				...(runnerDomain.kind === "external-terminal" ? {
 					externalTerminalCurrent: {
 						runner: runner.kind,
@@ -1239,14 +1244,16 @@ export async function refreshExternalTerminalAvailabilityForItem(
 		return true
 	}
 	const availability = await probeResolvedExternalTerminal(runner, executionDomain)
+	const currentItem = options.store.getItem(item.id)
+	if (currentItem === null) return false
 	if (availability.kind !== "available") {
 		const checkedAt = new Date(nowSeconds(options) * 1000).toISOString()
-		const previousHold = externalTerminalHold(item.extra)
+		const previousHold = externalTerminalHold(currentItem.extra)
 		const sameHold = previousHold !== null && previousHold.runner === runner.kind && previousHold.phase === phase
 			&& previousHold.binary === runner.binary && previousHold.availability.kind === availability.kind
 			&& previousHold.availability.reason === availability.reason
 		const since = sameHold ? previousHold.availability.since : checkedAt
-		options.store.updateItem(item.id, { extra: withExternalTerminalHold(item.extra, {
+		options.store.updateItem(item.id, { extra: withExternalTerminalHold(currentItem.extra, {
 			kind: "external-terminal-unavailable", runner: runner.kind, phase, binary: runner.binary,
 			probeArgv: executionDomain.probe.argv,
 			availability: availability.kind === "unavailable"
@@ -1259,10 +1266,10 @@ export async function refreshExternalTerminalAvailabilityForItem(
 			probeArgv: executionDomain.probe.argv, availability, affected: warningAffected })
 		return false
 	}
-	const previousHold = externalTerminalHold(item.extra)
+	const previousHold = externalTerminalHold(currentItem.extra)
 	if (previousHold !== null) {
 		const checkedAt = new Date(nowSeconds(options) * 1000).toISOString()
-		options.store.updateItem(item.id, { extra: clearExternalTerminalHold(item.extra), updatedAt: nowSeconds(options) })
+		options.store.updateItem(item.id, { extra: clearExternalTerminalHold(currentItem.extra), updatedAt: nowSeconds(options) })
 		if (!hasAnyExternalTerminalHoldForEndpoint(options.store, item.id, runner.kind, runner.binary)) await emit(options, {
 			type: "runner.availability_restored", chainId: chain.id, rowId: item.id, itemId: item.itemId, phase,
 			runner: runner.kind, binary: runner.binary, probeArgv: executionDomain.probe.argv, checkedAt,

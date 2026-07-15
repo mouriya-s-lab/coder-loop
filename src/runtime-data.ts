@@ -195,6 +195,7 @@ export class ItemExtra extends RuntimeDataRecord {
 	startStatus?: InternalStatus
 	startStatusUpdatedAt?: number
 	startPhase?: string
+	startAttempts?: number
 	pid?: number
 	processGroupLeader?: boolean
 
@@ -218,6 +219,7 @@ export class ItemExtra extends RuntimeDataRecord {
 		if (input.startStatus !== undefined) this.startStatus = input.startStatus
 		if (input.startStatusUpdatedAt !== undefined) this.startStatusUpdatedAt = input.startStatusUpdatedAt
 		if (input.startPhase !== undefined) this.startPhase = input.startPhase
+		if (input.startAttempts !== undefined) this.startAttempts = input.startAttempts
 		if (input.pid !== undefined) this.pid = input.pid
 		if (input.processGroupLeader !== undefined) this.processGroupLeader = input.processGroupLeader
 	}
@@ -271,6 +273,7 @@ type ItemExtraInput = {
 	startStatus?: InternalStatus
 	startStatusUpdatedAt?: number
 	startPhase?: string
+	startAttempts?: number
 	pid?: number
 	processGroupLeader?: boolean
 }
@@ -282,6 +285,7 @@ type ArkAssertable<T> = {
 const OptionalStringBoundary = arkType("string|undefined")
 const OptionalBooleanBoundary = arkType("boolean|undefined")
 const OptionalPositiveIntegerBoundary = arkType("number.integer > 0 | undefined")
+const OptionalNonNegativeIntegerBoundary = arkType("number.integer >= 0 | undefined")
 const RequiredPositiveIntegerBoundary = arkType("number.integer > 0")
 const OptionalStringArrayBoundary = arkType("string[]|undefined")
 const OptionalPositiveIntegerArrayBoundary = arkType("(number.integer > 0)[]|undefined")
@@ -327,6 +331,7 @@ const ITEM_EXTRA_KEYS = new Set([
 	"startStatus",
 	"startStatusUpdatedAt",
 	"startPhase",
+	"startAttempts",
 	"pid",
 	"processGroupLeader",
 ])
@@ -465,6 +470,7 @@ export function itemExtraToJsonObject(extra: ItemExtra): JsonObject {
 	assignJson(result, "startStatus", extra.startStatus)
 	assignJson(result, "startStatusUpdatedAt", extra.startStatusUpdatedAt)
 	assignJson(result, "startPhase", extra.startPhase)
+	assignJson(result, "startAttempts", extra.startAttempts)
 	assignJson(result, "pid", extra.pid)
 	assignJson(result, "processGroupLeader", extra.processGroupLeader)
 	return result
@@ -644,6 +650,8 @@ function parseItemExtra(value: JsonObject, field: string): ItemExtra {
 	if (startStatusUpdatedAt !== undefined) input.startStatusUpdatedAt = startStatusUpdatedAt
 	const startPhase = optionalStringField(value, "startPhase", `${field}.startPhase`)
 	if (startPhase !== undefined) input.startPhase = startPhase
+	const startAttempts = optionalNonNegativeIntegerField(value, "startAttempts", `${field}.startAttempts`)
+	if (startAttempts !== undefined) input.startAttempts = startAttempts
 	const pid = optionalPositiveIntegerField(value, "pid", `${field}.pid`)
 	if (pid !== undefined) input.pid = pid
 	const processGroupLeader = optionalBooleanField(value, "processGroupLeader", `${field}.processGroupLeader`)
@@ -840,6 +848,10 @@ function optionalBooleanField(record: JsonObject, key: string, field: string): b
 
 function optionalPositiveIntegerField(record: JsonObject, key: string, field: string): number | undefined {
 	return arkField(OptionalPositiveIntegerBoundary, record[key], field, `${field} must be a positive integer when provided`)
+}
+
+function optionalNonNegativeIntegerField(record: JsonObject, key: string, field: string): number | undefined {
+	return arkField(OptionalNonNegativeIntegerBoundary, record[key], field, `${field} must be a non-negative integer when provided`)
 }
 
 function requiredPositiveIntegerField(record: JsonObject, key: string, field: string): number {

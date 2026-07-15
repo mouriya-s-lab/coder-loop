@@ -247,6 +247,32 @@ describe("daemon", () => {
 		}
 	})
 
+	test("create and scheduler probe-failed race emits one availability transition", async () => {
+		const presetDir = resolve(TEST_ROOT, "probe-failed-create-scheduler-race")
+		const fakeBinary = resolve(TEST_ROOT, "probe-failed-create-scheduler-race-binary")
+		await cp(PRESET_DIR, presetDir, { recursive: true })
+		const presetToml = resolve(presetDir, "preset.toml")
+		await writeFile(presetToml, (await readFile(presetToml, "utf-8")).replaceAll('runner = "codex"', 'runner = "hapi"').replaceAll('runner  = "codex"', 'runner  = "hapi"'))
+		await writeFile(fakeBinary, "#!/bin/sh\nif [ \"$1\" = probe ]; then sleep 0.1; exit 2; fi\nexit 0\n")
+		await chmod(fakeBinary, 0o755)
+		const fixture = await startFixture("probe-failed-create-scheduler-race", {
+			schedulerPresetDir: presetDir,
+			schedulerUsePresetRunner: true,
+			schedulerIntervalMs: 10,
+		})
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", { name: "probe-failed-race", repository: "fixture/repo", baseBranch: "main", preset: "gh-issue-pr-iteration", metadata: { hapi: { binary: fakeBinary } } })))
+			const chainId = numberValue(record(chain.chain).id)
+			expectOk(await request(fixture, "item.add", { chainId, itemId: "602-probe-failed-race", repoCwd: REPO_ROOT, presetPath: presetDir }))
+			await new Promise((resolveDone) => setTimeout(resolveDone, 250))
+			const warnings = fixture.schedulerEvents.filter((event) => event.type === "runner.external_terminal_unavailable")
+			expect(warnings).toHaveLength(1)
+			expect(warnings[0]).toMatchObject({ availability: { kind: "probe-failed", reason: "unexpected-exit", exitCode: 2 } })
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("healthy active external terminal projects available current state", async () => {
 		const presetDir = resolve(TEST_ROOT, "healthy-active-external-terminal")
 		const fakeBinary = resolve(TEST_ROOT, "healthy-active-external-terminal-binary")
@@ -3579,6 +3605,52 @@ process.exitCode = 0
 					// Already reaped by daemon startup recovery.
 				}
 			}
+			await daemon.stop()
+		}
+	})
+
+	test("daemon startup consumes a durable external-terminal loss latch and restores the pre-run tuple", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-startup-external-terminal-loss`)
+		const loopDataRoot = resolve(root, "ld")
+		await mkdir(loopDataRoot, { recursive: true })
+		const store = openSqliteStateStore({ loopDataRoot })
+		let chainId = 0
+		let itemRowId = 0
+		try {
+			const chain = store.createChain({ name: "startup-external-terminal-loss", preset: "gh-issue-pr-iteration", repository: "mouriya-s-lab/coder-loop", baseBranch: "main", status: "active", metadata: storedChainMetadata({}) })
+			chainId = chain.id
+			const item = store.createItem({
+				chainId, itemId: "602-loss-crash", repoCwd: REPO_ROOT, status: runtimeStatus("in_progress"), attempts: 5,
+				lastRunId: "run-loss-crash", phase: "iteration", sessionIds: { iteration: { hapi: "lost-session" } },
+				extra: storedItemExtra({ schedulerBackoff: { failureCount: 2, nextRunAt: 1_900_000_000 }, externalTerminalHold: {
+					kind: "external-terminal-unavailable", runner: "hapi", phase: "iteration", binary: "fake-hapi", probeArgv: ["probe"],
+					availability: { kind: "unavailable", reason: "endpoint-unavailable", exitCode: 69, signal: null, checkedAt: "2026-07-15T00:00:00.000Z", since: "2026-07-15T00:00:00.000Z" },
+				} }),
+			})
+			itemRowId = item.id
+			store.recordRun({ runId: "run-loss-crash", chainId, itemId: item.id, phase: "iteration", status: runtimeStatus("running"), startedAt: 1_900_000_001, extra: storedItemExtra({ startStatus: "changes_requested", startStatusUpdatedAt: 1_900_000_000, startAttempts: 4 }) })
+			store.setCurrentRun({ chainId, phase: "iteration", runId: "run-loss-crash", startedAt: 1_900_000_001, extra: storedItemExtra({
+				itemId: item.id, startStatus: "changes_requested", startStatusUpdatedAt: 1_900_000_000, startAttempts: 4,
+				externalTerminalCurrent: { runner: "hapi", binary: "fake-hapi", availability: { kind: "available", checkedAt: "2026-07-15T00:00:01.000Z" } },
+				externalTerminalLoss: { kind: "lost", detectedAt: "2026-07-15T00:00:02.000Z", reason: "endpoint-unavailable", terminationPhase: "term" },
+			}) })
+		} finally {
+			store.close()
+		}
+
+		const daemon = await startCoderLoopDaemon({ loopDataRoot, scheduler: { enabled: false } })
+		try {
+			const recovered = await readItem(loopDataRoot, chainId, "602-loss-crash")
+			expect(recovered).toMatchObject({ status: "changes_requested", statusUpdatedAt: 1_900_000_000, phase: null, attempts: 4 })
+			expect(recovered?.sessionIds.iteration?.hapi).toBeUndefined()
+			expect(recovered?.extra.schedulerBackoff).toBeUndefined()
+			expect(recovered?.extra.externalTerminalHold).toBeDefined()
+			expect(await readCurrentRun(loopDataRoot, chainId)).toBeNull()
+			const run = await readRun(loopDataRoot, "run-loss-crash")
+			expect(run).toMatchObject({ itemId: itemRowId, status: "changes_requested", exitCode: -1 })
+			expect(run?.extra.externalTerminalLoss).toMatchObject({ reason: "endpoint-unavailable", terminationPhase: "closed" })
+			expect(run?.extra.schedulerBackoff).toBeUndefined()
+		} finally {
 			await daemon.stop()
 		}
 	})
@@ -8622,7 +8694,7 @@ async function readChain(loopDataRoot: string, chainId: number) {
 	}
 }
 
-async function readItem(loopDataRoot: string, chainId: number, issueNumber: number) {
+async function readItem(loopDataRoot: string, chainId: number, issueNumber: string | number) {
 	const store = openSqliteStateStore({ loopDataRoot })
 	try {
 		return store.getItemById(chainId, String(issueNumber))
