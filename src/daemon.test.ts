@@ -47,7 +47,7 @@ function runtimeStatus(value: string) {
 	return engineLifecycleAdmittedItemStatus(parseInternalStatus(value, "test.status"), "test")
 }
 
-function staleRecoveryRunExtra(worktreePath: string) {
+function staleRecoveryRunExtra(worktreePath: string, overrides: JsonObject = {}) {
 	return storedItemExtra({
 		worktreePath,
 		branchName: "main",
@@ -55,6 +55,7 @@ function staleRecoveryRunExtra(worktreePath: string) {
 		definitionKind: "preset",
 		definitionContentIdentity: "sha256:daemon-recovery-fixture",
 		definitionPhaseNames: ["iteration", "review", "blocked-responder", "umbrella-finalizer"],
+		...overrides,
 	})
 }
 
@@ -3501,7 +3502,7 @@ process.exitCode = 0
 					itemId: terminal.id,
 					phase: "iteration",
 					startedAt: 1_700_000_000,
-					extra: storedItemExtra({}),
+					extra: staleRecoveryRunExtra(REPO_ROOT),
 				})
 			store.createItem({
 				chainId: chain.id,
@@ -3577,7 +3578,7 @@ process.exitCode = 0
 					itemId: item.id,
 					phase: "iteration",
 					startedAt: 1_700_000_000,
-					extra: storedItemExtra({ pid: stale.pid, processGroupLeader: true }),
+					extra: staleRecoveryRunExtra(REPO_ROOT, { pid: stale.pid, processGroupLeader: true }),
 				})
 		} finally {
 			store.close()
@@ -3644,7 +3645,7 @@ process.exitCode = 0
 					itemId: terminal.id,
 					phase: "iteration",
 					startedAt: 1_700_000_000,
-					extra: storedItemExtra({}),
+					extra: staleRecoveryRunExtra(REPO_ROOT),
 				})
 			queuedItemId = store.createItem({
 				chainId: chain.id,

@@ -108,6 +108,7 @@ import {
 	makeObservabilityEvent,
 	observabilityDecisionFingerprint,
 	observabilityEventToJsonValue,
+	parseObservabilityEvent,
 	parseObservabilityEventType,
 	parseObservabilityKind,
 	queryObservabilityEvents,
@@ -120,6 +121,7 @@ import {
 	type PrivilegedOpAuditOp,
 	type PrivilegedOpAuditReason,
 } from "./observability"
+import type { TaskNodeIdentity, TaskNodeSnapshot } from "./task-runtime"
 
 // #409: every daemon command an agent process can reach belongs to exactly one
 // authorization class. The classification is the engine's compile-time gate —
@@ -1024,6 +1026,29 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 		default:
 			return assertNeverSchedulerEvent(event)
 	}
+}
+
+export function attachTaskIdentityToObservabilityEvent(event: ObservabilityEvent, identity: TaskNodeIdentity): ObservabilityEvent {
+	return parseObservabilityEvent({ ...event, ...identity })
+}
+
+function findTaskNodeIdentity(node: TaskNodeSnapshot, runtimeNodeId: string): TaskNodeIdentity | null {
+	if (node.identity.runtimeNodeId === runtimeNodeId) return node.identity
+	switch (node.kind) {
+		case "leaf": return null
+		case "seq":
+		case "par":
+			for (const child of node.children) {
+				const found = findTaskNodeIdentity(child, runtimeNodeId)
+				if (found !== null) return found
+			}
+			return null
+		default: return assertNeverTaskNode(node)
+	}
+}
+
+function assertNeverTaskNode(node: never): never {
+	throw new DaemonError("internal_error", `unhandled task node: ${JSON.stringify(node)}`)
 }
 
 export class CoderLoopDaemon {
@@ -3510,7 +3535,16 @@ export class CoderLoopDaemon {
 				if (this.store !== null) {
 					const chain = this.store.getChain(event.chainId)
 					if (chain === null) throw new DaemonError("not_found", `chain not found: ${event.chainId}`)
-					const observabilityEvent = schedulerEventToObservabilityEvent(chain, event)
+					let observabilityEvent = schedulerEventToObservabilityEvent(chain, event)
+					if ("runId" in event && typeof event.runId === "string") {
+						const run = this.store.getRunByRunId(event.runId)
+						if (run !== null) {
+							const tree = this.store.getTaskTree(chain.id)
+							const identity = tree === null ? null : findTaskNodeIdentity(tree.root, run.runtimeNodeId)
+							if (identity === null) throw new DaemonError("internal_error", `run ${run.runId} task identity ${run.runtimeNodeId} is absent from its persisted tree`)
+							observabilityEvent = attachTaskIdentityToObservabilityEvent(observabilityEvent, identity)
+						}
+					}
 					if (isTimerOwnedSchedulerLifecycleEvent(event)) {
 						await this.recordObservabilityEventOrThrow(observabilityEvent, event.chainId)
 					} else {

@@ -182,6 +182,8 @@ export type RunRecord = {
 	runId: string
 	chainId: number
 	itemId: number
+	closureId: string
+	runtimeNodeId: string
 	phase: string
 	status: InternalStatus
 	startedAt: number
@@ -377,6 +379,8 @@ type RunRow = {
 	run_id: string
 	chain_id: number
 	item_id: number
+	closure_id: string
+	runtime_node_id: string
 	phase: string
 	status: string
 	started_at: number
@@ -393,7 +397,7 @@ type CurrentRunRow = {
 	extra: string
 }
 
-const CurrentRunRowBoundary = arkType({ chain_id: "number.integer", phase: "string>0", run_id: "string>0", started_at: "number", extra: "string" })
+const CurrentRunRowBoundary = arkType({ chain_id: "number.integer", phase: "string>0", run_id: "string>0", started_at: "number", extra: "string", "+": "reject" })
 const TaskNodeRowBoundary = arkType({
 	runtime_node_id: "string>0",
 	chain_id: "number.integer",
@@ -403,44 +407,48 @@ const TaskNodeRowBoundary = arkType({
 	definition_kind: "'preset'|'chain'",
 	definition_content_identity: "string>0",
 	definition_node_id: "string>0",
+	"+": "reject",
 })
 const ClosureRowBoundary = arkType({
 	closure_id: "string>0", item_row_id: "number.integer>0", item_id: "string>0", phase: "string>0",
 	lifecycle: "'active'|'suspended'|'consumed'", worktree_path: "string|null", branch_name: "string|null",
 	base_commit: "string>0", source_par_node_id: "string|null",
+	"+": "reject",
 })
-const ClosureSessionRowBoundary = arkType({ runner_kind: "'claude'|'codex'|'opencode'", session_id: "string>0" })
-const ActiveRunRowBoundary = arkType({ closure_id: "string>0", run_id: "string>0", phase: "string>0", started_at: "number" })
-const TaskTreeRootRowBoundary = arkType({ root_node_id: "string>0" })
-const SeqNodeRowBoundary = arkType({ next_child_node_id: "string|null" })
-const ParNodeRowBoundary = arkType({ pin_commit: "string>0", reopen_count: "number.integer>=0", reopen_budget_ref: "string>0", container_state: "'open'|'completed'|'exhausted'" })
-const JoinBindingValueRowBoundary = arkType({ version: "number.integer>=1", join_kind: "'drain'|'validator'", candidate_definition_kind: "'preset'|'chain'|null", candidate_definition_content_identity: "string|null", candidate_id: "string|null" })
-const JoinBindingRowBoundary = arkType({ par_node_id: "string>0", version: "number.integer>=1", join_kind: "'drain'|'validator'", candidate_definition_kind: "'preset'|'chain'|null", candidate_definition_content_identity: "string|null", candidate_id: "string|null", author_kind: "string>0", author_id: "string>0", authority_class: "string>0", effective_from_epoch: "number.integer>=0", created_at: "number" })
-const JoinEvaluationValueRowBoundary = arkType({ epoch: "number.integer>=0", binding_version: "number.integer>=1", evaluation_state: "'evaluating'|'decided'|'consumed'" })
-const JoinEvaluationRowBoundary = arkType({ par_node_id: "string>0", epoch: "number.integer>=0", binding_version: "number.integer>=1", evaluation_state: "'evaluating'|'decided'|'consumed'" })
-const ClosureLeafRowBoundary = arkType({ leaf_node_id: "string>0" })
-const ActiveRunAssociationRowBoundary = arkType({ lifecycle: "'active'|'suspended'|'consumed'", phase: "string>0", chain_id: "number.integer" })
-const ClosureAssociationRowBoundary = arkType({ closure_id: "string>0", lifecycle: "'active'|'suspended'|'consumed'" })
-const RunIdRowBoundary = arkType({ run_id: "string>0" })
-const LegacyChainRowBoundary = arkType({ id: "number.integer>0" })
+const ClosureSessionRowBoundary = arkType({ runner_kind: "'claude'|'codex'|'opencode'", session_id: "string>0", "+": "reject" })
+const ActiveRunRowBoundary = arkType({ closure_id: "string>0", run_id: "string>0", phase: "string>0", started_at: "number", "+": "reject" })
+const TaskTreeRootRowBoundary = arkType({ root_node_id: "string>0", "+": "reject" })
+const SeqNodeRowBoundary = arkType({ next_child_node_id: "string|null", "+": "reject" })
+const ParNodeRowBoundary = arkType({ pin_commit: "string>0", reopen_count: "number.integer>=0", reopen_budget_ref: "string>0", container_state: "'open'|'completed'|'exhausted'", "+": "reject" })
+const JoinBindingValueRowBoundary = arkType({ version: "number.integer>=1", join_kind: "'drain'|'validator'", candidate_definition_kind: "'preset'|'chain'|null", candidate_definition_content_identity: "string|null", candidate_id: "string|null", "+": "reject" })
+const JoinBindingRowBoundary = arkType({ par_node_id: "string>0", version: "number.integer>=1", join_kind: "'drain'|'validator'", candidate_definition_kind: "'preset'|'chain'|null", candidate_definition_content_identity: "string|null", candidate_id: "string|null", author_kind: "string>0", author_id: "string>0", authority_class: "string>0", effective_from_epoch: "number.integer>=0", created_at: "number", "+": "reject" })
+const JoinEvaluationValueRowBoundary = arkType({ epoch: "number.integer>=0", binding_version: "number.integer>=1", evaluation_state: "'evaluating'|'decided'|'consumed'", "+": "reject" })
+const JoinEvaluationRowBoundary = arkType({ par_node_id: "string>0", epoch: "number.integer>=0", binding_version: "number.integer>=1", evaluation_state: "'evaluating'|'decided'|'consumed'", "+": "reject" })
+const ClosureLeafRowBoundary = arkType({ leaf_node_id: "string>0", "+": "reject" })
+const ActiveRunAssociationRowBoundary = arkType({ lifecycle: "'active'|'suspended'|'consumed'", phase: "string>0", chain_id: "number.integer", "+": "reject" })
+const ClosureAssociationRowBoundary = arkType({ closure_id: "string>0", lifecycle: "'active'|'suspended'|'consumed'", "+": "reject" })
+const RunIdRowBoundary = arkType({ run_id: "string>0", "+": "reject" })
+const LegacyChainRowBoundary = arkType({ id: "number.integer>0", "+": "reject" })
 const LegacyItemRowBoundary = arkType({
 	id: "number.integer>0", chain_id: "number.integer>0", item_id: "string>0", repo_cwd: "string>0",
 	phase: "string|null", session_ids: "string", agent_cwd: "string|null", preset: "string|null",
 	preset_path: "string|null", extra: "string",
+	"+": "reject",
 })
-const LegacyCurrentRunRowBoundary = arkType({ chain_id: "number.integer>0", phase: "string>0", run_id: "string>0", started_at: "number", extra: "string" })
-const PersistedRunExtraRowBoundary = arkType({ extra: "string" })
-const MigrationDefinitionOutputBoundary = arkType({ definitionKind: "'preset'", definitionContentIdentity: "string>0", definitionPhaseNames: "string[]" })
-const ClosureIdRowBoundary = arkType({ closure_id: "string>0" })
-const TableCountRowBoundary = arkType({ table_count: "number.integer>=0" })
-const SessionIdRowBoundary = arkType({ session_id: "string>0" })
-const JoinVersionRowBoundary = arkType({ version: "number.integer>=1" })
-const JoinEpochRowBoundary = arkType({ epoch: "number.integer>=0" })
-const ItemIdRowBoundary = arkType({ item_id: "string>0" })
-const DefinitionIdentityRowBoundary = arkType({ definition_kind: "'preset'|'chain'", definition_content_identity: "string>0" })
-const TaskNodeKindRowBoundary = arkType({ kind: "'leaf'|'seq'|'par'" })
-const NextChildIndexRowBoundary = arkType({ next_index: "number.integer>=0" })
-const RuntimeNodeIdRowBoundary = arkType({ runtime_node_id: "string>0" })
+const LegacyCurrentRunRowBoundary = arkType({ chain_id: "number.integer>0", phase: "string>0", run_id: "string>0", started_at: "number", extra: "string", "+": "reject" })
+const PersistedRunExtraRowBoundary = arkType({ extra: "string", "+": "reject" })
+const MigrationDefinitionOutputBoundary = arkType({ definitionKind: "'preset'", definitionContentIdentity: "string>0", definitionPhaseNames: "string[]", "+": "reject" })
+const ClosureIdRowBoundary = arkType({ closure_id: "string>0", "+": "reject" })
+const TableCountRowBoundary = arkType({ table_count: "number.integer>=0", "+": "reject" })
+const SessionIdRowBoundary = arkType({ session_id: "string>0", "+": "reject" })
+const JoinVersionRowBoundary = arkType({ version: "number.integer>=1", "+": "reject" })
+const JoinEpochRowBoundary = arkType({ epoch: "number.integer>=0", "+": "reject" })
+const ItemIdRowBoundary = arkType({ item_id: "string>0", "+": "reject" })
+const DefinitionIdentityRowBoundary = arkType({ definition_kind: "'preset'|'chain'", definition_content_identity: "string>0", "+": "reject" })
+const TaskNodeKindRowBoundary = arkType({ kind: "'leaf'|'seq'|'par'", "+": "reject" })
+const NextChildIndexRowBoundary = arkType({ next_index: "number.integer>=0", "+": "reject" })
+const RuntimeNodeIdRowBoundary = arkType({ runtime_node_id: "string>0", "+": "reject" })
+const RunTaskIdentityRowBoundary = arkType({ closure_id: "string>0", leaf_node_id: "string>0", "+": "reject" })
 
 function parsePersistedRow<T>(boundary: { assert(value: unknown): T }, value: unknown, label: string): T {
 	try {
@@ -579,6 +587,8 @@ CREATE TABLE IF NOT EXISTS runs (
 	run_id TEXT NOT NULL UNIQUE,
 	chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
 	item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+	closure_id TEXT NOT NULL,
+	runtime_node_id TEXT NOT NULL,
 	phase TEXT NOT NULL,
 	status TEXT NOT NULL,
 	started_at REAL NOT NULL,
@@ -723,7 +733,7 @@ ${STATE_INDEXES_SQL}
 // runner values are all `claude` / `codex` / NULL — strict subset of the new accepted set).
 // main independently used v14 for context_entries after #558 had used v14 for the
 // normalized v3 runtime tables. v15 is the first schema that requires both shapes.
-const STATE_SCHEMA_VERSION = 15
+const STATE_SCHEMA_VERSION = 16
 const V5_ITEM_SESSION_COLUMN = ["last", "session", "id"].join("_")
 // v9 moves preset declaration from chains.preset to items.preset / items.preset_path (#412).
 // Existing rows are back-filled from chains.preset so the engine resolves the legacy preset
@@ -872,6 +882,7 @@ function migrateStateSchema(db: Database, loopDataRoot: string): void {
 		&& !itemsTableRunnerCheckAllowsOpencode(db)
 	const needsLegacyRuntimeMigration = stateSchemaExists(db) && !v3RuntimeSchemaExists(db)
 	const needsV14ItemSourceRetire = stateSchemaExists(db) && itemsTableHasColumn(db, "session_ids")
+	const needsRunIdentityMigration = stateSchemaExists(db) && (!runsTableHasColumn(db, "closure_id") || !runsTableHasColumn(db, "runtime_node_id"))
 	if (
 		beforeVersion >= STATE_SCHEMA_VERSION
 		&& stateSchemaExists(db)
@@ -888,11 +899,15 @@ function migrateStateSchema(db: Database, loopDataRoot: string): void {
 		&& itemsTableHasColumn(db, V9_ITEMS_PRESET_PATH_COLUMN)
 		&& !itemsTableHasColumn(db, V5_ITEM_SESSION_COLUMN)
 		&& runsTableHasColumn(db, "status")
+		&& runsTableHasColumn(db, "closure_id")
+		&& runsTableHasColumn(db, "runtime_node_id")
 	) return
-	if (needsItemTableRebuild || needsChainTableRebuild || needsItemTableRebuildForGitHubShapeRetire || needsItemTableRebuildForOpencodeCheck || needsLegacyRuntimeMigration || needsV14ItemSourceRetire) db.exec("PRAGMA foreign_keys = OFF")
+	if (needsItemTableRebuild || needsChainTableRebuild || needsItemTableRebuildForGitHubShapeRetire || needsItemTableRebuildForOpencodeCheck || needsLegacyRuntimeMigration || needsV14ItemSourceRetire || needsRunIdentityMigration) db.exec("PRAGMA foreign_keys = OFF")
 	try {
 		db.transaction(() => {
 			db.exec(STATE_SCHEMA_SQL)
+			if (!runsTableHasColumn(db, "closure_id")) db.exec("ALTER TABLE runs ADD COLUMN closure_id TEXT")
+			if (!runsTableHasColumn(db, "runtime_node_id")) db.exec("ALTER TABLE runs ADD COLUMN runtime_node_id TEXT")
 			db.exec(V3_RUNTIME_SCHEMA_SQL)
 			if (needsChainTableRebuild) {
 				// v10 → v11 (#457): copy any non-null `chains.umbrella_issue` / `umbrella_repo` values
@@ -968,6 +983,7 @@ function migrateStateSchema(db: Database, loopDataRoot: string): void {
 				migrateChainsMetadataForCl433(db)
 			}
 			if (needsLegacyRuntimeMigration) migrateLegacyRuntimeToV3(db, loopDataRoot)
+			if (needsRunIdentityMigration) migrateRunIdentity(db)
 			if (itemsTableHasColumn(db, "session_ids")) rebuildItemsTableForV14(db)
 			db.exec(STATE_INDEXES_SQL)
 			db.exec(ITEM_NEXT_PENDING_INDEX_SQL)
@@ -975,8 +991,34 @@ function migrateStateSchema(db: Database, loopDataRoot: string): void {
 			db.exec(`PRAGMA user_version = ${STATE_SCHEMA_VERSION}`)
 		}).immediate()
 	} finally {
-		if (needsItemTableRebuild || needsChainTableRebuild || needsItemTableRebuildForGitHubShapeRetire || needsItemTableRebuildForOpencodeCheck || needsLegacyRuntimeMigration || needsV14ItemSourceRetire) db.exec("PRAGMA foreign_keys = ON")
+		if (needsItemTableRebuild || needsChainTableRebuild || needsItemTableRebuildForGitHubShapeRetire || needsItemTableRebuildForOpencodeCheck || needsLegacyRuntimeMigration || needsV14ItemSourceRetire || needsRunIdentityMigration) db.exec("PRAGMA foreign_keys = ON")
 	}
+}
+
+function migrateRunIdentity(db: Database): void {
+	db.exec(`UPDATE runs
+		SET closure_id = (SELECT closure_id FROM task_closures WHERE item_row_id = runs.item_id AND phase = runs.phase),
+			runtime_node_id = (SELECT leaf_node_id FROM task_closures WHERE item_row_id = runs.item_id AND phase = runs.phase)`)
+	const missing = queryPersistedOne(db, "SELECT COUNT(*) AS table_count FROM runs WHERE closure_id IS NULL OR runtime_node_id IS NULL", {}, TableCountRowBoundary, "runs missing durable task identity")
+	if (missing === null || missing.table_count !== 0) throw new SqliteStateError("run_closure_mismatch", `${missing?.table_count ?? "unknown"} historical runs have no closure/runtime-node identity`)
+	db.exec(`CREATE TABLE runs_new (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		run_id TEXT NOT NULL UNIQUE,
+		chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+		item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+		closure_id TEXT NOT NULL REFERENCES task_closures(closure_id),
+		runtime_node_id TEXT NOT NULL REFERENCES task_nodes(runtime_node_id),
+		phase TEXT NOT NULL,
+		status TEXT NOT NULL,
+		started_at REAL NOT NULL,
+		ended_at REAL,
+		exit_code INTEGER,
+		extra TEXT NOT NULL
+	)`)
+	db.exec(`INSERT INTO runs_new (id, run_id, chain_id, item_id, closure_id, runtime_node_id, phase, status, started_at, ended_at, exit_code, extra)
+		SELECT id, run_id, chain_id, item_id, closure_id, runtime_node_id, phase, status, started_at, ended_at, exit_code, extra FROM runs`)
+	db.exec("DROP TABLE runs")
+	db.exec("ALTER TABLE runs_new RENAME TO runs")
 }
 
 function migrateLegacyRuntimeToV3(db: Database, loopDataRoot: string): void {
@@ -1717,20 +1759,26 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 
 		recordRun: (input) =>
 			write("record run", () => {
-					const status = input.status ?? parseInternalStatus("in_progress", "runs.status")
+				const status = input.status ?? parseInternalStatus("in_progress", "runs.status")
+				const extra = input.extra ?? storedItemExtra({})
+				ensureRuntimeClosure(db, { runId: input.runId, chainId: input.chainId, itemId: input.itemId, phase: input.phase, extra })
+				const association = queryPersistedOne(db, "SELECT closure_id, leaf_node_id FROM task_closures WHERE item_row_id = $itemId AND phase = $phase", { itemId: input.itemId, phase: input.phase }, RunTaskIdentityRowBoundary, `task identity for run ${input.runId}`)
+				if (association === null) throw new SqliteStateError("run_closure_mismatch", `run ${input.runId} has no durable closure identity`, { runId: input.runId })
 				const result = db.query<never, SqlParams>(`
-					INSERT INTO runs (run_id, chain_id, item_id, phase, status, started_at, ended_at, exit_code, extra)
-					VALUES ($runId, $chainId, $itemId, $phase, $status, $startedAt, $endedAt, $exitCode, $extra)
+					INSERT INTO runs (run_id, chain_id, item_id, closure_id, runtime_node_id, phase, status, started_at, ended_at, exit_code, extra)
+					VALUES ($runId, $chainId, $itemId, $closureId, $runtimeNodeId, $phase, $status, $startedAt, $endedAt, $exitCode, $extra)
 				`).run({
 					runId: input.runId,
 					chainId: input.chainId,
 					itemId: input.itemId,
+					closureId: association.closure_id,
+					runtimeNodeId: association.leaf_node_id,
 					phase: input.phase,
 					status,
 					startedAt: input.startedAt,
 					endedAt: input.endedAt ?? null,
 					exitCode: input.exitCode ?? null,
-					extra: stringifyJsonObject(input.extra === undefined ? {} : itemExtraToJsonObject(input.extra)),
+					extra: stringifyJsonObject(itemExtraToJsonObject(extra)),
 				})
 				return requireRun(getRunRowByRunId(input.runId), Number(result.lastInsertRowid))
 			}),
@@ -1802,6 +1850,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 		setClosureLifecycle: (closureId, input) => write("set closure lifecycle", () => {
 			const current = requireClosureById(db, closureId)
 			const next = closureLifecycleTarget(input)
+			if (current.lifecycle === "consumed" && next !== "consumed") throw new SqliteStateError("closure_lifecycle_conflict", `closure ${closureId} is consumed and cannot transition to ${next}`, { closureId })
 			const active = queryPersistedOne(db, "SELECT run_id FROM active_runs WHERE closure_id = $closureId", { closureId }, RunIdRowBoundary, `active_runs.${closureId}`)
 			if (active !== null && next !== "active") throw new SqliteStateError("closure_lifecycle_conflict", `closure ${closureId} has active run ${active.run_id}`, { closureId, runId: active.run_id })
 			if (next === "active" && (current.worktreePath === null || current.branchName === null)) throw new SqliteStateError("closure_lifecycle_conflict", `closure ${closureId} cannot activate without resources`, { closureId })
@@ -1966,6 +2015,8 @@ function rowToRun(row: RunRow | null): RunRecord | null {
 		runId: row.run_id,
 		chainId: row.chain_id,
 		itemId: row.item_id,
+		closureId: row.closure_id,
+		runtimeNodeId: row.runtime_node_id,
 		phase: row.phase,
 		status: parseInternalStatus(row.status, `runs.${row.id}.status`),
 		startedAt: row.started_at,
@@ -1986,7 +2037,9 @@ function rowToCurrentRun(row: CurrentRunRow | null): CurrentRunRecord | null {
 	}
 }
 
-function ensureRuntimeClosure(db: Database, run: RunRecord): void {
+type RuntimeClosureSeed = Pick<RunRecord, "runId" | "chainId" | "itemId" | "phase" | "extra">
+
+function ensureRuntimeClosure(db: Database, run: RuntimeClosureSeed): void {
 	const existing = queryPersistedOne(db, "SELECT closure_id FROM task_closures WHERE item_row_id = $itemId AND phase = $phase", { itemId: run.itemId, phase: run.phase }, ClosureIdRowBoundary, `runtime closure for item ${run.itemId} phase ${run.phase}`)
 	if (existing !== null) return
 	const item = queryPersistedOne(db, "SELECT item_id FROM items WHERE id = $itemId", { itemId: run.itemId }, ItemIdRowBoundary, `runtime closure item ${run.itemId}`)

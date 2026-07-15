@@ -12,6 +12,7 @@ import {
 	listActiveRuns,
 	makeRunId,
 	markRunPendingRecycle,
+	presetExecutionContentIdentity,
 	renderSchedulerSpawnPrompt,
 	resumeDecisionForItem,
 	runSchedulerUntilIdle,
@@ -25,7 +26,7 @@ import {
 	type SchedulerPhaseRunner,
 	type SchedulerWorktreeManager,
 } from "./scheduler"
-import { schedulerEventToObservabilityEvent } from "./daemon"
+import { attachTaskIdentityToObservabilityEvent, schedulerEventToObservabilityEvent } from "./daemon"
 import {
 	buildPhaseRunnerSelectionFromChain,
 	buildRunnerInvocation,
@@ -41,6 +42,7 @@ import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import { type ChainRecord, type ItemRecord, openSqliteStateStore } from "./sqlite-state"
 import { appendObservabilityEvent, queryObservabilityEvents } from "./observability"
 import { engineLifecycleAdmittedItemStatus, itemExtraJsonValue, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
+import type { TaskNodeIdentity } from "./task-runtime"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/scheduler-tests", String(process.pid))
@@ -70,6 +72,18 @@ function runtimeStatus(value: string) {
 	return engineLifecycleAdmittedItemStatus(parseInternalStatus(value, "test.status"), "test")
 }
 
+function historicalRunExtra(extra: JsonObject = {}) {
+	return storedItemExtra({
+		definitionKind: "chain",
+		definitionContentIdentity: "sha256:scheduler-history-fixture",
+		definitionPhaseNames: ["iteration", "review"],
+		worktreePath: REPO_ROOT,
+		branchName: "scheduler-history-fixture",
+		baseCommit: "0123456789abcdef",
+		...extra,
+	})
+}
+
 function seedSessionClosure(store: ReturnType<typeof openSqliteStateStore>, chain: ChainRecord, item: ItemRecord, phase: string): void {
 	const definitionRef = { kind: "chain", contentIdentity: "sha256:session-fixture" } as const
 	store.createTaskTree(chain.id, {
@@ -87,6 +101,23 @@ afterAll(async () => {
 })
 
 describe("scheduler", () => {
+	test("execution content identity uses the canonical compiled source bundle hash", async () => {
+		const presetDir = resolve(REPO_ROOT, "presets/single-phase-example")
+		const preset = await loadPreset(presetDir)
+		expect(await presetExecutionContentIdentity({ presetDir, preset })).toBe(preset.sourceHash)
+	})
+
+	test("runtime identity event chain preserves the persisted task-node identity", async () => {
+		const fixture = await createFixture("runtime-identity-event-chain")
+		try {
+			const chain = createChain(fixture.store, "runtime-identity-event-chain")
+			const identity: TaskNodeIdentity = { runtimeNodeId: "runtime-leaf", definitionRef: { kind: "chain", contentIdentity: "sha256:event-chain" }, definitionNodeId: "definition-leaf" }
+			const event = schedulerEventToObservabilityEvent(chain, { type: "phase.start", ts: new Date(0).toISOString(), runId: "identity-run", chainId: chain.id, itemId: 1, repoCwd: REPO_ROOT, phase: "iteration", pid: 123 })
+			const persisted = attachTaskIdentityToObservabilityEvent(event, identity)
+			expect({ runtimeNodeId: persisted.runtimeNodeId, definitionRef: persisted.definitionRef, definitionNodeId: persisted.definitionNodeId }).toEqual(identity)
+		} finally { fixture.store.close() }
+	})
+
 	test("rejects successful scheduler completion when terminal persistence fails", async () => {
 		const fixture = await createFixture("terminal-persistence-failure")
 		try {
@@ -2075,7 +2106,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				startedAt: 1_800_000_700,
 				endedAt: null,
 				exitCode: null,
-				extra: storedItemExtra({ startStatus: "queued" }),
+				extra: historicalRunExtra({ startStatus: "queued" }),
 			})
 			fixture.store.updateItem(item.id, {
 				status: runtimeStatus("in_progress"),
@@ -2209,7 +2240,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				startedAt: 1_800_000_900,
 				endedAt: 1_800_000_950,
 				exitCode: 0,
-				extra: storedItemExtra({ startStatus: "queued" }),
+				extra: historicalRunExtra({ startStatus: "queued" }),
 			})
 			fixture.store.updateItem(item.id, {
 				status: runtimeStatus("queued"),
@@ -2263,7 +2294,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				startedAt: 1_800_002_300,
 				endedAt: 1_800_002_350,
 				exitCode: 0,
-				extra: storedItemExtra({ startStatus: "queued", startStatusUpdatedAt: item.statusUpdatedAt }),
+				extra: historicalRunExtra({ startStatus: "queued", startStatusUpdatedAt: item.statusUpdatedAt }),
 			})
 			fixture.store.updateItem(item.id, {
 				phase: "review",
@@ -2321,7 +2352,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				startedAt: 1_800_002_350,
 				endedAt: 1_800_002_450,
 				exitCode: 0,
-				extra: storedItemExtra({ startStatus: "changes_requested", startStatusUpdatedAt: beforeReview.statusUpdatedAt }),
+				extra: historicalRunExtra({ startStatus: "changes_requested", startStatusUpdatedAt: beforeReview.statusUpdatedAt }),
 			})
 			fixture.store.updateItem(item.id, {
 				status: runtimeStatus("changes_requested"),
@@ -2415,7 +2446,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 				startedAt: 1_800_001_900,
 				endedAt: 1_800_001_950,
 				exitCode: 0,
-				extra: storedItemExtra({ startStatus: "queued" }),
+				extra: historicalRunExtra({ startStatus: "queued" }),
 			})
 			fixture.store.updateItem(item.id, {
 				status: runtimeStatus("queued"),
@@ -2826,7 +2857,7 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 				startedAt: 1_800_005_900,
 				endedAt: 1_800_005_950,
 				exitCode: 0,
-				extra: storedItemExtra({ startStatus: "queued" }),
+				extra: historicalRunExtra({ startStatus: "queued" }),
 			})
 			fixture.store.updateItem(item.id, {
 				status: runtimeStatus("queued"),

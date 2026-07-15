@@ -242,6 +242,12 @@ const EventBaseBoundary = {
 	"runId?": "string",
 	"phase?": "string",
 	"subject?": SubjectBoundary,
+	"runtimeNodeId?": "string>0",
+	"definitionRef?": arkType.or(
+		{ kind: arkType.unit("preset"), contentIdentity: "string>0", "+": "reject" },
+		{ kind: arkType.unit("chain"), contentIdentity: "string>0", "+": "reject" },
+	),
+	"definitionNodeId?": "string>0",
 } as const
 
 export const ObservabilityEventBoundary = arkType.or(

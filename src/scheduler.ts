@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
-import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { mkdir, writeFile } from "node:fs/promises"
 import { createWriteStream, existsSync, realpathSync, rmSync, type WriteStream } from "node:fs"
 import { basename, dirname, isAbsolute, resolve } from "node:path"
 
@@ -15,6 +15,7 @@ import {
 	selectRunnerForPhase,
 	type AgentRunnerKind,
 	type AgentRunnerSelection,
+	type CompiledTaskModel,
 	type JsonObject,
 	type JsonValue,
 	type Preset,
@@ -298,7 +299,7 @@ export type SchedulerPhaseRunnerSelectionForItemResolver = (chain: ChainRecord, 
 
 export type SchedulerLoadedPreset = {
 	presetDir: string
-	preset: Preset
+	preset: CompiledTaskModel
 }
 
 export type SchedulerPresetResolver = (chain: ChainRecord) => SchedulerLoadedPreset | Promise<SchedulerLoadedPreset>
@@ -2728,10 +2729,7 @@ function git(cwd: string, args: readonly string[]): { stdout: string; stderr: st
 }
 
 export async function presetExecutionContentIdentity(loaded: SchedulerLoadedPreset): Promise<string> {
-	const hasher = createHash("sha256")
-	hasher.update(await readFile(resolve(loaded.presetDir, "preset.toml")))
-	for (const phase of loaded.preset.phases) hasher.update(await readFile(phase.prompt))
-	return `sha256:${hasher.digest("hex")}`
+	return loaded.preset.sourceHash
 }
 
 function errorMessage(error: unknown): string {

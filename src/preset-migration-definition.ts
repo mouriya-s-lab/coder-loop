@@ -11,6 +11,7 @@ const MigrationPresetInputBoundary = arkType({
 	presetPath: "string|null",
 	repoCwd: "string>0",
 	materializeRoot: "string>0",
+	"+": "reject",
 })
 
 async function main(): Promise<void> {

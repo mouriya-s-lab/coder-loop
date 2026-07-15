@@ -100,6 +100,8 @@ describe("sqlite state store", () => {
 				"run_id",
 				"chain_id",
 				"item_id",
+				"closure_id",
+				"runtime_node_id",
 				"phase",
 				"status",
 				"started_at",
@@ -212,7 +214,33 @@ describe("sqlite state store", () => {
 			expect(() => store.setClosureResources(`closure-${item.id}`, { worktreePath: null, branchName: null, updatedAt: 1_800_000_101 })).toThrow(SqliteStateError)
 			const consumed = store.setClosureLifecycle(`closure-${item.id}`, { kind: "consume", updatedAt: 1_800_000_102 })
 			expect(consumed.lifecycle).toBe("consumed")
+			expectSqliteCode(() => store.setClosureLifecycle(`closure-${item.id}`, { kind: "activate", updatedAt: 1_800_000_103 }), "closure_lifecycle_conflict")
+			expectSqliteCode(() => store.setClosureLifecycle(`closure-${item.id}`, { kind: "suspend", updatedAt: 1_800_000_104 }), "closure_lifecycle_conflict")
 			expect(store.setClosureResources(`closure-${item.id}`, { worktreePath: null, branchName: null, updatedAt: 1_800_000_103 }).worktreePath).toBeNull()
+		} finally { store.close() }
+	})
+
+	test("run closure identity survives active relation cleanup", async () => {
+		const { store } = await openTestStore("run-closure-identity")
+		try {
+			const chain = createFullChain(store)
+			const item = createFullItem(store, chain)
+			const run = store.recordRun({
+				runId: "durable-run",
+				chainId: chain.id,
+				itemId: item.id,
+				phase: "iteration",
+				startedAt: 1_800_000_105,
+				extra: definitionRunExtra({ worktreePath: "/worktrees/durable", branchName: "issue-durable" }),
+			})
+			store.setCurrentRun({ chainId: chain.id, phase: run.phase, runId: run.runId, startedAt: run.startedAt, extra: storedItemExtra({}) })
+			const active = store.getRunByRunId(run.runId)
+			expect(active?.closureId).toBe(`closure:${item.id}:${run.phase}`)
+			expect(active?.runtimeNodeId).toBe(`closure-node:${item.id}:${run.phase}`)
+			expect(store.clearCurrentRun(run.runId)).toBe(true)
+			const completed = store.getRunByRunId(run.runId)
+			expect(completed?.closureId).toBe(active?.closureId)
+			expect(completed?.runtimeNodeId).toBe(active?.runtimeNodeId)
 		} finally { store.close() }
 	})
 
@@ -221,15 +249,15 @@ describe("sqlite state store", () => {
 		try {
 			const chain = createFullChain(store)
 			const item = createFullItem(store, chain)
-			store.createTaskTree(chain.id, singleLeafTree(item))
-			store.recordRun({ runId: "active-one", chainId: chain.id, itemId: item.id, phase: "iteration", startedAt: 1_800_000_200 })
-			store.recordRun({ runId: "active-two", chainId: chain.id, itemId: item.id, phase: "iteration", startedAt: 1_800_000_201 })
-			store.recordRun({ runId: "wrong-phase", chainId: chain.id, itemId: item.id, phase: "review", startedAt: 1_800_000_202 })
+			store.createTaskTree(chain.id, twoPhaseLeafTree(item))
+			store.recordRun({ runId: "active-one", chainId: chain.id, itemId: item.id, phase: "iteration", startedAt: 1_800_000_200, extra: definitionRunExtra() })
+			store.recordRun({ runId: "active-two", chainId: chain.id, itemId: item.id, phase: "iteration", startedAt: 1_800_000_201, extra: definitionRunExtra() })
+			store.recordRun({ runId: "wrong-phase", chainId: chain.id, itemId: item.id, phase: "review", startedAt: 1_800_000_202, extra: definitionRunExtra() })
 			store.setCurrentRun({ chainId: chain.id, phase: "iteration", runId: "active-one", startedAt: 1_800_000_200, extra: storedItemExtra({}) })
 			expectSqliteCode(() => store.setCurrentRun({ chainId: chain.id, phase: "iteration", runId: "active-two", startedAt: 1_800_000_201, extra: storedItemExtra({}) }), "active_run_conflict")
 			expectSqliteCode(() => store.setCurrentRun({ chainId: chain.id, phase: "iteration", runId: "wrong-phase", startedAt: 1_800_000_202, extra: storedItemExtra({}) }), "run_closure_mismatch")
 			store.clearCurrentRun("active-one")
-			store.setClosureLifecycle(`closure-${item.id}`, { kind: "suspend", updatedAt: 1_800_000_203 })
+			store.setClosureLifecycle(`closure-${item.id}-iteration`, { kind: "suspend", updatedAt: 1_800_000_203 })
 			expectSqliteCode(() => store.setCurrentRun({ chainId: chain.id, phase: "iteration", runId: "active-two", startedAt: 1_800_000_204, extra: storedItemExtra({}) }), "closure_lifecycle_conflict")
 		} finally { store.close() }
 	})
@@ -278,11 +306,12 @@ describe("sqlite state store", () => {
 		const chain = createFullChain(fixture.store)
 		const activeItem = createFullItem(fixture.store, chain, { phase: "iteration", agentCwd: REPO_ROOT, preset: "gh-issue-pr-iteration", sessionIds: { iteration: { codex: "session-v13" }, review: { claude: "review-session-v13" } } })
 		const untouchedItem = createFullItem(fixture.store, chain, { issueNumber: 178, itemId: "178", phase: null, agentCwd: REPO_ROOT, preset: "gh-issue-pr-iteration", sessionIds: {} })
-		fixture.store.recordRun({ runId: "legacy-active", chainId: chain.id, itemId: activeItem.id, phase: "iteration", startedAt: 1_800_000_220 })
 		fixture.store.close()
 		const legacy = new Database(fixture.dbFile)
 		try {
 			legacy.exec("PRAGMA foreign_keys=OFF")
+			rebuildRunsAsPacketlessHistory(legacy)
+			insertPacketlessHistoricalRun(legacy, { runId: "legacy-active", chainId: chain.id, itemId: activeItem.id, phase: "iteration", startedAt: 1_800_000_220 })
 			legacy.exec("ALTER TABLE items ADD COLUMN session_ids TEXT NOT NULL DEFAULT '{}'")
 			legacy.exec(`UPDATE items SET session_ids = '{"iteration":{"codex":"session-v13"},"review":{"claude":"review-session-v13"}}' WHERE id = ${activeItem.id}`)
 			legacy.exec(`UPDATE items SET session_ids = '{}' WHERE id = ${untouchedItem.id}`)
@@ -294,7 +323,7 @@ describe("sqlite state store", () => {
 		const migrated = openSqliteStateStore({ loopDataRoot: dbFileRoot(fixture.dbFile) })
 		try {
 			const db = new Database(fixture.dbFile)
-			try { expect(db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(15) } finally { db.close() }
+			try { expect(db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(16) } finally { db.close() }
 			const tree = migrated.getTaskTree(chain.id)
 			expect(tree?.root.kind).toBe("seq")
 			if (tree?.root.kind !== "seq") throw new Error("expected migrated seq")
@@ -321,11 +350,12 @@ describe("sqlite state store", () => {
 		const fixture = await openTestStore("checkout-independent")
 		const chain = createFullChain(fixture.store)
 		const item = createFullItem(fixture.store, chain, { phase: "iteration", preset: null, presetPath })
-		fixture.store.recordRun({ runId: "packet-less-history", chainId: chain.id, itemId: item.id, phase: "iteration", startedAt: 1_800_000_221 })
 		fixture.store.close()
 		const legacy = new Database(fixture.dbFile)
 		try {
 			legacy.exec("PRAGMA foreign_keys=OFF")
+			rebuildRunsAsPacketlessHistory(legacy)
+			insertPacketlessHistoricalRun(legacy, { runId: "packet-less-history", chainId: chain.id, itemId: item.id, phase: "iteration", startedAt: 1_800_000_221 })
 			legacy.exec("ALTER TABLE items ADD COLUMN session_ids TEXT NOT NULL DEFAULT '{}'")
 			for (const table of ["active_runs", "closure_sessions", "task_join_evaluation_bindings", "task_join_bindings", "task_leaf_nodes", "task_seq_nodes", "task_par_nodes", "task_closures", "task_trees", "task_nodes", "execution_definitions"]) legacy.exec(`DROP TABLE ${table}`)
 			legacy.exec("CREATE TABLE current_runs (chain_id INTEGER PRIMARY KEY REFERENCES chains(id), phase TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES runs(run_id), started_at REAL NOT NULL, extra TEXT NOT NULL)")
@@ -375,11 +405,12 @@ describe("sqlite state store", () => {
 		const chain = createFullChain(fixture.store)
 		const item = createFullItem(fixture.store, chain, { phase: "iteration", agentCwd: REPO_ROOT, preset: "gh-issue-pr-iteration", sessionIds: { iteration: { codex: "main-v14-session" } } })
 		fixture.store.appendContextEntry({ chainId: chain.id, scope: { kind: "chain" }, author: { kind: "operator" }, body: "preserve-main-v14-context" })
-		fixture.store.recordRun({ runId: "main-v14-active", chainId: chain.id, itemId: item.id, phase: "iteration", startedAt: 1_800_000_230 })
 		fixture.store.close()
 		const mainV14 = new Database(fixture.dbFile)
 		try {
 			mainV14.exec("PRAGMA foreign_keys=OFF")
+			rebuildRunsAsPacketlessHistory(mainV14)
+			insertPacketlessHistoricalRun(mainV14, { runId: "main-v14-active", chainId: chain.id, itemId: item.id, phase: "iteration", startedAt: 1_800_000_230 })
 			mainV14.exec("ALTER TABLE items ADD COLUMN session_ids TEXT NOT NULL DEFAULT '{}'")
 			mainV14.exec(`UPDATE items SET session_ids = '{"iteration":{"codex":"main-v14-session"}}' WHERE id = ${item.id}`)
 			for (const table of ["active_runs", "closure_sessions", "task_join_evaluation_bindings", "task_join_bindings", "task_leaf_nodes", "task_seq_nodes", "task_par_nodes", "task_closures", "task_trees", "task_nodes", "execution_definitions"]) mainV14.exec(`DROP TABLE ${table}`)
@@ -526,7 +557,7 @@ describe("sqlite state store", () => {
 				itemId: first.id,
 				phase: "iteration",
 				startedAt: 1_800_000_200,
-				extra: storedItemExtra({ issue: 177 }),
+				extra: definitionRunExtra({ issue: 177 }),
 			})
 			expect(store.getRunByRunId("run-data-access")).toEqual(run)
 			const completedRun = store.completeRun("run-data-access", { endedAt: 1_800_000_260, exitCode: 0, status: runtimeStatus("done") })
@@ -1914,6 +1945,36 @@ describe("sqlite state store", () => {
 		} finally { reopened.close() }
 	})
 })
+
+type PacketlessHistoricalRun = {
+	runId: string
+	chainId: number
+	itemId: number
+	phase: string
+	startedAt: number
+}
+
+function rebuildRunsAsPacketlessHistory(db: Database): void {
+	db.exec(`CREATE TABLE runs_packetless (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		run_id TEXT NOT NULL UNIQUE,
+		chain_id INTEGER NOT NULL,
+		item_id INTEGER NOT NULL,
+		phase TEXT NOT NULL,
+		status TEXT NOT NULL,
+		started_at REAL NOT NULL,
+		ended_at REAL,
+		exit_code INTEGER,
+		extra TEXT NOT NULL
+	)`)
+	db.exec("DROP TABLE runs")
+	db.exec("ALTER TABLE runs_packetless RENAME TO runs")
+}
+
+function insertPacketlessHistoricalRun(db: Database, input: PacketlessHistoricalRun): void {
+	db.query(`INSERT INTO runs (run_id, chain_id, item_id, phase, status, started_at, ended_at, exit_code, extra)
+		VALUES (?, ?, ?, ?, 'in_progress', ?, NULL, NULL, '{}')`).run(input.runId, input.chainId, input.itemId, input.phase, input.startedAt)
+}
 
 async function openTestStore(name: string): Promise<{ store: ReturnType<typeof openSqliteStateStore>; dbFile: string }> {
 	const loopDataRoot = resolve(TEST_ROOT, `${name}-${Date.now()}-${++nextRootId}`)
