@@ -4,7 +4,7 @@ import { createConnection, createServer } from "node:net"
 import { resolve } from "node:path"
 
 import { daemonRequest, sendDaemonRequest, startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
-import { LOOP_DATA_ROOT_ENV, resolveLoopDataPaths } from "./runtime-paths"
+import { LOOP_DATA_ROOT_ENV, resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
 import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedItemExtra } from "./runtime-data"
 import { appendObservabilityEvent, makeObservabilityEvent, queryObservabilityEvents } from "./observability"
@@ -1197,16 +1197,20 @@ attemptTimeoutSeconds = 3600
 
 	test("context append real daemon runtime", async () => {
 		const loopDataRoot = await makeLoopDataRoot("context-append-runtime")
+		const agentCwd = resolve(loopDataRoot, "..", "context-live-agent")
+		const liveEvidenceDir = resolveChainRuntimePaths("context-live-chain", { loopDataRoot }).issueEvidenceDir("live-item")
+		await mkdir(agentCwd, { recursive: true })
+		await mkdir(liveEvidenceDir, { recursive: true })
 		await mkdir(loopDataRoot, { recursive: true })
 		const bodyPath = resolve(TEST_ROOT, `${++nextFixtureId}-context-body.txt`)
-		const credentialPath = resolve(TEST_ROOT, `${++nextFixtureId}-context-live-credential.txt`)
+		const credentialPath = resolve(liveEvidenceDir, "context-live-credential.txt")
 		const body = "多字节-context\n".repeat(150_000)
 		await writeFile(bodyPath, body)
 		const runtimeEnv = await contextRuntimeEnv(credentialPath)
 		const store = openSqliteStateStore({ loopDataRoot })
 		const chain = store.createChain({ name: "context-chain", repository: "mouriya-s-lab/coder-loop", baseBranch: "main" })
 		const liveChain = store.createChain({ name: "context-live-chain", preset: "gh-issue-pr-iteration", repository: "mouriya-s-lab/coder-loop", baseBranch: "main" })
-		store.createItem({ chainId: liveChain.id, itemId: "live-item", repoCwd: REPO_ROOT, status: admittedTestStatus("queued"), preset: "gh-issue-pr-iteration", extra: storedItemExtra({ issue: "live-item" }) })
+		store.createItem({ chainId: liveChain.id, itemId: "live-item", repoCwd: agentCwd, status: admittedTestStatus("queued"), preset: "gh-issue-pr-iteration", evidenceDir: liveEvidenceDir, extra: storedItemExtra({ issue: "live-item" }) })
 		store.close()
 		const daemonProcess = spawnDaemonUp(loopDataRoot, runtimeEnv)
 		const daemonStdout = new Response(daemonProcess.stdout).text()

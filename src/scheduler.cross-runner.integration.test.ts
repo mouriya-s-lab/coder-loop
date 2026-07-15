@@ -12,6 +12,7 @@ import {
 	type SchedulerWorktreeManager,
 } from "./scheduler"
 import { loadPreset, type JsonObject } from "./loop"
+import { startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
 import { type ChainRecord, openSqliteStateStore } from "./sqlite-state"
 import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 
@@ -78,7 +79,7 @@ test("cross-runner happy path stores iteration/codex and review/claude session i
 		])
 		expect(phaseStarts(fixture.schedulerEvents, item.id)).toEqual(["iteration", "review"])
 	} finally {
-		fixture.store.close()
+		await stopCrossRunnerFixture(fixture)
 	}
 })
 
@@ -148,7 +149,7 @@ test("review writing changes_requested returns to iteration before review runs a
 		expect(fakeEvents[2]?.resumedSessionId).toBe("d400e2b2-04a4-44f8-8f13-3078f41a5593")
 		expect(fakeEvents[3]?.resumedSessionId).toBe("019e6cf2-5b39-7b83-9bc5-8c8b96122682")
 	} finally {
-		fixture.store.close()
+		await stopCrossRunnerFixture(fixture)
 	}
 })
 
@@ -225,7 +226,7 @@ test("invalid review session id clears only review/claude and the next review sp
 		])
 		expect(phaseStarts(fixture.schedulerEvents, item.id)).toEqual(["iteration", "review", "review"])
 	} finally {
-		fixture.store.close()
+		await stopCrossRunnerFixture(fixture)
 	}
 })
 
@@ -323,7 +324,7 @@ test("invalid review session id on opencode clears only review/opencode and the 
 		])
 		expect(phaseStarts(fixture.schedulerEvents, item.id)).toEqual(["iteration", "review", "review"])
 	} finally {
-		fixture.store.close()
+		await stopCrossRunnerFixture(fixture)
 	}
 })
 
@@ -375,7 +376,7 @@ test("exhausts on the declared attempt budget", async () => {
 			"codex:iteration",
 		])
 	} finally {
-		fixture.store.close()
+		await stopCrossRunnerFixture(fixture)
 	}
 })
 
@@ -406,6 +407,7 @@ type FakeRunnerEvent = {
 
 type CrossRunnerFixture = {
 	store: ReturnType<typeof openSqliteStateStore>
+	daemon: CoderLoopDaemon
 	state: ReturnType<typeof createSchedulerState>
 	loopDataRoot: string
 	eventLog: string
@@ -417,22 +419,32 @@ type CrossRunnerFixture = {
 	options: (overrides?: Partial<SchedulerOptions>) => SchedulerOptions
 }
 
+const crossRunnerCaptureRoots = new WeakMap<ReturnType<typeof openSqliteStateStore>, string>()
+
+async function stopCrossRunnerFixture(fixture: CrossRunnerFixture): Promise<void> {
+	await fixture.daemon.stop()
+	fixture.store.close()
+}
+
 async function createCrossRunnerFixture(name: string, responses: FakeRunnerResponse[]): Promise<CrossRunnerFixture> {
 	const root = resolve(TEST_ROOT, `${++nextFixtureId}-${name}`)
 	const loopDataRoot = resolve(root, "loop-data")
-	const eventLog = resolve(root, "cross-runner-events.jsonl")
-	const planPath = resolve(root, "cross-runner-plan.json")
+	const evidenceDir = resolve(loopDataRoot, "fixture-evidence")
+	const eventLog = resolve(evidenceDir, "cross-runner-events.jsonl")
+	const planPath = resolve(evidenceDir, "cross-runner-plan.json")
 	const codexWrapper = resolve(root, "fake-codex.sh")
 	const claudeWrapper = resolve(root, "fake-claude.sh")
 	const opencodeWrapper = resolve(root, "fake-opencode.sh")
-	await mkdir(loopDataRoot, { recursive: true })
+	await mkdir(evidenceDir, { recursive: true })
 	await writeFile(planPath, JSON.stringify({ responses }, null, 2))
 	await writeRunnerWrapper(codexWrapper, planPath, eventLog, "codex", loopDataRoot)
 	await writeRunnerWrapper(claudeWrapper, planPath, eventLog, "claude", loopDataRoot)
 	await writeRunnerWrapper(opencodeWrapper, planPath, eventLog, "opencode", loopDataRoot)
 
 	const store = openSqliteStateStore({ loopDataRoot })
-	const state = createSchedulerState()
+	crossRunnerCaptureRoots.set(store, evidenceDir)
+	const daemon = await startCoderLoopDaemon({ loopDataRoot, scheduler: { enabled: false } })
+	const state = daemon.schedulerExecutionState()
 	const schedulerEvents: SchedulerEvent[] = []
 	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
 		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
@@ -452,10 +464,12 @@ async function createCrossRunnerFixture(name: string, responses: FakeRunnerRespo
 		phaseRunner,
 		worktreeManager,
 		loopDataRootOptions: { loopDataRoot },
+		runCredentials: daemon.buildSchedulerRunCredentialIssuer(),
 		runIdFactory: ({ chain, item, phase }) => `run-${chain.id}-${item.id}-${phase}-${++runSequence}`,
-		prompt: ({ item, runId, phase }) => JSON.stringify({
+		prompt: ({ chain, item, runId, phase }) => JSON.stringify({
 			itemId: item.id,
 			issueNumber: Number(item.itemId),
+			chainName: chain.name,
 			runId,
 			phase,
 		}),
@@ -467,6 +481,7 @@ async function createCrossRunnerFixture(name: string, responses: FakeRunnerRespo
 
 	return {
 		store,
+		daemon,
 		state,
 		loopDataRoot,
 		eventLog,
@@ -516,6 +531,7 @@ function createItem(store: ReturnType<typeof openSqliteStateStore>, chain: Chain
 		chainId: chain.id,
 		itemId: String(issueNumber),
 		repoCwd: REPO_ROOT,
+		evidenceDir: crossRunnerCaptureRoots.get(store) ?? null,
 		status: runtimeStatus("queued"),
 		attempts: 0,
 		title: `issue ${issueNumber}`,
