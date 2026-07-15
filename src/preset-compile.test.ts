@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { resolve } from "node:path"
 import {
@@ -125,7 +125,7 @@ UNUSED = "item.id"
 		}
 	})
 
-	test("rejected diagnostics are non-empty and error-only at type and public boundaries", () => {
+	test("rejected diagnostics are non-empty and error-only at type and public boundaries", async () => {
 		const errorDiagnostic = { verdict: "error", rule: "preset-source", message: "missing source" } as const
 		const rejected: CompileResult = { kind: "rejected", diagnostics: [errorDiagnostic] }
 		expect(PresetCompilePublicResultBoundary.assert(projectPresetCompileResult(rejected))).toEqual({
@@ -143,13 +143,23 @@ UNUSED = "item.id"
 			schemaVersion: 1,
 			diagnostics: [warnDiagnostic],
 		})).toThrow()
+
+		const model = await loadPreset(resolve(ROOT, "presets/single-phase-example"))
+		// @ts-expect-error compiled results cannot carry error findings
+		const impossibleCompiled: CompileResult = { kind: "compiled", model, warnings: [errorDiagnostic] }
+		expect(impossibleCompiled.kind).toBe("compiled")
+		const projection = projectCompiledPreset(model, [])
+		expect(() => PresetCompileProjectionBoundary.assert({
+			...projection,
+			findings: [errorDiagnostic],
+		})).toThrow()
 	})
 
 	test("direct and materialized compilation project identical source semantics", async () => {
 		const source = await mkdtemp(resolve(tmpdir(), "coder-loop-compile-literal-"))
 		const root = await mkdtemp(resolve(tmpdir(), "coder-loop-compile-"))
 		try {
-			await writeFile(resolve(source, "preset.toml"), `name = "literal-path"\n[item]\nidField = "id"\n[item.fields]\nid = "string"\n[statuses]\ncontinuable = ["queued"]\nterminal = ["done", "exhausted"]\nentry = "queued"\nexhausted = "exhausted"\n[[phases]]\nname = "run"\nprompt = "run.md"\n[[phases.exits]]\nstatus = "done"\nwhen = "complete"\n[phases.variables]\nID = "item.id"\n`)
+			await writeFile(resolve(source, "preset.toml"), `name = "literal-path"\n[item]\nidField = "id"\n[item.fields]\nid = "string"\n[statuses]\ncontinuable = ["queued"]\nterminal = ["done", "exhausted"]\nentry = "queued"\nexhausted = "exhausted"\n[[phases]]\nname = "run"\nprompt = "run.md"\n[[phases.exits]]\nstatus = "done"\nwhen = "complete"\n[phases.variables]\nID = "item.id"\nUNUSED = "item.id"\n`)
 			await writeFile(resolve(source, "run.md"), `literal path: ${source}\nid={{ID}}\n`)
 			const direct = await compilePreset(source)
 			const materialized = await compilePreset(source, { materialize: { root } })
@@ -168,6 +178,28 @@ UNUSED = "item.id"
 		const result = await compilePreset(resolve(ROOT, "package.json"))
 		expect(result.kind).toBe("rejected")
 		if (result.kind === "rejected") expect(result.diagnostics[0].message).toContain("ENOTDIR")
+	})
+
+	test("non-ENOENT compile source resolution failures emit structured rejections", async () => {
+		const cwd = await mkdtemp(resolve(tmpdir(), "coder-loop-compile-source-resolution-"))
+		const source = resolve(cwd, "recursive-link")
+		try {
+			await symlink("recursive-link", source)
+			const result = Bun.spawnSync({
+				cmd: [process.execPath, resolve(ROOT, "src/loop.ts"), "preset", "compile", source, "--json"],
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			expect(result.exitCode).not.toBe(0)
+			expect(new TextDecoder().decode(result.stdout)).toBe("")
+			const rejection = PresetCompilePublicResultBoundary.assert(JSON.parse(new TextDecoder().decode(result.stderr)))
+			expect(rejection.kind).toBe("rejected")
+			if (rejection.kind === "rejected") {
+				expect(rejection.diagnostics).toEqual([expect.objectContaining({ verdict: "error", rule: "preset-source" })])
+			}
+		} finally {
+			await rm(cwd, { recursive: true, force: true })
+		}
 	})
 
 	test("empty statuses are rejected at the preset parse boundary", async () => {

@@ -530,7 +530,7 @@ const StatusSnapshotBoundary = arkType({
 	processes: "object",
 })
 
-const CompileFindingBoundary = arkType({ verdict: arkType.or(arkType.unit("warn"), arkType.unit("error")), rule: "string", message: "string" })
+const CompileWarningBoundary = arkType({ verdict: arkType.unit("warn"), rule: "string", message: "string" })
 export const PresetCompileErrorDiagnosticBoundary = arkType({ verdict: arkType.unit("error"), rule: "string", message: "string" })
 export const PresetCompileProjectionBoundary = arkType({
 	schemaVersion: arkType.unit(1),
@@ -578,10 +578,10 @@ export const PresetCompileProjectionBoundary = arkType({
 	}).array(),
 	tools: arkType({ id: "string" }).array(),
 	fragments: arkType({ id: "string", role: "string", path: "string" }).array(),
-	findings: CompileFindingBoundary.array(),
+	findings: CompileWarningBoundary.array(),
 })
 
-export type CompileFinding = typeof CompileFindingBoundary.infer
+export type CompileWarning = typeof CompileWarningBoundary.infer
 export type PresetCompileErrorDiagnostic = typeof PresetCompileErrorDiagnosticBoundary.infer
 export type PresetCompileProjection = typeof PresetCompileProjectionBoundary.infer
 export const PresetCompilePublicResultBoundary = arkType.or(
@@ -785,9 +785,32 @@ export type CompiledTaskModel = Preset & {
 	tasks: CompiledTaskTree
 }
 
+export type CompiledPresetProduct = {
+	model: CompiledTaskModel
+	warnings: readonly CompileWarning[]
+}
+
+export type PresetCompileSuccess = CompiledPresetProduct & {
+	kind: "compiled"
+}
+
+export type PresetCompileRejection = {
+	kind: "rejected"
+	diagnostics: readonly [PresetCompileErrorDiagnostic, ...PresetCompileErrorDiagnostic[]]
+}
+
 export type CompileResult =
-	| { kind: "compiled"; model: CompiledTaskModel; warnings: readonly CompileFinding[] }
-	| { kind: "rejected"; diagnostics: readonly [PresetCompileErrorDiagnostic, ...PresetCompileErrorDiagnostic[]] }
+	| PresetCompileSuccess
+	| PresetCompileRejection
+
+type ResolvedPresetCompileSource = {
+	kind: "resolved"
+	presetDir: string
+}
+
+type PresetCompileSourceResolution =
+	| ResolvedPresetCompileSource
+	| PresetCompileRejection
 
 class PresetCompileFailure extends Error {
 	constructor(readonly diagnostics: readonly [PresetCompileErrorDiagnostic, ...PresetCompileErrorDiagnostic[]]) {
@@ -800,12 +823,16 @@ function missingPresetSource(message: string): PresetCompileFailure {
 	return new PresetCompileFailure([{ verdict: "error", rule: "preset-source", message }])
 }
 
-function presetSourceFailure(error: Error, code: string): PresetCompileFailure {
-	return new PresetCompileFailure([{
+function presetSourceDiagnostic(error: BoundaryError, code: string): PresetCompileErrorDiagnostic {
+	return {
 		verdict: "error",
 		rule: "preset-source",
-		message: `${code}: ${error.message}`,
-	}])
+		message: `${code}: ${errorMessage(error)}`,
+	}
+}
+
+function presetSourceFailure(error: BoundaryError, code: string): PresetCompileFailure {
+	return new PresetCompileFailure([presetSourceDiagnostic(error, code)])
 }
 
 async function readPresetSourceBytes(path: string): Promise<Buffer> {
@@ -2864,7 +2891,7 @@ async function runQueueCommand(args: string[]): Promise<void> {
 	await runQueueUnblockCommand(parsed.value.args)
 }
 
-export function projectCompiledPreset(model: CompiledTaskModel, findings: readonly CompileFinding[]): PresetCompileProjection {
+export function projectCompiledPreset(model: CompiledTaskModel, findings: readonly CompileWarning[]): PresetCompileProjection {
 	const statusNodes = [...model.statuses.continuable, ...model.statuses.terminal].map((status) => ({
 		identity: `status:${status}`,
 		status,
@@ -2933,20 +2960,26 @@ function parsePresetCompileCliArgs(args: string[]): PresetCompileCliArgs {
 	return PresetCompileCliArgsBoundary.assert(args)
 }
 
-async function resolvePresetCompileSource(source: string): Promise<string> {
+async function resolvePresetCompileSource(source: string): Promise<PresetCompileSourceResolution> {
 	const cwdRelative = resolve(process.cwd(), source)
 	try {
-		if ((await stat(cwdRelative)).isDirectory()) return cwdRelative
+		if ((await stat(cwdRelative)).isDirectory()) return { kind: "resolved", presetDir: cwdRelative }
 	} catch (error) {
-		if (!(isNodeError(error) && error.code === "ENOENT")) throw error
+		if (isNodeError(error) && error.code === "ENOENT") {
+			return { kind: "resolved", presetDir: PRESET_NAME_PATTERN.test(source) ? resolve(PKG_ROOT, "presets", source) : cwdRelative }
+		}
+		if (isNodeError(error) && typeof error.code === "string") {
+			return { kind: "rejected", diagnostics: [presetSourceDiagnostic(error, error.code)] }
+		}
+		throw error
 	}
-	return PRESET_NAME_PATTERN.test(source) ? resolve(PKG_ROOT, "presets", source) : cwdRelative
+	return { kind: "resolved", presetDir: PRESET_NAME_PATTERN.test(source) ? resolve(PKG_ROOT, "presets", source) : cwdRelative }
 }
 
 async function runPresetCommand(args: string[]): Promise<void> {
 	const [, source] = parsePresetCompileCliArgs(args)
-	const presetDir = await resolvePresetCompileSource(source)
-	const result = await compilePreset(presetDir)
+	const resolution = await resolvePresetCompileSource(source)
+	const result = resolution.kind === "resolved" ? await compilePreset(resolution.presetDir) : resolution
 	if (result.kind === "rejected") {
 		process.stderr.write(`${JSON.stringify(projectPresetCompileResult(result))}\n`)
 		process.exitCode = 1
@@ -4590,7 +4623,7 @@ export async function loadPreset(sourceDir: string, options: LoadPresetOptions =
 	return result.model
 }
 
-async function compilePresetOrThrow(sourceDir: string, options: LoadPresetOptions): Promise<{ model: CompiledTaskModel; warnings: readonly CompileFinding[] }> {
+async function compilePresetOrThrow(sourceDir: string, options: LoadPresetOptions): Promise<CompiledPresetProduct> {
 	const sourceAbs = resolve(sourceDir)
 	const presetDir = options.materialize
 		? (await materializePreset(sourceDir, options.materialize.root)).promptRoot
@@ -4626,7 +4659,7 @@ async function compilePresetOrThrow(sourceDir: string, options: LoadPresetOption
 	// edge) and is more actionable than a placeholder typo in a prompt the
 	// drift would have made unreachable anyway.
 	const dagFindings = checkPresetDag(preset)
-	const warnings: CompileFinding[] = []
+	const warnings: CompileWarning[] = []
 	const dagErrors: PresetDagFinding[] = []
 	for (const finding of dagFindings) {
 		options.onDagFinding?.(finding)
@@ -4651,7 +4684,7 @@ async function compilePresetOrThrow(sourceDir: string, options: LoadPresetOption
 			else warnings.push({
 				verdict: "warn",
 				rule: finding.direction,
-				message: `${finding.file}: {{${finding.key}}} (${finding.direction})`,
+				message: `${resolve(sourceAbs, relative(presetDir, finding.file))}: {{${finding.key}}} (${finding.direction})`,
 			})
 		}
 		phases.push(phase)
