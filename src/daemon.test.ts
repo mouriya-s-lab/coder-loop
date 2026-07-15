@@ -7650,7 +7650,7 @@ prompt = "iter.md"
 // #478 acceptance row 5: the daemon-wide rate-limit decision walks through four states
 // (normal → paused → stagger-wait → stagger-ready → normal). Each state's `maxSpawns`
 // value is the contract `schedulerTick(options, { maxSpawns })` consumes. The wider
-// integration is covered by real-e2e + the scheduler tests; this is the pure-function
+// integration is covered by engine-integration, real-e2e, and the scheduler tests; this is the pure-function
 // state machine pinned to its acceptance shape.
 describe("daemonRateLimitDecision (issue #478)", () => {
 	const reset: { resetsAt: number; resetAtIso: string; rateLimitType: string | null } = {
