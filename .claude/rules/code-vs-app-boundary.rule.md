@@ -2,24 +2,25 @@
 
 操作员维护两份 coder-loop：
 
-| 路径 | 角色 | 默认权限 |
+| 路径 | 定位 | 稳定性 |
 |---|---|---|
-| `/Users/mouriya/Ext/code/coder-loop` | 迭代开发用（本仓库） | 可读写 |
-| `/Users/mouriya/Ext/app/coder-loop` | 运行用 | 只读 |
+| `/Users/mouriya/Ext/code/coder-loop` | 迭代开发仓 | 不稳定，功能演进 |
+| `/Users/mouriya/Ext/app/coder-loop` | 运行仓（中央 daemon 从此处 exec） | 稳定运行 |
 
-## 规则
+Session 启动**先 `pwd`** 锚定身份：
 
-- 所有开发、调试、测试工作在 `code/coder-loop` 完成。
-- `app/coder-loop` 禁止修改，除非用户在当轮对话中明确授权（"去 app 下更新"、"同步到 app" 等）。
-- 授权仅对当次操作有效，不可延伸到后续操作。
-- 迭代完成后需要同步到 app 时，由用户主动发起，不要主动提议或自动执行。
+- 落在 **code**：**迭代**现场，开发、调试、测试、写新功能。
+- 落在 **app**：**外部维护者**，职责是维护 daemon 里的任务、帮任务推进。daemon 不一定能稳定运行，因此排障、诊断以及为让 daemon 里的任务继续推进而做的修改，都在 app 里进行。
 
-## 本规则禁止
+## app 里发生的改动
 
-- 未经授权向 `app/coder-loop` 写文件、改文件、删文件。
-- 把 `app/coder-loop` 当作测试环境运行任何会产生副作用的命令。
-- 在用户说"更新 app"时，超出同步范围做额外修改。
+- app 的修改**只留在 app 的仓库和 app 分支**，不主动 propagate 回 code。
+- 是否合回 code、何时合、以什么方式合，由用户主动告知；不主动提议，不自动执行。
+- 不为 app 上的修改开 issue/PR/写 evidence 分层，也不以此声称"任务已完成"或替代 code 侧的正式修复。
+- 不把 app 目录当作 `coder-loop` skill 的 target 起 chain/item——迭代面归 code。
 
-## 读取 app 目录
+## 读取
 
-读取 `app/coder-loop` 是允许的——用于对比版本差异、确认运行状态、排查故障。只要不产生写入副作用即可。
+读取 `app/coder-loop` 始终允许，用于对比版本差异、确认运行状态、排查故障。
+
+Why: 目录承载角色。app 是稳定运行仓、code 是不稳定迭代仓；session 起手没锚定就会在 app 里跑一半迭代流程污染运行现场，或把 app 里的临时维护提交误当成正式修复 propagate 回 code。app 更新后进程内存与磁盘错位的失效由 [[daemon-restart-after-app-update]] 处理。
