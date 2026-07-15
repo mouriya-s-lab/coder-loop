@@ -4268,7 +4268,8 @@ async function createFixture(name: string): Promise<Fixture> {
 	const fakeRunner = resolve(root, "fake-runner.ts")
 	const eventLogForChain = (chainName: string): string => resolve(resolveChainRuntimePaths(chainName, { loopDataRoot }).runsDir, "runner-events.jsonl")
 	const fixturePresetDir = resolve(root, "preset")
-	await mkdir(loopDataRoot, { recursive: true })
+	const fixtureEvidenceDir = resolve(loopDataRoot, "fixture-evidence")
+	await mkdir(fixtureEvidenceDir, { recursive: true })
 	await writeFakeRunner(fakeRunner)
 	await cp(resolve(REPO_ROOT, "presets/gh-issue-pr-iteration"), fixturePresetDir, { recursive: true })
 	const presetTomlPath = resolve(fixturePresetDir, "preset.toml")
@@ -4281,7 +4282,7 @@ async function createFixture(name: string): Promise<Fixture> {
 
 	const store = openSqliteStateStore({ loopDataRoot })
 	fixturePresetDirs.set(store, fixturePresetDir)
-	fixtureCaptureRoots.set(store, root)
+	fixtureCaptureRoots.set(store, fixtureEvidenceDir)
 	const daemon = await startCoderLoopDaemon({ loopDataRoot, scheduler: { enabled: false } })
 	fixtureDaemons.add(daemon)
 	const state = daemon.schedulerExecutionState()

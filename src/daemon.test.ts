@@ -335,7 +335,7 @@ process.exitCode = 0
 
 	test("daemon startup rejects live pid with missing socket pathname", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-startup-socket-unlinked`)
-		const loopDataRoot = resolve(root, "ld")
+		const loopDataRoot = root + "-loop-data"
 		const pidFile = resolve(loopDataRoot, "daemon.pid")
 		await mkdir(loopDataRoot, { recursive: true })
 		const stale = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
@@ -801,7 +801,7 @@ process.exitCode = 0
 
 	test("daemon startup skips invalid existing chain rows", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-invalid-existing-chain`)
-		const loopDataRoot = resolve(root, "ld")
+		const loopDataRoot = root + "-loop-data"
 		await mkdir(loopDataRoot, { recursive: true })
 		const store = openSqliteStateStore({ loopDataRoot })
 		try {
@@ -839,7 +839,7 @@ process.exitCode = 0
 
 	test("daemon startup repairs missing chain shared handoff file", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-repair-shared-handoff`)
-		const loopDataRoot = resolve(root, "ld")
+		const loopDataRoot = root + "-loop-data"
 		await mkdir(loopDataRoot, { recursive: true })
 		const store = openSqliteStateStore({ loopDataRoot })
 		try {
@@ -873,7 +873,7 @@ process.exitCode = 0
 
 	test("daemon startup quarantines chain directories missing from DB", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-orphan-chain-directory`)
-		const loopDataRoot = resolve(root, "ld")
+		const loopDataRoot = root + "-loop-data"
 		const orphanPath = resolve(loopDataRoot, "chains", "Z", "issues")
 		await mkdir(orphanPath, { recursive: true })
 
@@ -1556,7 +1556,7 @@ attemptTimeoutSeconds = 3600
 
 	test("daemon default scheduler prompt resolver consumes scheduler presetDir loaded preset", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-scheduler-preset-dir-prompt`)
-		const loopDataRoot = resolve(root, "ld")
+		const loopDataRoot = root + "-loop-data"
 		const presetDir = resolve(root, "override-preset")
 		const runner = resolve(root, "capture-prompt-runner.ts")
 		const promptCapture = resolve(root, "captured-prompt.txt")
@@ -2249,7 +2249,7 @@ attemptTimeoutSeconds = 3600
 
 	test("credential-bound item.exitAction denies forged attribution and preserves overlapping already-stopped review attempts (#600)", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-600-exit-action-credential-truth`)
-		const loopDataRoot = resolve(root, "ld")
+		const loopDataRoot = root + "-loop-data"
 		const credentialedPresetDir = await writeCredentialedFixturePreset(root)
 		const iterationCapture = resolve(root, "iteration-credential.txt")
 		const iterationRelease = resolve(root, "iteration-release")
@@ -3341,7 +3341,7 @@ process.exitCode = 0
 	// on the next tick because `gh-issue-pr-iteration` lists `in_progress` in `continuable`.
 	test("daemon startup kills stale process group and clears current_run without rewriting item business fields (#508)", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-startup-recovery`)
-		const loopDataRoot = resolve(root, "ld")
+		const loopDataRoot = root + "-loop-data"
 		await mkdir(loopDataRoot, { recursive: true })
 		const stale = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
 			detached: true,
@@ -3439,7 +3439,7 @@ process.exitCode = 0
 
 	test("daemon startup reconciles an orphan run on a terminal non-current item", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-orphan-run-recovery`)
-		const loopDataRoot = resolve(root, "ld")
+		const loopDataRoot = root + "-loop-data"
 		await mkdir(loopDataRoot, { recursive: true })
 
 		const store = openSqliteStateStore({ loopDataRoot })
@@ -3509,7 +3509,7 @@ process.exitCode = 0
 
 	test("daemon startup terminates the process group of an orphaned non-current run", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-orphan-run-pgid`)
-		const loopDataRoot = resolve(root, "ld")
+		const loopDataRoot = root + "-loop-data"
 		await mkdir(loopDataRoot, { recursive: true })
 		const stale = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
 			detached: true,
@@ -3577,7 +3577,7 @@ process.exitCode = 0
 
 	test("daemon startup reconciles an orphaned run before scheduler selection", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-orphan-run-scheduler-unblock`)
-		const loopDataRoot = resolve(root, "ld")
+		const loopDataRoot = root + "-loop-data"
 		const fakeRunner = resolve(root, "fake-runner.ts")
 		const eventLog = resolve(root, "events.jsonl")
 		await mkdir(loopDataRoot, { recursive: true })
@@ -3681,7 +3681,7 @@ process.exitCode = 0
 
 	test("daemon startup rejects socket commands before stale recovery finishes", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-startup-recovery-socket`)
-		const loopDataRoot = resolve(root, "ld")
+		const loopDataRoot = root + "-loop-data"
 		const socketPath = resolve(loopDataRoot, "daemon.sock")
 		await mkdir(loopDataRoot, { recursive: true })
 		const stale = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], {
@@ -4525,7 +4525,7 @@ prompt = "review.md"
 	// carries reason=wrong-item.
 	test("socket item.update rejects cross-item write with the wrong-item deny branch (live spawn, #406)", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-caller-wrong-item-live`)
-		const loopDataRoot = resolve(root, "ld")
+		const loopDataRoot = root + "-loop-data"
 		const capturePath = resolve(root, "captured-credential.txt")
 		const promptCapturePath = resolve(root, "captured-prompt.txt")
 		const fakeRunner = resolve(root, "fake-runner.ts")
@@ -4685,7 +4685,7 @@ process.exitCode = 0
 	// regressions where credentials are wrongly accepted, never where they're wrongly rejected.
 	test("socket item.update admits the agent's own credential against its bound item (live spawn, #406 row 3)", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-caller-admit-bound-item-live`)
-		const loopDataRoot = resolve(root, "ld")
+		const loopDataRoot = root + "-loop-data"
 		const capturePath = resolve(root, "captured-credential.txt")
 		const fakeRunner = resolve(root, "fake-runner.ts")
 		const eventLog = resolve(root, "events.jsonl")
@@ -4836,7 +4836,7 @@ process.exitCode = 0
 	// the registry, and the unknown-credential deny branch fires.
 	test("socket item.update rejects an expired credential after the run ends (live spawn, #406)", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-caller-credential-expiry-live`)
-		const loopDataRoot = resolve(root, "ld")
+		const loopDataRoot = root + "-loop-data"
 		const capturePath = resolve(root, "captured-credential.txt")
 		const fakeRunner = resolve(root, "fake-runner.ts")
 		const eventLog = resolve(root, "events.jsonl")
@@ -4998,7 +4998,7 @@ process.exitCode = 1
 
 	test("daemon scheduler spawns blocked-responder trigger phase after review exits blocked (live integration, issue #290)", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-b3-blocked-responder-live`)
-		const loopDataRoot = resolve(root, "ld")
+		const loopDataRoot = root + "-loop-data"
 		const credentialedPresetDir = await writeCredentialedFixturePreset(root)
 		const fakeRunner = resolve(root, "fake-phase-runner.ts")
 		const eventLog = resolve(root, "events.jsonl")
@@ -5730,7 +5730,7 @@ process.exitCode = 0
 	// child was NOT inserted, i.e. the gate ran BEFORE buildCreateItemInput / store.createItem.
 	test("socket item.add denies an iteration-phase agentCredential with no-rights-segment (#407 row 1)", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-407-row1-iter-deny`)
-		const loopDataRoot = resolve(root, "ld")
+		const loopDataRoot = root + "-loop-data"
 		const capturePath = resolve(root, "captured-credential.txt")
 		const fakeRunner = resolve(root, "fake-runner.ts")
 		const eventLog = resolve(root, "events.jsonl")
@@ -5855,7 +5855,7 @@ process.exitCode = 0
 	// `in_progress` status with exitCode=0, scheduler advances to review on the next tick).
 	test("socket item.add admits a review-phase agentCredential and inserts the child (#407 row 2)", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-407-row2-review-allow`)
-		const loopDataRoot = resolve(root, "ld")
+		const loopDataRoot = root + "-loop-data"
 		const credentialedPresetDir = await writeCredentialedFixturePreset(root)
 		const capturePath = resolve(root, "captured-credential.txt")
 		const fakeRunner = resolve(root, "fake-runner.ts")
@@ -6028,7 +6028,7 @@ process.exitCode = 0
 	// row #3 but on the smoke preset).
 	test("socket item.add default-deny on single-phase-example for agents; operator path still allowed (#407 row 4)", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-407-row4-default-deny`)
-		const loopDataRoot = resolve(root, "ld")
+		const loopDataRoot = root + "-loop-data"
 		const capturePath = resolve(root, "captured-credential.txt")
 		const fakeRunner = resolve(root, "fake-runner.ts")
 		const eventLog = resolve(root, "events.jsonl")
@@ -6151,7 +6151,7 @@ process.exitCode = 0
 	// buildCreateItemInput still enforces field shape exactly as before.
 	test("socket item.add review credential rejects illegal priority with the same invalid_request shape as item.update (#407 row 5)", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-407-row5-priority-validation`)
-		const loopDataRoot = resolve(root, "ld")
+		const loopDataRoot = root + "-loop-data"
 		const credentialedPresetDir = await writeCredentialedFixturePreset(root)
 		const capturePath = resolve(root, "captured-credential.txt")
 		const fakeRunner = resolve(root, "fake-runner.ts")
@@ -6273,7 +6273,7 @@ process.exitCode = 0
 	// one `privileged_op.caller_admission` audit event with `outcome=deny / reason=hard-deny-for-agent`.
 	test("daemon hard-denies chain.delete / chain.stop / daemon.down for agent credentials with no-preset-grammar message (#409 row 1)", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-409-row1-hard-deny`)
-		const loopDataRoot = resolve(root, "ld")
+		const loopDataRoot = root + "-loop-data"
 		const capturePath = resolve(root, "captured-credential.txt")
 		const fakeRunner = resolve(root, "fake-runner.ts")
 		const eventLog = resolve(root, "events.jsonl")
@@ -6390,7 +6390,7 @@ process.exitCode = 0
 	// a review-phase agent credential must succeed. Both outcomes emit `privileged_op.caller_admission`.
 	test("daemon allows item.reorder for review agent and denies it for iteration agent (#409 row 2)", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-409-row2-per-phase`)
-		const loopDataRoot = resolve(root, "ld")
+		const loopDataRoot = root + "-loop-data"
 		const credentialedPresetDir = await writeCredentialedFixturePreset(root)
 		const iterationCapture = resolve(root, "iteration-credential.txt")
 		const reviewCapture = resolve(root, "review-credential.txt")
@@ -6575,7 +6575,7 @@ process.exitCode = 0
 	// has a live resolvable item/chain/preset" per the review's required-changes block).
 	test("per-phase agent path emits deny event when item is not found (#409 retry audit edge)", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-409-per-phase-audit-edge`)
-		const loopDataRoot = resolve(root, "ld")
+		const loopDataRoot = root + "-loop-data"
 		const credentialedPresetDir = await writeCredentialedFixturePreset(root)
 		const reviewCapture = resolve(root, "review-credential.txt")
 		const iterationCapture = resolve(root, "iteration-credential.txt")
@@ -6698,7 +6698,7 @@ process.exitCode = 0
 	// path (no credential) succeeds and returns the event array.
 	test("daemon hard-denies logs.query for agent credentials; operator path returns events (#409 row 3)", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-409-row3-logs`)
-		const loopDataRoot = resolve(root, "ld")
+		const loopDataRoot = root + "-loop-data"
 		const capturePath = resolve(root, "credential.txt")
 		const fakeRunner = resolve(root, "fake-runner.ts")
 		const eventLog = resolve(root, "events.jsonl")
@@ -7094,7 +7094,7 @@ process.exitCode = 0
 	// field) is covered in the row #1 test below.
 	test("daemon allows review-phase agent to write declared passthrough fields branch + pr + extra blocker keys (#410 row 2)", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-410-row2-allow`)
-		const loopDataRoot = resolve(root, "ld")
+		const loopDataRoot = root + "-loop-data"
 		const credentialedPresetDir = await writeCredentialedFixturePreset(root)
 		const iterationCapture = resolve(root, "iteration-credential.txt")
 		const reviewCapture = resolve(root, "review-credential.txt")
@@ -7233,7 +7233,7 @@ process.exitCode = 0
 	// passthrough field but NOT in review's writableFields) → reason=field-not-granted.
 	test("daemon denies review-phase agent on control-plane fields and undeclared passthrough (#410 row 1)", async () => {
 		const root = resolve(TEST_ROOT, `${++nextFixtureId}-410-row1-deny`)
-		const loopDataRoot = resolve(root, "ld")
+		const loopDataRoot = root + "-loop-data"
 		const credentialedPresetDir = await writeCredentialedFixturePreset(root)
 		const iterationCapture = resolve(root, "iteration-credential.txt")
 		const reviewCapture = resolve(root, "review-credential.txt")
@@ -7864,7 +7864,7 @@ type PhaseAdvancementFixture = Fixture & {
 
 async function startPhaseAdvancementFixture(name: string): Promise<PhaseAdvancementFixture> {
 	const root = resolve(TEST_ROOT, `${++nextFixtureId}-${name}`)
-	const loopDataRoot = resolve(root, "ld")
+	const loopDataRoot = root + "-loop-data"
 	const credentialedPresetDir = await writeCredentialedFixturePreset(root)
 	const eventLog = resolve(root, "events.jsonl")
 	const fakeRunner = resolve(root, "phase-aware-runner.ts")
@@ -7947,7 +7947,7 @@ type ChainBasedRunnerFixture = Fixture & {
 async function startChainBasedRunnerFixture(name: string, options: { phase: string }): Promise<ChainBasedRunnerFixture> {
 	const { chmod } = await import("node:fs/promises")
 	const root = resolve(TEST_ROOT, `${++nextFixtureId}-${name}`)
-	const loopDataRoot = resolve(root, "ld")
+	const loopDataRoot = root + "-loop-data"
 	const eventLog = resolve(root, "events.jsonl")
 	await mkdir(root, { recursive: true })
 	const fakeCodex = resolve(root, "fake-codex.sh")
@@ -8025,7 +8025,7 @@ function assertNeverQueueUnblockOutcomeScenario(scenario: never): never {
 
 async function startQueueUnblockGateFixture(name: string, options: QueueUnblockGateOptions) {
 	const root = resolve(TEST_ROOT, `${++nextFixtureId}-${name}`)
-	const loopDataRoot = resolve(root, "ld")
+	const loopDataRoot = root + "-loop-data"
 	const fakeRunner = resolve(root, "held-runner.ts")
 	const credentialPath = resolve(root, "runner-credential.txt")
 	await mkdir(loopDataRoot, { recursive: true })
@@ -8163,7 +8163,7 @@ type FixtureOptions = {
 
 async function startFixture(name: string, options: FixtureOptions = {}): Promise<Fixture> {
 	const root = resolve(TEST_ROOT, `${++nextFixtureId}-${name}`)
-	const loopDataRoot = resolve(root, "ld")
+	const loopDataRoot = root + "-loop-data"
 	const fakeRunner = resolve(root, "fake-runner.ts")
 	const eventLog = resolve(root, "events.jsonl")
 	await mkdir(root, { recursive: true })

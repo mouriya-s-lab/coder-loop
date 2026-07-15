@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import { spawn, spawnSync } from "node:child_process"
+import { Database } from "bun:sqlite"
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, relative, resolve } from "node:path"
@@ -12,7 +13,7 @@ const workRoot = mkdtempSync(resolve(tmpdir(), "coder-loop-runner-grants-"))
 const loopDataRoot = resolve(workRoot, "loop-data")
 const target = resolve(workRoot, "target")
 const preset = resolve(workRoot, "preset")
-const retainedEvidenceRoot = resolve(repoRoot, ".coder-loop", "evidence", "runner-filesystem-grants-e2e", basename(workRoot))
+const retainedEvidenceRoot = resolve(repoRoot, ".coder-loop", "evidence", "runner-filesystem-grants-integration", basename(workRoot))
 const { CODER_LOOP_RUN_CRED: _parentRunCredential, ...operatorEnv } = process.env
 const runnerFlagIndex = Bun.argv.indexOf("--runner")
 const requestedRunner = runnerFlagIndex === -1 ? null : Bun.argv[runnerFlagIndex + 1]
@@ -38,10 +39,21 @@ type CompletedEvidenceResult = {
 	runners: RunnerEvidenceResult[]
 	events: string
 	daemonLogs: string[]
+	stateBefore: SqliteStateSnapshot
+	stateAfter: SqliteStateSnapshot
 	cleanup: {
 		daemonExited: true
 		socketRemoved: true
+		worktreesReclaimed: true
 	}
+}
+
+type SqliteCountRow = { count: number }
+
+type SqliteStateSnapshot = {
+	items: number
+	runs: number
+	doneItems: number
 }
 
 function command(args: readonly string[], cwd = repoRoot): string {
@@ -50,7 +62,19 @@ function command(args: readonly string[], cwd = repoRoot): string {
 	return result.stdout
 }
 
-function writeRunnerCaptureWrapper(wrapper: string, realBinary: string, capturePath: string): void {
+function sqliteStateSnapshot(): SqliteStateSnapshot {
+	const database = new Database(resolve(loopDataRoot, "db.sqlite"), { readonly: true })
+	try {
+		const items = database.query<SqliteCountRow, []>("SELECT COUNT(*) AS count FROM items").get()?.count ?? 0
+		const runs = database.query<SqliteCountRow, []>("SELECT COUNT(*) AS count FROM runs").get()?.count ?? 0
+		const doneItems = database.query<SqliteCountRow, []>("SELECT COUNT(*) AS count FROM items WHERE status = 'done'").get()?.count ?? 0
+		return { items, runs, doneItems }
+	} finally {
+		database.close()
+	}
+}
+
+function writeDeterministicRunnerShim(wrapper: string, runner: string, capturePath: string): void {
 	writeFileSync(wrapper, `#!/usr/bin/env bun
 import { appendFile, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
@@ -70,8 +94,16 @@ const args = Bun.argv.slice(2)
 await appendFile(${JSON.stringify(capturePath)}, JSON.stringify(args) + "\\n")
 const probeArguments = runnerPromptProbeArguments(args)
 await writeFile(resolve(process.cwd(), "runner-filesystem-probe.args"), probeArguments.join("\\n") + "\\n")
-const child = Bun.spawn({ cmd: [${JSON.stringify(realBinary)}, ...args], stdin: "inherit", stdout: "inherit", stderr: "inherit", env: process.env })
-process.exit(await child.exited)
+const runner = ${JSON.stringify(runner)}
+const sessionId = "deterministic-" + runner + "-session"
+const sessionEvent = runner === "claude"
+	? { type: "system", session_id: sessionId }
+	: runner === "codex"
+		? { type: "thread.started", thread_id: sessionId }
+		: { type: "step_start", sessionID: sessionId }
+process.stdout.write(JSON.stringify(sessionEvent) + "\\n")
+const probe = Bun.spawn({ cmd: ["/bin/sh", resolve(process.cwd(), "runner-filesystem-probe.sh")], stdin: "ignore", stdout: "inherit", stderr: "inherit", env: process.env })
+process.exit(await probe.exited)
 `)
 	command(["chmod", "+x", wrapper])
 }
@@ -222,7 +254,7 @@ fi
 	mkdirSync(preset, { recursive: true })
 	writeFileSync(resolve(preset, "fragment.md"), "DECLARED_PRESET_READ_OK\n")
 	writeFileSync(resolve(preset, "phase.md"), `Execute exactly this command once in a non-login shell without a PTY, without inspecting files or constructing a replacement command:\n\n/bin/sh {{AGENT_CWD}}/runner-filesystem-probe.sh\n\nThe script itself consumes the driver-owned task-private argument declaration, executes the required completion protocol, and prints the selected status. Do not retype or pass any of the declaration values. After it returns, do not query exits, do not write item status again, and do not run any other command; end the response immediately.\n\nRUNNER_PROBE_ARGUMENTS_BEGIN\n{{RUN_ID}}\n{{CHAIN_NAME}}\n{{PRESET_DIR}}\n{{SHARED_CONTEXT_FILE}}\n{{CURRENT_ISSUE_FILE}}\n{{EVIDENCE_DIR}}\n${loopDataRoot}/chains/{{CHAIN_NAME}}/undeclared.txt\n${loopDataRoot}/chains/undeclared-other/private.txt\n${loopDataRoot}/central.sqlite\nRUNNER_PROBE_ARGUMENTS_END\n`)
-	writeFileSync(resolve(preset, "preset.toml"), `name = "runner-filesystem-grants-e2e"\n[item]\nidField = "issue"\n[item.fields]\nissue = "number"\n[statuses]\nentry = "fresh"\ncontinuable = ["fresh", "queued"]\nterminal = ["done"]\nsuccess = ["done"]\nexhausted = "done"\n[[fragments]]\nid = "fixture"\nrole = "common"\npath = "fragment.md"\n[[phases]]\nname = "phase"\nprompt = "phase.md"\nroles = ["common"]\n[phases.variables]\nISSUE = "item.issue"\nCHAIN_NAME = "runtime.chainName"\nRUN_ID = "runtime.runId"\nAGENT_CWD = "runtime.agentCwd"\nPRESET_DIR = "runtime.presetDir"\nFRAGMENT_INDEX = "runtime.fragmentIndex"\nSHARED_CONTEXT_FILE = "runtime.sharedContextPath"\nCURRENT_ISSUE_FILE = "runtime.currentIssueFile"\nEVIDENCE_DIR = "runtime.evidenceDir"\n[[phases.exits]]\nstatus = "queued"\nwhen = "fresh invocation requests native resume"\n[[phases.exits]]\nstatus = "done"\nwhen = "resumed invocation completes fixture"\n`)
+	writeFileSync(resolve(preset, "preset.toml"), `name = "runner-filesystem-grants-integration"\n[item]\nidField = "issue"\n[item.fields]\nissue = "number"\n[statuses]\nentry = "fresh"\ncontinuable = ["fresh", "queued"]\nterminal = ["done"]\nsuccess = ["done"]\nexhausted = "done"\n[[fragments]]\nid = "fixture"\nrole = "common"\npath = "fragment.md"\n[[phases]]\nname = "phase"\nprompt = "phase.md"\nroles = ["common"]\n[phases.variables]\nISSUE = "item.issue"\nCHAIN_NAME = "runtime.chainName"\nRUN_ID = "runtime.runId"\nAGENT_CWD = "runtime.agentCwd"\nPRESET_DIR = "runtime.presetDir"\nFRAGMENT_INDEX = "runtime.fragmentIndex"\nSHARED_CONTEXT_FILE = "runtime.sharedContextPath"\nCURRENT_ISSUE_FILE = "runtime.currentIssueFile"\nEVIDENCE_DIR = "runtime.evidenceDir"\n[[phases.exits]]\nstatus = "queued"\nwhen = "fresh invocation requests native resume"\n[[phases.exits]]\nstatus = "done"\nwhen = "resumed invocation completes fixture"\n`)
 }
 
 function retainedDiagnosticFiles(root: string): string[] {
@@ -244,7 +276,7 @@ function retainedDiagnosticFiles(root: string): string[] {
 
 function runnerTimeoutDiagnostics(chain: string | null, lastStatus: string): string {
 	const chainRoot = chain === null ? loopDataRoot : resolve(loopDataRoot, "chains", chain)
-	const sections = [`runner filesystem grants e2e timeout diagnostics`, `workRoot=${workRoot}`, `chain=${chain ?? "<daemon-readiness>"}`, `lastChainStatus=${lastStatus}`]
+	const sections = [`runner filesystem grants integration timeout diagnostics`, `workRoot=${workRoot}`, `chain=${chain ?? "<daemon-readiness>"}`, `lastChainStatus=${lastStatus}`]
 	for (const path of retainedDiagnosticFiles(chainRoot)) {
 		const size = statSync(path).size
 		const content = readFileSync(path, "utf8")
@@ -298,17 +330,19 @@ const runners = ["claude", "codex", "opencode"].filter((candidate) => requestedR
 const captureBin = resolve(workRoot, "capture-bin")
 mkdirSync(captureBin, { recursive: true })
 for (const runner of runners) {
-	const realBinary = Bun.which(runner)
-	if (realBinary === null) throw new Error(`${runner}: binary not found on PATH`)
 	const invocationCapture = resolve(loopDataRoot, "chains", `filesystem-${runner}`, "evidence", "1", "runner.argv")
-	writeRunnerCaptureWrapper(resolve(captureBin, runner), realBinary, invocationCapture)
+	writeDeterministicRunnerShim(resolve(captureBin, runner), runner, invocationCapture)
 }
 const driverEnv = { ...operatorEnv, PATH: `${captureBin}:${operatorEnv.PATH ?? ""}` }
 const daemon = spawn("bun", [loopEntry, "daemon", "up", "--loop-data-root", loopDataRoot, "--scheduler-interval-ms", "100"], { cwd: repoRoot, stdio: "inherit", env: driverEnv })
 let completed = false
 const runnerResults: RunnerEvidenceResult[] = []
+let stateBefore: SqliteStateSnapshot | null = null
+let stateAfter: SqliteStateSnapshot | null = null
 try {
 	await waitForSocket()
+	stateBefore = sqliteStateSnapshot()
+	if (stateBefore.items !== 0 || stateBefore.runs !== 0 || stateBefore.doneItems !== 0) throw new Error(`unexpected initial SQLite state ${JSON.stringify(stateBefore)}`)
 	mkdirSync(resolve(loopDataRoot, "chains", "undeclared-other"), { recursive: true })
 	writeFileSync(resolve(loopDataRoot, "chains", "undeclared-other", "private.txt"), "other-chain-secret\n")
 	for (const runner of runners) {
@@ -316,10 +350,6 @@ try {
 		const invocationCapture = resolve(loopDataRoot, "chains", chain, "evidence", "1", "runner.argv")
 		command(["bun", loopEntry, "chain", "create", chain, "--config-json", JSON.stringify({ repository: "local/fixture", baseBranch: "main", presetPath: preset }), "--loop-data-root", loopDataRoot])
 		writeFileSync(resolve(loopDataRoot, "chains", chain, "undeclared.txt"), "same-chain-secret\n")
-		// The installed model inventory contains gpt-5.4-mini. Pin this boundary probe to that
-		// low-latency model so C6 tests filesystem authorization rather than waiting on the
-		// operator's potentially heavyweight interactive Codex default.
-		if (runner === "codex") command(["bun", loopEntry, "chain", "set-runner-model", chain, "--kind", "codex", "--model", "gpt-5.4-mini", "--loop-data-root", loopDataRoot])
 		mkdirSync(resolve(invocationCapture, ".."), { recursive: true })
 		const issueFile = resolve(loopDataRoot, "chains", chain, "1.md")
 		writeFileSync(issueFile, `${runner}-issue\n`)
@@ -352,6 +382,8 @@ try {
 		if (readFileSync(resolve(loopDataRoot, "central.sqlite"), "utf8") !== "root-secret\n") throw new Error(`${runner}: undeclared root sentinel was modified`)
 		const finalChainStatus = resolve(loopDataRoot, "chains", chain, "evidence", "1", "final-chain-status.json")
 		writeFileSync(finalChainStatus, command(["bun", loopEntry, "chain", "status", chain, "--loop-data-root", loopDataRoot, "--json"]))
+		const worktrees = resolve(loopDataRoot, "chains", chain, "worktrees")
+		if (readdirSync(worktrees).length !== 0) throw new Error(`${runner}: run-owned worktree was not reclaimed`)
 		runnerResults.push({
 			runner,
 			runIds,
@@ -364,7 +396,11 @@ try {
 		})
 		process.stdout.write(`${runner}: fresh/resume argv and outer profiles verified (${invocations.map((argv) => argv.length).join("/")} args; ${outerEvidencePaths.join(", ")})\n`)
 	}
-	process.stdout.write(`runner filesystem grants e2e passed: ${runners.join(" ")}\n`)
+	stateAfter = sqliteStateSnapshot()
+	if (stateAfter.items !== runners.length || stateAfter.runs !== runners.length * 2 || stateAfter.doneItems !== runners.length) {
+		throw new Error(`unexpected final SQLite state ${JSON.stringify(stateAfter)}`)
+	}
+	process.stdout.write(`runner filesystem grants integration passed: ${runners.join(" ")}\n`)
 	completed = true
 } finally {
 	spawnSync("bun", [loopEntry, "daemon", "down", "--loop-data-root", loopDataRoot], { encoding: "utf8", env: operatorEnv })
@@ -373,7 +409,7 @@ try {
 		await new Promise<void>((resolveClosed) => daemon.once("close", () => resolveClosed()))
 	}
 	const daemonSocket = resolve(loopDataRoot, "daemon.sock")
-	if (completed && daemon.exitCode !== null && !existsSync(daemonSocket)) {
+	if (completed && stateBefore !== null && stateAfter !== null && daemon.exitCode !== null && !existsSync(daemonSocket)) {
 		const result: CompletedEvidenceResult = {
 			schema: 1,
 			outcome: "passed",
@@ -382,15 +418,17 @@ try {
 			daemonLogs: retainedDiagnosticFiles(loopDataRoot)
 				.filter((path) => basename(path) === "daemon.log")
 				.map((path) => relative(workRoot, path)),
-			cleanup: { daemonExited: true, socketRemoved: true },
+			stateBefore,
+			stateAfter,
+			cleanup: { daemonExited: true, socketRemoved: true, worktreesReclaimed: true },
 		}
-		writeFileSync(resolve(workRoot, "runner-filesystem-grants-e2e-results.json"), `${JSON.stringify(result, null, 2)}\n`)
+		writeFileSync(resolve(workRoot, "runner-filesystem-grants-integration-results.json"), `${JSON.stringify(result, null, 2)}\n`)
 		mkdirSync(resolve(retainedEvidenceRoot, ".."), { recursive: true })
 		cpSync(workRoot, retainedEvidenceRoot, { recursive: true, errorOnExist: true })
 		rmSync(workRoot, { recursive: true, force: true })
-		process.stdout.write(`runner-filesystem-grants-e2e evidence retained at ${retainedEvidenceRoot}\n`)
+		process.stdout.write(`runner-filesystem-grants-integration evidence retained at ${retainedEvidenceRoot}\n`)
 	} else {
-		process.stderr.write(`runner filesystem grants e2e diagnostics retained at ${workRoot}\n`)
-		if (completed) throw new Error(`runner filesystem grants e2e cleanup incomplete: daemonExitCode=${daemon.exitCode} socketExists=${existsSync(daemonSocket)}`)
+		process.stderr.write(`runner filesystem grants integration diagnostics retained at ${workRoot}\n`)
+		if (completed) throw new Error(`runner filesystem grants integration cleanup incomplete: daemonExitCode=${daemon.exitCode} socketExists=${existsSync(daemonSocket)}`)
 	}
 }

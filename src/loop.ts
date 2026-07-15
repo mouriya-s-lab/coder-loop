@@ -7042,12 +7042,23 @@ export function buildRunnerFilesystemAuthorization(input: BuildRunnerFilesystemA
 	if (declares("logDir")) surfaces.push({ kind: "writable-directory", channel: "logs", path: input.logDir })
 	if (declares("sharedContextPath")) surfaces.push({ kind: "writable-file", channel: "shared-context", path: input.sharedContextPath })
 	if (declares("currentIssueFile") && input.currentIssueFile !== "") surfaces.push({ kind: "writable-file", channel: "current-issue", path: input.currentIssueFile })
-	for (const surface of surfaces) {
-		if (samePath(surface.path, input.loopDataRoot)) throw new Error(`declared runner surface ${surface.channel} may not grant the loop-data root`)
-	}
+	validateRunnerFilesystemSurfaces(input.loopDataRoot, surfaces)
 	const presetSurface = surfaces.find((surface) => surface.kind === "read-only-directory")
 	if (presetSurface === undefined) throw new Error("declared runner surfaces require a read-only preset")
 	return { agentCwd: input.agentCwd, loopDataRoot: input.loopDataRoot, surfaces }
+}
+
+function validateRunnerFilesystemSurfaces(loopDataRoot: string, surfaces: readonly RunnerFilesystemSurface[]): void {
+	const root = resolve(loopDataRoot)
+	for (const surface of surfaces) {
+		if (surface.kind === "cwd-ancestor-directory" || surface.kind === "read-only-file" || surface.kind === "writable-file" || surface.kind === "runner-runtime-file" || surface.kind === "system-device") continue
+		const surfaceRoot = resolve(surface.path)
+		const rootFromSurface = relative(surfaceRoot, root)
+		if (rootFromSurface === "") throw new Error(`declared runner surface ${surface.channel} may not grant the loop-data root`)
+		if (rootFromSurface !== ".." && !rootFromSurface.startsWith(`..${pathSeparator}`) && !isAbsolute(rootFromSurface)) {
+			throw new Error(`declared runner surface ${surface.channel} may not grant an ancestor of the loop-data root`)
+		}
+	}
 }
 
 function runnerCwdDiscoverySurfaces(loopDataRoot: string, agentCwd: string): RunnerFilesystemSurface[] {
@@ -7095,8 +7106,13 @@ export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: stri
 	const runnerExecutable = isAbsolute(runner.binary) ? runner.binary : Bun.which(runner.binary) ?? runner.binary
 	const effectiveAuthorization: RunnerFilesystemAuthorization = {
 		...authorization,
-		surfaces: [...authorization.surfaces, { kind: "read-only-file", channel: "runner-executable", runner: runner.kind, path: runnerExecutable }],
+		surfaces: [
+			...authorization.surfaces,
+			{ kind: "read-only-file", channel: "runner-executable", runner: runner.kind, path: runnerExecutable },
+			...runnerRuntimeSurfaces(runner.kind),
+		],
 	}
+	validateRunnerFilesystemSurfaces(effectiveAuthorization.loopDataRoot, effectiveAuthorization.surfaces)
 	const runnerScratch = effectiveAuthorization.surfaces.find((surface) => surface.kind === "task-private-directory" && surface.channel === "runner-scratch")
 	if (runnerScratch === undefined) throw new Error("declared runner surfaces require task-private runner scratch")
 	const writableDirs = effectiveAuthorization.surfaces.flatMap((surface) => surface.kind === "task-private-directory" || surface.kind === "writable-directory" ? [surface.path] : [])
@@ -7145,7 +7161,7 @@ function sandboxLiteral(value: string): string {
 }
 
 function runnerSandboxProfile(authorization: RunnerFilesystemAuthorization, runner: AgentRunnerKind): string {
-	const surfaces = [...authorization.surfaces, ...runnerRuntimeSurfaces(runner)]
+	const surfaces = authorization.surfaces
 	const cwdAncestorMetadata = surfaces.flatMap((surface) => surface.kind === "cwd-ancestor-directory"
 		? sandboxPathSpellings(surface.path).map((spelling) => `(literal ${sandboxLiteral(spelling)})`)
 		: [])

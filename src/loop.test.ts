@@ -832,6 +832,7 @@ describe("small parsers", () => {
 				expect(plan.binary).toBe("/usr/bin/sandbox-exec")
 				expect(plan.authorizationEvidence.outerSandboxProfile).toBe(outerSandboxProfile)
 				expect(plan.authorizationEvidence.runner).toBe(kind)
+				expect(plan.authorizationEvidence.surfaces).toContainEqual(expect.objectContaining({ kind: kind === "codex" ? "runner-runtime-file" : "runner-runtime-directory", runner: kind }))
 				expect(plan.args[2]).toBe(kind)
 				expect(plan.args.slice(2)).not.toContain("/runtime/loop-data")
 				expect(plan.args).not.toContain("danger-full-access")
@@ -878,6 +879,27 @@ describe("small parsers", () => {
 				}
 			}
 		}
+	})
+
+	test("runner filesystem grants reject equal-root and ancestor tree grants while retaining literal cwd traversal", () => {
+		const input = {
+			loopDataRoot: "/runtime/loop-data",
+			agentCwd: "/runtime/loop-data/chains/c/worktrees/i",
+			presetDir: "/runtime/loop-data/preset-materialized/p",
+			sharedContextPath: "/runtime/loop-data/chains/c/shared.md",
+			currentIssueFile: "",
+			evidenceDir: "/runtime/loop-data/chains/c/evidence/1",
+			evidenceRootDir: "/runtime/loop-data/chains/c/evidence",
+			issueDir: "/runtime/loop-data/chains/c/issues",
+			logDir: "/runtime/loop-data/chains/c/runs",
+			daemonSocketPath: "/runtime/loop-data/daemon.sock",
+			declaredRuntimeBindingPaths: [] as const,
+		}
+		expect(() => buildRunnerFilesystemAuthorization({ ...input, presetDir: input.loopDataRoot })).toThrow("may not grant the loop-data root")
+		expect(() => buildRunnerFilesystemAuthorization({ ...input, presetDir: "/runtime" })).toThrow("may not grant an ancestor of the loop-data root")
+		const authorization = buildRunnerFilesystemAuthorization(input)
+		expect(authorization.surfaces).toContainEqual({ kind: "cwd-ancestor-directory", channel: "agent-cwd-discovery", access: "entries", path: "/runtime/loop-data/chains" })
+		expect(authorization.surfaces).toContainEqual({ kind: "cwd-ancestor-directory", channel: "agent-cwd-discovery", access: "metadata", path: "/runtime/loop-data/chains/c/worktrees" })
 	})
 
 	test("runner git metadata authorizes a real commit from a linked worktree", async () => {

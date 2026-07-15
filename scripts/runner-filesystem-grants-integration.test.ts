@@ -2,9 +2,20 @@ import { describe, expect, test } from "bun:test"
 import { readFileSync } from "node:fs"
 import { resolve } from "node:path"
 
-describe("runner filesystem grants e2e driver", () => {
+describe("runner filesystem grants integration driver", () => {
+	test("uses deterministic local runner shims without external sessions", () => {
+		const source = readFileSync(resolve(import.meta.dir, "runner-filesystem-grants-integration.ts"), "utf8")
+		expect(source).toContain("function writeDeterministicRunnerShim")
+		expect(source).toContain('const sessionId = "deterministic-" + runner + "-session"')
+		expect(source).toContain('cmd: ["/bin/sh", resolve(process.cwd(), "runner-filesystem-probe.sh")]')
+		expect(source).not.toContain("Bun.which(runner)")
+		expect(source).not.toContain("realBinary")
+		expect(source).toContain("function sqliteStateSnapshot")
+		expect(source).toContain("worktreesReclaimed: true")
+	})
+
 	test("materializes model-independent probe arguments behind one declared-agent-cwd entry", () => {
-		const source = readFileSync(resolve(import.meta.dir, "runner-filesystem-grants-e2e.ts"), "utf8")
+		const source = readFileSync(resolve(import.meta.dir, "runner-filesystem-grants-integration.ts"), "utf8")
 		const command = source.match(/without a PTY[^\n]*:\\n\\n([^\n]+)\\n\\nThe script itself/)?.[1]
 		const argumentDeclaration = source.match(/RUNNER_PROBE_ARGUMENTS_BEGIN\\n([^`]+?)\\nRUNNER_PROBE_ARGUMENTS_END/)?.[1]?.split("\\n")
 		expect(command).toBeDefined()
@@ -28,26 +39,26 @@ describe("runner filesystem grants e2e driver", () => {
 	})
 
 	test("bounds readiness waits and reports retained runtime diagnostics", () => {
-		const source = readFileSync(resolve(import.meta.dir, "runner-filesystem-grants-e2e.ts"), "utf8")
+		const source = readFileSync(resolve(import.meta.dir, "runner-filesystem-grants-integration.ts"), "utf8")
 		expect(source).toContain("const SOCKET_WAIT_TIMEOUT_MS")
 		expect(source).toContain("const RUNNER_WAIT_TIMEOUT_MS")
 		expect(source).toContain("deadline = Date.now() + timeoutMs")
-		expect(source).toContain("runner filesystem grants e2e timeout diagnostics")
+		expect(source).toContain("runner filesystem grants integration timeout diagnostics")
 		for (const artifact of ["daemon.log", "runner.argv", "status.json", "stdout.jsonl", "stderr.txt", "runner-authorization.json"]) {
 			expect(source).toContain(artifact)
 		}
 	})
 
 	test("retains complete reviewer evidence after a successful run", () => {
-		const source = readFileSync(resolve(import.meta.dir, "runner-filesystem-grants-e2e.ts"), "utf8")
-		expect(source).toContain("runner-filesystem-grants-e2e-results.json")
-		expect(source).toContain("runner-filesystem-grants-e2e evidence retained at")
+		const source = readFileSync(resolve(import.meta.dir, "runner-filesystem-grants-integration.ts"), "utf8")
+		expect(source).toContain("runner-filesystem-grants-integration-results.json")
+		expect(source).toContain("runner-filesystem-grants-integration evidence retained at")
 		expect(source).toContain("cpSync(workRoot, retainedEvidenceRoot")
 		expect(source).not.toContain("if (completed) rmSync(workRoot")
 	})
 
 	test("uses a distinct entry status before the native-resume exit", () => {
-		const source = readFileSync(resolve(import.meta.dir, "runner-filesystem-grants-e2e.ts"), "utf8")
+		const source = readFileSync(resolve(import.meta.dir, "runner-filesystem-grants-integration.ts"), "utf8")
 		expect(source).toContain('entry = "fresh"')
 		expect(source).toContain('continuable = ["fresh", "queued"]')
 		expect(source).toContain('status = "queued"\\nwhen = "fresh invocation requests native resume"')
