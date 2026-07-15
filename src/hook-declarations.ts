@@ -5,7 +5,12 @@ import type { BoundaryValue } from "./boundary-types"
 import { parseObservabilityEventType, type ObservabilityEventType } from "./observability"
 import type { JsonValue } from "./loop"
 
-export type ObserverHookPoint = Exclude<ObservabilityEventType, `hook.${string}`>
+export type ObserverHookPointOf<EventType extends string> = Exclude<EventType, `hook.${string}`>
+export type ObserverHookPoint = ObserverHookPointOf<ObservabilityEventType>
+
+export function isObserverHookPoint<EventType extends string>(point: EventType): point is ObserverHookPointOf<EventType> {
+	return !point.startsWith("hook.")
+}
 
 export const NON_TICK_GATE_DECISION_POINTS = [
 	"run.pre-spawn",
@@ -106,9 +111,9 @@ function parseHookDeclaration(input: BoundaryValue, field: string): HookDeclarat
 	if (value.script.trim() === "") throw new Error(`${field}.script must not be empty`)
 	if (value.timeoutMs <= 0) throw new Error(`${field}.timeoutMs must be positive`)
 	if (value.kind === "observer") {
-		if (value.point.startsWith("hook.")) throw new Error(`${field}.point must not subscribe to hook.* events`)
 		let point: ObservabilityEventType
 		try { point = parseObservabilityEventType(value.point) } catch { throw new Error(`${field}.point is not a known observability event: ${value.point}`) }
+		if (!isObserverHookPoint(point)) throw new Error(`${field}.point must not subscribe to hook.* events`)
 		return { kind: "observer", point, script: value.script, timeoutMs: value.timeoutMs }
 	}
 	if (value.kind === "gate") {

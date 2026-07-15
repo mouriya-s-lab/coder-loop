@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { buildEffectiveHookView, hookDeclarationsToJsonValue, parseGlobalHookDocument, parseHookDeclarations } from "./hook-declarations"
+import { buildEffectiveHookView, hookDeclarationsToJsonValue, isObserverHookPoint, parseGlobalHookDocument, parseHookDeclarations } from "./hook-declarations"
 import type { GateHookDeclaration } from "./hook-declarations"
 import { chainMetadataToJsonObject, itemExtraToJsonObject, storedChainMetadata, storedItemExtra } from "./runtime-data"
 
@@ -43,6 +43,11 @@ describe("hook declarations", () => {
 		const parsed = parseHookDeclarations([tickGate])
 		expect(parsed).toEqual([tickGate])
 		expect(hookDeclarationsToJsonValue(parsed)).toEqual([tickGate])
+	})
+
+	test("structurally includes future event points while excluding future hook events", () => {
+		const syntheticFutureEvents = ["future.lifecycle", "hook.future"] as const
+		expect(syntheticFutureEvents.filter(isObserverHookPoint)).toEqual(["future.lifecycle"])
 	})
 
 	test.each([
