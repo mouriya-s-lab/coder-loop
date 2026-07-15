@@ -65,13 +65,19 @@ type Harness = {
 	shimDir: string
 	binaryPath: string
 	probeStatePath: string
-	modePath: string
-	chainPath: string
-	itemPath: string
-	invocationLogPath: string
-	postRevokePath: string
 	daemon: DaemonHandle
 	runnerPids: Set<number>
+}
+
+type RunnerScenario = {
+	mode: "loss" | "terminal"
+	chainName: string
+	itemId: string
+}
+
+type RunnerObservationPaths = {
+	invocationLogPath: string
+	postRevokePath: string
 }
 
 function log(message: string): void {
@@ -177,15 +183,15 @@ function shellLiteral(value: string): string {
 	return `'${value.replaceAll("'", `'"'"'`)}'`
 }
 
-async function writeRunner(harness: Harness): Promise<void> {
+async function writeRunner(harness: Harness, scenario: RunnerScenario): Promise<void> {
 	const script = `#!/bin/sh
 set -eu
 PROBE_STATE=${shellLiteral(harness.probeStatePath)}
-MODE_FILE=${shellLiteral(harness.modePath)}
-CHAIN_FILE=${shellLiteral(harness.chainPath)}
-ITEM_FILE=${shellLiteral(harness.itemPath)}
-INVOCATION_LOG=${shellLiteral(harness.invocationLogPath)}
-POST_REVOKE=${shellLiteral(harness.postRevokePath)}
+MODE=${shellLiteral(scenario.mode)}
+CHAIN=${shellLiteral(scenario.chainName)}
+ITEM=${shellLiteral(scenario.itemId)}
+INVOCATION_LOG=runner-invocations.log
+POST_REVOKE=post-revoke.json
 LOOP_ENTRY=${shellLiteral(LOOP_ENTRY)}
 LOOP_ROOT=${shellLiteral(harness.daemon.loopDataRoot)}
 
@@ -201,19 +207,25 @@ if [ "\${1:-}" = probe ]; then
 	esac
 fi
 
-mode=$(cat "$MODE_FILE")
-chain=$(cat "$CHAIN_FILE")
-item=$(cat "$ITEM_FILE")
-printf 'spawn pid=%s credential_present=%s mode=%s\n' "$$" "\${CODER_LOOP_RUN_CRED:+true}" "$mode" >> "$INVOCATION_LOG"
-if [ "$mode" = terminal ]; then
-	bun "$LOOP_ENTRY" item update "$chain" --issue "$item" --status done --loop-data-root "$LOOP_ROOT" --json >> "$INVOCATION_LOG" 2>&1
+printf 'spawn pid=%s credential_present=%s mode=%s\n' "$$" "\${CODER_LOOP_RUN_CRED:+true}" "$MODE" >> "$INVOCATION_LOG"
+if [ "$MODE" = terminal ]; then
+	bun "$LOOP_ENTRY" item update "$CHAIN" --issue "$ITEM" --status done --loop-data-root "$LOOP_ROOT" --json >> "$INVOCATION_LOG" 2>&1
 	exit 0
 fi
-trap 'printf "term pid=%s\\n" "$$" >> "$INVOCATION_LOG"; bun "$LOOP_ENTRY" item update "$chain" --issue "$item" --status done --loop-data-root "$LOOP_ROOT" --json > "$POST_REVOKE" 2>&1 || true' TERM
+trap 'printf "term pid=%s\\n" "$$" >> "$INVOCATION_LOG"; bun "$LOOP_ENTRY" item update "$CHAIN" --issue "$ITEM" --status done --loop-data-root "$LOOP_ROOT" --json > "$POST_REVOKE" 2>&1 || true' TERM
 while :; do sleep 1 || true; done
 `
 	await writeFile(harness.binaryPath, script)
 	await chmod(harness.binaryPath, 0o755)
+}
+
+function runnerObservationPaths(harness: Harness, chainId: number, itemId: string): RunnerObservationPaths {
+	const item = storeRead(harness, (store) => store.getItemById(chainId, itemId))
+	invariant(item?.agentCwd !== null && item?.agentCwd !== undefined, `runner task cwd missing for item ${itemId}`)
+	return {
+		invocationLogPath: resolve(item.agentCwd, "runner-invocations.log"),
+		postRevokePath: resolve(item.agentCwd, "post-revoke.json"),
+	}
 }
 
 async function startDaemon(workDir: string, shimDir: string): Promise<DaemonHandle> {
@@ -328,12 +340,7 @@ async function scenarioMissingRestorationLoss(harness: Harness): Promise<number>
 	const chainName = `external-loss-${randomUUID()}`
 	const itemId = "loss-first"
 	await rm(harness.binaryPath, { force: true })
-	await writeFile(harness.chainPath, chainName)
-	await writeFile(harness.itemPath, itemId)
 	await writeFile(harness.probeStatePath, "69")
-	await writeFile(harness.modePath, "loss")
-	await rm(harness.invocationLogPath, { force: true })
-	await rm(harness.postRevokePath, { force: true })
 	createChain(harness, chainName)
 	addItem(harness, chainName, itemId)
 
@@ -355,10 +362,11 @@ async function scenarioMissingRestorationLoss(harness: Harness): Promise<number>
 	invariant(!hasBackoff(missingEvents), "missing-binary emitted spawn-failure backoff")
 	log("scenario missing-binary: accepted item; hold/warning/SQLite/artifact/attempt/backoff assertions passed")
 
-	await writeRunner(harness)
+	await writeRunner(harness, { mode: "loss", chainName, itemId })
 	await writeFile(harness.probeStatePath, "0")
 	const current = await waitFor("automatic restoration spawn", () => storeRead(harness, (store) => store.getCurrentRun(id)), (value) => value !== null, 15_000)
 	invariant(current !== null, "restoration did not create a current run")
+	const observations = runnerObservationPaths(harness, id, itemId)
 	const restoredStatus = readStatus(harness, chainName)
 	invariant(restoredStatus.queue.holds.length === 0, "restoration left a durable hold")
 	const restoredEvents = readEvents(harness, chainName)
@@ -366,7 +374,7 @@ async function scenarioMissingRestorationLoss(harness: Harness): Promise<number>
 	invariant(storeRead(harness, (store) => store.getItemById(id, itemId)?.attempts ?? -1) === 1, "automatic spawn did not increment the fresh attempt exactly once")
 	log(`scenario restoration: hold removed and run ${current.runId} spawned without queue/item mutation`)
 
-	const invocation = await waitFor("fake runner invocation", async () => existsSync(harness.invocationLogPath) ? await readFile(harness.invocationLogPath, "utf-8") : "", (value) => value.includes("spawn pid="))
+	const invocation = await waitFor("fake runner invocation", async () => existsSync(observations.invocationLogPath) ? await readFile(observations.invocationLogPath, "utf-8") : "", (value) => value.includes("spawn pid="))
 	const pidMatch = invocation.match(/spawn pid=(\d+)/)
 	invariant(pidMatch?.[1] !== undefined, `runner PID missing from invocation log: ${invocation}`)
 	const runnerPid = Number.parseInt(pidMatch[1], 10)
@@ -383,9 +391,9 @@ async function scenarioMissingRestorationLoss(harness: Harness): Promise<number>
 	invariant(storeRead(harness, (store) => store.getCurrentRun(id)) === null, "loss retained current-run")
 	const lossEvents = readEvents(harness, chainName)
 	invariant(!hasBackoff(lossEvents), "loss entered spawn-failure backoff")
-	const termLog = await readFile(harness.invocationLogPath, "utf-8")
+	const termLog = await readFile(observations.invocationLogPath, "utf-8")
 	invariant(termLog.includes(`term pid=${runnerPid}`), "loss did not deliver TERM to the fake runner")
-	const revoked = await readFile(harness.postRevokePath, "utf-8")
+	const revoked = await readFile(observations.postRevokePath, "utf-8")
 	invariant(/invalid_caller|unknown credential|did not match any active run/.test(revoked), `runner credential remained admitted after loss: ${revoked}`)
 	invariant(!processExists(runnerPid), `runner ${runnerPid} survived TERM/grace/KILL`)
 	invariant(Date.now() - lossStartedAt >= 4_000, "loss runner closed before the configured grace could exercise SIGKILL")
@@ -398,10 +406,7 @@ async function scenarioProbeFailure(harness: Harness, scenario: "unexpected-exit
 	const state = scenario === "unexpected-exit" ? "2" : scenario === "signal" ? "signal" : "deadline"
 	const chainName = `external-${scenario}-${randomUUID()}`
 	const itemId = scenario
-	await writeFile(harness.chainPath, chainName)
-	await writeFile(harness.itemPath, itemId)
 	await writeFile(harness.probeStatePath, state)
-	await writeFile(harness.modePath, "loss")
 	createChain(harness, chainName)
 	addItem(harness, chainName, itemId)
 	const timeoutMs = scenario === "deadline-exceeded" ? 40_000 : 15_000
@@ -420,11 +425,8 @@ async function scenarioProbeFailure(harness: Harness, scenario: "unexpected-exit
 async function scenarioTerminalFirst(harness: Harness): Promise<void> {
 	const chainName = `external-terminal-first-${randomUUID()}`
 	const itemId = "terminal-first"
-	await writeFile(harness.chainPath, chainName)
-	await writeFile(harness.itemPath, itemId)
 	await writeFile(harness.probeStatePath, "0")
-	await writeFile(harness.modePath, "terminal")
-	await rm(harness.invocationLogPath, { force: true })
+	await writeRunner(harness, { mode: "terminal", chainName, itemId })
 	createChain(harness, chainName)
 	addItem(harness, chainName, itemId)
 	const id = chainId(harness, chainName)
@@ -481,11 +483,6 @@ async function buildHarness(): Promise<Harness> {
 		shimDir: shim.shimDir,
 		binaryPath: shim.binaryPath,
 		probeStatePath: resolve(workDir, "probe-state"),
-		modePath: resolve(workDir, "runner-mode"),
-		chainPath: resolve(workDir, "runner-chain"),
-		itemPath: resolve(workDir, "runner-item"),
-		invocationLogPath: resolve(workDir, "runner-invocations.log"),
-		postRevokePath: resolve(workDir, "post-revoke.json"),
 		daemon,
 		runnerPids: new Set(),
 	}
