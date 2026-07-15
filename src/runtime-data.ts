@@ -546,13 +546,6 @@ export function withExternalTerminalLoss(extra: ItemExtra, fact: ExternalTermina
 	return storedItemExtra({ ...itemExtraToJsonObject(extra), externalTerminalLoss: { ...fact } })
 }
 
-export function clearExternalTerminalLoss(extra: ItemExtra): ItemExtra {
-	if (extra.externalTerminalLoss === undefined) return extra
-	const next = itemExtraToJsonObject(extra)
-	delete next.externalTerminalLoss
-	return storedItemExtra(next)
-}
-
 export function chainCompleteTriggerState(metadata: ChainMetadata): ChainCompleteTriggerState | null {
 	return metadata.coderLoopChainCompleteTrigger ?? null
 }

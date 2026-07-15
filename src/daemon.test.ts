@@ -3792,9 +3792,8 @@ process.exitCode = 0
 				} }),
 			})
 			itemRowId = item.id
-			store.recordRun({ runId: "run-loss-crash", chainId, itemId: item.id, phase: "iteration", status: runtimeStatus("running"), startedAt: 1_900_000_001, extra: storedItemExtra({ startStatus: "changes_requested", startStatusUpdatedAt: 1_900_000_000, startAttempts: 4 }) })
-			store.setCurrentRun({ chainId, phase: "iteration", runId: "run-loss-crash", startedAt: 1_900_000_001, extra: storedItemExtra({
-				itemId: item.id, startStatus: "changes_requested", startStatusUpdatedAt: 1_900_000_000, startAttempts: 4,
+			store.recordRun({ runId: "run-loss-crash", chainId, itemId: item.id, phase: "iteration", status: runtimeStatus("running"), startedAt: 1_900_000_001, extra: storedItemExtra({
+				startStatus: "changes_requested", startStatusUpdatedAt: 1_900_000_000, startAttempts: 4,
 				externalTerminalCurrent: { runner: "hapi", binary: "fake-hapi", availability: { kind: "available", checkedAt: "2026-07-15T00:00:01.000Z" } },
 				externalTerminalLoss: { kind: "lost", detectedAt: "2026-07-15T00:00:02.000Z", reason: "endpoint-unavailable", terminationPhase: "term" },
 			}) })

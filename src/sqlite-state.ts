@@ -284,6 +284,7 @@ export type SqliteStateStore = {
 	recordRun: (input: RecordRunInput) => RunRecord
 	getRunByRunId: (runId: string) => RunRecord | null
 	listRuns: (chainId: number) => RunRecord[]
+	updateRunExtra: (runId: string, extra: ItemExtra) => RunRecord
 	completeRun: (runId: string, input: CompleteRunInput) => RunRecord
 	setCurrentRun: (input: SetCurrentRunInput) => CurrentRunRecord
 	getCurrentRun: (chainId: number) => CurrentRunRecord | null
@@ -1377,6 +1378,16 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 			read("list runs", () =>
 				db.query<RunRow, SqlParams>("SELECT * FROM runs WHERE chain_id = $chainId ORDER BY id ASC").all({ chainId }).map((row) => requireRun(row, row.id)),
 			),
+
+		updateRunExtra: (runId, extra) =>
+			write("update run extra", () => {
+				requireRun(getRunRowByRunId(runId), runId)
+				db.query<unknown, SqlParams>("UPDATE runs SET extra = $extra WHERE run_id = $runId").run({
+					runId,
+					extra: stringifyJsonObject(itemExtraToJsonObject(extra)),
+				})
+				return requireRun(getRunRowByRunId(runId), runId)
+			}),
 
 		completeRun: (runId, input) =>
 			write("complete run", () => {

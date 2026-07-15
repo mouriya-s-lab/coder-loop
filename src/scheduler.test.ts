@@ -3382,7 +3382,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			expect(fixture.store.getItem(item.id)?.sessionIds.iteration?.hapi).toBe("lost-session")
 			await writeFile(probeState, "69")
 			await schedulerTick(options)
-			expect(fixture.store.getCurrentRun(chain.id)?.extra.externalTerminalLoss).toMatchObject({ terminationPhase: "term" })
+			expect(fixture.store.getRunByRunId(spawned.spawnedRuns[0]!.runId)?.extra.externalTerminalLoss).toMatchObject({ terminationPhase: "term" })
 			const closed = await spawned.spawnedRuns[0]!.closed
 			expect(activeCredentials.size).toBe(0)
 			expect(fixture.store.getCurrentRun(chain.id)).toBeNull()
@@ -3400,6 +3400,72 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 				reason: "endpoint-unavailable",
 				terminationPhase: "closed",
 			})
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("same-chain repo-slot external-terminal losses keep independent durable run latches", async () => {
+		const fixture = await createFixture("external-terminal-same-chain-independent-loss")
+		try {
+			const chain = createChain(fixture.store, "external-terminal-same-chain-independent-loss-chain")
+			const first = createItem(fixture.store, chain, { issueNumber: 602_017, repoCwd: "/repo/a", sleepMs: 10_000 })
+			const second = createItem(fixture.store, chain, { issueNumber: 602_018, repoCwd: "/repo/b", sleepMs: 10_000 })
+			fixture.store.updateItem(first.id, {
+				status: runtimeStatus("changes_requested"),
+				attempts: 4,
+				phase: null,
+				updatedAt: 1_900_602_017,
+			})
+			fixture.store.updateItem(second.id, {
+				status: runtimeStatus("queued"),
+				attempts: 2,
+				phase: null,
+				updatedAt: 1_900_602_018,
+			})
+			const binary = resolve(fixture.loopDataRoot, "..", "fake-external-terminal")
+			const probeState = resolve(fixture.loopDataRoot, "..", "probe-state")
+			const externalEvents = resolve(fixture.loopDataRoot, "..", "external-events")
+			await writeFile(probeState, "0")
+			await writeFakeExternalTerminalBinary(binary, probeState, externalEvents, 10)
+			const activeCredentials = new Set<string>()
+			const revokedCredentials: string[] = []
+			const options = fixture.options({
+				runner: { kind: "hapi", source: "iteration-default", binary, extraArgs: [], model: null },
+				runCredentials: {
+					mint: ({ runId }) => { activeCredentials.add(runId); return { value: runId } },
+					revoke: (credential) => { activeCredentials.delete(credential.value); revokedCredentials.push(credential.value) },
+				},
+				attemptKillMs: 100,
+			})
+
+			const spawned = await schedulerTick(options)
+			expect(spawned.spawnedRuns).toHaveLength(2)
+			expect(activeCredentials.size).toBe(2)
+			fixture.store.setItemSessionId(first.id, { phase: "iteration", runner: "hapi", sessionId: "first-session" })
+			fixture.store.setItemSessionId(second.id, { phase: "iteration", runner: "hapi", sessionId: "second-session" })
+
+			await writeFile(probeState, "69")
+			await schedulerTick(options)
+			const closed = await Promise.all(spawned.spawnedRuns.map((run) => run.closed))
+
+			expect(closed.map((run) => run.result.kind)).toEqual(["external-terminal-lost", "external-terminal-lost"])
+			expect(activeCredentials.size).toBe(0)
+			expect(new Set(revokedCredentials)).toEqual(new Set(spawned.spawnedRuns.map((run) => run.runId)))
+			expect(fixture.store.getItem(first.id)).toMatchObject({ status: "changes_requested", phase: null, attempts: 4 })
+			expect(fixture.store.getItem(second.id)).toMatchObject({ status: "queued", phase: null, attempts: 2 })
+			expect(fixture.store.getItem(first.id)?.sessionIds.iteration?.hapi).toBeUndefined()
+			expect(fixture.store.getItem(second.id)?.sessionIds.iteration?.hapi).toBeUndefined()
+			expect(fixture.store.getItem(first.id)?.extra.schedulerBackoff).toBeUndefined()
+			expect(fixture.store.getItem(second.id)?.extra.schedulerBackoff).toBeUndefined()
+			for (const run of spawned.spawnedRuns) {
+				expect(fixture.store.getRunByRunId(run.runId)?.extra.externalTerminalLoss).toMatchObject({
+					kind: "lost",
+					reason: "endpoint-unavailable",
+					terminationPhase: "closed",
+				})
+			}
+			expect([...fixture.state.slots.values()].every((slot) => slot.activeRun === null)).toBe(true)
 		} finally {
 			fixture.store.close()
 		}
@@ -3542,7 +3608,7 @@ while :; do sleep 1; done
 			fixture.store.updateItem(item.id, { status: runtimeStatus("done"), updatedAt: 1_900_602_006 })
 			await writeFile(`${probeState}.release`, "release")
 			await lossTick
-			expect(fixture.store.getCurrentRun(chain.id)?.extra.externalTerminalLoss).toBeUndefined()
+			expect(fixture.store.getRunByRunId(spawned.spawnedRuns[0]!.runId)?.extra.externalTerminalLoss).toBeUndefined()
 			expect(fixture.store.getItem(item.id)?.extra.externalTerminalHold).toBeUndefined()
 			await spawned.spawnedRuns[0]!.terminate({ forceAfterMs: 100 })
 			await spawned.spawnedRuns[0]!.closed
@@ -3568,7 +3634,8 @@ while :; do sleep 1; done
 				onEvent: async (event) => {
 					fixture.schedulerEvents.push(event)
 					if (event.type !== "runner.external_terminal_unavailable") return
-					expect(fixture.store.getCurrentRun(chain.id)?.extra.externalTerminalLoss).toMatchObject({ terminationPhase: "term" })
+					const activeRun = fixture.store.listRuns(chain.id).find((run) => run.endedAt === null)
+					expect(activeRun?.extra.externalTerminalLoss).toMatchObject({ terminationPhase: "term" })
 					fixture.store.updateItem(item.id, { status: runtimeStatus("done"), updatedAt: 1_900_602_012 })
 				},
 			})

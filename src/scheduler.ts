@@ -210,6 +210,7 @@ export type SchedulerStore = Pick<
 	| "setItemSessionId"
 	| "recordRun"
 	| "getRunByRunId"
+	| "updateRunExtra"
 	| "completeRun"
 	| "setCurrentRun"
 	| "getCurrentRun"
@@ -570,12 +571,12 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 								: { kind: "probe-failed", reason: availability.reason, exitCode: availability.exitCode, signal: availability.signal, checkedAt, since },
 						}), updatedAt: nowSeconds(options) })
 						const terminating = activeRun
-						const currentRun = options.store.getCurrentRun(chain.id)
-						if (currentRun?.runId === terminating.runId) {
-							options.store.setCurrentRun({ ...currentRun, extra: withExternalTerminalLoss(currentRun.extra, {
-								kind: "lost", detectedAt: checkedAt, reason: availability.reason, terminationPhase: "term",
-							}) })
-						}
+						const durableRun = options.store.getRunByRunId(terminating.runId)
+						if (durableRun === null) throw new Error(`active external-terminal run ${terminating.runId} has no durable run row`)
+						if (durableRun.endedAt !== null) continue
+						options.store.updateRunExtra(terminating.runId, withExternalTerminalLoss(durableRun.extra, {
+							kind: "lost", detectedAt: checkedAt, reason: availability.reason, terminationPhase: "term",
+						}))
 						options.state.externalTerminalLossRunIds.add(terminating.runId)
 						terminating.revokeCredential()
 						options.store.setItemSessionId(activeItem.id, { phase: terminating.phase, runner: terminating.runner.kind, sessionId: null, updatedAt: nowSeconds(options) })
@@ -1100,6 +1101,13 @@ async function spawnSchedulerRun(
 				startStatusUpdatedAt: item.statusUpdatedAt,
 				...(item.phase === null ? {} : { startPhase: item.phase }),
 				startAttempts: item.attempts,
+				...(runnerDomain.kind === "external-terminal" ? {
+					externalTerminalCurrent: {
+						runner: runner.kind,
+						binary: runner.binary,
+						availability: { kind: "available", checkedAt: new Date(startedAt * 1000).toISOString() },
+					},
+				} : {}),
 			}),
 		})
 		options.store.setCurrentRun({
@@ -1181,6 +1189,14 @@ async function spawnSchedulerRun(
 		await waitForChildSpawn(child)
 		activeRun = attachRunCloseHandler(options, chain, item, slot, runId, worktreePath, startedAt, phase, child, runner, credential, credentialContext, origin)
 		slot.activeRun = activeRun
+		const durableRun = options.store.getRunByRunId(runId)
+		if (durableRun === null) throw new Error(`run ${runId} missing after spawn`)
+		options.store.updateRunExtra(runId, storedItemExtra({
+			...itemExtraToJsonObject(durableRun.extra),
+			worktreePath,
+			...(activeRun.pid === null ? {} : { pid: activeRun.pid }),
+			processGroupLeader: true,
+		}))
 		const currentRun = options.store.getCurrentRun(chain.id)
 		if (currentRun === null || currentRun.runId !== runId) throw new Error(`current run ${runId} missing after spawn`)
 		options.store.setCurrentRun({
@@ -1568,8 +1584,8 @@ function attachRunCloseHandler(
 				const rateLimitExit = (rateLimit.code !== null && isRateLimitErrorCode(rateLimit.code)) || rateLimit.reset !== null
 				const terminalStatuses = new Set((await schedulerStatusesForChain(options, chain)).terminal)
 				const currentItem = options.store.getItem(item.id)
-				const currentRunBeforeClose = options.store.getCurrentRun(chain.id)
-				const latchedLoss = currentRunBeforeClose?.runId === runId ? externalTerminalLoss(currentRunBeforeClose.extra) : null
+				const durableRunBeforeClose = options.store.getRunByRunId(runId)
+				const latchedLoss = durableRunBeforeClose === null ? null : externalTerminalLoss(durableRunBeforeClose.extra)
 				const externalTerminalLossWon = latchedLoss !== null
 				const closedLoss: ExternalTerminalLossFact | null = latchedLoss === null ? null : { ...latchedLoss, terminationPhase: "closed" }
 				const status = origin.kind === "chain-complete" || externalTerminalLossWon ? item.status : (currentItem ?? item).status
@@ -1754,14 +1770,11 @@ function attachRunCloseHandler(
 		})
 	})
 	const terminate = createRunTerminator(child, closed, terminatorCleanup, (terminationPhase) => {
-		const currentRun = options.store.getCurrentRun(chain.id)
-		if (currentRun?.runId !== runId) return
-		const loss = externalTerminalLoss(currentRun.extra)
+		const durableRun = options.store.getRunByRunId(runId)
+		if (durableRun === null || durableRun.endedAt !== null) return
+		const loss = externalTerminalLoss(durableRun.extra)
 		if (loss === null || loss.terminationPhase === terminationPhase) return
-		options.store.setCurrentRun({
-			...currentRun,
-			extra: withExternalTerminalLoss(currentRun.extra, { ...loss, terminationPhase }),
-		})
+		options.store.updateRunExtra(runId, withExternalTerminalLoss(durableRun.extra, { ...loss, terminationPhase }))
 	})
 	let credentialRevoked = false
 	const revokeCredential = (): void => {

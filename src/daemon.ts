@@ -2244,75 +2244,70 @@ export class CoderLoopDaemon {
 	private async recoverStaleSchedulerState(): Promise<void> {
 		// #508: ordinary daemon recovery is process-layer only: kill stale process groups, clear
 		// `current_runs`, and leave agent-owned item business fields untouched. The one typed
-		// exception is an external-terminal loss latch: the scheduler had already selected loss as
-		// the run result, so startup must finish that interrupted close by restoring its durable
-		// pre-run tuple before generic orphan reconciliation can overwrite the attribution.
+		// exception is an external-terminal loss latch: each unique `runs.run_id` row owns that
+		// decision, so startup can finish every interrupted repo-slot close independently before
+		// generic orphan reconciliation can overwrite the attribution.
 		const store = this.requireStore()
 		for (const chain of store.listChains()) {
 			if (chain.status === "deleted") continue
-			const currentRun = store.getCurrentRun(chain.id)
-			if (currentRun !== null) {
-				const stalePid = await this.readRunProcessGroupPid(chain, currentRun.runId, currentRun.extra)
+			const recoveredLossRunIds = new Set<string>()
+			for (const run of store.listRuns(chain.id)) {
+				if (run.endedAt !== null) continue
+				const loss = externalTerminalLoss(run.extra)
+				if (loss === null) continue
+				const stalePid = await this.readRunProcessGroupPid(chain, run.runId, run.extra)
 				if (stalePid !== null) await terminateStaleProcessGroup(stalePid, Math.min(this.shutdownGraceMs, STALE_RECOVERY_FORCE_AFTER_MS))
-				const loss = externalTerminalLoss(currentRun.extra)
-				if (loss !== null) {
-					const run = store.getRunByRunId(currentRun.runId)
-					const itemId = currentRun.extra.itemId ?? run?.itemId
-					const item = itemId === undefined ? null : store.getItem(itemId)
-					const startStatus = currentRun.extra.startStatus ?? run?.extra.startStatus
-					const startStatusUpdatedAt = currentRun.extra.startStatusUpdatedAt ?? run?.extra.startStatusUpdatedAt
-					const startAttempts = currentRun.extra.startAttempts ?? run?.extra.startAttempts
-					const terminal = externalTerminalCurrent(currentRun.extra)
-					if (item !== null && startStatus !== undefined && startStatusUpdatedAt !== undefined && startAttempts !== undefined && terminal !== null) {
-						const reconciledAt = unixSeconds()
-						const restoredExtra = clearItemSchedulerBackoff(item.extra)
-						store.updateItem(item.id, {
-							status: engineLifecycleAdmittedItemStatus(startStatus, "scheduler.external-terminal-loss-entry-restore"),
-							statusUpdatedAt: startStatusUpdatedAt,
-							phase: currentRun.extra.startPhase ?? run?.extra.startPhase ?? null,
-							attempts: startAttempts,
-							extra: restoredExtra,
-							updatedAt: reconciledAt,
-						})
-						store.setItemSessionId(item.id, { phase: currentRun.phase, runner: terminal.runner, sessionId: null, updatedAt: reconciledAt })
-						if (run !== null && run.endedAt === null) {
-							store.completeRun(run.runId, {
-								endedAt: reconciledAt,
-								exitCode: ORPHANED_RUN_EXIT_CODE,
-								status: startStatus,
-								extra: clearItemSchedulerBackoff(storedItemExtra({
-									...itemExtraToJsonObject(run.extra),
-									externalTerminalLoss: { ...loss, terminationPhase: "closed" },
-								})),
-							})
-						}
-						store.clearCurrentRun(chain.id)
-						await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
-							kind: "lifecycle",
-							type: "scheduler.recovery",
-							chain: chain.name,
-							runId: currentRun.runId,
-							subject: { kind: "engine" },
-							payload: { reason: "stale_current_run", pid: stalePid, reconciledRuns: [] },
-						}))
-						await this.reconcileOrphanedRuns(chain)
-						continue
-					}
-				}
-
-				store.clearCurrentRun(chain.id)
+				const item = store.getItem(run.itemId)
+				const startStatus = run.extra.startStatus
+				const startStatusUpdatedAt = run.extra.startStatusUpdatedAt
+				const startAttempts = run.extra.startAttempts
+				const terminal = externalTerminalCurrent(run.extra)
+				if (item === null || startStatus === undefined || startStatusUpdatedAt === undefined || startAttempts === undefined || terminal === null) continue
+				const reconciledAt = unixSeconds()
+				store.updateItem(item.id, {
+					status: engineLifecycleAdmittedItemStatus(startStatus, "scheduler.external-terminal-loss-entry-restore"),
+					statusUpdatedAt: startStatusUpdatedAt,
+					phase: run.extra.startPhase ?? null,
+					attempts: startAttempts,
+					extra: clearItemSchedulerBackoff(item.extra),
+					updatedAt: reconciledAt,
+				})
+				store.setItemSessionId(item.id, { phase: run.phase, runner: terminal.runner, sessionId: null, updatedAt: reconciledAt })
+				store.completeRun(run.runId, {
+					endedAt: reconciledAt,
+					exitCode: ORPHANED_RUN_EXIT_CODE,
+					status: startStatus,
+					extra: clearItemSchedulerBackoff(storedItemExtra({
+						...itemExtraToJsonObject(run.extra),
+						externalTerminalLoss: { ...loss, terminationPhase: "closed" },
+					})),
+				})
+				recoveredLossRunIds.add(run.runId)
 				await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
 					kind: "lifecycle",
 					type: "scheduler.recovery",
 					chain: chain.name,
-					runId: currentRun.runId,
+					runId: run.runId,
 					subject: { kind: "engine" },
-					payload: {
-						reason: "stale_current_run",
-						pid: stalePid,
-						reconciledRuns: [],
-					},
+					payload: { reason: "stale_current_run", pid: stalePid, reconciledRuns: [] },
 				}))
+			}
+
+			const currentRun = store.getCurrentRun(chain.id)
+			if (currentRun !== null) {
+				if (!recoveredLossRunIds.has(currentRun.runId)) {
+					const stalePid = await this.readRunProcessGroupPid(chain, currentRun.runId, currentRun.extra)
+					if (stalePid !== null) await terminateStaleProcessGroup(stalePid, Math.min(this.shutdownGraceMs, STALE_RECOVERY_FORCE_AFTER_MS))
+					await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
+						kind: "lifecycle",
+						type: "scheduler.recovery",
+						chain: chain.name,
+						runId: currentRun.runId,
+						subject: { kind: "engine" },
+						payload: { reason: "stale_current_run", pid: stalePid, reconciledRuns: [] },
+					}))
+				}
+				store.clearCurrentRun(chain.id)
 			}
 
 			await this.reconcileOrphanedRuns(chain)
