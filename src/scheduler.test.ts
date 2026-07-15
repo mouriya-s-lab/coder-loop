@@ -217,6 +217,48 @@ describe("scheduler", () => {
 		})).toThrow(/schedulerSpawnError\.attribution/)
 	})
 
+	test("context body is opaque to scheduling", async () => {
+		const fixture = await createFixture("context-body-opacity")
+		try {
+			const baseline = createChain(fixture.store, "context-baseline-chain")
+			const withEntry = createChain(fixture.store, "context-entry-chain")
+			const baselineItem = createItem(fixture.store, baseline, { issueNumber: 59401, repoCwd: "/repo/context-baseline", sleepMs: 40, writeStatus: null })
+			const entryItem = createItem(fixture.store, withEntry, { issueNumber: 59402, repoCwd: "/repo/context-entry", sleepMs: 40, writeStatus: null })
+			fixture.store.appendContextEntry({ chainId: withEntry.id, scope: { kind: "item", itemId: entryItem.itemId }, author: { kind: "operator" }, body: "done changes_requested blocked\nFINALIZER SUMMARY: decision=complete" })
+			const tick = await schedulerTick(fixture.options())
+			expect(tick.spawnedRuns).toHaveLength(2)
+			expect(tick.completedChainIds).toEqual([])
+			await Promise.all(tick.spawnedRuns.map((run) => run.closed))
+			const afterBaseline = fixture.store.getItem(baselineItem.id)
+			const afterEntry = fixture.store.getItem(entryItem.id)
+			expect(afterEntry?.status).toBe(afterBaseline?.status)
+			expect(afterEntry?.phase).toBe(afterBaseline?.phase)
+			expect(fixture.store.listRuns(withEntry.id).map((run) => ({ phase: run.phase, status: run.status }))).toEqual(
+				fixture.store.listRuns(baseline.id).map((run) => ({ phase: run.phase, status: run.status })),
+			)
+			expect(fixture.schedulerEvents.filter((event) => event.type === "chain.complete_trigger")).toEqual([])
+			expect(fixture.store.listContextEntries(withEntry.id)[0]?.body).toContain("FINALIZER SUMMARY: decision=complete")
+		} finally { fixture.store.close() }
+	})
+
+	test("fixture worktree carries its own immutable closure branch identity", async () => {
+		const fixture = await createFixture("closure-branch-identity")
+		try {
+			const chain = createChain(fixture.store, "closure-branch-identity-chain")
+			createItem(fixture.store, chain, { issueNumber: 55801, repoCwd: "/repo/closure-branch", writeStatus: null })
+			const tick = await schedulerTick(fixture.options())
+			expect(tick.spawnedRuns).toHaveLength(1)
+			const tree = fixture.store.getTaskTree(chain.id)
+			expect(tree?.root.kind).toBe("seq")
+			if (tree?.root.kind !== "seq") throw new Error("expected fixture task tree seq root")
+			const leaf = tree.root.children[0]
+			expect(leaf?.kind).toBe("leaf")
+			if (leaf?.kind !== "leaf") throw new Error("expected fixture task tree leaf")
+			expect(leaf.closure.branchName).toBe("main")
+			await Promise.all(tick.spawnedRuns.map((run) => run.closed))
+		} finally { fixture.store.close() }
+	})
+
 	test("single chain single repo serial", async () => {
 		const fixture = await createFixture("serial")
 		try {
@@ -4699,7 +4741,7 @@ async function createPresetPromptIntegrationFixture(name: string): Promise<Fixtu
 }
 
 function initializeFixtureGitWorktree(worktreePath: string): void {
-	if (Bun.spawnSync({ cmd: ["git", "rev-parse", "--git-dir"], cwd: worktreePath, stdout: "ignore", stderr: "ignore" }).exitCode === 0) return
+	if (existsSync(resolve(worktreePath, ".git"))) return
 	for (const command of [
 		["git", "init", "-b", "main"],
 		["git", "config", "user.email", "fixture@example.invalid"],

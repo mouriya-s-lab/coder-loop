@@ -28,6 +28,7 @@ import {
 	type TaskNodeSnapshot,
 	type TaskTreeSnapshot,
 } from "./task-runtime"
+import { contextScopeKey, parseContextAuthor, parsePersistedContextEntryRow, persistedContextScope, type AppendContextEntryInput, type ContextEntry, type PersistedContextEntryRow } from "./context-entry"
 
 export type SqliteStateErrorCode =
 	| "db_unavailable"
@@ -276,7 +277,7 @@ export type JoinBindingRecord = AppendJoinBindingInput & { parNodeId: string }
 export type BindJoinEvaluationInput = { epoch: number; bindingVersion: number; state: "evaluating" | "decided" | "consumed" }
 export type JoinEvaluationRecord = BindJoinEvaluationInput & { parNodeId: string }
 
-export type StateTableName = "chains" | "items" | "runs" | "execution_definitions" | "task_trees" | "task_nodes" | "task_leaf_nodes" | "task_seq_nodes" | "task_par_nodes" | "task_join_bindings" | "task_join_evaluation_bindings" | "task_closures" | "closure_sessions" | "active_runs"
+export type StateTableName = "chains" | "items" | "runs" | "execution_definitions" | "task_trees" | "task_nodes" | "task_leaf_nodes" | "task_seq_nodes" | "task_par_nodes" | "task_join_bindings" | "task_join_evaluation_bindings" | "task_closures" | "closure_sessions" | "active_runs" | "context_entries"
 
 export type SqliteStateStoreOptions = LoopDataRootOptions & {
 	createIfMissing?: boolean
@@ -322,6 +323,9 @@ export type SqliteStateStore = {
 	listJoinBindings: (parNodeId: string) => JoinBindingRecord[]
 	bindJoinEvaluation: (parNodeId: string, input: BindJoinEvaluationInput) => JoinEvaluationRecord
 	listJoinEvaluations: (parNodeId: string) => JoinEvaluationRecord[]
+	appendContextEntry: (input: AppendContextEntryInput) => ContextEntry
+	listContextEntries: (chainId: number) => ContextEntry[]
+	deleteContextEntriesForChain: (chainId: number) => number
 }
 
 type SqlParamValue = string | number | bigint | boolean | Uint8Array | null
@@ -586,7 +590,7 @@ CREATE TABLE IF NOT EXISTS runs (
 ${STATE_INDEXES_SQL}
 `
 
-const V14_SCHEMA_SQL = `
+const V3_RUNTIME_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS execution_definitions (
 	kind TEXT NOT NULL CHECK (kind IN ('preset','chain')),
 	content_identity TEXT NOT NULL,
@@ -683,6 +687,19 @@ BEGIN
 		THEN RAISE(ABORT, 'non-par child closure cannot reference a source par')
 	END;
 END;
+
+CREATE TABLE IF NOT EXISTS context_entries (
+	id TEXT PRIMARY KEY,
+	chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+	created_at REAL NOT NULL,
+	scope_kind TEXT NOT NULL CHECK (scope_kind IN ('chain','item','group')),
+	scope_key TEXT,
+	author TEXT NOT NULL,
+	body TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_context_entries_chain_cursor ON context_entries(chain_id, created_at, id);
+
+${STATE_INDEXES_SQL}
 `
 
 // #419 v11→v12: items 物理层退出 GitHub 形状。items.`issue_number INTEGER NOT NULL` → `item_id TEXT NOT NULL`;
@@ -704,7 +721,9 @@ END;
 // now carries the widened CHECK). Idempotent: rows already on v13 cause `user_version` to skip
 // the rebuild, and rows being copied through the new schema satisfy the new constraint (existing
 // runner values are all `claude` / `codex` / NULL — strict subset of the new accepted set).
-const STATE_SCHEMA_VERSION = 14
+// main independently used v14 for context_entries after #558 had used v14 for the
+// normalized v3 runtime tables. v15 is the first schema that requires both shapes.
+const STATE_SCHEMA_VERSION = 15
 const V5_ITEM_SESSION_COLUMN = ["last", "session", "id"].join("_")
 // v9 moves preset declaration from chains.preset to items.preset / items.preset_path (#412).
 // Existing rows are back-filled from chains.preset so the engine resolves the legacy preset
@@ -760,6 +779,24 @@ function stateSchemaExists(db: Database): boolean {
 			AND name IN ('chains', 'items', 'runs')
 	`).get()
 	return row?.table_count === 3
+}
+
+function contextEntriesTableExists(db: Database): boolean {
+	return (db.query<TableCountRow, []>("SELECT COUNT(*) AS table_count FROM sqlite_master WHERE type='table' AND name='context_entries'").get()?.table_count ?? 0) === 1
+}
+
+function v3RuntimeSchemaExists(db: Database): boolean {
+	const row = db.query<TableCountRow, []>(`
+		SELECT COUNT(*) AS table_count
+		FROM sqlite_master
+		WHERE type = 'table'
+			AND name IN (
+				'execution_definitions', 'task_trees', 'task_nodes', 'task_leaf_nodes',
+				'task_seq_nodes', 'task_par_nodes', 'task_join_bindings',
+				'task_join_evaluation_bindings', 'task_closures', 'closure_sessions', 'active_runs'
+			)
+	`).get()
+	return row?.table_count === 11
 }
 
 function readUserVersion(db: Database): number {
@@ -832,10 +869,13 @@ function migrateStateSchema(db: Database): void {
 	// check; the rebuild simply CREATEs `items_new` from that SQL and copies rows over.
 	const needsItemTableRebuildForOpencodeCheck = stateSchemaExists(db)
 		&& !itemsTableRunnerCheckAllowsOpencode(db)
+	const needsLegacyRuntimeMigration = stateSchemaExists(db) && !v3RuntimeSchemaExists(db)
 	const needsV14ItemSourceRetire = stateSchemaExists(db) && itemsTableHasColumn(db, "session_ids")
 	if (
 		beforeVersion >= STATE_SCHEMA_VERSION
 		&& stateSchemaExists(db)
+		&& contextEntriesTableExists(db)
+		&& v3RuntimeSchemaExists(db)
 		&& !needsChainTableRebuild
 		&& !needsItemTableRebuildForGitHubShapeRetire
 		&& !needsItemTableRebuildForOpencodeCheck
@@ -848,11 +888,11 @@ function migrateStateSchema(db: Database): void {
 		&& !itemsTableHasColumn(db, V5_ITEM_SESSION_COLUMN)
 		&& runsTableHasColumn(db, "status")
 	) return
-	if (needsItemTableRebuild || needsChainTableRebuild || needsItemTableRebuildForGitHubShapeRetire || needsItemTableRebuildForOpencodeCheck || needsV14ItemSourceRetire || beforeVersion < 14) db.exec("PRAGMA foreign_keys = OFF")
+	if (needsItemTableRebuild || needsChainTableRebuild || needsItemTableRebuildForGitHubShapeRetire || needsItemTableRebuildForOpencodeCheck || needsLegacyRuntimeMigration || needsV14ItemSourceRetire) db.exec("PRAGMA foreign_keys = OFF")
 	try {
 		db.transaction(() => {
 			db.exec(STATE_SCHEMA_SQL)
-			db.exec(V14_SCHEMA_SQL)
+			db.exec(V3_RUNTIME_SCHEMA_SQL)
 			if (needsChainTableRebuild) {
 				// v10 → v11 (#457): copy any non-null `chains.umbrella_issue` / `umbrella_repo` values
 				// into the chain's metadata.bindings (umbrellaIssue / umbrellaRepo) before the rebuild
@@ -926,7 +966,7 @@ function migrateStateSchema(db: Database): void {
 			if (beforeVersion < STATE_SCHEMA_VERSION) {
 				migrateChainsMetadataForCl433(db)
 			}
-			if (beforeVersion < 14) migrateV13RuntimeToV14(db)
+			if (needsLegacyRuntimeMigration) migrateLegacyRuntimeToV3(db)
 			if (itemsTableHasColumn(db, "session_ids")) rebuildItemsTableForV14(db)
 			db.exec(STATE_INDEXES_SQL)
 			db.exec(ITEM_NEXT_PENDING_INDEX_SQL)
@@ -934,11 +974,11 @@ function migrateStateSchema(db: Database): void {
 			db.exec(`PRAGMA user_version = ${STATE_SCHEMA_VERSION}`)
 		}).immediate()
 	} finally {
-		if (needsItemTableRebuild || needsChainTableRebuild || needsItemTableRebuildForGitHubShapeRetire || needsItemTableRebuildForOpencodeCheck || needsV14ItemSourceRetire || beforeVersion < 14) db.exec("PRAGMA foreign_keys = ON")
+		if (needsItemTableRebuild || needsChainTableRebuild || needsItemTableRebuildForGitHubShapeRetire || needsItemTableRebuildForOpencodeCheck || needsLegacyRuntimeMigration || needsV14ItemSourceRetire) db.exec("PRAGMA foreign_keys = ON")
 	}
 }
 
-function migrateV13RuntimeToV14(db: Database): void {
+function migrateLegacyRuntimeToV3(db: Database): void {
 	const now = unixSeconds()
 	const chains = queryPersistedAll(db, "SELECT id, preset, metadata FROM chains ORDER BY id", {}, LegacyChainRowBoundary, "legacy v13 chains")
 	for (const chain of chains) {
@@ -1768,6 +1808,26 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 		}),
 
 		listJoinEvaluations: (parNodeId) => read("list join evaluations", () => queryPersistedAll(db, "SELECT par_node_id, epoch, binding_version, evaluation_state FROM task_join_evaluation_bindings WHERE par_node_id = $parNodeId ORDER BY epoch", { parNodeId }, JoinEvaluationRowBoundary, `task_join_evaluation_bindings.${parNodeId}`).map((row) => ({ parNodeId: row.par_node_id, epoch: row.epoch, bindingVersion: row.binding_version, state: row.evaluation_state }))),
+
+		appendContextEntry: (input) => write("append context entry", () => {
+			const id = crypto.randomUUID()
+			const createdAt = input.createdAt ?? unixSeconds()
+			db.query<unknown, SqlParams>(`INSERT INTO context_entries (id, chain_id, created_at, scope_kind, scope_key, author, body)
+				VALUES ($id,$chainId,$createdAt,$scopeKind,$scopeKey,$author,$body)`).run({
+				id, chainId: input.chainId, createdAt, scopeKind: input.scope.kind, scopeKey: contextScopeKey(input.scope),
+				author: JSON.stringify(input.author), body: input.body,
+			})
+			return { id, chainId: input.chainId, createdAt, scope: input.scope, author: input.author, body: input.body }
+		}),
+
+		listContextEntries: (chainId) => read("list context entries", () => db.query<PersistedContextEntryRow, SqlParams>(
+			"SELECT * FROM context_entries WHERE chain_id=$chainId ORDER BY created_at,id").all({chainId}).map((rawRow) => {
+				const row = parsePersistedContextEntryRow(rawRow)
+				const scope = persistedContextScope(row)
+				return {id:row.id,chainId:row.chain_id,createdAt:row.created_at,scope,author:parseContextAuthor(JSON.parse(row.author)),body:row.body}
+			})),
+
+		deleteContextEntriesForChain: (chainId) => write("delete chain context entries", () => db.query<unknown, SqlParams>("DELETE FROM context_entries WHERE chain_id=$chainId").run({chainId}).changes),
 	}
 }
 

@@ -13,6 +13,7 @@ import {
 import type { JsonObject } from "./loop"
 import type { TaskTreeSnapshot } from "./task-runtime"
 import { chainBindings, engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
+import { daemonRequest, sendDaemonRequest, startCoderLoopDaemon } from "./daemon"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/sqlite-state-tests", String(process.pid))
@@ -264,7 +265,7 @@ describe("sqlite state store", () => {
 		const migrated = openSqliteStateStore({ loopDataRoot: dbFileRoot(fixture.dbFile) })
 		try {
 			const db = new Database(fixture.dbFile)
-			try { expect(db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(14) } finally { db.close() }
+			try { expect(db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(15) } finally { db.close() }
 			const tree = migrated.getTaskTree(chain.id)
 			expect(tree?.root.kind).toBe("seq")
 			if (tree?.root.kind !== "seq") throw new Error("expected migrated seq")
@@ -282,6 +283,38 @@ describe("sqlite state store", () => {
 			const migratedDb = new Database(fixture.dbFile)
 			try { expect(migratedDb.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'current_runs'").get()?.count).toBe(0) } finally { migratedDb.close() }
 			expect(migrated.listCurrentRuns(chain.id).map((run) => run.runId)).toEqual(["legacy-active"])
+		} finally { migrated.close() }
+	})
+
+	test("main v14 context database migrates normalized runtime without losing context", async () => {
+		const fixture = await openTestStore("main-v14-to-normalized-runtime")
+		const chain = createFullChain(fixture.store)
+		const item = createFullItem(fixture.store, chain, { phase: "iteration", agentCwd: REPO_ROOT, preset: "gh-issue-pr-iteration", sessionIds: { iteration: { codex: "main-v14-session" } } })
+		fixture.store.appendContextEntry({ chainId: chain.id, scope: { kind: "chain" }, author: { kind: "operator" }, body: "preserve-main-v14-context" })
+		fixture.store.recordRun({ runId: "main-v14-active", chainId: chain.id, itemId: item.id, phase: "iteration", startedAt: 1_800_000_230 })
+		fixture.store.close()
+		const mainV14 = new Database(fixture.dbFile)
+		try {
+			mainV14.exec("PRAGMA foreign_keys=OFF")
+			mainV14.exec("ALTER TABLE items ADD COLUMN session_ids TEXT NOT NULL DEFAULT '{}'")
+			mainV14.exec(`UPDATE items SET session_ids = '{"iteration":{"codex":"main-v14-session"}}' WHERE id = ${item.id}`)
+			for (const table of ["active_runs", "closure_sessions", "task_join_evaluation_bindings", "task_join_bindings", "task_leaf_nodes", "task_seq_nodes", "task_par_nodes", "task_closures", "task_trees", "task_nodes", "execution_definitions"]) mainV14.exec(`DROP TABLE ${table}`)
+			mainV14.exec("CREATE TABLE current_runs (chain_id INTEGER PRIMARY KEY REFERENCES chains(id), phase TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES runs(run_id), started_at REAL NOT NULL, extra TEXT NOT NULL)")
+			mainV14.query("INSERT INTO current_runs (chain_id, phase, run_id, started_at, extra) VALUES ($chainId, 'iteration', 'main-v14-active', 1800000230, '{}')").run({ chainId: chain.id })
+			mainV14.exec("PRAGMA user_version=14")
+		} finally { mainV14.close() }
+
+		const migrated = openSqliteStateStore({ loopDataRoot: dbFileRoot(fixture.dbFile) })
+		try {
+			const tree = migrated.getTaskTree(chain.id)
+			expect(tree?.root.kind).toBe("seq")
+			if (tree?.root.kind !== "seq") throw new Error("expected migrated main v14 seq")
+			const iteration = tree.root.children.find((node) => node.kind === "leaf" && node.closure.itemId === item.itemId && node.closure.phase === "iteration")
+			expect(iteration?.kind).toBe("leaf")
+			if (iteration?.kind !== "leaf") throw new Error("expected migrated main v14 iteration leaf")
+			expect(iteration.closure.sessions).toEqual([{ runner: "codex", sessionId: "main-v14-session" }])
+			expect(migrated.listCurrentRuns(chain.id).map((run) => run.runId)).toEqual(["main-v14-active"])
+			expect(migrated.listContextEntries(chain.id).map((entry) => entry.body)).toEqual(["preserve-main-v14-context"])
 		} finally { migrated.close() }
 	})
 
@@ -1734,6 +1767,67 @@ describe("sqlite state store", () => {
 		} finally {
 			migrated.close()
 		}
+	})
+
+	test("context entries are append-only and removed by chain delete", async () => {
+		const { store, dbFile } = await openTestStore("context-gc")
+		let oneId = -1
+		let twoId = -1
+		try {
+			const one = store.createChain({ name: "context-one", repository: "o/r", baseBranch: "main" })
+			const two = store.createChain({ name: "context-two", repository: "o/r", baseBranch: "main" })
+			oneId = one.id
+			twoId = two.id
+			store.appendContextEntry({ chainId: one.id, scope: { kind: "chain" }, author: { kind: "operator" }, body: "one" })
+			store.appendContextEntry({ chainId: two.id, scope: { kind: "chain" }, author: { kind: "operator" }, body: "two" })
+		} finally { store.close() }
+		const daemon = await startCoderLoopDaemon({ loopDataRoot: dbFileRoot(dbFile), scheduler: { enabled: false } })
+		try {
+			const deleted = await sendDaemonRequest(daemon.snapshot().socketPath, daemonRequest("chain.delete", { chainName: "context-one" }))
+			expect(deleted.ok).toBe(true)
+		} finally { await daemon.stop() }
+		const check = openSqliteStateStore({ loopDataRoot: dbFileRoot(dbFile) })
+		try {
+			expect(check.listContextEntries(oneId)).toEqual([])
+			expect(check.listContextEntries(twoId).map((entry) => entry.body)).toEqual(["two"])
+		} finally { check.close() }
+		for (const subcommand of ["update", "delete"]) {
+			const proc = Bun.spawnSync({ cmd: ["bun", resolve(REPO_ROOT, "src/loop.ts"), "context", subcommand], cwd: REPO_ROOT, stdout: "pipe", stderr: "pipe" })
+			expect(proc.exitCode).not.toBe(0)
+			expect(new TextDecoder().decode(proc.stderr)).toContain("Not a valid subcommand")
+		}
+	})
+
+	test("context schema migration preserves existing data", async () => {
+		const { store, dbFile } = await openTestStore("context-migration")
+		const chain = store.createChain({ name: "context-preserved", repository: "o/r", baseBranch: "main" })
+		const item = createFullItem(store, chain, { itemId: "migration-item" })
+		const runExtra = storedItemExtra({ preserved: true, definitionKind: "chain", definitionContentIdentity: "sha256:context-migration", definitionPhaseNames: ["iteration"], worktreePath: "/repo/context-migration", branchName: "context-migration", baseCommit: "0123456789abcdef" })
+		const run = store.recordRun({ runId: "context-migration-run", chainId: chain.id, itemId: item.id, phase: "iteration", status: runtimeStatus("running"), startedAt: 10, extra: runExtra })
+		const current = store.setCurrentRun({ chainId: chain.id, phase: "iteration", runId: run.runId, startedAt: 10, extra: storedItemExtra({ preserved: true }) })
+		store.close()
+		const legacy = new Database(dbFile)
+		legacy.exec("DROP TABLE context_entries; PRAGMA user_version = 13")
+		legacy.close()
+		const migrated = openSqliteStateStore({ loopDataRoot: dbFileRoot(dbFile) })
+		try {
+			expect(migrated.getChain(chain.id)?.name).toBe("context-preserved")
+			expect(migrated.getItem(item.id)?.itemId).toBe("migration-item")
+			expect(migrated.getRunByRunId(run.runId)?.extra).toEqual(runExtra)
+			expect(migrated.getCurrentRun(chain.id)).toEqual(current)
+			expect(migrated.listTableColumns("context_entries")).toContain("body")
+		} finally { migrated.close() }
+		const indexDb = new Database(dbFile)
+		const indexes = indexDb.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='context_entries' ORDER BY name").all().map((row) => row.name)
+		indexDb.close()
+		expect(indexes).toContain("idx_context_entries_chain_cursor")
+		const reopened = openSqliteStateStore({ loopDataRoot: dbFileRoot(dbFile) })
+		try {
+			expect(reopened.getChain(chain.id)?.name).toBe("context-preserved")
+			expect(reopened.getItem(item.id)?.itemId).toBe("migration-item")
+			expect(reopened.getRunByRunId(run.runId)?.runId).toBe(run.runId)
+			expect(reopened.getCurrentRun(chain.id)).toEqual(current)
+		} finally { reopened.close() }
 	})
 })
 
