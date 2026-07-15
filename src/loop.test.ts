@@ -913,6 +913,7 @@ describe("small parsers", () => {
 	test("runner stream parsers extract sessions (verdict parser retired per #405)", () => {
 		expect(parseSessionIdFromRunnerStream("claude", "{\"type\":\"system\",\"session_id\":\"sess-1\"}\n")).toBe("sess-1")
 		expect(parseSessionIdFromRunnerStream("codex", "{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}")).toBe("thread-1")
+		expect(parseSessionIdFromRunnerStream("hapi", "{\"type\":\"system\",\"session_id\":\"must-not-parse\"}\n")).toBeNull()
 	})
 
 	// #478 acceptance row 1: extractErrorCode must recognize account-level rate limit on

@@ -13,7 +13,6 @@ describe("runner execution domain", () => {
 		expect(runnerExecutionDomain("hapi")).toEqual({
 			kind: "external-terminal",
 			probe: { argv: ["probe"], deadlineMs: 30_000, killGraceMs: 1_000 },
-			invocation: { kind: "generic-binary" },
 		})
 	})
 

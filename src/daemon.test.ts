@@ -320,6 +320,94 @@ describe("daemon", () => {
 			await fixture.daemon.stop()
 		}
 	})
+
+	test("daemon keeps ticking while a scheduler-managed chain-complete external terminal is lost and revokes its credential", async () => {
+		let externalBinary = ""
+		let probeState = ""
+		let credentialCapture = ""
+		let ordinaryRunner = ""
+		const fixture = await startFixture("chain-complete-external-terminal-loss-boundary", {
+			useDefaultChainCompleteTrigger: true,
+			schedulerIntervalMs: 20,
+			beforeStart: async ({ root, fakeRunner }) => {
+				externalBinary = resolve(root, "external-terminal-finalizer")
+				probeState = resolve(root, "probe-state")
+				credentialCapture = resolve(root, "credential.txt")
+				ordinaryRunner = fakeRunner
+				await writeFile(probeState, "0")
+				await writeFile(externalBinary, `#!/bin/sh
+if [ "$1" = probe ]; then
+	[ "$(cat ${JSON.stringify(probeState)})" = 69 ] && exit 69
+	exit 0
+fi
+printf '%s' "$CODER_LOOP_RUN_CRED" > ${JSON.stringify(credentialCapture)}
+if [ "$(cat ${JSON.stringify(probeState)})" = complete ]; then
+	echo "FINALIZER SUMMARY: decision=complete; reason=daemon-boundary"
+	exit 0
+fi
+trap 'exit 0' TERM
+while :; do sleep 1; done
+`)
+				await chmod(externalBinary, 0o755)
+			},
+			schedulerConfig: {
+				phaseRunner: ({ phase }) => phase === "umbrella-finalizer"
+					? { kind: "hapi", source: "iteration-default", binary: externalBinary, extraArgs: [], model: null }
+					: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [ordinaryRunner], model: null },
+				attemptKillMs: 100,
+			},
+		})
+		try {
+			const chainName = "chain-complete-external-terminal-loss-boundary-chain"
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: chainName,
+				repository: "mouriya-s-lab/coder-loop",
+			})).chain)
+			const chainId = numberValue(chain.id)
+			const added = record(expectOk(await request(fixture, "item.add", {
+				chainId,
+				itemId: "602-chain-complete-loss",
+				repoCwd: REPO_ROOT,
+				extra: { writeStatus: "done" },
+			})).item)
+			const itemId = numberValue(added.id)
+			const credential = await waitFor(async () => {
+				try { return (await readFile(credentialCapture, "utf-8")).trim() } catch { return "" }
+			}, (value) => value.length > 0, 10_000)
+			const beforeLoss = await readCurrentRun(fixture.loopDataRoot, chainId)
+			expect(beforeLoss).toMatchObject({ phase: "umbrella-finalizer", extra: { itemId } })
+
+			await writeFile(probeState, "69")
+			await waitFor(
+				async () => fixture.schedulerEvents.find((event) => event.type === "runner.external_terminal_unavailable" && event.phase === "umbrella-finalizer") ?? null,
+				(event) => event !== null,
+				5_000,
+			)
+			await waitFor(() => readCurrentRun(fixture.loopDataRoot, chainId), (current) => current === null, 5_000)
+			const storeAfterLoss = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				const lostRun = storeAfterLoss.listRuns(chainId).find((run) => run.phase === "umbrella-finalizer")
+				expect(lostRun?.extra.externalTerminalLoss).toMatchObject({ kind: "lost", reason: "endpoint-unavailable", terminationPhase: "closed" })
+			} finally {
+				storeAfterLoss.close()
+			}
+			const denied = await request(fixture, "item.update", {
+				chainId,
+				itemId: "602-chain-complete-loss",
+				fields: { title: "must remain denied" },
+				agentCredential: credential,
+			})
+			expect(denied.ok).toBe(false)
+			if (!denied.ok) expect(denied.error).toMatchObject({ code: "invalid_caller" })
+			expect(await readChainStatus(fixture.loopDataRoot, chainId)).toBe("active")
+
+			await writeFile(probeState, "complete")
+			await waitFor(() => readChainStatus(fixture.loopDataRoot, chainId), (status) => status === "completed", 10_000)
+			expect(fixture.schedulerEvents.some((event) => event.type === "runner.external_terminal_unavailable" && event.phase === "umbrella-finalizer")).toBe(true)
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
 	test("cleans runner lifecycle after status persistence failure", () => {
 		for (const [file, name] of [
 			["src/scheduler.test.ts", "rejects successful scheduler completion when terminal persistence fails"],
@@ -430,11 +518,11 @@ describe("daemon", () => {
 			beforeStart: async ({ fakeRunner }) => {
 				await writeFile(fakeRunner, `#!/usr/bin/env bun
 const prompt = Bun.argv.at(-1) ?? ""
-if (prompt.includes("FINALIZER SUMMARY")) {
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+if (input.phase === "umbrella-finalizer") {
 	const event = { type: "item.completed", item: { type: "agent_message", text: "x".repeat(1_000_001) + "\\nFINALIZER SUMMARY: decision=complete; reason=large-event" } }
 	await Bun.write(Bun.stdout, JSON.stringify(event) + "\\n")
 } else {
-	const input = JSON.parse(prompt)
 	${FAKE_RUNNER_STATUS_WRITE_SNIPPET}
 }
 process.exitCode = 0
@@ -8489,6 +8577,7 @@ async function startFixture(name: string, options: FixtureOptions = {}): Promise
 					itemId: item.id,
 					issueNumber: Number(item.itemId),
 					runId,
+					phase,
 					eventLog,
 					sleepMs: typeof extra.sleepMs === "number" ? extra.sleepMs : 5,
 					exitCode: typeof extra.exitCode === "number" ? extra.exitCode : 0,

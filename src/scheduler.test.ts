@@ -9,6 +9,7 @@ import {
 	createSchedulerState,
 	DEFAULT_MAX_ITEM_ATTEMPTS,
 	listActiveRuns,
+	listPendingCloseHandlers,
 	makeRunId,
 	markRunPendingRecycle,
 	renderSchedulerSpawnPrompt,
@@ -3237,15 +3238,24 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			await writeFakeExternalTerminalBinary(binary, probeState, externalEvents, 1)
 			const chain = createChain(fixture.store, "external-terminal-pre-worktree-gate-chain")
 			const item = createItem(fixture.store, chain, { issueNumber: 602_001, repoCwd: "/repo/a" })
+			let credentialMints = 0
 			const tick = await schedulerTick(fixture.options({
 				runner: { kind: "hapi", source: "iteration-default", binary, extraArgs: [], model: null },
+				runCredentials: {
+					mint: () => { credentialMints += 1; return { value: "must-not-be-minted" } },
+					revoke: () => {},
+				},
 			}))
 
 			expect(tick.spawnedRuns).toHaveLength(0)
 			expect(await readFile(externalEvents, "utf-8")).toBe("probe\n")
 			expect(fixture.worktreeCalls).toHaveLength(0)
+			expect(credentialMints).toBe(0)
 			expect(fixture.store.listRuns(chain.id)).toHaveLength(0)
 			expect(fixture.store.getCurrentRun(chain.id)).toBeNull()
+			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
+			expect(existsSync(paths.runsDir)).toBe(false)
+			expect(existsSync(schedulerSlotWorktreePath(chain, item.repoCwd, { loopDataRoot: fixture.loopDataRoot }))).toBe(false)
 			expect(fixture.store.getItem(item.id)?.attempts).toBe(0)
 			expect(itemExtraToJsonObject(fixture.store.getItem(item.id)!.extra).externalTerminalHold).toMatchObject({
 				kind: "external-terminal-unavailable",
@@ -3354,24 +3364,27 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			const externalEvents = resolve(fixture.loopDataRoot, "..", "external-events")
 			await writeFile(probeState, "0")
 			await writeFakeExternalTerminalBinary(binary, probeState, externalEvents, 10)
-			let revocations = 0
+			const activeCredentials = new Set<string>()
+			const credentialIdentity = "external-loss-credential"
 			const options = fixture.options({
 				runner: { kind: "hapi", source: "iteration-default", binary, extraArgs: [], model: null },
 				runCredentials: {
-					mint: () => ({ value: "external-loss-credential" }),
-					revoke: () => { revocations += 1 },
+					mint: () => { activeCredentials.add(credentialIdentity); return { value: credentialIdentity } },
+					revoke: (credential) => { activeCredentials.delete(credential.value) },
 				},
 				attemptKillMs: 100,
 			})
 			const spawned = await schedulerTick(options)
 			expect(spawned.spawnedRuns).toHaveLength(1)
+			expect(activeCredentials).toEqual(new Set([credentialIdentity]))
 			expect(fixture.store.getItem(item.id)?.attempts).toBe(5)
 			fixture.store.setItemSessionId(item.id, { phase: "iteration", runner: "hapi", sessionId: "lost-session", updatedAt: 1_900_602_005 })
+			expect(fixture.store.getItem(item.id)?.sessionIds.iteration?.hapi).toBe("lost-session")
 			await writeFile(probeState, "69")
 			await schedulerTick(options)
 			expect(fixture.store.getCurrentRun(chain.id)?.extra.externalTerminalLoss).toMatchObject({ terminationPhase: "term" })
 			const closed = await spawned.spawnedRuns[0]!.closed
-			expect(revocations).toBe(1)
+			expect(activeCredentials.size).toBe(0)
 			expect(fixture.store.getCurrentRun(chain.id)).toBeNull()
 			expect(fixture.store.getItem(item.id)).toMatchObject({ status: "changes_requested", phase: null, attempts: 4 })
 			expect(fixture.store.getItem(item.id)?.sessionIds.iteration?.hapi).toBeUndefined()
@@ -3387,6 +3400,122 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 				reason: "endpoint-unavailable",
 				terminationPhase: "closed",
 			})
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("scheduler-managed external-terminal chain-complete run loses through the ordinary lifecycle and preserves its terminal anchor", async () => {
+		const fixture = await createFixture("external-terminal-chain-complete-loss")
+		try {
+			const chain = createChain(fixture.store, "external-terminal-chain-complete-loss-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 602_015, repoCwd: "/repo/chain-complete" })
+			fixture.store.updateItem(item.id, {
+				status: runtimeStatus("done"),
+				phase: "review",
+				attempts: 4,
+				updatedAt: 1_900_602_015,
+			})
+			fixture.store.setItemSessionId(item.id, { phase: "umbrella-finalizer", runner: "hapi", sessionId: "chain-complete-session", updatedAt: 1_900_602_016 })
+			const binary = resolve(fixture.loopDataRoot, "..", "chain-complete-external-terminal")
+			const probeState = resolve(fixture.loopDataRoot, "..", "chain-complete-probe-state")
+			await writeFile(probeState, "0")
+			await writeFile(binary, `#!/bin/sh
+if [ "$1" = probe ]; then
+	state=$(cat ${JSON.stringify(probeState)})
+	[ "$state" = 69 ] && exit 69
+	exit 0
+fi
+if [ "$(cat ${JSON.stringify(probeState)})" = complete ]; then
+	echo "FINALIZER SUMMARY: decision=complete; reason=test"
+	exit 0
+fi
+trap 'exit 0' TERM
+while :; do sleep 1; done
+`)
+			await chmod(binary, 0o755)
+			const activeCredentials = new Set<string>()
+			const options = fixture.options({
+				runner: { kind: "hapi", source: "iteration-default", binary, extraArgs: [], model: null },
+				chainCompleteExecution: { kind: "scheduler-managed" },
+				runCredentials: {
+					mint: ({ runId }) => { const value = `credential-${runId}`; activeCredentials.add(value); return { value } },
+					revoke: (credential) => { activeCredentials.delete(credential.value) },
+				},
+				attemptKillMs: 100,
+			})
+
+			const started = await schedulerTick(options)
+			expect(started.spawnedRuns).toHaveLength(1)
+			expect(started.spawnedRuns[0]?.phase).toBe("umbrella-finalizer")
+			expect(activeCredentials.size).toBe(1)
+			expect(fixture.store.getCurrentRun(chain.id)?.runId).toBe(started.spawnedRuns[0]?.runId)
+			expect(fixture.store.getItem(item.id)).toMatchObject({ status: "done", phase: "review", attempts: 4 })
+
+			await writeFile(probeState, "69")
+			await schedulerTick(options)
+			const lost = await started.spawnedRuns[0]!.closed
+			expect(lost.result.kind).toBe("external-terminal-lost")
+			expect(activeCredentials.size).toBe(0)
+			expect(fixture.store.getCurrentRun(chain.id)).toBeNull()
+			expect(fixture.store.getItem(item.id)).toMatchObject({ status: "done", phase: "review", attempts: 4 })
+			expect(fixture.store.getItem(item.id)?.sessionIds["umbrella-finalizer"]?.hapi).toBeUndefined()
+
+			await writeFile(probeState, "complete")
+			const restored = await schedulerTick(options)
+			expect(restored.spawnedRuns).toHaveLength(1)
+			expect((await restored.spawnedRuns[0]!.closed).exitCode).toBe(0)
+			await Promise.all(listPendingCloseHandlers(fixture.state))
+			const completed = await schedulerTick(options)
+			expect(completed.completedChainIds).toEqual([chain.id])
+			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("scheduler-managed chain-complete preparation failure preserves its terminal anchor and retries", async () => {
+		const fixture = await createFixture("chain-complete-preparation-failure")
+		try {
+			const chain = createChain(fixture.store, "chain-complete-preparation-failure-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 602_016, repoCwd: "/repo/chain-complete" })
+			fixture.store.updateItem(item.id, {
+				status: runtimeStatus("done"),
+				phase: "review",
+				attempts: 4,
+				lastRunId: "terminal-anchor-run",
+				updatedAt: 1_900_602_016,
+			})
+			const terminalAnchor = fixture.store.getItem(item.id)
+			const finalizerRunner = resolve(fixture.loopDataRoot, "..", "chain-complete-finalizer")
+			await writeShellFinalizerMarkerScript(finalizerRunner, "chain-complete-preparation-retry")
+			let failPreparation = true
+			const options = fixture.options({
+				chainCompleteExecution: { kind: "scheduler-managed" },
+				runner: { kind: "codex", source: "iteration-default", binary: finalizerRunner, extraArgs: [], model: null },
+				prompt: () => {
+					if (failPreparation) throw new Error("chain-complete prompt preparation failed")
+					return "finalize"
+				},
+			})
+
+			const failed = await schedulerTick(options)
+			expect(failed.spawnedRuns).toHaveLength(0)
+			expect(fixture.store.getItem(item.id)).toEqual(terminalAnchor)
+			expect(fixture.store.getCurrentRun(chain.id)).toBeNull()
+			expect(fixture.store.getChain(chain.id)?.status).toBe("active")
+			expect(fixture.state.chainCompleteExecutions.has(chain.id)).toBe(false)
+			expect(fixture.schedulerEvents.filter((event) => event.type === "spawn.aborted")).toHaveLength(1)
+			expect(fixture.schedulerEvents.filter((event) => event.type === "chain.complete_trigger_failed")).toHaveLength(1)
+
+			failPreparation = false
+			const retried = await schedulerTick(options)
+			expect(retried.spawnedRuns).toHaveLength(1)
+			await retried.spawnedRuns[0]!.closed
+			await Promise.all(listPendingCloseHandlers(fixture.state))
+			const completed = await schedulerTick(options)
+			expect(completed.completedChainIds).toEqual([chain.id])
+			expect(fixture.store.getItem(item.id)).toEqual(terminalAnchor)
 		} finally {
 			fixture.store.close()
 		}

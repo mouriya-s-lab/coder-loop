@@ -5227,16 +5227,39 @@ function selectFinalizerAnchorItem(items: readonly ItemRecord[], runId: string |
 	return item
 }
 
-function parseFinalizerSummaryDecision(output: string, runner: AgentRunnerKind): PresetChainCompleteDecision | null {
-	let sawRunnerJson = false
-	let decision: PresetChainCompleteDecision | null = null
+export function parseFinalizerSummaryDecision(output: string, runner: AgentRunnerKind): PresetChainCompleteDecision | null {
+	let state = createFinalizerSummaryDecisionState()
 	for (const line of output.split(/\r?\n/)) {
-		const parsed = runnerAgentTextFromJsonLine(line, runner)
-		sawRunnerJson = sawRunnerJson || parsed.parsedRunnerEvent
-		if (parsed.text === null) continue
-		decision = parseFinalizerSummaryDecisionFromText(parsed.text)
+		state = observeFinalizerSummaryDecisionLine(state, line, runner)
 	}
-	return sawRunnerJson ? decision : parseFinalizerSummaryDecisionFromText(output)
+	return finalizerSummaryDecision(state)
+}
+
+export type FinalizerSummaryDecisionState = {
+	sawRunnerJson: boolean
+	runnerDecision: PresetChainCompleteDecision | null
+	plainDecision: PresetChainCompleteDecision | null
+}
+
+export function createFinalizerSummaryDecisionState(): FinalizerSummaryDecisionState {
+	return { sawRunnerJson: false, runnerDecision: null, plainDecision: null }
+}
+
+export function observeFinalizerSummaryDecisionLine(
+	state: FinalizerSummaryDecisionState,
+	line: string,
+	runner: AgentRunnerKind,
+): FinalizerSummaryDecisionState {
+	const parsed = runnerAgentTextFromJsonLine(line, runner)
+	return {
+		sawRunnerJson: state.sawRunnerJson || parsed.parsedRunnerEvent,
+		runnerDecision: parsed.text === null ? state.runnerDecision : parseFinalizerSummaryDecisionFromText(parsed.text),
+		plainDecision: line.trim() === "" ? state.plainDecision : parseFinalizerSummaryDecisionFromText(line),
+	}
+}
+
+export function finalizerSummaryDecision(state: FinalizerSummaryDecisionState): PresetChainCompleteDecision | null {
+	return state.sawRunnerJson ? state.runnerDecision : state.plainDecision
 }
 
 function parseFinalizerSummaryDecisionFromText(text: string): PresetChainCompleteDecision | null {
@@ -6113,6 +6136,7 @@ function finalSummaryLine(text: string, marker: string): string | null {
 // (`parseFinalizerSummaryDecision`) — out of scope for this issue.
 
 function runnerAgentTextFromJsonLine(line: string, runner: AgentRunnerKind): { parsedRunnerEvent: boolean; text: string | null } {
+	if (runner === "hapi") return { parsedRunnerEvent: false, text: null }
 	const trimmed = line.trim()
 	if (trimmed === "" || !trimmed.startsWith("{")) return { parsedRunnerEvent: false, text: null }
 	try {
@@ -6827,9 +6851,12 @@ export function parseOpencodeSessionIdFromStream(text: string): string | null {
 }
 
 export function parseSessionIdFromRunnerStream(runner: AgentRunnerKind, text: string): string | null {
-	if (runner === "codex") return parseCodexThreadIdFromStream(text)
-	if (runner === "opencode") return parseOpencodeSessionIdFromStream(text)
-	return parseSessionIdFromStream(text)
+	switch (runner) {
+		case "claude": return parseSessionIdFromStream(text)
+		case "codex": return parseCodexThreadIdFromStream(text)
+		case "opencode": return parseOpencodeSessionIdFromStream(text)
+		case "hapi": return null
+	}
 }
 
 export function extractErrorCode(stdoutText: string, stderrText: string): string {

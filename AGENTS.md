@@ -92,7 +92,7 @@ preset 层配套的 target-side starter 在 `presets/<name>/templates/`。跨 pr
 
 ## Tech stack
 
-Bun + TypeScript (strict, ESM)。runtime 依赖是 PATH 上的 CLI：`gh` + 每个 phase 声明的 runner CLI（`claude` / `codex` / `opencode` / `hapi`）。
+Bun + TypeScript (strict, ESM)。runtime 依赖是 PATH 上的 CLI：`gh` + 每个 phase 声明的 runner CLI（`claude` / `codex` / `opencode` / `hapi-remote-session`）。
 
 ## Conventions
 

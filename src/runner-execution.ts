@@ -6,7 +6,6 @@ export type RunnerExecutionDomain =
 	| {
 		kind: "external-terminal"
 		probe: { argv: readonly ["probe"]; deadlineMs: number; killGraceMs: number }
-		invocation: { kind: "generic-binary" }
 	}
 
 export function runnerExecutionDomain(runner: AgentRunnerKind): RunnerExecutionDomain {
@@ -15,7 +14,6 @@ export function runnerExecutionDomain(runner: AgentRunnerKind): RunnerExecutionD
 		case "hapi": return {
 			kind: "external-terminal",
 			probe: { argv: ["probe"], deadlineMs: 30_000, killGraceMs: 1_000 },
-			invocation: { kind: "generic-binary" },
 		}
 	}
 }
