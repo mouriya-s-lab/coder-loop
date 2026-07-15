@@ -45,4 +45,11 @@ describe("runner filesystem grants e2e driver", () => {
 		expect(source).toContain("cpSync(workRoot, retainedEvidenceRoot")
 		expect(source).not.toContain("if (completed) rmSync(workRoot")
 	})
+
+	test("uses a distinct entry status before the native-resume exit", () => {
+		const source = readFileSync(resolve(import.meta.dir, "runner-filesystem-grants-e2e.ts"), "utf8")
+		expect(source).toContain('entry = "fresh"')
+		expect(source).toContain('continuable = ["fresh", "queued"]')
+		expect(source).toContain('status = "queued"\\nwhen = "fresh invocation requests native resume"')
+	})
 })
