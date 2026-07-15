@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { resolve } from "node:path"
 import {
 	PresetCompilePublicResultBoundary,
+	PresetCompileProjectionBoundary,
 	buildCompiledTaskTree,
 	compilePreset,
 	loadPreset,
@@ -42,10 +43,14 @@ describe("preset compiler", () => {
 		const first = projectCompiledPreset(model, [])
 		const second = projectCompiledPreset(model, [])
 		expect(JSON.stringify(first)).toBe(JSON.stringify(second))
+		const roundTripped = PresetCompileProjectionBoundary.assert(JSON.parse(JSON.stringify(first)))
 		expect(first.phases.map((phase) => phase.identity)).toEqual(model.tasks.children.map((tree) => tree.identity))
 		expect(first.phases.map((phase) => phase.taskTree.identity)).toEqual(model.tasks.children.map((tree) => tree.identity))
 		expect(first.phases.flatMap((phase) => phase.taskTree.children.map((task) => task.identity)))
 			.toEqual(model.tasks.children.flatMap((tree) => tree.children.map((task) => task.identity)))
+		expect(roundTripped.phases.map((phase) => phase.identity)).toEqual(model.tasks.children.map((tree) => tree.identity))
+		expect(roundTripped.phases.flatMap((phase) => [phase.taskTree.identity, ...phase.taskTree.children.map((task) => task.identity)]))
+			.toEqual(model.tasks.children.flatMap((tree) => [tree.identity, ...tree.children.map((task) => task.identity)]))
 		expect(new Set(model.tasks.children.flatMap((tree) => [tree.identity, ...tree.children.map((task) => task.identity)])).size)
 			.toBe(model.tasks.children.length * 2)
 
@@ -165,6 +170,43 @@ UNUSED = "item.id"
 		if (result.kind === "rejected") expect(result.diagnostics[0].message).toContain("ENOTDIR")
 	})
 
+	test("empty statuses are rejected at the preset parse boundary", async () => {
+		const source = await mkdtemp(resolve(tmpdir(), "coder-loop-compile-empty-status-"))
+		try {
+			await writeFile(resolve(source, "preset.toml"), `name = "empty-status"
+[item]
+idField = "id"
+[item.fields]
+id = "string"
+[statuses]
+continuable = [""]
+terminal = ["done", "exhausted"]
+entry = ""
+exhausted = "exhausted"
+[[phases]]
+name = "run"
+prompt = "run.md"
+[[phases.exits]]
+status = "done"
+when = "complete"
+[phases.variables]
+ID = "item.id"
+`)
+			await writeFile(resolve(source, "run.md"), "id={{ID}}\n")
+			const result = await compilePreset(source)
+			expect(result.kind).toBe("rejected")
+			if (result.kind === "rejected") {
+				expect(result.diagnostics).toEqual([{
+					verdict: "error",
+					rule: "preset-structure",
+					message: "preset.statuses.continuable[0] must be a non-empty status",
+				}])
+			}
+		} finally {
+			await rm(source, { recursive: true, force: true })
+		}
+	})
+
 	test("missing declared prompt and fragment sources return typed rejections", async () => {
 		const source = await mkdtemp(resolve(tmpdir(), "coder-loop-compile-missing-source-"))
 		const preset = `name = "missing-source"\n[item]\nidField = "id"\n[item.fields]\nid = "string"\n[statuses]\ncontinuable = ["queued"]\nterminal = ["done", "exhausted"]\nentry = "queued"\nexhausted = "exhausted"\n[[phases]]\nname = "run"\nprompt = "missing-prompt.md"\nroles = ["common"]\n[[phases.exits]]\nstatus = "done"\nwhen = "complete"\n[phases.variables]\nID = "item.id"\n[[fragments]]\nid = "missing"\nrole = "common"\npath = "missing-fragment.md"\n`
@@ -236,5 +278,46 @@ ID = "item.id"
 		const result = Bun.spawnSync({ cmd: [process.execPath, resolve(ROOT, "src/loop.ts"), "preset", "compile", "single-phase-example"], stderr: "pipe" })
 		expect(result.exitCode).not.toBe(0)
 		expect(new TextDecoder().decode(result.stderr)).toContain("Usage: coder-loop preset compile <name|path> --json")
+	})
+
+	test("bare cwd-relative preset directories win before bundled-name fallback", async () => {
+		const cwd = await mkdtemp(resolve(tmpdir(), "coder-loop-compile-relative-"))
+		const source = resolve(cwd, "custom-preset")
+		try {
+			await mkdir(source)
+			await writeFile(resolve(source, "preset.toml"), `name = "cwd-relative"
+[item]
+idField = "id"
+[item.fields]
+id = "string"
+[statuses]
+continuable = ["queued"]
+terminal = ["done", "exhausted"]
+entry = "queued"
+exhausted = "exhausted"
+[[phases]]
+name = "run"
+prompt = "run.md"
+[[phases.exits]]
+status = "done"
+when = "complete"
+[phases.variables]
+ID = "item.id"
+`)
+			await writeFile(resolve(source, "run.md"), "id={{ID}}\n")
+			const result = Bun.spawnSync({
+				cmd: [process.execPath, resolve(ROOT, "src/loop.ts"), "preset", "compile", "custom-preset", "--json"],
+				cwd,
+				stdout: "pipe",
+				stderr: "pipe",
+			})
+			expect(result.exitCode).toBe(0)
+			expect(new TextDecoder().decode(result.stderr)).toBe("")
+			const projection = PresetCompileProjectionBoundary.assert(JSON.parse(new TextDecoder().decode(result.stdout)))
+			expect(projection.preset.name).toBe("cwd-relative")
+			expect(projection.preset.dir).toBe(await realpath(source))
+		} finally {
+			await rm(cwd, { recursive: true, force: true })
+		}
 	})
 })

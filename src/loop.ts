@@ -68,6 +68,7 @@ import {
 	metadataNestedStringArray,
 	metadataString,
 	parseInternalStatus,
+	RuntimeDataError,
 	type AdmittedItemStatus,
 	type InternalStatus,
 	type ItemExtra,
@@ -588,6 +589,12 @@ export const PresetCompilePublicResultBoundary = arkType.or(
 	{ kind: arkType.unit("rejected"), schemaVersion: arkType.unit(1), diagnostics: arkType([PresetCompileErrorDiagnosticBoundary, "...", PresetCompileErrorDiagnosticBoundary.array()]) },
 )
 export type PresetCompilePublicResult = typeof PresetCompilePublicResultBoundary.infer
+const PresetCompileCliArgsBoundary = arkType([
+	arkType.unit("compile"),
+	"string",
+	arkType.unit("--json"),
+])
+type PresetCompileCliArgs = typeof PresetCompileCliArgsBoundary.infer
 
 // #451 + #405: boundary parser for the `item.exits` wire-verb response. The CLI
 // uses it to validate the daemon's reply before rendering — keeps the protocol
@@ -2921,12 +2928,24 @@ export function projectPresetCompileResult(result: CompileResult): PresetCompile
 	return PresetCompilePublicResultBoundary.assert(projected)
 }
 
-async function runPresetCommand(args: string[]): Promise<void> {
-	if (args.length !== 3 || args[0] !== "compile" || args[2] !== "--json") {
-		fail("Usage: coder-loop preset compile <name|path> --json")
+function parsePresetCompileCliArgs(args: string[]): PresetCompileCliArgs {
+	if (!PresetCompileCliArgsBoundary.allows(args)) fail("Usage: coder-loop preset compile <name|path> --json")
+	return PresetCompileCliArgsBoundary.assert(args)
+}
+
+async function resolvePresetCompileSource(source: string): Promise<string> {
+	const cwdRelative = resolve(process.cwd(), source)
+	try {
+		if ((await stat(cwdRelative)).isDirectory()) return cwdRelative
+	} catch (error) {
+		if (!(isNodeError(error) && error.code === "ENOENT")) throw error
 	}
-	const source = args[1]!
-	const presetDir = PRESET_NAME_PATTERN.test(source) ? resolve(PKG_ROOT, "presets", source) : resolve(process.cwd(), source)
+	return PRESET_NAME_PATTERN.test(source) ? resolve(PKG_ROOT, "presets", source) : cwdRelative
+}
+
+async function runPresetCommand(args: string[]): Promise<void> {
+	const [, source] = parsePresetCompileCliArgs(args)
+	const presetDir = await resolvePresetCompileSource(source)
 	const result = await compilePreset(presetDir)
 	if (result.kind === "rejected") {
 		process.stderr.write(`${JSON.stringify(projectPresetCompileResult(result))}\n`)
@@ -4587,7 +4606,19 @@ async function compilePresetOrThrow(sourceDir: string, options: LoadPresetOption
 		}
 		throw error
 	}
-	const preset = parsePreset(parsed, presetDir)
+	let preset: Preset
+	try {
+		preset = parsePreset(parsed, presetDir)
+	} catch (error) {
+		if (error instanceof RuntimeDataError) {
+			throw new PresetCompileFailure([{
+				verdict: "error",
+				rule: "preset-structure",
+				message: error.message,
+			}])
+		}
+		throw error
+	}
 	// #408 cross-table DAG check runs immediately after `parsePreset` returns
 	// the parsed shape and BEFORE per-phase prompt template validation. Order
 	// matters for the operator-facing error: a deadlock or dead-vocabulary
