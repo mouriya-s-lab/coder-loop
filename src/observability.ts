@@ -253,16 +253,12 @@ const EventBaseBoundary = {
 	"subject?": SubjectBoundary,
 } as const
 
-const EventTaskIdentityBoundary = arkType.or(
-	{
-		...TaskIdentityFields,
-	},
-	{ "runtimeNodeId?": "never", "definitionRef?": "never", "definitionNodeId?": "never" },
-)
-
-const EventRunIdentityBoundary = arkType.or(
+// Keep the run/identity relation in one ADT. Chaining independent intersections here makes
+// ArkType distribute the large payload union twice during every short-lived CLI startup.
+const EventIdentityBoundary = arkType.or(
 	{ runId: "string", ...TaskIdentityFields },
-	{ "runId?": "never" },
+	{ "runId?": "never", ...TaskIdentityFields },
+	{ "runId?": "never", "runtimeNodeId?": "never", "definitionRef?": "never", "definitionNodeId?": "never" },
 )
 
 const ObservabilityEventPayloadBoundary = arkType.or(
@@ -761,7 +757,7 @@ const ObservabilityEventPayloadBoundary = arkType.or(
 	},
 )
 
-export const ObservabilityEventBoundary = ObservabilityEventPayloadBoundary.and(EventTaskIdentityBoundary).and(EventRunIdentityBoundary)
+export const ObservabilityEventBoundary = ObservabilityEventPayloadBoundary.and(EventIdentityBoundary)
 
 export type ObservabilityEvent = typeof ObservabilityEventBoundary.infer
 export type ObservabilityEventType = typeof ObservabilityEventTypeBoundary.infer
