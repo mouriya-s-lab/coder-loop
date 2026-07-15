@@ -2727,7 +2727,7 @@ function git(cwd: string, args: readonly string[]): { stdout: string; stderr: st
 	}
 }
 
-async function presetExecutionContentIdentity(loaded: SchedulerLoadedPreset): Promise<string> {
+export async function presetExecutionContentIdentity(loaded: SchedulerLoadedPreset): Promise<string> {
 	const hasher = createHash("sha256")
 	hasher.update(await readFile(resolve(loaded.presetDir, "preset.toml")))
 	for (const phase of loaded.preset.phases) hasher.update(await readFile(phase.prompt))

@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite"
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync } from "node:fs"
 import { createHash } from "node:crypto"
 import { resolve } from "node:path"
 import { type as arkType } from "arktype"
@@ -422,15 +422,15 @@ const ClosureLeafRowBoundary = arkType({ leaf_node_id: "string>0" })
 const ActiveRunAssociationRowBoundary = arkType({ lifecycle: "'active'|'suspended'|'consumed'", phase: "string>0", chain_id: "number.integer" })
 const ClosureAssociationRowBoundary = arkType({ closure_id: "string>0", lifecycle: "'active'|'suspended'|'consumed'" })
 const RunIdRowBoundary = arkType({ run_id: "string>0" })
-const LegacyChainRowBoundary = arkType({ id: "number.integer>0", preset: "string|null", metadata: "string" })
+const LegacyChainRowBoundary = arkType({ id: "number.integer>0" })
 const LegacyItemRowBoundary = arkType({
 	id: "number.integer>0", chain_id: "number.integer>0", item_id: "string>0", repo_cwd: "string>0",
 	phase: "string|null", session_ids: "string", agent_cwd: "string|null", preset: "string|null",
 	preset_path: "string|null", extra: "string",
 })
 const LegacyCurrentRunRowBoundary = arkType({ chain_id: "number.integer>0", phase: "string>0", run_id: "string>0", started_at: "number", extra: "string" })
-const PersistedPhaseRowBoundary = arkType({ phase: "string>0" })
 const PersistedRunExtraRowBoundary = arkType({ extra: "string" })
+const MigrationDefinitionOutputBoundary = arkType({ definitionKind: "'preset'", definitionContentIdentity: "string>0", definitionPhaseNames: "string[]" })
 const ClosureIdRowBoundary = arkType({ closure_id: "string>0" })
 const TableCountRowBoundary = arkType({ table_count: "number.integer>=0" })
 const SessionIdRowBoundary = arkType({ session_id: "string>0" })
@@ -736,7 +736,8 @@ type UserVersionRow = {
 }
 
 export function openSqliteStateStore(options: SqliteStateStoreOptions = {}): SqliteStateStore {
-	const dbFile = resolveLoopDataPaths(options).dbFile
+	const paths = resolveLoopDataPaths(options)
+	const dbFile = paths.dbFile
 	const createIfMissing = options.createIfMissing ?? true
 	if (!createIfMissing && !existsSync(dbFile)) {
 		throw new SqliteStateError("db_unavailable", `SQLite state DB does not exist at ${dbFile}`, { dbFile })
@@ -762,7 +763,7 @@ export function openSqliteStateStore(options: SqliteStateStoreOptions = {}): Sql
 				})
 			}
 		}
-		migrateStateSchema(db)
+		migrateStateSchema(db, paths.root)
 	} catch (error) {
 		db.close()
 		throw translateSqliteError(error, "initialize state schema", { dbFile })
@@ -844,7 +845,7 @@ function runsTableHasColumn(db: Database, columnName: string): boolean {
 	return tableHasColumn(db, "runs", columnName)
 }
 
-function migrateStateSchema(db: Database): void {
+function migrateStateSchema(db: Database, loopDataRoot: string): void {
 	const beforeVersion = readUserVersion(db)
 	const needsItemTableRebuild = itemsTableHasColumn(db, V5_ITEM_SESSION_COLUMN)
 	const needsChainTableRebuildForStopped = stateSchemaExists(db) && !chainsTableAllowsStopped(db)
@@ -966,7 +967,7 @@ function migrateStateSchema(db: Database): void {
 			if (beforeVersion < STATE_SCHEMA_VERSION) {
 				migrateChainsMetadataForCl433(db)
 			}
-			if (needsLegacyRuntimeMigration) migrateLegacyRuntimeToV3(db)
+			if (needsLegacyRuntimeMigration) migrateLegacyRuntimeToV3(db, loopDataRoot)
 			if (itemsTableHasColumn(db, "session_ids")) rebuildItemsTableForV14(db)
 			db.exec(STATE_INDEXES_SQL)
 			db.exec(ITEM_NEXT_PENDING_INDEX_SQL)
@@ -978,29 +979,34 @@ function migrateStateSchema(db: Database): void {
 	}
 }
 
-function migrateLegacyRuntimeToV3(db: Database): void {
+function migrateLegacyRuntimeToV3(db: Database, loopDataRoot: string): void {
 	const now = unixSeconds()
-	const chains = queryPersistedAll(db, "SELECT id, preset, metadata FROM chains ORDER BY id", {}, LegacyChainRowBoundary, "legacy v13 chains")
+	const migratedChainIds = new Set<number>()
+	const chains = queryPersistedAll(db, "SELECT id FROM chains ORDER BY id", {}, LegacyChainRowBoundary, "legacy v13 chains")
 	for (const chain of chains) {
-		const definitionIdentity = `sha256:${createHash("sha256").update(JSON.stringify({ preset: chain.preset, metadata: chain.metadata })).digest("hex")}`
-		db.query<never, SqlParams>("INSERT OR IGNORE INTO execution_definitions (kind, content_identity, semantic_hash, schema_version) VALUES ('chain', $identity, $identity, 13)").run({ identity: definitionIdentity })
-		const rootId = `legacy-v13:chain:${chain.id}:root`
-		db.query<never, SqlParams>("INSERT OR IGNORE INTO task_nodes (runtime_node_id, chain_id, parent_node_id, child_index, kind, definition_kind, definition_content_identity, definition_node_id) VALUES ($root, $chainId, NULL, 0, 'seq', 'chain', $identity, 'root')").run({ root: rootId, chainId: chain.id, identity: definitionIdentity })
-		db.query<never, SqlParams>("INSERT OR IGNORE INTO task_trees (chain_id, root_node_id) VALUES ($chainId, $root)").run({ chainId: chain.id, root: rootId })
 		const items = queryPersistedAll(db, "SELECT id, chain_id, item_id, repo_cwd, phase, session_ids, agent_cwd, preset, preset_path, extra FROM items WHERE chain_id = $chainId ORDER BY position, id", { chainId: chain.id }, LegacyItemRowBoundary, `legacy v13 items for chain ${chain.id}`)
+		if (items.length === 0) continue
+		const packets = items.map((item) => resolveLegacyItemDefinition(item, loopDataRoot))
+		const definitionPacket = packets[0]
+		if (definitionPacket === undefined) throw new SqliteStateError("invalid_json", `legacy v13 chain ${chain.id} has no persisted preset declaration`, { chainId: chain.id })
+		insertDefinition(db, definitionPacket.definitionRef)
+		const rootId = `legacy-v13:chain:${chain.id}:root`
+		db.query<never, SqlParams>("INSERT OR IGNORE INTO task_nodes (runtime_node_id, chain_id, parent_node_id, child_index, kind, definition_kind, definition_content_identity, definition_node_id) VALUES ($root, $chainId, NULL, 0, 'seq', $definitionKind, $identity, 'root')").run({ root: rootId, chainId: chain.id, definitionKind: definitionPacket.definitionRef.kind, identity: definitionPacket.definitionRef.contentIdentity })
+		db.query<never, SqlParams>("INSERT OR IGNORE INTO task_trees (chain_id, root_node_id) VALUES ($chainId, $root)").run({ chainId: chain.id, root: rootId })
 		let childIndex = 0
 		let firstNodeId: string | null = null
-		for (const item of items) {
+		for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
+			const item = items[itemIndex]
+			const itemPacket = packets[itemIndex]
+			if (item === undefined || itemPacket === undefined) throw new SqliteStateError("invalid_json", `legacy v13 chain ${chain.id} definition packet alignment failed`, { chainId: chain.id })
+			insertDefinition(db, itemPacket.definitionRef)
 			const sessions = parseItemSessionIds(item.session_ids, `items.${item.id}.session_ids`)
-			const phases = new Set(legacyPresetPhaseNames(item, chain.preset))
-			for (const phase of Object.keys(sessions)) phases.add(phase)
-			if (item.phase !== null && item.phase !== "") phases.add(item.phase)
-			for (const run of queryPersistedAll(db, "SELECT DISTINCT phase FROM runs WHERE item_id = $itemId ORDER BY id", { itemId: item.id }, PersistedPhaseRowBoundary, `legacy v13 run phases for item ${item.id}`)) phases.add(run.phase)
-			if (phases.size === 0) phases.add("legacy-v13-unassigned")
-			for (const phase of phases) {
+			for (const phase of Object.keys(sessions)) requireDeclaredDefinitionPhase(itemPacket, phase, `items.${item.id}.session_ids`)
+			if (item.phase !== null && item.phase !== "") requireDeclaredDefinitionPhase(itemPacket, item.phase, `items.${item.id}.phase`)
+			for (const phase of itemPacket.definitionPhaseNames) {
 				const leafId = `legacy-v13:item:${item.id}:phase:${phase}`
 				const closureId = `legacy-v13:closure:${item.id}:${phase}`
-				db.query<never, SqlParams>("INSERT INTO task_nodes (runtime_node_id, chain_id, parent_node_id, child_index, kind, definition_kind, definition_content_identity, definition_node_id) VALUES ($leaf, $chainId, $root, $childIndex, 'leaf', 'chain', $identity, $definitionNodeId)").run({ leaf: leafId, chainId: chain.id, root: rootId, childIndex, identity: definitionIdentity, definitionNodeId: `item:${item.item_id}:phase:${phase}` })
+				db.query<never, SqlParams>("INSERT INTO task_nodes (runtime_node_id, chain_id, parent_node_id, child_index, kind, definition_kind, definition_content_identity, definition_node_id) VALUES ($leaf, $chainId, $root, $childIndex, 'leaf', $definitionKind, $identity, $definitionNodeId)").run({ leaf: leafId, chainId: chain.id, root: rootId, childIndex, definitionKind: itemPacket.definitionRef.kind, identity: itemPacket.definitionRef.contentIdentity, definitionNodeId: `item:${item.item_id}:phase:${phase}` })
 				const worktree = item.agent_cwd ?? item.repo_cwd
 				const { branch, baseCommit } = legacyClosureSourceFacts(db, item, phase)
 				db.query<never, SqlParams>("INSERT OR IGNORE INTO task_closures (closure_id, leaf_node_id, item_row_id, phase, lifecycle, worktree_path, branch_name, base_commit, source_par_node_id, created_at, updated_at) VALUES ($closure, $leaf, $itemId, $phase, 'active', $worktree, $branch, $baseCommit, NULL, $now, $now)").run({ closure: closureId, leaf: leafId, itemId: item.id, phase, worktree, branch, baseCommit, now })
@@ -1014,11 +1020,13 @@ function migrateLegacyRuntimeToV3(db: Database): void {
 			}
 		}
 		db.query<never, SqlParams>("INSERT OR IGNORE INTO task_seq_nodes (runtime_node_id, next_child_node_id) VALUES ($root, $next)").run({ root: rootId, next: firstNodeId })
+		migratedChainIds.add(chain.id)
 	}
 	const hasLegacyCurrent = queryPersistedOne(db, "SELECT COUNT(*) AS table_count FROM sqlite_master WHERE type='table' AND name='current_runs'", {}, TableCountRowBoundary, "legacy current_runs table count")?.table_count === 1
 	if (hasLegacyCurrent) {
 		const rows = queryPersistedAll(db, "SELECT chain_id, phase, run_id, started_at, extra FROM current_runs", {}, LegacyCurrentRunRowBoundary, "legacy current_runs")
 		for (const row of rows) {
+			if (!migratedChainIds.has(row.chain_id)) throw new SqliteStateError("invalid_json", `legacy active run ${row.run_id} has no migrated task tree`, { runId: row.run_id })
 			const closure = queryPersistedOne(db, "SELECT task_closures.closure_id FROM task_closures INNER JOIN runs ON runs.item_id = task_closures.item_row_id AND runs.phase = task_closures.phase WHERE runs.run_id = $runId AND runs.chain_id = $chainId AND runs.phase = $phase", { runId: row.run_id, chainId: row.chain_id, phase: row.phase }, ClosureIdRowBoundary, `legacy active run closure ${row.run_id}`)
 			if (closure === null) throw new SqliteStateError("run_closure_mismatch", `cannot migrate active run ${row.run_id}: no matching closure`, { runId: row.run_id })
 			db.query<never, SqlParams>("INSERT INTO active_runs (closure_id, run_id, phase, started_at, extra) VALUES ($closure, $runId, $phase, $startedAt, $extra)").run({ closure: closure.closure_id, runId: row.run_id, phase: row.phase, startedAt: row.started_at, extra: row.extra })
@@ -1027,22 +1035,42 @@ function migrateLegacyRuntimeToV3(db: Database): void {
 	}
 }
 
-function legacyPresetPhaseNames(item: { id: number; preset: string | null; preset_path: string | null }, chainPreset: string | null): readonly string[] {
-	const presetName = item.preset ?? chainPreset
-	const presetDir = item.preset_path ?? (presetName === null ? null : resolve(import.meta.dir, "..", "presets", presetName))
-	if (presetDir === null) return []
-	const presetFile = resolve(presetDir, "preset.toml")
+type PersistedExecutionDefinitionPacket = {
+	definitionRef: ExecutionDefinitionRef
+	definitionPhaseNames: readonly string[]
+}
+
+function resolveLegacyItemDefinition(item: { id: number; repo_cwd: string; preset: string | null; preset_path: string | null }, loopDataRoot: string): PersistedExecutionDefinitionPacket {
+	if (item.preset === null && item.preset_path === null) throw new SqliteStateError("invalid_json", `legacy item ${item.id} has no persisted preset declaration`, { itemId: item.id })
+	// bun:sqlite migrations are synchronous transactions, while the canonical preset loader and
+	// materializer are async. Run that existing boundary to completion in a child Bun process and
+	// admit only its exact typed packet here; this keeps the transaction synchronous without a
+	// second TOML parser or a migration-only definition hash.
+	const result = Bun.spawnSync({
+		cmd: [process.execPath, resolve(import.meta.dir, "preset-migration-definition.ts"), JSON.stringify({ preset: item.preset, presetPath: item.preset_path, repoCwd: item.repo_cwd, materializeRoot: loopDataRoot })],
+		stdout: "pipe",
+		stderr: "pipe",
+	})
+	const stderr = new TextDecoder().decode(result.stderr).trim()
+	if (result.exitCode !== 0) throw new SqliteStateError("invalid_json", `legacy item ${item.id} persisted preset cannot be loaded: ${stderr || `resolver exited ${result.exitCode}`}`, { itemId: item.id })
 	let parsed: unknown
 	try {
-		parsed = Bun.TOML.parse(readFileSync(presetFile, "utf8"))
+		parsed = JSON.parse(new TextDecoder().decode(result.stdout))
 	} catch (error) {
-		throw new SqliteStateError("invalid_json", `items.${item.id}: cannot read persisted preset phases`, { id: item.id, presetFile, reason: errorMessage(error) })
+		throw new SqliteStateError("invalid_json", `legacy item ${item.id} preset resolver returned invalid JSON: ${errorMessage(error)}`, { itemId: item.id })
 	}
-	if (!isJsonObject(parsed) || !Array.isArray(parsed.phases)) throw new SqliteStateError("invalid_json", `items.${item.id}: persisted preset has no phase list`, { id: item.id, presetFile })
-	return parsed.phases.map((phase, index) => {
-		if (!isJsonObject(phase) || typeof phase.name !== "string" || phase.name.length === 0) throw new SqliteStateError("invalid_json", `items.${item.id}: persisted preset phase ${index} has no name`, { id: item.id, presetFile, index })
-		return phase.name
-	})
+	let output: typeof MigrationDefinitionOutputBoundary.infer
+	try {
+		output = MigrationDefinitionOutputBoundary.assert(parsed)
+	} catch (error) {
+		throw new SqliteStateError("invalid_json", `legacy item ${item.id} preset resolver returned an invalid definition: ${errorMessage(error)}`, { itemId: item.id })
+	}
+	if (output.definitionPhaseNames.length === 0) throw new SqliteStateError("invalid_json", `legacy item ${item.id} persisted preset declares no phases`, { itemId: item.id })
+	return { definitionRef: { kind: output.definitionKind, contentIdentity: output.definitionContentIdentity }, definitionPhaseNames: output.definitionPhaseNames }
+}
+
+function requireDeclaredDefinitionPhase(packet: PersistedExecutionDefinitionPacket, phase: string, label: string): void {
+	if (!packet.definitionPhaseNames.includes(phase)) throw new SqliteStateError("invalid_json", `${label}: phase ${phase} conflicts with persisted execution definition`, { label, phase })
 }
 
 function legacyClosureSourceFacts(db: Database, item: { id: number; item_id: string; extra: string }, phase: string): { branch: string; baseCommit: string } {
@@ -1964,16 +1992,12 @@ function ensureRuntimeClosure(db: Database, run: RunRecord): void {
 	const item = queryPersistedOne(db, "SELECT item_id FROM items WHERE id = $itemId", { itemId: run.itemId }, ItemIdRowBoundary, `runtime closure item ${run.itemId}`)
 	if (item === null) throw new SqliteStateError("run_closure_mismatch", `run ${run.runId} item does not exist`, { runId: run.runId })
 	let root = queryPersistedOne(db, "SELECT root_node_id FROM task_trees WHERE chain_id = $chainId", { chainId: run.chainId }, TaskTreeRootRowBoundary, `runtime closure task tree for chain ${run.chainId}`)
-	const createsTree = root === null
 	const runExtra = itemExtraToJsonObject(run.extra)
-	let definitionRef: ExecutionDefinitionRef
-	if (root === null) {
-		if ((runExtra.definitionKind !== "preset" && runExtra.definitionKind !== "chain") || typeof runExtra.definitionContentIdentity !== "string" || runExtra.definitionContentIdentity === "") throw new SqliteStateError("invalid_input", `run ${run.runId} has no execution definition identity`, { runId: run.runId })
-		definitionRef = { kind: runExtra.definitionKind, contentIdentity: runExtra.definitionContentIdentity }
-	} else {
+	const definitionPacket = parseExecutionDefinitionPacket(runExtra, run.runId, "invalid_input")
+	const definitionRef = definitionPacket.definitionRef
+	if (root !== null) {
 		const persisted = queryPersistedOne(db, "SELECT definition_kind, definition_content_identity FROM task_nodes WHERE runtime_node_id = $root", { root: root.root_node_id }, DefinitionIdentityRowBoundary, `runtime closure root definition ${root.root_node_id}`)
 		if (persisted === null) throw new SqliteStateError("invalid_json", `task root ${root.root_node_id} does not exist`, { rootNodeId: root.root_node_id })
-		definitionRef = { kind: persisted.definition_kind, contentIdentity: persisted.definition_content_identity }
 	}
 	insertDefinition(db, definitionRef)
 	if (root === null) {
@@ -1994,9 +2018,9 @@ function ensureRuntimeClosure(db: Database, run: RunRecord): void {
 	const branch = branchValue
 	const baseCommit = baseCommitValue
 	const now = unixSeconds()
-	const declaredPhases = createsTree ? parseDefinitionPhaseNames(runExtra.definitionPhaseNames, run.phase, run.runId) : [run.phase]
+	requireRuntimeDefinitionPhase(definitionPacket, run.phase, run.runId)
 	let firstLeafId: string | null = null
-	for (const phase of declaredPhases) {
+	for (const phase of definitionPacket.definitionPhaseNames) {
 		if (queryPersistedOne(db, "SELECT closure_id FROM task_closures WHERE item_row_id = $itemId AND phase = $phase", { itemId: run.itemId, phase }, ClosureIdRowBoundary, `runtime closure for item ${run.itemId} phase ${phase}`) !== null) continue
 		const indexRow = queryPersistedOne(db, "SELECT COALESCE(MAX(child_index) + 1, 0) AS next_index FROM task_nodes WHERE parent_node_id = $root", { root: root.root_node_id }, NextChildIndexRowBoundary, `next runtime closure child index for ${root.root_node_id}`)
 		if (indexRow === null) throw new SqliteStateError("invalid_json", `runtime closure root ${root.root_node_id} has no child index projection`, { rootNodeId: root.root_node_id })
@@ -2012,15 +2036,23 @@ function ensureRuntimeClosure(db: Database, run: RunRecord): void {
 	if (seqExists === null) db.query<never, SqlParams>("INSERT INTO task_seq_nodes (runtime_node_id, next_child_node_id) VALUES ($root, $leaf)").run({ root: root.root_node_id, leaf: firstLeafId })
 }
 
-function parseDefinitionPhaseNames(value: JsonValue | undefined, currentPhase: string, runId: string): string[] {
-	if (value === undefined) return [currentPhase]
-	if (!Array.isArray(value) || value.length === 0 || !value.every((entry) => typeof entry === "string" && entry !== "")) throw new SqliteStateError("invalid_input", `run ${runId} has invalid definition phase names`, { runId })
+function parseExecutionDefinitionPacket(extra: JsonObject, runId: string, errorCode: "invalid_input" | "invalid_json"): PersistedExecutionDefinitionPacket {
+	const kind = extra.definitionKind
+	const contentIdentity = extra.definitionContentIdentity
+	const value = extra.definitionPhaseNames
+	if ((kind !== "preset" && kind !== "chain") || typeof contentIdentity !== "string" || contentIdentity === "") throw new SqliteStateError(errorCode, `run ${runId} has no exact execution definition identity`, { runId })
+	if (!Array.isArray(value) || value.length === 0 || !value.every((entry) => typeof entry === "string" && entry !== "")) throw new SqliteStateError(errorCode, `run ${runId} has invalid definition phase names`, { runId })
 	const phases: string[] = []
 	for (const entry of value) {
-		if (typeof entry !== "string") throw new SqliteStateError("invalid_input", `run ${runId} has a non-string definition phase`, { runId })
-		if (!phases.includes(entry)) phases.push(entry)
+		if (typeof entry !== "string") throw new SqliteStateError(errorCode, `run ${runId} has a non-string definition phase`, { runId })
+		if (phases.includes(entry)) throw new SqliteStateError(errorCode, `run ${runId} has duplicate definition phase ${entry}`, { runId, phase: entry })
+		phases.push(entry)
 	}
-	return phases
+	return { definitionRef: { kind, contentIdentity }, definitionPhaseNames: phases }
+}
+
+function requireRuntimeDefinitionPhase(packet: PersistedExecutionDefinitionPacket, phase: string, runId: string): void {
+	if (!packet.definitionPhaseNames.includes(phase)) throw new SqliteStateError("invalid_input", `run ${runId} phase ${phase} conflicts with persisted execution definition`, { runId, phase })
 }
 
 type TaskNodeRow = {

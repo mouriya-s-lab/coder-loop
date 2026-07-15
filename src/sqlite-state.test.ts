@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { Database } from "bun:sqlite"
-import { mkdir, rm } from "node:fs/promises"
+import { cp, mkdir, rm, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
 import {
@@ -144,6 +144,35 @@ describe("sqlite state store", () => {
 		}
 	})
 
+	test("existing task root materializes every phase for a newly encountered item with stable identities", async () => {
+		const { store, dbFile } = await openTestStore("existing-root-full-item-definition")
+		const chain = createFullChain(store)
+		const first = createFullItem(store, chain, { itemId: "first", issueNumber: 177, phase: "iteration" })
+		const second = createFullItem(store, chain, { itemId: "second", issueNumber: 178, phase: "review" })
+		const firstRun = store.recordRun({ runId: "first-definition-run", chainId: chain.id, itemId: first.id, phase: "iteration", startedAt: 1_800_000_205, extra: definitionRunExtra({ worktreePath: "/worktrees/first", branchName: "issue-first" }) })
+		store.setCurrentRun({ chainId: chain.id, phase: "iteration", runId: firstRun.runId, startedAt: firstRun.startedAt, extra: storedItemExtra({}) })
+		const secondDefinition = { definitionContentIdentity: "sha256:second-definition", definitionPhaseNames: ["review", "finalize"] }
+		const secondRun = store.recordRun({ runId: "second-definition-run", chainId: chain.id, itemId: second.id, phase: "review", startedAt: 1_800_000_206, extra: definitionRunExtra({ ...secondDefinition, worktreePath: "/worktrees/second", branchName: "issue-second" }) })
+		store.setCurrentRun({ chainId: chain.id, phase: "review", runId: secondRun.runId, startedAt: secondRun.startedAt, extra: storedItemExtra({}) })
+		const definitionRef = { kind: "preset", contentIdentity: "sha256:second-definition" } as const
+		const expectedSecondIdentities = ["review", "finalize"].map((phase) => ({
+			runtimeNodeId: `closure-node:${second.id}:${phase}`,
+			definitionRef,
+			definitionNodeId: `item:second:phase:${phase}`,
+		}))
+		try {
+			const tree = store.getTaskTree(chain.id)
+			if (tree?.root.kind !== "seq") throw new Error("expected seq root")
+			expect(tree.root.children.filter((node) => node.kind === "leaf" && node.closure.itemRowId === second.id).map((node) => node.identity)).toEqual(expectedSecondIdentities)
+		} finally { store.close() }
+		const reopened = openSqliteStateStore({ loopDataRoot: dbFileRoot(dbFile) })
+		try {
+			const tree = reopened.getTaskTree(chain.id)
+			if (tree?.root.kind !== "seq") throw new Error("expected reopened seq root")
+			expect(tree.root.children.filter((node) => node.kind === "leaf" && node.closure.itemRowId === second.id).map((node) => node.identity)).toEqual(expectedSecondIdentities)
+		} finally { reopened.close() }
+	})
+
 	test("nested task tree round-trip", async () => {
 		const { store } = await openTestStore("nested-task-tree")
 		try {
@@ -284,6 +313,61 @@ describe("sqlite state store", () => {
 			try { expect(migratedDb.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'current_runs'").get()?.count).toBe(0) } finally { migratedDb.close() }
 			expect(migrated.listCurrentRuns(chain.id).map((run) => run.runId)).toEqual(["legacy-active"])
 		} finally { migrated.close() }
+	})
+
+	test("normalized runtime migration resolves persisted preset once and survives source removal", async () => {
+		const presetPath = resolve(TEST_ROOT, "mutable-checkout-preset")
+		await cp(resolve(REPO_ROOT, "presets/gh-issue-pr-iteration"), presetPath, { recursive: true })
+		const fixture = await openTestStore("checkout-independent")
+		const chain = createFullChain(fixture.store)
+		const item = createFullItem(fixture.store, chain, { phase: "iteration", preset: null, presetPath })
+		fixture.store.recordRun({ runId: "packet-less-history", chainId: chain.id, itemId: item.id, phase: "iteration", startedAt: 1_800_000_221 })
+		fixture.store.close()
+		const legacy = new Database(fixture.dbFile)
+		try {
+			legacy.exec("PRAGMA foreign_keys=OFF")
+			legacy.exec("ALTER TABLE items ADD COLUMN session_ids TEXT NOT NULL DEFAULT '{}'")
+			for (const table of ["active_runs", "closure_sessions", "task_join_evaluation_bindings", "task_join_bindings", "task_leaf_nodes", "task_seq_nodes", "task_par_nodes", "task_closures", "task_trees", "task_nodes", "execution_definitions"]) legacy.exec(`DROP TABLE ${table}`)
+			legacy.exec("CREATE TABLE current_runs (chain_id INTEGER PRIMARY KEY REFERENCES chains(id), phase TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES runs(run_id), started_at REAL NOT NULL, extra TEXT NOT NULL)")
+			legacy.exec("PRAGMA user_version=13")
+		} finally { legacy.close() }
+		const migrated = openSqliteStateStore({ loopDataRoot: dbFileRoot(fixture.dbFile) })
+		const beforeSourceChange = migrated.getTaskTree(chain.id)
+		migrated.close()
+		await writeFile(resolve(presetPath, "preset.toml"), "invalid after migration", "utf8")
+		const reopenedAfterMutation = openSqliteStateStore({ loopDataRoot: dbFileRoot(fixture.dbFile) })
+		try { expect(reopenedAfterMutation.getTaskTree(chain.id)).toEqual(beforeSourceChange) } finally { reopenedAfterMutation.close() }
+		await rm(presetPath, { recursive: true, force: true })
+		const reopened = openSqliteStateStore({ loopDataRoot: dbFileRoot(fixture.dbFile) })
+		try {
+			expect(reopened.getTaskTree(chain.id)).toEqual(beforeSourceChange)
+			if (beforeSourceChange?.root.kind !== "seq") throw new Error("expected migrated seq")
+			expect(beforeSourceChange.root.children.map((node) => node.kind === "leaf" ? node.closure.phase : node.kind)).toEqual(["iteration", "review", "blocked-responder", "umbrella-finalizer"])
+		} finally { reopened.close() }
+	})
+
+	test("normalized runtime migration rejects missing unreadable or invalid persisted preset declarations", async () => {
+		for (const scenario of ["missing", "unreadable", "invalid"] as const) {
+			const fixture = await openTestStore(`definition-facts-${scenario}`)
+			const chain = createFullChain(fixture.store)
+			const presetPath = resolve(TEST_ROOT, `definition-source-${scenario}`)
+			if (scenario === "unreadable") await mkdir(presetPath, { recursive: true })
+			if (scenario === "invalid") {
+				await mkdir(presetPath, { recursive: true })
+				await writeFile(resolve(presetPath, "preset.toml"), "not = [valid", "utf8")
+			}
+			createFullItem(fixture.store, chain, { phase: "iteration", preset: null, presetPath: scenario === "missing" ? null : presetPath })
+			fixture.store.close()
+			const legacy = new Database(fixture.dbFile)
+			try {
+				legacy.exec("PRAGMA foreign_keys=OFF")
+				legacy.exec("ALTER TABLE items ADD COLUMN session_ids TEXT NOT NULL DEFAULT '{}'")
+				for (const table of ["active_runs", "closure_sessions", "task_join_evaluation_bindings", "task_join_bindings", "task_leaf_nodes", "task_seq_nodes", "task_par_nodes", "task_closures", "task_trees", "task_nodes", "execution_definitions"]) legacy.exec(`DROP TABLE ${table}`)
+				legacy.exec("CREATE TABLE current_runs (chain_id INTEGER PRIMARY KEY REFERENCES chains(id), phase TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES runs(run_id), started_at REAL NOT NULL, extra TEXT NOT NULL)")
+				legacy.exec("PRAGMA user_version=13")
+			} finally { legacy.close() }
+			expectSqliteCode(() => openSqliteStateStore({ loopDataRoot: dbFileRoot(fixture.dbFile) }), "invalid_json")
+		}
 	})
 
 	test("main v14 context database migrates normalized runtime without losing context", async () => {
@@ -1348,8 +1432,8 @@ describe("sqlite state store", () => {
 				VALUES ('legacy-v11-items', 'gh-issue-pr-iteration', 'mouriya-s-lab/coder-loop', 'main', 'active', '{}', 1.0, 1.0)
 			`)
 			legacy.exec(`
-				INSERT INTO items (chain_id, issue_number, repo_cwd, status, attempts, position, status_updated_at, branch, pr, session_ids, extra, created_at, updated_at)
-				VALUES (1, 181, '/repo/coder-loop', 'queued', 0, 0, 1.0, 'issue-181', 191, '{}', '{}', 1.0, 1.0)
+				INSERT INTO items (chain_id, issue_number, repo_cwd, status, attempts, position, status_updated_at, branch, pr, session_ids, preset, extra, created_at, updated_at)
+				VALUES (1, 181, '/repo/coder-loop', 'queued', 0, 0, 1.0, 'issue-181', 191, '{}', 'gh-issue-pr-iteration', '{}', 1.0, 1.0)
 			`)
 		} finally {
 			legacy.close()
@@ -1500,8 +1584,8 @@ describe("sqlite state store", () => {
 			// CHECK and the new widened CHECK. After migration we re-read the row to confirm the
 			// data survived the table rebuild.
 			legacy.exec(`
-				INSERT INTO items (chain_id, item_id, repo_cwd, status, attempts, position, status_updated_at, runner, session_ids, extra, created_at, updated_at)
-				VALUES (1, '481-pre', '/repo/coder-loop', 'queued', 0, 0, 1.0, 'claude', '{}', '{}', 1.0, 1.0)
+				INSERT INTO items (chain_id, item_id, repo_cwd, status, attempts, position, status_updated_at, runner, session_ids, preset, extra, created_at, updated_at)
+				VALUES (1, '481-pre', '/repo/coder-loop', 'queued', 0, 0, 1.0, 'claude', '{}', 'gh-issue-pr-iteration', '{}', 1.0, 1.0)
 			`)
 			// Sanity check that v12 narrow CHECK rejects 'opencode' — proves the seed disk is
 			// genuinely on v12 and not already on v13.
@@ -1753,7 +1837,7 @@ describe("sqlite state store", () => {
 			const item = items[0]
 			if (item === undefined) throw new Error("migrated item missing")
 			expect(item.sessionIds).toEqual({})
-			migrated.recordRun({ runId: "pre-v3-iteration", chainId: 1, itemId: item.id, phase: "iteration", startedAt: 1.5, extra: storedItemExtra({ worktreePath: REPO_ROOT, branchName: "main", baseCommit: "0123456789abcdef" }) })
+			migrated.recordRun({ runId: "pre-v3-iteration", chainId: 1, itemId: item.id, phase: "iteration", startedAt: 1.5, extra: definitionRunExtra({ definitionPhaseNames: ["iteration"], worktreePath: REPO_ROOT, branchName: "main" }) })
 			migrated.setCurrentRun({ chainId: 1, phase: "iteration", runId: "pre-v3-iteration", startedAt: 1.5, extra: storedItemExtra({}) })
 			migrated.clearCurrentRun("pre-v3-iteration")
 			const updated = migrated.setItemSessionId(item.id, {
@@ -1909,6 +1993,18 @@ function createFullItem(
 		createdAt: 1_800_000_020,
 		updatedAt: 1_800_000_030,
 		...rest,
+	})
+}
+
+function definitionRunExtra(overrides: JsonObject = {}) {
+	return storedItemExtra({
+		definitionKind: "preset",
+		definitionContentIdentity: "sha256:persisted-definition",
+		definitionPhaseNames: ["iteration", "review", "blocked-responder", "umbrella-finalizer"],
+		worktreePath: "/repo/coder-loop",
+		branchName: "issue-177",
+		baseCommit: "0123456789abcdef",
+		...overrides,
 	})
 }
 
