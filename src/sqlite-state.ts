@@ -274,10 +274,8 @@ export type ClosureLifecycleInput =
 	| { kind: "suspend"; updatedAt: number }
 	| { kind: "consume"; updatedAt: number }
 export type ClosureResourcesInput = { worktreePath: string | null; branchName: string | null; updatedAt: number }
-export type AppendJoinBindingInput = { version: number; value: JoinValueSnapshot; authorKind: string; authorId: string; authorityClass: string; effectiveFromEpoch: number; createdAt: number }
-export type JoinBindingRecord = AppendJoinBindingInput & { parNodeId: string }
-export type BindJoinEvaluationInput = { epoch: number; bindingVersion: number; state: "evaluating" | "decided" | "consumed" }
-export type JoinEvaluationRecord = BindJoinEvaluationInput & { parNodeId: string }
+export type JoinBindingRecord = { parNodeId: string; version: number; value: JoinValueSnapshot; authorKind: string; authorId: string; authorityClass: string; effectiveFromEpoch: number; createdAt: number }
+export type JoinEvaluationRecord = { parNodeId: string; epoch: number; bindingVersion: number; state: "evaluating" | "decided" | "consumed" }
 
 export type StateTableName = "chains" | "items" | "runs" | "execution_definitions" | "task_trees" | "task_nodes" | "task_leaf_nodes" | "task_seq_nodes" | "task_par_nodes" | "task_join_bindings" | "task_join_evaluation_bindings" | "task_closures" | "closure_sessions" | "active_runs" | "context_entries"
 
@@ -321,9 +319,7 @@ export type SqliteStateStore = {
 	getTaskTree: (chainId: number) => TaskTreeSnapshot | null
 	setClosureLifecycle: (closureId: string, input: ClosureLifecycleInput) => ClosureSnapshot
 	setClosureResources: (closureId: string, input: ClosureResourcesInput) => ClosureSnapshot
-	appendJoinBinding: (parNodeId: string, input: AppendJoinBindingInput) => JoinBindingRecord
 	listJoinBindings: (parNodeId: string) => JoinBindingRecord[]
-	bindJoinEvaluation: (parNodeId: string, input: BindJoinEvaluationInput) => JoinEvaluationRecord
 	listJoinEvaluations: (parNodeId: string) => JoinEvaluationRecord[]
 	appendContextEntry: (input: AppendContextEntryInput) => ContextEntry
 	listContextEntries: (chainId: number) => ContextEntry[]
@@ -389,6 +385,13 @@ type RunRow = {
 	extra: string
 }
 
+const RunRowBoundary = arkType({
+	id: "number.integer>0", run_id: "string>0", chain_id: "number.integer>0", item_id: "number.integer>0",
+	closure_id: "string>0", runtime_node_id: "string>0", phase: "string>0", status: "string>0",
+	started_at: "number", ended_at: "number|null", exit_code: "number.integer|null", extra: "string",
+	"+": "reject",
+})
+
 type CurrentRunRow = {
 	chain_id: number
 	phase: string
@@ -426,7 +429,7 @@ const JoinEvaluationValueRowBoundary = arkType({ epoch: "number.integer>=0", bin
 const JoinEvaluationRowBoundary = arkType({ par_node_id: "string>0", epoch: "number.integer>=0", binding_version: "number.integer>=1", evaluation_state: "'evaluating'|'decided'|'consumed'", "+": "reject" })
 const ClosureLeafRowBoundary = arkType({ leaf_node_id: "string>0", "+": "reject" })
 const ActiveRunAssociationRowBoundary = arkType({ lifecycle: "'active'|'suspended'|'consumed'", phase: "string>0", chain_id: "number.integer", "+": "reject" })
-const ClosureAssociationRowBoundary = arkType({ closure_id: "string>0", lifecycle: "'active'|'suspended'|'consumed'", "+": "reject" })
+const ClosureAssociationRowBoundary = arkType({ closure_id: "string>0", leaf_node_id: "string>0", lifecycle: "'active'|'suspended'|'consumed'", "+": "reject" })
 const RunIdRowBoundary = arkType({ run_id: "string>0", "+": "reject" })
 const LegacyChainRowBoundary = arkType({ id: "number.integer>0", "+": "reject" })
 const LegacyItemRowBoundary = arkType({
@@ -441,14 +444,13 @@ const MigrationDefinitionOutputBoundary = arkType({ definitionKind: "'preset'", 
 const ClosureIdRowBoundary = arkType({ closure_id: "string>0", "+": "reject" })
 const TableCountRowBoundary = arkType({ table_count: "number.integer>=0", "+": "reject" })
 const SessionIdRowBoundary = arkType({ session_id: "string>0", "+": "reject" })
-const JoinVersionRowBoundary = arkType({ version: "number.integer>=1", "+": "reject" })
-const JoinEpochRowBoundary = arkType({ epoch: "number.integer>=0", "+": "reject" })
 const ItemIdRowBoundary = arkType({ item_id: "string>0", "+": "reject" })
 const DefinitionIdentityRowBoundary = arkType({ definition_kind: "'preset'|'chain'", definition_content_identity: "string>0", "+": "reject" })
 const TaskNodeKindRowBoundary = arkType({ kind: "'leaf'|'seq'|'par'", "+": "reject" })
 const NextChildIndexRowBoundary = arkType({ next_index: "number.integer>=0", "+": "reject" })
 const RuntimeNodeIdRowBoundary = arkType({ runtime_node_id: "string>0", "+": "reject" })
 const RunTaskIdentityRowBoundary = arkType({ closure_id: "string>0", leaf_node_id: "string>0", "+": "reject" })
+const ActiveRunDurableIdentityRowBoundary = arkType({ closure_id: "string>0", runtime_node_id: "string>0", phase: "string>0", chain_id: "number.integer>0", "+": "reject" })
 
 function parsePersistedRow<T>(boundary: { assert(value: unknown): T }, value: unknown, label: string): T {
 	try {
@@ -573,16 +575,7 @@ const CHAINS_TABLE_SCHEMA_SQL = `
 	updated_at REAL NOT NULL
 `
 
-const STATE_SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS chains (
-${CHAINS_TABLE_SCHEMA_SQL}
-);
-
-CREATE TABLE IF NOT EXISTS items (
-${ITEMS_TABLE_SCHEMA_SQL}
-);
-
-CREATE TABLE IF NOT EXISTS runs (
+const RUNS_TABLE_SCHEMA_SQL = `
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	run_id TEXT NOT NULL UNIQUE,
 	chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
@@ -594,7 +587,22 @@ CREATE TABLE IF NOT EXISTS runs (
 	started_at REAL NOT NULL,
 	ended_at REAL,
 	exit_code INTEGER,
-	extra TEXT NOT NULL
+	extra TEXT NOT NULL,
+	FOREIGN KEY (closure_id, runtime_node_id) REFERENCES task_closures(closure_id, leaf_node_id),
+	UNIQUE (run_id, closure_id)
+`
+
+const STATE_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS chains (
+${CHAINS_TABLE_SCHEMA_SQL}
+);
+
+CREATE TABLE IF NOT EXISTS items (
+${ITEMS_TABLE_SCHEMA_SQL}
+);
+
+CREATE TABLE IF NOT EXISTS runs (
+${RUNS_TABLE_SCHEMA_SQL}
 );
 
 ${STATE_INDEXES_SQL}
@@ -637,6 +645,7 @@ CREATE TABLE IF NOT EXISTS task_closures (
 	created_at REAL NOT NULL,
 	updated_at REAL NOT NULL,
 	UNIQUE(item_row_id, phase),
+	UNIQUE(closure_id, leaf_node_id),
 	CHECK (lifecycle = 'consumed' OR (worktree_path IS NOT NULL AND branch_name IS NOT NULL))
 );
 CREATE TABLE IF NOT EXISTS task_leaf_nodes (runtime_node_id TEXT PRIMARY KEY REFERENCES task_nodes(runtime_node_id) ON DELETE CASCADE, closure_id TEXT NOT NULL UNIQUE REFERENCES task_closures(closure_id));
@@ -680,10 +689,11 @@ CREATE TABLE IF NOT EXISTS closure_sessions (
 );
 CREATE TABLE IF NOT EXISTS active_runs (
 	closure_id TEXT PRIMARY KEY REFERENCES task_closures(closure_id) ON DELETE CASCADE,
-	run_id TEXT NOT NULL UNIQUE REFERENCES runs(run_id) ON DELETE CASCADE,
+	run_id TEXT NOT NULL UNIQUE,
 	phase TEXT NOT NULL,
 	started_at REAL NOT NULL,
-	extra TEXT NOT NULL
+	extra TEXT NOT NULL,
+	FOREIGN KEY (run_id, closure_id) REFERENCES runs(run_id, closure_id) ON DELETE CASCADE
 );
 CREATE TRIGGER IF NOT EXISTS task_closure_source_par_insert
 BEFORE INSERT ON task_closures
@@ -1001,20 +1011,7 @@ function migrateRunIdentity(db: Database): void {
 			runtime_node_id = (SELECT leaf_node_id FROM task_closures WHERE item_row_id = runs.item_id AND phase = runs.phase)`)
 	const missing = queryPersistedOne(db, "SELECT COUNT(*) AS table_count FROM runs WHERE closure_id IS NULL OR runtime_node_id IS NULL", {}, TableCountRowBoundary, "runs missing durable task identity")
 	if (missing === null || missing.table_count !== 0) throw new SqliteStateError("run_closure_mismatch", `${missing?.table_count ?? "unknown"} historical runs have no closure/runtime-node identity`)
-	db.exec(`CREATE TABLE runs_new (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		run_id TEXT NOT NULL UNIQUE,
-		chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
-		item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
-		closure_id TEXT NOT NULL REFERENCES task_closures(closure_id),
-		runtime_node_id TEXT NOT NULL REFERENCES task_nodes(runtime_node_id),
-		phase TEXT NOT NULL,
-		status TEXT NOT NULL,
-		started_at REAL NOT NULL,
-		ended_at REAL,
-		exit_code INTEGER,
-		extra TEXT NOT NULL
-	)`)
+	db.exec(`CREATE TABLE runs_new (${RUNS_TABLE_SCHEMA_SQL})`)
 	db.exec(`INSERT INTO runs_new (id, run_id, chain_id, item_id, closure_id, runtime_node_id, phase, status, started_at, ended_at, exit_code, extra)
 		SELECT id, run_id, chain_id, item_id, closure_id, runtime_node_id, phase, status, started_at, ended_at, exit_code, extra FROM runs`)
 	db.exec("DROP TABLE runs")
@@ -1526,7 +1523,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 	const getItemRow = (id: number): ItemRow | null =>
 		db.query<ItemRow, SqlParams>("SELECT * FROM items WHERE id = $id").get({ id: id })
 	const getRunRowByRunId = (runId: string): RunRow | null =>
-		db.query<RunRow, SqlParams>("SELECT * FROM runs WHERE run_id = $runId").get({ runId: runId })
+		queryPersistedOne(db, "SELECT * FROM runs WHERE run_id = $runId", { runId }, RunRowBoundary, `runs.${runId}`)
 	const getCurrentRunRow = (chainId: number): CurrentRunRow | null =>
 		queryPersistedOne(db, `SELECT runs.chain_id, active_runs.phase, active_runs.run_id, active_runs.started_at,
 			json_set(active_runs.extra, '$.itemId', task_closures.item_row_id) AS extra
@@ -1709,7 +1706,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 		setItemSessionId: (id, input) =>
 			write("set item session id", () => {
 				const phase = normalizeSessionPhase(input.phase, "invalid_input")
-				const closure = queryPersistedOne(db, "SELECT closure_id, lifecycle FROM task_closures WHERE item_row_id = $itemId AND phase = $phase", { itemId: id, phase }, ClosureAssociationRowBoundary, `closure for item ${id} phase ${phase}`)
+				const closure = queryPersistedOne(db, "SELECT closure_id, leaf_node_id, lifecycle FROM task_closures WHERE item_row_id = $itemId AND phase = $phase", { itemId: id, phase }, ClosureAssociationRowBoundary, `closure for item ${id} phase ${phase}`)
 				if (closure === null) throw new SqliteStateError("not_found", `closure for item ${id} phase ${phase} was not found`, { id, phase })
 				if (closure.lifecycle === "consumed" && input.sessionId !== null) throw new SqliteStateError("closure_lifecycle_conflict", `consumed closure ${closure.closure_id} cannot retain a session`, { closureId: closure.closure_id })
 				if (input.sessionId === null) db.query<never, SqlParams>("DELETE FROM closure_sessions WHERE closure_id = $closureId AND runner_kind = $runner").run({ closureId: closure.closure_id, runner: input.runner })
@@ -1787,7 +1784,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 
 		listRuns: (chainId) =>
 			read("list runs", () =>
-				db.query<RunRow, SqlParams>("SELECT * FROM runs WHERE chain_id = $chainId ORDER BY id ASC").all({ chainId }).map((row) => requireRun(row, row.id)),
+				queryPersistedAll(db, "SELECT * FROM runs WHERE chain_id = $chainId ORDER BY id ASC", { chainId }, RunRowBoundary, `runs for chain ${chainId}`).map((row) => requireRun(row, row.id)),
 			),
 
 		completeRun: (runId, input) =>
@@ -1814,8 +1811,9 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 				const run = requireRun(getRunRowByRunId(input.runId), input.runId)
 				if (run.chainId !== input.chainId || run.phase !== input.phase) throw new SqliteStateError("run_closure_mismatch", `run ${input.runId} does not match chain/phase`, { runId: input.runId })
 				ensureRuntimeClosure(db, run)
-				const closure = queryPersistedOne(db, "SELECT closure_id, lifecycle FROM task_closures WHERE item_row_id = $itemId AND phase = $phase", { itemId: run.itemId, phase: input.phase }, ClosureAssociationRowBoundary, `task closure for run ${input.runId}`)
+				const closure = queryPersistedOne(db, "SELECT closure_id, leaf_node_id, lifecycle FROM task_closures WHERE item_row_id = $itemId AND phase = $phase", { itemId: run.itemId, phase: input.phase }, ClosureAssociationRowBoundary, `task closure for run ${input.runId}`)
 				if (closure === null) throw new SqliteStateError("run_closure_mismatch", `run ${input.runId} has no matching closure`, { runId: input.runId })
+				if (run.closureId !== closure.closure_id || run.runtimeNodeId !== closure.leaf_node_id) throw new SqliteStateError("run_closure_mismatch", `run ${input.runId} durable identity does not match its closure`, { runId: input.runId, closureId: closure.closure_id })
 				if (closure.lifecycle !== "active") throw new SqliteStateError("closure_lifecycle_conflict", `closure ${closure.closure_id} is not active`, { closureId: closure.closure_id })
 				const existing = queryPersistedOne(db, "SELECT run_id FROM active_runs WHERE closure_id = $closure", { closure: closure.closure_id }, RunIdRowBoundary, `active_runs.${closure.closure_id}`)
 				if (existing !== null && existing.run_id !== input.runId) throw new SqliteStateError("active_run_conflict", `closure ${closure.closure_id} already has active run ${existing.run_id}`, { closureId: closure.closure_id, runId: existing.run_id })
@@ -1866,23 +1864,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 			return requireClosureById(db, closureId)
 		}),
 
-		appendJoinBinding: (parNodeId, input) => write("append join binding", () => {
-			const current = queryPersistedOne(db, "SELECT version FROM task_join_bindings WHERE par_node_id = $parNodeId ORDER BY version DESC LIMIT 1", { parNodeId }, JoinVersionRowBoundary, `latest join binding version for ${parNodeId}`)
-			if (current === null || input.version !== current.version + 1) throw new SqliteStateError("invalid_input", `join binding version must append ${current === null ? 1 : current.version + 1}`, { parNodeId, version: input.version })
-			insertAppendJoinBinding(db, parNodeId, input)
-			return { parNodeId, ...input }
-		}),
-
 		listJoinBindings: (parNodeId) => read("list join bindings", () => listJoinBindingRecords(db, parNodeId)),
-
-		bindJoinEvaluation: (parNodeId, input) => write("bind join evaluation", () => {
-			const binding = queryPersistedOne(db, "SELECT version FROM task_join_bindings WHERE par_node_id = $parNodeId AND version = $version", { parNodeId, version: input.bindingVersion }, JoinVersionRowBoundary, `join binding ${parNodeId} version ${input.bindingVersion}`)
-			if (binding === null) throw new SqliteStateError("invalid_input", `join binding version ${input.bindingVersion} does not exist`, { parNodeId, bindingVersion: input.bindingVersion })
-			const latest = queryPersistedOne(db, "SELECT epoch FROM task_join_evaluation_bindings WHERE par_node_id = $parNodeId ORDER BY epoch DESC LIMIT 1", { parNodeId }, JoinEpochRowBoundary, `latest join evaluation epoch for ${parNodeId}`)
-			if (latest !== null && input.epoch <= latest.epoch) throw new SqliteStateError("invalid_input", `evaluation epoch must append after ${latest.epoch}`, { parNodeId, epoch: input.epoch })
-			db.query<never, SqlParams>("INSERT INTO task_join_evaluation_bindings (par_node_id, epoch, binding_version, evaluation_state) VALUES ($parNodeId, $epoch, $bindingVersion, $state)").run({ parNodeId, epoch: input.epoch, bindingVersion: input.bindingVersion, state: input.state })
-			return { parNodeId, ...input }
-		}),
 
 		listJoinEvaluations: (parNodeId) => read("list join evaluations", () => queryPersistedAll(db, "SELECT par_node_id, epoch, binding_version, evaluation_state FROM task_join_evaluation_bindings WHERE par_node_id = $parNodeId ORDER BY epoch", { parNodeId }, JoinEvaluationRowBoundary, `task_join_evaluation_bindings.${parNodeId}`).map((row) => ({ parNodeId: row.par_node_id, epoch: row.epoch, bindingVersion: row.binding_version, state: row.evaluation_state }))),
 
@@ -2149,6 +2131,10 @@ function insertTaskNode(db: Database, chainId: number, parentNodeId: string | nu
 			return
 		}
 		case "seq":
+			if (node.cursor.kind === "next") {
+				const cursorNodeId = node.cursor.nodeId
+				if (!node.children.some((child) => child.identity.runtimeNodeId === cursorNodeId)) throw new SqliteStateError("run_closure_mismatch", `seq cursor ${cursorNodeId} is not a direct child of ${node.identity.runtimeNodeId}`, { runtimeNodeId: node.identity.runtimeNodeId, cursorNodeId })
+			}
 			db.query<never, SqlParams>("INSERT INTO task_seq_nodes (runtime_node_id, next_child_node_id) VALUES ($nodeId, NULL)").run({ nodeId: node.identity.runtimeNodeId })
 			for (const [index, child] of node.children.entries()) insertTaskNode(db, chainId, node.identity.runtimeNodeId, index, child, node.kind)
 			db.query<never, SqlParams>("UPDATE task_seq_nodes SET next_child_node_id = $next WHERE runtime_node_id = $nodeId").run({ nodeId: node.identity.runtimeNodeId, next: node.cursor.kind === "next" ? node.cursor.nodeId : null })
@@ -2191,25 +2177,6 @@ function insertJoinEvaluation(db: Database, parNodeId: string, evaluation: JoinE
 	db.query<never, SqlParams>("INSERT INTO task_join_evaluation_bindings (par_node_id, epoch, binding_version, evaluation_state) VALUES ($par, $epoch, $version, $state)").run({ par: parNodeId, epoch: evaluation.epoch, version: evaluation.bindingVersion, state: evaluation.kind })
 }
 
-function insertAppendJoinBinding(db: Database, parNodeId: string, input: AppendJoinBindingInput): void {
-	if (input.value.kind === "validator") insertDefinition(db, input.value.candidate.definitionRef)
-	const candidate = input.value.kind === "validator" ? input.value.candidate : null
-	db.query<never, SqlParams>(`INSERT INTO task_join_bindings (par_node_id, version, join_kind, candidate_definition_kind, candidate_definition_content_identity, candidate_id, author_kind, author_id, authority_class, effective_from_epoch, created_at)
-		VALUES ($parNodeId, $version, $joinKind, $candidateKind, $candidateIdentity, $candidateId, $authorKind, $authorId, $authorityClass, $effectiveFromEpoch, $createdAt)`).run({
-		parNodeId,
-		version: input.version,
-		joinKind: input.value.kind,
-		candidateKind: candidate?.definitionRef.kind ?? null,
-		candidateIdentity: candidate?.definitionRef.contentIdentity ?? null,
-		candidateId: candidate?.candidateId ?? null,
-		authorKind: input.authorKind,
-		authorId: input.authorId,
-		authorityClass: input.authorityClass,
-		effectiveFromEpoch: input.effectiveFromEpoch,
-		createdAt: input.createdAt,
-	})
-}
-
 function listJoinBindingRecords(db: Database, parNodeId: string): JoinBindingRecord[] {
 	return queryPersistedAll(db, "SELECT * FROM task_join_bindings WHERE par_node_id = $parNodeId ORDER BY version", { parNodeId }, JoinBindingRowBoundary, `task_join_bindings.${parNodeId}`).map((row) => ({
 		parNodeId: row.par_node_id,
@@ -2241,6 +2208,8 @@ function insertActiveRunSnapshot(db: Database, chainId: number, active: ActiveRu
 	const row = queryPersistedOne(db, "SELECT task_closures.lifecycle, task_closures.phase, items.chain_id FROM task_closures INNER JOIN items ON items.id = task_closures.item_row_id WHERE task_closures.closure_id = $closure", { closure: active.closureId }, ActiveRunAssociationRowBoundary, `active run closure ${active.closureId}`)
 	if (row === null || row.chain_id !== chainId || row.phase !== active.phase) throw new SqliteStateError("run_closure_mismatch", `active run ${active.runId} does not match closure`, { runId: active.runId, closureId: active.closureId })
 	if (row.lifecycle !== "active") throw new SqliteStateError("closure_lifecycle_conflict", `closure ${active.closureId} is not active`, { closureId: active.closureId })
+	const durable = queryPersistedOne(db, "SELECT runs.closure_id, runs.runtime_node_id, runs.phase, runs.chain_id FROM runs WHERE runs.run_id = $runId", { runId: active.runId }, ActiveRunDurableIdentityRowBoundary, `durable run identity ${active.runId}`)
+	if (durable === null || durable.chain_id !== chainId || durable.closure_id !== active.closureId || durable.phase !== active.phase) throw new SqliteStateError("run_closure_mismatch", `active run ${active.runId} does not match its durable closure identity`, { runId: active.runId, closureId: active.closureId })
 	db.query<never, SqlParams>("INSERT INTO active_runs (closure_id, run_id, phase, started_at, extra) VALUES ($closure, $runId, $phase, $startedAt, '{}')").run({ closure: active.closureId, runId: active.runId, phase: active.phase, startedAt: active.startedAt })
 }
 

@@ -13,6 +13,7 @@ import {
 	ObservabilityEventSegmentBoundary,
 	ObservabilityEventTypeBoundary,
 	ObservabilityKindBoundary,
+	parseObservabilityEvent,
 	parseObservabilityEventSegmentName,
 	queryObservabilityEvents,
 } from "./observability"
@@ -30,6 +31,17 @@ describe("observability", () => {
 		expect(ObservabilityKindBoundary.assert(JSON.parse(JSON.stringify(event.kind)))).toBe("lifecycle")
 		expect(ObservabilityEventTypeBoundary.assert(JSON.parse(JSON.stringify(event.type)))).toBe("daemon.stop")
 		expect(ObservabilityEventBoundary.assert(JSON.parse(JSON.stringify(event)))).toEqual(event)
+	})
+
+	test("task event identity is an exact all-or-none triple", () => {
+		const event = makeObservabilityEvent({ kind: "lifecycle", type: "daemon.stop", subject: { kind: "engine" }, payload: { pid: 10 } })
+		expect(parseObservabilityEvent({ ...event, runtimeNodeId: "runtime-leaf", definitionRef: { kind: "chain", contentIdentity: "sha256:event" }, definitionNodeId: "definition-leaf" }).runtimeNodeId).toBe("runtime-leaf")
+		for (const partial of [
+			{ runtimeNodeId: "runtime-leaf" },
+			{ definitionRef: { kind: "chain", contentIdentity: "sha256:event" } },
+			{ definitionNodeId: "definition-leaf" },
+			{ runtimeNodeId: "runtime-leaf", definitionNodeId: "definition-leaf" },
+		]) expect(() => parseObservabilityEvent({ ...event, ...partial })).toThrow()
 	})
 
 	test("query filters by kind, type, chain, run, phase, and since", async () => {

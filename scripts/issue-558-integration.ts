@@ -15,7 +15,7 @@ import { TaskTreeSnapshotBoundary, type TaskNodeIdentity, type TaskTreeSnapshot 
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
-const StatusBoundary = arkType({ taskTree: TaskTreeSnapshotBoundary })
+const StatusBoundary = arkType({ state: { kind: arkType.unit("ok") }, taskTree: TaskTreeSnapshotBoundary })
 const VersionBoundary = arkType({ user_version: "number.integer" })
 
 function fail(message: string): never { throw new Error(message) }
@@ -49,6 +49,45 @@ function createFixtureRepo(root: string): string {
 	command(["git", "add", "README.md"], { cwd: repo })
 	command(["git", "-c", "user.name=issue-558", "-c", "user.email=issue-558@local", "commit", "-m", "chore: seed fixture"], { cwd: repo })
 	return repo
+}
+
+type HistoricalSeed = { chainName: string; runId: string; sessionId: string }
+
+function seedHistoricalRuntime(loopDataRoot: string, repo: string, schemaVersion: 13 | 14): HistoricalSeed {
+	mkdirSync(loopDataRoot, { recursive: true })
+	const store = openSqliteStateStore({ loopDataRoot })
+	const chainName = `issue-558-v${schemaVersion}-${randomUUID()}`
+	const runId = `historical-v${schemaVersion}-run`
+	const sessionId = `historical-v${schemaVersion}-session`
+	let chainId: number
+	let itemId: number
+	try {
+		const chain = store.createChain({ name: chainName, repository: repo, baseBranch: "main", status: "active" })
+		const item = store.createItem({ chainId: chain.id, itemId: `historical-v${schemaVersion}`, repoCwd: repo, status: runtimeStatus("done"), phase: "iteration", preset: "gh-issue-pr-iteration", agentCwd: REPO_ROOT, extra: storedItemExtra({ id: `historical-v${schemaVersion}` }) })
+		if (schemaVersion === 14) store.appendContextEntry({ chainId: chain.id, scope: { kind: "chain" }, author: { kind: "operator" }, body: "current-main-v14-context" })
+		chainId = chain.id
+		itemId = item.id
+	} finally { store.close() }
+	const db = new Database(resolve(loopDataRoot, "db.sqlite"), { strict: true })
+	try {
+		db.exec("PRAGMA foreign_keys = OFF")
+		db.exec(`CREATE TABLE runs_historical (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL UNIQUE,
+			chain_id INTEGER NOT NULL, item_id INTEGER NOT NULL, phase TEXT NOT NULL,
+			status TEXT NOT NULL, started_at REAL NOT NULL, ended_at REAL, exit_code INTEGER, extra TEXT NOT NULL
+		)`)
+		db.query<never, { runId: string; chainId: number; itemId: number }>("INSERT INTO runs_historical (run_id, chain_id, item_id, phase, status, started_at, ended_at, exit_code, extra) VALUES ($runId, $chainId, $itemId, 'iteration', 'in_progress', 1800000500, NULL, NULL, '{}')").run({ runId, chainId, itemId })
+		db.exec("DROP TABLE runs")
+		db.exec("ALTER TABLE runs_historical RENAME TO runs")
+		db.exec("ALTER TABLE items ADD COLUMN session_ids TEXT NOT NULL DEFAULT '{}'")
+		db.query<never, { itemId: number; sessions: string }>("UPDATE items SET session_ids = $sessions WHERE id = $itemId").run({ itemId, sessions: JSON.stringify({ iteration: { codex: sessionId } }) })
+		for (const table of ["active_runs", "closure_sessions", "task_join_evaluation_bindings", "task_join_bindings", "task_leaf_nodes", "task_seq_nodes", "task_par_nodes", "task_closures", "task_trees", "task_nodes", "execution_definitions"]) db.exec(`DROP TABLE ${table}`)
+		if (schemaVersion === 13) db.exec("DROP TABLE context_entries")
+		db.exec("CREATE TABLE current_runs (chain_id INTEGER PRIMARY KEY REFERENCES chains(id), phase TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES runs(run_id), started_at REAL NOT NULL, extra TEXT NOT NULL)")
+		db.query<never, { chainId: number; runId: string }>("INSERT INTO current_runs (chain_id, phase, run_id, started_at, extra) VALUES ($chainId, 'iteration', $runId, 1800000500, '{}')").run({ chainId, runId })
+		db.exec(`PRAGMA user_version = ${schemaVersion}`)
+	} finally { db.close() }
+	return { chainName, runId, sessionId }
 }
 
 function seedFinalRuntime(loopDataRoot: string, repo: string): { chainName: string; identity: TaskNodeIdentity; completedRunId: string } {
@@ -94,21 +133,46 @@ function seedFinalRuntime(loopDataRoot: string, repo: string): { chainName: stri
 	} finally { store.close() }
 }
 
-function downgradeRunSchemaToV15(loopDataRoot: string): void {
-	const db = new Database(resolve(loopDataRoot, "db.sqlite"), { strict: true })
-	try {
-		db.exec("PRAGMA foreign_keys = OFF")
-		db.exec("CREATE TABLE runs_v15 AS SELECT id, run_id, chain_id, item_id, phase, status, started_at, ended_at, exit_code, extra FROM runs")
-		db.exec("DROP TABLE runs")
-		db.exec("ALTER TABLE runs_v15 RENAME TO runs")
-		db.exec("CREATE UNIQUE INDEX runs_v15_run_id ON runs(run_id)")
-		db.exec("PRAGMA user_version = 15")
-	} finally { db.close() }
-}
-
 function userVersion(loopDataRoot: string): number {
 	const db = new Database(resolve(loopDataRoot, "db.sqlite"), { readonly: true })
 	try { return VersionBoundary.assert(db.query("PRAGMA user_version").get()).user_version } finally { db.close() }
+}
+
+async function stopDaemon(child: ChildProcess, loopDataRoot: string, env: NodeJS.ProcessEnv): Promise<void> {
+	command(["bun", LOOP_ENTRY, "daemon", "down", "--loop-data-root", loopDataRoot], { env, allowFail: true })
+	const deadline = Date.now() + 10_000
+	while (child.exitCode === null && Date.now() < deadline) await Bun.sleep(50)
+	if (child.exitCode === null) child.kill("SIGKILL")
+	if (existsSync(resolve(loopDataRoot, "daemon.sock"))) fail(`daemon socket remained after teardown: ${loopDataRoot}`)
+}
+
+async function migrateHistoricalRuntime(root: string, loopDataRoot: string, repo: string, schemaVersion: 13 | 14, env: NodeJS.ProcessEnv): Promise<void> {
+	const seed = seedHistoricalRuntime(loopDataRoot, repo, schemaVersion)
+	log(`preSchemaV${schemaVersion}=${userVersion(loopDataRoot)}`)
+	const stdoutFd = openSync(resolve(root, `daemon-v${schemaVersion}.stdout.log`), "a")
+	const stderrFd = openSync(resolve(root, `daemon-v${schemaVersion}.stderr.log`), "a")
+	const daemon = spawn("bun", [LOOP_ENTRY, "daemon", "up", "--loop-data-root", loopDataRoot], { cwd: REPO_ROOT, env, stdio: ["ignore", stdoutFd, stderrFd] })
+	closeSync(stdoutFd); closeSync(stderrFd)
+	try {
+		await waitForSocket(daemon, resolve(loopDataRoot, "daemon.sock"))
+		await waitForMigration(daemon, loopDataRoot)
+		const statusText = command(["bun", LOOP_ENTRY, "status", repo, "--json", "--loop-data-root", loopDataRoot, "--chain", seed.chainName], { env })
+		const status = StatusBoundary.assert(JSON.parse(statusText))
+		if (!JSON.stringify(status.taskTree).includes(seed.sessionId)) fail(`v${schemaVersion} session was not migrated`)
+		const migrated = openSqliteStateStore({ loopDataRoot })
+		try {
+			const run = migrated.getRunByRunId(seed.runId)
+			if (run === null || run.closureId.length === 0 || run.runtimeNodeId.length === 0) fail(`v${schemaVersion} durable run identity was not migrated`)
+		} finally { migrated.close() }
+		if (schemaVersion === 14) {
+			const migrated = openSqliteStateStore({ loopDataRoot })
+			try {
+				const chain = migrated.getChainByName(seed.chainName)
+				if (chain === null || migrated.listContextEntries(chain.id).map((entry) => entry.body).join(",") !== "current-main-v14-context") fail("v14 context was not preserved")
+			} finally { migrated.close() }
+		}
+		log(`postSchemaV${schemaVersion}=${userVersion(loopDataRoot)}`)
+	} finally { await stopDaemon(daemon, loopDataRoot, env) }
 }
 
 async function waitForSocket(child: ChildProcess, socket: string): Promise<void> {
@@ -134,14 +198,15 @@ async function waitForMigration(child: ChildProcess, loopDataRoot: string): Prom
 async function main(): Promise<void> {
 	const candidateSha = command(["git", "rev-parse", "HEAD"]).trim()
 	const root = resolve(REPO_ROOT, ".coder-loop/runtime/issue-558-integration", randomUUID())
-	const loopDataRoot = resolve(root, "loop-data")
+	const loopDataRoot = resolve(root, "final-loop-data")
 	mkdirSync(loopDataRoot, { recursive: true })
 	const repo = createFixtureRepo(root)
 	const shims = writeShims(root)
+	await migrateHistoricalRuntime(root, resolve(root, "v13-loop-data"), repo, 13, shims.env)
+	await migrateHistoricalRuntime(root, resolve(root, "v14-loop-data"), repo, 14, shims.env)
 	const seeded = seedFinalRuntime(loopDataRoot, repo)
-	downgradeRunSchemaToV15(loopDataRoot)
 	log(`candidateSha=${candidateSha}`)
-	log(`preSchema=${userVersion(loopDataRoot)}`)
+	log(`finalSchema=${userVersion(loopDataRoot)}`)
 	const stdoutFd = openSync(resolve(root, "daemon.stdout.log"), "a")
 	const stderrFd = openSync(resolve(root, "daemon.stderr.log"), "a")
 	const daemon = spawn("bun", [LOOP_ENTRY, "daemon", "up", "--loop-data-root", loopDataRoot], { cwd: REPO_ROOT, env: shims.env, stdio: ["ignore", stdoutFd, stderrFd] })
@@ -149,9 +214,7 @@ async function main(): Promise<void> {
 	const socket = resolve(loopDataRoot, "daemon.sock")
 	try {
 		await waitForSocket(daemon, socket)
-		await waitForMigration(daemon, loopDataRoot)
 		log(`daemonPid=${daemon.pid ?? "missing"} socket=${socket}`)
-		log(`postSchema=${userVersion(loopDataRoot)}`)
 		const runner = spawn("codex", ["--deterministic"], { cwd: REPO_ROOT, env: shims.env, stdio: "ignore" })
 		await new Promise<void>((resolveExit, reject) => { runner.once("exit", () => resolveExit()); runner.once("error", reject) })
 		const statusText = command(["bun", LOOP_ENTRY, "status", repo, "--json", "--loop-data-root", loopDataRoot, "--chain", seeded.chainName], { env: shims.env })
@@ -171,11 +234,7 @@ async function main(): Promise<void> {
 		if (identityEvent?.definitionNodeId !== seeded.identity.definitionNodeId || identityEvent.definitionRef?.contentIdentity !== seeded.identity.definitionRef.contentIdentity) fail("emitted event identity does not match persisted/status identity")
 		log("observed=recursive-status,sibling-active-runs,conflict-rejection,consumed-rejection,durable-run-identity,event-identity")
 	} finally {
-		command(["bun", LOOP_ENTRY, "daemon", "down", "--loop-data-root", loopDataRoot], { env: shims.env, allowFail: true })
-		const deadline = Date.now() + 10_000
-		while (daemon.exitCode === null && Date.now() < deadline) await Bun.sleep(50)
-		if (daemon.exitCode === null) daemon.kill("SIGKILL")
-		if (existsSync(socket)) fail("daemon socket remained after teardown")
+		await stopDaemon(daemon, loopDataRoot, shims.env)
 		const worktrees = command(["git", "worktree", "list", "--porcelain"], { cwd: repo })
 		if (worktrees.includes(resolve(loopDataRoot, "chains"))) fail("temporary worktree registration remained")
 		rmSync(root, { recursive: true, force: true })

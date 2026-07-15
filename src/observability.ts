@@ -242,15 +242,21 @@ const EventBaseBoundary = {
 	"runId?": "string",
 	"phase?": "string",
 	"subject?": SubjectBoundary,
-	"runtimeNodeId?": "string>0",
-	"definitionRef?": arkType.or(
-		{ kind: arkType.unit("preset"), contentIdentity: "string>0", "+": "reject" },
-		{ kind: arkType.unit("chain"), contentIdentity: "string>0", "+": "reject" },
-	),
-	"definitionNodeId?": "string>0",
 } as const
 
-export const ObservabilityEventBoundary = arkType.or(
+const EventTaskIdentityBoundary = arkType.or(
+	{
+		runtimeNodeId: "string>0",
+		definitionRef: arkType.or(
+			{ kind: arkType.unit("preset"), contentIdentity: "string>0", "+": "reject" },
+			{ kind: arkType.unit("chain"), contentIdentity: "string>0", "+": "reject" },
+		),
+		definitionNodeId: "string>0",
+	},
+	{ "runtimeNodeId?": "never", "definitionRef?": "never", "definitionNodeId?": "never" },
+)
+
+const ObservabilityEventPayloadBoundary = arkType.or(
 	{
 		...EventBaseBoundary,
 		kind: arkType.unit("audit"),
@@ -733,6 +739,8 @@ export const ObservabilityEventBoundary = arkType.or(
 		},
 	},
 )
+
+export const ObservabilityEventBoundary = ObservabilityEventPayloadBoundary.and(EventTaskIdentityBoundary)
 
 export type ObservabilityEvent = typeof ObservabilityEventBoundary.infer
 export type ObservabilityKind = typeof ObservabilityKindBoundary.infer

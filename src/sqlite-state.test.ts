@@ -115,6 +115,29 @@ describe("sqlite state store", () => {
 		}
 	})
 
+	test("fresh and migrated normalized runtime use the same runs schema", async () => {
+		const fresh = await openTestStore("fresh-runs-schema")
+		fresh.store.close()
+		const historical = await openTestStore("migrated-runs-schema")
+		historical.store.close()
+		const historicalDb = new Database(historical.dbFile)
+		try {
+			historicalDb.exec("PRAGMA foreign_keys=OFF")
+			historicalDb.exec("CREATE TABLE runs_v15 AS SELECT id, run_id, chain_id, item_id, phase, status, started_at, ended_at, exit_code, extra FROM runs")
+			historicalDb.exec("DROP TABLE runs")
+			historicalDb.exec("ALTER TABLE runs_v15 RENAME TO runs")
+			historicalDb.exec("CREATE UNIQUE INDEX runs_v15_run_id ON runs(run_id)")
+			historicalDb.exec("PRAGMA user_version=15")
+		} finally { historicalDb.close() }
+		openSqliteStateStore({ loopDataRoot: dbFileRoot(historical.dbFile) }).close()
+		const schema = (dbFile: string) => {
+			const db = new Database(dbFile, { readonly: true })
+			try { return db.query<{ sql: string }, []>("SELECT sql FROM sqlite_master WHERE type='table' AND name='runs'").get()?.sql ?? null } finally { db.close() }
+		}
+		const normalizeSchema = (sql: string | null) => sql?.replaceAll('"', "").replace(/\s+/g, " ").trim() ?? null
+		expect(normalizeSchema(schema(fresh.dbFile))).toBe(normalizeSchema(schema(historical.dbFile)))
+	})
+
 	test("closure active run round-trip", async () => {
 		const { store } = await openTestStore("current")
 		try {
@@ -202,6 +225,24 @@ describe("sqlite state store", () => {
 		} finally { store.close() }
 	})
 
+	test("nested task tree seq cursor accepts only a direct child", async () => {
+		const { store } = await openTestStore("nested-task-tree-seq-cursor")
+		try {
+			const chain = createFullChain(store)
+			const first = createFullItem(store, chain)
+			const second = createFullItem(store, chain, { issueNumber: 178, itemId: "178" })
+			const definitionRef = { kind: "chain", contentIdentity: "sha256:seq-cursor" } as const
+			const leaf = (item: ItemRecord, id: string, sourceParNodeId: string | null) => ({ kind: "leaf", identity: { runtimeNodeId: id, definitionRef, definitionNodeId: id }, closure: { closureId: `closure-${id}`, itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: `/worktrees/${id}`, branchName: `branch-${id}`, baseCommit: "0123456789abcdef", sourceParNodeId, sessions: [] } } as const)
+			const tree: TaskTreeSnapshot = { root: { kind: "seq", identity: { runtimeNodeId: "seq-root", definitionRef, definitionNodeId: "root" }, cursor: { kind: "next", nodeId: "nested-leaf" }, children: [leaf(first, "direct-leaf", null), { kind: "par", identity: { runtimeNodeId: "nested-par", definitionRef, definitionNodeId: "par" }, groupId: "nested-par", pinCommit: "0123456789abcdef", state: "open", reopen: { count: 0, budgetRef: "chain.maxReopens" }, join: { currentVersion: 1, value: { kind: "drain" }, evaluation: { kind: "not-evaluating" } }, children: [leaf(second, "nested-leaf", "nested-par")] }] }, activeRuns: [] }
+			expectSqliteCode(() => store.createTaskTree(chain.id, tree), "run_closure_mismatch")
+			const sourceChain = store.createChain({ name: "cursor-source", repository: "mouriya-s-lab/coder-loop", baseBranch: "main", status: "active" })
+			const sourceItem = createFullItem(store, sourceChain, { issueNumber: 179, itemId: "179" })
+			store.createTaskTree(sourceChain.id, { root: leaf(sourceItem, "other-tree-leaf", null), activeRuns: [] })
+			const crossTree: TaskTreeSnapshot = { root: { kind: "seq", identity: { runtimeNodeId: "cross-tree-root", definitionRef, definitionNodeId: "cross-root" }, cursor: { kind: "next", nodeId: "other-tree-leaf" }, children: [leaf(first, "cross-tree-direct-leaf", null)] }, activeRuns: [] }
+			expectSqliteCode(() => store.createTaskTree(chain.id, crossTree), "run_closure_mismatch")
+		} finally { store.close() }
+	})
+
 	test("closure lifecycle preserves suspended resources and only consumed permits absence", async () => {
 		const { store } = await openTestStore("closure-lifecycle")
 		try {
@@ -245,7 +286,7 @@ describe("sqlite state store", () => {
 	})
 
 	test("closure active run rejects conflicts and mismatches through typed errors", async () => {
-		const { store } = await openTestStore("closure-active-run-negative")
+		const { store, dbFile } = await openTestStore("closure-active-run-negative")
 		try {
 			const chain = createFullChain(store)
 			const item = createFullItem(store, chain)
@@ -257,6 +298,11 @@ describe("sqlite state store", () => {
 			expectSqliteCode(() => store.setCurrentRun({ chainId: chain.id, phase: "iteration", runId: "active-two", startedAt: 1_800_000_201, extra: storedItemExtra({}) }), "active_run_conflict")
 			expectSqliteCode(() => store.setCurrentRun({ chainId: chain.id, phase: "iteration", runId: "wrong-phase", startedAt: 1_800_000_202, extra: storedItemExtra({}) }), "run_closure_mismatch")
 			store.clearCurrentRun("active-one")
+			const db = new Database(dbFile)
+			try { db.exec(`UPDATE runs SET closure_id = 'closure-${item.id}-review', runtime_node_id = 'leaf-${item.id}-review' WHERE run_id = 'active-two'`) } finally { db.close() }
+			expectSqliteCode(() => store.setCurrentRun({ chainId: chain.id, phase: "iteration", runId: "active-two", startedAt: 1_800_000_204, extra: storedItemExtra({}) }), "run_closure_mismatch")
+			const restoreDb = new Database(dbFile)
+			try { restoreDb.exec(`UPDATE runs SET closure_id = 'closure-${item.id}-iteration', runtime_node_id = 'leaf-${item.id}-iteration' WHERE run_id = 'active-two'`) } finally { restoreDb.close() }
 			store.setClosureLifecycle(`closure-${item.id}-iteration`, { kind: "suspend", updatedAt: 1_800_000_203 })
 			expectSqliteCode(() => store.setCurrentRun({ chainId: chain.id, phase: "iteration", runId: "active-two", startedAt: 1_800_000_204, extra: storedItemExtra({}) }), "closure_lifecycle_conflict")
 		} finally { store.close() }
@@ -282,7 +328,7 @@ describe("sqlite state store", () => {
 		} finally { store.close() }
 	})
 
-	test("join binding and evaluation history is append-only and version referenced", async () => {
+	test("join binding and evaluation persisted shape round-trips", async () => {
 		const { store } = await openTestStore("join-history")
 		try {
 			const chain = createFullChain(store)
@@ -290,14 +336,21 @@ describe("sqlite state store", () => {
 			const second = createFullItem(store, chain, { issueNumber: 178, itemId: "178" })
 			const definitionRef = { kind: "chain", contentIdentity: "sha256:join-history" } as const
 			const leaf = (item: ItemRecord, id: string) => ({ kind: "leaf", identity: { runtimeNodeId: id, definitionRef, definitionNodeId: id }, closure: { closureId: `closure-${id}`, itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: `/worktrees/${id}`, branchName: `branch-${id}`, baseCommit: "0123456789abcdef", sourceParNodeId: "par-history", sessions: [] } } as const)
-			store.createTaskTree(chain.id, { root: { kind: "par", identity: { runtimeNodeId: "par-history", definitionRef, definitionNodeId: "par" }, groupId: "par-history", pinCommit: "0123456789abcdef", state: "open", reopen: { count: 0, budgetRef: "chain.maxReopens" }, join: { currentVersion: 1, value: { kind: "drain" }, evaluation: { kind: "not-evaluating" } }, children: [leaf(first, "join-leaf-one"), leaf(second, "join-leaf-two")] }, activeRuns: [] })
-			store.appendJoinBinding("par-history", { version: 2, value: { kind: "validator", candidate: { definitionRef, candidateId: "validator" } }, authorKind: "operator", authorId: "test", authorityClass: "runtime", effectiveFromEpoch: 1, createdAt: 1_800_000_300 })
-			store.bindJoinEvaluation("par-history", { epoch: 1, bindingVersion: 1, state: "decided" })
-			store.bindJoinEvaluation("par-history", { epoch: 2, bindingVersion: 2, state: "evaluating" })
-			expect(store.listJoinBindings("par-history").map((binding) => binding.version)).toEqual([1, 2])
-			expect(store.listJoinEvaluations("par-history").map((evaluation) => evaluation.bindingVersion)).toEqual([1, 2])
-			expectSqliteCode(() => store.appendJoinBinding("par-history", { version: 2, value: { kind: "drain" }, authorKind: "operator", authorId: "test", authorityClass: "runtime", effectiveFromEpoch: 2, createdAt: 1_800_000_301 }), "invalid_input")
-			expectSqliteCode(() => store.bindJoinEvaluation("par-history", { epoch: 3, bindingVersion: 3, state: "evaluating" }), "invalid_input")
+			const tree: TaskTreeSnapshot = { root: { kind: "par", identity: { runtimeNodeId: "par-history", definitionRef, definitionNodeId: "par" }, groupId: "par-history", pinCommit: "0123456789abcdef", state: "open", reopen: { count: 0, budgetRef: "chain.maxReopens" }, join: { currentVersion: 2, value: { kind: "validator", candidate: { definitionRef, candidateId: "validator" } }, evaluation: { kind: "evaluating", epoch: 2, bindingVersion: 2 } }, children: [leaf(first, "join-leaf-one"), leaf(second, "join-leaf-two")] }, activeRuns: [] }
+			expect(store.createTaskTree(chain.id, tree)).toEqual(tree)
+			expect(store.getTaskTree(chain.id)).toEqual(tree)
+		} finally { store.close() }
+	})
+
+	test("durable run SQLite ingress rejects undeclared columns", async () => {
+		const { store, dbFile } = await openTestStore("run-row-exact-ingress")
+		try {
+			const chain = createFullChain(store)
+			const item = createFullItem(store, chain)
+			store.recordRun({ runId: "exact-run", chainId: chain.id, itemId: item.id, phase: "iteration", startedAt: 1_800_000_400, extra: definitionRunExtra() })
+			const db = new Database(dbFile)
+			try { db.exec("ALTER TABLE runs ADD COLUMN unexpected TEXT") } finally { db.close() }
+			expectSqliteCode(() => store.getRunByRunId("exact-run"), "invalid_json")
 		} finally { store.close() }
 	})
 
