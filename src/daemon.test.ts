@@ -6688,6 +6688,25 @@ process.exitCode = 0
 			const newItem = record(created.result.item)
 			expect(stringValue(newItem.itemId)).toBe("407201")
 
+			const deniedHookAdd = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
+				chainId,
+				itemId: "407202",
+				repoCwd: REPO_ROOT,
+				preset: "gh-issue-pr-iteration",
+				extra: { hooks: [] },
+				agentCredential: credential,
+			}))
+			expect(deniedHookAdd.ok).toBe(false)
+			if (!deniedHookAdd.ok) expect(deniedHookAdd.error.message).toContain("hooks")
+
+			const deniedHookBatch = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.batchAdd", {
+				chainId,
+				items: [{ itemId: "407203", repoCwd: REPO_ROOT, preset: "gh-issue-pr-iteration", extra: { hooks: [] } }],
+				agentCredential: credential,
+			}))
+			expect(deniedHookBatch.ok).toBe(false)
+			if (!deniedHookBatch.ok) expect(deniedHookBatch.error.message).toContain("hooks")
+
 			// item.list cross-check: parent + child both present (2 items).
 			const listed = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.list", { chainId }))))
 			const items = Array.isArray(listed.items) ? listed.items : []
@@ -6710,6 +6729,8 @@ process.exitCode = 0
 				expect(allow.subject).toMatchObject({ kind: "agent" })
 				expect(allow.payload.presetName).toBe("gh-issue-pr-iteration")
 			}
+			const hookDenials = events.filter((event) => event.kind === "audit" && event.type === "item.add.rights_admission" && event.payload.reason === "control-plane-denied")
+			expect(hookDenials).toHaveLength(2)
 		} finally {
 			await daemon.stop()
 		}
@@ -8077,6 +8098,11 @@ process.exitCode = 0
 				preset: "gh-issue-pr-iteration",
 			}))).item)
 			const itemId = numberValue(added.id)
+			const protectedHook = { kind: "observer", point: "agent.spawn", script: "/bin/true", timeoutMs: 1_000 }
+			expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.update", {
+				itemId,
+				fields: { extraPatch: { hooks: [protectedHook] } },
+			})))
 
 			await waitFor(async () => {
 				try { return (await readFile(reviewCapture, "utf-8")).trim() } catch { return "" }
@@ -8167,6 +8193,20 @@ process.exitCode = 0
 				expect(denyExtraKey.error.message).toContain("field-not-granted")
 			}
 
+			for (const fields of [
+				{ extra: { hooks: [] } },
+				{ extraPatch: { hooks: [] } },
+				{ extraPatch: { hooks: null } },
+				{ extra: { branch: "allowed/without-protected-hooks" } },
+			]) {
+				const deniedHooks = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.update", { itemId, fields, agentCredential: reviewCredential }))
+				expect(deniedHooks.ok).toBe(false)
+				if (!deniedHooks.ok) {
+					expect(deniedHooks.error.message).toContain("hooks")
+					expect(deniedHooks.error.message).toContain("control-plane-denied")
+				}
+			}
+
 			// Audit replay: one deny event per attempt. Spot-check control-plane and undeclared.
 			const eventsPath = resolveLoopDataPaths({ loopDataRoot }).eventsFile
 			const events = (await queryObservabilityEvents(eventsPath)).events
@@ -8176,7 +8216,8 @@ process.exitCode = 0
 				&& event.item === itemId
 				&& event.payload.outcome === "deny",
 			)
-			expect(denies.length).toBeGreaterThanOrEqual(7)
+			expect(denies.length).toBeGreaterThanOrEqual(11)
+			expect(denies.filter((event) => event.kind === "audit" && event.type === "item.update.field_write_admission" && event.payload.deniedFields.includes("hooks"))).toHaveLength(5)
 			const controlPlaneRunner = denies.find((event) =>
 				event.kind === "audit"
 				&& event.type === "item.update.field_write_admission"
@@ -8205,6 +8246,7 @@ process.exitCode = 0
 			// #419: `branch` / `pr` are no longer top-level wire fields. After denial they must
 			// still be absent from the `extra` carrier where presets declare them.
 			const stillExtra = record(stillRecord.extra)
+			expect(stillExtra.hooks).toEqual([protectedHook])
 			expect(stillExtra.branch).toBeUndefined()
 			expect(stillExtra.pr).toBeUndefined()
 		} finally {
@@ -8246,6 +8288,39 @@ process.exitCode = 0
 			const extra = record(finalUpdate.extra)
 			expect(extra.blockerRepo).toBe("owner/dep")
 			expect(extra.arbitrary).toBe("key")
+			const explicitNull = record(expectOk(await request(fixture, "item.update", {
+				itemId,
+				extraPatch: { arbitrary: null },
+			})).item)
+			const explicitNullExtra = record(explicitNull.extra)
+			expect(Object.hasOwn(explicitNullExtra, "arbitrary")).toBe(true)
+			expect(explicitNullExtra.arbitrary).toBeNull()
+			const reservedKeyPatch = await request(fixture, "item.update", {
+				itemId,
+				extraPatch: JSON.parse(`{"__proto__":null}`),
+			})
+			expectInvalid(reservedKeyPatch)
+			if (!reservedKeyPatch.ok) {
+				expect(reservedKeyPatch.error.message).toBe("extra key not allowed: __proto__")
+				expect(record(reservedKeyPatch.error.details).field).toBe("extra.__proto__")
+			}
+			const hook = { kind: "observer", point: "agent.spawn", script: "/bin/true", timeoutMs: 1000 }
+			const replaced = record(expectOk(await request(fixture, "item.update", { itemId, extra: { hooks: [hook] } })).item)
+			expect(record(replaced.extra).hooks).toEqual([hook])
+			const replacementWithOmittedHooks = record(expectOk(await request(fixture, "item.update", {
+				itemId,
+				extra: { branch: "operator/replacement" },
+			})).item)
+			expect(record(replacementWithOmittedHooks.extra)).toMatchObject({ branch: "operator/replacement", hooks: [hook] })
+			const replacementWithExplicitHookClear = record(expectOk(await request(fixture, "item.update", {
+				itemId,
+				extra: { branch: "operator/cleared", hooks: null },
+			})).item)
+			expect(record(replacementWithExplicitHookClear.extra)).toEqual({ branch: "operator/cleared" })
+			const patched = record(expectOk(await request(fixture, "item.update", { itemId, extraPatch: { hooks: [hook] } })).item)
+			expect(record(patched.extra).hooks).toEqual([hook])
+			const cleared = record(expectOk(await request(fixture, "item.update", { itemId, extraPatch: { hooks: null } })).item)
+			expect(record(cleared.extra).hooks).toBeUndefined()
 
 			// Audit replay: every item.update emitted one field_write_admission allow with
 			// reason=operator. The subject is operator on every event.
@@ -8258,7 +8333,7 @@ process.exitCode = 0
 				&& event.payload.outcome === "allow"
 				&& event.payload.reason === "operator",
 			)
-			expect(operatorAllows.length).toBeGreaterThanOrEqual(7)
+			expect(operatorAllows.length).toBeGreaterThanOrEqual(12)
 			for (const event of operatorAllows) {
 				if (event.kind === "audit" && event.type === "item.update.field_write_admission") {
 					expect(event.subject).toEqual({ kind: "operator" })
