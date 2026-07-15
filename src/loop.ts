@@ -64,6 +64,7 @@ import {
 	chainBindingsPresetPath,
 	itemExtraJsonValue,
 	itemExtraToJsonObject,
+	itemExtraToTransparentJsonObject,
 	metadataBoolean,
 	metadataNestedString,
 	metadataNestedStringArray,
@@ -3482,7 +3483,7 @@ function transparentItemExtra(item: ItemRecord, preset: Preset): JsonObject {
 	// table de-GitHub-shaping. No legacy physical-column fallback remains; the function is
 	// kept (instead of inlining) so supervisor status snapshots keep going through one
 	// helper that documents the preset-vs-extra contract.
-	const extra = itemExtraToJsonObject(item.extra)
+	const extra = itemExtraToTransparentJsonObject(item.extra)
 	// `preset` is unused at runtime now — kept on the signature for clarity at call sites,
 	// matching the prior shape so review can diff the change easily. Silence the unused
 	// warning via void without `as`.
@@ -3541,7 +3542,7 @@ function statusCurrentRunSnapshot(current: CurrentRunRecord): StatusCurrentRunSn
 		phase: current.phase,
 		runId: current.runId,
 		startedAt: new Date(current.startedAt * 1000).toISOString(),
-		extra: itemExtraToJsonObject(current.extra),
+		extra: itemExtraToTransparentJsonObject(current.extra),
 	}
 }
 
