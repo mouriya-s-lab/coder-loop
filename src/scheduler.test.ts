@@ -26,7 +26,7 @@ import {
 	type SchedulerPhaseRunner,
 	type SchedulerWorktreeManager,
 } from "./scheduler"
-import { schedulerEventToObservabilityEvent } from "./daemon"
+import { resolveSchedulerEventTaskIdentity, schedulerEventToObservabilityEvent } from "./daemon"
 import {
 	buildPhaseRunnerSelectionFromChain,
 	buildRunnerInvocation,
@@ -129,6 +129,24 @@ describe("scheduler", () => {
 			expect(run.runtimeNodeId).toBe(leaf.identity.runtimeNodeId)
 			expect(fixture.schedulerEvents.some((event) => event.type === "phase.start" && event.runId === run.runId)).toBe(true)
 			await activeRun.closed
+		} finally { fixture.store.close() }
+	})
+
+	test("runtime identity event conversion rejects a missing durable run join", async () => {
+		const fixture = await createFixture("runtime-identity-missing-durable-join")
+		try {
+			const chain = createChain(fixture.store, "runtime-identity-missing-durable-join")
+			const event: SchedulerEvent = {
+				type: "phase.start",
+				ts: "2026-07-16T00:00:00.000Z",
+				runId: "missing-durable-run",
+				chainId: chain.id,
+				itemId: 1,
+				repoCwd: "/repo/a",
+				phase: "iteration",
+				pid: null,
+			}
+			expect(() => resolveSchedulerEventTaskIdentity(fixture.store, chain, event)).toThrow(/has no durable run row/)
 		} finally { fixture.store.close() }
 	})
 
@@ -1053,7 +1071,11 @@ describe("scheduler", () => {
 
 			// #411: the unified observability envelope must classify the engine-driven exhaustion
 			// transition as kind=audit / subject={kind:"engine"} per the event classification table.
-			const observabilityEvent = schedulerEventToObservabilityEvent(chain, queueTerminal!)
+			const observabilityEvent = schedulerEventToObservabilityEvent(chain, queueTerminal!, {
+				runtimeNodeId: "custom-exhausted-runtime",
+				definitionRef: { kind: "preset", contentIdentity: "sha256:custom-exhausted" },
+				definitionNodeId: "custom-exhausted-definition",
+			})
 			expect(observabilityEvent.kind).toBe("audit")
 			expect(observabilityEvent.type).toBe("queue.terminal")
 			expect(observabilityEvent.subject).toEqual({ kind: "engine" })
@@ -4361,9 +4383,10 @@ function persistedObservabilityOptions(fixture: Fixture, overrides: SchedulerFix
 async function appendPersistedSchedulerEvent(fixture: Fixture, event: SchedulerEvent): Promise<void> {
 	const chain = fixture.store.getChain(event.chainId)
 	if (chain === null) throw new Error(`missing chain ${event.chainId} for scheduler event ${event.type}`)
+	const identity = resolveSchedulerEventTaskIdentity(fixture.store, chain, event)
 	await appendObservabilityEvent(
 		resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile,
-		schedulerEventToObservabilityEvent(chain, event),
+		schedulerEventToObservabilityEvent(chain, event, identity),
 	)
 }
 
@@ -4450,16 +4473,45 @@ async function writeFakeRunner(path: string): Promise<void> {
 	await writeFile(
 		path,
 		`import { appendFile, readFile } from "node:fs/promises"
+import { type as arkType } from "arktype"
 import { openSqliteStateStore } from ${JSON.stringify(sqliteStateModule)}
+
+const FakeRunnerInputBoundary = arkType({
+	itemId: "number",
+	issueNumber: "number",
+	runId: "string",
+	worktreePath: "string",
+	eventLog: "string",
+	sleepMs: "number",
+	"waitForConcurrentStarts?": "number",
+	exitCode: "number",
+	"writeStatus?": arkType.or("string", "null"),
+	"summary?": arkType.or("string", "null"),
+	"+": "reject",
+})
+const FakeRunnerEventBoundary = arkType({
+	type: "'start'|'end'",
+	itemId: "number",
+	issueNumber: "number",
+	runId: "string",
+	cwd: "string",
+	"+": "reject",
+})
+function parseFakeRunnerInput(serialized: string) {
+	return FakeRunnerInputBoundary.assert(JSON.parse(serialized))
+}
+function parseFakeRunnerEvent(line: string) {
+	return FakeRunnerEventBoundary.assert(JSON.parse(line))
+}
 
 const promptIndex = Bun.argv.indexOf("-p")
 const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
-const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+const input = parseFakeRunnerInput(prompt.split("\\n")[0] ?? prompt)
 await appendFile(input.eventLog, JSON.stringify({ type: "start", itemId: input.itemId, issueNumber: input.issueNumber, runId: input.runId, cwd: process.cwd() }) + "\\n")
 if (typeof input.waitForConcurrentStarts === "number") {
 	const deadline = Date.now() + 5_000
 	while (true) {
-		const events = (await readFile(input.eventLog, "utf-8")).trim().split("\\n").filter(Boolean).map((line) => JSON.parse(line))
+		const events = (await readFile(input.eventLog, "utf-8")).trim().split("\\n").filter(Boolean).map(parseFakeRunnerEvent)
 		if (events.filter((event) => event.type === "start").length >= input.waitForConcurrentStarts) break
 		if (Date.now() >= deadline) throw new Error("timed out waiting for concurrent runner starts")
 		await Bun.sleep(5)

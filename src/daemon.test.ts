@@ -48,6 +48,14 @@ function runtimeStatus(value: string) {
 	return engineLifecycleAdmittedItemStatus(parseInternalStatus(value, "test.status"), "test")
 }
 
+function observabilityTaskIdentity(runId: string) {
+	return {
+		runtimeNodeId: `runtime:${runId}`,
+		definitionRef: { kind: "chain", contentIdentity: "sha256:daemon-observability-test" },
+		definitionNodeId: `definition:${runId}`,
+	} as const
+}
+
 function staleRecoveryRunExtra(worktreePath: string, overrides: JsonObject = {}) {
 	return storedItemExtra({
 		worktreePath,
@@ -2352,6 +2360,19 @@ attemptTimeoutSeconds = 3600
 			})).item)
 			const itemId = numberValue(item.id)
 			const eventsFile = resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile
+			const durableStore = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				durableStore.recordRun({
+					runId: "run-exit-action-test-2",
+					chainId,
+					itemId,
+					phase: "review",
+					startedAt: 1_800_000_000,
+					extra: staleRecoveryRunExtra(REPO_ROOT),
+				})
+			} finally {
+				durableStore.close()
+			}
 
 			// Scenario 2a: vocabulary-invalid action is rejected by the request boundary before the
 			// per-phase admission gate fires. The error message echoes the engine vocabulary.
@@ -2374,7 +2395,7 @@ attemptTimeoutSeconds = 3600
 			// `item.exit.selected` audit event with `outcome=deny reason=phase-exits`.
 			const undeclared = await request(fixture, "item.exitAction", {
 				itemId,
-				agentRunId: "run-exit-action-test-1b",
+				agentRunId: "run-exit-action-test-2",
 				agentPhase: "iteration",
 				action: "stop",
 			})
@@ -4299,6 +4320,7 @@ process.exitCode = 0
 	test("decision fingerprint suppresses only consecutive duplicates", () => {
 		const state = new DecisionFingerprintState()
 		const first = makeObservabilityEvent({
+			...observabilityTaskIdentity("run-1"),
 			kind: "decision",
 			type: "slot.busy",
 			chain: "fingerprint-chain",
@@ -4307,6 +4329,7 @@ process.exitCode = 0
 			payload: { slotKey: "slot-a", chainId: 1, repoCwd: "/repo/a", activeRunId: "run-1" },
 		})
 		const changed = makeObservabilityEvent({
+			...observabilityTaskIdentity("run-2"),
 			kind: "decision",
 			type: "slot.busy",
 			chain: "fingerprint-chain",
@@ -4370,6 +4393,18 @@ prompt = "review.md"
 				presetPath: stopPresetDir,
 			})).item)
 			const itemId = numberValue(item.id)
+			const durableStore = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				const durablePhaseExitRun = durableStore.recordRun({
+					runId: "run-phase-exit-stop",
+					chainId,
+					itemId,
+					phase: "review",
+					startedAt: 1_800_000_000,
+					extra: staleRecoveryRunExtra(REPO_ROOT),
+				})
+				expect(durablePhaseExitRun.runtimeNodeId.length).toBeGreaterThan(0)
+			} finally { durableStore.close() }
 			const sibling = record(expectOk(await request(fixture, "chain.create", {
 				name: "fingerprint-active-sibling",
 				repository: "mouriya-s-lab/coder-loop",
@@ -4377,6 +4412,7 @@ prompt = "review.md"
 			const siblingChainId = numberValue(sibling.id)
 			const state = daemonDecisionFingerprintState(fixture.daemon)
 			const slot = makeObservabilityEvent({
+				...observabilityTaskIdentity("run-slot"),
 				kind: "decision",
 				type: "slot.busy",
 				chain: "fingerprint-stop-chain",
@@ -4393,6 +4429,7 @@ prompt = "review.md"
 				payload: { rowId: itemId, failureCount: 1, nextRunAt: 1_800_000_000 },
 			})
 			const completedChain = makeObservabilityEvent({
+				...observabilityTaskIdentity("run-complete"),
 				kind: "decision",
 				type: "chain.complete_trigger",
 				chain: "fingerprint-stop-chain",
@@ -4473,6 +4510,7 @@ prompt = "review.md"
 		const survivingChainChurn = (generations: number): number => {
 			const state = new DecisionFingerprintState()
 			const keepActive = (runId: string, reason: string) => makeObservabilityEvent({
+				...observabilityTaskIdentity(runId),
 				kind: "decision",
 				type: "chain.complete_trigger",
 				chain: "surviving-chain",
@@ -4511,6 +4549,7 @@ prompt = "review.md"
 				const chainName = `churn-${chainId}`
 				const runId = `run-${chainId}`
 				const slot = makeObservabilityEvent({
+					...observabilityTaskIdentity(runId),
 					kind: "decision",
 					type: "slot.busy",
 					chain: chainName,
@@ -4527,6 +4566,7 @@ prompt = "review.md"
 					payload: { rowId, failureCount: 1, nextRunAt: 1_800_000_000 + index },
 				})
 				const keepActive = (reason: string, triggerRunId: string) => makeObservabilityEvent({
+					...observabilityTaskIdentity(triggerRunId),
 					kind: "decision",
 					type: "chain.complete_trigger",
 					chain: chainName,

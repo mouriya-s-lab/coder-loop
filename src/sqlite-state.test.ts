@@ -14,6 +14,7 @@ import type { JsonObject } from "./loop"
 import type { TaskTreeSnapshot } from "./task-runtime"
 import { chainBindings, engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 import { daemonRequest, sendDaemonRequest, startCoderLoopDaemon } from "./daemon"
+import { seedCanonicalHistoricalRuntime } from "./issue-558-historical-fixture"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/sqlite-state-tests", String(process.pid))
@@ -50,6 +51,22 @@ afterAll(async () => {
 })
 
 describe("sqlite state store", () => {
+	test("canonical historical runtime fixture preserves v13 and v14 foreign keys", async () => {
+		for (const schemaVersion of [13, 14] as const) {
+			const loopDataRoot = resolve(TEST_ROOT, `canonical-v${schemaVersion}-${++nextRootId}`)
+			await mkdir(loopDataRoot, { recursive: true })
+			const seeded = seedCanonicalHistoricalRuntime({
+				loopDataRoot,
+				schemaVersion,
+				chain: { name: `canonical-v${schemaVersion}`, repository: "mouriya-s-lab/coder-loop", preset: "gh-issue-pr-iteration" },
+				items: [{ itemId: `item-v${schemaVersion}`, repoCwd: REPO_ROOT, status: "in_progress", phase: "iteration", preset: "gh-issue-pr-iteration", presetPath: null, agentCwd: REPO_ROOT, sessionIds: {}, extra: {}, run: { runId: `run-v${schemaVersion}`, phase: "iteration", status: "in_progress", startedAt: 1_800_000_000, extra: {} } }],
+				contextEntries: schemaVersion === 14 ? [{ id: "context-v14", body: "v14" }] : [],
+			})
+			expect(seeded.schemaFacts.runForeignKeys).toEqual(["chain_id->chains.id:CASCADE", "item_id->items.id:CASCADE"])
+			expect(seeded.schemaFacts.currentRunForeignKeys).toEqual(["chain_id->chains.id:CASCADE", "run_id->runs.run_id:CASCADE"])
+			expect(seeded.schemaFacts.hasContextEntries).toBe(schemaVersion === 14)
+		}
+	})
 	test("schema covers chain core columns (umbrella retired #457)", async () => {
 		const { store } = await openTestStore("schema")
 		try {
@@ -361,24 +378,18 @@ describe("sqlite state store", () => {
 	})
 
 	test("v13 to v14 migrates normalized runtime before reads", async () => {
-		const fixture = await openTestStore("v13-to-v14")
-		const chain = createFullChain(fixture.store)
-		const activeItem = createFullItem(fixture.store, chain, { phase: "iteration", agentCwd: REPO_ROOT, preset: "gh-issue-pr-iteration", sessionIds: { iteration: { codex: "session-v13" }, review: { claude: "review-session-v13" } } })
-		const untouchedItem = createFullItem(fixture.store, chain, { issueNumber: 178, itemId: "178", phase: null, agentCwd: REPO_ROOT, preset: "gh-issue-pr-iteration", sessionIds: {} })
-		fixture.store.close()
-		const legacy = new Database(fixture.dbFile)
-		try {
-			legacy.exec("PRAGMA foreign_keys=OFF")
-			rebuildRunsAsPacketlessHistory(legacy)
-			insertPacketlessHistoricalRun(legacy, { runId: "legacy-active", chainId: chain.id, itemId: activeItem.id, phase: "iteration", startedAt: 1_800_000_220 })
-			legacy.exec("ALTER TABLE items ADD COLUMN session_ids TEXT NOT NULL DEFAULT '{}'")
-			legacy.exec(`UPDATE items SET session_ids = '{"iteration":{"codex":"session-v13"},"review":{"claude":"review-session-v13"}}' WHERE id = ${activeItem.id}`)
-			legacy.exec(`UPDATE items SET session_ids = '{}' WHERE id = ${untouchedItem.id}`)
-			for (const table of ["active_runs", "closure_sessions", "task_join_evaluation_bindings", "task_join_bindings", "task_leaf_nodes", "task_seq_nodes", "task_par_nodes", "task_closures", "task_trees", "task_nodes", "execution_definitions"]) legacy.exec(`DROP TABLE ${table}`)
-			legacy.exec("CREATE TABLE current_runs (chain_id INTEGER PRIMARY KEY REFERENCES chains(id), phase TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES runs(run_id), started_at REAL NOT NULL, extra TEXT NOT NULL)")
-			legacy.query("INSERT INTO current_runs (chain_id, phase, run_id, started_at, extra) VALUES ($chainId, 'iteration', 'legacy-active', 1800000220, '{}')").run({ chainId: chain.id })
-			legacy.exec("PRAGMA user_version=13")
-		} finally { legacy.close() }
+		const loopDataRoot = resolve(TEST_ROOT, `v13-to-v14-${Date.now()}-${++nextRootId}`)
+		const fixture = seedCanonicalHistoricalRuntime({
+			loopDataRoot,
+			schemaVersion: 13,
+			chain: { name: "central-state", repository: "mouriya-s-lab/coder-loop", preset: "gh-issue-pr-iteration" },
+			items: [
+				{ itemId: "177", repoCwd: REPO_ROOT, status: "in_progress", phase: "iteration", preset: "gh-issue-pr-iteration", presetPath: null, agentCwd: REPO_ROOT, sessionIds: { iteration: { codex: "session-v13" }, review: { claude: "review-session-v13" } }, extra: { issue: 177 }, run: { runId: "legacy-active", phase: "iteration", status: "in_progress", startedAt: 1_800_000_220, extra: {} } },
+				{ itemId: "178", repoCwd: REPO_ROOT, status: "queued", phase: null, preset: "gh-issue-pr-iteration", presetPath: null, agentCwd: REPO_ROOT, sessionIds: {}, extra: { issue: 178 } },
+			],
+			contextEntries: [],
+		})
+		const chain = fixture.chain
 		const migrated = openSqliteStateStore({ loopDataRoot: dbFileRoot(fixture.dbFile) })
 		try {
 			const db = new Database(fixture.dbFile)
@@ -406,20 +417,15 @@ describe("sqlite state store", () => {
 	test("normalized runtime migration resolves persisted preset once and survives source removal", async () => {
 		const presetPath = resolve(TEST_ROOT, "mutable-checkout-preset")
 		await cp(resolve(REPO_ROOT, "presets/gh-issue-pr-iteration"), presetPath, { recursive: true })
-		const fixture = await openTestStore("checkout-independent")
-		const chain = createFullChain(fixture.store)
-		const item = createFullItem(fixture.store, chain, { phase: "iteration", preset: null, presetPath })
-		fixture.store.close()
-		const legacy = new Database(fixture.dbFile)
-		try {
-			legacy.exec("PRAGMA foreign_keys=OFF")
-			rebuildRunsAsPacketlessHistory(legacy)
-			insertPacketlessHistoricalRun(legacy, { runId: "packet-less-history", chainId: chain.id, itemId: item.id, phase: "iteration", startedAt: 1_800_000_221 })
-			legacy.exec("ALTER TABLE items ADD COLUMN session_ids TEXT NOT NULL DEFAULT '{}'")
-			for (const table of ["active_runs", "closure_sessions", "task_join_evaluation_bindings", "task_join_bindings", "task_leaf_nodes", "task_seq_nodes", "task_par_nodes", "task_closures", "task_trees", "task_nodes", "execution_definitions"]) legacy.exec(`DROP TABLE ${table}`)
-			legacy.exec("CREATE TABLE current_runs (chain_id INTEGER PRIMARY KEY REFERENCES chains(id), phase TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES runs(run_id), started_at REAL NOT NULL, extra TEXT NOT NULL)")
-			legacy.exec("PRAGMA user_version=13")
-		} finally { legacy.close() }
+		const loopDataRoot = resolve(TEST_ROOT, `checkout-independent-${Date.now()}-${++nextRootId}`)
+		const fixture = seedCanonicalHistoricalRuntime({
+			loopDataRoot,
+			schemaVersion: 13,
+			chain: { name: "central-state", repository: "mouriya-s-lab/coder-loop", preset: "gh-issue-pr-iteration" },
+			items: [{ itemId: "177", repoCwd: REPO_ROOT, status: "in_progress", phase: "iteration", preset: null, presetPath, agentCwd: REPO_ROOT, sessionIds: {}, extra: { issue: 177 }, run: { runId: "packet-less-history", phase: "iteration", status: "in_progress", startedAt: 1_800_000_221, extra: {} } }],
+			contextEntries: [],
+		})
+		const chain = fixture.chain
 		const migrated = openSqliteStateStore({ loopDataRoot: dbFileRoot(fixture.dbFile) })
 		const beforeSourceChange = migrated.getTaskTree(chain.id)
 		migrated.close()
@@ -437,46 +443,36 @@ describe("sqlite state store", () => {
 
 	test("normalized runtime migration rejects missing unreadable or invalid persisted preset declarations", async () => {
 		for (const scenario of ["missing", "unreadable", "invalid"] as const) {
-			const fixture = await openTestStore(`definition-facts-${scenario}`)
-			const chain = createFullChain(fixture.store)
 			const presetPath = resolve(TEST_ROOT, `definition-source-${scenario}`)
 			if (scenario === "unreadable") await mkdir(presetPath, { recursive: true })
 			if (scenario === "invalid") {
 				await mkdir(presetPath, { recursive: true })
 				await writeFile(resolve(presetPath, "preset.toml"), "not = [valid", "utf8")
 			}
-			createFullItem(fixture.store, chain, { phase: "iteration", preset: null, presetPath: scenario === "missing" ? null : presetPath })
-			fixture.store.close()
-			const legacy = new Database(fixture.dbFile)
-			try {
-				legacy.exec("PRAGMA foreign_keys=OFF")
-				legacy.exec("ALTER TABLE items ADD COLUMN session_ids TEXT NOT NULL DEFAULT '{}'")
-				for (const table of ["active_runs", "closure_sessions", "task_join_evaluation_bindings", "task_join_bindings", "task_leaf_nodes", "task_seq_nodes", "task_par_nodes", "task_closures", "task_trees", "task_nodes", "execution_definitions"]) legacy.exec(`DROP TABLE ${table}`)
-				legacy.exec("CREATE TABLE current_runs (chain_id INTEGER PRIMARY KEY REFERENCES chains(id), phase TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES runs(run_id), started_at REAL NOT NULL, extra TEXT NOT NULL)")
-				legacy.exec("PRAGMA user_version=13")
-			} finally { legacy.close() }
+			const loopDataRoot = resolve(TEST_ROOT, `definition-facts-${scenario}-${Date.now()}-${++nextRootId}`)
+			const fixture = seedCanonicalHistoricalRuntime({
+				loopDataRoot,
+				schemaVersion: 13,
+				chain: { name: "central-state", repository: "mouriya-s-lab/coder-loop", preset: "gh-issue-pr-iteration" },
+				items: [{ itemId: "177", repoCwd: REPO_ROOT, status: "in_progress", phase: "iteration", preset: null, presetPath: scenario === "missing" ? null : presetPath, agentCwd: REPO_ROOT, sessionIds: {}, extra: { issue: 177 } }],
+				contextEntries: [],
+			})
 			expectSqliteCode(() => openSqliteStateStore({ loopDataRoot: dbFileRoot(fixture.dbFile) }), "invalid_json")
 		}
 	})
 
 	test("main v14 context database migrates normalized runtime without losing context", async () => {
-		const fixture = await openTestStore("main-v14-to-normalized-runtime")
-		const chain = createFullChain(fixture.store)
-		const item = createFullItem(fixture.store, chain, { phase: "iteration", agentCwd: REPO_ROOT, preset: "gh-issue-pr-iteration", sessionIds: { iteration: { codex: "main-v14-session" } } })
-		fixture.store.appendContextEntry({ chainId: chain.id, scope: { kind: "chain" }, author: { kind: "operator" }, body: "preserve-main-v14-context" })
-		fixture.store.close()
-		const mainV14 = new Database(fixture.dbFile)
-		try {
-			mainV14.exec("PRAGMA foreign_keys=OFF")
-			rebuildRunsAsPacketlessHistory(mainV14)
-			insertPacketlessHistoricalRun(mainV14, { runId: "main-v14-active", chainId: chain.id, itemId: item.id, phase: "iteration", startedAt: 1_800_000_230 })
-			mainV14.exec("ALTER TABLE items ADD COLUMN session_ids TEXT NOT NULL DEFAULT '{}'")
-			mainV14.exec(`UPDATE items SET session_ids = '{"iteration":{"codex":"main-v14-session"}}' WHERE id = ${item.id}`)
-			for (const table of ["active_runs", "closure_sessions", "task_join_evaluation_bindings", "task_join_bindings", "task_leaf_nodes", "task_seq_nodes", "task_par_nodes", "task_closures", "task_trees", "task_nodes", "execution_definitions"]) mainV14.exec(`DROP TABLE ${table}`)
-			mainV14.exec("CREATE TABLE current_runs (chain_id INTEGER PRIMARY KEY REFERENCES chains(id), phase TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES runs(run_id), started_at REAL NOT NULL, extra TEXT NOT NULL)")
-			mainV14.query("INSERT INTO current_runs (chain_id, phase, run_id, started_at, extra) VALUES ($chainId, 'iteration', 'main-v14-active', 1800000230, '{}')").run({ chainId: chain.id })
-			mainV14.exec("PRAGMA user_version=14")
-		} finally { mainV14.close() }
+		const loopDataRoot = resolve(TEST_ROOT, `main-v14-to-normalized-runtime-${Date.now()}-${++nextRootId}`)
+		const fixture = seedCanonicalHistoricalRuntime({
+			loopDataRoot,
+			schemaVersion: 14,
+			chain: { name: "central-state", repository: "mouriya-s-lab/coder-loop", preset: "gh-issue-pr-iteration" },
+			items: [{ itemId: "177", repoCwd: REPO_ROOT, status: "in_progress", phase: "iteration", preset: "gh-issue-pr-iteration", presetPath: null, agentCwd: REPO_ROOT, sessionIds: { iteration: { codex: "main-v14-session" } }, extra: { issue: 177 }, run: { runId: "main-v14-active", phase: "iteration", status: "in_progress", startedAt: 1_800_000_230, extra: {} } }],
+			contextEntries: [{ id: "main-v14-context", body: "preserve-main-v14-context" }],
+		})
+		const chain = fixture.chain
+		const item = fixture.items[0]
+		if (item === undefined) throw new Error("canonical v14 fixture omitted item")
 
 		const migrated = openSqliteStateStore({ loopDataRoot: dbFileRoot(fixture.dbFile) })
 		try {
@@ -1973,22 +1969,25 @@ describe("sqlite state store", () => {
 	})
 
 	test("context schema migration preserves existing data", async () => {
-		const { store, dbFile } = await openTestStore("context-migration")
-		const chain = store.createChain({ name: "context-preserved", repository: "o/r", baseBranch: "main" })
-		const item = createFullItem(store, chain, { itemId: "migration-item" })
 		const runExtra = storedItemExtra({ preserved: true, definitionKind: "chain", definitionContentIdentity: "sha256:context-migration", definitionPhases: [{ phase: "iteration", definitionNodeId: "task:iteration" }], worktreePath: "/repo/context-migration", branchName: "context-migration", baseCommit: "0123456789abcdef" })
-		const run = store.recordRun({ runId: "context-migration-run", chainId: chain.id, itemId: item.id, phase: "iteration", status: runtimeStatus("running"), startedAt: 10, extra: runExtra })
-		const current = store.setCurrentRun({ chainId: chain.id, phase: "iteration", runId: run.runId, startedAt: 10, extra: storedItemExtra({ preserved: true }) })
-		store.close()
-		const legacy = new Database(dbFile)
-		legacy.exec("DROP TABLE context_entries; PRAGMA user_version = 13")
-		legacy.close()
+		const loopDataRoot = resolve(TEST_ROOT, `context-migration-${Date.now()}-${++nextRootId}`)
+		const fixture = seedCanonicalHistoricalRuntime({
+			loopDataRoot,
+			schemaVersion: 13,
+			chain: { name: "context-preserved", repository: "o/r", preset: "gh-issue-pr-iteration" },
+			items: [{ itemId: "migration-item", repoCwd: REPO_ROOT, status: "in_progress", phase: "iteration", preset: "gh-issue-pr-iteration", presetPath: null, agentCwd: REPO_ROOT, sessionIds: {}, extra: { issue: 177 }, run: { runId: "context-migration-run", phase: "iteration", status: "running", startedAt: 10, extra: itemExtraToJsonObject(runExtra), currentExtra: { preserved: true } } }],
+			contextEntries: [],
+		})
+		const { dbFile, chain } = fixture
+		const item = fixture.items[0]
+		if (item === undefined) throw new Error("canonical context fixture omitted item")
+		const runId = "context-migration-run"
 		const migrated = openSqliteStateStore({ loopDataRoot: dbFileRoot(dbFile) })
 		try {
 			expect(migrated.getChain(chain.id)?.name).toBe("context-preserved")
 			expect(migrated.getItem(item.id)?.itemId).toBe("migration-item")
-			expect(migrated.getRunByRunId(run.runId)?.extra).toEqual(runExtra)
-			expect(migrated.getCurrentRun(chain.id)).toEqual(current)
+			expect(migrated.getRunByRunId(runId)?.extra).toEqual(runExtra)
+			expect(migrated.getCurrentRun(chain.id)).toEqual({ chainId: chain.id, phase: "iteration", runId, startedAt: 10, extra: storedItemExtra({ preserved: true, itemId: item.id }) })
 			expect(migrated.listTableColumns("context_entries")).toContain("body")
 		} finally { migrated.close() }
 		const indexDb = new Database(dbFile)
@@ -1999,41 +1998,11 @@ describe("sqlite state store", () => {
 		try {
 			expect(reopened.getChain(chain.id)?.name).toBe("context-preserved")
 			expect(reopened.getItem(item.id)?.itemId).toBe("migration-item")
-			expect(reopened.getRunByRunId(run.runId)?.runId).toBe(run.runId)
-			expect(reopened.getCurrentRun(chain.id)).toEqual(current)
+			expect(reopened.getRunByRunId(runId)?.runId).toBe(runId)
+			expect(reopened.getCurrentRun(chain.id)).toEqual({ chainId: chain.id, phase: "iteration", runId, startedAt: 10, extra: storedItemExtra({ preserved: true, itemId: item.id }) })
 		} finally { reopened.close() }
 	})
 })
-
-type PacketlessHistoricalRun = {
-	runId: string
-	chainId: number
-	itemId: number
-	phase: string
-	startedAt: number
-}
-
-function rebuildRunsAsPacketlessHistory(db: Database): void {
-	db.exec(`CREATE TABLE runs_packetless (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		run_id TEXT NOT NULL UNIQUE,
-		chain_id INTEGER NOT NULL,
-		item_id INTEGER NOT NULL,
-		phase TEXT NOT NULL,
-		status TEXT NOT NULL,
-		started_at REAL NOT NULL,
-		ended_at REAL,
-		exit_code INTEGER,
-		extra TEXT NOT NULL
-	)`)
-	db.exec("DROP TABLE runs")
-	db.exec("ALTER TABLE runs_packetless RENAME TO runs")
-}
-
-function insertPacketlessHistoricalRun(db: Database, input: PacketlessHistoricalRun): void {
-	db.query(`INSERT INTO runs (run_id, chain_id, item_id, phase, status, started_at, ended_at, exit_code, extra)
-		VALUES (?, ?, ?, ?, 'in_progress', ?, NULL, NULL, '{}')`).run(input.runId, input.chainId, input.itemId, input.phase, input.startedAt)
-}
 
 async function openTestStore(name: string): Promise<{ store: ReturnType<typeof openSqliteStateStore>; dbFile: string }> {
 	const loopDataRoot = resolve(TEST_ROOT, `${name}-${Date.now()}-${++nextRootId}`)

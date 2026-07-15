@@ -260,6 +260,11 @@ const EventTaskIdentityBoundary = arkType.or(
 	{ "runtimeNodeId?": "never", "definitionRef?": "never", "definitionNodeId?": "never" },
 )
 
+const EventRunIdentityBoundary = arkType.or(
+	{ runId: "string", ...TaskIdentityFields },
+	{ "runId?": "never" },
+)
+
 const ObservabilityEventPayloadBoundary = arkType.or(
 	{
 		...EventBaseBoundary,
@@ -756,7 +761,7 @@ const ObservabilityEventPayloadBoundary = arkType.or(
 	},
 )
 
-export const ObservabilityEventBoundary = ObservabilityEventPayloadBoundary.and(EventTaskIdentityBoundary)
+export const ObservabilityEventBoundary = ObservabilityEventPayloadBoundary.and(EventTaskIdentityBoundary).and(EventRunIdentityBoundary)
 
 export type ObservabilityEvent = typeof ObservabilityEventBoundary.infer
 export type ObservabilityEventType = typeof ObservabilityEventTypeBoundary.infer

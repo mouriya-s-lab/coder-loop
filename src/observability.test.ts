@@ -36,6 +36,7 @@ describe("observability", () => {
 	test("task event identity is an exact all-or-none triple", () => {
 		const event = makeObservabilityEvent({ kind: "lifecycle", type: "daemon.stop", subject: { kind: "engine" }, payload: { pid: 10 } })
 		expect(parseObservabilityEvent({ ...event, runtimeNodeId: "runtime-leaf", definitionRef: { kind: "chain", contentIdentity: "sha256:event" }, definitionNodeId: "definition-leaf" }).runtimeNodeId).toBe("runtime-leaf")
+		expect(() => parseObservabilityEvent({ ...event, runId: "run-without-durable-identity" })).toThrow()
 		for (const partial of [
 			{ runtimeNodeId: "runtime-leaf" },
 			{ definitionRef: { kind: "chain", contentIdentity: "sha256:event" } },
@@ -70,6 +71,7 @@ describe("observability", () => {
 	test("query filters by kind, type, chain, run, phase, and since", async () => {
 		const root = resolve(TEST_ROOT, "query")
 		const eventsFile = resolve(root, "events.jsonl")
+		const taskIdentity = { runtimeNodeId: "runtime-query", definitionRef: { kind: "chain", contentIdentity: "sha256:query" }, definitionNodeId: "definition-query" } as const
 		await mkdir(root, { recursive: true })
 
 		await appendObservabilityEvent(eventsFile, makeObservabilityEvent({
@@ -77,6 +79,7 @@ describe("observability", () => {
 			type: "slot.busy",
 			chain: "chain-a",
 			runId: "run-1",
+			...taskIdentity,
 			subject: { kind: "engine" },
 			payload: { slotKey: "slot-a", chainId: 1, repoCwd: "/repo/a", activeRunId: "run-1" },
 		}, new Date("2026-06-12T00:00:00.000Z")))
@@ -86,6 +89,7 @@ describe("observability", () => {
 			chain: "chain-a",
 			item: 10,
 			runId: "run-1",
+			...taskIdentity,
 			phase: "iteration",
 			subject: { kind: "engine" },
 			payload: { repoCwd: "/repo/a", pid: 123 },
@@ -96,6 +100,7 @@ describe("observability", () => {
 			chain: "chain-b",
 			item: 20,
 			runId: "run-2",
+			...taskIdentity,
 			phase: "review",
 			subject: { kind: "engine" },
 			payload: { repoCwd: "/repo/b", pid: null },
