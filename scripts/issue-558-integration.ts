@@ -53,38 +53,120 @@ function createFixtureRepo(root: string): string {
 
 type HistoricalSeed = { chainName: string; runId: string; sessionId: string }
 
+const CANONICAL_V13_SCHEMA_SQL = `
+CREATE TABLE chains (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	name TEXT NOT NULL UNIQUE,
+	preset TEXT,
+	repository TEXT NOT NULL,
+	base_branch TEXT NOT NULL,
+	status TEXT NOT NULL CHECK (status IN ('active', 'completed', 'deleted', 'stopped')),
+	metadata TEXT NOT NULL,
+	created_at REAL NOT NULL,
+	updated_at REAL NOT NULL
+);
+CREATE TABLE items (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+	item_id TEXT NOT NULL,
+	repo_cwd TEXT NOT NULL,
+	status TEXT NOT NULL,
+	attempts INTEGER NOT NULL,
+	position INTEGER NOT NULL DEFAULT 0,
+	title TEXT,
+	priority TEXT,
+	last_run_id TEXT,
+	session_ids TEXT NOT NULL DEFAULT '{}',
+	issue_file TEXT,
+	evidence_dir TEXT,
+	agent_cwd TEXT,
+	runner TEXT CHECK (runner IN ('claude', 'codex', 'opencode') OR runner IS NULL),
+	phase TEXT,
+	preset TEXT,
+	preset_path TEXT,
+	extra TEXT NOT NULL,
+	created_at REAL NOT NULL,
+	updated_at REAL NOT NULL,
+	status_updated_at REAL NOT NULL,
+	UNIQUE (chain_id, item_id)
+);
+CREATE TABLE runs (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	run_id TEXT NOT NULL UNIQUE,
+	chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+	item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+	phase TEXT NOT NULL,
+	status TEXT NOT NULL,
+	started_at REAL NOT NULL,
+	ended_at REAL,
+	exit_code INTEGER,
+	extra TEXT NOT NULL
+);
+CREATE TABLE current_runs (
+	chain_id INTEGER PRIMARY KEY REFERENCES chains(id) ON DELETE CASCADE,
+	phase TEXT NOT NULL,
+	run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+	started_at REAL NOT NULL,
+	extra TEXT NOT NULL
+);
+CREATE INDEX idx_items_chain_status ON items(chain_id, status);
+CREATE INDEX idx_runs_chain_item ON runs(chain_id, item_id);
+CREATE INDEX idx_items_next_pending ON items(chain_id, repo_cwd, status, position, id);
+CREATE INDEX idx_runs_chain_phase_status ON runs(chain_id, phase, status);
+`
+
+const CANONICAL_V14_CONTEXT_SCHEMA_SQL = `
+CREATE TABLE context_entries (
+	id TEXT PRIMARY KEY,
+	chain_id INTEGER NOT NULL REFERENCES chains(id) ON DELETE CASCADE,
+	created_at REAL NOT NULL,
+	scope_kind TEXT NOT NULL CHECK (scope_kind IN ('chain','item','group')),
+	scope_key TEXT,
+	author TEXT NOT NULL,
+	body TEXT NOT NULL
+);
+CREATE INDEX idx_context_entries_chain_cursor ON context_entries(chain_id, created_at, id);
+`
+
+type ForeignKeyRow = { table: string; from: string; to: string; on_delete: string }
+
+function assertCanonicalHistoricalSchema(loopDataRoot: string, schemaVersion: 13 | 14): void {
+	const db = new Database(resolve(loopDataRoot, "db.sqlite"), { readonly: true, strict: true })
+	try {
+		const runForeignKeys = db.query<ForeignKeyRow, []>("PRAGMA foreign_key_list(runs)").all()
+		const currentRunForeignKeys = db.query<ForeignKeyRow, []>("PRAGMA foreign_key_list(current_runs)").all()
+		if (!runForeignKeys.some((row) => row.table === "chains" && row.from === "chain_id" && row.to === "id" && row.on_delete === "CASCADE")) fail(`v${schemaVersion} runs.chain_id is not the canonical cascading FK`)
+		if (!runForeignKeys.some((row) => row.table === "items" && row.from === "item_id" && row.to === "id" && row.on_delete === "CASCADE")) fail(`v${schemaVersion} runs.item_id is not the canonical cascading FK`)
+		if (!currentRunForeignKeys.some((row) => row.table === "chains" && row.from === "chain_id" && row.to === "id" && row.on_delete === "CASCADE")) fail(`v${schemaVersion} current_runs.chain_id is not the canonical cascading FK`)
+		if (!currentRunForeignKeys.some((row) => row.table === "runs" && row.from === "run_id" && row.to === "run_id" && row.on_delete === "CASCADE")) fail(`v${schemaVersion} current_runs.run_id is not the canonical cascading FK`)
+		const contextCount = db.query<{ count: number }, []>("SELECT count(*) AS count FROM sqlite_master WHERE type='table' AND name='context_entries'").get()?.count ?? 0
+		if (contextCount !== (schemaVersion === 14 ? 1 : 0)) fail(`v${schemaVersion} context table does not match canonical version fact`)
+	} finally { db.close() }
+}
+
 function seedHistoricalRuntime(loopDataRoot: string, repo: string, schemaVersion: 13 | 14): HistoricalSeed {
 	mkdirSync(loopDataRoot, { recursive: true })
-	const store = openSqliteStateStore({ loopDataRoot })
 	const chainName = `issue-558-v${schemaVersion}-${randomUUID()}`
 	const runId = `historical-v${schemaVersion}-run`
 	const sessionId = `historical-v${schemaVersion}-session`
-	let chainId: number
-	let itemId: number
+	const db = new Database(resolve(loopDataRoot, "db.sqlite"), { create: true, readwrite: true, strict: true })
 	try {
-		const chain = store.createChain({ name: chainName, preset: "single-phase-example", repository: repo, baseBranch: "main", status: "active" })
-		const item = store.createItem({ chainId: chain.id, itemId: `historical-v${schemaVersion}`, repoCwd: repo, status: runtimeStatus("done"), phase: "iteration", preset: "gh-issue-pr-iteration", agentCwd: REPO_ROOT, extra: storedItemExtra({ id: `historical-v${schemaVersion}` }) })
-		if (schemaVersion === 14) store.appendContextEntry({ chainId: chain.id, scope: { kind: "chain" }, author: { kind: "operator" }, body: "current-main-v14-context" })
-		chainId = chain.id
-		itemId = item.id
-	} finally { store.close() }
-	const db = new Database(resolve(loopDataRoot, "db.sqlite"), { strict: true })
-	try {
-		db.exec("PRAGMA foreign_keys = OFF")
-		db.exec(`CREATE TABLE runs_historical (
-			id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL UNIQUE,
-			chain_id INTEGER NOT NULL, item_id INTEGER NOT NULL, phase TEXT NOT NULL,
-			status TEXT NOT NULL, started_at REAL NOT NULL, ended_at REAL, exit_code INTEGER, extra TEXT NOT NULL
-		)`)
-		db.query<never, { runId: string; chainId: number; itemId: number }>("INSERT INTO runs_historical (run_id, chain_id, item_id, phase, status, started_at, ended_at, exit_code, extra) VALUES ($runId, $chainId, $itemId, 'iteration', 'in_progress', 1800000500, NULL, NULL, '{}')").run({ runId, chainId, itemId })
-		db.exec("DROP TABLE runs")
-		db.exec("ALTER TABLE runs_historical RENAME TO runs")
-		db.exec("ALTER TABLE items ADD COLUMN session_ids TEXT NOT NULL DEFAULT '{}'")
-		db.query<never, { itemId: number; sessions: string }>("UPDATE items SET session_ids = $sessions WHERE id = $itemId").run({ itemId, sessions: JSON.stringify({ iteration: { codex: sessionId } }) })
-		for (const table of ["active_runs", "closure_sessions", "task_join_evaluation_bindings", "task_join_bindings", "task_leaf_nodes", "task_seq_nodes", "task_par_nodes", "task_closures", "task_trees", "task_nodes", "execution_definitions"]) db.exec(`DROP TABLE ${table}`)
-		if (schemaVersion === 13) db.exec("DROP TABLE context_entries")
-		db.exec("CREATE TABLE current_runs (chain_id INTEGER PRIMARY KEY REFERENCES chains(id), phase TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES runs(run_id), started_at REAL NOT NULL, extra TEXT NOT NULL)")
-		db.query<never, { chainId: number; runId: string }>("INSERT INTO current_runs (chain_id, phase, run_id, started_at, extra) VALUES ($chainId, 'iteration', $runId, 1800000500, '{}')").run({ chainId, runId })
+		db.exec("PRAGMA foreign_keys = ON")
+		db.exec(CANONICAL_V13_SCHEMA_SQL)
+		if (schemaVersion === 14) db.exec(CANONICAL_V14_CONTEXT_SCHEMA_SQL)
+		db.query<never, { chainName: string; repo: string }>(`INSERT INTO chains (id, name, preset, repository, base_branch, status, metadata, created_at, updated_at)
+			VALUES (1, $chainName, 'single-phase-example', $repo, 'main', 'active', '{}', 1800000000, 1800000000)`).run({ chainName, repo })
+		db.query<never, { itemId: string; repo: string; sessions: string; agentCwd: string; extra: string }>(`INSERT INTO items (
+			id, chain_id, item_id, repo_cwd, status, attempts, position, title, priority, last_run_id, session_ids,
+			issue_file, evidence_dir, agent_cwd, runner, phase, preset, preset_path, extra, created_at, updated_at, status_updated_at
+		) VALUES (
+			1, 1, $itemId, $repo, 'done', 1, 0, 'historical migration item', NULL, $runId, $sessions,
+			NULL, NULL, $agentCwd, NULL, 'iteration', 'gh-issue-pr-iteration', NULL, $extra, 1800000000, 1800000000, 1800000000
+		)`).run({ itemId: `historical-v${schemaVersion}`, repo, runId, sessions: JSON.stringify({ iteration: { codex: sessionId } }), agentCwd: REPO_ROOT, extra: JSON.stringify({ id: `historical-v${schemaVersion}` }) })
+		db.query<never, { runId: string }>("INSERT INTO runs (id, run_id, chain_id, item_id, phase, status, started_at, ended_at, exit_code, extra) VALUES (1, $runId, 1, 1, 'iteration', 'in_progress', 1800000500, NULL, NULL, '{}')").run({ runId })
+		db.query<never, { runId: string }>("INSERT INTO current_runs (chain_id, phase, run_id, started_at, extra) VALUES (1, 'iteration', $runId, 1800000500, '{}')").run({ runId })
+		if (schemaVersion === 14) db.exec(`INSERT INTO context_entries (id, chain_id, created_at, scope_kind, scope_key, author, body)
+			VALUES ('historical-v14-context', 1, 1800000600, 'chain', NULL, '{"kind":"operator"}', 'current-main-v14-context')`)
 		db.exec(`PRAGMA user_version = ${schemaVersion}`)
 	} finally { db.close() }
 	return { chainName, runId, sessionId }
@@ -166,6 +248,7 @@ function removeOwnedWorktrees(repo: string, loopDataRoot: string): void {
 
 async function migrateHistoricalRuntime(root: string, loopDataRoot: string, repo: string, schemaVersion: 13 | 14, env: NodeJS.ProcessEnv): Promise<void> {
 	const seed = seedHistoricalRuntime(loopDataRoot, repo, schemaVersion)
+	assertCanonicalHistoricalSchema(loopDataRoot, schemaVersion)
 	log(`preSchemaV${schemaVersion}=${userVersion(loopDataRoot)}`)
 	const stdoutFd = openSync(resolve(root, `daemon-v${schemaVersion}.stdout.log`), "a")
 	const stderrFd = openSync(resolve(root, `daemon-v${schemaVersion}.stderr.log`), "a")

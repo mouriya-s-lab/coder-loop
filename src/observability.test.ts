@@ -42,6 +42,29 @@ describe("observability", () => {
 			{ definitionNodeId: "definition-leaf" },
 			{ runtimeNodeId: "runtime-leaf", definitionNodeId: "definition-leaf" },
 		]) expect(() => parseObservabilityEvent({ ...event, ...partial })).toThrow()
+
+		const recovery = {
+			kind: "lifecycle",
+			type: "scheduler.recovery",
+			chain: "recovery-chain",
+			runId: "run-stale",
+			subject: { kind: "engine" },
+			payload: { reason: "stale_current_run", pid: null, reconciledRuns: [] },
+			ts: "2026-07-16T00:00:00.000Z",
+		}
+		expect(() => parseObservabilityEvent(recovery)).toThrow()
+		expect(() => parseObservabilityEvent({
+			kind: "lifecycle",
+			type: "scheduler.recovery",
+			chain: "recovery-chain",
+			subject: { kind: "engine" },
+			ts: "2026-07-16T00:00:00.000Z",
+			payload: {
+				reason: "orphaned_run_reconciled",
+				pid: null,
+				reconciledRuns: [{ runId: "run-orphan", itemId: 1, phase: "iteration", pid: null }],
+			},
+		})).toThrow()
 	})
 
 	test("query filters by kind, type, chain, run, phase, and since", async () => {
