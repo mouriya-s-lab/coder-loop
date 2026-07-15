@@ -29,6 +29,15 @@ export type ExternalTerminalAvailability =
 	| { kind: "unavailable"; reason: "binary-missing" | "endpoint-unavailable"; exitCode: number | null; signal: string | null }
 	| { kind: "probe-failed"; reason: "unexpected-exit" | "signal" | "deadline-exceeded"; exitCode: number | null; signal: string | null }
 
+export type RunnerAvailabilityGate =
+	| { kind: "local-process" }
+	| { kind: "available"; domain: Extract<RunnerExecutionDomain, { kind: "external-terminal" }> }
+	| {
+		kind: "unavailable"
+		domain: Extract<RunnerExecutionDomain, { kind: "external-terminal" }>
+		availability: Exclude<ExternalTerminalAvailability, { kind: "available" }>
+	}
+
 export function decodeExternalTerminalProbeResult(result: ExternalTerminalProbeWire): ExternalTerminalAvailability {
 	switch (result.kind) {
 		case "executable-missing": return { kind: "unavailable", reason: "binary-missing", exitCode: null, signal: null }
@@ -84,4 +93,25 @@ export async function probeExternalTerminal(
 		})
 	})
 	return decodeExternalTerminalProbeResult(wire)
+}
+
+export async function probeResolvedExternalTerminal(
+	runner: { binary: string },
+	domain: Extract<RunnerExecutionDomain, { kind: "external-terminal" }>,
+): Promise<ExternalTerminalAvailability> {
+	return await probeExternalTerminal(runner.binary, domain.probe.argv, {
+		deadlineMs: domain.probe.deadlineMs,
+		killGraceMs: domain.probe.killGraceMs,
+	})
+}
+
+export async function gateResolvedRunnerAvailability(
+	runner: { kind: AgentRunnerKind; binary: string },
+): Promise<RunnerAvailabilityGate> {
+	const domain = runnerExecutionDomain(runner.kind)
+	if (domain.kind === "local-process") return domain
+	const availability = await probeResolvedExternalTerminal(runner, domain)
+	return availability.kind === "available"
+		? { kind: "available", domain }
+		: { kind: "unavailable", domain, availability }
 }

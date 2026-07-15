@@ -182,12 +182,15 @@ function uniqueRequiredRunners(runners: RequiredRunnerCli[]): RequiredRunnerCli[
 }
 
 function runnerInstallHint(runner: RequiredRunnerCli): string {
-	if (runner.kind === "codex") return `codex runner CLI (${runner.binary}) 未在 PATH 中。安装/配置 Codex CLI，并确认 \`${runner.binary} --version\` 可运行。`
-	// #481: opencode third-runner-kind PATH check. The hint only emits when a phase actually
-	// selects opencode (`statusSnapshot.target.runner.phases` drives the iteration in
-	// runDoctorCommand) — phases that stay on claude/codex never produce an opencode row.
-	if (runner.kind === "opencode") return `opencode runner CLI (${runner.binary}) 未在 PATH 中。安装：https://opencode.ai（macOS: \`brew install sst/tap/opencode\`），并确认 \`${runner.binary} --version\` 可运行；登录 provider：\`${runner.binary} providers login\`。`
-	return `claude runner CLI (${runner.binary}) 未在 PATH 中。安装：https://docs.anthropic.com/claude/docs/claude-code（npm: \`npm install -g @anthropic-ai/claude-code\`），并确认 \`${runner.binary} --version\` 可运行。`
+	switch (runner.kind) {
+		case "claude": return `claude runner CLI (${runner.binary}) 未在 PATH 中。安装：https://docs.anthropic.com/claude/docs/claude-code（npm: \`npm install -g @anthropic-ai/claude-code\`），并确认 \`${runner.binary} --version\` 可运行。`
+		case "codex": return `codex runner CLI (${runner.binary}) 未在 PATH 中。安装/配置 Codex CLI，并确认 \`${runner.binary} --version\` 可运行。`
+		// #481: opencode third-runner-kind PATH check. The hint only emits when a phase actually
+		// selects opencode (`statusSnapshot.target.runner.phases` drives the iteration in
+		// runDoctorCommand) — phases that stay on claude/codex never produce an opencode row.
+		case "opencode": return `opencode runner CLI (${runner.binary}) 未在 PATH 中。安装：https://opencode.ai（macOS: \`brew install sst/tap/opencode\`），并确认 \`${runner.binary} --version\` 可运行；登录 provider：\`${runner.binary} providers login\`。`
+		case "hapi": return `hapi runner CLI (${runner.binary}) 未在 PATH 中。安装/配置 hapi-remote-session，并确认 \`${runner.binary} --version\` 与 \`${runner.binary} probe\` 可运行。`
+	}
 }
 
 // ===================================================================

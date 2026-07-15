@@ -73,7 +73,7 @@ import {
 } from "./runtime-paths"
 import { collectObservabilityExcerpt, type ObservabilityExcerpt } from "./observability"
 import { createStreamTextState } from "./runner-output"
-import { probeExternalTerminal, runnerExecutionDomain, type ExternalTerminalAvailability } from "./runner-execution"
+import { gateResolvedRunnerAvailability, probeResolvedExternalTerminal, runnerExecutionDomain, type ExternalTerminalAvailability } from "./runner-execution"
 
 // #452: completion signal is the daemon-observed state write, not a stdout marker.
 // The previous "per-run nonce summary tag" prompt injection + stdout watchdog
@@ -1275,14 +1275,15 @@ export async function refreshExternalTerminalAvailabilityForItem(
 	warningAffected: readonly { chainId: number; rowId: number; itemId: string; phase: string }[] = [{ chainId: chain.id, rowId: item.id, itemId: item.itemId, phase }],
 ): Promise<boolean> {
 	const runner = resolvedRunner ?? await resolvePhaseRunner(options, { chain, item, phase })
-	const executionDomain = runnerExecutionDomain(runner.kind)
-	if (executionDomain.kind === "local-process") {
+	const gate = await gateResolvedRunnerAvailability(runner)
+	if (gate.kind === "local-process") {
 		if (externalTerminalHold(item.extra) !== null) {
 			options.store.updateItem(item.id, { extra: clearExternalTerminalHold(item.extra), updatedAt: nowSeconds(options) })
 		}
 		return true
 	}
-	const availability = await probeResolvedExternalTerminal(runner, executionDomain)
+	const availability = gate.kind === "available" ? { kind: "available" } as const : gate.availability
+	const executionDomain = gate.domain
 	const currentItem = options.store.getItem(item.id)
 	if (currentItem === null) return false
 	if (availability.kind !== "available") {
@@ -1315,16 +1316,6 @@ export async function refreshExternalTerminalAvailabilityForItem(
 		})
 	}
 	return true
-}
-
-async function probeResolvedExternalTerminal(
-	runner: AgentRunnerSelection,
-	domain: Extract<ReturnType<typeof runnerExecutionDomain>, { kind: "external-terminal" }>,
-): Promise<ExternalTerminalAvailability> {
-	return await probeExternalTerminal(runner.binary, domain.probe.argv, {
-		deadlineMs: domain.probe.deadlineMs,
-		killGraceMs: domain.probe.killGraceMs,
-	})
 }
 
 function hasAnyExternalTerminalHoldForEndpoint(store: SchedulerStore, excludeItemId: number, runner: AgentRunnerKind, binary: string): boolean {

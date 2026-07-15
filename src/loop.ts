@@ -78,7 +78,7 @@ import {
 	type ExternalTerminalLossFact,
 } from "./runtime-data"
 import { checkPresetDag, type PresetDagFinding } from "./preset-dag-check"
-import { runnerExecutionDomain } from "./runner-execution"
+import { gateResolvedRunnerAvailability, runnerExecutionDomain } from "./runner-execution"
 export { checkPresetDag } from "./preset-dag-check"
 export type { PresetDagFinding, PresetDagFindingKind, PresetDagFindingVerdict, PresetDagFindingTable, PresetDagFindingDeadlockContinuable, PresetDagFindingDeadVocabulary } from "./preset-dag-check"
 
@@ -2883,6 +2883,7 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 	const target = makeStatusTargetSnapshot(options.targetCwd, options.stateDbPath, options)
 	const items = readDbItemsForChain(options.loopDataRoot, loaded.chain.id)
 	const current = readDbCurrentRun(options.loopDataRoot, loaded.chain.id)
+	const runs = readDbRunsForChain(options.loopDataRoot, loaded.chain.id)
 	// #412: status snapshot must resolve continuable / terminal / idField from each item's own preset
 	// so mixed-preset chains stay selectable after chain-preset items finish. The resolver caches
 	// loaded presets by directory so we read each preset.toml at most once per snapshot, and falls
@@ -2890,7 +2891,7 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 	const itemPresets = await loadStatusItemPresets(options, items)
 	const selected = pickFirstSelectableStatusItem(options, loaded.chain, items, current, itemPresets)
 	const runtimeErrors = await collectStatusRuntimeErrors(options, loaded.chain, items, current, itemPresets)
-	const currentSnapshot = await buildStatusCurrentSnapshotFromRecords(options, items, current, itemPresets)
+	const currentSnapshot = await buildStatusCurrentSnapshotFromRecords(options, items, runs, current, itemPresets)
 	const events = await buildStatusEventsSnapshotFromRecords(options, current, selected, items)
 	const processes = await buildCentralStatusProcessSnapshot(options)
 	const snapshot: CoderLoopStatusSnapshot = {
@@ -2907,7 +2908,7 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 			error: null,
 		},
 		queue: buildStatusQueueSnapshotFromRecords(options, items, selected, itemPresets),
-		runs: buildStatusRunsSnapshot(readDbRunsForChain(options.loopDataRoot, loaded.chain.id)),
+		runs: buildStatusRunsSnapshot(runs),
 		current: currentSnapshot,
 		events,
 		processes,
@@ -3243,6 +3244,7 @@ function buildStatusRunsSnapshot(runs: readonly RunRecord[]): StatusRunsSnapshot
 async function buildStatusCurrentSnapshotFromRecords(
 	options: LoopOptions,
 	items: readonly ItemRecord[],
+	runs: readonly RunRecord[],
 	current: CurrentRunRecord | null,
 	itemPresets: StatusItemPresetResolver,
 ): Promise<StatusCurrentSnapshot> {
@@ -3265,7 +3267,8 @@ async function buildStatusCurrentSnapshotFromRecords(
 	const currentRunner = item === null || selectionInput === null ? null : selectRunnerForPhase(current.phase, item, selectionInput)
 	const hold = item === null ? null : externalTerminalHold(item.extra)
 	const currentExternalTerminal = externalTerminalCurrent(current.extra)
-	const loss = externalTerminalLoss(current.extra)
+	const currentRun = runs.find((run) => run.runId === current.runId) ?? null
+	const loss = currentRun === null ? null : externalTerminalLoss(currentRun.extra)
 	const currentDomain = currentRunner === null ? null : runnerExecutionDomain(currentRunner.kind)
 	return {
 		run: statusCurrentRunSnapshot(current),
@@ -5183,6 +5186,14 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 	}
 
 	for (const phase of phases) {
+		const resolvedRunner = await resolvePhaseRunner(phase.name)
+		const gate = await gateResolvedRunnerAvailability(resolvedRunner)
+		if (gate.kind === "unavailable") {
+			return {
+				decision: "keep-active",
+				reason: `external terminal ${resolvedRunner.kind} unavailable: ${gate.availability.reason}`,
+			}
+		}
 		const ctx: ResolveContext = {
 			item: anchorRecord,
 			chain: buildRenderBindings(options),
@@ -5207,7 +5218,6 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 		const promptRaw = await readFile(phase.prompt, "utf-8")
 		const prompt = renderPrompt(promptRaw, phase, ctx)
 		const outputPath = agentOutputPath(options, finalizerRunId, phase.name)
-		const resolvedRunner = await resolvePhaseRunner(phase.name)
 		log(`Starting chain-complete trigger phase ${phase.name} for chain ${input.chain.name} (runner=${resolvedRunner.kind})...`)
 		const { output, stdoutBytes, code } = await runAgent(options, phase.name, prompt, outputPath, targetCwd, resolvedRunner, summaryWatchdogConfigForPhase(phase))
 		log(`Chain-complete trigger phase ${phase.name} finished: exit=${code}, output=${outputPath} (${stdoutBytes} bytes)`)

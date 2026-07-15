@@ -4082,6 +4082,51 @@ while :; do sleep 1; done
 describe("runPresetChainCompleteTriggerPhases per-phase runner selection (issue #287 retry)", () => {
 	const PRESET_DIR = resolve(REPO_ROOT, "presets/gh-issue-pr-iteration")
 
+	test("gates the exported external-terminal path before artifacts and retries after restoration", async () => {
+		const fixture = await createFixture("trigger-exported-external-terminal-gate")
+		try {
+			const root = resolve(fixture.loopDataRoot, "..")
+			const binary = resolve(root, "missing-hapi-remote-session")
+			const targetCwd = resolve(root, "target")
+			const invocationLog = resolve(root, "invocation.log")
+			await mkdir(targetCwd, { recursive: true })
+			const chain = createChain(fixture.store, "trigger-exported-external-terminal-gate-chain")
+			createItem(fixture.store, chain, { issueNumber: 602_006, repoCwd: targetCwd })
+			const runId = `trigger-${chain.id}-external-gate`
+			const input = {
+				chain,
+				items: fixture.store.listItems(chain.id),
+				runId,
+				terminalStatusNames: [runtimeStatus("done")],
+				loopDataRoot: fixture.loopDataRoot,
+				presetDir: PRESET_DIR,
+				targetCwd,
+				phaseRunner: () => ({ kind: "hapi", source: "preset", binary, extraArgs: [], model: null } as const),
+			}
+
+			await expect(runPresetChainCompleteTriggerPhases(input)).resolves.toEqual({
+				decision: "keep-active",
+				reason: "external terminal hapi unavailable: binary-missing",
+			})
+			const outputPath = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
+				.runPhaseStdoutFile(runId, "umbrella-finalizer")
+			expect(existsSync(outputPath)).toBe(false)
+			expect(existsSync(invocationLog)).toBe(false)
+
+			await writeFile(binary, `#!/bin/sh
+if [ "$1" = probe ]; then exit 0; fi
+echo invocation >> ${JSON.stringify(invocationLog)}
+echo 'FINALIZER SUMMARY: decision=complete; reason=restored'
+`)
+			await chmod(binary, 0o755)
+			await expect(runPresetChainCompleteTriggerPhases(input)).resolves.toEqual({ decision: "complete" })
+			expect(await readFile(invocationLog, "utf-8")).toBe("invocation\n")
+			expect(await readFile(outputPath, "utf-8")).toContain("FINALIZER SUMMARY: decision=complete; reason=restored")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
 	test("streams chain-complete runner output without retaining full history", async () => {
 		const fixture = await createFixture("trigger-large-output")
 		try {

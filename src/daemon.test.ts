@@ -32,7 +32,7 @@ import {
 import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
 import { makeObservabilityEvent, queryObservabilityEvents } from "./observability"
-import { chainBindings, engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
+import { chainBindings, engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra, withExternalTerminalLoss } from "./runtime-data"
 import type { BoundaryRecord } from "./boundary-types"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -315,6 +315,66 @@ describe("daemon", () => {
 			expect(snapshot.current.externalTerminal).toEqual({
 				availability: { kind: "available", checkedAt: expect.any(String) },
 				loss: null,
+			})
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("status projects a latched per-run external-terminal loss before current cleanup", async () => {
+		const presetDir = resolve(TEST_ROOT, "latched-loss-status-projection")
+		const fakeBinary = resolve(TEST_ROOT, "latched-loss-status-projection-binary")
+		await cp(PRESET_DIR, presetDir, { recursive: true })
+		const presetToml = resolve(presetDir, "preset.toml")
+		await writeFile(presetToml, (await readFile(presetToml, "utf-8")).replaceAll('runner = "codex"', 'runner = "hapi"').replaceAll('runner  = "codex"', 'runner  = "hapi"'))
+		await writeFile(fakeBinary, "#!/bin/sh\nif [ \"$1\" = probe ]; then exit 0; fi\ntrap 'exit 0' TERM\nsleep 10\n")
+		await chmod(fakeBinary, 0o755)
+		const fixture = await startFixture("latched-loss-status-projection", {
+			schedulerPresetDir: presetDir,
+			schedulerUsePresetRunner: true,
+			schedulerIntervalMs: 60_000,
+		})
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", {
+				name: "latched-loss-status",
+				repository: "mouriya-s-lab/coder-loop",
+				baseBranch: "main",
+				preset: "gh-issue-pr-iteration",
+				metadata: { hapi: { binary: fakeBinary } },
+			})).chain)
+			const chainId = numberValue(chain.id)
+			expectOk(await request(fixture, "item.add", { chainId, itemId: "602-loss-status", repoCwd: REPO_ROOT, presetPath: presetDir }))
+			const current = await waitFor(
+				() => readCurrentRun(fixture.loopDataRoot, chainId),
+				(candidate) => candidate?.extra.externalTerminalCurrent !== undefined,
+			)
+			if (current === null) throw new Error("expected active external-terminal run")
+			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				const run = store.getRunByRunId(current.runId)
+				if (run === null) throw new Error("expected durable run")
+				store.updateRunExtra(current.runId, withExternalTerminalLoss(run.extra, {
+					kind: "lost",
+					detectedAt: "2026-07-15T00:00:02.000Z",
+					reason: "endpoint-unavailable",
+					terminationPhase: "term",
+				}))
+			} finally {
+				store.close()
+			}
+
+			const snapshot = await buildCoderLoopStatusSnapshot({
+				targetCwd: REPO_ROOT,
+				loopDataRoot: fixture.loopDataRoot,
+				chainName: "latched-loss-status",
+				output: "json",
+			})
+			expect(snapshot.current.run?.runId).toBe(current.runId)
+			expect(snapshot.current.externalTerminal?.loss).toEqual({
+				kind: "lost",
+				detectedAt: "2026-07-15T00:00:02.000Z",
+				reason: "endpoint-unavailable",
+				terminationPhase: "term",
 			})
 		} finally {
 			await fixture.daemon.stop()
