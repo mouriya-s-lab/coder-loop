@@ -25,9 +25,24 @@ function command(args: readonly string[], cwd = repoRoot): string {
 
 function writeRunnerCaptureWrapper(wrapper: string, realBinary: string, capturePath: string): void {
 	writeFileSync(wrapper, `#!/usr/bin/env bun
-import { appendFile } from "node:fs/promises"
+import { appendFile, writeFile } from "node:fs/promises"
+import { resolve } from "node:path"
+const PROBE_ARGUMENTS_BEGIN = "RUNNER_PROBE_ARGUMENTS_BEGIN"
+const PROBE_ARGUMENTS_END = "RUNNER_PROBE_ARGUMENTS_END"
+function runnerPromptProbeArguments(args: readonly string[]): string[] {
+	const prompts = args.filter((arg) => arg.includes(PROBE_ARGUMENTS_BEGIN) && arg.includes(PROBE_ARGUMENTS_END))
+	if (prompts.length !== 1) throw new Error(\`expected one rendered probe argument declaration, observed \${prompts.length}\`)
+	const declaration = prompts[0]!.split(PROBE_ARGUMENTS_BEGIN)[1]?.split(PROBE_ARGUMENTS_END)[0]
+	const probeArguments = declaration?.trim().split("\\n") ?? []
+	if (probeArguments.length !== 9 || probeArguments.some((argument) => argument.length === 0)) {
+		throw new Error(\`expected nine non-empty rendered probe arguments, observed \${JSON.stringify(probeArguments)}\`)
+	}
+	return probeArguments
+}
 const args = Bun.argv.slice(2)
 await appendFile(${JSON.stringify(capturePath)}, JSON.stringify(args) + "\\n")
+const probeArguments = runnerPromptProbeArguments(args)
+await writeFile(resolve(process.cwd(), "runner-filesystem-probe.args"), probeArguments.join("\\n") + "\\n")
 const child = Bun.spawn({ cmd: [${JSON.stringify(realBinary)}, ...args], stdin: "inherit", stdout: "inherit", stderr: "inherit", env: process.env })
 process.exit(await child.exited)
 `)
@@ -122,6 +137,17 @@ function writeFixture(): void {
 	writeFileSync(resolve(target, "runner-filesystem-probe.sh"), `#!/bin/sh
 set -eu
 
+probe_config="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/runner-filesystem-probe.args"
+set --
+while IFS= read -r argument; do
+	set -- "$@" "$argument"
+done < "$probe_config"
+rm -f "$probe_config"
+if [ "$#" -ne 9 ]; then
+	echo "expected nine driver-owned probe arguments, observed $#" >&2
+	exit 1
+fi
+
 run_id="$1"
 chain="$2"
 preset_dir="$3"
@@ -168,7 +194,7 @@ fi
 	command(["git", "-c", "user.name=coder-loop-e2e", "-c", "user.email=e2e@example.invalid", "commit", "-m", "fixture"], target)
 	mkdirSync(preset, { recursive: true })
 	writeFileSync(resolve(preset, "fragment.md"), "DECLARED_PRESET_READ_OK\n")
-	writeFileSync(resolve(preset, "phase.md"), `Execute exactly this command once in a non-login shell without a PTY, without inspecting files or constructing a replacement command:\n\n/bin/sh {{AGENT_CWD}}/runner-filesystem-probe.sh {{RUN_ID}} {{CHAIN_NAME}} {{PRESET_DIR}} {{SHARED_CONTEXT_FILE}} {{CURRENT_ISSUE_FILE}} {{EVIDENCE_DIR}} ${loopDataRoot}/chains/{{CHAIN_NAME}}/undeclared.txt ${loopDataRoot}/chains/undeclared-other/private.txt ${loopDataRoot}/central.sqlite\n\nThe script itself executes the required completion protocol and prints the selected status. After it returns, do not query exits, do not write item status again, and do not run any other command; end the response immediately.\n`)
+	writeFileSync(resolve(preset, "phase.md"), `Execute exactly this command once in a non-login shell without a PTY, without inspecting files or constructing a replacement command:\n\n/bin/sh {{AGENT_CWD}}/runner-filesystem-probe.sh\n\nThe script itself consumes the driver-owned task-private argument declaration, executes the required completion protocol, and prints the selected status. Do not retype or pass any of the declaration values. After it returns, do not query exits, do not write item status again, and do not run any other command; end the response immediately.\n\nRUNNER_PROBE_ARGUMENTS_BEGIN\n{{RUN_ID}}\n{{CHAIN_NAME}}\n{{PRESET_DIR}}\n{{SHARED_CONTEXT_FILE}}\n{{CURRENT_ISSUE_FILE}}\n{{EVIDENCE_DIR}}\n${loopDataRoot}/chains/{{CHAIN_NAME}}/undeclared.txt\n${loopDataRoot}/chains/undeclared-other/private.txt\n${loopDataRoot}/central.sqlite\nRUNNER_PROBE_ARGUMENTS_END\n`)
 	writeFileSync(resolve(preset, "preset.toml"), `name = "runner-filesystem-grants-e2e"\n[item]\nidField = "issue"\n[item.fields]\nissue = "number"\n[statuses]\nentry = "queued"\ncontinuable = ["queued"]\nterminal = ["done"]\nsuccess = ["done"]\nexhausted = "done"\n[[fragments]]\nid = "fixture"\nrole = "common"\npath = "fragment.md"\n[[phases]]\nname = "phase"\nprompt = "phase.md"\nroles = ["common"]\n[phases.variables]\nISSUE = "item.issue"\nCHAIN_NAME = "runtime.chainName"\nRUN_ID = "runtime.runId"\nAGENT_CWD = "runtime.agentCwd"\nPRESET_DIR = "runtime.presetDir"\nFRAGMENT_INDEX = "runtime.fragmentIndex"\nSHARED_CONTEXT_FILE = "runtime.sharedContextPath"\nCURRENT_ISSUE_FILE = "runtime.currentIssueFile"\nEVIDENCE_DIR = "runtime.evidenceDir"\n[[phases.exits]]\nstatus = "queued"\nwhen = "fresh invocation requests native resume"\n[[phases.exits]]\nstatus = "done"\nwhen = "resumed invocation completes fixture"\n`)
 }
 
