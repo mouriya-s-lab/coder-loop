@@ -37,4 +37,12 @@ describe("runner filesystem grants e2e driver", () => {
 			expect(source).toContain(artifact)
 		}
 	})
+
+	test("retains complete reviewer evidence after a successful run", () => {
+		const source = readFileSync(resolve(import.meta.dir, "runner-filesystem-grants-e2e.ts"), "utf8")
+		expect(source).toContain("runner-filesystem-grants-e2e-results.json")
+		expect(source).toContain("runner-filesystem-grants-e2e evidence retained at")
+		expect(source).toContain("cpSync(workRoot, retainedEvidenceRoot")
+		expect(source).not.toContain("if (completed) rmSync(workRoot")
+	})
 })

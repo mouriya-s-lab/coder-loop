@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
 
 import { spawn, spawnSync } from "node:child_process"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { resolve } from "node:path"
+import { basename, relative, resolve } from "node:path"
 import { parseSessionIdFromRunnerStream } from "../src/loop"
 
 const repoRoot = resolve(import.meta.dir, "..")
@@ -12,6 +12,7 @@ const workRoot = mkdtempSync(resolve(tmpdir(), "coder-loop-runner-grants-"))
 const loopDataRoot = resolve(workRoot, "loop-data")
 const target = resolve(workRoot, "target")
 const preset = resolve(workRoot, "preset")
+const retainedEvidenceRoot = resolve(repoRoot, ".coder-loop", "evidence", "runner-filesystem-grants-e2e", basename(workRoot))
 const { CODER_LOOP_RUN_CRED: _parentRunCredential, ...operatorEnv } = process.env
 const runnerFlagIndex = Bun.argv.indexOf("--runner")
 const requestedRunner = runnerFlagIndex === -1 ? null : Bun.argv[runnerFlagIndex + 1]
@@ -19,6 +20,29 @@ if (requestedRunner !== null && !["claude", "codex", "opencode"].includes(reques
 const SOCKET_WAIT_TIMEOUT_MS = 30_000
 const RUNNER_WAIT_TIMEOUT_MS = 300_000
 const DIAGNOSTIC_TAIL_CHARACTERS = 16_000
+
+type RunnerEvidenceResult = {
+	runner: string
+	runIds: string[]
+	nativeArgv: string
+	outerProfiles: string[]
+	statusFiles: string[]
+	finalChainStatus: string
+	positiveResults: string[]
+	negativeResults: string[]
+}
+
+type CompletedEvidenceResult = {
+	schema: 1
+	outcome: "passed"
+	runners: RunnerEvidenceResult[]
+	events: string
+	daemonLogs: string[]
+	cleanup: {
+		daemonExited: true
+		socketRemoved: true
+	}
+}
 
 function command(args: readonly string[], cwd = repoRoot): string {
 	const result = spawnSync(args[0]!, args.slice(1), { cwd, encoding: "utf8", env: operatorEnv })
@@ -282,6 +306,7 @@ for (const runner of runners) {
 const driverEnv = { ...operatorEnv, PATH: `${captureBin}:${operatorEnv.PATH ?? ""}` }
 const daemon = spawn("bun", [loopEntry, "daemon", "up", "--loop-data-root", loopDataRoot, "--scheduler-interval-ms", "100"], { cwd: repoRoot, stdio: "inherit", env: driverEnv })
 let completed = false
+const runnerResults: RunnerEvidenceResult[] = []
 try {
 	await waitForSocket()
 	mkdirSync(resolve(loopDataRoot, "chains", "undeclared-other"), { recursive: true })
@@ -325,6 +350,18 @@ try {
 		if (readFileSync(resolve(loopDataRoot, "chains", chain, "undeclared.txt"), "utf8") !== "same-chain-secret\n") throw new Error(`${runner}: undeclared same-chain sentinel was modified`)
 		if (readFileSync(resolve(loopDataRoot, "chains", "undeclared-other", "private.txt"), "utf8") !== "other-chain-secret\n") throw new Error(`${runner}: undeclared other-chain sentinel was modified`)
 		if (readFileSync(resolve(loopDataRoot, "central.sqlite"), "utf8") !== "root-secret\n") throw new Error(`${runner}: undeclared root sentinel was modified`)
+		const finalChainStatus = resolve(loopDataRoot, "chains", chain, "evidence", "1", "final-chain-status.json")
+		writeFileSync(finalChainStatus, command(["bun", loopEntry, "chain", "status", chain, "--loop-data-root", loopDataRoot, "--json"]))
+		runnerResults.push({
+			runner,
+			runIds,
+			nativeArgv: relative(workRoot, invocationCapture),
+			outerProfiles: outerEvidencePaths.map((path) => relative(workRoot, path)),
+			statusFiles: runIds.map((runId) => relative(workRoot, resolve(loopDataRoot, "chains", chain, "runs", runId, "status.json"))),
+			finalChainStatus: relative(workRoot, finalChainStatus),
+			positiveResults: ["declared preset/shared/current-issue reads", "declared evidence writes", "linked-worktree commits", "credentialed fresh/resume transitions"],
+			negativeResults: ["preset mutation denied", "undeclared same-chain reads/writes denied", "undeclared other-chain reads/writes denied", "root-level loop-data reads/writes denied", "negative sentinels unchanged"],
+		})
 		process.stdout.write(`${runner}: fresh/resume argv and outer profiles verified (${invocations.map((argv) => argv.length).join("/")} args; ${outerEvidencePaths.join(", ")})\n`)
 	}
 	process.stdout.write(`runner filesystem grants e2e passed: ${runners.join(" ")}\n`)
@@ -335,6 +372,25 @@ try {
 		daemon.kill("SIGTERM")
 		await new Promise<void>((resolveClosed) => daemon.once("close", () => resolveClosed()))
 	}
-	if (completed) rmSync(workRoot, { recursive: true, force: true })
-	else process.stderr.write(`runner filesystem grants e2e diagnostics retained at ${workRoot}\n`)
+	const daemonSocket = resolve(loopDataRoot, "daemon.sock")
+	if (completed && daemon.exitCode !== null && !existsSync(daemonSocket)) {
+		const result: CompletedEvidenceResult = {
+			schema: 1,
+			outcome: "passed",
+			runners: runnerResults,
+			events: relative(workRoot, resolve(loopDataRoot, "events", "events.jsonl")),
+			daemonLogs: retainedDiagnosticFiles(loopDataRoot)
+				.filter((path) => basename(path) === "daemon.log")
+				.map((path) => relative(workRoot, path)),
+			cleanup: { daemonExited: true, socketRemoved: true },
+		}
+		writeFileSync(resolve(workRoot, "runner-filesystem-grants-e2e-results.json"), `${JSON.stringify(result, null, 2)}\n`)
+		mkdirSync(resolve(retainedEvidenceRoot, ".."), { recursive: true })
+		cpSync(workRoot, retainedEvidenceRoot, { recursive: true, errorOnExist: true })
+		rmSync(workRoot, { recursive: true, force: true })
+		process.stdout.write(`runner-filesystem-grants-e2e evidence retained at ${retainedEvidenceRoot}\n`)
+	} else {
+		process.stderr.write(`runner filesystem grants e2e diagnostics retained at ${workRoot}\n`)
+		if (completed) throw new Error(`runner filesystem grants e2e cleanup incomplete: daemonExitCode=${daemon.exitCode} socketExists=${existsSync(daemonSocket)}`)
+	}
 }
