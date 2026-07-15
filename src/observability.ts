@@ -134,7 +134,6 @@ export const ObservabilityEventTypeBoundary = arkType.or(
 	arkType.unit("item.update.field_write_admission"),
 	arkType.unit("context.write_admission"),
 )
-
 // #409: vocabulary of daemon ops that flow through the privileged-op caller-admission gate.
 // Closed boundary so a corrupted / forged event file can't smuggle an unknown op past the
 // reader. The daemon's `DaemonCommandName` is the source of truth; a compile-time check inside
@@ -676,6 +675,7 @@ export const ObservabilityEventBoundary = arkType.or(
 				arkType.unit("agent-allowed"),
 				arkType.unit("no-create-grant"),
 				arkType.unit("no-rights-segment"),
+				arkType.unit("control-plane-denied"),
 			),
 		},
 	},
@@ -729,8 +729,8 @@ export const ObservabilityEventBoundary = arkType.or(
 )
 
 export type ObservabilityEvent = typeof ObservabilityEventBoundary.infer
-export type ObservabilityKind = typeof ObservabilityKindBoundary.infer
 export type ObservabilityEventType = typeof ObservabilityEventTypeBoundary.infer
+export type ObservabilityKind = typeof ObservabilityKindBoundary.infer
 export type ObservabilityExcerpt = Extract<ObservabilityEvent, { type: "agent.exit" }>["payload"]["excerpt"]
 export type ObservabilitySubject = NonNullable<ObservabilityEvent["subject"]>
 export type PresetPlaceholderDirection = typeof PresetPlaceholderDirectionBoundary.infer
