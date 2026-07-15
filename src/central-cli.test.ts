@@ -1199,10 +1199,9 @@ attemptTimeoutSeconds = 3600
 		const loopDataRoot = await makeLoopDataRoot("context-append-runtime")
 		await mkdir(loopDataRoot, { recursive: true })
 		const bodyPath = resolve(TEST_ROOT, `${++nextFixtureId}-context-body.txt`)
-		const credentialPath = resolve(TEST_ROOT, `${++nextFixtureId}-context-live-credential.txt`)
 		const body = "多字节-context\n".repeat(150_000)
 		await writeFile(bodyPath, body)
-		const runtimeEnv = await contextRuntimeEnv(credentialPath)
+		const runtimeEnv = await contextRuntimeEnv()
 		const store = openSqliteStateStore({ loopDataRoot })
 		const chain = store.createChain({ name: "context-chain", repository: "mouriya-s-lab/coder-loop", baseBranch: "main" })
 		const liveChain = store.createChain({ name: "context-live-chain", preset: "gh-issue-pr-iteration", repository: "mouriya-s-lab/coder-loop", baseBranch: "main" })
@@ -1245,12 +1244,13 @@ attemptTimeoutSeconds = 3600
 			try { await expect(sendDaemonRequest(closeSocket, daemonRequest("daemon.status"))).rejects.toThrow("closed before a complete") }
 			finally { await new Promise<void>((resolveClose) => peer.close(() => resolveClose())) }
 
-			const credential = await waitFor(async () => { try { const value = (await readFile(credentialPath,"utf-8")).trim(); return value === "" ? null : value } catch { return null } }, 8_000)
-			const agentAppend = await runCli(["context","append","context-live-chain","--scope","chain","--body","live-agent","--loop-data-root",loopDataRoot,"--json"], { CODER_LOOP_RUN_CRED: credential })
-			expect(agentAppend.exitCode, agentAppend.stderr).toBe(0)
-			const liveStore = openSqliteStateStore({loopDataRoot})
-			expect(liveStore.listContextEntries(liveChain.id)[0]?.author).toMatchObject({kind:"agent",itemId:"live-item"})
-			liveStore.close()
+			const liveEntry = await waitFor(async () => {
+				const liveStore = openSqliteStateStore({loopDataRoot})
+				try { return liveStore.listContextEntries(liveChain.id)[0] ?? null }
+				finally { liveStore.close() }
+			}, 8_000)
+			expect(liveEntry.body).toBe("live-agent")
+			expect(liveEntry.author).toMatchObject({kind:"agent",itemId:"live-item"})
 
 			const down = await runCli(["daemon", "down", "--loop-data-root", loopDataRoot, "--json"])
 			expect(down.exitCode, down.stderr).toBe(0)
@@ -1390,12 +1390,12 @@ function spawnDaemonUp(loopDataRoot: string, env: Record<string, string> = {}): 
 	})
 }
 
-async function contextRuntimeEnv(credentialPath: string): Promise<Record<string, string>> {
+async function contextRuntimeEnv(): Promise<Record<string, string>> {
 	const bin = resolve(TEST_ROOT, `${++nextFixtureId}-context-runtime-bin`)
 	await mkdir(bin, { recursive: true })
 	const runner = [
 		"#!/usr/bin/env bash",
-		'printf "%s" "$CODER_LOOP_RUN_CRED" > "$CONTEXT_CREDENTIAL_PATH"',
+		'bun "$CONTEXT_LOOP_ENTRY" context append context-live-chain --scope chain --body live-agent --json',
 		"trap 'exit 0' TERM INT",
 		"while true; do sleep 1; done",
 		"",
@@ -1403,7 +1403,7 @@ async function contextRuntimeEnv(credentialPath: string): Promise<Record<string,
 	for (const name of ["codex", "claude", "opencode"]) await writeExecutable(resolve(bin, name), runner)
 	return {
 		PATH: `${bin}:${process.env.PATH ?? ""}`,
-		CONTEXT_CREDENTIAL_PATH: credentialPath,
+		CONTEXT_LOOP_ENTRY: LOOP_ENTRY,
 	}
 }
 
