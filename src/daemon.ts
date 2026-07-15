@@ -11,6 +11,7 @@ import {
 	phaseChainActions,
 	phaseWritableStatuses,
 	runPresetChainCompleteTriggerPhases,
+	selectRunnerForPhase,
 	substitutePresetRootToken,
 	PRESET_PHASE_CHAIN_ACTIONS,
 	type AgentRunnerKind,
@@ -48,7 +49,7 @@ import {
 	type SchedulerState,
 } from "./scheduler"
 import { PersistedRateLimitStateBoundary, type RateLimitReset } from "./rate-limit"
-import { runnerExecutionDomain } from "./runner-execution"
+import { runnerExecutionDomain, type RunnerExecutionDomain } from "./runner-execution"
 import {
 	type ChainRecord,
 	type CreateChainInput,
@@ -81,7 +82,9 @@ import {
 	assertRequestAdmittedItemStatus,
 	chainMetadataToJsonObject,
 	chainPresetPath,
+	clearExternalTerminalHold,
 	engineLifecycleAdmittedItemStatus,
+	externalTerminalHold,
 	itemDependsOnIds,
 	itemExtraToJsonObject,
 	parseInternalStatus,
@@ -3081,7 +3084,11 @@ export class CoderLoopDaemon {
 		}
 	}
 
-	private async resolvedPhaseForExternalTerminalRefresh(chain: ChainRecord, item: ItemRecord): Promise<{ phase: string; external: boolean } | null> {
+	private async resolvedPhaseForExternalTerminalRefresh(chain: ChainRecord, item: ItemRecord): Promise<{
+		phase: string
+		executionDomain: RunnerExecutionDomain
+		itemState: { kind: "active" } | { kind: "terminal" }
+	} | null> {
 		// `loadedPresetForItem` is backed by the daemon's shared promise cache keyed by canonical
 		// preset directory. Add, batch-add, update, and the scheduler therefore share one
 		// materialization/validation result; a batch does not reload the same preset per row and the
@@ -3093,19 +3100,37 @@ export class CoderLoopDaemon {
 			? preset.phases.find((candidate) => candidate.trigger === null)
 			: preset.phases.find((candidate) => candidate.name === item.phase)
 		if (phase === undefined) return null
-		if (item.runner !== null) return { phase: phase.name, external: runnerExecutionDomain(item.runner).kind === "external-terminal" }
-		return { phase: phase.name, external: phase.defaultRunner !== null && runnerExecutionDomain(phase.defaultRunner).kind === "external-terminal" }
+		const selection = buildPhaseRunnerSelectionFromChain({ chain, loopDataRoot: this.paths.root, preset })
+		const runner = selectRunnerForPhase(phase.name, item, selection)
+		return {
+			phase: phase.name,
+			executionDomain: runnerExecutionDomain(runner.kind),
+			itemState: preset.statuses.terminal.includes(item.status) ? { kind: "terminal" } : { kind: "active" },
+		}
 	}
 
 	private async refreshPostPersistenceExternalTerminal(chain: ChainRecord, items: readonly ItemRecord[]): Promise<void> {
 		const options = this.buildSchedulerOptions()
-		const resolvedItems: { item: ItemRecord; phase: string; external: boolean }[] = []
+		const resolvedItems: {
+			item: ItemRecord
+			phase: string
+			executionDomain: RunnerExecutionDomain
+			itemState: { kind: "active" } | { kind: "terminal" }
+		}[] = []
 		for (const item of items) {
 			const resolved = await this.resolvedPhaseForExternalTerminalRefresh(chain, item)
 			if (resolved !== null) resolvedItems.push({ item, ...resolved })
 		}
-		const affected = resolvedItems.filter(({ external }) => external).map(({ item, phase }) => ({ chainId: chain.id, rowId: item.id, itemId: item.itemId, phase }))
-		for (const { item, phase } of resolvedItems) {
+		const affected = resolvedItems
+			.filter(({ executionDomain, itemState }) => executionDomain.kind === "external-terminal" && itemState.kind === "active")
+			.map(({ item, phase }) => ({ chainId: chain.id, rowId: item.id, itemId: item.itemId, phase }))
+		for (const { item, phase, itemState } of resolvedItems) {
+			if (itemState.kind === "terminal") {
+				if (externalTerminalHold(item.extra) !== null) {
+					options.store.updateItem(item.id, { extra: clearExternalTerminalHold(item.extra), updatedAt: Math.floor(Date.now() / 1000) })
+				}
+				continue
+			}
 			await refreshExternalTerminalAvailabilityForItem(options, chain, item, phase, undefined, affected)
 		}
 	}

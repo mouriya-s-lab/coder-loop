@@ -528,6 +528,9 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 						const itemAfterProbe = options.store.getItem(activeItem.id)
 						if (itemAfterProbe === null) throw new Error(`active external-terminal run ${slot.activeRun.runId} references missing item ${activeItem.id}`)
 						if (chainStatuses.terminal.includes(itemAfterProbe.status)) {
+							if (externalTerminalHold(itemAfterProbe.extra) !== null) {
+								options.store.updateItem(itemAfterProbe.id, { extra: clearExternalTerminalHold(itemAfterProbe.extra), updatedAt: nowSeconds(options) })
+							}
 							await emit(options, { type: "slot.busy", slotKey: slot.key, chainId: chain.id, repoCwd, activeRunId: slot.activeRun.runId })
 							continue
 						}
@@ -545,13 +548,6 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 								? { kind: "unavailable", reason: availability.reason, exitCode: availability.exitCode, signal: null, checkedAt, since }
 								: { kind: "probe-failed", reason: availability.reason, exitCode: availability.exitCode, signal: availability.signal, checkedAt, since },
 						}), updatedAt: nowSeconds(options) })
-						if (!sameHold && !endpointAlreadyUnavailable) await emit(options, {
-							type: "runner.external_terminal_unavailable", chainId: chain.id, rowId: activeItem.id, itemId: activeItem.itemId,
-							phase: slot.activeRun.phase, runner: slot.activeRun.runner.kind, binary: slot.activeRun.runner.binary,
-							probeArgv: activeDomain.probe.argv, availability,
-							affected: activeExternalTerminalEndpointAffected(options, slot.activeRun.runner),
-						})
-						options.state.externalTerminalLossRunIds.add(slot.activeRun.runId)
 						const terminating = slot.activeRun
 						const currentRun = options.store.getCurrentRun(chain.id)
 						if (currentRun?.runId === terminating.runId) {
@@ -559,9 +555,17 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 								kind: "lost", detectedAt: checkedAt, reason: availability.reason, terminationPhase: "term",
 							}) })
 						}
+						options.state.externalTerminalLossRunIds.add(terminating.runId)
 						terminating.revokeCredential()
 						options.store.setItemSessionId(activeItem.id, { phase: terminating.phase, runner: terminating.runner.kind, sessionId: null, updatedAt: nowSeconds(options) })
-						void terminating.terminate({ forceAfterMs: options.attemptKillMs ?? ATTEMPT_KILL_MS }).finally(() => options.state.externalTerminalLossRunIds.delete(terminating.runId))
+						const termination = terminating.terminate({ forceAfterMs: options.attemptKillMs ?? ATTEMPT_KILL_MS })
+						if (!sameHold && !endpointAlreadyUnavailable) await emit(options, {
+							type: "runner.external_terminal_unavailable", chainId: chain.id, rowId: activeItem.id, itemId: activeItem.itemId,
+							phase: terminating.phase, runner: terminating.runner.kind, binary: terminating.runner.binary,
+							probeArgv: activeDomain.probe.argv, availability,
+							affected: activeExternalTerminalEndpointAffected(options, terminating.runner),
+						})
+						void termination.finally(() => options.state.externalTerminalLossRunIds.delete(terminating.runId))
 					}
 				}
 				await emit(options, {
@@ -1583,10 +1587,14 @@ function attachRunCloseHandler(
 						durationSeconds: Math.max(0, endedAt - startedAt),
 						status,
 					})
-					const previousSessionId = (currentItem ?? item).sessionIds[phase]?.[runner.kind] ?? null
-					if (externalTerminalLossWon || currentItem === null || !terminalStatuses.has(currentItem.status)) {
-						const itemForBackoff = currentItem ?? item
-						const statusWasWrittenDuringRun = currentItem !== null && currentItem.statusUpdatedAt !== item.statusUpdatedAt && currentItem.statusUpdatedAt >= startedAt
+					const itemBeforeBookkeeping = options.store.getItem(item.id)
+					const previousSessionId = (itemBeforeBookkeeping ?? currentItem ?? item).sessionIds[phase]?.[runner.kind] ?? null
+					if (!externalTerminalLossWon && itemBeforeBookkeeping !== null && terminalStatuses.has(itemBeforeBookkeeping.status) && externalTerminalHold(itemBeforeBookkeeping.extra) !== null) {
+						options.store.updateItem(item.id, { extra: clearExternalTerminalHold(itemBeforeBookkeeping.extra), updatedAt: endedAt })
+					}
+					if (externalTerminalLossWon || itemBeforeBookkeeping === null || !terminalStatuses.has(itemBeforeBookkeeping.status)) {
+						const itemForBackoff = itemBeforeBookkeeping ?? item
+						const statusWasWrittenDuringRun = itemBeforeBookkeeping !== null && itemBeforeBookkeeping.statusUpdatedAt !== item.statusUpdatedAt && itemBeforeBookkeeping.statusUpdatedAt >= startedAt
 						// #478: rate-limit exits do not consume an attempt slot (roll the spawn-time
 						// +1 back to the pre-spawn value via explicit `attempts: item.attempts`) and
 						// do not enter the blind exponential spawn-failure backoff — the account

@@ -1403,6 +1403,15 @@ describe("sqlite state store", () => {
 
 		const migrated = openSqliteStateStore({ loopDataRoot: resolve(dbFile, "..") })
 		try {
+			expect(() => migrated.createItem({
+				chainId: 999_999,
+				itemId: "602-v14-orphan",
+				repoCwd: "/repo/coder-loop",
+				status: runtimeStatus("queued"),
+				attempts: 0,
+				runner: "hapi",
+				extra: storedItemExtra({}),
+			})).toThrow(/FOREIGN KEY/i)
 			expect(migrated.getItemById(chain.id, preserved.itemId)?.runner).toBe("opencode")
 			const hapiItem = migrated.createItem({
 				chainId: chain.id,

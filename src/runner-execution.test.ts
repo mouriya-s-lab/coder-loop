@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { chmod, mkdir, writeFile } from "node:fs/promises"
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
 import { runnerExecutionDomain, decodeExternalTerminalProbeResult, probeExternalTerminal } from "./runner-execution"
 
@@ -15,6 +15,12 @@ describe("runner execution domain", () => {
 			probe: { argv: ["probe"], deadlineMs: 30_000, killGraceMs: 1_000 },
 			invocation: { kind: "generic-binary" },
 		})
+	})
+
+	test("daemon refresh preserves the execution-domain ADT without a boolean projection", async () => {
+		const daemonSource = await readFile(resolve(import.meta.dir, "daemon.ts"), "utf-8")
+		expect(daemonSource).not.toContain("external: boolean")
+		expect(daemonSource).toContain("RunnerExecutionDomain")
 	})
 
 	test("decodes the complete binary probe wire", () => {

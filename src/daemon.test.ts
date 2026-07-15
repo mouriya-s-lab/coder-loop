@@ -214,6 +214,39 @@ describe("daemon", () => {
 		}
 	})
 
+	test("terminal update while an external terminal is unavailable clears the hold without probing again", async () => {
+		const presetDir = resolve(TEST_ROOT, "terminal-update-clears-external-terminal-hold")
+		const fakeBinary = resolve(TEST_ROOT, "terminal-update-clears-external-terminal-hold-binary")
+		const probeLog = resolve(TEST_ROOT, "terminal-update-clears-external-terminal-hold-probes")
+		await cp(PRESET_DIR, presetDir, { recursive: true })
+		const presetToml = resolve(presetDir, "preset.toml")
+		await writeFile(presetToml, (await readFile(presetToml, "utf-8")).replaceAll('runner = "codex"', 'runner = "hapi"').replaceAll('runner  = "codex"', 'runner  = "hapi"'))
+		await writeFile(fakeBinary, `#!/bin/sh\nif [ "$1" = probe ]; then echo probe >> ${JSON.stringify(probeLog)}; exit 69; fi\nexit 0\n`)
+		await chmod(fakeBinary, 0o755)
+		const fixture = await startFixture("terminal-update-clears-external-terminal-hold", {
+			schedulerEnabled: false,
+			schedulerPresetDir: presetDir,
+			schedulerUsePresetRunner: true,
+		})
+		try {
+			const chain = record(expectOk(await request(fixture, "chain.create", { name: "terminal-hapi", repository: "fixture/repo", baseBranch: "main", preset: "gh-issue-pr-iteration", metadata: { hapi: { binary: fakeBinary } } })))
+			const chainId = numberValue(record(chain.chain).id)
+			expectOk(await request(fixture, "item.add", { chainId, itemId: "602-terminal", repoCwd: REPO_ROOT, presetPath: presetDir }))
+			const probesBeforeTerminal = (await readFile(probeLog, "utf-8")).trim().split("\n").length
+			expectOk(await request(fixture, "item.update", { chainId, itemId: "602-terminal", fields: { status: "done" } }))
+			const probesAfterTerminal = (await readFile(probeLog, "utf-8")).trim().split("\n").length
+			expect(probesAfterTerminal).toBe(probesBeforeTerminal)
+			const listed = record(expectOk(await request(fixture, "item.list", { chainId })))
+			if (!Array.isArray(listed.items)) throw new Error("item list missing")
+			const terminal = listed.items.map(record).find((item) => item.itemId === "602-terminal")
+			if (terminal === undefined) throw new Error("terminal item missing")
+			expect(terminal.status).toBe("done")
+			expect(record(terminal.extra).externalTerminalHold).toBeUndefined()
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
 	test("healthy active external terminal projects available current state", async () => {
 		const presetDir = resolve(TEST_ROOT, "healthy-active-external-terminal")
 		const fakeBinary = resolve(TEST_ROOT, "healthy-active-external-terminal-binary")

@@ -731,7 +731,7 @@ function migrateStateSchema(db: Database): void {
 			db.exec(`PRAGMA user_version = ${STATE_SCHEMA_VERSION}`)
 		}).immediate()
 	} finally {
-		if (needsItemTableRebuild || needsChainTableRebuild || needsItemTableRebuildForGitHubShapeRetire) db.exec("PRAGMA foreign_keys = ON")
+		if (needsItemTableRebuild || needsChainTableRebuild || needsItemTableRebuildForGitHubShapeRetire || needsItemTableRebuildForOpencodeCheck) db.exec("PRAGMA foreign_keys = ON")
 	}
 }
 

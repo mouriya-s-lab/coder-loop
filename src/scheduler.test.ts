@@ -3409,7 +3409,81 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			expect(fixture.store.getCurrentRun(chain.id)?.extra.externalTerminalLoss).toBeUndefined()
 			expect(fixture.store.getItem(item.id)?.extra.externalTerminalHold).toBeUndefined()
 			await spawned.spawnedRuns[0]!.terminate({ forceAfterMs: 100 })
+			await spawned.spawnedRuns[0]!.closed
 			expect(fixture.store.getItem(item.id)?.status).toBe("done")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("in-flight loss latches before awaited warning persistence", async () => {
+		const fixture = await createFixture("external-terminal-loss-latch-before-warning")
+		try {
+			const chain = createChain(fixture.store, "external-terminal-loss-latch-before-warning-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 602_012, repoCwd: "/repo/a", sleepMs: 10_000 })
+			const binary = resolve(fixture.loopDataRoot, "..", "fake-external-terminal")
+			const probeState = resolve(fixture.loopDataRoot, "..", "probe-state")
+			const externalEvents = resolve(fixture.loopDataRoot, "..", "external-events")
+			await writeFile(probeState, "0")
+			await writeFakeExternalTerminalBinary(binary, probeState, externalEvents, 10)
+			const options = fixture.options({
+				runner: { kind: "hapi", source: "iteration-default", binary, extraArgs: [], model: null },
+				attemptKillMs: 100,
+				onEvent: async (event) => {
+					fixture.schedulerEvents.push(event)
+					if (event.type !== "runner.external_terminal_unavailable") return
+					expect(fixture.store.getCurrentRun(chain.id)?.extra.externalTerminalLoss).toMatchObject({ terminationPhase: "term" })
+					fixture.store.updateItem(item.id, { status: runtimeStatus("done"), updatedAt: 1_900_602_012 })
+				},
+			})
+			const spawned = await schedulerTick(options)
+			expect(spawned.spawnedRuns).toHaveLength(1)
+			await writeFile(probeState, "69")
+			await schedulerTick(options)
+			const closed = await spawned.spawnedRuns[0]!.closed
+			expect(closed.result).toMatchObject({ kind: "external-terminal-lost" })
+			expect(fixture.store.getItem(item.id)?.status).toBe("queued")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("normal terminal close clears a stale external-terminal hold", async () => {
+		const fixture = await createFixture("external-terminal-terminal-close-clears-hold")
+		try {
+			const chain = createChain(fixture.store, "external-terminal-terminal-close-clears-hold-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 602_013, repoCwd: "/repo/a", sleepMs: 10_000 })
+			createItem(fixture.store, chain, { issueNumber: 602_014, repoCwd: "/repo/a", runner: "codex" })
+			const binary = resolve(fixture.loopDataRoot, "..", "fake-external-terminal")
+			const probeState = resolve(fixture.loopDataRoot, "..", "probe-state")
+			const externalEvents = resolve(fixture.loopDataRoot, "..", "external-events")
+			await writeFile(probeState, "0")
+			await writeFakeExternalTerminalBinary(binary, probeState, externalEvents, 10)
+			const options = fixture.options({
+				runner: { kind: "hapi", source: "iteration-default", binary, extraArgs: [], model: null },
+				onEvent: (event) => {
+					fixture.schedulerEvents.push(event)
+					if (event.type !== "agent.exit") return
+					const terminal = fixture.store.getItem(item.id)
+					if (terminal === null) throw new Error("terminal item missing during close")
+					fixture.store.updateItem(item.id, {
+						extra: storedItemExtra({ ...itemExtraToJsonObject(terminal.extra), externalTerminalHold: {
+							kind: "external-terminal-unavailable", runner: "hapi", phase: "iteration", binary, probeArgv: ["probe"],
+							availability: { kind: "unavailable", reason: "endpoint-unavailable", exitCode: 69, signal: null, checkedAt: "2026-07-15T00:00:00.000Z", since: "2026-07-15T00:00:00.000Z" },
+						} }),
+						updatedAt: 1_900_602_014,
+					})
+				},
+			})
+			const spawned = await schedulerTick(options)
+			expect(spawned.spawnedRuns).toHaveLength(1)
+			fixture.store.updateItem(item.id, {
+				status: runtimeStatus("done"),
+				updatedAt: 1_900_602_013,
+			})
+			await spawned.spawnedRuns[0]!.terminate({ forceAfterMs: 100 })
+			expect(fixture.store.getItem(item.id)?.status).toBe("done")
+			expect(fixture.store.getItem(item.id)?.extra.externalTerminalHold).toBeUndefined()
 		} finally {
 			fixture.store.close()
 		}
