@@ -10,8 +10,9 @@
 
 import { spawn } from "node:child_process"
 import { appendFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises"
-import { closeSync, createWriteStream, openSync, type Dirent, type WriteStream } from "node:fs"
-import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
+import { closeSync, createWriteStream, openSync, readFileSync, statSync, type Dirent, type WriteStream } from "node:fs"
+import { homedir } from "node:os"
+import { basename, dirname, isAbsolute, relative, resolve, sep as pathSeparator } from "node:path"
 import { command, flag, option, optional, positional, run as runCmd, string as cmdString, subcommands } from "cmd-ts"
 import { type as arkType } from "arktype"
 import type { BoundaryError, BoundaryRecord, BoundaryValue } from "./boundary-types"
@@ -1291,6 +1292,28 @@ export type RuntimeBindingPaths = {
 	evidenceDir: string
 	evidenceRootDir: string
 	logDir: string
+}
+
+export const RUNTIME_BINDING_PATH_KEYS = ["sharedContextPath", "currentIssueFile", "issueDir", "evidenceDir", "evidenceRootDir", "logDir"] as const
+export type RuntimeBindingPathKey = (typeof RUNTIME_BINDING_PATH_KEYS)[number]
+
+export function phaseDeclaredRuntimeBindingPaths(phase: Pick<PresetPhase, "variables">): readonly RuntimeBindingPathKey[] {
+	const result: RuntimeBindingPathKey[] = []
+	for (const variable of phase.variables) {
+		if (variable.source.kind !== "runtime") continue
+		let pathKey: RuntimeBindingPathKey | null = null
+		switch (variable.source.key) {
+			case "sharedContextPath": pathKey = "sharedContextPath"; break
+			case "currentIssueFile": pathKey = "currentIssueFile"; break
+			case "issueDir": pathKey = "issueDir"; break
+			case "evidenceDir": pathKey = "evidenceDir"; break
+			case "evidenceRootDir": pathKey = "evidenceRootDir"; break
+			case "logDir":
+			case "traceFile": pathKey = "logDir"; break
+		}
+		if (pathKey !== null && !result.includes(pathKey)) result.push(pathKey)
+	}
+	return result
 }
 
 export type RenderBindings = JsonObject
@@ -5491,6 +5514,13 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 	const currentIssueFile = resolveOptionalChainIssueFile(options, input.chain, anchorRecord, "Chain-complete trigger issue file")
 	const evidenceDir = resolveChainEvidenceDir(options, input.chain, anchorRecord, anchorId, "Chain-complete trigger evidence directory")
 	const finalizerRunId = input.runId ?? makeRunId(`chain-${input.chain.id}`)
+	const runtimeBindingPaths = buildCentralRuntimeBindingPaths({
+		options,
+		chain: input.chain,
+		runId: finalizerRunId,
+		currentIssueFile,
+		evidenceDir,
+	})
 
 	const phaseSelection = buildPhaseRunnerSelectionFromChain({ chain: input.chain, loopDataRoot: input.loopDataRoot, preset })
 	const resolvePhaseRunner = async (phase: string): Promise<AgentRunnerSelection> => {
@@ -5510,13 +5540,7 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 				evidenceDir,
 				agentCwd: targetCwd,
 				issueRun: { runIdGeneration: "new", resumedFromPhase: null, resumedStartedAt: null, resumedSessionId: null },
-				paths: buildCentralRuntimeBindingPaths({
-					options,
-					chain: input.chain,
-					runId: finalizerRunId,
-					currentIssueFile,
-					evidenceDir,
-				}),
+				paths: runtimeBindingPaths,
 			}),
 			preset,
 		}
@@ -5525,7 +5549,16 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 		const outputPath = agentOutputPath(options, finalizerRunId, phase.name)
 		const resolvedRunner = await resolvePhaseRunner(phase.name)
 		log(`Starting chain-complete trigger phase ${phase.name} for chain ${input.chain.name} (runner=${resolvedRunner.kind})...`)
-		const { output, stdoutBytes, code } = await runAgent(options, phase.name, prompt, outputPath, targetCwd, resolvedRunner, summaryWatchdogConfigForPhase(phase))
+		const { output, stdoutBytes, code } = await runAgent(
+			options,
+			phase,
+			prompt,
+			outputPath,
+			targetCwd,
+			resolvedRunner,
+			summaryWatchdogConfigForPhase(phase),
+			{ currentIssueFile: runtimeBindingPaths.currentIssueFile, evidenceDir: runtimeBindingPaths.evidenceDir },
+		)
 		log(`Chain-complete trigger phase ${phase.name} finished: exit=${code}, output=${outputPath} (${stdoutBytes} bytes)`)
 		if (code !== 0) throw new Error(`chain-complete trigger phase ${phase.name} exited ${code}`)
 		const decision = parseFinalizerSummaryDecision(output, resolvedRunner.kind)
@@ -6228,14 +6261,16 @@ export function buildRenderBindings(options: RenderBindingsInput): RenderBinding
 
 async function runAgent(
 	options: LoopOptions,
-	label: AgentLabel,
+	phase: PresetPhase,
 	prompt: string,
 	outputPath: string,
 	agentCwd: string,
 	runner: AgentRunnerSelection,
 	watchdog: SummaryWatchdogConfig | null,
+	authorizationPaths: RunnerAuthorizationRuntimePaths,
 	eventContext?: LoopEventContext,
 ): Promise<{ output: string; stdoutBytes: number; code: number }> {
+	const label = phase.name
 	const sessionsPath = agentSessionsPath(outputPath)
 	const lastEntry = await readLastSessionEntry(sessionsPath)
 	const compatibleLastEntry = await selectResumeEntryForRunner(lastEntry, runner, outputPath, label)
@@ -6246,7 +6281,7 @@ async function runAgent(
 
 	const result = await runAgentWithBackoff({
 		spawnAttempt: ({ resume }) => {
-			const baseInput: SpawnOneAttemptInput = { options, label, prompt, outputPath, sessionsPath, resume, agentCwd, runner, watchdog }
+			const baseInput: SpawnOneAttemptInput = { options, label, prompt, outputPath, sessionsPath, resume, agentCwd, runner, watchdog, authorizationPaths, authorizationPhase: phase }
 			return spawnOneAttempt(eventContext ? { ...baseInput, eventContext } : baseInput)
 		},
 		sleep: (seconds: number) => new Promise((resolve) => setTimeout(resolve, seconds * 1000)),
@@ -6302,7 +6337,11 @@ export type SpawnOneAttemptInput = {
 	attemptTimeout?: AttemptTimeoutConfig | null
 	eventContext?: LoopEventContext
 	statusWriter?: (path: string, payload: string) => Promise<void>
+	authorizationPaths?: RunnerAuthorizationRuntimePaths
+	authorizationPhase?: Pick<PresetPhase, "variables">
 }
+
+export type RunnerAuthorizationRuntimePaths = Pick<RuntimeBindingPaths, "currentIssueFile" | "evidenceDir">
 
 export type SummaryWatchdogConfig = {
 	marker: string
@@ -6540,7 +6579,24 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 	const { options, label, prompt: basePrompt, outputPath, sessionsPath, resume } = input
 	const effectivePrompt = resume.kind === "resume" ? RESUME_CONTINUE_PROMPT : basePrompt
 	const selectedRunner = input.runner ?? options.defaultRunner
+	const authorizationPaths = input.authorizationPaths ?? { currentIssueFile: "", evidenceDir: options.evidenceRootDir }
 	await mkdir(dirname(outputPath), { recursive: true })
+	const loopDataRoot = resolveLoopDataPaths(loopDataRootOption(options.loopDataRoot)).root
+	const runnerPlan = buildRunnerInvocation(selectedRunner, effectivePrompt, resume, buildRunnerFilesystemAuthorization({
+		agentCwd: input.agentCwd,
+		presetDir: options.preset.presetDir,
+		loopDataRoot,
+		sharedContextPath: options.sharedContextPath,
+		currentIssueFile: authorizationPaths.currentIssueFile,
+		issueDir: options.issueDir,
+		evidenceDir: authorizationPaths.evidenceDir,
+		evidenceRootDir: options.evidenceRootDir,
+		logDir: options.logDir,
+		daemonSocketPath: resolve(loopDataRoot, "daemon.sock"),
+		declaredRuntimeBindingPaths: phaseDeclaredRuntimeBindingPaths(input.authorizationPhase ?? { variables: [] }),
+	}))
+	for (const directory of runnerPlan.runtimeDirectories) await mkdir(directory, { recursive: true })
+	await writeFile(resolve(dirname(outputPath), "runner-authorization.json"), `${JSON.stringify(runnerPlan.authorizationEvidence)}\n`)
 	return new Promise((resolveResult, rejectResult) => {
 		let settled = false
 		let streamedSessionId: string | null = null
@@ -6569,12 +6625,6 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 		const statusPath = agentStatusPath(outputPath)
 		const streamOutFile = createWriteStream(attemptStreamPath, { flags: "w" })
 		const stderrOutFile = createWriteStream(attemptStderrPath, { flags: "w" })
-		const runnerPlan = buildRunnerInvocation(selectedRunner, effectivePrompt, resume, {
-			agentCwd: input.agentCwd,
-			targetCwd: options.targetCwd,
-			presetDir: options.preset.presetDir,
-			loopDataRoot: resolveLoopDataPaths(loopDataRootOption(options.loopDataRoot)).root,
-		})
 		const status: AgentRunStatus = {
 			label,
 			runner: selectedRunner.kind,
@@ -6623,6 +6673,7 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 			cwd: input.agentCwd,
 			stdio: ["ignore", "pipe", "pipe"],
 			detached: true,
+			env: { ...process.env, ...runnerPlan.environment },
 		})
 		const sendSignalToGroup = (sig: NodeJS.Signals): void => {
 			const pid = child.pid
@@ -6955,7 +7006,7 @@ export function agentClaudeArgs(extraArgs: readonly string[], prompt: string, re
 }
 
 export type RunnerInvocation =
-	| { kind: "spawn"; binary: string; args: string[] }
+	| { kind: "spawn"; binary: string; args: string[]; environment: Readonly<Record<string, string>>; runtimeDirectories: readonly string[]; authorizationEvidence: RunnerAuthorizationEvidence }
 
 // #505: the loop-process-side git worktree helpers (worktreeBasePath /
 // worktreePathForItem / ensureWorktreeForItem / removeWorktreeForItem /
@@ -6970,38 +7021,252 @@ export type RunnerInvocation =
 
 // --- runner invocation ---
 
-export type RunnerInvocationPaths = {
+export type RunnerFilesystemSurface =
+	| { kind: "task-private-directory"; channel: "agent-cwd" | "runner-scratch"; path: string }
+	| { kind: "cwd-ancestor-directory"; channel: "agent-cwd-discovery"; access: "entries" | "metadata"; path: string }
+	| { kind: "read-only-directory"; channel: "preset"; path: string }
+	| { kind: "read-only-file"; channel: "runner-executable"; runner: AgentRunnerKind; path: string }
+	| { kind: "writable-directory"; channel: "evidence" | "evidence-root" | "issues" | "logs" | "git-worktree-metadata" | "git-common-dir"; path: string }
+	| { kind: "writable-file"; channel: "shared-context" | "current-issue" | "daemon-socket"; path: string }
+	| { kind: "system-device"; channel: "null"; path: "/dev/null" }
+	| { kind: "runner-runtime-directory"; runner: "claude"; channel: "projects" | "session-env"; path: string }
+	| { kind: "runner-runtime-directory"; runner: "codex"; channel: "sessions" | "shell-snapshots" | "tmp" | "log" | "cache"; path: string }
+	| { kind: "runner-runtime-directory"; runner: "opencode"; channel: "data" | "state"; path: string }
+	| { kind: "runner-runtime-file"; runner: "codex"; channel: "installation-id" | "models-cache" | "state-db" | "state-db-shm" | "state-db-wal" | "logs-db" | "logs-db-shm" | "logs-db-wal" | "goals-db" | "goals-db-shm" | "goals-db-wal" | "memories-db" | "memories-db-shm" | "memories-db-wal"; path: string }
+
+export type RunnerFilesystemAuthorization = {
 	agentCwd: string
-	targetCwd: string
+	loopDataRoot: string
+	surfaces: readonly RunnerFilesystemSurface[]
+}
+
+export type RunnerAuthorizationEvidence = {
+	schemaVersion: 1
+	runner: AgentRunnerKind
+	outerSandboxBinary: "/usr/bin/sandbox-exec"
+	outerSandboxProfile: string
+	surfaces: readonly RunnerFilesystemSurface[]
+}
+
+export type BuildRunnerFilesystemAuthorizationInput = RuntimeBindingPaths & {
+	agentCwd: string
 	presetDir: string
 	loopDataRoot: string
+	daemonSocketPath: string
+	declaredRuntimeBindingPaths: readonly RuntimeBindingPathKey[]
 }
 
-export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: string, resume: ResumeDecision, paths: RunnerInvocationPaths): RunnerInvocation {
-	const additionalDirs = runnerAdditionalDirs(paths)
-	if (runner.kind === "claude") {
-		return {
-			kind: "spawn",
-			binary: runner.binary,
-			args: agentClaudeArgs(runner.extraArgs, prompt, resume, additionalDirs, runner.model),
+export function buildRunnerFilesystemAuthorization(input: BuildRunnerFilesystemAuthorizationInput): RunnerFilesystemAuthorization {
+	const runnerScratch = resolve(input.agentCwd, ".coder-loop-runner", "tmp")
+	const declares = (key: RuntimeBindingPathKey): boolean => input.declaredRuntimeBindingPaths.includes(key)
+	const surfaces: RunnerFilesystemSurface[] = [
+		{ kind: "task-private-directory", channel: "agent-cwd", path: input.agentCwd },
+		{ kind: "task-private-directory", channel: "runner-scratch", path: runnerScratch },
+		...runnerCwdDiscoverySurfaces(input.loopDataRoot, input.agentCwd),
+		...runnerGitMetadataSurfaces(input.agentCwd),
+		{ kind: "read-only-directory", channel: "preset", path: input.presetDir },
+		{ kind: "writable-file", channel: "daemon-socket", path: input.daemonSocketPath },
+		{ kind: "system-device", channel: "null", path: "/dev/null" },
+	]
+	if (declares("evidenceDir")) surfaces.push({ kind: "writable-directory", channel: "evidence", path: input.evidenceDir })
+	if (declares("evidenceRootDir")) surfaces.push({ kind: "writable-directory", channel: "evidence-root", path: input.evidenceRootDir })
+	if (declares("issueDir")) surfaces.push({ kind: "writable-directory", channel: "issues", path: input.issueDir })
+	if (declares("logDir")) surfaces.push({ kind: "writable-directory", channel: "logs", path: input.logDir })
+	if (declares("sharedContextPath")) surfaces.push({ kind: "writable-file", channel: "shared-context", path: input.sharedContextPath })
+	if (declares("currentIssueFile") && input.currentIssueFile !== "") surfaces.push({ kind: "writable-file", channel: "current-issue", path: input.currentIssueFile })
+	validateRunnerFilesystemSurfaces(input.loopDataRoot, surfaces)
+	const presetSurface = surfaces.find((surface) => surface.kind === "read-only-directory")
+	if (presetSurface === undefined) throw new Error("declared runner surfaces require a read-only preset")
+	return { agentCwd: input.agentCwd, loopDataRoot: input.loopDataRoot, surfaces }
+}
+
+function validateRunnerFilesystemSurfaces(loopDataRoot: string, surfaces: readonly RunnerFilesystemSurface[]): void {
+	const root = resolve(loopDataRoot)
+	for (const surface of surfaces) {
+		if (surface.kind === "cwd-ancestor-directory" || surface.kind === "read-only-file" || surface.kind === "writable-file" || surface.kind === "runner-runtime-file" || surface.kind === "system-device") continue
+		const surfaceRoot = resolve(surface.path)
+		const rootFromSurface = relative(surfaceRoot, root)
+		if (rootFromSurface === "") throw new Error(`declared runner surface ${surface.channel} may not grant the loop-data root`)
+		if (rootFromSurface !== ".." && !rootFromSurface.startsWith(`..${pathSeparator}`) && !isAbsolute(rootFromSurface)) {
+			throw new Error(`declared runner surface ${surface.channel} may not grant an ancestor of the loop-data root`)
 		}
 	}
-	if (runner.kind === "opencode") {
-		return {
-			kind: "spawn",
-			binary: runner.binary,
-			args: agentOpencodeArgs(runner.extraArgs, prompt, resume, runner.model),
+}
+
+function runnerCwdDiscoverySurfaces(loopDataRoot: string, agentCwd: string): RunnerFilesystemSurface[] {
+	const root = resolve(loopDataRoot)
+	const cwd = resolve(agentCwd)
+	const relativeCwd = relative(root, cwd)
+	if (relativeCwd === "" || relativeCwd === ".." || relativeCwd.startsWith(`..${pathSeparator}`) || isAbsolute(relativeCwd)) return []
+	const segments = relativeCwd.split(pathSeparator)
+	const ancestors = segments.slice(0, -1).map((_, index) => resolve(root, ...segments.slice(0, index + 1)))
+	return ancestors.map((path, index) => ({
+		kind: "cwd-ancestor-directory",
+		channel: "agent-cwd-discovery",
+		access: index < ancestors.length - 1 ? "entries" : "metadata",
+		path,
+	}))
+}
+
+function runnerGitMetadataSurfaces(agentCwd: string): RunnerFilesystemSurface[] {
+	const dotGit = resolve(agentCwd, ".git")
+	try {
+		if (statSync(dotGit).isDirectory()) {
+			return [{ kind: "writable-directory", channel: "git-common-dir", path: dotGit }]
 		}
+		const marker = readFileSync(dotGit, "utf-8").trim()
+		if (!marker.startsWith("gitdir:")) return []
+		const rawGitDir = marker.slice("gitdir:".length).trim()
+		const gitDir = isAbsolute(rawGitDir) ? resolve(rawGitDir) : resolve(agentCwd, rawGitDir)
+		let commonDir = gitDir
+		try {
+			const rawCommonDir = readFileSync(resolve(gitDir, "commondir"), "utf-8").trim()
+			if (rawCommonDir !== "") commonDir = isAbsolute(rawCommonDir) ? resolve(rawCommonDir) : resolve(gitDir, rawCommonDir)
+		} catch {
+			// A standalone .git file has no separate common directory.
+		}
+		const result: RunnerFilesystemSurface[] = [{ kind: "writable-directory", channel: "git-worktree-metadata", path: gitDir }]
+		if (!samePath(commonDir, gitDir)) result.push({ kind: "writable-directory", channel: "git-common-dir", path: commonDir })
+		return result
+	} catch {
+		return []
 	}
+}
+
+export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: string, resume: ResumeDecision, authorization: RunnerFilesystemAuthorization): RunnerInvocation {
+	assertRunnerAuthorizationMetadata(runner)
+	const runnerExecutable = isAbsolute(runner.binary) ? runner.binary : Bun.which(runner.binary) ?? runner.binary
+	const effectiveAuthorization: RunnerFilesystemAuthorization = {
+		...authorization,
+		surfaces: [
+			...authorization.surfaces,
+			{ kind: "read-only-file", channel: "runner-executable", runner: runner.kind, path: runnerExecutable },
+			...runnerRuntimeSurfaces(runner.kind),
+		],
+	}
+	validateRunnerFilesystemSurfaces(effectiveAuthorization.loopDataRoot, effectiveAuthorization.surfaces)
+	const runnerScratch = effectiveAuthorization.surfaces.find((surface) => surface.kind === "task-private-directory" && surface.channel === "runner-scratch")
+	if (runnerScratch === undefined) throw new Error("declared runner surfaces require task-private runner scratch")
+	const writableDirs = effectiveAuthorization.surfaces.flatMap((surface) => surface.kind === "task-private-directory" || surface.kind === "writable-directory" ? [surface.path] : [])
+	const claudeDirs = effectiveAuthorization.surfaces.flatMap((surface) => surface.kind === "task-private-directory" || surface.kind === "read-only-directory" || surface.kind === "writable-directory" ? [surface.path] : [])
+	const nativeArgs = runner.kind === "claude"
+		? agentClaudeArgs(runner.extraArgs, prompt, resume, claudeDirs, runner.model)
+		: runner.kind === "opencode"
+			? agentOpencodeArgs(runner.extraArgs, prompt, resume, runner.model, authorization.agentCwd)
+			: agentCodexArgs(runner.extraArgs, prompt, resume, authorization.agentCwd, runner.model, writableDirs)
+	const environment = runnerEnvironment(runner.kind, runnerScratch.path)
+	const outerSandboxProfile = runnerSandboxProfile(effectiveAuthorization, runner.kind)
 	return {
 		kind: "spawn",
-		binary: runner.binary,
-		args: agentCodexArgs(runner.extraArgs, prompt, resume, paths.agentCwd, runner.model, additionalDirs),
+		binary: "/usr/bin/sandbox-exec",
+		args: ["-p", outerSandboxProfile, runner.binary, ...nativeArgs],
+		environment,
+		runtimeDirectories: [runnerScratch.path],
+		authorizationEvidence: {
+			schemaVersion: 1,
+			runner: runner.kind,
+			outerSandboxBinary: "/usr/bin/sandbox-exec",
+			outerSandboxProfile,
+			surfaces: effectiveAuthorization.surfaces,
+		},
 	}
 }
 
-export function runnerAdditionalDirs(paths: RunnerInvocationPaths): string[] {
-	return distinctPaths([paths.presetDir, paths.loopDataRoot, paths.agentCwd])
+function runnerEnvironment(runner: AgentRunnerKind, scratchPath: string): Readonly<Record<string, string>> {
+	const common = { TMPDIR: scratchPath, TMP: scratchPath, TEMP: scratchPath }
+	if (runner === "claude") return { ...common, CLAUDE_CODE_TMPDIR: scratchPath }
+	return common
+}
+
+const RUNNER_AUTHORIZATION_OPTIONS = ["--add-dir", "--sandbox", "-s", "--cd", "-C", "--dir", "--permission-mode", "--dangerously-skip-permissions", "--dangerously-bypass-approvals-and-sandbox"]
+
+function assertRunnerAuthorizationMetadata(runner: AgentRunnerSelection): void {
+	for (const arg of runner.extraArgs) {
+		if (RUNNER_AUTHORIZATION_OPTIONS.some((option) => arg === option || arg.startsWith(`${option}=`) || (option.length === 2 && arg.startsWith(option)))) {
+			throw new Error(`runner authorization metadata may not supply ${arg}`)
+		}
+	}
+}
+
+function sandboxLiteral(value: string): string {
+	return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`
+}
+
+function runnerSandboxProfile(authorization: RunnerFilesystemAuthorization, runner: AgentRunnerKind): string {
+	const surfaces = authorization.surfaces
+	const cwdAncestorMetadata = surfaces.flatMap((surface) => surface.kind === "cwd-ancestor-directory"
+		? sandboxPathSpellings(surface.path).map((spelling) => `(literal ${sandboxLiteral(spelling)})`)
+		: [])
+	const cwdAncestorMetadataRule = cwdAncestorMetadata.length === 0 ? "" : `(allow file-read-metadata ${cwdAncestorMetadata.join(" ")}) `
+	const cwdAncestorEntries = surfaces.flatMap((surface) => surface.kind === "cwd-ancestor-directory" && surface.access === "entries"
+		? sandboxPathSpellings(surface.path).map((spelling) => `(literal ${sandboxLiteral(spelling)})`)
+		: [])
+	const cwdAncestorEntriesRule = cwdAncestorEntries.length === 0 ? "" : `(allow file-read-data ${cwdAncestorEntries.join(" ")}) `
+	const readable = distinctPaths(surfaces.flatMap((surface) => {
+		if (surface.kind === "cwd-ancestor-directory") return []
+		const exactSocket = surface.kind === "writable-file" && surface.channel === "daemon-socket"
+		if (exactSocket) return sandboxPathSpellings(surface.path).flatMap((path) => [`(literal ${sandboxLiteral(dirname(path))})`, `(subpath ${sandboxLiteral(path)})`])
+		const predicate = exactSocket || (surface.kind !== "writable-file" && surface.kind !== "runner-runtime-file" && surface.kind !== "read-only-file" && surface.kind !== "system-device") ? "subpath" : "literal"
+		return sandboxPathSpellings(surface.path).map((path) => `(${predicate} ${sandboxLiteral(path)})`)
+	}))
+	const writableDevices = distinctPaths(surfaces.flatMap((surface) => surface.kind === "system-device" ? [surface.path] : []))
+	const preset = authorization.surfaces.find((surface) => surface.kind === "read-only-directory")
+	if (preset === undefined) throw new Error("declared runner surfaces require a read-only preset")
+	const presetTrees = distinctPaths(sandboxPathSpellings(preset.path))
+	const denyPreset = presetTrees.map((path) => `(require-not (subpath ${sandboxLiteral(path)}))`).join(" ")
+	const writableRules = distinctPaths(surfaces.flatMap((surface) => {
+		if (surface.kind === "cwd-ancestor-directory" || surface.kind === "read-only-directory" || surface.kind === "read-only-file" || surface.kind === "system-device") return []
+		const exactSocket = surface.kind === "writable-file" && surface.channel === "daemon-socket"
+		const predicate = (surface.kind === "writable-file" && !exactSocket) || surface.kind === "runner-runtime-file" ? "literal" : "subpath"
+		return sandboxPathSpellings(surface.path).map((path) => `(${predicate} ${sandboxLiteral(path)})`)
+	}))
+	const writeRules = writableRules.map((rule) => `(require-all ${rule} ${denyPreset})`).join(" ")
+	const deviceWriteRules = writableDevices.map((path) => `(literal ${sandboxLiteral(path)})`).join(" ")
+	const runnerRuntimeCapabilities = runner === "codex" ? "(allow system-socket) " : ""
+	const outsideLoopData = sandboxPathSpellings(authorization.loopDataRoot).map((path) => `(require-not (subpath ${sandboxLiteral(path)}))`).join(" ")
+	return `(version 1) (deny default) (allow process*) (allow signal) (allow network*) (allow sysctl-read) (allow mach-lookup) (allow ipc-posix*) ${runnerRuntimeCapabilities}${cwdAncestorMetadataRule}${cwdAncestorEntriesRule}(allow file-read* (require-all ${outsideLoopData})) (allow file-read* ${readable.join(" ")}) (allow file-write* ${writeRules} ${deviceWriteRules})`
+}
+
+function runnerRuntimeSurfaces(runner: AgentRunnerKind): RunnerFilesystemSurface[] {
+	if (runner === "claude") {
+		return [
+			{ kind: "runner-runtime-directory", runner: "claude", channel: "projects", path: resolve(homedir(), ".claude/projects") },
+			{ kind: "runner-runtime-directory", runner: "claude", channel: "session-env", path: resolve(homedir(), ".claude/session-env") },
+		]
+	}
+	if (runner === "codex") {
+		const codexHome = process.env.CODEX_HOME ?? resolve(homedir(), ".codex")
+		return [
+			{ kind: "runner-runtime-file", runner: "codex", channel: "installation-id", path: resolve(codexHome, "installation_id") },
+			{ kind: "runner-runtime-file", runner: "codex", channel: "models-cache", path: resolve(codexHome, "models_cache.json") },
+			{ kind: "runner-runtime-directory", runner: "codex", channel: "cache", path: resolve(codexHome, "cache") },
+			{ kind: "runner-runtime-directory", runner: "codex", channel: "sessions", path: resolve(codexHome, "sessions") },
+			{ kind: "runner-runtime-directory", runner: "codex", channel: "shell-snapshots", path: resolve(codexHome, "shell_snapshots") },
+			{ kind: "runner-runtime-directory", runner: "codex", channel: "tmp", path: resolve(codexHome, "tmp") },
+			{ kind: "runner-runtime-directory", runner: "codex", channel: "log", path: resolve(codexHome, "log") },
+			{ kind: "runner-runtime-file", runner: "codex", channel: "state-db", path: resolve(codexHome, "state_5.sqlite") },
+			{ kind: "runner-runtime-file", runner: "codex", channel: "state-db-shm", path: resolve(codexHome, "state_5.sqlite-shm") },
+			{ kind: "runner-runtime-file", runner: "codex", channel: "state-db-wal", path: resolve(codexHome, "state_5.sqlite-wal") },
+			{ kind: "runner-runtime-file", runner: "codex", channel: "logs-db", path: resolve(codexHome, "logs_2.sqlite") },
+			{ kind: "runner-runtime-file", runner: "codex", channel: "logs-db-shm", path: resolve(codexHome, "logs_2.sqlite-shm") },
+			{ kind: "runner-runtime-file", runner: "codex", channel: "logs-db-wal", path: resolve(codexHome, "logs_2.sqlite-wal") },
+			{ kind: "runner-runtime-file", runner: "codex", channel: "goals-db", path: resolve(codexHome, "goals_1.sqlite") },
+			{ kind: "runner-runtime-file", runner: "codex", channel: "goals-db-shm", path: resolve(codexHome, "goals_1.sqlite-shm") },
+			{ kind: "runner-runtime-file", runner: "codex", channel: "goals-db-wal", path: resolve(codexHome, "goals_1.sqlite-wal") },
+			{ kind: "runner-runtime-file", runner: "codex", channel: "memories-db", path: resolve(codexHome, "memories_1.sqlite") },
+			{ kind: "runner-runtime-file", runner: "codex", channel: "memories-db-shm", path: resolve(codexHome, "memories_1.sqlite-shm") },
+			{ kind: "runner-runtime-file", runner: "codex", channel: "memories-db-wal", path: resolve(codexHome, "memories_1.sqlite-wal") },
+		]
+	}
+	if (runner === "opencode") return [
+		{ kind: "runner-runtime-directory", runner: "opencode", channel: "data", path: resolve(homedir(), ".local/share/opencode") },
+		{ kind: "runner-runtime-directory", runner: "opencode", channel: "state", path: resolve(homedir(), ".local/state/opencode") },
+	]
+	return []
+}
+
+function sandboxPathSpellings(path: string): string[] {
+	return path.startsWith("/var/") ? [path, `/private${path}`] : [path]
 }
 
 function distinctPaths(paths: readonly string[]): string[] {
@@ -7012,8 +7277,8 @@ function distinctPaths(paths: readonly string[]): string[] {
 	return result
 }
 
-// #481 opencode invocation shape (matches operator's local `opencode 1.17.5`):
-//   opencode run --format json --dangerously-skip-permissions -m <model> [-s <sessionID>] <prompt>
+// #481 opencode invocation shape (matches operator's local `opencode 1.17.10`):
+//   opencode run --format json --dangerously-skip-permissions --dir <cwd> -m <model> [-s <sessionID>] <prompt>
 // Resume passes `-s <sessionID>`; fresh start omits it. JSON streaming is mandatory because the
 // engine reads the first line for the `sessionID` (value `ses_…`) — see parseOpencodeSessionIdFromStream.
 // Default model is `opencode-go/glm-5.2` (see DEFAULT_OPENCODE_MODEL); model resolution layered
@@ -7022,13 +7287,16 @@ export function agentOpencodeArgs(
 	extraArgs: readonly string[],
 	prompt: string,
 	resume: ResumeDecision,
-	model: string | null = null,
+	model: string | null,
+	agentCwd: string,
 ): string[] {
 	const effectiveModel = model ?? DEFAULT_OPENCODE_MODEL
 	const runnerArgs = stripModelArgs(extraArgs, ["--model", "-m"])
 	const args: string[] = ["run"]
+	if (!runnerArgs.includes("--pure")) args.push("--pure")
 	if (!runnerArgs.includes("--format") && !runnerArgs.some((arg) => arg.startsWith("--format="))) args.push("--format", "json")
 	if (!runnerArgs.includes("--dangerously-skip-permissions")) args.push("--dangerously-skip-permissions")
+	args.push("--dir", agentCwd)
 	args.push(...runnerArgs)
 	args.push("-m", effectiveModel)
 	if (resume.kind === "resume") args.push("-s", resume.sessionId)
@@ -7044,7 +7312,7 @@ export function agentCodexArgs(
 	model: string | null = null,
 	additionalDirs: readonly string[] = [],
 ): string[] {
-	const topLevelArgs = ["--ask-for-approval", "never", "exec"]
+	const topLevelArgs = ["--ask-for-approval", "never", "-c", "shell_environment_policy.inherit=all", "exec"]
 	const runnerArgs = model === null ? [...extraArgs] : stripModelArgs(extraArgs, ["--model", "-m"])
 	if (resume.kind === "resume") {
 		const args = [...topLevelArgs, "resume", resume.sessionId, ...runnerArgs]
@@ -7061,7 +7329,6 @@ export function agentCodexArgs(
 	if (additionalDirs.length > 0 && !args.includes("--add-dir")) {
 		for (const dir of additionalDirs) args.push("--add-dir", dir)
 	}
-	if (!args.includes("--sandbox")) args.push("--sandbox", "danger-full-access")
 	args.push(prompt)
 	return args
 }

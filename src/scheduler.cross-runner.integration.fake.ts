@@ -1,8 +1,6 @@
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises"
 import { dirname, resolve } from "node:path"
 
-import { engineLifecycleAdmittedItemStatus, parseInternalStatus } from "./runtime-data"
-import { openSqliteStateStore } from "./sqlite-state"
 
 type RunnerKind = "claude" | "codex" | "opencode"
 
@@ -84,15 +82,15 @@ for (const line of response.stderr ?? []) {
 // exiting, exactly like `coder-loop item update --status` would. The scheduler only reads this value;
 // it never infers status from the stdout/stderr above or from the exit code below.
 if (typeof response.writeStatus === "string") {
-	const itemId = numberValue(promptInput.itemId)
-	if (itemId !== null) {
-		const store = openSqliteStateStore({ loopDataRoot })
-		try {
-			const status = engineLifecycleAdmittedItemStatus(parseInternalStatus(response.writeStatus, "cross-runner-fake.writeStatus"), "test")
-			store.updateItem(itemId, { status, updatedAt: Math.floor(Date.now() / 1000) })
-		} finally {
-			store.close()
-		}
+	const chainName = stringValue(promptInput.chainName, "")
+	if (chainName === "" || issueNumber === null) process.exit(2)
+	const update = Bun.spawnSync({
+		cmd: ["bun", resolve(import.meta.dir, "loop.ts"), "item", "update", chainName, "--issue", String(issueNumber), "--status", response.writeStatus],
+		stdout: "pipe", stderr: "pipe",
+	})
+	if (update.exitCode !== 0) {
+		process.stderr.write(new TextDecoder().decode(update.stderr))
+		process.exit(update.exitCode)
 	}
 }
 

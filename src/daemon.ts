@@ -3666,7 +3666,7 @@ export class CoderLoopDaemon {
 		// #406: wire the daemon-owned credential issuer. Test fixtures may pass their own issuer
 		// through scheduler.runCredentials (for unit tests that want to inspect bindings directly);
 		// production defaults to the daemon's instance-bound registry.
-		options.runCredentials = scheduler.runCredentials ?? this.buildRunCredentialIssuer()
+		options.runCredentials = scheduler.runCredentials ?? this.buildSchedulerRunCredentialIssuer()
 		options.maxItemAttemptsForChain = scheduler.maxItemAttemptsForChain
 			?? ((chain) => maxItemAttemptsFromChainMetadata(chain.metadata))
 		if (scheduler.maxItemAttempts !== undefined) options.maxItemAttempts = scheduler.maxItemAttempts
@@ -4285,7 +4285,7 @@ export class CoderLoopDaemon {
 	// opaque UUID and registers it; revoke deletes the entry. Both are idempotent in shape — mint
 	// never collides because UUID v4 is the source of the value; revoke tolerates a missing entry
 	// (the registry may have already evicted it via the inactive-run branch of the admission gate).
-	private buildRunCredentialIssuer(): SchedulerRunCredentialIssuer {
+	buildSchedulerRunCredentialIssuer(): SchedulerRunCredentialIssuer {
 		return {
 			mint: (context: SchedulerRunCredentialContext): SchedulerRunCredential => {
 				const value = randomUUID()
@@ -4296,6 +4296,10 @@ export class CoderLoopDaemon {
 				this.runCredentialRegistry.delete(credential.value)
 			},
 		}
+	}
+
+	schedulerExecutionState(): SchedulerState {
+		return this.schedulerState
 	}
 
 	private async allowedItemStatuses(chain: ChainRecord): Promise<Set<string>> {
