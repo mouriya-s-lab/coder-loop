@@ -2696,7 +2696,7 @@ function daemonErrorResponse(code: string, message: string, details: JsonObject 
 
 function writeDaemonErrorResponse(response: JsonObject): void {
 	process.stdout.write(`${JSON.stringify(response, null, "\t")}\n`)
-	process.exitCode = 1
+	setCliExitCode(1)
 }
 
 function writeCommandResult(result: JsonObject, json: boolean, formatText: (result: JsonObject) => string): void {
@@ -3036,7 +3036,7 @@ async function runPresetCommand(args: string[]): Promise<void> {
 	const result = resolution.kind === "resolved" ? await compilePreset(resolution.presetDir) : resolution
 	if (result.kind === "rejected") {
 		process.stderr.write(`${JSON.stringify(projectPresetCompileResult(result))}\n`)
-		process.exitCode = 1
+		setCliExitCode(1)
 		return
 	}
 	const publicResult = projectPresetCompileResult(result)
@@ -3044,46 +3044,63 @@ async function runPresetCommand(args: string[]): Promise<void> {
 	process.stdout.write(`${JSON.stringify(publicResult.projection)}\n`)
 }
 
-async function main() {
-	const firstArg = process.argv[2]
+let activeCliExitCode: number | null = null
+
+export async function runCoderLoopCli(args: string[]): Promise<number> {
+	activeCliExitCode = 0
+	try {
+		await dispatchCoderLoopCli(args)
+		return activeCliExitCode
+	} finally {
+		activeCliExitCode = null
+	}
+}
+
+async function dispatchCoderLoopCli(args: string[]): Promise<void> {
+	const firstArg = args[0]
 	if (firstArg === "status") {
-		await runStatusCommand(process.argv.slice(3))
+		await runStatusCommand(args.slice(1))
 		return
 	}
 	if (firstArg === "logs") {
-		await runLogsCommand(process.argv.slice(3))
+		await runLogsCommand(args.slice(1))
 		return
 	}
 	if (firstArg === "daemon") {
-		await runDaemonCommand(process.argv.slice(3))
+		await runDaemonCommand(args.slice(1))
 		return
 	}
 	if (firstArg === "chain") {
-		await runChainCommand(process.argv.slice(3))
+		await runChainCommand(args.slice(1))
 		return
 	}
 	if (firstArg === "item") {
-		await runItemCommand(process.argv.slice(3))
+		await runItemCommand(args.slice(1))
 		return
 	}
 	if (firstArg === "queue") {
-		await runQueueCommand(process.argv.slice(3))
+		await runQueueCommand(args.slice(1))
 		return
 	}
 	if (firstArg === "preset") {
-		await runPresetCommand(process.argv.slice(3))
+		await runPresetCommand(args.slice(1))
 		return
 	}
 	if (firstArg === "context") {
-		await runContextCommand(process.argv.slice(3))
+		await runContextCommand(args.slice(1))
 		return
 	}
 	if (firstArg === "doctor") {
-		const handled = await dispatchSubcommand(firstArg, process.argv.slice(3))
+		const handled = await dispatchSubcommand(firstArg, args.slice(1))
 		if (handled) return
 	}
 	process.stdout.write(rootUsage())
-	process.exitCode = 1
+	setCliExitCode(1)
+}
+
+function setCliExitCode(exitCode: number): void {
+	if (activeCliExitCode === null) process.exitCode = exitCode
+	else activeCliExitCode = exitCode
 }
 
 function rootUsage(): string {
@@ -3921,12 +3938,12 @@ async function runDaemonDownCommand(args: Extract<DaemonCommandArgs, { action: "
 	if (response === null) return
 	if (args.json) {
 		process.stdout.write(`${JSON.stringify(response, null, "\t")}\n`)
-		if (!response.ok) process.exitCode = 1
+		if (!response.ok) setCliExitCode(1)
 		return
 	}
 	if (!response.ok) {
 		process.stderr.write(`daemon down failed: ${response.error.code}: ${response.error.message}\n`)
-		process.exitCode = 1
+		setCliExitCode(1)
 		return
 	}
 	process.stdout.write(formatDaemonDownResult(response.result))
@@ -7862,7 +7879,9 @@ function fail(message: string): never {
 }
 
 if (import.meta.main) {
-	main().catch((error: BoundaryError) => {
+	runCoderLoopCli(process.argv.slice(2)).then((exitCode) => {
+		if (typeof process.exitCode !== "number" || process.exitCode === 0) process.exitCode = exitCode
+	}).catch((error: BoundaryError) => {
 		const message = errorMessage(error)
 		console.error(message)
 		process.exit(1)

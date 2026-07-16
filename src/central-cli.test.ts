@@ -1,6 +1,8 @@
 import { afterAll, describe, expect, test } from "bun:test"
+import { randomUUID } from "node:crypto"
 import { mkdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises"
 import { createConnection, createServer } from "node:net"
+import { availableParallelism } from "node:os"
 import { resolve } from "node:path"
 
 import { daemonRequest, sendDaemonRequest, startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
@@ -24,17 +26,23 @@ import type { BoundaryRecord } from "./boundary-types"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
+const CLI_WORKER_ENTRY = resolve(REPO_ROOT, "src/central-cli.integration.worker.ts")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/central-cli-tests", String(process.pid))
 const DEFAULT_CHAIN_CONFIG = chainConfig("mouriya-s-lab/coder-loop")
 const FIXTURE_CHAIN_CONFIG = chainConfig("fixture/repo")
 
 let nextFixtureId = 0
+const CLI_WORKER_LIMIT = Math.max(1, Math.min(availableParallelism(), 4))
+const cliWorkers: CliWorkerState[] = []
+const cliWorkerRequests = new Map<string, { worker: CliWorkerState; resolve: (result: CliResult) => void; reject: (error: Error) => void }>()
+const cliWorkerWaiters: ((worker: CliWorkerState) => void)[] = []
 
 function chainConfig(repository: string, baseBranch?: string): string {
 	return JSON.stringify(baseBranch === undefined ? { repository } : { repository, baseBranch })
 }
 
 afterAll(async () => {
+	for (const state of cliWorkers) state.worker.terminate()
 	await rm(TEST_ROOT, { recursive: true, force: true })
 })
 
@@ -1308,7 +1316,21 @@ async function makeLoopDataRoot(name: string): Promise<string> {
 	return resolve(root, "loop-data")
 }
 
-async function runCli(args: string[], env: Record<string, string> = {}): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
+type CliResult = { exitCode: number | null; stdout: string; stderr: string }
+
+async function runCli(args: string[], env: Record<string, string> = {}): Promise<CliResult> {
+	const ownsProcessExit = (args[0] === "daemon" && (args[1] === "up" || args[1] === "down")) || args[0] === "doctor" || args.includes("--help") || args.includes("--agent-run-id")
+	if (ownsProcessExit) return await runCliProcess(args, env)
+	const worker = await acquireCentralCliWorker()
+	const id = randomUUID()
+	const result = new Promise<CliResult>((resolveResult, rejectResult) => {
+		cliWorkerRequests.set(id, { worker, resolve: resolveResult, reject: rejectResult })
+	})
+	worker.worker.postMessage({ id, args, env })
+	return await result
+}
+
+async function runCliProcess(args: string[], env: Record<string, string> = {}): Promise<CliResult> {
 	const proc = Bun.spawn({
 		cmd: ["bun", LOOP_ENTRY, ...args],
 		cwd: REPO_ROOT,
@@ -1326,6 +1348,62 @@ async function runCli(args: string[], env: Record<string, string> = {}): Promise
 		stdout,
 		stderr,
 	}
+}
+
+type CliWorkerState = { worker: Worker; busy: boolean }
+
+async function acquireCentralCliWorker(): Promise<CliWorkerState> {
+	const idle = cliWorkers.find((state) => !state.busy)
+	if (idle !== undefined) {
+		idle.busy = true
+		return idle
+	}
+	if (cliWorkers.length < CLI_WORKER_LIMIT) return createCentralCliWorker()
+	return await new Promise((resolveWorker) => cliWorkerWaiters.push(resolveWorker))
+}
+
+function createCentralCliWorker(): CliWorkerState {
+	const worker = new Worker(CLI_WORKER_ENTRY)
+	const state = { worker, busy: true }
+	worker.onmessage = (event: MessageEvent<unknown>) => {
+		const response = parseCliWorkerResponse(event.data)
+		const pending = cliWorkerRequests.get(response.id)
+		if (pending === undefined) throw new Error(`unexpected central CLI worker response ${response.id}`)
+		cliWorkerRequests.delete(response.id)
+		pending.resolve({ exitCode: response.exitCode, stdout: response.stdout, stderr: response.stderr })
+		releaseCentralCliWorker(pending.worker)
+	}
+	worker.onerror = (event) => {
+		const error = new Error(event.message)
+		for (const [id, pending] of cliWorkerRequests) {
+			if (pending.worker !== state) continue
+			pending.reject(error)
+			cliWorkerRequests.delete(id)
+		}
+		const index = cliWorkers.indexOf(state)
+		if (index !== -1) cliWorkers.splice(index, 1)
+	}
+	cliWorkers.push(state)
+	return state
+}
+
+function releaseCentralCliWorker(worker: CliWorkerState): void {
+	const waiter = cliWorkerWaiters.shift()
+	if (waiter !== undefined) {
+		waiter(worker)
+		return
+	}
+	worker.busy = false
+}
+
+function parseCliWorkerResponse(value: unknown): { id: string; exitCode: number; stdout: string; stderr: string } {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("central CLI worker response must be an object")
+	const id = Reflect.get(value, "id")
+	const exitCode = Reflect.get(value, "exitCode")
+	const stdout = Reflect.get(value, "stdout")
+	const stderr = Reflect.get(value, "stderr")
+	if (typeof id !== "string" || typeof exitCode !== "number" || typeof stdout !== "string" || typeof stderr !== "string") throw new Error("central CLI worker response fields are invalid")
+	return { id, exitCode, stdout, stderr }
 }
 
 type TestDaemonResponse =
