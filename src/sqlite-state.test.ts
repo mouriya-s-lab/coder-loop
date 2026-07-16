@@ -414,6 +414,35 @@ describe("sqlite state store", () => {
 		} finally { migrated.close() }
 	})
 
+	test("normalized runtime delete advances a migrated seq cursor to the surviving direct child", async () => {
+		const loopDataRoot = resolve(TEST_ROOT, `migrated-delete-cursor-${Date.now()}-${++nextRootId}`)
+		const fixture = seedCanonicalHistoricalRuntime({
+			loopDataRoot,
+			schemaVersion: 13,
+			chain: { name: "migrated-delete-cursor", repository: "mouriya-s-lab/coder-loop", preset: "single-phase-example" },
+			items: [
+				{ itemId: "A", repoCwd: REPO_ROOT, status: "pending", phase: "run", preset: "single-phase-example", presetPath: null, agentCwd: REPO_ROOT, sessionIds: {}, extra: {} },
+				{ itemId: "B", repoCwd: REPO_ROOT, status: "pending", phase: "run", preset: "single-phase-example", presetPath: null, agentCwd: REPO_ROOT, sessionIds: {}, extra: {} },
+			],
+			contextEntries: [],
+		})
+		const store = openSqliteStateStore({ loopDataRoot: dbFileRoot(fixture.dbFile) })
+		try {
+			const first = fixture.items[0]
+			if (first === undefined) throw new Error("historical fixture omitted first item")
+			const selected = store.getTaskTree(fixture.chain.id)
+			if (selected?.root.kind !== "seq") throw new Error("expected migrated seq")
+			expect(selected.root.cursor).toEqual({ kind: "next", nodeId: "legacy-v13:item:1:phase:run" })
+
+			expect(store.deleteItem(first.id)).toBe(true)
+
+			const advanced = store.getTaskTree(fixture.chain.id)
+			if (advanced?.root.kind !== "seq") throw new Error("expected migrated seq after delete")
+			expect(advanced.root.children.map((node) => node.identity.runtimeNodeId)).toEqual(["legacy-v13:item:2:phase:run"])
+			expect(advanced.root.cursor).toEqual({ kind: "next", nodeId: "legacy-v13:item:2:phase:run" })
+		} finally { store.close() }
+	})
+
 	test("normalized runtime migration resolves persisted preset once and survives source removal", async () => {
 		const presetPath = resolve(TEST_ROOT, "mutable-checkout-preset")
 		await cp(resolve(REPO_ROOT, "presets/gh-issue-pr-iteration"), presetPath, { recursive: true })

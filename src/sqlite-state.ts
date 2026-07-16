@@ -1723,7 +1723,25 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 				db.query<never, SqlParams>("DELETE FROM active_runs WHERE run_id IN (SELECT run_id FROM runs WHERE item_id = $id)").run(params)
 				db.query<never, SqlParams>("DELETE FROM runs WHERE item_id = $id").run(params)
 				db.query<never, SqlParams>("DELETE FROM task_trees WHERE root_node_id IN (SELECT leaf_node_id FROM task_closures WHERE item_row_id = $id)").run(params)
-				db.query<never, SqlParams>("UPDATE task_seq_nodes SET next_child_node_id = NULL WHERE next_child_node_id IN (SELECT leaf_node_id FROM task_closures WHERE item_row_id = $id)").run(params)
+				db.query<never, SqlParams>(`
+					UPDATE task_seq_nodes AS sequence
+					SET next_child_node_id = (
+						SELECT successor.runtime_node_id
+						FROM task_nodes AS selected
+						INNER JOIN task_nodes AS successor
+							ON successor.parent_node_id = selected.parent_node_id
+							AND successor.child_index > selected.child_index
+						WHERE selected.runtime_node_id = sequence.next_child_node_id
+							AND successor.runtime_node_id NOT IN (
+								SELECT leaf_node_id FROM task_closures WHERE item_row_id = $id
+							)
+						ORDER BY successor.child_index ASC
+						LIMIT 1
+					)
+					WHERE next_child_node_id IN (
+						SELECT leaf_node_id FROM task_closures WHERE item_row_id = $id
+					)
+				`).run(params)
 				db.query<never, SqlParams>("DELETE FROM task_leaf_nodes WHERE closure_id IN (SELECT closure_id FROM task_closures WHERE item_row_id = $id)").run(params)
 				db.query<never, SqlParams>("DELETE FROM task_nodes WHERE runtime_node_id IN (SELECT leaf_node_id FROM task_closures WHERE item_row_id = $id)").run(params)
 				return db.query<never, SqlParams>("DELETE FROM items WHERE id = $id").run(params).changes > 0
