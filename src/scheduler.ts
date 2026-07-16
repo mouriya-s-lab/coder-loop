@@ -1042,7 +1042,7 @@ async function spawnSchedulerRun(
 		if (extraWithoutSpawnError !== item.extra) spawnUpdate.extra = extraWithoutSpawnError
 		options.store.updateItem(item.id, spawnUpdate)
 
-		const presetDir = loadedPreset.presetDir
+		const presetDir = loadedPreset.preset.presetDir
 		const context: SchedulerSpawnContext = { chain, item, slot, runId, worktreePath, presetDir, loadedPreset, phase }
 		const rawPrompt = typeof options.prompt === "string" ? options.prompt : await options.prompt(context)
 		const renderedPrompt = await renderSchedulerSpawnPrompt({
