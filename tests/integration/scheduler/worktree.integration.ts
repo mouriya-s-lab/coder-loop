@@ -13,7 +13,7 @@ import {
 	type SchedulerEvent,
 	type SchedulerOptions,
 } from "../../../src/scheduler"
-import { closureWorktreePath } from "../../../src/closure-lifecycle"
+import { closureWorktreePath, createRepositoryGitCoordinator, type RepositoryGitCoordinator } from "../../../src/closure-lifecycle"
 import { openSqliteStateStore } from "../../../src/sqlite-state"
 import { loadPreset } from "../../../src/loop"
 import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "../../../src/runtime-data"
@@ -51,6 +51,22 @@ async function initGitRepo(path: string): Promise<void> {
 	git(path, ["add", "README.md"])
 	const commit = git(path, ["commit", "-m", "init"])
 	if (commit.exitCode !== 0) throw new Error(`git commit failed: ${commit.stderr}`)
+}
+
+async function initOriginBackedRepo(root: string): Promise<string> {
+	const source = resolve(root, "source")
+	const origin = resolve(root, "origin.git")
+	const target = resolve(root, "target")
+	await initGitRepo(source)
+	const initOrigin = git(root, ["init", "--bare", origin])
+	if (initOrigin.exitCode !== 0) throw new Error(`git init --bare failed: ${initOrigin.stderr}`)
+	const addOrigin = git(source, ["remote", "add", "origin", origin])
+	if (addOrigin.exitCode !== 0) throw new Error(`git remote add failed: ${addOrigin.stderr}`)
+	const push = git(source, ["push", "-u", "origin", "main"])
+	if (push.exitCode !== 0) throw new Error(`git push failed: ${push.stderr}`)
+	const clone = git(root, ["clone", origin, target])
+	if (clone.exitCode !== 0) throw new Error(`git clone failed: ${clone.stderr}`)
+	return target
 }
 
 function makeChain(store: ReturnType<typeof openSqliteStateStore>, name: string) {
@@ -102,6 +118,39 @@ test("different closures retain different worktrees and branches across loop-dat
 	} finally {
 		storeA.close()
 		storeB.close()
+	}
+})
+
+test("concurrent closure opens share the scheduler's origin fetch", async () => {
+	const root = resolve(TEST_ROOT, "fetch-singleflight")
+	await mkdir(root, { recursive: true })
+	const repoCwd = await initOriginBackedRepo(root)
+	const loopDataRoot = resolve(root, "loop-data")
+	await mkdir(loopDataRoot, { recursive: true })
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = makeChain(store, "singleflight-chain")
+		const firstItem = makeItem(store, chain, "first", repoCwd)
+		const secondItem = makeItem(store, chain, "second", repoCwd)
+		const underlying = createRepositoryGitCoordinator()
+		let fetchExecutions = 0
+		const coordinator: RepositoryGitCoordinator = {
+			run: underlying.run,
+			singleflight: (coordinatedRepo, operationKey, operation) => underlying.singleflight(coordinatedRepo, operationKey, async () => {
+				fetchExecutions += 1
+				return await operation()
+			}),
+		}
+		const manager = createGitWorktreeManager({ loopDataRoot }, coordinator)
+		const [first, second] = await Promise.all([
+			manager({ chain, item: firstItem, phase: "iteration", closureId: "closure:first:iteration", repoCwd, slotKey: "slot", existing: null }),
+			manager({ chain, item: secondItem, phase: "iteration", closureId: "closure:second:iteration", repoCwd, slotKey: "slot", existing: null }),
+		])
+		if (typeof first === "string" || typeof second === "string") throw new Error("expected closure resources")
+		expect(fetchExecutions).toBe(1)
+		expect(first.baseCommit).toBe(second.baseCommit)
+	} finally {
+		store.close()
 	}
 })
 
