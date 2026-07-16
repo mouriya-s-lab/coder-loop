@@ -6353,8 +6353,12 @@ process.exitCode = 0
 				extra: { sleepMs: 2_000, writeStatus: null },
 			}))
 			await waitFor(
-				async () => fixture.schedulerEvents.some((event) => event.type === "agent.spawn"),
-				(spawned) => spawned,
+				// `agent.spawn` is followed immediately by `phase.start` and `slot.busy`. The daemon
+				// persists each event before forwarding it to this fixture, so waiting for the final
+				// immediate event closes those writers before the test replaces the file with a
+				// directory. Otherwise a pending append can recreate the file between rm and mkdir.
+				async () => fixture.schedulerEvents.some((event) => event.type === "slot.busy"),
+				(busy) => busy,
 			)
 			const eventsFile = resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile
 			await rm(eventsFile, { force: true })
