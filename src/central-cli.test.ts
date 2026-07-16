@@ -134,11 +134,15 @@ describe("central chain/item CLI", () => {
 				status: "active",
 			})
 
-			const listed = expectJsonOk(await runCli(["chain", "list", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const [listedResult, statusResult] = await Promise.all([
+				runCli(["chain", "list", "--loop-data-root", fixture.loopDataRoot, "--json"]),
+				runCli(["chain", "status", "crud-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]),
+			])
+			const listed = expectJsonOk(listedResult)
 			expect(listed.chains).toHaveLength(1)
 			expect(listed.chains[0]).toMatchObject({ name: "crud-chain", status: "active" })
 
-			const status = expectJsonOk(await runCli(["chain", "status", "crud-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const status = expectJsonOk(statusResult)
 			expect(status.chain).toMatchObject({ name: "crud-chain", status: "active" })
 			expect(status.summary).toMatchObject({ completion: { state: "active", completedAt: null }, items: { total: 0, byStatus: {} } })
 

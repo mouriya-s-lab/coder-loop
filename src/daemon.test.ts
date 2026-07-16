@@ -353,14 +353,17 @@ describe("daemon", () => {
 		}
 	})
 	test("completes large-output scheduler and chain-complete runners", () => {
-		for (const name of [
-			"streams scheduler runner output without retaining full history",
-			"streams chain-complete runner output without retaining full history",
-		]) {
-			const result = Bun.spawnSync(["bun", "test", "src/scheduler.test.ts", "-t", name], { cwd: REPO_ROOT })
-			expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0)
-			expect(new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr)).toContain("0 fail")
-		}
+		const result = Bun.spawnSync([
+			"bun",
+			"test",
+			"src/scheduler.test.ts",
+			"-t",
+			"streams (scheduler|chain-complete) runner output without retaining full history",
+		], { cwd: REPO_ROOT })
+		const output = new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr)
+		expect(result.exitCode, output).toBe(0)
+		expect(output).toContain("2 pass")
+		expect(output).toContain("0 fail")
 	})
 
 	test("orders requests within one daemon connection", async () => {

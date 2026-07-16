@@ -16,6 +16,7 @@ import {
 	parseObservabilityEvent,
 	parseObservabilityEventSegmentName,
 	queryObservabilityEvents,
+	renderObservabilityEvent,
 } from "./observability"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -31,6 +32,22 @@ describe("observability", () => {
 		expect(ObservabilityKindBoundary.assert(JSON.parse(JSON.stringify(event.kind)))).toBe("lifecycle")
 		expect(ObservabilityEventTypeBoundary.assert(JSON.parse(JSON.stringify(event.type)))).toBe("daemon.stop")
 		expect(ObservabilityEventBoundary.assert(JSON.parse(JSON.stringify(event)))).toEqual(event)
+	})
+
+	test("closure consumption audit preserves evidence and origin freshness", () => {
+		const event = makeObservabilityEvent({
+			kind: "audit",
+			type: "closure.consumed",
+			chain: "consume-chain",
+			subject: { kind: "engine" },
+			payload: {
+				closureId: "closure:consume:review",
+				evidence: "unpublished-discarded",
+				freshness: { kind: "retained", commit: "0123456789abcdef" },
+			},
+		})
+		expect(ObservabilityEventBoundary.assert(JSON.parse(JSON.stringify(event)))).toEqual(event)
+		expect(renderObservabilityEvent(event)).toContain("evidence=unpublished-discarded freshness=retained")
 	})
 
 	test("task event identity is an exact all-or-none triple", () => {
