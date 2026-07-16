@@ -763,6 +763,7 @@ function decisionFingerprintScopeReleasedBySchedulerEvent(event: SchedulerEvent)
 		case "scheduler.rate_limited":
 		case "runner.external_terminal_unavailable":
 		case "runner.availability_restored":
+		case "runner.invocation_pending":
 			return null
 		default:
 			return assertNeverSchedulerEvent(event)
@@ -864,6 +865,16 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 					checkedAt: event.checkedAt,
 					affected: [{ chainId: event.chainId, rowId: event.rowId, itemId: event.itemId, phase: event.phase }],
 				},
+			})
+		case "runner.invocation_pending":
+			return makeObservabilityEvent({
+				kind: "diagnostic",
+				type: "runner.invocation_pending",
+				chain: chain.name,
+				item: event.rowId,
+				phase: event.phase,
+				subject: { kind: "engine" },
+				payload: { runner: event.runner, binary: event.binary, capability: event.capability },
 			})
 
 		case "slot.busy":

@@ -80,6 +80,7 @@ export const ObservabilityEventTypeBoundary = arkType.or(
 	arkType.unit("preset.dag_check"),
 	arkType.unit("daemon.warning"),
 	arkType.unit("runner.availability_restored"),
+	arkType.unit("runner.invocation_pending"),
 	arkType.unit("scheduler.tick_failed"),
 	arkType.unit("scheduler.lifecycle_event_persistence_failed"),
 	arkType.unit("runner.status_persistence_failed"),
@@ -594,6 +595,16 @@ const ObservabilityEventPayloadBoundary = arkType.or(
 			probeArgv: arkType.or([arkType.unit("probe")]),
 			checkedAt: "string",
 			affected: arkType({ chainId: "number", rowId: "number", itemId: "string", phase: "string" }).array(),
+		},
+	},
+	{
+		...EventBaseBoundary,
+		kind: arkType.unit("diagnostic"),
+		type: arkType.unit("runner.invocation_pending"),
+		payload: {
+			runner: arkType.or(arkType.unit("claude"), arkType.unit("codex"), arkType.unit("opencode"), arkType.unit("hapi")),
+			binary: "string",
+			capability: { kind: arkType.unit("probe-only"), outcome: arkType.unit("invocation-pending") },
 		},
 	},
 	{
@@ -1155,6 +1166,8 @@ function renderDiagnosticEvent(event: Extract<ObservabilityEvent, { kind: "diagn
 				: `${event.ts} diagnostic daemon.warning code=${event.payload.code} runner=${event.payload.runner} reason=${event.payload.availability.reason}`
 		case "runner.availability_restored":
 			return `${event.ts} diagnostic runner.availability_restored runner=${event.payload.runner} checkedAt=${event.payload.checkedAt}`
+		case "runner.invocation_pending":
+			return `${event.ts} diagnostic runner.invocation_pending runner=${event.payload.runner} outcome=${event.payload.capability.outcome}`
 		case "scheduler.tick_failed":
 			return `${event.ts} diagnostic scheduler.tick_failed pid=${event.payload.pid} error=${event.payload.error}`
 		case "scheduler.lifecycle_event_persistence_failed":

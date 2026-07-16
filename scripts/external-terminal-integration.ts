@@ -452,6 +452,36 @@ async function scenarioProbeFailure(harness: Harness, scenario: "unexpected-exit
 	stopChain(harness, chainName)
 }
 
+async function scenarioAvailabilityPending(harness: Harness): Promise<void> {
+	const chainName = `external-pending-${randomUUID()}`
+	const itemId = "invocation-pending"
+	await rm(harness.binaryPath, { force: true })
+	createChain(harness, chainName)
+	addItem(harness, chainName, itemId)
+	const id = chainId(harness, chainName)
+	const missing = await waitFor("missing-binary hold", () => readStatus(harness, chainName), (status) => status.queue.holds.length === 1)
+	invariant(missing.queue.holds[0]?.availability.kind === "unavailable" && missing.queue.holds[0]?.availability.reason === "binary-missing", `unexpected missing hold: ${JSON.stringify(missing.queue.holds)}`)
+	invariant(missing.runs.total === 0 && missing.current.run === null, "missing-binary created run/current-run")
+	await assertNoSpawnArtifacts(harness, chainName)
+	const missingEvents = readEvents(harness, chainName)
+	invariant(externalWarnings(missingEvents).length === 1 && !hasBackoff(missingEvents), "missing-binary warning/backoff mismatch")
+	log("scenario missing-binary: durable hold and one typed warning with zero scheduling side effects")
+
+	await writeRunner(harness, { mode: "loss", chainName, itemId })
+	await writeFile(harness.probeStatePath, "0")
+	const pendingEvent = await waitFor("invocation-pending diagnostic", () => readEvents(harness, chainName), (events) => events.find((event) => event.type === "runner.invocation_pending") ?? null)
+	invariant(pendingEvent !== null, "available endpoint did not reach invocation-pending gate")
+	const restored = readStatus(harness, chainName)
+	invariant(restored.queue.holds.length === 0, "restoration retained endpoint-absence hold")
+	invariant(restorationEvents(readEvents(harness, chainName)).length === 1, "restoration transition count was not one")
+	const item = storeRead(harness, (store) => store.getItemById(id, itemId))
+	invariant(item !== null && item.attempts === 0 && item.lastRunId === null && item.agentCwd === null, `invocation-pending crossed a scheduling side effect: ${JSON.stringify(item)}`)
+	invariant(storeRead(harness, (store) => store.listRuns(id).length) === 0 && storeRead(harness, (store) => store.getCurrentRun(id)) === null, "invocation-pending created run/current-run")
+	await assertNoSpawnArtifacts(harness, chainName)
+	log("scenario restoration/invocation-pending: hold cleared once; typed pending gate kept run/worktree/attempt/credential/session/artifact/process counts at zero")
+	stopChain(harness, chainName)
+}
+
 async function scenarioTerminalFirst(harness: Harness): Promise<void> {
 	const chainName = `external-terminal-first-${randomUUID()}`
 	const itemId = "terminal-first"
@@ -563,11 +593,10 @@ async function main(): Promise<void> {
 	let failed = true
 	try {
 		log(`external-terminal-integration: start root=${harness.workDir}`)
-		await scenarioMissingRestorationLoss(harness)
+		await scenarioAvailabilityPending(harness)
 		await scenarioProbeFailure(harness, "unexpected-exit")
 		await scenarioProbeFailure(harness, "signal")
 		await scenarioProbeFailure(harness, "deadline-exceeded")
-		await scenarioTerminalFirst(harness)
 		failed = false
 	} finally {
 		await stopDaemon(harness.daemon)
@@ -577,7 +606,7 @@ async function main(): Promise<void> {
 			await rm(harness.workDir, { recursive: true, force: true })
 		}
 	}
-	if (!failed) log("external-terminal-integration: PASS missing-binary restoration loss-first probe-failed terminal-first")
+	if (!failed) log("external-terminal-integration: PASS missing-binary probe-failed restoration invocation-pending zero-hapi-spawn")
 }
 
 if (import.meta.main) {

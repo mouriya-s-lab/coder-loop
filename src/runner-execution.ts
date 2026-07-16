@@ -18,6 +18,17 @@ export function runnerExecutionDomain(runner: AgentRunnerKind): RunnerExecutionD
 	}
 }
 
+export type RunnerInvocationCapability =
+	| { kind: "invocable" }
+	| { kind: "probe-only"; outcome: "invocation-pending" }
+
+export function runnerInvocationCapability(runner: AgentRunnerKind): RunnerInvocationCapability {
+	switch (runner) {
+		case "claude": case "codex": case "opencode": return { kind: "invocable" }
+		case "hapi": return { kind: "probe-only", outcome: "invocation-pending" }
+	}
+}
+
 export type ExternalTerminalProbeWire =
 	| { kind: "exited"; exitCode: number }
 	| { kind: "signaled"; signal: string }

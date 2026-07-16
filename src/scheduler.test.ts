@@ -22,6 +22,7 @@ import {
 	schedulerTick,
 	selectNextPendingItemFromSnapshot,
 	type SchedulerEvent,
+	type SchedulerActiveRun,
 	type SchedulerLifecycleEventPersistenceFailure,
 	type SchedulerLoadedPreset,
 	type SchedulerOptions,
@@ -648,6 +649,37 @@ describe("scheduler", () => {
 		}
 	})
 
+	test("invocation-pending external terminal releases the repo slot before side effects", async () => {
+		const fixture = await createFixture("external-terminal-invocation-pending-slot-release")
+		try {
+			const binary = resolve(fixture.loopDataRoot, "..", "fake-external-terminal")
+			const probeState = resolve(fixture.loopDataRoot, "..", "probe-state")
+			const externalEvents = resolve(fixture.loopDataRoot, "..", "external-events")
+			await writeFile(probeState, "0")
+			await writeFakeExternalTerminalBinary(binary, probeState, externalEvents, 1)
+			const chain = createChain(fixture.store, "external-terminal-invocation-pending-slot-release-chain")
+			const pending = createItem(fixture.store, chain, { issueNumber: 602_901, repoCwd: "/repo/a" })
+			const sibling = createItem(fixture.store, chain, { issueNumber: 602_902, repoCwd: "/repo/a", writeStatus: "done" })
+			const base = fixture.options()
+			const tick = await schedulerTick({
+				...base,
+				phaseRunner: ({ item }) => item.id === pending.id
+					? { kind: "hapi", source: "preset", binary, extraArgs: [], model: null }
+					: base.runner!,
+			})
+
+			expect(tick.spawnedRuns.map((run) => run.itemId)).toEqual([sibling.id])
+			expect(fixture.store.getItem(pending.id)).toMatchObject({ attempts: 0, lastRunId: null, agentCwd: null })
+			expect(fixture.store.listRuns(chain.id).every((run) => run.itemId !== pending.id)).toBe(true)
+			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({
+				type: "runner.invocation_pending", rowId: pending.id, runner: "hapi",
+			}))
+			await tick.spawnedRuns[0]!.closed
+		} finally {
+			await stopFixture(fixture)
+		}
+	})
+
 	test("contained spawn failure releases repo scheduling", async () => {
 		const fixture = await createFixture("contained-spawn-releases-repo")
 		try {
@@ -859,8 +891,11 @@ describe("scheduler", () => {
 			}))
 			expect(fixture.schedulerEvents.filter((event) => event.type === "runner.availability_restored")).toHaveLength(1)
 			expect(fixture.store.getItem(item.id)?.extra.externalTerminalHold).toBeUndefined()
-			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
-			expect(triggerCalls).toBe(1)
+			expect(fixture.store.getChain(chain.id)?.status).toBe("active")
+			expect(triggerCalls).toBe(0)
+			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({
+				type: "runner.invocation_pending", phase: "umbrella-finalizer", runner: "hapi", rowId: item.id,
+			}))
 		} finally {
 			await stopFixture(fixture)
 		}
@@ -3570,13 +3605,15 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			expect((await schedulerTick(options)).spawnedRuns).toHaveLength(0)
 			await writeFile(probeState, "0")
 			const restored = await schedulerTick(options)
-			expect(restored.spawnedRuns).toHaveLength(1)
+			expect(restored.spawnedRuns).toHaveLength(0)
 			expect(fixture.store.getItem(item.id)?.extra.externalTerminalHold).toBeUndefined()
 			expect(fixture.schedulerEvents.filter((event) => event.type === "runner.availability_restored")).toHaveLength(1)
+			expect(fixture.schedulerEvents).toContainEqual(expect.objectContaining({ type: "runner.invocation_pending", rowId: item.id }))
 			await new Promise((resolveDone) => setTimeout(resolveDone, 20))
 			expect(await readFile(externalEvents, "utf-8")).toBe("probe\nprobe\n")
-			expect(await readFile(spawnEvents, "utf-8")).toBe("spawn\n")
-			await restored.spawnedRuns[0]!.closed
+			expect(existsSync(spawnEvents)).toBe(false)
+			expect(fixture.store.listRuns(chain.id)).toHaveLength(0)
+			expect(fixture.worktreeCalls).toHaveLength(0)
 		} finally {
 			await stopFixture(fixture)
 		}
@@ -3598,10 +3635,11 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			const externalEvents = resolve(fixture.loopDataRoot, "..", "external-events")
 			await writeFile(probeState, "0")
 			await writeFakeExternalTerminalBinary(binary, probeState, externalEvents, 10)
+			await writeFile(externalEvents, "")
 			const activeCredentials = new Set<string>()
 			const credentialIdentity = "external-loss-credential"
 			const options = fixture.options({
-				runner: { kind: "hapi", source: "iteration-default", binary, extraArgs: [], model: null },
+				runner: controlledLocalRunner(fixture, 10_000),
 				runCredentials: {
 					mint: () => { activeCredentials.add(credentialIdentity); return { value: credentialIdentity } },
 					revoke: (credential) => { activeCredentials.delete(credential.value) },
@@ -3610,6 +3648,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			})
 			const spawned = await schedulerTick(options)
 			expect(spawned.spawnedRuns).toHaveLength(1)
+			modelControlledExternalTerminalRun(spawned.spawnedRuns[0]!, binary)
 			expect(activeCredentials).toEqual(new Set([credentialIdentity]))
 			expect(fixture.store.getItem(item.id)?.attempts).toBe(5)
 			fixture.store.setItemSessionId(item.id, { phase: "iteration", runner: "hapi", sessionId: "lost-session", updatedAt: 1_900_602_005 })
@@ -3665,7 +3704,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			const activeCredentials = new Set<string>()
 			const revokedCredentials: string[] = []
 			const options = fixture.options({
-				runner: { kind: "hapi", source: "iteration-default", binary, extraArgs: [], model: null },
+				runner: controlledLocalRunner(fixture, 10_000),
 				runCredentials: {
 					mint: ({ runId }) => { activeCredentials.add(runId); return { value: runId } },
 					revoke: (credential) => { activeCredentials.delete(credential.value); revokedCredentials.push(credential.value) },
@@ -3675,6 +3714,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 
 			const spawned = await schedulerTick(options)
 			expect(spawned.spawnedRuns).toHaveLength(2)
+			for (const run of spawned.spawnedRuns) modelControlledExternalTerminalRun(run, binary)
 			expect(activeCredentials.size).toBe(2)
 			fixture.store.setItemSessionId(first.id, { phase: "iteration", runner: "hapi", sessionId: "first-session" })
 			fixture.store.setItemSessionId(second.id, { phase: "iteration", runner: "hapi", sessionId: "second-session" })
@@ -3735,7 +3775,7 @@ while :; do sleep 1; done
 			await chmod(binary, 0o755)
 			const activeCredentials = new Set<string>()
 			const options = fixture.options({
-				runner: { kind: "hapi", source: "iteration-default", binary, extraArgs: [], model: null },
+				runner: { kind: "claude", source: "iteration-default", binary, extraArgs: [], model: null },
 				chainCompleteExecution: { kind: "scheduler-managed" },
 				runCredentials: {
 					mint: ({ runId }) => { const value = `credential-${runId}`; activeCredentials.add(value); return { value } },
@@ -3746,6 +3786,7 @@ while :; do sleep 1; done
 
 			const started = await schedulerTick(options)
 			expect(started.spawnedRuns).toHaveLength(1)
+			modelControlledExternalTerminalRun(started.spawnedRuns[0]!, binary)
 			expect(started.spawnedRuns[0]?.phase).toBe("umbrella-finalizer")
 			fixture.store.setItemSessionId(item.id, { phase: "umbrella-finalizer", runner: "hapi", sessionId: "chain-complete-session", updatedAt: 1_900_602_016 })
 			expect(activeCredentials.size).toBe(1)
@@ -3831,11 +3872,13 @@ while :; do sleep 1; done
 			const externalEvents = resolve(fixture.loopDataRoot, "..", "external-events")
 			await writeFile(probeState, "0")
 			await writeFakeExternalTerminalBinary(binary, probeState, externalEvents, 10)
+			await writeFile(externalEvents, "")
 			const options = fixture.options({
-				runner: { kind: "hapi", source: "iteration-default", binary, extraArgs: [], model: null },
+				runner: controlledLocalRunner(fixture, 10_000),
 			})
 			const spawned = await schedulerTick(options)
 			expect(spawned.spawnedRuns).toHaveLength(1)
+			modelControlledExternalTerminalRun(spawned.spawnedRuns[0]!, binary)
 			await writeFile(probeState, "wait-69")
 			const lossTick = schedulerTick(options)
 			await waitForFileText(externalEvents, "probe-waiting")
@@ -3863,7 +3906,7 @@ while :; do sleep 1; done
 			await writeFile(probeState, "0")
 			await writeFakeExternalTerminalBinary(binary, probeState, externalEvents, 10)
 			const options = fixture.options({
-				runner: { kind: "hapi", source: "iteration-default", binary, extraArgs: [], model: null },
+				runner: controlledLocalRunner(fixture, 10_000),
 				attemptKillMs: 100,
 				onEvent: async (event) => {
 					fixture.schedulerEvents.push(event)
@@ -3875,6 +3918,7 @@ while :; do sleep 1; done
 			})
 			const spawned = await schedulerTick(options)
 			expect(spawned.spawnedRuns).toHaveLength(1)
+			modelControlledExternalTerminalRun(spawned.spawnedRuns[0]!, binary)
 			await writeFile(probeState, "69")
 			await schedulerTick(options)
 			const closed = await spawned.spawnedRuns[0]!.closed
@@ -3897,7 +3941,7 @@ while :; do sleep 1; done
 			await writeFile(probeState, "0")
 			await writeFakeExternalTerminalBinary(binary, probeState, externalEvents, 10)
 			const options = fixture.options({
-				runner: { kind: "hapi", source: "iteration-default", binary, extraArgs: [], model: null },
+				runner: controlledLocalRunner(fixture, 10_000),
 				onEvent: (event) => {
 					fixture.schedulerEvents.push(event)
 					if (event.type !== "agent.exit") return
@@ -3914,6 +3958,7 @@ while :; do sleep 1; done
 			})
 			const spawned = await schedulerTick(options)
 			expect(spawned.spawnedRuns).toHaveLength(1)
+			modelControlledExternalTerminalRun(spawned.spawnedRuns[0]!, binary)
 			fixture.store.updateItem(item.id, {
 				status: runtimeStatus("done"),
 				updatedAt: 1_900_602_013,
@@ -3936,11 +3981,12 @@ while :; do sleep 1; done
 			await writeFakeExternalTerminalBinary(binary, probeState, externalEvents, 10)
 			const firstChain = createChain(fixture.store, "external-terminal-active-loss-a")
 			const secondChain = createChain(fixture.store, "external-terminal-active-loss-b")
-			const first = createItem(fixture.store, firstChain, { issueNumber: 602_010, repoCwd: "/repo/a" })
-			const second = createItem(fixture.store, secondChain, { issueNumber: 602_011, repoCwd: "/repo/b" })
-			const options = fixture.options({ runner: { kind: "hapi", source: "iteration-default", binary, extraArgs: [], model: null }, attemptKillMs: 100 })
+			const first = createItem(fixture.store, firstChain, { issueNumber: 602_010, repoCwd: "/repo/a", sleepMs: 10_000 })
+			const second = createItem(fixture.store, secondChain, { issueNumber: 602_011, repoCwd: "/repo/b", sleepMs: 10_000 })
+			const options = fixture.options({ runner: controlledLocalRunner(fixture, 10_000), attemptKillMs: 100 })
 			const spawned = await schedulerTick(options)
 			expect(spawned.spawnedRuns).toHaveLength(2)
+			for (const run of spawned.spawnedRuns) modelControlledExternalTerminalRun(run, binary)
 			await writeFile(probeState, "69")
 			await schedulerTick(options)
 			const warnings = fixture.schedulerEvents.filter((event) => event.type === "runner.external_terminal_unavailable")
@@ -4218,6 +4264,7 @@ while :; do sleep 1; done
 			expect(runner.kind).toBe("codex")
 			expect(runner.model).toBe("gpt-5.6-sol")
 			const invocation = buildRunnerInvocation(runner, "p", { kind: "fresh" }, runnerAuthorizationForTest("/repo/a", PRESET_DIR, "/lr"))
+			if (invocation.kind !== "spawn") throw new Error("local codex runner must produce a spawn plan")
 			const modelFlagIndex = invocation.args.indexOf("--model")
 			expect(modelFlagIndex).toBeGreaterThanOrEqual(0)
 			expect(invocation.args[modelFlagIndex + 1]).toBe("gpt-5.6-sol")
@@ -4346,9 +4393,12 @@ echo invocation >> ${JSON.stringify(invocationLog)}
 echo 'FINALIZER SUMMARY: decision=complete; reason=restored'
 `)
 			await chmod(binary, 0o755)
-			await expect(runPresetChainCompleteTriggerPhases(input)).resolves.toEqual({ decision: "complete" })
-			expect(await readFile(invocationLog, "utf-8")).toBe("invocation\n")
-			expect(await readFile(outputPath, "utf-8")).toContain("FINALIZER SUMMARY: decision=complete; reason=restored")
+			await expect(runPresetChainCompleteTriggerPhases(input)).resolves.toEqual({
+				decision: "keep-active",
+				reason: "runner hapi invocation pending: invocation-pending",
+			})
+			expect(existsSync(invocationLog)).toBe(false)
+			expect(existsSync(outputPath)).toBe(false)
 		} finally {
 			await stopFixture(fixture)
 		}
@@ -5105,6 +5155,14 @@ type Fixture = {
 	worktreeCalls: string[]
 	fakeRunner: string
 	options: (overrides?: SchedulerFixtureOverrides) => SchedulerOptions
+}
+
+function controlledLocalRunner(fixture: Fixture, _sleepMs: number): AgentRunnerSelection {
+	return { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fixture.fakeRunner], model: null }
+}
+
+function modelControlledExternalTerminalRun(run: SchedulerActiveRun, probeBinary: string): void {
+	run.runner = { kind: "hapi", source: "iteration-default", binary: probeBinary, extraArgs: [], model: null }
 }
 
 async function stopFixture(fixture: Fixture): Promise<void> {

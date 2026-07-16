@@ -24,7 +24,9 @@ import {
 import { buildCoderLoopStatusSnapshot, loadPreset, type AgentRunnerKind, type JsonObject, type JsonValue } from "./loop"
 import {
 	createGitWorktreeManager,
+	listActiveRuns,
 	schedulerSlotWorktreePath,
+	type SchedulerActiveRun,
 	type SchedulerEvent,
 	type SchedulerOptions,
 	type SchedulerWorktreeManager,
@@ -97,6 +99,29 @@ function daemonDecisionFingerprintState(daemon: CoderLoopDaemon): DecisionFinger
 	const state = Reflect.get(daemon, "decisionFingerprints")
 	if (!(state instanceof DecisionFingerprintState)) throw new Error("daemon decision fingerprint state is unavailable")
 	return state
+}
+
+function modelControlledDaemonRunAsExternalTerminal(
+	fixture: Fixture,
+	run: SchedulerActiveRun,
+	probeBinary: string,
+): void {
+	run.runner = { kind: "hapi", source: "iteration-default", binary: probeBinary, extraArgs: [], model: null }
+	const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+	try {
+		const current = store.getCurrentRun(run.chainId)
+		const durable = store.getRunByRunId(run.runId)
+		if (current === null || durable === null) throw new Error("controlled active run is not durable")
+		const externalTerminalCurrent = {
+			runner: "hapi" as const,
+			binary: probeBinary,
+			availability: { kind: "available" as const, checkedAt: new Date(run.startedAt * 1000).toISOString() },
+		}
+		store.updateRunExtra(run.runId, storedItemExtra({ ...itemExtraToJsonObject(durable.extra), externalTerminalCurrent }))
+		store.setCurrentRun({ ...current, extra: storedItemExtra({ ...itemExtraToJsonObject(current.extra), externalTerminalCurrent }) })
+	} finally {
+		store.close()
+	}
 }
 
 // #406 fake-runner event-log line shape. The fake runners inline-render lines like
@@ -462,13 +487,10 @@ describe("daemon", () => {
 		const presetDir = resolve(TEST_ROOT, "healthy-active-external-terminal")
 		const fakeBinary = resolve(TEST_ROOT, "healthy-active-external-terminal-binary")
 		await cp(PRESET_DIR, presetDir, { recursive: true })
-		const presetToml = resolve(presetDir, "preset.toml")
-		await writeFile(presetToml, (await readFile(presetToml, "utf-8")).replaceAll('runner = "codex"', 'runner = "hapi"').replaceAll('runner  = "codex"', 'runner  = "hapi"'))
-		await writeFile(fakeBinary, "#!/bin/sh\nif [ \"$1\" = probe ]; then exit 0; fi\ntrap 'exit 0' TERM\nsleep 10\n")
+		await writeFile(fakeBinary, "#!/bin/sh\nexit 0\n")
 		await chmod(fakeBinary, 0o755)
 		const fixture = await startFixture("healthy-active-external-terminal", {
 			schedulerPresetDir: presetDir,
-			schedulerUsePresetRunner: true,
 			schedulerIntervalMs: 60_000,
 		})
 		try {
@@ -477,10 +499,15 @@ describe("daemon", () => {
 				repository: "mouriya-s-lab/coder-loop",
 				baseBranch: "main",
 				preset: "gh-issue-pr-iteration",
-				metadata: { hapi: { binary: fakeBinary } },
 			})).chain)
 			const chainId = numberValue(chain.id)
-			expectOk(await request(fixture, "item.add", { chainId, itemId: "602-current", repoCwd: REPO_ROOT, presetPath: presetDir }))
+			expectOk(await request(fixture, "item.add", { chainId, itemId: "602-current", repoCwd: REPO_ROOT, presetPath: presetDir, extra: { sleepMs: 10_000 } }))
+			const active = await waitFor(
+				async () => listActiveRuns(fixture.daemon.schedulerExecutionState()).find((run) => run.chainId === chainId) ?? null,
+				(candidate) => candidate !== null,
+			)
+			if (active === null) throw new Error("expected controlled active run")
+			modelControlledDaemonRunAsExternalTerminal(fixture, active, fakeBinary)
 			const current = await waitFor(
 				() => readCurrentRun(fixture.loopDataRoot, chainId),
 				(candidate) => candidate?.extra.externalTerminalCurrent !== undefined,
@@ -510,13 +537,10 @@ describe("daemon", () => {
 		const presetDir = resolve(TEST_ROOT, "latched-loss-status-projection")
 		const fakeBinary = resolve(TEST_ROOT, "latched-loss-status-projection-binary")
 		await cp(PRESET_DIR, presetDir, { recursive: true })
-		const presetToml = resolve(presetDir, "preset.toml")
-		await writeFile(presetToml, (await readFile(presetToml, "utf-8")).replaceAll('runner = "codex"', 'runner = "hapi"').replaceAll('runner  = "codex"', 'runner  = "hapi"'))
-		await writeFile(fakeBinary, "#!/bin/sh\nif [ \"$1\" = probe ]; then exit 0; fi\ntrap 'exit 0' TERM\nsleep 10\n")
+		await writeFile(fakeBinary, "#!/bin/sh\nexit 0\n")
 		await chmod(fakeBinary, 0o755)
 		const fixture = await startFixture("latched-loss-status-projection", {
 			schedulerPresetDir: presetDir,
-			schedulerUsePresetRunner: true,
 			schedulerIntervalMs: 60_000,
 		})
 		try {
@@ -525,10 +549,15 @@ describe("daemon", () => {
 				repository: "mouriya-s-lab/coder-loop",
 				baseBranch: "main",
 				preset: "gh-issue-pr-iteration",
-				metadata: { hapi: { binary: fakeBinary } },
 			})).chain)
 			const chainId = numberValue(chain.id)
-			expectOk(await request(fixture, "item.add", { chainId, itemId: "602-loss-status", repoCwd: REPO_ROOT, presetPath: presetDir }))
+			expectOk(await request(fixture, "item.add", { chainId, itemId: "602-loss-status", repoCwd: REPO_ROOT, presetPath: presetDir, extra: { sleepMs: 10_000 } }))
+			const active = await waitFor(
+				async () => listActiveRuns(fixture.daemon.schedulerExecutionState()).find((run) => run.chainId === chainId) ?? null,
+				(candidate) => candidate !== null,
+			)
+			if (active === null) throw new Error("expected controlled active run")
+			modelControlledDaemonRunAsExternalTerminal(fixture, active, fakeBinary)
 			const current = await waitFor(
 				() => readCurrentRun(fixture.loopDataRoot, chainId),
 				(candidate) => candidate?.extra.externalTerminalCurrent !== undefined,
@@ -586,7 +615,7 @@ describe("daemon", () => {
 				const presetToml = resolve(chainPresetDir, "preset.toml")
 				await writeFile(presetToml, (await readFile(presetToml, "utf-8")).replace(
 					'name    = "umbrella-finalizer"\nprompt  = "umbrella-finalizer-entry.md"\ntrigger = { on = "chain-complete" }\nrunner  = "codex"',
-					'name    = "umbrella-finalizer"\nprompt  = "umbrella-finalizer-entry.md"\ntrigger = { on = "chain-complete" }\nrunner  = "hapi"',
+					'name    = "umbrella-finalizer"\nprompt  = "umbrella-finalizer-entry.md"\ntrigger = { on = "chain-complete" }\nrunner  = "opencode"',
 				))
 				const itemPresetToml = resolve(itemPresetDir, "preset.toml")
 				await writeFile(itemPresetToml, (await readFile(itemPresetToml, "utf-8")).replace(
@@ -609,7 +638,7 @@ describe("daemon", () => {
 				metadata: {
 					presetPath: chainPresetDir,
 					claude: { binary: ordinaryBinary },
-					hapi: { binary: externalBinary },
+					opencode: { binary: externalBinary },
 				},
 			})).chain)
 			const chainId = numberValue(chain.id)
@@ -620,11 +649,14 @@ describe("daemon", () => {
 				presetPath: itemPresetDir,
 				extra: { eventLog: fixture.eventLog, writeStatus: "done" },
 			}))
-			const current = await waitFor(
-				() => readCurrentRun(fixture.loopDataRoot, chainId),
-				(candidate) => candidate?.phase === "umbrella-finalizer" && candidate.extra.externalTerminalCurrent !== undefined,
+			const active = await waitFor(
+				async () => listActiveRuns(fixture.daemon.schedulerExecutionState()).find((run) => run.chainId === chainId && run.phase === "umbrella-finalizer") ?? null,
+				(candidate) => candidate !== null,
 				10_000,
 			)
+			if (active === null) throw new Error("expected controlled chain-complete run")
+			modelControlledDaemonRunAsExternalTerminal(fixture, active, externalBinary)
+			const current = await readCurrentRun(fixture.loopDataRoot, chainId)
 			if (current === null) throw new Error("expected active chain-complete external-terminal run")
 			const finalizerSpawn = await waitFor(
 				async () => fixture.schedulerEvents.find((event) => event.type === "agent.spawn" && event.phase === "umbrella-finalizer") ?? null,
@@ -633,7 +665,7 @@ describe("daemon", () => {
 			expect(finalizerSpawn).toMatchObject({ type: "agent.spawn", phase: "umbrella-finalizer" })
 			if (finalizerSpawn?.type !== "agent.spawn") throw new Error("expected chain-complete spawn event")
 			expect(await readFile(resolve(finalizerSpawn.presetDir, "preset.toml"), "utf-8")).toContain(
-				'name    = "umbrella-finalizer"\nprompt  = "umbrella-finalizer-entry.md"\ntrigger = { on = "chain-complete" }\nrunner  = "hapi"',
+				'name    = "umbrella-finalizer"\nprompt  = "umbrella-finalizer-entry.md"\ntrigger = { on = "chain-complete" }\nrunner  = "opencode"',
 			)
 			expect(finalizerSpawn.presetDir).not.toBe(itemPresetDir)
 
@@ -643,7 +675,7 @@ describe("daemon", () => {
 				chainName,
 				output: "json",
 			})
-			expect(activeSnapshot.current.runner).toMatchObject({ kind: "hapi", binary: externalBinary })
+			expect(activeSnapshot.current.runner).toMatchObject({ kind: "opencode", binary: externalBinary })
 			expect(activeSnapshot.current.externalTerminal).toEqual({
 				availability: { kind: "available", checkedAt: expect.any(String) },
 				loss: null,
@@ -685,6 +717,7 @@ describe("daemon", () => {
 		let probeState = ""
 		let credentialCapture = ""
 		let ordinaryRunner = ""
+		let allowControlledFinalizerSpawn = true
 		const fixture = await startFixture("chain-complete-external-terminal-loss-boundary", {
 			useDefaultChainCompleteTrigger: true,
 			schedulerIntervalMs: 20,
@@ -710,9 +743,11 @@ while :; do sleep 1; done
 				await chmod(externalBinary, 0o755)
 			},
 			schedulerConfig: {
-				phaseRunner: ({ phase }) => phase === "umbrella-finalizer"
-					? { kind: "hapi", source: "iteration-default", binary: externalBinary, extraArgs: [], model: null }
-					: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [ordinaryRunner], model: null },
+				phaseRunner: ({ phase }) => {
+					if (phase !== "umbrella-finalizer") return { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [ordinaryRunner], model: null }
+					if (allowControlledFinalizerSpawn) return { kind: "claude", source: "iteration-default", binary: externalBinary, extraArgs: [], model: null }
+					return { kind: "hapi", source: "iteration-default", binary: externalBinary, extraArgs: [], model: null }
+				},
 				attemptKillMs: 100,
 			},
 		})
@@ -733,6 +768,13 @@ while :; do sleep 1; done
 			const credential = await waitFor(async () => {
 				try { return (await readFile(credentialCapture, "utf-8")).trim() } catch { return "" }
 			}, (value) => value.length > 0, 10_000)
+			const active = await waitFor(
+				async () => listActiveRuns(fixture.daemon.schedulerExecutionState()).find((run) => run.chainId === chainId && run.phase === "umbrella-finalizer") ?? null,
+				(candidate) => candidate !== null,
+			)
+			if (active === null) throw new Error("expected controlled chain-complete run")
+			allowControlledFinalizerSpawn = false
+			modelControlledDaemonRunAsExternalTerminal(fixture, active, externalBinary)
 			const beforeLoss = await readCurrentRun(fixture.loopDataRoot, chainId)
 			expect(beforeLoss).toMatchObject({ phase: "umbrella-finalizer", extra: { itemId } })
 
@@ -761,12 +803,18 @@ while :; do sleep 1; done
 			expect(await readChainStatus(fixture.loopDataRoot, chainId)).toBe("active")
 
 			await writeFile(probeState, "complete")
-			await waitFor(() => readChainStatus(fixture.loopDataRoot, chainId), (status) => status === "completed", 10_000)
+			await waitFor(
+				async () => fixture.schedulerEvents.find((event) => event.type === "runner.invocation_pending" && event.phase === "umbrella-finalizer") ?? null,
+				(event) => event !== null,
+				10_000,
+			)
+			expect(await readChainStatus(fixture.loopDataRoot, chainId)).toBe("active")
+			expect(await readCurrentRun(fixture.loopDataRoot, chainId)).toBeNull()
 			expect(fixture.schedulerEvents.some((event) => event.type === "runner.external_terminal_unavailable" && event.phase === "umbrella-finalizer")).toBe(true)
 		} finally {
 			await fixture.daemon.stop()
 		}
-	})
+	}, 15_000)
 
 	test("terminal-first chain-complete close does not leave a stale active-run read in the probing tick", async () => {
 		let externalBinary = ""
@@ -806,7 +854,7 @@ exit 0
 			},
 			schedulerConfig: {
 				phaseRunner: ({ phase }) => phase === "umbrella-finalizer"
-					? { kind: "hapi", source: "iteration-default", binary: externalBinary, extraArgs: [], model: null }
+					? { kind: "claude", source: "iteration-default", binary: externalBinary, extraArgs: [], model: null }
 					: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [ordinaryRunner], model: null },
 			},
 		})
@@ -825,6 +873,12 @@ exit 0
 			})).item)
 			const itemId = numberValue(added.id)
 			await waitFor(() => Bun.file(finalizerStarted).exists(), (exists) => exists, 10_000)
+			const active = await waitFor(
+				async () => listActiveRuns(fixture.daemon.schedulerExecutionState()).find((run) => run.chainId === chainId && run.phase === "umbrella-finalizer") ?? null,
+				(candidate) => candidate !== null,
+			)
+			if (active === null) throw new Error("expected controlled chain-complete run")
+			modelControlledDaemonRunAsExternalTerminal(fixture, active, externalBinary)
 
 			await writeFile(probeState, "wait-69")
 			await waitFor(() => Bun.file(probeWaiting).exists(), (exists) => exists, 5_000)

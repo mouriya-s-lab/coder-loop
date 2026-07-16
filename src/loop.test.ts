@@ -840,7 +840,7 @@ describe("small parsers", () => {
 		expect(authorization.surfaces).toContainEqual({ kind: "system-device", channel: "null", path: "/dev/null" })
 		expect(authorization.surfaces).not.toContainEqual(expect.objectContaining({ path: "/runtime/loop-data" }))
 		expect(authorization.surfaces).not.toContainEqual(expect.objectContaining({ path: "/dev" }))
-		for (const kind of ["claude", "codex", "opencode", "hapi"] as const) {
+		for (const kind of ["claude", "codex", "opencode"] as const) {
 			for (const resume of [{ kind: "fresh" }, { kind: "resume", sessionId: `session-${kind}` }] as const) {
 				const plan = buildRunnerInvocation({ kind, binary: kind, extraArgs: [], model: null, source: "engine-builtin" }, "prompt", resume, authorization)
 				const runnerScratch = resolve("/runtime/loop-data/chains/c/worktrees/i", ".coder-loop-runner", "tmp")
@@ -849,11 +849,7 @@ describe("small parsers", () => {
 				expect(plan.binary).toBe("/usr/bin/sandbox-exec")
 				expect(plan.authorizationEvidence.outerSandboxProfile).toBe(outerSandboxProfile)
 				expect(plan.authorizationEvidence.runner).toBe(kind)
-				if (kind === "hapi") {
-					expect(plan.authorizationEvidence.surfaces).not.toContainEqual(expect.objectContaining({ runner: kind, channel: expect.stringContaining("runtime") }))
-				} else {
-					expect(plan.authorizationEvidence.surfaces).toContainEqual(expect.objectContaining({ kind: kind === "codex" ? "runner-runtime-file" : "runner-runtime-directory", runner: kind }))
-				}
+				expect(plan.authorizationEvidence.surfaces).toContainEqual(expect.objectContaining({ kind: kind === "codex" ? "runner-runtime-file" : "runner-runtime-directory", runner: kind }))
 				expect(plan.args[2]).toBe(kind)
 				expect(plan.args.slice(2)).not.toContain("/runtime/loop-data")
 				expect(plan.args).not.toContain("danger-full-access")
@@ -870,8 +866,7 @@ describe("small parsers", () => {
 				expect(plan.environment.TEMP).toBe(runnerScratch)
 				expect(plan.environment.CLAUDE_CODE_TMPDIR).toBe(kind === "claude" ? runnerScratch : undefined)
 				expect(plan.runtimeDirectories).toEqual([runnerScratch])
-				if (resume.kind === "resume" && kind !== "hapi") expect(plan.args).toContain(`session-${kind}`)
-				if (kind === "hapi") expect(plan.args).not.toContain(`session-${kind}`)
+				if (resume.kind === "resume") expect(plan.args).toContain(`session-${kind}`)
 				if (kind === "claude") {
 					expect(plan.args[1]).toContain(resolve(homedir(), ".claude/projects"))
 				}
@@ -903,7 +898,7 @@ describe("small parsers", () => {
 		}
 	})
 
-	test("hapi authorization preserves the generic external-terminal invocation without Codex argv", () => {
+	test("hapi invocation builder defaults to typed invocation-pending without a spawn plan", () => {
 		const authorization = buildRunnerFilesystemAuthorization({
 			loopDataRoot: "/runtime/loop-data",
 			agentCwd: "/runtime/loop-data/chains/c/worktrees/i",
@@ -917,21 +912,20 @@ describe("small parsers", () => {
 			daemonSocketPath: "/runtime/loop-data/daemon.sock",
 			declaredRuntimeBindingPaths: [],
 		})
-		const plan = buildRunnerInvocation(
+		const defaultDecision = buildRunnerInvocation(
+			{ kind: "hapi", binary: "hapi-remote-session", extraArgs: [], model: null, source: "engine-builtin" },
+			"prompt-owned-by-603",
+			{ kind: "fresh" },
+			authorization,
+		)
+		const configuredDecision = buildRunnerInvocation(
 			{ kind: "hapi", binary: "hapi-remote-session", extraArgs: ["--configured"], model: null, source: "engine-builtin" },
 			"prompt-owned-by-603",
 			{ kind: "resume", sessionId: "session-owned-by-603" },
 			authorization,
 		)
-		expect(plan.binary).toBe("/usr/bin/sandbox-exec")
-		expect(plan.args.slice(2)).toEqual(["hapi-remote-session", "--configured"])
-		expect(plan.authorizationEvidence.runner).toBe("hapi")
-		expect(plan.authorizationEvidence.surfaces).toContainEqual({
-			kind: "read-only-file",
-			channel: "runner-executable",
-			runner: "hapi",
-			path: "hapi-remote-session",
-		})
+		expect(defaultDecision).toEqual({ kind: "invocation-pending", runner: "hapi", capability: { kind: "probe-only", outcome: "invocation-pending" } })
+		expect(configuredDecision).toEqual({ kind: "invocation-pending", runner: "hapi", capability: { kind: "probe-only", outcome: "invocation-pending" } })
 	})
 
 	test("runner filesystem grants reject equal-root and ancestor tree grants while retaining literal cwd traversal", () => {
@@ -1041,7 +1035,7 @@ describe("small parsers", () => {
 			evidenceDir, evidenceRootDir, issueDir, logDir, daemonSocketPath,
 			declaredRuntimeBindingPaths: ["sharedContextPath", "currentIssueFile", "issueDir", "evidenceDir", "evidenceRootDir", "logDir"],
 		})
-		for (const kind of ["claude", "codex", "opencode", "hapi"] as const) {
+		for (const kind of ["claude", "codex", "opencode"] as const) {
 			for (const resume of [{ kind: "fresh" }, { kind: "resume", sessionId: `resume-${kind}` }] as const) {
 				const plan = buildRunnerInvocation({ kind, binary: "/usr/bin/true", extraArgs: [], model: null, source: "engine-builtin" }, "prompt", resume, authorization)
 				const profile = plan.args[1]!
@@ -1101,7 +1095,7 @@ describe("small parsers", () => {
 			["--dir", "/runtime/root"], ["--dir=/runtime/root"], ["--permission-mode", "bypassPermissions"], ["--permission-mode=bypassPermissions"],
 			["--dangerously-skip-permissions"], ["--dangerously-bypass-approvals-and-sandbox"],
 		]
-		for (const kind of ["claude", "codex", "opencode", "hapi"] as const) {
+		for (const kind of ["claude", "codex", "opencode"] as const) {
 			for (const resume of [{ kind: "fresh" }, { kind: "resume", sessionId: `resume-${kind}` }] as const) {
 				for (const extraArgs of bypasses) {
 					expect(() => buildRunnerInvocation({ kind, binary: kind, extraArgs, model: null, source: "engine-builtin" }, "prompt", resume, authorization), `${kind}/${resume.kind}: ${extraArgs.join(" ")}`).toThrow("runner authorization metadata")

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
-import { runnerExecutionDomain, decodeExternalTerminalProbeResult, probeExternalTerminal } from "./runner-execution"
+import { runnerExecutionDomain, runnerInvocationCapability, decodeExternalTerminalProbeResult, probeExternalTerminal } from "./runner-execution"
 
 const TEST_ROOT = resolve(import.meta.dir, "../.coder-loop/runtime/evidence/runner-execution-tests")
 
@@ -14,6 +14,13 @@ describe("runner execution domain", () => {
 			kind: "external-terminal",
 			probe: { argv: ["probe"], deadlineMs: 30_000, killGraceMs: 1_000 },
 		})
+	})
+
+	test("exhaustively classifies invocation capability before execution side effects", () => {
+		expect(runnerInvocationCapability("claude")).toEqual({ kind: "invocable" })
+		expect(runnerInvocationCapability("codex")).toEqual({ kind: "invocable" })
+		expect(runnerInvocationCapability("opencode")).toEqual({ kind: "invocable" })
+		expect(runnerInvocationCapability("hapi")).toEqual({ kind: "probe-only", outcome: "invocation-pending" })
 	})
 
 	test("daemon refresh preserves the execution-domain ADT without a boolean projection", async () => {

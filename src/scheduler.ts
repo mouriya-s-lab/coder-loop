@@ -76,7 +76,7 @@ import {
 } from "./runtime-paths"
 import { collectObservabilityExcerpt, type ObservabilityExcerpt } from "./observability"
 import { createStreamTextState } from "./runner-output"
-import { gateResolvedRunnerAvailability, probeResolvedExternalTerminal, runnerExecutionDomain, type ExternalTerminalAvailability } from "./runner-execution"
+import { gateResolvedRunnerAvailability, probeResolvedExternalTerminal, runnerExecutionDomain, runnerInvocationCapability, type ExternalTerminalAvailability, type RunnerInvocationCapability } from "./runner-execution"
 
 // #452: completion signal is the daemon-observed state write, not a stdout marker.
 // The previous "per-run nonce summary tag" prompt injection + stdout watchdog
@@ -194,6 +194,7 @@ export type SchedulerState = {
 	// `DaemonRateLimitState`. Null when no cooldown is in effect.
 	rateLimitedUntilMs: number | null
 	externalTerminalLossRunIds: Set<string>
+	invocationPendingItemIds: Set<number>
 	chainCompleteExecutions: Map<number, SchedulerChainCompleteExecution>
 }
 
@@ -285,6 +286,7 @@ export type SchedulerEvent =
 	| { type: "scheduler.rate_limited"; ts: string; chainId: number; itemId: number; runId: string; resetsAt: number; resetAtIso: string; rateLimitType: string | null }
 	| { type: "runner.external_terminal_unavailable"; chainId: number; rowId: number; itemId: string; phase: string; runner: AgentRunnerKind; binary: string; probeArgv: readonly ["probe"]; availability: Exclude<ExternalTerminalAvailability, { kind: "available" }>; affected: readonly { chainId: number; rowId: number; itemId: string; phase: string }[] }
 	| { type: "runner.availability_restored"; chainId: number; rowId: number; itemId: string; phase: string; runner: AgentRunnerKind; binary: string; probeArgv: readonly ["probe"]; checkedAt: string }
+	| { type: "runner.invocation_pending"; chainId: number; rowId: number; itemId: string; phase: string; runner: AgentRunnerKind; binary: string; capability: Extract<RunnerInvocationCapability, { kind: "probe-only" }> }
 
 export type SchedulerTimerLifecycleEvent = Extract<SchedulerEvent, {
 	type:
@@ -471,6 +473,7 @@ export function createSchedulerState(): SchedulerState {
 		lifecycleEventPersistenceFailures: [],
 		rateLimitedUntilMs: null,
 		externalTerminalLossRunIds: new Set(),
+		invocationPendingItemIds: new Set(),
 		chainCompleteExecutions: new Map(),
 	}
 }
@@ -629,7 +632,8 @@ export async function schedulerTick(options: SchedulerOptions, limits?: { maxSpa
 				}
 				const candidateAfterSpawn = options.store.getItem(next.item.id)
 				if (candidateAfterSpawn === null) throw new Error(`spawn candidate ${next.item.id} disappeared`)
-				if (externalTerminalHold(candidateAfterSpawn.extra) === null) break
+				const invocationPending = options.state.invocationPendingItemIds.delete(next.item.id)
+				if (externalTerminalHold(candidateAfterSpawn.extra) === null && !invocationPending) break
 				remainingCandidates = remainingCandidates.filter((candidate) => candidate.id !== next.item.id)
 			}
 		}
@@ -1093,6 +1097,7 @@ async function spawnSchedulerRun(
 			? await resolveChainCompletePhaseRunner(options, { chain, item, phase })
 			: await resolvePhaseRunner(options, { chain, item, phase })
 		if (!await refreshExternalTerminalAvailabilityForItem(options, chain, item, phase, runner)) return null
+		if (!await runnerInvocationAllowsScheduling(options, chain, item, phase, runner)) return null
 		const runnerDomain = runnerExecutionDomain(runner.kind)
 		worktreePath = worktreePath ?? await worktreeManager({ chain, repoCwd: item.repoCwd, slotKey: slot.key })
 		slot.worktreePath = worktreePath
@@ -1201,6 +1206,7 @@ async function spawnSchedulerRun(
 			resumeDecision,
 			invocationAuthorization(chain, item, worktreePath, presetDir, resolveLoopDataPaths(options.loopDataRootOptions).root, authorizationPhase),
 		)
+		if (runnerPlan.kind === "invocation-pending") throw new Error(`runner ${runnerPlan.runner} crossed its invocation-pending scheduler gate`)
 		for (const directory of runnerPlan.runtimeDirectories) await mkdir(directory, { recursive: true })
 		await initializeSchedulerRunArtifacts(options, chain, item, runId, phase, startedAt, worktreePath)
 		const runPaths = resolveChainRuntimePaths(chain.name, options.loopDataRootOptions)
@@ -1352,6 +1358,32 @@ export async function refreshExternalTerminalAvailabilityForItem(
 		})
 	}
 	return true
+}
+
+async function runnerInvocationAllowsScheduling(
+	options: SchedulerOptions,
+	chain: ChainRecord,
+	item: ItemRecord,
+	phase: string,
+	runner: AgentRunnerSelection,
+): Promise<boolean> {
+	const capability = runnerInvocationCapability(runner.kind)
+	if (capability.kind === "invocable") {
+		options.state.invocationPendingItemIds.delete(item.id)
+		return true
+	}
+	options.state.invocationPendingItemIds.add(item.id)
+	await emit(options, {
+		type: "runner.invocation_pending",
+		chainId: chain.id,
+		rowId: item.id,
+		itemId: item.itemId,
+		phase,
+		runner: runner.kind,
+		binary: runner.binary,
+		capability,
+	})
+	return false
 }
 
 function clearExternalTerminalHoldsForEndpoint(store: SchedulerStore, runner: AgentRunnerKind, binary: string, updatedAt: number): boolean {
@@ -2382,6 +2414,7 @@ async function chainCompletionTriggerAllowsCompletion(
 		for (const triggerPhase of chainCompleteTriggerPhases(loadedPreset.preset)) {
 			const runner = await resolveChainCompletePhaseRunner(options, { chain, item: representativeItem, phase: triggerPhase.name })
 			if (!await refreshExternalTerminalAvailabilityForItem(options, chain, representativeItem, triggerPhase.name, runner)) return false
+			if (!await runnerInvocationAllowsScheduling(options, chain, representativeItem, triggerPhase.name, runner)) return false
 		}
 		const decision = options.chainCompleteTrigger !== undefined
 			? await options.chainCompleteTrigger(context)

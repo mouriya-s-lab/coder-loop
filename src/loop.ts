@@ -82,7 +82,7 @@ import {
 } from "./runtime-data"
 import { TaskTreeSnapshotBoundary, type TaskTreeSnapshot } from "./task-runtime"
 import { checkPresetDag, type PresetDagFinding } from "./preset-dag-check"
-import { gateResolvedRunnerAvailability, runnerExecutionDomain } from "./runner-execution"
+import { gateResolvedRunnerAvailability, runnerExecutionDomain, runnerInvocationCapability, type RunnerInvocationCapability } from "./runner-execution"
 export { checkPresetDag } from "./preset-dag-check"
 export type { PresetDagFinding, PresetDagFindingKind, PresetDagFindingVerdict, PresetDagFindingTable, PresetDagFindingDeadlockContinuable, PresetDagFindingDeadVocabulary } from "./preset-dag-check"
 
@@ -5598,6 +5598,13 @@ export async function runPresetChainCompleteTriggerPhases(input: RunPresetChainC
 				reason: `external terminal ${resolvedRunner.kind} unavailable: ${gate.availability.reason}`,
 			}
 		}
+		const invocationCapability = runnerInvocationCapability(resolvedRunner.kind)
+		if (invocationCapability.kind === "probe-only") {
+			return {
+				decision: "keep-active",
+				reason: `runner ${resolvedRunner.kind} invocation pending: ${invocationCapability.outcome}`,
+			}
+		}
 		const ctx: ResolveContext = {
 			item: anchorRecord,
 			chain: buildRenderBindings(options),
@@ -6672,7 +6679,6 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 	const effectivePrompt = resume.kind === "resume" ? RESUME_CONTINUE_PROMPT : basePrompt
 	const selectedRunner = input.runner ?? options.defaultRunner
 	const authorizationPaths = input.authorizationPaths ?? { currentIssueFile: "", evidenceDir: options.evidenceRootDir }
-	await mkdir(dirname(outputPath), { recursive: true })
 	const loopDataRoot = resolveLoopDataPaths(loopDataRootOption(options.loopDataRoot)).root
 	const runnerPlan = buildRunnerInvocation(selectedRunner, effectivePrompt, resume, buildRunnerFilesystemAuthorization({
 		agentCwd: input.agentCwd,
@@ -6687,6 +6693,8 @@ export async function spawnOneAttempt(input: SpawnOneAttemptInput): Promise<Atte
 		daemonSocketPath: resolve(loopDataRoot, "daemon.sock"),
 		declaredRuntimeBindingPaths: phaseDeclaredRuntimeBindingPaths(input.authorizationPhase ?? { variables: [] }),
 	}))
+	if (runnerPlan.kind === "invocation-pending") throw new Error(`runner ${runnerPlan.runner} invocation is pending its invocation contract`)
+	await mkdir(dirname(outputPath), { recursive: true })
 	for (const directory of runnerPlan.runtimeDirectories) await mkdir(directory, { recursive: true })
 	await writeFile(resolve(dirname(outputPath), "runner-authorization.json"), `${JSON.stringify(runnerPlan.authorizationEvidence)}\n`)
 	return new Promise((resolveResult, rejectResult) => {
@@ -7099,6 +7107,7 @@ export function agentClaudeArgs(extraArgs: readonly string[], prompt: string, re
 
 export type RunnerInvocation =
 	| { kind: "spawn"; binary: string; args: string[]; environment: Readonly<Record<string, string>>; runtimeDirectories: readonly string[]; authorizationEvidence: RunnerAuthorizationEvidence }
+	| { kind: "invocation-pending"; runner: AgentRunnerKind; capability: Extract<RunnerInvocationCapability, { kind: "probe-only" }> }
 
 // #505: the loop-process-side git worktree helpers (worktreeBasePath /
 // worktreePathForItem / ensureWorktreeForItem / removeWorktreeForItem /
@@ -7225,7 +7234,12 @@ function runnerGitMetadataSurfaces(agentCwd: string): RunnerFilesystemSurface[] 
 	}
 }
 
+export function buildRunnerInvocation(runner: AgentRunnerSelection & { kind: Exclude<AgentRunnerKind, "hapi"> }, prompt: string, resume: ResumeDecision, authorization: RunnerFilesystemAuthorization): Extract<RunnerInvocation, { kind: "spawn" }>
+export function buildRunnerInvocation(runner: AgentRunnerSelection & { kind: "hapi" }, prompt: string, resume: ResumeDecision, authorization: RunnerFilesystemAuthorization): Extract<RunnerInvocation, { kind: "invocation-pending" }>
+export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: string, resume: ResumeDecision, authorization: RunnerFilesystemAuthorization): RunnerInvocation
 export function buildRunnerInvocation(runner: AgentRunnerSelection, prompt: string, resume: ResumeDecision, authorization: RunnerFilesystemAuthorization): RunnerInvocation {
+	const capability = runnerInvocationCapability(runner.kind)
+	if (capability.kind === "probe-only") return { kind: "invocation-pending", runner: runner.kind, capability }
 	assertRunnerAuthorizationMetadata(runner)
 	const runnerExecutable = isAbsolute(runner.binary) ? runner.binary : Bun.which(runner.binary) ?? runner.binary
 	const effectiveAuthorization: RunnerFilesystemAuthorization = {
@@ -7272,10 +7286,7 @@ function runnerNativeArgs(
 		case "claude": return agentClaudeArgs(runner.extraArgs, prompt, resume, claudeDirs, runner.model)
 		case "codex": return agentCodexArgs(runner.extraArgs, prompt, resume, agentCwd, runner.model, writableDirs)
 		case "opencode": return agentOpencodeArgs(runner.extraArgs, prompt, resume, runner.model, agentCwd)
-		case "hapi":
-			// #602 owns the generic external-terminal lifecycle and configured invocation.
-			// #603 owns HAPI prompt, worktree, status, and session argv semantics.
-			return [...runner.extraArgs]
+		case "hapi": throw new Error("hapi invocation is pending the #603 invocation contract")
 		default: return assertNeverRunnerKind(runner.kind)
 	}
 }
