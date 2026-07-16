@@ -156,8 +156,11 @@ function startDaemon(root: string, env: NodeJS.ProcessEnv): Daemon {
 
 async function ready(daemon: Daemon): Promise<void> {
 	await until(() => existsSync(resolve(daemon.root, "daemon.sock")), Boolean, "daemon socket")
-	const status = command(["bun", LOOP_ENTRY, "daemon", "status", "--json", "--loop-data-root", daemon.root], { env: daemon.env })
-	assert(status.exitCode === 0, "daemon socket did not accept status")
+	await until(
+		() => command(["bun", LOOP_ENTRY, "daemon", "status", "--json", "--loop-data-root", daemon.root], { env: daemon.env, allowFail: true }),
+		(status) => status.exitCode === 0,
+		"daemon status readiness",
+	)
 }
 
 async function stopDaemon(daemon: Daemon): Promise<void> {
