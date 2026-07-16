@@ -4,13 +4,13 @@ import { resolve } from "node:path"
 
 import {
 	createSchedulerState,
-	schedulerSlotWorktreePath,
 	schedulerTick,
 	type SchedulerEvent,
 	type SchedulerOptions,
 	type SchedulerPhaseRunner,
 	type SchedulerWorktreeManager,
 } from "./scheduler"
+import { closureWorktreePath } from "./closure-lifecycle"
 import { loadPreset, type JsonObject } from "./loop"
 import { startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
 import { type ChainRecord, openSqliteStateStore } from "./sqlite-state"
@@ -446,8 +446,8 @@ async function createCrossRunnerFixture(name: string, responses: FakeRunnerRespo
 	const daemon = await startCoderLoopDaemon({ loopDataRoot, scheduler: { enabled: false } })
 	const state = daemon.schedulerExecutionState()
 	const schedulerEvents: SchedulerEvent[] = []
-	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
-		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd, closureId }) => {
+		const worktreePath = closureWorktreePath(loopDataRoot, chain.name, repoCwd, closureId)
 		await mkdir(worktreePath, { recursive: true })
 		return worktreePath
 	}

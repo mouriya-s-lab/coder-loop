@@ -30,6 +30,9 @@ export const ObservabilityEventTypeBoundary = arkType.or(
 	arkType.unit("item.reordered"),
 	arkType.unit("queue.terminal"),
 	arkType.unit("item.dependency_unblocked"),
+	arkType.unit("closure.resource_prepared"),
+	arkType.unit("closure.git_failed"),
+	arkType.unit("closure.reconciled"),
 	arkType.unit("slot.busy"),
 	arkType.unit("item.dependency_wait"),
 	arkType.unit("item.backoff"),
@@ -232,6 +235,20 @@ const TaskIdentityFields = {
 	definitionNodeId: "string>0",
 } as const
 
+const OriginFreshnessBoundary = arkType.or(
+	{ kind: arkType.unit("fetched"), remote: arkType.unit("origin"), commit: "string>0", observedAt: "string>0" },
+	{ kind: arkType.unit("no-origin"), availability: arkType.unit("unavailable"), commit: "string>0" },
+	{ kind: arkType.unit("retained"), commit: "string>0" },
+)
+
+const ClosureReconciliationMismatchBoundary = arkType.or(
+	{ kind: arkType.unit("missing-directory"), path: "string>0", repaired: arkType.unit(false) },
+	{ kind: arkType.unit("missing-branch"), branchName: "string>0", repaired: arkType.unit(false) },
+	{ kind: arkType.unit("orphan-directory"), path: "string>0", repaired: arkType.unit(true) },
+	{ kind: arkType.unit("orphan-branch"), branchName: "string>0", repaired: arkType.unit(true) },
+	{ kind: arkType.unit("hooks-drift"), hooksPath: "string>0", repaired: arkType.unit(false) },
+)
+
 const ReconciledRunBoundary = arkType({
 	runId: "string",
 	// `itemId` here is the integer rowid (FK to items.id) — `runs.item_id`. Kept as `itemId` for
@@ -318,6 +335,24 @@ const ObservabilityEventPayloadBoundary = arkType.or(
 		type: arkType.unit("item.dependency_unblocked"),
 		// #419 review I2: same rename — rowid moves from `itemId` to `rowId`.
 		payload: { rowId: "number", fromStatus: "string", toStatus: "string", dependsOn: "number[]" },
+	},
+	{
+		...EventBaseBoundary,
+		kind: arkType.unit("audit"),
+		type: arkType.unit("closure.resource_prepared"),
+		payload: { closureId: "string>0", worktreePath: "string>0", branchName: "string>0", baseCommit: "string>0", freshness: OriginFreshnessBoundary },
+	},
+	{
+		...EventBaseBoundary,
+		kind: arkType.unit("audit"),
+		type: arkType.unit("closure.git_failed"),
+		payload: { closureId: "string>0", code: "string>0", error: "string" },
+	},
+	{
+		...EventBaseBoundary,
+		kind: arkType.unit("audit"),
+		type: arkType.unit("closure.reconciled"),
+		payload: { closureId: arkType.or("string>0", "null"), repoCwd: "string", mismatch: ClosureReconciliationMismatchBoundary },
 	},
 	{
 		...EventBaseBoundary,
@@ -991,6 +1026,12 @@ function renderAuditEvent(event: Extract<ObservabilityEvent, { kind: "audit" }>)
 			return `${event.ts} audit queue.terminal chain=${event.chain ?? "-"} item=${event.item ?? event.payload.rowId} status=${event.payload.terminalStatus}`
 		case "item.dependency_unblocked":
 			return `${event.ts} audit item.dependency_unblocked chain=${event.chain ?? "-"} item=${event.item ?? event.payload.rowId} ${event.payload.fromStatus}->${event.payload.toStatus}`
+		case "closure.resource_prepared":
+			return `${event.ts} audit closure.resource_prepared chain=${event.chain ?? "-"} closure=${event.payload.closureId} branch=${event.payload.branchName} freshness=${event.payload.freshness.kind}`
+		case "closure.git_failed":
+			return `${event.ts} audit closure.git_failed chain=${event.chain ?? "-"} closure=${event.payload.closureId} code=${event.payload.code}`
+		case "closure.reconciled":
+			return `${event.ts} audit closure.reconciled chain=${event.chain ?? "-"} closure=${event.payload.closureId ?? "-"} mismatch=${event.payload.mismatch.kind} repaired=${event.payload.mismatch.repaired}`
 		case "item.status.write_admission":
 			// #397: render shape mirrors the payload — outcome + reason carry the deny diagnostic
 			// (allowed exits set follows so operators reading a default-deny rejection see what the

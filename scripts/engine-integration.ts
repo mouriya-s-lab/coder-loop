@@ -6,9 +6,9 @@
  * 单命令驱动一轮完整、本地、确定性的引擎进程级验收：
  *   本地 git fixture → 隔离 loop-data 起真实中央 daemon → chain create + item add →
  *   引擎按 preset phase 顺序真实 spawn 子进程 stub runner（PATH shim 把 `claude`
- *   解析到 scripts/engine-integration-stub-runner.ts）→ iteration 在 slot worktree 真实
+ *   解析到 scripts/engine-integration-stub-runner.ts）→ iteration 在 closure worktree 真实
  *   commit → review 经 daemon socket 凭据准入（#397 gate）写终态 → 断言 SQLite
- *   runs / 审计事件 / worktree 回收 / 无孤儿 → teardown。
+ *   runs / 审计事件 / terminal closure 保留 / 显式 chain delete 回收 / 无孤儿 → teardown。
  *
  * 无 LLM、无 GitHub、无网络；不持有任何跨运行共享资源——多个实例可并发运行
  * （#681 并发前提）。预算：单次 60 秒内。
@@ -364,10 +364,24 @@ async function assertEngineOutcome(
 	}
 }
 
-// chain 完成（唯一 item 落 done）时引擎调用 cleanupSchedulerChainWorktrees 回收
-// slot worktree（src/scheduler.ts chain-completion 路径）；teardown 后这里断言回收结果。
+async function assertTerminalClosureRetained(fixtureCwd: string, loopDataRoot: string, chainName: string): Promise<void> {
+	log("assert: terminal 本身不消费 active closure，worktree 保留到显式 chain delete")
+	const worktreesDir = resolve(loopDataRoot, "chains", chainName, "worktrees")
+	const leftovers = existsSync(worktreesDir) ? await readdir(worktreesDir) : []
+	if (leftovers.length === 0) fail(`terminal chain 未保留 closure worktree: ${worktreesDir}`)
+	const registered = sh(["git", "worktree", "list", "--porcelain"], { cwd: fixtureCwd }).stdout
+	const entries = registered.split("\n\n").filter((block) => block.trim().startsWith("worktree "))
+	if (entries.length <= 1) fail(`terminal chain 的 closure worktree 未注册:\n${registered}`)
+}
+
+function deleteChain(daemon: DaemonHandle, chainName: string): void {
+	log("chain delete: 显式消费 closure 并回收其 engine-owned resources")
+	sh(["bun", LOOP_ENTRY, "chain", "delete", chainName, "--loop-data-root", daemon.loopDataRoot, "--json"], { env: daemon.shimmedEnv })
+}
+
+// Explicit chain deletion consumes the retained closures and owns their final cleanup.
 async function assertWorktreesRecycled(fixtureCwd: string, loopDataRoot: string, chainName: string): Promise<void> {
-	log("assert: 引擎 slot worktree 已回收")
+	log("assert: 显式 chain delete 后 closure worktree 已回收")
 	const worktreesDir = resolve(loopDataRoot, "chains", chainName, "worktrees")
 	if (existsSync(worktreesDir)) {
 		const leftovers = await readdir(worktreesDir)
@@ -438,8 +452,10 @@ async function main(): Promise<number> {
 		}
 
 		const evidence = await assertEngineOutcome(fixtureCwd, daemon, chainName, startedAt)
-		await stopDaemon(daemon)
+		await assertTerminalClosureRetained(fixtureCwd, daemon.loopDataRoot, chainName)
+		deleteChain(daemon, chainName)
 		await assertWorktreesRecycled(fixtureCwd, daemon.loopDataRoot, chainName)
+		await stopDaemon(daemon)
 		assertNoOrphans(daemon.loopDataRoot)
 
 		log("")

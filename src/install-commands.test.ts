@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { resolve } from "node:path"
-import { buildLiveRuntimeHealthLines } from "./install-commands"
+import { buildGitOriginHealthLine, buildLiveRuntimeHealthLines } from "./install-commands"
 import { buildCoderLoopStatusSnapshot } from "./loop"
 import { openSqliteStateStore } from "./sqlite-state"
 import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedItemExtra } from "./runtime-data"
@@ -37,6 +37,14 @@ describe("buildLiveRuntimeHealthLines", () => {
 })
 
 describe("doctor command ownership", () => {
+	test("no-origin repository is a warning rather than a doctor failure", async () => {
+		const target = resolve(TEST_ROOT, "doctor-no-origin")
+		await mkdir(target, { recursive: true })
+		const init = Bun.spawnSync({ cmd: ["git", "init", "--initial-branch", "main"], cwd: target, stdout: "pipe", stderr: "pipe" })
+		expect(init.exitCode).toBe(0)
+		expect(await buildGitOriginHealthLine(target)).toBe("WARN: git origin unavailable; closure freshness=no-origin/unavailable")
+	})
+
 	test("does not carry the preset kind label bootstrap asset", async () => {
 		const source = await readFile(resolve(REPO_ROOT, "src/install-commands.ts"), "utf-8")
 		expect(source).not.toContain("KIND_LABELS")

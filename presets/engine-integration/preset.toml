@@ -50,11 +50,11 @@ runner = "claude"
 
   [[phases.exits]]
   status = "done"
-  when   = "The iteration phase committed the run marker in the shared slot worktree."
+  when   = "The iteration phase committed the run marker on its engine-owned closure branch."
 
   [[phases.exits]]
   status = "changes_requested"
-  when   = "The run marker commit is missing from the worktree; iteration must retry."
+  when   = "The run marker commit is missing from the iteration closure branch; iteration must retry."
 
   [phases.variables]
   CHAIN_NAME = { source = "runtime.chainName", label = "Chain name" }

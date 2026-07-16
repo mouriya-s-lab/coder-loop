@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
-import { mkdir, writeFile } from "node:fs/promises"
-import { createWriteStream, existsSync, realpathSync, rmSync, type WriteStream } from "node:fs"
-import { basename, dirname, isAbsolute, resolve } from "node:path"
+import { mkdir, readdir, rm, writeFile } from "node:fs/promises"
+import { createWriteStream, existsSync, realpathSync, type WriteStream } from "node:fs"
+import { dirname, isAbsolute, resolve } from "node:path"
 
 import {
 	buildRenderBindings,
@@ -66,6 +66,15 @@ import {
 } from "./runtime-paths"
 import { collectObservabilityExcerpt, type ObservabilityExcerpt } from "./observability"
 import { createStreamTextState } from "./runner-output"
+import {
+	closureBranchName,
+	closureBranchPrefix,
+	closureWorktreePath,
+	createRepositoryGitCoordinator,
+	persistedParPin,
+	type RepositoryGitCoordinator,
+} from "./closure-lifecycle"
+import type { ClosureSnapshot, TaskNodeSnapshot } from "./task-runtime"
 
 // #452: completion signal is the daemon-observed state write, not a stdout marker.
 // The previous "per-run nonce summary tag" prompt injection + stdout watchdog
@@ -189,6 +198,8 @@ export type SchedulerStore = Pick<
 	| "setCurrentRun"
 	| "getCurrentRun"
 	| "clearCurrentRun"
+	| "getTaskTree"
+	| "setClosureResources"
 >
 
 export type SchedulerSpawnContext = {
@@ -204,14 +215,33 @@ export type SchedulerSpawnContext = {
 
 export type SchedulerWorktreeContext = {
 	chain: ChainRecord
+	item: ItemRecord
+	phase: string
+	closureId: string
 	repoCwd: string
 	slotKey: string
+	existing: ClosureSnapshot | null
 }
 
-export type SchedulerWorktreeManager = (context: SchedulerWorktreeContext) => Promise<string>
+export type OriginFreshness =
+	| { kind: "fetched"; remote: "origin"; commit: string; observedAt: string }
+	| { kind: "no-origin"; availability: "unavailable"; commit: string }
+	| { kind: "retained"; commit: string }
+
+export type SchedulerClosureResources = {
+	worktreePath: string
+	branchName: string
+	baseCommit: string
+	freshness: OriginFreshness
+}
+
+export type SchedulerWorktreeManager = (context: SchedulerWorktreeContext) => Promise<SchedulerClosureResources | string>
 
 export type SchedulerEvent =
 	| { type: "slot.busy"; slotKey: string; chainId: number; repoCwd: string; activeRunId: string }
+	| { type: "closure.resource_prepared"; chainId: number; itemId: number; phase: string; closureId: string; worktreePath: string; branchName: string; baseCommit: string; freshness: OriginFreshness }
+	| { type: "closure.git_failed"; chainId: number; itemId: number; phase: string; closureId: string; code: SchedulerError["code"]; error: string }
+	| { type: "closure.reconciled"; chainId: number; closureId: string | null; repoCwd: string; mismatch: ClosureReconciliationMismatch }
 	// #419 review I2: `itemId` (rowid integer) renamed to `rowId` for wire-shape consistency
 	// with other `item.*` audit events that use the split shape `{ rowId: number, itemId: string }`.
 	// `itemId` on the audit wire now uniformly means the opaque preset-declared string identity;
@@ -840,53 +870,46 @@ export function schedulerSlotKey(chainId: number, repoCwd: string): string {
 	return `${chainId}\u0000${repoCwd}`
 }
 
-export function schedulerSlotWorktreePath(chain: ChainRecord, repoCwd: string, options: LoopDataRootOptions = {}): string {
-	const chainPaths = resolveChainRuntimePaths(chain.name, options)
-	const repoLabel = safePathComponent(basename(repoCwd) || "repo")
-	const repoHash = createHash("sha256").update(repoCwd).digest("hex").slice(0, 16)
-	return resolve(chainPaths.chainRoot, "worktrees", `${repoLabel}-${repoHash}`)
-}
+const repositoryGitCoordinator = createRepositoryGitCoordinator()
 
-function schedulerSlotBranchName(chain: ChainRecord, repoCwd: string): string {
-	return `coder-loop/${safeGitRefComponent(chain.name)}-${createHash("sha256").update(repoCwd).digest("hex").slice(0, 12)}`
-}
-
-export function createGitWorktreeManager(options: LoopDataRootOptions = {}): SchedulerWorktreeManager {
-	return async ({ chain, repoCwd }) => {
-		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, options)
+export function createGitWorktreeManager(
+	options: LoopDataRootOptions = {},
+	coordinator: RepositoryGitCoordinator = repositoryGitCoordinator,
+): SchedulerWorktreeManager {
+	return async (context) => coordinator.run(context.repoCwd, async () => {
+		const loopDataRoot = resolveLoopDataPaths(options).root
+		const expectedWorktreePath = closureWorktreePath(loopDataRoot, context.chain.name, context.repoCwd, context.closureId)
+		const expectedBranchName = closureBranchName(context.chain.name, context.closureId)
+		// Compatibility provisioning materializes every phase closure from the first run
+		// packet and therefore may have copied that first closure's resource tuple into
+		// unopened siblings. Only a tuple derived from this closure identity is retainable.
+		const worktreePath = context.existing?.worktreePath === expectedWorktreePath
+			? context.existing.worktreePath
+			: expectedWorktreePath
+		const branchName = context.existing?.branchName === expectedBranchName
+			? context.existing.branchName
+			: expectedBranchName
 		await mkdir(dirname(worktreePath), { recursive: true })
-		if (gitWorktreeListIncludesPath(repoCwd, worktreePath)) {
-			if (existsSync(worktreePath)) return worktreePath
-			// Registered but the directory is gone (deleted loop-data root): clear the corpse
-			// registration so the add below can recreate the worktree.
-			git(repoCwd, ["worktree", "prune"])
+		if (await gitWorktreeListIncludesPath(context.repoCwd, worktreePath)) {
+			if (!existsSync(worktreePath)) await git(context.repoCwd, ["worktree", "prune"])
+			else {
+				const head = await requireGitCommit(worktreePath, "HEAD", "closure_head_unavailable")
+				return { worktreePath, branchName, baseCommit: context.existing?.baseCommit ?? head, freshness: { kind: "retained", commit: head } }
+			}
 		}
 
-		const branchName = schedulerSlotBranchName(chain, repoCwd)
-		const startRef = chooseWorktreeStartRef(repoCwd, chain.baseBranch)
-		let result = git(repoCwd, ["worktree", "add", "-B", branchName, worktreePath, startRef])
-		if (result.exitCode !== 0 && removeStaleSlotBranchWorktree(repoCwd, result.stderr)) {
-			result = git(repoCwd, ["worktree", "add", "-B", branchName, worktreePath, startRef])
-		}
-		if (result.exitCode !== 0) {
-			throw new SchedulerError("worktree_create_failed", `failed to create scheduler worktree at ${worktreePath}: ${result.stderr}`)
-		}
-		return worktreePath
-	}
-}
-
-// A daemon killed mid-run leaves its slot worktree checked out on the engine-owned
-// `coder-loop/...` slot branch; git then refuses `worktree add -B` for that branch
-// ("already used by worktree at <path>") from any future loop-data root, permanently
-// wedging every later chain on the same repository. The slot branch name proves the
-// conflicting worktree is engine-created scrap, so force-remove the stale registration
-// and let the caller retry the add once.
-function removeStaleSlotBranchWorktree(repoCwd: string, stderr: string): boolean {
-	const match = stderr.match(/already used by worktree at '([^']+)'/)
-	if (match === null) return false
-	const removeResult = git(repoCwd, ["worktree", "remove", "--force", match[1]!])
-	if (removeResult.exitCode !== 0) git(repoCwd, ["worktree", "prune"])
-	return true
+		const parPin = persistedParPin(context.existing)
+		const base = parPin === null
+			? await resolveClosureBase(context.repoCwd, context.chain.baseBranch)
+			: { commit: parPin, freshness: { kind: "retained", commit: parPin } as const }
+		const shortBranch = branchName.replace(/^refs\/heads\//, "")
+		const branchExists = (await git(context.repoCwd, ["show-ref", "--verify", "--quiet", branchName])).exitCode === 0
+		const result = await git(context.repoCwd, branchExists
+			? ["worktree", "add", worktreePath, branchName]
+			: ["worktree", "add", "-b", shortBranch, worktreePath, base.commit])
+		if (result.exitCode !== 0) throw new SchedulerError("worktree_create_failed", `failed to create closure worktree ${context.closureId} at ${worktreePath}: ${result.stderr}`)
+		return { worktreePath, branchName, baseCommit: base.commit, freshness: base.freshness }
+	})
 }
 
 export type SchedulerChainWorktreeCleanup = {
@@ -899,55 +922,121 @@ export type SchedulerChainWorktreeCleanup = {
 	error: string | null
 }
 
-export function cleanupSchedulerChainWorktrees(
-	chain: ChainRecord,
-	repoCwds: readonly string[],
-	options: LoopDataRootOptions = {},
-): SchedulerChainWorktreeCleanup[] {
-	const cleaned: SchedulerChainWorktreeCleanup[] = []
-	for (const repoCwd of distinct(repoCwds)) {
-		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, options)
-		const listResult = git(repoCwd, ["worktree", "list", "--porcelain"])
-		if (listResult.exitCode !== 0) {
-			cleaned.push({
-				repoCwd,
-				worktreePath,
-				registered: false,
-				removed: false,
-				directoryRemoved: false,
-				pruned: false,
-				error: `git worktree list failed (exit ${listResult.exitCode}): ${listResult.stderr}`,
-			})
-			continue
-		}
+export type ClosureReconciliationMismatch =
+	| { kind: "missing-directory"; path: string; repaired: false }
+	| { kind: "missing-branch"; branchName: string; repaired: false }
+	| { kind: "orphan-directory"; path: string; repaired: true }
+	| { kind: "orphan-branch"; branchName: string; repaired: true }
+	| { kind: "hooks-drift"; hooksPath: string; repaired: false }
 
-		const registered = gitWorktreeListOutputIncludesPath(listResult.stdout, worktreePath)
-		let removed = false
-		let directoryRemoved = false
-		let error: string | null = null
-		if (registered && existsSync(worktreePath)) {
-			const removeResult = git(repoCwd, ["worktree", "remove", "--force", worktreePath])
-			removed = removeResult.exitCode === 0
-			if (!removed) error = `git worktree remove failed (exit ${removeResult.exitCode}): ${removeResult.stderr}`
+export async function reconcileClosureResources(input: {
+	chain: ChainRecord
+	items: readonly ItemRecord[]
+	tree: TaskNodeSnapshot | null
+	loopDataRootOptions?: LoopDataRootOptions
+}): Promise<{ closureId: string | null; repoCwd: string; mismatch: ClosureReconciliationMismatch }[]> {
+	const findings: { closureId: string | null; repoCwd: string; mismatch: ClosureReconciliationMismatch }[] = []
+	const items = new Map(input.items.map((item) => [item.id, item]))
+	const closures = collectClosures(input.tree)
+	const registeredPaths = new Set(closures.flatMap((closure) => closure.worktreePath === null ? [] : [closure.worktreePath]))
+	const branchesByRepo = new Map<string, Set<string>>()
+	for (const closure of closures) {
+		const item = items.get(closure.itemRowId)
+		if (item === undefined || closure.lifecycle === "consumed") continue
+		if (closure.worktreePath !== null && !existsSync(closure.worktreePath)) findings.push({ closureId: closure.closureId, repoCwd: item.repoCwd, mismatch: { kind: "missing-directory", path: closure.worktreePath, repaired: false } })
+		if (closure.branchName !== null) {
+			const branches = branchesByRepo.get(item.repoCwd) ?? new Set<string>()
+			branches.add(closure.branchName)
+			branchesByRepo.set(item.repoCwd, branches)
+			if ((await git(item.repoCwd, ["show-ref", "--verify", "--quiet", closure.branchName])).exitCode !== 0) findings.push({ closureId: closure.closureId, repoCwd: item.repoCwd, mismatch: { kind: "missing-branch", branchName: closure.branchName, repaired: false } })
 		}
-		if ((removed || !registered) && existsSync(worktreePath)) {
-			try {
-				rmSync(worktreePath, { recursive: true, force: true })
-				directoryRemoved = true
-			} catch (cleanupError) {
-				const directoryError = `worktree directory remove failed: ${errorMessage(cleanupError)}`
-				error = error === null ? directoryError : `${error}; ${directoryError}`
+	}
+	for (const repoCwd of new Set(input.items.map((item) => item.repoCwd))) {
+		await repositoryGitCoordinator.run(repoCwd, async () => {
+			const hooks = await git(repoCwd, ["config", "--get", "core.hooksPath"])
+			if (hooks.exitCode === 0 && hooks.stdout !== "") findings.push({ closureId: null, repoCwd, mismatch: { kind: "hooks-drift", hooksPath: hooks.stdout, repaired: false } })
+			const prefix = closureBranchPrefix(input.chain.name)
+			const listed = await git(repoCwd, ["for-each-ref", "--format=%(refname)", "refs/heads"])
+			if (listed.exitCode === 0) for (const branchName of listed.stdout.split("\n").filter((name) => name.startsWith(prefix))) {
+				if (branchesByRepo.get(repoCwd)?.has(branchName) === true) continue
+				if ((await git(repoCwd, ["update-ref", "-d", branchName])).exitCode === 0) findings.push({ closureId: null, repoCwd, mismatch: { kind: "orphan-branch", branchName, repaired: true } })
 			}
+		})
+	}
+	const worktreeRoot = resolve(resolveChainRuntimePaths(input.chain.name, input.loopDataRootOptions).chainRoot, "worktrees")
+	try {
+		for (const entry of await readdir(worktreeRoot, { withFileTypes: true })) {
+			if (!entry.isDirectory()) continue
+			const path = resolve(worktreeRoot, entry.name)
+			if (registeredPaths.has(path)) continue
+			await rm(path, { recursive: true, force: true })
+			findings.push({ closureId: null, repoCwd: input.items[0]?.repoCwd ?? "", mismatch: { kind: "orphan-directory", path, repaired: true } })
 		}
+	} catch (error) {
+		if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error
+	}
+	return findings
+}
 
-		const pruneResult = git(repoCwd, ["worktree", "prune"])
-		const pruned = pruneResult.exitCode === 0
-		if (!pruned) {
-			const pruneError = `git worktree prune failed (exit ${pruneResult.exitCode}): ${pruneResult.stderr}`
-			error = error === null ? pruneError : `${error}; ${pruneError}`
-		}
+function collectClosures(node: TaskNodeSnapshot | null): ClosureSnapshot[] {
+	if (node === null) return []
+	if (node.kind === "leaf") return [node.closure]
+	return node.children.flatMap(collectClosures)
+}
 
-		cleaned.push({ repoCwd, worktreePath, registered, removed, directoryRemoved, pruned, error })
+export async function cleanupSchedulerChainWorktrees(
+	closures: readonly { repoCwd: string; closure: ClosureSnapshot }[],
+): Promise<SchedulerChainWorktreeCleanup[]> {
+	const cleaned: SchedulerChainWorktreeCleanup[] = []
+	for (const { repoCwd, closure } of closures) {
+		if (closure.lifecycle !== "consumed" || closure.worktreePath === null || closure.branchName === null) continue
+		const worktreePath = closure.worktreePath
+		const branchName = closure.branchName
+		const result = await repositoryGitCoordinator.run(repoCwd, async (): Promise<SchedulerChainWorktreeCleanup> => {
+			const listResult = await git(repoCwd, ["worktree", "list", "--porcelain"])
+			if (listResult.exitCode !== 0) {
+				return {
+					repoCwd,
+					worktreePath,
+					registered: false,
+					removed: false,
+					directoryRemoved: false,
+					pruned: false,
+					error: `git worktree list failed (exit ${listResult.exitCode}): ${listResult.stderr}`,
+				}
+			}
+
+			const registered = gitWorktreeListOutputIncludesPath(listResult.stdout, worktreePath)
+			let removed = false
+			let directoryRemoved = false
+			let error: string | null = null
+			if (registered && existsSync(worktreePath)) {
+				const removeResult = await git(repoCwd, ["worktree", "remove", "--force", worktreePath])
+				removed = removeResult.exitCode === 0
+				if (!removed) error = `git worktree remove failed (exit ${removeResult.exitCode}): ${removeResult.stderr}`
+			}
+			if ((removed || !registered) && existsSync(worktreePath)) {
+				try {
+					await rm(worktreePath, { recursive: true, force: true })
+					directoryRemoved = true
+				} catch (cleanupError) {
+					const directoryError = `worktree directory remove failed: ${errorMessage(cleanupError)}`
+					error = error === null ? directoryError : `${error}; ${directoryError}`
+				}
+			}
+
+			const deleteBranchResult = await git(repoCwd, ["update-ref", "-d", branchName])
+			const pruneResult = await git(repoCwd, ["worktree", "prune"])
+			const pruned = pruneResult.exitCode === 0
+			if (deleteBranchResult.exitCode !== 0) error = `git update-ref failed (exit ${deleteBranchResult.exitCode}): ${deleteBranchResult.stderr}`
+			if (!pruned) {
+				const pruneError = `git worktree prune failed (exit ${pruneResult.exitCode}): ${pruneResult.stderr}`
+				error = error === null ? pruneError : `${error}; ${pruneError}`
+			}
+
+			return { repoCwd, worktreePath, registered, removed, directoryRemoved, pruned, error }
+		})
+		cleaned.push(result)
 	}
 	return cleaned
 }
@@ -960,9 +1049,29 @@ export function listPendingCloseHandlers(state: SchedulerState): Promise<Schedul
 	return [...state.pendingCloseHandlers]
 }
 
+function findClosure(node: TaskNodeSnapshot | null, closureId: string): ClosureSnapshot | null {
+	if (node === null) return null
+	if (node.kind === "leaf") return node.closure.closureId === closureId ? node.closure : null
+	for (const child of node.children) {
+		const found = findClosure(child, closureId)
+		if (found !== null) return found
+	}
+	return null
+}
+
+function findClosureForItemPhase(node: TaskNodeSnapshot | null, itemRowId: number, phase: string): ClosureSnapshot | null {
+	if (node === null) return null
+	if (node.kind === "leaf") return node.closure.itemRowId === itemRowId && node.closure.phase === phase ? node.closure : null
+	for (const child of node.children) {
+		const found = findClosureForItemPhase(child, itemRowId, phase)
+		if (found !== null) return found
+	}
+	return null
+}
+
 export class SchedulerError extends Error {
 	constructor(
-		readonly code: "max_ticks_exceeded" | "worktree_create_failed" | "spawn_failed",
+		readonly code: "max_ticks_exceeded" | "worktree_create_failed" | "base_fetch_failed" | "base_resolve_failed" | "local_base_missing" | "closure_head_unavailable" | "spawn_failed",
 		message: string,
 	) {
 		super(message)
@@ -986,11 +1095,22 @@ async function spawnSchedulerRun(
 	let credential: SchedulerRunCredential | null = null
 	let credentialContext: SchedulerRunCredentialContext | null = null
 	let activeRun: SchedulerPreparingRun | null = null
+	let closureId = `closure:${item.id}:${phase}`
 	try {
-		worktreePath = worktreePath ?? await worktreeManager({ chain, repoCwd: item.repoCwd, slotKey: slot.key })
-		slot.worktreePath = worktreePath
-		const baseCommitResult = git(worktreePath, ["rev-parse", "HEAD"])
-		const branchName = schedulerSlotBranchName(chain, item.repoCwd)
+		const existingClosure = findClosureForItemPhase(options.store.getTaskTree(chain.id)?.root ?? null, item.id, phase)
+		closureId = existingClosure?.closureId ?? closureId
+		const managed = await worktreeManager({ chain, item, phase, closureId, repoCwd: item.repoCwd, slotKey: slot.key, existing: existingClosure })
+		const resources = typeof managed === "string"
+			? {
+				worktreePath: managed,
+				branchName: existingClosure?.branchName ?? closureBranchName(chain.name, closureId),
+				baseCommit: existingClosure?.baseCommit ?? await requireGitCommit(managed, "HEAD", "closure_head_unavailable"),
+				freshness: { kind: "retained", commit: existingClosure?.baseCommit ?? await requireGitCommit(managed, "HEAD", "closure_head_unavailable") } as const,
+			}
+			: managed
+		worktreePath = resources.worktreePath
+		const branchName = resources.branchName
+		await emit(options, { type: "closure.resource_prepared", chainId: chain.id, itemId: item.id, phase, closureId, worktreePath, branchName, baseCommit: resources.baseCommit, freshness: resources.freshness })
 
 		const runner = await resolvePhaseRunner(options, { chain, item, phase })
 		const loadedPreset = await schedulerLoadedPresetForItem(options, chain, item)
@@ -1011,8 +1131,9 @@ async function spawnSchedulerRun(
 				slotKey: slot.key,
 				repoCwd: item.repoCwd,
 				worktreePath,
-				...(baseCommitResult.exitCode === 0 && baseCommitResult.stdout !== "" ? { baseCommit: baseCommitResult.stdout } : {}),
+				baseCommit: resources.baseCommit,
 				branchName,
+				originFreshness: resources.freshness,
 				definitionKind: "preset",
 				definitionContentIdentity,
 				definitionPhases: loadedPreset.preset.tasks.children.map((phaseTree) => ({
@@ -1023,6 +1144,11 @@ async function spawnSchedulerRun(
 				startStatusUpdatedAt: item.statusUpdatedAt,
 				...(item.phase === null ? {} : { startPhase: item.phase }),
 			}),
+		})
+		options.store.setClosureResources(closureId, {
+			worktreePath: resources.worktreePath,
+			branchName: resources.branchName,
+			updatedAt: startedAt,
 		})
 		options.store.setCurrentRun({
 			chainId: chain.id,
@@ -1125,6 +1251,9 @@ async function spawnSchedulerRun(
 		activeRun.markPrepared()
 		return activeRun
 	} catch (error) {
+		if (error instanceof SchedulerError && error.code !== "spawn_failed" && error.code !== "max_ticks_exceeded") {
+			await emit(options, { type: "closure.git_failed", chainId: chain.id, itemId: item.id, phase, closureId, code: error.code, error: error.message })
+		}
 		const failure = await cleanupFailedRunPreparation(options, chain, item, slot, {
 			runId,
 			activeRun,
@@ -2045,7 +2174,10 @@ async function completeChainIfReady(options: SchedulerOptions, chain: ChainRecor
 		if (!allItemsTerminalIncludingFinalizing(options, chain.id, effectiveTerminalStatuses)) return false
 		const updated = options.store.updateChain(chain.id, { status: "completed", updatedAt: nowSeconds(options) })
 		await emit(options, { type: "chain.completed", chainId: current.id, chainName: current.name, ...(runId === undefined ? {} : { runId }) })
-		cleanupSchedulerChainWorktrees(updated, completionItems.map((item) => item.repoCwd), options.loopDataRootOptions)
+		// A terminal chain is not proof that a closure can never be reached again. #560
+		// consumption owns resource removal after its fixed-point recheck; completion only
+		// records scheduler state and deliberately preserves active/suspended closures.
+		void updated
 		return true
 	} finally {
 		options.state.finalizingChainIds.delete(chain.id)
@@ -2690,25 +2822,26 @@ async function writeSchedulerRunStatus(
 	}, null, "\t")}\n`)
 }
 
-function safePathComponent(input: string): string {
-	const sanitized = input.replace(/[^A-Za-z0-9._-]/g, "_")
-	return sanitized === "" || sanitized === "." || sanitized.includes("..") ? "repo" : sanitized
-}
-
-function safeGitRefComponent(input: string): string {
-	return input.replace(/[^A-Za-z0-9._-]/g, "_").replace(/\.+/g, ".").replace(/^\.+|\.+$/g, "") || "chain"
-}
-
-function chooseWorktreeStartRef(repoCwd: string, baseBranch: string): string {
-	for (const candidate of [`origin/${baseBranch}`, baseBranch, "HEAD"]) {
-		if (git(repoCwd, ["rev-parse", "--verify", candidate]).exitCode === 0) return candidate
+async function resolveClosureBase(repoCwd: string, baseBranch: string): Promise<{ commit: string; freshness: OriginFreshness }> {
+	const origin = await git(repoCwd, ["remote", "get-url", "origin"])
+	if (origin.exitCode === 0) {
+		const fetched = await git(repoCwd, ["fetch", "--no-tags", "origin", baseBranch])
+		if (fetched.exitCode !== 0) throw new SchedulerError("base_fetch_failed", `git fetch origin ${baseBranch} failed: ${fetched.stderr}`)
+		const commit = await requireGitCommit(repoCwd, `refs/remotes/origin/${baseBranch}^{commit}`, "base_resolve_failed")
+		return { commit, freshness: { kind: "fetched", remote: "origin", commit, observedAt: new Date().toISOString() } }
 	}
-	return "HEAD"
+	const commit = await requireGitCommit(repoCwd, `refs/heads/${baseBranch}^{commit}`, "local_base_missing")
+	return { commit, freshness: { kind: "no-origin", availability: "unavailable", commit } }
 }
 
-function gitWorktreeListIncludesPath(repoCwd: string, expectedPath: string): boolean {
-	if (!existsSync(expectedPath)) return false
-	const result = git(repoCwd, ["worktree", "list", "--porcelain"])
+async function requireGitCommit(cwd: string, ref: string, code: "closure_head_unavailable" | "base_resolve_failed" | "local_base_missing"): Promise<string> {
+	const result = await git(cwd, ["rev-parse", "--verify", ref])
+	if (result.exitCode !== 0 || result.stdout === "") throw new SchedulerError(code, `git could not resolve ${ref}: ${result.stderr}`)
+	return result.stdout
+}
+
+async function gitWorktreeListIncludesPath(repoCwd: string, expectedPath: string): Promise<boolean> {
+	const result = await git(repoCwd, ["worktree", "list", "--porcelain"])
 	if (result.exitCode !== 0) return false
 	return gitWorktreeListOutputIncludesPath(result.stdout, expectedPath)
 }
@@ -2740,17 +2873,16 @@ function hasValidChainName(chainName: string): boolean {
 	}
 }
 
-function git(cwd: string, args: readonly string[]): { stdout: string; stderr: string; exitCode: number } {
-	try {
-		const proc = Bun.spawnSync({ cmd: ["git", ...args], cwd, stdout: "pipe", stderr: "pipe" })
-		return {
-			stdout: new TextDecoder().decode(proc.stdout).trim(),
-			stderr: new TextDecoder().decode(proc.stderr).trim(),
-			exitCode: proc.exitCode,
-		}
-	} catch (error) {
-		return { stdout: "", stderr: errorMessage(error), exitCode: 1 }
-	}
+async function git(cwd: string, args: readonly string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+	return await new Promise((resolveResult) => {
+		const child = spawn("git", [...args], { cwd, stdio: ["ignore", "pipe", "pipe"] })
+		const stdout: Buffer[] = []
+		const stderr: Buffer[] = []
+		child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk))
+		child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk))
+		child.on("error", (error) => resolveResult({ stdout: "", stderr: errorMessage(error), exitCode: 1 }))
+		child.on("close", (code) => resolveResult({ stdout: Buffer.concat(stdout).toString("utf8").trim(), stderr: Buffer.concat(stderr).toString("utf8").trim(), exitCode: code ?? 1 }))
+	})
 }
 
 export async function presetExecutionContentIdentity(loaded: SchedulerLoadedPreset): Promise<string> {

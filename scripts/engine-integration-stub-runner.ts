@@ -4,7 +4,7 @@
  *
  * 由引擎当作 `claude` runner 真实 spawn（scripts/engine-integration.ts 把 shim 目录前置到
  * PATH，`claude` 解析到本脚本）。它走真实 agent 的全部引擎面：
- *   - 进程从 scheduler spawn，cwd 是引擎创建的 slot worktree；
+ *   - 进程从 scheduler spawn，cwd 是引擎为当前 closure 创建的 worktree；
  *   - stdout 首行输出 stream-json 形状的 session_id，供 parseSessionIdFromStream 捕获；
  *   - iteration phase 在 worktree 里做真实 git commit；
  *   - review phase 用 `coder-loop item update --status`（PATH 上的 shim → src/loop.ts）
@@ -14,8 +14,9 @@
  */
 
 import { spawnSync } from "node:child_process"
-import { existsSync, writeFileSync } from "node:fs"
+import { writeFileSync } from "node:fs"
 import { randomUUID } from "node:crypto"
+import { closureBranchPrefix } from "../src/closure-lifecycle"
 
 export type StubPromptFacts = {
 	phase: string
@@ -71,8 +72,13 @@ function runIteration(facts: StubPromptFacts): void {
 }
 
 function runReview(facts: StubPromptFacts): void {
-	const committed = existsSync(MARKER_FILENAME)
-		&& sh(["git", "log", "-1", "--name-only", "--pretty=format:"]).stdout.includes(MARKER_FILENAME)
+	const refs = mustSh(["git", "for-each-ref", "--format=%(refname)", closureBranchPrefix(facts.chain)])
+		.split("\n")
+		.filter((ref) => ref !== "")
+	const committed = refs.some((ref) => {
+		const marker = sh(["git", "show", `${ref}:${MARKER_FILENAME}`])
+		return marker.exitCode === 0 && marker.stdout.includes(`item: ${facts.item}\n`)
+	})
 	const status = committed ? "done" : "changes_requested"
 	// PATH 上的 `coder-loop` 是 harness shim → src/loop.ts；CODER_LOOP_DATA_DIR /
 	// CODER_LOOP_RUN_CRED 由 scheduler spawn env 注入并被本进程继承，CLI 自动附加凭据。

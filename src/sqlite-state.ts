@@ -29,6 +29,7 @@ import {
 	type TaskTreeSnapshot,
 } from "./task-runtime"
 import { contextScopeKey, parseContextAuthor, parsePersistedContextEntryRow, persistedContextScope, type AppendContextEntryInput, type ContextEntry, type PersistedContextEntryRow } from "./context-entry"
+import { computeClosureReachability, type ClosureReachabilityModel } from "./closure-lifecycle"
 
 export type SqliteStateErrorCode =
 	| "db_unavailable"
@@ -274,6 +275,11 @@ export type ClosureLifecycleInput =
 	| { kind: "suspend"; updatedAt: number }
 	| { kind: "consume"; updatedAt: number }
 export type ClosureResourcesInput = { worktreePath: string | null; branchName: string | null; updatedAt: number }
+export type ClosureConsumptionEvidence = "no-work" | "published" | "unpublished-discarded" | "unevaluable"
+export type ConsumeClosureInput = { model: ClosureReachabilityModel; updatedAt: number; evidence?: ClosureConsumptionEvidence }
+export type ConsumeClosureResult =
+	| { kind: "retained"; closureId: string; reason: "reachable" | "active-run" | "already-consumed" }
+	| { kind: "consumed"; closure: ClosureSnapshot; evidence: ClosureConsumptionEvidence }
 export type JoinBindingRecord = { parNodeId: string; version: number; value: JoinValueSnapshot; authorKind: string; authorId: string; authorityClass: string; effectiveFromEpoch: number; createdAt: number }
 export type JoinEvaluationRecord = { parNodeId: string; epoch: number; bindingVersion: number; state: "evaluating" | "decided" | "consumed" }
 
@@ -319,6 +325,7 @@ export type SqliteStateStore = {
 	getTaskTree: (chainId: number) => TaskTreeSnapshot | null
 	setClosureLifecycle: (closureId: string, input: ClosureLifecycleInput) => ClosureSnapshot
 	setClosureResources: (closureId: string, input: ClosureResourcesInput) => ClosureSnapshot
+	consumeClosureIfUnreachable: (closureId: string, input: ConsumeClosureInput) => ConsumeClosureResult
 	listJoinBindings: (parNodeId: string) => JoinBindingRecord[]
 	listJoinEvaluations: (parNodeId: string) => JoinEvaluationRecord[]
 	appendContextEntry: (input: AppendContextEntryInput) => ContextEntry
@@ -1892,6 +1899,17 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 			if (current.lifecycle !== "consumed" && (input.worktreePath === null || input.branchName === null)) throw new SqliteStateError("closure_lifecycle_conflict", `closure ${closureId} resources can be absent only when consumed`, { closureId })
 			db.query<never, SqlParams>("UPDATE task_closures SET worktree_path = $worktreePath, branch_name = $branchName, updated_at = $updatedAt WHERE closure_id = $closureId").run({ closureId, worktreePath: input.worktreePath, branchName: input.branchName, updatedAt: input.updatedAt })
 			return requireClosureById(db, closureId)
+		}),
+
+		consumeClosureIfUnreachable: (closureId, input) => write("consume closure if unreachable", () => {
+			const current = requireClosureById(db, closureId)
+			if (current.lifecycle === "consumed") return { kind: "retained", closureId, reason: "already-consumed" }
+			const active = queryPersistedOne(db, "SELECT run_id FROM active_runs WHERE closure_id = $closureId", { closureId }, RunIdRowBoundary, `active_runs.${closureId}`)
+			if (active !== null) return { kind: "retained", closureId, reason: "active-run" }
+			if (computeClosureReachability(input.model).has(closureId)) return { kind: "retained", closureId, reason: "reachable" }
+			db.query<never, SqlParams>("UPDATE task_closures SET lifecycle = 'consumed', updated_at = $updatedAt WHERE closure_id = $closureId").run({ closureId, updatedAt: input.updatedAt })
+			db.query<never, SqlParams>("DELETE FROM closure_sessions WHERE closure_id = $closureId").run({ closureId })
+			return { kind: "consumed", closure: requireClosureById(db, closureId), evidence: input.evidence ?? "unevaluable" }
 		}),
 
 		listJoinBindings: (parNodeId) => read("list join bindings", () => listJoinBindingRecords(db, parNodeId)),

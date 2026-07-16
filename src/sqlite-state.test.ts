@@ -284,6 +284,27 @@ describe("sqlite state store", () => {
 		} finally { store.close() }
 	})
 
+	test("closure consumption rechecks fixed-point reachability in the serialized store write", async () => {
+		const { store } = await openTestStore("closure-consume-reachability")
+		try {
+			const chain = createFullChain(store)
+			const item = createFullItem(store, chain)
+			store.createTaskTree(chain.id, singleLeafTree(item))
+			const closureId = `closure-${item.id}`
+			const protectedResult = store.consumeClosureIfUnreachable(closureId, {
+				model: { closures: [closureId], seeds: [{ kind: "open-append", closureId }], edges: [] },
+				updatedAt: 1_800_000_110,
+			})
+			expect(protectedResult).toEqual({ kind: "retained", closureId, reason: "reachable" })
+			const consumed = store.consumeClosureIfUnreachable(closureId, {
+				model: { closures: [closureId], seeds: [], edges: [] },
+				updatedAt: 1_800_000_111,
+			})
+			expect(consumed.kind).toBe("consumed")
+			expect(store.getTaskTree(chain.id)?.root).toMatchObject({ closure: { lifecycle: "consumed", sessions: [] } })
+		} finally { store.close() }
+	})
+
 	test("run closure identity survives active relation cleanup", async () => {
 		const { store } = await openTestStore("run-closure-identity")
 		try {

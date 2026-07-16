@@ -6,12 +6,12 @@ import { daemonRequest, sendDaemonRequest, startCoderLoopDaemon, type CoderLoopD
 import {
 	createGitWorktreeManager,
 	createSchedulerState,
-	schedulerSlotWorktreePath,
 	schedulerTick,
 	type SchedulerEvent,
 	type SchedulerOptions,
 	type SchedulerWorktreeManager,
 } from "./scheduler"
+import { closureWorktreePath } from "./closure-lifecycle"
 import { resolveChainRuntimePaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
 import { loadPreset } from "./loop"
@@ -115,8 +115,8 @@ process.exit(1)
 		})
 		const state = createSchedulerState()
 		const schedulerEvents: SchedulerEvent[] = []
-		const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
-			const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+		const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd, closureId }) => {
+			const worktreePath = closureWorktreePath(loopDataRoot, chain.name, repoCwd, closureId)
 			await mkdir(worktreePath, { recursive: true })
 			return worktreePath
 		}
@@ -280,8 +280,8 @@ test("stopped chain does not block another active chain in the same scheduler ti
 			extra: storedItemExtra({}),
 		})
 		const state = createSchedulerState()
-		const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
-			const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+		const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd, closureId }) => {
+			const worktreePath = closureWorktreePath(loopDataRoot, chain.name, repoCwd, closureId)
 			await mkdir(worktreePath, { recursive: true })
 			return worktreePath
 		}
@@ -316,7 +316,7 @@ test("stopped chain does not block another active chain in the same scheduler ti
 	}
 })
 
-test("completed chain removes its real git worktree registration and local directory", async () => {
+test("completed chain retains its real closure worktree registration and local directory", async () => {
 	const root = resolve(TEST_ROOT, "completed-worktree-cleanup")
 	const loopDataRoot = resolve(root, "loop-data")
 	const target = resolve(root, "target")
@@ -388,12 +388,12 @@ console.log("done:" + input.itemId)
 
 		const completed = store.getChain(chain.id)
 		if (completed === null) throw new Error("expected completed chain")
-		const worktreePath = schedulerSlotWorktreePath(completed, target, { loopDataRoot })
+		const worktreePath = closureWorktreePath(loopDataRoot, completed.name, target, `closure:${item.id}:iteration`)
 		expect(store.getItem(item.id)?.status).toBe("done")
 		expect(completed.status).toBe("completed")
 		expect(schedulerEvents).toContainEqual(expect.objectContaining({ type: "chain.completed", chainId: chain.id }))
-		expect(await pathExists(worktreePath)).toBe(false)
-		expect(gitOutput(target, ["worktree", "list", "--porcelain"])).not.toContain(worktreePath)
+		expect(await pathExists(worktreePath)).toBe(true)
+		expect(gitOutput(target, ["worktree", "list", "--porcelain"])).toContain(worktreePath)
 	} finally {
 		await runtime.daemon.stop()
 		store.close()
@@ -439,8 +439,8 @@ console.log(input.phase + ":" + status)
 		})
 		const state = runtime.daemon.schedulerExecutionState()
 		const schedulerEvents: SchedulerEvent[] = []
-		const worktreeManager: SchedulerWorktreeManager = async ({ chain: selectedChain, repoCwd }) => {
-			const worktreePath = schedulerSlotWorktreePath(selectedChain, repoCwd, { loopDataRoot })
+		const worktreeManager: SchedulerWorktreeManager = async ({ chain: selectedChain, repoCwd, closureId }) => {
+			const worktreePath = closureWorktreePath(loopDataRoot, selectedChain.name, repoCwd, closureId)
 			await mkdir(worktreePath, { recursive: true })
 			return worktreePath
 		}
@@ -673,7 +673,7 @@ function killPidOrGroup(pid: number): void {
 
 async function initGitTarget(path: string): Promise<void> {
 	await mkdir(path, { recursive: true })
-	gitOutput(path, ["init", "-q"])
+	gitOutput(path, ["init", "-q", "-b", "main"])
 	gitOutput(path, ["config", "user.email", "test@example.invalid"])
 	gitOutput(path, ["config", "user.name", "Test User"])
 	await writeFile(resolve(path, "README.md"), "test\n")

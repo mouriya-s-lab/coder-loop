@@ -31,6 +31,7 @@ import {
 	listPendingCloseHandlers,
 	markRunPendingRecycle,
 	maxItemAttemptsFromChainMetadata,
+	reconcileClosureResources,
 	schedulerTick,
 	type SchedulerCompletedRun,
 	type SchedulerEvent,
@@ -127,7 +128,7 @@ import {
 	type PrivilegedOpAuditOp,
 	type PrivilegedOpAuditReason,
 } from "./observability"
-import type { TaskNodeIdentity, TaskNodeSnapshot } from "./task-runtime"
+import type { ClosureSnapshot, TaskNodeIdentity, TaskNodeSnapshot } from "./task-runtime"
 
 // #409: every daemon command an agent process can reach belongs to exactly one
 // authorization class. The classification is the engine's compile-time gate —
@@ -741,6 +742,9 @@ function decisionFingerprintScopeReleasedBySchedulerEvent(event: SchedulerEvent)
 		case "chain.completed":
 			return { kind: "chain", chainId: event.chainId }
 		case "slot.busy":
+		case "closure.resource_prepared":
+		case "closure.git_failed":
+		case "closure.reconciled":
 		case "item.dependency_wait":
 		case "item.backoff":
 		case "session_id.invalidated":
@@ -821,6 +825,34 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 	if (runId === null && identity !== null) throw new DaemonError("internal_error", `non-run scheduler event ${event.type} received task identity`)
 	const identityFields = identity === null ? {} : identity
 	switch (event.type) {
+		case "closure.resource_prepared":
+			return makeObservabilityEvent({
+				kind: "audit",
+				type: event.type,
+				chain: chain.name,
+				item: event.itemId,
+				phase: event.phase,
+				subject: { kind: "engine" },
+				payload: { closureId: event.closureId, worktreePath: event.worktreePath, branchName: event.branchName, baseCommit: event.baseCommit, freshness: event.freshness },
+			})
+		case "closure.git_failed":
+			return makeObservabilityEvent({
+				kind: "audit",
+				type: event.type,
+				chain: chain.name,
+				item: event.itemId,
+				phase: event.phase,
+				subject: { kind: "engine" },
+				payload: { closureId: event.closureId, code: event.code, error: event.error },
+			})
+		case "closure.reconciled":
+			return makeObservabilityEvent({
+				kind: "audit",
+				type: event.type,
+				chain: chain.name,
+				subject: { kind: "engine" },
+				payload: { closureId: event.closureId, repoCwd: event.repoCwd, mismatch: event.mismatch },
+			})
 		case "slot.busy":
 			return makeObservabilityEvent({
 				...identityFields,
@@ -1087,6 +1119,11 @@ function findTaskNodeIdentity(node: TaskNodeSnapshot, runtimeNodeId: string): Ta
 			return null
 		default: return assertNeverTaskNode(node)
 	}
+}
+
+function collectTaskClosures(node: TaskNodeSnapshot): ClosureSnapshot[] {
+	if (node.kind === "leaf") return [node.closure]
+	return node.children.flatMap(collectTaskClosures)
 }
 
 function assertNeverTaskNode(node: never): never {
@@ -2303,6 +2340,12 @@ export class CoderLoopDaemon {
 		const store = this.requireStore()
 		for (const chain of store.listChains()) {
 			if (chain.status === "deleted") continue
+			try {
+				sanitizeChainName(chain.name)
+			} catch (error) {
+				if (isInvalidChainNameError(error)) continue
+				throw error
+			}
 			for (const currentRun of store.listCurrentRuns(chain.id)) {
 				const run = store.getRunByRunId(currentRun.runId)
 				if (run === null) throw new DaemonError("internal_error", `active run ${currentRun.runId} has no durable run row`)
@@ -2329,6 +2372,11 @@ export class CoderLoopDaemon {
 			}
 
 			await this.reconcileOrphanedRuns(chain)
+			const tree = store.getTaskTree(chain.id)
+			for (const finding of await reconcileClosureResources({ chain, items: store.listItems(chain.id), tree: tree?.root ?? null, loopDataRootOptions: { loopDataRoot: this.paths.root } })) {
+				const event: SchedulerEvent = { type: "closure.reconciled", chainId: chain.id, ...finding }
+				await this.recordObservabilityEventIfChainNameIsValid(chain, schedulerEventToObservabilityEvent(chain, event))
+			}
 		}
 	}
 
@@ -2767,8 +2815,18 @@ export class CoderLoopDaemon {
 
 	private async cleanupChainRuntime(chain: ChainRecord): Promise<JsonObject> {
 		const store = this.requireStore()
-		const repoCwds = store.listItems(chain.id).map((item) => item.repoCwd)
-		const worktrees = cleanupSchedulerChainWorktrees(chain, repoCwds, { loopDataRoot: this.paths.root })
+		const items = new Map(store.listItems(chain.id).map((item) => [item.id, item]))
+		const tree = store.getTaskTree(chain.id)
+		const closures = tree === null ? [] : collectTaskClosures(tree.root).flatMap((closure) => {
+			const item = items.get(closure.itemRowId)
+			return item === undefined ? [] : [{ repoCwd: item.repoCwd, closure }]
+		})
+		const consumed = closures.map(({ repoCwd, closure }) => ({
+			repoCwd,
+			closure: closure.lifecycle === "consumed" ? closure : store.setClosureLifecycle(closure.closureId, { kind: "consume", updatedAt: unixSeconds() }),
+		}))
+		const worktrees = await cleanupSchedulerChainWorktrees(consumed)
+		for (const { closure } of consumed) store.setClosureResources(closure.closureId, { worktreePath: null, branchName: null, updatedAt: unixSeconds() })
 		try {
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: this.paths.root })
 			await rm(paths.chainRoot, { recursive: true, force: true })

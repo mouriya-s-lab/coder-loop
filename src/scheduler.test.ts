@@ -16,7 +16,6 @@ import {
 	renderSchedulerSpawnPrompt,
 	resumeDecisionForItem,
 	runSchedulerUntilIdle,
-	schedulerSlotWorktreePath,
 	schedulerTick,
 	selectNextPendingItemFromSnapshot,
 	type SchedulerEvent,
@@ -26,6 +25,7 @@ import {
 	type SchedulerPhaseRunner,
 	type SchedulerWorktreeManager,
 } from "./scheduler"
+import { closureBranchName, closureWorktreePath } from "./closure-lifecycle"
 import { resolveSchedulerEventTaskIdentity, schedulerEventToObservabilityEvent, startCoderLoopDaemon, type CoderLoopDaemon } from "./daemon"
 import {
 	buildPhaseRunnerSelectionFromChain,
@@ -384,7 +384,7 @@ describe("scheduler", () => {
 			const leaf = tree.root.children[0]
 			expect(leaf?.kind).toBe("leaf")
 			if (leaf?.kind !== "leaf") throw new Error("expected fixture task tree leaf")
-			expect(leaf.closure.branchName).toBe("coder-loop/closure-branch-identity-chain-6e04712f89fa")
+			expect(leaf.closure.branchName).toBe(closureBranchName(chain.name, leaf.closure.closureId))
 			await Promise.all(tick.spawnedRuns.map((run) => run.closed))
 		} finally { fixture.store.close() }
 	})
@@ -413,8 +413,8 @@ describe("scheduler", () => {
 				"end:181",
 			])
 			expect(maxConcurrentRunnerEvents(events)).toBe(1)
-			expect(new Set(events.map((event) => event.cwd)).size).toBe(1)
-			expect(fixture.worktreeCalls).toHaveLength(1)
+			expect(new Set(events.map((event) => event.cwd)).size).toBe(3)
+			expect(fixture.worktreeCalls).toHaveLength(3)
 			expect(fixture.store.listItems(chain.id).map((item) => item.status)).toEqual(["done", "done", "done"])
 		} finally {
 			await stopFixture(fixture)
@@ -746,7 +746,7 @@ describe("scheduler", () => {
 		}
 	})
 
-	test("completed chain worktree cleanup is idempotent after prior removal", async () => {
+	test("consumed closure cleanup removes a terminal chain worktree", async () => {
 		const fixture = await createFixture("completion-cleanup-idempotent")
 		const target = resolve(fixture.loopDataRoot, "..", "target")
 		await initGitTarget(target)
@@ -760,18 +760,22 @@ describe("scheduler", () => {
 
 			const completed = fixture.store.getChain(chain.id)
 			if (completed === null) throw new Error("expected completed chain")
-			const worktreePath = schedulerSlotWorktreePath(completed, target, { loopDataRoot: fixture.loopDataRoot })
+			const root = fixture.store.getTaskTree(completed.id)?.root
+			if (root?.kind !== "seq") throw new Error("expected seq task tree")
+			const closure = root.children.find((node) => node.kind === "leaf" && node.closure.phase === "iteration")
+			if (closure?.kind !== "leaf") throw new Error("expected iteration closure")
+			const worktreePath = closureWorktreePath(fixture.loopDataRoot, completed.name, target, closure.closure.closureId)
 			expect(completed.status).toBe("completed")
-			expect(existsSync(worktreePath)).toBe(false)
-			expect(gitOutput(target, ["worktree", "list", "--porcelain"])).not.toContain(worktreePath)
+			expect(existsSync(worktreePath)).toBe(true)
+			expect(gitOutput(target, ["worktree", "list", "--porcelain"])).toContain(worktreePath)
 
-			const repeated = cleanupSchedulerChainWorktrees(completed, [target], { loopDataRoot: fixture.loopDataRoot })
+			const repeated = await cleanupSchedulerChainWorktrees([{ repoCwd: target, closure: { ...closure.closure, lifecycle: "consumed" } }])
 			expect(repeated).toHaveLength(1)
 			expect(repeated[0]).toMatchObject({
 				repoCwd: target,
 				worktreePath,
-				registered: false,
-				removed: false,
+				registered: true,
+				removed: true,
 				pruned: true,
 				error: null,
 			})
@@ -799,6 +803,7 @@ describe("scheduler", () => {
 			expect(observedChainStatuses).toEqual(["active"])
 			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
 			expect(fixture.schedulerEvents.map((event) => event.type)).toEqual([
+				"closure.resource_prepared",
 				"agent.spawn",
 				"phase.start",
 				"recycle.pending_entered",
@@ -4334,7 +4339,7 @@ exit 0
 
 async function initGitTarget(path: string): Promise<void> {
 	await mkdir(path, { recursive: true })
-	gitOutput(path, ["init", "-q"])
+	gitOutput(path, ["init", "-q", "-b", "main"])
 	gitOutput(path, ["config", "user.email", "test@example.invalid"])
 	gitOutput(path, ["config", "user.name", "Test User"])
 	await writeFile(resolve(path, "README.md"), "test\n")
@@ -4420,8 +4425,8 @@ async function createFixture(name: string): Promise<Fixture> {
 	const defaultPresetDir = fixturePresetDir
 	const defaultLoadedPreset = await loadedPresetFromDir(defaultPresetDir)
 	if (defaultLoadedPreset.preset.phases.find((phase) => phase.name === "iteration")?.exits.length === 0) throw new Error("scheduler fixture preset did not declare iteration exits")
-	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
-		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd, closureId }) => {
+		const worktreePath = closureWorktreePath(loopDataRoot, chain.name, repoCwd, closureId)
 		await mkdir(worktreePath, { recursive: true })
 		initializeFixtureGitWorktree(worktreePath)
 		worktreeCalls.push(worktreePath)
@@ -4940,8 +4945,8 @@ async function createPresetPromptIntegrationFixture(name: string): Promise<Fixtu
 	const state = createSchedulerState()
 	const schedulerEvents: SchedulerEvent[] = []
 	const worktreeCalls: string[] = []
-	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd }) => {
-		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+	const worktreeManager: SchedulerWorktreeManager = async ({ chain, repoCwd, closureId }) => {
+		const worktreePath = closureWorktreePath(loopDataRoot, chain.name, repoCwd, closureId)
 		await mkdir(worktreePath, { recursive: true })
 		initializeFixtureGitWorktree(worktreePath)
 		worktreeCalls.push(worktreePath)
