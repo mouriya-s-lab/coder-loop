@@ -1166,6 +1166,7 @@ attemptTimeoutSeconds = 3600
 		const daemonStdout = new Response(daemonProcess.stdout).text()
 		const daemonStderr = new Response(daemonProcess.stderr).text()
 		let daemonStopped = false
+		let liveChainDeleted = false
 		try {
 			const readyPid = await waitForDaemonReady(loopDataRoot, runtimeEnv)
 			const daemonPid = Number((await readFile(resolve(loopDataRoot, "daemon.pid"), "utf-8")).trim())
@@ -1205,6 +1206,10 @@ attemptTimeoutSeconds = 3600
 			const liveStore = openSqliteStateStore({loopDataRoot})
 			expect(liveStore.listContextEntries(liveChain.id)[0]?.author).toMatchObject({kind:"agent",itemId:"live-item"})
 			liveStore.close()
+			const deletedLive = await sendDaemonRequest(socketPath, daemonRequest("chain.delete", { chainName: "context-live-chain" }))
+			expect(deletedLive.ok).toBe(true)
+			if (deletedLive.ok) expect(deletedLive.result.deletedContextEntries).toBe(1)
+			liveChainDeleted = deletedLive.ok
 
 			const down = await runCli(["daemon", "down", "--loop-data-root", loopDataRoot, "--json"])
 			expect(down.exitCode, down.stderr).toBe(0)
@@ -1217,6 +1222,7 @@ attemptTimeoutSeconds = 3600
 			await waitForDaemonSocketRemoval(loopDataRoot)
 			expect(await pathExistsForShutdownTest(resolve(loopDataRoot, "daemon.pid"))).toBe(false)
 		} finally {
+			if (!liveChainDeleted) await sendDaemonRequest(resolve(loopDataRoot, "daemon.sock"), daemonRequest("chain.delete", { chainName: "context-live-chain" })).catch(() => undefined)
 			if (!daemonStopped) await runCli(["daemon", "down", "--loop-data-root", loopDataRoot, "--json"])
 			daemonProcess.kill()
 			await daemonProcess.exited.catch(() => undefined)
