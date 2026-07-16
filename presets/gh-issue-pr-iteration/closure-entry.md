@@ -36,8 +36,8 @@ Read now, yourself:
 Read all of it live, this run — never trust a previous run's summary:
 
 1. `gh issue view {{ISSUE}} -R {{REPO}} --json state,body,comments,url` → issue state, the current contract marker, any operator correction posted after the verdict.
-2. The PR (bound `ISSUE_PR` or structural closing-keyword linkage per `common/github-routing.md`): `gh pr view <PR> -R {{REPO}} --json state,isDraft,mergedAt,mergeCommit,headRefOid,mergeStateStatus,statusCheckRollup,reviews,body,comments,url`.
-3. From the threads, the **latest** `coder-loop:review-verdict` block, plus the CandidateRef and VerificationPacket it references (fetch each referenced URL).
+2. The PR (bound `ISSUE_PR` or structural closing-keyword linkage per `common/github-routing.md`): `gh pr view <PR> -R {{REPO}} --json state,isDraft,mergedAt,mergeCommit,headRefOid,mergeStateStatus,statusCheckRollup,body,url`.
+3. From the body's `coder-loop:current-state` index (per `common/packets.md`), fetch the `reviewVerdictUrl` comment → the `coder-loop:review-verdict` block, plus the CandidateRef and VerificationPacket it references (fetch each referenced URL). Do not enumerate the PR comment history; index absent/unparsable or the verdict URL not resolving → one bootstrap scan per `common/packets.md` to locate the latest verdict, then proceed.
 
 No ReviewVerdict found → you cannot invent one: write the declared review-drift status (Step 3) so review re-adjudicates.
 

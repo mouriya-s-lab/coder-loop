@@ -38,7 +38,7 @@ Read now, yourself:
 Read these yourself:
 
 1. `gh issue view {{ISSUE}} -R {{REPO}} --json title,body,comments,state,url` → the current executable-contract marker (validate uniqueness and supersession per `common/executable-contract.md`) and any operator corrections posted after it.
-2. The CandidateRef: resolve the issue's linked PR (the bound `ISSUE_PR` when set; otherwise the structural closing-keyword linkage via the GraphQL query in `common/github-routing.md` — never text search) and read its body plus all comments; on no-PR routes read the issue comments. Take the **latest** `coder-loop:candidate-ref` block. Missing or unparsable CandidateRef → this is an iteration defect: publish the exact gap as a PR/issue comment and take the retry status exit (Step 5).
+2. The CandidateRef: resolve the issue's linked PR (the bound `ISSUE_PR` when set; otherwise the structural closing-keyword linkage via the GraphQL query in `common/github-routing.md` — never text search), then read the PR **body only** (`gh pr view <PR> -R {{REPO}} --json body,headRefOid`): the `coder-loop:candidate-ref` block and the `coder-loop:current-state` index per `common/packets.md`. Fetch only the objects the index names — do not enumerate the PR comments. Index absent or unparsable → one bootstrap scan per `common/packets.md`, write the index, proceed. On no-PR routes read the issue comments. Missing or unparsable CandidateRef → this is an iteration defect: publish the exact gap as a PR/issue comment and take the retry status exit (Step 5).
 3. Target repo `CLAUDE.md` / `AGENTS.md` in `TARGET_CWD` → project commands, required suites, CI-parity rules, canonical runtime/E2E driver.
 4. `{{SHARED_CONTEXT_FILE}}` → what iteration recorded for this run generation (context only — its claims are not evidence).
 
@@ -65,9 +65,15 @@ A contract check that is malformed, unexecutable as written, or contradicts the 
 
 ### Step 4 — Publish the VerificationPacket
 
-Assemble the `coder-loop:verification-packet` JSON block per `common/packets.md`: the consumed CandidateRef verbatim, the contract marker URL, one `checks[]` row per executed check bound to the candidate SHA, the typed runtime record, and the conclusion (`verified` / `changes-requested` / `contract-invalid`). Post it as a **new comment** on the CandidateRef's PR thread (or issue thread on no-PR routes). Then run the declared cleanup: tear down `recreatable` runtimes; leave `durable` ones documented.
+Assemble the `coder-loop:verification-packet` JSON block per `common/packets.md`: the consumed CandidateRef verbatim, the contract marker URL, one `checks[]` row per executed check bound to the candidate SHA, the typed runtime record, and the conclusion (`verified` / `changes-requested` / `contract-invalid`). Post it as a **new comment** on the CandidateRef's PR thread (or issue thread on no-PR routes), shaped per the comment-legibility rules of `common/github-routing.md`:
 
-The packet must be durable (comment URL resolves) before any exit. Publication failed → exit non-zero with the exact failure; do not write any status.
+- headline: `**[verification] <conclusion> @ <short-sha>** — <passed>/<total> checks pass`;
+- when the conclusion is not `verified`: one line per failing/defective row above the fold — id, command, expected vs observed;
+- the full packet JSON block inside `<details><summary>VerificationPacket (machine-readable)</summary>` — consumers parse raw bodies, so folding does not hide it.
+
+Then run the declared cleanup: tear down `recreatable` runtimes; leave `durable` ones documented.
+
+The packet must be durable (comment URL resolves) before any exit. Publication failed → exit non-zero with the exact failure; do not write any status. After the new packet is durable: update the PR body's `coder-loop:current-state` index (`verificationPacketUrl` = this comment) per `common/packets.md`, and minimize your own previous packet comment on this thread per `common/github-routing.md`.
 
 ### Step 5 — Exit
 

@@ -14,8 +14,34 @@ Every check that ran gets a section that references observed values (SHAs, count
 
 Rounds must be monotone: a finding that was discoverable at the previous review round's head — not caused by code changed since, and not surfaced by a newly identified mechanism's class sweep — is marked `late-discovery` and obliges you to include its mechanism's complete class sweep in this same round's list. An already-swept class must never resurface one site at a time in later rounds.
 
+The comment follows the legibility rules of `{{PRESET_ROOT}}/common/github-routing.md`: headline first, everything the next iteration must act on above the fold, the check/judgment bulk folded.
+
 ```markdown
+**[review] changes requested @ <short-sha>** — <n> blocking mechanism(s)/item(s)
+
 ## Review verdict: changes requested (<RUN_ID>)
+
+## 缺失汇总
+- <every missing/failing item across all checks, in one place, grouped by root mechanism
+  where the diff-audit established one: the mechanism sentence, its provenance, and the
+  complete site set it produces — the fix targets the mechanism once, never one site per
+  round; plus every identity mismatch (both SHAs), every uncovered/contradicted marker
+  row (ID), every packet gap — or `none`>
+
+## Required changes
+<concrete implementation fixes, one per 缺失 mechanism or item — a mechanism-rooted
+entry gets one mechanism-level fix covering its complete site set. A malformed, stale, or
+intrinsically broken marker Check is not an implementation retry: use the
+contract-invalid action so contract-enrichment publishes a superseding marker>
+
+## 范围外根因（不入本 PR 账单）
+- <defect groups from the diff-audit `Out-of-scope roots` section: mechanism, provenance
+  (base-owned / sibling-issue-owned / engine-level), complete sites, evidence. These are
+  NOT required changes for this PR and the next iteration is not judged on them; they
+  exist so the operator can route each one to its own issue — or `none`>
+
+<details>
+<summary>Check reports & judgments (observed values)</summary>
 
 ## Check reports
 ### diff-audit — <pass/fail>
@@ -34,32 +60,17 @@ runtime record: <kind, complete/missing fields>; conclusion consistency: <consis
 - evidence form: <sections present / missing by name; manifest re-runnable: yes / no + missing entry>
 - checks/mergeability: <head sha; each check: name=conclusion; mergeStateStatus>
 
-## 缺失汇总
-- <every missing/failing item across all checks, in one place, grouped by root mechanism
-  where the diff-audit established one: the mechanism sentence, its provenance, and the
-  complete site set it produces — the fix targets the mechanism once, never one site per
-  round; plus every identity mismatch (both SHAs), every uncovered/contradicted marker
-  row (ID), every packet gap — or `none`>
-
-## 范围外根因（不入本 PR 账单）
-- <defect groups from the diff-audit `Out-of-scope roots` section: mechanism, provenance
-  (base-owned / sibling-issue-owned / engine-level), complete sites, evidence. These are
-  NOT required changes for this PR and the next iteration is not judged on them; they
-  exist so the operator can route each one to its own issue — or `none`>
-
 ## Skipped checks
 - <check → reason (deliverable-route routing / no-PR route / infra) — or `none`>
 
-## Required changes
-<concrete implementation fixes, one per 缺失 mechanism or item — a mechanism-rooted
-entry gets one mechanism-level fix covering its complete site set. A malformed, stale, or
-intrinsically broken marker Check is not an implementation retry: use the
-contract-invalid action so contract-enrichment publishes a superseding marker>
+</details>
 
 ## Constraints
 do not bypass coder-loop review; do not merge manually; do not close the issue manually;
 never edit the issue body; contract corrections are superseding marker comments produced by contract-enrichment
 ```
+
+After the feedback comment is durably posted: update the PR body's `coder-loop:current-state` index (`reviewVerdictUrl` = this comment) per `{{PRESET_ROOT}}/common/packets.md`, then minimize your own previous verdict comment on this thread per `common/github-routing.md`. (No-PR routes have no index to maintain.)
 
 ## After publishing
 

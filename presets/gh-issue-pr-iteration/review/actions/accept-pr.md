@@ -6,8 +6,20 @@ Use only when both dispatched reports (diff-audit, verification-audit), all judg
 
 1. Post the acceptance review report on the PR — same fixed shape as every review reply. Each check that ran gets a section that references observed values (SHAs, counts, verbatim quotes from the retry comment / PR body caveats, URLs); each check that did not run appears in `## Skipped checks` with its reason:
 
+The comment follows the legibility rules of `{{PRESET_ROOT}}/common/github-routing.md`: headline first, the verdict block and operator-facing routing record above the fold, the check/judgment bulk folded.
+
 ```markdown
+**[review] accepted @ <short-sha>** — all checks pass; closure may merge
+
 ## Review verdict: accepted (<RUN_ID>)
+
+## 范围外根因（不入本 PR 账单）
+- <defect groups from the diff-audit `Out-of-scope roots` section: mechanism, provenance
+  (base-owned / sibling-issue-owned / engine-level), complete sites, evidence — a routing
+  record for the operator; entries here do not block acceptance — or `none`>
+
+<details>
+<summary>Check reports & judgments (observed values)</summary>
 
 ## Check reports
 ### diff-audit — pass
@@ -28,18 +40,15 @@ runtime record: <kind>, conclusion verified
 ## 缺失汇总
 none
 
-## 范围外根因（不入本 PR 账单）
-- <defect groups from the diff-audit `Out-of-scope roots` section: mechanism, provenance
-  (base-owned / sibling-issue-owned / engine-level), complete sites, evidence — a routing
-  record for the operator; entries here do not block acceptance — or `none`>
-
 ## Skipped checks
 - <check → reason — or `none`>
+
+</details>
 ```
 
 An acceptance whose 缺失汇总 is not `none` is not an acceptance — go back to the retry action. A non-empty `范围外根因` section is compatible with acceptance: those defects are not this PR's debt, and dropping them from the report would discard the only durable record the operator can route from.
 
-2. In the same comment, publish the machine-readable verdict per `{{PRESET_ROOT}}/common/packets.md` — a fenced json block labeled `coder-loop:review-verdict`:
+2. In the same comment, directly under the headline and above any fold, publish the machine-readable verdict per `{{PRESET_ROOT}}/common/packets.md` — a fenced json block labeled `coder-loop:review-verdict`:
 
 ```json
 {
@@ -51,7 +60,7 @@ An acceptance whose 缺失汇总 is not `none` is not an acceptance — go back 
 
 Populate `candidate` verbatim from the CandidateRef the verification-audit bound, and `verificationPacketUrl` from the packet comment it audited. Closure consumes exactly this block; a verdict naming an unaudited SHA sends closure after the wrong object.
 
-3. Verify the verdict comment resolves live (fetch the comment URL back). Record the URL in the handoff — closure and the unblock relation (when the issue body carries `Unblocks:`) both key off live GitHub state, so nothing else needs pre-staging here.
+3. Verify the verdict comment resolves live (fetch the comment URL back). Record the URL in the handoff — closure and the unblock relation (when the issue body carries `Unblocks:`) both key off live GitHub state, so nothing else needs pre-staging here. Then update the PR body's `coder-loop:current-state` index (`reviewVerdictUrl` = this comment) per `{{PRESET_ROOT}}/common/packets.md` — closure resolves the verdict through it — and minimize your own previous (superseded) verdict comments on this thread per `common/github-routing.md`.
 
 ## Failure routing
 

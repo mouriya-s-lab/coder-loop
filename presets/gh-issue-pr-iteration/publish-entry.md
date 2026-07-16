@@ -38,7 +38,7 @@ Read now, yourself:
 Read these yourself:
 
 1. `gh issue view {{ISSUE}} -R {{REPO}} --json title,body,comments,state,url` → the current executable-contract marker (delivery route, closing relation) and any late operator corrections.
-2. The candidate's PR (the bound `ISSUE_PR` when set; otherwise the structural closing-keyword linkage per `common/github-routing.md`): full body, all comments — locate the **latest** `coder-loop:candidate-ref` block and the **latest** `coder-loop:verification-packet` comment. On no-PR routes read the issue thread for both.
+2. The candidate's PR (the bound `ISSUE_PR` when set; otherwise the structural closing-keyword linkage per `common/github-routing.md`): read the **body only** — the `coder-loop:candidate-ref` block and the `coder-loop:current-state` index per `common/packets.md`, then fetch the `verificationPacketUrl` comment it names. Do not enumerate the PR comments; index absent/unparsable or a join failure → one bootstrap scan per `common/packets.md`, repair the index, proceed. On no-PR routes read the issue thread for both.
 3. Target repo `CLAUDE.md` / `AGENTS.md` in `TARGET_CWD` → PR title/body conventions and required sections.
 4. `{{SHARED_CONTEXT_FILE}}` → run history context (not evidence).
 
@@ -56,9 +56,10 @@ If an operator correction superseded the contract's delivery route or requiremen
 
 1. Title: aligned with the issue subject per target conventions (strip/keep prefixes as the target mandates).
 2. Body: first line exactly `Closes #{{ISSUE}}`; then the four evidence layers (Layer 1 Change preview / Layer 2 Landing checks / Layer 3 Startup / Layer 4 End-to-end) plus `Analysis`, assembled **from the VerificationPacket's checks and runtime record** — commands, exit codes, observations, artifact refs; the runtime manifest (auth by resolution location only — never a secret value); the test-inventory delta; CI detection + parity status. Repairing structural defects in the existing body (wrong closing keyword, missing section) is your job; do not rewrite evidence history in comments.
-3. Keep the CandidateRef block intact in the body.
+3. Keep the CandidateRef and `coder-loop:current-state` index blocks intact in the body.
 4. Flip draft → ready: `gh pr ready <PR> -R {{REPO}}`.
 5. Confirm live: `gh pr view <PR> -R {{REPO}} --json isDraft,url,body` shows ready and the assembled body.
+6. Companion comment (per `common/github-routing.md`, body edits get a comment): keep it to the headline plus at most two lines — `**[publish] body assembled @ <short-sha>** — evidence replaced from <VerificationPacket URL>`. Do not re-narrate the packet. Then minimize your own previous publication-update comment on this thread per the same fragment's legibility rules.
 
 **No-PR routes** (source-writing / comment-delivery / no-change): update the existing durable object the CandidateRef names into its final form (final artifact comment, final proof comment). You never invent a first candidate here — publish finalizes, it does not create.
 

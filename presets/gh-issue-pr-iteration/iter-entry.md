@@ -52,14 +52,13 @@ Read these yourself; each feeds a specific Step 3 decision:
    # while pageInfo.hasNextPage: re-run with after:"<endCursor>" and concatenate
    ```
 
-   Never discover PRs by text search (`--search "<n> in:body"` matches unrelated PRs). Then **full-fetch** the live PR — partial reads scope retries to the wrong demand:
+   Never discover PRs by text search (`--search "<n> in:body"` matches unrelated PRs). Then read the PR through its index — bounded, not enumerated:
 
    ```bash
-   gh pr view <number> -R {{REPO}} --json number,title,state,isDraft,mergeStateStatus,headRefName,url,body,comments,reviews,statusCheckRollup
-   gh api "repos/{{REPO}}/pulls/<number>/comments" --paginate   # inline review-thread comments
+   gh pr view <number> -R {{REPO}} --json number,title,state,isDraft,mergeStateStatus,headRefName,url,body,statusCheckRollup
    ```
 
-   Read the body, **all** comments, **all** reviews, and **all** inline review-thread comments. **Quote verbatim** the latest retry comment and any scope-reduction phrases you find in the PR body's caveat sections — those phrases are your judgment inputs and do not survive paraphrase (see `quality/honesty.md`). Retry instruction = the latest review plus everything posted after it, never just the last comment.
+   From the body, resolve the `coder-loop:candidate-ref` block and the `coder-loop:current-state` index per `{{PRESET_ROOT}}/common/packets.md`, then fetch **only**: the `reviewVerdictUrl` comment (your primary retry instruction — its 缺失汇总 / Required changes section), the `verificationPacketUrl` comment (failing rows), and any PR comments posted **after** the verdict's timestamp (operator additions — filter the comment listing by `createdAt`, do not read older ones). **Quote verbatim** the verdict's demand lines and any scope-reduction phrases in the PR body's caveat sections — those phrases are your judgment inputs and do not survive paraphrase (see `quality/honesty.md`). Retry instruction = the latest verdict plus everything posted after it, never just the last comment. Index absent (legacy PR) or unparsable, or a revision join failing → one bootstrap scan per `common/packets.md`, repair the index in Step 4's submit, and proceed — bootstrap is the exception path, not the default read.
 3. Sub-issues (`gh api "repos/{{REPO}}/issues/{{ISSUE}}/sub_issues" -H "X-GitHub-Api-Version: 2026-03-10"`) → whether this is a parent/wrapper. Only a successful response listing children counts as parent evidence; a failed call is recorded as `sub-issue graph unavailable` and the issue is treated as ordinary.
 4. `{{SHARED_CONTEXT_FILE}}` → what previous runs already tried, their `Intent`/`Result` blocks.
 5. The state file's selected item → must match {{ISSUE}}. Mismatch, or unreadable state/config files → record the infrastructure failure and jump to Step 5 (wrap-up); do not improvise a different issue.

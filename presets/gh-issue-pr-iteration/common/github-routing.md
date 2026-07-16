@@ -44,6 +44,21 @@ A PR is not a task container. A PR body is not the place to reconstruct or exten
 - When updating an open PR after review, also leave a PR comment summarizing what changed and which evidence was added or replaced.
 - Continue an existing open PR/branch for retry work unless that PR is explicitly invalid or unusable.
 
+## PR-thread comment legibility
+
+Every PR/issue comment a phase posts follows three rules. A PR thread accumulates dozens of phase comments across rounds; a reader (operator or later phase) must be able to see each comment's conclusion in one line and the thread's current state without reading superseded rounds.
+
+1. **Headline first.** The first line is one bold line: `**[<phase>] <outcome> @ <short-sha>** — <the one thing a reader needs>` (e.g. `**[review] changes requested @ d9eb680** — 2 blocking mechanisms`). After it, at most ~5 lines of key facts (blocking count, links to the packet/feedback this comment supersedes or consumes). Everything the next actor must act on appears above any fold.
+2. **Fold the fixed-shape bulk.** Boilerplate and all-pass detail — check report sections, judgment sections, packet JSON blocks, layered evidence narrative — go inside `<details><summary>…</summary>` blocks (blank line after `<summary>` so Markdown renders). Failures, blockers, and required changes never live only inside a fold. Machine-readable fenced blocks (`coder-loop:candidate-ref`, `coder-loop:verification-packet`, `coder-loop:review-verdict`) remain fully parseable inside a fold — consumers read raw bodies — but the small ReviewVerdict/CandidateRef blocks stay above the fold; only the large VerificationPacket JSON is folded.
+3. **Retire your own superseded rounds.** After durably posting a new comment of a given kind (retry evidence, verification packet, review verdict, publication update), minimize your **own** previous comment of the **same kind** on this thread — display-level retirement; the content is never edited:
+
+   ```bash
+   # node id: gh api repos/<REPO>/issues/comments/<comment_id> --jq .node_id
+   gh api graphql -f query='mutation($id:ID!){minimizeComment(input:{subjectId:$id,classifier:OUTDATED}){minimizedComment{isMinimized}}}' -f id=<node_id>
+   ```
+
+   Never minimize another phase's comment kind, operator comments, or the latest comment of any kind. A minimize failure is not a blocker — record it and continue.
+
 ## After merge
 
 - Treat merged PRs as immutable workflow records. Do not edit merged PR bodies to repair missing closing keywords, rewrite evidence, or reconstruct task context.

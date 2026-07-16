@@ -523,7 +523,8 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(submit).toContain("four-layer evidence packet")
 		expect(submit).toContain("Everything in the packet traces to the verify and e2e steps' output")
 		expect(review).toContain("every claim mapped to an observation")
-		expect(review).toContain("the published packet (PR body for the opening packet; the latest run's PR comment for retries")
+		expect(review).toContain("the current PR body (the full packet publish assembled from the VerificationPacket)")
+		expect(review).toContain("plus** the latest run's delta comment for retries")
 	})
 
 	test("iteration entry owns the task-list workflow, deliverable-shape routing, and dispatch protocol", async () => {
