@@ -8,6 +8,7 @@ import { resolve } from "node:path"
 import { type as arkType } from "arktype"
 
 import { queryObservabilityEvents } from "../src/observability"
+import { resolveChainRuntimePaths } from "../src/runtime-paths"
 import { openSqliteStateStore, SqliteStateError } from "../src/sqlite-state"
 import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedItemExtra } from "../src/runtime-data"
 import { TaskTreeSnapshotBoundary, type TaskNodeIdentity, type TaskTreeSnapshot } from "../src/task-runtime"
@@ -30,10 +31,9 @@ function command(args: readonly string[], options: { cwd?: string; env?: NodeJS.
 
 function writeShims(root: string): { dir: string; env: NodeJS.ProcessEnv } {
 	const dir = resolve(root, "shim")
-	const runnerPidFile = resolve(root, "runner.pid")
 	mkdirSync(dir, { recursive: true })
 	writeFileSync(resolve(dir, "coder-loop"), `#!/bin/sh\nexec bun ${LOOP_ENTRY} "$@"\n`)
-	writeFileSync(resolve(dir, "codex"), `#!/bin/sh\nprintf '%s\\n' "$$" > ${JSON.stringify(runnerPidFile)}\nprintf 'deterministic issue-558 runner\\n'\ntrap 'exit 0' TERM INT\nsleep 30 & wait $!\n`)
+	writeFileSync(resolve(dir, "codex"), `#!/bin/sh\nprintf 'deterministic issue-558 runner pid=%s\\n' "$$"\ntrap 'exit 0' TERM INT\nsleep 30 & wait $!\n`)
 	chmodSync(resolve(dir, "coder-loop"), 0o755)
 	chmodSync(resolve(dir, "codex"), 0o755)
 	const env = { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}` }
@@ -287,10 +287,12 @@ async function main(): Promise<void> {
 	const daemon = spawn("bun", [LOOP_ENTRY, "daemon", "up", "--loop-data-root", loopDataRoot], { cwd: REPO_ROOT, env: shims.env, stdio: ["ignore", stdoutFd, stderrFd] })
 	closeSync(stdoutFd); closeSync(stderrFd)
 	const socket = resolve(loopDataRoot, "daemon.sock")
+	let observedRunnerPid: number | null = null
 	try {
 		await waitForSocket(daemon, socket)
 		log(`daemonPid=${daemon.pid ?? "missing"} socket=${socket}`)
 		const emitted = await waitForDaemonOwnedIdentityEvent(loopDataRoot, seeded.chainName, seeded.auditItemRowId)
+		observedRunnerPid = emitted.runnerPid
 		if (emitted.identity.definitionNodeId !== "task:run") fail(`daemon event used non-canonical definition node ${emitted.identity.definitionNodeId}`)
 		const statusText = command(["bun", LOOP_ENTRY, "status", repo, "--json", "--loop-data-root", loopDataRoot, "--chain", seeded.chainName], { env: shims.env })
 		const status = StatusBoundary.assert(JSON.parse(statusText))
@@ -301,7 +303,8 @@ async function main(): Promise<void> {
 		const auditLeaf = rootNode.children.find((node) => node.kind === "leaf" && node.closure.itemRowId === seeded.auditItemRowId)
 		if (auditLeaf?.kind !== "leaf") fail("status omitted daemon-spawned audit closure")
 		if (JSON.stringify(auditLeaf.identity) !== JSON.stringify(emitted.identity)) fail("daemon event identity does not match persisted/status identity")
-		if (!existsSync(resolve(root, "runner.pid"))) fail("daemon-owned runner did not execute PATH shim")
+		const runnerOutput = readFileSync(resolveChainRuntimePaths(seeded.chainName, { loopDataRoot }).runStdoutFile(emitted.runId), "utf8")
+		if (!runnerOutput.includes(`deterministic issue-558 runner pid=${emitted.runnerPid}`)) fail("daemon-owned runner did not execute PATH shim")
 		if (emitted.runnerPid === process.pid || emitted.runnerPid === daemon.pid) fail("runner pid was not a daemon child")
 		log(`status.taskTree=${JSON.stringify(status.taskTree)}`)
 		log(`lifecycleRows=${JSON.stringify(seeded.lifecycleRows)}`)
@@ -314,10 +317,8 @@ async function main(): Promise<void> {
 	} finally {
 		await stopDaemon(daemon, loopDataRoot, shims.env)
 		removeOwnedWorktrees(repo, loopDataRoot)
-		const runnerPidText = existsSync(resolve(root, "runner.pid")) ? readFileSync(resolve(root, "runner.pid"), "utf8").trim() : ""
-		const runnerPid = Number.parseInt(runnerPidText, 10)
-		if (Number.isInteger(runnerPid)) {
-			try { process.kill(runnerPid, 0); fail(`runner process remained after teardown: ${runnerPid}`) } catch (error) {
+		if (observedRunnerPid !== null) {
+			try { process.kill(observedRunnerPid, 0); fail(`runner process remained after teardown: ${observedRunnerPid}`) } catch (error) {
 				if (!(error instanceof Error) || !("code" in error) || error.code !== "ESRCH") throw error
 			}
 		}
