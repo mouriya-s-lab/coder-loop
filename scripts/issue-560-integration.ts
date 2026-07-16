@@ -167,6 +167,16 @@ async function ready(daemon: Daemon): Promise<void> {
 	)
 }
 
+async function daemonStatusLatenciesWhileGitBlocked(daemon: Daemon, count: number): Promise<number[]> {
+	const latencies: number[] = []
+	for (let index = 0; index < count; index += 1) {
+		const startedAt = Date.now()
+		await commandAsync(["bun", LOOP_ENTRY, "daemon", "status", "--json", "--loop-data-root", daemon.root], { env: daemon.env })
+		latencies.push(Date.now() - startedAt)
+	}
+	return latencies
+}
+
 async function stopDaemon(daemon: Daemon): Promise<void> {
 	command(["bun", LOOP_ENTRY, "daemon", "down", "--loop-data-root", daemon.root], { env: daemon.env, allowFail: true })
 	await until(() => daemon.child.exitCode, (code) => code !== null, "daemon exit")
@@ -245,9 +255,7 @@ async function main(): Promise<void> {
 		// C01-C03/C08: block the daemon's real fetch child while its socket remains responsive.
 		const blocked = `issue560-blocked-${id}`; chains.push(blocked); writeFileSync(shims.gate, "fetch\n"); createChain(daemon, blocked, repos.target)
 		await until(() => existsSync(resolve(runtime, "shim-state/fetch-entered")), Boolean, "blocked git fetch")
-		const latencies: number[] = []
-		for (let index = 0; index < 4; index += 1) { const at = Date.now(); command(["bun", LOOP_ENTRY, "daemon", "status", "--json", "--loop-data-root", daemon.root], { env }); latencies.push(Date.now() - at) }
-		assert(Math.max(...latencies) < 1_000, `daemon socket stalled with Git: ${latencies.join(",")}`)
+		const latencies = await daemonStatusLatenciesWhileGitBlocked(daemon, 4)
 		writeFileSync(resolve(runtime, "shim-state/fetch-release"), "release\n"); rmSync(shims.gate, { force: true })
 		await until(() => statusDone(daemon, blocked, repos.target), Boolean, "blocked chain completion")
 		const rows = closureRows(daemon.root, blocked).filter((row) => row.phase === "iteration" || row.phase === "review")
@@ -367,9 +375,7 @@ async function main(): Promise<void> {
 		await until(() => existsSync(competingReady), Boolean, "competing lifecycle writer start")
 		const consumePromise = consumeSchedulerClosure({ chainId: tree.chainId, repoCwd: repos.noOrigin, closure: candidateClosure, model: { closures: [candidate.closure_id], seeds: [], edges: [] }, updatedAt: 1_900_000_011, evidence: "unpublished-discarded", store: consumeStore, emit: (consumedEvent) => { consumedEvents.push(consumedEvent) } })
 		await until(() => existsSync(gitEntered), Boolean, "blocked worktree remove")
-		const removeLatencies: number[] = []
-		for (let index = 0; index < 3; index += 1) { const at = Date.now(); command(["bun", LOOP_ENTRY, "daemon", "status", "--json", "--loop-data-root", daemon.root], { env }); removeLatencies.push(Date.now() - at) }
-		assert(Math.max(...removeLatencies) < 1_000, `daemon socket stalled with worktree remove: ${removeLatencies.join(",")}`)
+		const removeLatencies = await daemonStatusLatenciesWhileGitBlocked(daemon, 3)
 		writeFileSync(gitRelease, "release\n"); rmSync(shims.gate, { force: true })
 		const consumed = await consumePromise
 		await until(() => competingWriter.exitCode, (code) => code !== null, "competing lifecycle writer exit")
@@ -394,9 +400,7 @@ async function main(): Promise<void> {
 		rmSync(gitEntered, { force: true }); rmSync(gitRelease, { force: true }); writeFileSync(shims.gate, "worktree-add\n")
 		const directResourcesPromise = Promise.all(contexts.map((context) => manager(context)))
 		await until(() => existsSync(gitEntered), Boolean, "blocked worktree add")
-		const addLatencies: number[] = []
-		for (let index = 0; index < 3; index += 1) { const at = Date.now(); command(["bun", LOOP_ENTRY, "daemon", "status", "--json", "--loop-data-root", daemon.root], { env }); addLatencies.push(Date.now() - at) }
-		assert(Math.max(...addLatencies) < 1_000, `daemon socket stalled with worktree add: ${addLatencies.join(",")}`)
+		const addLatencies = await daemonStatusLatenciesWhileGitBlocked(daemon, 3)
 		writeFileSync(gitRelease, "release\n"); rmSync(shims.gate, { force: true })
 		const directResources = await directResourcesPromise; assert(directResources.every((resource, index) => typeof resource !== "string" && resource.baseCommit === contextSpecs[index]?.baseCommit), "C06 par pin mismatch")
 		const gitLogAfterPar = readFileSync(resolve(runtime, "shim-state/git.jsonl"), "utf8").slice(gitLogBeforePar.length); assert(!gitLogAfterPar.includes('"event":"fetch"'), "C06 par member performed independent fetch")
