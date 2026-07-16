@@ -21,6 +21,10 @@ type Daemon = { child: ChildProcess; root: string; env: NodeJS.ProcessEnv; stdou
 type RunnerObservation = { chain: string; phase: string; cwd: string; branch: string; argv: string[]; attempt: number; sessionId: string }
 type ClosureRow = { closure_id: string; phase: string; lifecycle: "active" | "suspended" | "consumed"; worktree_path: string | null; branch_name: string | null; base_commit: string; source_par_node_id: string | null }
 type ClosureSessionRow = { runner_kind: string; session_id: string }
+type CommandOptions = { cwd?: string; env?: NodeJS.ProcessEnv; allowFail?: boolean }
+type AsyncCommandOptions = { cwd?: string; env?: NodeJS.ProcessEnv }
+type PreparedRepositories = { target: string; noOrigin: string; badRemote: string; origin: string; advanced: string }
+type ShimResources = { dir: string; runnerLog: string; gate: string }
 
 function fail(message: string): never { throw new Error(message) }
 function assert(value: unknown, message: string): asserts value { if (!value) fail(message) }
@@ -56,14 +60,14 @@ function cleanEnvironment(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
 	return env
 }
 
-function command(cmd: readonly string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; allowFail?: boolean } = {}): CommandResult {
+function command(cmd: readonly string[], options: CommandOptions = {}): CommandResult {
 	const result = spawnSync(cmd[0]!, cmd.slice(1), { cwd: options.cwd ?? REPO_ROOT, env: options.env ?? cleanEnvironment(), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] })
 	const observed = { stdout: result.stdout ?? "", stderr: result.stderr ?? "", exitCode: result.status ?? 1 }
 	if (observed.exitCode !== 0 && options.allowFail !== true) fail(`${cmd.join(" ")} failed (${observed.exitCode}): ${observed.stderr}`)
 	return observed
 }
 
-async function commandAsync(cmd: readonly string[], options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): Promise<CommandResult> {
+async function commandAsync(cmd: readonly string[], options: AsyncCommandOptions = {}): Promise<CommandResult> {
 	return await new Promise((resolveCommand, rejectCommand) => {
 		const child = spawn(cmd[0]!, cmd.slice(1), { cwd: options.cwd ?? REPO_ROOT, env: options.env ?? cleanEnvironment(), stdio: ["ignore", "pipe", "pipe"] })
 		const stdout: Buffer[] = [], stderr: Buffer[] = []
@@ -96,7 +100,7 @@ function initLocalRepo(path: string): string {
 	return command([REAL_GIT, "rev-parse", "HEAD"], { cwd: path }).stdout.trim()
 }
 
-function prepareRepositories(root: string): { target: string; noOrigin: string; badRemote: string; origin: string; advanced: string } {
+function prepareRepositories(root: string): PreparedRepositories {
 	const origin = resolve(root, "origin.git")
 	command([REAL_GIT, "init", "-q", "--bare", origin])
 	const seed = resolve(root, "seed")
@@ -119,7 +123,7 @@ function prepareRepositories(root: string): { target: string; noOrigin: string; 
 	return { target, noOrigin, badRemote, origin, advanced }
 }
 
-function writeShims(root: string): { dir: string; runnerLog: string; gate: string } {
+function writeShims(root: string): ShimResources {
 	const dir = resolve(root, "shims")
 	const state = resolve(root, "shim-state")
 	mkdirSync(dir, { recursive: true }); mkdirSync(state, { recursive: true })
