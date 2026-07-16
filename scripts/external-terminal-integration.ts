@@ -65,6 +65,9 @@ type Harness = {
 	shimDir: string
 	binaryPath: string
 	probeStatePath: string
+	probeLogPath: string
+	terminalCommitPath: string
+	terminalReleasePath: string
 	daemon: DaemonHandle
 	runnerPids: Set<number>
 }
@@ -187,6 +190,9 @@ async function writeRunner(harness: Harness, scenario: RunnerScenario): Promise<
 	const script = `#!/bin/sh
 set -eu
 PROBE_STATE=${shellLiteral(harness.probeStatePath)}
+PROBE_LOG=${shellLiteral(harness.probeLogPath)}
+TERMINAL_COMMIT=${shellLiteral(harness.terminalCommitPath)}
+TERMINAL_RELEASE=${shellLiteral(harness.terminalReleasePath)}
 MODE=${shellLiteral(scenario.mode)}
 CHAIN=${shellLiteral(scenario.chainName)}
 ITEM=${shellLiteral(scenario.itemId)}
@@ -197,6 +203,7 @@ LOOP_ROOT=${shellLiteral(harness.daemon.loopDataRoot)}
 
 if [ "\${1:-}" = probe ]; then
 	state=$(cat "$PROBE_STATE")
+	printf 'probe state=%s pid=%s\n' "$state" "$$" >> "$PROBE_LOG"
 	case "$state" in
 		0) exit 0 ;;
 		69) exit 69 ;;
@@ -209,7 +216,9 @@ fi
 
 printf 'spawn pid=%s credential_present=%s mode=%s\n' "$$" "\${CODER_LOOP_RUN_CRED:+true}" "$MODE" >> "$INVOCATION_LOG"
 if [ "$MODE" = terminal ]; then
+	while [ ! -f "$TERMINAL_COMMIT" ]; do sleep 0.1; done
 	bun "$LOOP_ENTRY" item update "$CHAIN" --issue "$ITEM" --status done --loop-data-root "$LOOP_ROOT" --json >> "$INVOCATION_LOG" 2>&1
+	while [ ! -f "$TERMINAL_RELEASE" ]; do sleep 0.1; done
 	exit 0
 fi
 trap 'printf "term pid=%s\\n" "$$" >> "$INVOCATION_LOG"; bun "$LOOP_ENTRY" item update "$CHAIN" --issue "$ITEM" --status done --loop-data-root "$LOOP_ROOT" --json > "$POST_REVOKE" 2>&1 || true' TERM
@@ -446,21 +455,54 @@ async function scenarioProbeFailure(harness: Harness, scenario: "unexpected-exit
 async function scenarioTerminalFirst(harness: Harness): Promise<void> {
 	const chainName = `external-terminal-first-${randomUUID()}`
 	const itemId = "terminal-first"
+	const witnessItemId = "terminal-first-loss-witness"
+	await rm(harness.probeLogPath, { force: true })
+	await rm(harness.terminalCommitPath, { force: true })
+	await rm(harness.terminalReleasePath, { force: true })
 	await writeFile(harness.probeStatePath, "0")
 	await writeRunner(harness, { mode: "terminal", chainName, itemId })
 	createChain(harness, chainName)
 	addItem(harness, chainName, itemId)
 	const id = chainId(harness, chainName)
+	await waitFor("terminal-first current run", () => storeRead(harness, (store) => store.getCurrentRun(id)), (current) => current !== null)
+	const observations = runnerObservationPaths(harness, id, itemId)
+	const invocation = await waitFor("terminal-first runner observation", async () => existsSync(observations.invocationLogPath) ? await readFile(observations.invocationLogPath, "utf-8") : "", (value) => value.includes("spawn pid="))
+	const pidMatch = invocation.match(/spawn pid=(\d+)/)
+	invariant(pidMatch?.[1] !== undefined, `terminal-first runner PID missing from invocation log: ${invocation}`)
+	const runnerPid = Number.parseInt(pidMatch[1], 10)
+	harness.runnerPids.add(runnerPid)
+	invariant(processExists(runnerPid), `terminal-first runner ${runnerPid} exited before the terminal race`)
+	await writeFile(harness.terminalCommitPath, "commit\n")
+	await waitFor("terminal-first runner update acknowledgement", async () => await readFile(observations.invocationLogPath, "utf-8"), (value) => /"status"\s*:\s*"done"/.test(value))
+	const statusEvent = await waitFor("terminal-first daemon item.status acknowledgement", () => readEvents(harness, chainName), (events) => events.some((event) => event.kind === "audit" && event.type === "item.status" && event.runId !== undefined && event.payload.itemId === itemId && event.payload.fromStatus === "pending" && event.payload.toStatus === "done"))
 	const terminal = await waitFor("terminal-first status commit", () => storeRead(harness, (store) => store.getItemById(id, itemId)), (item) => item?.status === "done", 15_000)
 	invariant(terminal !== null, "terminal-first item disappeared")
+	const acknowledgedStatus = statusEvent.find((event) => event.kind === "audit" && event.type === "item.status" && event.payload.itemId === itemId && event.payload.toStatus === "done")
+	invariant(acknowledgedStatus?.runId === storeRead(harness, (store) => store.getCurrentRun(id))?.runId, "terminal-first status acknowledgement did not belong to the active run")
+	invariant(processExists(runnerPid), `terminal-first runner ${runnerPid} exited after the acknowledged terminal commit`)
+	const warningsBeforeWitness = externalWarnings(readEvents(harness, chainName)).length
+	const probeLogBeforeWitness = await readFile(harness.probeLogPath, "utf-8")
+	const exit69ProbesBeforeWitness = probeLogBeforeWitness.split("\n").filter((line) => line.startsWith("probe state=69 ")).length
 	await writeFile(harness.probeStatePath, "69")
-	await Bun.sleep(500)
+	addItem(harness, chainName, witnessItemId)
+	await waitFor("terminal-first witness endpoint-unavailable probe", async () => await readFile(harness.probeLogPath, "utf-8"), (value) => value.split("\n").filter((line) => line.startsWith("probe state=69 ")).length > exit69ProbesBeforeWitness)
+	const witness = await waitFor("terminal-first witness durable hold", () => storeRead(harness, (store) => store.getItemById(id, witnessItemId)), (item) => externalTerminalHold(item?.extra ?? {})?.availability.reason === "endpoint-unavailable")
+	invariant(witness !== null, "terminal-first witness disappeared")
+	await waitFor("terminal-first witness typed warning", () => readEvents(harness, chainName), (events) => externalWarnings(events).length === warningsBeforeWitness + 1 && externalWarnings(events).some((event) => event.payload.affected.some((affected) => affected.itemId === witnessItemId)))
+	const racedItem = storeRead(harness, (store) => store.getItemById(id, itemId))
+	const racedRuns = storeRead(harness, (store) => store.listRuns(id))
+	invariant(racedItem?.status === "done" && externalTerminalHold(racedItem.extra) === null, `terminal-first item changed after witness loss: ${JSON.stringify(racedItem)}`)
+	invariant(racedRuns.length === 1 && externalTerminalLoss(racedRuns[0]!.extra) === null, "terminal-first run acquired a loss attribution after witness loss")
+	invariant(storeRead(harness, (store) => store.getCurrentRun(id))?.runId === racedRuns[0]?.runId, "terminal-first current run disappeared before explicit release")
+	invariant(processExists(runnerPid), `terminal-first runner ${runnerPid} exited before explicit release`)
+	await writeFile(harness.terminalReleasePath, "release\n")
+	await waitFor("terminal-first run close", () => storeRead(harness, (store) => store.listRuns(id)), (value) => value.length === 1 && value[0]?.endedAt !== null)
 	const finalItem = storeRead(harness, (store) => store.getItemById(id, itemId))
 	const runs = storeRead(harness, (store) => store.listRuns(id))
-	invariant(finalItem?.status === "done", `terminal-first status was overwritten: ${finalItem?.status ?? "missing"}`)
+	invariant(finalItem?.status === "done" && externalTerminalHold(finalItem.extra) === null, `terminal-first item changed after close: ${JSON.stringify(finalItem)}`)
 	invariant(runs.length === 1 && externalTerminalLoss(runs[0]!.extra) === null, "terminal-first run acquired a loss attribution after terminal commit")
-	invariant(readStatus(harness, chainName).queue.holds.length === 0, "terminal-first item retained a stale hold")
-	log(`scenario terminal-first: run=${runs[0]?.runId ?? "missing"}; terminal status stayed authoritative with no loss/hold`)
+	invariant(externalTerminalHold(storeRead(harness, (store) => store.getItemById(id, witnessItemId))?.extra ?? {})?.availability.reason === "endpoint-unavailable", "terminal-first witness lost its durable hold")
+	log(`scenario terminal-first: run=${runs[0]?.runId ?? "missing"} pid=${runnerPid}; daemon acknowledged done, witness recorded endpoint loss, original retained terminal status with no loss/hold`)
 }
 
 function processExists(pid: number): boolean {
@@ -504,6 +546,9 @@ async function buildHarness(): Promise<Harness> {
 		shimDir: shim.shimDir,
 		binaryPath: shim.binaryPath,
 		probeStatePath: resolve(workDir, "probe-state"),
+		probeLogPath: resolve(workDir, "probe.log"),
+		terminalCommitPath: resolve(workDir, "terminal-commit"),
+		terminalReleasePath: resolve(workDir, "terminal-release"),
 		daemon,
 		runnerPids: new Set(),
 	}
