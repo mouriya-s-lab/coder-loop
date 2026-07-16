@@ -157,6 +157,22 @@ describe("central chain/item CLI", () => {
 			const resumed = expectJsonOk(await runCli(["chain", "resume", "crud-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(resumed.chain).toMatchObject({ name: "crud-chain", status: "active" })
 			expect(resumed.alreadyActive).toBe(false)
+		} finally {
+			await fixture.daemon.stop()
+		}
+	})
+
+	test("chain delete and recreate CLI", async () => {
+		const fixture = await startFixture("chain-delete-recreate")
+		try {
+			const created = expectJsonOk(await runCli(["chain", "create", "crud-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--preset", "gh-issue-pr-iteration", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expect(created.chain).toMatchObject({ name: "crud-chain", status: "active" })
+
+			const stopped = expectJsonOk(await runCli(["chain", "stop", "crud-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expect(stopped.chain).toMatchObject({ name: "crud-chain", status: "stopped" })
+
+			const resumed = expectJsonOk(await runCli(["chain", "resume", "crud-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			expect(resumed.chain).toMatchObject({ name: "crud-chain", status: "active" })
 
 			const deleted = expectJsonOk(await runCli(["chain", "delete", "crud-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(deleted.chain).toMatchObject({ name: "crud-chain", status: "deleted" })
