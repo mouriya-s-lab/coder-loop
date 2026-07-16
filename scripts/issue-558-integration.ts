@@ -52,7 +52,14 @@ function createFixtureRepo(root: string): string {
 	return repo
 }
 
-type HistoricalSeed = { chainName: string; runId: string; sessionId: string }
+type HistoricalSeed = {
+	chainName: string
+	chainRowId: number
+	runId: string
+	sessionId: string
+	selectedItemRowId: number
+	survivingNodeId: string
+}
 
 type IntegrationRejectionRecord = {
 	operation: "same-closure-active-run" | "consumed-reactivation"
@@ -89,13 +96,26 @@ function seedHistoricalRuntime(loopDataRoot: string, repo: string, schemaVersion
 		loopDataRoot,
 		schemaVersion,
 		chain: { name: chainName, repository: repo, preset: "single-phase-example" },
-		items: [{ itemId: `historical-v${schemaVersion}`, repoCwd: repo, status: "done", phase: "iteration", preset: "gh-issue-pr-iteration", presetPath: null, agentCwd: REPO_ROOT, sessionIds: { iteration: { codex: sessionId } }, extra: { id: `historical-v${schemaVersion}` }, run: { runId, phase: "iteration", status: "in_progress", startedAt: 1_800_000_500, extra: {} } }],
+		items: [
+			{ itemId: `historical-v${schemaVersion}`, repoCwd: repo, status: "done", phase: "iteration", preset: "gh-issue-pr-iteration", presetPath: null, agentCwd: REPO_ROOT, sessionIds: { iteration: { codex: sessionId } }, extra: { id: `historical-v${schemaVersion}` }, run: { runId, phase: "iteration", status: "in_progress", startedAt: 1_800_000_500, extra: {} } },
+			{ itemId: `historical-v${schemaVersion}-survivor`, repoCwd: repo, status: "done", phase: "run", preset: "single-phase-example", presetPath: null, agentCwd: REPO_ROOT, sessionIds: {}, extra: { id: `historical-v${schemaVersion}-survivor` } },
+		],
 		contextEntries: schemaVersion === 14 ? [{ id: "historical-v14-context", body: "current-main-v14-context" }] : [],
 	})
 	if (seeded.schemaFacts.runForeignKeys.join(",") !== "chain_id->chains.id:CASCADE,item_id->items.id:CASCADE") fail(`v${schemaVersion} runs foreign keys are not canonical`)
 	if (seeded.schemaFacts.currentRunForeignKeys.join(",") !== "chain_id->chains.id:CASCADE,run_id->runs.run_id:CASCADE") fail(`v${schemaVersion} current_runs foreign keys are not canonical`)
 	if (seeded.schemaFacts.hasContextEntries !== (schemaVersion === 14)) fail(`v${schemaVersion} context table does not match canonical version fact`)
-	return { chainName, runId, sessionId }
+	const selectedItem = seeded.items[0]
+	const survivingItem = seeded.items[1]
+	if (selectedItem === undefined || survivingItem === undefined) fail(`v${schemaVersion} historical delete fixture omitted an item`)
+	return {
+		chainName,
+		chainRowId: seeded.chain.id,
+		runId,
+		sessionId,
+		selectedItemRowId: selectedItem.id,
+		survivingNodeId: `legacy-v13:item:${survivingItem.id}:phase:run`,
+	}
 }
 
 function seedFinalRuntime(loopDataRoot: string, repo: string): FinalRuntimeSeed {
@@ -206,11 +226,29 @@ async function migrateHistoricalRuntime(root: string, loopDataRoot: string, repo
 		const statusText = command(["bun", LOOP_ENTRY, "status", repo, "--json", "--loop-data-root", loopDataRoot, "--chain", seed.chainName], { env })
 		const status = StatusBoundary.assert(JSON.parse(statusText))
 		if (!JSON.stringify(status.taskTree).includes(seed.sessionId)) fail(`v${schemaVersion} session was not migrated`)
+		let persistedDeleteCursor: string | null = null
 		const migrated = openSqliteStateStore({ loopDataRoot })
 		try {
 			const run = migrated.getRunByRunId(seed.runId)
 			if (run === null || run.closureId.length === 0 || run.runtimeNodeId.length === 0) fail(`v${schemaVersion} durable run identity was not migrated`)
+			if (schemaVersion === 13) {
+				const selectedTree = migrated.getTaskTree(seed.chainRowId)
+				if (selectedTree?.root.kind !== "seq" || selectedTree.root.cursor.kind !== "next") fail("v13 migrated delete fixture omitted its selected seq child")
+				if (!migrated.deleteItem(seed.selectedItemRowId)) fail("v13 selected migrated item was not deleted")
+				const persistedTree = migrated.getTaskTree(seed.chainRowId)
+				if (persistedTree?.root.kind !== "seq") fail("v13 persisted tree disappeared after selected-child delete")
+				if (persistedTree.root.cursor.kind !== "next" || persistedTree.root.cursor.nodeId !== seed.survivingNodeId) fail(`v13 persisted cursor did not advance to ${seed.survivingNodeId}`)
+				persistedDeleteCursor = persistedTree.root.cursor.nodeId
+			}
 		} finally { migrated.close() }
+		if (schemaVersion === 13) {
+			const advancedStatusText = command(["bun", LOOP_ENTRY, "status", repo, "--json", "--loop-data-root", loopDataRoot, "--chain", seed.chainName], { env })
+			const advancedStatus = StatusBoundary.assert(JSON.parse(advancedStatusText))
+			const advancedRoot = advancedStatus.taskTree.root
+			if (advancedRoot.kind !== "seq" || advancedRoot.cursor.kind !== "next" || advancedRoot.cursor.nodeId !== seed.survivingNodeId) fail(`v13 status cursor did not advance to ${seed.survivingNodeId}`)
+			if (advancedRoot.children.length !== 1 || advancedRoot.children[0]?.identity.runtimeNodeId !== seed.survivingNodeId) fail("v13 status retained deleted children or lost its survivor")
+			log(`migratedDeleteCursor=${JSON.stringify({ schemaVersion, deletedItemRowId: seed.selectedItemRowId, survivingNodeId: seed.survivingNodeId, persistedCursor: persistedDeleteCursor, statusCursor: advancedRoot.cursor.nodeId })}`)
+		}
 		if (schemaVersion === 14) {
 			const migrated = openSqliteStateStore({ loopDataRoot })
 			try {
@@ -313,7 +351,7 @@ async function main(): Promise<void> {
 		log(`consumedReactivationRejection=${JSON.stringify(seeded.consumedRejection)}`)
 		log(`completedRunIdentity=${JSON.stringify(seeded.completedRunIdentity)}`)
 		log(`emittedIdentity=${JSON.stringify({ runId: emitted.runId, runtimeNodeId: emitted.identity.runtimeNodeId, definitionRef: emitted.identity.definitionRef, definitionNodeId: emitted.identity.definitionNodeId })}`)
-		log("observed=recursive-status,sibling-active-runs,conflict-rejection,consumed-rejection,durable-run-identity,event-identity")
+		log("observed=migrated-delete-cursor,recursive-status,sibling-active-runs,conflict-rejection,consumed-rejection,durable-run-identity,event-identity")
 	} finally {
 		await stopDaemon(daemon, loopDataRoot, shims.env)
 		removeOwnedWorktrees(repo, loopDataRoot)
