@@ -7,6 +7,7 @@ import { resolve } from "node:path"
 import {
 	createGitWorktreeManager,
 	createSchedulerState,
+	consumeSchedulerClosure,
 	reconcileClosureResources,
 	schedulerTick,
 	type SchedulerEvent,
@@ -153,11 +154,37 @@ test("startup reconciliation audits missing resources and repairs only orphaned 
 		const orphanBranch = `coder-loop/closures/${chain.name}/orphan`
 		expect(git(repoCwd, ["branch", orphanBranch, "main"]).exitCode).toBe(0)
 		expect(git(repoCwd, ["config", "core.hooksPath", ".unexpected-hooks"]).exitCode).toBe(0)
+		expect(git(repoCwd, ["config", "extensions.worktreeConfig", "true"]).exitCode).toBe(0)
 		const findings = await reconcileClosureResources({ chain, items: [item], tree: store.getTaskTree(chain.id)?.root ?? null, loopDataRootOptions: { loopDataRoot } })
-		expect(findings.map((finding) => finding.mismatch.kind).sort()).toEqual(["hooks-drift", "missing-branch", "missing-directory", "orphan-branch", "orphan-directory"])
+		expect(findings.map((finding) => finding.mismatch.kind).sort()).toEqual(["hooks-drift", "missing-branch", "missing-directory", "orphan-branch", "orphan-directory", "repo-config-drift"])
 		expect(existsSync(orphanPath)).toBe(false)
 		expect(git(repoCwd, ["show-ref", "--verify", `refs/heads/${orphanBranch}`]).exitCode).not.toBe(0)
 		expect(store.getTaskTree(chain.id)?.root).toMatchObject({ closure: { lifecycle: "active" } })
+	} finally { store.close() }
+})
+
+test("serialized closure consumption removes only owned resources and emits evidence with freshness", async () => {
+	const root = resolve(TEST_ROOT, "consume-resources")
+	const repoCwd = resolve(root, "repo")
+	await initGitRepo(repoCwd)
+	const loopDataRoot = resolve(root, "loop-data")
+	await mkdir(loopDataRoot, { recursive: true })
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = makeChain(store, "consume-resources-chain")
+		const item = makeItem(store, chain, "consume", repoCwd)
+		const manager = createGitWorktreeManager({ loopDataRoot })
+		const resources = await manager({ chain, item, phase: "iteration", closureId: "closure:consume:iteration", repoCwd, slotKey: "slot", existing: null })
+		if (typeof resources === "string") throw new Error("expected closure resources")
+		const closure = { closureId: "closure:consume:iteration", itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: resources.worktreePath, branchName: resources.branchName, baseCommit: resources.baseCommit, sourceParNodeId: null, sessions: [] } as const
+		store.createTaskTree(chain.id, { root: { kind: "leaf", identity: { runtimeNodeId: "leaf-consume", definitionRef: { kind: "chain", contentIdentity: "sha256:consume" }, definitionNodeId: "iteration" }, closure }, activeRuns: [] })
+		const events: SchedulerEvent[] = []
+		const result = await consumeSchedulerClosure({ chainId: chain.id, repoCwd, closure, model: { closures: [closure.closureId], seeds: [], edges: [] }, evidence: "unpublished-discarded", updatedAt: 1_900_000_100, store, emit: (event) => { events.push(event) } })
+		expect(result.decision.kind).toBe("consumed")
+		expect(result.cleanup).toMatchObject({ registered: true, removed: true, error: null })
+		expect(existsSync(resources.worktreePath)).toBe(false)
+		expect(store.getTaskTree(chain.id)?.root).toMatchObject({ closure: { lifecycle: "consumed", worktreePath: null, branchName: null, sessions: [] } })
+		expect(events).toEqual([{ type: "closure.consumed", chainId: chain.id, closureId: closure.closureId, evidence: "unpublished-discarded", freshness: { kind: "retained", commit: resources.baseCommit } }])
 	} finally { store.close() }
 })
 

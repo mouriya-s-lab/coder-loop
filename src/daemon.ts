@@ -26,6 +26,7 @@ import {
 } from "./loop"
 import {
 	cleanupSchedulerChainWorktrees,
+	consumeSchedulerClosure,
 	createSchedulerState,
 	listActiveRuns,
 	listPendingCloseHandlers,
@@ -742,6 +743,7 @@ function decisionFingerprintScopeReleasedBySchedulerEvent(event: SchedulerEvent)
 			return { kind: "chain", chainId: event.chainId }
 		case "slot.busy":
 		case "closure.resource_prepared":
+		case "closure.consumed":
 		case "closure.git_failed":
 		case "closure.reconciled":
 		case "item.dependency_wait":
@@ -833,6 +835,14 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 				phase: event.phase,
 				subject: { kind: "engine" },
 				payload: { closureId: event.closureId, worktreePath: event.worktreePath, branchName: event.branchName, baseCommit: event.baseCommit, freshness: event.freshness },
+			})
+		case "closure.consumed":
+			return makeObservabilityEvent({
+				kind: "audit",
+				type: event.type,
+				chain: chain.name,
+				subject: { kind: "engine" },
+				payload: { closureId: event.closureId, evidence: event.evidence, freshness: event.freshness },
 			})
 		case "closure.git_failed":
 			return makeObservabilityEvent({
@@ -2814,12 +2824,25 @@ export class CoderLoopDaemon {
 			const item = items.get(closure.itemRowId)
 			return item === undefined ? [] : [{ repoCwd: item.repoCwd, closure }]
 		})
-		const consumed = closures.map(({ repoCwd, closure }) => ({
-			repoCwd,
-			closure: closure.lifecycle === "consumed" ? closure : store.setClosureLifecycle(closure.closureId, { kind: "consume", updatedAt: unixSeconds() }),
-		}))
-		const worktrees = await cleanupSchedulerChainWorktrees(consumed)
-		for (const { closure } of consumed) store.setClosureResources(closure.closureId, { worktreePath: null, branchName: null, updatedAt: unixSeconds() })
+		const worktrees: SchedulerChainWorktreeCleanup[] = []
+		for (const { repoCwd, closure } of closures) {
+			if (closure.lifecycle === "consumed") {
+				worktrees.push(...await cleanupSchedulerChainWorktrees([{ repoCwd, closure }]))
+				store.setClosureResources(closure.closureId, { worktreePath: null, branchName: null, updatedAt: unixSeconds() })
+				continue
+			}
+			const consumed = await consumeSchedulerClosure({
+				chainId: chain.id,
+				repoCwd,
+				closure,
+				model: { closures: [closure.closureId], seeds: [], edges: [] },
+				evidence: "unevaluable",
+				updatedAt: unixSeconds(),
+				store,
+				emit: async (event) => await this.recordObservabilityEventIfChainNameIsValid(chain, schedulerEventToObservabilityEvent(chain, event)),
+			})
+			if (consumed.cleanup !== null) worktrees.push(consumed.cleanup)
+		}
 		try {
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: this.paths.root })
 			await rm(paths.chainRoot, { recursive: true, force: true })

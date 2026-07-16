@@ -53,7 +53,7 @@ import {
 	type SchedulerSpawnErrorAttribution,
 } from "./runtime-data"
 import { detectsSessionIdInvalid } from "./runners/session-id"
-import { type ChainRecord, dependsOnItemIds, type ItemRecord, listDependencyWaitReasons, type RunRecord, type SqliteStateStore } from "./sqlite-state"
+import { type ChainRecord, type ClosureConsumptionEvidence, type ConsumeClosureResult, dependsOnItemIds, type ItemRecord, listDependencyWaitReasons, type RunRecord, type SqliteStateStore } from "./sqlite-state"
 import {
 	LOOP_DATA_ROOT_ENV,
 	LOOP_RUN_CREDENTIAL_ENV,
@@ -71,6 +71,7 @@ import {
 	closureWorktreePath,
 	createRepositoryGitCoordinator,
 	persistedParPin,
+	type ClosureReachabilityModel,
 	type RepositoryGitCoordinator,
 } from "./closure-lifecycle"
 import type { ClosureSnapshot, TaskNodeSnapshot } from "./task-runtime"
@@ -235,6 +236,7 @@ export type SchedulerWorktreeManager = (context: SchedulerWorktreeContext) => Pr
 export type SchedulerEvent =
 	| { type: "slot.busy"; slotKey: string; chainId: number; repoCwd: string; activeRunId: string }
 	| { type: "closure.resource_prepared"; chainId: number; itemId: number; phase: string; closureId: string; worktreePath: string; branchName: string; baseCommit: string; freshness: OriginFreshness }
+	| { type: "closure.consumed"; chainId: number; closureId: string; evidence: ClosureConsumptionEvidence; freshness: OriginFreshness }
 	| { type: "closure.git_failed"; chainId: number; itemId: number; phase: string; closureId: string; code: SchedulerError["code"]; error: string }
 	| { type: "closure.reconciled"; chainId: number; closureId: string | null; repoCwd: string; mismatch: ClosureReconciliationMismatch }
 	// #419 review I2: `itemId` (rowid integer) renamed to `rowId` for wire-shape consistency
@@ -923,6 +925,7 @@ export type ClosureReconciliationMismatch =
 	| { kind: "orphan-directory"; path: string; repaired: true }
 	| { kind: "orphan-branch"; branchName: string; repaired: true }
 	| { kind: "hooks-drift"; hooksPath: string; repaired: false }
+	| { kind: "repo-config-drift"; key: "extensions.worktreeConfig"; value: string; repaired: false }
 
 export async function reconcileClosureResources(input: {
 	chain: ChainRecord
@@ -950,6 +953,8 @@ export async function reconcileClosureResources(input: {
 		await repositoryGitCoordinator.run(repoCwd, async () => {
 			const hooks = await git(repoCwd, ["config", "--get", "core.hooksPath"])
 			if (hooks.exitCode === 0 && hooks.stdout !== "") findings.push({ closureId: null, repoCwd, mismatch: { kind: "hooks-drift", hooksPath: hooks.stdout, repaired: false } })
+			const worktreeConfig = await git(repoCwd, ["config", "--get", "extensions.worktreeConfig"])
+			if (worktreeConfig.exitCode === 0 && worktreeConfig.stdout !== "") findings.push({ closureId: null, repoCwd, mismatch: { kind: "repo-config-drift", key: "extensions.worktreeConfig", value: worktreeConfig.stdout, repaired: false } })
 			const prefix = closureBranchPrefix(input.chain.name)
 			const listed = await git(repoCwd, ["for-each-ref", "--format=%(refname)", "refs/heads"])
 			if (listed.exitCode === 0) for (const branchName of listed.stdout.split("\n").filter((name) => name.startsWith(prefix))) {
@@ -1034,6 +1039,36 @@ export async function cleanupSchedulerChainWorktrees(
 		cleaned.push(result)
 	}
 	return cleaned
+}
+
+export type ConsumeSchedulerClosureInput = {
+	chainId: number
+	repoCwd: string
+	closure: ClosureSnapshot
+	model: ClosureReachabilityModel
+	evidence: ClosureConsumptionEvidence
+	updatedAt: number
+	store: Pick<SqliteStateStore, "consumeClosureIfUnreachable" | "setClosureResources">
+	emit: (event: Extract<SchedulerEvent, { type: "closure.consumed" }>) => Promise<void> | void
+}
+
+export type ConsumeSchedulerClosureResult = {
+	decision: ConsumeClosureResult
+	cleanup: SchedulerChainWorktreeCleanup | null
+}
+
+export async function consumeSchedulerClosure(input: ConsumeSchedulerClosureInput): Promise<ConsumeSchedulerClosureResult> {
+	const decision = input.store.consumeClosureIfUnreachable(input.closure.closureId, {
+		model: input.model,
+		updatedAt: input.updatedAt,
+		evidence: input.evidence,
+	})
+	if (decision.kind !== "consumed") return { decision, cleanup: null }
+	const [cleanup] = await cleanupSchedulerChainWorktrees([{ repoCwd: input.repoCwd, closure: decision.closure }])
+	input.store.setClosureResources(decision.closure.closureId, { worktreePath: null, branchName: null, updatedAt: input.updatedAt })
+	const freshness: OriginFreshness = { kind: "retained", commit: decision.closure.baseCommit }
+	await input.emit({ type: "closure.consumed", chainId: input.chainId, closureId: decision.closure.closureId, evidence: decision.evidence, freshness })
+	return { decision, cleanup: cleanup ?? null }
 }
 
 export function listActiveRuns(state: SchedulerState): SchedulerActiveRun[] {

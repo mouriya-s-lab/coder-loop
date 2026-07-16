@@ -7,8 +7,9 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process"
 import { resolve } from "node:path"
 
 import { closureBranchPrefix, createRepositoryGitCoordinator } from "../src/closure-lifecycle"
-import { cleanupSchedulerChainWorktrees, createGitWorktreeManager } from "../src/scheduler"
+import { cleanupSchedulerChainWorktrees, consumeSchedulerClosure, createGitWorktreeManager, type OriginFreshness, type SchedulerEvent } from "../src/scheduler"
 import { openSqliteStateStore } from "../src/sqlite-state"
+import type { ClosureSnapshot, TaskNodeSnapshot } from "../src/task-runtime"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
@@ -18,9 +19,32 @@ const REAL_GIT = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim()
 type CommandResult = { stdout: string; stderr: string; exitCode: number }
 type Daemon = { child: ChildProcess; root: string; env: NodeJS.ProcessEnv; stdout: string; stderr: string }
 type RunnerObservation = { chain: string; phase: string; cwd: string; branch: string; argv: string[]; attempt: number; sessionId: string }
+type ClosureRow = { closure_id: string; phase: string; lifecycle: "active" | "suspended" | "consumed"; worktree_path: string | null; branch_name: string | null; base_commit: string; source_par_node_id: string | null }
+type ClosureSessionRow = { runner_kind: string; session_id: string }
 
 function fail(message: string): never { throw new Error(message) }
 function assert(value: unknown, message: string): asserts value { if (!value) fail(message) }
+function record(value: unknown, label: string): Record<string, unknown> {
+	assert(typeof value === "object" && value !== null && !Array.isArray(value), `${label} must be an object`)
+	return value
+}
+function stringField(value: Record<string, unknown>, key: string, label: string): string {
+	const field = value[key]; assert(typeof field === "string", `${label}.${key} must be a string`); return field
+}
+function parseRunnerObservation(value: unknown): RunnerObservation {
+	const row = record(value, "runner observation")
+	const argv = row.argv; assert(Array.isArray(argv) && argv.every((entry) => typeof entry === "string"), "runner observation.argv must be strings")
+	const attempt = row.attempt; assert(typeof attempt === "number" && Number.isInteger(attempt), "runner observation.attempt must be an integer")
+	return { chain: stringField(row, "chain", "runner observation"), phase: stringField(row, "phase", "runner observation"), cwd: stringField(row, "cwd", "runner observation"), branch: stringField(row, "branch", "runner observation"), argv, attempt, sessionId: stringField(row, "sessionId", "runner observation") }
+}
+function findClosure(node: TaskNodeSnapshot, closureId: string): ClosureSnapshot | null {
+	if (node.kind === "leaf") return node.closure.closureId === closureId ? node.closure : null
+	for (const child of node.children) {
+		const closure = findClosure(child, closureId)
+		if (closure !== null) return closure
+	}
+	return null
+}
 function event(type: string, payload: Record<string, unknown> = {}): void {
 	process.stdout.write(`${JSON.stringify({ ts: new Date().toISOString(), type, ...payload })}\n`)
 }
@@ -101,7 +125,7 @@ function writeShims(root: string): { dir: string; runnerLog: string; gate: strin
 	mkdirSync(dir, { recursive: true }); mkdirSync(state, { recursive: true })
 	const runnerLog = resolve(root, "loop-data", "chains")
 	const gate = resolve(state, "block-fetch")
-	const gitShim = `#!/usr/bin/env bun\nimport { appendFileSync, existsSync, writeFileSync } from "node:fs"; import { spawnSync } from "node:child_process"; const a=process.argv.slice(2); if(a[0]==="fetch"){appendFileSync(process.env.ISSUE560_GIT_LOG!,JSON.stringify({event:"fetch",cwd:process.cwd(),a})+"\\n");if(existsSync(process.env.ISSUE560_GIT_GATE!)){writeFileSync(process.env.ISSUE560_GIT_ENTERED!,"entered\\n");while(!existsSync(process.env.ISSUE560_GIT_RELEASE!)) await Bun.sleep(25)}} const p=spawnSync(process.env.ISSUE560_REAL_GIT!,a,{stdio:"inherit"});process.exit(p.status??1)\n`
+	const gitShim = `#!/usr/bin/env bun\nimport { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs"; import { spawnSync } from "node:child_process"; const a=process.argv.slice(2),op=a[0]==="fetch"?"fetch":a[0]==="worktree"&&a[1]==="add"?"worktree-add":a[0]==="worktree"&&a[1]==="remove"?"worktree-remove":a[0]??"unknown";appendFileSync(process.env.ISSUE560_GIT_LOG!,JSON.stringify({event:op,cwd:process.cwd(),a})+"\\n");if(existsSync(process.env.ISSUE560_GIT_GATE!)&&readFileSync(process.env.ISSUE560_GIT_GATE!,"utf8").trim()===op){writeFileSync(process.env.ISSUE560_GIT_ENTERED!,op+"\\n");while(!existsSync(process.env.ISSUE560_GIT_RELEASE!)) await Bun.sleep(25)} const p=spawnSync(process.env.ISSUE560_REAL_GIT!,a,{stdio:"inherit"});process.exit(p.status??1)\n`
 	const runner = `#!/usr/bin/env bun\nimport { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";import { spawnSync } from "node:child_process";import { resolve } from "node:path";const argv=process.argv.slice(2),p=argv[argv.lastIndexOf("-p")+1]??"";const f=Object.fromEntries(p.split("\\n").map(x=>x.match(/^(PHASE|CHAIN|ITEM|RUN)=(.+)$/)).filter(Boolean).map(x=>[x[1].toLowerCase(),x[2]]));const c=resolve(process.cwd(),".issue560-"+f.phase+".count"),attempt=existsSync(c)?Number(readFileSync(c,"utf8"))+1:1;writeFileSync(c,String(attempt));const branch=spawnSync(process.env.ISSUE560_REAL_GIT!,["symbolic-ref","-q","HEAD"],{encoding:"utf8"}).stdout.trim(),sessionId="issue560-"+f.chain+"-"+f.phase;appendFileSync(resolve(process.cwd(),".issue560-runner.jsonl"),JSON.stringify({chain:f.chain,phase:f.phase,cwd:process.cwd(),branch,argv,attempt,sessionId})+"\\n");process.stdout.write(JSON.stringify({type:"system",session_id:sessionId})+"\\n");if(f.chain.includes("interrupt")&&f.phase==="iteration"&&attempt===1)while(true) await Bun.sleep(1000);if(f.phase==="review"){const u=spawnSync("coder-loop",["item","update",f.chain,"--issue",f.item,"--status","done","--json"],{stdio:"inherit"});process.exit(u.status??1)}\n`
 	for (const [name, body] of Object.entries({ git: gitShim, claude: runner, "coder-loop": `#!/bin/sh\nexec bun ${LOOP_ENTRY} "$@"\n` })) {
 		const path = resolve(dir, name); writeFileSync(path, body); chmodSync(path, 0o755)
@@ -149,7 +173,11 @@ function createChain(daemon: Daemon, name: string, repo: string): void {
 function statusDone(daemon: Daemon, chain: string, repo: string): boolean {
 	const result = command(["bun", LOOP_ENTRY, "status", repo, "--json", "--chain", chain, "--loop-data-root", daemon.root], { env: daemon.env, allowFail: true })
 	if (result.exitCode !== 0) return false
-	return (JSON.parse(result.stdout) as { queue?: { byStatus?: Record<string, number> } }).queue?.byStatus?.done === 1
+	const parsed: unknown = JSON.parse(result.stdout)
+	const root = record(parsed, "status")
+	const queue = root.queue === undefined ? null : record(root.queue, "status.queue")
+	const byStatus = queue?.byStatus === undefined ? null : record(queue.byStatus, "status.queue.byStatus")
+	return byStatus?.done === 1
 }
 
 function observations(path: string): RunnerObservation[] {
@@ -163,12 +191,29 @@ function observations(path: string): RunnerObservation[] {
 		}
 	}
 	visit(path)
-	return logs.flatMap((log) => readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as RunnerObservation))
+	return logs.flatMap((log) => readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((line) => {
+		const parsed: unknown = JSON.parse(line)
+		return parseRunnerObservation(parsed)
+	}))
 }
 
-function closureRows(root: string, chain: string): { closure_id: string; phase: string; lifecycle: string; worktree_path: string | null; branch_name: string | null; base_commit: string; source_par_node_id: string | null }[] {
+function closureRows(root: string, chain: string): ClosureRow[] {
 	const db = new Database(resolve(root, "db.sqlite"), { readonly: true })
-	try { return db.query("SELECT tc.closure_id,tc.phase,tc.lifecycle,tc.worktree_path,tc.branch_name,tc.base_commit,tc.source_par_node_id FROM task_closures tc JOIN items i ON i.id=tc.item_row_id JOIN chains c ON c.id=i.chain_id WHERE c.name=$chain ORDER BY tc.phase").all({ $chain: chain }) as ReturnType<typeof closureRows> } finally { db.close() }
+	try { return db.query<ClosureRow, { $chain: string }>("SELECT tc.closure_id,tc.phase,tc.lifecycle,tc.worktree_path,tc.branch_name,tc.base_commit,tc.source_par_node_id FROM task_closures tc JOIN items i ON i.id=tc.item_row_id JOIN chains c ON c.id=i.chain_id WHERE c.name=$chain ORDER BY tc.phase").all({ $chain: chain }) } finally { db.close() }
+}
+
+function closureSnapshot(root: string, closureId: string, worktree: string): string {
+	const db = new Database(resolve(root, "db.sqlite"), { readonly: true })
+	let sessions: ClosureSessionRow[]
+	try { sessions = db.query<ClosureSessionRow, { $closureId: string }>("SELECT runner_kind,session_id FROM closure_sessions WHERE closure_id=$closureId ORDER BY runner_kind").all({ $closureId: closureId }) } finally { db.close() }
+	return JSON.stringify({
+		head: command([REAL_GIT, "rev-parse", "HEAD"], { cwd: worktree }).stdout,
+		branch: command([REAL_GIT, "symbolic-ref", "HEAD"], { cwd: worktree }).stdout,
+		status: command([REAL_GIT, "status", "--porcelain=v1", "--ignored"], { cwd: worktree }).stdout,
+		index: command([REAL_GIT, "ls-files", "--stage"], { cwd: worktree }).stdout,
+		scratch: readFileSync(resolve(worktree, ".issue560-scratch"), "utf8"),
+		sessions,
+	})
 }
 
 function deleteChain(daemon: Daemon, chain: string): void {
@@ -180,6 +225,10 @@ async function main(): Promise<void> {
 	mkdirSync(runtime, { recursive: true }); mkdirSync(evidence, { recursive: true })
 	const sourceSha = command([REAL_GIT, "rev-parse", "HEAD"]).stdout.trim()
 	const repos = prepareRepositories(runtime), shims = writeShims(runtime), env = daemonEnvironment(runtime, shims)
+	for (const key of ["PATH", "ISSUE560_REAL_GIT", "ISSUE560_GIT_GATE", "ISSUE560_GIT_ENTERED", "ISSUE560_GIT_RELEASE", "ISSUE560_GIT_LOG"] as const) {
+		const value = env[key]
+		if (value !== undefined) process.env[key] = value
+	}
 	let daemon = startDaemon(runtime, env)
 	const chains: string[] = []
 	let completed = false
@@ -187,7 +236,7 @@ async function main(): Promise<void> {
 		await ready(daemon); event("ready", { id, sourceSha, pid: daemon.child.pid, socket: resolve(daemon.root, "daemon.sock") })
 
 		// C01-C03/C08: block the daemon's real fetch child while its socket remains responsive.
-		const blocked = `issue560-blocked-${id}`; chains.push(blocked); writeFileSync(shims.gate, "block\n"); createChain(daemon, blocked, repos.target)
+		const blocked = `issue560-blocked-${id}`; chains.push(blocked); writeFileSync(shims.gate, "fetch\n"); createChain(daemon, blocked, repos.target)
 		await until(() => existsSync(resolve(runtime, "shim-state/fetch-entered")), Boolean, "blocked git fetch")
 		const latencies: number[] = []
 		for (let index = 0; index < 4; index += 1) { const at = Date.now(); command(["bun", LOOP_ENTRY, "daemon", "status", "--json", "--loop-data-root", daemon.root], { env }); latencies.push(Date.now() - at) }
@@ -197,13 +246,22 @@ async function main(): Promise<void> {
 		const rows = closureRows(daemon.root, blocked).filter((row) => row.phase === "iteration" || row.phase === "review")
 		assert(rows.length === 2 && new Set(rows.map((row) => row.worktree_path)).size === 2 && new Set(rows.map((row) => row.branch_name)).size === 2, "C01 closure resources are not distinct")
 		assert(rows.every((row) => row.base_commit === repos.advanced && row.branch_name?.startsWith(closureBranchPrefix(blocked))), "C02/C03 fetched base or branch identity mismatch")
-		event("C01-C03.C08.pass", { rows, latencies })
+		const blockedObservations = observations(shims.runnerLog).filter((row) => row.chain === blocked)
+		assert(blockedObservations.length === 2, "C01 runner observations missing")
+		for (const row of rows) {
+			const runner = blockedObservations.find((observation) => observation.phase === row.phase)
+			assert(runner !== undefined && runner.cwd === row.worktree_path && runner.branch === row.branch_name, `C01/C03 pre-spawn resource identity mismatch for ${row.phase}`)
+		}
+		const lifecycleLog = command(["bun", LOOP_ENTRY, "logs", repos.target, "--json", "--chain", blocked, "--loop-data-root", daemon.root], { env }).stdout
+		assert(lifecycleLog.indexOf("closure.resource_prepared") >= 0 && lifecycleLog.indexOf("closure.resource_prepared") < lifecycleLog.indexOf("agent.spawn"), "C01/C03 resources were not durably observed before runner spawn")
+		const fetchCount = readFileSync(resolve(runtime, "shim-state/git.jsonl"), "utf8").split("\n").filter((line) => line.includes('"event":"fetch"')).length
+		assert(fetchCount === 2, `C02 expected one serialized fetch per opened closure, observed ${fetchCount}`)
+		event("C01-C03.C08.pass", { rows, runner: blockedObservations, latencies, fetchCount })
 
 		// C04: suspend/reopen changes lifecycle only; Git and byte state remain identical.
 		const iteration = rows.find((row) => row.phase === "iteration")!; assert(iteration.worktree_path !== null, "missing iteration worktree")
-		const worktree = iteration.worktree_path; writeFileSync(resolve(worktree, ".gitignore"), "ignored.txt\n"); writeFileSync(resolve(worktree, "tracked-wip.txt"), "tracked\n"); command([REAL_GIT, "add", ".gitignore", "tracked-wip.txt"], { cwd: worktree }); writeFileSync(resolve(worktree, "untracked.txt"), "untracked\n"); writeFileSync(resolve(worktree, "ignored.txt"), "ignored\n")
-		const snapshot = () => JSON.stringify({ head: command([REAL_GIT, "rev-parse", "HEAD"], { cwd: worktree }).stdout, status: command([REAL_GIT, "status", "--porcelain=v1", "--ignored"], { cwd: worktree }).stdout, index: command([REAL_GIT, "ls-files", "--stage"], { cwd: worktree }).stdout })
-		const before = snapshot(), store = openSqliteStateStore({ loopDataRoot: daemon.root }); store.setClosureLifecycle(iteration.closure_id, { kind: "suspend", updatedAt: 1_900_000_001 }); store.setClosureLifecycle(iteration.closure_id, { kind: "activate", updatedAt: 1_900_000_002 }); const after = snapshot(); store.close(); assert(before === after, "C04 suspend/reopen mutated closure state")
+		const worktree = iteration.worktree_path; writeFileSync(resolve(worktree, ".gitignore"), "ignored.txt\n"); writeFileSync(resolve(worktree, "tracked-wip.txt"), "tracked\n"); command([REAL_GIT, "add", ".gitignore", "tracked-wip.txt"], { cwd: worktree }); writeFileSync(resolve(worktree, "untracked.txt"), "untracked\n"); writeFileSync(resolve(worktree, "ignored.txt"), "ignored\n"); writeFileSync(resolve(worktree, ".issue560-scratch"), "scratch bytes survive lifecycle transitions\n")
+		const before = closureSnapshot(daemon.root, iteration.closure_id, worktree), store = openSqliteStateStore({ loopDataRoot: daemon.root }); store.setClosureLifecycle(iteration.closure_id, { kind: "suspend", updatedAt: 1_900_000_001 }); store.setClosureLifecycle(iteration.closure_id, { kind: "activate", updatedAt: 1_900_000_002 }); const after = closureSnapshot(daemon.root, iteration.closure_id, worktree); store.close(); assert(before === after, "C04 suspend/reopen mutated Git, WIP, scratch, or session state")
 		event("C04.pass", { closureId: iteration.closure_id, worktree })
 
 		// C02 negative cases: no-origin is admitted; origin fetch failure is typed/audited.
@@ -216,46 +274,98 @@ async function main(): Promise<void> {
 		const interrupted = `issue560-interrupt-${id}`; chains.push(interrupted); createChain(daemon, interrupted, repos.target)
 		await until(() => observations(shims.runnerLog).some((row) => row.chain === interrupted && row.phase === "iteration" && row.attempt === 1), Boolean, "interrupt runner readiness")
 		const first = observations(shims.runnerLog).find((row) => row.chain === interrupted && row.phase === "iteration" && row.attempt === 1); assert(first, "missing first interrupted attempt")
+		const interruptedBefore = closureRows(daemon.root, interrupted).find((row) => row.phase === "iteration"); assert(interruptedBefore !== undefined, "missing interrupted closure before restart")
 		await stopDaemon(daemon); daemon = startDaemon(runtime, env); await ready(daemon)
 		await until(() => observations(shims.runnerLog).some((row) => row.chain === interrupted && row.phase === "iteration" && row.attempt === 2), Boolean, "resumed attempt", 90_000)
 		await until(() => statusDone(daemon, interrupted, repos.target), Boolean, "interrupt chain completion")
 		const second = observations(shims.runnerLog).find((row) => row.chain === interrupted && row.phase === "iteration" && row.attempt === 2); assert(second, "missing resumed attempt"); assert(second.cwd === first.cwd && second.branch === first.branch && second.argv.includes("--resume") && second.argv.includes(first.sessionId), "C09 resume identity mismatch")
-		event("C09.pass", { first, second })
+		const interruptedAfter = closureRows(daemon.root, interrupted).find((row) => row.phase === "iteration"); assert(interruptedAfter !== undefined && interruptedAfter.lifecycle === "active" && interruptedAfter.worktree_path === interruptedBefore.worktree_path && interruptedAfter.branch_name === interruptedBefore.branch_name, "C09 interruption changed lifecycle or resources")
+		event("C09.pass", { first, second, lifecycle: interruptedAfter.lifecycle, resources: { worktree: interruptedAfter.worktree_path, branch: interruptedAfter.branch_name } })
 
 		// C07: restart reconciliation reports all contradiction kinds and repairs only orphans.
 		await stopDaemon(daemon)
 		const missingDir = rows[0]!.worktree_path!, missingBranch = rows[1]!.branch_name!; rmSync(missingDir, { recursive: true, force: true }); command([REAL_GIT, "update-ref", "-d", missingBranch], { cwd: repos.target })
-		const orphanDir = resolve(daemon.root, "chains", blocked, "worktrees", "orphan"); mkdirSync(orphanDir, { recursive: true }); const orphanBranch = `${closureBranchPrefix(blocked)}orphan`; command([REAL_GIT, "branch", orphanBranch.replace("refs/heads/", ""), "main"], { cwd: repos.target }); command([REAL_GIT, "config", "core.hooksPath", ".issue560-hooks"], { cwd: repos.target })
+		const orphanDir = resolve(daemon.root, "chains", blocked, "worktrees", "orphan"); mkdirSync(orphanDir, { recursive: true }); const orphanBranch = `${closureBranchPrefix(blocked)}orphan`; command([REAL_GIT, "branch", orphanBranch.replace("refs/heads/", ""), "main"], { cwd: repos.target }); command([REAL_GIT, "config", "core.hooksPath", ".issue560-hooks"], { cwd: repos.target }); command([REAL_GIT, "config", "extensions.worktreeConfig", "true"], { cwd: repos.target })
 		daemon = startDaemon(runtime, env); await ready(daemon)
-		const reconcile = await until(() => command(["bun", LOOP_ENTRY, "logs", repos.target, "--json", "--type", "closure.reconciled", "--chain", blocked, "--loop-data-root", daemon.root], { env, allowFail: true }).stdout, (text) => ["missing-directory", "missing-branch", "orphan-directory", "orphan-branch", "hooks-drift"].every((kind) => text.includes(kind)), "reconciliation events")
-		assert(!existsSync(orphanDir) && command([REAL_GIT, "show-ref", "--verify", orphanBranch], { cwd: repos.target, allowFail: true }).exitCode !== 0, "C07 orphan repair failed"); command([REAL_GIT, "config", "--unset", "core.hooksPath"], { cwd: repos.target })
-		event("C07.pass", { eventKinds: ["missing-directory", "missing-branch", "orphan-directory", "orphan-branch", "hooks-drift"], bytes: reconcile.length })
+		const reconcileKinds = ["missing-directory", "missing-branch", "orphan-directory", "orphan-branch", "hooks-drift", "repo-config-drift"]
+		const reconcile = await until(() => command(["bun", LOOP_ENTRY, "logs", repos.target, "--json", "--type", "closure.reconciled", "--chain", blocked, "--loop-data-root", daemon.root], { env, allowFail: true }).stdout, (text) => reconcileKinds.every((kind) => text.includes(kind)), "reconciliation events")
+		assert(!existsSync(orphanDir) && command([REAL_GIT, "show-ref", "--verify", orphanBranch], { cwd: repos.target, allowFail: true }).exitCode !== 0, "C07 orphan repair failed"); command([REAL_GIT, "config", "--unset", "core.hooksPath"], { cwd: repos.target }); command([REAL_GIT, "config", "--unset", "extensions.worktreeConfig"], { cwd: repos.target })
+		assert(rows.every((row) => closureRows(daemon.root, blocked).find((current) => current.closure_id === row.closure_id)?.lifecycle === row.lifecycle), "C07 reconciliation silently changed lifecycle")
+		event("C07.pass", { eventKinds: reconcileKinds, bytes: reconcile.length })
 
-		// C05: fixed-point recheck, active-run protection, irreversible consume and session clearing share the store writer.
-		const consumeStore = openSqliteStateStore({ loopDataRoot: daemon.root }), consumeRows = closureRows(daemon.root, noOrigin), candidate = consumeRows.find((row) => row.phase === "review")!; const protectedResult = consumeStore.consumeClosureIfUnreachable(candidate.closure_id, { model: { closures: [candidate.closure_id], seeds: [{ kind: "open-append", closureId: candidate.closure_id }], edges: [] }, updatedAt: 1_900_000_010 }); assert(protectedResult.kind === "retained", "C05 reachable closure consumed"); const consumed = consumeStore.consumeClosureIfUnreachable(candidate.closure_id, { model: { closures: [candidate.closure_id], seeds: [], edges: [] }, updatedAt: 1_900_000_011, evidence: "unpublished-discarded" }); assert(consumed.kind === "consumed" && consumed.closure.sessions.length === 0, "C05 consume/session clear failed"); let conflict = false; try { consumeStore.setClosureLifecycle(candidate.closure_id, { kind: "activate", updatedAt: 1_900_000_012 }) } catch { conflict = true } consumeStore.close(); assert(conflict, "C05 consumed closure reactivated")
-		event("C05.pass", { protectedResult, consumed: consumed.kind })
+		// C05: every present/future reachability seed protects the closure; the winning consume
+		// transaction clears sessions, removes only its owned resources and emits evidence/freshness.
+		const consumeStore = openSqliteStateStore({ loopDataRoot: daemon.root }), consumeRows = closureRows(daemon.root, noOrigin), candidate = consumeRows.find((row) => row.phase === "review"); assert(candidate !== undefined, "missing C05 candidate")
+		const tree = consumeStore.getTaskTree(consumeStore.getChainByName(noOrigin)?.id ?? -1); assert(tree !== null, "missing C05 task tree")
+		const candidateClosure = findClosure(tree.root, candidate.closure_id); assert(candidateClosure !== null, "missing C05 closure snapshot")
+		const seedKinds = ["active-run", "resumable-attempt", "decided-reopen", "seq-suffix", "open-par-epoch", "open-append", "next-epoch-candidate"] as const
+		for (const kind of seedKinds) {
+			const protectedResult = consumeStore.consumeClosureIfUnreachable(candidate.closure_id, { model: { closures: [candidate.closure_id], seeds: [{ kind, closureId: candidate.closure_id }], edges: [] }, updatedAt: 1_900_000_010 })
+			assert(protectedResult.kind === "retained" && protectedResult.reason === "reachable", `C05 ${kind} reachability did not retain closure`)
+		}
+		const consumedEvents: Extract<SchedulerEvent, { type: "closure.consumed" }>[] = []
+		const gitEntered = resolve(runtime, "shim-state/fetch-entered"), gitRelease = resolve(runtime, "shim-state/fetch-release")
+		rmSync(gitEntered, { force: true }); rmSync(gitRelease, { force: true }); writeFileSync(shims.gate, "worktree-remove\n")
+		const consumePromise = consumeSchedulerClosure({ chainId: tree.chainId, repoCwd: repos.noOrigin, closure: candidateClosure, model: { closures: [candidate.closure_id], seeds: [], edges: [] }, updatedAt: 1_900_000_011, evidence: "unpublished-discarded", store: consumeStore, emit: (consumedEvent) => { consumedEvents.push(consumedEvent) } })
+		await until(() => existsSync(gitEntered), Boolean, "blocked worktree remove")
+		const removeLatencies: number[] = []
+		for (let index = 0; index < 3; index += 1) { const at = Date.now(); command(["bun", LOOP_ENTRY, "daemon", "status", "--json", "--loop-data-root", daemon.root], { env }); removeLatencies.push(Date.now() - at) }
+		assert(Math.max(...removeLatencies) < 1_000, `daemon socket stalled with worktree remove: ${removeLatencies.join(",")}`)
+		writeFileSync(gitRelease, "release\n"); rmSync(shims.gate, { force: true })
+		const consumed = await consumePromise
+		assert(consumed.decision.kind === "consumed" && consumed.decision.closure.sessions.length === 0 && consumed.cleanup?.removed === true, "C05 consume/session/resource cleanup failed")
+		assert(!existsSync(candidateClosure.worktreePath ?? "") && command([REAL_GIT, "show-ref", "--verify", candidateClosure.branchName ?? "missing"], { cwd: repos.noOrigin, allowFail: true }).exitCode !== 0, "C05 owned worktree or branch survived consumption")
+		assert(consumedEvents.length === 1 && consumedEvents[0]?.evidence === "unpublished-discarded" && consumedEvents[0].freshness.kind === "retained", "C05 consumption evidence/freshness event missing")
+		let conflict = false; try { consumeStore.setClosureLifecycle(candidate.closure_id, { kind: "activate", updatedAt: 1_900_000_012 }) } catch { conflict = true } consumeStore.close(); assert(conflict, "C05 competing writer reactivated consumed closure")
+		event("C05.pass", { protectedSeedKinds: seedKinds, consumed: consumed.decision.kind, cleanup: consumed.cleanup, event: consumedEvents[0], removeLatencies })
 
 		// C06/C10: direct production manager exercise for persisted par pin and concurrent repo coordination.
 		const coordinator = createRepositoryGitCoordinator(), manager = createGitWorktreeManager({ loopDataRoot: daemon.root }, coordinator), directChain = { id: 999_560, name: `issue560-direct-${id}`, preset: PRESET, repository: "issue-560/fixture", baseBranch: "main", status: "active", metadata: {}, createdAt: 0, updatedAt: 0 } as const, directItem = { id: 999_561, chainId: directChain.id, itemId: "direct", repoCwd: repos.target, status: "queued", phase: null, runner: null, attempts: 0, lastRunId: null, agentCwd: null, extra: {}, position: 0, createdAt: 0, updatedAt: 0 } as const
-		const pin = command([REAL_GIT, "rev-parse", "refs/heads/main"], { cwd: repos.target }).stdout.trim(), contexts = [
-			{ phase: "par-active-a", lifecycle: "active" as const },
-			{ phase: "par-active-b", lifecycle: "active" as const },
-			{ phase: "par-suspended", lifecycle: "suspended" as const },
-		].map(({ phase, lifecycle }, index) => ({ chain: directChain, item: { ...directItem, id: directItem.id + index }, phase, closureId: `closure:direct:${phase}`, repoCwd: repos.target, slotKey: `slot-${phase}`, existing: { closureId: `closure:direct:${phase}`, itemRowId: directItem.id + index, itemId: "direct", phase, lifecycle, worktreePath: null, branchName: null, baseCommit: pin, sourceParNodeId: "par-root", sessions: [] } }))
-		const directResources = await Promise.all(contexts.map((context) => manager(context))); assert(directResources.every((resource) => typeof resource !== "string" && resource.baseCommit === pin), "C06 par pin mismatch")
+		const pin = command([REAL_GIT, "rev-parse", "refs/heads/main"], { cwd: repos.target }).stdout.trim()
+		writeFileSync(resolve(repos.target, "nested-pin.txt"), "nested par pin\n"); command([REAL_GIT, "add", "nested-pin.txt"], { cwd: repos.target }); command([REAL_GIT, "-c", "user.name=issue-560", "-c", "user.email=issue-560@invalid", "commit", "-qm", "nested par pin"], { cwd: repos.target }); const nestedPin = command([REAL_GIT, "rev-parse", "HEAD"], { cwd: repos.target }).stdout.trim()
+		const contextSpecs = [
+			{ phase: "par-active-a", lifecycle: "active" as const, sourceParNodeId: "par-root", baseCommit: pin },
+			{ phase: "par-active-b", lifecycle: "active" as const, sourceParNodeId: "par-root", baseCommit: pin },
+			{ phase: "par-suspended", lifecycle: "suspended" as const, sourceParNodeId: "par-root", baseCommit: pin },
+			{ phase: "nested-par-member", lifecycle: "active" as const, sourceParNodeId: "par-nested", baseCommit: nestedPin },
+		]
+		const gitLogBeforePar = readFileSync(resolve(runtime, "shim-state/git.jsonl"), "utf8")
+		const contexts = contextSpecs.map(({ phase, lifecycle, sourceParNodeId, baseCommit }, index) => ({ chain: directChain, item: { ...directItem, id: directItem.id + index }, phase, closureId: `closure:direct:${phase}`, repoCwd: repos.target, slotKey: `slot-${phase}`, existing: { closureId: `closure:direct:${phase}`, itemRowId: directItem.id + index, itemId: "direct", phase, lifecycle, worktreePath: null, branchName: null, baseCommit, sourceParNodeId, sessions: [] } }))
+		rmSync(gitEntered, { force: true }); rmSync(gitRelease, { force: true }); writeFileSync(shims.gate, "worktree-add\n")
+		const directResourcesPromise = Promise.all(contexts.map((context) => manager(context)))
+		await until(() => existsSync(gitEntered), Boolean, "blocked worktree add")
+		const addLatencies: number[] = []
+		for (let index = 0; index < 3; index += 1) { const at = Date.now(); command(["bun", LOOP_ENTRY, "daemon", "status", "--json", "--loop-data-root", daemon.root], { env }); addLatencies.push(Date.now() - at) }
+		assert(Math.max(...addLatencies) < 1_000, `daemon socket stalled with worktree add: ${addLatencies.join(",")}`)
+		writeFileSync(gitRelease, "release\n"); rmSync(shims.gate, { force: true })
+		const directResources = await directResourcesPromise; assert(directResources.every((resource, index) => typeof resource !== "string" && resource.baseCommit === contextSpecs[index]?.baseCommit), "C06 par pin mismatch")
+		const gitLogAfterPar = readFileSync(resolve(runtime, "shim-state/git.jsonl"), "utf8").slice(gitLogBeforePar.length); assert(!gitLogAfterPar.includes('"event":"fetch"'), "C06 par member performed independent fetch")
 		await Promise.all(directResources.map(async (resource, index) => {
 			if (typeof resource === "string") fail("expected typed direct resources")
 			writeFileSync(resolve(resource.worktreePath, `concurrent-${index}.txt`), `${index}\n`)
-			await commandAsync([REAL_GIT, "add", `concurrent-${index}.txt`], { cwd: resource.worktreePath })
-			await commandAsync([REAL_GIT, "-c", "user.name=issue-560", "-c", "user.email=issue-560@invalid", "commit", "-m", `issue-560 concurrent ${index}`], { cwd: resource.worktreePath })
-			await commandAsync([REAL_GIT, "push", "-q", "origin", `HEAD:${resource.branchName}`], { cwd: resource.worktreePath })
+			await coordinator.run(repos.target, async () => await commandAsync([REAL_GIT, "add", `concurrent-${index}.txt`], { cwd: resource.worktreePath }))
+			await coordinator.run(repos.target, async () => await commandAsync([REAL_GIT, "-c", "user.name=issue-560", "-c", "user.email=issue-560@invalid", "commit", "-m", `issue-560 concurrent ${index}`], { cwd: resource.worktreePath }))
+			await coordinator.run(repos.target, async () => await commandAsync([REAL_GIT, "push", "-q", "origin", `HEAD:${resource.branchName}`], { cwd: resource.worktreePath }))
 		}))
+		const resourceStatesBefore = directResources.map((resource, index) => {
+			if (typeof resource === "string") fail("expected typed direct resources")
+			writeFileSync(resolve(resource.worktreePath, `.wip-${index}`), `wip-${index}\n`)
+			return { baseCommit: resource.baseCommit, head: command([REAL_GIT, "rev-parse", "HEAD"], { cwd: resource.worktreePath }).stdout.trim(), index: command([REAL_GIT, "ls-files", "--stage"], { cwd: resource.worktreePath }).stdout, status: command([REAL_GIT, "status", "--porcelain=v1", "--ignored"], { cwd: resource.worktreePath }).stdout }
+		})
+		const remoteWriter = resolve(runtime, "remote-writer"); command([REAL_GIT, "clone", "-q", repos.origin, remoteWriter]); command([REAL_GIT, "switch", "-q", "main"], { cwd: remoteWriter }); writeFileSync(resolve(remoteWriter, "tracking-advance.txt"), "remote tracking advance\n"); command([REAL_GIT, "add", "tracking-advance.txt"], { cwd: remoteWriter }); command([REAL_GIT, "-c", "user.name=issue-560", "-c", "user.email=issue-560@invalid", "commit", "-qm", "advance tracking ref"], { cwd: remoteWriter }); command([REAL_GIT, "push", "-q", "origin", "main"], { cwd: remoteWriter }); const trackingCommit = command([REAL_GIT, "rev-parse", "HEAD"], { cwd: remoteWriter }).stdout.trim()
+		await coordinator.run(repos.target, async () => await commandAsync([REAL_GIT, "fetch", "origin", "main"], { cwd: repos.target }))
+		assert(command([REAL_GIT, "rev-parse", "refs/remotes/origin/main"], { cwd: repos.target }).stdout.trim() === trackingCommit, "C10 remote-tracking ref did not advance")
+		const resourceStatesAfter = directResources.map((resource) => {
+			if (typeof resource === "string") fail("expected typed direct resources")
+			return { baseCommit: resource.baseCommit, head: command([REAL_GIT, "rev-parse", "HEAD"], { cwd: resource.worktreePath }).stdout.trim(), index: command([REAL_GIT, "ls-files", "--stage"], { cwd: resource.worktreePath }).stdout, status: command([REAL_GIT, "status", "--porcelain=v1", "--ignored"], { cwd: resource.worktreePath }).stdout }
+		})
+		assert(JSON.stringify(resourceStatesBefore) === JSON.stringify(resourceStatesAfter), "C10 tracking/config churn mutated saved base, HEAD, index, or WIP")
 		for (let index = 0; index < directResources.length; index += 1) {
 			const resource = directResources[index]!; if (typeof resource === "string") fail("expected typed direct resources")
 			await cleanupSchedulerChainWorktrees([{ repoCwd: repos.target, closure: { ...contexts[index]!.existing, lifecycle: "consumed", worktreePath: resource.worktreePath, branchName: resource.branchName } }])
 		}
 		assert(!readFileSync(resolve(runtime, "shim-state/git.jsonl"), "utf8").includes("gc"), "C10 explicit gc observed")
-		event("C06.C10.pass", { pin, resources: directResources })
+		event("C06.C10.pass", { pin, nestedPin, resources: directResources, addLatencies, trackingCommit, freshness: { kind: "fetched", remote: "origin", commit: trackingCommit, observedAt: new Date().toISOString() } satisfies OriginFreshness, resourceStates: resourceStatesAfter })
 
 		for (const chain of chains) deleteChain(daemon, chain)
 		await stopDaemon(daemon)

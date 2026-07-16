@@ -31,6 +31,7 @@ export const ObservabilityEventTypeBoundary = arkType.or(
 	arkType.unit("queue.terminal"),
 	arkType.unit("item.dependency_unblocked"),
 	arkType.unit("closure.resource_prepared"),
+	arkType.unit("closure.consumed"),
 	arkType.unit("closure.git_failed"),
 	arkType.unit("closure.reconciled"),
 	arkType.unit("slot.busy"),
@@ -246,6 +247,14 @@ const ClosureReconciliationMismatchBoundary = arkType.or(
 	{ kind: arkType.unit("orphan-directory"), path: "string>0", repaired: arkType.unit(true) },
 	{ kind: arkType.unit("orphan-branch"), branchName: "string>0", repaired: arkType.unit(true) },
 	{ kind: arkType.unit("hooks-drift"), hooksPath: "string>0", repaired: arkType.unit(false) },
+	{ kind: arkType.unit("repo-config-drift"), key: "string>0", value: "string>0", repaired: arkType.unit(false) },
+)
+
+const ClosureConsumptionEvidenceBoundary = arkType.or(
+	arkType.unit("no-work"),
+	arkType.unit("published"),
+	arkType.unit("unpublished-discarded"),
+	arkType.unit("unevaluable"),
 )
 
 const ReconciledRunBoundary = arkType({
@@ -340,6 +349,12 @@ const ObservabilityEventPayloadBoundary = arkType.or(
 		kind: arkType.unit("audit"),
 		type: arkType.unit("closure.resource_prepared"),
 		payload: { closureId: "string>0", worktreePath: "string>0", branchName: "string>0", baseCommit: "string>0", freshness: OriginFreshnessBoundary },
+	},
+	{
+		...EventBaseBoundary,
+		kind: arkType.unit("audit"),
+		type: arkType.unit("closure.consumed"),
+		payload: { closureId: "string>0", evidence: ClosureConsumptionEvidenceBoundary, freshness: OriginFreshnessBoundary },
 	},
 	{
 		...EventBaseBoundary,
@@ -1027,6 +1042,8 @@ function renderAuditEvent(event: Extract<ObservabilityEvent, { kind: "audit" }>)
 			return `${event.ts} audit item.dependency_unblocked chain=${event.chain ?? "-"} item=${event.item ?? event.payload.rowId} ${event.payload.fromStatus}->${event.payload.toStatus}`
 		case "closure.resource_prepared":
 			return `${event.ts} audit closure.resource_prepared chain=${event.chain ?? "-"} closure=${event.payload.closureId} branch=${event.payload.branchName} freshness=${event.payload.freshness.kind}`
+		case "closure.consumed":
+			return `${event.ts} audit closure.consumed chain=${event.chain ?? "-"} closure=${event.payload.closureId} evidence=${event.payload.evidence} freshness=${event.payload.freshness.kind}`
 		case "closure.git_failed":
 			return `${event.ts} audit closure.git_failed chain=${event.chain ?? "-"} closure=${event.payload.closureId} code=${event.payload.code}`
 		case "closure.reconciled":
