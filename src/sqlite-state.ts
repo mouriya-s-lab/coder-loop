@@ -1718,7 +1718,16 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 			}),
 
 		deleteItem: (id) =>
-			write("delete item", () => db.query<never, SqlParams>("DELETE FROM items WHERE id = $id").run({ id: id }).changes > 0),
+			write("delete item", () => {
+				const params = { id }
+				db.query<never, SqlParams>("DELETE FROM active_runs WHERE run_id IN (SELECT run_id FROM runs WHERE item_id = $id)").run(params)
+				db.query<never, SqlParams>("DELETE FROM runs WHERE item_id = $id").run(params)
+				db.query<never, SqlParams>("DELETE FROM task_trees WHERE root_node_id IN (SELECT leaf_node_id FROM task_closures WHERE item_row_id = $id)").run(params)
+				db.query<never, SqlParams>("UPDATE task_seq_nodes SET next_child_node_id = NULL WHERE next_child_node_id IN (SELECT leaf_node_id FROM task_closures WHERE item_row_id = $id)").run(params)
+				db.query<never, SqlParams>("DELETE FROM task_leaf_nodes WHERE closure_id IN (SELECT closure_id FROM task_closures WHERE item_row_id = $id)").run(params)
+				db.query<never, SqlParams>("DELETE FROM task_nodes WHERE runtime_node_id IN (SELECT leaf_node_id FROM task_closures WHERE item_row_id = $id)").run(params)
+				return db.query<never, SqlParams>("DELETE FROM items WHERE id = $id").run(params).changes > 0
+			}),
 
 		getNextPendingItem: (input) =>
 			read("get next pending item", () => {
@@ -1812,6 +1821,7 @@ function createSqliteStateStore(db: Database): SqliteStateStore {
 			write("set current run", () => {
 				const run = requireRun(getRunRowByRunId(input.runId), input.runId)
 				if (run.chainId !== input.chainId || run.phase !== input.phase) throw new SqliteStateError("run_closure_mismatch", `run ${input.runId} does not match chain/phase`, { runId: input.runId })
+				if (run.endedAt !== null) throw new SqliteStateError("invalid_input", `completed run ${input.runId} cannot become active`, { runId: input.runId })
 				ensureRuntimeClosure(db, run)
 				const closure = queryPersistedOne(db, "SELECT closure_id, leaf_node_id, lifecycle FROM task_closures WHERE item_row_id = $itemId AND phase = $phase", { itemId: run.itemId, phase: input.phase }, ClosureAssociationRowBoundary, `task closure for run ${input.runId}`)
 				if (closure === null) throw new SqliteStateError("run_closure_mismatch", `run ${input.runId} has no matching closure`, { runId: input.runId })

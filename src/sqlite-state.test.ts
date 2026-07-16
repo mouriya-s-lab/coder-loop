@@ -461,6 +461,29 @@ describe("sqlite state store", () => {
 		}
 	})
 
+	test("closure active run rejects completed run reactivation", async () => {
+		const { store } = await openTestStore("completed-run-reactivation")
+		try {
+			const chain = createFullChain(store)
+			const item = createFullItem(store, chain)
+			store.createTaskTree(chain.id, singleLeafTree(item))
+			const run = store.recordRun({
+				runId: "completed-run",
+				chainId: chain.id,
+				itemId: item.id,
+				phase: "iteration",
+				startedAt: 1_800_000_110,
+			})
+			store.completeRun(run.runId, { endedAt: 1_800_000_111, exitCode: 0, status: runtimeStatus("done") })
+
+			expectSqliteCode(
+				() => store.setCurrentRun({ chainId: chain.id, phase: run.phase, runId: run.runId, startedAt: run.startedAt, extra: storedItemExtra({}) }),
+				"invalid_input",
+			)
+			expect(store.listCurrentRuns(chain.id)).toEqual([])
+		} finally { store.close() }
+	})
+
 	test("main v14 context database migrates normalized runtime without losing context", async () => {
 		const loopDataRoot = resolve(TEST_ROOT, `main-v14-to-normalized-runtime-${Date.now()}-${++nextRootId}`)
 		const fixture = seedCanonicalHistoricalRuntime({
@@ -628,6 +651,28 @@ describe("sqlite state store", () => {
 		} finally {
 			store.close()
 		}
+	})
+
+	test("deleteItem removes normalized leaf ownership and run history", async () => {
+		const { store } = await openTestStore("delete-normalized-item")
+		try {
+			const chain = createFullChain(store)
+			const item = createFullItem(store, chain)
+			store.createTaskTree(chain.id, singleLeafTree(item))
+			const run = store.recordRun({
+				runId: "delete-normalized-run",
+				chainId: chain.id,
+				itemId: item.id,
+				phase: "iteration",
+				startedAt: 1_800_000_320,
+			})
+			store.completeRun(run.runId, { endedAt: 1_800_000_321, exitCode: 0, status: runtimeStatus("done") })
+
+			expect(store.deleteItem(item.id)).toBe(true)
+			expect(store.getItem(item.id)).toBeNull()
+			expect(store.getRunByRunId(run.runId)).toBeNull()
+			expect(store.getTaskTree(chain.id)).toBeNull()
+		} finally { store.close() }
 	})
 
 	test("next pending follows queue position regardless of attempts", async () => {

@@ -31,7 +31,7 @@ import {
 } from "./scheduler"
 import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
-import { makeObservabilityEvent, queryObservabilityEvents } from "./observability"
+import { makeObservabilityEvent, ObservabilityEventBoundary, queryObservabilityEvents } from "./observability"
 import { chainBindings, engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra } from "./runtime-data"
 import type { BoundaryRecord, BoundaryValue } from "./boundary-types"
 import { parseHookDeclarations, type GateHookDeclaration, type ObserverHookDeclaration, type PresetHookPlaceholder } from "./hook-declarations"
@@ -95,10 +95,8 @@ const FakeRunnerRunningEventBoundary = arkType({
 	itemId: "number",
 	runId: "string",
 })
-const BoundaryRecordBoundary = arkType({ "[string]": "unknown" })
-const BoundaryRecordArrayBoundary = BoundaryRecordBoundary.array()
 const StatusArtifactBoundary = arkType({ phase: "string" })
-const StatusSnapshotBoundary = arkType({ events: { recent: BoundaryRecordBoundary.array() } })
+const StatusSnapshotBoundary = arkType({ events: { recent: ObservabilityEventBoundary.array() } })
 
 // v1 status model: the spawned agent is the only writer of item.status. These daemon
 // integration tests use fake runners, so the fake runner reproduces the real agent's
@@ -1212,7 +1210,7 @@ process.exitCode = 0
 			})).chain)
 			const chainId = numberValue(chain.id)
 			expectOk(await request(fixture, "item.add", { chainId, itemId: "25901", repoCwd: REPO_ROOT, title: "occupant" }))
-			const baseline = records(expectOk(await request(fixture, "item.list", { chainId })).items)
+			const baseline = expectOk(await request(fixture, "item.list", { chainId })).items as BoundaryRecord[]
 			expect(baseline).toHaveLength(1)
 
 			const failed = await request(fixture, "item.batchAdd", {
@@ -1225,7 +1223,7 @@ process.exitCode = 0
 			})
 			expectConflict(failed)
 
-			const after = records(expectOk(await request(fixture, "item.list", { chainId })).items)
+			const after = expectOk(await request(fixture, "item.list", { chainId })).items as BoundaryRecord[]
 			expect(after.map((item) => Number(item.itemId))).toEqual([25901])
 			expect(after.map((item) => item.id)).toEqual(baseline.map((item) => item.id))
 		} finally {
@@ -1968,15 +1966,15 @@ attemptTimeoutSeconds = 3600
 			const b = record(expectOk(await request(fixture, "item.add", { chainId, itemId: "302", repoCwd: REPO_ROOT })).item)
 			const c = record(expectOk(await request(fixture, "item.add", { chainId, itemId: "303", repoCwd: REPO_ROOT })).item)
 
-			const baseline = records(expectOk(await request(fixture, "item.list", { chainId })).items)
+			const baseline = expectOk(await request(fixture, "item.list", { chainId })).items as BoundaryRecord[]
 			expect(baseline.map((item) => Number(item.itemId))).toEqual([301, 302, 303])
 			expect(baseline.map((item) => Number(item.position))).toEqual([0, 1, 2])
 
-			const moved = records(expectOk(await request(fixture, "item.reorder", { itemId: numberValue(c.id), position: 0 })).items)
+			const moved = expectOk(await request(fixture, "item.reorder", { itemId: numberValue(c.id), position: 0 })).items as BoundaryRecord[]
 			expect(moved.map((item) => Number(item.itemId))).toEqual([303, 301, 302])
 			expect(moved.map((item) => Number(item.position))).toEqual([0, 1, 2])
 
-			const after = records(expectOk(await request(fixture, "item.list", { chainId })).items)
+			const after = expectOk(await request(fixture, "item.list", { chainId })).items as BoundaryRecord[]
 			expect(after.map((item) => Number(item.itemId))).toEqual([303, 301, 302])
 			expect(after.map((item) => Number(item.position))).toEqual([0, 1, 2])
 
@@ -3435,7 +3433,7 @@ process.exitCode = 0
 			})).item)
 			const itemId = numberValue(added.id)
 			const activeRuns = await waitFor(async () => record(expectOk(await request(fixture, "daemon.status")).daemon).activeRuns, (runs) => Array.isArray(runs) && runs.length === 1)
-			const agentPid = numberValue(records(activeRuns)[0]?.pid)
+			const agentPid = (activeRuns as unknown as Array<{ pid?: number }>)[0]?.pid
 
 			const downStartedAt = Date.now()
 			const down = expectOk(await request(fixture, "daemon.down"))
@@ -5373,7 +5371,7 @@ process.exitCode = 0
 	test("daemon re-spawns item after agent exits 0 without SUMMARY marker (live integration)", async () => {
 		const warnings: string[] = []
 		const originalWarn = console.warn
-		console.warn = (...args: BoundaryValue[]) => {
+		console.warn = (...args: unknown[]) => {
 			warnings.push(args.map((value) => typeof value === "string" ? value : JSON.stringify(value)).join(" "))
 		}
 		const fixture = await startFixture("scheduler-respawn-no-summary", { schedulerIntervalMs: 30 })
@@ -5775,8 +5773,8 @@ process.exitCode = 0
 	})
 
 	test("recovers after scheduler lifecycle event failure", async () => {
-		const unhandled: BoundaryValue[] = []
-		const onUnhandled = (reason: BoundaryValue): void => { unhandled.push(reason) }
+		const unhandled: unknown[] = []
+		const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
 		process.on("unhandledRejection", onUnhandled)
 		const fixture = await startFixture("lifecycle-event-persistence-recovery", {
 			schedulerConfig: {
@@ -8686,7 +8684,7 @@ function expectInvalid(response: DaemonResponse): void {
 	if (!response.ok) expect(response.error.code).toBe("invalid_request")
 }
 
-function expectInvalidDetails(response: DaemonResponse, field: string, value: BoundaryValue): void {
+function expectInvalidDetails(response: DaemonResponse, field: string, value: unknown): void {
 	expectInvalid(response)
 	if (!response.ok) {
 		const details = record(response.error.details)
@@ -8725,12 +8723,9 @@ function expectTooLarge(response: DaemonResponse): void {
 	if (!response.ok) expect(response.error.code).toBe("request_too_large")
 }
 
-function record(value: BoundaryValue): BoundaryRecord {
-	return BoundaryRecordBoundary.assert(value)
-}
-
-function records(value: BoundaryValue): BoundaryRecord[] {
-	return BoundaryRecordArrayBoundary.assert(value)
+function record(value: unknown): BoundaryRecord {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("expected object")
+	return value as BoundaryRecord
 }
 
 function deferred<T>() {
