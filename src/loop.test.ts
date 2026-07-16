@@ -53,6 +53,7 @@ import { createStreamTextState } from "./runner-output"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const TEST_ROOT = resolve(REPO_ROOT, ".coder-loop/runtime/evidence/loop-tests")
+type PromptSessionRunnerKind = "claude" | "codex" | "opencode"
 
 // #419: ItemRecord retired top-level `issueNumber` / `branch` / `pr`. Tests still want the
 // legibility of passing those names — accept them as shim aliases and fold into `itemId` /
@@ -839,7 +840,7 @@ describe("small parsers", () => {
 		expect(authorization.surfaces).toContainEqual({ kind: "system-device", channel: "null", path: "/dev/null" })
 		expect(authorization.surfaces).not.toContainEqual(expect.objectContaining({ path: "/runtime/loop-data" }))
 		expect(authorization.surfaces).not.toContainEqual(expect.objectContaining({ path: "/dev" }))
-		for (const kind of ["claude", "codex", "opencode"] as const) {
+		for (const kind of ["claude", "codex", "opencode", "hapi"] as const) {
 			for (const resume of [{ kind: "fresh" }, { kind: "resume", sessionId: `session-${kind}` }] as const) {
 				const plan = buildRunnerInvocation({ kind, binary: kind, extraArgs: [], model: null, source: "engine-builtin" }, "prompt", resume, authorization)
 				const runnerScratch = resolve("/runtime/loop-data/chains/c/worktrees/i", ".coder-loop-runner", "tmp")
@@ -848,7 +849,11 @@ describe("small parsers", () => {
 				expect(plan.binary).toBe("/usr/bin/sandbox-exec")
 				expect(plan.authorizationEvidence.outerSandboxProfile).toBe(outerSandboxProfile)
 				expect(plan.authorizationEvidence.runner).toBe(kind)
-				expect(plan.authorizationEvidence.surfaces).toContainEqual(expect.objectContaining({ kind: kind === "codex" ? "runner-runtime-file" : "runner-runtime-directory", runner: kind }))
+				if (kind === "hapi") {
+					expect(plan.authorizationEvidence.surfaces).not.toContainEqual(expect.objectContaining({ runner: kind, channel: expect.stringContaining("runtime") }))
+				} else {
+					expect(plan.authorizationEvidence.surfaces).toContainEqual(expect.objectContaining({ kind: kind === "codex" ? "runner-runtime-file" : "runner-runtime-directory", runner: kind }))
+				}
 				expect(plan.args[2]).toBe(kind)
 				expect(plan.args.slice(2)).not.toContain("/runtime/loop-data")
 				expect(plan.args).not.toContain("danger-full-access")
@@ -865,7 +870,8 @@ describe("small parsers", () => {
 				expect(plan.environment.TEMP).toBe(runnerScratch)
 				expect(plan.environment.CLAUDE_CODE_TMPDIR).toBe(kind === "claude" ? runnerScratch : undefined)
 				expect(plan.runtimeDirectories).toEqual([runnerScratch])
-				if (resume.kind === "resume") expect(plan.args).toContain(`session-${kind}`)
+				if (resume.kind === "resume" && kind !== "hapi") expect(plan.args).toContain(`session-${kind}`)
+				if (kind === "hapi") expect(plan.args).not.toContain(`session-${kind}`)
 				if (kind === "claude") {
 					expect(plan.args[1]).toContain(resolve(homedir(), ".claude/projects"))
 				}
@@ -1035,7 +1041,7 @@ describe("small parsers", () => {
 			evidenceDir, evidenceRootDir, issueDir, logDir, daemonSocketPath,
 			declaredRuntimeBindingPaths: ["sharedContextPath", "currentIssueFile", "issueDir", "evidenceDir", "evidenceRootDir", "logDir"],
 		})
-		for (const kind of ["claude", "codex", "opencode"] as const) {
+		for (const kind of ["claude", "codex", "opencode", "hapi"] as const) {
 			for (const resume of [{ kind: "fresh" }, { kind: "resume", sessionId: `resume-${kind}` }] as const) {
 				const plan = buildRunnerInvocation({ kind, binary: "/usr/bin/true", extraArgs: [], model: null, source: "engine-builtin" }, "prompt", resume, authorization)
 				const profile = plan.args[1]!
@@ -1095,7 +1101,7 @@ describe("small parsers", () => {
 			["--dir", "/runtime/root"], ["--dir=/runtime/root"], ["--permission-mode", "bypassPermissions"], ["--permission-mode=bypassPermissions"],
 			["--dangerously-skip-permissions"], ["--dangerously-bypass-approvals-and-sandbox"],
 		]
-		for (const kind of ["claude", "codex", "opencode"] as const) {
+		for (const kind of ["claude", "codex", "opencode", "hapi"] as const) {
 			for (const resume of [{ kind: "fresh" }, { kind: "resume", sessionId: `resume-${kind}` }] as const) {
 				for (const extraArgs of bypasses) {
 					expect(() => buildRunnerInvocation({ kind, binary: kind, extraArgs, model: null, source: "engine-builtin" }, "prompt", resume, authorization), `${kind}/${resume.kind}: ${extraArgs.join(" ")}`).toThrow("runner authorization metadata")
@@ -1113,7 +1119,7 @@ describe("small parsers", () => {
 		const unrelatedEvidenceDir = resolve(options.evidenceRootDir, "999")
 		await rm(root, { recursive: true, force: true })
 		await mkdir(root, { recursive: true })
-		for (const kind of ["claude", "codex", "opencode"] as const) {
+		for (const kind of ["claude", "codex", "opencode"] as const satisfies readonly PromptSessionRunnerKind[]) {
 			for (const resume of [{ kind: "fresh" }, { kind: "resume", sessionId: `resume-${kind}` }] as const) {
 				const capture = resolve(root, `${kind}-${resume.kind}.argv`)
 				const runner = resolve(root, `${kind}-${resume.kind}.sh`)

@@ -13,6 +13,7 @@ import {
 	makeRunId,
 	markRunPendingRecycle,
 	renderSchedulerSpawnPrompt,
+	refreshExternalTerminalAvailabilityForItem,
 	resumeDecisionForItem,
 	runSchedulerUntilIdle,
 	schedulerSlotWorktreePath,
@@ -45,6 +46,7 @@ import { chainMetadataToJsonObject, engineLifecycleAdmittedItemStatus, itemExtra
 import type { BoundaryRecord } from "./boundary-types"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
+type PromptSessionRunnerKind = Exclude<AgentRunnerKind, "hapi">
 
 function runnerAuthorizationForTest(agentCwd: string, presetDir: string, loopDataRoot: string) {
 	return buildRunnerFilesystemAuthorization({
@@ -75,7 +77,7 @@ afterAll(async () => {
 
 describe("scheduler", () => {
 	test("runner projections reach scheduler fresh and resume paths for every runner", async () => {
-		for (const kind of ["claude", "codex", "opencode"] as const) {
+		for (const kind of ["claude", "codex", "opencode"] as const satisfies readonly PromptSessionRunnerKind[]) {
 			for (const resume of [false, true]) {
 				const fixture = await createFixture(`runner-projection-${kind}-${resume ? "resume" : "fresh"}`)
 				try {
@@ -744,6 +746,39 @@ describe("scheduler", () => {
 			expect(fixture.store.getItem(item.id)?.extra.externalTerminalHold).toBeUndefined()
 			expect(fixture.store.getChain(chain.id)?.status).toBe("completed")
 			expect(triggerCalls).toBe(1)
+		} finally {
+			await stopFixture(fixture)
+		}
+	})
+
+	test("endpoint restoration clears stopped-chain holds before a new loss transition", async () => {
+		const fixture = await createFixture("external-terminal-cross-chain-hold-epoch")
+		try {
+			const binary = resolve(fixture.loopDataRoot, "..", "fake-external-terminal")
+			const probeState = resolve(fixture.loopDataRoot, "..", "probe-state")
+			const externalEvents = resolve(fixture.loopDataRoot, "..", "external-events")
+			await writeFile(probeState, "69")
+			await writeFakeExternalTerminalBinary(binary, probeState, externalEvents, 1)
+			const stoppedChain = createChain(fixture.store, "external-terminal-stopped-held-chain")
+			const activeChain = createChain(fixture.store, "external-terminal-active-held-chain")
+			const stoppedItem = createItem(fixture.store, stoppedChain, { issueNumber: 602_017, repoCwd: "/repo/stopped" })
+			const activeItem = createItem(fixture.store, activeChain, { issueNumber: 602_018, repoCwd: "/repo/active" })
+			const options = fixture.options({ runner: { kind: "hapi", source: "iteration-default", binary, extraArgs: [], model: null } })
+
+			expect(await refreshExternalTerminalAvailabilityForItem(options, stoppedChain, stoppedItem, "iteration")).toBe(false)
+			expect(await refreshExternalTerminalAvailabilityForItem(options, activeChain, activeItem, "iteration")).toBe(false)
+			expect(fixture.schedulerEvents.filter((event) => event.type === "runner.external_terminal_unavailable")).toHaveLength(1)
+			fixture.store.updateChain(stoppedChain.id, { status: "stopped", updatedAt: 1_900_602_017 })
+
+			await writeFile(probeState, "0")
+			expect(await refreshExternalTerminalAvailabilityForItem(options, activeChain, activeItem, "iteration")).toBe(true)
+			expect(fixture.store.getItem(stoppedItem.id)?.extra.externalTerminalHold).toBeUndefined()
+			expect(fixture.store.getItem(activeItem.id)?.extra.externalTerminalHold).toBeUndefined()
+			expect(fixture.schedulerEvents.filter((event) => event.type === "runner.availability_restored")).toHaveLength(1)
+
+			await writeFile(probeState, "69")
+			expect(await refreshExternalTerminalAvailabilityForItem(options, activeChain, activeItem, "iteration")).toBe(false)
+			expect(fixture.schedulerEvents.filter((event) => event.type === "runner.external_terminal_unavailable")).toHaveLength(2)
 		} finally {
 			await stopFixture(fixture)
 		}

@@ -1324,11 +1324,9 @@ export async function refreshExternalTerminalAvailabilityForItem(
 			probeArgv: executionDomain.probe.argv, availability, affected: warningAffected })
 		return false
 	}
-	const previousHold = externalTerminalHold(currentItem.extra)
-	if (previousHold !== null) {
-		const checkedAt = new Date(nowSeconds(options) * 1000).toISOString()
-		options.store.updateItem(item.id, { extra: clearExternalTerminalHold(currentItem.extra), updatedAt: nowSeconds(options) })
-		if (!hasAnyExternalTerminalHoldForEndpoint(options.store, item.id, runner.kind, runner.binary)) await emit(options, {
+	const checkedAt = new Date(nowSeconds(options) * 1000).toISOString()
+	if (clearExternalTerminalHoldsForEndpoint(options.store, runner.kind, runner.binary, nowSeconds(options))) {
+		await emit(options, {
 			type: "runner.availability_restored", chainId: chain.id, rowId: item.id, itemId: item.itemId, phase,
 			runner: runner.kind, binary: runner.binary, probeArgv: executionDomain.probe.argv, checkedAt,
 		})
@@ -1336,12 +1334,17 @@ export async function refreshExternalTerminalAvailabilityForItem(
 	return true
 }
 
-function hasAnyExternalTerminalHoldForEndpoint(store: SchedulerStore, excludeItemId: number, runner: AgentRunnerKind, binary: string): boolean {
-	return store.listChains().some((chain) => store.listItems(chain.id).some((candidate) => {
-		if (candidate.id === excludeItemId) return false
-		const hold = externalTerminalHold(candidate.extra)
-		return hold !== null && hold.runner === runner && hold.binary === binary
-	}))
+function clearExternalTerminalHoldsForEndpoint(store: SchedulerStore, runner: AgentRunnerKind, binary: string, updatedAt: number): boolean {
+	let cleared = false
+	for (const chain of store.listChains()) {
+		for (const candidate of store.listItems(chain.id)) {
+			const hold = externalTerminalHold(candidate.extra)
+			if (hold === null || hold.runner !== runner || hold.binary !== binary) continue
+			store.updateItem(candidate.id, { extra: clearExternalTerminalHold(candidate.extra), updatedAt })
+			cleared = true
+		}
+	}
+	return cleared
 }
 
 async function waitForChildSpawn(child: ReturnType<typeof spawn>): Promise<void> {
