@@ -134,16 +134,6 @@ describe("db-backed v2 loop hard cut", () => {
 		}
 	}, 30_000)
 
-	test("daemon start dry-run resolves the chain without per-target state writes", async () => {
-		const fixture = await createFixture()
-		const beforeText = await readFile(fixture.statePath, "utf-8")
-		const result = runCli(["daemon", "start", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--chain", CHAIN_NAME, "--dry-run"])
-		expect(result.exitCode).toBe(0)
-		expect(result.stdout).toContain(`daemon start dry-run: chain=${CHAIN_NAME}`)
-		expect(readItem(fixture.loopDataRoot).status).toBe("queued")
-		expect(await readFile(fixture.statePath, "utf-8")).toBe(beforeText)
-	})
-
 	test("removed legacy state functions", async () => {
 		const source = await readFile(LOOP_ENTRY, "utf-8")
 		const removedNames = [

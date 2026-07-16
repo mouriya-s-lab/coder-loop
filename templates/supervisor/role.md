@@ -12,8 +12,11 @@ This supervisor is the **outer layer**. The **inner layer** is `coder-loop`, whi
 
 The outer layer steers coder-loop through its stable operations API:
 
-- observe: `coder-loop doctor <TARGET_DIR> --repo <TARGET_REPO>`, `coder-loop status <TARGET_DIR> --json`, and `coder-loop daemon status <TARGET_DIR> --json`
-- control: `coder-loop daemon start|stop|restart <TARGET_DIR>` (target-aware wrappers over the central daemon / chain API)
+- observe: `coder-loop doctor <TARGET_DIR> --repo <TARGET_REPO>`, `coder-loop status <TARGET_DIR> --json`, and `coder-loop status --loop-data-root <LOOP_DATA_ROOT> --json` (no target → central-daemon liveness only)
+- control:
+  - `coder-loop daemon up --detach --loop-data-root <LOOP_DATA_ROOT>` — spawn the central daemon in the background
+  - `coder-loop daemon down --loop-data-root <LOOP_DATA_ROOT>` — shut the central daemon down
+  - `coder-loop chain stop <CHAIN>` / `chain resume <CHAIN>` — pause / resume scheduling for one chain (target-scoped stop lives at the chain layer, not the daemon layer)
 - onboarding / chain repair: `coder-loop chain create <name> --config-json '{"repository":"<TARGET_REPO>","baseBranch":"main"}' --preset <preset>` when `doctor` shows no chain for this target. (`install` / `uninstall` subcommands were retired in #436; chain identity and per-target bindings live in `--config-json` only, and any preset business asset — labels, seed issues — is created out-of-band, not by coder-loop.)
 
 ## Read first (every patrol entry)
@@ -24,7 +27,7 @@ Current state is always **derived**, never read from a hand-written snapshot:
 2. `log.md` tail — last few cross-patrol decisions for continuity.
 3. `coder-loop doctor <TARGET_DIR> --repo <TARGET_REPO>` — bootstrap and live runtime health.
 4. `coder-loop status <TARGET_DIR> --json` — queue/current/events/process snapshot.
-5. `coder-loop daemon status <TARGET_DIR> --json` — daemon ownership and liveness.
+5. `coder-loop status --loop-data-root <LOOP_DATA_ROOT> --json` — central-daemon ownership and liveness (no `<TARGET_DIR>` → daemon-only view).
 6. `gh issue list / pr list / pr view` — GitHub truth for `<TARGET_REPO>`.
 7. `<TARGET_DIR>/CLAUDE.md` and `<TARGET_DIR>/AGENTS.md` — project commands and PR conventions, only when PR/review semantics matter for the patrol. Loop-internal policy (evidence layers, verdict semantics) lives in the active preset's fragments.
 8. Memory index at `<MEMORY_PROJECT_DIR>MEMORY.md` if the target project uses auto-memory.
@@ -38,7 +41,7 @@ Current state is always **derived**, never read from a hand-written snapshot:
    - `status.current.run`, `status.current.id`, and `status.current.phaseStatus`.
    - `status.events.latest`.
    - `status.processes.live` and `status.processes.scanError`.
-   - `daemon status` process ownership.
+   - `status --loop-data-root <LOOP_DATA_ROOT> --json` (no target) — central-daemon pid / socket / activeRuns.
    - GitHub state for the current issue/PR.
 
 2. **Duration thresholds (suspect, not instant proof of death):**
@@ -50,9 +53,10 @@ Current state is always **derived**, never read from a hand-written snapshot:
    - If `doctor` reports the chain is missing for this target, create it with `coder-loop chain create <name> --config-json '{"repository":"<TARGET_REPO>","baseBranch":"main"}' --preset <preset>`, then re-run `coder-loop doctor`.
    - If `doctor` reports an operator-machine prereq is missing (PATH / `gh auth` / runner CLI), repair it on the machine (no coder-loop subcommand does this), then re-run `coder-loop doctor`.
    - If runtime is invalid, record the blocker in `log.md`; only repair files manually when `status` / `doctor` has identified the exact broken layer.
-   - If actionable items remain in queue and no loop is running, start with `coder-loop daemon start <TARGET_DIR>`.
-   - If a loop is running, do not start another unless the existing one is clearly dead by multiple signals.
-   - If loop state is incoherent, stop with `coder-loop daemon stop <TARGET_DIR>`, append blocker to `log.md`, and do not destructively recover.
+   - If actionable items remain in queue and the central daemon is not running, start it with `coder-loop daemon up --detach --loop-data-root <LOOP_DATA_ROOT>`.
+   - If the daemon is running but the target's chain is stopped, resume with `coder-loop chain resume <CHAIN>`.
+   - Do not start a second daemon while the first is alive unless multiple signals confirm the first is dead.
+   - If loop state is incoherent, stop the affected chain with `coder-loop chain stop <CHAIN>`, append blocker to `log.md`, and do not destructively recover.
 
 4. **Wait through status snapshots:** when a patrol needs to wait for the next phase transition, keep the next wake short and re-query `coder-loop status <TARGET_DIR> --json`. Do not embed long-running file subscriptions in the template; the status API is the supervisor contract.
 
@@ -62,11 +66,12 @@ Current state is always **derived**, never read from a hand-written snapshot:
 
 ```bash
 coder-loop doctor <TARGET_DIR> --repo <TARGET_REPO>
-coder-loop status <TARGET_DIR> --json
-coder-loop daemon status <TARGET_DIR> --json
-coder-loop daemon start <TARGET_DIR>
-coder-loop daemon stop <TARGET_DIR>
-coder-loop daemon restart <TARGET_DIR>
+coder-loop status <TARGET_DIR> --json                                   # target snapshot
+coder-loop status --loop-data-root <LOOP_DATA_ROOT> --json              # central-daemon liveness only
+coder-loop daemon up --detach --loop-data-root <LOOP_DATA_ROOT>         # start central daemon detached
+coder-loop daemon down --loop-data-root <LOOP_DATA_ROOT>                # stop central daemon
+coder-loop chain stop <CHAIN>                                            # pause one chain's scheduling
+coder-loop chain resume <CHAIN>                                          # resume one chain
 ```
 
 Runner awareness:

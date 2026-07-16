@@ -15,9 +15,10 @@ through the stable operations API.
 Do not rebuild coder-loop runtime knowledge here. Use:
 
 - `coder-loop doctor <target>` for bootstrap and live runtime health.
-- `coder-loop status <target> --json` for queue/current/events/process snapshot.
-- `coder-loop daemon status <target> --json` for daemon ownership and liveness.
-- `coder-loop daemon start|stop|restart <target>` for controlled loop changes.
+- `coder-loop status <target> --json` for target queue/current/events/process snapshot.
+- `coder-loop status --loop-data-root <LOOP_DATA_ROOT> --json` (no target) for central-daemon liveness / ownership.
+- `coder-loop daemon up --detach --loop-data-root <LOOP_DATA_ROOT>` / `coder-loop daemon down --loop-data-root <LOOP_DATA_ROOT>` for daemon lifecycle.
+- `coder-loop chain stop|resume|delete <CHAIN>` for per-chain scheduling changes.
 
 ## Mission scope
 
@@ -80,7 +81,9 @@ Mission-specific paths, upstream repos, and safety boundaries belong in
 ```bash
 coder-loop doctor "$TARGET_DIR" --repo "$TARGET_REPO"
 coder-loop status "$TARGET_DIR" --json
-coder-loop daemon status "$TARGET_DIR" --json
+# central-daemon liveness (no target → daemon-only view):
+LOOP_DATA_ROOT="${CODER_LOOP_DATA_DIR:-$HOME/.coder-loop/loop-data}"
+coder-loop status --loop-data-root "$LOOP_DATA_ROOT" --json
 ```
 
 Use the JSON snapshots to derive:
@@ -125,7 +128,7 @@ Report:
 
 - active mission and one-line goal from `role.md`
 - last meaningful `log.md` entry
-- coder-loop health from `doctor` / `status` / `daemon status`
+- coder-loop health from `doctor` / `status <TARGET_DIR>` / `status --loop-data-root <LOOP_DATA_ROOT>`
 - current selected item, runner, run, phase status, and queue counts
 - open PRs or issues that block the mission
 - recommended next supervisor action, and whether you already took it
@@ -137,7 +140,7 @@ Report:
 | Mission contract | `<mission>/role.md` |
 | Cross-patrol decisions / restarts / blockers | `<mission>/log.md` |
 | Loop runtime snapshot | `coder-loop status "$TARGET_DIR" --json` |
-| Daemon liveness and ownership | `coder-loop daemon status "$TARGET_DIR" --json` |
+| Daemon liveness and ownership | `coder-loop status --loop-data-root "$LOOP_DATA_ROOT" --json` (no target) |
 | Bootstrap / live health | `coder-loop doctor "$TARGET_DIR" --repo "$TARGET_REPO"` |
 | Issue/PR truth | `gh` on `$TARGET_REPO` |
 | Long-term lessons / safety boundaries | `$MEMORY_DIR` when present |

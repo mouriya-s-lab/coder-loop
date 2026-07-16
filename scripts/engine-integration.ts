@@ -334,8 +334,8 @@ function readRunRows(loopDataRoot: string): RunRow[] {
 	}
 }
 
-function countAdmissionEvents(fixtureCwd: string, loopDataRoot: string, chainName: string): number {
-	const result = sh(["bun", LOOP_ENTRY, "logs", fixtureCwd, "--json",
+function countAdmissionEvents(_fixtureCwd: string, loopDataRoot: string, chainName: string): number {
+	const result = sh(["bun", LOOP_ENTRY, "logs", "--json",
 		"--type", "item.status.write_admission",
 		"--chain", chainName,
 		"--loop-data-root", loopDataRoot])

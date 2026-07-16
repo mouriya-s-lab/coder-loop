@@ -56,9 +56,9 @@ describe("central chain/item CLI", () => {
 		}
 		const daemon = await startCoderLoopDaemon({ loopDataRoot, scheduler: { enabled: false } })
 		try {
-			const status = expectJsonOk(await runCli(["daemon", "status", "--loop-data-root", loopDataRoot, "--json"]))
+			const status = expectJsonOk(await runCli(["status", "--loop-data-root", loopDataRoot, "--json"]))
 			expect(status.daemon).toMatchObject({ runnerStatusPersistenceFailure: { path: "chain-complete", runId: "run-635-trigger", phase: "umbrella-finalizer", persistencePath: "/runs/trigger/status.json", error: "EACCES trigger status" } })
-			const logs = expectJsonOk(await runCli(["logs", loopDataRoot, "--loop-data-root", loopDataRoot, "--json", "--type", "runner.status_persistence_failed"]))
+			const logs = expectJsonOk(await runCli(["logs", "--loop-data-root", loopDataRoot, "--json", "--type", "runner.status_persistence_failed"]))
 			expect(logs.events).toHaveLength(2)
 			expect(logs.events.map((event: BoundaryRecord) => event.payload)).toEqual([
 				{ path: "scheduler", stage: "status-artifact", persistencePath: "/runs/scheduler/status.json", error: "EIO scheduler status" },
@@ -83,7 +83,7 @@ describe("central chain/item CLI", () => {
 		}))
 		const daemon = await startCoderLoopDaemon({ loopDataRoot, scheduler: { enabled: false } })
 		try {
-			const status = expectJsonOk(await runCli(["daemon", "status", "--loop-data-root", loopDataRoot, "--json"]))
+			const status = expectJsonOk(await runCli(["status", "--loop-data-root", loopDataRoot, "--json"]))
 			expect(status.daemon).toMatchObject({
 				lifecycleEventPersistenceFailure: {
 					runId: "run-632-timeout",
@@ -93,7 +93,7 @@ describe("central chain/item CLI", () => {
 					originalPersisted: false,
 				},
 			})
-			const logs = expectJsonOk(await runCli(["logs", loopDataRoot, "--loop-data-root", loopDataRoot, "--json", "--run", "run-632-timeout", "--type", "scheduler.lifecycle_event_persistence_failed"]))
+			const logs = expectJsonOk(await runCli(["logs", "--loop-data-root", loopDataRoot, "--json", "--run", "run-632-timeout", "--type", "scheduler.lifecycle_event_persistence_failed"]))
 			expect(logs.events).toHaveLength(1)
 			expect(logs.events[0]).toMatchObject({ runId: "run-632-timeout", phase: "review", payload: { eventKind: "attempt.timeout", originalPersisted: false } })
 		} finally {
@@ -237,7 +237,7 @@ describe("central chain/item CLI", () => {
 			// caller claims). The agent path is exercised end-to-end in the daemon integration
 			// fixture (`daemon.test.ts > caller-admission gate`), where the scheduler spawns a real
 			// run and the CLI auto-attaches the engine-minted credential from env.
-			const operatorAuditLogs = expectJsonOk(await runCli(["logs", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--json", "--chain", "items-chain", "--kind", "audit", "--type", "item.status"]))
+			const operatorAuditLogs = expectJsonOk(await runCli(["logs", "--loop-data-root", fixture.loopDataRoot, "--json", "--chain", "items-chain", "--kind", "audit", "--type", "item.status"]))
 			expect(operatorAuditLogs.events).toHaveLength(1)
 			expect(operatorAuditLogs.events[0]).toMatchObject({
 				kind: "audit",
@@ -354,7 +354,7 @@ attemptTimeoutSeconds = 3600
 			expect(status.queue).toMatchObject({ total: 1, continuable: 0, terminal: 1, selected: null })
 			expect(status.queue.byStatus).toEqual({ custom_done: 1 })
 
-			const daemonStatus = expectJsonOk(await runCli(["daemon", "status", target, "--chain", "custom-status-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
+			const daemonStatus = expectJsonOk(await runCli(["status", target, "--chain", "custom-status-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
 			expect(daemonStatus.state).toMatchObject({ kind: "ok", ok: true })
 			expect(daemonStatus.target.preset).toMatchObject({ name: "custom-status-fixture", presetDir: presetPath })
 			expect(daemonStatus.queue).toMatchObject({ total: 1, continuable: 0, terminal: 1, selected: null })
@@ -708,7 +708,7 @@ attemptTimeoutSeconds = 3600
 	})
 
 	test("daemon commands expose json flag in help", async () => {
-		for (const action of ["up", "status", "start", "stop", "restart", "down"]) {
+		for (const action of ["up", "down"]) {
 			const help = await runCli(["daemon", action, "--help"])
 			expect(help.exitCode).toBe(0)
 			expect(help.stdout).toContain("--json")
@@ -773,12 +773,16 @@ attemptTimeoutSeconds = 3600
 		expect(result.stderr).toContain("coder-loop daemon up --loop-data-root")
 	})
 
-	test("daemon status and down --json emit JSON when central daemon is not running", async () => {
+	test("status (no target) and daemon down emit JSON when central daemon is not running", async () => {
 		const loopDataRoot = resolve(TEST_ROOT, `daemon-dead-json-${++nextFixtureId}`)
 		await mkdir(loopDataRoot, { recursive: true })
 
-		for (const action of ["status", "down"] as const) {
-			const result = await runCli(["daemon", action, "--loop-data-root", loopDataRoot, "--json"])
+		const cases: Array<{ args: string[] }> = [
+			{ args: ["status", "--loop-data-root", loopDataRoot, "--json"] },
+			{ args: ["daemon", "down", "--loop-data-root", loopDataRoot, "--json"] },
+		]
+		for (const { args } of cases) {
+			const result = await runCli(args)
 			const parsed = expectJsonError(result)
 			expect(result.stderr).toBe("")
 			expect(parsed.error).toMatchObject({
@@ -794,7 +798,7 @@ attemptTimeoutSeconds = 3600
 		}
 	})
 
-	test("daemon status --json reports live pid with missing socket pathname", async () => {
+	test("status (no target) --json reports live pid with missing socket pathname", async () => {
 		const loopDataRoot = await makeLoopDataRoot("daemon-socket-unlinked-json")
 		await mkdir(loopDataRoot, { recursive: true })
 		const stale = Bun.spawn({
@@ -807,7 +811,7 @@ attemptTimeoutSeconds = 3600
 		await writeFile(resolve(loopDataRoot, "daemon.pid"), `${stale.pid}\n`)
 
 		try {
-			const result = await runCli(["daemon", "status", "--loop-data-root", loopDataRoot, "--json"])
+			const result = await runCli(["status", "--loop-data-root", loopDataRoot, "--json"])
 			const parsed = expectJsonError(result)
 			expect(parsed.error.code).toBe("daemon_socket_unlinked")
 			expect(parsed.error.details).toMatchObject({
@@ -838,14 +842,14 @@ attemptTimeoutSeconds = 3600
 		expect(parsed.error.message).toContain("unable to prepare loop-data directory")
 	})
 
-	test("daemon status target reports chain-only daemon from loop-data socket", async () => {
+	test("status <target> reports chain-only daemon from loop-data socket", async () => {
 		const loopDataRoot = await makeLoopDataRoot("daemon-status-chain-only")
 		const daemonProcess = spawnDaemonUp(loopDataRoot)
 		try {
 			await waitForDaemonFiles(loopDataRoot)
 			const daemonPid = Number((await readFile(resolve(loopDataRoot, "daemon.pid"), "utf-8")).trim())
 
-			const status = expectJsonOk(await runCli(["daemon", "status", REPO_ROOT, "--loop-data-root", loopDataRoot, "--json"]))
+			const status = expectJsonOk(await runCli(["status", REPO_ROOT, "--loop-data-root", loopDataRoot, "--json"]))
 			const liveDaemon = status.processes.live.find((entry: BoundaryRecord) => entry.pid === daemonPid)
 			expect(liveDaemon).toMatchObject({
 				pid: daemonPid,
@@ -882,127 +886,6 @@ attemptTimeoutSeconds = 3600
 				metadata: { bindings: { umbrellaRepo: "mouriya-s-lab/coder-loop", umbrellaIssue: 176 } },
 			})
 			expect(status.items[0]).toMatchObject({ itemId: "181", status: "queued", repoCwd: REPO_ROOT })
-		} finally {
-			await fixture.daemon.stop()
-		}
-	})
-
-	test("daemon start chain resolve", async () => {
-		const fixture = await startFixture("target-cwd")
-		try {
-			expectJsonOk(await runCli(["chain", "create", "target-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			expectJsonOk(await runCli(["item", "add", "target-chain", "--issue", "184", "--repo-cwd", REPO_ROOT, "--preset", "gh-issue-pr-iteration", "--loop-data-root", fixture.loopDataRoot, "--json"]))
-
-			const start = await runCli(["daemon", "start", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--dry-run"])
-			expect(start.exitCode).toBe(0)
-			expect(start.stdout).toContain(`daemon start dry-run: target=${REPO_ROOT}`)
-			expect(start.stdout).toContain("daemon start dry-run: chain=target-chain")
-			expect(start.stdout).not.toContain("command=")
-
-			const startJson = expectJsonOk(await runCli(["daemon", "start", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--chain", "target-chain", "--dry-run", "--json"]))
-			expect(startJson).toMatchObject({ action: "start", target: REPO_ROOT, chain: "target-chain", dryRun: true })
-
-			const stopJson = expectJsonOk(await runCli(["daemon", "stop", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--chain", "target-chain", "--dry-run", "--json"]))
-			expect(stopJson).toMatchObject({ action: "stop", target: REPO_ROOT, chain: "target-chain", dryRun: true })
-
-			const restartJson = expectJsonOk(await runCli(["daemon", "restart", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--chain", "target-chain", "--dry-run", "--json"]))
-			expect(restartJson).toMatchObject({ action: "restart", target: REPO_ROOT, chain: "target-chain", dryRun: true, centralDaemon: "required" })
-		} finally {
-			await fixture.daemon.stop()
-		}
-	})
-
-	test("daemon stop preserves chain as stopped (regression: PR #194 wired it to chain.delete)", async () => {
-		const fixture = await startFixture("daemon-stop-keeps-chain")
-		try {
-			expectJsonOk(await runCli(["chain", "create", "target-chain", "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			expectJsonOk(await runCli(["item", "add", "target-chain", "--issue", "184", "--repo-cwd", REPO_ROOT, "--preset", "gh-issue-pr-iteration", "--loop-data-root", fixture.loopDataRoot, "--json"]))
-
-			const stopJson = expectJsonOk(await runCli(["daemon", "stop", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--chain", "target-chain", "--json"]))
-			expect(stopJson).toMatchObject({ action: "stop", target: REPO_ROOT, chain: "target-chain" })
-			expect(stopJson.result.chain).toMatchObject({ name: "target-chain", status: "stopped" })
-			expect(stopJson.result.chain.status).not.toBe("deleted")
-			expect(stopJson.result.alreadyStopped).toBe(false)
-
-			const status = expectJsonOk(await runCli(["chain", "status", "target-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			expect(status.chain).toMatchObject({ name: "target-chain", status: "stopped" })
-
-			const resumed = expectJsonOk(await runCli(["chain", "resume", "target-chain", "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			expect(resumed.chain).toMatchObject({ name: "target-chain", status: "active" })
-		} finally {
-			await fixture.daemon.stop()
-		}
-	})
-
-	test("daemon start ignores target-local legacy loop-data when loop-data root is omitted", async () => {
-		// #433: the engine no longer reads any target runtime file — `--loop-data-root` / env wins
-		// without exception. The legacy target-local layout below is just a noise directory; the
-		// global store wins on its own merits.
-		const target = await makeTarget("target-cwd-legacy-local")
-		const globalLoopDataRoot = await makeLoopDataRoot("target-cwd-global")
-		const targetLocalLoopDataRoot = resolve(target, ".coder-loop/runtime/loop-data")
-		await mkdir(globalLoopDataRoot, { recursive: true })
-		await mkdir(targetLocalLoopDataRoot, { recursive: true })
-
-		const globalStore = openSqliteStateStore({ loopDataRoot: globalLoopDataRoot })
-		try {
-			globalStore.createChain({
-				name: "global-chain",
-				preset: "gh-issue-pr-iteration",
-				repository: "fixture/repo",
-				baseBranch: "main",
-			})
-		} finally {
-			globalStore.close()
-		}
-
-		const legacyStore = openSqliteStateStore({ loopDataRoot: targetLocalLoopDataRoot })
-		try {
-			legacyStore.createChain({
-				name: "legacy-local-chain",
-				preset: "gh-issue-pr-iteration",
-				repository: "fixture/repo",
-				baseBranch: "main",
-			})
-		} finally {
-			legacyStore.close()
-		}
-
-		const result = await runCli(
-			["daemon", "start", target, "--dry-run", "--json"],
-			{ [LOOP_DATA_ROOT_ENV]: globalLoopDataRoot },
-		)
-		const parsed = expectJsonOk(result)
-		expect(parsed).toMatchObject({ action: "start", target, chain: "global-chain", dryRun: true })
-	})
-
-	test("daemon target-cwd fails explicitly when no chain matches", async () => {
-		const fixture = await startFixture("target-cwd-missing")
-		try {
-			const start = await runCli(["daemon", "start", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--dry-run"])
-			expect(start.exitCode).toBe(1)
-			expect(start.stderr).toContain("SQLite state DB has no active chain")
-		} finally {
-			await fixture.daemon.stop()
-		}
-	})
-
-	test("daemon start ambiguous chain", async () => {
-		const fixture = await startFixture("target-cwd-ambiguous")
-		try {
-			for (const chain of ["first-chain", "second-chain"]) {
-				expectJsonOk(await runCli(["chain", "create", chain, "--config-json", DEFAULT_CHAIN_CONFIG, "--loop-data-root", fixture.loopDataRoot, "--json"]))
-				expectJsonOk(await runCli(["item", "add", chain, "--issue", chain === "first-chain" ? "184" : "185", "--repo-cwd", REPO_ROOT, "--preset", "gh-issue-pr-iteration", "--loop-data-root", fixture.loopDataRoot, "--json"]))
-			}
-
-			const ambiguous = await runCli(["daemon", "start", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--dry-run"])
-			expect(ambiguous.exitCode).toBe(1)
-			expect(ambiguous.stderr).toContain("matches multiple active chains")
-			expect(ambiguous.stderr).toContain("--chain")
-
-			const selected = await runCli(["daemon", "start", REPO_ROOT, "--loop-data-root", fixture.loopDataRoot, "--chain", "second-chain", "--dry-run"])
-			expect(selected.exitCode).toBe(0)
-			expect(selected.stdout).toContain("chain=second-chain")
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -1048,7 +931,6 @@ attemptTimeoutSeconds = 3600
 
 			const stoppedLogs = expectJsonOk(await runCli([
 				"logs",
-				target,
 				"--loop-data-root",
 				fixture.loopDataRoot,
 				"--chain",
@@ -1070,7 +952,6 @@ attemptTimeoutSeconds = 3600
 			})
 			const completedLogs = expectJsonOk(await runCli([
 				"logs",
-				target,
 				"--loop-data-root",
 				fixture.loopDataRoot,
 				"--chain",
@@ -1413,7 +1294,7 @@ async function contextRuntimeEnv(credentialPath: string): Promise<Record<string,
 
 async function waitForDaemonReady(loopDataRoot: string, env: Record<string, string>): Promise<number> {
 	return await waitFor(async () => {
-		const result = await runCli(["daemon", "status", REPO_ROOT, "--loop-data-root", loopDataRoot, "--json"], env)
+		const result = await runCli(["status", REPO_ROOT, "--loop-data-root", loopDataRoot, "--json"], env)
 		if (result.exitCode !== 0) return null
 		const status = boundaryRecord(JSON.parse(result.stdout))
 		const processes = boundaryRecord(status.processes)

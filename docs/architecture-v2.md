@@ -54,7 +54,7 @@ schema v13 的四张核心表（`sqlite-state.ts`）：
 
 ## 五、v2 解决了什么，留下什么
 
-- **解决了**（执行模型天花板）：中央 daemon 统一调度、多 chain 并发、SQLite 事务状态、统一可观测面（`status` / `daemon status`）。
+- **解决了**（执行模型天花板）：中央 daemon 统一调度、多 chain 并发、SQLite 事务状态、统一可观测面（`status <target>` / `status --loop-data-root <dir>` 无 target 走 daemon-only 视角）。
 - **v2 结束时留给后续的债**（当年状态）：verdict 词表、kind 词表、daemon/SQLite 默认 status 集合等机制参数仍写死引擎、item 身份焊死 `issue_number`、preset 焊 chain 级——这些债后续陆续在 `#376`/`#396`/`#397`/`#401`/`#402`/`#403`/`#404`/`#405`/`#412`/`#419`/`#450`/`#451`/`#456` 等 children 中收敛（当前形态见第三、四节）。
 
 **两条独立的演变线**：daemon 化（v1→v2，换执行模型，本文）；机制参数外部化进 preset——机制留引擎、参数进 preset（贯穿 v2 后期的 `#373`/`#376`/`#380`/`#381`/`#386`/`#370`/`#396`/`#412`，准确表述与 `#30` 转折点见 `architecture-v1.md` 第四节）。它们经常被混为一谈，但解决的是不同问题。

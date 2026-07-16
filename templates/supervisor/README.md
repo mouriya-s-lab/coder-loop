@@ -9,7 +9,7 @@ Use this pattern when a target project has long-running multi-mission work (upst
 - **Inner — `coder-loop`** (this repo, `src/loop.ts`): iterates one issue at a time; iter→review→PR. Pure black box from the supervisor's perspective.
 - **Outer — supervisor agent + cron** (these templates): stateless, cron-woken, ensures the right mission is being worked, unblocks the inner loop, manages issue graph, decides restart vs. wait.
 
-The two layers do not share state. The outer steers the inner through coder-loop's stable operations API (`coder-loop doctor`, `coder-loop status <target> --json`, and `coder-loop daemon ...`) plus GitHub. coder-loop itself does not depend on this pattern.
+The two layers do not share state. The outer steers the inner through coder-loop's stable operations API (`coder-loop doctor`, `coder-loop status <target> --json`, `coder-loop status --loop-data-root <LOOP_DATA_ROOT> --json` for daemon-only view, `coder-loop daemon up|down`, `coder-loop chain stop|resume|delete`) plus GitHub. coder-loop itself does not depend on this pattern.
 
 ## Mission scope
 
@@ -59,7 +59,7 @@ Append-only cross-patrol event stream. Each patrol invocation appends one concis
 | Long-term direction / lessons | target project's user memory (`~/.claude/projects/.../memory/`) if used |
 | Cross-patrol decisions for this mission | `<MISSION>/log.md` |
 | Loop runtime snapshot | `coder-loop status <TARGET_DIR> --json` |
-| Loop daemon liveness | `coder-loop daemon status <TARGET_DIR> --json` |
+| Loop daemon liveness | `coder-loop status --loop-data-root <LOOP_DATA_ROOT> --json` (no target argument) |
 | Bootstrap / live health | `coder-loop doctor <TARGET_DIR> --repo <TARGET_REPO>` |
 | Issue/PR truth | `gh` on `<TARGET_REPO>` |
 

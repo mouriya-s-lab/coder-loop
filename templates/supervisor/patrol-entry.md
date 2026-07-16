@@ -18,7 +18,7 @@ Role: outer-layer supervisor for the **<MISSION>** mission, invoked by self-resc
 ## Then perform a real patrol per `role.md` in this directory
 
 1. Read `role.md` for the durable role contract.
-2. Derive current state through coder-loop APIs: `coder-loop doctor <TARGET_DIR> --repo <TARGET_REPO>`, `coder-loop status <TARGET_DIR> --json`, and `coder-loop daemon status <TARGET_DIR> --json`. Cross-check issue/PR truth with `gh`. Never from hand-written snapshots.
+2. Derive current state through coder-loop APIs: `coder-loop doctor <TARGET_DIR> --repo <TARGET_REPO>`, `coder-loop status <TARGET_DIR> --json`, and `coder-loop status --loop-data-root <LOOP_DATA_ROOT> --json` (no target → central-daemon liveness only). Cross-check issue/PR truth with `gh`. Never from hand-written snapshots.
 3. Read `log.md` tail (last 5–10 entries) for cross-patrol continuity.
 4. Apply the decision rules below.
 5. Append to `log.md` only on meaningful events.
@@ -26,9 +26,9 @@ Role: outer-layer supervisor for the **<MISSION>** mission, invoked by self-resc
 ## Decision rules
 
 - **Loop active and healthy** → verify it's advancing the <MISSION> queue via `status.current`, `status.events.latest`, and GitHub; report current issue/phase and expected next transition; stop.
-- **Loop stalled** (multi-signal evidence per `role.md` thresholds) → stop/delete the target chain through `coder-loop daemon stop <TARGET_DIR>`, repair only the layer identified by `doctor` / `status`, then verify/restart with `coder-loop daemon restart <TARGET_DIR>` when safe.
-- **No loop active but actionable items remain** → run `coder-loop doctor <TARGET_DIR> --repo <TARGET_REPO>`, then `coder-loop daemon start <TARGET_DIR>`.
-- **Loop state incoherent** → stop/delete the target chain through `coder-loop daemon stop <TARGET_DIR>`, append blocker to `log.md`, do not destructively recover.
+- **Loop stalled** (multi-signal evidence per `role.md` thresholds) → pause the target chain with `coder-loop chain stop <CHAIN>`, repair only the layer identified by `doctor` / `status`, then verify with `doctor` / `status` and resume via `coder-loop chain resume <CHAIN>` (bounce the central daemon only if it itself is wedged: `coder-loop daemon down --loop-data-root <LOOP_DATA_ROOT> && coder-loop daemon up --detach --loop-data-root <LOOP_DATA_ROOT>`).
+- **No loop active but actionable items remain** → run `coder-loop doctor <TARGET_DIR> --repo <TARGET_REPO>`, then `coder-loop daemon up --detach --loop-data-root <LOOP_DATA_ROOT>` (central daemon schedules every chain, so starting it revives the target too).
+- **Loop state incoherent** → pause the affected chain with `coder-loop chain stop <CHAIN>`, append blocker to `log.md`, do not destructively recover.
 - **Mission complete** (no actionable <MISSION> items left in queue and audit accepts current state as on-target) → append final `mission complete` entry to `log.md`, do not schedule another patrol for this mission, report to user that the next mission should be initialized.
 
 ## Safety boundaries

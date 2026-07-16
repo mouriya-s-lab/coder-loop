@@ -50,7 +50,7 @@ describe("smoke: v2 central chain CLI", () => {
 		const result = runCli([])
 		expect(result.exitCode).toBe(1)
 		expect(result.stdout).toContain("Usage: coder-loop <command> [options]")
-		expect(result.stdout).toContain("daemon <up|down|status|start|stop|restart>")
+		expect(result.stdout).toContain("daemon <up [--detach] | down>")
 	})
 
 	// #526 (closing #432 K2 末段 + close-verification row #4): the entire `runtime`
@@ -228,7 +228,6 @@ describe("smoke: v2 central chain CLI", () => {
 
 			const auditLogs = expectJsonOk(await runCliAsync([
 				"logs",
-				fixture.target,
 				"--loop-data-root",
 				fixture.loopDataRoot,
 				"--chain",
@@ -259,7 +258,6 @@ describe("smoke: v2 central chain CLI", () => {
 			// `subject.kind === "agent"` would imply a credential-admitted path, which never happened.
 			const allAudit = expectJsonOk(await runCliAsync([
 				"logs",
-				fixture.target,
 				"--loop-data-root",
 				fixture.loopDataRoot,
 				"--chain",
@@ -317,15 +315,6 @@ describe("smoke: v2 central chain CLI", () => {
 		}
 	})
 
-	test("daemon start dry-run resolves a chain and emits central-daemon plan", async () => {
-		const fixture = await createTarget("daemon-smoke")
-		seedChain(fixture, { issueNumber: 184, status: "queued" })
-
-		const result = runCli(["daemon", "start", fixture.target, "--loop-data-root", fixture.loopDataRoot, "--chain", fixture.chainName, "--dry-run"])
-		expect(result.exitCode).toBe(0)
-		expect(result.stdout).toContain(`daemon start dry-run: chain=${fixture.chainName}`)
-		expect(result.stdout).toContain("daemon start dry-run: central-daemon=required")
-	})
 })
 
 type Fixture = {

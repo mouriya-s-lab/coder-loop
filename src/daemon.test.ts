@@ -4045,7 +4045,6 @@ process.exitCode = 0
 					"bun",
 					resolve(REPO_ROOT, "src/loop.ts"),
 					"logs",
-					REPO_ROOT,
 					"--chain",
 					chainName,
 					"--loop-data-root",

@@ -93,7 +93,7 @@ coder-loop status /path/to/your-target-repo --json | jq '.state.kind, .queue, .c
 | `.target.runner.default` / `.queue.selected.runner` | 默认执行 phase 与 selected item 默认执行 phase runner |
 | `.current.run` | 正在跑或可 resume 的 run；null 表示当前没有 in-flight phase |
 | `.events.latest` | 当前或最近 run 的最后一条结构化事件 |
-| `.processes.live` / `.processes.scanError` | live process scan 结果；daemon 详情看 `coder-loop daemon status` |
+| `.processes.live` / `.processes.scanError` | live process scan 结果；daemon 详情用 `coder-loop status --loop-data-root <dir> --json`（无 `<target>` → 只返 daemon pid/socket/activeRuns） |
 
 如果你只想看 runtime/schema，不想同时检查 PATH / runner CLI 等 operator 机器层，直接读结构化 status：
 
@@ -132,11 +132,11 @@ coder-loop status /path/to/your-target-repo --json | jq '.state.kind, .queue.tot
 ## 4. 用 daemon API 起循环
 
 ```bash
-coder-loop daemon start /path/to/your-target-repo
-coder-loop daemon status /path/to/your-target-repo --json
+coder-loop daemon up --detach                                              # 起中央 daemon（后台化：fork + unref + 写 pid，立即返回）
+coder-loop status --loop-data-root ~/.coder-loop/loop-data --json          # 无 target 时 → daemon 存活探测
 ```
 
-`daemon start` 对已运行 target 幂等：返回 `alreadyRunning: true`，不会启动重复 loop。
+中央 daemon 一起就自动调度**所有** active chain（包括本 target 的 chain）—— 不再有 target-scoped "start daemon" 命令。如果 target 对应的 chain 处于 stopped，用 `coder-loop chain resume <chain>` 恢复；已经 completed 且现在要恢复某 blocked item，用 `coder-loop queue unblock <target> --issue <id>`。
 
 循环消费现有队列，按 preset 的 phase 顺序 spawn agent；每个 phase 声明的 `[[phases.exits]]` 决定 agent 允许写出的状态，agent 通过 `coder-loop item exits` / `item update --status` / `item exit-action` 显式表达出口。
 
@@ -144,7 +144,7 @@ coder-loop daemon status /path/to/your-target-repo --json
 
 ```bash
 coder-loop status /path/to/your-target-repo --json | jq '.state.kind, .queue, .current, .events.latest, .processes'
-coder-loop daemon status /path/to/your-target-repo --json | jq '.processes'
+coder-loop status --loop-data-root ~/.coder-loop/loop-data --json | jq '.daemon // .processes'
 ```
 
 需要看原始输出时再下钻到 `status` 暴露的 runtime 文件：
@@ -191,13 +191,19 @@ test -n "$EVENTS" && tail -F "$EVENTS"
 
 事件类型（`src/observability.ts` `ObservabilityEventTypeBoundary` 的 union）常见成员：`phase.start` / `phase.end` / `attempt.timeout` / `run.startup_idle_kill` / `recycle.pending_entered` / `recycle.timeout_kill` / `recycle.natural_exit` / `queue.terminal` / `chain.completed` / `agent.spawn` / `agent.exit`；`item.*` / `chain.*` / `daemon.*` / `scheduler.*` 等 audit / lifecycle 事件也全部落这条流。详见 [operations.md §6.3](./operations.md#63-agent-进程与监控fallback-reference)。
 
-停：
+停某个 chain（scheduler 停止在该 chain 选 item，in-flight run 自然完成，可 `chain resume` 恢复）：
 
 ```bash
-coder-loop daemon stop /path/to/your-target-repo
+coder-loop chain stop <chain>
 ```
 
-`daemon stop` 解析 target chain 并通过 central daemon 调用 `chain.stop`（scheduler 停止在该 chain 选 item，in-flight run 自然完成，可 `chain resume` 恢复）。需要强制处理 wedged 子进程时，先用 `status` / `daemon status` 定位 live process，按 operations 的 recovery 流程处理。
+要把中央 daemon 一起停：
+
+```bash
+coder-loop daemon down
+```
+
+需要强制处理 wedged 子进程时，先用 `status /path/to/target --json` 定位 `.processes.live`，按 operations 的 recovery 流程处理。
 
 ---
 
@@ -227,7 +233,7 @@ run 级事件在 `<logDir>/<runId>/events.jsonl`，也由 `status.events.path` �
 - iteration `stdout.jsonl` 尾部的调度者派发账（dispatch ledger）反映本次走的步骤 checklist（`implement` / `verify` / `e2e` / `submit` 等）与各步 verdict。
 - 各 phase 的状态转移通过 `coder-loop item exits` + `item update --status` / `item exit-action` 落地：`status.json` 里能看到 phase 结束时 agent 选择的 exit；`gh-issue-pr-iteration` 的终局动作（PR merge、issue close、写 `done` / `moot`）归 closure phase，事件流里看 `queue.terminal`。
 
-当前 / resume 状态先看 `coder-loop status` 的 `.current`。`current.phase` 指向当前/上次崩在哪个 phase；重启 `coder-loop daemon start` 或 `coder-loop daemon restart` 时引擎会按 `current.phase` 续跑，不重头来。详见 [operations#resume](./operations.md#5-resume-行为)。
+当前 / resume 状态先看 `coder-loop status` 的 `.current`。`current.phase` 指向当前/上次崩在哪个 phase；`daemon down` + `daemon up --detach` 重启后引擎会按 `current.phase` 续跑，不重头来。详见 [operations#resume](./operations.md#5-resume-行为)。
 
 ---
 
@@ -236,5 +242,5 @@ run 级事件在 `<logDir>/<runId>/events.jsonl`，也由 `status.events.path` �
 - **`.coder-loop/` 入了 git** → runtime handoff / logs 进了 PR diff；把整个目录加 `.gitignore` 后 `git rm --cached -r .coder-loop/`。
 - **target 的 `CLAUDE.md` / `AGENTS.md` 缺失或没入仓** → 各执行 phase 读不到项目工作方式（项目命令 / PR 约定），行为退化为推测项目命令，往往写错命令 / 漏证据 layer。
 - **`gh` 未 auth** → iteration 的 Step 0 / Step 2 亲读 issue body 就会失败，trace 里能看到 `gh auth status` 失败回显。
-- **chain identity 与目标 repo 不一致** → `status` / `daemon start` 会在解析 chain 时报告 repository/baseBranch 不匹配；指定正确 `--chain`，或修正 centralized chain identity。
+- **chain identity 与目标 repo 不一致** → `status` / `chain create` 会在解析 chain 时报告 repository/baseBranch 不匹配；指定正确 `--chain`，或修正 centralized chain identity。
 - **找不到 target 的状态** → 权威路径是 central daemon + chain runtime；先看 `coder-loop status <target> --json` 返回的 `target.logDir`、`events.path`、`processes.live`，不要按老式的 target-local flat log layout 找。

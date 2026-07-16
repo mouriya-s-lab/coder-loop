@@ -78,7 +78,7 @@ bun link                                             # 注册 coder-loop bin 到
 在目标 repo 上启动前，先起中央 daemon，再用一条命令注册 chain：
 
 ```bash
-coder-loop daemon up
+coder-loop daemon up --detach            # 前台阻塞就去掉 --detach（launchd / systemd / e2e 场景）
 coder-loop chain create <name> --config-json '{"repository":"<owner>/<repo>","baseBranch":"main"}' --preset gh-issue-pr-iteration
 coder-loop doctor /path/to/target --repo <owner>/<repo>
 coder-loop status /path/to/target --json
@@ -88,13 +88,15 @@ coder-loop status /path/to/target --json
 
 每个 phase 的默认 runner 由 `preset.toml` 的 `[[phases]].runner = "claude"|"codex"|"opencode"` 声明；未声明时走 engine-builtin fallback。phase 还可用 `[[phases]].model` 声明默认模型。Runner binary 就是 PATH 上的 `claude` / `codex` / `opencode`；没有 target 级 override 通道。单个 queue item 的 `runner` 字段只覆盖非 trigger phase。`doctor` / `status --json` 显示每个 phase 的 runner 与 source。
 
-后台循环由 daemon API 管理：
+后台循环由 daemon 与 chain API 管理：
 
 ```bash
-coder-loop daemon start /path/to/target
-coder-loop daemon status /path/to/target --json
-coder-loop daemon stop /path/to/target
-coder-loop queue unblock /path/to/source-target --issue 123 --start-daemon
+coder-loop daemon up --detach                                          # 起中央 daemon（后台化）
+coder-loop status /path/to/target --json                               # 某 target 快照
+coder-loop status --loop-data-root ~/.coder-loop/loop-data --json      # 无 target → 中央 daemon 存活探测
+coder-loop chain stop <chain>                                           # 停某 chain 调度（可 chain resume）
+coder-loop daemon down                                                  # 停中央 daemon
+coder-loop queue unblock /path/to/source-target --issue 123 --start-daemon  # unblock 完顺带把 daemon spawn detached
 ```
 
 新 operator 完整 bootstrap 步骤见 [docs/operator-quickstart.md](./docs/operator-quickstart.md)。

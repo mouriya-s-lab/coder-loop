@@ -163,39 +163,7 @@ export type DaemonCommandArgs =
 			action: "up"
 			loopDataRoot: string | null
 			schedulerIntervalMs: number | null
-			json: boolean
-	  }
-	| {
-			action: "status"
-			targetCwd: string
-			loopDataRoot?: string | null
-			chainName?: string | null
-			output: "json"
-	  }
-	| {
-			action: "start"
-			targetCwd: string
-			loopDataRoot?: string | null
-			chainName?: string | null
-			dryRun: boolean
-			worktree: boolean
-			json: boolean
-	  }
-	| {
-			action: "stop"
-			targetCwd: string
-			loopDataRoot?: string | null
-			chainName?: string | null
-			dryRun: boolean
-			json: boolean
-		}
-	| {
-			action: "restart"
-			targetCwd: string
-			loopDataRoot?: string | null
-			chainName?: string | null
-			dryRun: boolean
-			worktree: boolean
+			detach: boolean
 			json: boolean
 	  }
 	| {
@@ -204,8 +172,13 @@ export type DaemonCommandArgs =
 			json: boolean
 	  }
 
-export type LogsCommandArgs = {
+export type DaemonStartInputs = {
 	targetCwd: string
+	loopDataRoot: string | null
+	chainName: string | null
+}
+
+export type LogsCommandArgs = {
 	loopDataRoot?: string | null
 	kind: string | null
 	type: string | null
@@ -1207,18 +1180,15 @@ const statusCliCommand = command({
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
 		chain: option({ long: "chain", type: optional(cmdString) }),
 	},
-	handler: (args): CliCommand => {
-		if (!args.json) fail("status: only --json output is supported for now. Usage: coder-loop status <target> --json")
-		return {
-			kind: "status",
-			args: {
-				targetCwd: args.target,
-				loopDataRoot: args.loopDataRoot ?? null,
-				chainName: args.chain ?? null,
-				output: "json",
-			},
-		}
-	},
+	handler: (args): CliCommand => ({
+		kind: "status",
+		args: {
+			targetCwd: args.target,
+			loopDataRoot: args.loopDataRoot ?? null,
+			chainName: args.chain ?? null,
+			output: "json",
+		},
+	}),
 })
 
 const activityItemCliCommand = command({
@@ -1284,9 +1254,8 @@ const activityCliCommand = subcommands({
 
 const logsCliCommand = command({
 	name: "logs",
-	description: "Query the unified coder-loop observability event stream.",
+	description: "Query the unified coder-loop observability event stream (global, not target-scoped).",
 	args: {
-		target: positional({ displayName: "target", type: cmdString }),
 		json: flag({ long: "json" }),
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
 		kind: option({ long: "kind", type: optional(cmdString) }),
@@ -1298,57 +1267,30 @@ const logsCliCommand = command({
 		since: option({ long: "since", type: optional(cmdString) }),
 		follow: flag({ long: "follow" }),
 	},
-	handler: (args): CliCommand => {
-		if (!args.json) fail("logs: only --json output is supported for now. Usage: coder-loop logs <target> --json")
-		return {
-			kind: "logs",
-			args: {
-				targetCwd: args.target,
-				loopDataRoot: args.loopDataRoot ?? null,
-				kind: args.kind ?? null,
-				type: args.type ?? null,
-				chainName: args.chain ?? null,
-				item: parseOptionalPositiveInteger(args.item ?? null, "--item"),
-				run: args.run ?? null,
-				phase: args.phase ?? null,
-				since: args.since ?? null,
-				follow: args.follow,
-				json: true,
-			},
-		}
-	},
-})
-
-const daemonStatusCliCommand = command({
-	name: "status",
-	description: "Emit daemon ownership and runtime status for a target.",
-	args: {
-		target: positional({ displayName: "target", type: cmdString }),
-		json: flag({ long: "json" }),
-		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
-		chain: option({ long: "chain", type: optional(cmdString) }),
-	},
-	handler: (args): CliCommand => {
-		if (!args.json) fail("daemon status: only --json output is supported for now. Usage: coder-loop daemon status <target> --json")
-		return {
-			kind: "daemon",
-			args: {
-				action: "status",
-				targetCwd: args.target,
-				loopDataRoot: args.loopDataRoot ?? null,
-				chainName: args.chain ?? null,
-				output: "json",
-			},
-		}
-	},
+	handler: (args): CliCommand => ({
+		kind: "logs",
+		args: {
+			loopDataRoot: args.loopDataRoot ?? null,
+			kind: args.kind ?? null,
+			type: args.type ?? null,
+			chainName: args.chain ?? null,
+			item: parseOptionalPositiveInteger(args.item ?? null, "--item"),
+			run: args.run ?? null,
+			phase: args.phase ?? null,
+			since: args.since ?? null,
+			follow: args.follow,
+			json: true,
+		},
+	}),
 })
 
 const daemonUpCliCommand = command({
 	name: "up",
-	description: "Run the centralized coder-loop daemon process.",
+	description: "Run the centralized coder-loop daemon process. Foreground by default; --detach forks a background process and returns immediately.",
 	args: {
 		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
 		schedulerIntervalMs: option({ long: "scheduler-interval-ms", type: optional(cmdString) }),
+		detach: flag({ long: "detach" }),
 		json: flag({ long: "json" }),
 	},
 	handler: (args): CliCommand => ({
@@ -1357,79 +1299,7 @@ const daemonUpCliCommand = command({
 			action: "up",
 			loopDataRoot: args.loopDataRoot ?? null,
 			schedulerIntervalMs: parseOptionalPositiveInteger(args.schedulerIntervalMs ?? null, "--scheduler-interval-ms"),
-			json: args.json,
-		},
-	}),
-})
-
-const daemonStartCliCommand = command({
-	name: "start",
-	description: "Start coder-loop as a detached daemon for a target.",
-	args: {
-		target: positional({ displayName: "target", type: cmdString }),
-		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
-		chain: option({ long: "chain", type: optional(cmdString) }),
-		dryRun: flag({ long: "dry-run" }),
-		worktree: flag({ long: "worktree" }),
-		json: flag({ long: "json" }),
-	},
-	handler: (args): CliCommand => ({
-		kind: "daemon",
-		args: {
-			action: "start",
-			targetCwd: args.target,
-			loopDataRoot: args.loopDataRoot ?? null,
-			chainName: args.chain ?? null,
-			dryRun: args.dryRun,
-			worktree: args.worktree,
-			json: args.json,
-		},
-	}),
-})
-
-const daemonStopCliCommand = command({
-	name: "stop",
-	description: "Stop the coder-loop daemon for a target.",
-	args: {
-		target: positional({ displayName: "target", type: cmdString }),
-		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
-		chain: option({ long: "chain", type: optional(cmdString) }),
-		dryRun: flag({ long: "dry-run" }),
-		json: flag({ long: "json" }),
-	},
-	handler: (args): CliCommand => ({
-		kind: "daemon",
-		args: {
-			action: "stop",
-			targetCwd: args.target,
-			loopDataRoot: args.loopDataRoot ?? null,
-			chainName: args.chain ?? null,
-			dryRun: args.dryRun,
-			json: args.json,
-		},
-	}),
-})
-
-const daemonRestartCliCommand = command({
-	name: "restart",
-	description: "Restart the coder-loop daemon for a target.",
-	args: {
-		target: positional({ displayName: "target", type: cmdString }),
-		loopDataRoot: option({ long: "loop-data-root", type: optional(cmdString) }),
-		chain: option({ long: "chain", type: optional(cmdString) }),
-		dryRun: flag({ long: "dry-run" }),
-		worktree: flag({ long: "worktree" }),
-		json: flag({ long: "json" }),
-	},
-	handler: (args): CliCommand => ({
-		kind: "daemon",
-		args: {
-			action: "restart",
-			targetCwd: args.target,
-			loopDataRoot: args.loopDataRoot ?? null,
-			chainName: args.chain ?? null,
-			dryRun: args.dryRun,
-			worktree: args.worktree,
+			detach: args.detach,
 			json: args.json,
 		},
 	}),
@@ -1454,13 +1324,9 @@ const daemonDownCliCommand = command({
 
 const daemonCliCommand = subcommands({
 	name: "daemon",
-	description: "Manage coder-loop daemon processes.",
+	description: "Manage the central coder-loop daemon lifecycle. For target chain state use `coder-loop status <target>` / `chain stop|resume|delete`; to spawn the daemon detached from another command use `queue unblock ... --start-daemon`.",
 	cmds: {
 		up: daemonUpCliCommand,
-		status: daemonStatusCliCommand,
-		start: daemonStartCliCommand,
-		stop: daemonStopCliCommand,
-		restart: daemonRestartCliCommand,
 		down: daemonDownCliCommand,
 	},
 })
@@ -1920,7 +1786,7 @@ async function runContextCommand(args: string[]): Promise<void> {
 
 const queueUnblockCliCommand = command({
 	name: "unblock",
-	description: "Restore one preset-unblockable item to the preset entry status, clear its phase so the scheduler re-picks it from the entry phase, and reactivate the chain if it had completed.",
+	description: "Restore one preset-unblockable item to the preset entry status, clear its phase so the scheduler re-picks it from the entry phase, and reactivate the chain if it had completed. Pass --start-daemon to also spawn the central daemon detached when the mutation succeeds (skipped when no requeue was needed or --dry-run is set).",
 	args: {
 		target: positional({ displayName: "target", type: cmdString }),
 		issue: option({ long: "issue", type: cmdString }),
@@ -2066,11 +1932,79 @@ function parseItemPresetSpec(presetName: string | null, presetPath: string | nul
 }
 
 async function runStatusCommand(args: string[]): Promise<void> {
+	// `coder-loop status` has two modes distinguished by whether a positional target is passed:
+	//   - `status <target>`       — full target snapshot via buildCoderLoopStatusSnapshot
+	//   - `status --loop-data-root <dir>` (no target) — central daemon liveness via socket
+	// The no-target form used to live under the deprecated `daemon status` subcommand; after
+	// that subcommand was removed we keep the same behaviour reachable through `status`.
+	if (isCentralDaemonStatusInvocation(args)) {
+		await runCentralDaemonStatusCommand(args)
+		return
+	}
 	const parsed = await runCmd(statusCliCommand, args)
 	if (parsed.kind !== "status") return
 	const snapshot = await buildCoderLoopStatusSnapshot(parsed.args)
 	StatusSnapshotBoundary.assert(snapshot)
 	process.stdout.write(`${stringifyStatusSnapshot(snapshot)}\n`)
+}
+
+async function runCentralDaemonStatusCommand(args: string[]): Promise<void> {
+	const options = parseCentralDaemonSocketOptions(args, "status")
+	const result = await requestDaemonResultForDaemonCommand(options.loopDataRoot, "daemon.status", {}, options.json)
+	if (result === null) return
+	writeCommandResult(result, options.json, formatDaemonStatusResult)
+}
+
+function isCentralDaemonStatusInvocation(args: string[]): boolean {
+	if (args.some((arg) => arg === "--help" || arg === "-h")) return false
+	return !hasPositionalArgument(args)
+}
+
+function hasPositionalArgument(args: string[]): boolean {
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index]
+		if (arg === undefined) continue
+		if (!arg.startsWith("-")) return true
+		const [name, inlineValue] = splitFlag(arg)
+		if (inlineValue !== null) continue
+		if (name === "--loop-data-root" || name === "--chain") index++
+	}
+	return false
+}
+
+function parseCentralDaemonSocketOptions(args: string[], usage: string): { loopDataRoot: string | null; json: boolean } {
+	let loopDataRoot: string | null = null
+	let json = false
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index]
+		if (arg === undefined) fail(`${usage}: missing argument at index ${index}`)
+		const [name, inlineValue] = splitFlag(arg)
+		switch (name) {
+			case "--loop-data-root":
+				loopDataRoot = readFlagValue(args, index, inlineValue, name)
+				if (inlineValue === null) index++
+				break
+			case "--json":
+				rejectInlineValue(inlineValue, name)
+				json = true
+				break
+			default:
+				fail(`${usage}: unrecognized argument ${arg}`)
+		}
+	}
+	return { loopDataRoot, json }
+}
+
+function formatDaemonStatusResult(result: JsonObject): string {
+	const daemon = jsonObjectEntry(result.daemon)
+	const activeRuns = Array.isArray(daemon?.activeRuns) ? daemon.activeRuns.length : 0
+	return [
+		`pid: ${String(daemon?.pid ?? "")}`,
+		`running: ${String(daemon?.running ?? "")}`,
+		`socket: ${String(daemon?.socketPath ?? "")}`,
+		`activeRuns: ${activeRuns}`,
+		"",
+	].join("\n")
 }
 
 async function runActivityCommand(args: string[]): Promise<void> {
@@ -2453,54 +2387,6 @@ function parseUmbrellaRef(raw: string, defaultRepo: string): JsonObject {
 	}
 }
 
-async function runCentralDaemonStatusCommand(args: string[]): Promise<void> {
-	const options = parseCentralDaemonSocketOptions(args, "daemon status")
-	const result = await requestDaemonResultForDaemonCommand(options.loopDataRoot, "daemon.status", {}, options.json)
-	if (result === null) return
-	writeCommandResult(result, options.json, formatDaemonStatusResult)
-}
-
-function isCentralDaemonStatusInvocation(args: string[]): boolean {
-	if (args[0] !== "status") return false
-	if (args.slice(1).some((arg) => arg === "--help" || arg === "-h")) return false
-	return !hasPositionalArgument(args.slice(1))
-}
-
-function hasPositionalArgument(args: string[]): boolean {
-	for (let index = 0; index < args.length; index++) {
-		const arg = args[index]
-		if (arg === undefined) continue
-		if (!arg.startsWith("-")) return true
-		const [name, inlineValue] = splitFlag(arg)
-		if (inlineValue !== null) continue
-		if (name === "--loop-data-root") index++
-	}
-	return false
-}
-
-function parseCentralDaemonSocketOptions(args: string[], usage: string): { loopDataRoot: string | null; json: boolean } {
-	let loopDataRoot: string | null = null
-	let json = false
-	for (let index = 1; index < args.length; index++) {
-		const arg = args[index]
-		if (arg === undefined) fail(`${usage}: missing argument at index ${index}`)
-		const [name, inlineValue] = splitFlag(arg)
-		switch (name) {
-			case "--loop-data-root":
-				loopDataRoot = readFlagValue(args, index, inlineValue, name)
-				if (inlineValue === null) index++
-				break
-			case "--json":
-				rejectInlineValue(inlineValue, name)
-				json = true
-				break
-			default:
-				fail(`${usage}: unrecognized argument ${arg}`)
-		}
-	}
-	return { loopDataRoot, json }
-}
-
 async function requestDaemonResult(loopDataRoot: string | null, command: DaemonCommandName, args: JsonObject = {}): Promise<JsonObject> {
 	const pathOptions = loopDataRoot === null ? {} : { loopDataRoot }
 	const socketPath = resolveLoopDataPaths(pathOptions).daemonSocket
@@ -2811,20 +2697,12 @@ function formatItemExitActionResult(result: JsonObject): string {
 	}).join("")
 }
 
-function formatDaemonStatusResult(result: JsonObject): string {
-	const daemon = jsonObjectEntry(result.daemon)
-	const activeRuns = Array.isArray(daemon?.activeRuns) ? daemon.activeRuns.length : 0
-	return [
-		`pid: ${String(daemon?.pid ?? "")}`,
-		`running: ${String(daemon?.running ?? "")}`,
-		`socket: ${String(daemon?.socketPath ?? "")}`,
-		`activeRuns: ${activeRuns}`,
-		"",
-	].join("\n")
-}
-
 function formatDaemonUpResult(result: JsonObject): string {
 	return `daemon up: pid=${String(result.pid ?? "")} socket=${String(result.socketPath ?? "")}\n`
+}
+
+function formatDaemonUpDetachedResult(result: JsonObject): string {
+	return `daemon up (detached): pid=${String(result.pid ?? "")} stdout=${String(result.stdoutPath ?? "")} stderr=${String(result.stderrPath ?? "")}\n`
 }
 
 function formatDaemonDownResult(result: JsonObject): string {
@@ -2838,43 +2716,11 @@ function formatDaemonDownResult(result: JsonObject): string {
 	return output
 }
 
-function formatDaemonStartResult(result: JsonObject): string {
-	if (result.dryRun === true) {
-		return [
-			`daemon start dry-run: target=${String(result.target ?? "")}`,
-			`daemon start dry-run: chain=${String(result.chain ?? "")}`,
-			`daemon start dry-run: central-daemon=${String(result.centralDaemon ?? "required")}`,
-			"",
-		].join("\n")
-	}
-	const daemon = jsonObjectEntry(result.daemon)
-	return `daemon start: target=${String(result.target ?? "")} chain=${String(result.chain ?? "")} already-running=${String(result.alreadyRunning ?? false)} pid=${String(daemon?.pid ?? "")}\n`
-}
-
-function formatDaemonStopResult(result: JsonObject): string {
-	if (result.dryRun === true) return `daemon stop dry-run: target=${String(result.target ?? "")} chain=${String(result.chain ?? "")}\n`
-	const mutation = jsonObjectEntry(result.result)
-	const chain = jsonObjectEntry(mutation?.chain)
-	return `daemon stop: target=${String(result.target ?? "")} chain=${String(result.chain ?? "")} status=${String(chain?.status ?? "")}\n`
-}
-
-function formatDaemonRestartResult(result: JsonObject): string {
-	if (result.dryRun === true) {
-		return `daemon restart dry-run: target=${String(result.target ?? "")} chain=${String(result.chain ?? "")} central-daemon=${String(result.centralDaemon ?? "required")}\n`
-	}
-	const daemon = jsonObjectEntry(result.daemon)
-	return `daemon restart: target=${String(result.target ?? "")} chain=${String(result.chain ?? "")} restarted=${String(result.restarted ?? false)} pid=${String(daemon?.pid ?? "")}\n`
-}
-
 function jsonObjectEntry(value: JsonValue | undefined): JsonObject | undefined {
 	return isJsonObject(value) ? value : undefined
 }
 
 async function runDaemonCommand(args: string[]): Promise<void> {
-	if (isCentralDaemonStatusInvocation(args)) {
-		await runCentralDaemonStatusCommand(args)
-		return
-	}
 	const parsed = await runCmd(daemonCliCommand, args)
 	if (parsed.value.kind !== "daemon") return
 	const daemonArgs = parsed.value.args
@@ -2882,30 +2728,7 @@ async function runDaemonCommand(args: string[]): Promise<void> {
 		await runDaemonUpCommand(daemonArgs)
 		return
 	}
-	if (daemonArgs.action === "down") {
-		await runDaemonDownCommand(daemonArgs)
-		return
-	}
-	if (daemonArgs.action === "status") {
-		const snapshot = await buildCoderLoopStatusSnapshot({
-			targetCwd: daemonArgs.targetCwd,
-			loopDataRoot: daemonArgs.loopDataRoot ?? null,
-			chainName: daemonArgs.chainName ?? null,
-			output: "json",
-		})
-		StatusSnapshotBoundary.assert(snapshot)
-		process.stdout.write(`${stringifyStatusSnapshot(snapshot)}\n`)
-		return
-	}
-	if (daemonArgs.action === "start") {
-		await runDaemonStartCommand(daemonArgs)
-		return
-	}
-	if (daemonArgs.action === "stop") {
-		await runDaemonStopCommand(daemonArgs)
-		return
-	}
-	await runDaemonRestartCommand(daemonArgs)
+	await runDaemonDownCommand(daemonArgs)
 }
 
 async function runQueueCommand(args: string[]): Promise<void> {
@@ -2961,15 +2784,15 @@ function rootUsage(): string {
 		"Usage: coder-loop <command> [options]",
 		"",
 		"Commands:",
-		"  status <target> --json",
+		"  status [<target>] --json          # <target> → full snapshot; omit for central daemon liveness only",
 		"  activity item <chain> --issue <item-id> [--json] [--loop-data-root DIR]",
 		"  activity log <chain> --issue <item-id> [--json] [--loop-data-root DIR]",
 		"  activity all [--json] [--loop-data-root DIR]",
-		"  logs <target> --json [--kind K] [--type T] [--chain C] [--item ID] [--run RUN_ID] [--phase P] [--since TS] [--follow]",
-		"  daemon <up|down|status|start|stop|restart>",
+		"  logs --json [--kind K] [--type T] [--chain C] [--item ID] [--run RUN_ID] [--phase P] [--since TS] [--follow]",
+		"  daemon <up [--detach] | down>     # up: foreground by default, --detach forks background",
 		"  chain <create|list|status|stop|resume|delete|set-runner-model>",
 		"  item <add|batch-add|list|update|reorder|exits|exit-action>",
-		"  queue unblock <target> --issue <issue>",
+		"  queue unblock <target> --issue <issue> [--start-daemon]  # --start-daemon spawns central daemon detached",
 		"  context append <chain> --scope <chain|item|group> --body <text>",
 		"  doctor <target>",
 		"",
@@ -3692,12 +3515,10 @@ type DaemonStartResult =
 const DAEMON_SHUTDOWN_SIGNALS = ["SIGTERM", "SIGINT", "SIGQUIT"] as const
 const DAEMON_IGNORED_SIGNALS = ["SIGHUP", "SIGUSR1", "SIGUSR2", "SIGPIPE"] as const
 
-export function buildDaemonStartPlan(args: Extract<DaemonCommandArgs, { action: "start" }>): DaemonStartPlan {
+export function buildDaemonStartPlan(args: DaemonStartInputs): DaemonStartPlan {
 	const targetCwd = resolve(args.targetCwd)
 	const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")
-	// The central daemon is global, not per-chain: route its process stdout/stderr to the
-	// loop-data-root daemon log location instead of any chains/<chain>/daemon directory.
-	const loopDataPaths = resolveLoopDataPaths(loopDataRootOption(args.loopDataRoot ?? null))
+	const loopDataPaths = resolveLoopDataPaths(loopDataRootOption(args.loopDataRoot))
 	const stdoutPath = loopDataPaths.daemonStdoutFile(timestamp)
 	const stderrPath = loopDataPaths.daemonStderrFile(timestamp)
 	const command = [
@@ -3706,7 +3527,7 @@ export function buildDaemonStartPlan(args: Extract<DaemonCommandArgs, { action: 
 		"daemon",
 		"up",
 	]
-	if (args.loopDataRoot !== null && args.loopDataRoot !== undefined) command.push("--loop-data-root", args.loopDataRoot)
+	if (args.loopDataRoot !== null) command.push("--loop-data-root", args.loopDataRoot)
 	return {
 		targetCwd,
 		command,
@@ -3717,6 +3538,10 @@ export function buildDaemonStartPlan(args: Extract<DaemonCommandArgs, { action: 
 }
 
 async function runDaemonUpCommand(args: Extract<DaemonCommandArgs, { action: "up" }>): Promise<void> {
+	if (args.detach) {
+		await runDaemonUpDetached(args)
+		return
+	}
 	const scheduler = args.schedulerIntervalMs === null ? {} : { intervalMs: args.schedulerIntervalMs }
 	let daemon: CoderLoopDaemon | null = null
 	let shutdownStarted = false
@@ -3782,6 +3607,42 @@ async function runDaemonUpCommand(args: Extract<DaemonCommandArgs, { action: "up
 	}
 }
 
+async function runDaemonUpDetached(args: Extract<DaemonCommandArgs, { action: "up" }>): Promise<void> {
+	const loopDataPaths = resolveLoopDataPaths(loopDataRootOption(args.loopDataRoot ?? null))
+	const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")
+	const stdoutPath = loopDataPaths.daemonStdoutFile(timestamp)
+	const stderrPath = loopDataPaths.daemonStderrFile(timestamp)
+	const command = [
+		process.argv[0] ?? "bun",
+		resolve(import.meta.dir, "loop.ts"),
+		"daemon",
+		"up",
+	]
+	if (args.loopDataRoot !== null) command.push("--loop-data-root", args.loopDataRoot)
+	if (args.schedulerIntervalMs !== null) command.push("--scheduler-interval-ms", String(args.schedulerIntervalMs))
+	await mkdir(dirname(stdoutPath), { recursive: true })
+	const stdoutFd = openSync(stdoutPath, "a")
+	const stderrFd = openSync(stderrPath, "a")
+	try {
+		const child = spawn(command[0]!, command.slice(1), {
+			detached: true,
+			stdio: ["ignore", stdoutFd, stderrFd],
+		})
+		child.unref()
+		writeJsonOrText({
+			action: "up",
+			detached: true,
+			pid: child.pid ?? null,
+			command,
+			stdoutPath,
+			stderrPath,
+		}, args.json, formatDaemonUpDetachedResult)
+	} finally {
+		closeSync(stdoutFd)
+		closeSync(stderrFd)
+	}
+}
+
 async function runDaemonDownCommand(args: Extract<DaemonCommandArgs, { action: "down" }>): Promise<void> {
 	const response = await sendDaemonRequestForDaemonCommand(args.loopDataRoot, "daemon.down", {}, args.json)
 	if (response === null) return
@@ -3798,33 +3659,11 @@ async function runDaemonDownCommand(args: Extract<DaemonCommandArgs, { action: "
 	process.stdout.write(formatDaemonDownResult(response.result))
 }
 
-async function runDaemonStartCommand(args: Extract<DaemonCommandArgs, { action: "start" }>): Promise<void> {
-	const runtime = await loadTargetRuntime(daemonCommandToTargetLookupArgs(args))
-	if (args.dryRun) {
-		writeJsonOrText({
-			action: "start",
-				target: runtime.options.targetCwd,
-				chain: runtime.chain.name,
-				dryRun: true,
-				centralDaemon: "required",
-			}, args.json, formatDaemonStartResult)
-		return
-	}
-	const daemon = await requestDaemonResult(args.loopDataRoot ?? null, "daemon.status")
-	writeJsonOrText({
-		action: "start",
-		target: runtime.options.targetCwd,
-		chain: runtime.chain.name,
-		alreadyRunning: true,
-		daemon: daemon.daemon ?? null,
-	}, args.json, formatDaemonStartResult)
-}
-
-async function executeDaemonStart(args: Extract<DaemonCommandArgs, { action: "start" }>, plan = buildDaemonStartPlan(args)): Promise<DaemonStartResult> {
+async function executeDaemonStart(args: DaemonStartInputs, plan = buildDaemonStartPlan(args)): Promise<DaemonStartResult> {
 	const current = await buildCoderLoopStatusSnapshot({
 		targetCwd: args.targetCwd,
-		loopDataRoot: args.loopDataRoot ?? null,
-		chainName: args.chainName ?? null,
+		loopDataRoot: args.loopDataRoot,
+		chainName: args.chainName,
 		output: "json",
 	})
 	const live = findOwnedLiveProcess(current)
@@ -3861,61 +3700,6 @@ async function executeDaemonStart(args: Extract<DaemonCommandArgs, { action: "st
 		closeSync(stderrFd)
 	}
 }
-
-async function runDaemonStopCommand(args: Extract<DaemonCommandArgs, { action: "stop" }>): Promise<void> {
-	const runtime = await loadTargetRuntime(daemonCommandToTargetLookupArgs(args))
-	if (args.dryRun) {
-		writeJsonOrText({
-			action: "stop",
-			target: runtime.options.targetCwd,
-			chain: runtime.chain.name,
-			dryRun: true,
-		}, args.json, formatDaemonStopResult)
-		return
-	}
-	const result = await requestDaemonResult(args.loopDataRoot ?? null, "chain.stop", { chainName: runtime.chain.name })
-	writeJsonOrText({
-		action: "stop",
-		target: runtime.options.targetCwd,
-		chain: runtime.chain.name,
-		result,
-	}, args.json, formatDaemonStopResult)
-}
-
-async function runDaemonRestartCommand(args: Extract<DaemonCommandArgs, { action: "restart" }>): Promise<void> {
-	const runtime = await loadTargetRuntime(daemonCommandToTargetLookupArgs(args))
-	if (args.dryRun) {
-		writeJsonOrText({
-			action: "restart",
-			target: runtime.options.targetCwd,
-			chain: runtime.chain.name,
-			dryRun: true,
-			centralDaemon: "required",
-		}, args.json, formatDaemonRestartResult)
-		return
-	}
-	const daemon = await requestDaemonResult(args.loopDataRoot ?? null, "daemon.status")
-	writeJsonOrText({
-		action: "restart",
-		target: runtime.options.targetCwd,
-		chain: runtime.chain.name,
-		restarted: false,
-		reason: "central daemon is global; target restart resolves the chain and verifies daemon availability",
-		daemon: daemon.daemon ?? null,
-	}, args.json, formatDaemonRestartResult)
-}
-
-function daemonCommandToTargetLookupArgs(args: Extract<DaemonCommandArgs, { action: "start" | "stop" | "restart" }>): TargetChainLookupArgs {
-	return {
-		targetCwd: args.targetCwd,
-		loopDataRoot: args.loopDataRoot ?? null,
-			chainName: args.chainName ?? null,
-			repository: null,
-			baseBranch: null,
-			dryRun: args.dryRun,
-			worktree: "worktree" in args ? args.worktree : false,
-		}
-	}
 
 export type QueueUnblockMutationOutcome =
 	| {
@@ -4003,13 +3787,9 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 			requested: true,
 			dryRun: true,
 			plan: buildDaemonStartPlan({
-				action: "start",
 				targetCwd: options.targetCwd,
 				loopDataRoot: options.loopDataRoot,
 				chainName: options.chainName ?? null,
-				dryRun: true,
-				worktree: options.worktree,
-				json: false,
 			}),
 		}
 	} else {
@@ -4017,13 +3797,9 @@ async function runQueueUnblockCommand(args: QueueUnblockCommandArgs): Promise<vo
 			requested: true,
 			dryRun: false,
 			result: await executeDaemonStart({
-				action: "start",
 				targetCwd: options.targetCwd,
 				loopDataRoot: options.loopDataRoot,
 				chainName: options.chainName ?? null,
-				dryRun: false,
-				worktree: options.worktree,
-				json: false,
 			}),
 		}
 	}

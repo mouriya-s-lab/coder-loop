@@ -35,11 +35,11 @@ If the selected queue item is blocked by another repository, create the cross-re
 6. Declare the cross-chain dependency on the current blocked item — this is the only state mutation you make to it:
    - Add the captured blocker item id to the current blocked item's `extra.dependsOn` array (create the array if absent; do not duplicate an id already present).
    - Do NOT change the current blocked item's `status`, `phase`, or any field other than `extra.dependsOn`. `dependsOn` is an optional record orthogonal to status; the engine — not this responder — restores the item to actionable once the blocker reaches a success terminal status.
-7. Start the target daemon:
-   - `coder-loop daemon start <targetRepoPath>`
-   - If it is already running, treat that as success and record the returned status.
+7. Ensure the central coder-loop daemon is running (it schedules every target chain, so starting it is what makes the target's blocked-item scheduling resume):
+   - `coder-loop daemon up --detach --loop-data-root <targetLoopDataRoot>` — spawns the central daemon in the background, returns pid immediately.
+   - If it is already running the socket bind will refuse; treat that refusal as success and record `daemon=already_running`.
 8. Do not change the current repository's blocked item back to actionable, done, moot, or closed. The only field you may touch on it is `extra.dependsOn` (step 6); its lifecycle status transition back to actionable is the engine's job.
-9. Append a concise handoff note to `{{SHARED_CONTEXT_FILE}}`. If `{{CURRENT_ISSUE_FILE}}` is non-empty and already exists, you may also append issue-local details there. Include the created issue URL, target checkout path, queue injection result, declared dependsOn blocker item id, daemon start result, and any evidence files.
+9. Append a concise handoff note to `{{SHARED_CONTEXT_FILE}}`. If `{{CURRENT_ISSUE_FILE}}` is non-empty and already exists, you may also append issue-local details there. Include the created issue URL, target checkout path, queue injection result, declared dependsOn blocker item id, `daemon up --detach` result (pid or `already_running`), and any evidence files.
 
 ## GitHub and state boundaries
 

@@ -17,8 +17,9 @@ operator / supervisor 的默认入口是 `coder-loop` 自己暴露的只读或�
 | 接入 target | `coder-loop chain create <name> --config-json '{"repository":"<owner>/<repo>"}' --preset <name>` | 中央 daemon socket 一次写入 chain metadata；target 目录零文件依赖 |
 | 体检 target | `coder-loop doctor <target> --repo <owner>/<repo>` | 只读检查 operator 机器先决条件 + live runtime health（零 target 文件检查） |
 | 读机器状态 | `coder-loop status <target> --json` | supervisor / script 读取当前 state/queue/current/events/process snapshot |
-| 管理 central daemon | `coder-loop daemon up/down/status/start/stop/restart <target>` | 管理全局 daemon socket 与 target chain；避免手写 `nohup` / PID 归属逻辑 |
-| 管理 chain | `coder-loop chain create/list/status/stop/resume/delete/set-runner-model` | 直接操作 centralized coder-loop chain |
+| 管理 central daemon | `coder-loop daemon <up [--detach] \| down>` | `up --detach` fork + unref 起后台（写 pid，立即返回）；纯前台去掉 `--detach`（供 launchd / systemd / e2e）；`down` 走 socket 关机 |
+| 查中央 daemon 存活 | `coder-loop status --loop-data-root <dir> --json` | 无 `<target>` → 只返 daemon pid / socket / activeRuns |
+| 管理 chain | `coder-loop chain create/list/status/stop/resume/delete/set-runner-model` | target-scoped 的停 / 恢复 / 删都在 chain 层（历史上曾有 `daemon start/stop/restart <target>` wrapper，已删除，等价路径见下表） |
 | 管理 item | `coder-loop item add/batch-add/list/update/reorder` | 直接操作 centralized chain item |
 | 恢复 blocked item | `coder-loop queue unblock <target> --issue <id>` | 将 preset 声明的 unblockable terminal item 恢复到 `statuses.entry`，清空其 phase 使 scheduler 从 entry phase 重捡；chain 已 completed 时一并恢复为 active（#679） |
 
@@ -27,21 +28,31 @@ operator / supervisor 的默认入口是 `coder-loop` 自己暴露的只读或�
 ```bash
 coder-loop doctor /path/to/target --repo <owner>/<repo>
 coder-loop status /path/to/target --json | jq '.state.kind, .queue, .current, .processes.live'
-coder-loop daemon status /path/to/target --json | jq '.processes'
+coder-loop status --loop-data-root ~/.coder-loop/loop-data --json | jq '.processes // .daemon'
 ```
 
 判断 / 控制 daemon：
 
 ```bash
-coder-loop daemon up --json                      # 启动 central daemon（需要时）
-coder-loop daemon status /path/to/target --json  # 读 daemon + target chain 状态
-coder-loop daemon start /path/to/target          # 解析 target chain 并让 central daemon 开始调度
-coder-loop daemon stop /path/to/target           # 通过 central daemon 调 chain.stop（可 chain resume）
-coder-loop daemon restart /path/to/target        # 确认 central daemon 可用并返回单个 JSON object
-coder-loop daemon down --json                    # 关闭 central daemon socket 服务
+coder-loop daemon up --detach --json                                       # 起中央 daemon 后台（fork + unref + 写 pid，立即返回）
+coder-loop daemon up --json                                                # 前台形态，供 launchd / systemd / e2e
+coder-loop status --loop-data-root ~/.coder-loop/loop-data --json          # 中央 daemon 存活探测（无 target）
+coder-loop chain stop <chain>                                              # 停某 chain 的 scheduling（可 chain resume）
+coder-loop daemon down --json                                              # 关闭 central daemon socket 服务
+coder-loop queue unblock <target> --issue <id> --start-daemon              # unblock 完 + 顺带 spawn detached daemon
 ```
 
-`daemon up/down` 是 central daemon 生命周期。`daemon start/stop/restart <target>` 是 target-aware wrapper：先解析 target 对应的 centralized chain，再通过 daemon socket 操作或校验 chain。`daemon start` 对已存在/已运行 target 幂等；`daemon stop` 走 `chain.stop`（scheduler 暂停在该 chain 选 item，in-flight run 自然完成，可 `chain resume` / `coder-loop daemon start` 恢复）；`daemon restart` 不拼接旧 stop/start JSON，也不重启某个 target-owned PID，而是确认全局 daemon 可用并返回单个 JSON object。
+历史上曾有 `daemon start|stop|restart <target>` 与 `daemon status <target>` 四个 target-scoped 子命令，已经删除，替代路径：
+
+| 想做的事 | 用这个 |
+|---|---|
+| `daemon status <target>` | `status <target> --json`（顶层 status 兼容两种形态） |
+| `daemon status`（无 target） | `status --loop-data-root <dir> --json`（同一命令，位置参数缺省 → 走 socket 探测） |
+| `daemon start <target>` | `daemon up --detach`（或 `queue unblock ... --start-daemon` 顺带起） |
+| `daemon stop <target>` | `chain stop <chain>` |
+| `daemon restart <target>` | `daemon down && daemon up --detach` |
+
+删除原因：`daemon start` 从不真 spawn（只是查 `daemon.status`）、`daemon stop` 只是 `chain stop` 别名、`daemon restart` 完全 no-op、`daemon status <target>` 与顶层 `status <target>` 重合。真正 spawn 中央 daemon 的能力（`executeDaemonStart`）现在 wire 到 `daemon up --detach` 和 `queue unblock --start-daemon` 两处。
 
 `status <target> --json` 是 supervisor 的稳定读取契约。它会在 state 缺失或损坏时仍输出 JSON，让外部逻辑根据 `state.kind` 分支，而不是从 stderr 猜测失败类型。当前顶层字段：
 
@@ -232,17 +243,13 @@ coder-loop item --help
 | 子命令 | 用途 | 主要 flag |
 |---|---|---|
 | `doctor <target>` | 只读体检：operator 机器先决条件 + live runtime health（零 target 文件检查） | `--repo <slug>` `--loop-data-root <dir>` `--chain <name>` |
-| `status <target> --json` | 只读 JSON runtime/process snapshot | `--loop-data-root <dir>` `--chain <name>` |
-| `logs <target> --json` | 结构化 events / audit 查询 | `--kind K` `--type T` `--chain C` `--item ID` `--run RUN_ID` `--phase P` `--since TS` `--follow` |
+| `status [<target>] --json` | 带 `<target>` → JSON runtime/process snapshot；不带 → 中央 daemon socket 存活探测（等价于旧 `daemon status`） | `--loop-data-root <dir>` `--chain <name>` |
+| `logs --json` | 结构化 events / audit 查询（**全局**，不接 target 参数） | `--kind K` `--type T` `--chain C` `--item ID` `--run RUN_ID` `--phase P` `--since TS` `--follow` |
 | `activity item <chain> --issue <id>` | 直接读取本地 SQLite/artifact，显示指定存活任务的 10s / 30s / 1m / 5m 输出行数 | `--json` `--loop-data-root <dir>` |
 | `activity all` | 直接读取本地 SQLite/artifact，显示全部 PID 仍存活的 current task | `--json` `--loop-data-root <dir>` |
 | `activity log <chain> --issue <id>` | 输出指定存活任务当前 phase 的 `stdout.jsonl` 完整绝对路径 | `--json` `--loop-data-root <dir>` |
-| `daemon up` | 运行 centralized daemon process | `--json` `--loop-data-root <dir>` |
+| `daemon up` | 运行 centralized daemon process；默认前台阻塞（launchd / systemd / e2e），`--detach` 后台化（fork + unref + 写 pid，立即返回） | `--detach` `--json` `--loop-data-root <dir>` `--scheduler-interval-ms <n>` |
 | `daemon down` | 通过 Unix socket 要求 centralized daemon 退出 | `--json` `--loop-data-root <dir>` |
-| `daemon status <target> --json` | daemon 视角 JSON snapshot | `--loop-data-root <dir>` `--chain <name>` |
-| `daemon start <target>` | 解析 target chain 并让 daemon 开始调度；已运行/已存在时幂等返回 | `--loop-data-root <dir>` `--dry-run` |
-| `daemon stop <target>` | 解析 target chain 并调 `chain.stop`（可 resume） | `--loop-data-root <dir>` `--dry-run` |
-| `daemon restart <target>` | 确认 central daemon 可用，输出单个 JSON object | `--loop-data-root <dir>` `--dry-run` |
 | `chain create <name>` | 中央 daemon socket 上创建 chain metadata | `--config-json '{"repository":"...","baseBranch":"...","bindings":{...}}'` `--preset <name>` `--umbrella <ref>` `--force` |
 | `chain list` / `chain status <name>` | list / show one chain | `--json` `--loop-data-root <dir>` |
 | `chain stop <name>` / `chain resume <name>` | 暂停 / 恢复 chain scheduling | `--json` `--loop-data-root <dir>` |
@@ -260,10 +267,10 @@ coder-loop item --help
 
 ```bash
 bun src/loop.ts status <target> --json
-bun src/loop.ts daemon start <target>
+bun src/loop.ts daemon up --detach
 ```
 
-源码入口仍然要求第一位置参数是子命令；不带子命令时只打印 usage 并 exit 1。循环推进走 `coder-loop daemon start <target>`，只读健康检查走 `coder-loop status <target> --json` 或 `coder-loop doctor <target>`。
+源码入口仍然要求第一位置参数是子命令；不带子命令时只打印 usage 并 exit 1。启动中央 daemon 走 `coder-loop daemon up --detach`（或 `queue unblock ... --start-daemon` 顺带起），只读健康检查走 `coder-loop status <target> --json` 或 `coder-loop doctor <target>`。
 
 ### 6.3 Agent 进程与监控（fallback reference）
 
@@ -322,5 +329,5 @@ coder-loop item list <chain-name> --json
 - **`.coder-loop/` 入了 git** → runtime / logs / handoff 进了 PR diff；`.gitignore` 加 `.coder-loop/` 后 `git rm --cached -r .coder-loop/`。
 - **target 的 `CLAUDE.md` / `AGENTS.md` 缺失或没入仓** → 各执行 phase 读不到项目工作方式（项目命令 / PR 约定），行为退化为推测项目命令，往往写错命令 / 漏证据 layer。
 - **`gh` 未 auth** → iteration 的 issue body 亲读 / review 的 `gh pr checks` 都会失败，agent 输出里能看到 `gh auth status` 失败回显。
-- **chain identity 与目标 repo 不一致** → `status` / `daemon start` 会在解析 chain 时报告 repository/baseBranch 不匹配；指定正确 `--chain`，或修正 centralized chain identity。
+- **chain identity 与目标 repo 不一致** → `status <target>` / `queue unblock <target>` 会在解析 chain 时报告 repository/baseBranch 不匹配；指定正确 `--chain`，或修正 centralized chain identity。
 - **只看日志文件、不看 status** → authoritative path 来自 central chain；先看 `status` 返回的路径，不要按老式 flat log layout 找文件。

@@ -599,7 +599,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(/kind/i.test(prompt)).toBe(false)
 		expect(prompt).toContain("Unblocks: {{REPO}}#{{ISSUE}}")
 		expect(prompt).toContain("central state DB")
-		expect(prompt).toContain("coder-loop daemon start <targetRepoPath>")
+		expect(prompt).toContain("coder-loop daemon up --detach --loop-data-root <targetLoopDataRoot>")
 		expect(prompt).toContain("Do not change the current repository's blocked item")
 		expect(prompt).toContain("ITERATION SUMMARY: blocked_responder=")
 	})

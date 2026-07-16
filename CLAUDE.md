@@ -28,18 +28,29 @@ engine-owned `runtime.*` fact 清单、preset-declared runtime business key、`[
 
 ## Commands
 
-Root usage（源：`src/loop.ts:2684 rootUsage`）：
+Root usage（源：`src/loop.ts rootUsage`）：
 
 ```
-coder-loop status  <target> --json
+coder-loop status  [<target>] --json            # 带 <target> → target snapshot；不带 → 中央 daemon 存活探测
 coder-loop activity <item|all|log>
-coder-loop logs    <target> --json [--kind K] [--type T] [--chain C] [--item ID] [--run RUN_ID] [--phase P] [--since TS] [--follow]
-coder-loop daemon  <up|down|status|start|stop|restart>
+coder-loop logs    --json [--kind K] [--type T] [--chain C] [--item ID] [--run RUN_ID] [--phase P] [--since TS] [--follow]
+coder-loop daemon  <up [--detach] | down>       # up 默认前台；--detach 才是真后台化（fork + unref + pid 文件）
 coder-loop chain   <create|list|status|stop|resume|delete|set-runner-model>
 coder-loop item    <add|batch-add|list|update|reorder|exits|exit-action>
-coder-loop queue   unblock <target> --issue <issue>
+coder-loop queue   unblock <target> --issue <issue> [--start-daemon]   # --start-daemon 顺带把中央 daemon spawn detached
+coder-loop context append <chain> --scope <chain|item|group> --body <text>
 coder-loop doctor  <target>
 ```
+
+历史上曾有的 `daemon start|stop|restart <target>` 与 `daemon status <target>` 四个 target-scoped 子命令已删除：`daemon start` 从不真 spawn（只是查 daemon.status）、`daemon stop` 只是 `chain stop` 别名、`daemon restart` 完全 no-op、`daemon status <target>` 与顶层 `status <target>` 重合。等价替代：
+
+| 想做的事 | 用这个 |
+|---|---|
+| 起中央 daemon | `coder-loop daemon up --detach`（或 `queue unblock ... --start-daemon` 顺带起） |
+| 停某 chain | `coder-loop chain stop <chain>` |
+| 重启 daemon | `coder-loop daemon down && coder-loop daemon up --detach` |
+| 查某 target 状态 | `coder-loop status <target> --json` |
+| 查中央 daemon 存活 | `coder-loop status --loop-data-root <dir> --json`（无 `<target>`） |
 
 `item exits` / `item exit-action` 是 agent 面（`--agent-run-id` / `--agent-phase` 必填），不是 operator 面。operator 常用运维流程见 `docs/operations.md`。
 

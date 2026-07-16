@@ -19,9 +19,9 @@
 | **选 actionable item** | 若 `state.current` 存在且其 status 在 preset 的 `statuses.continuable` 内，继续它；否则在队列里找首个 `continuable` item。`continuable` 外的所有 item 视为 terminal，引擎不动。 |
 | **按 phase 顺序 spawn agent** | 遍历 `preset.phases`：每个 phase 读 entry prompt 模板，按 `[phases.variables]` 表绑定变量替换 `{{KEY}}`，把渲染后的 prompt 传给当前 runner（`claude` / `codex` / `opencode`）。捕获 stdout/stderr 写入 `<logDir>/<runId>/<phase>/`，每个 phase spawn 完写 `status.json`。 |
 | **resume / 不丢工作** | spawn 中途崩溃，重启时根据 `state.current.phase` 跳到当前 phase 而非从头。 |
-| **daemon / chain 控制** | 新版运行期由 centralized daemon socket + chain/item state 控制；target start/stop/restart 通过 daemon API 解析 chain，而不是依赖 target-local sentinel 文件。 |
+| **daemon / chain 控制** | 新版运行期由 centralized daemon socket + chain/item state 控制；start / stop / delete 全部走 daemon（`daemon up --detach` / `daemon down`）与 chain 层（`chain stop|resume|delete`），不再依赖 target-local sentinel 文件。 |
 | **runtime 状态快照** | `coder-loop status <target> --json` 不 spawn agent，读取 preset、target 文件、central chain layout、queue、current、runner 与 process snapshot，供 operator / supervisor 做结构化判断。 |
-| **daemon 调度预演** | `coder-loop daemon start <target> --dry-run` 解析 target chain 与 central daemon 需求，但不启动 target run；这是 daemon 子命令自己的预演 flag。 |
+| **queue unblock 预演** | `coder-loop queue unblock <target> --issue <id> --dry-run [--start-daemon]` 解析 target chain 与 daemon 需求但不做 mutation；带 `--start-daemon` + `--dry-run` 则打印 daemon spawn plan 而不真起。历史上曾有 `daemon start <target> --dry-run` 做类似语义，随四个空壳子命令一并删除。 |
 
 引擎**不知道**：phase 数量、phase 名字、status 字面量（`queued / done / pending` 之类）、item id 字段名、已知变量 KEY（`{{REPO}}` / `{{ISSUE}}` 之类）、preset 之间的差异、GitHub。
 
