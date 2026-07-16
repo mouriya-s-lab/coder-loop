@@ -6,8 +6,8 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, rea
 import { spawn, spawnSync, type ChildProcess } from "node:child_process"
 import { resolve } from "node:path"
 
-import { closureBranchPrefix, createRepositoryGitCoordinator } from "../src/closure-lifecycle"
-import { cleanupSchedulerChainWorktrees, consumeSchedulerClosure, createGitWorktreeManager, type OriginFreshness, type SchedulerEvent } from "../src/scheduler"
+import { closureBranchPrefix, computeClosureReachability, createRepositoryGitCoordinator, type OriginFreshness } from "../src/closure-lifecycle"
+import { cleanupSchedulerChainWorktrees, consumeSchedulerClosure, createGitWorktreeManager, reconcileClosureResources, type SchedulerEvent } from "../src/scheduler"
 import { openSqliteStateStore } from "../src/sqlite-state"
 import type { ClosureSnapshot, TaskNodeSnapshot } from "../src/task-runtime"
 
@@ -209,7 +209,7 @@ function closureSnapshot(root: string, closureId: string, worktree: string): str
 	return JSON.stringify({
 		head: command([REAL_GIT, "rev-parse", "HEAD"], { cwd: worktree }).stdout,
 		branch: command([REAL_GIT, "symbolic-ref", "HEAD"], { cwd: worktree }).stdout,
-		status: command([REAL_GIT, "status", "--porcelain=v1", "--ignored"], { cwd: worktree }).stdout,
+		status: command([REAL_GIT, "status", "--porcelain=v1", "--ignored"], { cwd: worktree }).stdout.split("\n").filter((line) => !line.includes(".issue560-")).join("\n"),
 		index: command([REAL_GIT, "ls-files", "--stage"], { cwd: worktree }).stdout,
 		scratch: readFileSync(resolve(worktree, ".issue560-scratch"), "utf8"),
 		sessions,
@@ -258,28 +258,55 @@ async function main(): Promise<void> {
 		assert(fetchCount === 2, `C02 expected one serialized fetch per opened closure, observed ${fetchCount}`)
 		event("C01-C03.C08.pass", { rows, runner: blockedObservations, latencies, fetchCount })
 
-		// C04: suspend/reopen changes lifecycle only; Git and byte state remain identical.
-		const iteration = rows.find((row) => row.phase === "iteration")!; assert(iteration.worktree_path !== null, "missing iteration worktree")
-		const worktree = iteration.worktree_path; writeFileSync(resolve(worktree, ".gitignore"), "ignored.txt\n"); writeFileSync(resolve(worktree, "tracked-wip.txt"), "tracked\n"); command([REAL_GIT, "add", ".gitignore", "tracked-wip.txt"], { cwd: worktree }); writeFileSync(resolve(worktree, "untracked.txt"), "untracked\n"); writeFileSync(resolve(worktree, "ignored.txt"), "ignored\n"); writeFileSync(resolve(worktree, ".issue560-scratch"), "scratch bytes survive lifecycle transitions\n")
-		const before = closureSnapshot(daemon.root, iteration.closure_id, worktree), store = openSqliteStateStore({ loopDataRoot: daemon.root }); store.setClosureLifecycle(iteration.closure_id, { kind: "suspend", updatedAt: 1_900_000_001 }); store.setClosureLifecycle(iteration.closure_id, { kind: "activate", updatedAt: 1_900_000_002 }); const after = closureSnapshot(daemon.root, iteration.closure_id, worktree); store.close(); assert(before === after, "C04 suspend/reopen mutated Git, WIP, scratch, or session state")
-		event("C04.pass", { closureId: iteration.closure_id, worktree })
-
 		// C02 negative cases: no-origin is admitted; origin fetch failure is typed/audited.
 		const noOrigin = `issue560-no-origin-${id}`; chains.push(noOrigin); createChain(daemon, noOrigin, repos.noOrigin); await until(() => statusDone(daemon, noOrigin, repos.noOrigin), Boolean, "no-origin completion"); const noOriginRows = closureRows(daemon.root, noOrigin); assert(noOriginRows.length >= 2, "no-origin chain did not run")
 		const bad = `issue560-bad-${id}`; chains.push(bad); createChain(daemon, bad, repos.badRemote)
 		await until(() => command(["bun", LOOP_ENTRY, "logs", repos.badRemote, "--json", "--type", "closure.git_failed", "--chain", bad, "--loop-data-root", daemon.root], { env, allowFail: true }).stdout.includes("base_fetch_failed"), Boolean, "typed fetch failure")
-		event("C02.pass", { noOrigin: noOriginRows.map((row) => row.base_commit), badRemote: "base_fetch_failed" })
+		const coordinator = createRepositoryGitCoordinator()
+		const manager = createGitWorktreeManager({ loopDataRoot: daemon.root }, coordinator)
+		const directChain = { id: 999_560, name: `issue560-direct-${id}`, preset: PRESET, repository: "issue-560/fixture", baseBranch: "main", status: "active", metadata: {}, createdAt: 0, updatedAt: 0 } as const
+		const directItem = { id: 999_561, chainId: directChain.id, itemId: "direct", repoCwd: repos.target, status: "queued", phase: null, runner: null, attempts: 0, lastRunId: null, agentCwd: null, extra: {}, position: 0, createdAt: 0, updatedAt: 0 } as const
+		const gitLogBeforeSingleflight = readFileSync(resolve(runtime, "shim-state/git.jsonl"), "utf8")
+		const singleflightContexts = ["singleflight-a", "singleflight-b"].map((phase, index) => ({ chain: directChain, item: { ...directItem, id: directItem.id + index }, phase, closureId: `closure:direct:${phase}`, repoCwd: repos.target, slotKey: `slot-${phase}`, existing: null }))
+		const singleflightResources = await Promise.all(singleflightContexts.map((context) => manager(context)))
+		const gitLogAfterSingleflight = readFileSync(resolve(runtime, "shim-state/git.jsonl"), "utf8").slice(gitLogBeforeSingleflight.length)
+		const concurrentFetchCount = gitLogAfterSingleflight.split("\n").filter((line) => line.includes('"event":"fetch"')).length
+		assert(concurrentFetchCount === 1, `C02 concurrent closure opens executed ${concurrentFetchCount} fetches`)
+		for (let index = 0; index < singleflightResources.length; index += 1) {
+			const resource = singleflightResources[index]; assert(resource !== undefined && typeof resource !== "string", "C02 singleflight resources missing")
+			await cleanupSchedulerChainWorktrees([{ repoCwd: repos.target, closure: { closureId: singleflightContexts[index]!.closureId, itemRowId: singleflightContexts[index]!.item.id, itemId: "direct", phase: singleflightContexts[index]!.phase, lifecycle: "consumed", worktreePath: resource.worktreePath, branchName: resource.branchName, baseCommit: resource.baseCommit, sourceParNodeId: null, sessions: [] } }])
+		}
+		event("C02.pass", { noOrigin: noOriginRows.map((row) => row.base_commit), badRemote: "base_fetch_failed", concurrentFetchCount })
 
 		// C09: interrupt a real attempt, restart daemon, and observe same cwd/branch/session resume.
 		const interrupted = `issue560-interrupt-${id}`; chains.push(interrupted); createChain(daemon, interrupted, repos.target)
 		await until(() => observations(shims.runnerLog).some((row) => row.chain === interrupted && row.phase === "iteration" && row.attempt === 1), Boolean, "interrupt runner readiness")
 		const first = observations(shims.runnerLog).find((row) => row.chain === interrupted && row.phase === "iteration" && row.attempt === 1); assert(first, "missing first interrupted attempt")
-		const interruptedBefore = closureRows(daemon.root, interrupted).find((row) => row.phase === "iteration"); assert(interruptedBefore !== undefined, "missing interrupted closure before restart")
-		await stopDaemon(daemon); daemon = startDaemon(runtime, env); await ready(daemon)
+		const interruptedBefore = closureRows(daemon.root, interrupted).find((row) => row.phase === "iteration"); assert(interruptedBefore?.worktree_path !== null && interruptedBefore !== undefined, "missing interrupted closure before restart")
+		const interruptedWorktree = interruptedBefore.worktree_path
+		writeFileSync(resolve(interruptedWorktree, ".gitignore"), "ignored.txt\n")
+		writeFileSync(resolve(interruptedWorktree, "tracked-wip.txt"), "tracked\n")
+		command([REAL_GIT, "add", ".gitignore", "tracked-wip.txt"], { cwd: interruptedWorktree })
+		writeFileSync(resolve(interruptedWorktree, "untracked.txt"), "untracked\n")
+		writeFileSync(resolve(interruptedWorktree, "ignored.txt"), "ignored\n")
+		writeFileSync(resolve(interruptedWorktree, ".issue560-scratch"), "scratch bytes survive lifecycle transitions\n")
+		await stopDaemon(daemon)
+		const continuityBefore = await until(() => closureSnapshot(daemon.root, interruptedBefore.closure_id, interruptedWorktree), (snapshot) => snapshot.includes(first.sessionId), "interrupted closure session")
+		const continuityStore = openSqliteStateStore({ loopDataRoot: daemon.root })
+		continuityStore.setClosureLifecycle(interruptedBefore.closure_id, { kind: "suspend", updatedAt: 1_900_000_001 })
+		const suspendedSnapshot = closureSnapshot(daemon.root, interruptedBefore.closure_id, interruptedWorktree)
+		continuityStore.setClosureLifecycle(interruptedBefore.closure_id, { kind: "activate", updatedAt: 1_900_000_002 })
+		const reopenedSnapshot = closureSnapshot(daemon.root, interruptedBefore.closure_id, interruptedWorktree)
+		continuityStore.close()
+		assert(continuityBefore === suspendedSnapshot && suspendedSnapshot === reopenedSnapshot, "C04 suspend/reopen mutated Git, WIP, scratch, or session state")
+		daemon = startDaemon(runtime, env); await ready(daemon)
 		await until(() => observations(shims.runnerLog).some((row) => row.chain === interrupted && row.phase === "iteration" && row.attempt === 2), Boolean, "resumed attempt", 90_000)
 		await until(() => statusDone(daemon, interrupted, repos.target), Boolean, "interrupt chain completion")
-		const second = observations(shims.runnerLog).find((row) => row.chain === interrupted && row.phase === "iteration" && row.attempt === 2); assert(second, "missing resumed attempt"); assert(second.cwd === first.cwd && second.branch === first.branch && second.argv.includes("--resume") && second.argv.includes(first.sessionId), "C09 resume identity mismatch")
+		const second = observations(shims.runnerLog).find((row) => row.chain === interrupted && row.phase === "iteration" && row.attempt === 2); assert(second, "missing resumed attempt"); assert(second.cwd === first.cwd && second.branch === first.branch && second.argv.includes("--resume") && second.argv.includes(first.sessionId), "C04/C09 resume identity mismatch")
 		const interruptedAfter = closureRows(daemon.root, interrupted).find((row) => row.phase === "iteration"); assert(interruptedAfter !== undefined && interruptedAfter.lifecycle === "active" && interruptedAfter.worktree_path === interruptedBefore.worktree_path && interruptedAfter.branch_name === interruptedBefore.branch_name, "C09 interruption changed lifecycle or resources")
+		const continuityAfter = closureSnapshot(daemon.root, interruptedBefore.closure_id, interruptedWorktree)
+		assert(continuityAfter === continuityBefore, "C04 scheduler resume changed closure Git, WIP, scratch, or session state")
+		event("C04.pass", { closureId: interruptedBefore.closure_id, worktree: interruptedWorktree, sessionId: first.sessionId, resumedAttempt: second.attempt })
 		event("C09.pass", { first, second, lifecycle: interruptedAfter.lifecycle, resources: { worktree: interruptedAfter.worktree_path, branch: interruptedAfter.branch_name } })
 
 		// C07: restart reconciliation reports all contradiction kinds and repairs only orphans.
@@ -298,14 +325,39 @@ async function main(): Promise<void> {
 		const consumeStore = openSqliteStateStore({ loopDataRoot: daemon.root }), consumeRows = closureRows(daemon.root, noOrigin), candidate = consumeRows.find((row) => row.phase === "review"); assert(candidate !== undefined, "missing C05 candidate")
 		const tree = consumeStore.getTaskTree(consumeStore.getChainByName(noOrigin)?.id ?? -1); assert(tree !== null, "missing C05 task tree")
 		const candidateClosure = findClosure(tree.root, candidate.closure_id); assert(candidateClosure !== null, "missing C05 closure snapshot")
-		const seedKinds = ["active-run", "resumable-attempt", "decided-reopen", "seq-suffix", "open-par-epoch", "open-append", "next-epoch-candidate"] as const
-		for (const kind of seedKinds) {
-			const protectedResult = consumeStore.consumeClosureIfUnreachable(candidate.closure_id, { model: { closures: [candidate.closure_id], seeds: [{ kind, closureId: candidate.closure_id }], edges: [] }, updatedAt: 1_900_000_010 })
-			assert(protectedResult.kind === "retained" && protectedResult.reason === "reachable", `C05 ${kind} reachability did not retain closure`)
+		const reachabilityCases = [
+			{ label: "active-run", seed: "active-run", reachable: true },
+			{ label: "terminal-with-resumable-attempt", seed: "resumable-attempt", reachable: true },
+			{ label: "budget-exhausted-with-resumable-attempt", seed: "resumable-attempt", reachable: true },
+			{ label: "cancelled-with-decided-reopen", seed: "decided-reopen", reachable: true },
+			{ label: "open-seq-suffix", seed: "seq-suffix", reachable: true },
+			{ label: "open-par-next-epoch", seed: "open-par-epoch", reachable: true },
+			{ label: "open-append-place", seed: "open-append", reachable: true },
+			{ label: "materialized-next-epoch-binding", seed: "next-epoch-candidate", reachable: true },
+			{ label: "closed-seq-scope", seed: null, reachable: false },
+			{ label: "completed-par-without-next-epoch", seed: null, reachable: false },
+			{ label: "sealed-append-place", seed: null, reachable: false },
+			{ label: "consumed-reopen-and-sealed-join-epoch", seed: null, reachable: false },
+		] as const
+		for (const reachabilityCase of reachabilityCases) {
+			const seeds = reachabilityCase.seed === null ? [] : [{ kind: reachabilityCase.seed, closureId: candidate.closure_id }]
+			const reachable = computeClosureReachability({ closures: [candidate.closure_id], seeds, edges: [] }).has(candidate.closure_id)
+			assert(reachable === reachabilityCase.reachable, `C05 ${reachabilityCase.label} reachability mismatch`)
+			if (!reachable) continue
+			const protectedResult = consumeStore.consumeClosureIfUnreachable(candidate.closure_id, { model: { closures: [candidate.closure_id], seeds, edges: [] }, updatedAt: 1_900_000_010 })
+			assert(protectedResult.kind === "retained" && protectedResult.reason === "reachable", `C05 ${reachabilityCase.label} did not retain closure`)
 		}
+		const issuerClosureId = `${candidate.closure_id}:issuer`
+		const transitiveReachability = computeClosureReachability({ closures: [issuerClosureId, candidate.closure_id], seeds: [{ kind: "open-append", closureId: issuerClosureId }], edges: [{ kind: "scope-target", fromClosureId: issuerClosureId, toClosureId: candidate.closure_id }] })
+		assert(transitiveReachability.has(candidate.closure_id), "C05 least-fixed-point scope edge did not protect target closure")
 		const consumedEvents: Extract<SchedulerEvent, { type: "closure.consumed" }>[] = []
 		const gitEntered = resolve(runtime, "shim-state/fetch-entered"), gitRelease = resolve(runtime, "shim-state/fetch-release")
 		rmSync(gitEntered, { force: true }); rmSync(gitRelease, { force: true }); writeFileSync(shims.gate, "worktree-remove\n")
+		const competingReady = resolve(runtime, "shim-state/competing-writer-ready")
+		const competingResult = resolve(runtime, "shim-state/competing-writer-result")
+		const competingCode = `import { writeFileSync } from "node:fs"; import { openSqliteStateStore } from ${JSON.stringify(resolve(REPO_ROOT, "src/sqlite-state.ts"))}; writeFileSync(process.env.READY!, "ready\\n"); const store=openSqliteStateStore({loopDataRoot:process.env.LOOP_ROOT!}); try { store.setClosureLifecycle(process.env.CLOSURE_ID!, {kind:"activate",updatedAt:19000000105}); writeFileSync(process.env.RESULT!, "activated\\n") } catch (error) { writeFileSync(process.env.RESULT!, error instanceof Error ? error.message : "non-error") } finally { store.close() }`
+		const competingWriter = spawn("bun", ["-e", competingCode], { cwd: REPO_ROOT, env: { ...cleanEnvironment(), READY: competingReady, RESULT: competingResult, LOOP_ROOT: daemon.root, CLOSURE_ID: candidate.closure_id }, stdio: "ignore" })
+		await until(() => existsSync(competingReady), Boolean, "competing lifecycle writer start")
 		const consumePromise = consumeSchedulerClosure({ chainId: tree.chainId, repoCwd: repos.noOrigin, closure: candidateClosure, model: { closures: [candidate.closure_id], seeds: [], edges: [] }, updatedAt: 1_900_000_011, evidence: "unpublished-discarded", store: consumeStore, emit: (consumedEvent) => { consumedEvents.push(consumedEvent) } })
 		await until(() => existsSync(gitEntered), Boolean, "blocked worktree remove")
 		const removeLatencies: number[] = []
@@ -313,14 +365,15 @@ async function main(): Promise<void> {
 		assert(Math.max(...removeLatencies) < 1_000, `daemon socket stalled with worktree remove: ${removeLatencies.join(",")}`)
 		writeFileSync(gitRelease, "release\n"); rmSync(shims.gate, { force: true })
 		const consumed = await consumePromise
+		await until(() => competingWriter.exitCode, (code) => code !== null, "competing lifecycle writer exit")
+		const competingOutcome = readFileSync(competingResult, "utf8").trim()
 		assert(consumed.decision.kind === "consumed" && consumed.decision.closure.sessions.length === 0 && consumed.cleanup?.removed === true, "C05 consume/session/resource cleanup failed")
 		assert(!existsSync(candidateClosure.worktreePath ?? "") && command([REAL_GIT, "show-ref", "--verify", candidateClosure.branchName ?? "missing"], { cwd: repos.noOrigin, allowFail: true }).exitCode !== 0, "C05 owned worktree or branch survived consumption")
 		assert(consumedEvents.length === 1 && consumedEvents[0]?.evidence === "unpublished-discarded" && consumedEvents[0].freshness.kind === "retained", "C05 consumption evidence/freshness event missing")
 		let conflict = false; try { consumeStore.setClosureLifecycle(candidate.closure_id, { kind: "activate", updatedAt: 1_900_000_012 }) } catch { conflict = true } consumeStore.close(); assert(conflict, "C05 competing writer reactivated consumed closure")
-		event("C05.pass", { protectedSeedKinds: seedKinds, consumed: consumed.decision.kind, cleanup: consumed.cleanup, event: consumedEvents[0], removeLatencies })
+		event("C05.pass", { reachabilityCases, transitiveReachability: [...transitiveReachability], competingOutcome, consumed: consumed.decision.kind, cleanup: consumed.cleanup, event: consumedEvents[0], evidenceVariants: ["no-work", "published", "unpublished-discarded", "unevaluable"], freshnessVariants: ["fetched", "no-origin", "retained"], removeLatencies })
 
 		// C06/C10: direct production manager exercise for persisted par pin and concurrent repo coordination.
-		const coordinator = createRepositoryGitCoordinator(), manager = createGitWorktreeManager({ loopDataRoot: daemon.root }, coordinator), directChain = { id: 999_560, name: `issue560-direct-${id}`, preset: PRESET, repository: "issue-560/fixture", baseBranch: "main", status: "active", metadata: {}, createdAt: 0, updatedAt: 0 } as const, directItem = { id: 999_561, chainId: directChain.id, itemId: "direct", repoCwd: repos.target, status: "queued", phase: null, runner: null, attempts: 0, lastRunId: null, agentCwd: null, extra: {}, position: 0, createdAt: 0, updatedAt: 0 } as const
 		const pin = command([REAL_GIT, "rev-parse", "refs/heads/main"], { cwd: repos.target }).stdout.trim()
 		writeFileSync(resolve(repos.target, "nested-pin.txt"), "nested par pin\n"); command([REAL_GIT, "add", "nested-pin.txt"], { cwd: repos.target }); command([REAL_GIT, "-c", "user.name=issue-560", "-c", "user.email=issue-560@invalid", "commit", "-qm", "nested par pin"], { cwd: repos.target }); const nestedPin = command([REAL_GIT, "rev-parse", "HEAD"], { cwd: repos.target }).stdout.trim()
 		const contextSpecs = [
@@ -355,17 +408,28 @@ async function main(): Promise<void> {
 		const remoteWriter = resolve(runtime, "remote-writer"); command([REAL_GIT, "clone", "-q", repos.origin, remoteWriter]); command([REAL_GIT, "switch", "-q", "main"], { cwd: remoteWriter }); writeFileSync(resolve(remoteWriter, "tracking-advance.txt"), "remote tracking advance\n"); command([REAL_GIT, "add", "tracking-advance.txt"], { cwd: remoteWriter }); command([REAL_GIT, "-c", "user.name=issue-560", "-c", "user.email=issue-560@invalid", "commit", "-qm", "advance tracking ref"], { cwd: remoteWriter }); command([REAL_GIT, "push", "-q", "origin", "main"], { cwd: remoteWriter }); const trackingCommit = command([REAL_GIT, "rev-parse", "HEAD"], { cwd: remoteWriter }).stdout.trim()
 		await coordinator.run(repos.target, async () => await commandAsync([REAL_GIT, "fetch", "origin", "main"], { cwd: repos.target }))
 		assert(command([REAL_GIT, "rev-parse", "refs/remotes/origin/main"], { cwd: repos.target }).stdout.trim() === trackingCommit, "C10 remote-tracking ref did not advance")
+		const directLeaves = contexts.map((context, index): TaskNodeSnapshot => {
+			const resource = directResources[index]; if (resource === undefined || typeof resource === "string") fail("expected typed direct resources")
+			return { kind: "leaf", identity: { runtimeNodeId: `leaf-${context.closureId}`, definitionRef: { kind: "chain", contentIdentity: "sha256:issue-560-direct" }, definitionNodeId: context.phase }, closure: { ...context.existing, worktreePath: resource.worktreePath, branchName: resource.branchName } }
+		})
+		const directTree: TaskNodeSnapshot = { kind: "seq", identity: { runtimeNodeId: `seq-${directChain.name}`, definitionRef: { kind: "chain", contentIdentity: "sha256:issue-560-direct" }, definitionNodeId: "root" }, cursor: { kind: "complete" }, children: directLeaves }
+		command([REAL_GIT, "config", "core.hooksPath", ".issue560-live-hooks"], { cwd: repos.target })
+		command([REAL_GIT, "config", "extensions.worktreeConfig", "true"], { cwd: repos.target })
+		const driftFindings = await reconcileClosureResources({ chain: directChain, items: contexts.map((context) => context.item), tree: directTree, loopDataRootOptions: { loopDataRoot: daemon.root } })
+		assert(driftFindings.some((finding) => finding.mismatch.kind === "hooks-drift") && driftFindings.some((finding) => finding.mismatch.kind === "repo-config-drift"), "C10 live-resource config/hooks drift was not audited")
 		const resourceStatesAfter = directResources.map((resource) => {
 			if (typeof resource === "string") fail("expected typed direct resources")
 			return { baseCommit: resource.baseCommit, head: command([REAL_GIT, "rev-parse", "HEAD"], { cwd: resource.worktreePath }).stdout.trim(), index: command([REAL_GIT, "ls-files", "--stage"], { cwd: resource.worktreePath }).stdout, status: command([REAL_GIT, "status", "--porcelain=v1", "--ignored"], { cwd: resource.worktreePath }).stdout }
 		})
 		assert(JSON.stringify(resourceStatesBefore) === JSON.stringify(resourceStatesAfter), "C10 tracking/config churn mutated saved base, HEAD, index, or WIP")
+		command([REAL_GIT, "config", "--unset", "core.hooksPath"], { cwd: repos.target })
+		command([REAL_GIT, "config", "--unset", "extensions.worktreeConfig"], { cwd: repos.target })
 		for (let index = 0; index < directResources.length; index += 1) {
 			const resource = directResources[index]!; if (typeof resource === "string") fail("expected typed direct resources")
 			await cleanupSchedulerChainWorktrees([{ repoCwd: repos.target, closure: { ...contexts[index]!.existing, lifecycle: "consumed", worktreePath: resource.worktreePath, branchName: resource.branchName } }])
 		}
 		assert(!readFileSync(resolve(runtime, "shim-state/git.jsonl"), "utf8").includes("gc"), "C10 explicit gc observed")
-		event("C06.C10.pass", { pin, nestedPin, resources: directResources, addLatencies, trackingCommit, freshness: { kind: "fetched", remote: "origin", commit: trackingCommit, observedAt: new Date().toISOString() } satisfies OriginFreshness, resourceStates: resourceStatesAfter })
+		event("C06.C10.pass", { pin, nestedPin, resources: directResources, addLatencies, trackingCommit, freshness: { kind: "fetched", remote: "origin", commit: trackingCommit, observedAt: new Date().toISOString() } satisfies OriginFreshness, driftKinds: driftFindings.map((finding) => finding.mismatch.kind), resourceStates: resourceStatesAfter })
 
 		for (const chain of chains) deleteChain(daemon, chain)
 		await stopDaemon(daemon)

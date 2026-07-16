@@ -77,3 +77,25 @@ test("repository Git coordinator serializes operations for one repo but not anot
 	expect(order).toEqual(["a1-start", "b1", "a1-end", "a2"])
 	await rm(TEST_ROOT, { recursive: true, force: true })
 })
+
+test("repository Git coordinator singleflights one keyed fetch per repo", async () => {
+	const coordinator = createRepositoryGitCoordinator()
+	let calls = 0
+	let release!: () => void
+	const gate = new Promise<void>((resolveGate) => { release = resolveGate })
+	const fetched = { commit: "fetched-base", freshness: { kind: "fetched", remote: "origin", commit: "fetched-base", observedAt: "2026-07-16T00:00:00.000Z" } } as const
+	const operation = async () => {
+		calls += 1
+		await gate
+		return fetched
+	}
+	const first = coordinator.singleflight("/repo-a", "fetch:main", operation)
+	const second = coordinator.singleflight("/repo-a", "fetch:main", operation)
+	const releaseBase = { commit: "release-base", freshness: { kind: "retained", commit: "release-base" } } as const
+	const otherKey = coordinator.singleflight("/repo-a", "fetch:release", async () => releaseBase)
+	expect(calls).toBe(1)
+	expect(await otherKey).toEqual(releaseBase)
+	release()
+	expect(await Promise.all([first, second])).toEqual([fetched, fetched])
+	expect(calls).toBe(1)
+})

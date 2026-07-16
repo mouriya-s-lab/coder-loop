@@ -73,7 +73,9 @@ import {
 	createRepositoryGitCoordinator,
 	persistedParPin,
 	type ClosureReachabilityModel,
+	type OriginFreshness,
 	type RepositoryGitCoordinator,
+	type RepositoryGitSingleflightResult,
 } from "./closure-lifecycle"
 import type { ClosureSnapshot, TaskNodeSnapshot } from "./task-runtime"
 
@@ -223,11 +225,6 @@ export type SchedulerWorktreeContext = {
 	slotKey: string
 	existing: ClosureSnapshot | null
 }
-
-export type OriginFreshness =
-	| { kind: "fetched"; remote: "origin"; commit: string; observedAt: string }
-	| { kind: "no-origin"; availability: "unavailable"; commit: string }
-	| { kind: "retained"; commit: string }
 
 export type SchedulerClosureResources = {
 	worktreePath: string
@@ -878,7 +875,7 @@ export function createGitWorktreeManager(
 	options: LoopDataRootOptions = {},
 	coordinator: RepositoryGitCoordinator = repositoryGitCoordinator,
 ): SchedulerWorktreeManager {
-	return async (context) => coordinator.run(context.repoCwd, async () => {
+	return async (context) => {
 		const loopDataRoot = resolveLoopDataPaths(options).root
 		const expectedWorktreePath = closureWorktreePath(loopDataRoot, context.chain.name, context.repoCwd, context.closureId)
 		const expectedBranchName = closureBranchName(context.chain.name, context.closureId)
@@ -891,27 +888,35 @@ export function createGitWorktreeManager(
 		const branchName = context.existing?.branchName === expectedBranchName
 			? context.existing.branchName
 			: expectedBranchName
-		await mkdir(dirname(worktreePath), { recursive: true })
-		if (await gitWorktreeListIncludesPath(context.repoCwd, worktreePath)) {
-			if (!existsSync(worktreePath)) await git(context.repoCwd, ["worktree", "prune"])
-			else {
-				const head = await requireGitCommit(worktreePath, "HEAD", "closure_head_unavailable")
-				return { worktreePath, branchName, baseCommit: context.existing?.baseCommit ?? head, freshness: { kind: "retained", commit: head } }
-			}
-		}
-
 		const parPin = persistedParPin(context.existing)
-		const base = parPin === null
-			? await resolveClosureBase(context.repoCwd, context.chain.baseBranch)
-			: { commit: parPin, freshness: { kind: "retained", commit: parPin } as const }
-		const shortBranch = branchName.replace(/^refs\/heads\//, "")
-		const branchExists = (await git(context.repoCwd, ["show-ref", "--verify", "--quiet", branchName])).exitCode === 0
-		const result = await git(context.repoCwd, branchExists
-			? ["worktree", "add", worktreePath, branchName]
-			: ["worktree", "add", "-b", shortBranch, worktreePath, base.commit])
-		if (result.exitCode !== 0) throw new SchedulerError("worktree_create_failed", `failed to create closure worktree ${context.closureId} at ${worktreePath}: ${result.stderr}`)
-		return { worktreePath, branchName, baseCommit: base.commit, freshness: base.freshness }
-	})
+		const retainedBase = context.existing?.worktreePath === expectedWorktreePath && context.existing.branchName === expectedBranchName
+			? { commit: context.existing.baseCommit, freshness: { kind: "retained", commit: context.existing.baseCommit } as const }
+			: null
+		const base: RepositoryGitSingleflightResult = parPin !== null
+			? { commit: parPin, freshness: { kind: "retained", commit: parPin } }
+			: retainedBase ?? await coordinator.singleflight(
+				context.repoCwd,
+				`resolve-base:${context.chain.baseBranch}`,
+				async () => await coordinator.run(context.repoCwd, async () => await resolveClosureBase(context.repoCwd, context.chain.baseBranch)),
+			)
+		return await coordinator.run(context.repoCwd, async () => {
+			await mkdir(dirname(worktreePath), { recursive: true })
+			if (await gitWorktreeListIncludesPath(context.repoCwd, worktreePath)) {
+				if (!existsSync(worktreePath)) await git(context.repoCwd, ["worktree", "prune"])
+				else {
+					const head = await requireGitCommit(worktreePath, "HEAD", "closure_head_unavailable")
+					return { worktreePath, branchName, baseCommit: context.existing?.baseCommit ?? head, freshness: { kind: "retained", commit: head } }
+				}
+			}
+			const shortBranch = branchName.replace(/^refs\/heads\//, "")
+			const branchExists = (await git(context.repoCwd, ["show-ref", "--verify", "--quiet", branchName])).exitCode === 0
+			const result = await git(context.repoCwd, branchExists
+				? ["worktree", "add", worktreePath, branchName]
+				: ["worktree", "add", "-b", shortBranch, worktreePath, base.commit])
+			if (result.exitCode !== 0) throw new SchedulerError("worktree_create_failed", `failed to create closure worktree ${context.closureId} at ${worktreePath}: ${result.stderr}`)
+			return { worktreePath, branchName, baseCommit: base.commit, freshness: base.freshness }
+		})
+	}
 }
 
 export type SchedulerChainWorktreeCleanup = {
@@ -932,13 +937,21 @@ export type ClosureReconciliationMismatch =
 	| { kind: "hooks-drift"; hooksPath: string; repaired: false }
 	| { kind: "repo-config-drift"; key: "extensions.worktreeConfig"; value: string; repaired: false }
 
-export async function reconcileClosureResources(input: {
+export type ReconcileClosureResourcesInput = {
 	chain: ChainRecord
 	items: readonly ItemRecord[]
 	tree: TaskNodeSnapshot | null
 	loopDataRootOptions?: LoopDataRootOptions
-}): Promise<{ closureId: string | null; repoCwd: string; mismatch: ClosureReconciliationMismatch }[]> {
-	const findings: { closureId: string | null; repoCwd: string; mismatch: ClosureReconciliationMismatch }[] = []
+}
+
+export type ClosureReconciliationFinding = {
+	closureId: string | null
+	repoCwd: string
+	mismatch: ClosureReconciliationMismatch
+}
+
+export async function reconcileClosureResources(input: ReconcileClosureResourcesInput): Promise<ClosureReconciliationFinding[]> {
+	const findings: ClosureReconciliationFinding[] = []
 	const items = new Map(input.items.map((item) => [item.id, item]))
 	const closures = collectClosures(input.tree)
 	const registeredPaths = new Set(closures.flatMap((closure) => closure.worktreePath === null ? [] : [closure.worktreePath]))
@@ -2857,7 +2870,7 @@ async function writeSchedulerRunStatus(
 	}, null, "\t")}\n`)
 }
 
-async function resolveClosureBase(repoCwd: string, baseBranch: string): Promise<{ commit: string; freshness: OriginFreshness }> {
+async function resolveClosureBase(repoCwd: string, baseBranch: string): Promise<RepositoryGitSingleflightResult> {
 	const origin = await git(repoCwd, ["remote", "get-url", "origin"])
 	if (origin.exitCode === 0) {
 		const fetched = await git(repoCwd, ["fetch", "--no-tags", "origin", baseBranch])

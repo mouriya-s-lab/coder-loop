@@ -58,16 +58,33 @@ export function closureBranchPrefix(chainName: string): string {
 	return `refs/heads/coder-loop/closures/${safeComponent(chainName)}/`
 }
 
-export function persistedParPin(closure: { sourceParNodeId: string | null; baseCommit: string } | null): string | null {
+export type PersistedParPinSource = {
+	sourceParNodeId: string | null
+	baseCommit: string
+}
+
+export type OriginFreshness =
+	| { kind: "fetched"; remote: "origin"; commit: string; observedAt: string }
+	| { kind: "no-origin"; availability: "unavailable"; commit: string }
+	| { kind: "retained"; commit: string }
+
+export type RepositoryGitSingleflightResult = {
+	commit: string
+	freshness: OriginFreshness
+}
+
+export function persistedParPin(closure: PersistedParPinSource | null): string | null {
 	return closure?.sourceParNodeId === null || closure === null ? null : closure.baseCommit
 }
 
 export type RepositoryGitCoordinator = {
 	run: <T>(repoCwd: string, operation: () => Promise<T>) => Promise<T>
+	singleflight: (repoCwd: string, operationKey: string, operation: () => Promise<RepositoryGitSingleflightResult>) => Promise<RepositoryGitSingleflightResult>
 }
 
 export function createRepositoryGitCoordinator(): RepositoryGitCoordinator {
 	const tails = new Map<string, Promise<void>>()
+	const flights = new Map<string, Promise<RepositoryGitSingleflightResult>>()
 	return {
 		run: async <T>(repoCwd: string, operation: () => Promise<T>): Promise<T> => {
 			const previous = tails.get(repoCwd) ?? Promise.resolve()
@@ -81,6 +98,16 @@ export function createRepositoryGitCoordinator(): RepositoryGitCoordinator {
 				release()
 				if (tails.get(repoCwd) === current) tails.delete(repoCwd)
 			}
+		},
+		singleflight: async (repoCwd, operationKey, operation) => {
+			const key = `${repoCwd}\u0000${operationKey}`
+			const existing = flights.get(key)
+			if (existing !== undefined) return await existing
+			const flight = operation().finally(() => {
+				if (flights.get(key) === flight) flights.delete(key)
+			})
+			flights.set(key, flight)
+			return await flight
 		},
 	}
 }
