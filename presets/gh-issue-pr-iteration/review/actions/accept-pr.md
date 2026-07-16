@@ -28,11 +28,16 @@ runtime record: <kind>, conclusion verified
 ## 缺失汇总
 none
 
+## 范围外根因（不入本 PR 账单）
+- <defect groups from the diff-audit `Out-of-scope roots` section: mechanism, provenance
+  (base-owned / sibling-issue-owned / engine-level), complete sites, evidence — a routing
+  record for the operator; entries here do not block acceptance — or `none`>
+
 ## Skipped checks
 - <check → reason — or `none`>
 ```
 
-An acceptance whose 缺失汇总 is not `none` is not an acceptance — go back to the retry action.
+An acceptance whose 缺失汇总 is not `none` is not an acceptance — go back to the retry action. A non-empty `范围外根因` section is compatible with acceptance: those defects are not this PR's debt, and dropping them from the report would discard the only durable record the operator can route from.
 
 2. In the same comment, publish the machine-readable verdict per `{{PRESET_ROOT}}/common/packets.md` — a fenced json block labeled `coder-loop:review-verdict`:
 

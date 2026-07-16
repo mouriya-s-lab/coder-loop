@@ -33,7 +33,16 @@ From your dispatch message: `ISSUE`, `REPO`, `ISSUE_PR`, `AGENT_CWD` (work there
    3. **Convention violations** — the changed code breaks the target project's written conventions (target `CLAUDE.md`, workflow file) or is inconsistent with the immediately surrounding code (naming, error handling, typing idiom). Cite the convention source or the neighboring counter-example.
    4. **Structural defects in the change** — dead code the change introduces, duplicated logic within the diff, an abstraction the diff adds but uses once. Within the diff only.
 
-   The no-divergence rule binds every 6b finding: nothing about code the diff does not touch *beyond what 6a's issue-named patterns already authorize* (a pre-existing bug you trip over goes as one line in Problems marked `out-of-scope observation`, never as a finding); no alternative-design proposals; no improvement ideas beyond the issue's design; no new requirements the issue and project conventions do not state. A finding that cannot cite its anchor does not go in the report.
+   The no-divergence rule binds what a 6b finding may **demand**, never what you may read or reason about: a finding that blocks this PR must sit inside the issue's authorized scope and carry its anchor. No alternative-design proposals; no improvement ideas beyond the issue's design; no new requirements the issue and project conventions do not state. A finding that cannot cite its anchor does not go in the report. A pre-existing bug you trip over that no 6c mechanism ties to a 6b finding goes as one line in Problems marked `out-of-scope observation`.
+
+   ### 6c. Root cause, provenance, and class sweep (mandatory for every 6b finding)
+
+   A 6b finding is a symptom. Before it enters the report, establish where it comes from and what else the same cause produces. Reading anywhere in the tree, the base, and history is authorized for this analysis — only the demand side stays scope-bound.
+
+   1. **Provenance** — classify from evidence (read the base side; never assert from memory): `diff-introduced` (the defect is created by base→head lines), `pre-existing` (the producing mechanism already exists at base; the diff touches or exposes it), `parallel-path` (one manifestation of a mechanism shared with code paths the diff does not touch). Record `unclear` after a real attempt rather than guessing.
+   2. **Mechanism** — one sentence naming the structural fact that produces the defect, anchored to sites (e.g. "chain-complete execution duplicates the item-path machinery instead of sharing it"). Restating the symptom ("the code at X is wrong") is not a mechanism; distinct findings sharing one cause share one mechanism row.
+   3. **Class sweep** — when the mechanism predictably produces sibling defects elsewhere in the head tree, enumerate the **complete** sibling site set now, in this report, in one shot. The sweep is bounded to that one mechanism — it is not license for open-ended tree review. A mechanism reported with a knowingly partial site list is a step defect.
+   4. **Routing** — mechanism rooted inside the issue's scope: the finding group stays in Code findings and the fix target is the mechanism with its complete site set, never one site per round. Mechanism rooted outside the issue's scope (base-owned, sibling-issue-owned, engine/contract-level): the whole group moves to `## Out-of-scope roots` with its evidence — it is routing input for the orchestrator and must not be billed to this PR.
 7. **Summarize the footprint.** Describe the change footprint factually: surfaces touched, nature of the change per surface, 3–8 lines. The orchestrator compares this against the iteration's declared intent — you describe; you do not judge whether any mismatch matters, and no severity labels ("minor", "cosmetic") appear anywhere in the report: raw findings only.
 
 ## Report
@@ -69,11 +78,22 @@ Test-collection changes (config/glob/skip-marker/CI): <list or `none`>
 (or a single row `none | - | - | - | - | -` only after confirming the marker declares no pattern target)
 
 ## Code findings (anchored to the issue's design)
-| # | Category | Location | Finding | Anchor |
-|---|---|---|---|---|
-| <n> | logic / design-deviation / convention / structure | <file:line> | <concrete defect> | <failure path / issue sentence quote / convention source / diff evidence> |
+| # | Category | Location | Finding | Anchor | Mechanism |
+|---|---|---|---|---|---|
+| <n> | logic / design-deviation / convention / structure | <file:line> | <concrete defect> | <failure path / issue sentence quote / convention source / diff evidence> | <m#> |
 
-(or a single row `none | - | - | - | -` after actually reading the changed code)
+(or a single row `none | - | - | - | - | -` after actually reading the changed code)
+
+## Root-cause mechanisms
+| # | Mechanism (one sentence) | Provenance | Complete site set | Affects |
+|---|---|---|---|---|
+| <m#> | <structural fact producing the defects> | diff-introduced / pre-existing / parallel-path / unclear | <every file:line the mechanism produces, from the 6c sweep> | <surfaces/behaviors downstream> |
+
+(one row per distinct mechanism; or a single row `none | - | - | - | -` when 6b found nothing)
+
+## Out-of-scope roots
+<defect groups whose root mechanism lies outside the issue's scope: mechanism, provenance,
+complete sites, evidence — routing input for the orchestrator, never billed to this PR — or `none`>
 
 ## Change footprint (factual)
 <surfaces touched and the nature of each change, 3-8 lines, no quality judgments>
@@ -85,12 +105,13 @@ processes started / files written (for the cleanup ledger)>
 
 ## Acceptance
 
-Reject the report (send back the gap list) unless it contains all of: `Refs audited` with both SHAs; `Scope mapping` table covering **every** changed file; `Hygiene findings`; `Test changes in the diff`; `Issue-named pattern coverage` table with one row per declared pattern carrying verbatim pattern, explicit scope, base/head, criterion, complete in-scope site count and sites; `Code findings`; `Change footprint`; `Problems`. A report that paraphrases the PR description instead of auditing the diff is not a diff audit — send it back.
+Reject the report (send back the gap list) unless it contains all of: `Refs audited` with both SHAs; `Scope mapping` table covering **every** changed file; `Hygiene findings`; `Test changes in the diff`; `Issue-named pattern coverage` table with one row per declared pattern carrying verbatim pattern, explicit scope, base/head, criterion, complete in-scope site count and sites; `Code findings`; `Root-cause mechanisms`; `Out-of-scope roots`; `Change footprint`; `Problems`. A report that paraphrases the PR description instead of auditing the diff is not a diff audit — send it back.
 
 - **Unmapped files** → scope violation finding. An unmapped file is excusable only when the task intent or marker deliverable explicitly covers it.
 - **Hygiene findings** → any staged runtime artifact / scheduling state / run log is a hard retry finding.
 - **Test changes** → non-empty enumeration not authorized by the marker Test delta → test-weakening trigger of `{{PRESET_ROOT}}/quality/honesty.md`. Test-collection changes that widen or narrow the runnable set without marker Test delta authorization are the same trigger — flag them in the retry. Apply the same file's stale-baseline exception to pure count drift explained by base movement.
 - **Issue-named pattern coverage** → missing/unknown/conflicting scope is a contract error. For `changed`, only complete base→head changed-line sites participate; for `whole-tree`, every head-tree site participates. Every in-scope row whose Sites > 0 is a retry finding and must cite all sites in one shot.
-- **Code findings** → verdict inputs only when properly anchored: a logic finding must carry a traceable failure path; a design-deviation finding must quote the issue sentence; a convention finding must cite the source. Anchored findings route to retry with the anchor quoted. Discard alternative-design taste, improvement ideas beyond issue design, or code the diff does not touch and no 6a pattern covers.
+- **Code findings** → verdict inputs only when properly anchored: a logic finding must carry a traceable failure path; a design-deviation finding must quote the issue sentence; a convention finding must cite the source. Anchored findings route to retry with the anchor quoted. Discard alternative-design taste, improvement ideas beyond issue design, or code the diff does not touch that neither a 6a pattern nor a 6c mechanism sweep covers.
+- **Root-cause mechanisms** → every code finding must reference a mechanism row; provenance asserted without base-side evidence, a mechanism that merely restates its symptom, or a knowingly partial sibling enumeration → send back. In-scope-rooted mechanisms route to retry as one fix per mechanism citing the complete site set. Out-of-scope-rooted groups belong in `Out-of-scope roots` and are never retry requirements for this PR — misrouting in either direction → send back.
 - **Change footprint** feeds your caveat-honesty judgment: compare it against the iteration's declared `Intent (run …)` blocks for intent-action mismatch.
 - Severity-downgrading language ("minor", "cosmetic") anywhere in the report → step defect, send back.
