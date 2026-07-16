@@ -21,6 +21,7 @@ import {
 	selectRunnerForPhase,
 	type AgentRunnerKind,
 	type AgentRunnerSelection,
+	type CompiledTaskModel,
 	type JsonObject,
 	type JsonValue,
 	type Preset,
@@ -182,7 +183,7 @@ export type SchedulerState = {
 	slots: Map<string, SchedulerSlot>
 	finalizingItemStatuses: Map<number, InternalStatus>
 	finalizingChainIds: Set<number>
-	pendingCloseHandlers: Set<Promise<unknown>>
+	pendingCloseHandlers: Set<Promise<SchedulerCompletedRun>>
 	recycleTriggers: Map<string, SchedulerRecycleTrigger>
 	lifecycleEventPersistenceFailures: SchedulerLifecycleEventPersistenceFailure[]
 	// #478: account-level rate-limit cooldown. The scheduler close handler arms this
@@ -210,12 +211,14 @@ export type SchedulerStore = Pick<
 	| "getItem"
 	| "updateItem"
 	| "setItemSessionId"
+	| "getItemSessionId"
 	| "recordRun"
 	| "getRunByRunId"
 	| "updateRunExtra"
 	| "completeRun"
 	| "setCurrentRun"
 	| "getCurrentRun"
+	| "listCurrentRuns"
 	| "clearCurrentRun"
 >
 
@@ -331,7 +334,7 @@ export type SchedulerPhaseRunnerSelectionForItemResolver = (chain: ChainRecord, 
 
 export type SchedulerLoadedPreset = {
 	presetDir: string
-	preset: Preset
+	preset: CompiledTaskModel
 }
 
 export type SchedulerPresetResolver = (chain: ChainRecord) => SchedulerLoadedPreset | Promise<SchedulerLoadedPreset>
@@ -943,6 +946,10 @@ export function schedulerSlotWorktreePath(chain: ChainRecord, repoCwd: string, o
 	return resolve(chainPaths.chainRoot, "worktrees", `${repoLabel}-${repoHash}`)
 }
 
+function schedulerSlotBranchName(chain: ChainRecord, repoCwd: string): string {
+	return `coder-loop/${safeGitRefComponent(chain.name)}-${createHash("sha256").update(repoCwd).digest("hex").slice(0, 12)}`
+}
+
 export function createGitWorktreeManager(options: LoopDataRootOptions = {}): SchedulerWorktreeManager {
 	return async ({ chain, repoCwd }) => {
 		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, options)
@@ -954,7 +961,7 @@ export function createGitWorktreeManager(options: LoopDataRootOptions = {}): Sch
 			git(repoCwd, ["worktree", "prune"])
 		}
 
-		const branchName = `coder-loop/${safeGitRefComponent(chain.name)}-${createHash("sha256").update(repoCwd).digest("hex").slice(0, 12)}`
+		const branchName = schedulerSlotBranchName(chain, repoCwd)
 		const startRef = chooseWorktreeStartRef(repoCwd, chain.baseBranch)
 		let result = git(repoCwd, ["worktree", "add", "-B", branchName, worktreePath, startRef])
 		if (result.exitCode !== 0 && removeStaleSlotBranchWorktree(repoCwd, result.stderr)) {
@@ -1048,7 +1055,7 @@ export function listActiveRuns(state: SchedulerState): SchedulerActiveRun[] {
 	return [...state.slots.values()].flatMap((slot) => (slot.activeRun === null ? [] : [slot.activeRun]))
 }
 
-export function listPendingCloseHandlers(state: SchedulerState): Promise<unknown>[] {
+export function listPendingCloseHandlers(state: SchedulerState): Promise<SchedulerCompletedRun>[] {
 	return [...state.pendingCloseHandlers]
 }
 
@@ -1089,7 +1096,15 @@ async function spawnSchedulerRun(
 		const runnerDomain = runnerExecutionDomain(runner.kind)
 		worktreePath = worktreePath ?? await worktreeManager({ chain, repoCwd: item.repoCwd, slotKey: slot.key })
 		slot.worktreePath = worktreePath
-		const resumeDecision = resumeDecisionForItem(item, phase, runner.kind)
+		const baseCommitResult = git(worktreePath, ["rev-parse", "HEAD"])
+		const branchName = schedulerSlotBranchName(chain, item.repoCwd)
+
+		const loadedPreset = origin.kind === "chain-complete"
+			? await schedulerLoadedPreset(options, chain)
+			: await schedulerLoadedPresetForItem(options, chain, item)
+		const definitionContentIdentity = await presetExecutionContentIdentity(loadedPreset)
+		const persistedSessionId = options.store.getItemSessionId(item.id, { phase, runner: runner.kind })
+		const resumeDecision: ResumeDecision = persistedSessionId === null ? freshResume() : { kind: "resume", sessionId: persistedSessionId }
 		const startsAttempt = origin.kind === "item" && phase === origin.phasePlan.firstPhase && resumeDecision.kind === "fresh"
 		runId = options.runIdFactory?.({ chain, item, phase }) ?? makeRunId(item.id, phase)
 		startedAt = nowSeconds(options)
@@ -1104,6 +1119,14 @@ async function spawnSchedulerRun(
 				slotKey: slot.key,
 				repoCwd: item.repoCwd,
 				worktreePath,
+				...(baseCommitResult.exitCode === 0 && baseCommitResult.stdout !== "" ? { baseCommit: baseCommitResult.stdout } : {}),
+				branchName,
+				definitionKind: "preset",
+				definitionContentIdentity,
+				definitionPhases: loadedPreset.preset.tasks.children.map((phaseTree) => ({
+					phase: phaseTree.phase,
+					definitionNodeId: phaseTree.children[0].identity,
+				})),
 				startStatus: item.status,
 				startStatusUpdatedAt: item.statusUpdatedAt,
 				schedulerRunOrigin: origin.kind,
@@ -1154,9 +1177,6 @@ async function spawnSchedulerRun(
 			options.store.updateItem(item.id, spawnUpdate)
 		}
 
-		const loadedPreset = origin.kind === "chain-complete"
-			? await schedulerLoadedPreset(options, chain)
-			: await schedulerLoadedPresetForItem(options, chain, item)
 		const presetDir = loadedPreset.preset.presetDir
 		const context: SchedulerSpawnContext = { chain, item, slot, runId, worktreePath, presetDir, loadedPreset, phase }
 		const rawPrompt = typeof options.prompt === "string" ? options.prompt : await options.prompt(context)
@@ -1215,8 +1235,8 @@ async function spawnSchedulerRun(
 			...(activeRun.pid === null ? {} : { pid: activeRun.pid }),
 			processGroupLeader: true,
 		}))
-		const currentRun = options.store.getCurrentRun(chain.id)
-		if (currentRun === null || currentRun.runId !== runId) throw new Error(`current run ${runId} missing after spawn`)
+		const currentRun = options.store.listCurrentRuns(chain.id).find((candidate) => candidate.runId === runId) ?? null
+		if (currentRun === null) throw new Error(`current run ${runId} missing after spawn`)
 		options.store.setCurrentRun({
 			...currentRun,
 			extra: storedItemExtra({
@@ -1426,8 +1446,7 @@ async function cleanupFailedRunPreparation(
 				extra: run.extra,
 			})
 		}
-		const currentRun = options.store.getCurrentRun(chain.id)
-		if (currentRun?.runId === resources.runId) options.store.clearCurrentRun(chain.id)
+			options.store.clearCurrentRun(resources.runId)
 		options.state.recycleTriggers.delete(resources.runId)
 	}
 	if (resources.runId === null || slot.activeRun?.runId === resources.runId) slot.activeRun = null
@@ -1635,8 +1654,7 @@ function attachRunCloseHandler(
 					})
 
 					persistenceStage = "current-run"
-					const currentRun = options.store.getCurrentRun(chain.id)
-					if (currentRun?.runId === runId) options.store.clearCurrentRun(chain.id)
+						options.store.clearCurrentRun(runId)
 					persistenceStage = null
 
 					if (slot.activeRun?.runId === runId) slot.activeRun = null
@@ -1661,7 +1679,7 @@ function attachRunCloseHandler(
 						status,
 					})
 					const itemBeforeBookkeeping = options.store.getItem(item.id)
-					const previousSessionId = (itemBeforeBookkeeping ?? currentItem ?? item).sessionIds[phase]?.[runner.kind] ?? null
+					const previousSessionId = options.store.getItemSessionId(item.id, { phase, runner: runner.kind })
 					if (origin.kind === "item" && !externalTerminalLossWon && itemBeforeBookkeeping !== null && terminalStatuses.has(itemBeforeBookkeeping.status) && externalTerminalHold(itemBeforeBookkeeping.extra) !== null) {
 						options.store.updateItem(item.id, { extra: clearExternalTerminalHold(itemBeforeBookkeeping.extra), updatedAt: endedAt })
 					}
@@ -2434,10 +2452,10 @@ async function runSchedulerManagedChainCompleteTrigger(
 
 	const settle = activeRun.closed.then(async (closed) => {
 		const currentExecution = options.state.chainCompleteExecutions.get(chain.id)
-		if (currentExecution?.kind !== "running" || currentExecution.runId !== activeRun.runId) return
+		if (currentExecution?.kind !== "running" || currentExecution.runId !== activeRun.runId) return closed
 		if (closed.result.kind === "external-terminal-lost" || closed.exitCode !== 0) {
 			options.state.chainCompleteExecutions.delete(chain.id)
-			return
+			return closed
 		}
 		const decision = activeRun.finalizerDecision()
 		if (decision === null) {
@@ -2449,7 +2467,7 @@ async function runSchedulerManagedChainCompleteTrigger(
 				runId: activeRun.runId,
 				error: `chain-complete trigger phase ${nextPhase.name} did not print a valid FINALIZER SUMMARY`,
 			})
-			return
+			return closed
 		}
 		await emit(options, {
 			type: "chain.complete_trigger",
@@ -2462,13 +2480,14 @@ async function runSchedulerManagedChainCompleteTrigger(
 		if (decision.decision === "keep-active") {
 			options.state.chainCompleteExecutions.delete(chain.id)
 			persistKeepActiveTriggerState(options, chain, executionFingerprint, decision, activeRun.runId)
-			return
+			return closed
 		}
 		options.state.chainCompleteExecutions.set(chain.id, {
 			kind: "progress",
 			fingerprint: executionFingerprint,
 			completedPhases: [...completedPhases, nextPhase.name],
 		})
+		return closed
 	}).catch(async (error: unknown) => {
 		options.state.chainCompleteExecutions.delete(chain.id)
 		await emit(options, {
@@ -2478,6 +2497,7 @@ async function runSchedulerManagedChainCompleteTrigger(
 			runId: activeRun.runId,
 			error: errorMessage(error),
 		})
+		return await activeRun.closed
 	})
 	options.state.pendingCloseHandlers.add(settle)
 	void settle.finally(() => options.state.pendingCloseHandlers.delete(settle)).catch(() => undefined)
@@ -3158,6 +3178,10 @@ function git(cwd: string, args: readonly string[]): { stdout: string; stderr: st
 	} catch (error) {
 		return { stdout: "", stderr: errorMessage(error), exitCode: 1 }
 	}
+}
+
+export async function presetExecutionContentIdentity(loaded: SchedulerLoadedPreset): Promise<string> {
+	return loaded.preset.sourceHash
 }
 
 function errorMessage(error: unknown): string {

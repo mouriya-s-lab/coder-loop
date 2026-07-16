@@ -13,6 +13,10 @@ import { appendObservabilityEvent, makeObservabilityEvent, queryObservabilityEve
 function admittedTestStatus(value: string) {
 	return engineLifecycleAdmittedItemStatus(parseInternalStatus(value, "test.status"), "test")
 }
+
+function observabilityTaskIdentity(runId: string) {
+	return { runtimeNodeId: `runtime:${runId}`, definitionRef: { kind: "chain", contentIdentity: "sha256:central-cli-test" }, definitionNodeId: `definition:${runId}` } as const
+}
 import type { BoundaryRecord } from "./boundary-types"
 
 // #456: the legacy chain-drain auto-fire suppressor helper retired with the path itself; tests
@@ -43,6 +47,7 @@ describe("central chain/item CLI", () => {
 			["chain-complete", "run-635-trigger", "umbrella-finalizer", "/runs/trigger/status.json", "EACCES trigger status"],
 		] as const) {
 			await appendObservabilityEvent(paths.runnerPersistenceFailuresFile, makeObservabilityEvent({
+				...observabilityTaskIdentity(runId),
 				kind: "diagnostic",
 				type: "runner.status_persistence_failed",
 				chain: "failure-chain",
@@ -70,6 +75,7 @@ describe("central chain/item CLI", () => {
 		const loopDataRoot = await makeLoopDataRoot("lifecycle-persistence-status")
 		const paths = resolveLoopDataPaths({ loopDataRoot })
 		await appendObservabilityEvent(paths.lifecycleEventFailuresFile, makeObservabilityEvent({
+			...observabilityTaskIdentity("run-632-timeout"),
 			kind: "diagnostic",
 			type: "scheduler.lifecycle_event_persistence_failed",
 			chain: "failure-chain",

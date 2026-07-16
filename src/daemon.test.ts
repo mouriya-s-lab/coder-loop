@@ -31,9 +31,9 @@ import {
 } from "./scheduler"
 import { resolveChainRuntimePaths, resolveLoopDataPaths } from "./runtime-paths"
 import { openSqliteStateStore } from "./sqlite-state"
-import { makeObservabilityEvent, queryObservabilityEvents } from "./observability"
+import { makeObservabilityEvent, ObservabilityEventBoundary, queryObservabilityEvents } from "./observability"
 import { chainBindings, engineLifecycleAdmittedItemStatus, itemExtraToJsonObject, parseInternalStatus, storedChainMetadata, storedItemExtra, withExternalTerminalLoss } from "./runtime-data"
-import type { BoundaryRecord } from "./boundary-types"
+import type { BoundaryRecord, BoundaryValue } from "./boundary-types"
 import { parseHookDeclarations, type GateHookDeclaration, type ObserverHookDeclaration, type PresetHookPlaceholder } from "./hook-declarations"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -46,6 +46,31 @@ let nextFixtureId = 0
 // #397 test brand helper — see install-commands.test.ts for rationale.
 function runtimeStatus(value: string) {
 	return engineLifecycleAdmittedItemStatus(parseInternalStatus(value, "test.status"), "test")
+}
+
+function observabilityTaskIdentity(runId: string) {
+	return {
+		runtimeNodeId: `runtime:${runId}`,
+		definitionRef: { kind: "chain", contentIdentity: "sha256:daemon-observability-test" },
+		definitionNodeId: `definition:${runId}`,
+	} as const
+}
+
+function staleRecoveryRunExtra(worktreePath: string, overrides: JsonObject = {}) {
+	return storedItemExtra({
+		worktreePath,
+		branchName: "main",
+		baseCommit: "0123456789abcdef",
+		definitionKind: "preset",
+		definitionContentIdentity: "sha256:daemon-recovery-fixture",
+		definitionPhases: [
+			{ phase: "iteration", definitionNodeId: "task:iteration" },
+			{ phase: "review", definitionNodeId: "task:review" },
+			{ phase: "blocked-responder", definitionNodeId: "task:blocked-responder" },
+			{ phase: "umbrella-finalizer", definitionNodeId: "task:umbrella-finalizer" },
+		],
+		...overrides,
+	})
 }
 
 async function writeCredentialedFixturePreset(root: string): Promise<string> {
@@ -83,6 +108,8 @@ const FakeRunnerRunningEventBoundary = arkType({
 	itemId: "number",
 	runId: "string",
 })
+const StatusArtifactBoundary = arkType({ phase: "string" })
+const StatusSnapshotBoundary = arkType({ events: { recent: ObservabilityEventBoundary.array() } })
 
 // The spawned agent is the only writer of item.status. Fake runners use the same
 // run-scoped credential and daemon admission path as a real `coder-loop item update`.
@@ -245,7 +272,7 @@ describe("daemon", () => {
 					itemId: itemRowId,
 					phase: "iteration",
 					startedAt: 1_800_000_000,
-					extra: storedItemExtra({ hooks: [itemHook], visibleRecordedRunField: "recorded-run-visible" }),
+					extra: staleRecoveryRunExtra(REPO_ROOT, { hooks: [itemHook], visibleRecordedRunField: "recorded-run-visible" }),
 				})
 				store.setCurrentRun({
 					chainId,
@@ -2724,7 +2751,8 @@ attemptTimeoutSeconds = 3600
 			for (const raw of reviewExitsArray) {
 				const exit = record(raw)
 				expect(typeof exit.when).toBe("string")
-				expect((exit.when as string).length).toBeGreaterThan(0)
+					if (typeof exit.when !== "string") throw new Error("expected exit condition")
+					expect(exit.when.length).toBeGreaterThan(0)
 				if (exit.kind === "item-status") {
 					expect(typeof exit.status).toBe("string")
 				} else if (exit.kind === "chain-action") {
@@ -2834,6 +2862,19 @@ attemptTimeoutSeconds = 3600
 			})).item)
 			const itemId = numberValue(item.id)
 			const eventsFile = resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile
+			const durableStore = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				durableStore.recordRun({
+					runId: "run-exit-action-test-2",
+					chainId,
+					itemId,
+					phase: "review",
+					startedAt: 1_800_000_000,
+					extra: staleRecoveryRunExtra(REPO_ROOT),
+				})
+			} finally {
+				durableStore.close()
+			}
 
 			// Scenario 2a: vocabulary-invalid action is rejected by the request boundary before the
 			// per-phase admission gate fires. The error message echoes the engine vocabulary.
@@ -2856,7 +2897,7 @@ attemptTimeoutSeconds = 3600
 			// `item.exit.selected` audit event with `outcome=deny reason=phase-exits`.
 			const undeclared = await request(fixture, "item.exitAction", {
 				itemId,
-				agentRunId: "run-exit-action-test-1b",
+				agentRunId: "run-exit-action-test-2",
 				agentPhase: "iteration",
 				action: "stop",
 			})
@@ -3204,7 +3245,7 @@ process.exitCode = 0
 				fields: { status: runtimeStatus("done"), title: "strict item update" },
 			})).item)
 			expect(updated).toMatchObject({ id: itemId, chainId, status: runtimeStatus("done"), title: "strict item update" })
-			expect((updated as { itemId: string }).itemId).toBe("221")
+			expect(stringValue(updated.itemId)).toBe("221")
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -3752,7 +3793,8 @@ process.exitCode = 0
 
 			const phaseEnd = fixture.schedulerEvents.find((event) => event.type === "phase.end")
 			expect(phaseEnd).toBeDefined()
-			expect((phaseEnd as { status?: string }).status).toBe("queued")
+			if (phaseEnd?.type !== "phase.end") throw new Error("expected phase.end event")
+			expect(phaseEnd.status).toBe("queued")
 		} finally {
 			await fixture.daemon.stop()
 		}
@@ -4051,7 +4093,7 @@ process.exitCode = 0
 					itemId: item.id,
 					phase: "iteration",
 					startedAt: 1_800_000_000,
-					extra: storedItemExtra({}),
+					extra: staleRecoveryRunExtra(agentCwdSnapshot),
 				})
 			store.setCurrentRun({
 				chainId: chain.id,
@@ -4060,6 +4102,7 @@ process.exitCode = 0
 					startedAt: 1_800_000_000,
 					extra: storedItemExtra({ itemId: item.id, pid: stale.pid, processGroupLeader: true }),
 				})
+			store.setItemSessionId(item.id, { phase: "iteration", runner: "claude", sessionId: "session-iter-217" })
 		} finally {
 			store.close()
 		}
@@ -4076,7 +4119,13 @@ process.exitCode = 0
 			// no longer rewrites business fields).
 			expect(recovered?.status).toBe("in_progress")
 			expect(recovered?.phase).toBe("iteration")
-			expect(recovered?.sessionIds).toEqual(sessionIdsSnapshot)
+			expect(recovered?.sessionIds).toEqual({})
+			const recoveredStore = openSqliteStateStore({ loopDataRoot })
+			try {
+				expect(recoveredStore.getItemSessionId(recovered?.id ?? 0, { phase: "iteration", runner: "claude" })).toBe(sessionIdsSnapshot.iteration.claude)
+			} finally {
+				recoveredStore.close()
+			}
 			expect(recovered?.attempts).toBe(1)
 			// Process-layer cleanup still happens: the orphan `current_runs` row is gone.
 			expect(await readCurrentRun(loopDataRoot, 1)).toBeNull()
@@ -4093,6 +4142,14 @@ process.exitCode = 0
 				repoCwd: REPO_ROOT,
 				agentCwd: agentCwdSnapshot,
 			}])
+			const recoveryEvents = (await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot }).eventsFile, { type: "scheduler.recovery", run: "run-stale-217" })).events
+			expect(recoveryEvents).toHaveLength(1)
+			expect(recoveryEvents[0]).toMatchObject({
+				runId: "run-stale-217",
+				runtimeNodeId: "closure-node:1:iteration",
+				definitionRef: { kind: "preset", contentIdentity: "sha256:daemon-recovery-fixture" },
+				definitionNodeId: "task:iteration",
+			})
 		} finally {
 			try {
 				process.kill(-(stale.pid), "SIGKILL")
@@ -4119,18 +4176,21 @@ process.exitCode = 0
 			chainId = chain.id
 			const item = store.createItem({
 				chainId, itemId: "602-loss-crash", repoCwd: REPO_ROOT, status: runtimeStatus("in_progress"), attempts: 5,
-				lastRunId: "run-loss-crash", phase: "iteration", sessionIds: { iteration: { hapi: "lost-session" } },
+				lastRunId: "run-loss-crash", phase: "iteration",
 				extra: storedItemExtra({ schedulerBackoff: { failureCount: 2, nextRunAt: 1_900_000_000 }, externalTerminalHold: {
 					kind: "external-terminal-unavailable", runner: "hapi", phase: "iteration", binary: "fake-hapi", probeArgv: ["probe"],
 					availability: { kind: "unavailable", reason: "endpoint-unavailable", exitCode: 69, signal: null, checkedAt: "2026-07-15T00:00:00.000Z", since: "2026-07-15T00:00:00.000Z" },
 				} }),
 			})
 			itemRowId = item.id
-			store.recordRun({ runId: "run-loss-crash", chainId, itemId: item.id, phase: "iteration", status: runtimeStatus("running"), startedAt: 1_900_000_001, extra: storedItemExtra({
+			const runExtra = staleRecoveryRunExtra(REPO_ROOT, {
 				startStatus: "changes_requested", startStatusUpdatedAt: 1_900_000_000, startAttempts: 4,
 				externalTerminalCurrent: { runner: "hapi", binary: "fake-hapi", availability: { kind: "available", checkedAt: "2026-07-15T00:00:01.000Z" } },
 				externalTerminalLoss: { kind: "lost", detectedAt: "2026-07-15T00:00:02.000Z", reason: "endpoint-unavailable", terminationPhase: "term" },
-			}) })
+			})
+			store.recordRun({ runId: "run-loss-crash", chainId, itemId: item.id, phase: "iteration", status: runtimeStatus("running"), startedAt: 1_900_000_001, extra: runExtra })
+			store.setCurrentRun({ chainId, phase: "iteration", runId: "run-loss-crash", startedAt: 1_900_000_001, extra: runExtra })
+			store.setItemSessionId(item.id, { phase: "iteration", runner: "hapi", sessionId: "lost-session" })
 		} finally {
 			store.close()
 		}
@@ -4139,7 +4199,12 @@ process.exitCode = 0
 		try {
 			const recovered = await readItem(loopDataRoot, chainId, "602-loss-crash")
 			expect(recovered).toMatchObject({ status: "changes_requested", statusUpdatedAt: 1_900_000_000, phase: null, attempts: 4 })
-			expect(recovered?.sessionIds.iteration?.hapi).toBeUndefined()
+			const recoveredStore = openSqliteStateStore({ loopDataRoot })
+			try {
+				expect(recoveredStore.getItemSessionId(itemRowId, { phase: "iteration", runner: "hapi" })).toBeNull()
+			} finally {
+				recoveredStore.close()
+			}
 			expect(recovered?.extra.schedulerBackoff).toBeUndefined()
 			expect(recovered?.extra.externalTerminalHold).toBeDefined()
 			expect(await readCurrentRun(loopDataRoot, chainId)).toBeNull()
@@ -4184,7 +4249,7 @@ process.exitCode = 0
 					itemId: terminal.id,
 					phase: "iteration",
 					startedAt: 1_700_000_000,
-					extra: storedItemExtra({}),
+					extra: staleRecoveryRunExtra(REPO_ROOT),
 				})
 			store.createItem({
 				chainId: chain.id,
@@ -4217,6 +4282,17 @@ process.exitCode = 0
 			expect(terminalItem?.status).toBe("done")
 			expect(terminalItem?.phase).toBe("iteration")
 			expect((await listChainRuns(loopDataRoot, 1)).filter((run) => run.endedAt === null)).toEqual([])
+			const recoveryEvents = (await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot }).eventsFile, { type: "scheduler.recovery" })).events
+			expect(recoveryEvents).toHaveLength(1)
+			expect(recoveryEvents[0]?.type === "scheduler.recovery" ? recoveryEvents[0].payload.reconciledRuns : []).toEqual([{
+				runId: "run-orphan-307",
+				itemId: 1,
+				phase: "iteration",
+				pid: null,
+				runtimeNodeId: "closure-node:1:iteration",
+				definitionRef: { kind: "preset", contentIdentity: "sha256:daemon-recovery-fixture" },
+				definitionNodeId: "task:iteration",
+			}])
 		} finally {
 			await daemon.stop()
 		}
@@ -4260,7 +4336,7 @@ process.exitCode = 0
 					itemId: item.id,
 					phase: "iteration",
 					startedAt: 1_700_000_000,
-					extra: storedItemExtra({ pid: stale.pid, processGroupLeader: true }),
+					extra: staleRecoveryRunExtra(REPO_ROOT, { pid: stale.pid, processGroupLeader: true }),
 				})
 		} finally {
 			store.close()
@@ -4328,7 +4404,7 @@ process.exitCode = 0
 					itemId: terminal.id,
 					phase: "iteration",
 					startedAt: 1_700_000_000,
-					extra: storedItemExtra({}),
+					extra: staleRecoveryRunExtra(REPO_ROOT),
 				})
 			queuedItemId = store.createItem({
 				chainId: chain.id,
@@ -4434,7 +4510,7 @@ process.exitCode = 0
 					itemId: item.id,
 					phase: "iteration",
 					startedAt: 1_800_000_000,
-					extra: storedItemExtra({}),
+					extra: staleRecoveryRunExtra(REPO_ROOT),
 				})
 			store.setCurrentRun({
 				chainId: chain.id,
@@ -4584,7 +4660,7 @@ process.exitCode = 0
 			const item = await readItem(fixture.loopDataRoot, chainId, 203)
 			const runId = item?.lastRunId ?? ""
 			const paths = resolveChainRuntimePaths("scheduler-artifacts-chain", { loopDataRoot: fixture.loopDataRoot })
-			const status = JSON.parse(await readFile(paths.runStatusFile(runId), "utf-8")) as BoundaryRecord
+			const status = record(JSON.parse(await readFile(paths.runStatusFile(runId), "utf-8")))
 			const stdout = await readFile(paths.runStdoutFile(runId), "utf-8")
 			const stderr = await readFile(paths.runStderrFile(runId), "utf-8")
 			const events = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, { run: runId })
@@ -4714,11 +4790,9 @@ process.exitCode = 0
 				console.error("CLI_STDOUT", cliStdout)
 			}
 			expect(cliExit).toBe(0)
-			const cliPayload = JSON.parse(cliStdout) as { events: { recent: unknown[] } }
+			const cliPayload = StatusSnapshotBoundary.assert(JSON.parse(cliStdout))
 			const cliTypes = cliPayload.events.recent.map((event) =>
-				typeof event === "object" && event !== null && !Array.isArray(event) && typeof (event as BoundaryRecord).type === "string"
-					? ((event as BoundaryRecord).type as string)
-					: null,
+				typeof event.type === "string" ? event.type : null,
 			)
 			expect(cliTypes).toContain("phase.start")
 			expect(cliTypes).toContain("phase.end")
@@ -4814,6 +4888,7 @@ process.exitCode = 0
 	test("decision fingerprint suppresses only consecutive duplicates", () => {
 		const state = new DecisionFingerprintState()
 		const first = makeObservabilityEvent({
+			...observabilityTaskIdentity("run-1"),
 			kind: "decision",
 			type: "slot.busy",
 			chain: "fingerprint-chain",
@@ -4822,6 +4897,7 @@ process.exitCode = 0
 			payload: { slotKey: "slot-a", chainId: 1, repoCwd: "/repo/a", activeRunId: "run-1" },
 		})
 		const changed = makeObservabilityEvent({
+			...observabilityTaskIdentity("run-2"),
 			kind: "decision",
 			type: "slot.busy",
 			chain: "fingerprint-chain",
@@ -4885,6 +4961,18 @@ prompt = "review.md"
 				presetPath: stopPresetDir,
 			})).item)
 			const itemId = numberValue(item.id)
+			const durableStore = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				const durablePhaseExitRun = durableStore.recordRun({
+					runId: "run-phase-exit-stop",
+					chainId,
+					itemId,
+					phase: "review",
+					startedAt: 1_800_000_000,
+					extra: staleRecoveryRunExtra(REPO_ROOT),
+				})
+				expect(durablePhaseExitRun.runtimeNodeId.length).toBeGreaterThan(0)
+			} finally { durableStore.close() }
 			const sibling = record(expectOk(await request(fixture, "chain.create", {
 				name: "fingerprint-active-sibling",
 				repository: "mouriya-s-lab/coder-loop",
@@ -4892,6 +4980,7 @@ prompt = "review.md"
 			const siblingChainId = numberValue(sibling.id)
 			const state = daemonDecisionFingerprintState(fixture.daemon)
 			const slot = makeObservabilityEvent({
+				...observabilityTaskIdentity("run-slot"),
 				kind: "decision",
 				type: "slot.busy",
 				chain: "fingerprint-stop-chain",
@@ -4908,6 +4997,7 @@ prompt = "review.md"
 				payload: { rowId: itemId, failureCount: 1, nextRunAt: 1_800_000_000 },
 			})
 			const completedChain = makeObservabilityEvent({
+				...observabilityTaskIdentity("run-complete"),
 				kind: "decision",
 				type: "chain.complete_trigger",
 				chain: "fingerprint-stop-chain",
@@ -4988,6 +5078,7 @@ prompt = "review.md"
 		const survivingChainChurn = (generations: number): number => {
 			const state = new DecisionFingerprintState()
 			const keepActive = (runId: string, reason: string) => makeObservabilityEvent({
+				...observabilityTaskIdentity(runId),
 				kind: "decision",
 				type: "chain.complete_trigger",
 				chain: "surviving-chain",
@@ -5026,6 +5117,7 @@ prompt = "review.md"
 				const chainName = `churn-${chainId}`
 				const runId = `run-${chainId}`
 				const slot = makeObservabilityEvent({
+					...observabilityTaskIdentity(runId),
 					kind: "decision",
 					type: "slot.busy",
 					chain: chainName,
@@ -5042,6 +5134,7 @@ prompt = "review.md"
 					payload: { rowId, failureCount: 1, nextRunAt: 1_800_000_000 + index },
 				})
 				const keepActive = (reason: string, triggerRunId: string) => makeObservabilityEvent({
+					...observabilityTaskIdentity(triggerRunId),
 					kind: "decision",
 					type: "chain.complete_trigger",
 					chain: chainName,
@@ -5710,7 +5803,8 @@ process.exitCode = 1
 			throw new Error("expected daemon start to fail")
 		} catch (error) {
 			expect(error).toBeInstanceOf(DaemonError)
-			expect((error as DaemonError).code).toBe("db_unavailable")
+			if (!(error instanceof DaemonError)) throw error
+			expect(error.code).toBe("db_unavailable")
 		}
 	})
 
@@ -5901,13 +5995,13 @@ process.exitCode = 0
 
 				// The fake shell runner writes no terminal status, so the item can be respawned immediately.
 				// Read the run id from the completed phase.end event instead of racing item.lastRunId.
-				const iterationEnd = (await waitFor(
+				const iterationEnd = present(await waitFor(
 					async () =>
 						fixture.schedulerEvents
 							.find((event): event is Extract<SchedulerEvent, { type: "phase.end" }> => event.type === "phase.end" && event.itemId === itemId && event.phase === "iteration") ?? null,
 					(event) => event !== null,
 					5_000,
-				)) as Extract<SchedulerEvent, { type: "phase.end" }>
+				))
 				const runId = iterationEnd.runId
 				const stdoutPath = resolveChainRuntimePaths(`ac5-iter-chain`, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(runId)
 				const stdout = await readFile(stdoutPath, "utf-8")
@@ -6076,8 +6170,8 @@ process.exitCode = 0
 					const expectedPhaseDir = runId === iterRunId ? "iteration" : "review"
 					expect(runDirEntries.sort()).toEqual([expectedPhaseDir, "status.json", "stderr.log", "stdout.log"])
 				}
-				const iterStatus = JSON.parse(await readFile(paths.runStatusFile(iterRunId), "utf-8")) as { phase: string }
-				const reviewStatus = JSON.parse(await readFile(paths.runStatusFile(reviewRunId), "utf-8")) as { phase: string }
+				const iterStatus = StatusArtifactBoundary.assert(JSON.parse(await readFile(paths.runStatusFile(iterRunId), "utf-8")))
+				const reviewStatus = StatusArtifactBoundary.assert(JSON.parse(await readFile(paths.runStatusFile(reviewRunId), "utf-8")))
 				expect(iterStatus.phase).toBe("iteration")
 				expect(reviewStatus.phase).toBe("review")
 
@@ -6204,13 +6298,13 @@ process.exitCode = 0
 			})).item)
 			const itemId = numberValue(added.id)
 
-			const agentExit = await waitFor(
+			const agentExit = present(await waitFor(
 				async () => fixture.schedulerEvents.find(
 					(e): e is Extract<SchedulerEvent, { type: "agent.exit" }> =>
 						e.type === "agent.exit" && e.itemId === itemId,
 				) ?? null,
 				(e) => e !== null,
-			) as Extract<SchedulerEvent, { type: "agent.exit" }>
+			))
 			expect(agentExit.exitCode).not.toBe(0)
 
 			// Lifecycle stream carries pending_entered → timeout_kill for this run.
@@ -6319,13 +6413,13 @@ process.exitCode = 0
 			})).item)
 			const itemId = numberValue(added.id)
 
-			const agentExit = await waitFor(
+			const agentExit = present(await waitFor(
 				async () => fixture.schedulerEvents.find(
 					(e): e is Extract<SchedulerEvent, { type: "agent.exit" }> =>
 						e.type === "agent.exit" && e.itemId === itemId,
 				) ?? null,
 				(e) => e !== null,
-			) as Extract<SchedulerEvent, { type: "agent.exit" }>
+			))
 			expect(agentExit.exitCode).toBe(0)
 
 			const pendingEntered = fixture.schedulerEvents.find(
@@ -6393,13 +6487,13 @@ process.exitCode = 0
 			})).item)
 			const itemId = numberValue(added.id)
 
-			const agentExit = await waitFor(
+			const agentExit = present(await waitFor(
 				async () => fixture.schedulerEvents.find(
 					(e): e is Extract<SchedulerEvent, { type: "agent.exit" }> =>
 						e.type === "agent.exit" && e.itemId === itemId,
 				) ?? null,
 				(e) => e !== null,
-			) as Extract<SchedulerEvent, { type: "agent.exit" }>
+			))
 			expect(agentExit.exitCode).not.toBe(0)
 
 			// No recycle events at all for this run — stdout content had zero effect.
@@ -6437,13 +6531,13 @@ process.exitCode = 0
 			})).item)
 			const itemId = numberValue(added.id)
 
-			const agentExit = await waitFor(
+			const agentExit = present(await waitFor(
 				async () => fixture.schedulerEvents.find(
 					(e): e is Extract<SchedulerEvent, { type: "agent.exit" }> =>
 						e.type === "agent.exit" && e.itemId === itemId
 				) ?? null,
 				(e) => e !== null,
-			) as Extract<SchedulerEvent, { type: "agent.exit" }>
+			))
 			expect(agentExit.exitCode).toBe(1)
 		} finally {
 			await fixture.daemon.stop()
@@ -7664,7 +7758,7 @@ process.exitCode = 0
 			await fixture.tickEntered.promise
 
 			// Model the snapshot that existed when the in-flight tick began. Once released, the
-			// real scheduler spawn replaces this row with the sentinel item's current run.
+			// real scheduler spawn adds the sentinel item's current run alongside this one.
 			const store = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
 			try {
 				store.recordRun({
@@ -7673,7 +7767,7 @@ process.exitCode = 0
 					itemId: fixture.targetRowId,
 					phase: "iteration",
 					startedAt: 1_800_000_000,
-					extra: storedItemExtra({}),
+					extra: staleRecoveryRunExtra(REPO_ROOT),
 				})
 				store.setCurrentRun({
 					chainId: fixture.chainId,
@@ -7716,12 +7810,18 @@ process.exitCode = 0
 				changed: true,
 				beforeStatus: "blocked",
 				afterStatus: "queued",
-				clearedCurrent: false,
+				clearedCurrent: true,
 			})
 
-			const current = await readCurrentRun(fixture.loopDataRoot, fixture.chainId)
-			expect(current?.extra.itemId).toBe(fixture.sentinelRowId)
-			expect(current?.runId).not.toBe("run-before-in-flight-tick")
+			const remainingCurrentRunsStore = openSqliteStateStore({ loopDataRoot: fixture.loopDataRoot })
+			try {
+				const currentRuns = remainingCurrentRunsStore.listCurrentRuns(fixture.chainId)
+				expect(currentRuns).toHaveLength(1)
+				expect(currentRuns[0]?.extra.itemId).toBe(fixture.sentinelRowId)
+				expect(currentRuns[0]?.runId).not.toBe("run-before-in-flight-tick")
+			} finally {
+				remainingCurrentRunsStore.close()
+			}
 		} finally {
 			fixture.releaseTick.resolve()
 			await fixture.daemon.stop()
@@ -7786,7 +7886,7 @@ process.exitCode = 0
 				async () => {
 					try {
 						return (await readFile(fixture.credentialPath, "utf-8")).trim()
-					} catch (error: unknown) {
+					} catch (error) {
 						if (error instanceof Error && "code" in error && error.code === "ENOENT") return ""
 						throw error
 					}
@@ -8645,7 +8745,7 @@ describe("rateLimitStatusFromState daemon.status wire shape (issue #478)", () =>
 		expect(wire["nextResumeAt"]).toBe(new Date(populatedState.nextResumeAtMs!).toISOString())
 		// JSON.stringify must not drop any field (undefined would be silently dropped) —
 		// the round-trip pins this because every value above is either a primitive or null.
-		const roundTrip: Record<string, unknown> = JSON.parse(JSON.stringify(wire))
+		const roundTrip = record(JSON.parse(JSON.stringify(wire)))
 		expect(Object.keys(roundTrip).sort()).toEqual([
 			"active", "mode", "nextResumeAt", "observedAt", "rateLimitType",
 			"rateLimitedUntil", "rateLimitedUntilUnix", "sourceChainId",
@@ -9201,13 +9301,18 @@ function nestedMetadata(depth: number): JsonObject {
 	return value
 }
 
-function numberValue(value: unknown): number {
+function numberValue(value: BoundaryValue): number {
 	if (typeof value !== "number") throw new Error("expected number")
 	return value
 }
 
-function stringValue(value: unknown): string {
+function stringValue(value: BoundaryValue): string {
 	if (typeof value !== "string") throw new Error("expected string")
+	return value
+}
+
+function present<T>(value: T | null | undefined): T {
+	if (value === null || value === undefined) throw new Error("expected value")
 	return value
 }
 
@@ -9285,7 +9390,7 @@ async function waitForItemQueueTerminal(
 	itemId: number,
 	timeoutMs = 10_000,
 ): Promise<Extract<SchedulerEvent, { type: "queue.terminal" }>> {
-	return (await waitFor(
+	return present(await waitFor(
 		async () =>
 			fixture.schedulerEvents.find(
 				// #419 review I2: scheduler event field renamed `itemId` (rowid) → `rowId`. The
@@ -9295,7 +9400,7 @@ async function waitForItemQueueTerminal(
 			) ?? null,
 		(event) => event !== null,
 		timeoutMs,
-	)) as Extract<SchedulerEvent, { type: "queue.terminal" }>
+	))
 }
 
 async function waitForItemPhaseEnd(
@@ -9303,14 +9408,14 @@ async function waitForItemPhaseEnd(
 	itemId: number,
 	timeoutMs = 10_000,
 ): Promise<Extract<SchedulerEvent, { type: "phase.end" }>> {
-	return (await waitFor(
+	return present(await waitFor(
 		async () =>
 			fixture.schedulerEvents.find(
 				(event): event is Extract<SchedulerEvent, { type: "phase.end" }> => event.type === "phase.end" && event.itemId === itemId,
 			) ?? null,
 		(event) => event !== null,
 		timeoutMs,
-	)) as Extract<SchedulerEvent, { type: "phase.end" }>
+	))
 }
 
 async function waitForPidExit(pid: number, timeoutMs: number): Promise<boolean> {
