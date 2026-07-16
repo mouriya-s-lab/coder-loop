@@ -5396,7 +5396,6 @@ function createItem(
 
 async function writeFakeRunner(path: string): Promise<void> {
 	await mkdir(resolve(path, ".."), { recursive: true })
-	const loopEntry = resolve(REPO_ROOT, "src/loop.ts")
 	await writeFile(
 		path,
 		`#!/usr/bin/env bun
@@ -5454,16 +5453,32 @@ await appendFile(input.eventLog, JSON.stringify({ type: "end", itemId: input.ite
 console.log("done:" + input.itemId)
 const summary = Object.prototype.hasOwnProperty.call(input, "summary") ? input.summary : "REVIEW SUMMARY: verdict=accepted; issue=#0; reason=fake-runner default"
 if (summary !== null) console.log(summary)
-// v1 status model: the agent owns its item status. Write it through the same SQLite store the
-// scheduler reads (the daemon's loop-data-root is passed via CODER_LOOP_DATA_DIR), mirroring a real
-// agent's \`coder-loop item update --status\`. A null writeStatus means the agent wrote nothing, so the
-// item keeps the entry status it had at spawn (continuable).
+// v1 status model: the agent owns its item status. Write it through the daemon socket with the
+// scheduler-minted run credential, mirroring a real agent's \`coder-loop item update --status\`
+// admission path without starting a nested CLI runtime. A null writeStatus means the agent wrote
+// nothing, so the item keeps the entry status it had at spawn (continuable).
 if (typeof input.writeStatus === "string" && input.itemId > 0) {
-	const update = Bun.spawnSync({ cmd: ["bun", ${JSON.stringify(loopEntry)}, "item", "update", input.chainName, "--issue", String(input.issueNumber), "--status", input.writeStatus], stdout: "pipe", stderr: "pipe" })
-	if (update.exitCode !== 0) {
-		process.stderr.write(new TextDecoder().decode(update.stderr))
-		process.exit(update.exitCode)
-	}
+	const credential = process.env.CODER_LOOP_RUN_CRED
+	const loopDataRoot = process.env.CODER_LOOP_DATA_DIR
+	if (typeof credential !== "string" || credential.length === 0) throw new Error("fake runner requires CODER_LOOP_RUN_CRED")
+	if (typeof loopDataRoot !== "string" || loopDataRoot.length === 0) throw new Error("fake runner requires CODER_LOOP_DATA_DIR")
+	const { createConnection } = await import("node:net")
+	const { randomUUID } = await import("node:crypto")
+	const response = await new Promise((resolveSend, rejectSend) => {
+		const socket = createConnection(loopDataRoot + "/daemon.sock")
+		let buffer = ""
+		socket.setEncoding("utf-8")
+		socket.on("connect", () => socket.write(JSON.stringify({ id: randomUUID(), command: "item.update", args: { itemId: input.itemId, status: input.writeStatus, agentCredential: credential } }) + "\\n"))
+		socket.on("data", (chunk) => {
+			buffer += chunk
+			const newline = buffer.indexOf("\\n")
+			if (newline === -1) return
+			socket.destroy()
+			resolveSend(JSON.parse(buffer.slice(0, newline)))
+		})
+		socket.on("error", rejectSend)
+	})
+	if (response.ok !== true) throw new Error("credentialed fake-runner status write failed: " + JSON.stringify(response))
 }
 process.exit(input.exitCode)
 `,
