@@ -256,6 +256,15 @@ function eventType(value: JsonValue | null): string {
 	return typeof type === "string" ? type : "<unknown>"
 }
 
+export async function buildGitOriginHealthLine(target: string): Promise<string> {
+	const inside = await spawnCapture("git", ["-C", target, "rev-parse", "--is-inside-work-tree"])
+	if (inside.code !== 0 || inside.stdout.trim() !== "true") return "FAIL: target is not a Git worktree"
+	const origin = await spawnCapture("git", ["-C", target, "remote", "get-url", "origin"])
+	return origin.code === 0
+		? `OK: git origin ${origin.stdout.trim()}`
+		: "WARN: git origin unavailable; closure freshness=no-origin/unavailable"
+}
+
 // ===================================================================
 // doctor entry point
 // ===================================================================
@@ -289,6 +298,11 @@ export async function runDoctorCommand(rawArgs: string[]): Promise<void> {
 		info(`  ${repoAccessible ? "OK" : "FAIL"}: repo access ${args.repo}`)
 		if (!repoAccessible) hasFailure = true
 	}
+
+	info("\n[Git repository] closure base freshness")
+	const gitOriginLine = await buildGitOriginHealthLine(args.target)
+	info(`  ${gitOriginLine}`)
+	if (gitOriginLine.startsWith("FAIL:")) hasFailure = true
 
 	info("\n[Live Runtime] coder-loop runtime health")
 	for (const line of buildLiveRuntimeHealthLines(statusSnapshot)) {

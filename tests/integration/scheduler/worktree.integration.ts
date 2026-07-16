@@ -7,11 +7,12 @@ import { resolve } from "node:path"
 import {
 	createGitWorktreeManager,
 	createSchedulerState,
-	schedulerSlotWorktreePath,
+	reconcileClosureResources,
 	schedulerTick,
 	type SchedulerEvent,
 	type SchedulerOptions,
 } from "../../../src/scheduler"
+import { closureWorktreePath } from "../../../src/closure-lifecycle"
 import { openSqliteStateStore } from "../../../src/sqlite-state"
 import { loadPreset } from "../../../src/loop"
 import { engineLifecycleAdmittedItemStatus, parseInternalStatus, storedChainMetadata, storedItemExtra } from "../../../src/runtime-data"
@@ -62,7 +63,11 @@ function makeChain(store: ReturnType<typeof openSqliteStateStore>, name: string)
 	})
 }
 
-test("killed-run slot worktree holding the slot branch is self-healed from a new loop-data root", async () => {
+function makeItem(store: ReturnType<typeof openSqliteStateStore>, chain: ReturnType<typeof makeChain>, itemId: string, repoCwd = REPO_ROOT) {
+	return store.createItem({ chainId: chain.id, itemId, repoCwd, status: runtimeStatus("queued"), attempts: 0, extra: storedItemExtra({}) })
+}
+
+test("different closures retain different worktrees and branches across loop-data roots", async () => {
 	const root = resolve(TEST_ROOT, "stale-slot-branch")
 	const repoCwd = resolve(root, "repo")
 	await initGitRepo(repoCwd)
@@ -75,23 +80,24 @@ test("killed-run slot worktree holding the slot branch is self-healed from a new
 	const storeB = openSqliteStateStore({ loopDataRoot: rootB })
 	try {
 		const chainA = makeChain(storeA, "wedge-chain")
+		const itemA = makeItem(storeA, chainA, "a")
 		const managerA = createGitWorktreeManager({ loopDataRoot: rootA })
-		const pathA = await managerA({ chain: chainA, repoCwd, slotKey: "slot-a" })
-		// Simulate the daemon being killed mid-run: the worktree stays registered and
-		// checked out on the engine-owned slot branch — nothing switches it away.
-		expect(existsSync(pathA)).toBe(true)
+		const resourceA = await managerA({ chain: chainA, item: itemA, phase: "iteration", closureId: "closure:a:iteration", repoCwd, slotKey: "slot-a", existing: null })
+		if (typeof resourceA === "string") throw new Error("expected closure resources")
+		expect(existsSync(resourceA.worktreePath)).toBe(true)
 
 		const chainB = makeChain(storeB, "wedge-chain")
+		const itemB = makeItem(storeB, chainB, "b")
 		const managerB = createGitWorktreeManager({ loopDataRoot: rootB })
-		// Pre-fix this threw worktree_create_failed: the slot branch was "already used by
-		// worktree at <pathA>".
-		const pathB = await managerB({ chain: chainB, repoCwd, slotKey: "slot-b" })
-		expect(pathB).toBe(schedulerSlotWorktreePath(chainB, repoCwd, { loopDataRoot: rootB }))
-		expect(existsSync(pathB)).toBe(true)
-		// The stale registration was removed, the new one is live.
+		const resourceB = await managerB({ chain: chainB, item: itemB, phase: "review", closureId: "closure:b:review", repoCwd, slotKey: "slot-b", existing: null })
+		if (typeof resourceB === "string") throw new Error("expected closure resources")
+		expect(resourceB.worktreePath).toBe(closureWorktreePath(rootB, chainB.name, repoCwd, "closure:b:review"))
+		expect(resourceB.worktreePath).not.toBe(resourceA.worktreePath)
+		expect(resourceB.branchName).not.toBe(resourceA.branchName)
+		expect(existsSync(resourceB.worktreePath)).toBe(true)
 		const list = git(repoCwd, ["worktree", "list", "--porcelain"]).stdout
-		expect(list).toContain(pathB)
-		expect(list).not.toContain(pathA)
+		expect(list).toContain(resourceA.worktreePath)
+		expect(list).toContain(resourceB.worktreePath)
 	} finally {
 		storeA.close()
 		storeB.close()
@@ -108,17 +114,51 @@ test("worktree registered but directory missing is pruned and recreated", async 
 	const store = openSqliteStateStore({ loopDataRoot })
 	try {
 		const chain = makeChain(store, "missing-dir-chain")
+		const item = makeItem(store, chain, "missing")
 		const manager = createGitWorktreeManager({ loopDataRoot })
-		const path = await manager({ chain, repoCwd, slotKey: "slot" })
-		await rm(path, { recursive: true, force: true })
+		const resource = await manager({ chain, item, phase: "iteration", closureId: "closure:missing:iteration", repoCwd, slotKey: "slot", existing: null })
+		if (typeof resource === "string") throw new Error("expected closure resources")
+		await rm(resource.worktreePath, { recursive: true, force: true })
 		// Registration survives the directory deletion; pre-fix the early-return handed back
 		// a nonexistent path.
-		const recreated = await manager({ chain, repoCwd, slotKey: "slot" })
-		expect(recreated).toBe(path)
-		expect(existsSync(recreated)).toBe(true)
+		const existing = { closureId: "closure:missing:iteration", itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: resource.worktreePath, branchName: resource.branchName, baseCommit: resource.baseCommit, sourceParNodeId: null, sessions: [] } as const
+		const recreated = await manager({ chain, item, phase: "iteration", closureId: existing.closureId, repoCwd, slotKey: "slot", existing })
+		if (typeof recreated === "string") throw new Error("expected closure resources")
+		expect(recreated.worktreePath).toBe(resource.worktreePath)
+		expect(existsSync(recreated.worktreePath)).toBe(true)
 	} finally {
 		store.close()
 	}
+})
+
+test("startup reconciliation audits missing resources and repairs only orphaned engine namespace", async () => {
+	const root = resolve(TEST_ROOT, "reconcile")
+	const repoCwd = resolve(root, "repo")
+	await initGitRepo(repoCwd)
+	const loopDataRoot = resolve(root, "loop-data")
+	await mkdir(loopDataRoot, { recursive: true })
+	const store = openSqliteStateStore({ loopDataRoot })
+	try {
+		const chain = makeChain(store, "reconcile-chain")
+		const item = makeItem(store, chain, "reconcile", repoCwd)
+		const manager = createGitWorktreeManager({ loopDataRoot })
+		const resources = await manager({ chain, item, phase: "iteration", closureId: "closure:reconcile:iteration", repoCwd, slotKey: "slot", existing: null })
+		if (typeof resources === "string") throw new Error("expected closure resources")
+		const definitionRef = { kind: "chain", contentIdentity: "sha256:reconcile" } as const
+		store.createTaskTree(chain.id, { root: { kind: "leaf", identity: { runtimeNodeId: "leaf-reconcile", definitionRef, definitionNodeId: "iteration" }, closure: { closureId: "closure:reconcile:iteration", itemRowId: item.id, itemId: item.itemId, phase: "iteration", lifecycle: "active", worktreePath: resources.worktreePath, branchName: resources.branchName, baseCommit: resources.baseCommit, sourceParNodeId: null, sessions: [] } }, activeRuns: [] })
+		expect(git(repoCwd, ["worktree", "remove", "--force", resources.worktreePath]).exitCode).toBe(0)
+		expect(git(repoCwd, ["update-ref", "-d", resources.branchName]).exitCode).toBe(0)
+		const orphanPath = resolve(loopDataRoot, "chains", chain.name, "worktrees", "orphan")
+		await mkdir(orphanPath, { recursive: true })
+		const orphanBranch = `coder-loop/closures/${chain.name}/orphan`
+		expect(git(repoCwd, ["branch", orphanBranch, "main"]).exitCode).toBe(0)
+		expect(git(repoCwd, ["config", "core.hooksPath", ".unexpected-hooks"]).exitCode).toBe(0)
+		const findings = await reconcileClosureResources({ chain, items: [item], tree: store.getTaskTree(chain.id)?.root ?? null, loopDataRootOptions: { loopDataRoot } })
+		expect(findings.map((finding) => finding.mismatch.kind).sort()).toEqual(["hooks-drift", "missing-branch", "missing-directory", "orphan-branch", "orphan-directory"])
+		expect(existsSync(orphanPath)).toBe(false)
+		expect(git(repoCwd, ["show-ref", "--verify", `refs/heads/${orphanBranch}`]).exitCode).not.toBe(0)
+		expect(store.getTaskTree(chain.id)?.root).toMatchObject({ closure: { lifecycle: "active" } })
+	} finally { store.close() }
 })
 
 test("worktree create failure is contained: backoff + schedulerSpawnError in extra, cleared on next successful spawn", async () => {
