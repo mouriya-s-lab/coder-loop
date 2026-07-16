@@ -336,7 +336,11 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 			loadPreset(REAL_E2E_MINIMAL_PRESET_DIR),
 		])
 		const decoratedIssueBindings = presets.flatMap((preset) => preset.phases.flatMap((phase) => {
-			const variable = phase.variables.find((candidate) => candidate.key === "ISSUE" && candidate.doc !== null)
+			const variable = phase.variables.find((candidate) =>
+				candidate.source.kind === "item"
+				&& candidate.source.field === preset.item.idField
+				&& candidate.doc?.prefix === "#"
+			)
 			return variable === undefined ? [] : [{ preset, phase, variable }]
 		}))
 		expect(decoratedIssueBindings).toHaveLength(5)
@@ -547,6 +551,73 @@ describe("parsePreset schema validation", () => {
 		expect(renderRuntimeInputsDoc(phase, ctx)).toBe("- Named issue: ref:539!\n- Ticket: `#539` after")
 	})
 
+	test("preset variable binding boundary accepts both variants and rejects malformed products", () => {
+		const valid: BoundaryRecord = {
+			...minimalRoot(),
+			phases: [{
+				name: "p",
+				prompt: "p.md",
+				variables: {
+					STRING: "item.id",
+					PRODUCT: {
+						source: "chain.optional",
+						default: false,
+						label: "Optional",
+						prefix: "[",
+						suffix: "]",
+						style: "plain",
+						blankBefore: true,
+					},
+				},
+			}],
+		}
+		const variables = parsePreset(valid, "/tmp").phases[0]!.variables
+		expect(variables).toEqual([
+			{ key: "STRING", source: { kind: "item", field: "id" }, doc: null },
+			{
+				key: "PRODUCT",
+				source: { kind: "chain", field: "optional", fallback: { kind: "value", value: false } },
+				doc: { label: "Optional", prefix: "[", suffix: "]", style: "plain", blankBefore: true },
+			},
+		])
+
+		const nonStringDocField: BoundaryRecord = {
+			...minimalRoot(),
+			phases: [{ name: "p", prompt: "p.md", variables: { PRODUCT: { source: "item.id", label: 7 } } }],
+		}
+		expect(() => parsePreset(nonStringDocField, "/tmp")).toThrow(/phases\[0\]\.variables\.PRODUCT\.label.*must be a string/)
+
+		const unknownProductField: BoundaryRecord = {
+			...minimalRoot(),
+			phases: [{ name: "p", prompt: "p.md", variables: { PRODUCT: { source: "item.id", label: "Item", prefx: "#" } } }],
+		}
+		expect(() => parsePreset(unknownProductField, "/tmp")).toThrow(/phases\[0\]\.variables\.PRODUCT\.prefx must be removed/)
+	})
+
+	test("runtime input doc rendering is invariant under variable key renaming", () => {
+		const render = (key: string): Uint8Array => {
+			const root: BoundaryRecord = {
+				...minimalRoot(),
+				phases: [{
+					name: "p",
+					prompt: "p.md",
+					variables: { [key]: { source: "runtime.runId", label: "Run", prefix: "#", style: "code" } },
+				}],
+			}
+			const preset = parsePreset(root, "/tmp")
+			const runtime = makeMinimalRuntimeBindings()
+			runtime.runId = "539"
+			return new TextEncoder().encode(renderRuntimeInputsDoc(preset.phases[0]!, {
+				item: makeItemRecord(),
+				chain: {},
+				runtime,
+				preset,
+			}))
+		}
+
+		expect(render("ALPHA")).toEqual(render("BETA"))
+	})
+
 	test("rejects doc decoration without a label but retains default-only object bindings", () => {
 		const decorationFields: ReadonlyArray<readonly [string, string | boolean]> = [
 			["prefix", "#"],
@@ -585,7 +656,7 @@ describe("parsePreset schema validation", () => {
 			}],
 		}
 		expect(() => parsePreset(root, "/tmp")).toThrow(
-			/preset\.phases\[0\]\.variables\.X\.prefx: unrecognized variable binding field/,
+			/preset: phases\[0\]\.variables\.X\.prefx must be removed/,
 		)
 	})
 

@@ -493,13 +493,30 @@ const PresetPhaseRightsBoundary = arkType({
 	"privilegedOps?": "string[]",
 })
 
+const PresetVariableBindingProductBoundary = arkType({
+	source: "string",
+	"default?": arkType.or("string", "number", "boolean", "null"),
+	"label?": "string",
+	"prefix?": "string",
+	"suffix?": "string",
+	"style?": arkType.or(arkType.unit("code"), arkType.unit("plain")),
+	"blankBefore?": "boolean",
+	"+": "reject",
+})
+
+const PresetVariableBindingBoundary = arkType.or("string", PresetVariableBindingProductBoundary)
+
+const PresetVariablesBoundary = arkType({
+	"[string]": PresetVariableBindingBoundary,
+})
+
 const PresetPhaseBoundary = arkType({
 	name: "string",
 	prompt: "string",
 	"runner?": "string",
 	"model?": "string",
 	"exits?": PresetPhaseExitBoundary.array(),
-	"variables?": "object",
+	"variables?": PresetVariablesBoundary,
 	"trigger?": PresetPhaseTriggerBoundary,
 	"roles?": "string[]",
 	"rights?": PresetPhaseRightsBoundary,
@@ -4855,7 +4872,6 @@ export function parsePreset(value: BoundaryValue, presetDir: string): Preset {
 		if (phaseNames.has(entry.name)) presetError(`preset.phases[${index}].name: duplicate name "${entry.name}"`)
 		phaseNames.add(entry.name)
 		const variablesRaw = entry.variables ?? {}
-		if (!isObjectRecord(variablesRaw)) presetError(`preset.phases[${index}].variables: must be an object`)
 		const variables: PresetPhaseVariable[] = []
 		for (const [key, val] of Object.entries(variablesRaw)) {
 			const variable = parseVariableBinding(val, `preset.phases[${index}].variables.${key}`)
@@ -5057,23 +5073,9 @@ function isKnownPresetItemField(field: string, idField: string, itemFields: Read
 	return field === idField || ENGINE_ITEM_BINDING_KEYS.has(field) || itemFields.has(field)
 }
 
-const PRESET_VARIABLE_BINDING_FIELDS = new Set([
-	"source",
-	"default",
-	"label",
-	"prefix",
-	"suffix",
-	"style",
-	"blankBefore",
-])
-
-function parseVariableBinding(value: BoundaryValue, label: string): ParsedVariableBinding {
+function parseVariableBinding(value: typeof PresetVariableBindingBoundary.infer, label: string): ParsedVariableBinding {
 	if (typeof value === "string") return { source: value, doc: null, chainFallback: { kind: "none" } }
-	if (!isObjectRecord(value)) presetError(`${label}: must be a string or { source, label } object`)
-	const unknownField = Object.keys(value).find((field) => !PRESET_VARIABLE_BINDING_FIELDS.has(field))
-	if (unknownField !== undefined) presetError(`${label}.${unknownField}: unrecognized variable binding field`)
 	const source = value.source
-	if (typeof source !== "string") presetError(`${label}.source: must be a string`)
 	const chainFallback: ChainBindingFallback = Object.hasOwn(value, "default")
 		? { kind: "value", value: parseChainBindingDefaultValue(value.default, `${label}.default`) }
 		: { kind: "none" }
@@ -5085,15 +5087,10 @@ function parseVariableBinding(value: BoundaryValue, label: string): ParsedVariab
 		}
 		return { source, doc: null, chainFallback }
 	}
-	if (typeof labelValue !== "string") presetError(`${label}.label: must be a string`)
 	const prefixValue = value.prefix
-	if (prefixValue !== undefined && typeof prefixValue !== "string") presetError(`${label}.prefix: must be a string`)
 	const suffixValue = value.suffix
-	if (suffixValue !== undefined && typeof suffixValue !== "string") presetError(`${label}.suffix: must be a string`)
 	const styleValue = value.style ?? "code"
-	if (styleValue !== "code" && styleValue !== "plain") presetError(`${label}.style: must be "code" or "plain"`)
 	const blankBeforeValue = value.blankBefore ?? false
-	if (typeof blankBeforeValue !== "boolean") presetError(`${label}.blankBefore: must be a boolean`)
 	return { source, doc: { label: labelValue, prefix: prefixValue ?? "", suffix: suffixValue ?? "", style: styleValue, blankBefore: blankBeforeValue }, chainFallback }
 }
 
