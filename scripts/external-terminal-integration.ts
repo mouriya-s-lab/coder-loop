@@ -11,7 +11,7 @@ import { type as arkType } from "arktype"
 import { parseObservabilityEvent, type ObservabilityEvent } from "../src/observability"
 import { externalTerminalHold, externalTerminalLoss } from "../src/runtime-data"
 import { resolveChainRuntimePaths, resolveLoopDataPaths } from "../src/runtime-paths"
-import { openSqliteStateStore } from "../src/sqlite-state"
+import { openSqliteStateStore, type CurrentRunRecord, type ItemRecord, type RunRecord } from "../src/sqlite-state"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const LOOP_ENTRY = resolve(REPO_ROOT, "src/loop.ts")
@@ -19,10 +19,10 @@ const HELP = `Usage: bun scripts/external-terminal-integration.ts
 
 Runs one isolated real daemon/CLI/SQLite lifecycle and asserts:
   missing-binary  accepted item, durable hold, one warning, zero spawn artifacts
-  restoration     stopped sibling + active chain share one endpoint epoch and restoration transition
-  loss-first      credential revocation, TERM/grace/KILL, lost attribution and restoration
+  endpoint-69     typed endpoint-unavailable hold with zero scheduling side effects
+  restoration     hold clears once and reaches typed invocation-pending without HAPI spawn
   probe-failed    unexpected-exit, signal, and deadline-exceeded remain typed failures
-  terminal-first  committed terminal status wins the loss race
+  evidence        prints per-transition status/log/SQLite/process snapshots before teardown
 `
 
 const AvailabilityBoundary = arkType.or(
@@ -81,6 +81,26 @@ type RunnerScenario = {
 type RunnerObservationPaths = {
 	invocationLogPath: string
 	postRevokePath: string
+}
+
+type TransitionSqliteEvidence = {
+	item: ItemRecord | null
+	runs: RunRecord[]
+	current: CurrentRunRecord | null
+}
+
+type TransitionProcessEvidence = {
+	daemon: { pid: number | null; alive: boolean }
+	runners: { pid: number; alive: boolean }[]
+}
+
+type TransitionEvidence = {
+	transition: string
+	chainName: string
+	status: StatusSnapshot
+	logs: ObservabilityEvent[]
+	sqlite: TransitionSqliteEvidence
+	processes: TransitionProcessEvidence
 }
 
 function log(message: string): void {
@@ -345,6 +365,28 @@ function hasBackoff(events: readonly ObservabilityEvent[]): boolean {
 	return events.some((event) => event.type === "item.backoff" || event.type === "spawn.aborted")
 }
 
+function retainTransitionEvidence(harness: Harness, transition: string, chainName: string, itemId: string): void {
+	const id = chainId(harness, chainName)
+	const sqlite = storeRead(harness, (store): TransitionSqliteEvidence => ({
+		item: store.getItemById(id, itemId),
+		runs: store.listRuns(id),
+		current: store.getCurrentRun(id),
+	}))
+	const daemonPid = harness.daemon.child.pid ?? null
+	const evidence: TransitionEvidence = {
+		transition,
+		chainName,
+		status: readStatus(harness, chainName),
+		logs: readEvents(harness, chainName),
+		sqlite,
+		processes: {
+			daemon: { pid: daemonPid, alive: daemonPid !== null && processExists(daemonPid) },
+			runners: [...harness.runnerPids].map((pid) => ({ pid, alive: processExists(pid) })),
+		},
+	}
+	log(`evidence ${JSON.stringify(evidence)}`)
+}
+
 async function scenarioMissingRestorationLoss(harness: Harness): Promise<number> {
 	const chainName = `external-loss-${randomUUID()}`
 	const stoppedSiblingChainName = `external-loss-stopped-sibling-${randomUUID()}`
@@ -448,7 +490,30 @@ async function scenarioProbeFailure(harness: Harness, scenario: "unexpected-exit
 	const item = storeRead(harness, (store) => store.getItemById(id, itemId))
 	invariant(item !== null && item.attempts === 0 && item.lastRunId === null, `${scenario} changed attempts/run identity`)
 	invariant(!hasBackoff(readEvents(harness, chainName)), `${scenario} emitted spawn-failure backoff`)
+	await assertNoSpawnArtifacts(harness, chainName)
+	retainTransitionEvidence(harness, `probe-failed/${scenario}`, chainName, itemId)
 	log(`scenario probe-failed/${scenario}: typed hold, zero run/current/attempt/backoff passed`)
+	stopChain(harness, chainName)
+}
+
+async function scenarioEndpointUnavailable(harness: Harness): Promise<void> {
+	const chainName = `external-endpoint-unavailable-${randomUUID()}`
+	const itemId = "endpoint-unavailable"
+	await writeFile(harness.probeStatePath, "69")
+	createChain(harness, chainName)
+	addItem(harness, chainName, itemId)
+	const status = await waitFor("endpoint-unavailable hold", () => readStatus(harness, chainName), (value) => value.queue.holds.length === 1)
+	const hold = status.queue.holds[0]
+	invariant(hold?.availability.kind === "unavailable" && hold.availability.reason === "endpoint-unavailable" && hold.availability.exitCode === 69, `exit 69 decoded as ${JSON.stringify(hold?.availability)}`)
+	invariant(status.runs.total === 0 && status.current.run === null, "endpoint-unavailable crossed the pre-run gate")
+	const id = chainId(harness, chainName)
+	const item = storeRead(harness, (store) => store.getItemById(id, itemId))
+	invariant(item !== null && item.attempts === 0 && item.lastRunId === null && item.agentCwd === null, `endpoint-unavailable changed scheduling identity: ${JSON.stringify(item)}`)
+	const events = readEvents(harness, chainName)
+	invariant(externalWarnings(events).length === 1 && !hasBackoff(events), "endpoint-unavailable warning/backoff mismatch")
+	await assertNoSpawnArtifacts(harness, chainName)
+	retainTransitionEvidence(harness, "endpoint-unavailable/exit-69", chainName, itemId)
+	log("scenario endpoint-unavailable/exit-69: typed hold and warning with zero run/current/worktree/attempt/backoff/process side effects")
 	stopChain(harness, chainName)
 }
 
@@ -465,6 +530,7 @@ async function scenarioAvailabilityPending(harness: Harness): Promise<void> {
 	await assertNoSpawnArtifacts(harness, chainName)
 	const missingEvents = readEvents(harness, chainName)
 	invariant(externalWarnings(missingEvents).length === 1 && !hasBackoff(missingEvents), "missing-binary warning/backoff mismatch")
+	retainTransitionEvidence(harness, "missing-binary", chainName, itemId)
 	log("scenario missing-binary: durable hold and one typed warning with zero scheduling side effects")
 
 	await writeRunner(harness, { mode: "loss", chainName, itemId })
@@ -478,6 +544,7 @@ async function scenarioAvailabilityPending(harness: Harness): Promise<void> {
 	invariant(item !== null && item.attempts === 0 && item.lastRunId === null && item.agentCwd === null, `invocation-pending crossed a scheduling side effect: ${JSON.stringify(item)}`)
 	invariant(storeRead(harness, (store) => store.listRuns(id).length) === 0 && storeRead(harness, (store) => store.getCurrentRun(id)) === null, "invocation-pending created run/current-run")
 	await assertNoSpawnArtifacts(harness, chainName)
+	retainTransitionEvidence(harness, "restoration/invocation-pending", chainName, itemId)
 	log("scenario restoration/invocation-pending: hold cleared once; typed pending gate kept run/worktree/attempt/credential/session/artifact/process counts at zero")
 	stopChain(harness, chainName)
 }
@@ -594,6 +661,7 @@ async function main(): Promise<void> {
 	try {
 		log(`external-terminal-integration: start root=${harness.workDir}`)
 		await scenarioAvailabilityPending(harness)
+		await scenarioEndpointUnavailable(harness)
 		await scenarioProbeFailure(harness, "unexpected-exit")
 		await scenarioProbeFailure(harness, "signal")
 		await scenarioProbeFailure(harness, "deadline-exceeded")
@@ -606,7 +674,7 @@ async function main(): Promise<void> {
 			await rm(harness.workDir, { recursive: true, force: true })
 		}
 	}
-	if (!failed) log("external-terminal-integration: PASS missing-binary probe-failed restoration invocation-pending zero-hapi-spawn")
+	if (!failed) log("external-terminal-integration: PASS missing-binary endpoint-unavailable probe-failed restoration invocation-pending zero-hapi-spawn evidence-retained")
 }
 
 if (import.meta.main) {

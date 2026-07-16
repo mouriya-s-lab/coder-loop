@@ -33,7 +33,7 @@ describe("smoke: v2 central chain CLI", () => {
 		})
 		const output = new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr)
 		expect(result.exitCode, output).toBe(0)
-		for (const scenario of ["missing-binary", "restoration", "loss-first", "probe-failed", "terminal-first"]) {
+		for (const scenario of ["missing-binary", "endpoint-69", "restoration", "probe-failed", "evidence"]) {
 			expect(output).toContain(scenario)
 		}
 	})
