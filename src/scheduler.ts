@@ -17,6 +17,7 @@ import {
 	selectRunnerForPhase,
 	type AgentRunnerKind,
 	type AgentRunnerSelection,
+	type CompiledTaskModel,
 	type JsonObject,
 	type JsonValue,
 	type Preset,
@@ -159,7 +160,7 @@ export type SchedulerState = {
 	slots: Map<string, SchedulerSlot>
 	finalizingItemStatuses: Map<number, InternalStatus>
 	finalizingChainIds: Set<number>
-	pendingCloseHandlers: Set<Promise<unknown>>
+	pendingCloseHandlers: Set<Promise<SchedulerCompletedRun>>
 	recycleTriggers: Map<string, SchedulerRecycleTrigger>
 	lifecycleEventPersistenceFailures: SchedulerLifecycleEventPersistenceFailure[]
 	// #478: account-level rate-limit cooldown. The scheduler close handler arms this
@@ -181,6 +182,7 @@ export type SchedulerStore = Pick<
 	| "getItem"
 	| "updateItem"
 	| "setItemSessionId"
+	| "getItemSessionId"
 	| "recordRun"
 	| "getRunByRunId"
 	| "completeRun"
@@ -299,7 +301,7 @@ export type SchedulerPhaseRunnerSelectionForItemResolver = (chain: ChainRecord, 
 
 export type SchedulerLoadedPreset = {
 	presetDir: string
-	preset: Preset
+	preset: CompiledTaskModel
 }
 
 export type SchedulerPresetResolver = (chain: ChainRecord) => SchedulerLoadedPreset | Promise<SchedulerLoadedPreset>
@@ -845,6 +847,10 @@ export function schedulerSlotWorktreePath(chain: ChainRecord, repoCwd: string, o
 	return resolve(chainPaths.chainRoot, "worktrees", `${repoLabel}-${repoHash}`)
 }
 
+function schedulerSlotBranchName(chain: ChainRecord, repoCwd: string): string {
+	return `coder-loop/${safeGitRefComponent(chain.name)}-${createHash("sha256").update(repoCwd).digest("hex").slice(0, 12)}`
+}
+
 export function createGitWorktreeManager(options: LoopDataRootOptions = {}): SchedulerWorktreeManager {
 	return async ({ chain, repoCwd }) => {
 		const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, options)
@@ -856,7 +862,7 @@ export function createGitWorktreeManager(options: LoopDataRootOptions = {}): Sch
 			git(repoCwd, ["worktree", "prune"])
 		}
 
-		const branchName = `coder-loop/${safeGitRefComponent(chain.name)}-${createHash("sha256").update(repoCwd).digest("hex").slice(0, 12)}`
+		const branchName = schedulerSlotBranchName(chain, repoCwd)
 		const startRef = chooseWorktreeStartRef(repoCwd, chain.baseBranch)
 		let result = git(repoCwd, ["worktree", "add", "-B", branchName, worktreePath, startRef])
 		if (result.exitCode !== 0 && removeStaleSlotBranchWorktree(repoCwd, result.stderr)) {
@@ -950,7 +956,7 @@ export function listActiveRuns(state: SchedulerState): SchedulerActiveRun[] {
 	return [...state.slots.values()].flatMap((slot) => (slot.activeRun === null ? [] : [slot.activeRun]))
 }
 
-export function listPendingCloseHandlers(state: SchedulerState): Promise<unknown>[] {
+export function listPendingCloseHandlers(state: SchedulerState): Promise<SchedulerCompletedRun>[] {
 	return [...state.pendingCloseHandlers]
 }
 
@@ -983,9 +989,14 @@ async function spawnSchedulerRun(
 	try {
 		worktreePath = worktreePath ?? await worktreeManager({ chain, repoCwd: item.repoCwd, slotKey: slot.key })
 		slot.worktreePath = worktreePath
+		const baseCommitResult = git(worktreePath, ["rev-parse", "HEAD"])
+		const branchName = schedulerSlotBranchName(chain, item.repoCwd)
 
 		const runner = await resolvePhaseRunner(options, { chain, item, phase })
-		const resumeDecision = resumeDecisionForItem(item, phase, runner.kind)
+		const loadedPreset = await schedulerLoadedPresetForItem(options, chain, item)
+		const definitionContentIdentity = await presetExecutionContentIdentity(loadedPreset)
+		const persistedSessionId = options.store.getItemSessionId(item.id, { phase, runner: runner.kind })
+		const resumeDecision: ResumeDecision = persistedSessionId === null ? freshResume() : { kind: "resume", sessionId: persistedSessionId }
 		const startsAttempt = phase === phasePlan.firstPhase && resumeDecision.kind === "fresh"
 		runId = options.runIdFactory?.({ chain, item, phase }) ?? makeRunId(item.id, phase)
 		startedAt = nowSeconds(options)
@@ -1000,6 +1011,14 @@ async function spawnSchedulerRun(
 				slotKey: slot.key,
 				repoCwd: item.repoCwd,
 				worktreePath,
+				...(baseCommitResult.exitCode === 0 && baseCommitResult.stdout !== "" ? { baseCommit: baseCommitResult.stdout } : {}),
+				branchName,
+				definitionKind: "preset",
+				definitionContentIdentity,
+				definitionPhases: loadedPreset.preset.tasks.children.map((phaseTree) => ({
+					phase: phaseTree.phase,
+					definitionNodeId: phaseTree.children[0].identity,
+				})),
 				startStatus: item.status,
 				startStatusUpdatedAt: item.statusUpdatedAt,
 				...(item.phase === null ? {} : { startPhase: item.phase }),
@@ -1023,7 +1042,6 @@ async function spawnSchedulerRun(
 		if (extraWithoutSpawnError !== item.extra) spawnUpdate.extra = extraWithoutSpawnError
 		options.store.updateItem(item.id, spawnUpdate)
 
-		const loadedPreset = await schedulerLoadedPresetForItem(options, chain, item)
 		const presetDir = loadedPreset.preset.presetDir
 		const context: SchedulerSpawnContext = { chain, item, slot, runId, worktreePath, presetDir, loadedPreset, phase }
 		const rawPrompt = typeof options.prompt === "string" ? options.prompt : await options.prompt(context)
@@ -1197,8 +1215,7 @@ async function cleanupFailedRunPreparation(
 				extra: run.extra,
 			})
 		}
-		const currentRun = options.store.getCurrentRun(chain.id)
-		if (currentRun?.runId === resources.runId) options.store.clearCurrentRun(chain.id)
+			options.store.clearCurrentRun(resources.runId)
 		options.state.recycleTriggers.delete(resources.runId)
 	}
 	if (resources.runId === null || slot.activeRun?.runId === resources.runId) slot.activeRun = null
@@ -1385,8 +1402,7 @@ function attachRunCloseHandler(
 					})
 
 					persistenceStage = "current-run"
-					const currentRun = options.store.getCurrentRun(chain.id)
-					if (currentRun?.runId === runId) options.store.clearCurrentRun(chain.id)
+						options.store.clearCurrentRun(runId)
 					persistenceStage = null
 
 					if (slot.activeRun?.runId === runId) slot.activeRun = null
@@ -1410,7 +1426,7 @@ function attachRunCloseHandler(
 						durationSeconds: Math.max(0, endedAt - startedAt),
 						status,
 					})
-					const previousSessionId = (currentItem ?? item).sessionIds[phase]?.[runner.kind] ?? null
+					const previousSessionId = options.store.getItemSessionId(item.id, { phase, runner: runner.kind })
 					if (currentItem === null || !terminalStatuses.has(currentItem.status)) {
 						const itemForBackoff = currentItem ?? item
 						const statusWasWrittenDuringRun = currentItem !== null && currentItem.statusUpdatedAt !== item.statusUpdatedAt && currentItem.statusUpdatedAt >= startedAt
@@ -2735,6 +2751,10 @@ function git(cwd: string, args: readonly string[]): { stdout: string; stderr: st
 	} catch (error) {
 		return { stdout: "", stderr: errorMessage(error), exitCode: 1 }
 	}
+}
+
+export async function presetExecutionContentIdentity(loaded: SchedulerLoadedPreset): Promise<string> {
+	return loaded.preset.sourceHash
 }
 
 function errorMessage(error: unknown): string {

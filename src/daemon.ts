@@ -127,6 +127,7 @@ import {
 	type PrivilegedOpAuditOp,
 	type PrivilegedOpAuditReason,
 } from "./observability"
+import type { TaskNodeIdentity, TaskNodeSnapshot } from "./task-runtime"
 
 // #409: every daemon command an agent process can reach belongs to exactly one
 // authorization class. The classification is the engine's compile-time gate —
@@ -794,10 +795,35 @@ export class DaemonError extends Error {
 	}
 }
 
-export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: SchedulerEvent): ObservabilityEvent {
+function schedulerEventRunId(event: SchedulerEvent): string | null {
+	if (event.type === "slot.busy") return event.activeRunId
+	if ("runId" in event) return event.runId ?? null
+	return null
+}
+
+function resolveStoredRunTaskIdentity(store: SqliteStateStore, chain: ChainRecord, runId: string): TaskNodeIdentity {
+	const run = store.getRunByRunId(runId)
+	if (run === null) throw new DaemonError("internal_error", `run ${runId} has no durable run row`)
+	const tree = store.getTaskTree(chain.id)
+	const identity = tree === null ? null : findTaskNodeIdentity(tree.root, run.runtimeNodeId)
+	if (identity === null) throw new DaemonError("internal_error", `run ${run.runId} task identity ${run.runtimeNodeId} is absent from its persisted tree`)
+	return identity
+}
+
+export function resolveSchedulerEventTaskIdentity(store: SqliteStateStore, chain: ChainRecord, event: SchedulerEvent): TaskNodeIdentity | null {
+	const runId = schedulerEventRunId(event)
+	return runId === null ? null : resolveStoredRunTaskIdentity(store, chain, runId)
+}
+
+export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: SchedulerEvent, identity: TaskNodeIdentity | null = null): ObservabilityEvent {
+	const runId = schedulerEventRunId(event)
+	if (runId !== null && identity === null) throw new DaemonError("internal_error", `run ${runId} observability event has no durable task identity`)
+	if (runId === null && identity !== null) throw new DaemonError("internal_error", `non-run scheduler event ${event.type} received task identity`)
+	const identityFields = identity === null ? {} : identity
 	switch (event.type) {
 		case "slot.busy":
 			return makeObservabilityEvent({
+				...identityFields,
 				kind: "decision",
 				type: "slot.busy",
 				chain: chain.name,
@@ -828,6 +854,7 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 			})
 		case "agent.spawn":
 			return makeObservabilityEvent({
+				...identityFields,
 				kind: "lifecycle",
 				type: "agent.spawn",
 				chain: chain.name,
@@ -839,6 +866,7 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 			})
 		case "agent.exit":
 			return makeObservabilityEvent({
+				...identityFields,
 				kind: "lifecycle",
 				type: "agent.exit",
 				chain: chain.name,
@@ -850,6 +878,7 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 			})
 		case "session_id.invalidated":
 			return makeObservabilityEvent({
+				...identityFields,
 				kind: "validation",
 				type: "session_id.invalidated",
 				chain: chain.name,
@@ -870,6 +899,7 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 			})
 		case "chain.complete_trigger":
 			return makeObservabilityEvent({
+				...identityFields,
 				kind: "decision",
 				type: "chain.complete_trigger",
 				chain: chain.name,
@@ -883,6 +913,7 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 			})
 		case "chain.complete_trigger_failed":
 			return makeObservabilityEvent({
+				...identityFields,
 				kind: "diagnostic",
 				type: "chain.complete_trigger_failed",
 				chain: chain.name,
@@ -892,6 +923,7 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 			})
 		case "chain.completed":
 			return makeObservabilityEvent({
+				...identityFields,
 				kind: "lifecycle",
 				type: "chain.completed",
 				chain: chain.name,
@@ -901,6 +933,7 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 			})
 		case "phase.start":
 			return makeObservabilityEvent({
+				...identityFields,
 				kind: "lifecycle",
 				type: "phase.start",
 				chain: chain.name,
@@ -912,6 +945,7 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 			})
 		case "phase.end":
 			return makeObservabilityEvent({
+				...identityFields,
 				kind: "lifecycle",
 				type: "phase.end",
 				chain: chain.name,
@@ -923,6 +957,7 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 			})
 		case "attempt.timeout":
 			return makeObservabilityEvent({
+				...identityFields,
 				kind: "lifecycle",
 				type: "attempt.timeout",
 				chain: chain.name,
@@ -937,6 +972,7 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 			// kept distinct from `attempt.timeout` (absolute floor) so observers can
 			// classify early reclaim vs. terminal-budget exhaustion without parsing payloads.
 			return makeObservabilityEvent({
+				...identityFields,
 				kind: "lifecycle",
 				type: "run.startup_idle_kill",
 				chain: chain.name,
@@ -951,6 +987,7 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 			// stream so an observer can pair the per-run trigger (`event.runId`) with the
 			// daemon-wide `rateLimit` field on `daemon.status`.
 			return makeObservabilityEvent({
+				...identityFields,
 				kind: "lifecycle",
 				type: "scheduler.rate_limited",
 				chain: chain.name,
@@ -964,6 +1001,7 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 			// window duration so an observer can pair this with the eventual
 			// `recycle.timeout_kill` or `recycle.natural_exit` event for the same runId.
 			return makeObservabilityEvent({
+				...identityFields,
 				kind: "lifecycle",
 				type: "recycle.pending_entered",
 				chain: chain.name,
@@ -978,6 +1016,7 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 			// the process group. Carries the excerpt for diagnostics so an auditor can see
 			// what the wedge was doing without re-reading the run logs.
 			return makeObservabilityEvent({
+				...identityFields,
 				kind: "lifecycle",
 				type: "recycle.timeout_kill",
 				chain: chain.name,
@@ -992,6 +1031,7 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 			// Carries `elapsedMs` so the lifecycle stream tells whether agents tend to
 			// exit fast after writing state (small elapsedMs) or sit on the window edge.
 			return makeObservabilityEvent({
+				...identityFields,
 				kind: "lifecycle",
 				type: "recycle.natural_exit",
 				chain: chain.name,
@@ -1003,6 +1043,7 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 			})
 		case "queue.terminal":
 			return makeObservabilityEvent({
+				...identityFields,
 				kind: "audit",
 				type: "queue.terminal",
 				chain: chain.name,
@@ -1031,6 +1072,25 @@ export function schedulerEventToObservabilityEvent(chain: ChainRecord, event: Sc
 		default:
 			return assertNeverSchedulerEvent(event)
 	}
+}
+
+function findTaskNodeIdentity(node: TaskNodeSnapshot, runtimeNodeId: string): TaskNodeIdentity | null {
+	if (node.identity.runtimeNodeId === runtimeNodeId) return node.identity
+	switch (node.kind) {
+		case "leaf": return null
+		case "seq":
+		case "par":
+			for (const child of node.children) {
+				const found = findTaskNodeIdentity(child, runtimeNodeId)
+				if (found !== null) return found
+			}
+			return null
+		default: return assertNeverTaskNode(node)
+	}
+}
+
+function assertNeverTaskNode(node: never): never {
+	throw new DaemonError("internal_error", `unhandled task node: ${JSON.stringify(node)}`)
 }
 
 export class CoderLoopDaemon {
@@ -1192,11 +1252,13 @@ export class CoderLoopDaemon {
 	}
 
 	private recordRunnerStatusPersistenceFailure(failure: RunnerStatusPersistenceFailure, chainId: number, itemId?: number): void {
-		const chain = this.store?.getChain(chainId)
+		const chain = this.requireStore().getChain(chainId)
+		if (chain === null) throw new DaemonError("internal_error", `run ${failure.runId} persistence failure has no durable chain ${chainId}`)
 		const event = makeObservabilityEvent({
+			...this.requireStoredRunTaskIdentity(chain, failure.runId),
 			kind: "diagnostic",
 			type: "runner.status_persistence_failed",
-			...(chain === null || chain === undefined ? {} : { chain: chain.name }),
+			chain: chain.name,
 			...(itemId === undefined ? {} : { item: itemId }),
 			runId: failure.runId,
 			phase: failure.phase,
@@ -1218,11 +1280,13 @@ export class CoderLoopDaemon {
 	}
 
 	private recordLifecycleEventPersistenceFailure(failure: SchedulerLifecycleEventPersistenceFailure): void {
-		const chain = this.store?.getChain(failure.event.chainId)
+		const chain = this.requireStore().getChain(failure.event.chainId)
+		if (chain === null) throw new DaemonError("internal_error", `run ${failure.event.runId} lifecycle failure has no durable chain ${failure.event.chainId}`)
 		const event = makeObservabilityEvent({
+			...this.requireStoredRunTaskIdentity(chain, failure.event.runId),
 			kind: "diagnostic",
 			type: "scheduler.lifecycle_event_persistence_failed",
-			...(chain === null || chain === undefined ? {} : { chain: chain.name }),
+			chain: chain.name,
 			item: failure.event.itemId,
 			runId: failure.event.runId,
 			phase: failure.event.phase,
@@ -2024,7 +2088,7 @@ export class CoderLoopDaemon {
 			type: "privileged_op.caller_admission",
 			...(input.chainName === null ? {} : { chain: input.chainName }),
 			...(input.subject.kind === "agent"
-				? { runId: input.subject.runId, phase: input.subject.phase }
+				? { ...this.requireStoredRunTaskIdentityByRunId(input.subject.runId), runId: input.subject.runId, phase: input.subject.phase }
 				: {}),
 			subject: input.subject,
 			payload: {
@@ -2231,25 +2295,30 @@ export class CoderLoopDaemon {
 
 	private async recoverStaleSchedulerState(): Promise<void> {
 		// #508: daemon recovery is a process-layer concern only. It kills any stale process group
-		// from the previous daemon instance and clears the `current_runs` orphan row so the
+		// from the previous daemon instance and clears each exact `active_runs` orphan row so the
 		// scheduler is free to take a new run on this chain. It MUST NOT write `items.status`,
-		// `items.phase`, or `items.sessionIds` — those are business fields the agent owns. An
+		// `items.phase`, or closure sessions — those are business fields the agent owns. An
 		// interrupted in_progress item is left as-is and re-scheduled because the preset's
 		// `statuses.continuable` covers `in_progress` (see preset.toml).
 		const store = this.requireStore()
 		for (const chain of store.listChains()) {
 			if (chain.status === "deleted") continue
-			const currentRun = store.getCurrentRun(chain.id)
-			if (currentRun !== null) {
+			for (const currentRun of store.listCurrentRuns(chain.id)) {
+				const run = store.getRunByRunId(currentRun.runId)
+				if (run === null) throw new DaemonError("internal_error", `active run ${currentRun.runId} has no durable run row`)
+				const tree = store.getTaskTree(chain.id)
+				const identity = tree === null ? null : findTaskNodeIdentity(tree.root, run.runtimeNodeId)
+				if (identity === null) throw new DaemonError("internal_error", `run ${run.runId} task identity ${run.runtimeNodeId} is absent from its persisted tree`)
 				const stalePid = await this.readRunProcessGroupPid(chain, currentRun.runId, currentRun.extra)
 				if (stalePid !== null) await terminateStaleProcessGroup(stalePid, Math.min(this.shutdownGraceMs, STALE_RECOVERY_FORCE_AFTER_MS))
 
-				store.clearCurrentRun(chain.id)
+				store.clearCurrentRun(currentRun.runId)
 				await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
 					kind: "lifecycle",
 					type: "scheduler.recovery",
 					chain: chain.name,
 					runId: currentRun.runId,
+					...identity,
 					subject: { kind: "engine" },
 					payload: {
 						reason: "stale_current_run",
@@ -2269,8 +2338,11 @@ export class CoderLoopDaemon {
 		if (orphanedRuns.length === 0) return
 
 		const reconciledAt = unixSeconds()
-		const reconciledRuns: { runId: string; itemId: number; phase: string; pid: number | null }[] = []
+		const reconciledRuns: { runId: string; itemId: number; phase: string; pid: number | null; runtimeNodeId: string; definitionRef: TaskNodeIdentity["definitionRef"]; definitionNodeId: string }[] = []
 		for (const run of orphanedRuns) {
+			const tree = store.getTaskTree(chain.id)
+			const identity = tree === null ? null : findTaskNodeIdentity(tree.root, run.runtimeNodeId)
+			if (identity === null) throw new DaemonError("internal_error", `run ${run.runId} task identity ${run.runtimeNodeId} is absent from its persisted tree`)
 			const stalePid = await this.readRunProcessGroupPid(chain, run.runId, run.extra)
 			if (stalePid !== null) await terminateStaleProcessGroup(stalePid, Math.min(this.shutdownGraceMs, STALE_RECOVERY_FORCE_AFTER_MS))
 			store.completeRun(run.runId, {
@@ -2279,7 +2351,7 @@ export class CoderLoopDaemon {
 				status: ORPHANED_RUN_STATUS,
 				extra: storedItemExtra({ ...itemExtraToJsonObject(run.extra), reconciledBy: "daemon_startup", reconciledAt }),
 			})
-			reconciledRuns.push({ runId: run.runId, itemId: run.itemId, phase: run.phase, pid: stalePid })
+			reconciledRuns.push({ runId: run.runId, itemId: run.itemId, phase: run.phase, pid: stalePid, ...identity })
 		}
 
 		await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
@@ -2621,7 +2693,7 @@ export class CoderLoopDaemon {
 				}
 			}
 			const entryStatus = preset.statuses.entry
-			const current = store.getCurrentRun(chain.id)
+			const current = store.listCurrentRuns(chain.id).find((run) => run.extra.itemId === item.id) ?? null
 			// CurrentRunRecord stores the active item identifier inside `extra.itemId` (the same shape
 			// the scheduler writes when it spawns); resolve it as JsonValue and only match when it's
 			// the numeric rowid the store inserted.
@@ -2637,7 +2709,7 @@ export class CoderLoopDaemon {
 					status: engineLifecycleAdmittedItemStatus(entryStatus, "queue.unblock-entry-restore"),
 					updatedAt: unixSeconds(),
 				})
-				if (clearedCurrent) store.clearCurrentRun(chain.id)
+				if (clearedCurrent && current !== null) store.clearCurrentRun(current.runId)
 				// Mirror the #406 operator-attribution audit shape the old CLI emitted so external
 				// tooling that watches `item.mutation.caller_admission` keeps seeing the unblock.
 				await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
@@ -2752,7 +2824,7 @@ export class CoderLoopDaemon {
 		// agent paths became reachable; the exhaustive switch on caller.kind here is how
 		// runId/phase enter the event base for the agent path.
 		const createdCallerExtras = caller.kind === "agent"
-			? { runId: caller.runId, phase: caller.phase }
+			? { ...this.requireStoredRunTaskIdentity(chain, caller.runId), runId: caller.runId, phase: caller.phase }
 			: {}
 		await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
 			kind: "audit",
@@ -2811,7 +2883,7 @@ export class CoderLoopDaemon {
 		}
 		// #407: emit `item.created` with the caller's true subject for each created child.
 		const createdCallerExtras = caller.kind === "agent"
-			? { runId: caller.runId, phase: caller.phase }
+			? { ...this.requireStoredRunTaskIdentity(chain, caller.runId), runId: caller.runId, phase: caller.phase }
 			: {}
 		for (const item of items) {
 			await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
@@ -3034,7 +3106,7 @@ export class CoderLoopDaemon {
 				// new caller variant in the future = a typechecker error here (the assertNever in
 				// observability.ts already enforces exhaustiveness on the rendering side).
 				const callerExtras = caller.kind === "agent"
-					? { runId: caller.runId, phase: caller.phase }
+					? { ...this.requireStoredRunTaskIdentity(chain, caller.runId), runId: caller.runId, phase: caller.phase }
 					: {}
 				await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
 					kind: "audit",
@@ -3096,7 +3168,7 @@ export class CoderLoopDaemon {
 				chain: chain.name,
 				item: item.id,
 				...(subject.kind === "agent"
-					? { runId: subject.runId, phase: subject.phase }
+					? { ...this.requireStoredRunTaskIdentity(chain, subject.runId), runId: subject.runId, phase: subject.phase }
 					: {}),
 				subject,
 				payload: { rowId: item.id, itemId: item.itemId, position },
@@ -3288,6 +3360,7 @@ export class CoderLoopDaemon {
 			const terminatedRuns = await this.terminateActiveRunsForChain(currentChain.id)
 			const terminatedRunIds = terminatedRuns.map((run) => run.runId)
 			await this.recordObservabilityEventIfChainNameIsValid(stopped, makeObservabilityEvent({
+				...this.requireStoredRunTaskIdentity(stopped, source.runId),
 				kind: "audit",
 				type: "chain.status",
 				chain: stopped.name,
@@ -3312,6 +3385,7 @@ export class CoderLoopDaemon {
 
 	private async recordChainStopFromPhaseExitLifecycle(chain: ChainRecord, source: { rowId: number; itemId: string; runId: string; phase: string; subject: ObservabilitySubject; alreadyStopped: boolean; terminatedRunIds: string[] }): Promise<void> {
 		await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
+			...this.requireStoredRunTaskIdentity(chain, source.runId),
 			kind: "lifecycle",
 			type: "chain.stop.from_phase_exit",
 			chain: chain.name,
@@ -3345,6 +3419,7 @@ export class CoderLoopDaemon {
 		subject: ObservabilitySubject
 	}): Promise<void> {
 		await this.recordObservabilityEventIfChainNameIsValid(chain, makeObservabilityEvent({
+			...this.requireStoredRunTaskIdentity(chain, input.runId),
 			kind: "audit",
 			type: "item.exit.selected",
 			chain: chain.name,
@@ -3417,6 +3492,19 @@ export class CoderLoopDaemon {
 	private requireStore(): SqliteStateStore {
 		if (this.store === null) throw new DaemonError("daemon_not_running", "daemon store is not open")
 		return this.store
+	}
+
+	private requireStoredRunTaskIdentity(chain: ChainRecord, runId: string): TaskNodeIdentity {
+		return resolveStoredRunTaskIdentity(this.requireStore(), chain, runId)
+	}
+
+	private requireStoredRunTaskIdentityByRunId(runId: string): TaskNodeIdentity {
+		const store = this.requireStore()
+		const run = store.getRunByRunId(runId)
+		if (run === null) throw new DaemonError("internal_error", `run ${runId} has no durable run row`)
+		const chain = store.getChain(run.chainId)
+		if (chain === null) throw new DaemonError("internal_error", `run ${runId} has no durable chain ${run.chainId}`)
+		return resolveStoredRunTaskIdentity(store, chain, runId)
 	}
 
 	private schedulerEnabled(): boolean {
@@ -3544,7 +3632,8 @@ export class CoderLoopDaemon {
 				if (this.store !== null) {
 					const chain = this.store.getChain(event.chainId)
 					if (chain === null) throw new DaemonError("not_found", `chain not found: ${event.chainId}`)
-					const observabilityEvent = schedulerEventToObservabilityEvent(chain, event)
+					const identity = resolveSchedulerEventTaskIdentity(this.store, chain, event)
+					const observabilityEvent = schedulerEventToObservabilityEvent(chain, event, identity)
 					if (isTimerOwnedSchedulerLifecycleEvent(event)) {
 						await this.recordObservabilityEventOrThrow(observabilityEvent, event.chainId)
 					} else {
@@ -3933,7 +4022,7 @@ export class CoderLoopDaemon {
 			chain: chain.name,
 			item: input.item.id,
 			...(input.subject.kind === "agent"
-				? { runId: input.subject.runId, phase: input.subject.phase }
+				? { ...this.requireStoredRunTaskIdentity(chain, input.subject.runId), runId: input.subject.runId, phase: input.subject.phase }
 				: {}),
 			subject: input.subject,
 			payload: {
@@ -4050,7 +4139,7 @@ export class CoderLoopDaemon {
 			type: "item.add.rights_admission",
 			chain: chain.name,
 			...(input.caller.kind === "agent"
-				? { runId: input.caller.runId, phase: input.caller.phase }
+				? { ...this.requireStoredRunTaskIdentity(chain, input.caller.runId), runId: input.caller.runId, phase: input.caller.phase }
 				: {}),
 			subject: input.caller.subject,
 			payload: {
@@ -4175,7 +4264,7 @@ export class CoderLoopDaemon {
 			chain: chain.name,
 			item: input.item.id,
 			...(input.caller.kind === "agent"
-				? { runId: input.caller.runId, phase: input.caller.phase }
+				? { ...this.requireStoredRunTaskIdentity(chain, input.caller.runId), runId: input.caller.runId, phase: input.caller.phase }
 				: {}),
 			subject: input.caller.subject,
 			payload: {

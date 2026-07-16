@@ -75,6 +75,7 @@ import {
 	type InternalStatus,
 	type ItemExtra,
 } from "./runtime-data"
+import { TaskTreeSnapshotBoundary, type TaskTreeSnapshot } from "./task-runtime"
 import { checkPresetDag, type PresetDagFinding } from "./preset-dag-check"
 export { checkPresetDag } from "./preset-dag-check"
 export type { PresetDagFinding, PresetDagFindingKind, PresetDagFindingVerdict, PresetDagFindingTable, PresetDagFindingDeadlockContinuable, PresetDagFindingDeadVocabulary } from "./preset-dag-check"
@@ -113,7 +114,7 @@ class CoderLoopError extends Error {
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
 export type JsonObject = { [key: string]: JsonValue }
 
-const STATUS_STATE_FILE_KEY = `state${"File"}` as `state${"File"}`
+const STATUS_STATE_FILE_KEY: "stateFile" = `state${"File"}`
 type ChainBindingScalar = null | boolean | number | string
 
 type ChainBindingFallback =
@@ -530,6 +531,7 @@ const StatusSnapshotBoundary = arkType({
 	current: "object",
 	events: "object",
 	processes: "object",
+	taskTree: TaskTreeSnapshotBoundary.or("null"),
 })
 
 const CompileWarningBoundary = arkType({ verdict: arkType.unit("warn"), rule: "string", message: "string" })
@@ -945,6 +947,7 @@ export type CoderLoopStatusSnapshot = {
 	current: StatusCurrentSnapshot
 	events: StatusEventsSnapshot
 	processes: StatusProcessSnapshot
+	taskTree: TaskTreeSnapshot | null
 }
 
 export type StatusTargetSnapshot = {
@@ -1277,7 +1280,7 @@ export const ENGINE_RUNTIME_BINDING_KEYS = [
 type EngineRuntimeBindingKey = (typeof ENGINE_RUNTIME_BINDING_KEYS)[number]
 
 function isEngineRuntimeBindingKey(key: string): key is EngineRuntimeBindingKey {
-	return (ENGINE_RUNTIME_BINDING_KEYS as readonly string[]).includes(key)
+	return ENGINE_RUNTIME_BINDING_KEYS.some((entry) => entry === key)
 }
 
 export type RuntimeBindings = Record<EngineRuntimeBindingKey, string> & Readonly<Record<string, string | undefined>>
@@ -2564,7 +2567,7 @@ const AGENT_ATTRIBUTED_COMMANDS = [
 type AgentAttributedCommand = typeof AGENT_ATTRIBUTED_COMMANDS[number]
 
 function isAgentAttributedCommand(command: DaemonCommandName): command is AgentAttributedCommand {
-	return (AGENT_ATTRIBUTED_COMMANDS as readonly DaemonCommandName[]).includes(command)
+	return AGENT_ATTRIBUTED_COMMANDS.some((entry) => entry === command)
 }
 
 function withInjectedRunCredential(command: DaemonCommandName, args: JsonObject): JsonObject {
@@ -3192,6 +3195,7 @@ export async function buildCoderLoopStatusSnapshot(args: StatusCommandArgs): Pro
 		current: currentSnapshot,
 		events,
 		processes,
+		taskTree: readDbTaskTree(options.loopDataRoot, loaded.chain.id),
 	}
 	StatusSnapshotBoundary.assert(snapshot)
 	return snapshot
@@ -3333,6 +3337,7 @@ function makeUnavailableStatusSnapshot(input: {
 		current: { run: null, id: null, item: null, runner: null, phaseStatus: null },
 		events: { runId: null, path: null, exists: false, recent: [], latest: null, error: null },
 		processes: input.processes ?? { live: [], scanError: null },
+		taskTree: null,
 	}
 }
 
@@ -4282,6 +4287,15 @@ function readDbItemsForChain(loopDataRoot: string | null, chainId: number): Item
 	}
 }
 
+function readDbTaskTree(loopDataRoot: string | null, chainId: number): TaskTreeSnapshot | null {
+	const store = openSqliteStateStore({ createIfMissing: false, ...loopDataRootOption(loopDataRoot) })
+	try {
+		return store.getTaskTree(chainId)
+	} finally {
+		store.close()
+	}
+}
+
 function readDbItemById(loopDataRoot: string | null, chainId: number, itemId: string): ItemRecord | null {
 	const store = openSqliteStateStore({ createIfMissing: false, ...loopDataRootOption(loopDataRoot) })
 	try {
@@ -4988,7 +5002,7 @@ function parsePresetItemFieldType(value: BoundaryValue, label: string): PresetIt
 }
 
 function isPresetItemFieldType(value: string): value is PresetItemFieldType {
-	return (PRESET_ITEM_FIELD_TYPES as readonly string[]).includes(value)
+	return PRESET_ITEM_FIELD_TYPES.some((entry) => entry === value)
 }
 
 function parsePresetRuntimeBusinessKeys(value: readonly string[], label: string): readonly string[] {
@@ -5582,9 +5596,11 @@ function parseFinalizerSummaryDecisionFromText(text: string): PresetChainComplet
 	const tail = match[2] ?? ""
 	const reasonMatch = tail.match(/(?:^|;)\s*reason=([^;]*)/)
 	const reason = reasonMatch?.[1]?.trim()
+	const decision = match[1]
+	if (decision !== "complete" && decision !== "keep-active") return null
 	return reason === undefined || reason === ""
-		? { decision: match[1] as "complete" | "keep-active" }
-		: { decision: match[1] as "complete" | "keep-active", reason }
+		? { decision }
+		: { decision, reason }
 }
 
 // #433: derive the chain-bindings object that wraps into `metadata.bindings`. Strips the

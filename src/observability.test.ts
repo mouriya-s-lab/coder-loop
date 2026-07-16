@@ -13,6 +13,7 @@ import {
 	ObservabilityEventSegmentBoundary,
 	ObservabilityEventTypeBoundary,
 	ObservabilityKindBoundary,
+	parseObservabilityEvent,
 	parseObservabilityEventSegmentName,
 	queryObservabilityEvents,
 } from "./observability"
@@ -32,9 +33,45 @@ describe("observability", () => {
 		expect(ObservabilityEventBoundary.assert(JSON.parse(JSON.stringify(event)))).toEqual(event)
 	})
 
+	test("task event identity is an exact all-or-none triple", () => {
+		const event = makeObservabilityEvent({ kind: "lifecycle", type: "daemon.stop", subject: { kind: "engine" }, payload: { pid: 10 } })
+		expect(parseObservabilityEvent({ ...event, runtimeNodeId: "runtime-leaf", definitionRef: { kind: "chain", contentIdentity: "sha256:event" }, definitionNodeId: "definition-leaf" }).runtimeNodeId).toBe("runtime-leaf")
+		expect(() => parseObservabilityEvent({ ...event, runId: "run-without-durable-identity" })).toThrow()
+		for (const partial of [
+			{ runtimeNodeId: "runtime-leaf" },
+			{ definitionRef: { kind: "chain", contentIdentity: "sha256:event" } },
+			{ definitionNodeId: "definition-leaf" },
+			{ runtimeNodeId: "runtime-leaf", definitionNodeId: "definition-leaf" },
+		]) expect(() => parseObservabilityEvent({ ...event, ...partial })).toThrow()
+
+		const recovery = {
+			kind: "lifecycle",
+			type: "scheduler.recovery",
+			chain: "recovery-chain",
+			runId: "run-stale",
+			subject: { kind: "engine" },
+			payload: { reason: "stale_current_run", pid: null, reconciledRuns: [] },
+			ts: "2026-07-16T00:00:00.000Z",
+		}
+		expect(() => parseObservabilityEvent(recovery)).toThrow()
+		expect(() => parseObservabilityEvent({
+			kind: "lifecycle",
+			type: "scheduler.recovery",
+			chain: "recovery-chain",
+			subject: { kind: "engine" },
+			ts: "2026-07-16T00:00:00.000Z",
+			payload: {
+				reason: "orphaned_run_reconciled",
+				pid: null,
+				reconciledRuns: [{ runId: "run-orphan", itemId: 1, phase: "iteration", pid: null }],
+			},
+		})).toThrow()
+	})
+
 	test("query filters by kind, type, chain, run, phase, and since", async () => {
 		const root = resolve(TEST_ROOT, "query")
 		const eventsFile = resolve(root, "events.jsonl")
+		const taskIdentity = { runtimeNodeId: "runtime-query", definitionRef: { kind: "chain", contentIdentity: "sha256:query" }, definitionNodeId: "definition-query" } as const
 		await mkdir(root, { recursive: true })
 
 		await appendObservabilityEvent(eventsFile, makeObservabilityEvent({
@@ -42,6 +79,7 @@ describe("observability", () => {
 			type: "slot.busy",
 			chain: "chain-a",
 			runId: "run-1",
+			...taskIdentity,
 			subject: { kind: "engine" },
 			payload: { slotKey: "slot-a", chainId: 1, repoCwd: "/repo/a", activeRunId: "run-1" },
 		}, new Date("2026-06-12T00:00:00.000Z")))
@@ -51,6 +89,7 @@ describe("observability", () => {
 			chain: "chain-a",
 			item: 10,
 			runId: "run-1",
+			...taskIdentity,
 			phase: "iteration",
 			subject: { kind: "engine" },
 			payload: { repoCwd: "/repo/a", pid: 123 },
@@ -61,6 +100,7 @@ describe("observability", () => {
 			chain: "chain-b",
 			item: 20,
 			runId: "run-2",
+			...taskIdentity,
 			phase: "review",
 			subject: { kind: "engine" },
 			payload: { repoCwd: "/repo/b", pid: null },

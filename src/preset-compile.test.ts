@@ -61,6 +61,61 @@ describe("preset compiler", () => {
 		expect(tree.children.find((task) => task.phase === model.phases[0]!.name)?.identity).toBe(model.tasks.children[0]!.identity)
 	})
 
+	test("execution content identity covers referenced fragments templates and auxiliary sources", async () => {
+		const source = await mkdtemp(resolve(tmpdir(), "coder-loop-execution-content-identity-"))
+		try {
+			await mkdir(resolve(source, "templates"))
+			await writeFile(resolve(source, "preset.toml"), `name = "content-identity"
+[item]
+idField = "id"
+[item.fields]
+id = "string"
+[statuses]
+continuable = ["queued"]
+terminal = ["done", "exhausted"]
+entry = "queued"
+exhausted = "exhausted"
+[[phases]]
+name = "run"
+prompt = "run.md"
+roles = ["common"]
+[[phases.exits]]
+status = "done"
+when = "complete"
+[phases.variables]
+ID = "item.id"
+[[fragments]]
+id = "common"
+role = "common"
+path = "common.md"
+`)
+			await writeFile(resolve(source, "run.md"), "id={{ID}}\n")
+			await writeFile(resolve(source, "common.md"), "fragment-v1\n")
+			await writeFile(resolve(source, "templates", "agent.md"), "template-v1\n")
+			await writeFile(resolve(source, "auxiliary.json"), '{"version":1}\n')
+
+			const baseline = await loadPreset(source)
+			const identical = await loadPreset(source)
+			expect(identical.sourceHash).toBe(baseline.sourceHash)
+
+			await writeFile(resolve(source, "common.md"), "fragment-v2\n")
+			const fragmentChanged = await loadPreset(source)
+			expect(fragmentChanged.sourceHash).not.toBe(baseline.sourceHash)
+			await writeFile(resolve(source, "common.md"), "fragment-v1\n")
+
+			await writeFile(resolve(source, "run.md"), "template-v2 id={{ID}}\n")
+			const templateChanged = await loadPreset(source)
+			expect(templateChanged.sourceHash).not.toBe(baseline.sourceHash)
+			await writeFile(resolve(source, "run.md"), "id={{ID}}\n")
+
+			await writeFile(resolve(source, "auxiliary.json"), '{"version":2}\n')
+			const auxiliaryChanged = await loadPreset(source)
+			expect(auxiliaryChanged.sourceHash).not.toBe(baseline.sourceHash)
+		} finally {
+			await rm(source, { recursive: true, force: true })
+		}
+	})
+
 	test("canonical identities remain unique for delimiter-bearing legal phase names", async () => {
 		const model = await loadPreset(resolve(ROOT, "presets/single-phase-example"))
 		const template = model.phases[0]!

@@ -223,6 +223,15 @@ const ExcerptBoundary = arkType({
 // `scheduler.recovery` — daemon recovery no longer mutates item business state, so there is no
 // list of "items the engine reset" to surface to consumers.
 
+const TaskIdentityFields = {
+	runtimeNodeId: "string>0",
+	definitionRef: arkType.or(
+		{ kind: arkType.unit("preset"), contentIdentity: "string>0", "+": "reject" },
+		{ kind: arkType.unit("chain"), contentIdentity: "string>0", "+": "reject" },
+	),
+	definitionNodeId: "string>0",
+} as const
+
 const ReconciledRunBoundary = arkType({
 	runId: "string",
 	// `itemId` here is the integer rowid (FK to items.id) — `runs.item_id`. Kept as `itemId` for
@@ -232,6 +241,7 @@ const ReconciledRunBoundary = arkType({
 	itemId: "number",
 	phase: "string",
 	"pid": arkType.or("number", "null"),
+	...TaskIdentityFields,
 })
 
 const EventBaseBoundary = {
@@ -243,7 +253,15 @@ const EventBaseBoundary = {
 	"subject?": SubjectBoundary,
 } as const
 
-export const ObservabilityEventBoundary = arkType.or(
+// Keep the run/identity relation in one ADT. Chaining independent intersections here makes
+// ArkType distribute the large payload union twice during every short-lived CLI startup.
+const EventIdentityBoundary = arkType.or(
+	{ runId: "string", ...TaskIdentityFields },
+	{ "runId?": "never", ...TaskIdentityFields },
+	{ "runId?": "never", "runtimeNodeId?": "never", "definitionRef?": "never", "definitionNodeId?": "never" },
+)
+
+const ObservabilityEventPayloadBoundary = arkType.or(
 	{
 		...EventBaseBoundary,
 		kind: arkType.unit("audit"),
@@ -387,10 +405,21 @@ export const ObservabilityEventBoundary = arkType.or(
 		kind: arkType.unit("lifecycle"),
 		type: arkType.unit("scheduler.recovery"),
 		payload: {
-			reason: arkType.or(arkType.unit("stale_current_run"), arkType.unit("orphaned_run_reconciled")),
+			reason: arkType.unit("orphaned_run_reconciled"),
 			"pid": arkType.or("number", "null"),
 			// #508: `recoveredItems` retired — daemon recovery is process-layer only and never
 			// rewrites item business fields, so there is no list to surface here.
+			reconciledRuns: ReconciledRunBoundary.array(),
+		},
+	},
+	{
+		...EventBaseBoundary,
+		...TaskIdentityFields,
+		kind: arkType.unit("lifecycle"),
+		type: arkType.unit("scheduler.recovery"),
+		payload: {
+			reason: arkType.unit("stale_current_run"),
+			"pid": arkType.or("number", "null"),
 			reconciledRuns: ReconciledRunBoundary.array(),
 		},
 	},
@@ -727,6 +756,8 @@ export const ObservabilityEventBoundary = arkType.or(
 		},
 	},
 )
+
+export const ObservabilityEventBoundary = ObservabilityEventPayloadBoundary.and(EventIdentityBoundary)
 
 export type ObservabilityEvent = typeof ObservabilityEventBoundary.infer
 export type ObservabilityEventType = typeof ObservabilityEventTypeBoundary.infer
