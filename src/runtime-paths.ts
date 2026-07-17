@@ -30,7 +30,6 @@ export const PHASE_STDOUT_FILENAME = "stdout.jsonl"
 export const PHASE_STDERR_FILENAME = "stderr.txt"
 export const PHASE_STATUS_FILENAME = "status.json"
 export const PHASE_ACTIVITY_FILENAME = "activity.json"
-export const DAEMON_LOG_FILENAME = "daemon.log"
 const MAX_PATH_COMPONENT_LENGTH = 255
 
 export type RuntimePathErrorCode = "invalid_loop_data_root" | "invalid_chain_name" | "invalid_path_component"
@@ -64,7 +63,6 @@ export type LoopDataPaths = {
 	runnerPersistenceFailuresFile: string
 	daemonLogDir: string
 	daemonBatchDir: (timestamp: string) => string
-	daemonLogFile: (timestamp: string) => string
 	daemonStdoutFile: (timestamp: string) => string
 	daemonStderrFile: (timestamp: string) => string
 }
@@ -81,8 +79,6 @@ export type ChainRuntimePaths = {
 	issueEvidenceDir: (issueNumber: number | string) => string
 	runDir: (runId: string) => string
 	runEventsFile: (runId: string) => string
-	runStdoutFile: (runId: string) => string
-	runStderrFile: (runId: string) => string
 	runStatusFile: (runId: string) => string
 	runPhaseDir: (runId: string, phase: string) => string
 	runPhaseStdoutFile: (runId: string, phase: string) => string
@@ -90,7 +86,6 @@ export type ChainRuntimePaths = {
 	runPhaseStatusFile: (runId: string, phase: string) => string
 	runPhaseActivityFile: (runId: string, phase: string) => string
 	daemonBatchDir: (timestamp: string) => string
-	daemonLogFile: (timestamp: string) => string
 }
 
 export function defaultLoopDataRoot(home = homedir()): string {
@@ -129,7 +124,6 @@ export function resolveLoopDataPaths(options: LoopDataRootOptions = {}): LoopDat
 		runnerPersistenceFailuresFile: resolve(eventsDir, "runner-persistence-failures.jsonl"),
 		daemonLogDir,
 		daemonBatchDir,
-		daemonLogFile: (timestamp) => resolve(daemonBatchDir(timestamp), DAEMON_LOG_FILENAME),
 		daemonStdoutFile: (timestamp) => resolve(daemonBatchDir(timestamp), RUN_STDOUT_FILENAME),
 		daemonStderrFile: (timestamp) => resolve(daemonBatchDir(timestamp), RUN_STDERR_FILENAME),
 	}
@@ -182,8 +176,6 @@ export function resolveChainRuntimePaths(chainName: string, options: LoopDataRoo
 		issueEvidenceDir: (issueNumber) => resolve(evidenceDir, sanitizePathComponent(String(issueNumber), "issue number")),
 		runDir,
 		runEventsFile: (runId) => resolve(runDir(runId), RUN_EVENTS_FILENAME),
-		runStdoutFile: (runId) => resolve(runDir(runId), RUN_STDOUT_FILENAME),
-		runStderrFile: (runId) => resolve(runDir(runId), RUN_STDERR_FILENAME),
 		runStatusFile: (runId) => resolve(runDir(runId), RUN_STATUS_FILENAME),
 		runPhaseDir,
 		runPhaseStdoutFile: (runId, phase) => resolve(runPhaseDir(runId, phase), PHASE_STDOUT_FILENAME),
@@ -191,7 +183,6 @@ export function resolveChainRuntimePaths(chainName: string, options: LoopDataRoo
 		runPhaseStatusFile: (runId, phase) => resolve(runPhaseDir(runId, phase), PHASE_STATUS_FILENAME),
 		runPhaseActivityFile: (runId, phase) => resolve(runPhaseDir(runId, phase), PHASE_ACTIVITY_FILENAME),
 		daemonBatchDir: (timestamp) => resolve(daemonDir, sanitizePathComponent(timestamp, "daemon timestamp")),
-		daemonLogFile: (timestamp) => resolve(daemonDir, sanitizePathComponent(timestamp, "daemon timestamp"), DAEMON_LOG_FILENAME),
 	}
 }
 

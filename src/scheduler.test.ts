@@ -1449,7 +1449,7 @@ echo 'FINALIZER SUMMARY: decision=complete; reason=resumed-from-db'
 
 			expect(tick.spawnedRuns).toHaveLength(1)
 			expect(closed.exitCode).toBe(0)
-			expect(await readFile(resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(closed.runId), "utf-8")).toContain(`done:${item.id}`)
+			expect(await readFile(resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot }).runPhaseStdoutFile(closed.runId, "iteration"), "utf-8")).toContain(`done:${item.id}`)
 			expect(fixture.store.getRunByRunId(closed.runId)?.exitCode).toBe(0)
 			expect(fixture.store.getItem(item.id)?.status).toBe("done")
 			expect((await readRunnerEvents(fixture.eventLog)).map((event) => event.type)).toEqual(["start", "end"])
@@ -1474,8 +1474,8 @@ echo 'FINALIZER SUMMARY: decision=complete; reason=resumed-from-db'
 			}))
 			const closed = await tick.spawnedRuns[0]!.closed
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
-			const stdout = await readFile(paths.runStdoutFile(closed.runId))
-			const stderr = await readFile(paths.runStderrFile(closed.runId))
+			const stdout = await readFile(paths.runPhaseStdoutFile(closed.runId, "iteration"))
+			const stderr = await readFile(paths.runPhaseStderrFile(closed.runId, "iteration"))
 			expect(closed.stdoutBytes).toBe(stdout.byteLength)
 			expect(closed.stderrBytes).toBe(stderr.byteLength)
 			expect(stdout.toString()).toContain("stdout-199999")
@@ -1499,8 +1499,6 @@ echo 'FINALIZER SUMMARY: decision=complete; reason=resumed-from-db'
 			const runId = `run-${chain.id}-${item.id}-iteration-1`
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
 			const status = JSON.parse(await readFile(paths.runStatusFile(runId), "utf-8")) as BoundaryRecord
-			const stdout = await readFile(paths.runStdoutFile(runId), "utf-8")
-			const stderr = await readFile(paths.runStderrFile(runId), "utf-8")
 			const phaseStdout = await readFile(paths.runPhaseStdoutFile(runId, "iteration"), "utf-8")
 			const phaseStderr = await readFile(paths.runPhaseStderrFile(runId, "iteration"), "utf-8")
 			const events = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, { run: runId })
@@ -1517,10 +1515,12 @@ echo 'FINALIZER SUMMARY: decision=complete; reason=resumed-from-db'
 				exitCode: 0,
 				status: runtimeStatus("done"),
 			})
-			expect(stdout).toContain(`done:${item.id}`)
-			expect(stderr).toBe("")
 			expect(phaseStdout).toContain(`done:${item.id}`)
 			expect(phaseStderr).toBe("")
+			expect(existsSync(resolve(paths.runDir(runId), "stdout.log"))).toBe(false)
+			expect(existsSync(resolve(paths.runDir(runId), "stderr.log"))).toBe(false)
+			expect(status).not.toHaveProperty("stdoutPath")
+			expect(status).not.toHaveProperty("stderrPath")
 			expect(status.eventsPath).toBe(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile)
 			expect(existsSync(paths.runEventsFile(runId))).toBe(false)
 			expect(events.events.map((event) => event.type)).toEqual([
@@ -3108,8 +3108,8 @@ describe("scheduler item-level trigger phase advancement (issue #290)", () => {
 			expect(tick.spawnedRuns).toHaveLength(1)
 			const closed = await tick.spawnedRuns[0]!.closed
 			expect(closed.exitCode).toBe(0)
-			expect(await readFile(resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(closed.runId), "utf-8")).toContain(`done:${item.id}`)
-			expect(await readFile(resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(closed.runId), "utf-8")).toContain("REVIEW SUMMARY: verdict=accepted")
+			expect(await readFile(resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot }).runPhaseStdoutFile(closed.runId, "blocked-responder"), "utf-8")).toContain(`done:${item.id}`)
+			expect(await readFile(resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot }).runPhaseStdoutFile(closed.runId, "blocked-responder"), "utf-8")).toContain("REVIEW SUMMARY: verdict=accepted")
 
 			const runs = (await readRunnerEvents(fixture.eventLog)).map((event) => event.type)
 			expect(runs).toEqual(["start", "end"])
@@ -3146,11 +3146,11 @@ describe("scheduler loaded preset prompt rendering", () => {
 			const closed = await tick.spawnedRuns[0]!.closed
 
 			expect(closed.exitCode).toBe(0)
-			expect(await readFile(resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(closed.runId), "utf-8")).toContain("# Contract enrichment")
-			expect(await readFile(resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(closed.runId), "utf-8")).toContain("## Authority")
+			expect(await readFile(resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot }).runPhaseStdoutFile(closed.runId, "contract-enrichment"), "utf-8")).toContain("# Contract enrichment")
+			expect(await readFile(resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot }).runPhaseStdoutFile(closed.runId, "contract-enrichment"), "utf-8")).toContain("## Authority")
 
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
-			const capturedStdout = await readFile(paths.runStdoutFile(closed.runId), "utf-8")
+			const capturedStdout = await readFile(paths.runPhaseStdoutFile(closed.runId, "contract-enrichment"), "utf-8")
 			expect(capturedStdout).toContain("# Contract enrichment")
 
 			const preset = await loadPreset(PRESET_DIR)
@@ -3331,7 +3331,7 @@ describe("scheduler chain bindings (issue #288)", () => {
 
 			expect(closed.exitCode).toBe(0)
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
-			const capturedStdout = await readFile(paths.runStdoutFile(closed.runId), "utf-8")
+			const capturedStdout = await readFile(paths.runPhaseStdoutFile(closed.runId, "contract-enrichment"), "utf-8")
 			expect(capturedStdout).toContain("chain.name=chain-binding-integration-chain")
 			expect(capturedStdout).toContain("chain.umbrellaRepo=owner/umb-repo")
 			expect(capturedStdout).toContain("chain.umbrellaIssue=777")
@@ -3382,7 +3382,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			expect(closed.exitCode).toBe(0)
 			expect(observedPhases).toEqual(["iteration"])
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
-			const capturedStdout = await readFile(paths.runStdoutFile(closed.runId), "utf-8")
+			const capturedStdout = await readFile(paths.runPhaseStdoutFile(closed.runId, "iteration"), "utf-8")
 			expect(capturedStdout).toContain("PER-PHASE:codex")
 			expect(capturedStdout).not.toContain("PER-PHASE:claude")
 		} finally {
@@ -3435,7 +3435,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			expect(closed.exitCode).toBe(0)
 			expect(observedPhases).toEqual(["review"])
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
-			const capturedStdout = await readFile(paths.runStdoutFile(closed.runId), "utf-8")
+			const capturedStdout = await readFile(paths.runPhaseStdoutFile(closed.runId, "review"), "utf-8")
 			expect(capturedStdout).toContain("PER-PHASE:claude")
 			expect(capturedStdout).not.toContain("PER-PHASE:codex")
 		} finally {
@@ -3654,7 +3654,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			const iterClosed = await iterTick.spawnedRuns[0]!.closed
 			expect(iterClosed.exitCode).toBe(0)
 			const iterPaths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
-			const iterStdout = await readFile(iterPaths.runStdoutFile(iterClosed.runId), "utf-8")
+			const iterStdout = await readFile(iterPaths.runPhaseStdoutFile(iterClosed.runId, "iteration"), "utf-8")
 			expect(iterStdout).toContain("BINARY:claude")
 			expect(iterStdout).not.toContain("BINARY:codex")
 
@@ -3669,7 +3669,7 @@ describe("scheduler per-phase runner selection (issue #287)", () => {
 			expect(reviewTick.spawnedRuns).toHaveLength(1)
 			const reviewClosed = await reviewTick.spawnedRuns[0]!.closed
 			expect(reviewClosed.exitCode).toBe(0)
-			const reviewStdout = await readFile(iterPaths.runStdoutFile(reviewClosed.runId), "utf-8")
+			const reviewStdout = await readFile(iterPaths.runPhaseStdoutFile(reviewClosed.runId, "review"), "utf-8")
 			// Unified policy: item.runner = "claude" propagates to every non-trigger phase, including
 			// review under the bundled preset (which has `trigger === null`). The role-named carve-out
 			// is gone, so review emits the same `BINARY:claude` as iteration.
@@ -3867,7 +3867,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			// first attempt.
 			const runId = `run-${chain.id}-${item.id}-iteration-1`
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
-			const stdout = await readFile(paths.runStdoutFile(runId), "utf-8")
+			const stdout = await readFile(paths.runPhaseStdoutFile(runId, "iteration"), "utf-8")
 			const argvLine = stdout.split("\n").find((line) => line.startsWith("{") && line.includes("\"argv\""))
 			expect(argvLine).toBeDefined()
 			const argv = JSON.parse(argvLine!) as { argv: string[] }
@@ -3983,7 +3983,7 @@ describe("scheduler session-id resume (issue #291 / #311)", () => {
 			expect(firstTick.spawnedRuns).toHaveLength(1)
 			const firstClosed = await firstTick.spawnedRuns[0]!.closed
 			expect(firstClosed.exitCode).toBe(1)
-			expect(await readFile(resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot }).runStderrFile(firstClosed.runId), "utf-8")).toContain("No conversation found with session ID: sess-stale-312")
+			expect(await readFile(resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot }).runPhaseStderrFile(firstClosed.runId, "iteration"), "utf-8")).toContain("No conversation found with session ID: sess-stale-312")
 			// Run-scoped invalidation: the predecessor run's session is cleared…
 			expect(fixture.store.getRunByRunId("run-orphan-312003")?.extra.runnerSessionId).toBeUndefined()
 			// …the failed recovery is marked so selection re-enters the same recover-run…
@@ -4115,7 +4115,7 @@ describe("six-phase entry-kind provenance (DESIGN-six-phase-split §5.2 / §8)",
 			// Re-entry over a normal edge is a fresh graph entry: no --resume on argv even
 			// though the item-level session slot still holds the stale iteration session.
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
-			const stdout = await readFile(paths.runStdoutFile(`run-${chain.id}-${item.id}-iteration-reentry`), "utf-8")
+			const stdout = await readFile(paths.runPhaseStdoutFile(`run-${chain.id}-${item.id}-iteration-reentry`, "iteration"), "utf-8")
 			const argvLine = stdout.split("\n").find((line) => line.startsWith("{") && line.includes("\"argv\""))
 			expect(argvLine).toBeDefined()
 			const argv = JSON.parse(argvLine!) as { argv: string[] }
@@ -4181,7 +4181,7 @@ describe("six-phase entry-kind provenance (DESIGN-six-phase-split §5.2 / §8)",
 
 			// recover-run resumes the predecessor run's session…
 			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
-			const stdout = await readFile(paths.runStdoutFile(`run-${chain.id}-${item.id}-iteration-recovery`), "utf-8")
+			const stdout = await readFile(paths.runPhaseStdoutFile(`run-${chain.id}-${item.id}-iteration-recovery`, "iteration"), "utf-8")
 			const argvLine = stdout.split("\n").find((line) => line.startsWith("{") && line.includes("\"argv\""))
 			expect(argvLine).toBeDefined()
 			const argv = JSON.parse(argvLine!) as { argv: string[] }

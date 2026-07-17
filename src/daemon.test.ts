@@ -3918,15 +3918,17 @@ process.exitCode = 0
 			const item = await readItem(fixture.loopDataRoot, chainId, 203)
 			const runId = item?.lastRunId ?? ""
 			const paths = resolveChainRuntimePaths("scheduler-artifacts-chain", { loopDataRoot: fixture.loopDataRoot })
+			const daemonLogs = Array.fromAsync(new Bun.Glob("**/daemon.log").scan({ cwd: fixture.loopDataRoot }))
 			const status = JSON.parse(await readFile(paths.runStatusFile(runId), "utf-8")) as BoundaryRecord
-			const stdout = await readFile(paths.runStdoutFile(runId), "utf-8")
-			const stderr = await readFile(paths.runStderrFile(runId), "utf-8")
+			const stdout = await readFile(paths.runPhaseStdoutFile(runId, "contract-enrichment"), "utf-8")
+			const stderr = await readFile(paths.runPhaseStderrFile(runId, "contract-enrichment"), "utf-8")
 			const events = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile, { run: runId })
 
 			expect(status).toMatchObject({ runId, chainId, itemId: "203", phase: "contract-enrichment", exitCode: 0, status: runtimeStatus("done") })
 			expect(stdout).toContain("done:")
 			expect(stderr).toBe("")
 			expect(status.eventsPath).toBe(resolveLoopDataPaths({ loopDataRoot: fixture.loopDataRoot }).eventsFile)
+			expect(await daemonLogs).toEqual([])
 			expect(await pathExists(paths.runEventsFile(runId))).toBe(false)
 			expect(events.events.map((event) => event.type)).toEqual([
 				"agent.spawn",
@@ -4684,7 +4686,7 @@ process.exitCode = 0
 			// Allow the run to finish so the close handler writes the trace artifacts.
 			await waitFor(async () => {
 				try {
-					return await readFile(paths.runStdoutFile(stringValue(itemA.lastRunId ?? "")), "utf-8")
+					return await readFile(paths.runPhaseStdoutFile(stringValue(itemA.lastRunId ?? ""), "iteration"), "utf-8")
 				} catch {
 					return null
 				}
@@ -5353,7 +5355,7 @@ process.exitCode = 0
 					5_000,
 				)) as Extract<SchedulerEvent, { type: "phase.end" }>
 				const runId = iterationEnd.runId
-				const stdoutPath = resolveChainRuntimePaths(`ac5-iter-chain`, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(runId)
+				const stdoutPath = resolveChainRuntimePaths(`ac5-iter-chain`, { loopDataRoot: fixture.loopDataRoot }).runPhaseStdoutFile(runId, "iteration")
 				const stdout = await readFile(stdoutPath, "utf-8")
 				expect(stdout).toContain("BINARY:codex")
 				expect(stdout).not.toContain("BINARY:claude")
@@ -5396,7 +5398,7 @@ process.exitCode = 0
 					(runId) => runId !== null,
 					5_000,
 				)
-				const stdoutPath = resolveChainRuntimePaths(`ac5-review-chain`, { loopDataRoot: fixture.loopDataRoot }).runStdoutFile(reviewRunId!)
+				const stdoutPath = resolveChainRuntimePaths(`ac5-review-chain`, { loopDataRoot: fixture.loopDataRoot }).runPhaseStdoutFile(reviewRunId!, "review")
 				const stdout = await readFile(stdoutPath, "utf-8")
 				expect(stdout).toContain("BINARY:codex")
 				expect(stdout).not.toContain("BINARY:claude")
@@ -5599,7 +5601,7 @@ process.exitCode = 0
 				for (const runId of [iterRunId, reviewRunId]) {
 					const runDirEntries = await readdir(paths.runDir(runId))
 					const expectedPhaseDir = runId === iterRunId ? "iteration" : "review"
-					expect(runDirEntries.sort()).toEqual([expectedPhaseDir, "status.json", "stderr.log", "stdout.log"])
+					expect(runDirEntries.sort()).toEqual([expectedPhaseDir, "status.json"])
 				}
 				const iterStatus = JSON.parse(await readFile(paths.runStatusFile(iterRunId), "utf-8")) as { phase: string }
 				const reviewStatus = JSON.parse(await readFile(paths.runStatusFile(reviewRunId), "utf-8")) as { phase: string }

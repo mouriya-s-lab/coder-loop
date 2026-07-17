@@ -527,7 +527,6 @@ export type LoopOptions = {
 	evidenceRootDir: string
 	logDir: string
 	loopDataRoot: string | null
-	logFile: string
 	repository: string | null
 	baseBranch: string | null
 	bindings: RenderBindings
@@ -2904,8 +2903,6 @@ function buildOptions(targetCwd: string, raw: BuildOptionsInput, resolved: Chain
 	const repository = raw.chain.repository
 	const baseBranch = raw.chain.baseBranch
 	const bindings = buildEffectiveBindings(raw.chain)
-	const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-")
-	const chainPaths = raw.chainName === null ? null : resolveChainRuntimePaths(raw.chainName, loopDataRootOption(loopDataRoot))
 	const hostRunner = detectHostRunner(process.env)
 	const runnerCommands = buildAgentRunnerCommands(resolved)
 	const defaultRunner = selectPhaseDefaultRunner(firstNonTriggerPhaseForPreset(preset), preset, runnerCommands)
@@ -2918,7 +2915,6 @@ function buildOptions(targetCwd: string, raw: BuildOptionsInput, resolved: Chain
 		evidenceRootDir,
 		logDir,
 		loopDataRoot,
-		logFile: chainPaths === null ? resolve(logDir, `coder-loop-${process.pid}.${timestamp}.log`) : chainPaths.daemonLogFile(timestamp),
 		repository,
 		baseBranch,
 		bindings,
