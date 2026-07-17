@@ -203,12 +203,22 @@ export type DaemonCommandName =
 // `ReadonlySet<PresetPhasePrivilegedOp>` and rejects unknown values at preset
 // load with the full vocabulary in the error message.
 //
-// Today the only entry is `item.reorder` — review's expanded-incomplete-parent
-// flow legitimately needs it (`presets/gh-issue-pr-iteration/review/
-// update-state.md`). Adding a future per-phase-authorized op = extend this
-// `as const` tuple, switch its dispatch-table entry to `per-phase-authorized`,
-// and the typechecker carries the rest.
-export const PRESET_PHASE_PRIVILEGED_OPS = ["item.reorder"] as const
+// Two grant axes share this vocabulary:
+// - `item.reorder` — a dispatch-table op (`per-phase-authorized` authClass);
+//   review's expanded-incomplete-parent flow legitimately needs it
+//   (`presets/gh-issue-pr-iteration/review/actions/state-write.md`). Adding a
+//   future op of this axis = extend the tuple AND switch its dispatch-table
+//   entry to `per-phase-authorized`.
+// - `item.dependsOn` — a field-axis grant consulted by the #410 field-write
+//   gate (`judgeItemUpdateFieldWrites`): it lifts the `dependsOn` field (any
+//   carrier) out of the unconditional control-plane deny for the granted
+//   phase only. The write still flows through `item.update`'s standard
+//   admission (own-item binding via the run credential + `validateDependsOnGraph`),
+//   so the grant lets a phase gate ITS OWN item on other items — nothing else.
+//   gh-issue-pr-iteration grants it to `blocked-responder`, whose declared job
+//   is wiring the cross-chain dependency the scheduler's
+//   `unblockDependencySatisfiedItems` restore consumes.
+export const PRESET_PHASE_PRIVILEGED_OPS = ["item.reorder", "item.dependsOn"] as const
 export type PresetPhasePrivilegedOp = (typeof PRESET_PHASE_PRIVILEGED_OPS)[number]
 
 // #410 field-write rights — engine domain classification of `item.update`'s field axis. Three
@@ -217,8 +227,9 @@ export type PresetPhasePrivilegedOp = (typeof PRESET_PHASE_PRIVILEGED_OPS)[numbe
 // presets cannot grant — the preset parser refuses any control-plane name in `writableFields`
 // with a clear vocabulary error. Passthrough fields are open to per-phase grant. `extra` /
 // `extraPatch` are aggregate carriers — the gate expands them and gates each inner key
-// individually (with `dependsOn` short-circuited to control-plane regardless of carrier,
-// because the existing extra-flatten path in `handleItemUpdate` lifts it to top-level).
+// individually (`dependsOn` classifies control-plane regardless of carrier because the
+// existing extra-flatten path in `handleItemUpdate` lifts it to top-level; it is the one
+// control-plane field with a typed grant escape — the `item.dependsOn` privileged op).
 //
 // The classification helper `classifyItemUpdateField` runs an exhaustive switch over this union
 // and uses `assertNever` to force a new field added to `ITEM_UPDATE_FIELD_KEYS` to receive a
@@ -2839,7 +2850,7 @@ export class CoderLoopDaemon {
 		const topLevelDependsOn = optionalDependsOn(args, "dependsOn")
 		const extraDependsOn = topLevelDependsOn === undefined ? optionalDependsOn(rawExtra, "dependsOn") : undefined
 		const dependsOn = topLevelDependsOn === undefined ? extraDependsOn : topLevelDependsOn
-		if (dependsOn !== undefined) validateDependsOnGraph(existingItems, null, dependsOn)
+		if (dependsOn !== undefined) validateDependsOnGraph(existingItems, null, dependsOn, (id) => this.requireStore().getItem(id))
 		// #412: preset must be specified on every new item. The candidate set was killed by the operator:
 		// no chain-level default, no engine-builtin default, no inherit-from-chain — only explicit per-item
 		// preset survives. Engine-derived items (review-on-empty etc.) bypass this API entirely.
@@ -3022,7 +3033,7 @@ export class CoderLoopDaemon {
 		const extraDependsOn = topLevelDependsOn === undefined && requestedExtra !== undefined ? optionalDependsOn(requestedExtra, "dependsOn") : undefined
 		const dependsOn = topLevelDependsOn === undefined ? extraDependsOn : topLevelDependsOn
 		if (dependsOn !== undefined) {
-			validateDependsOnGraph(store.listItems(item.chainId), item.id, dependsOn)
+			validateDependsOnGraph(store.listItems(item.chainId), item.id, dependsOn, (id) => store.getItem(id))
 			input.extra = validateItemExtra(withDependsOn(requestedExtra ?? itemExtraToJsonObject(item.extra), dependsOn))
 		} else if (requestedExtra !== undefined) {
 			input.extra = validateItemExtra(requestedExtra)
@@ -5068,10 +5079,11 @@ type ItemUpdateRequestedFields = {
 // Collect the set of fields the request is attempting to write. `extra` and `extraPatch` carriers
 // are expanded one level — each top-level inner key in the wrapper joins the set the matrix
 // gates. Nested objects inside extra (e.g. `extra.dependsOn = [42]`) surface as the inner key
-// name (`dependsOn`), not a recursive walk; the gate runs the classifier on each name and treats
-// `dependsOn` as control-plane regardless of carrier (the existing top-level extraction in
-// `handleItemUpdate` lifts it to the dependsOn field for graph validation, so the policy is
-// uniform). The wrapper (`extra` / `extraPatch`) is also recorded as a top-level field so the
+// name (`dependsOn`), not a recursive walk; the gate runs the classifier on each name and
+// classifies `dependsOn` as control-plane regardless of carrier (the existing top-level
+// extraction in `handleItemUpdate` lifts it to the dependsOn field for graph validation, so the
+// policy is uniform; the `item.dependsOn` privileged-op grant is judged downstream in
+// `judgeItemUpdateFieldWrites`). The wrapper (`extra` / `extraPatch`) is also recorded as a top-level field so the
 // audit trail surfaces it; on its own the wrapper is not classified — only its inner keys are.
 function collectItemUpdateFieldKeys(fields: JsonObject): ItemUpdateRequestedFields {
 	const topLevel = new Set<ItemUpdateFieldName>()
@@ -5103,7 +5115,10 @@ type ItemUpdateFieldWriteVerdict =
 // gate so we ignore it here. Aggregate wrappers (`extra` / `extraPatch`) are not themselves
 // gated — their grant is decided per inner key (which we already collected). Control-plane
 // fields anywhere in the requested set short-circuit to `control-plane-denied` (no preset
-// surface can recover this — it is structurally distinct from `field-not-granted`).
+// surface can recover this — it is structurally distinct from `field-not-granted`), with one
+// typed exception: `dependsOn` is grantable via the `item.dependsOn` privileged op (see
+// `PRESET_PHASE_PRIVILEGED_OPS`) — a phase holding that grant may declare the dependency edge
+// on its own item; every other control-plane field stays ungrantable.
 function judgeItemUpdateFieldWrites(
 	requested: ItemUpdateRequestedFields,
 	rights: PresetPhaseRights,
@@ -5117,6 +5132,7 @@ function judgeItemUpdateFieldWrites(
 	const granted = new Set<string>()
 	const deniedPassthrough = new Set<string>()
 	const deniedControlPlane = new Set<string>()
+	const dependsOnGranted = rights.privilegedOps.has("item.dependsOn")
 	for (const field of requested.topLevel) {
 		const classification = classifyItemUpdateField(field)
 		switch (classification.kind) {
@@ -5125,7 +5141,11 @@ function judgeItemUpdateFieldWrites(
 				continue
 			case "control-plane":
 				gatedFields.add(field)
-				deniedControlPlane.add(field)
+				if (classification.field === "dependsOn" && dependsOnGranted) {
+					granted.add(field)
+				} else {
+					deniedControlPlane.add(field)
+				}
 				break
 			case "passthrough":
 				gatedFields.add(field)
@@ -5144,13 +5164,18 @@ function judgeItemUpdateFieldWrites(
 				return assertNeverItemUpdateClassification(classification)
 		}
 	}
-	// Inner keys (from `extra` / `extraPatch`). `dependsOn` short-circuits to control-plane
-	// regardless of carrier — the existing `handleItemUpdate` flatten path lifts
-	// `extra.dependsOn` to the top-level dependsOn field for graph validation.
+	// Inner keys (from `extra` / `extraPatch`). Control-plane names short-circuit regardless of
+	// carrier — the existing `handleItemUpdate` flatten path lifts `extra.dependsOn` to the
+	// top-level dependsOn field for graph validation. `dependsOn` honors the same
+	// `item.dependsOn` privileged-op grant as the top-level classification above.
 	for (const innerKey of requested.innerKeys) {
 		gatedFields.add(innerKey)
 		if (PRESET_PHASE_RIGHTS_CONTROL_PLANE_FIELD_SET.has(innerKey)) {
-			deniedControlPlane.add(innerKey)
+			if (innerKey === "dependsOn" && dependsOnGranted) {
+				granted.add(innerKey)
+			} else {
+				deniedControlPlane.add(innerKey)
+			}
 			continue
 		}
 		if (rights.writableFields.has(innerKey)) {
@@ -5306,11 +5331,23 @@ function assertNeverSchedulerEvent(event: never): never {
 	throw new DaemonError("internal_error", `unhandled scheduler event: ${JSON.stringify(event)}`)
 }
 
-function validateDependsOnGraph(items: readonly ItemRecord[], itemId: number | null, dependsOn: readonly number[] | null): void {
+// dependsOn targets may live in another chain (item ids are globally unique — the scheduler's
+// `unblockDependencySatisfiedItems` restore resolves them through the store, not the per-chain
+// snapshot), so validation resolves ids the same way: the per-chain `items` snapshot first,
+// then the cross-chain `lookupItem` fallback. Only a target absent from the whole store is
+// rejected as unknown; the cycle walk follows dependsOn edges across chains through the same
+// resolver.
+function validateDependsOnGraph(
+	items: readonly ItemRecord[],
+	itemId: number | null,
+	dependsOn: readonly number[] | null,
+	lookupItem: (id: number) => ItemRecord | null,
+): void {
 	if (dependsOn === null) return
 	const byId = new Map(items.map((item) => [item.id, item]))
+	const resolveDependency = (id: number): ItemRecord | null => byId.get(id) ?? lookupItem(id)
 	for (const dependencyId of dependsOn) {
-		if (!byId.has(dependencyId)) throw new DaemonError("invalid_request", `dependsOn references unknown item ${dependencyId}`, { itemId: itemId ?? null, dependsOn: [...dependsOn] })
+		if (resolveDependency(dependencyId) === null) throw new DaemonError("invalid_request", `dependsOn references unknown item ${dependencyId}`, { itemId: itemId ?? null, dependsOn: [...dependsOn] })
 	}
 	if (itemId === null) return
 
@@ -5319,8 +5356,8 @@ function validateDependsOnGraph(items: readonly ItemRecord[], itemId: number | n
 			throw new DaemonError("invalid_request", `dependsOn would create a dependency cycle through item ${itemId}`, { itemId, path: [...path, candidateId] })
 		}
 		if (path.includes(candidateId)) return
-		const candidate = byId.get(candidateId)
-		if (candidate === undefined) return
+		const candidate = resolveDependency(candidateId)
+		if (candidate === null) return
 		for (const nextId of dependsOnFromStoredExtra(candidate.extra)) visit(nextId, [...path, candidateId])
 	}
 

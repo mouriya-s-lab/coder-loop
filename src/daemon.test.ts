@@ -7890,6 +7890,179 @@ prompt = "iter.md"
 			await fixture.daemon.stop()
 		}
 	})
+
+	// `item.dependsOn` privileged-op grant — the one typed escape from the control-plane deny on
+	// the `dependsOn` field. A phase holding the grant (gh-issue-pr-iteration: blocked-responder)
+	// may declare the dependency edge on its own item, including a CROSS-CHAIN target — the same
+	// shape the scheduler's `unblockDependencySatisfiedItems` restore consumes (item ids are
+	// globally unique; validation resolves targets through the store, not the per-chain
+	// snapshot). The grant is dependsOn-scoped: the same credential stays control-plane-denied
+	// on `runner`. Review-phase denial of `dependsOn` (no grant) is pinned by the row-1 test
+	// above and must not regress.
+	test("item.update dependsOn allowed via item.dependsOn privileged grant, cross-chain target", async () => {
+		const root = resolve(TEST_ROOT, `${++nextFixtureId}-depgrant-allow`)
+		const loopDataRoot = resolve(root, "ld")
+		const presetDir = resolve(root, "depgrant-preset")
+		const fakeRunner = resolve(root, "fake-runner.ts")
+		await mkdir(loopDataRoot, { recursive: true })
+		await mkdir(presetDir, { recursive: true })
+		await writeFile(resolve(presetDir, "preset.toml"), `name = "depgrant-preset"
+
+[item]
+idField = "issue"
+
+[item.fields]
+
+[statuses]
+continuable = ["queued"]
+terminal    = ["done", "blocked"]
+success     = ["done"]
+entry       = "queued"
+exhausted   = "done"
+
+[[phases]]
+name   = "responder"
+entry = true
+startsAttempt = true
+prompt = "responder.md"
+
+  [phases.rights]
+  privilegedOps = ["item.dependsOn"]
+
+  [[phases.exits]]
+  status = "blocked"
+  when   = "test exit so the DAG check sees a leaving edge"
+`)
+		await writeFile(resolve(presetDir, "responder.md"), "minimal responder entry\n")
+		// The runner captures its run credential per item id, then sleeps so the credential stays
+		// active while the test drives item.update through the daemon socket.
+		await writeFile(
+			fakeRunner,
+			`import { writeFile } from "node:fs/promises"
+const promptIndex = Bun.argv.indexOf("-p")
+const prompt = promptIndex === -1 ? "{}" : Bun.argv[promptIndex + 1] ?? "{}"
+const input = JSON.parse(prompt.split("\\n")[0] ?? prompt)
+await writeFile(input.capturePath, process.env.CODER_LOOP_RUN_CRED ?? "")
+await new Promise((r) => setTimeout(r, input.sleepMs ?? 8_000))
+process.exitCode = 0
+`,
+		)
+		const daemon = await startCoderLoopDaemon({
+			loopDataRoot,
+			shutdownGraceMs: 100,
+			scheduler: {
+				enabled: true,
+				intervalMs: 20,
+				runner: { kind: "claude", source: "iteration-default", binary: "bun", extraArgs: [fakeRunner], model: null },
+				// No `presetDir` override: per-item presetPath resolution must stay live so the
+				// spawn's phase plan comes from depgrant-preset (entry phase `responder`).
+				worktreeManager: async ({ chain, repoCwd }) => {
+					const worktreePath = schedulerSlotWorktreePath(chain, repoCwd, { loopDataRoot })
+					await mkdir(worktreePath, { recursive: true })
+					return worktreePath
+				},
+				prompt: ({ item }) => JSON.stringify({
+					capturePath: resolve(root, `cred-${item.id}.txt`),
+					sleepMs: 10_000,
+				}),
+				chainCompleteTriggerForChain: () => null,
+			},
+		})
+		try {
+			const snapshot = daemon.snapshot()
+			const chainA = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("chain.create", {
+				name: "depgrant-chain-a",
+				repository: "mouriya-s-lab/coder-loop",
+			}))).chain)
+			const chainB = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("chain.create", {
+				name: "depgrant-chain-b",
+				repository: "mouriya-s-lab/coder-loop",
+			}))).chain)
+			const itemX = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
+				chainId: numberValue(chainA.id),
+				itemId: "9001",
+				repoCwd: REPO_ROOT,
+				presetPath: presetDir,
+			}))).item)
+			const itemY = record(expectOk(await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.add", {
+				chainId: numberValue(chainB.id),
+				itemId: "9002",
+				repoCwd: REPO_ROOT,
+				presetPath: presetDir,
+			}))).item)
+			const itemXId = numberValue(itemX.id)
+			const itemYId = numberValue(itemY.id)
+
+			// Wait for item X's responder run to capture its credential.
+			const captureX = resolve(root, `cred-${itemXId}.txt`)
+			await waitFor(async () => {
+				try { return (await readFile(captureX, "utf-8")).trim() } catch { return "" }
+			}, (value) => value.length > 0, 12_000)
+			const credential = (await readFile(captureX, "utf-8")).trim()
+			expect(credential.length).toBeGreaterThan(0)
+
+			// Allow #1: top-level dependsOn naming the CROSS-CHAIN item Y.
+			const allowTopLevel = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.update", {
+				itemId: itemXId,
+				fields: { dependsOn: [itemYId] },
+				agentCredential: credential,
+			}))
+			if (!allowTopLevel.ok) throw new Error(`expected allow, got ${allowTopLevel.error.code}: ${allowTopLevel.error.message}`)
+			{
+				const updated = record(record(allowTopLevel.result).item)
+				const extra = record(updated.extra)
+				expect(extra.dependsOn).toEqual([itemYId])
+			}
+
+			// Allow #2: the extraPatch carrier reaches the same grant.
+			const allowPatch = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.update", {
+				itemId: itemXId,
+				fields: { extraPatch: { dependsOn: [itemYId] } },
+				agentCredential: credential,
+			}))
+			expect(allowPatch.ok).toBe(true)
+
+			// Deny: the grant is dependsOn-scoped — `runner` stays control-plane-denied.
+			const denyRunner = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.update", {
+				itemId: itemXId,
+				fields: { runner: "codex" },
+				agentCredential: credential,
+			}))
+			expect(denyRunner.ok).toBe(false)
+			if (!denyRunner.ok) {
+				expect(denyRunner.error.message).toContain("control-plane-denied")
+			}
+
+			// Deny: a dangling dependsOn target (no item anywhere in the store) is still rejected.
+			const denyDangling = await sendDaemonRequest(snapshot.socketPath, daemonRequest("item.update", {
+				itemId: itemXId,
+				fields: { dependsOn: [999_999] },
+				agentCredential: credential,
+			}))
+			expect(denyDangling.ok).toBe(false)
+			if (!denyDangling.ok) {
+				expect(denyDangling.error.message).toContain("unknown item")
+			}
+
+			// Audit replay: the allow event records dependsOn among grantedFields for the agent.
+			const eventsPath = resolveLoopDataPaths({ loopDataRoot }).eventsFile
+			const events = (await queryObservabilityEvents(eventsPath)).events
+			const allowEvent = events.find((event) =>
+				event.kind === "audit"
+				&& event.type === "item.update.field_write_admission"
+				&& event.item === itemXId
+				&& event.payload.outcome === "allow"
+				&& event.payload.grantedFields.includes("dependsOn"),
+			)
+			expect(allowEvent).toBeDefined()
+			if (allowEvent !== undefined && allowEvent.kind === "audit" && allowEvent.type === "item.update.field_write_admission") {
+				expect(allowEvent.payload.claimedPhase).toBe("responder")
+				expect(allowEvent.subject).toMatchObject({ kind: "agent" })
+			}
+		} finally {
+			await daemon.stop()
+		}
+	}, 30_000)
 })
 
 // #478 acceptance row 5: the daemon-wide rate-limit decision walks through four states
