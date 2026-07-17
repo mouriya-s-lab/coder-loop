@@ -35,7 +35,7 @@ The agent owns contextual judgments that require reading natural language, code,
 
 - Read the role entry prompt first; it contains the rendered runtime inputs and the fragment index with absolute paths.
 - Read the common fragments the entry prompt names before role-specific step files.
-- Enrichment reads `enrichment/*.md`; implementation and review step files live under `iter/steps/` and `review/steps/`; verification, publish, and closure are single-session executors guided by their entry prompts plus `common/packets.md`. The role entry prompt is the guide to when each is opened.
+- Enrichment reads `enrichment/*.md`; iteration's step runbooks live under `iter/steps/`; review's judgment guides and verdict actions live under `review/`; verification, publish, diff-audit, verification-audit, and closure are guided by their entry prompts plus `common/packets.md`. The role entry prompt is the guide to when each is opened.
 
 ## Terminal summaries
 
