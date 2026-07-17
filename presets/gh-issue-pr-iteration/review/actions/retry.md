@@ -59,6 +59,7 @@ runtime record: <kind, complete/missing fields>; conclusion consistency: <consis
 - caveat honesty: <Intent/Result verdict; trigger phrases: none / "<exact quote>">
 - evidence form: <sections present / missing by name; manifest re-runnable: yes / no + missing entry>
 - checks/mergeability: <head sha; each check: name=conclusion; mergeStateStatus>
+- cross-round regression: <historical findings ledger row count vs submit ledger row count; per-row status verdicts (silent drops / cited-but-not-fixed / deferred-but-issue-missing / regressed-from-addressed) — or `n=0 (round 1); trivially passes`>
 
 ## Skipped checks
 - <check → reason (deliverable-route routing / no-PR route / infra) — or `none`>
@@ -70,7 +71,7 @@ do not bypass coder-loop review; do not merge manually; do not close the issue m
 never edit the issue body; contract corrections are superseding marker comments produced by contract-enrichment
 ```
 
-After the feedback comment is durably posted: update the PR body's `coder-loop:current-state` index (`reviewVerdictUrl` = this comment) per `{{PRESET_ROOT}}/common/packets.md`, then minimize your own previous verdict comment on this thread per `common/github-routing.md`. (No-PR routes have no index to maintain.)
+After the feedback comment is durably posted: update the PR body's `coder-loop:current-state` index by **appending** this comment's URL to `reviewVerdictUrls` (never overwrite an earlier array element, never truncate — per `{{PRESET_ROOT}}/common/packets.md`); the next iter-entry reads the whole array as its cross-round instruction, so the earlier verdicts must survive. Then minimize your own previous verdict comment on this thread per `common/github-routing.md`. (No-PR routes have no index to maintain.)
 
 ## After publishing
 

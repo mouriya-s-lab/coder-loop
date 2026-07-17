@@ -1,10 +1,10 @@
 # Step: verify
 
-A verification subagent for one coder-loop iteration. The deliverable is executed verification plus a reviewer-consumable evidence trail under `EVIDENCE_DIR`. The e2e direct run is a separate step that may be running in parallel (it works in its own worktree; `AGENT_CWD` is yours) — your scope is the marker Checks, the test suite, CI parity, and workflow commands.
+The verification runbook for one coder-loop iteration. Iteration executes this step inline in its own session — this preset forbids subagents, so treat the sections below as your own instruction set, not a task spec for a nested agent. The deliverable is executed verification plus a reviewer-consumable evidence trail under `EVIDENCE_DIR`. The e2e direct run is a separate step you execute next in the same session (verify then e2e — sequential; there is no concurrent dispatch here) — your scope in this step is the marker Checks, the test suite, CI parity, and workflow commands.
 
 ## Task
 
-From your dispatch message: `ISSUE`, `REPO`, `BASE_BRANCH`, `RUN_ID`, `AGENT_CWD` (work there, on the issue branch the implement step produced), `EVIDENCE_DIR`, `TARGET_CWD`, and `Step focus`. Read now, before Step 1: the target repo's `CLAUDE.md` / `AGENTS.md` in `TARGET_CWD` (whichever exists; both is normal) for project test / build / lint / typecheck commands and CI parity guidance; plus `{{PRESET_ROOT}}/quality/evidence.md` and `{{PRESET_ROOT}}/quality/cleanup.md` — every artifact below is bound by them.
+From the iteration's runtime bindings and your Step focus: `ISSUE`, `REPO`, `BASE_BRANCH`, `RUN_ID`, `AGENT_CWD` (work there, on the issue branch the implement step produced), `EVIDENCE_DIR`, `TARGET_CWD`, and `Step focus`. Read now, before Step 1: the target repo's `CLAUDE.md` / `AGENTS.md` in `TARGET_CWD` (whichever exists; both is normal) for project test / build / lint / typecheck commands and CI parity guidance; plus `{{PRESET_ROOT}}/quality/evidence.md` and `{{PRESET_ROOT}}/quality/cleanup.md` — every artifact below is bound by them.
 
 **Claim gate.** No verdict without fresh evidence: before writing any pass wording, identify the command that proves the claim, run it in full this run, and read the complete output and exit code — a previous run, a partial check, or "should pass" is not a verdict. Before reporting, confirm the executed set as a whole still covers the marker Checks.
 
@@ -15,7 +15,7 @@ From your dispatch message: `ISSUE`, `REPO`, `BASE_BRANCH`, `RUN_ID`, `AGENT_CWD
    Write the per-Check plan (execute here / deferred to e2e) before running anything. No stable ID is silently dropped.
 2. **Run the shell Checks.** Before the first Check, make the worktree runnable — that is your job, not a blocker: run the project's dependency install (per its manifest/lockfile and the target repo's `CLAUDE.md` / `AGENTS.md`) and any required build if the implement step left them undone; record the setup commands and exits.
 
-   Per Check: run the literal command in its declared cwd/env, capture command + exit status + output vs expected exit/output. A mismatch is a result to record, not a thing to fix — product failures are findings the orchestrator routes back to implementation; you never patch product code or tests. Fix-and-rerun is allowed only for your own invocation mistakes, and the correction is recorded. An intrinsically broken marker Check is contract-invalid, not a command to reinterpret.
+   Per Check: run the literal command in its declared cwd/env, capture command + exit status + output vs expected exit/output. A mismatch is a result to record, not a thing to fix — product failures route back to a fresh implement step (iteration inserts one before re-running verify then e2e); you never patch product code or tests. Fix-and-rerun is allowed only for your own invocation mistakes, and the correction is recorded. An intrinsically broken marker Check is contract-invalid, not a command to reinterpret.
 3. **Test suite and inventory delta.** Run the canonical full-suite command named in the target repo's `CLAUDE.md` / `AGENTS.md` on the issue branch, captured with `2>&1 | tee <log under EVIDENCE_DIR>`, and parse the head-side integer from the runner's own aggregated summary line (see `quality/evidence.md` for the runner-specific rule — the integer is the runner's aggregated total, never a static `rg` / `grep` count of `test(` / `it(` declarations). Then measure the base side **without disturbing your checkout**, in a detached scratch worktree of your own:
 
    ```bash
@@ -73,4 +73,4 @@ Report structurally missing any section, or a Check results table with stable ID
 - **CI parity present** — either parity ran with command/arch/exit/log, or an exact infrastructure blocker is recorded. "Suite passed" alone does not satisfy parity.
 - **Side effects declared** — processes and temp files listed for the cleanup ledger (the scratch worktree confirmed removed).
 
-Send back precise gap lists. If verification surfaced product failures, route to a new implement dispatch, then re-dispatch verify and e2e in parallel for the full contract — not just the failed row.
+If this step's self-check surfaces gaps, do the missing work now. If verification surfaced product failures, iteration inserts a new implement step (fix), then re-runs verify then e2e sequentially for the full contract — not just the failed row.

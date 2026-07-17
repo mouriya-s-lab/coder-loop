@@ -1,6 +1,6 @@
 # Action: accept PR-backed work
 
-Use only when both dispatched reports (diff-audit, verification-audit), all judgments, and the completeness judgment passed. This action publishes the durable ReviewVerdict and ends in a clean exit — you do not merge or close anything; closure re-reads live state and performs the irreversible effects after you.
+Use only when both durable audit reports (DiffAuditReport, VerificationAuditReport) came back `clean`, all self-judgments, and the completeness judgment passed. This action publishes the durable ReviewVerdict and ends in a clean exit — you do not merge or close anything; closure re-reads live state and performs the irreversible effects after you.
 
 ## Procedure
 
@@ -36,6 +36,7 @@ runtime record: <kind>, conclusion verified
 - caveat honesty: Intent/Result verdict; trigger phrases: none
 - evidence form: required packet sections all present; manifest re-runnable: yes
 - checks/mergeability: <head sha; each check: name=conclusion; mergeStateStatus>
+- cross-round regression: <historical findings ledger row count = submit ledger row count = <n>; every row status ∈ addressed/regressed-and-refixed/deferred with cited evidence verified; no silent drops; no regression of previously-addressed findings — or `n=0 (round 1)`>
 
 ## 缺失汇总
 none
@@ -60,7 +61,7 @@ An acceptance whose 缺失汇总 is not `none` is not an acceptance — go back 
 
 Populate `candidate` verbatim from the CandidateRef the verification-audit bound, and `verificationPacketUrl` from the packet comment it audited. Closure consumes exactly this block; a verdict naming an unaudited SHA sends closure after the wrong object.
 
-3. Verify the verdict comment resolves live (fetch the comment URL back). Record the URL in the handoff — closure and the unblock relation (when the issue body carries `Unblocks:`) both key off live GitHub state, so nothing else needs pre-staging here. Then update the PR body's `coder-loop:current-state` index (`reviewVerdictUrl` = this comment) per `{{PRESET_ROOT}}/common/packets.md` — closure resolves the verdict through it — and minimize your own previous (superseded) verdict comments on this thread per `common/github-routing.md`.
+3. Verify the verdict comment resolves live (fetch the comment URL back). Record the URL in the handoff — closure and the unblock relation (when the issue body carries `Unblocks:`) both key off live GitHub state, so nothing else needs pre-staging here. Then update the PR body's `coder-loop:current-state` index by **appending** this comment's URL to `reviewVerdictUrls` (never overwrite an earlier array element, never truncate — per `{{PRESET_ROOT}}/common/packets.md`); closure resolves the latest verdict as `reviewVerdictUrls[length-1]`, and the earlier entries stay as durable audit trail for future iter-entry cross-round reads. Then minimize your own previous (superseded) verdict comments on this thread per `common/github-routing.md`.
 
 ## Failure routing
 

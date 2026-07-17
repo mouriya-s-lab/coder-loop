@@ -2112,7 +2112,7 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 					writeStatus: phase === "review" ? "changes_requested" : null,
 				}),
 			})
-			for (let index = 0; index < 6; index += 1) {
+			for (let index = 0; index < 8; index += 1) {
 				const tick = await schedulerTick(options)
 				expect(tick.spawnedRuns).toHaveLength(1)
 				await tick.spawnedRuns[0]!.closed
@@ -2120,9 +2120,11 @@ describe("scheduler per-item phase advancement (issue #289)", () => {
 			const phases = fixture.schedulerEvents
 				.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> => event.type === "phase.start" && event.itemId === item.id)
 				.map((event) => event.phase)
-			// Six-phase frontier: iteration's candidate flows through verification and
-			// publish before review; review's changes_requested reopens a fresh iteration.
-			expect(phases).toEqual(["contract-enrichment", "iteration", "verification", "publish", "review", "iteration"])
+			// Eight-phase frontier: iteration's candidate flows through verification →
+			// publish → diff-audit → verification-audit before review; review's
+			// changes_requested reopens a fresh iteration. Audits neither write status
+			// nor start attempts on the clean path.
+			expect(phases).toEqual(["contract-enrichment", "iteration", "verification", "publish", "diff-audit", "verification-audit", "review", "iteration"])
 			expect(phases.filter((phase) => phase === "contract-enrichment")).toHaveLength(1)
 			expect(fixture.store.getItem(item.id)?.attempts).toBe(2)
 		} finally {

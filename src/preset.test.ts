@@ -82,7 +82,6 @@ const EXPECTED_FRAGMENTS = [
 	{ id: "common/runtime-contract", role: "common", relPath: "common/runtime-contract.md" },
 	{ id: "common/github-routing", role: "common", relPath: "common/github-routing.md" },
 	{ id: "common/state-contract", role: "common", relPath: "common/state-contract.md" },
-	{ id: "common/dispatch-contract", role: "common", relPath: "common/dispatch-contract.md" },
 	{ id: "common/executable-contract", role: "common", relPath: "common/executable-contract.md" },
 	{ id: "common/packets", role: "common", relPath: "common/packets.md" },
 	{ id: "contract", role: "common", relPath: "contract.md" },
@@ -99,9 +98,6 @@ const EXPECTED_FRAGMENTS = [
 	{ id: "iter/steps/submit", role: "iter", relPath: "iter/steps/submit.md" },
 	{ id: "iter/steps/source-spike", role: "iter", relPath: "iter/steps/source-spike.md" },
 	{ id: "iter/steps/spike-comment", role: "iter", relPath: "iter/steps/spike-comment.md" },
-	{ id: "review/steps/investigate", role: "review", relPath: "review/steps/investigate.md" },
-	{ id: "review/steps/diff-audit", role: "review", relPath: "review/steps/diff-audit.md" },
-	{ id: "review/steps/verification-audit", role: "review", relPath: "review/steps/verification-audit.md" },
 	{ id: "review/spike-followup", role: "review", relPath: "review/spike-followup.md" },
 	{ id: "review/source-spike-audit", role: "review", relPath: "review/source-spike-audit.md" },
 	{ id: "review/actions/accept-pr", role: "review", relPath: "review/actions/accept-pr.md" },
@@ -162,28 +158,28 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 	})
 
 	test("verification-audit holds the packet's runtime record to the lifetime contract without re-running the E2E", async () => {
-		const audit = await readFile(resolve(BUNDLED_PRESET_DIR, "review/steps/verification-audit.md"), "utf8")
+		const audit = await readFile(resolve(BUNDLED_PRESET_DIR, "verification-audit-entry.md"), "utf8")
 		expect(audit).toContain("must declare exactly one kind (`durable` / `recreatable`)")
 		expect(audit).toContain("internal contradiction finding")
 		expect(audit).toContain("You do not re-run the canonical suite, the full check table, or the E2E")
 	})
 
 	test("limits changed-scope issue patterns to branch delta", async () => {
-		const audit = await readFile(resolve(BUNDLED_PRESET_DIR, "review/steps/diff-audit.md"), "utf8")
+		const audit = await readFile(resolve(BUNDLED_PRESET_DIR, "diff-audit-entry.md"), "utf8")
 		expect(audit).toContain("For `changed`")
 		expect(audit).toContain("base→head added or modified lines")
 		expect(audit).toContain("Pre-existing untouched matches are excluded from verdict")
 	})
 
 	test("requires whole-tree issue pattern convergence", async () => {
-		const audit = await readFile(resolve(BUNDLED_PRESET_DIR, "review/steps/diff-audit.md"), "utf8")
+		const audit = await readFile(resolve(BUNDLED_PRESET_DIR, "diff-audit-entry.md"), "utf8")
 		expect(audit).toContain("For `whole-tree`")
 		expect(audit).toContain("complete declared tree")
 		expect(audit).toContain("enumerate every remaining site")
 	})
 
 	test("classifies ambiguous marker Pattern scope as a contract error", async () => {
-		const audit = await readFile(resolve(BUNDLED_PRESET_DIR, "review/steps/diff-audit.md"), "utf8")
+		const audit = await readFile(resolve(BUNDLED_PRESET_DIR, "diff-audit-entry.md"), "utf8")
 		expect(audit).toContain("closed union `changed | whole-tree`")
 		expect(audit).toContain("unknown scope, duplicate rows, or conflicting scopes")
 		expect(audit).toContain("contract error")
@@ -191,7 +187,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 	})
 
 	test("routes diff audit by the executable-contract marker's typed Pattern scope", async () => {
-		const audit = await readFile(resolve(BUNDLED_PRESET_DIR, "review/steps/diff-audit.md"), "utf8")
+		const audit = await readFile(resolve(BUNDLED_PRESET_DIR, "diff-audit-entry.md"), "utf8")
 		expect(audit).toMatch(/For `changed`[\s\S]*For `whole-tree`/)
 		expect(audit).toContain("the difference is the candidate set, not the severity")
 		expect(audit).toContain("Base→head")
@@ -200,7 +196,9 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 	test("routes malformed contract packets to re-enrichment instead of implementation retry", async () => {
 		const entry = await readFile(resolve(BUNDLED_PRESET_DIR, "review-entry.md"), "utf8")
 		const action = await readFile(resolve(BUNDLED_PRESET_DIR, "review/actions/reenrich.md"), "utf8")
-		expect(entry).toContain("select contract-invalid and re-enrich")
+		// Post eight-phase split: review-entry lists reenrich in its Step-5 outcome table
+		// as the "executable contract invalid" outcome — that row is the routing rule.
+		expect(entry).toContain("| executable contract invalid | `{{PRESET_ROOT}}/review/actions/reenrich.md` |")
 		expect(action).toContain("missing, malformed, stale after an operator correction, internally contradictory")
 		expect(action).toContain("Do not use this for implementation defects")
 	})
@@ -232,8 +230,10 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		// that was mid-flight when the previous daemon process died. Daemon recovery (#508)
 		// no longer rewrites `items.status` / `phase` / `sessionIds`, so the post-crash
 		// `in_progress` rowid is what the scheduler now consumes on the next tick.
-		// Six-phase split: the drift statuses are closure's re-entry routing when live
+		// Eight-phase split: the drift statuses are closure's re-entry routing when live
 		// GitHub state no longer matches the packet chain at the irreversible effect.
+		// `verification_drift` is also verification-audit's exit when the packet is
+		// inadequate for the current candidate.
 		expect([...preset.statuses.continuable]).toEqual(["queued", "in_progress", "changes_requested", "contract_invalid", "candidate_drift", "verification_drift", "publication_drift", "review_drift"])
 		expect([...preset.statuses.terminal]).toEqual(["blocked", "moot", "done", "exhausted"])
 		expect([...preset.statuses.unblockable]).toEqual(["blocked"])
@@ -253,7 +253,7 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		// #405: review's exits include a chain-action branch (`stop`) alongside the
 		// item-status branches. The projection below narrows on the ADT discriminator so a future
 		// extra chain-action exit will land in the chain-action assertion automatically.
-		// Six-phase split: review's terminal business exits shrank to `blocked` — accepted/moot
+		// Eight-phase split: review's terminal business exits shrank to `blocked` — accepted/moot
 		// verdicts clean-exit to closure (which owns `done`/`moot`), and the pre-emptive
 		// `exhausted` exit is retired (the budget gate is the engine's, at graph entry).
 		const reviewExits = preset.phases.find((phase) => phase.name === "review")?.exits ?? []
@@ -263,18 +263,28 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(verificationExits.flatMap((exit) => exit.kind === "item-status" ? [exit.status] : [])).toEqual(["changes_requested", "contract_invalid"])
 		const publishExits = preset.phases.find((phase) => phase.name === "publish")?.exits ?? []
 		expect(publishExits.flatMap((exit) => exit.kind === "item-status" ? [exit.status] : [])).toEqual(["changes_requested", "contract_invalid"])
+		const diffAuditExits = preset.phases.find((phase) => phase.name === "diff-audit")?.exits ?? []
+		expect(diffAuditExits.flatMap((exit) => exit.kind === "item-status" ? [exit.status] : [])).toEqual(["changes_requested", "contract_invalid"])
+		const verificationAuditExits = preset.phases.find((phase) => phase.name === "verification-audit")?.exits ?? []
+		expect(verificationAuditExits.flatMap((exit) => exit.kind === "item-status" ? [exit.status] : [])).toEqual(["verification_drift", "changes_requested", "contract_invalid"])
 		const closureExits = preset.phases.find((phase) => phase.name === "closure")?.exits ?? []
 		expect(closureExits.flatMap((exit) => exit.kind === "item-status" ? [exit.status] : [])).toEqual(["done", "moot", "candidate_drift", "verification_drift", "publication_drift", "review_drift", "contract_invalid"])
 	})
 
-	test("phases are the six-phase frontier plus blocked responder and umbrella finalizer triggers", async () => {
+	test("phases are the eight-phase frontier plus blocked responder and umbrella finalizer triggers", async () => {
 		const preset = await loadPreset(BUNDLED_PRESET_DIR)
-		expect(preset.phases.map((p) => p.name)).toEqual(["contract-enrichment", "iteration", "verification", "publish", "review", "closure", "blocked-responder", "umbrella-finalizer"])
+		expect(preset.phases.map((p) => p.name)).toEqual([
+			"contract-enrichment", "iteration", "verification", "publish",
+			"diff-audit", "verification-audit", "review", "closure",
+			"blocked-responder", "umbrella-finalizer",
+		])
 		expect(Object.fromEntries(preset.phases.map((phase) => [phase.name, phase.defaultRunner]))).toEqual({
 			"contract-enrichment": "codex",
 			iteration: "codex",
 			verification: "codex",
 			publish: "codex",
+			"diff-audit": "codex",
+			"verification-audit": "codex",
 			review: "codex",
 			closure: "codex",
 			"blocked-responder": "codex",
@@ -285,6 +295,8 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 			iteration: "gpt-5.6-sol",
 			verification: "gpt-5.6-sol",
 			publish: "gpt-5.6-sol",
+			"diff-audit": "gpt-5.6-sol",
+			"verification-audit": "gpt-5.6-sol",
 			review: "gpt-5.6-sol",
 			closure: "gpt-5.6-sol",
 			"blocked-responder": "gpt-5.6-sol",
@@ -296,14 +308,18 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		const iteration = preset.phases.find((phase) => phase.name === "iteration")!
 		const verification = preset.phases.find((phase) => phase.name === "verification")!
 		const publish = preset.phases.find((phase) => phase.name === "publish")!
+		const diffAudit = preset.phases.find((phase) => phase.name === "diff-audit")!
+		const verificationAudit = preset.phases.find((phase) => phase.name === "verification-audit")!
 		const review = preset.phases.find((phase) => phase.name === "review")!
 		const closure = preset.phases.find((phase) => phase.name === "closure")!
 		expect(enrichment.entry).toBe(true)
 		expect(enrichment.startsAttempt).toBe(false)
 		expect(enrichment.next).toEqual([{ kind: "completed", phase: "iteration" }])
 		expect(iteration.entry).toBe(false)
-		// §4.4: iteration is the ONLY attempt-starting phase — one attempt covers the
-		// whole verification → publish → review → closure successor chain.
+		// §4.4: iteration is the ONLY attempt-starting phase — one attempt covers the whole
+		// verification → publish → diff-audit → verification-audit → review → closure
+		// successor chain. Audits are separate phases (subagents forbidden) but they do not
+		// start new attempts; a fresh iteration re-entry is what the budget gate counts.
 		expect(preset.phases.filter((phase) => phase.startsAttempt).map((phase) => phase.name)).toEqual(["iteration"])
 		expect(iteration.next).toEqual([
 			{ kind: "completed", phase: "verification" },
@@ -315,7 +331,18 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 			{ kind: "item-status", phase: "contract-enrichment", status: status("contract_invalid") },
 		])
 		expect(publish.next).toEqual([
+			{ kind: "completed", phase: "diff-audit" },
+			{ kind: "item-status", phase: "iteration", status: status("changes_requested") },
+			{ kind: "item-status", phase: "contract-enrichment", status: status("contract_invalid") },
+		])
+		expect(diffAudit.next).toEqual([
+			{ kind: "completed", phase: "verification-audit" },
+			{ kind: "item-status", phase: "iteration", status: status("changes_requested") },
+			{ kind: "item-status", phase: "contract-enrichment", status: status("contract_invalid") },
+		])
+		expect(verificationAudit.next).toEqual([
 			{ kind: "completed", phase: "review" },
+			{ kind: "item-status", phase: "verification", status: status("verification_drift") },
 			{ kind: "item-status", phase: "iteration", status: status("changes_requested") },
 			{ kind: "item-status", phase: "contract-enrichment", status: status("contract_invalid") },
 		])
@@ -358,6 +385,8 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 			iteration: ["RETRY_STATUS_DOC", "TERMINAL_STATUSES_DOC"],
 			verification: ["RETRY_STATUS_DOC", "TERMINAL_STATUSES_DOC"],
 			publish: ["RETRY_STATUS_DOC", "TERMINAL_STATUSES_DOC"],
+			"diff-audit": ["RETRY_STATUS_DOC", "TERMINAL_STATUSES_DOC"],
+			"verification-audit": ["RETRY_STATUS_DOC", "TERMINAL_STATUSES_DOC"],
 			review: ["STATUS_VOCABULARY_DOC"],
 			closure: [],
 			"blocked-responder": ["TRIGGER_STATUS_DOC"],
@@ -413,9 +442,10 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 			const variable = phase.variables.find((candidate) => candidate.key === "ISSUE" && candidate.doc !== null)
 			return variable === undefined ? [] : [{ preset, phase, variable }]
 		}))
-		// bundled six-phase preset decorates ISSUE on 7 phases (all but umbrella-finalizer)
-		// + real-e2e-minimal decorates 2.
-		expect(decoratedIssueBindings).toHaveLength(9)
+		// Bundled eight-phase preset decorates ISSUE on 9 phases (all but umbrella-finalizer:
+		// contract-enrichment, iteration, verification, publish, diff-audit, verification-audit,
+		// review, closure, blocked-responder) + real-e2e-minimal decorates 2.
+		expect(decoratedIssueBindings).toHaveLength(11)
 
 		for (const { preset, phase, variable } of decoratedIssueBindings) {
 			const doc = variable.doc
@@ -527,23 +557,34 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(review).toContain("plus** the latest run's delta comment for retries")
 	})
 
-	test("iteration entry owns the task-list workflow, deliverable-shape routing, and dispatch protocol", async () => {
+	test("iteration entry owns the task-list workflow and deliverable-shape routing (subagents forbidden)", async () => {
 		const entry = await Bun.file(resolve(BUNDLED_PRESET_DIR, "iter-entry.md")).text()
 
 		// #450: deliverable-shape routing — agent reads issue body to decide the step
 		// sequence; there is no `kind:*` label table. The four step sequences must all
 		// still be visible so step selection guidance is observable in the rendered prompt.
 		expect(entry).not.toMatch(/kind:[A-Za-z0-9_-]+/i)
-		expect(entry).toContain("[research if Step 2 left you unsure what the right change is] → implement → (verify ∥ e2e) → submit")
-		expect(entry).toContain("resolve-blocker → implement → (verify ∥ e2e) → submit")
+		// Subagent ban replaces the pre-existing orchestrator+worker split; verify and e2e
+		// are sequential (no `∥` parallel dispatch round because inline execution can't
+		// run two concurrent workflows in one session).
+		expect(entry).toContain("[research if Step 2 left you unsure what the right change is] → implement → verify → e2e → submit")
+		expect(entry).toContain("resolve-blocker → implement → verify → e2e → submit")
 		expect(entry).toContain("[research?] → source-spike")
 		expect(entry).toContain("[research?] → spike-comment")
 		expect(entry).toContain("the routing decision is yours, anchored in what the issue body asks for")
 
-		// task-list spine: explicit list, two-state exit, no self-execution, no subagent-file reads
+		// Subagent ban banner and inline execution language must be present so the entry
+		// cannot be reinterpreted as an orchestrator.
+		expect(entry).toContain("This preset forbids subagents")
+		expect(entry).toContain("do every step below yourself")
+		expect(entry).toContain("You execute inline.")
+
+		// task-list spine: explicit list with two-state exit stays; the pre-subagent-ban
+		// "never do the work yourself" line is retired (that was orchestrator-mode
+		// language, and the new model requires the opposite — see the "you do every step
+		// below yourself" banner above).
 		expect(entry).toContain("The list is the run.")
-		expect(entry).toContain("[x] accepted` or `[-] skipped:")
-		expect(entry).toContain("never do the work yourself")
+		expect(entry).toContain("every line is `[x]` or `[-] skipped:")
 		// All four deliverable step files are still referenced so the routing
 		// language above remains executable (the four-workflow capability survives).
 		expect(entry).toContain("{{PRESET_ROOT}}/iter/steps/implement.md")
@@ -555,32 +596,44 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		expect(entry).toContain("ITERATION SUMMARY:")
 	})
 
-	test("dispatch contract is runner-neutral while entry prompts retain semantic task decomposition", async () => {
-		const dispatch = await Bun.file(resolve(BUNDLED_PRESET_DIR, "common/dispatch-contract.md")).text()
+	test("iteration and review entries forbid subagent / dispatch language", async () => {
 		const iteration = await Bun.file(resolve(BUNDLED_PRESET_DIR, "iter-entry.md")).text()
 		const review = await Bun.file(resolve(BUNDLED_PRESET_DIR, "review-entry.md")).text()
 
-		expect(dispatch).toContain("Runner transports have two explicit shapes")
-		expect(dispatch).toContain("Immediate completion")
-		expect(dispatch).toContain("Deferred completion")
-		expect(dispatch).not.toMatch(/claude `-p`|<task-notification>|TaskStop|ScheduleWakeup|Agent\(\.\.\.\)/)
-		expect(iteration).toContain("Build the task list")
-		expect(review).toContain("Build the review task list")
-		expect(`${iteration}\n${review}`).not.toMatch(/claude `-p`|<task-notification>|TaskStop|ScheduleWakeup/)
+		// Both entry prompts declare the ban explicitly.
+		for (const [name, entry] of [["iter-entry", iteration], ["review-entry", review]] as const) {
+			expect(entry, name).toContain("This preset forbids subagents")
+		}
+		// No runner-specific dispatch transport strings survive in either entry — those
+		// belonged to the retired subagent contract.
+		expect(`${iteration}\n${review}`).not.toMatch(/claude `-p`|<task-notification>|TaskStop|ScheduleWakeup|Agent\(\.\.\.\)/)
+		// The retired common/dispatch-contract.md fragment is gone; the loader test
+		// (EXPECTED_FRAGMENTS) already asserts its absence, so no additional file read here.
 	})
 
-	test("review entry owns the mandatory dispatches, judgments, and action files", async () => {
+	test("review entry adjudicates from durable audit reports without re-auditing (subagents forbidden)", async () => {
 		const entry = await Bun.file(resolve(BUNDLED_PRESET_DIR, "review-entry.md")).text()
 
+		// Subagent ban + non-repair judge role.
+		expect(entry).toContain("This preset forbids subagents")
 		expect(entry).toContain("you never repair the work under review")
-		// Two mandatory dispatches (diff-audit + verification-audit); anti-cheat verbatim
-		// scaffolds are unnecessary for honest runners, but the "no verdict without both
-		// reports" guarantee stays.
-		expect(entry).toContain("A verdict — including retry — produced without both accepted reports is an invalid review")
-		expect(entry).toContain("{{PRESET_ROOT}}/review/steps/verification-audit.md")
-		expect(entry).toContain("{{PRESET_ROOT}}/review/steps/diff-audit.md")
+
+		// Review consumes the two durable audit reports via the current-state index
+		// (diff-audit / verification-audit ran as their own phases).
+		expect(entry).toContain("already ran as their own phases (diff-audit, verification-audit)")
+		expect(entry).toContain("diffAuditReportUrl")
+		expect(entry).toContain("verificationAuditReportUrl")
+		expect(entry).toContain("A review verdict published without both durable audit reports on a PR-backed route is an invalid review")
+
+		// Action files still resolve through review/actions/*.md — the verdict-owning
+		// side effect files did not move.
 		expect(entry).toContain("{{PRESET_ROOT}}/review/actions/accept-pr.md")
 		expect(entry).toContain("{{PRESET_ROOT}}/review/actions/state-write.md")
+
+		// Review MUST NOT re-audit — disagreement routes back through the graph, not by
+		// shadowing here.
+		expect(entry).toContain("re-audit the diff")
+
 		// #405 retired the `REVIEW SUMMARY: verdict=...` template line and the five-word
 		// verdict format from review-entry.md (review terminal action routes through
 		// `coder-loop item exits` + the appropriate writer per ADT branch). #404's
@@ -590,6 +643,18 @@ describe("loadPreset (bundled gh-issue-pr-iteration)", () => {
 		// merged quality files are the judgment ground truth
 		expect(entry).toContain("{{PRESET_ROOT}}/quality/honesty.md")
 		expect(entry).toContain("{{PRESET_ROOT}}/quality/evidence.md")
+	})
+
+	test("diff-audit and verification-audit entries declare the subagent ban and post durable reports", async () => {
+		const diffAudit = await Bun.file(resolve(BUNDLED_PRESET_DIR, "diff-audit-entry.md")).text()
+		const verificationAudit = await Bun.file(resolve(BUNDLED_PRESET_DIR, "verification-audit-entry.md")).text()
+
+		for (const [name, entry] of [["diff-audit-entry", diffAudit], ["verification-audit-entry", verificationAudit]] as const) {
+			expect(entry, name).toContain("This preset forbids subagents")
+		}
+		// The two audit phases post their durable packet types (per common/packets.md).
+		expect(diffAudit).toContain("coder-loop:diff-audit-report")
+		expect(verificationAudit).toContain("coder-loop:verification-audit-report")
 	})
 
 	test("blocked responder prompt carries the required cross-repo side effects", async () => {
@@ -1614,6 +1679,8 @@ describe("issue #400 — fragment index slicing per phase", () => {
 			iteration: ["common", "quality", "iter"],
 			verification: ["common", "quality"],
 			publish: ["common", "quality"],
+			"diff-audit": ["common", "quality"],
+			"verification-audit": ["common", "quality"],
 			review: ["common", "quality", "review"],
 			closure: ["common"],
 			"blocked-responder": ["common"],

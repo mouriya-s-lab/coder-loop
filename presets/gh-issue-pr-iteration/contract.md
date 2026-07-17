@@ -1,6 +1,8 @@
 # `gh-issue-pr-iteration` Preset Contract
 
-读者：contract-enrichment、iteration、verification、publish、review 与 closure agent。
+读者：contract-enrichment、iteration、verification、publish、diff-audit、verification-audit、review 与 closure agent。
+
+**本 preset 禁止使用 subagent**：每个 phase 在自己的 session 内 inline 完成所有工作，不派发嵌套 agent、不 delegate 到其他 runner session。原来靠 orchestrator+subagent 提供的独立复驱由独立 phase 承担：diff-audit 与 verification-audit 是独立 phase，在 fresh session 中读 CandidateRef / VerificationPacket，把结果写成 durable GitHub 报告（`common/packets.md` DiffAuditReport / VerificationAuditReport），review 只读这两份报告 + 自己做 protocol/scope/hygiene/honesty 判断后出 verdict。
 
 原 issue body 与后续 operator comments 是任务 intent，不要求预先包含实现前无法知道的 Pattern、canonical runtime/E2E、精确 Command 或 test-delta authorization。`contract-enrichment` 调查当前源码、target rules 与运行现场后，在 GitHub issue comment 发布 `schema=1` executable-contract marker；所有后继 phase 按 `common/executable-contract.md` 读取唯一 current packet。
 
@@ -113,23 +115,23 @@ PR protocol 验收检测"最新 retry response 是否在 issue 而非 PR" → re
 
 ## 3. Review 验收点总表
 
-六 phase 拆分后，逐行执行 Checks 与 canonical E2E 归 verification phase（结果进 VerificationPacket）；review 是裁决调度者（orchestrator）：PR-backed 路由必须先派 diff-audit 与 verification-audit 两个 subagent、拿齐两份已验收报告后才允许做 body 判断与 verdict；诚实性/协议判断由调度者亲自做。每次 PR 回复（retry 反馈与 accept 总结）都是完整 review 报告：每个 check 一节引实测值 + `## 缺失汇总` 单一权威缺口区 + `## Skipped checks` 写明理由。按 `review-entry.md` 的 phase 顺序列出每个验收点（entry 与 quality/ 文件做 ground truth）：
+八 phase 拆分后：逐行执行 Checks 与 canonical E2E 归 verification phase（结果进 VerificationPacket）；scope/diff/code/test-integrity 独立审查归 **diff-audit phase**（结果进 DiffAuditReport）；packet 身份/覆盖/artifact/live CI 一致性独立审查归 **verification-audit phase**（结果进 VerificationAuditReport）。review 是裁决者：它读上面两份 durable audit 报告 + 自己做诚实性/协议/scope-reduction/mergeability 判断，然后出 ReviewVerdict。**PR-backed 路由缺少两份 durable audit 报告（DiffAuditReport / VerificationAuditReport）任意一份的 verdict 无效**（仅 no-PR 路由与 infra-stop 例外）；review **不允许**再自己 dispatch subagent 或重跑 audit（本 preset 禁用 subagent；对 audit 结论有异议只能通过图路由回相应 audit phase 的 fresh 重跑，绝不在 review session 内影子重审）。每次 PR 回复（retry 反馈与 accept 总结）都是完整 review 报告：每个 check 一节引实测值 + `## 缺失汇总` 单一权威缺口区 + `## Skipped checks` 写明理由。按 `review-entry.md` 的 phase 顺序列出每个验收点（entry 与 quality/ 文件做 ground truth）：
 
 | 验收点 | 执行方 | 输入 | 规则 | 失败处置 |
 |---|---|---|---|---|
-| Diff audit | diff-audit subagent 真跑（纯读） | PR diff vs base + changed code 本体 + diff 中的测试变更 + current marker 声明的 Pattern scope | 每个 changed file 映射到 issue scope；runtime artifacts / scheduling state 不入仓；diff 中的测试删/改名/skip/弱化逐条枚举（含 test-collection config/glob/skip-marker/CI 变化）；代码审查锚定 issue 设计：逻辑错误（须可追溯失败路径）/ 偏离 issue 声明的设计（须引原句）/ 违反项目 conventions（须引来源）/ diff 内结构缺陷；并对 current marker 的 typed Pattern rows做一次性全仓 site 枚举——其余发散性发现不进 verdict | retry action（引用全部失败行 + 每个 pattern 的全部剩余 site） |
-| Verification audit | verification-audit subagent（纯读 + 有限 spot 复跑） | current marker 的全部 stable-ID Checks + 最新 CandidateRef + VerificationPacket + live PR checks | 身份绑定三方相等（CandidateRef == packet.candidate == live head）；marker 每个 stable-ID 都在 packet.checks 覆盖（原命令、cwd、exit、具体 observation）；artifact refs 可解析且内容与 claim 一致；live CI 对 verified SHA 绿；runtime 记录（durable/recreatable）完整且 conclusion 与行结果自洽；unblock-deliverable 路由必含 blocked-path 行覆盖；不重跑完整 E2E/套件——verification phase 已独立执行 | retry action（引用全部缺口/失配） |
-| Checks/mergeability | 调度者亲自 | live PR checks（names/conclusions/timestamps/head SHA）+ mergeStateStatus | 实测观察；pending/hung 不算 mergeable；CI 合法在跑 → retry 附 observe-again | retry action |
-| Trace honesty | 调度者亲自 | iter 汇报/trace + GitHub live state | 每个声明有对应观察（`quality/honesty.md` claim-vs-observation） | retry action |
-| PR protocol | 调度者亲自 | PR body + thread + issue comments | first line `Closes #<N>`、CI parity 行、retry 必有新 PR-thread comment | retry action / no-PR 路由 |
-| Title-intent | 调度者亲自 | issue title + PR title | strip conventional prefix 后主语 noun phrase 对齐 | retry action |
-| Caveat honesty | 调度者亲自 | handoff `Intent/Result (run …)` blocks + PR body/comments（scope-reduction 触发相关段落原文引用）+ diff-audit 报告（intent↔action 比对） | `quality/honesty.md` 七类 scope-reduction 触发；cosmetic-handwave 一律硬拒；授权须 current marker Test delta 或可追溯 intent source，stale-baseline 例外见同文件 | retry action |
-| Evidence form | 调度者亲自 | PR body（opening packet）/ 最新 run 的 PR comment | `quality/evidence.md`：分层齐全、claim 映射、artifact 可查、测试清单 delta 在场、**真实路径 E2E 证据**（按 marker Canonical runtime 的 target-mandated real driver；仓库脚本只要驱动真实消费路径即可）、**runtime manifest** 在场且可凭其重跑（auth 只写解析位置，secret 值入包即硬拒）；unblock-deliverable 路由额外要求 blocked-path 复测 | retry / blocked action |
-| Spike follow-up（comment-spike-deliverable） | 调度者亲自（`review/spike-followup.md`） | iter comment + issue `## 结果分支` | 选恰好一条分支 + 提议数 ≥ 分支动词词表要求 | retry action |
-| Source-spike audit（source-writing-spike-deliverable） | 调度者亲自（`review/source-spike-audit.md`） | issue comment + spike branch + 证据 | no-merge 语义、branch/SHA、命令覆盖、结果分支；有 PR 即 retry | retry action |
-| Completeness | 调度者亲自 | 上面验收点综合 + child closure table | 决定 verdict action（accept-pr / accept-no-pr / retry / expand-parent / moot / blocked / stop）；accepted/moot 发布 durable ReviewVerdict 后 clean exit，merge/close 由 closure phase 复读 live state 后执行 | 选 action 文件 |
+| Diff audit | diff-audit phase 独立跑（fresh session，纯读） | PR diff vs base + changed code 本体 + diff 中的测试变更 + current marker 声明的 Pattern scope | 每个 changed file 映射到 issue scope；runtime artifacts / scheduling state 不入仓；diff 中的测试删/改名/skip/弱化逐条枚举（含 test-collection config/glob/skip-marker/CI 变化）；代码审查锚定 issue 设计：逻辑错误（须可追溯失败路径）/ 偏离 issue 声明的设计（须引原句）/ 违反项目 conventions（须引来源）/ diff 内结构缺陷；并对 current marker 的 typed Pattern rows做一次性全仓 site 枚举——其余发散性发现不进 verdict。审查结论写入 durable DiffAuditReport，review 只读不重审 | diff-audit 自身写 `changes-requested` / `contract-invalid` 回 iteration / contract-enrichment；review 引用报告 findings 生成 retry action |
+| Verification audit | verification-audit phase 独立跑（fresh session，纯读 + 有限 spot 复跑） | current marker 的全部 stable-ID Checks + 最新 CandidateRef + VerificationPacket + live PR checks | 身份绑定三方相等（CandidateRef == packet.candidate == live head）；marker 每个 stable-ID 都在 packet.checks 覆盖（原命令、cwd、exit、具体 observation）；artifact refs 可解析且内容与 claim 一致；live CI 对 verified SHA 绿；runtime 记录（durable/recreatable）完整且 conclusion 与行结果自洽；unblock-deliverable 路由必含 blocked-path 行覆盖；不重跑完整 E2E/套件——verification phase 已独立执行。审查结论写入 durable VerificationAuditReport | verification-audit 自身写 `verification_drift`（packet 不足回 verification）/ `changes_requested`（candidate 需改回 iteration）/ `contract_invalid`；review 引用报告 findings |
+| Checks/mergeability | review 亲自 | live PR checks（names/conclusions/timestamps/head SHA）+ mergeStateStatus | 实测观察；pending/hung 不算 mergeable；CI 合法在跑 → retry 附 observe-again | retry action |
+| Trace honesty | review 亲自 | iter 汇报/trace + GitHub live state | 每个声明有对应观察（`quality/honesty.md` claim-vs-observation） | retry action |
+| PR protocol | review 亲自 | PR body + thread + issue comments | first line `Closes #<N>`、CI parity 行、retry 必有新 PR-thread comment | retry action / no-PR 路由 |
+| Title-intent | review 亲自 | issue title + PR title | strip conventional prefix 后主语 noun phrase 对齐 | retry action |
+| Caveat honesty | review 亲自 | handoff `Intent/Result (run …)` blocks + PR body/comments（scope-reduction 触发相关段落原文引用）+ DiffAuditReport 的 change footprint（intent↔action 比对） | `quality/honesty.md` 七类 scope-reduction 触发；cosmetic-handwave 一律硬拒；授权须 current marker Test delta 或可追溯 intent source，stale-baseline 例外见同文件 | retry action |
+| Evidence form | review 亲自 | PR body（opening packet）/ 最新 run 的 PR comment | `quality/evidence.md`：分层齐全、claim 映射、artifact 可查、测试清单 delta 在场、**真实路径 E2E 证据**（按 marker Canonical runtime 的 target-mandated real driver；仓库脚本只要驱动真实消费路径即可）、**runtime manifest** 在场且可凭其重跑（auth 只写解析位置，secret 值入包即硬拒）；unblock-deliverable 路由额外要求 blocked-path 复测 | retry / blocked action |
+| Spike follow-up（comment-spike-deliverable） | review 亲自（`review/spike-followup.md`） | iter comment + issue `## 结果分支` | 选恰好一条分支 + 提议数 ≥ 分支动词词表要求 | retry action |
+| Source-spike audit（source-writing-spike-deliverable） | review 亲自（`review/source-spike-audit.md`） | issue comment + spike branch + 证据 | no-merge 语义、branch/SHA、命令覆盖、结果分支；有 PR 即 retry | retry action |
+| Completeness | review 亲自 | 上面验收点综合 + child closure table | 决定 verdict action（accept-pr / accept-no-pr / retry / expand-parent / moot / blocked / stop）；accepted/moot 发布 durable ReviewVerdict 后 clean exit，merge/close 由 closure phase 复读 live state 后执行 | 选 action 文件 |
 
-代码审查**在 loop 内**，锚点是 issue 声明的设计：逻辑正确性、conventions、diff 内结构由 diff-audit 步审，所有发现必须带锚（可追溯失败路径 / issue 原句 / convention 来源），**不发散**——替代设计、issue 设计之外的改进想法、diff 没碰的代码一律不进 verdict（diff 外既有问题至多在 Problems 记一行 out-of-scope observation）。PR-backed 路由缺少两份派发报告（diff-audit / verification-audit）任意一份的 verdict 无效（仅 no-PR 路由与 infra-stop 例外）。review 的每条 PR 回复是全量报告：每个 check 一节引实测值（SHA / 计数 / 原句引用 / URL / 时间戳）——这些值只有真做了检查才存在。
+代码审查**在 loop 内**，锚点是 issue 声明的设计：逻辑正确性、conventions、diff 内结构由 **diff-audit phase** 独立审并写入 DiffAuditReport，所有发现必须带锚（可追溯失败路径 / issue 原句 / convention 来源），**不发散**——替代设计、issue 设计之外的改进想法、diff 没碰的代码一律不进 verdict（diff 外既有问题至多在 Problems 记一行 out-of-scope observation）。review 的每条 PR 回复是全量报告：每个 check 一节引实测值（SHA / 计数 / 原句引用 / URL / 时间戳）——这些值只有真做了检查才存在。
 
 ---
 
@@ -137,8 +139,8 @@ PR protocol 验收检测"最新 retry response 是否在 issue 而非 PR" → re
 
 每个验收点是否跑、按哪个 deliverable 路由跑——以 `review-entry.md` 底部的「Deliverable routing matrix」为单一来源；本文档不再复述同一张表。issue 作者从这张表反推自己写的 issue body 在 review 时会经过哪些 gate：
 
-- 实现-PR-deliverable / unblock-deliverable issue 都走 PR-backed 路由（两份 dispatch 报告 + 全套 self-judgment）；
-- comment-spike-deliverable / source-writing-spike-deliverable issue 走 no-PR 路由（仅 self-judgment + 对应的 spike 判断指南）；
+- 实现-PR-deliverable / unblock-deliverable issue 都走 PR-backed 路由（两份 durable audit report + review 全套 self-judgment）；
+- comment-spike-deliverable / source-writing-spike-deliverable issue 走 no-PR 路由（audit phase 各出 minimal report + review self-judgment + 对应的 spike 判断指南）；
 - unblock-deliverable issue 还要在 verification（blocked-path 行执行）、verification-audit（该行覆盖确认）与 evidence form 上接受额外的 blocked-path 要求。
 
 ---
@@ -167,6 +169,7 @@ A defect in the current executable packet—broken Check, wrong Pattern scope, s
 | 标题与 body 形态匹配 | §1.6 |
 | 原子性、citation、parent/child、retroactive umbrella、re-parenting | §7.2 |
 | PR body、证据、retry 位置 | §2 |
+| 禁止 subagent、audit 独立 phase 化 | §3 |
 
 ### 7.2 Issue-writing hygiene base
 
@@ -185,10 +188,11 @@ A defect in the current executable packet—broken Check, wrong Pattern scope, s
 
 任何下列改动落地时必须同步更新本文档（顺带改 `docs/gh-issue-pr-iteration-fragments.md`、`src/preset.test.ts` 的 `EXPECTED_FRAGMENTS`、`preset.toml` 的 `[[fragments]]`）：
 
-- `review-entry.md` 任一验收点的判定规则变更，或 `quality/*.md` 判据变更；
-- step 单文件（`iter/steps/*.md` / `review/steps/*.md`）Task / Report / Acceptance 三段解析口径变更；
+- `review-entry.md` / `diff-audit-entry.md` / `verification-audit-entry.md` 任一验收点的判定规则变更，或 `quality/*.md` 判据变更；
+- runbook 单文件（`iter/steps/*.md`）Task / Report / Acceptance 三段解析口径变更；
 - `runtime.*` 白名单增 / 减 key、preset business key 表增减；
 - 四层证据层名 / 数量 / 必填规则变更；
-- `Closes` 关键字位置 / `Closes` 动词放宽。
+- `Closes` 关键字位置 / `Closes` 动词放宽；
+- phase 数量或顺序变化、subagent 禁令放宽或收紧、audit 与 review 边界移动。
 
 本文档与 entry/quality 实际判定逻辑漂移 → issue writer 产 issue 后 review 验收拒绝，trace 上看不出原因——这是反复出现的失败模式，根本避免方式是把 contract 当验收实现的一部分维护。

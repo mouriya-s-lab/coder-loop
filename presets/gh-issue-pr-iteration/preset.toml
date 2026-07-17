@@ -1,19 +1,24 @@
 # coder-loop preset: gh-issue-pr-iteration
 #
 # This is the default preset bundled with coder-loop. It encodes the
-# GitHub issue/PR loop as six normal phases plus two post-review trigger
+# GitHub issue/PR loop as eight normal phases plus two post-review trigger
 # phases:
 #
-#   contract-enrichment → iteration → verification → publish → review → closure
+#   contract-enrichment → iteration → verification → publish →
+#   diff-audit → verification-audit → review → closure
 #
 # Each phase owns one trust boundary: enrichment publishes the executable
 # contract, iteration produces the candidate, verification independently
 # executes the contract checks, publish assembles the ready deliverable,
-# review adjudicates, closure re-reads live state and performs the
-# irreversible external effects. Phases hand off through durable GitHub
-# packets (ExecutableContract marker / CandidateRef / VerificationPacket /
-# ReviewVerdict — see common/packets.md), never through local worktree or
-# stdout alone.
+# diff-audit independently audits the diff against the marker, verification-
+# audit independently audits the VerificationPacket, review reads the two
+# durable audit reports and adjudicates, closure re-reads live state and
+# performs the irreversible external effects. Phases hand off through
+# durable GitHub packets (ExecutableContract marker / CandidateRef /
+# VerificationPacket / DiffAuditReport / VerificationAuditReport /
+# ReviewVerdict — see common/packets.md), never through local worktree,
+# stdout, or subagent context (this preset forbids subagents; every phase
+# does its work in the current session).
 #
 # Variable binding right-hand sides use the three-prefix DSL described in
 # RFC #5:
@@ -56,11 +61,14 @@ lastRunId = "string"
 # any chain that still has a live `current_run` — so listing `in_progress`
 # here does not cause double-spawn while a healthy daemon is running.
 #
-# Six-phase vocabulary: `changes_requested` routes back to a fresh iteration
-# (writable by verification, publish, review), `contract_invalid` routes back
-# to a fresh contract-enrichment (writable by every downstream phase), and the
-# four drift statuses are closure's re-entry routing when live GitHub state no
-# longer matches the packet chain at the moment of the irreversible effect.
+# Eight-phase vocabulary: `changes_requested` routes back to a fresh iteration
+# (writable by verification, publish, diff-audit, verification-audit, review);
+# `contract_invalid` routes back to a fresh contract-enrichment (writable by
+# every downstream phase); the four drift statuses are closure's re-entry
+# routing when live GitHub state no longer matches the packet chain at the
+# moment of the irreversible effect. `verification_drift` is also written by
+# verification-audit when the VerificationPacket itself is inadequate for the
+# same candidate — the candidate stays, verification re-executes.
 continuable = ["queued", "in_progress", "changes_requested", "contract_invalid", "candidate_drift", "verification_drift", "publication_drift", "review_drift"]
 terminal    = ["blocked", "moot", "done", "exhausted"]
 # success: subset of terminal that means the item succeeded. Used by the engine's
@@ -156,7 +164,7 @@ roles  = ["common", "quality", "iter"]
   phase  = "contract-enrichment"
   status = "contract_invalid"
 
-  # #410 field-write grant: iteration syncs the observability mirror (`branch`,
+  # Field-write grant: iteration syncs the observability mirror (`branch`,
   # `pr`) onto the item record once the candidate is durable (draft PR pushed /
   # CandidateRef written). GitHub stays authoritative for candidate identity.
   [phases.rights]
@@ -282,7 +290,7 @@ model  = "gpt-5.6-sol"
 roles  = ["common", "quality"]
 
   [[phases.next]]
-  phase = "review"
+  phase = "diff-audit"
   on    = "completed"
 
   [[phases.next]]
@@ -306,6 +314,148 @@ roles  = ["common", "quality"]
   [[phases.exits]]
   status = "contract_invalid"
   when   = "The contract's delivery route or requirements are invalid for the verified candidate — the contract defect evidence has been published."
+
+  [phases.variables]
+  TARGET_CWD               = { source = "runtime.targetCwd", label = "Target working directory (where `loop-data runtime artifacts` lives)" }
+  AGENT_CWD                = { source = "runtime.agentCwd", label = "Agent working directory (your `cwd`; may equal TARGET_CWD or point at a different repo checkout for cross-repo work)" }
+  REPO                     = { source = "chain.repository", label = "GitHub repository" }
+  BASE_BRANCH              = { source = "chain.baseBranch", label = "Base branch" }
+  ISSUE                    = { source = "item.issue", label = "Current issue", prefix = "#", suffix = "", style = "code" }
+  RUN_ID                   = { source = "runtime.runId", label = "Run ID" }
+  SHARED_CONTEXT_FILE      = { source = "runtime.sharedContextPath", label = "Chain handoff/shared file" }
+  STATE_FILE               = { source = "runtime.stateFile", label = "State file", style = "plain" }
+  CURRENT_ISSUE_FILE       = { source = "runtime.currentIssueFile", label = "Optional per-issue handoff file" }
+  ISSUE_DIR                = "runtime.issueDir"
+  EVIDENCE_DIR             = { source = "runtime.evidenceDir", label = "Evidence directory" }
+  EVIDENCE_ROOT_DIR        = { source = "runtime.evidenceRootDir", label = "Evidence root directory" }
+  LOG_DIR                  = { source = "runtime.logDir", label = "Log directory" }
+  TRACE_FILE               = "runtime.traceFile"
+  LOOP_FILE                = "runtime.loopFile"
+  PROMPT_ROOT              = "runtime.presetDir"
+  PROMPT_FRAGMENT_INDEX    = "runtime.fragmentIndex"
+  RUNTIME_INPUTS_DOC       = "runtime.runtimeInputsDoc"
+  PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
+  RETRY_STATUS_DOC         = "runtime.retryStatusDoc"
+  TERMINAL_STATUSES_DOC    = "runtime.terminalStatusesDoc"
+  REQUIRE_BROWSER_EVIDENCE = { source = "chain.requireBrowserEvidence", default = false, label = "Browser evidence required", suffix = " — when `true`, Layer 4 must contain the strongest feasible E2E evidence for the project type. For projects with UI: real browser screenshots of the running dev server or deployed page. For projects without UI (pure CLI / library / backend / config): CLI smoke run transcripts with command, exit status, and output are the Layer 4 evidence; do not fabricate screenshots by creating HTML files and screenshotting them." }
+  ISSUE_BRANCH             = { source = "item.branch", label = "Existing issue branch", blankBefore = true }
+  ISSUE_PR                 = { source = "item.pr", label = "Existing issue PR" }
+  ISSUE_STATUS             = { source = "item.status", label = "Queue status" }
+  ISSUE_LAST_RUN_ID        = { source = "item.lastRunId", label = "Previous run ID" }
+  RUN_ID_GENERATION        = { source = "runtime.runIdGeneration", label = "Run-ID generation", blankBefore = true }
+  RESUMED_FROM_PHASE       = { source = "runtime.resumedFromPhase", label = "Resumed-from phase" }
+  RESUMED_STARTED_AT       = { source = "runtime.resumedStartedAt", label = "Resumed run started at" }
+  RESUMED_SESSION_ID       = "runtime.resumedSessionId"
+  CHAIN_NAME               = "runtime.chainName"
+  CHAIN_UMBRELLA_REPO      = { source = "chain.umbrellaRepo", default = "" }
+  CHAIN_UMBRELLA_ISSUE     = { source = "chain.umbrellaIssue", default = "" }
+  REPO_CWD                 = "runtime.repoCwd"
+
+[[phases]]
+name   = "diff-audit"
+prompt = "diff-audit-entry.md"
+runner = "codex"
+model  = "gpt-5.6-sol"
+roles  = ["common", "quality"]
+
+  [[phases.next]]
+  phase = "verification-audit"
+  on    = "completed"
+
+  [[phases.next]]
+  phase  = "iteration"
+  status = "changes_requested"
+
+  [[phases.next]]
+  phase  = "contract-enrichment"
+  status = "contract_invalid"
+
+  # No [phases.rights] segment: diff-audit posts a durable DiffAuditReport
+  # comment to the PR/issue thread and its declared status exits only — it
+  # never mutates the queue, item fields, or the candidate.
+
+  [[phases.exits]]
+  status = "changes_requested"
+  when   = "The diff has unmapped files, hygiene findings, unauthorized test changes, uncovered marker Pattern sites, or anchored code findings against the issue's stated design — the DiffAuditReport has been published."
+
+  [[phases.exits]]
+  status = "contract_invalid"
+  when   = "The marker Pattern scope is unknown / duplicate / conflicting, or the deliverable route is contradicted by the diff (e.g. PR on a no-PR route) — the DiffAuditReport has been published."
+
+  [phases.variables]
+  TARGET_CWD               = { source = "runtime.targetCwd", label = "Target working directory (where `loop-data runtime artifacts` lives)" }
+  AGENT_CWD                = { source = "runtime.agentCwd", label = "Agent working directory (your `cwd`; may equal TARGET_CWD or point at a different repo checkout for cross-repo work)" }
+  REPO                     = { source = "chain.repository", label = "GitHub repository" }
+  BASE_BRANCH              = { source = "chain.baseBranch", label = "Base branch" }
+  ISSUE                    = { source = "item.issue", label = "Current issue", prefix = "#", suffix = "", style = "code" }
+  RUN_ID                   = { source = "runtime.runId", label = "Run ID" }
+  SHARED_CONTEXT_FILE      = { source = "runtime.sharedContextPath", label = "Chain handoff/shared file" }
+  STATE_FILE               = { source = "runtime.stateFile", label = "State file", style = "plain" }
+  CURRENT_ISSUE_FILE       = { source = "runtime.currentIssueFile", label = "Optional per-issue handoff file" }
+  ISSUE_DIR                = "runtime.issueDir"
+  EVIDENCE_DIR             = { source = "runtime.evidenceDir", label = "Evidence directory" }
+  EVIDENCE_ROOT_DIR        = { source = "runtime.evidenceRootDir", label = "Evidence root directory" }
+  LOG_DIR                  = { source = "runtime.logDir", label = "Log directory" }
+  TRACE_FILE               = "runtime.traceFile"
+  LOOP_FILE                = "runtime.loopFile"
+  PROMPT_ROOT              = "runtime.presetDir"
+  PROMPT_FRAGMENT_INDEX    = "runtime.fragmentIndex"
+  RUNTIME_INPUTS_DOC       = "runtime.runtimeInputsDoc"
+  PHASE_EXITS_DOC          = "runtime.phaseExitsDoc"
+  RETRY_STATUS_DOC         = "runtime.retryStatusDoc"
+  TERMINAL_STATUSES_DOC    = "runtime.terminalStatusesDoc"
+  REQUIRE_BROWSER_EVIDENCE = { source = "chain.requireBrowserEvidence", default = false, label = "Browser evidence required", suffix = " — when `true`, Layer 4 must contain the strongest feasible E2E evidence for the project type. For projects with UI: real browser screenshots of the running dev server or deployed page. For projects without UI (pure CLI / library / backend / config): CLI smoke run transcripts with command, exit status, and output are the Layer 4 evidence; do not fabricate screenshots by creating HTML files and screenshotting them." }
+  ISSUE_BRANCH             = { source = "item.branch", label = "Existing issue branch", blankBefore = true }
+  ISSUE_PR                 = { source = "item.pr", label = "Existing issue PR" }
+  ISSUE_STATUS             = { source = "item.status", label = "Queue status" }
+  ISSUE_LAST_RUN_ID        = { source = "item.lastRunId", label = "Previous run ID" }
+  RUN_ID_GENERATION        = { source = "runtime.runIdGeneration", label = "Run-ID generation", blankBefore = true }
+  RESUMED_FROM_PHASE       = { source = "runtime.resumedFromPhase", label = "Resumed-from phase" }
+  RESUMED_STARTED_AT       = { source = "runtime.resumedStartedAt", label = "Resumed run started at" }
+  RESUMED_SESSION_ID       = "runtime.resumedSessionId"
+  CHAIN_NAME               = "runtime.chainName"
+  CHAIN_UMBRELLA_REPO      = { source = "chain.umbrellaRepo", default = "" }
+  CHAIN_UMBRELLA_ISSUE     = { source = "chain.umbrellaIssue", default = "" }
+  REPO_CWD                 = "runtime.repoCwd"
+
+[[phases]]
+name   = "verification-audit"
+prompt = "verification-audit-entry.md"
+runner = "codex"
+model  = "gpt-5.6-sol"
+roles  = ["common", "quality"]
+
+  [[phases.next]]
+  phase = "review"
+  on    = "completed"
+
+  [[phases.next]]
+  phase  = "verification"
+  status = "verification_drift"
+
+  [[phases.next]]
+  phase  = "iteration"
+  status = "changes_requested"
+
+  [[phases.next]]
+  phase  = "contract-enrichment"
+  status = "contract_invalid"
+
+  # No [phases.rights] segment: verification-audit posts a durable
+  # VerificationAuditReport comment and its declared status exits only —
+  # it never mutates the queue, item fields, or the candidate.
+
+  [[phases.exits]]
+  status = "verification_drift"
+  when   = "The VerificationPacket is inadequate for the current candidate — identity mismatch, coverage gap on a marker Check, artifact contradiction, internal contradiction, live CI failing on the verified SHA, or the mandatory blocked-path row missing for a blocker-removal route — the VerificationAuditReport has been published. Verification re-executes against the same candidate."
+
+  [[phases.exits]]
+  status = "changes_requested"
+  when   = "The candidate itself is wrong (the packet cannot pass because the code does not work) or the deliverable route is wrong — the VerificationAuditReport has been published. A fresh iteration must produce a new candidate."
+
+  [[phases.exits]]
+  status = "contract_invalid"
+  when   = "A marker Check is malformed or unexecutable as written — the VerificationAuditReport has been published and the contract must be regenerated."
 
   [phases.variables]
   TARGET_CWD               = { source = "runtime.targetCwd", label = "Target working directory (where `loop-data runtime artifacts` lives)" }
@@ -648,11 +798,6 @@ role = "common"
 path = "common/state-contract.md"
 
 [[fragments]]
-id   = "common/dispatch-contract"
-role = "common"
-path = "common/dispatch-contract.md"
-
-[[fragments]]
 id   = "common/executable-contract"
 role = "common"
 path = "common/executable-contract.md"
@@ -731,21 +876,6 @@ path = "iter/steps/source-spike.md"
 id   = "iter/steps/spike-comment"
 role = "iter"
 path = "iter/steps/spike-comment.md"
-
-[[fragments]]
-id   = "review/steps/investigate"
-role = "review"
-path = "review/steps/investigate.md"
-
-[[fragments]]
-id   = "review/steps/diff-audit"
-role = "review"
-path = "review/steps/diff-audit.md"
-
-[[fragments]]
-id   = "review/steps/verification-audit"
-role = "review"
-path = "review/steps/verification-audit.md"
 
 [[fragments]]
 id   = "review/spike-followup"

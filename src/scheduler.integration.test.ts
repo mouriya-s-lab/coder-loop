@@ -453,8 +453,10 @@ console.log(input.phase + ":" + status)
 		expect(store.getItem(item.id)?.attempts).toBe(1)
 
 		// The producing phases between iteration and review clean-exit and advance via the
-		// completed edge without touching status or the attempt counter.
-		for (const passthroughPhase of ["verification", "publish"] as const) {
+		// completed edge without touching status or the attempt counter. Eight-phase split:
+		// diff-audit and verification-audit sit between publish and review and behave the
+		// same way on the clean path (no status write, no attempt bump).
+		for (const passthroughPhase of ["verification", "publish", "diff-audit", "verification-audit"] as const) {
 			const passthroughTick = await schedulerTick(options)
 			expect(passthroughTick.spawnedRuns).toHaveLength(1)
 			await passthroughTick.spawnedRuns[0]!.closed
@@ -481,16 +483,18 @@ console.log(input.phase + ":" + status)
 			.filter((event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
 				event.type === "phase.start" && event.itemId === item.id,
 			)
-			.map((event) => event.phase)).toEqual(["iteration", "verification", "publish", "review", "iteration"])
+			.map((event) => event.phase)).toEqual(["iteration", "verification", "publish", "diff-audit", "verification-audit", "review", "iteration"])
 	} finally {
 		store.close()
 	}
 })
 
-// Six-phase split: closure's drift statuses are sameness routing, not retry feedback. Each
+// Eight-phase split: closure's drift statuses are sameness routing, not retry feedback. Each
 // drift re-enters the phase that owns the mismatched artifact, and only the iteration
 // re-entry (candidate_drift) consumes an attempt — verification/publish/review re-entries
-// run under the attempt already opened by their producing iteration.
+// run under the attempt already opened by their producing iteration. diff-audit and
+// verification-audit sit between publish and review on the clean path and re-run whenever
+// their upstream (publish or verification) re-enters via a drift edge.
 test("closure drift statuses route to their producing phases and only candidate drift consumes an attempt", async () => {
 	const root = resolve(TEST_ROOT, "closure-drift-routing")
 	const loopDataRoot = resolve(root, "loop-data")
@@ -576,24 +580,33 @@ console.log(input.phase)
 		}
 
 		const expectedRuns: readonly { phase: string; attemptsAfter: number }[] = [
-			// Attempt 1: full chain, closure detects candidate drift → back to iteration.
+			// Attempt 1: full eight-phase chain, closure detects candidate drift → back to iteration.
 			{ phase: "iteration", attemptsAfter: 1 },
 			{ phase: "verification", attemptsAfter: 1 },
 			{ phase: "publish", attemptsAfter: 1 },
+			{ phase: "diff-audit", attemptsAfter: 1 },
+			{ phase: "verification-audit", attemptsAfter: 1 },
 			{ phase: "review", attemptsAfter: 1 },
 			{ phase: "closure", attemptsAfter: 1 },
 			// Attempt 2 (the only drift that consumes one): verification/publication/review
-			// drifts re-enter mid-chain without touching the counter.
+			// drifts re-enter mid-chain without touching the counter. Both audit phases
+			// re-run whenever their upstream (publish or verification) re-enters.
 			{ phase: "iteration", attemptsAfter: 2 },
 			{ phase: "verification", attemptsAfter: 2 },
 			{ phase: "publish", attemptsAfter: 2 },
+			{ phase: "diff-audit", attemptsAfter: 2 },
+			{ phase: "verification-audit", attemptsAfter: 2 },
 			{ phase: "review", attemptsAfter: 2 },
 			{ phase: "closure", attemptsAfter: 2 }, // → verification_drift
 			{ phase: "verification", attemptsAfter: 2 },
 			{ phase: "publish", attemptsAfter: 2 },
+			{ phase: "diff-audit", attemptsAfter: 2 },
+			{ phase: "verification-audit", attemptsAfter: 2 },
 			{ phase: "review", attemptsAfter: 2 },
 			{ phase: "closure", attemptsAfter: 2 }, // → publication_drift
 			{ phase: "publish", attemptsAfter: 2 },
+			{ phase: "diff-audit", attemptsAfter: 2 },
+			{ phase: "verification-audit", attemptsAfter: 2 },
 			{ phase: "review", attemptsAfter: 2 },
 			{ phase: "closure", attemptsAfter: 2 }, // → review_drift
 			{ phase: "review", attemptsAfter: 2 },

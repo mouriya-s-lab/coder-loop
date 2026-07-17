@@ -38,7 +38,7 @@ Read now, yourself:
 Read these yourself:
 
 1. `gh issue view {{ISSUE}} -R {{REPO}} --json title,body,comments,state,url` → the current executable-contract marker (delivery route, closing relation) and any late operator corrections.
-2. The candidate's PR (the bound `ISSUE_PR` when set; otherwise the structural closing-keyword linkage per `common/github-routing.md`): read the **body only** — the `coder-loop:candidate-ref` block and the `coder-loop:current-state` index per `common/packets.md`, then fetch the `verificationPacketUrl` comment it names. Do not enumerate the PR comments; index absent/unparsable or a join failure → one bootstrap scan per `common/packets.md`, repair the index, proceed. On no-PR routes read the issue thread for both.
+2. The candidate's PR (the bound `ISSUE_PR` when set; otherwise the structural closing-keyword linkage per `common/github-routing.md`): read the **body only** — the `coder-loop:candidate-ref` block and the `coder-loop:current-state` index per `common/packets.md`, then fetch the comment at `verificationPacketUrls[length-1]` (the latest packet — earlier entries are prior rounds' history, not this run's input). Do not enumerate the PR comments; index absent/unparsable or a join failure → one bootstrap scan per `common/packets.md`, repair the index, proceed. On no-PR routes read the issue thread for both.
 3. Target repo `CLAUDE.md` / `AGENTS.md` in `TARGET_CWD` → PR title/body conventions and required sections.
 4. `{{SHARED_CONTEXT_FILE}}` → run history context (not evidence).
 

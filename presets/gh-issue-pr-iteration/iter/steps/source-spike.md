@@ -1,10 +1,10 @@
 # Step: source-spike
 
-The source-writing spike subagent for a source-writing-spike-deliverable issue: proof-of-concept branches, temporary source files, runtime commands, and reviewer-visible evidence, where the result must never become a production PR merge. The deliverable is a GitHub issue comment plus evidence artifacts and, when useful, a pushed spike branch.
+The source-writing spike runbook for a source-writing-spike-deliverable issue. Iteration executes this step inline in its own session — this preset forbids subagents, so treat the sections below as your own instruction set, not a task spec for a nested agent. Proof-of-concept branches, temporary source files, runtime commands, and reviewer-visible evidence, where the result must never become a production PR merge. The deliverable is a GitHub issue comment plus evidence artifacts and, when useful, a pushed spike branch.
 
 ## Task
 
-From your dispatch message: `ISSUE`, `REPO`, `BASE_BRANCH`, `RUN_ID`, `AGENT_CWD` (work there), `TARGET_CWD`, `EVIDENCE_DIR`, and `Step focus`. Read now, before Step 1: the target repo's `CLAUDE.md` / `AGENTS.md` in `TARGET_CWD` for project commands; plus `{{PRESET_ROOT}}/quality/evidence.md` and `{{PRESET_ROOT}}/quality/cleanup.md`.
+From the iteration's runtime bindings and your Step focus: `ISSUE`, `REPO`, `BASE_BRANCH`, `RUN_ID`, `AGENT_CWD` (work there), `TARGET_CWD`, `EVIDENCE_DIR`, and `Step focus`. Read now, before Step 1: the target repo's `CLAUDE.md` / `AGENTS.md` in `TARGET_CWD` for project commands; plus `{{PRESET_ROOT}}/quality/evidence.md` and `{{PRESET_ROOT}}/quality/cleanup.md`.
 
 1. **Read the spike contract.** Fetch the live issue body and comments (`gh issue view <ISSUE> -R <REPO> --json body,comments`). Use the marker `Deliverable`, typed `Checks`, and Dependencies; read the issue `## 结果分支` only as intent, and identify the `## 结果分支` branches **before** running anything — the spike exists to pick one of those branches with evidence.
 2. **Take the spike branch.** Fresh spike:

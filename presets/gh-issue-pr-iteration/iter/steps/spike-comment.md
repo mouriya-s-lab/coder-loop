@@ -1,10 +1,10 @@
 # Step: spike-comment
 
-The spike subagent for a comment-spike-deliverable issue (spike / design question / open dialogue). The deliverable is a GitHub issue comment with cited evidence plus proposed follow-up sub-issue titles — no code.
+The spike runbook for a comment-spike-deliverable issue (spike / design question / open dialogue). Iteration executes this step inline in its own session — this preset forbids subagents, so treat the sections below as your own instruction set, not a task spec for a nested agent. The deliverable is a GitHub issue comment with cited evidence plus proposed follow-up sub-issue titles — no code.
 
 ## Task
 
-From your dispatch message: `ISSUE`, `REPO`, `AGENT_CWD`, `EVIDENCE_DIR`, `SHARED_CONTEXT_FILE`, `CURRENT_ISSUE_FILE` when present, and `Step focus`. Read now, before Step 1: `{{PRESET_ROOT}}/quality/evidence.md`. Your writable surface is: the chain handoff file, an existing per-issue file, and `EVIDENCE_DIR` — never source, preset, test, or app files; no branches, no commits, no PRs.
+From the iteration's runtime bindings and your Step focus: `ISSUE`, `REPO`, `AGENT_CWD`, `EVIDENCE_DIR`, `SHARED_CONTEXT_FILE`, `CURRENT_ISSUE_FILE` when present, and `Step focus`. Read now, before Step 1: `{{PRESET_ROOT}}/quality/evidence.md`. Your writable surface is: the chain handoff file, an existing per-issue file, and `EVIDENCE_DIR` — never source, preset, test, or app files; no branches, no commits, no PRs.
 
 1. **Read the question and executable contract.** Re-fetch the live issue: `gh issue view <ISSUE> -R <REPO> --json title,body,labels,comments,state,url`. Validate that the current marker `Deliverable` is `spike-comment`; use its typed `Checks` and `Dependencies` for execution. Use body headings only to understand intent and the result branches:
    - Spike issue → `## 目标`, `## 验证步骤`, `## 验收标准`, `## 结果分支`: report the verification result and pick exactly one result branch.

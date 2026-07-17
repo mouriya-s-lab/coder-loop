@@ -73,7 +73,7 @@ Assemble the `coder-loop:verification-packet` JSON block per `common/packets.md`
 
 Then run the declared cleanup: tear down `recreatable` runtimes; leave `durable` ones documented.
 
-The packet must be durable (comment URL resolves) before any exit. Publication failed → exit non-zero with the exact failure; do not write any status. After the new packet is durable: update the PR body's `coder-loop:current-state` index (`verificationPacketUrl` = this comment) per `common/packets.md`, and minimize your own previous packet comment on this thread per `common/github-routing.md`.
+The packet must be durable (comment URL resolves) before any exit. Publication failed → exit non-zero with the exact failure; do not write any status. After the new packet is durable: update the PR body's `coder-loop:current-state` index by **appending** this comment's URL to `verificationPacketUrls` (never overwrite an earlier array element, never truncate — per `common/packets.md`), and minimize your own previous packet comment on this thread per `common/github-routing.md`.
 
 ### Step 5 — Exit
 

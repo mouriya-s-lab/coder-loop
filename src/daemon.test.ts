@@ -2307,7 +2307,7 @@ const ReviewRunnerPromptBoundary = arkType({
 const PassthroughRunnerPromptBoundary = arkType({
 	itemId: "number",
 	runId: "string",
-	phase: "'contract-enrichment' | 'verification' | 'publish' | 'closure'",
+	phase: "'contract-enrichment' | 'verification' | 'publish' | 'diff-audit' | 'verification-audit' | 'closure'",
 	eventLog: "string",
 })
 const RunnerPromptBoundary = arkType.or(PassthroughRunnerPromptBoundary, IterationRunnerPromptBoundary, ReviewRunnerPromptBoundary)
@@ -2340,6 +2340,8 @@ switch (input.phase) {
 	case "contract-enrichment":
 	case "verification":
 	case "publish":
+	case "diff-audit":
+	case "verification-audit":
 	case "closure":
 		break
 	case "iteration": {
@@ -5150,7 +5152,7 @@ process.exitCode = 0
 					event.type === "phase.start" && event.itemId === finalItem!.id,
 				)
 				.map((event) => event.phase)
-			expect(phaseStarts).toEqual(["contract-enrichment", "iteration", "verification", "publish", "review", "blocked-responder"])
+			expect(phaseStarts).toEqual(["contract-enrichment", "iteration", "verification", "publish", "diff-audit", "verification-audit", "review", "blocked-responder"])
 
 			const events = await queryObservabilityEvents(resolveLoopDataPaths({ loopDataRoot }).eventsFile, {
 				kind: "lifecycle",
@@ -5462,7 +5464,9 @@ process.exitCode = 0
 					chain: "ac7-iter-then-review-chain",
 					item: item!.id,
 				})
-				expect(persistedSpawnEvents.events).toHaveLength(6)
+				// Eight-phase split: contract-enrichment, iteration, verification, publish,
+				// diff-audit, verification-audit, review, closure → eight spawns per attempt.
+				expect(persistedSpawnEvents.events).toHaveLength(8)
 			} finally {
 				await fixture.daemon.stop()
 			}
@@ -5499,8 +5503,8 @@ process.exitCode = 0
 					)
 					.map((event) => event.phase)
 				expect(phases).toEqual([
-					"contract-enrichment", "iteration", "verification", "publish", "review",
-					"iteration", "verification", "publish", "review", "closure",
+					"contract-enrichment", "iteration", "verification", "publish", "diff-audit", "verification-audit", "review",
+					"iteration", "verification", "publish", "diff-audit", "verification-audit", "review", "closure",
 				])
 				expect(phases.filter((phase) => phase === "contract-enrichment")).toHaveLength(1)
 			} finally {
@@ -5539,8 +5543,8 @@ process.exitCode = 0
 					)
 					.map((event) => event.phase)
 				expect(phases).toEqual([
-					"contract-enrichment", "iteration", "verification", "publish", "review",
-					"contract-enrichment", "iteration", "verification", "publish", "review", "closure",
+					"contract-enrichment", "iteration", "verification", "publish", "diff-audit", "verification-audit", "review",
+					"contract-enrichment", "iteration", "verification", "publish", "diff-audit", "verification-audit", "review", "closure",
 				])
 			} finally {
 				await fixture.daemon.stop()
@@ -5582,7 +5586,7 @@ process.exitCode = 0
 					(event): event is Extract<SchedulerEvent, { type: "phase.start" }> =>
 						event.type === "phase.start" && event.itemId === item!.id,
 				)
-				expect(phaseStartEvents.map((event) => event.phase)).toEqual(["contract-enrichment", "iteration", "verification", "publish", "review", "closure"])
+				expect(phaseStartEvents.map((event) => event.phase)).toEqual(["contract-enrichment", "iteration", "verification", "publish", "diff-audit", "verification-audit", "review", "closure"])
 				const runIdByPhase = new Map<string, string>(phaseStartEvents.map((event) => [event.phase, event.runId]))
 				const iterRunId = runIdByPhase.get("iteration")!
 				const reviewRunId = runIdByPhase.get("review")!
