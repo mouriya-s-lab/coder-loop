@@ -59,6 +59,122 @@ afterAll(async () => {
 })
 
 describe("scheduler", () => {
+	test("scheduler chain-complete trigger preserves keep-active summary semantics and restores the anchor item", async () => {
+		const fixture = await createFixture("scheduler-trigger-keep-active")
+		try {
+			const runnerPath = resolve(fixture.loopDataRoot, "..", "keep-active-runner.sh")
+			await writeFile(runnerPath, "#!/bin/sh\necho 'FINALIZER SUMMARY: decision=keep-active; reason=unresolved umbrella work'\n")
+			await chmod(runnerPath, 0o755)
+			const chain = createChain(fixture.store, "scheduler-trigger-keep-active-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 69501, repoCwd: "/repo/a", writeStatus: "done" })
+			const before = fixture.store.getItem(item.id)!
+			const decision = await runSchedulerChainCompleteTriggerPhases(
+				fixture.options({ runner: { kind: "claude", source: "iteration-default", binary: runnerPath, extraArgs: [], model: null } }),
+				{ chain, items: [item], terminalStatusNames: [runtimeStatus("done")] },
+			)
+			expect(decision).toEqual({ decision: "keep-active", reason: "unresolved umbrella work" })
+			const after = fixture.store.getItem(item.id)!
+			expect({ status: after.status, phase: after.phase, attempts: after.attempts, lastRunId: after.lastRunId, agentCwd: after.agentCwd, extra: after.extra })
+				.toEqual({ status: before.status, phase: before.phase, attempts: before.attempts, lastRunId: before.lastRunId, agentCwd: before.agentCwd, extra: before.extra })
+			expect(fixture.store.listRuns(chain.id).filter((run) => run.phase === "umbrella-finalizer")).toHaveLength(1)
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("scheduler chain-complete trigger rejects a successful runner without the legacy FINALIZER SUMMARY contract", async () => {
+		const fixture = await createFixture("scheduler-trigger-missing-summary")
+		try {
+			const runnerPath = resolve(fixture.loopDataRoot, "..", "missing-summary-runner.sh")
+			await writeFile(runnerPath, "#!/bin/sh\necho 'runner completed without decision'\n")
+			await chmod(runnerPath, 0o755)
+			const chain = createChain(fixture.store, "scheduler-trigger-missing-summary-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 69502, repoCwd: "/repo/a", writeStatus: "done" })
+			await expect(runSchedulerChainCompleteTriggerPhases(
+				fixture.options({ runner: { kind: "claude", source: "iteration-default", binary: runnerPath, extraArgs: [], model: null } }),
+				{ chain, items: [item], terminalStatusNames: [runtimeStatus("done")] },
+			)).rejects.toThrow("did not print a valid FINALIZER SUMMARY")
+			expect(fixture.store.listRuns(chain.id).find((run) => run.phase === "umbrella-finalizer")?.exitCode).toBe(0)
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("failed scheduler chain-complete trigger resumes from the DB run session on retry", async () => {
+		const fixture = await createFixture("scheduler-trigger-db-resume")
+		try {
+			const root = resolve(fixture.loopDataRoot, "..")
+			const runnerPath = resolve(root, "resume-trigger-runner.sh")
+			const markerPath = resolve(root, "first-run-complete")
+			const argvPath = resolve(root, "runner-argv.txt")
+			await writeFile(runnerPath, `#!/bin/sh
+printf '%s\\n' "$@" >> ${JSON.stringify(argvPath)}
+if [ ! -f ${JSON.stringify(markerPath)} ]; then
+  touch ${JSON.stringify(markerPath)}
+  echo '{"type":"system","subtype":"init","session_id":"sess-trigger-db-695"}'
+  exit 1
+fi
+echo 'FINALIZER SUMMARY: decision=complete; reason=resumed-from-db'
+`)
+			await chmod(runnerPath, 0o755)
+			const chain = createChain(fixture.store, "scheduler-trigger-db-resume-chain")
+			const item = createItem(fixture.store, chain, { issueNumber: 69503, repoCwd: "/repo/a", writeStatus: "done" })
+			const options = fixture.options({ runner: { kind: "claude", source: "iteration-default", binary: runnerPath, extraArgs: [], model: null } })
+			const context = { chain, items: [item], terminalStatusNames: [runtimeStatus("done")] }
+			await expect(runSchedulerChainCompleteTriggerPhases(options, context)).rejects.toThrow("exited 1")
+			const firstRun = fixture.store.listRuns(chain.id).find((run) => run.phase === "umbrella-finalizer")!
+			expect(firstRun.extra.runnerSessionId).toBe("sess-trigger-db-695")
+			expect(await runSchedulerChainCompleteTriggerPhases(options, context)).toEqual({ decision: "complete", reason: "resumed-from-db" })
+			const argv = (await readFile(argvPath, "utf-8")).split("\n")
+			const resumeIndex = argv.lastIndexOf("--resume")
+			expect(resumeIndex).toBeGreaterThanOrEqual(0)
+			expect(argv[resumeIndex + 1]).toBe("sess-trigger-db-695")
+			expect(Array.fromAsync(new Bun.Glob("**/sessions.jsonl").scan({ cwd: fixture.loopDataRoot }))).resolves.toEqual([])
+		} finally {
+			fixture.store.close()
+		}
+	})
+
+	test("scheduler chain-complete trigger keeps preset runner selection and explicit phaseRunner override behavior", async () => {
+		const fixture = await createFixture("scheduler-trigger-runner-selection")
+		try {
+			const root = resolve(fixture.loopDataRoot, "..")
+			const fakeCodex = resolve(root, "fake-codex-finalizer.sh")
+			const fakeClaude = resolve(root, "fake-claude-finalizer.sh")
+			await writeShellFinalizerMarkerScript(fakeCodex, "BINARY:codex")
+			await writeShellFinalizerMarkerScript(fakeClaude, "BINARY:claude")
+			const chain = createChain(fixture.store, "scheduler-trigger-runner-selection-chain", {
+				metadata: { claude: { binary: fakeClaude }, codex: { binary: fakeCodex } },
+			})
+			const item = createItem(fixture.store, chain, { issueNumber: 69504, repoCwd: "/repo/a", writeStatus: "done" })
+			const loadedPreset = await loadedPresetFromDir(resolve(REPO_ROOT, "presets/gh-issue-pr-iteration"))
+			const context = { chain, items: [item], terminalStatusNames: [runtimeStatus("done")] }
+			const presetSelected = fixture.options({
+				loadedPreset,
+				phaseRunnerSelectionForChain: (selectedChain) => buildPhaseRunnerSelectionFromChain({ chain: selectedChain, loopDataRoot: fixture.loopDataRoot, preset: loadedPreset.preset }),
+			})
+			await expect(runSchedulerChainCompleteTriggerPhases(presetSelected, context)).resolves.toEqual({ decision: "complete", reason: "test" })
+			const firstRun = fixture.store.listRuns(chain.id).find((run) => run.phase === "umbrella-finalizer")!
+			const paths = resolveChainRuntimePaths(chain.name, { loopDataRoot: fixture.loopDataRoot })
+			expect(await readFile(paths.runPhaseStdoutFile(firstRun.runId, "umbrella-finalizer"), "utf-8")).toContain("BINARY:codex")
+
+			const seenPhases: string[] = []
+			await expect(runSchedulerChainCompleteTriggerPhases(fixture.options({
+				loadedPreset,
+				runIdFactory: () => "run-trigger-runner-override",
+				phaseRunner: ({ phase }) => {
+					seenPhases.push(phase)
+					return { kind: "claude", source: "iteration-default", binary: fakeClaude, extraArgs: [], model: null }
+				},
+			}), context)).resolves.toEqual({ decision: "complete", reason: "test" })
+			expect(seenPhases).toEqual(["umbrella-finalizer"])
+			const latestRun = fixture.store.getRunByRunId("run-trigger-runner-override")!
+			expect(await readFile(paths.runPhaseStdoutFile(latestRun.runId, "umbrella-finalizer"), "utf-8")).toContain("BINARY:claude")
+		} finally {
+			fixture.store.close()
+		}
+	})
+
 	test("streams chain-complete runner output without retaining full history", async () => {
 		const fixture = await createFixture("scheduler-chain-complete-trigger")
 		try {

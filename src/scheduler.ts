@@ -297,13 +297,15 @@ export async function runSchedulerChainCompleteTriggerPhases(options: SchedulerO
 	for (const phase of phases) {
 		const previous = options.store.listRuns(context.chain.id).filter((run) => run.itemId === anchor.id && run.phase === phase.name).sort((left, right) => right.startedAt - left.startedAt)[0]
 		const entryKind: SchedulerEntryKind = previous !== undefined && previous.exitCode !== 0 ? { kind: "recover-run", predecessorRunId: previous.runId } : { kind: "graph-entry" }
-		const active = await spawnSchedulerRun(options, context.chain, anchor, slot, phase.name, triggerPlan, entryKind)
+		// Resolve exactly once, matching the retired trigger path's phaseRunner callback contract.
+		// Reuse that selection both for spawn and for decoding the runner's JSON stream.
+		const runner = await resolvePhaseRunner(options, { chain: context.chain, item: anchor, phase: phase.name })
+		const active = await spawnSchedulerRun({ ...options, phaseRunner: () => runner }, context.chain, anchor, slot, phase.name, triggerPlan, entryKind)
 		if (active === null) throw new Error(`chain-complete trigger phase ${phase.name} failed to spawn`)
 		const closed = await active.closed
 		options.store.updateItem(anchor.id, original)
 		if (closed.exitCode !== 0) throw new Error(`chain-complete trigger phase ${phase.name} exited ${closed.exitCode}`)
 		const output = await readFile(resolveChainRuntimePaths(context.chain.name, options.loopDataRootOptions).runPhaseStdoutFile(closed.runId, phase.name), "utf-8")
-		const runner = await resolvePhaseRunner(options, { chain: context.chain, item: anchor, phase: phase.name })
 		const texts = output.split(/\r?\n/).map((line) => runnerAgentTextFromJsonLine(line, runner.kind).text).filter((text): text is string => text !== null)
 		const summary = (texts.length === 0 ? output : texts.join("\n")).match(/FINALIZER SUMMARY:\s*decision=(complete|keep-active)\s*;([^\r\n]*)/)
 		if (summary === null) throw new Error(`chain-complete trigger phase ${phase.name} did not print a valid FINALIZER SUMMARY`)
